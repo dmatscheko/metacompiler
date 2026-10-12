@@ -5,18 +5,18 @@
 # tests/bench.sh --record when you land an intended change, and say in the commit
 # message which rows moved and why.
 # recorded with the runtime.c of the commit that wrote this line, 5 draws, min of 3 runs.
-bash       52823549         -          -
-batch      34232962         -          -
-c          11043953         -          -
-csharp     15072868265      11750880   587
-dart       2729489274       7517872    112
-go         89986331         10681808   1
-java       5975832842       13831984   264
-js         797200728        13894592   26
-kotlin     10860521097      10790016   470
-lua        1189655413       7515920    31
-metajs     214809738        7426912    1
-php        715051278        10683776   24
-python     8639192403       14101520   394
-ruby       4032412605       13914928   117
-swift      3178155538       10637888   118
+bash       52823855         -          -
+batch      34138696         -          -
+c          10983473         -          -
+csharp     4216815177       11747664   98
+dart       557061747        6468800    5
+go         89863253         10680208   1
+java       1347234424       13830608   21
+js         328649817        13893520   4
+kotlin     2798299702       9740144    51
+lua        529319087        7515264    10
+metajs     213786965        7427312    1
+php        297087591        11730976   6
+python     1857269793       13009920   29
+ruby       1408568862       13913232   21
+swift      933345050        10636272   17

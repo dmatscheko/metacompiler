@@ -196,6 +196,11 @@ function callExt(b, name, args) {
 var strGlobals = {}
 var strCount = 0
 function emitStr(b, s) {
+    var g = coreStrGlobal(s)
+    return callExt(b, "js_str_mem", [g.ptr, g.len])
+}
+// The module global holding the bytes of s, as {glob, ptr, len}.
+function coreStrGlobal(s) {
     // Prefix the cache key: a bare string like "toString" or "valueOf" would resolve to
     // an inherited Object.prototype member under a host JS engine (goja), so the
     // undefined check would miss and g.ptr/g.len read off a function - malformed IR. The
@@ -214,7 +219,7 @@ function emitStr(b, s) {
         g.ptr = llvm.constant.NewGetElementPtr(g.glob.ContentType, g.glob, [handle(0), handle(0)])
         strGlobals[key] = g
     }
-    return callExt(b, "js_str_mem", [g.ptr, g.len])
+    return g
 }
 // A numeric LITERAL outside the floor's small-integer cache used to box a fresh cell
 // every time it executed. Measured on the Lua allocation benchmark: 18 of the 26

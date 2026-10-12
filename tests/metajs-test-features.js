@@ -659,6 +659,64 @@ function continueInFinally() {
 }
 check("continue-in-finally", continueInFinally(), 3);
 
+// ----- bindings the compiler keeps out of scopes, and calls it makes directly -----
+// A parameter or local that never changes lives in an SSA value in the compiler
+// half, and a call of a top-level function skips the argument array when the
+// callee is still the declared one. Each check is a case where that would be
+// wrong if the binding or the callee were resolved by the source text alone.
+var sbWho = "outer";
+function sbReadBefore() {
+    var r = sbWho;                     // before the declaration: the outer binding
+    var sbWho = "inner";
+    return r + "/" + sbWho;
+}
+check("static-read-before-decl", sbReadBefore(), "outer/inner");
+function sbBlock(p) {
+    var r = "";
+    {
+        var p = "blk";                 // a block's own p shadows the parameter
+        r = r + p;
+    }
+    return r + "/" + p;
+}
+check("static-block-shadow", sbBlock("par"), "blk/par");
+function sbUnbraced(c) {
+    if (c) var u = "set";              // declared only when the branch runs
+    return u;
+}
+check("static-unbraced-decl", sbUnbraced(true), "set");
+function sbCaseDecl(k) {
+    var r = "";
+    switch (k) {
+        case 1: var z = "z";
+        case 2: r = z;                 // reached from case 1 by fallthrough
+    }
+    return r;
+}
+check("static-case-fallthrough", sbCaseDecl(1), "z");
+function sbCaptured(a) {
+    var b = a + 1;
+    var f = function() { return a * b; };
+    return f();
+}
+check("static-captured", sbCaptured(3), 12);
+function sbTryReads(a) {
+    var k = a * 2;
+    try { return k + a; } catch (e) { return e; }
+}
+check("static-try-reads", sbTryReads(5), 15);
+function sbTop(x, y) { return "" + x + "," + y; }
+var sbSide = 0;
+function sbBump() { sbSide = sbSide + 1; return sbSide; }
+function sbCallTop() { return sbTop(1) + "|" + sbTop(1, 2, sbBump()); }
+check("direct-missing-extra-args", sbCallTop(), "1,undefined|1,2");
+check("direct-extra-arg-evaluated", sbSide, 1);
+function sbTarget() { return "declared"; }
+function sbCallTarget() { return sbTarget(); }
+check("direct-declared", sbCallTarget(), "declared");
+sbTarget = function() { return "rebound"; };
+check("direct-rebound", sbCallTarget(), "rebound");
+
 // ----- everything combined in one small pipeline (3-element data flow) -----
 function transform(list) {
     var out = [];

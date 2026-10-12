@@ -1361,7 +1361,7 @@ var jsReclaimable = map[string]bool{"js_scope_new": true, "js_arr_new": true}
 // listed is treated as retaining every argument, so forgetting one costs memory,
 // never correctness.
 var jsThroughArgs = map[string]uint32{
-	"js_scope_new": 1 << 0, "js_scope_decl": 1 << 0, "js_scope_get": 1 << 0,
+	"js_scope_new": 1 << 0, "js_scope_decl": 1 << 0, "js_scope_get": 1 << 0, "js_scope_cget": 1 << 1,
 	"js_scope_set": 1 << 0, "js_scope_set_or_create": 1 << 0, "js_scope_own": 1 << 0,
 	"js_kget": 1 << 0, "js_kset": 1 << 0, "js_tdecl": 1 << 0, "js_tset": 1 << 0,
 	"js_pyset_var": 1 << 0, "js_pyglobal": 1 << 0, "js_pynonlocal": 1 << 0,
@@ -12933,6 +12933,16 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_scope_get": func(a []uint64) uint64 {
 			return w(rt.scopeGet(rt.scopeOf(a[0]), rt.toString(u(a[1]))))
 		},
+		// js_scope_cget(cache, env, name ptr, name len) is js_scope_get from env,
+		// the name read as js_str_mem reads it. The cache is the native floor's
+		// (languages/lib/runtime.c) and is not consulted here.
+		"js_scope_cget": func(a []uint64) uint64 {
+			ptr, n := a[2], a[3]
+			if ptr+n > uint64(len(ma.mem)) {
+				rt.fail("js_scope_cget name out of range")
+			}
+			return w(rt.scopeGet(rt.scopeOf(a[1]), string(ma.mem[ptr:ptr+n])))
+		},
 		"js_scope_set": func(a []uint64) uint64 {
 			rt.scopeSet(rt.scopeOf(a[0]), rt.toString(u(a[1])), u(a[2]))
 			return 0
@@ -13161,6 +13171,18 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				rt.fail("js_call args must be an array")
 			}
 			return w(rt.callH(u(a[0]), u(a[1]), args.elems, a[2]))
+		},
+		// js_call0..js_call3 (callee, arguments...): a call with no receiver and
+		// that many arguments, without an argument array built by the caller. The
+		// native floor's twins (languages/lib/runtime.c) hand a host builtin an
+		// array on the C stack; here every callee gets a fresh one, as js_call's.
+		"js_call0": func(a []uint64) uint64 { return w(rt.callH(u(a[0]), u(0), []interface{}{}, 0)) },
+		"js_call1": func(a []uint64) uint64 { return w(rt.callH(u(a[0]), u(0), []interface{}{u(a[1])}, 0)) },
+		"js_call2": func(a []uint64) uint64 {
+			return w(rt.callH(u(a[0]), u(0), []interface{}{u(a[1]), u(a[2])}, 0))
+		},
+		"js_call3": func(a []uint64) uint64 {
+			return w(rt.callH(u(a[0]), u(0), []interface{}{u(a[1]), u(a[2]), u(a[3])}, 0))
 		},
 		"js_mcall": func(a []uint64) uint64 { // (target, method name, args array)
 			args, ok := u(a[2]).(*jsArray)

@@ -14,7 +14,10 @@ null, false and true. Variables live in scope chain objects on the host side
 also enforce the MetaJS type pinning), and the scope chain is what gives closures
 their captured
 environment: a function expression becomes an own IR function jsf_N(env, args) plus a
-js_closure(N, currentScope) at the site of its creation. String and number literals
+js_closure(N, currentScope) at the site of its creation. A parameter or variable that
+is never assigned and never read from a nested function lives in an SSA value instead,
+and a call of a top-level function that is still the declared one is a direct IR call
+(wFrames and dRec in the start script). String and number literals
 enter through module globals (js_str_mem) and js_num_i/js_num_str.
 
 Every tag composes a small code generator function (a 'thunk') out of the thunks of its
@@ -93,7 +96,7 @@ CaseLabel   <~~ push({casev: pop()}) ~~>
 DefaultLabel <~~ push({isdflt: true}) ~~>
             = KwDefault ":" ;
 
-Block       <~~ push(makeBlockStmt(takeAll())) ~~>
+Block       <~~ push(ssaBlock(makeBlockStmt(takeAll()))) ~~>
             = "{" { Statement } "}" ;
 
 // var, let and const all declare a block scoped variable in the current scope.
@@ -101,16 +104,16 @@ VarDecl     = VarDeclCore [ ";" ] ;
 VarDeclCore <~~ push(makeSeq(takeAll())) ~~>
             = KwVar Declarator { "," Declarator } ;
 Declarator  <~~ push(makeDecl(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> [ "=" AssignExpr ] ;
+            = Id <~~ push(wDeclName(up.in)) ~~> [ "=" AssignExpr ] ;
 
 // [condThunk, thenThunk] or [condThunk, thenThunk, elseThunk].
-If          <~~ push(makeIf(takeAll())) ~~>
+If          <~~ push(makeIf(ssaCondIf(takeAll()))) ~~>
             = KwIf "(" Expression ")" Statement [ KwElse Statement ] ;
 
-While       <~~ push(makeWhile(pop(), pop())) ~~>
+While       <~~ push(makeWhile(ssaCondT(pop()), pop())) ~~>
             = KwWhile "(" Expression ")" Statement ;
 
-Do          <~~ push(makeDo(pop(), pop())) ~~>
+Do          <~~ push(makeDo(pop(), ssaCondT(pop()))) ~~>
             = KwDo Statement KwWhile "(" Expression ")" [ ";" ] ;
 
 // The three optional parts are wrapped with a kind marker, otherwise e.g.
@@ -143,18 +146,18 @@ Throw       <~~ push(makeThrow(pop())) ~~>
 // leaves a try body is outside this subset - see makeTry.
 TryStmt     <~~ push(makeTry(takeAll())) ~~>
             = KwTry TryBody [ CatchClause ] [ FinallyClause ] ;
-TryBody     <~~ push({trybody: pop()}) ~~>
+TryBody     <~~ push({trybody: pop(), wi: wFnExit()}) ~~>
             = Block ;
-CatchClause <~~ push(makeCatch(takeAll())) ~~>
-            = KwCatch [ "(" Id <~~ push(up.in) ~~> ")" ] Block ;
-FinallyClause <~~ push({finbody: pop()}) ~~>
+CatchClause <~~ push(mjCatch(makeCatch(takeAll()))) ~~>
+            = KwCatch [ "(" Id <~~ push(wDecl(up.in)) ~~> ")" ] Block ;
+FinallyClause <~~ push({finbody: pop(), wi: wFnExit()}) ~~>
             = KwFinally Block ;
 
 // A function declaration binds the closure in the current scope when it executes.
 FuncDecl    <~~ push(makeFuncDecl(pop(), pop(), pop())) ~~>
             = KwFunction Id <~~ push(up.in) ~~> ParamList Block ;
 
-ParamList   <~~ push(takeAll()) /* Collect the parameter names into one array. */ ~~>
+ParamList   <~~ push(wFnEnter(takeAll())) /* Collect the parameter names into one array. */ ~~>
             = "(" [ Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } ] ")" ;
 
 Empty       <~~ push(function(b) { return b }) ~~>
@@ -175,7 +178,7 @@ Assignment  <~~ push(makeAssign(takeAll())) ~~>
 // An assignable place: a variable, or a member path that may reach through calls
 // but must end in a member: findScope(name)[name] = value.
 // The local stack holds [name, suffix marker, suffix marker, ...].
-Target      <~~ push(makeTargetRef(takeAll())) ~~>
+Target      <~~ push(wTarget(makeTargetRef(takeAll()))) ~~>
             = Id <~~ push(up.in) ~~> { CallSuffix | DotSuffix | IndexSuffix } ;
 
 CondExpr    <~~ push(makeCond(takeAll())) ~~>
@@ -260,7 +263,7 @@ ArrayLit    <~~ push(makeArray(takeAll())) ~~>
 Null        <~~ push(makeHandleConst(1)) ~~>   = "null" KwEnd ;
 Undefined   <~~ push(makeHandleConst(0)) ~~>   = "undefined" KwEnd ;
 
-VarRef      <~~ push(makeVarRef(up.in)) ~~>
+VarRef      <~~ push(mjVarRef(up.in)) ~~>
             = Id ;
 
 StringLit   = DqString | SqString ;
@@ -284,9 +287,11 @@ KwReturn    = "return" KwEnd ;
 KwBreak     = "break" KwEnd ;
 KwContinue  = "continue" KwEnd ;
 KwThrow     = "throw" KwEnd ;
-KwTry       = "try" KwEnd ;
-KwCatch     = "catch" KwEnd ;
-KwFinally   = "finally" KwEnd ;
+// A try, catch or finally body is compiled to a function of its own, so the
+// static-locals walk opens a function record at its keyword (see wFrames).
+KwTry       <~~ wFnEnter([]) ~~> = "try" KwEnd ;
+KwCatch     <~~ wFnEnter([]) ~~> = "catch" KwEnd ;
+KwFinally   <~~ wFnEnter([]) ~~> = "finally" KwEnd ;
 KwTypeof    = "typeof" KwEnd ;
 KwSwitch    = "switch" KwEnd ;
 KwCase      = "case" KwEnd ;
@@ -318,6 +323,239 @@ KwDefault   = "default" KwEnd ;
     // enclosing loops (for break/continue).
 
     // An i1 for conditional branches: js_truthy(v) != 0.
+    // ----- Static locals: a binding that never changes lives in an SSA value -----
+    // A parameter or `var` of a function that is declared ONCE in it, never assigned
+    // (anywhere, nested functions included) and never read from a nested function is
+    // never looked up by name except from its own function's body. Such a binding
+    // gets no scope slot: its value is the SSA value of its initializer, and a read
+    // that statically resolves to it uses that value. A read that does not resolve
+    // statically (before the declaration, or after its block closed) keeps the scope
+    // walk, which finds exactly what it found before, because the binding never
+    // entered a scope. No type pin is lost: a binding that is never assigned is
+    // never checked.
+    //
+    // The facts are gathered at WALK time, when every tag of a function body has run
+    // before the function's own tag: wFrames holds one record per function being
+    // walked (try, catch and finally bodies included - each is its own IR function),
+    // with decl (declarations per name), asg (assigned, or initialized by something
+    // that is not a plain value) and cap (read or written from a nested function).
+    // args says whether the body names `arguments`; when it does not, the implicit
+    // `arguments` binding is not made either. Over-marking only costs the
+    // optimization; the analysis must never under-mark.
+    var wFrames = [{decl: {}, asg: {}, cap: {}, args: true}]
+    var wInfos = []
+    var wDeclMarks = []
+    // Counts the `anytype` reads and function expressions walked so far. A
+    // declaration whose initializer contains either keeps its scope slot: js_tdecl
+    // turns anytype into undefined, and -callgraph names a closure by the
+    // declaration it is stored in.
+    var wImpure = 0
+    function wTop() { return wFrames[wFrames.length - 1] }
+    function wDecl(name) {
+        var fr = wTop()
+        var k = "$" + name
+        if (fr.decl[k] == undefined) { fr.decl[k] = 1 } else { fr.decl[k] = fr.decl[k] + 1 }
+        return name
+    }
+    function wFnEnter(params) {
+        wFrames.push({decl: {}, asg: {}, cap: {}, args: false})
+        for (var i = 0; i < params.length; i++) { wDecl(params[i]) }
+        return params
+    }
+    function wFnExit() {
+        wInfos.push(wFrames.pop())
+        return wInfos.length - 1
+    }
+    function wRef(name) {
+        var k = "$" + name
+        var n = wFrames.length - 1
+        if (name == "arguments") { wFrames[n].args = true }
+        if (name == "anytype") { wImpure++ }
+        for (var i = 0; i < n; i++) { wFrames[i].cap[k] = true }
+    }
+    function wTarget(ref) {
+        wRef(ref.name)
+        if (ref.path.length == 0) { wTop().asg["$" + ref.name] = true }
+        return ref
+    }
+    function wDeclName(name) {
+        wDeclMarks.push(wImpure)
+        return wDecl(name)
+    }
+    function mjCatch(rec) {
+        rec.wi = wFnExit()
+        return rec
+    }
+
+    // The emission side. ssaInfo is the walk record of the function being emitted,
+    // ssaFrames its lexical blocks (name -> SSA value), and ssaCond is true while a
+    // statement is emitted that may not run - the unbraced body of an if, a loop or
+    // a case - where a declaration does not dominate the code after it and so keeps
+    // its scope slot.
+    // -trace, -cfgraph, -callgraph and -why read variable and call NAMES off the
+    // module and the run, so under them every binding, read and call keeps the
+    // generic scope-and-js_call shape.
+    var ssaOn = c.tracing != true
+    var ssaInfo = {decl: {}, asg: {}, cap: {}, args: true}
+    var ssaFrames = []
+    var ssaCond = false
+    // The closure scope of the function being emitted, or undefined at the top level.
+    var ssaEnv = anytype
+    function isSsa(name) {
+        var k = "$" + name
+        return ssaOn && ssaInfo.decl[k] == 1 && ssaInfo.asg[k] != true && ssaInfo.cap[k] != true && name != "arguments"
+    }
+    function ssaLookup(name) {
+        var k = "$" + name
+        var i = ssaFrames.length - 1
+        while (i >= 0) {
+            var v = ssaFrames[i][k]
+            if (v != undefined) { return v }
+            i--
+        }
+        return undefined
+    }
+    // Declare `name` holding v: an SSA binding when allowed, else the scope slot.
+    function ssaDecl(b, name, v) {
+        if (!ssaCond && ssaFrames.length > 0 && isSsa(name)) {
+            ssaFrames[ssaFrames.length - 1]["$" + name] = v
+            return
+        }
+        callExt(b, "js_tdecl", [curScopeV, emitStr(b, name), v])
+    }
+    // A name the function does not declare at all can only be bound at or above its
+    // closure scope, so it is read through js_scope_cget and its per-name cache
+    // (lib/runtime.c) - in a layer-2 library, every call of one top-level function
+    // from another, and every host builtin.
+    var gCaches = {}
+    var gCacheCount = 0
+    function gCachePtr(name) {
+        var k = "$" + name
+        var g = gCaches[k]
+        if (g == undefined) {
+            gCacheCount++
+            g = {}
+            g.glob = m.NewGlobalDef("jsgc." + gCacheCount, llvm.constant.NewZeroInitializer(llvm.types.NewArray(4, i64)))
+            g.ptr = llvm.constant.NewGetElementPtr(g.glob.ContentType, g.glob, [handle(0), handle(0)])
+            gCaches[k] = g
+        }
+        // The cache travels as an i64* and the name as js_str_mem's (i8*, length),
+        // made into a string only on a miss, so the extern is declared here rather
+        // than by compile-core's all-i64 getExtern.
+        if (externs["js_scope_cget"] == undefined) {
+            externs["js_scope_cget"] = m.NewFunc("js_scope_cget", i64, [llvm.ir.NewParam("", llvm.types.NewPointer(i64)),
+                llvm.ir.NewParam("", i64), llvm.ir.NewParam("", llvm.types.I8Ptr), llvm.ir.NewParam("", i64)])
+        }
+        return g.ptr
+    }
+    function ssaGet(b, name) {
+        var v = ssaLookup(name)
+        if (v != undefined) { return v }
+        if (ssaOn && ssaEnv != undefined && ssaInfo.decl["$" + name] == undefined && name != "arguments") {
+            var sg = coreStrGlobal(name)
+            return callExt(b, "js_scope_cget", [gCachePtr(name), ssaEnv, sg.ptr, sg.len])
+        }
+        return callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
+    }
+    function ssaBlock(t) {
+        return function(b) {
+            var sc = ssaCond
+            ssaCond = false
+            ssaFrames.push({})
+            var r = t(b)
+            ssaFrames.pop()
+            ssaCond = sc
+            return r
+        }
+    }
+    function ssaCondT(t) {
+        return function(b) {
+            var sc = ssaCond
+            ssaCond = true
+            var r = t(b)
+            ssaCond = sc
+            return r
+        }
+    }
+    function ssaCondIf(items) {
+        var out = [items[0]]
+        for (var i = 1; i < items.length; i++) { out.push(ssaCondT(items[i])) }
+        return out
+    }
+    // A read that is not static carries its name in `ref`, for a direct call.
+    function mjVarRef(name) {
+        wRef(name)
+        return function(b) {
+            var sv = ssaLookup(name)
+            if (sv != undefined) { return {b: b, v: sv} }
+            return {b: b, v: ssaGet(b, name), ref: name}
+        }
+    }
+
+    // ----- Direct calls of top-level functions -----
+    // A function declared once at the top level, outside any function, that does not
+    // name `arguments`, gets a second IR function jsfd_K(env, a0, ..) holding its
+    // body; jsf_N(env, args) only unpacks the array into it. When the declaration
+    // runs at the top level of jsrun it publishes the closure and its scope in two
+    // module globals, and a call `f(x, y)` compares the closure it looked up with
+    // the published one: the same closure is called directly, with no argument
+    // array, no js_call and no function table; any other value - a later binding,
+    // a declaration not yet run (the guard starts at -1, never a handle) - takes
+    // the generic call. The comparison is what makes this exact: it calls the body
+    // the generic path would have reached, with the scope it would have used.
+    var wTopFns = {}
+    var wTopCount = 0
+    function wTopFnNote(name, np, usesArgs) {
+        var k = "$" + name
+        var t = wTopFns[k]
+        if (t == undefined) {
+            wTopCount++
+            wTopFns[k] = {np: np, ok: !usesArgs, n: wTopCount}
+        } else { t.ok = false; wTopFns[k] = t }
+    }
+    var dFns = {}
+    function dRec(name) {
+        var k = "$" + name
+        var t = wTopFns[k]
+        if (!ssaOn || t == undefined || !t.ok) { return undefined }
+        var d = dFns[k]
+        if (d == undefined) {
+            var ps = [llvm.ir.NewParam("env", i64)]
+            for (var i = 0; i < t.np; i++) { ps.push(llvm.ir.NewParam("", i64)) }
+            d = {np: t.np}
+            d.fn = m.NewFunc("jsfd_" + t.n, i64, ps)
+            d.clo = m.NewGlobalDef("jsfdc." + t.n, handle(0 - 1))
+            d.env = m.NewGlobalDef("jsfde." + t.n, handle(0))
+            dFns[k] = d
+        }
+        return d
+    }
+    // True while jsrun's statements are emitted (not -rt-prims' jsrtprims).
+    var jsrunTop = false
+    // A call with no receiver: js_call0..3 (lib/runtime.c) build the argument array
+    // only when the callee can keep it.
+    function emitPlainCall(b, avs) {
+        if (avs.length <= 4) { return callExt(b, "js_call" + (avs.length - 1), avs) }
+        var argsV = callExt(b, "js_arr_new", [])
+        for (var j = 1; j < avs.length; j++) { callExt(b, "js_arr_push", [argsV, avs[j]]) }
+        return callExt(b, "js_call", [avs[0], hUndef, argsV])
+    }
+    // The call itself; avs[0] is the looked-up callee, the rest the evaluated
+    // arguments.
+    function emitDirectCall(b, d, avs) {
+        var okB = curF.NewBlock("")
+        var slowB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, avs[0], b.NewLoad(i64, d.clo)), okB, slowB)
+        var dargs = [okB.NewLoad(i64, d.env)]
+        for (var i = 0; i < d.np; i++) { dargs.push(i + 1 < avs.length ? avs[i + 1] : hUndef) }
+        var rd = okB.NewCall(d.fn, dargs)
+        okB.NewBr(mergeB)
+        var rs = emitPlainCall(slowB, avs)
+        slowB.NewBr(mergeB)
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(rd, okB), llvm.ir.NewIncoming(rs, slowB)])}
+    }
+
     // ----- Expression thunks: function(block) -> {b: endBlock, v: i64 handle} -----
 
     function makeHandleConst(n) {
@@ -415,6 +653,20 @@ KwDefault   = "default" KwEnd ;
                     var kr = s.key(b)
                     b = kr.b
                     cur = callExt(b, "js_get", [cur, kr.v])
+                } else if (curThis === hUndef && ssaOn) {
+                    var avs = [cur]
+                    for (var j = 0; j < s.args.length; j++) {
+                        var ar = s.args[j](b)
+                        b = ar.b
+                        avs.push(ar.v)
+                    }
+                    var d = undefined
+                    if (i == 0 && r.ref != undefined) { d = dRec(r.ref) }
+                    if (d != undefined) {
+                        var dc = emitDirectCall(b, d, avs)
+                        b = dc.b
+                        cur = dc.v
+                    } else { cur = emitPlainCall(b, avs) }
                 } else {
                     var argsV = callExt(b, "js_arr_new", [])
                     for (var j = 0; j < s.args.length; j++) {
@@ -434,7 +686,7 @@ KwDefault   = "default" KwEnd ;
     // Walks a target path (members and calls) up to the last element, which must
     // be a member. Returns {b, obj, key} with the object and the last key evaluated.
     function emitRefPath(b, ref) {
-        var cur = callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)])
+        var cur = ssaGet(b, ref.name)
         var curThis = hUndef
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
@@ -546,8 +798,26 @@ KwDefault   = "default" KwEnd ;
     callExt = function(b, name, args) {
         noteExt(name)   // compile-core's block-scope elision counts declarations here.
         var sh = primShim["$" + name]
-        if (sh != undefined) { return b.NewCall(sh, args) }
-        return b.NewCall(getExtern(name, args.length), args)
+        var cv = undefined
+        if (sh != undefined) { cv = b.NewCall(sh, args) } else { cv = b.NewCall(getExtern(name, args.length), args) }
+        if (ssaOn && boolExt["$" + name] == 1) {
+            boolCount++
+            cv.SetName("bool." + boolCount)
+        }
+        return cv
+    }
+
+    // A comparison or `!` answers the handle of false or true (2 or 3) in every
+    // engine, the -rt-prims bodies included, so a branch on such a value tests it
+    // against true instead of calling js_truthy. The calls are recognized by NAME:
+    // goja cannot compare two IR values for identity.
+    var boolExt = {$js_eq: 1, $js_ne: 1, $js_seq: 1, $js_sne: 1, $js_lt: 1, $js_gt: 1,
+                   $js_le: 1, $js_ge: 1, $js_not: 1}
+    var boolCount = 0
+    truthy = function(b, v) {
+        var id = v.Ident()
+        if (id.length > 6 && id.substring(0, 6) == "%bool.") { return b.NewICmp(llvm.enum.IPredEQ, v, hTrue) }
+        return b.NewICmp(llvm.enum.IPredNE, callExt(b, core.truthyExt, [v]), handle(0))
     }
 
     // One shim per primitive: a function with the EXTERNAL's signature (i64 in, i64 out)
@@ -621,46 +891,79 @@ KwDefault   = "default" KwEnd ;
     // the passed environment, binds the parameters and 'arguments', and runs the body.
     // isCtl marks a try/catch body closure: a return/break/continue leaving it emits a
     // control signal instead of a ret/br (see compile-core inCtlBody / excDispatch).
-    function emitFunction(paramNames, bodyT, isCtl) {
+    // The function's own scope is made only when something is bound in it, by the
+    // one-entry phi makeBlockStmt (compile-core) uses for a block: a function whose
+    // parameters and locals all live in SSA values runs on its closure's scope.
+    // With a direct record d (dRec) the body goes into d.fn, which takes the
+    // arguments one by one, and jsf_N only unpacks its array and calls it.
+    function emitFunction(paramNames, bodyT, isCtl, wi, d) {
         funcCount++
         var idx = funcCount
         var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
         funcByIdx["$" + idx] = f // -rt-prims: registerPrim needs the callee, not just its index.
+        var bodyF = f
+        if (d != undefined) {
+            bodyF = d.fn
+            var wb = f.NewBlock("entry")
+            var wargs = [f.Params[0]]
+            for (var wj = 0; wj < d.np; wj++) { wargs.push(callExt(wb, "js_arg", [f.Params[1], handle(wj)])) }
+            wb.NewRet(wb.NewCall(bodyF, wargs))
+        }
 
         var savedF = curF
         var savedScope = curScopeV
         var savedLoops = loopStack
         var savedTag = curFTag
+        var savedInfo = ssaInfo
+        var savedFrames = ssaFrames
+        var savedCond = ssaCond
+        var savedEnv = ssaEnv
         // A nested function's declarations land in ITS frame, so they must not make the
         // block that contains the function look like a block that declares (compile-core
         // makeBlockStmt / declCount).
         var savedDecl = declCount
-        curF = f
+        curF = bodyF
         curFTag = idx
         loopStack = []
+        ssaInfo = wInfos[wi]
+        ssaFrames = [{}]
+        ssaCond = false
+        ssaEnv = bodyF.Params[0]
         if (isCtl) { ctlEnter(idx) }
 
-        var b = f.NewBlock("entry")
-        curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
+        var entryB = bodyF.NewBlock("entry")
+        var b = bodyF.NewBlock("")
+        curScopeV = b.NewPhi([llvm.ir.NewIncoming(bodyF.Params[0], entryB)])
+        var before = declCount
         for (var i = 0; i < paramNames.length; i++) {
-            callExt(b, "js_tdecl", [curScopeV, emitStr(b, paramNames[i]),
-                                    callExt(b, "js_arg", [f.Params[1], handle(i)])])
+            if (d != undefined) { ssaDecl(b, paramNames[i], bodyF.Params[i + 1]) }
+            else { ssaDecl(b, paramNames[i], callExt(b, "js_arg", [f.Params[1], handle(i)])) }
         }
-        callExt(b, "js_tdecl", [curScopeV, emitStr(b, "arguments"), f.Params[1]])
+        if (ssaInfo.args || !ssaOn) { callExt(b, "js_tdecl", [curScopeV, emitStr(b, "arguments"), f.Params[1]]) }
         var endB = bodyT(b)
         endB.NewRet(hUndef) // A function without return returns undefined.
+        if (declCount != before) {
+            curScopeV.Incs = [llvm.ir.NewIncoming(callExt(entryB, "js_scope_new", [bodyF.Params[0]]), entryB)]
+        }
+        entryB.NewBr(b)
 
         if (isCtl) { ctlLeave() }
         curF = savedF
         curScopeV = savedScope
         loopStack = savedLoops
         curFTag = savedTag
+        ssaInfo = savedInfo
+        ssaFrames = savedFrames
+        ssaCond = savedCond
+        ssaEnv = savedEnv
         declCount = savedDecl
         return idx
     }
     function makeFunctionExpr(bodyT, paramNames) {
+        var wi = wFnExit()
+        wImpure++
         return function(b) {
-            var idx = emitFunction(paramNames, bodyT)
+            var idx = emitFunction(paramNames, bodyT, false, wi)
             return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
         }
     }
@@ -684,6 +987,7 @@ KwDefault   = "default" KwEnd ;
     // items = [name] or [name, initThunk].
     function makeDecl(items) {
         var name = items[0]
+        if (wDeclMarks.pop() != wImpure) { wTop().asg["$" + name] = true }
         return function(b) {
             var v = hUndef
             if (items.length > 1) {
@@ -691,7 +995,7 @@ KwDefault   = "default" KwEnd ;
                 b = r.b
                 v = r.v
             }
-            callExt(b, "js_tdecl", [curScopeV, emitStr(b, name), v])
+            ssaDecl(b, name, v)
             return b
         }
     }
@@ -720,9 +1024,11 @@ KwDefault   = "default" KwEnd ;
             if (items[i].k == "cond") cond = items[i].t
             if (items[i].k == "post") post = items[i].t
         }
+        bodyT = ssaCondT(bodyT)
         return function(b) {
             var saved = curScopeV
             curScopeV = callExt(b, "js_scope_new", [curScopeV]) // The for header is its own scope.
+            ssaFrames.push({})
             if (init != null) b = init(b)
             var headB = curF.NewBlock("")
             var bodyB = curF.NewBlock("")
@@ -741,6 +1047,7 @@ KwDefault   = "default" KwEnd ;
             var pb = postB
             if (post != null) pb = post(postB)
             pb.NewBr(headB)
+            ssaFrames.pop()
             curScopeV = saved
             return exitB
         }
@@ -779,21 +1086,22 @@ KwDefault   = "default" KwEnd ;
     // pending rethrow), like in JS.
     function makeTry(items) {
         var tryT = anytype, catchT = anytype, catchName = anytype, finallyT = anytype
+        var tryW = 0, catchW = 0, finW = 0
         for (var i = 0; i < items.length; i++) {
-            if (items[i].trybody != undefined) { tryT = items[i].trybody }
-            else if (items[i].catchbody != undefined) { catchT = items[i].catchbody; catchName = items[i].catchname }
-            else if (items[i].finbody != undefined) { finallyT = items[i].finbody }
+            if (items[i].trybody != undefined) { tryT = items[i].trybody; tryW = items[i].wi }
+            else if (items[i].catchbody != undefined) { catchT = items[i].catchbody; catchName = items[i].catchname; catchW = items[i].wi }
+            else if (items[i].finbody != undefined) { finallyT = items[i].finbody; finW = items[i].wi }
         }
         return function(b) {
-            var tryClo = callExt(b, "js_closure", [handle(emitFunction([], tryT, true)), curScopeV])
+            var tryClo = callExt(b, "js_closure", [handle(emitFunction([], tryT, true, tryW)), curScopeV])
             var catchClo = hUndef
             if (catchT != undefined) {
                 var cn = (catchName != undefined) ? catchName : "__caught"
-                catchClo = callExt(b, "js_closure", [handle(emitFunction([cn], catchT, true)), curScopeV])
+                catchClo = callExt(b, "js_closure", [handle(emitFunction([cn], catchT, true, catchW)), curScopeV])
             }
             var finClo = hUndef
             if (finallyT != undefined) {
-                finClo = callExt(b, "js_closure", [handle(emitFunction([], finallyT, true)), curScopeV])
+                finClo = callExt(b, "js_closure", [handle(emitFunction([], finallyT, true, finW)), curScopeV])
             }
             var ctl = callExt(b, "js_try", [tryClo, catchClo, finClo])
             return excDispatch(b, ctl)
@@ -841,25 +1149,45 @@ KwDefault   = "default" KwEnd ;
             b.NewBr(dfltB)
             var outerCont = loopStack.length > 0 ? loopStack[loopStack.length - 1].cont : null
             loopStack.push({cont: outerCont, brk: exitB})
+            // A case is entered by a jump, so nothing declared in one dominates the next.
+            var sc = ssaCond
+            ssaCond = true
             for (var i = 0; i < cases.length; i++) {
                 var bb = bodyBs[i]
                 var body = cases[i].body
                 for (var j = 0; j < body.length; j++) { bb = body[j](bb) }
                 bb.NewBr(i + 1 < cases.length ? bodyBs[i + 1] : exitB)
             }
+            ssaCond = sc
             loopStack.pop()
             return exitB
         }
     }
     // Local stack = [name, [paramNames...], bodyThunk] -- declares the closure when executed.
     function makeFuncDecl(bodyT, paramNames, name) {
+        var wi = wFnExit()
+        // A declared function keeps its scope slot: -callgraph names a closure by
+        // the js_tdecl that stores it.
+        wTop().asg["$" + wDecl(name)] = true
+        if (wFrames.length == 1) { wTopFnNote(name, paramNames.length, wInfos[wi].args) }
         return function(b) {
-            var idx = emitFunction(paramNames, bodyT)
+            var d = undefined
+            if (ssaEnv == undefined) { d = dRec(name) }
+            var idx = emitFunction(paramNames, bodyT, false, wi, d)
             // Inside lib/rt-prims.metajs every declaration IS a primitive: wire the
             // operator that used to call the external to this body (-rt-prims).
             if (inPrims) { registerPrim(name, idx, paramNames.length) }
             var cl = callExt(b, "js_closure", [handle(idx), curScopeV])
             callExt(b, "js_tdecl", [curScopeV, emitStr(b, name), cl])
+            // Published only from the top level of jsrun, which runs once per scope:
+            // anywhere else the guard keeps its initial -1 and every call goes the
+            // generic way. The closure is PINNED: a collected closure's address
+            // could come back as a different one and pass the guard. Its scope
+            // lives as long as it does.
+            if (d != undefined && jsrunTop && ssaFrames.length == 0 && !ssaCond) {
+                b.NewStore(curScopeV, d.env)
+                b.NewStore(callExt(b, "js_gc_pin", [cl]), d.clo)
+            }
             return b
         }
     }
@@ -942,6 +1270,7 @@ KwDefault   = "default" KwEnd ;
         curF = f
         var b = f.NewBlock("entry")
         curScopeV = f.Params[0]
+        jsrunTop = true
         callExt(b, "js_setret", [hUndef]) // A program without expression statements completes with undefined.
         // The imported files' top level goes FIRST. Flipping it to APPEND was measured
         // and is a LOSS - see the note at the ImportStmt rule.
@@ -997,6 +1326,8 @@ KwDefault   = "default" KwEnd ;
         funcCount = 1000000
         strCount = 1000000
         numCount = 1000000   // jsnum./jsnumg. are module-level symbols too (compile-core emitNum).
+        gCacheCount = 1000000
+        wTopCount = 1000000
     }
 
     // Build the module out of the parsed program.
@@ -1155,7 +1486,7 @@ KwDefault   = "default" KwEnd ;
             lkB.NewBr(goB)
             sb = goB
             var fV = sb.NewLoad(i64, fG)
-            var aV = callExt(sb, "js_arr_new", [])
+            var avs = [fV]
             pj = 0
             while (pj < ex.p.length) {
                 // A RAW parameter. Not every argument of an extern is a value handle:
@@ -1171,10 +1502,19 @@ KwDefault   = "default" KwEnd ;
                 if (pn.length > 4 && pn.substring(pn.length - 4, pn.length) == "_raw") {
                     pv = callExt(sb, "js_num_i", [pv])
                 }
-                callExt(sb, "js_arr_push", [aV, pv])
+                avs.push(pv)
                 pj = pj + 1
             }
-            var rv = callExt(sb, "js_call", [fV, hUndef, aV])
+            // The callee is reached the way a MetaJS call reaches it: directly when
+            // it has a direct body (dFns), else through js_call.
+            var dx = dFns["$" + ex.s]
+            var rv = undefined
+            curF = sf
+            if (dx != undefined) {
+                var dcx = emitDirectCall(sb, dx, avs)
+                sb = dcx.b
+                rv = dcx.v
+            } else { rv = emitPlainCall(sb, avs) }
             if (ex.r) { rv = callExt(sb, "js_truthy", [rv]) }
             sb.NewRet(rv)
             ei = ei + 1

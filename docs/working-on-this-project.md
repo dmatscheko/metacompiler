@@ -296,11 +296,12 @@ extern in a language's own twin file therefore leaks across languages: overridin
 *"Range [10, 6) out of bounds for length 6"*. Observed, not theorised. The correct
 pattern is a new language-specific name (`js_jvsub`, `js_csmcall`, `js_ktsmcall`).
 
-**`host_call` is a linear `if`-chain and its MIDDLE is not a free place to
-insert.** Twenty-three arms added in the middle cost java **+7.08%** — every
-`sint`/`flo`/`scope` call paid the extra compares. Add at the cold end. The fix is
-verifiable *without* a benchmark: the first ~70 `icmp eq i64` sites of `host_call`
-in `runtime.ll` must stay register-for-register identical to the base module's.
+**`host_call` is a `switch`, and it must stay one.** As a linear `if`-chain,
+twenty-three arms added in the middle cost java **+7.08%** — every
+`sint`/`flo`/`scope` call paid the extra compares. Our C compiler lowers a
+`switch` to a compare chain that clang folds into a jump table (an indirect `br` in
+`otool -tV` of a native binary), so a new host id costs nothing
+wherever it goes. Every case returns; a case that falls out would run the next one.
 
 **Go's arm64 backend contracts `a*b+c` into FMA inside `math`, and our C does
 not.** That is the whole of the residual one-ulp difference between `llvm.Run` and
@@ -974,6 +975,31 @@ the other direction — its unqualified-write branch has to identify the member 
 its declaring class anyway, so adoption came free inside it. **Ask what the
 existing value already knows before designing a side table - and what the
 declaration allows it to become.**
+
+## 7.16 What a layer-2 call costs, and what the MetaJS compiler removes from it
+
+Every layer 2 is MetaJS compiled by `metajs-to-llvm-ir.abnf`, so its cost per
+call is that compiler's. Three things keep it down, and all three are exact rather
+than heuristic (the start script's comments at `wFrames`, `gCachePtr` and `dRec`
+have the rules):
+
+- **A parameter or `var` that is never assigned and never read from a nested
+  function is an SSA value**, not a scope slot, and a function that binds nothing
+  else gets no scope of its own. Assigning a parameter, capturing it in a closure
+  or a `try` body, or naming `arguments` puts it back in the scope.
+- **A name the function does not declare is read through `js_scope_cget`**, a
+  per-name cache in the module that the floor fills only for PERMANENT scopes (a
+  layer 2's module scope and the root), so a helper or host builtin costs a few
+  loads instead of a hashed walk.
+- **A call of a top-level function** compares the looked-up closure with the one
+  its declaration published and, when it is the same, calls its body directly
+  with the arguments in registers. A plain call of up to three arguments
+  otherwise goes through `js_call0..3`, which hands a host builtin its arguments
+  in a C-stack array.
+
+They took java's `s = s + i % 7` from ~150,000 to ~34,000 instructions an
+iteration. Under `-trace`, `-cfgraph`, `-callgraph` and `-why` all three are off:
+those read variable and call NAMES off the module.
 
 ## 7.13 Who imports what
 

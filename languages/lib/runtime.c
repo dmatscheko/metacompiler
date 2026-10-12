@@ -2788,22 +2788,30 @@ long to_string(long h) {
 	return mk_cstr("[value]");
 }
 
+/* The six answers of type_of, made once by boot(): `typeof` is on the hot path
+ * of every layer 2, and mk_cstr measures and looks up its literal each time. */
+long TY_UNDEF;
+long TY_BOOL;
+long TY_NUM;
+long TY_STR;
+long TY_FN;
+long TY_OBJ;
 long type_of(long h) {
 	long t = tag_of(h);
-	if (t == 0) { return mk_cstr("undefined"); }
-	if (t == 2) { return mk_cstr("boolean"); }
+	if (t == 0) { return TY_UNDEF; }
+	if (t == 2) { return TY_BOOL; }
 	/* A SIZED INTEGER IS A NUMBER. This is the whole point of the tag: the Go
 	 * twin answers "number" for jsGInt (abnf/jsrt.go typeOf), and an object box
 	 * in layer 2 could only ever have answered "object". */
-	if (t == 3 || t == 13 || t == 14) { return mk_cstr("number"); }
-	if (t == 4) { return mk_cstr("string"); }
+	if (t == 3 || t == 13 || t == 14) { return TY_NUM; }
+	if (t == 4) { return TY_STR; }
 	/* Tag 16 is a GENERATOR FUNCTION and it is callable: is_callable() below
 	 * answers true for it, the Go twin's js_genfn returns a *hostFunc whose
 	 * typeOf is "function" (abnf/jsrt.go), and a caller that asks
 	 * `typeof m == "function"` before calling a member must get the same
 	 * answer in both halves. */
-	if (t == 7 || t == 8 || t == 9 || t == 16) { return mk_cstr("function"); }
-	return mk_cstr("object");
+	if (t == 7 || t == 8 || t == 9 || t == 16) { return TY_FN; }
+	return TY_OBJ;
 }
 
 /* The type CLASS used by the MetaJS type pin: 0 = none (undefined / null),
@@ -4177,6 +4185,34 @@ long js_call(long callee, long self, long args) {
 	die2("call of a non function value: ", callee);
 	return H_UNDEF;
 }
+
+/* js_call0..js_call3(callee, arguments...): a call with no receiver and that
+ * many arguments, which metajs-to-llvm-ir emits instead of building the array
+ * itself. A host builtin only ever READS its argument array (host_call keeps
+ * neither the array nor its buffer), so it gets one on the C stack, where the
+ * collector's stack scan sees the three handles; any other callee may keep its
+ * array (`arguments`, a generator) and gets a heap one. Twins: the same four
+ * externs in abnf/jsrt.go. */
+long js_call_k(long callee, long n, long a0, long a1, long a2) {
+	long args;
+	if (tag_of(callee) == 8) {
+		long buf[3];
+		long cell[7];
+		buf[0] = a0; buf[1] = a1; buf[2] = a2;
+		cell[0] = 5; cell[1] = (long)buf; cell[2] = n; cell[3] = 3;
+		cell[4] = 0; cell[5] = 0; cell[6] = 0;
+		return host_call(fa(callee), H_UNDEF, (long)cell);
+	}
+	args = mk_arr();
+	if (n > 0) { arr_push(args, a0); }
+	if (n > 1) { arr_push(args, a1); }
+	if (n > 2) { arr_push(args, a2); }
+	return js_call(callee, H_UNDEF, args);
+}
+long js_call0(long f) { return js_call_k(f, 0, 0, 0, 0); }
+long js_call1(long f, long a) { return js_call_k(f, 1, a, 0, 0); }
+long js_call2(long f, long a, long b) { return js_call_k(f, 2, a, b, 0); }
+long js_call3(long f, long a, long b, long c) { return js_call_k(f, 3, a, b, c); }
 
 /* ------------------------------------------------------------- coroutines - */
 /*
@@ -6019,25 +6055,29 @@ double arg_d(long args, long i) { union DB u; u.l = arg_num(args, i); return u.d
 long host_call(long id, long self, long args) {
 	long n = arr_len(args);
 	long i = 0;
-	if (id == 1 || id == 2 || id == 3) {
+	/* A switch rather than a chain of ifs: clang folds the case compares into a
+	 * jump table, so a builtin costs the same whatever its id. Every case
+	 * returns or exits; none falls through. */
+	switch (id) {
+	case 1: case 2: case 3: {
 		OUTFD = (id == 3) ? 2 : 1;
 		while (i < n) { if (i > 0) { o_ch(32); } print_val(arr_get(args, i)); i = i + 1; }
 		if (id != 2) { o_ch(10); }
 		OUTFD = 1;
 		return H_UNDEF;
 	}
-	if (id == 4) {
+	case 4: {
 		long r = arg_num(args, 1);
 		return mk_num(js_parse_int(arg_str(args, 0), d_is_nan(r) ? 0 : d_to_long(d_trunc(r))));
 	}
-	if (id == 5) { return mk_num(js_parse_float(arg_str(args, 0))); }
-	if (id == 6) {
+	case 5: { return mk_num(js_parse_float(arg_str(args, 0))); }
+	case 6: {
 		long v = arg_num(args, 0);
 		exit((int)(d_is_nan(v) ? 0 : to_int32(v)));
 	}
-	if (id == 10) { return mk_num(d_floor(arg_num(args, 0))); }
-	if (id == 11) { return mk_num(d_abs(arg_num(args, 0))); }
-	if (id == 12 || id == 13) {
+	case 10: { return mk_num(d_floor(arg_num(args, 0))); }
+	case 11: { return mk_num(d_abs(arg_num(args, 0))); }
+	case 12: case 13: {
 		long acc = (id == 12) ? DNINF : DINF;
 		while (i < n) {
 			long v = to_number(arr_get(args, i));
@@ -6053,7 +6093,7 @@ long host_call(long id, long self, long args) {
 		}
 		return mk_num(acc);
 	}
-	if (id == 14) {
+	case 14: {
 		long a = to_int32(arg_num(args, 0));
 		long b = to_int32(arg_num(args, 1));
 		long p = a * b;
@@ -6061,12 +6101,12 @@ long host_call(long id, long self, long args) {
 		if (p >= 2147483648) { p = p - 4294967296; }
 		return mk_num(d_from_long(p));
 	}
-	if (id == 15) { return mk_num(d_ceil(arg_num(args, 0))); }
-	if (id == 16) { return mk_num(d_trunc(arg_num(args, 0))); }
+	case 15: { return mk_num(d_ceil(arg_num(args, 0))); }
+	case 16: { return mk_num(d_trunc(arg_num(args, 0))); }
 	/* Math.round: jsMathRound in abnf/jsrt.go, step for step. floor(x + 0.5)
 	 * is wrong twice: the addition rounds 0.49999999999999994 up to 1, and a
 	 * negative operand that rounds to zero must give -0. */
-	if (id == 17) {
+	case 17: {
 		long v = arg_num(args, 0);
 		long r;
 		union DB h;
@@ -6079,39 +6119,39 @@ long host_call(long id, long self, long args) {
 		if (d_is_zero(r) && v < 0) { r = 1; r = r << 63; }
 		return mk_num(r);
 	}
-	if (id == 18) {
+	case 18: {
 		long v = arg_num(args, 0);
 		if (d_is_nan(v) || d_is_zero(v)) { return mk_num(v); }
 		return mk_num(d_sign(v) ? d_neg(DONE) : DONE);
 	}
-	if (id == 19) { return mk_num(d_sqrt(arg_num(args, 0))); }
-	if (id == 20) { return mk_num(d_pow(arg_num(args, 0), arg_num(args, 1))); }
-	if (id == 30) { return from_char_code(args); }
-	if (id == 31) { return mk_bool(tag_of(arg_at(args, 0)) == 5); }
-	if (id == 32) { return mk_num(d_from_long(str_len(arg_str(args, 0)))); }
+	case 19: { return mk_num(d_sqrt(arg_num(args, 0))); }
+	case 20: { return mk_num(d_pow(arg_num(args, 0), arg_num(args, 1))); }
+	case 30: { return from_char_code(args); }
+	case 31: { return mk_bool(tag_of(arg_at(args, 0)) == 5); }
+	case 32: { return mk_num(d_from_long(str_len(arg_str(args, 0)))); }
 	/* fail(msg): a RUNTIME ERROR, not an exception. The Go twin's rt.fail
 	 * (abnf/jsrt.go) panics with exactly this text, so the two engines report an
 	 * impossible operand the same way; throwing instead would prefix the message
 	 * with "uncaught exception: ". Layer 2 of every language needs it - Lua's
 	 * "attempt to perform arithmetic on a nil value" arrives here - and
 	 * languages/lib/interp-core.js already calls a fail() of its own. */
-	if (id == 36) {
+	case 36: {
 		werr("js runtime error: ");
 		wstr(to_string(arg_at(args, 0)));
 		werr("\n");
 		exit(1);
 	}
-	if (id == 33) {                                        /* sprintf */
+	case 33: {                                        /* sprintf */
 		if (n == 0) { return mk_cstr(""); }
 		return fmt_apply(arg_str(args, 0), args, 1);
 	}
-	if (id == 34) {                                        /* printf */
+	case 34: {                                        /* printf */
 		if (n == 0) { return H_UNDEF; }
 		OUTFD = 1;
 		o_str(fmt_apply(arg_str(args, 0), args, 1));
 		return H_UNDEF;
 	}
-	if (id == 35) { return fmt_sprint(args); }             /* sprint */
+	case 35: { return fmt_sprint(args); }             /* sprint */
 	/* ----- the SIZED INTEGER, for layer 2.
 	 * A MetaJS runtime library cannot make a new primitive type, so the floor
 	 * hands it the constructor and the three readers. The value travels as two
@@ -6122,30 +6162,30 @@ long host_call(long id, long self, long args) {
 	 *   sintIs(v)                     is this a sized integer (tag 13)
 	 *   sintHi(v) / sintLo(v)         the two halves back out, unsigned
 	 *   sintWidth(v) / sintUns(v)     the declared width and signedness */
-	if (id == 40) {
+	case 40: {
 		long hi = d_to_long(d_trunc(arg_num(args, 0))) & 4294967295;
 		long lo = d_to_long(d_trunc(arg_num(args, 1))) & 4294967295;
 		long w = n > 2 ? d_to_long(d_trunc(arg_num(args, 2))) : 64;
 		long u = n > 3 ? truthy(arg_at(args, 3)) : 0;
 		return si_norm((hi << 32) | lo, w, u);
 	}
-	if (id == 41) { return mk_bool(tag_of(arg_at(args, 0)) == 13); }
-	if (id == 42) { return mk_num(d_from_long((long)(si_u(si_val(arg_at(args, 0)), 64) >> 32))); }
-	if (id == 43) { return mk_num(d_from_long(si_val(arg_at(args, 0)) & 4294967295)); }
-	if (id == 44) { long v = arg_at(args, 0); return mk_num(d_from_long(si_width_of(v, v))); }
-	if (id == 45) { long v = arg_at(args, 0); return mk_bool(si_uns_of(v, v) != 0); }
+	case 41: { return mk_bool(tag_of(arg_at(args, 0)) == 13); }
+	case 42: { return mk_num(d_from_long((long)(si_u(si_val(arg_at(args, 0)), 64) >> 32))); }
+	case 43: { return mk_num(d_from_long(si_val(arg_at(args, 0)) & 4294967295)); }
+	case 44: { long v = arg_at(args, 0); return mk_num(d_from_long(si_width_of(v, v))); }
+	case 45: { long v = arg_at(args, 0); return mk_bool(si_uns_of(v, v) != 0); }
 	/*   sintOp(code, l, r)            one binary operator, by index:
 	 *                                 0 + 1 - 2 * 3 / 4 % 5 & 6 | 7 ^ 8 &^ 9 << 10 >>
 	 *   sintCmp(l, r)                 -1 / 0 / 1, unsigned where the type is
 	 *   sintConv(v, bits, unsigned)   an explicit conversion (js_giconv)
 	 *   sintStr(v) / sintNum(v)       the decimal text and the double reading */
-	if (id == 46) { return si_apply(d_to_long(d_trunc(arg_num(args, 0))), arg_at(args, 1), arg_at(args, 2)); }
-	if (id == 47) { return mk_num(d_from_long(si_cmp(arg_at(args, 0), arg_at(args, 1)))); }
-	if (id == 48) {
+	case 46: { return si_apply(d_to_long(d_trunc(arg_num(args, 0))), arg_at(args, 1), arg_at(args, 2)); }
+	case 47: { return mk_num(d_from_long(si_cmp(arg_at(args, 0), arg_at(args, 1)))); }
+	case 48: {
 		return si_norm(si_val(arg_at(args, 0)), d_to_long(d_trunc(arg_num(args, 1))), truthy(arg_at(args, 2)));
 	}
-	if (id == 49) { long v = arg_at(args, 0); if (tag_of(v) == 13) { return si_str(v); } return to_string(v); }
-	if (id == 50) { return mk_num(si_float(arg_at(args, 0))); }
+	case 49: { long v = arg_at(args, 0); if (tag_of(v) == 13) { return si_str(v); } return to_string(v); }
+	case 50: { return mk_num(si_float(arg_at(args, 0))); }
 	/* ----- the BOXED DOUBLE, for layer 2 (tag 14, abnf/jsrtjvm.go). The same
 	 * shape as the sint* family above: layer 2 cannot make a primitive type, so
 	 * the floor hands it the constructor and the readers. A double travels as
@@ -6160,23 +6200,23 @@ long host_call(long id, long self, long args) {
 	 *   floEq(l, r)          strict_eq's two tag-14 arms (jvmNumEq)
 	 *   floMax / floMin      Math.max / Math.min (jvmMinMax)
 	 *   floAbs(v)            Math.abs */
-	if (id == 51) {
+	case 51: {
 		long sty = n > 1 ? d_to_long(d_trunc(arg_num(args, 1))) : 0;
 		return jf_make(to_number(arg_at(args, 0)), sty);
 	}
-	if (id == 52) { return mk_bool(tag_of(arg_at(args, 0)) == 14); }
-	if (id == 53) { return mk_num(to_number(arg_at(args, 0))); }
-	if (id == 54) { long v = arg_at(args, 0); return mk_num(d_from_long(jf_style_of(v, v))); }
-	if (id == 55) { long v = arg_at(args, 0); if (tag_of(v) == 14) { return jf_text(v); } return to_string(v); }
-	if (id == 56) { return jf_arith(d_to_long(d_trunc(arg_num(args, 0))), arg_at(args, 1), arg_at(args, 2)); }
-	if (id == 57) {
+	case 52: { return mk_bool(tag_of(arg_at(args, 0)) == 14); }
+	case 53: { return mk_num(to_number(arg_at(args, 0))); }
+	case 54: { long v = arg_at(args, 0); return mk_num(d_from_long(jf_style_of(v, v))); }
+	case 55: { long v = arg_at(args, 0); if (tag_of(v) == 14) { return jf_text(v); } return to_string(v); }
+	case 56: { return jf_arith(d_to_long(d_trunc(arg_num(args, 0))), arg_at(args, 1), arg_at(args, 2)); }
+	case 57: {
 		long l = arg_at(args, 0);
 		long r = arg_at(args, 1);
 		if (tag_of(l) == 14) { return mk_bool(jf_num_eq(fa(l), r)); }
 		if (tag_of(r) == 14) { return mk_bool(jf_num_eq(fa(r), l)); }
 		return mk_bool(strict_eq(l, r));
 	}
-	if (id == 58 || id == 59) {
+	case 58: case 59: {
 		long l = arg_at(args, 0);
 		long r = arg_at(args, 1);
 		long ln = to_number(l);
@@ -6185,7 +6225,7 @@ long host_call(long id, long self, long args) {
 		 * the signed-zero and NaN cases those two cannot see. */
 		return jf_minmax(l, r, jf_take_l(ln, rn, id == 58));
 	}
-	if (id == 60) { return jf_abs(arg_at(args, 0)); }
+	case 60: { return jf_abs(arg_at(args, 0)); }
 	/* keysOf(o): an object's OWN keys, in insertion order. It is js_keys, and
 	 * it is here for the reason the sint* and flo* families are: an EXTERN is
 	 * only callable from an emitter, so a layer-2 file could not enumerate an
@@ -6194,7 +6234,7 @@ long host_call(long id, long self, long args) {
 	 * var_dump, `==` on objects, the (array) cast and clone are the first four).
 	 * A dict box ({__dict,keys,vals}) yields its key array; a plain object
 	 * yields its string keys, skipping the internal __-prefixed slots. */
-	if (id == 61) { return js_keys(arg_at(args, 0)); }
+	case 61: { return js_keys(arg_at(args, 0)); }
 	/* sintRaw(hi, lo, bits, unsigned): sint() WITHOUT si_norm - always a tag 13
 	 * cell, never a plain number.
 	 *
@@ -6208,7 +6248,7 @@ long host_call(long id, long self, long args) {
 	 * states (`the value already truncated to the width and sign extended`) -
 	 * a caller asking for 8 bits gets a well formed int8 box, not 300 labelled
 	 * as one. The ONLY thing dropped is si_norm's unboxing arm. */
-	if (id == 62) {
+	case 62: {
 		long hi = d_to_long(d_trunc(arg_num(args, 0))) & 4294967295;
 		long lo = d_to_long(d_trunc(arg_num(args, 1))) & 4294967295;
 		long w = n > 2 ? d_to_long(d_trunc(arg_num(args, 2))) : 64;
@@ -6221,7 +6261,7 @@ long host_call(long id, long self, long args) {
 	 * remove a key AT ALL. Every
 	 * language whose runtime models `delete`, `unset`, `remove` or a map erase
 	 * needs it. Answers true whether or not the key was there, like the twin. */
-	if (id == 63) { return js_del(arg_at(args, 0), arg_at(args, 1)); }
+	case 63: { return js_del(arg_at(args, 0), arg_at(args, 1)); }
 	/* ----- the SCOPE, for layer 2 (tag 11) -----
 	 *
 	 *   scopeNew(parent)      a scope whose parent is `parent`, or NO parent
@@ -6252,20 +6292,20 @@ long host_call(long id, long self, long args) {
 	 * are not a scope), and the scope argument is TYPE CHECKED (host_scope).
 	 * The twins are abnf/jsrtint.go's scopeBindings and
 	 * metajs-interpreter.abnf's scNew/scParent/scGet/scHas/scDecl. */
-	if (id == 64) {
+	case 64: {
 		long p = arg_at(args, 0);
 		return mk_scope(is_undef_or_null(p) ? 0 : host_scope(p));
 	}
-	if (id == 65) {
+	case 65: {
 		long p = ff(host_scope(arg_at(args, 0)));
 		if (p == 0) { return H_UNDEF; }
 		return p;
 	}
-	if (id == 66) { return scope_get(host_scope(arg_at(args, 0)), to_string(arg_at(args, 1))); }
-	if (id == 67) {
+	case 66: { return scope_get(host_scope(arg_at(args, 0)), to_string(arg_at(args, 1))); }
+	case 67: {
 		return mk_bool(scope_find(host_scope(arg_at(args, 0)), to_string(arg_at(args, 1))) >= 0);
 	}
-	if (id == 68) {
+	case 68: {
 		scope_put(host_scope(arg_at(args, 0)), to_string(arg_at(args, 1)), arg_at(args, 2));
 		return H_UNDEF;
 	}
@@ -6286,7 +6326,7 @@ long host_call(long id, long self, long args) {
 	 *
 	 * A generator is an OBJECT to typeof in all three halves, so this is a
 	 * refinement of typeof and never contradicts it. */
-	if (id == 69) { return mk_bool(tag_of(arg_at(args, 0)) == 15); }
+	case 69: { return mk_bool(tag_of(arg_at(args, 0)) == 15); }
 	/* floPrec(v, n): the correctly rounded n SIGNIFICANT DIGIT decimal of |v|,
 	 * written DIGITS "e" EXP - the digits with no point and the trailing zeros
 	 * stripped, and EXP the decimal exponent of the FIRST digit. It is the digit
@@ -6306,7 +6346,7 @@ long host_call(long id, long self, long args) {
 	 *
 	 * The twins are floPrecStr in abnf/commonscript.go (goja and the frozen
 	 * grammar host) and the floPrec binding of languages/metajs-interpreter.abnf. */
-	if (id == 70) {
+	case 70: {
 		long v = arg_num(args, 0);
 		long nd = arg_num(args, 1);
 		char digs[32];
@@ -6348,27 +6388,27 @@ long host_call(long id, long self, long args) {
 	/* The transcendental members of Math, host ids 71..91 - the set
 	 * standardJSBindings in abnf/jsrt.go offers. Each body is Go's own math
 	 * package, ported above. */
-	if (id == 71) { return mk_dnum(d_sin(arg_d(args, 0))); }
-	if (id == 72) { return mk_dnum(d_cos(arg_d(args, 0))); }
-	if (id == 73) { return mk_dnum(d_tan(arg_d(args, 0))); }
-	if (id == 74) { return mk_dnum(d_asin(arg_d(args, 0))); }
-	if (id == 75) { return mk_dnum(d_acos(arg_d(args, 0))); }
-	if (id == 76) { return mk_dnum(d_atan(arg_d(args, 0))); }
-	if (id == 77) { return mk_dnum(d_sinh(arg_d(args, 0))); }
-	if (id == 78) { return mk_dnum(d_cosh(arg_d(args, 0))); }
-	if (id == 79) { return mk_dnum(d_tanh(arg_d(args, 0))); }
-	if (id == 80) { return mk_dnum(d_asinh(arg_d(args, 0))); }
-	if (id == 81) { return mk_dnum(d_acosh(arg_d(args, 0))); }
-	if (id == 82) { return mk_dnum(d_atanh(arg_d(args, 0))); }
-	if (id == 83) { return mk_dnum(d_exp(arg_d(args, 0))); }
-	if (id == 84) { return mk_dnum(d_expm1(arg_d(args, 0))); }
-	if (id == 85) { return mk_dnum(d_log(arg_d(args, 0))); }
-	if (id == 86) { return mk_dnum(d_log1p(arg_d(args, 0))); }
-	if (id == 87) { return mk_dnum(d_log2(arg_d(args, 0))); }
-	if (id == 88) { return mk_dnum(d_log10(arg_d(args, 0))); }
-	if (id == 89) { return mk_dnum(d_cbrt(arg_d(args, 0))); }
-	if (id == 90) { return mk_dnum(d_atan2(arg_d(args, 0), arg_d(args, 1))); }
-	if (id == 91) {
+	case 71: { return mk_dnum(d_sin(arg_d(args, 0))); }
+	case 72: { return mk_dnum(d_cos(arg_d(args, 0))); }
+	case 73: { return mk_dnum(d_tan(arg_d(args, 0))); }
+	case 74: { return mk_dnum(d_asin(arg_d(args, 0))); }
+	case 75: { return mk_dnum(d_acos(arg_d(args, 0))); }
+	case 76: { return mk_dnum(d_atan(arg_d(args, 0))); }
+	case 77: { return mk_dnum(d_sinh(arg_d(args, 0))); }
+	case 78: { return mk_dnum(d_cosh(arg_d(args, 0))); }
+	case 79: { return mk_dnum(d_tanh(arg_d(args, 0))); }
+	case 80: { return mk_dnum(d_asinh(arg_d(args, 0))); }
+	case 81: { return mk_dnum(d_acosh(arg_d(args, 0))); }
+	case 82: { return mk_dnum(d_atanh(arg_d(args, 0))); }
+	case 83: { return mk_dnum(d_exp(arg_d(args, 0))); }
+	case 84: { return mk_dnum(d_expm1(arg_d(args, 0))); }
+	case 85: { return mk_dnum(d_log(arg_d(args, 0))); }
+	case 86: { return mk_dnum(d_log1p(arg_d(args, 0))); }
+	case 87: { return mk_dnum(d_log2(arg_d(args, 0))); }
+	case 88: { return mk_dnum(d_log10(arg_d(args, 0))); }
+	case 89: { return mk_dnum(d_cbrt(arg_d(args, 0))); }
+	case 90: { return mk_dnum(d_atan2(arg_d(args, 0), arg_d(args, 1))); }
+	case 91: {
 		/* Math.hypot, variadic and scaled - see the Math.hypot note above.
 		 * ECMA-262 orders the special cases: an infinity wins over a NaN. */
 		double mx = 0.0;
@@ -6393,15 +6433,15 @@ long host_call(long id, long self, long args) {
 	}
 	/* clz32 and fround: the Go twin's (abnf/jsrt.go standardJSBindings), which
 	 * the goja grammar host also uses (installGojaMathSurface). */
-	if (id == 92) { return mk_num(d_from_long(d_clz32(to_int32(arg_num(args, 0))))); }
-	if (id == 93) { return mk_dnum(d_fround(arg_d(args, 0))); }
+	case 92: { return mk_num(d_from_long(d_clz32(to_int32(arg_num(args, 0))))); }
+	case 93: { return mk_dnum(d_fround(arg_d(args, 0))); }
 	/* fnMeta(f, key) / fnMetaSet(f, name, length): see js_jsfnmeta. */
-	if (id == 94) { return fn_meta_get(arg_at(args, 0), arg_str(args, 1)); }
-	if (id == 95) { return js_jsfnmeta(arg_at(args, 0), arg_str(args, 1), mk_num(arg_num(args, 2))); }
+	case 94: { return fn_meta_get(arg_at(args, 0), arg_str(args, 1)); }
+	case 95: { return js_jsfnmeta(arg_at(args, 0), arg_str(args, 1), mk_num(arg_num(args, 2))); }
 	/* Math.random: xorshift64, seeded once from getentropy (time() if that
 	 * fails). The top 52 bits of the state become the mantissa of a double in
 	 * [1, 2), and subtracting 1 gives [0, 1). The Go twin uses math/rand. */
-	if (id == 96) {
+	case 96: {
 		long x = RNG_STATE;
 		union DB one;
 		if (x == 0) {
@@ -6415,11 +6455,11 @@ long host_call(long id, long self, long args) {
 		return mk_num(d_sub(((x >> 12) & 4503599627370495) | one.l, one.l));
 	}
 	/* unicodeCase(s, mode): see case_str. */
-	if (id == 97) { return case_str(arg_str(args, 0), d_to_long(arg_num(args, 1))); }
+	case 97: { return case_str(arg_str(args, 0), d_to_long(arg_num(args, 1))); }
 	/* writeBytes(s): the low byte of each UTF-16 unit of s, to standard output -
 	 * the raw output of a language whose strings hold one byte per unit (lua).
 	 * Twin of lowBytes in abnf/jsrt.go. */
-	if (id == 98) {
+	case 98: {
 		long s = arg_str(args, 0);
 		const char *p = str_ptr(s);
 		long len = str_len(s);
@@ -6439,15 +6479,16 @@ long host_call(long id, long self, long args) {
 	/* arrKind(a) / arrKindSet(a, k): the small kind number a language keeps on
 	 * an array cell, in field d (the collector never reads it; mk_arr zeroes
 	 * it, so a copy starts at 0). Twin of jsArray.kind in abnf/jsrt.go. */
-	if (id == 99) {
+	case 99: {
 		long a = arg_at(args, 0);
 		if (tag_of(a) != 5) { return mk_num(d_from_long(0)); }
 		return mk_num(d_from_long(fd(a)));
 	}
-	if (id == 100) {
+	case 100: {
 		long a = arg_at(args, 0);
 		if (tag_of(a) == 5) { sd(a, d_to_long(arg_num(args, 1))); }
 		return a;
+	}
 	}
 	die("unknown host function");
 	return H_UNDEF;
@@ -6643,6 +6684,8 @@ void gc_roots(void) {
  * extern; conservatively scanning the data segment instead is not portable, and
  * emitting a shadow stack for them would be IR the Go half has to carry. */
 long js_gc_pin(long v) {
+	/* A permanent object is never collected, so it needs no slot. */
+	if (is_perm(v)) { return v; }
 	if (PIN_N >= 8192) { die("too many pinned globals"); }
 	PINS[PIN_N] = v;
 	PIN_N = PIN_N + 1;
@@ -6737,6 +6780,41 @@ long fn_meta_get(long f, long key) {
 
 long js_scope_new(long parent) { return mk_scope(scope_of(parent)); }
 long js_scope_get(long s, long name) { return scope_get(scope_of(s), name); }
+
+/* js_scope_cget(cache, env, name bytes, name length): scope_get(env, name) for
+ * a name the calling MetaJS function does not declare, so that none of its own
+ * scopes can hold it and the answer depends on its closure scope `env` alone.
+ * The name is made a string only on a miss. metajs-to-llvm-ir
+ * emits one four-word cache per name: c[0] the env it was filled for, c[1] the
+ * scope holding the name, c[2] the entry's index there and c[3] env's entry
+ * count when the holder is env's PARENT.
+ *
+ * A hit is exact because entries are never removed or reordered: a holder that
+ * IS env keeps the entry at that index, and a holder one level up still wins
+ * while env has gained no name since. Only PERMANENT scopes are cached - a
+ * layer-2 library's module scope and the root - because a collected scope's
+ * address can come back as a different scope, and a permanent one never dies. */
+long js_scope_cget(long *c, long env, const char *np, long nn) {
+	long s = scope_of(env);
+	long name;
+	long p;
+	long i;
+	long *vals;
+	if (c[0] == s) {
+		if (c[1] == s || fd(s) == c[3]) { vals = (long *)fb(c[1]); return vals[c[2]]; }
+	}
+	name = str_intern(np, nn);
+	if (is_perm(s)) {
+		i = scope_find(s, name);
+		if (i >= 0) { c[0] = s; c[1] = s; c[2] = i; vals = (long *)fb(s); return vals[i]; }
+		p = ff(s);
+		if (p != 0 && is_perm(p)) {
+			i = scope_find(p, name);
+			if (i >= 0) { c[0] = s; c[1] = p; c[2] = i; c[3] = fd(s); vals = (long *)fb(p); return vals[i]; }
+		}
+	}
+	return scope_get(s, name);
+}
 
 /* ----- the scope and object primitives the OTHER language emitters call -----
  *
@@ -7208,6 +7286,12 @@ void boot(void) {
 	THROWN = 0;
 	OUTFD = 1;
 	G_ROOT = mk_scope(0);
+	TY_UNDEF = mk_cstr("undefined");
+	TY_BOOL = mk_cstr("boolean");
+	TY_NUM = mk_cstr("number");
+	TY_STR = mk_cstr("string");
+	TY_FN = mk_cstr("function");
+	TY_OBJ = mk_cstr("object");
 
 	seed_root("println", mk_host(1));
 	seed_root("print", mk_host(2));
