@@ -25,3 +25,4 @@ tests/*.out
 
 # Temporary files
 temp_*.md
+*-DO-NOT-TRACK.md
