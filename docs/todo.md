@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-455** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-456** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -63,14 +63,15 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-449 python: stdlib module contents (json, itertools, functools, os.path, string, random, time); import edges · P2 · PY · IN PROGRESS (PY worker, round 23) [V]
-python3 3.14: json, itertools, functools, os(.path), typing, random, string, time, abc, collections.abc are empty
-module objects ("module 'json' has no attribute 'dumps'"). Priority: json.dumps/loads (with indent, sort_keys,
-separators), itertools (chain, product, permutations, combinations, accumulate, groupby, islice, count, cycle, repeat,
-zip_longest), functools (reduce, partial, lru_cache/cache, wraps, cmp_to_key), string constants, os.path.join/basename/
-splitext. Write them in Python like python-collections.py where possible. Edges: `from math import *` binds nothing;
-`import collections.abc` does not bind `collections`; re flags print as ints (no RegexFlag); module function values
-(`f = re.sub`) drop keyword arguments; math/re/sys/builtins are visible without an import (CPython: NameError).
+### T-455 python: interpreter generators replay one-shot iterators (silent wrong answer); user iterators; descriptor method calls · P1 · PY · IN PROGRESS (PY worker, round 24) [V]
+python3 3.14: (a) interpreter only: `def g(it): for x in it: yield x` over `iter([5,6,7,8])` gives [5, 7] (CPython and
+both compiled halves [5, 6, 7, 8]) — the replay model re-pulls a one-shot input. Silent wrong answer; fix the
+interpreter's generator model (or snapshot consumed items) rather than document it. (b) `next(obj)` on a user class with
+`__next__` raises "'X' object is not an iterator" in all engines; a for-loop over a user `__iter__` reads eagerly, so an
+endless user iterator hangs. (c) compiled halves: `obj.m(x)` where m is a descriptor instance (e.g. @lru_cache on a
+method) skips `__get__` ("missing 1 required positional argument"). (d) Go twin: `repr(chr(0xd800))` prints the
+replacement char (CPython/interp/native `'\ud800'`). (e) `f.__doc__` AttributeError. Not done from T-449 and left open
+here as P3: `time` (needs a host clock in runtime.c), re flags as RegexFlag (needs an int subclass), typing/abc contents.
 
 ---
 
@@ -499,6 +500,7 @@ T-440 core: bitmap allocator (sweep = bitmap swap, cursor allocation) + 4 MB tri
 T-445 core: literal cache home slot by multiplicative hash, hits migrate home, frame-less hit leaf; another -4..-7.5% per row; baseline re-recorded — DONE cdf85b85
 T-452 java: System.arraycopy in all engines; ArrayList shifts/grows/copies with it (1,700 remove(0)+add on 300 elements: 93.7G -> 2.8G native); clear() reallocates — DONE 3e47ce3b
 T-450 php: property visibility (instance + static, magic fallback), uninitialised typed properties, per-object magic recursion guards, by-reference ??= targets, property_exists, ?? with BP_VAR_IS magic — DONE d835b006
+T-449 python: json/itertools/functools/string/os.path/random (MT19937) written in Python, star imports, runtime modules unbound until imported, module-function keywords; time/RegexFlag/typing contents moved to T-455 — PARTIAL 558e0c91
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
