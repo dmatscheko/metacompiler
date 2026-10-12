@@ -5840,7 +5840,16 @@ HasStatic   = :script(~~
             var m = members[i3]
             if (m.kind == "amethod") { cls.__abstract.push(m.name); jNoteKind(name, m.name, false); continue }
             if (m.kind == "method") {
-                cls[m.name] = m.statik ? makeStaticClosure(m, cls) : makeInstanceClosure(m)
+                var clo = m.statik ? makeStaticClosure(m, cls) : makeInstanceClosure(m)
+                // Overloads go under their "name#sig" slots, with a dispatcher
+                // under the name. Twin of the method loop of buildClassStmt in
+                // java-to-llvm-ir.abnf.
+                var ovc = jOvIfaceBodyCands(name, m.name)
+                if (ovc != null) {
+                    cls[m.name + "#" + jOvRawOf(m.ptys, jOvIsVar(m))] = clo
+                    clo = makeOvDispatch(cls, m.name, ovc, m.statik)
+                }
+                cls[m.name] = clo
                 jNoteKind(name, m.name, m.statik)
                 continue
             }

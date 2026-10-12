@@ -703,8 +703,10 @@ function jOvCands(cls, mname) {
     for (var k = 1; k < out.length; k++) { if (out[k].statik != out[0].statik) { return null } }
     return out
 }
-// Does any class dispatch over `mname`? Then every declaration of it is stored
-// under its "name#sig" slot as well. Asked only once the walk is complete.
+// Does any class or interface dispatch over `mname`? Then every declaration of
+// it is stored under its "name#sig" slot as well, so a class's override of an
+// interface's overload is found before the interface's own. Asked only once
+// the walk is complete.
 var jOvSlotNames = null
 function jOvNeedsSlot(mname) {
     if (jOvSlotNames == null) {
@@ -713,6 +715,12 @@ function jOvNeedsSlot(mname) {
             var ms = jOvCls["$" + jOvNames[c]].ms
             for (var i = 0; i < ms.length; i++) {
                 if (jOvCands(jOvNames[c], ms[i].name) != null) { jOvSlotNames["$" + ms[i].name] = true }
+            }
+        }
+        for (var f = 0; f < jOvIfaceNames.length; f++) {
+            var ims = jOvIfaceMs["$" + jOvIfaceNames[f]]
+            for (var k = 0; k < ims.length; k++) {
+                if (jOvIfaceBodyCands(jOvIfaceNames[f], ims[k].name) != null) { jOvSlotNames["$" + ims[k].name] = true }
             }
         }
     }
@@ -951,6 +959,7 @@ function jLangWants(cls) { return cls == "StringBuilder" }
 // any type this cannot read keeps the dispatcher's runtime pick, so a shape it
 // does not understand never changes what was resolved before.
 var jOvIfaceMs = {}
+var jOvIfaceNames = []
 // An interface's methods as jOvDeclare records a class': a call through an
 // interface-typed receiver resolves over these.
 function jOvIfaceDeclare(name, members) {
@@ -959,9 +968,11 @@ function jOvIfaceDeclare(name, members) {
         var m = members[i]
         if ((m.kind == "amethod" || m.kind == "abstract" || m.kind == "method") && m.ptys != undefined) {
             var v = m.params != undefined && jOvIsVar(m)
-            ms.push({name: m.name, raw: jOvRawOf(m.ptys, v), ptys: m.ptys, isVar: v, statik: m.statik == true})
+            ms.push({name: m.name, raw: jOvRawOf(m.ptys, v), ptys: m.ptys, isVar: v, statik: m.statik == true,
+                     body: m.kind == "method"})
         }
     }
+    if (jOvIfaceMs["$" + name] == undefined) { jOvIfaceNames.push(name) }
     jOvIfaceMs["$" + name] = ms
 }
 function jOvIfaceCands(name, mname) {
@@ -975,6 +986,20 @@ function jOvIfaceCands(name, mname) {
         out.push(ms[i])
     }
     if (out.length < 2) { return null }
+    return out
+}
+// The overloads of `mname` an interface declares with a body, when there are
+// two or more of one kind (all static or all default): the interface's own
+// dispatcher picks among them, as jOvCands' does for a class.
+function jOvIfaceBodyCands(name, mname) {
+    var all = jOvIfaceCands(name, mname)
+    if (all == null) { return null }
+    var out = []
+    for (var i = 0; i < all.length; i++) {
+        if (all[i].body) { out.push(all[i]) }
+    }
+    if (out.length < 2) { return null }
+    for (var k = 1; k < out.length; k++) { if (out[k].statik != out[0].statik) { return null } }
     return out
 }
 // The static types of a call's arguments, read from the call's own text

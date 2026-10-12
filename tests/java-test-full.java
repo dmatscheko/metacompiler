@@ -127,6 +127,7 @@ class Main {
         S57.run(); // SECTION-CALL 57
         S58.run(); // SECTION-CALL 58
         S59.run(); // SECTION-CALL 59
+        S60.run(); // SECTION-CALL 60
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -3452,5 +3453,41 @@ class S59 {
         Main.check("cm59", nat.equals("[apple, date, fig, kiwi, pear]") && rev.equals("[apple, date, kiwi, pear, fig]")
             && ws.toString().equals("[fig, pear, kiwi, date, apple]")
             && Stream.of(5, 3, 9).sorted(Comparator.reverseOrder()).toList().toString().equals("[9, 5, 3]"));
+    }
+}
+
+// ===== SECTION 60: overloaded static and default methods of an interface =====
+//
+// An interface's overloads are chosen by their arguments as a class's are
+// (JLS 15.12.2), whether static or default, and a class's override of one of
+// them wins over the default. Comparator.comparing and thenComparing take a
+// key comparator as a second argument. Every expected value is java 24.0.2's.
+interface S60Shape {
+    double area();
+    default String describe(String unit) { return "area " + area() + " " + unit; }
+    default String describe(int digits) { return "area~" + Math.round(area() * Math.pow(10, digits)); }
+    static String by(S60Shape s) { return "one"; }
+    static String by(S60Shape s, boolean loud) { return loud ? "TWO" : "two"; }
+}
+class S60Sq implements S60Shape {
+    double s;
+    S60Sq(double s) { this.s = s; }
+    public double area() { return s * s; }
+    public String describe(String unit) { return "square " + area() + unit; }
+}
+record S60P(String name, int age) {}
+class S60 {
+    static void run() {
+        S60Shape q = new S60Sq(1.5);
+        S60Shape lam = () -> 3.0;
+        Main.check("io60", q.describe("m2").equals("square 2.25m2") && q.describe(1).equals("area~23")
+            && lam.describe("u").equals("area 3.0 u") && lam.describe(2).equals("area~300")
+            && S60Shape.by(q).equals("one") && S60Shape.by(q, true).equals("TWO") && S60Shape.by(lam, false).equals("two"));
+        List<S60P> ps = new ArrayList<>(List.of(new S60P("bo", 30), new S60P("al", 25), new S60P("cy", 30)));
+        ps.sort(Comparator.comparing(S60P::age).thenComparing(S60P::name, Comparator.reverseOrder()));
+        List<String> ws = new ArrayList<>(List.of("pear", "fig", "apple"));
+        ws.sort(Comparator.comparing(String::length, Comparator.reverseOrder()));
+        Main.check("cm60", ps.toString().equals("[S60P[name=al, age=25], S60P[name=cy, age=30], S60P[name=bo, age=30]]")
+            && ws.toString().equals("[apple, pear, fig]"));
     }
 }

@@ -17,9 +17,9 @@ interface Iterator<E> {
 // java.util.Comparator: naturalOrder, reverseOrder and comparing order by
 // Comparable's compareTo, as java's do. Each comparator is built in a local of
 // type Comparator, which makes the lambda an instance of this interface, so a
-// chained reversed() or thenComparing() reaches the defaults. The members java
-// overloads on a functional-interface parameter are left out: a lambda carries
-// no parameter types to pick the overload by at run time.
+// chained reversed() or thenComparing() reaches the defaults. thenComparing's
+// one-argument Function form is left out: a lambda carries no parameter types
+// to tell it from the Comparator form at run time.
 interface Comparator<T> {
     int compare(T a, T b);
 
@@ -38,6 +38,10 @@ interface Comparator<T> {
         Comparator<T> c = (a, b) -> ((Comparable<Object>) key.apply(a)).compareTo(key.apply(b));
         return c;
     }
+    static <T, U> Comparator<T> comparing(java.util.function.Function<? super T, ? extends U> key, Comparator<? super U> keyCmp) {
+        Comparator<T> c = (a, b) -> keyCmp.compare(key.apply(a), key.apply(b));
+        return c;
+    }
     static <T> Comparator<T> comparingInt(java.util.function.ToIntFunction<? super T> key) {
         Comparator<T> c = (a, b) -> Integer.compare(key.applyAsInt(a), key.applyAsInt(b));
         return c;
@@ -54,6 +58,9 @@ interface Comparator<T> {
             return r != 0 ? r : other.compare(a, b);
         };
         return c;
+    }
+    default <U> Comparator<T> thenComparing(java.util.function.Function<? super T, ? extends U> key, Comparator<? super U> keyCmp) {
+        return thenComparing(comparing(key, keyCmp));
     }
 }
 

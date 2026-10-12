@@ -4934,10 +4934,13 @@ HasStatic   = :script(~~
                                        jBoundTys(m2.name, m2.ptys, m2Var))
                     defPos(b, m2.pos)
                     var mclo = callExt(b, "js_closure", [handle(idx), curScopeV])
-                    if (jOvNeedsSlot(m2.name)) {
+                    // An interface's own overloads (jOvIfaceBodyCands) dispatch
+                    // like a class's.
+                    var ovc = jOvCands(name, m2.name)
+                    if (ovc == null && interfaceNames["$" + name] == true) { ovc = jOvIfaceBodyCands(name, m2.name) }
+                    if (jOvNeedsSlot(m2.name) || ovc != null) {
                         callExt(b, "js_set", [clsV, emitStr(b, m2.name + "#" + jOvRawOf(m2.ptys, m2Var)), mclo])
                     }
-                    var ovc = jOvCands(name, m2.name)
                     if (ovc == null) {
                         callExt(b, "js_set", [clsV, emitStr(b, m2.name), mclo])
                     } else if (ovDone["$" + m2.name] != true) {
