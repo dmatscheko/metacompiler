@@ -5219,6 +5219,247 @@ def s101():
     check("dir2", own == ["__module__", "y", "__init__"] and "x" not in S101DirSub.__dict__
           and S101Dir.__dict__.get("x") == 1 and o.m().__class__ is S101DirSub and o.m().z == 2)
 
+# ===== SECTION 102: a user __hash__ / __eq__ keys dicts and sets =====
+# A dict or set compares keys by hash first and then by ==, so a class defining
+# both is found by an equal instance it never saw: lookup, insert, `in`, del,
+# get, pop, discard and the set algebra all agree. An __eq__ without __hash__
+# makes the class unhashable, named by its own class. A list or tuple holding an
+# instance compares through its __eq__. Rows from CPython 3.14.
+from dataclasses import dataclass
+
+class S102K:
+    def __init__(self, v):
+        self.v = v
+    def __hash__(self):
+        return hash(self.v)
+    def __eq__(self, o):
+        return isinstance(o, S102K) and self.v == o.v
+
+class S102Eq:
+    def __eq__(self, o):
+        return True
+
+class S102Seen:
+    def __init__(self, v, log):
+        self.v = v
+        self.log = log
+    def __hash__(self):
+        return self.v % 2
+    def __eq__(self, o):
+        self.log.append((self.v, o.v))
+        return True
+
+@dataclass(frozen=True)
+class S102P:
+    x: int
+    y: int
+
+def s102():
+    d = {S102K(1): "one", S102K(2): "two"}
+    d[S102K(1)] = "uno"
+    check("ukey1", d[S102K(1)] == "uno" and len(d) == 2 and S102K(2) in d and S102K(3) not in d
+          and d.get(S102K(2)) == "two" and d.get(S102K(9), "no") == "no")
+    del d[S102K(2)]
+    check("ukey2", d.pop(S102K(1)) == "uno" and len(d) == 0)
+    s = {S102K(1), S102K(2), S102K(1)}
+    s.add(S102K(2))
+    s.discard(S102K(1))
+    check("ukey3", len(s) == 1 and S102K(2) in s and S102K(1) not in s
+          and sorted(k.v for k in {S102K(1), S102K(2)} | {S102K(2), S102K(3)}) == [1, 2, 3]
+          and [k.v for k in {S102K(1), S102K(2)} & {S102K(2), S102K(3)}] == [2]
+          and [k.v for k in {S102K(1), S102K(2)} - {S102K(2), S102K(3)}] == [1])
+    check("ukey4", {S102P(1, 2): "p"}[S102P(1, 2)] == "p" and len({S102P(1, 2), S102P(1, 2)}) == 1
+          and {(S102K(1), 2): "t"}[(S102K(1), 2)] == "t")
+    check("ukey5", [S102K(1)] == [S102K(1)] and (S102K(1), 2) == (S102K(1), 2) and S102K(1) in [S102K(1)]
+          and [S102K(0), S102K(1)].index(S102K(1)) == 1 and [S102K(1), S102K(1)].count(S102K(1)) == 2
+          and {1: S102K(1)} == {1: S102K(1)})
+    log = []
+    s2 = {S102Seen(1, log), S102Seen(2, log)}
+    found = S102Seen(3, log) in s2
+    check("ukey6", len(s2) == 2 and found and log == [(1, 3)])
+    msgs = []
+    for f in [lambda: {S102Eq(): 1}, lambda: {S102Eq()}, lambda: {(1, S102Eq()): 2}, lambda: S102Eq() in {1: 2}]:
+        try:
+            f()
+        except TypeError as err:
+            msgs.append(str(err))
+    check("ukey7", msgs == ["cannot use 'S102Eq' as a dict key (unhashable type: 'S102Eq')",
+                            "cannot use 'S102Eq' as a set element (unhashable type: 'S102Eq')",
+                            "cannot use 'tuple' as a dict key (unhashable type: 'S102Eq')",
+                            "cannot use 'S102Eq' as a dict key (unhashable type: 'S102Eq')"])
+
+# ===== SECTION 103: descriptors on the class, type(), function attributes, notes =====
+# A descriptor read off the CLASS answers __get__(None, cls). type(name, bases,
+# ns) builds the class a class statement would. A function stored as another
+# function's attribute is called through it. BaseException.add_note appends to
+# __notes__. An arity error names the function by its __qualname__, an assigned
+# one included. SystemExit derives from BaseException, carries .code, and
+# sys.exit raises it. Rows from CPython 3.14.
+import sys
+
+class S103D:
+    def __get__(self, obj, typ=None):
+        if obj is None:
+            return ("cls", typ.__name__)
+        return ("inst", type(obj).__name__)
+
+class S103K:
+    a = S103D()
+
+class S103S(S103K):
+    pass
+
+class S103B:
+    def hi(self):
+        return "hi " + type(self).__name__
+
+def s103():
+    check("desc1", S103K.a == ("cls", "S103K") and S103S.a == ("cls", "S103S") and S103K().a == ("inst", "S103K")
+          and getattr(S103K, "a") == ("cls", "S103K") and type(S103K.__dict__["a"]).__name__ == "S103D")
+    Q = type("Q", (), {"a": 1})
+    R = type("R", (S103B,), {"b": 2, "m": lambda self: self.b * 10})
+    r = R()
+    check("type3", Q.__name__ == "Q" and Q.a == 1 and Q().a == 1 and type(Q()) is Q and isinstance(Q(), Q)
+          and r.b == 2 and r.m() == 20 and r.hi() == "hi R" and isinstance(r, S103B) and R.__mro__ == (R, S103B, object)
+          and type(Q) is type and Q.__module__ == "__main__")
+    try:
+        type("Q", ())
+        msg = "no error"
+    except TypeError as err:
+        msg = str(err)
+    check("type3e", msg == "type() takes 1 or 3 arguments")
+
+    def f():
+        return 1
+    def g(x):
+        return x * 2
+    f.g = g
+    f.h = lambda a, b=4: a + b
+    check("fnattr1", f.g(3) == 6 and f.h(1) == 5 and f.h(1, b=2) == 3)
+
+    e = ValueError("bad")
+    had = hasattr(e, "__notes__")
+    e.add_note("first")
+    e.add_note("second")
+    try:
+        e.add_note(3)
+        nmsg = "no error"
+    except TypeError as err:
+        nmsg = str(err)
+    check("note1", not had and e.__notes__ == ["first", "second"] and e.add_note("x") is None
+          and nmsg == "add_note() argument must be str, not int")
+
+    def ar(a, b):
+        return a + b
+    ar.__qualname__ = "Renamed.ar"
+    msgs = []
+    for c in [lambda: ar(1), lambda: ar(1, 2, 3), lambda: ar(1, c=2), lambda: (lambda x: x)()]:
+        try:
+            c()
+        except TypeError as err:
+            msgs.append(str(err))
+    check("qual1", msgs == ["Renamed.ar() missing 1 required positional argument: 'b'",
+                            "Renamed.ar() takes 2 positional arguments but 3 were given",
+                            "Renamed.ar() got an unexpected keyword argument 'c'",
+                            "s103.<locals>.<lambda>.<locals>.<lambda>() missing 1 required positional argument: 'x'"])
+
+    rows = []
+    for c in [lambda: sys.exit(3), lambda: sys.exit(), lambda: sys.exit(1, 2)]:
+        try:
+            c()
+        except Exception as err:
+            rows.append(str(err))
+        except BaseException as err:
+            rows.append((type(err).__name__, err.code, err.args))
+    check("sysexit1", rows == [("SystemExit", 3, (3,)), ("SystemExit", None, ()), "exit expected at most 1 argument, got 2"]
+          and SystemExit("a", "b").code == ("a", "b")
+          and [c.__name__ for c in SystemExit.__mro__] == ["SystemExit", "BaseException", "object"])
+
+# ===== SECTION 104: collections, builtin subclasses and bytearray =====
+# deque, defaultdict, OrderedDict and Counter (lib/python-collections.py), their
+# error texts included. A dict subclass's __missing__ answers an absent key, its
+# str() goes through an overriding __repr__, and dict() and ** read it as a
+# mapping. bytearray builds the same list of byte values bytes does here.
+# Rows from CPython 3.14.
+from collections import deque, defaultdict, OrderedDict, Counter
+import collections
+
+class S104D(dict):
+    def __missing__(self, k):
+        return k * 2
+    def __repr__(self):
+        return "S104D(" + dict.__repr__(self) + ")"
+
+class S104I(int):
+    def __repr__(self):
+        return "I!"
+
+def s104():
+    d = S104D(a=1)
+    check("bsub1", d["zz"] == "zzzz" and d.get("zz") is None and str(d) == "S104D({'a': 1})" and f"{d}" == "S104D({'a': 1})"
+          and dict(d) == {"a": 1} and {**d} == {"a": 1} and str(S104I(3)) == "I!" and str(5) == "5" and (5).__str__() == "5")
+
+    q = collections.deque(range(5))
+    q.rotate(2)
+    q.appendleft(-1)
+    q.extendleft([7, 8])
+    check("deque1", repr(q) == "deque([8, 7, -1, 3, 4, 0, 1, 2])" and q.pop() == 2 and q.popleft() == 8 and len(q) == 6
+          and 3 in q and q[0] == 7 and q[-1] == 1 and list(reversed(q)) == [1, 0, 4, 3, -1, 7]
+          and repr(deque(range(10), maxlen=3)) == "deque([7, 8, 9], maxlen=3)" and deque([1, 2]) == deque([1, 2]))
+    errs = []
+    for f in [lambda: deque([1]).index(5), lambda: deque([1]).remove(5), lambda: deque().pop(), lambda: deque().popleft(),
+              lambda: deque([1])[5], lambda: deque([1], maxlen=1).insert(0, 2), lambda: OrderedDict().popitem(),
+              lambda: defaultdict(None)["x"], lambda: defaultdict(3)]:
+        try:
+            f()
+        except (ValueError, IndexError, KeyError, TypeError) as err:
+            errs.append(type(err).__name__ + " " + repr(err))
+    check("coll2", errs == ["ValueError ValueError('deque.index(x): x not in deque')",
+                            "ValueError ValueError('deque.remove(x): x not in deque')",
+                            "IndexError IndexError('pop from an empty deque')",
+                            "IndexError IndexError('pop from an empty deque')",
+                            "IndexError IndexError('deque index out of range')",
+                            "IndexError IndexError('deque already at its maximum size')",
+                            "KeyError KeyError('dictionary is empty')", "KeyError KeyError('x')",
+                            "TypeError TypeError('first argument must be callable or None')"])
+    g = defaultdict(list)
+    for w in ["apple", "bob", "avocado"]:
+        g[w[0]].append(w)
+    cnt = defaultdict(int)
+    for ch in "mississippi":
+        cnt[ch] += 1
+    check("ddict1", repr(g) == "defaultdict(<class 'list'>, {'a': ['apple', 'avocado'], 'b': ['bob']})"
+          and g["zz"] == [] and len(g) == 3 and isinstance(g, dict) and dict(cnt) == {"m": 1, "i": 4, "s": 4, "p": 2}
+          and cnt.get("q") is None and "q" not in cnt)
+    o = OrderedDict([("x", 1), ("y", 2), ("z", 3)])
+    o.move_to_end("x")
+    o.move_to_end("z", last=False)
+    check("odict1", repr(o) == "OrderedDict({'z': 3, 'y': 2, 'x': 1})" and o.popitem() == ("x", 1)
+          and o.popitem(last=False) == ("z", 3) and list(o) == ["y"] and repr(OrderedDict()) == "OrderedDict()"
+          and OrderedDict(a=1, b=2) != OrderedDict(b=2, a=1) and OrderedDict(a=1, b=2) == {"b": 2, "a": 1})
+    c = Counter("hello world")
+    c.update("lol")
+    c.subtract({"l": 2})
+    check("counter1", c.most_common(2) == [("l", 3), ("o", 3)] and c["zzz"] == 0 and c.total() == 12
+          and repr(Counter("abca")) == "Counter({'a': 2, 'b': 1, 'c': 1})" and repr(Counter()) == "Counter()"
+          and Counter(a=1) == Counter(a=1, b=0) and list(Counter("aab").elements()) == ["a", "a", "b"])
+    check("counter2", Counter(a=3, b=1) - Counter(a=1, b=2) == Counter(a=2) and Counter(a=3) + Counter(a=1, b=2) == Counter(a=4, b=2)
+          and Counter(a=3, b=1) | Counter(a=1, b=2) == Counter(a=3, b=2) and Counter(a=3, b=1) & Counter(a=1, b=2) == Counter(a=1, b=1)
+          and +Counter(a=1, b=-2) == Counter(a=1) and -Counter(a=1, b=-2) == Counter(b=2))
+
+    ba = bytearray(b"ab")
+    ba[0] = 65
+    ba.append(67)
+    bmsgs = []
+    for f in [lambda: bytearray(1, 2, 3, 4), lambda: bytearray(None), lambda: bytearray([300]), lambda: bytes([300])]:
+        try:
+            f()
+        except (TypeError, ValueError) as err:
+            bmsgs.append(str(err))
+    check("barr1", list(ba) == [65, 98, 67] and len(bytearray(3)) == 3 and list(bytearray("hé", "utf-8")) == [104, 195, 169]
+          and bmsgs == ["bytearray() takes at most 3 arguments (4 given)", "cannot convert 'NoneType' object to bytearray",
+                        "byte must be in range(0, 256)", "bytes must be in range(0, 256)"])
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -5318,5 +5559,8 @@ def main():
     s99() # SECTION-CALL 99
     s100() # SECTION-CALL 100
     s101() # SECTION-CALL 101
+    s102() # SECTION-CALL 102
+    s103() # SECTION-CALL 103
+    s104() # SECTION-CALL 104
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

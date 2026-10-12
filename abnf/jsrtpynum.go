@@ -522,24 +522,47 @@ func (rt *jsrt) pyHashW(v interface{}) uint64 {
 		panic(&jsThrown{value: rt.pyExcInstance("TypeError", "unhashable type: '"+pyTypeName(rt, v)+"'")})
 	}
 	if _, cls, ok := pyInstance(v); ok {
-		for _, c := range pyMRO(cls) {
-			// `__hash__ = None` makes the class unhashable, as an __eq__ without
-			// a __hash__ does.
-			m, hasH := c.props["__hash__"]
-			if hasH && !isUndefOrNull(m) {
-				return rt.pyHashCall(m, v)
-			}
-			if _, hasEq := c.props["__eq__"]; hasEq || hasH {
-				panic(&jsThrown{value: rt.pyExcInstance("TypeError", "unhashable type: '"+pyTypeName(rt, v)+"'")})
-			}
-			if n := pyBuiltinClsName(c); n == "object" {
-				break // object's own hash is the identity one.
-			} else if n != "" {
-				return rt.pyHashW(pyUnwrapBuiltin(v))
-			}
+		switch m, how := pyHashOwner(cls); how {
+		case pyHashByMethod:
+			return rt.pyHashCall(m, v)
+		case pyHashByNone:
+			panic(&jsThrown{value: rt.pyExcInstance("TypeError", "unhashable type: '"+pyTypeName(rt, v)+"'")})
+		case pyHashByBuiltin:
+			return rt.pyHashW(pyUnwrapBuiltin(v))
 		}
 	}
 	return rt.pyHashId(v)
+}
+
+// How an instance hashes, as the first class on its resolution order that
+// settles it decides: object's identity hash, its own __hash__, none at all
+// (`__hash__ = None`, or an __eq__ without a __hash__), or a builtin base's.
+const (
+	pyHashById = iota
+	pyHashByMethod
+	pyHashByNone
+	pyHashByBuiltin
+)
+
+// pyHashOwner answers how instances of cls hash, and the __hash__ for
+// pyHashByMethod. Twin of pyHashOwner in languages/python-interpreter.abnf and
+// lib/python-rt.metajs.
+func pyHashOwner(cls *jsObject) (interface{}, int) {
+	for _, c := range pyMRO(cls) {
+		m, hasH := c.props["__hash__"]
+		if hasH && !isUndefOrNull(m) {
+			return m, pyHashByMethod
+		}
+		if _, hasEq := c.props["__eq__"]; hasEq || hasH {
+			return nil, pyHashByNone
+		}
+		if n := pyBuiltinClsName(c); n == "object" {
+			break
+		} else if n != "" {
+			return nil, pyHashByBuiltin
+		}
+	}
+	return nil, pyHashById
 }
 
 // pyHashCall is a class's own __hash__ m on v: the answer must be an int, kept
@@ -636,7 +659,7 @@ func (rt *jsrt) pyIntMaxDigits() int {
 }
 
 // pySysCall is a call of one of sys's functions; the module offers
-// get_int_max_str_digits and set_int_max_str_digits. Twin of pySysCall in
+// get_int_max_str_digits, set_int_max_str_digits and exit. Twin of pySysCall in
 // languages/python-interpreter.abnf and languages/lib/python-rt.metajs.
 func (rt *jsrt) pySysCall(name string, args []interface{}, kw interface{}) interface{} {
 	switch name {
@@ -653,6 +676,14 @@ func (rt *jsrt) pySysCall(name string, args []interface{}, kw interface{}) inter
 		}
 		rt.pyMaxDigits, rt.pyMaxDigitsSet = n, true
 		return jsUndef
+	case "exit":
+		if len(args) > 1 {
+			rt.pyRaise("TypeError", "exit expected at most 1 argument, got "+strconv.Itoa(len(args)))
+		}
+		inst := newJSObject()
+		inst.set("__class", rt.pyExcClass("SystemExit"))
+		inst.set("args", pyTup(&jsArray{elems: append([]interface{}{}, args...)}))
+		panic(&jsThrown{value: inst})
 	}
 	panic(&jsThrown{value: rt.pyExcInstance("AttributeError", "module 'sys' has no attribute '"+name+"'")})
 }

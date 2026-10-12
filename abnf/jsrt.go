@@ -3443,6 +3443,12 @@ func (rt *jsrt) dictScan(keys *jsArray, k interface{}) int {
 // one has dictIdxAll false and every lookup in it already comes through here.
 func (rt *jsrt) dictKeyEq(a, b interface{}) bool {
 	if rt.pyLang {
+		if _, _, ok := pyInstance(a); ok {
+			return rt.pyKeyEq(a, b)
+		}
+		if _, _, ok := pyInstance(b); ok {
+			return rt.pyUserKeyEq(a, b)
+		}
 		if pyIsFlo(a) || pyIsFlo(b) {
 			return rt.pyNumEq(a, b)
 		}
@@ -15796,36 +15802,8 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// Multiple inheritance is resolved ONCE, here, so every later lookup is a
 		// flat walk of "__mro".
 		"js_pyclass_new": func(a []uint64) uint64 { // (name, bases array) -> class
-			name := rt.toString(u(a[0]))
 			bases, _ := u(a[1]).(*jsArray)
-			cls := newJSObject()
-			cls.set("__name", name)
-			var baseObjs []*jsObject
-			if bases != nil {
-				for _, b := range bases.elems {
-					bo, ok := b.(*jsObject)
-					if !ok {
-						rt.fail("class %s: base is not a class", name)
-					}
-					baseObjs = append(baseObjs, bo)
-				}
-			}
-			if len(baseObjs) > 0 {
-				cls.set("__super", baseObjs[0])
-			}
-			// The declared bases, for __bases__. Kept beside __mro because the
-			// linearization cannot be un-merged back into the base list.
-			bl := &jsArray{}
-			for _, bo := range baseObjs {
-				bl.elems = append(bl.elems, bo)
-			}
-			cls.set("__basesl", bl)
-			mro := &jsArray{elems: []interface{}{cls}}
-			for _, c := range pyLinearize(baseObjs) {
-				mro.elems = append(mro.elems, c)
-			}
-			cls.set("__mro", mro)
-			return w(cls)
+			return w(rt.pyClassNew(rt.toString(u(a[0])), bases))
 		},
 		// super(): what a READ of the name `super` lowers to - see makeVarRef in
 		// languages/python-to-llvm-ir.abnf for why the magic is in the emitter and
@@ -15986,6 +15964,11 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			sk, sv, ok := dictParts(u(a[1]))
 			if !ok {
+				// A mapping by protocol: pyDictUpdateFrom's keys() arm.
+				if _, _, isInst := pyInstance(u(a[1])); isInst {
+					rt.pyDictUpdateFrom(keys, vals, u(a[1]))
+					return 0
+				}
 				rt.fail("cannot unpack a %s with **", rt.typeOf(u(a[1])))
 			}
 			for i, k := range sk.elems {
@@ -16005,6 +15988,47 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				return w(cls)
 			}
 			return w(rt.pyBuiltinClass(pyTypeName(rt, v)))
+		},
+		// type(name, bases, ns), or type() at any count but one and three: the
+		// class a class statement with those bases and body would build. Twin of
+		// pyTypeNew in languages/python-interpreter.abnf.
+		"js_pytypenew": func(a []uint64) uint64 {
+			args, _ := u(a[0]).(*jsArray)
+			if args == nil || len(args.elems) != 3 {
+				panic(&jsThrown{value: rt.pyExcInstance("TypeError", "type() takes 1 or 3 arguments")})
+			}
+			bases := &jsArray{elems: append([]interface{}{}, rt.pyElemsOf(args.elems[1])...)}
+			cls := rt.pyClassNew(rt.toString(args.elems[0]), bases)
+			cls.set("__module__", "__main__")
+			if keys, vals, ok := dictParts(args.elems[2]); ok {
+				for i, k := range keys.elems {
+					rt.pySetAttr(cls, rt.toString(k), vals.elems[i])
+				}
+			}
+			rt.pySetNames(cls)
+			return w(cls)
+		},
+		// BaseException.add_note(self, note): appends to the instance's __notes__
+		// list, made on first use. Twin of add_note in
+		// languages/python-interpreter.abnf.
+		"js_pyaddnote": func(a []uint64) uint64 {
+			self, note := u(a[0]), u(a[1])
+			if _, isStr := note.(string); !isStr {
+				rt.pyRaise("TypeError", "add_note() argument must be str, not "+pyTypeName(rt, note))
+			}
+			o, _, ok := pyInstance(self)
+			if !ok {
+				return w(jsUndef)
+			}
+			if _, has := o.props["__notes__"]; !has {
+				rt.pySetAttr(o, "__notes__", &jsArray{})
+			}
+			notes, isArr := o.props["__notes__"].(*jsArray)
+			if !isArr || notes.kind == pyTupKind {
+				rt.pyRaise("TypeError", "Cannot add note: __notes__ is not a list")
+			}
+			notes.elems = append(notes.elems, note)
+			return w(jsUndef)
 		},
 		// isinstance(v, C) / isinstance(v, (A, B)): a walk of the instance's MRO.
 		"js_pyisinst": func(a []uint64) uint64 {
@@ -17263,6 +17287,23 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// js_pyuncaught in languages/lib/python-rt.metajs.
 		"js_pyuncaught": func(a []uint64) uint64 {
 			v := u(a[0])
+			// An uncaught SystemExit ends the program quietly with its code as
+			// the exit status: None is 0, an int is itself, anything else is
+			// printed to stderr and the status is 1. Twin of pyExitIfSystemExit
+			// in languages/python-interpreter.abnf.
+			if inst, _, ok := pyInstance(v); ok && rt.pyIsInstance(v, rt.pyExcClass("SystemExit")) {
+				switch code := pyExitCode(inst).(type) {
+				case jsUndefT, jsNullT:
+					os.Exit(0)
+				case float64:
+					os.Exit(int(int32(code)))
+				case bool:
+					os.Exit(int(pyBoolInt(code)))
+				default:
+					fmt.Fprintln(warnWriter, wtf8Clean(rt.pyString(code)))
+					os.Exit(1)
+				}
+			}
 			text := rt.pyString(v)
 			if _, cls, ok := pyInstance(v); ok {
 				if text == "" {
@@ -18538,6 +18579,16 @@ func (rt *jsrt) pyEqual(x, y interface{}) bool {
 		uy, ok2 := pyUnionOf(y)
 		return ok2 && pyUnionEq(ux, uy)
 	}
+	// An instance on either side: its class's __eq__, as the == operator asks it,
+	// so a list, tuple or dict holding one compares through it.
+	if _, _, ok := pyInstance(x); ok {
+		v, _ := rt.pyDunderBin("==", x, y)
+		return rt.pyTruthyOf(v)
+	}
+	if _, _, ok := pyInstance(y); ok {
+		v, _ := rt.pyDunderBin("==", x, y)
+		return rt.pyTruthyOf(v)
+	}
 	// A Python bool IS an int - `class bool(int)` - so True == 1, True == 1.0,
 	// False == 0 and False == -0.0 all hold, and so does every container equality
 	// built on them ([True] == [1], {True: 1} == {1: 1}). Reading the bool as its
@@ -18585,6 +18636,20 @@ func (rt *jsrt) pyEqual(x, y interface{}) bool {
 		return im == 0 && re == rt.toNumber(x)
 	}
 	return rt.strictEq(x, y)
+}
+
+// pyExitCode is SystemExit.code: None for no argument, the argument for one,
+// the args tuple for more. Twin of pyExitCode in
+// languages/python-interpreter.abnf and lib/python-rt.metajs.
+func pyExitCode(e *jsObject) interface{} {
+	args, _ := e.props["args"].(*jsArray)
+	switch {
+	case args == nil || len(args.elems) == 0:
+		return jsUndef
+	case len(args.elems) == 1:
+		return args.elems[0]
+	}
+	return args
 }
 
 // pyBoolInt is the int a Python bool IS: True is 1, False is 0.
@@ -18872,7 +18937,7 @@ func pySetElems(v interface{}) (*jsArray, bool) {
 
 func (rt *jsrt) pySetHas(els *jsArray, v interface{}) bool {
 	for _, e := range els.elems {
-		if rt.pyEqual(e, v) {
+		if rt.pyKeyEq(e, v) {
 			return true
 		}
 	}
@@ -18926,8 +18991,56 @@ func (rt *jsrt) pyUnhashName(v interface{}) string {
 		if tag, has := t.props["__dict"]; has && tag == true {
 			return "dict"
 		}
+		// An instance whose class cannot hash, or whose builtin base cannot, is
+		// named by its own class.
+		if _, cls, ok := pyInstance(v); ok && rt.pyLang {
+			_, how := pyHashOwner(cls)
+			if how == pyHashByNone || (how == pyHashByBuiltin && rt.pyUnhashName(pyUnwrapBuiltin(v)) != "") {
+				return pyTypeName(rt, v)
+			}
+		}
 	}
 	return ""
+}
+
+// pyUserKeyEq is CPython's key match when an instance is on either side and
+// a !== b: the hashes must agree, and only then is == asked, so a user
+// __hash__/__eq__ pair decides it. An identity-hashed operand matches nothing
+// but itself. Twin of pyUserKeyEq in languages/python-interpreter.abnf and
+// lib/python-rt.metajs.
+func (rt *jsrt) pyUserKeyEq(a, b interface{}) bool {
+	if pyIdHashed(a) || pyIdHashed(b) || rt.pyHashW(a) != rt.pyHashW(b) {
+		return false
+	}
+	v, _ := rt.pyDunderBin("==", a, b)
+	return rt.pyTruthyOf(v)
+}
+
+func pyIdHashed(v interface{}) bool {
+	o, cls, ok := pyInstance(v)
+	if !ok {
+		return false
+	}
+	if _, isCls := o.props["__mro"]; isCls {
+		return true
+	}
+	_, how := pyHashOwner(cls)
+	return how == pyHashById
+}
+
+// pyKeyEq is Python's key equality, for set members and for a dict key that is
+// an instance: ==, under the hash rule when an instance is involved.
+func (rt *jsrt) pyKeyEq(a, b interface{}) bool {
+	if oa, _, ok := pyInstance(a); ok {
+		if ob, isObj := b.(*jsObject); isObj && ob == oa {
+			return true
+		}
+		return rt.pyUserKeyEq(a, b)
+	}
+	if _, _, ok := pyInstance(b); ok {
+		return rt.pyUserKeyEq(a, b)
+	}
+	return rt.pyEqual(a, b)
 }
 
 // elem: true for a set MEMBER, false for a dict KEY.
@@ -18955,6 +19068,38 @@ func (rt *jsrt) pyHashCheckMember(k interface{}) {
 		}
 	}
 	rt.pyHashCheck(k, true)
+}
+
+// pyClassNew builds a class object (js_pyclass_new) from its name and bases.
+func (rt *jsrt) pyClassNew(name string, bases *jsArray) *jsObject {
+	cls := newJSObject()
+	cls.set("__name", name)
+	var baseObjs []*jsObject
+	if bases != nil {
+		for _, b := range bases.elems {
+			bo, ok := b.(*jsObject)
+			if !ok {
+				rt.fail("class %s: base is not a class", name)
+			}
+			baseObjs = append(baseObjs, bo)
+		}
+	}
+	if len(baseObjs) > 0 {
+		cls.set("__super", baseObjs[0])
+	}
+	// The declared bases, for __bases__. Kept beside __mro because the
+	// linearization cannot be un-merged back into the base list.
+	bl := &jsArray{}
+	for _, bo := range baseObjs {
+		bl.elems = append(bl.elems, bo)
+	}
+	cls.set("__basesl", bl)
+	mro := &jsArray{elems: []interface{}{cls}}
+	for _, c := range pyLinearize(baseObjs) {
+		mro.elems = append(mro.elems, c)
+	}
+	cls.set("__mro", mro)
+	return cls
 }
 
 // pySetBin is the set algebra: union, intersection, difference and symmetric
@@ -19919,6 +20064,10 @@ func (rt *jsrt) pyGetAttrRaw(obj interface{}, name string) interface{} {
 			if pyDescKind(v) != "" {
 				return rt.pyDescGet(v, cls, name)
 			}
+			// A descriptor instance answers through __get__(None, cls).
+			if get, isDesc := pyIsDescriptor(v, "__get__"); isDesc {
+				return rt.call(get, jsUndef, []interface{}{v, jsUndef, cls})
+			}
 			return v
 		}
 		// C.mro(), type's own method: the resolution order as a fresh list.
@@ -19969,6 +20118,9 @@ func (rt *jsrt) pyGetAttrRaw(obj interface{}, name string) interface{} {
 		}
 		if name == "__new__" {
 			return rt.pyClsNew(cls)
+		}
+		if name == "code" && rt.pyIsInstance(obj, rt.pyExcClass("SystemExit")) {
+			return pyExitCode(inst)
 		}
 		if m := rt.pyObjectMethod(name); m != nil {
 			return rt.pyBindObjectMethod(obj, m, name)
@@ -20891,6 +21043,13 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 		panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
 			"'"+pyTypeName(rt, target)+"' object has no attribute '"+name+"'")})
 	}
+	// A function's own attribute holding a callable - f.g = g; f.g(3) - is
+	// called as it is read, with no receiver.
+	if pyTypeName(rt, target) == "function" {
+		if _, i := rt.pyFuncAttrIdx(target, name); i >= 0 {
+			return rt.callPyValue(rt.pyGetAttr(target, name), args, kw)
+		}
+	}
 	return rt.memberCall(target, name, args)
 }
 
@@ -21362,6 +21521,19 @@ func (rt *jsrt) pyDictUpdateFrom(keys, vals *jsArray, src interface{}) {
 			return
 		}
 	}
+	// A mapping by protocol - a dict subclass among them: its keys(), each read
+	// through its own subscript. Twin of pyDictUpdateFrom in
+	// languages/python-interpreter.abnf.
+	if o, cls, ok := pyInstance(src); ok {
+		if _, isCls := o.props["__mro"]; !isCls {
+			if _, has := pyLookup(cls, "keys"); has {
+				for _, k := range rt.pyElemsOf(rt.callPyValue(rt.pyGetAttr(src, "keys"), nil, jsUndef)) {
+					rt.pyDictStore(keys, vals, k, rt.pyExt("js_pyidx", src, k))
+				}
+				return
+			}
+		}
+	}
 	for i, el := range rt.pyElemsOf(src) {
 		k, v := rt.pyPairOf(el, i)
 		rt.pyDictStore(keys, vals, k, v)
@@ -21437,7 +21609,7 @@ func (rt *jsrt) pySetMethod(els *jsArray, name string, args []interface{}) inter
 		// not. That difference is the whole reason both exist.
 		rt.pyHashCheckMember(argAt(args, 0))
 		for i, e := range els.elems {
-			if rt.pyEqual(e, argAt(args, 0)) {
+			if rt.pyKeyEq(e, argAt(args, 0)) {
 				els.elems = append(els.elems[:i], els.elems[i+1:]...)
 				els.dropIdx()
 				return jsUndef
@@ -22582,7 +22754,7 @@ func (rt *jsrt) pyContains(x, y interface{}) bool {
 	if els, ok := pySetElems(y); ok {
 		rt.pyHashCheckMember(x)
 		for _, e := range els.elems {
-			if rt.pyEqual(e, x) {
+			if rt.pyKeyEq(e, x) {
 				return true
 			}
 		}
@@ -22796,7 +22968,7 @@ func (rt *jsrt) pyBindCallR(callee interface{}, pos []interface{}, kw interface{
 	}
 	if !sig.ext && !hasKw {
 		if len(pos) < sig.nreq || (!sig.rest && len(pos) > len(sig.names) && sig.qual != "") {
-			rt.pyArityCheck(sig, len(pos), nil)
+			rt.pyArityCheck(callee, sig, len(pos), nil)
 		}
 		return pos, false
 	}
@@ -22809,7 +22981,7 @@ func (rt *jsrt) pyBindCallR(callee interface{}, pos []interface{}, kw interface{
 				kn = append(kn, rt.toString(k))
 			}
 		}
-		rt.pyArityCheck(sig, len(pos), kn)
+		rt.pyArityCheck(callee, sig, len(pos), kn)
 	}
 	out := make([]interface{}, n)
 	for i := range out {
@@ -22861,18 +23033,23 @@ func (rt *jsrt) pyBindCallR(callee interface{}, pos []interface{}, kw interface{
 	return append(out, rest, left), true
 }
 
-// pyArityCheck raises CPython's TypeError for a call that does not fit sig:
+// pyArityCheck raises CPython's TypeError for a call of f that does not fit sig:
 // given positional arguments plus the keyword names kn. The order is
 // CPython's initialize_locals: each keyword in turn (a positional-only name
 // given by keyword, an unknown one, one already filled by position), then too
 // many positionals, then the missing positional, then the missing
 // keyword-only parameters. Twin of pyDArityCheck in lib/python-rt.metajs and
 // pyArityCheck in python-interpreter.abnf.
-func (rt *jsrt) pyArityCheck(sig *pySig, given int, kn []string) {
+func (rt *jsrt) pyArityCheck(f interface{}, sig *pySig, given int, kn []string) {
 	names := sig.names
 	npos := len(names) - sig.nkwonly
+	// The function's __qualname__ names it, an assigned one included.
 	fail := func(msg string) {
-		panic(&jsThrown{value: rt.pyExcInstance("TypeError", sig.qual+"() "+msg)})
+		q, ok := rt.pyFnQual(f)
+		if !ok {
+			q = sig.qual
+		}
+		panic(&jsThrown{value: rt.pyExcInstance("TypeError", q+"() "+msg)})
 	}
 	hasKw := func(n string) bool {
 		for _, k := range kn {
@@ -23433,7 +23610,7 @@ func pyExcParentName(name string) string {
 		return "ValueError"
 	case "UnicodeDecodeError", "UnicodeEncodeError":
 		return "UnicodeError"
-	case "Exception", "GeneratorExit":
+	case "Exception", "GeneratorExit", "SystemExit":
 		return "BaseException"
 	}
 	return "Exception"

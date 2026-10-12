@@ -75,10 +75,12 @@ Known deviations, all deliberate:
   - Complex division is the textbook formula, not CPython's scaled (Smith)
     one, so a quotient can differ in the last digit.
   - An imported module binds its names flat, without a module object, so the
-    from-import style is the one that works. copy and dataclasses are written
-    in Python (lib/python-copy.py, lib/python-dataclasses.py) and bind a module
-    object of their own besides; dataclass refuses slots, kw_only,
-    weakref_slot, KW_ONLY, InitVar and make_dataclass with NotImplementedError.
+    from-import style is the one that works. copy, dataclasses and collections
+    are written in Python (lib/python-copy.py, lib/python-dataclasses.py,
+    lib/python-collections.py) and bind a module object of their own besides;
+    collections offers deque, defaultdict, OrderedDict and Counter; dataclass
+    refuses slots, kw_only, weakref_slot, KW_ONLY, InitVar and make_dataclass
+    with NotImplementedError.
   - dir() answers a user class, its instance and object; dir() without an
     argument and dir() of a builtin value raise NotImplementedError. A class's
     __dict__ is a copy of its own members, not a live mappingproxy.
@@ -1219,7 +1221,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // isinstance(x, str), type(x) is Dog and the class patterns of `match` all go
     // through the same machinery.
     var pyTypeNames = ["object", "type", "str", "int", "float", "bool", "list", "tuple",
-                       "dict", "set", "frozenset", "bytes", "function", "NoneType", "complex", "property"]
+                       "dict", "set", "frozenset", "bytes", "bytearray", "function", "NoneType", "complex", "property"]
     for (var pti = 0; pti < pyTypeNames.length; pti++) {
         hostGlobals[pyTypeNames[pti]] = {__isclass: true, __name: pyTypeNames[pti], __bases: [], __builtin: true}
     }
@@ -1534,7 +1536,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 args = pyKwPos("complex", args, named, ["real", "imag"], 0)
                 if (args[0] === undefined) { args[0] = 0 }
             }
-            else if (name == "bytes") { args = pyKwPos("bytes", args, named, ["source", "encoding", "errors"], 0) }
+            else if (name == "bytes" || name == "bytearray") { args = pyKwPos(name, args, named, ["source", "encoding", "errors"], 0) }
             else if (name != "dict" && name != "type") { pyListErr("TypeError", name + "() takes no keyword arguments") }
         }
         var v = args.length > 0 ? args[0] : undefined
@@ -1578,9 +1580,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             return d
         }
-        if (name == "type") { return pyTypeOf(v) }
+        if (name == "type") {
+            if (args.length == 3) { return pyTypeNew(args[0], args[1], args[2]) }
+            if (args.length != 1) { pyListErr("TypeError", "type() takes 1 or 3 arguments") }
+            return pyTypeOf(v)
+        }
         if (name == "complex") { return pyComplexNew(args) }
-        if (name == "bytes") { return pyBytesNew(args) }
+        if (name == "bytes" || name == "bytearray") { return pyBytesNew(args, name) }
         fail("TypeError: cannot construct " + name)
     }
     // A builtin's arguments as positionals: the keyword arguments of NAMES are
@@ -1768,6 +1774,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (n != 0 && n < 640) { pyListErr("ValueError", "maxdigits must be >= 640 or 0 for unlimited") }
             pyMaxDigits = n
             return undefined
+        }
+        if (name == "exit") {
+            if (args.length > 1) { pyListErr("TypeError", "exit expected at most 1 argument, got " + args.length) }
+            pyRaise(pyMakeExc("SystemExit", args))
         }
         pyRaise(pyMakeExc("AttributeError", ["module 'sys' has no attribute '" + name + "'"]))
     }
@@ -2945,6 +2955,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (v.__set === true) { return v.__frozen === true ? "" : "set" }
         if (v.__dict === true) { return "dict" }
+        // An instance whose class sets __hash__ to None, or defines __eq__ without
+        // __hash__, or subclasses an unhashable builtin, is named by its own class.
+        if (pyUser(v) && v.__isclass !== true) {
+            var own = pyHashOwner(v.__class)
+            if (own === undefined) { return "" }
+            if (own.builtin === true ? pyHashName(pyBDelSelf(v)) != "" : own.m === null) { return pyTypeOf(v).__name }
+        }
         return ""
     }
     // elem: true for a set MEMBER, false for a dict KEY - CPython words the two
@@ -3067,6 +3084,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // confirms with dictKeyEq, which is this hook. Numbers only: everything else
     // keeps ===.
     core.keyEq = function(a, b) {
+        if (pyUser(a) || pyUser(b)) { return pyUserKeyEq(a, b) }
         // A tuple key. CPython hashes a tuple by its CONTENTS, so `{(1,2): "x"}[(1,2)]`
         // is a hit off two different objects and `{(1,2), (1,2)}` has one member, as
         // in both compiled halves (pySetHas -> pyEqual).
@@ -3076,6 +3094,19 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (pyIsUnion(a) && pyIsUnion(b)) { return pyUnionEq(a.__pyunion, b.__pyunion) }
         if (!pyNumeric(a) || !pyNumeric(b)) { return false }
         return floVal(a) == floVal(b)
+    }
+    // CPython's key match when an instance is on either side and a !== b: the
+    // hashes must agree, and only then is == asked, so a user __hash__/__eq__
+    // pair decides it. An identity-hashed operand matches nothing but itself.
+    // Twin of rt.pyUserKeyEq in abnf/jsrt.go and pyUserKeyEq in
+    // lib/python-rt.metajs.
+    function pyUserKeyEq(a, b) {
+        if (pyIdHashed(a) || pyIdHashed(b)) { return false }
+        if (!pynWEq(pyHashW(a), pyHashW(b))) { return false }
+        return pytruthy(pyUserEq(a, b))
+    }
+    function pyIdHashed(v) {
+        return pyUser(v) && (v.__isclass === true || pyHashOwner(v.__class) === undefined)
     }
     // The int a bool IS (True is 1, False is 0), against a value that is not a
     // bool. A boxed number (arbitrary precision int, complex) compares by VALUE
@@ -3619,6 +3650,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return f
     }
+    // object.__str__: the receiver's type's __repr__. Twin of pyBStr in
+    // lib/python-rt.metajs and pyBDelMake's __str__ in abnf/jsrtpysub.go.
+    function pyBStr(self) {
+        if (pyUser(self)) { return clsFind(self.__class, "__repr__")(self) }
+        return prepr(self)
+    }
     function pyBDelMake(tname, name) {
         var num = tname == "int" || tname == "float"
         var sample = anytype
@@ -3635,7 +3672,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var cplx = tname == "complex"
         if (name == "__repr__") { return function(self) { return prepr(pyBDelSelf(self)) } }
         if (name == "__str__" && tname == "str") { return function(self) { return pyBDelSelf(self) } }
-        if (name == "__str__" && !num) { return function(self) { return pstr(pyBDelSelf(self)) } }
+        // Every other builtin's __str__ is object's, which renders through the
+        // type's __repr__ - a subclass's own override included.
+        if (name == "__str__" && tname != "bytes") { return function(self) { return pyBStr(self) } }
+        if (name == "__str__") { return function(self) { return pstr(pyBDelSelf(self)) } }
         if (name == "__eq__" || name == "__ne__") {
             var neg = name == "__ne__"
             return function(self, o) {
@@ -3691,7 +3731,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         } else {
             if (name == "__len__") { return function(self) { return hostGlobals["len"](pyBDelSelf(self)) } }
             if (name == "__iter__") { return function(self) { return hostGlobals["iter"](pyBDelSelf(self)) } }
-            if (name == "__getitem__" && !setLike) { return function(self, k) { return pyget(pyBDelSelf(self), k) } }
+            if (name == "__getitem__" && !setLike) { return function(self, k) { return pyBGetItem(self, k) } }
             if (name == "__contains__") { return function(self, k) { return pyIn(k, pyBDelSelf(self)) } }
             if (tname == "list" || tname == "dict") {
                 if (name == "__setitem__") { return function(self, k, v) { refStore(pyBDelSelf(self), {}, {idx: k}, v) } }
@@ -3748,13 +3788,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
     // int's and float's conversion and rounding dunders, each the builtin it
-    // serves applied to the value: str(x) of a number is its repr, and floor and
-    // ceil step int()'s truncation (which also raises CPython's error for an
-    // infinity or a NaN). __index__ and __invert__ are int's alone. Twin of
+    // serves applied to the value: floor and ceil step int()'s truncation (which
+    // also raises CPython's error for an infinity or a NaN). __index__ and __invert__ are int's alone. Twin of
     // pyNumDunder in abnf/jsrtpysub.go and lib/python-rt.metajs.
     function pyNumDunder(tname, name) {
         var isInt = tname == "int"
-        if (name == "__str__") { return function(self) { return prepr(pyBDelSelf(self)) } }
         if (name == "__int__" || name == "__trunc__" || (isInt && name == "__index__")) {
             return function(self) { return pyConvert("int", [pyBDelSelf(self)], null) }
         }
@@ -3870,6 +3908,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return true
     }
 
+    // A builtin subclass's own __getitem__: dict's asks the class's __missing__
+    // for an absent key. Twin of pyBGetItem in abnf/jsrtpysub.go and
+    // lib/python-rt.metajs.
+    function pyBGetItem(self, k) {
+        var d = pyBDelSelf(self)
+        if (isDict(d) && !isSet(d) && dictFind(d, k) < 0) {
+            var ms = clsFind(self.__class, "__missing__")
+            if (ms != null) { return ms(self, k) }
+        }
+        return pyget(d, k)
+    }
     function pyget(o, i) {
         if (pyUser(o)) {
             var gi = clsFind(o.__class, "__getitem__")
@@ -5967,16 +6016,20 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var sdel = pyValDunder(target, name)
         if (sdel != null) { return sdel.apply(undefined, [target].concat(args)) }
         if (pyForeignMethod(target, name)) { pyAttrErr(target, name) }
+        // A function's own attribute holding a callable - f.g = g; f.g(3) - is
+        // called as it is read, with no receiver.
+        if (typeof target == "function") { return pyCall(pyattr(target, name), args, kw) }
         fail("method call ." + name + "() on " + pstr(target))
     }
 
     // bytes(source, encoding, errors), with the keywords already in their slots:
     // a list of byte values in this value model - a str under an encoding
     // (str.encode), a count of zero bytes, or an iterable of ints in range(256).
-    // None and an absent argument are the same value here. Twin of rt.pyBytesNew
-    // in abnf/jsrtpysub.go and js_pybytes in lib/python-rt.metajs.
-    function pyBytesNew(args) {
-        if (args.length > 3) { pyListErr("TypeError", "bytes() takes at most 3 arguments (" + args.length + " given)") }
+    // None and an absent argument are the same value here. bytearray(...) (NAME)
+    // builds the same list, under its own error texts. Twin of rt.pyBytesNew in
+    // abnf/jsrtpysub.go and pyBytesNew in lib/python-rt.metajs.
+    function pyBytesNew(args, name) {
+        if (args.length > 3) { pyListErr("TypeError", name + "() takes at most 3 arguments (" + args.length + " given)") }
         var v = anytype
         v = pyArgAt(args, 0)
         var enc = pyArgAt(args, 1)
@@ -5997,14 +6050,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return out
         }
         if (tn == "NoneType" || tn == "float" || tn == "complex") {
-            pyListErr("TypeError", "cannot convert '" + tn + "' object to bytes")
+            pyListErr("TypeError", "cannot convert '" + tn + "' object to " + name)
         }
         var src = iterToList(v)
         for (var j = 0; j < src.length; j++) {
             var et = pyTypeOf(src[j]).__name
             if (et != "int" && et != "bool") { pyListErr("TypeError", "'" + et + "' object cannot be interpreted as an integer") }
             var b = floVal(src[j])
-            if (b < 0 || b > 255) { pyListErr("ValueError", "bytes must be in range(0, 256)") }
+            if (b < 0 || b > 255) { pyListErr("ValueError", (name == "bytes" ? "bytes" : "byte") + " must be in range(0, 256)") }
             out.push(b)
         }
         return out
@@ -6385,6 +6438,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pyDictUpdateFrom(d, src) {
         if (isDict(src) && !isSet(src)) {
             for (var mi = 0; mi < src.keys.length; mi++) { dictSet(d, src.keys[mi], src.vals[mi]) }
+            return
+        }
+        // A mapping by protocol - a dict subclass among them: its keys(), each
+        // read through its own subscript. Twin of rt.pyDictUpdateFrom in
+        // abnf/jsrt.go and lib/python-rt.metajs.
+        if (pyUser(src) && src.__isclass !== true && clsFind(src.__class, "keys") != null) {
+            var mks = iterToList(pyCall(pyattr(src, "keys"), [], null))
+            for (var ki = 0; ki < mks.length; ki++) { dictSet(d, mks[ki], pyget(src, mks[ki])) }
             return
         }
         var items = pyIterOrTypeErr(src)
@@ -9708,8 +9769,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var d = newDict()
             for (var i = 0; i < items.length; i++) {
                 if (items[i].dsplat != undefined) {
-                    var m = items[i].dsplat()
-                    for (var j = 0; j < m.keys.length; j++) { dictSet(d, m.keys[j], m.vals[j]) }
+                    pyDictUpdateFrom(d, items[i].dsplat())
                 } else { dictSet(d, items[i].dk(), items[i].dv()) }
             }
             return d
@@ -10549,7 +10609,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                       "NameError", "UnboundLocalError", "AttributeError", "RuntimeError",
                       "StopIteration", "NotImplementedError", "AssertionError",
                       "OSError", "ExceptionGroup", "OverflowError", "UnicodeError", "UnicodeDecodeError",
-                      "UnicodeEncodeError", "GeneratorExit", "MemoryError"]
+                      "UnicodeEncodeError", "GeneratorExit", "MemoryError", "SystemExit"]
     var pyExcParent = {}
     pyExcParent["Exception"] = "BaseException"
     pyExcParent["ArithmeticError"] = "Exception"
@@ -10576,6 +10636,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     pyExcParent["UnicodeEncodeError"] = "UnicodeError"
     pyExcParent["GeneratorExit"] = "BaseException"
     pyExcParent["MemoryError"] = "Exception"
+    pyExcParent["SystemExit"] = "BaseException"
     function installExceptions() {
         for (var i = 0; i < pyExcNames.length; i++) {
             var n = pyExcNames[i]
@@ -10596,6 +10657,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
     installExceptions()
+    // BaseException.add_note(note): appends to the instance's __notes__ list,
+    // made on first use. Twin of js_pyaddnote in abnf/jsrt.go and
+    // lib/python-rt.metajs.
+    scopePut(hostGlobals["BaseException"], "add_note", function(self, note) {
+        if (typeof note != "string") { pyListErr("TypeError", "add_note() argument must be str, not " + pyTypeOf(note).__name) }
+        if (!hasOwn(self, "__notes__")) { pySetAttr(self, "__notes__", []) }
+        if (!Array.isArray(self.__notes__) || isTup(self.__notes__)) { pyListErr("TypeError", "Cannot add note: __notes__ is not a list") }
+        self.__notes__.push(note)
+        return undefined
+    })
     // Build an exception instance of a builtin type.
     function pyMakeExc(name, args) {
         var inst = {__class: hostGlobals[name], args: pyTup(args)}
@@ -10893,6 +10964,22 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             noteBound(name)
         }
     }
+    // type(name, bases, ns): the class a class statement with those bases and
+    // that body namespace would build. Twin of js_pytypenew in abnf/jsrt.go and
+    // lib/python-rt.metajs.
+    function pyTypeNew(name, bases, ns) {
+        var bl = iterToList(bases).slice(0)
+        var cls = {__isclass: true, __name: name, __bases: bl, __module__: "__main__", __qual: name}
+        clsSetMRO(cls, bl)
+        for (var k = 0; k < ns.keys.length; k++) {
+            scopePut(cls, ns.keys[k], ns.vals[k])
+            pyNoteHook(ns.keys[k])
+        }
+        cls.__attrs = ns.keys.slice(0)
+        pySetNames(cls, cls.__attrs)
+        cls.__annotations__ = newDict()
+        return cls
+    }
     // Cls(args): a fresh instance whose __init__ runs with it as self.
     function pyNew(cls, args, named) {
         // A class's own __new__ makes the instance, and __init__ runs only when
@@ -11092,6 +11179,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 // A staticmethod / classmethod read off the CLASS: the static one
                 // loses nothing, the class one binds to this very class.
                 if (pyIsStatic(cv) || pyIsClsM(cv)) { return pyDescGet(cv, o, name) }
+                // A descriptor instance answers through __get__(None, cls).
+                if (pyUser(cv) && cv.__isclass !== true) {
+                    var cg = clsFind(cv.__class, "__get__")
+                    if (cg != null) { return cg(cv, undefined, o) }
+                }
                 return cv
             }
             if (clsHas(o, name)) { return undefined }
@@ -11171,6 +11263,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return m
             }
             if (clsHas(o.__class, name)) { return undefined }
+            if (name == "code" && clsIsSub(o.__class, hostGlobals["SystemExit"])) { return pyExitCode(o) }
             if (name == "__new__") { return pyClsNew(o.__class) }
             var iom = pyObjectMethod(name)
             if (iom != null) { return pyBindObjectMethod(o, iom, name) }
@@ -12149,15 +12242,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // A call that does not fit plist raises CPython's TypeError, BEFORE the
     // body or a generator object exists. Only a keyword call, a required
     // keyword-only slot or a positional count outside the slot range is scanned.
-    function pyArgsFit(plist, args, named) {
+    function pyArgsFit(plist, args, named, fn) {
         if (named != null || plist.kwreq || args.length < plist.nreq
-            || (plist.rest == null && args.length > plist.npos)) { pyArityCheck(plist, args.length, named) }
+            || (plist.rest == null && args.length > plist.npos)) { pyArityCheck(plist, args.length, named, fn) }
     }
     // CPython's initialize_locals order: each keyword in turn (a positional-only
     // name given by keyword, an unknown one, one already filled by position),
     // then too many positionals, then the missing positional, then the missing
     // keyword-only slots. Twin of pyArityCheck in abnf/jsrt.go.
-    function pyArityCheck(plist, given, named) {
+    function pyArityCheck(plist, given, named, fn) {
         var slots = plist.slots
         var kn = named == null ? [] : named.keys
         var npos = plist.npos
@@ -12171,13 +12264,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     if (slots[q].posonly && kn.indexOf(slots[q].name) >= 0) { po.push(slots[q].name) }
                 }
                 if (po.length > 0) {
-                    pyArityFail(plist, "got some positional-only arguments passed as keyword arguments: '" + po.join(", ") + "'")
+                    pyArityFail(plist, fn, "got some positional-only arguments passed as keyword arguments: '" + po.join(", ") + "'")
                 }
                 var cands = []
                 for (var c2 = 0; c2 < slots.length; c2++) { if (!slots[c2].posonly) { cands.push(slots[c2].name) } }
-                pyArityFail(plist, "got an unexpected keyword argument '" + kn[k] + "'" + pyDidYouMean(kn[k], cands))
+                pyArityFail(plist, fn, "got an unexpected keyword argument '" + kn[k] + "'" + pyDidYouMean(kn[k], cands))
             }
-            if (at < npos && at < given) { pyArityFail(plist, "got multiple values for argument '" + kn[k] + "'") }
+            if (at < npos && at < given) { pyArityFail(plist, fn, "got multiple values for argument '" + kn[k] + "'") }
         }
         if (plist.rest == null && given > npos) {
             var ndef = 0
@@ -12192,19 +12285,23 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 msg = msg + " positional argument" + (given == 1 ? "" : "s") + " (and " + kwGiven
                     + " keyword-only argument" + (kwGiven == 1 ? "" : "s") + ")"
             }
-            pyArityFail(plist, msg + (given == 1 && kwGiven == 0 ? " was given" : " were given"))
+            pyArityFail(plist, fn, msg + (given == 1 && kwGiven == 0 ? " was given" : " were given"))
         }
         var miss = []
         for (var m = given; m < npos; m++) {
             if (plist.dflts[m] == null && (slots[m].posonly || kn.indexOf(slots[m].name) < 0)) { miss.push(slots[m].name) }
         }
-        if (miss.length > 0) { pyArityFail(plist, pyMissingMsg(miss, "positional")) }
+        if (miss.length > 0) { pyArityFail(plist, fn, pyMissingMsg(miss, "positional")) }
         for (var m2 = npos; m2 < slots.length; m2++) {
             if (plist.dflts[m2] == null && kn.indexOf(slots[m2].name) < 0) { miss.push(slots[m2].name) }
         }
-        if (miss.length > 0) { pyArityFail(plist, pyMissingMsg(miss, "keyword-only")) }
+        if (miss.length > 0) { pyArityFail(plist, fn, pyMissingMsg(miss, "keyword-only")) }
     }
-    function pyArityFail(plist, msg) { pyRaise(pyMakeExc("TypeError", [plist.qual + "() " + msg])) }
+    // The function's __qualname__ names it, an assigned one included.
+    function pyArityFail(plist, fn, msg) {
+        var q = fnQual(fn)
+        pyRaise(pyMakeExc("TypeError", [(q === undefined ? plist.qual : q) + "() " + msg]))
+    }
     // CPython's missing_arguments, listing 'a' / 'a' and 'b' / 'a', 'b', and 'c'.
     function pyMissingMsg(miss, kind) {
         var list = ""
@@ -12235,7 +12332,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var named = kTakeNamed()
                 var args = []
                 for (var i = 0; i < argv.length; i++) args.push(argv[i])
-                pyArgsFit(plist, args, named)
+                pyArgsFit(plist, args, named, fn)
                 // A generator function runs nothing on call: it captures the arguments
                 // and hands back a generator object.
                 if (isGenFn) { return newGenObject(bodyT, defScopes, plist, dflts, args, named) }
@@ -12293,7 +12390,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var named = kTakeNamed()
                 var args = []
                 for (var i = 0; i < argv.length; i++) args.push(argv[i])
-                pyArgsFit(plist, args, named)
+                pyArgsFit(plist, args, named, lf)
                 var saved = scopes
                 scopes = callScopes(defScopes, plist, dflts, args, named)
                 var r = anytype
@@ -12314,7 +12411,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         try {
             progT()
         } catch (e) {
-            if (excIsUser(e)) { fail("uncaught exception: " + pyUncaughtText(excValue(e))) }
+            if (excIsUser(e)) {
+                pyExitIfSystemExit(excValue(e))
+                fail("uncaught exception: " + pyUncaughtText(excValue(e)))
+            }
             throw e
         }
     }
@@ -12322,6 +12422,26 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // CPython's last traceback line for an exception nobody caught: `Name: str(e)`,
     // or the bare name when str(e) is empty. Twin of js_pyuncaught in abnf/jsrt.go
     // and languages/lib/python-rt.metajs.
+    // SystemExit.code: None for no argument, the argument for one, the args tuple
+    // for more. Twin of rt.pyExitCode in abnf/jsrt.go and pyExitCode in
+    // lib/python-rt.metajs.
+    function pyExitCode(e) {
+        if (e.args.length == 0) { return undefined }
+        if (e.args.length == 1) { return e.args[0] }
+        return e.args
+    }
+    // An uncaught SystemExit ends the program quietly with its code as the exit
+    // status: None is 0, an int is itself, anything else is printed to stderr
+    // and the status is 1.
+    function pyExitIfSystemExit(v) {
+        if (!pyUser(v) || !clsIsSub(v.__class, hostGlobals["SystemExit"])) { return }
+        var code = anytype
+        code = pyExitCode(v)
+        if (code === undefined || code === null) { exit(0) }
+        if (typeof code == "number" || typeof code == "boolean") { exit(floVal(code) | 0) }
+        eprintln(pstr(code))
+        exit(1)
+    }
     function pyUncaughtText(v) {
         var s = pstr(v)
         if (!pyUser(v)) { return s }
@@ -12439,7 +12559,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // Python stdlib modules the runtime provides (resolveImport lives in
     // lib/interp-core.js; prefix match, so os.path resolves against "os").
-    core.stdlibImports = ["sys", "os", "math", "collections", "itertools", "functools", "re", "json", "typing", "random", "string", "time", "abc", "builtins"]
+    core.stdlibImports = ["sys", "os", "math", "collections.abc", "itertools", "functools", "re", "json", "typing", "random", "string", "time", "abc", "builtins"]
     // Project-file imports: 'import mypkg.helper' / 'from mypkg.helper import x'
     // look for mypkg/helper.py, then mypkg.py under the program's directory and
     // the -i roots (c.findImport). The file is parsed with this grammar and
@@ -12461,10 +12581,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         c.popSource()
     }
     core.importFile = function(path, pos) {
-        // copy and dataclasses are written in Python (lib/python-<name>.py) and
-        // compiled like a project file. Twin of the same arm in
-        // python-to-llvm-ir.abnf.
-        if (path == "copy" || path == "dataclasses") {
+        // copy, dataclasses and collections are written in Python
+        // (lib/python-<name>.py) and compiled like a project file. Twin of the
+        // same arm in python-to-llvm-ir.abnf.
+        if (path == "copy" || path == "dataclasses" || path == "collections") {
             var lib = "lib/python-" + path + ".py"
             if (importedFiles["$" + lib] != true) { pyCompileModule(lib, load(lib), path) }
             return true
@@ -12497,7 +12617,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         try {
             ret = globalScope[entry]()
         } catch (e) {
-            if (excIsUser(e)) { fail("uncaught exception: " + pyUncaughtText(excValue(e))) }
+            if (excIsUser(e)) {
+                pyExitIfSystemExit(excValue(e))
+                fail("uncaught exception: " + pyUncaughtText(excValue(e)))
+            }
             throw e
         }
         exit(ret === undefined || ret === null ? 0 : ret | 0)

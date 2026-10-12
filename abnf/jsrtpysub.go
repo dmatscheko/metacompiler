@@ -141,7 +141,18 @@ func pyBDelMake(tname, name string) *hostFunc {
 		return mk(func(rt *jsrt, v interface{}, _ []interface{}) interface{} { return rt.pyRepr(v) })
 	case name == "__str__" && tname == "str":
 		return mk(func(rt *jsrt, v interface{}, _ []interface{}) interface{} { return v })
-	case name == "__str__" && !num:
+	case name == "__str__" && tname != "bytes":
+		// Every other builtin's __str__ is object's, which renders through the
+		// type's __repr__ - a subclass's own override included.
+		return mkSelf(func(rt *jsrt, self, v interface{}, _ []interface{}) interface{} {
+			if _, cls, ok := pyInstance(self); ok {
+				if r, found := pyLookup(cls, "__repr__"); found {
+					return rt.call(r, jsUndef, []interface{}{self})
+				}
+			}
+			return rt.pyRepr(v)
+		})
+	case name == "__str__":
 		return mk(func(rt *jsrt, v interface{}, _ []interface{}) interface{} { return rt.pyString(v) })
 	case name == "__eq__" || name == "__ne__":
 		neg := name == "__ne__"
@@ -202,7 +213,20 @@ func pyBDelMake(tname, name string) *hostFunc {
 		return mk(func(rt *jsrt, v interface{}, _ []interface{}) interface{} { return rt.pyExt("js_pylenof", v) })
 	case tname != "complex" && name == "__iter__":
 		return mk(func(rt *jsrt, v interface{}, _ []interface{}) interface{} { return rt.pyExt("js_pyiterfn", v) })
-	case (seq || tname == "dict") && name == "__getitem__":
+	case tname == "dict" && name == "__getitem__":
+		// dict's asks the class's __missing__ for an absent key. Twin of
+		// pyBGetItem in languages/python-interpreter.abnf.
+		return mkSelf(func(rt *jsrt, self, v interface{}, a []interface{}) interface{} {
+			if _, cls, ok := pyInstance(self); ok {
+				if keys, _, isDict := dictParts(v); isDict && rt.pyDictFind(keys, arg(a)) < 0 {
+					if ms, found := pyLookup(cls, "__missing__"); found {
+						return rt.call(ms, jsUndef, []interface{}{self, arg(a)})
+					}
+				}
+			}
+			return rt.pyExt("js_pyidx", v, arg(a))
+		})
+	case seq && name == "__getitem__":
 		return mk(func(rt *jsrt, v interface{}, a []interface{}) interface{} { return rt.pyExt("js_pyidx", v, arg(a)) })
 	case (tname == "list" || tname == "dict") && name == "__setitem__":
 		return mk(func(rt *jsrt, v interface{}, a []interface{}) interface{} {
@@ -344,16 +368,13 @@ func pyBDelAccepts(tname string, o interface{}) bool {
 }
 
 // pyNumDunder is int's and float's conversion and rounding dunders, each the
-// builtin it serves applied to the value: str(x) of a number is its repr, and
-// floor and ceil step int()'s truncation (which also raises CPython's error for
-// an infinity or a NaN). __index__ and __invert__ are int's alone. Twin of
+// builtin it serves applied to the value: floor and ceil step int()'s
+// truncation (which also raises CPython's error for an infinity or a NaN). __index__ and __invert__ are int's alone. Twin of
 // pyNumDunder in languages/python-interpreter.abnf and lib/python-rt.metajs.
 func pyNumDunder(tname, name string) func(rt *jsrt, v interface{}, a []interface{}) interface{} {
 	isInt := tname == "int"
 	toInt := func(rt *jsrt, v interface{}, _ []interface{}) interface{} { return rt.pyIntNew([]interface{}{v}) }
 	switch {
-	case name == "__str__":
-		return func(rt *jsrt, v interface{}, _ []interface{}) interface{} { return rt.pyRepr(v) }
 	case name == "__int__" || name == "__trunc__" || (isInt && (name == "__index__" || name == "__pos__")):
 		return toInt
 	case name == "__pos__":
@@ -780,13 +801,13 @@ func (rt *jsrt) pyBytesDecode(bs []interface{}, encV interface{}) string {
 // pyBytesNew is bytes(source, encoding, errors), with the keywords already in
 // their slots: a list of byte values in this value model - a str under an
 // encoding (str.encode), a count of zero bytes, or an iterable of ints in
-// range(256). None and an absent argument are the same value here. Twins:
-// pyBytesNew in languages/python-interpreter.abnf, js_pybytes in
-// lib/python-rt.metajs.
-func (rt *jsrt) pyBytesNew(args []interface{}) interface{} {
+// range(256). None and an absent argument are the same value here.
+// bytearray(...) (name) builds the same list, under its own error texts. Twins:
+// pyBytesNew in languages/python-interpreter.abnf and lib/python-rt.metajs.
+func (rt *jsrt) pyBytesNew(args []interface{}, name string) interface{} {
 	raise := func(cls, msg string) { panic(&jsThrown{value: rt.pyExcInstance(cls, msg)}) }
 	if len(args) > 3 {
-		raise("TypeError", fmt.Sprintf("bytes() takes at most 3 arguments (%d given)", len(args)))
+		raise("TypeError", fmt.Sprintf("%s() takes at most 3 arguments (%d given)", name, len(args)))
 	}
 	at := func(i int) interface{} {
 		if i < len(args) {
@@ -822,7 +843,7 @@ func (rt *jsrt) pyBytesNew(args []interface{}) interface{} {
 		}
 		return out
 	case "NoneType", "float", "complex":
-		raise("TypeError", "cannot convert '"+tn+"' object to bytes")
+		raise("TypeError", "cannot convert '"+tn+"' object to "+name)
 	}
 	for _, e := range rt.pyElemsOf(v) {
 		et := pyTypeName(rt, e)
@@ -831,7 +852,7 @@ func (rt *jsrt) pyBytesNew(args []interface{}) interface{} {
 		}
 		b := rt.toNumber(e)
 		if b < 0 || b > 255 {
-			raise("ValueError", "bytes must be in range(0, 256)")
+			raise("ValueError", strings.TrimSuffix(name, "array")+" must be in range(0, 256)")
 		}
 		out.elems = append(out.elems, b)
 	}
@@ -840,15 +861,19 @@ func (rt *jsrt) pyBytesNew(args []interface{}) interface{} {
 
 func init() {
 	rxExtraExterns = append(rxExtraExterns, func(rt *jsrt, m map[string]func(args []uint64) uint64) {
-		// bytes(...), bound as [positionals, keywords].
-		m["js_pybytes"] = func(a []uint64) uint64 {
-			el := rt.unwrap(a[0]).(*jsArray).elems
-			pos := el[0].(*jsArray).elems
-			if keys, _, ok := dictParts(el[1]); ok && len(keys.elems) > 0 {
-				pos = rt.pyKwPos("bytes", pos, el[1], []string{"source", "encoding", "errors"}, 0)
+		// bytes(...) and bytearray(...), bound as [positionals, keywords].
+		bytesNew := func(name string) func(a []uint64) uint64 {
+			return func(a []uint64) uint64 {
+				el := rt.unwrap(a[0]).(*jsArray).elems
+				pos := el[0].(*jsArray).elems
+				if keys, _, ok := dictParts(el[1]); ok && len(keys.elems) > 0 {
+					pos = rt.pyKwPos(name, pos, el[1], []string{"source", "encoding", "errors"}, 0)
+				}
+				return rt.wrap(rt.pyBytesNew(pos, name))
 			}
-			return rt.wrap(rt.pyBytesNew(pos))
 		}
+		m["js_pybytes"] = bytesNew("bytes")
+		m["js_pybytearray"] = bytesNew("bytearray")
 		// frozenset(iterable=()). Twins: pyConvert in
 		// languages/python-interpreter.abnf, js_pyfrozenset in lib/python-rt.metajs.
 		m["js_pyfrozenset"] = func(a []uint64) uint64 {

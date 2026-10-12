@@ -276,6 +276,7 @@ function pyKeyEq(a, b) {
     // rule the set side uses (pySetHas -> pyEqual). The typeof gate keeps the Array.isArray CALL off the
     // string and number keys that are almost every key.
     if (typeof a == "object") {
+        if (pyInstClassOf(a) !== null) { return pyUserKeyEq(a, b) }
         if (Array.isArray(a) && Array.isArray(b)) { return pyEqual(a, b) }
         // A frozenset key, by its members; a union key likewise.
         if (pySetElemsOf(a) !== null && pySetElemsOf(b) !== null) { return pyEqual(a, b) }
@@ -312,6 +313,13 @@ function pyHashName(v) {
         return "set"
     }
     if (v["__dict"] === true) { return "dict" }
+    // An instance whose class cannot hash, or whose builtin base cannot, is named
+    // by its own class.
+    var cls = pyInstClassOf(v)
+    if (cls !== null) {
+        var how = pyHashOwner(cls)["how"]
+        if (how == 2 || (how == 3 && pyHashName(pyUnwrapBuiltin(v)) != "")) { return pyTypeName(v) }
+    }
     return ""
 }
 
@@ -346,7 +354,10 @@ function pyDictFind(keys, k) {
     // typeof guard is inline rather than a pyIsObj call: this is the hottest
     // function in the file and almost every key is a string or a number.
     if (k !== null && k !== undefined) {
-        if (typeof k == "object") { pyHashCheck(k, false) }
+        if (typeof k == "object") {
+            pyHashCheck(k, false)
+            if (pyInstClassOf(k) !== null) { return pyUserKeyFind(keys, k) }
+        }
     }
     for (var i = 0; i < keys.length; i++) {
         if (pyKeyEq(keys[i], k)) { return i }
@@ -471,6 +482,7 @@ function pySetElemsOf(v) {
 }
 
 function pySetHas(els, v) {
+    if (pyInstClassOf(v) !== null) { return pyUserKeyFind(els, v) >= 0 }
     for (var i = 0; i < els.length; i++) {
         if (pyEqual(els[i], v)) { return true }
     }
@@ -776,8 +788,8 @@ function pyBigDec(v) {
 // sys.get_int_max_str_digits(): 0 for no limit. Go: rt.pyIntMaxDigits.
 var pyDMaxDigits = 4300
 
-// A call of one of sys's functions; the module offers get_int_max_str_digits
-// and set_int_max_str_digits. Go: rt.pySysCall in abnf/jsrtpynum.go.
+// A call of one of sys's functions; the module offers get_int_max_str_digits,
+// set_int_max_str_digits and exit. Go: rt.pySysCall in abnf/jsrtpynum.go.
 function pySysCall(name, args, kw) {
     if (name == "get_int_max_str_digits") { return pyDMaxDigits }
     if (name == "set_int_max_str_digits") {
@@ -790,6 +802,10 @@ function pySysCall(name, args, kw) {
         if (n != 0 && n < 640) { pyRaiseExc("ValueError", "maxdigits must be >= 640 or 0 for unlimited") }
         pyDMaxDigits = n
         return undefined
+    }
+    if (name == "exit") {
+        if (args.length > 1) { pyRaiseExc("TypeError", "exit expected at most 1 argument, got " + pyIntStr(args.length)) }
+        throw {__class: pyExcClass("SystemExit"), args: pyTup(pyCCopyArr(args))}
     }
     pyRaiseExc("AttributeError", "module 'sys' has no attribute '" + name + "'")
     return undefined
@@ -1172,6 +1188,12 @@ function pyEqual(x, y) {
         var uy = pyUnionOf(y)
         return uy !== null && pyUnionEq(x["__pyunion"], uy)
     }
+    // An instance on either side: its class's __eq__, as the == operator asks it,
+    // so a list, tuple or dict holding one compares through it.
+    if (pyInstClassOf(x) !== null || pyInstClassOf(y) !== null) {
+        var ur = pyADunderBin("==", x, y)
+        return pyATruthy(ur["v"])
+    }
     // A Python bool IS an int - `class bool(int)` - so True == 1, True == 1.0,
     // False == 0 and False == -0.0 all hold, and so does every container equality
     // built on them ([True] == [1], {True: 1} == {1: 1}). The Go twin rewrites the
@@ -1381,7 +1403,10 @@ function pyBDelMake(tname, name, meth) {
     var cplx = tname == "complex"
     if (name == "__repr__") { return function(self) { return pyRepr(pyUnwrapBuiltin(self)) } }
     if (name == "__str__" && tname == "str") { return function(self) { return pyUnwrapBuiltin(self) } }
-    if (name == "__str__" && !num) { return function(self) { return pyStr(pyUnwrapBuiltin(self)) } }
+    // Every other builtin's __str__ is object's, which renders through the
+    // type's __repr__ - a subclass's own override included.
+    if (name == "__str__" && tname != "bytes") { return function(self) { return pyBStr(self) } }
+    if (name == "__str__") { return function(self) { return pyStr(pyUnwrapBuiltin(self)) } }
     if (name == "__eq__" || name == "__ne__") {
         var neg = name == "__ne__"
         return function(self, o) {
@@ -1433,7 +1458,7 @@ function pyBDelMake(tname, name, meth) {
         if (name == "__len__") { return function(self) { return js_pylenof(pyUnwrapBuiltin(self)) } }
         if (name == "__iter__") { return function(self) { return js_pyiterfn(pyUnwrapBuiltin(self)) } }
         if (name == "__contains__") { return function(self, k) { return pyAContains(k, pyUnwrapBuiltin(self)) } }
-        if (name == "__getitem__" && !setLike) { return function(self, k) { return js_pyidx(pyUnwrapBuiltin(self), k) } }
+        if (name == "__getitem__" && !setLike) { return function(self, k) { return pyBGetItem(self, k) } }
         if (tname == "list" || tname == "dict") {
             if (name == "__setitem__") { return function(self, k, v) { return js_pyset(pyUnwrapBuiltin(self), k, v) } }
             if (name == "__delitem__") { return function(self, k) { return js_pydel_item(pyUnwrapBuiltin(self), k) } }
@@ -1511,13 +1536,28 @@ function pyBDelAccepts(tname, o) {
     return pyIsDict(o) && pySetElemsOf(o) === null
 }
 
+// object.__str__: the receiver's type's __repr__. Go: pyBDelMake's __str__.
+function pyBStr(self) {
+    var cls = pyInstClassOf(self)
+    if (cls !== null) { return pyCallSelf(pyLookupVal(cls, "__repr__"), self, []) }
+    return pyRepr(self)
+}
+// A builtin subclass's own __getitem__: dict's asks the class's __missing__ for
+// an absent key. Go: pyBDelMake's dict __getitem__.
+function pyBGetItem(self, k) {
+    var d = pyUnwrapBuiltin(self)
+    var cls = pyInstClassOf(self)
+    if (cls !== null && pyIsDict(d) && pyLookupHas(cls, "__missing__")) {
+        if (pyDictFind(d["keys"], k) < 0) { return pyCallSelf(pyLookupVal(cls, "__missing__"), self, [k]) }
+    }
+    return js_pyidx(d, k)
+}
+
 // Go: pyNumDunder. int's and float's conversion and rounding dunders, each the
-// builtin it serves applied to the value: str(x) of a number is its repr, and
-// floor and ceil step int()'s truncation (which also raises CPython's error for
-// an infinity or a NaN). __index__ and __invert__ are int's alone.
+// builtin it serves applied to the value: floor and ceil step int()'s
+// truncation (which also raises CPython's error for an infinity or a NaN). __index__ and __invert__ are int's alone.
 function pyNumDunder(tname, name) {
     var isInt = tname == "int"
-    if (name == "__str__") { return function(self) { return pyRepr(pyUnwrapBuiltin(self)) } }
     if (name == "__int__" || name == "__trunc__" || (isInt && (name == "__index__" || name == "__pos__"))) {
         return function(self) { return js_pyint([[pyUnwrapBuiltin(self)], undefined]) }
     }
@@ -1866,6 +1906,9 @@ function pyGetAttrRaw(obj, name) {
             // A staticmethod / classmethod read off the CLASS: the static one
             // loses nothing, the class one binds to this very class.
             if (pyDIsStatic(cv) || pyDIsClsM(cv)) { return pyDDescGet(cv, obj, name) }
+            // A descriptor instance answers through __get__(None, cls).
+            var cget = pyDescriptor(cv, "__get__")
+            if (cget !== undefined) { return cget.apply(undefined, [cv, undefined, obj]) }
             return cv
         }
         // C.mro(), type's own method: the resolution order as a fresh list.
@@ -1899,6 +1942,7 @@ function pyGetAttrRaw(obj, name) {
             return v
         }
         if (name == "__new__") { return pyClsNew(cls) }
+        if (name == "code" && pyDIsInstance(obj, pyExcClass("SystemExit"))) { return pyExitCode(obj) }
         var iom = pyObjectMethod(name)
         if (iom !== null) { return pyBindObjectMethod(obj, iom, name) }
         pyRaiseExc("AttributeError",
@@ -2860,6 +2904,7 @@ function pyExcParentName(name) {
     if (name == "UnicodeEncodeError") { return "UnicodeError" }
     if (name == "Exception") { return "BaseException" }
     if (name == "GeneratorExit") { return "BaseException" }
+    if (name == "SystemExit") { return "BaseException" }
     return "Exception"
 }
 
@@ -4202,6 +4247,7 @@ function pyAContains(x, y) {
     var els = pySetElemsOf(y)
     if (els !== null) {
         pyHashCheckMember(x)
+        if (pyInstClassOf(x) !== null) { return pyUserKeyFind(els, x) >= 0 }
         var i = 0
         while (i < els.length) {
             if (pyAEqual(els[i], x)) { return true }
@@ -4923,13 +4969,16 @@ function js_pystrnew(args) {
 // Go: js_pybytes. bytes(source, encoding, errors), bound as [positionals,
 // keywords]: a list of byte values in this value model - a str under an encoding
 // (str.encode), a count of zero bytes, or an iterable of ints in range(256). None
-// and an absent argument are the same value here.
-function js_pybytes(bound) {
+// and an absent argument are the same value here. bytearray(...) (NAME) builds
+// the same list, under its own error texts.
+function js_pybytes(bound) { return pyBytesNew(bound, "bytes") }
+function js_pybytearray(bound) { return pyBytesNew(bound, "bytearray") }
+function pyBytesNew(bound, name) {
     var args = bound[0]
     if (pyIsDict(bound[1]) && bound[1]["keys"].length > 0) {
-        args = pyKwPos("bytes", args, bound[1], ["source", "encoding", "errors"], 0)
+        args = pyKwPos(name, args, bound[1], ["source", "encoding", "errors"], 0)
     }
-    if (args.length > 3) { pyRaiseExc("TypeError", "bytes() takes at most 3 arguments (" + args.length + " given)") }
+    if (args.length > 3) { pyRaiseExc("TypeError", name + "() takes at most 3 arguments (" + args.length + " given)") }
     var v = anytype
     v = args.length > 0 ? args[0] : undefined
     var enc = args.length > 1 ? args[1] : undefined
@@ -4954,7 +5003,7 @@ function js_pybytes(bound) {
         return out
     }
     if (tn == "NoneType" || tn == "float" || tn == "complex") {
-        pyRaiseExc("TypeError", "cannot convert '" + tn + "' object to bytes")
+        pyRaiseExc("TypeError", "cannot convert '" + tn + "' object to " + name)
     }
     var src = pyElemsOf(v)
     var j = 0
@@ -4962,7 +5011,11 @@ function js_pybytes(bound) {
         var et = pyTypeName(src[j])
         if (et != "int" && et != "bool") { pyRaiseExc("TypeError", "'" + et + "' object cannot be interpreted as an integer") }
         var b = pyNum(src[j])
-        if (b < 0 || b > 255) { pyRaiseExc("ValueError", "bytes must be in range(0, 256)") }
+        if (b < 0 || b > 255) {
+            var what = "bytes"
+            if (name != "bytes") { what = "byte" }
+            pyRaiseExc("ValueError", what + " must be in range(0, 256)")
+        }
         out.push(b)
         j = j + 1
     }
@@ -5348,23 +5401,58 @@ function pyHashW(v0) {
     }
     var cls = pyInstClassOf(v)
     if (cls !== null) {
-        var mro = pyMRO(cls)
-        var mi = 0
-        while (mi < mro.length) {
-            var c = mro[mi]
-            if (c["__hash__"] !== undefined) { return pyHashCall(c["__hash__"], v) }
-            // `__hash__ = None` makes the class unhashable, as an __eq__ without
-            // a __hash__ does.
-            if (c["__eq__"] !== undefined || pyNoneBound(c, "__hash__")) { pyRaiseExc("TypeError", "unhashable type: '" + pyTypeName(v) + "'") }
-            if (c["__mro"] === undefined && c["__name"] !== undefined) {
-                // object's own hash is the identity one.
-                if (c["__name"] == "object") { return pyHashId(v) }
-                return pyHashW(pyUnwrapBuiltin(v))
-            }
-            mi = mi + 1
-        }
+        var own = pyHashOwner(cls)
+        var how = own["how"]
+        if (how == 1) { return pyHashCall(own["m"], v) }
+        if (how == 2) { pyRaiseExc("TypeError", "unhashable type: '" + pyTypeName(v) + "'") }
+        if (how == 3) { return pyHashW(pyUnwrapBuiltin(v)) }
     }
     return pyHashId(v)
+}
+// How instances of cls hash, as the first class on its resolution order that
+// settles it decides: {how: 0} object's identity hash, {how: 1, m} its own
+// __hash__ m, {how: 2} none at all (`__hash__ = None`, or an __eq__ without a
+// __hash__), {how: 3} a builtin base's. Twin of pyHashOwner in abnf/jsrtpynum.go
+// and languages/python-interpreter.abnf.
+function pyHashOwner(cls) {
+    var mro = pyMRO(cls)
+    var mi = 0
+    while (mi < mro.length) {
+        var c = mro[mi]
+        if (c["__hash__"] !== undefined) { return {how: 1, m: c["__hash__"]} }
+        if (c["__eq__"] !== undefined || pyNoneBound(c, "__hash__")) { return {how: 2} }
+        if (c["__mro"] === undefined && c["__name"] !== undefined) {
+            if (c["__name"] == "object") { return {how: 0} }
+            return {how: 3}
+        }
+        mi = mi + 1
+    }
+    return {how: 0}
+}
+// CPython's key match when an instance is on either side and a !== b: the
+// hashes must agree, and only then is == asked, so a user __hash__/__eq__ pair
+// decides it. An identity-hashed operand matches nothing but itself. Twin of
+// rt.pyUserKeyEq in abnf/jsrt.go and pyUserKeyEq in
+// languages/python-interpreter.abnf.
+function pyUserKeyEq(a, b) {
+    if (pyIdHashed(a) || pyIdHashed(b)) { return false }
+    if (!pynWEq(pyHashW(a), pyHashW(b))) { return false }
+    var r = pyADunderBin("==", a, b)
+    return pyATruthy(r["v"])
+}
+function pyIdHashed(v) {
+    if (pyIsClass(v)) { return true }
+    var c = pyInstClassOf(v)
+    return c !== null && pyHashOwner(c)["how"] == 0
+}
+// The position of instance k among keys under that rule, or -1.
+function pyUserKeyFind(keys, k) {
+    var i = 0
+    while (i < keys.length) {
+        if (keys[i] === k || pyUserKeyEq(keys[i], k)) { return i }
+        i = i + 1
+    }
+    return 0 - 1
 }
 // A class's own __hash__ m on v: the answer must be an int, kept when it fits
 // 64 bits and hashed as an int otherwise.
@@ -6040,9 +6128,37 @@ function pyAIntOp(op, l, r) {
     return pyAFloorMod(pyNum(l), pyNum(r))
 }
 
+// SystemExit.code: None for no argument, the argument for one, the args tuple
+// for more. Go: pyExitCode.
+function pyExitCode(e) {
+    var args = e["args"]
+    if (!pyIsArr(args) || args.length == 0) { return undefined }
+    if (args.length == 1) { return args[0] }
+    return args
+}
+
+// An uncaught SystemExit ends the program quietly with its code as the exit
+// status: None is 0, an int is itself, anything else is printed to stderr and
+// the status is 1. Go: js_pyuncaught.
+function pyExitIfSystemExit(v) {
+    if (pyInstClassOf(v) === null || !pyDIsInstance(v, pyExcClass("SystemExit"))) { return undefined }
+    var code = anytype
+    code = pyExitCode(v)
+    if (code === undefined || code === null) { exit(0) }
+    if (typeof code == "boolean") {
+        if (code) { exit(1) }
+        exit(0)
+    }
+    if (typeof code == "number") { exit(code) }
+    eprintln(pyStr(code))
+    exit(1)
+    return undefined
+}
+
 // An exception that escaped the program: abort with CPython's last traceback
 // line. Go: js_pyuncaught in abnf/jsrt.go.
 function js_pyuncaught(v) {
+    pyExitIfSystemExit(v)
     var text = pyStr(v)
     var cls = pyInstClassOf(v)
     if (cls !== null) {
@@ -7512,7 +7628,11 @@ function js_pyspread(arr, it) {
 // place so the insertion order of the destination survives.
 function js_pykwspread(dst, src) {
     if (!pyIsDict(dst)) { fail("js_pykwspread needs a dict") }
-    if (!pyIsDict(src)) { fail("cannot unpack a " + typeof src + " with **") }
+    if (!pyIsDict(src)) {
+        // A mapping by protocol: pyDictUpdateFrom's keys() arm.
+        if (pyInstClassOf(src) !== null) { return pyDictUpdateFrom(dst, src) }
+        fail("cannot unpack a " + typeof src + " with **")
+    }
     var keys = dst["keys"]
     var vals = dst["vals"]
     var sk = src["keys"]
@@ -8541,7 +8661,7 @@ function pyBindCall(callee, pos, kw) {
     var flags = pyDSigFlags[si]
     if (!ext && !hasKw) {
         if (pos.length < pyDSigNreq[si] || (flags % 2 == 0 && pos.length > names.length && qual != "")) {
-            pyDArityCheck(si, pos.length, [])
+            pyDArityCheck(callee, si, pos.length, [])
         }
         return pos
     }
@@ -8557,7 +8677,7 @@ function pyBindCall(callee, pos, kw) {
                 i = i + 1
             }
         }
-        pyDArityCheck(si, pos.length, kn)
+        pyDArityCheck(callee, si, pos.length, kn)
     }
     i = 0
     while (i < n) {
@@ -8643,7 +8763,7 @@ function pyBindCall(callee, pos, kw) {
 // CPython's TypeError for a call that does not fit signature si: given
 // positionals plus the keyword names kn. Go: rt.pyArityCheck, which documents
 // the order.
-function pyDArityCheck(si, given, kn) {
+function pyDArityCheck(f, si, given, kn) {
     var names = pyDSigNames[si]
     var dflt = pyDSigDflt[si]
     var flags = pyDSigFlags[si]
@@ -8665,11 +8785,11 @@ function pyDArityCheck(si, given, kn) {
                 if (pyDUsed(kn, names[j])) { po = po == "" ? names[j] : po + ", " + names[j] }
                 j = j + 1
             }
-            if (po != "") { pyDArityFail(si, "got some positional-only arguments passed as keyword arguments: '" + po + "'") }
-            pyDArityFail(si, "got an unexpected keyword argument '" + kn[k] + "'" +
+            if (po != "") { pyDArityFail(f, si, "got some positional-only arguments passed as keyword arguments: '" + po + "'") }
+            pyDArityFail(f, si, "got an unexpected keyword argument '" + kn[k] + "'" +
                              pyDidYouMean(kn[k], names.slice(nposonly, names.length)))
         }
-        if (at >= 0 && at < npos && at < given) { pyDArityFail(si, "got multiple values for argument '" + kn[k] + "'") }
+        if (at >= 0 && at < npos && at < given) { pyDArityFail(f, si, "got multiple values for argument '" + kn[k] + "'") }
         k = k + 1
     }
     if (flags % 2 == 0 && given > npos) {
@@ -8692,7 +8812,7 @@ function pyDArityCheck(si, given, kn) {
             msg = msg + " positional argument" + (given == 1 ? "" : "s") + " (and " + kwGiven
                 + " keyword-only argument" + (kwGiven == 1 ? "" : "s") + ")"
         }
-        pyDArityFail(si, msg + (given == 1 && kwGiven == 0 ? " was given" : " were given"))
+        pyDArityFail(f, si, msg + (given == 1 && kwGiven == 0 ? " was given" : " were given"))
     }
     var miss = []
     j = given
@@ -8700,16 +8820,21 @@ function pyDArityCheck(si, given, kn) {
         if (!(j < dflt.length && dflt[j]) && (j < nposonly || !pyDUsed(kn, names[j]))) { miss.push(names[j]) }
         j = j + 1
     }
-    if (miss.length > 0) { pyDArityFail(si, pyDMissingMsg(miss, "positional")) }
+    if (miss.length > 0) { pyDArityFail(f, si, pyDMissingMsg(miss, "positional")) }
     j = npos
     while (j < names.length) {
         if (!(j < dflt.length && dflt[j]) && !pyDUsed(kn, names[j])) { miss.push(names[j]) }
         j = j + 1
     }
-    if (miss.length > 0) { pyDArityFail(si, pyDMissingMsg(miss, "keyword-only")) }
+    if (miss.length > 0) { pyDArityFail(f, si, pyDMissingMsg(miss, "keyword-only")) }
 }
 
-function pyDArityFail(si, msg) { pyRaiseExc("TypeError", pyDSigQual[si] + "() " + msg) }
+// The function's __qualname__ names it, an assigned one included.
+function pyDArityFail(f, si, msg) {
+    var q = pyFnQual(f)
+    if (q === undefined) { q = pyDSigQual[si] }
+    pyRaiseExc("TypeError", q + "() " + msg)
+}
 
 // CPython's missing_arguments, listing 'a' / 'a' and 'b' / 'a', 'b', and 'c'.
 function pyDMissingMsg(miss, kind) {
@@ -9169,6 +9294,12 @@ function pyDMethodCall(target, name, args, kw) {
         throw pyExcInstance("AttributeError",
                             "'" + pyTypeName(target) + "' object has no attribute '" + name + "'")
     }
+    // A function's own attribute holding a callable - f.g = g; f.g(3) - is
+    // called as it is read, with no receiver. Go: pyMethodCall's last arm.
+    if (typeof target == "function" && pyTypeName(target) == "function") {
+        var fa = pyFnAttrs(pyFnOwner(target), false)
+        if (fa !== undefined && pyDictFind(fa["keys"], name) >= 0) { return js_pycall(pyGetAttr(target, name), args, kw) }
+    }
     return pyMemberCall(target, name, args)
 }
 
@@ -9567,6 +9698,18 @@ function pyDictUpdateFrom(d, src) {
             return undefined
         }
     }
+    // A mapping by protocol - a dict subclass among them: its keys(), each read
+    // through its own subscript. Go: rt.pyDictUpdateFrom.
+    var cls = pyInstClassOf(src)
+    if (cls !== null && pyLookupHas(cls, "keys")) {
+        var mks = pyElemsOf(js_pycall(pyGetAttr(src, "keys"), [], undefined))
+        var ki = 0
+        while (ki < mks.length) {
+            pyDictSet(d, mks[ki], js_pyidx(src, mks[ki]))
+            ki = ki + 1
+        }
+        return undefined
+    }
     var items = pyElemsOf(src)
     var i = 0
     while (i < items.length) {
@@ -9651,12 +9794,13 @@ function pySetMethod(els, name, args) {
     if (name == "remove" || name == "discard") {
         pyHashCheckMember(pyEArgAt(args, 0))
         var ri = 0
-        while (ri < els.length) {
-            if (pyEqual(els[ri], pyEArgAt(args, 0))) {
-                pyCRemoveAt(els, ri)
-                return undefined
-            }
-            ri = ri + 1
+        if (pyInstClassOf(pyEArgAt(args, 0)) !== null) { ri = pyUserKeyFind(els, pyEArgAt(args, 0)) }
+        else {
+            while (ri < els.length && !pyEqual(els[ri], pyEArgAt(args, 0))) { ri = ri + 1 }
+        }
+        if (ri >= 0 && ri < els.length) {
+            pyCRemoveAt(els, ri)
+            return undefined
         }
         if (name == "remove") {
             throw pyExcInstanceV("KeyError", pyEArgAt(args, 0))
@@ -10019,6 +10163,36 @@ function js_pytype(v) {
     var cls = pyInstClassOf(v)
     if (cls !== null) { return cls }
     return pyBuiltinClass(pyTypeName(v))
+}
+
+// BaseException.add_note(self, note): appends to the instance's __notes__ list,
+// made on first use. Go: js_pyaddnote.
+function js_pyaddnote(self, note) {
+    if (typeof note != "string") { pyRaiseExc("TypeError", "add_note() argument must be str, not " + pyTypeName(note)) }
+    if (pyInstClassOf(self) === null) { return undefined }
+    if (self["__notes__"] === undefined) { pySetAttr(self, "__notes__", []) }
+    var notes = self["__notes__"]
+    if (!pyIsArr(notes) || pyIsTup(notes)) { pyRaiseExc("TypeError", "Cannot add note: __notes__ is not a list") }
+    notes.push(note)
+    return undefined
+}
+
+// type(name, bases, ns), or type() at any count but one and three: the class a
+// class statement with those bases and body would build. Go: js_pytypenew.
+function js_pytypenew(args) {
+    if (!pyIsArr(args) || args.length != 3) { pyRaiseExc("TypeError", "type() takes 1 or 3 arguments") }
+    var cls = js_pyclass_new(args[0], pyCCopyArr(pyElemsOf(args[1])))
+    cls["__module__"] = "__main__"
+    var ns = args[2]
+    if (pyIsDict(ns)) {
+        var i = 0
+        while (i < ns["keys"].length) {
+            js_pysetattr(cls, ns["keys"][i], ns["vals"][i])
+            i = i + 1
+        }
+    }
+    js_pysetnames(cls)
+    return cls
 }
 
 // isinstance(v, C) / isinstance(v, (A, B)): a walk of the instance's MRO.
