@@ -339,7 +339,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
 // {propdecl} per name rather than exactly one, and every name inherits the shared
 // modifiers and type hint.
 PropDecl    <~~ var pds = makeProps(takeAll()); for (var pi = 0; pi < pds.length; pi++) { push({propdecl: pds[pi]}) } ~~>
-            = [ AttrGrp ] { PropMod } [ TypeHint ] DollarName [ "=" Expression ]
+            = [ AttrGrp ] { PropMod } [ TypeHint ] DollarName <~~ cloNoteProp(up.in) ~~> [ "=" Expression ]
               { "," DollarName [ "=" Expression ] } ( ";" | PropHooks ) ;
 // PHP 8.4 property hooks: 'public int $x = 1 { get => e; set { ... } }' (and the
 // bodyless 'get;' / 'set;' of an abstract or interface property, which declares a hook
@@ -352,7 +352,7 @@ PropDecl    <~~ var pds = makeProps(takeAll()); for (var pi = 0; pi < pds.length
 PropHooks   <~~ push({hooks: takeAll()}) ~~>
             = "{" { PropHook } "}" ;
 PropHook    <~~ push(makeHook(takeAll())) ~~>
-            = [ AttrGrp ] { PropMod } [ "&" ] HookName <~~ push({hname: stripWs(up.in)}) ~~>
+            = [ AttrGrp ] { PropMod } [ "&" ] HookName <~~ push({hname: cloEnterHook(stripWs(up.in))}) ~~>
               ( HookArrow | HookBlock | ";" ) ;
 HookName    = ( "get" | "set" ) KwEnd ;
 HookArrow   <~~ push({harrow: pop()}) ~~> = [ ParamList ] "=>" Expression ";" ;
@@ -4567,6 +4567,14 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         cloStatic = false
     }
     function cloLeave() { return cloScopes.pop() }
+    // A property hook's name: twin of cloEnterHook in php-interpreter.abnf.
+    var cloProp = ""
+    function cloNoteProp(n) { cloProp = stripWs(n) }
+    function cloEnterHook(kind) {
+        var fn = cloProp + "::" + kind
+        cloScopes.push({name: cloClass + "::" + fn + "()", self: true, fn: fn, meth: cloClass + "::" + fn})
+        return kind
+    }
     // __FUNCTION__ / __METHOD__: twin of cloMagic in php-interpreter.abnf.
     function cloMagic(method) {
         if (cloScopes.length == 0) { return "" }
@@ -6126,6 +6134,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // RETURNS e; 'set => e' is a body that stores e in the backing property; a bodyless
     // 'get;' / 'set;' declares nothing to run and is dropped.
     function makeHook(items) {
+        cloLeave()
         var kind = ""
         var param = null
         var arrow = null

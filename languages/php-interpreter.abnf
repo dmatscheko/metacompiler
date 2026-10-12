@@ -309,7 +309,7 @@ SkipSqChar  = "\x00"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
 // modifiers and type hint. makeClassStmt already walks the member list, so N records
 // need no change there.
 PropDecl    <~~ var pds = makeProps(takeAll()); for (var pi = 0; pi < pds.length; pi++) { push({propdecl: pds[pi]}) } ~~>
-            = [ AttrGrp ] { PropMod } [ TypeHint ] DollarName [ "=" Expression ]
+            = [ AttrGrp ] { PropMod } [ TypeHint ] DollarName <~~ cloNoteProp(up.in) ~~> [ "=" Expression ]
               { "," DollarName [ "=" Expression ] } ( ";" | PropHooks ) ;
 // PHP 8.4 property hooks: 'public int $x = 1 { get => e; set { ... } }' (and the
 // bodyless 'get;' / 'set;' of an abstract or interface property, which declares a hook
@@ -322,7 +322,7 @@ PropDecl    <~~ var pds = makeProps(takeAll()); for (var pi = 0; pi < pds.length
 PropHooks   <~~ push({hooks: takeAll()}) ~~>
             = "{" { PropHook } "}" ;
 PropHook    <~~ push(makeHook(takeAll())) ~~>
-            = [ AttrGrp ] { PropMod } [ "&" ] HookName <~~ push({hname: stripWs(up.in)}) ~~>
+            = [ AttrGrp ] { PropMod } [ "&" ] HookName <~~ push({hname: cloEnterHook(stripWs(up.in))}) ~~>
               ( HookArrow | HookBlock | ";" ) ;
 HookName    = ( "get" | "set" ) KwEnd ;
 HookArrow   <~~ push({harrow: pop()}) ~~> = [ ParamList ] "=>" Expression ";" ;
@@ -4211,6 +4211,15 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         cloStatic = false
     }
     function cloLeave() { return cloScopes.pop() }
+    // A property hook is a method named "$prop::get" / "$prop::set"
+    // (zend_compile_property_hooks); cloProp is the property being declared.
+    var cloProp = ""
+    function cloNoteProp(n) { cloProp = stripWs(n) }
+    function cloEnterHook(kind) {
+        var fn = cloProp + "::" + kind
+        cloScopes.push({name: cloClass + "::" + fn + "()", self: true, fn: fn, meth: cloClass + "::" + fn})
+        return kind
+    }
     // __FUNCTION__ / __METHOD__ are compile-time constants of the function being
     // walked (zend_try_ct_eval_magic_const): its name, "Class::name" for __METHOD__
     // in a method, the closure's own name for both inside a closure, "" at the top
@@ -4585,6 +4594,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // RETURNS e; 'set => e' is a body that stores e in the backing property; a bodyless
     // 'get;' / 'set;' declares nothing to run and is dropped.
     function makeHook(items) {
+        cloLeave()
         var kind = ""
         var param = null
         var arrow = null

@@ -2578,6 +2578,11 @@ class S59C {
         return [$c(), __FUNCTION__, __METHOD__];
     }
 }
+class S59H {
+    public $p {
+        get => __FUNCTION__ . "|" . __METHOD__;
+    }
+}
 interface S59I {}
 interface S59J extends S59I {}
 class S59A implements S59J, Countable { function count(): int { return 3; } }
@@ -2608,7 +2613,7 @@ function s59() {
         && $f[4] === "s59f");
     $m = (new S59C)->m();
     check("mag2", $m[0] === "{closure:S59C::m():2577}|{closure:S59C::m():2577}|S59C"
-        && $m[1] === "m" && $m[2] === "S59C::m");
+        && $m[1] === "m" && $m[2] === "S59C::m" && (new S59H)->p === "\$p::get|S59H::\$p::get");
     check("spl1", class_exists('ArrayIterator') && class_exists('arrayobject') && class_exists("SplStack")
         && class_exists('SplObjectStorage') && interface_exists('SeekableIterator')
         && !class_exists('SeekableIterator') && is_subclass_of('SplQueue', 'SplDoublyLinkedList'));
