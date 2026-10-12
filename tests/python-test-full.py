@@ -5071,6 +5071,154 @@ def s100():
     Own.d = Named()
     check("prop10", log == ["Own.a", "Own.c"])
 
+# ===== SECTION 101: copy, dataclasses and dir() =====
+# copy.copy shares what the copy holds, copy.deepcopy copies it once per
+# object (a cycle comes back to the copy); a class's __copy__ / __deepcopy__
+# wins and an immutable value is itself. @dataclass generates __init__,
+# __repr__, __eq__, the orderings and the hash its flags ask for, with
+# CPython's argument errors; frozen=True refuses an assignment. dir() of a user
+# class or instance is the sorted merge of object's names, every class's own
+# members and the instance's attributes. A class's __dict__ holds its own
+# members. Rows from CPython 3.14.
+import copy
+from dataclasses import dataclass, field, fields, asdict, astuple, replace, is_dataclass, FrozenInstanceError
+
+class S101Node:
+    def __init__(self, v):
+        self.v = v
+        self.me = self
+
+class S101Own:
+    def __copy__(self):
+        return "copied"
+    def __deepcopy__(self, memo):
+        return "deep"
+
+@dataclass
+class S101P:
+    x: int
+    y: int = 0
+    tags: list = field(default_factory=list)
+
+@dataclass(frozen=True)
+class S101F:
+    a: int
+    b: str = "s"
+
+@dataclass(order=True)
+class S101O:
+    k: int
+    n: str
+
+@dataclass
+class S101Base:
+    a: int
+    b: int = 2
+
+@dataclass
+class S101Sub(S101Base):
+    c: int = 3
+    a: int = 9
+    def __post_init__(self):
+        self.total = self.a + self.b + self.c
+
+@dataclass
+class S101Opts:
+    a: int
+    b: list = field(default_factory=list, init=False, repr=False)
+    c: int = field(default=4, compare=False)
+
+class S101Dir:
+    x = 1
+    def m(self):
+        return self.__class__(2)
+
+class S101DirSub(S101Dir):
+    y: int = 2
+    def __init__(self, v=0):
+        self.z = v
+
+def s101():
+    a = [1, [2, 3], {"k": [4]}, (5, [6]), (7, 8)]
+    b = copy.copy(a)
+    d = copy.deepcopy(a)
+    a[1].append(9)
+    a[3][1].append(11)
+    check("cpy1", b[1] == [2, 3, 9] and d[1] == [2, 3] and d[3] == (5, [6]) and d[4] is a[4] and d[3] is not a[3]
+          and copy.copy((1, 2)) is not None and copy.deepcopy("s") == "s")
+    n = S101Node([1])
+    sh = copy.copy(n)
+    dp = copy.deepcopy(n)
+    n.v.append(2)
+    shared = [0]
+    pair = copy.deepcopy([shared, shared])
+    check("cpy2", sh.v == [1, 2] and dp.v == [1] and sh.me is n and dp.me is dp and pair[0] is pair[1]
+          and copy.copy(S101Own()) == "copied" and copy.deepcopy(S101Own()) == "deep")
+    e = ValueError("bad", 3)
+    e.note = "n"
+    ec = copy.copy(e)
+    check("cpy3", type(ec) is ValueError and ec.args == ("bad", 3) and ec.note == "n" and ec is not e)
+
+    p = S101P(1)
+    check("dc1", repr(p) == "S101P(x=1, y=0, tags=[])" and p == S101P(1) and p != S101P(2) and not (p == 3)
+          and S101P(1).tags is not S101P(1).tags and repr(S101P(3, 4, ["a"])) == "S101P(x=3, y=4, tags=['a'])")
+    msgs = []
+    for f in [lambda: S101P(), lambda: S101P(1, 2, 3, 4), lambda: S101P(1, z=2), lambda: S101P(1, x=2)]:
+        try:
+            f()
+        except TypeError as err:
+            msgs.append(str(err))
+    check("dc2", msgs == ["S101P.__init__() missing 1 required positional argument: 'x'",
+                          "S101P.__init__() takes from 2 to 4 positional arguments but 5 were given",
+                          "S101P.__init__() got an unexpected keyword argument 'z'",
+                          "S101P.__init__() got multiple values for argument 'x'"])
+    fr = S101F(1)
+    try:
+        fr.a = 2
+        msg = "no error"
+    except FrozenInstanceError as err:
+        msg = type(err).__name__ + ": " + str(err) + " " + str(isinstance(err, AttributeError))
+    try:
+        hash(p)
+        unh = "hashable"
+    except TypeError as err:
+        unh = str(err)
+    check("dc3", msg == "FrozenInstanceError: cannot assign to field 'a' True" and hash(fr) == hash((1, "s"))
+          and unh == "unhashable type: 'S101P'" and repr(fr) == "S101F(a=1, b='s')")
+    check("dc4", S101O(1, "b") < S101O(2, "a") and not (S101O(1, "b") < S101O(1, "a")) and S101O(1, "a") <= S101O(1, "a")
+          and [o.n for o in sorted([S101O(2, "x"), S101O(1, "y")])] == ["y", "x"]
+          and repr(S101Sub()) == "S101Sub(a=9, b=2, c=3)" and S101Sub.__match_args__ == ("a", "b", "c")
+          and S101Sub(1).total == 6 and S101P.__init__.__qualname__ == "S101P.__init__")
+    check("dc5", [f.name for f in fields(S101P)] == ["x", "y", "tags"] and asdict(S101P(1, 2, [S101P(3)])) ==
+          {"x": 1, "y": 2, "tags": [{"x": 3, "y": 0, "tags": []}]} and astuple(S101P(1)) == (1, 0, [])
+          and repr(replace(S101P(1), y=5)) == "S101P(x=1, y=5, tags=[])" and is_dataclass(S101P)
+          and is_dataclass(p) and not is_dataclass(1) and repr(S101Opts(1)) == "S101Opts(a=1, c=4)"
+          and S101Opts(1, c=9) == S101Opts(1, c=8) and S101Opts(1).b == [] and not hasattr(S101P, "tags"))
+    errs = []
+    class Mut:
+        a: list = []
+    class Order:
+        a: int = 1
+        b: int
+    for f in [lambda: field(default=1, default_factory=list), lambda: dataclass(Mut), lambda: dataclass(Order)]:
+        try:
+            f()
+        except (TypeError, ValueError) as err:
+            errs.append(str(err))
+    check("dc6", errs == ["cannot specify both default and default_factory",
+                          "mutable default <class 'list'> for field a is not allowed: use default_factory",
+                          "non-default argument 'b' follows default argument 'a'"])
+
+    o = S101DirSub(3)
+    o.w = 4
+    check("dir1", [n for n in dir(o) if not n.startswith("__")] == ["m", "w", "x", "y", "z"]
+          and dir(object) == sorted(dir(object)) and len(dir(object)) == 24
+          and "__init__" in dir(S101DirSub) and "__weakref__" in dir(S101Dir) and "__annotate_func__" in dir(o)
+          and "__annotate_func__" not in dir(S101Dir))
+    own = [k for k in S101DirSub.__dict__ if k in ("__module__", "x", "y", "m", "__init__")]
+    check("dir2", own == ["__module__", "y", "__init__"] and "x" not in S101DirSub.__dict__
+          and S101Dir.__dict__.get("x") == 1 and o.m().__class__ is S101DirSub and o.m().z == 2)
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -5169,5 +5317,6 @@ def main():
     s98() # SECTION-CALL 98
     s99() # SECTION-CALL 99
     s100() # SECTION-CALL 100
+    s101() # SECTION-CALL 101
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

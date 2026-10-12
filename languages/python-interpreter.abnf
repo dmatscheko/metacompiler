@@ -75,7 +75,13 @@ Known deviations, all deliberate:
   - Complex division is the textbook formula, not CPython's scaled (Smith)
     one, so a quotient can differ in the last digit.
   - An imported module binds its names flat, without a module object, so the
-    from-import style is the one that works.
+    from-import style is the one that works. copy and dataclasses are written
+    in Python (lib/python-copy.py, lib/python-dataclasses.py) and bind a module
+    object of their own besides; dataclass refuses slots, kw_only,
+    weakref_slot, KW_ONLY, InitVar and make_dataclass with NotImplementedError.
+  - dir() answers a user class, its instance and object; dir() without an
+    argument and dir() of a builtin value raise NotImplementedError. A class's
+    __dict__ is a copy of its own members, not a live mappingproxy.
   - async functions are defined and inspected, never awaited: there is no event
     loop.
   - The BUILT-IN method surface is a subset, and hasattr() answers exactly what
@@ -1103,6 +1109,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     include("lib/python-num.js")
     // "Did you mean" for an unexpected keyword argument.
     include("lib/python-suggest.js")
+    // The fixed names dir() of a user class answers.
+    include("lib/python-dir.js")
 
     // sin, cos, tan and atan2 are fdlibm's (lib/fdlibm.js), which agree with the
     // platform libm CPython calls where the host's Math does not: cos(pi/2) is
@@ -2358,6 +2366,44 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // vars(o) IS o.__dict__ - CPython's own definition - over the same pyattr
     // the `.` operator uses.
     hostGlobals["vars"] = function(o) { return pyattr(o, "__dict__") }
+    // dir(o) of a user class or of its instance. Twin of js_pydir in
+    // lib/python-rt.metajs, which explains what it answers and what it refuses.
+    hostGlobals["dir"] = function() {
+        if (arguments.length == 0) { pyRaise(pyMakeExc("NotImplementedError", ["dir() without an argument is not supported"])) }
+        var o = arguments[0]
+        if (o === hostGlobals["object"]) { return pydirObject.slice(0) }
+        var names = []
+        var cls = o
+        if (!(typeof o == "object" && o !== null && o.__isclass === true)) {
+            if (!pyUser(o)) { pyDirRefuse(o) }
+            cls = o.__class
+            var idk = instDict(o).keys
+            for (var i = 0; i < idk.length; i++) { names.push(idk[i]) }
+        }
+        var mro = clsMRO(cls)
+        var ann = false
+        var read = false
+        for (var m = 0; m < mro.length; m++) {
+            var k = mro[m]
+            if (k === hostGlobals["object"]) { continue }
+            if (!hasOwn(k, "__module__") || typeof k.__module__ != "string" || hasOwn(k, "__slots__")) { pyDirRefuse(o) }
+            var ck = pyClassDict(k).keys
+            for (var j = 0; j < ck.length; j++) { names.push(ck[j]) }
+            if (hasOwn(k, "__annotations__") && k.__annotations__.keys.length > 0) { ann = true }
+            if (k.__annread === true) {
+                ann = true
+                read = true
+            }
+        }
+        for (var b = 0; b < pydirObject.length; b++) { names.push(pydirObject[b]) }
+        for (var u = 0; u < pydirUserClass.length; u++) { names.push(pydirUserClass[u]) }
+        if (ann) { names.push("__annotate_func__") }
+        if (read) { names.push("__annotations_cache__") }
+        return pydirSorted(names)
+    }
+    function pyDirRefuse(o) {
+        pyRaise(pyMakeExc("NotImplementedError", ["dir() of a '" + pyTypeOf(o).__name + "' value is not supported"]))
+    }
 
     // ----- staticmethod / classmethod --------------------------------------
     //
@@ -2520,7 +2566,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return pySuperFind(o, name) != null
         }
         if (typeof o == "object" && o.__isclass == true) {
-            if (name == "__name__" || name == "__qualname__" || name == "__mro__" || name == "__bases__" || name == "mro") { return true }
+            if (name == "__name__" || name == "__qualname__" || name == "__mro__" || name == "__bases__" || name == "mro" || name == "__dict__") { return true }
             if (clsFind(o, name) != null || clsHas(o, name)) { return true }
             if (name == "__new__" || name == "__class__" || pyObjectMethod(name) != null) { return true }
             // What pyattr answers on a builtin TYPE OBJECT: dict.fromkeys, and the
@@ -10832,6 +10878,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 scopePut(cls, ns.__nskeys[k], ns[ns.__nskeys[k]])
                 pyNoteHook(ns.__nskeys[k])
             }
+            // The class's own members in definition order, which pySetAttr and
+            // pyDelAttr keep from here on (pyClassDict).
+            cls.__attrs = ns.__nskeys.slice(0)
             pySetNames(cls, ns.__nskeys)
             var ann = newDict()
             if (hasOwn(ns, "__annots")) {
@@ -11033,6 +11082,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (typeof o == "object" && o.__isclass == true) {
             if (name == "__name__") { return pyShortName(o.__name) }
             if (name == "__qualname__") { return pyClsQual(o) }
+            if (name == "__dict__") { return pyClassDict(o) }
+            // Reading a class's annotations is what dir() lists as
+            // __annotations_cache__ (hostGlobals["dir"]).
+            if (name == "__annotations__") { o.__annread = true }
             if (name == "__mro__" || name == "__bases__") { return pyTup(pyMroAttr(o, name)) }
             var cv = clsFind(o, name)
             if (cv != null) {
@@ -11168,8 +11221,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // engines AND CPython's own text for every builtin, which this project
         // will never carry; a function's __module__ needs the defining module
         // recorded at every def site.
-        // A user function's __qualname__ is the one its def or lambda recorded; a
-        // builtin's rides with __name__.
+        // A function's own attributes come first, so an assigned __name__ or
+        // __qualname__ is the one read back. A user function's __qualname__ is
+        // otherwise the one its def or lambda recorded; a builtin's rides with
+        // __name__.
+        if (typeof o == "function") {
+            var fa = pyFnAttrs(pyFnOwner(o), false)
+            var fi = fa == null ? -1 : dictFind(fa, name)
+            if (fi >= 0) { return fa.vals[fi] }
+            if (name == "__dict__" && pyTypeOf(o).__name == "function") { return pyFnAttrs(o, true) }
+        }
         if (typeof o == "function" && (name == "__name__" || name == "__qualname__")) {
             var bfnm = bfnName(o)
             if (bfnm !== undefined) { return bfnm }
@@ -11180,12 +11241,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // builtin functions are that module's members.
         if (typeof o == "function" && name == "__self__" && bfnCode(o) !== undefined) {
             return hostGlobals["builtins"]
-        }
-        if (typeof o == "function") {
-            var fa = pyFnAttrs(pyFnOwner(o), false)
-            var fi = fa == null ? -1 : dictFind(fa, name)
-            if (fi >= 0) { return fa.vals[fi] }
-            if (name == "__dict__" && pyTypeOf(o).__name == "function") { return pyFnAttrs(o, true) }
         }
         var na = pyNumAttr(o, name)
         if (na !== undefined) { return na }
@@ -11337,6 +11392,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (var k = 0; k < ks.length; k++) {
             if (o[ks[k]] !== pyDeleted && !(exc && pyExcSlot(ks[k]))) { dictSet(d, ks[k], o[ks[k]]) }
         }
+    }
+    // C.__dict__: a fresh dict of the class's own members in definition order,
+    // after __module__. Twin of rt.pyClassDict in abnf/jsrt.go, which explains it.
+    function pyClassDict(c) {
+        var d = newDict()
+        if (typeof c.__module__ == "string") { dictSet(d, "__module__", c.__module__) }
+        var ks = hasOwn(c, "__attrs") ? c.__attrs : []
+        for (var k = 0; k < ks.length; k++) { if (c[ks[k]] !== pyDeleted) { dictSet(d, ks[k], c[ks[k]]) } }
+        return d
     }
     // BaseException keeps these in C slots, not in its instances' __dict__.
     // Twin of pyExcSlot in abnf/jsrt.go and lib/python-rt.metajs.
@@ -11674,9 +11738,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (var i = fnNames.fns.length - 1; i >= 0; i--) { if (fnNames.fns[i] === f) { return fnNames.names[i] } }
         return "<lambda>"
     }
-    // A user function's __qualname__, or undefined for one no def or nested
-    // lambda recorded. Twin of pyFnQual in lib/python-rt.metajs.
+    // A user function's __qualname__: one assigned to it, else the one its def
+    // or nested lambda recorded, else undefined. Twin of pyFnQual in
+    // lib/python-rt.metajs.
     function fnQual(f) {
+        var fa = pyFnAttrs(f, false)
+        var ai = fa == null ? -1 : dictFind(fa, "__qualname__")
+        if (ai >= 0) { return "" + fa.vals[ai] }
         for (var i = fnNames.fns.length - 1; i >= 0; i--) { if (fnNames.fns[i] === f) { return fnNames.quals[i] } }
         return undefined
     }
@@ -12371,7 +12439,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // Python stdlib modules the runtime provides (resolveImport lives in
     // lib/interp-core.js; prefix match, so os.path resolves against "os").
-    core.stdlibImports = ["sys", "os", "math", "collections", "itertools", "functools", "re", "json", "typing", "random", "string", "time", "dataclasses", "abc", "builtins"]
+    core.stdlibImports = ["sys", "os", "math", "collections", "itertools", "functools", "re", "json", "typing", "random", "string", "time", "abc", "builtins"]
     // Project-file imports: 'import mypkg.helper' / 'from mypkg.helper import x'
     // look for mypkg/helper.py, then mypkg.py under the program's directory and
     // the -i roots (c.findImport). The file is parsed with this grammar and
@@ -12382,7 +12450,25 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var importedFiles = {}
     // The module whose file is being walked: a class records it as __module__.
     var pyCurMod = "__main__"
+    function pyCompileModule(file, text, modName) {
+        importedFiles["$" + file] = true
+        var asg = c.parse(c.agrammar, text, null, file)
+        c.pushSource(file, text)
+        var outerMod = pyCurMod
+        pyCurMod = modName
+        c.compile(asg)
+        pyCurMod = outerMod
+        c.popSource()
+    }
     core.importFile = function(path, pos) {
+        // copy and dataclasses are written in Python (lib/python-<name>.py) and
+        // compiled like a project file. Twin of the same arm in
+        // python-to-llvm-ir.abnf.
+        if (path == "copy" || path == "dataclasses") {
+            var lib = "lib/python-" + path + ".py"
+            if (importedFiles["$" + lib] != true) { pyCompileModule(lib, load(lib), path) }
+            return true
+        }
         var rel = path.split(".").join("/")
         var cands = [rel + ".py"]
         var cut = -1
@@ -12391,16 +12477,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (var i = 0; i < cands.length; i++) {
             var file = c.findImport(cands[i])
             if (file == "") { continue }
-            if (importedFiles["$" + file] == true) { return true }
-            importedFiles["$" + file] = true
-            var text = c.readFile(file)
-            var asg = c.parse(c.agrammar, text, null, file)
-            c.pushSource(file, text)
-            var outerMod = pyCurMod
-            pyCurMod = i == 0 ? path : path.substring(0, cut)
-            c.compile(asg)
-            pyCurMod = outerMod
-            c.popSource()
+            if (importedFiles["$" + file] != true) {
+                pyCompileModule(file, c.readFile(file), i == 0 ? path : path.substring(0, cut))
+            }
             return true
         }
         return false

@@ -1002,6 +1002,9 @@ python-num.js             <- python-rt.metajs, python interpreter (int's and
 python-suggest.js         <- python-rt.metajs, python interpreter (the "Did you
                              mean" of an unexpected keyword argument; Go twin:
                              abnf/jsrtpysuggest.go)
+python-dir.js             <- python-rt.metajs, python interpreter (the fixed
+                             names dir() of a user class answers; Go twin:
+                             pyDirObject in abnf/jsrt.go)
 java-chars.js             <- java-rt.metajs, java interpreter, csharp-rt.metajs,
                              csharp interpreter (Go twin: abnf/jsrtjavachars.go)
 java-strings.js           <- java-rt.metajs, java interpreter (String's methods
@@ -1041,6 +1044,9 @@ them, so one implementation serves all three engines), `java-lang.java` (the
 same for java.lang's StringBuilder, compiled when a program creates one),
 `php-stdlib.php` (both php grammars: PHP's array and string library and SPL WRITTEN IN
 PHP, compiled with a program that names one of its functions or classes),
+`python-copy.py` and `python-dataclasses.py` (both python grammars: the copy and
+dataclasses modules WRITTEN IN PYTHON, compiled with a program that imports
+them),
 `kotlin-decltypes.js` (both kotlin grammars: the static types an integer literal
 adopts - type arguments, declared and inferred names, class properties - read at
 walk time, and which `==` has an integer literal operand and so compares across

@@ -99,6 +99,8 @@ import "./hex-float.js"
 import "./python-num.js"
 // "Did you mean" for an unexpected keyword argument.
 import "./python-suggest.js"
+// The fixed names dir() of a user class answers.
+import "./python-dir.js"
 
 // sin, cos, tan and atan2 (math and the complex power), as the interpreter's.
 import "./fdlibm.js"
@@ -1091,9 +1093,14 @@ function pyClsQual(c) {
     return pyShortName(pyToStr(c["__name"]))
 }
 
-// A user function's __qualname__, the one its signature carries (js_pysig), or
-// undefined for a builtin. Go: rt.pyFnQual.
+// A user function's __qualname__: one assigned to it, else the one its
+// signature carries (js_pysig); undefined for a builtin. Go: rt.pyFnQual.
 function pyFnQual(f) {
+    var fa = pyFnAttrs(f, false)
+    if (fa !== undefined) {
+        var ai = pyDictFind(fa["keys"], "__qualname__")
+        if (ai >= 0) { return pyToStr(fa["vals"][ai]) }
+    }
     var si = pyDSigIndex(f)
     if (si < 0 || pyDSigQual[si] == "") { return undefined }
     return pyDSigQual[si]
@@ -1726,6 +1733,32 @@ function pyInstDictPull(inst) {
     return undefined
 }
 
+// C.__dict__: a fresh dict of the class's own members in definition order,
+// after __module__. CPython answers a read-only mappingproxy that also holds
+// __firstlineno__, __static_attributes__, __dict__, __weakref__ and __doc__;
+// a write to this copy does not reach the class. Python 3.14 keeps the
+// annotations behind __annotate_func__, out of the dict. Go: rt.pyClassDict.
+function pyClassDict(cls) {
+    var d = pyNewDict()
+    if (typeof cls["__module__"] == "string") { pyDictSet(d, "__module__", cls["__module__"]) }
+    var ord = cls["__ord"]
+    if (ord !== undefined) {
+        for (var i = 0; i < ord.length; i++) {
+            if (ord[i] != "__annotations__") { pyDictSet(d, ord[i], cls[ord[i]]) }
+        }
+    }
+    return d
+}
+
+// C.__annotations__: the class's own dict, or an empty one cached on a class
+// whose body held none - CPython does not inherit them. The read is what
+// dir() lists as __annotations_cache__ (js_pydir). Go: rt.pyClassAnnotations.
+function pyClassAnnotations(c) {
+    c["__annread"] = true
+    if (c["__annotations__"] === undefined) { c["__annotations__"] = pyNewDict() }
+    return c["__annotations__"]
+}
+
 function pyIsDunderKey(k) { return k.length >= 2 && k.charAt(0) == "_" && k.charAt(1) == "_" }
 
 function pyStrAt(xs, s) {
@@ -1740,8 +1773,8 @@ function pyExcSlot(k) {
            k == "__suppress_context__"
 }
 
-// Records name in the instance's __ord (pyInstanceDict), starting it at the
-// first __-prefixed attribute.
+// Records name in obj's __ord: an instance's starts at its first __-prefixed
+// attribute (pyInstanceDict), a class's at its first member (pyClassDict).
 function pyOrdNote(obj, name) {
     var ord = obj["__ord"]
     if (ord === undefined) {
@@ -1758,14 +1791,17 @@ function pyInstDictPush(d) {
     var inst = d["__owner"]
     if (inst === undefined) { return undefined }
     var ks = keysOf(inst)
+    var exc = pyIsExcClass(pyInstClassOf(inst))
     for (var i = 0; i < ks.length; i++) {
         var k = ks[i]
-        if (k.length >= 2 && k.charAt(0) == "_" && k.charAt(1) == "_") { continue }
+        if (exc && pyExcSlot(k)) { continue }
         delKey(inst, k)
     }
     var ord = inst["__ord"]
     if (ord !== undefined) {
-        for (var oi = 0; oi < ord.length; oi++) { if (pyIsDunderKey(ord[oi])) { delKey(inst, ord[oi]) } }
+        for (var oi = 0; oi < ord.length; oi++) {
+            if (pyIsDunderKey(ord[oi]) && !(exc && pyExcSlot(ord[oi]))) { delKey(inst, ord[oi]) }
+        }
         delKey(inst, "__ord")
     }
     if (inst["__nonek"] !== undefined) { inst["__nonek"] = [] }
@@ -1822,6 +1858,8 @@ function pyGetAttrRaw(obj, name) {
     if (pyIsClass(obj)) {
         if (name == "__name__") { return pyShortName(pyToStr(obj["__name"])) }
         if (name == "__qualname__") { return pyClsQual(obj) }
+        if (name == "__dict__") { return pyClassDict(obj) }
+        if (name == "__annotations__") { return pyClassAnnotations(obj) }
         if (name == "__mro__" || name == "__bases__") { return pyTup(pyMroAttr(obj, name)) }
         if (pyLookupHas(obj, name)) {
             var cv = pyLookupVal(obj, name)
@@ -1940,6 +1978,16 @@ function pyGetAttrRaw(obj, name) {
     // any other absent attribute). __doc__ needs a def's leading string statement
     // recorded in three engines AND CPython's own text for every builtin; a
     // function's __module__ needs the defining module recorded at every def site.
+    // A function's own attributes, and the dict holding them: first, so an
+    // assigned __name__ or __qualname__ is the one read back.
+    if (typeof obj == "function") {
+        var fad = pyFnAttrs(pyFnOwner(obj), false)
+        if (fad !== undefined) {
+            var fai = pyDictFind(fad["keys"], name)
+            if (fai >= 0) { return fad["vals"][fai] }
+        }
+        if (name == "__dict__" && pyTypeName(obj) == "function") { return pyFnAttrs(obj, true) }
+    }
     // A user function's __qualname__ is its signature's; a builtin's rides with
     // __name__ below.
     // len.__self__ is the builtins MODULE in CPython, not a receiver - the
@@ -1966,15 +2014,6 @@ function pyGetAttrRaw(obj, name) {
         if (bfc !== undefined) { return pyBBFnName(pyToStr(bfc)) }
         var fn = rtPairGet(pyBFnObjs, pyBFnNames, obj)
         if (fn !== undefined) { return fn }
-    }
-    // A function's own attributes, and the dict holding them.
-    if (typeof obj == "function") {
-        var fad = pyFnAttrs(pyFnOwner(obj), false)
-        if (fad !== undefined) {
-            var fai = pyDictFind(fad["keys"], name)
-            if (fai >= 0) { return fad["vals"][fai] }
-        }
-        if (name == "__dict__" && pyTypeName(obj) == "function") { return pyFnAttrs(obj, true) }
     }
     // A BOUND built-in method, so getattr(xs, "count")(1) answers as CPython
     // does. Ahead of pyGetMember because a dict literally has a "keys" property
@@ -2308,6 +2347,7 @@ function pySetAttrRaw(obj, name, v) {
         return v
     }
     if (pyIsClass(obj)) {
+        pyOrdNote(obj, name)
         pyPutAttr(obj, name, v)
         pyDNoteHook(name)
         return v
@@ -2749,6 +2789,51 @@ function pyDictFromKeys(ks, dv) {
 
 // vars(o) IS o.__dict__ - CPython's own definition.
 function js_pyvars(o) { return pyGetAttr(o, "__dict__") }
+
+// dir(o) of a user class or of its instance: the instance's attributes, the
+// own members of every class on the resolution order and the fixed names of
+// lib/python-dir.js, sorted. Refused: dir() without an argument (it needs the
+// calling scope's names) and dir() of any other value, or of a class with
+// __slots__ or a builtin base (they need every builtin type's member table).
+// Go: rt.pyDir.
+function js_pydir(args) {
+    if (args.length == 0) { pyRaiseExc("NotImplementedError", "dir() without an argument is not supported") }
+    var o = args[0]
+    if (o === pyBuiltinClass("object")) { return pyCCopyArr(pydirObject) }
+    var names = []
+    var cls = o
+    if (!pyIsClass(o)) {
+        cls = pyInstClassOf(o)
+        if (cls === null || cls === undefined || !pyIsClass(cls)) { pyDirRefuse(o) }
+        names = pyCCopyArr(pyInstanceDict(o)["keys"])
+    }
+    var mro = pyMRO(cls)
+    var ann = false
+    var read = false
+    for (var i = 0; i < mro.length; i++) {
+        var k = mro[i]
+        if (k === pyBuiltinClass("object")) { continue }
+        if (typeof k["__module__"] != "string" || k["__slots__"] !== undefined) { pyDirRefuse(o) }
+        var ks = pyClassDict(k)["keys"]
+        for (var j = 0; j < ks.length; j++) { names.push(ks[j]) }
+        var an = k["__annotations__"]
+        if (pyIsDict(an) && an["keys"].length > 0) { ann = true }
+        if (k["__annread"] === true) {
+            ann = true
+            read = true
+        }
+    }
+    for (var b = 0; b < pydirObject.length; b++) { names.push(pydirObject[b]) }
+    for (var u = 0; u < pydirUserClass.length; u++) { names.push(pydirUserClass[u]) }
+    if (ann) { names.push("__annotate_func__") }
+    if (read) { names.push("__annotations_cache__") }
+    return pydirSorted(names)
+}
+
+function pyDirRefuse(o) {
+    pyRaiseExc("NotImplementedError", "dir() of a '" + pyTypeName(o) + "' value is not supported")
+    return undefined
+}
 
 // abnf/jsrt.go's pyExcInstance: the class is a stable per-name object deriving from
 // one called Exception, so the name walk of pyIsInstance answers `except Exception`
@@ -6116,7 +6201,7 @@ function pyDHasAttr(obj, name) {
         return pySuperFind(obj, name) !== undefined
     }
     if (pyIsClass(obj)) {
-        if (name == "__name__" || name == "__qualname__" || name == "__mro__" || name == "__bases__" || name == "mro") { return true }
+        if (name == "__name__" || name == "__qualname__" || name == "__mro__" || name == "__bases__" || name == "mro" || name == "__dict__") { return true }
         return pyLookupHas(obj, name) || pyClassFallback(obj, name) !== null
     }
     var cls = pyInstClassOf(obj)
@@ -8974,6 +9059,10 @@ function pyDMethodCall(target, name, args, kw) {
         if (own !== undefined && pyIsCallable(own)) {
             return pyCall(own, pyBindCall(own, args, kw))
         }
+        // Any other value in an attribute - a type object (self.factory = list)
+        // or an instance with __call__ - is called the way a call expression
+        // calls it.
+        if (own !== undefined && own !== null) { return pyDCallPyValue(own, args, kw) }
         if (pyLookupHas(icls, name)) {
             var m = pyLookupVal(icls, name)
             if (pyDIsProp(m)) { return pyDCallPyValue(pyDPropGet(m, target, icls), args, kw) }
@@ -9000,9 +9089,9 @@ function pyDMethodCall(target, name, args, kw) {
         if (iom !== null) { return pyDCallPyValue(iom, rtPrepend(target, args), kw) }
         // A dict that also carries a __class falls through to the builtin dict
         // methods instead of aborting.
-        if (target["__dict"] === undefined) {
-            fail("'" + pyToStr(icls["__name"]) + "' object has no method '" + name + "'")
-        }
+        // Anything else the attribute read answers (self.__class__(...)) is
+        // called; an absent one is the read's AttributeError.
+        if (target["__dict"] === undefined) { return pyDCallPyValue(pyGetAttr(target, name), args, kw) }
     }
     // THE DICT AND SET METHOD SURFACE. Go: pySetMethod/pyDictMethod in
     // abnf/jsrt.go; the interpreter: the same two in

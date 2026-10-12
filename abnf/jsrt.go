@@ -3752,10 +3752,19 @@ func (rt *jsrt) pyClsQual(cls *jsObject) string {
 	return pyShortName(rt.pyClsName(cls))
 }
 
-// pyFnQual is a user function's __qualname__, the one its signature carries
-// (js_pysig); ok is false for a builtin.
+// pyFnQual is a user function's __qualname__: one assigned to it, else the
+// one its signature carries (js_pysig); ok is false for a builtin.
 func (rt *jsrt) pyFnQual(f interface{}) (string, bool) {
-	if f == nil || rt.pySigs == nil {
+	if f == nil {
+		return "", false
+	}
+	if d := rt.pyFuncAttrs(f, false); d != nil {
+		keys, vals, _ := dictParts(d)
+		if i := rt.dictFind(keys, "__qualname__"); i >= 0 {
+			return rt.toString(vals.elems[i]), true
+		}
+	}
+	if rt.pySigs == nil {
 		return "", false
 	}
 	if sig, ok := rt.pySigs[f]; ok && sig.qual != "" {
@@ -17331,6 +17340,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_pyvars": func(a []uint64) uint64 {
 			return w(rt.pyGetAttr(u(a[0]), "__dict__"))
 		},
+		"js_pydir": func(a []uint64) uint64 {
+			return w(rt.pyDir(rt.argArray(u(a[0]))))
+		},
 		"js_pysetattr3": func(a []uint64) uint64 {
 			args := rt.argArray(u(a[0]))
 			rt.pySetAttr(argAt(args, 0), rt.toString(argAt(args, 1)), argAt(args, 2))
@@ -19879,6 +19891,10 @@ func (rt *jsrt) pyGetAttrRaw(obj interface{}, name string) interface{} {
 				return rt.pyClsQual(cls)
 			}
 			return cls.props["__name"]
+		case "__dict__":
+			return rt.pyClassDict(cls)
+		case "__annotations__":
+			return rt.pyClassAnnotations(cls)
 		case "__name__":
 			if n, ok := cls.props["__name"].(string); ok {
 				return pyShortName(n)
@@ -20040,6 +20056,17 @@ func (rt *jsrt) pyGetAttrRaw(obj interface{}, name string) interface{} {
 	// three engines AND CPython's own text for every builtin, which this project
 	// will never carry; a function's __module__ needs the defining module
 	// recorded at every def site.
+	// A function's own attributes, and the dict holding them: first, so an
+	// assigned __name__ or __qualname__ is the one read back.
+	if isCallable(obj) {
+		if d, i := rt.pyFuncAttrIdx(obj, name); i >= 0 {
+			_, vals, _ := dictParts(d)
+			return vals.elems[i]
+		}
+		if name == "__dict__" && pyTypeName(rt, obj) == "function" {
+			return rt.pyFuncAttrs(obj, true)
+		}
+	}
 	// A user function's __qualname__ is its signature's; a builtin's rides with
 	// __name__ below.
 	if name == "__qualname__" {
@@ -20074,16 +20101,6 @@ func (rt *jsrt) pyGetAttrRaw(obj interface{}, name string) interface{} {
 		}
 		if fn, ok := rt.pyFuncNames[obj]; ok {
 			return fn
-		}
-	}
-	// A function's own attributes, and the dict holding them.
-	if isCallable(obj) {
-		if d, i := rt.pyFuncAttrIdx(obj, name); i >= 0 {
-			_, vals, _ := dictParts(d)
-			return vals.elems[i]
-		}
-		if name == "__dict__" && pyTypeName(rt, obj) == "function" {
-			return rt.pyFuncAttrs(obj, true)
 		}
 	}
 	// A BOUND built-in method, so getattr(xs, "count")(1) is
@@ -20216,6 +20233,122 @@ func pyInstDictPull(inst, d *jsObject) {
 	}
 }
 
+// pyClassDict is C.__dict__: a fresh dict of the class's own members in
+// definition order, after __module__ and without the annotations (Python 3.14
+// keeps them behind __annotate_func__) - a copy, where CPython answers a
+// read-only mappingproxy. Twin of pyClassDict in lib/python-rt.metajs.
+func (rt *jsrt) pyClassDict(cls *jsObject) interface{} {
+	d := newJSObject()
+	keys, vals := &jsArray{}, &jsArray{}
+	d.set("__dict", true)
+	d.set("keys", keys)
+	d.set("vals", vals)
+	if m, ok := cls.props["__module__"].(string); ok {
+		dictAppend(keys, vals, "__module__", m)
+	}
+	for _, k := range cls.keys {
+		if (len(k) >= 2 && k[0] == '_' && k[1] == '_' && !pyIsNotedDunder(cls, k)) || k == "__annotations__" {
+			continue
+		}
+		dictAppend(keys, vals, k, cls.props[k])
+	}
+	return d
+}
+
+// pyClassAnnotations is C.__annotations__: the class's own dict, or an empty
+// one cached on a class whose body held none - CPython does not inherit them.
+// The read is what dir() lists as __annotations_cache__ (pyDir). Twin of
+// pyClassAnnotations in lib/python-rt.metajs.
+func (rt *jsrt) pyClassAnnotations(cls *jsObject) interface{} {
+	cls.set("__annread", true)
+	if a, ok := cls.props["__annotations__"]; ok {
+		return a
+	}
+	d := newJSObject()
+	d.set("__dict", true)
+	d.set("keys", &jsArray{})
+	d.set("vals", &jsArray{})
+	cls.set("__annotations__", d)
+	return d
+}
+
+// pyDirObject and pyDirUserClass are lib/python-dir.js's pydirObject and
+// pydirUserClass: what object and a class statement give a user class's dir().
+var pyDirObject = []string{"__class__", "__delattr__", "__dir__", "__doc__", "__eq__", "__format__", "__ge__",
+	"__getattribute__", "__getstate__", "__gt__", "__hash__", "__init__",
+	"__init_subclass__", "__le__", "__lt__", "__ne__", "__new__", "__reduce__",
+	"__reduce_ex__", "__repr__", "__setattr__", "__sizeof__", "__str__",
+	"__subclasshook__"}
+var pyDirUserClass = []string{"__dict__", "__firstlineno__", "__module__", "__static_attributes__", "__weakref__"}
+
+// pyDir is dir(o) of a user class or of its instance. Twin of js_pydir in
+// lib/python-rt.metajs, which explains what it answers and what it refuses.
+func (rt *jsrt) pyDir(args []interface{}) interface{} {
+	if len(args) == 0 {
+		panic(&jsThrown{value: rt.pyExcInstance("NotImplementedError", "dir() without an argument is not supported")})
+	}
+	o := args[0]
+	if o == interface{}(rt.pyBuiltinClass("object")) {
+		out := &jsArray{}
+		for _, n := range pyDirObject {
+			out.elems = append(out.elems, n)
+		}
+		return out
+	}
+	refuse := func() {
+		panic(&jsThrown{value: rt.pyExcInstance("NotImplementedError",
+			"dir() of a '"+pyTypeName(rt, o)+"' value is not supported")})
+	}
+	var names []string
+	cls, isCls := pyClassObj(o)
+	if !isCls {
+		inst, c, ok := pyInstance(o)
+		if !ok {
+			refuse()
+		}
+		cls = c
+		keys, _, _ := dictParts(rt.pyInstanceDict(inst))
+		for _, k := range keys.elems {
+			names = append(names, rt.toString(k))
+		}
+	}
+	ann, read := false, false
+	for _, k := range pyMRO(cls) {
+		if k == rt.pyBuiltinClass("object") {
+			continue
+		}
+		_, hasSlots := k.props["__slots__"]
+		if _, user := k.props["__module__"].(string); !user || hasSlots {
+			refuse()
+		}
+		keys, _, _ := dictParts(rt.pyClassDict(k))
+		for _, n := range keys.elems {
+			names = append(names, rt.toString(n))
+		}
+		if ak, _, ok := dictParts(k.props["__annotations__"]); ok && len(ak.elems) > 0 {
+			ann = true
+		}
+		if k.props["__annread"] == true {
+			ann, read = true, true
+		}
+	}
+	names = append(append(names, pyDirObject...), pyDirUserClass...)
+	if ann {
+		names = append(names, "__annotate_func__")
+	}
+	if read {
+		names = append(names, "__annotations_cache__")
+	}
+	sort.Strings(names)
+	out := &jsArray{}
+	for i, n := range names {
+		if i == 0 || n != names[i-1] {
+			out.elems = append(out.elems, n)
+		}
+	}
+	return out
+}
+
 func pyExcSlot(k string) bool {
 	switch k {
 	case "args", "__cause__", "__context__", "__traceback__", "__suppress_context__":
@@ -20261,9 +20394,13 @@ func pyInstDictPush(dv interface{}) {
 	if !ok {
 		return
 	}
+	exc := false
+	if cls, ok := inst.props["__class"].(*jsObject); ok {
+		exc = pyIsExcClass(cls)
+	}
 	kept := inst.keys[:0]
 	for _, k := range inst.keys {
-		if len(k) >= 2 && k[0] == '_' && k[1] == '_' && !pyIsNotedDunder(inst, k) {
+		if (len(k) >= 2 && k[0] == '_' && k[1] == '_' && !pyIsNotedDunder(inst, k)) || (exc && pyExcSlot(k)) {
 			kept = append(kept, k)
 		} else {
 			delete(inst.props, k)
@@ -20314,6 +20451,7 @@ func (rt *jsrt) pySetAttrRaw(obj interface{}, name string, v interface{}) {
 		return
 	}
 	if cls, ok := pyClassObj(obj); ok {
+		pyNoteDunder(cls, name)
 		cls.set(name, v)
 		rt.pyNoteHook(name)
 		return
@@ -20607,6 +20745,12 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 		if v, found := inst.props[name]; found && isCallable(v) {
 			return rt.call(v, jsUndef, rt.pyBindCall(v, args, kw)) // A plain function in an attribute.
 		}
+		// Any other value in an attribute - a type object (self.factory = list)
+		// or an instance with __call__ - is called the way a call expression
+		// calls it. Twin of the same arm in lib/python-rt.metajs.
+		if v, found := inst.props[name]; found && !isUndefOrNull(v) {
+			return rt.callPyValue(v, args, kw)
+		}
 		if m, found := pyLookup(cls, name); found {
 			if p, isProp := pyPropOf(m); isProp {
 				return rt.callPyValue(rt.pyPropGet(p, target, cls), args, kw)
@@ -20635,8 +20779,11 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 		if m := rt.pyObjectMethod(name); m != nil {
 			return rt.callPyValue(m, append([]interface{}{target}, args...), kw)
 		}
+		// Anything else the attribute read answers (self.__class__(...)) is
+		// called; an absent one is the read's AttributeError. Twin of the
+		// same arm in lib/python-rt.metajs.
 		if _, isDict := inst.props["__dict"]; !isDict {
-			rt.fail("'%s' object has no method '%s'", rt.toString(cls.props["__name"]), name)
+			return rt.callPyValue(rt.pyGetAttr(target, name), args, kw)
 		}
 	}
 	// list.count(x). rt.memberCall's `count` arm is KOTLIN's
@@ -21913,7 +22060,7 @@ func (rt *jsrt) pyHasAttrRaw(obj interface{}, name string) bool {
 		return found
 	}
 	if cls, ok := pyClassObj(obj); ok {
-		if name == "__name__" || name == "__qualname__" || name == "__mro__" || name == "__bases__" || name == "mro" {
+		if name == "__name__" || name == "__qualname__" || name == "__mro__" || name == "__bases__" || name == "mro" || name == "__dict__" {
 			return true
 		}
 		_, found := pyLookup(cls, name)

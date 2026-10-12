@@ -68,6 +68,10 @@ statement's finally ran). A bare 'raise' re-raises the active exception, 'raise 
 from e' records e as X.__cause__, and 'except* T as g' (PEP 654) runs every clause
 whose type matches part of an ExceptionGroup, each with its own sub-group.
 
+copy and dataclasses are Python sources (lib/python-copy.py, lib/python-dataclasses.py)
+compiled with a program that imports them, the same ones the interpreter grammar runs;
+python-interpreter.abnf's description lists what they refuse, and what dir() does.
+
 Type syntax: annotations are recorded in the enclosing body's __annotations__, PEP
 695 'type NAME = TYPE' binds an alias object with __name__ and __value__, and
 list[int] is a generic alias value (one object per written alias, so two of them
@@ -4396,6 +4400,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b = declBuiltin(b, "delattr", "js_pydel_attr", 2)
         // vars(o) IS o.__dict__ - CPython's own definition.
         b = declBuiltin(b, "vars", "js_pyvars", 1)
+        b = declBuiltin(b, "dir", "js_pydir", 0)
         b = declBuiltin(b, "format", "js_pyformatfn", 0)
         // staticmethod / classmethod. The builtin only WRAPS; the unwrapping
         // happens at the class-member lookup, which is the one place that knows
@@ -4641,7 +4646,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // Python stdlib modules the runtime provides (prefix match, so os.path
     // resolves against "os").
-    core.stdlibImports = ["sys", "os", "math", "collections", "itertools", "functools", "re", "json", "typing", "random", "string", "time", "dataclasses", "abc", "builtins"]
+    core.stdlibImports = ["sys", "os", "math", "collections", "itertools", "functools", "re", "json", "typing", "random", "string", "time", "abc", "builtins"]
     // Project-file imports: 'import mypkg.helper' / 'from mypkg.helper import x'
     // look for mypkg/helper.py, then mypkg.py under the program's directory and
     // the -i roots (c.findImport). The file is parsed with this grammar and
@@ -4655,7 +4660,27 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // The module whose file is being walked: a class records it as __module__.
     var pyCurMod = "__main__"
     // imported files top-level items: stashImported / emitImported (compile-core)
+    function pyCompileModule(file, text, modName) {
+        importedFiles["$" + file] = true
+        var asg = c.parse(c.agrammar, text, null, file)
+        c.pushSource(file, text)
+        importDepth = importDepth + 1
+        var outerMod = pyCurMod
+        pyCurMod = modName
+        c.compile(asg)
+        pyCurMod = outerMod
+        importDepth = importDepth - 1
+        c.popSource()
+    }
     core.importFile = function(path, pos) {
+        // copy and dataclasses are written in Python (lib/python-<name>.py) and
+        // compiled like a project file. Twin of the same arm in
+        // python-interpreter.abnf.
+        if (path == "copy" || path == "dataclasses") {
+            var lib = "lib/python-" + path + ".py"
+            if (importedFiles["$" + lib] != true) { pyCompileModule(lib, load(lib), path) }
+            return true
+        }
         var rel = path.split(".").join("/")
         var cands = [rel + ".py"]
         var cut = -1
@@ -4664,18 +4689,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (var i = 0; i < cands.length; i++) {
             var file = c.findImport(cands[i])
             if (file == "") { continue }
-            if (importedFiles["$" + file] == true) { return true }
-            importedFiles["$" + file] = true
-            var text = c.readFile(file)
-            var asg = c.parse(c.agrammar, text, null, file)
-            c.pushSource(file, text)
-            importDepth = importDepth + 1
-            var outerMod = pyCurMod
-            pyCurMod = i == 0 ? path : path.substring(0, cut)
-            c.compile(asg)
-            pyCurMod = outerMod
-            importDepth = importDepth - 1
-            c.popSource()
+            if (importedFiles["$" + file] != true) {
+                pyCompileModule(file, c.readFile(file), i == 0 ? path : path.substring(0, cut))
+            }
             return true
         }
         return false
