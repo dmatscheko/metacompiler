@@ -4898,6 +4898,39 @@ def s98():
     check("arity8", err(lambda: gen()) == "s98.<locals>.gen() missing 1 required positional argument: 'a'"
           and err(lambda: f(None)) == "no error" and err(lambda: h(None, k=None, j=None)) == "no error")
 
+# ===== SECTION 99: an instance's __dict__ is its attribute storage =====
+# o.__dict__ is the same dict at every read, and a write through either side
+# is seen through the other: an item store, an item delete or a dict method
+# changes the attributes, an attribute write or delete changes a dict read
+# earlier. A deleted then re-created attribute goes last. Rows from CPython
+# 3.14.
+class S99P:
+    cv = 9
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+def s99():
+    o = S99P(a=1, b=None)
+    check("dict1", o.a == 1 and o.b is None and hasattr(o, "b") and vars(o) == {"a": 1, "b": None})
+    d = o.__dict__
+    o.__dict__["x"] = 2
+    o.z = 3
+    check("dict2", hasattr(o, "x") and o.x == 2 and list(d.items()) == [("a", 1), ("b", None), ("x", 2), ("z", 3)]
+          and d is o.__dict__ and vars(o) is d)
+    del d["a"]
+    o.b = 4
+    check("dict3", not hasattr(o, "a") and d == {"b": 4, "x": 2, "z": 3})
+    del o.x
+    o.x = 5
+    check("dict4", list(d) == ["b", "z", "x"] and d.pop("z") == 3 and not hasattr(o, "z"))
+    d.setdefault("s", 6)
+    vars(o)["w"] = 7
+    check("dict5", o.s == 6 and o.w == 7 and len(d) == 4 and d.get("q", 8) == 8)
+    d.clear()
+    check("dict6", o.__dict__ == {} and not hasattr(o, "b") and o.cv == 9)
+    o.k = 1
+    check("dict7", d == {"k": 1} and type(d).__name__ == "dict" and S99P(i=1).__dict__ is not d)
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -4994,5 +5027,6 @@ def main():
     s95() # SECTION-CALL 95
     s96() # SECTION-CALL 96
     s98() # SECTION-CALL 98
+    s99() # SECTION-CALL 99
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

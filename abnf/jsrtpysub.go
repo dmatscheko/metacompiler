@@ -1351,4 +1351,7 @@ func (rt *jsrt) pyDelAttrRaw(obj interface{}, name string) {
 			break
 		}
 	}
+	if d, has := o.props["__pydict"].(*jsObject); has {
+		pyInstDictPull(o, d)
+	}
 }

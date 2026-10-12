@@ -5800,7 +5800,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (pyForeignMethod(target, name)) { pyAttrErr(target, name) }
                 fail("unknown dict method: " + name)
             }
-            if (pyIsDictMethod(name)) { return pyDictMethod(target, name, args, kw) }
+            if (pyIsDictMethod(name)) {
+                var dr = pyDictMethod(target, name, args, kw)
+                if (target.__owner != undefined) { pyInstDictPush(target) }
+                return dr
+            }
             var ddel = pyValDunder(target, name)
             if (ddel != null) { return ddel.apply(undefined, [target].concat(args)) }
             if (pyIsSetOnly(name)) { pyAttrErr(target, name) }
@@ -9833,7 +9837,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var si = clsFind(o.__class, "__setitem__")
             if (si != null) { si(o, idx, v); return }
         }
-        if (isDict(o) && !isSet(o)) { dictSet(o, idx, v); return }
+        if (isDict(o) && !isSet(o)) {
+            dictSet(o, idx, v)
+            if (o.__owner != undefined) { pyInstDictPush(o) }
+            return
+        }
         if (!Array.isArray(o) || isTup(o)) { pyNoItemOp(o, false) }
         var pos = pySeqIdx(o, idx)
         if (pos < 0) pos += o.length
@@ -10014,6 +10022,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (pyUser(o)) { pyRaise(pyMakeExc("AttributeError", ["'" + pyTypeOf(o).__name + "' object has no attribute '" + name + "'"])) }
         }
         scopePut(o, name, pyDeleted)
+        // A re-created attribute goes LAST in __dict__, as in CPython.
+        if (hasOwn(o, "__attrs")) {
+            var ai = o.__attrs.indexOf(name)
+            if (ai >= 0) { listRemoveAt(o.__attrs, ai) }
+        }
+        if (o.__pydict != undefined) { pyInstDictPull(o) }
     }
     // del o[idx].
     function pyDelItem(o, idx) {
@@ -10027,6 +10041,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             listRemoveAt(o.keys, di)
             listRemoveAt(o.vals, di)
             o.__idx = null
+            if (o.__owner != undefined) { pyInstDictPush(o) }
             return
         }
         if (!Array.isArray(o) || isTup(o)) { pyNoItemOp(o, true) }
@@ -10904,11 +10919,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         } else {
             pyNoteHook(name)
         }
-        if (!hasOwn(o, name)) {
+        if (!hasOwn(o, name) || o[name] === pyDeleted) {
             if (!hasOwn(o, "__attrs")) { o.__attrs = [] }
             o.__attrs.push(name)
         }
         scopePut(o, name, v)
+        if (o.__pydict != undefined) { pyInstDictPull(o) }
     }
     function pyattr(o, name, raw) {
         if (pyHooks > 0 && raw !== true && pyHasGetHook(o)) { return pyHookGet(o, name) }
@@ -11209,12 +11225,41 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "denominator") { return 1 }
         return undefined
     }
-    // The instance attribute dict. pySetAttr records the order it created names in.
+    // An instance's __dict__ is ONE dict, cached on it as __pydict and pointing
+    // back through __owner, so it is the same object at every read and stays in
+    // step both ways: pyInstDictPull refills it after an attribute write or
+    // delete, pyInstDictPush rewrites the attributes after an item store, an
+    // item delete or a method call on the dict itself. pySetAttr records the
+    // order names were created in (__attrs). Twin of pyInstanceDict in
+    // abnf/jsrt.go and lib/python-rt.metajs.
     function instDict(o) {
-        var d = newDict()
+        if (o.__pydict == undefined) {
+            var d = newDict()
+            d.__owner = o
+            o.__pydict = d
+        }
+        pyInstDictPull(o)
+        return o.__pydict
+    }
+    function pyInstDictPull(o) {
+        var d = o.__pydict
+        d.keys = []
+        d.vals = []
+        d.__idx = null
         var ks = hasOwn(o, "__attrs") ? o.__attrs : []
-        for (var k = 0; k < ks.length; k++) { if (hasOwn(o, ks[k])) { dictSet(d, ks[k], o[ks[k]]) } }
-        return d
+        for (var k = 0; k < ks.length; k++) { if (o[ks[k]] !== pyDeleted) { dictSet(d, ks[k], o[ks[k]]) } }
+    }
+    function pyInstDictPush(d) {
+        var o = d.__owner
+        var ks = hasOwn(o, "__attrs") ? o.__attrs : []
+        for (var k = 0; k < ks.length; k++) { scopePut(o, ks[k], pyDeleted) }
+        o.__attrs = []
+        for (var j = 0; j < d.keys.length; j++) {
+            if (typeof d.keys[j] == "string") {
+                scopePut(o, d.keys[j], d.vals[j])
+                o.__attrs.push(d.keys[j])
+            }
+        }
     }
     function bindMethod(self, f, name) {
         var b = function() {

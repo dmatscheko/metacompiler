@@ -1655,18 +1655,57 @@ function pyDescriptor(v, hook) {
     return m
 }
 
-// An instance's own attributes as a Python dict (pyInstanceDict). The __-prefixed
-// slots are internal and are skipped, which is what Go does with inst.keys.
+// An instance's own attributes as a Python dict (pyInstanceDict): ONE dict,
+// cached as __pydict, kept in step both ways (Go: rt.pyInstanceDict, which
+// explains the scheme). The __-prefixed slots are internal and are skipped,
+// which is what Go does with inst.keys.
 function pyInstanceDict(inst) {
-    var d = pyNewDict()
+    var d = inst["__pydict"]
+    if (d === undefined) {
+        d = pyNewDict()
+        d["__owner"] = inst
+        inst["__pydict"] = d
+    }
+    pyInstDictPull(inst)
+    return d
+}
+
+function pyInstDictPull(inst) {
+    var d = inst["__pydict"]
+    var dk = d["keys"]
+    var dv = d["vals"]
+    while (dk.length > 0) {
+        dk.pop()
+        dv.pop()
+    }
     var ks = keysOf(inst)
     for (var i = 0; i < ks.length; i++) {
         var k = ks[i]
         if (k.length >= 2 && k.charAt(0) == "_" && k.charAt(1) == "_") { continue }
-        d["keys"].push(k)
-        d["vals"].push(inst[k])
+        dk.push(k)
+        dv.push(inst[k])
     }
-    return d
+    return undefined
+}
+
+// After a mutation of dict d: when it is an instance's __dict__, the
+// instance's attributes become its entries. Go: pyInstDictPush.
+function pyInstDictPush(d) {
+    var inst = d["__owner"]
+    if (inst === undefined) { return undefined }
+    var ks = keysOf(inst)
+    for (var i = 0; i < ks.length; i++) {
+        var k = ks[i]
+        if (k.length >= 2 && k.charAt(0) == "_" && k.charAt(1) == "_") { continue }
+        delKey(inst, k)
+    }
+    if (inst["__nonek"] !== undefined) { inst["__nonek"] = [] }
+    var dk = d["keys"]
+    var dv = d["vals"]
+    for (var j = 0; j < dk.length; j++) {
+        if (typeof dk[j] == "string") { pyPutAttr(inst, dk[j], dv[j]) }
+    }
+    return undefined
 }
 
 // C.__mro__ and C.__bases__. The class chains here leave out `object`, which owns
@@ -2184,6 +2223,7 @@ function pySetAttrRaw(obj, name, v) {
         }
         if (!pySlotsAllow(cls, name)) { pyAttrError(cls, name) }
         pyPutAttr(obj, name, v)
+        if (obj["__pydict"] !== undefined) { pyInstDictPull(obj) }
         return v
     }
     if (pyIsClass(obj)) {
@@ -7145,6 +7185,7 @@ function js_pyset(c, k, v) {
     }
     if (pyIsDict(c)) {
         pyDictSet(c, k, v)
+        pyInstDictPush(c)
         return undefined
     }
     if (!pyIsArr(c) || pyIsTup(c)) { pyNoItemOp(c, false) }
@@ -7565,6 +7606,7 @@ function js_pydel_item(c, k) {
         if (i < 0) { pyRaiseExcV("KeyError", k) }
         pyCRemoveAt(keys, i)
         pyCRemoveAt(vals, i)
+        pyInstDictPush(c)
         return undefined
     }
     if (!pyIsArr(c) || pyIsTup(c)) { pyNoItemOp(c, true) }
@@ -8172,6 +8214,7 @@ function pyDDelAttr(obj, name) {
             if (nk[ni] === dname) { pyCRemoveAt(nk, ni) } else { ni = ni + 1 }
         }
     }
+    if (dcls !== null && obj["__pydict"] !== undefined) { pyInstDictPull(obj) }
     return undefined
 }
 
@@ -8887,7 +8930,11 @@ function pyDMethodCall(target, name, args, kw) {
         return true
     }
     if (pyIsDict(target)) {
-        if (pyIsDictMethod(name)) { return pyDictMethod(target, name, args, kw) }
+        if (pyIsDictMethod(name)) {
+            var dr = pyDictMethod(target, name, args, kw)
+            pyInstDictPush(target)
+            return dr
+        }
         if (pyIsSetOnly(name)) {
             throw pyExcInstance("AttributeError",
                                 "'" + pyTypeName(target) + "' object has no attribute '" + name + "'")

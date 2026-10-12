@@ -14953,6 +14953,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				} else {
 					dictAppend(keys, vals, u(a[1]), u(a[2]))
 				}
+				pyInstDictPush(u(a[0]))
 				return 0
 			}
 			arr, ok := u(a[0]).(*jsArray)
@@ -16561,6 +16562,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				keys.dropIdx()
 				keys.elems = append(keys.elems[:i], keys.elems[i+1:]...)
 				vals.elems = append(vals.elems[:i], vals.elems[i+1:]...)
+				pyInstDictPush(u(a[0]))
 				return 0
 			}
 			arr, ok := u(a[0]).(*jsArray)
@@ -20119,19 +20121,64 @@ func pyNumAttr(v interface{}, name string) (interface{}, bool) {
 }
 
 // pyInstanceDict renders an instance's own attributes as a Python dict.
+// It is ONE dict, cached on the instance as __pydict and pointing back
+// through __owner, so it is the same object at every read and stays in step
+// both ways: pyInstDictPull refills it after an attribute write or delete,
+// pyInstDictPush rewrites the attributes after an item store, an item delete
+// or a method call on the dict itself. Twin of instDict in
+// python-interpreter.abnf and pyInstanceDict in lib/python-rt.metajs.
 func (rt *jsrt) pyInstanceDict(inst *jsObject) interface{} {
-	keys, vals := &jsArray{}, &jsArray{}
+	d, ok := inst.props["__pydict"].(*jsObject)
+	if !ok {
+		d = newJSObject()
+		d.set("__dict", true)
+		d.set("keys", &jsArray{})
+		d.set("vals", &jsArray{})
+		d.set("__owner", inst)
+		inst.set("__pydict", d)
+	}
+	pyInstDictPull(inst, d)
+	return d
+}
+
+func pyInstDictPull(inst, d *jsObject) {
+	keys, vals, _ := dictParts(d)
+	keys.dropIdx()
+	keys.elems, vals.elems = nil, nil
 	for _, k := range inst.keys {
 		if len(k) >= 2 && k[0] == '_' && k[1] == '_' {
 			continue
 		}
 		dictAppend(keys, vals, k, inst.props[k])
 	}
-	d := newJSObject()
-	d.set("__dict", true)
-	d.set("keys", keys)
-	d.set("vals", vals)
-	return d
+}
+
+// pyInstDictPush is the other direction, for a dict that is an instance's
+// __dict__ (a no-op for any other).
+func pyInstDictPush(dv interface{}) {
+	d, _ := dv.(*jsObject)
+	if d == nil {
+		return
+	}
+	inst, ok := d.props["__owner"].(*jsObject)
+	if !ok {
+		return
+	}
+	kept := inst.keys[:0]
+	for _, k := range inst.keys {
+		if len(k) >= 2 && k[0] == '_' && k[1] == '_' {
+			kept = append(kept, k)
+		} else {
+			delete(inst.props, k)
+		}
+	}
+	inst.keys = kept
+	keys, vals, _ := dictParts(d)
+	for i, k := range keys.elems {
+		if ks, isStr := k.(string); isStr {
+			inst.set(ks, vals.elems[i])
+		}
+	}
 }
 
 // pySetAttr writes obj.name through the class's __setattr__ when it defines
@@ -20158,6 +20205,9 @@ func (rt *jsrt) pySetAttrRaw(obj interface{}, name string, v interface{}) {
 			panic(&jsThrown{value: rt.pyAttrError(cls, name)})
 		}
 		inst.set(name, v)
+		if d, has := inst.props["__pydict"].(*jsObject); has {
+			pyInstDictPull(inst, d)
+		}
 		return
 	}
 	if cls, ok := pyClassObj(obj); ok {
@@ -20516,7 +20566,9 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 			return pyNewDView(target.(*jsObject), name)
 		}
 		if pyIsDictMethod(name) {
-			return rt.pyDictMethod(keys, vals, name, args, kw)
+			r := rt.pyDictMethod(keys, vals, name, args, kw)
+			pyInstDictPush(target)
+			return r
 		}
 		if pyIsSetOnly(name) {
 			panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
