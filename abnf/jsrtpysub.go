@@ -1050,19 +1050,19 @@ func pyObjMethodBody(name string) func(rt *jsrt, this uint64, args []interface{}
 		}
 	case "__setattr__":
 		return func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			rt.pySetAttr(arg(args, 0), rt.toString(arg(args, 1)), arg(args, 2))
+			rt.pySetAttrRaw(arg(args, 0), rt.toString(arg(args, 1)), arg(args, 2))
 			return jsUndef
 		}
 	case "__getattribute__":
 		return func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			return rt.pyGetAttr(arg(args, 0), rt.toString(arg(args, 1)))
+			return rt.pyGetAttrRaw(arg(args, 0), rt.toString(arg(args, 1)))
 		}
 	case "__lt__", "__le__", "__gt__", "__ge__":
 		// object's four orderings decline every pair.
 		return func(rt *jsrt, this uint64, args []interface{}) interface{} { return pyNotImplemented }
 	}
 	return func(rt *jsrt, this uint64, args []interface{}) interface{} { // __delattr__
-		rt.pyDelAttr(arg(args, 0), rt.toString(arg(args, 1)))
+		rt.pyDelAttrRaw(arg(args, 0), rt.toString(arg(args, 1)))
 		return jsUndef
 	}
 }
@@ -1201,8 +1201,101 @@ func (rt *jsrt) pyBindObjectMethod(self, m interface{}, name string) interface{}
 	return b
 }
 
-// pyDelAttr is `del obj.name`.
+// pyNoteHook counts a class member that is an attribute hook, so the attribute
+// paths only look for one once a class has defined it. Twin of pyNoteHook in
+// python-interpreter.abnf and pyDNoteHook in lib/python-rt.metajs.
+func (rt *jsrt) pyNoteHook(name string) {
+	switch name {
+	case "__getattribute__", "__getattr__", "__setattr__", "__delattr__":
+		rt.pyHooks++
+	}
+}
+
+// pyUserHook is the hook NAME an instance's class (not object) defines.
+func (rt *jsrt) pyUserHook(obj interface{}, name string) (interface{}, bool) {
+	if rt.pyHooks == 0 {
+		return nil, false
+	}
+	_, cls, ok := pyInstance(obj)
+	if !ok {
+		return nil, false
+	}
+	return pyLookup(cls, name)
+}
+
+// pyHookGet is CPython's slot_tp_getattr_hook: obj.name through the class's
+// __getattribute__ (else object's), and on an AttributeError through its
+// __getattr__. ok is false when the class defines neither.
+func (rt *jsrt) pyHookGet(obj interface{}, name string) (v interface{}, ok bool) {
+	ga, hasGA := rt.pyUserHook(obj, "__getattribute__")
+	gf, hasGF := rt.pyUserHook(obj, "__getattr__")
+	if !hasGA && !hasGF {
+		return nil, false
+	}
+	first := func() interface{} {
+		if hasGA {
+			return rt.callPyValue(ga, []interface{}{obj, name}, jsUndef)
+		}
+		return rt.pyGetAttrRaw(obj, name)
+	}
+	if !hasGF {
+		return first(), true
+	}
+	if v, missed := rt.pyTryAttr(first); !missed {
+		return v, true
+	}
+	return rt.callPyValue(gf, []interface{}{obj, name}, jsUndef), true
+}
+
+// pyTryAttr runs f, reporting an AttributeError it raises as missed.
+func (rt *jsrt) pyTryAttr(f func() interface{}) (v interface{}, missed bool) {
+	defer func() {
+		if p := recover(); p != nil {
+			if th, isThrown := p.(*jsThrown); isThrown && rt.pyIsInstance(th.value, rt.pyExcClass("AttributeError")) {
+				missed = true
+				return
+			}
+			panic(p)
+		}
+	}()
+	return f(), false
+}
+
+// pyHookHas is hasattr() over a class with a __getattribute__ or __getattr__:
+// whether reading the attribute raises AttributeError.
+func (rt *jsrt) pyHookHas(obj interface{}, name string) bool {
+	_, missed := rt.pyTryAttr(func() interface{} { return rt.pyGetAttr(obj, name) })
+	return !missed
+}
+
+// pyHookMethod is the callable obj.name(...) calls when the class's hooks
+// decide it: always under __getattribute__, and under __getattr__ only for a
+// name the ordinary lookup does not find.
+func (rt *jsrt) pyHookMethod(obj interface{}, name string) (interface{}, bool) {
+	if rt.pyHooks == 0 {
+		return nil, false
+	}
+	if _, ok := rt.pyUserHook(obj, "__getattribute__"); ok {
+		return rt.pyGetAttr(obj, name), true
+	}
+	if _, ok := rt.pyUserHook(obj, "__getattr__"); ok && !rt.pyHasAttrRaw(obj, name) {
+		return rt.pyGetAttr(obj, name), true
+	}
+	return nil, false
+}
+
+// pyDelAttr is `del obj.name`, through the class's __delattr__ when it defines
+// one.
 func (rt *jsrt) pyDelAttr(obj interface{}, name string) {
+	if f, ok := rt.pyUserHook(obj, "__delattr__"); ok {
+		rt.callPyValue(f, []interface{}{obj, name}, jsUndef)
+		return
+	}
+	rt.pyDelAttrRaw(obj, name)
+}
+
+// pyDelAttrRaw is object.__delattr__.
+func (rt *jsrt) pyDelAttrRaw(obj interface{}, name string) {
 	if isCallable(obj) {
 		d, i := rt.pyFuncAttrIdx(obj, name)
 		if i < 0 {
@@ -1214,7 +1307,8 @@ func (rt *jsrt) pyDelAttr(obj interface{}, name string) {
 		vals.elems = append(vals.elems[:i], vals.elems[i+1:]...)
 		return
 	}
-	if _, cls, isInst := pyInstance(obj); !isInst {
+	_, cls, isInst := pyInstance(obj)
+	if !isInst {
 		rt.pyNoDictAttr(obj, name)
 	} else if pyIsObjectCls(cls) {
 		panic(&jsThrown{value: rt.pyAttrError(cls, name)})
@@ -1222,6 +1316,16 @@ func (rt *jsrt) pyDelAttr(obj interface{}, name string) {
 	o, ok := obj.(*jsObject)
 	if !ok {
 		rt.fail("attribute deletion on a %s", rt.typeOf(obj))
+	}
+	// Only an OWN attribute can be deleted: a class's member is not the
+	// instance's, nor a base's the subclass's.
+	if _, has := o.props[name]; !has {
+		if _, isCls := pyClassObj(o); isCls {
+			rt.pyRaise("AttributeError", "type object '"+rt.toString(o.props["__name"])+"' has no attribute '"+name+"'")
+		}
+		if isInst {
+			rt.pyRaise("AttributeError", "'"+pyTypeName(rt, obj)+"' object has no attribute '"+name+"'")
+		}
 	}
 	delete(o.props, name)
 	for i, k := range o.keys {

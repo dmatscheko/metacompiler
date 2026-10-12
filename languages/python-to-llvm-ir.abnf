@@ -4361,6 +4361,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b = declBuiltin(b, "getattr", "js_pygetattr3", 0)
         b = declBuiltin(b, "hasattr", "js_pyhasattr", 2)
         b = declBuiltin(b, "setattr", "js_pysetattr3", 0)
+        b = declBuiltin(b, "delattr", "js_pydel_attr", 2)
         // vars(o) IS o.__dict__ - CPython's own definition.
         b = declBuiltin(b, "vars", "js_pyvars", 1)
         b = declBuiltin(b, "format", "js_pyformatfn", 0)

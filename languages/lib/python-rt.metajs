@@ -1670,7 +1670,7 @@ function pyMroAttr(cls, name) {
     return out
 }
 
-function pyGetAttr(obj, name) {
+function pyGetAttrRaw(obj, name) {
     // None has no attributes and CPython says so with a catchable AttributeError
     // rather than the floor's uncatchable "member 'x' of undefined". __class__ is
     // the one name None does answer, and it is handled by the instance arm below
@@ -2066,7 +2066,85 @@ function pyAttrError(cls, name) {
                         "' and no __dict__ for setting new attributes")
 }
 
+// object.__setattr__.
+function pyObjSetattr(obj, name, v) {
+    pySetAttrRaw(obj, pyToStr(name), v)
+    return undefined
+}
+
+// The attribute hooks: once any class has defined __getattribute__,
+// __getattr__, __setattr__ or __delattr__ (pyDNoteHook counts them), an
+// instance's attribute read, write and delete go through its class's own. The
+// Raw functions are object's implementation, which skips them. Go:
+// rt.pyNoteHook / rt.pyHookGet in abnf/jsrtpysub.go.
+var pyDHooks = 0
+function pyDNoteHook(name) {
+    if (name == "__getattribute__" || name == "__getattr__" || name == "__setattr__" || name == "__delattr__") {
+        pyDHooks = pyDHooks + 1
+    }
+}
+// The hook NAME an instance's class (not object) defines, or undefined.
+function pyDUserHook(obj, name) {
+    var cls = pyInstClassOf(obj)
+    if (cls === null) { return undefined }
+    if (!pyLookupHas(cls, name)) { return undefined }
+    return pyLookupVal(cls, name)
+}
+function pyDHasGetHook(obj) {
+    return pyDUserHook(obj, "__getattribute__") !== undefined || pyDUserHook(obj, "__getattr__") !== undefined
+}
+// CPython's slot_tp_getattr_hook: the class's __getattribute__ (else
+// object's), and on an AttributeError its __getattr__.
+function pyDHookGet(obj, name) {
+    var ga = pyDUserHook(obj, "__getattribute__")
+    var gf = pyDUserHook(obj, "__getattr__")
+    if (gf === undefined) { return pyCall(ga, [obj, name]) }
+    var r = anytype
+    var missed = false
+    try {
+        if (ga === undefined) { r = pyGetAttrRaw(obj, name) } else { r = pyCall(ga, [obj, name]) }
+    } catch (e) {
+        if (!pyDIsInstance(e, pyExcClass("AttributeError"))) { throw e }
+        missed = true
+    }
+    if (!missed) { return r }
+    return pyCall(gf, [obj, name])
+}
+// hasattr() of an instance whose class has a read hook: whether the read
+// raises AttributeError.
+function pyDHookHas(obj, name) {
+    var has = true
+    try {
+        pyDHookGet(obj, name)
+    } catch (e) {
+        if (!pyDIsInstance(e, pyExcClass("AttributeError"))) { throw e }
+        has = false
+    }
+    return has
+}
+// Whether obj.name(...) calls what the hooks answer: always under
+// __getattribute__, and under __getattr__ for a name the ordinary lookup
+// misses.
+function pyDHookCalls(obj, name) {
+    if (pyDUserHook(obj, "__getattribute__") !== undefined) { return true }
+    return pyDUserHook(obj, "__getattr__") !== undefined && !pyDHasAttr(obj, name)
+}
+function pyGetAttr(obj, name) {
+    if (pyDHooks > 0 && pyDHasGetHook(obj)) { return pyDHookGet(obj, name) }
+    return pyGetAttrRaw(obj, name)
+}
 function pySetAttr(obj, name, v) {
+    if (pyDHooks > 0) {
+        var sa = pyDUserHook(obj, "__setattr__")
+        if (sa !== undefined) {
+            pyCall(sa, [obj, name, v])
+            return v
+        }
+    }
+    return pySetAttrRaw(obj, name, v)
+}
+
+function pySetAttrRaw(obj, name, v) {
     var cls = pyInstClassOf(obj)
     if (cls != null) {
         if (pyLookupHas(cls, name)) {
@@ -2083,6 +2161,7 @@ function pySetAttr(obj, name, v) {
     }
     if (pyIsClass(obj)) {
         pyPutAttr(obj, name, v)
+        pyDNoteHook(name)
         return v
     }
     if (typeof obj == "function") {
@@ -2248,7 +2327,7 @@ var pyObjMFns = []
 function pyObjectMethod(name) {
     if (pyObjMFns.length == 0) {
         pyObjMFns = [pyObjInit, pyObjNew, pyObjEq, pyObjNe, pyObjHash, pyObjRepr, pyObjStr,
-                     pyObjFormat, js_pysetattr, js_pygetattr, js_pydel_attr,
+                     pyObjFormat, pyObjSetattr, pyGetAttrRaw, pyDDelAttr,
                      pyObjOrder(), pyObjOrder(), pyObjOrder(), pyObjOrder()]
         var k = 0
         while (k < pyObjMFns.length) {
@@ -5865,11 +5944,14 @@ function js_pyascii(v) {
 function js_pygetattr3(args) {
     var o = pyEArgAt(args, 0)
     var n = pyToStr(pyEArgAt(args, 1))
-    if (args.length > 2 && !pyDHasAttr(o, n)) { return args[2] }
+    if (args.length > 2 && !js_pyhasattr(o, n)) { return args[2] }
     return pyGetAttr(o, n)
 }
 
-function js_pyhasattr(o, n) { return pyDHasAttr(o, pyToStr(n)) }
+function js_pyhasattr(o, n) {
+    if (pyDHooks > 0 && pyDHasGetHook(o)) { return pyDHookHas(o, pyToStr(n)) }
+    return pyDHasAttr(o, pyToStr(n))
+}
 
 function js_pysetattr3(args) {
     pySetAttr(pyEArgAt(args, 0), pyToStr(pyEArgAt(args, 1)), pyEArgAt(args, 2))
@@ -7988,6 +8070,7 @@ function js_pyclass_fill(cls, bodyDict) {
     var i = 0
     while (i < keys.length) {
         cls[pyToStr(keys[i])] = vals[i]
+        pyDNoteHook(pyToStr(keys[i]))
         i = i + 1
     }
     return undefined
@@ -7999,13 +8082,20 @@ function js_pyclass_fill(cls, bodyDict) {
 // (running a __get__ descriptor found there); a class checks its own MRO.
 // Anything else takes the ordinary member read. The whole lookup order is
 // rt.pyGetAttr, which the prelude provides.
-function js_pygetattr(obj, name) { return pyGetAttr(obj, pyToStr(name)) }
+function js_pygetattr(obj, name) {
+    if (pyDHooks > 0 && pyDHasGetHook(obj)) { return pyDHookGet(obj, pyToStr(name)) }
+    return pyGetAttrRaw(obj, pyToStr(name))
+}
 
 // obj.name = v: a __set__ descriptor on the class wins; __slots__ (when the
 // class declares it) rejects an unknown name by raising, like Python.
 // rt.pySetAttr is in the prelude.
 function js_pysetattr(obj, name, v) {
-    pySetAttr(obj, pyToStr(name), v)
+    if (pyDHooks > 0) {
+        pySetAttr(obj, pyToStr(name), v)
+        return undefined
+    }
+    pySetAttrRaw(obj, pyToStr(name), v)
     return undefined
 }
 
@@ -8014,6 +8104,18 @@ function js_pysetattr(obj, name, v) {
 // 63); it drops the key AND its insertion-order entry, which is what keeps
 // keysOf, and therefore vars()/dir(), right after a delete.
 function js_pydel_attr(obj, name) {
+    if (pyDHooks > 0) {
+        var da = pyDUserHook(obj, "__delattr__")
+        if (da !== undefined) {
+            pyCall(da, [obj, pyToStr(name)])
+            return undefined
+        }
+    }
+    return pyDDelAttr(obj, name)
+}
+
+// object.__delattr__.
+function pyDDelAttr(obj, name) {
     if (typeof obj == "function") {
         var dn = pyToStr(name)
         var fd = pyFnAttrs(pyFnOwner(obj), false)
@@ -8031,6 +8133,12 @@ function js_pydel_attr(obj, name) {
         fail("attribute deletion on a " + pyTypeName(obj))
     }
     var dname = pyToStr(name)
+    // Only an OWN attribute can be deleted: a class's member is not the
+    // instance's, nor a base's the subclass's. Go: rt.pyDelAttr.
+    if (obj[dname] === undefined && !pyNoneBound(obj, dname)) {
+        if (pyIsClass(obj)) { pyRaiseExc("AttributeError", "type object '" + pyToStr(obj["__name"]) + "' has no attribute '" + dname + "'") }
+        if (dcls !== null) { pyRaiseExc("AttributeError", "'" + pyTypeName(obj) + "' object has no attribute '" + dname + "'") }
+    }
     delKey(obj, dname)
     var nk = obj["__nonek"]
     if (nk !== undefined) {
@@ -8552,6 +8660,7 @@ function pyDMethodCall(target, name, args, kw) {
     }
     var icls = pyInstClassOf(target)
     if (icls !== null) {
+        if (pyDHooks > 0 && pyDHookCalls(target, name)) { return pyDCallPyValue(pyGetAttr(target, name), args, kw) }
         // Go reads inst.props[name] - the instance's OWN property map. A bare
         // member read here also sees Object.prototype under goja, so a method
         // call literally named "toString" / "valueOf" / "constructor" on an

@@ -2285,6 +2285,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     hostGlobals["hasattr"] = function(o, n) { return pyHasAttrOf(o, n) }
     hostGlobals["setattr"] = function(o, n, v) { pySetAttr(o, n, v); return undefined }
+    hostGlobals["delattr"] = function(o, n) { pyDelAttr(o, n); return undefined }
     // vars(o) IS o.__dict__ - CPython's own definition - over the same pyattr
     // the `.` operator uses.
     hostGlobals["vars"] = function(o) { return pyattr(o, "__dict__") }
@@ -2364,7 +2365,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var pyBFuncNames = ["print", "len", "abs", "isinstance", "issubclass", "repr", "sum",
                         "max", "min", "ord", "chr", "iter", "next", "sorted", "all", "any",
                         "bin", "hex", "oct", "divmod", "round", "pow", "callable", "ascii",
-                        "getattr", "hasattr", "setattr", "vars", "format", "hash", "id"]
+                        "getattr", "hasattr", "setattr", "delattr", "vars", "format", "hash", "id"]
     var pyBClassNames = ["range", "enumerate", "zip", "map", "filter", "reversed"]
     for (var bn0 = 0; bn0 < pyBFuncNames.length; bn0++) {
         if (typeof hostGlobals[pyBFuncNames[bn0]] == "function") {
@@ -2380,6 +2381,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
 
     function pyHasAttrOf(o, name) {
+        if (pyHooks > 0 && pyHasGetHook(o)) { return pyHookHas(o, name) }
         if (o === null || o === undefined) { return name == "__class__" }
         if (typeof o == "object" && o.__pysup == true) {
             pySuperCheck(o)
@@ -3362,7 +3364,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (hasOwn(cls, "__mro")) {
             var mro = cls.__mro
             for (var mi = 0; mi < mro.length; mi++) {
-                if (hasOwn(mro[mi], name)) { return mro[mi][name] }
+                if (hasOwn(mro[mi], name) && mro[mi][name] !== pyDeleted) { return mro[mi][name] }
                 if (mro[mi].__builtin === true) {
                     var bd = pyBDelegate(mro[mi].__name, name)
                     if (bd != null) { return bd }
@@ -3386,7 +3388,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (cls == undefined || cls == null) { return false }
         if (hasOwn(cls, "__mro")) {
             for (var mi = 0; mi < cls.__mro.length; mi++) {
-                if (hasOwn(cls.__mro[mi], name)) { return true }
+                if (hasOwn(cls.__mro[mi], name) && cls.__mro[mi][name] !== pyDeleted) { return true }
             }
             return false
         }
@@ -9929,7 +9931,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         pyDelItem(o, last.idx())
     }
     // del o.name.
-    function pyDelAttr(o, name) {
+    function pyDelAttr(o, name, raw) {
+        if (pyHooks > 0 && raw !== true && pyUser(o)) {
+            var da = clsFind(o.__class, "__delattr__")
+            if (da != null) { da(o, name); return }
+        }
         if (typeof o == "function") {
             var fa = pyFnAttrs(o, false)
             var fi = fa == null ? -1 : dictFind(fa, name)
@@ -9940,6 +9946,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return
         }
         pyNoDictAttr(o, name)
+        // Only an OWN attribute can be deleted: a class's member is not the
+        // instance's, nor a base's the subclass's. Twin of rt.pyDelAttr in
+        // abnf/jsrtpysub.go and js_pydel_attr in lib/python-rt.metajs.
+        if (!hasOwn(o, name) || o[name] === pyDeleted) {
+            if (hasOwn(o, "__mro")) { pyRaise(pyMakeExc("AttributeError", ["type object '" + o.__name + "' has no attribute '" + name + "'"])) }
+            if (pyUser(o)) { pyRaise(pyMakeExc("AttributeError", ["'" + pyTypeOf(o).__name + "' object has no attribute '" + name + "'"])) }
+        }
         scopePut(o, name, pyDeleted)
     }
     // del o[idx].
@@ -10657,6 +10670,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             ns.__pycls = cls
             for (var k = 0; k < ns.__nskeys.length; k++) {
                 scopePut(cls, ns.__nskeys[k], ns[ns.__nskeys[k]])
+                pyNoteHook(ns.__nskeys[k])
             }
             var ann = newDict()
             if (hasOwn(ns, "__annots")) {
@@ -10761,8 +10775,59 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         dictSet(pyFnAttrs(f, true), name, v)
     }
-    function pySetAttr(o, name, v) {
+    // The attribute hooks: once any class has defined __getattribute__,
+    // __getattr__, __setattr__ or __delattr__ (pyNoteHook counts them), an
+    // instance's attribute read, write and delete go through its class's own.
+    // RAW is object's implementation, which skips them. Twin of rt.pyNoteHook /
+    // rt.pyHookGet in abnf/jsrtpysub.go and pyDNoteHook / pyDHookGet in
+    // lib/python-rt.metajs.
+    var pyHooks = 0
+    function pyNoteHook(name) {
+        if (name == "__getattribute__" || name == "__getattr__" || name == "__setattr__" || name == "__delattr__") { pyHooks++ }
+    }
+    function pyHasGetHook(o) {
+        return pyUser(o) && (clsFind(o.__class, "__getattribute__") != null || clsFind(o.__class, "__getattr__") != null)
+    }
+    // CPython's slot_tp_getattr_hook: the class's __getattribute__ (else
+    // object's), and on an AttributeError its __getattr__.
+    function pyHookGet(o, name) {
+        var ga = clsFind(o.__class, "__getattribute__")
+        var gf = clsFind(o.__class, "__getattr__")
+        if (gf == null) { return ga(o, name) }
+        var saved = scopes
+        var r = anytype
+        var missed = false
+        try { r = ga != null ? ga(o, name) : pyattr(o, name, true) }
+        catch (e) {
+            scopes = saved
+            if (!pyIsAttrExc(e)) { throw e }
+            missed = true
+        }
+        if (!missed) { return r }
+        return gf(o, name)
+    }
+    function pyIsAttrExc(e) {
+        return e != null && e != undefined && e.__exc === true && pyUser(e.v) && clsIsSub(e.v.__class, hostGlobals["AttributeError"])
+    }
+    // hasattr() of an instance whose class has a read hook: whether the read
+    // raises AttributeError.
+    function pyHookHas(o, name) {
+        var saved = scopes
+        var has = true
+        try { pyattr(o, name) }
+        catch (e) {
+            scopes = saved
+            if (!pyIsAttrExc(e)) { throw e }
+            has = false
+        }
+        return has
+    }
+    function pySetAttr(o, name, v, raw) {
         if (typeof o == "function") { pyFnSetAttr(o, name, v); return }
+        if (pyHooks > 0 && raw !== true && pyUser(o)) {
+            var sa = clsFind(o.__class, "__setattr__")
+            if (sa != null) { sa(o, name, v); return }
+        }
         // An instance, the common case, pays no call.
         if (o === null || o === undefined || typeof o != "object" || o.__class == undefined) { pyNoDictAttr(o, name) }
         var cls = o.__class
@@ -10776,6 +10841,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 pyRaise(pyMakeExc("AttributeError", ["'" + cls.__name + "' object has no attribute '" + name +
                                                      "' and no __dict__ for setting new attributes"]))
             }
+        } else {
+            pyNoteHook(name)
         }
         if (!hasOwn(o, name)) {
             if (!hasOwn(o, "__attrs")) { o.__attrs = [] }
@@ -10783,7 +10850,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         scopePut(o, name, v)
     }
-    function pyattr(o, name) {
+    function pyattr(o, name, raw) {
+        if (pyHooks > 0 && raw !== true && pyHasGetHook(o)) { return pyHookGet(o, name) }
         if (o === null || o === undefined) {
             if (name == "__class__") { return pyTypeOf(o) } // None.__class__ is NoneType.
             // A CATCHABLE AttributeError with CPython's own text, as the other two
@@ -11210,9 +11278,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // object's four orderings decline every pair; one function each.
     function pyObjOrder() { return function(a, b) { return pyNotImpl } }
-    function pySetAttrFn(a, k, v) { pySetAttr(a, k, v); return undefined }
-    function pyObjGetattr(a, k) { return pyattr(a, k) }
-    function pyObjDelattr(a, k) { pyDelAttr(a, k); return undefined }
+    function pySetAttrFn(a, k, v) { pySetAttr(a, k, v, true); return undefined }
+    function pyObjGetattr(a, k) { return pyattr(a, k, true) }
+    function pyObjDelattr(a, k) { pyDelAttr(a, k, true); return undefined }
     // T.__new__(cls, *args) of a builtin value type: T's conversion for T itself,
     // and for a subclass a bare instance holding it, __init__ not run (list, dict
     // and set start empty: their __init__ fills them). One function per type.

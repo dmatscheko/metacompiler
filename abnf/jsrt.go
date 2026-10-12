@@ -578,6 +578,8 @@ type jsrt struct {
 	pyBuiltinRender map[interface{}]string
 	pySigs          map[interface{}]*pySig
 	pyEllipsis      *jsObject
+	// pyHooks counts the attribute hooks class bodies have defined (pyNoteHook).
+	pyHooks int
 	// pyAliases memoizes the list[int]-style generic aliases, so the same written
 	// alias is the same value every time (see pyGenericAlias).
 	pyAliases map[string]*jsObject
@@ -15774,6 +15776,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			sc := rt.scopeOf(a[1])
 			for i, n := range sc.names {
 				cls.set(n, sc.vals[i])
+				rt.pyNoteHook(n)
 			}
 			return 0
 		},
@@ -19737,8 +19740,19 @@ func (rt *jsrt) pyMroAttr(cls *jsObject, name string) *jsArray {
 	return &jsArray{elems: out}
 }
 
-// pyGetAttr reads obj.name with Python's lookup order.
+// pyGetAttr reads obj.name with Python's lookup order, through the class's
+// __getattribute__ / __getattr__ when it defines one.
 func (rt *jsrt) pyGetAttr(obj interface{}, name string) interface{} {
+	if rt.pyHooks > 0 {
+		if v, ok := rt.pyHookGet(obj, name); ok {
+			return v
+		}
+	}
+	return rt.pyGetAttrRaw(obj, name)
+}
+
+// pyGetAttrRaw is object.__getattribute__: the lookup order without the hooks.
+func (rt *jsrt) pyGetAttrRaw(obj interface{}, name string) interface{} {
 	// None has no attributes and CPython says so with a catchable AttributeError
 	// rather than a getMember abort. __class__ is the one name None does answer.
 	if isUndefOrNull(obj) && name != "__class__" {
@@ -20056,8 +20070,19 @@ func (rt *jsrt) pyInstanceDict(inst *jsObject) interface{} {
 	return d
 }
 
-// pySetAttr writes obj.name, honouring a __set__ descriptor and __slots__.
+// pySetAttr writes obj.name through the class's __setattr__ when it defines
+// one.
 func (rt *jsrt) pySetAttr(obj interface{}, name string, v interface{}) {
+	if f, ok := rt.pyUserHook(obj, "__setattr__"); ok {
+		rt.callPyValue(f, []interface{}{obj, name, v}, jsUndef)
+		return
+	}
+	rt.pySetAttrRaw(obj, name, v)
+}
+
+// pySetAttrRaw is object.__setattr__: obj.name written, honouring a __set__
+// descriptor and __slots__.
+func (rt *jsrt) pySetAttrRaw(obj interface{}, name string, v interface{}) {
 	if inst, cls, ok := pyInstance(obj); ok {
 		if cur, found := pyLookup(cls, name); found {
 			if set, isDesc := pyIsDescriptor(cur, "__set__"); isDesc {
@@ -20073,6 +20098,7 @@ func (rt *jsrt) pySetAttr(obj interface{}, name string, v interface{}) {
 	}
 	if cls, ok := pyClassObj(obj); ok {
 		cls.set(name, v)
+		rt.pyNoteHook(name)
 		return
 	}
 	if isCallable(obj) {
@@ -20355,6 +20381,9 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 		rt.fail("type object '%s' has no method '%s'", rt.toString(cls.props["__name"]), name)
 	}
 	if inst, cls, ok := pyInstance(target); ok {
+		if f, hooked := rt.pyHookMethod(target, name); hooked {
+			return rt.callPyValue(f, args, kw)
+		}
 		if v, found := inst.props[name]; found && isCallable(v) {
 			return rt.call(v, jsUndef, rt.pyBindCall(v, args, kw)) // A plain function in an attribute.
 		}
@@ -21628,6 +21657,19 @@ func (rt *jsrt) pyStopIter(args []interface{}, val interface{}) uint64 {
 // the only one the two engines can both have. Keep in step with pyDHasAttr in
 // languages/lib/python-rt.metajs.
 func (rt *jsrt) pyHasAttr(obj interface{}, name string) bool {
+	if rt.pyHooks > 0 {
+		if _, ok := rt.pyUserHook(obj, "__getattribute__"); ok {
+			return rt.pyHookHas(obj, name)
+		}
+		if _, ok := rt.pyUserHook(obj, "__getattr__"); ok {
+			return rt.pyHookHas(obj, name)
+		}
+	}
+	return rt.pyHasAttrRaw(obj, name)
+}
+
+// pyHasAttrRaw is hasattr() without the attribute hooks.
+func (rt *jsrt) pyHasAttrRaw(obj interface{}, name string) bool {
 	if sup, isSup := pySuperObj(obj); isSup {
 		rt.pySuperCheck(sup)
 		_, found := rt.pySuperFind(sup, name)

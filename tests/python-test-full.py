@@ -4695,6 +4695,101 @@ def s94():
     check("none3", k3(b=nn[0]) == (5, None) and k3(nn[0], nn[0]) == (None, None) and k3(a=nn[0]) == (None, 6))
     check("none4", S94C().m(nn[0]) == (None, 4) and S94C().m(y=nn[0]) == (3, None) and S94C().m() == (3, 4))
 
+# ===== SECTION 95: the attribute hooks, and deleting an attribute =====
+# Only an object's OWN attribute can be deleted: a class member, a missing
+# name or an already deleted one is an AttributeError, on an instance and on a
+# class. A class's __getattribute__ runs for every instance attribute read and
+# method call, its __getattr__ only when the ordinary lookup raises
+# AttributeError, __setattr__ / __delattr__ for every write and delete;
+# object.__getattribute__ / __setattr__ / __delattr__ are the plain ones.
+# getattr's default and hasattr catch exactly AttributeError. Rows from
+# CPython 3.14.
+class S95C:
+    k = 1
+    def m(self):
+        return 1
+
+class S95D(S95C):
+    pass
+
+class S95Get:
+    k = 2
+    def __getattr__(self, name):
+        if name == "f":
+            return lambda x: x * 3
+        if name == "no":
+            raise AttributeError("no " + name)
+        return "ga:" + name
+
+class S95Set:
+    def __init__(self):
+        object.__setattr__(self, "log", [])
+    def __setattr__(self, name, v):
+        self.log.append(name)
+        object.__setattr__(self, name, v * 2)
+    def __delattr__(self, name):
+        self.log.append("-" + name)
+        object.__delattr__(self, name)
+
+class S95Kid(S95Set):
+    def __init__(self):
+        super().__init__()
+        self.n = 7
+
+class S95GA:
+    reads = []
+    def __init__(self):
+        self.v = 1
+    def __getattribute__(self, name):
+        S95GA.reads.append(name)
+        if name == "secret":
+            return 42
+        if name == "bad":
+            raise ValueError("bad")
+        return object.__getattribute__(self, name)
+    def __getattr__(self, name):
+        return "fb:" + name
+    def m(self):
+        return "m"
+
+def s95():
+    msgs = []
+    c = S95C()
+    c.x = None
+    del c.x
+    for t in [c, c, c, S95D, S95D, S95C]:
+        for n in ["missing", "k", "m", "x"]:
+            try:
+                delattr(t, n)
+                msgs.append(n)
+            except AttributeError as e:
+                msgs.append(str(e))
+    check("dela1", msgs[:4] == ["'S95C' object has no attribute 'missing'", "'S95C' object has no attribute 'k'",
+                                "'S95C' object has no attribute 'm'", "'S95C' object has no attribute 'x'"])
+    check("dela2", msgs[12:16] == ["type object 'S95D' has no attribute 'missing'", "type object 'S95D' has no attribute 'k'",
+                                   "type object 'S95D' has no attribute 'm'", "type object 'S95D' has no attribute 'x'"]
+          and msgs[20:] == ["type object 'S95C' has no attribute 'missing'", "k", "m", "type object 'S95C' has no attribute 'x'"]
+          and not hasattr(S95C(), "m"))
+    g = S95Get()
+    g.x = 5
+    check("hook1", (g.x, g.k, g.zz, getattr(g, "yy"), g.f(4)) == (5, 2, "ga:zz", "ga:yy", 12)
+          and hasattr(g, "q") and not hasattr(g, "no") and getattr(g, "no", "d") == "d")
+    s = S95Set()
+    s.a = 3
+    setattr(s, "b", 4)
+    s.a += 1
+    del s.b
+    check("hook2", (s.a, hasattr(s, "b"), s.log) == (14, False, ["a", "b", "a", "-b"]) and S95Kid().n == 14)
+    ga = S95GA()
+    S95GA.reads.clear()
+    check("hook3", (ga.v, ga.secret, ga.m(), ga.other) == (1, 42, "m", "fb:other")
+          and S95GA.reads == ["v", "secret", "m", "other"])
+    try:
+        hasattr(ga, "bad")
+    except ValueError as e:
+        msgs.append(str(e))
+    check("hook4", msgs[-1] == "bad" and object.__getattribute__(ga, "v") == 1)
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -4788,5 +4883,6 @@ def main():
     s92() # SECTION-CALL 92
     s93() # SECTION-CALL 93
     s94() # SECTION-CALL 94
+    s95() # SECTION-CALL 95
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]
