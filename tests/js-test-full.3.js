@@ -1866,6 +1866,51 @@ function s80() {
         f13() === "t" && f14() === "blk" && f15() === "arrow" && f16() === "numberfunction" && f17() === "1!")
 }
 
+// ===== SECTION 81: a generator pulling an iterator made outside it =====
+// Each pull a generator makes on an iterator it was handed advances that iterator
+// once, however the generator is driven: a for-of, a spread, a destructuring, a
+// yield* and an explicit next() over an array iterator, a Map iterator, another
+// generator and a hand-written iterator (whose throw is caught where it happened),
+// interleaved with the caller's own pulls. An iterator the generator makes itself
+// starts over each time it is made. Values read off node 24.
+function* s81each(it) { for (const x of it) yield x }
+function* s81two(s) { yield s.next().value; yield s.next().value; yield* s }
+function* s81pat(it) { const [a, b] = it; yield a; yield b; yield [...it].join("+") }
+function* s81own() { const it = [1, 2, 3][Symbol.iterator](); yield it.next().value; yield it.next().value; yield it.next().value }
+function* s81wrap(src) { const w = { next() { return src.next() } }; for (const x of { [Symbol.iterator]() { return w } }) yield x }
+function* s81nums() { yield 10; yield 20; yield 30; yield 40 }
+class S81Flaky {
+    constructor(n) { this.n = n; this.i = 0 }
+    next() { this.i++; if (this.i === 2) throw "boom"; return this.i > this.n ? { done: true, value: undefined } : { done: false, value: this.i } }
+    [Symbol.iterator]() { return this }
+}
+function* s81try(it) {
+    let r = ""
+    while (true) {
+        try { const s = it.next(); if (s.done) break; r += s.value; yield r }
+        catch (e) { r += "!" + e; yield r }
+    }
+}
+function s81() {
+    check("gp81a", [...s81each([5, 6, 7, 8][Symbol.iterator]())].join(",") === "5,6,7,8")
+    const it = [1, 2, 3, 4, 5, 6][Symbol.iterator]()
+    const g = s81each(it)
+    const seen = [g.next().value, it.next().value, g.next().value, g.next().value, it.next().value, g.next().done]
+    check("gp81b", seen.join(",") === "1,2,3,4,5,false")
+    check("gp81c", [...s81two(s81nums())].join(",") === "10,20,30,40")
+    let n = 0
+    const user = { next() { n++; return n > 4 ? { done: true } : { value: n * 100, done: false } }, [Symbol.iterator]() { return this } }
+    check("gp81d", [...s81each(user)].join(",") === "100,200,300,400" && n === 5)
+    check("gp81e", [...s81each(new Map([["a", 1], ["b", 2], ["c", 3]]).keys())].join(",") === "a,b,c")
+    check("gp81f", [...s81pat([7, 8, 9, 10][Symbol.iterator]())].join(",") === "7,8,9+10")
+    check("gp81g", [...s81own()].join(",") === "1,2,3")
+    check("gp81h", [...s81wrap([3, 1, 4, 1, 5][Symbol.iterator]())].join(",") === "3,1,4,1,5")
+    const ext = s81nums()
+    const h = s81each(ext)
+    check("gp81i", h.next().value + " " + ext.next().value + " " + h.next().value + " " + [...h].join(",") === "10 20 30 40")
+    check("gp81j", [...s81try(new S81Flaky(4))].join(",") === "1,1!boom,1!boom3,1!boom34")
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1904,6 +1949,7 @@ function main() {
     s78() // SECTION-CALL 78
     s79() // SECTION-CALL 79
     s80() // SECTION-CALL 80
+    s81() // SECTION-CALL 81
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

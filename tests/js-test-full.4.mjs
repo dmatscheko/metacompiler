@@ -12,7 +12,7 @@
 //                             model, the Unicode identifier tables, iterators, derived
 //                             constructors, JSON, guards, Set and Map, iterator closing,
 //                             hasOwnProperty, delete, Object.prototype, extends Object,
-//                             g.return() at a yield*
+//                             g.return() at a yield*, generators over outside iterators
 //   tests/js-test-full.4.mjs  section 57, export in a Module
 //
 // The section NUMBERS are global across the four files; ./test.sh --full reports this

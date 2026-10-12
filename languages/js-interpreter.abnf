@@ -83,6 +83,9 @@ the yield the generator is parked at happens once per resume, so an array a gene
 pushes to before its first yield ends up [1, 1, 2] where node leaves [1, 2], and driving
 a generator to exhaustion costs O(n squared). The ORDER of finally clauses, closes and
 the driver's prints matches node (jsExcTry lets the suspension signal pass untouched).
+VALUES read from a one-shot source do not repeat: a next() on an iterator the replay did
+not create is logged on the first run and answered from the log by every replay
+(lib/js-genlog.js), so a generator over an iterator it was handed yields every element.
 
 .return(v) resumes the body with a return completion: it replays to the parked yield and
 raises an exit record there (genClose), so the finally clauses run as node runs them - one
@@ -3271,6 +3274,8 @@ NotFuncHead = :script(~~
     include("lib/js-callee.js")
     // Which scope instantiates each function declaration (makeFuncBody, makeJsBlock).
     include("lib/js-hoist.js")
+    // The pull log of the replay generators (genNext, jsPull).
+    include("lib/js-genlog.js")
 
 
     // ----- JavaScript's own value semantics -----
@@ -3408,6 +3413,7 @@ NotFuncHead = :script(~~
             return r
         }
         it["__#@iterator"] = function() { return it }
+        if (genRuns.length > 0) { glStamp(it) }
         return it
     }
     // [Symbol.iterator] of an array or a string read as a value, bound to the receiver.
@@ -4190,6 +4196,7 @@ NotFuncHead = :script(~~
         st["started"] = false // The body has been entered at least once.
         var ag = {}
         ag["__agen"] = true
+        if (genRuns.length > 0) { glStamp(ag) }
         ag["__keys"] = []
         ag["next"] = function() {
             var a1 = anytype
@@ -7449,6 +7456,7 @@ NotFuncHead = :script(~~
                 else { jsSymTrack(o, key) }
             }
             o["__keys"] = keys
+            if (genRuns.length > 0) { glStamp(o) }
             return o
         }
     }
@@ -7650,7 +7658,7 @@ NotFuncHead = :script(~~
         var out = []
         while (n < 0 || out.length < n) {
             var s = anytype // The iterator result record.
-            s = callWithThis(nx, v, [])
+            s = (genRuns.length > 0) ? jsPull(nx, v, [], "") : callWithThis(nx, v, [])
             if (jsTruthy(getMember(s, "done"))) { return out }
             out.push(getMember(s, "value"))
         }
@@ -7658,12 +7666,24 @@ NotFuncHead = :script(~~
         return out
     }
 
+    // One next() call on an iterator. Under a replay, a pull on an iterator the replay
+    // did not create is answered from the generator's log (lib/js-genlog.js). nx is the
+    // `next` member as read; a class method reads as none and is dispatched by name.
+    function jsPull(nx, it, args, site) {
+        var gi = glExtRun(genRuns, it)
+        if (gi >= 0) { return glPull(genRuns, gi, function() { return jsNextCall(nx, it, args, site) }) }
+        return jsNextCall(nx, it, args, site)
+    }
+    function jsNextCall(nx, it, args, site) {
+        if (typeof nx == "function") { return callWithThis(nx, it, args) }
+        return mcall(it, "next", args, site)
+    }
     // One step of a for-of: the iterator's next(), AWAITED when the loop is a
     // 'for await'. Out of line because a MetaJS local keeps the type of its first
     // assignment, and an awaited step is not the same type as a plain one.
     function forOfStep(nx, it, isAwait) {
         var s = anytype
-        s = callWithThis(nx, it, [])
+        s = (genRuns.length > 0) ? jsPull(nx, it, [], "") : callWithThis(nx, it, [])
         if (isAwait) { s = jpDoAwait(s) }
         return s
     }
@@ -7835,7 +7855,7 @@ NotFuncHead = :script(~~
     // answers a PROMISE, whose `done` is undefined, so an unawaited drive spins.
     function jpStepDelegate(run, dnx, v, args) {
         var r = anytype
-        r = callWithThis(dnx, v, args)
+        r = (genRuns.length > 0) ? jsPull(dnx, v, args, "") : callWithThis(dnx, v, args)
         if (run.ag) { return jpDoAwait(r) }
         return r
     }
@@ -8154,9 +8174,10 @@ NotFuncHead = :script(~~
     // delegate - an async generator's next() answers a promise, so driving one
     // unawaited never sees a `done` and spins forever.
     function newGenObject(params, bodyT, env, self, args, isAg) {
-        var st = {sent: [], count: 0, done: false, ag: isAg, closeV: undefined, closing: false}
+        var st = {sent: [], count: 0, done: false, ag: isAg, closeV: undefined, closing: false, log: []}
         var g = {}
         g["__gen"] = true
+        if (genRuns.length > 0) { glStamp(g) }
         g["__keys"] = []
         g["next"] = function() {
             var sendv = anytype // next(v) may send any value in.
@@ -8232,7 +8253,7 @@ NotFuncHead = :script(~~
     function genNext(st, params, bodyT, env, self, args, sendv) {
         if (st.done) { return {value: undefined, done: true, __keys: ["value", "done"]} }
         st.sent.push(sendv)
-        var run = {target: st.count, k: 0, sent: st.sent, out: undefined, ag: st.ag}
+        var run = {target: st.count, k: 0, sent: st.sent, out: undefined, ag: st.ag, log: st.log, lp: 0, floor: glSerial}
         genRuns.push(run)
         var saved = scopes
         var savedCloseV = anytype
@@ -8852,6 +8873,7 @@ NotFuncHead = :script(~~
             if (typeof cls == "function") {
                 var self = {}
                 self["__keys"] = []
+                if (genRuns.length > 0) { glStamp(self) }
                 self["__class"] = ctorDescriptor(clsName, cls)
                 pendingNewTarget = cls
                 var r = anytype // The function may return a replacement object.
@@ -8869,6 +8891,7 @@ NotFuncHead = :script(~~
             var obj = {}
             obj["__class"] = cls
             obj["__keys"] = []
+            if (genRuns.length > 0) { glStamp(obj) }
             var cargv = [obj]
             for (var j = 0; j < argv.length; j++) cargv.push(argv[j])
             var cret = anytype // [[Construct]]: a returned OBJECT replaces the instance.
@@ -9481,6 +9504,12 @@ NotFuncHead = :script(~~
                     curThis = undefined
                 } else {
                     var argv = evalArgs(s.args)
+                    // A next() call is an iterator pull, logged under a replay.
+                    if (genRuns.length > 0 && lastKey === "next") {
+                        cur = jsPull(cur, curThis, argv, sTexts[i])
+                        curThis = undefined
+                        continue
+                    }
                     // The regular-expression surface first: a RegExp receiver has no
                     // members of its own (getMember answered undefined), and a string
                     // receiver whose argument is a pattern must not fall through to the

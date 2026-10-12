@@ -3687,6 +3687,54 @@ function s74() {
     check("fh74c", fa() === 7 && o.p === 5 && o.q === 3 && o.r === 4 && o.s === 6 && n === 4);
 }
 
+// ===== SECTION 75: a generator pulling an iterator made outside it =====
+// Each pull a generator makes on an iterator it was handed advances that iterator
+// once, however the generator is driven: a for-of, a spread, a destructuring, a
+// yield* and an explicit next() over an array iterator, a Map iterator, another
+// generator and a hand-written iterator (whose throw is caught where it happened),
+// interleaved with the caller's own pulls. An iterator the generator makes itself
+// starts over each time it is made. Values read off node 24 (through tsc 6.0.3's
+// output).
+function* s75each(it: any): Generator<any> { for (const x of it) yield x; }
+function* s75two(s: any): Generator<any> { yield s.next().value; yield s.next().value; yield* s; }
+function* s75pat(it: any): Generator<any> { const [a, b] = it; yield a; yield b; yield [...it].join("+"); }
+function* s75own(): Generator<number> { const it = [1, 2, 3][Symbol.iterator](); yield it.next().value; yield it.next().value; yield it.next().value; }
+function* s75wrap(src: any): Generator<any> { const w = { next(): any { return src.next(); } }; for (const x of { [Symbol.iterator]() { return w; } } as any) yield x; }
+function* s75nums(): Generator<number> { yield 10; yield 20; yield 30; yield 40; }
+class S75Flaky {
+    n: number;
+    i: number = 0;
+    constructor(n: number) { this.n = n; }
+    next(): any { this.i++; if (this.i === 2) throw "boom"; return this.i > this.n ? { done: true, value: undefined } : { done: false, value: this.i }; }
+    [Symbol.iterator]() { return this; }
+}
+function* s75try(it: any): Generator<string> {
+    let r = "";
+    while (true) {
+        try { const s = it.next(); if (s.done) break; r += s.value; yield r; }
+        catch (e) { r += "!" + e; yield r; }
+    }
+}
+function s75() {
+    check("gp75a", [...s75each([5, 6, 7, 8][Symbol.iterator]())].join(",") === "5,6,7,8");
+    const it = [1, 2, 3, 4, 5, 6][Symbol.iterator]();
+    const g = s75each(it);
+    const seen: any[] = [g.next().value, it.next().value, g.next().value, g.next().value, it.next().value, g.next().done];
+    check("gp75b", seen.join(",") === "1,2,3,4,5,false");
+    check("gp75c", [...s75two(s75nums())].join(",") === "10,20,30,40");
+    let n = 0;
+    const user = { next(): any { n++; return n > 4 ? { done: true } : { value: n * 100, done: false }; }, [Symbol.iterator]() { return this; } };
+    check("gp75d", [...s75each(user)].join(",") === "100,200,300,400" && n === 5);
+    check("gp75e", [...s75each(new Map([["a", 1], ["b", 2], ["c", 3]]).keys())].join(",") === "a,b,c");
+    check("gp75f", [...s75pat([7, 8, 9, 10][Symbol.iterator]())].join(",") === "7,8,9+10");
+    check("gp75g", [...s75own()].join(",") === "1,2,3");
+    check("gp75h", [...s75wrap([3, 1, 4, 1, 5][Symbol.iterator]())].join(",") === "3,1,4,1,5");
+    const ext = s75nums();
+    const h = s75each(ext);
+    check("gp75i", h.next().value + " " + ext.next().value + " " + h.next().value + " " + [...h].join(",") === "10 20 30 40");
+    check("gp75j", [...s75try(new S75Flaky(4))].join(",") === "1,1!boom,1!boom3,1!boom34");
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -3764,6 +3812,7 @@ function main(): number {
     s72(); // SECTION-CALL 72
     s73(); // SECTION-CALL 73
     s74(); // SECTION-CALL 74
+    s75(); // SECTION-CALL 75
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }
