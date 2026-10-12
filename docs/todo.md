@@ -84,7 +84,7 @@ splitext. Write them in Python like python-collections.py where possible. Edges:
 
 # JV — Java
 
-### T-452 java: ArrayList.remove(0) costs ~73M instructions natively · P3 · JV · OPEN [V]
+### T-452 java: ArrayList.remove(0) costs ~73M instructions natively · P3 · JV · IN PROGRESS (JV worker, round 13) [V]
 With 300 elements one remove(0) costs ~73M instructions (1,700 removes: 124G instructions, 15,770 collections): the
 element-shift loop in languages/lib/java-util.java runs at the interpreted per-statement cost. Use a bulk primitive
 (array splice / copyWithin-style) in java-util.java; oracle javac/java 24.
@@ -146,7 +146,7 @@ with a reference-returning `function &foo()` leaves `$foo` NULL (assign_coalesce
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
-### T-451 core: layer-2 per-call / per-statement cost dominates native time · P2 · CORE · OPEN [V]
+### T-451 core: layer-2 per-call / per-statement cost dominates native time · P2 · CORE · IN PROGRESS (CORE worker, round 22) [V]
 Measured by the CORE r21 worker: native java `t += k` in a loop ~165K instructions per iteration, `a[j] = j + k` ~170K;
 ~540 small allocations per iteration (layer-2 scopes, argument arrays, boxed numbers). Profile one hot statement end to
 end (emitted IR -> layer-2 calls -> floor) and cut the biggest per-call costs (scope allocation per call, argument
