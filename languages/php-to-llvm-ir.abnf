@@ -3765,7 +3765,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         }
     }
     // ----- magic methods --------------------------------------------------------
-    // __get / __set / __isset / __call / __invoke are FALLBACKS: they run only where an
+    // __get / __set / __isset / __unset / __call / __invoke are FALLBACKS: they run only where an
     // ordinary member access finds nothing. Each therefore costs a branch at every
     // property read, property write or method call - so, exactly like the operator
     // overloading in csharp-to-llvm-ir.abnf, the branch is emitted only when some class
@@ -3773,6 +3773,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     var magicGet = false
     var magicSet = false
     var magicIsset = false
+    var magicUnset = false
     var magicCall = false
     var magicInvoke = false
     // Method names are case-insensitive: '__GET' declares __get.
@@ -3781,6 +3782,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (name == "__get") { magicGet = true }
         else if (name == "__set") { magicSet = true }
         else if (name == "__isset") { magicIsset = true }
+        else if (name == "__unset") { magicUnset = true }
         else if (name == "__call") { magicCall = true }
         else if (name == "__invoke") { magicInvoke = true }
     }
@@ -3912,13 +3914,20 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     function propKey(b, name) {
         return emitStr(b, (name.length > 1 && name.substring(0, 2) == "__") ? "\x01" + name : name)
     }
+    // The magic fallbacks run only for a property the instance does not HAVE: a
+    // declared `public $p;` holds null, is present, and is read, written and isset()
+    // without __get / __set / __isset (zend_std_read_property and friends find the
+    // slot first). Absent is the floor's undefined - js_del removes the key on unset().
+    // Twin of the dictFind presence test in php-interpreter.abnf's phpGetProp.
+    function propPresent(b, raw) { return b.NewICmp(llvm.enum.IPredNE, raw, hUndef) }
     function emitPropGetPlain(b, objV, keyV) {
         if (!magicGet) { return phDeref(b, callExt(b, "js_get", [objV, keyV])) }
         var haveB = curF.NewBlock("")
         var missB = curF.NewBlock("")
         var mergeB = curF.NewBlock("")
-        b.NewCondBr(truthy(b, callExt(b, "js_phisset", [objV, keyV])), haveB, missB)
-        var hp = phDeref(haveB, callExt(haveB, "js_get", [objV, keyV]))
+        var raw = callExt(b, "js_get", [objV, keyV])
+        b.NewCondBr(propPresent(b, raw), haveB, missB)
+        var hp = phDeref(haveB, raw)
         var plainV = hp.v
         hp.b.NewBr(mergeB)
         var hm = emitHasMethod(missB, objV, emitStr(missB, "__get"))
@@ -3927,11 +3936,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         hm.b.NewCondBr(truthy(hm.b, hm.v), magB, rawB)
         var magV = callExt(magB, "js_phmcall", [objV, emitStr(magB, "__get"), argList(magB, [callExt(magB, "js_phpname", [keyV])])])
         magB.NewBr(mergeB)
-        var rr = phDeref(rawB, callExt(rawB, "js_get", [objV, keyV]))
-        rr.b.NewBr(mergeB)
+        rawB.NewBr(mergeB)
         return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(plainV, hp.b),
                                              llvm.ir.NewIncoming(magV, magB),
-                                             llvm.ir.NewIncoming(rr.v, rr.b)])}
+                                             llvm.ir.NewIncoming(hUndef, rawB)])}
     }
     // $o->p = v, with the property's set HOOK in front of it and __set as the fallback.
     // A receiver that is not an object (null, an int, a string, an array...) raises
@@ -4003,7 +4011,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var haveB = curF.NewBlock("")
         var missB = curF.NewBlock("")
         var mergeB = curF.NewBlock("")
-        b.NewCondBr(truthy(b, callExt(b, "js_phisset", [objV, keyV])), haveB, missB)
+        b.NewCondBr(propPresent(b, callExt(b, "js_get", [objV, keyV])), haveB, missB)
         emitPropStore(haveB, objV, keyV, valV).NewBr(mergeB)
         var hm = emitHasMethod(missB, objV, emitStr(missB, "__set"))
         var magB = curF.NewBlock("")
@@ -4024,9 +4032,11 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     function emitPropIsset(b, objV, keyV) {
         var plain = callExt(b, "js_phisset", [objV, keyV])
         if (!magicIsset) { return {b: b, v: plain} }
+        var chkB = curF.NewBlock("")
         var missB = curF.NewBlock("")
         var mergeB = curF.NewBlock("")
-        b.NewCondBr(b.NewOr(truthy(b, plain), isNullishHandle(b, objV)), mergeB, missB)
+        b.NewCondBr(b.NewOr(truthy(b, plain), isNullishHandle(b, objV)), mergeB, chkB)
+        chkB.NewCondBr(propPresent(chkB, callExt(chkB, "js_get", [objV, keyV])), mergeB, missB)
         var hm = emitHasMethod(missB, objV, emitStr(missB, "__isset"))
         var magB = curF.NewBlock("")
         var rawB = curF.NewBlock("")
@@ -4035,8 +4045,26 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         magB.NewBr(mergeB)
         rawB.NewBr(mergeB)
         return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(plain, b),
+                                             llvm.ir.NewIncoming(hFalse, chkB),
                                              llvm.ir.NewIncoming(magV, magB),
                                              llvm.ir.NewIncoming(hFalse, rawB)])}
+    }
+    // unset($o->p), with __unset as the fallback for a property the instance does
+    // not have. Twin of phpUnsetProp in php-interpreter.abnf.
+    function emitPropUnset(b, objV, keyV) {
+        if (!magicUnset) { callExt(b, "js_del", [objV, keyV]); return b }
+        var delB = curF.NewBlock("")
+        var missB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        b.NewCondBr(propPresent(b, callExt(b, "js_get", [objV, keyV])), delB, missB)
+        callExt(delB, "js_del", [objV, keyV])
+        delB.NewBr(mergeB)
+        var hm = emitHasMethod(missB, objV, emitStr(missB, "__unset"))
+        var magB = curF.NewBlock("")
+        hm.b.NewCondBr(truthy(hm.b, hm.v), magB, mergeB)
+        callExt(magB, "js_phmcall", [objV, emitStr(magB, "__unset"), argList(magB, [callExt(magB, "js_phpname", [keyV])])])
+        magB.NewBr(mergeB)
+        return mergeB
     }
     // $o->m(args), with __call($name, $args) as the fallback for a method the class
     // chain does not declare.
@@ -4207,8 +4235,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                         var liveB = curF.NewBlock("")
                         var skipB = curF.NewBlock("")
                         b.NewCondBr(isNullishHandle(b, p.obj), skipB, liveB)
-                        callExt(liveB, "js_del", [p.obj, p.key])
-                        liveB.NewBr(skipB)
+                        emitPropUnset(liveB, p.obj, p.key).NewBr(skipB)
                         b = skipB
                     }
                 }
@@ -5803,7 +5830,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             || name == "is_a" || name == "is_subclass_of" || name == "get_parent_class"
             || name == "define" || name == "defined" || name == "constant" || name == "error_reporting"
             || phpIsKind(name) != "" || phpNativeExt(name) != "" || name == "strtolower" || name == "strtoupper"
-            || name == "__mec_callable" || name == "__mec_ifaces"
+            || name == "__mec_callable" || name == "__mec_ifaces" || name == "realpath"
     }
     // The natives lib/php-stdlib.php is written on, each ONE extern taking its
     // arguments in order, an absent optional one as null (abnf/jsrtphpstr.go,
@@ -5867,6 +5894,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         }
         // abs goes through PHP's own coercion so a float argument stays a float.
         if (name == "abs") { return {b: b, v: callExt(b, "js_phabs", [vs[0]])} }
+        // realpath(3) on PHP's string form of the argument (js_realpath, runtime.c).
+        if (name == "realpath") { return {b: b, v: callExt(b, "js_realpath", [callExt(b, "js_phstr", [vs[0]])])} }
         var nat = phpNativeExt(name)
         if (nat != "") {
             var na = []

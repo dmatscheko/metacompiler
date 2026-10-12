@@ -40,7 +40,7 @@ Classes are covered in full: inheritance and interfaces, class constants (typed 
 self-referential), static properties and methods, self:: / static:: / parent:: with
 late static binding, constructor property promotion, anonymous classes, traits with
 insteadof and as, enums (pure and backed, with cases()/from()/tryFrom()), the magic
-methods (__get __set __isset __call __callStatic __invoke __toString __clone), and
+methods (__get __set __isset __unset __call __callStatic __invoke __toString __clone), and
 Foo::class. Also covered: switch with fallthrough, do-while, the alternative
 colon/endXXX control syntax, break N / continue N, goto within a statement list,
 static local variables, global constants and the magic __FUNCTION__ / __CLASS__.
@@ -2831,6 +2831,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                         var mi = classFind(o.__class, "__isset")
                         if (mi != null && !phptest(mi(o, argsOf([st.key])))) { return null }
                         if (mi == null) { return null }
+                        // isset() of the LAST step is __isset's answer alone; empty(),
+                        // '??' and a deeper step go on to __get (zend_std_has_property).
+                        if (isset && i == ref.path.length - 1) { return true }
                         o = phpGetProp(o, st.key)
                     } else { o = deref(o.p.vals[at]) }
                 } else { return null }
@@ -2899,7 +2902,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                                 (ref.sref == null || ref.sref == undefined)
                 if (plainRoot && !varExists(nm)) { continue }
                 var p = resolveRefPhpV(ref, false)
-                if (p.last.key != undefined) { if (isObj(p.obj)) { arrDel(p.obj.p, p.last.key) } }
+                if (p.last.key != undefined) { if (isObj(p.obj)) { phpUnsetProp(p.obj, p.last.key) } }
                 else if (p.last.append !== true && isArr(p.obj)) { arrDel(p.obj, p.last.idx()) }
                 else if (p.last.append !== true && phpIsAA(p.obj)) { mcall(p.obj, "offsetUnset", argsOf([p.last.idx()])) }
             }
@@ -3592,6 +3595,14 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         // arrSet, not dictSet: a slot holding a cell is written THROUGH, which is
         // what makes `$r = &$o->p; $o->p = 5;` visible through $r.
         arrSet(o.p, name, v)
+    }
+    // unset($o->p): a property the instance has goes away; one it does not have is
+    // handed to __unset when the class declares it (zend_std_unset_property).
+    // Twin of makeUnset's field arm in php-to-llvm-ir.abnf.
+    function phpUnsetProp(o, name) {
+        if (dictFind(o.p, phpKey(name)) >= 0) { arrDel(o.p, name); return }
+        var un = classFind(o.__class, "__unset")
+        if (un != null) { callMethod(o, un, [name]) }
     }
     // A magic method is found under its lower-cased name, which setMethod stores for
     // every method whatever its spelling: '__TOSTRING' is __toString. Twin of
@@ -5844,6 +5855,13 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         // With no argument, the class scope of the caller (deprecated since 8.3).
         "get_parent_class": function(v) { return arguments.length == 0 ? phpParentOf(ctxSelf()) : phpParentClass(v) },
         "class_exists": function(n) { return phpClassExists(n, false) },
+        // realpath(3) through the host; false when the path does not resolve. Twin
+        // of js_realpath (languages/lib/runtime.c, abnf/jsrtphp.go).
+        "realpath": function(p) {
+            var r = c.realpath(phpStr(p))
+            if (r == "") { return false }
+            return r
+        },
         "interface_exists": function(n) { return phpClassExists(n, true) },
         "gettype": function(v) { return phpTypeName(v) },
         "get_debug_type": function(v) { return phpDebugType(v) },

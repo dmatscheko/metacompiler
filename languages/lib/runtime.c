@@ -7347,3 +7347,39 @@ int main(void) {
 		return (int)to_int32(n);
 	}
 }
+
+/* js_realpath(p): the canonical absolute path of an existing file, with ".",
+ * ".." and symbolic links resolved against the working directory, or false
+ * when it does not resolve. An empty path is the working directory; a path
+ * holding a NUL byte resolves to nothing. access(2) runs first because the
+ * kernel's lookup demands a DIRECTORY before every further component and a
+ * trailing slash, which macOS's realpath(3) does not ("file/" and "file/.."
+ * resolve there). The answer is copied with mk_str, never str_intern: the
+ * buffer realpath(3) returns is freed here, and str_intern caches by POINTER.
+ * Twin of realPath in abnf/jsrtphp.go. */
+int access(const char *path, int mode);
+char *realpath(const char *path, char *resolved);
+long js_realpath(long p) {
+	long s = to_string(p);
+	long n = str_len(s);
+	const char *src = str_ptr(s);
+	char *buf = (char *)malloc(n + 2);
+	char *r = 0;
+	long m = 0;
+	long h;
+	long i = 0;
+	while (i < n) {
+		if (src[i] == 0) { free(buf); return H_FALSE; }
+		buf[i] = src[i];
+		i = i + 1;
+	}
+	buf[n] = 0;
+	if (n == 0) { buf[0] = 46; buf[1] = 0; }
+	if (access(buf, 0) == 0) { r = realpath(buf, 0); }
+	free(buf);
+	if (r == 0) { return H_FALSE; }
+	while (r[m] != 0) { m = m + 1; }
+	h = mk_str(r, m);
+	free(r);
+	return h;
+}

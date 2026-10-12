@@ -60553,6 +60553,208 @@ dead1019:
 
 declare i64 @jsmain(i64 %0, i64 %1)
 
+define i64 @js_realpath(i64 %0) {
+entry:
+	%1 = alloca i64
+	store i64 %0, i64* %1
+	%2 = alloca i64
+	%3 = load i64, i64* %1
+	%4 = call i64 @to_string(i64 %3)
+	store i64 %4, i64* %2
+	%5 = alloca i64
+	%6 = load i64, i64* %2
+	%7 = call i64 @str_len(i64 %6)
+	store i64 %7, i64* %5
+	%8 = alloca i32*
+	%9 = load i64, i64* %2
+	%10 = call i32* @str_ptr(i64 %9)
+	%11 = bitcast i32* %10 to i32*
+	store i32* %11, i32** %8
+	%12 = alloca i32*
+	%13 = load i64, i64* %5
+	%14 = sext i32 2 to i64
+	%15 = add i64 %13, %14
+	%16 = call i32* @malloc(i64 %15)
+	%17 = bitcast i32* %16 to i32*
+	%18 = bitcast i32* %17 to i32*
+	store i32* %18, i32** %12
+	%19 = alloca i32*
+	%20 = inttoptr i32 0 to i32*
+	store i32* %20, i32** %19
+	%21 = alloca i64
+	%22 = sext i32 0 to i64
+	store i64 %22, i64* %21
+	%23 = alloca i64
+	%24 = alloca i64
+	%25 = sext i32 0 to i64
+	store i64 %25, i64* %24
+	br label %26
+
+26:
+	%27 = load i64, i64* %24
+	%28 = load i64, i64* %5
+	%29 = icmp slt i64 %27, %28
+	%30 = zext i1 %29 to i32
+	%31 = icmp ne i32 %30, 0
+	br i1 %31, label %32, label %41
+
+32:
+	%33 = load i64, i64* %24
+	%34 = load i32*, i32** %8
+	%35 = getelementptr i8, i32* %34, i64 %33
+	%36 = load i8, i8* %35
+	%37 = sext i8 %36 to i32
+	%38 = icmp eq i32 %37, 0
+	%39 = zext i1 %38 to i32
+	%40 = icmp ne i32 %39, 0
+	br i1 %40, label %55, label %60
+
+41:
+	%42 = load i64, i64* %5
+	%43 = load i32*, i32** %12
+	%44 = getelementptr i8, i32* %43, i64 %42
+	%45 = shl i32 0, 24
+	%46 = ashr i32 %45, 24
+	%47 = shl i32 %46, 24
+	%48 = ashr i32 %47, 24
+	%49 = trunc i32 %48 to i8
+	store i8 %49, i8* %44
+	%50 = load i64, i64* %5
+	%51 = sext i32 0 to i64
+	%52 = icmp eq i64 %50, %51
+	%53 = zext i1 %52 to i32
+	%54 = icmp ne i32 %53, 0
+	br i1 %54, label %77, label %92
+
+55:
+	%56 = load i32*, i32** %12
+	%57 = bitcast i32* %56 to i32*
+	%58 = call i32 @free(i32* %57)
+	%59 = load i64, i64* @H_FALSE
+	ret i64 %59
+
+60:
+	%61 = load i64, i64* %24
+	%62 = load i32*, i32** %12
+	%63 = getelementptr i8, i32* %62, i64 %61
+	%64 = load i64, i64* %24
+	%65 = load i32*, i32** %8
+	%66 = getelementptr i8, i32* %65, i64 %64
+	%67 = load i8, i8* %66
+	%68 = sext i8 %67 to i32
+	%69 = shl i32 %68, 24
+	%70 = ashr i32 %69, 24
+	%71 = shl i32 %70, 24
+	%72 = ashr i32 %71, 24
+	%73 = trunc i32 %72 to i8
+	store i8 %73, i8* %63
+	%74 = load i64, i64* %24
+	%75 = sext i32 1 to i64
+	%76 = add i64 %74, %75
+	store i64 %76, i64* %24
+	br label %26
+
+dead1020:
+	br label %60
+
+77:
+	%78 = load i32*, i32** %12
+	%79 = getelementptr i8, i32* %78, i32 0
+	%80 = shl i32 46, 24
+	%81 = ashr i32 %80, 24
+	%82 = shl i32 %81, 24
+	%83 = ashr i32 %82, 24
+	%84 = trunc i32 %83 to i8
+	store i8 %84, i8* %79
+	%85 = load i32*, i32** %12
+	%86 = getelementptr i8, i32* %85, i32 1
+	%87 = shl i32 0, 24
+	%88 = ashr i32 %87, 24
+	%89 = shl i32 %88, 24
+	%90 = ashr i32 %89, 24
+	%91 = trunc i32 %90 to i8
+	store i8 %91, i8* %86
+	br label %92
+
+92:
+	%93 = load i32*, i32** %12
+	%94 = bitcast i32* %93 to i32*
+	%95 = call i32 @access(i32* %94, i32 0)
+	%96 = icmp eq i32 %95, 0
+	%97 = zext i1 %96 to i32
+	%98 = icmp ne i32 %97, 0
+	br i1 %98, label %99, label %106
+
+99:
+	%100 = load i32*, i32** %12
+	%101 = bitcast i32* %100 to i32*
+	%102 = sext i32 0 to i64
+	%103 = inttoptr i64 %102 to i32*
+	%104 = call i32* @realpath(i32* %101, i32* %103)
+	%105 = bitcast i32* %104 to i32*
+	store i32* %105, i32** %19
+	br label %106
+
+106:
+	%107 = load i32*, i32** %12
+	%108 = bitcast i32* %107 to i32*
+	%109 = call i32 @free(i32* %108)
+	%110 = load i32*, i32** %19
+	%111 = bitcast i32* %110 to i32*
+	%112 = inttoptr i32 0 to i32*
+	%113 = icmp eq i32* %111, %112
+	%114 = zext i1 %113 to i32
+	%115 = icmp ne i32 %114, 0
+	br i1 %115, label %116, label %118
+
+116:
+	%117 = load i64, i64* @H_FALSE
+	ret i64 %117
+
+118:
+	br label %119
+
+dead1021:
+	br label %118
+
+119:
+	%120 = load i64, i64* %21
+	%121 = load i32*, i32** %19
+	%122 = getelementptr i8, i32* %121, i64 %120
+	%123 = load i8, i8* %122
+	%124 = sext i8 %123 to i32
+	%125 = icmp ne i32 %124, 0
+	%126 = zext i1 %125 to i32
+	%127 = icmp ne i32 %126, 0
+	br i1 %127, label %128, label %132
+
+128:
+	%129 = load i64, i64* %21
+	%130 = sext i32 1 to i64
+	%131 = add i64 %129, %130
+	store i64 %131, i64* %21
+	br label %119
+
+132:
+	%133 = load i32*, i32** %19
+	%134 = bitcast i32* %133 to i32*
+	%135 = load i64, i64* %21
+	%136 = call i64 @mk_str(i32* %134, i64 %135)
+	store i64 %136, i64* %23
+	%137 = load i32*, i32** %19
+	%138 = bitcast i32* %137 to i32*
+	%139 = call i32 @free(i32* %138)
+	%140 = load i64, i64* %23
+	ret i64 %140
+
+dead1022:
+	ret i64 0
+}
+
+declare i32 @access(i32* %0, i32 %1)
+
+declare i32* @realpath(i32* %0, i32* %1)
+
 define i32 @__mec_ginit() {
 entry:
 	%0 = sext i32 336 to i64

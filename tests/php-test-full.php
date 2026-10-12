@@ -2845,6 +2845,55 @@ function s61() {
     check("pth3", $e === "dirname(): Argument #2 (\$levels) must be greater than or equal to 1");
 }
 
+// ===== SECTION 62: declared properties before magic, __unset, realpath =====
+// The magic property methods run only for a property the object does not have
+// (zend_std_read_property / write_property / has_property / unset_property): a
+// declared `public $p;` holds null and is read, written, isset() and unset() as
+// itself. Once unset() it is gone, and the magic applies to it. isset() of a magic
+// property is __isset's answer alone; __get is asked only by empty() and '??'.
+// realpath() resolves ".", ".." and symbolic links against the working directory,
+// and answers false for a path that does not exist or that continues past a
+// file (tsrm_realpath_r).
+class S62M {
+    public $p;
+    public $k = 1;
+    public $log = "";
+    private $d = [];
+    function __get($n) { $this->log .= "g" . $n; return $this->d[$n] ?? null; }
+    function __set($n, $v) { $this->log .= "s" . $n; $this->d[$n] = $v; }
+    function __isset($n) { $this->log .= "i" . $n; return isset($this->d[$n]); }
+    function __unset($n) { $this->log .= "u" . $n; unset($this->d[$n]); }
+}
+function s62() {
+    $m = new S62M;
+    $r = [isset($m->p), $m->p];
+    $m->p = 1;
+    $r[] = isset($m->p);
+    $r[] = $m->p ?? 0;
+    check("mgd1", $r === [false, null, true, 1] && $m->log === "");
+    unset($m->p);
+    $r = [isset($m->p)];
+    $m->p = 2;
+    $r[] = $m->p;
+    $r[] = isset($m->p);
+    check("mgd2", $r === [false, 2, true] && $m->log === "ipspgpip");
+    $m->log = "";
+    unset($m->p);
+    unset($m->q);
+    unset($m->k);
+    $r = [isset($m->k), $m->k];
+    check("mgu1", $r === [false, null] && $m->log === "upuqikgk");
+    $m2 = new S62M;
+    $m2->x = 5;
+    $r = [isset($m2->x), isset($m2->y), empty($m2->x)];
+    check("mgi1", $r === [true, false, false] && $m2->log === "sxixiyixgx");
+    $f = realpath(__FILE__);
+    check("rp1", $f === __FILE__ && realpath(__DIR__) === __DIR__ && realpath(__DIR__ . "//.././" . basename(__DIR__) . "/") === __DIR__
+        && realpath("/") === "/" && is_string(realpath("")) && realpath("") === realpath("."));
+    check("rp2", realpath(__DIR__ . "/no-such-file") === false && realpath(__FILE__ . "/") === false
+        && realpath(__FILE__ . "/..") === false && realpath(__DIR__ . "/no-such-dir/..") === false);
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -2914,6 +2963,7 @@ function main() {
     s59dump(); // SECTION-CALL 59
     s60(); // SECTION-CALL 60
     s61(); // SECTION-CALL 61
+    s62(); // SECTION-CALL 62
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

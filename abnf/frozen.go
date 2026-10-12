@@ -482,6 +482,9 @@ func newFrozenEngine(co *compiler, asg *r.Rules, aGrammar *r.Rules, traceEnabled
 		"pushSource":     func(name, text string) { pushTraceSource(name, text) },
 		"pushSourceFile": func(name string) { pushTraceSourceFile(name) },
 		"popSource":      func() { popTraceSource() },
+		// realpath(3) for a program the interpreter runs (PHP's realpath); "" when
+		// the path does not resolve. Twin of js_realpath (abnf/jsrtphp.go).
+		"realpath": func(p string) string { return realPath(p) },
 	}
 
 	bindings := frozenBaseBindings(preventDefaultOutput)
@@ -766,6 +769,9 @@ func (ps *frozenParserScript) init() {
 		"pushSource":     func(name, text string) { pushTraceSource(name, text) },
 		"pushSourceFile": func(name string) { pushTraceSourceFile(name) },
 		"popSource":      func() { popTraceSource() },
+		// realpath(3) for a program the interpreter runs (PHP's realpath); "" when
+		// the path does not resolve. Twin of js_realpath (abnf/jsrtphp.go).
+		"realpath": func(p string) string { return realPath(p) },
 	}
 	// A raw Go func gets a fresh handle every time it is read (funcs are not
 	// comparable, so they cannot be interned), and a lookahead guard reads c.peek

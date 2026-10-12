@@ -21,6 +21,7 @@ package abnf
 import (
 	"errors"
 	"math"
+	"os"
 	"strconv"
 	"strings"
 )
@@ -2449,6 +2450,66 @@ func phpLit(text string, radix int) interface{} {
 	return phpMkFlo(v)
 }
 
+// realPath is realpath(3): the canonical absolute path of an existing file, with
+// ".", ".." and symbolic links resolved against the working directory, or "" when
+// it does not resolve - a missing component, a non-directory followed by more
+// path, a symlink loop, a NUL byte. An empty path is the working directory. It is
+// js_realpath here and c.realpath for the interpreters; twin of js_realpath in
+// languages/lib/runtime.c.
+func realPath(p string) string {
+	if strings.IndexByte(p, 0) >= 0 {
+		return ""
+	}
+	if !strings.HasPrefix(p, "/") {
+		wd, err := os.Getwd()
+		if err != nil {
+			return ""
+		}
+		p = wd + "/" + p
+	}
+	res := ""
+	rest := strings.Split(p, "/")
+	links := 0
+	for len(rest) > 0 {
+		c := rest[0]
+		rest = rest[1:]
+		if c == "" || c == "." {
+			continue
+		}
+		if c == ".." {
+			if i := strings.LastIndexByte(res, '/'); i >= 0 {
+				res = res[:i]
+			}
+			continue
+		}
+		next := res + "/" + c
+		fi, err := os.Lstat(next)
+		if err != nil {
+			return ""
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			links++
+			t, err := os.Readlink(next)
+			if err != nil || links > 32 {
+				return ""
+			}
+			if strings.HasPrefix(t, "/") {
+				res = ""
+			}
+			rest = append(strings.Split(t, "/"), rest...)
+			continue
+		}
+		if !fi.IsDir() && len(rest) > 0 {
+			return ""
+		}
+		res = next
+	}
+	if res == "" {
+		return "/"
+	}
+	return res
+}
+
 func init() {
 	rxExtraExterns = append(rxExtraExterns, func(rt *jsrt, m map[string]func(args []uint64) uint64) {
 		u := rt.unwrap
@@ -2462,6 +2523,12 @@ func init() {
 
 		// phpmain hands its scope over once, so phpRaise can find the emitted
 		// DivisionByZeroError / ArithmeticError descriptors.
+		m["js_realpath"] = func(a []uint64) uint64 {
+			if r := realPath(rt.toString(u(a[0]))); r != "" {
+				return rt.wrapStr(r)
+			}
+			return jsHFalse
+		}
 		m["js_phrtinit"] = func(a []uint64) uint64 {
 			phpMainScope[rt] = a[0]
 			return 0

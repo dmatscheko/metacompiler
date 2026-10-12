@@ -395,6 +395,9 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 		"pushSource":     func(name, text string) { pushTraceSource(name, text) },
 		"pushSourceFile": func(name string) { pushTraceSourceFile(name) },
 		"popSource":      func() { popTraceSource() },
+		// realpath(3) for a program the interpreter runs (PHP's realpath); "" when
+		// the path does not resolve. Twin of js_realpath (abnf/jsrtphp.go).
+		"realpath": func(p string) string { return realPath(p) },
 	}
 	// The three host API objects are wrapped for goja ONCE per member instead of
 	// per access (see hostAPIObject). c.localAsg is the only entry a run rebinds
