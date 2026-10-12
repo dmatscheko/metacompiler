@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-462** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-463** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -114,12 +114,14 @@ not change the renderer.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-457 php: static call of a non-static method; first-class callable creation (compiled); is_callable · P2 · PHP · IN PROGRESS (PHP worker, round 31) [V]
-Spec / corpus: (a) calling a non-static method statically from outside raises nothing in both engines (PHP: Error
-"Non-static method C::m() cannot be called statically"; first_class_callable_errors). (b) compiled only:
-`(new stdClass)->doesNotExist(...)` / `[$o,'nope'](...)` do not raise at creation ("Call to undefined method
-stdClass::doesNotExist()"); the interpreter does — keep public first-class callables free of new calls. (c) `is_callable()`
-missing in both engines. Not modelled (note only): deprecation output, typed-reference type sources.
+### T-462 php: callbacks and dynamic calls of non-static methods; compiled __call reach; static closures; Closure methods · P2 · PHP · OPEN [V]
+php-src semantics, both engines unless noted: (a) a callback naming a non-static method through its class from a
+compatible instance (`call_user_func(['A','foo'])`, `array_map(['B','twice'],…)` inside a B instance) runs without $this
+(PHP binds the frame's $this: "foo:B"). (b) `['C','m']()` / `'C::m'()` of a non-static method should always be an Error
+(zend_init_dynamic_call_*; dynamic_call/dynamic_call_non_static, needs the __call trampoline). (c) compiled only: `__call`
+is not reached through `[$o,'x']()` or through `$o->x(...)`. (d) `static function(){ A::foo(); }` inside a method still
+sees $this (PHP: Error). (e) `$closure->bindTo(...)`, `->call(...)`, `->__invoke(...)` unsupported ("Call to a member
+function ... on Closure").
 
 ---
 
@@ -491,6 +493,7 @@ T-456 java: instanceof on boxes (java-specific test), wrapper members, array clo
 T-461 core: the goja-hosted MetaJS interpreter leaked JavaScript prototype members (array map/forEach, function bind, ...); it now answers only the floor's members, like -frozen, llvm.Run and native — DONE f04d906f
 T-459 js, ts: interpreter generators log pulls on outside iterators (shared js-genlog.js), replayed from the log; was [5,7] for [5,6,7,8] — DONE 0f734f33
 T-458 python: Unicode 16 printable table (736 runs, shared JS + Go twin) for repr and str.isprintable, all BMP code points verified against python3 — DONE f3549e3c
+T-457 php: non-static methods called statically (Error / callback TypeError, $this forwarding), compiled first-class callables resolve at creation, is_callable — DONE 5b15f6f1
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
