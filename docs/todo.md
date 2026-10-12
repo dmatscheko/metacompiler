@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-434** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-435** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -91,13 +91,13 @@ slow. Native: `hex(10**4300)` > 100 s. Java frozen interpreter: ~10.7K steps per
 
 # CS — C#  (no dotnet here: spec-only, ECMA-334 and the .NET reference source)
 
-### T-430 csharp: double constants; LINQ over user IEnumerable; Math tails · P2 · CS · IN PROGRESS (CS worker, round 23) [V spec-only]
-(a) `double.NaN`, `double.PositiveInfinity`, `NegativeInfinity`, `Epsilon`, `MaxValue`, `MinValue` absent (the double
-type object only has Parse/TryParse; interpreter renders `[object Object]`). (b) LINQ / `string.Join` over a user class
-implementing IEnumerable<T> (`bag.Where(...)`, `bag.Sum()`) unsupported in all engines (extension dispatch looks for a
-method on the class). (c) Math: Max/Min of mixed integral types (uint vs long) answer the picked argument's type, not the
-promoted overload's; `Abs(short.MinValue)` does not throw; MidpointRounding overloads, MathF, BigMul, DivRem, CopySign
-absent. (Math.Sin(2) last-ulp vs platform libm is unspecified by ECMA: not a defect.)
+### T-434 csharp: tuple ToString; float type object; BCL enum casts; extension vs inapplicable instance method · P1 · CS · IN PROGRESS (CS worker, round 24) [V spec-only]
+(a) every tuple prints `[object Object]` in all engines: `var t = (1, 2); Console.WriteLine(t)`, `"" + t`, `$"{t}"`,
+`Math.DivRem(-17, 5)` (C#: `(1, 2)`, `(-3, -2)`; ValueTuple.ToString, named elements print positionally).
+(b) `float` has no type object: `float.MaxValue`, `float.NaN`, `float.Parse` die ("unknown name: float").
+(c) `(int)StringComparison.Ordinal`, `(int)StringSplitOptions.RemoveEmptyEntries`, `(int)MidpointRounding.ToPositiveInfinity`
+print 0 (C#: 4, 1, 4). (d) a user IEnumerable class's parameterless `Count()` wins over the LINQ extension for
+`w.Count(s => s.Length > 3)`; C# overload resolution only considers applicable instance methods first.
 
 ### T-112 csharp: `Single` exponent-notation threshold is unverified · P3 · CS · BLOCKED - needs dotnet
 `flt36`/`flt37` in tests/csharp-test-full.cs assert `1E+07`, `1E+20`,
@@ -475,6 +475,7 @@ T-427 csharp: System.Math, re-enumerable iterators (fresh enumerator per GetEnum
 T-419 python: object() and object's own methods/__new__, exact int**int past 4096, the 4300-digit int<->str limit, type | type unions; java/python ratchets split for the frozen step brake; __sizeof__ DECLINED (CPython allocator layout, not a rule); sys.set_int_max_str_digits moved to T-431 — DONE f43fa335
 T-429 php: is_a/is_subclass_of/get_parent_class, object-operand TypeErrors, Closure/Generator debug types, leading-backslash lookups, SELF/PARENT/STATIC in any case, compiled instanceof Throwable — DONE 23e6ad05
 T-428 core: permanent unmarked region for boot/layer-2 top level/interned literals/small ints; collector cost per unused library function 611 -> ~200 instr per collection; every handle-IR bench row -3..-7% — DONE 6b2f74d6
+T-430 csharp: double constants and IsNaN family, LINQ/Join/Concat over a user IEnumerable, Math overload result types, Abs overflow, MidpointRounding, MathF, BigMul, DivRem, CopySign — DONE f557ea80
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
