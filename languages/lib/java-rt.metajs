@@ -606,10 +606,27 @@ function jpClassName(cls) {
     return "Object"
 }
 
-// jpArrayTag is the array's class name as getName spells it. The element type is
-// INFERRED from the elements: this value model does not carry the declared one,
-// and the Go twin makes the same inference from the same table.
+// An array created with a declared type carries that type's binary name as its
+// kind number, 1000 and up so it meets no other language's kinds; jvArrTagNames
+// maps the number back. Twin of js_jvarrtag in abnf/jsrtjava.go and jArrTag in
+// java-interpreter.abnf.
+var jvArrTagNames = []
+var jvArrTagKinds = {}
+function js_jvarrtag(a, desc) {
+    var k = jvArrTagKinds["$" + desc]
+    if (k === undefined) {
+        k = 1000 + jvArrTagNames.length
+        jvArrTagNames.push(desc)
+        jvArrTagKinds["$" + desc] = k
+    }
+    return arrKindSet(a, k)
+}
+
+// jpArrayTag is the array's class name as getName spells it: the type it was
+// created with, else one INFERRED from its elements by the Go twin's table.
 function jpArrayTag(a) {
+    var kind = arrKind(a)
+    if (kind >= 1000) { return jvArrTagNames[kind - 1000] }
     var tag = ""
     var i = 0
     while (i < a.length) {
@@ -1269,7 +1286,9 @@ function jvAddCommon(o, width, size, bytes) {
     o["BYTES"] = bytes
     o["valueOf"] = function(v) { return jvNarrow(v, width) }
     o["toString"] = function(v) { return jpStr(v) }
+    // Short.compare and Byte.compare answer x - y, Integer and Long the sign.
     o["compare"] = function(a, b) {
+        if (width < 32) { return jvI(a) - jvI(b) }
         if (jvCmp("<", a, b)) { return 0 - 1 }
         if (jvCmp(">", a, b)) { return 1 }
         return 0
@@ -1890,9 +1909,9 @@ function js_jvnewstr(args) {
     }
     return out
 }
-// An array's clone() is a new array of the same length holding the same
-// elements, a shallow copy (JLS 10.7); any other receiver dispatches. Twin of
-// js_jvclone in abnf/jsrtjava.go and the clone arm of mcall in
+// An array's clone() is a new array of the same type and length holding the
+// same elements, a shallow copy (JLS 10.7); any other receiver dispatches. Twin
+// of js_jvclone in abnf/jsrtjava.go and the clone arm of mcall in
 // java-interpreter.abnf.
 function js_jvclone(v) {
     if (Array.isArray(v)) {
@@ -1902,7 +1921,7 @@ function js_jvclone(v) {
             out.push(v[i])
             i = i + 1
         }
-        return out
+        return arrKindSet(out, arrKind(v))
     }
     return js_mcall(v, "clone", [])
 }
@@ -1948,26 +1967,38 @@ function jvClassOf(name, simple) {
     return c
 }
 function jvLangClass(simple) { return jvClassOf("java.lang." + simple, simple) }
-// An array's simple name from its (inferred) binary name: [I is int[].
+// An array's simple name from its binary name: [I is int[], [[LMain$1P; is
+// P[][] (a nested or local class goes by its own name). Twin of jxArraySimple
+// in abnf/jsrtjavastr.go and jArraySimple in java-interpreter.abnf.
 function jvArraySimple(tag) {
-    var c = tag.charAt(1)
+    var d = 0
+    while (tag.charAt(d) == "[") { d = d + 1 }
+    var c = tag.charAt(d)
+    var name = "byte"
     if (c == "L") {
-        var dot = 0
-        var i = 0
+        var from = d + 1
+        var i = from
         while (i < tag.length) {
-            if (tag.charAt(i) == ".") { dot = i }
+            var ch = tag.charAt(i)
+            if (ch == "." || ch == "$") { from = i + 1 }
             i = i + 1
         }
-        return tag.substring(dot + 1, tag.length - 1) + "[]"
+        while (tag.charAt(from) >= "0" && tag.charAt(from) <= "9") { from = from + 1 }
+        name = tag.substring(from, tag.length - 1)
     }
-    if (c == "I") { return "int[]" }
-    if (c == "J") { return "long[]" }
-    if (c == "D") { return "double[]" }
-    if (c == "F") { return "float[]" }
-    if (c == "Z") { return "boolean[]" }
-    if (c == "C") { return "char[]" }
-    if (c == "S") { return "short[]" }
-    return "byte[]"
+    if (c == "I") { name = "int" }
+    if (c == "J") { name = "long" }
+    if (c == "D") { name = "double" }
+    if (c == "F") { name = "float" }
+    if (c == "Z") { name = "boolean" }
+    if (c == "C") { name = "char" }
+    if (c == "S") { name = "short" }
+    var k = 0
+    while (k < d) {
+        name = name + "[]"
+        k = k + 1
+    }
+    return name
 }
 // The java.lang wrapper class a boxed primitive (or a String) belongs to, or ""
 // for any other value. Twin of jvBoxName in abnf/jsrtjavastr.go and jBoxName in
@@ -2185,7 +2216,10 @@ function js_jvstrstatic(name, args) {
     }
     if (name == "format") {
         if (rest.length == 1 && Array.isArray(rest[0])) {
-            if (jpArrayTag(rest[0]).substring(0, 2) == "[L") { return jxFormat(jvStrArg(args[0]), rest[0]) }
+            // An array of references (an Object[], also a String[][]) is the
+            // varargs array itself.
+            var k1 = jpArrayTag(rest[0]).charAt(1)
+            if (k1 == "L" || k1 == "[") { return jxFormat(jvStrArg(args[0]), rest[0]) }
         }
         return jxFormat(jvStrArg(args[0]), rest)
     }

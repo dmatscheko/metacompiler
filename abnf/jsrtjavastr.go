@@ -988,7 +988,9 @@ func init() {
 			case "format":
 				rest := av[1:]
 				if len(rest) == 1 {
-					if arr, ok := rest[0].(*jsArray); ok && strings.HasPrefix(jvpArrayTag(arr), "[L") {
+					// An array of references (an Object[], also a String[][]) is
+					// the varargs array itself.
+					if arr, ok := rest[0].(*jsArray); ok && strings.ContainsRune("L[", rune(jvpArrayTag(arr)[1])) {
 						rest = arr.elems
 					}
 				}
@@ -1001,14 +1003,32 @@ func init() {
 }
 
 // jxArraySimple is an array class's simple name from its binary one: [I is
-// int[], [Ljava.lang.String; is String[].
+// int[], [[LMain$1P; is P[][] (a nested or local class goes by its own name).
+// Twin of jArraySimple in java-interpreter.abnf and jvArraySimple in
+// languages/lib/java-rt.metajs.
 func jxArraySimple(tag string) string {
-	if tag[1] == 'L' {
-		return tag[strings.LastIndexByte(tag, '.')+1:len(tag)-1] + "[]"
+	d := 0
+	for tag[d] == '[' {
+		d++
 	}
-	names := map[byte]string{'I': "int", 'J': "long", 'D': "double", 'F': "float", 'Z': "boolean",
-		'C': "char", 'S': "short", 'B': "byte"}
-	return names[tag[1]] + "[]"
+	var name string
+	if tag[d] == 'L' {
+		from := d + 1
+		for i := from; i < len(tag); i++ {
+			if tag[i] == '.' || tag[i] == '$' {
+				from = i + 1
+			}
+		}
+		for tag[from] >= '0' && tag[from] <= '9' {
+			from++
+		}
+		name = tag[from : len(tag)-1]
+	} else {
+		names := map[byte]string{'I': "int", 'J': "long", 'D': "double", 'F': "float", 'Z': "boolean",
+			'C': "char", 'S': "short", 'B': "byte"}
+		name = names[tag[d]]
+	}
+	return name + strings.Repeat("[]", d)
 }
 
 // jxElems is String.join's elements: the varargs themselves, the one array

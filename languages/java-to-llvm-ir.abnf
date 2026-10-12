@@ -3208,6 +3208,7 @@ HasStatic   = :script(~~
                 callExt(b, "js_arr_push", [arr, declConvert(b, r.v, ety)])
             }
             jArrCtx = saved
+            jEmitArrTag(b, arr, alty == null ? saved : alty)
             return {b: b, v: arr}
         }
     }
@@ -3220,7 +3221,8 @@ HasStatic   = :script(~~
         if (hasEmpty) { return function(b) { return hNull } }
         return function(b) { return jZeroOf(b, ty) }
     }
-    function emitArrDims(b, dimVs, idx, fillFn) {
+    // ty is the type of the array level idx allocates.
+    function emitArrDims(b, dimVs, idx, fillFn, ty) {
         // JLS 15.10.1: EVERY dimension expression is validated BEFORE any array is
         // allocated, so `new int[0][-1]` throws even though the inner allocation
         // would never run. js_jvnewlen answers its argument and raises
@@ -3229,9 +3231,12 @@ HasStatic   = :script(~~
             for (var d = 0; d < dimVs.length; d++) { callExt(b, "js_jvnewlen", [dimVs[d]]) }
         }
         if (idx == dimVs.length - 1) {
-            return {b: b, v: callExt(b, "js_arr_new_n", [dimVs[idx], fillFn(b)])}
+            var leafV = callExt(b, "js_arr_new_n", [dimVs[idx], fillFn(b)])
+            jEmitArrTag(b, leafV, ty)
+            return {b: b, v: leafV}
         }
         var arrV = callExt(b, "js_arr_new_n", [dimVs[idx], hNull])
+        jEmitArrTag(b, arrV, ty)
         naCount++
         var iName = "$na" + naCount
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
@@ -3242,7 +3247,7 @@ HasStatic   = :script(~~
         var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
         headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, dimVs[idx]])), bodyB, doneB)
         var i2V = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
-        var sub = emitArrDims(bodyB, dimVs, idx + 1, fillFn)
+        var sub = emitArrDims(bodyB, dimVs, idx + 1, fillFn, jElemTy(ty))
         var bb = sub.b
         callExt(bb, "js_set", [arrV, i2V, sub.v])
         callExt(bb, "js_scope_set", [curScopeV, emitStr(bb, iName),
@@ -3254,13 +3259,15 @@ HasStatic   = :script(~~
         jUsesNewArr = true
         var ty = ""
         var dims = []
-        var hasEmpty = false
+        var open = 0
         for (var i = 0; i < items.length; i++) {
             if (items[i].naty != undefined) { ty = items[i].naty }
             else if (items[i].dim != undefined) { dims.push(items[i].dim) }
-            else { hasEmpty = true }
+            else { open = open + 1 }
         }
-        var fillFn = arrFillOf(ty, hasEmpty)
+        var fillFn = arrFillOf(ty, open > 0)
+        var arrTy = ty
+        for (var t = 0; t < dims.length + open; t++) { arrTy = arrTy + "[]" }
         return function(b) {
             var dimVs = []
             for (var k = 0; k < dims.length; k++) {
@@ -3268,8 +3275,14 @@ HasStatic   = :script(~~
                 b = r.b
                 dimVs.push(r.v)
             }
-            return emitArrDims(b, dimVs, 0, fillFn)
+            return emitArrDims(b, dimVs, 0, fillFn, arrTy)
         }
+    }
+    // Tags the array arrV with the binary name of its type ty (jArrDesc in
+    // lib/java-decltypes.js), which getClass() reads back.
+    function jEmitArrTag(b, arrV, ty) {
+        var desc = jArrDesc(ty)
+        if (desc != "") { callExt(b, "js_jvarrtag", [arrV, emitStr(b, desc)]) }
     }
     // A cast is identity: (Type) expr lowers to expr.
     function makeCast(inner) { return inner }
@@ -3356,16 +3369,16 @@ HasStatic   = :script(~~
             // `new String[n]` does - and this is the WALK, which is where the flag
             // has to be set (emitBuiltinExc runs before the body thunks).
             jUsesNewArr = true
-            var fillFn = arrFillOf(jStripArr(tgtPath), false)
+            var fillFn = arrFillOf(jElemTy(tgtPath), false)
             var arrName = methodPart
             var arrBody = function(b) {
                 var a0 = callExt(b, "js_get", [curF.Params[1], emitNum(b, 0)])
                 if (arrName == "new") {
-                    var r = emitArrDims(b, [a0], 0, fillFn)
+                    var r = emitArrDims(b, [a0], 0, fillFn, tgtPath)
                     r.b.NewRet(r.v)
                     return deadBlock()
                 }
-                b.NewRet(callExt(b, "js_mcall", [a0, emitStr(b, arrName), callExt(b, "js_arr_new", [])]))
+                b.NewRet(callExt(b, "js_jvclone", [a0]))
                 return deadBlock()
             }
             return function(b) {
@@ -3384,21 +3397,7 @@ HasStatic   = :script(~~
                 // so the copy is an emitted loop over the incoming array.
                 var allV = callExt(b, "js_arr_new", [])
                 callExt(b, "js_arr_push", [allV, objV])
-                var lenV = callExt(b, "js_get", [curF.Params[1], emitStr(b, "length")])
-                var iName = "$cr"
-                var scopeV = curScopeV
-                callExt(b, "js_scope_decl", [scopeV, emitStr(b, iName), emitNum(b, 0)])
-                var headB = curF.NewBlock("")
-                var bodyB = curF.NewBlock("")
-                var doneB = curF.NewBlock("")
-                b.NewBr(headB)
-                var iV = callExt(headB, "js_scope_get", [scopeV, emitStr(headB, iName)])
-                headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, doneB)
-                var i2V = callExt(bodyB, "js_scope_get", [scopeV, emitStr(bodyB, iName)])
-                callExt(bodyB, "js_arr_push", [allV, callExt(bodyB, "js_get", [curF.Params[1], i2V])])
-                callExt(bodyB, "js_scope_set", [scopeV, emitStr(bodyB, iName),
-                                                callExt(bodyB, "js_jadd", [i2V, emitNum(bodyB, 1)])])
-                bodyB.NewBr(headB)
+                var doneB = jEmitArgsFrom(b, allV, 0)
                 callExt(doneB, "js_call", [callExt(doneB, "js_get", [clsV, emitStr(doneB, "__ctor")]), hUndef, allV])
                 doneB.NewRet(objV)
                 return deadBlock()
@@ -3409,7 +3408,31 @@ HasStatic   = :script(~~
             }
         }
         var parts = splitDots(tgtPath)
+        // String::length - an unbound reference over a java.lang type: the first
+        // argument is the receiver and the rest are the method's arguments. The
+        // call is dispatched as `recv.m(...)` is; of Object's members only
+        // equals takes an argument.
+        if (parts.length == 1 && jUnboundRef(parts[0], methodPart)) {
+            var ubCall = {name: methodPart, args: methodPart == "equals" ? [null] : []}
+            var ubBody = function(b) {
+                var restV = callExt(b, "js_arr_new", [])
+                var r = jEmitArgsFrom(b, restV, 1)
+                var a0 = callExt(r, "js_get", [curF.Params[1], emitNum(r, 0)])
+                r.NewRet(jEmitNamedCall(r, a0, ubCall, restV))
+                return deadBlock()
+            }
+            return function(b) {
+                var idx = emitFunc([], ubBody, false, null)
+                return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
+            }
+        }
         var bodyStmt = function(b) {
+            // String::valueOf - java.lang.String's statics, which no scope value
+            // carries (see foldCallMember).
+            if (tgtPath == "String") {
+                b.NewRet(callExt(b, "js_jvstrstatic", [emitStr(b, methodPart), curF.Params[1]]))
+                return deadBlock()
+            }
             var recv = callExt(b, core.scopeGetExt, [curScopeV, emitStr(b, parts[0])])
             for (var k = 1; k < parts.length; k++) {
                 recv = callExt(b, "js_get", [recv, emitStr(b, parts[k])])
@@ -3422,6 +3445,27 @@ HasStatic   = :script(~~
             var idx = emitFunc([], bodyStmt, false, null)
             return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
         }
+    }
+    // Appends a method reference's own arguments from index `from` on to arrV.
+    // The reference is handed an arbitrary argument list, so the copy is an
+    // emitted loop over the incoming array; answers the block after it.
+    function jEmitArgsFrom(b, arrV, from) {
+        var lenV = callExt(b, "js_get", [curF.Params[1], emitStr(b, "length")])
+        var iName = "$cr"
+        var scopeV = curScopeV
+        callExt(b, "js_scope_decl", [scopeV, emitStr(b, iName), emitNum(b, from)])
+        var headB = curF.NewBlock("")
+        var bodyB = curF.NewBlock("")
+        var doneB = curF.NewBlock("")
+        b.NewBr(headB)
+        var iV = callExt(headB, "js_scope_get", [scopeV, emitStr(headB, iName)])
+        headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, doneB)
+        var i2V = callExt(bodyB, "js_scope_get", [scopeV, emitStr(bodyB, iName)])
+        callExt(bodyB, "js_arr_push", [arrV, callExt(bodyB, "js_get", [curF.Params[1], i2V])])
+        callExt(bodyB, "js_scope_set", [scopeV, emitStr(bodyB, iName),
+                                        callExt(bodyB, "js_jadd", [i2V, emitNum(bodyB, 1)])])
+        bodyB.NewBr(headB)
+        return doneB
     }
     // Splits a dotted path "a.b.c" into ["a", "b", "c"].
     function splitDots(s) { return s.split(".") }
@@ -3438,16 +3482,6 @@ HasStatic   = :script(~~
             if (ch == "<") { depth = depth + 1 }
             else if (ch == ">") { depth = depth - 1 }
             else if (depth == 0) { out = out + ch }
-        }
-        return out
-    }
-    // "String[][]" -> "String": the element type an array reference allocates.
-    function jStripArr(s) {
-        var out = ""
-        for (var i = 0; i < s.length; i++) {
-            var ch = s.charAt(i)
-            if (ch == "[" || ch == "]") { return out }
-            out = out + ch
         }
         return out
     }
@@ -3488,6 +3522,52 @@ HasStatic   = :script(~~
             return callExt(b, "js_jvstrm", [recv, emitStr(b, s.name), argsV])
         }
         return callExt(b, "js_mcall", [recv, emitStr(b, s.name), argsV])
+    }
+    // A named call s on a receiver that is not a closure, argsV its arguments.
+    // String.charAt answers a CHAR (js_jcharat), not a one-character
+    // String: Java's char is an integral type, so s.charAt(1) + 0
+    // is 101. A user class with its own charAt still dispatches.
+    // x.hashCode() is Object#hashCode and its overrides, and it
+    // reaches values js_mcall cannot dispatch on at all - a
+    // String, a boxed long, a double, a plain int, an array, an
+    // instance of a class that declares no method by that name.
+    // js_jhash answers all of them AND still dispatches to a
+    // user-declared hashCode. Only the no-argument form is
+    // Object#hashCode, so an overload with parameters still goes
+    // to js_mcall.
+    // x.toString() and x.equals(y) are the other two members of
+    // the java.lang.Object contract a class inherits without
+    // declaring. js_jvstr is String.valueOf, which DISPATCHES to
+    // a declared or inherited toString before falling back to the
+    // record form and then to getName() + "@" + hex(hashCode());
+    // js_jvaleq is Objects.equals arm for arm, which dispatches to
+    // a declared equals and otherwise keeps Object's identity.
+    // Only the exact arities are Object's.
+    // String.substring checks the RANGE (begin > end is out of
+    // bounds too, JLS java.lang.String) where the shared js_mcall
+    // CLAMPS. js_jvsub is java-only, exactly like js_jcharat: the
+    // Go extern table is SHARED across languages, so a wrapper on
+    // js_mcall would make a C# Substring raise java's message.
+    // String.toCharArray (js_jvchars) is java-only for the same reason,
+    // and so is an array's clone() (js_jvclone).
+    function jEmitNamedCall(b, cur, s, argsV) {
+        return (s.name == "substring")
+                 ? callExt(b, "js_jvsub", [cur, argsV])
+                 : ((s.name == "toCharArray" && s.args.length == 0)
+                 ? callExt(b, "js_jvchars", [cur])
+                 : ((s.name == "clone" && s.args.length == 0)
+                 ? callExt(b, "js_jvclone", [cur])
+                 : ((s.name == "charAt")
+                 ? callExt(b, "js_jcharat", [cur, argsV])
+                 : ((s.name == "getClass" && s.args.length == 0)
+                 ? callExt(b, "js_jvgetclass", [cur])
+                 : ((s.name == "hashCode" && s.args.length == 0)
+                    ? callExt(b, "js_jhash", [cur])
+                    : ((s.name == "toString" && s.args.length == 0)
+                       ? callExt(b, "js_jvstr", [cur])
+                       : ((s.name == "equals" && s.args.length == 1)
+                          ? callExt(b, "js_jvaleq", [cur, callExt(b, "js_arg", [argsV, handle(0)])])
+                          : jEmitMcall(b, cur, s, argsV))))))))
     }
     var jStrMethods = {}
     var jStrMethodList = ["isEmpty", "isBlank", "indexOf", "lastIndexOf", "contains", "startsWith", "endsWith",
@@ -3531,49 +3611,7 @@ HasStatic   = :script(~~
                     b.NewCondBr(isFn, callB, mcallB)
                     var cv = callExt(callB, "js_call", [cur, hUndef, ea.v])
                     callB.NewBr(mergeB)
-                    // String.charAt answers a CHAR (js_jcharat), not a one-character
-                    // String: Java's char is an integral type, so s.charAt(1) + 0
-                    // is 101. A user class with its own charAt still dispatches.
-                    // x.hashCode() is Object#hashCode and its overrides, and it
-                    // reaches values js_mcall cannot dispatch on at all - a
-                    // String, a boxed long, a double, a plain int, an array, an
-                    // instance of a class that declares no method by that name.
-                    // js_jhash answers all of them AND still dispatches to a
-                    // user-declared hashCode. Only the no-argument form is
-                    // Object#hashCode, so an overload with parameters still goes
-                    // to js_mcall.
-                    // x.toString() and x.equals(y) are the other two members of
-                    // the java.lang.Object contract a class inherits without
-                    // declaring. js_jvstr is String.valueOf, which DISPATCHES to
-                    // a declared or inherited toString before falling back to the
-                    // record form and then to getName() + "@" + hex(hashCode());
-                    // js_jvaleq is Objects.equals arm for arm, which dispatches to
-                    // a declared equals and otherwise keeps Object's identity.
-                    // Only the exact arities are Object's.
-                    // String.substring checks the RANGE (begin > end is out of
-                    // bounds too, JLS java.lang.String) where the shared js_mcall
-                    // CLAMPS. js_jvsub is java-only, exactly like js_jcharat: the
-                    // Go extern table is SHARED across languages, so a wrapper on
-                    // js_mcall would make a C# Substring raise java's message.
-                    // String.toCharArray (js_jvchars) is java-only for the same reason,
-                    // and so is an array's clone() (js_jvclone).
-                    var mv = (s.name == "substring")
-                             ? callExt(mcallB, "js_jvsub", [cur, ea.v])
-                             : ((s.name == "toCharArray" && s.args.length == 0)
-                             ? callExt(mcallB, "js_jvchars", [cur])
-                             : ((s.name == "clone" && s.args.length == 0)
-                             ? callExt(mcallB, "js_jvclone", [cur])
-                             : ((s.name == "charAt")
-                             ? callExt(mcallB, "js_jcharat", [cur, ea.v])
-                             : ((s.name == "getClass" && s.args.length == 0)
-                             ? callExt(mcallB, "js_jvgetclass", [cur])
-                             : ((s.name == "hashCode" && s.args.length == 0)
-                                ? callExt(mcallB, "js_jhash", [cur])
-                                : ((s.name == "toString" && s.args.length == 0)
-                                   ? callExt(mcallB, "js_jvstr", [cur])
-                                   : ((s.name == "equals" && s.args.length == 1)
-                                      ? callExt(mcallB, "js_jvaleq", [cur, callExt(mcallB, "js_arg", [ea.v, handle(0)])])
-                                      : jEmitMcall(mcallB, cur, s, ea.v))))))))
+                    var mv = jEmitNamedCall(mcallB, cur, s, ea.v)
                     mcallB.NewBr(mergeB)
                     cur = mergeB.NewPhi([llvm.ir.NewIncoming(cv, callB), llvm.ir.NewIncoming(mv, mcallB)])
                     b = mergeB
@@ -4800,22 +4838,7 @@ HasStatic   = :script(~~
             }
             for (i = 0; i < members.length; i++) {
                 var mm = members[i]
-                if (mm.kind == "field") {
-                    if (mm.statik) {
-                        var sv
-                        if (mm.init != null && mm.init != undefined) {
-                            var r = mm.init(b)
-                            b = r.b
-                            sv = r.v
-                        } else {
-                            sv = fieldDefault(b, mm)
-                        }
-                        callExt(b, "js_set", [clsV, emitStr(b, mm.name), sv])
-                    } else {
-                        fields.push(mm)
-                    }
-                }
-                if (mm.kind == "staticinit") { b = mm.body(b) }
+                if (mm.kind == "field" && !mm.statik) { fields.push(mm) }
                 if (mm.kind == "initblock") { fields.push({initblock: mm.body}) }
                 if (mm.kind == "ctor") { ctors.push(mm) }
             }
@@ -4950,7 +4973,25 @@ HasStatic   = :script(~~
                     callExt(b, "js_set", [clsV, emitStr(b, "equals"), callExt(b, "js_closure", [handle(eqidx), curScopeV])])
                 }
             }
+            // Static fields and static initializer blocks run in textual order once
+            // the constructors and methods are installed, so an initializer can
+            // construct its own class or call its static methods. Twin of the
+            // statics loop in buildClassFrom in java-interpreter.abnf.
             curHasThis = savedHasThis
+            for (i = 0; i < members.length; i++) {
+                var sm = members[i]
+                if (sm.kind == "staticinit") { b = sm.body(b) }
+                if (sm.kind != "field" || !sm.statik) { continue }
+                var sv
+                if (sm.init != null && sm.init != undefined) {
+                    var r = sm.init(b)
+                    b = r.b
+                    sv = r.v
+                } else {
+                    sv = fieldDefault(b, sm)
+                }
+                callExt(b, "js_set", [clsV, emitStr(b, sm.name), sv])
+            }
             return b
         }
     }

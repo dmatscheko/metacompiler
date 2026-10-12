@@ -175,6 +175,12 @@ class ArrayList<E> implements List<E> {
         return out;
     }
     public Iterator<E> iterator() { return new ArrayListItr<E>(this); }
+    // Stable, and c == null is natural order (List#sort).
+    public void sort(Comparator<? super E> c) {
+        writable();
+        Arrays.sortRange(elems, 0, count, c);
+        modCount++;
+    }
     @SuppressWarnings("unchecked")
     public void forEach(java.util.function.Consumer<? super E> action) {
         int expected = modCount;

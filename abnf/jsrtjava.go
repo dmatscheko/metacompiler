@@ -25,12 +25,12 @@ package abnf
 //     the SAME program, so no assertion can ever depend on the digits; what the two
 //     halves DO have to agree on is that the same object renders the same way twice
 //     and that a program's output is reproducible, which a counter gives.
-//   - An array's ELEMENT TYPE is inferred from the elements, because this value
-//     model does not carry the declared type. plain number -> [I, boxed double ->
-//     [D, String -> [Ljava.lang.String;, boolean -> [Z, char -> [C, and empty or
-//     mixed -> [Ljava.lang.Object;. So `Object[] o = {1, 2}` renders as `[I@...`
-//     where real java says `[Ljava.lang.Object;@...`, and a nested `int[][]` renders
-//     as `[Ljava.lang.Object;@...` where real java says `[[I@...`.
+//   - An array created with a declared type other than a one-dimensional
+//     Object[] carries that type (js_jvarrtag). Any other array's ELEMENT TYPE is
+//     inferred from the elements: plain number -> [I, boxed double -> [D, String
+//     -> [Ljava.lang.String;, boolean -> [Z, char -> [C, and empty or mixed ->
+//     [Ljava.lang.Object;. So `Object[] o = {1, 2}` renders as `[I@...` where
+//     real java says `[Ljava.lang.Object;@...`.
 //   - `Object#toString` IS a callable member: `b.toString()` on a class that
 //     declares none routes to js_jvstr, the same rendering println / `+` /
 //     String.valueOf use, and `b.equals(o)` routes to js_jvaleq. Both dispatch to a
@@ -43,6 +43,7 @@ import (
 	"math/rand/v2"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode/utf16"
 )
 
@@ -1168,7 +1169,11 @@ func (rt *jsrt) jvBoxType(name string) *jsObject {
 		o.set("toString", jsHostFunc("toString", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			return rt.jvpStr(argAt(args, 0))
 		}))
+		// Short.compare and Byte.compare answer x - y, Integer and Long the sign.
 		o.set("compare", jsHostFunc("compare", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			if width < 32 {
+				return float64(jvToLong(rt, argAt(args, 0)) - jvToLong(rt, argAt(args, 1)))
+			}
 			return cmp(argAt(args, 0), argAt(args, 1))
 		}))
 		o.set("max", jsHostFunc("max", func(rt *jsrt, this uint64, args []interface{}) interface{} {
@@ -1434,15 +1439,23 @@ func init() {
 		}
 		// String.toCharArray: one char per UTF-16 unit. Anything else is an
 		// ordinary call of a method by that name.
-		// An array's clone() is a new array of the same length holding the same
-		// elements, a shallow copy (JLS 10.7); any other receiver dispatches.
+		// An array's clone() is a new array of the same type and length holding
+		// the same elements, a shallow copy (JLS 10.7); any other receiver
+		// dispatches.
 		// Twin of the clone arm of mcall in java-interpreter.abnf and js_jvclone
 		// in languages/lib/java-rt.metajs.
 		m["js_jvclone"] = func(a []uint64) uint64 {
 			if arr, ok := u(a[0]).(*jsArray); ok {
-				return w(&jsArray{elems: append([]interface{}(nil), arr.elems...)})
+				return w(&jsArray{elems: append([]interface{}(nil), arr.elems...), kind: arr.kind})
 			}
 			return baseMcall([]uint64{a[0], w("clone"), w(&jsArray{})})
+		}
+		// Tags an array with the binary name of its declared type (jvArrTagKind).
+		m["js_jvarrtag"] = func(a []uint64) uint64 {
+			if arr, ok := u(a[0]).(*jsArray); ok {
+				arr.kind = jvArrTagKind(rt.toString(u(a[1])))
+			}
+			return a[0]
 		}
 		m["js_jvchars"] = func(a []uint64) uint64 {
 			if s, ok := u(a[0]).(string); ok {
@@ -2294,10 +2307,42 @@ func jvpFindMember(o *jsObject, name string) (interface{}, bool) {
 	return nil, false
 }
 
-// jvpArrayTag is the array's class name as getName spells it. The element type is
-// INFERRED from the elements (see the header): this value model does not carry the
-// declared one.
+// An array created with a declared type carries that type's binary name as its
+// kind number, jvArrKindBase and up so it meets no other language's kinds;
+// jvArrTags maps the number back. The numbering is this process's own and only
+// ever grows. Twin of jArrTag in java-interpreter.abnf and js_jvarrtag in
+// languages/lib/java-rt.metajs.
+const jvArrKindBase = 1000
+
+var jvArrTags struct {
+	sync.Mutex
+	names []string
+	kinds map[string]int
+}
+
+func jvArrTagKind(desc string) int {
+	jvArrTags.Lock()
+	defer jvArrTags.Unlock()
+	k, ok := jvArrTags.kinds[desc]
+	if !ok {
+		if jvArrTags.kinds == nil {
+			jvArrTags.kinds = map[string]int{}
+		}
+		k = jvArrKindBase + len(jvArrTags.names)
+		jvArrTags.names = append(jvArrTags.names, desc)
+		jvArrTags.kinds[desc] = k
+	}
+	return k
+}
+
+// jvpArrayTag is the array's class name as getName spells it: the type it was
+// created with, else one INFERRED from its elements (see the header).
 func jvpArrayTag(a *jsArray) string {
+	if a.kind >= jvArrKindBase {
+		jvArrTags.Lock()
+		defer jvArrTags.Unlock()
+		return jvArrTags.names[a.kind-jvArrKindBase]
+	}
 	tag := ""
 	for _, e := range a.elems {
 		t := jvpElemTag(e)

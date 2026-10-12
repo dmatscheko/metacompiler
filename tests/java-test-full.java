@@ -120,6 +120,7 @@ class Main {
         S55.run(); // SECTION-CALL 55
         S56.run(); // SECTION-CALL 56
         S57.run(); // SECTION-CALL 57
+        S58.run(); // SECTION-CALL 58
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -3343,5 +3344,64 @@ class S57 {
         Main.check("qn57", S57Outer.S57Lid.m() == 42 && box instanceof S57Outer.S57Lid && box instanceof S57Outer.S57Cup
             && "s" instanceof java.lang.String && !(box instanceof java.lang.Number)
             && new String[] { "a", "b" }.getClass().getSimpleName().equals("String[]"));
+    }
+}
+
+// ===== SECTION 58: static self-typed fields, unbound method references, array types =====
+//
+// A class's static initializers run once its methods and constructors exist,
+// so one may construct the class itself or call its static methods. A method
+// reference Type::m naming an instance method of a java.lang type is unbound
+// (JLS 15.13.1): its first argument is the receiver. An array is created with
+// a type that getClass() names whatever it holds, and clone() keeps it.
+// Short.compare and Byte.compare answer x - y. Every expected value is java
+// 24.0.2's.
+final class S58Opt {
+    static final S58Opt EMPTY = new S58Opt(7);
+    static final int TWICE = twice(21);
+    static int twice(int x) { return x * 2; }
+    final int v;
+    S58Opt(int v) { this.v = v; }
+}
+class S58Cell { int x; }
+class S58 {
+    static String names(Object[] os) {
+        String s = "";
+        for (Object o : os) { s = s + o.getClass().getSimpleName() + " " + o.getClass().getName() + ";"; }
+        return s;
+    }
+    static void run() {
+        Main.check("si58", S58Opt.EMPTY.v == 7 && S58Opt.TWICE == 42 && S58Opt.EMPTY == S58Opt.EMPTY);
+        List<String> ws = List.of("bb", "a", "ccc", "dd");
+        ArrayList<String> sorted = new ArrayList<>(ws);
+        sorted.sort(String::compareTo);
+        java.util.function.Function<String, Integer> len = String::length;
+        java.util.function.BiFunction<String, String, String> cat = String::concat;
+        java.util.function.Function<Object, String> str = Object::toString;
+        java.util.function.Function<Object, String> val = String::valueOf;
+        java.util.function.Function<Integer, Integer> iv = Integer::intValue;
+        Main.check("mr58", ws.stream().collect(Collectors.groupingBy(String::length)).toString().equals("{1=[a], 2=[bb, dd], 3=[ccc]}")
+            && ws.stream().map(String::toUpperCase).collect(Collectors.joining(",")).equals("BB,A,CCC,DD")
+            && sorted.toString().equals("[a, bb, ccc, dd]") && len.apply("four") == 4 && cat.apply("x", "y").equals("xy")
+            && str.apply(12).equals("12") && val.apply(null).equals("null") && iv.apply(5) == 5
+            && Stream.of(3, 1, 2).sorted(Integer::compareTo).toList().toString().equals("[1, 2, 3]"));
+        String[] s = { "x", null };
+        Object[] c = s.clone();
+        java.util.function.IntFunction<int[][]> mk = int[][]::new;
+        Main.check("at58", names(new Object[] { s, c, new String[0], new int[0], new S58Cell[1], new int[2][3], new String[1][1],
+                new Integer[] { 1 }, mk.apply(2), new double[0][] })
+            .equals("String[] [Ljava.lang.String;;String[] [Ljava.lang.String;;String[] [Ljava.lang.String;;int[] [I;"
+                + "S58Cell[] [LS58Cell;;int[][] [[I;String[][] [[Ljava.lang.String;;Integer[] [Ljava.lang.Integer;;"
+                + "int[][] [[I;double[][] [[D;")
+            && mk.apply(2)[0] == null);
+        String[][] sm = { { "a" }, { "b" } };
+        int[][] im = new int[2][0];
+        Main.check("fm58", String.format("%s|%s", (Object[]) sm).replaceAll("@[0-9a-f]+", "@").equals("[Ljava.lang.String;@|[Ljava.lang.String;@")
+            && String.format("%s+%s", (Object[]) im).replaceAll("@[0-9a-f]+", "@").equals("[I@+[I@"));
+        short[] hs = { (short) 3, (short) -5, (short) 32767, (short) -32768 };
+        byte[] bs = { (byte) 3, (byte) -5, (byte) 127, (byte) -128 };
+        String cmp = "";
+        for (int i = 0; i < 4; i++) { cmp = cmp + Short.compare(hs[i], hs[3 - i]) + " " + Byte.compare(bs[i], bs[3 - i]) + " "; }
+        Main.check("sc58", cmp.equals("32771 131 -32772 -132 32772 132 -32771 -131 "));
     }
 }

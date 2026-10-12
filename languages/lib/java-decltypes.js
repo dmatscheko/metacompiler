@@ -65,6 +65,40 @@ function jElemTy(ty) {
     if (ty.length > 2 && ty.substring(ty.length - 2) == "[]") { return ty.substring(0, ty.length - 2) }
     return ""
 }
+// The binary name java.lang.Class#getName gives the array type ty, which an
+// array created with that type carries (jArrTag in each grammar):
+// "String[][]" is "[[Ljava.lang.String;", "Main.P[]" is "[LMain$P;". "" when
+// ty is no array type or names no type this program knows, and for a
+// one-dimensional Object[]: lib/java-util.java builds every array it hands
+// back as one, whatever the caller's type was, so the element-type inference
+// of an untagged array stays the better answer there. Read once every class is
+// declared, and memoized.
+var jArrDescs = {}
+var jPrimDescs = {"$int": "I", "$long": "J", "$short": "S", "$byte": "B", "$char": "C",
+                  "$float": "F", "$double": "D", "$boolean": "Z"}
+function jArrDesc(ty) {
+    var memo = jArrDescs["$" + ty]
+    if (memo != undefined) { return memo }
+    var t = jStripTargs(ty)
+    var dims = ""
+    while (jElemTy(t) != "") {
+        dims = dims + "["
+        t = jElemTy(t)
+    }
+    var d = ""
+    if (dims != "") {
+        var from = 0
+        for (var i = 0; i < t.length; i++) { if (t.charAt(i) == ".") { from = i + 1 } }
+        var simple = t.substring(from)
+        var bin = jBinName["$" + simple]
+        if (jPrimDescs["$" + t] != undefined) { d = dims + jPrimDescs["$" + t] }
+        else if (jLangStatics["$" + simple] != undefined) { d = dims + "Ljava.lang." + simple + ";" }
+        else if (bin != undefined) { d = dims + "L" + bin + ";" }
+        if (d == "[Ljava.lang.Object;") { d = "" }
+    }
+    jArrDescs["$" + ty] = d
+    return d
+}
 // The declared result type of the method whose body is being walked: the
 // RetType tag pushes it before the body, a lambda's head pushes "" (its
 // returns are its own), and the closing tags pop.
@@ -371,6 +405,28 @@ function jNoteRefText(text) {
     var c = text.indexOf("::")
     if (c >= 0) { jCallEsc["$" + text.substring(c + 2)] = true }
     return text
+}
+// The public static methods of the java.lang types a value of this model is an
+// instance of, as JDK 24's reflection lists them. A reference Type::m naming
+// any other method of one of these types is unbound (JLS 15.13.1): its first
+// argument is the receiver. A name that is both static and instance
+// (Integer::toString, Double::isNaN) is ambiguous wherever both apply, so the
+// static reading is the only one a valid program can mean.
+var jLangStatics = {
+    "$String": "|copyValueOf|format|join|valueOf|",
+    "$Integer": "|bitCount|compare|compareUnsigned|compress|decode|divideUnsigned|expand|getInteger|hashCode|highestOneBit|lowestOneBit|max|min|numberOfLeadingZeros|numberOfTrailingZeros|parseInt|parseUnsignedInt|remainderUnsigned|reverse|reverseBytes|rotateLeft|rotateRight|signum|sum|toBinaryString|toHexString|toOctalString|toString|toUnsignedLong|toUnsignedString|valueOf|",
+    "$Long": "|bitCount|compare|compareUnsigned|compress|decode|divideUnsigned|expand|getLong|hashCode|highestOneBit|lowestOneBit|max|min|numberOfLeadingZeros|numberOfTrailingZeros|parseLong|parseUnsignedLong|remainderUnsigned|reverse|reverseBytes|rotateLeft|rotateRight|signum|sum|toBinaryString|toHexString|toOctalString|toString|toUnsignedString|valueOf|",
+    "$Short": "|compare|compareUnsigned|decode|hashCode|parseShort|reverseBytes|toString|toUnsignedInt|toUnsignedLong|valueOf|",
+    "$Byte": "|compare|compareUnsigned|decode|hashCode|parseByte|toString|toUnsignedInt|toUnsignedLong|valueOf|",
+    "$Double": "|compare|doubleToLongBits|doubleToRawLongBits|hashCode|isFinite|isInfinite|isNaN|longBitsToDouble|max|min|parseDouble|sum|toHexString|toString|valueOf|",
+    "$Float": "|compare|float16ToFloat|floatToFloat16|floatToIntBits|floatToRawIntBits|hashCode|intBitsToFloat|isFinite|isInfinite|isNaN|max|min|parseFloat|sum|toHexString|toString|valueOf|",
+    "$Character": "|charCount|codePointAt|codePointBefore|codePointCount|codePointOf|compare|digit|forDigit|getDirectionality|getName|getNumericValue|getType|hashCode|highSurrogate|isAlphabetic|isBmpCodePoint|isDefined|isDigit|isEmoji|isEmojiComponent|isEmojiModifier|isEmojiModifierBase|isEmojiPresentation|isExtendedPictographic|isHighSurrogate|isISOControl|isIdentifierIgnorable|isIdeographic|isJavaIdentifierPart|isJavaIdentifierStart|isJavaLetter|isJavaLetterOrDigit|isLetter|isLetterOrDigit|isLowSurrogate|isLowerCase|isMirrored|isSpace|isSpaceChar|isSupplementaryCodePoint|isSurrogate|isSurrogatePair|isTitleCase|isUnicodeIdentifierPart|isUnicodeIdentifierStart|isUpperCase|isValidCodePoint|isWhitespace|lowSurrogate|offsetByCodePoints|reverseBytes|toChars|toCodePoint|toLowerCase|toString|toTitleCase|toUpperCase|valueOf|",
+    "$Boolean": "|compare|getBoolean|hashCode|logicalAnd|logicalOr|logicalXor|parseBoolean|toString|valueOf|",
+    "$Object": "|", "$Number": "|", "$Comparable": "|", "$CharSequence": "|compare|"
+}
+function jUnboundRef(tgt, name) {
+    var st = jLangStatics["$" + tgt]
+    return st != undefined && st.indexOf("|" + name + "|") < 0
 }
 // The parameter types a method converts its arguments to: its declared
 // ptys, with "" where every call site already passes that type. A varargs

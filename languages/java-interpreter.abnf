@@ -2716,10 +2716,15 @@ HasStatic   = :script(~~
     // this runs at SCRIPT BODY time and only the included lib is textually in
     // scope by now; the pairs are the sign-extended 64 bit readings of each width's
     // extremes, which is the invariant i64Trunc would have produced.
+    // Short.compare and Byte.compare answer x - y (Integer's and Long's the sign).
+    // Twin of addCommon in jvBoxType in abnf/jsrtjava.go and jvAddCommon in
+    // languages/lib/java-rt.metajs.
     hostGlobals["Byte"] = {MAX_VALUE: szMake(i64Make(0, 127), 8, false),
-                           MIN_VALUE: szMake(i64Make(0xffffffff, 0xffffff80), 8, false), SIZE: 8, BYTES: 1}
+                           MIN_VALUE: szMake(i64Make(0xffffffff, 0xffffff80), 8, false), SIZE: 8, BYTES: 1,
+                           compare: function(a, b) { return jI(a) - jI(b) }}
     hostGlobals["Short"] = {MAX_VALUE: szMake(i64Make(0, 32767), 16, false),
-                            MIN_VALUE: szMake(i64Make(0xffffffff, 0xffff8000), 16, false), SIZE: 16, BYTES: 2}
+                            MIN_VALUE: szMake(i64Make(0xffffffff, 0xffff8000), 16, false), SIZE: 16, BYTES: 2,
+                            compare: function(a, b) { return jI(a) - jI(b) }}
     hostGlobals["Character"] = {MAX_VALUE: {__char: 65535}, MIN_VALUE: {__char: 0}, SIZE: 16, BYTES: 2}
     // Double / Boolean carry only a subset of their members. A member NOT on one
     // of these descriptors reads as null rather than aborting, as Character's
@@ -3351,12 +3356,12 @@ HasStatic   = :script(~~
         return 0x1a2b3c00 + jHashN
     }
     // An array renders as its CLASS NAME - "[I@1a2b3c01" - and the element type is
-    // part of that name. This value model does not carry the declared type, so it is
-    // inferred from the elements: all-int -> [I, all-double -> [D, all-String ->
-    // [Ljava.lang.String;, all-boolean -> [Z, all-char -> [C, and empty or mixed ->
-    // [Ljava.lang.Object;. A deliberate simplification, shared with the compiler
-    // half: `Object[] o = {1, 2}` therefore renders as [I@... and a nested int[][]
-    // as [Ljava.lang.Object;@... where real java writes [[I@...
+    // part of that name. An array created with a declared type carries it
+    // (jArrTag); any other's is inferred from the elements: all-int -> [I,
+    // all-double -> [D, all-String -> [Ljava.lang.String;, all-boolean -> [Z,
+    // all-char -> [C, and empty or mixed -> [Ljava.lang.Object;. A deliberate
+    // simplification, shared with the compiler half: `Object[] o = {1, 2}`
+    // therefore renders as [I@... where real java writes [Ljava.lang.Object;@...
     function jElemTag(e) {
         if (e === undefined || e === null) return ""
         var t = typeof e
@@ -3372,7 +3377,27 @@ HasStatic   = :script(~~
         }
         return ""
     }
+    // An array created with a declared type carries that type's binary name
+    // (jArrDesc in lib/java-decltypes.js) as its kind number, 1000 and up so it
+    // meets no other language's kinds; jArrTagNames maps the number back. Twin
+    // of js_jvarrtag in abnf/jsrtjava.go and languages/lib/java-rt.metajs.
+    var jArrTagNames = []
+    var jArrTagKinds = {}
+    function jArrTag(a, desc) {
+        if (desc == "") { return a }
+        var k = jArrTagKinds["$" + desc]
+        if (k == undefined) {
+            k = 1000 + jArrTagNames.length
+            jArrTagNames.push(desc)
+            jArrTagKinds["$" + desc] = k
+        }
+        return arrKindSet(a, k)
+    }
+    // The array's binary class name: the type it was created with, else one
+    // inferred from its elements.
     function jArrayTag(a) {
+        var kind = arrKind(a)
+        if (kind >= 1000) { return jArrTagNames[kind - 1000] }
         var tag = ""
         for (var i = 0; i < a.length; i++) {
             var t = jElemTag(a[i])
@@ -3461,18 +3486,27 @@ HasStatic   = :script(~~
         return c
     }
     function jLangClass(simple) { return jClassOf("java.lang." + simple, simple) }
-    // An array's simple name from its (inferred) binary name: [I is int[].
+    // An array's simple name from its binary name: [I is int[], [[LMain$1P; is
+    // P[][] (a nested or local class goes by its own name). Twin of
+    // jxArraySimple in abnf/jsrtjavastr.go and jvArraySimple in
+    // languages/lib/java-rt.metajs.
     function jArraySimple(tag) {
-        if (tag.charAt(1) == "L") { return jSimpleName(tag.substring(0, tag.length - 1)) + "[]" }
-        var c = tag.charAt(1)
-        if (c == "I") { return "int[]" }
-        if (c == "J") { return "long[]" }
-        if (c == "D") { return "double[]" }
-        if (c == "F") { return "float[]" }
-        if (c == "Z") { return "boolean[]" }
-        if (c == "C") { return "char[]" }
-        if (c == "S") { return "short[]" }
-        return "byte[]"
+        var d = 0
+        while (tag.charAt(d) == "[") { d = d + 1 }
+        var name = ""
+        if (tag.charAt(d) == "L") {
+            var from = d + 1
+            for (var i = from; i < tag.length; i++) {
+                var ch = tag.charAt(i)
+                if (ch == "." || ch == "$") { from = i + 1 }
+            }
+            while (tag.charAt(from) >= "0" && tag.charAt(from) <= "9") { from = from + 1 }
+            name = tag.substring(from, tag.length - 1)
+        } else {
+            name = jAcNames[tag.charAt(d)]
+        }
+        for (var k = 0; k < d; k++) { name = name + "[]" }
+        return name
     }
     // The java.lang wrapper class a boxed primitive (or a String) belongs to, or ""
     // for any other value. Twin of jvBoxName in abnf/jsrtjavastr.go and
@@ -3645,7 +3679,12 @@ HasStatic   = :script(~~
             return jxJoin(jStrArg(args[0]), parts)
         }
         if (name == "format") {
-            if (rest.length == 1 && Array.isArray(rest[0]) && jArrayTag(rest[0]).substring(0, 2) == "[L") { rest = rest[0] }
+            if (rest.length == 1 && Array.isArray(rest[0])) {
+                // An array of references (an Object[], also a String[][]) is the
+                // varargs array itself.
+                var k1 = jArrayTag(rest[0]).charAt(1)
+                if (k1 == "L" || k1 == "[") { rest = rest[0] }
+            }
             return jxFormat(jStrArg(args[0]), rest)
         }
         fail("unknown method 'String." + name + "'")
@@ -3728,10 +3767,10 @@ HasStatic   = :script(~~
             if (jIsFlo(target)) { return jDblCompare(jNumD(target), jNumD(args[0])) }
             if (typeof target == "boolean") { return target === args[0] ? 0 : (target ? 1 : jNegOne) }
         }
-        // An array's clone() is a new array of the same length holding the same
-        // elements, a shallow copy (JLS 10.7). Twin of js_jvclone in
+        // An array's clone() is a new array of the same type and length holding
+        // the same elements, a shallow copy (JLS 10.7). Twin of js_jvclone in
         // abnf/jsrtjava.go and languages/lib/java-rt.metajs.
-        if (name == "clone" && args.length == 0 && Array.isArray(target)) { return target.slice(0) }
+        if (name == "clone" && args.length == 0 && Array.isArray(target)) { return arrKindSet(target.slice(0), arrKind(target)) }
         if (target === undefined || target === null) fail("method call ." + name + "() on null")
         if (target.__class != undefined) {
             // The lookup follows the __super chain and the interfaces along it. Own
@@ -4299,7 +4338,7 @@ HasStatic   = :script(~~
             var a = []
             for (var i = 0; i < items.length; i++) { a.push(jConvTo(items[i](), ety)) }
             jArrCtx = saved
-            return a
+            return jArrTag(a, jArrDesc(saved))
         }
     }
     // new T[]{...}: the initializer builds a T[].
@@ -4315,7 +4354,8 @@ HasStatic   = :script(~~
         if (ty == "double" || ty == "float" || hasOwn(jDeclWidth, ty)) { return jTypeAdopt(0, ty) }
         return null
     }
-    function jAllocArr(ns, i, leaf) {
+    // ty is the type of the array this level allocates.
+    function jAllocArr(ns, i, leaf, ty) {
         // JLS 15.10.1: a negative dimension throws NegativeArraySizeException, whose
         // message is the offending size and nothing else. EVERY dimension is checked
         // before anything is allocated, so `new int[0][-1]` throws as well.
@@ -4328,10 +4368,10 @@ HasStatic   = :script(~~
         var n = jNum(ns[i])
         var a = []
         for (var k = 0; k < n; k++) {
-            if (i + 1 < ns.length) { a.push(jAllocArr(ns, i + 1, leaf)) }
+            if (i + 1 < ns.length) { a.push(jAllocArr(ns, i + 1, leaf, jElemTy(ty))) }
             else { a.push(leaf) }
         }
-        return a
+        return jArrTag(a, jArrDesc(ty))
     }
     function makeNewArray(items) {
         var base = items[0].abase
@@ -4342,10 +4382,12 @@ HasStatic   = :script(~~
             else { open = open + 1 }
         }
         var leaf = (open > 0) ? null : jZeroOf(base)
+        var ty = base
+        for (var t = 0; t < dims.length + open; t++) { ty = ty + "[]" }
         return function() {
             var ns = []
             for (var k = 0; k < dims.length; k++) { ns.push(dims[k]()) }
-            return jAllocArr(ns, 0, leaf)
+            return jAllocArr(ns, 0, leaf, ty)
         }
     }
     // new Type(args) { members } - an anonymous subclass. The class is built on
@@ -4449,14 +4491,14 @@ HasStatic   = :script(~~
         // is no class descriptor to look up, so these two are the whole set:
         // ::new allocates, ::clone is unbound and copies its first argument.
         if (tgtPath.indexOf("[") >= 0) {
-            var elemDflt = jZeroOf(jStripArr(tgtPath))
+            var elemDflt = jZeroOf(jElemTy(tgtPath))
             if (methodPart == "new") {
                 return function() {
-                    return function(n) { return jAllocArr([n], 0, elemDflt) }
+                    return function(n) { return jAllocArr([n], 0, elemDflt, tgtPath) }
                 }
             }
             return function() {
-                return function(a) { return a == null ? null : a.slice(0) }
+                return function(a) { return a == null ? null : mcall(a, "clone", []) }
             }
         }
         var parts = splitDots(tgtPath)
@@ -4477,6 +4519,17 @@ HasStatic   = :script(~~
                     for (var a = 0; a < arguments.length; a++) { argv.push(arguments[a]) }
                     jCallCtor(cls, obj, argv)
                     return obj
+                }
+            }
+        }
+        // String::length - an unbound reference over a java.lang type: the first
+        // argument is the receiver and the rest are the method's arguments.
+        if (parts.length == 1 && jUnboundRef(parts[0], methodPart)) {
+            return function() {
+                return function() {
+                    var rest = []
+                    for (var a = 1; a < arguments.length; a++) { rest.push(arguments[a]) }
+                    return mcall(arguments[0], methodPart, rest)
                 }
             }
         }
@@ -4511,16 +4564,6 @@ HasStatic   = :script(~~
             if (ch == "<") { depth = depth + 1 }
             else if (ch == ">") { depth = depth - 1 }
             else if (depth == 0) { out = out + ch }
-        }
-        return out
-    }
-    // "String[][]" -> "String": the element type an array reference allocates.
-    function jStripArr(s) {
-        var out = ""
-        for (var i = 0; i < s.length; i++) {
-            var ch = s.charAt(i)
-            if (ch == "[" || ch == "]") { return out }
-            out = out + ch
         }
         return out
     }
