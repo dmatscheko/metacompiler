@@ -76,12 +76,15 @@ Known deviations, all deliberate:
     one, so a quotient can differ in the last digit.
   - An imported module binds its names flat, without a module object, so the
     from-import style is the one that works (`from m import f as g` binds g).
-    copy, dataclasses and collections are written in Python (lib/python-copy.py,
-    lib/python-dataclasses.py, lib/python-collections.py) and have a module
-    object besides, so `import copy as c` and `from copy import Error` work;
-    collections offers deque, defaultdict, OrderedDict and Counter; dataclass
-    refuses slots, kw_only, weakref_slot, KW_ONLY, InitVar and make_dataclass
-    with NotImplementedError.
+    copy, dataclasses, collections, json, itertools, functools, string and os
+    (with os.path) are written in Python (lib/python-<name>.py) and have a
+    module object besides, so `import copy as c` and `from copy import Error`
+    work; collections offers deque, defaultdict, OrderedDict and Counter, and
+    collections.abc none of its ABCs; dataclass refuses slots, kw_only,
+    weakref_slot, KW_ONLY, InitVar and make_dataclass with NotImplementedError.
+    An itertools tool over a finite input computes its whole result first, so
+    a group from groupby stays readable after the next one is taken; os offers
+    no file system or environment access.
   - dir() answers a user class, its instance and object; dir() without an
     argument and dir() of a builtin value raise NotImplementedError. A class's
     __dict__ is a copy of its own members, not a live mappingproxy.
@@ -12566,8 +12569,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return true
     }
     // Python stdlib modules the runtime provides (resolveImport lives in
-    // lib/interp-core.js; prefix match, so os.path resolves against "os").
-    core.stdlibImports = ["sys", "os", "math", "collections.abc", "itertools", "functools", "re", "json", "typing", "random", "string", "time", "abc", "builtins"]
+    // lib/interp-core.js; prefix match, so a submodule resolves against its
+    // parent). The modules written in Python are pyLibMods.
+    core.stdlibImports = ["sys", "math", "collections.abc", "re", "typing", "random", "time", "abc", "builtins"]
     // Each top-level module of that list has a module object, bound as
     // _mec_mod_<name> like a library module's: the host global for the modules
     // that have one (math, re, sys, builtins), else a bare module whose every
@@ -12603,13 +12607,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         pyCurMod = outerMod
         c.popSource()
     }
+    // The modules (and submodules) lib/python-<top>.py provides.
+    var pyLibMods = ["copy", "dataclasses", "collections", "json", "itertools",
+                     "functools", "string", "os", "os.path"]
     core.importFile = function(path, pos) {
-        // copy, dataclasses and collections are written in Python
-        // (lib/python-<name>.py) and compiled like a project file. Twin of the
-        // same arm in python-to-llvm-ir.abnf.
-        if (path == "copy" || path == "dataclasses" || path == "collections") {
-            var lib = "lib/python-" + path + ".py"
-            if (importedFiles["$" + lib] != true) { pyCompileModule(lib, load(lib), path) }
+        // A library module is written in Python (lib/python-<name>.py, a
+        // submodule in its parent's file) and compiled like a project file.
+        // Twin of the same arm in python-to-llvm-ir.abnf.
+        if (pyLibMods.indexOf(path) >= 0) {
+            var top = path.split(".")[0]
+            var lib = "lib/python-" + top + ".py"
+            if (importedFiles["$" + lib] != true) { pyCompileModule(lib, load(lib), top) }
             pyImportKind = "lib"
             return true
         }
@@ -12667,9 +12675,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (rtm != "") {
             return pyImportStmt((items.length > 1 ? items[1] : rtm) + " = _mec_mod_" + rtm + "\n", "SmallLine")
         }
+        var top = items[0].split(".")[0]
+        // `import P.S` of a runtime submodule of a library module binds P.
+        if (pyImportKind == "" && items.length == 1 && top != items[0] && pyLibMods.indexOf(top) >= 0) {
+            core.importFile(top, pos)
+        }
         if (pyImportKind != "lib") { return null }
-        var bound = items.length > 1 ? items[1] : items[0]
-        return pyImportStmt(bound + " = _mec_mod_" + items[0] + "\n", "SmallLine")
+        if (items.length > 1) { return pyImportStmt(items[1] + " = _mec_mod_" + items[0] + "\n", "SmallLine") }
+        return pyImportStmt(top + " = _mec_mod_" + top + "\n", "SmallLine")
     }
     function pyFromImport(items, pos) {
         pyImportKind = ""

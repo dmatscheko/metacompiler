@@ -362,7 +362,18 @@ class _mec_co_module:
         return "<module 'collections'>"
 
 
-_mec_mod_collections = _mec_co_module()
+# collections.abc is a runtime module whose names stay unbound (its ABCs would
+# need isinstance hooks); `import collections.abc` binds collections, so the
+# submodule is an attribute here.
+class _mec_co_abc_module:
+    def __repr__(self):
+        return "<module 'collections.abc'>"
+
+
+_mec_co_module.abc = type("module", (_mec_co_abc_module,), {})()
+_mec_co_module.abc.__name__ = "collections.abc"
+_mec_mod_collections = type("module", (_mec_co_module,), {})()
+_mec_mod_collections.__name__ = "collections"
 _mec_co_module.deque = deque
 _mec_co_module.defaultdict = defaultdict
 _mec_co_module.OrderedDict = OrderedDict

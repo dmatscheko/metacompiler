@@ -5555,6 +5555,214 @@ def s106():
     S106chk("impst4", lambda: type(json).__name__ == "module" and type(os).__name__ == "module" and j2 is json
             and S106first([7, 8]) == 7 and inner() == 9 and errs == ["name 'S106mm' is not defined"])
 
+# ===== SECTION 107: the json module =====
+# dumps with indent, separators, sort_keys, ensure_ascii, allow_nan, skipkeys
+# and default, and loads with its hooks and its JSONDecodeError positions
+# (lib/python-json.py). Rows from CPython 3.14.
+import json
+
+def S107err(f):
+    try:
+        f()
+    except ValueError as e:
+        return type(e).__name__ + ": " + str(e)
+    except TypeError as e:
+        return "TypeError: " + str(e)
+    return "no error"
+
+def s107():
+    v = [{"b": 1, "a": [1, 2.5, None, True]}, "x\"\n\u00e9\U0001f600", (), {}]
+    check("json1", json.dumps(v) == '[{"b": 1, "a": [1, 2.5, null, true]}, "x\\"\\n\\u00e9\\ud83d\\ude00", [], {}]'
+          and json.dumps(v, ensure_ascii=False) == '[{"b": 1, "a": [1, 2.5, null, true]}, "x\\"\\n\u00e9\U0001f600", [], {}]'
+          and json.dumps(v[0], separators=(",", ":"), sort_keys=True) == '{"a":[1,2.5,null,true],"b":1}'
+          and json.dumps({1: 2, 2.5: 3, False: None}) == '{"1": 2, "2.5": 3, "false": null}'
+          and json.dumps([float("inf"), float("nan"), 1e20, -0.0]) == "[Infinity, NaN, 1e+20, -0.0]")
+    check("json2", json.dumps(v[0], indent=2, sort_keys=True) == '{\n  "a": [\n    1,\n    2.5,\n    null,\n    true\n  ],\n  "b": 1\n}'
+          and json.dumps([[], {"k": {}}], indent="\t") == '[\n\t[],\n\t{\n\t\t"k": {}\n\t}\n]'
+          and json.dumps([1], indent=0) == "[\n1\n]")
+    r = []
+    r.append(r)
+    check("json3", [S107err(lambda: json.dumps(object())), S107err(lambda: json.dumps({(1,): 2})),
+                    S107err(lambda: json.dumps(float("nan"), allow_nan=False)), S107err(lambda: json.dumps(r))]
+          == ["TypeError: Object of type object is not JSON serializable",
+              "TypeError: keys must be str, int, float, bool or None, not tuple",
+              "ValueError: Out of range float values are not JSON compliant: nan",
+              "ValueError: Circular reference detected"]
+          and json.dumps({(1,): 2, "a": 1}, skipkeys=True) == '{"a": 1}'
+          and json.dumps([object()], default=lambda o: "obj") == '["obj"]')
+    d = json.loads(' {"a": [1, -2.5e1, "\\u00e9\\ud83d\\ude00\\n", true, false, null], "b": {}} ')
+    check("json4", d == {"a": [1, -25.0, "\u00e9\U0001f600\n", True, False, None], "b": {}}
+          and type(d["a"][0]) is int and type(d["a"][1]) is float and json.loads("[NaN, -Infinity]")[1] == float("-inf")
+          and json.loads('{"a": 1, "b": 2}', object_pairs_hook=lambda p: p) == [("a", 1), ("b", 2)]
+          and json.loads('{"a": 1}', object_hook=lambda o: list(o)) == ["a"]
+          and json.loads("[1, 2.5]", parse_int=lambda s: "i" + s, parse_float=lambda s: "f" + s) == ["i1", "f2.5"]
+          and json.loads(json.dumps(v)) == [{"b": 1, "a": [1, 2.5, None, True]}, "x\"\n\u00e9\U0001f600", [], {}])
+    bad = ["", "[1,]", '{"a" 1}', "{a: 1}", "[1 2]", '"abc', '"a\\qb"', "01", '{"a": 1}\n  x', "[\n1,\n\n2,\n]"]
+    check("json5", [S107err(lambda: json.loads(t)) for t in bad] == [
+        "JSONDecodeError: Expecting value: line 1 column 1 (char 0)",
+        "JSONDecodeError: Illegal trailing comma before end of array: line 1 column 3 (char 2)",
+        "JSONDecodeError: Expecting ':' delimiter: line 1 column 6 (char 5)",
+        "JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
+        "JSONDecodeError: Expecting ',' delimiter: line 1 column 4 (char 3)",
+        "JSONDecodeError: Unterminated string starting at: line 1 column 1 (char 0)",
+        "JSONDecodeError: Invalid \\escape: line 1 column 3 (char 2)",
+        "JSONDecodeError: Extra data: line 1 column 2 (char 1)",
+        "JSONDecodeError: Extra data: line 2 column 3 (char 11)",
+        "JSONDecodeError: Illegal trailing comma before end of array: line 4 column 2 (char 7)"])
+    try:
+        json.loads("[1,\n x]")
+    except json.JSONDecodeError as e:
+        ex = [e.msg, e.pos, e.lineno, e.colno, isinstance(e, ValueError)]
+    check("json6", ex == ["Expecting value", 5, 2, 2, True] and type(json).__name__ == "module"
+          and json.dumps.__name__ == "dumps" and hasattr(json, "loads") and not hasattr(json, "S107nope"))
+
+# ===== SECTION 108: the itertools module =====
+# Every tool of Modules/itertoolsmodule.c but the lazy-input ones' laziness
+# (lib/python-itertools.py): count, cycle and repeat are endless, and islice
+# and takewhile read an endless input only as far as CPython does. Rows from
+# CPython 3.14.
+import itertools
+from itertools import islice as S108islice, count as S108count, chain as S108chain
+
+def S108verr(f):
+    try:
+        list(f())
+    except ValueError as e:
+        return str(e)
+    return "no error"
+
+def s108():
+    it = itertools
+    xs = [3, 1, 4, 1, 5, 9, 2, 6]
+    check("itt1", list(S108islice(S108count(), 4)) == [0, 1, 2, 3] and list(it.islice(it.count(2.5, -0.5), 3)) == [2.5, 2.0, 1.5]
+          and list(it.islice(it.cycle("ab"), 5)) == ["a", "b", "a", "b", "a"] and list(it.repeat(7, 2)) == [7, 7]
+          and list(it.repeat(1, -1)) == [] and list(it.takewhile(lambda n: n < 4, it.count(1))) == [1, 2, 3]
+          and list(it.islice(xs, 1, 7, 2)) == [1, 1, 9] and list(it.islice(xs, 6, None)) == [2, 6])
+    src = iter(range(10))
+    check("itt2", list(it.islice(src, 2, 6, 3)) == [2, 5] and next(src) == 6
+          and [S108verr(lambda: it.islice(xs, -1)), S108verr(lambda: it.islice(xs, 0, 5, 0)),
+               S108verr(lambda: it.combinations("a", -1)), S108verr(lambda: it.batched("a", 0))]
+          == ["Stop argument for islice() must be None or an integer: 0 <= x <= sys.maxsize.",
+              "Step for islice() must be a positive integer or None.", "r must be non-negative", "n must be at least one"])
+    check("itt3", list(it.accumulate(xs, max)) == [3, 3, 4, 4, 5, 9, 9, 9] and list(it.accumulate([1, 2], initial=10)) == [10, 11, 13]
+          and list(it.batched("abcde", 2)) == [("a", "b"), ("c", "d"), ("e",)] and list(S108chain("ab", [1])) == ["a", "b", 1]
+          and list(it.chain.from_iterable(["xy", "z"])) == ["x", "y", "z"] and list(it.compress("abc", [1, 0, 1])) == ["a", "c"]
+          and list(it.dropwhile(lambda n: n < 5, xs)) == [5, 9, 2, 6] and list(it.filterfalse(None, [0, 1, "", "a"])) == [0, ""]
+          and list(it.pairwise("abc")) == [("a", "b"), ("b", "c")] and list(it.starmap(pow, [(2, 3)])) == [8])
+    check("itt4", [(k, list(g)) for k, g in it.groupby("aabccc")] == [("a", ["a", "a"]), ("b", ["b"]), ("c", ["c", "c", "c"])]
+          and [k for k, g in it.groupby(xs, key=lambda n: n % 2)] == [1, 0, 1, 0]
+          and list(it.zip_longest("ab", [1], fillvalue="-")) == [("a", 1), ("b", "-")]
+          and [list(t) for t in it.tee(iter([1, 2]), 3)] == [[1, 2], [1, 2], [1, 2]])
+    check("itt5", list(it.product("ab", repeat=2)) == [("a", "a"), ("a", "b"), ("b", "a"), ("b", "b")]
+          and list(it.product([1, 2], "x")) == [(1, "x"), (2, "x")] and list(it.product()) == [()]
+          and list(it.permutations("abc", 2)) == [("a", "b"), ("a", "c"), ("b", "a"), ("b", "c"), ("c", "a"), ("c", "b")]
+          and len(list(it.permutations(range(5)))) == 120 and list(it.permutations("ab", 3)) == []
+          and list(it.combinations("abcd", 3)) == [("a", "b", "c"), ("a", "b", "d"), ("a", "c", "d"), ("b", "c", "d")]
+          and list(it.combinations_with_replacement("ab", 2)) == [("a", "a"), ("a", "b"), ("b", "b")]
+          and type(it).__name__ == "module" and it.chain.__name__ == "chain")
+
+# ===== SECTION 109: the functools module =====
+# reduce, partial, lru_cache / cache with cache_info, wraps / update_wrapper,
+# cmp_to_key and total_ordering (lib/python-functools.py). Rows from CPython
+# 3.14.
+import functools
+from functools import reduce as S109reduce, partial, lru_cache, wraps
+
+def S109f(a, b, c=0, *, d=1):
+    return (a, b, c, d)
+
+def S109cmp(a, b):
+    return (a > b) - (a < b)
+
+@functools.total_ordering
+class S109V:
+    def __init__(self, v):
+        self.v = v
+    def __eq__(self, o):
+        return self.v == o.v
+    def __lt__(self, o):
+        return self.v < o.v
+
+def s109():
+    errs = []
+    try:
+        S109reduce(lambda a, b: a, [])
+    except TypeError as e:
+        errs.append(str(e))
+    check("ftl1", S109reduce(lambda a, b: a * b, [1, 2, 3, 4]) == 24 and functools.reduce(max, [3, 9], 100) == 100
+          and S109reduce(lambda a, b: a - b, [1, 2], initial=10) == 7 and errs == ["reduce() of empty iterable with no initial value"])
+    p = partial(S109f, 1, d=5)
+    pp = partial(p, 7, c=8)
+    check("ftl2", p(2) == (1, 2, 0, 5) and p(2, d=9) == (1, 2, 0, 9) and p.args == (1,) and p.keywords == {"d": 5}
+          and p.func is S109f and pp() == (1, 7, 8, 5) and pp.func is S109f and type(p).__name__ == "partial")
+    calls = []
+    @lru_cache(maxsize=2)
+    def sq(n):
+        calls.append(n)
+        return n * n
+    vals = [sq(x) for x in [1, 2, 1, 3, 2, 1]]
+    info = sq.cache_info()
+    check("ftl3", vals == [1, 4, 1, 9, 4, 1] and calls == [1, 2, 3, 2, 1] and repr(info) == "CacheInfo(hits=1, misses=5, maxsize=2, currsize=2)"
+          and info.hits == 1 and info == (1, 5, 2, 2) and sq.__name__ == "sq")
+    @functools.cache
+    def fib(n):
+        return n if n < 2 else fib(n - 1) + fib(n - 2)
+    def deco(fn):
+        @wraps(fn)
+        def inner(*a):
+            return fn(*a) + 1
+        return inner
+    @deco
+    def g(x):
+        return x
+    check("ftl4", fib(60) == 1548008755920 and fib.cache_info().misses == 61 and g(1) == 2 and g.__name__ == "g"
+          and g.__wrapped__(1) == 1)
+    K = functools.cmp_to_key(S109cmp)
+    check("ftl5", sorted([3, 1, 2], key=K) == [1, 2, 3] and sorted("bca", key=functools.cmp_to_key(lambda a, b: S109cmp(b, a))) == ["c", "b", "a"]
+          and K(1) < K(2) and K(2) >= K(2) and S109V(1) <= S109V(1) and S109V(2) > S109V(1) and not S109V(2) >= S109V(3))
+
+# ===== SECTION 110: the string module and os.path =====
+# string's constants, capwords and Template (lib/python-string.py), and
+# posixpath's string arithmetic as os.path (lib/python-os.py). Rows from
+# CPython 3.14.
+import string
+import os.path
+from os.path import join as S110join
+
+def s110():
+    st = string
+    check("strm1", st.ascii_letters == st.ascii_lowercase + st.ascii_uppercase and st.digits == "0123456789"
+          and st.hexdigits == "0123456789abcdefABCDEF" and st.octdigits == "01234567" and len(st.printable) == 100
+          and st.punctuation == "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~" and st.whitespace == " \t\n\r\x0b\x0c"
+          and st.capwords(" hello   wORLD ") == "Hello World" and st.capwords("a-b", "-") == "A-B")
+    t = st.Template("$who likes ${what}; $$5")
+    errs = []
+    for f in [lambda: st.Template("cost $5").substitute(), lambda: st.Template("a\nb ${x").substitute()]:
+        try:
+            f()
+        except ValueError as e:
+            errs.append(str(e))
+    try:
+        t.substitute(who="x")
+    except KeyError as e:
+        errs.append(repr(e))
+    check("strm2", t.substitute(who="tim", what="tea") == "tim likes tea; $5" and t.safe_substitute(who="x") == "x likes ${what}; $5"
+          and t.substitute({"who": "a", "what": "b"}, who="z") == "z likes b; $5" and t.get_identifiers() == ["who", "what"]
+          and errs == ["Invalid placeholder in string: line 1, col 6", "Invalid placeholder in string: line 2, col 3", "KeyError('what')"])
+    op = os.path
+    check("osp1", S110join("a", "b", "c") == "a/b/c" and op.join("/a", "/b", "c") == "/b/c" and op.join("a/", "b") == "a/b"
+          and op.split("/a/b.c") == ("/a", "b.c") and op.basename("a/b/") == "" and op.dirname("//x//y") == "//x"
+          and op.splitext("a/b.tar.gz") == ("a/b.tar", ".gz") and op.splitext(".cshrc") == (".cshrc", "")
+          and op.normpath("./a/./b/../../c") == "c" and op.normpath("//a/b/..") == "//a" and op.normpath("") == "."
+          and op.isabs("/x") and not op.isabs("x") and op.commonprefix(["/usr/lib", "/usr/local"]) == "/usr/l")
+    errs = []
+    try:
+        op.basename(1)
+    except TypeError as e:
+        errs.append(str(e))
+    check("osp2", errs == ["expected str, bytes or os.PathLike object, not int"] and os.sep == "/" and os.path.sep == "/"
+          and os.name == "posix" and op.__name__ == "posixpath" and type(os).__name__ == "module")
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -5659,5 +5867,9 @@ def main():
     s104() # SECTION-CALL 104
     s105() # SECTION-CALL 105
     s106() # SECTION-CALL 106
+    s107() # SECTION-CALL 107
+    s108() # SECTION-CALL 108
+    s109() # SECTION-CALL 109
+    s110() # SECTION-CALL 110
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]
