@@ -5781,6 +5781,29 @@ def s111():
     check("modvis1", [S111name(lambda: math.sqrt(4)), S111name(lambda: builtins.len), inner(), S111name(lambda: math)]
           == ["name 'math' is not defined", "name 'builtins' is not defined", 2, "name 'math' is not defined"])
 
+# ===== SECTION 112: the random module =====
+# The module (lib/python-random.py) and the argument checks Lib/random.py makes
+# before it draws. No row draws: seeding the Mersenne Twister alone costs the
+# -frozen interpreter leg most of its step budget, so the seeded sequences are
+# pinned by a differential probe against CPython instead. Rows from CPython 3.14.
+import random
+from random import Random as S112Random
+
+def s112():
+    errs = []
+    for f in [lambda: random.randrange(5, 5), lambda: random.randrange(0), lambda: random.choice([]),
+              lambda: random.sample([1], 2), lambda: random.randrange(1, 9, 0), lambda: random.getrandbits(-1)]:
+        try:
+            f()
+        except (ValueError, IndexError) as e:
+            errs.append(type(e).__name__ + ": " + str(e))
+    check("rnd1", errs == ["ValueError: empty range in randrange(5, 5)", "ValueError: empty range for randrange()",
+                           "IndexError: Cannot choose from an empty sequence",
+                           "ValueError: Sample larger than population or is negative", "ValueError: zero step for randrange()",
+                           "ValueError: Cannot convert negative int"]
+          and random.getrandbits(0) == 0 and type(random).__name__ == "module" and random.randint.__name__ == "randint"
+          and S112Random.__name__ == "Random")
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -5890,5 +5913,6 @@ def main():
     s109() # SECTION-CALL 109
     s110() # SECTION-CALL 110
     s111() # SECTION-CALL 111
+    s112() # SECTION-CALL 112
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

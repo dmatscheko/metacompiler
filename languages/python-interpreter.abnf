@@ -76,15 +76,16 @@ Known deviations, all deliberate:
     one, so a quotient can differ in the last digit.
   - An imported module binds its names flat, without a module object, so the
     from-import style is the one that works (`from m import f as g` binds g).
-    copy, dataclasses, collections, json, itertools, functools, string and os
-    (with os.path) are written in Python (lib/python-<name>.py) and have a
-    module object besides, so `import copy as c` and `from copy import Error`
+    copy, dataclasses, collections, json, itertools, functools, string, random
+    and os (with os.path) are written in Python (lib/python-<name>.py) and have
+    a module object besides, so `import copy as c` and `from copy import Error`
     work; collections offers deque, defaultdict, OrderedDict and Counter, and
     collections.abc none of its ABCs; dataclass refuses slots, kw_only,
     weakref_slot, KW_ONLY, InitVar and make_dataclass with NotImplementedError.
     An itertools tool over a finite input computes its whole result first, so
     a group from groupby stays readable after the next one is taken; os offers
-    no file system or environment access.
+    no file system or environment access; random has no entropy source, so an
+    unseeded generator starts as seed(0) does.
   - dir() answers a user class, its instance and object; dir() without an
     argument and dir() of a builtin value raise NotImplementedError. A class's
     __dict__ is a copy of its own members, not a live mappingproxy.
@@ -12599,7 +12600,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Python stdlib modules the runtime provides (resolveImport lives in
     // lib/interp-core.js; prefix match, so a submodule resolves against its
     // parent). The modules written in Python are pyLibMods.
-    core.stdlibImports = ["sys", "math", "collections.abc", "re", "typing", "random", "time", "abc", "builtins"]
+    core.stdlibImports = ["sys", "math", "collections.abc", "re", "typing", "time", "abc", "builtins"]
     // Each top-level module of that list has a module object, bound as
     // _mec_mod_<name> like a library module's and only there, so a module name
     // is unbound until an import binds it: the host record for the modules that

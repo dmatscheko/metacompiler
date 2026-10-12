@@ -4,7 +4,7 @@
 
 // The modules (and submodules) written in Python: lib/python-<top>.py.
 var pyLibMods = ["copy", "dataclasses", "collections", "json", "itertools",
-                 "functools", "string", "os", "os.path"]
+                 "functools", "string", "os", "os.path", "random"]
 
 // The functions the runtime modules math, re and sys offer. Keep in step with
 // pyMHas in languages/lib/python-rt.metajs and pyModHas in abnf/jsrtpymath.go.

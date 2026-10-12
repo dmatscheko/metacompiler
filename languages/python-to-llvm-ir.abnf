@@ -68,8 +68,8 @@ statement's finally ran). A bare 'raise' re-raises the active exception, 'raise 
 from e' records e as X.__cause__, and 'except* T as g' (PEP 654) runs every clause
 whose type matches part of an ExceptionGroup, each with its own sub-group.
 
-copy, dataclasses, collections, json, itertools, functools, string and os are
-Python sources (lib/python-<name>.py) compiled with a program that imports them,
+copy, dataclasses, collections, json, itertools, functools, string, random and
+os are Python sources (lib/python-<name>.py) compiled with a program that imports them,
 the same ones the interpreter grammar runs;
 python-interpreter.abnf's description lists what they refuse, and what dir() does.
 
@@ -4683,7 +4683,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // Python stdlib modules the runtime provides (prefix match, so a submodule
     // resolves against its parent). The modules written in Python are pyLibMods.
-    core.stdlibImports = ["sys", "math", "collections.abc", "re", "typing", "random", "time", "abc", "builtins"]
+    core.stdlibImports = ["sys", "math", "collections.abc", "re", "typing", "time", "abc", "builtins"]
     // Project-file imports: 'import mypkg.helper' / 'from mypkg.helper import x'
     // look for mypkg/helper.py, then mypkg.py under the program's directory and
     // the -i roots (c.findImport). The file is parsed with this grammar and
