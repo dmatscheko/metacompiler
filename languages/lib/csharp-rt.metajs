@@ -861,6 +861,7 @@ function cpObjStr(o, depth) {
         if (es == "") { return full }
         return full + ": " + es
     }
+    if (csIsRecVal(o)) { return cpRecStr(o, depth) }
     // The type descriptor itself.
     if (o["__isclass"] !== undefined) {
         var n = o["__name"]
@@ -875,6 +876,40 @@ function cpObjStr(o, depth) {
     var cn = cls["__name"]
     if (typeof cn == "string") { if (cn.length > 0) { return cn } }
     return undefined
+}
+
+// A record's synthesized ToString. Twin of csRecStr in
+// languages/csharp-interpreter.abnf, where the rule is cited.
+function cpRecStr(o, depth) {
+    var chain = []
+    var c = o["__class"]
+    while (rtIsObj(c) && chain.length < 64) {
+        chain.push(c)
+        c = c["__super"]
+    }
+    var seen = {}
+    var s = ""
+    var i = chain.length - 1
+    while (i >= 0) {
+        var ns = chain[i]["__recprint"]
+        if (Array.isArray(ns)) {
+            var j = 0
+            while (j < ns.length) {
+                var k = ns[j]
+                if (seen["$" + k] !== true) {
+                    seen["$" + k] = true
+                    var mv = o[k]
+                    var g = rtFindMethod(o["__class"], "__get_" + k)
+                    if (g !== undefined) { mv = g.apply(undefined, [o]) }
+                    if (s == "") { s = " " } else { s = s + ", " }
+                    s = s + k + " = " + cpRender(mv, depth + 1)
+                }
+                j = j + 1
+            }
+        }
+        i = i - 1
+    }
+    return chain[0]["__name"] + " {" + s + " }"
 }
 
 // ================================== System.Object.Equals / GetHashCode / GetType ==

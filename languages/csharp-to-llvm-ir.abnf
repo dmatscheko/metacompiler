@@ -4462,7 +4462,14 @@ KwLet       = "let" KwEnd ;
                     // An extension method ('static T M(this X x, ...)') is a static member
                     // of the class it was declared in, called with the receiver as its
                     // first argument. The registry is complete by the time a thunk emits
-                    // (the whole file has been walked), so the choice is made here.
+                    // (the whole file has been walked), so the choice is made here: an
+                    // applicable instance method wins over it (csEmitInstOrExt).
+                    var uxr = (csExt[s.name] != undefined) ? csEmitInstOrExt(b, cur, s.name, sfxArgs[i], csExt[s.name]) : null
+                    if (uxr != null) {
+                        b = uxr.b
+                        cur = uxr.v
+                        continue
+                    }
                     if (csExt[s.name] != undefined) {
                         var eargs = callExt(b, "js_arr_new", [])
                         callExt(b, "js_arr_push", [eargs, cur])
@@ -5875,8 +5882,12 @@ KwLet       = "let" KwEnd ;
         }
         csDfltMember(name, ty)
         var isStatic = false
-        for (var k = 0; k < mods.length; k++) { if (mods[k] == "static") { isStatic = true } }
-        if (auto) { return csAutoField(name, isStatic, init, ty) }
+        var isPub = false
+        for (var k = 0; k < mods.length; k++) {
+            if (mods[k] == "static") { isStatic = true }
+            if (mods[k] == "public") { isPub = true }
+        }
+        if (auto) { return csAutoField(name, isStatic, isPub, init, ty) }
         if (getT != null || setT != null) { csPropAcc[name] = isStatic ? "static" : "instance" }
         csNoteDataName(name)
         if (addT != null || remT != null) { csEvtAcc[name] = isStatic ? "static" : "instance" }
@@ -5884,12 +5895,12 @@ KwLet       = "let" KwEnd ;
         // A computed property's GETTER carries a declared type too, so
         // `public double Get => 3;` answers 3.0 and Get / 2 is 1.5. Its SETTER's
         // `value` parameter is not adopted - the value arrives from the assignment.
-        return {kind: "prop", name: name, statik: isStatic, getT: getT, setT: setT,
+        return {kind: "prop", name: name, statik: isStatic, pub: isPub, getT: getT, setT: setT,
                 getTy: ty, addT: addT, remT: remT, adoptTy: csNoteAdoptMem(name, csWriteTy(ty)), expl: expl}
     }
     // An automatic property IS a field: same record, so every field path (the instance
     // initializers, the static slot, the member table) applies to it unchanged.
-    function csAutoField(name, isStatic, init, ty) {
+    function csAutoField(name, isStatic, isPub, init, ty) {
         var isNum = (ty == "int" || ty == "uint" || ty == "long" || ty == "ulong" || ty == "short"
                   || ty == "ushort" || ty == "byte" || ty == "sbyte" || ty == "double"
                   || ty == "float" || ty == "decimal")
@@ -5899,7 +5910,7 @@ KwLet       = "let" KwEnd ;
         if (ty == "bool") { dfltH = 2 }
         if (isInt) { dfltH = 0 }
         // The declared type adopts the initializer.
-        return {kind: "field", name: name, statik: isStatic, init: csAdoptInit(ty, init),
+        return {kind: "field", name: name, statik: isStatic, pub: isPub, init: csAdoptInit(ty, init),
                 dfltH: dfltH, isInt: isInt, adoptTy: csNoteAdoptMem(name, csWriteTy(ty))}
     }
     function makeIndexer(items) {
@@ -6162,6 +6173,8 @@ KwLet       = "let" KwEnd ;
         var isStatic = false
         // A `const` MEMBER is implicitly static (ECMA-334 15.4), so `Bas.C` names it.
         for (var i = 0; i < mods.length; i++) if (mods[i] == "static" || mods[i] == "const") isStatic = true
+        var isPub = false
+        for (var pi = 0; pi < mods.length; pi++) if (mods[pi] == "public") isPub = true
         var isNum = (ty == "int" || ty == "uint" || ty == "long" || ty == "ulong" || ty == "short"
                   || ty == "ushort" || ty == "byte" || ty == "sbyte" || ty == "double"
                   || ty == "float" || ty == "decimal")
@@ -6172,7 +6185,7 @@ KwLet       = "let" KwEnd ;
         if (isInt) dfltH = 0
         // The declared type adopts the initializer: a `public double a = 3;` field
         // holds 3.0, so `t.a / 2` is 1.5. `double[] xs = {3, 4}` adopts elementwise.
-        return {kind: "field", name: name, statik: isStatic, init: csAdoptInit(ty, init),
+        return {kind: "field", name: name, statik: isStatic, pub: isPub, init: csAdoptInit(ty, init),
                 dfltH: dfltH, isInt: isInt, adoptTy: csNoteAdoptMem(name, csWriteTy(ty))}
     }
     // Wraps a field/auto-property initializer thunk so its value adopts `ty`. The
@@ -6644,13 +6657,16 @@ KwLet       = "let" KwEnd ;
     }
     // `recv.M(args)` where some class's INSTANCE group M has no member accepting this
     // many arguments (csxSigsAccept): on an instance of such a class the group is not
-    // applicable and C# goes on to the extension methods, here Enumerable's
-    // (ECMA-334 12.8.10.2). There is no static receiver type, so the receiver's class
-    // is tested at run time - the accepting classes first, since a subclass may add an
-    // accepting overload - and anything else keeps the ordinary dispatch. null when no
-    // class's group rejects the count, which is the plain js_csmcall. Twin of the
-    // csxSigsAccept test in mcall0, csharp-interpreter.abnf.
-    function csEmitInstOrExt(b, recvV, name, argThunks) {
+    // applicable and C# goes on to the extension methods (ECMA-334 12.8.10.2) - the
+    // user's, declared in class `extCls`, or else Enumerable's. There is no static
+    // receiver type, so the receiver's class is tested at run time, the accepting
+    // classes first, since a subclass may add an accepting overload. A receiver of no
+    // tested class keeps the ordinary dispatch, or with a user extension calls it.
+    // null when there is nothing to test: no group rejects the count (the plain
+    // js_csmcall), or for a user extension no group accepts it (the plain extension
+    // call). Twin of the csxSigsAccept tests in mcall / mcall0,
+    // csharp-interpreter.abnf.
+    function csEmitInstOrExt(b, recvV, name, argThunks, extCls) {
         var acc = []
         var rej = []
         var i
@@ -6659,7 +6675,8 @@ KwLet       = "let" KwEnd ;
             if (e == null || e.statik === true) { continue }
             if (csxSigsAccept(e.sigs, argThunks.length)) { acc.push(csMSigCls[i]) } else { rej.push(csMSigCls[i]) }
         }
-        if (rej.length == 0) { return null }
+        var userExt = (extCls != undefined)
+        if (userExt ? acc.length == 0 : rej.length == 0) { return null }
         var ea = emitArgs(b, argThunks)
         b = ea.b
         var instB = curF.NewBlock("")
@@ -6672,17 +6689,23 @@ KwLet       = "let" KwEnd ;
                         i < acc.length ? instB : extB, nextB)
             b = nextB
         }
-        b.NewBr(instB)
+        b.NewBr(userExt ? extB : instB)
         var ir = csEmitInstCall(instB, recvV, name, ea.v)
         ir.b.NewBr(mergeB)
-        // Enumerable.M(recv, args...): the static form csqStatic reads.
+        // Ext.M(recv, args...): the static form csqStatic reads, or the user's.
         var xargs = callExt(extB, "js_arr_new", [])
         callExt(extB, "js_arr_push", [xargs, recvV])
         for (i = 0; i < argThunks.length; i++) {
             callExt(extB, "js_arr_push", [xargs, callExt(extB, "js_pyget", [ea.v, emitNum(extB, i)])])
         }
-        var enumV = callExt(extB, "js_scope_get", [curScopeV, emitStr(extB, "Enumerable")])
-        var extV = callExt(extB, "js_csmcall", [enumV, emitStr(extB, name), xargs])
+        var extV = anytype
+        if (userExt) {
+            var uclsV = callExt(extB, "js_scope_get", [curScopeV, emitStr(extB, extCls)])
+            extV = callExt(extB, "js_call", [callExt(extB, "js_get", [uclsV, emitStr(extB, name)]), hUndef, xargs])
+        } else {
+            var enumV = callExt(extB, "js_scope_get", [curScopeV, emitStr(extB, "Enumerable")])
+            extV = callExt(extB, "js_csmcall", [enumV, emitStr(extB, name), xargs])
+        }
         extB.NewBr(mergeB)
         return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(ir.v, ir.b), llvm.ir.NewIncoming(extV, extB)])}
     }
@@ -6756,6 +6779,21 @@ KwLet       = "let" KwEnd ;
                           !m2.statik, null, undefined, false, null)
         callExt(b, "js_set", [clsV, emitStr(b, m2.name), callExt(b, "js_closure", [handle(di), curScopeV])])
         return b
+    }
+    // The members a record's synthesized PrintMembers prints, in declaration order: the
+    // positional parameters (public properties), then every public instance field and
+    // public property with a getter. Twin of csRecPrintNames in csharp-interpreter.abnf.
+    function csRecPrintNames(primary, members) {
+        var out = []
+        if (primary != null && primary != undefined) {
+            for (var i = 0; i < primary.params.length; i++) { out.push(primary.params[i]) }
+        }
+        for (var j = 0; j < members.length; j++) {
+            var m = members[j]
+            if (m.pub !== true || m.statik === true) { continue }
+            if (m.kind == "field" || (m.kind == "prop" && m.getT != null)) { out.push(m.name) }
+        }
+        return out
     }
     function buildClassStmt(name, members, kind, primary, isRecord) {
         return function(b) {
@@ -6944,6 +6982,11 @@ KwLet       = "let" KwEnd ;
             // Deconstruct of its own. Its VALUE equality needs no member here: '$valeq'
             // recognizes a record by the '__isrecord' flag on this descriptor.
             if (isRecord) {
+                // '__recprint': the members its synthesized ToString prints (cspRecStr).
+                var rpV = callExt(b, "js_arr_new", [])
+                var rpN = csRecPrintNames(primary, members)
+                for (i = 0; i < rpN.length; i++) { callExt(b, "js_arr_push", [rpV, emitStr(b, rpN[i])]) }
+                callExt(b, "js_set", [clsV, emitStr(b, "__recprint"), rpV])
                 var hasDecon = false
                 for (i = 0; i < members.length; i++) {
                     if (members[i].kind == "method" && members[i].name == "Deconstruct") { hasDecon = true }

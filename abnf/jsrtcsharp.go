@@ -1726,7 +1726,7 @@ func (rt *jsrt) cspObjStr(o *jsObject, depth int) (string, bool) {
 	}
 	// A user ToString() override wins over every built-in rendering, exactly as
 	// the virtual System.Object.ToString() does in C#.
-	if mth, ok := cspFindToString(o); ok {
+	if mth, ok := cspFindMethod(o, "ToString"); ok {
 		return rt.cspRender(rt.call(mth, jsUndef, []interface{}{o}), depth+1), true
 	}
 	// An exception - a BCL {__excname, Message} object or a user class whose chain
@@ -1752,6 +1752,9 @@ func (rt *jsrt) cspObjStr(o *jsObject, depth int) (string, bool) {
 		}
 		return full + ": " + ms, true
 	}
+	if rt.csIsRecVal(o) {
+		return rt.cspRecStr(o, depth), true
+	}
 	// The type descriptor itself.
 	if _, ok := o.props["__isclass"]; ok {
 		if n, ok := o.props["__name"].(string); ok {
@@ -1765,6 +1768,42 @@ func (rt *jsrt) cspObjStr(o *jsObject, depth int) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// cspRecStr is a record's synthesized ToString. Twin of csRecStr in
+// languages/csharp-interpreter.abnf, where the rule is cited.
+func (rt *jsrt) cspRecStr(o *jsObject, depth int) string {
+	var chain []*jsObject
+	for c, ok := o.props["__class"].(*jsObject); ok && len(chain) < 64; c, ok = c.props["__super"].(*jsObject) {
+		chain = append(chain, c)
+	}
+	seen := map[string]bool{}
+	var sb strings.Builder
+	for i := len(chain) - 1; i >= 0; i-- {
+		names, ok := chain[i].props["__recprint"].(*jsArray)
+		if !ok {
+			continue
+		}
+		for _, e := range names.elems {
+			k, _ := e.(string)
+			if seen[k] {
+				continue
+			}
+			seen[k] = true
+			if sb.Len() == 0 {
+				sb.WriteString(" ")
+			} else {
+				sb.WriteString(", ")
+			}
+			mv := o.props[k]
+			if g, ok := cspFindMethod(o, "__get_"+k); ok {
+				mv = rt.call(g, jsUndef, []interface{}{o})
+			}
+			sb.WriteString(k + " = " + rt.cspRender(mv, depth+1))
+		}
+	}
+	name, _ := chain[0].props["__name"].(string)
+	return name + " {" + sb.String() + " }"
 }
 
 // cspIsDeleg: a delegate value is a closure, or a MULTICAST invocation list whose
@@ -1783,15 +1822,15 @@ func cspIsDeleg(v interface{}) bool {
 	return false
 }
 
-// cspFindToString walks the __class / __super chain for a user-declared ToString,
-// the same walk the method dispatch does in both C# grammars.
-func cspFindToString(o *jsObject) (interface{}, bool) {
+// cspFindMethod walks the __class / __super chain for a user-declared member
+// function, the same walk the method dispatch does in both C# grammars.
+func cspFindMethod(o *jsObject, name string) (interface{}, bool) {
 	for cls := o.props["__class"]; cls != nil; {
 		clsObj, ok := cls.(*jsObject)
 		if !ok {
 			return nil, false
 		}
-		if mth, ok := clsObj.props["ToString"]; ok && isCallable(mth) {
+		if mth, ok := clsObj.props[name]; ok && isCallable(mth) {
 			return mth, true
 		}
 		cls = clsObj.props["__super"]

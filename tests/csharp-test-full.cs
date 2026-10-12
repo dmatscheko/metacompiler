@@ -244,6 +244,16 @@ b";                                                   // verbatim keeps the newl
         // ===== SECTION 08: records =====
         record S08Pt(int X, int Y);
         record struct S08Val(int N);
+        record S08Base(int A);
+        record S08Der(int A, string B) : S08Base(A);
+        record S08Body(int X)
+        {
+            public int Y { get; init; } = 2;
+            private int h = 1;
+            public static int Z = 3;
+            public int Sum => X + Y + h;
+        }
+        record S08Empty();
         static void S08()
         {
             var p = new S08Pt(3, 4);
@@ -255,6 +265,13 @@ b";                                                   // verbatim keeps the newl
             Program.Check("rec4", rx == 3 && ry == 4);
             var vs = new S08Val(5);
             Program.Check("rec5", vs.N == 5 && vs == new S08Val(5));
+            // The synthesized ToString prints the public fields and properties in
+            // declaration order, the base record's first.
+            Program.Check("rec6", p.ToString() == "S08Pt { X = 3, Y = 4 }" && $"{vs}" == "S08Val { N = 5 }");
+            Program.Check("rec7", new S08Der(1, "b").ToString() == "S08Der { A = 1, B = b }"
+                                  && new S08Der(1, null).ToString() == "S08Der { A = 1, B =  }");
+            Program.Check("rec8", new S08Body(1).ToString() == "S08Body { X = 1, Y = 2, Sum = 4 }");
+            Program.Check("rec9", ("" + new S08Empty()) == "S08Empty { }");
         }
 
         // ===== SECTION 09: structs =====
@@ -429,6 +446,9 @@ b";                                                   // verbatim keeps the newl
         static int S15Tripled(this int x) { return x * 3; }
         static S15Box S15Grown(this S15Box b, int d) { return new S15Box(b.N + d); }
         static T S15FirstOr<T>(this List<T> xs, T alt) { return xs.Count > 0 ? xs[0] : alt; }
+        class S15Inst { public string S15Hi() { return "inst"; } }
+        static string S15Hi(this S15Inst s, int n) { return "ext" + n; }
+        static string S15Hi(this object o) { return "ext"; }
         static void S15()
         {
             Program.Check("ext1", 7.S15Tripled() == 21);
@@ -437,6 +457,11 @@ b";                                                   // verbatim keeps the newl
             var xs = new List<int> { 8, 9 };
             var none = new List<int>();
             Program.Check("ext3", xs.S15FirstOr(0) == 8 && none.S15FirstOr(5) == 5);
+            // An applicable instance method wins over a same-named extension; one
+            // that does not accept the arguments leaves the call to the extension.
+            var si = new S15Inst();
+            Program.Check("ext4", si.S15Hi() == "inst" && b.S15Hi() == "ext");
+            Program.Check("ext5", si.S15Hi(2) == "ext2");
         }
 
         // ===== SECTION 16: generics: variance, constraints, type arguments =====

@@ -2495,6 +2495,45 @@ KwLet       = "let" KwEnd ;
         return v !== null && v !== undefined && typeof v == "object"
             && v.__class != undefined && v.__class.__isrecord === true
     }
+    // The members a record's synthesized PrintMembers prints, in declaration order: the
+    // positional parameters (public properties), then every public instance field and
+    // public property with a getter. Twin of csRecPrintNames in csharp-to-llvm-ir.abnf.
+    function csRecPrintNames(primary, members) {
+        var out = []
+        if (primary != null && primary != undefined) {
+            for (var i = 0; i < primary.params.length; i++) { out.push(primary.params[i]) }
+        }
+        for (var j = 0; j < members.length; j++) {
+            var m = members[j]
+            if (m.pub !== true || m.statik === true) { continue }
+            if (m.kind == "field" || (m.kind == "prop" && m.getT != null)) { out.push(m.name) }
+        }
+        return out
+    }
+    // A record's synthesized ToString (C# records spec, PrintMembers): the type name and
+    // "{ A = 1, B = x }" over the printable members, the base record's first, each
+    // rendered by its own ToString; a record with none prints "Name { }". Twins: the
+    // record arm of cpObjStr in languages/lib/csharp-rt.metajs and cspRecStr in
+    // abnf/jsrtcsharp.go.
+    function csRecStr(v, d) {
+        var chain = []
+        for (var c = v.__class; c != undefined; c = c.__super) { chain.push(c) }
+        var seen = {}
+        var s = ""
+        for (var i = chain.length - 1; i >= 0; i--) {
+            var ns = chain[i].__recprint
+            if (ns == undefined) { continue }
+            for (var j = 0; j < ns.length; j++) {
+                var k = ns[j]
+                if (seen["$" + k] === true) { continue }
+                seen["$" + k] = true
+                var g = csFindAcc(v, "__get_" + k)
+                var mv = (g != undefined) ? g(v) : v[k]
+                s = s + (s == "" ? " " : ", ") + k + " = " + csStrD(mv, d + 1)
+            }
+        }
+        return v.__class.__name + " {" + s + " }"
+    }
     function csRecEq(l, r) {
         if (l.__class !== r.__class) { return false }
         var ks = l.__class.__fieldNames
@@ -2547,7 +2586,6 @@ KwLet       = "let" KwEnd ;
     //     "System.Collections.Generic.List`1[System.Int32]".
     //   - an instance prints its BARE declared name; real C# qualifies it with the namespace
     //     and the enclosing type (Demo.Program+Box), neither of which this runtime models.
-    //     A record prints its type name too, where C# synthesizes "Box { X = 1 }".
     function csElemName(e) {
         if (e === true || e === false) return "System.Boolean"
         if (typeof e == "string") return "System.String"
@@ -2622,6 +2660,7 @@ KwLet       = "let" KwEnd ;
             // override, not System.Object's bare type name: "System.Exception: m".
             // A user override still wins, above.
             if (csExcBase(v) != "") { return csExcToStr(v, d) }
+            if (csIsRecObj(v)) { return csRecStr(v, d) }
             if (v.__isclass === true && typeof v.__name == "string") { return v.__name }
             if (v.__class != undefined && typeof v.__class.__name == "string") { return v.__class.__name }
         }
@@ -3039,8 +3078,20 @@ KwLet       = "let" KwEnd ;
     // ----- Extension methods -----
     // A static method whose first parameter carries 'this' is callable as an instance
     // method on that first argument. The registry is filled while the classes are built,
-    // and consulted at call time - so an instance member of the same name always wins.
+    // and consulted at call time - so an APPLICABLE instance member of the same name
+    // wins (ECMA-334 12.8.10.2), where applicable is csxSigsAccept's argument count.
+    // Twin of csEmitInstOrExt in csharp-to-llvm-ir.abnf.
     var csExt = {}
+    function csInstApplies(target, name, n) {
+        if (target === undefined || target === null || typeof target != "object") { return false }
+        if (target.__isclass === true) { return hasOwn(target, name) }
+        for (var c = target.__class; c != undefined; c = c.__super) {
+            if (!hasOwn(c, name)) { continue }
+            if (c.__msig == undefined || !hasOwn(c.__msig, name)) { return true }
+            return csxSigsAccept(c.__msig[name].sigs, n)
+        }
+        return false
+    }
     function csHasMethod(target, name) {
         if (target === undefined || target === null) { return false }
         if (typeof target != "object") { return false }
@@ -3051,7 +3102,7 @@ KwLet       = "let" KwEnd ;
 
     // ----- Method dispatch (mirrors the js_mcall external of the compiled world) -----
     function mcall(target, name, args) {
-        if (hasOwn(csExt, name) && !csHasMethod(target, name)) {
+        if (hasOwn(csExt, name) && !csInstApplies(target, name, args.length)) {
             return csExt[name].apply(undefined, concat2impl([target], args))
         }
         return mcall0(target, name, args)
@@ -5611,6 +5662,8 @@ KwLet       = "let" KwEnd ;
         var isStatic = false
         // A `const` MEMBER is implicitly static (ECMA-334 15.4), so `Bas.C` names it.
         for (var i = 0; i < mods.length; i++) if (mods[i] == "static" || mods[i] == "const") isStatic = true
+        var isPub = false
+        for (var pi = 0; pi < mods.length; pi++) if (mods[pi] == "public") isPub = true
         var isNum = (ty == "int" || ty == "uint" || ty == "long" || ty == "ulong" || ty == "short"
                   || ty == "ushort" || ty == "byte" || ty == "sbyte" || ty == "double"
                   || ty == "float" || ty == "decimal")
@@ -5619,7 +5672,7 @@ KwLet       = "let" KwEnd ;
         else if (isNum && ty.indexOf("[") < 0) dflt = 0
         // The declared type adopts the initializer: a `public double a = 3;` field
         // holds 3.0, so `t.a / 2` is 1.5. `double[] xs = {3, 4}` adopts elementwise.
-        return {kind: "field", name: name, statik: isStatic,
+        return {kind: "field", name: name, statik: isStatic, pub: isPub,
                 init: init == null ? init : csAdoptThunk(ty, init), dflt: dflt,
                 adoptTy: csNoteAdoptMem(name, csWriteTy(ty))}
     }
@@ -5772,18 +5825,22 @@ KwLet       = "let" KwEnd ;
         }
         csDfltMember(name, ty)
         var isStatic = false
-        for (var k = 0; k < mods.length; k++) { if (mods[k] == "static") { isStatic = true } }
-        if (auto) { return csAutoField(name, isStatic, init, ty) }
+        var isPub = false
+        for (var k = 0; k < mods.length; k++) {
+            if (mods[k] == "static") { isStatic = true }
+            if (mods[k] == "public") { isPub = true }
+        }
+        if (auto) { return csAutoField(name, isStatic, isPub, init, ty) }
         // A computed property's GETTER carries a declared type too, so
         // `public double Get => 3;` answers 3.0 and Get / 2 is 1.5. Its SETTER's
         // `value` parameter is not adopted - the value arrives from the assignment.
-        return {kind: "prop", name: name, statik: isStatic,
+        return {kind: "prop", name: name, statik: isStatic, pub: isPub,
                 getT: getT == null ? getT : csAdoptRet(ty, getT), setT: setT,
                 addT: addT, remT: remT, adoptTy: csNoteAdoptMem(name, csWriteTy(ty)), expl: expl}
     }
     // An automatic property IS a field: same record, so every field path (the instance
     // initializers, the static slot, the member table) applies to it unchanged.
-    function csAutoField(name, isStatic, init, ty) {
+    function csAutoField(name, isStatic, isPub, init, ty) {
         var isNum = (ty == "int" || ty == "uint" || ty == "long" || ty == "ulong" || ty == "short"
                   || ty == "ushort" || ty == "byte" || ty == "sbyte" || ty == "double"
                   || ty == "float" || ty == "decimal")
@@ -5792,7 +5849,7 @@ KwLet       = "let" KwEnd ;
         else if (isNum && ty.indexOf("[") < 0) { dflt = 0 }
         // The declared type adopts the initializer, as it does at a local
         // declaration: `public double A { get; set; } = 3;` holds 3.0.
-        return {kind: "field", name: name, statik: isStatic,
+        return {kind: "field", name: name, statik: isStatic, pub: isPub,
                 init: init == null ? init : csAdoptThunk(ty, init), dflt: dflt,
                 adoptTy: csNoteAdoptMem(name, csWriteTy(ty))}
     }
@@ -6010,6 +6067,7 @@ KwLet       = "let" KwEnd ;
         // A record deconstructs into its positional parameters, unless it declares a
         // Deconstruct of its own (which csDeconstruct asks for first).
         if (isRecord && primary != null && primary != undefined) { cls.__recfields = primary.params }
+        if (isRecord) { cls.__recprint = csRecPrintNames(primary, members) }
         // EVERY method declaration is kept, not just the last one:
         // the group is collected first, and the member is built once, from the FIRST
         // record of its group, so the record order is the declaration order the
