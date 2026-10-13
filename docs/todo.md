@@ -115,91 +115,6 @@ gen_busy / the twin's jsGenerator.enter with no hook registered); node throws a 
 running`. Register a `js_rt_genbusy` hook in js-/typescript-to-llvm-ir.abnf the way python-to-llvm-ir.abnf does, and check
 the interpreter half.
 
-### T-478 js: a `let`/`const` in a loop head is one shared binding, not one per iteration · P1 · JS · IN PROGRESS (JS worker, round 1) [V]
-`var f1=[]; for (let i=0;i<3;i++) f1.push(()=>i)` → all legs `3,3,3`, node `0,1,2`. Same for `for (let x of src)` (`9,9,9`
-vs `7,8,9`), `for (let k in {a:1,b:2})` (`b,b` vs `a,b`), `for (const x of src)`, `for (let x of src) { ... }` with a block
-body, `for (let [a,b] of [[1,2],[3,4]])` (`7,7` vs `3,7`). A `let` inside the body and `while`+`let` are right. Interp
-also: `for (let i=0, get=()=>i; i<2; i++) fs.push(get)` gives `2,2`, node `0,0` (the head closure sees the FIRST copy). No
-test uses `for (let`. Files: for / for-of / for-in lowering in js-interpreter.abnf and js-to-llvm-ir.abnf (check
-typescript-*.abnf too, which shares the shape).
-
-### T-479 assignment evaluates the RHS before the LHS reference; compound assignment reads the LHS after the RHS (js, java) · P1 · JS · IN PROGRESS (JS worker, round 1) [V]
-ECMA-262 13.15.2 and JLS 15.26 both evaluate the left-hand reference (object, key/index) first and, for `op=`, read the
-old value before the RHS. All legs agree and are wrong in BOTH languages (go has the tuple-assign variant, T-466).
-js vs node: `o[f("k")] = f("v")` logs `vk` (node `kv`); `a[i++] = i` → `0,2` (node `1,2`); `x += (x=5,10)` → 15 (node 11);
-`ar[k++] += k` on `[10,20,30]` → unchanged (node `[11,20,30]`); `obj[key] = (key="b",5)` → `{"a":1,"b":5}` (node `{"a":5}`).
-java vs javac/java 24 (operands from arrays): `j += j++ * 2` 16 (java 15); `a[k++] = k++` `[0,0,0]` (java `[1,0,0]`);
-`b[k] = k = 2` `[0,0,2]` (java `[2,0,0]`); `arr(c)[f("i",1)] += f("v",5)` logs `vAi` (java `Aiv`); `y -= (y = 1)` 0 (java 2);
-`s += (s = "b") + s` `bbb` (java `abb`); `e[idx] += (idx = 1) * 100` `[1, 102]` (java `[101, 2]`). Files: the assignment /
-compound-assignment builders of js-*, typescript-* and java-* grammars; check lib/interp-core.js and lib/compile-core.js
-first in case the order lives in a shared helper, and probe the other languages' compound assignment while there.
-Shared: JV (java grammars) — a worker taking this needs both groups' files.
-
-### T-480 js interp: a non-string computed key (`o[1]=v`, `o[true]`, `o[null]`) is stored but not tracked as an own key · P1 · JS · IN PROGRESS (JS worker, round 1) [V]
-`var o={}; o[ks[i]]="v"` with `ks=[1,"s",true,null]` then `Object.keys(o).length, for-in count, JSON.stringify(o), o[ks[i]]`:
-interp `key 1 0 0 {} v` (goja and -frozen), run/native/node `key 1 1 1 {"1":"v"} v`; `p[2]="x"; p["k"]="y"` keys: interp `k`,
-others `2|k`. `setMember` (js-interpreter.abnf ~5812) calls `trackKey(o, k)` with the raw key and `trackKey` (~7528) returns
-early on `typeof key != "string"`.
-
-### T-481 js: own-key order ignores the array-index rule (indices ascending first, then strings in insertion order) · P2 · JS · IN PROGRESS (JS worker, round 1) [V]
-Keys inserted `b,2,a,1,-1,01,4294967295,4294967294,1.5,0,10,1e3," 3",9007199254740993,3`: all legs print insertion order;
-node `0|1|2|3|10|4294967294|b|a|-1|01|4294967295|1.5|1e3| 3|9007199254740993` — affects `Object.keys`, `for-in`,
-`JSON.stringify`, entries/values. Literal `{z:1,5:2,y:3,0:4,"-0":5}`: ours `z|5|y|0|-0`, node `0|5|z|y|-0`.
-`JSON.parse('{"b":1,"a":2,"1":3}')` re-stringified: ours `{"b":1,"a":2,"1":3}`, node `{"1":3,"b":1,"a":2}`. Manual 7.9 records
-insertion-order `keysOf` but nothing exempts js from ECMA-262 OrdinaryOwnPropertyKeys. Interp only, same probe: `numkeys`
-(keys from numbers/booleans/null) prints nothing — T-480. Files: interp `__keys`, `js_keys` in runtime.c / jsrt.go /
-js-rt.metajs; decide whether the order is applied at enumeration (cheap) or kept at insertion.
-
-### T-482 js compiler: labeled break/continue out of `try`/`finally` inside a loop loops forever or fails to build · P1 · JS · IN PROGRESS (JS worker, round 1) [V]
-`bl: for (var i=0;i<3;i++){ try { if (i===1) break bl; lt.push("t"+i); } finally { lt.push("f"+i); } }` → interp and node
-`t0,f0,f1`; llvm.Run hits the step brake (endless loop); `-exe` fails to link: unresolved `js_jsxcall` (finder also saw
-`use of undefined value '%55'` in a larger module). `continue label` from an inner loop through a finally is the same.
-Unlabelled break/continue through finally is fine. File: js-to-llvm-ir.abnf (labels crossing the control-signal path;
-check typescript-to-llvm-ir.abnf, and why the module references an extern nothing defines).
-
-### T-483 js compiler: `for-of` over an array mutated during iteration uses the starting length · P1 · JS · IN PROGRESS (JS worker, round 1) [V]
-`a=[1,2,3,4]; for (x of a) { out.push(x); if (x===2) a.shift(); }` → run/native `1,2,4,undefined`, interp/node `1,2,4`;
-pop while iterating `[1,2,3]` → `1,2,undefined` vs `1,2`; push while iterating `[1,2]` → `1,2` vs `1,2,10,20`. The array
-iterator re-reads `length` every step. File: js-to-llvm-ir.abnf (array fast path of for-of), typescript likewise.
-
-### T-484 js: string `<`/`>` and default `sort()` compare code points, not UTF-16 code units · P1 · JS · IN PROGRESS (JS worker, round 1) [V]
-s = ["", "\ud800", "\udc00x", "𝄞", "￿"]: node orders by code units, so `"𝄞" < ""`. run, native and
-interp -frozen: `"𝄞" < ""` false; default sort `d800,e000,ffff,d834` (node `d800,d834,e000,ffff`). Interp under goja
-gets astral right but a lone surrogate wrong (`"" < "\ud800"` true; sort `e000,d800,ffff,d834`). Files: `jsCompare` in
-abnf/jsrt.go (~2333, Go string `<`), `js_compare` in runtime.c (~2881), the interp sort comparator. Check which other
-languages share these comparators before changing them (java/kotlin/csharp/dart compare UTF-16 too; python/go/swift do not).
-
-### T-485 js: the Go twin's `Math.max`/`Math.min` drop NaN next to ±Infinity · P1 · JS · IN PROGRESS (JS worker, round 1) [V]
-`Math.max(NaN, Infinity)`, `Math.min(-Infinity, NaN)`, `Math.max.apply(null,[1,NaN,Infinity])`: interp (goja and -frozen)
-and llvm.Run `Infinity`/`-Infinity`, native and node `NaN`. abnf/jsrt.go ~17604 folds with Go's `math.Max`/`math.Min`,
-which define Max(x,+Inf)=+Inf even for NaN x. Check go's min/max (T-470) and other languages that route through it.
-
-### T-487 js interp (goja): ToInt32/ToUint32 of |x| ≥ 2^63 saturates · P1 · JS · IN PROGRESS (JS worker, round 1) [V]
-`x = 1e21`: interp `x|0 = -1`, `x>>>0 = 4294967295`, `~x = 0`, `1<<x = -2147483648`; run, native, interp -frozen and node
-`-559939584 3735027712 559939583 1`. 2^63 and 2^64+2^33 also wrong. Cause: third_party/goja/runtime.go:946 and :961
-`int32(int64(f))` — Go saturates on arm64. A goja patch like the ftoa one (manual ch. 4); add a cross-host pin test.
-
-### T-488 js: TypeError/RangeError raised by runtime builtins is uncatchable; `repeat(Infinity)` hangs or panics · P1 · JS · IN PROGRESS (JS worker, round 1) [V]
-`try { "a".repeat(-1) } catch(e) {...}` and `try { [].reduce((a,b)=>a+b) } catch(e)`: every leg ends the program with
-`js runtime error: Invalid count value: -1` / `Reduce of empty array with no initial value`, exit 1; node catches a
-RangeError / TypeError. `"ab".repeat(Infinity)` in a try: interp and native run until killed, run panics in Go
-(`strings: Repeat output length overflow`); node RangeError. `new Array(-1)` is already catchable — copy its path.
-Files: the builtin error raise in jsrt.go / runtime.c / js-rt.metajs / js-interpreter.abnf.
-
-### T-489 js: fromIndex and separator arguments of includes / lastIndexOf / join · P1 · JS · IN PROGRESS (JS worker, round 1) [V]
-`arr=[1,2,1]`: `arr.includes(1,5)`, `arr.includes(1,3)` → true (node false: fromIndex ignored); `arr.lastIndexOf(1,-5)` → 2
-(node -1); `"abcabc".lastIndexOf("a",-1)` → 3 (node 0, also for -5); `[1,2].join(null)` → `1,2` (node `1null2`). All legs.
-
-### T-490 js: regex `replace` replacement patterns `` $` `` `$'` and literal `$n`/`$<x>` · P1 · JS · IN PROGRESS (JS worker, round 1) [V]
-`"xabcx".replace(/b/, "$\`")` → `xa$\`cx` (node `xaxacx`); `"$'"` → `xa$'cx` (node `xacxcx`); finder also: `"$<x>"` with no named
-groups → `xacx` (node `xa$<x>cx`), `"$2"` with no group 2 → `xacx` (node `xa$2cx`), `"$10"` → `xa0cx` (node `xa$10cx`). The
-string-pattern form is right. All legs. Files: the regex replace expander (lib/regex.js and its twins).
-
-### T-491 js interp: index arguments are not ToIntegerOrInfinity'd (NaN, fractions) · P1 · JS · IN PROGRESS (JS worker, round 1) [V]
-`"abc".at(NaN)`, `"abc".substr(NaN,1)`, `[5,6].at(NaN)` → interp `""`, `""`, `undefined`; run/native/node `a`, `a`, `5`. For
-`-0.5`: interp `charAt ""`, `charCodeAt NaN`, `at "c"`, `substr "c"`, `[5,6].at → 6`; node `a 97 a a 5`.
-`"abc".indexOf("c", NaN)` → NaN (node 2). File: js-interpreter.abnf string/array builtins.
-
 ---
 
 # JV — Java
@@ -979,6 +894,19 @@ T-477 go: features where the engines disagree on support — PARTIAL 646e06a3 (m
 T-486 js: parseInt edge cases, a different leg wrong per case — DONE 690ef8af (the >2^53 non-power-of-two radix tail is implementation-defined in V8; all legs agree, recorded in T-566)
 T-492 js: missing TypeErrors — const assignment, `in` on a primitive, `instanceof` a non-object — PARTIAL 99030ccb (const assignment, in / instanceof TypeErrors); P3 wording is T-565
 T-493 js: low-value divergences and gaps — PARTIAL 27ea061e (strings.raw, toSorted/toReversed/toSpliced/with/copyWithin); rest is T-565
+T-480 js interp: a non-string computed key (`o[1]=v`, `o[true]`, `o[null]`) is stored but not tracked as an own key — DONE af004511
+T-481 js: own-key order ignores the array-index rule (indices ascending first, then strings in insertion order) — DONE af004511
+T-478 js: a `let`/`const` in a loop head is one shared binding, not one per iteration — DONE d3cdf4ad
+T-479 assignment evaluates the RHS before the LHS reference; compound assignment reads the LHS after the RHS (js, java) — DONE de41557c
+T-485 js: the Go twin's `Math.max`/`Math.min` drop NaN next to ±Infinity — DONE 690ef8af
+T-487 js interp (goja): ToInt32/ToUint32 of |x| ≥ 2^63 saturates — DONE 690ef8af
+T-482 js compiler: labeled break/continue out of `try`/`finally` inside a loop loops forever or fails to build — DONE 54788504
+T-483 js compiler: `for-of` over an array mutated during iteration uses the starting length — DONE 54788504
+T-484 js: string `<`/`>` and default `sort()` compare code points, not UTF-16 code units — DONE 54788504
+T-488 js: TypeError/RangeError raised by runtime builtins is uncatchable; `repeat(Infinity)` hangs or panics — DONE 55313c71
+T-489 js: fromIndex and separator arguments of includes / lastIndexOf / join — DONE 55313c71
+T-490 js: regex `replace` replacement patterns `` $` `` `$'` and literal `$n`/`$<x>` — DONE 55313c71
+T-491 js interp: index arguments are not ToIntegerOrInfinity'd (NaN, fractions) — DONE 55313c71
 
 # Settled — do not re-open
 
