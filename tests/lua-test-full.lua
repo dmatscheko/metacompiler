@@ -1836,6 +1836,13 @@ function s41()
     check("zs3", tostring(math.floor(nan)) == tostring(nan), true)
 end
 
+-- ===== SECTION 42: string.rep of an empty piece =====
+-- lua 5.5 answers "" at once whatever the count; walking the count would not end.
+function s42()
+    local ns = {2 ^ 40, 1 << 50}
+    check("rep1", string.rep("", ns[1]) .. "|" .. string.rep("", ns[2], ""), "|")
+end
+
 s25() -- SECTION-CALL 25
 s26() -- SECTION-CALL 26
 s27() -- SECTION-CALL 27
@@ -1853,5 +1860,6 @@ s38() -- SECTION-CALL 38
 s39() -- SECTION-CALL 39
 s40() -- SECTION-CALL 40
 s41() -- SECTION-CALL 41
+s42() -- SECTION-CALL 42
 print("full: " .. checks .. " checks, " .. failures .. " failures")
 exit(failures)

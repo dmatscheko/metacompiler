@@ -490,7 +490,10 @@ function lsSub(s, i, j) {
 
 // string.rep(s, n, sep): n copies joined by sep, "" when n < 1.
 function lsRep(s, n, sep) {
-    if (n < 1) { return "" }
+    // An empty piece repeats to "" at any count, which must not cost the count:
+    // string.rep("", 2^40) answers at once in lua. Twin of js_lurep in
+    // abnf/jsrtluastr.go.
+    if (n < 1 || s.length + sep.length === 0) { return "" }
     var out = s
     var k = 1
     while (k < n) {

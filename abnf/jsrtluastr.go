@@ -858,7 +858,7 @@ func init() {
 			s := rt.luCheckStr("string.rep", 1, args)
 			n := rt.luCheckInt("string.rep", 2, args)
 			sep := rt.luOptStr("string.rep", 3, args, "")
-			if n < 1 {
+			if n < 1 || s+sep == "" {
 				return rt.wrapStr("")
 			}
 			var b strings.Builder
