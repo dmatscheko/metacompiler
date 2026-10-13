@@ -5147,7 +5147,16 @@ HasStatic   = :script(~~
                            "StringIndexOutOfBoundsException", "NegativeArraySizeException",
                            "ClassCastException", "UnsupportedOperationException",
                            "NumberFormatException", "InterruptedException", "IOException",
-                           "StackOverflowError", "AssertionError"]
+                           "StackOverflowError", "AssertionError", "IllegalFormatException"]
+    // java.util.Formatter's exceptions, which String.format throws: each an
+    // IllegalFormatException, itself an IllegalArgumentException. Twin of
+    // jUtilExcs in java-interpreter.abnf.
+    var jUtilExcs = ",IllegalFormatException,IllegalFormatConversionException,MissingFormatArgumentException,"
+        + "UnknownFormatConversionException,IllegalFormatPrecisionException,MissingFormatWidthException,"
+        + "IllegalFormatCodePointException,IllegalFormatFlagsException,FormatFlagsConversionMismatchException,"
+        + "IllegalFormatWidthException,DuplicateFormatFlagsException,IllegalFormatArgumentIndexException,"
+    var jFmtExcs = jUtilExcs.split(",")
+    for (var jfe = 2; jfe < jFmtExcs.length - 1; jfe = jfe + 1) { builtinExcOrder.push(jFmtExcs[jfe]) }
     // The PACKAGE-QUALIFIED (binary) name of each, written on the descriptor as
     // __bname - which is what java.lang.Class#getName answers, what jpClassName in
     // languages/lib/java-rt.metajs and jvpClassName in abnf/jsrtjava.go read, and
@@ -5157,6 +5166,7 @@ HasStatic   = :script(~~
     // java.lang. The twin is jExcFqcn in java-interpreter.abnf.
     function jExcFqcn(name) {
         if (name == "IOException") { return "java.io." + name }
+        if (jUtilExcs.indexOf("," + name + ",") >= 0) { return "java.util." + name }
         return "java.lang." + name
     }
     var builtinExcParent = {"$Object": "", "$Throwable": "", "$Exception": "Throwable", "$Error": "Throwable",
@@ -5174,7 +5184,9 @@ HasStatic   = :script(~~
                             "$ClassCastException": "RuntimeException",
                             "$UnsupportedOperationException": "RuntimeException",
                             "$NumberFormatException": "IllegalArgumentException",
-                            "$InterruptedException": "Exception", "$IOException": "Exception"}
+                            "$InterruptedException": "Exception", "$IOException": "Exception",
+                            "$IllegalFormatException": "IllegalArgumentException"}
+    for (var jfp = 2; jfp < jFmtExcs.length - 1; jfp = jfp + 1) { builtinExcParent["$" + jFmtExcs[jfp]] = "IllegalFormatException" }
     // ----- what the RUNTIME can raise, decided at WALK time -----
     //
     // A descriptor the runtime raises has to exist before the raise, so it cannot
@@ -5190,11 +5202,13 @@ HasStatic   = :script(~~
     var jUsesNewArr = false     // new T[n]         -> NegativeArraySizeException
     var jUsesParse = false      // parseInt/parseDouble/valueOf ... -> NumberFormatException
     var jUsesRepeat = false     // String.repeat    -> IllegalArgumentException
+    var jUsesFormat = false     // String.format    -> java.util.Formatter's exceptions
     function jNoteIdx(sfx) { jUsesIdx = true; return sfx }
     function jNoteMSfx(sfx) {
         if (sfx.name == "charAt" || sfx.name == "substring" || sfx.name == "codePointAt"
             || sfx.name == "subSequence") { jUsesStrIdx = true }
         if (sfx.name == "repeat") { jUsesRepeat = true }
+        if (sfx.name == "format" || sfx.name == "formatted" || sfx.name == "printf") { jUsesFormat = true }
         if (sfx.name == "arraycopy") { jUsesIdx = true }
         if (sfx.name == "parseInt" || sfx.name == "parseLong" || sfx.name == "parseDouble"
             || sfx.name == "parseFloat" || sfx.name == "valueOf") { jUsesParse = true }
@@ -5244,6 +5258,10 @@ HasStatic   = :script(~~
         if (jUsesCast) {
             runtimeExc["$ClassCastException"] = true
             noteTypeUse("ClassCastException")
+        }
+        for (var fe = 2; jUsesFormat && fe < jFmtExcs.length - 1; fe++) {
+            runtimeExc["$" + jFmtExcs[fe]] = true
+            noteTypeUse(jFmtExcs[fe])
         }
     }
     var userDeclared = {}

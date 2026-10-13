@@ -131,6 +131,7 @@ class Main {
         S61.run(); // SECTION-CALL 61
         S62.run(); // SECTION-CALL 62
         S63.run(); // SECTION-CALL 63
+        S64.run(); // SECTION-CALL 64
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -3645,5 +3646,43 @@ class S63 {
         try { Object o = vals[1]; String t = (String) o; msg2 = t; } catch (ClassCastException e) { msg2 = e.toString(); }
         Main.check("cm63", msg.equals("class java.lang.String cannot be cast to class java.lang.Integer (java.lang.String and java.lang.Integer are in module java.base of loader 'bootstrap')")
             && msg2.equals("java.lang.ClassCastException: class java.lang.Integer cannot be cast to class java.lang.String (java.lang.Integer and java.lang.String are in module java.base of loader 'bootstrap')"));
+    }
+}
+
+// ===== SECTION 64: java.util.Formatter's exceptions, %a, %h and %#.0f =====
+//
+// String.format throws a catchable IllegalFormatException subclass - each an
+// IllegalArgumentException - for a mismatched argument (its message names the
+// argument's class), a missing argument, an unknown conversion, a precision,
+// flag or width the conversion does not take, and an invalid code point.
+// %a is Double.toHexString's form (a precision rounds the hex significand
+// half-even), %h the hash code in hex, and '#' keeps the point of %.0f. Every
+// expected value is java 24.0.2's.
+class S64 {
+    static Object[] vals = {"str", 3.0, 3, 'c', 7L, 0x110000};
+    static String fmt(String f, Object v) {
+        try { return String.format(f, v); }
+        catch (IllegalArgumentException e) { return e.getClass().getName().substring(10) + ":" + e.getMessage(); }
+    }
+    static void run() {
+        Main.check("fx64", fmt("%d", vals[0]).equals("IllegalFormatConversionException:d != java.lang.String")
+            && fmt("%d", vals[1]).equals("IllegalFormatConversionException:d != java.lang.Double")
+            && fmt("%c", vals[4]).equals("IllegalFormatConversionException:c != java.lang.Long")
+            && fmt("%f", vals[2]).equals("IllegalFormatConversionException:f != java.lang.Integer")
+            && fmt("%s %s", vals[2]).equals("MissingFormatArgumentException:Format specifier '%s'")
+            && fmt("%q", vals[2]).equals("UnknownFormatConversionException:Conversion = 'q'")
+            && fmt("%.2d", vals[2]).equals("IllegalFormatPrecisionException:2")
+            && fmt("%-d", vals[2]).equals("MissingFormatWidthException:%-d")
+            && fmt("%c", vals[5]).equals("IllegalFormatCodePointException:Code point = 0x110000")
+            && fmt("%+s", vals[0]).equals("FormatFlagsConversionMismatchException:Conversion = s, Flags = +")
+            && fmt("%-05d", vals[2]).equals("IllegalFormatFlagsException:Flags = '-0'")
+            && fmt("%.f", vals[1]).equals("UnknownFormatConversionException:Conversion = '.'"));
+        double[] ds = {2.5, 0.1, 1e-320, -1.0 / 3, 1.0 + 1.0 / 32, 1.0 + 3.0 / 32};
+        String hx = "";
+        for (double d : ds) { hx = hx + String.format("%a %.1a %A|", d, d, d); }
+        Main.check("fa64", hx.equals("0x1.4p1 0x1.4p1 0X1.4P1|0x1.999999999999ap-4 0x1.ap-4 0X1.999999999999AP-4|"
+            + "0x0.00000000007e8p-1022 0x1.0p-1063 0X0.00000000007E8P-1022|-0x1.5555555555555p-2 -0x1.5p-2 -0X1.5555555555555P-2|"
+            + "0x1.08p0 0x1.0p0 0X1.08P0|0x1.18p0 0x1.2p0 0X1.18P0|"));
+        Main.check("fh64", String.format("%h %H %#.0f %#.0e %.2s", "hi", 255, 2.5, 2.5, null).equals("d01 FF 3. 3.e+00 nu"));
     }
 }

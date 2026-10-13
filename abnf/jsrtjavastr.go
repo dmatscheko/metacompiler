@@ -278,6 +278,9 @@ func (rt *jsrt) jxExpand(re *rxRe, text []rune, m *rxMatch, repl []rune) string 
 
 // ----- String.format -----
 
+// jxFormat is lib/java-strings.js's jxFormat: a malformed specifier, a
+// missing argument and a mismatched one throw java.util.Formatter's
+// exceptions (jvThrowNamed).
 func (rt *jsrt) jxFormat(fmtS string, args []interface{}) string {
 	f := []rune(fmtS)
 	var out strings.Builder
@@ -299,10 +302,16 @@ func (rt *jsrt) jxFormat(fmtS string, args []interface{}) string {
 		if k > j && k < len(f) && f[k] == '$' {
 			n, _ := strconv.Atoi(string(f[j:k]))
 			idx = n - 1
+			if idx < 0 {
+				rt.jvThrowNamed("IllegalFormatArgumentIndexException", "Illegal format argument index = "+strconv.Itoa(n))
+			}
 			j = k + 1
 		}
 		flags := ""
 		for j < len(f) && strings.ContainsRune("-#+ 0,(<", f[j]) {
+			if strings.ContainsRune(flags, f[j]) {
+				rt.jvThrowNamed("DuplicateFormatFlagsException", "Flags = '"+string(f[j])+"'")
+			}
 			flags += string(f[j])
 			j++
 		}
@@ -314,21 +323,27 @@ func (rt *jsrt) jxFormat(fmtS string, args []interface{}) string {
 		}
 		j = k
 		prec := -1
+		bad := false
 		if j < len(f) && f[j] == '.' {
 			for k = j + 1; k < len(f) && digit(f[k]); k++ {
 			}
 			if k == j+1 {
-				rt.fail("IllegalFormatPrecisionException: %s", string(f[start:k]))
+				bad = true
 			}
 			prec, _ = strconv.Atoi(string(f[j+1 : k]))
 			j = k
 		}
-		if j >= len(f) {
-			rt.fail("UnknownFormatConversionException: Conversion = '%%'")
+		// A specifier that does not parse names the character after the '%'.
+		if bad || j >= len(f) {
+			c := "%"
+			if start+1 < len(f) {
+				c = string(f[start+1])
+			}
+			rt.jvThrowNamed("UnknownFormatConversionException", "Conversion = '"+c+"'")
 		}
 		conv := f[j]
 		i = j + 1
-		spec := string(f[start:i])
+		rt.jxCheckSpec(conv, flags, width, prec, idx)
 		if conv == 'n' {
 			out.WriteString("\n")
 			continue
@@ -346,12 +361,123 @@ func (rt *jsrt) jxFormat(fmtS string, args []interface{}) string {
 			next++
 		}
 		if ai < 0 || ai >= len(args) {
-			rt.fail("MissingFormatArgumentException: Format specifier '%s'", spec)
+			rt.jvThrowNamed("MissingFormatArgumentException", "Format specifier '"+string(f[start:i])+"'")
 		}
 		last = ai
 		out.WriteString(rt.jxConv(conv, flags, width, prec, args[ai]))
 	}
 	return out.String()
+}
+
+// jxCheckSpec is java-strings.js's jxCheckSpec: the checks Formatter makes of
+// a specifier before it reads the argument.
+func (rt *jsrt) jxCheckSpec(conv rune, flags string, width, prec, idx int) {
+	if !strings.ContainsRune("bBhHsScCdoxXeEfgGaAtT%n", conv) {
+		rt.jvThrowNamed("UnknownFormatConversionException", "Conversion = '"+string(conv)+"'")
+	}
+	lc := []rune(strings.ToLower(string(conv)))[0]
+	has := func(c string) bool { return strings.Contains(flags, c) }
+	sp := jxSpecStr(conv, flags, width, prec, idx)
+	missing := func() { rt.jvThrowNamed("MissingFormatWidthException", sp) }
+	badPrec := func() { rt.jvThrowNamed("IllegalFormatPrecisionException", strconv.Itoa(prec)) }
+	illegal := func() { rt.jvThrowNamed("IllegalFormatFlagsException", "Flags = '"+jxFlagsCanon(flags)+"'") }
+	switch lc {
+	case '%', 'n':
+		if prec >= 0 {
+			badPrec()
+		}
+		if lc == 'n' && width >= 0 {
+			rt.jvThrowNamed("IllegalFormatWidthException", strconv.Itoa(width))
+		}
+		if flags != "" && (lc == 'n' || flags != "-") {
+			illegal()
+		}
+		if width < 0 && has("-") {
+			missing()
+		}
+		return
+	case 'b', 'h', 's':
+		if lc != 's' && has("#") {
+			rt.jxMismatch(lc, '#')
+		}
+		if width < 0 && has("-") {
+			missing()
+		}
+		rt.jxBadFlags(lc, flags, "+ 0,(")
+		return
+	case 'c':
+		if prec >= 0 {
+			badPrec()
+		}
+		rt.jxBadFlags(lc, flags, "#+ 0,(")
+		if width < 0 && has("-") {
+			missing()
+		}
+		return
+	case 't':
+		return
+	}
+	if width < 0 && (has("-") || has("0")) {
+		missing()
+	}
+	if (has("+") && has(" ")) || (has("-") && has("0")) {
+		illegal()
+	}
+	switch lc {
+	case 'd', 'o', 'x':
+		if prec >= 0 {
+			badPrec()
+		}
+		if lc == 'd' {
+			rt.jxBadFlags(lc, flags, "#")
+		} else {
+			rt.jxBadFlags(lc, flags, ",")
+		}
+	case 'a':
+		rt.jxBadFlags(lc, flags, "(,")
+	case 'e':
+		rt.jxBadFlags(lc, flags, ",")
+	case 'g':
+		rt.jxBadFlags(lc, flags, "#")
+	}
+}
+
+func (rt *jsrt) jxBadFlags(lc rune, flags, bad string) {
+	for _, c := range bad {
+		if strings.ContainsRune(flags, c) {
+			rt.jxMismatch(lc, c)
+		}
+	}
+}
+
+func (rt *jsrt) jxMismatch(lc, flag rune) {
+	rt.jvThrowNamed("FormatFlagsConversionMismatchException", "Conversion = "+string(lc)+", Flags = "+string(flag))
+}
+
+// jxFlagsCanon is the flags in Formatter's own order, as its messages spell them.
+func jxFlagsCanon(flags string) string {
+	out := ""
+	for _, c := range "-#+ 0,(<" {
+		if strings.ContainsRune(flags, c) {
+			out += string(c)
+		}
+	}
+	return out
+}
+
+// jxSpecStr is the specifier as Formatter's toString writes it back.
+func jxSpecStr(conv rune, flags string, width, prec, idx int) string {
+	out := "%" + jxFlagsCanon(flags)
+	if idx >= 0 {
+		out += strconv.Itoa(idx+1) + "$"
+	}
+	if width >= 0 {
+		out += strconv.Itoa(width)
+	}
+	if prec >= 0 {
+		out += "." + strconv.Itoa(prec)
+	}
+	return out + string(conv)
 }
 
 func jxPad(s, flags string, width int) string {
@@ -371,8 +497,17 @@ func (rt *jsrt) jxConv(conv rune, flags string, width, prec int, v interface{}) 
 	up := lc != conv
 	k := jxKind(v)
 	body := ""
+	cut := func() {
+		if u := strUnits(body); prec >= 0 && prec < len(u) {
+			body = strFromUnits(u[:prec])
+		}
+	}
 	switch lc {
 	case 's', 'b':
+		// '#' is for a Formattable, which no value here is.
+		if lc == 's' && strings.Contains(flags, "#") {
+			rt.jxMismatch(lc, '#')
+		}
 		switch {
 		case k == "null" && lc == 's':
 			body = "null"
@@ -383,21 +518,30 @@ func (rt *jsrt) jxConv(conv rune, flags string, width, prec int, v interface{}) 
 		default:
 			body = "true"
 		}
-		if u := strUnits(body); prec >= 0 && prec < len(u) {
-			body = strFromUnits(u[:prec])
-		}
-	case 'c':
-		switch k {
-		case "null":
+		cut()
+	case 'h':
+		if k == "null" {
 			body = "null"
-		case "char", "int":
-			if c := jxCode(rt, v); c < 0x10000 {
+		} else {
+			body = strconv.FormatUint(uint64(uint32(int32(rt.jvHash(v)))), 16)
+		}
+		cut()
+	case 'c':
+		switch {
+		case k == "null":
+			body = "null"
+		case k == "char" || (k == "int" && jvClassNameOf(v) != "java.lang.Long"):
+			c := jxCode(rt, v)
+			if k == "int" && (c < 0 || c > 0x10FFFF) {
+				rt.jvThrowNamed("IllegalFormatCodePointException", "Code point = 0x"+strconv.FormatUint(uint64(uint32(int32(c))), 16))
+			}
+			if c < 0x10000 {
 				body = strFromUnits([]uint16{uint16(c)})
 			} else {
 				body = string(rune(c))
 			}
 		default:
-			rt.jxBadConv(conv, k)
+			rt.jxBadConv(lc, v)
 		}
 	case 'd':
 		if k == "null" {
@@ -405,7 +549,7 @@ func (rt *jsrt) jxConv(conv rune, flags string, width, prec int, v interface{}) 
 			break
 		}
 		if k != "int" {
-			rt.jxBadConv(conv, k)
+			rt.jxBadConv(lc, v)
 		}
 		dd := strconv.FormatInt(jvToLong(rt, v), 10)
 		neg := strings.HasPrefix(dd, "-")
@@ -420,8 +564,10 @@ func (rt *jsrt) jxConv(conv rune, flags string, width, prec int, v interface{}) 
 			break
 		}
 		if k != "int" {
-			rt.jxBadConv(conv, k)
+			rt.jxBadConv(lc, v)
 		}
+		// A sign or a bracket is for a BigInteger only.
+		rt.jxBadFlags(lc, flags, "( +")
 		base := 8
 		if lc == 'x' {
 			base = 16
@@ -444,17 +590,24 @@ func (rt *jsrt) jxConv(conv rune, flags string, width, prec int, v interface{}) 
 			}
 		}
 		body = rd
-	case 'f', 'e', 'g':
+	case 'f', 'e', 'g', 'a':
 		if k == "null" {
 			body = "null"
 			break
 		}
 		if k != "float" {
-			rt.jxBadConv(conv, k)
+			rt.jxBadConv(lc, v)
+		}
+		if lc == 'a' {
+			return jxHexFloat(v.(jsJFlo).f, flags, width, prec, up)
 		}
 		return jxFloat(lc, v.(jsJFlo).f, flags, width, prec, up)
 	default:
-		rt.fail("UnknownFormatConversionException: Conversion = '%c'", conv)
+		rt.fail("unsupported conversion %%%c", conv)
+	}
+	// A null argument prints "null", cut to the precision like a string.
+	if k == "null" {
+		cut()
 	}
 	if up {
 		body = caseMapMode(body, caseUpper|caseFull)
@@ -462,8 +615,111 @@ func (rt *jsrt) jxConv(conv rune, flags string, width, prec int, v interface{}) 
 	return jxPad(body, flags, width)
 }
 
-func (rt *jsrt) jxBadConv(conv rune, k string) {
-	rt.fail("IllegalFormatConversionException: %c != %s", conv, k)
+func (rt *jsrt) jxBadConv(lc rune, v interface{}) {
+	rt.jvThrowNamed("IllegalFormatConversionException", string(lc)+" != "+jvClassNameOf(v))
+}
+
+// jxHexFloat is %a: java-strings.js's jxHexFloat.
+func jxHexFloat(x float64, flags string, width, prec int, up bool) string {
+	if x != x || math.IsInf(x, 0) {
+		return jxFloat('e', x, flags, width, prec, up)
+	}
+	neg := x < 0 || (x == 0 && math.Signbit(x))
+	a := math.Abs(x)
+	lead, e, m := 1, 0, a
+	cut := prec >= 0 && prec < 13
+	switch {
+	case a == 0:
+		lead = 0
+	case a < 0x1p-1022:
+		m = a * 0x1p1022
+		e = -1022
+		if cut {
+			for m < 1 {
+				m *= 2
+				e--
+			}
+		} else {
+			lead = 0
+		}
+	default:
+		for m >= 2 {
+			m /= 2
+			e++
+		}
+		for m < 1 {
+			m *= 2
+			e--
+		}
+	}
+	frac := m - float64(lead)
+	var ds [13]int
+	for i := range ds {
+		frac *= 16
+		d := math.Floor(frac)
+		ds[i] = int(d)
+		frac -= d
+	}
+	n := 13
+	if cut {
+		n = prec
+		if n == 0 {
+			n = 1
+		}
+		more := false
+		for r := n + 1; r < 13; r++ {
+			if ds[r] != 0 {
+				more = true
+			}
+		}
+		if first := ds[n]; first > 8 || (first == 8 && (more || ds[n-1]%2 == 1)) {
+			q := n - 1
+			for q >= 0 && ds[q] == 15 {
+				ds[q] = 0
+				q--
+			}
+			if q >= 0 {
+				ds[q]++
+			} else {
+				lead++
+			}
+			if lead == 2 {
+				lead = 1
+				e++
+			}
+		}
+	} else if prec < 0 {
+		for n > 1 && ds[n-1] == 0 {
+			n--
+		}
+	}
+	hex := ""
+	for _, d := range ds[:n] {
+		hex += string("0123456789abcdef"[d])
+	}
+	for len(hex) < prec {
+		hex += "0"
+	}
+	body := strconv.Itoa(lead) + "." + hex + "p" + strconv.Itoa(e)
+	sign := ""
+	switch {
+	case neg:
+		sign = "-"
+	case strings.Contains(flags, "+"):
+		sign = "+"
+	case strings.Contains(flags, " "):
+		sign = " "
+	}
+	if strings.Contains(flags, "0") {
+		for len(sign)+2+len(body) < width {
+			body = "0" + body
+		}
+	}
+	out := sign + "0x" + body
+	if up {
+		out = strings.ToUpper(out)
+	}
+	return jxPad(out, flags, width)
 }
 
 func jxGroup(ds string) string {
@@ -570,6 +826,9 @@ func jxFloat(lc rune, x float64, flags string, width, prec int, up bool) string 
 			prec = 6
 		}
 		body = jxFixed(ds, e, prec, group)
+		if prec == 0 && strings.Contains(flags, "#") {
+			body += "."
+		}
 	default:
 		if prec < 0 {
 			prec = 6
@@ -793,6 +1052,23 @@ func (rt *jsrt) jvIsType(v interface{}, t string) bool {
 	return t == "CharSequence" && bn == "String"
 }
 
+// jvClassNameOf is v.getClass().getName() of a non-null value. Twin of
+// jxkClass in java-interpreter.abnf and languages/lib/java-rt.metajs.
+func jvClassNameOf(v interface{}) string {
+	if bn := jvBoxName(v); bn != "" {
+		return "java.lang." + bn
+	}
+	switch t := v.(type) {
+	case *jsArray:
+		return jvpArrayTag(t)
+	case *jsObject:
+		if cls, ok := t.props["__class"].(*jsObject); ok {
+			return jvpClassName(cls)
+		}
+	}
+	return "java.lang.Object"
+}
+
 // jvCceMsg is java 24's ClassCastException message: the two classes and where
 // each was loaded from (java.base for java.*, an array of primitives and an
 // array of java.* classes; the unnamed module of the app loader otherwise).
@@ -895,8 +1171,7 @@ func init() {
 			if _, isArr := v.(*jsArray); (t == "Comparable" || t == "CharSequence") && jvBoxName(v) == "" && !isArr {
 				return a[0]
 			}
-			cls, _ := u(m["js_jvgetclass"]([]uint64{a[0]})).(*jsObject)
-			rt.jvThrowCls(jvCceCls, jvCceMsg(rt.toString(cls.props["__cname"]), rt.toString(u(a[2]))))
+			rt.jvThrowCls(jvCceCls, jvCceMsg(jvClassNameOf(v), rt.toString(u(a[2]))))
 			return 0
 		}
 		// A java.lang.String method on a string receiver, compareTo and the

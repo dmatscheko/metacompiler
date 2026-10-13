@@ -123,6 +123,11 @@ var jvNpeCls *jsObject
 var jvNfeCls *jsObject
 var jvCceCls *jsObject
 
+// java.util.Formatter's exceptions, by name (jvThrowNamed).
+var jvExcNamed = map[string]*jsObject{}
+
+func (rt *jsrt) jvThrowNamed(cls, msg string) { rt.jvThrowCls(jvExcNamed[cls], msg) }
+
 func (rt *jsrt) jvThrowCls(cls *jsObject, msg interface{}) {
 	if cls == nil {
 		rt.fail("java: %v", msg)
@@ -1332,6 +1337,8 @@ func init() {
 				jvIaeCls = o
 			case "ClassCastException":
 				jvCceCls = o
+			default:
+				jvExcNamed[rt.toString(u(a[0]))] = o
 			}
 			return 0
 		}

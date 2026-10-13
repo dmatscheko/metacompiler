@@ -275,6 +275,8 @@ var jvSioobeCls = undefined
 var jvNegArrCls = undefined
 var jvNpeCls = undefined
 var jvCceCls = undefined
+// java.util.Formatter's exceptions, by name (jxkThrow).
+var jvExcNamed = {}
 var jvNfeCls = undefined
 var jvIaeCls = undefined
 
@@ -1610,6 +1612,7 @@ function js_jvexc(name, cls) {
     else if (name == "NumberFormatException") { jvNfeCls = cls }
     else if (name == "IllegalArgumentException") { jvIaeCls = cls }
     else if (name == "ClassCastException") { jvCceCls = cls }
+    else { jvExcNamed["$" + name] = cls }
     return undefined
 }
 
@@ -2155,6 +2158,9 @@ function jxkRadix(v, r) {
 function jxkDbl(v) { return rtjNum(v) }
 function jxkDblStr(a) { return floStr(flo(a, 0)) }
 function jxkFail(msg) { fail(msg) }
+function jxkClass(v) { return js_jvgetclass(v)["__cname"] }
+function jxkHash(v) { return js_jhash(v) }
+function jxkThrow(cls, msg) { return jvThrowCls(jvExcNamed["$" + cls], msg) }
 
 // A String method's CharSequence or char argument as a string, and indexOf's
 // first argument, which may also be an int code point.

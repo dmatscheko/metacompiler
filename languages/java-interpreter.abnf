@@ -3637,6 +3637,9 @@ HasStatic   = :script(~~
     function jxkDbl(v) { return v.__flo }
     function jxkDblStr(a) { return jFloStr(a) }
     function jxkFail(msg) { fail(msg) }
+    function jxkClass(v) { return jGetClass(v).__cname }
+    function jxkHash(v) { return jHash(v) }
+    function jxkThrow(cls, msg) { jThrowExc(cls, msg) }
     // A String method's CharSequence or char argument as a string, and indexOf's
     // first argument, which may also be an int code point.
     function jStrArg(v) {
@@ -4797,8 +4800,16 @@ HasStatic   = :script(~~
     // The emitter (emitBuiltinExc in java-to-llvm-ir.abnf) writes the same
     // string as __bname, which is where the Go twin (jvpClassName in
     // abnf/jsrtjava.go) and layer 2 (jpClassName) read it.
+    // java.util.Formatter's exceptions, which String.format throws: each an
+    // IllegalFormatException, itself an IllegalArgumentException. Twin of
+    // jUtilExcs in java-to-llvm-ir.abnf.
+    var jUtilExcs = ",IllegalFormatException,IllegalFormatConversionException,MissingFormatArgumentException,"
+        + "UnknownFormatConversionException,IllegalFormatPrecisionException,MissingFormatWidthException,"
+        + "IllegalFormatCodePointException,IllegalFormatFlagsException,FormatFlagsConversionMismatchException,"
+        + "IllegalFormatWidthException,DuplicateFormatFlagsException,IllegalFormatArgumentIndexException,"
     function jExcFqcn(name) {
         if (name == "IOException") { return "java.io." + name }
+        if (jUtilExcs.indexOf("," + name + ",") >= 0) { return "java.util." + name }
         return "java.lang." + name
     }
     function jDefExc(name, superName) {
@@ -4831,7 +4842,13 @@ HasStatic   = :script(~~
                     "NegativeArraySizeException", "RuntimeException",
                     "NumberFormatException", "IllegalArgumentException",
                     "StackOverflowError", "VirtualMachineError",
-                    "AssertionError", "Error"]
+                    "AssertionError", "Error",
+                    "IllegalFormatException", "IllegalArgumentException"]
+    var jFmtExcs = jUtilExcs.split(",")
+    for (var jfe = 2; jfe < jFmtExcs.length - 1; jfe = jfe + 1) {
+        jExcTree.push(jFmtExcs[jfe])
+        jExcTree.push("IllegalFormatException")
+    }
     // java.lang.Object: `new Object()` and `extends Object`; its constructor
     // does nothing.
     globalScope["Object"] = {__isclass: true, __name: "Object", __bname: "java.lang.Object",
