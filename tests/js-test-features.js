@@ -777,6 +777,43 @@ check("label-jump-out-of-try", (function () {
         && log.join(",") === "f,c5";
 })());
 
+// ----- a builtin's RangeError / TypeError is a catchable throw -----
+check("builtin-errors-catchable", (function () {
+    function kind(f) { try { f(); return "none"; } catch (e) { return (e instanceof RangeError ? "R:" : e instanceof TypeError ? "T:" : "E:") + e.message; } }
+    var c = [-1, Infinity];
+    return kind(function () { return "a".repeat(c[0]); }) === "R:Invalid count value: -1"
+        && kind(function () { return "ab".repeat(c[1]); }) === "R:Invalid count value: Infinity"
+        && kind(function () { return [].reduce(function (a, b) { return a + b; }); }) === "T:Reduce of empty array with no initial value"
+        && kind(function () { return [].reduceRight(function (a, b) { return a + b; }); }) === "T:Reduce of empty array with no initial value";
+})());
+
+// ----- fromIndex / position / separator arguments of includes, lastIndexOf, join -----
+check("search-from-index", (function () {
+    var arr = [1, 2, 1];
+    var f = [5, 3, -5, -1];
+    return arr.includes(1, f[0]) === false && arr.includes(1, f[1]) === false && arr.lastIndexOf(1, f[2]) === -1
+        && arr.lastIndexOf(1, f[3]) === 2 && "abcabc".lastIndexOf("a", f[3]) === 0 && "abcabc".lastIndexOf("a", f[2]) === 0
+        && "abcabc".lastIndexOf("a") === 3 && "abcabc".includes("a", f[0]) === false && [1, 2].join(null) === "1null2"
+        && [1, 2].join(undefined) === "1,2";
+})());
+
+// ----- regex replace: $` $' and a $n / $<name> with no such group stay what node makes them -----
+check("regex-replace-patterns", (function () {
+    var s = "xabcx";
+    var re = [/b/, /(b)/];
+    return s.replace(re[0], "$`") === "xaxacx" && s.replace(re[0], "$'") === "xacxcx" && s.replace(re[0], "$<x>") === "xa$<x>cx"
+        && s.replace(re[0], "$2") === "xa$2cx" && s.replace(re[0], "$10") === "xa$10cx" && s.replace(re[1], "$10") === "xab0cx"
+        && s.replace(re[1], "[$01]") === "xa[b]cx" && "abab".replaceAll(/a/g, "[$`]") === "[]b[ab]b";
+})());
+
+// ----- index arguments are ToIntegerOrInfinity'd: NaN is 0, fractions truncate toward zero -----
+check("index-args-tointeger", (function () {
+    var v = [NaN, -0.5];
+    return "abc".at(v[0]) === "a" && "abc".substr(v[0], 1) === "a" && [5, 6].at(v[0]) === 5 && "abc".indexOf("c", v[0]) === 2
+        && "abc".charAt(v[1]) === "a" && "abc".charCodeAt(v[1]) === 97 && "abc".at(v[1]) === "a" && "abc".substr(v[1]) === "abc"
+        && [5, 6].at(v[1]) === 5;
+})());
+
 function main() {
     println("features: " + checks + " checks, " + failures + " failures");
     return failures;

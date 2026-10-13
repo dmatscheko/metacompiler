@@ -302,58 +302,63 @@ func (rt *jsrt) jsxSplit(o *jsObject, s string, limit int) *jsArray {
 	return out
 }
 
-// jsxTemplate rewrites JavaScript's replacement template into the one rxRe.expand reads.
-// The engine expands \1 / \k<name>, which is what Ruby and Python write; JavaScript writes
-// $1 / $<name> / $& / $$. The rewrite belongs to the language, not to the engine - the
-// interpreter's jsReTemplate is the same function.
-// Two forms are NOT covered, because the engine has nothing to rewrite them to: the prefix
-// $` and the suffix $' stay the two characters they are written with, and $10 and up read
-// as $1 followed by a '0', since expand takes one digit. The interpreter side has exactly
-// the same two gaps.
-func jsxTemplate(t string) string {
-	var out strings.Builder
+// substJS is GetSubstitution: a match's replacement template. Twin of jsReSubst in
+// languages/js-interpreter.abnf, where the rules are.
+func (re *rxRe) substJS(t string, text []rune, m *rxMatch) string {
 	r := []rune(t)
-	for i := 0; i < len(r); {
-		if r[i] == '\\' { // a literal backslash has to survive rxRe.expand
-			out.WriteString(`\\`)
-			i++
-			continue
+	var out strings.Builder
+	group := func(i int) {
+		if g, ok := re.group(text, m, i); ok {
+			out.WriteString(g)
 		}
+	}
+	for i := 0; i < len(r); {
 		if r[i] != '$' || i+1 >= len(r) {
 			out.WriteRune(r[i])
 			i++
 			continue
 		}
-		d := r[i+1]
-		if d == '$' {
+		switch d := r[i+1]; {
+		case d == '$':
 			out.WriteRune('$')
-			i += 2
+		case d == '&':
+			group(0)
+		case d == '`':
+			out.WriteString(string(text[:m.begin]))
+		case d == '\'':
+			out.WriteString(string(text[m.end:]))
+		case d >= '0' && d <= '9':
+			idx, w := int(d-'0'), 1
+			if i+2 < len(r) && r[i+2] >= '0' && r[i+2] <= '9' && idx*10+int(r[i+2]-'0') <= re.ngroups {
+				idx, w = idx*10+int(r[i+2]-'0'), 2
+			}
+			if idx >= 1 && idx <= re.ngroups {
+				group(idx)
+			} else {
+				out.WriteString(string(r[i : i+1+w]))
+			}
+			i += 1 + w
 			continue
-		}
-		if d == '&' {
-			out.WriteString(`\0`)
-			i += 2
-			continue
-		}
-		if d >= '1' && d <= '9' {
-			out.WriteRune('\\')
-			out.WriteRune(d)
-			i += 2
-			continue
-		}
-		if d == '<' {
+		case d == '<':
 			j := i + 2
 			for j < len(r) && r[j] != '>' {
 				j++
 			}
-			out.WriteString(`\k<`)
-			out.WriteString(string(r[i+2 : j]))
-			out.WriteString(">")
+			if len(re.names) == 0 || j >= len(r) {
+				out.WriteString("$<")
+				break
+			}
+			if gi := re.indexOfName(string(r[i+2 : j])); gi >= 0 {
+				group(gi)
+			}
 			i = j + 1
 			continue
+		default:
+			out.WriteRune('$')
+			i++
+			continue
 		}
-		out.WriteRune('$')
-		i++
+		i += 2
 	}
 	return out.String()
 }
@@ -364,12 +369,9 @@ func jsxTemplate(t string) string {
 func (rt *jsrt) jsxReplace(o *jsObject, s string, repl interface{}, forceAll bool) string {
 	re := rt.jsxProg(o)
 	all := forceAll || jsxBool(o, "global")
-	if rt.typeOf(repl) != "function" {
-		res := rt.rxReplace(o, s, jsxTemplate(rt.toString(repl)), all)
-		if jsxBool(o, "global") {
-			o.set("lastIndex", float64(0))
-		}
-		return res
+	tpl, isFn := "", rt.typeOf(repl) == "function"
+	if !isFn {
+		tpl = rt.toString(repl)
 	}
 	text := []rune(s)
 	var out strings.Builder
@@ -380,16 +382,20 @@ func (rt *jsrt) jsxReplace(o *jsObject, s string, repl interface{}, forceAll boo
 			break
 		}
 		out.WriteString(string(text[last:m.begin]))
-		args := []interface{}{}
-		for i := 0; i <= re.ngroups; i++ {
-			if g, ok := re.group(text, m, i); ok {
-				args = append(args, g)
-			} else {
-				args = append(args, jsUndef)
+		if !isFn {
+			out.WriteString(re.substJS(tpl, text, m))
+		} else {
+			args := []interface{}{}
+			for i := 0; i <= re.ngroups; i++ {
+				if g, ok := re.group(text, m, i); ok {
+					args = append(args, g)
+				} else {
+					args = append(args, jsUndef)
+				}
 			}
+			args = append(args, float64(m.begin), s)
+			out.WriteString(rt.toString(rt.call(repl, jsUndef, args)))
 		}
-		args = append(args, float64(m.begin), s)
-		out.WriteString(rt.toString(rt.call(repl, jsUndef, args)))
 		last, at = m.end, m.end
 		if m.end == m.begin {
 			if m.end < len(text) {

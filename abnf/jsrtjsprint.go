@@ -1708,29 +1708,56 @@ func (rt *jsrt) jsvStringMethod(s string, name string, args []interface{}) (inte
 		}
 		return float64(at + from), true
 	case "lastIndexOf":
+		// The last match at or before the position; a NaN (an absent) one is the
+		// whole string. Twin: jsLastIndex in languages/js-interpreter.abnf.
 		sub := argS(0)
-		best := -1
 		subLen := rt.strLen(sub)
-		for i := 0; i+subLen <= units; i++ {
+		start := units
+		if p := rt.jsvToNum(argAt(args, 1)); p == p {
+			start = jsToInt(p)
+		}
+		if start < 0 {
+			start = 0
+		}
+		if start > units-subLen {
+			start = units - subLen
+		}
+		for i := start; i >= 0; i-- {
 			if rt.strRange(s, i, i+subLen) == sub {
-				best = i
+				return float64(i), true
 			}
 		}
-		return float64(best), true
+		return float64(-1), true
 	case "includes":
-		return rt.strIndexOf(s, argS(0)) >= 0, true
+		from := jsToInt(rt.jsvNumArg(args, 1, 0))
+		if from < 0 {
+			from = 0
+		}
+		if from > units {
+			from = units
+		}
+		return rt.strIndexOf(rt.strRange(s, from, units), argS(0)) >= 0, true
 	case "startsWith":
 		sub := argS(0)
 		at := jsToInt(rt.jsvNumArg(args, 1, 0))
 		if at < 0 {
 			at = 0
 		}
+		if at > units {
+			at = units
+		}
 		return at+rt.strLen(sub) <= units && rt.strRange(s, at, at+rt.strLen(sub)) == sub, true
 	case "endsWith":
 		sub := argS(0)
 		end := units
-		if len(args) > 1 && !isUndefOrNull(args[1]) {
-			end = jsToInt(rt.toNumber(args[1]))
+		if len(args) > 1 && args[1] != jsUndef {
+			end = jsToInt(rt.jsvToNum(args[1]))
+		}
+		if end < 0 {
+			end = 0
+		}
+		if end > units {
+			end = units
 		}
 		start := end - rt.strLen(sub)
 		return start >= 0 && end <= units && rt.strRange(s, start, end) == sub, true
@@ -1752,13 +1779,13 @@ func (rt *jsrt) jsvStringMethod(s string, name string, args []interface{}) (inte
 			start = units
 		}
 		n := units - start
-		if len(args) > 1 && !isUndefOrNull(args[1]) {
-			n = jsToInt(rt.toNumber(args[1]))
+		if len(args) > 1 && args[1] != jsUndef {
+			n = jsToInt(rt.jsvToNum(args[1]))
 		}
 		if n < 0 {
 			n = 0
 		}
-		if start+n > units {
+		if n > units-start {
 			n = units - start
 		}
 		return rt.strRange(s, start, start+n), true
@@ -1819,9 +1846,13 @@ func (rt *jsrt) jsvStringMethod(s string, name string, args []interface{}) (inte
 		}
 		return s + pad, true
 	case "repeat":
-		n := jsToInt(rt.jsvNumArg(args, 0, 0))
-		if n < 0 {
-			rt.fail("Invalid count value: %d", n)
+		c := rt.jsvNumArg(args, 0, 0)
+		n := jsToInt(c)
+		if n < 0 || math.IsInf(c, 1) {
+			rt.bigRaise("RangeError: Invalid count value: %s", rt.jsvString(c))
+		}
+		if len(s) > 0 && n > 536870888/units {
+			rt.bigRaise("RangeError: Invalid string length")
 		}
 		return strings.Repeat(s, n), true
 	case "concat":
@@ -2025,14 +2056,28 @@ func (rt *jsrt) jsvArrayMethod(a *jsArray, name string, args []interface{}) (int
 		}
 		return float64(-1), true
 	case "lastIndexOf":
-		for i := n - 1; i >= 0; i-- {
+		from := n - 1
+		if len(args) > 1 {
+			from = jsToInt(rt.jsvToNum(args[1]))
+			if from < 0 {
+				from += n
+			}
+			if from > n-1 {
+				from = n - 1
+			}
+		}
+		for i := from; i >= 0; i-- {
 			if rt.strictEq(a.elems[i], cb) {
 				return float64(i), true
 			}
 		}
 		return float64(-1), true
 	case "includes":
-		for _, e := range a.elems {
+		from := 0
+		if len(args) > 1 {
+			from = jsvRelIndex(rt.jsvToNum(args[1]), n)
+		}
+		for _, e := range a.elems[from:] {
 			if rt.strictEq(e, cb) {
 				return true, true
 			}
@@ -2046,7 +2091,7 @@ func (rt *jsrt) jsvArrayMethod(a *jsArray, name string, args []interface{}) (int
 		return false, true
 	case "join":
 		sep := ","
-		if len(args) > 0 && !isUndefOrNull(args[0]) {
+		if len(args) > 0 && args[0] != jsUndef {
 			sep = rt.jsvString(args[0])
 		}
 		parts := make([]string, n)
@@ -2148,7 +2193,7 @@ func (rt *jsrt) jsvArrayMethod(a *jsArray, name string, args []interface{}) (int
 			acc = args[1]
 		} else {
 			if n == 0 {
-				rt.fail("Reduce of empty array with no initial value")
+				rt.bigRaise("TypeError: Reduce of empty array with no initial value")
 			}
 			acc = a.elems[idx[0]]
 			at = 1
