@@ -709,21 +709,21 @@ TagSuffix   <~~ push({kind: "tag", parts: takeAll()}) ~~>
             = TplBody ;
 CallSuffix  <~~ push({kind:"call", args: takeAll()}) ~~>
             = "(" [ Arg { "," Arg } [ "," ] ] ")" ;
-DotSuffix   = "." ( PrivSuffix | Id <~~ push({kind:"member", name: idName(up.in), key: makeConst(idName(up.in))}); noteMember(idName(up.in)) ~~> ) ;
+DotSuffix   = "." ( PrivSuffix | Id <~~ push({kind:"member", name: idName(up.in), key: makeConst(jsKeyEsc(idName(up.in)))}); noteMember(idName(up.in)) ~~> ) ;
 // 'this.#x': a private name. It is stored under the mangled key '__#<body>#x' (see
 // ClassPrivate),
 // which is what keeps it out of js_keys, so out of for-in and object spread.
 PrivSuffix  = "#" Id <~~ push({kind:"member", name: "#" + idName(up.in), key: privRefConst(idName(up.in))}) ~~> ;
-IndexSuffix <~~ push({kind:"member", txt: cpTxt(up.in, up.pos), key: pop()}) ~~>
+IndexSuffix <~~ push({kind:"member", txt: cpTxt(up.in, up.pos), key: keyEscT(pop())}) ~~>
             = "[" Expression "]" ;
 // The three optional forms carry the same payload as their plain counterparts plus the
 // 'opt' kind, which is what makes foldCallMember emit the nullish guard in front of them.
 OptChainSuffix = OptCallSuffix | OptIndexSuffix | OptDotSuffix ;
 OptCallSuffix <~~ push({kind:"optcall", args: takeAll()}) ~~>
             = "?." "(" [ Arg { "," Arg } [ "," ] ] ")" ;
-OptIndexSuffix <~~ push({kind:"optmember", txt: cpTxt(up.in, up.pos), key: pop()}) ~~>
+OptIndexSuffix <~~ push({kind:"optmember", txt: cpTxt(up.in, up.pos), key: keyEscT(pop())}) ~~>
             = "?." "[" Expression "]" ;
-OptDotSuffix = "?." Id <~~ push({kind:"optmember", name: idName(up.in), key: makeConst(idName(up.in))}) ~~> ;
+OptDotSuffix = "?." Id <~~ push({kind:"optmember", name: idName(up.in), key: makeConst(jsKeyEsc(idName(up.in)))}) ~~> ;
 
 // A call/array/new argument. The spread form (...expr) pushes a marker instead of a
 // value thunk; pushArgs recognizes it and appends the ELEMENTS of the spread value.
@@ -775,8 +775,8 @@ SuperProp   <~~ push(makeSuperProp(pop())) ~~>
 // assignment and destructuring-target forms can pick it out of takeAll().
 SuperKey    = SuperKeyDot | SuperKeyIdx ;
 SuperKeyDot <~~ push({skey: pop()}) ~~>
-            = "." Id <~~ push(makeConst(idName(up.in))) ~~> ;
-SuperKeyIdx <~~ push({skey: pop()}) ~~>
+            = "." Id <~~ push(makeConst(jsKeyEsc(idName(up.in)))) ~~> ;
+SuperKeyIdx <~~ push({skey: keyEscT(pop())}) ~~>
             = "[" Expression "]" ;
 
 // 'new.target': the constructor the running call was made with, or undefined for an
@@ -3990,6 +3990,24 @@ NotFuncHead = :script(~~
     // String.prototype.normalize needs the tables of lib/unicode-norm.txt, which a
     // program that names a .normalize member hands both engines at boot
     // (js_jsnormdata: jsvNormData in abnf/jsrtjsnorm.go, layer 2's js_jsnormdata).
+    // A program's own property key that starts with "__" is stored escaped behind a
+    // leading U+0001, so it cannot reach the value model's hidden slots: a member name
+    // is escaped here at compile time and a computed key at run time (js_jskeyesc,
+    // js_jspropkey). Twin: jsKeyEsc in js-interpreter.abnf, which states the rule.
+    // lib/js-builtins.js is the engine's own code, whose "__" names are hidden slots;
+    // its walk and its emission both run under its own source name.
+    function jsKeyEsc(k) {
+        if (k.length == 0 || c.curFile() == "js-builtins.js") { return k }
+        var k0 = k.charCodeAt(0)
+        if (k0 == 1 || (k0 == 95 && k.length >= 2 && k.charCodeAt(1) == 95 && !(k.length >= 3 && k.charCodeAt(2) == 35))) { return String.fromCharCode(1) + k }
+        return k
+    }
+    function keyEscT(t) {
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: callExt(r.b, "js_jskeyesc", [r.v])}
+        }
+    }
     var normWant = false
     function noteMember(name) { if (name == "normalize") { normWant = true } }
     // An arguments object (js_jsargs: a kind-19 copy of the argument array, see
@@ -4207,7 +4225,8 @@ NotFuncHead = :script(~~
     function makeProp(valT, key, txt) {
         // NamedEvaluation, the property form: `{ o: (a,b)=>a }` names the arrow "o".
         if (typeof key == "string") { fnAnonName(key, ":", txt) }
-        return {kt: (typeof key == "string") ? makeConst(key) : key, t: valT}
+        if (typeof key == "string") { return {kt: makeConst(jsKeyEsc(key)), kesc: true, t: valT} }
+        return {kt: key, t: valT}
     }
     function makeObject(props) {
         return function(b) {
@@ -4233,7 +4252,8 @@ NotFuncHead = :script(~~
                 }
                 var vr = props[i].t(b)
                 b = vr.b
-                callExt(b, memSetExt(), [obj, kr.v, vr.v])
+                var kv = (props[i].kesc === true) ? kr.v : callExt(b, "js_jskeyesc", [kr.v])
+                callExt(b, memSetExt(), [obj, kv, vr.v])
             }
             return {b: b, v: obj}
         }
@@ -5979,8 +5999,8 @@ NotFuncHead = :script(~~
                 b = kr.b
                 keyV = callExt(b, "js_jspropkey", [kr.v])
             } else {
-                keyV = emitStr(b, f.dkey)
-                taken.push(f.dkey)
+                keyV = emitStr(b, jsKeyEsc(f.dkey))
+                taken.push(jsKeyEsc(f.dkey))
             }
             b = bindPattern(b, f.pat, callExt(b, memGetExt(), [valueH, keyV]), declExt)
         }
@@ -6021,7 +6041,7 @@ NotFuncHead = :script(~~
         var restV = callExt(b, "js_obj_new", [])
         var saved = curScopeV
         curScopeV = callExt(b, "js_scope_new", [saved])
-        var keysV = callExt(b, "js_jskeys", [valueH])
+        var keysV = callExt(b, "js_jsspreadkeys", [valueH])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0ork"), keysV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0orsrc"), valueH])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0ori"), callExt(b, "js_num_i", [handle(0)])])
@@ -6427,7 +6447,7 @@ NotFuncHead = :script(~~
             var kr = m.nameT(b)
             return {b: kr.b, v: callExt(kr.b, "js_jspropkey", [kr.v])}
         }
-        return {b: b, v: emitStr(b, m.name)}
+        return {b: b, v: emitStr(b, jsKeyEsc(m.name))}
     }
     // The member's own name for `f.name` / `f.length` - "" when the key is COMPUTED and
     // so is only known at run time.
@@ -6602,7 +6622,7 @@ NotFuncHead = :script(~~
                 b = r.b
                 fv = r.v
             }
-            callExt(b, memSetExt(), [thisV, emitStr(b, initFields[k].name), fv])
+            callExt(b, memSetExt(), [thisV, emitStr(b, jsKeyEsc(initFields[k].name)), fv])
         }
         return b
     }
@@ -6889,7 +6909,7 @@ NotFuncHead = :script(~~
             var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
             var argsV = callExt(b, "js_arr_new", [])
             b = pushArgs(b, argsV, argThunks)
-            var scV = callExt(jsThisSet(b, thisV), "js_supercall", [supV, thisV, emitStr(b, name), argsV])
+            var scV = callExt(jsThisSet(b, thisV), "js_supercall", [supV, thisV, emitStr(b, jsKeyEsc(name)), argsV])
             // The same miss-sentinel check the method-call arm makes: nothing on the
             // __super chain is node's "is not a function", not an abort. It has no
             // source text for a super receiver either and prints "(intermediate

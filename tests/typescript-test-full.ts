@@ -3928,6 +3928,35 @@ function s80() {
     check("ar80e", s80e(4, 5) === "2:4");
 }
 
+// ===== SECTION 81: a program's own keys that start with "__" =====
+// The value model keeps its hidden slots under "__" names (__class, __keys, ...), so
+// a program's own "__" key is stored escaped and listed, copied, serialized and read
+// back as written, and it can neither see nor disturb the hidden slots. Values read
+// off node 24 (through tsc 6.0.3's output).
+function s81() {
+    const p = JSON.parse('{"__proto__":1,"__x":2,"y":{"__z":[1]}}');
+    check("dk81a", Object.keys(p).join() === "__proto__,__x,y" && JSON.stringify(p.y) === "{\"__z\":[1]}");
+    const o: any = {__z: 3, w: 4, "__q": 5};
+    o.__x = 1;
+    o["__y"] = 2;
+    let fk = "";
+    for (const k in o) { fk += k; }
+    check("dk81b", Object.keys(o).join() === "__z,w,__q,__x,__y" && fk === "__zw__q__x__y" && o.__x + o["__y"] === 3);
+    check("dk81c", JSON.stringify({__a: 1, b: {__c: 2}}) === "{\"__a\":1,\"b\":{\"__c\":2}}" &&
+        ("__z" in o) && o.hasOwnProperty("__z") && !("__nope" in o));
+    const h: any = {__class: 1, __name: "n", __keys: 7};
+    check("dk81d", Object.keys(h).join() === "__class,__name,__keys" && h.__class === 1 && h.__keys === 7 && typeof h === "object");
+    const {__z, ...rest} = {__z: 5, __w: 6};
+    check("dk81e", __z === 5 && Object.keys(rest).join() === "__w" && Object.keys({...h}).join() === "__class,__name,__keys");
+    check("dk81f", Object.entries({__e: 1}).join() === "__e,1" && Object.keys(Object.fromEntries([["__f", 1]])).join() === "__f");
+    class A { __p: number; constructor() { this.__p = 1; } __m(): number { return 1; } static __s(): number { return 3; } get __g(): number { return 4; } }
+    class B extends A { __m(): number { return super.__m() + 1; } static t(): number { return super.__s(); } f(): number { return super.__g; } }
+    check("dk81g", new B().__m() === 2 && B.t() === 3 && new B().f() === 4 && Object.keys(new B()).join() === "__p");
+    let rk = "";
+    JSON.parse('{"__r":1}', function (k: string, v: any) { rk += "[" + k + "]"; return v; });
+    check("dk81h", rk === "[__r][]" && JSON.stringify({__x: 1}, function (k: string, v: any) { return k === "__x" ? 5 : v; }) === "{\"__x\":5}");
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -4011,6 +4040,7 @@ function main(): number {
     s78(); // SECTION-CALL 78
     s79(); // SECTION-CALL 79
     s80(); // SECTION-CALL 80
+    s81(); // SECTION-CALL 81
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

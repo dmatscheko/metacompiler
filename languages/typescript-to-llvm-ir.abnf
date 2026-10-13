@@ -851,21 +851,21 @@ TagSuffix   <~~ push({kind: "tag", parts: takeAll()}) ~~>
 // same way the TypeScript compiler resolves this ambiguity.
 CallSuffix  <~~ push({kind:"call", args: takeAll()}) ~~>
             = [ TypeArgs ] "(" [ Arg { "," Arg } [ "," ] ] ")" ;
-DotSuffix   = "." ( PrivSuffix | Id <~~ push({kind:"member", name: idName(up.in), key: makeConst(idName(up.in))}); noteMember(idName(up.in)) ~~> ) ;
+DotSuffix   = "." ( PrivSuffix | Id <~~ push({kind:"member", name: idName(up.in), key: makeConst(jsKeyEsc(idName(up.in)))}); noteMember(idName(up.in)) ~~> ) ;
 // 'this.#x': a private name. It is stored under the mangled key '__#<body>#x' (see
 // ClassPrivate),
 // which is what keeps it out of js_keys, so out of for-in and object spread.
 PrivSuffix  = "#" Id <~~ push({kind:"member", name: "#" + idName(up.in), key: privRefConst(idName(up.in))}) ~~> ;
-IndexSuffix <~~ push({kind:"member", txt: cpTxt(up.in, up.pos), key: pop()}) ~~>
+IndexSuffix <~~ push({kind:"member", txt: cpTxt(up.in, up.pos), key: keyEscT(pop())}) ~~>
             = "[" Expression "]" ;
 // The three optional forms carry the same payload as their plain counterparts plus the
 // 'opt' kind, which is what makes foldCallMember emit the nullish guard in front of them.
 OptChainSuffix = OptCallSuffix | OptIndexSuffix | OptPrivateSuffix | OptDotSuffix ;
 OptCallSuffix <~~ push({kind:"optcall", args: takeAll()}) ~~>
             = "?." "(" [ Arg { "," Arg } [ "," ] ] ")" ;
-OptIndexSuffix <~~ push({kind:"optmember", txt: cpTxt(up.in, up.pos), key: pop()}) ~~>
+OptIndexSuffix <~~ push({kind:"optmember", txt: cpTxt(up.in, up.pos), key: keyEscT(pop())}) ~~>
             = "?." "[" Expression "]" ;
-OptDotSuffix = "?." Id <~~ push({kind:"optmember", name: idName(up.in), key: makeConst(idName(up.in))}) ~~> ;
+OptDotSuffix = "?." Id <~~ push({kind:"optmember", name: idName(up.in), key: makeConst(jsKeyEsc(idName(up.in)))}) ~~> ;
 // 'this?.#foo' - the optional-chaining form of PrivSuffix. It must use the SAME mangled
 // key privRefConst builds ('__#<body>#x'), not a raw '#x': the field is stored under the mangled
 // name, and a key that only carries the marker reads a slot that was never written.
@@ -924,8 +924,8 @@ SuperProp   <~~ push(makeSuperProp(pop())) ~~>
 // assignment and destructuring-target forms can pick it out of takeAll().
 SuperKey    = SuperKeyDot | SuperKeyIdx ;
 SuperKeyDot <~~ push({skey: pop()}) ~~>
-            = "." Id <~~ push(makeConst(idName(up.in))) ~~> ;
-SuperKeyIdx <~~ push({skey: pop()}) ~~>
+            = "." Id <~~ push(makeConst(jsKeyEsc(idName(up.in)))) ~~> ;
+SuperKeyIdx <~~ push({skey: keyEscT(pop())}) ~~>
             = "[" Expression "]" ;
 
 // 'new.target': the constructor the running call was made with, or undefined for an
@@ -2909,7 +2909,8 @@ NotFuncHead = :script(~~
     function makeProp(valT, key, txt) {
         // NamedEvaluation, the property form: `{ o: (a,b)=>a }` names the arrow "o".
         if (typeof key == "string") { fnAnonName(key, ":", txt) }
-        return {kt: (typeof key == "string") ? makeConst(key) : key, t: valT}
+        if (typeof key == "string") { return {kt: makeConst(jsKeyEsc(key)), kesc: true, t: valT} }
+        return {kt: key, t: valT}
     }
     function makeObject(props) {
         return function(b) {
@@ -2935,7 +2936,8 @@ NotFuncHead = :script(~~
                 }
                 var vr = props[i].t(b)
                 b = vr.b
-                callExt(b, memSetExt(), [obj, kr.v, vr.v])
+                var kv = (props[i].kesc === true) ? kr.v : callExt(b, "js_jskeyesc", [kr.v])
+                callExt(b, memSetExt(), [obj, kv, vr.v])
             }
             return {b: b, v: obj}
         }
@@ -4332,8 +4334,8 @@ NotFuncHead = :script(~~
                 b = kr.b
                 keyV = callExt(b, "js_jspropkey", [kr.v])
             } else {
-                keyV = emitStr(b, f.dkey)
-                taken.push(f.dkey)
+                keyV = emitStr(b, jsKeyEsc(f.dkey))
+                taken.push(jsKeyEsc(f.dkey))
             }
             b = bindPattern(b, f.pat, callExt(b, memGetExt(), [valueH, keyV]), declExt)
         }
@@ -4371,7 +4373,7 @@ NotFuncHead = :script(~~
         var restV = callExt(b, "js_obj_new", [])
         var saved = curScopeV
         curScopeV = callExt(b, "js_scope_new", [saved])
-        var keysV = callExt(b, "js_jskeys", [valueH])
+        var keysV = callExt(b, "js_jsspreadkeys", [valueH])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0ork"), keysV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0orsrc"), valueH])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0ori"), callExt(b, "js_num_i", [handle(0)])])
@@ -4714,7 +4716,7 @@ NotFuncHead = :script(~~
             var kr = m.nameT(b)
             return {b: kr.b, v: callExt(kr.b, "js_jspropkey", [kr.v])}
         }
-        return {b: b, v: emitStr(b, m.name)}
+        return {b: b, v: emitStr(b, jsKeyEsc(m.name))}
     }
     // The member's own name for `f.name` / `f.length` - "" when the key is COMPUTED and
     // so is only known at run time.
@@ -4887,7 +4889,7 @@ NotFuncHead = :script(~~
         var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
         if (inits.props != undefined && inits.props != null) {
             for (var pd = 0; pd < inits.props.length; pd++) {
-                callExt(b, memSetExt(), [thisV, emitStr(b, inits.props[pd]), hUndef])
+                callExt(b, memSetExt(), [thisV, emitStr(b, jsKeyEsc(inits.props[pd])), hUndef])
             }
         }
         if (inits.fields != undefined && inits.fields != null) {
@@ -4898,12 +4900,12 @@ NotFuncHead = :script(~~
                     b = r.b
                     fv = r.v
                 }
-                callExt(b, memSetExt(), [thisV, emitStr(b, inits.fields[k].name), fv])
+                callExt(b, memSetExt(), [thisV, emitStr(b, jsKeyEsc(inits.fields[k].name)), fv])
             }
         }
         if (inits.props != undefined && inits.props != null) {
             for (var pi = 0; pi < inits.props.length; pi++) {
-                callExt(b, memSetExt(), [thisV, emitStr(b, inits.props[pi]),
+                callExt(b, memSetExt(), [thisV, emitStr(b, jsKeyEsc(inits.props[pi])),
                                       callExt(b, "js_scope_get", [curScopeV, emitStr(b, inits.props[pi])])])
             }
         }
@@ -5157,7 +5159,7 @@ NotFuncHead = :script(~~
             var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
             var argsV = callExt(b, "js_arr_new", [])
             b = pushArgs(b, argsV, argThunks)
-            var scV = callExt(jsThisSet(b, thisV), "js_supercall", [supV, thisV, emitStr(b, name), argsV])
+            var scV = callExt(jsThisSet(b, thisV), "js_supercall", [supV, thisV, emitStr(b, jsKeyEsc(name)), argsV])
             // See the twin of this comment in js-to-llvm-ir.abnf.
             var scOkB = curF.NewBlock("")
             var scBadB = curF.NewBlock("")
@@ -5513,6 +5515,19 @@ NotFuncHead = :script(~~
         if (ref.tdz != undefined && hoistRefAll[ref.tdz].chk) { tdzChk(b, callExt(b, nsGetExt(ref.name), [curScopeV, nmV]), nmV) }
     }
     // See the twin of this comment in js-to-llvm-ir.abnf.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
+    function jsKeyEsc(k) {
+        if (k.length == 0 || c.curFile() == "js-builtins.js") { return k }
+        var k0 = k.charCodeAt(0)
+        if (k0 == 1 || (k0 == 95 && k.length >= 2 && k.charCodeAt(1) == 95 && !(k.length >= 3 && k.charCodeAt(2) == 35))) { return String.fromCharCode(1) + k }
+        return k
+    }
+    function keyEscT(t) {
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: callExt(r.b, "js_jskeyesc", [r.v])}
+        }
+    }
     var normWant = false
     function noteMember(name) { if (name == "normalize") { normWant = true } }
     // See the twin of this comment in js-to-llvm-ir.abnf.

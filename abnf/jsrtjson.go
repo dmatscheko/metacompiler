@@ -249,8 +249,14 @@ func (rt *jsrt) jsonObj(st *jsonState, o *jsObject) string {
 	}
 	parts := []string{}
 	for _, k := range keys {
-		if s, ok := rt.jsonSer(st, o, k, rt.jsvGetKey(o, k)); ok {
-			parts = append(parts, jsonQuote(k)+colon+s)
+		// The own keys are stored escaped (jsvKeyEsc), a replacer's list is a
+		// program's own.
+		sk, uk := k, jsvKeyUnesc(k)
+		if st.allow != nil {
+			sk, uk = jsvKeyEsc(k), k
+		}
+		if s, ok := rt.jsonSer(st, o, uk, rt.jsvGetKey(o, sk)); ok {
+			parts = append(parts, jsonQuote(uk)+colon+s)
 		}
 	}
 	out := jsonWrap(st, parts, "{", "}", stepback)
@@ -538,7 +544,7 @@ func (p *jsonParser) object() interface{} {
 			p.badAt("Expected ':' after property name in JSON")
 		}
 		p.i++
-		o.set(k, p.value())
+		o.set(jsvKeyEsc(k), p.value())
 		p.ws()
 		if !p.at('}') && !p.at(',') {
 			p.badAt("Expected ',' or '}' after property value in JSON")
@@ -561,7 +567,7 @@ func (rt *jsrt) jsonRevive(holder interface{}, key string, val interface{}, revi
 	case *jsObject:
 		if jsonIsObj(x) {
 			for _, k := range jsvOwnKeys(x) {
-				nv := rt.jsonRevive(x, k, rt.jsvGetKey(x, k), reviver)
+				nv := rt.jsonRevive(x, jsvKeyUnesc(k), rt.jsvGetKey(x, k), reviver)
 				if _, isU := nv.(jsUndefT); isU {
 					delete(x.props, k)
 					for i, kk := range x.keys {

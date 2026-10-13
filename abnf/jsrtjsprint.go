@@ -203,9 +203,9 @@ func jsvIsProtoName(name string) bool {
 func (rt *jsrt) jsvProtoApply(recv interface{}, name string, args []interface{}) interface{} {
 	switch name {
 	case "hasOwnProperty":
-		return rt.jsvHasOwn(recv, rt.toString(argAt(args, 0)))
+		return rt.jsvHasOwn(recv, jsvKeyEsc(rt.toString(argAt(args, 0))))
 	case "propertyIsEnumerable":
-		return jsvPropEnum(recv, rt.toString(argAt(args, 0)))
+		return jsvPropEnum(recv, jsvKeyEsc(rt.toString(argAt(args, 0))))
 	case "toString":
 		return rt.jsvProtoTag(recv)
 	}
@@ -1217,6 +1217,47 @@ func jsvHidesMember(target interface{}, name string) bool {
 	return false
 }
 
+// A program's own property key that starts with "__" would be one of the value
+// model's hidden slots, so it is stored behind a leading U+0001, as is one that
+// itself starts with U+0001; a private name's and a symbol's "__#..." key is the
+// engine's own and is left alone. The emitters escape a member name at compile time and pass a
+// computed key through js_jskeyesc (or js_jspropkey), so the member externs see
+// stored keys; js_jshas and hasOwnProperty escape the key a program hands them,
+// and js_jskeys, Object.keys / entries / getOwnPropertyNames and JSON unescape what
+// they hand back. Twins: jsKeyEsc in both *-interpreter.abnf, js_jskeyesc in
+// languages/lib/js-rt.metajs.
+const jsvKeyMark = "\x01"
+
+func jsvKeyNeedsEsc(k string) bool {
+	if len(k) == 0 {
+		return false
+	}
+	return k[0] == 1 || (len(k) >= 2 && k[0] == '_' && k[1] == '_' && !(len(k) >= 3 && k[2] == '#'))
+}
+func jsvKeyEsc(k string) string {
+	if jsvKeyNeedsEsc(k) {
+		return jsvKeyMark + k
+	}
+	return k
+}
+func jsvKeyUnesc(k string) string {
+	if len(k) > 0 && k[0] == 1 {
+		return k[1:]
+	}
+	return k
+}
+
+// jsvEscArg is the argument slice with a[i], a program's property key, escaped; the
+// slice itself when the key needs nothing.
+func (rt *jsrt) jsvEscArg(a []uint64, i int) []uint64 {
+	if k, ok := rt.unwrap(a[i]).(string); ok && jsvKeyNeedsEsc(k) {
+		b := append([]uint64(nil), a...)
+		b[i] = rt.wrapStr(jsvKeyMark + k)
+		return b
+	}
+	return a
+}
+
 // jsvIsArgs: the arguments object, an array carrying kind 19 (js_jsargs below).
 // Twins: jsIsArgs in both *-interpreter.abnf, jvIsArgs in languages/lib/js-rt.metajs.
 func jsvIsArgs(v interface{}) bool {
@@ -1586,7 +1627,7 @@ func (rt *jsrt) jsvMethod(target interface{}, name string, args []interface{}) (
 		case "keys":
 			out := &jsArray{}
 			for _, k := range jsvOwnKeys(argAt(args, 0)) {
-				out.elems = append(out.elems, k)
+				out.elems = append(out.elems, jsvKeyUnesc(k))
 			}
 			return out, true
 		case "values":
@@ -1600,13 +1641,13 @@ func (rt *jsrt) jsvMethod(target interface{}, name string, args []interface{}) (
 			out := &jsArray{}
 			src := argAt(args, 0)
 			for _, k := range jsvOwnKeys(src) {
-				out.elems = append(out.elems, &jsArray{elems: []interface{}{k, rt.jsvGetKey(src, k)}})
+				out.elems = append(out.elems, &jsArray{elems: []interface{}{jsvKeyUnesc(k), rt.jsvGetKey(src, k)}})
 			}
 			return out, true
 		case "getOwnPropertyNames":
 			out := &jsArray{}
 			for _, k := range jsvGopnKeys(argAt(args, 0)) {
-				out.elems = append(out.elems, k)
+				out.elems = append(out.elems, jsvKeyUnesc(k))
 			}
 			return out, true
 		case "assign":
@@ -1634,7 +1675,7 @@ func (rt *jsrt) jsvMethod(target interface{}, name string, args []interface{}) (
 					if !isArr || len(pair.elems) == 0 {
 						continue
 					}
-					out.set(rt.jsvString(pair.elems[0]), argAt(pair.elems, 1))
+					out.set(jsvKeyEsc(rt.jsvString(pair.elems[0])), argAt(pair.elems, 1))
 				}
 			}
 			return out, true
@@ -2446,10 +2487,17 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		}
 		return rt.wrapStr(rt.jsvString(u(a[0])))
 	}
-	// The keys object spread copies: the own enumerable string keys, then the own
-	// symbol keys. Twin of js_jsspreadkeys in languages/lib/js-rt.metajs.
+	// The keys object spread and an object rest pattern copy: the own enumerable
+	// string keys, then the own symbol keys. Twin of js_jsspreadkeys in
+	// languages/lib/js-rt.metajs.
 	m["js_jsspreadkeys"] = func(a []uint64) uint64 {
 		out := u(m["js_jskeys"]([]uint64{a[0]})).(*jsArray)
+		// The copy reads and writes each key, so it takes them as they are stored.
+		for i, k := range out.elems {
+			if ks, isStr := k.(string); isStr {
+				out.elems[i] = jsvKeyEsc(ks)
+			}
+		}
 		for _, k := range jsvSymKeys(u(a[0])) {
 			out.elems = append(out.elems, k)
 		}
@@ -3219,17 +3267,18 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		return m["js_jshas"](a)
 	}
 	m["js_jshas"] = func(a []uint64) uint64 {
+		a = rt.jsvEscArg(a, 1)
 		recv, isObj := u(a[0]).(*jsObject)
 		name := rt.toString(u(a[1]))
 		// Every object inherits Object.prototype's names (`"toString" in {}`), an
 		// Array its methods and length, a function or a class call / apply / bind /
 		// name / length.
 		if isObj || jsvIsFnLike(u(a[0])) {
-			if jsvObjProtoName(name) {
+			if jsvObjProtoName(jsvKeyUnesc(name)) {
 				return w(true)
 			}
 		}
-		if _, isArr := u(a[0]).(*jsArray); isArr && (name == "length" || jsvArrayMethods[name] || jsvObjProtoName(name)) {
+		if _, isArr := u(a[0]).(*jsArray); isArr && (name == "length" || jsvArrayMethods[name] || jsvObjProtoName(jsvKeyUnesc(name))) {
 			return w(true)
 		}
 		if (jsvIsFnLike(u(a[0])) || (isObj && isClassDesc(recv))) &&
@@ -3417,7 +3466,19 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	// as strings ("0","1"). A string enumerates the same way, and
 	// null/undefined/a number/a boolean enumerate NOTHING rather than raising.
 	baseKeys := m["js_keys"]
+	var jsKeysAll func(a []uint64) uint64
 	m["js_jskeys"] = func(a []uint64) uint64 {
+		r := jsKeysAll(a)
+		if arr, ok := u(r).(*jsArray); ok {
+			for i, k := range arr.elems {
+				if ks, isStr := k.(string); isStr && len(ks) > 0 && ks[0] == 1 {
+					arr.elems[i] = ks[1:]
+				}
+			}
+		}
+		return r
+	}
+	jsKeysAll = func(a []uint64) uint64 {
 		switch v := u(a[0]).(type) {
 		case *jsObject:
 			if isClassDesc(v) {
@@ -3777,12 +3838,15 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	keyed("js_jshas")
 	keyed("js_jsdel")
 	keyed("js_jsmcall")
-	// The class and destructuring computed keys, which reach no member extern.
+	// A computed member key, escaped (jsvKeyEsc) before it reaches a member extern.
+	m["js_jskeyesc"] = func(a []uint64) uint64 { return rt.jsvEscArg(a, 0)[0] }
+	// A class member's or an accessor's computed key, which reaches no member
+	// extern: a symbol's key, or the escaped string (jsvKeyEsc).
 	m["js_jspropkey"] = func(a []uint64) uint64 {
 		if k, isSym := symKey(u(a[0])); isSym {
 			return rt.wrapStr(k)
 		}
-		return a[0]
+		return rt.jsvEscArg(a, 0)[0]
 	}
 	// Symbol.for / Symbol.keyFor, and a symbol's toString / valueOf.
 	symCall := m["js_jsmcall"]

@@ -567,12 +567,42 @@ function js_jswithtypeof(scope, name) {
     return "undefined"
 }
 
-// The class and destructuring computed keys, which reach no member extern.
+// A program's own property key that starts with "__" is stored behind a leading
+// U+0001 (as is one that itself starts with U+0001), so it cannot reach the value
+// model's hidden slots; a private name's and a symbol's "__#..." key is the engine's
+// own and is left alone. The emitter escapes a member name at compile time and a computed key with
+// js_jskeyesc / js_jspropkey, so the member externs see stored keys; js_jshas and
+// hasOwnProperty escape the key a program hands them, and js_jskeys,
+// Object.keys / entries / getOwnPropertyNames and JSON unescape what they hand back.
+// Twins: jsvKeyEsc in abnf/jsrtjsprint.go, jsKeyEsc in both *-interpreter.abnf.
+var jvKeyMark = String.fromCharCode(1)
+// Ordered string comparisons decide it, which cost less than reading characters: a
+// key from "_`" up (every lower-case name) needs nothing, one in ["__", "_`") starts
+// with "__", and one in [U+0001, U+0002) with U+0001.
+var jvKeyMark2 = String.fromCharCode(2)
+function js_jskeyesc(k) {
+    if (typeof k != "string") { return k }
+    if (k >= "_`") { return k }
+    if (k >= "__") {
+        if (k >= "__#") { if (k < "__$") { return k } }
+        return jvKeyMark + k
+    }
+    if (k >= jvKeyMark2) { return k }
+    if (k >= jvKeyMark) { return jvKeyMark + k }
+    return k
+}
+function jvKeyUnesc(k) {
+    if (k.length > 0) { if (k.charCodeAt(0) == 1) { return k.substring(1, k.length) } }
+    return k
+}
+
+// A class member's or an accessor's computed key, which reaches no member extern: a
+// symbol's key, or the escaped string.
 function js_jspropkey(k) {
     if (jvSymN > 0) {
         if (jvIsSym(k)) { return k["__symkey"] }
     }
-    return k
+    return js_jskeyesc(k)
 }
 // Symbol.for / Symbol.keyFor and a symbol's toString / valueOf, or jvMiss.
 function jvSymCall(recv, name, args) {
@@ -1085,6 +1115,17 @@ function js_jsstatics(cls) {
 // copy the methods and `for (k in C)` enumerate them. Twin: m["js_jskeys"] in
 // abnf/jsrtjsprint.go.
 function js_jskeys(o) {
+    var ks = jvStoredKeys(o)
+    var out = []
+    var i = 0
+    while (i < ks.length) {
+        out.push(jvKeyUnesc(ks[i]))
+        i = i + 1
+    }
+    return out
+}
+// The own enumerable string keys as they are stored (escaped).
+function jvStoredKeys(o) {
     if (jvIsClassDesc(o)) { return jvStaticEnumKeys(o) }
     // ...and it has to be TOTAL, which keysOf is not: `for (i in [7,8])` and
     // `{...[7,8]}` both arrive here with an ARRAY, where node answers the INDICES as
@@ -1144,7 +1185,7 @@ function jvFnOwn(f, kk) {
 // Object.prototype.hasOwnProperty(k) for any receiver. See jsvHasOwn in
 // abnf/jsrtjsprint.go, its twin; jsHasOwn in both *-interpreter.abnf is the third.
 function jvHasOwn(self, k) {
-    var kk = jvStr(k)
+    var kk = js_jskeyesc(jvStr(k))
     if (jvIsCallable(self)) { return jvFnOwn(self, kk) }
     if (Array.isArray(self) || typeof self == "string") {
         if (kk === "length") { return true }
@@ -2068,14 +2109,17 @@ function js_jsin(o, key) {
 // Twin: m["js_jshas"] in abnf/jsrtjsprint.go.
 function js_jshas(o, key) {
     if (jvSymN > 0) {
-        if (typeof key == "object") { if (jvIsSym(key)) { return js_jshas(o, key["__symkey"]) } }
+        if (typeof key == "object") { if (jvIsSym(key)) { return jvHas(o, key["__symkey"]) } }
     }
+    return jvHas(o, js_jskeyesc(key))
+}
+function jvHas(o, key) {
     // Every object inherits Object.prototype's names (`"toString" in {}`), an Array its
     // methods and length, a function or a class call / apply / bind / name / length. Twin of
     // js_jshas in abnf/jsrtjsprint.go.
     if (typeof key == "string") {
         if (jvIsObj(o) || Array.isArray(o) || jvIsCallable(o)) {
-            if (jvObjProtoHas(key)) { return true }
+            if (jvObjProtoHas(jvKeyUnesc(key))) { return true }
         }
         if (Array.isArray(o)) {
             if (key == "length" || jvArrM[key] === 1) { return true }
@@ -2757,9 +2801,10 @@ function js_jstplstr(v) {
     return jvStr(v)
 }
 // The keys object spread copies: the own enumerable string keys, then the own symbol
-// keys. Twin of js_jsspreadkeys in abnf/jsrtjsprint.go.
+// keys, as they are stored: the copy reads and writes each one. Twin of
+// js_jsspreadkeys in abnf/jsrtjsprint.go.
 function js_jsspreadkeys(o) {
-    var ks = js_jskeys(o)
+    var ks = jvStoredKeys(o)
     if (jvSymN == 0) { return ks }
     var sk = jvSymKeys(o)
     if (sk.length == 0) { return ks }
@@ -2927,7 +2972,7 @@ function jvProtoShim(o, name) {
 // propertyIsEnumerable: an own ENUMERABLE key, which is exactly Object.keys - an
 // array's `length`, an Error's `message` and a function's `name` are own and not
 // enumerable.
-function jvPropEnum(self, k) { return jvInNames(jvOwnKeys(self), jvStr(k)) }
+function jvPropEnum(self, k) { return jvInNames(jvOwnKeys(self), js_jskeyesc(jvStr(k))) }
 function jvInNames(names, k) {
     var i = 0
     while (i < names.length) {
@@ -3999,7 +4044,7 @@ function jvObjectGlobalMethod(name, args) {
         var ks = jvOwnKeys(src)
         var i = 0
         while (i < ks.length) {
-            out.push(ks[i])
+            out.push(jvKeyUnesc(ks[i]))
             i = i + 1
         }
         return out
@@ -4020,7 +4065,7 @@ function jvObjectGlobalMethod(name, args) {
         var ei = 0
         while (ei < ek.length) {
             var pair = []
-            pair.push(ek[ei])
+            pair.push(jvKeyUnesc(ek[ei]))
             pair.push(js_jsmget(src, ek[ei]))
             eo.push(pair)
             ei = ei + 1
@@ -4057,7 +4102,7 @@ function jvObjectGlobalMethod(name, args) {
             while (fi < src.length) {
                 var e = src[fi]
                 if (Array.isArray(e)) {
-                    if (e.length > 0) { js_jsmset(fo, jvStr(e[0]), jvArg(e, 1)) }
+                    if (e.length > 0) { js_jsmset(fo, js_jskeyesc(jvStr(e[0])), jvArg(e, 1)) }
                 }
                 fi = fi + 1
             }
@@ -5351,13 +5396,13 @@ function js_jsjson() {
     return o
 }
 function jsonHKeys(o) { return js_jskeys(o) }
-function jsonHGet(o, k) { return js_jsmget(o, k) }
+function jsonHGet(o, k) { return js_jsmget(o, js_jskeyesc(k)) }
 function jsonHPut(o, k, v) {
-    o[k] = v
+    o[js_jskeyesc(k)] = v
     return undefined
 }
 function jsonHDel(o, k) {
-    delKey(o, k)
+    delKey(o, js_jskeyesc(k))
     return undefined
 }
 function jsonHNew() { return {} }

@@ -555,7 +555,7 @@ IncDec      <~~ push(makeIncDec(takeAll())) ~~>
 
 // super(args) delegates to the parent constructor; super.m(args) invokes the parent's
 // method on 'this'. popName pulls the optional '.m' out, leaving the argument thunks.
-SuperCall   <~~ push(makeSuperCall(popName(), takeAll())) ~~>
+SuperCall   <~~ push(makeSuperCall(jsKeyEsc(popName()), takeAll())) ~~>
             = KwSuper [ "." Id <~~ push({mname: idName(up.in)}) ~~> ] "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 
 // A primary expression followed by any mix of calls and member accesses: a.b[i](x).c().
@@ -613,7 +613,7 @@ TaggedTemplate <~~ push({kind: "tagcall", parts: takeAll()}) ~~>
             = "`" :whitespace() { TplExpr | TplChars | TplDollar } "`" :whitespace(Whitespace) ;
 CallSuffix  <~~ push({kind:"call", args: takeAll()}) ~~>
             = "(" [ Arg { "," Arg } [ "," ] ] ")" ;
-DotSuffix   = PrivateDotSuffix | "." Id <~~ push({kind:"member", name: idName(up.in), key: makeConst(idName(up.in))}) ~~> ;
+DotSuffix   = PrivateDotSuffix | "." Id <~~ push({kind:"member", name: idName(up.in), key: makeConst(jsKeyEsc(idName(up.in)))}) ~~> ;
 // 'this.#secret' / 'this.#bump()': a private member is an ordinary property whose name
 // carries the '#', so the access only has to keep the marker in the key. Tried first,
 // because the plain form's Id cannot start at a '#'.
@@ -628,7 +628,7 @@ OptCallSuffix <~~ push({kind:"call", opt: true, args: takeAll()}) ~~>
             = "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 OptIndexSuffix <~~ push({kind:"member", opt: true, txt: cpTxt(up.in, up.pos), key: jsPropKeyT(pop())}) ~~>
             = "[" Expression "]" ;
-OptDotSuffix = Id <~~ push({kind:"member", opt: true, name: idName(up.in), key: makeConst(idName(up.in))}) ~~> ;
+OptDotSuffix = Id <~~ push({kind:"member", opt: true, name: idName(up.in), key: makeConst(jsKeyEsc(idName(up.in)))}) ~~> ;
 
 // A call/array/new argument. A plain argument pushes its value thunk directly (the
 // common case, and what makes the fast path a plain function call); a SPREAD pushes a
@@ -680,8 +680,8 @@ SuperProp   <~~ push(makeSuperProp(pop())) ~~>
 // assignment and destructuring-target forms can pick it out of takeAll().
 SuperKey    = SuperKeyDot | SuperKeyIdx ;
 SuperKeyDot <~~ push({skey: pop()}) ~~>
-            = "." Id <~~ push(makeConst(idName(up.in))) ~~> ;
-SuperKeyIdx <~~ push({skey: pop()}) ~~>
+            = "." Id <~~ push(makeConst(jsKeyEsc(idName(up.in)))) ~~> ;
+SuperKeyIdx <~~ push({skey: jsPropKeyT(pop())}) ~~>
             = "[" Expression "]" ;
 
 // 'new.target' is the constructor a call was reached through, or undefined for a plain
@@ -3329,9 +3329,37 @@ NotFuncHead = :script(~~
     }
     function jsIsSym(v) { return v !== null && v !== undefined && typeof v == "object" && hasOwn(v, "__symkey") }
     // ToPropertyKey's symbol case: a computed key that is a symbol becomes its key.
-    function jsPropKey(k) { return jsIsSym(k) ? k.__symkey : k }
+    function jsPropKey(k) { return jsIsSym(k) ? k.__symkey : jsKeyEsc(k) }
     function jsPropKeyT(t) { return function() { return jsPropKey(t()) } }
-    function jsKeyStr(k) { return jsIsSym(k) ? k.__symkey : "" + k }
+    function jsKeyStr(k) { return jsIsSym(k) ? k.__symkey : jsKeyEsc("" + k) }
+    // A program's own key that starts with "__" would be one of the value model's
+    // hidden slots (__class, __keys, ...: manual 7.9), so it is stored ESCAPED behind
+    // a leading U+0001, as is a key that itself starts with U+0001. A private name's
+    // and a symbol's "__#..." key is the engine's own and is left alone, which makes a
+    // program's string key of that shape one too. A key is escaped where a program's
+    // key enters (a member name, a literal or pattern key, ToPropertyKey, JSON.parse,
+    // fromEntries, hasOwnProperty) and unescaped where one leaves (Object.keys,
+    // entries, getOwnPropertyNames, for-in, JSON). Twins: jsvKeyEsc in
+    // abnf/jsrtjsprint.go, js_jskeyesc in languages/lib/js-rt.metajs.
+    var jsKeyMark = String.fromCharCode(1)
+    // lib/js-builtins.js is the engine's own code, whose "__" names are hidden slots
+    // (jsbLoad walks it with jsKeyRaw set).
+    var jsKeyRaw = false
+    function jsKeyEsc(k) {
+        if (jsKeyRaw || typeof k != "string" || k.length == 0) { return k }
+        var c = k.charCodeAt(0)
+        if (c == 1 || (c == 95 && k.length >= 2 && k.charCodeAt(1) == 95 && !(k.length >= 3 && k.charCodeAt(2) == 35))) { return jsKeyMark + k }
+        return k
+    }
+    function jsKeyUnesc(k) {
+        if (typeof k == "string" && k.length > 0 && k.charCodeAt(0) == 1) { return k.substring(1) }
+        return k
+    }
+    function jsKeysUnesc(ks) {
+        var out = []
+        for (var i = 0; i < ks.length; i++) { out.push(jsKeyUnesc(ks[i])) }
+        return out
+    }
     function jsSymStr(s) { return "Symbol(" + ((s.__symdesc === undefined) ? "" : s.__symdesc) + ")" }
     function jsSymWellKnown(n) {
         if (!hasOwn(jsSymWK, n)) { jsSymWK[n] = jsSymMake("Symbol." + n, "__#@" + n) }
@@ -3787,7 +3815,7 @@ NotFuncHead = :script(~~
     // propertyIsEnumerable: an own ENUMERABLE key, which is exactly Object.keys - an
     // array's `length`, an Error's `message` and a function's `name` are own and not
     // enumerable.
-    function jsPropEnum(self, k) { return jsOwnKeys(self).indexOf("" + k) >= 0 }
+    function jsPropEnum(self, k) { return jsOwnKeys(self).indexOf(jsKeyEsc("" + k)) >= 0 }
     // The own property names of the Object and Array globals, in node's order. None
     // of them is enumerable.
     var jsObjectOwnNames = ["length", "name", "prototype", "assign", "getOwnPropertyDescriptor",
@@ -3815,7 +3843,7 @@ NotFuncHead = :script(~~
     // Object.prototype.hasOwnProperty(k) for any receiver. See jsvHasOwn in
     // abnf/jsrtjsprint.go, its twin; jvHasOwn in languages/lib/js-rt.metajs is the third.
     function jsHasOwn(self, k) {
-        var kk = "" + k
+        var kk = jsKeyEsc("" + k)
         if (typeof self == "function") { return fnOwn(self, kk) }
         if (typeof self == "string" || Array.isArray(self)) {
             if (kk == "length") { return true }
@@ -4393,12 +4421,12 @@ NotFuncHead = :script(~~
     }
     function jsObjectStatic(name, args) {
         var src = args[0]
-        if (name == "keys") { return {v: jsOwnKeys(src)} }
+        if (name == "keys") { return {v: jsKeysUnesc(jsOwnKeys(src))} }
         // getOwnPropertyNames is Object.keys plus the NON-ENUMERABLE own names, and a
         // function has two of them. It is the only caller here that must differ: keys,
         // values, entries and assign all see the enumerable half, and for-in reads the
         // same list, so node's empty `for (k in f)` is preserved.
-        if (name == "getOwnPropertyNames") { return {v: jsGopnKeys(src)} }
+        if (name == "getOwnPropertyNames") { return {v: jsKeysUnesc(jsGopnKeys(src))} }
         if (name == "values") {
             var vs = []
             var kv = jsOwnKeys(src)
@@ -4408,7 +4436,7 @@ NotFuncHead = :script(~~
         if (name == "entries") {
             var es = []
             var ke = jsOwnKeys(src)
-            for (var j = 0; j < ke.length; j++) { es.push([ke[j], getMember(src, ke[j])]) }
+            for (var j = 0; j < ke.length; j++) { es.push([jsKeyUnesc(ke[j]), getMember(src, ke[j])]) }
             return {v: es}
         }
         if (name == "assign") {
@@ -4428,7 +4456,7 @@ NotFuncHead = :script(~~
                 for (var e = 0; e < src.length; e++) {
                     var pair = src[e]
                     if (!Array.isArray(pair) || pair.length == 0) { continue }
-                    setMember(o, jsStr(pair[0]), pair[1])
+                    setMember(o, jsKeyStr(pair[0]), pair[1])
                 }
             }
             return {v: o}
@@ -4903,14 +4931,16 @@ NotFuncHead = :script(~~
         "parse": function(t, r) { return jsonParse(t, r) },
         "__strtag": "JSON"
     }
-    function jsonHKeys(o) { return jsOwnKeys(o) }
-    function jsonHGet(o, k) { return getMember(o, k) }
-    function jsonHPut(o, k, v) {
+    function jsonHKeys(o) { return jsKeysUnesc(jsOwnKeys(o)) }
+    function jsonHGet(o, k) { return getMember(o, jsKeyEsc(k)) }
+    function jsonHPut(o, k0, v) {
+        var k = jsKeyEsc(k0)
         scopePut(o, k, v)
         trackKey(o, k)
         return undefined
     }
-    function jsonHDel(o, k) {
+    function jsonHDel(o, k0) {
+        var k = jsKeyEsc(k0)
         scopePut(o, k, undefined)
         var ks = o["__keys"]
         var keep = []
@@ -5200,7 +5230,7 @@ NotFuncHead = :script(~~
         if (isStaticSide(o, k)) { return staticSideRead(o, k) }
         // Catches null and undefined. node's TypeError, catchable, with node's own
         // wording; the compiler half reaches it through js_rt_missmem.
-        if (o == undefined) { biRaise("TypeError: Cannot read properties of " + jsStr(o) + " (reading '" + jsStr(k) + "')") }
+        if (o == undefined) { biRaise("TypeError: Cannot read properties of " + jsStr(o) + " (reading '" + jsStr(jsKeyUnesc(k)) + "')") }
         // then/catch/finally READ AS A VALUE. Promise method dispatch is table-based
         // (jsBuiltin -> jpMethod), so a promise has no own slot of that name. Same
         // arm in abnf/jsrtjsprint.go's js_jsmget and languages/lib/js-rt.metajs's.
@@ -7409,7 +7439,7 @@ NotFuncHead = :script(~~
         // length.
         // Twins: js_jshas in abnf/jsrtjsprint.go and languages/lib/js-rt.metajs.
         if (typeof k == "string") {
-            if (objProtoHas(k)) { return true }
+            if (objProtoHas(jsKeyUnesc(k))) { return true }
             if (Array.isArray(o) && (k == "length" || hasOwn(bvArr, k))) { return true }
             if ((typeof o == "function" || isClassDesc(o)) && (k == "call" || k == "apply" || k == "bind" || k == "name" || k == "length")) { return true }
         }
@@ -7566,7 +7596,7 @@ NotFuncHead = :script(~~
         var k = (typeof key == "string") ? key : jsStr(key())
         // NamedEvaluation, the property form: `{ o: (a,b)=>a }` names the arrow "o".
         fnAnonName("" + k, ":", txt)
-        return {k: k, t: valT}
+        return {k: jsKeyEsc(k), t: valT}
     }
     // Objects carry a hidden __keys array recording their own keys in insertion order.
     // The tag dialect has no for-in and no Object.keys, and the -frozen engine cannot
@@ -7634,7 +7664,7 @@ NotFuncHead = :script(~~
         var items = itemsNoStrict(itemsIn)
         var key = items[1]
         var fn = makeFunctionExpr(items[3], items[2], st, (typeof key == "string") ? (items[0].acc + " " + key) : "")
-        if (typeof key == "string") { return {acc: items[0].acc, k: key, fn: fn} }
+        if (typeof key == "string") { return {acc: items[0].acc, k: jsKeyEsc(key), fn: fn} }
         return {acc: items[0].acc, kt: key, fn: fn}
     }
     // items = [{isasync}?, {isgen}?, key, params, bodyThunk]. A shorthand method is an
@@ -7659,7 +7689,7 @@ NotFuncHead = :script(~~
         var mnm = (typeof key == "string") ? key : ""
         var fn = isGen ? makeGenerator(params, body, st, mnm) : makeFunctionExpr(body, params, st, mnm)
         if (isAsync) { fn = isGen ? makeAsyncGen(params, body, st, mnm) : makeAsyncFn(params, body, st, mnm) }
-        if (typeof key == "string") { return {k: key, t: fn} }
+        if (typeof key == "string") { return {k: jsKeyEsc(key), t: fn} }
         return {kt: key, t: fn}
     }
     // Records a newly assigned key on a tracked object (an object carrying __keys). Plain
@@ -7873,7 +7903,7 @@ NotFuncHead = :script(~~
                     // guard uses, so the two halves skip exactly the same keys.
                     if (!propIn(ks[i], obj)) { continue }
                     if (lexT) { scopes[scopes.length - 1] = {} }
-                    bindLoopTarget(target, ks[i])
+                    bindLoopTarget(target, jsKeyUnesc(ks[i]))
                     if (target.cnames != undefined) { jsConstMark(target.cnames) }
                     var r = bodyT()
                     var a = loopAction(r, label)
@@ -8521,14 +8551,14 @@ NotFuncHead = :script(~~
     }
     // items = [{dkey}|{dkeyT}, elemNode].
     function makeDField(items) {
-        return {key: items[0].dkey, keyT: items[0].dkeyT, pat: items[1]}
+        return {key: jsKeyEsc(items[0].dkey), keyT: items[0].dkeyT, pat: items[1]}
     }
     // '{p}' and '{p = 1}': the key and the bound name are the same word.
     function makeShorthandField(items) {
         var name = items[0].dkey
         var pat = {dtype: "id", name: name}
         if (items.length > 1) { scopePut(pat, "dflt", items[1]) }
-        return {key: name, keyT: null, pat: pat}
+        return {key: jsKeyEsc(name), keyT: null, pat: pat}
     }
     // items = [node] or [node, defaultThunk]. The default rides ON the node, so every
     // pattern position - leaf, nested array, nested object - can carry one.
@@ -9579,7 +9609,7 @@ NotFuncHead = :script(~~
     // A class member's literal key text, mangled when it is a private name.
     function memberNameKey(s) {
         if (s.length > 0 && s.charAt(0) == "#") { return privDeclare(s.substring(1)) }
-        return s
+        return jsKeyEsc(s)
     }
     // Is this one of the mangled private-name slots? They are '__' names, so every
     // enumeration skips them, but the class-side lookups (isStaticSide, the method walk
@@ -10416,7 +10446,9 @@ NotFuncHead = :script(~~
         var text = load("lib/js-builtins.js")
         var asg = c.parse(c.agrammar, text, null, "js-builtins.js")
         c.pushSource("js-builtins.js", text)
+        jsKeyRaw = true
         c.compile(asg)
+        jsKeyRaw = false
         c.popSource()
         var mod = popg()
         mod()
