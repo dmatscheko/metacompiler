@@ -64,7 +64,7 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-575 python: module `__name__`, builtin class methods with keywords, `slice`, bytes method gaps · P2 · PY · OPEN [V]
+### T-575 python: module `__name__`, builtin class methods with keywords, `slice`, bytes method gaps · P2 · PY · IN PROGRESS (PY worker, round 4) [V]
 `import math; print(math.__name__)` (also sys, re, typing, builtins) → AttributeError in all legs (python `math`).
 `dict.fromkeys("ab", value=1)` → interp `{'a': None, 'b': None}`, run/native use the keyword dict as the value; python
 TypeError "dict.fromkeys() takes no keyword arguments" (built-in class methods lose keywords in the compiled halves).
