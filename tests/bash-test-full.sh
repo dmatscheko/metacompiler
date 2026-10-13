@@ -2466,6 +2466,51 @@ s51() {
   check num4 "$a1|$a2|$a3" "p q  r|p q  r|62"
 }
 
+# ===== SECTION 52: let words and redirections, NUL bytes, loops inside loops =====
+# let's arguments are words: redirections stand among them, an unquoted expansion is
+# field-split into several arguments, every word is expanded before any is evaluated, and
+# the first error stops the command. A NUL byte that printf or echo -e makes is written
+# out, dropped by a command substitution, and ends a printf -v value and a $'...' string.
+# Every expected value is bash 5.3's.
+s52() {
+  local e='1 + 2' x y z w p q r s v
+  let x=1 2>/dev/null
+  check let1 "$? $x" "0 1"
+  let y=$e*2 z=7 2>/dev/null
+  check let2 "$? $y $z" "1 1 "
+  let w=4 >/dev/null p=$w+1 2>&1
+  check let3 "$? $w $p" "0 4 1"
+  let q=1 + r=2 2>/dev/null
+  check let4 "$? $q $r" "1 1 "
+  local f='s=3 v=0'
+  let $f
+  check let5 "$? $s $v" "1 3 0"
+  local u=
+  let $u 2>/dev/null
+  check let6 "$?" "1"
+  let $u s=9 || s=bad
+  check let7 "$s" "9"
+  local n1 n2 n3 n4 n5
+  printf -v n1 'e\0f'
+  printf -v n2 '[%3c]' ''
+  printf -v n3 '%b|' 'z\0z'
+  { n4=$(printf 'a\0b'; echo -e 'c\0d'); } 2>/dev/null
+  n5=$'g\0h'x$'\x00'y
+  check nul1 "$n1|$n2|$n3|$n4|$n5" "e|[  |z|abcd|gxy"
+  local i j t=""
+  for i in 1 2 3; do
+    j=0
+    while [ $j -lt 3 ]; do
+      for k in a b; do
+        [[ $k$j =~ ^b ]] && continue
+        t="$t$i$j$k"
+      done
+      j=$(( j + 1 ))
+    done
+  done
+  check lpl1 "$t $?" "10a11a12a20a21a22a30a31a32a 0"
+}
+
 s01   # SECTION-CALL 01
 s02   # SECTION-CALL 02
 s03   # SECTION-CALL 03
@@ -2517,5 +2562,6 @@ s48   # SECTION-CALL 48
 s49   # SECTION-CALL 49
 s50   # SECTION-CALL 50
 s51   # SECTION-CALL 51
+s52   # SECTION-CALL 52
 echo "full: $checks checks, $fails failures"
 exit $fails

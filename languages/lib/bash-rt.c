@@ -2158,8 +2158,13 @@ char *rt_pfq(char *s) {
  * Escapes: the FORMAT knows \a \b \e \E \f \n \r \t \v \\ \" \' \?, \NNN octal
  * (one to three digits, \0 included), \xHH, \uHHHH and \UHHHHHHHH, and keeps
  * anything else - \c included - as written. A %b operand knows the same, reads
- * octal as \0NNN or \NNN, and its \c ends ALL output. A NUL byte cannot be held
- * in a string here and is dropped (a command substitution drops it too).
+ * octal as \0NNN or \NNN, and its \c ends ALL output.
+ *
+ * A NUL byte is written to the output like any other, but a string here cannot
+ * hold one, so the text printf and echo -e build is ENCODED: byte 1 escapes the
+ * byte after it, "\x01" "0" for NUL and "\x01\x01" for a 1 byte itself. pf_vlen
+ * and pf_vcut count such a pair as the one byte it stands for; rt_pf_out writes
+ * the text decoded, rt_pf_value is the value printf -v stores (it ends at a NUL).
  * Twin of printfBuiltin in bash-interpreter.abnf. */
 int printf_rc;
 int pf_stop;      /* a %b operand's \c: no further output                 */
@@ -2167,11 +2172,17 @@ char *pf_e;       /* the text pf_escape appends to                         */
 int pf_ai;        /* the next operand                                      */
 int pf_have;      /* the operand pf_arg answered existed                   */
 
-/* One character as a string; 0 is dropped (see above). */
+/* One byte as encoded text (see above). */
 char *pf_chr(int c)
 {
     char *d;
-    if (c == 0) return empty;
+    if (c == 0 || c == 1) {
+        d = rt_bump(3);
+        d[0] = 1;
+        d[1] = (char)(c == 0 ? 48 : 1);
+        d[2] = 0;
+        return d;
+    }
     d = rt_bump(2);
     d[0] = (char)c;
     d[1] = 0;
@@ -2181,13 +2192,10 @@ char *pf_chr(int c)
 /* The UTF-8 encoding of a code point (\u / \U). */
 char *pf_utf8(long cp)
 {
-    char *d = rt_bump(5);
-    if (cp == 0) {
-        d[0] = 0;
-    } else if (cp < 128) {
-        d[0] = (char)cp;
-        d[1] = 0;
-    } else if (cp < 2048) {
+    char *d;
+    if (cp < 128) return pf_chr((int)cp);
+    d = rt_bump(5);
+    if (cp < 2048) {
         d[0] = (char)(192 + cp / 64);
         d[1] = (char)(128 + cp % 64);
         d[2] = 0;
@@ -2393,9 +2401,68 @@ long pf_num(char *a, int uns)
 
 /* Pad s to width w: spaces on the left, on the right (left), or zeros after the
  * first `keep` bytes (a sign or a 0x prefix). */
+/* The number of bytes encoded text stands for, and its first n of them. */
+int pf_vlen(char *s)
+{
+    int i = 0;
+    int n = 0;
+    while (s[i] != 0) {
+        if (s[i] == 1 && s[i + 1] != 0) i = i + 1;
+        i = i + 1;
+        n = n + 1;
+    }
+    return n;
+}
+
+char *pf_vcut(char *s, int n)
+{
+    int i = 0;
+    int k = 0;
+    while (s[i] != 0 && k < n) {
+        if (s[i] == 1 && s[i + 1] != 0) i = i + 1;
+        i = i + 1;
+        k = k + 1;
+    }
+    return rt_substr(s, 0, i);
+}
+
+/* Encoded text written out, and the value it is up to its first NUL. */
+int rt_pf_out(char *s)
+{
+    int i = 0;
+    while (s[i] != 0) {
+        if (s[i] == 1 && s[i + 1] != 0) {
+            i = i + 1;
+            rt_putc(s[i] == 48 ? 0 : 1);
+        } else {
+            rt_putc((int)(unsigned char)s[i]);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+char *rt_pf_value(char *s)
+{
+    char *d = rt_bump(rt_strlen(s) + 1);
+    int i = 0;
+    int o = 0;
+    while (s[i] != 0) {
+        if (s[i] == 1 && s[i + 1] != 0) {
+            i = i + 1;
+            if (s[i] == 48) break;
+        }
+        d[o] = s[i];
+        o = o + 1;
+        i = i + 1;
+    }
+    d[o] = 0;
+    return d;
+}
+
 char *pf_pad(char *s, int w, int left, int zero, int keep)
 {
-    int len = rt_strlen(s);
+    int len = pf_vlen(s);
     char *fill = empty;
     while (len < w) {
         if (zero != 0) fill = rt_strcat(fill, "0");
@@ -2520,10 +2587,10 @@ int pf_conv(char *fmt, int i, char *args, int nargs)
         piece = pf_int(nv, cv, left, plus, space, alt, zero, w, prec);
     } else {
         piece = a;
-        if (cv == 99) piece = rt_substr(a, 0, 1);
+        if (cv == 99) piece = a[0] != 0 ? rt_substr(a, 0, 1) : pf_chr(0);
         if (cv == 98) piece = pf_bstr(a, 1);
         if (cv == 113) piece = rt_pfq(a);
-        if (prec >= 0 && cv != 99 && rt_strlen(piece) > prec) piece = rt_substr(piece, 0, prec);
+        if (prec >= 0 && cv != 99) piece = pf_vcut(piece, prec);
         piece = pf_pad(piece, w, left, zero, 0);
     }
     pf_e = rt_strcat(pf_e, piece);
@@ -2557,7 +2624,7 @@ char *rt_printf(char *fmt, char *args)
                 i = pf_conv(fmt, i + 1, args, nargs);
                 if (i < 0) return pf_e;
             } else {
-                pf_e = rt_strcat(pf_e, rt_substr(fmt, i, 1));
+                pf_e = rt_strcat(pf_e, c == 1 ? pf_chr(1) : rt_substr(fmt, i, 1));
                 i = i + 1;
             }
         }
@@ -3008,6 +3075,23 @@ long rt_arr_litkey(char *nm, char *k, char *v, long next) {
 
 /* The fields of a bare word of an INDEXED array literal, stored from index next
  * on; the answer is the index after the last one. */
+/* The fields `let` word arguments expanded to, each its own expression, in order; the
+ * first error stops the command. With `need`, the list is every argument of the command
+ * and no field at all is bash's "expression expected".
+ * Twin of the letws arm of makeLetCmd in bash-interpreter.abnf. */
+long rt_letfields(char *list, int need)
+{
+    int n = rt_nfields(list);
+    int i = 0;
+    long v = 0;
+    if (n == 0 && need != 0) rt_arith_fail("let", "expression expected", empty);
+    while (i < n && arith_err == 0) {
+        v = rt_arith(rt_getfield(list, i));
+        i = i + 1;
+    }
+    return v;
+}
+
 long rt_arr_litwords(char *nm, char *f, long next) {
     int n = rt_nfields(f);
     int i = 0;
@@ -4039,7 +4123,8 @@ int rt_echo(char *fields, int newline, int escapes) {
             flagging = 0;
         }
         if (first == 0) rt_prints(" ");
-        rt_prints(escapes != 0 ? pf_bstr(f, 2) : f);
+        if (escapes != 0) rt_pf_out(pf_bstr(f, 2));
+        else rt_prints(f);
         if (pf_stop != 0) return 0;     /* \c: no further output, not even the newline */
         first = 0;
         i = i + 1;
@@ -4184,8 +4269,11 @@ int rt_putc(int c)
                 cap_sz[d - 1] = nsz;
                 buf = nb;
             }
-            buf[l] = (char)c;
-            cap_len[d - 1] = l + 1;
+            /* A command substitution drops a NUL byte, as bash does. */
+            if (c != 0) {
+                buf[l] = (char)c;
+                cap_len[d - 1] = l + 1;
+            }
         } else {
             putchar(c);
         }

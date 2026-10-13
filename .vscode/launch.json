@@ -1199,6 +1199,18 @@
             "program": "${workspaceFolder}","args": ["languages/bash-to-llvm-ir.abnf", "tests/bash-test-features.sh", "-q", "-exe", "tests/bash-native.out"]
         },
         {
+            "name": "Bash printf writes NUL bytes (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/bash-interpreter.abnf", "tests/bash-test-bytes.sh", "-q"]
+        },
+        {
+            "name": "Bash printf writes NUL bytes (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/bash-to-llvm-ir.abnf", "tests/bash-test-bytes.sh", "-q"]
+        },
+        {
             "name": "Batch features (interpreter)",
             "type": "go",
             "request": "launch",

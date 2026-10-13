@@ -233,13 +233,17 @@ RedirList   = RedirItem { RedirItem } ;
 RedirItem   = HereDoc | Redir ;
 
 // let EXPR ... : the same evaluator as (( )); a quoted argument is parsed as arithmetic.
-LetCmd      <~~ push(makeLetCmd(takeAll())) ~~> = KwLet LetArg { LetArg } ;
+// Redirections may stand among the arguments (`let x=1 2>/dev/null`).
+LetCmd      <~~ push(makeLetCmd(takeAll())) ~~> = KwLet LetItem { LetItem } ;
 KwLet       = "let" KwEnd ;
-// A double-quoted argument holding an expansion is expanded first and then evaluated, as
-// (( )) is: e='1 + 2'; `let "x = $e * 2"` sets 5.
-LetArg      = LetDqDyn | LetDq | LetSq | ArAssign ;
-LetDqDyn    <~~ push(mkArDyn(pop())) ~~> = LetHasExp LetDqWord ;
-LetDqWord   <~~ push(mkNsWord(takeAll())) ~~> = DqSeg ;
+LetItem     = RedirItem | NotIoRedir LetArg ;
+// Each argument is a WORD: expanded, field-split where it is unquoted, and every field is
+// then one expression. e='1 + 2': `let "x = $e * 2"` sets 5, `let x=$e*2` is the three
+// arguments x=1 + 2*2 (x=1, then a syntax error). A word with no expansion is parsed here
+// instead, unless the next word would read as the rest of its expression (`let c=1 + d=2`,
+// `let x=0 || y`): LetIsWord decides.
+LetArg      = LetWord | LetDq | LetSq | ArAssign ;
+LetWord     <~~ push({letws: takeAll()}) ~~> = LetIsWord CWord ;
 LetDq       = '"' :whitespace(Whitespace) ArList '"' ;
 LetSq       = "'" :whitespace(Whitespace) ArList "'" ;
 
@@ -964,21 +968,44 @@ CfHasExp = :script(~~
         }
     })()
 ~~) ;
-// And for a double-quoted `let` argument: a "$" or "`" before the closing quote.
-LetHasExp = :script(~~
+// Whether a `let` argument must be read as a word (LetWord): it holds a "$" or "`" outside
+// single quotes, or the arithmetic grammar would carry its expression on into the next
+// word - this one ends in an operator character, or the next one starts with one. A "("
+// keeps the arithmetic parse, which reads a parenthesised argument as one expression.
+LetIsWord = :script(~~
     (function() {
+        var no = abnf.newToken("\x01let-static", 0)
         var i = 0
         var cc = c.peek(i)
+        var dq = false
+        var last = 0
         while (cc === 32 || cc === 9) { i = i + 1; cc = c.peek(i) }
-        if (cc !== 34) { return abnf.newToken("\x01let-static", 0) }
-        i = i + 1
         while (true) {
             cc = c.peek(i)
-            if (cc === -1 || cc === 34) { return abnf.newToken("\x01let-static", 0) }
+            if (cc === -1) { return no }
             if (cc === 36 || cc === 96) { return }
             if (cc === 92) { i = i + 1 }
+            else if (cc === 34) { dq = !dq }
+            else if (!dq && cc === 39) {
+                i = i + 1
+                while (c.peek(i) !== 39) {
+                    if (c.peek(i) === -1) { return no }
+                    i = i + 1
+                }
+            }
+            else if (!dq && cc === 40) { return no }
+            else if (!dq && (cc === 32 || cc === 9 || cc === 10 || cc === 13 || cc === 59 || cc === 38 ||
+                             cc === 124 || cc === 60 || cc === 62 || cc === 41)) { break }
+            last = cc
             i = i + 1
         }
+        var wordEnd = last === 39 || last === 34 || last === 95 || last === 41 || last === 93 ||
+            (last >= 48 && last <= 57) || (last >= 97 && last <= 122) || (last >= 65 && last <= 90)
+        if (!wordEnd) { return }
+        while (cc === 32 || cc === 9) { i = i + 1; cc = c.peek(i) }
+        if (cc === -1 || cc === 10 || cc === 13 || cc === 59 || cc === 41 || cc === 35 || cc === 125) { return no }
+        if (cc === 39 || cc === 34 || cc === 95 || (cc >= 48 && cc <= 57)) { return no }
+        if ((cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90)) { return no }
     })()
 ~~) ;
 
@@ -1201,7 +1228,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function writeChan(ch, s) {
         if (ch == 1) { errBuf = errBuf + s; flushErrLines(); return }
         if (ch != 0) { return }
-        if (capStack.length > 0) { capStack[capStack.length - 1] = capStack[capStack.length - 1] + s }
+        if (capStack.length > 0) { capStack[capStack.length - 1] = capStack[capStack.length - 1] + (nulSeen ? dropNul(s) : s) }
         else if (rawSeen && hasRaw(s)) { writeBytes(bytesText(strBytes(s))) }
         else { print(s) }
     }
@@ -1213,6 +1240,20 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // writeChan writes it back as that byte. rawSeen keeps the output path from scanning for
     // one until one has been made. The compiled half's strings are bytes already.
     var rawSeen = false
+    // A NUL byte exists only on its way out of printf / echo -e (pfChr): written to the
+    // output, dropped by a command substitution, the end of a printf -v value.
+    var nulSeen = false
+    function dropNul(s) {
+        var out = ""
+        var i
+        for (i = 0; i < s.length; i++) { if (s.charCodeAt(i) != 0) { out = out + s.charAt(i) } }
+        return out
+    }
+    function cutNul(s) {
+        var i
+        for (i = 0; i < s.length; i++) { if (s.charCodeAt(i) == 0) { return s.slice(0, i) } }
+        return s
+    }
     function rawByte(b) { rawSeen = true; return String.fromCharCode(56320 + b) }
     function isRawCh(cc) { return cc >= 56448 && cc <= 56575 }
     function hasRaw(s) {
@@ -3246,7 +3287,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return ifsHas(seps, v.charAt(v.length - 1))
     }
 
-    // $'...' body -> the decoded string (bash's ANSI-C escapes).
+    // $'...' body -> the decoded string (bash's ANSI-C escapes). A NUL byte ends it, as it
+    // ends a C string: $'g\0h'x is gx.
     function ansiC(t) {
         var out = ""
         var i = 0
@@ -3274,6 +3316,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     while (on < 3 && i < t.length && t.charAt(i) >= "0" && t.charAt(i) <= "7") {
                         ov = ov * 8 + (t.charCodeAt(i) - 48); i = i + 1; on = on + 1
                     }
+                    if (ov % 256 == 0) { return normBytes(out) }
                     out = out + escByte(ov % 256)
                 }
                 else if (e == "x") {
@@ -3282,6 +3325,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     else {
                         var v = 0, n = 0
                         while (n < 2 && i < t.length && hexVal(t.charCodeAt(i)) >= 0) { v = v * 16 + hexVal(t.charCodeAt(i)); i = i + 1; n = n + 1 }
+                        if (v == 0) { return normBytes(out) }
                         out = out + escByte(v)
                     }
                 }
@@ -4133,9 +4177,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (cc >= 65 && cc <= 70) { return cc - 55 }
         return -1
     }
-    // A code point as a string (a NUL is dropped: a string here cannot hold one).
+    // A code point as a string.
     function pfChr(cp) {
-        if (cp == 0) { return "" }
+        if (cp == 0) { nulSeen = true; return String.fromCharCode(0) }
         if (cp < 65536) { return String.fromCharCode(cp) }
         var off = cp - 65536
         return String.fromCharCode(55296 + ((off - (off % 1024)) / 1024)) + String.fromCharCode(56320 + (off % 1024))
@@ -4333,7 +4377,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (pf.have) { nv = pfNum(a, cv != "d" && cv != "i") }
             piece = pfInt(nv, cv, f)
         } else {
-            if (cv == "c") { piece = (a.length > 0) ? pfCut(a, 1) : "" }
+            if (cv == "c") { piece = (a.length > 0) ? pfCut(a, 1) : pfChr(0) }
             else if (cv == "b") { piece = pfBstr(a, 1) }
             else if (cv == "q") { piece = printfQuote(a) }
             if (f.prec >= 0 && cv != "c") { piece = pfCut(piece, f.prec) }
@@ -4368,7 +4412,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             used = pf.ai > before
         }
         var res = normBytes(pf.e)
-        if (dest != null) { setVarVal(dest, res) } else { emitOut(res) }
+        if (dest != null) { setVarVal(dest, cutNul(res)) } else { emitOut(res) }
         return pf.rc
     }
     // printf's %x/%X/%o/%u: the operand as an UNSIGNED 64-bit value in the given base.
@@ -5102,18 +5146,51 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return st
         }
     }
-    // let EXPR ... : same evaluator, status from the LAST expression.
+    // let EXPR ... : same evaluator, status from the LAST expression; the first error stops
+    // the command. The arguments are all expanded before any is evaluated (x=1; `let x=5 y=$x`
+    // sets y=1); a word argument ({letws}) is expanded like a command word and each field is one
+    // expression. No expression at all is an error.
+    // Twin of makeLetCmd in bash-to-llvm-ir.abnf (rt_letfields in lib/bash-rt.c).
     function makeLetCmd(items) {
-        return function() {
+        var args = []
+        var redirs = []
+        var nstatic = 0
+        var i
+        for (i = 0; i < items.length; i++) {
+            if (typeof items[i] == "function") { args.push(items[i]); nstatic = nstatic + 1 }
+            else if (items[i].letws != undefined) { args.push(items[i]) }
+            else { redirs.push(items[i]) }
+        }
+        var core = function() {
+            var lists = []
+            var total = 0
+            var k
+            for (k = 0; k < args.length; k++) {
+                var fs = []
+                if (typeof args[k] != "function") { fs = expandWords(args[k].letws) }
+                lists.push(fs)
+                total = total + fs.length
+            }
+            var ab = takeAbort()
+            if (ab != null) { return ab }
+            if (nstatic == 0 && total == 0) { arFailAt("let", "expression expected", "") }
             var v = anytype
             v = 0
-            var i
-            for (i = 0; i < items.length; i++) { v = items[i]() }
+            for (k = 0; k < args.length && !arithErr; k++) {
+                if (typeof args[k] == "function") { v = args[k]() }
+                else {
+                    var j
+                    for (j = 0; j < lists[k].length && !arithErr; j++) { v = arEval(lists[k][j]) }
+                }
+            }
             var st = !arIsZero(v) ? 0 : 1
             if (takeArithErr()) { st = 1 }
             setStatus(st)
             return st
         }
+        var wrapped = [core]
+        for (i = 0; i < redirs.length; i++) { wrapped.push(redirs[i]) }
+        return mkRedirected(wrapped)
     }
     // [[ ... ]] : the condition thunks answer a boolean; the command status is its inverse.
     // 0 true, 1 false, 2 the condition could not be evaluated (a bad =~ pattern).

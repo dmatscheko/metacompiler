@@ -46,9 +46,11 @@
 #             feature files are written as a sum of (expr - expected) terms, so
 #             the right answer is 0 and any wrong one is not.
 #
-# One real-language row joins them: lua/bytes, because what lua's print writes
-# for a string that is not valid UTF-8 is visible only in the output bytes. Its
-# fixture is real lua 5.5's output, not a blessed one of ours.
+# Real-language rows join them: lua/bytes, because what lua's print writes for a
+# string that is not valid UTF-8 is visible only in the output bytes (php/bytes and
+# bash/bytes - the NUL bytes printf writes - likewise), and bash/stack, whose
+# failure is a native stack overflow. Their fixtures are the real toolchain's
+# output, not blessed ones of ours.
 #
 # EXPECT_ROWS covers those by comparing what the binary actually produced
 # against a checked-in fixture, which is the only thing left when there is no
@@ -120,6 +122,8 @@ ROWS="bash:sh batch:cmd c:c csharp:cs dart:dart go:go java:java kotlin:kt
 EXPECT_ROWS="brainfuck:features:tests/brainfuck-test-features.txt:tests/brainfuck-features.expected
              calculator:features:tests/calculator-test-features.txt:exit-only
              calculator:compiler:tests/calculator-compiler-features.txt:exit-only
+             bash:bytes:tests/bash-test-bytes.sh:tests/bash-bytes.expected
+             bash:stack:tests/bash-native-stack.sh:tests/bash-stack.expected
              lua:bytes:tests/lua-test-bytes.lua:tests/lua-bytes.expected
              php:bytes:tests/php-test-bytes.php:tests/php-bytes.expected"
 

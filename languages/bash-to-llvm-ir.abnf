@@ -224,13 +224,17 @@ RedirList   = RedirItem { RedirItem } ;
 RedirItem   = HereDoc | Redir ;
 
 // let EXPR ... : the same evaluator as (( )); a quoted argument is parsed as arithmetic.
-LetCmd      <~~ push(makeLetCmd(takeAll())) ~~> = KwLet LetArg { LetArg } ;
+// Redirections may stand among the arguments (`let x=1 2>/dev/null`).
+LetCmd      <~~ push(makeLetCmd(takeAll())) ~~> = KwLet LetItem { LetItem } ;
 KwLet       = "let" KwEnd ;
-// A double-quoted argument holding an expansion is expanded first and then evaluated, as
-// (( )) is: e='1 + 2'; `let "x = $e * 2"` sets 5.
-LetArg      = LetDqDyn | LetDq | LetSq | ArAssign ;
-LetDqDyn    <~~ push(mkArDyn(pop())) ~~> = LetHasExp LetDqWord ;
-LetDqWord   <~~ push(mkNsWord(takeAll())) ~~> = DqSeg ;
+LetItem     = RedirItem | NotIoRedir LetArg ;
+// Each argument is a WORD: expanded, field-split where it is unquoted, and every field is
+// then one expression. e='1 + 2': `let "x = $e * 2"` sets 5, `let x=$e*2` is the three
+// arguments x=1 + 2*2 (x=1, then a syntax error). A word with no expansion is parsed here
+// instead, unless the next word would read as the rest of its expression (`let c=1 + d=2`,
+// `let x=0 || y`): LetIsWord decides.
+LetArg      = LetWord | LetDq | LetSq | ArAssign ;
+LetWord     <~~ push({letws: takeAll()}) ~~> = LetIsWord CWord ;
 LetDq       = '"' :whitespace(Whitespace) ArList '"' ;
 LetSq       = "'" :whitespace(Whitespace) ArList "'" ;
 
@@ -846,21 +850,44 @@ CfHasExp = :script(~~
         }
     })()
 ~~) ;
-// And for a double-quoted `let` argument: a "$" or "`" before the closing quote.
-LetHasExp = :script(~~
+// Whether a `let` argument must be read as a word (LetWord): it holds a "$" or "`" outside
+// single quotes, or the arithmetic grammar would carry its expression on into the next
+// word - this one ends in an operator character, or the next one starts with one. A "("
+// keeps the arithmetic parse, which reads a parenthesised argument as one expression.
+LetIsWord = :script(~~
     (function() {
+        var no = abnf.newToken("\x01let-static", 0)
         var i = 0
         var cc = c.peek(i)
+        var dq = false
+        var last = 0
         while (cc === 32 || cc === 9) { i = i + 1; cc = c.peek(i) }
-        if (cc !== 34) { return abnf.newToken("\x01let-static", 0) }
-        i = i + 1
         while (true) {
             cc = c.peek(i)
-            if (cc === -1 || cc === 34) { return abnf.newToken("\x01let-static", 0) }
+            if (cc === -1) { return no }
             if (cc === 36 || cc === 96) { return }
             if (cc === 92) { i = i + 1 }
+            else if (cc === 34) { dq = !dq }
+            else if (!dq && cc === 39) {
+                i = i + 1
+                while (c.peek(i) !== 39) {
+                    if (c.peek(i) === -1) { return no }
+                    i = i + 1
+                }
+            }
+            else if (!dq && cc === 40) { return no }
+            else if (!dq && (cc === 32 || cc === 9 || cc === 10 || cc === 13 || cc === 59 || cc === 38 ||
+                             cc === 124 || cc === 60 || cc === 62 || cc === 41)) { break }
+            last = cc
             i = i + 1
         }
+        var wordEnd = last === 39 || last === 34 || last === 95 || last === 41 || last === 93 ||
+            (last >= 48 && last <= 57) || (last >= 97 && last <= 122) || (last >= 65 && last <= 90)
+        if (!wordEnd) { return }
+        while (cc === 32 || cc === 9) { i = i + 1; cc = c.peek(i) }
+        if (cc === -1 || cc === 10 || cc === 13 || cc === 59 || cc === 41 || cc === 35 || cc === 125) { return no }
+        if (cc === 39 || cc === 34 || cc === 95 || (cc >= 48 && cc <= 57)) { return no }
+        if ((cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90)) { return no }
     })()
 ~~) ;
 
@@ -1019,7 +1046,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return makeConst(s)
     }
-    // $'...' body -> the decoded string (bash's ANSI-C escapes).
+    // $'...' body -> the decoded string (bash's ANSI-C escapes). A NUL byte ends it, as it
+    // ends a C string: $'g\0h'x is gx.
     function ansiC(t) {
         var out = ""
         var i = 0
@@ -1047,6 +1075,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     while (on < 3 && i < t.length && t.charAt(i) >= "0" && t.charAt(i) <= "7") {
                         ov = ov * 8 + (t.charCodeAt(i) - 48); i = i + 1; on = on + 1
                     }
+                    if (ov % 256 == 0) { return out }
                     out = out + escByte(ov % 256)
                 }
                 else if (e == "x") {
@@ -1055,6 +1084,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     else {
                         var v = 0, n = 0
                         while (n < 2 && i < t.length && hexVal(t.charCodeAt(i)) >= 0) { v = v * 16 + hexVal(t.charCodeAt(i)); i = i + 1; n = n + 1 }
+                        if (v == 0) { return out }
                         out = out + escByte(v)
                     }
                 }
@@ -1280,6 +1310,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // ===================================================================================
 
     var curF = null       // the IR function currently being emitted into
+    var curEntry = null   // ...and its entry block, where every alloca goes (slotOf)
     var curExit = null     // its exit block (an `exit N` / propagated exit branches here)
     var curFrame = null    // null at top level, else {params: [9 i8* values], argc: i32 value}
     var condDepth = 0      // >0 while emitting a CONDITION (set -e must not fire there)
@@ -1365,6 +1396,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // run time; rt_idiv / rt_ipow are / % and ** with bash's error cases. Any of them can
     // raise arith_err (see languages/lib/bash-rt.c).
     var rtArith = rtDecl("rt_arith", 3, [1])
+    var rtLetFields = rtDecl("rt_letfields", 3, [1, 0])
     var rtPcheck = rtDecl("rt_pcheck", true, [1, 0, 1, 1])
     var rtSubErr = rtDecl("rt_suberr", false, [0, 0])
     var rtIdiv = rtDecl("rt_idiv", 3, [3, 3, 0])
@@ -1407,6 +1439,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // each terminated by "\x01".
     var rtField = rtDecl("rt_field", true, [1, 1, 0, 0])
     var rtPrintf = rtDecl("rt_printf", true, [1, 1])
+    var rtPfOut = rtDecl("rt_pf_out", false, [1])
+    var rtPfValue = rtDecl("rt_pf_value", true, [1])
     var gPrintfRc = rtGlobal("printf_rc", i32)
     var rtNFields = rtDecl("rt_nfields", false, [1])
     var rtGetField = rtDecl("rt_getfield", true, [1, 0])
@@ -3258,12 +3292,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (!bang && stages.length == 1) { return stages[0] }
         return function(b) {
-            var ff = b.NewAlloca(i32)
+            var ff = slotOf(i32)
             b.NewStore(zero, ff)
             var psName = gepStr(b, "PIPESTATUS")
             b.NewCall(rtArrClear, psName)
             // a pipeline rebinds standard input for its stages only
-            var savedIn = b.NewAlloca(i8ptr), savedInPos = b.NewAlloca(i32)
+            var savedIn = slotOf(i8ptr), savedInPos = slotOf(i32)
             b.NewStore(b.NewLoad(i8ptr, gStdin), savedIn)
             b.NewStore(b.NewLoad(i32, gStdinPos), savedInPos)
             var k
@@ -3347,15 +3381,70 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return b
         }
     }
+    // let EXPR ... : status from the LAST expression; the first error stops the command. The
+    // arguments are all expanded before any is evaluated (x=1; `let x=5 y=$x` sets y=1). A word
+    // argument ({letws}) becomes a field list that rt_letfields evaluates field by field; when
+    // every argument is a word they are one list, whose emptiness is "expression expected".
+    // Twin of makeLetCmd in bash-interpreter.abnf.
     function makeLetCmd(items) {
-        return function(b) {
-            var v = zero64
-            var i
-            for (i = 0; i < items.length; i++) { var r = items[i](b); b = r.b; v = r.v }
-            var st = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, v, zero64), zero, one)
+        var args = []
+        var redirs = []
+        var words = []
+        var nstatic = 0
+        var i
+        for (i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "function") { args.push(it); nstatic = nstatic + 1 }
+            else if (it.letws != undefined) {
+                args.push(it)
+                var j
+                for (j = 0; j < it.letws.length; j++) { words.push(it.letws[j]) }
+            }
+            else { redirs.push(it) }
+        }
+        if (nstatic == 0) { args = [{letws: words}] }
+        var need = (nstatic == 0) ? one : zero
+        var core = function(b) {
+            var lists = []
+            var k
+            for (k = 0; k < args.length; k++) {
+                var list = zero64
+                if (typeof args[k] != "function") {
+                    list = gepStr(b, "\x02")
+                    var w
+                    for (w = 0; w < args[k].letws.length; w++) {
+                        var rw = args[k].letws[w].fn(b)
+                        b = rw.b
+                        list = b.NewCall(rtCatFields, [list, rw.v])
+                    }
+                }
+                lists.push(list)
+            }
+            b = emitAbortCheck(b)
+            var endB = curF.NewBlock("")
+            var inc = []
+            for (k = 0; k < args.length; k++) {
+                var v = zero64
+                if (typeof args[k] == "function") { var r = args[k](b); b = r.b; v = r.v }
+                else { v = b.NewCall(rtLetFields, [lists[k], need]) }
+                inc.push(llvm.ir.NewIncoming(v, b))
+                if (k + 1 < args.length) {
+                    var nb = curF.NewBlock("")
+                    b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, gArithErr), zero), endB, nb)
+                    b = nb
+                } else {
+                    b.NewBr(endB)
+                }
+            }
+            b = endB
+            var last = b.NewPhi(inc)
+            var st = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, last, zero64), zero, one)
             storeStatus(b, b.NewSelect(takeArithErr(b), one, st))
             return b
         }
+        var wrapped = [core]
+        for (i = 0; i < redirs.length; i++) { wrapped.push(redirs[i]) }
+        return mkRedirected(wrapped)
     }
 
     // [[ ... ]] : the condition thunks answer an i32 boolean (1 = true).
@@ -3473,10 +3562,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var rl = evalWord(b, lw); b = rl.b
             var rr = evalWord(b, rw); b = rr.b
             var subj = rl.v
-            var caps = b.NewAlloca(capsTy)
+            var caps = slotOf(capsTy)
             var capsPtr = b.NewGetElementPtr(capsTy, caps, zero, zero)
-            var resP = b.NewAlloca(i32)
-            var ip = b.NewAlloca(i32)
+            var resP = slotOf(i32)
+            var ip = slotOf(i32)
             b.NewStore(zero, resP)
             var nm = gepStr(b, "BASH_REMATCH")
             // No flags: bash's =~ is a POSIX ERE where ^ and $ anchor the whole subject and
@@ -3612,7 +3701,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         b = emitAbortCheck(b)
         var out = b.NewCall(rtPrintf, [rf.v, listV])
-        if (dest != null) { storeVar(b, dest, out) } else { b.NewCall(rtPrints, out) }
+        if (dest != null) { storeVar(b, dest, b.NewCall(rtPfValue, out)) } else { b.NewCall(rtPfOut, out) }
         storeStatus(b, b.NewLoad(i32, gPrintfRc))
         return b
     }
@@ -3753,7 +3842,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // A subshell must restore the shell OPTIONS as well as the variables (set -e inside
     // $( ) does not leak out), so they are stashed in allocas around the body.
     function saveOpts(b) {
-        var se = b.NewAlloca(i32), su = b.NewAlloca(i32), sp = b.NewAlloca(i32), sx = b.NewAlloca(i32)
+        var se = slotOf(i32), su = slotOf(i32), sp = slotOf(i32), sx = slotOf(i32)
         b.NewStore(b.NewLoad(i32, gOptE), se)
         b.NewStore(b.NewLoad(i32, gOptU), su)
         b.NewStore(b.NewLoad(i32, gOptPf), sp)
@@ -3808,7 +3897,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // (printf, test/[, read, eval, set, trap, unset, declare, control flow) reach the
     // `command not found` fallback here, where the interpreter runs them.
     function emitComputedCommand(b, cmdT, argTs) {
-        var listP = b.NewAlloca(i8ptr)
+        var listP = slotOf(i8ptr)
         b.NewStore(gepStr(b, "\x02"), listP)
         var rw = cmdT.fn(b)
         b = rw.b
@@ -3850,9 +3939,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 storeStatusI(hb, 0)
             } else {
                 var f = funcFor(cname)
-                var savedTop = hb.NewAlloca(i32)
-                var savedBase = hb.NewAlloca(i32)
-                var savedN = hb.NewAlloca(i32)
+                var savedTop = slotOf(i32)
+                var savedBase = slotOf(i32)
+                var savedN = slotOf(i32)
                 hb.NewStore(hb.NewLoad(i32, gArgvTop), savedTop)
                 hb.NewStore(hb.NewLoad(i32, gFrameBase), savedBase)
                 hb.NewStore(hb.NewLoad(i32, gFrameN), savedN)
@@ -4067,9 +4156,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (f != null) {
                 // Push every ARGUMENT FIELD, then make them this call's frame. The stack top,
                 // base and count are all restored afterwards, so recursion nests correctly.
-                var savedTop = b.NewAlloca(i32)
-                var savedBase = b.NewAlloca(i32)
-                var savedN = b.NewAlloca(i32)
+                var savedTop = slotOf(i32)
+                var savedBase = slotOf(i32)
+                var savedN = slotOf(i32)
                 b.NewStore(b.NewLoad(i32, gArgvTop), savedTop)
                 b.NewStore(b.NewLoad(i32, gFrameBase), savedBase)
                 b.NewStore(b.NewLoad(i32, gFrameN), savedN)
@@ -4292,8 +4381,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // Apply a redirection list by rerouting the two output channels and the stdin buffer.
     function emitOpenRedirs(b, redirs) {
-        var so = b.NewAlloca(i32), se = b.NewAlloca(i32)
-        var sb = b.NewAlloca(i8ptr), sp = b.NewAlloca(i32)
+        var so = slotOf(i32), se = slotOf(i32)
+        var sb = slotOf(i8ptr), sp = slotOf(i32)
         b.NewStore(b.NewLoad(i32, gSinkOut), so)
         b.NewStore(b.NewLoad(i32, gSinkErr), se)
         b.NewStore(b.NewLoad(i8ptr, gStdin), sb)
@@ -4353,7 +4442,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         var inner = makeSimpleCommand(rest)
         return function(b) {
-            var depth = b.NewAlloca(i32)
+            var depth = slotOf(i32)
             b.NewStore(b.NewLoad(i32, gLsTop), depth)
             var k
             for (k = 0; k < asgs.length; k++) {
@@ -4396,13 +4485,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
 
+    // A stack slot of the function being emitted. It is made in that function's entry block
+    // whatever block asks for it, so a slot used inside a loop is not a fresh alloca on every
+    // pass - which would grow the stack each iteration.
+    function slotOf(ty) { return curEntry.NewAlloca(ty) }
+
     // A loop's status slot: the status of the last body command it ran, 0 when the body never
     // ran. break and continue store their own status (0, or 1 for an out-of-range level) into
     // every enclosing loop's slot - an outer loop that goes on running overwrites it at the end
     // of its body anyway. The exit block hands the slot to $?. Twin of sigStatus in
     // bash-interpreter.abnf.
     function loopStatusSlot(b) {
-        var lst = b.NewAlloca(i32)
+        var lst = slotOf(i32)
         b.NewStore(zero, lst)
         return lst
     }
@@ -4490,7 +4584,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // Build the whole word list as ONE field list at run time, then walk it: the
             // words can each expand to any number of fields ("${a[@]}", "$@", an unquoted
             // expansion), so the iteration count is not known while emitting.
-            var listP = b.NewAlloca(i8ptr)
+            var listP = slotOf(i8ptr)
             if (wordThunks == null) {
                 b.NewStore(b.NewCall(rtParams, [gepStr(b, " "), zero]), listP)
             } else {
@@ -4502,7 +4596,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     b.NewStore(b.NewCall(rtCatFields, [b.NewLoad(i8ptr, listP), r.v]), listP)
                 }
             }
-            var ip = b.NewAlloca(i32)
+            var ip = slotOf(i32)
             b.NewStore(zero, ip)
             var lst = loopStatusSlot(b)
             var head = curF.NewBlock(""), body = curF.NewBlock("")
@@ -4549,10 +4643,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             definedFuncs[key] = true
             // bash's loops do not reach into a called function: the body starts with none.
-            var savedF = curF, savedExit = curExit, savedFrame = curFrame, savedLoops = loopStack
+            var savedF = curF, savedEntry = curEntry, savedExit = curExit, savedFrame = curFrame, savedLoops = loopStack
             loopStack = []
             curF = f
             var entry = f.NewBlock("entry")
+            curEntry = entry
             curExit = f.NewBlock("exit")
             // The local-save-stack depth at entry: every ret unwinds back to it.
             var dslot = entry.NewAlloca(i32)
@@ -4567,7 +4662,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var endb = bodyT(entry)
             emitFnRet(endb, endb.NewLoad(i32, gStatus))
             attrUnwind(undoBase)
-            curF = savedF; curExit = savedExit; curFrame = savedFrame; loopStack = savedLoops
+            curF = savedF; curEntry = savedEntry; curExit = savedExit; curFrame = savedFrame; loopStack = savedLoops
             storeStatusI(b, 0)
             return b
         }
@@ -4582,6 +4677,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var main = m.NewFunc("main", i32)
         curF = main
         var entry = main.NewBlock("entry")
+        curEntry = entry
         var body = main.NewBlock("body")
         curExit = main.NewBlock("exit")
         // An explicit `exit N` still runs the EXIT trap on its way out.
