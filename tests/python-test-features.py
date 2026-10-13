@@ -2706,6 +2706,47 @@ check("generator-reentry", [mi_run(lambda: next(gr_me)), list(gr_me), next(gr_me
 check("sort-mutation",[mi_run(lambda: mi_l.sort(key=mi_key)), mi_l, mi_seen], ["ValueError: list modified during sort", [1, 2, 3], [0, 1, 2]])
 
 
+# ----- SECTION: zip stepping and strict, comprehension unpacking -----
+#
+# zip steps its sources in turn, so zip(it, it) pairs consecutive items, and
+# strict=True raises when the lengths differ. A comprehension's tuple target
+# checks the count as a for statement does. Rows from CPython 3.14.
+def zs_try(f):
+    try:
+        return f()
+    except (ValueError, TypeError) as e:
+        return type(e).__name__ + ": " + str(e)
+zs_a = [1, 2]
+zs_b = [3, 4, 5]
+zs_it = iter([1, 2, 3, 4])
+check("zip-shared-iterator", [list(zip(zs_it, zs_it)), list(zs_it)], [[(1, 2), (3, 4)], []])
+check("zip-strict", [zs_try(lambda: list(zip(zs_a, zs_b, strict=True))), zs_try(lambda: list(zip(zs_b, zs_a, strict=True))),
+                     zs_try(lambda: list(zip(zs_a, zs_b, strict=False))), zs_try(lambda: list(zip([1], [2], [], strict=True))),
+                     zs_try(lambda: list(zip(zs_a, (7, 8), strict=True))), zs_try(lambda: zip(zs_a, foo=1))],
+      ["ValueError: zip() argument 2 is longer than argument 1", "ValueError: zip() argument 2 is shorter than argument 1",
+       [(1, 3), (2, 4)], "ValueError: zip() argument 3 is shorter than arguments 1-2", [(1, 7), (2, 8)],
+       "TypeError: zip() got an unexpected keyword argument 'foo'"])
+zs_src = [(1, 2, 3)]
+zs_src2 = [(1,)]
+check("comp-unpack-count", [zs_try(lambda: [a for a, b in zs_src]), zs_try(lambda: {a: b for a, b in zs_src2}),
+                            zs_try(lambda: [a for a, b in [5]])],
+      ["ValueError: too many values to unpack (expected 2, got 3)", "ValueError: not enough values to unpack (expected 2, got 1)",
+       "TypeError: cannot unpack non-iterable int object"])
+
+
+# ----- SECTION: an int has no negative zero -----
+#
+# int(), round(), math.floor/ceil/trunc, unary minus and * answer the int 0 for
+# a zero result, so float() of it and int * 1.0 are 0.0. Rows from CPython 3.14.
+nz_v = [-0.5, -0.0, -0.4]
+nz_i = [0, -5]
+check("int-no-negative-zero",
+      [repr(float(int(nz_v[0]))), repr(float(round(nz_v[0]))), repr(float(math.ceil(nz_v[2]))), repr(float(math.trunc(nz_v[1]))),
+       repr(float(math.floor(nz_v[1]))), repr(int(nz_v[1]) * 1.0), repr(float(nz_i[0] * nz_i[1])), repr(float(-nz_i[0])),
+       repr(float(round(nz_v[2])))],
+      ["0.0"] * 9)
+
+
 # ----- import edges -----
 # `from M import *` binds a runtime module's public names and a library
 # module's __all__, `import P.S` binds P, and a module function keeps its

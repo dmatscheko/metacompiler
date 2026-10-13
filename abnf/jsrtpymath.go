@@ -71,6 +71,9 @@ func pyMathInt(rt *jsrt, f float64) interface{} {
 		panic(&jsThrown{value: rt.pyExcInstance("OverflowError",
 			"cannot convert float infinity to integer")})
 	}
+	if f == 0 {
+		return 0.0 // An int has no negative zero: math.ceil(-0.5) is 0.
+	}
 	return f
 }
 

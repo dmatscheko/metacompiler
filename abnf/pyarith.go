@@ -70,7 +70,9 @@ func (rt *jsrt) pyPromoteArith(op string, l, r interface{}) (interface{}, bool) 
 	case "-":
 		d = x - y
 	case "*":
-		d = x * y
+		if d = x * y; d == 0 {
+			return 0.0, true // An int has no negative zero: 0 * -5 is 0.
+		}
 	default:
 		return nil, false
 	}

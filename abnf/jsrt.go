@@ -16808,7 +16808,10 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if f, ok := v.(*jsPyFlo); ok {
 				return w(&jsPyFlo{f: -f.f}) // -0.0 keeps its sign, for repr(-0.0).
 			}
-			return rt.wrapNum(-rt.toNumber(v))
+			if n := rt.toNumber(v); n != 0 {
+				return rt.wrapNum(-n)
+			}
+			return rt.wrapNum(0) // An int has no negative zero.
 		},
 		"js_pystr": func(a []uint64) uint64 { // str(v) with Python style rendering.
 			return rt.wrapStr(rt.pyString(u(a[0])))
@@ -17260,25 +17263,32 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			return w(rt.pyMkIter("enumerate", out))
 		},
+		// zip(*iterables, strict=False), bound as [positionals, keywords]. The
+		// sources are stepped in turn, one row at a time, so zip(it, it) pairs
+		// consecutive items, and strict= is CPython's ValueError for sources of
+		// different lengths. Twin of js_pyzip in lib/python-rt.metajs and
+		// hostGlobals["zip"] in languages/python-interpreter.abnf.
 		"js_pyzip": func(a []uint64) uint64 {
-			args := rt.argArray(u(a[0]))
-			var srcs [][]interface{}
-			n := -1
-			for _, s := range args {
-				es := rt.pyElemsOf(s)
-				srcs = append(srcs, es)
-				if n < 0 || len(es) < n {
-					n = len(es)
-				}
-			}
-			if n < 0 {
-				n = 0
+			el := u(a[0]).(*jsArray).elems
+			pos := el[0].(*jsArray).elems
+			rt.pyKwOnly(el[1], "zip", "strict", "strict")
+			strict := rt.pyTruthyOf(rt.pyKwArg(el[1], "strict"))
+			var steps []func() (interface{}, bool)
+			for _, s := range pos {
+				steps = append(steps, rt.pyStepper(s))
 			}
 			var out []interface{}
-			for i := 0; i < n; i++ {
+			for len(steps) > 0 {
 				row := pyTup(&jsArray{})
-				for _, s := range srcs {
-					row.elems = append(row.elems, s[i])
+				for k, step := range steps {
+					v, ok := step()
+					if !ok {
+						if strict {
+							rt.pyZipStrict(steps, k)
+						}
+						return w(rt.pyMkIter("zip", out))
+					}
+					row.elems = append(row.elems, v)
 				}
 				out = append(out, row)
 			}
@@ -18813,6 +18823,9 @@ func (rt *jsrt) pyFloatToInt(f float64) interface{} {
 		panic(&jsThrown{value: rt.pyExcInstance("OverflowError", "cannot convert float infinity to integer")})
 	}
 	t := math.Trunc(f)
+	if t == 0 {
+		return 0.0 // An int has no negative zero: int(-0.0) is 0.
+	}
 	if math.Abs(t) <= pyMax53 {
 		return t
 	}
@@ -22268,6 +22281,58 @@ func (rt *jsrt) pyWatchCheck(it *jsObject, wo interface{}, a *jsArray, i int) {
 		}
 		rt.pyRaise("RuntimeError", msg)
 	}
+}
+
+// pyStepper is any iterable stepped one value at a time, the way a compiled for
+// loop runs (js_pyforsrc): a list by index, anything else through its next. The
+// bool is false once it is exhausted. Twin of pyAStepper in lib/python-rt.metajs.
+func (rt *jsrt) pyStepper(v interface{}) func() (interface{}, bool) {
+	src := rt.pyExt("js_pyforsrc", v)
+	if arr, ok := src.(*jsArray); ok {
+		i := 0
+		return func() (interface{}, bool) {
+			if i >= len(arr.elems) {
+				return nil, false
+			}
+			i++
+			return arr.elems[i-1], true
+		}
+	}
+	return func() (interface{}, bool) {
+		var st *jsObject
+		if g, ok := src.(*jsGenerator); ok {
+			st, _ = g.step(rt, jsUndef).(*jsObject)
+		} else if o, ok := src.(*jsObject); ok {
+			st, _ = rt.call(o.props["next"], src, nil).(*jsObject)
+		}
+		if st == nil || rt.truthy(st.props["done"]) {
+			return nil, false
+		}
+		return st.props["value"], true
+	}
+}
+
+// pyZipStrict is strict zip's check once source k ran out: a later k is
+// shorter than the ones before it; k == 0 asks whether any other source still
+// has an item.
+func (rt *jsrt) pyZipStrict(steps []func() (interface{}, bool), k int) {
+	j, what := k, "shorter"
+	if k == 0 {
+		what = "longer"
+		for j = 1; j < len(steps); j++ {
+			if _, ok := steps[j](); ok {
+				break
+			}
+		}
+		if j == len(steps) {
+			return
+		}
+	}
+	plural := "s 1-"
+	if j == 1 {
+		plural = " "
+	}
+	rt.pyRaise("ValueError", fmt.Sprintf("zip() argument %d is %s than argument%s%d", j+1, what, plural, j))
 }
 
 // pyIterName answers an iterator object's type name, or "" for anything else.

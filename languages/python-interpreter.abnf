@@ -2281,23 +2281,44 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (var i = 0; i < a.length; i++) { out.push(pyTup([binOp("+", s, i), a[i]])) }
         return pyMkIter("enumerate", out)
     }
+    // zip(*iterables, strict=False). The sources are stepped in turn, one row at
+    // a time, so zip(it, it) pairs consecutive items, and strict= is CPython's
+    // ValueError for sources of different lengths. Twin of js_pyzip in
+    // abnf/jsrt.go and lib/python-rt.metajs.
     hostGlobals["zip"] = function() {
-        var srcs = []
-        var n = 0 - 1
+        var kw = kTakeNamed()
+        pyKwOnly(kw, "zip", "strict", "strict")
+        var strict = pytruthy(pyKwArg(kw, "strict"))
+        var ds = []
         var i
-        for (i = 0; i < arguments.length; i++) {
-            var es = iterToList(arguments[i])
-            srcs.push(es)
-            if (n < 0 || es.length < n) { n = es.length }
-        }
-        if (n < 0) { n = 0 }
+        for (i = 0; i < arguments.length; i++) { ds.push(pyDelegOf(arguments[i])) }
         var out = []
-        for (i = 0; i < n; i++) {
+        while (ds.length > 0) {
             var row = []
-            for (var k = 0; k < srcs.length; k++) { row.push(srcs[k][i]) }
+            for (var k = 0; k < ds.length; k++) {
+                var st = pyDelegStep(ds[k], undefined)
+                if (st.done) {
+                    if (strict) { pyZipStrict(ds, k) }
+                    return pyMkIter("zip", out)
+                }
+                row.push(st.value)
+            }
             out.push(pyTup(row))
         }
         return pyMkIter("zip", out)
+    }
+    // strict zip's check once source K ran out: a later K is shorter than the
+    // ones before it; K == 0 asks whether any other source still has an item.
+    function pyZipStrict(ds, k) {
+        var j = k
+        var what = "shorter"
+        if (k == 0) {
+            what = "longer"
+            j = 1
+            while (j < ds.length && pyDelegStep(ds[j], undefined).done) { j++ }
+            if (j == ds.length) { return }
+        }
+        pyListErr("ValueError", "zip() argument " + (j + 1) + " is " + what + " than argument" + (j == 1 ? " " : "s 1-") + j)
     }
     hostGlobals["map"] = function() {
         var f = arguments[0]
@@ -4605,6 +4626,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (f === pyMInf() || f === 0 - pyMInf()) {
             pyRaise(pyMakeExc("OverflowError", ["cannot convert float infinity to integer"]))
         }
+        if (f == 0) { return 0 }
         return f
     }
     function pyMGcd2(a, b) {
@@ -6852,6 +6874,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (isCplx(v)) { return pyCplx(floNegate(v.real), floNegate(v.imag)) }
             if (pyBoxed(v)) { return boxOp("-", 0, v).v }
             if (typeof v != "number" && typeof v != "boolean") { pyUnaryErr("-", v) }
+            if (v == 0) { return 0 }
             return -v
         }
     }
@@ -7748,6 +7771,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (f - f != 0) { pyRaise(pyMakeExc("OverflowError", ["cannot convert float infinity to integer"])) }
         var t = f < 0 ? 0 - Math.floor(0 - f) : Math.floor(f)
         if (t > bigMaxNum || t < 0 - bigMaxNum) { return bigFromFlo(t) }
+        // An int has no negative zero: int(-0.0) is 0, and so is float() of it.
+        if (t == 0) { return 0 }
         return t
     }
     // bigOf lifts an operand into the boxed world, or answers null when it cannot
@@ -8375,6 +8400,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (op == "*") {
             var smul = l * r
             if (pyOver53(smul)) { return boxOp("*", l, r).v }
+            if (smul == 0) { return 0 }
             return smul
         }
         // Python's `/` is TRUE division: it answers a float even from two ints,
@@ -10153,10 +10179,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (!ct.cplain) { writeTarget(ct.ctgt, v); return }
         var names = ct.cnames
         if (names.length == 1) { scopePut(scopes[scopes.length - 1], names[0], v); return }
-        var it = iterToList(v)
-        for (var i = 0; i < names.length; i++) {
-            scopePut(scopes[scopes.length - 1], names[i], i < it.length ? it[i] : undefined)
+        if (!pyIterable(v)) {
+            pyListErr("TypeError", "cannot unpack non-iterable " + pyTypeOf(v).__name + " object")
         }
+        var it = iterToList(v)
+        pyUnpackCheck(v, it.length, names.length, false)
+        for (var i = 0; i < names.length; i++) { scopePut(scopes[scopes.length - 1], names[i], it[i]) }
     }
     // items = [exprT, clause, clause, ...] where a clause is {cfor, citer} or {cif}.
     // compRun walks the chain recursively, so nested `for`s and interleaved `if`s

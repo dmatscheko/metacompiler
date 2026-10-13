@@ -3668,7 +3668,11 @@ function pyAArith(op, l, r) {
         return pyMkFlo(pyAOperand(l, op, l, r) / pyAOperand(r, op, l, r))
     }
     if (op == "-") { return pyAOperand(l, op, l, r) - pyAOperand(r, op, l, r) }
-    if (op == "*") { return pyAOperand(l, op, l, r) * pyAOperand(r, op, l, r) }
+    if (op == "*") {
+        var p = pyAOperand(l, op, l, r) * pyAOperand(r, op, l, r)
+        if (p == 0) { return 0 }
+        return p
+    }
     return pyAOperand(l, op, l, r) / pyAOperand(r, op, l, r)
 }
 
@@ -4543,7 +4547,10 @@ function js_pybin(opv, l, r) {
         } else if (op == "-") {
             if (l - r < 9007199254740992 && l - r > -9007199254740992) { return l - r }
         } else if (op == "*") {
-            if (l * r < 9007199254740992 && l * r > -9007199254740992) { return l * r }
+            if (l * r < 9007199254740992 && l * r > -9007199254740992) {
+                if (l * r == 0) { return 0 }
+                return l * r
+            }
         } else if (op == "==") {
             return l === r
         } else if (op == "!=") {
@@ -4863,7 +4870,9 @@ function js_pyunary(opv, v) {
     if (pyIsCplx(v)) { return pyNewCplx(pyFloNegate(pyCplxRe(v)), pyFloNegate(pyCplxIm(v))) }
     if (pyIsBig(v)) { return rtABigNeg(v) }
     if (pyIsFlo(v)) { return pyMkFlo(pyFloNegate(v["__flo"])) }
-    return -pyNum(v)
+    var n = pyNum(v)
+    if (n == 0) { return 0 }
+    return -n
 }
 
 // Go: js_pyint and rt.pyIntNew. int(x=0, /, base=10), bound as [positionals,
@@ -5338,6 +5347,8 @@ function pyFToInt(f) {
     if (f != f) { pyRaiseExc("ValueError", "cannot convert float NaN to integer") }
     if (f - f != 0) { pyRaiseExc("OverflowError", "cannot convert float infinity to integer") }
     var t = Math.trunc(f)
+    // An int has no negative zero: int(-0.0) is 0, and so is float() of it.
+    if (t == 0) { return 0 }
     if (Math.abs(t) <= 9007199254740992) { return t }
     return rtABigFromNum(t)
 }
@@ -6152,20 +6163,76 @@ function pyZipRows(srcs) {
     return out
 }
 
+// Go: js_pyzip. zip(*iterables, strict=False), bound as [positionals,
+// keywords]. The sources are stepped in turn, one row at a time, so zip(it, it)
+// pairs consecutive items, and strict= is CPython's ValueError for sources of
+// different lengths.
 function js_pyzip(args) {
-    var srcs = []
+    var pos = args[0]
+    var kw = args[1]
+    pyKwOnly(kw, "zip", "strict", "strict")
+    var strict = pyDTruthy(pyKwArg(kw, "strict"))
+    var ss = []
     var i = 0
-    while (i < args.length) {
-        srcs.push(pyElemsOf(args[i]))
+    while (i < pos.length) {
+        ss.push(pyAStepper(pos[i]))
         i = i + 1
     }
-    var rows = pyZipRows(srcs)
-    var j = 0
-    while (j < rows.length) {
-        pyTup(rows[j])
-        j = j + 1
+    var out = []
+    while (ss.length > 0) {
+        var row = []
+        var k = 0
+        while (k < ss.length) {
+            var st = pyAStep(ss[k])
+            if (st["done"] === true) {
+                if (strict) { pyAZipStrict(ss, k) }
+                return pyMkIter("zip", out)
+            }
+            row.push(st["value"])
+            k = k + 1
+        }
+        out.push(pyTup(row))
     }
-    return pyMkIter("zip", rows)
+    return pyMkIter("zip", out)
+}
+
+// strict zip's check once source k ran out: a later k is shorter than the ones
+// before it; k == 0 asks whether any other source still has an item.
+function pyAZipStrict(ss, k) {
+    var j = k
+    var what = "shorter"
+    if (k == 0) {
+        what = "longer"
+        j = 1
+        while (j < ss.length && pyAStep(ss[j])["done"] === true) { j = j + 1 }
+        if (j == ss.length) { return undefined }
+    }
+    var plural = "s 1-"
+    if (j == 1) { plural = " " }
+    pyRaiseExc("ValueError", "zip() argument " + pyIntStr(j + 1) + " is " + what + " than argument" + plural + pyIntStr(j))
+    return undefined
+}
+
+// Go: rt.pyStepper. Any iterable as something stepped one value at a time, the
+// way a compiled for loop runs (js_pyforsrc): a list by index, anything else
+// through its next.
+function pyAStepper(v) {
+    var s = anytype
+    s = js_pyforsrc(v)
+    if (pyIsArr(s)) { return {a: s, i: 0} }
+    return {g: s}
+}
+function pyAStep(st) {
+    if (st["g"] === undefined) {
+        var a = st["a"]
+        var i = st["i"]
+        if (i >= a.length) { return {value: undefined, done: true} }
+        st["i"] = i + 1
+        return {value: a[i], done: false}
+    }
+    var g = st["g"]
+    var r = g["next"].apply(g, [])
+    return {value: r["value"], done: pyATruthy(r["done"])}
 }
 
 function js_pymapfn(args) {
@@ -11461,6 +11528,7 @@ function pyMInt(f) {
     if (f === pyMInf() || f === 0 - pyMInf()) {
         pyRaiseExc("OverflowError", "cannot convert float infinity to integer")
     }
+    if (f == 0) { return 0 }
     return f
 }
 
