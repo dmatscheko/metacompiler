@@ -666,13 +666,24 @@ func jvCharMembers(o *jsObject) {
 		}
 		return int(rt.toNumber(v))
 	}
-	// Character.toChars: a code point's one or two chars. Twin of
-	// jCharMembers in java-interpreter.abnf.
-	o.set("toChars", jsHostFunc("toChars", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-		cp := int(jvToLong(rt, argAt(args, 0)))
+	// Character.toChars: a code point's one or two chars, and toString(c or
+	// cp) its text. Twin of jCharMembers in java-interpreter.abnf.
+	validCp := func(rt *jsrt, v interface{}) int {
+		cp := code(rt, v)
 		if cp < 0 || cp > 0x10FFFF {
 			rt.jvThrowCls(jvIaeCls, "Not a valid Unicode code point: 0x"+strings.ToUpper(strconv.FormatUint(uint64(uint32(int32(cp))), 16)))
 		}
+		return cp
+	}
+	o.set("toString", jsHostFunc("toString", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		if cp := validCp(rt, argAt(args, 0)); cp < 0x10000 {
+			return jsChar{code: int32(cp)}.text()
+		} else {
+			return string(rune(cp))
+		}
+	}))
+	o.set("toChars", jsHostFunc("toChars", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		cp := validCp(rt, argAt(args, 0))
 		var elems []interface{}
 		for _, u := range utf16.Encode([]rune{rune(cp)}) {
 			elems = append(elems, jsChar{code: int32(u)})
@@ -714,6 +725,12 @@ func jvCharMembers(o *jsObject) {
 			return float64(d)
 		}
 		return float64(-1)
+	}))
+	o.set("hashCode", jsHostFunc("hashCode", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return float64(code(rt, argAt(args, 0)))
+	}))
+	o.set("forDigit", jsHostFunc("forDigit", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return jsChar{code: int32(jxForDigit(int(jvToLong(rt, argAt(args, 0))), int(jvToLong(rt, argAt(args, 1)))))}
 	}))
 	o.set("compare", jsHostFunc("compare", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		return float64(code(rt, argAt(args, 0)) - code(rt, argAt(args, 1)))
@@ -1351,6 +1368,9 @@ func (rt *jsrt) jvBoxType(name string) *jsObject {
 		o.set("toString", jsHostFunc("toString", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			return rt.jvpStr(argAt(args, 0))
 		}))
+		o.set("hashCode", jsHostFunc("hashCode", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return rt.jvHash(jvNarrow(rt, argAt(args, 0), width))
+		}))
 		// Short.compare and Byte.compare answer x - y, Integer and Long the sign.
 		o.set("compare", jsHostFunc("compare", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			if width < 32 {
@@ -1441,6 +1461,10 @@ func (rt *jsrt) jvBoxType(name string) *jsObject {
 			}
 			return float64(-1)
 		})
+		o.set("hashCode", jsHostFunc("hashCode", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			b, _ := argAt(args, 0).(bool)
+			return rt.jvHash(b)
+		}))
 		bin("logicalAnd", func(a, b bool) interface{} { return a && b })
 		bin("logicalOr", func(a, b bool) interface{} { return a || b })
 		bin("logicalXor", func(a, b bool) interface{} { return a != b })
@@ -2711,9 +2735,11 @@ func (rt *jsrt) jvHash(v interface{}) float64 {
 	case jsChar:
 		return float64(x.code)
 	case jsGInt:
-		// Long.hashCode. A byte/short/int box narrows to the same answer,
-		// because its high half is the sign extension the value already has.
+		// Long.hashCode folds the halves; a byte or short box is its value.
 		u := uint64(x.v)
+		if x.w < 64 {
+			return float64(int32(uint32(u)))
+		}
 		return float64(int32(uint32(u>>32) ^ uint32(u)))
 	case jsJFlo:
 		if x.sty == floJavaF {

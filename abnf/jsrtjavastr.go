@@ -169,6 +169,19 @@ func jxCpAt(s []uint16, i int) int {
 	return c
 }
 
+// jxForDigit is Character.forDigit: the lowercase digit d stands for in radix
+// r, 0 for a digit or radix out of range. Twin of jxForDigit in
+// languages/lib/java-strings.js.
+func jxForDigit(d, r int) int {
+	switch {
+	case r < 2 || r > 36 || d < 0 || d >= r:
+		return 0
+	case d < 10:
+		return '0' + d
+	}
+	return 87 + d
+}
+
 // ----- the regex methods -----
 
 func (rt *jsrt) jxRe(pattern string) *rxRe {

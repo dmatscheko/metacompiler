@@ -1,4 +1,5 @@
-// java-map.java -- java.util's Map, HashMap, Set and HashSet, written in Java
+// java-map.java -- java.util's Map, HashMap, LinkedHashMap, TreeMap, Set,
+// HashSet, LinkedHashSet and TreeSet, written in Java
 // and compiled with the program: java-interpreter.abnf and java-to-llvm-ir.abnf
 // load it (after lib/java-util.java, which it builds on) when the program
 // imports or creates one of its types, or uses java.util.stream (jMapWants in
@@ -23,6 +24,23 @@ interface Map<K, V> {
     boolean containsKey(Object key);
     void clear();
     Collection<Map.Entry<K, V>> entrySet();
+
+    // Map.of: an unmodifiable map of up to ten pairs (MapOf).
+    static <K, V> Map<K, V> of() { return new MapOf<K, V>(new Object[]{}); }
+    static <K, V> Map<K, V> of(K k1, V v1) { return new MapOf<K, V>(new Object[]{k1, v1}); }
+    static <K, V> Map<K, V> of(K k1, V v1, K k2, V v2) { return new MapOf<K, V>(new Object[]{k1, v1, k2, v2}); }
+    static <K, V> Map<K, V> of(K k1, V v1, K k2, V v2, K k3, V v3) { return new MapOf<K, V>(new Object[]{k1, v1, k2, v2, k3, v3}); }
+    static <K, V> Map<K, V> of(K k1, V v1, K k2, V v2, K k3, V v3, K k4, V v4) { return new MapOf<K, V>(new Object[]{k1, v1, k2, v2, k3, v3, k4, v4}); }
+    static <K, V> Map<K, V> of(K k1, V v1, K k2, V v2, K k3, V v3, K k4, V v4, K k5, V v5) { return new MapOf<K, V>(new Object[]{k1, v1, k2, v2, k3, v3, k4, v4, k5, v5}); }
+    static <K, V> Map<K, V> of(K k1, V v1, K k2, V v2, K k3, V v3, K k4, V v4, K k5, V v5, K k6, V v6) { return new MapOf<K, V>(new Object[]{k1, v1, k2, v2, k3, v3, k4, v4, k5, v5, k6, v6}); }
+    static <K, V> Map<K, V> of(K k1, V v1, K k2, V v2, K k3, V v3, K k4, V v4, K k5, V v5, K k6, V v6, K k7, V v7) { return new MapOf<K, V>(new Object[]{k1, v1, k2, v2, k3, v3, k4, v4, k5, v5, k6, v6, k7, v7}); }
+    static <K, V> Map<K, V> of(K k1, V v1, K k2, V v2, K k3, V v3, K k4, V v4, K k5, V v5, K k6, V v6, K k7, V v7, K k8, V v8) { return new MapOf<K, V>(new Object[]{k1, v1, k2, v2, k3, v3, k4, v4, k5, v5, k6, v6, k7, v7, k8, v8}); }
+    static <K, V> Map<K, V> of(K k1, V v1, K k2, V v2, K k3, V v3, K k4, V v4, K k5, V v5, K k6, V v6, K k7, V v7, K k8, V v8, K k9, V v9) { return new MapOf<K, V>(new Object[]{k1, v1, k2, v2, k3, v3, k4, v4, k5, v5, k6, v6, k7, v7, k8, v8, k9, v9}); }
+    static <K, V> Map<K, V> of(K k1, V v1, K k2, V v2, K k3, V v3, K k4, V v4, K k5, V v5, K k6, V v6, K k7, V v7, K k8, V v8, K k9, V v9, K k10, V v10) { return new MapOf<K, V>(new Object[]{k1, v1, k2, v2, k3, v3, k4, v4, k5, v5, k6, v6, k7, v7, k8, v8, k9, v9, k10, v10}); }
+    static <K, V> Map.Entry<K, V> entry(K k, V v) {
+        if (k == null || v == null) { throw new NullPointerException(); }
+        return new HashMapNode<K, V>(0, k, v, null);
+    }
 
     interface Entry<K, V> {
         K getKey();
@@ -68,11 +86,23 @@ class HashMapNode<K, V> implements Map.Entry<K, V> {
     public String toString() { return key + "=" + value; }
 }
 
+// A LinkedHashMap's node: also on the list of the entries in insertion order.
+class LinkedNode<K, V> extends HashMapNode<K, V> {
+    LinkedNode<K, V> before;
+    LinkedNode<K, V> after;
+    LinkedNode(int hash, K key, V value, HashMapNode<K, V> next) { super(hash, key, value, next); }
+}
+
 class HashMap<K, V> implements Map<K, V> {
     HashMapNode<K, V>[] table;
     int size;
     int threshold;
     int modCount;
+    // A LinkedHashMap: every node is a LinkedNode on the head..tail list, which
+    // is the order the map iterates in.
+    boolean linked;
+    LinkedNode<K, V> head;
+    LinkedNode<K, V> tail;
 
     public HashMap() {}
     public HashMap(int initialCapacity) {
@@ -159,7 +189,7 @@ class HashMap<K, V> implements Map<K, V> {
         int i = h & (table.length - 1);
         HashMapNode<K, V> p = table[i];
         if (p == null) {
-            table[i] = new HashMapNode<K, V>(h, key, value, null);
+            table[i] = linked ? linkNew(h, key, value, null) : new HashMapNode<K, V>(h, key, value, null);
         } else {
             int count = 0;
             while (true) {
@@ -169,7 +199,7 @@ class HashMap<K, V> implements Map<K, V> {
                     return old;
                 }
                 if (p.next == null) {
-                    p.next = new HashMapNode<K, V>(h, key, value, null);
+                    p.next = linked ? linkNew(h, key, value, null) : new HashMapNode<K, V>(h, key, value, null);
                     if (count >= 7) { longBin(); }
                     break;
                 }
@@ -192,10 +222,18 @@ class HashMap<K, V> implements Map<K, V> {
     // Inserts at the head of bin i, as those three do; `count` is how many keys
     // the bin held.
     void addFirst(int i, int h, K key, V value, int count) {
-        table[i] = new HashMapNode<K, V>(h, key, value, table[i]);
+        table[i] = linked ? linkNew(h, key, value, table[i]) : new HashMapNode<K, V>(h, key, value, table[i]);
         if (count >= 7) { longBin(); }
         modCount++;
         size++;
+    }
+    // A new node at the tail of the insertion-order list.
+    LinkedNode<K, V> linkNew(int h, K key, V value, HashMapNode<K, V> next) {
+        LinkedNode<K, V> e = new LinkedNode<K, V>(h, key, value, next);
+        e.before = tail;
+        if (tail == null) { head = e; } else { tail.after = e; }
+        tail = e;
+        return e;
     }
     static int binCount(HashMapNode<?, ?> e) {
         int n = 0;
@@ -215,6 +253,11 @@ class HashMap<K, V> implements Map<K, V> {
         while (e != null) {
             if (e.hash == h && same(key, e.key)) {
                 if (prev == null) { table[i] = e.next; } else { prev.next = e.next; }
+                if (linked) {
+                    LinkedNode<K, V> l = (LinkedNode<K, V>) e;
+                    if (l.before == null) { head = l.after; } else { l.before.after = l.after; }
+                    if (l.after == null) { tail = l.before; } else { l.after.before = l.before; }
+                }
                 modCount++;
                 size--;
                 return e.value;
@@ -266,6 +309,8 @@ class HashMap<K, V> implements Map<K, V> {
     public V remove(Object key) { return removeKey(key); }
     public void clear() {
         modCount++;
+        head = null;
+        tail = null;
         if (table != null && size > 0) {
             size = 0;
             for (int i = 0; i < table.length; i++) { table[i] = null; }
@@ -406,6 +451,29 @@ class HashMap<K, V> implements Map<K, V> {
     }
 }
 
+// Map.of's map: java's rejects a null and a repeated key when it is made, and
+// every change after. It iterates in HashMap's order, which java leaves
+// unspecified (its own varies from run to run).
+class MapOf<K, V> extends HashMap<K, V> {
+    @SuppressWarnings("unchecked")
+    MapOf(Object[] kv) {
+        for (int i = 0; i < kv.length; i += 2) {
+            if (kv[i] == null || kv[i + 1] == null) { throw new NullPointerException(); }
+            if (putVal((K) kv[i], (V) kv[i + 1], false) != null) { throw new IllegalArgumentException("duplicate key: " + kv[i]); }
+        }
+    }
+    public V put(K key, V value) { throw new UnsupportedOperationException(); }
+    public V putIfAbsent(K key, V value) { throw new UnsupportedOperationException(); }
+    public void putAll(Map<? extends K, ? extends V> m) { throw new UnsupportedOperationException(); }
+    public V remove(Object key) { throw new UnsupportedOperationException(); }
+    public void clear() { throw new UnsupportedOperationException(); }
+    public V computeIfAbsent(K key, java.util.function.Function<? super K, ? extends V> f) { throw new UnsupportedOperationException(); }
+    public V computeIfPresent(K key, java.util.function.BiFunction<? super K, ? super V, ? extends V> f) { throw new UnsupportedOperationException(); }
+    public V compute(K key, java.util.function.BiFunction<? super K, ? super V, ? extends V> f) { throw new UnsupportedOperationException(); }
+    public V merge(K key, V value, java.util.function.BiFunction<? super V, ? super V, ? extends V> f) { throw new UnsupportedOperationException(); }
+    public void replaceAll(java.util.function.BiFunction<? super K, ? super V, ? extends V> f) { throw new UnsupportedOperationException(); }
+}
+
 // The table in bin order, each bin front to back; kind 0 answers the keys, 1 the
 // values, 2 the entries. Fail-fast, as java's is.
 class HashMapItr<K, V> implements Iterator<Object> {
@@ -418,7 +486,7 @@ class HashMapItr<K, V> implements Iterator<Object> {
         this.map = map;
         this.kind = kind;
         expected = map.modCount;
-        advance(null);
+        if (map.linked) { nextNode = map.head; } else { advance(null); }
     }
     void advance(HashMapNode<K, V> from) {
         nextNode = from;
@@ -433,8 +501,32 @@ class HashMapItr<K, V> implements Iterator<Object> {
         if (map.modCount != expected) { throw new ConcurrentModificationException(); }
         HashMapNode<K, V> e = nextNode;
         if (e == null) { throw new NoSuchElementException(); }
-        advance(e.next);
+        if (map.linked) { nextNode = ((LinkedNode<K, V>) e).after; } else { advance(e.next); }
         return kind == 0 ? e.key : (kind == 1 ? (Object) e.value : e);
+    }
+}
+
+// java.util.LinkedHashMap: a HashMap that iterates in insertion order (a put
+// of a key already there keeps its place).
+class LinkedHashMap<K, V> extends HashMap<K, V> {
+    public LinkedHashMap() { linked = true; }
+    public LinkedHashMap(int initialCapacity) {
+        super(initialCapacity);
+        linked = true;
+    }
+    public LinkedHashMap(Map<? extends K, ? extends V> m) {
+        linked = true;
+        putAll(m);
+    }
+    public void forEach(java.util.function.BiConsumer<? super K, ? super V> f) {
+        int mc = modCount;
+        for (LinkedNode<K, V> e = head; e != null && modCount == mc; e = e.after) { f.accept(e.key, e.value); }
+        if (modCount != mc) { throw new ConcurrentModificationException(); }
+    }
+    public void replaceAll(java.util.function.BiFunction<? super K, ? super V, ? extends V> f) {
+        int mc = modCount;
+        for (LinkedNode<K, V> e = head; e != null; e = e.after) { e.value = f.apply(e.key, e.value); }
+        if (modCount != mc) { throw new ConcurrentModificationException(); }
     }
 }
 
@@ -496,6 +588,10 @@ class TreeMap<K, V> implements Map<K, V> {
         this.cmp = cmp;
         keys = new Object[8];
         vals = new Object[8];
+    }
+    public TreeMap(Map<? extends K, ? extends V> m) {
+        this((Comparator<? super K>) null);
+        putAll(m);
     }
     @SuppressWarnings("unchecked")
     int order(Object a, Object b) {
@@ -606,6 +702,9 @@ class TreeMap<K, V> implements Map<K, V> {
     }
     public void forEach(java.util.function.BiConsumer<? super K, ? super V> f) {
         for (int i = 0; i < size; i++) { f.accept(keyAt(i), valAt(i)); }
+    }
+    public void replaceAll(java.util.function.BiFunction<? super K, ? super V, ? extends V> f) {
+        for (int i = 0; i < size; i++) { vals[i] = f.apply(keyAt(i), valAt(i)); }
     }
     Map.Entry<K, V> entryAt(int i) {
         if (i < 0 || i >= size) { return null; }
@@ -729,26 +828,10 @@ class TreeMapItr<E> implements Iterator<E> {
 interface Set<E> extends Collection<E> {
 }
 
-// java.util.HashSet: the keys of a HashMap, as java's is, so it iterates in
-// java's order. A collection's copy starts at the capacity java 24 picks,
-// HashMap.newHashMap(max(size, 12)).
-class HashSet<E> implements Set<E> {
-    HashMap<E, Object> map;
-
-    public HashSet() { map = new HashMap<E, Object>(); }
-    public HashSet(int initialCapacity) { map = new HashMap<E, Object>(initialCapacity); }
-    public HashSet(Collection<? extends E> c) {
-        map = new HashMap<E, Object>((Math.max(c.size(), 12) * 4 + 2) / 3);
-        addAll(c);
-    }
-
-    public int size() { return map.size(); }
-    public boolean isEmpty() { return map.isEmpty(); }
-    public boolean contains(Object o) { return map.containsKey(o); }
-    public boolean add(E e) { return map.put(e, Boolean.TRUE) == null; }
-    public boolean remove(Object o) { return map.remove(o) != null; }
-    public void clear() { map.clear(); }
-    public Iterator<E> iterator() { return map.keySet().iterator(); }
+// The members every Set here answers from size, iterator, contains, add and
+// remove alone.
+abstract class AbstractSet<E> implements Set<E> {
+    public boolean isEmpty() { return size() == 0; }
     public boolean addAll(Collection<? extends E> c) {
         boolean changed = false;
         Iterator<? extends E> it = c.iterator();
@@ -773,7 +856,7 @@ class HashSet<E> implements Set<E> {
             E e = it.next();
             if (filter.test(e)) { gone[n] = e; n++; }
         }
-        for (int i = 0; i < n; i++) { map.remove(gone[i]); any = true; }
+        for (int i = 0; i < n; i++) { remove(gone[i]); any = true; }
         return any;
     }
     public void forEach(java.util.function.Consumer<? super E> action) {
@@ -812,5 +895,69 @@ class HashSet<E> implements Set<E> {
             s = s + (e == this ? "(this Collection)" : "" + e);
         }
         return s + "]";
+    }
+}
+
+// java.util.HashSet: the keys of a HashMap, as java's is, so it iterates in
+// java's order. A collection's copy starts at the capacity java 24 picks,
+// HashMap.newHashMap(max(size, 12)).
+class HashSet<E> extends AbstractSet<E> {
+    HashMap<E, Object> map;
+
+    public HashSet() { map = new HashMap<E, Object>(); }
+    public HashSet(int initialCapacity) { map = new HashMap<E, Object>(initialCapacity); }
+    public HashSet(Collection<? extends E> c) {
+        map = new HashMap<E, Object>((Math.max(c.size(), 12) * 4 + 2) / 3);
+        addAll(c);
+    }
+
+    public int size() { return map.size(); }
+    public boolean contains(Object o) { return map.containsKey(o); }
+    public boolean add(E e) { return map.put(e, Boolean.TRUE) == null; }
+    public boolean remove(Object o) { return map.remove(o) != null; }
+    public void clear() { map.clear(); }
+    public Iterator<E> iterator() { return map.keySet().iterator(); }
+}
+
+// java.util.LinkedHashSet: the keys of a LinkedHashMap, in insertion order.
+class LinkedHashSet<E> extends HashSet<E> {
+    public LinkedHashSet() { map = new LinkedHashMap<E, Object>(); }
+    public LinkedHashSet(int initialCapacity) { map = new LinkedHashMap<E, Object>(initialCapacity); }
+    public LinkedHashSet(Collection<? extends E> c) {
+        map = new LinkedHashMap<E, Object>();
+        addAll(c);
+    }
+}
+
+// java.util.TreeSet: the keys of a TreeMap, in their order.
+class TreeSet<E> extends AbstractSet<E> {
+    TreeMap<E, Object> map;
+
+    public TreeSet() { map = new TreeMap<E, Object>(); }
+    public TreeSet(Comparator<? super E> cmp) { map = new TreeMap<E, Object>(cmp); }
+    public TreeSet(Collection<? extends E> c) {
+        map = new TreeMap<E, Object>();
+        addAll(c);
+    }
+
+    public int size() { return map.size(); }
+    public boolean contains(Object o) { return map.containsKey(o); }
+    public boolean add(E e) { return map.put(e, Boolean.TRUE) == null; }
+    public boolean remove(Object o) { return map.remove(o) != null; }
+    public void clear() { map.clear(); }
+    public Iterator<E> iterator() { return map.keySet().iterator(); }
+    public E first() { return map.firstKey(); }
+    public E last() { return map.lastKey(); }
+    public E floor(E e) { return map.floorKey(e); }
+    public E lower(E e) { return map.lowerKey(e); }
+    public E ceiling(E e) { return map.ceilingKey(e); }
+    public E higher(E e) { return map.higherKey(e); }
+    public E pollFirst() {
+        Map.Entry<E, Object> e = map.pollFirstEntry();
+        return e == null ? null : e.getKey();
+    }
+    public E pollLast() {
+        Map.Entry<E, Object> e = map.pollLastEntry();
+        return e == null ? null : e.getKey();
     }
 }

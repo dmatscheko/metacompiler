@@ -287,6 +287,14 @@ function jxJoin(delim, parts) {
     return out
 }
 
+// Character.forDigit: the lowercase digit d stands for in radix r, '\0' for a
+// digit or radix out of range. Twin of jxForDigit in abnf/jsrtjavastr.go.
+function jxForDigit(d, r) {
+    if (r < 2 || r > 36 || d < 0 || d >= r) { return 0 }
+    if (d < 10) { return 48 + d }
+    return 87 + d
+}
+
 // ----- the regex methods (java.util.regex.Pattern / Matcher) -----
 
 // Java's pattern flags in regex.js's terms: \Q...\E quoting.

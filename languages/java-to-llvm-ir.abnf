@@ -3498,24 +3498,8 @@ HasStatic   = :script(~~
             }
         }
         var parts = splitDots(tgtPath)
-        // String::length - an unbound reference over a java.lang type: the first
-        // argument is the receiver and the rest are the method's arguments. The
-        // call is dispatched as `recv.m(...)` is; of Object's members only
-        // equals takes an argument.
-        if (parts.length == 1 && jUnboundRef(parts[0], methodPart)) {
-            var ubCall = {name: methodPart, args: methodPart == "equals" ? [null] : []}
-            var ubBody = function(b) {
-                var restV = callExt(b, "js_arr_new", [])
-                var r = jEmitArgsFrom(b, restV, 1)
-                var a0 = callExt(r, "js_get", [curF.Params[1], emitNum(r, 0)])
-                r.NewRet(jEmitNamedCall(r, a0, ubCall, restV))
-                return deadBlock()
-            }
-            return function(b) {
-                var idx = emitFunc([], ubBody, false, null)
-                return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
-            }
-        }
+        // String::length - an unbound reference over a java.lang type.
+        if (parts.length == 1 && jUnboundRef(parts[0], methodPart)) { return makeUnboundRef(methodPart) }
         var bodyStmt = function(b) {
             // String::valueOf - java.lang.String's statics, which no scope value
             // carries (see foldCallMember).
@@ -3532,7 +3516,34 @@ HasStatic   = :script(~~
             return deadBlock()
         }
         return function(b) {
+            // Type::m over an instance method (an interface's abstract or
+            // inherited one included) is unbound too. Decided at emit time, when
+            // every declaration is known. Twin of makeMethodRef in
+            // java-interpreter.abnf.
+            if (parts.length == 1 && classNames["$" + parts[0]] == true) {
+                var refKind = lookupMethodKind(parts[0], methodPart)
+                if (refKind == "instance" || (refKind == null && interfaceNames["$" + parts[0]] == true)) {
+                    return makeUnboundRef(methodPart)(b)
+                }
+            }
             var idx = emitFunc([], bodyStmt, false, null)
+            return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
+        }
+    }
+    // An unbound reference: the closure calls methodPart on its first argument
+    // with the rest, dispatched as `recv.m(...)` is; of Object's members only
+    // equals takes an argument.
+    function makeUnboundRef(methodPart) {
+        var ubCall = {name: methodPart, args: methodPart == "equals" ? [null] : []}
+        var ubBody = function(b) {
+            var restV = callExt(b, "js_arr_new", [])
+            var r = jEmitArgsFrom(b, restV, 1)
+            var a0 = callExt(r, "js_get", [curF.Params[1], emitNum(r, 0)])
+            r.NewRet(jEmitNamedCall(r, a0, ubCall, restV))
+            return deadBlock()
+        }
+        return function(b) {
+            var idx = emitFunc([], ubBody, false, null)
             return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
         }
     }

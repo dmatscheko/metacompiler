@@ -47,7 +47,10 @@ import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.ListIterator;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Objects;
@@ -55,6 +58,7 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.stream.Collectors;
 import java.util.stream.DoubleStream;
 import java.util.stream.IntStream;
@@ -144,6 +148,7 @@ class Main {
         S68.run(); // SECTION-CALL 68
         S69.run(); // SECTION-CALL 69
         S70.run(); // SECTION-CALL 70
+        S71.run(); // SECTION-CALL 71
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -3985,5 +3990,80 @@ class S70 {
             + "Illegal repetition range near index 5/a{3,2}/     ^;named capturing group is missing trailing '>' near index 4/(?<n;"
             + "named capturing group <zz> does not exist near index 5/\\k<zz>/     ^;Unknown inline modifier near index 2/(?z)/  ^;"
             + "Illegal hexadecimal escape sequence near index 2/\\xZZ/  ^;Unclosed group near index 3/\\Q(\\E(/   ^;"));
+    }
+}
+
+// ===== SECTION 71: LinkedHashMap, LinkedHashSet, TreeSet, Map.of, the further Collectors and stream sources =====
+//
+// A LinkedHashMap / LinkedHashSet iterates in insertion order, a TreeSet in
+// its order; Map.of is unmodifiable; the Collectors beyond toList / joining /
+// groupingBy; Stream.iterate, concat, flatMap, takeWhile / dropWhile; a
+// method reference over an interface's method is unbound; the static
+// hashCode of the wrappers, and a byte or short box hashes to its value.
+// Every expected value is java 24.0.2's.
+class S71 {
+    static void run() {
+        Map<String, Integer> lm = new LinkedHashMap<>();
+        String[] ks = {"zeta", "alpha", "mid", "beta", "alpha"};
+        for (int i = 0; i < ks.length; i++) { lm.put(ks[i], i); }
+        lm.remove("mid");
+        lm.put("mid", 9);
+        lm.merge("zeta", 100, Integer::sum);
+        StringBuilder fe = new StringBuilder();
+        lm.forEach((k, v) -> fe.append(k.charAt(0)));
+        Set<Integer> ls = new LinkedHashSet<>(List.of(50, 3, 17));
+        ls.add(3);
+        ls.add(-1);
+        TreeSet<String> ts = new TreeSet<>(List.of("pear", "apple", "fig"));
+        ts.add("banana");
+        String col = lm + " " + lm.keySet() + " " + fe + " " + ls + " " + ts + " " + ts.first() + ts.ceiling("c") + ts.lower("apple")
+            + " " + ts.pollLast() + " " + new TreeMap<>(Map.of(3, "c", 1, "a")) + " " + Map.entry("a", 2);
+        Main.check("lh71", col.equals("{zeta=100, alpha=4, beta=3, mid=9} [zeta, alpha, beta, mid] zabm [50, 3, 17, -1]"
+            + " [apple, banana, fig, pear] applefignull pear {1=a, 3=c} a=2"));
+        String ex = "";
+        try { Map.of("k", 1).put("z", 2); } catch (UnsupportedOperationException e) { ex = ex + "U"; }
+        try { Map.of("a", 1, "a", 2); } catch (IllegalArgumentException e) { ex = ex + e.getMessage(); }
+        try { Stream.of("a", "b", "a").collect(Collectors.toMap(x -> x, x -> 1)); } catch (IllegalStateException e) { ex = ex + "|" + e.getMessage(); }
+        Main.check("mo71", ex.equals("Uduplicate key: a|Duplicate key a (attempted merging values 1 and 1)"));
+        List<String> w = List.of("apple", "bob", "cat", "avocado");
+        String cs = w.stream().collect(Collectors.partitioningBy(x -> x.length() > 3)) + " "
+            + w.stream().collect(Collectors.groupingBy(String::length, TreeMap::new, Collectors.counting())) + " "
+            + w.stream().collect(Collectors.toMap(x -> x.charAt(0), x -> 1, Integer::sum)) + " "
+            + w.stream().collect(Collectors.groupingBy(x -> x.charAt(0), Collectors.mapping(x -> x.length(), Collectors.toList()))) + " "
+            + w.stream().collect(Collectors.averagingInt(String::length)) + " " + w.stream().collect(Collectors.summingInt(String::length)) + " "
+            + w.stream().collect(Collectors.maxBy(Comparator.naturalOrder())) + " " + w.stream().collect(Collectors.reducing("", (a, b) -> a + b.charAt(0))) + " "
+            + w.stream().collect(Collectors.collectingAndThen(Collectors.toList(), List::size)) + " "
+            + w.stream().mapToInt(String::length).summaryStatistics() + " " + Stream.of(3, 1, 2).collect(Collectors.toCollection(TreeSet::new));
+        Main.check("co71", cs.equals("{false=[bob, cat], true=[apple, avocado]} {3=2, 5=1, 7=1} {a=2, b=1, c=1} {a=[5, 7], b=[3], c=[3]}"
+            + " 4.5 18 Optional[cat] abca 4 IntSummaryStatistics{count=4, sum=18, min=3, average=4.500000, max=7} [1, 2, 3]"));
+        String st = Stream.iterate(1, x -> x * 2).limit(5).toList() + " " + Stream.iterate(1, x -> x <= 20, x -> x * 3).toList() + " "
+            + Stream.of(List.of(1, 2), List.of(3)).flatMap(List::stream).toList() + " " + Stream.concat(Stream.of("a"), Stream.of("b")).toList() + " "
+            + Stream.of(1, 2, 3, 1).takeWhile(x -> x < 3).toList() + Stream.of(1, 2, 3, 1).dropWhile(x -> x < 3).toList() + " "
+            + Arrays.toString(Stream.of("q", "r").toArray(String[]::new)) + " " + IntStream.iterate(5, x -> x - 2).limit(3).sum();
+        Main.check("st71", st.equals("[1, 2, 4, 8, 16] [1, 3, 9] [1, 2, 3] [a, b] [1, 2][3, 1] [q, r] 9"));
+        List<Integer> nums = new ArrayList<>(List.of(1, 2, 3));
+        nums.addAll(1, List.of(7, 8));
+        ListIterator<Integer> li = nums.listIterator(nums.size());
+        String lr = "";
+        while (li.hasPrevious()) {
+            int v = li.previous();
+            lr = lr + v;
+            if (v == 8) { li.set(80); }
+        }
+        li.add(0);
+        List<String> fl = new ArrayList<>(List.of("x", "y"));
+        Collections.fill(fl, "z");
+        Integer[] desc = {2, 9, 4};
+        Arrays.sort(desc, Collections.reverseOrder());
+        String ut = lr + nums + li.nextIndex() + " " + fl + " " + Arrays.toString(desc) + " " + Collections.binarySearch(List.of(1, 3, 5), 4)
+            + " " + Arrays.deepToString(new Object[]{1, new int[][]{{2}, {3, 4}}, null}) + " " + Optional.of(3).flatMap(x -> Optional.of(x + 1))
+            + " " + Optional.empty().or(() -> Optional.of("o")) + " " + Optional.of("v").orElseThrow(IllegalStateException::new);
+        Main.check("ut71", ut.equals("32871[0, 1, 7, 80, 2, 3]1 [z, z] [9, 4, 2] -3 [1, [[2], [3, 4]], null] Optional[4] Optional[o] v"));
+        Byte nb = (byte) -1;
+        Short ns = (short) -300;
+        String hc = nb.hashCode() + " " + ns.hashCode() + " " + Integer.hashCode(-7) + " " + Long.hashCode(1L << 40) + " " + Short.hashCode((short) -2)
+            + " " + Byte.hashCode((byte) -3) + " " + Character.hashCode('x') + " " + Boolean.hashCode(false) + " " + Character.forDigit(11, 16)
+            + (int) Character.forDigit(7, 2) + " " + Character.toString(97) + Character.toString('b');
+        Main.check("hc71", hc.equals("-1 -300 -7 256 -2 -3 120 1237 b0 ab"));
     }
 }

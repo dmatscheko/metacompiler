@@ -57,6 +57,44 @@ class StreamOfRange implements Iterator<Object> {
     }
 }
 
+// Stream.iterate: seed, then f of the element before, each made when it is
+// read, ending at the first element hasNext rejects (null: never).
+class StreamIterate implements Iterator<Object> {
+    Object cur;
+    java.util.function.UnaryOperator<Object> f;
+    java.util.function.Predicate<Object> more;
+    boolean started;
+    boolean ready;
+    boolean done;
+    StreamIterate(Object seed, java.util.function.UnaryOperator<Object> f, java.util.function.Predicate<Object> more) {
+        cur = seed;
+        this.f = f;
+        this.more = more;
+    }
+    public boolean hasNext() {
+        if (!ready && !done) {
+            if (started) { cur = f.apply(cur); }
+            started = true;
+            ready = true;
+            if (more != null && !more.test(cur)) { done = true; }
+        }
+        return !done;
+    }
+    public Object next() {
+        hasNext();
+        ready = false;
+        return cur;
+    }
+}
+
+// Stream.generate: the supplier's next value, without end.
+class StreamGenerate implements Iterator<Object> {
+    java.util.function.Supplier<Object> s;
+    StreamGenerate(java.util.function.Supplier<Object> s) { this.s = s; }
+    public boolean hasNext() { return true; }
+    public Object next() { return s.get(); }
+}
+
 // Collection.stream(): the collection's iterator is taken at the first read,
 // not when the stream is made, as a late-binding spliterator does.
 class StreamOfCollection implements Iterator<Object> {
@@ -101,6 +139,71 @@ class StreamMap implements Iterator<Object> {
 
 // filter (Predicate.test / IntPredicate.test): hasNext reads ahead to the next
 // element that passes and holds it.
+// flatMap and concat: the elements of each stream f makes of an upstream
+// element, one stream after the other; a null stream contributes none.
+class StreamFlat implements Iterator<Object> {
+    Iterator<Object> up;
+    java.util.function.Function<Object, Object> f;
+    Iterator<Object> cur;
+    StreamFlat(Iterator<Object> up, java.util.function.Function<Object, Object> f) {
+        this.up = up;
+        this.f = f;
+    }
+    public boolean hasNext() {
+        while (cur == null || !cur.hasNext()) {
+            if (!up.hasNext()) { return false; }
+            Object s = f.apply(up.next());
+            cur = s == null ? null : ((BaseStream) s).take();
+        }
+        return true;
+    }
+    public Object next() {
+        if (!hasNext()) { throw new NoSuchElementException(); }
+        return cur.next();
+    }
+}
+
+// takeWhile passes elements until the first that fails p and stops there;
+// dropWhile skips them and passes that one and every one after.
+class StreamWhile implements Iterator<Object> {
+    Iterator<Object> up;
+    java.util.function.Predicate<Object> p;
+    boolean taking;
+    boolean done;
+    Object held;
+    boolean holding;
+    StreamWhile(Iterator<Object> up, java.util.function.Predicate<Object> p, boolean taking) {
+        this.up = up;
+        this.p = p;
+        this.taking = taking;
+    }
+    public boolean hasNext() {
+        if (holding) { return true; }
+        if (done && taking) { return false; }
+        while (up.hasNext()) {
+            Object x = up.next();
+            if (taking) {
+                if (!p.test(x)) {
+                    done = true;
+                    return false;
+                }
+            } else if (!done && p.test(x)) {
+                continue;
+            }
+            done = !taking;
+            held = x;
+            holding = true;
+            return true;
+        }
+        return false;
+    }
+    public Object next() {
+        if (!hasNext()) { throw new NoSuchElementException(); }
+        holding = false;
+        return held;
+    }
+}
+
 class StreamFilter implements Iterator<Object> {
     Iterator<Object> up;
     java.util.function.Predicate<Object> p;
@@ -280,6 +383,18 @@ class Stream<T> extends BaseStream {
     public static <T> Stream<T> of(T... a) { return new Stream<T>(new StreamOfArray(a, 0, a.length)); }
     public static <T> Stream<T> empty() { return new Stream<T>(new StreamOfArray(new Object[0], 0, 0)); }
     static <T> Stream<T> ofCollection(Collection<T> c) { return new Stream<T>(new StreamOfCollection(c)); }
+    @SuppressWarnings("unchecked")
+    public static <T> Stream<T> iterate(T seed, java.util.function.UnaryOperator<T> f) {
+        return new Stream<T>(new StreamIterate(seed, (java.util.function.UnaryOperator<Object>) (Object) f, null));
+    }
+    @SuppressWarnings("unchecked")
+    public static <T> Stream<T> iterate(T seed, java.util.function.Predicate<? super T> more, java.util.function.UnaryOperator<T> f) {
+        return new Stream<T>(new StreamIterate(seed, (java.util.function.UnaryOperator<Object>) (Object) f, (java.util.function.Predicate<Object>) more));
+    }
+    @SuppressWarnings("unchecked")
+    public static <T> Stream<T> generate(java.util.function.Supplier<? extends T> s) {
+        return new Stream<T>(new StreamGenerate((java.util.function.Supplier<Object>) s));
+    }
 
     public <R> Stream<R> map(java.util.function.Function<? super T, ? extends R> f) { return new Stream<R>(new StreamMap(take(), f, StreamMap.OBJ)); }
     public IntStream mapToInt(java.util.function.ToIntFunction<? super T> f) { return new IntStream(new StreamMap(take(), f, StreamMap.INT)); }
@@ -301,6 +416,17 @@ class Stream<T> extends BaseStream {
     @SuppressWarnings("unchecked")
     public Stream<T> sorted(java.util.Comparator<? super T> c) { return new Stream<T>(new StreamSort(take(), (java.util.Comparator<Object>) c)); }
     public Stream<T> distinct() { return new Stream<T>(new StreamDistinct(take())); }
+    @SuppressWarnings("unchecked")
+    public <R> Stream<R> flatMap(java.util.function.Function<? super T, ? extends Stream<? extends R>> f) {
+        return new Stream<R>(new StreamFlat(take(), (java.util.function.Function<Object, Object>) (Object) f));
+    }
+    public static <T> Stream<T> concat(Stream<? extends T> a, Stream<? extends T> b) {
+        return new Stream<T>(new StreamFlat(new StreamOfArray(new Object[]{a, b}, 0, 2), s -> s));
+    }
+    @SuppressWarnings("unchecked")
+    public Stream<T> takeWhile(java.util.function.Predicate<? super T> p) { return new Stream<T>(new StreamWhile(take(), (java.util.function.Predicate<Object>) p, true)); }
+    @SuppressWarnings("unchecked")
+    public Stream<T> dropWhile(java.util.function.Predicate<? super T> p) { return new Stream<T>(new StreamWhile(take(), (java.util.function.Predicate<Object>) p, false)); }
 
     @SuppressWarnings("unchecked")
     public void forEach(java.util.function.Consumer<? super T> f) {
@@ -338,6 +464,13 @@ class Stream<T> extends BaseStream {
         return l;
     }
     public Object[] toArray() { return StreamPipes.drain(take()); }
+    // toArray(String[]::new): the generator's array of the element count.
+    public <A> A[] toArray(java.util.function.IntFunction<A[]> g) {
+        Object[] all = StreamPipes.drain(take());
+        A[] out = g.apply(all.length);
+        System.arraycopy(all, 0, out, 0, all.length);
+        return out;
+    }
     @SuppressWarnings("unchecked")
     public Optional<T> findFirst() {
         Iterator<Object> i = take();
@@ -381,6 +514,12 @@ class IntStream extends BaseStream {
     public static IntStream empty() { return new IntStream(new StreamOfArray(new Object[0], 0, 0)); }
     public static IntStream range(int from, int to) { return new IntStream(new StreamOfRange(from, (long) to - 1, true)); }
     public static IntStream rangeClosed(int from, int to) { return new IntStream(new StreamOfRange(from, to, true)); }
+    public static IntStream iterate(int seed, java.util.function.IntUnaryOperator f) {
+        return new IntStream(new StreamIterate(seed, x -> f.applyAsInt((int) x), null));
+    }
+    public static IntStream iterate(int seed, java.util.function.IntPredicate more, java.util.function.IntUnaryOperator f) {
+        return new IntStream(new StreamIterate(seed, x -> f.applyAsInt((int) x), x -> more.test((int) x)));
+    }
 
     public IntStream map(java.util.function.IntUnaryOperator f) { return new IntStream(new StreamMap(take(), f, StreamMap.INT)); }
     public <U> Stream<U> mapToObj(java.util.function.IntFunction<? extends U> f) { return new Stream<U>(new StreamMap(take(), f, StreamMap.OBJ)); }
@@ -450,6 +589,12 @@ class IntStream extends BaseStream {
         while (i.hasNext()) { r = op.applyAsInt(r, (int) i.next()); }
         return OptionalInt.of(r);
     }
+    public IntSummaryStatistics summaryStatistics() {
+        IntSummaryStatistics st = new IntSummaryStatistics();
+        Iterator<Object> i = take();
+        while (i.hasNext()) { st.accept((int) i.next()); }
+        return st;
+    }
     public int[] toArray() {
         Object[] all = StreamPipes.drain(take());
         int[] out = new int[all.length];
@@ -470,6 +615,30 @@ class IntStream extends BaseStream {
             if (p.test((int) i.next()) == want) { return true; }
         }
         return false;
+    }
+}
+
+// java.util.IntSummaryStatistics: count, sum, min and max of the ints seen;
+// with none, min is Integer.MAX_VALUE and max Integer.MIN_VALUE.
+class IntSummaryStatistics {
+    long count;
+    long sum;
+    int min = Integer.MAX_VALUE;
+    int max = Integer.MIN_VALUE;
+
+    public void accept(int x) {
+        count++;
+        sum += x;
+        min = Math.min(min, x);
+        max = Math.max(max, x);
+    }
+    public long getCount() { return count; }
+    public long getSum() { return sum; }
+    public int getMin() { return min; }
+    public int getMax() { return max; }
+    public double getAverage() { return count > 0 ? (double) sum / count : 0.0; }
+    public String toString() {
+        return String.format("IntSummaryStatistics{count=%d, sum=%d, min=%d, average=%f, max=%d}", count, sum, min, getAverage(), max);
     }
 }
 
@@ -667,9 +836,13 @@ class StreamJoiner {
     }
 }
 
-// counting's container.
-class StreamCounter {
+// The container of counting, the summing and averaging collectors, minBy,
+// maxBy and reducing: a count, an integral and a floating sum, and a value.
+class StreamAcc {
     long n;
+    long sum;
+    double dsum;
+    Object v;
 }
 
 final class Collectors {
@@ -711,7 +884,146 @@ final class Collectors {
             return m;
         });
     }
+    // groupingBy into the map mapFactory makes (TreeMap::new): the same
+    // computeIfAbsent and replaceAll, on that map.
+    @SuppressWarnings("unchecked")
+    public static <T, K, D, A, M extends Map<K, D>> Collector<T, ?, M> groupingBy(java.util.function.Function<? super T, ? extends K> f,
+            java.util.function.Supplier<M> mapFactory, Collector<? super T, A, D> ds) {
+        return new Collector<T, Object, M>(() -> mapFactory.get(), (m, x) -> {
+            Object k = f.apply((T) x);
+            if (k == null) { throw new NullPointerException("element cannot be mapped to a null key"); }
+            ds.accumulator.accept(((Map<Object, Object>) m).computeIfAbsent(k, key -> ds.supplier.get()), x);
+        }, m -> {
+            ((Map<Object, Object>) m).replaceAll((k, v) -> ds.finisher.apply(v));
+            return m;
+        });
+    }
+    // partitioningBy: both keys always present, false first, as java's
+    // Partition map prints.
+    public static <T> Collector<T, ?, Map<Boolean, List<T>>> partitioningBy(java.util.function.Predicate<? super T> p) {
+        return partitioningBy(p, toList());
+    }
+    @SuppressWarnings("unchecked")
+    public static <T, D, A> Collector<T, ?, Map<Boolean, D>> partitioningBy(java.util.function.Predicate<? super T> p,
+            Collector<? super T, A, D> ds) {
+        return new Collector<T, Object, Map<Boolean, D>>(() -> {
+            TreeMap<Object, Object> m = new TreeMap<Object, Object>();
+            m.put(Boolean.FALSE, ds.supplier.get());
+            m.put(Boolean.TRUE, ds.supplier.get());
+            return m;
+        }, (m, x) -> ds.accumulator.accept(((TreeMap<Object, Object>) m).get(p.test((T) x)), x), m -> {
+            ((TreeMap<Object, Object>) m).replaceAll((k, v) -> ds.finisher.apply(v));
+            return m;
+        });
+    }
+    // toMap: a repeated key is an IllegalStateException naming both values,
+    // unless a merge function combines them.
+    @SuppressWarnings("unchecked")
+    public static <T, K, U> Collector<T, ?, Map<K, U>> toMap(java.util.function.Function<? super T, ? extends K> kf,
+            java.util.function.Function<? super T, ? extends U> vf) {
+        return new Collector<T, Object, Map<K, U>>(() -> new HashMap<Object, Object>(), (m, x) -> {
+            Object k = kf.apply((T) x);
+            Object v = vf.apply((T) x);
+            if (v == null) { throw new NullPointerException(); }
+            Object old = ((HashMap<Object, Object>) m).putIfAbsent(k, v);
+            if (old != null) { throw new IllegalStateException("Duplicate key " + k + " (attempted merging values " + old + " and " + v + ")"); }
+        }, m -> m);
+    }
+    public static <T, K, U> Collector<T, ?, Map<K, U>> toMap(java.util.function.Function<? super T, ? extends K> kf,
+            java.util.function.Function<? super T, ? extends U> vf, java.util.function.BinaryOperator<U> merge) {
+        return toMap(kf, vf, merge, () -> new HashMap<K, U>());
+    }
+    @SuppressWarnings("unchecked")
+    public static <T, K, U, M extends Map<K, U>> Collector<T, ?, M> toMap(java.util.function.Function<? super T, ? extends K> kf,
+            java.util.function.Function<? super T, ? extends U> vf, java.util.function.BinaryOperator<U> merge,
+            java.util.function.Supplier<M> mapFactory) {
+        return new Collector<T, Object, M>(() -> mapFactory.get(),
+            (m, x) -> ((Map<Object, Object>) m).merge(kf.apply((T) x), vf.apply((T) x), (java.util.function.BinaryOperator<Object>) merge),
+            m -> m);
+    }
+    @SuppressWarnings("unchecked")
+    public static <T, C extends Collection<T>> Collector<T, ?, C> toCollection(java.util.function.Supplier<C> f) {
+        return new Collector<T, Object, C>(() -> f.get(), (c, x) -> ((Collection<Object>) c).add(x), c -> c);
+    }
+    @SuppressWarnings("unchecked")
+    public static <T, U, A, R> Collector<T, ?, R> mapping(java.util.function.Function<? super T, ? extends U> f, Collector<? super U, A, R> ds) {
+        return new Collector<T, Object, R>(ds.supplier, (c, x) -> ds.accumulator.accept(c, f.apply((T) x)), ds.finisher);
+    }
+    @SuppressWarnings("unchecked")
+    public static <T, A, R> Collector<T, ?, R> filtering(java.util.function.Predicate<? super T> p, Collector<? super T, A, R> ds) {
+        return new Collector<T, Object, R>(ds.supplier, (c, x) -> { if (p.test((T) x)) { ds.accumulator.accept(c, x); } }, ds.finisher);
+    }
+    @SuppressWarnings("unchecked")
+    public static <T, A, R, RR> Collector<T, A, RR> collectingAndThen(Collector<T, A, R> ds, java.util.function.Function<R, RR> f) {
+        return new Collector<T, A, RR>(ds.supplier, ds.accumulator, c -> f.apply((R) ds.finisher.apply(c)));
+    }
     public static <T> Collector<T, ?, Long> counting() {
-        return new Collector<T, Object, Long>(() -> new StreamCounter(), (k, x) -> ((StreamCounter) k).n++, k -> (long) ((StreamCounter) k).n);
+        return new Collector<T, Object, Long>(() -> new StreamAcc(), (k, x) -> ((StreamAcc) k).n++, k -> (long) ((StreamAcc) k).n);
+    }
+    @SuppressWarnings("unchecked")
+    public static <T> Collector<T, ?, Integer> summingInt(java.util.function.ToIntFunction<? super T> f) {
+        return new Collector<T, Object, Integer>(() -> new StreamAcc(), (a, x) -> ((StreamAcc) a).sum += f.applyAsInt((T) x),
+                                                 a -> (int) ((StreamAcc) a).sum);
+    }
+    @SuppressWarnings("unchecked")
+    public static <T> Collector<T, ?, Long> summingLong(java.util.function.ToLongFunction<? super T> f) {
+        return new Collector<T, Object, Long>(() -> new StreamAcc(), (a, x) -> ((StreamAcc) a).sum += f.applyAsLong((T) x),
+                                              a -> ((StreamAcc) a).sum);
+    }
+    @SuppressWarnings("unchecked")
+    public static <T> Collector<T, ?, Double> summingDouble(java.util.function.ToDoubleFunction<? super T> f) {
+        return new Collector<T, Object, Double>(() -> new StreamAcc(), (a, x) -> ((StreamAcc) a).dsum += f.applyAsDouble((T) x),
+                                                a -> ((StreamAcc) a).dsum);
+    }
+    // The averages: the sum over the count, 0.0 for no element.
+    static double mean(StreamAcc a, boolean integral) {
+        if (a.n == 0) { return 0.0; }
+        return (integral ? (double) a.sum : a.dsum) / a.n;
+    }
+    @SuppressWarnings("unchecked")
+    public static <T> Collector<T, ?, Double> averagingInt(java.util.function.ToIntFunction<? super T> f) {
+        return new Collector<T, Object, Double>(() -> new StreamAcc(), (a, x) -> {
+            ((StreamAcc) a).sum += f.applyAsInt((T) x);
+            ((StreamAcc) a).n++;
+        }, a -> mean((StreamAcc) a, true));
+    }
+    @SuppressWarnings("unchecked")
+    public static <T> Collector<T, ?, Double> averagingLong(java.util.function.ToLongFunction<? super T> f) {
+        return new Collector<T, Object, Double>(() -> new StreamAcc(), (a, x) -> {
+            ((StreamAcc) a).sum += f.applyAsLong((T) x);
+            ((StreamAcc) a).n++;
+        }, a -> mean((StreamAcc) a, true));
+    }
+    @SuppressWarnings("unchecked")
+    public static <T> Collector<T, ?, Double> averagingDouble(java.util.function.ToDoubleFunction<? super T> f) {
+        return new Collector<T, Object, Double>(() -> new StreamAcc(), (a, x) -> {
+            ((StreamAcc) a).dsum += f.applyAsDouble((T) x);
+            ((StreamAcc) a).n++;
+        }, a -> mean((StreamAcc) a, false));
+    }
+    // minBy / maxBy: the first of equal extremes, as an Optional.
+    @SuppressWarnings("unchecked")
+    public static <T> Collector<T, ?, Optional<T>> minBy(Comparator<? super T> c) {
+        return reducing((a, b) -> ((Comparator<Object>) c).compare(a, b) <= 0 ? a : b);
+    }
+    @SuppressWarnings("unchecked")
+    public static <T> Collector<T, ?, Optional<T>> maxBy(Comparator<? super T> c) {
+        return reducing((a, b) -> ((Comparator<Object>) c).compare(a, b) >= 0 ? a : b);
+    }
+    @SuppressWarnings("unchecked")
+    public static <T> Collector<T, ?, Optional<T>> reducing(java.util.function.BinaryOperator<T> op) {
+        return new Collector<T, Object, Optional<T>>(() -> new StreamAcc(), (a, x) -> {
+            StreamAcc s = (StreamAcc) a;
+            s.v = s.n == 0 ? x : op.apply((T) s.v, (T) x);
+            s.n++;
+        }, a -> ((StreamAcc) a).n == 0 ? Optional.empty() : Optional.of(((StreamAcc) a).v));
+    }
+    @SuppressWarnings("unchecked")
+    public static <T> Collector<T, ?, T> reducing(T identity, java.util.function.BinaryOperator<T> op) {
+        return new Collector<T, Object, T>(() -> {
+            StreamAcc s = new StreamAcc();
+            s.v = identity;
+            return s;
+        }, (a, x) -> ((StreamAcc) a).v = op.apply((T) ((StreamAcc) a).v, (T) x), a -> ((StreamAcc) a).v);
     }
 }

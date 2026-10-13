@@ -944,7 +944,7 @@ function jUtilWants(path) {
     var rest = path.substring(10)
     var dot = rest.indexOf(".")
     if (dot >= 0) { rest = rest.substring(0, dot) }
-    return ",ArrayList,List,Collection,Comparator,Iterator,NoSuchElementException,ConcurrentModificationException,AbstractList,Arrays,Optional,OptionalInt,OptionalLong,OptionalDouble,Map,HashMap,Objects,Collections,Queue,Deque,ArrayDeque,TreeMap,".indexOf("," + rest + ",") >= 0
+    return ",ArrayList,List,ListIterator,Collection,Comparator,Iterator,NoSuchElementException,ConcurrentModificationException,AbstractList,Arrays,Optional,OptionalInt,OptionalLong,OptionalDouble,Map,HashMap,Objects,Collections,Queue,Deque,ArrayDeque,TreeMap,".indexOf("," + rest + ",") >= 0
 }
 
 // Does this import, or the class a `new` creates, name a type lib/java-map.java
@@ -956,7 +956,9 @@ var jMapWant = false
 function jMapWants(path) {
     return path == "java.util.Map" || path == "java.util.HashMap" || path == "java.util.Map.Entry"
         || path == "java.util.Set" || path == "java.util.HashSet" || path == "java.util.TreeMap"
-        || path == "HashMap" || path == "HashSet" || path == "TreeMap" || path == "java.base"
+        || path == "java.util.LinkedHashMap" || path == "java.util.LinkedHashSet" || path == "java.util.TreeSet"
+        || path == "HashMap" || path == "HashSet" || path == "TreeMap" || path == "LinkedHashMap"
+        || path == "LinkedHashSet" || path == "TreeSet" || path == "java.base"
 }
 
 // Does this import name a java.util.stream type? Then the grammar compiles

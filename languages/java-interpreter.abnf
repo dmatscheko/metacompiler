@@ -2754,6 +2754,7 @@ HasStatic   = :script(~~
         valueOf: function(v, radix) { return typeof v == "string" ? jParseInt(v, 32, radix) : jNarrow(v, 32) },
         toString: function(v, radix) { return jRadixStr(v, 32, radix, false) },
         compare: function(a, b) { return jCmp("<", a, b) ? 0 - 1 : (jCmp(">", a, b) ? 1 : 0) },
+        hashCode: function(v) { return jHash(jNarrow(v, 32)) },
         max: function(a, b) { return jCmp(">", a, b) ? jNarrow(a, 32) : jNarrow(b, 32) },
         min: function(a, b) { return jCmp("<", a, b) ? jNarrow(a, 32) : jNarrow(b, 32) }
     }
@@ -2768,6 +2769,7 @@ HasStatic   = :script(~~
         valueOf: function(v, radix) { return typeof v == "string" ? jParseInt(v, 64, radix) : jNarrow(v, 64) },
         toString: function(v, radix) { return jRadixStr(v, 64, radix, false) },
         compare: function(a, b) { return jCmp("<", a, b) ? 0 - 1 : (jCmp(">", a, b) ? 1 : 0) },
+        hashCode: function(v) { return jHash(jNarrow(v, 64)) },
         max: function(a, b) { return jCmp(">", a, b) ? jNarrow(a, 64) : jNarrow(b, 64) },
         min: function(a, b) { return jCmp("<", a, b) ? jNarrow(a, 64) : jNarrow(b, 64) }
     }
@@ -2783,10 +2785,10 @@ HasStatic   = :script(~~
     // languages/lib/java-rt.metajs.
     hostGlobals["Byte"] = {MAX_VALUE: szMake(i64Make(0, 127), 8, false),
                            MIN_VALUE: szMake(i64Make(0xffffffff, 0xffffff80), 8, false), SIZE: 8, BYTES: 1,
-                           compare: function(a, b) { return jI(a) - jI(b) }}
+                           compare: function(a, b) { return jI(a) - jI(b) }, hashCode: function(v) { return jI(v) }}
     hostGlobals["Short"] = {MAX_VALUE: szMake(i64Make(0, 32767), 16, false),
                             MIN_VALUE: szMake(i64Make(0xffffffff, 0xffff8000), 16, false), SIZE: 16, BYTES: 2,
-                            compare: function(a, b) { return jI(a) - jI(b) }}
+                            compare: function(a, b) { return jI(a) - jI(b) }, hashCode: function(v) { return jI(v) }}
     hostGlobals["Character"] = {MAX_VALUE: {__char: 65535}, MIN_VALUE: {__char: 0}, SIZE: 16, BYTES: 2}
     // Double / Boolean carry only a subset of their members. A member NOT on one
     // of these descriptors reads as null rather than aborting, as Character's
@@ -2819,10 +2821,15 @@ HasStatic   = :script(~~
     // languages/lib/java-rt.metajs.
     function jCharMembers(o) {
         var code = function(v) { return jIsChar(v) ? v.__char : jNum(v) }
-        o.toChars = function(v) {
-            var cp = jNum(v)
+        // Character.toString(c or cp): a code point's text, as toChars checks it.
+        var cpStr = function(v) {
+            var cp = code(v)
             if (cp < 0 || cp > 1114111) { jThrowExc("IllegalArgumentException", "Not a valid Unicode code point: 0x" + unicodeCase(jxHex32(cp), 3)) }
-            var u = jxCpStr(cp)
+            return jxCpStr(cp)
+        }
+        o.toString = cpStr
+        o.toChars = function(v) {
+            var u = cpStr(v)
             var a = []
             for (var i = 0; i < u.length; i++) { a.push(jChar(u.charCodeAt(i))) }
             return jArrTag(a, "[C")
@@ -2839,6 +2846,8 @@ HasStatic   = :script(~~
         o.toLowerCase = function(v) { return like(v, jxChLo(code(v))) }
         o.getNumericValue = function(v) { return jcNumericValue(code(v)) }
         o.digit = function(v, radix) { var d = jcDigitVal(code(v)); return d < jNum(radix) ? d : 0 - 1 }
+        o.hashCode = function(v) { return code(v) }
+        o.forDigit = function(d, radix) { return jChar(jxForDigit(jNum(d), jNum(radix))) }
         o.compare = function(a, b) { return code(a) - code(b) }
         o.valueOf = function(v) { return v }
     }
@@ -2905,6 +2914,7 @@ HasStatic   = :script(~~
                               valueOf: function(v) { return jBoolOf(v) },
                               parseBoolean: function(v) { return jBoolOf(v) },
                               compare: function(a, b) { return a === b ? 0 : (a === true ? 1 : 0 - 1) },
+                              hashCode: function(v) { return jHash(v === true) },
                               logicalAnd: function(a, b) { return a === true && b === true },
                               logicalOr: function(a, b) { return a === true || b === true },
                               logicalXor: function(a, b) { return a !== b },
@@ -4854,6 +4864,16 @@ HasStatic   = :script(~~
                 for (var k = 1; k < parts.length; k++) { recv = core.getField(recv, parts[k]) }
                 var argv = []
                 for (var a = 0; a < arguments.length; a++) { argv.push(arguments[a]) }
+                // Type::m over an instance method (an interface's abstract or
+                // inherited one included) is unbound: m is dispatched on the
+                // first argument, as a call on it would be. Twin of
+                // makeMethodRef in java-to-llvm-ir.abnf.
+                if (parts.length == 1 && argv.length > 0 && recv != null && recv.__isclass === true) {
+                    var kind = jLookupKind(recv.__name, methodPart)
+                    if (kind == "instance" || (kind == null && recv.__isiface === true)) {
+                        return mcall(argv[0], methodPart, argv.slice(1))
+                    }
+                }
                 return mcall(recv, methodPart, argv)
             }
         }
@@ -6034,7 +6054,8 @@ HasStatic   = :script(~~
             var db = jDblBits(v.__flo)
             return db.hi ^ db.lo
         }
-        if (jIsSz(v)) { var p = szPair(v); return p.h ^ p.l }
+        // Long.hashCode folds the halves; a byte or short box is its value.
+        if (jIsSz(v)) { var p = szPair(v); return v.w < 64 ? p.l | 0 : p.h ^ p.l }
         if (typeof v == "number") { return v | 0 }
         if (Array.isArray(v)) { return jIdNum(v) }
         if (typeof v == "object" && v.__class != undefined) {

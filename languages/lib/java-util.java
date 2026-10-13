@@ -100,6 +100,15 @@ interface Collection<E> {
     default java.util.stream.Stream<E> stream() { return Stream.ofCollection(this); }
 }
 
+interface ListIterator<E> extends Iterator<E> {
+    boolean hasPrevious();
+    E previous();
+    int nextIndex();
+    int previousIndex();
+    void set(E e);
+    void add(E e);
+}
+
 interface List<E> extends Collection<E> {
     int size();
     boolean isEmpty();
@@ -239,15 +248,20 @@ class ArrayList<E> implements List<E> {
         elems = new Object[elems.length];
         count = 0;
     }
-    public boolean addAll(Collection<? extends E> c) {
+    public boolean addAll(Collection<? extends E> c) { return addAll(count, c); }
+    public boolean addAll(int index, Collection<? extends E> c) {
         writable();
+        if (index < 0 || index > count) {
+            throw new IndexOutOfBoundsException("Index: " + index + ", Size: " + count);
+        }
         Object[] all = new Object[c.size()];
         int n = 0;
         Iterator<? extends E> it = c.iterator();
         while (it.hasNext()) { all[n] = it.next(); n++; }
         modCount++;
         while (elems.length - count < n) { grow(); }
-        System.arraycopy(all, 0, elems, count, n);
+        System.arraycopy(elems, index, elems, index + n, count - index);
+        System.arraycopy(all, 0, elems, index, n);
         count = count + n;
         return n > 0;
     }
@@ -265,7 +279,12 @@ class ArrayList<E> implements List<E> {
         if (out.length > count) { out[count] = null; }
         return out;
     }
-    public Iterator<E> iterator() { return new ArrayListItr<E>(this); }
+    public Iterator<E> iterator() { return new ArrayListItr<E>(this, 0); }
+    public ListIterator<E> listIterator() { return new ArrayListItr<E>(this, 0); }
+    public ListIterator<E> listIterator(int index) {
+        if (index < 0 || index > count) { throw new IndexOutOfBoundsException("Index: " + index); }
+        return new ArrayListItr<E>(this, index);
+    }
     // Stable, and c == null is natural order (List#sort).
     @SuppressWarnings("unchecked")
     public void replaceAll(java.util.function.UnaryOperator<E> op) {
@@ -353,15 +372,16 @@ class ConcurrentModificationException extends RuntimeException {
 // Fail-fast: next() throws once the list changed size behind the iterator. A
 // loop that removes the next-to-last element therefore ends quietly, because
 // hasNext() is a plain cursor != size test, as in java.
-class ArrayListItr<E> implements Iterator<E> {
+class ArrayListItr<E> implements ListIterator<E> {
     ArrayList<E> list;
     int cursor;
     int expected;
     // The index next() answered last, -1 once remove() has used it.
     int lastRet = -1;
 
-    ArrayListItr(ArrayList<E> list) {
+    ArrayListItr(ArrayList<E> list, int index) {
         this.list = list;
+        cursor = index;
         expected = list.modCount;
     }
     public boolean hasNext() { return cursor != list.count; }
@@ -378,6 +398,29 @@ class ArrayListItr<E> implements Iterator<E> {
         if (list.modCount != expected) { throw new ConcurrentModificationException(); }
         list.remove(lastRet);
         cursor = lastRet;
+        lastRet = -1;
+        expected = list.modCount;
+    }
+    public boolean hasPrevious() { return cursor != 0; }
+    @SuppressWarnings("unchecked")
+    public E previous() {
+        if (list.modCount != expected) { throw new ConcurrentModificationException(); }
+        if (cursor <= 0) { throw new NoSuchElementException(); }
+        cursor--;
+        lastRet = cursor;
+        return (E) list.elems[cursor];
+    }
+    public int nextIndex() { return cursor; }
+    public int previousIndex() { return cursor - 1; }
+    public void set(E e) {
+        if (lastRet < 0) { throw new IllegalStateException(); }
+        if (list.modCount != expected) { throw new ConcurrentModificationException(); }
+        list.set(lastRet, e);
+    }
+    public void add(E e) {
+        if (list.modCount != expected) { throw new ConcurrentModificationException(); }
+        list.add(cursor, e);
+        cursor++;
         lastRet = -1;
         expected = list.modCount;
     }
@@ -606,6 +649,31 @@ final class Collections {
         for (int i = 0; i < elements.length; i++) { if (c.add(elements[i])) { changed = true; } }
         return changed;
     }
+    @SuppressWarnings("unchecked")
+    public static <T> Comparator<T> reverseOrder() { return (Comparator<T>) Comparator.reverseOrder(); }
+    public static <T> Comparator<T> reverseOrder(Comparator<T> c) {
+        if (c == null) { return reverseOrder(); }
+        return c.reversed();
+    }
+    // binarySearch: the index of key in the sorted list, else -(insertion point) - 1.
+    public static <T> int binarySearch(List<? extends Comparable<? super T>> list, T key) { return binarySearch(list, key, null); }
+    @SuppressWarnings("unchecked")
+    public static <T> int binarySearch(List<? extends T> list, T key, Comparator<? super T> c) {
+        int lo = 0;
+        int hi = list.size() - 1;
+        while (lo <= hi) {
+            int mid = (lo + hi) >>> 1;
+            Object v = list.get(mid);
+            int r = c == null ? ((Comparable<Object>) v).compareTo(key) : ((Comparator<Object>) c).compare(v, key);
+            if (r < 0) { lo = mid + 1; }
+            else if (r > 0) { hi = mid - 1; }
+            else { return mid; }
+        }
+        return -(lo + 1);
+    }
+    public static <T> void fill(List<? super T> list, T obj) {
+        for (int i = 0; i < list.size(); i++) { list.set(i, obj); }
+    }
 }
 
 // java.util.Queue, Deque and ArrayDeque: a circular buffer that doubles when
@@ -788,6 +856,29 @@ class Arrays {
             if (i > 0) { s = s + ", "; }
             s = s + a[i];
         }
+        return s + "]";
+    }
+    // deepToString: a nested array by its own elements, and one that contains
+    // itself (an array on the path down) as "[...]".
+    public static String deepToString(Object[] a) {
+        if (a == null) { return "null"; }
+        return deep(a, new ArrayList<Object>());
+    }
+    static String deep(Object[] a, List<Object> path) {
+        path.add(a);
+        String s = "[";
+        for (int i = 0; i < a.length; i++) {
+            if (i > 0) { s = s + ", "; }
+            Object e = a[i];
+            if (e == null || e.getClass().getName().charAt(0) != '[') {
+                s = s + e;
+                continue;
+            }
+            boolean cycle = false;
+            for (int j = 0; j < path.size(); j++) { if (path.get(j) == e) { cycle = true; } }
+            s = s + (cycle ? "[...]" : deep((Object[]) e, path));
+        }
+        path.remove(path.size() - 1);
         return s + "]";
     }
     public static int hashCode(Object[] a) {
@@ -987,6 +1078,27 @@ final class Optional<T> {
     }
     public Optional<T> filter(java.util.function.Predicate<? super T> p) {
         return value == null || p.test(value) ? this : empty();
+    }
+    @SuppressWarnings("unchecked")
+    public <U> Optional<U> flatMap(java.util.function.Function<? super T, ? extends Optional<? extends U>> f) {
+        if (value == null) { return empty(); }
+        Optional<U> r = (Optional<U>) f.apply(value);
+        if (r == null) { throw new NullPointerException(); }
+        return r;
+    }
+    @SuppressWarnings("unchecked")
+    public Optional<T> or(java.util.function.Supplier<? extends Optional<? extends T>> f) {
+        if (value != null) { return this; }
+        Optional<T> r = (Optional<T>) f.get();
+        if (r == null) { throw new NullPointerException(); }
+        return r;
+    }
+    public void ifPresentOrElse(java.util.function.Consumer<? super T> f, Runnable other) {
+        if (value != null) { f.accept(value); } else { other.run(); }
+    }
+    public <X extends Throwable> T orElseThrow(java.util.function.Supplier<? extends X> f) throws X {
+        if (value == null) { throw f.get(); }
+        return value;
     }
     public boolean equals(Object o) {
         if (o == this) { return true; }

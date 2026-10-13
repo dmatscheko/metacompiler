@@ -822,6 +822,7 @@ function jvBoxType(name) {
             if (a === true) { return 1 }
             return 0 - 1
         }
+        o["hashCode"] = function(v) { return js_jhash(v === true) }
         o["logicalAnd"] = function(a, b) { return a === true && b === true }
         o["logicalOr"] = function(a, b) { return a === true || b === true }
         o["logicalXor"] = function(a, b) { return a !== b }
@@ -1371,6 +1372,7 @@ function jvAddCommon(o, width, size, bytes) {
     o["BYTES"] = bytes
     o["valueOf"] = function(v) { return jvNarrow(v, width) }
     o["toString"] = function(v) { return jpStr(v) }
+    o["hashCode"] = function(v) { return js_jhash(jvNarrow(v, width)) }
     // Short.compare and Byte.compare answer x - y, Integer and Long the sign.
     o["compare"] = function(a, b) {
         if (width < 32) { return jvI(a) - jvI(b) }
@@ -2746,7 +2748,11 @@ function js_jhash(v) {
         var db = jvDblBits(floNum(v))
         return db["hi"] ^ db["lo"]
     }
-    if (sintIs(v)) { return sintHi(v) ^ sintLo(v) }
+    // Long.hashCode folds the halves; a byte or short box is its value.
+    if (sintIs(v)) {
+        if (sintWidth(v) < 64) { return sintLo(v) | 0 }
+        return sintHi(v) ^ sintLo(v)
+    }
     if (typeof v == "number") { return jvI(v) }
     if (Array.isArray(v)) { return jpIdNum(v) }
     if (typeof v == "object") {
@@ -3159,13 +3165,18 @@ function jvCharLike(v, c) {
     if (jvIsChar(v)) { return jvChar(c) }
     return c
 }
+// Character.toString(c or cp): a code point's text; an invalid one is
+// toChars's IllegalArgumentException.
+function jvCpStr(cp) {
+    if (cp < 0 || cp > 1114111) { jvThrowCls(jvIaeCls, "Not a valid Unicode code point: 0x" + unicodeCase(jxHex32(cp), 3)) }
+    return jxCpStr(cp)
+}
 function jvCharMembers(o) {
     // Character.toChars: a code point's one or two chars. Twin of jCharMembers
     // in java-interpreter.abnf.
+    o["toString"] = function(v) { return jvCpStr(jvCharCode(v)) }
     o["toChars"] = function(v) {
-        var cp = jvI(v)
-        if (cp < 0 || cp > 1114111) { jvThrowCls(jvIaeCls, "Not a valid Unicode code point: 0x" + unicodeCase(jxHex32(cp), 3)) }
-        var u = jxCpStr(cp)
+        var u = jvCpStr(jvCharCode(v))
         var a = []
         var i = 0
         while (i < u.length) {
@@ -3192,6 +3203,8 @@ function jvCharMembers(o) {
         if (d < rtjNum(radix)) { return d }
         return 0 - 1
     }
+    o["hashCode"] = function(v) { return jvCharCode(v) }
+    o["forDigit"] = function(d, radix) { return jvChar(jxForDigit(rtjNum(d), rtjNum(radix))) }
     o["compare"] = function(a, b) { return jvCharCode(a) - jvCharCode(b) }
     o["valueOf"] = function(v) { return v }
 }
