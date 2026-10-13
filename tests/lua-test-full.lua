@@ -400,6 +400,23 @@ function s15()
     check("tbl8", fk[2], "two")
     local one = {5;}                    -- trailing semicolon
     check("tbl9", one[1], 5)
+    -- nil and NaN are no table keys: a write under one is an error, a read is nil.
+    local K = {nil, 0/0}
+    local res = ""
+    for i = 1, 2 do
+        local k, q = K[i], {}
+        local ok1 = pcall(function() q[k] = 1 end)
+        local ok2 = pcall(function() return {[k] = 2} end)
+        local ok3 = pcall(rawset, {}, k, 3)
+        local n = 0
+        for _ in pairs(q) do n = n + 1 end
+        res = res .. tostring(ok1) .. tostring(ok2) .. tostring(ok3) .. n .. tostring(q[k]) .. " "
+    end
+    check("tbl10", res, "falsefalsefalse0nil falsefalsefalse0nil ")
+    local okn, en = pcall(function() local t = {}; t[K[1]] = nil end)
+    check("tbl11", tostring(okn) .. " " .. tostring(string.match(tostring(en), "table index is %a+")), "false table index is nil")
+    local okm, em = pcall(function() local t = {}; t[K[2]] = 1 end)
+    check("tbl12", string.match(tostring(em), "table index is %a+"), "table index is NaN")
 end
 
 -- ===== SECTION 16: function call forms =====

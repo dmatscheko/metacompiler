@@ -2127,7 +2127,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     b = rk.b
                     var rv3 = f.v(b)
                     b = rv3.b
-                    callExt(b, "js_set", [t, callLua(b, "lua_cmpv", [callLua(b, "lua_first", [rk.v])]), callLua(b, "lua_first", [rv3.v])])
+                    var kv = callLua(b, "lua_first", [rk.v])
+                    callExt(b, "js_set", [t, callExt(b, "js_luwkey", [kv]), callLua(b, "lua_first", [rv3.v])])
                 }
             }
             return {b: b, v: t}
@@ -2135,10 +2136,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
 
     // ----- Assignment -----
+    // A target's key: a field's name, or the index's first value, which is made a
+    // table key only when it is written (js_luwkey rejects nil and NaN there).
     function pathKeyV(b, p) {
-        if (p.kind == "field") { return {b: b, v: emitStr(b, p.name)} }
+        if (p.kind == "field") { return {b: b, v: emitStr(b, p.name), raw: false} }
         var r = p.idx(b)
-        return {b: r.b, v: callLua(r.b, "lua_cmpv", [callLua(r.b, "lua_first", [r.v])])}
+        return {b: r.b, v: callLua(r.b, "lua_first", [r.v]), raw: true}
     }
     // An indexed target's table and key, evaluated before any right-hand side, as
     // lua does (manual 3.3.3: in `i, a[i] = i+1, 20` the a[i] is a[old i]); whether
@@ -2160,7 +2163,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (afterCall) { o = callLua(b, "lua_first", [o]) }
         var lk = pathKeyV(b, ref.path[ref.path.length - 1])
-        return {b: lk.b, o: o, k: lk.v, d: pdescs[ref.path.length - 1]}
+        return {b: lk.b, o: o, k: lk.v, raw: lk.raw, d: pdescs[ref.path.length - 1]}
     }
     function emitSlotWrite(b, ref, slot, v) {
         if (slot.o == null) {
@@ -2176,7 +2179,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var doneB = curF.NewBlock("")
         b.NewCondBr(rawTruthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [o]), emitStr(b, "object")])), objB, badB)
         objB.NewCondBr(rawTruthy(objB, callExt(objB, "js_seq", [callExt(objB, "js_get", [o, emitStr(objB, "__f")]), hUndef])), setB, badB)
-        callExt(setB, "js_set", [o, slot.k, v])
+        callExt(setB, "js_set", [o, slot.raw ? callExt(setB, "js_luwkey", [slot.k]) : slot.k, v])
         setB.NewBr(doneB)
         luaIndexError(badB, o, luaDescText(slot.d))
         badB.NewBr(doneB)

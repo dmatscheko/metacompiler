@@ -849,6 +849,19 @@ func luKey(v interface{}) interface{} {
 	return v
 }
 
+// luWriteKey is the key a table is WRITTEN under: lua rejects nil and NaN there
+// (luaH_newkey), while reading t[nil] is just nil. Twin of js_luwkey in
+// languages/lib/lua-rt.metajs.
+func (rt *jsrt) luWriteKey(v interface{}) interface{} {
+	if v == nil || v == jsUndef {
+		rt.luFail("table index is nil")
+	}
+	if f, ok := v.(float64); ok && f != f {
+		rt.luFail("table index is NaN")
+	}
+	return luKey(v)
+}
+
 func init() {
 	rxExtraExterns = append(rxExtraExterns, func(rt *jsrt, m map[string]func(args []uint64) uint64) {
 		u := rt.unwrap
@@ -910,6 +923,7 @@ func init() {
 		}
 		m["js_lustr"] = func(a []uint64) uint64 { return rt.wrapStr(luNumStr(u(a[0]))) }
 		m["js_lukey"] = func(a []uint64) uint64 { return w(luKey(u(a[0]))) }
+		m["js_luwkey"] = func(a []uint64) uint64 { return w(rt.luWriteKey(u(a[0]))) }
 		// A table key as pairs hands it to the program. The object store
 		// addresses a number by its text, so js_keys answers text: a text that
 		// reads as a numeral and addresses the same slot again (luKey, then the

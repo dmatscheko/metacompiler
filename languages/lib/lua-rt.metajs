@@ -994,6 +994,15 @@ function js_lukey(v) {
     return v
 }
 
+// The key a table is WRITTEN under: lua rejects nil and NaN there (luaH_newkey),
+// while reading t[nil] is just nil. Twin of luWriteKey in abnf/jsrtlua.go.
+function js_luwkey(v) {
+    if (typeof v == "number" && (v | 0) === v) { return v }
+    if (v === undefined || v === null) { luFail("table index is nil") }
+    if (v !== v) { luFail("table index is NaN") }
+    return js_lukey(v)
+}
+
 // A table key as pairs hands it to the program: the text js_keys answers turns
 // back into the number that addresses the same slot, and stays a string
 // otherwise. "" + the key is the store's own spelling of it. Twin of
@@ -1609,7 +1618,7 @@ function js_lurawset(args) {
     var t = luCheckTab("rawset", 1, args)
     luCheckAny("rawset", 2, args)
     luCheckAny("rawset", 3, args)
-    t[js_lukey(args[1])] = args[2]
+    t[js_luwkey(args[1])] = args[2]
     return t
 }
 function js_lurawlen(args) {

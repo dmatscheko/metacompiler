@@ -250,7 +250,7 @@ func init() {
 			t := rt.luCheckTab("rawset", 1, args)
 			rt.luCheckAny("rawset", 2, args)
 			rt.luCheckAny("rawset", 3, args)
-			rt.setMember(t, luKey(args[1]), args[2])
+			rt.setMember(t, rt.luWriteKey(args[1]), args[2])
 			return w(t)
 		}
 		m["js_lurawlen"] = func(a []uint64) uint64 {

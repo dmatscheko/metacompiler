@@ -1431,7 +1431,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function luaSetIndex(o, k, v) {
         if (o === undefined || o === null) { fail("attempt to index a nil value") }
         if (!isTbl(o)) { fail("attempt to index a " + luaType(o) + " value") }
-        luaRawSet(o, luaKey(k), v)
+        luaRawSet(o, luaWriteKey(k), v)
+    }
+    // The key a table is WRITTEN under: lua rejects nil and NaN there (luaH_newkey),
+    // while reading t[nil] is just nil. Twin of js_luwkey in lib/lua-rt.metajs and
+    // abnf/jsrtlua.go.
+    function luaWriteKey(k) {
+        if (k === undefined || k === null) { fail("table index is nil") }
+        if (typeof k == "number" && k !== k) { fail("table index is NaN") }
+        return luaKey(k)
     }
     // #t: the sequence border - the largest n with t[1..n] all non nil (strings by length).
     function luaLen(v) {
@@ -1847,7 +1855,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     } else { luaRawSet(t, "" + pos, luaFirst(f.v())); pos++ }
                 }
                 else if (f.fkind == "name") { luaRawSet(t, f.name, luaFirst(f.v())) }
-                else { luaRawSet(t, luaKey(luaFirst(f.k())), luaFirst(f.v())) }
+                else {
+                    var fk = anytype // The key may be of any type.
+                    fk = luaFirst(f.k())
+                    luaRawSet(t, luaWriteKey(fk), luaFirst(f.v()))
+                }
             }
             return t
         }
@@ -2947,7 +2959,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         luaCheckTab("rawset", 1, t, nargs)
         luaCheckAny("rawset", 2, nargs)
         luaCheckAny("rawset", 3, nargs)
-        luaRawSet(t, luaKey(k), v)
+        luaRawSet(t, luaWriteKey(k), v)
         return t
     }
     globalScope["rawlen"] = function(v) {
