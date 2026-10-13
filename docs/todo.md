@@ -727,13 +727,6 @@ other languages' equivalents (python RecursionError, js RangeError "Maximum call
 Lua (reproduced by the lua finder): `pcall(nt, 1000000)` of a non-tail recursion → lua `false ...: stack overflow`
 then `after`; interp and run die with Go's fatal stack overflow (exit 2), native SIGSEGV. One mechanism for every language.
 
-### T-530 probe.sh reports a false "step brake" for any module that CONTAINS the brake's wording · P2 · CORE · OPEN [V]
-`tests/probe.sh bash m.sh` with `[[ abc =~ b ]]; echo "rc=$?"` marks the run leg `BROKEN: hit the IR step brake - output is
-TRUNCATED`, though `mec languages/bash-to-llvm-ir.abnf m.sh -qq` prints `rc=0` and is complete: the grep for `step limit
-exceeded` (tests/probe.sh ~275) scans run.raw, which holds the IR module, and bash's module carries the string constant
-"bash: [[: regular expression step limit exceeded". It blinds every bash probe that uses `=~`. Grep only the program's
-output or stderr, after the module (clang-check.sh `module_only()` splits them).
-
 ---
 
 # Closed
@@ -1099,6 +1092,7 @@ T-030 ruby: Rational/Complex exactness — PARTIAL 9c5d75c (Complex raises/conju
 T-060 java: assignment conversion only happens at declarations — DONE a11485b
 T-061 java: field defaults, Double/Float constants, Math.sqrt — DONE 9723535
 T-062 java: `Integer.parseInt`'s NumberFormatException is not catchable compiled — DONE f2a0034
+T-530 probe.sh reports a false "step brake" for any module that CONTAINS the brake's wording — DONE f7b60537
 
 # Settled — do not re-open
 
