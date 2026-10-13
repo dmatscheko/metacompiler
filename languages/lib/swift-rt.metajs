@@ -3624,6 +3624,29 @@ function swScalarsOf(s) {
 // A Unicode.Scalar: {__usc, value, isASCII}. Twins: swMkScalar / swScalarDebug /
 // swScalarText in languages/swift-interpreter.abnf, whose comment has the rule,
 // and in abnf/jsrtswift.go.
+// Unicode.Scalar(x) / UnicodeScalar(x): a code point that is a scalar value, or a
+// String of exactly one scalar, else nil. Twins: swScalarOf in
+// languages/swift-interpreter.abnf and js_swscalar in abnf/jsrtswift.go.
+function js_swscalar(x) {
+    if (swIsObj(x)) { if (x["__usc"] !== undefined) { return x } }
+    if (typeof x == "string") {
+        var n = x.length
+        if (n == 1) {
+            var c0 = x.charCodeAt(0)
+            if (c0 < 55296 || c0 > 57343) { return swMkScalar(x) }
+        }
+        if (n == 2) {
+            var h = x.charCodeAt(0)
+            var l = x.charCodeAt(1)
+            if (h >= 55296 && h <= 56319 && l >= 56320 && l <= 57343) { return swMkScalar(x) }
+        }
+        return null
+    }
+    var cp = swNum(x)
+    if (cp < 0 || cp > 1114111) { return null }
+    if (cp >= 55296 && cp <= 57343) { return null }
+    return swMkScalar(js_char(cp))
+}
 function swMkScalar(s) {
     var cp = swCpAt(s, 0)
     var o = {}

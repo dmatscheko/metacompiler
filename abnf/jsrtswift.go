@@ -1212,6 +1212,31 @@ func init() {
 			return w(swRangeAt(rt, lo, swRnd.below(n)))
 		}
 		m["js_swrandom"] = func(a []uint64) uint64 { return swRandom(a, 0) }
+		// Unicode.Scalar(x) / UnicodeScalar(x): a code point that is a scalar
+		// value, or a String of exactly one scalar, else nil. Twins: swScalarOf
+		// in languages/swift-interpreter.abnf and js_swscalar in
+		// languages/lib/swift-rt.metajs.
+		m["js_swscalar"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			if o, ok := v.(*jsObject); ok {
+				if _, is := o.props["__usc"]; is {
+					return a[0]
+				}
+			}
+			if s, ok := v.(string); ok {
+				us := strUnits(s)
+				if (len(us) == 1 && !isHighSurr(rune(us[0])) && !isLowSurr(rune(us[0]))) ||
+					(len(us) == 2 && isHighSurr(rune(us[0])) && isLowSurr(rune(us[1]))) {
+					return w(swMkScalar(s))
+				}
+				return w(jsNull)
+			}
+			cp := swNum(rt, v)
+			if cp < 0 || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF) {
+				return w(jsNull)
+			}
+			return w(swMkScalar(string(rune(int(cp)))))
+		}
 		m["js_swrandomd"] = func(a []uint64) uint64 { return swRandom(a, 1) }
 		m["js_swrandomf"] = func(a []uint64) uint64 { return swRandom(a, 2) }
 		m["js_swmcall"] = func(a []uint64) uint64 {

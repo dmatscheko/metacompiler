@@ -461,12 +461,15 @@ Hashbang    = "#!" :whitespace() { PoundCondChar } :whitespace(Whitespace) ;
 // parsed and ignored.
 Modifiers   = { Modifier | Attribute } ;
 Attribute   = "@" Id [ SkipAngle ] { "." Id [ SkipAngle ] } [ SkipParen ] ;
-Modifier    = ( "public" | "private" | "fileprivate" | "internal" | "open"
-              | "prefix" | "postfix" | "infix"
+Modifier    = AccessMod
+            | ( "prefix" | "postfix" | "infix"
               | "final" | "static" | "mutating" | "nonmutating"
               | "override" | "lazy" | "weak" | "unowned" | "convenience"
-              | "required" | "dynamic" | "indirect" | "package"
+              | "required" | "dynamic" | "indirect"
               | "nonisolated" | "distributed" | "borrowing" | "consuming" | "__consuming" ) KwEnd ;
+// An access level, optionally for the setter alone: `private(set) var x = 0`.
+AccessMod   = ( "public" | "private" | "fileprivate" | "internal" | "open" | "package" ) KwEnd
+              [ "(" "set" ")" ] ;
 // `class` is a type-member modifier (class var / class func) as well as a
 // declaration keyword, so it is NOT in Modifier - a greedy Modifiers would eat the
 // `class` of `@objc class Cache { ... }` and leave nothing for ClassDecl. Member
@@ -3622,6 +3625,24 @@ KwContinue  = "continue" KwEnd ;
     function swMkScalar(s) {
         var cp = swCpAt(s, 0)
         return {__usc: s, value: cp, isASCII: cp < 128}
+    }
+    // Unicode.Scalar(x) / UnicodeScalar(x): a code point that is a scalar value
+    // (not a surrogate, at most 10FFFF), or a String of exactly one scalar, else
+    // nil - the failable initializers; a UInt8 is always one. Twins: js_swscalar
+    // in abnf/jsrtswift.go and lib/swift-rt.metajs.
+    function swScalarOf(x) {
+        if (x !== null && typeof x == "object" && x.__usc !== undefined) { return x }
+        if (typeof x == "string") {
+            var n = x.length
+            if (n == 1 && (x.charCodeAt(0) < 55296 || x.charCodeAt(0) > 57343)) { return swMkScalar(x) }
+            if (n == 2 && x.charCodeAt(0) >= 55296 && x.charCodeAt(0) <= 56319 && x.charCodeAt(1) >= 56320 && x.charCodeAt(1) <= 57343) { return swMkScalar(x) }
+            return null
+        }
+        var cp = szNum(x)
+        if (cp < 0 || cp > 1114111 || (cp >= 55296 && cp <= 57343)) { return null }
+        if (cp < 65536) { return swMkScalar(String.fromCharCode(cp)) }
+        var v = cp - 65536
+        return swMkScalar(String.fromCharCode(55296 + Math.floor(v / 1024)) + String.fromCharCode(56320 + (v % 1024)))
     }
     function swHexUp(n, width) {
         var digits = "0123456789ABCDEF"
@@ -10172,6 +10193,8 @@ KwContinue  = "continue" KwEnd ;
         return swstr(x)
     }
     hostGlobals["String"] = {__convl: swStrInit, __tname: "String"}
+    hostGlobals["UnicodeScalar"] = {__conv: swScalarOf, __tname: "Unicode.Scalar"}
+    hostGlobals["Unicode"] = {Scalar: swScalarOf, __tname: "Unicode"}
     // Bool(x): a Bool is itself, and the failable Bool(String) accepts exactly
     // "true" and "false" (LosslessStringConvertible). Twin of rtBoolOf in
     // swift-to-llvm-ir.abnf.

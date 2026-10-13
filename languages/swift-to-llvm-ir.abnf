@@ -460,12 +460,15 @@ Hashbang    = "#!" :whitespace() { PoundCondChar } :whitespace(Whitespace) ;
 // parsed and ignored.
 Modifiers   = { Modifier | Attribute } ;
 Attribute   = "@" Id [ SkipAngle ] { "." Id [ SkipAngle ] } [ SkipParen ] ;
-Modifier    = ( "public" | "private" | "fileprivate" | "internal" | "open"
-              | "prefix" | "postfix" | "infix"
+Modifier    = AccessMod
+            | ( "prefix" | "postfix" | "infix"
               | "final" | "static" | "mutating" | "nonmutating"
               | "override" | "lazy" | "weak" | "unowned" | "convenience"
-              | "required" | "dynamic" | "indirect" | "package"
+              | "required" | "dynamic" | "indirect"
               | "nonisolated" | "distributed" | "borrowing" | "consuming" | "__consuming" ) KwEnd ;
+// An access level, optionally for the setter alone: `private(set) var x = 0`.
+AccessMod   = ( "public" | "private" | "fileprivate" | "internal" | "open" | "package" ) KwEnd
+              [ "(" "set" ")" ] ;
 // `class` is a type-member modifier (class var / class func) as well as a
 // declaration keyword, so it is NOT in Modifier - a greedy Modifiers would eat the
 // `class` of `@objc class Cache { ... }` and leave nothing for ClassDecl. Member
@@ -10614,6 +10617,14 @@ KwContinue  = "continue" KwEnd ;
         // abs/max/min are Double-aware: Math.abs would truncate a boxed operand to
         // an integer, and Math.max compares two boxes as OBJECTS.
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "abs"), emitExtFn(b, "js_swabs", 1)])
+        // Unicode.Scalar(x) / UnicodeScalar(x). Twin: hostGlobals in
+        // swift-interpreter.abnf.
+        var scalarV = emitExtFn(b, "js_swscalar", 1)
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "UnicodeScalar"), scalarV])
+        var unicodeV = callExt(b, "js_obj_new", [])
+        callExt(b, "js_set", [unicodeV, emitStr(b, "Scalar"), scalarV])
+        callExt(b, "js_set", [unicodeV, emitStr(b, "__tname"), emitStr(b, "Unicode")])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Unicode"), unicodeV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "max"), emitExtFn(b, "js_swmax", 2)])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "min"), emitExtFn(b, "js_swmin", 2)])
         // Imported declarations first (so the main file's code can use them), then the

@@ -4592,6 +4592,37 @@ func s102() {
     check("102d", "\(A102().v) \(B102().w) \(d.u) \(d.opt102!)" == "1.0 2.0 3.0 4.0")
 }
 
+// ===== SECTION 103: private(set); Unicode.Scalar initializers =====
+// An access level may be the setter's alone (`private(set) var`). Unicode.Scalar(x)
+// and its alias UnicodeScalar(x) build a scalar from a UInt8, from a code point
+// (nil for a surrogate or past 10FFFF) or from a one-scalar String. Every value
+// read off swiftc 6.1.2.
+class Acct103 {
+    private(set) var balance: Double = 0
+    public internal(set) var n = 0
+    fileprivate(set) var tag = "t"
+    func add(_ x: Double) { balance += x; n += 1 }
+}
+func caesar103(_ s: String, _ k: Int) -> String {
+    String(s.map { c -> Character in
+        guard let a = c.asciiValue, c.isLetter else { return c }
+        let base: UInt8 = c.isUppercase ? 65 : 97
+        return Character(UnicodeScalar((a - base + UInt8(k)) % 26 + base))
+    })
+}
+func s103() {
+    let a = Acct103()
+    a.add(2.5)
+    check("103a", a.balance == 2.5 && a.n == 1 && a.tag == "t")
+    let cps = [97, 0xD800, 0x1F600, 0x110000]
+    let b8: UInt8 = 72
+    let strs = ["é", "ab", ""]
+    check("103b", Character(Unicode.Scalar(b8)) == "H" && Unicode.Scalar(cps[0])! == "a" && Unicode.Scalar(cps[1]) == nil
+        && Unicode.Scalar(cps[2])!.value == 0x1F600 && Unicode.Scalar(cps[3]) == nil && String(UnicodeScalar(UInt8(105))) == "i"
+        && Unicode.Scalar(strs[0])!.value == 233 && Unicode.Scalar(strs[1]) == nil && Unicode.Scalar(strs[2]) == nil)
+    check("103c", caesar103("Hello, World!", 3) == "Khoor, Zruog!")
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -4695,6 +4726,7 @@ func main() {
     s100() // SECTION-CALL 100
     s101() // SECTION-CALL 101
     s102() // SECTION-CALL 102
+    s103() // SECTION-CALL 103
     print("full: \(checks) checks, \(fails) failures")
 }
 
