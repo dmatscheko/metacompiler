@@ -186,7 +186,11 @@ Subshell    <~~ push(makeSubshellR(takeAll())) ~~> = "(" CompoundList ")" [ Redi
 // stray "}", which real bash refuses.
 BraceGroup  <~~ push(makeGroupR(takeAll())) ~~> = "{" BraceKwEnd CompoundList "}" [ RedirList ] ;
 // (( expr )) as a command: status 0 when the value is non-zero.
-ArithCmd    <~~ push(makeArithCmd(pop())) ~~> = "((" :whitespace(Whitespace) ArList "))" ;
+// (( EXPR )): a text holding an expansion is expanded first and then evaluated, exactly as
+// $(( EXPR )) is. Twin of ArithCmd in bash-interpreter.abnf.
+ArithCmd    = ArithCmdDyn | ArithCmdSt ;
+ArithCmdSt  <~~ push(makeArithCmd(pop())) ~~> = "((" :whitespace(Whitespace) ArList "))" ;
+ArithCmdDyn <~~ push(makeArithCmd(mkArDyn(pop()))) ~~> = "((" :whitespace() ArHasExp ArDynWord "))" ;
 // [[ ... ]] : the conditional command (no word splitting, glob and regex matching).
 CondCmd     <~~ push(makeCondCmd(pop())) ~~> = "[[" :whitespace(Whitespace) CondOr "]]" ;
 
@@ -377,8 +381,18 @@ BackSub     <~~ push(mkCmdSub(pop())) ~~>
             = "`" :whitespace(Whitespace) CompoundList "`" ;
 
 // $(( expr )) : whitespace IS allowed inside; the value is the decimal string of the result.
-ArithExp    <~~ push(mkArith(pop())) ~~>
-            = "$((" :whitespace(Whitespace) ArList "))" ;
+// $(( EXPR )): a text holding an expansion (or a double quote, which bash removes) is kept as
+// a word, expanded, and read by rt_arith at run time - bash expands first and parses after,
+// so e="1 + 2"; $(( $e * 2 )) is 5. Twin of ArithExp in bash-interpreter.abnf.
+ArithExp    = ArithDyn | ArithSt ;
+ArithSt     <~~ push(mkArith(pop())) ~~> = "$((" :whitespace(Whitespace) ArList "))" ;
+ArithDyn    <~~ push(mkArith(mkArDyn(pop()))) ~~> = "$((" :whitespace() ArHasExp ArDynWord "))" ;
+ArDynWord   <~~ push(mkNsWord(takeAll())) ~~> = { ArDynSeg } ;
+ArDynSeg    = DqSeg | ExpSeg | ArDynParen | ArDynBare ;
+ArDynParen  = ArDynOpen { ArDynSeg } ArDynClose ;
+ArDynOpen   <~~ push(makeConst("(")) ~~> = "(" ;
+ArDynClose  <~~ push(makeConst(")")) ~~> = ")" ;
+ArDynBare   <~~ push(makeConst(up.in)) ~~> = !@+"()$`\"" ;
 
 // ${...} : the whole parameter-expansion family. Inside the braces whitespace is NOT
 // skipped (a default word may contain spaces), and the enclosing state is restored on return.
@@ -719,6 +733,26 @@ HdScan = :script(~~
             return no
         }
         return abnf.newToken(out, 0)
+    })()
+~~) ;
+
+// Succeeds (consuming nothing) when the arithmetic text up to its closing "))" holds a "$", a
+// "`" or a double quote - the texts bash has to expand before it can parse them.
+ArHasExp = :script(~~
+    (function() {
+        var i = 0
+        var depth = 0
+        while (true) {
+            var cc = c.peek(i)
+            if (cc === -1) { return abnf.newToken("\x01ar-static", 0) }
+            if (cc === 36 || cc === 96 || cc === 34) { return }
+            if (cc === 40) { depth = depth + 1 }
+            if (cc === 41) {
+                if (depth === 0) { return abnf.newToken("\x01ar-static", 0) }
+                depth = depth - 1
+            }
+            i = i + 1
+        }
     })()
 ~~) ;
 
@@ -1416,7 +1450,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }}
     }
     function mkArCmdSub(sub) {
-        return function(b) { var r = evalWord(b, sub); return {b: r.b, v: r.b.NewCall(rtStr2int, r.v)} }
+        return function(b) { var r = evalWord(b, sub); return {b: r.b, v: r.b.NewCall(rtArith, r.v)} }
     }
     // The parameter-expansion operators that take a GLOB and rewrite the value: the two
     // strips, the two case maps and the two replacements. They are the ones that also apply
@@ -1888,6 +1922,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function mkArith(intThunk) {
         return {fn: function(b) { var r = intThunk(b); return {b: r.b, v: r.b.NewCall(rtInt2str, r.v)} }, c: undefined}
     }
+    // An arithmetic text that held an expansion: expand the word, then rt_arith reads it.
+    function mkArDyn(w) { return function(b) { var r = evalWord(b, w); return {b: r.b, v: r.b.NewCall(rtArith, r.v)} } }
     // ---- brace expansion (purely syntactic, so it is done once at BUILD time) ----
     function pushWords(ws) {
         var i
@@ -2232,7 +2268,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return {b: bb, v: bb.NewTrunc(v, i32)}
         }
     }
-    function mkArOfStr(o) { return function(b) { var r = evalWord(b, o); return {b: r.b, v: r.b.NewCall(rtStr2int, r.v)} } }
+    function mkArOfStr(o) { return function(b) { var r = evalWord(b, o); return {b: r.b, v: r.b.NewCall(rtArith, r.v)} } }
     function mkUn(op, t) {
         return function(b) {
             var r = t(b)
@@ -2251,7 +2287,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (it.lhs != undefined) { lhs = it.lhs } else { iop = it.iop; pre = it.pre }
         }
         return function(b) {
-            var v = b.NewCall(rtStr2int, varString(b, lhs))
+            var v = b.NewCall(rtArith, varString(b, lhs))
             var nv = (iop == "++") ? b.NewAdd(v, one64) : b.NewSub(v, one64)
             storeVar(b, lhs, b.NewCall(rtInt2str, nv))
             return {b: b, v: (pre == 1) ? nv : v}
@@ -2262,7 +2298,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var aop = items[1].aop
         var t = items[2]
         return function(b) {
-            var cur = b.NewCall(rtStr2int, varString(b, lhs))
+            var cur = b.NewCall(rtArith, varString(b, lhs))
             var r = t(b)
             b = r.b
             var nv = r.v
@@ -2275,15 +2311,19 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return {b: b, v: nv}
         }
     }
+    // c ? a : b evaluates ONE arm: `k == 1 ? k++ : k--` changes k once.
     function mkArCond(items) {
         if (items.length == 1) { return items[0] }
         var c0 = items[0], t1 = items[1], t2 = items[2]
         return function(b) {
             var rc = c0(b)
-            var r1 = t1(rc.b)
-            var r2 = t2(r1.b)
-            var bb = r2.b
-            return {b: bb, v: bb.NewSelect(bb.NewICmp(llvm.enum.IPredNE, rc.v, zero64), r1.v, r2.v)}
+            var tb = curF.NewBlock(""), fb = curF.NewBlock(""), jb = curF.NewBlock("")
+            rc.b.NewCondBr(rc.b.NewICmp(llvm.enum.IPredNE, rc.v, zero64), tb, fb)
+            var r1 = t1(tb)
+            r1.b.NewBr(jb)
+            var r2 = t2(fb)
+            r2.b.NewBr(jb)
+            return {b: jb, v: jb.NewPhi([llvm.ir.NewIncoming(r1.v, r1.b), llvm.ir.NewIncoming(r2.v, r2.b)])}
         }
     }
     function foldComma(items) {
@@ -2304,7 +2344,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return {b: re.b, v: re.b.NewCall(rtIpow, [rb.v, re.v])}
         }
     }
-    function mkArVar(name) { return function(b) { return {b: b, v: b.NewCall(rtStr2int, varString(b, name))} } }
+    // A name's value is itself an expression (x=010 is 8, r=a reads a), so rt_arith reads it.
+    function mkArVar(name) { return function(b) { return {b: b, v: b.NewCall(rtArith, varString(b, name))} } }
     // / and % go through rt_idiv, which knows bash's two cases the hardware does not (a zero
     // divisor, LONG_MIN / -1). A shift count is taken modulo 64, which is what bash's own
     // shift instruction does on both arm64 and x86-64; an unmasked count is poison in LLVM.
@@ -2328,14 +2369,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (op == "&") { return {b: b, v: b.NewAnd(l, r)} }
             if (op == "|") { return {b: b, v: b.NewOr(l, r)} }
             if (op == "^") { return {b: b, v: b.NewXor(l, r)} }
-            var ln = b.NewICmp(llvm.enum.IPredNE, l, zero64)
-            var rn = b.NewICmp(llvm.enum.IPredNE, r, zero64)
-            if (op == "&&") { return {b: b, v: b.NewZExt(b.NewAnd(ln, rn), i64)} }
-            if (op == "||") { return {b: b, v: b.NewZExt(b.NewOr(ln, rn), i64)} }
             fail("unsupported arithmetic operator: " + op)
         }
         return {b: b, v: b.NewZExt(b.NewICmp(pred, l, r), i64)}
     }
+    // && and || branch around an operand the left side already decided, so `z && (z = 9)`
+    // leaves z alone; the result is 0 or 1.
     function foldBin(items) {
         if (items.length == 1) { return items[0] }
         return function(b) {
@@ -2343,10 +2382,22 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var bb = r.b, v = r.v
             var i
             for (i = 1; i < items.length; i += 2) {
-                var r2 = items[i + 1](bb)
-                var res = arOp(r2.b, items[i].op, v, r2.v)
-                bb = res.b
-                v = res.v
+                var op = items[i].op
+                if (op == "&&" || op == "||") {
+                    var rb = curF.NewBlock(""), jb = curF.NewBlock("")
+                    var lt = bb.NewICmp(llvm.enum.IPredNE, v, zero64)
+                    if (op == "&&") { bb.NewCondBr(lt, rb, jb) } else { bb.NewCondBr(lt, jb, rb) }
+                    var rr = items[i + 1](rb)
+                    var rv = rr.b.NewZExt(rr.b.NewICmp(llvm.enum.IPredNE, rr.v, zero64), i64)
+                    rr.b.NewBr(jb)
+                    v = jb.NewPhi([llvm.ir.NewIncoming((op == "&&") ? zero64 : one64, bb), llvm.ir.NewIncoming(rv, rr.b)])
+                    bb = jb
+                } else {
+                    var r2 = items[i + 1](bb)
+                    var res = arOp(r2.b, op, v, r2.v)
+                    bb = res.b
+                    v = res.v
+                }
             }
             return {b: bb, v: v}
         }

@@ -196,7 +196,11 @@ Subshell    <~~ push(makeSubshellR(takeAll())) ~~> = "(" CompoundList ")" [ Redi
 // bash refuses ("syntax error near unexpected token `}'"), so BraceKwEnd demands the blank.
 BraceGroup  <~~ push(makeGroupR(takeAll())) ~~> = "{" BraceKwEnd CompoundList "}" [ RedirList ] ;
 // (( expr )) as a command: status 0 when the value is non-zero.
-ArithCmd    <~~ push(makeArithCmd(pop())) ~~> = "((" :whitespace(Whitespace) ArList "))" ;
+// (( EXPR )): a text holding an expansion is expanded first and then evaluated, exactly as
+// $(( EXPR )) is (see ArithExp).
+ArithCmd    = ArithCmdDyn | ArithCmdSt ;
+ArithCmdSt  <~~ push(makeArithCmd(pop())) ~~> = "((" :whitespace(Whitespace) ArList "))" ;
+ArithCmdDyn <~~ push(makeArithCmd(mkArDyn(pop()))) ~~> = "((" :whitespace() ArHasExp ArDynWord "))" ;
 // [[ ... ]] : the conditional command (no word splitting, glob and regex matching).
 CondCmd     <~~ push(makeCondCmd(pop())) ~~> = "[[" :whitespace(Whitespace) CondOr "]]" ;
 
@@ -409,8 +413,19 @@ BackSub     <~~ push(mkCmdSub(pop())) ~~>
             = "`" :whitespace(Whitespace) CompoundList "`" ;
 
 // $(( expr )) : whitespace IS allowed inside; the value is the decimal string of the result.
-ArithExp    <~~ push(mkArith(pop())) ~~>
-            = "$((" :whitespace(Whitespace) ArList "))" ;
+// bash EXPANDS the expression's text first and only then parses it, so an expansion can
+// contribute operators: e="1 + 2"; $(( $e * 2 )) is 5, not 6. A text holding an expansion (or
+// a double quote, which is removed) is therefore kept as a word and read by the run-time
+// evaluator, arEval; a text without one is parsed here, once.
+ArithExp    = ArithDyn | ArithSt ;
+ArithSt     <~~ push(mkArith(pop())) ~~> = "$((" :whitespace(Whitespace) ArList "))" ;
+ArithDyn    <~~ push(mkArith(mkArDyn(pop()))) ~~> = "$((" :whitespace() ArHasExp ArDynWord "))" ;
+ArDynWord   <~~ push(mkNsWord(takeAll())) ~~> = { ArDynSeg } ;
+ArDynSeg    = DqSeg | ExpSeg | ArDynParen | ArDynBare ;
+ArDynParen  = ArDynOpen { ArDynSeg } ArDynClose ;
+ArDynOpen   <~~ push(makeConst("(")) ~~> = "(" ;
+ArDynClose  <~~ push(makeConst(")")) ~~> = ")" ;
+ArDynBare   <~~ push(makeConst(up.in)) ~~> = !@+"()$`\"" ;
 
 // ${...} : the whole parameter-expansion family. Inside the braces whitespace is NOT
 // skipped (a default word may contain spaces), and the enclosing state is restored on return.
@@ -836,6 +851,26 @@ BraceKwEnd = :script(~~
         if (cc == 59 || cc == 38 || cc == 124) { return undefined }
         if (cc == 40 || cc == 41 || cc == 60 || cc == 62) { return undefined }
         return abnf.newToken("\x01brace-boundary", 0)
+    })()
+~~) ;
+
+// Succeeds (consuming nothing) when the arithmetic text up to its closing "))" holds a "$", a
+// "`" or a double quote - the texts bash has to expand before it can parse them.
+ArHasExp = :script(~~
+    (function() {
+        var i = 0
+        var depth = 0
+        while (true) {
+            var cc = c.peek(i)
+            if (cc === -1) { return abnf.newToken("\x01ar-static", 0) }
+            if (cc === 36 || cc === 96 || cc === 34) { return }
+            if (cc === 40) { depth = depth + 1 }
+            if (cc === 41) {
+                if (depth === 0) { return abnf.newToken("\x01ar-static", 0) }
+                depth = depth - 1
+            }
+            i = i + 1
+        }
     })()
 ~~) ;
 
@@ -1356,12 +1391,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function sliceStr(v, offT, lenT) {
         var vlen = charLen(v)
-        var off = offT()
+        var off = arNum(offT())
         // x=abc; "${x: -5}" is empty: a negative offset past the start selects nothing.
         if (off < 0) { off = vlen + off; if (off < 0) { return "" } }
         if (off > vlen) { return "" }
         if (lenT == null) { return v.slice(charIdx(v, off)) }
-        var ln = lenT()
+        var ln = arNum(lenT())
         if (ln < 0) {
             var end = vlen + ln
             if (end < off) { return "" }
@@ -1821,11 +1856,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     // starts with the script name.
                     var vals = scValList(name)
                     if (isPosName(name)) { vals = [scriptName]; for (var pv = 0; pv < posParams.length; pv++) { vals.push(posParams[pv]) } }
-                    var off = offT()
+                    var off = arNum(offT())
                     // A negative offset counts from the end, and one reaching past the
                     // start selects nothing (bash 5.3: a=(p q r); "${a[@]: -5}" is no word).
                     if (off < 0) { off = vals.length + off; if (off < 0) { off = vals.length } }
-                    var n = (lenT != null) ? lenT() : (vals.length - off)
+                    var n = (lenT != null) ? arNum(lenT()) : (vals.length - off)
                     if (n < 0) { n = vals.length + n - off }
                     var out = []
                     var i2
@@ -2633,11 +2668,29 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (i = 0; i < list.length; i++) { arrSet(name, numToStr(i), list[i]) }
     }
     function arrAppendList(name, list) {
-        var a = arrEnsure(name, false)
-        var next = 0
+        arrEnsure(name, false)
+        var next = arrNextIdx(name)
         var i
-        for (i = 0; i < a.keys.length; i++) { var n = strToInt(a.keys[i]); if (n >= next) { next = n + 1 } }
-        for (i = 0; i < list.length; i++) { arrSet(name, numToStr(next + i), list[i]) }
+        for (i = 0; i < list.length; i++) { arrSet(name, numToStr(arOp("+", next, i)), list[i]) }
+    }
+    // One past the highest index of an indexed array (0 for none). Twin of rt_arr_nextidx.
+    function arrNextIdx(name) {
+        var next = anytype
+        next = 0
+        if (!isArr(name)) { return next }
+        var a = arrs[arrKey(name)]
+        var i
+        for (i = 0; i < a.keys.length; i++) {
+            var n = arStr(a.keys[i])
+            if (arOp(">=", n, next) == 1) { next = arOp("+", n, 1) }
+        }
+        return next
+    }
+    // The key an indexed subscript names: a negative index counts back from one past the
+    // highest index, so ${a[-1]} is the last element. Twin of ar_key.
+    function arrIdxKey(name, k) {
+        if (arIsNeg(k)) { return numToStr(arOp("+", arrNextIdx(name), k)) }
+        return numToStr(k)
     }
     function joinList(list, sep) {
         var out = ""
@@ -2677,12 +2730,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return stripTrailNL(out)
         }
     }
-    function mkArCmdSub(subT) { return function() { return strToInt(wordJoin(subT())) } }
+    function mkArCmdSub(subT) { return function() { return arEval(wordJoin(subT())) } }
     function mkVarRef(name) {
         if (name == "*") { return function() { return starJoin(posParams) } }
         return function() { return getVarVal(name) }
     }
     function mkArith(intThunk) { return function() { return numToStr(intThunk()) } }
+    // An arithmetic text that held an expansion: expand the word, then evaluate the string.
+    function mkArDyn(wordT) { return function() { return arEval(wordJoin(wordT())) } }
     // ---- brace expansion (purely syntactic, so it is done once at BUILD time) ----
     // A word's segment list is turned into N segment lists (the cross product of every brace
     // group in it) and CWord pushes one word thunk per variant.
@@ -3038,7 +3093,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return function() { return digitsInBase(wordJoin(rw()), arNum(arStr(wordJoin(lw())))) }
     }
     function mkNum(text) { var n = parseNumLit(text); return function() { return n } }
-    function mkArOfStr(t) { return function() { return arStr(wordJoin(t())) } }
+    function mkArOfStr(t) { return function() { return arEval(wordJoin(t())) } }
     function mkUn(op, t) {
         return function() {
             var v = t()
@@ -3057,7 +3112,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (it.lhs != undefined) { lhs = it.lhs } else { iop = it.iop; pre = it.pre }
         }
         return function() {
-            var v = arStr(getVarVal(lhs))
+            var v = arEval(getVarVal(lhs))
             var nv = arOp((iop == "++") ? "+" : "-", v, 1)
             setVarVal(lhs, numToStr(nv))
             return (pre == 1) ? nv : v
@@ -3069,7 +3124,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var aop = items[1].aop
         var t = items[2]
         return function() {
-            var cur = arStr(getVarVal(lhs))
+            var cur = arEval(getVarVal(lhs))
             var nv = anytype
             nv = t()
             if (aop != "=") { nv = arOp(aop.slice(0, aop.length - 1), cur, nv) }
@@ -3095,7 +3150,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // ** by repeated squaring over the exponent's 64 bits, wrapping like every product.
     function arPow(bs, ex) {
-        if (arIsNeg(ex)) { arFail("exponent less than 0"); return 0 }
+        if (arIsNeg(ex)) { arFailAt("", "exponent less than 0", ""); return 0 }
         var r = anytype
         r = 1
         var b = anytype
@@ -3113,11 +3168,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var b0 = items[0], e0 = items[2]
         return function() { var bs = b0(); return arPow(bs, e0()) }
     }
-    function mkArVar(name) { return function() { return arStr(getVarVal(name)) } }
+    // A name's value is itself an expression: x=010 is 8, r=a reads a.
+    function mkArVar(name) { return function() { return arEval(getVarVal(name)) } }
     // An arithmetic error: bash reports it on standard error and abandons the command.
+    // Twin of rt_arith_fail.
     var arithErr = false
-    function arFail(msg) {
-        if (!arithErr) { emitErr("bash: " + msg + "\n") }
+    function arFailAt(expr, msg, tok) {
+        var t = (tok != "") ? " (error token is \"" + tok + "\")" : ""
+        emitErr("bash: " + ((expr != "") ? expr + ": " : "") + msg + t + "\n")
         arithErr = true
     }
     // One binary operator. Two plain numbers take the double path while its result is still
@@ -3137,7 +3195,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (op == "&&") { return (!arIsZero(l) && !arIsZero(r)) ? 1 : 0 }
         if (op == "||") { return (!arIsZero(l) || !arIsZero(r)) ? 1 : 0 }
-        if ((op == "/" || op == "%") && arIsZero(r)) { arFail("division by 0"); return 0 }
+        if ((op == "/" || op == "%") && arIsZero(r)) { arFailAt("", "division by 0", ""); return 0 }
         if (both) {
             var x = 0
             if (op == "+") { x = l + r } else if (op == "-") { x = l - r } else if (op == "*") { x = l * r }
@@ -3170,17 +3228,382 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         else { return 0 }
         return arNorm(p)
     }
-    // items = [thunk, {op}, thunk, {op}, thunk, ...] -> one left folded thunk.
+    // items = [thunk, {op}, thunk, {op}, thunk, ...] -> one left folded thunk. && and || do
+    // not evaluate an operand the left side already decided: `z && (z = 9)` leaves z alone.
     function foldBin(items) {
         if (items.length == 1) { return items[0] }
         return function() {
             var v = anytype
             v = items[0]()
             var i
-            for (i = 1; i < items.length; i += 2) { v = arOp(items[i].op, v, items[i + 1]()) }
+            for (i = 1; i < items.length; i += 2) {
+                var op = items[i].op
+                if (op == "&&" && arIsZero(v)) { v = 0 }
+                else if (op == "||" && !arIsZero(v)) { v = 1 }
+                else { v = arOp(op, v, items[i + 1]()) }
+            }
             return v
         }
     }
+    // ---- the arithmetic evaluator for a run-time string ----
+    // What only exists at run time - a variable's value that is not a plain number
+    // (`r=a; a=7; $(( r + 1 ))` is 8), an expression with an expansion in it (expanded first,
+    // then parsed: `e="1 + 2"; $(( $e * 2 ))` is 5), an indexed subscript - is parsed here.
+    // Twin of rt_arith and its ar_* helpers in languages/lib/bash-rt.c, which the compiled
+    // half calls for the same three cases; the two are kept line for line alike.
+    var arS = ""
+    var arLen = 0
+    var arP = 0
+    var arBad = false     // an error was reported: every level unwinds with 0
+    var arNoeval = 0      // > 0 in an operand && / || / ?: skips: no store, no error
+    var arDepth = 0       // nesting through variables' values
+    function arAt(d) { var i = arP + d; return (i >= 0 && i < arLen) ? arS.charCodeAt(i) : 0 }
+    function arWs() { while (arAt(0) == 32 || arAt(0) == 9 || arAt(0) == 10) { arP = arP + 1 } }
+    function arIdCh(cc, first) {
+        if ((cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90) || cc == 95) { return true }
+        return !first && cc >= 48 && cc <= 57
+    }
+    // An error at the cursor: bash names the rest of the expression as the token.
+    function arErr(msg) {
+        if (!arBad) { arBad = true; arFailAt(arS, msg, arS.slice(arP)) }
+        return 0
+    }
+    // A numeric constant: 0x / 0X hexadecimal, a leading 0 octal, BASE#DIGITS with a base from
+    // 2 to 64, else decimal. bash scans every letter, digit, @ and _ into the constant, so
+    // `12abc` is "value too great for base", not 12.
+    function arNumber() {
+        var base = 10
+        var v = anytype
+        v = 0
+        var start = arP
+        if (arAt(0) == 48 && (arAt(1) == 120 || arAt(1) == 88)) { base = 16; arP = arP + 2 }
+        else if (arAt(0) == 48) { base = 8 }
+        while (true) {
+            var cc = arAt(0)
+            var d = -1
+            if (cc == 35) {
+                if (!(typeof v == "number" && v >= 2 && v <= 64)) { arP = start; return arErr("invalid arithmetic base") }
+                base = v
+                v = 0
+                arP = arP + 1
+                continue
+            }
+            if (cc >= 48 && cc <= 57) { d = cc - 48 }
+            else if (cc >= 97 && cc <= 122) { d = cc - 87 }
+            else if (cc >= 65 && cc <= 90) { d = (base > 36) ? cc - 29 : cc - 55 }
+            else if (cc == 64) { d = 62 }
+            else if (cc == 95) { d = 63 }
+            else { break }
+            if (d >= base) { arP = start; return arErr("value too great for base") }
+            v = arOp("+", arOp("*", v, base), d)
+            arP = arP + 1
+        }
+        return v
+    }
+    function arName() {
+        var s0 = arP
+        while (arIdCh(arAt(0), arP == s0)) { arP = arP + 1 }
+        return arS.slice(s0, arP)
+    }
+    // [ EXPR ] after a name, as the key it names, or null when there is no subscript.
+    function arSubscript(nm) {
+        if (arAt(0) != 91) { return null }
+        arP = arP + 1
+        var k = arComma()
+        arWs()
+        if (arAt(0) != 93) { arErr("missing `]'"); return null }
+        arP = arP + 1
+        return arrIdxKey(nm, k)
+    }
+    // A variable's value as an operand: empty is 0, anything else is itself an expression.
+    function arValue(nm, key) {
+        if (arNoeval > 0) { return 0 }
+        var v = (key != null) ? scGet(nm, key) : getVarVal(nm)
+        if (v == "") { return 0 }
+        if (arDepth >= 1024) { return arErr("expression recursion level exceeded") }
+        return arEval(v)
+    }
+    function arStore(nm, key, v) {
+        if (arNoeval > 0) { return v }
+        if (key != null) { arrSet(nm, key, numToStr(v)) } else { setVarVal(nm, numToStr(v)) }
+        return v
+    }
+    // One binary operator of the string evaluator: the thunks' arOp, with / and % checked here
+    // so that a skipped operand does not report its division by 0.
+    function arApply(op, a, b) {
+        if ((op == "/" || op == "%") && arIsZero(b)) {
+            if (arNoeval > 0) { return 0 }
+            return arErr("division by 0")
+        }
+        return arOp(op, a, b)
+    }
+    function arPrimary() {
+        arWs()
+        var cc = arAt(0)
+        if (cc == 40) {
+            arP = arP + 1
+            var v = arComma()
+            arWs()
+            if (arAt(0) != 41) { return arErr("missing `)'") }
+            arP = arP + 1
+            return v
+        }
+        if (cc >= 48 && cc <= 57) { return arNumber() }
+        if (arIdCh(cc, true)) {
+            var nm = arName()
+            var key = arSubscript(nm)
+            if (arBad) { return 0 }
+            var v2 = arValue(nm, key)
+            arWs()
+            if ((arAt(0) == 43 && arAt(1) == 43) || (arAt(0) == 45 && arAt(1) == 45)) {
+                arStore(nm, key, arOp((arAt(0) == 43) ? "+" : "-", v2, 1))
+                arP = arP + 2
+            }
+            return v2
+        }
+        return arErr("arithmetic syntax error: operand expected")
+    }
+    function arUnary() {
+        arWs()
+        var cc = arAt(0)
+        if (cc == 33 && arAt(1) != 61) { arP = arP + 1; return arIsZero(arUnary()) ? 1 : 0 }
+        if (cc == 126) { arP = arP + 1; var bv = arUnary(); return arInt32(bv) ? ~bv : arNorm(i64Not(arPair(bv))) }
+        if ((cc == 43 || cc == 45) && arAt(1) == cc) {
+            var save = arP
+            arP = arP + 2
+            arWs()
+            if (arIdCh(arAt(0), true)) {
+                var nm = arName()
+                var key = arSubscript(nm)
+                if (arBad) { return 0 }
+                return arStore(nm, key, arOp((cc == 43) ? "+" : "-", arValue(nm, key), 1))
+            }
+            arP = save
+        }
+        if (cc == 45) { arP = arP + 1; var nv = arUnary(); return (typeof nv == "number") ? 0 - nv : arNorm(i64Neg(nv)) }
+        if (cc == 43) { arP = arP + 1; return arUnary() }
+        return arPrimary()
+    }
+    function arPowS() {
+        var b = arUnary()
+        arWs()
+        if (arAt(0) == 42 && arAt(1) == 42) {
+            arP = arP + 2
+            var e = arPowS()
+            if (arIsNeg(e)) {
+                if (arNoeval > 0) { return 0 }
+                return arErr("exponent less than 0")
+            }
+            return arPow(b, e)
+        }
+        return b
+    }
+    function arMulS() {
+        var v = anytype
+        v = arPowS()
+        while (!arBad) {
+            arWs()
+            var cc = arAt(0)
+            if (!((cc == 42 && arAt(1) != 42 && arAt(1) != 61) || ((cc == 47 || cc == 37) && arAt(1) != 61))) { break }
+            arP = arP + 1
+            v = arApply(String.fromCharCode(cc), v, arPowS())
+        }
+        return v
+    }
+    function arAddS() {
+        var v = anytype
+        v = arMulS()
+        while (!arBad) {
+            arWs()
+            var cc = arAt(0)
+            if (!((cc == 43 || cc == 45) && arAt(1) != cc && arAt(1) != 61)) { break }
+            arP = arP + 1
+            v = arOp(String.fromCharCode(cc), v, arMulS())
+        }
+        return v
+    }
+    function arShiftS() {
+        var v = anytype
+        v = arAddS()
+        while (!arBad) {
+            arWs()
+            var cc = arAt(0)
+            if (!((cc == 60 || cc == 62) && arAt(1) == cc && arAt(2) != 61)) { break }
+            arP = arP + 2
+            v = arOp((cc == 60) ? "<<" : ">>", v, arAddS())
+        }
+        return v
+    }
+    function arCmpS() {
+        var v = anytype
+        v = arShiftS()
+        while (!arBad) {
+            arWs()
+            var cc = arAt(0)
+            if (!((cc == 60 || cc == 62) && arAt(1) != cc)) { break }
+            var eq = arAt(1) == 61
+            arP = arP + (eq ? 2 : 1)
+            v = arOp(String.fromCharCode(cc) + (eq ? "=" : ""), v, arShiftS())
+        }
+        return v
+    }
+    function arEqS() {
+        var v = anytype
+        v = arCmpS()
+        while (!arBad) {
+            arWs()
+            var cc = arAt(0)
+            if (!((cc == 61 || cc == 33) && arAt(1) == 61)) { break }
+            arP = arP + 2
+            v = arOp((cc == 61) ? "==" : "!=", v, arCmpS())
+        }
+        return v
+    }
+    // & ^ | : one loop each, the operator byte and the two it must not be part of.
+    function arBitS(lvl) {
+        var op = (lvl == 0) ? 38 : ((lvl == 1) ? 94 : 124)
+        var v = anytype
+        v = (lvl == 0) ? arEqS() : arBitS(lvl - 1)
+        while (!arBad) {
+            arWs()
+            if (!(arAt(0) == op && arAt(1) != op && arAt(1) != 61)) { break }
+            arP = arP + 1
+            v = arOp(String.fromCharCode(op), v, (lvl == 0) ? arEqS() : arBitS(lvl - 1))
+        }
+        return v
+    }
+    // && and ||: the right operand is parsed either way, but evaluated only when the left one
+    // did not already decide the answer.
+    function arLogicS(isOr) {
+        var v = anytype
+        v = isOr ? arLogicS(false) : arBitS(2)
+        while (!arBad) {
+            var op = isOr ? 124 : 38
+            arWs()
+            if (!(arAt(0) == op && arAt(1) == op)) { break }
+            arP = arP + 2
+            var skip = isOr ? !arIsZero(v) : arIsZero(v)
+            if (skip) { arNoeval = arNoeval + 1 }
+            var r = isOr ? arLogicS(false) : arBitS(2)
+            if (skip) { arNoeval = arNoeval - 1 }
+            v = arOp(isOr ? "||" : "&&", v, r)
+        }
+        return v
+    }
+    function arCondS() {
+        var cv = arLogicS(true)
+        arWs()
+        if (arBad || arAt(0) != 63) { return cv }
+        arP = arP + 1
+        var taken = !arIsZero(cv)
+        if (!taken) { arNoeval = arNoeval + 1 }
+        var a = arComma()
+        if (!taken) { arNoeval = arNoeval - 1 }
+        arWs()
+        if (arBad) { return 0 }
+        if (arAt(0) != 58) { return arErr("`:' expected for conditional expression") }
+        arP = arP + 1
+        if (taken) { arNoeval = arNoeval + 1 }
+        var b = arCondS()
+        if (taken) { arNoeval = arNoeval - 1 }
+        return taken ? a : b
+    }
+    // NAME[SUB] OP= EXPR, recognised by a scan that evaluates nothing, so the subscript's side
+    // effects (a[i++]=x) happen exactly once.
+    function arAssignS() {
+        arWs()
+        var save = arP
+        var op = ""
+        if (arIdCh(arAt(0), true)) {
+            var q = arP
+            while (q < arLen && arIdCh(arS.charCodeAt(q), false)) { q = q + 1 }
+            if (q < arLen && arS.charCodeAt(q) == 91) {
+                var depth = 0
+                while (q < arLen) {
+                    var bc = arS.charCodeAt(q)
+                    if (bc == 91) { depth = depth + 1 }
+                    if (bc == 93) { depth = depth - 1; if (depth == 0) { break } }
+                    q = q + 1
+                }
+                q = q + 1
+            }
+            while (q < arLen && (arS.charCodeAt(q) == 32 || arS.charCodeAt(q) == 9 || arS.charCodeAt(q) == 10)) { q = q + 1 }
+            arP = q
+            var c0 = arAt(0), c1 = arAt(1)
+            if (c0 == 61 && c1 != 61) { op = "=" }
+            else if (c1 == 61 && (c0 == 43 || c0 == 45 || c0 == 42 || c0 == 47 || c0 == 37 || c0 == 38 || c0 == 94 || c0 == 124)) {
+                op = String.fromCharCode(c0) + "="
+            } else if ((c0 == 60 || c0 == 62) && c1 == c0 && arAt(2) == 61) {
+                op = String.fromCharCode(c0) + String.fromCharCode(c0) + "="
+            }
+            arP = save
+        }
+        if (op != "") {
+            var nm = arName()
+            var key = arSubscript(nm)
+            if (arBad) { return 0 }
+            arWs()
+            arP = arP + op.length
+            var v = anytype
+            v = arAssignS()
+            if (arBad) { return 0 }
+            if (op != "=") { v = arApply(op.slice(0, op.length - 1), arValue(nm, key), v) }
+            if (arBad) { return 0 }
+            return arStore(nm, key, v)
+        }
+        return arCondS()
+    }
+    function arComma() {
+        var v = anytype
+        v = arAssignS()
+        while (!arBad) {
+            arWs()
+            if (arAt(0) != 44) { break }
+            arP = arP + 1
+            v = arAssignS()
+        }
+        return v
+    }
+    // A string that is a plain decimal number (blanks around, one sign, no leading 0) needs no
+    // parse; everything else is evaluated as an expression. An empty expression is 0.
+    function arEval(s) {
+        var i = 0
+        var n = s.length
+        while (i < n && (s.charCodeAt(i) == 32 || s.charCodeAt(i) == 9 || s.charCodeAt(i) == 10)) { i = i + 1 }
+        var j = i
+        if (j < n && (s.charCodeAt(j) == 45 || s.charCodeAt(j) == 43)) { j = j + 1 }
+        var d0 = j
+        while (j < n && s.charCodeAt(j) >= 48 && s.charCodeAt(j) <= 57) { j = j + 1 }
+        var d1 = j
+        while (j < n && (s.charCodeAt(j) == 32 || s.charCodeAt(j) == 9 || s.charCodeAt(j) == 10)) { j = j + 1 }
+        if (j == n && d1 > d0 && (s.charCodeAt(d0) != 48 || d1 == d0 + 1)) { return arStr(s) }
+        var saveS = arS, saveLen = arLen, saveP = arP
+        var v = anytype
+        v = 0
+        arS = s
+        arLen = n
+        arP = 0
+        arDepth = arDepth + 1
+        arWs()
+        if (arP < arLen) {
+            v = arComma()
+            arWs()
+            if (!arBad && arP < arLen) {
+                if (arAt(0) == 41) { arErr("arithmetic syntax error: invalid arithmetic operator") }
+                else { arErr("arithmetic syntax error in expression") }
+            }
+        }
+        arDepth = arDepth - 1
+        arS = saveS
+        arLen = saveLen
+        arP = saveP
+        if (arBad) {
+            v = 0
+            if (arDepth == 0) { arBad = false; arNoeval = 0 }
+        }
+        return v
+    }
+
 
     // ---- statement / command thunks: function() -> int status | {ret: int} ----
 
@@ -3271,12 +3694,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (a.op == "+=") {
             if (isArr(a.name)) { arrAppendList(a.name, [v]) }
-            else if (attrOn(intVars, a.name)) { setVarVal(a.name, numToStr(arOp("+", arStr(getVarVal(a.name)), evalArithStr(v)))) }
+            else if (attrOn(intVars, a.name)) { setVarVal(a.name, numToStr(arOp("+", arEval(getVarVal(a.name)), arEval(v)))) }
             else { setVarVal(a.name, getVarVal(a.name) + v) }
             return
         }
         // `declare -i n` makes n=EXPR evaluate EXPR as arithmetic.
-        if (attrOn(intVars, a.name)) { setVarVal(a.name, numToStr(evalArithStr(v))); return }
+        if (attrOn(intVars, a.name)) { setVarVal(a.name, numToStr(arEval(v))); return }
         setVarVal(a.name, v)
     }
 
@@ -3352,13 +3775,6 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (st.hadIn) { stdinBuf = st.inb; stdinPos = st.inp }
     }
 
-    // The arithmetic evaluator, reachable from a runtime string (declare -i assignments).
-    function evalArithStr(src) {
-        if (src == "") { return 0 }
-        var frag = c.parseFrom(c.agrammar, src, "ArList")
-        var t = c.compile(frag).stack[0]
-        return t()
-    }
 
     // eval / trap re-parse a string with THIS grammar, starting at CompoundList (which pushes
     // one statement-sequence thunk), and run the thunk that comes back.
@@ -4160,15 +4576,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // (( expr )) : status 0 when the value is non-zero (the opposite of C).
     function makeArithCmd(exprT) {
-        return function() { var st = (exprT() != 0) ? 0 : 1; setStatus(st); return st }
+        return function() { var st = !arIsZero(exprT()) ? 0 : 1; setStatus(st); return st }
     }
     // let EXPR ... : same evaluator, status from the LAST expression.
     function makeLetCmd(items) {
         return function() {
-            var v = 0
+            var v = anytype
+            v = 0
             var i
             for (i = 0; i < items.length; i++) { v = items[i]() }
-            var st = (v != 0) ? 0 : 1
+            var st = !arIsZero(v) ? 0 : 1
             setStatus(st)
             return st
         }
@@ -4428,7 +4845,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var r = anytype
             initT()
             var go = true
-            while (go && condT() != 0) {
+            while (go && !arIsZero(condT())) {
                 r = bodyT()
                 if (typeof r == "object") {
                     var sg = loopSignal(r)

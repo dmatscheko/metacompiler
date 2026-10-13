@@ -1025,13 +1025,24 @@ long ar_comma(void)
     return v;
 }
 
-/* Evaluate the whole string. An empty expression is 0, as in bash. */
+/* Evaluate the whole string. An empty expression is 0, as in bash, and a plain
+ * decimal number (blanks around, one sign, no leading 0) needs no parse. */
 long rt_arith(char *s)
 {
     char *saveS = ar_s;
     int saveLen = ar_len;
     int saveP = ar_p;
     long v = 0;
+    int i = 0;
+    int d0;
+    int d1;
+    while (s[i] == 32 || s[i] == 9 || s[i] == 10) i = i + 1;
+    if (s[i] == 45 || s[i] == 43) i = i + 1;
+    d0 = i;
+    while (s[i] >= 48 && s[i] <= 57) i = i + 1;
+    d1 = i;
+    while (s[i] == 32 || s[i] == 9 || s[i] == 10) i = i + 1;
+    if (s[i] == 0 && d1 > d0 && (s[d0] != 48 || d1 == d0 + 1)) return rt_str2int(s);
     ar_s = s;
     ar_len = rt_strlen(s);
     ar_p = 0;

@@ -2071,6 +2071,32 @@ s37() {
   check w64k "$rt" 0
 }
 
+# ===== SECTION 38: what arithmetic evaluates, and when =====
+# && and || skip an operand the left side decided, and ?: evaluates one arm. A variable's
+# value is itself an expression (x=010 is 8, r=a reads a), and an expression holding an
+# expansion is expanded FIRST and parsed after, so `$e * 2` with e="1 + 2" is 1 + 2 * 2.
+# Every expected value is bash 5.3's.
+s38() {
+  local z=0 k=1
+  check sc1 "$(( z && (z = 9) )) z=$z" "0 z=0"
+  check sc2 "$(( 1 || (z = 9) )) z=$z" "1 z=0"
+  check sc3 "$(( k == 1 ? k++ : k-- )) k=$k" "1 k=2"
+  k=0
+  check sc4 "$(( k == 1 ? k++ : k-- )) k=$k" "0 k=-1"
+  check sc5 "$(( 0 && 1/0 )) $(( 1 || 1/0 )) $(( 0 ? 1/0 : 5 )) $(( 1 ? 2 : 3 , 4 ))" "0 1 5 4"
+  local r=a a=7 e="1 + 2"
+  check ev1 "$(( r + 1 ))" 8
+  check ev2 "$(( e * 2 )) $(( $e * 2 )) $(( ${e} * 2 ))" "6 5 5"
+  (( $e * 2 == 5 )); check ev3 "$?" 0
+  local x=010 y="1+2" w="2*3"
+  (( y++ )); (( w += 1 ))
+  check ev4 "$(( x )) $y $w" "8 4 7"
+  local v1=5 v2=v1 v3=v2 asg="t38=4"
+  check ev5 "$(( "3" + 4 )) $(( $(echo 3) * 2 )) $(( v3 * 2 )) $(( asg )) $t38" "7 6 10 4 4"
+  local n=5
+  check ev6 "$(( n$((1+1)) )) $(( 1 + (2 ? 3 : 4) * 2 ))" "0 7"
+}
+
 s01   # SECTION-CALL 01
 s02   # SECTION-CALL 02
 s03   # SECTION-CALL 03
@@ -2108,5 +2134,6 @@ s34   # SECTION-CALL 34
 s35   # SECTION-CALL 35
 s36   # SECTION-CALL 36
 s37   # SECTION-CALL 37
+s38   # SECTION-CALL 38
 echo "full: $checks checks, $fails failures"
 exit $fails
