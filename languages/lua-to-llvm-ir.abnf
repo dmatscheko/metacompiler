@@ -3157,6 +3157,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b = libSet(b, st, "char", emitLibFunc(libArgsExt("js_luchar")))
             b = libSet(b, st, "reverse", emitLibFunc(libArgsExt("js_lureverse")))
             b = libSet(b, st, "format", emitLibFunc(libArgsExt("js_luformat")))
+            b = libSet(b, st, "pack", emitLibFunc(libArgsExt("js_lustrpack")))
+            b = libSet(b, st, "packsize", emitLibFunc(libArgsExt("js_lustrpacksize")))
+            b = libSet(b, st, "unpack", emitLibFunc(libArgsExt("js_lustrunpack")))
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "string"), st])
             // The same table under a name no Lua program can spell, so the string
             // metatable lookup cannot be broken by `local string = 1`.

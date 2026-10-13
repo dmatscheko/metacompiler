@@ -2188,6 +2188,36 @@ function s51()
     check("tm6", try(table.insert, setmetatable({}, {__len = function() return "x" end}), 1), "object length is not an integer")
 end
 
+-- ===== SECTION 52: string.pack / unpack / packsize =====
+-- Integers of every size with their overflow checks and sign extension, IEEE
+-- floats and doubles (subnormals, rounding to float, infinities), the string
+-- options, endianness, alignment and the format errors. Bytes and values printed
+-- by lua 5.5 on a little-endian 64-bit machine.
+function s52()
+    local function try(f, ...)
+        local ok, e = pcall(f, ...)
+        if ok then return "ok" end
+        return (tostring(e):gsub("^[^:]*:%d+: ", ""))
+    end
+    local function hex(s) return (s:gsub(".", function(c) return string.format("%02x", c:byte()) end)) end
+    check("pk1", hex(string.pack("i3", -2)) .. " " .. hex(string.pack(">I2", 65535)) .. " " .. hex(string.pack("j", math.mininteger)) .. " " .. hex(string.pack("i16", -1)),
+        "feffff ffff 0000000000000080 ffffffffffffffffffffffffffffffff")
+    check("pk2", hex(string.pack(">d", 1.5)) .. " " .. hex(string.pack("<f", 0.1)) .. " " .. hex(string.pack("f", 1e40)) .. " " .. hex(string.pack("f", 3e-45)) .. " " .. hex(string.pack("d", 0/0)),
+        "3ff8000000000000 cdcccc3d 0000807f 02000000 000000000000f87f")
+    local ds = {string.unpack("f", string.pack("f", 0.1)), string.unpack(">d", string.pack(">d", 5e-324)), string.unpack("f", string.pack("f", 16777217)), string.unpack("f", string.pack("f", 7e-46))}
+    check("pk3", tostring(ds[1]) .. " " .. tostring(ds[2]) .. " " .. tostring(ds[3]) .. " " .. tostring(ds[4]), "0.10000000149011612 4.94065645841247e-324 16777216.0 0.0")
+    check("pk4", hex(string.pack("!4 b i4", 1, 2)) .. " " .. hex(string.pack("b Xi4 i2", 1, 2)) .. " " .. string.packsize("!8 b d") .. " " .. string.packsize("i3 x c5") .. " " .. hex(string.pack("<i4 >i4", 1, 1)),
+        "0100000002000000 010200 16 9 0100000000000001")
+    local a, b, c, n = string.unpack("z s1 B", string.pack("z s1 B", "hi", "yo", 7))
+    check("pk5", a .. b .. c .. n .. " " .. string.unpack("i9", string.rep("\255", 9)) .. " " .. string.unpack("b", "\200") .. " " .. hex(string.pack("c4", "ab")), "hiyo78 -1 -56 61620000")
+    check("pk6", try(string.pack, "i17", 1) .. "|" .. try(string.pack, "c", "a") .. "|" .. try(string.pack, "q", 1) .. "|" .. try(string.pack, "b", 200) .. "|" .. try(string.pack, "B", -1),
+        "integral size (17) out of limits [1,16]|missing size for format option 'c'|invalid format option 'q'|bad argument #2 to 'string.pack' (integer overflow)|bad argument #2 to 'string.pack' (unsigned overflow)")
+    check("pk7", try(string.packsize, "s") .. "|" .. try(string.unpack, "i4", "abc") .. "|" .. try(string.unpack, "z", "abc") .. "|" .. try(string.unpack, "i9", string.rep("\255", 8) .. "\1") .. "|" .. try(string.pack, "!3 i4", 1),
+        "bad argument #1 to 'string.packsize' (variable-length format)|bad argument #2 to 'string.unpack' (data string too short)|bad argument #2 to 'string.unpack' (unfinished string for format 'z')|9-byte integer does not fit into Lua Integer|bad argument #1 to 'string.pack' (format asks for alignment not power of 2)")
+    check("pk8", math.type(string.unpack("d", string.pack("d", 3))) .. " " .. math.type(string.unpack("i", string.pack("i", 3))) .. " " .. string.unpack("I3 i5 I7", string.pack("I3 i5 I7", 0xABCDEF, -3, 1 << 50)),
+        "float integer 11259375")
+end
+
 s25() -- SECTION-CALL 25
 s26() -- SECTION-CALL 26
 s27() -- SECTION-CALL 27
@@ -2215,5 +2245,6 @@ s48() -- SECTION-CALL 48
 s49() -- SECTION-CALL 49
 s50() -- SECTION-CALL 50
 s51() -- SECTION-CALL 51
+s52() -- SECTION-CALL 52
 print("full: " .. checks .. " checks, " .. failures .. " failures")
 exit(failures)

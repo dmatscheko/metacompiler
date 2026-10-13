@@ -877,6 +877,18 @@ func init() {
 			}
 			return rt.wrapStr(strFromUnits(out))
 		}
+		// ----- string.pack / unpack / packsize -----
+		m["js_lustrpack"] = func(a []uint64) uint64 { return rt.wrapStr(rt.lpPack("string.pack", argsOf(a[0]))) }
+		m["js_lustrpacksize"] = func(a []uint64) uint64 {
+			args := argsOf(a[0])
+			return w(float64(rt.lpPackSize("string.packsize", rt.luCheckStr("string.packsize", 1, args))))
+		}
+		m["js_lustrunpack"] = func(a []uint64) uint64 {
+			args := argsOf(a[0])
+			f := rt.luCheckStr("string.unpack", 1, args)
+			s := strUnits(rt.luCheckStr("string.unpack", 2, args))
+			return w(luMk(rt.lpUnpack("string.unpack", f, s, rt.luOptInt("string.unpack", 3, args, 1))))
+		}
 		// ----- utf8 (lutf8lib.c) -----
 		m["js_luutf8char"] = func(a []uint64) uint64 {
 			args := argsOf(a[0])
@@ -1137,4 +1149,329 @@ func (rt *jsrt) lu8Next(s []uint16, i int, strict bool) (int, int64, bool) {
 func luU8Strict(args []interface{}, n int) bool {
 	lax := luArgAt(args, n)
 	return luIsNil(lax) || lax == false
+}
+
+// ----- string.pack / unpack / packsize (lstrlib.c) -----
+// Line-by-line twin of the lp* functions of languages/lib/lua-strlib.js: the
+// format read one option at a time under a header state, this machine's sizes
+// (C int 4, long, size_t and lua_Integer 8, maximal alignment 8), little-endian
+// native. A NaN packs as the quiet NaN whatever its sign, as the MetaJS side,
+// which cannot see the sign, has to.
+
+const (
+	lpInt = iota
+	lpUint
+	lpFloat
+	lpDouble
+	lpChar
+	lpString
+	lpZstr
+	lpPadding
+	lpPaddalign
+	lpNop
+)
+
+type lpState struct {
+	f        []uint16
+	p        int
+	little   bool
+	maxalign int
+}
+
+type lpOpt struct{ k, size, ntoalign int }
+
+func (st *lpState) isDigit() bool { return st.p < len(st.f) && st.f[st.p] >= '0' && st.f[st.p] <= '9' }
+
+func (st *lpState) getNum(df int) int {
+	if !st.isDigit() {
+		return df
+	}
+	a := 0
+	for going := true; going; going = st.isDigit() && a <= 214748363 {
+		a = a*10 + int(st.f[st.p]-'0')
+		st.p++
+	}
+	return a
+}
+
+func (rt *jsrt) lpGetNumLimit(st *lpState, df int) int {
+	sz := st.getNum(df)
+	if sz > 16 || sz <= 0 {
+		rt.luFail("integral size (%d) out of limits [1,16]", sz)
+	}
+	return sz
+}
+
+func (rt *jsrt) lpOption(st *lpState) lpOpt {
+	c := st.f[st.p]
+	st.p++
+	switch c {
+	case 'b', 'B':
+		return lpOpt{k: lpIntKind(c == 'b'), size: 1}
+	case 'h', 'H':
+		return lpOpt{k: lpIntKind(c == 'h'), size: 2}
+	case 'l', 'L', 'j', 'J':
+		return lpOpt{k: lpIntKind(c == 'l' || c == 'j'), size: 8}
+	case 'T':
+		return lpOpt{k: lpUint, size: 8}
+	case 'f':
+		return lpOpt{k: lpFloat, size: 4}
+	case 'n', 'd':
+		return lpOpt{k: lpDouble, size: 8}
+	case 'i', 'I':
+		return lpOpt{k: lpIntKind(c == 'i'), size: rt.lpGetNumLimit(st, 4)}
+	case 's':
+		return lpOpt{k: lpString, size: rt.lpGetNumLimit(st, 8)}
+	case 'c':
+		n := st.getNum(-1)
+		if n == -1 {
+			rt.luFail("missing size for format option 'c'")
+		}
+		return lpOpt{k: lpChar, size: n}
+	case 'z':
+		return lpOpt{k: lpZstr}
+	case 'x':
+		return lpOpt{k: lpPadding, size: 1}
+	case 'X':
+		return lpOpt{k: lpPaddalign}
+	case ' ':
+	case '<', '=':
+		st.little = true
+	case '>':
+		st.little = false
+	case '!':
+		st.maxalign = rt.lpGetNumLimit(st, 8)
+	default:
+		rt.luFail("invalid format option '%s'", strFromUnits([]uint16{c}))
+	}
+	return lpOpt{k: lpNop}
+}
+
+func lpIntKind(signed bool) int {
+	if signed {
+		return lpInt
+	}
+	return lpUint
+}
+
+func (rt *jsrt) lpDetails(st *lpState, total int, qual string) lpOpt {
+	o := rt.lpOption(st)
+	align := o.size
+	if o.k == lpPaddalign {
+		if st.p >= len(st.f) {
+			rt.luArgErr(qual, 1, "invalid next option for option 'X'")
+		}
+		nx := rt.lpOption(st)
+		align = nx.size
+		if nx.k == lpChar || align == 0 {
+			rt.luArgErr(qual, 1, "invalid next option for option 'X'")
+		}
+	}
+	if align > 1 && o.k != lpChar {
+		if align > st.maxalign {
+			align = st.maxalign
+		}
+		if align&(align-1) != 0 {
+			rt.luArgErr(qual, 1, "format asks for alignment not power of 2")
+		}
+		o.ntoalign = (align - total%align) % align
+	}
+	return o
+}
+
+func lpPackInt(out []uint16, n uint64, little bool, size int, neg bool) []uint16 {
+	for i := 0; i < size; i++ {
+		j := i
+		if !little {
+			j = size - 1 - i
+		}
+		b := uint16(0)
+		if j < 8 {
+			b = uint16(n >> (8 * j) & 255)
+		} else if neg {
+			b = 255
+		}
+		out = append(out, b)
+	}
+	return out
+}
+
+func lpF64Bits(x float64) uint64 {
+	if x != x {
+		return 0x7FF8000000000000
+	}
+	return math.Float64bits(x)
+}
+
+func lpF32Bits(x float64) uint32 {
+	if x != x {
+		return 0x7FC00000
+	}
+	return math.Float32bits(float32(x))
+}
+
+func (rt *jsrt) lpIntArg(qual string, args []interface{}, n int) uint64 {
+	rt.luCheckInt(qual, n, args)
+	v, _ := luToNum(args[n-1])
+	return uint64(luIntOf(v))
+}
+
+func (rt *jsrt) lpPack(qual string, args []interface{}) string {
+	st := &lpState{f: strUnits(rt.luCheckStr(qual, 1, args)), little: true, maxalign: 1}
+	var out []uint16
+	arg, total := 1, 0
+	for st.p < len(st.f) {
+		d := rt.lpDetails(st, total, qual)
+		total += d.ntoalign + d.size
+		out = append(out, make([]uint16, d.ntoalign)...)
+		arg++
+		switch d.k {
+		case lpInt, lpUint:
+			n := rt.lpIntArg(qual, args, arg)
+			if d.size < 8 {
+				lim := uint64(1) << (d.size*8 - 1)
+				if d.k == lpInt {
+					if int64(n) < -int64(lim) || int64(n) >= int64(lim) {
+						rt.luArgErr(qual, arg, "integer overflow")
+					}
+				} else if n >= lim<<1 {
+					rt.luArgErr(qual, arg, "unsigned overflow")
+				}
+			}
+			out = lpPackInt(out, n, st.little, d.size, d.k == lpInt && int64(n) < 0)
+		case lpFloat:
+			rt.luCheckNum(qual, arg, args)
+			v, _ := luToNum(args[arg-1])
+			out = lpPackInt(out, uint64(lpF32Bits(luNumOf(v))), st.little, 4, false)
+		case lpDouble:
+			rt.luCheckNum(qual, arg, args)
+			v, _ := luToNum(args[arg-1])
+			out = lpPackInt(out, lpF64Bits(luNumOf(v)), st.little, 8, false)
+		case lpChar:
+			s := strUnits(rt.luCheckStr(qual, arg, args))
+			if len(s) > d.size {
+				rt.luArgErr(qual, arg, "string longer than given size")
+			}
+			out = append(append(out, s...), make([]uint16, d.size-len(s))...)
+		case lpString:
+			s := strUnits(rt.luCheckStr(qual, arg, args))
+			if d.size < 8 && uint64(len(s)) >= uint64(1)<<(d.size*8) {
+				rt.luArgErr(qual, arg, "string length does not fit in given size")
+			}
+			out = append(lpPackInt(out, uint64(len(s)), st.little, d.size, false), s...)
+			total += len(s)
+		case lpZstr:
+			s := strUnits(rt.luCheckStr(qual, arg, args))
+			for _, c := range s {
+				if c == 0 {
+					rt.luArgErr(qual, arg, "string contains zeros")
+				}
+			}
+			out = append(append(out, s...), 0)
+			total += len(s) + 1
+		default:
+			if d.k == lpPadding {
+				out = append(out, 0)
+			}
+			arg--
+		}
+	}
+	return strFromUnits(out)
+}
+
+func (rt *jsrt) lpPackSize(qual string, fmt string) int {
+	st := &lpState{f: strUnits(fmt), little: true, maxalign: 1}
+	total := 0
+	for st.p < len(st.f) {
+		d := rt.lpDetails(st, total, qual)
+		if d.k == lpString || d.k == lpZstr {
+			rt.luArgErr(qual, 1, "variable-length format")
+		}
+		size := d.size + d.ntoalign
+		if total > 2147483647-size {
+			rt.luArgErr(qual, 1, "format result too large")
+		}
+		total += size
+	}
+	return total
+}
+
+func (rt *jsrt) lpUnpackInt(s []uint16, i int, little bool, size int, signed bool) uint64 {
+	limit := size
+	if limit > 8 {
+		limit = 8
+	}
+	at := func(k int) uint64 {
+		if little {
+			return uint64(s[i+k])
+		}
+		return uint64(s[i+size-1-k])
+	}
+	res := uint64(0)
+	for k := limit - 1; k >= 0; k-- {
+		res = res<<8 | at(k)
+	}
+	if size < 8 {
+		if signed {
+			mask := uint64(1) << (size*8 - 1)
+			res = (res ^ mask) - mask
+		}
+	} else if size > 8 {
+		fill := uint64(0)
+		if signed && int64(res) < 0 {
+			fill = 255
+		}
+		for q := limit; q < size; q++ {
+			if at(q) != fill {
+				rt.luFail("%d-byte integer does not fit into Lua Integer", size)
+			}
+		}
+	}
+	return res
+}
+
+func (rt *jsrt) lpUnpack(qual string, fmt string, data []uint16, init float64) []interface{} {
+	st := &lpState{f: strUnits(fmt), little: true, maxalign: 1}
+	ld := len(data)
+	pos := int(lsPosI(init, float64(ld))) - 1
+	if pos > ld {
+		rt.luArgErr(qual, 3, "initial position out of string")
+	}
+	var out []interface{}
+	for st.p < len(st.f) {
+		d := rt.lpDetails(st, pos, qual)
+		if d.ntoalign+d.size > ld-pos {
+			rt.luArgErr(qual, 2, "data string too short")
+		}
+		pos += d.ntoalign
+		switch d.k {
+		case lpInt, lpUint:
+			out = append(out, giNorm(int64(rt.lpUnpackInt(data, pos, st.little, d.size, d.k == lpInt)), 64, false))
+		case lpFloat:
+			out = append(out, luMkFlo(float64(math.Float32frombits(uint32(rt.lpUnpackInt(data, pos, st.little, 4, false))))))
+		case lpDouble:
+			out = append(out, luMkFlo(math.Float64frombits(rt.lpUnpackInt(data, pos, st.little, 8, false))))
+		case lpChar:
+			out = append(out, strFromUnits(data[pos:pos+d.size]))
+		case lpString:
+			n := rt.lpUnpackInt(data, pos, st.little, d.size, false)
+			if n > uint64(ld-pos-d.size) {
+				rt.luArgErr(qual, 2, "data string too short")
+			}
+			out = append(out, strFromUnits(data[pos+d.size:pos+d.size+int(n)]))
+			pos += int(n)
+		case lpZstr:
+			e := pos
+			for e < ld && data[e] != 0 {
+				e++
+			}
+			if e >= ld {
+				rt.luArgErr(qual, 2, "unfinished string for format 'z'")
+			}
+			out = append(out, strFromUnits(data[pos:e]))
+			pos = e + 1
+		}
+		pos += d.size
+	}
+	return append(out, float64(pos+1))
 }

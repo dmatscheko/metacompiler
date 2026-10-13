@@ -1624,6 +1624,23 @@ function js_lurep(args) {
 }
 function js_lureverse(args) { return lsReverse(luCheckStr("string.reverse", 1, args)) }
 
+// string.pack / unpack / packsize over lib/lua-strlib.js's lp* and these hooks.
+// Twins of the same hooks in lua-interpreter.abnf and of js_lupack* in
+// abnf/jsrtluastr.go.
+function lpArgInt(qual, args, n) { return luIntPairArg(qual, n, args) }
+function lpArgNum(qual, args, n) { return luNumOf(luCheckNum(qual, n, args)) }
+function lpArgStr(qual, args, n) { return luCheckStr(qual, n, args) }
+function lpArgErr(qual, n, msg) { luArgErr(qual, n, msg) }
+function lpMkInt(p) { return luNorm(p) }
+function lpMkFlt(d) { return luMkFlo(d) }
+function js_lustrpack(args) { return lpPack("string.pack", args) }
+function js_lustrpacksize(args) { return lpPackSize("string.packsize", luCheckStr("string.packsize", 1, args)) }
+function js_lustrunpack(args) {
+    var f = luCheckStr("string.unpack", 1, args)
+    var s = luCheckStr("string.unpack", 2, args)
+    return luMk(lpUnpack("string.unpack", f, s, luOptInt("string.unpack", 3, args, 1)))
+}
+
 // utf8 (lutf8lib.c) over lib/lua-strlib.js's lu8* core; the argument checks are
 // lauxlib's. Twins of the utf8 table in lua-interpreter.abnf and of
 // abnf/jsrtluastr.go's js_luutf8*.

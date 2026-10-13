@@ -41,7 +41,7 @@ before the yield a coroutine is parked at - a write to an upvalue, a global or a
 table it did not create - happens once per resume instead of once.
 
 Not in the subset: the loading functions of the base library (load, loadfile,
-dofile), os, string.pack/unpack and the rest of io; collectgarbage collects nothing.
+dofile), os and the rest of io; collectgarbage collects nothing.
 
 There is no main(): the file simply runs top to bottom. Self checking programs count
 their failures and end with exit(fails). The same language with the same semantics is
@@ -3308,6 +3308,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // ----- patterns: lib/lua-strlib.js, shared with layer 2 -----
     include("lib/lua-strlib.js")
     lsFail = function(msg) { fail(msg) }
+    // string.pack / unpack / packsize's hooks (lib/lua-strlib.js). Twins in
+    // languages/lib/lua-rt.metajs.
+    function lpArgInt(qual, args, n) { return luaIntPairArg(qual, n, args[n - 1], args.length) }
+    function lpArgNum(qual, args, n) { return numOf(luaCheckNum(qual, n, args[n - 1], args.length)) }
+    function lpArgStr(qual, args, n) { return luaCheckStr(qual, n, args[n - 1], args.length) }
+    function lpArgErr(qual, n, msg) { luaArgErr(qual, n, msg) }
+    function lpMkInt(p) { return szNorm(p, 64, false) }
+    function lpMkFlt(d) { return mkFlt(d) }
 
     // utf8 (lutf8lib.c) over lib/lua-strlib.js's lu8* core; the argument checks
     // are lauxlib's. Twins: the js_luutf8* externs in abnf/jsrtluastr.go and
@@ -3443,6 +3451,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // string.*: 1-based, matching Lua, over byte strings; the bodies are
     // lib/lua-strlib.js's, shared with layer 2.
     globalScope["string"] = {
+        // pack / packsize / unpack: lib/lua-strlib.js's lp* over the hooks above.
+        pack: function() { return lpPack("string.pack", arguments) },
+        packsize: function(fmt) { return lpPackSize("string.packsize", luaCheckStr("string.packsize", 1, fmt, arguments.length)) },
+        unpack: function(fmt, data, init) {
+            var nargs = arguments.length
+            var f = luaCheckStr("string.unpack", 1, fmt, nargs)
+            var s = luaCheckStr("string.unpack", 2, data, nargs)
+            return mkMulti(lpUnpack("string.unpack", f, s, luaOptInt("string.unpack", 3, init, nargs, 1)))
+        },
         len: function(s) { return luaCheckStr("string.len", 1, s, arguments.length).length },
         upper: function(s) { return lsCase(luaCheckStr("string.upper", 1, s, arguments.length), true) },
         lower: function(s) { return lsCase(luaCheckStr("string.lower", 1, s, arguments.length), false) },

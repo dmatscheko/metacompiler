@@ -1,8 +1,8 @@
 // lua-strlib.js -- Lua's pattern matching and the byte-level string library:
 // string.find, match, gmatch, gsub, byte, reverse, sub, rep, upper, lower and
 // format, as lstrlib.c (Lua 5.5) does them; at the end the utf8 library's core
-// (lutf8lib.c) and math.random's generator (lmathlib.c), which the same two
-// includers share. Lua patterns are NOT regular expressions: no alternation, a
+// (lutf8lib.c), math.random's generator (lmathlib.c) and string.pack / unpack,
+// which the same two includers share. Lua patterns are NOT regular expressions: no alternation, a
 // quantifier applies to one character class only, and %b, %f and back-references
 // (%1) exist instead. The names below follow lstrlib.c.
 //
@@ -1037,4 +1037,315 @@ function lrProject(ran, n) {
     var r = i64And(ran, lim)
     while (i64CmpU(r, n) > 0) { r = i64And(lrNext(), lim) }
     return r
+}
+
+// ----- string.pack / unpack / packsize (lstrlib.c) -----
+// The format is read one option at a time (lpDetails) under a header state
+// {f: the format, p: the position in it, little, maxalign}; sizes are this
+// machine's (C int 4, long, size_t, lua_Integer and the maximal alignment 8),
+// little-endian native. What touches a Lua value is the includer's, by hook:
+// lpArgInt(qual, args, n) the argument as an exact {h, l} pair, lpArgNum a
+// double, lpArgStr a byte string, lpArgErr(qual, n, msg) luaL_argerror,
+// lpMkInt(pair) and lpMkFlt(double) a result. Errors that name no argument go
+// through lsFail. Twin of the lp* functions in abnf/jsrtluastr.go.
+var LP_INT = 0
+var LP_UINT = 1
+var LP_FLOAT = 2
+var LP_DOUBLE = 3
+var LP_CHAR = 4
+var LP_STRING = 5
+var LP_ZSTR = 6
+var LP_PADDING = 7
+var LP_PADDALIGN = 8
+var LP_NOP = 9
+function lpIsDigit(st) { return st.p < st.f.length && st.f.charCodeAt(st.p) >= 48 && st.f.charCodeAt(st.p) <= 57 }
+// getnum: a decimal count at the cursor, else df.
+function lpGetNum(st, df) {
+    if (!lpIsDigit(st)) { return df }
+    var a = 0
+    var going = true
+    while (going) {
+        a = a * 10 + (st.f.charCodeAt(st.p) - 48)
+        st.p = st.p + 1
+        going = lpIsDigit(st) && a <= 214748363
+    }
+    return a
+}
+function lpGetNumLimit(st, df) {
+    var sz = lpGetNum(st, df)
+    if (sz > 16 || sz <= 0) { lsFail("integral size (" + sz + ") out of limits [1,16]") }
+    return sz
+}
+// getoption: the next option's kind and size.
+function lpOption(st) {
+    var opt = st.f.charCodeAt(st.p)
+    st.p = st.p + 1
+    var c = String.fromCharCode(opt)
+    if (c == "b" || c == "B") { return {k: c == "b" ? LP_INT : LP_UINT, size: 1} }
+    if (c == "h" || c == "H") { return {k: c == "h" ? LP_INT : LP_UINT, size: 2} }
+    if (c == "l" || c == "L" || c == "j" || c == "J") { return {k: (c == "l" || c == "j") ? LP_INT : LP_UINT, size: 8} }
+    if (c == "T") { return {k: LP_UINT, size: 8} }
+    if (c == "f") { return {k: LP_FLOAT, size: 4} }
+    if (c == "n" || c == "d") { return {k: LP_DOUBLE, size: 8} }
+    if (c == "i" || c == "I") { return {k: c == "i" ? LP_INT : LP_UINT, size: lpGetNumLimit(st, 4)} }
+    if (c == "s") { return {k: LP_STRING, size: lpGetNumLimit(st, 8)} }
+    if (c == "c") {
+        var n = lpGetNum(st, 0 - 1)
+        if (n === 0 - 1) { lsFail("missing size for format option 'c'") }
+        return {k: LP_CHAR, size: n}
+    }
+    if (c == "z") { return {k: LP_ZSTR, size: 0} }
+    if (c == "x") { return {k: LP_PADDING, size: 1} }
+    if (c == "X") { return {k: LP_PADDALIGN, size: 0} }
+    if (c == " ") { return {k: LP_NOP, size: 0} }
+    if (c == "<" || c == "=") { st.little = true; return {k: LP_NOP, size: 0} }
+    if (c == ">") { st.little = false; return {k: LP_NOP, size: 0} }
+    if (c == "!") { st.maxalign = lpGetNumLimit(st, 8); return {k: LP_NOP, size: 0} }
+    lsFail("invalid format option '" + c + "'")
+    return {k: LP_NOP, size: 0}
+}
+// getdetails: the option, and the padding that aligns it at offset `total`.
+function lpDetails(st, total, qual) {
+    var o = lpOption(st)
+    var align = o.size
+    if (o.k === LP_PADDALIGN) {
+        if (st.p >= st.f.length) { lpArgErr(qual, 1, "invalid next option for option 'X'") }
+        var nx = lpOption(st)
+        align = nx.size
+        if (nx.k === LP_CHAR || align === 0) { lpArgErr(qual, 1, "invalid next option for option 'X'") }
+    }
+    o.ntoalign = 0
+    if (align > 1 && o.k !== LP_CHAR) {
+        if (align > st.maxalign) { align = st.maxalign }
+        if ((align & (align - 1)) !== 0) { lpArgErr(qual, 1, "format asks for alignment not power of 2") }
+        o.ntoalign = (align - total % align) % align
+    }
+    return o
+}
+function lpNewState(fmt) { return {f: fmt, p: 0, little: true, maxalign: 1} }
+function lpIsNeg(p) { return (p.h & 2147483648) !== 0 }
+// packint: the low `size` bytes of the pair, sign-extended past 8 when neg.
+function lpPackInt(n, little, size, neg) {
+    var out = ""
+    for (var i = 0; i < size; i++) {
+        var j = little ? i : size - 1 - i
+        var byte = 0
+        if (j < 4) { byte = (n.l >>> (8 * j)) & 255 }
+        else if (j < 8) { byte = (n.h >>> (8 * (j - 4))) & 255 }
+        else if (neg) { byte = 255 }
+        out = out + String.fromCharCode(byte)
+    }
+    return out
+}
+function lpZeros(n) {
+    var out = ""
+    for (var i = 0; i < n; i++) { out = out + String.fromCharCode(0) }
+    return out
+}
+// 2^k, exact, for k down to -1074.
+function lpPow2(k) {
+    var v = 1
+    var i = 0
+    if (k >= 0) {
+        while (i < k) { v = v * 2; i = i + 1 }
+    } else {
+        while (i > k) { v = v / 2; i = i - 1 }
+    }
+    return v
+}
+// The IEEE-754 bits of a double as a pair, of a float as a number. A double has
+// no bit access in this dialect, so they are found by exact scaling: a finite
+// |x| is m * 2^e with 1 <= m < 2, and halving or doubling never rounds. A NaN
+// is the quiet NaN 0x7FF8.. / 0x7FC00000, whatever its sign.
+function lpF64Bits(x) {
+    if (x !== x) { return i64Make(2146959360, 0) }
+    var neg = x < 0 || (x === 0 && 1 / x < 0)
+    var a = neg ? -x : x
+    var hi = 0
+    var mant = 0
+    if (a - a !== 0) { hi = 2146435072 } else if (a !== 0) {
+        var m = a
+        var e = 0
+        while (m >= 2) { m = m / 2; e = e + 1 }
+        while (m < 1) { m = m * 2; e = e - 1 }
+        var biased = 0
+        if (e >= 0 - 1022) {
+            mant = (m - 1) * 4503599627370496
+            biased = e + 1023
+        } else {
+            mant = a * lpPow2(537) * lpPow2(537)
+        }
+        hi = biased * 1048576 + Math.floor(mant / 4294967296)
+    }
+    var lo = mant - Math.floor(mant / 4294967296) * 4294967296
+    if (neg) { hi = hi + 2147483648 }
+    return i64Make(hi, lo)
+}
+function lpBitsF64(p) {
+    var h = p.h >>> 0
+    var neg = h >= 2147483648
+    if (neg) { h = h - 2147483648 }
+    var biased = Math.floor(h / 1048576)
+    var mant = (h - biased * 1048576) * 4294967296 + (p.l >>> 0)
+    var v = 0
+    if (biased === 2047) { v = mant === 0 ? 1 / 0 : 0 / 0 }
+    else if (biased === 0) { v = mant * lpPow2(0 - 537) * lpPow2(0 - 537) }
+    else { v = (mant + 4503599627370496) * lpPow2(biased - 1075) }
+    return neg ? -v : v
+}
+// (float)x: rounded to 24 significant bits, half to even, an overflow to infinity.
+function lpRoundEven(sc) {
+    var r = Math.floor(sc)
+    var fr = sc - r
+    if (fr > 0.5 || (fr === 0.5 && r % 2 === 1)) { r = r + 1 }
+    return r
+}
+function lpF32Bits(x) {
+    if (x !== x) { return 2143289344 }
+    var neg = x < 0 || (x === 0 && 1 / x < 0)
+    var a = neg ? -x : x
+    var bits = 0
+    if (a - a !== 0) { bits = 2139095040 } else if (a !== 0) {
+        var m = a
+        var e = 0
+        while (m >= 2) { m = m / 2; e = e + 1 }
+        while (m < 1) { m = m * 2; e = e - 1 }
+        if (e >= 0 - 126) {
+            var r = lpRoundEven((m - 1) * 8388608)
+            if (r === 8388608) { r = 0; e = e + 1 }
+            bits = e > 127 ? 2139095040 : (e + 127) * 8388608 + r
+        } else {
+            // Below the normal range the units are 2^-149; a carry into 2^23 is
+            // the smallest normal float, which that encoding already is.
+            bits = lpRoundEven(a * lpPow2(149))
+        }
+    }
+    if (neg) { bits = bits + 2147483648 }
+    return bits
+}
+function lpBitsF32(b) {
+    var neg = b >= 2147483648
+    var u = neg ? b - 2147483648 : b
+    var ex = Math.floor(u / 8388608)
+    var mt = u - ex * 8388608
+    var v = 0
+    if (ex === 255) { v = mt === 0 ? 1 / 0 : 0 / 0 }
+    else if (ex === 0) { v = mt * lpPow2(0 - 149) }
+    else { v = (mt + 8388608) * lpPow2(ex - 150) }
+    return neg ? -v : v
+}
+// str_pack over the call's argument array (the format is argument 1).
+function lpPack(qual, args) {
+    var st = lpNewState(lpArgStr(qual, args, 1))
+    var out = ""
+    var arg = 1
+    var total = 0
+    while (st.p < st.f.length) {
+        var d = lpDetails(st, total, qual)
+        total = total + d.ntoalign + d.size
+        out = out + lpZeros(d.ntoalign)
+        arg = arg + 1
+        if (d.k === LP_INT || d.k === LP_UINT) {
+            var n = lpArgInt(qual, args, arg)
+            if (d.size < 8) {
+                var lim = i64Shl(i64Make(0, 1), d.size * 8 - 1)
+                if (d.k === LP_INT) {
+                    if (i64CmpS(n, i64Neg(lim)) < 0 || i64CmpS(n, lim) >= 0) { lpArgErr(qual, arg, "integer overflow") }
+                } else if (i64CmpU(n, i64Shl(lim, 1)) >= 0) {
+                    lpArgErr(qual, arg, "unsigned overflow")
+                }
+            }
+            out = out + lpPackInt(n, st.little, d.size, d.k === LP_INT && lpIsNeg(n))
+        } else if (d.k === LP_FLOAT) {
+            out = out + lpPackInt(i64Make(0, lpF32Bits(lpArgNum(qual, args, arg))), st.little, 4, false)
+        } else if (d.k === LP_DOUBLE) {
+            out = out + lpPackInt(lpF64Bits(lpArgNum(qual, args, arg)), st.little, 8, false)
+        } else if (d.k === LP_CHAR) {
+            var cs = lpArgStr(qual, args, arg)
+            if (cs.length > d.size) { lpArgErr(qual, arg, "string longer than given size") }
+            out = out + cs + lpZeros(d.size - cs.length)
+        } else if (d.k === LP_STRING) {
+            var ss = lpArgStr(qual, args, arg)
+            if (d.size < 8 && ss.length >= lpPow2(d.size * 8)) { lpArgErr(qual, arg, "string length does not fit in given size") }
+            out = out + lpPackInt(i64FromNum(ss.length), st.little, d.size, false) + ss
+            total = total + ss.length
+        } else if (d.k === LP_ZSTR) {
+            var zs = lpArgStr(qual, args, arg)
+            if (zs.indexOf(String.fromCharCode(0)) >= 0) { lpArgErr(qual, arg, "string contains zeros") }
+            out = out + zs + String.fromCharCode(0)
+            total = total + zs.length + 1
+        } else {
+            if (d.k === LP_PADDING) { out = out + String.fromCharCode(0) }
+            arg = arg - 1
+        }
+    }
+    return out
+}
+function lpPackSize(qual, fmt) {
+    var st = lpNewState(fmt)
+    var total = 0
+    while (st.p < st.f.length) {
+        var d = lpDetails(st, total, qual)
+        if (d.k === LP_STRING || d.k === LP_ZSTR) { lpArgErr(qual, 1, "variable-length format") }
+        var size = d.size + d.ntoalign
+        if (total > 2147483647 - size) { lpArgErr(qual, 1, "format result too large") }
+        total = total + size
+    }
+    return total
+}
+// unpackint at byte i of s.
+function lpUnpackInt(s, i, little, size, signed) {
+    var limit = size <= 8 ? size : 8
+    var res = i64Make(0, 0)
+    for (var k = limit - 1; k >= 0; k--) {
+        res = i64Or(i64Shl(res, 8), i64Make(0, s.charCodeAt(little ? i + k : i + size - 1 - k)))
+    }
+    if (size < 8) {
+        if (signed) {
+            var mask = i64Shl(i64Make(0, 1), size * 8 - 1)
+            res = i64Sub(i64Xor(res, mask), mask)
+        }
+    } else if (size > 8) {
+        var fill = (!signed || !lpIsNeg(res)) ? 0 : 255
+        for (var q = limit; q < size; q++) {
+            if (s.charCodeAt(little ? i + q : i + size - 1 - q) !== fill) { lsFail(size + "-byte integer does not fit into Lua Integer") }
+        }
+    }
+    return res
+}
+// str_unpack: the values, and the position after the last one.
+function lpUnpack(qual, fmt, data, init) {
+    var st = lpNewState(fmt)
+    var ld = data.length
+    var pos = lsPosI(init, ld) - 1
+    if (pos > ld) { lpArgErr(qual, 3, "initial position out of string") }
+    var out = []
+    while (st.p < st.f.length) {
+        var d = lpDetails(st, pos, qual)
+        if (d.ntoalign + d.size > ld - pos) { lpArgErr(qual, 2, "data string too short") }
+        pos = pos + d.ntoalign
+        if (d.k === LP_INT || d.k === LP_UINT) {
+            out.push(lpMkInt(lpUnpackInt(data, pos, st.little, d.size, d.k === LP_INT)))
+        } else if (d.k === LP_FLOAT) {
+            var fb = lpUnpackInt(data, pos, st.little, 4, false)
+            out.push(lpMkFlt(lpBitsF32(fb.l >>> 0)))
+        } else if (d.k === LP_DOUBLE) {
+            out.push(lpMkFlt(lpBitsF64(lpUnpackInt(data, pos, st.little, 8, false))))
+        } else if (d.k === LP_CHAR) {
+            out.push(data.substring(pos, pos + d.size))
+        } else if (d.k === LP_STRING) {
+            var len = lpUnpackInt(data, pos, st.little, d.size, false)
+            if (len.h !== 0 || len.l > ld - pos - d.size) { lpArgErr(qual, 2, "data string too short") }
+            out.push(data.substring(pos + d.size, pos + d.size + len.l))
+            pos = pos + len.l
+        } else if (d.k === LP_ZSTR) {
+            var e = data.indexOf(String.fromCharCode(0), pos)
+            if (e < 0) { lpArgErr(qual, 2, "unfinished string for format 'z'") }
+            out.push(data.substring(pos, e))
+            pos = e + 1
+        }
+        pos = pos + d.size
+    }
+    out.push(lpMkInt(i64FromNum(pos + 1)))
+    return out
 }
