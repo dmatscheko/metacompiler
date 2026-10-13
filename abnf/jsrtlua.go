@@ -378,8 +378,22 @@ func (rt *jsrt) luFailOp(opnd int, format string, args ...interface{}) {
 	panic(&jsThrown{value: o})
 }
 
-// luTypeName is Lua's type() for an error message.
+// luTypeName is the type an error message names, luaT_objtypename: the __name
+// of a table's or a file's metatable when that is a string ("FILE*" for a
+// file), else type(). Twin of luTypeName in languages/lib/lua-rt.metajs and
+// luaTypeName in lua-interpreter.abnf.
 func (rt *jsrt) luTypeName(v interface{}) string {
+	t := rt.luType(v)
+	if t == "table" || t == "userdata" {
+		if nm, ok := rt.luTm(v, "__name").(string); ok {
+			return nm
+		}
+	}
+	return t
+}
+
+// luType is Lua's type().
+func (rt *jsrt) luType(v interface{}) string {
 	if v == nil || v == jsUndef {
 		return "nil"
 	}
@@ -995,6 +1009,7 @@ func init() {
 		}
 
 		m["js_lutname"] = func(a []uint64) uint64 { return rt.wrapStr(rt.luTypeName(u(a[0]))) }
+		m["js_lutypeof"] = func(a []uint64) uint64 { return rt.wrapStr(rt.luType(u(a[0]))) }
 		// The end of a program whose error nobody caught: the text arrives
 		// rendered by the emitter's lua_errtext. Twin of js_luuncaught in
 		// languages/lib/lua-rt.metajs.

@@ -517,7 +517,7 @@ func (rt *jsrt) luIdent(v interface{}) string {
 	if luIsFile(v) {
 		return "file (0x" + hex + ")"
 	}
-	return rt.luTypeName(v) + ": 0x" + hex
+	return rt.luType(v) + ": 0x" + hex
 }
 
 func (rt *jsrt) lsLiteral(args []interface{}, n int) string {

@@ -1078,7 +1078,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             strB.NewRet(ps[0])
             notStrB.NewCondBr(rawTruthy(notStrB, callLua(notStrB, "lua_isnum", [ps[0]])), numB, otherB)
             numB.NewRet(callLua(numB, "lua_str", [ps[0]]))
-            otherB.NewRet(callExt(otherB, "js_add", [callExt(otherB, "js_add", [emitStr(otherB, "(error object is a "), callExt(otherB, "js_lutname", [ps[0]])]), emitStr(otherB, " value)")]))
+            otherB.NewRet(callExt(otherB, "js_add", [callExt(otherB, "js_add", [emitStr(otherB, "(error object is a "), callExt(otherB, "js_lutypeof", [ps[0]])]), emitStr(otherB, " value)")]))
             return
         }
         if (name == "lua_raise") {
@@ -1918,11 +1918,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var notStrB = curF.NewBlock("")
             var badB = curF.NewBlock("")
             b.NewCondBr(truthy(b, callExt(b, "js_seq", [tyV, emitStr(b, "string")])), strB, notStrB)
-            // A table with a __len answers what it answers.
+            // A table with a __len answers what it answers; a float box and a file
+            // have no length.
             var objB = curF.NewBlock("")
             var lenTmB = curF.NewBlock("")
+            var tabB = curF.NewBlock("")
             notStrB.NewCondBr(truthy(notStrB, callExt(notStrB, "js_seq", [tyV, emitStr(notStrB, "object")])), objB, badB)
-            objB.NewCondBr(objB.NewICmp(llvm.enum.IPredEQ, callExt(objB, "js_lutm", [handle(18), tv, tv]), hUndef), headB, lenTmB)
+            objB.NewCondBr(objB.NewICmp(llvm.enum.IPredEQ, callExt(objB, "js_lutm", [handle(18), tv, tv]), hUndef), tabB, lenTmB)
+            tabB.NewCondBr(truthy(tabB, callExt(tabB, "js_seq", [callExt(tabB, "js_lutypeof", [tv]), emitStr(tabB, "table")])), headB, badB)
             callExt(lenTmB, "js_scope_set", [curScopeV, emitStr(lenTmB, rName), callLua(lenTmB, "lua_metabin", [handle(18), tv, tv])])
             lenTmB.NewBr(joinB)
             var lenMk = luaMarker(badB, callExt(badB, "js_add", [callExt(badB, "js_add", [emitStr(badB, "attempt to get length of a "),
@@ -2270,7 +2273,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         objB.NewCondBr(rawTruthy(objB, callExt(objB, "js_seq", [fV, hUndef])), setB, slotB)
         callExt(setB, "js_set", [o, slot.raw ? callExt(setB, "js_luwkey", [slot.k]) : slot.k, v])
         setB.NewBr(doneB)
-        slotB.NewCondBr(rawTruthy(slotB, callExt(slotB, "js_seq", [callExt(slotB, "js_typeof", [fV]), emitStr(slotB, "object")])), metaB, badB)
+        // A file has a metatable too, and is no table to store into.
+        var metaTabB = curF.NewBlock("")
+        slotB.NewCondBr(rawTruthy(slotB, callExt(slotB, "js_seq", [callExt(slotB, "js_typeof", [fV]), emitStr(slotB, "object")])), metaTabB, badB)
+        metaTabB.NewCondBr(rawTruthy(metaTabB, callExt(metaTabB, "js_seq", [callExt(metaTabB, "js_lutypeof", [o]), emitStr(metaTabB, "table")])), metaB, badB)
         callExt(metaB, "js_lusetindex", [o, slot.raw ? slot.k : emitStr(metaB, slot.name), v])
         metaB.NewBr(doneB)
         luaIndexError(badB, o, luaDescText(slot.d))
@@ -2804,7 +2810,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function libType(bb, argsH) {
         callLua(bb, "lua_needany", [argsH, emitNum(bb, 1), emitStr(bb, "type")])
-        return {b: bb, v: callExt(bb, "js_lutname", [libArg(bb, argsH, 0)])}
+        return {b: bb, v: callExt(bb, "js_lutypeof", [libArg(bb, argsH, 0)])}
     }
 
     // ipairs(t) / pairs(t): both answer the iterator triple the generic for consumes.
@@ -2883,7 +2889,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var t = libArg(bb, argsH, 0)
         var tabB = curF.NewBlock("")
         var otherB = curF.NewBlock("")
-        bb.NewCondBr(rawTruthy(bb, callExt(bb, "js_seq", [callExt(bb, "js_lutname", [t]), emitStr(bb, "table")])), tabB, otherB)
+        bb.NewCondBr(rawTruthy(bb, callExt(bb, "js_seq", [callExt(bb, "js_lutypeof", [t]), emitStr(bb, "table")])), tabB, otherB)
         var oarr = callExt(otherB, "js_arr_new", [])
         callExt(otherB, "js_arr_push", [oarr, callExt(otherB, "js_closure", [handle(emitLibFunc(libArgsExt("js_lunext"))), curScopeV])])
         callExt(otherB, "js_arr_push", [oarr, t])
@@ -3118,8 +3124,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // Standard output is the one file: a table carrying the runtime field
             // __luf, which type() reads as a userdata. io.write answers it from the
             // reserved name 0stdout; its write method answers its self.
+            // Its metatable names it FILE* in an error and leaves it unwritable,
+            // with an empty __index for the members it does not have.
             var fo = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [fo, emitStr(b, "__luf"), hTrue])
+            var fmt = callExt(b, "js_obj_new", [])
+            callExt(b, "js_set", [fmt, emitStr(b, luaNameKey("__name")), emitStr(b, "FILE*")])
+            callExt(b, "js_set", [fmt, emitStr(b, luaNameKey("__index")), callExt(b, "js_obj_new", [])])
+            callExt(b, "js_set", [fo, emitStr(b, "__f"), fmt])
             b = libSet(b, fo, "write", emitLibFunc(libWrite(1)))
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0stdout"), fo])
             var iot = callExt(b, "js_obj_new", [])

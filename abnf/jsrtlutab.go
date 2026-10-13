@@ -7,7 +7,7 @@ package abnf
 // ARGUMENT ARRAY, so an absent argument can be told from a nil one.
 
 // luIsTable is Lua's type(v) == "table".
-func (rt *jsrt) luIsTable(v interface{}) bool { return rt.luTypeName(v) == "table" }
+func (rt *jsrt) luIsTable(v interface{}) bool { return rt.luType(v) == "table" }
 
 // luCheckTab is luaL_checktype(L, n, LUA_TTABLE).
 func (rt *jsrt) luCheckTab(fn string, n int, args []interface{}) interface{} {
@@ -311,7 +311,7 @@ func init() {
 				s, ok := v.(string)
 				if !ok {
 					if !luIsNum(v) {
-						rt.luFail("invalid value (%s) at index %d in table for 'concat'", rt.luTypeName(v), i)
+						rt.luFail("invalid value (%s) at index %d in table for 'concat'", rt.luType(v), i)
 					}
 					s = luNumStr(v)
 				}
@@ -402,7 +402,7 @@ func init() {
 					rt.luArgErr("table.sort", 1, "array too big")
 				}
 				cmp := luArgAt(args, 2)
-				if !luIsNil(cmp) && rt.luTypeName(cmp) != "function" {
+				if !luIsNil(cmp) && rt.luType(cmp) != "function" {
 					rt.luArgTypeErr("table.sort", 2, "function", args)
 				}
 				rt.luAuxSort(t, cmp, 1, n)

@@ -669,7 +669,7 @@ func (rt *jsrt) luReplVal(v interface{}) (string, bool) {
 	if luIsNum(v) {
 		return luNumStr(v), true
 	}
-	rt.luFail("invalid replacement value (a %s)", rt.luTypeName(v))
+	rt.luFail("invalid replacement value (a %s)", rt.luType(v))
 	return "", false
 }
 

@@ -1231,6 +1231,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (isLuaFile(v)) { return "userdata" }
         return "table"
     }
+    // The type an error message names, luaT_objtypename: the __name of a table's
+    // or a file's metatable when that is a string ("FILE*" for a file), else
+    // luaType. Twin of rt.luTypeName in abnf/jsrtlua.go and lib/lua-rt.metajs.
+    function luaTypeName(v) {
+        if (isTbl(v)) {
+            var nm = anytype
+            nm = luaTm(v, "__name")
+            if (typeof nm == "string") { return nm }
+        }
+        return luaType(v)
+    }
     // A file of the io library is a table carrying the runtime field __luf, which
     // no program can set (luaStrKey escapes the name).
     function isLuaFile(v) { return typeof v == "object" && v.__luf === true }
@@ -1451,7 +1462,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var nm = anytype
         nm = luaTm(v, "__name")
         var id = luaIdent(v)
-        if (typeof nm == "string") { return nm + id.substring(id.indexOf(":")) }
+        if (typeof nm == "string" && !isLuaFile(v)) { return nm + id.substring(id.indexOf(":")) }
         return id
     }
     // How a table or a function renders: its type and an identity, `table: 0x...`.
@@ -1501,7 +1512,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var sk = "" + k
             return hasOwn(lib, sk) ? lib[sk] : undefined
         }
-        if (!isTbl(o)) { fail("attempt to index a " + luaType(o) + " value") }
+        if (!isTbl(o)) { fail("attempt to index a " + luaTypeName(o) + " value") }
         var kk = luaKey(k)
         return hasOwn(o, kk) ? o[kk] : undefined
     }
@@ -1516,7 +1527,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // t[k] = v in the program: a raw store, unless the table has a metatable.
     function luaSetIndex(o, k, v) {
         if (o === undefined || o === null) { fail("attempt to index a nil value") }
-        if (!isTbl(o)) { fail("attempt to index a " + luaType(o) + " value") }
+        if (!isTbl(o) || isLuaFile(o)) { fail("attempt to index a " + luaTypeName(o) + " value") }
         if (o.__mt === undefined) { luaRawSet(o, luaWriteKey(k), v); return }
         luaNewIndex(o, k, v)
     }
@@ -1562,7 +1573,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         while (typeof fn != "function") {
             var cm = anytype
             cm = luaTm(fn, "__call")
-            if (cm === undefined) { fail("attempt to call a " + luaType(fn) + " value") }
+            if (cm === undefined) { fail("attempt to call a " + luaTypeName(fn) + " value") }
             a = [fn].concat(a)
             fn = cm
         }
@@ -1589,7 +1600,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var h = anytype
             h = luaTm(cur, "__index")
             if (h === undefined) {
-                if (!isTbl(cur)) { fail("attempt to index a " + luaType(cur) + " value") }
+                if (!isTbl(cur)) { fail("attempt to index a " + luaTypeName(cur) + " value") }
                 return undefined
             }
             if (typeof h == "function") { return luaFirst(h(cur, k)) }
@@ -1611,14 +1622,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         cur = t
         for (var loop = 0; loop < 2000; loop++) {
             var h = anytype
-            if (isTbl(cur)) {
+            if (isTbl(cur) && !isLuaFile(cur)) {
                 var have = anytype
                 have = luaIndex(cur, k)
                 h = (have === undefined || have === null) ? luaTm(cur, "__newindex") : undefined
                 if (h === undefined) { luaRawSet(cur, luaWriteKey(k), v); return }
             } else {
                 h = luaTm(cur, "__newindex")
-                if (h === undefined) { fail("attempt to index a " + luaType(cur) + " value") }
+                if (h === undefined) { fail("attempt to index a " + luaTypeName(cur) + " value") }
             }
             if (typeof h == "function") { h(cur, k, v); return }
             cur = h
@@ -1641,7 +1652,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             while (hasOwn(v, "" + (n + 1)) && v["" + (n + 1)] !== undefined) { n++ }
             return n
         }
-        fail("attempt to get length of a " + luaType(v) + " value")
+        fail("attempt to get length of a " + luaTypeName(v) + " value")
     }
     // Lua's modulo follows the sign of the DIVISOR (-0.5 % 2 is 1.5, not -0.5).
     //
@@ -1667,9 +1678,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                       "&": "__band", "|": "__bor", "~": "__bxor", "<<": "__shl", ">>": "__shr"}
     function luaArithFail(op, l, r, lok) {
         if (typeof l == "string" || typeof r == "string") {
-            fail("attempt to " + luaArithNames[op] + " a '" + luaType(l) + "' with a '" + luaType(r) + "'")
+            fail("attempt to " + luaArithNames[op] + " a '" + luaTypeName(l) + "' with a '" + luaTypeName(r) + "'")
         }
-        fail("attempt to perform arithmetic on a " + luaType(lok ? r : l) + " value" + luaOpSfx(lok ? 1 : 0))
+        fail("attempt to perform arithmetic on a " + luaTypeName(lok ? r : l) + " value" + luaOpSfx(lok ? 1 : 0))
     }
 
     // ----- 64-bit integer bit operations -----
@@ -1689,7 +1700,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function toIntOp(v, opnd) {
         var a = anytype // The operand, a number or an error.
         a = v
-        if (!isNum(v)) { fail("attempt to perform bitwise operation on a " + luaType(v) + " value" + luaOpSfx(opnd - 1)) }
+        if (!isNum(v)) { fail("attempt to perform bitwise operation on a " + luaTypeName(v) + " value" + luaOpSfx(opnd - 1)) }
         if (szIs(a)) { return a }
         var n = numOf(a)
         if (n - n !== 0 || Math.floor(n) !== n) { fail("number" + luaOpSfx(opnd - 1) + " has no integer representation") }
@@ -1868,8 +1879,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var h = anytype
             h = luaBinTm(op == "<" || op == ">" ? "__lt" : "__le", x, y)
             if (h !== undefined) { return luatruthy(luaCallVal(h, [x, y])) }
-            var tl = luaType(swap ? r : l)
-            var tr = luaType(swap ? l : r)
+            var tl = luaTypeName(swap ? r : l)
+            var tr = luaTypeName(swap ? l : r)
             if (tl == tr) { fail("attempt to compare two " + tl + " values") }
             fail("attempt to compare " + tl + " with " + tr)
         }
@@ -1922,7 +1933,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return function() {
             var v = anytype
             v = luaFirst(t())
-            if (typeof v != "string" && !isTbl(v)) { fail("attempt to get length of a " + luaType(v) + " value" + luaOpSfx(0)) }
+            if ((typeof v != "string" && !isTbl(v)) || isLuaFile(v)) { fail("attempt to get length of a " + luaTypeName(v) + " value" + luaOpSfx(0)) }
             if (isTbl(v)) {
                 var h = anytype
                 h = luaTm(v, "__len")
@@ -1964,7 +1975,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function luaCatStr(v, opnd) {
         if (typeof v == "string") { return v }
         if (isNum(v)) { return luaNumStr(v) }
-        fail("attempt to concatenate a " + luaType(v) + " value" + luaOpSfx(opnd - 1))
+        fail("attempt to concatenate a " + luaTypeName(v) + " value" + luaOpSfx(opnd - 1))
     }
     // and / or keep the deciding operand, with Lua truthiness.
     makeOrAnd = function(items, isOr) {
@@ -2003,7 +2014,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 // itself as the first argument (luaD_tryfuncTM).
                 var cm = anytype
                 cm = luaTm(fv, "__call")
-                if (cm === undefined) { fail("attempt to call a " + luaType(fv) + " value" + luaDescText(pd)) }
+                if (cm === undefined) { fail("attempt to call a " + luaTypeName(fv) + " value" + luaDescText(pd)) }
                 argv = [fv].concat(argv)
                 fv = cm
             }
@@ -2022,7 +2033,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             while (typeof fn != "function") {
                 var mcm = anytype
                 mcm = luaTm(fn, "__call")
-                if (mcm === undefined) { fail("attempt to call a " + luaType(fn) + " value" + luaDescText({k: "method", n: s.name})) }
+                if (mcm === undefined) { fail("attempt to call a " + luaTypeName(fn) + " value" + luaDescText({k: "method", n: s.name})) }
                 mfull = [fn].concat(mfull)
                 fn = mcm
             }
@@ -2041,7 +2052,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // luaIndex with lua's naming of the indexed expression in its error.
     function luaIndexAt(o, k, pd) {
         if (o === undefined || o === null || (typeof o != "string" && !isTbl(o))) {
-            fail("attempt to index a " + luaType(o) + " value" + luaDescText(pd))
+            fail("attempt to index a " + luaTypeName(o) + " value" + luaDescText(pd))
         }
         return luaGet(o, k)
     }
@@ -2154,7 +2165,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function assignSlot(ref, slot, v) {
         if (ref.path.length == 0) { setVar(ref.name, v); return }
-        if (!isTbl(slot.t)) { fail("attempt to index a " + luaType(slot.t) + " value" + luaDescText(slot.d)) }
+        if (!isTbl(slot.t) || isLuaFile(slot.t)) { fail("attempt to index a " + luaTypeName(slot.t) + " value" + luaDescText(slot.d)) }
         luaSetIndex(slot.t, slot.k, v)
     }
     // items interleave targets (objects) and value thunks (functions). The targets'
@@ -2525,7 +2536,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (numOf(step) === 0) { fail("'for' step is zero") }
         return mkFlt(numOf(start))
     }
-    function luaForErr(what, v) { fail("bad 'for' " + what + " (number expected, got " + luaType(v) + ")") }
+    function luaForErr(what, v) { fail("bad 'for' " + what + " (number expected, got " + luaTypeName(v) + ")") }
     // repeat body until cond: the body runs, then cond is tested in the body's own scope;
     // it loops while cond is falsy, so the body always runs at least once.
     function makeRepeat(block, cond) {
@@ -2576,7 +2587,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (typeof f != "function") {
                 var fo = anytype // A callable value: the loop calls it through its __call.
                 fo = f
-                if (luaTm(fo, "__call") === undefined) { fail("attempt to call a " + luaType(f) + " value") }
+                if (luaTm(fo, "__call") === undefined) { fail("attempt to call a " + luaTypeName(f) + " value") }
                 f = function(a1, a2) { return luaCallAll(fo, [a1, a2]) }
             }
             var res = undefined
@@ -2644,7 +2655,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             items[0]()
         } catch (e) {
             if (!excIsUser(e)) { throw e }
-            println("lua interpreter error: " + luaOut(luaErrText(e.v)))
+            eprintln("lua interpreter error: " + luaOut(luaErrText(e.v)))
             exit(1)
         }
         luaRunning = was
@@ -2685,7 +2696,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (level === undefined || level === null) { return 1 }
         var n = anytype // The level after Lua's string coercion.
         n = toNumV(level)
-        if (n === undefined) { luaArgErr("error", 2, "number expected, got " + luaType(level)) }
+        if (n === undefined) { luaArgErr("error", 2, "number expected, got " + luaTypeName(level)) }
         var d = numOf(n)
         if (d - d !== 0 || Math.floor(d) !== d) { luaArgErr("error", 2, "number has no integer representation") }
         return d
@@ -2795,6 +2806,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (var i = from; i < args.length; i++) { writeBytes(luaCheckStr(qual, i + 1, args[i], args.length)) }
     }
     var luaStdout = {__luf: true}
+    // Its metatable names it FILE* in an error and leaves it unwritable, with an
+    // empty __index for the members it does not have.
+    var luaFileMeta = {}
+    luaRawSet(luaFileMeta, luaKey("__name"), "FILE*")
+    luaRawSet(luaFileMeta, luaKey("__index"), {})
+    luaStdout.__mt = luaFileMeta
     luaRawSet(luaStdout, "write", function(f) {
         if (!isLuaFile(f)) { luaArgTypeErr("?", 1, "FILE*", f, arguments.length) }
         luaWrite("?", arguments, 1)
@@ -2907,7 +2924,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         fail("bad argument #" + k + " to '" + cn.n + "' (" + msg + ")")
     }
     function luaArgTypeErr(qual, n, want, v, nargs) {
-        luaArgErr(qual, n, want + " expected, got " + (n > nargs ? "no value" : luaType(v)))
+        luaArgErr(qual, n, want + " expected, got " + (n > nargs ? "no value" : luaTypeName(v)))
     }
     function luaCheckAny(qual, n, nargs) { if (n > nargs) { luaArgErr(qual, n, "value expected") } }
     // A number argument, keeping its subtype; a numeric string converts.
@@ -3325,7 +3342,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (typeof msg == "string") { fail(msg) }
         throw {__exc: true, v: msg}
     }
-    function luaCheckTab(qual, n, v, nargs) { if (!isTbl(v)) { luaArgTypeErr(qual, n, "table", v, nargs) } }
+    function luaCheckTab(qual, n, v, nargs) { if (!isTbl(v) || isLuaFile(v)) { luaArgTypeErr(qual, n, "table", v, nargs) } }
     globalScope["rawequal"] = function(a, b) {
         luaCheckAny("rawequal", 1, arguments.length)
         luaCheckAny("rawequal", 2, arguments.length)

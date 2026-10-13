@@ -1968,6 +1968,26 @@ function s44()
     check("mt26", tostring(rt.q) .. " " .. tostring(getmetatable(rt)), "nil nil")
 end
 
+-- ===== SECTION 45: a file is no table, and __name names a type =====
+-- io.stdout is a userdata: readable through its metatable, not writable, with
+-- no length, and an error names it by its metatable's __name, FILE*. A table's
+-- __name names it the same way. Messages printed by lua 5.5.
+function s45()
+    local function try(f, ...)
+        local ok, e = pcall(f, ...)
+        if ok then return "ok" end
+        return (tostring(e):gsub("^[^:]*:%d+: ", ""))
+    end
+    check("fi1", try(function() io.stdout.x = 1 end), "attempt to index a FILE* value (field 'stdout')")
+    check("fi2", tostring(io.stdout.foo) .. " " .. type(io.stdout), "nil userdata")
+    check("fi3", try(function() return #io.stdout end), "attempt to get length of a FILE* value (field 'stdout')")
+    check("fi4", try(rawset, io.stdout, 1, 2) .. "|" .. try(setmetatable, io.stdout, {}),
+        "bad argument #1 to 'rawset' (table expected, got FILE*)|bad argument #1 to 'setmetatable' (table expected, got FILE*)")
+    local P = setmetatable({}, {__name = "Point"})
+    check("fi5", try(function() return P + 1 end) .. "|" .. try(function() return io.stdout .. "" end),
+        "attempt to perform arithmetic on a Point value (upvalue 'P')|attempt to concatenate a FILE* value (field 'stdout')")
+end
+
 s25() -- SECTION-CALL 25
 s26() -- SECTION-CALL 26
 s27() -- SECTION-CALL 27
@@ -1988,5 +2008,6 @@ s41() -- SECTION-CALL 41
 s42() -- SECTION-CALL 42
 s43() -- SECTION-CALL 43
 s44() -- SECTION-CALL 44
+s45() -- SECTION-CALL 45
 print("full: " .. checks .. " checks, " .. failures .. " failures")
 exit(failures)

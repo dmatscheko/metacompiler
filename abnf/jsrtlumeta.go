@@ -31,13 +31,14 @@ var luEvents = []string{"__add", "__sub", "__mul", "__div", "__idiv", "__mod", "
 	"__band", "__bor", "__bxor", "__shl", "__shr", "__bnot", "__concat", "__eq", "__lt", "__le", "__len",
 	"__call", "__pairs"}
 
-// luMetaOf is v's metatable, or nil.
+// luMetaOf is v's metatable, or nil: a table's or a file's __f when it holds a
+// table (a float box holds a float64 there).
 func (rt *jsrt) luMetaOf(v interface{}) *jsObject {
 	if _, isStr := v.(string); isStr {
 		return luStrMeta
 	}
 	o, ok := v.(*jsObject)
-	if !ok || !rt.luIsTable(v) {
+	if !ok {
 		return nil
 	}
 	mt, _ := o.props["__f"].(*jsObject)
@@ -144,7 +145,7 @@ func (rt *jsrt) luObjStr(v interface{}) string {
 		rt.luFail("'__tostring' must return a string")
 	}
 	id := rt.luIdent(v)
-	if nm, ok := rt.luTm(v, "__name").(string); ok {
+	if nm, ok := rt.luTm(v, "__name").(string); ok && !luIsFile(v) {
 		return nm + id[strings.Index(id, ":"):]
 	}
 	return id

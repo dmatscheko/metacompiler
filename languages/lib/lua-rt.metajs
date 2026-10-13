@@ -487,9 +487,21 @@ function luToNum(v) {
 }
 function js_lutonum(v) { return luToNum(v) }
 
-// luTypeName is Lua's type() for an error message.
+// luTypeName is the type an error message names, luaT_objtypename: the __name
+// of a table's or a file's metatable when that is a string ("FILE*" for a
+// file), else type(). Twin of rt.luTypeName in abnf/jsrtlua.go.
 function js_lutname(v) { return luTypeName(v) }
 function luTypeName(v) {
+    var t = luType(v)
+    if (t == "table" || t == "userdata") {
+        var nm = luTm(v, "__name")
+        if (typeof nm == "string") { return nm }
+    }
+    return t
+}
+// luType is Lua's type().
+function js_lutypeof(v) { return luType(v) }
+function luType(v) {
     if (v === undefined) { return "nil" }
     if (v === null) { return "nil" }
     if (v === true) { return "boolean" }
@@ -1485,7 +1497,7 @@ function luReplVal(v) {
     if (v === undefined || v === null || v === false) { return null }
     if (typeof v == "string") { return v }
     if (luIsNum(v)) { return js_lustr(v) }
-    luFail("invalid replacement value (a " + luTypeName(v) + ")")
+    luFail("invalid replacement value (a " + luType(v) + ")")
     return null
 }
 function luGsubTable(t) { return function(caps) { return luReplVal(t[js_lukey(caps[0])]) } }
@@ -1597,7 +1609,7 @@ function luIdent(v) {
         hex = digits.charAt(n - q * 16) + hex
         n = q
     }
-    var tn = luTypeName(v)
+    var tn = luType(v)
     if (tn == "userdata") { return "file (0x" + hex + ")" }
     return tn + ": 0x" + hex
 }
@@ -1614,7 +1626,7 @@ function js_luident(v) {
     }
     var id = luIdent(v)
     var nm = luTm(v, "__name")
-    if (typeof nm == "string") { return nm + id.substring(id.indexOf(":"), id.length) }
+    if (typeof nm == "string" && !luIsFile(v)) { return nm + id.substring(id.indexOf(":"), id.length) }
     return id
 }
 
@@ -1641,8 +1653,11 @@ function js_lustrmeta(m) {
 }
 function luMetaOf(v) {
     if (typeof v == "string") { return luStrMetas.length > 0 ? luStrMetas[0] : undefined }
-    if (!luIsTable(v)) { return undefined }
-    return v["__f"]
+    // A table's or a file's __f when it holds a table (a float box holds a number).
+    if (v === undefined || v === null || typeof v != "object") { return undefined }
+    var mt = v["__f"]
+    if (typeof mt == "object") { return mt }
+    return undefined
 }
 function luTm(v, ev) {
     var mt = luMetaOf(v)
@@ -1760,7 +1775,7 @@ function js_luselect(args) {
 // ============================================== the base and table library ===
 // Twins of abnf/jsrtlutab.go, function for function; each takes the call's
 // ARGUMENT ARRAY.
-function luIsTable(v) { return luTypeName(v) == "table" }
+function luIsTable(v) { return luType(v) == "table" }
 // luaL_checktype(L, n, LUA_TTABLE).
 function luCheckTab(fn, n, args) {
     var v = luArgAt(args, n)
@@ -1896,14 +1911,14 @@ function js_luwrite(args, from) {
     var qual = "io.write"
     if (from === 1) {
         qual = "?"
-        if (luTypeName(luArgAt(args, 1)) != "userdata") { luArgTypeErr(qual, 1, "FILE*", args) }
+        if (luType(luArgAt(args, 1)) != "userdata") { luArgTypeErr(qual, 1, "FILE*", args) }
     }
     for (var i = from; i < args.length; i++) { writeBytes(luCheckStr(qual, i + 1, args)) }
     return undefined
 }
 function js_luiotype(args) {
     luCheckAny("io.type", 1, args)
-    if (luTypeName(args[0]) == "userdata") { return "file" }
+    if (luType(args[0]) == "userdata") { return "file" }
     return undefined
 }
 
@@ -1920,7 +1935,7 @@ function js_luconcat(args) {
         var v = t[i]
         if (typeof v == "string") { out = out + v }
         else if (luIsNum(v)) { out = out + js_lustr(v) }
-        else { luFail("invalid value (" + luTypeName(v) + ") at index " + js_lustr(i) + " in table for 'concat'") }
+        else { luFail("invalid value (" + luType(v) + ") at index " + js_lustr(i) + " in table for 'concat'") }
         if (i < last) { out = out + sep }
         i = i + 1
     }
@@ -2039,7 +2054,7 @@ function js_lusort(args) {
     if (n > 1) {
         if (n >= 2147483647) { luArgErr("table.sort", 1, "array too big") }
         var cmp = luArgAt(args, 2)
-        if (cmp !== undefined && cmp !== null && luTypeName(cmp) != "function") { luArgTypeErr("table.sort", 2, "function", args) }
+        if (cmp !== undefined && cmp !== null && luType(cmp) != "function") { luArgTypeErr("table.sort", 2, "function", args) }
         luAuxSort(t, cmp, 1, n)
     }
     return undefined
