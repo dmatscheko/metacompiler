@@ -91,6 +91,10 @@ function s03()
     local nl = "a\
 b"                                      -- escaped newline stays in the string
     check("str8", nl, "a\nb")
+    -- \u{...} past U+10FFFF is the original UTF-8, up to six bytes.
+    check("str9", table.concat({("\u{200000}"):byte(1, -1)}, " "), "248 136 128 128 128")
+    check("str10", table.concat({("\u{7FFFFFFF}"):byte(1, -1)}, " "), "253 191 191 191 191 191")
+    check("str11", #"\u{10FFFF}\u{3FFFFFF}", 9)
 end
 
 -- ===== SECTION 04: long brackets: strings and comments =====
@@ -1430,6 +1434,12 @@ function s30()
     check("pe4", m3, "invalid replacement value (a table)")
     local ok5, m5 = pcall(select, 0, 1)
     check("pe5", m5, "bad argument #1 to 'select' (index out of range)")
+    -- %z is the NUL byte, alone, in a set and complemented.
+    local z = "a\0b\0"
+    check("pe6", table.concat({string.find(z, "%z")}, " "), "2 2")
+    check("pe7", table.concat({string.find(z, "[%z]b")}, " "), "2 3")
+    check("pe8", (string.gsub(z, "%z", "#")) .. tostring(string.find("azb", "%z")), "a#b#nil")
+    check("pe9", string.match(z, "%Z+", 2), "b")
 end
 
 -- ===== SECTION 31: library argument errors =====
@@ -1461,6 +1471,10 @@ function s31()
     check("ae16", math.max(1, 5, 3) == 5 and math.min(4, 2, 8) == 2, true)
     check("ae17", math.type(math.floor(2 ^ 70)), "float")
     check("ae18", select("#", pairs({})), 4)
+    -- xpcall checks only its handler, which has to be a function.
+    check("ae19", msg(xpcall), "bad argument #2 to 'xpcall' (function expected, got no value)")
+    check("ae20", msg(xpcall, print, 1), "bad argument #2 to 'xpcall' (function expected, got number)")
+    check("ae21", msg(pcall), "bad argument #1 to 'pcall' (value expected)")
 end
 
 -- ===== SECTION 32: no value, a number's fields, an error in the handler =====
@@ -1606,6 +1620,10 @@ function s35()
     check("sf16", msg(string.format, "%100d", 1), "invalid conversion specification: '%100d'")
     check("sf17", msg(string.format, "%10q", "x"), "specifier '%q' cannot have modifiers")
     check("sf18", msg(function() return ("%d"):format("x") end), "bad argument #1 to 'format' (number expected, got string)")
+    -- %s with a modifier cannot hold a NUL; without one it keeps the whole string.
+    check("sf19", msg(string.format, "%5.2s", "a\0b"), "bad argument #2 to 'string.format' (string contains zeros)")
+    check("sf20", msg(string.format, "%-8s", "a\0b"), "bad argument #2 to 'string.format' (string contains zeros)")
+    check("sf21", #string.format("%s|", "a\0b"), 4)
 end
 
 -- ===== SECTION 36: the base and table library =====

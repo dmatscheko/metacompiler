@@ -1015,20 +1015,23 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // luaUtf8 encodes source text and \u{...} on the way IN (it is called only from the
     // literal readers), and print writes the bytes OUT raw (writeBytes), so what a
     // program prints is the byte sequence it holds. Nothing in between needs to know.
+    // lua's luaO_utf8esc: continuation bytes from the low end while the rest does not
+    // fit the lead byte, whose free bits halve with each one - the original
+    // UTF-8 of up to six bytes, so \u{7FFFFFFF} is FD BF BF BF BF BF. Twin of utf8Enc in
+    // lua-to-llvm-ir.abnf.
     function utf8Enc(cp) {
         if (cp < 128) { return String.fromCharCode(cp) }
-        if (cp < 2048) {
-            return String.fromCharCode(192 + Math.floor(cp / 64)) + String.fromCharCode(128 + cp % 64)
+        var out = ""
+        var x = cp
+        var mfb = 63 // The largest value the lead byte can still hold.
+        var more = true
+        while (more) {
+            out = String.fromCharCode(128 + x % 64) + out
+            x = Math.floor(x / 64)
+            mfb = Math.floor(mfb / 2)
+            more = x > mfb
         }
-        if (cp < 65536) {
-            return String.fromCharCode(224 + Math.floor(cp / 4096))
-                 + String.fromCharCode(128 + Math.floor(cp / 64) % 64)
-                 + String.fromCharCode(128 + cp % 64)
-        }
-        return String.fromCharCode(240 + Math.floor(cp / 262144))
-             + String.fromCharCode(128 + Math.floor(cp / 4096) % 64)
-             + String.fromCharCode(128 + Math.floor(cp / 64) % 64)
-             + String.fromCharCode(128 + cp % 64)
+        return String.fromCharCode((255 - mfb) * 2 % 256 + x) + out
     }
     // Host text (UTF-16, surrogate pairs included) to its UTF-8 bytes.
     function luaUtf8(s) {
@@ -2503,7 +2506,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return luaProtect(arguments[0], args, undefined)
     }
     globalScope["xpcall"] = function() {
-        luaCheckAny("xpcall", 2, arguments.length)
+        // lua checks only the handler, which has to be a function (luaB_xpcall).
+        if (typeof arguments[1] != "function") { luaArgTypeErr("xpcall", 2, "function", arguments[1], arguments.length) }
         var args = []
         for (var i = 2; i < arguments.length; i++) { args.push(arguments[i]) }
         return luaProtect(arguments[0], args, arguments[1])

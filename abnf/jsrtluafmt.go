@@ -624,6 +624,12 @@ func (rt *jsrt) luFormat(args []interface{}) string {
 				out = append(out, s...)
 				break
 			}
+			// A modifier goes through C's %s, which would stop at a NUL.
+			for _, cu := range s {
+				if cu == 0 {
+					rt.luArgErr("string.format", arg, "string contains zeros")
+				}
+			}
 			rt.lsCheckFormat(form, lsFlagsC, true)
 			sp := lsSpec(form)
 			if sp.prec < 0 && len(s) >= 100 {

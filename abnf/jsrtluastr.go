@@ -210,6 +210,8 @@ func lsMatchClass(c, cl int) bool {
 		res = lsIsAlpha(c) || lsIsDigit(c)
 	case 'x':
 		res = lsIsXDigit(c)
+	case 'z': // kept by lua 5.4 for the NUL byte
+		res = c == 0
 	default:
 		return cl == c
 	}

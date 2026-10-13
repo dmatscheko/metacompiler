@@ -69,6 +69,7 @@ function lsMatchClass(c, cl) {
     else if (lower === 117) { res = lsIsUpper(c) }
     else if (lower === 119) { res = lsIsAlpha(c) || lsIsDigit(c) }
     else if (lower === 120) { res = lsIsXDigit(c) }
+    else if (lower === 122) { res = c === 0 }   // %z, kept by lua 5.4 for the NUL byte
     else { return cl === c }
     if (lsIsUpper(cl)) { return !res }
     return res
@@ -858,6 +859,8 @@ function lsFormat(args) {
         } else if (conv === 115) {
             var s = lsFmtToStr(args, arg)
             if (form.length == 2) { out = out + s } else {
+                // A modifier goes through C's %s, which would stop at a NUL.
+                if (s.indexOf(String.fromCharCode(0)) >= 0) { lsFmtArgErr(arg, "string contains zeros") }
                 lsCheckFormat(form, LS_FMT_C, true)
                 var sp = lsSpec(form)
                 if (sp.prec < 0 && s.length >= 100) { out = out + s } else {
