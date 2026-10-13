@@ -829,6 +829,22 @@ check("missing-typeerrors", (function () {
         && kind(function () { return ({}) instanceof rs[2]; }) === "T:Right-hand side of 'instanceof' is not callable";
 })());
 
+// ----- tagged template strings.raw, and ES2023's copying array methods -----
+check("raw-and-array-copies", (function () {
+    function tag(s) { return s.raw.join("|") + "#" + s.raw.length; }
+    var a = [3, 1, 2];
+    var srt = a.toSorted();
+    var rev = a.toReversed();
+    var spl = a.toSpliced(1, 1, 7, 8);
+    var w = a.with(-1, 9);
+    var bad = "none";
+    try { a.with(5, 0); } catch (e) { bad = e.message; }
+    return tag`a\n${1}b` === "a\\n|b#2" && a.join(",") === "3,1,2" && srt.join(",") === "1,2,3"
+        && rev.join(",") === "2,1,3" && spl.join(",") === "3,7,8,2" && w.join(",") === "3,1,9"
+        && bad === "Invalid index : 5" && [1, 2, 3, 4, 5].copyWithin(0, 3).join(",") === "4,5,3,4,5"
+        && [1, 2, 3, 4, 5].copyWithin(1, 0, 2).join(",") === "1,1,2,4,5";
+})());
+
 function main() {
     println("features: " + checks + " checks, " + failures + " failures");
     return failures;

@@ -1132,6 +1132,7 @@ var jsvArrayMethods = map[string]bool{
 	"some": true, "every": true, "find": true, "findIndex": true,
 	"findLast": true, "findLastIndex": true, "flat": true, "flatMap": true,
 	"fill": true, "at": true, "toString": true, "keys": true, "values": true, "entries": true,
+	"toReversed": true, "toSorted": true, "toSpliced": true, "with": true, "copyWithin": true,
 }
 
 // jsvNumberMethods are a Number's methods read as a value (jsvBuiltinFam).
@@ -1966,6 +1967,36 @@ func (rt *jsrt) jsvArrayMethod(a *jsArray, name string, args []interface{}) (int
 	switch name {
 	case "toString":
 		return rt.jsvString(a), true
+	// ES2023's copying methods: reverse, sort and splice on a copy, and with.
+	// copyWithin moves a run in place. Twin: jsArrayMethod in js-interpreter.abnf.
+	case "toReversed", "toSorted", "toSpliced":
+		cp := &jsArray{elems: append([]interface{}{}, a.elems...)}
+		rt.jsvArrayMethod(cp, map[string]string{"toReversed": "reverse", "toSorted": "sort", "toSpliced": "splice"}[name], args)
+		return cp, true
+	case "with":
+		i := jsToInt(rt.jsvNumArg(args, 0, 0))
+		r := i
+		if r < 0 {
+			r += n
+		}
+		if r < 0 || r >= n {
+			rt.bigRaise("RangeError: Invalid index : %s", rt.jsvString(float64(i)))
+		}
+		cp := &jsArray{elems: append([]interface{}{}, a.elems...)}
+		cp.elems[r] = argAt(args, 1)
+		return cp, true
+	case "copyWithin":
+		to := jsvRelIndex(rt.jsvNumArg(args, 0, 0), n)
+		from := jsvRelIndex(rt.jsvNumArg(args, 1, 0), n)
+		end := n
+		if len(args) > 2 && args[2] != jsUndef {
+			end = jsvRelIndex(rt.jsvToNum(args[2]), n)
+		}
+		if from < end {
+			a.dropIdx()
+			copy(a.elems[to:], append([]interface{}{}, a.elems[from:end]...))
+		}
+		return a, true
 	case "values":
 		return jsvSeqIter(a, 1), true
 	case "keys":
@@ -2030,7 +2061,7 @@ func (rt *jsrt) jsvArrayMethod(a *jsArray, name string, args []interface{}) (int
 		if del < 0 {
 			del = 0
 		}
-		if start+del > n {
+		if del > n-start {
 			del = n - start
 		}
 		removed := &jsArray{elems: append([]interface{}{}, a.elems[start:start+del]...)}

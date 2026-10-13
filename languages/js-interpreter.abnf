@@ -4578,6 +4578,32 @@ NotFuncHead = :script(~~
         var n = a.length
         var cb = args[0]
         if (name == "toString") { return {v: jsJoin(a, ",")} }
+        // ES2023's copying methods: reverse, sort and splice on a copy, and with.
+        // copyWithin moves a run in place. Twins: jsvArrayMethod in
+        // abnf/jsrtjsprint.go, jvArrMethod in languages/lib/js-rt.metajs.
+        if (name == "toReversed" || name == "toSorted" || name == "toSpliced") {
+            var cp = a.slice()
+            if (name == "toReversed") { cp.reverse() }
+            else if (name == "toSorted") { jsSortArr(cp, cb) }
+            else { jsArrayMethod(cp, "splice", args) }
+            return {v: cp}
+        }
+        if (name == "with") {
+            var wi = jsnToInt(jsArgNum(args, 0, 0))
+            var wr = (wi < 0) ? n + wi : wi
+            if (wr < 0 || wr >= n) { biRaise("RangeError: Invalid index : " + jsStr(wi)) }
+            var wc = a.slice()
+            wc[wr] = args[1]
+            return {v: wc}
+        }
+        if (name == "copyWithin") {
+            var to = jsRelIndex(jsArgNum(args, 0, 0), n)
+            var fr = jsRelIndex(jsArgNum(args, 1, 0), n)
+            var fe = (args.length > 2 && args[2] !== undefined) ? jsRelIndex(jsToNum(args[2]), n) : n
+            var src = a.slice(fr, fe)
+            for (var cw = 0; cw < src.length && to + cw < n; cw++) { a[to + cw] = src[cw] }
+            return {v: a}
+        }
         if (name == "values") { return {v: jsSeqIter(a, 1)} }
         if (name == "keys") { return {v: jsSeqIter(a, 0)} }
         if (name == "entries") { return {v: jsSeqIter(a, 2)} }
@@ -5443,7 +5469,7 @@ NotFuncHead = :script(~~
                    "includes", "join", "concat", "reverse", "sort", "map", "filter", "forEach",
                    "reduce", "reduceRight", "some", "every", "find", "findIndex", "findLast",
                    "findLastIndex", "flat", "flatMap", "fill", "at", "toString", "valueOf",
-                   "keys", "values", "entries"])
+                   "keys", "values", "entries", "toReversed", "toSorted", "toSpliced", "with", "copyWithin"])
     bvSeed(bvNum, ["toFixed", "toExponential", "toPrecision", "toString", "valueOf"])
     // "s" / "a" / "n" when `k` is a builtin method of the receiver's kind, else "".
     function builtinFam(o, k) {

@@ -1408,6 +1408,11 @@ function jvSeedMethodNames() {
     jvArrM["flatMap"] = 1
     jvArrM["fill"] = 1
     jvArrM["at"] = 1
+    jvArrM["toReversed"] = 1
+    jvArrM["toSorted"] = 1
+    jvArrM["toSpliced"] = 1
+    jvArrM["with"] = 1
+    jvArrM["copyWithin"] = 1
     jvArrM["toString"] = 1
     jvArrM["keys"] = 1
     jvArrM["values"] = 1
@@ -3523,6 +3528,39 @@ function jvArrMethod(a, name, args) {
     var n = a.length
     var cb = jvArg(args, 0)
     if (name == "toString") { return jvStr(a) }
+    // ES2023's copying methods: reverse, sort and splice on a copy, and with.
+    // copyWithin moves a run in place. Twin: jsArrayMethod in js-interpreter.abnf.
+    if (name == "toReversed" || name == "toSorted" || name == "toSpliced") {
+        var cp = a.slice()
+        if (name == "toReversed") { jvArrMethod(cp, "reverse", args) }
+        else if (name == "toSorted") { jvArrMethod(cp, "sort", args) }
+        else { jvArrMethod(cp, "splice", args) }
+        return cp
+    }
+    if (name == "with") {
+        var wi = jvToInt(jvNumArg(args, 0, 0))
+        var wr = wi
+        if (wr < 0) { wr = n + wr }
+        if (wr < 0 || wr >= n) { jbRaise("RangeError: Invalid index : " + jvStr(wi)) }
+        var wc = a.slice()
+        wc[wr] = jvArg(args, 1)
+        return wc
+    }
+    if (name == "copyWithin") {
+        var to = jvRelIndex(jvNumArg(args, 0, 0), n)
+        var fr = jvRelIndex(jvNumArg(args, 1, 0), n)
+        var fe = n
+        if (args.length > 2) {
+            if (args[2] !== undefined) { fe = jvRelIndex(jvToNumber(args[2]), n) }
+        }
+        var src = a.slice(fr, fe)
+        var cw = 0
+        while (cw < src.length && to + cw < n) {
+            a[to + cw] = src[cw]
+            cw = cw + 1
+        }
+        return a
+    }
     if (name == "values") { return jvSeqIter(a, 1) }
     if (name == "keys") { return jvSeqIter(a, 0) }
     if (name == "entries") { return jvSeqIter(a, 2) }
