@@ -881,7 +881,10 @@ function swQuote(s) {
         else if (c == "\n") { esc = "\\n" }
         else if (c == "\t") { esc = "\\t" }
         else if (c == "\r") { esc = "\\r" }
+        else if (c == "'") { esc = "\\'" }
         else if (c.charCodeAt(0) === 0) { esc = "\\0" }
+        // Every other ASCII control character is \u{XX}; above ASCII is itself.
+        else if (c.charCodeAt(0) < 32 || c.charCodeAt(0) == 127) { esc = "\\u{" + swHexUp(c.charCodeAt(0), 2) + "}" }
         if (esc != "") {
             out = out + s.substring(from, i) + esc
             from = i + 1
@@ -2335,6 +2338,9 @@ function js_swstr(v) { return swDesc(v) }
 // valid for a LosslessStringConvertible or a Character sequence and both of those
 // render the same either way. The emitter knows the LABEL statically, so it picks
 // the extern rather than passing one: js_swstrinit is the unlabelled form.
+// String(reflecting:): the debug form, as inside a collection.
+function js_swreflect(v) { return swRender(v, true, 0) }
+
 function js_swstrinit(v) {
     if (rtIsArr(v)) {
         var out = ""
@@ -2432,10 +2438,11 @@ function swGiArith(op, l, r) {
     // shared sized-integer layer's (languages/lib/runtime.c's si_arith and
     // abnf/jsrtint.go), correct for go and for nobody else. swiftc 6.1.2 says
     //     Swift/IntegerTypes.swift:9012: Fatal error: Division by zero
-    // so the guard stays in FRONT of the shared primitive, in swift's own file, and
+    // (`... in remainder operation` for %), so the guard stays in FRONT of the shared primitive, in swift's own file, and
     // the floor's Go-correct wording is left exactly as it is. Twins: swDivGuard in
     // languages/swift-interpreter.abnf and js_swarith in abnf/jsrtswift.go.
-    if ((c == 3 || c == 4) && swNum(r) === 0) { swAbort("Fatal error: Division by zero") }
+    if (c == 3 && swNum(r) === 0) { swAbort("Fatal error: Division by zero") }
+    if (c == 4 && swNum(r) === 0) { swAbort("Fatal error: Division by zero in remainder operation") }
     return sintOp(c, l, r)
 }
 

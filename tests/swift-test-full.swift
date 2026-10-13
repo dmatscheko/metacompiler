@@ -4192,6 +4192,18 @@ func s90() {
     check("90e", "\(an)" == "[1, 2.5]" && "\(a2)" == "3" && "\(flag[0] ? 1 : 2)" == "2")
 }
 
+// ===== SECTION 91: a String's debug form =====
+// Inside a collection a String is quoted with \0 \t \n \r \" \' \\ escaped and
+// every other ASCII control character spelled \u{XX}; String(reflecting:) is the
+// same form. Every value read off swiftc 6.1.2.
+func s91() {
+    let ctl = ["bel\u{7}", "del\u{7F}", "esc\u{1B}", "s'", "\u{A0}é"]
+    check("91a", "\(ctl)" == "[\"bel\\u{07}\", \"del\\u{7F}\", \"esc\\u{1B}\", \"s\\'\", \"\u{A0}é\"]")
+    let cs: [Character] = ["'", "\""]
+    check("91b", "\(cs)" == "[\"\\'\", \"\\\"\"]" && "'".debugDescription == "\"\\'\"")
+    check("91c", String(reflecting: "s") == "\"s\"" && String(reflecting: 5) == "5" && String(reflecting: ["a"]) == "[\"a\"]")
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -4283,6 +4295,7 @@ func main() {
     s88() // SECTION-CALL 88
     s89() // SECTION-CALL 89
     s90() // SECTION-CALL 90
+    s91() // SECTION-CALL 91
     print("full: \(checks) checks, \(fails) failures")
 }
 

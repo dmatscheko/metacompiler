@@ -2539,7 +2539,11 @@ KwContinue  = "continue" KwEnd ;
             else if (c == "\n") { esc = "\\n" }
             else if (c == "\t") { esc = "\\t" }
             else if (c == "\r") { esc = "\\r" }
+            else if (c == "'") { esc = "\\'" }
             else if (s.charCodeAt(i) === 0) { esc = "\\0" }
+            // Every other ASCII control character is \u{XX} (swiftc 6.1.2:
+            // "bel\u{07}", "del\u{7F}"); everything above ASCII prints as itself.
+            else if (s.charCodeAt(i) < 32 || s.charCodeAt(i) == 127) { esc = "\\u{" + swHexUp(s.charCodeAt(i), 2) + "}" }
             if (esc != "") {
                 out += s.substring(from, i) + esc
                 from = i + 1
@@ -9662,12 +9666,14 @@ KwContinue  = "continue" KwEnd ;
     // layer (interp-core.js's szArith here, languages/lib/runtime.c's si_arith and
     // abnf/jsrtint.go) says `integer divide by zero`, Go's own panic text; swiftc 6.1.2 says
     //     Swift/IntegerTypes.swift:9012: Fatal error: Division by zero
-    // so the guard sits in FRONT of the shared primitive, in each language's own
+    // (`... in remainder operation` for %), so the guard sits in FRONT of the shared primitive, in each language's own
     // file (as go's goRTPanic in go-rt.metajs does), leaving the floor's Go-correct
     // wording untouched. Twins: swGiArith in
     // languages/lib/swift-rt.metajs and js_swarith in abnf/jsrtswift.go.
     function swDivGuard(op, l, r) {
-        if (swIntish(l, r) && szNum(r) === 0) { fail("Fatal error: Division by zero") }
+        if (swIntish(l, r) && szNum(r) === 0) {
+            fail(op == "%" ? "Fatal error: Division by zero in remainder operation" : "Fatal error: Division by zero")
+        }
         return swIntish(l, r) ? szArith(op, l, r) : swFloArith(op, l, r)
     }
     swOverloadable("/", function(l, r) { return swDivGuard("/", l, r) })
@@ -9870,6 +9876,8 @@ KwContinue  = "continue" KwEnd ;
     function swStrInit(argv, labels) {
         var x = argv.length > 0 ? argv[0] : undefined
         var lb = labels.length > 0 ? labels[0] : null
+        // String(reflecting:) is the debug form: "s" quoted, as inside a collection.
+        if (lb == "reflecting") { return swRender(x, true, 0) }
         if (lb == null && argv.length == 1 && Array.isArray(x)) { return swStrJoin(x) }
         if (argv.length > 1 && labels[1] == "radix") { return swRadixStr(x, szNum(argv[1]), argv.length > 2 && argv[2] === true) }
         return swstr(x)

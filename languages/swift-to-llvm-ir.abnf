@@ -6763,6 +6763,7 @@ KwContinue  = "continue" KwEnd ;
             // than a label passed at run time.
             if (name == "String" && args.length == 1
                 && (args[0].lbl == null || args[0].lbl == "")) { convExt = "js_swstrinit" }
+            if (name == "String" && args.length == 1 && args[0].lbl == "reflecting") { convExt = "js_swreflect" }
             return function(b) {
                 var ec2 = emitArgRecs(b, args)
                 b = ec2.b

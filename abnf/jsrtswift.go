@@ -130,13 +130,16 @@ func init() {
 				// si_arith) - correct for go and for nobody else.
 				// swiftc 6.1.2 says
 				//   Swift/IntegerTypes.swift:9012: Fatal error: Division by zero
-				// so the guard sits in FRONT of the shared
+				// (`... in remainder operation` for %), so the guard sits in FRONT of the shared
 				// primitive, in swift's own file, and the floor's
 				// Go-correct wording is left exactly as it is.
 				// Twins: swGiArith in languages/lib/swift-rt.metajs
 				// and swDivGuard in languages/swift-interpreter.abnf.
-				if (op == "/" || op == "%") && swNum(rt, r) == 0 {
+				if op == "/" && swNum(rt, r) == 0 {
 					rt.swAbort("Fatal error: Division by zero")
+				}
+				if op == "%" && swNum(rt, r) == 0 {
+					rt.swAbort("Fatal error: Division by zero in remainder operation")
 				}
 				return w(rt.giArith(op, l, r))
 			}
@@ -1009,6 +1012,9 @@ func init() {
 		}
 		// String(x) / String(describing: x): the text print would have written.
 		m["js_swstr"] = func(a []uint64) uint64 { return rt.wrapStr(rt.swDesc(u(a[0]))) }
+		// String(reflecting:): the debug form, as inside a collection. Twins:
+		// swStrInit in languages/swift-interpreter.abnf and lib/swift-rt.metajs.
+		m["js_swreflect"] = func(a []uint64) uint64 { return rt.wrapStr(rt.swDescIn(u(a[0]))) }
 		// String(x) and String(describing: x) are NOT one conversion. The one
 		// argument that tells them apart is a SEQUENCE - `String(s.sorted())` is
 		// init(_: some Sequence<Character>) and answers "ehllo" where the
@@ -2470,11 +2476,41 @@ func (rt *jsrt) swDesc(v interface{}) string { return rt.swRender(v, false, 0) }
 
 func (rt *jsrt) swDescIn(v interface{}) string { return rt.swRender(v, true, 0) }
 
-// swQuote is Swift's debugDescription of a String: double quotes and the four
-// escapes Swift itself emits.
+// swQuote is Swift's debugDescription of a String: double quotes and the
+// escapes Swift itself emits. Every escaped character is ASCII, so the walk is
+// over bytes and leaves the rest of the encoding untouched.
 func swQuote(s string) string {
-	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`, "\t", `\t`, "\r", `\r`, "\x00", `\0`)
-	return `"` + r.Replace(s) + `"`
+	var b strings.Builder
+	b.WriteByte('"')
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch c {
+		case '\\':
+			b.WriteString(`\\`)
+		case '"':
+			b.WriteString(`\"`)
+		case '\'':
+			b.WriteString(`\'`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\t':
+			b.WriteString(`\t`)
+		case '\r':
+			b.WriteString(`\r`)
+		case 0:
+			b.WriteString(`\0`)
+		default:
+			// Every other ASCII control character is \u{XX} (swiftc 6.1.2:
+			// "bel\u{07}"); above ASCII is itself.
+			if c < 32 || c == 127 {
+				fmt.Fprintf(&b, "\\u{%02X}", c)
+			} else {
+				b.WriteByte(c)
+			}
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
 }
 
 // swRender does the work. `nested` selects the quoted form for strings; `depth`
