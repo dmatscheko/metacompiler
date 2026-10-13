@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-585** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-586** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -144,13 +144,10 @@ an O(1) byte-at host builtin in the floor (CORE: runtime.c).
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-582 swift: missing traps — Int(huge Double), inverted range, compiled removeLast on empty; the ratchet does not compile under swiftc · P1 · SW · IN PROGRESS (SW worker, round 4) [V]
-`let d = 1e300; print(Int(d))` → all legs 0 (swiftc traps "Double value cannot be converted to Int because the result would be
-greater than Int.max", 133). `let a = [3]; let r = a[0]..<1; print(r)` → `3..<1` (swiftc traps "Range requires lowerBound <=
-upperBound"). `var e: [Int] = []; e.removeLast()` → interp right ("Can't remove last element from an empty collection", 133),
-llvm.Run and native "js runtime error: pop from empty list", exit 1 (twin and layer 2). P3: tests/swift-test-full.swift does
-not compile under swiftc (line ~1820 `seen35 += c` with c a Character); fix the test so the whole ratchet can be run on the
-oracle. Integer overflow wrapping is the recorded deliberate divergence, not part of this ticket.
+### T-585 swift: Range `lowerBound`/`upperBound`; `contains` on Double and String ranges · P1 · SW · OPEN [V]
+`let a = [1.5]; let r = a[0]..<2.5; print(r.lowerBound, r.upperBound)` → nil in all three legs (swiftc `1.5 2.5`).
+`(1.5..<2.5).contains(2.0)` → interp false (swiftc, run, native true). `("a"..."c").contains("b")` → run and native false
+(swiftc and interp true).
 
 ---
 
@@ -692,6 +689,7 @@ T-565 js: wording and remaining low-value gaps — PARTIAL 1e54eac7 (toString(ra
 T-570 swift: a ternary passed to an `Any` parameter unifies; nested existential annotations — DONE 5b5742db 72163636
 T-571 swift: mutating value methods on numbers and Bools; General_Category Character properties; trap exit status — DONE d8070820 (traps exit 133 in every leg; probe.sh accepts 133 for swift, 83fd0c9f)
 T-579 bash: an arithmetic error does not cancel the assignment; bytes 0x01/0x02 break field lists — DONE e57f7553
+T-582 swift: missing traps — Int(huge Double), inverted range, compiled removeLast on empty; the ratchet does not compile under swiftc — DONE de9fcee2 (the whole ratchet now runs on swiftc: 769 checks, 0 failures)
 
 # Settled — do not re-open
 
