@@ -2037,6 +2037,40 @@ s36() {
 }
 
 
+# ===== SECTION 37: 64-bit arithmetic =====
+# bash's integers are intmax_t: 64 bits, wrapping, with a shift count taken modulo 64
+# (the shift instruction's own rule on arm64 and x86-64). Operands come out of an array so
+# no grammar can fold them. Every expected value is bash 5.3's.
+s37() {
+  local v=(10 3000000000 65536 -2147483648 2147483647 32 33 -1 -9223372036854775808)
+  local t=${v[0]} big=${v[1]} h=${v[2]} m=${v[3]} x=${v[4]} z=${v[8]}
+  check w64a "$(( t ** t )) $(( big + 0 )) $(( h * h ))" "10000000000 3000000000 4294967296"
+  check w64b "[$(( m ))] [$(( x + 1 ))] [$(( 1 << 31 ))] [$(( m * 2 ))]" "[-2147483648] [2147483648] [2147483648] [-4294967296]"
+  local s r=""
+  for s in ${v[5]} ${v[6]} ${v[7]}; do r="$r $(( 1 << s )) $(( -8 >> s ))"; done
+  check w64c "$r" " 4294967296 -1 8589934592 -1 -9223372036854775808 -1"
+  local w="-9223372036854775808 7766279631452241919 -9223372036854775808 0 9223372036854775807"
+  check w64d "$(( 9223372036854775807 + 1 )) $(( 99999999999999999999 )) $(( z / -1 )) $(( z % -1 )) $(( z - 1 ))" "$w"
+  w="1099511627776 ffffffffffffffff 1777777777777777777777 18446744073709551615 B2D05E00"
+  check w64e "$(printf '%d %x %o %u %X' $(( 1 << 40 )) -1 -1 -1 "$big")" "$w"
+  w="-6289078614652622815 -9223372036854775808 0 -8446744073709551616"
+  check w64f "$(( 3 ** 40 )) $(( 2 ** 63 )) $(( 2 ** 64 )) $(( t ** 19 ))" "$w"
+  w="-3000000001 33558016 3000000001 -3000000001 -1"
+  check w64g "$(( ~big )) $(( big & 0xF0F0F0F0F )) $(( big | 1 )) $(( big ^ -1 )) $(( 0xffffffffffffffff ))" "$w"
+  local y=12345678901
+  w="37037036703 1763668414 901 -1763668414 -901"
+  check w64h "$(( y * 3 )) $(( y / 7 )) $(( y % 1000 )) $(( -y / 7 )) $(( -y % 1000 ))" "$w"
+  let q=big*2
+  declare -i di=$big
+  di+=$big
+  local i o=""
+  for (( i = 4294967294; i < 4294967297; i++ )); do o="$o $i"; done
+  check w64i "$q $di$o" "6000000000 6000000000 4294967294 4294967295 4294967296"
+  check w64j "$(( big > 1 )) $(( -big < 1 )) $(( big == 3000000000 )) $(( 64#zzzzzzzzzzzz ))" "1 1 1 4099276460824344803"
+  [ "$big" -gt 2147483647 ]; local rt=$?
+  check w64k "$rt" 0
+}
+
 s01   # SECTION-CALL 01
 s02   # SECTION-CALL 02
 s03   # SECTION-CALL 03
@@ -2073,5 +2107,6 @@ s33   # SECTION-CALL 33
 s34   # SECTION-CALL 34
 s35   # SECTION-CALL 35
 s36   # SECTION-CALL 36
+s37   # SECTION-CALL 37
 echo "full: $checks checks, $fails failures"
 exit $fails

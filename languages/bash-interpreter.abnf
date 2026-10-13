@@ -12,7 +12,8 @@ All 22 sections of tests/bash-test-full.sh pass, goja and -frozen byte-identical
     ${v:off:len} ${v#p} ${v##p} ${v%p} ${v%%p} ${v/p/r} ${v//p/r} ${v/#p/r} ${v/%p/r}
     ${v^} ${v^^} ${v,} ${v,,} and every subscripted form of them
   - command substitution $(...) and `...`, nested; v=$(cmd) leaves cmd's status in $?
-  - arithmetic $(( )), (( )) and let: the full operator set (** * / % + - << >> comparisons
+  - arithmetic $(( )), (( )) and let, 64-bit and wrapping like bash's intmax_t: the full
+    operator set (** * / % + - << >> comparisons
     == != & ^ | && || ?: the assignment forms ++ -- and the comma) with hexadecimal, octal
     and BASE#DIGITS literals
   - if/elif/else, while, until, for..in, for NAME (the positional parameters), for (( ;; )),
@@ -917,6 +918,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // The shared regular-expression engine, used for [[ str =~ ere ]].
     include("lib/regex.js")
+    // Exact 64-bit integers on a pair of 32-bit halves: bash's arithmetic is intmax_t.
+    include("lib/int64.js")
 
     // ---- tiny stack / string helpers (self contained, no shared core) ----
 
@@ -939,21 +942,37 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
 
     // Integer -> decimal string built by hand, so the two engines cannot disagree on any
-    // number formatting (goja and the frozen VM differ on large / float toString).
+    // number formatting (goja and the frozen VM differ on large / float toString). An
+    // arithmetic value beyond 2^53 is an int64.js pair (see arNorm).
     function numToStr(n) {
-        n = n | 0
+        if (typeof n != "number") { return i64StrS(n) }
         if (n == 0) { return "0" }
-        var neg = false
-        if (n < 0) { neg = true; n = (0 - n) | 0 }
+        var neg = n < 0
+        var a = neg ? 0 - n : n
         var s = ""
-        while (n > 0) {
-            var d = n % 10
+        while (a > 0) {
+            var d = a % 10
             s = String.fromCharCode(48 + d) + s
-            n = ((n - d) / 10) | 0
+            a = (a - d) / 10
         }
         if (neg) { s = "-" + s }
         return s
     }
+
+    // ---- 64-bit arithmetic ----
+    // bash's integers are intmax_t: 64 bits, wrapping. An arithmetic value is a plain number
+    // while it lies in [-2^53, 2^53], where double arithmetic on it is exact, and an int64.js
+    // pair {h, l} beyond that. arNorm restores that invariant after every pair operation, so a
+    // pair is never 0 and never small. Twin of the i64 arithmetic languages/bash-to-llvm-ir.abnf
+    // emits and of rt_arith in languages/lib/bash-rt.c.
+    var AR_SAFE = 9007199254740992
+    function arPair(v) { return (typeof v == "number") ? i64FromNum(v) : v }
+    function arNorm(p) { return i64Fits53(p) ? i64ToNumS(p) : p }
+    function arIsZero(v) { return typeof v == "number" && v == 0 }
+    function arIsNeg(v) { return (typeof v == "number") ? v < 0 : (v.h & 0x80000000) != 0 }
+    // The nearest double, for a consumer that counts (an offset, a length, an exit status).
+    function arNum(v) { return (typeof v == "number") ? v : i64ToNumS(v) }
+    function arInt32(v) { return (typeof v == "number" && v >= -2147483648 && v <= 2147483647) }
 
     // Decimal string -> 32 bit int (leading spaces and one +/- sign, digits until the first
     // non-digit; empty or non-numeric yields 0, like an unset variable in Bash arithmetic).
@@ -984,6 +1003,24 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (neg) { v = (0 - v) | 0 }
         return v
+    }
+    // The same scan for an arithmetic operand: 64-bit, wrapping. Twin of rt_str2int.
+    function arStr(s) {
+        var i = 0
+        var n = s.length
+        while (i < n && (s.charCodeAt(i) == 32 || s.charCodeAt(i) == 9)) { i = i + 1 }
+        var neg = false
+        if (i < n && (s.charCodeAt(i) == 45 || s.charCodeAt(i) == 43)) { neg = s.charCodeAt(i) == 45; i = i + 1 }
+        var j = i
+        while (j < n && s.charCodeAt(j) >= 48 && s.charCodeAt(j) <= 57) { j = j + 1 }
+        if (j - i <= 15) {
+            var v = 0
+            var k
+            for (k = i; k < j; k++) { v = v * 10 + (s.charCodeAt(k) - 48) }
+            return neg ? 0 - v : v
+        }
+        var p = i64FromStr(s.slice(i, j))
+        return arNorm(neg ? i64Neg(p) : p)
     }
 
     // ---- interpreter state ----
@@ -2443,7 +2480,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function arrNorm(a, key) {
         if (a.assoc) { return key }
-        return numToStr(strToInt(key))
+        return numToStr(arStr(key))
     }
     function arrSet(name, key, val) {
         var a = arrEnsure(name, false)
@@ -2452,10 +2489,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (a.assoc) { a.keys.push(kk) }
             else {
                 // keep the index list in numeric order, so ${!a[*]} and ${a[@]} are sorted
-                var n = strToInt(kk)
+                var n = arStr(kk)
                 var at = a.keys.length
                 var i
-                for (i = a.keys.length - 1; i >= 0; i--) { if (strToInt(a.keys[i]) > n) { at = i } }
+                for (i = a.keys.length - 1; i >= 0; i--) { if (arOp(">", arStr(a.keys[i]), n) == 1) { at = i } }
                 a.keys.push("")
                 var j
                 for (j = a.keys.length - 1; j > at; j--) { a.keys[j] = a.keys[j - 1] }
@@ -2959,7 +2996,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return t
     }
 
-    // ---- arithmetic thunks: function() -> int ----
+    // ---- arithmetic thunks: function() -> an arithmetic value (see arNorm) ----
 
     // A numeric literal: 0xHH hexadecimal, BASE#DIGITS, a leading 0 octal, else decimal.
     function parseNumLit(t) {
@@ -2969,17 +3006,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var h = -1
         var i
         for (i = 0; i < t.length; i++) { if (t.charAt(i) == "#") { h = i } }
-        if (h > 0) { return digitsInBase(t.slice(h + 1), strToInt(t.slice(0, h))) }
+        if (h > 0) { return digitsInBase(t.slice(h + 1), arNum(digitsInBase(t.slice(0, h), 10))) }
         if (t.length > 1 && t.charAt(0) == "0") { return digitsInBase(t.slice(1), 8) }
-        return strToInt(t)
+        return digitsInBase(t, 10)
     }
     // bash's digit alphabet is base dependent above 36: the two cases SEPARATE - a-z is
     // 10..35, A-Z is 36..61 - and "@" and "_" are digits 62 and 63 ($(( 64#Az )) is 2339,
     // $(( 64#@_ )) is 4031 in bash 5.3.15).
     // At 36 and below the alphabet is case insensitive, which is what makes 16#FF and 16#ff
-    // both 255. languages/lib/bash-rt.c's rt_basenum is the same table for the compiled half.
+    // both 255. languages/lib/bash-rt.c's ar_number is the same table for the compiled half.
     function digitsInBase(t, base) {
-        var v = 0
+        var v = anytype
+        v = 0
         var i
         for (i = 0; i < t.length; i++) {
             var cc = t.charCodeAt(i)
@@ -2990,24 +3028,24 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else if (cc == 64) { d = 62 }
             else if (cc == 95) { d = 63 }
             if (d < 0 || d >= base) { d = 0 }
-            v = (v * base + d) | 0
+            v = arOp("+", arOp("*", v, base), d)
         }
         return v
     }
     // items = [baseWordThunk, digitsWordThunk] - see the ArBaseDyn rule.
     function mkArBaseDyn(items) {
         var lw = items[0], rw = items[1]
-        return function() { return digitsInBase(wordJoin(rw()), strToInt(wordJoin(lw()))) }
+        return function() { return digitsInBase(wordJoin(rw()), arNum(arStr(wordJoin(lw())))) }
     }
     function mkNum(text) { var n = parseNumLit(text); return function() { return n } }
-    function mkArOfStr(t) { return function() { return strToInt(wordJoin(t())) } }
+    function mkArOfStr(t) { return function() { return arStr(wordJoin(t())) } }
     function mkUn(op, t) {
         return function() {
             var v = t()
-            if (op == "-") { return (0 - v) | 0 }
-            if (op == "+") { return v | 0 }
-            if (op == "!") { return (v == 0) ? 1 : 0 }
-            return (~v) | 0
+            if (op == "-") { return (typeof v == "number") ? 0 - v : arNorm(i64Neg(v)) }
+            if (op == "+") { return v }
+            if (op == "!") { return arIsZero(v) ? 1 : 0 }
+            return arInt32(v) ? ~v : arNorm(i64Not(arPair(v)))
         }
     }
     // items = [thunk] | [{iop,pre}, {lhs}] | [{lhs}, {iop,pre}]
@@ -3019,8 +3057,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (it.lhs != undefined) { lhs = it.lhs } else { iop = it.iop; pre = it.pre }
         }
         return function() {
-            var v = strToInt(getVarVal(lhs))
-            var nv = (iop == "++") ? ((v + 1) | 0) : ((v - 1) | 0)
+            var v = arStr(getVarVal(lhs))
+            var nv = arOp((iop == "++") ? "+" : "-", v, 1)
             setVarVal(lhs, numToStr(nv))
             return (pre == 1) ? nv : v
         }
@@ -3031,19 +3069,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var aop = items[1].aop
         var t = items[2]
         return function() {
-            var cur = strToInt(getVarVal(lhs))
-            var r = t()
-            var nv = r
-            if (aop == "+=") { nv = (cur + r) | 0 }
-            else if (aop == "-=") { nv = (cur - r) | 0 }
-            else if (aop == "*=") { nv = (cur * r) | 0 }
-            else if (aop == "/=") { nv = (r == 0) ? 0 : ((cur / r) | 0) }
-            else if (aop == "%=") { nv = (r == 0) ? 0 : ((cur % r) | 0) }
-            else if (aop == "<<=") { nv = (cur << r) | 0 }
-            else if (aop == ">>=") { nv = (cur >> r) | 0 }
-            else if (aop == "&=") { nv = cur & r }
-            else if (aop == "^=") { nv = cur ^ r }
-            else if (aop == "|=") { nv = cur | r }
+            var cur = arStr(getVarVal(lhs))
+            var nv = anytype
+            nv = t()
+            if (aop != "=") { nv = arOp(aop.slice(0, aop.length - 1), cur, nv) }
             setVarVal(lhs, numToStr(nv))
             return nv
         }
@@ -3052,57 +3081,101 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function mkArCond(items) {
         if (items.length == 1) { return items[0] }
         var c0 = items[0], t1 = items[1], t2 = items[2]
-        return function() { return (c0() != 0) ? t1() : t2() }
+        return function() { return !arIsZero(c0()) ? t1() : t2() }
     }
     function foldComma(items) {
         if (items.length == 1) { return items[0] }
         return function() {
-            var v = 0
+            var v = anytype
+            v = 0
             var i
             for (i = 0; i < items.length; i++) { v = items[i]() }
             return v
         }
     }
+    // ** by repeated squaring over the exponent's 64 bits, wrapping like every product.
+    function arPow(bs, ex) {
+        if (arIsNeg(ex)) { arFail("exponent less than 0"); return 0 }
+        var r = anytype
+        r = 1
+        var b = anytype
+        b = bs
+        var e = arPair(ex)
+        while (!i64IsZero(e)) {
+            if ((e.l & 1) != 0) { r = arOp("*", r, b) }
+            e = i64ShrU(e, 1)
+            if (!i64IsZero(e)) { b = arOp("*", b, b) }
+        }
+        return r
+    }
     function foldPow(items) {
         if (items.length == 1) { return items[0] }
         var b0 = items[0], e0 = items[2]
-        return function() {
-            var bs = b0(), ex = e0()
-            var v = 1
-            var i
-            for (i = 0; i < ex; i++) { v = (v * bs) | 0 }
-            return v
-        }
+        return function() { var bs = b0(); return arPow(bs, e0()) }
     }
-    function mkInt(text) { var n = strToInt(text); return function() { return n } }
-    function mkArVar(name) { return function() { return strToInt(getVarVal(name)) } }
-    function mkNeg(t) { return function() { return (0 - t()) | 0 } }
+    function mkArVar(name) { return function() { return arStr(getVarVal(name)) } }
+    // An arithmetic error: bash reports it on standard error and abandons the command.
+    var arithErr = false
+    function arFail(msg) {
+        if (!arithErr) { emitErr("bash: " + msg + "\n") }
+        arithErr = true
+    }
+    // One binary operator. Two plain numbers take the double path while its result is still
+    // exact; everything else runs on int64.js pairs and is normalised back. A shift count is
+    // taken modulo 64, which is what bash's own shift instruction does on arm64 and x86-64.
     function arOp(op, l, r) {
-        if (op == "+") { return (l + r) | 0 }
-        if (op == "-") { return (l - r) | 0 }
-        if (op == "*") { return (l * r) | 0 }
-        if (op == "/") { return (l / r) | 0 }
-        if (op == "%") { return (l % r) | 0 }
-        if (op == "<")  { return (l < r) ? 1 : 0 }
-        if (op == ">")  { return (l > r) ? 1 : 0 }
-        if (op == "<=") { return (l <= r) ? 1 : 0 }
-        if (op == ">=") { return (l >= r) ? 1 : 0 }
-        if (op == "==") { return (l == r) ? 1 : 0 }
-        if (op == "!=") { return (l != r) ? 1 : 0 }
-        if (op == "<<") { return (l << r) | 0 }
-        if (op == ">>") { return (l >> r) | 0 }
-        if (op == "&") { return l & r }
-        if (op == "|") { return l | r }
-        if (op == "^") { return l ^ r }
-        if (op == "&&") { return (l != 0 && r != 0) ? 1 : 0 }
-        if (op == "||") { return (l != 0 || r != 0) ? 1 : 0 }
-        return 0
+        var both = typeof l == "number" && typeof r == "number"
+        if (op == "<" || op == ">" || op == "<=" || op == ">=" || op == "==" || op == "!=") {
+            var c = 0
+            if (both) { c = (l < r) ? -1 : ((l > r) ? 1 : 0) } else { c = i64CmpS(arPair(l), arPair(r)) }
+            if (op == "<") { return (c < 0) ? 1 : 0 }
+            if (op == ">") { return (c > 0) ? 1 : 0 }
+            if (op == "<=") { return (c <= 0) ? 1 : 0 }
+            if (op == ">=") { return (c >= 0) ? 1 : 0 }
+            if (op == "==") { return (c == 0) ? 1 : 0 }
+            return (c != 0) ? 1 : 0
+        }
+        if (op == "&&") { return (!arIsZero(l) && !arIsZero(r)) ? 1 : 0 }
+        if (op == "||") { return (!arIsZero(l) || !arIsZero(r)) ? 1 : 0 }
+        if ((op == "/" || op == "%") && arIsZero(r)) { arFail("division by 0"); return 0 }
+        if (both) {
+            var x = 0
+            if (op == "+") { x = l + r } else if (op == "-") { x = l - r } else if (op == "*") { x = l * r }
+            if ((op == "+" || op == "-" || op == "*") && x > 0 - AR_SAFE && x < AR_SAFE) { return x }
+            if (op == "/" || op == "%") {
+                // JS % on doubles is exact and truncates like C, so l - rem is an exact multiple
+                // of r. Adding 0 turns a -0 into 0.
+                var rem = l % r
+                if (op == "%") { return rem + 0 }
+                return (l - rem) / r + 0
+            }
+            if ((op == "&" || op == "|" || op == "^") && arInt32(l) && arInt32(r)) {
+                if (op == "&") { return l & r }
+                if (op == "|") { return l | r }
+                return l ^ r
+            }
+        }
+        var a = arPair(l), b = arPair(r)
+        var p = anytype
+        if (op == "+") { p = i64Add(a, b) }
+        else if (op == "-") { p = i64Sub(a, b) }
+        else if (op == "*") { p = i64Mul(a, b) }
+        else if (op == "/") { p = i64DivModS(a, b).q }
+        else if (op == "%") { p = i64DivModS(a, b).r }
+        else if (op == "<<") { p = i64Shl(a, b.l & 63) }
+        else if (op == ">>") { p = i64ShrS(a, b.l & 63) }
+        else if (op == "&") { p = i64And(a, b) }
+        else if (op == "|") { p = i64Or(a, b) }
+        else if (op == "^") { p = i64Xor(a, b) }
+        else { return 0 }
+        return arNorm(p)
     }
-    // items = [thunk, {op}, thunk, {op}, thunk, ...] -> one left folded int thunk.
+    // items = [thunk, {op}, thunk, {op}, thunk, ...] -> one left folded thunk.
     function foldBin(items) {
         if (items.length == 1) { return items[0] }
         return function() {
-            var v = items[0]()
+            var v = anytype
+            v = items[0]()
             var i
             for (i = 1; i < items.length; i += 2) { v = arOp(items[i].op, v, items[i + 1]()) }
             return v
@@ -3192,13 +3265,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (a.idxT != null) {
             var key = wordJoin(a.idxT())
             arrEnsure(a.name, assoc)
-            if (!arrs[arrKey(a.name)].assoc) { key = numToStr(strToInt(key)) }
+            if (!arrs[arrKey(a.name)].assoc) { key = numToStr(arStr(key)) }
             if (a.op == "+=") { arrSet(a.name, key, arrGet(a.name, key) + v) } else { arrSet(a.name, key, v) }
             return
         }
         if (a.op == "+=") {
             if (isArr(a.name)) { arrAppendList(a.name, [v]) }
-            else if (attrOn(intVars, a.name)) { setVarVal(a.name, numToStr(strToInt(getVarVal(a.name)) + evalArithStr(v))) }
+            else if (attrOn(intVars, a.name)) { setVarVal(a.name, numToStr(arOp("+", arStr(getVarVal(a.name)), evalArithStr(v)))) }
             else { setVarVal(a.name, getVarVal(a.name) + v) }
             return
         }
@@ -3305,11 +3378,6 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // the "-" / "0" / "#" flags and the usual backslash escapes. The format is reused until
     // the arguments run out, exactly like the shell.
     //
-    // WIDTH OF THE INTEGER MODEL: both halves are 32-bit throughout (strToInt ends in
-    // `| 0`; the compiler's rt_str2int/rt_int2str are i32), while bash's printf is 64-bit.
-    // So a NEGATIVE operand under %x/%X/%o/%u renders its 32-BIT two's complement -
-    // `printf '%x' -1` is ffffffff here and ffffffffffffffff in bash 5.3.
-    //
     // NOT IMPLEMENTED, in either half: %e %f %g %a and the ' flag. The whole runtime is
     // integer-only (bash-rt.c has no double), so a float conversion would first need a
     // float parser and an exact formatter in the C runtime.
@@ -3375,11 +3443,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         var piece = ""
                         var isNum = (conv == "d" || conv == "i" || conv == "u" || conv == "x" || conv == "X" || conv == "o")
                         if (conv == "s") { piece = arg; if (prec >= 0 && piece.length > prec) { piece = piece.slice(0, prec) } }
-                        else if (conv == "d" || conv == "i") { piece = numToStr(strToInt(arg)) }
+                        else if (conv == "d" || conv == "i") { piece = numToStr(arStr(arg)) }
                         else if (conv == "c") { piece = (arg.length > 0) ? arg.charAt(0) : "" }
-                        else if (conv == "u") { piece = radixStr(strToInt(arg), 10, false) }
-                        else if (conv == "o") { piece = radixStr(strToInt(arg), 8, false) }
-                        else if (conv == "x" || conv == "X") { piece = radixStr(strToInt(arg), 16, conv == "X") }
+                        else if (conv == "u") { piece = radixStr(arStr(arg), 10, false) }
+                        else if (conv == "o") { piece = radixStr(arStr(arg), 8, false) }
+                        else if (conv == "x" || conv == "X") { piece = radixStr(arStr(arg), 16, conv == "X") }
                         else if (conv == "b") { piece = ansiC(arg) }
                         else if (conv == "q") { piece = printfQuote(arg) }
                         else { piece = arg }
@@ -3410,18 +3478,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (dest != null) { setVarVal(dest, out) } else { emitOut(out) }
         return 0
     }
-    // printf's %x/%X/%o/%u: the operand as an UNSIGNED 32-bit value in the given base.
-    // 4294967296 is exact in a double, so the two's complement is exact too.
+    // printf's %x/%X/%o/%u: the operand as an UNSIGNED 64-bit value in the given base.
     function radixStr(n, base, upper) {
-        var v = n
-        if (v < 0) { v = v + 4294967296 }
-        if (v == 0) { return "0" }
+        var v = arPair(n)
+        if (i64IsZero(v)) { return "0" }
+        if (base == 10) { return i64StrU(v) }
         var digits = upper ? "0123456789ABCDEF" : "0123456789abcdef"
+        var bits = (base == 8) ? 3 : 4
         var out = ""
-        while (v > 0) {
-            var d = v % base
-            out = digits.charAt(d) + out
-            v = (v - d) / base
+        while (!i64IsZero(v)) {
+            out = digits.charAt(v.l & (base - 1)) + out
+            v = i64ShrU(v, bits)
         }
         return out
     }
@@ -3708,13 +3775,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (op == "-c") { return (fsKind(s) == 3) ? 0 : 1 }
         return 1
     }
+    var testNumOps = {"-eq": "==", "-ne": "!=", "-lt": "<", "-le": "<=", "-gt": ">", "-ge": ">="}
     function testBinary(l, op, r) {
-        if (op == "-eq") { return (strToInt(l) == strToInt(r)) ? 0 : 1 }
-        if (op == "-ne") { return (strToInt(l) != strToInt(r)) ? 0 : 1 }
-        if (op == "-lt") { return (strToInt(l) < strToInt(r)) ? 0 : 1 }
-        if (op == "-le") { return (strToInt(l) <= strToInt(r)) ? 0 : 1 }
-        if (op == "-gt") { return (strToInt(l) > strToInt(r)) ? 0 : 1 }
-        if (op == "-ge") { return (strToInt(l) >= strToInt(r)) ? 0 : 1 }
+        if (hasOwn(testNumOps, op)) { return arIsZero(arOp(testNumOps[op], arStr(l), arStr(r))) ? 1 : 0 }
         if (op == "=" || op == "==") { return (l == r) ? 0 : 1 }
         if (op == "!=") { return (l != r) ? 0 : 1 }
         if (op == "<") { return (l < r) ? 0 : 1 }

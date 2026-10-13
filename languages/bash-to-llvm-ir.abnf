@@ -10,7 +10,7 @@ blocks - the loop being emitted knows both targets - so no control signal travel
 Bash has one data type, the string, so the module is linked with a string runtime written in C
 (languages/lib/bash-rt.c, compiled to the checked-in bash-rt.ll): rt_bump bump-allocates from a
 global arena, rt_strlen / rt_streq / rt_strcmp / rt_strcat / rt_substr operate on NUL-terminated
-i8*, rt_int2str / rt_str2int convert to and from i32, rt_glob / rt_class are the glob matcher
+i8*, rt_int2str / rt_str2int convert to and from i64 (bash's arithmetic is 64-bit), rt_glob / rt_class are the glob matcher
 behind case and [[ == ]], rt_strip / rt_replace / rt_case implement the ${v#p} ${v/p/r} ${v^^}
 family, rt_putc / rt_cap_begin / rt_cap_end give command substitution and pipelines their output
 capture, rt_read_line / rt_field / rt_splitifs back read and word splitting, rt_arr_* are the
@@ -942,9 +942,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     var i8 = llvm.types.I8
     var i32 = llvm.types.I32
+    var i64 = llvm.types.I64
     var i8ptr = llvm.types.I8Ptr
     var zero = llvm.constant.NewInt(i32, 0)
     var one = llvm.constant.NewInt(i32, 1)
+    // Arithmetic is bash's intmax_t: every arithmetic thunk answers an i64.
+    var zero64 = llvm.constant.NewInt(i64, 0)
+    var one64 = llvm.constant.NewInt(i64, 1)
     var ten = llvm.constant.NewInt(i32, 10)
     var zero8 = llvm.constant.NewInt(i8, 0)
     var nullStr = llvm.constant.NewNull(i8ptr) // the empty string: address 0 is the NUL byte
@@ -974,20 +978,22 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // Every pointer out of c-to-llvm-ir.abnf is an i32*; every string here is an i8*. As the
     // runtime is a separate module resolved by name, each helper is simply DECLARED with the face
-    // this emitter wants. `kinds`: one per parameter, 1 = i8*, 2 = i32*, 0 = i32; `retPtr`: the
-    // result is an i8*.
+    // this emitter wants. `kinds`: one per parameter, 1 = i8*, 2 = i32*, 3 = i64 (a C long),
+    // 0 = i32; `ret`: true for an i8* result, 3 for an i64 one, false for an i32 one.
     var i32ptr = llvm.types.NewPointer(i32)
-    function rtDecl(name, retPtr, kinds) {
+    function rtDecl(name, ret, kinds) {
         var ps = []
         var i = 0
         while (i < kinds.length) {
             if (kinds[i] == 1) { ps.push(llvm.ir.NewParam("s" + i, i8ptr)) }
             else if (kinds[i] == 2) { ps.push(llvm.ir.NewParam("s" + i, i32ptr)) }
+            else if (kinds[i] == 3) { ps.push(llvm.ir.NewParam("s" + i, i64)) }
             else { ps.push(llvm.ir.NewParam("s" + i, i32)) }
             i = i + 1
         }
         var rty = i32
-        if (retPtr) { rty = i8ptr }
+        if (ret === true) { rty = i8ptr }
+        if (ret === 3) { rty = i64 }
         return m.NewFunc(name, rty, ps)
     }
     // A global the runtime DEFINES, declared here with the type this emitter wants to
@@ -1189,12 +1195,20 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtStrcmp = rtDecl("rt_strcmp", false, [1, 1])
     // i8* rt_strcat(i8* a, i8* b): fresh arena string = a followed by b.
     var rtStrcat = rtDecl("rt_strcat", true, [1, 1])
-    // i8* rt_int2str(i32 n): decimal string in the arena (mirrors the interpreter's numToStr).
-    var rtInt2str = rtDecl("rt_int2str", true, [0])
-    // i32 rt_str2int(i8* s): leading spaces/tabs, one +/- sign, digits until non-digit.
-    var rtStr2int = rtDecl("rt_str2int", false, [1])
-    // rt_basenum(digits, base): BASE#DIGITS when either side was built by expansion.
-    var rtBasenum = rtDecl("rt_basenum", false, [1, 0])
+    // i8* rt_int2str(i64 n): decimal string in the arena (mirrors the interpreter's numToStr).
+    var rtInt2str = rtDecl("rt_int2str", true, [3])
+    // i64 rt_str2int(i8* s): leading spaces/tabs, one +/- sign, digits until non-digit.
+    var rtStr2int = rtDecl("rt_str2int", 3, [1])
+    // i64 rt_arith(i8* expr): the arithmetic evaluator for an expression that only exists at
+    // run time; rt_idiv / rt_ipow are / % and ** with bash's error cases. Any of them can
+    // raise arith_err (see languages/lib/bash-rt.c).
+    var rtArith = rtDecl("rt_arith", 3, [1])
+    var rtIdiv = rtDecl("rt_idiv", 3, [3, 3, 0])
+    var rtIpow = rtDecl("rt_ipow", 3, [3, 3])
+    // An i32 as a decimal string, and a decimal string read back as an i32 - the status,
+    // counts and lengths that are not arithmetic.
+    function i2s(b, v) { return b.NewCall(rtInt2str, b.NewSExt(v, i64)) }
+    function s2i(b, s) { return b.NewTrunc(b.NewCall(rtStr2int, s), i32) }
     // i32 rt_class(i8* p, i32 ch): p points at "[". Returns -1 when the bracket expression is
     // unterminated (the "[" is then a literal), else (bytesConsumed << 1) | matched.
     var rtClass = rtDecl("rt_class", false, [1, 0])
@@ -1337,8 +1351,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return true
     }
     function varString(b, name) {
-        if (name == "?") { return b.NewCall(rtInt2str, b.NewLoad(i32, gStatus)) }
-        if (name == "#") { return b.NewCall(rtInt2str, b.NewLoad(i32, gFrameN)) }
+        if (name == "?") { return i2s(b, b.NewLoad(i32, gStatus)) }
+        if (name == "#") { return i2s(b, b.NewLoad(i32, gFrameN)) }
         if (name == "*") { return b.NewCall(rtParams, [ifsFirstValue(b), one]) }
         if (name == "@") { return b.NewCall(rtParams, [ifsFirstValue(b), zero]) }
         // There is no process behind a compiled run, so $$ and $! are fixed values.
@@ -1557,8 +1571,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     var k = kindOf(b, rs.v)
                     var whole = b.NewICmp(llvm.enum.IPredNE, k, zero)
                     return {b: b, v: b.NewSelect(whole,
-                        b.NewCall(rtInt2str, b.NewCall(rtScCount, nmOf(b))),
-                        b.NewCall(rtInt2str, b.NewCall(rtCharLen, b.NewCall(rtScGet, [nmOf(b), keyOf(b, rs.v)]))))}
+                        i2s(b, b.NewCall(rtScCount, nmOf(b))),
+                        i2s(b, b.NewCall(rtCharLen, b.NewCall(rtScGet, [nmOf(b), keyOf(b, rs.v)]))))}
                 }}
             }
             if (pe == "ind") {
@@ -1571,8 +1585,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 }}
             }
             if (pe == "substr") {
-                var offT = ariths[0]
-                var lenT = (ariths.length > 1) ? ariths[1] : null
+                var offT = ar32T(ariths[0])
+                var lenT = (ariths.length > 1) ? ar32T(ariths[1]) : null
                 return {f: true, c: undefined, fn: function(b) {
                     var rs = subOf(b); b = rs.b
                     var k = kindOf(b, rs.v)
@@ -1736,7 +1750,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (pe == "len") {
             return {c: undefined, fn: function(b) {
                 // ${#v} counts CHARACTERS in bash (rt_strlen counts bytes).
-                return {b: b, v: b.NewCall(rtInt2str, b.NewCall(rtCharLen, varString(b, name)))}
+                return {b: b, v: i2s(b, b.NewCall(rtCharLen, varString(b, name)))}
             }}
         }
         if (pe == "ind") {
@@ -1774,8 +1788,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }}
         }
         if (pe == "substr") {
-            var offT = ariths[0]
-            var lenT = (ariths.length > 1) ? ariths[1] : null
+            var offT = ar32T(ariths[0])
+            var lenT = (ariths.length > 1) ? ar32T(ariths[1]) : null
             return {c: undefined, fn: function(b) {
                 var v = valOf(b)
                 var ro = offT(b)
@@ -2150,25 +2164,27 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     //  Arithmetic thunks (bare functions):  function(b) -> {b, v: i32}
     // ===================================================================================
 
-    function mkInt(text) { var c = llvm.constant.NewInt(i32, parseDec(text)); return function(b) { return {b: b, v: c} } }
     // A numeric literal: 0xHH hexadecimal, BASE#DIGITS, a leading 0 octal, else decimal.
-    // See languages/bash-interpreter.abnf's copy for the measurement: bash's digit alphabet
-    // SEPARATES the two letter cases once the base passes 36, and adds "@" (62) and "_" (63).
-    // This copy folds a LITERAL base#digits at compile time; rt_basenum in
-    // languages/lib/bash-rt.c is the same table for the operands built by expansion.
+    // bash's digit alphabet SEPARATES the two letter cases once the base passes 36, and adds
+    // "@" (62) and "_" (63); rt_arith's ar_number in languages/lib/bash-rt.c is the same
+    // table. A literal is folded here when its value is exact in a double; a bigger one, or
+    // one bash rejects (a digit too great for its base, a base outside 2..64), is handed to
+    // rt_arith as text, which wraps it to 64 bits or reports the error at run time.
     function digitsInBase(t, base) {
+        if (base < 2 || base > 64) { return null }
         var v = 0
         var i
         for (i = 0; i < t.length; i++) {
             var cc = t.charCodeAt(i)
-            var d = -1
+            var d = 64
             if (cc >= 48 && cc <= 57) { d = cc - 48 }
             else if (cc >= 97 && cc <= 122) { d = cc - 87 }
             else if (cc >= 65 && cc <= 90) { d = (base > 36) ? cc - 29 : cc - 55 }
             else if (cc == 64) { d = 62 }
             else if (cc == 95) { d = 63 }
-            if (d < 0 || d >= base) { d = 0 }
-            v = (v * base + d) | 0
+            if (d >= base) { return null }
+            v = v * base + d
+            if (v > 9007199254740991) { return null }
         }
         return v
     }
@@ -2179,19 +2195,41 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var h = -1
         var i
         for (i = 0; i < t.length; i++) { if (t.charAt(i) == "#") { h = i } }
-        if (h > 0) { return digitsInBase(t.slice(h + 1), parseDec(t.slice(0, h))) }
+        if (h > 0) {
+            var bs = digitsInBase(t.slice(0, h), 10)
+            return (bs == null) ? null : digitsInBase(t.slice(h + 1), bs)
+        }
         if (t.length > 1 && t.charAt(0) == "0") { return digitsInBase(t.slice(1), 8) }
-        return parseDec(t)
+        return digitsInBase(t, 10)
     }
-    function mkNum(text) { var c = llvm.constant.NewInt(i32, parseNumLit(text)); return function(b) { return {b: b, v: c} } }
-    // items = [baseWordThunk, digitsWordThunk] - see the ArBaseDyn rule.
+    function mkNum(text) {
+        var n = parseNumLit(text)
+        if (n == null) { return function(b) { return {b: b, v: b.NewCall(rtArith, gepStr(b, text))} } }
+        var c = llvm.constant.NewInt(i64, n)
+        return function(b) { return {b: b, v: c} }
+    }
+    // items = [baseWordThunk, digitsWordThunk] - see the ArBaseDyn rule. Either side was built
+    // by expansion, so the constant is put back together and read by rt_arith.
     function mkArBaseDyn(items) {
         var lw = items[0], rw = items[1]
         return function(b) {
             var rl = evalWord(b, lw)
             var rr = evalWord(rl.b, rw)
             var bb = rr.b
-            return {b: bb, v: bb.NewCall(rtBasenum, [rr.v, bb.NewCall(rtStr2int, rl.v)])}
+            var txt = bb.NewCall(rtStrcat, [bb.NewCall(rtStrcat, [rl.v, gepStr(bb, "#")]), rr.v])
+            return {b: bb, v: bb.NewCall(rtArith, txt)}
+        }
+    }
+    // An arithmetic thunk whose consumer counts in i32 (a substring offset or length): the
+    // value saturates rather than wraps, so an offset past 2^31 still selects nothing.
+    function ar32T(t) {
+        var lo = llvm.constant.NewInt(i64, -2147483647), hi = llvm.constant.NewInt(i64, 2147483647)
+        return function(b) {
+            var r = t(b)
+            var bb = r.b
+            var v = bb.NewSelect(bb.NewICmp(llvm.enum.IPredSLT, r.v, lo), lo, r.v)
+            v = bb.NewSelect(bb.NewICmp(llvm.enum.IPredSGT, v, hi), hi, v)
+            return {b: bb, v: bb.NewTrunc(v, i32)}
         }
     }
     function mkArOfStr(o) { return function(b) { var r = evalWord(b, o); return {b: r.b, v: r.b.NewCall(rtStr2int, r.v)} } }
@@ -2199,10 +2237,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return function(b) {
             var r = t(b)
             var bb = r.b
-            if (op == "-") { return {b: bb, v: bb.NewSub(zero, r.v)} }
+            if (op == "-") { return {b: bb, v: bb.NewSub(zero64, r.v)} }
             if (op == "+") { return {b: bb, v: r.v} }
-            if (op == "!") { return {b: bb, v: bb.NewZExt(bb.NewICmp(llvm.enum.IPredEQ, r.v, zero), i32)} }
-            return {b: bb, v: bb.NewXor(r.v, llvm.constant.NewInt(i32, -1))}
+            if (op == "!") { return {b: bb, v: bb.NewZExt(bb.NewICmp(llvm.enum.IPredEQ, r.v, zero64), i64)} }
+            return {b: bb, v: bb.NewXor(r.v, llvm.constant.NewInt(i64, -1))}
         }
     }
     function mkIncDec(items) {
@@ -2214,7 +2252,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return function(b) {
             var v = b.NewCall(rtStr2int, varString(b, lhs))
-            var nv = (iop == "++") ? b.NewAdd(v, one) : b.NewSub(v, one)
+            var nv = (iop == "++") ? b.NewAdd(v, one64) : b.NewSub(v, one64)
             storeVar(b, lhs, b.NewCall(rtInt2str, nv))
             return {b: b, v: (pre == 1) ? nv : v}
         }
@@ -2245,55 +2283,37 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var r1 = t1(rc.b)
             var r2 = t2(r1.b)
             var bb = r2.b
-            return {b: bb, v: bb.NewSelect(bb.NewICmp(llvm.enum.IPredNE, rc.v, zero), r1.v, r2.v)}
+            return {b: bb, v: bb.NewSelect(bb.NewICmp(llvm.enum.IPredNE, rc.v, zero64), r1.v, r2.v)}
         }
     }
     function foldComma(items) {
         if (items.length == 1) { return items[0] }
         return function(b) {
-            var v = zero
+            var v = zero64
             var i
             for (i = 0; i < items.length; i++) { var r = items[i](b); b = r.b; v = r.v }
             return {b: b, v: v}
         }
     }
-    // base ** exponent : a counted multiply loop (the exponent can be a run time value).
     function foldPow(items) {
         if (items.length == 1) { return items[0] }
         var bt = items[0], et = items[2]
         return function(b) {
             var rb = bt(b)
             var re = et(rb.b)
-            b = re.b
-            var acc = b.NewAlloca(i32), ip = b.NewAlloca(i32)
-            b.NewStore(one, acc)
-            b.NewStore(zero, ip)
-            var h = curF.NewBlock(""), bd = curF.NewBlock(""), x = curF.NewBlock("")
-            b.NewBr(h)
-            var iv = h.NewLoad(i32, ip)
-            h.NewCondBr(h.NewICmp(llvm.enum.IPredSLT, iv, re.v), bd, x)
-            bd.NewStore(bd.NewMul(bd.NewLoad(i32, acc), rb.v), acc)
-            bd.NewStore(bd.NewAdd(iv, one), ip)
-            bd.NewBr(h)
-            return {b: x, v: x.NewLoad(i32, acc)}
+            return {b: re.b, v: re.b.NewCall(rtIpow, [rb.v, re.v])}
         }
     }
     function mkArVar(name) { return function(b) { return {b: b, v: b.NewCall(rtStr2int, varString(b, name))} } }
-    function mkNeg(t) { return function(b) { var r = t(b); return {b: r.b, v: r.b.NewSub(zero, r.v)} } }
-    // Returns {b, v}: only / and % branch (a zero divisor yields 0, like the interpreter's
-    // (l/r)|0 / (l%r)|0, and unlike a raw sdiv/srem which would trap in the IR interpreter).
+    // / and % go through rt_idiv, which knows bash's two cases the hardware does not (a zero
+    // divisor, LONG_MIN / -1). A shift count is taken modulo 64, which is what bash's own
+    // shift instruction does on both arm64 and x86-64; an unmasked count is poison in LLVM.
     function arOp(b, op, l, r) {
         if (op == "+") { return {b: b, v: b.NewAdd(l, r)} }
         if (op == "-") { return {b: b, v: b.NewSub(l, r)} }
         if (op == "*") { return {b: b, v: b.NewMul(l, r)} }
         if (op == "/" || op == "%") {
-            var isz = b.NewICmp(llvm.enum.IPredEQ, r, zero)
-            var zb = curF.NewBlock(""), db = curF.NewBlock(""), cb = curF.NewBlock("")
-            b.NewCondBr(isz, zb, db)
-            zb.NewBr(cb)
-            var dv = (op == "/") ? db.NewSDiv(l, r) : db.NewSRem(l, r)
-            db.NewBr(cb)
-            return {b: cb, v: cb.NewPhi([llvm.ir.NewIncoming(zero, zb), llvm.ir.NewIncoming(dv, db)])}
+            return {b: b, v: b.NewCall(rtIdiv, [l, r, (op == "%") ? one : zero])}
         }
         var pred = null
         if (op == "<") { pred = llvm.enum.IPredSLT }
@@ -2303,18 +2323,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (op == "==") { pred = llvm.enum.IPredEQ }
         if (op == "!=") { pred = llvm.enum.IPredNE }
         if (pred == null) {
-            if (op == "<<") { return {b: b, v: b.NewShl(l, r)} }
-            if (op == ">>") { return {b: b, v: b.NewAShr(l, r)} }
+            if (op == "<<") { return {b: b, v: b.NewShl(l, b.NewAnd(r, llvm.constant.NewInt(i64, 63)))} }
+            if (op == ">>") { return {b: b, v: b.NewAShr(l, b.NewAnd(r, llvm.constant.NewInt(i64, 63)))} }
             if (op == "&") { return {b: b, v: b.NewAnd(l, r)} }
             if (op == "|") { return {b: b, v: b.NewOr(l, r)} }
             if (op == "^") { return {b: b, v: b.NewXor(l, r)} }
-            var ln = b.NewICmp(llvm.enum.IPredNE, l, zero)
-            var rn = b.NewICmp(llvm.enum.IPredNE, r, zero)
-            if (op == "&&") { return {b: b, v: b.NewZExt(b.NewAnd(ln, rn), i32)} }
-            if (op == "||") { return {b: b, v: b.NewZExt(b.NewOr(ln, rn), i32)} }
+            var ln = b.NewICmp(llvm.enum.IPredNE, l, zero64)
+            var rn = b.NewICmp(llvm.enum.IPredNE, r, zero64)
+            if (op == "&&") { return {b: b, v: b.NewZExt(b.NewAnd(ln, rn), i64)} }
+            if (op == "||") { return {b: b, v: b.NewZExt(b.NewOr(ln, rn), i64)} }
             fail("unsupported arithmetic operator: " + op)
         }
-        return {b: b, v: b.NewZExt(b.NewICmp(pred, l, r), i32)}
+        return {b: b, v: b.NewZExt(b.NewICmp(pred, l, r), i64)}
     }
     function foldBin(items) {
         if (items.length == 1) { return items[0] }
@@ -2409,14 +2429,20 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b.NewCall(rtArrSet, [nm, key, v])
             return b
         }
-        // `declare -i n; n+=EXPR` is an arithmetic ADD in bash (n=3; n+=4 is 7), not a concatenation.
-        if (a.op == "+=" && attrOn(intVars, a.name) && a.valT != null && a.valT.c != undefined) {
-            var fragA = c.parseFrom(c.agrammar, a.valT.c, "ArList")
-            var atA = c.compile(fragA).stack[0]
-            var raA = atA(b)
-            b = raA.b
-            storeVar(b, a.name, b.NewCall(rtInt2str,
-                b.NewAdd(b.NewCall(rtStr2int, loadVar(b, a.name)), raA.v)))
+        // `declare -i n` makes n=EXPR evaluate EXPR as arithmetic, and n+=EXPR an arithmetic ADD
+        // (n=3; n+=4 is 7), not a concatenation. A literal right hand side is parsed with this
+        // grammar and emitted as ordinary IR; an expanded one is read by rt_arith at run time.
+        if (attrOn(intVars, a.name) && a.valT != null) {
+            var rv = null
+            if (a.valT.c != undefined) {
+                var ra = c.compile(c.parseFrom(c.agrammar, a.valT.c, "ArList")).stack[0](b)
+                b = ra.b
+                rv = ra.v
+            } else {
+                rv = b.NewCall(rtArith, v)
+            }
+            if (a.op == "+=") { rv = b.NewAdd(b.NewCall(rtStr2int, loadVar(b, a.name)), rv) }
+            storeVar(b, a.name, b.NewCall(rtInt2str, rv))
             return b
         }
         if (a.op == "+=") {
@@ -2428,16 +2454,6 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             storeVar(strB, a.name, strB.NewCall(rtStrcat, [loadVar(strB, a.name), v]))
             strB.NewBr(mg)
             return mg
-        }
-        // `declare -i n` makes n=EXPR evaluate EXPR as arithmetic. The right hand side is a
-        // literal here, so it is parsed with this grammar and emitted as ordinary IR.
-        if (attrOn(intVars, a.name) && a.valT != null && a.valT.c != undefined) {
-            var frag = c.parseFrom(c.agrammar, a.valT.c, "ArList")
-            var at = c.compile(frag).stack[0]
-            var ra2 = at(b)
-            b = ra2.b
-            storeVar(b, a.name, b.NewCall(rtInt2str, ra2.v))
-            return b
         }
         // an ordinary scalar assignment - unless the name is an array, where it is element 0
         var isA2 = b.NewICmp(llvm.enum.IPredSGT, b.NewCall(rtArrCount, nm), zero)
@@ -2903,7 +2919,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     b.NewStore(zero, gStdinPos)
                 }
                 var stv = b.NewLoad(i32, gStatus)
-                b.NewCall(rtArrSet, [psName, gepStr(b, numToStr(k)), b.NewCall(rtInt2str, stv)])
+                b.NewCall(rtArrSet, [psName, gepStr(b, numToStr(k)), i2s(b, stv)])
                 var fail0 = b.NewICmp(llvm.enum.IPredEQ, b.NewLoad(i32, ff), zero)
                 var bad = b.NewAnd(fail0, b.NewICmp(llvm.enum.IPredNE, stv, zero))
                 b.NewStore(b.NewSelect(bad, stv, b.NewLoad(i32, ff)), ff)
@@ -2969,16 +2985,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return function(b) {
             var r = exprT(b)
             b = r.b
-            storeStatus(b, b.NewSelect(b.NewICmp(llvm.enum.IPredNE, r.v, zero), zero, one))
+            storeStatus(b, b.NewSelect(b.NewICmp(llvm.enum.IPredNE, r.v, zero64), zero, one))
             return b
         }
     }
     function makeLetCmd(items) {
         return function(b) {
-            var v = zero
+            var v = zero64
             var i
             for (i = 0; i < items.length; i++) { var r = items[i](b); b = r.b; v = r.v }
-            storeStatus(b, b.NewSelect(b.NewICmp(llvm.enum.IPredNE, v, zero), zero, one))
+            storeStatus(b, b.NewSelect(b.NewICmp(llvm.enum.IPredNE, v, zero64), zero, one))
             return b
         }
     }
@@ -3110,7 +3126,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         fillB.NewAdd(fillB.NewMul(idx, two2), one)))
             var have = fillB.NewAnd(inRange, fillB.NewICmp(llvm.enum.IPredSGE, bgn, zero))
             var piece = fillB.NewCall(rtSubstr, [subj, bgn, fillB.NewSub(end, bgn)])
-            fillB.NewCall(rtArrSet, [nm, fillB.NewCall(rtInt2str, i),
+            fillB.NewCall(rtArrSet, [nm, i2s(fillB, i),
                                      fillB.NewSelect(have, piece, emptyPtr(fillB))])
             fillB.NewStore(fillB.NewAdd(i, one), ip)
             fillB.NewBr(fillH)
@@ -3258,7 +3274,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // then printed, or stored when -v NAME was given.
     //
     // The conversion set and rules are printfBuiltin's in languages/bash-interpreter.abnf; see
-    // there for the 32-bit integer model and why %e %f %g are absent.
+    // there for why %e %f %g are absent.
     function emitPrintf(b, args) {
         var a = args
         var dest = null
@@ -3620,7 +3636,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (cmd == "false") { storeStatusI(b, 1); return b }
             if (cmd == "exit") {
                 var code = zero
-                if (argTs.length > 0) { var r = evalWord(b, argTs[0]); b = r.b; code = b.NewCall(rtStr2int, r.v) } else { code = b.NewLoad(i32, gStatus) }
+                if (argTs.length > 0) { var r = evalWord(b, argTs[0]); b = r.b; code = s2i(b, r.v) } else { code = b.NewLoad(i32, gStatus) }
                 b.NewStore(code, gExitCode)
                 b.NewStore(one, gExited)
                 b.NewBr(curExit)
@@ -3628,7 +3644,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             if (cmd == "return") {
                 var rv = null
-                if (argTs.length > 0) { var r2 = evalWord(b, argTs[0]); b = r2.b; rv = b.NewCall(rtStr2int, r2.v) } else { rv = b.NewLoad(i32, gStatus) }
+                if (argTs.length > 0) { var r2 = evalWord(b, argTs[0]); b = r2.b; rv = s2i(b, r2.v) } else { rv = b.NewLoad(i32, gStatus) }
                 if (curFrame != null) { emitFnRet(b, rv); return deadBlock() }
                 storeStatus(b, rv); return b
             }
@@ -3694,7 +3710,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (argTs.length > 0) {
                     var rs2 = evalWord(b, argTs[0])
                     b = rs2.b
-                    sn = b.NewCall(rtStr2int, rs2.v)
+                    sn = s2i(b, rs2.v)
                 }
                 b.NewStore(b.NewAdd(b.NewLoad(i32, gFrameBase), sn), gFrameBase)
                 b.NewStore(b.NewSub(b.NewLoad(i32, gFrameN), sn), gFrameN)
@@ -4077,7 +4093,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var head = curF.NewBlock(""), body = curF.NewBlock(""), step = curF.NewBlock(""), ex = curF.NewBlock("")
             b.NewBr(head)
             var rc = condT(head)
-            rc.b.NewCondBr(rc.b.NewICmp(llvm.enum.IPredNE, rc.v, zero), body, ex)
+            rc.b.NewCondBr(rc.b.NewICmp(llvm.enum.IPredNE, rc.v, zero64), body, ex)
             loopStack.push({brk: ex, cont: step})
             var bb = bodyT(body)
             loopStack.pop()

@@ -131,9 +131,10 @@ int rt_charoff(char *s, int k);
 int rt_streq(char *a, char *b);
 int rt_strcmp(char *a, char *b);
 char *rt_strcat(char *a, char *b);
-char *rt_int2str(int n);
-int rt_str2int(char *s);
-int rt_basenum(char *s, int base);
+char *rt_int2str(long n);
+long rt_str2int(char *s);
+long rt_arith(char *s);
+int rt_arith_fail(char *expr, char *msg, char *tok);
 int rt_class(char *p, int ch);
 int rt_cpw(char *s);
 int rt_cpat(char *s);
@@ -423,42 +424,48 @@ char *rt_strcat(char *a, char *b) {
 }
 
 /* rt_int2str: decimal string in the arena (mirrors the interpreter's numToStr).
- * The digits are formed in a stack buffer first so the allocation is exact.
- * INT_MIN answers "-": 0 - INT_MIN is still negative, so no digit is produced. */
-char *rt_int2str(int n) {
-    char tmp[16];
+ * The digits are formed in a stack buffer first so the allocation is exact. A
+ * digit is taken from the remainder of the SIGNED value, so LONG_MIN, which has
+ * no positive counterpart, prints like every other negative number. */
+char *rt_int2str(long n) {
+    char tmp[24];
     char *dst;
     if (n == 0) { dst = rt_bump(2); dst[0] = 48; dst[1] = 0; return dst; }
     int neg = n < 0;
-    int a = neg ? 0 - n : n;
-    int t = 15;
-    while (a > 0) {
-        tmp[t] = (char)(48 + (a % 10));
+    long a = n;
+    int t = 23;
+    while (a != 0) {
+        long q = a / 10;
+        long dg = a - q * 10;
+        if (dg < 0) dg = 0 - dg;
+        tmp[t] = (char)(48 + (int)dg);
         t = t - 1;
-        a = a / 10;
+        a = q;
     }
     int d = 0;
-    dst = rt_bump((15 - t) + (neg ? 1 : 0) + 1);
+    dst = rt_bump((23 - t) + (neg ? 1 : 0) + 1);
     if (neg) { dst[0] = 45; d = 1; }
     int j = t + 1;
-    while (j <= 15) { dst[d] = tmp[j]; d = d + 1; j = j + 1; }
+    while (j <= 23) { dst[d] = tmp[j]; d = d + 1; j = j + 1; }
     dst[d] = 0;
     return dst;
 }
 
-/* rt_str2int: leading spaces/tabs, one +/- sign, digits until a non-digit. */
-int rt_str2int(char *s) {
-    int i = 0, v = 0, sign = 1;
+/* rt_str2int: leading spaces/tabs, one +/- sign, decimal digits until a
+ * non-digit, wrapping modulo 2^64 like every other 64-bit operation here. */
+long rt_str2int(char *s) {
+    int i = 0, sign = 1;
+    long v = 0;
     while (s[i] == 32 || s[i] == 9) i = i + 1;
     if (s[i] == 45 || s[i] == 43) {
         if (s[i] == 45) sign = -1;
         i = i + 1;
     }
     while (s[i] >= 48 && s[i] <= 57) {
-        v = v * 10 + ((int)s[i] - 48);
+        v = v * 10 + (long)((int)s[i] - 48);
         i = i + 1;
     }
-    return v * sign;
+    return sign < 0 ? 0 - v : v;
 }
 
 /* The fourteen POSIX class names, WHOLE-matched, shared by the glob bracket
@@ -528,29 +535,523 @@ int rt_cpat(char *s) {
     return v;
 }
 
-/* rt_basenum(digits, base): the value of BASE#DIGITS when either operand was
- * built by expansion (`$(( 10#$num ))`), which the emitter cannot fold. The
- * alphabet is bash 5.3's and it is base dependent above 36 - 0-9, then a-z as
- * 10..35, then A-Z as 36..61, "@" 62 and "_" 63 - while at 36 and below the two
- * letter cases coincide, which is what makes 16#FF and 16#ff both 255. A digit
- * that is out of range contributes 0 here; bash errors, and that is recorded
- * rather than reproduced (there is no arithmetic-error channel in this design).
- * The identical table is digitsInBase in both bash grammars. */
-int rt_basenum(char *s, int base) {
-    int n = rt_strlen(s);
-    int v = 0;
-    int i = 0;
-    while (i < n) {
-        int cc = (int)(unsigned char)s[i];
-        int d = -1;
-        if (cc >= 48 && cc <= 57) { d = cc - 48; }
-        else if (cc >= 97 && cc <= 122) { d = cc - 87; }
-        else if (cc >= 65 && cc <= 90) { d = base > 36 ? cc - 29 : cc - 55; }
-        else if (cc == 64) { d = 62; }
-        else if (cc == 95) { d = 63; }
-        if (d < 0 || d >= base) { d = 0; }
+/* ---- arithmetic -----------------------------------------------------------
+ * bash's integers are intmax_t: 64 bits, wrapping on overflow, / and %
+ * truncating toward zero. The emitter compiles an expression whose text is
+ * known at compile time straight to i64 instructions; what only exists at run
+ * time - a variable's value that is not a plain number (`r=a; a=7; $(( r + 1 ))`
+ * is 8), an expression with a $-expansion in it (expanded first and then parsed,
+ * so `e="1 + 2"; $(( $e * 2 ))` is 5) - goes through rt_arith below.
+ *
+ * An error (division by 0, a negative exponent, a syntax error, a digit too
+ * great for its base) is reported on the standard error channel and raises
+ * arith_err; the expression answers 0 and the emitter's check after it abandons
+ * the command, as bash does. Twin of arEval and its helpers in
+ * bash-interpreter.abnf. */
+int arith_err;
+
+int rt_arith_fail(char *expr, char *msg, char *tok)
+{
+    int saved;
+    arith_err = 1;
+    saved = sink_out;
+    sink_out = sink_err;
+    rt_prints("bash: ");
+    if (expr[0] != 0) { rt_prints(expr); rt_prints(": "); }
+    rt_prints(msg);
+    if (tok[0] != 0) { rt_prints(" (error token is \""); rt_prints(tok); rt_prints("\")"); }
+    rt_prints("\n");
+    sink_out = saved;
+    return 0;
+}
+
+/* / and %: C's truncating division, plus the two cases the hardware leaves
+ * undefined. A zero divisor is bash's "division by 0"; LONG_MIN / -1 wraps back
+ * to LONG_MIN and LONG_MIN % -1 is 0, which is what bash 5.3 prints. */
+long rt_idiv(long a, long b, int mod)
+{
+    if (b == 0) {
+        rt_arith_fail(empty, "division by 0", empty);
+        return 0;
+    }
+    if (b == -1) return mod != 0 ? 0 : 0 - a;
+    return mod != 0 ? a % b : a / b;
+}
+
+/* ** by repeated squaring, wrapping like every product. */
+long rt_ipow(long b, long e)
+{
+    long r = 1;
+    if (e < 0) {
+        rt_arith_fail(empty, "exponent less than 0", empty);
+        return 0;
+    }
+    while (e > 0) {
+        if ((e & 1) != 0) r = r * b;
+        e = e >> 1;
+        if (e > 0) b = b * b;
+    }
+    return r;
+}
+
+/* The evaluator's state. A variable's value is evaluated by a NESTED rt_arith,
+ * which saves and restores ar_s / ar_len / ar_p around itself. */
+char *ar_s;        /* the expression text                                      */
+int ar_len;
+int ar_p;          /* the cursor                                               */
+int ar_bad;        /* an error was reported: every level unwinds with 0        */
+int ar_noeval;     /* > 0 in an operand && / || / ?: skips: no store, no error */
+int ar_depth;      /* nesting through variables' values                        */
+
+long ar_comma(void);
+long ar_assign(void);
+long ar_unary(void);
+
+int ar_at(int d)
+{
+    int i = ar_p + d;
+    if (i < 0 || i >= ar_len) return 0;
+    return (int)(unsigned char)ar_s[i];
+}
+
+int ar_ws(void)
+{
+    while (ar_at(0) == 32 || ar_at(0) == 9 || ar_at(0) == 10) ar_p = ar_p + 1;
+    return 0;
+}
+
+int ar_idch(int c, int first)
+{
+    if ((c >= 97 && c <= 122) || (c >= 65 && c <= 90) || c == 95) return 1;
+    if (first == 0 && c >= 48 && c <= 57) return 1;
+    return 0;
+}
+
+/* An error at the cursor: bash names the rest of the expression as the token. */
+long ar_err(char *msg)
+{
+    if (ar_bad == 0) {
+        ar_bad = 1;
+        rt_arith_fail(ar_s, msg, &ar_s[ar_p]);
+    }
+    return 0;
+}
+
+/* A numeric constant: 0x / 0X hexadecimal, a leading 0 octal, BASE#DIGITS with
+ * a base from 2 to 64, else decimal. bash scans every letter, digit, @ and _
+ * into the constant, so `12abc` is "value too great for base", not 12. The
+ * digit alphabet is base dependent above 36: a-z are 10..35, A-Z 36..61, @ 62
+ * and _ 63, while at 36 and below the two letter cases coincide. */
+long ar_number(void)
+{
+    long base = 10;
+    long v = 0;
+    int start = ar_p;
+    if (ar_at(0) == 48 && (ar_at(1) == 120 || ar_at(1) == 88)) {
+        base = 16;
+        ar_p = ar_p + 2;
+    } else if (ar_at(0) == 48) {
+        base = 8;
+    }
+    while (1) {
+        int c = ar_at(0);
+        long d = -1;
+        if (c == 35) {
+            if (v < 2 || v > 64) {
+                ar_p = start;
+                return ar_err("invalid arithmetic base");
+            }
+            base = v;
+            v = 0;
+            ar_p = ar_p + 1;
+            continue;
+        }
+        if (c >= 48 && c <= 57) d = c - 48;
+        else if (c >= 97 && c <= 122) d = c - 87;
+        else if (c >= 65 && c <= 90) d = base > 36 ? c - 29 : c - 55;
+        else if (c == 64) d = 62;
+        else if (c == 95) d = 63;
+        else break;
+        if (d >= base) {
+            ar_p = start;
+            return ar_err("value too great for base");
+        }
         v = v * base + d;
-        i = i + 1;
+        ar_p = ar_p + 1;
+    }
+    return v;
+}
+
+/* The name at the cursor, cursor advanced past it. */
+char *ar_name(void)
+{
+    int s = ar_p;
+    while (ar_idch(ar_at(0), ar_p == s ? 1 : 0) != 0) ar_p = ar_p + 1;
+    return rt_substr(ar_s, s, ar_p - s);
+}
+
+/* The key an indexed subscript names: a negative index counts back from one past
+ * the highest index (`${a[-1]}` is the last element). */
+char *ar_key(char *nm, long k)
+{
+    if (k < 0) k = (long)rt_arr_nextidx(nm) + k;
+    return rt_int2str(k);
+}
+
+/* [ EXPR ] after a name, or 0 when the name has no subscript. */
+char *ar_subscript(char *nm)
+{
+    long k;
+    if (ar_at(0) != 91) return 0;
+    ar_p = ar_p + 1;
+    k = ar_comma();
+    ar_ws();
+    if (ar_at(0) != 93) { ar_err("missing `]'"); return 0; }
+    ar_p = ar_p + 1;
+    return ar_key(nm, k);
+}
+
+/* A variable's value as an operand: empty is 0, anything else is itself an
+ * expression (`x=010` is 8, `x="1+2"` is 3, `r=a` is a's value). */
+long ar_value(char *nm, char *key)
+{
+    char *v;
+    if (ar_noeval > 0) return 0;
+    if (key != 0) v = rt_sc_get(nm, key);
+    else if (rt_arr_count(nm) > 0) v = rt_arr_get(nm, "0");
+    else v = rt_getvar_byname(nm);
+    if (v[0] == 0) return 0;
+    if (ar_depth >= 1024) return ar_err("expression recursion level exceeded");
+    return rt_arith(v);
+}
+
+long ar_store(char *nm, char *key, long v)
+{
+    if (ar_noeval > 0) return v;
+    if (key != 0) rt_arr_set(nm, key, rt_int2str(v));
+    else if (rt_arr_count(nm) > 0) rt_arr_set(nm, "0", rt_int2str(v));
+    else rt_setvar_byname(nm, rt_int2str(v));
+    return v;
+}
+
+/* One binary operator, shared by `a OP b` and `a OP= b`. */
+long ar_apply(int op, long a, long b)
+{
+    if (op == 43) return a + b;
+    if (op == 45) return a - b;
+    if (op == 42) return a * b;
+    if (op == 47 || op == 37) {
+        if (b == 0) {
+            if (ar_noeval > 0) return 0;
+            return ar_err("division by 0");
+        }
+        return rt_idiv(a, b, op == 37 ? 1 : 0);
+    }
+    if (op == 60) return a << (b & 63);
+    if (op == 62) return a >> (b & 63);
+    if (op == 38) return a & b;
+    if (op == 94) return a ^ b;
+    if (op == 124) return a | b;
+    return b;
+}
+
+long ar_primary(void)
+{
+    long v;
+    int c;
+    ar_ws();
+    c = ar_at(0);
+    if (c == 40) {
+        ar_p = ar_p + 1;
+        v = ar_comma();
+        ar_ws();
+        if (ar_at(0) != 41) return ar_err("missing `)'");
+        ar_p = ar_p + 1;
+        return v;
+    }
+    if (c >= 48 && c <= 57) return ar_number();
+    if (ar_idch(c, 1) != 0) {
+        char *nm = ar_name();
+        char *key = ar_subscript(nm);
+        if (ar_bad != 0) return 0;
+        v = ar_value(nm, key);
+        ar_ws();
+        if ((ar_at(0) == 43 && ar_at(1) == 43) || (ar_at(0) == 45 && ar_at(1) == 45)) {
+            ar_store(nm, key, ar_at(0) == 43 ? v + 1 : v - 1);
+            ar_p = ar_p + 2;
+        }
+        return v;
+    }
+    return ar_err("arithmetic syntax error: operand expected");
+}
+
+long ar_unary(void)
+{
+    int c;
+    ar_ws();
+    c = ar_at(0);
+    if (c == 33 && ar_at(1) != 61) { ar_p = ar_p + 1; return ar_unary() == 0 ? 1 : 0; }
+    if (c == 126) { ar_p = ar_p + 1; return ~ar_unary(); }
+    if ((c == 43 || c == 45) && ar_at(1) == c) {
+        int save = ar_p;
+        ar_p = ar_p + 2;
+        ar_ws();
+        if (ar_idch(ar_at(0), 1) != 0) {
+            char *nm = ar_name();
+            char *key = ar_subscript(nm);
+            long v;
+            if (ar_bad != 0) return 0;
+            v = ar_value(nm, key);
+            return ar_store(nm, key, c == 43 ? v + 1 : v - 1);
+        }
+        ar_p = save;
+    }
+    if (c == 45) { ar_p = ar_p + 1; return 0 - ar_unary(); }
+    if (c == 43) { ar_p = ar_p + 1; return ar_unary(); }
+    return ar_primary();
+}
+
+long ar_pow(void)
+{
+    long b = ar_unary();
+    long e;
+    ar_ws();
+    if (ar_at(0) == 42 && ar_at(1) == 42) {
+        ar_p = ar_p + 2;
+        e = ar_pow();
+        if (e < 0) {
+            if (ar_noeval > 0) return 0;
+            return ar_err("exponent less than 0");
+        }
+        return rt_ipow(b, e);
+    }
+    return b;
+}
+
+long ar_mul(void)
+{
+    long v = ar_pow();
+    while (ar_bad == 0) {
+        int c;
+        ar_ws();
+        c = ar_at(0);
+        if (!((c == 42 && ar_at(1) != 42 && ar_at(1) != 61) || ((c == 47 || c == 37) && ar_at(1) != 61))) break;
+        ar_p = ar_p + 1;
+        v = ar_apply(c, v, ar_pow());
+    }
+    return v;
+}
+
+long ar_add(void)
+{
+    long v = ar_mul();
+    while (ar_bad == 0) {
+        int c;
+        ar_ws();
+        c = ar_at(0);
+        if (!((c == 43 || c == 45) && ar_at(1) != c && ar_at(1) != 61)) break;
+        ar_p = ar_p + 1;
+        v = ar_apply(c, v, ar_mul());
+    }
+    return v;
+}
+
+long ar_shift(void)
+{
+    long v = ar_add();
+    while (ar_bad == 0) {
+        int c;
+        ar_ws();
+        c = ar_at(0);
+        if (!((c == 60 || c == 62) && ar_at(1) == c && ar_at(2) != 61)) break;
+        ar_p = ar_p + 2;
+        v = ar_apply(c, v, ar_add());
+    }
+    return v;
+}
+
+long ar_cmp(void)
+{
+    long v = ar_shift();
+    while (ar_bad == 0) {
+        int c;
+        int eq;
+        long r;
+        ar_ws();
+        c = ar_at(0);
+        if (!((c == 60 || c == 62) && ar_at(1) != c)) break;
+        eq = ar_at(1) == 61 ? 1 : 0;
+        ar_p = ar_p + 1 + eq;
+        r = ar_shift();
+        if (c == 60) v = (eq != 0 ? v <= r : v < r) ? 1 : 0;
+        else v = (eq != 0 ? v >= r : v > r) ? 1 : 0;
+    }
+    return v;
+}
+
+long ar_eq(void)
+{
+    long v = ar_cmp();
+    while (ar_bad == 0) {
+        int c;
+        long r;
+        ar_ws();
+        c = ar_at(0);
+        if (!((c == 61 || c == 33) && ar_at(1) == 61)) break;
+        ar_p = ar_p + 2;
+        r = ar_cmp();
+        v = ((v == r) == (c == 61)) ? 1 : 0;
+    }
+    return v;
+}
+
+/* & ^ | : one loop each, the operator byte and the two it must not be part of. */
+long ar_bit(int lvl)
+{
+    long v;
+    int op = lvl == 0 ? 38 : (lvl == 1 ? 94 : 124);
+    v = lvl == 0 ? ar_eq() : ar_bit(lvl - 1);
+    while (ar_bad == 0) {
+        ar_ws();
+        if (!(ar_at(0) == op && ar_at(1) != op && ar_at(1) != 61)) break;
+        ar_p = ar_p + 1;
+        v = ar_apply(op, v, lvl == 0 ? ar_eq() : ar_bit(lvl - 1));
+    }
+    return v;
+}
+
+/* && and ||: the right operand is parsed either way, but evaluated only when
+ * the left one did not already decide the answer. */
+long ar_logic(int isOr)
+{
+    long v = isOr != 0 ? ar_logic(0) : ar_bit(2);
+    while (ar_bad == 0) {
+        int op = isOr != 0 ? 124 : 38;
+        int skip;
+        long r;
+        ar_ws();
+        if (!(ar_at(0) == op && ar_at(1) == op)) break;
+        ar_p = ar_p + 2;
+        skip = (isOr != 0) ? (v != 0) : (v == 0);
+        if (skip != 0) ar_noeval = ar_noeval + 1;
+        r = isOr != 0 ? ar_logic(0) : ar_bit(2);
+        if (skip != 0) ar_noeval = ar_noeval - 1;
+        v = (isOr != 0) ? ((v != 0 || r != 0) ? 1 : 0) : ((v != 0 && r != 0) ? 1 : 0);
+    }
+    return v;
+}
+
+long ar_cond(void)
+{
+    long c = ar_logic(1);
+    long a;
+    long b;
+    ar_ws();
+    if (ar_bad != 0 || ar_at(0) != 63) return c;
+    ar_p = ar_p + 1;
+    if (c == 0) ar_noeval = ar_noeval + 1;
+    a = ar_comma();
+    if (c == 0) ar_noeval = ar_noeval - 1;
+    ar_ws();
+    if (ar_bad != 0) return 0;
+    if (ar_at(0) != 58) return ar_err("`:' expected for conditional expression");
+    ar_p = ar_p + 1;
+    if (c != 0) ar_noeval = ar_noeval + 1;
+    b = ar_cond();
+    if (c != 0) ar_noeval = ar_noeval - 1;
+    return c != 0 ? a : b;
+}
+
+/* NAME[SUB] OP= EXPR, recognised by a scan that evaluates nothing, so the
+ * subscript's side effects (a[i++]=x) happen exactly once. */
+long ar_assign(void)
+{
+    int save;
+    int q;
+    int op = 0;
+    int oplen = 0;
+    ar_ws();
+    save = ar_p;
+    if (ar_idch(ar_at(0), 1) != 0) {
+        int depth = 0;
+        q = ar_p;
+        while (q < ar_len && ar_idch((int)(unsigned char)ar_s[q], 0) != 0) q = q + 1;
+        if (q < ar_len && ar_s[q] == 91) {
+            while (q < ar_len) {
+                if (ar_s[q] == 91) depth = depth + 1;
+                if (ar_s[q] == 93) { depth = depth - 1; if (depth == 0) break; }
+                q = q + 1;
+            }
+            q = q + 1;
+        }
+        while (q < ar_len && (ar_s[q] == 32 || ar_s[q] == 9 || ar_s[q] == 10)) q = q + 1;
+        ar_p = q;
+        if (ar_at(0) == 61 && ar_at(1) != 61) { op = 61; oplen = 1; }
+        else if (ar_at(1) == 61 && (ar_at(0) == 43 || ar_at(0) == 45 || ar_at(0) == 42 || ar_at(0) == 47
+                 || ar_at(0) == 37 || ar_at(0) == 38 || ar_at(0) == 94 || ar_at(0) == 124)) {
+            op = ar_at(0);
+            oplen = 2;
+        } else if ((ar_at(0) == 60 || ar_at(0) == 62) && ar_at(1) == ar_at(0) && ar_at(2) == 61) {
+            op = ar_at(0);
+            oplen = 3;
+        }
+        ar_p = save;
+    }
+    if (op != 0) {
+        char *nm = ar_name();
+        char *key = ar_subscript(nm);
+        long v;
+        if (ar_bad != 0) return 0;
+        ar_ws();
+        ar_p = ar_p + oplen;
+        v = ar_assign();
+        if (ar_bad != 0) return 0;
+        if (op != 61) v = ar_apply(op, ar_value(nm, key), v);
+        if (ar_bad != 0) return 0;
+        return ar_store(nm, key, v);
+    }
+    return ar_cond();
+}
+
+long ar_comma(void)
+{
+    long v = ar_assign();
+    while (ar_bad == 0) {
+        ar_ws();
+        if (ar_at(0) != 44) break;
+        ar_p = ar_p + 1;
+        v = ar_assign();
+    }
+    return v;
+}
+
+/* Evaluate the whole string. An empty expression is 0, as in bash. */
+long rt_arith(char *s)
+{
+    char *saveS = ar_s;
+    int saveLen = ar_len;
+    int saveP = ar_p;
+    long v = 0;
+    ar_s = s;
+    ar_len = rt_strlen(s);
+    ar_p = 0;
+    ar_depth = ar_depth + 1;
+    ar_ws();
+    if (ar_p < ar_len) {
+        v = ar_comma();
+        ar_ws();
+        if (ar_bad == 0 && ar_p < ar_len) {
+            if (ar_at(0) == 41) ar_err("arithmetic syntax error: invalid arithmetic operator");
+            else ar_err("arithmetic syntax error in expression");
+        }
+    }
+    ar_depth = ar_depth - 1;
+    ar_s = saveS;
+    ar_len = saveLen;
+    ar_p = saveP;
+    if (ar_bad != 0) {
+        v = 0;
+        if (ar_depth == 0) { ar_bad = 0; ar_noeval = 0; }
     }
     return v;
 }
@@ -1415,40 +1916,48 @@ char *rt_pad(char *s, int w, int left, int zero) {
     return v;
 }
 
-/* rt_radix: printf's %x / %X / %o / %u - the operand as an UNSIGNED value in
- * `base`, with the # prefix when `alt` and the value is not zero.
+/* rt_radix: printf's %x / %X / %o / %u - the operand as an UNSIGNED 64-bit
+ * value in `base`, with the # prefix when `alt` and the value is not zero.
  *
- * THE WIDTH IS 32 BITS, the whole engine's width: `printf '%x' -1` answers
- * ffffffff where bash 5.3 answers ffffffffffffffff. The interpreter's radixStr
- * does the same, so the two halves agree; nothing asserts the negative case.
- *
- * There is no 64-bit or unsigned type in this C subset, so the unsigned value
- * is carried as two 16-bit halves and divided long-hand: with r < base <= 16,
- * r * 65536 + lo stays below 2^20 and every intermediate fits in an int. */
+ * The C subset has no unsigned 64-bit type, so the value is carried as four
+ * 16-bit limbs and divided long-hand: with r < base <= 16, r * 65536 + limb
+ * stays below 2^20. */
 char *rt_radix(char *s, int base, int upper, int alt) {
-    int n = rt_str2int(s);
-    int hi = (n >> 16) & 65535;
-    int lo = n & 65535;
-    char tmp[40];
-    int t = 39;
+    long n = rt_str2int(s);
+    int lb[4];
+    char tmp[72];
+    int t = 71;
     char *dst;
     int d;
     int j;
+    int k;
     int pre = 0;
-    if (hi == 0 && lo == 0) {
+    int nz = 0;
+    k = 0;
+    while (k < 4) {
+        lb[3 - k] = (int)((n >> (16 * k)) & 65535);
+        if (lb[3 - k] != 0) nz = 1;
+        k = k + 1;
+    }
+    if (nz == 0) {
         dst = rt_bump(2);
         dst[0] = 48;
         dst[1] = 0;
         return dst;
     }
-    while (hi != 0 || lo != 0) {
-        int r = hi % base;
-        int cur;
+    while (nz != 0) {
+        int r = 0;
         int dg;
-        hi = hi / base;
-        cur = r * 65536 + lo;
-        dg = cur % base;
-        lo = cur / base;
+        nz = 0;
+        k = 0;
+        while (k < 4) {
+            int cur = r * 65536 + lb[k];
+            lb[k] = cur / base;
+            r = cur % base;
+            if (lb[k] != 0) nz = 1;
+            k = k + 1;
+        }
+        dg = r;
         if (dg < 10) tmp[t] = (char)(48 + dg);
         else if (upper != 0) tmp[t] = (char)(55 + dg);
         else tmp[t] = (char)(87 + dg);
@@ -1456,7 +1965,7 @@ char *rt_radix(char *s, int base, int upper, int alt) {
     }
     if (alt != 0 && base == 8) pre = 1;
     if (alt != 0 && base == 16) pre = 2;
-    dst = rt_bump(pre + (39 - t) + 1);
+    dst = rt_bump(pre + (71 - t) + 1);
     d = 0;
     if (pre == 1) { dst[0] = 48; d = 1; }
     if (pre == 2) {
@@ -1465,7 +1974,7 @@ char *rt_radix(char *s, int base, int upper, int alt) {
         d = 2;
     }
     j = t + 1;
-    while (j <= 39) { dst[d] = tmp[j]; d = d + 1; j = j + 1; }
+    while (j <= 71) { dst[d] = tmp[j]; d = d + 1; j = j + 1; }
     dst[d] = 0;
     return dst;
 }

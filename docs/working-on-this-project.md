@@ -792,8 +792,7 @@ same-named nested types apart.
 reproducible here and `StackTrace.empty` would be a divergence of a different
 shape; an uncaught `__dexc` in the compiler half prints `bad` rather than
 `FormatException: bad` (the handler is `runJSModule` in the shared `abnf/jsrt.go`).
-**Bash** the compiler's attribute scope is LEXICAL where bash's is dynamic;
-`%x/%o/%u` of a negative renders 32-bit where bash is 64-bit; `printf '%d' 0x1f`
+**Bash** the compiler's attribute scope is LEXICAL where bash's is dynamic; `printf '%d' 0x1f`
 is 0 where bash says 31, because bash routes operands through its arithmetic
 evaluator and the compiler has none at runtime; `readonly` is not enforced;
 `%e %f %g %a` need a double in `bash-rt.c`, which has none.
@@ -1007,6 +1006,8 @@ those read variable and call NAMES off the module.
 runtime.metajs            <- csharp go dart java php kotlin ruby python swift metajs-rt lua
                              (lua for the hook-free exact decimal only)
 regex.js                  <- js python ruby kotlin java dart
+int64.js                  <- interp-core.js, bash interpreter (the exact {h, l} 64-bit
+                             pair; bash's arithmetic is intmax_t)
 lua-rt.metajs             <- imports lua-strlib.js and runtime.metajs ONLY
 lua-strlib.js             <- lua-rt.metajs, lua interpreter (Lua patterns and
                              string.format; Go twins: abnf/jsrtluastr.go,
