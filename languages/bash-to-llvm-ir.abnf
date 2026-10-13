@@ -140,7 +140,7 @@ CfDyn       <~~ push(mkArDyn(pop())) ~~> = CfHasExp CfDynWord ;
 CfDynWord   <~~ push(mkNsWord(takeAll())) ~~> = CfDynSeg { CfDynSeg } ;
 CfDynSeg    = DqSeg | ExpSeg | ArDynParen | CfDynBare ;
 CfDynBare   <~~ push(makeConst(up.in)) ~~> = !@+"()$`\";" ;
-CfSt        = WsNL :whitespace(Whitespace) ArList :whitespace() WsNL ;
+CfSt        <~~ arClaim(up.start, up.pos); push(pop()) ~~> = WsNL :whitespace(Whitespace) ArList :whitespace() WsNL ;
 CfZero      <~~ push(mkNum("0")) ~~> = WsNL ;
 CfOne       <~~ push(mkNum("1")) ~~> = WsNL ;
 
@@ -212,7 +212,7 @@ BraceGroup  <~~ push(makeGroupR(takeAll())) ~~> = "{" BraceKwEnd CompoundList "}
 // (( EXPR )): a text holding an expansion is expanded first and then evaluated, exactly as
 // $(( EXPR )) is. Twin of ArithCmd in bash-interpreter.abnf.
 ArithCmd    = ArithCmdDyn | ArithCmdSt | ArithCmdRaw ;
-ArithCmdSt  <~~ push(makeArithCmd(pop())) ~~> = "((" :whitespace(Whitespace) ArList "))" ;
+ArithCmdSt  <~~ arClaim(up.start + 2, up.pos - 2); push(makeArithCmd(pop())) ~~> = "((" :whitespace(Whitespace) ArList "))" ;
 ArithCmdDyn <~~ push(makeArithCmd(mkArDyn(pop()))) ~~> = "((" :whitespace() ArHasExp ArDynWord "))" ;
 // A text the arithmetic grammar rejects (`(( 1 + ))`) is still an arithmetic command: the
 // run-time evaluator reports bash's syntax error and the command fails with status 1.
@@ -233,10 +233,11 @@ LetItem     = RedirItem | NotIoRedir LetArg ;
 // arguments x=1 + 2*2 (x=1, then a syntax error). A word with no expansion is parsed here
 // instead, unless the next word would read as the rest of its expression (`let c=1 + d=2`,
 // `let x=0 || y`): LetIsWord decides.
-LetArg      = LetWord | LetDq | LetSq | ArAssign ;
+LetArg      = LetWord | LetDq | LetSq | LetAr ;
+LetAr       <~~ arClaim(up.start, up.pos); push(pop()) ~~> = ArAssign ;
 LetWord     <~~ push({letws: takeAll()}) ~~> = LetIsWord CWord ;
-LetDq       = '"' :whitespace(Whitespace) ArList '"' ;
-LetSq       = "'" :whitespace(Whitespace) ArList "'" ;
+LetDq       <~~ arClaim(up.start + 1, up.pos - 1); push(pop()) ~~> = '"' :whitespace(Whitespace) ArList '"' ;
+LetSq       <~~ arClaim(up.start + 1, up.pos - 1); push(pop()) ~~> = "'" :whitespace(Whitespace) ArList "'" ;
 
 // local / declare / typeset / export / readonly [-flags] NAME[=WORD] ...
 // Spelled as its own production (rather than an ordinary command with word arguments)
@@ -423,7 +424,7 @@ BackSub     <~~ push(mkCmdSub(pop())) ~~>
 // a word, expanded, and read by rt_arith at run time - bash expands first and parses after,
 // so e="1 + 2"; $(( $e * 2 )) is 5. Twin of ArithExp in bash-interpreter.abnf.
 ArithExp    = ArithDyn | ArithSt | ArithRaw ;
-ArithSt     <~~ push(mkArith(pop())) ~~> = "$((" :whitespace(Whitespace) ArList "))" ;
+ArithSt     <~~ arClaim(up.start + 3, up.pos - 2); push(mkArith(pop())) ~~> = "$((" :whitespace(Whitespace) ArList "))" ;
 ArithDyn    <~~ push(mkArith(mkArDyn(pop()))) ~~> = "$((" :whitespace() ArHasExp ArDynWord "))" ;
 ArithRaw    <~~ push(mkArith(mkArDyn(pop()))) ~~> = "$((" :whitespace() ArDynWord "))" ;
 ArDynWord   <~~ push(mkNsWord(takeAll())) ~~> = { ArDynSeg } ;
@@ -460,7 +461,8 @@ PeXfOp      <~~ push({xf: up.in}) ~~> = "Q" | "E" | "P" | "A" | "K" | "a" | "k" 
 
 // NAME or NAME[SUBSCRIPT] - the subscript is a word, read as an arithmetic index for an
 // indexed array and as a literal key for an associative one. "@" and "*" mean the whole array.
-PeTarget    = PeIdxRef | PeName ;
+// peTgt: the target as written, the prefix of an arithmetic error in ${v:off} (ArOff).
+PeTarget    <~~ peTgt = arSrc(up.start, up.pos) ~~> = PeIdxRef | PeName ;
 PeIdxRef    <~~ push({hasIdx: 1}) ~~> = PeName "[" IdxWord "]" ;
 IdxWord     <~~ push(mkWord(takeAll())) ~~> = { IdxSeg } ;
 IdxSeg      = SqSeg | DqSeg | ExpSeg | EscSeg | IdxBare ;
@@ -513,7 +515,7 @@ RepAnsiBody <~~ push(ansiWord(repEscape(ansiC(up.in)))) ~~> = { AnsiEsc | AnsiLi
 // Twin of PeSubstrForm in bash-interpreter.abnf; see there.
 PeSubstrForm <~~ push({pe: "substr"}) ~~> = PeTarget ":" :whitespace(Whitespace) ArOff [ PeSubLen ] :whitespace() PeArPad ;
 PeSubLen    = ":" ArOff ;
-ArOff       = ArList | ArEmpty ;
+ArOff       <~~ arClaim(up.start, arPastWs(up.pos)); push(arIn(peTgt + ": ", pop())) ~~> = ArList | ArEmpty ;
 ArEmpty     <~~ push(mkNum("0")) ~~> = ArEndHere ;
 PeArPad     = { PeBlank } ;
 PeBlank     = @+" \t" ;
@@ -548,7 +550,7 @@ ArgDigit    = "0"..."9" ;
 
 ArList      <~~ push(foldComma(takeAll())) ~~> = ArAssign { "," ArAssign } ;
 ArAssign    = ArAssignForm | ArCond ;
-ArAssignForm <~~ push(mkArAssign(takeAll())) ~~> = ArLhs ArAsgOp ArAssign ;
+ArAssignForm <~~ push(mkArAssign(takeAll(), up.pos)) ~~> = ArLhs ArAsgOp ArAssign ;
 // NAME[SUBSCRIPT] is an array element, an operand and an assignment target alike. Twin of
 // ArLhs / ArElem in bash-interpreter.abnf.
 ArLhs       = ArLhsElem | ArLhsName ;
@@ -580,8 +582,8 @@ ArShiftOp   <~~ push({op: up.in}) ~~> = "<<" | ">>" ;
 ArAdd       <~~ push(foldBin(takeAll())) ~~> = ArMul { ArAddOp ArMul } ;
 ArAddOp     <~~ push({op: up.in}) ~~> = "+" NotPlus | "-" NotMinus ;
 ArMul       <~~ push(foldBin(takeAll())) ~~> = ArPow { ArMulOp ArPow } ;
-ArMulOp     <~~ push({op: up.in}) ~~> = "*" NotStar | "/" | "%" ;
-ArPow       <~~ push(foldPow(takeAll())) ~~> = ArUnary [ ArPowOp ArPow ] ;
+ArMulOp     <~~ push({op: up.in, at: up.pos}) ~~> = "*" NotStar | "/" | "%" ;
+ArPow       <~~ push(foldPow(takeAll(), up.pos)) ~~> = ArUnary [ ArPowOp ArPow ] ;
 ArPowOp     <~~ push({op: up.in}) ~~> = "**" ;
 
 ArUnary     = ArPreInc | ArNeg | ArPos | ArNot | ArBnot | ArPrimary ;
@@ -1412,8 +1414,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtLetFields = rtDecl("rt_letfields", 3, [1, 0])
     var rtPcheck = rtDecl("rt_pcheck", true, [1, 0, 1, 1])
     var rtSubErr = rtDecl("rt_suberr", false, [0, 0])
-    var rtIdiv = rtDecl("rt_idiv", 3, [3, 3, 0])
-    var rtIpow = rtDecl("rt_ipow", 3, [3, 3])
+    var rtIdiv = rtDecl("rt_idiv", 3, [3, 3, 0, 1, 1])
+    var rtIpow = rtDecl("rt_ipow", 3, [3, 3, 1, 1])
     // An i32 as a decimal string, and a decimal string read back as an i32 - the status,
     // counts and lengths that are not arithmetic.
     function i2s(b, v) { return b.NewCall(rtInt2str, b.NewSExt(v, i64)) }
@@ -2512,10 +2514,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return {b: b, v: (pre == 1) ? nv : v}
         }
     }
-    function mkArAssign(items) {
+    function mkArAssign(items, at) {
         var lhs = items[0]
         var aop = items[1].aop
         var t = items[2]
+        var rc = arRecLa(at)
         return function(b) {
             var rk = arLhsKey(b, lhs)
             b = rk.b
@@ -2525,7 +2528,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b = r.b
             var nv = r.v
             if (aop != "=") {
-                var res = arOp(b, aop.slice(0, aop.length - 1), cur, r.v, r.lit)
+                var res = arOp(b, aop.slice(0, aop.length - 1), cur, r.v, r.lit, rc)
                 b = res.b
                 nv = res.v
             }
@@ -2557,13 +2560,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return {b: b, v: v}
         }
     }
-    function foldPow(items) {
+    function foldPow(items, at) {
         if (items.length == 1) { return items[0] }
         var bt = items[0], et = items[2]
+        var rc = arRecLa(at)
         return function(b) {
             var rb = bt(b)
             var re = et(rb.b)
-            return {b: re.b, v: re.b.NewCall(rtIpow, [rb.v, re.v])}
+            var bb = re.b
+            return {b: bb, v: bb.NewCall(rtIpow, [rb.v, re.v, rc.ok ? gepStr(bb, rc.expr) : emptyPtr(bb),
+                                                  rc.ok ? gepStr(bb, rc.tok) : emptyPtr(bb)])}
         }
     }
     // A name's value is itself an expression (x=010 is 8, r=a reads a), so rt_arith reads it.
@@ -2605,7 +2611,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // operator) other than 0 has neither, so it divides inline. A shift count is taken
     // modulo 64, which is what bash's own shift instruction does on both arm64 and x86-64;
     // an unmasked count is poison in LLVM.
-    function arOp(b, op, l, r, rlit) {
+    function arOp(b, op, l, r, rlit, rec) {
         if (op == "+") { return {b: b, v: b.NewAdd(l, r)} }
         if (op == "-") { return {b: b, v: b.NewSub(l, r)} }
         if (op == "*") { return {b: b, v: b.NewMul(l, r)} }
@@ -2613,7 +2619,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return {b: b, v: (op == "%") ? b.NewSRem(l, r) : b.NewSDiv(l, r)}
         }
         if (op == "/" || op == "%") {
-            return {b: b, v: b.NewCall(rtIdiv, [l, r, (op == "%") ? one : zero])}
+            var known = rec != undefined && rec.ok
+            return {b: b, v: b.NewCall(rtIdiv, [l, r, (op == "%") ? one : zero,
+                known ? gepStr(b, rec.expr) : emptyPtr(b), known ? gepStr(b, rec.tok) : emptyPtr(b)])}
         }
         var pred = null
         if (op == "<") { pred = llvm.enum.IPredSLT }
@@ -2634,8 +2642,94 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // && and || branch around an operand the left side already decided, so `z && (z = 9)`
     // leaves z alone; the result is 0 or 1.
+    // WHERE A STATIC OPERATOR THAT CAN FAIL STANDS, FOR ITS ERROR TEXT. bash names the
+    // expression and an error token: for / and % the text from the divisor on - `(( v = 1/0 ))`
+    // reports `((: v = 1/0 : division by 0 (error token is "0 ")` - and for ** and /= %= the
+    // token after the right operand, or its last token at the end (arLaTok). An operator
+    // records an offset (arRec: after / or %; arRecLa: the operand's end); the enclosing
+    // $(( )), (( )), let argument or for (( )) part fills in the text (arClaim). In any other
+    // context the message stays bare. arPfx is the command's own prefix ("((: ", "let: ",
+    // "[[: "), which a variable's value evaluated inside it reports too.
+    // Twin of arRec / arClaim in bash-interpreter.abnf.
+    var arRecs = []
+    var peTgt = ""
+    // A snippet (eval, trap, a here-document body) is parsed apart from the program, and its
+    // offsets are its own: arSrc reads them from its text, not the program's.
+    var arSnip = ""
+    var arInSnip = false
+    function arSrc(from, to) { return arInSnip ? arSnip.slice(from, to) : c.srcSlice(from, to) }
+    function arCompile(text, rule, claimAll) {
+        var svS = arSnip, svIn = arInSnip, svR = arRecs
+        arSnip = text
+        arInSnip = true
+        arRecs = []
+        var t = c.compile(c.parseFrom(c.agrammar, text, rule)).stack[0]
+        if (claimAll) { arClaimText(text, 0, text.length) }
+        arSnip = svS
+        arInSnip = svIn
+        arRecs = svR
+        return t
+    }
+    function arRec(at) { var r = {ok: false, la: false, at: at, expr: "", tok: ""}; arRecs.push(r); return r }
+    function arRecLa(at) { var r = arRec(at); r.la = true; return r }
+    function arIsWs(ch) { return ch == " " || ch == "\t" || ch == "\n" }
+    function arLtrim(t) {
+        var i = 0
+        while (i < t.length && arIsWs(t.charAt(i))) { i = i + 1 }
+        return t.slice(i)
+    }
+    function arLaTok(t, p) {
+        var rest = arLtrim(t.slice(p))
+        if (rest != "") { return rest }
+        var q = p
+        while (q > 0 && arIsWs(t.charAt(q - 1))) { q = q - 1 }
+        var e = q
+        while (q > 0 && arIdCh(t.charCodeAt(q - 1), false)) { q = q - 1 }
+        if (q == e && q > 0) { q = q - 1 }
+        return t.slice(q)
+    }
+    // ${v:off}'s expression runs up to the ":" or "}", blanks included.
+    function arPastWs(p) {
+        var q = p
+        while (arIsWs(arSrc(q, q + 1))) { q = q + 1 }
+        return q
+    }
+    function arClaim(from, to) { arClaimText(arSrc(from, to), from, to) }
+    function arClaimText(text, from, to) {
+        var expr = arLtrim(text)
+        var keep = []
+        var i
+        for (i = 0; i < arRecs.length; i++) {
+            var r = arRecs[i]
+            if (r.at >= from && r.at <= to) {
+                r.ok = true
+                r.expr = expr
+                r.tok = r.la ? arLaTok(text, r.at - from) : arLtrim(text.slice(r.at - from))
+            }
+            else if (r.at > to) { keep.push(r) }
+        }
+        arRecs = keep
+    }
+    function arIdCh(cc, first) {
+        if ((cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90) || cc == 95) { return true }
+        return !first && cc >= 48 && cc <= 57
+    }
+    // The prefix arithmetic errors report while t runs ("((: ", "let: ", "[[: ", "s: " for
+    // ${s:off}), which ar_pfx in bash-rt.c reads. Twin of arIn in bash-interpreter.abnf.
+    var gArPfx = rtGlobal("ar_pfx_s", i8ptr)
+    function arIn(pfx, t) {
+        return function(b) {
+            b.NewStore(gepStr(b, pfx), gArPfx)
+            var r = t(b)
+            r.b.NewStore(emptyPtr(r.b), gArPfx)
+            return r
+        }
+    }
     function foldBin(items) {
         if (items.length == 1) { return items[0] }
+        var rs = []
+        var j
+        for (j = 1; j < items.length; j += 2) { rs.push(arRec((items[j].at != undefined) ? items[j].at : -1)) }
         return function(b) {
             var r = items[0](b)
             var bb = r.b, v = r.v
@@ -2653,7 +2747,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     bb = jb
                 } else {
                     var r2 = items[i + 1](bb)
-                    var res = arOp(r2.b, op, v, r2.v, r2.lit)
+                    var res = arOp(r2.b, op, v, r2.v, r2.lit, rs[(i - 1) / 2])
                     bb = res.b
                     v = res.v
                 }
@@ -2765,7 +2859,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (attrOn(intVars, a.name) && a.valT != null) {
             var rv = null
             if (a.valT.c != undefined) {
-                var ra = c.compile(c.parseFrom(c.agrammar, a.valT.c, "ArList")).stack[0](b)
+                var ra = arCompile(a.valT.c, "ArList", true)(b)
                 b = ra.b
                 rv = ra.v
             } else {
@@ -3407,7 +3501,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function makeSubshellR(items) { return withRedirs(makeSubshell(items[0]), items) }
     function makeGroupR(items) { return withRedirs(makeGroup(items[0]), items) }
 
-    function makeArithCmd(exprT) {
+    function makeArithCmd(exprT0) {
+        var exprT = arIn("((: ", exprT0)
         return function(b) {
             var r = exprT(b)
             b = r.b
@@ -3458,6 +3553,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b = emitAbortCheck(b)
             var endB = curF.NewBlock("")
             var inc = []
+            b.NewStore(gepStr(b, "let: "), gArPfx)
             for (k = 0; k < args.length; k++) {
                 var v = zero64
                 if (typeof args[k] == "function") { var r = args[k](b); b = r.b; v = r.v }
@@ -3473,6 +3569,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             b = endB
             var last = b.NewPhi(inc)
+            b.NewStore(emptyPtr(b), gArPfx)
             var st = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, last, zero64), zero, one)
             storeStatus(b, b.NewSelect(takeArithErr(b), one, st))
             return b
@@ -3677,8 +3774,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // Twin of mkCondBin in bash-interpreter.abnf.
             var npred = condNumPred(op)
             if (npred != null) {
+                b.NewStore(gepStr(b, "[[: "), gArPfx)
                 var al = b.NewCall(rtArith, rl.v)
                 var ar = b.NewCall(rtArith, rr.v)
+                b.NewStore(emptyPtr(b), gArPfx)
                 return {b: b, v: b.NewZExt(b.NewICmp(npred, al, ar), i32)}
             }
             var st = testBinaryIR(b, {v: rl.v, c: lw.c}, op, {v: rr.v, c: rw.c})
@@ -3709,8 +3808,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // eval / trap re-parse a string with THIS grammar, starting at CompoundList (which pushes
     // one statement-sequence thunk); the thunk that comes back is emitted inline.
     function compileSnippet(src) {
-        var frag = c.parseFrom(c.agrammar, src, "CompoundList")
-        return c.compile(frag).stack[0]
+        return arCompile(src, "CompoundList", false)
     }
 
     // printf [-v NAME] [--] FORMAT [ARG...]: the whole command runs in rt_printf
@@ -4437,8 +4535,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return out
     }
     function compileHereBody(body) {
-        var frag = c.parseFrom(c.agrammar, "\x01" + body, "HereBodyW")
-        return c.compile(frag).stack[0]
+        return arCompile("\x01" + body, "HereBodyW", false)
     }
 
     // A compound statement plus its redirections; items = [bodyThunk, redir...]
@@ -4452,6 +4549,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var sv = emitOpenRedirs(b, redirs)
             b = sv.b
             redirStack.push(sv)
+            // An expansion error in a redirection's word abandons the compound command.
+            // Twin of mkRedirected in bash-interpreter.abnf.
+            b = emitAbortCheck(b)
             b = bodyT(b)
             redirStack.pop()
             emitCloseRedirs(b, sv)
@@ -4647,7 +4747,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // items = [initExpr, condExpr, stepExpr, bodyThunk]
     function makeCFor(items) {
-        var initT = items[0], condT = items[1], stepT = items[2], bodyT = items[3]
+        var initT = arIn("((: ", items[0]), condT = arIn("((: ", items[1]), stepT = arIn("((: ", items[2]), bodyT = items[3]
         return function(b) {
             // An arithmetic error in any of the three parts ends the loop with status 1.
             var lst = loopStatusSlot(b)

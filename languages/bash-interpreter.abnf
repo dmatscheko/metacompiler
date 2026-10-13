@@ -147,7 +147,7 @@ CfDyn       <~~ push(mkArDyn(pop())) ~~> = CfHasExp CfDynWord ;
 CfDynWord   <~~ push(mkNsWord(takeAll())) ~~> = CfDynSeg { CfDynSeg } ;
 CfDynSeg    = DqSeg | ExpSeg | ArDynParen | CfDynBare ;
 CfDynBare   <~~ push(makeConst(up.in)) ~~> = !@+"()$`\";" ;
-CfSt        = WsNL :whitespace(Whitespace) ArList :whitespace() WsNL ;
+CfSt        <~~ arClaim(up.start, up.pos); push(pop()) ~~> = WsNL :whitespace(Whitespace) ArList :whitespace() WsNL ;
 CfZero      <~~ push(mkNum("0")) ~~> = WsNL ;
 CfOne       <~~ push(mkNum("1")) ~~> = WsNL ;
 
@@ -221,7 +221,7 @@ BraceGroup  <~~ push(makeGroupR(takeAll())) ~~> = "{" BraceKwEnd CompoundList "}
 // (( EXPR )): a text holding an expansion is expanded first and then evaluated, exactly as
 // $(( EXPR )) is (see ArithExp).
 ArithCmd    = ArithCmdDyn | ArithCmdSt | ArithCmdRaw ;
-ArithCmdSt  <~~ push(makeArithCmd(pop())) ~~> = "((" :whitespace(Whitespace) ArList "))" ;
+ArithCmdSt  <~~ arClaim(up.start + 2, up.pos - 2); push(makeArithCmd(pop())) ~~> = "((" :whitespace(Whitespace) ArList "))" ;
 ArithCmdDyn <~~ push(makeArithCmd(mkArDyn(pop()))) ~~> = "((" :whitespace() ArHasExp ArDynWord "))" ;
 // A text the arithmetic grammar rejects (`(( 1 + ))`) is still an arithmetic command: the
 // run-time evaluator reports bash's syntax error and the command fails with status 1.
@@ -242,10 +242,11 @@ LetItem     = RedirItem | NotIoRedir LetArg ;
 // arguments x=1 + 2*2 (x=1, then a syntax error). A word with no expansion is parsed here
 // instead, unless the next word would read as the rest of its expression (`let c=1 + d=2`,
 // `let x=0 || y`): LetIsWord decides.
-LetArg      = LetWord | LetDq | LetSq | ArAssign ;
+LetArg      = LetWord | LetDq | LetSq | LetAr ;
+LetAr       <~~ arClaim(up.start, up.pos); push(pop()) ~~> = ArAssign ;
 LetWord     <~~ push({letws: takeAll()}) ~~> = LetIsWord CWord ;
-LetDq       = '"' :whitespace(Whitespace) ArList '"' ;
-LetSq       = "'" :whitespace(Whitespace) ArList "'" ;
+LetDq       <~~ arClaim(up.start + 1, up.pos - 1); push(pop()) ~~> = '"' :whitespace(Whitespace) ArList '"' ;
+LetSq       <~~ arClaim(up.start + 1, up.pos - 1); push(pop()) ~~> = "'" :whitespace(Whitespace) ArList "'" ;
 
 // local / declare / typeset / export / readonly [-flags] NAME[=WORD] ...
 // Spelled as its own production (rather than an ordinary command with word arguments)
@@ -455,7 +456,7 @@ BackSub     <~~ push(mkCmdSub(pop())) ~~>
 // a double quote, which is removed) is therefore kept as a word and read by the run-time
 // evaluator, arEval; a text without one is parsed here, once.
 ArithExp    = ArithDyn | ArithSt | ArithRaw ;
-ArithSt     <~~ push(mkArith(pop())) ~~> = "$((" :whitespace(Whitespace) ArList "))" ;
+ArithSt     <~~ arClaim(up.start + 3, up.pos - 2); push(mkArith(pop())) ~~> = "$((" :whitespace(Whitespace) ArList "))" ;
 ArithDyn    <~~ push(mkArith(mkArDyn(pop()))) ~~> = "$((" :whitespace() ArHasExp ArDynWord "))" ;
 ArithRaw    <~~ push(mkArith(mkArDyn(pop()))) ~~> = "$((" :whitespace() ArDynWord "))" ;
 ArDynWord   <~~ push(mkNsWord(takeAll())) ~~> = { ArDynSeg } ;
@@ -509,7 +510,8 @@ PeXfOp      <~~ push({xf: up.in}) ~~> = "Q" | "E" | "P" | "A" | "K" | "a" | "k" 
 
 // NAME or NAME[SUBSCRIPT] - the subscript is a word, read as an arithmetic index for an
 // indexed array and as a literal key for an associative one. "@" and "*" mean the whole array.
-PeTarget    = PeIdxRef | PeName ;
+// peTgt: the target as written, the prefix of an arithmetic error in ${v:off} (ArOff).
+PeTarget    <~~ peTgt = arSrc(up.start, up.pos) ~~> = PeIdxRef | PeName ;
 PeIdxRef    <~~ push({hasIdx: 1}) ~~> = PeName "[" IdxWord "]" ;
 IdxWord     <~~ push(mkWord(takeAll())) ~~> = { IdxSeg } ;
 IdxSeg      = SqSeg | DqSeg | ExpSeg | EscSeg | IdxBare ;
@@ -567,7 +569,7 @@ RepAnsiBody <~~ push(makeConst(repEscape(ansiC(up.in)))) ~~> = { AnsiEsc | AnsiL
 // eaten while this production still has the Whitespace rule installed.
 PeSubstrForm <~~ push({pe: "substr"}) ~~> = PeTarget ":" :whitespace(Whitespace) ArOff [ PeSubLen ] :whitespace() PeArPad ;
 PeSubLen    = ":" ArOff ;
-ArOff       = ArList | ArEmpty ;
+ArOff       <~~ arClaim(up.start, arPastWs(up.pos)); push(arIn(peTgt + ": ", pop())) ~~> = ArList | ArEmpty ;
 ArEmpty     <~~ push(mkNum("0")) ~~> = ArEndHere ;
 PeArPad     = { PeBlank } ;
 PeBlank     = @+" \t" ;
@@ -603,7 +605,7 @@ ArgDigit    = "0"..."9" ;
 
 ArList      <~~ push(foldComma(takeAll())) ~~> = ArAssign { "," ArAssign } ;
 ArAssign    = ArAssignForm | ArCond ;
-ArAssignForm <~~ push(mkArAssign(takeAll())) ~~> = ArLhs ArAsgOp ArAssign ;
+ArAssignForm <~~ push(mkArAssign(takeAll(), up.pos)) ~~> = ArLhs ArAsgOp ArAssign ;
 // NAME[SUBSCRIPT] is an array element, an operand and an assignment target alike:
 // `$(( nums[0] + nums[2] ))`, `(( m[p]++ ))`, `(( a[i] += 2 ))`.
 ArLhs       = ArLhsElem | ArLhsName ;
@@ -635,8 +637,8 @@ ArShiftOp   <~~ push({op: up.in}) ~~> = "<<" | ">>" ;
 ArAdd       <~~ push(foldBin(takeAll())) ~~> = ArMul { ArAddOp ArMul } ;
 ArAddOp     <~~ push({op: up.in}) ~~> = "+" NotPlus | "-" NotMinus ;
 ArMul       <~~ push(foldBin(takeAll())) ~~> = ArPow { ArMulOp ArPow } ;
-ArMulOp     <~~ push({op: up.in}) ~~> = "*" NotStar | "/" | "%" ;
-ArPow       <~~ push(foldPow(takeAll())) ~~> = ArUnary [ ArPowOp ArPow ] ;
+ArMulOp     <~~ push({op: up.in, at: up.pos}) ~~> = "*" NotStar | "/" | "%" ;
+ArPow       <~~ push(foldPow(takeAll(), up.pos)) ~~> = ArUnary [ ArPowOp ArPow ] ;
 ArPowOp     <~~ push({op: up.in}) ~~> = "**" ;
 
 ArUnary     = ArPreInc | ArNeg | ArPos | ArNot | ArBnot | ArPrimary ;
@@ -3464,10 +3466,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
     // items = [{lhs}, {aop}, valueThunk]
-    function mkArAssign(items) {
+    function mkArAssign(items, at) {
         var lhs = items[0]
         var aop = items[1].aop
         var t = items[2]
+        var rc = arRecLa(at)
         return function() {
             var key = arLhsKey(lhs)
             var cur = anytype
@@ -3475,7 +3478,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (aop != "=") { cur = arLhsGet(lhs.lhs, key) }
             var nv = anytype
             nv = t()
-            if (aop != "=") { nv = arOp(aop.slice(0, aop.length - 1), cur, nv) }
+            if (rc.ok && (aop == "/=" || aop == "%=") && arIsZero(nv)) { arFailAt(arPfx + rc.expr, "division by 0", rc.tok); nv = 0 }
+            else if (aop != "=") { nv = arOp(aop.slice(0, aop.length - 1), cur, nv) }
             arLhsSet(lhs.lhs, key, nv)
             return nv
         }
@@ -3511,10 +3515,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return r
     }
-    function foldPow(items) {
+    function foldPow(items, at) {
         if (items.length == 1) { return items[0] }
         var b0 = items[0], e0 = items[2]
-        return function() { var bs = b0(); return arPow(bs, e0()) }
+        var rc = arRecLa(at)
+        return function() {
+            var bs = b0()
+            var ex = e0()
+            if (rc.ok && arIsNeg(ex)) { arFailAt(arPfx + rc.expr, "exponent less than 0", rc.tok); return 0 }
+            return arPow(bs, ex)
+        }
     }
     // A name's value is itself an expression: x=010 is 8, r=a reads a.
     function mkArVar(name) { return function() { return arEval(getVarVal(name)) } }
@@ -3594,8 +3604,90 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // items = [thunk, {op}, thunk, {op}, thunk, ...] -> one left folded thunk. && and || do
     // not evaluate an operand the left side already decided: `z && (z = 9)` leaves z alone.
+    // WHERE A STATIC OPERATOR THAT CAN FAIL STANDS, FOR ITS ERROR TEXT. bash names the
+    // expression and an error token: for / and % the text from the divisor on - `(( v = 1/0 ))`
+    // reports `((: v = 1/0 : division by 0 (error token is "0 ")` - and for ** and /= %= the
+    // token after the right operand, or its last token at the end (arLaTok). An operator
+    // records an offset (arRec: after / or %; arRecLa: the operand's end); the enclosing
+    // $(( )), (( )), let argument or for (( )) part fills in the text (arClaim). In any other
+    // context the message stays bare. arPfx is the command's own prefix ("((: ", "let: ",
+    // "[[: "), which a variable's value evaluated inside it reports too.
+    // Twin of arRec / arClaim in bash-to-llvm-ir.abnf.
+    var arRecs = []
+    var peTgt = ""
+    // A snippet (eval, trap, a here-document body) is parsed apart from the program, and its
+    // offsets are its own: arSrc reads them from its text, not the program's.
+    var arSnip = ""
+    var arInSnip = false
+    function arSrc(from, to) { return arInSnip ? arSnip.slice(from, to) : c.srcSlice(from, to) }
+    function arCompile(text, rule, claimAll) {
+        var svS = arSnip, svIn = arInSnip, svR = arRecs
+        arSnip = text
+        arInSnip = true
+        arRecs = []
+        var t = c.compile(c.parseFrom(c.agrammar, text, rule)).stack[0]
+        if (claimAll) { arClaimText(text, 0, text.length) }
+        arSnip = svS
+        arInSnip = svIn
+        arRecs = svR
+        return t
+    }
+    function arRec(at) { var r = {ok: false, la: false, at: at, expr: "", tok: ""}; arRecs.push(r); return r }
+    function arRecLa(at) { var r = arRec(at); r.la = true; return r }
+    function arIsWs(ch) { return ch == " " || ch == "\t" || ch == "\n" }
+    function arLtrim(t) {
+        var i = 0
+        while (i < t.length && arIsWs(t.charAt(i))) { i = i + 1 }
+        return t.slice(i)
+    }
+    function arLaTok(t, p) {
+        var rest = arLtrim(t.slice(p))
+        if (rest != "") { return rest }
+        var q = p
+        while (q > 0 && arIsWs(t.charAt(q - 1))) { q = q - 1 }
+        var e = q
+        while (q > 0 && arIdCh(t.charCodeAt(q - 1), false)) { q = q - 1 }
+        if (q == e && q > 0) { q = q - 1 }
+        return t.slice(q)
+    }
+    // ${v:off}'s expression runs up to the ":" or "}", blanks included.
+    function arPastWs(p) {
+        var q = p
+        while (arIsWs(arSrc(q, q + 1))) { q = q + 1 }
+        return q
+    }
+    function arClaim(from, to) { arClaimText(arSrc(from, to), from, to) }
+    function arClaimText(text, from, to) {
+        var expr = arLtrim(text)
+        var keep = []
+        var i
+        for (i = 0; i < arRecs.length; i++) {
+            var r = arRecs[i]
+            if (r.at >= from && r.at <= to) {
+                r.ok = true
+                r.expr = expr
+                r.tok = r.la ? arLaTok(text, r.at - from) : arLtrim(text.slice(r.at - from))
+            }
+            else if (r.at > to) { keep.push(r) }
+        }
+        arRecs = keep
+    }
+    var arPfx = ""
+    function arIn(pfx, t) {
+        return function() {
+            var sv = arPfx
+            arPfx = pfx
+            var v = anytype
+            v = t()
+            arPfx = sv
+            return v
+        }
+    }
     function foldBin(items) {
         if (items.length == 1) { return items[0] }
+        var rs = []
+        var j
+        for (j = 1; j < items.length; j += 2) { rs.push(arRec((items[j].at != undefined) ? items[j].at : -1)) }
         return function() {
             var v = anytype
             v = items[0]()
@@ -3604,7 +3696,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var op = items[i].op
                 if (op == "&&" && arIsZero(v)) { v = 0 }
                 else if (op == "||" && !arIsZero(v)) { v = 1 }
-                else { v = arOp(op, v, items[i + 1]()) }
+                else {
+                    var r = items[i + 1]()
+                    var rc = rs[(i - 1) / 2]
+                    if (rc.ok && (op == "/" || op == "%") && arIsZero(r)) { arFailAt(arPfx + rc.expr, "division by 0", rc.tok); v = 0 }
+                    else { v = arOp(op, v, r) }
+                }
             }
             return v
         }
@@ -3629,7 +3726,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // An error at the cursor: bash names the rest of the expression as the token.
     function arErr(msg) {
-        if (!arBad) { arBad = true; arFailAt(arS, msg, arS.slice(arP)) }
+        return arErrTok(msg, arLaTok(arS, arP))
+    }
+    function arErrTok(msg, tok) {
+        if (!arBad) { arBad = true; arFailAt(arPfx + arLtrim(arS), msg, tok) }
         return 0
     }
     // A numeric constant: 0x / 0X hexadecimal, a leading 0 octal, BASE#DIGITS with a base from
@@ -3764,7 +3864,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var e = arPowS()
             if (arIsNeg(e)) {
                 if (arNoeval > 0) { return 0 }
-                return arErr("exponent less than 0")
+                return arErrTok("exponent less than 0", arLaTok(arS, arP))
             }
             return arPow(b, e)
         }
@@ -3778,7 +3878,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var cc = arAt(0)
             if (!((cc == 42 && arAt(1) != 42 && arAt(1) != 61) || ((cc == 47 || cc == 37) && arAt(1) != 61))) { break }
             arP = arP + 1
-            v = arApply(String.fromCharCode(cc), v, arPowS())
+            arWs()
+            var rs0 = arP
+            var rv = arPowS()
+            if (cc != 42 && arIsZero(rv) && arNoeval == 0) { return arErrTok("division by 0", arS.slice(rs0)) }
+            v = arApply(String.fromCharCode(cc), v, rv)
         }
         return v
     }
@@ -3919,6 +4023,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var v = anytype
             v = arAssignS()
             if (arBad) { return 0 }
+            if ((op == "/=" || op == "%=") && arIsZero(v) && arNoeval == 0) { return arErrTok("division by 0", arLaTok(arS, arP)) }
             if (op != "=") { v = arApply(op.slice(0, op.length - 1), arValue(nm, key), v) }
             if (arBad) { return 0 }
             return arStore(nm, key, v)
@@ -3938,6 +4043,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // A string that is a plain decimal number (blanks around, one sign, no leading 0) needs no
     // parse; everything else is evaluated as an expression. An empty expression is 0.
+    // An assignment operator where no name stood before it (`8 /= 0`). Twin of ar_asgop_here.
+    function arAsgOpHere() {
+        var c0 = arAt(0), c1 = arAt(1)
+        if (c0 == 61) { return c1 != 61 }
+        if (c1 == 61) { return c0 == 43 || c0 == 45 || c0 == 42 || c0 == 47 || c0 == 37 || c0 == 38 || c0 == 94 || c0 == 124 }
+        return (c0 == 60 || c0 == 62) && c1 == c0 && arAt(2) == 61
+    }
     function arEval(s) {
         var i = 0
         var n = s.length
@@ -3962,6 +4074,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             arWs()
             if (!arBad && arP < arLen) {
                 if (arAt(0) == 41) { arErr("arithmetic syntax error: invalid arithmetic operator") }
+                else if (arAsgOpHere()) { arErr("attempted assignment to non-variable") }
                 else { arErr("arithmetic syntax error in expression") }
             }
         }
@@ -4146,6 +4259,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (k = 1; k < all.length; k++) { args.push(all[k]) }
             if (redirs.length == 0) { return runCommand(cmd, args) }
             var rs = openRedirs(redirs)
+            // An expansion error in a redirection's word (`<<< "$(( 1/0 ))"`) abandons the
+            // command too. Twin of the emitAbortCheck that starts the compiler's inner.
+            var ab2 = takeAbort()
+            if (ab2 != null) { closeRedirs(rs); return ab2 }
             var st = anytype
             st = runCommand(cmd, args)
             closeRedirs(rs)
@@ -4192,8 +4309,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // eval / trap re-parse a string with THIS grammar, starting at CompoundList (which pushes
     // one statement-sequence thunk), and run the thunk that comes back.
     function compileSnippet(src) {
-        var frag = c.parseFrom(c.agrammar, src, "CompoundList")
-        return c.compile(frag).stack[0]
+        return arCompile(src, "CompoundList", false)
     }
     function runExitTrap() {
         if (exitTrap == null) { return }
@@ -5183,7 +5299,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function makeGroupR(items) { return withRedirs(makeGroup(items[0]), items) }
 
     // (( expr )) : status 0 when the value is non-zero (the opposite of C).
-    function makeArithCmd(exprT) {
+    function makeArithCmd(exprT0) {
+        var exprT = arIn("((: ", exprT0)
         return function() {
             var st = !arIsZero(exprT()) ? 0 : 1
             if (takeArithErr()) { st = 1 }
@@ -5221,6 +5338,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (nstatic == 0 && total == 0) { arFailAt("let", "expression expected", "") }
             var v = anytype
             v = 0
+            var svp = arPfx
+            arPfx = "let: "
             for (k = 0; k < args.length && !arithErr; k++) {
                 if (typeof args[k] == "function") { v = args[k]() }
                 else {
@@ -5228,6 +5347,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     for (j = 0; j < lists[k].length && !arithErr; j++) { v = arEval(lists[k][j]) }
                 }
             }
+            arPfx = svp
             var st = !arIsZero(v) ? 0 : 1
             if (takeArithErr()) { st = 1 }
             setStatus(st)
@@ -5382,7 +5502,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (op == "!=") { return !globMatchX(rv, lv) }
             // The numeric tests evaluate BOTH sides as arithmetic expressions inside [[ ]]
             // ([[ 2+3 -eq 5 ]], [[ 010 -eq 8 ]], [[ x -eq 4 ]]), where test / [ want integers.
-            if (hasOwn(testNumOps, op)) { return arOp(testNumOps[op], arEval(lv), arEval(rv)) == 1 }
+            if (hasOwn(testNumOps, op)) {
+                var svp = arPfx
+                arPfx = "[[: "
+                var al = arEval(lv)
+                var ar = arEval(rv)
+                arPfx = svp
+                return arOp(testNumOps[op], al, ar) == 1
+            }
             return testBinary(lv, op, rv) == 0
         }
     }
@@ -5440,8 +5567,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // An unquoted here-document body is re-parsed with this grammar so that $ expansions,
     // command substitutions and backslash escapes inside it work exactly as in a word.
     function compileHereBody(body) {
-        var frag = c.parseFrom(c.agrammar, "\x01" + body, "HereBodyW")
-        return c.compile(frag).stack[0]
+        return arCompile("\x01" + body, "HereBodyW", false)
     }
 
     // A compound statement plus its redirections; items = [bodyThunk, redir...]
@@ -5453,6 +5579,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (redirs.length == 0) { return bodyT }
         return function() {
             var rs = openRedirs(redirs)
+            var ab = takeAbort()
+            if (ab != null) { closeRedirs(rs); return ab }
             var st = anytype
             st = bodyT()
             closeRedirs(rs)
@@ -5549,7 +5677,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // items = [initExpr, condExpr, stepExpr, bodyThunk]
     function makeCFor(items) {
-        var initT = items[0], condT = items[1], stepT = items[2], bodyT = items[3]
+        var initT = arIn("((: ", items[0]), condT = arIn("((: ", items[1]), stepT = arIn("((: ", items[2]), bodyT = items[3]
         return inLoop(function() {
             // An arithmetic error in any of the three parts ends the loop with status 1.
             var last = 0

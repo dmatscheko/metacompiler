@@ -2620,6 +2620,36 @@ s55() {
   check stx10 "${#e} ${#o}" "10 3"
 }
 
+# ===== SECTION 56: the text of an arithmetic error =====
+# bash names the command ("((: ", "let: ", "[[: ", "v: " in ${v:off}), the expression without
+# its leading blanks, and an error token: for / and % the text from the divisor on, for **
+# and /= the token after the right operand or else its last one. The location prefix is
+# dropped before comparing (bash writes "FILE: line N: ", these engines "bash: ").
+# Every expected value is bash 5.3's.
+s56m() { local m=${1#bash: }; printf '%s' "${m#*line [0-9]*: }"; }
+s56() {
+  local z=0 v=1 x=3 e='4/z' s=abc o d h
+  o=$( { (( v = 1/z )); } 2>&1 ); check aem1 "$(s56m "$o")" '((: v = 1/z : division by 0 (error token is "z ")'
+  o=$( { echo $(( 10 / (3-3) + 1 )); } 2>&1 ); check aem2 "$(s56m "$o")" '10 / (3-3) + 1 : division by 0 (error token is "(3-3) + 1 ")'
+  o=$( { let 'q=1/z'; } 2>&1 ); check aem3 "$(s56m "$o")" 'let: q=1/z: division by 0 (error token is "z")'
+  o=$( { echo $(( 2 ** -1 + 5 )); } 2>&1 ); check aem4 "$(s56m "$o")" '2 ** -1 + 5 : exponent less than 0 (error token is "+ 5 ")'
+  o=$( { (( v /= z, 1 )); } 2>&1 ); check aem5 "$(s56m "$o")" '((: v /= z, 1 : division by 0 (error token is ", 1 ")'
+  o=$( { echo $(( e + 1 )); } 2>&1 ); check aem6 "$(s56m "$o")" '4/z: division by 0 (error token is "z")'
+  o=$( { [[ 4 -lt $x/z ]]; } 2>&1 ); check aem7 "$(s56m "$o")" '[[: 3/z: division by 0 (error token is "z")'
+  o=$( { echo ${s: 1/z }; } 2>&1 ); check aem8 "$(s56m "$o")" 's: 1/z : division by 0 (error token is "z ")'
+  o=$( { echo $(( 8 /= 0 )); } 2>&1 ); check aem9 "$(s56m "$o")" '8 /= 0 : attempted assignment to non-variable (error token is "/= 0 ")'
+  o=$( { echo $(( 1 + )); } 2>&1 ); check aem10 "$(s56m "$o")" '1 + : arithmetic syntax error: operand expected (error token is "+ ")'
+  o=$( { declare -i d; d=5/0; } 2>&1 ); check aem11 "$(s56m "$o")" '5/0: division by 0 (error token is "0")'
+  o=$( { read -r h <<S56
+a $(( 7/z ))
+S56
+  } 2>&1 ); check aem12 "$(s56m "$o")" '7/z : division by 0 (error token is "z ")'
+  o=$( { for (( d = 2 % z; d < 1; d++ )); do :; done; } 2>&1 ); check aem13 "$(s56m "$o")" '((: d = 2 % z: division by 0 (error token is "z")'
+  o=$( { echo x <<< "$(( 7/z ))"; } 2>/dev/null ); check aem14 "$? [$o]" "1 []"
+  o=$( { { echo y; } <<< "$(( 7/z ))"; } 2>/dev/null
+        echo "st $?" ); check aem15 "$o" ""
+}
+
 s01   # SECTION-CALL 01
 s02   # SECTION-CALL 02
 s03   # SECTION-CALL 03
@@ -2675,5 +2705,6 @@ s52   # SECTION-CALL 52
 s53   # SECTION-CALL 53
 s54   # SECTION-CALL 54
 s55   # SECTION-CALL 55
+s56   # SECTION-CALL 56
 echo "full: $checks checks, $fails failures"
 exit $fails

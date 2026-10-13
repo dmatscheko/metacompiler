@@ -635,6 +635,15 @@ int rt_suberr(int bad, int len)
  * Twin of arEval and its helpers in bash-interpreter.abnf. */
 int arith_err;
 
+/* What an arithmetic error is reported for, stored by the emitter around (( )), let,
+ * [[ ]], for (( )) and ${v:off} ("((: ", "let: ", "[[: ", "v: "). Twin of arPfx in
+ * bash-interpreter.abnf. */
+char *ar_pfx_s;
+char *ar_pfx(void)
+{
+    return ar_pfx_s != 0 ? ar_pfx_s : &empty[0];
+}
+
 int rt_arith_fail(char *expr, char *msg, char *tok)
 {
     int saved;
@@ -654,10 +663,10 @@ int rt_arith_fail(char *expr, char *msg, char *tok)
 /* / and %: C's truncating division, plus the two cases the hardware leaves
  * undefined. A zero divisor is bash's "division by 0"; LONG_MIN / -1 wraps back
  * to LONG_MIN and LONG_MIN % -1 is 0, which is what bash 5.3 prints. */
-long rt_idiv(long a, long b, int mod)
+long rt_idiv(long a, long b, int mod, char *expr, char *tok)
 {
     if (b == 0) {
-        rt_arith_fail(empty, "division by 0", empty);
+        rt_arith_fail(expr[0] != 0 ? rt_strcat(ar_pfx(), expr) : expr, "division by 0", tok);
         return 0;
     }
     if (b == -1) return mod != 0 ? 0 : 0 - a;
@@ -665,11 +674,11 @@ long rt_idiv(long a, long b, int mod)
 }
 
 /* ** by repeated squaring, wrapping like every product. */
-long rt_ipow(long b, long e)
+long rt_ipow(long b, long e, char *expr, char *tok)
 {
     long r = 1;
     if (e < 0) {
-        rt_arith_fail(empty, "exponent less than 0", empty);
+        rt_arith_fail(expr[0] != 0 ? rt_strcat(ar_pfx(), expr) : expr, "exponent less than 0", tok);
         return 0;
     }
     while (e > 0) {
@@ -692,6 +701,8 @@ int ar_depth;      /* nesting through variables' values                        *
 long ar_comma(void);
 long ar_assign(void);
 long ar_unary(void);
+long ar_errtok(char *msg, char *tok);
+char *ar_latok(int p);
 
 int ar_at(int d)
 {
@@ -716,11 +727,35 @@ int ar_idch(int c, int first)
 /* An error at the cursor: bash names the rest of the expression as the token. */
 long ar_err(char *msg)
 {
+    return ar_errtok(msg, ar_latok(ar_p));
+}
+
+/* bash names the expression without its leading blanks, after the command's prefix. */
+long ar_errtok(char *msg, char *tok)
+{
+    int i = 0;
     if (ar_bad == 0) {
         ar_bad = 1;
-        rt_arith_fail(ar_s, msg, &ar_s[ar_p]);
+        while (ar_s[i] == 32 || ar_s[i] == 9 || ar_s[i] == 10) i = i + 1;
+        rt_arith_fail(rt_strcat(ar_pfx(), &ar_s[i]), msg, tok);
     }
     return 0;
+}
+
+/* The error token of ** and /= %=: the text after the right operand, or the operand's
+ * last token when nothing follows. Twin of arLaTok in bash-interpreter.abnf. */
+char *ar_latok(int p)
+{
+    int q = p;
+    int e;
+    while (ar_s[q] == 32 || ar_s[q] == 9 || ar_s[q] == 10) q = q + 1;
+    if (ar_s[q] != 0) return &ar_s[q];
+    q = p;
+    while (q > 0 && (ar_s[q - 1] == 32 || ar_s[q - 1] == 9 || ar_s[q - 1] == 10)) q = q - 1;
+    e = q;
+    while (q > 0 && ar_idch((int)(unsigned char)ar_s[q - 1], 0) != 0) q = q - 1;
+    if (q == e && q > 0) q = q - 1;
+    return &ar_s[q];
 }
 
 /* A numeric constant: 0x / 0X hexadecimal, a leading 0 octal, BASE#DIGITS with
@@ -831,7 +866,7 @@ long ar_apply(int op, long a, long b)
             if (ar_noeval > 0) return 0;
             return ar_err("division by 0");
         }
-        return rt_idiv(a, b, op == 37 ? 1 : 0);
+        return rt_idiv(a, b, op == 37 ? 1 : 0, empty, empty);
     }
     if (op == 60) return a << (b & 63);
     if (op == 62) return a >> (b & 63);
@@ -907,9 +942,9 @@ long ar_pow(void)
         e = ar_pow();
         if (e < 0) {
             if (ar_noeval > 0) return 0;
-            return ar_err("exponent less than 0");
+            return ar_errtok("exponent less than 0", ar_latok(ar_p));
         }
-        return rt_ipow(b, e);
+        return rt_ipow(b, e, empty, empty);
     }
     return b;
 }
@@ -917,13 +952,19 @@ long ar_pow(void)
 long ar_mul(void)
 {
     long v = ar_pow();
+    long rv;
+    int rs;
     while (ar_bad == 0) {
         int c;
         ar_ws();
         c = ar_at(0);
         if (!((c == 42 && ar_at(1) != 42 && ar_at(1) != 61) || ((c == 47 || c == 37) && ar_at(1) != 61))) break;
         ar_p = ar_p + 1;
-        v = ar_apply(c, v, ar_pow());
+        ar_ws();
+        rs = ar_p;
+        rv = ar_pow();
+        if (c != 42 && rv == 0 && ar_noeval == 0) return ar_errtok("division by 0", &ar_s[rs]);
+        v = ar_apply(c, v, rv);
     }
     return v;
 }
@@ -1092,11 +1133,22 @@ long ar_assign(void)
         ar_p = ar_p + oplen;
         v = ar_assign();
         if (ar_bad != 0) return 0;
+        if ((op == 47 || op == 37) && v == 0 && ar_noeval == 0) return ar_errtok("division by 0", ar_latok(ar_p));
         if (op != 61) v = ar_apply(op, ar_value(nm, key), v);
         if (ar_bad != 0) return 0;
         return ar_store(nm, key, v);
     }
     return ar_cond();
+}
+
+/* An assignment operator where no name stood before it (`8 /= 0`). Twin of arAsgOpHere. */
+int ar_asgop_here(void)
+{
+    int c0 = ar_at(0);
+    int c1 = ar_at(1);
+    if (c0 == 61) return c1 != 61 ? 1 : 0;
+    if (c1 == 61) return (c0 == 43 || c0 == 45 || c0 == 42 || c0 == 47 || c0 == 37 || c0 == 38 || c0 == 94 || c0 == 124) ? 1 : 0;
+    return ((c0 == 60 || c0 == 62) && c1 == c0 && ar_at(2) == 61) ? 1 : 0;
 }
 
 long ar_comma(void)
@@ -1150,6 +1202,7 @@ long rt_arith(char *s)
         ar_ws();
         if (ar_bad == 0 && ar_p < ar_len) {
             if (ar_at(0) == 41) ar_err("arithmetic syntax error: invalid arithmetic operator");
+            else if (ar_asgop_here() != 0) ar_err("attempted assignment to non-variable");
             else ar_err("arithmetic syntax error in expression");
         }
     }
