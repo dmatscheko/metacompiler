@@ -7630,6 +7630,10 @@ KwContinue  = "continue" KwEnd ;
             // (manual chapter 4).
             var arr = anytype
             arr = listT()
+            // The loop walks a COPY of an Array or a Set (value semantics): the
+            // body's appends, removals and element writes are not seen by the walk.
+            // Twin: makeForList in swift-to-llvm-ir.abnf.
+            if (Array.isArray(arr) || swIsSet(arr)) { arr = swCopy(arr) }
             // A lazy sequence is asked for one element per trip, so an endless one
             // runs until the body breaks out.
             var it = anytype

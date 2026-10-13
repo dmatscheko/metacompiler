@@ -7857,10 +7857,14 @@ KwContinue  = "continue" KwEnd ;
             var dictB = curF.NewBlock("")
             var seqB = curF.NewBlock("")
             b.NewCondBr(truthy(b, isDictV), dictB, arrB)
+            // The loop walks a COPY of an Array (value semantics): the body's
+            // appends, removals and element writes are not seen by the walk. Twin:
+            // makeForList in swift-interpreter.abnf.
+            var arrV = emitCopy(arrB, r.v)
             arrB.NewBr(seqB)
             var pairsV = dictB.NewCall(rtArrayOf(), [r.v])
             dictB.NewBr(seqB)
-            var seqV = seqB.NewPhi([llvm.ir.NewIncoming(r.v, arrB), llvm.ir.NewIncoming(pairsV, dictB)])
+            var seqV = seqB.NewPhi([llvm.ir.NewIncoming(arrV, arrB), llvm.ir.NewIncoming(pairsV, dictB)])
             b = seqB
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, sName), seqV])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])

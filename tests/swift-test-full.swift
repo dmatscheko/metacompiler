@@ -4071,6 +4071,33 @@ func s86() {
         && String(big[0], radix: 16) == "ffffffffffffffff")
 }
 
+// ===== SECTION 87: for-in walks a copy of its sequence =====
+// The sequence operand is a value: appends, removals and element writes in the
+// body change the variable, not the walk. Every value read off swiftc 6.1.2.
+struct P87 { var x: Int }
+func s87() {
+    var it = [1, 2, 3]
+    var seen: [String] = []
+    for v in it {
+        if v == 1 { it.append(10) }
+        if v == 2 { it.removeAll() }
+        seen.append("\(v):\(it.count)")
+    }
+    check("87a", seen == ["1:4", "2:0", "3:0"] && it.isEmpty)
+    var d = [5, 6]
+    var got: [Int] = []
+    for v in d { d[1] = 99; got.append(v) }
+    check("87b", got == [5, 6] && d == [5, 99])
+    var ps = [P87(x: 1), P87(x: 2)]
+    var xs: [Int] = []
+    for p in ps { ps[1].x = 50; xs.append(p.x) }
+    check("87c", xs == [1, 2] && ps[1].x == 50)
+    var s: Set<Int> = [1]
+    var n = 0
+    for e in s { s.insert(e + 1); n += 1 }
+    check("87d", n == 1 && s.count == 2)
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -4158,6 +4185,7 @@ func main() {
     s84() // SECTION-CALL 84
     s85() // SECTION-CALL 85
     s86() // SECTION-CALL 86
+    s87() // SECTION-CALL 87
     print("full: \(checks) checks, \(fails) failures")
 }
 
