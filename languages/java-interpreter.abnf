@@ -2240,8 +2240,9 @@ HasStatic   = :script(~~
     include("lib/regex.js")
     include("lib/utf16-strings.js")
     include("lib/java-strings.js")
-    // rxFail is regex.js's error KNOB, overridden by assignment.
+    // rxFail (the error) and rxPropHit (\p{..}) are regex.js's KNOBS, set by assignment.
     rxFail = function (msg) { fail("regexp: " + msg) }
+    rxPropHit = function (id, c) { return jxPropHit(id, c) }
 
     function jArgList(args) {
         var out = []

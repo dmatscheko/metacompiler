@@ -83,8 +83,9 @@ import "./regex.js"
 import "./utf16-strings.js"
 import "./java-strings.js"
 
-// rxFail is regex.js's error knob, overridden by assignment.
+// rxFail (the error) and rxPropHit (\p{..}) are regex.js's knobs, set by assignment.
 rxFail = function (msg) { fail("regexp: " + msg) }
+rxPropHit = function (id, c) { return jxPropHit(id, c) }
 
 // ----- the JVM-family section's two knobs (lib/runtime.metajs) ---------------
 function rtjkCmp(op, l, r) { return jvCmp(op, l, r) }

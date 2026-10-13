@@ -213,17 +213,21 @@ func jxForDigit(d, r int) int {
 // ----- the regex methods -----
 
 func (rt *jsrt) jxRe(pattern string) *rxRe {
-	re := rxGet(pattern, "q")
+	re := rxGet(pattern, "qJ")
 	if !re.ok {
-		rt.jvThrowNamed("PatternSyntaxException", jxReMsg(pattern, re.err))
+		rt.jvThrowNamed("PatternSyntaxException", jxReMsg(pattern, re.err, re.errAt))
 	}
 	return re
 }
 
-// jxReMsg is Java's PatternSyntaxException message for a regex error kind, the
-// index read off the shortest failing prefix of the \Q-expanded pattern. Twin of
+// jxReMsg is Java's PatternSyntaxException message for a regex error: a J error
+// is Java's own description at its own index (at); for the shared kinds the index
+// is read off the shortest failing prefix of the \Q-expanded pattern. Twin of
 // jxReMsg in languages/lib/java-strings.js.
-func jxReMsg(pattern, err string) string {
+func jxReMsg(pattern, err string, at int) string {
+	if at >= 0 {
+		return jxReFmt(pattern, err, at)
+	}
 	p := rxExpandQuotes([]rune(pattern))
 	n := len(p)
 	switch err {
@@ -233,24 +237,16 @@ func jxReMsg(pattern, err string) string {
 		return jxReFmt(pattern, "Unclosed character class", n-1)
 	case "trailing backslash in pattern":
 		return jxReFmt(pattern, "Unescaped trailing backslash", n)
-	case "unterminated group name":
-		return jxReFmt(pattern, "named capturing group is missing trailing '>'", n)
 	}
 	k := 1
-	for k < n && rxCompile(string(p[:k]), "").err != err {
+	for k < n && rxCompile(string(p[:k]), "J").err != err {
 		k++
 	}
 	switch {
 	case err == "unmatched ) in pattern":
 		return jxReFmt(pattern, "Unmatched closing ')'", k-2)
-	case err == "character class range is out of order":
-		return jxReFmt(pattern, "Illegal character range", k-1)
 	case err == "quantifier with nothing to repeat" || err == "multiple repeat":
 		return jxReFmt(pattern, "Dangling meta character '"+string(p[k-1])+"'", k-1)
-	case err == "quantifier bounds are out of order":
-		return jxReFmt(pattern, "Illegal repetition range", k-1)
-	case err == "invalid hex escape":
-		return jxReFmt(pattern, "Illegal hexadecimal escape sequence", k)
 	case strings.HasPrefix(err, "unsupported group form"):
 		return jxReFmt(pattern, "Unknown inline modifier", k-1)
 	case strings.HasPrefix(err, "unknown group name '"):

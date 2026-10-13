@@ -325,35 +325,46 @@ function jxForDigit(d, r) {
 
 // ----- the regex methods (java.util.regex.Pattern / Matcher) -----
 
-// Java's pattern flags in regex.js's terms: \Q...\E quoting.
+// Java's pattern flags in regex.js's terms: \Q...\E quoting and the J dialect.
 function jxRe(pattern) {
-    var re = rxGet(pattern, "q")
-    if (!re.ok) { jxkThrow("PatternSyntaxException", jxReMsg(pattern, re.err)) }
+    var re = rxGet(pattern, "qJ")
+    if (!re.ok) { jxkThrow("PatternSyntaxException", jxReMsg(pattern, re.err, re.errAt)) }
     return re
 }
-// jxReMsg renders a regex.js error kind as Java's PatternSyntaxException message.
-// regex.js reports no position, so the index is read off k, the length of the
-// shortest prefix of the \Q-expanded pattern that fails with the same kind (Java
-// indexes the expanded pattern too); an end-of-input kind uses the full length.
-// Unmapped kinds keep regex.js's text. Twin of jxReMsg in abnf/jsrtjavastr.go.
-function jxReMsg(pattern, err) {
+// jxPropHit is regex.js's rxPropHit knob over java.lang.Character's table
+// (lib/java-chars.js). Twin of the rxPropHit switch in abnf/jsrtregex.go.
+function jxPropHit(id, c) {
+    if (id == RX_PL) { return jcIsLetter(c) }
+    if (id == RX_PND) { return jcIsDigit(c) }
+    if (id == RX_PALPHA) { return jcIsAlphabetic(c) }
+    if (id == RX_PUPPER) { return jcIsUpper(c) }
+    if (id == RX_PLOWER) { return jcIsLower(c) }
+    if (id == RX_PLD) { return jcIsLetter(c) || jcIsDigit(c) }
+    var k = jcClass(c) % 8
+    if (id == RX_PLU) { return k == 1 }
+    if (id == RX_PLL) { return k == 2 }
+    if (id == RX_PLT) { return k == 3 }
+    return id == RX_PNL && k == 6
+}
+// jxReMsg renders a regex.js error as Java's PatternSyntaxException message. A J
+// error is Java's own description at its own index (at). For the shared kinds the
+// index is read off k, the length of the shortest prefix of the \Q-expanded
+// pattern that fails with the same kind (Java indexes the expanded pattern too);
+// an end-of-input kind uses the full length. Unmapped kinds keep regex.js's text.
+// Twin of jxReMsg in abnf/jsrtjavastr.go.
+function jxReMsg(pattern, err, at) {
+    if (at >= 0) { return jxReFmt(pattern, err, at) }
     var p = rxExpandQuotes(pattern)
     var n = p.length
     if (err == "unterminated group") { return jxReFmt(pattern, "Unclosed group", n) }
     if (err == "unterminated character class") { return jxReFmt(pattern, "Unclosed character class", n - 1) }
     if (err == "trailing backslash in pattern") { return jxReFmt(pattern, "Unescaped trailing backslash", n) }
-    if (err == "unterminated group name") {
-        return jxReFmt(pattern, "named capturing group is missing trailing '>'", n)
-    }
     var k = 1
-    while (k < n && rxCompile(p.substring(0, k), "").err != err) { k = k + 1 }
+    while (k < n && rxCompile(p.substring(0, k), "J").err != err) { k = k + 1 }
     if (err == "unmatched ) in pattern") { return jxReFmt(pattern, "Unmatched closing ')'", k - 2) }
-    if (err == "character class range is out of order") { return jxReFmt(pattern, "Illegal character range", k - 1) }
     if (err == "quantifier with nothing to repeat" || err == "multiple repeat") {
         return jxReFmt(pattern, "Dangling meta character '" + p.charAt(k - 1) + "'", k - 1)
     }
-    if (err == "quantifier bounds are out of order") { return jxReFmt(pattern, "Illegal repetition range", k - 1) }
-    if (err == "invalid hex escape") { return jxReFmt(pattern, "Illegal hexadecimal escape sequence", k) }
     if (err.indexOf("unsupported group form") == 0) { return jxReFmt(pattern, "Unknown inline modifier", k - 1) }
     if (err.indexOf("unknown group name '") == 0) {
         var name = err.substring(20, err.length - 1)

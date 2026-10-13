@@ -157,6 +157,7 @@ class Main {
         S71.run(); // SECTION-CALL 71
         S72.run(); // SECTION-CALL 72
         S73.run(); // SECTION-CALL 73
+        S74.run(); // SECTION-CALL 74
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -4156,5 +4157,55 @@ class S73 {
         Object ch = 'a';
         Object str = "a";
         Main.check("ce73", !ch.equals(str) && !ch.equals(97) && ch.equals('a') && new HashSet<>(Arrays.asList("1", '1')).size() == 2);
+    }
+}
+
+// ===== SECTION 74: the java.util.regex dialect =====
+//
+// A { is always a bound: one that does not read as {n}, {n,} or {n,m} with
+// ints is an error, while a bound where an atom belongs quantifies nothing;
+// a u escape wants four hex digits, \p{..} a known property, a group name a Latin
+// letter first, a range a character at both ends; [..] classes nest and
+// intersect with &&; \nn takes as many digits as name a group, and a
+// reference to a group that did not take part FAILS; lookbehind works.
+// Every expected value is java 24.0.2's.
+class S74 {
+    static String m(String p, String s) {
+        try { return "" + s.matches(p); }
+        catch (java.util.regex.PatternSyntaxException e) { String g = e.getMessage(); return g.substring(0, g.indexOf("\n")); }
+    }
+    static String all(String[] ps, String s) {
+        String out = "";
+        for (String p : ps) { out = out + m(p, s) + ";"; }
+        return out;
+    }
+    static void run() {
+        String[] bad = {"{", "a{", "a{x}", "a{2", "x{1,2}{", "a{,2}", "a{99999999999}", "a{1,2147483648}", "a{3,2}"};
+        Main.check("bd74", all(bad, "a").equals("Illegal repetition near index 1;Illegal repetition near index 2;Illegal repetition near index 2;"
+            + "Unclosed counted closure near index 3;Illegal repetition near index 7;Illegal repetition near index 2;"
+            + "Illegal repetition range near index 11;Illegal repetition range near index 13;Illegal repetition range near index 5;"));
+        String bounds = m("a{1}{2}", "a") + m("a*{2}", "aa") + m("{1}", "") + m("a{2147483647}", "a") + m("(a){1,2147483647}", "a") + m("(ab){2,3}?c", "ababc");
+        Main.check("bn74", bounds.equals("truetruetruefalsetruetrue"));
+        String[] esc = {"\\u12", "\\p{Foo}", "\\c", "\\08", "\\x4", "\\y", "[\\b]", "\\k", "\\p{", "\\x{110000}"};
+        Main.check("es74", all(esc, "a").equals("Illegal Unicode escape sequence near index 4;Unknown character property name {Foo} near index 6;"
+            + "Illegal control escape sequence near index 1;Illegal octal escape sequence near index 2;Illegal hexadecimal escape sequence near index 3;"
+            + "Illegal/unsupported escape sequence near index 1;Illegal/unsupported escape sequence near index 2;"
+            + "\\k is not followed by '<' for named capturing group near index 2;Unclosed character family near index 3;"
+            + "Hexadecimal codepoint is too big near index 8;"));
+        String good = m("\\cA", "\u0001") + m("\\0101", "A") + m("\\x{41}", "A") + m("\\h", " ") + m("\\v", " ") + m("\\H", " ")
+            + m("\\p{Lower}+", "abc") + m("\\P{Alpha}", "A") + m("\\pL", "é") + m("\\p{Lu}", "a") + m("\\p{IsAlphabetic}", "x") + "a\r\nb\nc".split("\\R").length;
+        Main.check("eg74", good.equals("truetruetruetruetruefalsetruefalsetruefalsetrue3"));
+        String[] grp = {"(?<1a>x)", "(?<a>x)(?<a>y)", "(?<a_b>x)", "[a-", "[a-\\d]", "[b-a]", "[&&]"};
+        Main.check("gr74", all(grp, "x").equals("capturing group name does not start with a Latin letter near index 3;"
+            + "Named capturing group <a> is already defined near index 11;named capturing group is missing trailing '>' near index 4;"
+            + "Illegal character range near index 3;Illegal character range near index 4;Illegal character range near index 3;Bad class syntax near index 2;"));
+        String cls = m("[[:alpha:]]", ":") + m("[[:alpha:]]", "x") + m("[a-z&&[^aeiou]]", "e") + m("[a-z&&[^aeiou]]", "f") + m("[^a-c&&b]", "a")
+            + m("[^a-c&&b]", "b") + m("[a&&&b]", "&") + m("[a-[b]]", "-") + m("[&&a]", "a") + m("[\\w&&[^\\d]]", "5");
+        Main.check("cc74", cls.equals("truefalsefalsetruetruefalsetruetruetruefalse"));
+        String refs = m("\\2", "") + m("(a)\\11", "aa1") + m("(b)?a\\1", "a") + m("(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)\\10", "abcdefghijj") + m("\\1(a)", "a");
+        Main.check("br74", refs.equals("falsetruefalsetruefalse"));
+        String behind = "x1y2".replaceAll("(?<=x)\\d", "#") + "aXbX".replaceAll("(?<!a)X", "_") + m("aa(?<=a+)b", "aab") + m("ab(?<=(?<=a)b)", "ab")
+            + m("(?<=a{1,3})b", "b") + "a1b22c333d".split("\\d{1,2}").length;
+        Main.check("lb74", behind.equals("x#y2aXb_truetruefalse5"));
     }
 }
