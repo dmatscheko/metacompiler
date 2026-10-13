@@ -94,14 +94,14 @@ raises TypeError. Dict "keys changed during iteration" is detected only when the
 
 # JS — JavaScript and TypeScript
 
-### T-565 js: wording and remaining low-value gaps · P3 · JS · OPEN [V]
+### T-565 js: wording and remaining low-value gaps · P3 · JS · IN PROGRESS (JS worker, round 3) [V]
 TDZ says "q is not defined" (node "Cannot access 'q' before initialization"); toString radix message; JSON.parse syntax-error
 text is older V8 wording. `(1e21).toString(36)` / `(2**60).toString(7)`: interp `5v1j4f4ds7c000`, compiler `...c4ks` — the
 halves must agree (port V8's DoubleToRadixCString to all three engines). `arguments[0]=9` in a zero-arg call makes
 `arguments.length` 1 (node 0; needs an arguments object). `JSON.parse('{"__proto__":1}')` → `{}` (`__` keys are internal slots,
 manual 7.9). `String.fromCodePoint` missing everywhere; `normalize` missing in the compiler.
 
-### T-566 js: `padStart(Infinity)` hangs; a missing method aborts natively; nested-try labeled jumps; big-radix parseInt · P2 · JS · OPEN [V]
+### T-566 js: `padStart(Infinity)` hangs; a missing method aborts natively; nested-try labeled jumps; big-radix parseInt · P2 · JS · IN PROGRESS (JS worker, round 3) [V]
 `"abc".padStart(Infinity, "*")` → interp and native run until killed (node RangeError "Invalid string length"). Calling a
 missing method natively (e.g. `String.fromCodePoint(65)` in a try) ends the binary with exit 1, interp and run throw a
 catchable TypeError "... is not a function". A labeled break crossing several nested try bodies with for-of loops in between
@@ -109,7 +109,7 @@ does not close the for-of iterators opened inside the intermediate try closures 
 P3: `parseInt` past 2^53 in a radix that is neither 10 nor a power of two — all legs agree, node differs in the last digit
 (implementation-defined approximation in V8).
 
-### T-560 js/ts: a generator that re-enters itself aborts instead of throwing TypeError · P2 · JS · OPEN [V]
+### T-560 js/ts: a generator that re-enters itself aborts instead of throwing TypeError · P2 · JS · IN PROGRESS (JS worker, round 3) [V]
 A generator body calling `me.next()` on itself: every compiled leg aborts with "generator already running" (the floor's
 gen_busy / the twin's jsGenerator.enter with no hook registered); node throws a catchable `TypeError: Generator is already
 running`. Register a `js_rt_genbusy` hook in js-/typescript-to-llvm-ir.abnf the way python-to-llvm-ir.abnf does, and check
