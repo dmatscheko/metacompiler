@@ -2501,6 +2501,7 @@ NotMemberKw = :script(~~
     include("lib/java-chars.js")
     include("lib/regex.js")
     include("lib/java-regex.js")
+    include("lib/java-format.js")
     rxFail = function (msg) { fail(msg) }
     rxPropHit = function (id, c) { return jxPropHit(id, c) }
 
@@ -5049,7 +5050,7 @@ NotMemberKw = :script(~~
             name == "toIntOrNull" || name == "toLongOrNull" || name == "toDoubleOrNull" || name == "toFloatOrNull") {
             return {v: kParseNum(sv, name, args.length > 0 ? kNum(args[0]) : 10)}
         }
-        if (name == "format") { return {v: kFormat(sv, args)} }
+        if (name == "format") { return {v: jxFormat(sv, args)} }
         // ----- More of kotlin.text. The compiled twin is ktStrMethod2 in
         // abnf/jsrtkotlin.go. A `replace` whose argument is a Regex never reaches
         // here - krxMethod runs before this branch in mcall.
@@ -5488,156 +5489,52 @@ NotMemberKw = :script(~~
         if (c >= 65 && c <= 70) { return c - 55 }
         return -1
     }
-    // The subset of java.util.Formatter a test program writes: %s, %d, %f (with a
-    // precision), %x, %c, %b, %% and a width. The Go twin is ktFormat.
-    // java.util.Formatter's %f has two rules (java is the oracle: Kotlin/JVM inherits
-    // the semantics, and there is no kotlinc here):
-    //
-    //   1. THE DIGITS ARE Double.toString's, NOT THE DOUBLE'S EXACT DECIMAL.
-    //      java's Formatter renders a double through FormattedFloatingDecimal, which
-    //      starts from the SHORTEST round-tripping decimal and pads with zeros. So
-    //      String.format("%.20f", 0.1) is "0.10000000000000000000" and not
-    //      0.1000000000000000055511151231257827, "%.30f" of 4.9e-324 is all zeros,
-    //      and "%.0f" of 1.3379870716132959e18 is 1337987071613295900 - NOT the exact
-    //      1337987071613295872. So rtFixed / rtExactDec in
-    //      languages/lib/runtime.metajs - the exact machinery
-    //      docs/working-on-this-project.md 7.7 points at - is the WRONG tool here.
-    //   2. THE TIE RULE IS HALF_UP, AWAY FROM ZERO, applied to those digits:
-    //      "%.1f" of 0.15 is "0.2" (the exact double is 0.1499999999999999944, which
-    //      an exact half-even rounder answers "0.1"), of 0.25 is "0.3", "%.0f" of 2.5
-    //      is "3" and of -2.5 is "-3".
-    //
-    // A naive Math.floor(x*10^p + 0.5) would also overflow to Infinity for prec 17 of
-    // 1e300, lose the sign of -0.0 (java prints "-0"), and stop being the value past
-    // 2^53. The twins are ktFixed in abnf/jsrtkotlin.go and k2Fixed in
-    // languages/lib/kotlin-rt.metajs; all three must agree or --cross and the native
-    // leg diverge.
-    function kFixed(f, prec) {
-        if (f !== f) { return "NaN" }
-        if (f - f !== 0) { return f > 0 ? "Infinity" : "-Infinity" }
-        var neg = f < 0 || (f === 0 && 1 / f < 0)
-        var x = neg ? 0 - f : f
-        var digits = "0"
-        var e10 = 0
-        if (x !== 0) {
-            var sig = coreDecDigits(x)
-            var ei = sig.indexOf("e")
-            digits = sig.substring(0, ei)
-            e10 = parseInt(sig.substring(ei + 1), 10)
+    // kotlin.text.format IS java.lang.String.format: lib/java-format.js over these
+    // value-model hooks. A primitive is boxed to its java.lang class, so a mismatch
+    // names that class. Twin of ktFormat in abnf/jsrtkotlin.go and the jxk* hooks in
+    // languages/lib/kotlin-rt.metajs.
+    function jxkKind(v) {
+        if (v === null || v === undefined) { return "null" }
+        if (typeof v == "boolean") { return "bool" }
+        if (typeof v == "string") { return "str" }
+        if (typeof v == "number") { return "int" }
+        if (typeof v == "object") {
+            if (v.__char !== undefined) { return "char" }
+            if (v.__sz === true) { return "int" }
+            if (v.__flo !== undefined) { return "float" }
         }
-        var body = kFixedBody(digits, e10, prec)
-        return neg ? "-" + body : body
+        return "obj"
     }
-    // The digit half of kFixed, shared with nothing (see the twins named above) but
-    // split out because MetaJS pins a reassigned local to its first type and the two
-    // string cursors below would otherwise collide with the numeric ones.
-    // `digits` are the significant digits with no point, `e10` the decimal exponent of
-    // the FIRST of them, so the value is digits[0] . digits[1..] * 10^e10.
-    function kFixedBody(digits, e10, prec) {
-        var ilen = e10 + 1
-        var ip = ""
-        var fp = ""
-        if (ilen <= 0) {
-            ip = "0"
-            fp = kZeros(0 - ilen) + digits
-        } else if (ilen >= digits.length) {
-            ip = digits + kZeros(ilen - digits.length)
-            fp = ""
-        } else {
-            ip = digits.substring(0, ilen)
-            fp = digits.substring(ilen, digits.length)
-        }
-        if (fp.length <= prec) {
-            fp = fp + kZeros(prec - fp.length)
-        } else {
-            var up = fp.charCodeAt(prec) >= 53
-            fp = fp.substring(0, prec)
-            if (up) {
-                var carried = kCarry1(fp)
-                fp = carried.substring(carried.length - prec, carried.length)
-                if (carried.length > prec) { ip = kCarry1(ip) }
-            }
-        }
-        if (prec > 0) { return ip + "." + fp }
-        return ip
-    }
-    function kZeros(n) {
-        var z = ""
-        for (var i = 0; i < n; i++) { z = z + "0" }
-        return z
-    }
-    // The digit string plus one, one character longer when the carry runs off the
-    // front ("999" -> "1000"), which is how the caller detects it.
-    function kCarry1(ds) {
+    function jxkStr(v) { return kstr2(v) }
+    function jxkCode(v) { return kIsChar(v) ? v.__char : kNumD(v) }
+    function jxkDec(v) { return szIs(v) ? szStr(v) : "" + v }
+    // Two's complement digits at the value's own width (Byte 8, Short 16, Int 32,
+    // Long 64), as Formatter's %x / %o print a negative.
+    function jxkRadix(v, r) {
+        var w = szIs(v) ? v.w : 32
+        var p = i64Trunc(szIs(v) ? szPair(v) : i64FromNum(v), w, true)
+        if (i64IsZero(p)) { return "0" }
         var out = ""
-        var carry = 1
-        for (var i = ds.length - 1; i >= 0; i--) {
-            var d = ds.charCodeAt(i) - 48 + carry
-            carry = 0
-            if (d == 10) { d = 0; carry = 1 }
-            out = "" + d + out
-        }
-        if (carry == 1) { out = "1" + out }
-        return out
-    }
-    function kPadNum(sv, width, left, zero) {
-        var out = sv
-        while (out.length < width) { out = left ? (zero ? "0" : " ") + out : out + " " }
-        return out
-    }
-    function kFormat(f, args) {
-        var out = ""
-        var ai = 0
-        var i = 0
-        while (i < f.length) {
-            var ch = f.charAt(i)
-            if (ch != "%") { out += ch; i++; continue }
-            if (i + 1 < f.length && f.charAt(i + 1) == "%") { out += "%"; i = i + 2; continue }
-            i++
-            var flags = ""
-            while (i < f.length) {
-                var fc = f.charAt(i)
-                if (fc == "-" || fc == "+" || fc == "0" || fc == " " || fc == "." || fc == "," ||
-                    (fc >= "0" && fc <= "9")) { if (fc != ",") { flags += fc }; i++; continue }
-                break
-            }
-            if (i >= f.length) { break }
-            var verb = f.charAt(i)
-            i++
-            var a = anytype
-            a = ai < args.length ? args[ai] : undefined
-            ai++
-            var leftPad = flags.indexOf("-") < 0
-            var zeroPad = flags.length > 0 && flags.charAt(0) == "0"
-            var width = 0
-            var prec = 0 - 1
-            var wpart = flags
-            var dot = flags.indexOf(".")
-            if (dot >= 0) {
-                wpart = flags.substring(0, dot)
-                prec = parseFloat("0" + flags.substring(dot + 1, flags.length))
-            }
-            var wnum = ""
-            for (var wi = 0; wi < wpart.length; wi++) {
-                var wc = wpart.charAt(wi)
-                if (wc >= "0" && wc <= "9") { wnum += wc }
-            }
-            if (wnum.length > 0) { width = parseFloat(wnum) }
-            var piece = ""
-            if (verb == "s") { piece = kstr2(a) }
-            else if (verb == "d") { piece = szIs(a) ? szStr(a) : ("" + (kNum(a) | 0)) }
-            else if (verb == "f") { piece = kFixed(kNumD(a), prec < 0 ? 6 : prec) }
-            else if (verb == "x" || verb == "X") {
-                var hx = (kNum(a) | 0).toString(16)
-                piece = verb == "X" ? hx.toUpperCase() : hx
-            }
-            else if (verb == "c") { piece = kIsChar(a) ? String.fromCharCode(a.__char) : kstr2(a) }
-            else if (verb == "b") { piece = a ? "true" : "false" }
-            else { piece = verb; ai-- }
-            out += kPadNum(piece, width, leftPad, zeroPad)
+        while (!i64IsZero(p)) {
+            var d = i64DivModSmall(p, r)
+            out = "0123456789abcdefghijklmnopqrstuvwxyz".charAt(d.r) + out
+            p = d.q
         }
         return out
     }
+    function jxkDbl(v) { return v.__flo }
+    function jxkDblStr(a) { return kFloStr(a) }
+    function jxkFail(msg) { fail(msg) }
+    function jxkClass(v) {
+        var n = kSimpleName(v)
+        if (n == "Int") { return "java.lang.Integer" }
+        if (n == "Char") { return "java.lang.Character" }
+        if (n == "Long" || n == "Short" || n == "Byte" || n == "Double" || n == "Float" ||
+            n == "String" || n == "Boolean") { return "java.lang." + n }
+        return n
+    }
+    function jxkHash(v) { return kHash(v) }
+    function jxkThrow(cls, msg) { kThrowExc(cls, msg) }
 
     // ----- explicit TYPE ARGUMENTS on a method call -----
     // The methods whose type argument is part of the call's MEANING. For these the type
@@ -7216,9 +7113,13 @@ NotMemberKw = :script(~~
         if (v === null || v === undefined) { return 0 }
         if (kIsChar(v)) { return v.__char }
         if (kIsFlo(v)) { return kIsF32(v) ? kFltHash(v.__flo) : kDblHash(v.__flo) }
-        // Long.hashCode is (value xor (value ushr 32)) read as an Int; for every
-        // narrower width that is the value itself.
-        if (szIs(v)) { return szNum(szConv(szArith("^", v, szArith(">>", szConv(v, 64, true), 32)), 32, false)) | 0 }
+        // Long.hashCode is (value xor (value ushr 32)) read as an Int; every narrower
+        // type hashes as its value read at its own SIGNED width, so UByte 255 is -1.
+        if (szIs(v)) {
+            if (v.w == 64) { return szNum(szConv(szArith("^", v, szArith(">>", szConv(v, 64, true), 32)), 32, false)) | 0 }
+            var hb = 32 - v.w
+            return (szNum(v) << hb) >> hb
+        }
         var t = typeof v
         if (t == "boolean") { return v ? 1231 : 1237 }
         if (t == "number") { return v | 0 }
@@ -10710,8 +10611,15 @@ NotMemberKw = :script(~~
                      // instanceof). `"ab"[5]` throws it; the COLLECTION read throws plain
                      // IndexOutOfBoundsException, see kIndex.
                      "StringIndexOutOfBoundsException",
-                     // java.util.regex's, under IllegalArgumentException (java instanceof).
-                     "PatternSyntaxException"]
+                     // java.util.regex's and java.util.Formatter's, under
+                     // IllegalArgumentException (java instanceof).
+                     "PatternSyntaxException", "IllegalFormatException",
+                     "IllegalFormatConversionException", "MissingFormatArgumentException",
+                     "UnknownFormatConversionException", "IllegalFormatPrecisionException",
+                     "MissingFormatWidthException", "IllegalFormatCodePointException",
+                     "IllegalFormatFlagsException", "FormatFlagsConversionMismatchException",
+                     "IllegalFormatWidthException", "DuplicateFormatFlagsException",
+                     "IllegalFormatArgumentIndexException"]
         var supers = ["", "Throwable", "Throwable", "Exception",
                       "RuntimeException", "RuntimeException",
                       "RuntimeException", "RuntimeException",
@@ -10720,7 +10628,13 @@ NotMemberKw = :script(~~
                       "RuntimeException", "IllegalArgumentException",
                       "Exception", "Error", "Error",
                       "Error", "RuntimeException",
-                      "IndexOutOfBoundsException", "IllegalArgumentException"]
+                      "IndexOutOfBoundsException", "IllegalArgumentException",
+                      "IllegalArgumentException", "IllegalFormatException",
+                      "IllegalFormatException", "IllegalFormatException",
+                      "IllegalFormatException", "IllegalFormatException",
+                      "IllegalFormatException", "IllegalFormatException",
+                      "IllegalFormatException", "IllegalFormatException",
+                      "IllegalFormatException", "IllegalFormatException"]
         for (var i = 0; i < names.length; i++) {
             var cls = newDescriptor(names[i], i == 0 ? [] : [{name: supers[i], args: null, deleg: null}])
             // The PACKAGE-QUALIFIED (binary) name, which is what Throwable#toString

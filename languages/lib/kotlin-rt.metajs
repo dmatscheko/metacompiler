@@ -677,6 +677,19 @@ function ktExcHierarchy() {
     h["NumberFormatException"] = k0MkExc("NumberFormatException", h["IllegalArgumentException"])
     // java.util.regex.PatternSyntaxException is under IllegalArgumentException too.
     h["PatternSyntaxException"] = k0MkExc("PatternSyntaxException", h["IllegalArgumentException"])
+    // java.util.Formatter's exceptions, under IllegalFormatException.
+    h["IllegalFormatException"] = k0MkExc("IllegalFormatException", h["IllegalArgumentException"])
+    var fmtExc = ["IllegalFormatConversionException", "MissingFormatArgumentException",
+        "UnknownFormatConversionException", "IllegalFormatPrecisionException",
+        "MissingFormatWidthException", "IllegalFormatCodePointException",
+        "IllegalFormatFlagsException", "FormatFlagsConversionMismatchException",
+        "IllegalFormatWidthException", "DuplicateFormatFlagsException",
+        "IllegalFormatArgumentIndexException"]
+    i = 0
+    while (i < fmtExc.length) {
+        h[fmtExc[i]] = k0MkExc(fmtExc[i], h["IllegalFormatException"])
+        i = i + 1
+    }
     // StringIndexOutOfBoundsException is under IndexOutOfBoundsException, not
     // directly under RuntimeException - checked with `instanceof` under java (JDK
     // 24). It is what `"ab"[5]` throws; the COLLECTION read throws plain
@@ -1140,8 +1153,10 @@ function ktElemHash(v) {
         return ktFloHash(v)
     }
     if (sintIs(v)) {
-        if (sintWidth(v) == 64) { return sintLo(v) ^ sintHi(v) }
-        return sintLo(v) | 0
+        var hw = sintWidth(v)
+        if (hw == 64) { return sintLo(v) ^ sintHi(v) }
+        // A narrower type hashes as its value at its own SIGNED width (UByte 255 is -1).
+        return (sintLo(v) << (32 - hw)) >> (32 - hw)
     }
     if (typeof v == "number") { return k0Wrap32(Math.trunc(v)) }
     // A PROGRESSION hashes by its bounds, not its elements - and an EMPTY one
@@ -1636,17 +1651,7 @@ function ktNumMethod(recv, name, args) {
         if (!floIs(recv)) { return false }
         return floNum(recv) !== floNum(recv)
     }
-    if (name == "hashCode") {
-        // Double.hashCode or Float.hashCode, by the box's style byte - ktFloHash.
-        if (floIs(recv)) { return ktFloHash(recv) }
-        if (sintIs(recv)) {
-            // Long.hashCode is (value xor (value ushr 32)) read as an Int; for
-            // every narrower width that is the value itself.
-            var h64 = sintConv(recv, 64, 0)
-            return k1I32(sintOp(7, h64, sintOp(10, h64, 32)))
-        }
-        return k1I32(recv)
-    }
+    if (name == "hashCode") { return ktElemHash(recv) }
     return KT_MISS
 }
 
@@ -2671,7 +2676,7 @@ function k2StrMethod2(s, name, args) {
         // "%.2f".format(x): the receiver is the format string, as
         // kotlin.text.format declares it (String.Companion.format has the
         // arguments the other way round).
-        return k2Format(s, args)
+        return jxFormat(s, args)
     }
 
     // ----- More of kotlin.text. The twin is the `typeof target == "string"`
@@ -3295,254 +3300,69 @@ function k2HexVal(c) {
     return 0 - 1
 }
 
-// k2Format is ktFormat (jsrtkotlin.go:2502): the subset of java.util.Formatter
-// a test program actually writes - %s, %d, %f with an optional precision, %x,
-// %% and a width.
-//
-// The Go twin hands the assembled spec to fmt.Sprintf; the floor's own sprintf
-// (runtime.c:3080) supports NO width and NO precision, so the padding is done
-// by hand here. The two verbs that are not reproduced are %e and %g: Go's
-// scientific formatting has no counterpart the floor can reach, so they fall
-// back on the double's own rendering.
-function k2Format(f, args) {
-    var out = ""
-    var ai = 0
-    var i = 0
-    while (i < f.length) {
-        if (f.charAt(i) != "%") {
-            out = out + f.charAt(i)
-            i = i + 1
-            continue
-        }
-        if (i + 1 < f.length) {
-            if (f.charAt(i + 1) == "%") {
-                out = out + "%"
-                i = i + 2
-                continue
-            }
-        }
-        i = i + 1
-        var minus = false
-        var plus = false
-        var zero = false
-        var width = 0
-        var prec = -1
-        var inPrec = false
-        var more = true
-        while (more && i < f.length) {
-            var fc = f.charAt(i)
-            if (fc == "-") { minus = true } else if (fc == "+") { plus = true } else if (fc == " ") {
-                more = true
-            } else if (fc == ",") {
-                // The grouping flag is dropped, exactly as the Go twin drops it.
-                more = true
-            } else if (fc == ".") {
-                inPrec = true
-                prec = 0
-            } else if (fc == "0" && !inPrec && width == 0) { zero = true } else if (fc >= "0" && fc <= "9") {
-                var d = f.charCodeAt(i) - 48
-                if (inPrec) { prec = prec * 10 + d } else { width = width * 10 + d }
-            } else { more = false }
-            if (more) { i = i + 1 }
-        }
-        if (i >= f.length) { break }
-        var verb = f.charAt(i)
-        var a = anytype
-        a = undefined
-        if (ai < args.length) { a = args[ai] }
-        ai = ai + 1
-        var txt = anytype
-        txt = ""
-        if (verb == "s") {
-            txt = k2Render(a, 0)
-            if (prec >= 0 && txt.length > prec) { txt = txt.substring(0, prec) }
-            out = out + k2Pad(txt, width, minus, false)
-        } else if (verb == "d") {
-            txt = k2IntText(a)
-            if (plus && !k2StartsWith(txt, "-")) { txt = "+" + txt }
-            out = out + k2PadNum(txt, width, minus, zero)
-        } else if (verb == "f") {
-            var p = prec
-            if (p < 0) { p = 6 }
-            txt = k2Fixed(ktNum(a), p)
-            if (plus && !k2StartsWith(txt, "-")) { txt = "+" + txt }
-            out = out + k2PadNum(txt, width, minus, zero)
-        } else if (verb == "e" || verb == "g") {
-            // NOT Go's %e / %g. See the header note.
-            txt = k2Render(flo(ktNum(a), 0), 0)
-            out = out + k2Pad(txt, width, minus, false)
-        } else if (verb == "x" || verb == "X" || verb == "o") {
-            var base = 16
-            if (verb == "o") { base = 8 }
-            txt = k2BaseText(a, base, verb == "X")
-            out = out + k2PadNum(txt, width, minus, zero)
-        } else if (verb == "c") {
-            if (ktIsChar(a)) { txt = k2ChStr(ktCharCode(a)) } else { txt = k2Render(a, 0) }
-            out = out + k2Pad(txt, width, minus, false)
-        } else if (verb == "b") {
-            // Go's %t of rt.truthy(a).
-            if (k2Truthy(a)) { txt = "true" } else { txt = "false" }
-            out = out + k2Pad(txt, width, minus, false)
-        } else {
-            out = out + verb
-            ai = ai - 1
-        }
-        i = i + 1
-    }
-    return out
+// kotlin.text.format IS java.lang.String.format: lib/java-format.js over these
+// value-model hooks. A primitive is boxed to its java.lang class, so a mismatch
+// names that class. Twin of ktFormat in jsrtkotlin.go.
+function jxkKind(v) {
+    if (rtIsNil(v)) { return "null" }
+    if (typeof v == "boolean") { return "bool" }
+    if (typeof v == "string") { return "str" }
+    if (ktIsChar(v)) { return "char" }
+    if (floIs(v)) { return "float" }
+    if (typeof v == "number") { return "int" }
+    return "obj"
 }
-
-function k2Pad(s, width, minus, zero) {
-    var out = s
-    while (out.length < width) {
-        if (minus) { out = out + " " } else if (zero) { out = "0" + out } else { out = " " + out }
-    }
-    return out
+function jxkStr(v) { return k2Str2(v) }
+function jxkCode(v) {
+    if (ktIsChar(v)) { return ktCharCode(v) }
+    return k2Int(v)
 }
-
-// A numeric field pads with zeros AFTER the sign, which is what Go's %0Nd does.
-function k2PadNum(s, width, minus, zero) {
-    if (!zero || minus) { return k2Pad(s, width, minus, false) }
-    var sign = ""
-    var body = s
-    if (k2StartsWith(s, "-") || k2StartsWith(s, "+")) {
-        sign = s.substring(0, 1)
-        body = s.substring(1, s.length)
-    }
-    while (sign.length + body.length < width) { body = "0" + body }
-    return sign + body
-}
-
-// giVal's digits: a sized integer keeps its exact (possibly unsigned) spelling,
-// everything else is truncated toward zero.
-function k2IntText(v) {
+function jxkDec(v) {
     if (sintIs(v)) { return sintStr(v) }
-    if (ktIsChar(v)) { return "" + ktCharCode(v) }
     return "" + k2Int(v)
 }
-
-function k2BaseText(v, base, upper) {
-    var x = k2Int(v)
-    var neg = false
-    if (x < 0) {
-        neg = true
-        x = -x
+// Two's complement digits at the value's own width (Byte 8, Short 16, Int 32,
+// Long 64), as Formatter's %x / %o print a negative.
+function jxkRadix(v, r) {
+    var hi = 0
+    var lo = 0
+    var w = 32
+    if (sintIs(v)) {
+        w = sintWidth(v)
+        hi = sintHi(v)
+        lo = sintLo(v)
+    } else {
+        lo = k2Int(v)
+        if (lo < 0) { lo = lo + 4294967296 }
     }
-    if (x == 0) { return "0" }
-    var digits = "0123456789abcdef"
-    if (upper) { digits = "0123456789ABCDEF" }
+    if (w < 64) { hi = 0 }
+    if (w == 16) { lo = lo % 65536 }
+    if (w == 8) { lo = lo % 256 }
     var out = ""
-    while (x > 0) {
-        var d = x % base
-        out = digits.charAt(d) + out
-        x = Math.floor(x / base)
+    while (hi > 0 || lo > 0) {
+        var rh = hi % r
+        hi = (hi - rh) / r
+        var cur = rh * 4294967296 + lo
+        var d = cur % r
+        lo = (cur - d) / r
+        out = "0123456789abcdefghijklmnopqrstuvwxyz".charAt(d) + out
     }
-    if (neg) { out = "-" + out }
+    if (out == "") { return "0" }
     return out
 }
-
-// rt.truthy: everything but null / undefined / false / 0 / "" / NaN.
-function k2Truthy(v) {
-    if (v === undefined || v === null || v === false) { return false }
-    if (v === true) { return true }
-    if (typeof v == "string") { return v.length > 0 }
-    if (sintIs(v) || floIs(v)) { return ktNum(v) != 0 }
-    if (typeof v == "number") { return v != 0 && v === v }
-    return true
+function jxkDbl(v) { return ktNum(v) }
+function jxkDblStr(a) { return ktRender(flo(a, 0)) }
+function jxkFail(msg) { fail(msg) }
+function jxkClass(v) {
+    var n = k4bSimpleName(v)
+    if (n == "Int") { return "java.lang.Integer" }
+    if (n == "Char") { return "java.lang.Character" }
+    if (n == "Long" || n == "Short" || n == "Byte" || n == "Double" || n == "Float" ||
+        n == "String" || n == "Boolean") { return "java.lang." + n }
+    return n
 }
-
-// k2Fixed is ktFixed (abnf/jsrtkotlin.go); twin: kFixed in
-// languages/kotlin-interpreter.abnf. The two rules (java.util.Formatter):
-//
-//   - %f renders from Double.toString's SHORTEST round-tripping digits,
-//     zero-padded - NOT from the double's exact decimal. "%.20f" of 0.1 is
-//     "0.10000000000000000000"; "%.0f" of 1.3379870716132959e18 is
-//     1337987071613295900 and not the exact ...872. So rtFixed / rtExactDec in
-//     ./runtime.metajs, which are exact, are the wrong tool for this one - they are
-//     right for python / ruby / swift, whose formatters really are exact.
-//   - the tie rule is HALF_UP, away from zero, on those digits: "%.1f" of 0.15 is
-//     "0.2" where an exact half-even rounder answers "0.1".
-//
-// rtDecDigits is the shortest-digits source; see its own header for why `"" + a`
-// is exact in this file and is not in a tag script.
-function k2Fixed(f, prec) {
-    if (f !== f) { return "NaN" }
-    if (f - f !== 0) {
-        if (f > 0) { return "Infinity" }
-        return "-Infinity"
-    }
-    var neg = f < 0
-    if (f === 0 && 1 / f < 0) { neg = true }
-    var x = f
-    if (neg) { x = -x }
-    var digits = "0"
-    var e10 = 0
-    if (x !== 0) {
-        var sig = rtDecDigits(x)
-        var ei = sig.indexOf("e")
-        digits = sig.substring(0, ei)
-        e10 = parseInt(sig.substring(ei + 1), 10)
-    }
-    var body = k2FixedBody(digits, e10, prec)
-    if (neg) { return "-" + body }
-    return body
-}
-
-// `digits` are the significant digits with no point and `e10` the decimal exponent
-// of the FIRST of them, so the value is digits[0] . digits[1..] * 10^e10. Lay them
-// out around the point and round the fraction to prec digits, half up.
-function k2FixedBody(digits, e10, prec) {
-    var ilen = e10 + 1
-    var ip = ""
-    var fp = ""
-    if (ilen <= 0) {
-        ip = "0"
-        fp = k2Zeros(0 - ilen) + digits
-    } else if (ilen >= digits.length) {
-        ip = digits + k2Zeros(ilen - digits.length)
-        fp = ""
-    } else {
-        ip = digits.substring(0, ilen)
-        fp = digits.substring(ilen, digits.length)
-    }
-    if (fp.length <= prec) {
-        fp = fp + k2Zeros(prec - fp.length)
-    } else {
-        var up = fp.charCodeAt(prec) >= 53
-        fp = fp.substring(0, prec)
-        if (up) {
-            var carried = k2Carry1(fp)
-            fp = carried.substring(carried.length - prec, carried.length)
-            if (carried.length > prec) { ip = k2Carry1(ip) }
-        }
-    }
-    if (prec > 0) { return ip + "." + fp }
-    return ip
-}
-
-function k2Zeros(n) {
-    var z = ""
-    var i = 0
-    while (i < n) { z = z + "0"; i = i + 1 }
-    return z
-}
-
-// The digit string plus one, one character longer when the carry runs off the
-// front ("999" -> "1000"), which is how the caller detects it.
-function k2Carry1(ds) {
-    var out = ""
-    var carry = 1
-    var i = ds.length - 1
-    while (i >= 0) {
-        var d = ds.charCodeAt(i) - 48 + carry
-        carry = 0
-        if (d == 10) { d = 0; carry = 1 }
-        out = "" + d + out
-        i = i - 1
-    }
-    if (carry == 1) { out = "1" + out }
-    return out
-}
+function jxkHash(v) { return ktElemHash(v) }
+function jxkThrow(cls, msg) { ktRaise(cls, msg) }
 
 // ------------------------------------------------------------ the Char surface
 
@@ -9034,6 +8854,8 @@ function k4NameVal(v, name) {
 import "./java-chars.js"
 import "./regex.js"
 import "./java-regex.js"
+// kotlin.text.format is java.lang.String.format (lib/java-format.js).
+import "./java-format.js"
 
 // ===================================================== the Kotlin layer =====
 //

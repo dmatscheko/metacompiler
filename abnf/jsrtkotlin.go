@@ -185,6 +185,16 @@ func ktExcHierarchy() map[string]*jsObject {
 	h["NumberFormatException"] = mk("NumberFormatException", h["IllegalArgumentException"])
 	// java.util.regex.PatternSyntaxException is under IllegalArgumentException too.
 	h["PatternSyntaxException"] = mk("PatternSyntaxException", h["IllegalArgumentException"])
+	// java.util.Formatter's exceptions, under IllegalFormatException.
+	h["IllegalFormatException"] = mk("IllegalFormatException", h["IllegalArgumentException"])
+	for _, n := range []string{"IllegalFormatConversionException", "MissingFormatArgumentException",
+		"UnknownFormatConversionException", "IllegalFormatPrecisionException",
+		"MissingFormatWidthException", "IllegalFormatCodePointException",
+		"IllegalFormatFlagsException", "FormatFlagsConversionMismatchException",
+		"IllegalFormatWidthException", "DuplicateFormatFlagsException",
+		"IllegalFormatArgumentIndexException"} {
+		h[n] = mk(n, h["IllegalFormatException"])
+	}
 	// StringIndexOutOfBoundsException is under IndexOutOfBoundsException, not
 	// directly under RuntimeException - checked with `instanceof` under java (JDK
 	// 24), which also gives the message an out-of-range charAt carries:
@@ -683,13 +693,7 @@ func (rt *jsrt) ktNumMethod(target interface{}, name string, args []interface{})
 		f, ok := target.(jsJFlo)
 		return ok && math.IsNaN(f.f), true
 	case "hashCode":
-		if f, ok := target.(jsJFlo); ok {
-			return float64(ktFloHash(f)), true
-		}
-		if b, ok := target.(jsGInt); ok {
-			return float64(int32(b.v ^ (b.v >> 32))), true
-		}
-		return float64(int32(giVal(rt, target))), true
+		return float64(int32(ktElemHash(rt, target))), true
 	}
 	return nil, false
 }
@@ -3364,80 +3368,21 @@ func ktJavaFloat(s string, f32 bool) (float64, bool, bool) {
 	return v, true, false
 }
 
-// ktFormat implements the subset of java.util.Formatter that a test program
-// actually writes: %s, %d, %f with an optional precision, %x, %%, and a width.
+// ktFormat is kotlin.text.format, which IS java.lang.String.format: java's
+// formatter (jxFormat) over Kotlin's rendering, hash and exception classes. A
+// primitive is boxed to its java.lang class, so a mismatch names that class.
+// Twin of the jxk* hooks in kotlin-interpreter.abnf and languages/lib/kotlin-rt.metajs.
 func ktFormat(rt *jsrt, f string, args []interface{}) string {
-	out := ""
-	ai := 0
-	rs := []rune(f)
-	for i := 0; i < len(rs); i++ {
-		if rs[i] != '%' {
-			out += string(rs[i])
-			continue
-		}
-		if i+1 < len(rs) && rs[i+1] == '%' {
-			out += "%"
-			i++
-			continue
-		}
-		spec := "%"
-		i++
-		for i < len(rs) && (rs[i] == '-' || rs[i] == '+' || rs[i] == '0' || rs[i] == ' ' ||
-			rs[i] == '.' || rs[i] == ',' || (rs[i] >= '0' && rs[i] <= '9')) {
-			if rs[i] != ',' {
-				spec += string(rs[i])
+	h := &jxFmtHooks{rt: rt, throw: rt.ktRaise,
+		str:  func(v interface{}) string { return rt.ktpRender(v, 0) },
+		hash: func(v interface{}) int32 { return int32(ktElemHash(rt, v)) },
+		class: func(v interface{}) string {
+			if bn := jvBoxName(v); bn != "" {
+				return "java.lang." + bn
 			}
-			i++
-		}
-		if i >= len(rs) {
-			break
-		}
-		verb := rs[i]
-		var a interface{} = jsUndef
-		if ai < len(args) {
-			a = args[ai]
-		}
-		ai++
-		switch verb {
-		case 's':
-			out += fmt.Sprintf(spec+"s", rt.ktpRender(a, 0))
-		case 'd':
-			out += fmt.Sprintf(spec+"d", giVal(rt, a))
-		case 'f':
-			// Java's %f rounds HALF UP, Go's Sprintf rounds half to even, so
-			// String.format("%5.1f", 1.25) is "  1.3" on java and "  1.2" through
-			// Sprintf. ktFixed is the Go twin of kFixed in kotlin-interpreter.abnf and
-			// gives both halves Java's answer.
-			prec := 6
-			if d := strings.Index(spec, "."); d >= 0 {
-				prec = 0
-				for _, r := range spec[d+1:] {
-					if r < '0' || r > '9' {
-						break
-					}
-					prec = prec*10 + int(r-'0')
-				}
-				spec = spec[:d]
-			}
-			out += fmt.Sprintf(spec+"s", ktFixed(giFloat(rt, a), prec))
-		case 'e', 'g':
-			out += fmt.Sprintf(spec+string(verb), giFloat(rt, a))
-		case 'x', 'X', 'o':
-			out += fmt.Sprintf(spec+string(verb), giVal(rt, a))
-		case 'c':
-			if c, ok := a.(jsChar); ok {
-				out = strConcat(out, c.text())
-			} else {
-				out += rt.ktpRender(a, 0)
-			}
-		case 'b':
-			out += fmt.Sprintf(spec+"t", rt.truthy(a))
-		default:
-			out += string(verb)
-			ai--
-		}
-	}
-	return out
+			return rt.toString(ktSimpleName(v))
+		}}
+	return h.jxFormat(f, args)
 }
 
 // ktStr2 is kstr2: a string is itself, everything else renders through ktpRender.
@@ -5374,9 +5319,19 @@ func ktElemHash(rt *jsrt, v interface{}) int64 {
 		return int64(ktFloHash(t))
 	}
 	if giIsNumeric(v) {
+		// Long's hash folds the halves; a narrower type hashes as its value read at
+		// its own width, so UByte 255 is Byte -1's -1 (an unsigned type's hashCode
+		// is its signed twin's). Twin of kHash and ktElemHash in kotlin-rt.metajs.
 		x := giVal(rt, v)
-		if b, ok := v.(jsGInt); ok && b.w == 64 {
-			return x ^ (x >> 32)
+		if b, ok := v.(jsGInt); ok {
+			switch b.w {
+			case 64:
+				return x ^ (x >> 32)
+			case 16:
+				return int64(int16(x))
+			case 8:
+				return int64(int8(x))
+			}
 		}
 		return int64(int32(x))
 	}
@@ -7683,95 +7638,6 @@ func (rt *jsrt) ktLazyValue(o *jsObject) interface{} {
 		o.set("done", true)
 	}
 	return o.props["v"]
-}
-
-// ktFixed renders a float with `prec` decimals the way java.util.Formatter's %f
-// does. The twins are kFixed in languages/kotlin-interpreter.abnf and k2Fixed in
-// languages/lib/kotlin-rt.metajs; the full derivation is in kFixed's header. In
-// one line each:
-//
-//   - the digits are Double.toString's SHORTEST round-tripping decimal padded with
-//     zeros, not the double's exact expansion, so "%.20f" of 0.1 is
-//     "0.10000000000000000000" and "%.0f" of 1.3379870716132959e18 is
-//     1337987071613295900 and not the exact 1337987071613295872;
-//   - the tie rule is HALF_UP away from zero ON THOSE DIGITS, so "%.1f" of 0.15 is
-//     "0.2" where an exact rounder says "0.1".
-func ktFixed(f float64, prec int) string {
-	if math.IsNaN(f) {
-		return "NaN"
-	}
-	if math.IsInf(f, 1) {
-		return "Infinity"
-	}
-	if math.IsInf(f, -1) {
-		return "-Infinity"
-	}
-	neg := math.Signbit(f)
-	x := math.Abs(f)
-	digits, e10 := "0", 0
-	if x != 0 {
-		// 'e' with precision -1 is the shortest round-tripping form, which is what
-		// Double.toString answers too.
-		s := strconv.FormatFloat(x, 'e', -1, 64)
-		at := strings.IndexByte(s, 'e')
-		e10, _ = strconv.Atoi(s[at+1:])
-		digits = strings.Replace(s[:at], ".", "", 1)
-	}
-	out := ktFixedBody(digits, e10, prec)
-	if neg {
-		out = "-" + out
-	}
-	return out
-}
-
-// ktFixedBody lays `digits` out around a decimal point whose first digit has place
-// value 10^e10 and rounds the fraction to prec digits, half up.
-func ktFixedBody(digits string, e10, prec int) string {
-	ilen := e10 + 1
-	var ip, fp string
-	if ilen <= 0 {
-		ip, fp = "0", strings.Repeat("0", -ilen)+digits
-	} else if ilen >= len(digits) {
-		ip, fp = digits+strings.Repeat("0", ilen-len(digits)), ""
-	} else {
-		ip, fp = digits[:ilen], digits[ilen:]
-	}
-	if len(fp) <= prec {
-		fp = fp + strings.Repeat("0", prec-len(fp))
-	} else {
-		up := fp[prec] >= '5'
-		fp = fp[:prec]
-		if up {
-			carried := ktCarry1(fp)
-			fp = carried[len(carried)-prec:]
-			if len(carried) > prec {
-				ip = ktCarry1(ip)
-			}
-		}
-	}
-	if prec > 0 {
-		return ip + "." + fp
-	}
-	return ip
-}
-
-// ktCarry1 adds one to a digit string, answering one character more when the carry
-// runs off the front ("999" -> "1000"), which is how the caller detects it.
-func ktCarry1(ds string) string {
-	out := []byte(ds)
-	carry := 1
-	for i := len(out) - 1; i >= 0 && carry == 1; i-- {
-		if out[i] == '9' {
-			out[i] = '0'
-		} else {
-			out[i]++
-			carry = 0
-		}
-	}
-	if carry == 1 {
-		return "1" + string(out)
-	}
-	return string(out)
 }
 
 // ktClassChainHas answers whether the instance's descriptor - or anything on its

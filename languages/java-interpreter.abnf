@@ -49,8 +49,8 @@ iteration order) are lib/java-map.java, compiled when the program imports or
 creates one. A java.util.stream import, or a call of a method named stream,
 compiles lib/java-stream.java too: sequential Stream and IntStream pipelines and
 Collectors' toList, joining, counting and groupingBy. java.lang.String's
-methods and String.valueOf / join / format are lib/java-strings.js (the regex ones
-over lib/regex.js), StringBuilder is lib/java-lang.java, compiled the same way, and
+methods and String.valueOf / join are lib/java-strings.js (the regex ones over
+lib/regex.js), String.format is lib/java-format.js, StringBuilder is lib/java-lang.java, compiled the same way, and
 Object and getClass() are built in. Math's and StrictMath's transcendentals are
 fdlibm's (lib/fdlibm.js).
 
@@ -2241,6 +2241,7 @@ HasStatic   = :script(~~
     include("lib/java-regex.js")
     include("lib/utf16-strings.js")
     include("lib/java-strings.js")
+    include("lib/java-format.js")
     // rxFail (the error) and rxPropHit (\p{..}) are regex.js's KNOBS, set by assignment.
     rxFail = function (msg) { fail("regexp: " + msg) }
     rxPropHit = function (id, c) { return jxPropHit(id, c) }
@@ -2958,7 +2959,7 @@ HasStatic   = :script(~~
                 var lp = szPair(jNarrow(v, 64))
                 return jFlo(jxBitsDbl(lp.h, lp.l))
             }
-            // toHexString is %a's rendering (lib/java-strings.js).
+            // toHexString is %a's rendering (lib/java-format.js).
             o.toHexString = function(v) { return jxHexFloat(jNumD(v), "", 0, 0 - 1, false) }
             o.hashCode = function(v) { var hb = jDblBits(jNumD(v)); return hb.hi ^ hb.lo }
         }
@@ -3872,7 +3873,7 @@ HasStatic   = :script(~~
     }
 
     // ----- java.lang.String's methods and statics (lib/java-strings.js) -----
-    // The value-model hooks lib/java-strings.js asks through.
+    // The value-model hooks lib/java-strings.js and lib/java-format.js ask through.
     function jxkKind(v) {
         if (v === null || v === undefined) { return "null" }
         if (typeof v == "boolean") { return "bool" }

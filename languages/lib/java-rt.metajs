@@ -83,6 +83,7 @@ import "./regex.js"
 import "./java-regex.js"
 import "./utf16-strings.js"
 import "./java-strings.js"
+import "./java-format.js"
 
 // rxFail (the error) and rxPropHit (\p{..}) are regex.js's knobs, set by assignment.
 rxFail = function (msg) { fail("regexp: " + msg) }
@@ -1263,7 +1264,7 @@ function jvFloType(o, f32) {
             var lb = jvToLongBox(v)
             return flo(jxBitsDbl(sintHi(lb), sintLo(lb)), 0)
         }
-        // toHexString is %a's rendering (lib/java-strings.js).
+        // toHexString is %a's rendering (lib/java-format.js).
         o["toHexString"] = function(v) { return jxHexFloat(rtjNum(v), "", 0, 0 - 1, false) }
         o["hashCode"] = function(v) { return js_jhash(flo(rtjNum(v), 0)) }
     }
@@ -2428,7 +2429,7 @@ function js_jvgetclass(v) {
 
 // ----- java.lang.String's methods and statics (lib/java-strings.js) -----------
 
-// The value-model hooks lib/java-strings.js asks through.
+// The value-model hooks lib/java-strings.js and lib/java-format.js ask through.
 function jxkKind(v) {
     if (v === undefined || v === null) { return "null" }
     if (typeof v == "boolean") { return "bool" }

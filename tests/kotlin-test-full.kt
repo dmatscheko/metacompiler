@@ -4716,6 +4716,13 @@ fun sec94() {
 // target type's, and a bad radix is an IllegalArgumentException. groupBy and
 // associateBy take an optional valueTransform; joinToString's parameters can be
 // passed by NAME, and `limit` writes the separator and then `truncated`.
+// String.format IS java.util.Formatter (Locale.US): two's complement %x / %o at the
+// value's own width, the flags, %e / %g / %a, explicit and relative indexes, and its
+// IllegalFormatException family; a primitive argument is its java.lang box. A
+// narrower integer hashes as its value at its own signed width (UByte 255 is -1).
+fun s95fmt(f: String, vararg a: Any?): String {
+    try { return f.format(*a) } catch (e: IllegalArgumentException) { return e::class.simpleName + ": " + e.message }
+}
 fun s95err(f: () -> Any?): String {
     try { return "" + f() } catch (e: Exception) { return e::class.simpleName + ": " + e.message }
 }
@@ -4734,6 +4741,16 @@ fun sec95() {
     check("jts95g", l5.joinToString(limit = 2) { "<" + it + ">" } == "<1>, <2>, ..."
                     && l5.joinToString(prefix = "[", postfix = "]", limit = 0) == "[...]"
                     && l5.joinToString(", ", "[", "]", 5) == "[1, 2, 3, 4, 5]")
+    val fv = listOf<Any?>(-7, 255, (-1).toByte(), 42000, 3.14159, 1e-5, 2.5, -0.5, 1.0, (-2).toShort(), -5L)
+    check("fmt95h", s95fmt("%x|%X|%o|%x", fv[0], fv[1], fv[1], fv[2]) == "fffffff9|FF|377|ff"
+                    && s95fmt("%,d|% d|%+d|%05d|%(d", fv[3], 42, 42, fv[0], -5) == "42,000| 42|+42|-0007|(5)")
+    check("fmt95i", s95fmt("%e|%.3g|%10.2f|%-8.1f|%a", fv[4], fv[5], fv[6], fv[7], fv[8]) == "3.141590e+00|1.00e-05|      2.50|-0.5    |0x1.0p0"
+                    && s95fmt("%2\$s-%1\$s|%s %<s|%S|%c|%b|%h", "a", "b", 'z', null, "hi") == "b-a|a a|B|z|false|d01")
+    check("fmt95j", s95fmt("%d", fv[4]) == "IllegalFormatConversionException: d != java.lang.Double"
+                    && s95fmt("%s %s", "a") == "MissingFormatArgumentException: Format specifier '%s'"
+                    && s95fmt("%q", 1) == "UnknownFormatConversionException: Conversion = 'q'")
+    check("hsh95k", fv[2].hashCode() == -1 && fv[9].hashCode() == -2 && 255.toUByte().hashCode() == -1 && 65534.toUShort().hashCode() == -2
+                    && s95fmt("%h|%h|%h", fv[2], fv[9], fv[10]) == "ffffffff|fffffffe|4")
 }
 
 
