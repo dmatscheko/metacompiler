@@ -8329,6 +8329,25 @@ KwContinue  = "continue" KwEnd ;
         lst.push({f: f, fn: makeFunClosure(f)})
         if (lst.length == 1) { globalScope[f.name] = lst[0].fn }
         else { globalScope[f.name] = makeOverloadClosure(lst) }
+        if (swIsOpName(f.name)) { swAttachGlobalOp(f, lst[lst.length - 1].fn) }
+    }
+    function swIsOpName(n) {
+        var ch = n.charCodeAt(0)
+        return !((ch >= 97 && ch <= 122) || (ch >= 65 && ch <= 90) || ch == 95)
+    }
+    // A GLOBAL `func + (a: V, b: V) -> V` is V's operator as a `static func +`
+    // inside V would be: it goes on the member table of every program type among
+    // its parameter types, where findOpFn (and every sort and comparison through
+    // it) finds it - unless the type declares that operator itself. Twin of
+    // makeFunStmt in swift-to-llvm-ir.abnf.
+    function swAttachGlobalOp(f, fn) {
+        for (var i = 0; i < f.params.length; i++) {
+            var h = swResolve(baseTypeName(f.params[i].type))
+            if (h == null || !isTypeVal(h.v)) { continue }
+            var t = accTable(h.v)
+            if (t == null || hasOwn(t, "__static_" + f.name)) { continue }
+            tput(t, "__static_" + f.name, function(self, a, b) { return arguments.length > 2 ? fn(a, b) : fn(a) })
+        }
     }
     // `Crate<Int>?` -> `Crate`: the bare name a declared type spells.
     function swBaseTy(t0) {

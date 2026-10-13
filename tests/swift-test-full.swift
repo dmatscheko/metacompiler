@@ -4692,6 +4692,33 @@ func late107(_ x: Int) -> Int { x * 10 }
 struct Late107 { var v: Int }
 extension Late107 { func twice107() -> Int { v * 2 } }
 
+// ===== SECTION 108: an enum's static operators; global operator functions =====
+// A `static func +` inside an enum is that enum's operator. A GLOBAL
+// `func + (a: V, b: V)` is V's operator as a static one would be - binary,
+// prefix, ==, and < with the comparisons Comparable derives from it, sorting
+// included - while Int's own + is untouched. Every value read off swiftc 6.1.2.
+enum Dir108: Comparable {
+    case l, r
+    static func + (a: Dir108, b: Dir108) -> Int { a == b ? 2 : 1 }
+    static func < (a: Dir108, b: Dir108) -> Bool { a == .l && b == .r }
+}
+struct V108: Comparable { var x: Int }
+func == (a: V108, b: V108) -> Bool { a.x == b.x }
+func < (a: V108, b: V108) -> Bool { a.x < b.x }
+func + (a: V108, b: V108) -> V108 { V108(x: a.x + b.x) }
+prefix func - (a: V108) -> V108 { V108(x: -a.x) }
+func * (a: V108, k: Int) -> V108 { V108(x: a.x * k) }
+enum Sd108 { case p, q }
+func + (a: Sd108, b: Sd108) -> Int { a == b ? 20 : 10 }
+func s108() {
+    check("108a", Dir108.l + .r == 1 && Dir108.l + .l == 2 && [Dir108.r, Dir108.l].sorted() == [.l, .r] && Dir108.l < Dir108.r)
+    let a = V108(x: 1), b = V108(x: 2)
+    check("108b", !(a == b) && a == V108(x: 1) && a != b && a < b && b > a && a <= a && (a + b).x == 3 && (-b).x == -2
+        && (a * 3).x == 3 && 2 + 3 == 5)
+    check("108c", [b, a, V108(x: 0)].sorted().map { $0.x } == [0, 1, 2] && [b, a].sorted(by: >).map { $0.x } == [2, 1]
+        && [b, a].max()!.x == 2 && Sd108.p + .q == 10 && Sd108.q + .q == 20)
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -4800,6 +4827,7 @@ func main() {
     s105() // SECTION-CALL 105
     s106() // SECTION-CALL 106
     s107() // SECTION-CALL 107
+    s108() // SECTION-CALL 108
     print("full: \(checks) checks, \(fails) failures")
 }
 

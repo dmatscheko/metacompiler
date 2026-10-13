@@ -8558,6 +8558,20 @@ KwContinue  = "continue" KwEnd ;
         return []
     }
     function makeFunStmt(f) {
+        // A GLOBAL operator function is its parameter types' operator, as a
+        // `static func` inside them would be: noted here, installed on each program
+        // type declared above it (unless the type declares the operator itself).
+        // Twin of swAttachGlobalOp in swift-interpreter.abnf.
+        var opTys = []
+        if (isOperatorName(f.name)) {
+            hasOpOverload = true
+            for (var oi = 0; oi < f.params.length; oi++) {
+                var otn = baseTypeName(f.params[oi].type)
+                var odup = false
+                for (var od = 0; od < opTys.length; od++) { if (opTys[od] == otn) { odup = true } }
+                if ((classNames[otn] == 1 || enumNames[otn] == 1) && !odup) { opTys.push(otn) }
+            }
+        }
         regSig(f.name, f.params)
         swNoteFnRet(f.name, f.ret)
         var key = "$" + f.name
@@ -8576,6 +8590,18 @@ KwContinue  = "continue" KwEnd ;
                 var didx = emitOverloadDispatch(f.name, lst)
                 callExt(b, "js_scope_decl", [curScopeV, emitStr(b, f.name),
                                              callExt(b, "js_closure", [handle(didx), curScopeV])])
+            }
+            for (var oj = 0; oj < opTys.length; oj++) {
+                // A value reaches its type's operators through its __class: an
+                // enum's member table, any other type's descriptor.
+                var otV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, typeKeyOf(opTys[oj]))])
+                if (enumNames[opTys[oj]] == 1) { otV = callExt(b, "js_get", [otV, emitStr(b, "__members")]) }
+                var setB = curF.NewBlock("")
+                var doneB = curF.NewBlock("")
+                b.NewCondBr(truthy(b, callExt(b, "js_get", [otV, emitStr(b, f.name)])), doneB, setB)
+                callExt(setB, "js_set", [otV, emitStr(setB, f.name), cloV])
+                setB.NewBr(doneB)
+                b = doneB
             }
             return b
         }
@@ -9493,6 +9519,14 @@ KwContinue  = "continue" KwEnd ;
             noteOverload(statNames, statCands, skey, sn, st.params, tname, true)
         }
         b = emitOverloadSlots(b, statV, statNames, statCands, 1, tname, true)
+        // An enum's values reach their type's members through its member TABLE,
+        // not the descriptor the statics live on, so an operator goes on it too.
+        if (typeAt(tname) != null && typeAt(tname).kind == "enum") {
+            for (var so = 0; so < statNames.length; so++) {
+                if (!isOperatorName(statNames[so])) { continue }
+                callExt(b, "js_set", [tblV, emitStr(b, statNames[so]), callExt(b, "js_get", [statV, emitStr(b, statNames[so])])])
+            }
+        }
         // A static accessor reads the type's other statics unqualified, as a static
         // method does; sw_getprop and sw_setprop pass the descriptor first, so both
         // are receiver functions too.
