@@ -121,7 +121,7 @@ not change the renderer.
 
 # GO — Go  (oracle: `go run`)
 
-### T-591 go: uint64 assignment of `1 << 63`; untyped big constant × float in the interp; overflowing constant args; NaN sign · P1 · GO · OPEN [V]
+### T-591 go: uint64 assignment of `1 << 63`; untyped big constant × float in the interp; overflowing constant args; NaN sign · P1 · GO · IN PROGRESS (GO worker, round 5) [V]
 `var s uint64; s = 1 << 63; fmt.Println(s, s|1)` → all legs `-9223372036854775808 -9223372036854775807` (go
 `9223372036854775808 9223372036854775809`; the declared form `var t uint64 = 1<<63` is right). Interp only:
 `x := 0.5; fmt.Println(18014398509481984*x)` → `NaN` (go, run, native `9.007199254740992e+15`). `fmt.Println(math.MaxUint64)`
@@ -130,7 +130,7 @@ in argument to fmt.Println (overflows)"). P3: `math.Signbit(-NaN)` false and `Fl
 a float-bits host builtin in the floor, twin and interpreter. llvm.Run's per-call step brake limits heavy math code (the
 3000-row probe needs `-max-steps 0`; the `-frozen` interpreter finishes 35 rows).
 
-### T-592 go: UTF-8-encoded surrogate bytes in strings under llvm.Run and native; interp byte cache · P3 · GO · OPEN [V]
+### T-592 go: UTF-8-encoded surrogate bytes in strings under llvm.Run and native; interp byte cache · P3 · GO · IN PROGRESS (GO worker, round 5) [V]
 `s := "\xed\xa0\x80" + "\xed\xb0\x80"; fmt.Println(len(s), []byte(s))` → go `6 [237 160 128 237 176 128]`, interp right;
 llvm.Run and native `4 [240 144 128 128]` and print EF BF BD: the shared str_cat / strConcat and print paths read these bytes as
 WTF-8 (changing them is a CORE floor change; manual 7.9 records it). Interp: `s[i]` still uses a 4-way byte cache, so 5+
