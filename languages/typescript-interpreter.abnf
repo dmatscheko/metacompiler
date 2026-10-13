@@ -7399,11 +7399,10 @@ NotFuncHead = :script(~~
             }
         }
         return function() {
-            var v = anytype // A compound assignment may change the value's type.
-            v = valT()
             var k = anytype // A computed key is an arbitrary value.
             k = keyT()
-            if (op != "=") { v = applyOp(op, superGet(k), v) }
+            var v = anytype // A compound assignment may change the value's type.
+            if (op != "=") { v = superGet(k); v = applyOp(op, v, valT()) } else { v = valT() }
             superSet(k, v)
             return v
         }
@@ -8304,10 +8303,9 @@ NotFuncHead = :script(~~
                 setMember(p0.obj, p0.key, lv)
                 return lv
             }
-            var v = anytype // A compound assignment may change the value's type.
-            v = valT()
             var p = resolveRef(ref)
-            if (op != "=") { v = applyOp(op, getMember(p.obj, p.key), v) }
+            var v = anytype // A compound assignment may change the value's type.
+            if (op != "=") { v = getMember(p.obj, p.key); v = applyOp(op, v, valT()) } else { v = valT() }
             setMember(p.obj, p.key, v)
             return v
         }
@@ -8321,15 +8319,15 @@ NotFuncHead = :script(~~
         // NamedEvaluation, the assignment form: `f = function(){}` names it "f", and
         // only for a plain '=' to a bare NAME.
         if (op == "=" && ref.path.length == 0) { fnAnonName(ref.name, "=", txt) }
+        // See the twin of this comment in js-interpreter.abnf.
         return nsTracked(function() {
             var v = anytype // A compound assignment (s += n) may change the value's type.
-            v = valT()
             if (ref.path.length == 0) {
-                if (op != "=") v = applyOp(op, getVar(ref.name), v)
+                if (op != "=") { v = getVar(ref.name); v = applyOp(op, v, valT()) } else { v = valT() }
                 setVar(ref.name, v)
             } else {
                 var p = resolveRef(ref)
-                if (op != "=") v = applyOp(op, getMember(p.obj, p.key), v)
+                if (op != "=") { v = getMember(p.obj, p.key); v = applyOp(op, v, valT()) } else { v = valT() }
                 setMember(p.obj, p.key, v)
             }
             return v

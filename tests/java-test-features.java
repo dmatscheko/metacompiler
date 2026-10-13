@@ -267,6 +267,11 @@ public class Main {
         return true;
     }
 
+    static String asgLog = "";
+    static int asgFld = 3;
+    static int asgF(String s, int v) { Main.asgLog += s; return v; }
+    static int[] asgArr(int[] c) { Main.asgLog += "A"; return c; }
+
     // ----- functions: early return, recursion, mutual recursion -----
     static String grade(int n) {
         if (n > 10) { return "big"; }
@@ -911,6 +916,31 @@ public class Main {
         qual.add(4);
         qual.add(5);
         Main.check("qualified-util-new", qual.size() == 2 && ("" + qual).equals("[4, 5]"));
+
+        // ----- assignment: the target before the right-hand side (JLS 15.26) -----
+        int[] aops = {5, 0, 1, 100};
+        int aj = aops[0];
+        aj += aj++ * 2;
+        int[] aa = new int[3];
+        int ak = aops[1];
+        aa[ak++] = ak++;
+        int[] ab = new int[3];
+        ak = aops[1];
+        ab[ak] = ak = 2;
+        int[] ac = {1, 2};
+        Main.asgArr(ac)[Main.asgF("i", aops[2])] += Main.asgF("v", 5);
+        String as = "a";
+        as += (as = "b") + as;
+        int[] ae = {1, 2};
+        int aidx = aops[1];
+        ae[aidx] += (aidx = 1) * aops[3];
+        Main.asgFld += (Main.asgFld = 10) * 2;
+        String aoob = "none";
+        Main.asgLog = Main.asgLog + "|";
+        try { ac[Main.asgF("x", 5)] = Main.asgF("y", 1); } catch (ArrayIndexOutOfBoundsException e) { aoob = "caught"; }
+        Main.check("assign-lhs-first", aj == 15 && aa[0] == 1 && aa[1] == 0 && ab[0] == 2 && ab[2] == 0
+                   && ac[1] == 7 && as.equals("abb") && ae[0] == 101 && ae[1] == 2 && Main.asgFld == 23
+                   && aoob.equals("caught") && Main.asgLog.equals("Aiv|xy"));
 
         // ----- everything combined -----
         Main.check("combined-pipeline", Main.transform(new int[]{1, 2, -3}).equals("o1e2x"));

@@ -3860,20 +3860,28 @@ HasStatic   = :script(~~
         var tyRef = ref.base == undefined ? ref : ref.tyref
         var pty = anytype
         pty = null
+        // The target's array and index (or object) are evaluated BEFORE the right-hand
+        // side, and a compound assignment reads the old value before it too; a plain
+        // `=` checks the index only after the right-hand side (JLS 15.26.1, 15.26.2).
+        // Twin: makeAssign in java-to-llvm-ir.abnf.
         return function() {
             var v = anytype // The assigned value may be a number, a string, a double box, ...
-            v = valT()
             if (ref.path.length == 0) {
                 if (op != "=") {
-                    v = applyOp(op, jGetVar(ref.name), v)
+                    v = jGetVar(ref.name)
+                    v = applyOp(op, v, valT())
                     jSetVar(ref.name, v)
                 } else {
-                    v = jSetVarTyped(ref.name, v, lty, vty)
+                    v = jSetVarTyped(ref.name, valT(), lty, vty)
                 }
             } else {
-                var p = resolveRef(ref)
-                if (op != "=") { v = applyOp(op, hasOwn(p.obj, p.key) ? p.obj[p.key] : undefined, v) }
-                else {
+                var p = resolveRef(ref, op == "=")
+                if (op != "=") {
+                    v = hasOwn(p.obj, p.key) ? p.obj[p.key] : undefined
+                    v = applyOp(op, v, valT())
+                } else {
+                    v = valT()
+                    if (p.idx === true) { p.key = jArrIdx(p.obj, p.key) }
                     if (pty === null) {
                         pty = (tyRef == null || tyRef == undefined) ? jFieldTyOfPlace(ref) : jPlaceTy(tyRef, lty)
                         if (pty == vty) { pty = "" }
@@ -6244,8 +6252,9 @@ HasStatic   = :script(~~
 
     // A target record may carry a `base` thunk instead of a variable name (see
     // makeChainTarget); everything after the root is resolved exactly as the
-    // shared version does.
-    resolveRef = function(ref) {
+    // shared version does. With lateIdx an array index is returned unchecked, marked
+    // {idx: true}, for a plain `=` that checks it after its right-hand side.
+    resolveRef = function(ref, lateIdx) {
         var o = anytype // The containers along the path may be of mixed types.
         if (ref.base != undefined) { o = ref.base() } else { o = getVar(ref.name) }
         for (var i = 0; i < ref.path.length - 1; i++) {
@@ -6261,7 +6270,10 @@ HasStatic   = :script(~~
         // rather than growing the array. Every writer - makeAssign, makeIncDec,
         // makePreIncDec - goes through this one place.
         var ki = last.idx()
-        if (Array.isArray(o)) { return {obj: o, key: jArrIdx(o, ki)} }
+        if (Array.isArray(o)) {
+            if (lateIdx === true) { return {obj: o, key: ki, idx: true} }
+            return {obj: o, key: jArrIdx(o, ki)}
+        }
         return {obj: o, key: ki}
     }
     // ----- Core library config (see lib/interp-core.js) -----

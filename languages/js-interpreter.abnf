@@ -9104,11 +9104,10 @@ NotFuncHead = :script(~~
             }
         }
         return function() {
-            var v = anytype // A compound assignment may change the value's type.
-            v = valT()
             var k = anytype // A computed key is an arbitrary value.
             k = keyT()
-            if (op != "=") { v = applyOp(op, superGet(k), v) }
+            var v = anytype // A compound assignment may change the value's type.
+            if (op != "=") { v = superGet(k); v = applyOp(op, v, valT()) } else { v = valT() }
             superSet(k, v)
             return v
         }
@@ -9716,10 +9715,9 @@ NotFuncHead = :script(~~
         var op = items[items.length - 2]
         var valT = items[items.length - 1]
         return function() {
-            var v = anytype // A compound assignment may change the value's type.
-            v = valT()
             var p = resolveRef(ref)
-            if (op != "=") { v = applyOp(op, getMember(p.obj, p.key), v) }
+            var v = anytype // A compound assignment may change the value's type.
+            if (op != "=") { v = getMember(p.obj, p.key); v = applyOp(op, v, valT()) } else { v = valT() }
             setMember(p.obj, p.key, v)
             return v
         }
@@ -9733,15 +9731,17 @@ NotFuncHead = :script(~~
         // NamedEvaluation, the assignment form: `f = function(){}` names it "f", and
         // only for a plain '=' to a bare NAME.
         if (op == "=" && ref.path.length == 0) { fnAnonName(ref.name, "=", txt) }
+        // The target's object and key are evaluated BEFORE the right-hand side, and a
+        // compound assignment reads the old value before it too (ECMA-262 13.15.2).
+        // Twin: makeAssign in js-to-llvm-ir.abnf.
         return function() {
             var v = anytype // A compound assignment (s += n) may change the value's type.
-            v = valT()
             if (ref.path.length == 0) {
-                if (op != "=") v = applyOp(op, refGet(ref), v)
+                if (op != "=") { v = refGet(ref); v = applyOp(op, v, valT()) } else { v = valT() }
                 refSet(ref, v)
             } else {
                 var p = resolveRef(ref)
-                if (op != "=") v = applyOp(op, getMember(p.obj, p.key), v)
+                if (op != "=") { v = getMember(p.obj, p.key); v = applyOp(op, v, valT()) } else { v = valT() }
                 setMember(p.obj, p.key, v)
             }
             return v

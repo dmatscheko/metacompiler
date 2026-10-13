@@ -699,6 +699,21 @@ check("loop-let-per-iteration", (function () {
         && run(f5) === "0,0" && run(f6) === "0,2" && run(f7) === "2,2";
 })());
 
+// ----- assignment: the target's reference before the right-hand side -----
+check("assign-lhs-first", (function () {
+    var log = "";
+    function f(s) { log += s; return s; }
+    var o = {}; o[f("k")] = f("v");
+    var a = [0, 0]; var i = 0; a[i++] = i;
+    var x = 1; x += (x = 5, 10);
+    var ar = [10, 20, 30]; var k = 0; ar[k++] += k;
+    var obj = {a: 1}; var key = "a"; obj[key] = (key = "b", 5);
+    var s = "a"; s += (s = "b") + s;
+    var e = [1, 2]; var idx = 0; e[idx] += (idx = 1) * 100;
+    return log === "kv" && a.join(",") === "1,0" && x === 11 && ar.join(",") === "11,20,30"
+        && JSON.stringify(obj) === '{"a":5}' && s === "abb" && e.join(",") === "101,2";
+})());
+
 function main() {
     println("features: " + checks + " checks, " + failures + " failures");
     return failures;

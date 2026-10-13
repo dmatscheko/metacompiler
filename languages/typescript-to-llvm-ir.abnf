@@ -3634,31 +3634,30 @@ NotFuncHead = :script(~~
         var ref = items[0]
         var op = items[1]
         var valT = items[2]
+        // See the twin of this comment in js-to-llvm-ir.abnf.
         return function(b) {
-            var r = valT(b)
-            b = r.b
-            var v = r.v
+            var oldV = anytype // A handle: the old value, for a compound assignment.
+            var setExt = "js_scope_set_or_create"
+            var p = anytype    // The target's {b, obj, key}, for a member target.
             if (ref.path.length == 0) {
-                var nameV = emitStr(b, ref.name)
                 // Plain `=` to an undeclared name becomes an implicit global
                 // (js_scope_set_or_create). A compound assignment first reads the
                 // old value, so it still requires a prior declaration.
-                var setExt = "js_scope_set_or_create"
                 if (op != "=") {
-                    var old = callExt(b, nsGetExt(ref.name), [curScopeV, nameV])
-                    v = emitBinOp(b, op, old, v)
+                    oldV = callExt(b, nsGetExt(ref.name), [curScopeV, emitStr(b, ref.name)])
                     setExt = "js_scope_set"
                 }
-                callExt(b, nsSetExt(ref.name, setExt), [curScopeV, nameV, v])
             } else {
-                var p = emitRefPath(b, ref)
+                p = emitRefPath(b, ref)
                 b = p.b
-                if (op != "=") {
-                    var oldM = callExt(b, memGetExt(), [p.obj, p.key])
-                    v = emitBinOp(b, op, oldM, v)
-                }
-                callExt(b, memSetExt(), [p.obj, p.key, v])
+                if (op != "=") { oldV = callExt(b, memGetExt(), [p.obj, p.key]) }
             }
+            var r = valT(b)
+            b = r.b
+            var v = r.v
+            if (op != "=") { v = emitBinOp(b, op, oldV, v) }
+            if (ref.path.length == 0) { callExt(b, nsSetExt(ref.name, setExt), [curScopeV, emitStr(b, ref.name), v]) }
+            else { callExt(b, memSetExt(), [p.obj, p.key, v]) }
             return {b: b, v: v}
         }
     }
@@ -5165,15 +5164,15 @@ NotFuncHead = :script(~~
             return notImplExpr("logical assignment to a super property", pos)
         }
         return function(b) {
-            var r = valT(b)
-            b = r.b
-            var v = r.v
             var kr = keyT(b)
             b = kr.b
             var sb = emitSuperBase(b, defName)
-            if (op != "=") {
-                v = emitBinOp(b, op, callExt(b, "js_jssupget", [sb.sup, sb.self, kr.v]), v)
-            }
+            var oldV = anytype // A handle: the old value, for a compound assignment.
+            if (op != "=") { oldV = callExt(b, "js_jssupget", [sb.sup, sb.self, kr.v]) }
+            var r = valT(b)
+            b = r.b
+            var v = r.v
+            if (op != "=") { v = emitBinOp(b, op, oldV, v) }
             callExt(b, "js_supset", [sb.sup, sb.self, kr.v, v])
             return {b: b, v: v}
         }

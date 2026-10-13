@@ -2264,7 +2264,9 @@ HasStatic   = :script(~~
         // succeeds and the enclosing Assignment fails on the missing operator.
         return {name: "", path: [{key: "\x01not-a-place"}], base: foldCallMember(head)}
     }
-    function emitRefPath(b, ref) {
+    // With lateIdx a final array index is left unchecked, marked {idx: true}, for a
+    // plain `=` that checks it after its right-hand side (JLS 15.26.1).
+    function emitRefPath(b, ref, lateIdx) {
         var o = anytype // Either the lowered base expression or a scope read.
         if (ref.base != undefined) {
             var br = ref.base(b)
@@ -2286,6 +2288,7 @@ HasStatic   = :script(~~
         var last = ref.path[ref.path.length - 1]
         if (last.key != undefined) return {b: b, obj: o, key: emitStr(b, last.key)}
         var kr = last.idx(b)
+        if (lateIdx === true) { return {b: kr.b, obj: o, key: kr.v, idx: true} }
         // The WRITE half of the bounds check, here rather than at the three js_set
         // call sites because makeAssign, makeIncDec and makePreIncDec all resolve
         // their place through this one function. js_jvidx is reused as the CHECK -
@@ -2355,7 +2358,27 @@ HasStatic   = :script(~~
         // also needs the field table, which is complete only at emit time.
         var lty = ref.base == undefined ? jTyOf(ref.name) : ref.tylty
         var tyRef = ref.base == undefined ? ref : ref.tyref
+        // The old value of a compound assignment to a bare name, read the way the name
+        // reads: a local, or the field it may name.
+        var oldRead = (ref.path.length == 0 && op != "=") ? makeVarRef(ref.name) : null
+        // The target's array and index (or object) are evaluated BEFORE the right-hand
+        // side, and a compound assignment reads the old value before it too (JLS
+        // 15.26.1, 15.26.2); js_set checks the index when it stores, after the right-
+        // hand side. Twin: makeAssign in java-interpreter.abnf.
         return function(b) {
+            var oldV = anytype // A handle: the old value, for a compound assignment.
+            var p = anytype    // The target's {b, obj, key}, for a member target.
+            if (ref.path.length == 0) {
+                if (oldRead != null) {
+                    var ro = oldRead(b)
+                    b = ro.b
+                    oldV = ro.v
+                }
+            } else {
+                p = emitRefPath(b, ref, op == "=")
+                b = p.b
+                if (op != "=") { oldV = callExt(b, "js_get", [p.obj, p.key]) }
+            }
             var r = valT(b)
             b = r.b
             var v = r.v
@@ -2364,29 +2387,19 @@ HasStatic   = :script(~~
             // (byte)310 == 54 and `int i = 5; i += 1.5` is (int)6.5 == 6.
             // js_jvnarrowlike reads the width off the old value and applies it; a
             // String left operand keeps its concatenation untouched.
+            if (op != "=") { v = callExt(b, "js_jvnarrowlike", [oldV, emitBin(b, op, oldV, v)]) }
             if (ref.path.length == 0) {
                 var fi = jLookupField(chain, ref.name)
                 if (fi != null) {
-                    var mk = (op == "=") ? null : function(bx, oldX) {
-                        return callExt(bx, "js_jvnarrowlike", [oldX, emitBin(bx, op, oldX, v)])
-                    }
+                    var nv = v
+                    var mk = (op == "=") ? null : function(bx, oldX) { return nv }
                     return jUnqualWrite(b, ref.name, fi, v, mk, false, lty, vty)
                 }
-                var nameV = emitStr(b, ref.name)
-                if (op != "=") {
-                    var old = callExt(b, "js_scope_get", [curScopeV, nameV])
-                    v = callExt(b, "js_jvnarrowlike", [old, emitBin(b, op, old, v)])
-                } else if (lty != undefined && lty != vty) {
-                    v = declConvert(b, v, lty)
-                }
-                callExt(b, "js_scope_set", [curScopeV, nameV, v])
+                if (op == "=" && lty != undefined && lty != vty) { v = declConvert(b, v, lty) }
+                callExt(b, "js_scope_set", [curScopeV, emitStr(b, ref.name), v])
             } else {
-                var p = emitRefPath(b, ref)
-                b = p.b
-                if (op != "=") {
-                    var oldM = callExt(b, "js_get", [p.obj, p.key])
-                    v = callExt(b, "js_jvnarrowlike", [oldM, emitBin(b, op, oldM, v)])
-                } else {
+                if (op == "=") {
+                    if (p.idx === true) { callExt(b, "js_jvidx", [p.obj, p.key]) }
                     var pty = (tyRef == null || tyRef == undefined) ? jFieldTyOfPlace(ref) : jPlaceTy(tyRef, lty)
                     if (pty != vty) { v = declConvert(b, v, pty) }
                 }
