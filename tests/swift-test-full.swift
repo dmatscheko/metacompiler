@@ -4162,6 +4162,14 @@ func s89() {
     check("89d", cs[0].isHexDigit && cs[0].hexDigitValue == 10 && !cs[1].isHexDigit && cs[2].hexDigitValue == 5)
     check("89e", Dir89.allCases.count == 4 && Dir89.allCases.first == .n && Dir89.allCases.last == .w
         && Pl89.allCases.map { $0.rawValue } == [1, 2, 3])
+    // The General_Category members. isCased of a Character of several scalars
+    // asks whether either case mapping changes it: "1\u{345}" is cased, its 1 is not.
+    let gs: [Character] = ["!", "+", "$", "€", "^", "\u{2061}", "a", "ª", "\u{1D400}", "😀", "!\u{301}", "1\u{345}", "\u{AA}\u{301}", "「"]
+    let bits = gs.map { c -> Int in
+        (c.isPunctuation ? 1 : 0) + (c.isSymbol ? 2 : 0) + (c.isMathSymbol ? 4 : 0)
+            + (c.isCurrencySymbol ? 8 : 0) + (c.isCased ? 16 : 0)
+    }
+    check("89f", bits == [1, 6, 10, 10, 6, 4, 16, 16, 20, 2, 1, 16, 0, 1])
 }
 
 // ===== SECTION 90: an integer literal typed by its neighbours =====
@@ -4258,6 +4266,48 @@ func s93() {
         && "\u{FFFD}" < "😀")
 }
 
+// ===== SECTION 94: the mutating members of a number and a Bool =====
+// round(_:), formRemainder, formTruncatingRemainder, formSquareRoot, negate and
+// toggle store their non-mutating twin's answer back into the receiver - a
+// variable, a property, an element, an inout parameter - and a program type's
+// own `mutating func toggle()` still wins. Operands are read out of arrays.
+// Every value read off swiftc 6.1.2.
+struct Sw94 { var on = false; var log = ""; mutating func toggle() { on = !on; log += "t" } }
+struct P94 { var flag = true; var x = 1.75; var n: Int8 = -5 }
+func flip94(_ b: inout Bool) { b.toggle() }
+func s94() {
+    let src = [2.5, -2.5, 10.0, -7.5, 9.0]
+    var m = src[0]
+    m.round(.down)
+    var q = src[1]
+    q.round()
+    var r = src[2]
+    r.formRemainder(dividingBy: 3)
+    var t = src[3]
+    t.formTruncatingRemainder(dividingBy: 2)
+    var s = src[4]
+    s.formSquareRoot()
+    check("94a", m == 2.0 && q == -3.0 && r == 1.0 && t == -1.5 && s == 3.0 && "\(m) \(r)" == "2.0 1.0")
+    var bs = [true, false]
+    bs[0].toggle()
+    var n = Int(src[2])
+    n.negate()
+    var z = src[2] - src[2]
+    z.negate()
+    var g = false
+    flip94(&g)
+    check("94b", bs == [false, false] && n == -10 && "\(z)" == "-0.0" && g)
+    var p = P94()
+    p.flag.toggle()
+    p.x.round(.towardZero)
+    p.n.negate()
+    var sw = Sw94()
+    sw.toggle()
+    var fl: [Float] = [2.5]
+    fl[0].round(.up)
+    check("94c", !p.flag && p.x == 1.0 && p.n == 5 && sw.on && sw.log == "t" && "\(fl[0])" == "3.0")
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -4352,6 +4402,7 @@ func main() {
     s91() // SECTION-CALL 91
     s92() // SECTION-CALL 92
     s93() // SECTION-CALL 93
+    s94() // SECTION-CALL 94
     print("full: \(checks) checks, \(fails) failures")
 }
 

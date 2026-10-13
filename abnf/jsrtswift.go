@@ -1986,7 +1986,8 @@ func (rt *jsrt) swRoundRule(f float64, rv interface{}) float64 {
 func swcProp(s, name string) (interface{}, bool) {
 	switch name {
 	case "isLetter", "isUppercase", "isLowercase", "isNumber", "isWholeNumber", "wholeNumberValue",
-		"isWhitespace", "isNewline", "asciiValue", "isASCII", "isHexDigit", "hexDigitValue":
+		"isWhitespace", "isNewline", "asciiValue", "isASCII", "isHexDigit", "hexDigitValue",
+		"isPunctuation", "isSymbol", "isMathSymbol", "isCurrencySymbol", "isCased":
 	default:
 		return nil, false
 	}
@@ -2006,6 +2007,19 @@ func swcProp(s, name string) (interface{}, bool) {
 		return float64(v)
 	}
 	switch name {
+	case "isCased":
+		if !single {
+			return caseMapMode(s, caseFull|caseUpper) != s || caseMapMode(s, caseFull) != s, true
+		}
+		return swcGcBits(c)&16 != 0, true
+	case "isPunctuation":
+		return swcGcBits(c)&1 != 0, true
+	case "isSymbol":
+		return swcGcBits(c)&2 != 0, true
+	case "isMathSymbol":
+		return swcGcBits(c)&4 != 0, true
+	case "isCurrencySymbol":
+		return swcGcBits(c)&8 != 0, true
 	case "asciiValue", "isASCII":
 		av := -1
 		if s == "\r\n" {
@@ -4010,15 +4024,13 @@ func swSharedListMethod(name string) bool {
 
 // swAbort is HOW A SWIFT PROGRAM DIES. rt.fail prefixes "js runtime error: ";
 // a message ALREADY in swiftc's own
-// wording is printed bare on stderr and exits 1. The pattern is js_jvtop in
-// abnf/jsrtjvm.go, and the
+// wording is printed bare on stderr and exits 133, a trap's status (see "How a
+// Swift program DIES" in languages/swift-interpreter.abnf). The pattern is
+// js_jvtop in abnf/jsrtjvm.go, and the
 // twins are swAbort in languages/lib/swift-rt.metajs and the fail override in
 // languages/swift-interpreter.abnf. An engine-level complaint no toolchain would
 // say ("unknown Array method: x") still goes through rt.fail and keeps its prefix.
-//
-// THE EXIT CODE STAYS 1, not swiftc's 133 - see "How a Swift program DIES" in
-// languages/swift-interpreter.abnf.
 func (rt *jsrt) swAbort(format string, args ...interface{}) {
 	fmt.Fprint(warnWriter, wtf8Clean(fmt.Sprintf(format, args...)+"\n"))
-	os.Exit(1)
+	os.Exit(133)
 }

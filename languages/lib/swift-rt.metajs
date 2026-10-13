@@ -1409,17 +1409,15 @@ function js_swforce(v) {
 // qualification this runtime has no concept of (manual chapter 7.9).
 //
 // HOW A SWIFT PROGRAM DIES. A message ALREADY in swiftc's own
-// wording is printed bare on stderr and exits 1 - the pattern is java's js_jvtop,
-// and the twins are the fail
+// wording is printed bare on stderr and exits 133, a trap's status (see "How a
+// Swift program DIES" in languages/swift-interpreter.abnf) - the pattern is java's
+// js_jvtop, and the twins are the fail
 // override in languages/swift-interpreter.abnf and rt.swAbort in abnf/jsrtswift.go.
 // An engine-level complaint that no toolchain would say ("unknown Array method: x")
 // still goes through fail() and keeps its prefix, because it is the engine talking.
-//
-// THE EXIT CODE STAYS 1, not swiftc's 133 - see "How a Swift program DIES" in
-// languages/swift-interpreter.abnf.
 function swAbort(msg) {
     eprintln(msg)
-    exit(1)
+    exit(133)
     return undefined
 }
 

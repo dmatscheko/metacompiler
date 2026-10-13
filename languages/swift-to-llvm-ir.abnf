@@ -3932,7 +3932,8 @@ KwContinue  = "continue" KwEnd ;
     }
     function swStrMutRef(txt, suffixes) {
         var n = suffixes.length
-        if (suffixes[n - 1].kind != "mcall" || !swStrMutName(suffixes[n - 1].name)) { return null }
+        if (suffixes[n - 1].kind != "mcall") { return null }
+        if (!swStrMutName(suffixes[n - 1].name) && swValMutOf(suffixes[n - 1].name) == "") { return null }
         var j = 0
         while (j < txt.length) {
             var k = txt.charCodeAt(j)
@@ -3947,6 +3948,49 @@ KwContinue  = "continue" KwEnd ;
             else if (suffixes[i].kind != "force") { return null }
         }
         return {name: txt.substring(0, j), path: path}
+    }
+    // A number or a Bool is a value as well, and each of its mutating members
+    // stores what its non-mutating twin answers (`m.round(.down)` is
+    // `m = m.rounded(.down)`): the twin's name, or "". Twin of swValMutOf in
+    // swift-interpreter.abnf.
+    function swValMutOf(n) {
+        if (n == "round") { return "rounded" }
+        if (n == "formRemainder") { return "remainder" }
+        if (n == "formTruncatingRemainder") { return "truncatingRemainder" }
+        if (n == "formSquareRoot") { return "squareRoot" }
+        if (n == "negate" || n == "toggle") { return n }
+        return ""
+    }
+    // The value mutator s on the receiver curV: when curV is one of its receivers
+    // (toggle a Bool, negate any number, the rest a floating-point one) the new
+    // value is stored through assign and the call answers Void; anything else
+    // takes the ordinary call. Twin of swValMutFits / swValMutate in
+    // swift-interpreter.abnf.
+    function swEmitValMut(b, curV, s, nameV, argsV, assign) {
+        var fitB = curF.NewBlock("")
+        var omB = curF.NewBlock("")
+        var jmB = curF.NewBlock("")
+        var ty = s.name == "toggle" ? "Bool" : "Double"
+        var fitsV = callExt(b, "js_swfits", [curV, emitStr(b, ty)])
+        if (s.name == "negate") {
+            var intB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, fitsV), fitB, intB)
+            intB.NewCondBr(truthy(intB, callExt(intB, "js_swfits", [curV, emitStr(intB, "Int")])), fitB, omB)
+        } else {
+            b.NewCondBr(truthy(b, fitsV), fitB, omB)
+        }
+        var nv = null
+        if (s.name == "toggle") { nv = {b: fitB, v: callExt(fitB, "js_not", [curV])} }
+        else if (s.name == "negate") { nv = makeNeg(function(b2) { return {b: b2, v: curV} })(fitB) }
+        else {
+            var twin = swValMutOf(s.name)
+            nv = {b: fitB, v: swEmitMCall(fitB, curV, twin, emitStr(fitB, twin), argsV)}
+        }
+        var sa = assign(nv.b, nv.v)
+        sa.b.NewBr(jmB)
+        var r2 = swEmitLMCall(omB, curV, s, nameV, argsV)
+        omB.NewBr(jmB)
+        return {b: jmB, v: jmB.NewPhi([llvm.ir.NewIncoming(hUndef, sa.b), llvm.ir.NewIncoming(r2, omB)])}
     }
     // The String mutator on its Characters, answering [the new String, the call's
     // own result]: the array member runs on the clusters (js_swgsplit), which are
@@ -5562,7 +5606,11 @@ KwContinue  = "continue" KwEnd ;
                     if (s.name == "init" && curType() != null) {
                         mnameV = emitOverloadKey(b, "init", typeRec(curType().key).inits, s.args, ea.v, 0)
                     }
-                    if (smAssign != null && i + 1 == suffixes.length) {
+                    if (smAssign != null && i + 1 == suffixes.length && !swStrMutName(s.name)) {
+                        var vm = swEmitValMut(b, cur, s, mnameV, ea.v, function(b2, v2) { smVal = v2; return smAssign(b2) })
+                        b = vm.b
+                        cur = vm.v
+                    } else if (smAssign != null && i + 1 == suffixes.length) {
                         // A String receiver takes rtStrMut and the write-back;
                         // anything else (an Array's append) the ordinary call.
                         var smB = curF.NewBlock("")
@@ -7454,7 +7502,7 @@ KwContinue  = "continue" KwEnd ;
     }
     var swMutNames = {}
     function swIsMutator(n) {
-        if (hasOwn(swMutNames, "$" + n)) { return true }
+        if (hasOwn(swMutNames, "$" + n) || swValMutOf(n) != "") { return true }
         return n == "append" || n == "insert" || n == "remove" || n == "removeFirst" || n == "removeLast"
             || n == "removeAll" || n == "removeSubrange" || n == "popLast" || n == "sort" || n == "reverse"
             || n == "shuffle" || n == "swapAt" || n == "removeValue" || n == "updateValue" || n == "merge"

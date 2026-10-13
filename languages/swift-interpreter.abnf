@@ -3993,7 +3993,7 @@ KwContinue  = "continue" KwEnd ;
     function swTrap(kind, msg) {
         var m = msg === undefined || msg === null ? "" : swstr(msg)
         eprintln(m == "" ? kind : kind + ": " + m)
-        exit(1)
+        exit(133)
     }
     hostGlobals["fatalError"] = function(msg) { swTrap("Fatal error", msg) }
     hostGlobals["preconditionFailure"] = function(msg) { swTrap("Fatal error", msg) }
@@ -5668,9 +5668,10 @@ KwContinue  = "continue" KwEnd ;
     //    bare; an engine-level complaint that no toolchain would ever say ("unknown
     //    Array method: x") keeps `swift interpreter error: `, because it is the
     //    engine talking and manual chapter 3 says that has to stay distinguishable.
-    //  - THE EXIT CODE stays 1, not swiftc's 133 (SIGTRAP): the interpreter and
-    //    llvm.Run legs run INSIDE the mec process, where raising SIGTRAP would kill
-    //    the metacompiler, so only the native leg could match.
+    //  - THE EXIT STATUS of a trap is 133, what a shell reports for swiftc's
+    //    SIGTRAP death (128 + 5). Every leg EXITS with it rather than raising the
+    //    signal, which in the interpreter and llvm.Run legs would kill the mec
+    //    process itself. An engine-level complaint exits 1.
     //
     // Twins: js_swtop / swAbort in languages/lib/swift-rt.metajs and rt.swAbort in
     // abnf/jsrtswift.go. The pattern is java's js_jvtop.
@@ -5679,7 +5680,11 @@ KwContinue  = "continue" KwEnd ;
     }
     // Overridden by ASSIGNMENT (see the include-override trap in the gotchas doc).
     fail = function(msg) {
-        if (swIsFatalMsg(msg)) { eprintln(msg) } else { eprintln("swift interpreter error: " + msg) }
+        if (swIsFatalMsg(msg)) {
+            eprintln(msg)
+            exit(133)
+        }
+        eprintln("swift interpreter error: " + msg)
         exit(1)
     }
     // Overridden by ASSIGNMENT (see the include-override trap in the gotchas doc).
@@ -6685,7 +6690,8 @@ KwContinue  = "continue" KwEnd ;
     }
     function swStrMutRef(txt, suffixes) {
         var n = suffixes.length
-        if (suffixes[n - 1].kind != "mcall" || !swStrMutName(suffixes[n - 1].name)) { return null }
+        if (suffixes[n - 1].kind != "mcall") { return null }
+        if (!swStrMutName(suffixes[n - 1].name) && swValMutOf(suffixes[n - 1].name) == "") { return null }
         var j = 0
         while (j < txt.length && swIdCh(txt.charCodeAt(j))) { j++ }
         if (j == 0 || j >= txt.length || (txt.charAt(j) != "." && txt.charAt(j) != "[")) { return null }
@@ -6712,6 +6718,31 @@ KwContinue  = "continue" KwEnd ;
         r = undefined
         if (name != "reserveCapacity") { r = arrayMethod(gs, name, a) }
         return {s: swJoinStrs(gs), r: r}
+    }
+    // A number or a Bool is a value as well, and each of its mutating members
+    // stores what its non-mutating twin answers: `m.round(.down)` is
+    // `m = m.rounded(.down)` and `b.toggle()` is `b = !b`. The twin's name, or ""
+    // for any other name. Twin of swValMutOf in swift-to-llvm-ir.abnf.
+    function swValMutOf(n) {
+        if (n == "round") { return "rounded" }
+        if (n == "formRemainder") { return "remainder" }
+        if (n == "formTruncatingRemainder") { return "truncatingRemainder" }
+        if (n == "formSquareRoot") { return "squareRoot" }
+        if (n == "negate" || n == "toggle") { return n }
+        return ""
+    }
+    // Whether v is a receiver of the value mutator n: toggle is Bool's, negate
+    // any number's, the rest floating-point.
+    function swValMutFits(v, n) {
+        if (swValMutOf(n) == "") { return false }
+        if (n == "toggle") { return typeof v == "boolean" }
+        if (n == "negate") { return typeof v == "number" || szIs(v) || isFlo(v) }
+        return isFlo(v)
+    }
+    function swValMutate(v, n, args) {
+        if (n == "toggle") { return !v }
+        if (n == "negate") { return makeNeg(function() { return v })() }
+        return mcall(v, swValMutOf(n), args)
     }
     foldCallMember = function(items, txt) {
         if (items.length == 1) { return items[0] }
@@ -6800,11 +6831,15 @@ KwContinue  = "continue" KwEnd ;
                     if (aTy != "" && ea.argv.length > 0) {
                         ea.argv[0] = swAdoptAnn(ea.argv[0], aTy)
                     }
-                    if (smAssign != null && i + 1 == suffixes.length && typeof cur == "string") {
+                    if (smAssign != null && i + 1 == suffixes.length && typeof cur == "string" && swStrMutName(s.name)) {
                         var sm = swStrMutate(cur, s.name, ea.argv)
                         smVal = sm.s
                         smAssign()
                         cur = sm.r
+                    } else if (smAssign != null && i + 1 == suffixes.length && swValMutFits(cur, s.name)) {
+                        smVal = swValMutate(cur, s.name, ea.argv)
+                        smAssign()
+                        cur = undefined
                     } else {
                         pendingLabels = recLabels(s.args)
                         cur = mcall(cur, s.name, ea.argv)
@@ -7438,7 +7473,7 @@ KwContinue  = "continue" KwEnd ;
     }
     var swMutNames = {}
     function swIsMutator(n) {
-        if (hasOwn(swMutNames, "$" + n)) { return true }
+        if (hasOwn(swMutNames, "$" + n) || swValMutOf(n) != "") { return true }
         return n == "append" || n == "insert" || n == "remove" || n == "removeFirst" || n == "removeLast"
             || n == "removeAll" || n == "removeSubrange" || n == "popLast" || n == "sort" || n == "reverse"
             || n == "shuffle" || n == "swapAt" || n == "removeValue" || n == "updateValue" || n == "merge"
