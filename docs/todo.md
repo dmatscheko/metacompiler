@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-570** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-572** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -238,72 +238,16 @@ passes took 581 s. Cache the byte form, or index the UTF-8 directly in lib/go-rt
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-507 swift: a literal typed by context is not adopted, so Double arithmetic runs as Int · P1 · SW · IN PROGRESS (SW worker, round 2) [V]
-`let t1 = flag[1] ? 1.5 : 3; print(t1 / 2)` → all legs `1`, swiftc `1.5`. Same for `[1.5, 3][1] / 2`, `(nilDouble ?? 3) / 2`,
-`enum K { case b(Double) }; K.b(3)` payload `/ 2`, `["a": 1.5, "b": 3]["b"]! / 2`. Printing shows it too: `[1.5, 2]` (swiftc
-`[1.5, 2.0]`), `[2, 1.5]` (`[2.0, 1.5]`), `K.b(x: 2)` (`b(x: 2.0)`), `Double(s) ?? -999` → `-999` (`-999.0`), `max(1, v)` with v
-Double → `1` (`1.0`). Already right: annotated `let`, struct field, default argument, return value, `reduce(0, +)`, typed
-closure, tuple. Missing contexts: ternary arms, heterogeneous array/dictionary literals, the RHS of `??`, enum payloads,
-`min`/`max` arguments. Files: swAdopt* in swift-interpreter.abnf and swift-to-llvm-ir.abnf.
+### T-570 swift: a ternary passed to an `Any` parameter unifies; nested existential annotations · P2 · SW · OPEN [V]
+`func f(_ x: Any) { print(x) }; f(c ? 1.5 : 3)` with c false → all legs `3.0`, swiftc `3` (an existential context keeps each
+arm's own type; needs the parameter type at the argument through the swDs call typing). `let a: [[Any]] = [[1, 2.5]]` is not
+detected as existential (swiftc `[[1, 2.5]]`).
 
-### T-508 swift: `rounded(_:)` ignores its rule; `.sign` is never `.minus` · P1 · SW · IN PROGRESS (SW worker, round 2) [V]
-d from a [Double]: `d.rounded(.down/.towardZero/.toNearestOrEven/.up/.awayFromZero)` all return half-away rounding:
-1.5 → down/tz 2.0 (swiftc 1.0); 2.5 → even/down/tz 3.0 (2.0); -2.5 → even/up/tz -3.0 (-2.0); 1e-05 → up/afz 0.0 (1.0);
-4.35 → up/afz 4.0 (5.0). `(-0.0).sign == .minus`, `(-2.5).sign == .minus` → false (true). Files: swift-interpreter.abnf ~4071,
-lib/swift-rt.metajs ~2857 (`swRound`), abnf/jsrtswift.go ~1309 — all return `swRoundHalfAway` regardless of the argument;
-`sign` has no handler (the silent-nil member read, T-514).
-
-### T-509 swift: `init(clamping:)`/`init(exactly:)` truncate; `radix:` is ignored · P1 · SW · IN PROGRESS (SW worker, round 2) [V]
-Operands from an [Int]: `UInt8(clamping: 256)` → 0 (255), `UInt8(clamping: -1)` → 255 (0), `Int8(clamping: 255)` → -1 (127),
-`Int8(clamping: -129)` → 127 (-128); `UInt8(exactly: 256)` → 0 (nil), `Int8(exactly: 255)` → -1 (nil), `UInt8(exactly: -1)` → 255
-(nil); finder: `Int64(exactly: 3.9)` → 3 (nil). `Int("ff", radix: 16) ?? -1` → -1 (255), `Int("-101", radix: 2)` → -101 (-5),
-`Int("z", radix: 36)` → nil (35), `String(42, radix: 16)` → 42 (2a), `String(-255, radix: 2)` → -255 (-11111111); finder:
-`uppercase: true` ignored. All legs. Files: integer-init path near swIntBounds (swift-interpreter.abnf ~2990),
-swift-to-llvm-ir.abnf, lib/swift-rt.metajs, abnf/jsrtswift.go.
-
-### T-510 swift: `for v in arr` does not iterate a copy; interp and compiler disagree · P1 · SW · IN PROGRESS (SW worker, round 2) [V]
-`var it = [1,2,3]; for v in it { if v == 1 { it.append(10) }; if v == 2 { it.removeAll() }; print("iter \(v) count=\(it.count)") }`
-then `var d = [5,6]; for v in d { d[1] = 99; print("d \(v)") }`: swiftc `iter 1`, `iter 2`, `iter 3 count=0`, `d 5`, `d 6`;
-interp `iter 1`, `iter 2`, `iter nil count=0`, `d 5`, `d 99` (original count, live elements); run/native stop after `iter 2`
-and print `d 99` (live array; finder: an append is iterated). Value semantics (copy-at-store) is not applied to the for-in
-sequence operand. Files: for-in lowering in both swift grammars.
-
-### T-511 swift: array subscript — a negative index wraps; interp grows the array on a write past the end · P2 · SW · IN PROGRESS (SW worker, round 2) [V]
-`var a = [1,2]; let idx = [2,5,-1]; print(a[idx[2]]); a[idx[2]] = 9; print(a)` → all legs `2`, `[1, 9]`, exit 0; swiftc
-`Fatal error: Index out of range`, exit 133. Finder: `a[2] = 9` / `a[5] = 9` → interp `[1, 2, 9]` / `[1, 2, nil, nil, nil, 9]`,
-run `Fatal error: Error raised at top level: IndexError`, native `list assignment index out of range` (python's setter
-wording). A positive out-of-range READ is right. Files: swift subscript get/set in both grammars (the compiled write goes
-through a python-style setter).
-
-### T-512 swift: `switch` patterns on `Int.min`/`Int.max` · P1 · SW · IN PROGRESS (SW worker, round 2) [V]
-n from `[Int.min, -5, Int.max]`: `case Int.min:` never matches (all legs `other`, swiftc `min`); `case Int.max:` never matches
-(swiftc `max`); `case ..<0:` with Int.min → interp `other`, run/native and swiftc `neg`; `case 0...:` after `case Int.max` →
-interp `other`, run/native `nonneg`, swiftc `max`. `n == Int.min` and `n < 0` are right. Files: matchPat / emitMatchPat in the
-two swift grammars (the sized-int box is not compared via the `==` arm; interp range patterns do not unbox).
-
-### T-513 swift: grapheme clusters — ZWJ only in the interpreter; RI pairs, CR LF, emoji modifiers, Hangul never; prefix/contains/`<` not grapheme-aware · P1 · SW · IN PROGRESS (SW worker, round 2) [V]
-`.count`: 👨‍👩‍👧 interp 1, run/native 5, swiftc 1 (also `first` and `reversed()` split it); 🏳️‍🌈 interp 1, compiled 3. All legs:
-🇩🇪🇫🇷 4 (2), `"\r\n"` 2 (1), 👍🏽 2 (1), Hangul L+V+T 3 (1). `"e\u{301}".hasPrefix("e")` and `.contains("e")` true (false);
-`"e\u{301}" < "f"` true (false), `"e\u{301}" < "\u{e9}"` true (false — they are equal; `==` already uses canonical
-equivalence). The interpreter's `swGraphemeCount`/`swGraphemes` (~2456) has the 0x200D arm; the compiler's `rtGSplit`
-(swift-to-llvm-ir.abnf ~3573-3720) and `sw_gcount` lack it. Implement UAX #29 once (shared), not per site.
-
-### T-514 swift: an unimplemented member read answers nil silently; `?? default` then disagrees between legs · P2 · SW · IN PROGRESS (SW worker, round 2) [V]
-`Character` `.isLetter/.isUppercase/.isNumber/.isWhitespace/.asciiValue/.wholeNumberValue/.isASCII` all print `nil` in every
-leg (swiftc real values, e.g. `[a] letter=true upper=false num=false ws=false ascii=97 whole=-1 isASCII=true`);
-`ch.asciiValue ?? 0` → interp 0, run/native `nil` (`undefined ?? 0` does not fire in the compiled legs). Also `Double.sign`
-(T-508) and `Dir.allCases` (`nil`; `.count` → "field .count of nil"). Unknown METHODS fail loudly; unknown PROPERTIES must
-too, and these Character properties should be implemented. Files: member-read fallback in both swift grammars.
-
-### T-515 swift: debug-description escapes and trap wording · P3 · SW · IN PROGRESS (SW worker, round 2) [V finder only]
-`print(["bel\u{7}", "del\u{7F}"])` prints raw control bytes (swiftc `"bel\u{07}"`, `"del\u{7F}"`); a Character `'` in an
-array prints `"'"` (swiftc `"\'"`); `String(reflecting: "s")` → `s` (`"s"`); `a % 0` → `Fatal error: Division by zero` (swiftc
-`... in remainder operation`).
-
-### T-516 swift: missing features that fail loudly · P3 · SW · IN PROGRESS (SW worker, round 2) [V finder only]
-`s.utf16.count` ("field .count of nil"); Range `.map/.filter/.reduce/.contains`; `Int.signum()`, `isMultiple(of:)`,
-`quotientAndRemainder(dividingBy:)`; `Double.remainder(dividingBy:)`; `Optional.map` on a `firstIndex(of:)` result ("method
-call 'map' on a number"); `(..<0).contains(n)` does not parse.
+### T-571 swift: mutating value methods on numbers and Bools; General_Category Character properties; trap exit status · P2 · SW · OPEN [V]
+`var m = 2.5; m.round(.down); print(m)` → "unknown Double method: round" (swiftc 2.0); `var b = [true]; b[0].toggle()` →
+interp "unknown method 'toggle'", compiled "method call 'toggle' on a boolean" (swiftc `[false]`); also `negate()`,
+`formRemainder`. `Character.isPunctuation`, `isSymbol`, `isCased`, `isMathSymbol`, `isCurrencySymbol` fail loudly (need
+General_Category data). P3: a trap exits 1 in every leg, swiftc 133 (SIGTRAP).
 
 ---
 
@@ -805,6 +749,16 @@ T-537 lua: numeric `for` prep — an int start with a float step is an integer o
 T-538 lua: no proper tail calls — DONE b32c7caa
 T-539 lua: `tostring` of a table or function has no identity — DONE c04e8cf0
 T-540 lua: string library — `%z` class missing; `%s` with width/precision accepts `\0`; `\u{...}` above 0x1FFFFF — DONE 65572cc5
+T-508 swift: `rounded(_:)` ignores its rule; `.sign` is never `.minus` — DONE 2a59ce6e
+T-509 swift: `init(clamping:)`/`init(exactly:)` truncate; `radix:` is ignored — DONE bf511553
+T-510 swift: `for v in arr` does not iterate a copy; interp and compiler disagree — DONE 5f26f384
+T-511 swift: array subscript — a negative index wraps; interp grows the array on a write past the end — DONE 0b8cc7dc
+T-512 swift: `switch` patterns on `Int.min`/`Int.max` — DONE 6b97a867
+T-514 swift: an unimplemented member read answers nil silently; `?? default` then disagrees between legs — DONE c8ec3a26
+T-515 swift: debug-description escapes and trap wording — DONE 17073228
+T-516 swift: missing features that fail loudly — DONE 5399e731
+T-513 swift: grapheme clusters — ZWJ only in the interpreter; RI pairs, CR LF, emoji modifiers, Hangul never; prefix/contains/`<` not grapheme-aware — DONE f04d4e28
+T-507 swift: a literal typed by context is not adopted, so Double arithmetic runs as Int — PARTIAL c29f70a2 (literals adopt Double next to a Double: ternaries, collections, ??, payloads, min/max); Any-parameter and nested existential cases are T-570
 
 # Settled — do not re-open
 
