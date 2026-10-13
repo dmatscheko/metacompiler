@@ -221,16 +221,16 @@ not change the renderer.
 
 # GO — Go  (oracle: `go run`)
 
-### T-562 go: `[]byte(s)[i]` has dynamic type int; `cap()` of a channel · P2 · GO · OPEN [V]
+### T-562 go: `[]byte(s)[i]` has dynamic type int; `cap()` of a channel · P2 · GO · IN PROGRESS (GO worker, round 3) [V]
 `b := []byte("az"); fmt.Printf("%T", b[0])` → all legs `int` (go `uint8`): `[]byte` elements are held as code points, so they
 carry no sized type. `c := make(chan int, 2); fmt.Println(cap(c))` → interp `<nil>`, llvm.Run and native abort "len() of a
 object" (go 2): the buffer size of `make(chan T, n)` is not recorded where `cap` looks.
 
-### T-563 go: `fmt.Fprint*` / `os.Stdout` / io.Writer, and the `math` package · P3 · GO · OPEN [V]
+### T-563 go: `fmt.Fprint*` / `os.Stdout` / io.Writer, and the `math` package · P3 · GO · IN PROGRESS (GO worker, round 3) [V]
 `fmt.Fprintf(&sb, ...)`, `fmt.Fprintln(os.Stdout, ...)` unsupported in every engine (no io.Writer model, no os.Stdout).
 `math.Sqrt` etc. unknown in every engine; needs correctly rounded primitives in all three engines, not a partial package.
 
-### T-564 go native: `s[i]` on a string converts the whole string to bytes per index · P2 · GO · OPEN [V]
+### T-564 go native: `s[i]` on a string converts the whole string to bytes per index · P2 · GO · IN PROGRESS (GO worker, round 3) [V]
 A loop reading `s[i]` over a 10,000-byte string is quadratic natively (`goBytes` of the whole string for every index): 1,430 × 50
 passes took 581 s. Cache the byte form, or index the UTF-8 directly in lib/go-rt.metajs.
 
