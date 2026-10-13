@@ -40,8 +40,8 @@ order and printed text match lua; what differs is that any OTHER side effect
 before the yield a coroutine is parked at - a write to an upvalue, a global or a
 table it did not create - happens once per resume instead of once.
 
-Not in the subset: the loading and collector functions of the base library
-(load, dofile, collectgarbage), os, string.pack/unpack and the rest of io.
+Not in the subset: the loading functions of the base library (load, loadfile,
+dofile), os, string.pack/unpack and the rest of io; collectgarbage collects nothing.
 
 There is no main(): the file simply runs top to bottom. Self checking programs count
 their failures and end with exit(fails). The same language with the same semantics is
@@ -3611,6 +3611,38 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return luaLen(v)
     }
     globalScope["_VERSION"] = "Lua 5.5"
+    // collectgarbage(opt): the engines' collectors are not lua's and cannot be
+    // driven from a program, so the options answer what lua's would without
+    // collecting - "count" a fixed 1.0 KB, "step" an unfinished cycle - while the
+    // running flag and the mode (5.5 starts generational) are kept as state.
+    // Twin of js_lucollect in abnf/jsrtlua.go and lib/lua-rt.metajs.
+    var luaGcState = {running: true, mode: "generational"}
+    // "param" reads and sets the tuning parameters, from lua 5.5's defaults.
+    var luaGcParams = {minormul: 20, majorminor: 50, minormajor: 68, pause: 250, stepmul: 200, stepsize: 9600}
+    globalScope["collectgarbage"] = function(opt, a2, a3) {
+        var o = luaOptStr("collectgarbage", 1, opt, arguments.length, "collect")
+        if (o == "param") {
+            var pn = luaCheckStr("collectgarbage", 2, a2, arguments.length)
+            if (!hasOwn(luaGcParams, pn)) { luaArgErr("collectgarbage", 2, "invalid option '" + pn + "'") }
+            var was = luaGcParams[pn]
+            if (a3 !== undefined && a3 !== null) { luaGcParams[pn] = luaCheckInt("collectgarbage", 3, a3, arguments.length) }
+            return was
+        }
+        if (o == "collect" || o == "stop" || o == "restart") {
+            if (o == "stop") { luaGcState.running = false }
+            if (o == "restart") { luaGcState.running = true }
+            return 0
+        }
+        if (o == "count") { return mkFlt(1) }
+        if (o == "step") { return false }
+        if (o == "isrunning") { return luaGcState.running }
+        if (o == "incremental" || o == "generational") {
+            var prev = luaGcState.mode
+            luaGcState.mode = o
+            return prev
+        }
+        luaArgErr("collectgarbage", 1, "invalid option '" + o + "'")
+    }
     // _G, the globals as a table. The globals live in the global scope and not in
     // a table, so _G is a proxy whose metatable reads and writes that scope by
     // name; a key that is no string is an ordinary field of the proxy. Twin of

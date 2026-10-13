@@ -1323,6 +1323,45 @@ func init() {
 		}
 		m["js_lumaxint"] = func(a []uint64) uint64 { return w(giNorm(math.MaxInt64, 64, false)) }
 		m["js_luminint"] = func(a []uint64) uint64 { return w(giNorm(math.MinInt64, 64, false)) }
+		// collectgarbage(opt): the options answer what lua's would without
+		// collecting; the running flag, the mode and the tuning parameters are
+		// kept as state. Twin of collectgarbage in lua-interpreter.abnf and
+		// js_lucollect in lib/lua-rt.metajs.
+		gcRunning, gcMode := true, "generational"
+		gcParams := map[string]float64{"minormul": 20, "majorminor": 50, "minormajor": 68, "pause": 250, "stepmul": 200, "stepsize": 9600}
+		m["js_lucollect"] = func(a []uint64) uint64 {
+			args := argsOf(a[0])
+			o := rt.luOptStr("collectgarbage", 1, args, "collect")
+			switch o {
+			case "param":
+				pn := rt.luCheckStr("collectgarbage", 2, args)
+				was, ok := gcParams[pn]
+				if !ok {
+					rt.luArgErr("collectgarbage", 2, "invalid option '"+pn+"'")
+				}
+				if !luIsNil(luArgAt(args, 3)) {
+					gcParams[pn] = rt.luCheckInt("collectgarbage", 3, args)
+				}
+				return w(was)
+			case "collect", "stop", "restart":
+				if o != "collect" {
+					gcRunning = o == "restart"
+				}
+				return w(float64(0))
+			case "count":
+				return w(luMkFlo(1))
+			case "step":
+				return w(false)
+			case "isrunning":
+				return w(gcRunning)
+			case "incremental", "generational":
+				prev := gcMode
+				gcMode = o
+				return rt.wrapStr(prev)
+			}
+			rt.luArgErr("collectgarbage", 1, "invalid option '"+o+"'")
+			return w(jsUndef)
+		}
 		// math.random / math.randomseed, lmathlib.c's. Twins of the math table's
 		// random / randomseed in lua-interpreter.abnf and lib/lua-rt.metajs.
 		intArg := func(fn string, n int, args []interface{}) uint64 {

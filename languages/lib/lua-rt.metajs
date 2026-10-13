@@ -1290,6 +1290,37 @@ function js_luult(args) {
     luCheckInt("math.ult", 2, args)
     return i64CmpU(luIntPair(luToNum(args[0])), luIntPair(luToNum(args[1]))) < 0
 }
+// collectgarbage(opt): the options answer what lua's would without collecting;
+// the running flag, the mode and the tuning parameters are kept as state. Twin of
+// collectgarbage in lua-interpreter.abnf and js_lucollect in abnf/jsrtlua.go.
+var luGcState = {running: true, mode: "generational"}
+var luGcParams = {minormul: 20, majorminor: 50, minormajor: 68, pause: 250, stepmul: 200, stepsize: 9600}
+function js_lucollect(args) {
+    var o = luOptStr("collectgarbage", 1, args, "collect")
+    if (o == "param") {
+        var pn = luCheckStr("collectgarbage", 2, args)
+        var was = luGcParams[pn]
+        if (was === undefined) { luArgErr("collectgarbage", 2, "invalid option '" + pn + "'") }
+        var nv = luArgAt(args, 3)
+        if (nv !== undefined && nv !== null) { luGcParams[pn] = luCheckInt("collectgarbage", 3, args) }
+        return was
+    }
+    if (o == "collect" || o == "stop" || o == "restart") {
+        if (o == "stop") { luGcState["running"] = false }
+        if (o == "restart") { luGcState["running"] = true }
+        return 0
+    }
+    if (o == "count") { return luMkFlo(1) }
+    if (o == "step") { return false }
+    if (o == "isrunning") { return luGcState["running"] }
+    if (o == "incremental" || o == "generational") {
+        var prev = luGcState["mode"]
+        luGcState["mode"] = o
+        return prev
+    }
+    luArgErr("collectgarbage", 1, "invalid option '" + o + "'")
+    return undefined
+}
 // math.random / math.randomseed, lmathlib.c's, over lib/lua-strlib.js's
 // xoshiro256** (lr*). Twins of js_lurandom / js_lurandomseed in abnf/jsrtlua.go.
 function luIntPairArg(fn, n, args) {

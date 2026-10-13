@@ -1854,7 +1854,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // them all.
     var libNames = ["math", "string", "table", "next", "ipairs", "pairs", "error", "pcall", "xpcall", "select",
                     "tostring", "tonumber", "type", "assert", "rawequal", "rawget", "rawset", "rawlen", "_VERSION",
-                    "io", "setmetatable", "getmetatable", "_G", "coroutine", "utf8"]
+                    "io", "setmetatable", "getmetatable", "_G", "coroutine", "utf8", "collectgarbage"]
     var libNeed = {}
     for (var lni = 0; lni < libNames.length; lni++) { libNeed[libNames[lni]] = false }
     makeVarRef = function(name) {
@@ -3055,7 +3055,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // in lib/lua-rt.metajs).
         var baseExt = [["next", "js_lunext"], ["tonumber", "js_lutonumber"], ["assert", "js_luassert"],
                        ["rawequal", "js_lurawequal"], ["rawget", "js_lurawget"], ["rawset", "js_lurawset"],
-                       ["rawlen", "js_lurawlen"], ["setmetatable", "js_lusetmt"], ["getmetatable", "js_lugetmt"]]
+                       ["rawlen", "js_lurawlen"], ["setmetatable", "js_lusetmt"], ["getmetatable", "js_lugetmt"], ["collectgarbage", "js_lucollect"]]
         for (var bi = 0; bi < baseExt.length; bi++) {
             if (libNeed[baseExt[bi][0]]) {
                 callExt(b, "js_scope_decl", [curScopeV, emitStr(b, baseExt[bi][0]), callExt(b, "js_closure", [handle(emitLibFunc(libArgsExt(baseExt[bi][1]))), curScopeV])])

@@ -2137,6 +2137,29 @@ function s49()
         "bad argument #1 to 'math.random' (interval is empty)|wrong number of arguments|bad argument #1 to 'math.randomseed' (number has no integer representation)")
 end
 
+-- ===== SECTION 50: collectgarbage =====
+-- The options and their answers, the mode switch (5.5 starts generational), the
+-- running flag and the 5.5 tuning parameters. Values printed by lua 5.5; the
+-- byte count itself is the one answer no engine shares, so only its type is.
+function s50()
+    local function try(f, ...)
+        local ok, e = pcall(f, ...)
+        if ok then return "ok" end
+        return (tostring(e):gsub("^[^:]*:%d+: ", ""))
+    end
+    check("gc1", collectgarbage() .. " " .. collectgarbage("collect") .. " " .. math.type(collectgarbage("count")) .. " " .. tostring(collectgarbage("step")) .. " " .. tostring(collectgarbage("isrunning")),
+        "0 0 float false true")
+    check("gc2", collectgarbage("incremental") .. " " .. collectgarbage("generational") .. " " .. collectgarbage("incremental"), "generational incremental generational")
+    collectgarbage("stop")
+    local stopped = collectgarbage("isrunning")
+    collectgarbage("restart")
+    check("gc3", tostring(stopped) .. " " .. tostring(collectgarbage("isrunning")), "false true")
+    check("gc4", collectgarbage("param", "pause") .. " " .. collectgarbage("param", "stepsize") .. " " .. collectgarbage("param", "pause", 100) .. " " .. collectgarbage("param", "pause"),
+        "250 9600 250 100")
+    check("gc5", try(collectgarbage, "bogus") .. "|" .. try(collectgarbage, "param", "bogus"),
+        "bad argument #1 to 'collectgarbage' (invalid option 'bogus')|bad argument #2 to 'collectgarbage' (invalid option 'bogus')")
+end
+
 s25() -- SECTION-CALL 25
 s26() -- SECTION-CALL 26
 s27() -- SECTION-CALL 27
@@ -2162,5 +2185,6 @@ s46() -- SECTION-CALL 46
 s47() -- SECTION-CALL 47
 s48() -- SECTION-CALL 48
 s49() -- SECTION-CALL 49
+s50() -- SECTION-CALL 50
 print("full: " .. checks .. " checks, " .. failures .. " failures")
 exit(failures)
