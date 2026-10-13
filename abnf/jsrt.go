@@ -17463,10 +17463,35 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			rt.fail("uncaught exception: %s", text)
 			return 0
 		},
-		// divmod(a, b) is the pair (a // b, a % b) - floor division and the
-		// floored remainder, so divmod(-7, 2) is (-4, 1).
+		// divmod(a, b) is a.__divmod__(b), then b.__rdivmod__(a); for two real
+		// numbers it is the pair (a // b, a % b) - floor division and the
+		// floored remainder, so divmod(-7, 2) is (-4, 1). Anything else is
+		// CPython's TypeError naming divmod(), even for a class with
+		// __floordiv__ and __mod__. Twin of hostGlobals["divmod"] in
+		// languages/python-interpreter.abnf and js_pydivmod in lib/python-rt.metajs.
 		"js_pydivmod": func(a []uint64) uint64 {
 			l, r := u(a[0]), u(a[1])
+			if _, cls, ok := pyInstance(l); ok {
+				if m, found := pyLookup(cls, "__divmod__"); found && isCallable(m) {
+					if v := rt.call(m, jsUndef, []interface{}{l, r}); v != pyNotImplemented {
+						return w(v)
+					}
+				}
+			}
+			if _, cls, ok := pyInstance(r); ok {
+				if m, found := pyLookup(cls, "__rdivmod__"); found && isCallable(m) {
+					if v := rt.call(m, jsUndef, []interface{}{r, l}); v != pyNotImplemented {
+						return w(v)
+					}
+				}
+			}
+			ul, ur := pyUnwrapBuiltin(l), pyUnwrapBuiltin(r)
+			na, nb := pyNumTypeName(ul), pyNumTypeName(ur)
+			if na == "" || nb == "" || na == "complex" || nb == "complex" {
+				panic(&jsThrown{value: rt.pyExcInstance("TypeError", "unsupported operand type(s) for divmod(): '"+
+					pyTypeName(rt, l)+"' and '"+pyTypeName(rt, r)+"'")})
+			}
+			l, r = ul, ur
 			q := rt.pyExt("js_pybin", "//", l, r)
 			m := rt.pyExt("js_pybin", "%", l, r)
 			return w(pyTup(&jsArray{elems: []interface{}{q, m}}))
@@ -22274,11 +22299,11 @@ func (rt *jsrt) pyMkIter(name string, elems []interface{}) *jsObject {
 // protocol - and the floor's generator cell - answer.
 func (rt *jsrt) pyItStep(it *jsObject) *jsObject {
 	out := newJSObject()
+	if wv, ok := it.props["__w"]; ok && wv != jsUndef {
+		rt.pyWatchCheck(it, wv)
+	}
 	a, _ := it.props["__a"].(*jsArray)
 	i := int(rt.toNumber(it.props["__i"]))
-	if wv, ok := it.props["__w"]; ok && wv != jsUndef {
-		rt.pyWatchCheck(it, wv, a, i)
-	}
 	if a == nil || i >= len(a.elems) {
 		out.set("value", jsUndef)
 		out.set("done", true)
@@ -22291,9 +22316,14 @@ func (rt *jsrt) pyItStep(it *jsObject) *jsObject {
 }
 
 // pyWatchIter is the iterator over a dict, a set or a dict view, which WATCHES
-// the container (__w, its size __n, a dict's keys __k), as CPython's do: a size
-// change between two steps is RuntimeError, and so is a dict whose keys changed
-// at equal size by the time the iterator runs out. Twin of pyWatchIter in
+// the container (__w, its size __n), as CPython's do: a size change between two
+// steps is RuntimeError. A dict's iterator also walks the dict's entry order as
+// it is NOW: __k is the key order its elements __a were read in, and when the
+// key at the cursor no longer matches, the keys before the cursor that survive
+// give the new cursor and __a is re-read. Deleting a key not yet reached and
+// adding one is therefore no error, while yielding more items than the dict had
+// (__y counts them) is "dictionary keys changed during iteration", CPython's
+// dictiter_iternextkey rule. Twin of pyWatchIter in
 // languages/python-interpreter.abnf and pyAWatchIter in lib/python-rt.metajs.
 func (rt *jsrt) pyWatchIter(v interface{}) (*jsObject, bool) {
 	var wo interface{} = v
@@ -22314,30 +22344,60 @@ func (rt *jsrt) pyWatchIter(v interface{}) (*jsObject, bool) {
 	it.set("__n", float64(n))
 	if keys != nil {
 		it.set("__k", keys)
+		it.set("__src", v)
+		it.set("__y", float64(0))
 	}
 	return it, true
 }
 
-func (rt *jsrt) pyWatchCheck(it *jsObject, wo interface{}, a *jsArray, i int) {
+func (rt *jsrt) pyWatchCheck(it *jsObject, wo interface{}) {
 	msg := ""
+	n := int(rt.toNumber(it.props["__n"]))
 	if els, ok := pySetElems(wo); ok {
-		if float64(len(els.elems)) != rt.toNumber(it.props["__n"]) {
+		if len(els.elems) != n {
 			msg = "Set changed size during iteration"
 		}
 	} else if k, _, ok := dictParts(wo); ok {
-		if float64(len(k.elems)) != rt.toNumber(it.props["__n"]) {
+		if len(k.elems) != n {
 			msg = "dictionary changed size during iteration"
-		} else if snap, ok := it.props["__k"].(*jsArray); ok && (a == nil || i >= len(a.elems)) {
-			for j, key := range snap.elems {
-				if key != k.elems[j] {
+		} else if snap, ok := it.props["__k"].(*jsArray); ok && n > 0 {
+			i := int(rt.toNumber(it.props["__i"]))
+			at := i
+			if at > n-1 {
+				at = n - 1
+			}
+			if snap.elems[at] != k.elems[at] {
+				j := 0
+				for _, key := range snap.elems[:i] {
+					if key == k.elems[j] {
+						j++
+					}
+				}
+				it.set("__k", &jsArray{elems: append([]interface{}{}, k.elems...)})
+				it.set("__a", &jsArray{elems: rt.pyElemsOf(it.props["__src"])})
+				it.set("__i", float64(j))
+				i = j
+			}
+			if a := it.props["__a"].(*jsArray); i < len(a.elems) {
+				y := int(rt.toNumber(it.props["__y"]))
+				if y >= n {
 					msg = "dictionary keys changed during iteration"
+				}
+				it.set("__y", float64(y+1))
+				// A value is read when it is reached, as CPython's iterator does.
+				_, vals, _ := dictParts(wo)
+				switch _, kind, _ := pyDView(it.props["__src"]); kind {
+				case "values":
+					a.elems[i] = vals.elems[i]
+				case "items":
+					a.elems[i] = pyTup(&jsArray{elems: []interface{}{k.elems[i], vals.elems[i]}})
 				}
 			}
 		}
 	}
 	if msg != "" {
 		it.set("__w", jsUndef)
-		if a != nil {
+		if a, ok := it.props["__a"].(*jsArray); ok {
 			it.set("__i", float64(len(a.elems)))
 		}
 		rt.pyRaise("RuntimeError", msg)

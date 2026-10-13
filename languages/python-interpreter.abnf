@@ -2173,16 +2173,25 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return v !== null && v !== undefined && typeof v == "object" && v.__pyit !== undefined
     }
     // An iterator over a dict, a set or a dict view WATCHES the container (__w,
-    // its size __n, a dict's keys __k), as CPython's do: a size change between
-    // two steps is RuntimeError, and so is a dict whose keys changed at equal
-    // size by the time the iterator runs out. Twin of rt.pyWatchIter in
-    // abnf/jsrt.go and pyAWatchIter in lib/python-rt.metajs.
+    // its size __n), as CPython's do: a size change between two steps is
+    // RuntimeError. A dict's iterator also walks the dict's entry order as it
+    // is NOW: __k is the key order its elements __a were read in, and when the
+    // key at the cursor no longer matches, the keys before the cursor that
+    // survive give the new cursor and __a is re-read. Deleting a key not yet
+    // reached and adding one is therefore no error, while yielding more items
+    // than the dict had (__y counts them) is "dictionary keys changed during
+    // iteration", CPython's dictiter_iternextkey rule. Twin of rt.pyWatchIter
+    // in abnf/jsrt.go and pyAWatchIter in lib/python-rt.metajs.
     function pyWatchIter(v) {
         var it = pyMkIter(pyItKind(v), iterToList(v).slice(0))
         var w = isView(v) ? v.__vd : v
         it.__w = w
         it.__n = w.keys.length
-        if (!isSet(w)) { it.__k = w.keys.slice(0) }
+        if (!isSet(w)) {
+            it.__k = w.keys.slice(0)
+            it.__src = v
+            it.__y = 0
+        }
         return it
     }
     function pyWatchCheck(it) {
@@ -2190,9 +2199,25 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var msg = ""
         if (w.keys.length != it.__n) {
             msg = isSet(w) ? "Set changed size during iteration" : "dictionary changed size during iteration"
-        } else if (it.__i >= it.__a.length && it.__k !== undefined) {
-            for (var i = 0; i < it.__k.length; i++) {
-                if (it.__k[i] !== w.keys[i]) { msg = "dictionary keys changed during iteration" }
+        } else if (it.__k !== undefined && it.__n > 0) {
+            var ks = it.__k
+            var at = it.__i < it.__n ? it.__i : it.__n - 1
+            if (ks[at] !== w.keys[at]) {
+                var j = 0
+                for (var i = 0; i < it.__i; i++) {
+                    if (ks[i] === w.keys[j]) { j = j + 1 }
+                }
+                it.__k = w.keys.slice(0)
+                it.__a = iterToList(it.__src).slice(0)
+                it.__i = j
+            }
+            if (it.__i < it.__a.length) {
+                if (it.__y >= it.__n) { msg = "dictionary keys changed during iteration" }
+                it.__y = it.__y + 1
+                // A value is read when it is reached, as CPython's iterator does.
+                var vk = isView(it.__src) ? it.__src.__dview : "keys"
+                if (vk == "values") { it.__a[it.__i] = w.vals[it.__i] }
+                if (vk == "items") { it.__a[it.__i] = pyTup([w.keys[it.__i], w.vals[it.__i]]) }
             }
         }
         if (msg != "") {
@@ -2406,9 +2431,35 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var ib = pyIntBits(n)
         return (ib.neg ? "-" : "") + prefix + pynBitsRadix(ib.bits, base)
     }
-    // divmod(a, b) is the pair (a // b, a % b): FLOOR division and the floored
-    // remainder, so divmod(-7, 2) is (-4, 1).
-    hostGlobals["divmod"] = function(a, b) { return pyTup([binOp("//", a, b), binOp("%", a, b)]) }
+    // divmod(a, b) is a.__divmod__(b), then b.__rdivmod__(a); for two real
+    // numbers it is the pair (a // b, a % b), FLOOR division and the floored
+    // remainder, so divmod(-7, 2) is (-4, 1). Anything else is CPython's
+    // TypeError naming divmod(), even for a class with __floordiv__ and
+    // __mod__. Twin of js_pydivmod in abnf/jsrt.go and lib/python-rt.metajs.
+    hostGlobals["divmod"] = function(l, r) {
+        if (pyUser(l)) {
+            var f = clsFind(l.__class, "__divmod__")
+            if (f != null) {
+                var lv = f(l, r)
+                if (lv !== pyNotImpl) { return lv }
+            }
+        }
+        if (pyUser(r)) {
+            var g = clsFind(r.__class, "__rdivmod__")
+            if (g != null) {
+                var rv = g(r, l)
+                if (rv !== pyNotImpl) { return rv }
+            }
+        }
+        var a = pyBDelSelf(l)
+        var b = pyBDelSelf(r)
+        var na = pyNumTName(a)
+        var nb = pyNumTName(b)
+        if (na == "" || nb == "" || na == "complex" || nb == "complex") {
+            pyListErr("TypeError", "unsupported operand type(s) for divmod(): '" + pyTypeOf(l).__name + "' and '" + pyTypeOf(r).__name + "'")
+        }
+        return pyTup([binOp("//", a, b), binOp("%", a, b)])
+    }
     // round(x[, n]) rounds HALF TO EVEN, so round(0.5) is 0, round(1.5) is 2 and
     // round(2.5) is 2 - which a Math.floor(x + 0.5) spelling gets wrong on every
     // other integer. pyFixed is this grammar's exact decimal formatter and rounds

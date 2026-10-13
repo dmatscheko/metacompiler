@@ -5924,9 +5924,11 @@ function pyItStep(it) {
 }
 
 // Go: rt.pyWatchIter. An iterator over a dict, a set or a dict view WATCHES the
-// container (__w, its size __n, a dict's keys __k), as CPython's do: a size
-// change between two steps is RuntimeError, and so is a dict whose keys changed
-// at equal size by the time the iterator runs out.
+// container (__w, its size __n), as CPython's do: a size change between two
+// steps is RuntimeError. A dict's iterator walks the dict's entry order as it is
+// NOW: when the key at the cursor no longer matches __k, the surviving keys
+// before the cursor give the new cursor and __a is re-read; yielding more items
+// than the dict had (__y) is "dictionary keys changed during iteration".
 function pyAWatchIter(v) {
     var it = pyMkIter(pyIterKind(v), pyCCopyArr(pyElemsOf(v)))
     var w = v
@@ -5938,23 +5940,47 @@ function pyAWatchIter(v) {
     } else {
         it["__n"] = w["keys"].length
         it["__k"] = pyCCopyArr(w["keys"])
+        it["__src"] = v
+        it["__y"] = 0
     }
     return it
 }
 function pyAWatchCheck(it) {
     var w = it["__w"]
     var els = pySetElemsOf(w)
+    var n = it["__n"]
     var msg = ""
     if (els !== null) {
-        if (els.length != it["__n"]) { msg = "Set changed size during iteration" }
-    } else if (w["keys"].length != it["__n"]) {
+        if (els.length != n) { msg = "Set changed size during iteration" }
+    } else if (w["keys"].length != n) {
         msg = "dictionary changed size during iteration"
-    } else if (it["__i"] >= it["__a"].length) {
+    } else if (n > 0) {
         var ks = it["__k"]
-        var i = 0
-        while (i < ks.length) {
-            if (ks[i] !== w["keys"][i]) { msg = "dictionary keys changed during iteration" }
-            i = i + 1
+        var lk = w["keys"]
+        var i = it["__i"]
+        var at = i
+        if (at > n - 1) { at = n - 1 }
+        if (ks[at] !== lk[at]) {
+            var j = 0
+            var x = 0
+            while (x < i) {
+                if (ks[x] === lk[j]) { j = j + 1 }
+                x = x + 1
+            }
+            it["__k"] = pyCCopyArr(lk)
+            it["__a"] = pyCCopyArr(pyElemsOf(it["__src"]))
+            it["__i"] = j
+            i = j
+        }
+        if (i < it["__a"].length) {
+            if (it["__y"] >= n) { msg = "dictionary keys changed during iteration" }
+            it["__y"] = it["__y"] + 1
+            // A value is read when it is reached, as CPython's iterator does.
+            var src = it["__src"]
+            if (pyIsDView(src)) {
+                if (src["__dview"] == "values") { it["__a"][i] = w["vals"][i] }
+                if (src["__dview"] == "items") { it["__a"][i] = pyTup([lk[i], w["vals"][i]]) }
+            }
         }
     }
     if (msg != "") {
@@ -6381,10 +6407,35 @@ function js_pyuncaught(v) {
     return undefined
 }
 
-// divmod(a, b) is the pair (a // b, a % b): FLOOR division and the floored
-// remainder, so divmod(-7, 2) is (-4, 1).
+// Go: js_pydivmod. divmod(a, b) is a.__divmod__(b), then b.__rdivmod__(a); for
+// two real numbers it is the pair (a // b, a % b): FLOOR division and the
+// floored remainder, so divmod(-7, 2) is (-4, 1). Anything else is CPython's
+// TypeError naming divmod(), even for a class with __floordiv__ and __mod__.
 function js_pydivmod(l, r) {
-    return pyTup([js_pybin("//", l, r), js_pybin("%", l, r)])
+    var d = pyADivmodDunder(l, "__divmod__", r)
+    if (d !== null) { return d["v"] }
+    d = pyADivmodDunder(r, "__rdivmod__", l)
+    if (d !== null) { return d["v"] }
+    var a = pyUnwrapBuiltin(l)
+    var b = pyUnwrapBuiltin(r)
+    var na = pyNumTName(a)
+    var nb = pyNumTName(b)
+    if (na == "" || nb == "" || na == "complex" || nb == "complex") {
+        pyRaiseExc("TypeError", "unsupported operand type(s) for divmod(): '" + pyTypeName(l) + "' and '" + pyTypeName(r) + "'")
+    }
+    return pyTup([js_pybin("//", a, b), js_pybin("%", a, b)])
+}
+// v's own dunder name called with o, as {v: answer}, or null when v is no
+// instance, has no such method or answers NotImplemented.
+function pyADivmodDunder(v, name, o) {
+    var c = pyInstClassOf(v)
+    if (c === null || !pyLookupHas(c, name)) { return null }
+    var m = pyLookupVal(c, name)
+    if (!pyIsCallable(m)) { return null }
+    var a = anytype
+    a = pyCallSelf(m, v, [o])
+    if (a === pyNotImpl) { return null }
+    return {v: a}
 }
 
 // round(x[, n]) rounds HALF TO EVEN, so round(0.5) is 0, round(1.5) is 2 and

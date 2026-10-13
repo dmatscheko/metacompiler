@@ -6021,6 +6021,56 @@ def s115():
           and min(iter([]), default="d") == "d" and sum(x * 2 for x in range(4)) == 12
           and max(3, 9, 2) == 9 and min(iter([5, 4, 6])) == 4)
 
+# ===== SECTION 116: divmod dispatch, and a dict iterator over a changing dict =====
+# divmod() asks __divmod__ / __rdivmod__ and otherwise serves two real numbers
+# only, so __floordiv__ and __mod__ alone are not enough. A dict iterator walks
+# the dict's entries as they are when reached: a key deleted before it is
+# reached is skipped and one added is reached, with no error unless more items
+# come out than the dict held. Rows from CPython 3.14.
+class S116FM:
+    def __floordiv__(self, o): return 1
+    def __mod__(self, o): return 2
+
+class S116DM:
+    def __divmod__(self, o): return ("dm", o)
+    def __rdivmod__(self, o): return ("rdm", o)
+
+def S116err(f):
+    try:
+        f()
+    except Exception as e:
+        return type(e).__name__ + ": " + str(e)
+    return "no error"
+
+def S116walk(view, at, drop, add):
+    d = {"a": 1, "b": 2, "c": 3}
+    out = []
+    try:
+        for x in (d if view == "k" else d.items()):
+            out.append(x)
+            if len(out) == at:
+                d.pop(drop)
+                d[add] = 9
+                d["a" if drop != "a" else "c"] = 7
+    except RuntimeError as e:
+        out.append(str(e))
+    return out
+
+def s116():
+    vals = ["a", 1, 2.5, None]
+    check("dvm1", S116err(lambda: divmod(vals[0], vals[1])) == "TypeError: unsupported operand type(s) for divmod(): 'str' and 'int'"
+          and S116err(lambda: divmod(vals[2], vals[3])) == "TypeError: unsupported operand type(s) for divmod(): 'float' and 'NoneType'"
+          and S116err(lambda: divmod(S116FM(), vals[1])) == "TypeError: unsupported operand type(s) for divmod(): 'S116FM' and 'int'"
+          and S116err(lambda: divmod(1j, vals[1])) == "TypeError: unsupported operand type(s) for divmod(): 'complex' and 'int'")
+    check("dvm2", divmod(S116DM(), 3) == ("dm", 3) and divmod(3, S116DM()) == ("rdm", 3)
+          and divmod(-7, vals[1] + 1) == (-4, 1) and divmod(7.5, 2) == (3.0, 1.5))
+    check("dvm3", S116walk("k", 1, "b", "z") == ["a", "c", "z"]
+          and S116walk("k", 2, "a", "z") == ["a", "b", "c", "dictionary keys changed during iteration"]
+          and S116walk("k", 1, "c", "z") == ["a", "b", "z"])
+    check("dvm4", S116walk("i", 1, "b", "z") == [("a", 1), ("c", 3), ("z", 9)]
+          and S116walk("i", 2, "c", "y") == [("a", 1), ("b", 2), ("y", 9)]
+          and S116walk("i", 1, "a", "z") == [("a", 1), ("b", 2), ("c", 7), "dictionary keys changed during iteration"])
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -6134,5 +6184,6 @@ def main():
     s113() # SECTION-CALL 113
     s114() # SECTION-CALL 114
     s115() # SECTION-CALL 115
+    s116() # SECTION-CALL 116
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]
