@@ -877,3 +877,118 @@ function lsFormat(args) {
     }
     return out
 }
+
+// ----- utf8 (lutf8lib.c) -----
+// Over the same byte strings; a position here is a 0-based byte index.
+
+// luaO_utf8esc: continuation bytes from the low end while the rest does not fit
+// the lead byte, whose free bits halve with each one - the original UTF-8 of up to
+// six bytes, so 0x7FFFFFFF is FD BF BF BF BF BF. Twin of utf8Enc in
+// lua-to-llvm-ir.abnf, which needs it at compile time.
+function lu8Esc(cp) {
+    if (cp < 128) { return String.fromCharCode(cp) }
+    var out = ""
+    var x = cp
+    var mfb = 63 // The largest value the lead byte can still hold.
+    var more = true
+    while (more) {
+        out = String.fromCharCode(128 + x % 64) + out
+        x = Math.floor(x / 64)
+        mfb = Math.floor(mfb / 2)
+        more = x > mfb
+    }
+    return String.fromCharCode((255 - mfb) * 2 % 256 + x) + out
+}
+// The byte at i, or the 0 that ends a C string past the last one.
+function lu8Byte(s, i) { return i < s.length ? s.charCodeAt(i) : 0 }
+function lu8IsCont(s, i) { return (lu8Byte(s, i) & 192) === 128 }
+// The smallest value a sequence of k continuation bytes may encode (an overlong
+// form is invalid); k = 0 is a lone continuation byte, never valid.
+var LU8_LIMITS = [4294967295, 128, 2048, 65536, 2097152, 67108864]
+// utf8_decode at byte i: {n: the index after the sequence, c: its value}, or
+// undefined. `strict` also refuses a surrogate and a value past 0x10FFFF. The
+// lead byte doubles once per continuation byte, as C's `c <<= 1` does.
+function lu8Decode(s, i, strict) {
+    var c = lu8Byte(s, i)
+    var res = 0
+    var count = 0
+    if (c < 128) { res = c } else {
+        while ((c & 64) !== 0) {
+            count = count + 1
+            var cc = lu8Byte(s, i + count)
+            if ((cc & 192) !== 128) { return undefined }
+            res = res * 64 + (cc & 63)
+            c = c * 2
+        }
+        res = res + (c & 127) * Math.pow(2, count * 5)
+        if (count > 5 || res > 2147483647 || res < LU8_LIMITS[count]) { return undefined }
+    }
+    if (strict && (res > 1114111 || (res >= 55296 && res <= 57343))) { return undefined }
+    return {n: i + count + 1, c: res}
+}
+// u_posrelat: a 1-based position, negative counting from the end, 0 when it
+// falls before the start.
+function lu8PosRelat(pos, len) {
+    if (pos >= 0) { return pos }
+    if (0 - pos > len) { return 0 }
+    return len + pos + 1
+}
+// utflen over the bytes i..j (0-based, inclusive): {n: the count} or {bad: the
+// 1-based position of the first invalid sequence}.
+function lu8Len(s, i, j, strict) {
+    var n = 0
+    var p = i
+    while (p <= j) {
+        var d = lu8Decode(s, p, strict)
+        if (d === undefined) { return {n: n, bad: p + 1} }
+        p = d.n
+        n = n + 1
+    }
+    return {n: n, bad: 0}
+}
+// byteoffset from the 1-based position posi: [start, end] of the n-th character
+// (n = 0: of the one holding posi), 1-based, or undefined when there is none.
+function lu8Offset(s, n, posi) {
+    var p = posi - 1
+    var k = n
+    if (k === 0) {
+        while (p > 0 && lu8IsCont(s, p)) { p = p - 1 }
+    } else {
+        if (lu8IsCont(s, p)) { lsFail("initial position is a continuation byte") }
+        if (k < 0) {
+            while (k < 0 && p > 0) {
+                p = p - 1
+                while (p > 0 && lu8IsCont(s, p)) { p = p - 1 }
+                k = k + 1
+            }
+        } else {
+            k = k - 1
+            while (k > 0 && p < s.length) {
+                p = p + 1
+                while (lu8IsCont(s, p)) { p = p + 1 }
+                k = k - 1
+            }
+        }
+    }
+    if (k !== 0) { return undefined }
+    var e = p
+    if ((lu8Byte(s, p) & 128) !== 0) {
+        e = e + 1
+        while (lu8IsCont(s, e)) { e = e + 1 }
+        e = e - 1
+    }
+    return [p + 1, e + 1]
+}
+// iter_aux: the character after byte offset i (the control value, 0 at the
+// start): [its 1-based position, its code], or undefined past the end.
+function lu8Next(s, i, strict) {
+    var p = i
+    if (p < 0) { return undefined }
+    if (p < s.length) {
+        while (lu8IsCont(s, p)) { p = p + 1 }
+    }
+    if (p >= s.length) { return undefined }
+    var d = lu8Decode(s, p, strict)
+    if (d === undefined || lu8IsCont(s, d.n)) { lsFail("invalid UTF-8 code") }
+    return [p + 1, d.c]
+}

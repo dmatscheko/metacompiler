@@ -877,6 +877,99 @@ func init() {
 			}
 			return rt.wrapStr(strFromUnits(out))
 		}
+		// ----- utf8 (lutf8lib.c) -----
+		m["js_luutf8char"] = func(a []uint64) uint64 {
+			args := argsOf(a[0])
+			var out []uint16
+			for i := range args {
+				cp := rt.luCheckInt("utf8.char", i+1, args)
+				if cp < 0 || cp > 2147483647 {
+					rt.luArgErr("utf8.char", i+1, "value out of range")
+				}
+				out = append(out, lu8Esc(int64(cp))...)
+			}
+			return rt.wrapStr(strFromUnits(out))
+		}
+		m["js_luutf8len"] = func(a []uint64) uint64 {
+			args := argsOf(a[0])
+			s := strUnits(rt.luCheckStr("utf8.len", 1, args))
+			posi := lu8PosRelat(int64(rt.luOptInt("utf8.len", 2, args, 1)), len(s))
+			posj := lu8PosRelat(int64(rt.luOptInt("utf8.len", 3, args, -1)), len(s))
+			if posi < 1 || posi-1 > int64(len(s)) {
+				rt.luArgErr("utf8.len", 2, "initial position out of bounds")
+			}
+			if posj-1 >= int64(len(s)) {
+				rt.luArgErr("utf8.len", 3, "final position out of bounds")
+			}
+			strict := luU8Strict(args, 4)
+			n := 0
+			for p := int(posi - 1); p <= int(posj-1); n++ {
+				next, _, ok := lu8Decode(s, p, strict)
+				if !ok {
+					return w(luMk([]interface{}{jsUndef, float64(p + 1)}))
+				}
+				p = next
+			}
+			return w(float64(n))
+		}
+		m["js_luutf8cp"] = func(a []uint64) uint64 {
+			args := argsOf(a[0])
+			s := strUnits(rt.luCheckStr("utf8.codepoint", 1, args))
+			posi := lu8PosRelat(int64(rt.luOptInt("utf8.codepoint", 2, args, 1)), len(s))
+			pose := lu8PosRelat(int64(rt.luOptInt("utf8.codepoint", 3, args, float64(posi))), len(s))
+			if posi < 1 {
+				rt.luArgErr("utf8.codepoint", 2, "out of bounds")
+			}
+			if pose > int64(len(s)) {
+				rt.luArgErr("utf8.codepoint", 3, "out of bounds")
+			}
+			strict := luU8Strict(args, 4)
+			out := []interface{}{}
+			for p := int(posi - 1); p < int(pose); {
+				next, code, ok := lu8Decode(s, p, strict)
+				if !ok {
+					rt.luFail("invalid UTF-8 code")
+				}
+				out = append(out, float64(code))
+				p = next
+			}
+			return w(luMk(out))
+		}
+		m["js_luutf8off"] = func(a []uint64) uint64 {
+			args := argsOf(a[0])
+			s := strUnits(rt.luCheckStr("utf8.offset", 1, args))
+			k := int64(rt.luCheckInt("utf8.offset", 2, args))
+			dflt := 1.0
+			if k < 0 {
+				dflt = float64(len(s) + 1)
+			}
+			posi := lu8PosRelat(int64(rt.luOptInt("utf8.offset", 3, args, dflt)), len(s))
+			if posi < 1 || posi > int64(len(s)+1) {
+				rt.luArgErr("utf8.offset", 3, "position out of bounds")
+			}
+			start, end, ok := rt.lu8Offset(s, k, posi)
+			if !ok {
+				return w(jsUndef)
+			}
+			return w(luMk([]interface{}{float64(start), float64(end)}))
+		}
+		m["js_luutf8codes"] = func(a []uint64) uint64 {
+			args := argsOf(a[0])
+			str := rt.luCheckStr("utf8.codes", 1, args)
+			if lu8IsCont(strUnits(str), 0) {
+				rt.luArgErr("utf8.codes", 1, "invalid UTF-8 code")
+			}
+			return rt.wrapStr(str)
+		}
+		m["js_luutf8next"] = func(a []uint64) uint64 {
+			args := argsOf(a[0])
+			s := strUnits(rt.luCheckStr("for iterator", 1, args))
+			pos, code, ok := rt.lu8Next(s, int(luNumOf(luArgAt(args, 2))), a[1] == 0)
+			if !ok {
+				return w(jsUndef)
+			}
+			return w(luMk([]interface{}{float64(pos), float64(code)}))
+		}
 		// select(n, ...): the arguments from the n-th on, a negative n counting
 		// from the end, or their count for select('#', ...).
 		m["js_luselect"] = func(a []uint64) uint64 {
@@ -897,4 +990,151 @@ func init() {
 			return w(luMk(append([]interface{}{}, args[i:]...)))
 		}
 	})
+}
+
+// ----- utf8 (lutf8lib.c) -----
+// Line-by-line twin of the lu8* core of languages/lib/lua-strlib.js, over the
+// byte string as its units (one per byte), with 0-based positions.
+
+// lu8Esc is luaO_utf8esc: the original UTF-8 of up to six bytes.
+func lu8Esc(cp int64) []uint16 {
+	if cp < 128 {
+		return []uint16{uint16(cp)}
+	}
+	var out []uint16
+	x, mfb := cp, int64(63)
+	for more := true; more; more = x > mfb {
+		out = append([]uint16{uint16(128 + x%64)}, out...)
+		x /= 64
+		mfb /= 2
+	}
+	return append([]uint16{uint16((255-mfb)*2%256 + x)}, out...)
+}
+
+// lu8Byte is the byte at i, or the 0 that ends a C string past the last one.
+func lu8Byte(s []uint16, i int) int {
+	if i < len(s) {
+		return int(s[i])
+	}
+	return 0
+}
+
+func lu8IsCont(s []uint16, i int) bool { return lu8Byte(s, i)&192 == 128 }
+
+var lu8Limits = []int64{4294967295, 128, 2048, 65536, 2097152, 67108864}
+
+// lu8Decode is utf8_decode at byte i: the index after the sequence and its value.
+func lu8Decode(s []uint16, i int, strict bool) (int, int64, bool) {
+	c := int64(lu8Byte(s, i))
+	res := int64(0)
+	count := 0
+	if c < 128 {
+		res = c
+	} else {
+		for c&64 != 0 {
+			count++
+			cc := int64(lu8Byte(s, i+count))
+			if cc&192 != 128 {
+				return 0, 0, false
+			}
+			res = res*64 + cc&63
+			c *= 2
+		}
+		if count > 5 {
+			return 0, 0, false
+		}
+		res += (c & 127) << (count * 5)
+		if res > 2147483647 || res < lu8Limits[count] {
+			return 0, 0, false
+		}
+	}
+	if strict && (res > 1114111 || (res >= 55296 && res <= 57343)) {
+		return 0, 0, false
+	}
+	return i + count + 1, res, true
+}
+
+// lu8PosRelat is u_posrelat.
+func lu8PosRelat(pos int64, n int) int64 {
+	if pos >= 0 {
+		return pos
+	}
+	if -pos > int64(n) {
+		return 0
+	}
+	return int64(n) + pos + 1
+}
+
+// lu8Offset is byteoffset from the 1-based position posi: the 1-based start and
+// end of the n-th character (n = 0: of the one holding posi).
+func (rt *jsrt) lu8Offset(s []uint16, n, posi int64) (int64, int64, bool) {
+	p := int(posi - 1)
+	k := n
+	if k == 0 {
+		for p > 0 && lu8IsCont(s, p) {
+			p--
+		}
+	} else {
+		if lu8IsCont(s, p) {
+			rt.luFail("initial position is a continuation byte")
+		}
+		if k < 0 {
+			for k < 0 && p > 0 {
+				p--
+				for p > 0 && lu8IsCont(s, p) {
+					p--
+				}
+				k++
+			}
+		} else {
+			k--
+			for k > 0 && p < len(s) {
+				p++
+				for lu8IsCont(s, p) {
+					p++
+				}
+				k--
+			}
+		}
+	}
+	if k != 0 {
+		return 0, 0, false
+	}
+	e := p
+	if lu8Byte(s, p)&128 != 0 {
+		e++
+		for lu8IsCont(s, e) {
+			e++
+		}
+		e--
+	}
+	return int64(p + 1), int64(e + 1), true
+}
+
+// lu8Next is iter_aux: the character after byte offset i, its 1-based position
+// and its code.
+func (rt *jsrt) lu8Next(s []uint16, i int, strict bool) (int, int64, bool) {
+	p := i
+	if p < 0 {
+		return 0, 0, false
+	}
+	if p < len(s) {
+		for lu8IsCont(s, p) {
+			p++
+		}
+	}
+	if p >= len(s) {
+		return 0, 0, false
+	}
+	next, code, ok := lu8Decode(s, p, strict)
+	if !ok || lu8IsCont(s, next) {
+		rt.luFail("invalid UTF-8 code")
+	}
+	return p + 1, code, true
+}
+
+// luU8Strict: argument n, utf8's `lax`, is absent or false.
+func luU8Strict(args []interface{}, n int) bool {
+	lax := luArgAt(args, n)
+	return luIsNil(lax) || lax == false
 }

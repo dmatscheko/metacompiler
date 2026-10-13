@@ -2075,6 +2075,43 @@ function s47()
     check("co13", pack(evens(), evens(), evens()), "2 4 6")
 end
 
+-- ===== SECTION 48: utf8 =====
+-- The utf8 library over byte strings: char, charpattern, len, codepoint, offset
+-- (which answers the start AND the end of a character in 5.5) and codes, strict
+-- and lax, with lutf8lib.c's errors. Values printed by lua 5.5.
+function s48()
+    local function try(f, ...)
+        local ok, e = pcall(f, ...)
+        if ok then return "ok" end
+        return (tostring(e):gsub("^[^:]*:%d+: ", ""))
+    end
+    local function pack(...)
+        local out = {}
+        for i = 1, select("#", ...) do out[i] = tostring((select(i, ...))) end
+        return table.concat(out, " ")
+    end
+    local s = "h\xc3\xa4\xe2\x82\xac\xf0\x9f\x98\x80"
+    check("u1", pack(utf8.char(72, 228, 8364, 128512, 0x7FFFFFFF):byte(1, -1)), "72 195 164 226 130 172 240 159 152 128 253 191 191 191 191 191")
+    check("u2", utf8.char(0x48, 0x10FFFF) == "H\xf4\x8f\xbf\xbf" and utf8.charpattern == "[\0-\x7F\xC2-\xFD][\x80-\xBF]*", true)
+    check("u3", try(utf8.char, -1) .. "|" .. try(utf8.char, "x"), "bad argument #1 to 'utf8.char' (value out of range)|bad argument #1 to 'utf8.char' (number expected, got string)")
+    check("u4", pack(#s, utf8.len(s), utf8.len(s, 2), utf8.len(s, -4)) .. "|" .. pack(utf8.len(s, 3)) .. "|" .. pack(utf8.len("a\x80b")), "10 4 3 1|nil 3|nil 2")
+    check("u5", try(utf8.len, s, 20) .. "|" .. try(utf8.len, s, 1, 20), "bad argument #2 to 'utf8.len' (initial position out of bounds)|bad argument #3 to 'utf8.len' (final position out of bounds)")
+    check("u6", pack(utf8.codepoint(s, 1, -1)) .. "|" .. try(utf8.codepoint, s, 3) .. "|" .. try(utf8.codepoint, s, 1, 50),
+        "104 228 8364 128512|invalid UTF-8 code|bad argument #3 to 'utf8.codepoint' (out of bounds)")
+    check("u7", pack(utf8.offset(s, 3)) .. "|" .. pack(utf8.offset(s, -1)) .. "|" .. pack(utf8.offset(s, 0, 9)) .. "|" .. pack(utf8.offset(s, 5)) .. "|" .. pack(utf8.offset(s, 6)),
+        "4 6|7 10|7 10|11 11|nil")
+    check("u8", try(utf8.offset, s, 1, 3) .. "|" .. try(utf8.offset, s, 1, 12), "initial position is a continuation byte|bad argument #3 to 'utf8.offset' (position out of bounds)")
+    local cs = ""
+    for p, c in utf8.codes(s) do cs = cs .. p .. ":" .. c .. " " end
+    check("u9", cs, "1:104 2:228 4:8364 7:128512 ")
+    check("u10", try(function() for p, c in utf8.codes("a\xffb") do end end) .. "|" .. try(utf8.codes, "\x80"), "invalid UTF-8 code|bad argument #1 to 'utf8.codes' (invalid UTF-8 code)")
+    check("u11", pack(utf8.len("\xed\xa0\x80")) .. "|" .. utf8.len("\xed\xa0\x80", 1, -1, true) .. "|" .. utf8.codepoint("\xf4\x90\x80\x80", 1, 1, true) .. "|" .. pack(utf8.len("\xc0\x80")),
+        "nil 1|1|1114112|nil 1")
+    local n = 0
+    for ch in ("a\xc3\xb1b\xe2\x82\xac"):gmatch(utf8.charpattern) do n = n + 1 end
+    check("u12", n, 4)
+end
+
 s25() -- SECTION-CALL 25
 s26() -- SECTION-CALL 26
 s27() -- SECTION-CALL 27
@@ -2098,5 +2135,6 @@ s44() -- SECTION-CALL 44
 s45() -- SECTION-CALL 45
 s46() -- SECTION-CALL 46
 s47() -- SECTION-CALL 47
+s48() -- SECTION-CALL 48
 print("full: " .. checks .. " checks, " .. failures .. " failures")
 exit(failures)

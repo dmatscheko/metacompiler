@@ -703,8 +703,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // uncaught error is decoded back (js_luaout). lua-interpreter.abnf does the same.
     // lua's luaO_utf8esc: continuation bytes from the low end while the rest does not
     // fit the lead byte, whose free bits halve with each one - the original
-    // UTF-8 of up to six bytes, so \u{7FFFFFFF} is FD BF BF BF BF BF. Twin of utf8Enc in
-    // lua-interpreter.abnf.
+    // UTF-8 of up to six bytes, so \u{7FFFFFFF} is FD BF BF BF BF BF. Twin of lu8Esc in
+    // lib/lua-strlib.js (the interpreter and layer 2).
     function utf8Enc(cp) {
         if (cp < 128) { return String.fromCharCode(cp) }
         var out = ""
@@ -1854,7 +1854,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // them all.
     var libNames = ["math", "string", "table", "next", "ipairs", "pairs", "error", "pcall", "xpcall", "select",
                     "tostring", "tonumber", "type", "assert", "rawequal", "rawget", "rawset", "rawlen", "_VERSION",
-                    "io", "setmetatable", "getmetatable", "_G", "coroutine"]
+                    "io", "setmetatable", "getmetatable", "_G", "coroutine", "utf8"]
     var libNeed = {}
     for (var lni = 0; lni < libNames.length; lni++) { libNeed[libNames[lni]] = false }
     makeVarRef = function(name) {
@@ -3067,6 +3067,20 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (libNeed.type) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "type"), callExt(b, "js_closure", [handle(emitLibFunc(libType)), curScopeV])])
         }
+        if (libNeed.utf8) {
+            // utf8: one extern each over the argument array (abnf/jsrtluastr.go,
+            // layer 2 over lib/lua-strlib.js); charpattern is a string value.
+            var ut = callExt(b, "js_obj_new", [])
+            b = libSet(b, ut, "char", emitLibFunc(libArgsExt("js_luutf8char")))
+            b = libSet(b, ut, "len", emitLibFunc(libArgsExt("js_luutf8len")))
+            b = libSet(b, ut, "codepoint", emitLibFunc(libArgsExt("js_luutf8cp")))
+            b = libSet(b, ut, "offset", emitLibFunc(libArgsExt("js_luutf8off")))
+            b = libSet(b, ut, "codes", emitLibFunc(libUtf8Codes))
+            var cps = "[" + String.fromCharCode(0) + "-" + String.fromCharCode(127) + String.fromCharCode(194) + "-" +
+                      String.fromCharCode(253) + "][" + String.fromCharCode(128) + "-" + String.fromCharCode(191) + "]*"
+            callExt(b, "js_set", [ut, emitStr(b, "charpattern"), emitStr(b, cps)])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "utf8"), ut])
+        }
         if (libNeed.coroutine) {
             var cot = callExt(b, "js_obj_new", [])
             var resumeClo = callExt(b, "js_closure", [handle(emitLibFunc(libCoResume)), curScopeV])
@@ -3178,6 +3192,21 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "io"), iot])
         }
         return b
+    }
+    // utf8.codes(s [, lax]): the iterator triple, the strict or the lax iterator by
+    // the truth of `lax` (js_luutf8next's raw second argument).
+    function libUtf8Codes(bb, argsH) {
+        var s = callExt(bb, "js_luutf8codes", [argsH])
+        var strictClo = callExt(bb, "js_closure", [handle(emitLibFunc(libUtf8Next(0))), curScopeV])
+        var laxClo = callExt(bb, "js_closure", [handle(emitLibFunc(libUtf8Next(1))), curScopeV])
+        var arr = callExt(bb, "js_arr_new", [])
+        callExt(bb, "js_arr_push", [arr, bb.NewSelect(truthy(bb, libArg(bb, argsH, 1)), laxClo, strictClo)])
+        callExt(bb, "js_arr_push", [arr, s])
+        callExt(bb, "js_arr_push", [arr, emitNum(bb, 0)])
+        return {b: bb, v: callLua(bb, "lua_mk", [arr])}
+    }
+    function libUtf8Next(lax) {
+        return function(bb, argsH) { return {b: bb, v: callExt(bb, "js_luutf8next", [argsH, handle(lax)])} }
     }
     // ----- coroutines -----
     // A coroutine is a THREAD OBJECT - a table marked __luco, which type() reads as

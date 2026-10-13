@@ -1554,6 +1554,73 @@ function js_lurep(args) {
 }
 function js_lureverse(args) { return lsReverse(luCheckStr("string.reverse", 1, args)) }
 
+// utf8 (lutf8lib.c) over lib/lua-strlib.js's lu8* core; the argument checks are
+// lauxlib's. Twins of the utf8 table in lua-interpreter.abnf and of
+// abnf/jsrtluastr.go's js_luutf8*.
+function luU8Strict(args, n) {
+    var lax = luArgAt(args, n)
+    return lax === undefined || lax === null || lax === false
+}
+function js_luutf8char(args) {
+    var out = ""
+    for (var i = 1; i <= args.length; i++) {
+        var cp = luCheckInt("utf8.char", i, args)
+        if (cp < 0 || cp > 2147483647) { luArgErr("utf8.char", i, "value out of range") }
+        out = out + lu8Esc(cp)
+    }
+    return out
+}
+function js_luutf8len(args) {
+    var s = luCheckStr("utf8.len", 1, args)
+    var posi = lu8PosRelat(luOptInt("utf8.len", 2, args, 1), s.length)
+    var posj = lu8PosRelat(luOptInt("utf8.len", 3, args, 0 - 1), s.length)
+    if (posi < 1 || posi - 1 > s.length) { luArgErr("utf8.len", 2, "initial position out of bounds") }
+    if (posj - 1 >= s.length) { luArgErr("utf8.len", 3, "final position out of bounds") }
+    var r = lu8Len(s, posi - 1, posj - 1, luU8Strict(args, 4))
+    if (r.bad > 0) { return luMk([undefined, r.bad]) }
+    return r.n
+}
+function js_luutf8cp(args) {
+    var s = luCheckStr("utf8.codepoint", 1, args)
+    var posi = lu8PosRelat(luOptInt("utf8.codepoint", 2, args, 1), s.length)
+    var pose = lu8PosRelat(luOptInt("utf8.codepoint", 3, args, posi), s.length)
+    if (posi < 1) { luArgErr("utf8.codepoint", 2, "out of bounds") }
+    if (pose > s.length) { luArgErr("utf8.codepoint", 3, "out of bounds") }
+    var strict = luU8Strict(args, 4)
+    var out = []
+    var p = posi - 1
+    while (p < pose) {
+        var d = lu8Decode(s, p, strict)
+        if (d === undefined) { luFail("invalid UTF-8 code") }
+        out.push(d.c)
+        p = d.n
+    }
+    return luMk(out)
+}
+function js_luutf8off(args) {
+    var s = luCheckStr("utf8.offset", 1, args)
+    var k = luCheckInt("utf8.offset", 2, args)
+    var posi = lu8PosRelat(luOptInt("utf8.offset", 3, args, k >= 0 ? 1 : s.length + 1), s.length)
+    if (posi < 1 || posi > s.length + 1) { luArgErr("utf8.offset", 3, "position out of bounds") }
+    var r = lu8Offset(s, k, posi)
+    if (r === undefined) { return undefined }
+    return luMk(r)
+}
+// utf8.codes's checks: the string, refused when it starts with a continuation
+// byte; the emitter pairs it with the iterator.
+function js_luutf8codes(args) {
+    var s = luCheckStr("utf8.codes", 1, args)
+    if (lu8IsCont(s, 0)) { luArgErr("utf8.codes", 1, "invalid UTF-8 code") }
+    return s
+}
+// One step of utf8.codes's iterator: (string, control value) as the call's
+// arguments, `lax` as a raw handle the emitter writes.
+function js_luutf8next(args, lax_raw) {
+    var r = lu8Next(luCheckStr("for iterator", 1, args), luNumOf(luArgAt(args, 2)), lax_raw === 0)
+    if (r === undefined) { return undefined }
+    return luMk(r)
+}
+
 // string.format, and its hooks (lib/lua-strlib.js). Twins in lua-interpreter.abnf.
 // The exact decimal of a double is lib/runtime.metajs's: Lua imports that file for
 // its hook-free decimal helpers only, so it defines none of the rtk* hooks.
