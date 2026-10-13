@@ -2960,6 +2960,8 @@ function js_gowrite(args, mode) {
 function js_gostr(args, mode) {
     var m = goIdx(mode)
     if (m == GOP_ONE) { return gopStr(args) }
+    // fmt.Sprintln (GOP_LN) ends its text with the newline.
+    if (m == GOP_LN) { return gopCompose(args, m) + "\n" }
     return gopCompose(args, m)
 }
 

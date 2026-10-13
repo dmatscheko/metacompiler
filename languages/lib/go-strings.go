@@ -443,6 +443,35 @@ func Map(mapping func(rune) rune, s string) string {
 func ToUpper(s string) string { return Map(toUpper, s) }
 func ToLower(s string) string { return Map(toLower, s) }
 
+// Title maps the first letter of every word to its title case; a word starts
+// after a separator - ASCII other than a letter, digit or '_', or a space.
+func Title(s string) string {
+	prev := ' '
+	return Map(func(r rune) rune {
+		sep := isSpace(prev)
+		if prev < 0x80 {
+			sep = !(prev >= 'a' && prev <= 'z' || prev >= 'A' && prev <= 'Z' || prev >= '0' && prev <= '9' || prev == '_')
+		}
+		prev = r
+		if sep {
+			return toTitle(r)
+		}
+		return r
+	}, s)
+}
+
+// toTitle is toUpper except for the digraphs, whose title case is the middle one
+// of the three (ǅ, ǈ, ǋ, ǲ).
+func toTitle(r rune) rune {
+	switch {
+	case r >= 0x1C4 && r <= 0x1CC:
+		return r - (r-0x1C4)%3 + 1
+	case r >= 0x1F1 && r <= 0x1F3:
+		return 0x1F2
+	}
+	return toUpper(r)
+}
+
 // EqualFold compares under simple case folding, rune by rune.
 func EqualFold(s, t string) bool {
 	a := []rune(s)

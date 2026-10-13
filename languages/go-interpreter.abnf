@@ -1453,15 +1453,19 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // type text may carry trailing whitespace, so match the prefix).
     function zeroOfType(t) { return goZeroTy(t) }
 
+    // The text of fmt.Println: every operand, a space between each pair.
+    function gLnText(args) {
+        var out = ""
+        for (var i = 0; i < args.length; i++) {
+            if (i > 0) out += " "
+            out += gstr(args[i])
+        }
+        return out
+    }
     hostGlobals["fmt"] = {
-        Println: function() {
-            var out = ""
-            for (var i = 0; i < arguments.length; i++) {
-                if (i > 0) out += " "
-                out += gstr(arguments[i])
-            }
-            println(out)
-        },
+        Println: function() { println(gLnText(arguments)) },
+        // fmt.Sprintln: Println's line, returned instead of printed.
+        Sprintln: function() { return gLnText(arguments) + "\n" },
         // fmt.Print puts a space between two operands when NEITHER of them is a
         // string, which is what the handle runtime's print does too.
         Print: function() {
@@ -4059,7 +4063,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (d.mkind == "map") {
             var zero = zeroOfType(d.czero)
             var mty = "map[" + d.mkey + "]" + d.czero
-            return function() { return newMap(zero, mty) }
+            // The size hint is evaluated and otherwise ignored.
+            return function() {
+                if (lenT != null) { lenT() }
+                return newMap(zero, mty)
+            }
         }
         if (d.mkind == "chan") {
             var cz = d.czero

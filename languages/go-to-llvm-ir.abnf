@@ -1112,7 +1112,7 @@ MapKeyE     <~~ push({mkt: pop(), ksty: stAt(up.pos)}) ~~> = Expression ;
 MapVal      = SeqNest | MapValE ;
 MapValE     <~~ push({mvt: pop(), esty: stAt(up.pos)}) ~~> = Expression ;
 MakeMap     <~~ push(makeMakeMap(takeAll())); regSt(up.pos, goMakeTy(up.in)) ~~>
-            = "make" KwEnd "(" MapTypeZ ")" ;
+            = "make" KwEnd "(" MapTypeZ [ "," Expression ] ")" ;
 
 // new(T): a zero value of T - a POINTER to it for a scalar type (a fresh one slot
 // cell), the value itself for a struct or slice, which are references already.
@@ -2590,10 +2590,16 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             return {b: b, v: callExt(b, "js_gochan_new", [emitStr(b, ty)])}
         }
     }
+    // items = [{mkey}, {mzero}, hintThunk?]: the size hint is evaluated and
+    // otherwise ignored (a map here grows as it goes).
     function makeMakeMap(items) {
-        var zero = items[items.length - 1].mzero
+        var zero = items[1].mzero
         var mty = "map[" + items[0].mkey + "]" + zero
-        return function(b) { return {b: b, v: emitMapNew(b, zero, mty)} }
+        var hintT = items.length > 2 ? items[2] : null
+        return function(b) {
+            if (hintT != null) { b = hintT(b).b }
+            return {b: b, v: emitMapNew(b, zero, mty)}
+        }
     }
     // A fresh map: the zero value of its value type, read by js_map_get, and its type
     // as written (mty), read by fmt's %T. The twin is newMap in go-interpreter.abnf.
@@ -5774,6 +5780,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         b = declPrint(b, fmtV, "Println", "js_goprint", 0)
         b = declPrint(b, fmtV, "Print", "js_gowrite", 1)
         b = declPrint(b, fmtV, "Sprint", "js_gostr", 1)
+        b = declPrint(b, fmtV, "Sprintln", "js_gostr", 0)
         b = declPrint(b, fmtV, "Printf", "js_goprint", 4)
         b = declPrint(b, fmtV, "Sprintf", "js_gostr", 4)
         // fmt.Errorf and the errors package share one extern, js_goerrors(args, mode):

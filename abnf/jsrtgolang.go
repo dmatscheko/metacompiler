@@ -132,7 +132,11 @@ func init() {
 			if mode == gopOne {
 				return rt.wrapStr(rt.gopStr(u(a[0])))
 			}
-			out, _ := rt.gopCompose(u(a[0]), mode)
+			// fmt.Sprintln (mode gopLn) ends its text with the newline.
+			out, nl := rt.gopCompose(u(a[0]), mode)
+			if nl {
+				out += "\n"
+			}
 			return rt.wrapStr(out)
 		}
 	})

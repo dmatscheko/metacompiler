@@ -4015,6 +4015,19 @@ func s72() {
 		strings.EqualFold("Å", "å") && !strings.EqualFold("ǲ", "dz"))
 }
 
+// ===== SECTION 73: make(map, hint), fmt.Sprintln, strings.Title =====
+var n73 = 0
+
+func h73() int { n73++; return 8 }
+
+func s73() {
+	m := make(map[string]int, h73())
+	m["a"] = 1
+	check("feat1", len(m) == 1 && n73 == 1)
+	check("feat2", fmt.Sprintln("a", 1, []int{2}) == "a 1 [2]\n" && fmt.Sprintln() == "\n")
+	check("feat3", strings.Title("hello wOrld-foo_bar x.y ǆz") == "Hello WOrld-Foo_bar X.Y ǅz")
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -4088,6 +4101,7 @@ func main() {
 	s70() // SECTION-CALL 70
 	s71() // SECTION-CALL 71
 	s72() // SECTION-CALL 72
+	s73() // SECTION-CALL 73
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }
