@@ -188,6 +188,114 @@ func (rt *jsrt) jsvProtoTag(v interface{}) string {
 	return "[object Object]"
 }
 
+// jsvIterList is the values an iterable yields, for the statics that take one
+// (Object.fromEntries, Object.groupBy): an array as it is, a string's code points, a
+// generator drained, anything with a [Symbol.iterator] or a `next` method driven to
+// the end. Anything else is node's TypeError. Twins: jsIterList in both
+// *-interpreter.abnf, jvIterList in languages/lib/js-rt.metajs.
+func (rt *jsrt) jsvIterList(v interface{}) []interface{} {
+	it := v
+	if o, isObj := v.(*jsObject); isObj {
+		if r, called := rt.jsvCallMethod(o, "__#@iterator"); called {
+			it = r
+		}
+	}
+	switch x := it.(type) {
+	case *jsArray:
+		return x.elems
+	case string:
+		return jsvCodePoints(x)
+	case *jsGenerator:
+		return x.drain(rt).elems
+	case *jsObject:
+		var out []interface{}
+		for {
+			step, called := rt.jsvCallMethod(x, "next")
+			if !called {
+				break
+			}
+			if rt.truthy(rt.jsvGetKey(step, "done")) {
+				return out
+			}
+			out = append(out, rt.jsvGetKey(step, "value"))
+		}
+	}
+	if isUndefOrNull(v) {
+		rt.bigRaise("TypeError: undefined is not iterable")
+	}
+	what := "object"
+	switch t := v.(type) {
+	case float64:
+		what = "number " + rt.jsvString(t)
+	case bool:
+		what = "boolean " + rt.jsvString(t)
+	default:
+		if _, ok := bigOf(v); ok {
+			what = "bigint"
+		} else if jsvIsSym(v) {
+			what = "symbol"
+		} else if isCallable(v) {
+			what = "function"
+		}
+	}
+	rt.bigRaise("TypeError: %s is not iterable (cannot read property Symbol(Symbol.iterator))", what)
+	return nil
+}
+
+// jsvPropKey is ToPropertyKey as a key of the value model: a symbol's __symkey, any
+// other value's string, escaped.
+func (rt *jsrt) jsvPropKey(k interface{}) string {
+	if o, ok := k.(*jsObject); ok {
+		if sk, isSym := o.props["__symkey"].(string); isSym {
+			return sk
+		}
+	}
+	return jsvKeyEsc(rt.jsvString(k))
+}
+
+// jsvNotFnText is V8's rendering of a non-callable callback in "<x> is not a
+// function": a primitive's string, "#<Object>" for an object. Twins: jsNotFnText in
+// both *-interpreter.abnf, jvNotFnText in languages/lib/js-rt.metajs.
+func (rt *jsrt) jsvNotFnText(f interface{}) string {
+	switch f.(type) {
+	case *jsArray:
+		return "[object Array]"
+	case *jsObject:
+		if !jsvIsSym(f) {
+			if _, isBig := bigOf(f); !isBig {
+				return "#<Object>"
+			}
+		}
+	}
+	return rt.jsvString(f)
+}
+
+// jsvStringRaw is String.raw(template, ...subs): template.raw's strings, the i-th
+// substitution between the i-th and the next one, over ToLength(raw.length)
+// strings. Twins: jsStringRaw in both *-interpreter.abnf, jvStringRaw in
+// languages/lib/js-rt.metajs.
+func (rt *jsrt) jsvStringRaw(args []interface{}) string {
+	var raw interface{} = jsUndef
+	if tp := argAt(args, 0); !isUndefOrNull(tp) {
+		raw = rt.jsvGetKey(tp, "raw")
+	}
+	if isUndefOrNull(raw) {
+		rt.bigRaise("TypeError: Cannot convert undefined or null to object")
+	}
+	n := rt.toNumber(rt.jsvGetKey(raw, "length"))
+	if !(n > 0) {
+		n = 0
+	}
+	var b strings.Builder
+	for i := 0; float64(i) < math.Floor(n); i++ {
+		b.WriteString(rt.jsvString(rt.jsvGetKey(raw, strconv.Itoa(i))))
+		if float64(i+1) < math.Floor(n) && i+1 < len(args) {
+			b.WriteString(rt.jsvString(args[i+1]))
+		}
+	}
+	return b.String()
+}
+
 // jsvIsProtoName names Object.prototype's four methods. No value here has the
 // prototype chain they are inherited through, so a call or a value read that finds no
 // member of one of these names is answered by jsvProtoApply. Twins: jsProtoApply in
@@ -273,11 +381,40 @@ func jsvObjProtoName(k string) bool {
 // Twins: stNames in both *-interpreter.abnf, jvStaticHas in
 // languages/lib/js-rt.metajs.
 var jsvStaticNames = map[string][]string{
-	"Object":  {"assign", "entries", "freeze", "fromEntries", "getOwnPropertyNames", "is", "keys", "seal", "values"},
-	"String":  {"fromCharCode", "fromCodePoint"},
+	"Object": {"assign", "entries", "freeze", "fromEntries", "getOwnPropertyNames", "groupBy", "hasOwn", "is", "keys",
+		"seal", "values"},
+	"String":  {"fromCharCode", "fromCodePoint", "raw"},
 	"Promise": {"resolve", "reject", "all", "allSettled", "race", "any"},
 	"Array":   {"isArray"},
 	"Symbol":  {"for", "keyFor"},
+	"Number":  {"isFinite", "isInteger", "isNaN", "isSafeInteger", "parseFloat", "parseInt"},
+}
+
+// jsvStaticLen2: the statics whose node length is 2; every other one's is 1.
+var jsvStaticLen2 = []string{"assign", "is", "hasOwn", "groupBy", "parseInt"}
+
+// jsvNumberConst: Number's constant members. Twins: jsNumberConst in both
+// *-interpreter.abnf, jvNumberConst in languages/lib/js-rt.metajs.
+func jsvNumberConst(k string) (float64, bool) {
+	switch k {
+	case "MAX_SAFE_INTEGER":
+		return 9007199254740991, true
+	case "MIN_SAFE_INTEGER":
+		return -9007199254740991, true
+	case "EPSILON":
+		return math.Pow(2, -52), true
+	case "MAX_VALUE":
+		return math.MaxFloat64, true
+	case "MIN_VALUE":
+		return math.SmallestNonzeroFloat64, true
+	case "POSITIVE_INFINITY":
+		return math.Inf(1), true
+	case "NEGATIVE_INFINITY":
+		return math.Inf(-1), true
+	case "NaN":
+		return math.NaN(), true
+	}
+	return 0, false
 }
 
 func jsvInNames(names []string, k string) bool {
@@ -308,7 +445,7 @@ func (rt *jsrt) jsvString(v interface{}) string {
 		}
 		return rt.jsvProtoTag(t)
 	case *jsArray:
-		if t.kind == 19 {
+		if jsvIsArgs(t) {
 			return "[object Arguments]"
 		}
 		parts := make([]string, len(t.elems))
@@ -383,6 +520,22 @@ func jsvSymKeys(v interface{}) []string {
 	return out
 }
 
+// jsvCodePoints is a string's CODE POINTS: a surrogate pair is one, a lone surrogate
+// one of its own.
+func jsvCodePoints(s string) []interface{} {
+	var cps []interface{}
+	u := strUnits(s)
+	for i := 0; i < len(u); {
+		n := 1
+		if u[i] >= 0xD800 && u[i] <= 0xDBFF && i+1 < len(u) && u[i+1] >= 0xDC00 && u[i+1] <= 0xDFFF {
+			n = 2
+		}
+		cps = append(cps, strFromUnits(u[i:i+n]))
+		i += n
+	}
+	return cps
+}
+
 // jsvSeqIter is the iterator [Symbol.iterator](), values(), keys() and entries()
 // answer over an array or a string: kind 1 yields the elements - a string's CODE
 // POINTS - kind 0 the indices and kind 2 [index, element] pairs. An array is read
@@ -391,15 +544,7 @@ func jsvSymKeys(v interface{}) []string {
 func jsvSeqIter(src interface{}, kind int) *jsObject {
 	var cps []interface{}
 	if s, isStr := src.(string); isStr {
-		u := strUnits(s)
-		for i := 0; i < len(u); {
-			n := 1
-			if u[i] >= 0xD800 && u[i] <= 0xDBFF && i+1 < len(u) && u[i+1] >= 0xDC00 && u[i+1] <= 0xDFFF {
-				n = 2
-			}
-			cps = append(cps, strFromUnits(u[i:i+n]))
-			i += n
-		}
+		cps = jsvCodePoints(s)
 	}
 	it := newJSObject()
 	i := 0
@@ -407,6 +552,10 @@ func jsvSeqIter(src interface{}, kind int) *jsObject {
 		elems := cps
 		if a, isArr := src.(*jsArray); isArr {
 			elems = a.elems
+			// An arguments object is iterated up to its own length (jsvIsArgs).
+			if jsvIsArgs(a) && a.kind>>5 < len(elems) {
+				elems = elems[:a.kind>>5]
+			}
 		}
 		r := newJSObject()
 		if i < len(elems) {
@@ -1258,12 +1407,20 @@ func (rt *jsrt) jsvEscArg(a []uint64, i int) []uint64 {
 	return a
 }
 
-// jsvIsArgs: the arguments object, an array carrying kind 19 (js_jsargs below).
-// Twins: jsIsArgs in both *-interpreter.abnf, jvIsArgs in languages/lib/js-rt.metajs.
+// jsvIsArgs: the arguments object, an array whose kind word carries jsArgsKind in
+// its low five bits (js_jsargs below). Above them the word keeps the value of the
+// object's own `length`: the call's argument count, which an element write does not
+// change (ECMA-262 10.4.4.6, CreateUnmappedArgumentsObject step 4) and only a write
+// to `length` itself does. Twins: jsIsArgs / jsArgsLen in both *-interpreter.abnf,
+// jvIsArgs / jvArgsLen in languages/lib/js-rt.metajs.
+const jsArgsKind = 19
+
 func jsvIsArgs(v interface{}) bool {
 	a, ok := v.(*jsArray)
-	return ok && a.kind == 19
+	return ok && a.kind&31 == jsArgsKind
 }
+
+func jsvArgsKind(length int) int { return jsArgsKind + 32*length }
 
 // jsvRelIndex resolves a possibly negative / out-of-range index against a length,
 // the way slice/splice/fill do (ECMA RelativeIndex).
@@ -1669,14 +1826,39 @@ func (rt *jsrt) jsvMethod(target interface{}, name string, args []interface{}) (
 			return dst, true
 		case "fromEntries":
 			out := newJSObject()
-			if arr, ok := argAt(args, 0).(*jsArray); ok {
-				for _, e := range arr.elems {
-					pair, isArr := e.(*jsArray)
-					if !isArr || len(pair.elems) == 0 {
-						continue
+			for _, e := range rt.jsvIterList(argAt(args, 0)) {
+				switch e.(type) {
+				case *jsObject, *jsArray, *hostFunc:
+				default:
+					if !isCallable(e) {
+						rt.bigRaise("TypeError: Iterator value %s is not an entry object", rt.jsvString(e))
 					}
-					out.set(jsvKeyEsc(rt.jsvString(pair.elems[0])), argAt(pair.elems, 1))
 				}
+				out.set(rt.jsvPropKey(rt.jsvGetKey(e, "0")), rt.jsvGetKey(e, "1"))
+			}
+			return out, true
+		case "hasOwn":
+			if isUndefOrNull(argAt(args, 0)) {
+				rt.bigRaise("TypeError: Cannot convert undefined or null to object")
+			}
+			return rt.jsvHasOwn(argAt(args, 0), rt.jsvPropKey(argAt(args, 1))), true
+		case "groupBy":
+			if isUndefOrNull(argAt(args, 0)) {
+				rt.bigRaise("TypeError: Object.groupBy called on null or undefined")
+			}
+			f := argAt(args, 1)
+			if !isCallable(f) {
+				rt.bigRaise("TypeError: %s is not a function", rt.jsvNotFnText(f))
+			}
+			out := newJSObject()
+			for i, v := range rt.jsvIterList(argAt(args, 0)) {
+				k := rt.jsvPropKey(rt.call(f, jsUndef, []interface{}{v, float64(i)}))
+				grp, found := out.props[k].(*jsArray)
+				if !found {
+					grp = &jsArray{}
+					out.set(k, grp)
+				}
+				grp.elems = append(grp.elems, v)
 			}
 			return out, true
 		case "freeze", "seal":
@@ -1710,10 +1892,35 @@ func (rt *jsrt) jsvMethod(target interface{}, name string, args []interface{}) (
 		return nil, false
 	}
 
+	// Number's statics on the `Number` global: the predicates do not convert their
+	// argument, and the two parsers are the global functions. Twins: jsNumberStatic in
+	// both *-interpreter.abnf, jvNumberStatic in languages/lib/js-rt.metajs.
+	if hf, ok := target.(*hostFunc); ok && hf.name == "Number" {
+		x, isNum := argAt(args, 0).(float64)
+		fin := isNum && !math.IsNaN(x) && !math.IsInf(x, 0)
+		switch name {
+		case "isNaN":
+			return isNum && x != x, true
+		case "isFinite":
+			return fin, true
+		case "isInteger":
+			return fin && math.Trunc(x) == x, true
+		case "isSafeInteger":
+			return fin && math.Trunc(x) == x && math.Abs(x) <= 9007199254740991, true
+		case "parseFloat":
+			return jsParseFloatJS(rt.jsvString(argAt(args, 0))), true
+		case "parseInt":
+			return jsParseIntJS(rt.jsvString(argAt(args, 0)), rt.toInt32(rt.jsvToNum(argAt(args, 1)))), true
+		}
+		return nil, false
+	}
+
 	// String.fromCharCode / String.raw on the `String` global (a host function, so
 	// js_get finds no member of that name and the call lands here).
 	if hf, ok := target.(*hostFunc); ok && hf.name == "String" {
 		switch name {
+		case "raw":
+			return rt.jsvStringRaw(args), true
 		case "fromCharCode":
 			units := make([]uint16, len(args))
 			for i, x := range args {
@@ -2718,6 +2925,11 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		if g == interface{}(symbolFn) && jsvInNames(jsvSymWKNames, name) {
 			return symWellKnown(name)
 		}
+		if gname == "Number" {
+			if c, isConst := jsvNumberConst(name); isConst {
+				return c
+			}
+		}
 		if !jsvInNames(jsvStaticNames[gname], name) {
 			return nil
 		}
@@ -2729,7 +2941,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			return u(m["js_jsmcall"]([]uint64{w(g), w(name), w(&jsArray{elems: append([]interface{}{}, args...)})}))
 		})
 		length := 1
-		if name == "assign" || name == "is" {
+		if jsvInNames(jsvStaticLen2, name) {
 			length = 2
 		}
 		jsvFnMetaSet(f, name, length)
@@ -2790,15 +3002,79 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	}
 
 	baseInstanceof := m["js_instanceof"]
-	// The arguments object of a call: a copy of its argument array carrying kind 19
-	// (jsvIsArgs). Twin: js_jsargs in languages/lib/js-rt.metajs.
+	// js_jsargs(args, off): the arguments object of a call, a copy of its argument
+	// array from index off (an instance method's receiver comes first) carrying the
+	// arguments kind (jsvIsArgs). Twin: js_jsargs in languages/lib/js-rt.metajs.
 	m["js_jsargs"] = func(a []uint64) uint64 {
 		src, _ := u(a[0]).(*jsArray)
-		c := &jsArray{kind: 19}
-		if src != nil {
-			c.elems = append([]interface{}(nil), src.elems...)
+		off := int(rt.toNumber(u(a[1])))
+		c := &jsArray{kind: jsvArgsKind(0)}
+		if src != nil && off < len(src.elems) {
+			c.elems = append([]interface{}(nil), src.elems[off:]...)
+			c.kind = jsvArgsKind(len(c.elems))
 		}
 		return w(c)
+	}
+	// The MAPPED arguments object of a sloppy function with plain parameters (ECMA-262
+	// 10.4.4.7). js_jsargmap(names, arguments) is the names mapped to arguments[0..n),
+	// the parameters below the argument count, which the call's scope keeps under
+	// "0argm". js_jsargsync(scope, name, v), after a store to a name, copies v into
+	// arguments when the binding the store reached is a mapped parameter;
+	// js_jsargput(scope, k, v), after a store to arguments[k], copies v into the
+	// parameter k maps to. Twins: the same externs in languages/lib/js-rt.metajs,
+	// jsArgSync / jsArgPut in both *-interpreter.abnf.
+	m["js_jsargmap"] = func(a []uint64) uint64 {
+		names, _ := u(a[0]).(*jsArray)
+		args, _ := u(a[1]).(*jsArray)
+		out := &jsArray{}
+		if names != nil && args != nil {
+			n := len(names.elems)
+			if len(args.elems) < n {
+				n = len(args.elems)
+			}
+			out.elems = append(out.elems, names.elems[:n]...)
+		}
+		return w(out)
+	}
+	m["js_jsargsync"] = func(a []uint64) uint64 {
+		name := rt.toString(u(a[1]))
+		for s := rt.scopeOf(a[0]); s != nil; s = s.parent {
+			if !s.has(name) {
+				continue
+			}
+			mv, mapped := s.get("0argm")
+			names, _ := mv.(*jsArray)
+			av, _ := s.get("arguments")
+			args, isArgs := av.(*jsArray)
+			if mapped && names != nil && isArgs && jsvIsArgs(args) {
+				for i := len(names.elems) - 1; i >= 0; i-- {
+					if rt.toString(names.elems[i]) == name {
+						if i < len(args.elems) {
+							args.elems[i] = u(a[2])
+						}
+						break
+					}
+				}
+			}
+			break
+		}
+		return 0
+	}
+	m["js_jsargput"] = func(a []uint64) uint64 {
+		for s := rt.scopeOf(a[0]); s != nil; s = s.parent {
+			if !s.has("arguments") {
+				continue
+			}
+			mv, mapped := s.get("0argm")
+			names, _ := mv.(*jsArray)
+			if mapped && names != nil {
+				if i, isIdx := jsvArrayIndex(rt.toString(u(a[1]))); isIdx && i < uint64(len(names.elems)) {
+					s.put(rt.toString(names.elems[i]), u(a[2]))
+				}
+			}
+			break
+		}
+		return 0
 	}
 	m["js_jsinstanceof"] = func(a []uint64) uint64 {
 		v, target := u(a[0]), u(a[1])
@@ -3234,6 +3510,10 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		return r
 	}
 	m["js_jsvget"] = func(a []uint64) uint64 {
+		// The arguments object's `length` is its own slot (jsvIsArgs), not the storage's.
+		if arr, isArr := u(a[0]).(*jsArray); isArr && arr.kind&31 == jsArgsKind && rt.toString(u(a[1])) == "length" {
+			return w(float64(arr.kind >> 5))
+		}
 		r := vget(a)
 		if !isUndefOrNull(u(r)) {
 			return r
@@ -3601,7 +3881,13 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 				protoWrite(d, rt.toString(u(a[1])), u(a[2]))
 			}
 		}
-		return baseSet(a)
+		r := baseSet(a)
+		// A write to an arguments object's `length` resizes it as an array write does,
+		// and the slot follows.
+		if arr, isArr := u(a[0]).(*jsArray); isArr && arr.kind&31 == jsArgsKind && rt.toString(u(a[1])) == "length" {
+			arr.kind = jsvArgsKind(len(arr.elems))
+		}
+		return r
 	}
 
 	// (closure, name, length) -> closure. The emitter calls it at the creation site of

@@ -1,8 +1,8 @@
 // js-builtins.js -- JAVASCRIPT, not MetaJS: the Set and Map classes, Array.from /
-// Array.of, Boolean, isNaN and isFinite, written in the language itself and compiled INTO a program by
-// the js grammars, both halves (jsbLoad in js-interpreter.abnf and js-to-llvm-ir.abnf).
-// A program that names Set, Map, Array, Boolean, isNaN or isFinite gets this file in front of it; one
-// that does not pays nothing. Being one JavaScript source compiled by the same grammars is what
+// Array.of, Boolean, isNaN, isFinite and structuredClone, written in the language itself and compiled
+// INTO a program by the js grammars, both halves (jsbLoad in js-interpreter.abnf and js-to-llvm-ir.abnf).
+// A program that names Set, Map, Array, Boolean, isNaN, isFinite or structuredClone gets this file in
+// front of it; one that does not pays nothing. Being one JavaScript source compiled by the same grammars is what
 // makes the interpreter, llvm.Run and a native binary agree on every answer here.
 //
 // It is a Script ('.js'), runs before the program's own top level, and a program that
@@ -198,6 +198,23 @@ class Map extends __Coll {
     entries() { return new __CollIter(this, 2) }
     ["__#@iterator"]() { return new __CollIter(this, 2) }
     toString() { return "[object Map]" }
+    // Map.groupBy(items, f): the items in a Map from f(item, index) to the items it
+    // gave that key, the keys in first-seen order and compared as Map keys.
+    static groupBy(items, f) {
+        if (items === null || items === undefined) { throw new TypeError("Map.groupBy called on null or undefined") }
+        if (typeof f !== "function") {
+            var what = (typeof f === "object" && f !== null) ? (Array.isArray(f) ? "[object Array]" : "#<Object>") : String(f)
+            throw new TypeError(what + " is not a function")
+        }
+        var m = new Map()
+        var i = 0
+        for (var v of __iterCheck(items)) {
+            var k = f(v, i)
+            if (m.has(k)) { m.get(k).push(v) } else { m.set(k, [v]) }
+            i = i + 1
+        }
+        return m
+    }
 }
 
 // Array.from(items, mapFn, thisArg): an iterable is iterated, anything else is read as
@@ -207,11 +224,20 @@ Array.from = function from(items, mapFn, self) {
     if (items === null || items === undefined) { __iterCheck(items) }
     var out = []
     var t = typeof items
-    if (t === "string" || Array.isArray(items)
-        || ((t === "object" || t === "function") && (typeof items.next === "function" || typeof items["__#@iterator"] === "function"))) {
-        var i = 0
+    var i = 0
+    if (t === "string" || Array.isArray(items)) {
         for (var v of items) {
             out.push(mapFn === undefined ? v : mapFn.call(self, v, i))
+            i = i + 1
+        }
+        return out
+    }
+    // Any other iterable through its own iterator, which for an arguments object stops
+    // at its length.
+    if ((t === "object" || t === "function") && (typeof items.next === "function" || typeof items["__#@iterator"] === "function")) {
+        var it = typeof items["__#@iterator"] === "function" ? items["__#@iterator"]() : items
+        for (var s = it.next(); !s.done; s = it.next()) {
+            out.push(mapFn === undefined ? s.value : mapFn.call(self, s.value, i))
             i = i + 1
         }
         return out
@@ -235,3 +261,43 @@ function Boolean(v) { return !!v }
 // isNaN("abc") is true and isFinite("12") is true), unlike Number.isNaN/isFinite.
 function isNaN(v) { var n = +v; return n !== n }
 function isFinite(v) { var n = +v; return n === n && n !== Infinity && n !== -Infinity }
+
+// structuredClone(v): a deep copy of the arrays, plain objects, Maps and Sets in v,
+// a value reached twice (a cycle too) copied once. A class instance copies as a plain
+// object of its own enumerable keys. A function or a symbol is node's DataCloneError,
+// which here is an Error of that name; nothing in this engine is a DOMException.
+function structuredClone(v) { return __clone(v, [], []) }
+function __clone(v, seen, made) {
+    var t = typeof v
+    if (t === "function" || t === "symbol") {
+        var e = new Error(String(v) + " could not be cloned.")
+        e.name = "DataCloneError"
+        throw e
+    }
+    if (v === null || t !== "object") { return v }
+    for (var i = 0; i < seen.length; i++) { if (seen[i] === v) { return made[i] } }
+    seen.push(v)
+    if (Array.isArray(v)) {
+        var a = []
+        made.push(a)
+        for (var j = 0; j < v.length; j++) { a.push(__clone(v[j], seen, made)) }
+        return a
+    }
+    if (v instanceof Map) {
+        var m = new Map()
+        made.push(m)
+        v.forEach(function (x, k) { m.set(__clone(k, seen, made), __clone(x, seen, made)) })
+        return m
+    }
+    if (v instanceof Set) {
+        var s = new Set()
+        made.push(s)
+        v.forEach(function (x) { s.add(__clone(x, seen, made)) })
+        return s
+    }
+    var o = {}
+    made.push(o)
+    var ks = Object.keys(v)
+    for (var n = 0; n < ks.length; n++) { o[ks[n]] = __clone(v[ks[n]], seen, made) }
+    return o
+}

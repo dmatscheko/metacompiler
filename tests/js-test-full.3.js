@@ -2135,6 +2135,108 @@ function s87() {
     check("dk87h", rk === "[__r][]" && JSON.stringify({__x: 1}, function (k, v) { return k === "__x" ? 5 : v }) === "{\"__x\":5}")
 }
 
+// ===== SECTION 88: the ES2015-ES2024 statics of Object, Number and String, structuredClone =====
+// Object.hasOwn, Object.groupBy and Map.groupBy, Object.fromEntries over any iterable,
+// Number's predicates, parsers and constants, String.raw, structuredClone. Values read
+// off node 24.
+function s88() {
+    const v = [{a: 1}, "a", null, 5, "ab", [1, 2]]
+    function err(f) { try { f(); return "none" } catch (e) { return (e instanceof TypeError ? "T:" : e.name + ":") + e.message } }
+    const s = Symbol("q")
+    const so = {}
+    so[s] = 1
+    check("es88a", Object.hasOwn(v[0], v[1]) && !Object.hasOwn(v[0], "b") && !Object.hasOwn(v[0], "toString") &&
+        Object.hasOwn(v[5], "length") && Object.hasOwn(v[5], 1) && !Object.hasOwn(v[5], 2) && Object.hasOwn(v[4], 0) &&
+        Object.hasOwn(so, s) && !Object.hasOwn(v[3], "a") && typeof Object.hasOwn === "function" && Object.hasOwn.length === 2 &&
+        err(function () { return Object.hasOwn(v[2], "a") }) === "T:Cannot convert undefined or null to object")
+    function* gen() { yield 1; yield 2; yield 3 }
+    const it = {i: 0, next() { this.i++; return {value: this.i, done: this.i > 2} }, [Symbol.iterator]() { return this }}
+    check("es88b", JSON.stringify(Object.groupBy([1, 2, 3, 4], function (x) { return x % 2 ? "odd" : "even" })) === "{\"odd\":[1,3],\"even\":[2,4]}" &&
+        JSON.stringify(Object.groupBy(v[4], function (c, i) { return c + i })) === "{\"a0\":[\"a\"],\"b1\":[\"b\"]}" &&
+        JSON.stringify(Object.groupBy(gen(), function (x) { return x > 1 })) === "{\"false\":[1],\"true\":[2,3]}" &&
+        JSON.stringify(Object.groupBy(new Set([1, 1, 2]), function (x) { return "k" })) === "{\"k\":[1,2]}" &&
+        JSON.stringify(Object.groupBy(it, function (x) { return "n" })) === "{\"n\":[1,2]}" &&
+        err(function () { return Object.groupBy(v[2], function () {}) }) === "T:Object.groupBy called on null or undefined" &&
+        err(function () { return Object.groupBy([1], v[3]) }) === "T:5 is not a function" &&
+        err(function () { return Object.groupBy(v[3], function () {}) }) === "T:number 5 is not iterable (cannot read property Symbol(Symbol.iterator))")
+    const k = {}
+    const m = Map.groupBy([1, 2, 3, 4], function (x) { return x % 2 ? k : "even" })
+    check("es88c", m.size === 2 && m.get(k).join() === "1,3" && m.get("even").join() === "2,4" && Map.groupBy.length === 2 &&
+        err(function () { return Map.groupBy(v[2], function () {}) }) === "T:Map.groupBy called on null or undefined")
+    function* pairs() { yield ["x", 1]; yield ["__y", 2] }
+    check("es88d", JSON.stringify(Object.fromEntries(new Map([["k", 3]]))) === "{\"k\":3}" &&
+        JSON.stringify(Object.fromEntries(pairs())) === "{\"x\":1,\"__y\":2}" &&
+        JSON.stringify(Object.fromEntries([{0: "a", 1: 2}])) === "{\"a\":2}" &&
+        err(function () { return Object.fromEntries([1]) }) === "T:Iterator value 1 is not an entry object" &&
+        err(function () { return Object.fromEntries(v[2]) }) === "T:undefined is not iterable")
+    const xs = [0, -0, 1.5, "3", NaN, Infinity, -7, 9007199254740992, null]
+    let ps = ""
+    for (let i = 0; i < xs.length; i++) {
+        ps += (Number.isInteger(xs[i]) ? "i" : "-") + (Number.isSafeInteger(xs[i]) ? "s" : "-") +
+            (Number.isFinite(xs[i]) ? "f" : "-") + (Number.isNaN(xs[i]) ? "n" : "-") + " "
+    }
+    check("es88e", ps === "isf- isf- --f- ---- ---n ---- isf- i-f- ---- " &&
+        Number.parseFloat("3.5e1x") === 35 && Number.parseInt("ff", 16) === 255 && Number.parseInt.length === 2 &&
+        typeof Number.isInteger === "function" && Number.isInteger.name === "isInteger")
+    check("es88f", Number.MAX_SAFE_INTEGER === 9007199254740991 && Number.MIN_SAFE_INTEGER === -9007199254740991 &&
+        Number.EPSILON === Math.pow(2, -52) && 1 + Number.EPSILON !== 1 && "" + Number.MAX_VALUE === "1.7976931348623157e+308" &&
+        "" + Number.MIN_VALUE === "5e-324" && Number.POSITIVE_INFINITY === Infinity && Number.NEGATIVE_INFINITY === -Infinity &&
+        Number.NaN !== Number.NaN)
+    const n = v[3]
+    check("es88g", String.raw`x\ty${n}\n${n + 1}` === "x\\ty5\\n6" && String.raw({raw: "abc"}, 1, 2, 3) === "a1b2c" &&
+        String.raw({raw: ["p", "q"]}, v[4], 9) === "pabq" && String.raw({raw: []}) === "" && String.raw.length === 1 &&
+        err(function () { return String.raw({}) }) === "T:Cannot convert undefined or null to object")
+    const o = {a: [1, {b: n}], c: "s", __d: 2}
+    o.self = o
+    const c = structuredClone(o)
+    c.a[1].b = 9
+    const sm = structuredClone(new Map([[1, o.a]]))
+    check("es88h", o.a[1].b === 5 && c.a[1].b === 9 && c.self === c && c !== o && Object.keys(c).join() === "a,c,__d,self" &&
+        sm instanceof Map && sm.get(1)[0] === 1 && sm.get(1) !== o.a && structuredClone(v[1]) === "a" &&
+        err(function () { return structuredClone(s) }) === "DataCloneError:Symbol(q) could not be cloned.")
+}
+
+// ===== SECTION 89: the arguments object's length, and the mapped arguments of a sloppy function =====
+// `length` is the argument count whatever is written to the elements; in a sloppy
+// function with plain parameters, parameter i and arguments[i] are one value below
+// that count, in both directions, through closures, compound stores, destructuring and
+// a var of the parameter's name. Strict code, defaults, rest parameters, generators and
+// methods are unmapped. Values read off node 24.
+function s89() {
+    const v = [1, 2, 3]
+    function l1() { arguments[0] = 9; return arguments.length + ":" + arguments[0] }
+    function l2(p) { arguments[3] = 9; return arguments.length + ":" + Array.from(arguments).length }
+    function l3() { arguments.length = 2; return arguments.length }
+    check("ar89a", l1() === "0:9" && l2(v[0]) === "1:1" && l3(v[0]) === 2 && l1(v[0], v[1]) === "2:9")
+    function m1(p) { p = 5; return arguments[0] }
+    function m2(p) { arguments[0] = 9; return p }
+    function m3(p, q) { q = 7; return arguments.length + ":" + arguments[1] }
+    function m4(p) { p++; p += 10; return arguments[0] }
+    function m5(p) { var p = 8; return arguments[0] + ":" + p }
+    function m6(p) { (function () { p = 4 })(); return arguments[0] }
+    function m7(p) { const g = () => { arguments[0] = 6 }; g(); return p }
+    function m8(p) { arguments[0] += 1; arguments[0]++; return p }
+    function m9(p) { [p] = [3]; return arguments[0] }
+    function m10(p) { ({p} = {p: 6}); return arguments[0] }
+    check("ar89b", m1(v[0]) === 5 && m2(v[0]) === 9 && m3(v[0]) === "1:undefined" && m3(v[0], v[1]) === "2:7" &&
+        m4(v[0]) === 12 && m5(v[0]) === "8:8" && m6(v[0]) === 4 && m7(v[0]) === 6 && m8(v[0]) === 3 &&
+        m9(v[0]) === 3 && m10(v[0]) === 6 && m1() === undefined && m2() === undefined)
+    function u1(p) { "use strict"; p = 5; return arguments[0] }
+    function u2(p = 0) { p = 5; return arguments[0] }
+    function u3(p, ...r) { p = 5; return arguments[0] }
+    function u4(p) { { let p = 3; p = 4 } return arguments[0] }
+    function u5(p) { try { throw 1 } catch (p) { p = 4 } return arguments[0] }
+    function* u6(p) { p = 5; yield arguments[0] }
+    class C { m(p) { p = 5; return arguments[0] + ":" + arguments.length } }
+    check("ar89c", u1(v[0]) === 1 && u2(v[0]) === 1 && u3(v[0]) === 1 && u4(v[0]) === 1 && u5(v[0]) === 1 &&
+        new C().m(v[0], v[1]) === "1:2")
+    function n1(p) { function inner(p) { p = 9; return arguments[0] } return inner(p) + ":" + arguments[0] + ":" + p }
+    function n2(n) { if (n > 0) { n = n - 1; return n2(n) + "," + arguments[0] } return "0" }
+    function n3(p) { arguments["0"] = 8; return p }
+    const o = { m(p) { p = 6; return arguments[0] } }
+    check("ar89d", n1(v[0]) === "9:1:1" && n2(v[1]) === "0,0,1" && n3(v[0]) === 8 && o.m(v[0]) === 6)
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -2180,6 +2282,8 @@ function main() {
     s85() // SECTION-CALL 85
     s86() // SECTION-CALL 86
     s87() // SECTION-CALL 87
+    s88() // SECTION-CALL 88
+    s89() // SECTION-CALL 89
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

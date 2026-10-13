@@ -322,7 +322,7 @@ RestArg     = RestParam | RestPattern ;
 // remaining arguments). A plain parameter pushes its bare name and the two others a
 // descriptor, which is what bindParams tells them apart by.
 Param       = DefaultParam | PatternParam | PlainParam ;
-PlainParam  <~~ push(idName(up.in)) ~~>
+PlainParam  <~~ push(noteParam(idName(up.in))) ~~>
             = NotBindName Id ;
 DefaultParam <~~ push(makeDefaultParam(takeAll())) ~~>
             = NotBindName Id <~~ push(idName(up.in)) ~~> "=" AssignExpr ;
@@ -3651,7 +3651,7 @@ NotFuncHead = :script(~~
         return true
     }
 
-    // lib/js-builtins.js (Set, Map, Array.from, Array.of, Boolean, isNaN, isFinite) is JavaScript,
+    // lib/js-builtins.js (Set, Map, Array.from, Array.of, Boolean, isNaN, isFinite, structuredClone) is JavaScript,
     // compiled into a program that names one of them (jsbRef, at the
     // VarRef, typeof-name and new-name tags), like an imported file but emitted FIRST,
     // before every imported file's top level, since any of them may use it. Twin of
@@ -3659,7 +3659,8 @@ NotFuncHead = :script(~~
     var jsbWant = false
     var jsbDone = false
     function jsbRef(name) {
-        if (name == "Set" || name == "Map" || name == "Array" || name == "Boolean" || name == "isNaN" || name == "isFinite") { jsbWant = true }
+        if (name == "Set" || name == "Map" || name == "Array" || name == "Boolean" || name == "isNaN" || name == "isFinite" ||
+            name == "structuredClone") { jsbWant = true }
         return name
     }
     function jsbLoad() {
@@ -3986,6 +3987,7 @@ NotFuncHead = :script(~~
         var nmV = emitStr(b, ref.name)
         if (ref.tdz != undefined && hoistRefAll[ref.tdz].chk) { tdzChk(b, callExt(b, "js_scope_get", [curScopeV, nmV]), nmV) }
         callExt(b, (ref.w === true) ? "js_jswithset" : ext, [curScopeV, nmV, v])
+        emitArgSync(b, ref.name, v)
     }
     // String.prototype.normalize needs the tables of lib/unicode-norm.txt, which a
     // program that names a .normalize member hands both engines at boot
@@ -4014,6 +4016,37 @@ NotFuncHead = :script(~~
     // jsIsArgs in js-interpreter.abnf) is made at function entry only in a program
     // that names `arguments`; an arrow has none of its own.
     var argsWant = false
+    // A SLOPPY function whose parameters are all plain names has a MAPPED arguments
+    // object (ECMA-262 10.4.4.7): while the call runs, parameter i and arguments[i] are
+    // one value for every i below the argument count. Its scope keeps the mapped names
+    // under "0argm" (js_jsargmap); a store to a name that is some function's parameter
+    // is copied into arguments (js_jsargsync), and a store to `arguments[k]` into the
+    // parameter (js_jsargput). Both externs find the binding at run time, so a
+    // closure's store and a shadowing block binding come out right. A store through any
+    // OTHER reference to the arguments object is not copied, and a generator's or an
+    // async function's arguments are not mapped (lexThis), since the interpreter
+    // replays a generator's body from its argument array. Twins: jsArgSync /
+    // jsArgPut in js-interpreter.abnf; the externs are in abnf/jsrtjsprint.go and
+    // languages/lib/js-rt.metajs.
+    var paramSeen = {}
+    function noteParam(name) {
+        paramSeen["$" + name] = true
+        return name
+    }
+    function argsMapped(params) {
+        if (params.length == 0 || emitStrict) { return false }
+        for (var i = 0; i < params.length; i++) { if (typeof params[i] != "string") { return false } }
+        return true
+    }
+    function emitArgSync(b, name, v) {
+        if (argsWant && paramSeen["$" + name] === true) { callExt(b, "js_jsargsync", [curScopeV, emitStr(b, name), v]) }
+    }
+    // A store through a member reference, and the copy into the mapped parameter when
+    // the reference is `arguments[k]`.
+    function refMemberSet(b, ref, objV, keyV, v) {
+        callExt(b, memSetExt(), [objV, keyV, v])
+        if (argsWant && ref.name === "arguments" && ref.path.length == 1) { callExt(b, "js_jsargput", [curScopeV, keyV, v]) }
+    }
     // The temporal dead zone (lib/js-hoist.js). A scope creates the names some
     // reference can reach uninitialized holding the TDZ SENTINEL, one pinned object
     // made at boot like the miss sentinel, and only those references (chk) pass what
@@ -5201,7 +5234,7 @@ NotFuncHead = :script(~~
             var v = r.v
             if (op != "=") { v = emitBinOp(b, op, oldV, v) }
             if (ref.path.length == 0) { refNameSet(b, ref, setExt, v) }
-            else { callExt(b, memSetExt(), [p.obj, p.key, v]) }
+            else { refMemberSet(b, ref, p.obj, p.key, v) }
             return {b: b, v: v}
         }
     }
@@ -5238,7 +5271,7 @@ NotFuncHead = :script(~~
             var r = valT(assignB)
             var ab = r.b
             if (nameV != null) { refNameSet(ab, ref, "js_scope_set", r.v) }
-            else { callExt(ab, memSetExt(), [objV, keyV, r.v]) }
+            else { refMemberSet(ab, ref, objV, keyV, r.v) }
             ab.NewBr(mergeB)
             var phi = mergeB.NewPhi([llvm.ir.NewIncoming(r.v, ab), llvm.ir.NewIncoming(oldV, fromB)])
             return {b: mergeB, v: phi}
@@ -5262,7 +5295,7 @@ NotFuncHead = :script(~~
             var p = emitRefPath(b, ref)
             b = p.b
             var oldM = callExt(b, "js_jstonumeric", [callExt(b, memGetExt(), [p.obj, p.key])])
-            callExt(b, memSetExt(), [p.obj, p.key, callExt(b, "js_jsstep", [oldM, oneV])])
+            refMemberSet(b, ref, p.obj, p.key, callExt(b, "js_jsstep", [oldM, oneV]))
             return {b: b, v: oldM}
         }
     }
@@ -5281,7 +5314,7 @@ NotFuncHead = :script(~~
             b = p.b
             var oldM = callExt(b, "js_jstonumeric", [callExt(b, memGetExt(), [p.obj, p.key])])
             var newM = callExt(b, "js_jsstep", [oldM, oneV])
-            callExt(b, memSetExt(), [p.obj, p.key, newM])
+            refMemberSet(b, ref, p.obj, p.key, newM)
             return {b: b, v: newM}
         }
     }
@@ -5412,8 +5445,13 @@ NotFuncHead = :script(~~
         // A try/catch/finally body is no function of the program: `arguments` there is
         // the enclosing function's.
         if (!isCtl && isArrow !== true) {
-            var argsV = argsWant ? callExt(b, "js_jsargs", [f.Params[1]]) : f.Params[1]
+            var argsV = argsWant ? callExt(b, "js_jsargs", [f.Params[1], callExt(b, "js_num_i", [handle(0)])]) : f.Params[1]
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "arguments"), argsV])
+            if (argsWant && lexThis !== true && argsMapped(paramNames)) {
+                var pnV = callExt(b, "js_arr_new", [])
+                for (var pi = 0; pi < paramNames.length; pi++) { callExt(b, "js_arr_push", [pnV, emitStr(b, paramNames[pi])]) }
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0argm"), callExt(b, "js_jsargmap", [pnV, argsV])])
+            }
         }
         var endB = bodyT(b)
         endB.NewRet(hUndef) // A function without return returns undefined.
@@ -5837,7 +5875,10 @@ NotFuncHead = :script(~~
                 bodyB = iterB
             }
             if (isPat) { bodyB = bindPattern(bodyB, name, elemV, patExt) }
-            else { callExt(bodyB, "js_scope_decl", [curScopeV, emitStr(bodyB, name), elemV]) }
+            else {
+                callExt(bodyB, "js_scope_decl", [curScopeV, emitStr(bodyB, name), elemV])
+                if (!isLex) { emitArgSync(bodyB, name, elemV) }
+            }
             constMark(bodyB, curScopeV, constNames)
             var brkB = exitB   // where `break` goes: exitB, or the closing block below.
             if (lazy) {
@@ -5969,6 +6010,7 @@ NotFuncHead = :script(~~
         if (pat.dtype == "id") {
             if (isAssignExt(declExt)) { constChk(b, pat.name) }
             callExt(b, declExt, [curScopeV, emitStr(b, pat.name), valueH])
+            if (declExt != "js_scope_decl") { emitArgSync(b, pat.name, valueH) }
             return b
         }
         if (pat.dtype == "arr") {
@@ -6153,6 +6195,17 @@ NotFuncHead = :script(~~
         }
         return b
     }
+    // With plain parameters a var of a parameter's name IS the parameter's binding
+    // (ECMA-262 10.2.11 step 27: the body's var scope is the parameters' own), so the
+    // body scope leaves it out; that is what keeps a mapped arguments object (argsMapped)
+    // seeing the parameter. With a default, a rest or a pattern the var is a separate
+    // binding starting at the parameter's value (step 28).
+    function varsOverParams(names, params) {
+        for (var i = 0; i < params.length; i++) { if (typeof params[i] != "string") { return names } }
+        var out = []
+        for (var j = 0; j < names.length; j++) { if (params.indexOf(names[j]) < 0) { out.push(names[j]) } }
+        return out
+    }
     // A body with vars runs in a scope of its own under the parameters', holding just
     // them: the names a loop reads most are then the first a lookup meets. The body's
     // functions are instantiated in that scope too, so an Annex B assignment and a var
@@ -6168,7 +6221,7 @@ NotFuncHead = :script(~~
         return function(b) {
             var fnScope = curScopeV
             curScopeV = callExt(b, "js_scope_new", [fnScope])
-            b = emitHoist(b, curScopeV, fnScope, names)
+            b = emitHoist(b, curScopeV, fnScope, varsOverParams(names, emitParams))
             if (annex.length > 0) { b = emitAnnexHoist(b, annex, names, emitParams) }
             var endB = bodyT(emitFnInit(b, fns))
             curScopeV = fnScope
@@ -6553,6 +6606,8 @@ NotFuncHead = :script(~~
         var savedAsyncGen = inAsyncGen
         var savedStrict = emitStrict
         emitStrict = true // A class body is strict code, always.
+        var savedParams = emitParams
+        emitParams = params
         var savedPlainGen = inPlainGen
         inAsyncFn = pendingAsyncFn
         inAsyncGen = pendingAsyncGen
@@ -6581,6 +6636,11 @@ NotFuncHead = :script(~~
             if (isInstance === false) { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), callExt(b, "js_this", [])]) }
         }
         b = bindParams(b, params, f.Params[1], off)
+        // A method's arguments object: its own arguments, the receiver an instance
+        // method is handed first left out. Class code is strict, so it is never mapped.
+        if (argsWant) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "arguments"), callExt(b, "js_jsargs", [f.Params[1], callExt(b, "js_num_i", [handle(off)])])])
+        }
         if (implicitSuper != undefined && implicitSuper != null) {
             var supCls = callExt(b, "js_scope_get", [curScopeV, emitStr(b, implicitSuper)])
             var supCtor = callExt(b, memGetExt(), [supCls, emitStr(b, "__ctor")])
@@ -6611,6 +6671,7 @@ NotFuncHead = :script(~~
         inAsyncGen = savedAsyncGen
         inPlainGen = savedPlainGen
         emitStrict = savedStrict
+        emitParams = savedParams
         return idx
     }
     function emitFieldInits(b, initFields) {
@@ -7210,6 +7271,7 @@ NotFuncHead = :script(~~
                 if (items.length == 1) { return b }
                 var vr = items[1](b)
                 callExt(vr.b, "js_scope_set", [curScopeV, emitStr(vr.b, name), vr.v])
+                emitArgSync(vr.b, name, vr.v)
                 return vr.b
             }
         }

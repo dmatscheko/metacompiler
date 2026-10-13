@@ -303,7 +303,7 @@ RestArg     = RestParam | RestPattern ;
 // the stack; the three richer forms push a descriptor bindParams knows how to read (see
 // there). A default value is an AssignExpr, so it may itself be a call or a ternary.
 Param       = DefaultParam | PatternParam | PlainParam ;
-PlainParam  <~~ push(idName(up.in)) ~~>
+PlainParam  <~~ push(noteParam(idName(up.in))) ~~>
             = NotBindName Id ;
 DefaultParam <~~ push(makeDefaultParam(takeAll())) ~~>
             = NotBindName Id <~~ push(idName(up.in)) ~~> "=" AssignExpr ;
@@ -3427,7 +3427,10 @@ NotFuncHead = :script(~~
         it["next"] = function() {
             var r = {}
             r["__keys"] = ["value", "done"]
-            if (st.i < src.length) {
+            // An arguments object is iterated up to its own length (jsIsArgs).
+            var n = src.length
+            if (argsWant && jsIsArgs(src) && jsArgsLen(src) < n) { n = jsArgsLen(src) }
+            if (st.i < n) {
                 var v = anytype // An element, an index or a pair.
                 v = src[st.i]
                 if (kind == 0) { v = st.i }
@@ -3472,7 +3475,7 @@ NotFuncHead = :script(~~
         // A BigInt prints as its digits with no 'n' suffix: String(10n) is "10".
         if (isBigInt(v)) { return biToStr(v, 10) }
         if (Array.isArray(v)) {
-            if (arrKind(v) == 19) { return "[object Arguments]" }
+            if (jsIsArgs(v)) { return "[object Arguments]" }
             var out = ""
             for (var i = 0; i < v.length; i++) {
                 if (i > 0) { out = out + "," }
@@ -4412,8 +4415,10 @@ NotFuncHead = :script(~~
                 }
                 return {v: cs}
             }
+            if (name == "raw") { return {v: jsStringRaw(args)} }
             return null
         }
+        if (target === jsNumberFn) { return jsNumberStatic(name, args) }
         if (typeof target == "string") { return jsStringMethod(target, name, args) }
         if (Array.isArray(target)) { return jsArrayMethod(target, name, args) }
         if (typeof target == "number") { return jsNumberMethod(target, name, args) }
@@ -4452,18 +4457,117 @@ NotFuncHead = :script(~~
         if (name == "fromEntries") {
             var o = {}
             o["__keys"] = []
-            if (Array.isArray(src)) {
-                for (var e = 0; e < src.length; e++) {
-                    var pair = src[e]
-                    if (!Array.isArray(pair) || pair.length == 0) { continue }
-                    setMember(o, jsKeyStr(pair[0]), pair[1])
+            var fl = jsIterList(src)
+            for (var e = 0; e < fl.length; e++) {
+                var pair = anytype // An entry is any object; anything else is the TypeError.
+                pair = fl[e]
+                if (pair === null || (typeof pair != "object" && typeof pair != "function") || isBigInt(pair)) {
+                    biRaise("TypeError: Iterator value " + jsStr(pair) + " is not an entry object")
                 }
+                setMember(o, jsKeyStr(getMember(pair, "0")), getMember(pair, "1"))
             }
             return {v: o}
+        }
+        if (name == "hasOwn") {
+            if (src === undefined || src === null) { biRaise("TypeError: Cannot convert undefined or null to object") }
+            var hk = anytype // The key: a symbol, or any value ToPropertyKey reads as a string.
+            hk = args.length > 1 ? args[1] : undefined
+            return {v: jsHasOwn(src, jsIsSym(hk) ? hk.__symkey : hk)}
+        }
+        if (name == "groupBy") {
+            if (src === undefined || src === null) { biRaise("TypeError: Object.groupBy called on null or undefined") }
+            var gf = anytype // The key callback, checked before the iteration.
+            gf = args.length > 1 ? args[1] : undefined
+            if (typeof gf != "function") { biRaise("TypeError: " + jsNotFnText(gf) + " is not a function") }
+            var gl = jsIterList(src)
+            var g = {}
+            g["__keys"] = []
+            for (var gi = 0; gi < gl.length; gi++) {
+                var gk = jsKeyStr(callWithThis(gf, undefined, [gl[gi], gi]))
+                var grp = anytype // The group so far, or undefined.
+                grp = getMemberRaw(g, gk)
+                if (grp === undefined) {
+                    grp = []
+                    setMember(g, gk, grp)
+                }
+                grp.push(gl[gi])
+            }
+            return {v: g}
         }
         if (name == "freeze" || name == "seal") { return {v: src} }
         if (name == "is") { return {v: sameValue(args[0], args[1])} }
         return null
+    }
+    // The values an iterable yields, for the statics that take one (Object.fromEntries,
+    // Object.groupBy): an array as it is, a string's code points, anything with a
+    // [Symbol.iterator] or a callable `next` driven to the end. Anything else is node's
+    // TypeError. Twins: jsvIterList in abnf/jsrtjsprint.go, jvIterList in
+    // languages/lib/js-rt.metajs.
+    function jsIterList(v) {
+        if (v === undefined || v === null) { biRaise("TypeError: undefined is not iterable") }
+        if (typeof v == "string") { return jsCodePoints(v) }
+        var r = anytype // The drained values, or v itself when it is no iterator.
+        r = iterArr(v, -1)
+        if (Array.isArray(r)) { return r }
+        var t = jsTypeofVal(v)
+        var what = (t == "number" || t == "boolean") ? t + " " + jsStr(v) : t
+        biRaise("TypeError: " + what + " is not iterable (cannot read property Symbol(Symbol.iterator))")
+        return []
+    }
+    // V8's rendering of a non-callable callback in "<x> is not a function": a
+    // primitive's string, "#<Object>" for an object. Twins: jsvNotFnText in
+    // abnf/jsrtjsprint.go, jvNotFnText in languages/lib/js-rt.metajs.
+    function jsNotFnText(f) {
+        if (Array.isArray(f)) { return "[object Array]" }
+        if (f !== null && typeof f == "object") { return "#<Object>" }
+        return jsStr(f)
+    }
+    // Number's statics: the predicates do not convert their argument, and the two
+    // parsers are the global functions. Twins: the "Number" arm of jsvMethod in
+    // abnf/jsrtjsprint.go, jvNumberStatic in languages/lib/js-rt.metajs.
+    function jsNumberStatic(name, args) {
+        var x = anytype // The argument, which the predicates test without converting.
+        x = args.length > 0 ? args[0] : undefined
+        var fin = typeof x == "number" && x - x === 0
+        if (name == "isNaN") { return {v: typeof x == "number" && x !== x} }
+        if (name == "isFinite") { return {v: fin} }
+        if (name == "isInteger") { return {v: fin && Math.floor(x) === x} }
+        if (name == "isSafeInteger") { return {v: fin && Math.floor(x) === x && Math.abs(x) <= 9007199254740991} }
+        if (name == "parseFloat") { return {v: jsnParseFloat(jsStr(x))} }
+        if (name == "parseInt") { return {v: jsnParseInt(jsStr(x), jsToNum(args.length > 1 ? args[1] : undefined) | 0)} }
+        return null
+    }
+    // String.raw(template, ...subs): template.raw's strings, the i-th substitution
+    // between the i-th and the next one, over ToLength(raw.length) strings. Twins:
+    // jsvStringRaw in abnf/jsrtjsprint.go, jvStringRaw in languages/lib/js-rt.metajs.
+    function jsStringRaw(args) {
+        var tp = anytype // The template object; a primitive is read through its members.
+        tp = args.length > 0 ? args[0] : undefined
+        var raw = anytype // template.raw, of any type.
+        raw = (tp === undefined || tp === null) ? undefined : getMember(tp, "raw")
+        if (raw === undefined || raw === null) { biRaise("TypeError: Cannot convert undefined or null to object") }
+        var n = jsToNum(getMember(raw, "length"))
+        n = (n > 0) ? Math.floor(n) : 0
+        var out = ""
+        for (var i = 0; i < n; i++) {
+            out = out + jsStr(getMember(raw, "" + i))
+            if (i + 1 < n && i + 1 < args.length) { out = out + jsStr(args[i + 1]) }
+        }
+        return out
+    }
+    // Number's constant members, or undefined for any other name. MetaJS has no
+    // exponent literal, so the extremes are built from exact powers of two. Twins:
+    // jsvNumberConst in abnf/jsrtjsprint.go, jvNumberConst in languages/lib/js-rt.metajs.
+    function jsNumberConst(k) {
+        if (k == "MAX_SAFE_INTEGER") { return 9007199254740991 }
+        if (k == "MIN_SAFE_INTEGER") { return -9007199254740991 }
+        if (k == "EPSILON") { return Math.pow(2, -52) }
+        if (k == "MAX_VALUE") { return (2 - Math.pow(2, -52)) * Math.pow(2, 1023) }
+        if (k == "MIN_VALUE") { return Math.pow(2, -1074) }
+        if (k == "POSITIVE_INFINITY") { return 1 / 0 }
+        if (k == "NEGATIVE_INFINITY") { return -1 / 0 }
+        if (k == "NaN") { return 0 / 0 }
+        return undefined
     }
     // Object.is: SameValue, which is === except that NaN is itself and +0 is not -0.
     // Twins: the "is" arms of abnf/jsrtjsprint.go and languages/lib/js-rt.metajs.
@@ -4965,8 +5069,71 @@ NotFuncHead = :script(~~
     // and with a length like one, but no Array - Array.isArray and instanceof say no, it
     // has no Array methods, it is tagged [object Arguments] and JSON writes it as an
     // object. Twins: js_jsargs in abnf/jsrtjsprint.go and languages/lib/js-rt.metajs.
-    function jsIsArr(v) { return Array.isArray(v) && arrKind(v) != 19 }
-    function jsIsArgs(v) { return Array.isArray(v) && arrKind(v) == 19 }
+    // The kind word keeps 19 in its low five bits and, above them, the value of the
+    // object's own `length`: the argument count, which an element write does not change
+    // (ECMA-262 10.4.4.6, CreateUnmappedArgumentsObject step 4) and only a write to
+    // `length` itself does. argsWant is set once the program names `arguments`, so
+    // nothing else pays for the slot on a `length` read.
+    function jsIsArr(v) { return Array.isArray(v) && arrKind(v) % 32 != 19 }
+    function jsIsArgs(v) { return Array.isArray(v) && arrKind(v) % 32 == 19 }
+    function jsArgsObj(args) { return arrKindSet(args, 19 + 32 * args.length) }
+    function jsArgsLen(v) { return (arrKind(v) - 19) / 32 }
+    var argsWant = false
+    // A SLOPPY function whose parameters are all plain names has a MAPPED arguments
+    // object (ECMA-262 10.4.4.7): while the call runs, parameter i and arguments[i] are
+    // one value for every i below the argument count. Its scope keeps the mapped names
+    // under "0argm" (jsArgMap); a store to a name that is some function's parameter is
+    // copied into arguments (jsArgSync), and a store to `arguments[k]` into the
+    // parameter (jsArgPut). Both find the binding at run time, so a closure's store and
+    // a shadowing block binding come out right. A store through any OTHER reference to
+    // the arguments object is not copied, and a generator's or an async function's
+    // arguments are not mapped (this engine replays a generator's body from its
+    // arguments). Twins: js_jsargmap / js_jsargsync / js_jsargput in
+    // abnf/jsrtjsprint.go and languages/lib/js-rt.metajs, emitArgSync / refMemberSet
+    // in js-to-llvm-ir.abnf.
+    var paramSeen = {}
+    function noteParam(name) {
+        paramSeen["$" + name] = true
+        return name
+    }
+    function jsArgMapNames(params, strict) {
+        if (strict || params.length == 0) { return null }
+        for (var i = 0; i < params.length; i++) { if (typeof params[i] != "string") { return null } }
+        return params
+    }
+    function jsArgMap(sc, names, args) {
+        if (names === null || !argsWant) { return }
+        sc["0argm"] = names.slice(0, names.length < args.length ? names.length : args.length)
+    }
+    function jsArgSync(name, v) {
+        if (!argsWant || paramSeen["$" + name] !== true) { return }
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            var s = scopes[i]
+            if (objHasOwn.call(s, name)) {
+                if (!objHasOwn.call(s, "0argm")) { return }
+                var ns = s["0argm"]
+                var ix = ns.length - 1
+                while (ix >= 0 && ns[ix] !== name) { ix = ix - 1 }
+                var ao = anytype // The arguments binding, which the program may have reassigned.
+                ao = s["arguments"]
+                if (ix >= 0 && jsIsArgs(ao) && ix < ao.length) { ao[ix] = v }
+                return
+            }
+        }
+    }
+    function jsArgPut(ref, k, v) {
+        if (!argsWant || ref.name !== "arguments" || ref.path.length != 1) { return }
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            var s = scopes[i]
+            if (objHasOwn.call(s, "arguments")) {
+                if (!objHasOwn.call(s, "0argm")) { return }
+                var ix = jsToNum(k)
+                var ns = s["0argm"]
+                if (ix >= 0 && ix < ns.length && Math.floor(ix) === ix && jsStr(ix) === jsStr(k)) { scopePut(s, ns[ix], v) }
+                return
+            }
+        }
+    }
     function jsonHIsObj(v) {
         return v !== null && v !== undefined && typeof v == "object" && !jsIsArr(v) && !isBigInt(v) && !isClassDesc(v) &&
             !jsIsSym(v)
@@ -5133,6 +5300,8 @@ NotFuncHead = :script(~~
     function makeClosure(params, bodyT, defScopes, ownStrict) {
         var env = defScopes.slice()
         var strictHere = (ownStrict === true) || strictAt(env)
+        var mapNames = anytype // The mapped parameter names, or null (jsArgMapNames).
+        mapNames = jsArgMapNames(params, strictHere)
         return function() {
             var self = pendingThis
             var nt = pendingNewTarget
@@ -5148,8 +5317,9 @@ NotFuncHead = :script(~~
             var sc = {}
             sc["this"] = self
             sc["new.target"] = nt
-            sc["arguments"] = arrKindSet(args, 19)
+            sc["arguments"] = jsArgsObj(args)
             sc["0strict"] = strictHere
+            jsArgMap(sc, mapNames, args)
             // The parameter scope has to be ACTIVE while the parameters bind: a default
             // value may read an earlier parameter ('function f(a, b = a + 1)').
             scopes.push(sc)
@@ -5430,6 +5600,8 @@ NotFuncHead = :script(~~
             if (bf != "") { return builtinValue(bf, k) }
             if (hasOwn(bvArr, k) && jsIsArgs(o)) { return jsIsProtoName(k) ? jsProtoShim(o, k) : undefined }
         }
+        // An arguments object's `length` is its own slot (jsIsArgs).
+        if (argsWant && k === "length" && jsIsArgs(o)) { return jsArgsLen(o) }
         if (k === "prototype") {
             var bp = anytype // The prototype object, or undefined for a non-callable.
             bp = protoOf(o)
@@ -5466,14 +5638,22 @@ NotFuncHead = :script(~~
     // length is node's. Twins: staticValue in abnf/jsrtjsprint.go, jvStaticValue in
     // languages/lib/js-rt.metajs.
     var stVals = {}
-    var stNames = {"Object": ["assign", "entries", "freeze", "fromEntries", "getOwnPropertyNames", "is", "keys",
-                              "seal", "values"],
-                   "String": ["fromCharCode", "fromCodePoint"], "Promise": ["resolve", "reject", "all", "allSettled", "race", "any"],
-                   "Array": ["isArray"], "Symbol": ["for", "keyFor"]}
+    var stNames = {"Object": ["assign", "entries", "freeze", "fromEntries", "getOwnPropertyNames", "groupBy", "hasOwn",
+                              "is", "keys", "seal", "values"],
+                   "String": ["fromCharCode", "fromCodePoint", "raw"], "Promise": ["resolve", "reject", "all", "allSettled", "race", "any"],
+                   "Array": ["isArray"], "Symbol": ["for", "keyFor"],
+                   "Number": ["isFinite", "isInteger", "isNaN", "isSafeInteger", "parseFloat", "parseInt"]}
+    var stLen2 = ["assign", "is", "hasOwn", "groupBy", "parseInt"]
     function staticValue(g, k) {
         var gn = ""
         if (g === jsObjectGlobal) { gn = "Object" }
         if (g === jsStringFn) { gn = "String" }
+        if (g === jsNumberFn) {
+            var nc = anytype // A constant member, or undefined.
+            nc = jsNumberConst(k)
+            if (nc !== undefined) { return nc }
+            gn = "Number"
+        }
         if (g === jsPromiseFn) { gn = "Promise" }
         if (g === jsArrayFn) { gn = "Array" }
         if (g === jsSymbolFn) {
@@ -5483,7 +5663,7 @@ NotFuncHead = :script(~~
         if (gn == "" || typeof k != "string" || stNames[gn].indexOf(k) < 0) { return undefined }
         var key = "$" + gn + "." + k
         if (hasOwn(stVals, key)) { return stVals[key] }
-        var f = fnMetaPut(staticValueFn(g, k), k, (k == "assign" || k == "is") ? 2 : 1)
+        var f = fnMetaPut(staticValueFn(g, k), k, stLen2.indexOf(k) >= 0 ? 2 : 1)
         stVals[key] = f
         return f
     }
@@ -5911,6 +6091,9 @@ NotFuncHead = :script(~~
         if (o != undefined && o != null && typeof o == "object" && hasOwn(o, "__protoof")) { protoWrite(o.__protoof, "" + k, v) }
         scopePut(o, k, v)
         trackKey(o, k) // Keep the object's for-in key list up to date.
+        // A write to an arguments object's `length` resizes it as an array write does,
+        // and the slot follows.
+        if (argsWant && k === "length" && jsIsArgs(o)) { jsArgsObj(o) }
     }
     // Object.prototype.hasOwnProperty / .propertyIsEnumerable on a FUNCTION. Every own
     // property a program can write onto a function here is an ordinary enumerable data
@@ -8462,7 +8645,7 @@ NotFuncHead = :script(~~
             scopes = env.slice()
             var sc = {}
             sc["this"] = self
-            sc["arguments"] = arrKindSet(args, 19)
+            sc["arguments"] = jsArgsObj(args)
             scopes.push(sc)
             bindParams(sc, params, args)
             var r = bodyT()
@@ -8578,7 +8761,7 @@ NotFuncHead = :script(~~
         v = value
         if (v === undefined && pat.dflt != undefined) { v = pat.dflt() }
         if (pat.dtype == "id") {
-            if (decl) { declVar(pat.name, v) } else { jsConstChk(pat.name); setVar(pat.name, v) }
+            if (decl) { declVar(pat.name, v) } else { jsConstChk(pat.name); setVar(pat.name, v); jsArgSync(pat.name, v) }
             return
         }
         // A target leaf. With an empty path it is a plain name and behaves exactly like
@@ -8692,7 +8875,7 @@ NotFuncHead = :script(~~
             scopes = env.slice()
             var sc = {}
             sc["this"] = self
-            sc["arguments"] = arrKindSet(args, 19)
+            sc["arguments"] = jsArgsObj(args)
             sc["0strict"] = true // A class body is strict code, always.
             scopes.push(sc)
             bindParams(sc, params, args)
@@ -8714,7 +8897,7 @@ NotFuncHead = :script(~~
             scopes = env.slice()
             var sc = {}
             sc["this"] = self
-            sc["arguments"] = arrKindSet(args, 19)
+            sc["arguments"] = jsArgsObj(args)
             sc["0strict"] = true // A class body is strict code, always.
             scopes.push(sc)
             bindParams(sc, params, args)
@@ -9838,11 +10021,12 @@ NotFuncHead = :script(~~
     }
     function refSet(ref, v) {
         if (ref.path.length == 0) {
-            if (ref.w === true) { withSet(ref.name, v) } else { jsConstChk(ref.name); setVar(ref.name, v) }
+            if (ref.w === true) { withSet(ref.name, v) } else { jsConstChk(ref.name); setVar(ref.name, v); jsArgSync(ref.name, v) }
             return
         }
         var p = resolveRef(ref)
         setMember(p.obj, p.key, v)
+        jsArgPut(ref, p.key, v)
     }
     // items = [ref, "&&="|"||="|"??=", valueThunk]. The right-hand side is evaluated
     // ONLY when the test says the assignment happens; the value of the expression is the
@@ -9906,6 +10090,7 @@ NotFuncHead = :script(~~
                 var p = resolveRef(ref)
                 if (op != "=") { v = getMember(p.obj, p.key); v = applyOp(op, v, valT()) } else { v = valT() }
                 setMember(p.obj, p.key, v)
+                jsArgPut(ref, p.key, v)
             }
             return v
         }
@@ -9924,6 +10109,7 @@ NotFuncHead = :script(~~
             var p = resolveRef(ref)
             n = jsToNumeric(getMember(p.obj, p.key))
             setMember(p.obj, p.key, jsStep(n, delta))
+            jsArgPut(ref, p.key, jsStep(n, delta))
             return n
         }
     }
@@ -9968,6 +10154,7 @@ NotFuncHead = :script(~~
             var p = resolveRef(ref)
             n = jsStep(jsToNumeric(getMember(p.obj, p.key)), delta)
             setMember(p.obj, p.key, n)
+            jsArgPut(ref, p.key, n)
             return n
         }
     }
@@ -10070,7 +10257,13 @@ NotFuncHead = :script(~~
         return function() {
             var ps = scopes[scopes.length - 1]
             var vs = {}
+            // A var of a mapped parameter's name IS the parameter (ECMA-262 10.2.11 step
+            // 27), so it stays in the parameters' scope, where the arguments object
+            // sees it (jsArgSync). Elsewhere the copy is a binding no program can tell
+            // apart from the parameter's. Twin of varsOverParams in js-to-llvm-ir.abnf.
+            var mapped = objHasOwn.call(ps, "0argm")
             for (var i = 0; i < names.length; i++) {
+                if (mapped && objHasOwn.call(ps, names[i])) { continue }
                 var v = anytype // A parameter's argument, or undefined.
                 v = objHasOwn.call(ps, names[i]) ? ps[names[i]] : undefined
                 scopePut(vs, names[i], v)
@@ -10161,7 +10354,7 @@ NotFuncHead = :script(~~
     // a new one here.
     function varSet(name, v) {
         for (var i = scopes.length - 1; i >= 0; i--) {
-            if (objHasOwn.call(scopes[i], name)) { scopePut(scopes[i], name, v); return }
+            if (objHasOwn.call(scopes[i], name)) { scopePut(scopes[i], name, v); jsArgSync(name, v); return }
         }
         declVar(name, v)
     }
@@ -10429,7 +10622,7 @@ NotFuncHead = :script(~~
         return true
     }
 
-    // lib/js-builtins.js (Set, Map, Array.from, Array.of, Boolean, isNaN, isFinite) is JavaScript,
+    // lib/js-builtins.js (Set, Map, Array.from, Array.of, Boolean, isNaN, isFinite, structuredClone) is JavaScript,
     // compiled into a program that names one of them (jsbRef, at the
     // VarRef, typeof-name and new-name tags) and run before anything that could use it:
     // before an imported file's top level and before the program's. Twin of jsbLoad in
@@ -10437,7 +10630,9 @@ NotFuncHead = :script(~~
     var jsbWant = false
     var jsbDone = false
     function jsbRef(name) {
-        if (name == "Set" || name == "Map" || name == "Array" || name == "Boolean" || name == "isNaN" || name == "isFinite") { jsbWant = true }
+        if (name == "Set" || name == "Map" || name == "Array" || name == "Boolean" || name == "isNaN" || name == "isFinite" ||
+            name == "structuredClone") { jsbWant = true }
+        if (name == "arguments") { argsWant = true }
         return name
     }
     function jsbLoad() {

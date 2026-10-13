@@ -500,7 +500,7 @@ RestArg     = RestParam | RestPattern ;
 // dropped. The property form is tried first, because its modifier word would otherwise be
 // taken for the parameter name.
 Param       = PropParam | DefaultParam | PatternParam | PlainParam ;
-PlainParam  = { Decorator <~~ pop() ~~> } NotBindName Id <~~ push(idName(up.in)) ~~> [ "?" ] [ TypeAnnot ] ;
+PlainParam  = { Decorator <~~ pop() ~~> } NotBindName Id <~~ push(noteParam(idName(up.in))) ~~> [ "?" ] [ TypeAnnot ] ;
 DefaultParam <~~ push(makeDefaultParam(takeAll())) ~~>
             = { Decorator <~~ pop() ~~> } NotBindName Id <~~ push(idName(up.in)) ~~> [ "?" ] [ TypeAnnot ] "=" AssignExpr ;
 PropParam   <~~ push(makePropParam(takeAll())) ~~>
@@ -2525,7 +2525,8 @@ NotFuncHead = :script(~~
     var jsbWant = false
     var jsbDone = false
     function jsbRef(name) {
-        if (name == "Set" || name == "Map" || name == "Array" || name == "Boolean" || name == "isNaN" || name == "isFinite") { jsbWant = true }
+        if (name == "Set" || name == "Map" || name == "Array" || name == "Boolean" || name == "isNaN" || name == "isFinite" ||
+            name == "structuredClone") { jsbWant = true }
         return name
     }
     function jsbLoad() {
@@ -3667,8 +3668,9 @@ NotFuncHead = :script(~~
                 var nmV = emitStr(b, ref.name)
                 refWriteChk(b, ref, nmV)
                 callExt(b, nsSetExt(ref.name, setExt), [curScopeV, nmV, v])
+                emitArgSync(b, ref.name, v)
             }
-            else { callExt(b, memSetExt(), [p.obj, p.key, v]) }
+            else { refMemberSet(b, ref, p.obj, p.key, v) }
             return {b: b, v: v}
         }
     }
@@ -3704,8 +3706,9 @@ NotFuncHead = :script(~~
                 var anV = emitStr(ab, ref.name)
                 refWriteChk(ab, ref, anV)
                 callExt(ab, nsSetExt(ref.name, "js_scope_set"), [curScopeV, anV, r.v])
+                emitArgSync(ab, ref.name, r.v)
             }
-            else { callExt(ab, memSetExt(), [objV, keyV, r.v]) }
+            else { refMemberSet(ab, ref, objV, keyV, r.v) }
             ab.NewBr(mergeB)
             var phi = mergeB.NewPhi([llvm.ir.NewIncoming(r.v, ab), llvm.ir.NewIncoming(oldV, fromB)])
             return {b: mergeB, v: phi}
@@ -3723,13 +3726,15 @@ NotFuncHead = :script(~~
                 var oldV = callExt(b, "js_jstonumeric", [refRead(b, ref, nameV)])
                 constChk(b, ref.name)
                 refWriteChk(b, ref, nameV)
-                callExt(b, nsSetExt(ref.name, "js_scope_set"), [curScopeV, nameV, callExt(b, "js_jsstep", [oldV, oneV])])
+                var stepV = callExt(b, "js_jsstep", [oldV, oneV])
+                callExt(b, nsSetExt(ref.name, "js_scope_set"), [curScopeV, nameV, stepV])
+                emitArgSync(b, ref.name, stepV)
                 return {b: b, v: oldV}
             }
             var p = emitRefPath(b, ref)
             b = p.b
             var oldM = callExt(b, "js_jstonumeric", [callExt(b, memGetExt(), [p.obj, p.key])])
-            callExt(b, memSetExt(), [p.obj, p.key, callExt(b, "js_jsstep", [oldM, oneV])])
+            refMemberSet(b, ref, p.obj, p.key, callExt(b, "js_jsstep", [oldM, oneV]))
             return {b: b, v: oldM}
         }
     }
@@ -3745,13 +3750,14 @@ NotFuncHead = :script(~~
                 constChk(b, ref.name)
                 refWriteChk(b, ref, nameV)
                 callExt(b, nsSetExt(ref.name, "js_scope_set"), [curScopeV, nameV, newV])
+                emitArgSync(b, ref.name, newV)
                 return {b: b, v: newV}
             }
             var p = emitRefPath(b, ref)
             b = p.b
             var oldM = callExt(b, "js_jstonumeric", [callExt(b, memGetExt(), [p.obj, p.key])])
             var newM = callExt(b, "js_jsstep", [oldM, oneV])
-            callExt(b, memSetExt(), [p.obj, p.key, newM])
+            refMemberSet(b, ref, p.obj, p.key, newM)
             return {b: b, v: newM}
         }
     }
@@ -3864,8 +3870,13 @@ NotFuncHead = :script(~~
         b = bindParams(b, paramNames, f.Params[1], 0)
         // See the twin of this line in js-to-llvm-ir.abnf.
         if (!isCtl && isArrow !== true) {
-            var argsV = argsWant ? callExt(b, "js_jsargs", [f.Params[1]]) : f.Params[1]
+            var argsV = argsWant ? callExt(b, "js_jsargs", [f.Params[1], callExt(b, "js_num_i", [handle(0)])]) : f.Params[1]
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "arguments"), argsV])
+            if (argsWant && lexThis !== true && argsMapped(paramNames)) {
+                var pnV = callExt(b, "js_arr_new", [])
+                for (var pi = 0; pi < paramNames.length; pi++) { callExt(b, "js_arr_push", [pnV, emitStr(b, paramNames[pi])]) }
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0argm"), callExt(b, "js_jsargmap", [pnV, argsV])])
+            }
         }
         var endB = bodyT(b)
         endB.NewRet(hUndef) // A function without return returns undefined.
@@ -4187,7 +4198,10 @@ NotFuncHead = :script(~~
                 bodyB = iterB
             }
             if (isPat) { bodyB = bindPattern(bodyB, name, elemV, patExt) }
-            else { callExt(bodyB, nsSetExt(name, "js_scope_decl"), [curScopeV, emitStr(bodyB, name), elemV]) }
+            else {
+                callExt(bodyB, nsSetExt(name, "js_scope_decl"), [curScopeV, emitStr(bodyB, name), elemV])
+                if (!isLex) { emitArgSync(bodyB, name, elemV) }
+            }
             constMark(bodyB, curScopeV, constNames)
             var brkB = exitB   // where `break` goes: exitB, or the closing block below.
             if (lazy) {
@@ -4269,6 +4283,7 @@ NotFuncHead = :script(~~
             var nmV = emitStr(b, ref.name)
             refWriteChk(b, ref, nmV)
             callExt(b, nsSetExt(ref.name, "js_scope_set_or_create"), [curScopeV, nmV, valueH])
+            emitArgSync(b, ref.name, valueH)
             return b
         }
         var p = emitRefPath(b, ref)
@@ -4304,6 +4319,7 @@ NotFuncHead = :script(~~
         if (pat.dtype == "id") {
             if (declExt == "js_scope_set_or_create" || declExt == "js_jswithset") { constChk(b, pat.name) }
             nsLeafStore(b, declExt, pat.name, valueH)
+            if (declExt != "js_scope_decl") { emitArgSync(b, pat.name, valueH) }
             return b
         }
         if (pat.dtype == "arr") {
@@ -4476,6 +4492,13 @@ NotFuncHead = :script(~~
         }
         return b
     }
+    // See the twin of this function in js-to-llvm-ir.abnf.
+    function varsOverParams(names, params) {
+        for (var i = 0; i < params.length; i++) { if (typeof params[i] != "string") { return names } }
+        var out = []
+        for (var j = 0; j < names.length; j++) { if (params.indexOf(names[j]) < 0) { out.push(names[j]) } }
+        return out
+    }
     // See the twin of this comment in js-to-llvm-ir.abnf.
     function makeFuncBody(items, from, to) {
         fnBodyTo = to
@@ -4488,7 +4511,7 @@ NotFuncHead = :script(~~
         return function(b) {
             var fnScope = curScopeV
             curScopeV = callExt(b, "js_scope_new", [fnScope])
-            b = emitHoist(b, curScopeV, fnScope, names)
+            b = emitHoist(b, curScopeV, fnScope, varsOverParams(names, emitParams))
             if (annex.length > 0) { b = emitAnnexHoist(b, annex, names, emitParams) }
             var endB = bodyT(emitFnInit(b, fns))
             curScopeV = fnScope
@@ -4830,6 +4853,8 @@ NotFuncHead = :script(~~
         var savedAsyncGen = inAsyncGen
         var savedStrict = emitStrict
         emitStrict = true // A class body is strict code, always.
+        var savedParams = emitParams
+        emitParams = params
         var savedPlainGen = inPlainGen
         inAsyncFn = pendingAsyncFn
         inAsyncGen = pendingAsyncGen
@@ -4853,6 +4878,10 @@ NotFuncHead = :script(~~
             if (isInstance === false) { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), callExt(b, "js_this", [])]) }
         }
         b = bindParams(b, params, f.Params[1], off)
+        // See the twin of this line in js-to-llvm-ir.abnf.
+        if (argsWant) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "arguments"), callExt(b, "js_jsargs", [f.Params[1], callExt(b, "js_num_i", [handle(off)])])])
+        }
         var inits = {fields: initFields, props: propNames}
         if (implicitSuper != undefined && implicitSuper != null) {
             var supCls = callExt(b, "js_scope_get", [curScopeV, emitStr(b, implicitSuper)])
@@ -4879,6 +4908,7 @@ NotFuncHead = :script(~~
         inAsyncGen = savedAsyncGen
         inPlainGen = savedPlainGen
         emitStrict = savedStrict
+        emitParams = savedParams
         return idx
     }
     // The TypeScript parameter properties declared as undefined, the field initializers,
@@ -5532,6 +5562,24 @@ NotFuncHead = :script(~~
     function noteMember(name) { if (name == "normalize") { normWant = true } }
     // See the twin of this comment in js-to-llvm-ir.abnf.
     var argsWant = false
+    // The mapped arguments object: see the twin of this comment in js-to-llvm-ir.abnf.
+    var paramSeen = {}
+    function noteParam(name) {
+        paramSeen["$" + name] = true
+        return name
+    }
+    function argsMapped(params) {
+        if (params.length == 0 || emitStrict) { return false }
+        for (var i = 0; i < params.length; i++) { if (typeof params[i] != "string") { return false } }
+        return true
+    }
+    function emitArgSync(b, name, v) {
+        if (argsWant && paramSeen["$" + name] === true) { callExt(b, "js_jsargsync", [curScopeV, emitStr(b, name), v]) }
+    }
+    function refMemberSet(b, ref, objV, keyV, v) {
+        callExt(b, memSetExt(), [objV, keyV, v])
+        if (argsWant && ref.name === "arguments" && ref.path.length == 1) { callExt(b, "js_jsargput", [curScopeV, keyV, v]) }
+    }
     // The temporal dead zone: see the twin of this comment in js-to-llvm-ir.abnf.
     var tdzGH = [] // [the sentinel's module global, jstdzchk]
     function tdzGlob() {
@@ -6071,6 +6119,7 @@ NotFuncHead = :script(~~
                 if (items.length == 1) { return b }
                 var vr = items[1](b)
                 nsDeclStore(vr.b, "js_scope_set", name, vr.v, true)
+                emitArgSync(vr.b, name, vr.v)
                 return vr.b
             }
         }

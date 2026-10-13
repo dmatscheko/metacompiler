@@ -114,14 +114,87 @@ function jvIsObj(v) {
     return typeof v == "object"
 }
 
-// The arguments object of a call: a copy of its argument array carrying kind 19.
-// Twins: jsIsArgs in both *-interpreter.abnf, js_jsargs / jsvIsArgs in
-// abnf/jsrtjsprint.go.
-function jvIsArgs(v) { return Array.isArray(v) && arrKind(v) == 19 }
-function js_jsargs(a) {
+// js_jsargs(args, off): the arguments object of a call, a copy of its argument array
+// from index off (an instance method's receiver comes first) whose kind word is 19 in
+// its low five bits and, above them, the value of its own `length` - the argument
+// count, which an element write does not change. jvArgsN is set once one exists, so
+// a program without one pays nothing on a `length` read. Twins: jsIsArgs / jsArgsLen
+// in both *-interpreter.abnf, js_jsargs / jsvIsArgs in abnf/jsrtjsprint.go.
+var jvArgsN = 0
+function jvIsArgs(v) { return Array.isArray(v) && arrKind(v) % 32 == 19 }
+function jvArgsLen(v) { return (arrKind(v) - 19) / 32 }
+function js_jsargs(a, off) {
     var c = []
-    for (var i = 0; i < a.length; i++) { c.push(a[i]) }
-    return arrKindSet(c, 19)
+    for (var i = off; i < a.length; i++) { c.push(a[i]) }
+    jvArgsN = 1
+    return arrKindSet(c, 19 + 32 * c.length)
+}
+
+// The MAPPED arguments object of a sloppy function with plain parameters (ECMA-262
+// 10.4.4.7). js_jsargmap(names, arguments) is the names mapped to arguments[0..n),
+// the parameters below the argument count, which the call's scope keeps under
+// "0argm". js_jsargsync(scope, name, v), after a store to a name, copies v into
+// arguments when the binding the store reached is a mapped parameter; js_jsargput
+// (scope, k, v), after a store to arguments[k], copies v into the parameter k maps
+// to. Twins: the same externs in abnf/jsrtjsprint.go, jsArgSync / jsArgPut in both
+// *-interpreter.abnf.
+function js_jsargmap(names, args) {
+    var out = []
+    var i = 0
+    while (i < names.length) {
+        if (i >= args.length) { return out }
+        out.push(names[i])
+        i = i + 1
+    }
+    return out
+}
+function js_jsargsync(sc, name, v) {
+    var s = anytype
+    s = sc
+    while (s !== undefined) {
+        if (scopeHas(s, name)) {
+            if (scopeHas(s, "0argm")) {
+                var ns = scopeGet(s, "0argm")
+                var ao = anytype
+                ao = scopeGet(s, "arguments")
+                var i = ns.length - 1
+                while (i >= 0) {
+                    if (ns[i] == name) {
+                        if (jvIsArgs(ao)) {
+                            if (i < ao.length) { ao[i] = v }
+                        }
+                        return undefined
+                    }
+                    i = i - 1
+                }
+            }
+            return undefined
+        }
+        s = scopeParent(s)
+    }
+    return undefined
+}
+function js_jsargput(sc, key, v) {
+    var s = anytype
+    s = sc
+    while (s !== undefined) {
+        if (scopeHas(s, "arguments")) {
+            if (scopeHas(s, "0argm")) {
+                var ns = scopeGet(s, "0argm")
+                var ix = jvToNumber(key)
+                if (ix >= 0) {
+                    if (ix < ns.length) {
+                        if (jvStr(ix) === jvStr(key)) {
+                            if (Math.floor(ix) === ix) { scopeDecl(s, ns[ix], v) }
+                        }
+                    }
+                }
+            }
+            return undefined
+        }
+        s = scopeParent(s)
+    }
+    return undefined
 }
 
 function jvIsCallable(v) {
@@ -414,6 +487,22 @@ function jvSymUntrack(o, k) {
     o["__symkeys"] = keep
     return undefined
 }
+// A string's CODE POINTS: a surrogate pair is one, a lone surrogate one of its own.
+function jvCodePoints(o) {
+    var cps = []
+    var i = 0
+    while (i < o.length) {
+        var c = o.charCodeAt(i)
+        var w = 1
+        if (c >= 55296 && c <= 56319 && i + 1 < o.length) {
+            var t = o.charCodeAt(i + 1)
+            if (t >= 56320 && t <= 57343) { w = 2 }
+        }
+        cps.push(o.substring(i, i + w))
+        i = i + w
+    }
+    return cps
+}
 // The iterator [Symbol.iterator](), values(), keys() and entries() answer over an
 // array or a string: kind 1 yields the elements - a string's CODE POINTS - kind 0 the
 // indices and kind 2 [index, element] pairs. An array is read live. Its own
@@ -422,26 +511,19 @@ function jvSymUntrack(o, k) {
 function jvSeqIter(o, kind) {
     var src = anytype
     src = o
-    if (typeof o == "string") {
-        var cps = []
-        var i = 0
-        while (i < o.length) {
-            var c = o.charCodeAt(i)
-            var w = 1
-            if (c >= 55296 && c <= 56319 && i + 1 < o.length) {
-                var t = o.charCodeAt(i + 1)
-                if (t >= 56320 && t <= 57343) { w = 2 }
-            }
-            cps.push(o.substring(i, i + w))
-            i = i + w
-        }
-        src = cps
-    }
+    if (typeof o == "string") { src = jvCodePoints(o) }
     var st = {i: 0}
     var it = {}
     it["next"] = function () {
         var r = {}
-        if (st["i"] < src.length) {
+        // An arguments object is iterated up to its own length (jvIsArgs).
+        var n = src.length
+        if (jvArgsN > 0) {
+            if (jvIsArgs(src)) {
+                if (jvArgsLen(src) < n) { n = jvArgsLen(src) }
+            }
+        }
+        if (st["i"] < n) {
             var v = anytype
             v = src[st["i"]]
             if (kind == 0) { v = st["i"] }
@@ -798,7 +880,7 @@ function jvStr(v) {
         return jvProtoTag(v)
     }
     if (Array.isArray(v)) {
-        if (arrKind(v) == 19) { return "[object Arguments]" }
+        if (jvIsArgs(v)) { return "[object Arguments]" }
         var out = ""
         var i = 0
         while (i < v.length) {
@@ -1852,11 +1934,17 @@ function js_jsvget(o, key) {
         if (bfam != "") { return jvBuiltinValue(bfam, key) }
         // `f.name` and `f.length` - two inline comparisons, no call (see the comment
         // beside jvFnNameOf). Before the own-property side table, because both are
-        // non-writable in node and js_jsmset drops a write to either.
+        // non-writable in node and js_jsmset drops a write to either. An arguments
+        // object's `length` is its own slot (jvIsArgs).
         if (key == "name" || key == "length") {
             if (typeof o == "function") {
                 if (key == "name") { return jvFnNameOf(o) }
                 return jvFnLenOf(o)
+            }
+            if (jvArgsN > 0) {
+                if (key == "length") {
+                    if (jvIsArgs(o)) { return jvArgsLen(o) }
+                }
             }
         }
         // An own property written onto a FUNCTION lives in the side table, not on
@@ -1956,9 +2044,14 @@ var jvStaticVals = {}
 function jvStaticHas(g, key) {
     if (g == "Object") {
         return key == "assign" || key == "entries" || key == "freeze" || key == "fromEntries" ||
-            key == "getOwnPropertyNames" || key == "is" || key == "keys" || key == "seal" || key == "values"
+            key == "getOwnPropertyNames" || key == "groupBy" || key == "hasOwn" || key == "is" || key == "keys" ||
+            key == "seal" || key == "values"
     }
-    if (g == "String") { return key == "fromCharCode" || key == "fromCodePoint" }
+    if (g == "String") { return key == "fromCharCode" || key == "fromCodePoint" || key == "raw" }
+    if (g == "Number") {
+        return key == "isFinite" || key == "isInteger" || key == "isNaN" || key == "isSafeInteger" ||
+            key == "parseFloat" || key == "parseInt"
+    }
     if (g == "Promise") {
         return key == "resolve" || key == "reject" || key == "all" || key == "allSettled" || key == "race" || key == "any"
     }
@@ -1976,17 +2069,37 @@ function jvStaticValue(g, key) {
         if (jvSymIsWK(key)) { return jvSymWellKnown(key) }
         gn = "Symbol"
     }
+    if (jvNumberFn !== undefined && g === jvNumberFn) {
+        var nc = anytype
+        nc = jvNumberConst(key)
+        if (nc !== undefined) { return nc }
+        gn = "Number"
+    }
     if (!jvStaticHas(gn, key)) { return undefined }
     var k = "$" + gn + "." + key
     var got = anytype
     got = jvStaticVals[k]
     if (got !== undefined) { return got }
     var len = 1
-    if (key == "assign" || key == "is") { len = 2 }
+    if (key == "assign" || key == "is" || key == "hasOwn" || key == "groupBy" || key == "parseInt") { len = 2 }
     var f = anytype
     f = fnMetaSet(jvStaticValueFn(g, key), key, len)
     jvStaticVals[k] = f
     return f
+}
+// Number's constant members, or undefined for any other name. MetaJS has no
+// exponent literal, so the extremes are built from exact powers of two. Twins:
+// jsvNumberConst in abnf/jsrtjsprint.go, jsNumberConst in both *-interpreter.abnf.
+function jvNumberConst(k) {
+    if (k == "MAX_SAFE_INTEGER") { return 9007199254740991 }
+    if (k == "MIN_SAFE_INTEGER") { return -9007199254740991 }
+    if (k == "EPSILON") { return Math.pow(2, -52) }
+    if (k == "MAX_VALUE") { return (2 - Math.pow(2, -52)) * Math.pow(2, 1023) }
+    if (k == "MIN_VALUE") { return Math.pow(2, -1074) }
+    if (k == "POSITIVE_INFINITY") { return 1 / 0 }
+    if (k == "NEGATIVE_INFINITY") { return -1 / 0 }
+    if (k == "NaN") { return NaN }
+    return undefined
 }
 function jvStaticValueFn(g, key) {
     return function () {
@@ -2233,6 +2346,13 @@ function js_jsmset(o, key, v) {
         }
     }
     o[key] = v
+    // A write to an arguments object's `length` resizes it as an array write does,
+    // and the slot follows.
+    if (jvArgsN > 0) {
+        if (key === "length") {
+            if (jvIsArgs(o)) { arrKindSet(o, 19 + 32 * o.length) }
+        }
+    }
     return undefined
 }
 
@@ -4097,21 +4217,153 @@ function jvObjectGlobalMethod(name, args) {
     }
     if (name == "fromEntries") {
         var fo = {}
-        if (Array.isArray(src)) {
-            var fi = 0
-            while (fi < src.length) {
-                var e = src[fi]
-                if (Array.isArray(e)) {
-                    if (e.length > 0) { js_jsmset(fo, js_jskeyesc(jvStr(e[0])), jvArg(e, 1)) }
-                }
-                fi = fi + 1
-            }
+        var fl = jvIterList(src)
+        var fi = 0
+        while (fi < fl.length) {
+            var e = anytype
+            e = fl[fi]
+            var entry = jvIsObjLike(e) || jvIsCallable(e)
+            if (jbIsBig(e)) { entry = false }
+            if (!entry) { jbRaise("TypeError: Iterator value " + jvStr(e) + " is not an entry object") }
+            js_jsmset(fo, jvPropKey(js_jsvget(e, "0")), js_jsvget(e, "1"))
+            fi = fi + 1
         }
         return fo
+    }
+    if (name == "hasOwn") {
+        if (jvUndefOrNull(src)) { jbRaise("TypeError: Cannot convert undefined or null to object") }
+        var hk = anytype
+        hk = jvArg(args, 1)
+        if (jvIsSym(hk)) { hk = hk["__symkey"] }
+        return jvHasOwn(src, hk)
+    }
+    if (name == "groupBy") {
+        if (jvUndefOrNull(src)) { jbRaise("TypeError: Object.groupBy called on null or undefined") }
+        var gf = anytype
+        gf = jvArg(args, 1)
+        if (!jvIsCallable(gf)) { jbRaise("TypeError: " + jvNotFnText(gf) + " is not a function") }
+        var gl = jvIterList(src)
+        var g = {}
+        var gi = 0
+        while (gi < gl.length) {
+            var gk = jvPropKey(jvCallT(gf, undefined, [gl[gi], gi]))
+            var grp = anytype
+            grp = js_jsmget(g, gk)
+            if (grp === undefined) {
+                grp = []
+                js_jsmset(g, gk, grp)
+            }
+            grp.push(gl[gi])
+            gi = gi + 1
+        }
+        return g
     }
     if (name == "freeze" || name == "seal") { return src }
     if (name == "is") { return jvSameValue(jvArg(args, 0), jvArg(args, 1)) }
     return jvMiss
+}
+
+// The values an iterable yields, for the statics that take one (Object.fromEntries,
+// Object.groupBy): an array as it is, a string's code points, anything with a
+// [Symbol.iterator] or a callable `next` driven to the end. Anything else is node's
+// TypeError. Twins: jsvIterList in abnf/jsrtjsprint.go, jsIterList in both
+// *-interpreter.abnf.
+function jvIterList(v) {
+    if (jvUndefOrNull(v)) { jbRaise("TypeError: undefined is not iterable") }
+    if (Array.isArray(v)) { return v }
+    if (typeof v == "string") { return jvCodePoints(v) }
+    var it = anytype
+    it = v
+    if (jvIsCallable(js_jsvget(v, "__#@iterator"))) { it = js_jsmcall(v, "__#@iterator", []) }
+    if (Array.isArray(it)) { return it }
+    if (jvIsCallable(js_jsvget(it, "next"))) {
+        var out = []
+        var step = anytype
+        step = js_jsmcall(it, "next", [])
+        while (!js_jsvget(step, "done")) {
+            out.push(js_jsvget(step, "value"))
+            step = js_jsmcall(it, "next", [])
+        }
+        return out
+    }
+    var t = js_jstypeof(v)
+    var what = t
+    if (t == "number" || t == "boolean") { what = t + " " + jvStr(v) }
+    jbRaise("TypeError: " + what + " is not iterable (cannot read property Symbol(Symbol.iterator))")
+    return []
+}
+
+// ToPropertyKey as a key of the value model: a symbol's __symkey, any other value's
+// string, escaped.
+function jvPropKey(k) {
+    if (jvIsSym(k)) { return k["__symkey"] }
+    return js_jskeyesc(jvStr(k))
+}
+
+// V8's rendering of a non-callable callback in "<x> is not a function": a
+// primitive's string, "#<Object>" for an object. Twins: jsvNotFnText in
+// abnf/jsrtjsprint.go, jsNotFnText in both *-interpreter.abnf.
+function jvNotFnText(f) {
+    if (Array.isArray(f)) { return "[object Array]" }
+    if (jvIsObj(f)) {
+        if (!jvIsSym(f)) {
+            if (!jbIsBig(f)) { return "#<Object>" }
+        }
+    }
+    return jvStr(f)
+}
+
+// Number's statics: the predicates do not convert their argument, and the two
+// parsers are the global functions. Twins: the "Number" arm of jsvMethod in
+// abnf/jsrtjsprint.go, jsNumberStatic in both *-interpreter.abnf.
+function jvNumberStatic(name, args) {
+    var x = anytype
+    x = jvArg(args, 0)
+    var isNum = typeof x == "number"
+    var fin = false
+    if (isNum) { fin = x - x === 0 }
+    if (name == "isNaN") {
+        if (isNum) { return x !== x }
+        return false
+    }
+    if (name == "isFinite") { return fin }
+    if (name == "isInteger") {
+        if (fin) { return Math.floor(x) === x }
+        return false
+    }
+    if (name == "isSafeInteger") {
+        if (fin) {
+            if (Math.floor(x) === x) { return Math.abs(x) <= 9007199254740991 }
+        }
+        return false
+    }
+    if (name == "parseFloat") { return jsnParseFloat(jvStr(x)) }
+    if (name == "parseInt") { return jsnParseInt(jvStr(x), jvToNumber(jvArg(args, 1)) | 0) }
+    return jvMiss
+}
+
+// String.raw(template, ...subs): template.raw's strings, the i-th substitution
+// between the i-th and the next one, over ToLength(raw.length) strings. Twins:
+// jsvStringRaw in abnf/jsrtjsprint.go, jsStringRaw in both *-interpreter.abnf.
+function jvStringRaw(args) {
+    var tp = anytype
+    tp = jvArg(args, 0)
+    var raw = anytype
+    raw = undefined
+    if (!jvUndefOrNull(tp)) { raw = js_jsvget(tp, "raw") }
+    if (jvUndefOrNull(raw)) { jbRaise("TypeError: Cannot convert undefined or null to object") }
+    var n = jvToNumber(js_jsvget(raw, "length"))
+    if (n > 0) { n = Math.floor(n) } else { n = 0 }
+    var out = ""
+    var i = 0
+    while (i < n) {
+        out = out + jvStr(js_jsvget(raw, "" + i))
+        if (i + 1 < n) {
+            if (i + 1 < args.length) { out = out + jvStr(args[i + 1]) }
+        }
+        i = i + 1
+    }
+    return out
 }
 
 // Object.is: SameValue, which is === except that NaN is itself and +0 is not -0.
@@ -4282,8 +4534,14 @@ function js_jsmcall(recv, key, args) {
             }
             return cs
         }
+        if (name == "raw") { return jvStringRaw(args) }
         if (jvMissCallSet) { return jvMissCall }
         fail("unknown String method: " + name)
+    }
+    if (jvNumberFn !== undefined && recv === jvNumberFn) {
+        var ns = anytype
+        ns = jvNumberStatic(name, args)
+        if (ns !== jvMiss) { return ns }
     }
     if (typeof recv == "string") {
         var sm = jvStrMethod(recv, name, args)

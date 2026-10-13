@@ -3957,6 +3957,91 @@ function s81() {
     check("dk81h", rk === "[__r][]" && JSON.stringify({__x: 1}, function (k: string, v: any) { return k === "__x" ? 5 : v; }) === "{\"__x\":5}");
 }
 
+// ===== SECTION 82: the ES2015-ES2024 statics of Object, Number and String, structuredClone =====
+// Object.hasOwn, Object.groupBy and Map.groupBy, Object.fromEntries over any iterable,
+// Number's predicates, parsers and constants, String.raw, structuredClone. Values read
+// off node 24 (type stripping).
+function s82() {
+    const v: any[] = [{a: 1}, "a", null, 5, "ab", [1, 2]];
+    function err(f: () => any): string { try { f(); return "none"; } catch (e: any) { return (e instanceof TypeError ? "T:" : e.name + ":") + e.message; } }
+    const s = Symbol("q");
+    const so: any = {};
+    so[s] = 1;
+    check("es82a", Object.hasOwn(v[0], v[1]) && !Object.hasOwn(v[0], "b") && !Object.hasOwn(v[0], "toString") &&
+        Object.hasOwn(v[5], "length") && Object.hasOwn(v[5], 1) && !Object.hasOwn(v[5], 2) && Object.hasOwn(v[4], 0) &&
+        Object.hasOwn(so, s) && !Object.hasOwn(v[3], "a") && typeof Object.hasOwn === "function" && Object.hasOwn.length === 2 &&
+        err(() => Object.hasOwn(v[2], "a")) === "T:Cannot convert undefined or null to object");
+    function* gen(): Generator<number> { yield 1; yield 2; yield 3; }
+    const O: any = Object;
+    check("es82b", JSON.stringify(O.groupBy([1, 2, 3, 4], (x: number) => x % 2 ? "odd" : "even")) === "{\"odd\":[1,3],\"even\":[2,4]}" &&
+        JSON.stringify(O.groupBy(v[4], (c: string, i: number) => c + i)) === "{\"a0\":[\"a\"],\"b1\":[\"b\"]}" &&
+        JSON.stringify(O.groupBy(gen(), (x: number) => x > 1)) === "{\"false\":[1],\"true\":[2,3]}" &&
+        JSON.stringify(O.groupBy(new Set([1, 1, 2]), (x: number) => "k")) === "{\"k\":[1,2]}" &&
+        err(() => O.groupBy(v[2], () => 0)) === "T:Object.groupBy called on null or undefined" &&
+        err(() => O.groupBy([1], v[3])) === "T:5 is not a function" &&
+        err(() => O.groupBy(v[3], () => 0)) === "T:number 5 is not iterable (cannot read property Symbol(Symbol.iterator))");
+    const k = {};
+    const MG: any = Map;
+    const m = MG.groupBy([1, 2, 3, 4], (x: number) => x % 2 ? k : "even");
+    check("es82c", m.size === 2 && m.get(k).join() === "1,3" && m.get("even").join() === "2,4" && MG.groupBy.length === 2);
+    function* pairs(): Generator<[string, number]> { yield ["x", 1]; yield ["__y", 2]; }
+    check("es82d", JSON.stringify(Object.fromEntries(new Map([["k", 3]]))) === "{\"k\":3}" &&
+        JSON.stringify(Object.fromEntries(pairs())) === "{\"x\":1,\"__y\":2}" &&
+        err(() => Object.fromEntries([1] as any)) === "T:Iterator value 1 is not an entry object" &&
+        err(() => Object.fromEntries(v[2])) === "T:undefined is not iterable");
+    const xs: any[] = [0, -0, 1.5, "3", NaN, Infinity, -7, 9007199254740992, null];
+    let ps = "";
+    for (let i = 0; i < xs.length; i++) {
+        ps += (Number.isInteger(xs[i]) ? "i" : "-") + (Number.isSafeInteger(xs[i]) ? "s" : "-") +
+            (Number.isFinite(xs[i]) ? "f" : "-") + (Number.isNaN(xs[i]) ? "n" : "-") + " ";
+    }
+    check("es82e", ps === "isf- isf- --f- ---- ---n ---- isf- i-f- ---- " &&
+        Number.parseFloat("3.5e1x") === 35 && Number.parseInt("ff", 16) === 255 && Number.parseInt.length === 2);
+    check("es82f", Number.MAX_SAFE_INTEGER === 9007199254740991 && Number.EPSILON === Math.pow(2, -52) &&
+        "" + Number.MAX_VALUE === "1.7976931348623157e+308" && "" + Number.MIN_VALUE === "5e-324" &&
+        Number.NEGATIVE_INFINITY === -Infinity && Number.NaN !== Number.NaN);
+    const n: number = v[3];
+    check("es82g", String.raw`x\ty${n}\n${n + 1}` === "x\\ty5\\n6" && String.raw({raw: "abc"} as any, 1, 2, 3) === "a1b2c" &&
+        err(() => String.raw({} as any)) === "T:Cannot convert undefined or null to object");
+    const o: any = {a: [1, {b: n}], c: "s"};
+    o.self = o;
+    const c = structuredClone(o);
+    c.a[1].b = 9;
+    check("es82h", o.a[1].b === 5 && c.a[1].b === 9 && c.self === c && c !== o &&
+        err(() => structuredClone(s)) === "DataCloneError:Symbol(q) could not be cloned.");
+}
+
+// ===== SECTION 83: the arguments object's length, and the mapped arguments of a sloppy function =====
+// `length` is the argument count whatever is written to the elements; in a sloppy
+// function with plain parameters, parameter i and arguments[i] are one value below
+// that count, in both directions. Strict code, defaults, rest parameters and methods
+// are unmapped. Values read off node 24's type stripping, which keeps the file sloppy as
+// these grammars do; tsc 6 output starts with "use strict" (alwaysStrict), where none of
+// it is mapped.
+function s83() {
+    const v: any[] = [1, 2, 3];
+    function l1(...xs: any[]): string { return ""; }
+    function l2(): string { arguments[0] = 9; return arguments.length + ":" + arguments[0]; }
+    function l3(p?: any): string { arguments[3] = 9; return arguments.length + ":" + Array.from(arguments).length; }
+    check("ar83a", l2() === "0:9" && l3(v[0]) === "1:1" && l1() === "");
+    function m1(p?: any): any { p = 5; return arguments[0]; }
+    function m2(p?: any): any { arguments[0] = 9; return p; }
+    function m3(p: any, q?: any): string { q = 7; return arguments.length + ":" + arguments[1]; }
+    function m4(p: any): any { p++; p += 10; return arguments[0]; }
+    function m5(p: any): string { var p: any = 8; return arguments[0] + ":" + p; }
+    function m6(p: any): any { (function () { p = 4; })(); return arguments[0]; }
+    function m7(p: any): any { const g = () => { arguments[0] = 6; }; g(); return p; }
+    function m9(p: any): any { [p] = [3]; return arguments[0]; }
+    check("ar83b", m1(v[0]) === 5 && m2(v[0]) === 9 && m3(v[0]) === "1:undefined" && m3(v[0], v[1]) === "2:7" &&
+        m4(v[0]) === 12 && m5(v[0]) === "8:8" && m6(v[0]) === 4 && m7(v[0]) === 6 && m9(v[0]) === 3 &&
+        m1() === undefined && m2() === undefined);
+    function u1(p: any): any { "use strict"; p = 5; return arguments[0]; }
+    function u2(p: any = 0): any { p = 5; return arguments[0]; }
+    function u4(p: any): any { { let p = 3; p = 4; } return arguments[0]; }
+    class C { m(p: any): string { p = 5; return arguments[0] + ":" + arguments.length; } }
+    check("ar83c", u1(v[0]) === 1 && u2(v[0]) === 1 && u4(v[0]) === 1 && new C().m(v[0], v[1]) === "1:2");
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -4041,6 +4126,8 @@ function main(): number {
     s79(); // SECTION-CALL 79
     s80(); // SECTION-CALL 80
     s81(); // SECTION-CALL 81
+    s82(); // SECTION-CALL 82
+    s83(); // SECTION-CALL 83
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

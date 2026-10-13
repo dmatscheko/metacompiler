@@ -138,7 +138,7 @@ func (rt *jsrt) jsonSer(st *jsonState, holder interface{}, key string, v interfa
 		}
 		return rt.jsvString(x), true
 	case *jsArray:
-		if x.kind == 19 {
+		if jsvIsArgs(x) {
 			// The arguments object: written by its index keys, as an object.
 			o := newJSObject()
 			for i, e := range x.elems {
