@@ -1717,6 +1717,28 @@ function js_phcloinv(recv, name) {
     if (typeof recv == "function" && phsCase(phStr(name), false) == "__invoke") { return recv }
     return undefined
 }
+// "bind" or "fromcallable" when [recv, name] is one of Closure's static methods.
+// Twin of m["js_phclost"] in abnf/jsrtphp.go, which states the rule.
+function js_phclost(recv, name, where) {
+    var isStr = typeof recv == "string"
+    if (isStr) {
+        var cn = recv
+        if (cn.substring(0, 1) == "\\") { cn = cn.substring(1) }
+        if (phsCase(cn, false) != "closure") { return undefined }
+    } else if (typeof recv != "function") { return undefined }
+    var nm = phStr(name)
+    var mn = phsCase(nm, false)
+    if (mn == "bind" || mn == "fromcallable") { return mn }
+    if (!isStr) { return undefined }
+    var check = typeof where == "string"
+    var canon = ""
+    if (mn == "bindto") { canon = "bindTo" } else if (mn == "call" || mn == "__invoke") { canon = mn }
+    if (canon != "" && check) { phCbFail(where, "non-static method Closure::" + canon + "() cannot be called statically") }
+    if (canon != "") { phRaise("Error", "Non-static method Closure::" + canon + "() cannot be called statically") }
+    if (check) { phCbFail(where, "class Closure does not have a method \"" + nm + "\"") }
+    phRaise("Error", "Call to undefined method Closure::" + nm + "()")
+    return undefined
+}
 // A method call on a Closure: __invoke calls it, bindTo rebinds it, call rebinds
 // it to an object and that object's class and calls it at once. Twin of
 // phpCloCall in abnf/jsrtphp.go and cloMethod in php-interpreter.abnf.
@@ -3017,21 +3039,6 @@ function js_phfccdecl(env, key, recv, name) {
     phRaise("Error", "Call to a member function " + nm + "() on " + phDebugType(recv))
     return undefined
 }
-// The class name a 'C::m' or ['C', 'm'] callable starts with, else null. Twin of
-// m["js_phcbhead"] in abnf/jsrtphp.go.
-function js_phcbhead(v) {
-    if (typeof v == "string") {
-        var at = v.indexOf("::")
-        if (at >= 0) { return v.substring(0, at) }
-        return null
-    }
-    var p = phArrParts(v)
-    if (p !== undefined && p.v.length == 2) {
-        var c = phDeref(p.v[0])
-        if (typeof c == "string") { return c }
-    }
-    return null
-}
 // A method callback some class restricts, on cls (the class a named callable
 // denotes) or the object of [$obj, 'm']. With where a string it is the callback
 // check, raising its TypeError for a method scope may not call; otherwise it
@@ -3685,7 +3692,13 @@ function js_phplacesig(sig, args, mask) {
             var rest = phNewArr()
             i = 0
             while (i < p.k.length) {
-                if (typeof p.k[i] == "number" && p.k[i] >= pi) { phArrPush(rest, phPlaceAt(p, i, isList)) }
+                if (typeof p.k[i] == "number" && p.k[i] >= pi) {
+                    // A reference a by-reference variadic collects is a holder.
+                    var e = anytype
+                    e = phPlaceAt(p, i, isList || phRefBit(mask, p.k[i]))
+                    phRefAdjust(phCellOf(e), 1)
+                    phArrPush(rest, e)
+                }
                 i = i + 1
             }
             i = 0
@@ -3775,12 +3788,48 @@ function js_phcount(v) {
 }
 
 // [...$a]: integer keys renumber, string keys stay.
-function js_phmerge(dst, src) {
+function js_phmerge(dst, src) { return phMergeArgs(dst, src, "", 0) }
+// The spread of a variable into a call's arguments, for a callee whose signature
+// text and by-reference mask are known. Twin of phpMergeArgs in abnf/jsrtphp.go,
+// which states the rule.
+function js_phmergeref(dst, src, sig, mask) { return phMergeArgs(dst, src, sig, mask) }
+// The same for a callee known only at run time. Twin of m["js_phmergefn"] in
+// abnf/jsrtphp.go.
+function js_phmergefn(dst, src, f, name) {
+    var fn = anytype
+    fn = f
+    if (name !== undefined) { fn = phMethodOf(f, name) }
+    else if (typeof fn == "object" && fn !== null) { fn = phMethodOf(fn, "__invoke") }
+    var mask = 0
+    if (typeof fn == "function") { mask = fnMeta(fn, "length") }
+    return phMergeArgs(dst, src, phSigOf(fn), mask)
+}
+function phMergeArgs(dst, src, sig, mask) {
     var p = phArrParts(src)
     if (p === undefined) { return undefined }
     var i = 0
     while (i < p.k.length) {
-        if (typeof p.k[i] == "number") { phArrPush(dst, p.v[i]) } else { phArrSet(dst, p.k[i], p.v[i]) }
+        var k = anytype
+        k = p.k[i]
+        var e = anytype
+        e = p.v[i]
+        if (mask != 0) {
+            var pi = 0 - 1
+            if (typeof k == "number") { pi = phArrNext(dst) }
+            else if (sig != "" && sig != ")") {
+                var at = 0
+                var from = 0
+                while (from <= sig.length) {
+                    var to = sig.indexOf(",", from)
+                    if (to < 0) { to = sig.length }
+                    if (sig.substring(from, to) == k) { pi = at }
+                    from = to + 1
+                    at = at + 1
+                }
+            }
+            if (pi >= 0 && pi < 53 && phRefBit(mask, pi)) { e = phElemCell(src, k) }
+        }
+        if (typeof k == "number") { phArrPush(dst, e) } else { phArrSet(dst, k, e) }
         i = i + 1
     }
     return undefined
@@ -4007,50 +4056,6 @@ function phCbFail(where, reason) {
     phRaise("TypeError", w + ", " + reason)
 }
 function js_phcbfail(where, reason) { return phCbFail(where, phStr(reason)) }
-// A library function's callback named RELATIVE to the class scope ('self::m',
-// ['parent', 'm'], 'static::m'), resolved against the caller's frame classes:
-// undefined when the class answers the method (the caller binds it), the absolute
-// "C::m" when it does not (the library's own check reports on that), v itself
-// when it is no relative callable or the caller has no class scope. A non-static
-// method named outright through ncls (the class its name denotes, which the
-// caller looks up) answers undefined too when the frame's thisv binds it
-// (js_phcbns). Twin of m["js_phrelcb"] in abnf/jsrtphp.go.
-function js_phrelcb(v, self, stat, ncls, thisv) {
-    var cn = anytype
-    var mn = anytype
-    cn = undefined
-    mn = undefined
-    if (typeof v == "string") {
-        var at = v.indexOf("::")
-        if (at >= 0) {
-            cn = v.substring(0, at)
-            mn = v.substring(at + 2)
-        }
-    } else {
-        var p = phArrParts(v)
-        if (p !== undefined && p.v.length == 2) {
-            cn = phDeref(p.v[0])
-            mn = phDeref(p.v[1])
-        }
-    }
-    if (typeof cn != "string" || typeof mn != "string") { return v }
-    if (self === undefined || self === null || typeof self != "object") { return v }
-    cn = phsCase(cn, false)
-    var cls = anytype
-    cls = self
-    if (cn == "static") {
-        if (stat !== undefined && stat !== null && typeof stat == "object") { cls = stat }
-    } else if (cn == "parent") {
-        cls = self["__super"]
-        if (cls === undefined || cls === null || typeof cls != "object") { return v }
-    } else if (cn != "self") {
-        if (js_phcbns(true, ncls, cn, mn, thisv, self) !== undefined) { return undefined }
-        return v
-    }
-    if (typeof phMethodOf(cls, mn) == "function") { return undefined }
-    if (typeof phMethodOf(cls, "__callStatic") == "function") { return undefined }
-    return phStr(cls["__name"]) + "::" + mn
-}
 // The method half of a callback check: target (an object, or a class for a static
 // callable) has the method, or the magic method that stands in for a missing one.
 // Twin of phpCbMeth in abnf/jsrtphp.go.
@@ -4067,18 +4072,38 @@ function phCbMeth(where, target, name) {
 // abnf/jsrtphp.go.
 function js_phcbcls(where, cls, mn, cn, self, scope, form) {
     if (cls === undefined || cls === null || typeof cls != "object") { return undefined }
-    if (typeof phMethodOf(cls, mn) == "function") { return undefined }
+    var hidden = false
+    if (typeof phMethodOf(cls, mn) == "function") {
+        hidden = phCbHidden(cls, phStr(mn), phStr(cn), self, scope)
+        if (!hidden) { return undefined }
+    }
     if (phCbFallback(cls, phStr(cn), form, self, scope) === undefined) {
         phCbFail(where, "class " + phStr(cls["__name"]) + " does not have a method \"" + phStr(mn) + "\"")
     }
-    return undefined
+    return hidden
+}
+// A callback's method scope may not call that the magic method takes counts as
+// missing. Twin of phpCbHidden in abnf/jsrtphp.go, which states the rule.
+function phCbHidden(cls, mn, cn, self, scope) {
+    var sc = anytype
+    sc = scope !== undefined && scope !== null && typeof scope == "object" ? scope : null
+    var acc = phMethodAccess(cls, phsCase(mn, false), sc, false)
+    if (acc != 1 && acc != 2) { return false }
+    var rn = cn
+    if (rn.length > 0 && rn.charCodeAt(0) == 92) { rn = rn.substring(1) }
+    rn = phsCase(rn, false)
+    var bound = false
+    if (rn == "self" || rn == "parent" || rn == "static") { bound = phIsObj(self) }
+    else { bound = sc !== null && phIsObj(self) && phIsA(self, phStr(sc["__name"])) && phIsA(sc, phStr(cls["__name"])) }
+    if (bound) { return phOwner(cls, "__call") !== undefined }
+    return phOwner(cls, "__callstatic") !== undefined
 }
 // Where a callback's method cls lacks goes: the class whose __call runs on self,
 // false for cls's __callStatic, undefined when cls has the method (or nothing
 // takes it). Twin of m["js_phcbfb"] in abnf/jsrtphp.go.
 function js_phcbfb(cls, cn, mn, self, scope, form) {
     if (cls === undefined || cls === null || typeof cls != "object") { return undefined }
-    if (typeof phMethodOf(cls, mn) == "function") { return undefined }
+    if (typeof phMethodOf(cls, mn) == "function" && !phCbHidden(cls, phStr(mn), phStr(cn), self, scope)) { return undefined }
     var r = phCbFallback(cls, phStr(cn), form, self, scope)
     if (r === null) { return false }
     return r

@@ -315,8 +315,13 @@ func phpCellOf(v interface{}) *jsObject {
 // foreach by reference, use (&$v), [&$v], global, unset() and an array copy keeping
 // the cell - but not when a frame returns or an array (an array literal assigned
 // and copied, too) is discarded, so it can only run high. A by-reference argument
-// is not counted: its binding ends with the call. The count is read when the copy
-// is made, at the assignment; PHP reads it at the copy's first write.
+// is not counted: its binding ends with the call; a by-reference variadic's array
+// is a holder. The count is read when the copy is made, at the assignment; PHP
+// reads it at the copy's first write, so `$a = [&$x]; $b = $a; unset($x);
+// $b[0] = 5;` writes $x's cell here and not in PHP. Sharing an array's storage
+// until a write would move the read there without a cost on reads, but every
+// in-place write in the three engines would have to separate first, and with no
+// decrement on a dropped holder the share counts would run high like these.
 // Twin of phRefHolders in languages/lib/php-rt.metajs and refHolders in
 // php-interpreter.abnf.
 func phpRefHolders(c *jsObject) float64 {
@@ -454,9 +459,8 @@ func phpClassFind(cls interface{}, name string) interface{} {
 // parameter", and one naming a parameter a position already filled raises
 // "overwrites previous argument", both in argument order. mask has bit i set for a
 // by-reference parameter i: an element of a collected array that is a reference
-// arrives there as that reference (call_user_func_array, a spread). An element
-// that is none arrives as its value, where a spread in PHP first makes it a
-// reference in the spread array (ZEND_SEND_UNPACK).
+// arrives there as that reference (call_user_func_array, a spread, which
+// phpMergeArgs has made one); an element that is none arrives as its value.
 // Twin of js_phplacesig in languages/lib/php-rt.metajs.
 func (rt *jsrt) phpPlaceArgs(sig string, mask int, args interface{}) interface{} {
 	list, isList := args.(*jsArray)
@@ -515,7 +519,11 @@ func (rt *jsrt) phpPlaceArgs(sig string, mask int, args interface{}) interface{}
 			rest := phpNewArr()
 			for i, k := range keys.elems {
 				if n, isPos := k.(float64); isPos && int(n) >= pi {
-					rt.phpArrPush(rest, at(i, -1))
+					// A reference a by-reference variadic collects is a holder:
+					// the array may outlive the call.
+					e := at(i, int(n))
+					phpRefAdjust(phpCellOf(e), 1)
+					rt.phpArrPush(rest, e)
 				}
 			}
 			for i, k := range keys.elems {
@@ -542,6 +550,48 @@ func (rt *jsrt) phpPlaceArgs(sig string, mask int, args interface{}) interface{}
 		}
 	}
 	return out
+}
+
+// phpMergeArgs collects the spread `...$name` of a variable into a call's argument
+// array dst, for the callee whose parameter list and by-reference mask are sig and
+// mask (as phpPlaceArgs reads them). Integer keys take the next position and string
+// keys the parameter of that name, as js_phmerge's renumbering does; an element
+// headed for a by-reference parameter is first made a reference in src itself, so
+// the callee writes the caller's array (ZEND_SEND_UNPACK, ZVAL_MAKE_REF_EX). Twin
+// of phMergeArgs in languages/lib/php-rt.metajs and of evalArgs's spread arm in
+// php-interpreter.abnf.
+func (rt *jsrt) phpMergeArgs(dst, src interface{}, sig string, mask int) {
+	keys, vals, ok := phpArrParts(src)
+	if !ok {
+		return
+	}
+	var params []string
+	if sig != ")" && sig != "" {
+		params = strings.Split(sig, ",")
+	}
+	for i := range keys.elems {
+		k, e := keys.elems[i], vals.elems[i]
+		_, isNum := k.(float64)
+		if mask != 0 {
+			pi := -1
+			if o, isO := phpAsArr(dst); isO && isNum {
+				pi = int(phpArrNext(o))
+			}
+			for j, p := range params {
+				if !isNum && p == k {
+					pi = j
+				}
+			}
+			if pi >= 0 && pi < 53 && (mask>>uint(pi))&1 == 1 {
+				e = rt.phpElemCell(src, k)
+			}
+		}
+		if isNum {
+			rt.phpArrPush(dst, e)
+		} else {
+			rt.phpArrSet(dst, k, e)
+		}
+	}
 }
 
 // ----- numeric strings and arithmetic coercion -------------------------------
@@ -1159,6 +1209,31 @@ func (rt *jsrt) phpCbFallback(cls *jsObject, cn string, form int, this, scope in
 		return c, true
 	}
 	return nil, phpOwner(cls, "__callstatic") != nil
+}
+
+// phpCbHidden: a callback's method mn of cls that scope may not call counts as
+// missing, for the magic method to take, when cls has the one that applies -
+// __call with an object bound (this, for a relative name cn, else when scope is
+// an instance of cls and this one of scope), __callStatic without
+// (zend_is_callable_check_func). Twin of cbHidden in php-interpreter.abnf and
+// phCbHidden in languages/lib/php-rt.metajs.
+func (rt *jsrt) phpCbHidden(cls *jsObject, mn, cn string, this, scope interface{}) bool {
+	sc, _ := scope.(*jsObject)
+	if acc := rt.phpMethodAccess(cls, phpCase(mn, false), sc, false); acc != 1 && acc != 2 {
+		return false
+	}
+	bound := false
+	switch phpCase(strings.TrimPrefix(cn, "\\"), false) {
+	case "self", "parent", "static":
+		bound = phpIsObj(this)
+	default:
+		bound = sc != nil && phpIsObj(this) && rt.phpIsA(this, rt.phpStr(sc.props["__name"])) &&
+			rt.phpIsA(sc, rt.phpStr(cls.props["__name"]))
+	}
+	if bound {
+		return phpOwner(cls, "__call") != nil
+	}
+	return phpOwner(cls, "__callstatic") != nil
 }
 
 // phpCloHas: the methods [$closure, name] names validly. Twin of cloHasMethod
@@ -3631,21 +3706,6 @@ func init() {
 			rt.phpMethodVis(u(a[0]), rt.phpStr(u(a[1])), scope, u(a[3]))
 			return jsHUndefined
 		}
-		// js_phcbhead(v): the class name a 'C::m' or ['C', 'm'] callable starts
-		// with, else null. Twin of js_phcbhead in languages/lib/php-rt.metajs.
-		m["js_phcbhead"] = func(a []uint64) uint64 {
-			v := u(a[0])
-			if s, ok := v.(string); ok {
-				if i := strings.Index(s, "::"); i >= 0 {
-					return rt.wrapStr(s[:i])
-				}
-			} else if phpIsArr(v) && rt.phpLen(v) == 2 {
-				if s, ok := rt.phpArrGet(v, float64(0)).(string); ok {
-					return rt.wrapStr(s)
-				}
-			}
-			return jsHNull
-		}
 		// js_phcbvis(v, cls, scope, where): a method callback some class restricts,
 		// on cls (the class a named callable denotes) or the object of [$obj, 'm'].
 		// With where a string it is the callback check, raising its TypeError for a
@@ -3810,60 +3870,6 @@ func init() {
 			rt.phpRaise("TypeError", "count(): Argument #1 ($value) must be of type Countable|array, "+rt.phpValueName(v)+" given")
 			return jsHUndefined
 		}
-		// js_phrelcb(v, self, static, cls, this): a library function's callback named RELATIVE
-		// to the class scope ('self::m', ['parent', 'm'], 'static::m'), resolved
-		// against the caller's frame classes. undefined when the class answers the
-		// method (the caller binds it), the absolute "C::m" when it does not (the
-		// library's own check reports on that), v itself when it is no relative
-		// callable or the caller has no class scope. A non-static method named
-		// outright through cls (the class its name denotes, which the caller looks
-		// up) answers undefined too when the frame's this binds it (js_phcbns).
-		// Twin of js_phrelcb in languages/lib/php-rt.metajs and libCallable in
-		// php-interpreter.abnf.
-		m["js_phrelcb"] = func(a []uint64) uint64 {
-			v := u(a[0])
-			var cn, mn interface{}
-			if s, ok := v.(string); ok && strings.Contains(s, "::") {
-				i := strings.Index(s, "::")
-				cn, mn = s[:i], s[i+2:]
-			} else if phpIsArr(v) && rt.phpLen(v) == 2 {
-				cn, mn = rt.phpArrGet(v, float64(0)), rt.phpArrGet(v, float64(1))
-			}
-			c, ok1 := cn.(string)
-			mname, ok2 := mn.(string)
-			self, ok3 := u(a[1]).(*jsObject)
-			if !ok1 || !ok2 || !ok3 {
-				return a[0]
-			}
-			cls := self
-			switch phpCase(c, false) {
-			case "self", "static", "parent":
-			default:
-				if m["js_phcbns"]([]uint64{jsHTrue, a[3], w(c), w(mname), a[4], a[1]}) != jsHUndefined {
-					return jsHUndefined
-				}
-				return a[0]
-			}
-			switch phpCase(c, false) {
-			case "self":
-			case "static":
-				if st, ok := u(a[2]).(*jsObject); ok {
-					cls = st
-				}
-			case "parent":
-				sup, ok := self.props["__super"].(*jsObject)
-				if !ok {
-					return a[0]
-				}
-				cls = sup
-			default:
-				return a[0]
-			}
-			if rt.phpMethodOf(cls, mname) != nil || rt.phpMethodOf(cls, "__callStatic") != nil {
-				return jsHUndefined
-			}
-			return rt.wrapStr(rt.phpStr(cls.props["__name"]) + "::" + mname)
-		}
 		m["js_phcbfail"] = func(a []uint64) uint64 {
 			rt.phpCbFail(rt.phpStr(u(a[0])), rt.phpStr(u(a[1])))
 			return jsHUndefined
@@ -3872,23 +3878,35 @@ func init() {
 		// the check of a callback naming mn through its class cn: a method cls
 		// lacks must go somewhere (phpCbFallback). Twin of js_phcbcls in
 		// languages/lib/php-rt.metajs.
+		// A method scope may not call that the magic method takes counts as
+		// missing (phpCbHidden), and answers true: the rest of the check, which
+		// judges a method the callback reaches, does not apply.
 		m["js_phcbcls"] = func(a []uint64) uint64 {
 			cls, _ := u(a[1]).(*jsObject)
-			if cls == nil || rt.phpMethodOf(cls, u(a[2])) != nil {
+			if cls == nil {
 				return jsHUndefined
 			}
-			if _, ok := rt.phpCbFallback(cls, rt.phpStr(u(a[3])), int(rt.toNumber(u(a[6]))), u(a[4]), u(a[5])); !ok {
+			cn := rt.phpStr(u(a[3]))
+			hidden := false
+			if rt.phpMethodOf(cls, u(a[2])) != nil {
+				if hidden = rt.phpCbHidden(cls, rt.phpStr(u(a[2])), cn, u(a[4]), u(a[5])); !hidden {
+					return jsHUndefined
+				}
+			}
+			if _, ok := rt.phpCbFallback(cls, cn, int(rt.toNumber(u(a[6]))), u(a[4]), u(a[5])); !ok {
 				rt.phpCbFail(rt.phpStr(u(a[0])), "class "+rt.phpStr(cls.props["__name"])+" does not have a method \""+rt.phpStr(u(a[2]))+"\"")
 			}
-			return jsHUndefined
+			return boolH(hidden)
 		}
 		// js_phcbfb(cls, cn, mn, this, scope, form): where a callback's method
-		// cls lacks goes: the class whose __call runs on this, false for cls's
-		// __callStatic, undefined when cls has the method (or nothing takes it).
+		// cls lacks (or hides, phpCbHidden) goes: the class whose __call runs on
+		// this, false for cls's __callStatic, undefined when cls has the method
+		// (or nothing takes it).
 		// Twin of js_phcbfb in languages/lib/php-rt.metajs.
 		m["js_phcbfb"] = func(a []uint64) uint64 {
 			cls, _ := u(a[0]).(*jsObject)
-			if cls == nil || rt.phpMethodOf(cls, u(a[2])) != nil {
+			if cls == nil || (rt.phpMethodOf(cls, u(a[2])) != nil &&
+				!rt.phpCbHidden(cls, rt.phpStr(u(a[2])), rt.phpStr(u(a[1])), u(a[3]), u(a[4]))) {
 				return jsHUndefined
 			}
 			via, ok := rt.phpCbFallback(cls, rt.phpStr(u(a[1])), int(rt.toNumber(u(a[5]))), u(a[3]), u(a[4]))
@@ -3918,6 +3936,42 @@ func init() {
 		// is the closure itself (zend_closure_from_frame,
 		// zend_create_closure_from_callable); undefined otherwise. Twin of
 		// js_phcloinv in languages/lib/php-rt.metajs.
+		// (recv, name, where) -> "bind" or "fromcallable" when the callable
+		// [recv, name] is one of Closure's static methods: recv the class's name
+		// (any case, one leading "\") or a closure; undefined otherwise. Any other
+		// method named through the class fails, as a callback with where (a check)
+		// else as a call. Twin of js_phclost in languages/lib/php-rt.metajs and
+		// isCloStatic in php-interpreter.abnf.
+		m["js_phclost"] = func(a []uint64) uint64 {
+			recv := u(a[0])
+			s, isStr := recv.(string)
+			if isStr && phpCase(strings.TrimPrefix(rt.phpStr(s), "\\"), false) != "closure" {
+				return jsHUndefined
+			}
+			if !isStr && !isCallable(recv) {
+				return jsHUndefined
+			}
+			name := rt.phpStr(u(a[1]))
+			mn := phpCase(name, false)
+			if mn == "bind" || mn == "fromcallable" {
+				return w(mn)
+			}
+			if !isStr {
+				return jsHUndefined
+			}
+			where, check := u(a[2]).(string)
+			canon := map[string]string{"bindto": "bindTo", "call": "call", "__invoke": "__invoke"}[mn]
+			switch {
+			case canon != "" && check:
+				rt.phpCbFail(where, "non-static method Closure::"+canon+"() cannot be called statically")
+			case canon != "":
+				rt.phpRaise("Error", "Non-static method Closure::"+canon+"() cannot be called statically")
+			case check:
+				rt.phpCbFail(where, "class Closure does not have a method \""+name+"\"")
+			}
+			rt.phpRaise("Error", "Call to undefined method Closure::"+name+"()")
+			return jsHUndefined
+		}
 		m["js_phcloinv"] = func(a []uint64) uint64 {
 			if isCallable(u(a[0])) && phpCase(rt.phpStr(u(a[1])), false) == "__invoke" {
 				return a[0]
@@ -4043,6 +4097,23 @@ func init() {
 		// `new C`: the class is initialized before its first instance (phpClassInit).
 		m["js_phsinit"] = func(a []uint64) uint64 {
 			rt.phpClassInit(rt.phpClassOf(u(a[0])))
+			return 0
+		}
+		// The spread of a variable, for a callee of known signature text and mask.
+		m["js_phmergeref"] = func(a []uint64) uint64 {
+			rt.phpMergeArgs(u(a[0]), u(a[1]), rt.phpStr(u(a[2])), int(rt.toNumber(u(a[3]))))
+			return 0
+		}
+		// The same for a callee known only at run time: f as js_phplace places
+		// for, or with a name, f's method of that name as js_phmplace does.
+		m["js_phmergefn"] = func(a []uint64) uint64 {
+			f := u(a[2])
+			if nm := u(a[3]); nm != jsUndef {
+				f = rt.phpMethodOf(f, nm)
+			} else if _, isObj := f.(*jsObject); isObj {
+				f = rt.phpMethodOf(f, "__invoke")
+			}
+			rt.phpMergeArgs(u(a[0]), u(a[1]), rt.phpSigOf(f), jsvFnMeta(f).length)
 			return 0
 		}
 		m["js_phplacesig"] = func(a []uint64) uint64 {

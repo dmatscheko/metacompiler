@@ -563,8 +563,11 @@ function array_intersect_uassoc($array, ...$rest) { $cb = __mec_takecb($rest); r
 
 // ----- callbacks -------------------------------------------------------------
 // A string key of call_user_func_array's list is a named argument, as in a spread.
+// Its list is spread as a value, not as the variable: an element that is no
+// reference reaches a by-reference parameter as a temporary one, and the list
+// keeps it (zend_call_function).
 function call_user_func($callback, ...$args) { return $callback(...$args); }
-function call_user_func_array($callback, $args) { return $callback(...$args); }
+function call_user_func_array($callback, $args) { return $callback(...($args)); }
 function array_map($callback, $array, ...$arrays) {
     if ($callback !== null) { __mec_callable($callback, 'array_map(): Argument #1 ($callback) must be a valid callback or null'); }
     $out = [];

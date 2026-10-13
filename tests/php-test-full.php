@@ -3578,6 +3578,74 @@ function s70() {
         && $bad === 'Closure::bind(): Argument #1 ($closure) must be of type Closure, int given');
 }
 
+// ===== SECTION 71: spreads into by-reference parameters, Closure's statics by name, library callbacks =====
+// A spread of a variable makes each element a by-reference parameter takes a
+// reference in that variable's array (zend_vm_def.h ZEND_SEND_UNPACK); a
+// by-reference variadic takes every position from its own. call_user_func_array
+// passes a non-reference element as a temporary one and leaves its list alone
+// (zend_call_function). 'Closure::bind' / ['Closure', 'fromCallable'] name the
+// static methods (zend_closures.c). A library function's callback is judged at
+// the first user frame (zend_API.c zend_is_callable_ex), with its $this and class
+// scope: a method that scope may not call goes to __call (with an object bound)
+// or __callStatic (without) when the class has it, an explicit ['C', 'm'] with an
+// object bound reaches only C's __call (zend_is_callable_check_func), and a
+// trampoline keeps the called scope of the bound $this.
+function s71inc(&$x) { $x++; }
+function s71two($y, &$x) { $x .= "!"; }
+function s71named(&$x, &$z = null) { $x += 100; }
+function s71all(&...$xs) { foreach ($xs as &$x) { $x *= 2; } }
+function s71keep(&...$xs) { return $xs; }
+class S71K { function m(&$x) { $x .= "m"; } static function s(&$x) { $x .= "s"; } }
+class S71P { private $v = 42; }
+class S71N { static function __callStatic($n, $a) { return "N:" . $n; } }
+class S71NK extends S71N { function t() {
+    try { return array_map(['S71N', 'q'], [1]); } catch (TypeError $e) { return $e->getMessage(); } } }
+class S71S { function m($x) { return "m" . $x; } }
+class S71SK extends S71S { static function t() {
+    try { return array_map(['S71S', 'm'], [1]); } catch (TypeError $e) { return $e->getMessage(); } } }
+class S71C { private function p($x = 0) { return "p"; } function __call($n, $a) { return "call:" . static::class . ":" . $n; } }
+class S71CK extends S71C { function t() {
+    return [array_map(['S71C', 'p'], [1])[0], call_user_func('S71C::p'), call_user_func([$this, 'p'])]; } }
+class S71Q { private function p() { return "p"; } static function __callStatic($n, $a) { return "cs:" . static::class . ":" . $n; } }
+class S71QK extends S71Q {
+    static function t() { return call_user_func(['S71Q', 'p']); }
+    function u() { return [call_user_func('S71Q::zz'), Closure::fromCallable('S71Q::zz')()]; } }
+function s71() {
+    $a = [1]; s71inc(...$a);
+    $b = [1, "a"]; s71two(...$b);
+    $c = ['x' => 5]; s71named(...$c);
+    $d = [7]; s71inc(...[...$d]);
+    $f = 's71inc'; $e = [3]; $f(...$e);
+    $g = function (&$x) { $x *= 3; }; $h = [4]; $g(...$h);
+    $k = new S71K; $i = ["k"]; $k->m(...$i); $j = ["t"]; S71K::s(...$j);
+    $l = [1]; $l2 = $l; s71inc(...$l);
+    $n = [1]; s71inc(...$n); $n2 = $n; $n2[0] = 9;
+    check("sbr1", $a === [2] && $b === [1, "a!"] && $c === ['x' => 105] && $d === [7] && $e === [4]
+        && $h === [12] && $i === ["km"] && $j === ["ts"] && $l === [2] && $l2 === [1] && $n === [2]);
+    $p = 1; $q = 2; s71all($p, $q);
+    $r = [3, 4]; s71all(...$r);
+    $s = 1; $t = s71keep($s); $t[0] = 5;
+    $cf = [1]; call_user_func_array('s71inc', $cf);
+    check("sbr2", $p === 2 && $q === 4 && $r === [6, 8] && $s === 5 && $cf === [1]);
+    $th = function () { return $this->v; };
+    $bad = "";
+    try { call_user_func(['Closure', 'nope']); } catch (TypeError $e) { $bad = $e->getMessage(); }
+    $ns = "";
+    try { call_user_func('Closure::bindTo'); } catch (TypeError $e) { $ns = $e->getMessage(); }
+    check("cls1", call_user_func(['Closure', 'bind'], $th, new S71P, S71P::class)() === 42
+        && call_user_func('closure::BIND', $th, new S71P, S71P::class)() === 42
+        && call_user_func_array(['\Closure', 'bind'], [$th, new S71P, S71P::class])() === 42
+        && call_user_func(['Closure', 'fromCallable'], 'strtoupper')("ab") === "AB"
+        && call_user_func_array([$th, 'fromCallable'], ['strrev'])("ab") === "ba"
+        && array_map(['Closure', 'fromCallable'], ['strlen'])[0]("four") === 4
+        && $bad === 'call_user_func(): Argument #1 ($callback) must be a valid callback, class Closure does not have a method "nope"'
+        && $ns === 'call_user_func(): Argument #1 ($callback) must be a valid callback, non-static method Closure::bindTo() cannot be called statically');
+    check("lcb1", (new S71NK)->t() === 'array_map(): Argument #1 ($callback) must be a valid callback or null, class S71N does not have a method "q"'
+        && S71SK::t() === 'array_map(): Argument #1 ($callback) must be a valid callback or null, non-static method S71S::m() cannot be called statically'
+        && (new S71CK)->t() === ["call:S71CK:p", "call:S71CK:p", "call:S71CK:p"]
+        && S71QK::t() === "cs:S71Q:p" && (new S71QK)->u() === ["cs:S71QK:zz", "cs:S71QK:zz"]);
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -3657,6 +3725,7 @@ function main() {
     s68(); // SECTION-CALL 68
     s69(); // SECTION-CALL 69
     s70(); // SECTION-CALL 70
+    s71(); // SECTION-CALL 71
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

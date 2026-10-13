@@ -1057,7 +1057,10 @@ ArgEnd      = :script(~~
 NamedArg    <~~ push(placedArg({aname: argLabel(up.in), pos: pop(), vtext: plainVarText(up.in.substring(up.in.indexOf(":") + 1))})) ~~>
             = ArgLabel Expression ;
 ArgLabel    = Id ":" !":" ;
-SpreadArg   <~~ push(placedArg({aspread: pop()})) ~~>
+// acv: the name of a spread plain variable, whose elements a by-reference parameter
+// makes references in the variable's own array. Twin of SpreadArg in
+// php-interpreter.abnf.
+SpreadArg   <~~ var sv = trimWs(up.in).substring(3); push(placedArg({aspread: pop(), acv: isCvText(sv) ? sv : null})) ~~>
             = "..." Expression ;
 FccArg      <~~ push({fcc: true}) ~~>
             = "..." ;
@@ -3901,10 +3904,14 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                         rc2 = callableV(b, cur, false, false)
                         ea2 = emitDynRefArgs(rc2.b, s.args, rc2.v)
                         b = ea2.b
-                    } else {
-                        ea2 = plain2 ? emitPhArgs(b, s.args, null) : emitArgTmp(b, s.args, {dyn: true})
+                    } else if (plain2) {
+                        ea2 = emitPhArgs(b, s.args, null)
                         rc2 = callableV(ea2.b, cur, false, false)
                         b = rc2.b
+                    } else {
+                        rc2 = callableV(b, cur, false, false)
+                        ea2 = emitArgTmp(rc2.b, s.args, {dyn: true, fV: rc2.v})
+                        b = ea2.b
                     }
                     ea2 = {b: b, v: dynPlaceArgs(b, rc2.v, ea2.v, plain2)}
                     if (magicInvoke) {
@@ -5632,6 +5639,13 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         return t.substring(a, z)
     }
     function isSpaceCh(ch) { return ch == " " || ch == "\t" || ch == "\r" || ch == "\n" }
+    // '$name', the spelling of a plain variable. Twin of isCvText in
+    // php-interpreter.abnf.
+    function isCvText(t) {
+        if (t.length < 2 || t.charAt(0) != "$" || !isNameStart(t.charAt(1))) { return false }
+        for (var i = 2; i < t.length; i++) { if (!isNameChar(t.charAt(i))) { return false } }
+        return t != "$this" && t != "$GLOBALS"
+    }
     function plainVarText(t) {
         var w = trimWs(t)
         if (w.length < 2 || w.charAt(0) != "$") { return null }
@@ -5763,7 +5777,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             return {b: rr.b, v: callExt(rr.b, "js_phmplace", [targetV, nameV, rr.v])}
         }
         if (plain && !variadic) { return emitPhArgs(b, args, null) }
-        var ra = plain ? emitPhArgs(b, args, null) : emitArgTmp(b, args, mayRef ? {dyn: true} : null)
+        var ra = plain ? emitPhArgs(b, args, null) : emitArgTmp(b, args, mayRef ? {dyn: true, fV: targetV, nameV: nameV} : null)
         return {b: ra.b, v: callExt(ra.b, "js_phmplace", [targetV, nameV, ra.v])}
     }
     // "every argument is an ordinary positional one". A NAMED argument carries a
@@ -5780,9 +5794,12 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     function hasFcc(args) {
         return args.length == 1 && args[0] != undefined && args[0].fcc != undefined
     }
+    // Is position i by reference? Every position a by-reference variadic collects is.
     function byrefAt(sig, i) {
         if (sig == null) { return false }
-        for (var k = 0; k < sig.byref.length; k++) { if (sig.byref[k] == i) { return true } }
+        for (var k = 0; k < sig.byref.length; k++) {
+            if (sig.byref[k] == i || (sig.byref[k] == sig.rest && i > sig.rest)) { return true }
+        }
         return false
     }
     function hasVarArg(args) {
@@ -5875,8 +5892,14 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             }
             if (variadic) {
                 var restV2 = callExt(b, "js_pharr", [])
+                // A by-reference variadic collects the cells, each a holder of its
+                // own (the array may outlive the call).
                 for (var k3 = nFixed; k3 < args.length; k3++) {
-                    var ar3 = args[k3].pos(b)
+                    var ar3 = anytype
+                    if (byrefAt(sig, k3) && args[k3].vtext != null) {
+                        ar3 = targetCell(b, argTarget(args[k3].vtext))
+                        callExt(ar3.b, "js_phrebind", [hUndef, ar3.v])
+                    } else { ar3 = args[k3].pos(b) }
                     b = ar3.b
                     callExt(b, "js_phpush", [restV2, ar3.v])
                 }
@@ -5913,7 +5936,16 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             } else if (a.aspread != undefined) {
                 var rs = a.aspread(b)
                 b = rs.b
-                callExt(b, "js_phmerge", [tmp, rs.v])
+                var mask = refs != null && refs.sig != undefined ? refMask(refs.sig) : 0
+                // The variable is written through, so a by-value parameter it is
+                // must be copied (emitFunc).
+                if (a.acv != null && mask != 0) {
+                    curWrites[a.acv] = true
+                    callExt(b, "js_phmergeref", [tmp, rs.v, emitStr(b, sigText(refs.sig.params, refs.sig.rest)), emitNum(b, mask)])
+                } else if (a.acv != null && refs != null && refs.fV != undefined) {
+                    curWrites[a.acv] = true
+                    callExt(b, "js_phmergefn", [tmp, rs.v, refs.fV, refs.nameV == undefined ? hUndef : refs.nameV])
+                } else { callExt(b, "js_phmerge", [tmp, rs.v]) }
                 spread = true
                 pk = -1
             } else if (a.aname != undefined) {
@@ -6212,8 +6244,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                           emitStr(badB, "()")])])
         badB.NewRet(hNull) // never reached: js_phraise throws
         var cnS = callExt(sepB, "js_phsubstr", [v, emitNum(sepB, 0), sepV])
-        var clsS = sepB.NewCall(classNamedFn(), [env, cnS, hUndef])
         var mnS = callExt(sepB, "js_phsubstr", [v, callExt(sepB, "js_phadd", [sepV, emitNum(sepB, 2)]), hNull])
+        sepB = cloStaticRet(f, sepB, env, cnS, mnS)
+        var clsS = sepB.NewCall(classNamedFn(), [env, cnS, hUndef])
         boundStatic(f, sepB, env, cnS, clsS, mnS, f.Params[2], f.Params[3])
         // A two-element array: [$obj, 'm'] or ['C', 'm']. js_phcbarr raises PHP's
         // Error for a value that cannot be called at all.
@@ -6227,11 +6260,54 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var clsB = f.NewBlock("cls")
         // A Closure receiver is an object too.
         arrB.NewCondBr(truthy(arrB, callExt(arrB, "js_phis", [emitStr(arrB, "object"), recvV])), objB, clsB)
+        objB = cloStaticRet(f, objB, env, recvV, mnA)
         objB.NewRet(boundDyn(objB, env, "mcall", recvV, mnA, hUndef, hUndef, true))
         var cnA = callExt(clsB, "js_phstr", [recvV])
+        clsB = cloStaticRet(f, clsB, env, cnA, mnA)
         var clsA = clsB.NewCall(classNamedFn(), [env, cnA, hUndef])
         boundStatic(f, clsB, env, cnA, clsA, mnA, f.Params[2], emitNum(clsB, 1))
         return f
+    }
+    // A static method of Closure named as a callable ('Closure::bind',
+    // ['Closure', 'fromCallable'], [$closure, 'fromCallable'], js_phclost): its
+    // callable returned from php_callable f. Answers the block anything else
+    // continues in.
+    function cloStaticRet(f, b, env, recvV, mnV) {
+        var kind = callExt(b, "js_phclost", [recvV, mnV, hUndef])
+        var hitB = f.NewBlock("")
+        var missB = f.NewBlock("")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, kind, hUndef), missB, hitB)
+        hitB.NewRet(cloStaticV(f, hitB, env, kind))
+        return missB
+    }
+    // The callable itself: bind runs through the closure, as the static called
+    // through an instance does (phpCloCall), and fromCallable checks and resolves
+    // its callback in the frame env, as emitFromCallableOn does. Twin of cloStaticFn
+    // in php-interpreter.abnf.
+    var cloStaticIdx = -1
+    function cloStaticV(f, b, env, kindV) {
+        if (cloStaticIdx < 0) {
+            if (cbCheckF == undefined) { cbCheckF = emitCbCheckFn() }
+            funcCount++
+            cloStaticIdx = funcCount
+            var sf = m.NewFunc("jsf_" + cloStaticIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+            var sb = sf.NewBlock("entry")
+            var hold = sf.Params[0]
+            var bindB = sf.NewBlock("")
+            var fromB = sf.NewBlock("")
+            var kd = callExt(sb, "js_scope_get", [hold, emitStr(sb, "\x00dcname")])
+            sb.NewCondBr(truthy(sb, callExt(sb, "js_seq", [kd, emitStr(sb, "bind")])), bindB, fromB)
+            bindB.NewRet(callExt(bindB, "js_phmcall", [callExt(bindB, "js_scope_get", [hold, emitStr(bindB, "\x00dcrecv")]),
+                                                       emitStr(bindB, "bind"), sf.Params[1]]))
+            var cbV = callExt(fromB, "js_arg", [sf.Params[1], handle(0)])
+            var okV = fromB.NewCall(cbCheckF, [hold, cbV, emitStr(fromB, "Failed to create closure from callable:"), hTrue, emitNum(fromB, 2)])
+            fromB.NewRet(fromB.NewCall(f, [hold, okV, hTrue, emitNum(fromB, 2)]))
+        }
+        var holder = callExt(b, "js_scope_new", [env])
+        callExt(b, "js_scope_decl", [holder, emitStr(b, "\x00dcname"), kindV])
+        var clo = callExt(b, "js_closure", [handle(cloStaticIdx), holder])
+        callExt(b, "js_scope_decl", [holder, emitStr(b, "\x00dcrecv"), clo])
+        return clo
     }
     // A static method callable. A relative class name (self / parent / static)
     // forwards the late-static-binding class and $this of the frame that resolves it,
@@ -6258,7 +6334,11 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, fbV, hUndef), plainB, fbB)
         plainB.NewRet(boundDyn(plainB, env, "scall", clsV, mnV, fwdThis, fwdLsb, false))
         fbB.NewCondBr(fbB.NewICmp(llvm.enum.IPredEQ, fbV, hFalse), csB, viaB)
-        csB.NewRet(boundDyn(csB, env, "scall", clsV, mnV, hUndef, fwdLsb, false))
+        // __callStatic runs without the $this the callback binds, whose class is its
+        // called scope still (fcc->called_scope).
+        var thisCls = csB.NewSelect(csB.NewICmp(llvm.enum.IPredEQ, nsThis, hUndef), clsV, callExt(csB, "js_phlsb", [nsThis, clsV]))
+        var csLsb = csB.NewSelect(named, thisCls, lsbV)
+        csB.NewRet(boundDyn(csB, env, "scall", clsV, mnV, hUndef, csLsb, false))
         viaB.NewRet(boundDyn(viaB, env, "scallvia", fbV, mnV, thisV, hTrue, false))
     }
     // A callback handed to an internal function is checked where it is handed over:
@@ -6274,11 +6354,16 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (cbCheckF == undefined) { cbCheckF = emitCbCheckFn() }
         return b.NewCall(cbCheckF, [curScopeV, v, whereV, ns ? hTrue : hFalse, emitNum(b, internal ? 2 : 0)])
     }
-    // The method half of a class-named callback's check (js_phcbcls).
-    function cbClsChk(b, env, where, clsV, mnV, cnV, formV) {
+    // The method half of a class-named callback's check (js_phcbcls): a method the
+    // magic method takes instead branches to okB. Answers the block the rest of
+    // the check continues in.
+    function cbClsChk(f, b, env, where, clsV, mnV, cnV, formV, okB) {
         var thisV = b.NewCall(scopeProbeFn(), [env, emitStr(b, "$this"), hUndef])
         var selfV = b.NewCall(scopeProbeFn(), [env, emitStr(b, frameClsName("self")), hNull])
-        callExt(b, "js_phcbcls", [where, clsV, mnV, cnV, thisV, selfV, formV])
+        var hid = callExt(b, "js_phcbcls", [where, clsV, mnV, cnV, thisV, selfV, formV])
+        var contB = f.NewBlock("")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, hid, hTrue), okB, contB)
+        return contB
     }
     function emitCbCheckFn() {
         var f = m.NewFunc("php_cbcheck", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("v", i64),
@@ -6306,9 +6391,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         callExt(badB, "js_phcbfail", [where, callExt(badB, "js_phcat", [whyV, emitStr(badB, "\" not found or invalid function name")])])
         badB.NewRet(v) // never reached: js_phcbfail throws
         var cnS = callExt(sepB, "js_phsubstr", [v, emitNum(sepB, 0), sepV])
-        var clsS = sepB.NewCall(classNamedFn(), [env, cnS, where])
         var mnS = callExt(sepB, "js_phsubstr", [v, callExt(sepB, "js_phadd", [sepV, emitNum(sepB, 2)]), hNull])
-        cbClsChk(sepB, env, where, clsS, mnS, cnS, f.Params[4])
+        sepB = cloStaticOk(f, sepB, cnS, mnS, where, okB)
+        var clsS = sepB.NewCall(classNamedFn(), [env, cnS, where])
+        sepB = cbClsChk(f, sepB, env, where, clsS, mnS, cnS, f.Params[4], okB)
         sepB = cbNsChk(f, sepB, env, ns, clsS, cnS, mnS, where)
         cbVisChk(sepB, env, v, clsS, where)
         sepB.NewBr(okB)
@@ -6323,13 +6409,21 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         }
         notStrB.NewCondBr(truthy(notStrB, callExt(notStrB, "js_phcbarr", [v, where])), arrB, restB)
         var cnA = callExt(arrB, "js_phstr", [callExt(arrB, "js_phget", [v, emitNum(arrB, 0)])])
-        var clsA = arrB.NewCall(classNamedFn(), [env, cnA, where])
         var mnA = callExt(arrB, "js_phstr", [callExt(arrB, "js_phget", [v, emitNum(arrB, 1)])])
-        cbClsChk(arrB, env, where, clsA, mnA, cnA, emitNum(arrB, 1))
+        arrB = cloStaticOk(f, arrB, cnA, mnA, where, okB)
+        var clsA = arrB.NewCall(classNamedFn(), [env, cnA, where])
+        arrB = cbClsChk(f, arrB, env, where, clsA, mnA, cnA, emitNum(arrB, 1), okB)
         arrB = cbNsChk(f, arrB, env, ns, clsA, cnA, mnA, where)
         cbVisChk(arrB, env, v, clsA, where)
         arrB.NewBr(okB)
         return f
+    }
+    // A static method of Closure named through the class is a valid callback
+    // (js_phclost): it branches to okB. Answers the block anything else continues in.
+    function cloStaticOk(f, b, cnV, mnV, where, okB) {
+        var missB = f.NewBlock("")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, callExt(b, "js_phclost", [cnV, mnV, where]), hUndef), missB, okB)
+        return missB
     }
     // The non-static half of a class-named callback check, when ns asks for it.
     // Answers the block the check continues in.
@@ -6389,10 +6483,11 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         callExt(b, "js_phfccdecl", [holder, emitStr(b, "\x00dcrecv"), recvV, ext == "scallvia" ? emitStr(b, "__call") : nameV])
         callExt(b, "js_scope_decl", [holder, emitStr(b, "\x00dcname"), nameV])
         // In a program that restricts some method, the callable is judged from the
-        // class scope that resolves it, and dispatches from there.
+        // class scope that resolves it, and dispatches from there; one __call takes
+        // is never the method's to judge.
         if (anyMVis) {
             var rsc = b.NewCall(scopeProbeFn(), [env, emitStr(b, frameClsName("self")), hNull])
-            callExt(b, "js_phmvis", [recvV, nameV, rsc, hUndef])
+            if (ext != "scallvia") { callExt(b, "js_phmvis", [recvV, nameV, rsc, hUndef]) }
             callExt(b, "js_scope_decl", [holder, emitStr(b, "\x00dcscope"), rsc])
         }
         if (ext != "mcall") {
@@ -6615,60 +6710,33 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, okName)])}
         }
     }
-    // The callback argument of the library functions that take one, by position.
-    var libCbArg = {"$array_map": 0, "$array_filter": 1, "$array_reduce": 1, "$array_walk": 1,
-                    "$usort": 1, "$uasort": 1, "$uksort": 1}
-    // A library function's callback named RELATIVE to the class scope ('self::m',
-    // ['parent', 'm'], 'static::m') is resolved in the caller's frame too
-    // (js_phrelcb): a method the class answers becomes the bound closure
-    // php_callable makes here, anything else the absolute 'C::m' the library's own
-    // check reports on. So is a non-static method named outright that this frame's
-    // $this may call; the library's check (__mec_callable) rejects any other one.
-    // Twin of libCallable in php-interpreter.abnf.
-    function libCallable(a) {
+    // The callback argument of the library functions that take one: its position
+    // and the TypeError's wording, which says whether null is accepted.
+    var libCbArg = {"$array_map": {at: 0, w: "array_map(): Argument #1 ($callback) must be a valid callback or null"},
+                    "$array_filter": {at: 1, w: "array_filter(): Argument #2 ($callback) must be a valid callback or null"},
+                    "$array_reduce": {at: 1, w: "array_reduce(): Argument #2 ($callback) must be a valid callback"},
+                    "$array_walk": {at: 1, w: "array_walk(): Argument #2 ($callback) must be a valid callback"},
+                    "$usort": {at: 1, w: "usort(): Argument #2 ($callback) must be a valid callback"},
+                    "$uasort": {at: 1, w: "uasort(): Argument #2 ($callback) must be a valid callback"},
+                    "$uksort": {at: 1, w: "uksort(): Argument #2 ($callback) must be a valid callback"}}
+    // A library function's callback is checked and bound in the CALLER's frame, as
+    // call_user_func's is (callerCallable): an internal function judges it at the
+    // first user frame (zend_is_callable_ex), whose $this and class scope the
+    // library's own frame does not have. Twin of libCallable in
+    // php-interpreter.abnf.
+    function libCallable(a, cb) {
+        var nullable = cb.w.indexOf("or null") >= 0
         return {pos: function(b) {
             var r = a.pos(b)
             b = r.b
-            var selfV = b.NewCall(scopeProbeFn(), [curScopeV, emitStr(b, frameClsName("self")), hNull])
-            var statV = b.NewCall(scopeProbeFn(), [curScopeV, emitStr(b, frameClsName("static")), hNull])
-            // A class named outright is looked up here, for its non-static methods.
-            var thisV = hUndef
-            var clsV = hNull
-            if (anyNs) {
-                thisV = phThis(b)
-                var hdV = callExt(b, "js_phcbhead", [r.v])
-                var hlB = curF.NewBlock("")
-                var hjB = curF.NewBlock("")
-                var hb0 = b
-                b.NewCondBr(truthy(b, callExt(b, "js_phis", [emitStr(b, "string"), hdV])), hlB, hjB)
-                var hcV = phClsFind(hlB, hdV)
-                hlB.NewBr(hjB)
-                clsV = hjB.NewPhi([llvm.ir.NewIncoming(hNull, hb0), llvm.ir.NewIncoming(hcV, hlB)])
-                b = hjB
-            }
-            var relV = callExt(b, "js_phrelcb", [r.v, selfV, statV, clsV, thisV])
+            if (!nullable) { return callableV(b, cbCheckV(b, r.v, emitStr(b, cb.w), true, false), true, false) }
             var bindB = curF.NewBlock("")
             var joinB = curF.NewBlock("")
-            if (anyMVis) {
-                // A method some class restricts that this class scope may call is
-                // bound here too: the library function has no class scope.
-                var headV = callExt(b, "js_phcbhead", [relV])
-                var lookB = curF.NewBlock("")
-                var visB = curF.NewBlock("")
-                var hb = b
-                b.NewCondBr(truthy(b, callExt(b, "js_phis", [emitStr(b, "string"), headV])), lookB, visB)
-                var foundV = phClsFind(lookB, headV)
-                lookB.NewBr(visB)
-                var tgtV = visB.NewPhi([llvm.ir.NewIncoming(hNull, hb), llvm.ir.NewIncoming(foundV, lookB)])
-                var okV = callExt(visB, "js_phcbvis", [relV, tgtV, selfV, hUndef])
-                relV = visB.NewSelect(truthy(visB, okV), hUndef, relV)
-                b = visB
-            }
             var fromB = b
-            b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, relV, hUndef), bindB, joinB)
-            var bound = callableV(bindB, r.v, true, false)
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, r.v, hNull), joinB, bindB)
+            var bound = callableV(bindB, cbCheckV(bindB, r.v, emitStr(bindB, cb.w), true, false), true, false)
             bound.b.NewBr(joinB)
-            return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(relV, fromB), llvm.ir.NewIncoming(bound.v, bound.b)])}
+            return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(hNull, fromB), llvm.ir.NewIncoming(bound.v, bound.b)])}
         }}
     }
     function makeCall(items) {
@@ -6683,11 +6751,12 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             nsUsed = true
             return makeIsCallable(args[0])
         }
-        var cbAt = libCbArg["$" + name] == undefined ? -1 : libCbArg["$" + name]
+        var libCb = libCbArg["$" + name] == undefined ? null : libCbArg["$" + name]
+        var cbAt = libCb == null ? -1 : libCb.at
         if (cbAt >= 0 && args.length > cbAt && args[cbAt].pos != undefined && args[cbAt].aname == undefined
             && argsArePlain(args.slice(0, cbAt + 1))) {
             nsUsed = true
-            args[cbAt] = libCallable(args[cbAt])
+            args[cbAt] = libCallable(args[cbAt], libCb)
         }
         if (name == "__mec_callable") { nsUsed = true }
         return function(b) {
@@ -7018,9 +7087,15 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (mask == 0 && sig == "") { return fn }
         return callExt(b, "js_jsfnmeta", [fn, emitStr(b, sig), emitNum(b, mask)])
     }
+    // Bit i is set for a by-reference position i; a by-reference variadic ('&...$xs')
+    // sets every position from its own up to the 53 a double holds exactly.
     function refMask(pl) {
         var mask = 0
-        for (var i = 0; i < pl.byref.length; i++) { mask = mask + Math.pow(2, pl.byref[i]) }
+        for (var i = 0; i < pl.byref.length; i++) {
+            if (pl.byref[i] == pl.rest) {
+                for (var j = pl.rest; j < 53; j++) { mask = mask + Math.pow(2, j) }
+            } else { mask = mask + Math.pow(2, pl.byref[i]) }
+        }
         return mask
     }
     function plSig(pl) { return (dynPlaceNamed || dynPlaceVariadic) ? sigText(pl.params, pl.rest) : "" }

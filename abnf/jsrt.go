@@ -14662,15 +14662,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			return 0
 		},
 		"js_phmerge": func(a []uint64) uint64 { // [...$a]: integer keys renumber, string keys stay
-			if keys, vals, ok := phpArrParts(u(a[1])); ok {
-				for i := range keys.elems {
-					if _, isNum := keys.elems[i].(float64); isNum {
-						rt.phpArrPush(u(a[0]), vals.elems[i])
-					} else {
-						rt.phpArrSet(u(a[0]), keys.elems[i], vals.elems[i])
-					}
-				}
-			}
+			rt.phpMergeArgs(u(a[0]), u(a[1]), "", 0)
 			return 0
 		},
 		"js_phcopy": func(a []uint64) uint64 { return w(rt.phpArrCopy(u(a[0]))) },
