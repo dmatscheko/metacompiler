@@ -4261,6 +4261,57 @@ type P81 struct{ F float64 }
 
 func r81() float64 { return 1 << 64 }
 
+// ===== SECTION 82: constants at the edge of the type they convert to =====
+// go rejects at compile time a constant its location's type cannot hold (the
+// go-fail-test-overflow-*.go files); every value here is the largest or smallest
+// that fits, at each kind of location, and compiles. The expected values are go run's.
+type P82 struct {
+	a int
+	b uint8
+}
+
+type B82 struct{ x uint8 }
+
+type E82 struct {
+	B82
+	y int8
+}
+
+type K82 struct{ l, r int8 }
+
+type L82 []uint8
+
+type M82 map[uint8]int8
+
+const (
+	A82 uint8 = iota + 253
+	B82c
+	C82c
+)
+
+func r82() (int8, uint16) {
+	g := func() uint8 { return 255 }
+	_ = g
+	return -128, 65535
+}
+
+func s82() {
+	check("cke1", fmt.Sprint(E82{B82{255}, -128}, []P82{{1, 255}, {2, 0}}, map[string]P82{"a": {1, 255}},
+		map[K82]uint8{{-128, 127}: 255}, [3]uint8{2: 255}, L82{255}, M82{255: -128}, P82{b: 255, a: 1}) ==
+		"{{255} -128} [{1 255} {2 0}] map[a:{1 255}] map[{-128 127}:255] [0 0 255] [255] map[255:-128] {1 255}")
+	var u8 uint8 = 1
+	var i8 int8 = -1
+	x := 5
+	check("cke2", fmt.Sprint(u8+254, i8-127, u8 == 255, x<<62, 100+155+u8, A82, B82c, C82c) ==
+		"255 -128 false 4611686018427387904 0 253 254 255")
+	a, b := r82()
+	ch := make(chan uint8, 1)
+	ch <- 255
+	u8 += 254
+	_ = 1<<63 - 1
+	check("cke3", fmt.Sprint(a, b, <-ch, u8) == "-128 65535 255 255")
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -4343,6 +4394,7 @@ func main() {
 	s79() // SECTION-CALL 79
 	s80() // SECTION-CALL 80
 	s81() // SECTION-CALL 81
+	s82() // SECTION-CALL 82
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

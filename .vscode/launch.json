@@ -623,6 +623,90 @@
             "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-overflow.go", "-q"]
         },
         {
+            "name": "Go interpreter constant overflow (compound) SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-overflow-compound.go", "-q"]
+        },
+        {
+            "name": "Go compiler constant overflow (compound) SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-overflow-compound.go", "-q"]
+        },
+        {
+            "name": "Go interpreter constant overflow (operand) SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-overflow-operand.go", "-q"]
+        },
+        {
+            "name": "Go compiler constant overflow (operand) SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-overflow-operand.go", "-q"]
+        },
+        {
+            "name": "Go interpreter constant overflow (const) SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-overflow-const.go", "-q"]
+        },
+        {
+            "name": "Go compiler constant overflow (const) SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-overflow-const.go", "-q"]
+        },
+        {
+            "name": "Go interpreter constant overflow (return) SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-overflow-return.go", "-q"]
+        },
+        {
+            "name": "Go compiler constant overflow (return) SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-overflow-return.go", "-q"]
+        },
+        {
+            "name": "Go interpreter constant overflow (literal) SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-overflow-literal.go", "-q"]
+        },
+        {
+            "name": "Go compiler constant overflow (literal) SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-overflow-literal.go", "-q"]
+        },
+        {
+            "name": "Go interpreter constant overflow (send) SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-overflow-send.go", "-q"]
+        },
+        {
+            "name": "Go compiler constant overflow (send) SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-overflow-send.go", "-q"]
+        },
+        {
+            "name": "Go interpreter constant overflow (blank) SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-overflow-blank.go", "-q"]
+        },
+        {
+            "name": "Go compiler constant overflow (blank) SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-overflow-blank.go", "-q"]
+        },
+        {
             "name": "Python interpreter",
             "type": "go",
             "request": "launch",

@@ -750,6 +750,25 @@ function goFoldConst(items, ops, pos, ty) {
     return cMaterialize(acc)
 }
 
+// Go's compile-time check on a binary run (the items layout above; each {at} also
+// carries its operand's start as `as`, and sty is the run's static type): an
+// untyped integer constant operand that the type it is converted to cannot hold. A run of constant operands at the front is ONE
+// constant expression (`200 + 100 + u8` converts 300), so it is checked whole,
+// except as a shift's left operand, whose type the context decides.
+function goRunCheck(items, ops, sty) {
+    var acc = constAt(items[1].at)
+    var k = 0
+    while (k < ops.length) {
+        var op = ops[k]
+        var r = items[3 * k + 4]
+        var rhs = constAt(r.at)
+        var shift = op == "<<" || op == ">>"
+        if (!shift && acc != null && rhs == null) { goOperandFits(goKRecOf(acc, items[1].as, items[3 * k + 1].at), sty) }
+        if (!shift && acc == null && rhs != null) { goOperandFits(goKRecOf(rhs, r.as, r.at), sty) }
+        acc = (acc != null && rhs != null) ? cApply(op, acc, rhs) : null
+        k = k + 1
+    }
+}
 // The static type of a binary run that did not fold (same items layout). Go gives
 // + - * / % & | ^ &^ the type of its operands, an untyped constant taking the
 // other's, and a shift the type of its LEFT operand. "" when none is known.
@@ -1026,8 +1045,8 @@ function goSplitSty(xs) {
 // constant reaching a float type is rounded from its exact value, so
 // `var f float64 = 1 << 64` holds 2^64. kr is goKRec's record of the value
 // (StoreExpr, ArgExpr), ty its location's type ("" not known: nothing checked).
-function goKRec(start, pos) {
-    var k = constAt(pos)
+function goKRec(start, pos) { return goKRecOf(constAt(pos), start, pos) }
+function goKRecOf(k, start, pos) {
     if (k == null || cIsCx(k) || k.f) { return null }
     return {k: k, ks: start, ke: pos}
 }
@@ -1040,11 +1059,160 @@ function goConstTo(t, kr, ty, ctx) {
     if (isFloatTy(w)) { return cMaterialize(cAsF(kr.k)) }
     var it = goIntTy(w)
     if (it == null || cFitsInt(kr.k, it.w, it.u)) { return t }
+    goKFail(kr, "cannot use " + goKDesc(kr) + " as " + shown + " value in " + ctx + " (overflows)")
+    return t
+}
+// How go's diagnostics name an integer constant: its source, then its value where
+// the two differ - "1 << 63 (untyped int constant 9223372036854775808)".
+function goKDesc(kr) {
     var src = stTrim(c.srcSlice(kr.ks, kr.ke))
     var dec = (kr.k.s < 0 ? "-" : "") + cbToDec(kr.k.n)
-    fail(c.curFile() + ":" + c.lineOf(kr.ks) + ": cannot use " + src + " (untyped int constant" + (src == dec ? "" : " " + dec)
-         + ") as " + shown + " value in " + ctx + " (overflows)")
-    return t
+    return src + " (untyped " + (kr.k.rn === true ? "rune" : "int") + " constant" + (src == dec ? "" : " " + dec) + ")"
+}
+// kr.ln, where present, is the position whose line the error is reported at.
+function goKFail(kr, msg) { fail(c.curFile() + ":" + c.lineOf(kr.ln != undefined ? kr.ln : kr.ks) + ": " + msg) }
+// The integer type a location of type ty holds, through a defined type, or null.
+function goIntUnder(ty) {
+    var w = goTyWord(stBare(ty))
+    if (typeof definedUnder[w] == "string") { w = goTyWord(resolveDefined(w)) }
+    var it = goIntTy(w)
+    if (it == null) { return null }
+    return {w: it.w, u: it.u, name: w}
+}
+// An untyped integer constant OPERAND beside one of type ty is converted to ty,
+// and go rejects one that does not fit: `u8 + 256` and `u8 += 256` are
+// "256 (untyped int constant) overflows uint8".
+function goOperandFits(kr, ty) {
+    if (kr == null || ty == "") { return }
+    var it = goIntUnder(ty)
+    if (it != null && !cFitsInt(kr.k, it.w, it.u)) { goKFail(kr, goKDesc(kr) + " overflows " + it.name) }
+}
+// `=` storing value kr into target lref, one of n targets: the blank identifier
+// takes a constant at its default type.
+function goAssignConstTo(t, kr, lref, n) {
+    var blank = lref.name == "_" && lref.path.length == 0 && lref.stars == 0
+    var ctx = n > 1 ? "multiple assignment" : (blank ? "assignment to _ identifier" : "assignment")
+    return goConstTo(t, kr, blank ? "any" : goRefTy(lref), ctx)
+}
+// A returned constant is converted to its result's type, which a return statement
+// does not know: the function's tag fires after its body's. So each return notes
+// its values' records (goRetNote), and the function that closes next - the
+// innermost one around them - checks them against its result types.
+var goRetPend = []
+function goRetNote(krs) {
+    var i = 0
+    while (i < krs.length) {
+        if (krs[i] != null) { goRetPend.push({kr: krs[i], i: i, n: krs.length}) }
+        i = i + 1
+    }
+}
+function goRetFlush(rtys) {
+    var p = goRetPend
+    goRetPend = []
+    var i = 0
+    while (i < p.length) {
+        if (p[i].n == rtys.length) { goConstTo(null, p[i].kr, rtys[p[i].i], "return statement") }
+        i = i + 1
+    }
+}
+// ----- THE ELEMENTS OF A COMPOSITE LITERAL -----
+// Each element is converted to its slot's type, so `[]uint8{256}` and
+// `P{b: 300}` (b uint8) do not compile. The element tags note every element
+// expression (goLitEl: a key when key is set, kt its text) and every nested
+// brace group (goLitGrp) in goLitPend; a literal's tag fires after all of them
+// and claims the notes inside its source range [s, e] (goLitClaim) - an inner
+// literal has already claimed its own - rebuilds the nesting from the ranges and
+// walks it against its type.
+var goLitPend = []
+function goLitEl(s, e, key, kt) { goLitPend.push({s: s, e: e, key: key, kt: kt, g: false, kr: goKRec(s, e), kids: []}) }
+function goLitGrp(s, e) { goLitPend.push({s: s, e: e, key: false, kt: "", g: true, kr: null, kids: []}) }
+function goLitClaim(ty, s, e) {
+    var mine = []
+    var rest = []
+    var i = 0
+    while (i < goLitPend.length) {
+        var n = goLitPend[i]
+        if (n.s >= s && n.e <= e) {
+            // A re-parse of the same source notes it again.
+            var dup = false
+            var j = 0
+            while (j < mine.length) {
+                if (mine[j].s == n.s && mine[j].e == n.e && mine[j].g == n.g && mine[j].key == n.key) { dup = true }
+                j = j + 1
+            }
+            if (!dup) {
+                // In source order: a group's note comes after its elements'.
+                mine.push(n)
+                var at = mine.length - 1
+                while (at > 0 && mine[at - 1].s > n.s) { mine[at] = mine[at - 1]; at = at - 1 }
+                mine[at] = n
+            }
+        } else { rest.push(n) }
+        i = i + 1
+    }
+    goLitPend = rest
+    if (ty == "" || mine.length == 0) { return }
+    var top = []
+    var open = []
+    var k = 0
+    while (k < mine.length) {
+        var r = mine[k]
+        while (open.length > 0 && open[open.length - 1].e < r.e) { open.pop() }
+        if (open.length > 0) { open[open.length - 1].kids.push(r) } else { top.push(r) }
+        if (r.g) { open.push(r) }
+        k = k + 1
+    }
+    goLitWalk(ty, top)
+}
+// One element (a note or a group) going into a slot of type ty.
+function goLitInto(n, ty, ctx) {
+    if (n.g) { goLitWalk(ty.charAt(0) == "*" ? ty.substring(1) : ty, n.kids) }
+    else { goConstTo(null, n.kr, ty, ctx) }
+}
+function goLitWalk(ty0, els) {
+    var ty = stBare(ty0)
+    if (goTyWord(ty) == ty && typeof definedUnder[ty] == "string") { ty = resolveDefined(ty) }
+    var i = 0
+    if (ty.indexOf("map[") == 0) {
+        var kt = stMapKeyTy(ty)
+        var vt = stElemTy(ty)
+        while (i + 1 < els.length) {
+            goLitInto(els[i], kt, "map literal")
+            goLitInto(els[i + 1], vt, "map literal")
+            i = i + 2
+        }
+        return
+    }
+    if (ty.charAt(0) == "[") {
+        var et = stElemTy(ty)
+        while (i < els.length) {
+            if (!els[i].key) { goLitInto(els[i], et, "array or slice literal") }
+            i = i + 1
+        }
+        return
+    }
+    var sk = goTyKey(ty)
+    var ord = goPreFldOrd["$" + sk]
+    if (ord === undefined) { return }
+    var keyed = els.length > 0 && els[0].key
+    var f = 0
+    while (i < els.length) {
+        var fname = ""
+        if (keyed) {
+            fname = els[i].kt
+            i = i + 1
+        } else if (f < ord.length) { fname = ord[f] }
+        f = f + 1
+        var fty = goPreFld["$" + sk + "." + fname]
+        if (i < els.length && fty !== undefined) { goLitInto(els[i], fty, "struct literal") }
+        i = i + 1
+    }
+}
+// `x op= v`: v is an operand of x's type ty (a shift's count is not).
+function goAssignOpCheck(op, kr, ty) {
+    if (kr == null) { return }
+    if (op == "<<=" || op == ">>=") { return }
+    goOperandFits(kr, ty)
 }
 function stTrim(t) {
     var a = 0
@@ -1595,9 +1763,12 @@ function goCallBoxC(items) {
     if (sp.spread) { out.push({spread: true}) }
     return out
 }
-// items = [chanThunk, valueThunk] of `ch <- v` (text, whitespace out, ends at pos):
-// the value boxed when the channel's element type is an interface.
-function goChanSendBoxC(items, text, pos) {
+// items = [chanThunk, valueThunk, {kr}] of `ch <- v` (text, whitespace out, ends at
+// pos): the value converted to the channel's element type, and boxed when that is
+// an interface.
+function goChanSendBoxC(items3, text, pos) {
+    var kr = items3[2].kr
+    var items = [items3[0], items3[1]]
     var d = 0
     var i = 0
     while (i + 1 < text.length) {
@@ -1611,6 +1782,7 @@ function goChanSendBoxC(items, text, pos) {
     if (ct.indexOf("chan<-") == 0) { ct = ct.substring(6) }
     else if (ct.indexOf("chan") == 0) { ct = ct.substring(4) }
     else { return items }
+    items[1] = goConstTo(items[1], kr, ct, "send")
     items[1] = goDtBoxThunk(items[1], goDtBoxTo(stAt(pos), ct))
     if (goIsRuneC(pos) && goRuneSlotTy(ct)) { items[1] = goI32Thunk(items[1]) }
     return items
@@ -1668,6 +1840,7 @@ function cIsLocal(name) {
 // field types, with the whitespace taken out as up.in takes it out of a type the
 // walk captures.
 var goPreFld = {}     // "$S.f" -> the type of field f of struct S
+var goPreFldOrd = {}  // "$S" -> S's field names in declaration order
 // An imported file's declarations. Inside the package they keep their own names,
 // and its defined types are not boxed there (goDtBoxTy), since their methods live
 // in the package's own scope. Seen from outside they are QUALIFIED, as the source
@@ -2024,8 +2197,10 @@ function goPreField(sname, f) {
 // A shadowed package struct's field is "p.S.f", its type as the package spells it
 // seen from outside (goPreShadow).
 function goNoteFld(sname, f, ty) {
-    if (goPreShadow(sname)) { goPreFld["$" + goNotePkg() + "." + sname + "." + f] = goPkgQual(goNotePkg(), ty) }
-    else { goPreFld["$" + sname + "." + f] = ty }
+    var sk = goPreShadow(sname) ? goNotePkg() + "." + sname : sname
+    goPreFld["$" + sk + "." + f] = goPreShadow(sname) ? goPkgQual(goNotePkg(), ty) : ty
+    if (goPreFldOrd["$" + sk] === undefined) { goPreFldOrd["$" + sk] = [] }
+    goPreFldOrd["$" + sk].push(f)
 }
 // Every .m(args) and .m suffix of a chain that starts at source offset start, and
 // every [i] suffix that carries its offset, gets its receiver record (goRecvC);
@@ -2302,6 +2477,8 @@ function cTsCase(items) {
 // every `const`, grouped or not; CSpecOn steps the index once per spec.
 var cIotaIdx = 0
 var cLastFns = []
+var cLastAts = []   // that list's end and start positions, for a diagnostic's text
+var cLastAks = []
 var cLastTy = ""
 function cSpecVal(fns, n, ok, io) {
     if (!ok) { return null }
@@ -2331,7 +2508,7 @@ function goNameC(name, pos) {
 // A const spec binds its names and hands the item list on with the position markers
 // CExprItem pushed taken back out, so the builders below see the plain shape.
 // items = [name..., {ty}?, thunk, {cat}, thunk, {cat}, ...].
-function cBindSpec(items) {
+function cBindSpec(items, start) {
     var names = []
     var i = 0
     for (; i < items.length; i++) {
@@ -2343,9 +2520,10 @@ function cBindSpec(items) {
     if (i < items.length && items[i] != undefined && items[i].ty != undefined) { typed = true; cty = items[i].ty; i++ }
     var rest = []
     var ats = []
+    var aks = []
     var k = i
     while (k < items.length) {
-        if (typeof items[k] == "object" && items[k] != null && items[k].cat !== undefined) { ats.push(items[k].cat) }
+        if (typeof items[k] == "object" && items[k] != null && items[k].cat !== undefined) { ats.push(items[k].cat); aks.push(items[k].cks) }
         else { rest.push(items[k]) }
         k = k + 1
     }
@@ -2358,6 +2536,8 @@ function cBindSpec(items) {
         var af = 0
         while (af < ats.length) { fns.push(cfnAt(ats[af])); af = af + 1 }
         cLastFns = fns
+        cLastAts = ats
+        cLastAks = aks
     } else if (ats.length === 0 && rest.length === 0 && cLastFns.length === names.length) {
         fns = cLastFns
     }
@@ -2381,6 +2561,17 @@ function cBindSpec(items) {
     // value. Flat rather than scoped, which is the one thing it gives up: a
     // function-local typed const shadowing a package-level one of the same name
     // would take the inner value for both.
+    // A typed constant is its value converted to the type, which must hold it. A
+    // spec repeating the list above (and its type) is reported at its own line.
+    if (cLastTy != "" && okn) {
+        var cn = 0
+        while (cn < names.length) {
+            var tkr = goKRecOf(cSpecVal(fns, cn, okn, cIotaIdx), cLastAks[cn], cLastAts[cn])
+            if (tkr != null && ats.length == 0) { tkr = {k: tkr.k, ks: tkr.ks, ke: tkr.ke, ln: start} }
+            if (tkr != null) { goConstTo(null, tkr, cLastTy, "constant declaration") }
+            cn = cn + 1
+        }
+    }
     if (typed) {
         var tn = 0
         while (tn < names.length) {
@@ -2472,6 +2663,8 @@ function goCmpFold(items) {
         goFloOperands(items, ts, lt != "" ? lt : rt)
         var l = constAt(items[1].at)
         var r = constAt(items[4].at)
+        if (l != null && r == null) { goOperandFits(goKRecOf(l, items[1].as, items[1].at), rt) }
+        if (r != null && l == null) { goOperandFits(goKRecOf(r, items[4].as, items[4].at), lt) }
         // The clear has to come AFTER the two reads: this node ends exactly where
         // its right operand does, so clearing first would erase what it reads.
         regConst(items[4].at, null)
