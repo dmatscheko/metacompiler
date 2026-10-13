@@ -1759,6 +1759,7 @@ function pyAUserStep(nx, it) {
 // with a user iterator wrapped. Go: the same names in abnf/jsrt.go.
 function js_pyforsrc(v) {
     if (pyIsGen(v) || pyIsIter(v)) { return v }
+    if (pyIsDict(v) || pySetElemsOf(v) !== null || pyIsDView(v)) { return pyAWatchIter(v) }
     var it = pyAUserIter(v)
     if (it !== undefined) { return pyAUserStepper(it) }
     return js_pyiterof(v)
@@ -5899,10 +5900,53 @@ function pyMkIter(name, arr) {
 }
 
 function pyItStep(it) {
+    if (it["__w"] !== undefined) { pyAWatchCheck(it) }
     if (it["__i"] >= it["__a"].length) { return {value: undefined, done: true} }
     var v = it["__a"][it["__i"]]
     it["__i"] = it["__i"] + 1
     return {value: v, done: false}
+}
+
+// Go: rt.pyWatchIter. An iterator over a dict, a set or a dict view WATCHES the
+// container (__w, its size __n, a dict's keys __k), as CPython's do: a size
+// change between two steps is RuntimeError, and so is a dict whose keys changed
+// at equal size by the time the iterator runs out.
+function pyAWatchIter(v) {
+    var it = pyMkIter(pyIterKind(v), pyCCopyArr(pyElemsOf(v)))
+    var w = v
+    if (pyIsDView(v)) { w = v["__vd"] }
+    it["__w"] = w
+    var els = pySetElemsOf(w)
+    if (els !== null) {
+        it["__n"] = els.length
+    } else {
+        it["__n"] = w["keys"].length
+        it["__k"] = pyCCopyArr(w["keys"])
+    }
+    return it
+}
+function pyAWatchCheck(it) {
+    var w = it["__w"]
+    var els = pySetElemsOf(w)
+    var msg = ""
+    if (els !== null) {
+        if (els.length != it["__n"]) { msg = "Set changed size during iteration" }
+    } else if (w["keys"].length != it["__n"]) {
+        msg = "dictionary changed size during iteration"
+    } else if (it["__i"] >= it["__a"].length) {
+        var ks = it["__k"]
+        var i = 0
+        while (i < ks.length) {
+            if (ks[i] !== w["keys"][i]) { msg = "dictionary keys changed during iteration" }
+            i = i + 1
+        }
+    }
+    if (msg != "") {
+        it["__w"] = undefined
+        it["__i"] = it["__a"].length
+        pyRaiseExc("RuntimeError", msg)
+    }
+    return undefined
 }
 
 function pyIsIter(v) {
@@ -5975,6 +6019,7 @@ function js_pyiterfn(v) {
     if (pyIsGen(v) || pyIsIter(v)) { return v }
     var it = pyAUserIter(v)
     if (it !== undefined) { return it }
+    if (pyIsDict(v) || pySetElemsOf(v) !== null || pyIsDView(v)) { return pyAWatchIter(v) }
     return pyMkIter(pyIterKind(v), pyCCopyArr(pyElemsOf(v)))
 }
 
@@ -9597,12 +9642,29 @@ function pyListClamp(v, dflt, n) {
 // reversing, sorting ascending and reversing again, which is how CPython keeps
 // equal elements in their original order under it; an inverted comparison would
 // not. sorted() is this same function run on a copy, as in CPython, which is
-// why its unknown-keyword error names sort().
+// why its unknown-keyword error names sort(). As in CPython the list is EMPTY
+// while it sorts, a list the key function grew is ValueError (its additions
+// dropped), and an exception leaves the items as they were.
 function pySortList(xs, args, kw) {
     if (args.length > 0) {
         throw pyExcInstance("TypeError", "sort() takes no positional arguments")
     }
     pyKwOnly(kw, "sort", "key", "reverse")
+    var items = pyCCopyArr(xs)
+    pyCReplaceArr(xs, [])
+    var vals = []
+    try {
+        vals = pySortItems(items, kw)
+    } catch (e) {
+        pyCReplaceArr(xs, items)
+        throw e
+    }
+    var grown = xs.length > 0
+    pyCReplaceArr(xs, vals)
+    if (grown) { pyRaiseExc("ValueError", "list modified during sort") }
+    return undefined
+}
+function pySortItems(xs, kw) {
     var key = pyKwArg(kw, "key")
     var noKey = key === undefined || key === null
     var rev = pyDTruthy(pyKwArg(kw, "reverse"))
@@ -9635,14 +9697,14 @@ function pySortList(xs, args, kw) {
         vals[p + 1] = vx
         s = s + 1
     }
-    var w = 0
-    while (w < vals.length) {
-        var t = w
-        if (rev) { t = vals.length - 1 - w }
-        xs[t] = vals[w]
-        w = w + 1
+    if (!rev) { return vals }
+    var out = []
+    var w = vals.length - 1
+    while (w >= 0) {
+        out.push(vals[w])
+        w = w - 1
     }
-    return undefined
+    return out
 }
 
 // CPython's TypeError for a keyword argument other than a or b.

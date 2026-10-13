@@ -603,6 +603,11 @@ type jsrt struct {
 	// restores it around a resume, which makes generators nest.
 	curGen *jsGenerator
 
+	// genBusy is the language's hook for a resume of a RUNNING generator (its
+	// body stepping itself): a closure answering the value to throw, or nil to
+	// abort. Registered by js_rt_genbusy; the floor's is RT_GEN_BUSY.
+	genBusy interface{}
+
 	// microQ is the job (microtask) queue promises and async functions schedule
 	// onto; js_jsdrain runs it to exhaustion once the script has finished, which
 	// is the only point at which this runtime has an event loop turn.
@@ -631,6 +636,7 @@ type jsGenerator struct {
 	args    []interface{}
 	started bool
 	done    bool
+	running bool // the body is executing, between a resume and its yield or end
 
 	resume chan interface{} // next(v) -> the body
 	yields chan *genStep    // yield v / return -> next()
@@ -704,12 +710,14 @@ func (g *jsGenerator) step(rt *jsrt, sent interface{}) interface{} {
 			g.yields <- &genStep{value: ret, done: true}
 		}()
 	}
+	g.enter(rt)
 	savedThis, savedNT := rt.thisStack, rt.newTargetStack
 	rt.thisStack, rt.newTargetStack = g.savedThis, g.savedNT
 	prevGen := rt.curGen
 	rt.curGen = g
 	g.resume <- sent
 	st := <-g.yields
+	g.running = false
 	rt.curGen = prevGen
 	g.savedThis, g.savedNT = rt.thisStack, rt.newTargetStack
 	rt.thisStack, rt.newTargetStack = savedThis, savedNT
@@ -759,6 +767,21 @@ func genDelegated(v interface{}) bool {
 	return false
 }
 
+// enter marks the body running for one resume. A resume of a body that is
+// already running - it stepped itself, directly or through another generator -
+// would wait on its own handshake for ever, so it raises what rt.genBusy
+// answers (CPython's ValueError) or aborts. The floor's twin is gen_busy.
+func (g *jsGenerator) enter(rt *jsrt) {
+	if !g.running {
+		g.running = true
+		return
+	}
+	if rt.genBusy == nil {
+		rt.fail("generator already running")
+	}
+	panic(&jsThrown{value: rt.call(rt.genBusy, jsUndef, nil)})
+}
+
 // prime runs the body up to its first yield when it has not started, so that
 // current() and key() answer without the caller having to step it first - PHP's
 // Generator does exactly this.
@@ -781,12 +804,14 @@ func (g *jsGenerator) closeBody(rt *jsrt) {
 		g.lastKey = jsUndef
 		return
 	}
+	g.enter(rt)
 	savedThis, savedNT := rt.thisStack, rt.newTargetStack
 	rt.thisStack, rt.newTargetStack = g.savedThis, g.savedNT
 	prevGen := rt.curGen
 	rt.curGen = g
 	g.resume <- genExit
 	st := <-g.yields
+	g.running = false
 	rt.curGen = prevGen
 	g.savedThis, g.savedNT = rt.thisStack, rt.newTargetStack
 	rt.thisStack, rt.newTargetStack = savedThis, savedNT
@@ -13075,6 +13100,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// exception in its language; one that registers nothing keeps the abort.
 		// The twins are js_rt_missvar / js_rt_missmem in languages/lib/runtime.c.
 		"js_rt_missvar": func(a []uint64) uint64 { rt.missVar = u(a[0]); return 0 },
+		"js_rt_genbusy": func(a []uint64) uint64 { rt.genBusy = u(a[0]); return 0 },
 		"js_rt_missmem": func(a []uint64) uint64 { rt.missMem = u(a[0]); return 0 },
 		// The WRITE sibling of missMem: a hook of its own because node's two
 		// messages differ ("Cannot read properties of" / "Cannot set properties of").
@@ -17130,6 +17156,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			if pyIterName(rt, v) != "" {
 				return a[0]
+			}
+			if it, ok := rt.pyWatchIter(v); ok {
+				return w(it)
 			}
 			return w(rt.pyMkIter(pyIterKind(rt, v), rt.pyElemsOf(v)))
 		},
@@ -21279,22 +21308,46 @@ func (rt *jsrt) pyListMethod(arr *jsArray, name string, args []interface{}, kw i
 // how CPython keeps equal elements in their original order under it; sorting
 // with an inverted comparison would not. sorted() is this same function run on
 // a copy, as in CPython, which is why its unknown-keyword error names sort().
+// As in CPython the list is EMPTY while it sorts, a list the key function grew
+// is ValueError (its additions dropped), and an exception leaves the items as
+// they were.
 func (rt *jsrt) pySortList(arr *jsArray, args []interface{}, kw interface{}) {
 	if len(args) > 0 {
 		panic(&jsThrown{value: rt.pyExcInstance("TypeError",
 			"sort() takes no positional arguments")})
 	}
 	rt.pyKwOnly(kw, "sort", "key", "reverse")
+	items := arr.elems
+	arr.dropIdx()
+	arr.elems = []interface{}{}
+	done := false
+	defer func() {
+		if !done {
+			arr.dropIdx()
+			arr.elems = items
+		}
+	}()
+	out := rt.pySortItems(items, kw)
+	grown := len(arr.elems) > 0
+	arr.dropIdx()
+	arr.elems = out
+	done = true
+	if grown {
+		rt.pyRaise("ValueError", "list modified during sort")
+	}
+}
+
+func (rt *jsrt) pySortItems(elems []interface{}, kw interface{}) []interface{} {
 	key := rt.pyKwArg(kw, "key")
 	rev := rt.pyTruthyOf(rt.pyKwArg(kw, "reverse"))
 	type pySortPair struct{ k, v interface{} }
-	pairs := make([]pySortPair, len(arr.elems))
-	for i, e := range arr.elems {
+	pairs := make([]pySortPair, len(elems))
+	for i := range elems {
 		j := i
 		if rev {
-			j = len(arr.elems) - 1 - i
+			j = len(elems) - 1 - i
 		}
-		e = arr.elems[j]
+		e := elems[j]
 		k := e
 		if !isUndefOrNull(key) {
 			k = rt.callPyValue(key, []interface{}{e}, jsUndef)
@@ -21312,8 +21365,7 @@ func (rt *jsrt) pySortList(arr *jsArray, args []interface{}, kw interface{}) {
 		}
 		out[j] = p.v
 	}
-	arr.dropIdx()
-	arr.elems = out
+	return out
 }
 
 // pyKwOnly raises CPython's TypeError for a keyword argument other than a or b.
@@ -22004,6 +22056,9 @@ func init() {
 			if _, ok := v.(*jsGenerator); ok || pyIterName(rt, v) != "" {
 				return a[0]
 			}
+			if it, ok := rt.pyWatchIter(v); ok {
+				return rt.wrap(it)
+			}
 			if it, ok := rt.pyUserIter(v); ok {
 				return rt.wrap(rt.pyUserStepper(it))
 			}
@@ -22147,6 +22202,9 @@ func (rt *jsrt) pyItStep(it *jsObject) *jsObject {
 	out := newJSObject()
 	a, _ := it.props["__a"].(*jsArray)
 	i := int(rt.toNumber(it.props["__i"]))
+	if wv, ok := it.props["__w"]; ok && wv != jsUndef {
+		rt.pyWatchCheck(it, wv, a, i)
+	}
 	if a == nil || i >= len(a.elems) {
 		out.set("value", jsUndef)
 		out.set("done", true)
@@ -22156,6 +22214,60 @@ func (rt *jsrt) pyItStep(it *jsObject) *jsObject {
 	out.set("value", a.elems[i])
 	out.set("done", false)
 	return out
+}
+
+// pyWatchIter is the iterator over a dict, a set or a dict view, which WATCHES
+// the container (__w, its size __n, a dict's keys __k), as CPython's do: a size
+// change between two steps is RuntimeError, and so is a dict whose keys changed
+// at equal size by the time the iterator runs out. Twin of pyWatchIter in
+// languages/python-interpreter.abnf and pyAWatchIter in lib/python-rt.metajs.
+func (rt *jsrt) pyWatchIter(v interface{}) (*jsObject, bool) {
+	var wo interface{} = v
+	if d, _, ok := pyDView(v); ok {
+		wo = d
+	}
+	n := 0
+	var keys *jsArray
+	if els, ok := pySetElems(wo); ok {
+		n = len(els.elems)
+	} else if k, _, ok := dictParts(wo); ok {
+		n, keys = len(k.elems), &jsArray{elems: append([]interface{}{}, k.elems...)}
+	} else {
+		return nil, false
+	}
+	it := rt.pyMkIter(pyIterKind(rt, v), rt.pyElemsOf(v))
+	it.set("__w", wo)
+	it.set("__n", float64(n))
+	if keys != nil {
+		it.set("__k", keys)
+	}
+	return it, true
+}
+
+func (rt *jsrt) pyWatchCheck(it *jsObject, wo interface{}, a *jsArray, i int) {
+	msg := ""
+	if els, ok := pySetElems(wo); ok {
+		if float64(len(els.elems)) != rt.toNumber(it.props["__n"]) {
+			msg = "Set changed size during iteration"
+		}
+	} else if k, _, ok := dictParts(wo); ok {
+		if float64(len(k.elems)) != rt.toNumber(it.props["__n"]) {
+			msg = "dictionary changed size during iteration"
+		} else if snap, ok := it.props["__k"].(*jsArray); ok && (a == nil || i >= len(a.elems)) {
+			for j, key := range snap.elems {
+				if key != k.elems[j] {
+					msg = "dictionary keys changed during iteration"
+				}
+			}
+		}
+	}
+	if msg != "" {
+		it.set("__w", jsUndef)
+		if a != nil {
+			it.set("__i", float64(len(a.elems)))
+		}
+		rt.pyRaise("RuntimeError", msg)
+	}
 }
 
 // pyIterName answers an iterator object's type name, or "" for anything else.

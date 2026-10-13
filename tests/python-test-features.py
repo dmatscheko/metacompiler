@@ -2639,6 +2639,73 @@ check("slice-errors-catchable", [sr_err(lambda: sr_x[::sr_0[0]]), sr_err(sr_set_
        "ValueError: slice step cannot be zero"])
 
 
+# ----- SECTION: mutation during iteration -----
+#
+# A dict, set or view iterator raises RuntimeError at the step after its
+# container changed size, and a dict's at the end when its keys changed at equal
+# size; changing a value is allowed. A list is empty while it sorts, and a key
+# function that grows it is ValueError. Rows from CPython 3.14.
+def mi_run(f):
+    try:
+        return f()
+    except (RuntimeError, ValueError) as e:
+        return type(e).__name__ + ": " + str(e)
+def mi_add():
+    d = {1: 1, 2: 2}
+    for k in d:
+        d[k + 10] = 0
+def mi_set():
+    s = {1, 2}
+    for k in s:
+        s.add(k + 10)
+def mi_items():
+    d = {1: 1, 2: 2}
+    for k, v in d.items():
+        del d[k]
+def mi_pop_add():
+    d = {1: 1, 2: 2}
+    for k in d:
+        d.pop(k)
+        d[k + 10] = 0
+def mi_value():
+    d = {1: 1, 2: 2}
+    for k in d:
+        d[k] = k * 5
+    return d
+def mi_next():
+    d = {1: 1}
+    it = iter(d)
+    d[2] = 2
+    return next(it)
+check("iter-mutation", [mi_run(mi_add), mi_run(mi_set), mi_run(mi_items), mi_run(mi_pop_add), mi_run(mi_value), mi_run(mi_next)],
+      ["RuntimeError: dictionary changed size during iteration", "RuntimeError: Set changed size during iteration",
+       "RuntimeError: dictionary changed size during iteration", "RuntimeError: dictionary keys changed during iteration",
+       {1: 5, 2: 10}, "RuntimeError: dictionary changed size during iteration"])
+mi_l = [3, 1, 2]
+mi_seen = []
+def mi_key(x):
+    mi_seen.append(len(mi_l))
+    mi_l.append(x)
+    return x
+def gr_self():
+    yield next(gr_me)
+gr_me = gr_self()
+def gr_catch():
+    try:
+        yield next(gr_me2)
+    except ValueError as e:
+        yield "inner " + str(e)
+gr_me2 = gr_catch()
+def gr_send():
+    gr_me3.send(None)
+    yield 1
+gr_me3 = gr_send()
+check("generator-reentry", [mi_run(lambda: next(gr_me)), list(gr_me), next(gr_me2), mi_run(lambda: next(gr_me3))],
+      ["ValueError: generator already executing", [], "inner generator already executing",
+       "ValueError: generator already executing"])
+check("sort-mutation",[mi_run(lambda: mi_l.sort(key=mi_key)), mi_l, mi_seen], ["ValueError: list modified during sort", [1, 2, 3], [0, 1, 2]])
+
+
 # ----- import edges -----
 # `from M import *` binds a runtime module's public names and a library
 # module's __all__, `import P.S` binds P, and a module function keeps its

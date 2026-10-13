@@ -2163,6 +2163,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return pyItAdvance(it)
     }
     function pyItAdvance(it) {
+        if (it.__w !== undefined) { pyWatchCheck(it) }
         if (it.__i >= it.__a.length) { return {value: undefined, done: true} }
         var v = it.__a[it.__i]
         it.__i = it.__i + 1
@@ -2170,6 +2171,35 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function isPyIt(v) {
         return v !== null && v !== undefined && typeof v == "object" && v.__pyit !== undefined
+    }
+    // An iterator over a dict, a set or a dict view WATCHES the container (__w,
+    // its size __n, a dict's keys __k), as CPython's do: a size change between
+    // two steps is RuntimeError, and so is a dict whose keys changed at equal
+    // size by the time the iterator runs out. Twin of rt.pyWatchIter in
+    // abnf/jsrt.go and pyAWatchIter in lib/python-rt.metajs.
+    function pyWatchIter(v) {
+        var it = pyMkIter(pyItKind(v), iterToList(v).slice(0))
+        var w = isView(v) ? v.__vd : v
+        it.__w = w
+        it.__n = w.keys.length
+        if (!isSet(w)) { it.__k = w.keys.slice(0) }
+        return it
+    }
+    function pyWatchCheck(it) {
+        var w = it.__w
+        var msg = ""
+        if (w.keys.length != it.__n) {
+            msg = isSet(w) ? "Set changed size during iteration" : "dictionary changed size during iteration"
+        } else if (it.__i >= it.__a.length && it.__k !== undefined) {
+            for (var i = 0; i < it.__k.length; i++) {
+                if (it.__k[i] !== w.keys[i]) { msg = "dictionary keys changed during iteration" }
+            }
+        }
+        if (msg != "") {
+            it.__w = undefined
+            it.__i = it.__a.length
+            pyListErr("RuntimeError", msg)
+        }
     }
     // What is LEFT of an iterator, which the read then EXHAUSTS - so next(it)
     // followed by list(it) does not repeat an element.
@@ -2211,6 +2241,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var itf = clsFind(v.__class, "__iter__")
             if (itf != null) { return itf(v) }
         }
+        if (isDict(v) || isView(v)) { return pyWatchIter(v) }
         return pyMkIter(pyItKind(v), iterToList(v).slice(0))
     }
     // next(it[, default]) - the ordinary way to drive a generator.
@@ -6404,9 +6435,32 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // CPython keeps equal elements in their original order under it; an inverted
     // comparison would not. sorted() is this same function run on a copy, as in
     // CPython, which is why its unknown-keyword error names sort().
+    // As in CPython the list is EMPTY while it sorts, a list the key function
+    // grew is ValueError (its additions dropped), and an exception leaves the
+    // items as they were. Twin of rt.pySortList in abnf/jsrt.go and
+    // lib/python-rt.metajs.
     function pySortList(xs, args, kw) {
         if (args.length > 0) { pyListErr("TypeError", "sort() takes no positional arguments") }
         pyKwOnly(kw, "sort", "key", "reverse")
+        var items = xs.slice(0)
+        listTruncate(xs, 0)
+        var vals = []
+        var ok = false
+        try {
+            vals = pySortItems(items, kw)
+            ok = true
+        } finally {
+            if (!ok) {
+                listTruncate(xs, 0)
+                for (var r = 0; r < items.length; r++) { xs.push(items[r]) }
+            }
+        }
+        var grown = xs.length > 0
+        listTruncate(xs, 0)
+        for (var w = 0; w < vals.length; w++) { xs.push(vals[w]) }
+        if (grown) { pyListErr("ValueError", "list modified during sort") }
+    }
+    function pySortItems(xs, kw) {
         var key = pyKwArg(kw, "key")
         var rev = pytruthy(pyKwArg(kw, "reverse"))
         var vals = []
@@ -6431,9 +6485,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             keys[p + 1] = kx
             vals[p + 1] = vx
         }
-        for (var w = 0; w < vals.length; w++) {
-            xs[rev ? vals.length - 1 - w : w] = vals[w]
-        }
+        if (rev) { vals.reverse() }
+        return vals
     }
     // CPython's TypeError for a keyword argument other than A or B.
     function pyKwOnly(kw, fname, a, b) {
@@ -9776,9 +9829,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return genRun(g, sendv)
     }
+    // A step of a generator whose body is RUNNING (it stepped itself, directly
+    // or through another) is CPython's ValueError. Twin of jsGenerator.enter in
+    // abnf/jsrt.go and gen_busy in languages/lib/runtime.c.
     function genRun(g, sendv) {
         var st = g.st
         if (st.done) { return {yielded: false, value: st.ret} }
+        if (g.running === true) { pyListErr("ValueError", "generator already executing") }
+        g.running = true
+        try { return genReplay(g, st, sendv) } finally { g.running = false }
+    }
+    function genReplay(g, st, sendv) {
         st.sent.push(sendv)
         var run = {target: st.count, k: 0, sent: st.sent, log: st.log, lp: 0, floor: genSerial}
         genRuns.push(run)
@@ -10655,7 +10716,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // An ITERATOR object is stepped the same way, so `break` leaves it
             // PARTIALLY CONSUMED exactly as it does in the compiled halves, where
             // an iterator object carries a callable "next" and the test is
-            // structural (python-to-llvm-ir.abnf makeForStmt).
+            // structural (python-to-llvm-ir.abnf makeForStmt). A dict, a set and
+            // a view are stepped through a watching one (pyWatchIter).
+            if (isDict(src) || isView(src)) { src = pyWatchIter(src) }
             if (isPyIt(src)) {
                 while (true) {
                     var ir = pyItStep(src)

@@ -4650,6 +4650,19 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var nmCls = callExt(nmb, "js_scope_get", [nmf.Params[0], emitStr(nmb, "NameError")])
         nmb.NewRet(callExt(nmb, "js_pycall", [nmCls, nmArgs, handle(0)]))
         callExt(b, "js_rt_missvar", [callExt(b, "js_closure", [handle(nmIdx), curScopeV])])
+        // A generator resumed while its body runs (it stepped itself) raises
+        // CPython's ValueError: the floor's and the twin's RT_GEN_BUSY hook,
+        // answering the instance the way the NameError hook above does.
+        funcCount++
+        var gbIdx = funcCount
+        var gbf = m.NewFunc("jsf_" + gbIdx, i64,
+                            [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var gbb = gbf.NewBlock("entry")
+        var gbArgs = callExt(gbb, "js_arr_new", [])
+        callExt(gbb, "js_arr_push", [gbArgs, emitStr(gbb, "generator already executing")])
+        var gbCls = callExt(gbb, "js_scope_get", [gbf.Params[0], emitStr(gbb, "ValueError")])
+        gbb.NewRet(callExt(gbb, "js_pycall", [gbCls, gbArgs, handle(0)]))
+        callExt(b, "js_rt_genbusy", [callExt(b, "js_closure", [handle(gbIdx), curScopeV])])
 
         // An exception nobody catches aborts with CPython's last traceback line,
         // `KeyError: 1`, which only python's own str() and class name can render:

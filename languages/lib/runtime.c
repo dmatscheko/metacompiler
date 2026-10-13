@@ -464,6 +464,7 @@ long RT_MISS_VAR;    /* closure(name)      -> the value to throw, or 0 = abort *
 long RT_MISS_MEM;    /* closure(key, obj)  -> the value to throw, or 0 = abort */
 long RT_MISS_SET;    /* closure(key, obj)  -> the value to throw, or 0 = abort */
 long RT_MISS_FN;     /* closure(callee)    -> the value to throw, or 0 = abort */
+long RT_GEN_BUSY;    /* closure()          -> the value to throw, or 0 = abort (gen_busy) */
 long RNG_STATE;      /* Math.random's xorshift64 state, 0 until the first call */
 
 void gc_collect(void);
@@ -4353,6 +4354,18 @@ void coro_entry(long arg) {
 	mec_coro_switch(&cb[2], cb[3]);
 }
 
+/* A resume of a generator whose body is RUNNING (cb[1] == 3) - the body stepping
+ * itself, directly or through another generator - would switch to the stack it
+ * is already on. It raises what the language's RT_GEN_BUSY hook answers
+ * (CPython's ValueError) instead, or aborts, and the close or throw-in that
+ * asked for the resume is dropped. The twin is abnf/jsrt.go's jsGenerator.enter. */
+void gen_busy(long *cb) {
+	cb[13] = 0;
+	cb[14] = 0;
+	if (RT_GEN_BUSY == 0) { die("generator already running"); }
+	js_throw(js_call(RT_GEN_BUSY, H_UNDEF, mk_arr()));
+}
+
 /* Resume a generator until its next yield or its return. Answers nothing: the
  * result is in the cell (d = yielded, e = done, f = returned or thrown), and a
  * body that threw has its value RE-RAISED here, on the resumer's stack. */
@@ -4377,6 +4390,7 @@ void gen_resume(long g, long sent, int closing) {
 		CORO_N = CORO_N + 1;
 	}
 	cb = (long *)fc(g);
+	if (cb[1] == 3) { gen_busy(cb); }
 	sf(g, sent);
 	if (RES_N >= RES_CAP) {
 		long nr = RES_CAP == 0 ? 64 : RES_CAP * 2;
@@ -6631,6 +6645,7 @@ void gc_roots(void) {
 	gc_try(RT_MISS_MEM, 1);
 	gc_try(RT_MISS_SET, 1);
 	gc_try(RT_MISS_FN, 1);
+	gc_try(RT_GEN_BUSY, 1);
 	gc_try(RETSLOT, 1);
 	gc_try(GEN_EXIT, 1);
 	if (NIC_YOUNG != 0) { while (i < 1281) { gc_try(NIC[i], 1); i = i + 1; } }
@@ -6709,6 +6724,7 @@ long js_rt_missvar(long clo) { RT_MISS_VAR = clo; return 0; }
 long js_rt_missmem(long clo) { RT_MISS_MEM = clo; return 0; }
 long js_rt_missset(long clo) { RT_MISS_SET = clo; return 0; }
 long js_rt_missfn(long clo) { RT_MISS_FN = clo; return 0; }
+long js_rt_genbusy(long clo) { RT_GEN_BUSY = clo; return 0; }
 
 /* js_str_mem is the string-literal cache; str_intern, next to mk_str above, is
  * the whole of it. */
