@@ -12417,6 +12417,10 @@ func (rt *jsrt) builtinMethod(m *boundMethod, args []interface{}) interface{} {
 	if m.name == "apply" && isCallable(m.recv) {
 		var callArgs []interface{}
 		if arr, ok := argAt(args, 1).(*jsArray); ok {
+			// A JavaScript arguments object is read up to its own `length`.
+			if jsvIsArgs(arr) {
+				arr = jsvArgsView(arr)
+			}
 			callArgs = arr.elems
 		}
 		return rt.call(m.recv, argAt(args, 0), callArgs)

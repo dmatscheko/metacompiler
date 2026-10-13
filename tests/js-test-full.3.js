@@ -2200,7 +2200,7 @@ function s88() {
 // `length` is the argument count whatever is written to the elements; in a sloppy
 // function with plain parameters, parameter i and arguments[i] are one value below
 // that count, in both directions, through closures, compound stores, destructuring and
-// a var of the parameter's name. Strict code, defaults, rest parameters, generators and
+// a var of the parameter's name. Strict code, defaults, rest parameters and class
 // methods are unmapped. Values read off node 24.
 function s89() {
     const v = [1, 2, 3]
@@ -2280,6 +2280,57 @@ function s90() {
     check("tg90d", seesLex() === 3 && hoisted === 2)
 }
 
+// ===== SECTION 91: the arguments object through other references, past its length; "__#" keys =====
+// A store through another reference to a mapped arguments object reaches the parameter,
+// a generator's and an async function's arguments are mapped too, and `delete` ends an
+// element's mapping. `length` is an ordinary property: writing it leaves the elements
+// alone, and an iteration, a spread, apply and an Array method read up to it, while the
+// own keys are the elements that hold a value. Number.parseInt and parseFloat are the
+// globals. A program's own "__#" key is a key like any other. Values read off node 24.
+function s91() {
+    const v = [1, 2, 3]
+    function a1(p) { var a = arguments; a[0] = 2; return p }
+    function a2(p) { const box = {a: arguments}; box.a[0] = 4; return p }
+    function a3(p) { const a = arguments; const g = () => { a[0] = 6 }; g(); return p }
+    function* g1(p) { p = 5; yield arguments[0] }
+    function* g2(p) { arguments[0] = 6; yield p; yield p }
+    function d1(p) { delete arguments[0]; p = 3; return arguments[0] + ":" + p }
+    function d2(p) { delete arguments[0]; arguments[0] = 9; return p }
+    const it2 = g2(v[0])
+    check("ag91a", a1(v[0]) === 2 && a2(v[0]) === 4 && a3(v[0]) === 6 && g1(v[0]).next().value === 5 &&
+        it2.next().value === 6 && it2.next().value === 6 && d1(v[0]) === "undefined:3" && d2(v[0]) === 1)
+    function sum() { let s = 0; for (let i = 0; i < arguments.length; i++) { s += arguments[i] } return s }
+    function k1() {
+        arguments[2] = 1
+        return [Object.keys(arguments).join(), arguments.length, [...arguments].length, Array.from(arguments).length,
+            Array.prototype.slice.call(arguments).length, JSON.stringify(arguments), sum.apply(null, arguments),
+            arguments.hasOwnProperty(1), 1 in arguments, 2 in arguments].join(" ")
+    }
+    function k2() { arguments[2] = 1; let s = ""; for (const x of arguments) { s += x } for (const k in arguments) { s += "k" + k } return s }
+    check("ag91b", k1() === "2 0 0 0 0 {\"2\":1} 0 false false true" &&
+        k1(v[0]) === "0,2 1 1 1 1 {\"0\":1,\"2\":1} 1 false false true" && k2(v[0]) === "1k0k2")
+    function t1(p, q) { arguments.length = 0; return arguments.length + ":" + arguments[0] + ":" + [...arguments].length + ":" + Object.keys(arguments).join("") }
+    function t2(p) { arguments.length = 3; return [...arguments].join("|") + ":" + Object.keys(arguments).length + ":" + Array.from(arguments).length }
+    function t3(p, q) { arguments.length = 1; q = 9; return arguments[1] + ":" + [...arguments].length }
+    function t4() { return Object.getOwnPropertyNames(arguments).join() }
+    check("ag91c", t1(v[0], 7) === "0:1:0:01" && t2(v[0]) === "1||:1:3" && t3(v[0], v[1]) === "9:1" &&
+        t4(v[0], v[1]) === "0,1,length,callee" && Object.getOwnPropertyNames(v).join() === "0,1,2,length")
+    check("ag91d", Number.parseInt === parseInt && Number.parseFloat === parseFloat && parseInt.length === 2 &&
+        parseFloat.length === 1 && parseInt.name === "parseInt" && Number.parseFloat.name === "parseFloat")
+    const ks = ["__#x", "__#1#y"]
+    const o = {}
+    o[ks[0]] = 1
+    o[ks[1]] = 2
+    const lit = {"__#a": 3, __b: 4}
+    const ps = JSON.parse('{"__#q": 5}')
+    class P { #x = 1; has(t) { return #x in t } }
+    const pp = new P()
+    check("ag91e", Object.keys(o).join() === "__#x,__#1#y" && JSON.stringify(o) === '{"__#x":1,"__#1#y":2}' &&
+        Object.keys(lit).join() === "__#a,__b" && ps["__#q"] === 5 && Object.keys(ps).length === 1 &&
+        o.hasOwnProperty(ks[0]) && (ks[1] in o) && pp.has(pp) && !pp.has(o) && Object.keys(pp).length === 0 &&
+        JSON.stringify(Object.entries({"__#z": 1})) === '[["__#z",1]]')
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -2328,6 +2379,7 @@ function main() {
     s88() // SECTION-CALL 88
     s89() // SECTION-CALL 89
     s90() // SECTION-CALL 90
+    s91() // SECTION-CALL 91
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

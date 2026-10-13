@@ -621,7 +621,11 @@ EqExpr      <~~ push(foldBinary(takeAll())) ~~>
 
 // See the twin of this comment in js-to-llvm-ir.abnf.
 InExpr      <~~ push(makeInInstanceof(takeAll(), up.pos)) ~~>
-            = RelExpr { ( KwInstanceof | KwIn ) <~~ push(up.in) ~~> RelExpr } ;
+            = ( PrivIn | RelExpr ) { ( KwInstanceof | KwIn ) <~~ push(up.in) ~~> RelExpr } ;
+// '#field in obj', the brand check: js_jsprivin asks for the private name's RAW key,
+// which no key of the program can spell. Twin of PrivIn in js-interpreter.abnf.
+PrivIn      <~~ push(makePrivIn(pop(), pop())) ~~>
+            = "#" Id <~~ push(idName(up.in)) ~~> KwIn RelExpr ;
 
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
             = ShiftExpr { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> ShiftExpr } ;
@@ -884,10 +888,7 @@ SpreadElem  <~~ push({spreadT: pop()}) ~~>
 
 Primary     = AsyncArrow | ArrowFn | TypeAssertion | DynImport | ImportMeta | NewTarget | NewExpr | NewWidened | SuperProp | "(" Expression ")" | AsyncFuncExpr | GenFuncExpr | FunctionExpr | ClassExpr
             | TemplateLit | RegexLit | ObjectLit | ArrayLit | StringLit | NumberLit
-            | True | False | Null | Undefined | PrivateNameRef | VarRef ;
-// See the twin of this comment in js-to-llvm-ir.abnf.
-PrivateNameRef <~~ push(privRefConst(pop())) ~~>
-            = "#" Id <~~ push(idName(up.in)) ~~> ;
+            | True | False | Null | Undefined | VarRef ;
 
 // 'import("./m")' is the dynamic import EXPRESSION and 'import.meta' the module record:
 // both are module-system features this flat, single-scope compiler has no model for, so
@@ -2771,7 +2772,9 @@ NotFuncHead = :script(~~
             var p = emitRefPath(b, ref)
             // js_jsdel adds the ARRAY case: the shared js_del only knows objects. The
             // slot is blanked and the key dropped, so `1 in a` is false afterwards.
-            return {b: p.b, v: callExt(p.b, "js_jsdel", [p.obj, p.key])}
+            var dv = callExt(p.b, "js_jsdel", [p.obj, p.key])
+            emitArgPut(p.b, ref, p.obj, p.key, hUndef, hTrue)
+            return {b: p.b, v: dv}
         }
     }
     // 'void e': evaluate and discard.
@@ -3879,6 +3882,7 @@ NotFuncHead = :script(~~
         var savedAsyncGen = inAsyncGen
         var savedPlainGen = inPlainGen
         var savedStrict = emitStrict
+        var savedAlias = argsAliasOn
         if (ownStrict === true) { emitStrict = true }
         if (!isCtl) { inAsyncFn = pendingAsyncFn; inAsyncGen = pendingAsyncGen; inPlainGen = pendingPlainGen }
         pendingAsyncFn = false
@@ -3907,7 +3911,8 @@ NotFuncHead = :script(~~
         if (!isCtl && isArrow !== true) {
             var argsV = argsWant ? callExt(b, "js_jsargs", [f.Params[1], callExt(b, "js_num_i", [handle(0)])]) : f.Params[1]
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "arguments"), argsV])
-            if (argsWant && lexThis !== true && argsMapped(paramNames)) {
+            argsAliasOn = argsWant && argsMapped(paramNames)
+            if (argsAliasOn) {
                 var pnV = callExt(b, "js_arr_new", [])
                 for (var pi = 0; pi < paramNames.length; pi++) { callExt(b, "js_arr_push", [pnV, emitStr(b, paramNames[pi])]) }
                 callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0argm"), callExt(b, "js_jsargmap", [pnV, argsV])])
@@ -3925,6 +3930,7 @@ NotFuncHead = :script(~~
         inAsyncFn = savedAsync
         inAsyncGen = savedAsyncGen
         inPlainGen = savedPlainGen
+        argsAliasOn = savedAlias
         emitStrict = savedStrict
         emitParams = savedParams
         return idx
@@ -4761,6 +4767,14 @@ NotFuncHead = :script(~~
     }
     // The value thunk of a private-name REFERENCE: makeConst, with the key resolved at
     // emit time instead of at walk time.
+    function makePrivIn(objT, n) {
+        var keyT = privRefConst(n)
+        return function(b) {
+            var r = objT(b)
+            var k = keyT(r.b)
+            return {b: k.b, v: callExt(k.b, "js_jsprivin", [r.v, k.v])}
+        }
+    }
     function privRefConst(n) {
         var st = privStack.slice()
         return function(b) { return {b: b, v: emitStr(b, privRefKey(st, n))} }
@@ -4779,7 +4793,7 @@ NotFuncHead = :script(~~
             var kr = m.nameT(b)
             return {b: kr.b, v: callExt(kr.b, "js_jspropkey", [kr.v])}
         }
-        return {b: b, v: emitStr(b, jsKeyEsc(m.name))}
+        return {b: b, v: emitStr(b, memberNameEsc(m))}
     }
     // The member's own name for `f.name` / `f.length` - "" when the key is COMPUTED and
     // so is only known at run time.
@@ -4853,11 +4867,14 @@ NotFuncHead = :script(~~
     function makeClassPrivate(items) {
         var statik = isStaticMods(items[0].mods)
         if (items.length > 3) {
-            return {kind: "method", name: items[1], statik: statik, params: items[2], body: items[3]}
+            return {kind: "method", name: items[1], priv: true, statik: statik, params: items[2], body: items[3]}
         }
-        return {kind: "field", name: items[1], statik: statik,
+        return {kind: "field", name: items[1], priv: true, statik: statik,
                 init: items.length > 2 ? items[2] : null}
     }
+    // The key a member with a literal name is filed under: a private one's mangled key is
+    // the engine's own and stays raw, anything else is a key of the program.
+    function memberNameEsc(m) { return (m.priv === true) ? m.name : jsKeyEsc(m.name) }
     // The same shapes with a computed or literal KEY, which arrives as a value thunk.
     function makeClassComputed(items) {
         var statik = isStaticMods(items[0].mods)
@@ -4893,6 +4910,8 @@ NotFuncHead = :script(~~
         var savedAsyncGen = inAsyncGen
         var savedStrict = emitStrict
         emitStrict = true // A class body is strict code, always.
+        var savedAlias = argsAliasOn
+        argsAliasOn = false
         var savedParams = emitParams
         emitParams = params
         var savedPlainGen = inPlainGen
@@ -4947,6 +4966,7 @@ NotFuncHead = :script(~~
         inAsyncFn = savedAsync
         inAsyncGen = savedAsyncGen
         inPlainGen = savedPlainGen
+        argsAliasOn = savedAlias
         emitStrict = savedStrict
         emitParams = savedParams
         return idx
@@ -4970,7 +4990,7 @@ NotFuncHead = :script(~~
                     b = r.b
                     fv = r.v
                 }
-                callExt(b, memSetExt(), [thisV, emitStr(b, jsKeyEsc(inits.fields[k].name)), fv])
+                callExt(b, memSetExt(), [thisV, emitStr(b, memberNameEsc(inits.fields[k])), fv])
             }
         }
         if (inits.props != undefined && inits.props != null) {
@@ -5589,7 +5609,7 @@ NotFuncHead = :script(~~
     function jsKeyEsc(k) {
         if (k.length == 0 || c.curFile() == "js-builtins.js") { return k }
         var k0 = k.charCodeAt(0)
-        if (k0 == 1 || (k0 == 95 && k.length >= 2 && k.charCodeAt(1) == 95 && !(k.length >= 3 && k.charCodeAt(2) == 35))) { return String.fromCharCode(1) + k }
+        if (k0 == 1 || (k0 == 95 && k.length >= 2 && k.charCodeAt(1) == 95 && !(k.length >= 4 && k.charCodeAt(2) == 35 && k.charCodeAt(3) == 64))) { return String.fromCharCode(1) + k }
         return k
     }
     function keyEscT(t) {
@@ -5618,7 +5638,15 @@ NotFuncHead = :script(~~
     }
     function refMemberSet(b, ref, objV, keyV, v) {
         callExt(b, memSetExt(), [objV, keyV, v])
-        if (argsWant && ref.name === "arguments" && ref.path.length == 1) { callExt(b, "js_jsargput", [curScopeV, keyV, v]) }
+        emitArgPut(b, ref, objV, keyV, v, hFalse)
+    }
+    var argsAliasOn = false
+    // After a store of v to objV[keyV] (unmapV true: a delete of it), the copy into the
+    // mapped parameter it may be.
+    function emitArgPut(b, ref, objV, keyV, v, unmapV) {
+        if (argsWant && (argsAliasOn || (ref.name === "arguments" && ref.path.length == 1))) {
+            callExt(b, "js_jsargput", [curScopeV, objV, keyV, v, unmapV])
+        }
     }
     // The temporal dead zone: see the twin of this comment in js-to-llvm-ir.abnf.
     var tdzGH = [] // [the sentinel's module global, jstdzchk]

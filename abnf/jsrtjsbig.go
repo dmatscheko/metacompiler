@@ -544,18 +544,28 @@ func (rt *jsrt) addJSBigIntExterns(m map[string]func(args []uint64) uint64) {
 			return rt.jsvToNum(args[0])
 		}))
 	}
-	// The parseFloat global: JavaScript's, not the shared host function's.
+	// The parseFloat global: JavaScript's, not the shared host function's. One per
+	// runtime, because Number.parseFloat is the very same function (staticValue).
+	var parseFloatFn, parseIntFn *hostFunc
 	m["js_jsparsefloatfn"] = func(a []uint64) uint64 {
-		return w(jsHostFunc("parseFloat", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			return jsParseFloatJS(rt.jsvString(argAt(args, 0)))
-		}))
+		if parseFloatFn == nil {
+			parseFloatFn = jsHostFunc("parseFloat", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+				return jsParseFloatJS(rt.jsvString(argAt(args, 0)))
+			})
+			jsvFnMetaSet(parseFloatFn, "parseFloat", 1)
+		}
+		return w(parseFloatFn)
 	}
 	// The parseInt global, the same way.
 	m["js_jsparseintfn"] = func(a []uint64) uint64 {
-		return w(jsHostFunc("parseInt", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			s := rt.jsvString(argAt(args, 0))
-			return jsParseIntJS(s, rt.toInt32(rt.jsvToNum(argAt(args, 1))))
-		}))
+		if parseIntFn == nil {
+			parseIntFn = jsHostFunc("parseInt", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+				s := rt.jsvString(argAt(args, 0))
+				return jsParseIntJS(s, rt.toInt32(rt.jsvToNum(argAt(args, 1))))
+			})
+			jsvFnMetaSet(parseIntFn, "parseInt", 2)
+		}
+		return w(parseIntFn)
 	}
 }
 

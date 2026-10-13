@@ -501,7 +501,11 @@ EqExpr      <~~ push(foldBinary(takeAll())) ~~>
 // is this runtime's stand-in for the prototype chain. With neither operator present this
 // level is a transparent pass-through of its single operand.
 InExpr      <~~ push(makeInInstanceof(takeAll(), up.pos)) ~~>
-            = RelExpr { ( KwInstanceof | KwIn ) <~~ push(up.in) ~~> RelExpr } ;
+            = ( PrivIn | RelExpr ) { ( KwInstanceof | KwIn ) <~~ push(up.in) ~~> RelExpr } ;
+// '#field in obj', the brand check: js_jsprivin asks for the private name's RAW key,
+// which no key of the program can spell. Twin of PrivIn in js-interpreter.abnf.
+PrivIn      <~~ push(makePrivIn(pop(), pop())) ~~>
+            = "#" Id <~~ push(idName(up.in)) ~~> KwIn RelExpr ;
 
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
             = ShiftExpr { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> ShiftExpr } ;
@@ -733,13 +737,7 @@ SpreadElem  <~~ push({spreadT: pop()}) ~~>
 
 Primary     = NewTarget | NewExpr | NewWidened | SuperProp | "(" Expression ")" | AsyncFuncExpr | GenFuncExpr | FunctionExpr | ClassExpr
             | TemplateLit | RegexLit | ObjectLit | ArrayLit | StringLit | NumberLit
-            | True | False | Null | Undefined | PrivateNameRef | VarRef ;
-// '#field in obj' - the ergonomic brand check of ES2022. A private name is stored under
-// the mangled key '__#<body>#field' (privKey), so the operand is that key as a string and the
-// ordinary 'in' does the rest - js_jshas has the arm that lets a private name past the
-// __-slot filter. Tried before VarRef, whose Id cannot start at a '#'.
-PrivateNameRef <~~ push(privRefConst(pop())) ~~>
-            = "#" Id <~~ push(idName(up.in)) ~~> ;
+            | True | False | Null | Undefined | VarRef ;
 
 // new C(args): build an instance of the class named C. Member/call suffixes may follow
 // (new C().m()).
@@ -3934,7 +3932,9 @@ NotFuncHead = :script(~~
             var p = emitRefPath(b, ref)
             // js_jsdel adds the ARRAY case: the shared js_del only knows objects. The
             // slot is blanked and the length left alone, as in the interpreter half.
-            return {b: p.b, v: callExt(p.b, "js_jsdel", [p.obj, p.key])}
+            var dv = callExt(p.b, "js_jsdel", [p.obj, p.key])
+            emitArgPut(p.b, ref, p.obj, p.key, hUndef, hTrue)
+            return {b: p.b, v: dv}
         }
     }
     // 'void e': evaluate and discard.
@@ -4013,7 +4013,7 @@ NotFuncHead = :script(~~
     function jsKeyEsc(k) {
         if (k.length == 0 || c.curFile() == "js-builtins.js") { return k }
         var k0 = k.charCodeAt(0)
-        if (k0 == 1 || (k0 == 95 && k.length >= 2 && k.charCodeAt(1) == 95 && !(k.length >= 3 && k.charCodeAt(2) == 35))) { return String.fromCharCode(1) + k }
+        if (k0 == 1 || (k0 == 95 && k.length >= 2 && k.charCodeAt(1) == 95 && !(k.length >= 4 && k.charCodeAt(2) == 35 && k.charCodeAt(3) == 64))) { return String.fromCharCode(1) + k }
         return k
     }
     function keyEscT(t) {
@@ -4032,12 +4032,13 @@ NotFuncHead = :script(~~
     // object (ECMA-262 10.4.4.7): while the call runs, parameter i and arguments[i] are
     // one value for every i below the argument count. Its scope keeps the mapped names
     // under "0argm" (js_jsargmap); a store to a name that is some function's parameter
-    // is copied into arguments (js_jsargsync), and a store to `arguments[k]` into the
-    // parameter (js_jsargput). Both externs find the binding at run time, so a
-    // closure's store and a shadowing block binding come out right. A store through any
-    // OTHER reference to the arguments object is not copied, and a generator's or an
-    // async function's arguments are not mapped (lexThis), since the interpreter
-    // replays a generator's body from its argument array. Twins: jsArgSync /
+    // is copied into arguments (js_jsargsync), and a store to an element of the
+    // arguments object into the parameter (js_jsargput), and a delete ends the element's
+    // mapping. Both externs find the binding at run time, so a closure's store and a
+    // shadowing block binding come out right. A store through another reference to the
+    // object ('var a = arguments; a[0] = 2') is copied too, where the call's scope is on
+    // the chain: argsAliasOn says so while a mapped function and its arrows are emitted,
+    // and only there does every member store pay the extern. Twins: jsArgSync /
     // jsArgPut in js-interpreter.abnf; the externs are in abnf/jsrtjsprint.go and
     // languages/lib/js-rt.metajs.
     var paramSeen = {}
@@ -4057,7 +4058,15 @@ NotFuncHead = :script(~~
     // the reference is `arguments[k]`.
     function refMemberSet(b, ref, objV, keyV, v) {
         callExt(b, memSetExt(), [objV, keyV, v])
-        if (argsWant && ref.name === "arguments" && ref.path.length == 1) { callExt(b, "js_jsargput", [curScopeV, keyV, v]) }
+        emitArgPut(b, ref, objV, keyV, v, hFalse)
+    }
+    var argsAliasOn = false
+    // After a store of v to objV[keyV] (unmapV true: a delete of it), the copy into the
+    // mapped parameter it may be.
+    function emitArgPut(b, ref, objV, keyV, v, unmapV) {
+        if (argsWant && (argsAliasOn || (ref.name === "arguments" && ref.path.length == 1))) {
+            callExt(b, "js_jsargput", [curScopeV, objV, keyV, v, unmapV])
+        }
     }
     // The temporal dead zone (lib/js-hoist.js). A scope creates the names some
     // reference can reach uninitialized holding the TDZ SENTINEL, one pinned object
@@ -5451,6 +5460,7 @@ NotFuncHead = :script(~~
         var savedAsyncGen = inAsyncGen
         var savedPlainGen = inPlainGen
         var savedStrict = emitStrict
+        var savedAlias = argsAliasOn
         if (ownStrict === true) { emitStrict = true }
         if (!isCtl) { inAsyncFn = pendingAsyncFn; inAsyncGen = pendingAsyncGen; inPlainGen = pendingPlainGen }
         pendingAsyncFn = false
@@ -5484,7 +5494,8 @@ NotFuncHead = :script(~~
         if (!isCtl && isArrow !== true) {
             var argsV = argsWant ? callExt(b, "js_jsargs", [f.Params[1], callExt(b, "js_num_i", [handle(0)])]) : f.Params[1]
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "arguments"), argsV])
-            if (argsWant && lexThis !== true && argsMapped(paramNames)) {
+            argsAliasOn = argsWant && argsMapped(paramNames)
+            if (argsAliasOn) {
                 var pnV = callExt(b, "js_arr_new", [])
                 for (var pi = 0; pi < paramNames.length; pi++) { callExt(b, "js_arr_push", [pnV, emitStr(b, paramNames[pi])]) }
                 callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0argm"), callExt(b, "js_jsargmap", [pnV, argsV])])
@@ -5502,6 +5513,7 @@ NotFuncHead = :script(~~
         inAsyncFn = savedAsync
         inAsyncGen = savedAsyncGen
         inPlainGen = savedPlainGen
+        argsAliasOn = savedAlias
         emitStrict = savedStrict
         emitParams = savedParams
         return idx
@@ -6517,6 +6529,14 @@ NotFuncHead = :script(~~
     }
     // The value thunk of a private-name REFERENCE: makeConst, with the key resolved at
     // emit time instead of at walk time.
+    function makePrivIn(objT, n) {
+        var keyT = privRefConst(n)
+        return function(b) {
+            var r = objT(b)
+            var k = keyT(r.b)
+            return {b: k.b, v: callExt(k.b, "js_jsprivin", [r.v, k.v])}
+        }
+    }
     function privRefConst(n) {
         var st = privStack.slice()
         return function(b) { return {b: b, v: emitStr(b, privRefKey(st, n))} }
@@ -6543,7 +6563,7 @@ NotFuncHead = :script(~~
             var kr = m.nameT(b)
             return {b: kr.b, v: callExt(kr.b, "js_jspropkey", [kr.v])}
         }
-        return {b: b, v: emitStr(b, jsKeyEsc(m.name))}
+        return {b: b, v: emitStr(b, memberNameEsc(m))}
     }
     // The member's own name for `f.name` / `f.length` - "" when the key is COMPUTED and
     // so is only known at run time.
@@ -6601,11 +6621,14 @@ NotFuncHead = :script(~~
     function makeClassPrivate(items) {
         var statik = isStaticMods(items[0].mods)
         if (items.length > 3) {
-            return {kind: "method", name: items[1], statik: statik, params: items[2], body: items[3]}
+            return {kind: "method", name: items[1], priv: true, statik: statik, params: items[2], body: items[3]}
         }
-        return {kind: "field", name: items[1], statik: statik,
+        return {kind: "field", name: items[1], priv: true, statik: statik,
                 init: items.length > 2 ? items[2] : null}
     }
+    // The key a member with a literal name is filed under: a private one's mangled key is
+    // the engine's own and stays raw, anything else is a key of the program.
+    function memberNameEsc(m) { return (m.priv === true) ? m.name : jsKeyEsc(m.name) }
     // The same shapes with a computed or literal KEY, which arrives as a value thunk.
     function makeClassComputed(items) {
         var statik = isStaticMods(items[0].mods)
@@ -6649,6 +6672,8 @@ NotFuncHead = :script(~~
         var savedAsyncGen = inAsyncGen
         var savedStrict = emitStrict
         emitStrict = true // A class body is strict code, always.
+        var savedAlias = argsAliasOn
+        argsAliasOn = false
         var savedParams = emitParams
         emitParams = params
         var savedPlainGen = inPlainGen
@@ -6713,6 +6738,7 @@ NotFuncHead = :script(~~
         inAsyncFn = savedAsync
         inAsyncGen = savedAsyncGen
         inPlainGen = savedPlainGen
+        argsAliasOn = savedAlias
         emitStrict = savedStrict
         emitParams = savedParams
         return idx
@@ -6726,7 +6752,7 @@ NotFuncHead = :script(~~
                 b = r.b
                 fv = r.v
             }
-            callExt(b, memSetExt(), [thisV, emitStr(b, jsKeyEsc(initFields[k].name)), fv])
+            callExt(b, memSetExt(), [thisV, emitStr(b, memberNameEsc(initFields[k])), fv])
         }
         return b
     }

@@ -4085,6 +4085,57 @@ function s84(): void {
     check("tg84d", seesLex() === 3 && hoisted === 2)
 }
 
+// ===== SECTION 85: the arguments object through other references, past its length; "__#" keys =====
+// A store through another reference to a mapped arguments object reaches the parameter,
+// a generator's and an async function's arguments are mapped too, and `delete` ends an
+// element's mapping. `length` is an ordinary property: writing it leaves the elements
+// alone, and an iteration, a spread, apply and an Array method read up to it, while the
+// own keys are the elements that hold a value. Number.parseInt and parseFloat are the
+// globals. A program's own "__#" key is a key like any other. Values read off node 24.
+function s85(): void {
+    const v: any[] = [1, 2, 3]
+    function a1(p?: any): any { var a = arguments; a[0] = 2; return p }
+    function a2(p?: any): any { const box = {a: arguments}; box.a[0] = 4; return p }
+    function a3(p?: any): any { const a = arguments; const g = () => { a[0] = 6 }; g(); return p }
+    function* g1(p?: any): any { p = 5; yield arguments[0] }
+    function* g2(p?: any): any { arguments[0] = 6; yield p; yield p }
+    function d1(p?: any): any { delete arguments[0]; p = 3; return arguments[0] + ":" + p }
+    function d2(p?: any): any { delete arguments[0]; arguments[0] = 9; return p }
+    const it2 = g2(v[0])
+    check("ag85a", a1(v[0]) === 2 && a2(v[0]) === 4 && a3(v[0]) === 6 && g1(v[0]).next().value === 5 &&
+        it2.next().value === 6 && it2.next().value === 6 && d1(v[0]) === "undefined:3" && d2(v[0]) === 1)
+    function sum(...xs: any[]): any { let s = 0; for (let i = 0; i < arguments.length; i++) { s += arguments[i] } return s }
+    function k1(...xs: any[]): string {
+        arguments[2] = 1
+        return [Object.keys(arguments).join(), arguments.length, [...arguments].length, Array.from(arguments).length,
+            Array.prototype.slice.call(arguments).length, JSON.stringify(arguments), sum.apply(null, arguments),
+            arguments.hasOwnProperty(1), 1 in arguments, 2 in arguments].join(" ")
+    }
+    function k2(...xs: any[]): string { arguments[2] = 1; let s = ""; for (const x of arguments) { s += x } for (const k in arguments) { s += "k" + k } return s }
+    check("ag85b", k1() === "2 0 0 0 0 {\"2\":1} 0 false false true" &&
+        k1(v[0]) === "0,2 1 1 1 1 {\"0\":1,\"2\":1} 1 false false true" && k2(v[0]) === "1k0k2")
+    function t1(p?: any, q?: any): string { arguments.length = 0; return arguments.length + ":" + arguments[0] + ":" + [...arguments].length + ":" + Object.keys(arguments).join("") }
+    function t2(p?: any): string { arguments.length = 3; return [...arguments].join("|") + ":" + Object.keys(arguments).length + ":" + Array.from(arguments).length }
+    function t3(p?: any, q?: any): string { arguments.length = 1; q = 9; return arguments[1] + ":" + [...arguments].length }
+    function t4(...xs: any[]): string { return Object.getOwnPropertyNames(arguments).join() }
+    check("ag85c", t1(v[0], 7) === "0:1:0:01" && t2(v[0]) === "1||:1:3" && t3(v[0], v[1]) === "9:1" &&
+        t4(v[0], v[1]) === "0,1,length,callee" && Object.getOwnPropertyNames(v).join() === "0,1,2,length")
+    check("ag85d", Number.parseInt === parseInt && Number.parseFloat === parseFloat && parseInt.length === 2 &&
+        parseFloat.length === 1 && parseInt.name === "parseInt" && Number.parseFloat.name === "parseFloat")
+    const ks: string[] = ["__#x", "__#1#y"]
+    const o: any = {}
+    o[ks[0]] = 1
+    o[ks[1]] = 2
+    const lit: any = {"__#a": 3, __b: 4}
+    const ps: any = JSON.parse('{"__#q": 5}')
+    class P { #x = 1; has(t: any): boolean { return #x in t } }
+    const pp = new P()
+    check("ag85e", Object.keys(o).join() === "__#x,__#1#y" && JSON.stringify(o) === '{"__#x":1,"__#1#y":2}' &&
+        Object.keys(lit).join() === "__#a,__b" && ps["__#q"] === 5 && Object.keys(ps).length === 1 &&
+        o.hasOwnProperty(ks[0]) && (ks[1] in o) && pp.has(pp) && !pp.has(o) && Object.keys(pp).length === 0 &&
+        JSON.stringify(Object.entries({"__#z": 1})) === '[["__#z",1]]')
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -4172,6 +4223,7 @@ function main(): number {
     s82(); // SECTION-CALL 82
     s83(); // SECTION-CALL 83
     s84(); // SECTION-CALL 84
+    s85(); // SECTION-CALL 85
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

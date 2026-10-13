@@ -123,6 +123,38 @@ function jvIsObj(v) {
 var jvArgsN = 0
 function jvIsArgs(v) { return Array.isArray(v) && arrKind(v) % 32 == 19 }
 function jvArgsLen(v) { return (arrKind(v) - 19) / 32 }
+// An index of an arguments object is an own property when it is below `length` or
+// holds a value, and what an iteration, a spread, apply and an Array method read is
+// the list up to `length`. Twins: jsvArgsHas / jsvArgsView in abnf/jsrtjsprint.go,
+// jsArgsHas / jsArgsView in both *-interpreter.abnf.
+function jvArgsHas(v, k) {
+    var n = jvToNumber(k)
+    if (jvStr(n) !== jvStr(k)) { return false }
+    if (n < 0) { return false }
+    if (Math.floor(n) !== n) { return false }
+    if (n >= v.length) { return false }
+    if (n < jvArgsLen(v)) { return true }
+    return v[n] !== undefined
+}
+function jvArgsView(v) {
+    var out = []
+    var n = jvArgsLen(v)
+    var i = 0
+    while (i < n) {
+        if (i < v.length) { out.push(v[i]) } else { out.push(undefined) }
+        i = i + 1
+    }
+    return out
+}
+function jvArgsKeys(v) {
+    var out = []
+    var i = 0
+    while (i < v.length) {
+        if (jvArgsHas(v, i + "")) { out.push(i + "") }
+        i = i + 1
+    }
+    return out
+}
 function js_jsargs(a, off) {
     var c = []
     for (var i = off; i < a.length; i++) { c.push(a[i]) }
@@ -135,8 +167,9 @@ function js_jsargs(a, off) {
 // the parameters below the argument count, which the call's scope keeps under
 // "0argm". js_jsargsync(scope, name, v), after a store to a name, copies v into
 // arguments when the binding the store reached is a mapped parameter; js_jsargput
-// (scope, k, v), after a store to arguments[k], copies v into the parameter k maps
-// to. Twins: the same externs in abnf/jsrtjsprint.go, jsArgSync / jsArgPut in both
+// (scope, obj, k, v, unmap), after a store to obj[k], copies v into the parameter k
+// maps to when obj is the arguments object of the call whose scope the chain reaches
+// first (after a delete, unmap true, k stops being mapped). Twins: the same externs in abnf/jsrtjsprint.go, jsArgSync / jsArgPut in both
 // *-interpreter.abnf.
 function js_jsargmap(names, args) {
     var out = []
@@ -174,18 +207,24 @@ function js_jsargsync(sc, name, v) {
     }
     return undefined
 }
-function js_jsargput(sc, key, v) {
+function js_jsargput(sc, obj, key, v, unmap) {
+    if (!jvIsArgs(obj)) { return undefined }
     var s = anytype
     s = sc
     while (s !== undefined) {
         if (scopeHas(s, "arguments")) {
+            if (scopeGet(s, "arguments") !== obj) { return undefined }
             if (scopeHas(s, "0argm")) {
                 var ns = scopeGet(s, "0argm")
                 var ix = jvToNumber(key)
                 if (ix >= 0) {
                     if (ix < ns.length) {
                         if (jvStr(ix) === jvStr(key)) {
-                            if (Math.floor(ix) === ix) { scopeDecl(s, ns[ix], v) }
+                            if (Math.floor(ix) === ix) {
+                                if (ns[ix] !== "") {
+                                    if (unmap) { ns[ix] = "" } else { scopeDecl(s, ns[ix], v) }
+                                }
+                            }
                         }
                     }
                 }
@@ -512,17 +551,14 @@ function jvSeqIter(o, kind) {
     var src = anytype
     src = o
     if (typeof o == "string") { src = jvCodePoints(o) }
+    if (jvArgsN > 0) {
+        if (jvIsArgs(o)) { src = jvArgsView(o) }
+    }
     var st = {i: 0}
     var it = {}
     it["next"] = function () {
         var r = {}
-        // An arguments object is iterated up to its own length (jvIsArgs).
         var n = src.length
-        if (jvArgsN > 0) {
-            if (jvIsArgs(src)) {
-                if (jvArgsLen(src) < n) { n = jvArgsLen(src) }
-            }
-        }
         if (st["i"] < n) {
             var v = anytype
             v = src[st["i"]]
@@ -651,8 +687,9 @@ function js_jswithtypeof(scope, name) {
 
 // A program's own property key that starts with "__" is stored behind a leading
 // U+0001 (as is one that itself starts with U+0001), so it cannot reach the value
-// model's hidden slots; a private name's and a symbol's "__#..." key is the engine's
-// own and is left alone. The emitter escapes a member name at compile time and a computed key with
+// model's hidden slots. A symbol's "__#@" key is left alone (it travels as a string
+// between ToPropertyKey and the slot); a private name's "__#" key is escaped like any
+// other here and reaches js_jsprivin and the member externs RAW. The emitter escapes a member name at compile time and a computed key with
 // js_jskeyesc / js_jspropkey, so the member externs see stored keys; js_jshas and
 // hasOwnProperty escape the key a program hands them, and js_jskeys,
 // Object.keys / entries / getOwnPropertyNames and JSON unescape what they hand back.
@@ -666,7 +703,7 @@ function js_jskeyesc(k) {
     if (typeof k != "string") { return k }
     if (k >= "_`") { return k }
     if (k >= "__") {
-        if (k >= "__#") { if (k < "__$") { return k } }
+        if (k >= "__#@") { if (k < "__#A") { return k } }
         return jvKeyMark + k
     }
     if (k >= jvKeyMark2) { return k }
@@ -1213,7 +1250,12 @@ function jvStoredKeys(o) {
     // `{...[7,8]}` both arrive here with an ARRAY, where node answers the INDICES as
     // strings. A string enumerates the same way; null/undefined and a primitive
     // enumerate NOTHING rather than raising.
-    if (Array.isArray(o)) { return jvIndexKeys(o.length) }
+    if (Array.isArray(o)) {
+        if (jvArgsN > 0) {
+            if (jvIsArgs(o)) { return jvArgsKeys(o) }
+        }
+        return jvIndexKeys(o.length)
+    }
     if (typeof o == "string") { return jvIndexKeys(o.length) }
     if (!jvIsObj(o)) {
         // A FUNCTION enumerates the own properties written onto it, which node
@@ -1271,6 +1313,9 @@ function jvHasOwn(self, k) {
     if (jvIsCallable(self)) { return jvFnOwn(self, kk) }
     if (Array.isArray(self) || typeof self == "string") {
         if (kk === "length") { return true }
+        if (jvArgsN > 0) {
+            if (jvIsArgs(self)) { return jvArgsHas(self, kk) }
+        }
         if (jvStr(jvToNumber(kk)) !== kk) { return false }
         return jvIndexIn(kk, self.length)
     }
@@ -1589,6 +1634,9 @@ function jvApplyShim(f) {
         var a = anytype
         a = arguments[1]
         if (!Array.isArray(a)) { a = [] }
+        if (jvArgsN > 0) {
+            if (jvIsArgs(a)) { a = jvArgsView(a) }
+        }
         return jvCallT(f, arguments[0], a)
     }
 }
@@ -1878,6 +1926,14 @@ function jvBuiltinRecv(fam, name, recv) {
             return jvStr(recv)
         }
     }
+    // An Array method called on an arguments object reads it up to its `length`; the
+    // ones that write keep the object itself.
+    if (fam == "a") {
+        if (jvIsArgs(recv)) {
+            if (name != "push" && name != "pop" && name != "shift" && name != "unshift" && name != "splice" &&
+                name != "reverse" && name != "sort" && name != "fill" && name != "copyWithin") { return jvArgsView(recv) }
+        }
+    }
     return recv
 }
 
@@ -2028,9 +2084,15 @@ function jvValueMiss(o, key) {
     }
     if (key == "prototype") { return jvBuiltinProto(o) }
     // A string's [Symbol.iterator], which the iteration sites probe under the key it
-    // stands for (emitIterOf): code points, not UTF-16 units.
+    // stands for (emitIterOf): code points, not UTF-16 units. An arguments object's
+    // walks it up to its `length` (jvSeqIter).
     if (typeof o == "string") {
         if (key == "__#@iterator") { return jvSeqIterFn(o) }
+    }
+    if (jvArgsN > 0) {
+        if (key == "__#@iterator") {
+            if (jvIsArgs(o)) { return jvSeqIterFn(o) }
+        }
     }
     return jvStaticValue(o, key)
 }
@@ -2073,6 +2135,9 @@ function jvStaticValue(g, key) {
         var nc = anytype
         nc = jvNumberConst(key)
         if (nc !== undefined) { return nc }
+        // Number.parseInt and Number.parseFloat ARE the two globals (ECMA-262 21.1.2.12/13).
+        if (key == "parseInt") { return js_jsparseintfn() }
+        if (key == "parseFloat") { return js_jsparsefloatfn() }
         gn = "Number"
     }
     if (!jvStaticHas(gn, key)) { return undefined }
@@ -2210,6 +2275,22 @@ function jvProtoWrite(d, key, v) {
 
 // The `in` operator: js_jshas, after node's TypeError for a primitive on the right
 // (ECMA-262 13.10.1). Twin: m["js_jsin"] in abnf/jsrtjsprint.go.
+// `#x in o`, the brand check: the private name's key is the engine's own, handed over
+// RAW. Twin: js_jsprivin in abnf/jsrtjsprint.go.
+function js_jsprivin(o, key) {
+    if (!jvIsObjLike(o) || jbIsBig(o)) {
+        if (!jvIsCallable(o)) {
+            var k = jvStr(key)
+            var i = k.length - 1
+            while (i > 0) {
+                if (k.charCodeAt(i) == 35) { break }
+                i = i - 1
+            }
+            jbRaise("TypeError: Cannot use 'in' operator to search for '#" + k.substring(i + 1, k.length) + "' in " + jvStr(o))
+        }
+    }
+    return jvHas(o, key)
+}
 function js_jsin(o, key) {
     if (!jvIsObjLike(o) || jbIsBig(o)) {
         if (!jvIsCallable(o)) { jbRaise("TypeError: Cannot use 'in' operator to search for '" + jvStr(key) + "' in " + jvStr(o)) }
@@ -2266,6 +2347,11 @@ function jvHas(o, key) {
         }
         if (jvFindClassMethod(o, k) !== undefined) { return true }
         return false
+    }
+    if (jvArgsN > 0) {
+        if (jvIsArgs(o)) {
+            if (jvStr(jvToNumber(key)) === jvStr(key)) { return jvArgsHas(o, key) }
+        }
     }
     // js_has and not `fp[k] !== undefined`, so a property holding undefined is still
     // reported, exactly as it is on an ordinary object. A function that is not in the
@@ -2345,14 +2431,29 @@ function js_jsmset(o, key, v) {
             if (pd !== undefined) { jvProtoWrite(pd, key, v) }
         }
     }
-    o[key] = v
-    // A write to an arguments object's `length` resizes it as an array write does,
-    // and the slot follows.
+    // An arguments object's `length` is an ordinary property, kept in its kind word
+    // (jvIsArgs): the elements stay as they are. A value that is no array length
+    // resizes the storage as an array write does, and the word follows.
     if (jvArgsN > 0) {
         if (key === "length") {
-            if (jvIsArgs(o)) { arrKindSet(o, 19 + 32 * o.length) }
+            if (jvIsArgs(o)) {
+                if (typeof v == "number") {
+                    if (v >= 0) {
+                        if (Math.floor(v) === v) {
+                            if (v < 67108864) {
+                                arrKindSet(o, 19 + 32 * v)
+                                return undefined
+                            }
+                        }
+                    }
+                }
+                o[key] = v
+                arrKindSet(o, 19 + 32 * o.length)
+                return undefined
+            }
         }
     }
+    o[key] = v
     return undefined
 }
 
@@ -3222,6 +3323,9 @@ function jvOwnKeys(v) {
         }
     }
     if (Array.isArray(v)) {
+        if (jvArgsN > 0) {
+            if (jvIsArgs(v)) { return jvArgsKeys(v) }
+        }
         var oa = []
         var j = 0
         while (j < v.length) {
@@ -4167,6 +4271,14 @@ function jvObjectGlobalMethod(name, args) {
             out.push(jvKeyUnesc(ks[i]))
             i = i + 1
         }
+        // ...and an array's or a string's `length` after its indices, an arguments
+        // object's `callee` after that.
+        if (name == "getOwnPropertyNames") {
+            if (Array.isArray(src) || typeof src == "string") {
+                out.push("length")
+                if (jvIsArgs(src)) { out.push("callee") }
+            }
+        }
         return out
     }
     if (name == "values") {
@@ -4447,6 +4559,12 @@ function js_jsmcall(recv, key, args) {
         }
     }
     var name = jvStr(key)
+    // An arguments object's [Symbol.iterator] (see jvValueMiss).
+    if (jvArgsN > 0) {
+        if (name == "__#@iterator") {
+            if (jvIsArgs(recv)) { return jvSeqIter(recv, 1) }
+        }
+    }
     // A CLASS DESCRIPTOR stops here: js_jsmget already answered every static, so
     // reaching this line means the name is not one - and jvFallbackCall below would
     // find the descriptor's own property of that name, which is its INSTANCE method.
@@ -5390,12 +5508,19 @@ function js_jsnumberfn() {
 
 // The parseFloat global: JavaScript's (lib/js-num.js), declared into the program
 // scope like Number. Twin in abnf/jsrtjsbig.go.
+// One function, because Number.parseFloat is the very same one (jvStaticValue).
+var jvParseFloatFn = anytype
+var jvParseIntFn = anytype
 function js_jsparsefloatfn() {
-    return function (v) { return jsnParseFloat(jvStr(v)) }
+    if (jvParseFloatFn === undefined) { jvParseFloatFn = fnMetaSet(function (v) { return jsnParseFloat(jvStr(v)) }, "parseFloat", 1) }
+    return jvParseFloatFn
 }
 // The parseInt global, the same way.
 function js_jsparseintfn() {
-    return function (v, r) { return jsnParseInt(jvStr(v), jvToNumber(r) | 0) }
+    if (jvParseIntFn === undefined) {
+        jvParseIntFn = fnMetaSet(function (v, r) { return jsnParseInt(jvStr(v), jvToNumber(r) | 0) }, "parseInt", 2)
+    }
+    return jvParseIntFn
 }
 
 // Unary '+' is the ONE operator a BigInt refuses outright: there is no number
