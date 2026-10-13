@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-587** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-588** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -139,10 +139,10 @@ an O(1) byte-at host builtin in the floor (CORE: runtime.c).
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-585 swift: Range `lowerBound`/`upperBound`; `contains` on Double and String ranges · P1 · SW · IN PROGRESS (SW worker, round 5) [V]
-`let a = [1.5]; let r = a[0]..<2.5; print(r.lowerBound, r.upperBound)` → nil in all three legs (swiftc `1.5 2.5`).
-`(1.5..<2.5).contains(2.0)` → interp false (swiftc, run, native true). `("a"..."c").contains("b")` → run and native false
-(swiftc and interp true).
+### T-587 swift: ClosedRange.Index; an element as an expression pattern · P3 · SW · OPEN [V]
+`let cr = 2...7; print(cr.firstIndex(of: 4) as Any)` → all legs `2` (swiftc
+`Optional(Swift.ClosedRange<Swift.Int>.Index.inRange(4))`: the Index enum is not modelled). `switch 1 { case xs[0]: ... }` (an
+element as an expression pattern) does not parse in either half (range bounds do).
 
 ---
 
@@ -686,6 +686,7 @@ T-571 swift: mutating value methods on numbers and Bools; General_Category Chara
 T-579 bash: an arithmetic error does not cancel the assignment; bytes 0x01/0x02 break field lists — DONE e57f7553
 T-582 swift: missing traps — Int(huge Double), inverted range, compiled removeLast on empty; the ratchet does not compile under swiftc — DONE de9fcee2 (the whole ratchet now runs on swiftc: 769 checks, 0 failures)
 T-575 python: module `__name__`, builtin class methods with keywords, `slice`, bytes method gaps — DONE 411114f9 6bd49c7f except the dict pop/re-add-at-equal-size detection — DECLINED: CPython's answer depends on its hash table's resize/compaction history (a 4-key dict ends quietly, a 3-key one raises); a deletion counter made 46 of 116 probe rows wrong vs 38 before; matching it needs CPython's entry table per dict in all engines, a cost on every insert
+T-585 swift: Range `lowerBound`/`upperBound`; `contains` on Double and String ranges — DONE b3f96517 (plus isEmpty, clamped, overlaps, indices, Int8 elements, count near Int.max, variable range-pattern bounds)
 
 # Settled — do not re-open
 
