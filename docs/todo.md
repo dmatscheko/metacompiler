@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-607** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-610** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -64,6 +64,13 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
+### T-607 python regex: inline flags `(?i)` `(?s)` `(?x)` `(?i:..)`; a backreference to an unset group matches empty · P1 · PY · OPEN [V]
+`re.match(r"(?i)A", "a")` → every leg "unsupported group form" (python3 matches; also `(?s)`, `(?x)`, `(?m)`, scoped `(?i:..)`).
+`re.fullmatch(r"(b)?a\1", "a")` → ours a match (JS semantics: an unset group's backreference matches empty), python3 None.
+Both live in the shared lib/regex.js / abnf/jsrtregex.go: add them under python's own dialect flag (as java's J), additive,
+full matrix + native-full + gen-all; ruby has the same backreference rule (`"a" =~ /\A(b)?a\1\z/` → nil in ruby 2.6) — enable
+it for ruby's flag too and add a ruby assertion.
+
 ### T-586 python: slice ordering and unhashable slice keys · P3 · PY · IN PROGRESS (PY worker, round 5) [V]
 `slice(1, 2) < slice(1, 3)` → TypeError "'<' not supported" in all legs (python True: slices compare as tuples). `{slice([1]):
 0}` is accepted (CPython TypeError "unhashable type: 'list'"); only `hash()` was checked, probe the dict-key case first.
@@ -91,16 +98,9 @@ escape `"__#"` like other `"__"` keys.
 
 # JV — Java
 
-### T-604 java: regex dialect gaps; missing Math/Long/Double API; TreeMap views; unmodifiable view write-through · P2 · JV · IN PROGRESS (JV worker, round 5) [V]
-`"a".matches("a{99999999999}")` runs away (17 GB) in the interp (java "Illegal repetition range near index 11"). Java rejects,
-ours accepts: `{`, `a{`, `a{x}`, `a{2`, `x{1,2}{`, `\u12`, `\p{Foo}`, `\c`, `(?<1a>x)`, a duplicate group name; `[a-` and
-`[a-\d]` are "Illegal character range" in java. Java accepts, ours rejects: `\2` (backreference to a missing group),
-`[[:alpha:]]`... (careful: in Java `[[:alpha:]]` is a nested class), lookbehind `(?<=...)`. These need a Java flag in the shared
-lib/regex.js and abnf/jsrtregex.go (a CORE-shared file: additive, flag-gated, full matrix). Missing API in all engines:
-Math.clamp, Math.nextUp; Long.toUnsignedString / parseUnsignedLong / divideUnsigned and the rest of the unsigned family;
-Double.toHexString, longBitsToDouble, Float.intBitsToFloat; TreeMap.headMap/tailMap/subMap live views; String.indent /
-stripIndent. Unmodifiable map keySet/values write through (java: UnsupportedOperationException). String.CASE_INSENSITIVE_ORDER
-is a plain comparator when java.util is not loaded. Check the interp keeps 1 and 1L distinct (twin and layer 2 do).
+### T-608 java regex: forward `\k<name>`; `\X \G \N{..} \b{g}` and \p scripts/blocks; PatternSyntaxException getters · P3 · JV · OPEN [V]
+A `\k<name>` referring forward is accepted (java PSE). `\X`, `\G`, `\N{..}`, `\b{g}`, `\p{IsLatin}`, `\p{N}` etc. report
+"unsupported" (java supports them). `PatternSyntaxException.getDescription/getIndex/getPattern` missing.
 
 ---
 
@@ -117,6 +117,12 @@ not change the renderer.
 
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
+
+### T-609 kotlin: Regex should use the Java dialect (flag J) · P2 · KT · OPEN [V spec-only]
+Kotlin/JVM's Regex is java.util.regex, but the kotlin grammars pass only `q` to the shared regex engine, so every gap the J
+dialect fixes for java remains, including the `Regex("a{99999999999}")` runaway (java PSE "Illegal repetition range"). Pass J in
+the kotlin grammars and twins, map errors to PatternSyntaxException as java does, assert in tests/kotlin-test-full.kt. (The real
+kotlin-stdlib jar can be driven from a java program to confirm Regex behaviour.)
 
 ---
 
@@ -703,6 +709,7 @@ T-578 java: PatternSyntaxException message wording; class literals of unloaded J
 T-598 lua: interpreter coroutines replay side effects; `ipairs("abc")`; indexing a coroutine — DONE 3d17ef92 (a real suspension primitive in both tag hosts: goja coroutine + frozen jsGenerator.suspend)
 T-599 lua: os library, load/dofile, `<close>`, a real `_G`, NaN sign in string.pack — DONE 82a5666c 117bdd13 3a1cd51e for <close>, os (time/clock/date/difftime/getenv/exit), _G raw access; load/loadfile/dofile DECLINED (a native binary has no run-time Lua compiler, and constant-only load would make load(s) depend on whether s is a literal); NaN sign in string.pack DECLINED (goja canonicalises NaN, MetaJS cannot see a double's bits); __gc/__mode DECLINED (no engine lets a program drive its collector)
 T-602 php: spread into a by-ref parameter; lazy copy holder counts; Closure statics by name; caller context in library callbacks — DONE ad2d64a0 for spreads into by-ref params, by-ref variadics, Closure statics by name, caller-frame library callbacks; lazy copy holder counts DECLINED: exact copy-on-write needs decrement-on-drop (refcounting), which manual 7.8 rejects, plus a separation check at ~85 write sites — documented at phpRefHolders
+T-604 java: regex dialect gaps; missing Math/Long/Double API; TreeMap views; unmodifiable view write-through — DONE bc54d07a c6b40b82 (a Java dialect flag J in the shared regex engine, additive; the a{99999999999} runaway now 0.2 s)
 
 # Settled — do not re-open
 
