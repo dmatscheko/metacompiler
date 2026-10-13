@@ -1680,13 +1680,9 @@ function js_mcall(recv, name, args) {
         // arm of mcall in languages/swift-interpreter.abnf.
         if (args.length > 0 && typeof args[0] == "string") {
             var sa = args[0]
-            if (name === "contains") { return recv.indexOf(sa) >= 0 }
-            if (name === "hasPrefix" || name === "starts" || name === "hasSuffix") {
-                if (sa.length > recv.length) { return false }
-                var at = 0
-                if (name === "hasSuffix") { at = recv.length - sa.length }
-                return recv.substring(at, at + sa.length) === sa
-            }
+            if (name === "contains") { return swcContains(recv, sa) }
+            if (name === "hasPrefix" || name === "starts") { return swcHasPrefix(recv, sa) }
+            if (name === "hasSuffix") { return swcHasSuffix(recv, sa) }
         }
         fail("unknown String method: " + name)
     }
@@ -3315,10 +3311,17 @@ function swRel(l, r) {
     // "every ordering is false" is -2, which js_swlt/le/gt/ge already test. Mapping
     // it to 0 (EQUAL) would make `<=` and `>=` TRUE for a raw NaN pair; Swift makes
     // all four false, like C# and Java.
+    // Two Strings order by their NFC scalars (lib/swift-chars.js).
+    if (typeof l == "string") { if (typeof r == "string") { return swcStrCmp(l, r) } }
     var c = rtCompare(l, r)
     if (c == 2) { return 0 - 2 }
     return c
 }
+
+// A String's Characters and their count: UAX #29 (lib/swift-chars.js). Twins:
+// js_swgsplit / js_swgcount in abnf/jsrtswift.go.
+function js_swgsplit(s) { return swcGraphemes(s) }
+function js_swgcount(s) { return swcGraphemeCount(s) }
 
 function js_swlt(l, r) {
     var c = swRel(l, r)

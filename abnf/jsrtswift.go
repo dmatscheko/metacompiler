@@ -1505,8 +1505,27 @@ func init() {
 						return boolH(want(rt.giCmp(l, r)))
 					}
 				}
+				// Two Strings order by their NFC scalars (swcStrCmp).
+				if ls, ok := l.(string); ok {
+					if rs, ok := r.(string); ok {
+						return boolH(want(swcStrCmp(ls, rs)))
+					}
+				}
 				return boolH(want(rt.jsCompare(l, r)))
 			}
+		}
+		// A String's Characters and their count: UAX #29 (abnf/jsrtswiftchars.go).
+		// Twins: js_swgsplit / js_swgcount in languages/lib/swift-rt.metajs.
+		m["js_swgsplit"] = func(a []uint64) uint64 {
+			cs := swcGraphemes(rt.toString(u(a[0])))
+			out := make([]interface{}, len(cs))
+			for i, c := range cs {
+				out[i] = c
+			}
+			return w(&jsArray{elems: out})
+		}
+		m["js_swgcount"] = func(a []uint64) uint64 {
+			return rt.wrapNum(float64(len(swcGraphemes(rt.toString(u(a[0]))))))
 		}
 		// The members a sized integer answers for itself. Everything else falls
 		// straight through to the runtime's own js_get, so this is only ever a
@@ -3952,11 +3971,11 @@ func swStrMethod(s, name string, args []interface{}) (interface{}, bool) {
 	}
 	switch name {
 	case "hasPrefix", "starts":
-		return strings.HasPrefix(s, p), true
+		return swcHasPrefix(s, p), true
 	case "hasSuffix":
-		return strings.HasSuffix(s, p), true
+		return swcHasSuffix(s, p), true
 	case "contains":
-		return strings.Contains(s, p), true
+		return swcContains(s, p), true
 	}
 	return nil, false
 }

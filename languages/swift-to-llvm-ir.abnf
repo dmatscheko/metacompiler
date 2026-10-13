@@ -1902,7 +1902,8 @@ KwContinue  = "continue" KwEnd ;
     // protocol, expression/statement builders); see the `core` knobs below.
     include("lib/compile-core.js")
 
-    // swcIsProp: the Character property names js_swget answers.
+    // swcIsProp: the Character property names js_swget answers; swcNfdBase /
+    // swcNfdMark, the decomposition table sw_nfd is built from.
     include("lib/swift-chars.js")
 
     var hidCount = 0     // Names hidden loop bounds.
@@ -2878,77 +2879,8 @@ KwContinue  = "continue" KwEnd ;
         return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(stV, fromB), llvm.ir.NewIncoming(sv, boundB)])}
     }
     // ----- Strings are sequences of extended grapheme clusters -----
-    // .count counts CLUSTERS, so an astral emoji is one and a base letter plus its
-    // combining mark is one; and == compares by CANONICAL EQUIVALENCE, so the
-    // precomposed and the decomposed spelling of a letter are the same string. The
-    // decomposition table covers the Latin-1 precomposed letters, which is the range
-    // real programs mix; anything outside it compares by code units.
-    var nfdBase = "AAAAAA\x00CEEEEIIII\x00NOOOOO\x00\x00UUUUY\x00\x00aaaaaa\x00ceeeeiiii\x00nooooo\x00\x00uuuuy\x00y"
-    var nfdMark = [0x300, 0x301, 0x302, 0x303, 0x308, 0x30A, 0, 0x327,
-                   0x300, 0x301, 0x302, 0x308, 0x300, 0x301, 0x302, 0x308,
-                   0, 0x303, 0x300, 0x301, 0x302, 0x303, 0x308, 0,
-                   0, 0x300, 0x301, 0x302, 0x308, 0x301, 0, 0,
-                   0x300, 0x301, 0x302, 0x303, 0x308, 0x30A, 0, 0x327,
-                   0x300, 0x301, 0x302, 0x308, 0x300, 0x301, 0x302, 0x308,
-                   0, 0x303, 0x300, 0x301, 0x302, 0x303, 0x308, 0,
-                   0, 0x300, 0x301, 0x302, 0x308, 0x301, 0, 0x308]
-    function swNFD(str) {
-        var out = ""
-        for (var i = 0; i < str.length; i++) {
-            var cc = str.charCodeAt(i)
-            if (cc >= 0xC0 && cc <= 0xFF) {
-                var b = nfdBase.charCodeAt(cc - 0xC0)
-                if (b != 0) {
-                    out += String.fromCharCode(b) + String.fromCharCode(nfdMark[cc - 0xC0])
-                    continue
-                }
-            }
-            out += str.charAt(i)
-        }
-        return out
-    }
-    function hasNonAscii(str) {
-        for (var i = 0; i < str.length; i++) { if (str.charCodeAt(i) > 127) { return true } }
-        return false
-    }
-    function swStrEq(a, b) {
-        if (a === b) { return true }
-        if (!hasNonAscii(a) || !hasNonAscii(b)) { return false }
-        return swNFD(a) === swNFD(b)
-    }
-    // A code point that attaches to the cluster before it rather than starting one.
-    function isCombiningCp(cp) {
-        if (cp >= 0x0300 && cp <= 0x036F) { return true }
-        if (cp >= 0x0483 && cp <= 0x0489) { return true }
-        if (cp >= 0x0591 && cp <= 0x05BD) { return true }
-        if (cp >= 0x0610 && cp <= 0x061A) { return true }
-        if (cp >= 0x064B && cp <= 0x065F) { return true }
-        if (cp >= 0x1AB0 && cp <= 0x1AFF) { return true }
-        if (cp >= 0x1DC0 && cp <= 0x1DFF) { return true }
-        if (cp >= 0x20D0 && cp <= 0x20F0) { return true }
-        if (cp >= 0xFE00 && cp <= 0xFE0F) { return true }
-        if (cp >= 0xFE20 && cp <= 0xFE2F) { return true }
-        return false
-    }
-    function swGraphemeCount(str) {
-        var n = 0
-        var i = 0
-        var joining = false
-        while (i < str.length) {
-            var cp = str.charCodeAt(i)
-            var w = 1
-            if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < str.length) {
-                cp = 0x10000 + ((cp - 0xD800) * 1024) + (str.charCodeAt(i + 1) - 0xDC00)
-                w = 2
-            }
-            i += w
-            if (cp == 0x200D) { joining = true; continue }
-            if (joining) { joining = false; continue }
-            if (isCombiningCp(cp)) { continue }
-            n++
-        }
-        return n
-    }
+    // .count counts CLUSTERS (UAX #29, js_swgcount / js_swgsplit) and == compares
+    // by CANONICAL EQUIVALENCE (sw_nfd over lib/swift-chars.js's table).
 
     // ----- Expression thunks: function(block) -> {b, v} -----
 
@@ -3578,120 +3510,17 @@ KwContinue  = "continue" KwEnd ;
         })
     }
     // ----- Strings are sequences of extended grapheme clusters -----
-    // .count counts CLUSTERS and == compares by CANONICAL EQUIVALENCE, so these two
-    // walk the string by code point (js_kindex answers the rune at a code-unit index;
-    // a surrogate half comes back as U+FFFD, which is how a pair is recognised). Both
-    // are emitted only for a program that has a non-ASCII or escaped string literal,
-    // so an ASCII-only program pays nothing.
+    // .count and every Character walk split by UAX #29: js_swgcount / js_swgsplit,
+    // whose bodies are lib/swift-chars.js's swcGraphemeCount / swcGraphemes (layer 2,
+    // the interpreter) and their Go twins in abnf/jsrtswift.go.
     //
-    // THE LENGTH THESE TWO LOOP TO MUST BE THE CODE-UNIT LENGTH, and js_pylen is not
-    // it: the Go twin's js_pylen counts CODE POINTS for a string (it is CPython's
-    // len(), shared by every language) while js_kindex indexes CODE UNITS - the
-    // jsrt.go inconsistency the manual's chapter 7.9 records.
-    // `.length` is UTF-16 units in all three engines (rt.strLen, str_ulen in the
-    // floor, and the host string in the interpreter).
+    // sw_nfd loops to the CODE-UNIT length, and js_pylen is not it: the Go twin's
+    // js_pylen counts CODE POINTS for a string (it is CPython's len(), shared by
+    // every language) while js_kindex indexes CODE UNITS - the jsrt.go inconsistency
+    // the manual's chapter 7.9 records. `.length` is UTF-16 units in all three
+    // engines (rt.strLen, str_ulen in the floor, and the host string in the
+    // interpreter).
     function swUnitLen(b, sV) { return callExt(b, "js_get", [sV, emitStr(b, "length")]) }
-    var combLo = [0x300, 0x483, 0x591, 0x610, 0x64B, 0x1AB0, 0x1DC0, 0x20D0, 0xFE00, 0xFE20]
-    var combHi = [0x36F, 0x489, 0x5BD, 0x61A, 0x65F, 0x1AFF, 0x1DFF, 0x20F0, 0xFE0F, 0xFE2F]
-    function rtIsComb() {
-        return rtFunc("sw_iscomb", 1, function(b, ps) {
-            var yesB = curF.NewBlock("")
-            var noB = curF.NewBlock("")
-            for (var i = 0; i < combLo.length; i++) {
-                var inB = curF.NewBlock("")
-                var nxB = curF.NewBlock("")
-                b.NewCondBr(truthy(b, callExt(b, "js_ge", [ps[0], emitNum(b, combLo[i])])), inB, nxB)
-                inB.NewCondBr(truthy(inB, callExt(inB, "js_le", [ps[0], emitNum(inB, combHi[i])])), yesB, nxB)
-                b = nxB
-            }
-            b.NewBr(noB)
-            yesB.NewRet(hTrue)
-            noB.NewRet(hFalse)
-        })
-    }
-    function rtGCount() {
-        return rtFunc("sw_gcount", 1, function(b, ps) {
-            var sV = ps[0]
-            var lenV = swUnitLen(b, sV)
-            var sc = callExt(b, "js_scope_new", [handle(0)])
-            callExt(b, "js_scope_decl", [sc, emitStr(b, "i"), emitNum(b, 0)])
-            callExt(b, "js_scope_decl", [sc, emitStr(b, "n"), emitNum(b, 0)])
-            var headB = curF.NewBlock("")
-            var bodyB = curF.NewBlock("")
-            var doneB = curF.NewBlock("")
-            b.NewBr(headB)
-            var iV = callExt(headB, "js_scope_get", [sc, emitStr(headB, "i")])
-            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, doneB)
-            var i2 = callExt(bodyB, "js_scope_get", [sc, emitStr(bodyB, "i")])
-            var cp = callExt(bodyB, "js_char_code", [callExt(bodyB, "js_kindex", [sV, i2])])
-            callExt(bodyB, "js_scope_set", [sc, emitStr(bodyB, "i"), callExt(bodyB, "js_jadd", [i2, emitNum(bodyB, 1)])])
-            var surB = curF.NewBlock("")
-            var chkB = curF.NewBlock("")
-            var combB = curF.NewBlock("")
-            var countB = curF.NewBlock("")
-            bodyB.NewCondBr(truthy(bodyB, callExt(bodyB, "js_seq", [cp, emitNum(bodyB, 0xFFFD)])), surB, chkB)
-            // A surrogate half: skip its partner, the pair is one cluster.
-            callExt(surB, "js_scope_set", [sc, emitStr(surB, "i"),
-                                           callExt(surB, "js_jadd", [callExt(surB, "js_scope_get", [sc, emitStr(surB, "i")]), emitNum(surB, 1)])])
-            surB.NewBr(countB)
-            chkB.NewCondBr(truthy(chkB, chkB.NewCall(rtIsComb(), [cp])), combB, countB)
-            combB.NewBr(headB)
-            callExt(countB, "js_scope_set", [sc, emitStr(countB, "n"),
-                                             callExt(countB, "js_jadd", [callExt(countB, "js_scope_get", [sc, emitStr(countB, "n")]), emitNum(countB, 1)])])
-            countB.NewBr(headB)
-            doneB.NewRet(callExt(doneB, "js_scope_get", [sc, emitStr(doneB, "n")]))
-        })
-    }
-    // The same walk as sw_gcount, keeping the CLUSTERS instead of counting them:
-    // `Array(s)` and `for c in s` both need the elements .count counts
-    // (`for c in "cafe\u{301}"` is c, a, f, é). A cluster is cut out with js_mcall's "substring", which
-    // is UTF-16 code units in all three engines (rt.strRange, the floor's, and the
-    // host string's).
-    function rtGSplit() {
-        return rtFunc("sw_gsplit", 1, function(b, ps) {
-            var sV = ps[0]
-            var out = callExt(b, "js_arr_new", [])
-            var lenV = swUnitLen(b, sV)
-            var sc = callExt(b, "js_scope_new", [handle(0)])
-            callExt(b, "js_scope_decl", [sc, emitStr(b, "i"), emitNum(b, 0)])
-            callExt(b, "js_scope_decl", [sc, emitStr(b, "st"), emitNum(b, 0 - 1)])
-            var headB = curF.NewBlock("")
-            var bodyB = curF.NewBlock("")
-            var doneB = curF.NewBlock("")
-            b.NewBr(headB)
-            var iV = callExt(headB, "js_scope_get", [sc, emitStr(headB, "i")])
-            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, doneB)
-            // jV is where THIS code point starts; i advances past it (twice for a
-            // surrogate pair, which js_kindex reports as U+FFFD).
-            var jV = callExt(bodyB, "js_scope_get", [sc, emitStr(bodyB, "i")])
-            var cp = callExt(bodyB, "js_char_code", [callExt(bodyB, "js_kindex", [sV, jV])])
-            callExt(bodyB, "js_scope_set", [sc, emitStr(bodyB, "i"), callExt(bodyB, "js_jadd", [jV, emitNum(bodyB, 1)])])
-            var surB = curF.NewBlock("")
-            var chkB = curF.NewBlock("")
-            var cutB = curF.NewBlock("")
-            bodyB.NewCondBr(truthy(bodyB, callExt(bodyB, "js_seq", [cp, emitNum(bodyB, 0xFFFD)])), surB, chkB)
-            callExt(surB, "js_scope_set", [sc, emitStr(surB, "i"),
-                                           callExt(surB, "js_jadd", [callExt(surB, "js_scope_get", [sc, emitStr(surB, "i")]), emitNum(surB, 1)])])
-            surB.NewBr(cutB)
-            // A combining mark attaches to the cluster in progress and cuts nothing.
-            chkB.NewCondBr(truthy(chkB, chkB.NewCall(rtIsComb(), [cp])), headB, cutB)
-            var stV = callExt(cutB, "js_scope_get", [sc, emitStr(cutB, "st")])
-            var pushB = curF.NewBlock("")
-            var setB = curF.NewBlock("")
-            cutB.NewCondBr(truthy(cutB, callExt(cutB, "js_ge", [stV, emitNum(cutB, 0)])), pushB, setB)
-            callExt(pushB, "js_arr_push", [out, swEmitSub(pushB, sV, stV, jV)])
-            pushB.NewBr(setB)
-            callExt(setB, "js_scope_set", [sc, emitStr(setB, "st"), jV])
-            setB.NewBr(headB)
-            var stD = callExt(doneB, "js_scope_get", [sc, emitStr(doneB, "st")])
-            var tailB = curF.NewBlock("")
-            var retB = curF.NewBlock("")
-            doneB.NewCondBr(truthy(doneB, callExt(doneB, "js_ge", [stD, emitNum(doneB, 0)])), tailB, retB)
-            callExt(tailB, "js_arr_push", [out, swEmitSub(tailB, sV, stD, lenV)])
-            tailB.NewBr(retB)
-            retB.NewRet(out)
-        })
-    }
     // popLast() and Array(...) are lowered as EMITTED IR rather than as new externs
     // (a new extern needs a Go twin); both are built from externs both compiled
     // engines already answer.
@@ -3724,7 +3553,7 @@ KwContinue  = "continue" KwEnd ;
             var strB = curF.NewBlock("")
             var notStrB = curF.NewBlock("")
             b.NewCondBr(truthy(b, callExt(b, "js_is_type", [ps[0], emitStr(b, "String")])), strB, notStrB)
-            strB.NewRet(strB.NewCall(rtGSplit(), [ps[0]]))
+            strB.NewRet(callExt(strB, "js_swgsplit", [ps[0]]))
             var seqV = notStrB.NewCall(rtRangeArr(), [hasLazySeq ? callExt(notStrB, "js_swseqarr", [ps[0]]) : ps[0]])
             var dictB = curF.NewBlock("")
             var arrB = curF.NewBlock("")
@@ -3808,7 +3637,7 @@ KwContinue  = "continue" KwEnd ;
             var sB = curF.NewBlock("")
             var oB = curF.NewBlock("")
             b.NewCondBr(truthy(b, callExt(b, "js_is_type", [ps[0], emitStr(b, "String")])), sB, oB)
-            sB.NewRet(sB.NewCall(rtGSplit(), [ps[0]]))
+            sB.NewRet(callExt(sB, "js_swgsplit", [ps[0]]))
             oB.NewRet(oB.NewCall(rtRangeArr(), [ps[0]]))
         })
     }
@@ -3840,7 +3669,7 @@ KwContinue  = "continue" KwEnd ;
             var sB = curF.NewBlock("")
             var oB = curF.NewBlock("")
             b.NewCondBr(truthy(b, callExt(b, "js_is_type", [ps[0], emitStr(b, "String")])), sB, oB)
-            sB.NewRet(sB.NewCall(rtGSplit(), [ps[0]]))
+            sB.NewRet(callExt(sB, "js_swgsplit", [ps[0]]))
             oB.NewRet(ps[0])
         })
     }
@@ -3911,7 +3740,7 @@ KwContinue  = "continue" KwEnd ;
             var notStrB = curF.NewBlock("")
             var joinB = curF.NewBlock("")
             b.NewCondBr(truthy(b, callExt(b, "js_is_type", [ps[0], emitStr(b, "String")])), strB, notStrB)
-            callExt(strB, "js_scope_set", [sc, emitStr(strB, "a"), strB.NewCall(rtGSplit(), [ps[0]])])
+            callExt(strB, "js_scope_set", [sc, emitStr(strB, "a"), callExt(strB, "js_swgsplit", [ps[0]])])
             strB.NewBr(joinB)
             var seqV = notStrB.NewCall(rtRangeArr(), [ps[0]])
             var dictB = curF.NewBlock("")
@@ -3941,11 +3770,8 @@ KwContinue  = "continue" KwEnd ;
     // externs cannot answer can be lowered without a new extern.
     // A String IS a Collection of Characters in Swift, so every Sequence member
     // applies to it - `"hello".map { $0 }` is ["h", "e", "l", "l", "o"] and
-    // `"hello".filter { $0 != "l" }` is the String "heo". This is
-    // lowered as EMITTED IR rather than as an arm of layer 2 because the split has to
-    // be into GRAPHEME CLUSTERS, and the cluster walk (rtGSplit) is emitted IR: layer
-    // 2's own string indexing counts CODE UNITS, so an arm there would have given the
-    // two halves different answers for every non-ASCII receiver. Split, run the array
+    // `"hello".filter { $0 != "l" }` is the String "heo". The split is into
+    // GRAPHEME CLUSTERS (js_swgsplit); run the array
     // member through the ordinary js_swmcall, and - for the five members whose Swift
     // result is a String or a Substring - join back through the `joined` member.
     //
@@ -4006,7 +3832,7 @@ KwContinue  = "continue" KwEnd ;
                 eqB.NewRet(eqB.NewCall(rtStrEq(), [ps[0], e0]))
                 sB = splitE
             }
-            var gV = sB.NewCall(rtGSplit(), [ps[0]])
+            var gV = callExt(sB, "js_swgsplit", [ps[0]])
             var rV = callExt(sB, "js_swmcall", [gV, emitStr(sB, name), ps[1]])
             if (name == "split") { rV = sB.NewCall(rtJoinEach(), [rV]) }
             if (!keep) { sB.NewRet(rV) }
@@ -4123,12 +3949,12 @@ KwContinue  = "continue" KwEnd ;
         return {name: txt.substring(0, j), path: path}
     }
     // The String mutator on its Characters, answering [the new String, the call's
-    // own result]: the array member runs on the clusters (rtGSplit), which are
+    // own result]: the array member runs on the clusters (js_swgsplit), which are
     // joined back. An appended or inserted argument is TEXT, so `contentsOf:` a
     // [Character] is joined first. Twin of swStrMutate in swift-interpreter.abnf.
     function rtStrMut(name) {
         return rtFunc("sw_smut_" + name, 2, function(b, ps) {
-            var gV = b.NewCall(rtGSplit(), [ps[0]])
+            var gV = callExt(b, "js_swgsplit", [ps[0]])
             var aV = ps[1]
             if (name == "append" || name == "insert") {
                 var a0 = callExt(b, "js_arg", [ps[1], handle(0)])
@@ -4184,7 +4010,7 @@ KwContinue  = "continue" KwEnd ;
                 var seqB = curF.NewBlock("")
                 var goB = curF.NewBlock("")
                 colB.NewCondBr(truthy(colB, callExt(colB, "js_is_type", [a0, emitStr(colB, "String")])), strB, seqB)
-                var gV = strB.NewCall(rtGSplit(), [a0])
+                var gV = callExt(strB, "js_swgsplit", [a0])
                 strB.NewBr(goB)
                 var rV = seqB.NewCall(rtRangeArr(), [a0])
                 seqB.NewBr(goB)
@@ -4249,8 +4075,8 @@ KwContinue  = "continue" KwEnd ;
             var baseArr = callExt(b, "js_arr_new", [])
             var markArr = callExt(b, "js_arr_new", [])
             for (var q = 0; q < 64; q++) {
-                callExt(b, "js_arr_push", [baseArr, emitNum(b, nfdBase.charCodeAt(q))])
-                callExt(b, "js_arr_push", [markArr, emitNum(b, nfdMark[q])])
+                callExt(b, "js_arr_push", [baseArr, emitNum(b, swcNfdBase.charCodeAt(q))])
+                callExt(b, "js_arr_push", [markArr, emitNum(b, swcNfdMark[q])])
             }
             var lenV = swUnitLen(b, sV)
             var sc = callExt(b, "js_scope_new", [handle(0)])
@@ -4334,7 +4160,7 @@ KwContinue  = "continue" KwEnd ;
             var strB = curF.NewBlock("")
             var otherB = curF.NewBlock("")
             b.NewCondBr(truthy(b, isStr), strB, otherB)
-            strB.NewRet(strB.NewCall(rtGCount(), [ps[0]]))
+            strB.NewRet(callExt(strB, "js_swgcount", [ps[0]]))
             otherB.NewRet(callExt(otherB, "js_pylen", [ps[0]]))
         })
     }

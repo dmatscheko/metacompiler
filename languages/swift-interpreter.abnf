@@ -2411,103 +2411,8 @@ KwContinue  = "continue" KwEnd ;
     }
 
     // ----- Strings are sequences of extended grapheme clusters -----
-    // .count counts CLUSTERS, so an astral emoji is one and a base letter plus its
-    // combining mark is one; and == compares by CANONICAL EQUIVALENCE, so the
-    // precomposed and the decomposed spelling of a letter are the same string. The
-    // decomposition table covers the Latin-1 precomposed letters, which is the range
-    // real programs mix; anything outside it compares by code units.
-    var nfdBase = "AAAAAA\x00CEEEEIIII\x00NOOOOO\x00\x00UUUUY\x00\x00aaaaaa\x00ceeeeiiii\x00nooooo\x00\x00uuuuy\x00y"
-    var nfdMark = [0x300, 0x301, 0x302, 0x303, 0x308, 0x30A, 0, 0x327,
-                   0x300, 0x301, 0x302, 0x308, 0x300, 0x301, 0x302, 0x308,
-                   0, 0x303, 0x300, 0x301, 0x302, 0x303, 0x308, 0,
-                   0, 0x300, 0x301, 0x302, 0x308, 0x301, 0, 0,
-                   0x300, 0x301, 0x302, 0x303, 0x308, 0x30A, 0, 0x327,
-                   0x300, 0x301, 0x302, 0x308, 0x300, 0x301, 0x302, 0x308,
-                   0, 0x303, 0x300, 0x301, 0x302, 0x303, 0x308, 0,
-                   0, 0x300, 0x301, 0x302, 0x308, 0x301, 0, 0x308]
-    function swNFD(str) {
-        var out = ""
-        for (var i = 0; i < str.length; i++) {
-            var cc = str.charCodeAt(i)
-            if (cc >= 0xC0 && cc <= 0xFF) {
-                var b = nfdBase.charCodeAt(cc - 0xC0)
-                if (b != 0) {
-                    out += String.fromCharCode(b) + String.fromCharCode(nfdMark[cc - 0xC0])
-                    continue
-                }
-            }
-            out += str.charAt(i)
-        }
-        return out
-    }
-    function hasNonAscii(str) {
-        for (var i = 0; i < str.length; i++) { if (str.charCodeAt(i) > 127) { return true } }
-        return false
-    }
-    function swStrEq(a, b) {
-        if (a === b) { return true }
-        if (!hasNonAscii(a) || !hasNonAscii(b)) { return false }
-        return swNFD(a) === swNFD(b)
-    }
-    // A code point that attaches to the cluster before it rather than starting one.
-    function isCombiningCp(cp) {
-        if (cp >= 0x0300 && cp <= 0x036F) { return true }
-        if (cp >= 0x0483 && cp <= 0x0489) { return true }
-        if (cp >= 0x0591 && cp <= 0x05BD) { return true }
-        if (cp >= 0x0610 && cp <= 0x061A) { return true }
-        if (cp >= 0x064B && cp <= 0x065F) { return true }
-        if (cp >= 0x1AB0 && cp <= 0x1AFF) { return true }
-        if (cp >= 0x1DC0 && cp <= 0x1DFF) { return true }
-        if (cp >= 0x20D0 && cp <= 0x20F0) { return true }
-        if (cp >= 0xFE00 && cp <= 0xFE0F) { return true }
-        if (cp >= 0xFE20 && cp <= 0xFE2F) { return true }
-        return false
-    }
-    function swGraphemeCount(str) {
-        var n = 0
-        var i = 0
-        var joining = false
-        while (i < str.length) {
-            var cp = str.charCodeAt(i)
-            var w = 1
-            if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < str.length) {
-                cp = 0x10000 + ((cp - 0xD800) * 1024) + (str.charCodeAt(i + 1) - 0xDC00)
-                w = 2
-            }
-            i += w
-            if (cp == 0x200D) { joining = true; continue }
-            if (joining) { joining = false; continue }
-            if (isCombiningCp(cp)) { continue }
-            n++
-        }
-        return n
-    }
-    // The same walk, keeping the CLUSTERS instead of counting them. `Array(s)` and
-    // `for c in s` both need the elements swGraphemeCount counts:
-    // `for c in "cafe\u{301}"` yields c, a, f, é (swiftc 6.1.2).
-    function swGraphemes(str) {
-        var out = []
-        var i = 0
-        var start = -1
-        var joining = false
-        while (i < str.length) {
-            var j = i
-            var cp = str.charCodeAt(i)
-            var w = 1
-            if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < str.length) {
-                cp = 0x10000 + ((cp - 0xD800) * 1024) + (str.charCodeAt(i + 1) - 0xDC00)
-                w = 2
-            }
-            i += w
-            if (cp == 0x200D) { joining = true; continue }
-            if (joining) { joining = false; continue }
-            if (isCombiningCp(cp)) { continue }
-            if (start >= 0) { out.push(str.substring(start, j)) }
-            start = j
-        }
-        if (start >= 0) { out.push(str.substring(start, str.length)) }
-        return out
-    }
+    // .count counts CLUSTERS (UAX #29) and == compares by CANONICAL EQUIVALENCE:
+    // swcGraphemes / swcStrEq in lib/swift-chars.js, shared with layer 2.
 
     // ----- Values: dictionaries, strings, indexing (js_pyget/js_pyset semantics) -----
     // Dictionaries (isDict/dictFind/dictSet) are shared - see lib/interp-core.js.
@@ -3511,7 +3416,7 @@ KwContinue  = "continue" KwEnd ;
     function swlen(v) {
         if (isDict(v)) { return v.keys.length }
         if (v === null || v === undefined) { fail("count of nil") }
-        if (typeof v == "string") { return swGraphemeCount(v) }
+        if (typeof v == "string") { return swcGraphemeCount(v) }
         if (v.__range === true) { return rangeLen(v) }
         if (v.__set === true) { return v.elems.length }
         return v.length
@@ -3618,7 +3523,7 @@ KwContinue  = "continue" KwEnd ;
     }
     function swFirstLast(o, wantLast) {
         if (typeof o == "string") {
-            var g = swGraphemes(o)
+            var g = swcGraphemes(o)
             if (g.length == 0) { return null }
             return wantLast ? g[g.length - 1] : g[0]
         }
@@ -3798,7 +3703,7 @@ KwContinue  = "continue" KwEnd ;
     }
     function swSlice(o, r) {
         if (typeof o == "string") {
-            var gs = swGraphemes(o)
+            var gs = swcGraphemes(o)
             var sb = swRangeBounds(r, gs.length)
             var s = ""
             for (var k = sb.lo; k < sb.hi; k++) { s += gs[k] }
@@ -4122,7 +4027,7 @@ KwContinue  = "continue" KwEnd ;
             if (typeof bm == "function") { return bm.apply(undefined, concat2impl([target], args)) }
         }
         if (typeof target == "string") {
-            if (name == "count" && args.length == 0) { return swGraphemeCount(target) }
+            if (name == "count" && args.length == 0) { return swcGraphemeCount(target) }
             var sln = swLabelName(name, mcLabels)
             if (swIsIdxMove(sln)) { return swIdxMove(sln, args) }
             // Swift maps case fully but has no Final_Sigma: unicodeCase modes 3 and 2.
@@ -4134,12 +4039,10 @@ KwContinue  = "continue" KwEnd ;
             // abnf/jsrtswift.go and the String arm of js_mcall in lib/swift-rt.metajs.
             if (args.length > 0 && typeof args[0] == "string") {
                 var sa = args[0]
-                if (name == "hasPrefix" || name == "starts") { return target.slice(0, sa.length) === sa }
-                if (name == "hasSuffix") {
-                    return sa.length <= target.length && target.slice(target.length - sa.length, target.length) === sa
-                }
-                if (name == "contains") { return target.indexOf(sa) >= 0 }
-                if (name == "elementsEqual") { return swStrEq(target, sa) }
+                if (name == "hasPrefix" || name == "starts") { return swcHasPrefix(target, sa) }
+                if (name == "hasSuffix") { return swcHasSuffix(target, sa) }
+                if (name == "contains") { return swcContains(target, sa) }
+                if (name == "elementsEqual") { return swcStrEq(target, sa) }
             }
             // A String IS a Collection of Characters in Swift, so every Sequence
             // member applies to it - `"hello".map { $0 }` is
@@ -4151,7 +4054,7 @@ KwContinue  = "continue" KwEnd ;
             // swift-to-llvm-ir.abnf, which emits the same split-run-join around the
             // same js_swmcall - so layer 2 and the Go twin never see a String here.
             if (swIsSeqMember(name)) {
-                var sres = arrayMethod(swGraphemes(target), name, args)
+                var sres = arrayMethod(swcGraphemes(target), name, args)
                 if (swSeqKeepsString(name)) { return swJoinStrs(sres) }
                 // split answers Substrings, each the text of its Characters.
                 if (name == "split") {
@@ -4864,7 +4767,7 @@ KwContinue  = "continue" KwEnd ;
             for (i = 0; i < n; i++) {
                 var fv = args[0](t[i])
                 if (Array.isArray(fv)) { for (var q = 0; q < fv.length; q++) { out.push(fv[q]) } }
-                else if (typeof fv == "string") { var gs = swGraphemes(fv); for (var g = 0; g < gs.length; g++) { out.push(gs[g]) } }
+                else if (typeof fv == "string") { var gs = swcGraphemes(fv); for (var g = 0; g < gs.length; g++) { out.push(gs[g]) } }
                 else { out.push(fv) }
             }
             return out
@@ -6797,7 +6700,7 @@ KwContinue  = "continue" KwEnd ;
     // seam. Answers {s: the new String, r: the call's own result}. Twin of
     // rtStrMut in swift-to-llvm-ir.abnf.
     function swStrMutate(target, name, args) {
-        var gs = swGraphemes(target)
+        var gs = swcGraphemes(target)
         var a = args
         if ((name == "append" || name == "insert") && args.length > 0 && Array.isArray(args[0])) {
             a = concat2impl([swJoinStrs(args[0])], args.slice(1))
@@ -7746,7 +7649,7 @@ KwContinue  = "continue" KwEnd ;
         if (isRange(v)) { return rangeArray(v) }
         if (swIsSet(v)) { return v.elems }
         if (isTupleVal(v)) { return tupleArray(v) }
-        if (typeof v == "string") { return swGraphemes(v) }
+        if (typeof v == "string") { return swcGraphemes(v) }
         if (isDict(v)) { return swDictPairs(v) }
         return v
     }
@@ -9583,7 +9486,7 @@ KwContinue  = "continue" KwEnd ;
     function swEq(l, r) { return swEqD(l, r, 0) }
     function swEqD(l, r, depth) {
         if (depth > 32) { return false }
-        if (typeof l == "string" && typeof r == "string") { return swStrEq(l, r) }
+        if (typeof l == "string" && typeof r == "string") { return swcStrEq(l, r) }
         // A Unicode.Scalar against a scalar or a String literal: by scalar.
         if ((l !== null && typeof l == "object" && l.__usc !== undefined)
             || (r !== null && typeof r == "object" && r.__usc !== undefined)) {
@@ -9751,6 +9654,8 @@ KwContinue  = "continue" KwEnd ;
         if (isF32(l) || isF32(r)) { return want(coreF32Round(swD(l)), coreF32Round(swD(r))) }
         if (isFlo(l) || isFlo(r)) { return want(swD(l), swD(r)) }
         if (szIs(l) || szIs(r)) { return want(szCmp(l, r), 0) }
+        // Two Strings order by their NFC scalars (lib/swift-chars.js).
+        if (typeof l == "string" && typeof r == "string") { return want(swcStrCmp(l, r), 0) }
         return want(l, r)
     }
     swOverloadable("<", function(l, r) { return swOrd(l, r, function(a, b) { return a < b }) })
@@ -9970,7 +9875,7 @@ KwContinue  = "continue" KwEnd ;
             for (var q = 0; q < k; q++) { rep.push(x) }
             return rep
         }
-        if (typeof x == "string") { return swGraphemes(x) }
+        if (typeof x == "string") { return swcGraphemes(x) }
         if (isRange(x)) { return rangeArray(x) }
         if (isTupleVal(x)) { return tupleArray(x) }
         if (isDict(x)) { return swDictPairs(x) }

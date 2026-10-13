@@ -4227,6 +4227,23 @@ func s92() {
         && (arr.firstIndex(of: 9).map { $0 + 1 } ?? -1) == -1)
 }
 
+// ===== SECTION 93: extended grapheme clusters, Character-wise matching, ordering =====
+// UAX #29 as swiftc 6.1.2 applies it: ZWJ emoji sequences, flag pairs, CR LF,
+// emoji modifiers, Hangul syllables and Indic conjuncts (GB9c) are one Character
+// each; hasPrefix / hasSuffix / contains compare Characters; < orders the NFC
+// scalars. Every value read off swiftc 6.1.2.
+func s93() {
+    let ss = ["👨‍👩‍👧", "🏳️‍🌈", "🇩🇪🇫🇷", "\r\n", "👍🏽", "\u{1100}\u{1161}\u{11A8}", "क्ष", "\u{600}a", "a\u{903}", "🇩🇪🇫", "\n\u{301}"]
+    check("93a", ss.map { $0.count } == [1, 1, 2, 1, 1, 1, 1, 1, 1, 2, 2] && Array(ss[2]).count == 2)
+    let fam = "ab👨‍👩‍👧"
+    check("93b", String(fam.reversed()) == "👨‍👩‍👧ba" && "\(fam.last!)" == "👨‍👩‍👧" && Array(ss[0] + "x").count == 2)
+    let e = ["e\u{301}", "\u{e9}", "e\u{301}x"]
+    check("93c", !e[0].hasPrefix("e") && !e[0].contains("e") && e[2].hasSuffix("x") && e[2].hasPrefix(e[1])
+        && !e[1].hasPrefix("e") && e[2].contains("\u{e9}"))
+    check("93d", !(e[0] < "f") && !(e[0] < e[1]) && !(e[1] < e[0]) && e[0] == e[1] && "a" < "b" && !("a" < "B")
+        && "\u{FFFD}" < "😀")
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -4320,6 +4337,7 @@ func main() {
     s90() // SECTION-CALL 90
     s91() // SECTION-CALL 91
     s92() // SECTION-CALL 92
+    s93() // SECTION-CALL 93
     print("full: \(checks) checks, \(fails) failures")
 }
 
