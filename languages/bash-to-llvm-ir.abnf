@@ -1340,7 +1340,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtArrGet = rtDecl("rt_arr_get", true, [1, 1])
     var rtArrHas = rtDecl("rt_arr_has", false, [1, 1])
     var rtArrDel = rtDecl("rt_arr_del", false, [1, 1])
-    var rtArrCount = rtDecl("rt_arr_count", false, [1])
+    var rtArrAny = rtDecl("rt_arr_any", false, [1])
     var rtArrList = rtDecl("rt_arr_list", true, [1, 1, 0, 0])
     // The scalar-aware quartet, EXPANSION SITES ONLY - see languages/lib/bash-rt.c.
     var rtScGet = rtDecl("rt_sc_get", true, [1, 1])
@@ -1461,7 +1461,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // an array name expands to its element 0. A select evaluates both operands and an array's
         // own gvars slot is the unset marker, so rt_nounset is told which arm is live - otherwise
         // `set -u; a=(11 22); echo "$a"` would abort where bash prints 11.
-        var isA = b.NewICmp(llvm.enum.IPredSGT, b.NewCall(rtArrCount, gepStr(b, name)), zero)
+        var isA = b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtArrAny, gepStr(b, name)), zero)
         return b.NewSelect(isA, b.NewCall(rtArrGet, [gepStr(b, name), gepStr(b, "0")]),
                                 b.NewCall(rtNounset, [loadVar(b, name), gepStr(b, name), b.NewZExt(isA, i32)]))
     }
@@ -1620,7 +1620,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         function attrLetters(b, nmv) {
             var sc = scalarAttrLetters(xfName)
             if (hasOwn(assocArrays, "$" + xfName)) { return gepStr(b, "A" + sc) }
-            var isArrRt = b.NewICmp(llvm.enum.IPredSGT, b.NewCall(rtArrCount, nmv), zero)
+            var isArrRt = b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtArrAny, nmv), zero)
             return b.NewSelect(isArrRt, gepStr(b, "a" + sc), gepStr(b, sc))
         }
         // `isset` is an i32 0/1: ${nosuch@Q} and ${nosuch@A} are EMPTY in bash 5.3.15, while
@@ -2617,7 +2617,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return b
         }
         if (a.op == "+=") {
-            var isA = b.NewICmp(llvm.enum.IPredSGT, b.NewCall(rtArrCount, nm), zero)
+            var isA = b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtArrAny, nm), zero)
             var arrB = curF.NewBlock(""), strB = curF.NewBlock(""), mg = curF.NewBlock("")
             b.NewCondBr(isA, arrB, strB)
             arrB.NewCall(rtArrAppend, [nm, v])
@@ -2627,7 +2627,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return mg
         }
         // an ordinary scalar assignment - unless the name is an array, where it is element 0
-        var isA2 = b.NewICmp(llvm.enum.IPredSGT, b.NewCall(rtArrCount, nm), zero)
+        var isA2 = b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtArrAny, nm), zero)
         var arrB2 = curF.NewBlock(""), strB2 = curF.NewBlock(""), mg2 = curF.NewBlock("")
         b.NewCondBr(isA2, arrB2, strB2)
         arrB2.NewCall(rtArrSet, [nm, gepStr(arrB2, "0"), v])
@@ -3005,7 +3005,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     b.NewCall(rtArrHas, [gepStr(b, sv.name), litKeyOf(b, sv.name, sv.key)]), zero))
             }
             var setScalar = b.NewICmp(llvm.enum.IPredNE, loadVar(b, arg.c), unsetPtr(b))
-            var setArray = b.NewICmp(llvm.enum.IPredSGT, b.NewCall(rtArrCount, gepStr(b, arg.c)), zero)
+            var setArray = b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtArrAny, gepStr(b, arg.c)), zero)
             return boolStatus(b, b.NewOr(setScalar, setArray))
         }
         var k = b.NewCall(rtFskind, arg.v)

@@ -181,6 +181,7 @@ char *rt_arr_get(char *nm, char *k);
 int rt_arr_has(char *nm, char *k);
 int rt_arr_del(char *nm, char *k);
 int rt_arr_count(char *nm);
+int rt_arr_any(char *nm);
 char *rt_arr_list(char *nm, char *sep, int star, int keys);
 int rt_sc_count(char *nm);
 int rt_declp(char *nm, char *flag, int assoc);
@@ -238,6 +239,7 @@ int rt_pop_locals(int d);
 int rt_unset_up(int id, int d, int fn);
 int rt_fskind(char *p);
 char *rt_getvar_byname(char *n);
+int rt_varslot(char *n);
 int rt_setvar_byname(char *n, char *v);
 int rt_eval_assign(char *s);
 int putchar(int c);
@@ -756,7 +758,7 @@ long ar_value(char *nm, char *key)
     char *v;
     if (ar_noeval > 0) return 0;
     if (key != 0) v = rt_sc_get(nm, key);
-    else if (rt_arr_count(nm) > 0) v = rt_arr_get(nm, "0");
+    else if (rt_arr_any(nm) != 0) v = rt_arr_get(nm, "0");
     else v = rt_getvar_byname(nm);
     if (v[0] == 0) return 0;
     if (ar_depth >= 1024) return ar_err("expression recursion level exceeded");
@@ -767,7 +769,7 @@ long ar_store(char *nm, char *key, long v)
 {
     if (ar_noeval > 0) return v;
     if (key != 0) rt_arr_iset(nm, key, rt_int2str(v));
-    else if (rt_arr_count(nm) > 0) rt_arr_iset(nm, "0", rt_int2str(v));
+    else if (rt_arr_any(nm) != 0) rt_arr_iset(nm, "0", rt_int2str(v));
     else rt_setvar_byname(nm, rt_int2str(v));
     return v;
 }
@@ -2948,24 +2950,29 @@ int rt_arr_iset(char *nm, char *k, char *v) {
         arith_err = 1;
         return 0;
     }
-    at = rt_arr_find(nm, k);
-    if (at >= 0) {
-        arr_v[at] = v;
-        return 0;
-    }
+    /* The array's rows are already in order, so one scan from the END finds the
+     * row to update or the place to insert; appending in ascending order - the
+     * common case - stops at the array's last row. */
     n = arr_n;
+    kv = rt_str2int(k);
+    pos = 0;
+    i = n - 1;
+    while (i >= 0) {
+        if (rt_streq(nm, arr_nm[i]) != 0) {
+            long ki = rt_str2int(arr_k[i]);
+            if (ki == kv) {
+                arr_v[i] = v;
+                return 0;
+            }
+            if (ki < kv) {
+                pos = i + 1;
+                break;
+            }
+        }
+        i = i - 1;
+    }
     if (n >= 4096) {
         rt_die("array store", 1, n, 4096);
-    }
-    kv = rt_str2int(k);
-    pos = n;
-    i = 0;
-    while (i < n) {
-        if (rt_streq(nm, arr_nm[i]) != 0 && rt_str2int(arr_k[i]) > kv) {
-            pos = i;
-            break;
-        }
-        i = i + 1;
     }
     i = n;
     while (i > pos) {
@@ -3088,6 +3095,18 @@ int rt_arr_del(char *nm, char *k) {
             }
         }
         rt_arr_mark(nm);
+    }
+    return 0;
+}
+
+/* 1 when the array has a row at all: the test every variable read makes, so it
+ * stops at the first row instead of counting them. */
+int rt_arr_any(char *nm) {
+    int n = arr_n;
+    int i = 0;
+    while (i < n) {
+        if (rt_streq(nm, arr_nm[i]) != 0) return 1;
+        i = i + 1;
     }
     return 0;
 }
@@ -3248,7 +3267,7 @@ int rt_isposnm(char *nm) {
  * bash 5.3 answers Q for "${x[@]}" with x=Q, Q for "${x[0]}", 1 for ${#x[@]}
  * and 0 for ${!x[@]}: a plain scalar occupies index 0 of an array of one.
  *
- * WHY FOUR SEPARATE NAMES AND NOT A CHANGE TO rt_arr_count. rt_arr_count IS the test
+ * WHY FOUR SEPARATE NAMES AND NOT A CHANGE TO rt_arr_any. rt_arr_any IS the test
  * `is this name an array` everywhere else in the emitted program - varString
  * picks between rt_arr_get(name, "0") and the scalar slot with it, `[[ -v x ]]`
  * asks it, and every assignment path asks it. Making it answer 1 for a scalar
@@ -3274,7 +3293,7 @@ int rt_sc_count(char *nm) {
 char *rt_sc_get(char *nm, char *k) {
     char *v;
     if (rt_isposnm(nm) != 0) return rt_param(rt_str2int(k));
-    if (rt_arr_count(nm) > 0) return rt_arr_get(nm, k);
+    if (rt_arr_any(nm) != 0) return rt_arr_get(nm, k);
     v = rt_getvar_byname(nm);
     if (v != &unset_marker[0] && rt_streq(k, "0") != 0) return v;
     return &empty[0];
@@ -3288,7 +3307,7 @@ int rt_sc_has(char *nm, char *k) {
         if (pk >= 1 && pk <= frame_n) return 1;
         return 0;
     }
-    if (rt_arr_count(nm) > 0) return rt_arr_has(nm, k);
+    if (rt_arr_any(nm) != 0) return rt_arr_has(nm, k);
     v = rt_getvar_byname(nm);
     if (v != &unset_marker[0] && rt_streq(k, "0") != 0) return 1;
     return 0;
@@ -3300,7 +3319,7 @@ int rt_sc_has(char *nm, char *k) {
 char *rt_sc_list(char *nm, char *sep, int star, int keys) {
     char *v;
     if (rt_isposnm(nm) != 0) return rt_params(sep, star);
-    if (rt_arr_count(nm) > 0) return rt_arr_list(nm, sep, star, keys);
+    if (rt_arr_any(nm) != 0) return rt_arr_list(nm, sep, star, keys);
     v = rt_getvar_byname(nm);
     if (v == &unset_marker[0]) return star != 0 ? &empty[0] : "\002";
     if (keys != 0) v = "0";
@@ -3334,7 +3353,7 @@ char *rt_pfxnames(char *p, char *sep, int star) {
         v = i < nvars ? varnames[i] : arr_nm[i - nvars];
         if ((int)(unsigned char)v[0] == 3) v = rt_substr(v, 1, rt_strlen(v) - 1);
         int ok = rt_strlen(v) >= pl && rt_streq(rt_substr(v, 0, pl), p) != 0;
-        if (ok && rt_getvar_byname(v) == &unset_marker[0] && rt_arr_count(v) == 0
+        if (ok && rt_getvar_byname(v) == &unset_marker[0] && rt_arr_any(v) == 0
             && rt_arr_marked(v) == 0) ok = 0;
         dup = 0;
         j = 0;
@@ -3533,7 +3552,7 @@ char *rt_declasg(char *nm, char *at, char *v, int isset) {
  * to the scalar form, which is what bash does too. Twin of the @A arm in
  * bash-interpreter.abnf. */
 char *rt_declxa(char *nm, char *at, char *v, int isset, int assoc, char *ifs, int star) {
-    int isarr = (rt_arr_count(nm) > 0 || assoc != 0) ? 1 : 0;
+    int isarr = (rt_arr_any(nm) != 0 || assoc != 0) ? 1 : 0;
     char *flag;
     char *asg;
     char *val;
@@ -3621,7 +3640,7 @@ char *rt_kvq(char *nm, int assoc, char *v, int isset) {
     char *out = empty;
     int c = 0;
     int i = 0;
-    if (rt_arr_count(nm) == 0 && assoc == 0) return rt_shq(v, isset);
+    if (rt_arr_any(nm) == 0 && assoc == 0) return rt_shq(v, isset);
     while (i < arr_n) {
         if (rt_streq(nm, arr_nm[i]) != 0) {
             if (c > 0) out = rt_strcat(out, " ");
@@ -3641,7 +3660,7 @@ char *rt_kvp(char *nm, char *sep, int star, char *v, int isset) {
     char *out = star != 0 ? empty : "\002";
     int c = 0;
     int i = 0;
-    if (rt_arr_count(nm) == 0) return rt_shq(v, isset);
+    if (rt_arr_any(nm) == 0) return rt_shq(v, isset);
     while (i < arr_n) {
         if (rt_streq(nm, arr_nm[i]) != 0) {
             if (star != 0) {
@@ -3880,7 +3899,7 @@ char *rt_arr_slice(char *nm, long off, long len, int haslen, char *sep, int star
         rt_arith_fail(rt_int2str(len), "substring expression < 0", empty);
         return out;
     }
-    if (rt_arr_count(nm) == 0) {
+    if (rt_arr_any(nm) == 0) {
         char *all = rt_sc_list(nm, sep, 0, 0);
         int cnt = rt_nfields(all);
         if (off < 0) off = off + cnt;
@@ -4234,6 +4253,8 @@ char *rt_cap_end(int u)
         }
         l = l - 1;
     }
+    /* terminated first: the reused buffer still holds an earlier, longer text */
+    buf[l] = (char)0;
     return rt_substr(buf, 0, l);
 }
 
@@ -4430,6 +4451,47 @@ int rt_unset_up(int id, int d, int fn)
 /* Ordinary loops over the varnames[] {name, slot} table, so the emitted module
  * does not grow with the number of distinct variables. */
 
+/* The slot of the variable called n, or -1. Every by-name access - ${!r}, a name
+ * in a run-time arithmetic string, declare - goes through here, so the names are
+ * indexed once, the first time, in an open-addressing table (djb2, linear
+ * probing; nvars is final by then, main's entry block having filled varnames). */
+int vh_tab[4096];     /* slot + 1, 0 = empty */
+int vh_built;
+
+int rt_vhash(char *n)
+{
+    int h = 5381;
+    int i = 0;
+    while (n[i] != 0) {
+        h = (h * 33) ^ (int)(unsigned char)n[i];
+        i = i + 1;
+    }
+    return h & 4095;
+}
+
+int rt_varslot(char *n)
+{
+    int h;
+    int k;
+    if (vh_built == 0) {
+        k = 0;
+        while (k < nvars) {
+            h = rt_vhash(varnames[k]);
+            while (vh_tab[h] != 0) h = (h + 1) & 4095;
+            vh_tab[h] = k + 1;
+            k = k + 1;
+        }
+        vh_built = 1;
+    }
+    h = rt_vhash(n);
+    while (vh_tab[h] != 0) {
+        k = vh_tab[h] - 1;
+        if (rt_streq(n, varnames[k]) != 0) return k;
+        h = (h + 1) & 4095;
+    }
+    return -1;
+}
+
 /* ${!name}: the value of the variable whose NAME is `n`, or the unset marker.
  * Names are distinct, so at most one slot can match. */
 /* "$*" joins with the FIRST character of IFS (a space when IFS is unset). The
@@ -4492,15 +4554,10 @@ char *rt_getvar_byname(char *n)
         return rt_param(k);
     }
     sel = &unset_marker[0];
-    i = 0;
-    while (i < nvars) {
-        if (rt_streq(n, varnames[i]) != 0) {
-            sel = gvars[i];
-        }
-        i = i + 1;
-    }
+    i = rt_varslot(n);
+    if (i >= 0) sel = gvars[i];
     /* An array name reads its element 0, as $arr does. */
-    if (sel == &unset_marker[0] && rt_arr_count(n) > 0) return rt_arr_get(n, "0");
+    if (sel == &unset_marker[0] && rt_arr_any(n) != 0) return rt_arr_get(n, "0");
     return sel;
 }
 
@@ -4508,14 +4565,8 @@ char *rt_getvar_byname(char *n)
  * mentions has no slot and is silently dropped. */
 int rt_setvar_byname(char *n, char *v)
 {
-    int i;
-    i = 0;
-    while (i < nvars) {
-        if (rt_streq(n, varnames[i]) != 0) {
-            gvars[i] = v;
-        }
-        i = i + 1;
-    }
+    int i = rt_varslot(n);
+    if (i >= 0) gvars[i] = v;
     return 0;
 }
 
