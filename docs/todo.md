@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-565** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-567** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -93,6 +93,21 @@ raises TypeError. Dict "keys changed during iteration" is detected only when the
 ---
 
 # JS — JavaScript and TypeScript
+
+### T-565 js: wording and remaining low-value gaps · P3 · JS · OPEN [V]
+TDZ says "q is not defined" (node "Cannot access 'q' before initialization"); toString radix message; JSON.parse syntax-error
+text is older V8 wording. `(1e21).toString(36)` / `(2**60).toString(7)`: interp `5v1j4f4ds7c000`, compiler `...c4ks` — the
+halves must agree (port V8's DoubleToRadixCString to all three engines). `arguments[0]=9` in a zero-arg call makes
+`arguments.length` 1 (node 0; needs an arguments object). `JSON.parse('{"__proto__":1}')` → `{}` (`__` keys are internal slots,
+manual 7.9). `String.fromCodePoint` missing everywhere; `normalize` missing in the compiler.
+
+### T-566 js: `padStart(Infinity)` hangs; a missing method aborts natively; nested-try labeled jumps; big-radix parseInt · P2 · JS · OPEN [V]
+`"abc".padStart(Infinity, "*")` → interp and native run until killed (node RangeError "Invalid string length"). Calling a
+missing method natively (e.g. `String.fromCodePoint(65)` in a try) ends the binary with exit 1, interp and run throw a
+catchable TypeError "... is not a function". A labeled break crossing several nested try bodies with for-of loops in between
+does not close the for-of iterators opened inside the intermediate try closures (only the innermost's and the label's own).
+P3: `parseInt` past 2^53 in a radix that is neither 10 nor a power of two — all legs agree, node differs in the last digit
+(implementation-defined approximation in V8).
 
 ### T-560 js/ts: a generator that re-enters itself aborts instead of throwing TypeError · P2 · JS · OPEN [V]
 A generator body calling `me.next()` on itself: every compiled leg aborts with "generator already running" (the floor's
@@ -159,14 +174,6 @@ languages share these comparators before changing them (java/kotlin/csharp/dart 
 and llvm.Run `Infinity`/`-Infinity`, native and node `NaN`. abnf/jsrt.go ~17604 folds with Go's `math.Max`/`math.Min`,
 which define Max(x,+Inf)=+Inf even for NaN x. Check go's min/max (T-470) and other languages that route through it.
 
-### T-486 js: parseInt edge cases, a different leg wrong per case · P1 · JS · IN PROGRESS (JS worker, round 1) [V]
-node: `parseInt("-0")`, `"-00"`, `"-0x0"` → -0 (interp goja and native give 0: runtime.c `js_parse_int` does `0.0 - val`);
-`parseInt(" 7")`, `"  9"`, `"　10"` → 7, 9, 10 (native NaN: `is_space` is ASCII-only); `parseInt("﻿8")` → 8
-(run and interp -frozen NaN: Go `strings.TrimSpace` does not trim U+FEFF); `parseInt("11", 37)` → NaN (run/-frozen 38: no
-2..36 check); radix is ToInt32, so `parseInt("11", 4294967312)` → 17 (native NaN, run 4294967313). P3 tail: large-radix
-results differ in the last digit across legs (`parseInt("9007199254740993", 36)`). Files: abnf/jsrt.go `jsParseInt`
-(~17885), runtime.c `js_parse_int` (~5986), goja's parseInt for the interp.
-
 ### T-487 js interp (goja): ToInt32/ToUint32 of |x| ≥ 2^63 saturates · P1 · JS · IN PROGRESS (JS worker, round 1) [V]
 `x = 1e21`: interp `x|0 = -1`, `x>>>0 = 4294967295`, `~x = 0`, `1<<x = -2147483648`; run, native, interp -frozen and node
 `-559939584 3735027712 559939583 1`. 2^63 and 2^64+2^33 also wrong. Cause: third_party/goja/runtime.go:946 and :961
@@ -192,19 +199,6 @@ string-pattern form is right. All legs. Files: the regex replace expander (lib/r
 `"abc".at(NaN)`, `"abc".substr(NaN,1)`, `[5,6].at(NaN)` → interp `""`, `""`, `undefined`; run/native/node `a`, `a`, `5`. For
 `-0.5`: interp `charAt ""`, `charCodeAt NaN`, `at "c"`, `substr "c"`, `[5,6].at → 6`; node `a 97 a a 5`.
 `"abc".indexOf("c", NaN)` → NaN (node 2). File: js-interpreter.abnf string/array builtins.
-
-### T-492 js: missing TypeErrors — const assignment, `in` on a primitive, `instanceof` a non-object · P2 · JS · IN PROGRESS (JS worker, round 1) [V]
-`const c=1; c=2;` accepted (node TypeError "Assignment to constant variable."); `"a" in "abc"` → false (node TypeError
-"Cannot use 'in' operator to search for 'a' in abc"); `({}) instanceof 5` → false (node TypeError "Right-hand side of
-'instanceof' is not an object"). P3 wording: TDZ says "q is not defined" (node "Cannot access 'q' before initialization"),
-toString radix message, JSON.parse syntax-error text is older V8 wording. All legs.
-
-### T-493 js: low-value divergences and gaps · P3 · JS · IN PROGRESS (JS worker, round 1) [V finder only]
-`(1e21).toString(36)` / `(2**60).toString(7)`: interp and compiler disagree (implementation-defined, but the halves must
-agree). Tagged template `s.raw` undefined in the compiler (`s.raw.join is not a function`). `arguments[0]=9` in a
-zero-arg call makes `arguments.length` 1 (node 0). `JSON.parse('{"__proto__":1}')` → `{}` (node keeps the key). Missing in
-every leg: `copyWithin`, `toSorted`/`toReversed`/`with`/`toSpliced`, `String.fromCodePoint`; `normalize` missing in the
-compiler.
 
 ---
 
@@ -982,6 +976,9 @@ T-475 go: interp `string(rune(r))` of an invalid code point is not U+FFFD — DO
 T-476 go: Unicode case — titlecase digraphs and simple-fold orbits — DONE 9c2e45b8
 T-472 go: runes and bytes produced by literals, range and indexing have dynamic type `int` — PARTIAL ac022f51 (range/[]rune/literal runes int32, s[i] uint8); []byte elements are T-562
 T-477 go: features where the engines disagree on support — PARTIAL 646e06a3 (make(map,hint), Sprintln, strings.Title); Fprintf/io.Writer and the math package are T-563
+T-486 js: parseInt edge cases, a different leg wrong per case — DONE 690ef8af (the >2^53 non-power-of-two radix tail is implementation-defined in V8; all legs agree, recorded in T-566)
+T-492 js: missing TypeErrors — const assignment, `in` on a primitive, `instanceof` a non-object — PARTIAL 99030ccb (const assignment, in / instanceof TypeErrors); P3 wording is T-565
+T-493 js: low-value divergences and gaps — PARTIAL 27ea061e (strings.raw, toSorted/toReversed/toSpliced/with/copyWithin); rest is T-565
 
 # Settled — do not re-open
 
