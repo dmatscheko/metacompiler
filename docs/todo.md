@@ -106,7 +106,7 @@ the interpreter half.
 
 # JV — Java
 
-### T-574 java: regex errors are uncatchable; fully qualified static calls; `(Object) arr` to Object...; "Caused by:" · P1 · JV · OPEN [V]
+### T-574 java: regex errors are uncatchable; fully qualified static calls; `(Object) arr` to Object...; "Caused by:" · P1 · JV · IN PROGRESS (JV worker, round 3) [V]
 `try { "a".matches("("); } catch (java.util.regex.PatternSyntaxException e)` → every leg aborts "PatternSyntaxException:
 unterminated group"; java throws a catchable PatternSyntaxException. `"a".replaceAll("a", "$9")` aborts; java throws
 IndexOutOfBoundsException "No group 9" (jxkFail in lib/java-strings.js, rt.fail in jsrtjavastr.go, all engines).
