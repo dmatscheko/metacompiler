@@ -91,7 +91,7 @@ escape `"__#"` like other `"__"` keys.
 
 # JV — Java
 
-### T-604 java: regex dialect gaps; missing Math/Long/Double API; TreeMap views; unmodifiable view write-through · P2 · JV · OPEN [V]
+### T-604 java: regex dialect gaps; missing Math/Long/Double API; TreeMap views; unmodifiable view write-through · P2 · JV · IN PROGRESS (JV worker, round 5) [V]
 `"a".matches("a{99999999999}")` runs away (17 GB) in the interp (java "Illegal repetition range near index 11"). Java rejects,
 ours accepts: `{`, `a{`, `a{x}`, `a{2`, `x{1,2}{`, `\u12`, `\p{Foo}`, `\c`, `(?<1a>x)`, a duplicate group name; `[a-` and
 `[a-\d]` are "Illegal character range" in java. Java accepts, ours rejects: `\2` (backreference to a missing group),
