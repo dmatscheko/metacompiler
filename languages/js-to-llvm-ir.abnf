@@ -271,7 +271,7 @@ Do          <~~ push(makeDo(pop(), pop())) ~~>
 
 // The three optional parts are wrapped with a kind marker, otherwise e.g.
 // 'for (;c;)' and 'for (i=0;;)' could not be told apart on the stack.
-For         <~~ push(makeFor(takeAll(), hoistLexNames(up.start, up.pos), hoistLexNames(up.start, up.pos, true))); hoistLexKill(up.start, up.pos) ~~>
+For         <~~ push(makeFor(takeAll(), hoistLexNames(up.start, up.pos), hoistLexNames(up.start, up.pos, true), hoistLexKill(up.start, up.pos).tdz)) ~~>
             = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" NestedStatement ;
 ForInit     <~~ push({k:"init", t:pop()}) ~~> = ForVar | ForExpr ;
 ForVar      = VarDeclCore ;
@@ -453,7 +453,7 @@ YieldOne    <~~ push(makeYield(takeAll())) ~~>
 // parenthesized one is the only one that can start with '(', and the based one demands at
 // least one member suffix, which a bare name never has left over.
 Target      = TargetParen | TargetNamed | TargetBased ;
-TargetNamed <~~ push(jsTargetRef(takeAll())) ~~>
+TargetNamed <~~ push(jsTargetRef(takeAll(), up.start)) ~~>
             = NotReserved NotThisTarget Id <~~ push(idName(up.in)) ~~> [ TargetTail ] ;
 TargetParen <~~ push(retarget(takeAll())) ~~>
             = "(" Target ")" [ TargetTail ] ;
@@ -562,7 +562,7 @@ BitNot      <~~ push(makeBitNot(pop())) ~~>
 // with a '.', '[', '(' or a template behind it the general form has to run, because there
 // the property/call, not the name, is what is being typed.
 Typeof      = TypeofName | TypeofExpr ;
-TypeofName  <~~ push(makeTypeofName(pop())) ~~>
+TypeofName  <~~ push(makeTypeofName(pop(), up.start)) ~~>
             = KwTypeof NotReserved Id <~~ push(jsbRef(idName(up.in))) ~~> NotChain ;
 TypeofExpr  <~~ push(makeUnary(pop(), typeofExt())) ~~>
             = KwTypeof UnaryExpr ;
@@ -743,7 +743,7 @@ PrivateNameRef <~~ push(privRefConst(pop())) ~~>
 
 // new C(args): build an instance of the class named C. Member/call suffixes may follow
 // (new C().m()).
-NewExpr     <~~ push(makeNew(takeAll())) ~~>
+NewExpr     <~~ push(makeNew(takeAll(), up.start)) ~~>
             = KwNew NotReserved Id <~~ push({cls: jsbRef(idName(up.in))}) ~~> "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 
 // The general 'new' forms: a member-path or parenthesized callee ('new a.b.C()',
@@ -864,7 +864,7 @@ MethodProp  <~~ push(makeMethodProp(takeAll())) ~~>
 AsyncMod    <~~ push({amod: true}) ~~> = "async" KwEnd ;
 GenMod      <~~ push({gmod: true}) ~~> = "*" ;
 // '{ val }' is '{ val: val }'.
-ShorthandProp <~~ push(makeProp(jsVarRef(idName(up.in)), idName(up.in))) ~~>
+ShorthandProp <~~ push(makeProp(jsVarRef(idName(up.in), up.start), idName(up.in))) ~~>
             = NotReserved Id ;
 
 // An array literal has ELISIONS: '[1,,2]' is three elements whose middle one is a hole,
@@ -968,7 +968,7 @@ ForOfPathHead = NotLet ForOfTarget ForOfOp | ForOfTarget ForInOp ;
 // TargetTail rather than '{ TargetSuffix }': the path must END in a member, so
 // 'for (a.b() of xs)' stays the syntax error it is instead of reaching emitRefPath with
 // a call as its last element.
-ForOfTarget <~~ push({apat: {dtype: "target", ref: jsTargetRef(takeAll())}}) ~~>
+ForOfTarget <~~ push({apat: {dtype: "target", ref: jsTargetRef(takeAll(), up.start)}}) ~~>
             = NotReserved Id <~~ push(idName(up.in)) ~~> TargetTail ;
 // A for-in/of whose loop target is not a reference at all: 'for (0 of 0)',
 // 'for ([0] in 0)', 'for ({a: 0} of 0)'. Like AssignNoRef these PARSE in the spec and are
@@ -1081,7 +1081,7 @@ ATargetSuper <~~ push(makeSuperTarget(takeAll())) ~~>
             = KwSuper SuperKey { DotSuffix | IndexSuffix } ;
 // A name with at least one member suffix - the shape that distinguishes a target element
 // from the plain binding name behind it.
-TargetSuffixed <~~ push(jsTargetRef(takeAll())) ~~>
+TargetSuffixed <~~ push(jsTargetRef(takeAll(), up.start)) ~~>
             = NotReserved Id <~~ push(idName(up.in)) ~~> TargetSuffix { TargetSuffix } ;
 AObjPattern <~~ push({dtype: "obj", fields: takeAll()}) ~~>
             = "{" [ AField { "," AField } [ "," ] ] "}" ;
@@ -1325,7 +1325,7 @@ GenFuncDecl <~~ push(makeGenFuncDecl(takeAll(), up.start)) ~~>
 Null        <~~ push(makeHandleConst(1)) ~~>   = "null" KwEnd ;
 Undefined   <~~ push(makeHandleConst(0)) ~~>   = "undefined" KwEnd ;
 
-VarRef      <~~ push(jsVarRef(jsbRef(idName(up.in)))) ~~>
+VarRef      <~~ push(jsVarRef(jsbRef(idName(up.in)), up.start)) ~~>
             = NotReserved Id ;
 
 // JavaScript's own string literals, deliberately NOT the shared lib's
@@ -3955,22 +3955,76 @@ NotFuncHead = :script(~~
         }
         return true
     }
-    function jsVarRef(name) {
-        if (withDepth == 0) { return makeVarRef(name) }
-        return function(b) { return {b: b, v: callExt(b, "js_jswithget", [curScopeV, emitStr(b, name)])} }
+    function jsVarRef(name, pos) {
+        if (withDepth > 0) {
+            return function(b) { return {b: b, v: callExt(b, "js_jswithget", [curScopeV, emitStr(b, name)])} }
+        }
+        var ri = hoistNoteRef(name, pos)
+        return function(b) {
+            var nmV = emitStr(b, name)
+            var v = callExt(b, core.scopeGetExt, [curScopeV, nmV])
+            if (hoistRefAll[ri].chk) { v = tdzChk(b, v, nmV) }
+            return {b: b, v: v}
+        }
     }
-    function jsTargetRef(items) {
+    function jsTargetRef(items, pos) {
         var ref = makeTargetRef(items)
         ref.w = withDepth > 0
+        if (!ref.w && typeof ref.name == "string") { ref.tdz = hoistNoteRef(ref.name, pos) }
         return ref
     }
     // A bare-name target's read and write, through the with walk when it stands in one.
     function refNameGet(b, ref) {
-        return callExt(b, (ref.w === true) ? "js_jswithget" : "js_scope_get", [curScopeV, emitStr(b, ref.name)])
+        var nmV = emitStr(b, ref.name)
+        var v = callExt(b, (ref.w === true) ? "js_jswithget" : "js_scope_get", [curScopeV, nmV])
+        if (ref.tdz != undefined && hoistRefAll[ref.tdz].chk) { v = tdzChk(b, v, nmV) }
+        return v
     }
     function refNameSet(b, ref, ext, v) {
         constChk(b, ref.name)
-        callExt(b, (ref.w === true) ? "js_jswithset" : ext, [curScopeV, emitStr(b, ref.name), v])
+        var nmV = emitStr(b, ref.name)
+        if (ref.tdz != undefined && hoistRefAll[ref.tdz].chk) { tdzChk(b, callExt(b, "js_scope_get", [curScopeV, nmV]), nmV) }
+        callExt(b, (ref.w === true) ? "js_jswithset" : ext, [curScopeV, nmV, v])
+    }
+    // The temporal dead zone (lib/js-hoist.js). A scope creates the names some
+    // reference can reach uninitialized holding the TDZ SENTINEL, one pinned object
+    // made at boot like the miss sentinel, and only those references (chk) pass what
+    // they read through jstdzchk, a module function answering the value or throwing
+    // node's ReferenceError. Twin: jsTdz in js-interpreter.abnf.
+    var tdzGH = [] // [the sentinel's module global, jstdzchk]
+    function tdzGlob() {
+        if (tdzGH.length == 0) {
+            tdzGH.push(m.NewGlobalDef("jstdz", llvm.constant.NewInt(i64, 0)))
+            var f = m.NewFunc("jstdzchk", i64, [llvm.ir.NewParam("v", i64), llvm.ir.NewParam("name", i64)])
+            var eb = f.NewBlock("entry")
+            var badB = f.NewBlock("")
+            var okB = f.NewBlock("")
+            eb.NewCondBr(eb.NewICmp(llvm.enum.IPredEQ, f.Params[0], eb.NewLoad(i64, tdzGH[0])), badB, okB)
+            okB.NewRet(f.Params[0])
+            var msgV = callExt(badB, "js_add", [callExt(badB, "js_add", [emitStr(badB, "ReferenceError: Cannot access '"), f.Params[1]]),
+                                                emitStr(badB, "' before initialization")])
+            callExt(badB, "js_throw", [callExt(badB, "js_jserrmk", [msgV])])
+            badB.NewRet(hUndef) // Never reached: js_throw does not return.
+            tdzGH.push(f)
+        }
+        return tdzGH[0]
+    }
+    function tdzChk(b, v, nmV) {
+        tdzGlob()
+        return b.NewCall(tdzGH[1], [v, nmV])
+    }
+    // Creates names in the current scope holding the sentinel.
+    function tdzDecl(b, names) {
+        for (var i = 0; i < names.length; i++) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, names[i]), b.NewLoad(i64, tdzGlob())])
+        }
+        return b
+    }
+    function withTdzInit(names, items) {
+        if (names.length == 0) { return items }
+        var out = [function(b) { return tdzDecl(b, names) }]
+        for (var j = 0; j < items.length; j++) { out.push(items[j]) }
+        return out
     }
     function makeWith(items) {
         withDepth = withDepth - 1
@@ -3991,10 +4045,11 @@ NotFuncHead = :script(~~
             return endB
         }
     }
-    function makeTypeofName(name) {
+    function makeTypeofName(name, pos) {
         if (withDepth > 0) {
             return function(b) { return {b: b, v: callExt(b, "js_jswithtypeof", [curScopeV, emitStr(b, name)])} }
         }
+        var ri = hoistNoteRef(name, pos)
         return function(b) {
             var nmV = emitStr(b, name)
             var tv = callExt(b, "js_scope_typeof", [curScopeV, nmV])
@@ -4003,7 +4058,9 @@ NotFuncHead = :script(~~
             var endB = curF.NewBlock("")
             b.NewCondBr(truthy(b, callExt(b, "js_seq", [tv, emitStr(b, "undefined")])), absB, hitB)
             absB.NewBr(endB)
-            var hv = callExt(hitB, "js_jstypeof", [callExt(hitB, "js_scope_get", [curScopeV, nmV])])
+            var gv = callExt(hitB, "js_scope_get", [curScopeV, nmV])
+            if (hoistRefAll[ri].chk) { gv = tdzChk(hitB, gv, nmV) }
+            var hv = callExt(hitB, "js_jstypeof", [gv])
             hitB.NewBr(endB)
             return {b: endB, v: endB.NewPhi([llvm.ir.NewIncoming(tv, absB),
                                              llvm.ir.NewIncoming(hv, hitB)])}
@@ -5028,7 +5085,8 @@ NotFuncHead = :script(~~
     function makeTargetBase(items) { return {base: items[0], ptxt: items[1].ptxt, path: items.slice(2)} }
     function retarget(items) {
         var inner = items[0]
-        return {name: inner.name, base: inner.base, ptxt: inner.ptxt, path: inner.path.concat(items.slice(1))}
+        return {name: inner.name, base: inner.base, ptxt: inner.ptxt, path: inner.path.concat(items.slice(1)),
+                w: inner.w, tdz: inner.tdz}
     }
     // The primary text of an assignment TARGET's reference. compile-core's shared
     // makeTargetRef answers {name, path} and is not this grammar's to change, so a
@@ -5996,7 +6054,12 @@ NotFuncHead = :script(~~
             ext = "js_scope_set"
         }
         var cn = []
-        if (declIsConst()) {
+        var cst = declIsConst()
+        if (ext == "js_scope_decl") {
+            var ln = patNames(pat, [])
+            for (var li = 0; li < ln.length; li++) { hoistNoteLex(ln[li], pos, cst) }
+        }
+        if (cst) {
             cn = patNames(pat, [])
             constNote(cn)
         }
@@ -6062,12 +6125,13 @@ NotFuncHead = :script(~~
     // functions are instantiated in that scope too, so an Annex B assignment and a var
     // of the same name write the binding they read.
     function makeFuncBody(items, from, to) {
+        fnBodyTo = to
         var fns = hoistClaimFns(from, to)
-        hoistLexKill(from, to)
+        var tdz = hoistLexKill(from, to, fns).tdz
         var annex = hoistClaimAnnex(from, to)
         var names = claimVars(from, to)
-        if (names.length == 0 && annex.length == 0) { return makeBlockStmt(withFnInit(fns, items)) }
-        var bodyT = makeBlockStmt(items)
+        if (names.length == 0 && annex.length == 0) { return makeBlockStmt(withTdzInit(tdz, withFnInit(fns, items))) }
+        var bodyT = makeBlockStmt(withTdzInit(tdz, items))
         return function(b) {
             var fnScope = curScopeV
             curScopeV = callExt(b, "js_scope_new", [fnScope])
@@ -6141,8 +6205,11 @@ NotFuncHead = :script(~~
     }
     // The declaration in place: nothing, or the Annex B assignment of the block's
     // binding to the function's.
+    // A function declaration's span ends with its FuncBody, the last one whose tag ran
+    // before the declaration's own.
+    var fnBodyTo = 0
     function fnDeclAt(name, fnT, pos, plain) {
-        var rec = {name: name, fnT: fnT, at: pos, file: c.curFile(), plain: plain, ab: false}
+        var rec = {name: name, fnT: fnT, at: pos, to: fnBodyTo, file: c.curFile(), plain: plain, ab: false}
         hoistFns.push(rec)
         return function(b) {
             if (!rec.ab || emitStrict) { return b }
@@ -6154,24 +6221,32 @@ NotFuncHead = :script(~~
         }
     }
     function makeJsBlock(items, from, to) {
-        return makeBlockStmt(withFnInit(hoistBlockFns(from, to), items))
+        var hb = hoistBlockFns(from, to)
+        return makeBlockStmt(withTdzInit(hb.tdz, withFnInit(hb.fns, items)))
     }
-    // A switch's case block is one scope for the functions declared in it.
+    // A switch's case block is one scope for the functions and lexical names declared
+    // in it, entered after the discriminant is evaluated.
     function makeJsSwitch(items, from, to) {
-        var fns = hoistBlockFns(from, to)
+        var hb = hoistBlockFns(from, to, true)
+        if (hb.fns.length == 0 && hb.names.length == 0) { return makeSwitch(items) }
+        var subj = items[0]
+        var saved = []
+        items[0] = function(b) {
+            var r = subj(b)
+            saved.push(curScopeV)
+            curScopeV = callExt(r.b, "js_scope_new", [curScopeV])
+            return {b: emitFnInit(tdzDecl(r.b, hb.tdz), hb.fns), v: r.v}
+        }
         var swT = makeSwitch(items)
-        if (fns.length == 0) { return swT }
         return function(b) {
-            var saved = curScopeV
-            curScopeV = callExt(b, "js_scope_new", [saved])
-            var endB = swT(emitFnInit(b, fns))
-            curScopeV = saved
+            var endB = swT(b)
+            curScopeV = saved.pop()
             return endB
         }
     }
     // Annex B.3.4: a function declaration as an if body is one in a block of its own.
     function makeIfBody(t, from, to) {
-        var fns = hoistBlockFns(from, to)
+        var fns = hoistBlockFns(from, to).fns
         if (fns.length == 0) { return t }
         return makeBlockStmt(withFnInit(fns, [t]))
     }
@@ -6709,7 +6784,7 @@ NotFuncHead = :script(~~
     // ('function Ctor(n) { this.n = n }'), where the fresh object is simply the receiver
     // of a normal call. Which one it is can only be decided at run time, so both are
     // emitted and a typeof test picks: a class descriptor is an object, a function is not.
-    function makeNew(items) {
+    function makeNew(items, pos) {
         var clsName = items[0].cls
         var argThunks = items.slice(1)
         // new RegExp(src, flags) needs its own form: the function arm below hands back the
@@ -6722,10 +6797,7 @@ NotFuncHead = :script(~~
                 return {b: b, v: callExt(b, "js_jsxregexp", [rargs])}
             }
         }
-        var newExt = (withDepth > 0) ? "js_jswithget" : "js_scope_get"
-        return makeNewFrom(function(b) {
-            return {b: b, v: callExt(b, newExt, [curScopeV, emitStr(b, clsName)])}
-        }, argThunks, clsName)
+        return makeNewFrom(jsVarRef(clsName, pos), argThunks, clsName)
     }
     // The general 'new' (NewWidened): the callee is an arbitrary value thunk, and the
     // argument list may be absent entirely ('new C'), which is the same as an empty one.
@@ -7149,7 +7221,7 @@ NotFuncHead = :script(~~
     // the scope the head and the increment run against is a phi whose incoming
     // values are written once the loop is emitted, the way makeBlockStmt decides
     // its own scope in lib/compile-core.js. Twin: makeFor in js-interpreter.abnf.
-    function makeFor(items, lexNames, constNames) {
+    function makeFor(items, lexNames, constNames, tdz) {
         var bodyT = items.pop()
         var init = null, cond = null, post = null
         for (var i = 0; i < items.length; i++) {
@@ -7163,6 +7235,7 @@ NotFuncHead = :script(~~
             var fnBefore = funcCount
             curScopeV = callExt(b, "js_scope_new", [curScopeV]) // The for header is its own scope.
             var headS = curScopeV
+            b = tdzDecl(b, tdz)
             if (init != null) b = init(b)
             var initB = curF.NewBlock("")
             b.NewBr(initB)
@@ -7479,12 +7552,12 @@ NotFuncHead = :script(~~
         // Every var and function no function body claimed is the program's own, hoisted
         // in front of its statements.
         var topFns = hoistClaimFns(0, 2147483647)
-        hoistLexKill(0, 2147483647)
+        var topTdz = hoistLexKill(0, 2147483647, topFns).tdz
         var topVars = claimVars(0, 2147483647)
         var topAnnex = hoistClaimAnnex(0, 2147483647)
-        if (topVars.length > 0 || topAnnex.length > 0 || topFns.length > 0) {
+        if (topVars.length > 0 || topAnnex.length > 0 || topFns.length > 0 || topTdz.length > 0) {
             var hoisted = [function(hb) {
-                hb = emitHoist(hb, curScopeV, curScopeV, topVars)
+                hb = tdzDecl(emitHoist(hb, curScopeV, curScopeV, topVars), topTdz)
                 if (topAnnex.length > 0) { hb = emitAnnexHoist(hb, topAnnex, topVars, []) }
                 return emitFnInit(hb, topFns)
             }]
@@ -7556,6 +7629,7 @@ NotFuncHead = :script(~~
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Symbol"), callExt(b, "js_jssymbolfn", [])])
         b = emitErrorClasses(b)
         b = emitMissHooks(b)   // after the classes: the hooks raise instances of them.
+        if (hoistTdzCount > 0) { b.NewStore(callExt(b, "js_gc_pin", [callExt(b, "js_obj_new", [])]), tdzGlob()) }
         b = emitImported(b)
         b = makeSeq(items)(b)
         b.NewRet(callExt(b, "js_getret", []))

@@ -444,7 +444,7 @@ Do          <~~ push(makeDo(pop(), pop())) ~~>
 
 // The three optional parts are wrapped with a kind marker, otherwise e.g.
 // 'for (;c;)' and 'for (i=0;;)' could not be told apart on the stack.
-For         <~~ push(makeFor(takeAll(), hoistLexNames(up.start, up.pos), hoistLexNames(up.start, up.pos, true))); hoistLexKill(up.start, up.pos) ~~>
+For         <~~ push(makeFor(takeAll(), hoistLexNames(up.start, up.pos), hoistLexNames(up.start, up.pos, true), hoistLexKill(up.start, up.pos).tdz)) ~~>
             = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" NestedStatement ;
 ForInit     <~~ push({k:"init", t:pop()}) ~~> = ForVar | ForExpr ;
 ForVar      = VarDeclCore ;
@@ -581,7 +581,7 @@ YieldOne    <~~ push(makeYield(takeAll())) ~~>
 
 // See the twin of this comment in js-to-llvm-ir.abnf.
 Target      = TargetParen | TargetNamed | TargetBased ;
-TargetNamed <~~ push(makeTargetRef(takeAll())) ~~>
+TargetNamed <~~ push(tsTargetRef(takeAll(), up.start)) ~~>
             = NotReserved Id <~~ push(idName(up.in)) ~~> { TargetSuffix } ;
 // A type assertion inside the parentheses is erased: '(f as any) = g' stores to f.
 // Twin of ParenTarget in typescript-interpreter.abnf.
@@ -789,7 +789,7 @@ BitNot      <~~ push(makeBitNot(pop())) ~~>
             = "~" UnaryExpr ;
 // See the twin of this comment in js-to-llvm-ir.abnf.
 Typeof      = TypeofName | TypeofExpr ;
-TypeofName  <~~ push(makeTypeofName(pop())) ~~>
+TypeofName  <~~ push(makeTypeofName(pop(), up.start)) ~~>
             = KwTypeof NotReserved Id <~~ push(jsbRef(idName(up.in))) ~~> NotChain ;
 TypeofExpr  <~~ push(makeUnary(pop(), typeofExt())) ~~>
             = KwTypeof UnaryExpr ;
@@ -902,7 +902,7 @@ TypeAssertion = "<" Type ">" UnaryExpr ;
 
 // new C(args): build an instance of the class named C. Member/call suffixes may follow
 // (new C().m()).
-NewExpr     <~~ push(makeNew(takeAll())) ~~>
+NewExpr     <~~ push(makeNew(takeAll(), up.start)) ~~>
             = KwNew NotReserved Id <~~ push({cls: jsbRef(idName(up.in))}) ~~> [ TypeArgs ] "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 
 // The general 'new' forms - a member-path or parenthesized callee, a nested 'new', no
@@ -1012,7 +1012,7 @@ MethodProp  <~~ push(makeMethodProp(takeAll())) ~~>
 AsyncMod    <~~ push({amod: true}) ~~> = "async" KwEnd ;
 GenMod      <~~ push({gmod: true}) ~~> = "*" ;
 // '{ val }' is '{ val: val }'.
-ShorthandProp <~~ push(makeProp(tsVarRef(idName(up.in)), idName(up.in))) ~~>
+ShorthandProp <~~ push(makeProp(tsVarRef(idName(up.in), up.start), idName(up.in))) ~~>
             = NotReserved Id ;
 
 // See the twin of this comment in js-to-llvm-ir.abnf.
@@ -1178,7 +1178,7 @@ ATargetSuper <~~ push(makeSuperTarget(takeAll())) ~~>
             = KwSuper SuperKey { DotSuffix | IndexSuffix } ;
 // A name with at least one member suffix - the shape that distinguishes a target element
 // from the plain binding name behind it.
-TargetSuffixed <~~ push(makeTargetRef(takeAll())) ~~>
+TargetSuffixed <~~ push(tsTargetRef(takeAll(), up.start)) ~~>
             = NotReserved Id <~~ push(idName(up.in)) ~~> TargetSuffix { TargetSuffix } ;
 AObjPattern <~~ push({dtype: "obj", fields: takeAll()}) ~~>
             = "{" [ AField { "," AField } [ "," ] ] "}" ;
@@ -1470,7 +1470,7 @@ GenFuncDecl <~~ push(makeGenFuncDecl(takeAll(), up.start)) ~~>
 Null        <~~ push(makeHandleConst(1)) ~~>   = "null" KwEnd ;
 Undefined   <~~ push(makeHandleConst(0)) ~~>   = "undefined" KwEnd ;
 
-VarRef      <~~ push(tsVarRef(jsbRef(idName(up.in)))) ~~>
+VarRef      <~~ push(tsVarRef(jsbRef(idName(up.in)), up.start)) ~~>
             = NotReserved Id ;
 
 // See the twin of this comment in js-to-llvm-ir.abnf.
@@ -2768,7 +2768,8 @@ NotFuncHead = :script(~~
         return function(b) { return {b: t(b).b, v: hUndef} }
     }
     // See the twin of this comment in js-to-llvm-ir.abnf.
-    function makeTypeofName(name) {
+    function makeTypeofName(name, pos) {
+        var ri = hoistNoteRef(name, pos)
         return function(b) {
             if (nsIsVar(name)) { return {b: b, v: callExt(b, "js_jswithtypeof", [curScopeV, emitStr(b, name)])} }
             var nmV = emitStr(b, name)
@@ -2778,7 +2779,9 @@ NotFuncHead = :script(~~
             var endB = curF.NewBlock("")
             b.NewCondBr(truthy(b, callExt(b, "js_seq", [tv, emitStr(b, "undefined")])), absB, hitB)
             absB.NewBr(endB)
-            var hv = callExt(hitB, "js_jstypeof", [callExt(hitB, "js_scope_get", [curScopeV, nmV])])
+            var gv = callExt(hitB, "js_scope_get", [curScopeV, nmV])
+            if (hoistRefAll[ri].chk) { gv = tdzChk(hitB, gv, nmV) }
+            var hv = callExt(hitB, "js_jstypeof", [gv])
             hitB.NewBr(endB)
             return {b: endB, v: endB.NewPhi([llvm.ir.NewIncoming(tv, absB),
                                              llvm.ir.NewIncoming(hv, hitB)])}
@@ -3578,7 +3581,7 @@ NotFuncHead = :script(~~
     function makeTargetBase(items) { return {base: items[0], ptxt: items[1].ptxt, path: items.slice(2)} }
     function retarget(items) {
         var inner = items[0]
-        return {name: inner.name, base: inner.base, ptxt: inner.ptxt, path: inner.path.concat(items.slice(1))}
+        return {name: inner.name, base: inner.base, ptxt: inner.ptxt, path: inner.path.concat(items.slice(1)), tdz: inner.tdz}
     }
     // See the twin of this comment in js-to-llvm-ir.abnf.
     function refSiteText(ref) {
@@ -3593,7 +3596,7 @@ NotFuncHead = :script(~~
             b = br.b
             cur = br.v
         } else {
-            cur = callExt(b, nsGetExt(ref.name), [curScopeV, emitStr(b, ref.name)])
+            cur = refRead(b, ref, emitStr(b, ref.name))
         }
         var curThis = hUndef
         for (var i = 0; i < ref.path.length - 1; i++) {
@@ -3645,7 +3648,7 @@ NotFuncHead = :script(~~
                 // (js_scope_set_or_create). A compound assignment first reads the
                 // old value, so it still requires a prior declaration.
                 if (op != "=") {
-                    oldV = callExt(b, nsGetExt(ref.name), [curScopeV, emitStr(b, ref.name)])
+                    oldV = refRead(b, ref, emitStr(b, ref.name))
                     setExt = "js_scope_set"
                 }
             } else {
@@ -3657,7 +3660,12 @@ NotFuncHead = :script(~~
             b = r.b
             var v = r.v
             if (op != "=") { v = emitBinOp(b, op, oldV, v) }
-            if (ref.path.length == 0) { constChk(b, ref.name); callExt(b, nsSetExt(ref.name, setExt), [curScopeV, emitStr(b, ref.name), v]) }
+            if (ref.path.length == 0) {
+                constChk(b, ref.name)
+                var nmV = emitStr(b, ref.name)
+                refWriteChk(b, ref, nmV)
+                callExt(b, nsSetExt(ref.name, setExt), [curScopeV, nmV, v])
+            }
             else { callExt(b, memSetExt(), [p.obj, p.key, v]) }
             return {b: b, v: v}
         }
@@ -3671,7 +3679,7 @@ NotFuncHead = :script(~~
             var nameV = null, objV = null, keyV = null, oldV = null
             if (ref.path.length == 0) {
                 nameV = emitStr(b, ref.name)
-                oldV = callExt(b, nsGetExt(ref.name), [curScopeV, nameV])
+                oldV = refRead(b, ref, nameV)
             } else {
                 var p = emitRefPath(b, ref)
                 b = p.b
@@ -3689,7 +3697,12 @@ NotFuncHead = :script(~~
             b.NewCondBr(condI, assignB, mergeB)
             var r = valT(assignB)
             var ab = r.b
-            if (nameV != null) { constChk(ab, ref.name); callExt(ab, nsSetExt(ref.name, "js_scope_set"), [curScopeV, emitStr(ab, ref.name), r.v]) }
+            if (nameV != null) {
+                constChk(ab, ref.name)
+                var anV = emitStr(ab, ref.name)
+                refWriteChk(ab, ref, anV)
+                callExt(ab, nsSetExt(ref.name, "js_scope_set"), [curScopeV, anV, r.v])
+            }
             else { callExt(ab, memSetExt(), [objV, keyV, r.v]) }
             ab.NewBr(mergeB)
             var phi = mergeB.NewPhi([llvm.ir.NewIncoming(r.v, ab), llvm.ir.NewIncoming(oldV, fromB)])
@@ -3705,8 +3718,9 @@ NotFuncHead = :script(~~
             var oneV = callExt(b, "js_num_i", [handle(delta)])
             if (ref.path.length == 0) {
                 var nameV = emitStr(b, ref.name)
-                var oldV = callExt(b, "js_jstonumeric", [callExt(b, nsGetExt(ref.name), [curScopeV, nameV])])
+                var oldV = callExt(b, "js_jstonumeric", [refRead(b, ref, nameV)])
                 constChk(b, ref.name)
+                refWriteChk(b, ref, nameV)
                 callExt(b, nsSetExt(ref.name, "js_scope_set"), [curScopeV, nameV, callExt(b, "js_jsstep", [oldV, oneV])])
                 return {b: b, v: oldV}
             }
@@ -3724,9 +3738,10 @@ NotFuncHead = :script(~~
             var oneV = callExt(b, "js_num_i", [handle(delta)])
             if (ref.path.length == 0) {
                 var nameV = emitStr(b, ref.name)
-                var oldV = callExt(b, "js_jstonumeric", [callExt(b, nsGetExt(ref.name), [curScopeV, nameV])])
+                var oldV = callExt(b, "js_jstonumeric", [refRead(b, ref, nameV)])
                 var newV = callExt(b, "js_jsstep", [oldV, oneV])
                 constChk(b, ref.name)
+                refWriteChk(b, ref, nameV)
                 callExt(b, nsSetExt(ref.name, "js_scope_set"), [curScopeV, nameV, newV])
                 return {b: b, v: newV}
             }
@@ -4246,7 +4261,9 @@ NotFuncHead = :script(~~
     function assignRef(b, ref, valueH) {
         if (ref.path.length == 0 && ref.base == undefined) {
             constChk(b, ref.name)
-            callExt(b, nsSetExt(ref.name, "js_scope_set_or_create"), [curScopeV, emitStr(b, ref.name), valueH])
+            var nmV = emitStr(b, ref.name)
+            refWriteChk(b, ref, nmV)
+            callExt(b, nsSetExt(ref.name, "js_scope_set_or_create"), [curScopeV, nmV, valueH])
             return b
         }
         var p = emitRefPath(b, ref)
@@ -4399,7 +4416,11 @@ NotFuncHead = :script(~~
             ext = "js_scope_set"
         }
         var cn = []
-        if (declIsConst()) {
+        var cst = declIsConst()
+        if (ext == "js_scope_decl") {
+            for (var ni = 0; ni < leaves.length; ni++) { hoistNoteLex(leaves[ni], pos, cst) }
+        }
+        if (cst) {
             cn = patNames(pat, [])
             constNote(cn)
         }
@@ -4452,12 +4473,13 @@ NotFuncHead = :script(~~
     }
     // See the twin of this comment in js-to-llvm-ir.abnf.
     function makeFuncBody(items, from, to) {
+        fnBodyTo = to
         var fns = hoistClaimFns(from, to)
-        hoistLexKill(from, to)
+        var tdz = hoistLexKill(from, to, fns).tdz
         var annex = hoistClaimAnnex(from, to)
         var names = claimVars(from, to)
-        if (names.length == 0 && annex.length == 0) { return makeBlockStmt(withFnInit(fns, items)) }
-        var bodyT = makeBlockStmt(items)
+        if (names.length == 0 && annex.length == 0) { return makeBlockStmt(withTdzInit(tdz, withFnInit(fns, items))) }
+        var bodyT = makeBlockStmt(withTdzInit(tdz, items))
         return function(b) {
             var fnScope = curScopeV
             curScopeV = callExt(b, "js_scope_new", [fnScope])
@@ -4529,8 +4551,10 @@ NotFuncHead = :script(~~
     }
     // The declaration in place: nothing, or the Annex B assignment of the block's
     // binding to the function's.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
+    var fnBodyTo = 0
     function fnDeclAt(name, fnT, pos, plain) {
-        var rec = {name: name, fnT: fnT, at: pos, file: c.curFile(), plain: plain, ab: false}
+        var rec = {name: name, fnT: fnT, at: pos, to: fnBodyTo, file: c.curFile(), plain: plain, ab: false}
         hoistFns.push(rec)
         return function(b) {
             if (!rec.ab || emitStrict) { return b }
@@ -4542,24 +4566,31 @@ NotFuncHead = :script(~~
         }
     }
     function makeJsBlock(items, from, to) {
-        return makeBlockStmt(withFnInit(hoistBlockFns(from, to), items))
+        var hb = hoistBlockFns(from, to)
+        return makeBlockStmt(withTdzInit(hb.tdz, withFnInit(hb.fns, items)))
     }
-    // A switch's case block is one scope for the functions declared in it.
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function makeJsSwitch(items, from, to) {
-        var fns = hoistBlockFns(from, to)
+        var hb = hoistBlockFns(from, to, true)
+        if (hb.fns.length == 0 && hb.names.length == 0) { return makeSwitch(items) }
+        var subj = items[0]
+        var saved = []
+        items[0] = function(b) {
+            var r = subj(b)
+            saved.push(curScopeV)
+            curScopeV = callExt(r.b, "js_scope_new", [curScopeV])
+            return {b: emitFnInit(tdzDecl(r.b, hb.tdz), hb.fns), v: r.v}
+        }
         var swT = makeSwitch(items)
-        if (fns.length == 0) { return swT }
         return function(b) {
-            var saved = curScopeV
-            curScopeV = callExt(b, "js_scope_new", [saved])
-            var endB = swT(emitFnInit(b, fns))
-            curScopeV = saved
+            var endB = swT(b)
+            curScopeV = saved.pop()
             return endB
         }
     }
     // Annex B.3.4: a function declaration as an if body is one in a block of its own.
     function makeIfBody(t, from, to) {
-        var fns = hoistBlockFns(from, to)
+        var fns = hoistBlockFns(from, to).fns
         if (fns.length == 0) { return t }
         return makeBlockStmt(withFnInit(fns, [t]))
     }
@@ -5034,7 +5065,7 @@ NotFuncHead = :script(~~
     }
 
     // See the twin of this comment in js-to-llvm-ir.abnf.
-    function makeNew(items) {
+    function makeNew(items, pos) {
         var clsName = items[0].cls
         var argThunks = items.slice(1)
         // new RegExp(src, flags) needs its own form: the function arm below hands back the
@@ -5047,9 +5078,7 @@ NotFuncHead = :script(~~
                 return {b: b, v: callExt(b, "js_jsxregexp", [rargs])}
             }
         }
-        return makeNewFrom(function(b) {
-            return {b: b, v: callExt(b, nsGetExt(clsName), [curScopeV, emitStr(b, clsName)])}
-        }, argThunks, clsName)
+        return makeNewFrom(tsVarRef(clsName, pos), argThunks, clsName)
     }
     // See the twin of this comment in js-to-llvm-ir.abnf.
     function makeNewGeneral(items) {
@@ -5456,8 +5485,63 @@ NotFuncHead = :script(~~
         if (ext == "js_scope_set_or_create") { callExt(b, nsSetExt(name, ext), [curScopeV, emitStr(b, name), v]) }
         else { nsDeclStore(b, ext, name, v, true) }
     }
-    function tsVarRef(name) {
-        return function(b) { return {b: b, v: callExt(b, nsGetExt(name), [curScopeV, emitStr(b, name)])} }
+    function tsVarRef(name, pos) {
+        var ri = hoistNoteRef(name, pos)
+        return function(b) {
+            var nmV = emitStr(b, name)
+            var v = callExt(b, nsGetExt(name), [curScopeV, nmV])
+            if (hoistRefAll[ri].chk) { v = tdzChk(b, v, nmV) }
+            return {b: b, v: v}
+        }
+    }
+    function tsTargetRef(items, pos) {
+        var ref = makeTargetRef(items)
+        if (typeof ref.name == "string") { ref.tdz = hoistNoteRef(ref.name, pos) }
+        return ref
+    }
+    // A bare-name target's read, and the check in front of its write.
+    function refRead(b, ref, nmV) {
+        var v = callExt(b, nsGetExt(ref.name), [curScopeV, nmV])
+        if (ref.tdz != undefined && hoistRefAll[ref.tdz].chk) { v = tdzChk(b, v, nmV) }
+        return v
+    }
+    function refWriteChk(b, ref, nmV) {
+        if (ref.tdz != undefined && hoistRefAll[ref.tdz].chk) { tdzChk(b, callExt(b, nsGetExt(ref.name), [curScopeV, nmV]), nmV) }
+    }
+    // The temporal dead zone: see the twin of this comment in js-to-llvm-ir.abnf.
+    var tdzGH = [] // [the sentinel's module global, jstdzchk]
+    function tdzGlob() {
+        if (tdzGH.length == 0) {
+            tdzGH.push(m.NewGlobalDef("jstdz", llvm.constant.NewInt(i64, 0)))
+            var f = m.NewFunc("jstdzchk", i64, [llvm.ir.NewParam("v", i64), llvm.ir.NewParam("name", i64)])
+            var eb = f.NewBlock("entry")
+            var badB = f.NewBlock("")
+            var okB = f.NewBlock("")
+            eb.NewCondBr(eb.NewICmp(llvm.enum.IPredEQ, f.Params[0], eb.NewLoad(i64, tdzGH[0])), badB, okB)
+            okB.NewRet(f.Params[0])
+            var msgV = callExt(badB, "js_add", [callExt(badB, "js_add", [emitStr(badB, "ReferenceError: Cannot access '"), f.Params[1]]),
+                                                emitStr(badB, "' before initialization")])
+            callExt(badB, "js_throw", [callExt(badB, "js_jserrmk", [msgV])])
+            badB.NewRet(hUndef) // Never reached: js_throw does not return.
+            tdzGH.push(f)
+        }
+        return tdzGH[0]
+    }
+    function tdzChk(b, v, nmV) {
+        tdzGlob()
+        return b.NewCall(tdzGH[1], [v, nmV])
+    }
+    function tdzDecl(b, names) {
+        for (var i = 0; i < names.length; i++) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, names[i]), b.NewLoad(i64, tdzGlob())])
+        }
+        return b
+    }
+    function withTdzInit(names, items) {
+        if (names.length == 0) { return items }
+        var out = [function(b) { return tdzDecl(b, names) }]
+        for (var j = 0; j < items.length; j++) { out.push(items[j]) }
+        return out
     }
     function nsAccessors(b, objV, names) {
         if (nsAccIdx.length == 0) {
@@ -5999,7 +6083,7 @@ NotFuncHead = :script(~~
         }
     }
     // See the twin of this comment in js-to-llvm-ir.abnf.
-    function makeFor(items, lexNames, constNames) {
+    function makeFor(items, lexNames, constNames, tdz) {
         var bodyT = items.pop()
         var init = null, cond = null, post = null
         for (var i = 0; i < items.length; i++) {
@@ -6013,6 +6097,7 @@ NotFuncHead = :script(~~
             var fnBefore = funcCount
             curScopeV = callExt(b, "js_scope_new", [curScopeV]) // The for header is its own scope.
             var headS = curScopeV
+            b = tdzDecl(b, tdz)
             if (init != null) b = init(b)
             var initB = curF.NewBlock("")
             b.NewBr(initB)
@@ -6255,12 +6340,12 @@ NotFuncHead = :script(~~
         // Every var and function no function body claimed is the program's own, hoisted
         // in front of its statements.
         var topFns = hoistClaimFns(0, 2147483647)
-        hoistLexKill(0, 2147483647)
+        var topTdz = hoistLexKill(0, 2147483647, topFns).tdz
         var topVars = claimVars(0, 2147483647)
         var topAnnex = hoistClaimAnnex(0, 2147483647)
-        if (topVars.length > 0 || topAnnex.length > 0 || topFns.length > 0) {
+        if (topVars.length > 0 || topAnnex.length > 0 || topFns.length > 0 || topTdz.length > 0) {
             var hoisted = [function(hb) {
-                hb = emitHoist(hb, curScopeV, curScopeV, topVars)
+                hb = tdzDecl(emitHoist(hb, curScopeV, curScopeV, topVars), topTdz)
                 if (topAnnex.length > 0) { hb = emitAnnexHoist(hb, topAnnex, topVars, []) }
                 return emitFnInit(hb, topFns)
             }]
@@ -6321,6 +6406,7 @@ NotFuncHead = :script(~~
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Symbol"), callExt(b, "js_jssymbolfn", [])])
         b = emitErrorClasses(b)
         b = emitMissHooks(b)   // after the classes: the hooks raise instances of them.
+        if (hoistTdzCount > 0) { b.NewStore(callExt(b, "js_gc_pin", [callExt(b, "js_obj_new", [])]), tdzGlob()) }
         b = emitImported(b)
         b = makeSeq(items)(b)
         b.NewRet(callExt(b, "js_getret", []))

@@ -3736,7 +3736,12 @@ NotFuncHead = :script(~~
     // change type freely. No declare-before-use discipline.
     getVar = function(name) {
         for (var i = scopes.length - 1; i >= 0; i--) {
-            if (hasOwn(scopes[i], name)) return scopes[i][name]
+            if (hasOwn(scopes[i], name)) {
+                var v = anytype // The variable may hold any type.
+                v = scopes[i][name]
+                if (v === jsTdz) { jsTdzRaise(name) }
+                return v
+            }
         }
         if (hasOwn(hostGlobals, name)) return hostGlobals[name]
         // A name with no binding is node's ReferenceError, not an engine abort, so a
@@ -3756,9 +3761,26 @@ NotFuncHead = :script(~~
     // implicit global (real, non strict JavaScript), never an error.
     setVar = function(name, value) {
         for (var i = scopes.length - 1; i >= 0; i--) {
-            if (hasOwn(scopes[i], name)) { scopePut(scopes[i], name, value); return }
+            if (hasOwn(scopes[i], name)) {
+                if (scopes[i][name] === jsTdz) { jsTdzRaise(name) }
+                scopePut(scopes[i], name, value)
+                return
+            }
         }
         scopePut(globalScope, name, value)
+    }
+    // The temporal dead zone: see the twin of this comment in js-interpreter.abnf.
+    var jsTdz = {}
+    function jsTdzRaise(name) { biRaise("ReferenceError: Cannot access '" + name + "' before initialization") }
+    function withLexInit(names, items) {
+        if (names.length == 0) { return items }
+        var out = [function() { jsTdzDecl(names) }]
+        for (var j = 0; j < items.length; j++) { out.push(items[j]) }
+        return out
+    }
+    function jsTdzDecl(names) {
+        var sc = scopes[scopes.length - 1]
+        for (var i = 0; i < names.length; i++) { scopePut(sc, names[i], jsTdz) }
     }
 
     // ----- Statement signals -----
@@ -3794,7 +3816,7 @@ NotFuncHead = :script(~~
         }
         // Every var and function no function body claimed is the program's own.
         var fns = hoistClaimFns(0, 2147483647)
-        hoistLexKill(0, 2147483647)
+        var lex = hoistLexKill(0, 2147483647).names
         var names = claimVars(0, 2147483647)
         var annex = hoistNames(hoistClaimAnnex(0, 2147483647))
         if (!fileStrict) {
@@ -3802,7 +3824,7 @@ NotFuncHead = :script(~~
                 if (names.indexOf(annex[a]) < 0) { names.push(annex[a]) }
             }
         }
-        return hoistVars(names, makeSeq(withFnInit(fns, out)))
+        return hoistVars(names, makeSeq(withLexInit(lex, withFnInit(fns, out))))
     }
     // See the twin of this comment in js-interpreter.abnf.
     function itemsStrict(items) {
@@ -4682,6 +4704,7 @@ NotFuncHead = :script(~~
                 if (hasOwn(scopes[i], name)) {
                     var v = anytype // The variable may hold any type.
                     v = scopes[i][name]
+                    if (v === jsTdz) { jsTdzRaise(name) }
                     return jsTypeofVal(v)
                 }
             }
@@ -6811,6 +6834,8 @@ NotFuncHead = :script(~~
             }, nsPatNames(pat))
         }
         var cn = []
+        var ln = patNames(pat, [])
+        for (var li = 0; li < ln.length; li++) { hoistNoteLex(ln[li], pos, false) }
         if (nsDepth == 0 && declKinds.length > 0 && declKinds[declKinds.length - 1] == "const") {
             cn = patNames(pat, [])
             for (var ci = 0; ci < cn.length; ci++) { jsConstNames[cn[ci]] = true }
@@ -8550,11 +8575,11 @@ NotFuncHead = :script(~~
     // See the twin of this comment in js-interpreter.abnf.
     function makeFuncBody(items, from, to) {
         var fns = hoistClaimFns(from, to)
-        hoistLexKill(from, to)
+        var lex = hoistLexKill(from, to).names
         var annex = hoistNames(hoistClaimAnnex(from, to))
         var names = claimVars(from, to)
-        if (names.length == 0 && annex.length == 0) { return makeBlockStmt(withFnInit(fns, items)) }
-        var bodyT = makeBlockStmt(items)
+        if (names.length == 0 && annex.length == 0) { return makeBlockStmt(withLexInit(lex, withFnInit(fns, items))) }
+        var bodyT = makeBlockStmt(withLexInit(lex, items))
         var initT = fns.length > 0 ? withFnInit(fns, [])[0] : null
         return function() {
             var ps = scopes[scopes.length - 1]
@@ -8620,17 +8645,24 @@ NotFuncHead = :script(~~
         }
     }
     function makeJsBlock(items, from, to) {
-        return makeBlockStmt(withFnInit(hoistBlockFns(from, to), items))
+        var hb = hoistBlockFns(from, to)
+        return makeBlockStmt(withLexInit(hb.names, withFnInit(hb.fns, items)))
     }
-    // A switch's case block is one scope for the functions declared in it.
+    // See the twin of this comment in js-interpreter.abnf.
     function makeJsSwitch(items, from, to) {
-        var fns = hoistBlockFns(from, to)
-        var swT = makeSwitch(items)
-        if (fns.length == 0) { return swT }
-        var initT = withFnInit(fns, [])[0]
-        return function() {
+        var hb = hoistBlockFns(from, to, true)
+        if (hb.fns.length == 0 && hb.names.length == 0) { return makeSwitch(items) }
+        var initT = withLexInit(hb.names, withFnInit(hb.fns, []))
+        var subj = items[0]
+        items[0] = function() {
+            var v = anytype // The discriminant may be of any type.
+            v = subj()
             scopes.push({})
-            initT()
+            for (var i = 0; i < initT.length; i++) { initT[i]() }
+            return v
+        }
+        var swT = makeSwitch(items)
+        return function() {
             var r = swT()
             scopes.pop()
             return r
@@ -8638,7 +8670,7 @@ NotFuncHead = :script(~~
     }
     // Annex B.3.4: a function declaration as an if body is one in a block of its own.
     function makeIfBody(t, from, to) {
-        var fns = hoistBlockFns(from, to)
+        var fns = hoistBlockFns(from, to).fns
         if (fns.length == 0) { return t }
         return makeBlockStmt(withFnInit(fns, [t]))
     }
@@ -8773,6 +8805,7 @@ NotFuncHead = :script(~~
         return function() {
             scopes.push({}) // The for header is its own scope (for the loop variable).
             var res = undefined
+            if (lex) { jsTdzDecl(lexNames) }
             if (init != null) init()
             if (lex) { forIterScope(lexNames) }
             while (cond == null || jsTruthy(cond())) {

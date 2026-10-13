@@ -3841,6 +3841,37 @@ function s77() {
         s77err(function () { (String as any).fromCodePoint(0x110000); }) === "RangeError: Invalid code point 1114112");
 }
 
+// ===== SECTION 78: the temporal dead zone of let, const and class =====
+// A lexical binding exists from its scope's entry, uninitialized until its
+// declaration runs: a read, a write or a typeof before then is a ReferenceError, also
+// through a closure or a function declaration of the scope, and in a switch's case
+// block, which is entered after the discriminant. Values read off node 24.
+function s78err(f: () => any): string {
+    try { return "" + f(); } catch (e: any) { return e.name + ": " + e.message; }
+}
+let s78top = s78read();
+function s78read(): string { return s78err(function () { return s78late; }); }
+let s78late = 5;
+function s78() {
+    check("tdz78a", s78err(function () { let q = "outer"; { let r = q; let q = 1; return r; } }) === "ReferenceError: Cannot access 'q' before initialization");
+    check("tdz78b", s78err(function () { { let r = typeof u; const u = 1; return r; } }) === "ReferenceError: Cannot access 'u' before initialization");
+    check("tdz78c", s78err(function () { { u = 5; let u = 1; return u; } }) === "ReferenceError: Cannot access 'u' before initialization");
+    check("tdz78d", s78err(function () { { x2++; let x2 = 1; return x2; } }) === "ReferenceError: Cannot access 'x2' before initialization");
+    check("tdz78e", s78err(function () { { let f = function () { return v; }; let r = f(); let v = 3; return r; } }) === "ReferenceError: Cannot access 'v' before initialization");
+    check("tdz78f", s78err(function () { { let r = new K(); class K {} return r; } }) === "ReferenceError: Cannot access 'K' before initialization");
+    check("tdz78g", s78err(function () { let x: any = x; return x; }) === "ReferenceError: Cannot access 'x' before initialization");
+    check("tdz78h", s78err(function () { switch (1) { case 0: let z = 1; case 1: return z; } }) === "ReferenceError: Cannot access 'z' before initialization");
+    check("tdz78i", s78err(function () { { g(); let w = 1; function g() { return w; } } }) === "ReferenceError: Cannot access 'w' before initialization");
+    check("tdz78j", s78err(function () { let n = 1; switch (n) { case 1: let n = 2; return n; } }) === "2");
+    check("tdz78k", s78err(function () { switch (0) { case 0: let z = 3; } return typeof z; }) === "undefined");
+    check("tdz78l", s78err(function () { { let [a, b] = [a, 2]; return b; } }) === "ReferenceError: Cannot access 'a' before initialization");
+    check("tdz78m", s78err(function () { for (let i: any = i; ;) { return i; } }) === "ReferenceError: Cannot access 'i' before initialization");
+    check("tdz78n", s78err(function () { { q.a = 1; let q: any = {}; return q; } }) === "ReferenceError: Cannot access 'q' before initialization");
+    check("tdz78o", s78top === "ReferenceError: Cannot access 's78late' before initialization" && s78read() === "5");
+    check("tdz78p", s78err(function () { let x = 1; { let f = () => x; let x = 2; return f(); } }) === "2" &&
+        s78err(function () { { let r = typeof undeclared78; return r; } }) === "undefined");
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -3921,6 +3952,7 @@ function main(): number {
     s75(); // SECTION-CALL 75
     s76(); // SECTION-CALL 76
     s77(); // SECTION-CALL 77
+    s78(); // SECTION-CALL 78
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }
