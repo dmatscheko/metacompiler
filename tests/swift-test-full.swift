@@ -4225,6 +4225,7 @@ func s92() {
     let arr = [3, 4, 5]
     check("92e", "héllo😀".utf16.count == 7 && (arr.firstIndex(of: 4).map { $0 * 10 } ?? -1) == 10
         && (arr.firstIndex(of: 9).map { $0 + 1 } ?? -1) == -1)
+    check("92f", (..<0) ~= ns[0] && !((..<0) ~= ns[2]) && (3...) ~= ns[3] && !((3...) ~= ns[1]))
 }
 
 // ===== SECTION 93: extended grapheme clusters, Character-wise matching, ordering =====
