@@ -5426,16 +5426,19 @@ KwContinue  = "continue" KwEnd ;
         return swAdoptable(t) ? t : ""
     }
     function swSelfFieldTy(name) {
+        var t = swTyStripOptText(swSelfFieldAnn(name))
+        return swAdoptable(t) ? t : ""
+    }
+    function swSelfFieldDeepTy(name) {
+        var t = swSelfFieldAnn(name)
+        return t != "" && swTyIsDeep(t) && swAdoptNeeded(t) ? t : ""
+    }
+    function swSelfFieldAnn(name) {
         var tn = curType() == null ? null : curType().name
         var guard = 0
         while (tn != null && hasOwn(typeFieldAnn, "$" + tn) && guard < 64) {
             var r = typeFieldAnn["$" + tn]
-            for (var i = 0; i < r.fs.length; i++) {
-                if (r.fs[i].name == name) {
-                    var t = swTyStripOptText(r.fs[i].ty)
-                    return swAdoptable(t) ? t : ""
-                }
-            }
+            for (var i = 0; i < r.fs.length; i++) { if (r.fs[i].name == name) { return r.fs[i].ty } }
             tn = r.sup
             guard = guard + 1
         }
@@ -7022,6 +7025,11 @@ KwContinue  = "continue" KwEnd ;
         var localAnn = hasOwn(localAnnReg, "$" + ref.name) ? localAnnReg["$" + ref.name] : "?"
         var hasLocal = localAnn != "?"
         if (hasLocal && ref.path.length == 0 && op == "=") { valT = swDotWant(valT, items[3], localAnn) }
+        // A whole value written to a local declared with a STRUCTURAL type adopts its
+        // numeric leaves. Twin in swift-interpreter.abnf.
+        if (hasLocal && ref.path.length == 0 && op == "=" && localAnn != "" && swTyIsDeep(localAnn) && swAdoptNeeded(localAnn)) {
+            valT = swAdoptThunk(valT, localAnn)
+        }
         var pathNames = []
         for (var pn = 0; pn + 1 < ref.path.length; pn++) { if (ref.path[pn].key != undefined) { pathNames.push(ref.path[pn].key) } }
         var obs = hasOwn(localObsReg, "$" + ref.name) ? localObsReg["$" + ref.name] : null
@@ -7056,6 +7064,12 @@ KwContinue  = "continue" KwEnd ;
             var r = valT(b)
             b = r.b
             var v = emitCopy(b, r.v)
+            // A whole value written to self's STRUCTURAL property adopts its leaves.
+            if (op == "=" && ((ref.path.length == 0 && !hasLocal)
+                              || (ref.name == "self" && ref.path.length == 1 && ref.path[0].key != undefined))) {
+                var dty = swSelfFieldDeepTy(ref.path.length == 0 ? ref.name : ref.path[0].key)
+                if (dty != "") { v = swEmitAdopt(b, v, dty) }
+            }
             if (ref.path.length == 0) {
                 // `_ = expr` evaluates and throws the value away.
                 if (ref.name == "_") { return {b: b, v: v} }

@@ -4719,6 +4719,34 @@ func s108() {
         && [b, a].max()!.x == 2 && Sd108.p + .q == 10 && Sd108.q + .q == 20)
 }
 
+// ===== SECTION 109: whole-value writes into structurally typed slots =====
+// A whole value written to a local or a property declared `[Double]` (or any
+// type with numeric leaves) adopts those leaves as the declaration's own
+// initializer does: `xs = Array(repeating: 0, count: 2)` holds 0.0s, in an
+// initializer as in a method. Every value read off swiftc 6.1.2.
+struct M109 {
+    var data: [Double]
+    var rows: Int
+    init(n: Int) { data = Array(repeating: 0, count: n); rows = n }
+    subscript(i: Int) -> Double {
+        get { data[i] }
+        set { data[i] = newValue }
+    }
+}
+class C109 { var xs: [Double] = []; var tag: (Double, Int) = (0, 0); func fill() { xs = [1, 2]; self.tag = (3, 4) } }
+func s109() {
+    var m = M109(n: 2)
+    m[1] = 3
+    var loc: [Double] = []
+    loc = Array(repeating: 1, count: 2)
+    var dict: [String: Double] = [:]
+    dict = ["a": 1]
+    let c = C109()
+    c.fill()
+    check("109a", "\(m.data) \(m[1] / 2)" == "[0.0, 3.0] 1.5" && "\(loc) \(dict)" == "[1.0, 1.0] [\"a\": 1.0]"
+        && "\(c.xs) \(c.tag)" == "[1.0, 2.0] (3.0, 4)")
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -4828,6 +4856,7 @@ func main() {
     s106() // SECTION-CALL 106
     s107() // SECTION-CALL 107
     s108() // SECTION-CALL 108
+    s109() // SECTION-CALL 109
     print("full: \(checks) checks, \(fails) failures")
 }
 

@@ -6894,18 +6894,24 @@ KwContinue  = "continue" KwEnd ;
         return swAdoptable(t) ? t : ""
     }
     function swSelfFieldTy(name) {
+        var t = swTyStripOpt(swSelfFieldAnn(name))
+        return swAdoptable(t) ? t : ""
+    }
+    // A STRUCTURAL one (`var xs: [Double]`), which every whole-value write
+    // (`xs = [1, 2]`) adopts, nil or not.
+    function swSelfFieldDeepTy(name) {
+        var t = swSelfFieldAnn(name)
+        return t != "" && swTyIsDeepText(t) && swAdoptNeeded(t) ? t : ""
+    }
+    // The type self's class (or a superclass) declares a stored property at, "".
+    function swSelfFieldAnn(name) {
         var self = findThis()
         if (self === null || self === undefined || typeof self != "object" || self.__class == undefined) { return "" }
         var tn = self.__class.__name
         var guard = 0
         while (tn != null && hasOwn(typeFieldAnn, "$" + tn) && guard < 64) {
             var r = typeFieldAnn["$" + tn]
-            for (var i = 0; i < r.fs.length; i++) {
-                if (r.fs[i].name == name) {
-                    var t = swTyStripOpt(r.fs[i].ty)
-                    return swAdoptable(t) ? t : ""
-                }
-            }
+            for (var i = 0; i < r.fs.length; i++) { if (r.fs[i].name == name) { return r.fs[i].ty } }
             tn = r.sup
             guard = guard + 1
         }
@@ -7261,6 +7267,13 @@ KwContinue  = "continue" KwEnd ;
         var localAnn = hasOwn(localAnnReg, "$" + ref.name) ? localAnnReg["$" + ref.name] : "?"
         var hasLocal = localAnn != "?"
         if (hasLocal && ref.path.length == 0 && op == "=") { valT = swDotWant(valT, items[3], localAnn) }
+        // A whole value written to a local declared with a STRUCTURAL type adopts its
+        // numeric leaves, as the declaration's initializer does: `xs =
+        // Array(repeating: 0, count: 3)` into `var xs: [Double]`. Twin in
+        // swift-to-llvm-ir.abnf.
+        if (hasLocal && ref.path.length == 0 && op == "=" && localAnn != "" && swTyIsDeepText(localAnn) && swAdoptNeeded(localAnn)) {
+            valT = swAdoptThunk(valT, localAnn)
+        }
         var obs = hasOwn(localObsReg, "$" + ref.name) ? localObsReg["$" + ref.name] : null
         // `s = [1, 2]` into a local declared `Set<Int>`, and `d[[1, 2]] = v` into
         // one declared `[Set<Int>: V]`.
@@ -7298,6 +7311,10 @@ KwContinue  = "continue" KwEnd ;
             var v = anytype
             v = swCopy(valT())
             if (setTy && op == "=") { v = swSetOf(v) }
+            if (op == "=" && viaSelf) {
+                var dty = swSelfFieldDeepTy(lastKey)
+                if (dty != "") { v = swAdoptAnn(v, dty) }
+            }
             if (ref.path.length == 0) {
                 var oldL = ref.name == "self" ? null : lookupOrNull(ref.name)
                 if (catTy != "") { v = swAdoptAnn(v, catTy) }
