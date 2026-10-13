@@ -731,6 +731,18 @@
             "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-shift.go", "-q"]
         },
         {
+            "name": "Go interpreter float constant truncated SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-truncate.go", "-q"]
+        },
+        {
+            "name": "Go compiler float constant truncated SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-truncate.go", "-q"]
+        },
+        {
             "name": "Go interpreter constant slice bounds out of order SHOULD FAIL",
             "type": "go",
             "request": "launch",

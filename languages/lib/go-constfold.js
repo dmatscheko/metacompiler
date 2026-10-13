@@ -395,9 +395,11 @@ function cMod2(a, b) {
     // The remainder takes the DIVIDEND's sign, as everywhere else in Go.
     return cInt(a.s, cbDivMod(a.n, b.n).r)
 }
-function cShift(a, b, left) {
-    if (a.f || b.f) { return null }
-    if (b.s < 0) { return null }
+function cShift(a, b0, left) {
+    if (a.f) { return null }
+    // A count that is an integral float constant (`1 << 2.0`) is that integer.
+    var b = goKInt(b0)
+    if (b == null || b.s < 0) { return null }
     if (b.n.length > 1) { return null }
     var k = b.s === 0 ? 0 : b.n[0]
     if (k > 4096) { return null }
@@ -774,6 +776,16 @@ function goRunCheck(items, ops, sty) {
         k = k + 1
     }
 }
+// The same count where the left operand is not a constant (`x << 2.0`): the
+// thunk of operand k + 1 becomes the integer.
+function goShiftCounts(items, ops, ts) {
+    var k = 0
+    while (k < ops.length) {
+        var n = constAt(items[3 * k + 4].at)
+        if ((ops[k] == "<<" || ops[k] == ">>") && n != null && !cIsCx(n) && n.f && goKInt(n) != null) { ts[k + 1] = cMaterialize(goKInt(n)) }
+        k = k + 1
+    }
+}
 // The static type of a binary run that did not fold (same items layout). Go gives
 // + - * / % & | ^ &^ the type of its operands, an untyped constant taking the
 // other's, and a shift the type of its LEFT operand. "" when none is known.
@@ -1049,30 +1061,47 @@ function goSplitSty(xs) {
 // `var b uint8 = 256` and `fmt.Println(1 << 63)` do not compile. An integer
 // constant reaching a float type is rounded from its exact value, so
 // `var f float64 = 1 << 64` holds 2^64. kr is goKRec's record of the value
-// (StoreExpr, ArgExpr), ty its location's type ("" not known: nothing checked).
+// (StoreExpr, ArgExpr): a real constant and its source range, or null; ty is its
+// location's type ("" not known: nothing checked).
 function goKRec(start, pos) { return goKRecOf(constAt(pos), start, pos) }
 function goKRecOf(k, start, pos) {
-    if (k == null || cIsCx(k) || k.f) { return null }
+    if (k == null || cIsCx(k)) { return null }
     return {k: k, ks: start, ke: pos}
 }
+// A float constant reaches an integer location only when it is integral and fits
+// (`var u uint8 = 2.0`); otherwise go says "truncated" rather than "overflows".
+// One at an interface or a := takes its default type float64.
 function goConstTo(t, kr, ty, ctx) {
     if (kr == null || ty == "") { return t }
     var bt = stBare(ty)
+    if (kr.k.f && goIsIfaceTy(bt)) { return t }
     var shown = goIsIfaceTy(bt) ? "int" : bt
     var w = goTyWord(shown)
     if (typeof definedUnder[w] == "string") { w = goTyWord(resolveDefined(w)) }
-    if (isFloatTy(w)) { return cMaterialize(cAsF(kr.k)) }
+    if (isFloatTy(w)) { return kr.k.f ? t : cMaterialize(cAsF(kr.k)) }
     var it = goIntTy(w)
-    if (it == null || cFitsInt(kr.k, it.w, it.u)) { return t }
-    goKFail(kr, "cannot use " + goKDesc(kr) + " as " + shown + " value in " + ctx + " (overflows)")
+    if (it == null) { return t }
+    var iv = goKInt(kr.k)
+    if (iv != null && cFitsInt(iv, it.w, it.u)) { return t }
+    goKFail(kr, "cannot use " + goKDesc(kr) + " as " + shown + " value in " + ctx + (kr.k.f ? " (truncated)" : " (overflows)"))
     return t
 }
-// How go's diagnostics name an integer constant: its source, then its value where
-// the two differ - "1 << 63 (untyped int constant 9223372036854775808)".
+// Constant k as an integer constant, or null when it has a fraction.
+function goKInt(k) {
+    if (!k.f) { return k }
+    var qr = cbDivMod(k.n, k.d)
+    if (!cbIsZero(qr.r)) { return null }
+    return cInt(k.s, qr.q)
+}
+// How go's diagnostics name a constant: its source, then its value where the two
+// differ - "1 << 63 (untyped int constant 9223372036854775808)", "h (untyped
+// float constant 0.5)".
 function goKDesc(kr) {
     var src = stTrim(c.srcSlice(kr.ks, kr.ke))
-    var dec = (kr.k.s < 0 ? "-" : "") + cbToDec(kr.k.n)
-    return src + " (untyped " + (kr.k.rn === true ? "rune" : "int") + " constant" + (src == dec ? "" : " " + dec) + ")"
+    var iv = goKInt(kr.k)
+    var dec = iv != null ? (iv.s < 0 ? "-" : "") + cbToDec(iv.n) : "" + cToF64(kr.k)
+    var kind = kr.k.f ? "float" : (kr.k.rn === true ? "rune" : "int")
+    return src + " (untyped " + kind + " constant" + (src == dec ? "" : " " + dec) + ")"
 }
 // kr.ln, where present, is the position whose line the error is reported at.
 function goKFail(kr, msg) { fail(c.curFile() + ":" + c.lineOf(kr.ln != undefined ? kr.ln : kr.ks) + ": " + msg) }
@@ -1090,13 +1119,17 @@ function goIntUnder(ty) {
 function goOperandFits(kr, ty) {
     if (kr == null || ty == "") { return }
     var it = goIntUnder(ty)
-    if (it != null && !cFitsInt(kr.k, it.w, it.u)) { goKFail(kr, goKDesc(kr) + " overflows " + it.name) }
+    if (it == null) { return }
+    var iv = goKInt(kr.k)
+    if (iv == null || !cFitsInt(iv, it.w, it.u)) { goKFail(kr, goKDesc(kr) + (kr.k.f ? " truncated to " : " overflows ") + it.name) }
 }
 // A shift count that is a negative constant, and a division by a constant zero
-// that is integer division or constant arithmetic, are compile errors. kr is the
-// right operand's goKRec record (an integer constant).
+// that is integer division or constant arithmetic, are compile errors, and so is
+// a count with a fraction. kr is the right operand's goKRec record.
 function goShiftCountOk(kr) {
-    if (kr != null && kr.k.s < 0) { goKFail(kr, "invalid operation: negative shift count " + goKDesc(kr)) }
+    if (kr == null) { return }
+    if (goKInt(kr.k) == null) { goKFail(kr, goKDesc(kr) + " truncated to uint"); return }
+    if (kr.k.s < 0) { goKFail(kr, "invalid operation: negative shift count " + goKDesc(kr)) }
 }
 function goDivZeroFail(ks) { fail(c.curFile() + ":" + c.lineOf(ks) + ": invalid operation: division by zero") }
 // A conversion `to(c)` of an untyped constant c (source [ks, ke]) to an integer
@@ -2272,7 +2305,7 @@ function goRecvsC(items, start) {
 // index 3 out of bounds [0:3]". ty is the indexed operand's static type and
 // [os, oe] its source (-1: none), which a string literal's length is read from.
 function goIdxCheck(kr, ty, os, oe) {
-    if (kr == null) { return }
+    if (kr == null || kr.k.f) { return }
     var t = goIdxTy(ty)
     var n = goArrLen(t)
     if (n < 0 && os >= 0) { n = goStrLitLen(stTrim(c.srcSlice(os, oe))) }
@@ -2291,7 +2324,7 @@ function goSliceKCheck(ks, ty, os, oe) {
     var i = 0
     while (i < ks.length) {
         var kr = ks[i]
-        if (kr != null && kr != undefined) {
+        if (kr != null && kr != undefined && !kr.k.f) {
             if (kr.k.s < 0) { goKFail(kr, "invalid argument: index " + goKIdxDesc(kr) + " must not be negative") }
             if (n >= 0 && cbCmp(kr.k.n, cbFromSmall(n)) > 0) {
                 goKFail(kr, "invalid argument: index " + cbToDec(kr.k.n) + " out of bounds [0:" + (n + 1) + "]")

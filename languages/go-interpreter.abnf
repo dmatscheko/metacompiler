@@ -3057,6 +3057,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var folded = goFoldConst(items, ops, pos, ty)
         if (folded != null) { return folded }
         if (ty == null) { goFloOperands(items, ts, sty) }
+        goShiftCounts(items, ops, ts)
         regConst(pos, null)
         regCFn(pos, cfn)
         regSt(pos, sty)

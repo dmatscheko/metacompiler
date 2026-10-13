@@ -4332,6 +4332,12 @@ func s82() {
 	mn := map[int]int{-1: 9}
 	check("cke6", fmt.Sprint(arr[2], pa[2], arr[3:], arr[0:3:3], "abc"[2], "abc"[3:], "héllo"[5], mn[-1]) ==
 		"4 4 [] [1 2 4] 99111 9")
+	// A float constant reaches an integer location when it is integral
+	// (go-fail-test-truncate.go is one that is not).
+	var ui uint8 = 2.0
+	var ii int = 1e3
+	ui += 3.0
+	check("cke7", fmt.Sprint(ui, ii, ui+250.0, ii/2.0, []int{4.0}, x<<2.0, 1<<2.0) == "5 1000 255 500 [4] 20 4")
 }
 
 type U82 uint8
