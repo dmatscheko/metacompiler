@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-589** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-591** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -166,11 +166,17 @@ from a compatible B instance — php-src suggests static:: is B, ours gives A. (
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
 
-### T-569 lua: runtime bookkeeping keys are visible to programs; the `io` library is missing · P2 · LUA · IN PROGRESS (LUA worker, round 3) [U]
-Tables carry internal bookkeeping under plain string keys (`__keys` in the interpreter; `{__mv = true, a = ...}` marks a
-multi-value box in both halves), so a program can forge them: `return {__mv = true, a = {1, 2}}` is reportedly taken for
-multiple return values, and `t.__keys = 5` breaks pairs (two interpreter spots confirmed by reading, compiler unchecked; probe
-first). Separately `io.write(...)` → interp "attempt to index a nil value (global 'io')" (lua 5.5 writes without a newline).
+### T-589 lua: tables and functions as keys collide · P1 · LUA · OPEN [V]
+`local t = {}; local a, b = {}, {}; t[a] = 1; t[b] = 2; print(t[a], t[b])` → all legs `2 2` (lua `1 2`): an object key falls
+through to its text. Needs a per-object identity (a hidden id given when the table / closure is made) and a way back from the
+id to the object for pairs/next. All three engines; measure tests/bench.sh lua.
+
+### T-590 lua: metatables and the missing standard library · P2 · LUA · OPEN [V]
+`setmetatable` / `getmetatable` are nil in both halves (no `__index`, `__newindex`, `__call`, arithmetic/comparison/`__tostring`/
+`__len`/`__eq` metamethods). Also nil: `_G`, `coroutine`, `utf8`, `os`, `string.pack/unpack`, `math.random/randomseed`,
+`load`, `collectgarbage`, `select('#')` was fine. Metatables first (the core of idiomatic Lua: OOP, `__index` inheritance);
+then `_G`, `coroutine` (the floor has coroutines), `utf8`, `math.random`. Also: `io.stdout.x = 1` succeeds (lua "attempt to
+index a FILE* value"); the interpreter prints an uncaught error to stdout (compiled legs and lua: stderr).
 
 ---
 
@@ -681,6 +687,7 @@ T-575 python: module `__name__`, builtin class methods with keywords, `slice`, b
 T-585 swift: Range `lowerBound`/`upperBound`; `contains` on Double and String ranges — DONE b3f96517 (plus isEmpty, clamped, overlaps, indices, Int8 elements, count near Int.max, variable range-pattern bounds)
 T-583 bash: several assignments in one command; `$(( ))` inside `${s:off:len}`; inner stderr of `$( )` — DONE 169887c8 71363b2d (plus redirections undone on return/break/exit, stdin rewound only under a stdin redirection)
 T-584 bash: a value whose first byte is 0x02 is read as a field list — DONE 9b84ee7e
+T-569 lua: runtime bookkeeping keys are visible to programs; the `io` library is missing — DONE 5d41bb3a 3bcbd2fd (key types are part of the key in every engine; io.write/io.stdout:write/io.type; io.read needs a stdin no handle-IR engine has)
 
 # Settled — do not re-open
 
