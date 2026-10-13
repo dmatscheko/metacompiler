@@ -2152,6 +2152,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var sr = emitSpecText(b, spec)
                 b = sr.b
                 body = callExt(b, "js_pyformat", [r.v, sr.v, emitStr(b, conv == null ? "" : conv)])
+            } else if (conv == "a") {
+                body = callExt(b, "js_pyascii", [r.v])
             } else if (conv == "r" || (debug && conv == null)) {
                 body = callExt(b, "js_pyrepr", [r.v])
             } else {

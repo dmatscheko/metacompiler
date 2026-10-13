@@ -15008,7 +15008,11 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 					idx += len(o.elems)
 				}
 				if idx < 0 || idx >= len(o.elems) {
-					panic(&jsThrown{value: rt.pyExcInstance("IndexError", "list index out of range")})
+					kind := "list"
+					if o.kind == pyTupKind {
+						kind = "tuple"
+					}
+					panic(&jsThrown{value: rt.pyExcInstance("IndexError", kind+" index out of range")})
 				}
 				return w(o.elems[idx])
 			case string:
@@ -24080,6 +24084,29 @@ func pyIsAlign(ch byte) bool { return ch == '<' || ch == '>' || ch == '^' || ch 
 // are the same body; those two spell the float verbs out over floPrec because
 // their dialect has no strconv.
 
+// pyPctStar is a `*` width or precision: the next argument, which must be an
+// int. Under a %(key) the keyed value is the only argument, so the conversion
+// itself finds none left. Twin of pyPctStar in languages/python-interpreter.abnf
+// and pyBPctStar in lib/python-rt.metajs.
+func (rt *jsrt) pyPctStar(args []interface{}, ai int, keyed bool) int {
+	if keyed || ai >= len(args) {
+		rt.pyPctTypeErr("not enough arguments for format string")
+	}
+	switch w := args[ai].(type) {
+	case float64:
+		return int(w)
+	case bool:
+		if w {
+			return 1
+		}
+		return 0
+	case *jsBigInt:
+		return int(w.v.Int64())
+	}
+	rt.pyPctTypeErr("* wants int")
+	return 0
+}
+
 func (rt *jsrt) pyPctTypeErr(msg string) {
 	panic(&jsThrown{value: rt.pyExcInstance("TypeError", msg)})
 }
@@ -24176,9 +24203,12 @@ func (rt *jsrt) pyPctOne(v interface{}, typ byte, left, zero, plus, space, alt b
 	numeric := false
 	switch typ {
 	case 's', 'r', 'a':
-		if typ == 's' {
+		switch typ {
+		case 's':
 			body = rt.pyString(v)
-		} else {
+		case 'a':
+			body = pyAsciiOf(rt.pyRepr(v))
+		default:
 			body = rt.pyRepr(v)
 		}
 		if prec >= 0 {
@@ -24366,6 +24396,14 @@ func (rt *jsrt) pyPct(f string, arg interface{}) string {
 			}
 		}
 		width := 0
+		if i < len(f) && f[i] == '*' {
+			width = rt.pyPctStar(args, ai, hasKey)
+			ai++
+			i++
+			if width < 0 {
+				left, width = true, -width
+			}
+		}
 		for i < len(f) && f[i] >= '0' && f[i] <= '9' {
 			width = width*10 + int(f[i]-'0')
 			i++
@@ -24374,6 +24412,13 @@ func (rt *jsrt) pyPct(f string, arg interface{}) string {
 		if i < len(f) && f[i] == '.' {
 			i++
 			prec = 0
+			if i < len(f) && f[i] == '*' {
+				if prec = rt.pyPctStar(args, ai, hasKey); prec < 0 {
+					prec = 0
+				}
+				ai++
+				i++
+			}
 			for i < len(f) && f[i] >= '0' && f[i] <= '9' {
 				prec = prec*10 + int(f[i]-'0')
 				i++
@@ -24551,6 +24596,9 @@ func (rt *jsrt) pyFormat(v interface{}, spec, conv string) string {
 	group := ""
 	if i < len(sp) && (sp[i] == ',' || sp[i] == '_') {
 		group, i = string(sp[i]), i+1
+		if i < len(sp) && (sp[i] == ',' || sp[i] == '_') {
+			fail("ValueError", "Cannot specify both ',' and '_'.")
+		}
 	}
 	prec := -1
 	if i < len(sp) && sp[i] == '.' {
@@ -24580,6 +24628,8 @@ func (rt *jsrt) pyFormat(v interface{}, spec, conv string) string {
 			fail("ValueError", unknown)
 		case sign != 0:
 			fail("ValueError", "Sign not allowed in string format specifier")
+		case zflag:
+			fail("ValueError", "Negative zero coercion (z) not allowed in string format specifier")
 		case alt:
 			fail("ValueError", "Alternate form (#) not allowed in string format specifier")
 		case align == '=':
@@ -24628,6 +24678,9 @@ func (rt *jsrt) pyFormat(v interface{}, spec, conv string) string {
 		if typ == "" || strings.Contains("bcdoxXn", typ) {
 			if prec >= 0 {
 				fail("ValueError", "Precision not allowed in integer format specifier")
+			}
+			if zflag {
+				fail("ValueError", "Negative zero coercion (z) not allowed in integer format specifier")
 			}
 			if typ == "c" {
 				switch {
@@ -24687,6 +24740,9 @@ func (rt *jsrt) pyFormat(v interface{}, spec, conv string) string {
 	}
 	neg := math.Signbit(f) && !math.IsNaN(f)
 	a := math.Abs(f)
+	if typ == "%" {
+		a *= 100 // Scaled first, so a value that overflows on the way is inf%.
+	}
 	upper := typ == "E" || typ == "F" || typ == "G"
 	body := ""
 	switch {
@@ -24698,9 +24754,6 @@ func (rt *jsrt) pyFormat(v interface{}, spec, conv string) string {
 		p := prec
 		if p < 0 {
 			p = 6
-		}
-		if typ == "%" {
-			a *= 100
 		}
 		body = strconv.FormatFloat(a, 'f', p, 64)
 		if alt && p == 0 {

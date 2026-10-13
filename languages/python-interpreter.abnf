@@ -4087,7 +4087,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         var li = pySeqIdx(o, i)
         if (li < 0) li += o.length
-        if (li < 0 || li >= o.length) { pyRaise(pyMakeExc("IndexError", ["list index out of range"])) }
+        if (li < 0 || li >= o.length) { pyRaise(pyMakeExc("IndexError", [(isTup(o) ? "tuple" : "list") + " index out of range"])) }
         return o[li]
     }
     // The position a list or str subscript names: an int (a bool is one), or
@@ -8674,7 +8674,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var body = anytype
         var numeric = false
         if (typ == "s" || typ == "r" || typ == "a") {
-            body = (typ == "s") ? pstr(v) : prepr(v)
+            body = (typ == "s") ? pstr(v) : (typ == "a" ? hostGlobals["ascii"](v) : prepr(v))
             if (prec >= 0 && pyLen(body) > prec) { body = body.substring(0, pySCpUnit(body, prec)) }
         } else if (typ == "c") {
             body = pyPctChar(v)
@@ -8787,6 +8787,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var out = mant + (upper ? "E" : "e") + (ex < 0 ? "-" : "+") + es
         return neg ? ("-" + out) : out
     }
+    // A `*` width or precision: the next argument, which must be an int. Under a
+    // %(key) the keyed value is the only argument, so the conversion itself
+    // finds none left. Twin of rt.pyPctStar in abnf/jsrt.go and lib/python-rt.metajs.
+    function pyPctStar(args, ai, keyed) {
+        if (keyed || ai >= args.length) { pyPctTypeErr("not enough arguments for format string") }
+        var w = anytype
+        w = args[ai]
+        if (typeof w != "number" && typeof w != "boolean" && !bigIsBig(w)) { pyPctTypeErr("* wants int") }
+        return floVal(w)
+    }
     function pyPct(fmt, arg) {
         var args = anytype
         var dict = null
@@ -8831,6 +8841,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 else { scanning = false }
             }
             var width = 0
+            if (i < fmt.length && fmt.charAt(i) == "*") {
+                width = pyPctStar(args, ai, key != null)
+                ai = ai + 1
+                i = i + 1
+                if (width < 0) { left = true ; width = 0 - width }
+            }
             while (i < fmt.length && fmt.charAt(i) >= "0" && fmt.charAt(i) <= "9") {
                 width = width * 10 + (fmt.charCodeAt(i) - 48)
                 i = i + 1
@@ -8839,6 +8855,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (i < fmt.length && fmt.charAt(i) == ".") {
                 i = i + 1
                 prec = 0
+                if (i < fmt.length && fmt.charAt(i) == "*") {
+                    prec = Math.max(0, pyPctStar(args, ai, key != null))
+                    ai = ai + 1
+                    i = i + 1
+                }
                 while (i < fmt.length && fmt.charAt(i) >= "0" && fmt.charAt(i) <= "9") {
                     prec = prec * 10 + (fmt.charCodeAt(i) - 48)
                     i = i + 1
@@ -9130,7 +9151,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var v = anytype
             v = exprT()
             var body = anytype
-            body = (conv == "r" || (debug && conv == null && spec == null)) ? prepr(v) : pstr(v)
+            if (conv == "a") { body = hostGlobals["ascii"](v) }
+            else { body = (conv == "r" || (debug && conv == null && spec == null)) ? prepr(v) : pstr(v) }
             if (spec != null) { body = pyFormat(v, specText(spec), conv) }
             return prefix + body
         }
@@ -9182,6 +9204,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         while (i < spec.length && spec.charAt(i) >= "0" && spec.charAt(i) <= "9") { width = width * 10 + (spec.charCodeAt(i) - 48); i++ }
         var group = ""
         if (i < spec.length && (spec.charAt(i) == "," || spec.charAt(i) == "_")) { group = spec.charAt(i); i++ }
+        if (group != "" && i < spec.length && (spec.charAt(i) == "," || spec.charAt(i) == "_")) {
+            pyFmtErr("ValueError", "Cannot specify both ',' and '_'.")
+        }
         var prec = -1
         if (i < spec.length && spec.charAt(i) == ".") {
             i++
@@ -9197,6 +9222,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (typeof x == "string") {
             if (typ != "" && typ != "s") { pyFmtErr("ValueError", unknown) }
             if (sign != "") { pyFmtErr("ValueError", "Sign not allowed in string format specifier") }
+            if (zflag) { pyFmtErr("ValueError", "Negative zero coercion (z) not allowed in string format specifier") }
             if (alt) { pyFmtErr("ValueError", "Alternate form (#) not allowed in string format specifier") }
             if (align == "=") { pyFmtErr("ValueError", "'=' alignment not allowed in string format specifier") }
             if (group != "") { pyFmtErr("ValueError", "Cannot specify '" + group + "' with 's'.") }
@@ -9222,6 +9248,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (isInt) {
             if (typ == "" || "bcdoxXn".indexOf(typ) >= 0) {
                 if (prec >= 0) { pyFmtErr("ValueError", "Precision not allowed in integer format specifier") }
+                if (zflag) { pyFmtErr("ValueError", "Negative zero coercion (z) not allowed in integer format specifier") }
                 if (typ == "c") {
                     if (sign != "") { pyFmtErr("ValueError", "Sign not allowed with integer format specifier 'c'") }
                     if (alt) { pyFmtErr("ValueError", "Alternate form (#) not allowed with integer format specifier 'c'") }
@@ -9252,13 +9279,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         var neg = f < 0 || (f == 0 && 1 / f < 0)
         var a = neg ? 0 - f : f
+        // `%` scales first, so a value that overflows on the way is inf%.
+        if (typ == "%") { a = a * 100 }
         var upper = typ == "E" || typ == "F" || typ == "G"
         var body = ""
         if (a !== a) { body = upper ? "NAN" : "nan" }
         else if (a - a !== 0) { body = upper ? "INF" : "inf" }
         else if (typ == "f" || typ == "F" || typ == "%") {
             var fp = prec < 0 ? 6 : prec
-            body = pyFixed(typ == "%" ? a * 100 : a, fp)
+            body = pyFixed(a, fp)
             if (alt && fp == 0) { body = body + "." }
         } else if (typ == "e" || typ == "E") {
             body = pyPctExpText(a, prec < 0 ? 6 : prec, upper)

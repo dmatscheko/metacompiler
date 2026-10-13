@@ -2747,6 +2747,33 @@ check("int-no-negative-zero",
       ["0.0"] * 9)
 
 
+# ----- SECTION: format and printf edges -----
+#
+# "%" scales before the inf test, %a and !a escape like ascii(), * takes a
+# width or precision from the arguments, z is refused for a str or an int, and
+# a tuple index error names the tuple. Rows from CPython 3.14.
+def fe_try(f):
+    try:
+        return f()
+    except (ValueError, TypeError, IndexError) as e:
+        return type(e).__name__ + ": " + str(e)
+fe_v = [1e307, -1e308, "é", (1, 2)]
+check("format-percent-overflow", [format(fe_v[0], "%"), format(fe_v[1], ".1%"), f"{fe_v[0]:.2%}"], ["inf%", "-inf%", "inf%"])
+check("ascii-conversion", ["%a" % (fe_v[2],), f"{fe_v[2]!a}", f"{fe_v[2]!a:>8}", "%5a|" % fe_v[2]],
+      ["'\\xe9'", "'\\xe9'", "  '\\xe9'", "'\\xe9'|"])
+check("pct-star", [fe_try(lambda: "%*d" % (5, 42)), fe_try(lambda: "%.*f" % (3, 3.14159)), fe_try(lambda: "%-*d|" % (5, 42)),
+                   fe_try(lambda: "%*s|" % (-5, "ab")), fe_try(lambda: "%.*s|" % (-1, "abc")), fe_try(lambda: "%*d" % ("a", 1)),
+                   fe_try(lambda: "%*d" % (5,))],
+      ["   42", "3.142", "42   |", "ab   |", "|", "TypeError: * wants int", "TypeError: not enough arguments for format string"])
+check("format-z-and-groups", [fe_try(lambda: format("ab", "z")), fe_try(lambda: format(65, "z")), fe_try(lambda: format(1234, ",_")),
+                              fe_try(lambda: format(1.5, "_,")), format(-0.0, "z")],
+      ["ValueError: Negative zero coercion (z) not allowed in string format specifier",
+       "ValueError: Negative zero coercion (z) not allowed in integer format specifier",
+       "ValueError: Cannot specify both ',' and '_'.", "ValueError: Cannot specify both ',' and '_'.", "0.0"])
+check("tuple-index-error", [fe_try(lambda: fe_v[3][5]), fe_try(lambda: fe_v[3][-5])],
+      ["IndexError: tuple index out of range", "IndexError: tuple index out of range"])
+
+
 # ----- import edges -----
 # `from M import *` binds a runtime module's public names and a library
 # module's __all__, `import P.S` binds P, and a module function keeps its
