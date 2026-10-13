@@ -292,8 +292,52 @@ function jxJoin(delim, parts) {
 // Java's pattern flags in regex.js's terms: \Q...\E quoting.
 function jxRe(pattern) {
     var re = rxGet(pattern, "q")
-    if (!re.ok) { jxkThrow("PatternSyntaxException", re.err) }
+    if (!re.ok) { jxkThrow("PatternSyntaxException", jxReMsg(pattern, re.err)) }
     return re
+}
+// jxReMsg renders a regex.js error kind as Java's PatternSyntaxException message.
+// regex.js reports no position, so the index is read off k, the length of the
+// shortest prefix of the \Q-expanded pattern that fails with the same kind (Java
+// indexes the expanded pattern too); an end-of-input kind uses the full length.
+// Unmapped kinds keep regex.js's text. Twin of jxReMsg in abnf/jsrtjavastr.go.
+function jxReMsg(pattern, err) {
+    var p = rxExpandQuotes(pattern)
+    var n = p.length
+    if (err == "unterminated group") { return jxReFmt(pattern, "Unclosed group", n) }
+    if (err == "unterminated character class") { return jxReFmt(pattern, "Unclosed character class", n - 1) }
+    if (err == "trailing backslash in pattern") { return jxReFmt(pattern, "Unescaped trailing backslash", n) }
+    if (err == "unterminated group name") {
+        return jxReFmt(pattern, "named capturing group is missing trailing '>'", n)
+    }
+    var k = 1
+    while (k < n && rxCompile(p.substring(0, k), "").err != err) { k = k + 1 }
+    if (err == "unmatched ) in pattern") { return jxReFmt(pattern, "Unmatched closing ')'", k - 2) }
+    if (err == "character class range is out of order") { return jxReFmt(pattern, "Illegal character range", k - 1) }
+    if (err == "quantifier with nothing to repeat" || err == "multiple repeat") {
+        return jxReFmt(pattern, "Dangling meta character '" + p.charAt(k - 1) + "'", k - 1)
+    }
+    if (err == "quantifier bounds are out of order") { return jxReFmt(pattern, "Illegal repetition range", k - 1) }
+    if (err == "invalid hex escape") { return jxReFmt(pattern, "Illegal hexadecimal escape sequence", k) }
+    if (err.indexOf("unsupported group form") == 0) { return jxReFmt(pattern, "Unknown inline modifier", k - 1) }
+    if (err.indexOf("unknown group name '") == 0) {
+        var name = err.substring(20, err.length - 1)
+        return jxReFmt(pattern, "named capturing group <" + name + "> does not exist", k - 1)
+    }
+    return err
+}
+// PatternSyntaxException.getMessage: the description, " near index N" when N >= 0,
+// the pattern, and a caret under N when N is inside it.
+function jxReFmt(pattern, desc, at) {
+    if (at < 0) { return desc + "\n" + pattern }
+    var out = desc + " near index " + at + "\n" + pattern
+    if (at >= pattern.length) { return out }
+    out = out + "\n"
+    var i = 0
+    while (i < at) {
+        out = out + " "
+        i = i + 1
+    }
+    return out + "^"
 }
 // Matcher.find's next start: after an empty match the search moves one on.
 function jxNext(m) {

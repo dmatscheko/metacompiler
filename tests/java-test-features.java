@@ -916,6 +916,11 @@ public class Main {
         qual.add(4);
         qual.add(5);
         Main.check("qualified-util-new", qual.size() == 2 && ("" + qual).equals("[4, 5]"));
+        // A class literal of a JDK type names its package, and an interface says so.
+        String jdkLits = java.util.Map.class + "|" + Runnable.class + "|" + Function.class + "|"
+            + java.util.HashMap.class + "|" + java.util.Map.class.getSimpleName();
+        Main.check("class-lit-jdk", jdkLits.equals("interface java.util.Map|interface java.lang.Runnable"
+            + "|interface java.util.function.Function|class java.util.HashMap|Map"));
 
         // ----- assignment: the target before the right-hand side (JLS 15.26) -----
         int[] aops = {5, 0, 1, 100};

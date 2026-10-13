@@ -3151,10 +3151,12 @@ HasStatic   = :script(~~
         if (!lit.prim) { noteTypeUse(lit.simple) }
         return function(b) {
             var descV = hUndef
-            if (!lit.prim && classNames["$" + lit.simple] == true) {
+            var known = !lit.prim && classNames["$" + lit.simple] == true
+            if (known) {
                 descV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, lit.simple)])
             }
-            var ifV = interfaceNames["$" + lit.simple] == true ? hTrue : hFalse
+            var iface = interfaceNames["$" + lit.simple] == true || (!known && lit.iface)
+            var ifV = iface ? hTrue : hFalse
             return {b: b, v: callExt(b, "js_jvclasslit", [descV, emitStr(b, lit.name), emitStr(b, lit.simple), emitNum(b, lit.dims), ifV])}
         }
     }

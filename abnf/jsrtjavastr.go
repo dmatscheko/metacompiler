@@ -174,9 +174,62 @@ func jxCpAt(s []uint16, i int) int {
 func (rt *jsrt) jxRe(pattern string) *rxRe {
 	re := rxGet(pattern, "q")
 	if !re.ok {
-		rt.jvThrowNamed("PatternSyntaxException", re.err)
+		rt.jvThrowNamed("PatternSyntaxException", jxReMsg(pattern, re.err))
 	}
 	return re
+}
+
+// jxReMsg is Java's PatternSyntaxException message for a regex error kind, the
+// index read off the shortest failing prefix of the \Q-expanded pattern. Twin of
+// jxReMsg in languages/lib/java-strings.js.
+func jxReMsg(pattern, err string) string {
+	p := rxExpandQuotes([]rune(pattern))
+	n := len(p)
+	switch err {
+	case "unterminated group":
+		return jxReFmt(pattern, "Unclosed group", n)
+	case "unterminated character class":
+		return jxReFmt(pattern, "Unclosed character class", n-1)
+	case "trailing backslash in pattern":
+		return jxReFmt(pattern, "Unescaped trailing backslash", n)
+	case "unterminated group name":
+		return jxReFmt(pattern, "named capturing group is missing trailing '>'", n)
+	}
+	k := 1
+	for k < n && rxCompile(string(p[:k]), "").err != err {
+		k++
+	}
+	switch {
+	case err == "unmatched ) in pattern":
+		return jxReFmt(pattern, "Unmatched closing ')'", k-2)
+	case err == "character class range is out of order":
+		return jxReFmt(pattern, "Illegal character range", k-1)
+	case err == "quantifier with nothing to repeat" || err == "multiple repeat":
+		return jxReFmt(pattern, "Dangling meta character '"+string(p[k-1])+"'", k-1)
+	case err == "quantifier bounds are out of order":
+		return jxReFmt(pattern, "Illegal repetition range", k-1)
+	case err == "invalid hex escape":
+		return jxReFmt(pattern, "Illegal hexadecimal escape sequence", k)
+	case strings.HasPrefix(err, "unsupported group form"):
+		return jxReFmt(pattern, "Unknown inline modifier", k-1)
+	case strings.HasPrefix(err, "unknown group name '"):
+		name := err[len("unknown group name '") : len(err)-1]
+		return jxReFmt(pattern, "named capturing group <"+name+"> does not exist", k-1)
+	}
+	return err
+}
+
+// jxReFmt is PatternSyntaxException.getMessage: the description, " near index N"
+// when N >= 0, the pattern, and a caret under N when N is inside it.
+func jxReFmt(pattern, desc string, at int) string {
+	if at < 0 {
+		return desc + "\n" + pattern
+	}
+	out := desc + " near index " + strconv.Itoa(at) + "\n" + pattern
+	if at >= len([]rune(pattern)) {
+		return out
+	}
+	return out + "\n" + strings.Repeat(" ", at) + "^"
 }
 
 func (rt *jsrt) jxSearch(re *rxRe, text []rune, at int) *rxMatch {

@@ -143,6 +143,7 @@ class Main {
         S67.run(); // SECTION-CALL 67
         S68.run(); // SECTION-CALL 68
         S69.run(); // SECTION-CALL 69
+        S70.run(); // SECTION-CALL 70
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -3961,5 +3962,28 @@ class S69 {
         RuntimeException a = new RuntimeException("a");
         IllegalStateException b = new IllegalStateException("b");
         Main.check("ic69", a.initCause(b) == a && a.getCause() == b);
+    }
+}
+
+// ===== SECTION 70: PatternSyntaxException's message =====
+//
+// getMessage is the description, " near index N" when the error has a position,
+// the pattern, and a caret line under N when N is inside the pattern. Every
+// expected value is java 24.0.2's.
+class S70 {
+    static void run() {
+        String[] pats = {"(", "a(b", "a)", ")", "[a", "[b-a]", "a\\", "*", "a**", "a{3,2}", "(?<n", "\\k<zz>", "(?z)", "\\xZZ", "\\Q(\\E("};
+        String got = "";
+        for (String p : pats) {
+            try { "a".matches(p); got = got + "ok;"; }
+            catch (java.util.regex.PatternSyntaxException e) { got = got + e.getMessage().replace("\n", "/") + ";"; }
+        }
+        Main.check("pm70", got.equals("Unclosed group near index 1/(;Unclosed group near index 3/a(b;"
+            + "Unmatched closing ')' near index 0/a)/^;Unmatched closing ')'/);Unclosed character class near index 1/[a/ ^;"
+            + "Illegal character range near index 3/[b-a]/   ^;Unescaped trailing backslash near index 2/a\\;"
+            + "Dangling meta character '*' near index 0/*/^;Dangling meta character '*' near index 2/a**/  ^;"
+            + "Illegal repetition range near index 5/a{3,2}/     ^;named capturing group is missing trailing '>' near index 4/(?<n;"
+            + "named capturing group <zz> does not exist near index 5/\\k<zz>/     ^;Unknown inline modifier near index 2/(?z)/  ^;"
+            + "Illegal hexadecimal escape sequence near index 2/\\xZZ/  ^;Unclosed group near index 3/\\Q(\\E(/   ^;"));
     }
 }

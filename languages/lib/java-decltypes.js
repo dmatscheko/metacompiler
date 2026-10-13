@@ -1714,12 +1714,35 @@ function jVaRecvCls(rty) {
 }
 // A class literal's text ("int.class", "String[][].class", "Main.Box.class")
 // as its element type's simple name, its dimension count, whether the element
-// is a primitive (or void), and the binary name to use when no class
-// descriptor answers it: java.lang's for the java.lang types, otherwise the
-// name as written.
+// is a primitive (or void), and the binary name and interface flag to use when
+// no class descriptor answers it: a JDK type by its package (a nested one as
+// Outer$Inner), otherwise the name as written.
 var jLangTypes = ",Object,String,Integer,Long,Short,Byte,Character,Boolean,Double,Float,Number,Math,StrictMath,"
     + "System,StringBuilder,StringBuffer,CharSequence,Comparable,Iterable,Runnable,Thread,Class,Enum,Record,"
-    + "Void,Cloneable,AutoCloseable,"
+    + "Void,Cloneable,AutoCloseable,Appendable,"
+var jUtilTypes = ",List,ArrayList,LinkedList,Map,HashMap,LinkedHashMap,TreeMap,SortedMap,NavigableMap,Set,"
+    + "HashSet,LinkedHashSet,TreeSet,SortedSet,NavigableSet,Collection,Collections,Arrays,Queue,Deque,"
+    + "ArrayDeque,PriorityQueue,Iterator,ListIterator,Comparator,Optional,OptionalInt,OptionalLong,"
+    + "OptionalDouble,Objects,Random,Scanner,StringJoiner,BitSet,Stack,Vector,EnumMap,EnumSet,"
+    + "RandomAccess,"
+var jFuncTypes = ",Function,BiFunction,Supplier,Consumer,BiConsumer,Predicate,BiPredicate,UnaryOperator,"
+    + "BinaryOperator,IntFunction,IntPredicate,IntUnaryOperator,IntBinaryOperator,ToIntFunction,"
+    + "ToLongFunction,ToDoubleFunction,IntConsumer,IntSupplier,BooleanSupplier,"
+var jJdkIfaces = ",java.lang.CharSequence,java.lang.Comparable,java.lang.Iterable,java.lang.Runnable,"
+    + "java.lang.Cloneable,java.lang.AutoCloseable,java.lang.Appendable,java.util.List,java.util.Map,"
+    + "java.util.SortedMap,java.util.NavigableMap,java.util.Set,java.util.SortedSet,java.util.NavigableSet,"
+    + "java.util.Collection,java.util.Queue,java.util.Deque,java.util.Iterator,java.util.ListIterator,"
+    + "java.util.Comparator,java.util.RandomAccess,java.util.Map$Entry,"
+function jJdkBinName(t) {
+    var dot = t.indexOf(".")
+    var outer = dot < 0 ? t : t.substring(0, dot)
+    var pkg = ""
+    if (jLangTypes.indexOf("," + outer + ",") >= 0) { pkg = "java.lang." }
+    else if (jUtilTypes.indexOf("," + outer + ",") >= 0) { pkg = "java.util." }
+    else if (jFuncTypes.indexOf("," + outer + ",") >= 0) { pkg = "java.util.function." }
+    if (pkg == "") { return t }
+    return pkg + t.split(".").join("$")
+}
 function jClassLit(text) {
     var t = text.substring(0, text.length - 6)
     var dims = 0
@@ -1728,9 +1751,9 @@ function jClassLit(text) {
         t = t.substring(0, t.length - 2)
     }
     t = t.split("<")[0]
-    var name = t
-    if (t.indexOf(".") < 0 && jLangTypes.indexOf("," + t + ",") >= 0) { name = "java.lang." + t }
-    return {simple: jOvBare(t), dims: dims, prim: jOvIsPrim(t) || t == "void", name: name}
+    var name = jJdkBinName(t)
+    var iface = name.indexOf("java.util.function.") == 0 || jJdkIfaces.indexOf("," + name + ",") >= 0
+    return {simple: jOvBare(t), dims: dims, prim: jOvIsPrim(t) || t == "void", name: name, iface: iface}
 }
 // jOvStaticSig for a member call whose receiver jRecvTy read as rty.
 function jOvMemberSig(rty, mname, atys) {

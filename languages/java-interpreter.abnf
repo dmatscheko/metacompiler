@@ -3648,13 +3648,15 @@ HasStatic   = :script(~~
             var cls = lit.prim ? undefined : jResolveClass(lit.simple)
             var n = lit.name
             var sm = lit.simple
+            var iface = lit.iface
             if (cls != undefined && cls != null && cls.__isclass === true) {
                 n = jClassBin(cls)
                 sm = cls.__name
+                iface = cls.__isiface === true
             }
             if (lit.dims == 0) {
                 var c = jClassOf(n, sm)
-                if (cls != undefined && cls != null && cls.__isiface === true) { c.__ciface = true }
+                if (iface) { c.__ciface = true }
                 return c
             }
             var tag = jArrOfDesc(n)
