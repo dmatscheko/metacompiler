@@ -1409,6 +1409,20 @@ function jCondMayBox(t) {
     if (ty != "") { return ty == "Boolean" }
     return jTopOp(t, 1) < 0 && t.charAt(0) != "!" && jTopFind(t, "?") < 0
 }
+// The operands of a top-level `op` chain (`a&&b&&c`), split on op outside
+// groups and literals.
+function jSplitTop(t, op) {
+    var out = []
+    var rest = t
+    var at = jTopFind(rest, op)
+    while (at >= 0) {
+        out.push(rest.substring(0, at))
+        rest = rest.substring(at + op.length)
+        at = jTopFind(rest, op)
+    }
+    out.push(rest)
+    return out
+}
 // Which operand of `a == b` / `a != b` (its whitespace-free text) unboxes:
 // a box whose other operand is a primitive (JLS 15.21.1, 15.21.2).
 function jEqUnbox(t) {

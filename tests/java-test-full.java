@@ -3616,6 +3616,11 @@ class S62 {
         k("z", () -> { Integer i = (Integer) nulls[0]; Object o = nulls[0]; log = log + (i == null) + (o == i); });
         Main.check("np62", log.equals("a:npe b:npe c:npe d:npe e:npe f:npe g:npe h:npe i:npe j:npe l:npe m:npe n:npe o:npe "
             + "p:npe q:npe r:npe s:npe t:npe u:npe w:npe x:npe xnully:none truetruez:none "));
+        log = "";
+        k("a", () -> { Boolean bb = (Boolean) nulls[0]; log = log + (bb && true); });
+        k("b", () -> { Boolean bb = (Boolean) nulls[0]; log = log + (false || bb); });
+        k("c", () -> { Boolean bb = (Boolean) nulls[0]; log = log + (false && bb); });
+        Main.check("np62b", log.equals("a:npe b:npe falsec:none "));
         String msg = "";
         try { Object o = nulls[0]; o.toString(); } catch (NullPointerException e) { msg = e.getClass().getName(); }
         Main.check("nm62", msg.equals("java.lang.NullPointerException"));

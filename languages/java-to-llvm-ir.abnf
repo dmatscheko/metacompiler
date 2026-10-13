@@ -823,10 +823,10 @@ TIndex      <~~ push(jNoteIdx({idx: pop()})) ~~>
 CondExpr    <~~ push(makeCond(takeAll(), up.in)) ~~>
             = OrExpr [ "?" Expression ":" Expression ] ;
 
-OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
+OrExpr      <~~ push(makeOrAnd(jOrAndChk(takeAll(), up.in, "||"), true)) ~~>
             = AndExpr { "||" AndExpr } ;
 
-AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
+AndExpr     <~~ push(makeOrAnd(jOrAndChk(takeAll(), up.in, "&&"), false)) ~~>
             = BitOrExpr { "&&" BitOrExpr } ;
 
 // The bitwise (| ^ &) and shift (<< >> >>>) levels work on int operands with
@@ -3869,6 +3869,15 @@ HasStatic   = :script(~~
     // A condition that may be a Boolean box (jCondMayBox) unboxes it. Twin of
     // jCondChk in java-interpreter.abnf.
     function jCondChk(t, text) { return jCondMayBox(text) ? jNonNull(t) : t }
+    // Each operand of `a && b` / `a || b` is a condition (jCondChk). Twin of
+    // jOrAndChk in java-interpreter.abnf.
+    function jOrAndChk(items, text, op) {
+        if (items.length < 2) { return items }
+        var parts = jSplitTop(text, op)
+        if (parts.length != items.length) { return items }
+        for (var i = 0; i < items.length; i++) { items[i] = jCondChk(items[i], parts[i]) }
+        return items
+    }
     // `a == b` with one primitive operand unboxes the other (JLS 15.21.1).
     // Twin of jFoldEq in java-interpreter.abnf.
     function jFoldEq(items, text) {
