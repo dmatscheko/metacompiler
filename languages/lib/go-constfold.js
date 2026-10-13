@@ -1037,7 +1037,42 @@ function stElemTy(t) {
 function goChainC(t, text, pos) {
     var ty = stChainTy(text)
     if (ty != "") { regSt(pos, ty) }
+    cPkgMember(text, pos)
+    var pc = cPkgConstOf(text)
+    if (pc != null) { regConst(pos, pc) }
     return t
+}
+// An imported package's top-level names ("$pkg.Name" -> the folded constant, null for
+// a name some other binder owns), kept when its file is done (cNotePkgConsts, at the
+// end of each grammar's importFile), so pkg.Name in a chain folds as exactly as a
+// constant of the program's own: math.Pi == 3.141592653589793 is false in Go. For a
+// standard package written in Go (lib) the list is the whole package, so a name it
+// does not declare is Go's compile error "undefined: pkg.Name" (cPkgMember).
+var cPkgConsts = {}
+var cPkgWhole = {}
+function cNotePkgConsts(pname, lib) {
+    var f = cScopes[0]
+    var i = 0
+    while (i < f.n.length) { cPkgConsts["$" + pname + "." + f.n[i]] = f.v[i]; i = i + 1 }
+    if (lib) { cPkgWhole["$" + pname] = true }
+}
+// A chain that starts with pkg.Name, pkg a standard package written in Go and not a
+// local binding, where the package declares no Name: Go rejects it at compile time.
+function cPkgMember(text, pos) {
+    var h = stHeadLen(text)
+    if (h == 0 || h + 1 >= text.length || text.charAt(h) != "." || cPkgWhole["$" + text.substring(0, h)] !== true) { return }
+    if (cIsLocal(text.substring(0, h))) { return }
+    var sel = text.substring(0, h + 1 + stHeadLen(text.substring(h + 1)))
+    if (cPkgConsts["$" + sel] === undefined) { fail(c.file + ":" + c.lineOf(pos) + ": undefined: " + sel) }
+}
+// The constant of a chain that is exactly pkg.Name, pkg not a local binding.
+function cPkgConstOf(text) {
+    var h = stHeadLen(text)
+    if (h == 0 || h + 1 >= text.length || text.charAt(h) != "." || cIsLocal(text.substring(0, h))) { return null }
+    var n = stHeadLen(text.substring(h + 1))
+    if (h + 1 + n != text.length) { return null }
+    var c = cPkgConsts["$" + text]
+    return c === undefined ? null : c
 }
 // The type of a chain's text, or "" (a bare name answers its binding's).
 function stChainTy(text) {

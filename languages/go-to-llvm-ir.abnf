@@ -6116,6 +6116,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         cPendT = []
         cSwMarks = []
         c.compile(asg)
+        cNotePkgConsts(pname, lib != "")
         constByPos = savedConsts
         cFnByPos = savedCFns
         convByPos = savedConvs

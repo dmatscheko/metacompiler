@@ -6065,6 +6065,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var savedTop = goTopPend
         goTopPend = []
         c.compile(asg)
+        cNotePkgConsts(pname, lib != "")
         goRunTopVars()
         goTopPend = savedTop
         scopes = savedRun

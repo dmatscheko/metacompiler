@@ -27,8 +27,8 @@
 // Deliberately out of scope (not syntax, or unrunnable in this harness):
 // imports and the standard library (the prologue's fmt/os calls are the whole
 // harness, mirroring the feature-matrix file; SECTION 46 adds fmt.Errorf and
-// the errors package, SECTIONS 76-77 the math package and fmt.Fprint* on an
-// io.Writer), packages and modules, cgo,
+// the errors package, SECTIONS 76, 77 and 80 the math package and fmt.Fprint* on
+// an io.Writer), packages and modules, cgo,
 // unsafe, build tags, reflection (struct tags appear as syntax only), and
 // goroutine scheduling beyond deterministic channel operations; generic
 // method constraints do not exist in Go 1.22 and are n/a. Unlike the
@@ -4179,6 +4179,36 @@ func s79() {
 	check("ibs9", len(m) == 2 && m[a] == 2 && m[w[3:4]] == 2 && m[w[1:2]] == 5)
 }
 
+// ===== SECTION 80: math's transcendental functions, bits and exact constants =====
+// Every result is go run's on arm64 to the last bit, which is where the FMAs its
+// compiler fuses into the polynomials show; operands come out of slices.
+func s80() {
+	xs := []float64{0.5, 1.7, -2.3, 10, 1e-5, 3e8, 1e300, 5e-324, 0.7853981633974483, 2.5e-10}
+	got := ""
+	for _, x := range xs {
+		got += fmt.Sprint(math.Exp(x), math.Log(math.Abs(x)), math.Sin(x), math.Cos(x), math.Tan(x), math.Atan(x),
+			math.Cbrt(x), math.Hypot(x, 3)) + ";"
+	}
+	check("mtr1", got == "1.6487212707001282 -0.6931471805599453 0.479425538604203 0.8775825618903728 0.5463024898437905 0.4636476090008061 0.7937005259840997 3.0413812651491092;"+
+		"5.473947391727199 0.5306282510621704 0.9916648104524687 -0.12884449429552464 -7.696602139459161 1.039072259536091 1.193483191927337 3.448187929913334;"+
+		"0.10025884372280375 0.832909122935104 -0.7457052121767203 -0.666276021279824 1.1192136417341325 -1.1606689862534056 -1.3200061217959125 3.7802116342871597;"+
+		"22026.465794806718 2.302585092994046 -0.5440211108893699 -0.8390715290764524 0.6483608274590867 1.4711276743037345 2.154434690031884 10.44030650891055;"+
+		"1.00001000005 -11.512925464970229 9.999999999833334e-06 0.99999999995 1.0000000000333334e-05 9.999999999666668e-06 0.02154434690031884 3.0000000000166667;"+
+		"+Inf 19.519293032620475 -0.4395520511837499 0.8982171197990818 -0.48936058052653386 1.5707963234615632 669.4329500821696 3e+08;"+
+		"+Inf 690.7755278982137 -0.8178819121159087 -0.5753861119575491 1.4214488238747243 1.5707963267948966 1e+100 1e+300;"+
+		"1 -744.4400719213812 5e-324 1 5e-324 5e-324 1.7031839360032603e-108 3;"+
+		"2.1932800507380152 -0.2415644752704905 0.7071067811865475 0.7071067811865476 0.9999999999999998 0.6657737500283538 0.9226350743220142 3.101104686247803;"+
+		"1.00000000025 -22.1095601980663 2.5e-10 1 2.5e-10 2.5e-10 0.0006299605249474366 3;")
+	ys := []float64{2, 0.25, -1.5, 10, 7.7}
+	check("mtr2", fmt.Sprint(math.Pow(ys[0], ys[1]), math.Pow(ys[3], ys[2]), math.Pow(ys[4], ys[4]), math.Pow(ys[1], ys[2]),
+		math.Pow(-ys[0], ys[1])) == "1.189207115002721 0.031622776601683784 6.698515765072521e+06 8 NaN")
+	check("mtr3", math.Float64bits(ys[2]) == 13832806255468478464 && math.Float64frombits(4614253070214989087) == 3.14 &&
+		math.Float64bits(xs[7]) == 1 && math.FMA(xs[1], xs[1], -2.89) == -2.753353101070388e-16 && math.FMA(ys[4], 3, 0.1) == 23.2)
+	// A package constant is exact until it lands in a typed place.
+	check("mtr4", !(math.Pi == 3.141592653589793) && math.Pi > 3.141592653589793 && float64(math.Pi) == 3.141592653589793 &&
+		math.MaxUint64/3 == 6148914691236517205 && uint64(math.MaxUint64) == 1<<64-1 && math.E != 2.718281828459045)
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -4259,6 +4289,7 @@ func main() {
 	s77() // SECTION-CALL 77
 	s78() // SECTION-CALL 78
 	s79() // SECTION-CALL 79
+	s80() // SECTION-CALL 80
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }
