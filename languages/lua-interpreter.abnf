@@ -2171,9 +2171,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return function() {
             var i = anytype // The control value, an integer or a float.
             i = luaFirst(startT())
-            var limit = luaFirst(limitT())
+            var limit = anytype // The bound, an integer or a float.
+            limit = luaFirst(limitT())
             var step = anytype // The increment, 1 when the loop did not spell one out.
             step = stepT != null ? luaFirst(stepT()) : 1
+            i = luaForPrep(i, limit, step)
             var stp = numOf(step)
             var res = undefined
             // luaCmp, not a comparison of the double readings: an integer loop that runs
@@ -2203,6 +2205,24 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return res
         }
     }
+    // forprep (lvm.c): the loop runs on integers when the start AND the step are
+    // integers, and then only the step is checked (a zero step would never end) and
+    // the limit; otherwise all three must be numbers and the loop runs on floats from
+    // the first pass, so the start is converted. The answer is the first control
+    // value. Twin of js_luforprep in lib/lua-rt.metajs and abnf/jsrtlua.go.
+    function luaForPrep(start, limit, step) {
+        if (isInt(start) && isInt(step)) {
+            if (szEq(step, 0)) { fail("'for' step is zero") }
+            if (!isNum(limit)) { luaForErr("limit", limit) }
+            return start
+        }
+        if (!isNum(limit)) { luaForErr("limit", limit) }
+        if (!isNum(step)) { luaForErr("step", step) }
+        if (!isNum(start)) { luaForErr("initial value", start) }
+        if (numOf(step) === 0) { fail("'for' step is zero") }
+        return mkFlt(numOf(start))
+    }
+    function luaForErr(what, v) { fail("bad 'for' " + what + " (number expected, got " + luaType(v) + ")") }
     // repeat body until cond: the body runs, then cond is tested in the body's own scope;
     // it loops while cond is falsy, so the body always runs at least once.
     function makeRepeat(block, cond) {

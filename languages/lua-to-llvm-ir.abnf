@@ -2426,16 +2426,20 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var stepName = "$fs" + hidCount
             var rs = startT(b)
             b = rs.b
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), rs.v])
+            var startV = callLua(b, "lua_first", [rs.v])
             var rl = limitT(b)
             b = rl.b
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, limName), rl.v])
+            var limV0 = callLua(b, "lua_first", [rl.v])
             var stepV = emitNum(b, 1)
             if (stepT != null) {
                 var rst = stepT(b)
                 b = rst.b
-                stepV = rst.v
+                stepV = callLua(b, "lua_first", [rst.v])
             }
+            // forprep's checks, and a start made a float when the loop runs on floats.
+            startV = callExt(b, "js_luforprep", [startV, limV0, stepV])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), startV])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, limName), limV0])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, stepName), stepV])
             // The step is written once, at the head of the loop, and nothing can
             // reassign $fs (the name is unspellable in Lua), so its SIGN is loop

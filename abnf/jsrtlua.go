@@ -849,6 +849,39 @@ func luKey(v interface{}) interface{} {
 	return v
 }
 
+// luForPrep is forprep (lvm.c): the loop runs on integers when the start AND the
+// step are integers, and then only the step is checked (a zero step would never
+// end) and the limit; otherwise all three must be numbers and the loop runs on
+// floats from the first pass, so the start is converted. The answer is the first
+// control value. Twin of js_luforprep in languages/lib/lua-rt.metajs.
+func (rt *jsrt) luForPrep(start, limit, step interface{}) interface{} {
+	bad := func(what string, v interface{}) {
+		rt.luFail("bad 'for' %s (number expected, got %s)", what, rt.luTypeName(v))
+	}
+	if luIsInt(start) && luIsInt(step) {
+		if luInt64(step) == 0 {
+			rt.luFail("'for' step is zero")
+		}
+		if !luIsNum(limit) {
+			bad("limit", limit)
+		}
+		return start
+	}
+	if !luIsNum(limit) {
+		bad("limit", limit)
+	}
+	if !luIsNum(step) {
+		bad("step", step)
+	}
+	if !luIsNum(start) {
+		bad("initial value", start)
+	}
+	if luNumOf(step) == 0 {
+		rt.luFail("'for' step is zero")
+	}
+	return luMkFlo(luNumOf(start))
+}
+
 // luWriteKey is the key a table is WRITTEN under: lua rejects nil and NaN there
 // (luaH_newkey), while reading t[nil] is just nil. Twin of js_luwkey in
 // languages/lib/lua-rt.metajs.
@@ -924,6 +957,7 @@ func init() {
 		m["js_lustr"] = func(a []uint64) uint64 { return rt.wrapStr(luNumStr(u(a[0]))) }
 		m["js_lukey"] = func(a []uint64) uint64 { return w(luKey(u(a[0]))) }
 		m["js_luwkey"] = func(a []uint64) uint64 { return w(rt.luWriteKey(u(a[0]))) }
+		m["js_luforprep"] = func(a []uint64) uint64 { return w(rt.luForPrep(u(a[0]), u(a[1]), u(a[2]))) }
 		// A table key as pairs hands it to the program. The object store
 		// addresses a number by its text, so js_keys answers text: a text that
 		// reads as a numeral and addresses the same slot again (luKey, then the

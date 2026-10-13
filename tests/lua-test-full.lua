@@ -245,6 +245,20 @@ function s08()
     local runs = 0
     for i = 1, 3 do runs = runs + 1; i = i + 10 end -- assigning i does not steer it
     check("for5", runs, 3)
+    -- forprep: an integer start with a float step runs on floats from the first
+    -- pass; a zero step and a bound that is no number are errors.
+    local P = {1, 3, 0.5, 0, 0.0, {}}
+    local first
+    for i = P[1], P[2], P[3] do first = first or math.type(i) .. tostring(i) end
+    check("for6", first, "float1.0")
+    local function forErr(a, b, c)
+        local ok, e = pcall(function() for i = a, b, c do end end)
+        return tostring(ok) .. " " .. tostring(string.match(tostring(e), "'for' .*"))
+    end
+    check("for7", forErr(P[1], P[2], P[4]), "false 'for' step is zero")
+    check("for8", forErr(P[1], P[2], P[5]), "false 'for' step is zero")
+    check("for9", forErr(P[1], P[6], P[1]), "false 'for' limit (number expected, got table)")
+    check("for10", forErr(P[6], P[2], P[1]), "false 'for' initial value (number expected, got table)")
 end
 
 -- ===== SECTION 09: generic for and custom iterators =====

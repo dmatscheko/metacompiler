@@ -994,6 +994,25 @@ function js_lukey(v) {
     return v
 }
 
+// forprep (lvm.c): the loop runs on integers when the start AND the step are
+// integers, and then only the step is checked (a zero step would never end) and
+// the limit; otherwise all three must be numbers and the loop runs on floats from
+// the first pass, so the start is converted. The answer is the first control
+// value. Twin of luForPrep in abnf/jsrtlua.go.
+function js_luforprep(start, limit, step) {
+    if (luIsInt(start) && luIsInt(step)) {
+        if (luNumOf(step) === 0) { luFail("'for' step is zero") }
+        if (!luIsNum(limit)) { luForErr("limit", limit) }
+        return start
+    }
+    if (!luIsNum(limit)) { luForErr("limit", limit) }
+    if (!luIsNum(step)) { luForErr("step", step) }
+    if (!luIsNum(start)) { luForErr("initial value", start) }
+    if (luNumOf(step) === 0) { luFail("'for' step is zero") }
+    return luMkFlo(luNumOf(start))
+}
+function luForErr(what, v) { luFail("bad 'for' " + what + " (number expected, got " + luTypeName(v) + ")") }
+
 // The key a table is WRITTEN under: lua rejects nil and NaN there (luaH_newkey),
 // while reading t[nil] is just nil. Twin of luWriteKey in abnf/jsrtlua.go.
 function js_luwkey(v) {
