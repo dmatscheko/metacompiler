@@ -248,7 +248,7 @@ Do          <~~ push(makeDo(takeAll())) ~~>
 
 // The three optional parts are wrapped with a kind marker, otherwise e.g.
 // 'for (;c;)' and 'for (i=0;;)' could not be told apart on the stack.
-For         <~~ push(makeFor(takeAll())); hoistLexKill(up.start, up.pos) ~~>
+For         <~~ push(makeFor(takeAll(), hoistLexNames(up.start, up.pos))); hoistLexKill(up.start, up.pos) ~~>
             = KwFor <~~ push({label: takeLabel()}) ~~> "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" NestedStatement ;
 ForInit     <~~ push({k:"init", t:pop()}) ~~> = ForVar | ForExpr ;
 ForVar      = UsingDeclCore | VarDeclCore ;
@@ -6107,6 +6107,8 @@ NotFuncHead = :script(~~
         // Inside a namespace body each iteration's store to an assignment target is
         // tracked (nsTracked) before the body runs.
         if (nsDepth > 0 && target.asg != undefined) { bodyT = nsTrackedBody(bodyT, nsPatNames(target.asg)) }
+        // See the twin of this comment in js-interpreter.abnf.
+        var lexT = target.asg == undefined && target.dtype != "ref"
         if (items[2] == "in") {
             // for-in iterates the object's own keys (jsKeys), binding the loop variable
             // to each key string - mirrors the compiler's js_keys.
@@ -6119,6 +6121,7 @@ NotFuncHead = :script(~~
                 for (var i = 0; i < ks.length; i++) {
                     // See the twin of this comment in js-interpreter.abnf.
                     if (!propIn(ks[i], obj)) { continue }
+                    if (lexT) { scopes[scopes.length - 1] = {} }
                     bindLoopTarget(target, ks[i])
                     var r = bodyT()
                     var a = loopAction(r, label)
@@ -6149,6 +6152,7 @@ NotFuncHead = :script(~~
                 var gr = anytype // The body's completion record, of any shape.
                 gr = undefined
                 while (!step.done) {
+                    if (lexT) { scopes[scopes.length - 1] = {} }
                     bindLoopTarget(target, step.value)
                     // See the twin of this comment in js-interpreter.abnf.
                     gr = bodyT()
@@ -6164,6 +6168,7 @@ NotFuncHead = :script(~~
                 return res
             }
             for (var i = 0; i < it.length; i++) {
+                if (lexT) { scopes[scopes.length - 1] = {} }
                 bindLoopTarget(target, forOfElem(it[i], isAwait))
                 var r = bodyT()
                 var a = loopAction(r, label)
@@ -8651,8 +8656,8 @@ NotFuncHead = :script(~~
             return res
         }
     }
-    // items = [{label}, {k:"init"|"cond"|"post", t:thunk}..., bodyThunk].
-    function makeFor(items) {
+    // See the twin of this comment in js-interpreter.abnf.
+    function makeFor(items, lexNames) {
         var bodyT = items.pop()
         var label = items[0].label
         var init = null, cond = null, post = null
@@ -8661,20 +8666,30 @@ NotFuncHead = :script(~~
             if (items[i].k == "cond") cond = items[i].t
             if (items[i].k == "post") post = items[i].t
         }
+        var lex = lexNames.length > 0
         return function() {
             scopes.push({}) // The for header is its own scope (for the loop variable).
             var res = undefined
             if (init != null) init()
+            if (lex) { forIterScope(lexNames) }
             while (cond == null || jsTruthy(cond())) {
                 var r = bodyT()
                 var a = loopAction(r, label)
                 if (a == "break") break
                 if (a == "propagate") { res = r; break } // A return, or an outer label.
+                if (lex) { forIterScope(lexNames) }
                 if (post != null) post()
             }
             scopes.pop()
             return res
         }
+    }
+    function forIterScope(names) {
+        var top = scopes.length - 1
+        var old = scopes[top]
+        var ns = {}
+        for (var i = 0; i < names.length; i++) { if (hasOwn(old, names[i])) { scopePut(ns, names[i], old[names[i]]) } }
+        scopes[top] = ns
     }
     // items = [] or [exprThunk].
     function makeReturn(items) {

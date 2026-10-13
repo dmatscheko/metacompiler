@@ -250,7 +250,7 @@ Do          <~~ push(makeDo(takeAll())) ~~>
 
 // The three optional parts are wrapped with a kind marker, otherwise e.g.
 // 'for (;c;)' and 'for (i=0;;)' could not be told apart on the stack.
-For         <~~ push(makeFor(takeAll())); hoistLexKill(up.start, up.pos) ~~>
+For         <~~ push(makeFor(takeAll(), hoistLexNames(up.start, up.pos))); hoistLexKill(up.start, up.pos) ~~>
             = KwFor <~~ push({label: takeLabel()}) ~~> "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" NestedStatement ;
 ForInit     <~~ push({k:"init", t:pop()}) ~~> = ForVar | ForExpr ;
 ForVar      = VarDeclCore ;
@@ -7754,6 +7754,9 @@ NotFuncHead = :script(~~
         var target = items[1]
         var iterT = items[3]
         var bodyT = items[4]
+        // A let/const target is bound in a fresh scope each iteration, so a closure
+        // keeps the binding of the iteration that made it (ForIn/OfBodyEvaluation).
+        var lexT = target.asg == undefined && target.dtype != "ref"
         if (items[2] == "in") {
             // for-in iterates the object's own keys (jsKeys), binding the loop variable
             // to each key string - mirrors the compiler's js_keys.
@@ -7770,6 +7773,7 @@ NotFuncHead = :script(~~
                     // is the same predicate the compiler half's per-iteration js_jshas
                     // guard uses, so the two halves skip exactly the same keys.
                     if (!propIn(ks[i], obj)) { continue }
+                    if (lexT) { scopes[scopes.length - 1] = {} }
                     bindLoopTarget(target, ks[i])
                     var r = bodyT()
                     var a = loopAction(r, label)
@@ -7800,6 +7804,7 @@ NotFuncHead = :script(~~
                 var gr = anytype // The body's completion record, of any shape.
                 gr = undefined
                 while (!step.done) {
+                    if (lexT) { scopes[scopes.length - 1] = {} }
                     bindLoopTarget(target, step.value)
                     // A BREAK, a RETURN out of the loop and a LABELED BREAK to an
                     // outer statement all close the iterator, as node does: its
@@ -7827,6 +7832,7 @@ NotFuncHead = :script(~~
                 return res
             }
             for (var i = 0; i < it.length; i++) {
+                if (lexT) { scopes[scopes.length - 1] = {} }
                 bindLoopTarget(target, forOfElem(it[i], isAwait))
                 var r = bodyT()
                 var a = loopAction(r, label)
@@ -10068,8 +10074,12 @@ NotFuncHead = :script(~~
             return res
         }
     }
-    // items = [{label}, {k:"init"|"cond"|"post", t:thunk}..., bodyThunk].
-    function makeFor(items) {
+    // items = [{label}, {k:"init"|"cond"|"post", t:thunk}..., bodyThunk]; lexNames are
+    // the let/const names the head declares. Each iteration runs in a COPY of the head
+    // scope (CreatePerIterationEnvironment, ECMA-262 14.7.4.4): one made after the
+    // initializer and one before each increment, so a closure keeps the binding of
+    // the iteration that made it. Twin: makeFor in js-to-llvm-ir.abnf.
+    function makeFor(items, lexNames) {
         var bodyT = items.pop()
         var label = items[0].label
         var init = null, cond = null, post = null
@@ -10078,20 +10088,30 @@ NotFuncHead = :script(~~
             if (items[i].k == "cond") cond = items[i].t
             if (items[i].k == "post") post = items[i].t
         }
+        var lex = lexNames.length > 0
         return function() {
             scopes.push({}) // The for header is its own scope (for the loop variable).
             var res = undefined
             if (init != null) init()
+            if (lex) { forIterScope(lexNames) }
             while (cond == null || jsTruthy(cond())) {
                 var r = bodyT()
                 var a = loopAction(r, label)
                 if (a == "break") break
                 if (a == "propagate") { res = r; break } // A return, or an outer label.
+                if (lex) { forIterScope(lexNames) }
                 if (post != null) post()
             }
             scopes.pop()
             return res
         }
+    }
+    function forIterScope(names) {
+        var top = scopes.length - 1
+        var old = scopes[top]
+        var ns = {}
+        for (var i = 0; i < names.length; i++) { if (hasOwn(old, names[i])) { scopePut(ns, names[i], old[names[i]]) } }
+        scopes[top] = ns
     }
     // items = [] or [exprThunk].
     function makeReturn(items) {

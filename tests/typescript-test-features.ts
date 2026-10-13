@@ -706,6 +706,21 @@ check("key-order-index-first", (function (): boolean {
         && Object.values({q: 1, 7: 2, 3: 3}).join(",") === "3,2,1";
 })());
 
+// ----- a let/const loop binding is a fresh binding per iteration -----
+check("loop-let-per-iteration", (function (): boolean {
+    function run(fs: any[]): string { var o: any[] = []; for (var i = 0; i < fs.length; i++) { o.push(fs[i]()); } return o.join(","); }
+    var src: number[] = [7, 8, 9];
+    var f1: any[] = []; for (let i = 0; i < 3; i++) { f1.push(() => i); }
+    var f2: any[] = []; for (const x of src) { f2.push(() => x); }
+    var f3: any[] = []; for (let k in {a: 1, b: 2}) { f3.push(() => k); }
+    var f4: any[] = []; for (let [a, b] of [[1, 2], [3, 4]]) { f4.push(() => a + b); }
+    var f5: any[] = []; for (let i = 0, get = () => i; i < 2; i++) { f5.push(get); }
+    var f6: any[] = []; for (let i = 0; i < 3; i++) { if (i == 1) { continue; } f6.push(() => i); }
+    var f7: any[] = []; for (var v = 0; v < 2; v++) { f7.push(() => v); }
+    return run(f1) === "0,1,2" && run(f2) === "7,8,9" && run(f3) === "a,b" && run(f4) === "3,7"
+        && run(f5) === "0,0" && run(f6) === "0,2" && run(f7) === "2,2";
+})());
+
 function main(): number {
     println("features: " + checks + " checks, " + failures + " failures");
     return failures;

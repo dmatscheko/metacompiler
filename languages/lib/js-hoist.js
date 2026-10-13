@@ -45,6 +45,16 @@ function hoistClaimFns(from, to) {
     return sp.got
 }
 
+// The lexical names declared directly in a span and not claimed yet, without claiming
+// them: at a `for` statement's own tag that is what its head declares, the names a
+// per-iteration environment copies (CreatePerIterationEnvironment).
+function hoistLexNames(from, to) {
+    var got = hoistSplit(hoistLex, from, to).got
+    var names = []
+    for (var i = 0; i < got.length; i++) { if (names.indexOf(got[i].name) < 0) { names.push(got[i].name) } }
+    return names
+}
+
 // The lexical names declared directly in a span cancel the Annex B binding of every
 // block function inside it of the same name.
 function hoistLexKill(from, to) {

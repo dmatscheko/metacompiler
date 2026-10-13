@@ -684,6 +684,21 @@ check("key-order-index-first", (function () {
         && Object.keys(C).join("|") === "3|7|q";
 })());
 
+// ----- a let/const loop binding is a fresh binding per iteration -----
+check("loop-let-per-iteration", (function () {
+    function run(fs) { var o = []; for (var i = 0; i < fs.length; i++) { o.push(fs[i]()); } return o.join(","); }
+    var src = [7, 8, 9];
+    var f1 = []; for (let i = 0; i < 3; i++) { f1.push(() => i); }
+    var f2 = []; for (const x of src) { f2.push(() => x); }
+    var f3 = []; for (let k in {a: 1, b: 2}) { f3.push(() => k); }
+    var f4 = []; for (let [a, b] of [[1, 2], [3, 4]]) { f4.push(() => a + b); }
+    var f5 = []; for (let i = 0, get = () => i; i < 2; i++) { f5.push(get); }
+    var f6 = []; for (let i = 0; i < 3; i++) { if (i == 1) { continue; } f6.push(() => i); }
+    var f7 = []; for (var v = 0; v < 2; v++) { f7.push(() => v); }
+    return run(f1) === "0,1,2" && run(f2) === "7,8,9" && run(f3) === "a,b" && run(f4) === "3,7"
+        && run(f5) === "0,0" && run(f6) === "0,2" && run(f7) === "2,2";
+})());
+
 function main() {
     println("features: " + checks + " checks, " + failures + " failures");
     return failures;

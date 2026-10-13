@@ -271,7 +271,7 @@ Do          <~~ push(makeDo(pop(), pop())) ~~>
 
 // The three optional parts are wrapped with a kind marker, otherwise e.g.
 // 'for (;c;)' and 'for (i=0;;)' could not be told apart on the stack.
-For         <~~ push(makeFor(takeAll())); hoistLexKill(up.start, up.pos) ~~>
+For         <~~ push(makeFor(takeAll(), hoistLexNames(up.start, up.pos))); hoistLexKill(up.start, up.pos) ~~>
             = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" NestedStatement ;
 ForInit     <~~ push({k:"init", t:pop()}) ~~> = ForVar | ForExpr ;
 ForVar      = VarDeclCore ;
@@ -5724,10 +5724,26 @@ NotFuncHead = :script(~~
             var elemIn = [llvm.ir.NewIncoming(idxElemV, elemB)]
             if (lazy) { elemIn.push(llvm.ir.NewIncoming(stepElemV, stepB)) }
             var elemV = bodyB.NewPhi(elemIn)
-            // A pattern target is re-bound per iteration (its leaves are fresh
-            // declarations in the loop scope); a plain name reuses its single slot.
+            // A let/const target is bound in a scope of its own each iteration
+            // (ForIn/OfBodyEvaluation), so a closure keeps the binding of the iteration
+            // that made it. As in makeFor, that scope is a phi decided once the body is
+            // emitted: a fresh scope when the loop emitted a function, else the loop's.
+            var loopS = curScopeV
+            var isLex = patExt == "js_scope_decl"
+            var iterHdrB = bodyB
+            var iterB = bodyB
+            var iterPh = anytype // The iteration's scope: a phi, once isLex.
+            var fnBefore = funcCount
+            if (isLex) {
+                iterHdrB = curF.NewBlock("")
+                bodyB.NewBr(iterHdrB)
+                iterB = curF.NewBlock("")
+                iterPh = iterB.NewPhi([llvm.ir.NewIncoming(loopS, iterHdrB)])
+                curScopeV = iterPh
+                bodyB = iterB
+            }
             if (isPat) { bodyB = bindPattern(bodyB, name, elemV, patExt) }
-            else { callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, name), elemV]) }
+            else { callExt(bodyB, "js_scope_decl", [curScopeV, emitStr(bodyB, name), elemV]) }
             var brkB = exitB   // where `break` goes: exitB, or the closing block below.
             if (lazy) {
                 var closeB = curF.NewBlock("")
@@ -5752,6 +5768,13 @@ NotFuncHead = :script(~~
             bodyT(bodyB).NewBr(postB)
             loopStack.pop()
             if (lazy) { forOfIters.pop() }
+            if (isLex) {
+                if (funcCount != fnBefore) {
+                    iterPh.Incs = [llvm.ir.NewIncoming(callExt(iterHdrB, "js_scope_new", [loopS]), iterHdrB)]
+                }
+                iterHdrB.NewBr(iterB)
+                curScopeV = loopS
+            }
             var iP = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, "0i")])
             var nextV = callExt(postB, "js_add", [iP, callExt(postB, "js_num_i", [handle(1)])])
             callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, "0i"), nextV])
@@ -7029,8 +7052,16 @@ NotFuncHead = :script(~~
             return exitB
         }
     }
-    // items = [{k:"init"|"cond"|"post", t:thunk}..., bodyThunk].
-    function makeFor(items) {
+    // items = [{k:"init"|"cond"|"post", t:thunk}..., bodyThunk]; lexNames are the
+    // let/const names the head declares. Each iteration runs in a COPY of the head
+    // scope (CreatePerIterationEnvironment, ECMA-262 14.7.4.4), made after the
+    // initializer (in initB) and before each increment (in postB), so a closure keeps
+    // the binding of the iteration that made it. Only a closure can tell the copy from
+    // the original, so the copies are made only when the loop emitted a function:
+    // the scope the head and the increment run against is a phi whose incoming
+    // values are written once the loop is emitted, the way makeBlockStmt decides
+    // its own scope in lib/compile-core.js. Twin: makeFor in js-interpreter.abnf.
+    function makeFor(items, lexNames) {
         var bodyT = items.pop()
         var init = null, cond = null, post = null
         for (var i = 0; i < items.length; i++) {
@@ -7041,13 +7072,19 @@ NotFuncHead = :script(~~
         return function(b) {
             var lbl = takeLabel()
             var saved = curScopeV
+            var fnBefore = funcCount
             curScopeV = callExt(b, "js_scope_new", [curScopeV]) // The for header is its own scope.
+            var headS = curScopeV
             if (init != null) b = init(b)
+            var initB = curF.NewBlock("")
+            b.NewBr(initB)
             var headB = curF.NewBlock("")
             var bodyB = curF.NewBlock("")
             var postB = curF.NewBlock("")
+            var runB = curF.NewBlock("")
             var exitB = curF.NewBlock("")
-            b.NewBr(headB)
+            var headPh = headB.NewPhi([llvm.ir.NewIncoming(headS, initB)])
+            curScopeV = headPh
             if (cond != null) {
                 var r = cond(headB)
                 r.b.NewCondBr(truthy(r.b, r.v), bodyB, exitB)
@@ -7058,12 +7095,30 @@ NotFuncHead = :script(~~
             if (lbl != "") { bindLabelCont(lbl, postB) }
             bodyT(bodyB).NewBr(postB)
             loopStack.pop()
-            var pb = postB
-            if (post != null) pb = post(postB)
+            var runPh = runB.NewPhi([llvm.ir.NewIncoming(headPh, postB)])
+            curScopeV = runPh
+            var pb = runB
+            if (post != null) pb = post(runB)
             pb.NewBr(headB)
+            var firstS = headS
+            if (lexNames.length > 0 && funcCount != fnBefore) {
+                firstS = forIterScope(initB, saved, headS, lexNames)
+                runPh.Incs = [llvm.ir.NewIncoming(forIterScope(postB, saved, headPh, lexNames), postB)]
+            }
+            headPh.Incs = [llvm.ir.NewIncoming(firstS, initB), llvm.ir.NewIncoming(runPh, pb)]
+            initB.NewBr(headB)
+            postB.NewBr(runB)
             curScopeV = saved
             return exitB
         }
+    }
+    // A new scope under parent holding the current values of names in old.
+    function forIterScope(b, parent, old, names) {
+        var ns = callExt(b, "js_scope_new", [parent])
+        for (var i = 0; i < names.length; i++) {
+            callExt(b, "js_scope_decl", [ns, emitStr(b, names[i]), callExt(b, "js_scope_get", [old, emitStr(b, names[i])])])
+        }
+        return ns
     }
     // items = [] or [exprThunk].
     function makeReturn(items) {
