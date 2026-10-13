@@ -2767,6 +2767,8 @@ function js_phscallv(target, name, self, args, lsb, scope) {
     var nm = phStr(name)
     var acc = phMethodAccess(cls, phsCase(nm, false), scope, false)
     if (acc == 1 || acc == 2) {
+        // An inaccessible method falls back as a missing one does.
+        if (phCallFallback(cls, self)) { return phCallVia(self, nm, args) }
         if (phOwner(cls, "__callstatic") === undefined) { phBadMethod(cls, nm, scope, false) }
         var fwd = phNewArr()
         phArrPush(fwd, nm)
@@ -2824,8 +2826,9 @@ function js_phcbns(where, cls, cn, mn, self, scope) {
     var m = phStr(mn)
     if (where === false) {
         var dn = ""
-        if (typeof phMethodOf(cls, m) == "function") { dn = phNonStatic(cls, phsCase(m, false)) }
-        else if (phOwner(cls, "__call") !== undefined && phIsObj(self) && phIsA(self, phStr(cls["__name"]))) {
+        if (typeof phMethodOf(cls, m) == "function" && phMethodAccess(cls, phsCase(m, false), scope, false) == 0) {
+            dn = phNonStatic(cls, phsCase(m, false))
+        } else if (phCallFallback(cls, self)) {
             var d = phMethodDecl(self["__class"], "__call")
             if (d !== undefined) { dn = phStr(d["k"]["__name"]) + "::" + m }
         }
@@ -2833,13 +2836,15 @@ function js_phcbns(where, cls, cn, mn, self, scope) {
         return undefined
     }
     var ns = phNonStatic(cls, phsCase(m, false))
-    if (ns == "") { return undefined }
-    if (phIsObj(self) && scope !== undefined && scope !== null && typeof scope == "object" && phIsA(self, phStr(scope["__name"]))
-        && phIsA(scope, phStr(cls["__name"]))) {
-        if (where === true) { return self }
+    // The frame's $this, compatible as above, is bound to a static method too: its
+    // class is then the called scope.
+    var compat = phIsObj(self) && scope !== undefined && scope !== null && typeof scope == "object" && phIsA(self, phStr(scope["__name"]))
+        && phIsA(scope, phStr(cls["__name"]))
+    if (where === true) {
+        if (compat) { return self }
         return undefined
     }
-    if (where === true) { return undefined }
+    if (ns == "" || compat) { return undefined }
     phCbFail(where, "non-static method " + phStr(cls["__name"]) + "::" + ns.substring(ns.indexOf("::") + 2) + "() cannot be called statically")
     return undefined
 }
@@ -2929,7 +2934,7 @@ function js_phcbvis(v, cls, scope, where) {
 // A bareword is a function name here, and PHP 8 raises the CATCHABLE
 // `Error: Call to undefined function zzz()`. A `$variable` never reaches the hook
 // (the emitter reads it in its own frame with js_scope_own, and an undefined one
-// reads null), except `$this` outside an object, which keeps the abort.
+// reads null; `$this` is probed, and outside an object it is PHP's Error).
 function js_phmissname(name) {
     var s = phStr(name)
     if (s.length == 0) { return undefined }
@@ -3402,7 +3407,14 @@ function js_phisset(a, k) { return phArrHas(a, k) }
 // Is parameter i of function f by reference? Bit i of the mask the emitter
 // recorded in the function's meta slot (withRefMask in php-to-llvm-ir.abnf).
 // Twin of js_phrefat in abnf/jsrtphp.go.
-function js_phrefat(f, i) { return Math.floor(fnMeta(f, "length") / Math.pow(2, i)) % 2 == 1 }
+// An object called as a function takes its __invoke's.
+function js_phrefat(f, i) {
+    var fn = anytype
+    fn = f
+    if (typeof fn == "object" && fn !== null) { fn = phMethodOf(fn, "__invoke") }
+    if (typeof fn != "function") { return false }
+    return Math.floor(fnMeta(fn, "length") / Math.pow(2, i)) % 2 == 1
+}
 // A call's arguments laid out in the parameter positions of a callee known only at
 // run time, from the parameter list recorded in its meta name (withSig in
 // php-to-llvm-ir.abnf). Twin of phpPlaceArgs in abnf/jsrtphp.go, which documents
@@ -4036,8 +4048,13 @@ function js_phscall(target, name, self, args, lsb) {
     phLsb = bind
     var out = anytype
     if (owner === undefined) {
-        // __callStatic($name, $args) is PHP's fallback for a missing static
-        // method, exactly as __call is for an instance method.
+        // A missing method is the __call of a $this that is an instance of cls
+        // (phCallFallback), else __callStatic's, as __call is for an instance
+        // method.
+        if (phCallFallback(cls, self)) {
+            phLsb = saved
+            return phCallVia(self, name, args)
+        }
         var cs = phOwner(cls, "__callstatic")
         if (cs === undefined) {
             phLsb = saved
@@ -4060,7 +4077,12 @@ function js_phscall(target, name, self, args, lsb) {
         }
         return out
     }
-    var av = [self]
+    // A static method runs without the $this the call site handed over, in the
+    // called scope alone (ZEND_INIT_STATIC_METHOD_CALL).
+    var me = anytype
+    me = self
+    if (phIsObj(me) && phStaticIn(owner, key)) { me = undefined }
+    var av = [me]
     var p = phArrParts(args)
     if (p !== undefined) {
         var i = 0
@@ -4075,6 +4097,35 @@ function js_phscall(target, name, self, args, lsb) {
         phLsb = saved
     }
     return out
+}
+
+// Where a '::' call of a method cls has none of, or may not call, goes
+// (get_static_method_fallback): to the __call of self - the frame's $this, or the
+// one a callback binds - when cls has a __call and self is an instance of cls;
+// false leaves it to __callStatic. Twin of phpCallFallback in abnf/jsrtphp.go and
+// php-interpreter.abnf.
+function phCallFallback(cls, self) {
+    return phIsObj(self) && phOwner(cls, "__call") !== undefined && phIsA(self, phStr(cls["__name"]))
+}
+// self's __call for the method name, with the PHP array args.
+function phCallVia(self, name, args) {
+    var ar = []
+    var p = phArrParts(args)
+    if (p !== undefined) {
+        var i = 0
+        while (i < p.v.length) {
+            ar.push(p.v[i])
+            i = i + 1
+        }
+    }
+    return phOwner(self["__class"], "__call")["__call"].apply(undefined, [self, name, ar])
+}
+
+// Whether the method owner holds under key is static: owner's __mst lists its
+// static methods lower-cased. Twin of phpStaticIn in abnf/jsrtphp.go.
+function phStaticIn(owner, key) {
+    var l = owner["__mst"]
+    return typeof l == "string" && l.indexOf("," + phsCase(phStr(key), false) + ",") >= 0
 }
 
 // A class descriptor by name, or null when nothing of that name is declared yet -

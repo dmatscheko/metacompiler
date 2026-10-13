@@ -910,8 +910,8 @@ function s29() {
 }
 class S29Box { public $v = 1; }
 // var_dump's OWN renderer is serialize_precision=-1, which no expression above
-// can observe - so these lines put it in the transcript, where the matrix's
-// byte-identity check and ./test.sh --cross both see it. Every expected line is
+// can observe - so these lines put it in the transcript, where --full's goja vs
+// -frozen check sees it (--cross skips this file). Every expected line is
 // quoted from the corpus: int(9223372036854775807) and
 // float(9.223372036854776E+18) from lang/operators/add_basiclong_64bit.phpt,
 // float(1.9119287772983036E+25) from lang/integer_literals/binary_64bit.phpt,
@@ -2975,6 +2975,12 @@ function s63() {
         && s63err(function() { return S63A::$sa; }) === "Cannot access private property S63A::\$sa"
         && s63err(function() { S63A::$sb = 1; }) === "Cannot access protected property S63A::\$sb"
         && !isset(S63A::$sa) && (S63A::$sb ?? "n") === "n");
+    // isset() of a static property out of reach raises nothing, so no Error takes
+    // an object handle (zend_std_get_static_property_with_info under BP_VAR_IS).
+    // This engine never recycles a handle; PHP reuses freed ones.
+    $h = new stdClass;
+    $q = isset(S63A::$sa) || isset(S63A::$sb);
+    check("vis6", !$q && spl_object_id(new stdClass) === spl_object_id($h) + 1);
     $t = new S63T;
     $r = [s63err(function() use ($t) { return $t->x; }), isset($t->x), $t->x ?? "d", count((array) $t)];
     $keys = [];
@@ -3267,6 +3273,99 @@ function s66() {
     check("clo4", $cnt() === 3 && $cnt() === 6);
 }
 
+// ===== SECTION 67: $this outside an object, the called scope of '::', __call for '::' =====
+// Only an instance method's body is sure to have a $this (this_guaranteed_exists);
+// anywhere else - a static method, a function, a closure without one - every use
+// of it but isset($this) / empty($this) fetches it (ZEND_FETCH_THIS), and the
+// fetch is Error "Using $this when not in object context". A static method never
+// binds a $this, whatever receiver the call went through. A '::' call naming its
+// class runs a static method in that class, self:: / parent:: / static::
+// forward the caller's called scope (ZEND_INIT_STATIC_METHOD_CALL), and a
+// callback naming a class binds the frame's $this when the frame's class is an
+// instance of it and a subclass of the named one, whose class is then the called
+// scope even of a static method (zend_is_callable_check_class). A '::' call of a
+// method the class lacks or the scope may not call goes to the __call of a
+// $this that is an instance of the class, else to __callStatic
+// (get_static_method_fallback); a dynamic call cannot take __call, so it is an
+// Error there (zend_init_dynamic_call_array). A method name is case-insensitive,
+// a by-reference parameter included, and $c->__invoke($v) is the call $c($v).
+// $o->$m(...) and C::$m(...) are first-class callables like the literal forms.
+class S67A {
+    public $x = 1;
+    static function who() { return static::class; }
+    static function s() { return static::who() . self::who(); }
+    static function run() { return (new S67B)->s(); }
+    static function rd() { return $this->x; }
+    static function bare() { return $this; }
+    static function call() { return $this->who(); }
+    static function wr() { $this->x = 5; return 1; }
+    static function prop() { return isset($this->x); }
+    static function probe() { return [isset($this), empty($this)]; }
+    function closures() {
+        return [s67err(static function() { return $this->x; }), s67err(static fn() => $this ?? 0),
+                (static fn() => isset($this))()];
+    }
+    function calls() {
+        return [S67A::who(), self::who(), static::who(), $this->who(), call_user_func(['S67A', 'who']),
+                call_user_func('S67A::who'), self::s(), S67A::s()];
+    }
+}
+class S67B extends S67A {}
+class S67C { function j() { return [call_user_func(['S67A', 'who']), S67A::who()]; } }
+function s67fn() { return $this; }
+function s67err($f) {
+    try { return $f(); } catch (Error $e) { return get_class($e) . ": " . $e->getMessage(); }
+}
+class S67H { function __invoke(&$x) { $x .= "!"; } function Tail(&$x) { $x .= "?"; } }
+class S67M {
+    private static function sp($x) { return "sp$x"; }
+    function __call($n, $a) { return "call:$n:" . implode(",", $a); }
+    static function __callStatic($n, $a) { return "cs:$n:" . implode(",", $a); }
+}
+class S67N extends S67M {
+    function t() {
+        $s = "sp";
+        return [S67M::sp(1), S67M::$s(2), parent::sp(3), static::sp(4), S67M::nope(5), (S67M::sp(...))(6)];
+    }
+    function dyn() {
+        return [s67err(fn() => ['S67M', 'sp'](1)), s67err(fn() => 'S67M::nope'(2))];
+    }
+    static function st() { return [S67M::sp(1), parent::nope(2), ['S67M', 'sp'](3)]; }
+}
+class S67X { function t() { return [S67M::sp(1), 'S67M::sp'(2), S67M::nope(3)]; } }
+class S67K { function __call($n, $a) { return "K:" . $n; } }
+class S67L extends S67K { function t() { return [S67K::miss(), parent::miss2(), self::miss3()]; } }
+function s67() {
+    $nt = "Error: Using \$this when not in object context";
+    check("ths1", s67err(fn() => S67A::rd()) === $nt && s67err(fn() => S67A::bare()) === $nt
+        && s67err(fn() => S67A::call()) === $nt && s67err(fn() => S67A::wr()) === $nt
+        && s67err(fn() => S67A::prop()) === $nt && s67err('s67fn') === $nt
+        && s67err(function() { return $this; }) === $nt && s67err(fn() => (new S67B)->rd()) === $nt);
+    check("ths2", S67A::probe() === [false, true] && (new S67A)->closures() === [$nt, $nt, false]);
+    check("lsb1", (new S67B)->calls() === ["S67A", "S67B", "S67B", "S67B", "S67B", "S67B", "S67BS67B", "S67AS67A"]
+        && (new S67B)->s() === "S67BS67B" && S67A::run() === "S67BS67B" && S67B::s() === "S67BS67B"
+        && (new S67C)->j() === ["S67A", "S67A"]);
+    $inc = function(&$n) { $n++; };
+    $n = 1;
+    $inc->__INVOKE($n);
+    $inc->__invoke($n);
+    $h = new S67H;
+    $s = "a";
+    $h($s);
+    $h->__invoke($s);
+    $h->tail($s);
+    check("inv1", $n === 3 && $s === "a!!?");
+    check("cfb1", (new S67N)->t() === ["call:sp:1", "call:sp:2", "call:sp:3", "call:sp:4", "call:nope:5", "call:sp:6"]
+        && S67N::st() === ["cs:sp:1", "cs:nope:2", "cs:sp:3"] && (new S67X)->t() === ["cs:sp:1", "cs:sp:2", "cs:nope:3"]
+        && (new S67L)->t() === ["K:miss", "K:miss2", "K:miss3"]);
+    check("cfb2", (new S67N)->dyn() === ["Error: Non-static method S67M::sp() cannot be called statically",
+                                        "Error: Non-static method S67M::nope() cannot be called statically"]);
+    $o = new S67M;
+    $m = "sp";
+    $w = "who";
+    check("fcc1", ($o->$m(...))(7) === "call:sp:7" && (S67M::$m(...))(8) === "cs:sp:8" && (S67B::$w(...))() === "S67B");
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -3342,6 +3441,7 @@ function main() {
     s64(); // SECTION-CALL 64
     s65(); // SECTION-CALL 65
     s66(); // SECTION-CALL 66
+    s67(); // SECTION-CALL 67
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

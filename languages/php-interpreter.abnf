@@ -1807,22 +1807,28 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (ho.call(sc[i], name)) {
                 var v = anytype
                 v = sc[i][name]
-                if (v === UNSET) { return null }
+                if (v === UNSET) {
+                    if (name == "$this") { phpNoThis() }
+                    return null
+                }
                 return isRef(v) ? v.v : v
             }
         }
+        if (name == "$this") { phpNoThis() }
         if (hasOwn(hostGlobals, name)) { return hostGlobals[name] }
         // A BAREWORD that resolves nowhere is a function name here (a constant goes
         // through the constant rule below and words itself differently), and PHP 8
         // raises a CATCHABLE `Error: Call to undefined function zzz()` on one. The
         // compiler reaches the same answer through the floor's js_rt_missvar hook
-        // (js_phmissname in languages/lib/php-rt.metajs). Only `$this` outside an
-        // object is left to reach the fatal.
+        // (js_phmissname in languages/lib/php-rt.metajs).
         if (name.length > 0 && name.charAt(0) != "$") {
             phpRaise("Error", "Call to undefined function " + name + "()")
         }
         fail("unknown name: " + name)
     }
+    // Every use of $this but isset($this) / empty($this) fetches it (ZEND_FETCH_THIS),
+    // which outside an object raises. Twin of phThisFetch in php-to-llvm-ir.abnf.
+    function phpNoThis() { phpRaise("Error", "Using $this when not in object context") }
     function varExists(name) {
         if (isLocalName(name)) {
             var top = scopes[scopes.length - 1]
@@ -2867,17 +2873,21 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         else if (ref.gkey != undefined) { o = globalsVal(ref.gkey) }
         // A STATIC PROPERTY head: isset(C::$sp) asks whether the property exists and
         // is not null. staticCell raises for one that was never declared, which is
-        // exactly the "false" answer here, so the probe catches it.
+        // exactly the "false" answer here, so the probe catches it; one the scope may
+        // not see answers false without raising (no Error object is made).
         else if (ref.sref != null && ref.sref != undefined) {
             var cell = anytype
             cell = null
-            try { cell = ref.sref() } catch (e) { return null }
+            try { cell = ref.sref(true) } catch (e) { return null }
             if (cell == null || cell == undefined) { return null }
             o = deref(cell.v)
         }
         else {
             var nm = refName(ref)
-            if (!varExists(nm)) { return null }
+            if (!varExists(nm)) {
+                if (nm == "$this" && ref.path.length > 0) { phpNoThis() }
+                return null
+            }
             o = getVar(nm)
         }
         for (var i = 0; i < ref.path.length; i++) {
@@ -2954,7 +2964,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 // and a static-property head have no name to be missing and are left alone.
                 var plainRoot = (ref.headT == null || ref.headT == undefined) &&
                                 (ref.sref == null || ref.sref == undefined)
-                if (plainRoot && !varExists(nm)) { continue }
+                if (plainRoot && !varExists(nm)) {
+                    if (nm == "$this") { phpNoThis() }
+                    continue
+                }
                 var p = resolveRefPhpV(ref, false)
                 if (p.last.key != undefined) { if (isObj(p.obj)) { phpUnsetProp(p.obj, p.last.key) } }
                 else if (p.last.append !== true && isArr(p.obj)) { arrDel(p.obj, p.last.idx()) }
@@ -4032,11 +4045,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (cbThis(cls, mname) != null) { return }
         cbFail(where, "non-static method " + cls.__name + "::" + ns.substring(ns.indexOf("::") + 2) + "() cannot be called statically")
     }
-    // The $this a non-static method of cls binds as a callback named through
-    // its class: the frame's, when the frame's class scope is an instance of cls
-    // (zend_is_callable_check_class), else null - as for a static method.
+    // The $this a method of cls binds as a callback named through its class: the
+    // frame's, when the frame's class scope is an instance of cls, else null
+    // (zend_is_callable_check_class). A static method runs without it, in its class.
     function cbThis(cls, mname) {
-        if (phpNonStatic(cls, phsCase(mname, false)) == "") { return null }
         var tv = anytype
         tv = varExists("$this") ? getVar("$this") : null
         if (!isObj(tv)) { return null }
@@ -4054,13 +4066,25 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (rn == "self" || rn == "parent" || rn == "static") { return }
         var lc = phsCase(mname, false)
         var ns = ""
-        if (classFind(cls, mname) != null || classFind(cls, lc) != null) { ns = phpNonStatic(cls, lc) }
-        else if (classFind(cls, "__call") != null && varExists("$this")) {
+        var has = classFind(cls, mname) != null || classFind(cls, lc) != null
+        var acc = has && mVisNames["$" + lc] === true ? phpMethodAccess(cls, lc, ctxSelf(), false) : 0
+        if (has && acc == 0) { ns = phpNonStatic(cls, lc) }
+        else {
             var tv = anytype
-            tv = getVar("$this")
-            if (isObj(tv) && classIs(tv.__class, cls.__name)) { ns = phpMethodDecl(tv.__class, "__call").k.__name + "::" + mname }
+            tv = phpCallFallback(cls, frameThis())
+            if (tv != null) { ns = phpMethodDecl(tv.__class, "__call").k.__name + "::" + mname }
         }
         if (ns != "") { phpRaise("Error", "Non-static method " + ns + "() cannot be called statically") }
+    }
+    function frameThis() { return varExists("$this") ? getVar("$this") : null }
+    // Where a '::' call of a method cls has none of, or may not call, goes
+    // (get_static_method_fallback): to the __call of tv - the frame's $this, or the
+    // one a callback binds - when cls has a __call and tv is an instance of cls;
+    // null leaves it to __callStatic. Twin of phCallFallback in lib/php-rt.metajs
+    // and phpCallFallback in abnf/jsrtphp.go.
+    function phpCallFallback(cls, tv) {
+        if (!isObj(tv) || classFind(cls, "__call") == null || !classIs(tv.__class, cls.__name)) { return null }
+        return tv
     }
     // is_callable($v): the check call_user_func makes, in the caller's frame, whose
     // TypeError answers false. syntax_only and callable_name are not modelled.
@@ -4245,7 +4269,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     // The CELL of a static property: the first declaration found walking up, so a
     // subclass reads and writes the same storage as its parent.
-    function staticCell(cls, name) {
+    // quiet: a property the scope may not see answers null instead of raising.
+    function staticCell(cls, name, quiet) {
         if (cls.__ready !== true) { classInit(cls) }
         var k = cls
         while (k != undefined && k != null) {
@@ -4253,7 +4278,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (st != undefined && st != null) {
                 var i = dictFind(st, name)
                 if (i >= 0) {
-                    if (sVisNames["$" + name] === true) { phpStaticVis(cls, k, name, false) }
+                    if (sVisNames["$" + name] === true && !phpStaticVis(cls, k, name, quiet === true)) { return null }
                     return st.vals[i]
                 }
             }
@@ -4315,8 +4340,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (m != null && mVisNames["$" + phsCase(name, false)] === true && !(bound != undefined && bound.ok === true)) {
             var scope = ctxSelf()
             if (phpMethodAccess(cls, phsCase(name, false), scope, false) != 0) {
-                // An inaccessible method is __callStatic's, like a missing one.
-                if (classFind(cls, "__callstatic") == null) { phpBadMethod(cls, name, scope, false) }
+                // An inaccessible method falls back as a missing one does.
+                if (classFind(cls, "__callstatic") == null && phpCallFallback(cls, bound != undefined ? bound.self : frameThis()) == null) {
+                    phpBadMethod(cls, name, scope, false)
+                }
                 m = null
             }
         }
@@ -4340,7 +4367,15 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             var pself = self
             return makePartial(function(a2) { pendingStatic = pbind; return pm(pself, a2) }, argset)
         }
+        var ft = anytype
+        ft = m == null ? phpCallFallback(cls, bound != undefined ? bound.self : frameThis()) : null
         if (argset.fcc === true) {
+            if (ft != null) {
+                var fmc = classFind(ft.__class, "__call")
+                var fft = ft
+                var fnm = name
+                return function(a4) { return fmc(fft, argsOf([fnm, arrOf(a4.pos)])) }
+            }
             if (m == null) {
                 var fcs = classFind(cls, "__callstatic")
                 if (fcs == null) { phpRaise("Error", "Call to undefined method " + cls.__name + "::" + name + "()") }
@@ -4357,6 +4392,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             pendingStatic = bind
             return m(self, argset)
         }
+        if (ft != null) { return classFind(ft.__class, "__call")(ft, argsOf([name, arrOf(argset.pos)])) }
         var cs = classFind(cls, "__callstatic")
         if (cs != null) {
             pendingStatic = bind
@@ -4555,7 +4591,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             return staticAccess(classOfValue(cur), stName(p), stProp(p), p.args, "")
         }}
     }
-    function staticRefOf(p) { return function() { return staticCell(resolveClassName(p.base), stProp(p)) } }
+    function staticRefOf(p) { return function(quiet) { return staticCell(resolveClassName(p.base), stProp(p), quiet) } }
 
     // include / require: a single-quoted literal path is resolved to a project file
     // (resolveImport -> core.importFile below, so the file's defs register during the walk);
@@ -5737,8 +5773,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // A method closure knows the class it was DECLARED in (self::). static:: is the
     // class the call went through: whatever a '::' site handed over in pendingStatic,
     // else the receiver's own class (so static:: inside an instance method resolves in
-    // the actual, possibly derived, class), else the declaring class.
+    // the actual, possibly derived, class), else the declaring class. A static
+    // method binds no $this, whatever receiver the call went through.
     function makeMethodClosure(fn, defCls) {
+        var stat = fn.isStatic === true
         return function(self, argset) {
             var st = anytype
             st = pendingStatic
@@ -5746,11 +5784,13 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (st == null || st == undefined) {
                 st = (self !== undefined && self !== null && isObj(self)) ? self.__class : defCls
             }
+            var me = anytype
+            me = stat ? null : self
             if (fn.isGen === true) {
                 var gst = st
-                return newGen(function() { return invokePhpCls(fn, self, argset, defCls, gst) })
+                return newGen(function() { return invokePhpCls(fn, me, argset, defCls, gst) })
             }
-            return invokePhpCls(fn, self, argset, defCls, st)
+            return invokePhpCls(fn, me, argset, defCls, st)
         }
     }
     // A named function is GLOBAL wherever its declaration stands: one written inside

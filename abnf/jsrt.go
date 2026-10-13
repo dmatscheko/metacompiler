@@ -14732,8 +14732,12 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				}
 			}
 			if owner == nil {
-				// __callStatic($name, $args) is PHP's fallback for a missing
-				// static method, exactly as __call is for an instance method.
+				// A missing method is the __call of a $this that is an instance
+				// of cls (phpCallFallback), else __callStatic's, as __call is for
+				// an instance method.
+				if rt.phpCallFallback(cls, u(a[2])) {
+					return w(rt.phpCallVia(u(a[2]), name, u(a[3])))
+				}
 				if cs := phpOwner(cls, "__callstatic"); cs != nil {
 					args := &jsArray{}
 					if _, vals, ok := phpArrParts(u(a[3])); ok {
@@ -14747,7 +14751,13 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				}
 				rt.phpRaise("Error", "Call to undefined method "+rt.phpStr(cls.props["__name"])+"::"+name+"()")
 			}
-			args := []interface{}{u(a[2])}
+			// A static method runs without the $this the call site handed over, in
+			// the called scope alone (ZEND_INIT_STATIC_METHOD_CALL).
+			self := u(a[2])
+			if phpIsObj(self) && phpStaticIn(owner, name) {
+				self = jsUndef
+			}
+			args := []interface{}{self}
 			if _, vals, ok := phpArrParts(u(a[3])); ok {
 				args = append(args, vals.elems...)
 			}

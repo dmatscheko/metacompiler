@@ -1941,6 +1941,33 @@ func (rt *jsrt) phpClassOf(v interface{}) *jsObject {
 	return nil
 }
 
+// Whether the method owner holds under key is static: owner's __mst lists its
+// static methods lower-cased. Twin of phStaticIn in languages/lib/php-rt.metajs.
+func phpStaticIn(owner *jsObject, key string) bool {
+	l, ok := owner.props["__mst"].(string)
+	return ok && strings.Contains(l, ","+phpCase(key, false)+",")
+}
+
+// phpCallFallback says where a '::' call of a method cls has none of, or may not
+// call, goes (get_static_method_fallback): to the __call of this - the frame's
+// $this, or the one a callback binds - when cls has a __call and this is an
+// instance of cls; false leaves it to __callStatic. Twin of phCallFallback in
+// languages/lib/php-rt.metajs and phpCallFallback in php-interpreter.abnf.
+func (rt *jsrt) phpCallFallback(cls *jsObject, this interface{}) bool {
+	return phpIsObj(this) && phpOwner(cls, "__call") != nil && rt.phpIsA(this, rt.phpStr(cls.props["__name"]))
+}
+
+// phpCallVia runs this's __call for the method name, with the PHP array args.
+func (rt *jsrt) phpCallVia(this interface{}, name string, args interface{}) interface{} {
+	o := this.(*jsObject)
+	cls, _ := o.props["__class"].(*jsObject)
+	inner := &jsArray{}
+	if _, vals, ok := phpArrParts(args); ok {
+		inner.elems = append(inner.elems, vals.elems...)
+	}
+	return rt.call(phpOwner(cls, "__call").props["__call"], jsUndef, []interface{}{o, name, inner})
+}
+
 // phpOwner walks the __super chain for the class that actually declares `key`.
 func phpOwner(cls *jsObject, key string) *jsObject {
 	for guard := 0; cls != nil && guard < 64; guard++ {
@@ -3299,6 +3326,10 @@ func init() {
 			name := rt.phpStr(u(a[1]))
 			scope, _ := u(a[5]).(*jsObject)
 			if acc := rt.phpMethodAccess(cls, phpCase(name, false), scope, false); acc == 1 || acc == 2 {
+				// An inaccessible method falls back as a missing one does.
+				if rt.phpCallFallback(cls, u(a[2])) {
+					return w(rt.phpCallVia(u(a[2]), name, u(a[3])))
+				}
 				if phpOwner(cls, "__callstatic") == nil {
 					rt.phpBadMethod(cls, name, scope, false)
 				}
@@ -3353,9 +3384,10 @@ func init() {
 			mn := rt.phpStr(u(a[3]))
 			if u(a[0]) == false {
 				ns := ""
-				if rt.phpMethodOf(cls, mn) != nil {
+				scope, _ := u(a[5]).(*jsObject)
+				if rt.phpMethodOf(cls, mn) != nil && rt.phpMethodAccess(cls, phpCase(mn, false), scope, false) == 0 {
 					ns = rt.phpNonStatic(cls, phpCase(mn, false))
-				} else if o, ok := this.(*jsObject); ok && phpOwner(cls, "__call") != nil && rt.phpIsA(this, rt.phpStr(cls.props["__name"])) {
+				} else if o, ok := this.(*jsObject); ok && rt.phpCallFallback(cls, this) {
 					if k, _ := rt.phpMethodDecl(o.props["__class"].(*jsObject), "__call"); k != nil {
 						ns = rt.phpStr(k.props["__name"]) + "::" + mn
 					}
@@ -3366,19 +3398,20 @@ func init() {
 				return jsHUndefined
 			}
 			ns := rt.phpNonStatic(cls, phpCase(mn, false))
-			if ns == "" {
-				return jsHUndefined
-			}
-			if phpIsObj(this) {
-				if scope, ok := u(a[5]).(*jsObject); ok && rt.phpIsA(this, rt.phpStr(scope.props["__name"])) &&
-					rt.phpIsA(scope, rt.phpStr(cls.props["__name"])) {
-					if u(a[0]) == true {
-						return a[4]
-					}
-					return jsHUndefined
-				}
+			// The frame's $this, compatible as above, is bound to a static method too:
+			// its class is then the called scope.
+			compat := false
+			if scope, ok := u(a[5]).(*jsObject); ok && phpIsObj(this) && rt.phpIsA(this, rt.phpStr(scope.props["__name"])) &&
+				rt.phpIsA(scope, rt.phpStr(cls.props["__name"])) {
+				compat = true
 			}
 			if u(a[0]) == true {
+				if compat {
+					return a[4]
+				}
+				return jsHUndefined
+			}
+			if ns == "" || compat {
 				return jsHUndefined
 			}
 			rt.phpCbFail(rt.phpStr(u(a[0])), "non-static method "+rt.phpStr(cls.props["__name"])+"::"+ns[strings.Index(ns, "::")+2:]+"() cannot be called statically")
@@ -3504,7 +3537,12 @@ func init() {
 		// js_phrefat in languages/lib/php-rt.metajs.
 		m["js_phrefat"] = func(a []uint64) uint64 {
 			i := int(rt.toNumber(u(a[1])))
-			return boolH((jsvFnMeta(u(a[0])).length>>uint(i))&1 == 1)
+			f := u(a[0])
+			// An object called as a function takes its __invoke's.
+			if _, isObj := f.(*jsObject); isObj {
+				f = rt.phpMethodOf(f, "__invoke")
+			}
+			return boolH((jsvFnMeta(f).length>>uint(i))&1 == 1)
 		}
 		// An object called as a function places its arguments for its __invoke.
 		m["js_phplace"] = func(a []uint64) uint64 {

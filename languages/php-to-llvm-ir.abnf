@@ -1741,6 +1741,20 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // $this inside a method, or undefined in a static one. A plain js_scope_get
     // would abort on the name.
     function phThis(b) { return scopeProbe(b, emitStr(b, "$this"), hUndef) }
+    // $this as the program fetches it. Only an instance method's own body is sure to
+    // have one (this_guaranteed_exists); anywhere else - a closure, a function, a
+    // static method - a fetch outside an object raises (ZEND_FETCH_THIS). Twin of
+    // phpNoThis in php-interpreter.abnf.
+    function phThisFetch(b) {
+        var t = phThis(b)
+        if (curThisSure) { return {b: b, v: t} }
+        var badB = curF.NewBlock("")
+        var okB = curF.NewBlock("")
+        b.NewCondBr(isNullishHandle(b, t), badB, okB)
+        callExt(badB, "js_phraise", [emitStr(badB, "Error"), emitStr(badB, "Using $this when not in object context")])
+        badB.NewBr(okB)
+        return {b: okB, v: t}
+    }
     // A class descriptor by name, or null when nothing of that name is declared
     // yet - an interface list must not abort on a forward reference.
     function phClsLookup(b, nameV) { return scopeProbe(b, nameV, hNull) }
@@ -1862,7 +1876,13 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     }
     makeVarRef = function(name) {
         if (name == "$this") {
-            return function(b) { return phDeref(b, callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])) }
+            return function(b) {
+                if (!curThisSure) {
+                    var tf = phThisFetch(b)
+                    return phDeref(tf.b, tf.v)
+                }
+                return phDeref(b, callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)]))
+            }
         }
         return function(b) { return readVarV(b, emitStr(b, name)) }
     }
@@ -3770,6 +3790,11 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                     var rn = s.nameT(b)
                     b = rn.b
                     var dnV = callExt(b, "js_phstr", [rn.v])
+                    // $o->$m(...): a callable bound to this receiver and that name.
+                    if (hasFcc(s.args)) {
+                        cur = boundDyn(b, curScopeV, "mcall", cur, dnV, hUndef, hUndef)
+                        continue
+                    }
                     var ed = emitMethArgs(b, cur, dnV, null, s.args)
                     b = ed.b
                     var rdm = emitMethodCall(b, cur, dnV, ed.v, null)
@@ -3790,7 +3815,14 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                         cur = rpm.v
                         continue
                     }
-                    var ea = emitMethArgs(b, cur, emitStr(b, s.name), s.name, s.args)
+                    var ea = anytype
+                    // $c->__invoke($v) is the call $c($v): a by-reference parameter of
+                    // the closure (or of the object's __invoke) takes the variable.
+                    if (phsCase(s.name, false) == "__invoke" && argsArePlain(s.args) && hasVarArg(s.args)) {
+                        ea = emitDynRefArgs(b, s.args, cur)
+                    } else {
+                        ea = emitMethArgs(b, cur, emitStr(b, s.name), s.name, s.args)
+                    }
                     b = ea.b
                     var rm = emitMethodCall(b, cur, emitStr(b, s.name), ea.v, s.name)
                     b = rm.b
@@ -4413,11 +4445,13 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         return callExt(b, "js_phscall", [clsV, nameV, thisV, argsV, lsbV])
     }
     // js_phscall's lsb argument at a call site: a self:: / parent:: / static:: call
-    // forwards the caller's late-static-binding class, any other names its own.
-    function fwdLsb(baseText) {
+    // forwards the caller's late-static-binding class - its frame's static:: - and
+    // any other names its own.
+    function fwdLsb(b, baseText) {
         if (baseText == null) { return hUndef }
         var n = lastSeg(baseText)
-        return (n == "self" || n == "parent" || n == "static") ? hTrue : hUndef
+        if (n != "self" && n != "parent" && n != "static") { return hUndef }
+        return scopeProbe(b, emitStr(b, frameClsName("static")), hTrue)
     }
     // baseText is the class as written (self, Foo), which a constant cycle names;
     // null when the base is a value.
@@ -4462,10 +4496,14 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 b = rn8.b
                 if (args != null) {
                     emitNsCheck(b, rb.v, rn8.v, null)
+                    // C::$m(...): a callable dispatching statically to that name.
+                    if (hasFcc(args)) {
+                        return {b: b, v: boundDyn(b, curScopeV, "scall", rb.v, rn8.v, phThis(b), fwdLsb(b, baseText))}
+                    }
                     var ea8 = emitMethArgs(b, rb.v, rn8.v, null, args)
                     b = ea8.b
                     var th8 = phThis(b)
-                    return {b: b, v: emitStaticCall(b, rb.v, rn8.v, th8, ea8.v, fwdLsb(baseText), null)}
+                    return {b: b, v: emitStaticCall(b, rb.v, rn8.v, th8, ea8.v, fwdLsb(b, baseText), null)}
                 }
                 if (memprop) { return {b: b, v: sGetV(b, rb.v, rn8.v, null, mode === coalIs)} }
                 return {b: b, v: callExt(b, "js_phconst", [rb.v, rn8.v, baseText == null ? hNull : emitStr(b, baseText)])}
@@ -4479,7 +4517,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 var ea = emitMethArgs(b, rb.v, emitStr(b, mem), mem, args)
                 b = ea.b
                 var thisV = phThis(b)
-                return {b: b, v: emitStaticCall(b, rb.v, emitStr(b, mem), thisV, ea.v, fwdLsb(baseText), mem)}
+                return {b: b, v: emitStaticCall(b, rb.v, emitStr(b, mem), thisV, ea.v, fwdLsb(b, baseText), mem)}
             }
             if (mem.charAt(0) == "$") {
                 return {b: b, v: sGetV(b, rb.v, emitStr(b, mem.substring(1)), mem.substring(1), mode === coalIs)}
@@ -5101,7 +5139,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var gr = globalsRawV(b, ref)
             return phDeref(gr.b, gr.v)
         }
-        if (!curThisOwn && (ref.nameT == null || ref.nameT == undefined) && ref.name == "$this") { return {b: b, v: phThis(b)} }
+        if (!curThisSure && (ref.nameT == null || ref.nameT == undefined) && ref.name == "$this") { return phThisFetch(b) }
         var rn = refNameV(b, ref)
         if (!viv) { return phDeref(rn.b, rawVarV(rn.b, rn.v)) }
         return {b: rn.b, v: rawVarV(rn.b, rn.v)}
@@ -5591,14 +5629,15 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // the receiver's class, so a named argument can only be placed when every class
     // that declares a method of that name declares the SAME parameter names. Two
     // declarations that disagree mark the name ambiguous and the call falls back to
-    // plain positional binding.
+    // plain positional binding. Method names are case-insensitive, so the key is
+    // lower-cased.
     // (php-interpreter.abnf has no such problem: it binds named arguments in the
     // CALLEE, where the parameter list is always the right one.)
     var methSigs = {}
     var methVariadic = {}
     function noteMethodSig(fn) {
         if (fn.name == undefined || fn.name == "") { return }
-        var key = "$" + fn.name
+        var key = "$" + phsCase(fn.name, false)
         if (fn.rest >= 0) { methVariadic[key] = true }
         var prev = methSigs[key]
         // Strict: null (already ambiguous) == undefined, and a third declaration
@@ -5617,7 +5656,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     }
     function methSigOf(name) {
         if (name == undefined) { return null }
-        var s3 = methSigs["$" + name]
+        var s3 = methSigs["$" + phsCase(name, false)]
         return s3 == undefined || s3 == null ? null : s3
     }
     // The argument list of a method call. Where the name's signature is not known
@@ -5629,7 +5668,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var sig = methSigOf(name)
         if (sig != null) { return emitPhArgs(b, args, sig) }
         var plain = argsArePlain(args)
-        var variadic = name == null ? dynPlaceVariadic : methVariadic["$" + name] === true
+        var variadic = name == null ? dynPlaceVariadic : methVariadic["$" + phsCase(name, false)] === true
         if (plain && !variadic) { return emitPhArgs(b, args, null) }
         var ra = plain ? emitPhArgs(b, args, null) : emitArgTmp(b, args)
         return {b: ra.b, v: callExt(ra.b, "js_phmplace", [targetV, nameV, ra.v])}
@@ -5858,8 +5897,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         else if (ext == "mcall") { res = callExt(bb, "js_phmcall", [selfV, emitStr(bb, name), f.Params[1]]) }
         else {
             // A non-static method runs on the $this of the frame that made the
-            // callable, which js_phnscheck found compatible there.
-            var fthis = needsNs(name) ? phThis(bb) : hUndef
+            // callable, which js_phnscheck found compatible there; a missing or
+            // inaccessible one may fall back to that $this's __call.
+            var fthis = phThis(bb)
             if (vis) { res = callExt(bb, "js_phscallv", [selfV, emitStr(bb, name), fthis, phListOf(bb, f.Params[1]), hUndef, fsc]) }
             else { res = callExt(bb, "js_phscall", [selfV, emitStr(bb, name), fthis, phListOf(bb, f.Params[1]), hUndef]) }
         }
@@ -6475,7 +6515,11 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // Whether the body being emitted declares $this in its own frame (a method, and
     // the try bodies inside one); a closure reads it up its scope chain.
     var curThisOwn = false
-    function emitFunc(params, bodyStmt, isMethod, isCtl, selfName) {
+    // Whether that frame is an instance method's, which always has a $this.
+    var curThisSure = false
+    // isStatic: a static method, whose frame binds no $this; the receiver a call
+    // hands over still decides static::.
+    function emitFunc(params, bodyStmt, isMethod, isCtl, selfName, isStatic) {
         funcCount++
         var idx = funcCount
         var savedTag = curFTag
@@ -6495,8 +6539,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         // no block scope, so it runs in the frame it is written in (its env).
         curScopeV = isCtl ? f.Params[0] : callExt(b, "js_scope_new", [f.Params[0]])
         var off = 0
+        var thisArg = hUndef
         if (isMethod) {
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$this"), callExt(b, "js_arg", [f.Params[1], handle(0)])])
+            thisArg = callExt(b, "js_arg", [f.Params[1], handle(0)])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$this"), isStatic === true ? hUndef : thisArg])
             off = 1
         }
         // self:: and static:: are CALL FRAME entries, not globals: 'self' is the class
@@ -6508,7 +6554,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, selfName)])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, frameClsName("self")), selfV])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, frameClsName("static")),
-                                         callExt(b, "js_phlsb", [phThis(b), selfV])])
+                                         callExt(b, "js_phlsb", [thisArg, selfV])])
         }
         for (var i = 0; i < params.length; i++) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, params[i]),
@@ -6521,11 +6567,16 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         // know its class at compile time, so its property accesses take the check.
         else if (!isCtl && cloRebind) { curSelfName = "" }
         var savedOwn = curThisOwn
-        if (!isCtl) { curThisOwn = isMethod }
+        var savedSure = curThisSure
+        if (!isCtl) {
+            curThisOwn = isMethod
+            curThisSure = isMethod && isStatic !== true
+        }
         sawYield = false
         var endB = bodyStmt(b)
         curSelfName = savedSelf
         curThisOwn = savedOwn
+        curThisSure = savedSure
         endB.NewRet(hNull)
         genClosure = sawYield
         sawYield = savedSaw
@@ -6655,6 +6706,15 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var out = ","
         for (var i = 0; i < ms.length; i++) {
             if (ms[i].st !== true) { out = out + phsCase(ms[i].name, false) + ":" + ms[i].name + "," }
+        }
+        return out
+    }
+    // A class's __mst: its static methods lower-cased, ",lc,", which js_phscall
+    // reads to run one without the caller's $this.
+    function phStaticList(ms) {
+        var out = ","
+        for (var i = 0; i < ms.length; i++) {
+            if (ms[i].st === true) { out = out + phsCase(ms[i].name, false) + "," }
         }
         return out
     }
@@ -7412,10 +7472,12 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             if (mvl != ",") { callExt(b, "js_set", [clsV, emitStr(b, "__mvis"), emitStr(b, mvl)]) }
             var nsl = nsUsed ? phNonStaticList(methods) : ","
             if (nsl != ",") { callExt(b, "js_set", [clsV, emitStr(b, "__mns"), emitStr(b, nsl)]) }
+            var stl = phStaticList(methods)
+            if (stl != ",") { callExt(b, "js_set", [clsV, emitStr(b, "__mst"), emitStr(b, stl)]) }
             var pvl = phVisList(shown, props)
             if (pvl != ",") { callExt(b, "js_set", [clsV, emitStr(b, "__pvis"), emitStr(b, pvl)]) }
             for (var k = 0; k < methods.length; k++) {
-                var idx = emitFunc(methods[k].params, methods[k].body, true, false, name)
+                var idx = emitFunc(methods[k].params, methods[k].body, true, false, name, methods[k].st === true)
                 // Stored under its declared name, its lower-cased name and every other
                 // spelling an ancestor declared (setMethod in php-interpreter.abnf).
                 callExt(b, "js_phmset", [clsV, emitStr(b, methods[k].name), withSig(b, closureV(b, idx, curScopeV), methods[k])])
@@ -7771,8 +7833,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         // (languages/lib/runtime.c) and abnf/jsrt.go call a per-language closure that
         // ANSWERS the value to throw instead of aborting. php's answer is
         // js_phmissname's: PHP's `Error: Call to undefined function zzz()` for a
-        // bareword. A variable never gets here (it is read with js_scope_own) except
-        // `$this` outside an object, which keeps the abort. The registration has to
+        // bareword. A variable never gets here: it is read with js_scope_own, and
+        // `$this` with a probe (phThisFetch). The registration has to
         // come AFTER js_phrtinit, because the Error descriptor the hook builds its
         // object from is the one handed over there.
         funcCount++
