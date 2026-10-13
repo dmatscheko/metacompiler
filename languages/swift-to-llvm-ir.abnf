@@ -156,7 +156,8 @@ IdBtChar    = "\x20"..."\x5f" | "\x61"..."\U0010ffff" ;
 :startRule(Program) ;
 :whitespace(Whitespace) ;
 
-// Top level items become statements of jsmain, emitted in source order.
+// Top level items become statements of jsmain: the declarations first, then the
+// statements in source order (swTopItems).
 Program     <~~ buildMain(takeAll()) ~~>
             = [ Hashbang ] { TopItem } ;
 TopItem     = PoundIfTop StmtSep | OpDeclTop StmtSep | FunTop StmtSep | TypeTop StmtSep
@@ -164,10 +165,13 @@ TopItem     = PoundIfTop StmtSep | OpDeclTop StmtSep | FunTop StmtSep | TypeTop 
 // An operator / precedencegroup declaration is matched BEFORE the modifier-led
 // items: `prefix` is in the modifier list (it precedes `func`), so a greedy
 // Modifiers would eat the `prefix` of `prefix operator ~~~` and leave nothing.
-OpDeclTop   = PrecGroupDecl | OperatorDecl ;
-FunTop      <~~ push(makeFunStmt(pop())) ~~> = [ Modifiers ] FunDecl ;
-TypeTop     = [ Modifiers ] ( StructDecl | ClassDecl | ActorDecl | EnumDecl ) ;
-UnsupTop    = [ Modifiers ] UnsupDecl ;
+// A top-level DECLARATION is a {decl} record, emitted ahead of every statement
+// (swTopItems): main.swift's declarations are visible to the whole file. Twin of
+// the same rules in swift-interpreter.abnf.
+OpDeclTop   <~~ swDeclWrap(takeAll()) ~~> = PrecGroupDecl | OperatorDecl ;
+FunTop      <~~ push({decl: makeFunStmt(pop())}) ~~> = [ Modifiers ] FunDecl ;
+TypeTop     <~~ swDeclWrap(takeAll()) ~~> = [ Modifiers ] ( StructDecl | ClassDecl | ActorDecl | EnumDecl ) ;
+UnsupTop    <~~ swDeclWrap(takeAll()) ~~> = [ Modifiers ] UnsupDecl ;
 TopStmt     = Statement ;
 
 // ----- #if / #elseif / #else / #endif conditional compilation -----
@@ -3363,15 +3367,22 @@ KwContinue  = "continue" KwEnd ;
     // the interpreter half runs them too. (No valid Swift reaches this: only main.swift
     // may carry top-level statements.)
     function swTopItems(items) {
+        var decls = []
         var plain = []
         var defs = []
         for (var i = 0; i < items.length; i++) {
             var it = items[i]
             if (it == null) { continue }
-            if (typeof it == "function") { plain.push(it) } else { defs.push(it.isdefer) }
+            if (typeof it == "function") { plain.push(it) }
+            else if (it.decl !== undefined) { decls.push(it.decl) }
+            else { defs.push(it.isdefer) }
         }
         for (var j = defs.length - 1; j >= 0; j--) { plain.push(defs[j]) }
-        return plain
+        for (var k = 0; k < plain.length; k++) { decls.push(plain[k]) }
+        return decls
+    }
+    function swDeclWrap(xs) {
+        for (var i = 0; i < xs.length; i++) { if (xs[i] != null) { push({decl: xs[i]}) } }
     }
     function swTopSeq(items) { return makeSeq(swTopItems(items)) }
     // Both overridden by ASSIGNMENT (see the include-override trap in the gotchas doc).

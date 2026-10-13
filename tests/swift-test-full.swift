@@ -4679,6 +4679,19 @@ func s106() {
         && (rs[0] + .nan).isNaN && rs[0] < .greatestFiniteMagnitude)
 }
 
+// ===== SECTION 107: top-level code above the declarations it uses =====
+// main.swift's functions and types are visible to the whole file: a top-level
+// statement may call a function, construct a type and use an extension member
+// that are declared further down. Every value read off swiftc 6.1.2.
+let early107 = late107(3)
+let made107 = Late107(v: 4).twice107()
+func s107() {
+    check("107a", early107 == 30 && made107 == 8)
+}
+func late107(_ x: Int) -> Int { x * 10 }
+struct Late107 { var v: Int }
+extension Late107 { func twice107() -> Int { v * 2 } }
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -4786,6 +4799,7 @@ func main() {
     s104() // SECTION-CALL 104
     s105() // SECTION-CALL 105
     s106() // SECTION-CALL 106
+    s107() // SECTION-CALL 107
     print("full: \(checks) checks, \(fails) failures")
 }
 

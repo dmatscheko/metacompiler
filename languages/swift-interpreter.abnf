@@ -143,21 +143,22 @@ IdBtChar    = "\x20"..."\x5f" | "\x61"..."\U0010ffff" ;
 :startRule(Program) ;
 :whitespace(Whitespace) ;
 
-// Top level items run in source order during the tree walk: functions and
-// types register themselves; a bare statement's thunk runs immediately.
-// Every top level item pushes a thunk (or nothing); TopExec runs the thunks it
-// finds, in order. The indirection is what lets a #if branch collect its items
-// WITHOUT running them - see PoundIfTop, which splices the live branch's thunks
-// into the enclosing item list.
+// Every top level item pushes a thunk (or nothing), a declaration a {decl}
+// record. TopExec runs a declaration as soon as it is walked and queues the
+// statements, which the Program tag runs in source order once the whole file is
+// walked - so every declaration is registered before the first statement runs.
+// The indirection is what lets a #if branch collect its items WITHOUT running
+// them - see PoundIfTop, which splices the live branch's thunks into the
+// enclosing item list.
 //
 // swRunTop, not the loop written out here, because an error NOBODY CAUGHT has to
 // be reported as a diagnostic rather than allowed to escape into the engine - see
 // its comment in the start script below.
-// The Program tag runs the TOP-LEVEL defers, once, after the last TopExec: each
-// TopExec executes ONE top-level statement as it is parsed, so a `defer` marker
-// has to be parked in a script-side list and drained here. swiftc runs them at
-// the end of the top level, LIFO, and only on the normal path - see swRunTop.
-Program     <~~ swRunTopDefers() ~~>
+// The Program tag then runs the TOP-LEVEL defers, once: a `defer` marker is
+// parked in a script-side list as its statement runs and drained here. swiftc
+// runs them at the end of the top level, LIFO, and only on the normal path - see
+// swRunTop.
+Program     <~~ swRunQueued(); swRunTopDefers() ~~>
             = [ Hashbang ] { TopExec } ;
 TopExec     <~~ swRunTop(takeAll()) ~~>
             = TopItem ;
@@ -166,10 +167,14 @@ TopItem     = PoundIfTop StmtSep | OpDeclTop StmtSep | FunTop StmtSep | TypeTop 
 // An operator / precedencegroup declaration is matched BEFORE the modifier-led
 // items: `prefix` is in the modifier list (it precedes `func`), so a greedy
 // Modifiers would eat the `prefix` of `prefix operator ~~~` and leave nothing.
-OpDeclTop   = PrecGroupDecl | OperatorDecl ;
-FunTop      <~~ push(makeRegFun(pop())) ~~> = [ Modifiers ] FunDecl ;
-TypeTop     = [ Modifiers ] ( StructDecl | ClassDecl | ActorDecl | EnumDecl ) ;
-UnsupTop    = [ Modifiers ] UnsupDecl ;
+// A top-level DECLARATION is a {decl} record, run as soon as it is walked, while
+// the statements around it wait for the end of the file (swRunTop / swRunQueued):
+// main.swift's declarations are visible to the whole file, so `print(f(2))` above
+// `func f` calls it.
+OpDeclTop   <~~ swDeclWrap(takeAll()) ~~> = PrecGroupDecl | OperatorDecl ;
+FunTop      <~~ push({decl: makeRegFun(pop())}) ~~> = [ Modifiers ] FunDecl ;
+TypeTop     <~~ swDeclWrap(takeAll()) ~~> = [ Modifiers ] ( StructDecl | ClassDecl | ActorDecl | EnumDecl ) ;
+UnsupTop    <~~ swDeclWrap(takeAll()) ~~> = [ Modifiers ] UnsupDecl ;
 TopStmt     = Statement ;
 
 // ----- #if / #elseif / #else / #endif conditional compilation -----
@@ -5836,7 +5841,29 @@ KwContinue  = "continue" KwEnd ;
             if (typeof it == "function") { it() } else { swTopDefers.push(it.isdefer) }
         }
     }
+    function swDeclWrap(xs) {
+        for (var i = 0; i < xs.length; i++) { if (xs[i] != null) { push({decl: xs[i]}) } }
+    }
+    // One top-level item's thunks: its declarations run now, everything else is
+    // queued, in source order, for swRunQueued at the end of the file. Twin of
+    // swTopItems in swift-to-llvm-ir.abnf, which emits the declarations first.
+    var swTopQueue = []
     function swRunTop(xs) {
+        var decls = []
+        var rest = []
+        for (var i = 0; i < xs.length; i++) {
+            var it = xs[i]
+            if (it != null && typeof it == "object" && it.decl !== undefined) { decls.push(it.decl) } else { rest.push(it) }
+        }
+        swRunItems(decls)
+        if (rest.length > 0) { swTopQueue.push(rest) }
+    }
+    function swRunQueued() {
+        var q = swTopQueue
+        swTopQueue = []
+        for (var i = 0; i < q.length; i++) { swRunItems(q[i]) }
+    }
+    function swRunItems(xs) {
         // The call arguments parsed so far get their parameters' types (swDsFlush),
         // which an existential one passes to the literals in them (swLitCells).
         swDsFlush()
