@@ -138,7 +138,7 @@ element as an expression pattern) does not parse in either half (range bounds do
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-600 php compiler: arrays passed by value are not copied; array copies drop references; spread of references · P1 · PHP · OPEN [V spec-only]
+### T-600 php compiler: arrays passed by value are not copied; array copies drop references; spread of references · P1 · PHP · IN PROGRESS (PHP worker, round 3) [V spec-only]
 `function h($xs){ $xs[0]=5; } $a=[1]; h($a); echo $a[0];` → llvm.Run and native `5`, interp `1` (PHP 1: arrays are values,
 copy-on-write). All engines: arrCopy / phpArrCopy dereference every cell, so `$n=1; $a[0]=&$n; $b=$a; $b[0]=7; echo $n;` → 1
 (PHP 7: a reference with refcount > 1 survives zend_array_dup; a refcount-1 one, e.g. after unset($v) of a foreach-by-ref,
