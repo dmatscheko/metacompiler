@@ -1506,7 +1506,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // file cannot call a floor extern by name, so the check cannot wrap js_giarith; it
     // is emitted as a PRE-CHECK, the mirror image of emitF32Fix's post-fix. js_gidivz
     // panics on a zero integer divisor and is the identity otherwise, and a FLOAT
-    // divisor is passed over (a float64 divided by zero is an infinity in Go).
+    // operand on either side is passed over (a float64 divided by zero is an
+    // infinity in Go, and `f / 0` divides by the constant converted to float64).
     //
     // IT IS GATED ON usesRecover on purpose: js_gidivz is a LAYER-2 call in front of
     // every division, +57% on tests/bench/mod.go. A program that never writes
@@ -1517,17 +1518,17 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // (makeCall), long before any emit thunk runs.
     //
     // Emitted for '/' '%' '/=' '%=' only, so no other operator pays anything either.
-    function emitDivZ(b, base, r) {
+    function emitDivZ(b, base, l, r) {
         if (!usesRecover) { return }
         if (base != "/" && base != "%") { return }
-        callExt(b, "js_gidivz", [r])
+        callExt(b, "js_gidivz", [l, r])
     }
     function emitBinNum(b, op, l, r) {
         var base = giBase[op]
         if (typeof base == "string") {
             if (base == "+") { return emitF32Fix(b, "+", callExt(b, "js_giadd", [l, r]), l, r) }
             if (giShift[op] == 1) { r = callExt(b, "js_gival", [r]) }
-            emitDivZ(b, base, r)
+            emitDivZ(b, base, l, r)
             return emitF32Fix(b, base, callExt(b, "js_giarith", [emitStr(b, base), l, r]), l, r)
         }
         var rel = giRel[op]

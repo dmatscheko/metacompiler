@@ -4310,6 +4310,13 @@ func s82() {
 	u8 += 254
 	_ = 1<<63 - 1
 	check("cke3", fmt.Sprint(a, b, <-ch, u8) == "-128 65535 255 255")
+	// A float divided by an integer constant zero is an infinity, also in a program
+	// that recovers from an integer divide by zero (this one does): the constant
+	// converts to float64.
+	f := 2.5
+	f /= 0
+	g := []float64{1.5}[0]
+	check("dvz1", fmt.Sprint(f, g/0, -g/0) == "+Inf +Inf -Inf")
 }
 
 func main() {

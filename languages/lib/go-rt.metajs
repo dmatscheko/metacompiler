@@ -3108,11 +3108,12 @@ function js_gisetsl(h, iv, v) {
 // raises it with die() - a hard abort no js_gotry can catch. This file cannot call
 // the floor's js_giarith by name to wrap it, so the emitter emits this as a
 // PRE-CHECK instead (emitDivZ in languages/go-to-llvm-ir.abnf), the mirror image of
-// js_gf32fix's post-fix. A FLOAT divisor is passed over: a float64 divided by zero
-// is an infinity in Go, not a panic. The twin is js_gidivz in abnf/jsrtgolang.go
-// and the interpreter's own check is gIntDivZ in languages/go-interpreter.abnf.
-function js_gidivz(r) {
-    if (floIs(r)) { return undefined }
+// js_gf32fix's post-fix. A FLOAT operand on either side is passed over: a float64
+// divided by zero is an infinity in Go, not a panic. The twin is js_gidivz in
+// abnf/jsrtgolang.go and the interpreter's own check is gIntDivZ in
+// languages/go-interpreter.abnf.
+function js_gidivz(l, r) {
+    if (floIs(l) || floIs(r)) { return undefined }
     if (goNum(r) === 0) { goRTPanic("integer divide by zero") }
     return undefined
 }

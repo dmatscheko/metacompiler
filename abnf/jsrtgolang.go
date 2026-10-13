@@ -2468,15 +2468,16 @@ func init() {
 		// si_arith raises it with die(), which no js_gotry can catch. A layer-2 file
 		// cannot call a floor extern by name, so the emitter (emitDivZ in
 		// languages/go-to-llvm-ir.abnf) emits this as a PRE-CHECK instead. A float
-		// divisor is passed over: a float64 divided by zero is an infinity in Go,
-		// not a panic. The twin is js_gidivz in languages/lib/go-rt.metajs.
+		// operand on either side is passed over: a float64 divided by zero is an
+		// infinity in Go, not a panic. The twin is js_gidivz in
+		// languages/lib/go-rt.metajs.
 		// The floor's switch from dying to throwing on an integer divide by zero
 		// (js_gidivthrow in languages/lib/runtime.c). js_giarith here already
 		// raises go's run-time panic, so there is nothing to switch.
 		m["js_gidivthrow"] = func(a []uint64) uint64 { return w(jsUndef) }
 		m["js_gidivz"] = func(a []uint64) uint64 {
-			v := u(a[0])
-			if jvmIsFlo(v) {
+			v := u(a[1])
+			if jvmIsFlo(u(a[0])) || jvmIsFlo(v) {
 				return 0
 			}
 			if rt.toNumber(v) == 0 {
