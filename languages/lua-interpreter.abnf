@@ -40,10 +40,8 @@ order and printed text match lua; what differs is that any OTHER side effect
 before the yield a coroutine is parked at - a write to an upvalue, a global or a
 table it did not create - happens once per resume instead of once.
 
-Not in the subset: the standard library beyond the base library built below
-(print, exit and the rest without the loading and collector functions), the
-table library, the string and math tables (string.pack/unpack and math.random
-excepted) and coroutine.
+Not in the subset: the loading and collector functions of the base library
+(load, dofile, collectgarbage), os, string.pack/unpack and the rest of io.
 
 There is no main(): the file simply runs top to bottom. Self checking programs count
 their failures and end with exit(fails). The same language with the same semantics is
@@ -3077,6 +3075,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (!isInt(a) && (d - d !== 0 || Math.floor(d) !== d || luaI64(d) === undefined)) { luaArgErr(qual, n, "number has no integer representation") }
         return d
     }
+    // An integer argument as its exact 64 bit pair (luaCheckInt's double would
+    // round one past 2^53).
+    function luaIntPairArg(qual, n, v, nargs) {
+        luaCheckInt(qual, n, v, nargs)
+        var a = anytype
+        a = toNumV(v)
+        if (isInt(a)) { return szPair(a) }
+        return szPair(luaI64(numOf(a)))
+    }
     function luaOptInt(qual, n, v, nargs, dflt) {
         if (v === undefined || v === null) { return dflt }
         return luaCheckInt(qual, n, v, nargs)
@@ -3175,6 +3182,43 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var n = numOf(a)
             if (n - n !== 0 || Math.floor(n) !== n) { return undefined }
             return luaI64(n)
+        },
+        // math.random / math.randomseed, lmathlib.c's, over lib/lua-strlib.js's
+        // xoshiro256** (lr*). Twins: js_lurandom / js_lurandomseed in
+        // abnf/jsrtlua.go and lib/lua-rt.metajs.
+        random: function(m, n) {
+            var nargs = arguments.length
+            var rv = lrNext()
+            if (nargs === 0) { return mkFlt(lrFloat(rv)) }
+            var low = i64Make(0, 1)
+            var up = anytype
+            if (nargs === 1) {
+                up = luaIntPairArg("math.random", 1, m, nargs)
+                if (i64IsZero(up)) { return szNorm(rv, 64, false) }
+            } else if (nargs === 2) {
+                low = luaIntPairArg("math.random", 1, m, nargs)
+                up = luaIntPairArg("math.random", 2, n, nargs)
+            } else {
+                fail("wrong number of arguments")
+            }
+            if (i64CmpS(low, up) > 0) { luaArgErr("math.random", 1, "interval is empty") }
+            return szNorm(i64Add(lrProject(rv, i64Sub(up, low)), low), 64, false)
+        },
+        // Without arguments lua seeds from the clock; there is none to read here,
+        // so the seed is the next two draws.
+        randomseed: function(m, n) {
+            var nargs = arguments.length
+            var n1 = anytype
+            var n2 = anytype
+            if (nargs === 0) {
+                n1 = lrNext()
+                n2 = lrNext()
+            } else {
+                n1 = luaIntPairArg("math.randomseed", 1, m, nargs)
+                n2 = (n === undefined || n === null) ? i64Make(0, 0) : luaIntPairArg("math.randomseed", 2, n, nargs)
+            }
+            lrSeed(n1, n2)
+            return mkMulti([szNorm(n1, 64, false), szNorm(n2, 64, false)])
         },
         // ----- the float-only half of the library -----
         // Every one of these answers a FLOAT whatever its argument's subtype was

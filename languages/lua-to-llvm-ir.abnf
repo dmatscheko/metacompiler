@@ -3129,6 +3129,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b = libSet(b, mt, "log", emitLibFunc(libArgsExt("js_lulog")))
             b = libSet(b, mt, "modf", emitLibFunc(libArgsExt("js_lumodf")))
             b = libSet(b, mt, "ult", emitLibFunc(libArgsExt("js_luult")))
+            b = libSet(b, mt, "random", emitLibFunc(libArgsExt("js_lurandom")))
+            b = libSet(b, mt, "randomseed", emitLibFunc(libArgsExt("js_lurandomseed")))
             // math.pi and math.huge are FLOAT VALUES, not functions. The dialect has
             // no exponent literal, so the infinity is built by division (manual
             // chapter 4); js_luflo boxes a raw double as a Lua float.

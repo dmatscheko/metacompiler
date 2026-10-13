@@ -2112,6 +2112,31 @@ function s48()
     check("u12", n, 4)
 end
 
+-- ===== SECTION 49: math.random =====
+-- lua 5.4+'s xoshiro256** is a specified algorithm, so a seeded sequence is
+-- reproducible: these are lua 5.5's own draws, with the 64 bit edges, the float
+-- form and the argument errors.
+function s49()
+    local function try(f, ...)
+        local ok, e = pcall(f, ...)
+        if ok then return "ok" end
+        return (tostring(e):gsub("^[^:]*:%d+: ", ""))
+    end
+    local s1, s2 = math.randomseed(42)
+    check("rnd1", s1 .. " " .. s2 .. "|" .. math.random(1, 100) .. " " .. math.random(1, 100) .. " " .. math.random() .. " " .. math.random(10) .. " " .. math.random(0) .. " " .. math.random(3, 7),
+        "42 0|50 76 0.79358935263827257 6 177101407732369983 4")
+    math.randomseed(7, 3)
+    check("rnd2", math.random(1, 6) .. " " .. math.random(1, 1000000), "4 520415")
+    math.randomseed(-1)
+    check("rnd3", math.random(math.mininteger, math.maxinteger) .. " " .. math.random(1 << 40), "2691159215327871793 171508919368")
+    math.randomseed(123456789, 987654321)
+    local s = 0
+    for i = 1, 1000 do s = s + math.random(1, 1000) end
+    check("rnd4", s .. " " .. math.type(math.random()) .. " " .. math.type(math.random(3)), "496943 float integer")
+    check("rnd5", try(math.random, 2, 1) .. "|" .. try(math.random, 1, 2, 3) .. "|" .. try(math.randomseed, 1.5),
+        "bad argument #1 to 'math.random' (interval is empty)|wrong number of arguments|bad argument #1 to 'math.randomseed' (number has no integer representation)")
+end
+
 s25() -- SECTION-CALL 25
 s26() -- SECTION-CALL 26
 s27() -- SECTION-CALL 27
@@ -2136,5 +2161,6 @@ s45() -- SECTION-CALL 45
 s46() -- SECTION-CALL 46
 s47() -- SECTION-CALL 47
 s48() -- SECTION-CALL 48
+s49() -- SECTION-CALL 49
 print("full: " .. checks .. " checks, " .. failures .. " failures")
 exit(failures)

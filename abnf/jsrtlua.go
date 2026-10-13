@@ -41,6 +41,7 @@ package abnf
 import (
 	"fmt"
 	"math"
+	"math/bits"
 	"strconv"
 	"strings"
 )
@@ -1322,5 +1323,96 @@ func init() {
 		}
 		m["js_lumaxint"] = func(a []uint64) uint64 { return w(giNorm(math.MaxInt64, 64, false)) }
 		m["js_luminint"] = func(a []uint64) uint64 { return w(giNorm(math.MinInt64, 64, false)) }
+		// math.random / math.randomseed, lmathlib.c's. Twins of the math table's
+		// random / randomseed in lua-interpreter.abnf and lib/lua-rt.metajs.
+		intArg := func(fn string, n int, args []interface{}) uint64 {
+			rt.luCheckInt(fn, n, args)
+			v, _ := luToNum(args[n-1])
+			return uint64(luIntOf(v))
+		}
+		m["js_lurandom"] = func(a []uint64) uint64 {
+			args := argsOf(a[0])
+			rv := luRandNext()
+			low, up := uint64(1), uint64(0)
+			switch len(args) {
+			case 0:
+				return w(luMkFlo(float64(rv>>11) / 9007199254740992))
+			case 1:
+				up = intArg("math.random", 1, args)
+				if up == 0 {
+					return w(giNorm(int64(rv), 64, false))
+				}
+			case 2:
+				low = intArg("math.random", 1, args)
+				up = intArg("math.random", 2, args)
+			default:
+				rt.luFail("wrong number of arguments")
+			}
+			if int64(low) > int64(up) {
+				rt.luArgErr("math.random", 1, "interval is empty")
+			}
+			return w(giNorm(int64(luRandProject(rv, up-low)+low), 64, false))
+		}
+		// Without arguments lua seeds from the clock; there is none to read
+		// here, so the seed is the next two draws.
+		m["js_lurandomseed"] = func(a []uint64) uint64 {
+			args := argsOf(a[0])
+			var n1, n2 uint64
+			if len(args) == 0 {
+				n1, n2 = luRandNext(), luRandNext()
+			} else {
+				n1 = intArg("math.randomseed", 1, args)
+				if !luIsNil(luArgAt(args, 2)) {
+					n2 = intArg("math.randomseed", 2, args)
+				}
+			}
+			luRandSeed(n1, n2)
+			return w(luMk([]interface{}{giNorm(int64(n1), 64, false), giNorm(int64(n2), 64, false)}))
+		}
 	})
+}
+
+// luRand is math.random's xoshiro256** state (lmathlib.c), seeded at the first
+// draw when the program has not seeded it. One compile runs one program, so a
+// package-level variable is per program. Twin of lrState in
+// languages/lib/lua-strlib.js.
+var luRand []uint64
+
+func luRandNext() uint64 {
+	if luRand == nil {
+		luRandSeed(0, 0)
+	}
+	s := luRand
+	res := bits.RotateLeft64(s[1]*5, 7) * 9
+	t := s[1] << 17
+	s[2] ^= s[0]
+	s[3] ^= s[1]
+	s[1] ^= s[2]
+	s[0] ^= s[3]
+	s[2] ^= t
+	s[3] = bits.RotateLeft64(s[3], 45)
+	return res
+}
+
+// luRandSeed is setseed: the two seed words, then 16 draws discarded.
+func luRandSeed(n1, n2 uint64) {
+	luRand = []uint64{n1, 0xff, n2, 0}
+	for i := 0; i < 16; i++ {
+		luRandNext()
+	}
+}
+
+// luRandProject is project: a draw into [0, n], masked to the smallest 2^b - 1
+// not below n and drawn again while it falls above n.
+func luRandProject(ran, n uint64) uint64 {
+	if n&(n+1) == 0 {
+		return ran & n
+	}
+	lim := n
+	for sh := uint(1); sh <= 32; sh *= 2 {
+		lim |= lim >> sh
+	}
+	for ran &= lim; ran > n; ran = luRandNext() & lim {
+	}
+	return ran
 }

@@ -1,6 +1,8 @@
 // lua-strlib.js -- Lua's pattern matching and the byte-level string library:
 // string.find, match, gmatch, gsub, byte, reverse, sub, rep, upper, lower and
-// format, as lstrlib.c (Lua 5.5) does them. Lua patterns are NOT regular expressions: no alternation, a
+// format, as lstrlib.c (Lua 5.5) does them; at the end the utf8 library's core
+// (lutf8lib.c) and math.random's generator (lmathlib.c), which the same two
+// includers share. Lua patterns are NOT regular expressions: no alternation, a
 // quantifier applies to one character class only, and %b, %f and back-references
 // (%1) exist instead. The names below follow lstrlib.c.
 //
@@ -991,4 +993,48 @@ function lu8Next(s, i, strict) {
     var d = lu8Decode(s, p, strict)
     if (d === undefined || lu8IsCont(s, d.n)) { lsFail("invalid UTF-8 code") }
     return [p + 1, d.c]
+}
+
+// ----- math.random's generator (lmathlib.c): xoshiro256** -----
+// On the exact 64 bit {h, l} pairs both includers have (lib/int64.js in the
+// interpreter, its copy in layer 2). lrState is the four state words, empty
+// until the first seed. Twin of luRand in abnf/jsrtlua.go.
+var lrState = []
+function lrRotl(x, n) { return i64Or(i64Shl(x, n), i64ShrU(x, 64 - n)) }
+function lrNext() {
+    if (lrState.length === 0) { lrSeed(i64Make(0, 0), i64Make(0, 0)) }
+    var s = lrState
+    var res = i64Mul(lrRotl(i64Mul(s[1], i64Make(0, 5)), 7), i64Make(0, 9))
+    var t = i64Shl(s[1], 17)
+    s[2] = i64Xor(s[2], s[0])
+    s[3] = i64Xor(s[3], s[1])
+    s[1] = i64Xor(s[1], s[2])
+    s[0] = i64Xor(s[0], s[3])
+    s[2] = i64Xor(s[2], t)
+    s[3] = lrRotl(s[3], 45)
+    return res
+}
+// setseed: the two seed words, then 16 draws discarded to spread them.
+function lrSeed(n1, n2) {
+    lrState = [n1, i64Make(0, 255), n2, i64Make(0, 0)]
+    for (var i = 0; i < 16; i++) { lrNext() }
+}
+// A float in [0, 1) from a draw's high 53 bits.
+function lrFloat(rv) {
+    var x = i64ShrU(rv, 11)
+    return (x.h * 4294967296 + x.l) / 9007199254740992
+}
+// project: a draw into [0, n] (unsigned): masked to the smallest 2^b - 1 not
+// below n, and drawn again while it falls above n.
+function lrProject(ran, n) {
+    if (i64IsZero(i64And(n, i64Add(n, i64Make(0, 1))))) { return i64And(ran, n) }
+    var lim = n
+    var sh = 1
+    while (sh <= 32) {
+        lim = i64Or(lim, i64ShrU(lim, sh))
+        sh = sh * 2
+    }
+    var r = i64And(ran, lim)
+    while (i64CmpU(r, n) > 0) { r = i64And(lrNext(), lim) }
+    return r
 }

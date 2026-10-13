@@ -1290,6 +1290,45 @@ function js_luult(args) {
     luCheckInt("math.ult", 2, args)
     return i64CmpU(luIntPair(luToNum(args[0])), luIntPair(luToNum(args[1]))) < 0
 }
+// math.random / math.randomseed, lmathlib.c's, over lib/lua-strlib.js's
+// xoshiro256** (lr*). Twins of js_lurandom / js_lurandomseed in abnf/jsrtlua.go.
+function luIntPairArg(fn, n, args) {
+    luCheckInt(fn, n, args)
+    return luIntPair(luToNum(args[n - 1]))
+}
+function js_lurandom(args) {
+    var rv = lrNext()
+    if (args.length === 0) { return luMkFlo(lrFloat(rv)) }
+    var low = i64Make(0, 1)
+    var up = i64Make(0, 0)
+    if (args.length === 1) {
+        up = luIntPairArg("math.random", 1, args)
+        if (i64IsZero(up)) { return luNorm(rv) }
+    } else if (args.length === 2) {
+        low = luIntPairArg("math.random", 1, args)
+        up = luIntPairArg("math.random", 2, args)
+    } else {
+        luFail("wrong number of arguments")
+    }
+    if (i64CmpS(low, up) > 0) { luArgErr("math.random", 1, "interval is empty") }
+    return luNorm(i64Add(lrProject(rv, i64Sub(up, low)), low))
+}
+// Without arguments lua seeds from the clock; there is none to read here, so the
+// seed is the next two draws.
+function js_lurandomseed(args) {
+    var n1 = i64Make(0, 0)
+    var n2 = i64Make(0, 0)
+    if (args.length === 0) {
+        n1 = lrNext()
+        n2 = lrNext()
+    } else {
+        n1 = luIntPairArg("math.randomseed", 1, args)
+        var a2 = luArgAt(args, 2)
+        if (a2 !== undefined && a2 !== null) { n2 = luIntPairArg("math.randomseed", 2, args) }
+    }
+    lrSeed(n1, n2)
+    return luMk([luNorm(n1), luNorm(n2)])
+}
 // An integer-valued number as the exact 64 bit pair (3.0 is 3).
 function luIntPair(v) {
     if (luIsInt(v)) { return luPair(v) }
