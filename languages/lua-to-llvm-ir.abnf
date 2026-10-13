@@ -209,8 +209,8 @@ Local       <~~ push(makeLocal(takeAll())) ~~>
 LocalVals   = Expression <~~ push({ltext: up.in}) ~~> { "," Expression <~~ push({ltext: up.in}) ~~> } ;
 LocalName   <~~ push({lname: up.in}) ~~>
             = Id ;
-// Lua 5.4 local attribute: local x <const> = 1 / local h <close> = r. Accepted and
-// ignored (the subset enforces neither const-ness nor to-be-closed semantics).
+// Lua 5.4 local attribute: local x <const> = 1 / local h <close> = r. <close> makes
+// the local to-be-closed (lua_tbcpush); <const> is not enforced.
 Attrib      <~~ push({lattr: up.in}) ~~> = "<" Id ">" ;
 
 // function name(...) end, function tbl.field(...) end, and the method-definition sugar
@@ -231,7 +231,7 @@ VarargPar   <~~ push("...") ~~>
 // Twin of Return in lua-interpreter.abnf; see there.
 Return      <~~ push(makeReturn(takeAll(), up.in)) ~~>
             = KwReturn [ NotEnders ExprList ] ;
-Break       <~~ push(makeBreak()) ~~>
+Break       <~~ push(luaMakeBreak()) ~~>
             = KwBreak ;
 
 // goto Name jumps to a matching ::Name:: label (Lua 5.2+), backward as well as forward
@@ -860,11 +860,120 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                       lua_tail: 2, lua_shift: 3, lua_strall: 1, lua_tramp: 1,
                       lua_num: 1, lua_isnum: 1, lua_isint: 1, lua_mkflt: 1, lua_res: 3,
                       lua_arith: 3, lua_eq: 2, lua_cmp: 3, lua_cmpv: 1, lua_str: 1,
-                      lua_argerr: 3, lua_argmsg: 2, lua_needany: 3, lua_opmsg: 2}
+                      lua_argerr: 3, lua_argmsg: 2, lua_needany: 3, lua_opmsg: 2,
+                      lua_tbcpush: 2, lua_tbccall: 2, lua_tbcclose: 1, lua_tbcunwind: 2, lua_coshut: 1}
     // Inside a helper the tested value is already a real boolean, so the plain host test
     // is enough - Lua's own truthiness (the `truthy` override below) would recurse.
     function rawTruthy(b, v) { return b.NewICmp(llvm.enum.IPredNE, callExt(b, "js_truthy", [v]), handle(0)) }
     function luaFnBody(name, b, ps) {
+        if (name == "lua_tbcpush") {
+            // local x <close> = v (p0, named p1): nil and false close nothing, a value
+            // without a __close is lua's error, anything else goes on lua.tbc.
+            var nilB = curF.NewBlock("")
+            var valB = curF.NewBlock("")
+            var mtB = curF.NewBlock("")
+            var badB = curF.NewBlock("")
+            var pushB = curF.NewBlock("")
+            var isNil = rawTruthy(b, callExt(b, "js_seq", [ps[0], hUndef]))
+            var isFalse = rawTruthy(b, callExt(b, "js_seq", [ps[0], hFalse]))
+            b.NewCondBr(b.NewOr(isNil, isFalse), nilB, valB)
+            nilB.NewRet(hUndef)
+            var fV = callExt(valB, "js_get", [ps[0], emitStr(valB, "__f")])
+            valB.NewCondBr(rawTruthy(valB, callExt(valB, "js_seq", [callExt(valB, "js_typeof", [fV]), emitStr(valB, "object")])), mtB, badB)
+            mtB.NewCondBr(rawTruthy(mtB, callExt(mtB, "js_seq", [callExt(mtB, "js_get", [fV, emitStr(mtB, luaNameKey("__close"))]), hUndef])), badB, pushB)
+            callLua(badB, "lua_raise", [callExt(badB, "js_add", [callExt(badB, "js_add", [emitStr(badB, "variable '"), ps[1]]),
+                emitStr(badB, "' got a non-closable value")])])
+            badB.NewRet(hUndef)
+            var st = pushB.NewLoad(i64, gLuaTbc)
+            var n = callExt(pushB, "js_get", [st, emitStr(pushB, "n")])
+            callExt(pushB, "js_set", [st, n, ps[0]])
+            callExt(pushB, "js_set", [st, emitStr(pushB, "n"), callExt(pushB, "js_add", [n, emitNum(pushB, 1)])])
+            pushB.NewRet(hUndef)
+            return
+        }
+        if (name == "lua_tbccall") {
+            // Close p0 with the error object p1: its __close, looked up again now.
+            var hasB = curF.NewBlock("")
+            var noB = curF.NewBlock("")
+            var fV2 = callExt(b, "js_get", [ps[0], emitStr(b, "__f")])
+            var objB = curF.NewBlock("")
+            b.NewCondBr(rawTruthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [fV2]), emitStr(b, "object")])), objB, noB)
+            var h = callExt(objB, "js_get", [fV2, emitStr(objB, luaNameKey("__close"))])
+            objB.NewCondBr(rawTruthy(objB, callExt(objB, "js_seq", [h, hUndef])), noB, hasB)
+            callLua(noB, "lua_raise", [emitStr(noB, "attempt to call a nil value (metamethod 'close')")])
+            noB.NewRet(hUndef)
+            var cargs = callExt(hasB, "js_arr_new", [])
+            callExt(hasB, "js_arr_push", [cargs, ps[0]])
+            callExt(hasB, "js_arr_push", [cargs, ps[1]])
+            hasB.NewStore(handle(0), gLuaCallee)
+            callExt(hasB, "js_call", [h, hUndef, cargs])
+            hasB.NewRet(hUndef)
+            return
+        }
+        if (name == "lua_tbcclose" || name == "lua_tbcunwind") {
+            // Close lua.tbc down to the depth p0. lua_tbcclose is a normal exit: an
+            // error in a __close raises from here, and what is left is closed by that
+            // error's unwinding. lua_tbcunwind closes while the error p1 unwinds; an
+            // error in a __close replaces it, and the answer is the final one.
+            var unwind = name == "lua_tbcunwind"
+            var errP = b.NewAlloca(i64)
+            b.NewStore(unwind ? ps[1] : hUndef, errP)
+            // A raise out of a __close skips the restores of the frames it leaves.
+            var pos0 = b.NewLoad(i64, gLuaPos)
+            var csp0 = b.NewLoad(i64, gLuaCsp)
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var doneB = curF.NewBlock("")
+            b.NewBr(headB)
+            var st2 = headB.NewLoad(i64, gLuaTbc)
+            var n2 = callExt(headB, "js_get", [st2, emitStr(headB, "n")])
+            headB.NewCondBr(rawTruthy(headB, callExt(headB, "js_gt", [n2, ps[0]])), bodyB, doneB)
+            var top = callExt(bodyB, "js_sub", [n2, emitNum(bodyB, 1)])
+            var v = callExt(bodyB, "js_get", [st2, top])
+            callExt(bodyB, "js_set", [st2, top, hUndef])
+            callExt(bodyB, "js_set", [st2, emitStr(bodyB, "n"), top])
+            if (unwind) {
+                var sc = callExt(bodyB, "js_scope_new", [hUndef])
+                callExt(bodyB, "js_scope_decl", [sc, emitStr(bodyB, "v"), v])
+                callExt(bodyB, "js_scope_decl", [sc, emitStr(bodyB, "e"), bodyB.NewLoad(i64, errP)])
+                var r = callExt(bodyB, "js_try", [callExt(bodyB, "js_closure", [handle(emitLibFunc(libTbcTry)), sc]),
+                                                  callExt(bodyB, "js_closure", [handle(emitLibFunc(libTbcFail)), sc]), hUndef])
+                var keepB = curF.NewBlock("")
+                var newB = curF.NewBlock("")
+                bodyB.NewCondBr(rawTruthy(bodyB, callExt(bodyB, "js_get", [r, emitNum(bodyB, 0)])), keepB, newB)
+                newB.NewStore(callExt(newB, "js_get", [r, emitNum(newB, 1)]), errP)
+                newB.NewStore(pos0, gLuaPos)
+                newB.NewStore(csp0, gLuaCsp)
+                newB.NewStore(handle(0), gLuaTail)
+                newB.NewBr(headB)
+                keepB.NewBr(headB)
+            } else {
+                callLua(bodyB, "lua_tbccall", [v, hUndef])
+                bodyB.NewBr(headB)
+            }
+            doneB.NewRet(doneB.NewLoad(i64, errP))
+            return
+        }
+        if (name == "lua_coshut") {
+            // Close the pending values of the coroutine p0 (suspended, or dead of the
+            // error __luerv) on the caller's side, mark it dead, and answer the error
+            // that leaves it, undefined for none. Twin of luaCoShut in
+            // lua-interpreter.abnf.
+            var ct = callExt(b, "js_get", [ps[0], emitStr(b, "__lutbc")])
+            var ev0 = callExt(b, "js_get", [ps[0], emitStr(b, "__luerv")])
+            callExt(b, "js_set", [ps[0], emitStr(b, "__lust"), emitStr(b, "dead")])
+            callExt(b, "js_set", [ps[0], emitStr(b, "__luerv"), hUndef])
+            var noneB = curF.NewBlock("")
+            var someB = curF.NewBlock("")
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, ct, hUndef), noneB, someB)
+            noneB.NewRet(ev0)
+            var mine = someB.NewLoad(i64, gLuaTbc)
+            someB.NewStore(ct, gLuaTbc)
+            var ev1 = callLua(someB, "lua_tbcunwind", [emitNum(someB, 0), ev0])
+            someB.NewStore(mine, gLuaTbc)
+            someB.NewRet(ev1)
+            return
+        }
         if (name == "lua_metabin") {
             // The first result of the metamethod of event p0 (js_lutm's code, a raw
             // handle) of the operands p1 and p2, called with both.
@@ -1335,6 +1444,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function makeLabel(name) { return {__label: name} }
     function makeGoto(name) {
         return function(b) {
+            // Leaving blocks closes their values; a jump back over a <close> local of
+            // the label's own block closes down to the depth at the label.
+            for (var k = luaBlocks.length - 1; k >= 0; k--) {
+                var lbk = luaBlocks[k]
+                if (lbk.fn === luaFnTag && lbk.labels !== null && lbk.labels["$" + name] != undefined) {
+                    var ldv = lbk.ld["$" + name]
+                    if (ldv != undefined && lbk.d !== null) { callLua(b, "lua_tbcclose", [ldv]) }
+                    else { luaTbcExit(b, k + 1) }
+                    break
+                }
+            }
             for (var i = labelScopes.length - 1; i >= 0; i--) {
                 var tgt = labelScopes[i]["$" + name]
                 if (tgt != undefined) {
@@ -1375,6 +1495,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // The empty multi-value a function that runs off its end returns; nothing
     // writes into a multi-value's array, so one serves every such return.
     var gLuaNone = m.NewGlobalDef("lua.none", handle(0))
+    // The running side's stack of values to close ({n, 0.., n-1}), see lua_tbcpush.
+    var gLuaTbc = m.NewGlobalDef("lua.tbc", handle(0))
     var luaCallNames = []
     var luaCallDescs = []
     function luaCalleeCode(nm, dtext) {
@@ -1749,6 +1871,72 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return inner(b)
         }
     }
+    // ----- to-be-closed variables (local x <close>, manual 3.3.8) -----
+    // A closable value goes on the running side's lua.tbc when its local is declared
+    // (lua_tbcpush). Every way out of a block but a raise closes what the block
+    // pushed: its end, and the break, goto or return that leaves it (luaTbcExit); a
+    // raise is closed by the protected call that catches it, down to the depth that
+    // call started at (lua_tbcunwind) - lua's luaF_close at its pcall level. Each
+    // coroutine has a stack of its own (libCoResume). luaBlocks is the emit-time
+    // stack of the blocks being emitted: d is the depth the block's values start at,
+    // read where its first <close> local is declared (nothing of the block is on
+    // the stack before), loops the loop depth it sits in, fn the function, labels
+    // its label blocks and ld the depth at each label passed. Twin of luaTbc in
+    // lua-interpreter.abnf.
+    var luaBlocks = []
+    var luaFnTag = 0
+    function luaTbcNew(b) {
+        var o = callExt(b, "js_obj_new", [])
+        callExt(b, "js_set", [o, emitStr(b, "n"), emitNum(b, 0)])
+        return o
+    }
+    function luaTbcDepth(b) { return callExt(b, "js_get", [b.NewLoad(i64, gLuaTbc), emitStr(b, "n")]) }
+    // Close what the blocks of this function from luaBlocks[k] on pushed.
+    function luaTbcExit(b, k) {
+        for (var i = k; i < luaBlocks.length; i++) {
+            var e = luaBlocks[i]
+            if (e.fn === luaFnTag && e.d !== null) {
+                callLua(b, "lua_tbcclose", [e.d])
+                return
+            }
+        }
+    }
+    // Whether the running function has a value to close here: then a return of a call
+    // is no tail call.
+    function luaTbcLive() {
+        for (var i = 0; i < luaBlocks.length; i++) {
+            if (luaBlocks[i].fn === luaFnTag && luaBlocks[i].d !== null) { return true }
+        }
+        return false
+    }
+    function luaMakeBreak() {
+        var t = makeBreak()
+        return function(b) {
+            for (var i = 0; i < luaBlocks.length; i++) {
+                if (luaBlocks[i].fn === luaFnTag && luaBlocks[i].loops >= loopStack.length) {
+                    luaTbcExit(b, i)
+                    break
+                }
+            }
+            return t(b)
+        }
+    }
+    function libTbcTry(bb, argsH) {
+        callLua(bb, "lua_tbccall", [callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "v")]),
+                                    callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "e")])])
+        var arr = callExt(bb, "js_arr_new", [])
+        callExt(bb, "js_arr_push", [arr, hTrue])
+        return {b: bb, v: arr}
+    }
+    function libTbcFail(bb, argsH) {
+        var arr = callExt(bb, "js_arr_new", [])
+        callExt(bb, "js_arr_push", [arr, hFalse])
+        callExt(bb, "js_arr_push", [arr, callLua(bb, "lua_errval", [libArg(bb, argsH, 0)])])
+        return {b: bb, v: arr}
+    }
+    // repeat closes its body's values after the until test: the body's block entry,
+    // handed over by makeSeq.
+    var luaTbcHanded = null
     makeSeq = function(items) {
         return function(b) {
             var ownDecls = !luaDeclShared
@@ -1768,6 +1956,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 }
             }
             if (any) { labelScopes.push(scope) }
+            var blk = {d: null, loops: loopStack.length, fn: luaFnTag, labels: any ? scope : null, ld: {}}
+            luaBlocks.push(blk)
             for (var j = 0; j < items.length; j++) {
                 var it = items[j]
                 if (typeof it != "function") {
@@ -1775,6 +1965,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         var lb = scope["$" + it.__label]
                         b.NewBr(lb)
                         b = lb
+                        if (luaAnyTbc) { blk.ld["$" + it.__label] = luaTbcDepth(b) }
                         // A goto back here leaves the scope of the locals after the
                         // label: they get a fresh scope on every pass.
                         luaScopeOwned = false
@@ -1782,6 +1973,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     continue
                 }
                 b = it(b)
+            }
+            luaBlocks.pop()
+            if (ownDecls) {
+                if (blk.d !== null) { callLua(b, "lua_tbcclose", [blk.d]) }
+            } else {
+                luaTbcHanded = blk
             }
             if (any) { labelScopes.pop() }
             if (ownDecls) { luaDeclPop() }
@@ -2361,6 +2558,26 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (var i = 0; i < s.length; i++) { if (!luaIsIdChar(s.charCodeAt(i)) && s.charCodeAt(i) !== 46) { return false } }
         return true
     }
+    // The index of the name a <close> attribute marks in makeLocal's items, or -1.
+    // Twin of luaCloseAttr in lua-interpreter.abnf.
+    function luaCloseAttr(items) {
+        var n = 0 - 1
+        for (var i = 0; i < items.length; i++) {
+            if (typeof items[i] == "function") { continue }
+            if (items[i].lname != undefined) { n = n + 1 }
+            else if (items[i].lattr != undefined && items[i].lattr.indexOf("close") >= 0) { return n }
+        }
+        return 0 - 1
+    }
+    // Whether the program declares a <close> local anywhere (makeLocal, at parse
+    // time): only then is the depth at each label kept.
+    var luaAnyTbc = false
+    // The innermost block's values start at the depth before its first <close>.
+    function luaTbcDeclare(b, v, name) {
+        var blk = luaBlocks[luaBlocks.length - 1]
+        if (blk.d === null) { blk.d = luaTbcDepth(b) }
+        callLua(b, "lua_tbcpush", [v, emitStr(b, name)])
+    }
     function makeLocal(items) {
         var names = []
         var vals = []
@@ -2369,6 +2586,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else if (items[i].lname != undefined) { names.push(items[i].lname) }
         }
         var folded = luaFolded(items)
+        var tbcAt = luaCloseAttr(items)
+        if (tbcAt >= 0) { luaAnyTbc = true }
         return function(b) {
             // `local x = e` - one name, one value - skips the positional array for the
             // same reason makeAssign does; see the note there.
@@ -2379,6 +2598,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 luaLocalScope(b)
                 callExt(b, "js_scope_decl", [curScopeV, emitStr(b, names[0]), v1])
                 luaDeclare(folded[0] ? "\x00k" + names[0] : names[0])
+                if (tbcAt === 0) { luaTbcDeclare(b, v1, names[0]) }
                 return b
             }
             var ra = emitListArr(b, vals)
@@ -2388,6 +2608,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 callExt(b, "js_scope_decl", [curScopeV, emitStr(b, names[n]), callExt(b, "js_get", [ra.v, emitNum(b, n)])])
                 luaDeclare(folded[n] ? "\x00k" + names[n] : names[n])
             }
+            if (tbcAt >= 0) { luaTbcDeclare(b, callExt(b, "js_get", [ra.v, emitNum(b, tbcAt)]), names[tbcAt]) }
             return b
         }
     }
@@ -2422,7 +2643,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         luaOwnTop = true
         var savedStamp = luaScopeStamp
         luaScopeStamp = funcCount
+        var savedTag = luaFnTag
+        luaFnTag = idx
         var endB = bodyT(b)
+        luaFnTag = savedTag
         luaScopeStamp = savedStamp
         luaDeclPop()
         luaLeave(endB, luaFrame)
@@ -2654,10 +2878,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             luaDeclShared = true
             luaOwnTop = true
             luaScopeStamp = funcCount
+            luaTbcHanded = null
             block(bodyB).NewBr(contB)
+            var body = luaTbcHanded
             loopStack.pop()
             var r = condT(contB)
             luaDeclPop()
+            if (body !== null && body.d !== null) { callLua(r.b, "lua_tbcclose", [body.d]) }
             r.b.NewCondBr(truthy(r.b, r.v), exitB, bodyB)
             curScopeV = saved
             return exitB
@@ -2690,6 +2917,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, fName), callExt(b, "js_get", [ra.v, emitNum(b, 0)])])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, sName), callExt(b, "js_get", [ra.v, emitNum(b, 1)])])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, cName), callExt(b, "js_get", [ra.v, emitNum(b, 2)])])
+            // The fourth value is the loop's closing value, closed however the loop ends.
+            var forBlk = {d: luaTbcDepth(b), loops: loopStack.length, fn: luaFnTag, labels: null, ld: {}}
+            callLua(b, "lua_tbcpush", [callExt(b, "js_get", [ra.v, emitNum(b, 3)]), emitStr(b, "(for state)")])
+            luaBlocks.push(forBlk)
             var headB = curF.NewBlock("")
             var bodyB = curF.NewBlock("")
             var postB = curF.NewBlock("")
@@ -2718,9 +2949,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             block(bodyB).NewBr(postB)
             luaDeclPop()
             loopStack.pop()
+            luaBlocks.pop()
             curScopeV = forScope
             postB.NewBr(headB)
             curScopeV = saved
+            callLua(exitB, "lua_tbcclose", [forBlk.d])
             return exitB
         }
     }
@@ -2737,7 +2970,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var tailT = null
         if (items.length == 1 && lastCallFold !== null && text == "return" + lastCallFold.text) { tailT = lastCallFold.tail }
         return function(b) {
-            if (tailT != null && luaFrame != null) {
+            if (tailT != null && luaFrame != null && !luaTbcLive()) {
                 var rt = tailT(b)
                 var trB = curF.NewBlock("")
                 var ownB = curF.NewBlock("")
@@ -2753,6 +2986,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var ra = emitListArr(b, ts)
             b = ra.b
             var rv = callLua(b, "lua_mk", [ra.v])
+            luaTbcExit(b, 0)
             if (luaFrame != null) { luaLeave(b, luaFrame) }
             b.NewRet(rv)
             return deadBlock()
@@ -3004,6 +3238,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             callExt(b, "js_scope_decl", [sc, emitStr(b, "f"), libArg(b, argsH, 0)])
             callExt(b, "js_scope_decl", [sc, emitStr(b, "a"), callLua(b, "lua_tail", [argsH, emitNum(b, need)])])
             if (withHandler) { callExt(b, "js_scope_decl", [sc, emitStr(b, "h"), libArg(b, argsH, 1)]) }
+            callExt(b, "js_scope_decl", [sc, emitStr(b, "d"), luaTbcDepth(b)])
             var tryClo = callExt(b, "js_closure", [handle(emitLibFunc(libProtectTry)), sc])
             var catchClo = callExt(b, "js_closure", [handle(emitLibFunc(libProtectCatch(withHandler))), sc])
             var res = callExt(b, "js_try", [tryClo, catchClo, hUndef])
@@ -3042,6 +3277,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 ev = callExt(bb, "js_try", [callExt(bb, "js_closure", [handle(emitLibFunc(libHandlerCall)), hs]),
                                             callExt(bb, "js_closure", [handle(emitLibFunc(libHandlerFail)), hs]), hUndef])
             }
+            ev = callLua(bb, "lua_tbcunwind", [callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "d")]), ev])
             // lua 5.5 reports a nil error object as this string.
             ev = bb.NewSelect(rawTruthy(bb, callExt(bb, "js_seq", [ev, hUndef])), emitStr(bb, "<no error object>"), ev)
             var arr = callExt(bb, "js_arr_new", [])
@@ -3313,6 +3549,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         goB.NewCondBr(goB.NewICmp(llvm.enum.IPredEQ, g0, hUndef), newB, runB)
         var g1 = callExt(newB, "js_call", [callExt(newB, "js_get", [co, emitStr(newB, "__lugf")]), hUndef, rest])
         callExt(newB, "js_set", [co, emitStr(newB, "__lugen"), g1])
+        callExt(newB, "js_set", [co, emitStr(newB, "__lutbc"), luaTbcNew(newB)])
         newB.NewBr(runB)
         var g = runB.NewPhi([llvm.ir.NewIncoming(g0, goB), llvm.ir.NewIncoming(g1, newB)])
         var sent = runB.NewPhi([llvm.ir.NewIncoming(rest, goB), llvm.ir.NewIncoming(hUndef, newB)])
@@ -3330,8 +3567,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var sc = callExt(stepB, "js_scope_new", [curScopeV])
         callExt(stepB, "js_scope_decl", [sc, emitStr(stepB, "g"), g])
         callExt(stepB, "js_scope_decl", [sc, emitStr(stepB, "s"), sent])
+        // The body runs over its own stack of values to close, which it keeps when it
+        // yields or dies (lua_coshut closes it).
+        var tbcMine = stepB.NewLoad(i64, gLuaTbc)
+        stepB.NewStore(callExt(stepB, "js_get", [co, emitStr(stepB, "__lutbc")]), gLuaTbc)
         var r = callExt(stepB, "js_try", [callExt(stepB, "js_closure", [handle(emitLibFunc(libCoStep)), sc]),
                                           callExt(stepB, "js_closure", [handle(emitLibFunc(libCoFail)), sc]), hUndef])
+        callExt(stepB, "js_set", [co, emitStr(stepB, "__lutbc"), stepB.NewLoad(i64, gLuaTbc)])
+        stepB.NewStore(tbcMine, gLuaTbc)
         stepB.NewStore(pos, gLuaPos)
         stepB.NewStore(csp, gLuaCsp)
         stepB.NewStore(prev, gLuaCo)
@@ -3419,7 +3662,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var errB = curF.NewBlock("")
         var okB = curF.NewBlock("")
         bb.NewCondBr(rawTruthy(bb, callExt(bb, "js_get", [all, emitNum(bb, 0)])), okB, errB)
-        var ev = callExt(errB, "js_get", [all, emitNum(errB, 1)])
+        var ev0 = callExt(errB, "js_get", [all, emitNum(errB, 1)])
+        var shut = callLua(errB, "lua_coshut", [callExt(errB, "js_scope_get", [curScopeV, emitStr(errB, "0co")])])
+        var ev = errB.NewSelect(errB.NewICmp(llvm.enum.IPredEQ, shut, hUndef), ev0, shut)
         var strB = curF.NewBlock("")
         var plainB = curF.NewBlock("")
         errB.NewCondBr(rawTruthy(errB, callExt(errB, "js_seq", [callExt(errB, "js_typeof", [ev]), emitStr(errB, "string")])), strB, plainB)
@@ -3438,26 +3683,23 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var st = callExt(b, "js_get", [co, emitStr(b, "__lust")])
         var suspB = curF.NewBlock("")
         var notSuspB = curF.NewBlock("")
-        var deadB = curF.NewBlock("")
         var busyB = curF.NewBlock("")
-        var errB = curF.NewBlock("")
-        var fineB = curF.NewBlock("")
+        var shutB = curF.NewBlock("")
         b.NewCondBr(rawTruthy(b, callExt(b, "js_seq", [st, emitStr(b, "suspended")])), suspB, notSuspB)
         var g = callExt(suspB, "js_get", [co, emitStr(suspB, "__lugen")])
         var retB = curF.NewBlock("")
-        var markB = curF.NewBlock("")
-        suspB.NewCondBr(suspB.NewICmp(llvm.enum.IPredEQ, g, hUndef), markB, retB)
+        suspB.NewCondBr(suspB.NewICmp(llvm.enum.IPredEQ, g, hUndef), shutB, retB)
         var nargs = callExt(retB, "js_arr_new", [])
         callExt(retB, "js_arr_push", [nargs, hUndef])
         callExt(retB, "js_call", [callExt(retB, "js_get", [g, emitStr(retB, "return")]), hUndef, nargs])
-        retB.NewBr(markB)
-        callExt(markB, "js_set", [co, emitStr(markB, "__lust"), emitStr(markB, "dead")])
-        markB.NewRet(hTrue)
-        notSuspB.NewCondBr(rawTruthy(notSuspB, callExt(notSuspB, "js_seq", [st, emitStr(notSuspB, "dead")])), deadB, busyB)
+        retB.NewBr(shutB)
+        notSuspB.NewCondBr(rawTruthy(notSuspB, callExt(notSuspB, "js_seq", [st, emitStr(notSuspB, "dead")])), shutB, busyB)
         callLua(busyB, "lua_raise", [callExt(busyB, "js_add", [callExt(busyB, "js_add", [emitStr(busyB, "cannot close a "), st]), emitStr(busyB, " coroutine")])])
         busyB.NewRet(hUndef)
-        var ev = callExt(deadB, "js_get", [co, emitStr(deadB, "__luerv")])
-        deadB.NewCondBr(deadB.NewICmp(llvm.enum.IPredEQ, ev, hUndef), fineB, errB)
+        var ev = callLua(shutB, "lua_coshut", [co])
+        var fineB = curF.NewBlock("")
+        var errB = curF.NewBlock("")
+        shutB.NewCondBr(shutB.NewICmp(llvm.enum.IPredEQ, ev, hUndef), fineB, errB)
         fineB.NewRet(hTrue)
         return {b: errB, v: callLua(errB, "lua_mk", [libCoPair(errB, hFalse, ev)])}
     }
@@ -3513,6 +3755,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         pb.NewRet(hUndef)
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "print"), callExt(b, "js_closure", [handle(prIdx), curScopeV])])
         b.NewStore(callExt(b, "js_gc_pin", [callLua(b, "lua_mk", [callExt(b, "js_arr_new", [])])]), gLuaNone)
+        b.NewStore(callExt(b, "js_gc_pin", [luaTbcNew(b)]), gLuaTbc)
         b = emitLibs(b)
         // A member read or write on nil and a call of a non-function are Lua errors,
         // catchable like any other: the floor's three hooks answer the marker to
@@ -3532,6 +3775,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         curF = m.NewFunc("jsf_" + topIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
         b = curF.NewBlock("entry")
         curScopeV = curF.Params[0]
+        luaFnTag = topIdx
         b = emitImported(b)
         b = makeSeq(items)(b)
         b.NewRet(hUndef)
@@ -3565,7 +3809,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return {b: doneB, v: callExt(doneB, "js_throw", [luaMarker(doneB, full)])}
     }
     function libUncaught(bb, argsH) {
-        var text = callLua(bb, "lua_errtext", [callLua(bb, "lua_errval", [libArg(bb, argsH, 0)])])
+        var ev = callLua(bb, "lua_tbcunwind", [emitNum(bb, 0), callLua(bb, "lua_errval", [libArg(bb, argsH, 0)])])
+        var text = callLua(bb, "lua_errtext", [ev])
         callExt(bb, "js_luuncaught", [callExt(bb, "js_luaout", [text])])
         return {b: bb, v: hUndef}
     }

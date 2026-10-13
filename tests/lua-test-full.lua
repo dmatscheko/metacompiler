@@ -25,8 +25,8 @@
 -- without which sections 21 and 22 could not be written - and the pattern
 -- half of the string library with select (SECTION 30), string.format
 -- (SECTION 35), the base and table library (SECTION 36) and metatables with the
--- operator metamethods (SECTION 44). The <close> attribute (needs __close) stays
--- untested, and likewise coroutine.* (library calls, not syntax).
+-- operator metamethods (SECTION 44), the <close> attribute (SECTION 53) and
+-- coroutine.* (SECTION 47).
 -- error/pcall/xpcall are in, because
 -- without them no error is observable at all (SECTION 27). Lua has no
 -- chained comparisons (a < b < c is a type error by design), so none appear.
@@ -2252,6 +2252,120 @@ function s52()
         "float integer 11259375")
 end
 
+-- ===== SECTION 53: to-be-closed variables =====
+-- local x <close>: closed in reverse order at every way out of its block (end,
+-- break, goto, return, error, a coroutine's close), with the error object on an
+-- error path, an error in a __close replacing it, a return of a call being no
+-- tail call, and a generic for's closing value. Values printed by lua 5.5.
+function s53()
+    local log = {}
+    local function C(name)
+        return setmetatable({}, {__close = function(o, e) log[#log + 1] = name .. ":" .. tostring(e) end})
+    end
+    local function take() local out = table.concat(log, " "); log = {}; return out end
+    local function try(f, ...)
+        local ok, e = pcall(f, ...)
+        if ok then return "ok" end
+        return (tostring(e):gsub("^[^:]*:%d+: ", ""))
+    end
+    do
+        local a <close> = C("a")
+        local b <close> = C("b")
+        local c <close> = nil
+        local d <close> = false
+        log[#log + 1] = "body"
+    end
+    check("tb1", take(), "body b:nil a:nil")
+    local function f()
+        local x <close> = C("x")
+        do local y <close> = C("y") end
+        return log[#log]
+    end
+    check("tb2", f() .. "|" .. take(), "y:nil|y:nil x:nil")
+    for i = 1, 3 do
+        local z <close> = C("z" .. i)
+        if i == 2 then break end
+    end
+    check("tb3", take(), "z1:nil z2:nil")
+    local ok, e = pcall(function() local p <close> = C("p"); local q <close> = C("q"); error("E", 0) end)
+    check("tb4", tostring(ok) .. " " .. e .. "|" .. take(), "false E|q:E p:E")
+    ok, e = pcall(function()
+        local p <close> = setmetatable({}, {__close = function(o, e) log[#log + 1] = "p:" .. tostring(e); error("P", 0) end})
+        local q <close> = setmetatable({}, {__close = function(o, e) log[#log + 1] = "q:" .. tostring(e); error("Q", 0) end})
+        error("E", 0)
+    end)
+    check("tb5", e .. "|" .. take(), "P|q:E p:Q")
+    check("tb6", try(function() local v <close> = {} end) .. "|" .. try(function() local v <close> = 42 end),
+        "variable 'v' got a non-closable value|variable 'v' got a non-closable value")
+    do
+        local k = 0
+        ::top::
+        k = k + 1
+        do
+            local g <close> = C("g" .. k)
+            if k < 3 then goto top end
+        end
+        local m = 0
+        ::again::
+        m = m + 1
+        local h <close> = C("h" .. m)
+        if m < 2 then goto again end
+    end
+    check("tb7", take(), "g1:nil g2:nil g3:nil h1:nil h2:nil")
+    local function g2() log[#log + 1] = "callee"; return "v" end
+    local function f2() local t <close> = C("t"); return g2() end
+    check("tb8", f2() .. "|" .. take(), "v|callee t:nil")
+    local co = coroutine.create(function() local w <close> = C("w"); coroutine.yield(1); log[#log + 1] = "after" end)
+    coroutine.resume(co)
+    check("tb9", tostring(coroutine.close(co)) .. " " .. coroutine.status(co) .. "|" .. take(), "true dead|w:nil")
+    local co2 = coroutine.create(function() local w <close> = C("w2"); error("boom", 0) end)
+    coroutine.resume(co2)
+    local before = take()
+    local c1, c2 = coroutine.close(co2)
+    check("tb10", before .. "|" .. tostring(c1) .. " " .. c2 .. "|" .. take() .. "|" .. tostring(coroutine.close(co2)), "|false boom|w2:boom|true")
+    local wr = coroutine.wrap(function() local w <close> = C("w3"); coroutine.yield(1); error("werr", 0) end)
+    wr()
+    check("tb11", try(wr) .. "|" .. take(), "werr|w3:werr")
+    local function iter()
+        local cl = C("fc")
+        local i = 0
+        return function() i = i + 1; if i <= 3 then return i end end, nil, nil, cl
+    end
+    for i in iter() do if i == 2 then break end end
+    local brk = take()
+    for i in iter() do end
+    check("tb12", brk .. "|" .. take() .. "|" .. try(function() for i in iter() do error("in-for", 0) end end) .. "|" .. take(),
+        "fc:nil|fc:nil|in-for|fc:in-for")
+    check("tb13", try(function() for i in function() end, nil, nil, 5 do end end), "variable '(for state)' got a non-closable value")
+    local i = 0
+    repeat
+        i = i + 1
+        local r <close> = C("r" .. i)
+        log[#log + 1] = "body" .. i
+    until (function() log[#log + 1] = "test" .. i; return i >= 2 end)()
+    check("tb14", take(), "body1 test1 r1:nil body2 test2 r2:nil")
+    local function find()
+        for j = 1, 3 do
+            local z <close> = C("z" .. j)
+            while true do
+                local w <close> = C("w" .. j)
+                if j == 2 then return "found" .. j end
+                break
+            end
+        end
+    end
+    check("tb15", find() .. "|" .. take(), "found2|w1:nil z1:nil w2:nil z2:nil")
+    local xok, xe = xpcall(function() local p <close> = C("xp"); error("X", 0) end, function(m) log[#log + 1] = "handler:" .. m; return m .. "!" end)
+    check("tb16", xe .. "|" .. take(), "X!|handler:X xp:X!")
+    local mt = {__close = function() log[#log + 1] = "orig" end}
+    check("tb17", try(function() local v <close> = setmetatable({}, mt); mt.__close = nil end), "attempt to call a nil value (metamethod 'close')")
+    do
+        local a, b <close>, c = 1, C("mb"), 3
+        log[#log + 1] = a .. c
+    end
+    check("tb18", take(), "13 mb:nil")
+end
+
 s25() -- SECTION-CALL 25
 s26() -- SECTION-CALL 26
 s27() -- SECTION-CALL 27
@@ -2280,5 +2394,6 @@ s49() -- SECTION-CALL 49
 s50() -- SECTION-CALL 50
 s51() -- SECTION-CALL 51
 s52() -- SECTION-CALL 52
+s53() -- SECTION-CALL 53
 print("full: " .. checks .. " checks, " .. failures .. " failures")
 exit(failures)
