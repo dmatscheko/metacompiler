@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-580** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-582** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -81,26 +81,20 @@ quietly, CPython raises "dictionary keys changed during iteration".
 
 # JS — JavaScript and TypeScript
 
-### T-565 js: wording and remaining low-value gaps · P3 · JS · IN PROGRESS (JS worker, round 3) [V]
-TDZ says "q is not defined" (node "Cannot access 'q' before initialization"); toString radix message; JSON.parse syntax-error
-text is older V8 wording. `(1e21).toString(36)` / `(2**60).toString(7)`: interp `5v1j4f4ds7c000`, compiler `...c4ks` — the
-halves must agree (port V8's DoubleToRadixCString to all three engines). `arguments[0]=9` in a zero-arg call makes
-`arguments.length` 1 (node 0; needs an arguments object). `JSON.parse('{"__proto__":1}')` → `{}` (`__` keys are internal slots,
-manual 7.9). `String.fromCodePoint` missing everywhere; `normalize` missing in the compiler.
+### T-580 js/ts: no temporal dead zone for let / const / class · P1 · JS · OPEN [V]
+`let q = "outer"; { println(q); let q = 1; }` → all legs print `outer`; node `ReferenceError: Cannot access 'q' before
+initialization`. `typeof u` before `const u = 1` in the same block → `undefined` (node ReferenceError). Pre-declare let/const/
+class names with a sentinel at block entry in both interpreters and the emitter, and check reads, writes and typeof; in the
+compiler emit the check only at sites that can reach the TDZ (textually-earlier reads, closures declared in the block) so
+block entry and scope reads stay cheap. Measure tests/bench.sh js.
 
-### T-566 js: `padStart(Infinity)` hangs; a missing method aborts natively; nested-try labeled jumps; big-radix parseInt · P2 · JS · IN PROGRESS (JS worker, round 3) [V]
-`"abc".padStart(Infinity, "*")` → interp and native run until killed (node RangeError "Invalid string length"). Calling a
-missing method natively (e.g. `String.fromCodePoint(65)` in a try) ends the binary with exit 1, interp and run throw a
-catchable TypeError "... is not a function". A labeled break crossing several nested try bodies with for-of loops in between
-does not close the for-of iterators opened inside the intermediate try closures (only the innermost's and the label's own).
-P3: `parseInt` past 2^53 in a radix that is neither 10 nor a power of two — all legs agree, node differs in the last digit
-(implementation-defined approximation in V8).
-
-### T-560 js/ts: a generator that re-enters itself aborts instead of throwing TypeError · P2 · JS · IN PROGRESS (JS worker, round 3) [V]
-A generator body calling `me.next()` on itself: every compiled leg aborts with "generator already running" (the floor's
-gen_busy / the twin's jsGenerator.enter with no hook registered); node throws a catchable `TypeError: Generator is already
-running`. Register a `js_rt_genbusy` hook in js-/typescript-to-llvm-ir.abnf the way python-to-llvm-ir.abnf does, and check
-the interpreter half.
+### T-581 js: arguments object, `__`-prefixed user keys, `String.prototype.normalize`, BigInt callee text · P2 · JS · OPEN [V]
+`function f(){ arguments[0]=9; return arguments.length }; f()` → 1 (node 0); `Array.isArray(arguments)` → true (node false):
+arguments is a plain array in all engines. `JSON.parse('{"__proto__":1,"__x":2,"y":3}')` keys → `y` (node `__proto__,__x,y`):
+`__` keys are value-model slots (manual 7.9); user keys need escaping at every property path. `"é".normalize("NFD")`: goja
+interp answers through the host, -frozen / run / native "normalize is not a function" — a goja-vs-frozen divergence no test
+sees; needs decomposition/composition tables in all engines. P3: `(5n).nope()` message says `5n.nope` (node
+`(intermediate value).nope is not a function`).
 
 ---
 
@@ -689,6 +683,9 @@ T-563 go: `fmt.Fprint*` / `os.Stdout` / io.Writer, and the `math` package — PA
 T-574 java: regex errors are uncatchable; fully qualified static calls; `(Object) arr` to Object...; "Caused by:" — DONE 049e1dfd
 T-573 bash native: the mod.sh benchmark regressed +26% with the 64-bit arithmetic rework — DONE a0a680b4 (bench +26.15% -> +0.14%, spread 0.19%, re-measured by the master)
 T-572 bash: `let` with a redirection; unquoted `let` field splitting; NUL bytes; per-iteration stack growth — DONE 61e861d2
+T-560 js/ts: a generator that re-enters itself aborts instead of throwing TypeError — DONE 1e54eac7
+T-566 js: `padStart(Infinity)` hangs; a missing method aborts natively; nested-try labeled jumps; big-radix parseInt — DONE 1e54eac7 28476b59 (incl. V8's fused parseInt for odd radices, verified on this arm64 node)
+T-565 js: wording and remaining low-value gaps — PARTIAL 1e54eac7 (toString(radix) = V8 DoubleToRadixCString, radix message, node-24 JSON.parse messages, String.fromCodePoint); TDZ is T-580, arguments/__ keys/normalize are T-581
 
 # Settled — do not re-open
 
