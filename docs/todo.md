@@ -64,23 +64,23 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-556 python: bytes and bytearray are lists · P2 · PY · OPEN [V]
+### T-556 python: bytes and bytearray are lists · P2 · PY · IN PROGRESS (PY worker, round 3) [V]
 `(255).to_bytes(2, "big", signed=True)` → all legs `[0, 255]` (python `b'\x00\xff'`); `type(b"ab").__name__` → `list`,
 `b"ab" == [97, 98]` → True (python False); `int(b"12")`, `float(b"1.5")` → TypeError naming 'list' (python 12, 1.5). A real
 bytes type in the value model (repr `b'..'`, immutability, `==` against a list False, int()/float() parsing), all engines.
 
-### T-557 python: str.maketrans, `__import__`, translate with a non-dict table, non-ASCII isidentifier · P3 · PY · OPEN [V]
+### T-557 python: str.maketrans, `__import__`, translate with a non-dict table, non-ASCII isidentifier · P3 · PY · IN PROGRESS (PY worker, round 3) [V]
 `str.maketrans("ab","xy")` is missing: the unbound `str.X(...)` dispatch passes the first argument as the receiver, so a
 static method needs dispatch work in all engines. `__import__` missing. `"ab".translate([..])` → TypeError (CPython accepts any
 `__getitem__` mapping). `"😀".isidentifier()` → True (python False): past ASCII every printable code point counts as a letter;
 use the XID_Start/XID_Continue tables.
 
-### T-558 python: any/all/max/min/sum materialise a generator argument; an endless source never finishes · P1 · PY · OPEN [V]
+### T-558 python: any/all/max/min/sum materialise a generator argument; an endless source never finishes · P1 · PY · IN PROGRESS (PY worker, round 3) [V]
 `from itertools import count; print(any(x > 2 for x in count()))` → every leg runs until killed (python True). The
 builtins turn the argument into a list before scanning, so short-circuiting never happens (also for a generator function).
 Consume the iterator step by step in all engines.
 
-### T-559 python: divmod() error text and dispatch · P3 · PY · OPEN [V]
+### T-559 python: divmod() error text and dispatch · P3 · PY · IN PROGRESS (PY worker, round 3) [V]
 `divmod("a", 1)` → TypeError "unsupported operand type(s) for //: 'str' and 'int'" (python "... for divmod(): 'str' and
 'int'"). A class with `__floordiv__`/`__mod__` but no `__divmod__` (unprobed, from the code): divmod() uses the two, CPython
 raises TypeError. Dict "keys changed during iteration" is detected only when the iterator runs out (snapshot compare); for
