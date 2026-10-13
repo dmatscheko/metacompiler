@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-586** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-587** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -64,14 +64,9 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-575 python: module `__name__`, builtin class methods with keywords, `slice`, bytes method gaps · P2 · PY · IN PROGRESS (PY worker, round 4) [V]
-`import math; print(math.__name__)` (also sys, re, typing, builtins) → AttributeError in all legs (python `math`).
-`dict.fromkeys("ab", value=1)` → interp `{'a': None, 'b': None}`, run/native use the keyword dict as the value; python
-TypeError "dict.fromkeys() takes no keyword arguments" (built-in class methods lose keywords in the compiled halves).
-`slice(1, 3)` → NameError in the interpreter (other legs unprobed); `bytearray.__delitem__` AttributeError in the interpreter.
-bytes: `splitlines`, `translate`, `maketrans`, `hex(sep)`, `decode(errors=)` missing; `b"%s" % 5` → `b'5'` (python TypeError);
-`%r` of a bytes argument loses the `b` prefix. Dict iteration: pop and re-add an already-yielded key at equal size → we end
-quietly, CPython raises "dictionary keys changed during iteration".
+### T-586 python: slice ordering and unhashable slice keys · P3 · PY · OPEN [V]
+`slice(1, 2) < slice(1, 3)` → TypeError "'<' not supported" in all legs (python True: slices compare as tuples). `{slice([1]):
+0}` is accepted (CPython TypeError "unhashable type: 'list'"); only `hash()` was checked, probe the dict-key case first.
 
 ---
 
@@ -690,6 +685,7 @@ T-570 swift: a ternary passed to an `Any` parameter unifies; nested existential 
 T-571 swift: mutating value methods on numbers and Bools; General_Category Character properties; trap exit status — DONE d8070820 (traps exit 133 in every leg; probe.sh accepts 133 for swift, 83fd0c9f)
 T-579 bash: an arithmetic error does not cancel the assignment; bytes 0x01/0x02 break field lists — DONE e57f7553
 T-582 swift: missing traps — Int(huge Double), inverted range, compiled removeLast on empty; the ratchet does not compile under swiftc — DONE de9fcee2 (the whole ratchet now runs on swiftc: 769 checks, 0 failures)
+T-575 python: module `__name__`, builtin class methods with keywords, `slice`, bytes method gaps — DONE 411114f9 6bd49c7f except the dict pop/re-add-at-equal-size detection — DECLINED: CPython's answer depends on its hash table's resize/compaction history (a 4-key dict ends quietly, a 3-key one raises); a deletion counter made 46 of 116 probe rows wrong vs 38 before; matching it needs CPython's entry table per dict in all engines, a cost on every insert
 
 # Settled — do not re-open
 
@@ -700,7 +696,7 @@ re-opening it. The detail is in git; the durable lessons are in the manual
 (ch. 4 and 7).
 
 **DECLINED after measurement — each is a number the next person should not have to
-re-derive.** php's `isset`/`$this`
+re-derive.** python's "dictionary keys changed during iteration" for a pop and re-add of an already-yielded key at equal size (CPython's answer follows its hash table's resize/compaction history: a deletion counter made **46 of 116** probe rows wrong vs 38 before; matching needs CPython's per-dict entry table, a cost on every insert) · php's `isset`/`$this`
 scope probe into layer 2 (**+0.77%, slower in 9 of 9 paired draws**, ~490 instructions
 per probe call: unlike kotlin's, php's probe has NO miss arm layer 2 answers better,
 so it is all hot arm) · swift's and dart's `sw_kget`/`sw_kset` into layer 2
