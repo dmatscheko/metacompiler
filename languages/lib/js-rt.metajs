@@ -114,6 +114,16 @@ function jvIsObj(v) {
     return typeof v == "object"
 }
 
+// The arguments object of a call: a copy of its argument array carrying kind 19.
+// Twins: jsIsArgs in both *-interpreter.abnf, js_jsargs / jsvIsArgs in
+// abnf/jsrtjsprint.go.
+function jvIsArgs(v) { return Array.isArray(v) && arrKind(v) == 19 }
+function js_jsargs(a) {
+    var c = []
+    for (var i = 0; i < a.length; i++) { c.push(a[i]) }
+    return arrKindSet(c, 19)
+}
+
 function jvIsCallable(v) {
     if (v === undefined) { return false }
     if (v === null) { return false }
@@ -758,6 +768,7 @@ function jvStr(v) {
         return jvProtoTag(v)
     }
     if (Array.isArray(v)) {
+        if (arrKind(v) == 19) { return "[object Arguments]" }
         var out = ""
         var i = 0
         while (i < v.length) {
@@ -1379,6 +1390,7 @@ function jvSeedMethodNames() {
     jvStrM["toString"] = 1
     jvStrM["valueOf"] = 1
     jvStrM["localeCompare"] = 1
+    jvStrM["normalize"] = 1
 
     jvArrM["push"] = 1
     jvArrM["pop"] = 1
@@ -1681,7 +1693,7 @@ function jvBuiltinFam(o, key) {
         return ""
     }
     if (Array.isArray(o)) {
-        if (jvArrM[key] === 1 || key == "valueOf") { return "a" }
+        if ((jvArrM[key] === 1 || key == "valueOf") && !jvIsArgs(o)) { return "a" }
     }
     return ""
 }
@@ -1702,6 +1714,12 @@ function jvBuiltinValue(fam, name) {
         // An Array's valueOf (Object.prototype's): the receiver itself.
         if (fam == "a") {
             if (name == "valueOf") { return recv }
+            // Array.prototype's methods run on any array, the arguments object too,
+            // which js_jsmcall's own dispatch refuses them.
+            if (Array.isArray(recv)) {
+                var am = jvArrMethod(recv, name, a)
+                if (am !== jvMiss) { return am }
+            }
         }
         return js_jsmcall(recv, name, a)
     }
@@ -2450,7 +2468,7 @@ function js_jsinstanceof(v, c) {
         if (jvIsObjLike(v)) { return true }
         return jvIsCallable(v)
     }
-    if (jvIsArrayGlobal(c)) { return Array.isArray(v) }
+    if (jvIsArrayGlobal(c)) { return Array.isArray(v) && !jvIsArgs(v) }
     // An object that is no constructor (and has no Symbol.hasInstance, above).
     if (!jvIsCallable(c)) {
         if (!jvIsClassDesc(c)) { jbRaise("TypeError: Right-hand side of 'instanceof' is not callable") }
@@ -2785,7 +2803,7 @@ function js_jsobject() {
 function jvProtoTag(v) {
     if (v === undefined) { return "[object Undefined]" }
     if (v === null) { return "[object Null]" }
-    if (Array.isArray(v)) { return "[object Array]" }
+    if (Array.isArray(v)) { return jvIsArgs(v) ? "[object Arguments]" : "[object Array]" }
     if (typeof v == "number") { return "[object Number]" }
     if (typeof v == "string") { return "[object String]" }
     if (typeof v == "boolean") { return "[object Boolean]" }
@@ -3451,6 +3469,7 @@ function jvStrMethod(s, name, args) {
         if (jvIsCallable(rep)) { return jvReplaceFn(s, pat, rep, lim) }
         return jvReplaceTemplate(s, pat, jvArgS(args, 1), lim)
     }
+    if (name == "normalize") { return jvNormalize(s, args) }
     if (name == "localeCompare") {
         var other = jvArgS(args, 0)
         if (s < other) { return -1 }
@@ -4225,7 +4244,7 @@ function js_jsmcall(recv, key, args) {
         var sm = jvStrMethod(recv, name, args)
         if (sm !== jvMiss) { return sm }
     }
-    if (Array.isArray(recv)) {
+    if (Array.isArray(recv) && !jvIsArgs(recv)) {
         var am = jvArrMethod(recv, name, args)
         if (am !== jvMiss) { return am }
     }
@@ -4236,7 +4255,7 @@ function js_jsmcall(recv, key, args) {
     // Array.isArray on the `Array` global, last: no other receiver is a function
     // value. Array.from and Array.of are lib/js-builtins.js's own properties of it,
     // which jvFallbackCall finds.
-    if (name == "isArray" && jvArrayFn !== undefined && recv === jvArrayFn) { return Array.isArray(args[0]) }
+    if (name == "isArray" && jvArrayFn !== undefined && recv === jvArrayFn) { return Array.isArray(args[0]) && !jvIsArgs(args[0]) }
     return jvFallbackCall(recv, name, args)
 }
 
@@ -5293,6 +5312,28 @@ function js_jsmath(src) {
     return o
 }
 
+// ===================================================== normalize ============
+//
+// String.prototype.normalize over lib/js-norm.js, its tables the text of
+// lib/unicode-norm.txt that the emitted boot block hands js_jsnormdata. Twins:
+// jsNormalize in both *-interpreter.abnf start scripts, jsvNormalize in
+// abnf/jsrtjsnorm.go.
+
+import "./js-norm.js"
+
+function js_jsnormdata(t) {
+    jsnormLoad(t)
+    return undefined
+}
+function jvNormalize(s, args) {
+    var f = "NFC"
+    if (args.length > 0 && args[0] !== undefined) { f = jvStr(args[0]) }
+    if (f != "NFC" && f != "NFD" && f != "NFKC" && f != "NFKD") {
+        jbRaise("RangeError: The normalization form should be one of NFC, NFD, NFKC, NFKD.")
+    }
+    return jsnormApply(s, f)
+}
+
 // ===================================================== JSON =================
 //
 // The program's JSON global over lib/json.js, and the value-model hooks that file
@@ -5338,6 +5379,7 @@ function jsonHToJSON(v, k) {
 function jsonHIsFn(v) { return js_jstypeof(v) == "function" }
 function jsonHIsBig(v) { return jbIsBig(v) }
 function jsonHIsObj(v) {
+    if (jvIsArgs(v)) { return true }
     if (!jvIsObj(v)) { return false }
     if (jbIsBig(v)) { return false }
     if (v["__symkey"] !== undefined) { return false }

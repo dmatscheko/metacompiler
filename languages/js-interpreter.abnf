@@ -3274,6 +3274,7 @@ NotFuncHead = :script(~~
     include("lib/js-callee.js")
     // Which scope instantiates each function declaration (makeFuncBody, makeJsBlock).
     include("lib/js-hoist.js")
+    include("lib/js-norm.js")
     // The pull log of the replay generators (genNext, jsPull).
     include("lib/js-genlog.js")
 
@@ -3443,6 +3444,7 @@ NotFuncHead = :script(~~
         // A BigInt prints as its digits with no 'n' suffix: String(10n) is "10".
         if (isBigInt(v)) { return biToStr(v, 10) }
         if (Array.isArray(v)) {
+            if (arrKind(v) == 19) { return "[object Arguments]" }
             var out = ""
             for (var i = 0; i < v.length; i++) {
                 if (i > 0) { out = out + "," }
@@ -3720,7 +3722,7 @@ NotFuncHead = :script(~~
     function jsProtoTag(v) {
         if (v === undefined) { return "[object Undefined]" }
         if (v === null) { return "[object Null]" }
-        if (Array.isArray(v)) { return "[object Array]" }
+        if (Array.isArray(v)) { return jsIsArr(v) ? "[object Array]" : "[object Arguments]" }
         if (typeof v == "number") { return "[object Number]" }
         if (typeof v == "string") { return "[object String]" }
         if (typeof v == "boolean") { return "[object Boolean]" }
@@ -4363,7 +4365,7 @@ NotFuncHead = :script(~~
             return null
         }
         if (target === jsArrayFn) {
-            if (name == "isArray") { return {v: Array.isArray(args[0])} }
+            if (name == "isArray") { return {v: jsIsArr(args[0])} }
             return null
         }
         if (target === jsStringFn) {
@@ -4444,6 +4446,16 @@ NotFuncHead = :script(~~
         }
         if (isBigInt(a) || isBigInt(b)) { return isBigInt(a) && isBigInt(b) && biCmp(a, b) == 0 }
         return a === b
+    }
+    // String.prototype.normalize (lib/js-norm.js), its tables loaded at the first call.
+    // Twins: jvNormalize in languages/lib/js-rt.metajs, jsvNormalize in abnf/jsrtjsnorm.go.
+    function jsNormalize(s, args) {
+        var f = (args.length == 0 || args[0] === undefined) ? "NFC" : jsStr(args[0])
+        if (f != "NFC" && f != "NFD" && f != "NFKC" && f != "NFKD") {
+            biRaise("RangeError: The normalization form should be one of NFC, NFD, NFKC, NFKD.")
+        }
+        if (!jsnormReady[0]) { jsnormLoad(load("lib/unicode-norm.txt")) }
+        return jsnormApply(s, f)
     }
     function jsStringMethod(s, name, args) {
         // A pattern argument belongs to the regular-expression surface, which
@@ -4550,6 +4562,7 @@ NotFuncHead = :script(~~
         }
         if (name == "replace") { return {v: jsReplace(s, jsStr(args[0]), (typeof args[1] == "function") ? args[1] : jsStr(args[1]), 1)} }
         if (name == "replaceAll") { return {v: jsReplace(s, jsStr(args[0]), (typeof args[1] == "function") ? args[1] : jsStr(args[1]), -1)} }
+        if (name == "normalize") { return {v: jsNormalize(s, args)} }
         if (name == "localeCompare") {
             var oc = jsStr(args[0])
             if (s < oc) { return {v: -1} }
@@ -4918,8 +4931,14 @@ NotFuncHead = :script(~~
     }
     function jsonHIsFn(v) { return typeof v == "function" || isClassDesc(v) }
     function jsonHIsBig(v) { return isBigInt(v) }
+    // The arguments object is an array carrying kind 19 (arrKind): indexed, iterable
+    // and with a length like one, but no Array - Array.isArray and instanceof say no, it
+    // has no Array methods, it is tagged [object Arguments] and JSON writes it as an
+    // object. Twins: js_jsargs in abnf/jsrtjsprint.go and languages/lib/js-rt.metajs.
+    function jsIsArr(v) { return Array.isArray(v) && arrKind(v) != 19 }
+    function jsIsArgs(v) { return Array.isArray(v) && arrKind(v) == 19 }
     function jsonHIsObj(v) {
-        return v !== null && v !== undefined && typeof v == "object" && !Array.isArray(v) && !isBigInt(v) && !isClassDesc(v) &&
+        return v !== null && v !== undefined && typeof v == "object" && !jsIsArr(v) && !isBigInt(v) && !isClassDesc(v) &&
             !jsIsSym(v)
     }
     function jsonHStr(v) { return jsStr(v) }
@@ -5099,7 +5118,7 @@ NotFuncHead = :script(~~
             var sc = {}
             sc["this"] = self
             sc["new.target"] = nt
-            sc["arguments"] = args
+            sc["arguments"] = arrKindSet(args, 19)
             sc["0strict"] = strictHere
             // The parameter scope has to be ACTIVE while the parameters bind: a default
             // value may read an earlier parameter ('function f(a, b = a + 1)').
@@ -5379,6 +5398,7 @@ NotFuncHead = :script(~~
         if (typeof k == "string" && k !== "length" && (typeof o == "string" || typeof o == "number" || Array.isArray(o))) {
             var bf = builtinFam(o, k)
             if (bf != "") { return builtinValue(bf, k) }
+            if (hasOwn(bvArr, k) && jsIsArgs(o)) { return jsIsProtoName(k) ? jsProtoShim(o, k) : undefined }
         }
         if (k === "prototype") {
             var bp = anytype // The prototype object, or undefined for a non-callable.
@@ -5473,7 +5493,8 @@ NotFuncHead = :script(~~
     bvSeed(bvStr, ["charAt", "charCodeAt", "codePointAt", "at", "indexOf", "lastIndexOf", "includes",
                    "startsWith", "endsWith", "slice", "substring", "substr", "split", "toUpperCase",
                    "toLowerCase", "trim", "trimStart", "trimEnd", "padStart", "padEnd", "repeat",
-                   "concat", "replace", "replaceAll", "toString", "valueOf", "localeCompare"])
+                   "concat", "replace", "replaceAll", "toString", "valueOf", "localeCompare",
+                   "normalize"])
     bvSeed(bvArr, ["push", "pop", "shift", "unshift", "slice", "splice", "indexOf", "lastIndexOf",
                    "includes", "join", "concat", "reverse", "sort", "map", "filter", "forEach",
                    "reduce", "reduceRight", "some", "every", "find", "findIndex", "findLast",
@@ -5484,7 +5505,7 @@ NotFuncHead = :script(~~
     function builtinFam(o, k) {
         if (typeof o == "string") { return hasOwn(bvStr, k) ? "s" : "" }
         if (typeof o == "number") { return hasOwn(bvNum, k) ? "n" : "" }
-        if (Array.isArray(o)) { return hasOwn(bvArr, k) ? "a" : "" }
+        if (Array.isArray(o)) { return (hasOwn(bvArr, k) && jsIsArr(o)) ? "a" : "" }
         return ""
     }
     // Array.prototype is an empty array (Array.isArray answers true, as in node), and
@@ -7455,7 +7476,7 @@ NotFuncHead = :script(~~
         // The two host constructors a program may legitimately test against. There is no
         // prototype chain here, so they are answered from the value's own shape.
         if (cls === hostGlobals["Object"]) { return typeof v == "object" || typeof v == "function" }
-        if (cls === hostGlobals["Array"]) { return Array.isArray(v) }
+        if (cls === hostGlobals["Array"]) { return jsIsArr(v) }
         if (typeof v != "object") { return false }
         // A CONSTRUCTOR FUNCTION on the right: its instances carry the synthetic
         // descriptor makeNew filed for it, so the test is made on that descriptor.
@@ -8411,7 +8432,7 @@ NotFuncHead = :script(~~
             scopes = env.slice()
             var sc = {}
             sc["this"] = self
-            sc["arguments"] = args
+            sc["arguments"] = arrKindSet(args, 19)
             scopes.push(sc)
             bindParams(sc, params, args)
             var r = bodyT()
@@ -8641,7 +8662,7 @@ NotFuncHead = :script(~~
             scopes = env.slice()
             var sc = {}
             sc["this"] = self
-            sc["arguments"] = args
+            sc["arguments"] = arrKindSet(args, 19)
             sc["0strict"] = true // A class body is strict code, always.
             scopes.push(sc)
             bindParams(sc, params, args)
@@ -8663,7 +8684,7 @@ NotFuncHead = :script(~~
             scopes = env.slice()
             var sc = {}
             sc["this"] = self
-            sc["arguments"] = args
+            sc["arguments"] = arrKindSet(args, 19)
             sc["0strict"] = true // A class body is strict code, always.
             scopes.push(sc)
             bindParams(sc, params, args)
@@ -9682,11 +9703,14 @@ NotFuncHead = :script(~~
                     // script host, which differs per engine. abnf/jsrtjsprint.go
                     // (js_jsmcall) is the compiler twin.
                     var bHit = anytype
-                    bHit = (rxHit != null) ? null : jsBuiltin(curThis, lastKey, argv)
+                    bHit = (rxHit != null || jsIsArgs(curThis)) ? null : jsBuiltin(curThis, lastKey, argv)
                     if (rxHit != null) {
                         cur = rxHit.v
                     } else if (bHit != null) {
                         cur = bHit.v
+                    } else if (jsIsArgs(curThis) && hasOwn(bvArr, lastKey)) {
+                        if (!jsIsProtoName(lastKey)) { biRaise("TypeError: " + sTexts[i] + " is not a function") }
+                        cur = jsProtoApply(curThis, lastKey, argv)
                     } else if (typeof cur == "function") {
                         cur = callWithThis(cur, curThis, argv)
                     } else {

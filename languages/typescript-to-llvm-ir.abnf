@@ -851,7 +851,7 @@ TagSuffix   <~~ push({kind: "tag", parts: takeAll()}) ~~>
 // same way the TypeScript compiler resolves this ambiguity.
 CallSuffix  <~~ push({kind:"call", args: takeAll()}) ~~>
             = [ TypeArgs ] "(" [ Arg { "," Arg } [ "," ] ] ")" ;
-DotSuffix   = "." ( PrivSuffix | Id <~~ push({kind:"member", name: idName(up.in), key: makeConst(idName(up.in))}) ~~> ) ;
+DotSuffix   = "." ( PrivSuffix | Id <~~ push({kind:"member", name: idName(up.in), key: makeConst(idName(up.in))}); noteMember(idName(up.in)) ~~> ) ;
 // 'this.#x': a private name. It is stored under the mangled key '__#<body>#x' (see
 // ClassPrivate),
 // which is what keeps it out of js_keys, so out of for-in and object spread.
@@ -3040,7 +3040,7 @@ NotFuncHead = :script(~~
     function makeAsyncFn(params, bodyT, isArrow, ownStrict, nm, txt) {
         return fnDef(function(b) {
             pendingAsyncFn = true // Consumed by the emitFunction call below.
-            var idx = emitFunction(params, bodyT, false, true, ownStrict)
+            var idx = emitFunction(params, bodyT, false, true, ownStrict, isArrow)
             if (isArrow) { return {b: b, v: coroOf(b, idx, "async", curScopeV)} }
             return emitThisBinder(b, emitStrict || ownStrict === true, idx, "async")
         }, nm, params, txt)
@@ -3819,7 +3819,7 @@ NotFuncHead = :script(~~
     }
 
     // See the twin of this comment in js-to-llvm-ir.abnf.
-    function emitFunction(paramNames, bodyT, isCtl, lexThis, ownStrict) {
+    function emitFunction(paramNames, bodyT, isCtl, lexThis, ownStrict, isArrow) {
         var savedParams = emitParams
         if (!isCtl) { emitParams = paramNames }
         funcCount++
@@ -3861,7 +3861,10 @@ NotFuncHead = :script(~~
         }
         b = bindParams(b, paramNames, f.Params[1], 0)
         // See the twin of this line in js-to-llvm-ir.abnf.
-        if (!isCtl) { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "arguments"), f.Params[1]]) }
+        if (!isCtl && isArrow !== true) {
+            var argsV = argsWant ? callExt(b, "js_jsargs", [f.Params[1]]) : f.Params[1]
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "arguments"), argsV])
+        }
         var endB = bodyT(b)
         endB.NewRet(hUndef) // A function without return returns undefined.
 
@@ -3987,7 +3990,7 @@ NotFuncHead = :script(~~
         var params = items[0].aparams
         var bodyT = arrowBody(items[1])
         return fnDef(function(b) {
-            var idx = emitFunction(params, bodyT, false, true)
+            var idx = emitFunction(params, bodyT, false, true, false, true)
             return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
         }, "", params, txt)
     }
@@ -5486,6 +5489,7 @@ NotFuncHead = :script(~~
         else { nsDeclStore(b, ext, name, v, true) }
     }
     function tsVarRef(name, pos) {
+        if (name == "arguments") { argsWant = true }
         var ri = hoistNoteRef(name, pos)
         return function(b) {
             var nmV = emitStr(b, name)
@@ -5508,6 +5512,11 @@ NotFuncHead = :script(~~
     function refWriteChk(b, ref, nmV) {
         if (ref.tdz != undefined && hoistRefAll[ref.tdz].chk) { tdzChk(b, callExt(b, nsGetExt(ref.name), [curScopeV, nmV]), nmV) }
     }
+    // See the twin of this comment in js-to-llvm-ir.abnf.
+    var normWant = false
+    function noteMember(name) { if (name == "normalize") { normWant = true } }
+    // See the twin of this comment in js-to-llvm-ir.abnf.
+    var argsWant = false
     // The temporal dead zone: see the twin of this comment in js-to-llvm-ir.abnf.
     var tdzGH = [] // [the sentinel's module global, jstdzchk]
     function tdzGlob() {
@@ -6406,6 +6415,7 @@ NotFuncHead = :script(~~
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Symbol"), callExt(b, "js_jssymbolfn", [])])
         b = emitErrorClasses(b)
         b = emitMissHooks(b)   // after the classes: the hooks raise instances of them.
+        if (normWant) { callExt(b, "js_jsnormdata", [emitStr(b, load("lib/unicode-norm.txt"))]) }
         if (hoistTdzCount > 0) { b.NewStore(callExt(b, "js_gc_pin", [callExt(b, "js_obj_new", [])]), tdzGlob()) }
         b = emitImported(b)
         b = makeSeq(items)(b)

@@ -154,6 +154,9 @@ func (rt *jsrt) jsvProtoTag(v interface{}) string {
 	case jsUndefT:
 		return "[object Undefined]"
 	case *jsArray:
+		if jsvIsArgs(v) {
+			return "[object Arguments]"
+		}
 		return "[object Array]"
 	case float64:
 		return "[object Number]"
@@ -305,6 +308,9 @@ func (rt *jsrt) jsvString(v interface{}) string {
 		}
 		return rt.jsvProtoTag(t)
 	case *jsArray:
+		if t.kind == 19 {
+			return "[object Arguments]"
+		}
 		parts := make([]string, len(t.elems))
 		for i, e := range t.elems {
 			if isUndefOrNull(e) {
@@ -1123,6 +1129,7 @@ var jsvStringMethods = map[string]bool{
 	"trim": true, "trimStart": true, "trimEnd": true, "padStart": true,
 	"padEnd": true, "repeat": true, "concat": true, "replace": true,
 	"replaceAll": true, "toString": true, "valueOf": true, "localeCompare": true,
+	"normalize": true,
 }
 
 var jsvArrayMethods = map[string]bool{
@@ -1154,7 +1161,7 @@ func jsvBuiltinFam(target interface{}, name string) byte {
 			return 'n'
 		}
 	case *jsArray:
-		if jsvArrayMethods[name] || name == "valueOf" {
+		if (jsvArrayMethods[name] || name == "valueOf") && !jsvIsArgs(target) {
 			return 'a'
 		}
 	}
@@ -1205,9 +1212,16 @@ func jsvHidesMember(target interface{}, name string) bool {
 	case string:
 		return jsvStringMethods[name]
 	case *jsArray:
-		return jsvArrayMethods[name]
+		return jsvArrayMethods[name] && !jsvIsArgs(target)
 	}
 	return false
+}
+
+// jsvIsArgs: the arguments object, an array carrying kind 19 (js_jsargs below).
+// Twins: jsIsArgs in both *-interpreter.abnf, jvIsArgs in languages/lib/js-rt.metajs.
+func jsvIsArgs(v interface{}) bool {
+	a, ok := v.(*jsArray)
+	return ok && a.kind == 19
 }
 
 // jsvRelIndex resolves a possibly negative / out-of-range index against a length,
@@ -1650,7 +1664,7 @@ func (rt *jsrt) jsvMethod(target interface{}, name string, args []interface{}) (
 	if hf, ok := target.(*hostFunc); ok && hf.name == "Array" {
 		if name == "isArray" {
 			_, isArr := argAt(args, 0).(*jsArray)
-			return isArr, true
+			return isArr && !jsvIsArgs(argAt(args, 0)), true
 		}
 		return nil, false
 	}
@@ -1689,6 +1703,9 @@ func (rt *jsrt) jsvMethod(target interface{}, name string, args []interface{}) (
 		}
 		return rt.jsvStringMethod(recv, name, args)
 	case *jsArray:
+		if jsvIsArgs(recv) {
+			return nil, false
+		}
 		return rt.jsvArrayMethod(recv, name, args)
 	case float64:
 		return rt.jsvNumberMethod(recv, name, args)
@@ -1919,6 +1936,16 @@ func (rt *jsrt) jsvStringMethod(s string, name string, args []interface{}) (inte
 			return rt.jsvReplaceFn(s, pat, args[1], n), true
 		}
 		return jsvReplaceTemplate(rt, s, pat, argS(1), n), true
+	case "normalize":
+		// Twin of jsNormalize in languages/js-interpreter.abnf.
+		f := "NFC"
+		if len(args) > 0 && args[0] != jsUndef {
+			f = argS(0)
+		}
+		if f != "NFC" && f != "NFD" && f != "NFKC" && f != "NFKD" {
+			rt.bigRaise("RangeError: The normalization form should be one of NFC, NFD, NFKC, NFKD.")
+		}
+		return rt.jsvNormalize(s, f), true
 	case "localeCompare":
 		other := argS(0)
 		switch {
@@ -2715,6 +2742,16 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	}
 
 	baseInstanceof := m["js_instanceof"]
+	// The arguments object of a call: a copy of its argument array carrying kind 19
+	// (jsvIsArgs). Twin: js_jsargs in languages/lib/js-rt.metajs.
+	m["js_jsargs"] = func(a []uint64) uint64 {
+		src, _ := u(a[0]).(*jsArray)
+		c := &jsArray{kind: 19}
+		if src != nil {
+			c.elems = append([]interface{}(nil), src.elems...)
+		}
+		return w(c)
+	}
 	m["js_jsinstanceof"] = func(a []uint64) uint64 {
 		v, target := u(a[0]), u(a[1])
 		if !jsvIsObjLike(target) && !isCallable(target) {
@@ -2737,7 +2774,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		}
 		if jsvIsArrayGlobal(target) {
 			_, isArr := v.(*jsArray)
-			return boolH(isArr)
+			return boolH(isArr && !jsvIsArgs(v))
 		}
 		if isCallable(target) {
 			d, ok := ctorDescs[target]
@@ -3001,6 +3038,13 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			// An Array's valueOf (Object.prototype's): the receiver itself.
 			if fam == 'a' && name == "valueOf" {
 				return recv
+			}
+			// Array.prototype's methods run on any array, the arguments object too,
+			// which js_jsmcall's own dispatch refuses them.
+			if arr, isArr := recv.(*jsArray); isArr && fam == 'a' {
+				if v, ok := rt.jsvArrayMethod(arr, name, args); ok {
+					return v
+				}
 			}
 			return u(m["js_jsmcall"]([]uint64{w(recv), w(name), w(&jsArray{elems: append([]interface{}{}, args...)})}))
 		})
@@ -3589,6 +3633,13 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		if name := rt.toString(u(a[1])); jsvIsProtoName(name) && !isUndefOrNull(u(a[0])) && !rxIsRegexObj(u(a[0])) &&
 			(jsvBuiltinFam(u(a[0]), name) != 0 || isUndefOrNull(u(vget([]uint64{a[0], a[1]})))) {
 			return w(rt.jsvProtoApply(u(a[0]), name, arr.elems))
+		}
+		// The arguments object has no Array method: the miss, so the call site raises
+		// node's TypeError.
+		if jsvIsArgs(u(a[0])) && jsvArrayMethods[rt.toString(u(a[1]))] {
+			if v, ok := rt.mcallMiss(); ok {
+				return w(v)
+			}
 		}
 		if next := m["js_jsxmcall"]; next != nil {
 			return next(a)

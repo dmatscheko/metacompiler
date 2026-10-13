@@ -709,7 +709,7 @@ TagSuffix   <~~ push({kind: "tag", parts: takeAll()}) ~~>
             = TplBody ;
 CallSuffix  <~~ push({kind:"call", args: takeAll()}) ~~>
             = "(" [ Arg { "," Arg } [ "," ] ] ")" ;
-DotSuffix   = "." ( PrivSuffix | Id <~~ push({kind:"member", name: idName(up.in), key: makeConst(idName(up.in))}) ~~> ) ;
+DotSuffix   = "." ( PrivSuffix | Id <~~ push({kind:"member", name: idName(up.in), key: makeConst(idName(up.in))}); noteMember(idName(up.in)) ~~> ) ;
 // 'this.#x': a private name. It is stored under the mangled key '__#<body>#x' (see
 // ClassPrivate),
 // which is what keeps it out of js_keys, so out of for-in and object spread.
@@ -3959,6 +3959,7 @@ NotFuncHead = :script(~~
         if (withDepth > 0) {
             return function(b) { return {b: b, v: callExt(b, "js_jswithget", [curScopeV, emitStr(b, name)])} }
         }
+        if (name == "arguments") { argsWant = true }
         var ri = hoistNoteRef(name, pos)
         return function(b) {
             var nmV = emitStr(b, name)
@@ -3986,6 +3987,15 @@ NotFuncHead = :script(~~
         if (ref.tdz != undefined && hoistRefAll[ref.tdz].chk) { tdzChk(b, callExt(b, "js_scope_get", [curScopeV, nmV]), nmV) }
         callExt(b, (ref.w === true) ? "js_jswithset" : ext, [curScopeV, nmV, v])
     }
+    // String.prototype.normalize needs the tables of lib/unicode-norm.txt, which a
+    // program that names a .normalize member hands both engines at boot
+    // (js_jsnormdata: jsvNormData in abnf/jsrtjsnorm.go, layer 2's js_jsnormdata).
+    var normWant = false
+    function noteMember(name) { if (name == "normalize") { normWant = true } }
+    // An arguments object (js_jsargs: a kind-19 copy of the argument array, see
+    // jsIsArgs in js-interpreter.abnf) is made at function entry only in a program
+    // that names `arguments`; an arrow has none of its own.
+    var argsWant = false
     // The temporal dead zone (lib/js-hoist.js). A scope creates the names some
     // reference can reach uninitialized holding the TDZ SENTINEL, one pinned object
     // made at boot like the miss sentinel, and only those references (chk) pass what
@@ -4360,7 +4370,7 @@ NotFuncHead = :script(~~
     function makeAsyncFn(params, bodyT, isArrow, ownStrict, nm, txt) {
         return fnDef(function(b) {
             pendingAsyncFn = true // Consumed by the emitFunction call below.
-            var idx = emitFunction(params, bodyT, false, true, ownStrict)
+            var idx = emitFunction(params, bodyT, false, true, ownStrict, isArrow)
             if (isArrow) { return {b: b, v: coroOf(b, idx, "async", curScopeV)} }
             return emitThisBinder(b, emitStrict || ownStrict === true, idx, "async")
         }, nm, params, txt)
@@ -5330,7 +5340,7 @@ NotFuncHead = :script(~~
     // the enclosing function's binding, which is exactly what the spec prescribes for an
     // arrow. Every other function binds the DYNAMIC this of its call (js_this, fed by the
     // receiver that the call site handed to js_call).
-    function emitFunction(paramNames, bodyT, isCtl, lexThis, ownStrict) {
+    function emitFunction(paramNames, bodyT, isCtl, lexThis, ownStrict, isArrow) {
         var savedParams = emitParams
         if (!isCtl) { emitParams = paramNames }
         funcCount++
@@ -5381,7 +5391,10 @@ NotFuncHead = :script(~~
         b = bindParams(b, paramNames, f.Params[1], 0)
         // A try/catch/finally body is no function of the program: `arguments` there is
         // the enclosing function's.
-        if (!isCtl) { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "arguments"), f.Params[1]]) }
+        if (!isCtl && isArrow !== true) {
+            var argsV = argsWant ? callExt(b, "js_jsargs", [f.Params[1]]) : f.Params[1]
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "arguments"), argsV])
+        }
         var endB = bodyT(b)
         endB.NewRet(hUndef) // A function without return returns undefined.
 
@@ -5557,7 +5570,7 @@ NotFuncHead = :script(~~
         var params = items[0].aparams
         var bodyT = arrowBody(items[1])
         return fnDef(function(b) {
-            var idx = emitFunction(params, bodyT, false, true)
+            var idx = emitFunction(params, bodyT, false, true, false, true)
             return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
         }, "", params, txt)
     }
@@ -7629,6 +7642,7 @@ NotFuncHead = :script(~~
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Symbol"), callExt(b, "js_jssymbolfn", [])])
         b = emitErrorClasses(b)
         b = emitMissHooks(b)   // after the classes: the hooks raise instances of them.
+        if (normWant) { callExt(b, "js_jsnormdata", [emitStr(b, load("lib/unicode-norm.txt"))]) }
         if (hoistTdzCount > 0) { b.NewStore(callExt(b, "js_gc_pin", [callExt(b, "js_obj_new", [])]), tdzGlob()) }
         b = emitImported(b)
         b = makeSeq(items)(b)

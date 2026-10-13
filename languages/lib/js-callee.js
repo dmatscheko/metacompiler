@@ -16,7 +16,7 @@
 //   - a number literal prints as its value, "2e3" reads "2000" and "1e21" "1e+21";
 //     two NUMBER literals fold, as V8's parser folds them: "(1 + 2)" reads "3",
 //     "(1 / 4)" "0.25", and a signed literal is one literal, "-1"; two string
-//     literals concatenate
+//     literals concatenate; a BigInt literal prints "(intermediate value)"
 //   - an assignment prints its target alone, a conditional "(intermediate value)"
 //     three times, a comma "(a , b)", a call "f(...)", a string-literal index as a
 //     dotted name ('o["a b"]' reads "o.a b")
@@ -160,12 +160,18 @@ function cpLiteral(t) {
     if (!cpIsDigit(c0) && c0 != 46 && c0 != 39) { return t }
     var toks = cpLex(t)
     if (toks === null || toks.length != 1) { return t }
+    if (toks[0]["k"] == "big") { return "(intermediate value)" }
     if (toks[0]["k"] != "num" && toks[0]["k"] != "str") { return t }
     return cpShow(toks[0])
 }
 
 function cpIsIdStart(c) { return (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || c == 95 || c == 36 }
 function cpIsDigit(c) { return c >= 48 && c <= 57 }
+// Whether the digits ending at i are a BigInt literal's: an 'n' that ends the word.
+function cpBigEnd(s, i) {
+    if (i >= s.length || s.charCodeAt(i) != 110) { return false }
+    return i + 1 >= s.length || !(cpIsIdStart(s.charCodeAt(i + 1)) || cpIsDigit(s.charCodeAt(i + 1)))
+}
 
 // The tokens of s, or null. A token that follows a line break carries nl: true, which
 // is what tells a statement boundary without a ';' (cpBodyCount declines it).
@@ -204,8 +210,10 @@ function cpLex(s) {
                 rv = rv * rx + cpDigitVal(s.charCodeAt(i))
                 i = i + 1
             }
+            if (i == start + 2) { return null }
+            if (cpBigEnd(s, i)) { out.push({k: "big"}); i = i + 1; continue }
             // Past 2^53 the running sum is no longer exact.
-            if (i == start + 2 || rv > 9007199254740991) { return null }
+            if (rv > 9007199254740991) { return null }
             if (i < s.length && (cpIsIdStart(s.charCodeAt(i)) || cpIsDigit(s.charCodeAt(i)))) { return null }
             out.push({k: "num", v: "" + rv, f: rv})
             continue
@@ -215,6 +223,7 @@ function cpLex(s) {
             // left to the grammar's own answer.
             if (c == 48 && i + 1 < s.length && cpIsDigit(s.charCodeAt(i + 1))) { return null }
             while (i < s.length && cpIsDigit(s.charCodeAt(i))) { i = i + 1 }
+            if (c != 46 && cpBigEnd(s, i)) { out.push({k: "big"}); i = i + 1; continue }
             if (i < s.length && s.charCodeAt(i) == 46) {
                 i = i + 1
                 while (i < s.length && cpIsDigit(s.charCodeAt(i))) { i = i + 1 }
@@ -575,6 +584,10 @@ function cpPrimary(p) {
     if (k == "num" || k == "str" || k == "rx") {
         p["i"] = p["i"] + 1
         return tok
+    }
+    if (k == "big") {
+        p["i"] = p["i"] + 1
+        return {k: "iv", n: 1}
     }
     if (k == "tpl") {
         p["i"] = p["i"] + 1

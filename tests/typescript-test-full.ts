@@ -3872,6 +3872,62 @@ function s78() {
         s78err(function () { { let r = typeof undeclared78; return r; } }) === "undefined");
 }
 
+// ===== SECTION 79: String.prototype.normalize, a BigInt literal as a callee's base =====
+// The four Unicode normalization forms: decomposition (canonical, or compatibility for
+// NFK*), canonical ordering of combining marks, and canonical composition for NFC and
+// NFKC, Hangul by arithmetic. V8 prints a BigInt literal in a callee's text as
+// "(intermediate value)". Values read off node 24 (through tsc 6.0.3's output).
+function s79hex(s: string): string {
+    const o: string[] = [];
+    for (let i = 0; i < s.length; i++) { o.push(s.charCodeAt(i).toString(16)); }
+    return o.join(" ");
+}
+function s79err(f: () => any): string {
+    try { return "" + f(); } catch (e: any) { return e.name + ": " + e.message; }
+}
+function s79() {
+    const xs = ["é", "ẛ̣", "ﬁ", "각", "á̧", "①", "𝅗𝅥", "x\ud800y"];
+    const forms = ["NFC", "NFD", "NFKC", "NFKD"];
+    const got: string[] = [];
+    for (let i = 0; i < xs.length; i++) {
+        for (let j = 0; j < forms.length; j++) { got.push(s79hex(xs[i].normalize(forms[j]))); }
+    }
+    check("nf79a", got.slice(0, 8).join("|") === "e9|65 301|e9|65 301|1e9b 323|17f 323 307|1e69|73 323 307");
+    check("nf79b", got.slice(8, 16).join("|") === "fb01|fb01|66 69|66 69|ac01|1100 1161 11a8|ac01|1100 1161 11a8");
+    check("nf79c", got.slice(16, 24).join("|") === "e1 327|61 327 301|e1 327|61 327 301|2460|2460|31|31");
+    check("nf79d", got.slice(24).join("|") === "d834 dd57 d834 dd65|d834 dd57 d834 dd65|d834 dd57 d834 dd65|d834 dd57 d834 dd65|78 d800 79|78 d800 79|78 d800 79|78 d800 79");
+    check("nf79e", "é".normalize() === "é" && "abc".normalize("NFD") === "abc" && typeof "".normalize === "function");
+    check("nf79f", s79err(function () { return "a".normalize("nfc"); }) === "RangeError: The normalization form should be one of NFC, NFD, NFKC, NFKD.");
+    check("bc79a", s79err(function () { return (5n as any).nope(); }) === "TypeError: (intermediate value).nope is not a function");
+    check("bc79b", s79err(function () { return ((5n + 1n) as any).nope(); }) === "TypeError: ((intermediate value) + (intermediate value)).nope is not a function");
+}
+
+// ===== SECTION 80: the arguments object is no Array =====
+// It is indexed, has a length and iterates like an array, and Array.prototype's
+// methods run on it through call, but Array.isArray and instanceof Array say no, it
+// has no Array methods of its own, Object.prototype.toString tags it Arguments and
+// JSON writes it as an object. An arrow has no arguments of its own. Values read off
+// node 24 (through tsc 6.0.3's output).
+function s80err(f: () => any): string {
+    try { return "" + f(); } catch (e: any) { return e.name + ": " + e.message; }
+}
+function s80a(...xs: any[]): string { return Array.isArray(arguments) + " " + (arguments instanceof Array) + " " + arguments.length + " " + arguments[1]; }
+function s80b(...xs: any[]): string { return Object.prototype.toString.call(arguments) + " " + String(arguments) + " " + JSON.stringify(arguments); }
+function s80c(...xs: any[]): any { return (arguments as any).map(function (x: any) { return x; }); }
+function s80d(...xs: any[]): string {
+    let s = 0;
+    for (const x of arguments) { s += x; }
+    return s + " " + Array.prototype.slice.call(arguments).join("-") + " " + Array.isArray(Array.from(arguments)) + " " + [...arguments].length;
+}
+function s80e(...xs: any[]): string { const f = () => arguments.length + ":" + arguments[0]; return f(); }
+function s80() {
+    check("ar80a", s80a(1, 2) === "false false 2 2");
+    check("ar80b", s80b(1, "x") === "[object Arguments] [object Arguments] {\"0\":1,\"1\":\"x\"}");
+    check("ar80c", s80err(function () { return s80c(1); }) === "TypeError: arguments.map is not a function");
+    check("ar80d", s80d(1, 2, 3) === "6 1-2-3 true 3");
+    check("ar80e", s80e(4, 5) === "2:4");
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -3953,6 +4009,8 @@ function main(): number {
     s76(); // SECTION-CALL 76
     s77(); // SECTION-CALL 77
     s78(); // SECTION-CALL 78
+    s79(); // SECTION-CALL 79
+    s80(); // SECTION-CALL 80
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }
