@@ -266,7 +266,9 @@ accept_leg() {   # accept_leg NAME [module]
         reject "$name" "KILLED after ${TIMEOUT}s - a truncated leg is not a measurement"
         return 1
     fi
-    if [ "$rc" -ge 128 ] 2>/dev/null; then
+    # A Swift trap is SIGTRAP by definition (swiftc's binary dies with 133), so
+    # all four legs exit 133 on purpose and the status is compared like any other.
+    if [ "$rc" -ge 128 ] 2>/dev/null && ! { [ "$LANG_NAME" = swift ] && [ "$rc" = 133 ]; }; then
         reject "$name" "died on signal $((rc - 128)) (exit $rc) - a crashing leg is not a measurement"
         return 1
     fi
