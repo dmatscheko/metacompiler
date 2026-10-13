@@ -155,7 +155,7 @@ line tracking at warning sites is worth its cost.
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
 
-### T-598 lua: interpreter coroutines replay side effects; `ipairs("abc")`; indexing a coroutine · P1 · LUA · OPEN [V]
+### T-598 lua: interpreter coroutines replay side effects; `ipairs("abc")`; indexing a coroutine · P1 · LUA · IN PROGRESS (LUA worker, round 5) [V]
 The interpreter half runs coroutines by replay: a write to an upvalue, global or shared table made before the yield it is
 paused at runs once per resume. A producer appending to a shared table gives `p1,c1,p1,p2,...` where lua gives
 `p1,c1,p2,...` (compiled halves right). Give the interpreter real suspension (the tag host's generators / a continuation of
@@ -163,7 +163,7 @@ the walk) or run the coroutine body on the host's own coroutine mechanism. `ipai
 (lua: error "bad argument #1 to 'for iterator' (table expected, got string)"). `co.x` / `co.x = 1` on a coroutine works (lua
 "attempt to index a thread value").
 
-### T-599 lua: os library, load/dofile, `<close>`, a real `_G`, NaN sign in string.pack · P3 · LUA · OPEN [V]
+### T-599 lua: os library, load/dofile, `<close>`, a real `_G`, NaN sign in string.pack · P3 · LUA · IN PROGRESS (LUA worker, round 5) [V]
 `os.time/clock/date/getenv/exit` missing (needs a time-zone offset primitive in the three hosts and a handle→C-string bridge
 for getenv natively). `load`/`loadfile`/`dofile` missing (interp could use c.parseFrom; the compiled half has no run-time
 compiler — constant strings only, as bash's eval). `local x <close>` (__close) needs block-exit hooks on every exit path.
