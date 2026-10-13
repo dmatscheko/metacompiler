@@ -268,6 +268,27 @@ function phCellOf(v) {
     return undefined
 }
 
+// How many slots hold a reference cell: absent is the one slot that made it.
+// Twin of phpRefHolders in abnf/jsrtphp.go, which says what is counted.
+function phRefHolders(c) {
+    var n = c["rc"]
+    if (n === undefined) { return 1 }
+    return n
+}
+function phRefAdjust(c, d) {
+    if (c !== undefined) { c["rc"] = phRefHolders(c) + d }
+}
+// A slot that held old now holds cell. Twin of m["js_phrebind"] in abnf/jsrtphp.go.
+function js_phrebind(old, cell) {
+    var co = phCellOf(old)
+    var cn = phCellOf(cell)
+    if (co !== cn) {
+        phRefAdjust(co, -1)
+        phRefAdjust(cn, 1)
+    }
+    return undefined
+}
+
 function phDeref(v) {
     var c = phCellOf(v)
     if (c !== undefined) { return c["v"] }
@@ -1312,6 +1333,7 @@ function phArrUnset(av, k) {
     var vals = av["vals"]
     var at = phDictFind(av, phNormKey(k))
     if (at < 0) { return undefined }
+    phRefAdjust(phCellOf(vals[at]), -1)
     var nk = []
     var nv = []
     var i = 0
@@ -1365,7 +1387,8 @@ function phAACell(av, k) {
 }
 
 // phArrCopy is PHP's value assignment: an array is copied (deeply, since a nested
-// array is a value too), an object is not.
+// array is a value too), an object is not; a reference another slot holds stays
+// one. Twin of phpArrCopy in abnf/jsrtphp.go.
 function phArrCopy(v) {
     var p = phArrParts(v)
     if (p === undefined) { return v }
@@ -1375,7 +1398,11 @@ function phArrCopy(v) {
     var i = 0
     while (i < p.k.length) {
         ok2.push(p.k[i])
-        ov.push(phArrCopy(phDeref(p.v[i])))
+        var c = phCellOf(p.v[i])
+        if (c !== undefined && phRefHolders(c) > 1) {
+            phRefAdjust(c, 1)
+            ov.push(c)
+        } else { ov.push(phArrCopy(phDeref(p.v[i]))) }
         i = i + 1
     }
     if (p.d) {
@@ -3534,8 +3561,12 @@ function js_phmrefat(target, name, i) {
 // the rule.
 // An object called as a function places its arguments for its __invoke.
 function js_phplace(f, args) {
-    if (typeof f == "object" && f !== null) { return js_phplacesig(phSigOf(phMethodOf(f, "__invoke")), args) }
-    return js_phplacesig(phSigOf(f), args)
+    var fn = anytype
+    fn = f
+    if (typeof fn == "object" && fn !== null) { fn = phMethodOf(fn, "__invoke") }
+    var mask = 0
+    if (typeof fn == "function") { mask = fnMeta(fn, "length") }
+    return js_phplacesig(phSigOf(fn), args, mask)
 }
 // The parameter list a function value's meta records, which a closure literal
 // keeps in its record (js_phclo). Twin of phpSigOf in abnf/jsrtphp.go.
@@ -3599,7 +3630,7 @@ function js_phbindsig(clo, target, name) {
 // which class's method it reaches. Twin of js_phmplace in abnf/jsrtphp.go.
 function js_phmplace(target, name, args) {
     var mm = phMethodOf(target, name)
-    if (typeof mm != "function") { return js_phplacesig("", args) }
+    if (typeof mm != "function") { return js_phplacesig("", args, 0) }
     return js_phplace(mm, args)
 }
 // The method `name` of target - an object, or a class for a static method - with
@@ -3616,8 +3647,9 @@ function phMethodOf(target, name) {
     if (typeof mm != "function") { mm = rtFindMethod(cls, phsCase(phStr(name), false)) }
     return mm
 }
-// The same placement, by a signature text the emitter knows at compile time.
-function js_phplacesig(sig, args) {
+// The same placement, by a signature text and by-reference mask the emitter knows
+// at compile time.
+function js_phplacesig(sig, args, mask) {
     var isList = phIsList(args)
     if (isList && sig.indexOf("...") < 0) { return args }
     var out = []
@@ -3626,7 +3658,7 @@ function js_phplacesig(sig, args) {
     var i = 0
     if (sig == "") {
         while (i < p.k.length) {
-            if (typeof p.k[i] == "number") { out.push(phPlaceAt(p, i, isList)) }
+            if (typeof p.k[i] == "number") { out.push(phPlaceAt(p, i, isList || phRefBit(mask, p.k[i]))) }
             i = i + 1
         }
         return out
@@ -3659,10 +3691,11 @@ function js_phplacesig(sig, args) {
         var v = anytype
         v = undefined
         var at = phKeyIndex(p.k, pi)
-        if (at >= 0) { v = phPlaceAt(p, at, isList) } else {
+        var raw = isList || phRefBit(mask, pi)
+        if (at >= 0) { v = phPlaceAt(p, at, raw) } else {
             at = phKeyIndex(p.k, pn)
             if (at >= 0) {
-                v = phPlaceAt(p, at, isList)
+                v = phPlaceAt(p, at, raw)
                 taken["$" + pn] = true
             }
         }
@@ -3672,11 +3705,13 @@ function js_phplacesig(sig, args) {
     // Positions past the declared parameters still travel (func_get_args).
     i = 0
     while (i < p.k.length) {
-        if (typeof p.k[i] == "number" && p.k[i] >= pi) { out.push(phPlaceAt(p, i, isList)) }
+        if (typeof p.k[i] == "number" && p.k[i] >= pi) { out.push(phPlaceAt(p, i, isList || phRefBit(mask, p.k[i]))) }
         i = i + 1
     }
     return out
 }
+// Is bit i of a by-reference mask set?
+function phRefBit(mask, i) { return Math.floor(mask / Math.pow(2, i)) % 2 == 1 }
 // The named-argument errors of a placement against a known parameter list (")" is
 // the empty one), in argument order. Twin of the check in phpPlaceArgs in
 // abnf/jsrtphp.go.
@@ -3706,9 +3741,10 @@ function phCheckNamed(sig, p) {
     }
 }
 // A runtime list may carry the CELL of a by-reference argument, which has to arrive
-// as it is; a collected PHP array holds values.
-function phPlaceAt(p, i, isList) {
-    if (isList) { return p.v[i] }
+// as it is (raw); a collected PHP array holds values, but for a by-reference
+// parameter its references.
+function phPlaceAt(p, i, raw) {
+    if (raw) { return p.v[i] }
     return phDeref(p.v[i])
 }
 function js_phcell(a, k) { return phElemCell(a, k) }

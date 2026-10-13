@@ -310,6 +310,29 @@ func phpCellOf(v interface{}) *jsObject {
 	return nil
 }
 
+// phpRefHolders is how many slots hold a reference cell, its "rc"; absent is the
+// one slot that made it. It is counted where a reference is bound or unbound - '=&',
+// foreach by reference, use (&$v), [&$v], global, unset() and an array copy keeping
+// the cell - but not when a frame returns or an array (an array literal assigned
+// and copied, too) is discarded, so it can only run high. A by-reference argument
+// is not counted: its binding ends with the call. The count is read when the copy
+// is made, at the assignment; PHP reads it at the copy's first write.
+// Twin of phRefHolders in languages/lib/php-rt.metajs and refHolders in
+// php-interpreter.abnf.
+func phpRefHolders(c *jsObject) float64 {
+	if n, ok := c.props["rc"].(float64); ok {
+		return n
+	}
+	return 1
+}
+
+// phpRefAdjust adds d holders to c, when there is a cell.
+func phpRefAdjust(c *jsObject, d float64) {
+	if c != nil {
+		c.set("rc", phpRefHolders(c)+d)
+	}
+}
+
 func phpDeref(v interface{}) interface{} {
 	if c := phpCellOf(v); c != nil {
 		return c.props["v"]
@@ -429,9 +452,13 @@ func phpClassFind(cls interface{}, name string) interface{} {
 // every named argument no parameter took. Against a known list, a named argument
 // that no parameter declares and no variadic collects raises "Unknown named
 // parameter", and one naming a parameter a position already filled raises
-// "overwrites previous argument", both in argument order.
-// Twin of js_phplace in languages/lib/php-rt.metajs.
-func (rt *jsrt) phpPlaceArgs(sig string, args interface{}) interface{} {
+// "overwrites previous argument", both in argument order. mask has bit i set for a
+// by-reference parameter i: an element of a collected array that is a reference
+// arrives there as that reference (call_user_func_array, a spread). An element
+// that is none arrives as its value, where a spread in PHP first makes it a
+// reference in the spread array (ZEND_SEND_UNPACK).
+// Twin of js_phplacesig in languages/lib/php-rt.metajs.
+func (rt *jsrt) phpPlaceArgs(sig string, mask int, args interface{}) interface{} {
 	list, isList := args.(*jsArray)
 	if isList && !strings.Contains(sig, "...") {
 		return list
@@ -442,17 +469,18 @@ func (rt *jsrt) phpPlaceArgs(sig string, args interface{}) interface{} {
 		return out
 	}
 	// A runtime list may carry the CELL of a by-reference argument, which has to
-	// arrive as it is; a collected PHP array holds values.
-	at := func(i int) interface{} {
-		if isList {
+	// arrive as it is; a collected PHP array holds values, but for a by-reference
+	// parameter pi (-1: none) its references.
+	at := func(i, pi int) interface{} {
+		if isList || (pi >= 0 && pi < 53 && (mask>>uint(pi))&1 == 1) {
 			return vals.elems[i]
 		}
 		return phpDeref(vals.elems[i])
 	}
 	if sig == "" {
 		for i, k := range keys.elems {
-			if _, isPos := k.(float64); isPos {
-				out.elems = append(out.elems, at(i))
+			if n, isPos := k.(float64); isPos {
+				out.elems = append(out.elems, at(i, int(n)))
 			}
 		}
 		return out
@@ -487,12 +515,12 @@ func (rt *jsrt) phpPlaceArgs(sig string, args interface{}) interface{} {
 			rest := phpNewArr()
 			for i, k := range keys.elems {
 				if n, isPos := k.(float64); isPos && int(n) >= pi {
-					rt.phpArrPush(rest, at(i))
+					rt.phpArrPush(rest, at(i, -1))
 				}
 			}
 			for i, k := range keys.elems {
 				if s, isName := k.(string); isName && !taken[s] {
-					rt.phpArrSet(rest, s, at(i))
+					rt.phpArrSet(rest, s, at(i, -1))
 				}
 			}
 			out.elems = append(out.elems, rest)
@@ -500,9 +528,9 @@ func (rt *jsrt) phpPlaceArgs(sig string, args interface{}) interface{} {
 		}
 		var v interface{} = jsUndef
 		if i := rt.phpKeyIndex(keys, float64(pi)); i >= 0 {
-			v = at(i)
+			v = at(i, pi)
 		} else if i := rt.phpKeyIndex(keys, p); i >= 0 {
-			v = at(i)
+			v = at(i, pi)
 			taken[p] = true
 		}
 		out.elems = append(out.elems, v)
@@ -510,7 +538,7 @@ func (rt *jsrt) phpPlaceArgs(sig string, args interface{}) interface{} {
 	// Positions past the declared parameters still travel (func_get_args).
 	for i, k := range keys.elems {
 		if n, isPos := k.(float64); isPos && int(n) >= len(params) {
-			out.elems = append(out.elems, at(i))
+			out.elems = append(out.elems, at(i, int(n)))
 		}
 	}
 	return out
@@ -1861,6 +1889,7 @@ func (rt *jsrt) phpArrUnset(av interface{}, k interface{}) {
 	if i < 0 {
 		return
 	}
+	phpRefAdjust(phpCellOf(vals.elems[i]), -1)
 	keys.dropIdx()
 	vals.dropIdx()
 	keys.elems = append(keys.elems[:i], keys.elems[i+1:]...)
@@ -1916,7 +1945,9 @@ func (rt *jsrt) phpAACell(av interface{}, k interface{}) interface{} {
 }
 
 // phpArrCopy is PHP's value assignment: an array is copied (deeply, since a
-// nested array is a value too), an object is not.
+// nested array is a value too), an object is not. An element that is a reference
+// some other slot holds stays that reference in the copy; one only its own slot
+// holds becomes a plain value (zend_array_dup_element).
 func (rt *jsrt) phpArrCopy(v interface{}) interface{} {
 	keys, vals, ok := phpArrParts(v)
 	if !ok {
@@ -1927,6 +1958,11 @@ func (rt *jsrt) phpArrCopy(v interface{}) interface{} {
 	ov, _ := out.props["vals"].(*jsArray)
 	ok2.elems = append(ok2.elems, keys.elems...)
 	for _, e := range vals.elems {
+		if c := phpCellOf(e); c != nil && phpRefHolders(c) > 1 {
+			phpRefAdjust(c, 1)
+			ov.elems = append(ov.elems, c)
+			continue
+		}
 		ov.elems = append(ov.elems, rt.phpArrCopy(phpDeref(e)))
 	}
 	if o, isO := phpAsArr(v); isO {
@@ -3348,6 +3384,16 @@ func init() {
 			}
 			return jsHFalse
 		}
+		// A slot that held old now holds cell (either may be no cell; undefined for
+		// an unset): the holder counts phpArrCopy reads.
+		m["js_phrebind"] = func(a []uint64) uint64 {
+			co, cn := phpCellOf(u(a[0])), phpCellOf(u(a[1]))
+			if co != cn {
+				phpRefAdjust(co, -1)
+				phpRefAdjust(cn, 1)
+			}
+			return 0
+		}
 		m["js_phrtinit"] = func(a []uint64) uint64 {
 			phpMainScope[rt] = a[0]
 			return 0
@@ -3680,7 +3726,7 @@ func init() {
 			if _, isObj := f.(*jsObject); isObj {
 				f = rt.phpMethodOf(f, "__invoke")
 			}
-			return w(rt.phpPlaceArgs(rt.phpSigOf(f), u(a[1])))
+			return w(rt.phpPlaceArgs(rt.phpSigOf(f), jsvFnMeta(f).length, u(a[1])))
 		}
 		// A non-string callee: true for an array callback (which must have two
 		// elements), false for a value the call runs as it is (a closure, an object
@@ -3946,7 +3992,8 @@ func init() {
 		// a call site that cannot know which class's method it reaches. Twin of
 		// js_phmplace in languages/lib/php-rt.metajs.
 		m["js_phmplace"] = func(a []uint64) uint64 {
-			return w(rt.phpPlaceArgs(rt.phpSigOf(rt.phpMethodOf(u(a[0]), u(a[1]))), u(a[2])))
+			meth := rt.phpMethodOf(u(a[0]), u(a[1]))
+			return w(rt.phpPlaceArgs(rt.phpSigOf(meth), jsvFnMeta(meth).length, u(a[2])))
 		}
 		// (name, self, static) -> the class a run-time class name the scope did not
 		// declare denotes: self / static / parent through the frame's classes (null
@@ -3992,7 +4039,7 @@ func init() {
 			return 0
 		}
 		m["js_phplacesig"] = func(a []uint64) uint64 {
-			return w(rt.phpPlaceArgs(rt.phpStr(u(a[0])), u(a[1])))
+			return w(rt.phpPlaceArgs(rt.phpStr(u(a[0])), int(rt.toNumber(u(a[2]))), u(a[1])))
 		}
 		// The four that REPLACE a jsrt.go entry: each is exact 64 bit where the
 		// shared one is 32 bit or double based.

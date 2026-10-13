@@ -1674,7 +1674,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 sv = a.argspread()
                 if (isArr(sv)) {
                     for (var j = 0; j < sv.keys.length; j++) {
-                        if (typeof sv.keys[j] == "number") { pos.push(deref(sv.vals[j])); tgts.push(null) }
+                        // An element that is a reference reaches a by-reference
+                        // parameter as that reference.
+                        if (typeof sv.keys[j] == "number") { pos.push(deref(sv.vals[j])); tgts.push(isRef(sv.vals[j]) ? cellOf(sv.vals[j]) : null) }
                         else {
                             if (hasOwn(named, "$" + sv.keys[j])) { namedTwice("$" + sv.keys[j]) }
                             nkeys.push("$" + sv.keys[j])
@@ -1720,6 +1722,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // A by-reference parameter needs the CALLER's cell, but binding happens after
     // the frame switch - so the maker restores the caller's chain for the lookup.
     // read is {v} of the value the argument was already read as (targetCell).
+    function cellOf(cell) { return function() { return cell } }
     function mkCellMaker(ref, here, read) {
         return function() {
             var saved = scopes
@@ -1780,6 +1783,20 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     var UNSET = {__unset: true}
     function isRef(v) { return v !== null && v !== undefined && typeof v == "object" && v.__refcell === true }
     function deref(v) { return isRef(v) ? v.v : v }
+    // How many slots hold a cell ("rc", absent for the one slot that made it), which
+    // decides whether an array copy keeps it (copySlot). Twin of phpRefHolders in
+    // abnf/jsrtphp.go, which says what is counted.
+    function refHolders(c) { return c.rc == undefined ? 1 : c.rc }
+    // A slot that held old now holds cell; either may be no cell.
+    function rebind(old, cell) {
+        if (old === cell) { return }
+        if (isRef(old)) { old.rc = refHolders(old) - 1 }
+        if (isRef(cell)) { cell.rc = refHolders(cell) + 1 }
+    }
+    function bindRef(fr, name, cell) {
+        rebind(hasOwn(fr, name) ? fr[name] : undefined, cell)
+        scopePut(fr, name, cell)
+    }
     // ----- Variables: local to ONE frame -----------------------------------------
     // PHP has no lexical variable scope: a `$name` lives in the frame of the function
     // (or of the main program, globalScope) it is used in and nothing else reaches it
@@ -1860,7 +1877,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return function() {
             for (var i = 0; i < names.length; i++) {
                 var nm = names[i].gnT != undefined ? "$" + phpStr(names[i].gnT()) : names[i].gn
-                scopePut(scopes[scopes.length - 1], nm, varCellIn(globalScope, nm))
+                bindRef(scopes[scopes.length - 1], nm, varCellIn(globalScope, nm))
             }
             return null
         }
@@ -2495,7 +2512,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // binds by value, the same degradation DTarget's '&' already documents).
     function feBind(ref, v, byref, src, key) {
         if (byref && ref.path.length == 0 && ref.name != null && ref.sref == null) {
-            scopePut(scopes[scopes.length - 1], refName(ref), arrCell(src, key))
+            bindRef(scopes[scopes.length - 1], refName(ref), arrCell(src, key))
             return
         }
         writeTargetVal(ref, phpCopy(v))
@@ -2950,11 +2967,11 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 var nm = refName(ref)
                 if (ref.path.length == 0 && ref.gkey != undefined) {
                     var gn = globalsName(ref.gkey)
-                    if (hasOwn(globalScope, gn)) { scopePut(globalScope, gn, UNSET) }
+                    if (hasOwn(globalScope, gn)) { bindRef(globalScope, gn, UNSET) }
                     continue
                 }
                 if (ref.path.length == 0) {
-                    if (hasOwn(scopes[scopes.length - 1], nm)) { scopePut(scopes[scopes.length - 1], nm, UNSET) }
+                    if (hasOwn(scopes[scopes.length - 1], nm)) { bindRef(scopes[scopes.length - 1], nm, UNSET) }
                     continue
                 }
                 // unset() DIAGNOSES NOTHING, and neither does a path through a name
@@ -3073,6 +3090,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (i < 0) { return }
         var ks = a.keys
         var vs = a.vals
+        rebind(vs[i], undefined)
         for (var j = i; j < ks.length - 1; j++) { ks[j] = ks[j + 1]; vs[j] = vs[j + 1] }
         ks.pop()
         vs.pop()
@@ -3095,7 +3113,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     function arrCopy(a) {
         var out = newArr()
-        for (var i = 0; i < a.keys.length; i++) { arrSet(out, a.keys[i], phpCopy(deref(a.vals[i]))) }
+        for (var i = 0; i < a.keys.length; i++) { arrSet(out, a.keys[i], copySlot(a.vals[i])) }
         out.__next = a.__next
         if (hasOwn(a, "__pos")) { out.__pos = a.__pos }
         return out
@@ -3104,6 +3122,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // argument pass of an array hands over a copy (copy-on-assign, not the engine's
     // lazy copy-on-write - observationally the same for a single-threaded program).
     function phpCopy(v) { return isArr(v) ? arrCopy(v) : v }
+    // One element of an array copy: a reference some other slot holds stays that
+    // reference, one only its own slot holds becomes its value (zend_array_dup_element).
+    function copySlot(e) {
+        if (isRef(e) && refHolders(e) > 1) { e.rc = e.rc + 1; return e }
+        return phpCopy(deref(e))
+    }
 
     // A by-reference element (er, or hr under the key hk) holds its target's
     // storage cell; the key is evaluated before the target (zend_compile_array).
@@ -3135,6 +3159,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     function arrRefAt(d, key, ref) {
         var cell = targetCell(ref)
         if (cell == null) { fail("cannot take a reference to this expression") }
+        rebind(undefined, cell)
         var at = key === undefined ? -1 : dictFind(d, key)
         if (at < 0) {
             if (key === undefined) { arrPush(d, null) } else { arrSet(d, key, null) }
@@ -4810,7 +4835,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             var captured = cloChain(sc)
             var env = {}
             for (var i = 0; i < byval.length; i++) { scopePut(env, byval[i], phpCopy(getVar(byval[i]))) }
-            for (var j = 0; j < byref.length; j++) { scopePut(env, byref[j], varCell(byref[j])) }
+            for (var j = 0; j < byref.length; j++) { bindRef(env, byref[j], varCell(byref[j])) }
             return closureBody(params, body, captured, env, isGen, desc, cloThis(self), sc.st, sc.ut === true)
         }
     }
@@ -5538,9 +5563,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return function() {
             var cell = targetCell(rhs)
             if (cell == null) { fail("cannot take a reference to this expression") }
-            if (lhs.path.length == 0 && lhs.gkey != undefined) { scopePut(globalScope, globalsName(lhs.gkey), cell); return cell.v }
-            if (lhs.path.length == 0) { scopePut(scopes[scopes.length - 1], refName(lhs), cell); return cell.v }
+            if (lhs.path.length == 0 && lhs.gkey != undefined) { bindRef(globalScope, globalsName(lhs.gkey), cell); return cell.v }
+            if (lhs.path.length == 0) { bindRef(scopes[scopes.length - 1], refName(lhs), cell); return cell.v }
             var p = resolveRefPhp(lhs)
+            rebind(undefined, cell)
             // A typed property bound to a reference takes the referenced value as it
             // would an assigned one, and coerces it in place.
             if (p.last.key != undefined && isObj(p.obj)) {

@@ -1987,6 +1987,12 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         makeB.NewBr(mergeB)
         return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(raw, haveB), llvm.ir.NewIncoming(cell, makeB)])}
     }
+    // A slot of scopeV under nameV now holds cell: the holder counts an array copy
+    // reads (js_phrebind, abnf/jsrtphp.go). Twin of bindRef in php-interpreter.abnf.
+    function bindRefIn(b, scopeV, nameV, cell) {
+        callExt(b, "js_phrebind", [callExt(b, "js_scope_own", [scopeV, nameV]), cell])
+        callExt(b, "js_scope_decl", [scopeV, nameV, cell])
+    }
     function varCell(b, name) {
         curWrites[name] = true
         return varCellV(b, emitStr(b, name))
@@ -2027,12 +2033,13 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             if (lhs.path.length == 0 && lhs.gkey != undefined) {
                 var gn = globalsNameV(b, lhs)
                 b = gn.b
-                callExt(b, "js_scope_decl", [globalsFrameV(b), gn.v, rc.v])
+                bindRefIn(b, globalsFrameV(b), gn.v, rc.v)
             } else if (lhs.path.length == 0) {
-                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, lhs.name), rc.v])
+                bindRefIn(b, curScopeV, emitStr(b, lhs.name), rc.v)
             } else {
                 var p = emitRefPathV(b, lhs, true)
                 b = p.b
+                callExt(b, "js_phrebind", [hUndef, rc.v])
                 if (p.kind == "append") { callExt(b, "js_phpush", [p.obj, rc.v]) }
                 else if (p.kind == "index") { callExt(b, "js_phset", [p.obj, p.key, rc.v]) }
                 else {
@@ -2067,7 +2074,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         for (var k = 0; k < byRef.length; k++) {
             var rc = varCell(b, byRef[k])
             b = rc.b
-            callExt(b, "js_scope_decl", [env, emitStr(b, byRef[k]), rc.v])
+            bindRefIn(b, env, emitStr(b, byRef[k]), rc.v)
         }
         return {b: b, v: env}
     }
@@ -2098,7 +2105,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 b = nm.b
                 var rc = varCellIn(b, gV, nm.v)
                 b = rc.b
-                callExt(b, "js_scope_decl", [curScopeV, nm.v, rc.v])
+                bindRefIn(b, curScopeV, nm.v, rc.v)
             }
             return b
         }
@@ -2989,12 +2996,17 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // Bind one element of the iteration to the slot the header declared. A plain
     // variable is a single js_scope_decl; anything else is an ordinary assignment
     // target and goes through the path walk.
-    function emitFeBind(b, ref, v) {
+    // isRef: v is the element's cell ('as &$v').
+    function emitFeBind(b, ref, v, isRef) {
         if (ref == null) { return b }
         if (ref.path.length == 0 && ref.sbase == undefined && ref.headT == undefined && ref.nameT == null
             && ref.gkey == undefined) {
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, ref.name), v])
-            return b
+            if (isRef === true) {
+                bindRefIn(b, curScopeV, emitStr(b, ref.name), v)
+                return b
+            }
+            // A by-value loop variable that is a reference is assigned through it.
+            return setVar(b, ref.name, v)
         }
         // A computed name ($$n, $GLOBALS[e]) has no path to walk.
         if (ref.path.length == 0 && ref.sbase == undefined && ref.headT == undefined) {
@@ -3072,7 +3084,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             }
             if (keyName != null) { bodyB = emitFeBind(bodyB, keyName, callExt(bodyB, "js_range_key", [itV, iB])) }
             if (pat != null) { bodyB = emitBindPattern(bodyB, pat, elemV) }
-            else { bodyB = emitFeBind(bodyB, valName, elemV) }
+            else { bodyB = emitFeBind(bodyB, valName, elemV, byRef) }
             loopStack.push({cont: postB, brk: exitB})
             body(bodyB).NewBr(postB)
             loopStack.pop()
@@ -3313,14 +3325,18 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var aK = callExt(aBody, "js_range_key", [itA, ixA])
             var aV = anytype
             if (byRef) { aV = elemCell(aBody, itA, aK) }
-            else { aV = callExt(aBody, "js_phcopy", [callExt(aBody, "js_range_val", [itA, ixA])]) }
+            else {
+                var rdA = phDeref(aBody, callExt(aBody, "js_range_val", [itA, ixA]))
+                aBody = rdA.b
+                aV = callExt(aBody, "js_phcopy", [rdA.v])
+            }
             aBody.NewBr(bindB)
             var keyV = bindB.NewPhi([llvm.ir.NewIncoming(gK, joinB), llvm.ir.NewIncoming(aK, aBody)])
             var valV = bindB.NewPhi([llvm.ir.NewIncoming(gV, joinB), llvm.ir.NewIncoming(aV, aBody)])
             var bb = bindB
             if (keyName != null) { bb = emitFeBind(bb, keyName, keyV) }
             if (pat != null) { bb = emitBindPattern(bb, pat, valV) }
-            else { bb = emitFeBind(bb, valName, valV) }
+            else { bb = emitFeBind(bb, valName, valV, byRef) }
             loopStack.push({cont: postB, brk: exitB})
             body(bb).NewBr(postB)
             loopStack.pop()
@@ -3650,9 +3666,11 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                     // The key is evaluated before a by-reference target (zend_compile_array).
                     var rk = items[k].hk(b); b = rk.b
                     var rv = items[k].hr != undefined ? targetCell(b, items[k].hr) : items[k].hv(b); b = rv.b
+                    if (items[k].hr != undefined) { callExt(b, "js_phrebind", [hUndef, rv.v]) }
                     callExt(b, "js_phset", [d, rk.v, rv.v])
                 } else if (items[k].er != undefined) {
                     var rc = targetCell(b, items[k].er); b = rc.b
+                    callExt(b, "js_phrebind", [hUndef, rc.v])
                     callExt(b, "js_phpush", [d, rc.v])
                 } else if (items[k].spread != undefined) {
                     var rs = items[k].spread(b); b = rs.b
@@ -4396,12 +4414,13 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 if (ref.path.length == 0 && ref.gkey != undefined) {
                     var gn = globalsNameV(b, ref)
                     b = gn.b
-                    callExt(b, "js_scope_decl", [globalsFrameV(b), gn.v, hUndef])
+                    bindRefIn(b, globalsFrameV(b), gn.v, hUndef)
                 } else if (ref.path.length == 0) {
                     if (ref.sbase == undefined) {
                         var rn3 = refNameV(b, ref)
                         b = rn3.b
-                        callExt(b, "js_scope_decl", [curScopeV, rn3.v, hUndef])
+                        if (usesRefs) { bindRefIn(b, curScopeV, rn3.v, hUndef) }
+                        else { callExt(b, "js_scope_decl", [curScopeV, rn3.v, hUndef]) }
                     }
                 } else {
                     noteWrite(ref)
@@ -5901,7 +5920,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // makes for a callee known only at run time, from the signature text here.
     function emitPlaceInto(b, tmp, sig) {
         var text = sig == null ? "" : sigText(sig.params, sig.rest)
-        return {b: b, v: callExt(b, "js_phplacesig", [emitStr(b, text), tmp])}
+        return {b: b, v: callExt(b, "js_phplacesig", [emitStr(b, text), tmp, emitNum(b, sig == null ? 0 : refMask(sig))])}
     }
     // A parameter list as the runtime reads it: the names without '$', comma
     // separated, the variadic one spelled "...name"; ")" when there are none, which

@@ -3520,7 +3520,10 @@ function s70refs($xs) { foreach ($xs as &$v) { $v = 8; } unset($v); $r = &$xs[1]
 function s70rest(...$xs) { $xs[0][0] = 6; return $xs[0][0]; }
 function s70read($xs) { return $xs[0] + count($xs); }
 function s70gen($xs) { yield $xs[0]; yield $xs[0]; }
-class S70M { public $items = [1]; function m($xs) { $xs[] = 2; return count($xs); } static function s($xs) { $xs[0]++; return $xs[0]; } }
+class S70M { public $items = [1]; function m($xs) { $xs[] = 2; return count($xs); } static function s($xs) { $xs[0]++; return $xs[0]; }
+    function inc(&$x) { $x += 10; } }
+function s70inc(&$x) { $x++; }
+function s70set2(&$z) { $z = 3; }
 function s70() {
     $a = [1, 2];
     $n = ['k' => [1], 'j' => 2];
@@ -3534,6 +3537,23 @@ function s70() {
     $a[0] = 5;
     $g->next();
     check("abv2", s70read($a) === 7 && $first === 1 && $g->current() === 1);
+    $n = 1; $r1 = []; $r1[0] = &$n; $r2 = $r1; $r2[0] = 7;
+    $k = 1; $r3 = [&$k, 4]; $r3[0] = 9;
+    $x = 1; $r4 = []; $r4[0] = &$x; unset($x); $r5 = $r4; $r5[0] = 5;
+    $p = [1, 2]; s70set2($p[0]); $q = $p; $q[0] = 8;
+    check("arc1", $n === 7 && $k === 9 && $r4[0] === 1 && $p[0] === 3);
+    $l1 = [1, 2, 3]; foreach ($l1 as &$v) { $v *= 2; } unset($v); $c1 = $l1; $c1[2] = 0;
+    $l2 = [1, 2, 3]; foreach ($l2 as &$v) { $v *= 2; } $c2 = $l2; $c2[2] = 0;
+    $l3 = [1, 2, 3]; foreach ($l3 as &$w) { } foreach ($l3 as $w) { }
+    $l4 = [1, 2]; foreach ($l4 as &$v4) { } unset($v4); foreach ($l4 as $x4) { $x4 = 9; }
+    check("arc2", $l1 === [2, 4, 6] && $l2 === [2, 4, 0] && $l3 === [1, 2, 2] && $l4 === [1, 2]);
+    $m = 1; $sp = []; $sp[0] = &$m;
+    call_user_func_array('s70inc', $sp);
+    s70inc(...$sp);
+    s70inc(...[&$m]);
+    (new S70M)->inc(...$sp);
+    $plain = [1]; call_user_func_array('s70inc', $plain);
+    check("spr1", $m === 14 && $plain === [1]);
 }
 
 // ===== END SECTIONS =====
