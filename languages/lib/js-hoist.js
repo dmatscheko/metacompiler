@@ -23,10 +23,10 @@
 // plain function (not async, not a generator) and ab that its declaration performs
 // the Annex B assignment. The grammar adds what instantiating it takes.
 var hoistFns = []
-var hoistLex = []   // {name, at, file} of each let, const and class name.
+var hoistLex = []   // {name, at, file, cst} of each let, const and class name; cst marks a const.
 var hoistAnnex = [] // Block functions whose function body has not claimed them yet.
 
-function hoistNoteLex(name, pos) { hoistLex.push({name: name, at: pos, file: c.curFile()}) }
+function hoistNoteLex(name, pos, cst) { hoistLex.push({name: name, at: pos, file: c.curFile(), cst: cst === true}) }
 
 function hoistSplit(recs, from, to) {
     var file = c.curFile()
@@ -47,11 +47,15 @@ function hoistClaimFns(from, to) {
 
 // The lexical names declared directly in a span and not claimed yet, without claiming
 // them: at a `for` statement's own tag that is what its head declares, the names a
-// per-iteration environment copies (CreatePerIterationEnvironment).
-function hoistLexNames(from, to) {
+// per-iteration environment copies (CreatePerIterationEnvironment). constOnly keeps
+// the const ones.
+function hoistLexNames(from, to, constOnly) {
     var got = hoistSplit(hoistLex, from, to).got
     var names = []
-    for (var i = 0; i < got.length; i++) { if (names.indexOf(got[i].name) < 0) { names.push(got[i].name) } }
+    for (var i = 0; i < got.length; i++) {
+        if (constOnly === true && !got[i].cst) { continue }
+        if (names.indexOf(got[i].name) < 0) { names.push(got[i].name) }
+    }
     return names
 }
 

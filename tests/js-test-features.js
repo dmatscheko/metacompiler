@@ -814,6 +814,21 @@ check("index-args-tointeger", (function () {
         && [5, 6].at(v[1]) === 5;
 })());
 
+// ----- TypeErrors: const assignment, `in` on a primitive, `instanceof` a non-object -----
+check("missing-typeerrors", (function () {
+    function kind(f) { try { f(); return "none"; } catch (e) { return (e instanceof TypeError ? "T:" : "E:") + e.message; } }
+    const c = 1;
+    var rs = ["abc", 5, {}];
+    var ac = "T:Assignment to constant variable.";
+    return kind(function () { c = 2; }) === ac && kind(function () { c += 1; }) === ac && kind(function () { c++; }) === ac
+        && kind(function () { [c] = [5]; }) === ac && kind(function () { for (const x of [1]) { x = 2; } }) === ac
+        && kind(function () { const {a, b} = {a: 1, b: 2}; b = 3; }) === ac && kind(function () { let c = 3; c = 4; }) === "none"
+        && kind(function () { for (const i = 0; i < 2; i++) {} }) === ac && c === 1
+        && kind(function () { return "a" in rs[0]; }) === "T:Cannot use 'in' operator to search for 'a' in abc"
+        && kind(function () { return ({}) instanceof rs[1]; }) === "T:Right-hand side of 'instanceof' is not an object"
+        && kind(function () { return ({}) instanceof rs[2]; }) === "T:Right-hand side of 'instanceof' is not callable";
+})());
+
 function main() {
     println("features: " + checks + " checks, " + failures + " failures");
     return failures;

@@ -444,7 +444,7 @@ Do          <~~ push(makeDo(pop(), pop())) ~~>
 
 // The three optional parts are wrapped with a kind marker, otherwise e.g.
 // 'for (;c;)' and 'for (i=0;;)' could not be told apart on the stack.
-For         <~~ push(makeFor(takeAll(), hoistLexNames(up.start, up.pos))); hoistLexKill(up.start, up.pos) ~~>
+For         <~~ push(makeFor(takeAll(), hoistLexNames(up.start, up.pos), hoistLexNames(up.start, up.pos, true))); hoistLexKill(up.start, up.pos) ~~>
             = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" NestedStatement ;
 ForInit     <~~ push({k:"init", t:pop()}) ~~> = ForVar | ForExpr ;
 ForVar      = VarDeclCore ;
@@ -1064,15 +1064,15 @@ ForOfPat    = ForOfPatDecl | ForOfPatAssign ;
 // leaves are bound afresh in the loop's own scope; after var it assigns the function's
 // hoisted names (forDeclTarget); without a keyword it is an ASSIGNMENT pattern, whose
 // leaves may be members ('for ([o.a] of xs)'), which is why it is a production of its own.
-ForOfPatDecl <~~ push(makeForOf(takeAll(), up.pos)); hoistLexKill(up.start, up.pos) ~~>
+ForOfPatDecl <~~ push(makeForOf(takeAll(), up.pos, hoistLexNames(up.start, up.pos, true))); hoistLexKill(up.start, up.pos) ~~>
             = KwFor [ KwAwait <~~ push({fawait: true}) ~~> ] "(" DeclKw DPattern <~~ push(forDeclTarget(pop(), up.pos)) ~~> [ TypeAnnot ] ForOfOp Expression ")" NestedStatement ;
-ForOfPatAssign <~~ push(makeForOf(takeAll(), up.pos)); hoistLexKill(up.start, up.pos) ~~>
+ForOfPatAssign <~~ push(makeForOf(takeAll(), up.pos, hoistLexNames(up.start, up.pos, true))); hoistLexKill(up.start, up.pos) ~~>
             = KwFor [ KwAwait <~~ push({fawait: true}) ~~> ] "(" ForOfAPat [ TypeAnnot ] ForOfOp Expression ")" NestedStatement ;
 ForOfAPat   <~~ push({apat: pop()}) ~~>
             = APattern ;
 // 'for await (x of xs)' pushes a {fawait} marker that makeForOf strips: it drives an
 // ITERATOR by awaiting each next() and an array or a string by awaiting each ELEMENT.
-ForOfName   <~~ push(makeForOf(takeAll(), up.pos)); hoistLexKill(up.start, up.pos) ~~>
+ForOfName   <~~ push(makeForOf(takeAll(), up.pos, hoistLexNames(up.start, up.pos, true))); hoistLexKill(up.start, up.pos) ~~>
             = KwFor [ KwAwait <~~ push({fawait: true}) ~~> ] "(" ForOfHead Expression ")" NestedStatement ;
 // See the twin of this comment in js-to-llvm-ir.abnf.
 ForOfHead   = ForOfDecl ForOfOp | NotLet ForOfBare ForOfOp | ForOfBare ForInOp ;
@@ -1099,7 +1099,7 @@ ForInOp     = KwIn <~~ push(up.in) ~~> ;
 // pattern '[a.b]' would produce and takes the same write path. TargetTail rather than a
 // plain suffix repetition: the path must END in a member, so 'for (a.b() of xs)' stays
 // the syntax error it is instead of reaching emitRefPath with a call as its last element.
-ForOfPath   <~~ push(makeForOf(takeAll(), up.pos)); hoistLexKill(up.start, up.pos) ~~>
+ForOfPath   <~~ push(makeForOf(takeAll(), up.pos, hoistLexNames(up.start, up.pos, true))); hoistLexKill(up.start, up.pos) ~~>
             = KwFor "(" ForOfPathHead Expression ")" NestedStatement ;
 ForOfPathHead = NotLet ForOfTarget ForOfOp | ForOfTarget ForInOp ;
 ForOfTarget <~~ push(makeForOfTarget(takeAll(), up.pos)) ~~>
@@ -2739,7 +2739,8 @@ NotFuncHead = :script(~~
                 // js_jshas is js_has plus the __class methods: an instance keeps its
                 // methods on its class descriptor, not as own properties, but
                 // `"m" in instance` is true in node.
-                if (items[i] == "in") { v = callExt(b, "js_jshas", [rr.v, v]) }
+                // js_jsin raises node's TypeError for a primitive on the right first.
+                if (items[i] == "in") { v = callExt(b, "js_jsin", [rr.v, v]) }
                 // js_jsinstanceof also answers a plain constructor FUNCTION on the
                 // right ('function F() {}; new F() instanceof F') and the Object / Array
                 // globals; the shared extern only knows class descriptors. It delegates
@@ -3656,7 +3657,7 @@ NotFuncHead = :script(~~
             b = r.b
             var v = r.v
             if (op != "=") { v = emitBinOp(b, op, oldV, v) }
-            if (ref.path.length == 0) { callExt(b, nsSetExt(ref.name, setExt), [curScopeV, emitStr(b, ref.name), v]) }
+            if (ref.path.length == 0) { constChk(b, ref.name); callExt(b, nsSetExt(ref.name, setExt), [curScopeV, emitStr(b, ref.name), v]) }
             else { callExt(b, memSetExt(), [p.obj, p.key, v]) }
             return {b: b, v: v}
         }
@@ -3688,7 +3689,7 @@ NotFuncHead = :script(~~
             b.NewCondBr(condI, assignB, mergeB)
             var r = valT(assignB)
             var ab = r.b
-            if (nameV != null) { callExt(ab, nsSetExt(ref.name, "js_scope_set"), [curScopeV, emitStr(ab, ref.name), r.v]) }
+            if (nameV != null) { constChk(ab, ref.name); callExt(ab, nsSetExt(ref.name, "js_scope_set"), [curScopeV, emitStr(ab, ref.name), r.v]) }
             else { callExt(ab, memSetExt(), [objV, keyV, r.v]) }
             ab.NewBr(mergeB)
             var phi = mergeB.NewPhi([llvm.ir.NewIncoming(r.v, ab), llvm.ir.NewIncoming(oldV, fromB)])
@@ -3705,6 +3706,7 @@ NotFuncHead = :script(~~
             if (ref.path.length == 0) {
                 var nameV = emitStr(b, ref.name)
                 var oldV = callExt(b, "js_jstonumeric", [callExt(b, nsGetExt(ref.name), [curScopeV, nameV])])
+                constChk(b, ref.name)
                 callExt(b, nsSetExt(ref.name, "js_scope_set"), [curScopeV, nameV, callExt(b, "js_jsstep", [oldV, oneV])])
                 return {b: b, v: oldV}
             }
@@ -3724,6 +3726,7 @@ NotFuncHead = :script(~~
                 var nameV = emitStr(b, ref.name)
                 var oldV = callExt(b, "js_jstonumeric", [callExt(b, nsGetExt(ref.name), [curScopeV, nameV])])
                 var newV = callExt(b, "js_jsstep", [oldV, oneV])
+                constChk(b, ref.name)
                 callExt(b, nsSetExt(ref.name, "js_scope_set"), [curScopeV, nameV, newV])
                 return {b: b, v: newV}
             }
@@ -4035,7 +4038,7 @@ NotFuncHead = :script(~~
     }
 
     // See the twin of this comment in js-to-llvm-ir.abnf.
-    function makeForOf(items, pos) {
+    function makeForOf(items, pos, constNames) {
         // 'for await (x of xs)' pushes a {fawait} marker from its header; strip it so
         // every index below is the one the plain form has.
         var isAwait = false
@@ -4165,6 +4168,7 @@ NotFuncHead = :script(~~
             }
             if (isPat) { bodyB = bindPattern(bodyB, name, elemV, patExt) }
             else { callExt(bodyB, nsSetExt(name, "js_scope_decl"), [curScopeV, emitStr(bodyB, name), elemV]) }
+            constMark(bodyB, curScopeV, constNames)
             var brkB = exitB   // where `break` goes: exitB, or the closing block below.
             if (lazy) {
                 var closeB = curF.NewBlock("")
@@ -4241,6 +4245,7 @@ NotFuncHead = :script(~~
     // whose leaves may be member targets ('[a.b] = c').
     function assignRef(b, ref, valueH) {
         if (ref.path.length == 0 && ref.base == undefined) {
+            constChk(b, ref.name)
             callExt(b, nsSetExt(ref.name, "js_scope_set_or_create"), [curScopeV, emitStr(b, ref.name), valueH])
             return b
         }
@@ -4275,6 +4280,7 @@ NotFuncHead = :script(~~
         b = d.b
         valueH = d.v
         if (pat.dtype == "id") {
+            if (declExt == "js_scope_set_or_create" || declExt == "js_jswithset") { constChk(b, pat.name) }
             nsLeafStore(b, declExt, pat.name, valueH)
             return b
         }
@@ -4392,9 +4398,16 @@ NotFuncHead = :script(~~
             notePatVars(pat, pos)
             ext = "js_scope_set"
         }
+        var cn = []
+        if (declIsConst()) {
+            cn = patNames(pat, [])
+            constNote(cn)
+        }
         return function(b) {
             var r = init(b)
-            return bindPattern(r.b, pat, r.v, ext)
+            var eb = bindPattern(r.b, pat, r.v, ext)
+            constMark(eb, curScopeV, cn)
+            return eb
         }
     }
 
@@ -4404,6 +4417,18 @@ NotFuncHead = :script(~~
     var declKinds = []
     var varRecs = []
     function declIsVar() { return declKinds.length > 0 && declKinds[declKinds.length - 1] == "var" }
+    // See the twin of this comment in js-to-llvm-ir.abnf.
+    var jsConstNames = {}
+    function declIsConst() { return declKinds.length > 0 && declKinds[declKinds.length - 1] == "const" }
+    function constNote(names) {
+        for (var i = 0; i < names.length; i++) { jsConstNames["$" + names[i]] = true }
+    }
+    function constMark(b, sc, names) {
+        for (var i = 0; i < names.length; i++) { callExt(b, "js_scope_decl", [sc, emitStr(b, "0const:" + names[i]), hTrue]) }
+    }
+    function constChk(b, name) {
+        if (jsConstNames["$" + name] != undefined) { callExt(b, "js_jsconstchk", [curScopeV, emitStr(b, name)]) }
+    }
     function claimVars(from, to) {
         var file = c.curFile()
         var names = []
@@ -4542,13 +4567,15 @@ NotFuncHead = :script(~~
     // (a plain name in the loop's one slot), var assigns the hoisted names.
     function forDeclTarget(pat, pos) {
         var isVar = declIsVar()
+        var isConst = declIsConst()
         declKinds.pop()
         if (isVar) {
             notePatVars(pat, pos)
             return {apat: pat}
         }
         var ns = patNames(pat, [])
-        for (var i = 0; i < ns.length; i++) { hoistNoteLex(ns[i], pos) }
+        for (var i = 0; i < ns.length; i++) { hoistNoteLex(ns[i], pos, isConst) }
+        if (isConst) { constNote(ns) }
         if (pat.dtype == "id") { return pat.name }
         return pat
     }
@@ -5930,7 +5957,9 @@ NotFuncHead = :script(~~
                 return vr.b
             }
         }
-        hoistNoteLex(name, pos)
+        var cst = declIsConst()
+        hoistNoteLex(name, pos, cst)
+        if (cst) { constNote([name]) }
         return function(b) {
             var v = hUndef
             if (items.length > 1) {
@@ -5939,6 +5968,7 @@ NotFuncHead = :script(~~
                 v = r.v
             }
             nsDeclStore(b, "js_scope_decl", name, v, items.length > 1)
+            if (cst && !(nsExpScopeV !== null && curScopeV === nsExpScopeV)) { constMark(b, curScopeV, [name]) }
             return b
         }
     }
@@ -5960,7 +5990,7 @@ NotFuncHead = :script(~~
         }
     }
     // See the twin of this comment in js-to-llvm-ir.abnf.
-    function makeFor(items, lexNames) {
+    function makeFor(items, lexNames, constNames) {
         var bodyT = items.pop()
         var init = null, cond = null, post = null
         for (var i = 0; i < items.length; i++) {
@@ -6001,8 +6031,8 @@ NotFuncHead = :script(~~
             pb.NewBr(headB)
             var firstS = headS
             if (lexNames.length > 0 && funcCount != fnBefore) {
-                firstS = forIterScope(initB, saved, headS, lexNames)
-                runPh.Incs = [llvm.ir.NewIncoming(forIterScope(postB, saved, headPh, lexNames), postB)]
+                firstS = forIterScope(initB, saved, headS, lexNames, constNames)
+                runPh.Incs = [llvm.ir.NewIncoming(forIterScope(postB, saved, headPh, lexNames, constNames), postB)]
             }
             headPh.Incs = [llvm.ir.NewIncoming(firstS, initB), llvm.ir.NewIncoming(runPh, pb)]
             initB.NewBr(headB)
@@ -6011,11 +6041,12 @@ NotFuncHead = :script(~~
             return exitB
         }
     }
-    function forIterScope(b, parent, old, names) {
+    function forIterScope(b, parent, old, names, constNames) {
         var ns = callExt(b, "js_scope_new", [parent])
         for (var i = 0; i < names.length; i++) {
             callExt(b, "js_scope_decl", [ns, emitStr(b, names[i]), callExt(b, "js_scope_get", [old, emitStr(b, names[i])])])
         }
+        constMark(b, ns, constNames)
         return ns
     }
     // items = [] or [exprThunk].

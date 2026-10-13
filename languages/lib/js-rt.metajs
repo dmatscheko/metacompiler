@@ -527,6 +527,20 @@ function js_jswithset(scope, name, v) {
     return undefined
 }
 function js_jswithrecv() { return jvWithRecv }
+// An assignment to a const binding. Twin: m["js_jsconstchk"] in abnf/jsrtjsprint.go.
+function js_jsconstchk(scope, name) {
+    var n = jvStr(name)
+    var s = anytype
+    s = scope
+    while (s !== undefined && s !== null) {
+        if (scopeHas(s, n)) {
+            if (scopeHas(s, "0const:" + n)) { jbRaise("TypeError: Assignment to constant variable.") }
+            return undefined
+        }
+        s = scopeParent(s)
+    }
+    return undefined
+}
 function js_jswithtypeof(scope, name) {
     var n = jvStr(name)
     var s = anytype
@@ -2017,6 +2031,15 @@ function jvProtoWrite(d, key, v) {
     return undefined
 }
 
+// The `in` operator: js_jshas, after node's TypeError for a primitive on the right
+// (ECMA-262 13.10.1). Twin: m["js_jsin"] in abnf/jsrtjsprint.go.
+function js_jsin(o, key) {
+    if (!jvIsObjLike(o) || jbIsBig(o)) {
+        if (!jvIsCallable(o)) { jbRaise("TypeError: Cannot use 'in' operator to search for '" + jvStr(key) + "' in " + jvStr(o)) }
+    }
+    return js_jshas(o, key)
+}
+
 // js_has plus the __class methods: an instance keeps its methods on its class
 // descriptor rather than as own properties, but `"m" in instance` is true in node.
 // Twin: m["js_jshas"] in abnf/jsrtjsprint.go.
@@ -2403,6 +2426,9 @@ function jvChainHas(v, d) {
 }
 
 function js_jsinstanceof(v, c) {
+    if (!jvIsObjLike(c) || jbIsBig(c)) {
+        if (!jvIsCallable(c)) { jbRaise("TypeError: Right-hand side of 'instanceof' is not an object") }
+    }
     // A [Symbol.hasInstance] method on the right decides. Twins: instanceOf in
     // js-interpreter.abnf, js_jsinstanceof in abnf/jsrtjsprint.go.
     if (jvSymOn) {
@@ -2420,6 +2446,10 @@ function js_jsinstanceof(v, c) {
         return jvIsCallable(v)
     }
     if (jvIsArrayGlobal(c)) { return Array.isArray(v) }
+    // An object that is no constructor (and has no Symbol.hasInstance, above).
+    if (!jvIsCallable(c)) {
+        if (!jvIsClassDesc(c)) { jbRaise("TypeError: Right-hand side of 'instanceof' is not callable") }
+    }
     if (jvIsCallable(c)) {
         var d = jvCtorDescOf(c)
         if (d === undefined) { return false }

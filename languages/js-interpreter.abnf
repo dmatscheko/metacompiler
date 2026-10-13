@@ -7331,8 +7331,16 @@ NotFuncHead = :script(~~
             return v
         }
     }
+    // Both operators want an OBJECT on the right (ECMA-262 13.10.1, 13.10.2): a
+    // primitive there is a TypeError with node's wording. Twins: js_jsin and
+    // js_jsinstanceof in abnf/jsrtjsprint.go and languages/lib/js-rt.metajs.
     function inOrInstanceof(op, l, r) {
-        if (op == "instanceof") { return instanceOf(l, r) }
+        var isObj = jsIsObjLike(r) || typeof r == "function"
+        if (op == "instanceof") {
+            if (!isObj) { biRaise("TypeError: Right-hand side of 'instanceof' is not an object") }
+            return instanceOf(l, r)
+        }
+        if (!isObj) { biRaise("TypeError: Cannot use 'in' operator to search for '" + (jsIsSym(l) ? jsSymStr(l) : jsStr(l)) + "' in " + jsStr(r)) }
         return propIn(jsPropKey(l), r)
     }
     function propIn(k, o) {
@@ -7400,6 +7408,10 @@ NotFuncHead = :script(~~
                     return jsTruthy(callWithThis(hi, cls, [v]))
                 }
             }
+        }
+        // An object that is no constructor (and has no Symbol.hasInstance, above).
+        if (typeof cls != "function" && !isClassDesc(cls) && cls !== hostGlobals["Object"] && cls !== hostGlobals["Array"]) {
+            biRaise("TypeError: Right-hand side of 'instanceof' is not callable")
         }
         if (v == undefined || v == null) { return false }
         // The two host constructors a program may legitimately test against. There is no
@@ -7803,6 +7815,7 @@ NotFuncHead = :script(~~
                     if (!propIn(ks[i], obj)) { continue }
                     if (lexT) { scopes[scopes.length - 1] = {} }
                     bindLoopTarget(target, ks[i])
+                    if (target.cnames != undefined) { jsConstMark(target.cnames) }
                     var r = bodyT()
                     var a = loopAction(r, label)
                     if (a == "break") break
@@ -7834,6 +7847,7 @@ NotFuncHead = :script(~~
                 while (!step.done) {
                     if (lexT) { scopes[scopes.length - 1] = {} }
                     bindLoopTarget(target, step.value)
+                    if (target.cnames != undefined) { jsConstMark(target.cnames) }
                     // A BREAK, a RETURN out of the loop and a LABELED BREAK to an
                     // outer statement all close the iterator, as node does: its
                     // return() is called if it has one. On a generator that return()
@@ -7862,6 +7876,7 @@ NotFuncHead = :script(~~
             for (var i = 0; i < it.length; i++) {
                 if (lexT) { scopes[scopes.length - 1] = {} }
                 bindLoopTarget(target, forOfElem(it[i], isAwait))
+                if (target.cnames != undefined) { jsConstMark(target.cnames) }
                 var r = bodyT()
                 var a = loopAction(r, label)
                 if (a == "break") break
@@ -8463,7 +8478,7 @@ NotFuncHead = :script(~~
         v = value
         if (v === undefined && pat.dflt != undefined) { v = pat.dflt() }
         if (pat.dtype == "id") {
-            if (decl) { declVar(pat.name, v) } else { setVar(pat.name, v) }
+            if (decl) { declVar(pat.name, v) } else { jsConstChk(pat.name); setVar(pat.name, v) }
             return
         }
         // A target leaf. With an empty path it is a plain name and behaves exactly like
@@ -8527,10 +8542,16 @@ NotFuncHead = :script(~~
                 bindPatternMode(pat, av, false)
             }
         }
+        var cn = []
+        if (declKinds.length > 0 && declKinds[declKinds.length - 1] == "const") {
+            cn = patNames(pat, [])
+            for (var ci = 0; ci < cn.length; ci++) { jsConstNames[cn[ci]] = true }
+        }
         return function() {
             var v = anytype // The initializer may be an array or an object.
             v = init()
             bindPattern(pat, v)
+            jsConstMark(cn)
         }
     }
     // The assignment form: the same walk with declaration turned off. Like every
@@ -9711,7 +9732,7 @@ NotFuncHead = :script(~~
     }
     function refSet(ref, v) {
         if (ref.path.length == 0) {
-            if (ref.w === true) { withSet(ref.name, v) } else { setVar(ref.name, v) }
+            if (ref.w === true) { withSet(ref.name, v) } else { jsConstChk(ref.name); setVar(ref.name, v) }
             return
         }
         var p = resolveRef(ref)
@@ -9859,7 +9880,9 @@ NotFuncHead = :script(~~
             if (items.length == 1) { return function() {} }
             return function() { varSet(name, init()) }
         }
-        hoistNoteLex(name, pos)
+        var cst = declIsConst(name)
+        hoistNoteLex(name, pos, cst)
+        if (cst) { return function() { declVar(name, init()); declVar("0const:" + name, true) } }
         return function() { declVar(name, init()) }
     }
 
@@ -9873,6 +9896,32 @@ NotFuncHead = :script(~~
     var declKinds = []
     var varRecs = []
     function declIsVar() { return declKinds.length > 0 && declKinds[declKinds.length - 1] == "var" }
+    // const. A const binding carries a marker binding beside it in its scope, "0const:"
+    // and the name (no identifier starts with a digit), so an assignment finds the
+    // binding it writes and raises node's TypeError when that one is a const. Only a
+    // name some const declaration used pays for the scope walk. Twins: constChk in
+    // js-to-llvm-ir.abnf, js_jsconstchk in abnf/jsrtjsprint.go and
+    // languages/lib/js-rt.metajs.
+    var jsConstNames = {}
+    // A const declaration: notes name as one some const binds, and answers whether
+    // the declaration being walked is one.
+    function declIsConst(name) {
+        if (declKinds.length == 0 || declKinds[declKinds.length - 1] != "const") { return false }
+        jsConstNames[name] = true
+        return true
+    }
+    function jsConstMark(names) {
+        for (var i = 0; i < names.length; i++) { declVar("0const:" + names[i], true) }
+    }
+    function jsConstChk(name) {
+        if (!hasOwn(jsConstNames, name)) { return }
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            if (hasOwn(scopes[i], name)) {
+                if (hasOwn(scopes[i], "0const:" + name)) { biRaise("TypeError: Assignment to constant variable.") }
+                return
+            }
+        }
+    }
     function claimVars(from, to) {
         var file = c.curFile()
         var names = []
@@ -10022,10 +10071,15 @@ NotFuncHead = :script(~~
     // afresh, var assigns the hoisted names.
     function forDeclTarget(pat, pos) {
         var isVar = declIsVar()
+        var isConst = declKinds.length > 0 && declKinds[declKinds.length - 1] == "const"
         declKinds.pop()
         if (!isVar) {
             var ns = patNames(pat, [])
-            for (var i = 0; i < ns.length; i++) { hoistNoteLex(ns[i], pos) }
+            for (var i = 0; i < ns.length; i++) {
+                hoistNoteLex(ns[i], pos, isConst)
+                if (isConst) { jsConstNames[ns[i]] = true }
+            }
+            if (isConst) { pat.cnames = ns }
             return pat
         }
         notePatVars(pat, pos)
@@ -10146,7 +10200,10 @@ NotFuncHead = :script(~~
         var top = scopes.length - 1
         var old = scopes[top]
         var ns = {}
-        for (var i = 0; i < names.length; i++) { if (hasOwn(old, names[i])) { scopePut(ns, names[i], old[names[i]]) } }
+        for (var i = 0; i < names.length; i++) {
+            if (hasOwn(old, names[i])) { scopePut(ns, names[i], old[names[i]]) }
+            if (hasOwn(old, "0const:" + names[i])) { scopePut(ns, "0const:" + names[i], true) }
+        }
         scopes[top] = ns
     }
     // items = [] or [exprThunk].

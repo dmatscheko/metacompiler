@@ -5735,8 +5735,14 @@ NotFuncHead = :script(~~
             return v
         }
     }
+    // See the twin of this comment in js-interpreter.abnf.
     function inOrInstanceof(op, l, r) {
-        if (op == "instanceof") { return instanceOf(l, r) }
+        var isObj = jsIsObjLike(r) || typeof r == "function"
+        if (op == "instanceof") {
+            if (!isObj) { biRaise("TypeError: Right-hand side of 'instanceof' is not an object") }
+            return instanceOf(l, r)
+        }
+        if (!isObj) { biRaise("TypeError: Cannot use 'in' operator to search for '" + (jsIsSym(l) ? jsSymStr(l) : jsStr(l)) + "' in " + jsStr(r)) }
         return propIn(jsPropKey(l), r)
     }
     function propIn(k, o) {
@@ -5796,6 +5802,10 @@ NotFuncHead = :script(~~
                     return jsTruthy(callWithThis(hi, cls, [v]))
                 }
             }
+        }
+        // An object that is no constructor (and has no Symbol.hasInstance, above).
+        if (typeof cls != "function" && !isClassDesc(cls) && cls !== hostGlobals["Object"] && cls !== hostGlobals["Array"]) {
+            biRaise("TypeError: Right-hand side of 'instanceof' is not callable")
         }
         if (v == undefined || v == null) { return false }
         // The two host constructors a program may legitimately test against. There is no
@@ -6150,6 +6160,7 @@ NotFuncHead = :script(~~
                     if (!propIn(ks[i], obj)) { continue }
                     if (lexT) { scopes[scopes.length - 1] = {} }
                     bindLoopTarget(target, ks[i])
+                    if (target.cnames != undefined) { jsConstMark(target.cnames) }
                     var r = bodyT()
                     var a = loopAction(r, label)
                     if (a == "break") break
@@ -6181,6 +6192,7 @@ NotFuncHead = :script(~~
                 while (!step.done) {
                     if (lexT) { scopes[scopes.length - 1] = {} }
                     bindLoopTarget(target, step.value)
+                    if (target.cnames != undefined) { jsConstMark(target.cnames) }
                     // See the twin of this comment in js-interpreter.abnf.
                     gr = bodyT()
                     var ga = loopAction(gr, label)
@@ -6197,6 +6209,7 @@ NotFuncHead = :script(~~
             for (var i = 0; i < it.length; i++) {
                 if (lexT) { scopes[scopes.length - 1] = {} }
                 bindLoopTarget(target, forOfElem(it[i], isAwait))
+                if (target.cnames != undefined) { jsConstMark(target.cnames) }
                 var r = bodyT()
                 var a = loopAction(r, label)
                 if (a == "break") break
@@ -6709,7 +6722,7 @@ NotFuncHead = :script(~~
         v = value
         if (v === undefined && pat.dflt != undefined) { v = pat.dflt() }
         if (pat.dtype == "id") {
-            if (decl) { declVar(pat.name, v) } else { setVar(pat.name, v) }
+            if (decl) { declVar(pat.name, v) } else { jsConstChk(pat.name); setVar(pat.name, v) }
             return
         }
         // A target leaf. With an empty path it is a plain name and behaves exactly like
@@ -6718,7 +6731,7 @@ NotFuncHead = :script(~~
         if (pat.dtype == "ref") {
             var r = pat.ref
             if (r.path.length == 0) {
-                if (decl) { declVar(r.name, v) } else { setVar(r.name, v) }
+                if (decl) { declVar(r.name, v) } else { jsConstChk(r.name); setVar(r.name, v) }
             } else {
                 refSet(r, v)
             }
@@ -6778,10 +6791,16 @@ NotFuncHead = :script(~~
                 bindPatternMode(pat, av, false)
             }, nsPatNames(pat))
         }
+        var cn = []
+        if (nsDepth == 0 && declKinds.length > 0 && declKinds[declKinds.length - 1] == "const") {
+            cn = patNames(pat, [])
+            for (var ci = 0; ci < cn.length; ci++) { jsConstNames[cn[ci]] = true }
+        }
         return function() {
             var v = anytype // The initializer may be an array or an object.
             v = init()
             bindPattern(pat, v)
+            jsConstMark(cn)
         }
     }
     // The assignment form: the same walk with declaration turned off. Like every
@@ -8280,7 +8299,7 @@ NotFuncHead = :script(~~
         return getMember(p.obj, p.key)
     }
     function refSet(ref, v) {
-        if (ref.path.length == 0) { setVar(ref.name, v); return }
+        if (ref.path.length == 0) { jsConstChk(ref.name); setVar(ref.name, v); return }
         var p = resolveRef(ref)
         setMember(p.obj, p.key, v)
     }
@@ -8359,6 +8378,7 @@ NotFuncHead = :script(~~
             var v = anytype // A compound assignment (s += n) may change the value's type.
             if (ref.path.length == 0) {
                 if (op != "=") { v = getVar(ref.name); v = applyOp(op, v, valT()) } else { v = valT() }
+                jsConstChk(ref.name)
                 setVar(ref.name, v)
             } else {
                 var p = resolveRef(ref)
@@ -8376,6 +8396,7 @@ NotFuncHead = :script(~~
             var n = anytype // A number, or a BigInt (which ++ steps by 1n).
             if (ref.path.length == 0) {
                 n = jsToNumeric(getVar(ref.name))
+                jsConstChk(ref.name)
                 setVar(ref.name, jsStep(n, delta))
                 return n
             }
@@ -8416,6 +8437,7 @@ NotFuncHead = :script(~~
             var n = anytype
             if (ref.path.length == 0) {
                 n = jsStep(jsToNumeric(getVar(ref.name)), delta)
+                jsConstChk(ref.name)
                 setVar(ref.name, n)
                 return n
             }
@@ -8441,7 +8463,9 @@ NotFuncHead = :script(~~
             if (items.length == 1) { return function() {} }
             return nsTracked(function() { varSet(name, init()) }, [name])
         }
-        hoistNoteLex(name, pos)
+        // A namespace body publishes its bindings, so a const there carries no marker.
+        var cst = declIsConst(name) && nsDepth == 0
+        hoistNoteLex(name, pos, cst)
         if (nsDepth > 0 && items.length == 1) {
             return function() {
                 nsNoInit = true
@@ -8449,6 +8473,7 @@ NotFuncHead = :script(~~
                 nsNoInit = false
             }
         }
+        if (cst) { return function() { declVar(name, init()); declVar("0const:" + name, true) } }
         return function() { declVar(name, init()) }
     }
 
@@ -8458,6 +8483,27 @@ NotFuncHead = :script(~~
     var declKinds = []
     var varRecs = []
     function declIsVar() { return declKinds.length > 0 && declKinds[declKinds.length - 1] == "var" }
+    // See the twin of this comment in js-interpreter.abnf.
+    var jsConstNames = {}
+    // A const declaration: notes name as one some const binds, and answers whether
+    // the declaration being walked is one.
+    function declIsConst(name) {
+        if (declKinds.length == 0 || declKinds[declKinds.length - 1] != "const") { return false }
+        jsConstNames[name] = true
+        return true
+    }
+    function jsConstMark(names) {
+        for (var i = 0; i < names.length; i++) { declVar("0const:" + names[i], true) }
+    }
+    function jsConstChk(name) {
+        if (!hasOwn(jsConstNames, name)) { return }
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            if (hasOwn(scopes[i], name)) {
+                if (hasOwn(scopes[i], "0const:" + name)) { biRaise("TypeError: Assignment to constant variable.") }
+                return
+            }
+        }
+    }
     function claimVars(from, to) {
         var file = c.curFile()
         var names = []
@@ -8605,10 +8651,15 @@ NotFuncHead = :script(~~
     // afresh, var assigns the hoisted names.
     function forDeclTarget(pat, pos) {
         var isVar = declIsVar()
+        var isConst = declKinds.length > 0 && declKinds[declKinds.length - 1] == "const"
         declKinds.pop()
         if (!isVar) {
             var ns = patNames(pat, [])
-            for (var i = 0; i < ns.length; i++) { hoistNoteLex(ns[i], pos) }
+            for (var i = 0; i < ns.length; i++) {
+                hoistNoteLex(ns[i], pos, isConst)
+                if (isConst) { jsConstNames[ns[i]] = true }
+            }
+            if (isConst) { pat.cnames = ns }
             return pat
         }
         notePatVars(pat, pos)
@@ -8721,7 +8772,10 @@ NotFuncHead = :script(~~
         var top = scopes.length - 1
         var old = scopes[top]
         var ns = {}
-        for (var i = 0; i < names.length; i++) { if (hasOwn(old, names[i])) { scopePut(ns, names[i], old[names[i]]) } }
+        for (var i = 0; i < names.length; i++) {
+            if (hasOwn(old, names[i])) { scopePut(ns, names[i], old[names[i]]) }
+            if (hasOwn(old, "0const:" + names[i])) { scopePut(ns, "0const:" + names[i], true) }
+        }
         scopes[top] = ns
     }
     // items = [] or [exprThunk].

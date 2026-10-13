@@ -2639,6 +2639,9 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	baseInstanceof := m["js_instanceof"]
 	m["js_jsinstanceof"] = func(a []uint64) uint64 {
 		v, target := u(a[0]), u(a[1])
+		if !jsvIsObjLike(target) && !isCallable(target) {
+			rt.bigRaise("TypeError: Right-hand side of 'instanceof' is not an object")
+		}
 		// A [Symbol.hasInstance] method on the right decides. Twins: instanceOf in
 		// js-interpreter.abnf, js_jsinstanceof in languages/lib/js-rt.metajs.
 		if _, isObj := target.(*jsObject); isObj || isCallable(target) {
@@ -2649,6 +2652,10 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		}
 		if jsvIsObjectGlobal(target) {
 			return boolH(jsvIsObjLike(v) || isCallable(v))
+		}
+		// An object that is no constructor (and has no Symbol.hasInstance, above).
+		if o, isObj := target.(*jsObject); (isObj && !isClassDesc(o) && !jsvIsArrayGlobal(target)) || !(isObj || isCallable(target)) {
+			rt.bigRaise("TypeError: Right-hand side of 'instanceof' is not callable")
 		}
 		if jsvIsArrayGlobal(target) {
 			_, isArr := v.(*jsArray)
@@ -3081,6 +3088,14 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	// The layer-2 twin is js_jshas in languages/lib/js-rt.metajs; the interpreters' is
 	// propIn.
 	baseHas := m["js_has"]
+	// The `in` operator: js_jshas, after node's TypeError for a primitive on the right
+	// (ECMA-262 13.10.1). Twin: js_jsin in languages/lib/js-rt.metajs.
+	m["js_jsin"] = func(a []uint64) uint64 {
+		if o := u(a[0]); !jsvIsObjLike(o) && !isCallable(o) {
+			rt.bigRaise("TypeError: Cannot use 'in' operator to search for '%s' in %s", rt.jsvString(u(a[1])), rt.jsvString(o))
+		}
+		return m["js_jshas"](a)
+	}
 	m["js_jshas"] = func(a []uint64) uint64 {
 		recv, isObj := u(a[0]).(*jsObject)
 		name := rt.toString(u(a[1]))
@@ -3721,6 +3736,21 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		return m["js_scope_set_or_create"](a)
 	}
 	m["js_jswithrecv"] = func(a []uint64) uint64 { return w(withRecv) }
+	// An assignment to a const binding: the scope the write reaches carries the
+	// "0const:" marker beside the name. Twins: js_jsconstchk in
+	// languages/lib/js-rt.metajs, jsConstChk in js-interpreter.abnf.
+	m["js_jsconstchk"] = func(a []uint64) uint64 {
+		name := rt.toString(u(a[1]))
+		for sc := rt.scopeOf(a[0]); sc != nil; sc = sc.parent {
+			if sc.has(name) {
+				if sc.has("0const:" + name) {
+					rt.bigRaise("TypeError: Assignment to constant variable.")
+				}
+				break
+			}
+		}
+		return w(jsUndef)
+	}
 	m["js_jswithtypeof"] = func(a []uint64) uint64 {
 		if o := withObj(rt.scopeOf(a[0]), rt.toString(u(a[1]))); o != nil {
 			return m["js_jstypeof"]([]uint64{m["js_jsvget"]([]uint64{w(o), a[1]})})

@@ -803,10 +803,10 @@ check("label-jump-out-of-try", (function (): boolean {
 check("builtin-errors-catchable", (function (): boolean {
     function kind(f: any): string { try { f(); return "none"; } catch (e) { return (e instanceof RangeError ? "R:" : e instanceof TypeError ? "T:" : "E:") + e.message; } }
     var c: number[] = [-1, Infinity];
-    return kind(function (): boolean { return "a".repeat(c[0]); }) === "R:Invalid count value: -1"
-        && kind(function (): boolean { return "ab".repeat(c[1]); }) === "R:Invalid count value: Infinity"
-        && kind(function (): boolean { return [].reduce(function (a: any, b: any): any { return a + b; }); }) === "T:Reduce of empty array with no initial value"
-        && kind(function (): boolean { return [].reduceRight(function (a: any, b: any): any { return a + b; }); }) === "T:Reduce of empty array with no initial value";
+    return kind(function () { return "a".repeat(c[0]); }) === "R:Invalid count value: -1"
+        && kind(function () { return "ab".repeat(c[1]); }) === "R:Invalid count value: Infinity"
+        && kind(function () { return [].reduce(function (a: any, b: any): any { return a + b; }); }) === "T:Reduce of empty array with no initial value"
+        && kind(function () { return [].reduceRight(function (a: any, b: any): any { return a + b; }); }) === "T:Reduce of empty array with no initial value";
 })());
 
 // ----- fromIndex / position / separator arguments of includes, lastIndexOf, join -----
@@ -834,6 +834,17 @@ check("index-args-tointeger", (function (): boolean {
     return "abc".at(v[0]) === "a" && "abc".substr(v[0], 1) === "a" && [5, 6].at(v[0]) === 5 && "abc".indexOf("c", v[0]) === 2
         && "abc".charAt(v[1]) === "a" && "abc".charCodeAt(v[1]) === 97 && "abc".at(v[1]) === "a" && "abc".substr(v[1]) === "abc"
         && [5, 6].at(v[1]) === 5;
+})());
+
+// ----- TypeErrors: `in` on a primitive, `instanceof` a non-object -----
+// (An assignment to a const is a compile-time error in TypeScript, so only the js
+// feature file asserts the runtime TypeError.)
+check("missing-typeerrors", (function (): boolean {
+    function kind(f: any): string { try { f(); return "none"; } catch (e) { return (e instanceof TypeError ? "T:" : "E:") + e.message; } }
+    var rs: any[] = ["abc", 5, {}];
+    return kind(function () { return "a" in rs[0]; }) === "T:Cannot use 'in' operator to search for 'a' in abc"
+        && kind(function () { return ({}) instanceof rs[1]; }) === "T:Right-hand side of 'instanceof' is not an object"
+        && kind(function () { return ({}) instanceof rs[2]; }) === "T:Right-hand side of 'instanceof' is not callable";
 })());
 
 function main(): number {
