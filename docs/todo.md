@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-605** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-606** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -167,21 +167,10 @@ line tracking at warning sites is worth its cost.
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
 
-### T-598 lua: interpreter coroutines replay side effects; `ipairs("abc")`; indexing a coroutine · P1 · LUA · IN PROGRESS (LUA worker, round 5) [V]
-The interpreter half runs coroutines by replay: a write to an upvalue, global or shared table made before the yield it is
-paused at runs once per resume. A producer appending to a shared table gives `p1,c1,p1,p2,...` where lua gives
-`p1,c1,p2,...` (compiled halves right). Give the interpreter real suspension (the tag host's generators / a continuation of
-the walk) or run the coroutine body on the host's own coroutine mechanism. `ipairs("abc")` yields characters in all engines
-(lua: error "bad argument #1 to 'for iterator' (table expected, got string)"). `co.x` / `co.x = 1` on a coroutine works (lua
-"attempt to index a thread value").
-
-### T-599 lua: os library, load/dofile, `<close>`, a real `_G`, NaN sign in string.pack · P3 · LUA · IN PROGRESS (LUA worker, round 5) [V]
-`os.time/clock/date/getenv/exit` missing (needs a time-zone offset primitive in the three hosts and a handle→C-string bridge
-for getenv natively). `load`/`loadfile`/`dofile` missing (interp could use c.parseFrom; the compiled half has no run-time
-compiler — constant strings only, as bash's eval). `local x <close>` (__close) needs block-exit hooks on every exit path.
-`rawget(_G, k)` / `pairs(_G)` see only the proxy's fields (globals are not stored in a table). `string.pack("d", -(0/0))`
-packs a positive NaN. __gc / __mode are out of reach (no engine lets a program drive its collector) — record as declined if
-nothing else is done.
+### T-605 lua: the string metatable's `__index` cannot be replaced; `next(_G)` skips non-string proxy keys · P3 · LUA · OPEN [V]
+`getmetatable("").__index = function(s, k) ... end` is ignored in all engines (both halves read the string library directly);
+with such an `__index`, lua's `ipairs("xy")` yields "x" and "y", ours nothing. `next(_G)` skips non-string keys stored on the
+_G proxy, in both halves.
 
 ---
 
@@ -715,6 +704,8 @@ T-593 go: an overflowing constant is not rejected at compound assignment, typed 
 T-600 php compiler: arrays passed by value are not copied; array copies drop references; spread of references — PARTIAL 2393d44a 464bc456 49c99ffa (by-value array params copied when written, shared references kept through copies and spreads, Closure::bind/fromCallable via an instance, named by-ref args); rest is T-602
 T-597 js: arguments length and mapping; `Object.hasOwn`; `"__#"` user keys — PARTIAL 3687b718 (Object.hasOwn/groupBy/fromEntries, Map.groupBy, Number statics, String.raw, structuredClone, sloppy mapped arguments, arguments length slot); rest is T-603
 T-578 java: PatternSyntaxException message wording; class literals of unloaded JDK types — DONE 6096b47d (plus a java.util/java.lang API sweep: 46e77cc7 cd485893 caf757fb)
+T-598 lua: interpreter coroutines replay side effects; `ipairs("abc")`; indexing a coroutine — DONE 3d17ef92 (a real suspension primitive in both tag hosts: goja coroutine + frozen jsGenerator.suspend)
+T-599 lua: os library, load/dofile, `<close>`, a real `_G`, NaN sign in string.pack — DONE 82a5666c 117bdd13 3a1cd51e for <close>, os (time/clock/date/difftime/getenv/exit), _G raw access; load/loadfile/dofile DECLINED (a native binary has no run-time Lua compiler, and constant-only load would make load(s) depend on whether s is a literal); NaN sign in string.pack DECLINED (goja canonicalises NaN, MetaJS cannot see a double's bits); __gc/__mode DECLINED (no engine lets a program drive its collector)
 
 # Settled — do not re-open
 
@@ -725,7 +716,7 @@ re-opening it. The detail is in git; the durable lessons are in the manual
 (ch. 4 and 7).
 
 **DECLINED after measurement — each is a number the next person should not have to
-re-derive.** python's "dictionary keys changed during iteration" for a pop and re-add of an already-yielded key at equal size (CPython's answer follows its hash table's resize/compaction history: a deletion counter made **46 of 116** probe rows wrong vs 38 before; matching needs CPython's per-dict entry table, a cost on every insert) · php's `isset`/`$this`
+re-derive.** lua's `load`/`loadfile`/`dofile` (a native binary has no run-time compiler; constant-only load would make `load(s)` depend on whether `s` is a literal) · lua `__gc`/`__mode` and NaN sign/payload in lua `string.pack` and go `Float64bits` (no engine lets a program drive its collector; goja canonicalises every NaN) · python's "dictionary keys changed during iteration" for a pop and re-add of an already-yielded key at equal size (CPython's answer follows its hash table's resize/compaction history: a deletion counter made **46 of 116** probe rows wrong vs 38 before; matching needs CPython's per-dict entry table, a cost on every insert) · php's `isset`/`$this`
 scope probe into layer 2 (**+0.77%, slower in 9 of 9 paired draws**, ~490 instructions
 per probe call: unlike kotlin's, php's probe has NO miss arm layer 2 answers better,
 so it is all hot arm) · swift's and dart's `sw_kget`/`sw_kset` into layer 2
