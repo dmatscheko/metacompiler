@@ -2494,6 +2494,42 @@
             "program": "${workspaceFolder}","args": ["languages/swift-to-llvm-ir.abnf", "tests/swift-abort-test-throw.swift", "-q", "-exe", "tests/swift-abort.out"]
         },
         {
+            "name": "Swift abort probe, Int of an out-of-range Double (interpreter, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/swift-interpreter.abnf", "tests/swift-abort-test-intconv.swift", "-q"]
+        },
+        {
+            "name": "Swift abort probe, Int of an out-of-range Double, native binary SHOULD ABORT, ALL HALVES (interpreter vs llvm.Run vs native)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/swift-to-llvm-ir.abnf", "tests/swift-abort-test-intconv.swift", "-q", "-exe", "tests/swift-abort-intconv.out"]
+        },
+        {
+            "name": "Swift abort probe, inverted range (interpreter, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/swift-interpreter.abnf", "tests/swift-abort-test-range.swift", "-q"]
+        },
+        {
+            "name": "Swift abort probe, inverted range, native binary SHOULD ABORT, ALL HALVES (interpreter vs llvm.Run vs native)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/swift-to-llvm-ir.abnf", "tests/swift-abort-test-range.swift", "-q", "-exe", "tests/swift-abort-range.out"]
+        },
+        {
+            "name": "Swift abort probe, removeLast on an empty array (interpreter, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/swift-interpreter.abnf", "tests/swift-abort-test-removelast.swift", "-q"]
+        },
+        {
+            "name": "Swift abort probe, removeLast on an empty array, native binary SHOULD ABORT, ALL HALVES (interpreter vs llvm.Run vs native)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/swift-to-llvm-ir.abnf", "tests/swift-abort-test-removelast.swift", "-q", "-exe", "tests/swift-abort-removelast.out"]
+        },
+        {
             "name": "Bash abort probe, command not found (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",

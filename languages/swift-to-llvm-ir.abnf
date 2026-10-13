@@ -7712,7 +7712,7 @@ KwContinue  = "continue" KwEnd ;
             b = rf.b
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, cName), rf.v])
             var rt = toT(b)
-            b = rt.b
+            b = swEmitRangeChk(rt.b, rf.v, rt.v)
             var boundV = rt.v
             if (rop == "..<") { boundV = callExt(b, "js_sub", [boundV, emitNum(b, 1)]) }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, tName), boundV])
@@ -10590,6 +10590,7 @@ KwContinue  = "continue" KwEnd ;
                 b = rh.b
                 hiV = rh.v
             }
+            if (loT != null && hiT != undefined && hiT != null) { b = swEmitRangeChk(b, loV, hiV) }
             var o = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [o, emitStr(b, "__range"), hTrue])
             callExt(b, "js_set", [o, emitStr(b, "lo"), loV])
@@ -10598,6 +10599,17 @@ KwContinue  = "continue" KwEnd ;
             hasRanges = true
             return {b: b, v: o}
         }
+    }
+    // Forming a two-sided range traps unless lowerBound <= upperBound, under the
+    // bound type's own <= (so `Double.nan..<1` traps too). Answers the block to
+    // continue in. Twin: swRangeChk in swift-interpreter.abnf.
+    function swEmitRangeChk(b, loV, hiV) {
+        var trapB = curF.NewBlock("")
+        var okB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, emitBin(b, "<=", loV, hiV)), okB, trapB)
+        callExt(trapB, "js_swtrap", [emitStr(trapB, "Fatal error"), emitStr(trapB, "Range requires lowerBound <= upperBound")])
+        trapB.NewBr(okB)
+        return okB
     }
     var hasRanges = false
     // ----- Set -----

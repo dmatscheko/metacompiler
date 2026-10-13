@@ -2140,11 +2140,19 @@ KwContinue  = "continue" KwEnd ;
         // ordinary arithmetic, and a sized-integer box (Int32(3), Int.max) would
         // otherwise arrive here as an object and compare as NaN.
         return function() {
-            return {__range: true,
-                    lo: lo == null ? null : szNum(lo()),
-                    hi: hi == null ? null : szNum(hi()),
-                    closed: closed}
+            var r = {__range: true,
+                     lo: lo == null ? null : szNum(lo()),
+                     hi: hi == null ? null : szNum(hi()),
+                     closed: closed}
+            if (lo != null && hi != null) { swRangeChk(r.lo, r.hi) }
+            return r
         }
+    }
+    // Forming a two-sided range traps unless lowerBound <= upperBound, under the
+    // bound type's own <= (so `Double.nan..<1` traps too). Twin: swEmitRangeChk
+    // in swift-to-llvm-ir.abnf.
+    function swRangeChk(lo, hi) {
+        if (!core.test(binOp("<=", lo, hi))) { fail("Fatal error: Range requires lowerBound <= upperBound") }
     }
     function isRange(v) {
         return v !== null && v !== undefined && typeof v == "object" && v.__range === true
@@ -2489,7 +2497,7 @@ KwContinue  = "continue" KwEnd ;
                 return (v.closed ? "PartialRangeThrough" : "PartialRangeUpTo") + "(upperBound: " + v.hi + ")"
             }
             if (v.hi === null || v.hi === undefined) { return "PartialRangeFrom(lowerBound: " + v.lo + ")" }
-            return "" + v.lo + rop + v.hi
+            return swRender(v.lo, false, depth + 1) + rop + swRender(v.hi, false, depth + 1)
         }
         if (Array.isArray(v)) {
             var out = "["
@@ -3032,15 +3040,21 @@ KwContinue  = "continue" KwEnd ;
         return szCmp(x, 0) < 0 ? bd.mn : bd.mx
     }
     // Int(x) / Int8(x) / UInt64(x): a value conversion at width w. A Double
-    // truncates toward zero; an integer wraps to the width (see the divergence
-    // note above - real Swift traps instead); a String is failable.
+    // truncates toward zero and traps when that is not representable; an integer
+    // wraps to the width (see the divergence note above - real Swift traps
+    // instead); a String is failable.
     function swIntConv(x, w, u) {
         if (typeof x == "string") { return swIntFromStr(x, w, u, 10) }
         // Int(3.7) TRUNCATES toward zero (3), Int(-3.7) is -3.
         if (isFlo(x)) {
             var f = x.__flo
-            if (f !== f || f === swInfF || f === swInfF * swNegOne) { fail("integer conversion of " + swFloStr(f)) }
-            return szConv(f < 0 ? Math.ceil(f) : Math.floor(f), w, u)
+            var t = f < 0 ? Math.ceil(f) : Math.floor(f)
+            var why = swFloIntWhy(t, w, u)
+            if (why != "") {
+                fail("Fatal error: " + (isF32(x) ? "Float" : "Double") + " value cannot be converted to "
+                    + swIntTyName(w, u) + " because " + why)
+            }
+            return szConv(t, w, u)
         }
         if (szIs(x)) { return szConv(x, w, u) }
         if (x === true) { return szConv(1, w, u) }
@@ -3048,6 +3062,18 @@ KwContinue  = "continue" KwEnd ;
         if (x === null || x === undefined) { fail("integer conversion of nil") }
         if (typeof x != "number") { fail("integer conversion of a non number") }
         return szConv(x < 0 ? Math.ceil(x) : Math.floor(x), w, u)
+    }
+    // Why the truncated float t does not fit the integer type (w, u), in swiftc
+    // 6.1.2's trap wording ("... because the result would be greater than
+    // Int8.max"), or "" when it fits. Twins: swFloIntWhy in abnf/jsrtswift.go and
+    // lib/swift-rt.metajs.
+    function swFloIntWhy(t, w, u) {
+        if (t !== t || t === swInfF || t === swInfF * swNegOne) { return "it is either infinite or NaN" }
+        var b = w > 64 ? 64 : w
+        var hi = Math.pow(2, u ? b : b - 1)
+        if (t >= hi) { return "the result would be greater than " + swIntTyName(w, u) + ".max" }
+        if (t < (u ? 0 : -hi)) { return "the result would be less than " + swIntTyName(w, u) + ".min" }
+        return ""
     }
     // One integer type: a callable descriptor. `__convl` is what makeCall reaches for
     // when the callee is an object rather than a function, so `Int(x)` works while
@@ -4296,16 +4322,23 @@ KwContinue  = "continue" KwEnd ;
         }
         // removeLast() and popLast() differ ONLY on an empty array: swiftc 6.1.2
         // traps on `[].removeLast()` ("Can't remove last element from an empty
-        // collection") and answers nil for `[].popLast()`. The compiled halves'
-        // removeLast is the shared list table in abnf/jsrt.go and swListMethod in
-        // lib/swift-rt.metajs; popLast is rtPopLast in swift-to-llvm-ir.abnf.
+        // collection") and answers nil for `[].popLast()`. removeLast(k) drops k
+        // elements and answers Void, trapping like removeFirst(k). Twins:
+        // swSeqMethod in abnf/jsrtswift.go, swListMethod in lib/swift-rt.metajs;
+        // popLast is rtPopLast in swift-to-llvm-ir.abnf.
         if (name == "popLast") {
             if (t.length == 0) { return null }
             return t.pop()
         }
         if (name == "removeLast") {
-            if (t.length == 0) { fail("Fatal error: Can't remove last element from an empty collection") }
-            return t.pop()
+            if (args.length == 0) {
+                if (t.length == 0) { fail("Fatal error: Can't remove last element from an empty collection") }
+                return t.pop()
+            }
+            var lk = szNum(args[0]) | 0
+            if (lk < 0 || lk > t.length) { fail("Fatal error: Can't remove more items from a collection than it contains") }
+            for (var li = 0; li < lk; li++) { t.pop() }
+            return undefined
         }
         // contains(_:) is a value test by swEq and contains(where:) a PREDICATE; the label
         // does not reach here, so the closure argument is what tells them apart
@@ -7664,6 +7697,7 @@ KwContinue  = "continue" KwEnd ;
             var res = undefined
             var from = fromT()
             var last = toT()
+            swRangeChk(from, last)
             if (rop == "..<") { last = (last - 1) | 0 }
             for (var i = from; i <= last; i++) {
                 scopes.push({})

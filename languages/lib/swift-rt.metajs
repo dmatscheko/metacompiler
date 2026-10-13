@@ -1762,9 +1762,22 @@ function swListMethod(o, name, args) {
         o.push(args[0])
         return undefined
     }
-    if (name === "pop" || name === "removeLast") {
+    if (name === "pop") {
         if (o.length == 0) { fail("pop from empty list") }
         return o.pop()
+    }
+    // removeLast() traps on an empty array; removeLast(k) drops k elements and
+    // answers Void. Twin of arrayMethod in languages/swift-interpreter.abnf.
+    if (name === "removeLast") {
+        if (args.length == 0) {
+            if (o.length == 0) { swAbort("Fatal error: Can't remove last element from an empty collection") }
+            return o.pop()
+        }
+        var lk = swNum(args[0]) | 0
+        if (lk < 0 || lk > o.length) { swAbort("Fatal error: Can't remove more items from a collection than it contains") }
+        var li = 0
+        while (li < lk) { o.pop(); li = li + 1 }
+        return undefined
     }
     if (name === "size") { return o.length }
     if (name === "get") {
@@ -3280,7 +3293,34 @@ function js_swintconv(v, bits, uns) {
         return r
     }
     if (v === undefined || v === null) { fail("integer conversion of nil") }
+    if (floIs(v)) {
+        var f = floNum(v)
+        var t = Math.floor(f)
+        if (f < 0) { t = Math.ceil(f) }
+        var why = swFloIntWhy(t, bits, uns)
+        if (why !== "") {
+            var fty = "Double"
+            if (swIsF32(v)) { fty = "Float" }
+            swAbort("Fatal error: " + fty + " value cannot be converted to " + swIntTyName(bits, uns) + " because " + why)
+        }
+    }
     return sintConv(v, bits, uns)
+}
+
+// Why the truncated float t does not fit the integer type (bits, uns), in swiftc
+// 6.1.2's trap wording, or "" when it fits. Twin of swFloIntWhy in
+// languages/swift-interpreter.abnf.
+function swFloIntWhy(t, bits, uns) {
+    if (t !== t || t === Math.pow(2, 1024) || t === -Math.pow(2, 1024)) { return "it is either infinite or NaN" }
+    var b = bits
+    if (b > 64) { b = 64 }
+    if (!uns) { b = b - 1 }
+    var hi = Math.pow(2, b)
+    var lo = -hi
+    if (uns) { lo = 0 }
+    if (t >= hi) { return "the result would be greater than " + swIntTyName(bits, uns) + ".max" }
+    if (t < lo) { return "the result would be less than " + swIntTyName(bits, uns) + ".min" }
+    return ""
 }
 
 // The four ordered comparisons. A box has to go through sintCmp rather than the

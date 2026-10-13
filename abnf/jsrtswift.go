@@ -1427,6 +1427,15 @@ func init() {
 			if isNullish(v) {
 				rt.fail("integer conversion of nil")
 			}
+			if f, ok := v.(jsJFlo); ok {
+				if why := swFloIntWhy(math.Trunc(f.f), bits, uns); why != "" {
+					fty := "Double"
+					if swIsF32(v) {
+						fty = "Float"
+					}
+					rt.swAbort("Fatal error: %s value cannot be converted to %s because %s", fty, swIntTyName(bits, uns), why)
+				}
+			}
 			return w(rt.giConv(v, bits, uns))
 		}
 		// Int8(clamping: x), UInt8(exactly: x), Int(s, radix: r):
@@ -2357,6 +2366,34 @@ func swIntTyName(w uint8, u bool) string {
 		return n
 	}
 	return n + strconv.Itoa(int(w))
+}
+
+// swFloIntWhy says why the truncated float t does not fit the integer type
+// (w, u), in swiftc 6.1.2's trap wording, or "" when it fits. Twin of
+// swFloIntWhy in languages/swift-interpreter.abnf.
+func swFloIntWhy(t float64, w uint8, u bool) string {
+	if math.IsNaN(t) || math.IsInf(t, 0) {
+		return "it is either infinite or NaN"
+	}
+	b := int(w)
+	if b > 64 {
+		b = 64
+	}
+	if !u {
+		b--
+	}
+	hi := math.Ldexp(1, b)
+	lo := -hi
+	if u {
+		lo = 0
+	}
+	if t >= hi {
+		return "the result would be greater than " + swIntTyName(w, u) + ".max"
+	}
+	if t < lo {
+		return "the result would be less than " + swIntTyName(w, u) + ".min"
+	}
+	return ""
 }
 
 // swTypeOf is type(of: v): the dynamic type's name, as print shows it.
@@ -3642,6 +3679,23 @@ func (rt *jsrt) swSeqMethod(o *jsArray, name string, args []interface{}, rnd *sw
 		}
 		o.elems = o.elems[k:]
 		return jsUndef, true
+	case "removeLast":
+		// removeLast() answers the element; removeLast(k) answers Void. Twin of
+		// arrayMethod in languages/swift-interpreter.abnf.
+		if len(args) == 0 {
+			if n == 0 {
+				rt.swAbort("Fatal error: Can't remove last element from an empty collection")
+			}
+			l := o.elems[n-1]
+			o.elems = o.elems[:n-1]
+			return l, true
+		}
+		k := int(swNum(rt, args[0]))
+		if k < 0 || k > n {
+			rt.swAbort("Fatal error: Can't remove more items from a collection than it contains")
+		}
+		o.elems = o.elems[:n-k]
+		return jsUndef, true
 	case "remove":
 		i := int(swNum(rt, args[0]))
 		if i < 0 || i >= n {
@@ -4015,7 +4069,7 @@ func swIsLazyName(name string) bool {
 
 func swSharedListMethod(name string) bool {
 	switch name {
-	case "add", "append", "pop", "removeLast", "size", "get", "contains", "map",
+	case "add", "append", "pop", "size", "get", "contains", "map",
 		"filter", "forEach", "count", "any", "insert", "popLast":
 		return true
 	}

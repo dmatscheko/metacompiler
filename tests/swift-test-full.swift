@@ -15,6 +15,10 @@
 //   - main() calls each section via a line tagged 'SECTION-CALL <nn>' and
 //     prints the summary line 'full: <checks> checks, <failures> failures';
 //     the file ends features-style with main() and exit(fails)
+//   - swiftc 6.1.2 here cannot import Foundation, so on the oracle compile this
+//     file as main.swift beside a shim.swift declaring the exit it calls:
+//       @_silgen_name("exit") func cExit(_ code: Int32) -> Never
+//       func exit(_ code: Int) -> Never { cExit(Int32(code)) }
 //
 // Deliberately out of scope (not syntax, or unrunnable in this harness):
 // imports and Foundation - stdlib usage strictly mirrors the features file
@@ -1817,7 +1821,7 @@ func s35() {
     let uni35 = "cafe\u{301}"
     var seen35 = ""
     var n35 = 0
-    for c in uni35 { seen35 += c; n35 += 1 }
+    for c in uni35 { seen35 += String(c); n35 += 1 }
     check("35h", n35 == 4 && n35 == uni35.count && seen35 == uni35)
     check("35i", Array(uni35).count == 4 && Array(uni35)[3] == "e\u{301}")
     let ast35 = "a\u{1f600}b"
@@ -4310,6 +4314,33 @@ func s94() {
     check("94c", !p.flag && p.x == 1.0 && p.n == 5 && sw.on && sw.log == "t" && "\(fl[0])" == "3.0")
 }
 
+// ===== SECTION 95: the edges of three traps =====
+// removeLast(k) drops k elements; a Double range prints its bounds as Doubles;
+// a Double whose truncation fits converts, at either end of the type, and an
+// empty range forms without trapping. The trapping side of each edge is a
+// tests/swift-abort-test-*.swift probe. Operands are read out of arrays. Every
+// value read off swiftc 6.1.2.
+func s95() {
+    var a = [1, 2, 3, 4]
+    let ks = [2, 0]
+    a.removeLast(ks[0])
+    a.removeLast(ks[1])
+    var b = [5, 6]
+    b.removeLast(ks[0])
+    check("95a", a == [1, 2] && b.isEmpty)
+    let ds = [1.5, 2.5]
+    check("95b", "\(ds[0]..<ds[1])" == "1.5..<2.5" && "\(ds[0]...ds[0])" == "1.5...1.5")
+    let es = [127.9, -128.9, -0.5, -9223372036854775808.0, 1e19]
+    check("95c", Int8(es[0]) == 127 && Int8(es[1]) == -128 && UInt(es[2]) == 0
+                 && Int(es[3]) == Int.min && UInt64(es[4]) == 10000000000000000000)
+    let n = [3]
+    var walked = 0
+    for i in n[0]...n[0] { walked += i }
+    for _ in n[0]..<n[0] { walked += 100 }
+    let e = n[0]..<n[0]
+    check("95d", walked == 3 && e.isEmpty && e.count == 0)
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -4405,6 +4436,7 @@ func main() {
     s92() // SECTION-CALL 92
     s93() // SECTION-CALL 93
     s94() // SECTION-CALL 94
+    s95() // SECTION-CALL 95
     print("full: \(checks) checks, \(fails) failures")
 }
 
