@@ -166,12 +166,12 @@ from a compatible B instance — php-src suggests static:: is B, ours gives A. (
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
 
-### T-589 lua: tables and functions as keys collide · P1 · LUA · OPEN [V]
+### T-589 lua: tables and functions as keys collide · P1 · LUA · IN PROGRESS (LUA worker, round 4) [V]
 `local t = {}; local a, b = {}, {}; t[a] = 1; t[b] = 2; print(t[a], t[b])` → all legs `2 2` (lua `1 2`): an object key falls
 through to its text. Needs a per-object identity (a hidden id given when the table / closure is made) and a way back from the
 id to the object for pairs/next. All three engines; measure tests/bench.sh lua.
 
-### T-590 lua: metatables and the missing standard library · P2 · LUA · OPEN [V]
+### T-590 lua: metatables and the missing standard library · P2 · LUA · IN PROGRESS (LUA worker, round 4) [V]
 `setmetatable` / `getmetatable` are nil in both halves (no `__index`, `__newindex`, `__call`, arithmetic/comparison/`__tostring`/
 `__len`/`__eq` metamethods). Also nil: `_G`, `coroutine`, `utf8`, `os`, `string.pack/unpack`, `math.random/randomseed`,
 `load`, `collectgarbage`, `select('#')` was fine. Metatables first (the core of idiomatic Lua: OOP, `__index` inheritance);
