@@ -1490,7 +1490,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
     }
     function goFdWrite(fd, s) {
-        if (fd == 1) { print(s); return }
+        if (fd == 1) { gOut(s); return }
         if (s.length > 0 && s.charCodeAt(s.length - 1) == 10) { eprintln(s.substring(0, s.length - 1)) } else { eprintln(s) }
     }
     // The text of fmt.Println: every operand, a space between each pair.
@@ -1503,25 +1503,25 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return out
     }
     hostGlobals["fmt"] = {
-        Println: function() { println(gLnText(arguments)) },
+        Println: function() { gOut(gLnText(arguments) + "\n") },
         // fmt.Sprintln: Println's line, returned instead of printed.
         Sprintln: function() { return gLnText(arguments) + "\n" },
         // fmt.Print puts a space between two operands when NEITHER of them is a
         // string, which is what the handle runtime's print does too.
-        Print: function() { print(gPrText(arguments)) },
+        Print: function() { gOut(gPrText(arguments)) },
         // fmt.Sprint: Print's text, returned instead of printed.
-        Sprint: function() { return gPrText(arguments) },
+        Sprint: function() { return goCanon(gPrText(arguments)) },
         // fmt.Printf / fmt.Sprintf: gfFormat in lib/go-fmt.js, over the gfH* hooks
         // below. The twin is gopFormat in abnf/jsrtgolang.go.
         Printf: function() {
             var a = []
             for (var i = 1; i < arguments.length; i++) { a.push(arguments[i]) }
-            print(gfFormat(gstr(arguments[0]), a, GF_NOWRAP))
+            gOut(gfFormat(gstr(arguments[0]), a, GF_NOWRAP))
         },
         Sprintf: function() {
             var a2 = []
             for (var j = 1; j < arguments.length; j++) { a2.push(arguments[j]) }
-            return gfFormat(gstr(arguments[0]), a2, GF_NOWRAP)
+            return goCanon(gfFormat(gstr(arguments[0]), a2, GF_NOWRAP))
         },
         // fmt.Fprint / Fprintln / Fprintf hand their text to w.Write as a []byte, Go's
         // io.Writer contract, and answer what Write answers. Twin of the Fprint arms of
@@ -1567,12 +1567,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             if (i > 0) out += " "
             out += gstr(arguments[i])
         }
-        println(out)
+        gOut(out + "\n")
     }
     hostGlobals["print"] = function() {
         var out = ""
         for (var i = 0; i < arguments.length; i++) { out += gstr(arguments[i]) }
-        print(out)
+        gOut(out)
     }
     hostGlobals["os"] = { Exit: function(code) { exit(code | 0) }, Stdout: goOsFile(1), Stderr: goOsFile(2) }
     // The correctly rounded square root lib/go-math.go's Sqrt is. Twin of js_gosqrt in
@@ -1926,7 +1926,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         while (i < s.length) {
             var r = strRuneAt(s, i)
             var c = r.cp
-            if (c == 92) { out += "\\\\" }
+            if (goHeld(c)) { out += "\\x" + gfHex2(c - 0xdc00) }
+            else if (c == 92) { out += "\\\\" }
             else if (c == delim) { out += "\\" + s.charAt(i) }
             else if (c == 10) { out += "\\n" }
             else if (c == 9) { out += "\\t" }
@@ -2458,7 +2459,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (x === undefined || x === null) { return 0 }
         if (isSl(x)) { return x.n }
         if (isMap(x)) { return x.keys.length }
-        if (typeof x == "string") { return byteLen(x) }
+        // A held byte is three bytes to byteLen and one to Go, so a string that is not
+        // ASCII is measured by its (cached) byte form.
+        if (typeof x == "string") {
+            var nb = byteLen(x)
+            return nb == x.length ? nb : goByteForm(x).length
+        }
         if (isChan(x)) { return chanLen(x) }
         return x.length
     }
@@ -2651,7 +2657,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var i2 = 0
             while (i2 < t.length) {
                 var r = strRuneAt(t, i2)
-                out.push(szConv(r.cp, 32, false))
+                out.push(szConv(goHeld(r.cp) ? 65533 : r.cp, 32, false))
                 i2 += r.n
             }
             return slT(slOf(out), "rune")
@@ -3314,6 +3320,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     binOps["+"] = function(l, r) {
         if (isCx(l) || isCx(r)) { return cxAdd(l, r) }
         if (isFlo(l) || isFlo(r)) { return gFloOp2("+", gNumF(l), gNumF(r), gF32Res(l, r)) }
+        if (typeof l == "string" && typeof r == "string") { return goJoin(l, r) }
         if (typeof l == "string" || typeof r == "string") { return coreAddOp(l, r) }
         return szArith("+", l, r)
     }
@@ -3342,10 +3349,22 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     var coreGtOp = binOps[">"]
     var coreLeOp = binOps["<="]
     var coreGeOp = binOps[">="]
-    binOps["<"]  = function(l, r) { if (isFlo(l) || isFlo(r)) { var f = gF32Res(l, r); return gCmpNum(l, f) < gCmpNum(r, f) };  if (szIs(l) || szIs(r)) { return szCmp(l, r) < 0 };  return coreLtOp(l, r) }
-    binOps[">"]  = function(l, r) { if (isFlo(l) || isFlo(r)) { var f = gF32Res(l, r); return gCmpNum(l, f) > gCmpNum(r, f) };  if (szIs(l) || szIs(r)) { return szCmp(l, r) > 0 };  return coreGtOp(l, r) }
-    binOps["<="] = function(l, r) { if (isFlo(l) || isFlo(r)) { var f = gF32Res(l, r); return gCmpNum(l, f) <= gCmpNum(r, f) }; if (szIs(l) || szIs(r)) { return szCmp(l, r) <= 0 }; return coreLeOp(l, r) }
-    binOps[">="] = function(l, r) { if (isFlo(l) || isFlo(r)) { var f = gF32Res(l, r); return gCmpNum(l, f) >= gCmpNum(r, f) }; if (szIs(l) || szIs(r)) { return szCmp(l, r) >= 0 }; return coreGeOp(l, r) }
+    binOps["<"]  = function(l, r) { if (isFlo(l) || isFlo(r)) { var f = gF32Res(l, r); return gCmpNum(l, f) < gCmpNum(r, f) };  if (szIs(l) || szIs(r)) { return szCmp(l, r) < 0 };  if (gHeldCmp(l, r)) { return gBytesCmp(l, r) < 0 }; return coreLtOp(l, r) }
+    binOps[">"]  = function(l, r) { if (isFlo(l) || isFlo(r)) { var f = gF32Res(l, r); return gCmpNum(l, f) > gCmpNum(r, f) };  if (szIs(l) || szIs(r)) { return szCmp(l, r) > 0 };  if (gHeldCmp(l, r)) { return gBytesCmp(l, r) > 0 }; return coreGtOp(l, r) }
+    binOps["<="] = function(l, r) { if (isFlo(l) || isFlo(r)) { var f = gF32Res(l, r); return gCmpNum(l, f) <= gCmpNum(r, f) }; if (szIs(l) || szIs(r)) { return szCmp(l, r) <= 0 }; if (gHeldCmp(l, r)) { return gBytesCmp(l, r) <= 0 }; return coreLeOp(l, r) }
+    binOps[">="] = function(l, r) { if (isFlo(l) || isFlo(r)) { var f = gF32Res(l, r); return gCmpNum(l, f) >= gCmpNum(r, f) }; if (szIs(l) || szIs(r)) { return szCmp(l, r) >= 0 }; if (gHeldCmp(l, r)) { return gBytesCmp(l, r) >= 0 }; return coreGeOp(l, r) }
+    // Two strings compare by their BYTES. The host's order agrees with that except
+    // where one holds a byte that is not part of a character (goHeld), so only
+    // those are compared byte by byte.
+    function gHeldCmp(l, r) { return typeof l == "string" && typeof r == "string" && (goHasHeld(l) || goHasHeld(r)) }
+    function gBytesCmp(l, r) {
+        var a = utf8Bytes(l)
+        var b = utf8Bytes(r)
+        for (var i = 0; i < a.length && i < b.length; i++) {
+            if (a[i] != b[i]) { return a[i] < b[i] ? 0 - 1 : 1 }
+        }
+        return a.length == b.length ? 0 : (a.length < b.length ? 0 - 1 : 1)
+    }
     // The compound assignments are the same operators (x *= 2 is x = x * 2), so they
     // ALL resolve through binOps rather than the shared 32 bit applyOps table - which
     // is what makes `n *= n` exact and `u8 += 1` wrap at 8 bits.
@@ -4762,8 +4781,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 while (b < arr.length) {
                     var ru = strRuneAt(arr, b)
                     keys.push(off)
-                    vals.push(szConv(ru.cp, 32, false))
-                    off += utf8Len(ru.cp)
+                    if (goHeld(ru.cp)) { vals.push(szConv(65533, 32, false)); off += 1 }
+                    else { vals.push(szConv(ru.cp, 32, false)); off += utf8Len(ru.cp) }
                     b += ru.n
                 }
             }
@@ -5318,11 +5337,46 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     // ----- Go strings are BYTE strings -----
     // The value model keeps them as host (UTF-16) strings, so the byte view is built
-    // on demand: s[i] is a byte, s[lo:hi] slices bytes, len counts bytes.
+    // on demand: s[i] is a byte, s[lo:hi] slices bytes, len counts bytes. A byte that
+    // is not part of a character - half a rune cut by a slice, a \x escape, a
+    // string([]byte) of one - is HELD as the lone surrogate U+DC00 + byte, which no
+    // Go string can otherwise contain, and counts, slices and prints as that byte.
+    function goHeld(c) { return c >= 0xdc80 && c <= 0xdcff }
+    function goHasHeld(s) {
+        if (byteLen(s) == s.length) { return false }
+        for (var i = 0; i < s.length; i++) { if (goHeld(s.charCodeAt(i))) { return true } }
+        return false
+    }
+    // a + b, re-read when a ends and b starts with a held byte, since the bytes
+    // the two hold may spell a character together.
+    function goJoin(a, b) {
+        var s = a + b
+        if (a.length == 0 || b.length == 0 || !goHeld(a.charCodeAt(a.length - 1)) || !goHeld(b.charCodeAt(0))) { return s }
+        return utf8Decode(utf8Bytes(s))
+    }
+    // A text built from pieces (fmt's Sprint and Sprintf), re-read when two held
+    // bytes meet in it.
+    function goCanon(s) {
+        if (byteLen(s) == s.length) { return s }
+        for (var i = 1; i < s.length; i++) {
+            if (goHeld(s.charCodeAt(i)) && goHeld(s.charCodeAt(i - 1))) { return utf8Decode(utf8Bytes(s)) }
+        }
+        return s
+    }
+    // Standard output: Go writes a held byte RAW, so a text holding one goes out
+    // through writeBytes, one byte per unit.
+    function gOut(s) {
+        if (!goHasHeld(s)) { print(s); return }
+        var bs = utf8Bytes(s)
+        var t = ""
+        for (var i = 0; i < bs.length; i++) { t += String.fromCharCode(bs[i]) }
+        writeBytes(t)
+    }
     function utf8Bytes(s) {
         var out = []
         var i = 0
         while (i < s.length) {
+            if (goHeld(s.charCodeAt(i))) { out.push(s.charCodeAt(i) - 0xdc00); i++; continue }
             var r = strRuneAt(s, i)
             i += r.n
             var cp = r.cp
@@ -5342,8 +5396,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return out
     }
     // utf8Bytes of the last GO_BYTE_WAYS strings indexed, replaced round robin, so a
-    // loop over s[i] encodes s once rather than once per index. Twin of goByteForm in
-    // lib/go-rt.metajs.
+    // loop over s[i] encodes s once rather than once per index.
     var GO_BYTE_WAYS = 4
     var goByteS = ["", "", "", ""]
     var goByteB = [[], [], [], []]
@@ -5360,9 +5413,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         goByteNext = (goByteNext + 1) % GO_BYTE_WAYS
         return bs
     }
-    // The inverse: a byte list back to a host string. A byte that does not start a
-    // well-formed sequence is passed through as its own code point (Go would render
-    // U+FFFD; nothing in the subset depends on that).
+    // The inverse: a byte list back to a host string, decoded the way utf8.DecodeRune
+    // does. A byte that does not begin a well-formed sequence (a stray continuation, a
+    // lead without its continuations, an overlong form, a surrogate, past U+10FFFF) is
+    // held (goHeld). Twin of utf8Decode in go-to-llvm-ir.abnf.
     function utf8Decode(bytes) {
         var out = ""
         var i = 0
@@ -5371,18 +5425,20 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             if (b0 < 0x80) { out += String.fromCharCode(b0); i++; continue }
             var need = 0
             var cp = 0
-            if (b0 >= 0xf0) { need = 3; cp = b0 & 7 }
-            else if (b0 >= 0xe0) { need = 2; cp = b0 & 15 }
-            else if (b0 >= 0xc0) { need = 1; cp = b0 & 31 }
-            else { out += String.fromCharCode(b0); i++; continue }
-            if (i + need > bytes.length - 1) { out += String.fromCharCode(b0); i++; continue }
-            var ok = true
-            for (var k = 1; k <= need; k++) {
+            var lo = 0
+            if (b0 >= 0xc2 && b0 <= 0xdf) { need = 1; cp = b0 & 31; lo = 0x80 }
+            else if (b0 >= 0xe0 && b0 <= 0xef) { need = 2; cp = b0 & 15; lo = 0x800 }
+            else if (b0 >= 0xf0 && b0 <= 0xf4) { need = 3; cp = b0 & 7; lo = 0x10000 }
+            var ok = need > 0 && i + need < bytes.length
+            for (var k = 1; ok && k <= need; k++) {
                 var bk = bytes[i + k] & 255
-                if (bk < 0x80 || bk > 0xbf) { ok = false; break }
-                cp = cp * 64 + (bk & 63)
+                if (bk < 0x80 || bk > 0xbf) { ok = false } else { cp = cp * 64 + (bk & 63) }
             }
-            if (!ok) { out += String.fromCharCode(b0); i++; continue }
+            if (!ok || cp < lo || (cp >= 0xd800 && cp <= 0xdfff) || cp > 0x10ffff) {
+                out += String.fromCharCode(0xdc00 + b0)
+                i++
+                continue
+            }
             out += fromCodePoint(cp)
             i += need + 1
         }
@@ -5394,6 +5450,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function runeVal(s) {
         var u = unescapeJs(s)
         if (u.length == 0) { return 0 }
+        // '\xff' and '\377' are the byte's value, which unescapeJs holds.
+        if (goHeld(u.charCodeAt(0))) { return u.charCodeAt(0) - 0xdc00 }
         return strRuneAt(u, 0).cp
     }
     // The integer value of a 0x / 0o / 0b literal, ignoring '_' digit separators.

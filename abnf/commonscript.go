@@ -246,6 +246,30 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 	// (lib/compile-core.js emitStr).
 	wtf8 := gojaWTF8(vm)
 	vm.Set("byteLen", func(v goja.Value) int { return len(wtf8(v)) })
+	// byteAt / byteSub / bytesStr: byteBindings in jsrtint.go over the same WTF-8
+	// bytes. A goja string cannot hold a byte that is not part of a character, so
+	// a result that cuts one reads U+FFFD there.
+	vm.Set("byteAt", func(v goja.Value, i goja.Value) int {
+		b, k := wtf8(v), jsToInt(i.ToFloat())
+		if k < 0 || k >= len(b) {
+			return -1
+		}
+		return int(b[k])
+	})
+	vm.Set("byteSub", func(v, lo, hi goja.Value) string {
+		b := wtf8(v)
+		l, h := byteWindow(len(b), jsToInt(lo.ToFloat()), jsToInt(hi.ToFloat()))
+		return b[l:h]
+	})
+	vm.Set("bytesStr", func(v goja.Value) string {
+		var out []byte
+		if o, ok := v.(*goja.Object); ok && o.ClassName() == "Array" {
+			for _, e := range o.Export().([]interface{}) {
+				out = append(out, byte(int64(jsToInt(vm.ToValue(e).ToFloat()))))
+			}
+		}
+		return string(out)
+	})
 
 	// sprint: fmt.Sprint's text, the rendering println gives returned rather than
 	// printed. Twin of the frozen host's binding (standardJSBindings, jsrt.go);

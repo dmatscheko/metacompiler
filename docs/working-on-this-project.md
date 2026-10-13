@@ -796,11 +796,15 @@ shape; an uncaught `__dexc` in the compiler half prints `bad` rather than
 `readonly` is not enforced; `%e %f %g %a` need a double in `bash-rt.c`, which has
 none.
 
-Per-language divergences from real toolchains, recorded and permanent: Go byte-
-slicing a rune in half cannot be represented at all (the floor's strings are
-UTF-16), so `string(bs)` of bytes that are not valid UTF-8 differs per engine (the
-Go twin keeps the raw byte, the native leg prints U+FFFD, the interpreter the
-byte's Latin-1 character); `[]byte(s)` itself is the exact UTF-8 bytes. An
+Per-language divergences from real toolchains, recorded and permanent: a Go
+string is its BYTES under llvm.Run and natively (the floor's cell holds UTF-8, and
+layer 2 reads it through `byteAt`/`byteSub`/`bytesStr`, host ids 101..103), and the
+interpreter holds a byte that is not part of a character as U+DC00 + byte, so a
+slice that cuts a rune, `string([]byte)` and `\x` escapes agree with go in all
+three. What is left is the bytes of a UTF-8-encoded SURROGATE (`"\xed\xa0\x80"`):
+llvm.Run and the native leg print them as U+FFFD and join two such triples into
+one astral character, because the shared `str_cat` and print path read them as
+WTF-8; the interpreter writes them raw, as go does. An
 ~~astral character prints as two U+FFFD in swift~~ - **NO LONGER TRUE for string
 literals, 2026-08-10**: `swUnescape` was copying a literal one code unit at a time
 and handing the host a LONE SURROGATE, which UTF-8 cannot encode. All four legs

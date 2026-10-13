@@ -22,7 +22,7 @@
 //     and prints the summary line 'full: <checks> checks, <failures> failures'
 //   - main() returns the failure count (exit 0 == full support, verified)
 //
-// All three engines bind the SAME 52 host globals - the C floor's seed_root list in
+// All three engines bind the SAME host globals - the C floor's seed_root list in
 // languages/lib/runtime.c is the authority. SECTION 31 asserts every one of them on
 // both halves; abnf/hostglobals_test.go parses the three sources and fails
 // `go test ./abnf/` if a future name lands in fewer than three of them.
@@ -1632,7 +1632,7 @@ function s30() {
     check("gen08", typeof fake === "object" && isGenerator(fake) === false)
 }
 
-// ===== SECTION 31: the host-global SET, all 52 names on both halves =====
+// ===== SECTION 31: the host-global SET, every name on both halves =====
 // The --full runner makes both halves run this same file and report the same
 // assertion count, so these rows hold only because the halves bind the same set.
 //
@@ -1761,6 +1761,13 @@ function s31() {
         if (typeof rv === "number" && rv >= 0 && rv < 1) { rok = rok + 1 }
     }
     check("hg38", typeof Math.random === "function" && rok === 50)
+    // A string as its UTF-8 bytes (host ids 101..103): byteAt is -1 outside it,
+    // byteSub clamps its window to it.
+    var bt = ["h\u00e9llo", "abc"]
+    check("hg39", typeof byteAt === "function" && typeof byteSub === "function" && typeof bytesStr === "function")
+    check("hg40", byteAt(bt[0], 1) === 195 && byteAt(bt[0], 2) === 169 && byteAt(bt[0], 6) === -1 && byteAt(bt[1], -1) === -1)
+    check("hg41", byteSub(bt[0], 0, 3) === "h\u00e9" && byteSub(bt[1], 1, 9) === "bc" && byteSub(bt[1], 2, 1) === "" && byteSub(bt[1], -3, 1) === "a")
+    check("hg42", bytesStr([104, 195, 169]) === "h\u00e9" && bytesStr([]) === "" && bytesStr([353]) === "a")
 }
 
 // ===== SECTION 32: string case mapping is ECMAScript's FULL mapping =====

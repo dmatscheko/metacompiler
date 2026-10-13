@@ -1829,13 +1829,17 @@ func (rt *jsrt) gopList(f gopFlags, v interface{}, verb rune, depth int, noMeth 
 // gopQuoteBody is the body of strconv.Quote / QuoteRune: the letter escapes, the
 // backslash and whichever delimiter is in force, \xHH for the other ASCII controls
 // and \uHHHH / \UHHHHHHHH for any other rune strconv.IsPrint refuses (gfIsPrint in
-// languages/lib/go-fmt.js carries the same table). The twins are gQuoteBody in
+// languages/lib/go-fmt.js carries the same table), and \xHH for a byte that is
+// not part of a character. The twins are gQuoteBody in
 // languages/go-interpreter.abnf and gopQuoteBody in languages/lib/go-rt.metajs.
 func gopQuoteBody(s string, delim byte) string {
 	named := map[rune]string{'\n': `\n`, '\t': `\t`, '\r': `\r`, 7: `\a`, 8: `\b`, 12: `\f`, 11: `\v`}
 	out := ""
-	for _, c := range s {
-		if c == '\\' {
+	for i := 0; i < len(s); {
+		c, w := utf8.DecodeRuneInString(s[i:])
+		if c == utf8.RuneError && w == 1 {
+			out += fmt.Sprintf(`\x%02x`, s[i])
+		} else if c == '\\' {
 			out += `\\`
 		} else if c == rune(delim) {
 			out += `\` + string(c)
@@ -1850,6 +1854,7 @@ func gopQuoteBody(s string, delim byte) string {
 		} else {
 			out += string(c)
 		}
+		i += w
 	}
 	return out
 }
@@ -2187,6 +2192,11 @@ func init() {
 			}
 			return 0
 		}
+		// js_gorawstr(s): a string constant's text with each held byte (U+DC80 ..
+		// U+DCFF, which utf8Decode in go-to-llvm-ir.abnf makes of a byte that is
+		// not part of a character) back as that one byte - phpRaw's rule. Twin of
+		// js_gorawstr in lib/go-rt.metajs.
+		m["js_gorawstr"] = func(a []uint64) uint64 { return w(phpRaw(rt.toString(u(a[0])))) }
 		// goMathSqrt(x): the correctly rounded square root lib/go-math.go's Sqrt is,
 		// a float64. Twin of js_gosqrt in lib/go-rt.metajs, goMathSqrt in
 		// go-interpreter.abnf.

@@ -4165,6 +4165,8 @@ long js_throw(long v);
 
 long arg_at(long args, long i) { if (i < arr_len(args)) { return arr_get(args, i); } return H_UNDEF; }
 long arg_num(long args, long i) { if (i < arr_len(args)) { return to_number(arr_get(args, i)); } return DNAN; }
+/* An argument as a whole number: truncated, a NaN 0 (the Go twin's jsToInt). */
+long arg_idx(long args, long i) { long v = arg_num(args, i); return d_is_nan(v) ? 0 : d_to_long(v); }
 long arg_str(long args, long i) { if (i < arr_len(args)) { return to_string(arr_get(args, i)); } return mk_cstr(""); }
 
 long host_call(long id, long self, long args);
@@ -4865,6 +4867,7 @@ long builtin_method(long recv, long mid, long args) {
  *      10 floor 11 abs 12 max 13 min 14 imul 15 ceil 16 trunc 17 round
  *      18 sign  19 sqrt 20 pow
  *      30 String.fromCharCode  31 Array.isArray  32 byteLen  97 unicodeCase
+ *      101 byteAt  102 byteSub  103 bytesStr
  */
 
 /* Compare (M * 2^E)^2 with (m2 * 2^e2), exactly. A 53-bit mantissa squared is
@@ -6503,6 +6506,44 @@ long host_call(long id, long self, long args) {
 		if (tag_of(a) == 5) { sd(a, d_to_long(arg_num(args, 1))); }
 		return a;
 	}
+	/* byteAt(s, i) / byteSub(s, lo, hi) / bytesStr(a): a string as the BYTES a
+	 * cell holds (UTF-8, WTF-8 for a lone surrogate), for a language whose
+	 * strings are byte strings (go). byteAt is the i-th byte, -1 outside s;
+	 * byteSub the bytes [lo, hi) clamped to s, kept as they are even where they
+	 * cut a character; bytesStr the string whose bytes are a's numbers. Twin of
+	 * byteBindings in abnf/jsrtint.go. */
+	case 101: {
+		long s = arg_str(args, 0);
+		long k = arg_idx(args, 1);
+		if (k < 0 || k >= str_len(s)) { return mk_num(d_from_long(-1)); }
+		return mk_num(d_from_long((long)str_ptr(s)[k] & 255));
+	}
+	case 102: {
+		long s = arg_str(args, 0);
+		long len = str_len(s);
+		long lo = arg_idx(args, 1);
+		long hi = arg_idx(args, 2);
+		if (hi > len) { hi = len; }
+		if (lo < 0) { lo = 0; }
+		if (hi < lo) { hi = lo; }
+		return mk_str(str_ptr(s) + lo, hi - lo);
+	}
+	case 103: {
+		long a = arg_at(args, 0);
+		long len = tag_of(a) == 5 ? arr_len(a) : 0;
+		char *buf = ar_alloc(len + 1);
+		long h;
+		while (i < len) {
+			long v = to_number(arr_get(a, i));
+			buf[i] = (char)((d_is_nan(v) ? 0 : d_to_long(v)) & 255);
+			i = i + 1;
+		}
+		buf[len] = 0;
+		h = cell_new(4);
+		sa(h, (long)buf);
+		sb(h, len);
+		return h;
+	}
 	}
 	die("unknown host function");
 	return H_UNDEF;
@@ -7357,6 +7398,9 @@ void boot(void) {
 	seed_root("fnMetaSet", mk_host(95));
 	seed_root("arrKind", mk_host(99));
 	seed_root("arrKindSet", mk_host(100));
+	seed_root("byteAt", mk_host(101));
+	seed_root("byteSub", mk_host(102));
+	seed_root("bytesStr", mk_host(103));
 	seed_root("Infinity", mk_num(DINF));
 	seed_root("NaN", mk_num(DNAN));
 	seed_root("anytype", cell_new(12));

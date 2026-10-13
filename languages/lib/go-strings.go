@@ -2,17 +2,14 @@
 // imports "strings" (core.importFile in both go grammars), so one implementation
 // serves the interpreter, llvm.Run and a native build alike.
 //
-// The value model holds a string as text, not bytes: s[i], len(s) and s[i:j] are
-// exact byte operations, but a slice that cuts a rune in half has no representation
-// (manual 7.9). Everything here therefore steps over whole runes, or compares whole
-// substrings, and never builds a string from single non-ASCII bytes.
+// s[i], len(s) and s[i:j] are exact byte operations in every engine, a slice that
+// cuts a rune included, so this is written the way Go's own is.
 //
 // Case mapping covers U+0000..U+052F, Armenian, Latin Extended Additional and the
 // fullwidth Latin letters, except the irregular letters of Latin Extended-B, the IPA
 // block and the Greek symbols (U+0180..U+01CC, U+0220..U+0245, U+0250..U+029E,
 // U+0345, U+037B..U+037F, U+03CF..U+03FF in part): those, and every letter outside
 // these blocks, map to themselves here where Go's unicode tables would map them.
-// Builder.WriteByte of a byte >= 0x80 writes that code point, not the raw byte.
 package strings
 
 // ----- searching -----
@@ -22,11 +19,9 @@ func Index(s, substr string) int {
 	if n == 0 {
 		return 0
 	}
-	for i := range s {
-		if i+n > len(s) {
-			return -1
-		}
-		if s[i] == substr[0] && s[i:i+n] == substr {
+	c := substr[0]
+	for i := 0; i+n <= len(s); i++ {
+		if s[i] == c && s[i:i+n] == substr {
 			return i
 		}
 	}
@@ -38,16 +33,13 @@ func LastIndex(s, substr string) int {
 	if n == 0 {
 		return len(s)
 	}
-	last := -1
-	for i := range s {
-		if i+n > len(s) {
-			break
-		}
-		if s[i] == substr[0] && s[i:i+n] == substr {
-			last = i
+	c := substr[0]
+	for i := len(s) - n; i >= 0; i-- {
+		if s[i] == c && s[i:i+n] == substr {
+			return i
 		}
 	}
-	return last
+	return -1
 }
 
 func IndexByte(s string, c byte) int {
@@ -351,18 +343,46 @@ func (r *Replacer) Replace(s string) string {
 	return out + s[last:]
 }
 
-// runeLen is the byte length of the rune starting at s[i], and 1 at the end of s.
+// runeLen is the byte length of the rune utf8.DecodeRuneInString reads at s[i]: 1
+// for a byte that does not begin a well-formed sequence, and 1 at the end of s.
 func runeLen(s string, i int) int {
 	if i >= len(s) || s[i] < 0x80 {
 		return 1
 	}
-	if s[i] < 0xE0 {
-		return 2
+	n := 0
+	switch {
+	case s[i] >= 0xC2 && s[i] <= 0xDF:
+		n = 2
+	case s[i] >= 0xE0 && s[i] <= 0xEF:
+		n = 3
+	case s[i] >= 0xF0 && s[i] <= 0xF4:
+		n = 4
+	default:
+		return 1
 	}
-	if s[i] < 0xF0 {
-		return 3
+	if i+n > len(s) {
+		return 1
 	}
-	return 4
+	lo, hi := byte(0x80), byte(0xBF)
+	switch s[i] {
+	case 0xE0:
+		lo = 0xA0
+	case 0xED:
+		hi = 0x9F
+	case 0xF0:
+		lo = 0x90
+	case 0xF4:
+		hi = 0x8F
+	}
+	if s[i+1] < lo || s[i+1] > hi {
+		return 1
+	}
+	for k := 2; k < n; k++ {
+		if s[i+k] < 0x80 || s[i+k] > 0xBF {
+			return 1
+		}
+	}
+	return n
 }
 
 // ----- trimming -----
@@ -376,12 +396,17 @@ func TrimLeftFunc(s string, f func(rune) bool) string {
 	return ""
 }
 
+// The kept prefix ends where the rune after the last one f refuses begins.
 func TrimRightFunc(s string, f func(rune) bool) string {
-	end := 0
+	end, kept := 0, false
 	for i, c := range s {
-		if !f(c) {
-			end = i + len(string(c))
+		if kept {
+			end = i
 		}
+		kept = !f(c)
+	}
+	if kept {
+		end = len(s)
 	}
 	return s[:end]
 }
@@ -645,7 +670,7 @@ func (b *Builder) WriteString(s string) (int, error) {
 }
 
 func (b *Builder) WriteByte(c byte) error {
-	b.s += string(rune(c))
+	b.s += string([]byte{c})
 	return nil
 }
 

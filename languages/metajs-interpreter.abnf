@@ -1084,6 +1084,11 @@ KwDefault   = "default" KwEnd ;
         // on an array; bound by both grammar hosts like the fnMeta pair.
         "arrKind": arrKind,
         "arrKindSet": arrKindSet,
+        // byteAt(s, i) / byteSub(s, lo, hi) / bytesStr(a): host ids 101..103, a
+        // string as its bytes; bound by both grammar hosts like the arrKind pair.
+        "byteAt": byteAt,
+        "byteSub": byteSub,
+        "bytesStr": bytesStr,
         // The ten boxed-double names, the same set languages/lib/runtime.c
         // seeds (ids 51..60) and abnf/jsrtjvm.go's jfBindings adds.
         "flo": flHost,

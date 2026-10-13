@@ -5238,9 +5238,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
         return out
     }
-    // The inverse: a byte list back to a host string. A byte that does not start a
-    // well-formed sequence is passed through as its own code point (Go would render
-    // U+FFFD; nothing in the subset depends on that).
+    // The inverse: a byte list back to a host string, decoded the way utf8.DecodeRune
+    // does. A byte that does not begin a well-formed sequence is HELD as the lone
+    // surrogate U+DC00 + byte, which no Go string can otherwise contain (goHeld), and
+    // makeConst turns a constant holding one back into its bytes. Twin of utf8Decode
+    // in go-interpreter.abnf.
     function utf8Decode(bytes) {
         var out = ""
         var i = 0
@@ -5249,22 +5251,40 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             if (b0 < 0x80) { out += String.fromCharCode(b0); i++; continue }
             var need = 0
             var cp = 0
-            if (b0 >= 0xf0) { need = 3; cp = b0 & 7 }
-            else if (b0 >= 0xe0) { need = 2; cp = b0 & 15 }
-            else if (b0 >= 0xc0) { need = 1; cp = b0 & 31 }
-            else { out += String.fromCharCode(b0); i++; continue }
-            if (i + need > bytes.length - 1) { out += String.fromCharCode(b0); i++; continue }
-            var ok = true
-            for (var k = 1; k <= need; k++) {
+            var lo = 0
+            if (b0 >= 0xc2 && b0 <= 0xdf) { need = 1; cp = b0 & 31; lo = 0x80 }
+            else if (b0 >= 0xe0 && b0 <= 0xef) { need = 2; cp = b0 & 15; lo = 0x800 }
+            else if (b0 >= 0xf0 && b0 <= 0xf4) { need = 3; cp = b0 & 7; lo = 0x10000 }
+            var ok = need > 0 && i + need < bytes.length
+            for (var k = 1; ok && k <= need; k++) {
                 var bk = bytes[i + k] & 255
-                if (bk < 0x80 || bk > 0xbf) { ok = false; break }
-                cp = cp * 64 + (bk & 63)
+                if (bk < 0x80 || bk > 0xbf) { ok = false } else { cp = cp * 64 + (bk & 63) }
             }
-            if (!ok) { out += String.fromCharCode(b0); i++; continue }
+            if (!ok || cp < lo || (cp >= 0xd800 && cp <= 0xdfff) || cp > 0x10ffff) {
+                out += String.fromCharCode(0xdc00 + b0)
+                i++
+                continue
+            }
             out += fromCodePoint(cp)
             i += need + 1
         }
         return out
+    }
+    function goHeld(c) { return c >= 0xdc80 && c <= 0xdcff }
+    function goHasHeld(s) {
+        for (var i = 0; i < s.length; i++) { if (goHeld(s.charCodeAt(i))) { return true } }
+        return false
+    }
+    // A string constant is emitted as module bytes, which are the WTF-8 of its text:
+    // one holding a byte that is not part of a character is turned back into those
+    // bytes at run time (js_gorawstr). Assigned over the shared core's makeConst,
+    // like unescapeJs above.
+    var coreMakeConstG = makeConst
+    makeConst = function(v) {
+        if (typeof v == "string" && goHasHeld(v)) {
+            return function(b) { return {b: b, v: callExt(b, "js_gorawstr", [emitStr(b, v)])} }
+        }
+        return coreMakeConstG(v)
     }
     // A rune literal is its first code point (Go runes are int32); empty is 0.
     // '\U0001F600' is a single rune, so the astral surrogate pair has to be folded
@@ -5272,6 +5292,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function runeVal(s) {
         var u = unescapeJs(s)
         if (u.length == 0) { return 0 }
+        // '\xff' and '\377' are the byte's value, which unescapeJs holds.
+        if (goHeld(u.charCodeAt(0))) { return u.charCodeAt(0) - 0xdc00 }
         return strRuneAt(u, 0).cp
     }
     // The integer value of a 0x / 0o / 0b literal, ignoring '_' digit separators.

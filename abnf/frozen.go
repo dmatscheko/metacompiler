@@ -380,6 +380,8 @@ func frozenBaseBindings(preventDefaultOutput bool) map[string]interface{} {
 	fnMetaBindings(b)
 	// arrKind / arrKindSet - the kind number kept on an array (arrKindBindings).
 	arrKindBindings(b)
+	// byteAt / byteSub / bytesStr - a string's bytes (byteBindings).
+	byteBindings(b)
 	return b
 }
 

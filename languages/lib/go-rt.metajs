@@ -33,8 +33,10 @@
 //     a BOXED DOUBLE       ==  float64 / float32, style 1 (floGo). The Go twin
 //                              uses jsJFlo (abnf/jsrtjvm.go); the floor has it
 //                              as tag 14.
-//     a string             ==  string. UTF-16 here, as everywhere in this
-//                              runtime; len() is the UTF-8 BYTE count (byteLen).
+//     a string             ==  string, as the floor's cell holds it: its UTF-8
+//                              BYTES. len(), s[i] and s[lo:hi] are byteLen,
+//                              byteAt and byteSub, so a slice that cuts a rune
+//                              keeps the raw bytes, as Go's does.
 //     an array             ==  a Go ARRAY (a value type), and the backing store
 //                              of a slice
 //     a {__dict} object    ==  map: keys/vals parallel arrays, insertion ordered,
@@ -1155,23 +1157,28 @@ function gfHShort(a, f32) {
 function gfHExact(a) { return rtExactDec(a) }
 function gfHRound(ds, n) { return rtRoundHalfEven(ds, n) }
 function gfHBytes(s) { return goBytes(s) }
-function gfHBytesStr(bs) { return goDecodeUtf8(bs) }
+function gfHBytesStr(bs) { return bytesStr(bs) }
 function gfHQuote(s, delim) { return gopQuoteBody(s, delim) }
 function gfHRune(cp) { return goRuneStr(cp) }
 
 // gopQuoteBody is the body of strconv.Quote / QuoteRune: the letter escapes, the
 // backslash and whichever delimiter is in force, \xHH for the other ASCII controls
 // and gfUEsc for any other character that is not printable (gfIsPrint); a
-// printable one is copied whole. The twins are gQuoteBody in
-// languages/go-interpreter.abnf and gopQuoteBody in abnf/jsrtgolang.go.
+// printable one is copied whole, and a byte that is not part of a character is
+// \xHH. The twins are gQuoteBody in languages/go-interpreter.abnf and
+// gopQuoteBody in abnf/jsrtgolang.go.
 function gopQuoteBody(s, delim) {
-    var cps = goRunes(s).cps
+    var rs = goRunes(s)
+    var cps = rs.cps
     var dc = delim.charCodeAt(0)
     var out = ""
     var i = 0
     while (i < cps.length) {
         var k = cps[i]
-        if (k == 92) { out = out + "\\\\" }
+        var at = rs.offs[i]
+        var w = (i + 1 < cps.length ? rs.offs[i + 1] : byteLen(s)) - at
+        if (k == 65533 && w == 1) { out = out + "\\x" + gfHex2(byteAt(s, at)) }
+        else if (k == 92) { out = out + "\\\\" }
         else if (k == dc) { out = out + "\\" + String.fromCharCode(k) }
         else if (k == 10) { out = out + "\\n" }
         else if (k == 9) { out = out + "\\t" }
@@ -1263,39 +1270,40 @@ function gopNewline(mode) {
 
 function goIsFn(v) { return typeof v == "function" }
 
-// The UTF-8 byte length of one code point, which is what len() counts and what a
-// `for i, r := range s` index steps by.
-function goUtf8Len(cp) {
-    if (cp < 128) { return 1 }
-    if (cp < 2048) { return 2 }
-    if (cp < 65536) { return 3 }
-    return 4
-}
-
-// The code points of a UTF-16 string, with the UTF-8 BYTE offset of each. A lone
-// surrogate is U+FFFD, which is how Go decodes an invalid byte sequence and what
-// wtf8Clean does on the way out.
+// The code points of a string's BYTES, with the byte offset of each, decoded
+// the way utf8.DecodeRune does: a byte that does not begin a well-formed
+// sequence (a stray continuation, a lead without its continuations, an overlong
+// form, a surrogate, past U+10FFFF) is U+FFFD and one byte wide.
 function goRunes(s) {
     var cps = []
     var offs = []
-    var off = 0
+    var n = byteLen(s)
     var i = 0
-    while (i < s.length) {
-        var c = s.charCodeAt(i)
-        var cp = c
-        if (c >= 55296 && c <= 56319 && i + 1 < s.length) {
-            var d = s.charCodeAt(i + 1)
-            if (d >= 56320 && d <= 57343) {
-                cp = 65536 + (c - 55296) * 1024 + (d - 56320)
-                i = i + 1
-            } else { cp = 65533 }
-        } else if (c >= 55296 && c <= 57343) { cp = 65533 }
+    while (i < n) {
+        var b = byteAt(s, i)
+        var need = 0
+        var cp = 65533
+        var lo = 0
+        if (b < 128) { cp = b }
+        else if (b >= 194 && b <= 223) { need = 1; cp = b - 192; lo = 128 }
+        else if (b >= 224 && b <= 239) { need = 2; cp = b - 224; lo = 2048 }
+        else if (b >= 240 && b <= 244) { need = 3; cp = b - 240; lo = 65536 }
+        var ok = i + need < n
+        var k = 1
+        while (ok && k <= need) {
+            var c = byteAt(s, i + k)
+            if (c < 128 || c > 191) { ok = false } else { cp = cp * 64 + (c - 128) }
+            k = k + 1
+        }
+        if (need > 0 && (!ok || cp < lo || (cp >= 55296 && cp <= 57343) || cp > 1114111)) {
+            cp = 65533
+            need = 0
+        }
         cps.push(cp)
-        offs.push(off)
-        off = off + goUtf8Len(cp)
-        i = i + 1
+        offs.push(i)
+        i = i + need + 1
     }
-    return {cps: cps, offs: offs, bytes: off}
+    return {cps: cps, offs: offs}
 }
 
 // ===================================================== the NEUTRAL externs ==
@@ -1373,7 +1381,7 @@ function js_goslice(v, lo0, hi0) {
         var slo = goBound(lo0, 0)
         var shi = goBound(hi0, nb)
         goSliceCheck(slo, shi, 0, nb, false, "length")
-        return goSubBytes(v, slo, shi)
+        return byteSub(v, slo, shi)
     }
     if (!Array.isArray(v)) { fail("slicing a " + typeof v) }
     var lo = goBound(lo0, 0)
@@ -1388,53 +1396,6 @@ function js_goslice(v, lo0, hi0) {
 function goBound(h, dflt) {
     if (h === undefined) { return dflt }
     return goIdx(h)
-}
-
-// The [lo, hi) BYTE window of a string. The runtime's strings are UTF-16 and Go's
-// are bytes, so the window is taken over the UTF-8 ENCODING and decoded back -
-// with U+FFFD for every byte that is not part of a well-formed sequence, which is
-// exactly what a Go string carrying a partial rune prints once wtf8Clean has seen
-// it. `"日本語"[0:1]` is therefore one replacement character in both halves.
-function goSubBytes(s, lo, hi) {
-    var bs = goBytes(s)
-    var win = []
-    var i = lo
-    while (i < hi) { win.push(bs[i]); i = i + 1 }
-    return goDecodeUtf8(win)
-}
-
-// UTF-8 decoding with the replacement rule: one U+FFFD per byte that cannot
-// begin or continue a well-formed sequence, which is Go's own behaviour when a
-// string is ranged or printed.
-function goDecodeUtf8(bs) {
-    var out = ""
-    var i = 0
-    while (i < bs.length) {
-        var b = bs[i]
-        var need = 0
-        var cp = 0
-        var lo = 0
-        if (b < 128) { out = out + String.fromCharCode(b); i = i + 1; continue }
-        else if (b >= 194 && b <= 223) { need = 1; cp = b - 192; lo = 128 }
-        else if (b >= 224 && b <= 239) { need = 2; cp = b - 224; lo = 2048 }
-        else if (b >= 240 && b <= 244) { need = 3; cp = b - 240; lo = 65536 }
-        else { out = out + goRuneStr(65533); i = i + 1; continue }
-        var ok = i + need < bs.length
-        var k = 1
-        while (ok && k <= need) {
-            var c = bs[i + k]
-            if (c < 128 || c > 191) { ok = false } else { cp = cp * 64 + (c - 128) }
-            k = k + 1
-        }
-        if (!ok || cp < lo || (cp >= 55296 && cp <= 57343) || cp > 1114111) {
-            out = out + goRuneStr(65533)
-            i = i + 1
-            continue
-        }
-        out = out + goRuneStr(cp)
-        i = i + need + 1
-    }
-    return out
 }
 
 // js_gospread is the C FLOOR's (lib/runtime.c, next to js_bytelen); a copy here as
@@ -1734,63 +1695,21 @@ function js_map_get(c, k) {
     }
     if (typeof c == "string") {
         var si = goIdx(k)
-        var n = byteLen(c)
-        if (si < 0 || si >= n) { goIdxPanic(si, n) }
-        // byteLen is O(1) and the unit count is memoised in the string cell, so
-        // an ASCII string is indexed in place; any other one through goByteForm.
-        if (n == c.length) { return sintConv(c.charCodeAt(si), 8, true) }
-        return sintConv(goByteForm(c)[si], 8, true)
+        var sb = byteAt(c, si)
+        if (sb < 0) { goIdxPanic(si, byteLen(c)) }
+        return sintConv(sb, 8, true)
     }
     if (goIsFn(c)) { return c }
     fail("indexing a " + typeof c)
     return undefined
 }
 
-// goBytes of the last GO_BYTE_WAYS non-ASCII strings indexed, replaced round
-// robin, so a loop indexing a few strings encodes each once rather than once per
-// index. A string is immutable, and === compares a string handle by identity,
-// then by length, before its bytes. Twin of goByteForm in go-interpreter.abnf.
-var GO_BYTE_WAYS = 4
-var goByteS = ["", "", "", ""]
-var goByteB = [[], [], [], []]
-var goByteNext = 0
-function goByteForm(s) {
-    var k = 0
-    while (k < GO_BYTE_WAYS) {
-        if (goByteS[k] === s) { return goByteB[k] }
-        k = k + 1
-    }
-    var bs = goBytes(s)
-    goByteS[goByteNext] = s
-    goByteB[goByteNext] = bs
-    goByteNext = (goByteNext + 1) % GO_BYTE_WAYS
-    return bs
-}
-
-// The UTF-8 bytes of a string: s[i] is the i-th BYTE of a Go string, so the
-// encoding has to be spelled out here (the runtime's strings are UTF-16).
+// The bytes of a string: s[i] is the i-th BYTE of a Go string.
 function goBytes(s) {
     var out = []
-    var r = goRunes(s)
+    var n = byteLen(s)
     var i = 0
-    while (i < r.cps.length) {
-        var cp = r.cps[i]
-        if (cp < 128) { out.push(cp) }
-        else if (cp < 2048) {
-            out.push(192 + Math.floor(cp / 64))
-            out.push(128 + (cp % 64))
-        } else if (cp < 65536) {
-            out.push(224 + Math.floor(cp / 4096))
-            out.push(128 + (Math.floor(cp / 64) % 64))
-            out.push(128 + (cp % 64))
-        } else {
-            out.push(240 + Math.floor(cp / 262144))
-            out.push(128 + (Math.floor(cp / 4096) % 64))
-            out.push(128 + (Math.floor(cp / 64) % 64))
-            out.push(128 + (cp % 64))
-        }
-        i = i + 1
-    }
+    while (i < n) { out.push(byteAt(s, i)); i = i + 1 }
     return out
 }
 
@@ -1939,7 +1858,7 @@ function js_goconv(to, v) {
             if (goByteEls(v)) {
                 var bs = []
                 while (i < v.length) { bs.push(goIdx(v[i])); i = i + 1 }
-                return goDecodeUtf8(bs)
+                return bytesStr(bs)
             }
             var out = ""
             while (i < v.length) { out = out + goRuneStr(goIdx(v[i])); i = i + 1 }
@@ -2936,6 +2855,30 @@ function js_gofdwrite(fd, s) {
     if (goNum(fd) == 1) { print(s); return undefined }
     if (s.length > 0 && s.charCodeAt(s.length - 1) == 10) { eprintln(s.substring(0, s.length - 1)) } else { eprintln(s) }
     return undefined
+}
+
+// js_gorawstr(s): a string constant's text with each held byte (U+DC80..U+DCFF,
+// WTF-8 ED B2 80..ED B3 BF, which utf8Decode in go-to-llvm-ir.abnf makes of a byte
+// that is not part of a character) back as that one byte. Twin of js_gorawstr in
+// abnf/jsrtgolang.go.
+function js_gorawstr(s) {
+    var out = []
+    var n = byteLen(s)
+    var i = 0
+    while (i < n) {
+        var b = byteAt(s, i)
+        if (b == 237 && i + 2 < n) {
+            var b1 = byteAt(s, i + 1)
+            if (b1 == 178 || b1 == 179) {
+                out.push((b1 - 178) * 64 + byteAt(s, i + 2))
+                i = i + 3
+                continue
+            }
+        }
+        out.push(b)
+        i = i + 1
+    }
+    return bytesStr(out)
 }
 
 // goMathSqrt(x): the correctly rounded square root lib/go-math.go's Sqrt is, a

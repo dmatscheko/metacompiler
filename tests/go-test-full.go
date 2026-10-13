@@ -4144,6 +4144,41 @@ func s78() {
 	check("rdx1", a+c+d == 0 && x1 == 3 && b1 == 4 && o2 == 5 && b3 == 6 && 0x1f+0o17+0b11 == 49)
 }
 
+// ===== SECTION 79: a string holding bytes that are not a character =====
+// A Go string is bytes: a slice may cut a rune, string([]byte) and a \x escape may
+// hold any byte, and each such byte counts, indexes, compares and concatenates as
+// itself while ranging and []rune read it as U+FFFD. The expected values are go run's.
+func s79() {
+	ws := []string{"日本語", "a\xffb"}
+	w := ws[0]
+	a, b := w[0:1], w[1:3]
+	ra := []rune(a)
+	check("ibs1", len(a) == 1 && len(ra) == 1 && ra[0] == 65533 && a != "�" && a[0] == 230 && len(b) == 2)
+	c := string([]byte{200})
+	check("ibs2", len(c) == 1 && c == "\xc8" && []byte(c)[0] == 200 && len(string([]byte{0xe6, 0x97, 0xa5})) == 3)
+	ab := a + b
+	d := a
+	d += b
+	check("ibs3", ab == "日" && d == "日" && len(ab) == 3 && []rune(ab)[0] == 26085 && a+"" == a)
+	check("ibs4", "\xe6\x97\xa5" == w[0:3] && len("x\xe6") == 2 && '\xff' == 255 && '\377' == 255 && len([]rune("\xed\xa0\x80")) == 3)
+	got := ""
+	for i, r := range ws[1] {
+		got += fmt.Sprint(i, ":", r, " ")
+	}
+	check("ibs5", got == "0:97 1:65533 2:98 " && len(ws[1]) == 3 && ws[1][1] == 255)
+	check("ibs6", fmt.Sprintf("%q %x %+q", w[0:4], w[0:4], a) == `"日\xe6" e697a5e6 "\xe6"` && fmt.Sprintf("%s%s", a, b) == "日")
+	var sb strings.Builder
+	for i := 0; i < len(w); i++ {
+		sb.WriteByte(w[i])
+	}
+	check("ibs7", sb.String() == w && strings.Index(w, b) == 1 && strings.LastIndex(w, w[3:4]) == 3 &&
+		strings.TrimSpace(" "+w[0:2]+" ") == w[0:2] && strings.ToUpper(a) == "�")
+	check("ibs8", !(a < b) && b < a && ws[1][1:2] > ws[1][0:1] && "\xff" > "日")
+	m := map[string]int{a: 1, w[1:2]: 5}
+	m[string([]byte{0xe6})] += 1
+	check("ibs9", len(m) == 2 && m[a] == 2 && m[w[3:4]] == 2 && m[w[1:2]] == 5)
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -4223,6 +4258,7 @@ func main() {
 	s76() // SECTION-CALL 76
 	s77() // SECTION-CALL 77
 	s78() // SECTION-CALL 78
+	s79() // SECTION-CALL 79
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

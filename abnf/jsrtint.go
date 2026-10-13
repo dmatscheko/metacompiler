@@ -473,6 +473,7 @@ func programJSBindings() map[string]interface{} {
 	})
 	fnMetaBindings(b)
 	arrKindBindings(b)
+	byteBindings(b)
 	// fail(msg): a RUNTIME ERROR, not an exception - the twin of host id 36 in
 	// languages/lib/runtime.c (rt.fail panics with exactly that text). Every
 	// layer-2 file calls it, so it must be bound under llvm.Run too.
@@ -624,6 +625,58 @@ func arrKindBindings(b map[string]interface{}) {
 		}
 		return v
 	})
+}
+
+// byteBindings adds byteAt(s, i), byteSub(s, lo, hi) and bytesStr(a), host ids
+// 101..103 of languages/lib/runtime.c: a string as the bytes it is held in (UTF-8,
+// WTF-8 for a lone surrogate), for a language whose strings are byte strings.
+// byteAt answers -1 outside s; byteSub clamps to s and keeps a cut character's
+// bytes as they are. The frozen grammar host binds them too (frozenBaseBindings)
+// and commonscript.go binds the goja twin, which cannot hold such a byte.
+func byteBindings(b map[string]interface{}) {
+	b["byteAt"] = jsHostFunc("byteAt", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		s := rt.toString(argAt(args, 0))
+		k := jsToInt(rt.toNumber(argAt(args, 1)))
+		if k < 0 || k >= len(s) {
+			return float64(-1)
+		}
+		return float64(s[k])
+	})
+	b["byteSub"] = jsHostFunc("byteSub", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		s := rt.toString(argAt(args, 0))
+		lo, hi := byteWindow(len(s), jsToInt(rt.toNumber(argAt(args, 1))), jsToInt(rt.toNumber(argAt(args, 2))))
+		return s[lo:hi]
+	})
+	b["bytesStr"] = jsHostFunc("bytesStr", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return string(hostBytes(rt, argAt(args, 0)))
+	})
+}
+
+// byteWindow is byteSub's [lo, hi) window, clamped to a string of n bytes.
+func byteWindow(n, lo, hi int) (int, int) {
+	if lo < 0 {
+		lo = 0
+	}
+	if hi > n {
+		hi = n
+	}
+	if lo > hi {
+		lo = hi
+	}
+	return lo, hi
+}
+
+// hostBytes is bytesStr's array of numbers as bytes, each taken modulo 256.
+func hostBytes(rt *jsrt, v interface{}) []byte {
+	a, _ := v.(*jsArray)
+	if a == nil {
+		return nil
+	}
+	out := make([]byte, len(a.elems))
+	for i, e := range a.elems {
+		out[i] = byte(int64(jsToInt(rt.toNumber(e))))
+	}
+	return out
 }
 
 // scopeBindings adds the FIVE scope* host globals and isGenerator, which
