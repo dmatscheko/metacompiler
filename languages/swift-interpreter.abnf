@@ -1942,6 +1942,10 @@ KwContinue  = "continue" KwEnd ;
     // Double("0x1p4")'s numeral (swFloParse).
     include("lib/hex-float.js")
 
+    // Character's properties (swcProp) over java's Unicode classification table.
+    include("lib/java-chars.js")
+    include("lib/swift-chars.js")
+
     // ----- Operators -----
     // precedencegroup / operator declarations. Only the RELATIVE order of the custom
     // operators matters: they all sit at one level of the expression grammar (tighter
@@ -3517,6 +3521,12 @@ KwContinue  = "continue" KwEnd ;
         }
         return c
     }
+    // `.utf16`: the UTF-16 code units, as an array.
+    function swUtf16Of(s) {
+        var out = []
+        for (var i = 0; i < s.length; i++) { out.push(s.charCodeAt(i)) }
+        return out
+    }
     function swUtf8Of(s) {
         var out = []
         var i = 0
@@ -3636,6 +3646,10 @@ KwContinue  = "continue" KwEnd ;
         // js_swget in abnf/jsrtswift.go and lib/swift-rt.metajs, rtLazy in
         // swift-to-llvm-ir.abnf.
         if (typeof o == "string" && name == "utf8") { return swUtf8Of(o) }
+        if (typeof o == "string" && name == "utf16") { return swUtf16Of(o) }
+        // A Character's properties (lib/swift-chars.js). Twins: js_swget in
+        // abnf/jsrtswift.go and lib/swift-rt.metajs.
+        if (typeof o == "string" && swcIsProp(name)) { return swcProp(o, name) }
         if (typeof o == "string" && name == "unicodeScalars") { return swScalarsOf(o) }
         if (name == "lazy" && swIsColl(o)) { return swSeqVal(o) }
         // `.description` of a built-in value is its String(describing:).
@@ -3669,7 +3683,8 @@ KwContinue  = "continue" KwEnd ;
             if (ft != null && hasOwn(ft, name)) { return ft[name] }
             // A computed property an `extension Double` added.
             var fg = findAccessor(o, "__get_" + name)
-            return fg == null ? undefined : fg(o)
+            if (fg == null) { swNoProp(o, name) }
+            return fg(o)
         }
         if (szIs(o)) {
             if (name == "description") { return szStr(o) }
@@ -3680,7 +3695,8 @@ KwContinue  = "continue" KwEnd ;
             var it = builtinTable("Int", false)
             if (it != null && hasOwn(it, name)) { return it[name] }
             var ig = findAccessor(o, "__get_" + name)
-            return ig == null ? undefined : ig(o)
+            if (ig == null) { swNoProp(o, name) }
+            return ig(o)
         }
         // The same three members on a value that stayed a plain number, which is
         // where every integer inside +/- 2^53 lives.
@@ -3729,8 +3745,13 @@ KwContinue  = "continue" KwEnd ;
         // generated getter on the value's member table.
         var g = findAccessor(o, "__get_" + name)
         if (g != null) { return g(o) }
+        if (typeof o != "object" || Array.isArray(o) || isDict(o) || swIsSet(o)) { swNoProp(o, name) }
         return undefined
     }
+    // A property a builtin value does not have. Swift would not have compiled the
+    // read, so it is a member this runtime lacks, and it fails loudly rather than
+    // answering nil. Twins: js_swgetk in abnf/jsrtswift.go and lib/swift-rt.metajs.
+    function swNoProp(o, name) { fail("unknown property ." + name + " of " + swTypeOf(o)) }
     // A subscript that cannot answer. The messages are swiftc 6.1.2's OWN,
     // read off the toolchain, and the twins of js_swidx in lib/swift-rt.metajs and
     // abnf/jsrtswift.go.
@@ -9211,6 +9232,15 @@ KwContinue  = "continue" KwEnd ;
             return newCaseVal(etype, cname, undefined, vals, labels, cls)
         }
     }
+    // CaseIterable's synthesized `allCases`, every case in declaration order: for
+    // an enum whose cases carry no associated values and that declares no
+    // `allCases` of its own. Twin in swift-to-llvm-ir.abnf.
+    function swSynthAllCases(mem) {
+        for (var i = 0; i < mem.cases.length; i++) { if (mem.cases[i].cassoc != null) { return false } }
+        for (var j = 0; j < mem.statProps.length; j++) { if (mem.statProps[j].name == "allCases") { return false } }
+        for (var k = 0; k < mem.statComps.length; k++) { if (mem.statComps[k].name == "allCases") { return false } }
+        return true
+    }
     function makeEnumStmt(items) {
         var name = items[0]
         var mem = splitMembers(items, 1)
@@ -9251,6 +9281,11 @@ KwContinue  = "continue" KwEnd ;
                 scopePut(e, cs.cname, newCaseVal(name, cs.cname, rv, null, null, tbl))
             }
             e.__cases = order
+            if (swSynthAllCases(mem)) {
+                var all = []
+                for (var ac = 0; ac < order.length; ac++) { all.push(e[order[ac]]) }
+                e.allCases = all
+            }
             declType(name, e, isNestedDecl(myIdx))
         }
     }

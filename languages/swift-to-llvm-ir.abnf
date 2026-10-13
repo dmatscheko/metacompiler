@@ -1900,6 +1900,9 @@ KwContinue  = "continue" KwEnd ;
     // protocol, expression/statement builders); see the `core` knobs below.
     include("lib/compile-core.js")
 
+    // swcIsProp: the Character property names js_swget answers.
+    include("lib/swift-chars.js")
+
     var hidCount = 0     // Names hidden loop bounds.
     var classNames = {}  // Known struct/class names (constructor calls).
 
@@ -5128,12 +5131,14 @@ KwContinue  = "continue" KwEnd ;
             for (var i = 2; i < items.length; i++) {
                 var rightB = curF.NewBlock("")
                 var mergeB = curF.NewBlock("")
-                var isNull = callExt(b, "js_seq", [v, hNull])
-                b.NewCondBr(truthy(b, isNull), rightB, mergeB)
+                // nil is null or undefined, as emitNotNil tests it.
+                var undB = curF.NewBlock("")
+                b.NewCondBr(truthy(b, callExt(b, "js_seq", [v, hNull])), rightB, undB)
+                undB.NewCondBr(undB.NewICmp(llvm.enum.IPredEQ, v, hUndef), rightB, mergeB)
                 var r2 = items[i](rightB)
                 if (aty != "") { r2 = {b: r2.b, v: swEmitAdopt(r2.b, r2.v, aty)} }
                 r2.b.NewBr(mergeB)
-                var phi = mergeB.NewPhi([llvm.ir.NewIncoming(v, b), llvm.ir.NewIncoming(r2.v, r2.b)])
+                var phi = mergeB.NewPhi([llvm.ir.NewIncoming(v, undB), llvm.ir.NewIncoming(r2.v, r2.b)])
                 b = mergeB
                 v = phi
             }
@@ -5210,14 +5215,29 @@ KwContinue  = "continue" KwEnd ;
             || name == "indices"
             // A Dictionary's .values: the floor's js_get does not know the name.
             || name == "values"
-            // A String's UTF-8 bytes and code points, as arrays.
-            || name == "utf8" || name == "unicodeScalars") {
+            // A String's UTF-8 bytes, UTF-16 units and code points, as arrays.
+            || name == "utf8" || name == "utf16" || name == "unicodeScalars"
+            // A Character's properties (lib/swift-chars.js).
+            || swcIsProp(name)) {
             if (name == "indices") { hasRanges = true }
             return callExt(b, "js_swget", [cur, emitStr(b, name)])
         }
         if (name == "lazy") { return b.NewCall(rtLazy(), [cur]) }
         if (hasOwn(swStatMeths, "$" + name)) { return b.NewCall(rtStatRef(), [cur, emitStr(b, name)]) }
-        return callExt(b, "js_get", [cur, emitStr(b, name)])
+        return b.NewCall(rtGetK(), [cur, emitStr(b, name)])
+    }
+    // The plain member read, which hands an undefined answer to js_swnoprop: a
+    // property a builtin value does not have fails loudly there. Twin of swNoProp
+    // in swift-interpreter.abnf.
+    function rtGetK() {
+        return rtFunc("sw_getk", 2, function(b, ps) {
+            var v = callExt(b, "js_get", [ps[0], ps[1]])
+            var missB = curF.NewBlock("")
+            var okB = curF.NewBlock("")
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, v, hUndef), missB, okB)
+            okB.NewRet(v)
+            missB.NewRet(callExt(missB, "js_swnoprop", [ps[0], ps[1]]))
+        })
     }
     // `Q.make` unapplied: a static method a type descriptor declares or inherits, as
     // a function value bound to that descriptor; any other value's member is a plain
@@ -10251,11 +10271,27 @@ KwContinue  = "continue" KwEnd ;
                 callExt(b, "js_set", [eV, emitStr(b, cs.cname), cv])
             }
             callExt(b, "js_set", [eV, emitStr(b, "__cases"), namesArr])
+            if (swSynthAllCases(mem)) {
+                var allV = callExt(b, "js_arr_new", [])
+                for (var ac = 0; ac < mem.cases.length; ac++) {
+                    callExt(b, "js_arr_push", [allV, callExt(b, "js_get", [eV, emitStr(b, mem.cases[ac].cname)])])
+                }
+                callExt(b, "js_set", [eV, emitStr(b, "allCases"), allV])
+            }
             typeStack.pop()
             lastTypeName = name
             lastTypeKey = rec.key
             return b
         }
+    }
+    // CaseIterable's synthesized `allCases`, every case in declaration order: for
+    // an enum whose cases carry no associated values and that declares no
+    // `allCases` of its own. Twin in swift-interpreter.abnf.
+    function swSynthAllCases(mem) {
+        for (var i = 0; i < mem.cases.length; i++) { if (mem.cases[i].cassoc != null) { return false } }
+        for (var j = 0; j < mem.statProps.length; j++) { if (mem.statProps[j].name == "allCases") { return false } }
+        for (var k = 0; k < mem.statComps.length; k++) { if (mem.statComps[k].name == "allCases") { return false } }
+        return true
     }
     // The constructor of a case with associated values: Shape.circle(r: 5).
     // ename is the enum's BARE name (it becomes __etype, which case equality reads);

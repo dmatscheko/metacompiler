@@ -1408,6 +1408,27 @@ func init() {
 			}
 			return w(rt.swIntLabeled(v, bits, uns, rt.toString(u(a[3]))))
 		}
+		// A member read that came back undefined: a property a builtin value
+		// does not have fails loudly, anything else stays undefined. Twins:
+		// swNoProp in languages/swift-interpreter.abnf and lib/swift-rt.metajs.
+		m["js_swnoprop"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			builtin := false
+			switch v.(type) {
+			case string, float64, bool, jsGInt, jsJFlo, *jsArray:
+				builtin = true
+			}
+			if _, _, ok := dictParts(v); ok {
+				builtin = true
+			}
+			if _, ok := swSetElems(v); ok {
+				builtin = true
+			}
+			if builtin {
+				rt.fail("unknown property .%s of %s", rt.toString(u(a[1])), rt.swTypeOf(v))
+			}
+			return w(jsUndef)
+		}
 		// String(v, radix: r, uppercase: up).
 		m["js_swradixstr"] = func(a []uint64) uint64 {
 			return rt.wrapStr(swRadixStr(u(a[0]), int(giVal(rt, u(a[1]))), rt.truthy(u(a[2]))))
@@ -1504,7 +1525,18 @@ func init() {
 			// languages/swift-interpreter.abnf and js_swget in
 			// languages/lib/swift-rt.metajs.
 			if s, ok := u(a[0]).(string); ok {
-				switch rt.toString(u(a[1])) {
+				name := rt.toString(u(a[1]))
+				if v, ok := swcProp(s, name); ok {
+					return w(v)
+				}
+				switch name {
+				case "utf16":
+					u16 := strUnits(s)
+					out := make([]interface{}, len(u16))
+					for i, c := range u16 {
+						out[i] = float64(c)
+					}
+					return w(&jsArray{elems: out})
 				case "utf8":
 					bs := []byte(s)
 					out := make([]interface{}, len(bs))
@@ -1887,6 +1919,104 @@ func (rt *jsrt) swRoundRule(f float64, rv interface{}) float64 {
 	}
 	rt.fail("unknown rounding rule: %s", rule)
 	return f
+}
+
+// swcProp is a Character's property `name` (ok false for any other name); a
+// Character is its one-cluster String. Twin of swcProp in
+// languages/lib/swift-chars.js, which has the rules.
+func swcProp(s, name string) (interface{}, bool) {
+	switch name {
+	case "isLetter", "isUppercase", "isLowercase", "isNumber", "isWholeNumber", "wholeNumberValue",
+		"isWhitespace", "isNewline", "asciiValue", "isASCII", "isHexDigit", "hexDigitValue":
+	default:
+		return nil, false
+	}
+	u16 := strUnits(s)
+	c, single := 0, len(u16) == 1
+	if len(u16) > 0 {
+		c = int(u16[0])
+		if isHighSurr(rune(u16[0])) && len(u16) > 1 && isLowSurr(rune(u16[1])) {
+			c = (c-0xD800)*1024 + int(u16[1]) - 0xDC00 + 0x10000
+			single = len(u16) == 2
+		}
+	}
+	opt := func(v int) interface{} {
+		if v < 0 {
+			return jsNull
+		}
+		return float64(v)
+	}
+	switch name {
+	case "asciiValue", "isASCII":
+		av := -1
+		if s == "\r\n" {
+			av = 10
+		} else if single && c < 128 {
+			av = c
+		}
+		if name == "isASCII" {
+			return av >= 0, true
+		}
+		return opt(av), true
+	case "isLetter":
+		return jcIsAlphabetic(c), true
+	case "isUppercase":
+		return jcIsUpper(c), true
+	case "isLowercase":
+		return jcIsLower(c), true
+	case "isWhitespace":
+		return (c >= 9 && c <= 13) || c == 32 || c == 0x85 || c == 0xA0 || c == 0x1680 || (c >= 0x2000 && c <= 0x200A) ||
+			c == 0x2028 || c == 0x2029 || c == 0x202F || c == 0x205F || c == 0x3000, true
+	case "isNewline":
+		return (c >= 10 && c <= 13) || c == 0x85 || c == 0x2028 || c == 0x2029, true
+	case "isNumber":
+		return swcNumVal(c) != -1, true
+	case "isHexDigit", "hexDigitValue":
+		hv := -1
+		if single {
+			hv = swcHexVal(c)
+		}
+		if name == "isHexDigit" {
+			return hv >= 0, true
+		}
+		return opt(hv), true
+	}
+	nv := -1
+	if single {
+		nv = swcNumVal(c)
+	}
+	if name == "isWholeNumber" {
+		return nv >= 0, true
+	}
+	return opt(nv), true
+}
+
+// swcNumVal is java's getNumericValue without its Latin-letter digits: -1 no
+// number, -2 a number that is no non-negative integer.
+func swcNumVal(c int) int {
+	if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= 0xFF21 && c <= 0xFF3A) || (c >= 0xFF41 && c <= 0xFF5A) {
+		return -1
+	}
+	return jcNumericValue(c)
+}
+
+// swcHexVal is a hex digit's value, ASCII or fullwidth, or -1.
+func swcHexVal(c int) int {
+	switch {
+	case c >= '0' && c <= '9':
+		return c - '0'
+	case c >= 'A' && c <= 'F':
+		return c - 'A' + 10
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 10
+	case c >= 0xFF10 && c <= 0xFF19:
+		return c - 0xFF10
+	case c >= 0xFF21 && c <= 0xFF26:
+		return c - 0xFF21 + 10
+	case c >= 0xFF41 && c <= 0xFF46:
+		return c - 0xFF41 + 10
+	}
+	return -1
 }
 
 // swCaseVal is a payload-free enum case of a builtin enum type.

@@ -95,6 +95,10 @@ import "./runtime.metajs"
 // Double("0x1p4")'s numeral (swFloParse).
 import "./hex-float.js"
 
+// Character's properties (swcProp) over java's Unicode classification table.
+import "./java-chars.js"
+import "./swift-chars.js"
+
 // ----- the rtk* hooks the shared runtime calls -------------------------------
 function rtkStr(v) { return rtJavaStr(v) }
 function rtkNum(v) { return swNum(v) }
@@ -593,6 +597,17 @@ function swIntMin(bits) {
     var b = bits
     if (b > 64) { b = 64 }
     return sintConv(sintOp(9, 1, b - 1), bits, false)
+}
+
+// A member read that came back undefined: a property a builtin value does not
+// have fails loudly, anything else stays undefined. Twins: swNoProp in
+// languages/swift-interpreter.abnf and js_swnoprop in abnf/jsrtswift.go.
+function js_swnoprop(v, k) {
+    var builtin = typeof v == "string" || typeof v == "number" || typeof v == "boolean" || floIs(v) || sintIs(v)
+    if (!builtin) { builtin = rtIsArr(v) || rtIsDictObj(v) }
+    if (!builtin) { if (swIsObj(v)) { builtin = v["__set"] === true } }
+    if (builtin) { fail("unknown property ." + k + " of " + js_swtypeof(v)) }
+    return undefined
 }
 
 // String(v, radix: r, uppercase: up).
@@ -3348,6 +3363,14 @@ function js_swget(v, k) {
     if (typeof v == "string") {
         if (k === "utf8") { return swUtf8Of(v) }
         if (k === "unicodeScalars") { return swScalarsOf(v) }
+        if (k === "utf16") {
+            var units = []
+            var ui = 0
+            while (ui < v.length) { units.push(v.charCodeAt(ui)); ui = ui + 1 }
+            return units
+        }
+        // A Character's properties (lib/swift-chars.js).
+        if (swcIsProp(k)) { return swcProp(v, k) }
     }
     // `.description` of a built-in value is its String(describing:).
     if (k === "description") {

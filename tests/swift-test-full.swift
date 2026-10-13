@@ -4144,6 +4144,26 @@ func s88() {
     check("88c", got == ["huge", "not", "b", "r"])
 }
 
+// ===== SECTION 89: Character properties and CaseIterable =====
+// The Unicode properties of a Character (its first scalar's; the numeric ones
+// need a single scalar), and an enum's synthesized allCases. Every value read
+// off swiftc 6.1.2.
+enum Dir89: CaseIterable { case n, e, s, w }
+enum Pl89: Int, CaseIterable { case one = 1, two, three }
+func s89() {
+    let cs = Array("aZ5 é\n_ß٣Ⅻ½😀")
+    check("89a", cs[0].isLetter && !cs[0].isUppercase && cs[0].isLowercase && cs[1].isUppercase && !cs[2].isLetter
+        && cs[2].isNumber && cs[3].isWhitespace && cs[5].isNewline && cs[5].isWhitespace && !cs[6].isLetter)
+    check("89b", cs[0].asciiValue == 97 && cs[4].asciiValue == nil && (cs[4].asciiValue ?? 0) == 0 && cs[0].isASCII
+        && !cs[4].isASCII && cs[4].isLetter && cs[7].isLetter && cs[7].isLowercase && Character("\r\n").asciiValue == 10)
+    check("89c", cs[2].wholeNumberValue == 5 && cs[8].wholeNumberValue == 3 && cs[9].wholeNumberValue == 12
+        && cs[9].isLetter && cs[10].isNumber && cs[10].wholeNumberValue == nil && cs[0].wholeNumberValue == nil
+        && !cs[11].isNumber && !cs[11].isLetter)
+    check("89d", cs[0].isHexDigit && cs[0].hexDigitValue == 10 && !cs[1].isHexDigit && cs[2].hexDigitValue == 5)
+    check("89e", Dir89.allCases.count == 4 && Dir89.allCases.first == .n && Dir89.allCases.last == .w
+        && Pl89.allCases.map { $0.rawValue } == [1, 2, 3])
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -4233,6 +4253,7 @@ func main() {
     s86() // SECTION-CALL 86
     s87() // SECTION-CALL 87
     s88() // SECTION-CALL 88
+    s89() // SECTION-CALL 89
     print("full: \(checks) checks, \(fails) failures")
 }
 
