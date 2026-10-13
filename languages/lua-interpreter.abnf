@@ -2993,7 +2993,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     core.lang = "lua"
     core.test = luatruthy
     // A bare assignment to a name that is nowhere in scope creates a global.
-    core.setMiss = function(name, value) { globalScope[name] = value; return true }
+    core.setMiss = function(name, value) { globalScope[name] = value; luaGNote(name); return true }
     // Reading a name that is nowhere in scope is not an error in Lua: an unset global
     // simply reads as nil.
     core.varMiss = function(name) { return {v: undefined} }
@@ -3142,6 +3142,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // generic for expects, so pairs(t) is next plus the table.
     function luaNext(t, k) {
         if (!isTbl(t)) { luaArgTypeErr("next", 1, "table", t, arguments.length) }
+        if (t === luaG) { return luaGNext(k) }
         var keys = hasOwn(t, "__keys") ? t.__keys : []
         var i = 0
         if (k !== undefined && k !== null) {
@@ -3793,6 +3794,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     globalScope["rawget"] = function(t, k) {
         luaCheckTab("rawget", 1, t, arguments.length)
         luaCheckAny("rawget", 2, arguments.length)
+        if (t === luaG) { return luaGRaw(k) }
         return luaIndex(t, k)
     }
     globalScope["rawset"] = function(t, k, v) {
@@ -3800,7 +3802,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         luaCheckTab("rawset", 1, t, nargs)
         luaCheckAny("rawset", 2, nargs)
         luaCheckAny("rawset", 3, nargs)
-        luaRawSet(t, luaWriteKey(k), v)
+        if (t === luaG) { luaGSet(t, k, v) } else { luaRawSet(t, luaWriteKey(k), v) }
         return t
     }
     globalScope["rawlen"] = function(v) {
@@ -3842,19 +3844,55 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // _G, the globals as a table. The globals live in the global scope and not in
     // a table, so _G is a proxy whose metatable reads and writes that scope by
-    // name; a key that is no string is an ordinary field of the proxy. Twin of
-    // libGIndex / libGNewIndex in lua-to-llvm-ir.abnf.
+    // name; a key that is no string is an ordinary field of the proxy. rawget,
+    // rawset and next see the globals the same way (luaGRaw, luaGNext): next walks
+    // the names a global was ever created under, in creation order (luaGNames), and
+    // skips the nil ones - lua's own order is unspecified. Twin of libGIndex /
+    // libGNewIndex / libGRaw / libGNext in lua-to-llvm-ir.abnf.
+    var luaGNames = []
+    var luaGSeen = {}
+    function luaGNote(name) {
+        if (!hasOwn(luaGSeen, "$" + name)) {
+            luaGSeen["$" + name] = true
+            luaGNames.push(name)
+        }
+    }
     var luaGMeta = {}
     luaRawSet(luaGMeta, luaKey("__index"), function(t, k) {
         if (typeof k == "string" && hasOwn(globalScope, k)) { return globalScope[k] }
         return undefined
     })
-    luaRawSet(luaGMeta, luaKey("__newindex"), function(t, k, v) {
-        if (typeof k == "string") { globalScope[k] = v } else { luaRawSet(t, luaWriteKey(k), v) }
-    })
+    function luaGSet(t, k, v) {
+        if (typeof k == "string") {
+            globalScope[k] = v
+            luaGNote(k)
+        } else {
+            luaRawSet(t, luaWriteKey(k), v)
+        }
+    }
+    luaRawSet(luaGMeta, luaKey("__newindex"), luaGSet)
     var luaG = {}
     luaG.__mt = luaGMeta
     globalScope["_G"] = luaG
+    function luaGRaw(k) {
+        if (typeof k == "string") { return hasOwn(globalScope, k) ? globalScope[k] : undefined }
+        return luaIndex(luaG, k)
+    }
+    function luaGNext(k) {
+        var i = 0
+        if (k !== undefined && k !== null) {
+            while (i < luaGNames.length && luaGNames[i] !== k) { i = i + 1 }
+            if (i === luaGNames.length) { throw {__exc: true, v: "invalid key to 'next'"} }
+            i = i + 1
+        }
+        while (i < luaGNames.length) {
+            var v = anytype // The global under the candidate name.
+            v = globalScope[luaGNames[i]]
+            if (v !== undefined && v !== null) { return mkMulti([luaGNames[i], v]) }
+            i = i + 1
+        }
+        return undefined
+    }
     // setmetatable(t, mt) and getmetatable(v), lbaselib's: a __metatable field
     // protects the metatable and is what getmetatable answers instead. Twins of
     // js_lusetmt / js_lugetmt in abnf/jsrtlumeta.go and lib/lua-rt.metajs.
@@ -4068,6 +4106,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // Lua stdlib libraries the runtime already provides; require of one is a no-op.
     core.stdlibImports = ["string", "table", "math", "io", "os", "coroutine"]
+    // The library's globals, in the order next(_G) walks them first.
+    var LUA_LIB_GLOBALS = ["_G", "_VERSION", "assert", "collectgarbage", "coroutine", "error", "getmetatable", "io",
+        "ipairs", "math", "next", "os", "pairs", "pcall", "print", "rawequal", "rawget", "rawlen", "rawset", "select",
+        "setmetatable", "string", "table", "tonumber", "tostring", "type", "utf8", "xpcall"]
+    for (var lgi = 0; lgi < LUA_LIB_GLOBALS.length; lgi++) { luaGNote(LUA_LIB_GLOBALS[lgi]) }
     // Load the file and compile it; the imported chunk runs itself (buildChunk), registering
     // its functions in the shared global scope before the main chunk runs. Required once; a
     // leading './' is dropped and a missing '.lua' extension appended before the -i search.

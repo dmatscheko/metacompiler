@@ -2434,8 +2434,20 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // A target with a path READS its base name (getmetatable("").__index = f), so a
     // library name there is a reference too.
     function luaTargetRef(items) {
-        if (items.length > 1) { luaNoteRef(items[0]) }
+        if (items.length > 1) { luaNoteRef(items[0]) } else { luaGlobalName(items[0]) }
         return makeTargetRef(items)
+    }
+    // Every name a bare assignment or a `function name` writes, in first-seen order:
+    // the globals the program can create by name, which next(_G) walks (libGNext)
+    // after the library's. A name that is a local where it is written reads as nil
+    // from jsmain's scope and is skipped.
+    var luaGStatic = []
+    var luaGStaticSeen = {}
+    function luaGlobalName(name) {
+        if (luaGStaticSeen["$" + name] == undefined) {
+            luaGStaticSeen["$" + name] = true
+            luaGStatic.push(name)
+        }
     }
     // A target's key: a field's name, or the index's first value, which is made a
     // table key only when it is written (js_luwkey rejects nil and NaN there).
@@ -2682,6 +2694,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // writes the closure into the last field of the resolved table path.
     function makeFunc(bodyT, plist, nameDesc) {
         var params = plist.params
+        if (nameDesc.fsteps.length == 0) { luaGlobalName(nameDesc.fbase) }
         if (nameDesc.fsteps.length > 1) { libNeed.string = true } // emitMemberGet's string arm
         if (nameDesc.fmethod) {
             var mp = []
@@ -3156,6 +3169,19 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function libPairs(bb, argsH) {
         callLua(bb, "lua_needany", [argsH, emitNum(bb, 1), emitStr(bb, "pairs")])
         var t = libArg(bb, argsH, 0)
+        if (libNeed._G) {
+            // pairs(_G) is next(_G) (libGNext) over the proxy.
+            var gB = curF.NewBlock("")
+            var ngB = curF.NewBlock("")
+            bb.NewCondBr(rawTruthy(bb, callExt(bb, "js_seq", [t, callLua(bb, "lua_getvar", [curScopeV, emitStr(bb, "0gproxy")])])), gB, ngB)
+            var garr = callExt(gB, "js_arr_new", [])
+            callExt(gB, "js_arr_push", [garr, callLua(gB, "lua_getvar", [curScopeV, emitStr(gB, "next")])])
+            callExt(gB, "js_arr_push", [garr, t])
+            callExt(gB, "js_arr_push", [garr, hUndef])
+            callExt(gB, "js_arr_push", [garr, hUndef])
+            gB.NewRet(callLua(gB, "lua_mk", [garr]))
+            bb = ngB
+        }
         var tabB = curF.NewBlock("")
         var otherB = curF.NewBlock("")
         bb.NewCondBr(rawTruthy(bb, callExt(bb, "js_seq", [callExt(bb, "js_lutypeof", [t]), emitStr(bb, "table")])), tabB, otherB)
@@ -3322,7 +3348,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                        ["rawlen", "js_lurawlen"], ["setmetatable", "js_lusetmt"], ["getmetatable", "js_lugetmt"], ["collectgarbage", "js_lucollect"]]
         for (var bi = 0; bi < baseExt.length; bi++) {
             if (libNeed[baseExt[bi][0]]) {
-                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, baseExt[bi][0]), callExt(b, "js_closure", [handle(emitLibFunc(libArgsExt(baseExt[bi][1]))), curScopeV])])
+                var bfn = libArgsExt(baseExt[bi][1])
+                if (libNeed._G && baseExt[bi][0] == "next") { bfn = libGWrap(bfn, 1, libGNext) }
+                if (libNeed._G && baseExt[bi][0] == "rawget") { bfn = libGWrap(bfn, 2, libGRaw) }
+                if (libNeed._G && baseExt[bi][0] == "rawset") { bfn = libGWrap(bfn, 3, libGRawSet) }
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, baseExt[bi][0]), callExt(b, "js_closure", [handle(emitLibFunc(bfn)), curScopeV])])
             }
         }
         if (libNeed.tostring) {
@@ -3370,9 +3400,27 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var gp = callExt(b, "js_obj_new", [])
             var gmt = callExt(b, "js_obj_new", [])
             b = libSet(b, gmt, luaNameKey("__index"), emitLibFunc(libGIndex))
-            b = libSet(b, gmt, luaNameKey("__newindex"), emitLibFunc(libGNewIndex))
+            var gni = callExt(b, "js_closure", [handle(emitLibFunc(libGNewIndex)), curScopeV])
+            callExt(b, "js_set", [gmt, emitStr(b, luaNameKey("__newindex")), gni])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0gnewindex"), gni])
             callExt(b, "js_set", [gp, emitStr(b, "__f"), gmt])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "_G"), gp])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0gproxy"), gp])
+            // The names next(_G) walks: the library's, then the program's (luaGStatic),
+            // then those only a computed _G[k] = v created (libGNewIndex adds them).
+            var gnames = callExt(b, "js_arr_new", [])
+            var gseen = callExt(b, "js_obj_new", [])
+            var gall = ["print"].concat(libNames).concat(luaGStatic)
+            var gdone = {}
+            for (var gi = 0; gi < gall.length; gi++) {
+                if (gdone["$" + gall[gi]] == undefined) {
+                    gdone["$" + gall[gi]] = true
+                    callExt(b, "js_arr_push", [gnames, emitStr(b, gall[gi])])
+                    callExt(b, "js_set", [gseen, emitStr(b, gall[gi]), hTrue])
+                }
+            }
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0gnames"), gnames])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0gseen"), gseen])
         }
         if (libNeed._VERSION) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "_VERSION"), emitStr(b, "Lua 5.5")])
@@ -3729,9 +3777,89 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var otherB = curF.NewBlock("")
         bb.NewCondBr(rawTruthy(bb, callExt(bb, "js_seq", [callExt(bb, "js_typeof", [k]), emitStr(bb, "string")])), nameB, otherB)
         callExt(nameB, "js_scope_set_or_create", [curScopeV, k, v])
-        nameB.NewRet(hUndef)
+        var seen = callLua(nameB, "lua_getvar", [curScopeV, emitStr(nameB, "0gseen")])
+        var newB = curF.NewBlock("")
+        var knownB = curF.NewBlock("")
+        nameB.NewCondBr(rawTruthy(nameB, callExt(nameB, "js_seq", [callExt(nameB, "js_get", [seen, k]), hUndef])), newB, knownB)
+        callExt(newB, "js_set", [seen, k, hTrue])
+        callExt(newB, "js_arr_push", [callLua(newB, "lua_getvar", [curScopeV, emitStr(newB, "0gnames")]), k])
+        newB.NewRet(hUndef)
+        knownB.NewRet(hUndef)
         callExt(otherB, "js_set", [t, callExt(otherB, "js_luwkey", [k]), v])
         return {b: otherB, v: hUndef}
+    }
+    // rawget / rawset / next of the _G proxy see the globals by name, as the
+    // proxy's metatable does; every other call is the plain library function,
+    // which also checks the arguments when there are fewer than `need`.
+    function libGWrap(plain, need, onG) {
+        return function(bb, argsH) {
+            var gB = curF.NewBlock("")
+            var pB = curF.NewBlock("")
+            var isG = rawTruthy(bb, callExt(bb, "js_seq", [libArg(bb, argsH, 0), callLua(bb, "lua_getvar", [curScopeV, emitStr(bb, "0gproxy")])]))
+            var enough = rawTruthy(bb, callExt(bb, "js_lt", [emitNum(bb, need - 1), callExt(bb, "js_get", [argsH, emitStr(bb, "length")])]))
+            bb.NewCondBr(bb.NewAnd(isG, enough), gB, pB)
+            var g = onG(gB, argsH)
+            g.b.NewRet(g.v)
+            return plain(pB, argsH)
+        }
+    }
+    function libGRaw(bb, argsH) {
+        var k = libArg(bb, argsH, 1)
+        var nameB = curF.NewBlock("")
+        var otherB = curF.NewBlock("")
+        bb.NewCondBr(rawTruthy(bb, callExt(bb, "js_seq", [callExt(bb, "js_typeof", [k]), emitStr(bb, "string")])), nameB, otherB)
+        nameB.NewRet(callLua(nameB, "lua_getvar", [curScopeV, k]))
+        return {b: otherB, v: callExt(otherB, "js_get", [libArg(otherB, argsH, 0), callExt(otherB, "js_lukey", [k])])}
+    }
+    function libGRawSet(bb, argsH) {
+        bb.NewStore(handle(0), gLuaCallee)
+        callExt(bb, "js_call", [callLua(bb, "lua_getvar", [curScopeV, emitStr(bb, "0gnewindex")]), hUndef, argsH])
+        return {b: bb, v: libArg(bb, argsH, 0)}
+    }
+    // next(_G, k): the name after k in 0gnames whose global is not nil.
+    function libGNext(bb, argsH) {
+        var names = callLua(bb, "lua_getvar", [curScopeV, emitStr(bb, "0gnames")])
+        var n = callExt(bb, "js_get", [names, emitStr(bb, "length")])
+        var k = libArg(bb, argsH, 1)
+        var iP = bb.NewAlloca(i64)
+        bb.NewStore(emitNum(bb, 0), iP)
+        var findB = curF.NewBlock("")
+        var scanB = curF.NewBlock("")
+        var cmpB = curF.NewBlock("")
+        var stepB = curF.NewBlock("")
+        var badB = curF.NewBlock("")
+        var foundB = curF.NewBlock("")
+        var walkB = curF.NewBlock("")
+        var testB = curF.NewBlock("")
+        var hitB = curF.NewBlock("")
+        var skipB = curF.NewBlock("")
+        var endB = curF.NewBlock("")
+        bb.NewCondBr(rawTruthy(bb, callExt(bb, "js_seq", [k, hUndef])), walkB, findB)
+        findB.NewBr(scanB)
+        var i0 = scanB.NewLoad(i64, iP)
+        scanB.NewCondBr(rawTruthy(scanB, callExt(scanB, "js_lt", [i0, n])), cmpB, badB)
+        cmpB.NewCondBr(rawTruthy(cmpB, callExt(cmpB, "js_seq", [callExt(cmpB, "js_get", [names, i0]), k])), foundB, stepB)
+        stepB.NewStore(callExt(stepB, "js_add", [i0, emitNum(stepB, 1)]), iP)
+        stepB.NewBr(scanB)
+        callExt(badB, "js_throw", [emitStr(badB, "invalid key to 'next'")])
+        badB.NewRet(hUndef)
+        foundB.NewStore(callExt(foundB, "js_add", [i0, emitNum(foundB, 1)]), iP)
+        foundB.NewBr(walkB)
+        walkB.NewBr(testB)
+        var i1 = testB.NewLoad(i64, iP)
+        testB.NewCondBr(rawTruthy(testB, callExt(testB, "js_lt", [i1, n])), hitB, endB)
+        var name = callExt(hitB, "js_get", [names, i1])
+        var v = callLua(hitB, "lua_getvar", [curScopeV, name])
+        var retB = curF.NewBlock("")
+        hitB.NewCondBr(rawTruthy(hitB, callExt(hitB, "js_seq", [v, hUndef])), skipB, retB)
+        var pair = callExt(retB, "js_arr_new", [])
+        callExt(retB, "js_arr_push", [pair, name])
+        callExt(retB, "js_arr_push", [pair, v])
+        retB.NewRet(callLua(retB, "lua_mk", [pair]))
+        skipB.NewStore(callExt(skipB, "js_add", [i1, emitNum(skipB, 1)]), iP)
+        skipB.NewBr(testB)
+        endB.NewRet(hUndef)
+        return {b: deadBlock(), v: hUndef}
     }
     function libWrite(from) {
         return function(bb, argsH) {

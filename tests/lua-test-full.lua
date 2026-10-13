@@ -2011,6 +2011,18 @@ function s46()
     check("g2", s46h .. " " .. s46g .. " " .. _G["math"].floor(2.5), "20 11 2")
     s46g = nil
     check("g3", tostring(_G.s46g) .. " " .. type(_G), "nil table")
+    -- The raw functions and next see the globals too; pairs order is unspecified,
+    -- so only membership is asserted.
+    rawset(_G, "s46r", 7)
+    _G["s46" .. "c"] = 9
+    local kinds = {}
+    for k, v in pairs(_G) do if type(k) == "string" then kinds[k] = type(v) end end
+    check("g4", tostring(rawget(_G, "s46h")) .. " " .. tostring(rawget(_G, "print") == print) .. " " .. tostring(rawget(_G, "s46g")) .. " " .. s46r,
+        "20 true nil 7")
+    check("g5", tostring(kinds.s46h) .. " " .. tostring(kinds.s46c) .. " " .. tostring(kinds.s46r) .. " " .. tostring(kinds.s46g) .. " " .. tostring(kinds.print) .. " " .. tostring(kinds.string) .. " " .. tostring(kinds.loc),
+        "number number number nil function table nil")
+    local ok, e = pcall(next, _G, "s46-not-a-global")
+    check("g6", tostring(ok) .. " " .. e .. " " .. type(next(_G)), "false invalid key to 'next' string")
 end
 
 -- ===== SECTION 47: coroutines =====
