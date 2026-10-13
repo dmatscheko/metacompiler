@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-569** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-570** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -327,57 +327,11 @@ from a compatible B instance — php-src suggests static:: is B, ours gives A. (
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
 
-### T-532 lua: a closure made in a `for`/`while` body captures one shared variable, not a fresh one per iteration · P1 · LUA · IN PROGRESS (LUA worker, round 2) [V]
-`for i = 1, N[1] do fs[i] = function() return i end end` → all legs `3 3 3`, lua `1 2 3`; a `local c = i * 10` in the body →
-`30 30 30` (lua `10 20 30`); `for k, v in ipairs({"a","b","c"})` → `3c 3c 3c` (lua `1a 2b 3c`); a `local` in a `while` body →
-`3 3 3` (lua `1 2 3`). `repeat` bodies, `do ... end` blocks and goto loops are right. The same class as js T-478. The
-ratchet's SECTION 18 has no loop-closure check. Files: loop-body scoping in lua-interpreter.abnf and lua-to-llvm-ir.abnf.
-
-### T-533 lua: multiple assignment evaluates an indexed target's table and key after assigning · P1 · LUA · IN PROGRESS (LUA worker, round 2) [V]
-Lua manual §3.3.3's own example: `local i, a = V[1], {}; i, a[i] = i + 1, V[2]` → all legs `a[1]=nil a[2]=20`, lua `a[1]=20`.
-`cur, cur.x = u, 5` → the field lands on `u` (lua: on the old `cur`). `idx, f[idx], f[idx+1] = 3, "a", "b"` → `f[3], f[4]` set
-(lua `f[1], f[2]`). Side-effect order `q[k(1)], q[k(2)] = k(3), k(4)` logs `3412` (lua `1234`; undefined by the manual, a
-symptom only). The same class as go T-466. Files: the assignment emitters in both lua grammars.
-
-### T-534 lua: integer-vs-float comparison is done in doubles, wrong past 2^53 · P1 · LUA · IN PROGRESS (LUA worker, round 2) [V]
-Operands from arrays: `9007199254740993 == 2^53` → true (lua false); `<`, `<=`, `>` likewise wrong (`true false true false`, lua
-`false false false true`); finder: `math.maxinteger` vs `2^63` and `math.max(math.maxinteger, 2^63)` → `9223372036854775807`
-(lua `9.2233720368547758e+18`). Integer-integer comparison and table keys at 2^53/2^53+1 are right. Likely `js_lueq` /
-`js_lucmp` fast path in lib/lua-rt.metajs (~752-790), their twin and interpreter counterparts: need Lua's exact int/float
-rule (luaV_equalobj / LTnum).
-
-### T-535 lua: `t[nil] = v` and `t[NaN] = v` are accepted; `pairs` then counts an unreadable entry · P1 · LUA · IN PROGRESS (LUA worker, round 2) [V]
-`k = nil` (and `0/0`): `pcall(function() q[k] = 1 end)` → all legs `true`, `q[k]` nil, `pairs` count 1; lua `false ...: table
-index is nil` (NaN: "table index is NaN"), count 0. Also `{[k] = 2}`, `rawset({}, k, 3)` and `q[nil] = nil` are accepted (lua
-errors). Files: table-store paths in lib/lua-rt.metajs, the twin, the interpreter's index assignment and table constructor.
-
-### T-536 lua native: `math.max`/`math.min` die when a float beats an int argument · P1 · LUA · IN PROGRESS (LUA worker, round 2) [V]
-`A = {1, 2.0, 2, 1.0, 3}`: `pcall(math.min, A[3], A[4])`, `pcall(math.max, A[2], A[1])` → interp, run and lua `true 1.0`,
-`true 2.0`; native no output, exit 1, uncatchable `js runtime error: MetaJS: variable 'best' has type number and cannot hold a
-object`. lib/lua-rt.metajs ~1059-1067: `var best = args[0]` pins the type (manual ch. 4 "MetaJS is typed").
-
-### T-537 lua: numeric `for` prep — an int start with a float step is an integer on the first pass; a zero step does not raise · P1 · LUA · IN PROGRESS (LUA worker, round 2) [V]
-`for i = P[1], P[2], P[3]` with 1, 3, 0.5 → first pass `1 integer` (lua `1.0 float`; later passes agree). Finder: a 0 or 0.0
-step → the loop silently does not run (lua `'for' step is zero`); a table limit → `attempt to compare number with table` (lua
-`bad 'for' limit (number expected, got table)`). Lua 5.5-only behaviour (string bounds converted, read-only loop variable) is
-informational — the suite targets 5.4. Files: numeric-for emitters in both lua grammars.
-
-### T-538 lua: no proper tail calls · P2 · LUA · IN PROGRESS (LUA worker, round 2) [V finder only]
-`local function tc(n) if n == 0 then return "done" end return tc(n - 1) end` with n = 100000: interp, run and lua `done`; native
-SIGSEGV (exit 139). n = 1,000,000: interp Go fatal "goroutine stack exceeds 1000000000-byte limit", run hits the step brake;
-lua runs it. Lua guarantees unbounded tail calls (§3.4.10); the ratchet only checks depth 200. The catchable "stack
-overflow" half is T-505.
-
-### T-539 lua: `tostring` of a table or function has no identity · P2 · LUA · IN PROGRESS (LUA worker, round 2) [V finder only]
-`tostring({})` → `table` (lua `table: 0x...`), so `tostring({}) ~= tostring({})` is false (lua true) and code keying on
-tostring breaks. Needs an identity value (see how java's `[C@1a2b3c01` and php's object ids are produced).
-
-### T-540 lua: string library — `%z` class missing; `%s` with width/precision accepts `\0`; `\u{...}` above 0x1FFFFF · P3 · LUA · IN PROGRESS (LUA worker, round 2) [V]
-`string.find("a\0b", "%z")` → nil (lua `2 2`; `[%z]` and gsub likewise, and ours makes `%z` match a literal z): add
-`case 'z': c == 0` to lsMatchClass in abnf/jsrtluastr.go (~192) and lua-strlib.js (~59). `string.format("%5.2s", "a\0b")`
-formats (lua `bad argument #2 to 'format' (string contains zeros)`; also `%.0s`, `%-8s`). `("\u{200000}"):byte(1,-1)` → 4 values
-(lua 5 bytes 248 136 128 128 128); `\u{4000000}`, `\u{7FFFFFFF}` → 4 values with one above 255 (lua 6 bytes). Finder:
-`pcall(xpcall)` message `(value expected)` vs lua `(function expected, got no value)`.
+### T-569 lua: runtime bookkeeping keys are visible to programs; the `io` library is missing · P2 · LUA · OPEN [U]
+Tables carry internal bookkeeping under plain string keys (`__keys` in the interpreter; `{__mv = true, a = ...}` marks a
+multi-value box in both halves), so a program can forge them: `return {__mv = true, a = {1, 2}}` is reportedly taken for
+multiple return values, and `t.__keys = 5` breaks pairs (two interpreter spots confirmed by reading, compiler unchecked; probe
+first). Separately `io.write(...)` → interp "attempt to index a nil value (global 'io')" (lua 5.5 writes without a newline).
 
 ---
 
@@ -842,6 +796,15 @@ T-527 bash: `${v/p/r}` details — `&` in the replacement, an empty subject, ext
 T-526 bash: printf flags, operands and escapes — DONE f6d3b150
 T-529 bash: command substitution nests at most 8 deep natively — DONE 295bfad5
 T-531 bash compiler: `break N` beyond the loop depth is a compile error — DONE 0bfb57fe
+T-532 lua: a closure made in a `for`/`while` body captures one shared variable, not a fresh one per iteration — DONE 51964557
+T-533 lua: multiple assignment evaluates an indexed target's table and key after assigning — DONE e15b50e2
+T-534 lua: integer-vs-float comparison is done in doubles, wrong past 2^53 — DONE 98819ebd
+T-536 lua native: `math.max`/`math.min` die when a float beats an int argument — DONE 98819ebd
+T-535 lua: `t[nil] = v` and `t[NaN] = v` are accepted; `pairs` then counts an unreadable entry — DONE cacdc476
+T-537 lua: numeric `for` prep — an int start with a float step is an integer on the first pass; a zero step does not raise — DONE c339f500
+T-538 lua: no proper tail calls — DONE b32c7caa
+T-539 lua: `tostring` of a table or function has no identity — DONE c04e8cf0
+T-540 lua: string library — `%z` class missing; `%s` with width/precision accepts `\0`; `\u{...}` above 0x1FFFFF — DONE 65572cc5
 
 # Settled — do not re-open
 
