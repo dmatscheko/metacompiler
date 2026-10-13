@@ -4499,6 +4499,41 @@ func s99() {
     check("99c", n[0].loud == "INT5" && n[0].tagged("t") == "t:int5")
 }
 
+// ===== SECTION 100: range types; observers are not re-entered =====
+// type(of:) names a range's kind and bound type, which is also what lets a range
+// bind a generic Sequence/Collection parameter. A write to a property from its
+// own didSet replaces the value and calls no observer again (struct, class,
+// global, local), and an observed property prints under its own name. Every
+// value read off swiftc 6.1.2.
+func sum100<S: Sequence>(_ s: S) -> Int where S.Element == Int { s.reduce(0, +) }
+func cnt100<C: Collection>(_ c: C) -> Int { c.count }
+var log100 = [String]()
+struct Ob100: Equatable {
+    var bal: Int = 0 {
+        willSet { log100.append("will\(newValue)") }
+        didSet { if bal < 0 { bal = 0 } }
+    }
+}
+var dids100 = 0
+class Cl100 { var t = 0 { didSet { dids100 += 1; if t > 10 { t = 10 } } } }
+var g100 = 0 { didSet { dids100 += 1; if g100 > 10 { g100 = 10 } } }
+func s100() {
+    let ns = [1, 4]
+    let i8: [Int8] = [2]
+    check("100a", "\(type(of: ns[0]...ns[1])) \(type(of: ns[0]..<ns[1])) \(type(of: ns[0]...))" == "ClosedRange<Int> Range<Int> PartialRangeFrom<Int>"
+        && "\(type(of: ...ns[1])) \(type(of: ..<ns[1])) \(type(of: i8[0]...i8[0]))" == "PartialRangeThrough<Int> PartialRangeUpTo<Int> ClosedRange<Int8>")
+    check("100b", sum100(ns[0]...ns[1]) == 10 && sum100(0..<ns[1]) == 6 && cnt100(0..<ns[1]) == 4)
+    var ob = Ob100()
+    ob.bal = -5
+    check("100c", ob.bal == 0 && log100 == ["will-5"] && "\(ob)" == "Ob100(bal: 0)" && ob == Ob100())
+    let cl = Cl100()
+    cl.t = 50
+    g100 = 99
+    var l = 0 { didSet { dids100 += 1; if l > 1 { l = 1 } } }
+    l = 7
+    check("100d", cl.t == 10 && g100 == 10 && l == 1 && dids100 == 3)
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -4599,6 +4634,7 @@ func main() {
     s97() // SECTION-CALL 97
     s98() // SECTION-CALL 98
     s99() // SECTION-CALL 99
+    s100() // SECTION-CALL 100
     print("full: \(checks) checks, \(fails) failures")
 }
 

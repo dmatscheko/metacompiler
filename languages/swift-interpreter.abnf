@@ -2654,11 +2654,14 @@ KwContinue  = "continue" KwEnd ;
         // A STRUCT prints memberwise - Swift synthesizes that reflection-based
         // description for every struct; a class prints its type name.
         if (cls.__struct !== true || cls.__fields == undefined || cls.__fields == null) { return cls.__name }
+        // An observed property's storage, __v_<name>, prints under the property's
+        // own name. Twins: swObjDesc in abnf/jsrtswift.go and lib/swift-rt.metajs.
         var fs = cls.__fields
         var sout = cls.__name + "("
         for (var f = 0; f < fs.length; f++) {
             if (f > 0) { sout += ", " }
-            sout += fs[f] + ": " + swRender(hasOwn(v, fs[f]) ? v[fs[f]] : undefined, true, depth + 1)
+            var fl = fs[f].substring(0, 4) == "__v_" ? fs[f].substring(4) : fs[f]
+            sout += fl + ": " + swRender(hasOwn(v, fs[f]) ? v[fs[f]] : undefined, true, depth + 1)
         }
         return sout + ")"
     }
@@ -3214,6 +3217,13 @@ KwContinue  = "continue" KwEnd ;
         if (szIs(v)) { return swIntTyName(v.w, v.u) }
         if (typeof v == "number") { return Math.floor(v) == v ? "Int" : "Double" }
         if (Array.isArray(v)) { return "Array<" + (v.length > 0 ? swTypeOf(v[0]) : "Any") + ">" }
+        // A range names its kind and its bound type.
+        if (isRange(v)) {
+            var rlo = v.lo !== null && v.lo !== undefined
+            var rhi = v.hi !== null && v.hi !== undefined
+            var rk = !rhi ? "PartialRangeFrom" : (!rlo ? (v.closed ? "PartialRangeThrough" : "PartialRangeUpTo") : (v.closed ? "ClosedRange" : "Range"))
+            return rk + "<" + swTypeOf(rlo ? v.lo : v.hi) + ">"
+        }
         if (v !== null && v !== undefined && typeof v == "object") {
             if (v.__set === true) { return "Set<" + (v.elems.length > 0 ? swTypeOf(v.elems[0]) : "Any") + ">" }
             if (isDict(v)) {
@@ -8578,11 +8588,20 @@ KwContinue  = "continue" KwEnd ;
         var willC = cp.will == null ? null : makeMethodClosure({name: "__will_" + cp.name, params: [plainParam(cp.willP)], body: cp.will}, cls)
         var didC = cp.did == null ? null : makeMethodClosure({name: "__did_" + cp.name, params: [plainParam(cp.didP)], body: cp.did}, cls)
         tput(cls, "__get_" + cp.name, function(self) { return hasOwn(self, store) ? self[store] : undefined })
+        // A write to the property from inside its own observers sets the storage
+        // and calls no observer again (Swift: "the new value that you assign
+        // replaces the one that was just set"); __ob_<name> marks the running ones.
+        // Twin of emitComputed in swift-to-llvm-ir.abnf.
+        var busy = "__ob_" + cp.name
         tput(cls, "__set_" + cp.name, function(self, v) {
+            if (self[busy] === true) { scopePut(self, store, v); return }
             var old = hasOwn(self, store) ? self[store] : undefined
-            if (willC != null) { willC(self, v) }
-            scopePut(self, store, v)
-            if (didC != null) { didC(self, old) }
+            self[busy] = true
+            try {
+                if (willC != null) { willC(self, v) }
+                scopePut(self, store, v)
+                if (didC != null) { didC(self, old) }
+            } finally { self[busy] = false }
         })
     }
     // Installs one computed/observed property's accessors on a type descriptor.

@@ -1062,7 +1062,10 @@ function swObjDesc(o, depth) {
     var k = 0
     while (k < flds.length) {
         if (k > 0) { fout = fout + ", " }
-        fout = fout + flds[k] + ": " + swRender(o[flds[k]], true, depth + 1)
+        // An observed property's storage prints under the property's own name.
+        var fl = flds[k]
+        if (fl.substring(0, 4) === "__v_") { fl = fl.substring(4) }
+        fout = fout + fl + ": " + swRender(o[flds[k]], true, depth + 1)
         k = k + 1
     }
     return fout + ")"
@@ -3365,6 +3368,21 @@ function js_swtypeof(v) {
     if (rtIsArr(v)) {
         if (v.length > 0) { return "Array<" + js_swtypeof(v[0]) + ">" }
         return "Array<Any>"
+    }
+    // A range names its kind and its bound type. Twins: swTypeOf in
+    // languages/swift-interpreter.abnf and abnf/jsrtswift.go.
+    if (swIsRange(v)) {
+        var rlo = v["lo"]
+        var rhi = v["hi"]
+        var rk = "Range"
+        if (v["closed"] === true) { rk = "ClosedRange" }
+        if (rlo === null || rlo === undefined) {
+            rk = "PartialRangeUpTo"
+            if (v["closed"] === true) { rk = "PartialRangeThrough" }
+            return rk + "<" + js_swtypeof(rhi) + ">"
+        }
+        if (rhi === null || rhi === undefined) { rk = "PartialRangeFrom" }
+        return rk + "<" + js_swtypeof(rlo) + ">"
     }
     if (swIsObj(v)) {
         if (v["__set"] === true) {

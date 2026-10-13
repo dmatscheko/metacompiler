@@ -9452,9 +9452,20 @@ KwContinue  = "continue" KwEnd ;
             var hasWill = cp.will != null
             var hasDid = cp.did != null
             var name = cp.name
+            // A write from inside the property's own observers sets the storage and
+            // calls no observer again; __ob_<name> marks the running ones. Twin of
+            // observedAccessors in swift-interpreter.abnf.
+            var busy = "__ob_" + name
             var setBody = function(bb) {
                 var thisV = bb.NewCall(rtKGet(), [curScopeV, emitStr(bb, "this")])
                 var newV = bb.NewCall(rtKGet(), [curScopeV, emitStr(bb, "$new")])
+                var rawB = curF.NewBlock("")
+                var obsB = curF.NewBlock("")
+                bb.NewCondBr(truthy(bb, callExt(bb, "js_get", [thisV, emitStr(bb, busy)])), rawB, obsB)
+                callExt(rawB, "js_set", [thisV, emitStr(rawB, store), newV])
+                rawB.NewRet(hUndef)
+                bb = obsB
+                callExt(bb, "js_set", [thisV, emitStr(bb, busy), hTrue])
                 var oldV = callExt(bb, "js_get", [thisV, emitStr(bb, store)])
                 if (hasWill) {
                     var wa = callExt(bb, "js_arr_new", [])
@@ -9467,6 +9478,7 @@ KwContinue  = "continue" KwEnd ;
                     callExt(bb, "js_arr_push", [da, oldV])
                     callExt(bb, "js_mcall", [thisV, emitStr(bb, "__did_" + name), da])
                 }
+                callExt(bb, "js_set", [thisV, emitStr(bb, busy), hFalse])
                 bb.NewRet(hUndef)
                 return deadBlock()
             }

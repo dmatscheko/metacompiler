@@ -2431,6 +2431,26 @@ func (rt *jsrt) swTypeOf(v interface{}) string {
 		}
 		return "Double"
 	}
+	// A range names its kind and its bound type. Twins: swTypeOf in
+	// languages/swift-interpreter.abnf, js_swtypeof in lib/swift-rt.metajs.
+	if r, ok := v.(*jsObject); ok && swIsRange(r) {
+		lo, hi := r.props["lo"], r.props["hi"]
+		k := "Range"
+		switch {
+		case isNullish(hi):
+			k = "PartialRangeFrom"
+		case isNullish(lo) && r.props["closed"] == true:
+			k = "PartialRangeThrough"
+		case isNullish(lo):
+			k = "PartialRangeUpTo"
+		case r.props["closed"] == true:
+			k = "ClosedRange"
+		}
+		if isNullish(lo) {
+			lo = hi
+		}
+		return k + "<" + rt.swTypeOf(lo) + ">"
+	}
 	if els, ok := swSetElems(v); ok {
 		if len(els.elems) > 0 {
 			return "Set<" + rt.swTypeOf(els.elems[0]) + ">"
@@ -3052,7 +3072,8 @@ func (rt *jsrt) swObjDesc(o *jsObject, depth int) (string, bool) {
 		if !ok {
 			val = jsUndef
 		}
-		parts = append(parts, f+": "+rt.swRender(val, true, depth+1))
+		// An observed property's storage prints under the property's own name.
+		parts = append(parts, strings.TrimPrefix(f, "__v_")+": "+rt.swRender(val, true, depth+1))
 	}
 	return name + "(" + strings.Join(parts, ", ") + ")", true
 }
