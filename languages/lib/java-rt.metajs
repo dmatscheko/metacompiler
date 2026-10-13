@@ -275,7 +275,8 @@ var jvSioobeCls = undefined
 var jvNegArrCls = undefined
 var jvNpeCls = undefined
 var jvCceCls = undefined
-// java.util.Formatter's exceptions, by name (jxkThrow).
+// java.util.Formatter's exceptions and IndexOutOfBoundsException, by name
+// (jxkThrow).
 var jvExcNamed = {}
 var jvNfeCls = undefined
 var jvIaeCls = undefined
@@ -731,6 +732,7 @@ function jvBoxType(name) {
         o["valueOf"] = function(v, r) { return jvValueOf(v, 32, r) }
         jvRadixMembers(o, 32)
         jvBitOps(o, 32)
+        jvUnsignedOps(o)
         return o
     }
     if (name == "Long") {
@@ -876,6 +878,13 @@ function jvMathMembers(o) {
         if (jvIsDouble(v)) { return jvNarrow(flo(jvRoundHalfUp(floNum(v)), 0), 64) }
         return jvNarrow(flo(jvRoundHalfUp(rtF32Round(rtjNum(v))), 0), 32)
     }
+    // ulp's float overload takes an integral argument too, as signum's. Twin of
+    // jvMathMembers in abnf/jsrtjava.go.
+    o["ulp"] = function(v) {
+        if (jvIsDouble(v)) { return flo(jxUlp(floNum(v), false), 0) }
+        return flo(jxUlp(rtF32Round(rtjNum(v)), true), 3)
+    }
+    o["IEEEremainder"] = function(a, b) { return flo(jxIeeeRem(rtjNum(a), rtjNum(b)), 0) }
     // signum keeps a double a double and a float a float; an integral argument
     // takes the float overload. NaN and both zeros answer themselves.
     o["signum"] = function(v) {
@@ -1190,6 +1199,18 @@ function jvFloType(o, f32) {
         return f != Infinity && f != 0 - Infinity
     }
     o["compare"] = function(a, b) { return jvDoubleCompare(rtjNum(a), rtjNum(b)) }
+    // The bit patterns, NaN canonical (JLS 4.2.3); hashCode is the boxed
+    // value's. Twin of jvFloType in abnf/jsrtjava.go.
+    if (f32) {
+        o["floatToIntBits"] = function(v) { return jvFloatBits(rtjNum(v)) }
+        o["hashCode"] = function(v) { return jvFloatBits(rtjNum(v)) }
+    } else {
+        o["doubleToLongBits"] = function(v) {
+            var b = jvDblBits(rtjNum(v))
+            return sintRaw(b.hi, b.lo, 64, false)
+        }
+        o["hashCode"] = function(v) { return js_jhash(flo(rtjNum(v), 0)) }
+    }
     o["sum"] = function(a, b) { return jvFloOf(rtjNum(a) + rtjNum(b), f32) }
     o["max"] = function(a, b) { return jvFloOf(jvMaxD(rtjNum(a), rtjNum(b)), f32) }
     o["min"] = function(a, b) { return jvFloOf(jvMinD(rtjNum(a), rtjNum(b)), f32) }
@@ -1236,6 +1257,42 @@ function jvBitOps(o, w) {
         var l = jvLow32(v)
         if (h == 0 && l == 0) { return jvNarrow(0, w) }
         return jvOneBit(jvTrailZeros(h, l, w), w)
+    }
+}
+
+// Integer's unsigned readings and bit permutations (lib/java-strings.js).
+// Twin of jvUnsignedOps in abnf/jsrtjava.go.
+function jvUnsignedOps(o) {
+    o["reverse"] = function(v) { return jxReverse32(jvI(v)) }
+    o["reverseBytes"] = function(v) { return jxReverseBytes32(jvI(v)) }
+    o["rotateLeft"] = function(v, d) { return jxRotl32(jvI(v), jvI(d)) }
+    o["rotateRight"] = function(v, d) { return jxRotl32(jvI(v), 0 - jvI(d)) }
+    o["toUnsignedLong"] = function(v) { return sintRaw(0, jxU32(jvI(v)), 64, false) }
+    o["compareUnsigned"] = function(a, b) {
+        var x = jxU32(jvI(a))
+        var y = jxU32(jvI(b))
+        if (x < y) { return 0 - 1 }
+        if (x > y) { return 1 }
+        return 0
+    }
+    o["divideUnsigned"] = function(a, b) {
+        var y = jxU32(jvI(b))
+        if (y == 0) { jvThrowCls(jvArithExcCls, "/ by zero") }
+        return jxI32(Math.floor(jxU32(jvI(a)) / y))
+    }
+    o["remainderUnsigned"] = function(a, b) {
+        var y = jxU32(jvI(b))
+        if (y == 0) { jvThrowCls(jvArithExcCls, "/ by zero") }
+        return jxI32(jxU32(jvI(a)) % y)
+    }
+    o["toUnsignedString"] = function(v, r) { return jvRadixStr(sintRaw(0, jxU32(jvI(v)), 64, false), 64, r, false) }
+    o["parseUnsignedInt"] = function(s, r) {
+        if (s === null) { jvThrowCls(jvNfeCls, "Cannot parse null string") }
+        var t = jpStr(s)
+        if (t.charAt(0) == "-") { jvThrowCls(jvNfeCls, "Illegal leading minus sign on unsigned string " + t + ".") }
+        var l = jvParseInt(t, 64, jvRadixOf(r))
+        if (sintHi(l) != 0) { jvThrowCls(jvNfeCls, "String value " + t + " exceeds range of unsigned int.") }
+        return jxI32(sintLo(l))
     }
 }
 
@@ -2279,6 +2336,26 @@ function js_jvstrm(s, name, args) {
     var a0 = args[0]
     if (name == "isEmpty") { return s.length == 0 }
     if (name == "isBlank") { return jxIsBlank(s) }
+    if (name == "formatted") {
+        var fa = [s]
+        var fi = 0
+        while (fi < args.length) {
+            fa.push(args[fi])
+            fi = fi + 1
+        }
+        return js_jvstrstatic("format", fa)
+    }
+    if (name == "regionMatches") {
+        if (typeof a0 == "boolean") { return jxRegionMatches(s, a0, jvI(args[1]), jvStrArg(args[2]), jvI(args[3]), jvI(args[4])) }
+        return jxRegionMatches(s, false, jvI(a0), jvStrArg(args[1]), jvI(args[2]), jvI(args[3]))
+    }
+    if (name == "codePointCount") {
+        var cb = jvI(a0)
+        var ce = jvI(args[1])
+        var cn = jxCodePointCount(s, cb, ce)
+        if (cn < 0) { jxkThrow("IndexOutOfBoundsException", "Range [" + cb + ", " + ce + ") out of bounds for length " + s.length) }
+        return cn
+    }
     if (name == "indexOf") { return jxIndexOf(s, jvStrPat(a0), jvArgInt(args, 1, 0)) }
     if (name == "lastIndexOf") { return jxLastIndexOf(s, jvStrPat(a0), jvArgInt(args, 1, s.length)) }
     if (name == "contains") { return jxIndexOf(s, jvStrArg(a0), 0) >= 0 }
@@ -3024,6 +3101,20 @@ function jvCharLike(v, c) {
     return c
 }
 function jvCharMembers(o) {
+    // Character.toChars: a code point's one or two chars. Twin of jCharMembers
+    // in java-interpreter.abnf.
+    o["toChars"] = function(v) {
+        var cp = jvI(v)
+        if (cp < 0 || cp > 1114111) { jvThrowCls(jvIaeCls, "Not a valid Unicode code point: 0x" + unicodeCase(jxHex32(cp), 3)) }
+        var u = jxCpStr(cp)
+        var a = []
+        var i = 0
+        while (i < u.length) {
+            a.push(jvChar(u.charCodeAt(i)))
+            i = i + 1
+        }
+        return js_jvarrtag(a, "[C")
+    }
     o["isDigit"] = function(v) { return jcIsDigit(jvCharCode(v)) }
     o["isLetter"] = function(v) { return jcIsLetter(jvCharCode(v)) }
     o["isAlphabetic"] = function(v) { return jcIsAlphabetic(jvCharCode(v)) }

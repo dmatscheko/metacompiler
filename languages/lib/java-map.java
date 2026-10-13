@@ -296,6 +296,19 @@ class HashMap<K, V> implements Map<K, V> {
         addFirst(i, h, key, v, count);
         return v;
     }
+    public V computeIfPresent(K key, java.util.function.BiFunction<? super K, ? super V, ? extends V> f) {
+        HashMapNode<K, V> e = find(key);
+        if (e == null || e.value == null) { return null; }
+        int mc = modCount;
+        V v = f.apply(key, e.value);
+        if (mc != modCount) { throw new ConcurrentModificationException(); }
+        if (v == null) {
+            removeKey(key);
+            return null;
+        }
+        e.value = v;
+        return v;
+    }
     public V compute(K key, java.util.function.BiFunction<? super K, ? super V, ? extends V> f) {
         int h = hash(key);
         int i = binFor(h);
@@ -466,6 +479,250 @@ class HashMapView<E> implements Collection<E> {
             s = s + (e == this ? "(this Collection)" : "" + e);
         }
         return s + "]";
+    }
+}
+
+// java.util.TreeMap: the entries in key order (the comparator's, else the keys'
+// compareTo) in one sorted array, found by binary search. keySet, values and
+// entrySet are live views in that order.
+class TreeMap<K, V> implements Map<K, V> {
+    Comparator<? super K> cmp;
+    Object[] keys;
+    Object[] vals;
+    int size;
+
+    public TreeMap() { this(null); }
+    public TreeMap(Comparator<? super K> cmp) {
+        this.cmp = cmp;
+        keys = new Object[8];
+        vals = new Object[8];
+    }
+    @SuppressWarnings("unchecked")
+    int order(Object a, Object b) {
+        if (cmp == null) {
+            if (a == null || b == null) { throw new NullPointerException(); }
+            return ((Comparable<Object>) a).compareTo(b);
+        }
+        return ((Comparator<Object>) cmp).compare(a, b);
+    }
+    // The index of key, or -(insertion point) - 1.
+    int search(Object key) {
+        int lo = 0;
+        int hi = size - 1;
+        while (lo <= hi) {
+            int mid = (lo + hi) >>> 1;
+            int c = order(keys[mid], key);
+            if (c < 0) { lo = mid + 1; } else if (c > 0) { hi = mid - 1; } else { return mid; }
+        }
+        return -(lo + 1);
+    }
+    @SuppressWarnings("unchecked")
+    K keyAt(int i) { return (K) keys[i]; }
+    @SuppressWarnings("unchecked")
+    V valAt(int i) { return (V) vals[i]; }
+    public int size() { return size; }
+    public boolean isEmpty() { return size == 0; }
+    public V get(Object key) {
+        int i = search(key);
+        return i >= 0 ? valAt(i) : null;
+    }
+    public V getOrDefault(Object key, V dflt) {
+        int i = search(key);
+        return i >= 0 ? valAt(i) : dflt;
+    }
+    public boolean containsKey(Object key) { return search(key) >= 0; }
+    public boolean containsValue(Object value) {
+        for (int i = 0; i < size; i++) { if (HashMap.same(value, vals[i])) { return true; } }
+        return false;
+    }
+    public V put(K key, V value) {
+        if (size == 0) { order(key, key); }
+        int i = search(key);
+        if (i >= 0) {
+            V old = valAt(i);
+            vals[i] = value;
+            return old;
+        }
+        int at = -i - 1;
+        if (size == keys.length) {
+            Object[] nk = new Object[size * 2];
+            Object[] nv = new Object[size * 2];
+            System.arraycopy(keys, 0, nk, 0, size);
+            System.arraycopy(vals, 0, nv, 0, size);
+            keys = nk;
+            vals = nv;
+        }
+        System.arraycopy(keys, at, keys, at + 1, size - at);
+        System.arraycopy(vals, at, vals, at + 1, size - at);
+        keys[at] = key;
+        vals[at] = value;
+        size++;
+        return null;
+    }
+    public V putIfAbsent(K key, V value) {
+        V old = get(key);
+        if (old == null) { put(key, value); }
+        return old;
+    }
+    public void putAll(Map<? extends K, ? extends V> m) {
+        Iterator<? extends Map.Entry<? extends K, ? extends V>> it = m.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<? extends K, ? extends V> e = it.next();
+            put(e.getKey(), e.getValue());
+        }
+    }
+    V removeAt(int i) {
+        V old = valAt(i);
+        System.arraycopy(keys, i + 1, keys, i, size - i - 1);
+        System.arraycopy(vals, i + 1, vals, i, size - i - 1);
+        size--;
+        keys[size] = null;
+        vals[size] = null;
+        return old;
+    }
+    public V remove(Object key) {
+        int i = search(key);
+        return i >= 0 ? removeAt(i) : null;
+    }
+    public void clear() {
+        for (int i = 0; i < size; i++) {
+            keys[i] = null;
+            vals[i] = null;
+        }
+        size = 0;
+    }
+    public V merge(K key, V value, java.util.function.BiFunction<? super V, ? super V, ? extends V> f) {
+        int i = search(key);
+        V v = i >= 0 && vals[i] != null ? f.apply(valAt(i), value) : value;
+        if (v == null) { remove(key); } else { put(key, v); }
+        return v;
+    }
+    public V computeIfAbsent(K key, java.util.function.Function<? super K, ? extends V> f) {
+        V old = get(key);
+        if (old != null) { return old; }
+        V v = f.apply(key);
+        if (v != null) { put(key, v); }
+        return v;
+    }
+    public void forEach(java.util.function.BiConsumer<? super K, ? super V> f) {
+        for (int i = 0; i < size; i++) { f.accept(keyAt(i), valAt(i)); }
+    }
+    Map.Entry<K, V> entryAt(int i) {
+        if (i < 0 || i >= size) { return null; }
+        HashMapNode<K, V> e = new HashMapNode<K, V>(0, keyAt(i), valAt(i), null);
+        return e;
+    }
+    K keyOrThrow(int i) {
+        if (size == 0) { throw new NoSuchElementException(); }
+        return keyAt(i);
+    }
+    public K firstKey() { return keyOrThrow(0); }
+    public K lastKey() { return keyOrThrow(size - 1); }
+    public Map.Entry<K, V> firstEntry() { return entryAt(0); }
+    public Map.Entry<K, V> lastEntry() { return entryAt(size - 1); }
+    public Map.Entry<K, V> pollFirstEntry() {
+        Map.Entry<K, V> e = entryAt(0);
+        if (e != null) { removeAt(0); }
+        return e;
+    }
+    public Map.Entry<K, V> pollLastEntry() {
+        Map.Entry<K, V> e = entryAt(size - 1);
+        if (e != null) { removeAt(size - 1); }
+        return e;
+    }
+    // The index of the greatest key below (or at, when inclusive) key, or of
+    // the least key above (or at) it; -1 or size when there is none.
+    int below(K key, boolean inclusive) {
+        int i = search(key);
+        if (i >= 0) { return inclusive ? i : i - 1; }
+        return -i - 2;
+    }
+    int above(K key, boolean inclusive) {
+        int i = search(key);
+        if (i >= 0) { return inclusive ? i : i + 1; }
+        return -i - 1;
+    }
+    K keyOrNull(int i) { return i >= 0 && i < size ? keyAt(i) : null; }
+    public K floorKey(K key) { return keyOrNull(below(key, true)); }
+    public K lowerKey(K key) { return keyOrNull(below(key, false)); }
+    public K ceilingKey(K key) { return keyOrNull(above(key, true)); }
+    public K higherKey(K key) { return keyOrNull(above(key, false)); }
+    public Map.Entry<K, V> floorEntry(K key) { return entryAt(below(key, true)); }
+    public Map.Entry<K, V> ceilingEntry(K key) { return entryAt(above(key, true)); }
+    public Collection<K> keySet() { return new TreeMapView<K>(this, 0); }
+    public Collection<V> values() { return new TreeMapView<V>(this, 1); }
+    public Collection<Map.Entry<K, V>> entrySet() { return new TreeMapView<Map.Entry<K, V>>(this, 2); }
+    public boolean equals(Object o) {
+        if (o == this) { return true; }
+        if (!(o instanceof Map)) { return false; }
+        Map<?, ?> m = (Map<?, ?>) o;
+        if (m.size() != size) { return false; }
+        for (int i = 0; i < size; i++) {
+            if (!m.containsKey(keys[i]) || !HashMap.same(vals[i], m.get(keys[i]))) { return false; }
+        }
+        return true;
+    }
+    public int hashCode() {
+        int h = 0;
+        for (int i = 0; i < size; i++) { h += (keys[i] == null ? 0 : keys[i].hashCode()) ^ (vals[i] == null ? 0 : vals[i].hashCode()); }
+        return h;
+    }
+    public String toString() {
+        String s = "{";
+        for (int i = 0; i < size; i++) {
+            if (i > 0) { s = s + ", "; }
+            s = s + (keys[i] == this ? "(this Map)" : "" + keys[i]) + "=" + (vals[i] == this ? "(this Map)" : "" + vals[i]);
+        }
+        return s + "}";
+    }
+}
+// A TreeMap's keys (kind 0), values (1) or entries (2) in key order.
+class TreeMapView<E> implements Collection<E> {
+    TreeMap<?, ?> map;
+    int kind;
+    TreeMapView(TreeMap<?, ?> map, int kind) {
+        this.map = map;
+        this.kind = kind;
+    }
+    public int size() { return map.size; }
+    public boolean isEmpty() { return map.size == 0; }
+    @SuppressWarnings("unchecked")
+    E at(int i) { return (E) (kind == 0 ? map.keys[i] : (kind == 1 ? map.vals[i] : map.entryAt(i))); }
+    public Iterator<E> iterator() { return new TreeMapItr<E>(this); }
+    public boolean contains(Object o) {
+        for (int i = 0; i < map.size; i++) { if (HashMap.same(o, at(i))) { return true; } }
+        return false;
+    }
+    public boolean remove(Object o) {
+        for (int i = 0; i < map.size; i++) {
+            if (HashMap.same(o, at(i))) {
+                map.removeAt(i);
+                return true;
+            }
+        }
+        return false;
+    }
+    public boolean add(E e) { throw new UnsupportedOperationException(); }
+    public void clear() { map.clear(); }
+    public String toString() {
+        String s = "[";
+        for (int i = 0; i < map.size; i++) { s = s + (i > 0 ? ", " : "") + at(i); }
+        return s + "]";
+    }
+}
+class TreeMapItr<E> implements Iterator<E> {
+    TreeMapView<E> view;
+    int cursor;
+    TreeMapItr(TreeMapView<E> view) { this.view = view; }
+    public boolean hasNext() { return cursor < view.map.size; }
+    public E next() {
+        if (cursor >= view.map.size) { throw new NoSuchElementException(); }
+        cursor++;
+        return view.at(cursor - 1);
+    }
+    public void remove() {
+        cursor--;
+        view.map.removeAt(cursor);
     }
 }
 

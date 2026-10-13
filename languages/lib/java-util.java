@@ -14,6 +14,7 @@ import java.lang.reflect.Array;
 interface Iterator<E> {
     boolean hasNext();
     E next();
+    default void remove() { throw new UnsupportedOperationException("remove"); }
 }
 
 // java.util.Comparator: naturalOrder, reverseOrder and comparing order by
@@ -266,6 +267,19 @@ class ArrayList<E> implements List<E> {
     }
     public Iterator<E> iterator() { return new ArrayListItr<E>(this); }
     // Stable, and c == null is natural order (List#sort).
+    @SuppressWarnings("unchecked")
+    public void replaceAll(java.util.function.UnaryOperator<E> op) {
+        writable();
+        for (int i = 0; i < count; i++) { elems[i] = op.apply((E) elems[i]); }
+        modCount++;
+    }
+    // A view of [from, to): reads and writes go through to this list.
+    public List<E> subList(int from, int to) {
+        if (from < 0) { throw new IndexOutOfBoundsException("fromIndex = " + from); }
+        if (to > count) { throw new IndexOutOfBoundsException("toIndex = " + to); }
+        if (from > to) { throw new IllegalArgumentException("fromIndex(" + from + ") > toIndex(" + to + ")"); }
+        return new SubList<E>(this, from, to - from);
+    }
     public void sort(Comparator<? super E> c) {
         writable();
         Arrays.sortRange(elems, 0, count, c);
@@ -343,6 +357,8 @@ class ArrayListItr<E> implements Iterator<E> {
     ArrayList<E> list;
     int cursor;
     int expected;
+    // The index next() answered last, -1 once remove() has used it.
+    int lastRet = -1;
 
     ArrayListItr(ArrayList<E> list) {
         this.list = list;
@@ -354,7 +370,16 @@ class ArrayListItr<E> implements Iterator<E> {
         if (list.modCount != expected) { throw new ConcurrentModificationException(); }
         if (cursor >= list.count) { throw new NoSuchElementException(); }
         cursor++;
+        lastRet = cursor - 1;
         return (E) list.elems[cursor - 1];
+    }
+    public void remove() {
+        if (lastRet < 0) { throw new IllegalStateException(); }
+        if (list.modCount != expected) { throw new ConcurrentModificationException(); }
+        list.remove(lastRet);
+        cursor = lastRet;
+        lastRet = -1;
+        expected = list.modCount;
     }
 }
 
@@ -432,6 +457,296 @@ abstract class AbstractList<E> implements List<E> {
             s = s + (e == this ? "(this Collection)" : "" + e);
         }
         return s + "]";
+    }
+}
+
+// ArrayList.subList's view and Collections.unmodifiableList's: get and size
+// read through to the backing list; a SubList also sets, adds and removes
+// through it.
+class SubList<E> extends AbstractList<E> {
+    ArrayList<E> parent;
+    int offset;
+    int size;
+    SubList(ArrayList<E> parent, int offset, int size) {
+        this.parent = parent;
+        this.offset = offset;
+        this.size = size;
+    }
+    void check(int index, int n) {
+        if (index < 0 || index >= n) { throw new IndexOutOfBoundsException("Index " + index + " out of bounds for length " + n); }
+    }
+    public E get(int index) {
+        check(index, size);
+        return parent.get(offset + index);
+    }
+    public int size() { return size; }
+    public E set(int index, E e) {
+        check(index, size);
+        return parent.set(offset + index, e);
+    }
+    public void add(int index, E e) {
+        check(index, size + 1);
+        parent.add(offset + index, e);
+        size++;
+    }
+    public E remove(int index) {
+        check(index, size);
+        size--;
+        return parent.remove(offset + index);
+    }
+}
+class UnmodifiableList<E> extends AbstractList<E> {
+    List<? extends E> list;
+    UnmodifiableList(List<? extends E> list) { this.list = list; }
+    public E get(int index) { return list.get(index); }
+    public int size() { return list.size(); }
+}
+
+// java.util.Objects.
+final class Objects {
+    private Objects() {}
+    public static boolean equals(Object a, Object b) { return a == b || (a != null && a.equals(b)); }
+    public static int hashCode(Object o) { return o == null ? 0 : o.hashCode(); }
+    public static int hash(Object... values) { return Arrays.hashCode(values); }
+    public static String toString(Object o) { return String.valueOf(o); }
+    public static String toString(Object o, String nullDefault) { return o == null ? nullDefault : o.toString(); }
+    public static boolean isNull(Object o) { return o == null; }
+    public static boolean nonNull(Object o) { return o != null; }
+    public static <T> T requireNonNull(T obj) {
+        if (obj == null) { throw new NullPointerException(); }
+        return obj;
+    }
+    public static <T> T requireNonNull(T obj, String message) {
+        if (obj == null) { throw new NullPointerException(message); }
+        return obj;
+    }
+    public static <T> T requireNonNullElse(T obj, T dflt) {
+        if (obj != null) { return obj; }
+        if (dflt == null) { throw new NullPointerException("defaultObj"); }
+        return dflt;
+    }
+    public static <T> int compare(T a, T b, Comparator<? super T> c) { return a == b ? 0 : c.compare(a, b); }
+    public static int checkIndex(int index, int length) {
+        if (index < 0 || index >= length) { throw new IndexOutOfBoundsException("Index " + index + " out of bounds for length " + length); }
+        return index;
+    }
+}
+
+// java.util.Collections, for lists and plain collections.
+final class Collections {
+    private Collections() {}
+    public static <T extends Comparable<? super T>> void sort(List<T> list) { sort(list, null); }
+    @SuppressWarnings("unchecked")
+    public static <T> void sort(List<T> list, Comparator<? super T> c) {
+        Object[] a = list.toArray();
+        Arrays.sortRange(a, 0, a.length, (Comparator<Object>) c);
+        for (int i = 0; i < a.length; i++) { list.set(i, (T) a[i]); }
+    }
+    @SuppressWarnings("unchecked")
+    public static void reverse(List<?> list) {
+        List<Object> l = (List<Object>) list;
+        for (int i = 0, j = l.size() - 1; i < j; i++, j--) {
+            Object t = l.get(i);
+            l.set(i, l.get(j));
+            l.set(j, t);
+        }
+    }
+    @SuppressWarnings("unchecked")
+    public static void swap(List<?> list, int i, int j) {
+        List<Object> l = (List<Object>) list;
+        l.set(i, l.set(j, l.get(i)));
+    }
+    public static <T extends Comparable<? super T>> T max(Collection<? extends T> coll) { return pick(coll, null, 1); }
+    public static <T> T max(Collection<? extends T> coll, Comparator<? super T> c) { return pick(coll, c, 1); }
+    public static <T extends Comparable<? super T>> T min(Collection<? extends T> coll) { return pick(coll, null, -1); }
+    public static <T> T min(Collection<? extends T> coll, Comparator<? super T> c) { return pick(coll, c, -1); }
+    // The greatest (sign 1) or least (sign -1) element, the first of equals.
+    @SuppressWarnings("unchecked")
+    static <T> T pick(Collection<? extends T> coll, Comparator<? super T> c, int sign) {
+        Iterator<? extends T> it = coll.iterator();
+        T best = it.next();
+        while (it.hasNext()) {
+            T e = it.next();
+            int r = c == null ? ((Comparable<Object>) e).compareTo(best) : c.compare(e, best);
+            if (r * sign > 0) { best = e; }
+        }
+        return best;
+    }
+    public static int frequency(Collection<?> c, Object o) {
+        int n = 0;
+        Iterator<?> it = c.iterator();
+        while (it.hasNext()) {
+            Object e = it.next();
+            if (o == null ? e == null : o.equals(e)) { n++; }
+        }
+        return n;
+    }
+    public static <T> List<T> nCopies(int n, T o) {
+        if (n < 0) { throw new IllegalArgumentException("List length = " + n); }
+        ArrayList<T> l = new ArrayList<T>(n);
+        for (int i = 0; i < n; i++) { l.add(o); }
+        l.frozen = true;
+        return l;
+    }
+    public static <T> List<T> emptyList() {
+        ArrayList<T> l = new ArrayList<T>(0);
+        l.frozen = true;
+        return l;
+    }
+    public static <T> List<T> singletonList(T o) {
+        ArrayList<T> l = new ArrayList<T>(1);
+        l.add(o);
+        l.frozen = true;
+        return l;
+    }
+    public static <T> List<T> unmodifiableList(List<? extends T> list) { return new UnmodifiableList<T>(list); }
+    @SafeVarargs
+    public static <T> boolean addAll(Collection<? super T> c, T... elements) {
+        boolean changed = false;
+        for (int i = 0; i < elements.length; i++) { if (c.add(elements[i])) { changed = true; } }
+        return changed;
+    }
+}
+
+// java.util.Queue, Deque and ArrayDeque: a circular buffer that doubles when
+// full and holds no null, as java's does.
+interface Queue<E> extends Collection<E> {
+    boolean offer(E e);
+    E poll();
+    E peek();
+    E remove();
+    E element();
+}
+interface Deque<E> extends Queue<E> {
+    void addFirst(E e);
+    void addLast(E e);
+    boolean offerFirst(E e);
+    boolean offerLast(E e);
+    E removeFirst();
+    E removeLast();
+    E pollFirst();
+    E pollLast();
+    E getFirst();
+    E getLast();
+    E peekFirst();
+    E peekLast();
+    void push(E e);
+    E pop();
+}
+class ArrayDeque<E> implements Deque<E> {
+    Object[] elems;
+    int head;
+    int count;
+
+    public ArrayDeque() { elems = new Object[16]; }
+    public ArrayDeque(int capacity) { elems = new Object[capacity < 1 ? 1 : capacity]; }
+    public ArrayDeque(Collection<? extends E> c) {
+        elems = new Object[c.size() + 1];
+        Iterator<? extends E> it = c.iterator();
+        while (it.hasNext()) { addLast(it.next()); }
+    }
+    void grow() {
+        Object[] more = new Object[elems.length * 2];
+        for (int i = 0; i < count; i++) { more[i] = elems[(head + i) % elems.length]; }
+        elems = more;
+        head = 0;
+    }
+    @SuppressWarnings("unchecked")
+    E at(int i) { return (E) elems[(head + i) % elems.length]; }
+    public void addFirst(E e) {
+        if (e == null) { throw new NullPointerException(); }
+        if (count == elems.length) { grow(); }
+        head = (head - 1 + elems.length) % elems.length;
+        elems[head] = e;
+        count++;
+    }
+    public void addLast(E e) {
+        if (e == null) { throw new NullPointerException(); }
+        if (count == elems.length) { grow(); }
+        elems[(head + count) % elems.length] = e;
+        count++;
+    }
+    public boolean offerFirst(E e) { addFirst(e); return true; }
+    public boolean offerLast(E e) { addLast(e); return true; }
+    public E pollFirst() {
+        if (count == 0) { return null; }
+        E e = at(0);
+        elems[head] = null;
+        head = (head + 1) % elems.length;
+        count--;
+        return e;
+    }
+    public E pollLast() {
+        if (count == 0) { return null; }
+        E e = at(count - 1);
+        elems[(head + count - 1) % elems.length] = null;
+        count--;
+        return e;
+    }
+    public E removeFirst() {
+        if (count == 0) { throw new NoSuchElementException(); }
+        return pollFirst();
+    }
+    public E removeLast() {
+        if (count == 0) { throw new NoSuchElementException(); }
+        return pollLast();
+    }
+    public E getFirst() {
+        if (count == 0) { throw new NoSuchElementException(); }
+        return at(0);
+    }
+    public E getLast() {
+        if (count == 0) { throw new NoSuchElementException(); }
+        return at(count - 1);
+    }
+    public E peekFirst() { return count == 0 ? null : at(0); }
+    public E peekLast() { return count == 0 ? null : at(count - 1); }
+    public void push(E e) { addFirst(e); }
+    public E pop() { return removeFirst(); }
+    public boolean add(E e) { addLast(e); return true; }
+    public boolean offer(E e) { addLast(e); return true; }
+    public E poll() { return pollFirst(); }
+    public E peek() { return peekFirst(); }
+    public E remove() { return removeFirst(); }
+    public E element() { return getFirst(); }
+    public int size() { return count; }
+    public boolean isEmpty() { return count == 0; }
+    public boolean contains(Object o) {
+        for (int i = 0; i < count; i++) { if (o != null && o.equals(at(i))) { return true; } }
+        return false;
+    }
+    public boolean remove(Object o) {
+        for (int i = 0; i < count; i++) {
+            if (o != null && o.equals(at(i))) {
+                for (int k = i; k < count - 1; k++) { elems[(head + k) % elems.length] = elems[(head + k + 1) % elems.length]; }
+                elems[(head + count - 1) % elems.length] = null;
+                count--;
+                return true;
+            }
+        }
+        return false;
+    }
+    public void clear() {
+        for (int i = 0; i < count; i++) { elems[(head + i) % elems.length] = null; }
+        head = 0;
+        count = 0;
+    }
+    public Iterator<E> iterator() { return new ArrayDequeItr<E>(this); }
+    public String toString() {
+        String s = "[";
+        for (int i = 0; i < count; i++) { s = s + (i > 0 ? ", " : "") + at(i); }
+        return s + "]";
+    }
+}
+class ArrayDequeItr<E> implements Iterator<E> {
+    ArrayDeque<E> dq;
+    int cursor;
+    ArrayDequeItr(ArrayDeque<E> dq) { this.dq = dq; }
+    public boolean hasNext() { return cursor < dq.count; }
+    public E next() {
+        if (cursor >= dq.count) { throw new NoSuchElementException(); }
+        cursor++;
+        return dq.at(cursor - 1);
     }
 }
 

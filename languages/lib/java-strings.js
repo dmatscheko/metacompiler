@@ -16,6 +16,9 @@
 //   jxkClass(v)      v.getClass().getName() of a non-null v
 //   jxkHash(v)       v.hashCode() of a non-null v
 //   jxkThrow(c, msg) throw a new java.util exception of class c with message msg
+//
+// It also holds Integer's unsigned and bit members over plain int values, and
+// Math.ulp and Math.IEEEremainder over doubles.
 //   jxkFail(msg)     a format or a pattern this subset does not support
 //
 // Case mapping and the literal search are lib/utf16-strings.js's, which both
@@ -99,6 +102,108 @@ function jxCpAt(s, i) {
         if (h >= 55296 && h < 56320) { return 65536 + (h - 55296) * 1024 + (c - 56320) }
     }
     return c
+}
+// regionMatches: the len units of s from to and of o from oo, folded as
+// compareToIgnoreCase folds them when ic; false when a region runs off its
+// string.
+function jxRegionMatches(s, ic, to, o, oo, len) {
+    if (oo < 0 || to < 0 || to > s.length - len || oo > o.length - len) { return false }
+    for (var i = 0; i < len; i++) {
+        var a = s.charCodeAt(to + i)
+        var b = o.charCodeAt(oo + i)
+        if (a != b && (!ic || jxFold(a) != jxFold(b))) { return false }
+    }
+    return true
+}
+// codePointCount(b, e): a surrogate pair counts once; -1 for a range outside s.
+function jxCodePointCount(s, b, e) {
+    if (b < 0 || e > s.length || b > e) { return 0 - 1 }
+    var n = 0
+    var i = b
+    while (i < e) {
+        var c = s.charCodeAt(i)
+        i = i + 1
+        if (c >= 55296 && c < 56320 && i < e && s.charCodeAt(i) >= 56320 && s.charCodeAt(i) < 57344) { i = i + 1 }
+        n = n + 1
+    }
+    return n
+}
+// ----- Integer's unsigned and bit members, on int values (plain numbers) -----
+//
+// An int's 32 bits read as unsigned, and back; every step is exact in a double.
+function jxU32(i) { return i < 0 ? i + 4294967296 : i }
+function jxI32(u) { return u >= 2147483648 ? u - 4294967296 : u }
+function jxReverse32(i) {
+    var u = jxU32(i)
+    var r = 0
+    for (var k = 0; k < 32; k++) {
+        r = r * 2 + u % 2
+        u = Math.floor(u / 2)
+    }
+    return jxI32(r)
+}
+function jxReverseBytes32(i) {
+    var u = jxU32(i)
+    var r = 0
+    for (var k = 0; k < 4; k++) {
+        r = r * 256 + u % 256
+        u = Math.floor(u / 256)
+    }
+    return jxI32(r)
+}
+// rotateLeft by d mod 32; rotateRight(i, d) is rotateLeft(i, -d).
+function jxRotl32(i, d) {
+    var n = d & 31
+    var u = jxU32(i)
+    var cut = Math.pow(2, 32 - n)
+    return jxI32((u % cut) * Math.pow(2, n) + Math.floor(u / cut))
+}
+// ----- Math.ulp and Math.IEEEremainder -----
+//
+// ulp: the gap to the next double (f32: float) away from zero at |f|'s
+// exponent; the subnormal gap below the least normal; NaN and Infinity answer
+// themselves. Scaling by two is exact.
+function jxUlp(f, f32) {
+    if (f !== f) { return f }
+    var a = f < 0 ? -f : f
+    if (a - a !== 0) { return a }
+    var minExp = f32 ? 0 - 126 : 0 - 1022
+    var mant = f32 ? 23 : 52
+    if (a < Math.pow(2, minExp)) { return Math.pow(2, minExp - mant) }
+    var e = 0
+    while (a >= 2) {
+        a = a / 2
+        e = e + 1
+    }
+    while (a < 1) {
+        a = a * 2
+        e = e - 1
+    }
+    return Math.pow(2, e - mant)
+}
+// IEEEremainder: x - p * n, n the integer nearest x / p (ties to even), with
+// x's sign - fdlibm's __ieee754_remainder, whose every step is exact.
+function jxIeeeRem(x, p) {
+    if (x !== x || p !== p || x - x !== 0 || p == 0) { return (x - x) * p / 0 }
+    if (p - p !== 0) { return x }
+    var neg = x < 0 || (x == 0 && 1 / x < 0)
+    var hp = p < 0 ? -p : p
+    var hx = neg ? -x : x
+    if (hp < Math.pow(2, 1023)) { hx = hx % (hp + hp) }
+    if (hp < Math.pow(2, 0 - 1021)) {
+        if (hx + hx > hp) {
+            hx = hx - hp
+            if (hx + hx >= hp) { hx = hx - hp }
+        }
+    } else {
+        var half = 0.5 * hp
+        if (hx > half) {
+            hx = hx - hp
+            if (hx >= half) { hx = hx - hp }
+        }
+    }
+    if (neg) { return -hx }
+    return hx
 }
 // A code point as its one or two UTF-16 units.
 function jxCpStr(cp) {

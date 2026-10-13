@@ -2241,13 +2241,20 @@ HasStatic   = :script(~~
     // rxFail is regex.js's error KNOB, overridden by assignment.
     rxFail = function (msg) { fail("regexp: " + msg) }
 
+    function jArgList(args) {
+        var out = []
+        for (var i = 0; i < args.length; i++) { out.push(args[i]) }
+        return out
+    }
     // The host names a program can see. System and Math are built here.
     hostGlobals["System"] = {
         out: {
             // println() with no argument writes just the line terminator; without
             // the arity test the missing parameter rendered as "null".
             println: function(x) { println(arguments.length == 0 ? "" : jOutText(jstr(x))) },
-            print: function(x) { print(jOutText(jstr(x))) }
+            print: function(x) { print(jOutText(jstr(x))) },
+            printf: function() { print(jOutText(jStrStatic("format", jArgList(arguments)))) },
+            format: function() { print(jOutText(jStrStatic("format", jArgList(arguments)))) }
         },
         exit: function(code) { exit(code | 0) },
         // Twin of js_jvarraycopy in lib/java-rt.metajs, which documents the checks.
@@ -2327,6 +2334,14 @@ HasStatic   = :script(~~
             var f = dbl ? jNumD(v) : coreF32Round(jNumD(v))
             return jNarrow(jFlo(jRoundHalfUp(f)), dbl ? 64 : 32)
         },
+        // ulp's float overload takes an integral argument too, as signum's.
+        // Twin of jvMathMembers in abnf/jsrtjava.go and languages/lib/java-rt.metajs.
+        ulp: function(v) {
+            var dbl = jIsFlo(v) && !jIsF32(v)
+            var u = jxUlp(jNumD(v), !dbl)
+            return dbl ? jFlo(u) : jFlo32(u)
+        },
+        IEEEremainder: function(a, b) { return jFlo(jxIeeeRem(jNumD(a), jNumD(b))) },
         // signum keeps a double a double and a float a float; an integral
         // argument takes the float overload. NaN and both zeros answer themselves.
         signum: function(v) {
@@ -2607,6 +2622,39 @@ HasStatic   = :script(~~
             return (p.h == 0 && p.l == 0) ? jNarrow(0, w) : jOneBit(jTrailZeros(p, w), w)
         }
     }
+    // Integer's unsigned readings and bit permutations (lib/java-strings.js).
+    // Twin of jvUnsignedOps in abnf/jsrtjava.go and languages/lib/java-rt.metajs.
+    function jAddUnsigned(o) {
+        o.reverse = function(v) { return jxReverse32(jI(v)) }
+        o.reverseBytes = function(v) { return jxReverseBytes32(jI(v)) }
+        o.rotateLeft = function(v, d) { return jxRotl32(jI(v), jI(d)) }
+        o.rotateRight = function(v, d) { return jxRotl32(jI(v), 0 - jI(d)) }
+        o.toUnsignedLong = function(v) { return szMake(i64Make(0, jxU32(jI(v))), 64, jNoU) }
+        o.compareUnsigned = function(a, b) {
+            var x = jxU32(jI(a))
+            var y = jxU32(jI(b))
+            return x < y ? jNegOne : (x > y ? 1 : 0)
+        }
+        o.divideUnsigned = function(a, b) {
+            var y = jxU32(jI(b))
+            if (y == 0) { jThrowExc("ArithmeticException", "/ by zero") }
+            return jxI32(Math.floor(jxU32(jI(a)) / y))
+        }
+        o.remainderUnsigned = function(a, b) {
+            var y = jxU32(jI(b))
+            if (y == 0) { jThrowExc("ArithmeticException", "/ by zero") }
+            return jxI32(jxU32(jI(a)) % y)
+        }
+        o.toUnsignedString = function(v, radix) { return jRadixStr(o.toUnsignedLong(v), 64, radix, false) }
+        o.parseUnsignedInt = function(s, radix) {
+            if (s === null) { jThrowExc("NumberFormatException", "Cannot parse null string") }
+            var t = "" + s
+            if (t.charAt(0) == "-") { jThrowExc("NumberFormatException", "Illegal leading minus sign on unsigned string " + t + ".") }
+            var p = szPair(jParseInt(t, 64, radix))
+            if (p.h != 0) { jThrowExc("NumberFormatException", "String value " + t + " exceeds range of unsigned int.") }
+            return jxI32(p.l)
+        }
+    }
     // The value's two unsigned 32 bit halves at width w (h is 0 at 32).
     function jHalves(v, w) {
         var p = szPair(jNarrow(v, 64))
@@ -2717,6 +2765,7 @@ HasStatic   = :script(~~
     }
     jAddBitOps(hostGlobals["Integer"], 32)
     jAddBitOps(hostGlobals["Long"], 64)
+    jAddUnsigned(hostGlobals["Integer"])
     // Built with szMake / i64Make rather than through the helpers below, because
     // this runs at SCRIPT BODY time and only the included lib is textually in
     // scope by now; the pairs are the sign-extended 64 bit readings of each width's
@@ -2762,6 +2811,14 @@ HasStatic   = :script(~~
     // languages/lib/java-rt.metajs.
     function jCharMembers(o) {
         var code = function(v) { return jIsChar(v) ? v.__char : jNum(v) }
+        o.toChars = function(v) {
+            var cp = jNum(v)
+            if (cp < 0 || cp > 1114111) { jThrowExc("IllegalArgumentException", "Not a valid Unicode code point: 0x" + unicodeCase(jxHex32(cp), 3)) }
+            var u = jxCpStr(cp)
+            var a = []
+            for (var i = 0; i < u.length; i++) { a.push(jChar(u.charCodeAt(i))) }
+            return jArrTag(a, "[C")
+        }
         var like = function(v, c) { return jIsChar(v) ? jChar(c) : c }
         o.isDigit = function(v) { return jcIsDigit(code(v)) }
         o.isLetter = function(v) { return jcIsLetter(code(v)) }
@@ -2807,6 +2864,19 @@ HasStatic   = :script(~~
         o.isInfinite = function(v) { var f = jNumD(v); return f == inf || f == -inf }
         o.isFinite = function(v) { var f = jNumD(v); return f == f && f != inf && f != -inf }
         o.compare = function(a, b) { return jDblCompare(jNumD(a), jNumD(b)) }
+        // The bit patterns, NaN canonical (JLS 4.2.3); hashCode is the boxed
+        // value's. Twin of jvFloType in abnf/jsrtjava.go and
+        // languages/lib/java-rt.metajs.
+        if (f32) {
+            o.floatToIntBits = function(v) { return jFloatBits(jNumD(v)) }
+            o.hashCode = function(v) { return jFloatBits(jNumD(v)) }
+        } else {
+            o.doubleToLongBits = function(v) {
+                var db = jDblBits(jNumD(v))
+                return szMake(i64Make(db.hi, db.lo), 64, jNoU)
+            }
+            o.hashCode = function(v) { var hb = jDblBits(jNumD(v)); return hb.hi ^ hb.lo }
+        }
         o.sum = function(a, b) { return jFloRes(jNumD(a) + jNumD(b), f32) }
         o.max = function(a, b) { return jFloRes(jMaxD(jNumD(a), jNumD(b)), f32) }
         o.min = function(a, b) { return jFloRes(jMinD(jNumD(a), jNumD(b)), f32) }
@@ -3717,6 +3787,18 @@ HasStatic   = :script(~~
         var n1 = args.length > 1
         if (name == "isEmpty") { return s.length == 0 }
         if (name == "isBlank") { return jxIsBlank(s) }
+        if (name == "formatted") { return jStrStatic("format", concat2impl([s], args)) }
+        if (name == "regionMatches") {
+            if (typeof a0 == "boolean") { return jxRegionMatches(s, a0, jI(args[1]), jStrArg(args[2]), jI(args[3]), jI(args[4])) }
+            return jxRegionMatches(s, false, jI(a0), jStrArg(args[1]), jI(args[2]), jI(args[3]))
+        }
+        if (name == "codePointCount") {
+            var cb = jI(a0)
+            var ce = jI(args[1])
+            var cn = jxCodePointCount(s, cb, ce)
+            if (cn < 0) { jThrowExc("IndexOutOfBoundsException", "Range [" + cb + ", " + ce + ") out of bounds for length " + s.length) }
+            return cn
+        }
         if (name == "indexOf") { return jxIndexOf(s, jStrPat(a0), n1 ? jI(args[1]) : 0) }
         if (name == "lastIndexOf") { return jxLastIndexOf(s, jStrPat(a0), n1 ? jI(args[1]) : s.length) }
         if (name == "contains") { return jxIndexOf(s, jStrArg(a0), 0) >= 0 }
@@ -4829,12 +4911,34 @@ HasStatic   = :script(~~
     // java.lang's exception types, as ordinary class descriptors: the message is a
     // field the constructor stores, getMessage reads it, and the __super chain is
     // what a typed catch and instanceof walk.
+    // (), (message), (cause) - whose message is the cause's toString() - and
+    // (message, cause). Twin of emitBuiltinExc's constructors in
+    // java-to-llvm-ir.abnf.
     function jExcCtor(cls) {
         return function() {
             var self = arguments[0]
-            if (arguments.length > 1) { self.message = arguments[1] }
+            if (arguments.length > 2) {
+                self.message = arguments[1]
+                self.__cause = arguments[2]
+            } else if (arguments.length > 1) {
+                var a = arguments[1]
+                if (jIsThrowable(a)) {
+                    self.message = jThrowableStr(a)
+                    self.__cause = a
+                } else {
+                    self.message = a
+                }
+            }
             else if (self.message == undefined) { self.message = null }
         }
+    }
+    function jExcGetCause() {
+        var c = arguments[0].__cause
+        return c === undefined ? null : c
+    }
+    function jExcInitCause() {
+        arguments[0].__cause = arguments[1]
+        return arguments[0]
     }
     function jExcGetMessage() { return arguments[0].message }
     function jExcGetLocalized() { return mcall(arguments[0], "getMessage", []) }
@@ -4876,6 +4980,8 @@ HasStatic   = :script(~~
         cls.__ctor = jExcCtor(cls)
         cls.getMessage = jExcGetMessage
         cls.getLocalizedMessage = jExcGetLocalized
+        cls.getCause = jExcGetCause
+        cls.initCause = jExcInitCause
         cls.addSuppressed = jExcAddSuppressed
         cls.getSuppressed = jExcGetSuppressed
         globalScope[name] = cls

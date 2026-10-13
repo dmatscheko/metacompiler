@@ -37,19 +37,24 @@
 
 import java.lang.reflect.Array;
 import java.util.AbstractList;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.ConcurrentModificationException;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.stream.Collectors;
 import java.util.stream.DoubleStream;
 import java.util.stream.IntStream;
@@ -136,6 +141,7 @@ class Main {
         S65.run(); // SECTION-CALL 65
         S66.run(); // SECTION-CALL 66
         S67.run(); // SECTION-CALL 67
+        S68.run(); // SECTION-CALL 68
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -3804,5 +3810,87 @@ class S67 {
             + "IndexOutOfBoundsException:Index 5 out of bounds for length 2"));
         Main.check("ci67", strs[1].compareToIgnoreCase(strs[2]) == 62977 && strs[2].compareToIgnoreCase(strs[1]) == -62977
             && strs[1].compareTo(strs[2]) == -10178 && "Ab".compareToIgnoreCase("aC") == -1);
+    }
+}
+
+// ===== SECTION 68: Objects, Collections, TreeMap, ArrayDeque and the commonly hit members =====
+//
+// java.util's Objects, Collections, TreeMap (key order, navigation) and
+// ArrayDeque; a list iterator's remove, replaceAll and subList; HashMap's
+// computeIfPresent; Throwable's cause; String.formatted, regionMatches and
+// codePointCount; Character.toChars; Integer's unsigned and bit members;
+// Double and Float bits; Math.ulp and IEEEremainder. Every expected value is
+// java 24.0.2's.
+class S68Ex extends Exception {
+    S68Ex(String m, Throwable c) { super(m, c); }
+}
+class S68 {
+    static int[] vs = {1, -1, 0x12345678};
+    static void run() {
+        Main.check("ob68", Objects.equals(null, null) && !Objects.equals("a", null) && Objects.hash(1, 2) == 994 && Objects.hashCode(null) == 0
+            && Objects.toString(null, "d").equals("d") && Objects.requireNonNull("a").equals("a") && Objects.isNull(null));
+        List<Integer> l = new ArrayList<>(List.of(3, 1, 2));
+        Collections.sort(l);
+        String a = l.toString();
+        Collections.reverse(l);
+        Collections.swap(l, 0, 2);
+        Main.check("co68", a.equals("[1, 2, 3]") && l.toString().equals("[1, 2, 3]") && Collections.max(l) == 3 && Collections.min(l) == 1
+            && Collections.nCopies(2, "z").toString().equals("[z, z]") && Collections.frequency(List.of(1, 2, 1), 1) == 2
+            && Collections.max(List.of("bb", "a", "ccc"), Comparator.comparing(String::length)).equals("ccc")
+            && Collections.unmodifiableList(l).toString().equals("[1, 2, 3]"));
+        TreeMap<String, Integer> m = new TreeMap<>();
+        m.put("b", 2);
+        m.put("a", 1);
+        m.put("c", 3);
+        m.put("b", 20);
+        String it = "";
+        for (Map.Entry<String, Integer> e : m.entrySet()) { it = it + e.getKey() + e.getValue(); }
+        TreeMap<Integer, String> rm = new TreeMap<>(Comparator.reverseOrder());
+        rm.put(1, "x");
+        rm.put(3, "y");
+        rm.put(2, "z");
+        Main.check("tm68", m.toString().equals("{a=1, b=20, c=3}") && m.firstKey().equals("a") && m.lastKey().equals("c")
+            && m.floorKey("bb").equals("b") && m.ceilingKey("bb").equals("c") && it.equals("a1b20c3") && m.keySet().toString().equals("[a, b, c]")
+            && rm.toString().equals("{3=y, 2=z, 1=x}") && rm.higherKey(2) == 1);
+        ArrayDeque<Integer> d = new ArrayDeque<>();
+        d.push(1);
+        d.addLast(2);
+        d.offerFirst(0);
+        for (int i = 3; i < 20; i++) { d.addLast(i); }
+        Deque<String> q = new ArrayDeque<>(List.of("x", "y"));
+        q.offer("z");
+        Main.check("dq68", d.size() == 20 && d.pop() == 0 && d.pollLast() == 19 && d.peek() == 1 && q.toString().equals("[x, y, z]") && q.poll().equals("x"));
+        List<Integer> r = new ArrayList<>(List.of(1, 2, 3, 4, 5));
+        Iterator<Integer> ri = r.iterator();
+        while (ri.hasNext()) { if (ri.next() % 2 == 0) { ri.remove(); } }
+        r.replaceAll(x -> x * 10);
+        List<Integer> sub = r.subList(1, 3);
+        sub.set(0, 99);
+        Map<String, Integer> hm = new HashMap<>();
+        hm.put("a", 1);
+        hm.computeIfPresent("a", (k, v) -> v + 1);
+        hm.computeIfPresent("b", (k, v) -> 9);
+        Main.check("li68", r.toString().equals("[10, 99, 50]") && sub.toString().equals("[99, 50]") && hm.toString().equals("{a=2}"));
+        RuntimeException c = new RuntimeException("outer", new IllegalStateException("inner"));
+        Exception c1 = new Exception(new IllegalStateException("in"));
+        S68Ex me = new S68Ex("m", c1);
+        Main.check("ca68", c.getCause().getMessage().equals("inner") && c1.getMessage().equals("java.lang.IllegalStateException: in")
+            && me.getCause().getCause().getMessage().equals("in") && new Exception("x").getCause() == null);
+        Main.check("st68", "%d!".formatted(5).equals("5!") && "Hello".regionMatches(true, 1, "ELL", 0, 3) && !"hello".regionMatches(1, "he", 0, 2)
+            && "a😀b".codePointCount(0, 4) == 3 && new String(Character.toChars(0x1F600)).equals("😀")
+            && Character.toChars(65)[0] == 'A');
+        String u = "";
+        for (int v : vs) {
+            u = u + Integer.reverse(v) + " " + Integer.reverseBytes(v) + " " + Integer.toUnsignedString(v) + " " + Integer.rotateLeft(v, 33)
+                + " " + Integer.rotateRight(v, -7) + " " + Integer.divideUnsigned(v, 3) + " " + Integer.remainderUnsigned(v, 7)
+                + " " + Integer.compareUnsigned(v, 5) + " " + Integer.toUnsignedLong(v) + "|";
+        }
+        Main.check("un68", u.equals("-2147483648 16777216 1 2 128 0 1 -1 1|-1 -1 4294967295 -1 -1 1431655765 3 1 4294967295|"
+            + "510274632 2018915346 305419896 610839792 439041033 101806632 5 1 305419896|")
+            && Integer.parseUnsignedInt("4294967295") == -1);
+        Main.check("bt68", Double.doubleToLongBits(1.5) == 4609434218613702656L && Double.hashCode(1.5) == 1073217536
+            && Float.floatToIntBits(1.5f) == 1069547520 && Double.doubleToLongBits(-0.0) == Long.MIN_VALUE
+            && Math.ulp(1.0) == 2.220446049250313E-16 && Math.ulp(1e-310) == 4.9E-324 && Math.ulp(1f) == 1.1920929E-7f
+            && Math.IEEEremainder(5.0, 3.0) == -1.0 && Math.IEEEremainder(7.0, 2.0) == -1.0 && Math.IEEEremainder(-5.5, 3.0) == 0.5);
     }
 }

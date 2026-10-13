@@ -3620,7 +3620,8 @@ HasStatic   = :script(~~
     var jStrMethodList = ["isEmpty", "isBlank", "indexOf", "lastIndexOf", "contains", "startsWith", "endsWith",
                           "equalsIgnoreCase", "compareTo", "compareToIgnoreCase", "concat", "replace", "replaceAll",
                           "replaceFirst", "matches", "split", "trim", "strip", "stripLeading", "stripTrailing",
-                          "toUpperCase", "toLowerCase", "repeat", "codePointAt", "subSequence", "intern"]
+                          "toUpperCase", "toLowerCase", "repeat", "codePointAt", "subSequence", "intern",
+                          "formatted", "regionMatches", "codePointCount"]
     for (var jsm = 0; jsm < jStrMethodList.length; jsm++) { jStrMethods["$" + jStrMethodList[jsm]] = true }
     var jUnboxNames = {"$intValue": true, "$longValue": true, "$doubleValue": true, "$floatValue": true,
                        "$shortValue": true, "$byteValue": true, "$charValue": true, "$booleanValue": true}
@@ -5211,17 +5212,19 @@ HasStatic   = :script(~~
     var jUsesStrIdx = false     // charAt/substring -> StringIndexOutOfBoundsException
     var jUsesNewArr = false     // new T[n]         -> NegativeArraySizeException
     var jUsesParse = false      // parseInt/parseDouble/valueOf ... -> NumberFormatException
-    var jUsesRepeat = false     // String.repeat    -> IllegalArgumentException
+    var jUsesRepeat = false     // String.repeat, Character.toChars -> IllegalArgumentException
     var jUsesFormat = false     // String.format    -> java.util.Formatter's exceptions
+    var jUsesRange = false      // codePointCount   -> IndexOutOfBoundsException
     function jNoteIdx(sfx) { jUsesIdx = true; return sfx }
     function jNoteMSfx(sfx) {
         if (sfx.name == "charAt" || sfx.name == "substring" || sfx.name == "codePointAt"
             || sfx.name == "subSequence") { jUsesStrIdx = true }
-        if (sfx.name == "repeat") { jUsesRepeat = true }
+        if (sfx.name == "codePointCount") { jUsesRange = true }
+        if (sfx.name == "repeat" || sfx.name == "toChars") { jUsesRepeat = true }
         if (sfx.name == "format" || sfx.name == "formatted" || sfx.name == "printf") { jUsesFormat = true }
         if (sfx.name == "arraycopy") { jUsesIdx = true }
         if (sfx.name == "parseInt" || sfx.name == "parseLong" || sfx.name == "parseDouble"
-            || sfx.name == "parseFloat" || sfx.name == "valueOf") { jUsesParse = true }
+            || sfx.name == "parseFloat" || sfx.name == "valueOf" || sfx.name == "parseUnsignedInt") { jUsesParse = true }
         return sfx
     }
     // These are needed whether or not the program names them, because the
@@ -5269,6 +5272,10 @@ HasStatic   = :script(~~
             runtimeExc["$ClassCastException"] = true
             noteTypeUse("ClassCastException")
         }
+        if (jUsesRange) {
+            runtimeExc["$IndexOutOfBoundsException"] = true
+            noteTypeUse("IndexOutOfBoundsException")
+        }
         for (var fe = 2; jUsesFormat && fe < jFmtExcs.length - 1; fe++) {
             runtimeExc["$" + jFmtExcs[fe]] = true
             noteTypeUse(jFmtExcs[fe])
@@ -5289,7 +5296,10 @@ HasStatic   = :script(~~
         jNoteRuntimeExc()
         var ctor1 = emitFunc([], function(bb) {
             var tV = callExt(bb, "js_arg", [curF.Params[1], handle(0)])
-            callExt(bb, "js_set", [tV, emitStr(bb, "__msg"), callExt(bb, "js_arg", [curF.Params[1], handle(1)])])
+            var aV = callExt(bb, "js_arg", [curF.Params[1], handle(1)])
+            var isCause = truthy(bb, callExt(bb, "js_jvis", [aV, emitStr(bb, "Throwable")]))
+            callExt(bb, "js_set", [tV, emitStr(bb, "__msg"), bb.NewSelect(isCause, callExt(bb, "js_jvstr", [aV]), aV)])
+            callExt(bb, "js_set", [tV, emitStr(bb, "__cause"), bb.NewSelect(isCause, aV, hNull)])
             bb.NewRet(hUndef)
             return deadBlock()
         }, false, null)
@@ -5297,6 +5307,20 @@ HasStatic   = :script(~~
             var tV = callExt(bb, "js_arg", [curF.Params[1], handle(0)])
             callExt(bb, "js_set", [tV, emitStr(bb, "__msg"), hNull])
             bb.NewRet(hUndef)
+            return deadBlock()
+        }, false, null)
+        // (message, cause); and (cause) above, whose message is the cause's
+        // toString(). Twin of jExcCtor in java-interpreter.abnf.
+        var ctor2 = emitFunc([], function(bb) {
+            var tV = callExt(bb, "js_arg", [curF.Params[1], handle(0)])
+            callExt(bb, "js_set", [tV, emitStr(bb, "__msg"), callExt(bb, "js_arg", [curF.Params[1], handle(1)])])
+            callExt(bb, "js_set", [tV, emitStr(bb, "__cause"), callExt(bb, "js_arg", [curF.Params[1], handle(2)])])
+            bb.NewRet(hUndef)
+            return deadBlock()
+        }, false, null)
+        var getCause = emitFunc([], function(bb) {
+            var cV = callExt(bb, "js_get", [callExt(bb, "js_arg", [curF.Params[1], handle(0)]), emitStr(bb, "__cause")])
+            bb.NewRet(bb.NewSelect(bb.NewICmp(llvm.enum.IPredEQ, cV, hUndef), hNull, cV))
             return deadBlock()
         }, false, null)
         var getMsg = emitFunc([], function(bb) {
@@ -5351,8 +5375,10 @@ HasStatic   = :script(~~
             }
             callExt(b, "js_set", [clsV, emitStr(b, "__ctor#0"), callExt(b, "js_closure", [handle(ctor0), curScopeV])])
             callExt(b, "js_set", [clsV, emitStr(b, "__ctor#1"), callExt(b, "js_closure", [handle(ctor1), curScopeV])])
+            callExt(b, "js_set", [clsV, emitStr(b, "__ctor#2"), callExt(b, "js_closure", [handle(ctor2), curScopeV])])
             callExt(b, "js_set", [clsV, emitStr(b, "__ctor"),
-                                  callExt(b, "js_closure", [handle(emitCtorDispatch(name, [0, 1])), curScopeV])])
+                                  callExt(b, "js_closure", [handle(emitCtorDispatch(name, [0, 1, 2])), curScopeV])])
+            callExt(b, "js_set", [clsV, emitStr(b, "getCause"), callExt(b, "js_closure", [handle(getCause), curScopeV])])
             callExt(b, "js_set", [clsV, emitStr(b, "getMessage"), callExt(b, "js_closure", [handle(getMsg), curScopeV])])
             callExt(b, "js_set", [clsV, emitStr(b, "getLocalizedMessage"), callExt(b, "js_closure", [handle(getLoc), curScopeV])])
             callExt(b, "js_set", [clsV, emitStr(b, "addSuppressed"), callExt(b, "js_closure", [handle(addSupp), curScopeV])])
@@ -5746,6 +5772,16 @@ HasStatic   = :script(~~
         callExt(b, "js_set", [sysV, emitStr(b, "arraycopy"), callExt(b, "js_closure", [handle(jvArraycopyF), curScopeV])])
         callExt(b, "js_set", [outV, emitStr(b, "println"), callExt(b, "js_closure", [handle(jvPrintlnF), curScopeV])])
         callExt(b, "js_set", [outV, emitStr(b, "print"), callExt(b, "js_closure", [handle(jvPrintF), curScopeV])])
+        // printf / format: String.format's text, written as print writes.
+        var jvPrintfF = emitFunc([], function(bb) {
+            var one = callExt(bb, "js_arr_new", [])
+            callExt(bb, "js_arr_push", [one, callExt(bb, "js_jvstrstatic", [emitStr(bb, "format"), curF.Params[1]])])
+            callExt(bb, "js_jvwrite", [one])
+            bb.NewRet(hUndef)
+            return deadBlock()
+        }, false, null)
+        callExt(b, "js_set", [outV, emitStr(b, "printf"), callExt(b, "js_closure", [handle(jvPrintfF), curScopeV])])
+        callExt(b, "js_set", [outV, emitStr(b, "format"), callExt(b, "js_closure", [handle(jvPrintfF), curScopeV])])
         callExt(b, "js_set", [sysV, emitStr(b, "out"), outV])
         callExt(b, "js_set", [sysV, emitStr(b, "exit"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "exit")])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "System"), sysV])

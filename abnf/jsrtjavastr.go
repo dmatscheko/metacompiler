@@ -141,6 +141,21 @@ func jxCompare(a, b []uint16, fold bool) int {
 	return len(a) - len(b)
 }
 
+// jxRegionMatches is java-strings.js's: the len units of s from to and of o
+// from oo, folded when ic.
+func jxRegionMatches(s []uint16, ic bool, to int, o []uint16, oo, n int) bool {
+	if oo < 0 || to < 0 || to > len(s)-n || oo > len(o)-n {
+		return false
+	}
+	for i := 0; i < n; i++ {
+		a, b := int(s[to+i]), int(o[oo+i])
+		if a != b && (!ic || jvChLo(jvChUp(a)) != jvChLo(jvChUp(b))) {
+			return false
+		}
+	}
+	return true
+}
+
 // jxCpAt is the code point the unit at i belongs to: a surrogate pair's whole
 // value whichever half i is, the unit itself otherwise.
 func jxCpAt(s []uint16, i int) int {
@@ -1323,6 +1338,27 @@ func init() {
 			switch name {
 			case "isEmpty":
 				r = len(su) == 0
+			case "formatted":
+				return m["js_jvstrstatic"]([]uint64{w("format"), w(&jsArray{elems: append([]interface{}{s}, av...)})})
+			case "regionMatches":
+				if ic, ok := arg(0).(bool); ok {
+					r = jxRegionMatches(su, ic, num(1), strUnits(rt.jxArgStr(arg(2))), num(3), num(4))
+				} else {
+					r = jxRegionMatches(su, false, num(0), strUnits(rt.jxArgStr(arg(1))), num(2), num(3))
+				}
+			case "codePointCount":
+				b, e := num(0), num(1)
+				if b < 0 || e > len(su) || b > e {
+					rt.jvThrowNamed("IndexOutOfBoundsException", "Range ["+strconv.Itoa(b)+", "+strconv.Itoa(e)+") out of bounds for length "+strconv.Itoa(len(su)))
+				}
+				n := 0
+				for i := b; i < e; i++ {
+					if su[i] >= 0xD800 && su[i] < 0xDC00 && i+1 < e && su[i+1] >= 0xDC00 && su[i+1] < 0xE000 {
+						i++
+					}
+					n++
+				}
+				r = float64(n)
 			case "isBlank":
 				r = jxStrip(s, true, false) == ""
 			case "indexOf":

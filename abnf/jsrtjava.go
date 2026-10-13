@@ -121,7 +121,8 @@ var jvNpeCls *jsObject
 var jvNfeCls *jsObject
 var jvCceCls *jsObject
 
-// java.util.Formatter's exceptions, by name (jvThrowNamed).
+// java.util.Formatter's exceptions and IndexOutOfBoundsException, by name
+// (jvThrowNamed).
 var jvExcNamed = map[string]*jsObject{}
 
 func (rt *jsrt) jvThrowNamed(cls, msg string) { rt.jvThrowCls(jvExcNamed[cls], msg) }
@@ -529,6 +530,33 @@ func jvMathMembers(o *jsObject) {
 		}
 		return jsJFlo{f: f, sty: floJavaF}
 	}))
+	// ulp's float overload takes an integral argument too, as signum's; the
+	// remainder is IEEE 754's, which math.Remainder is. Twin of jxUlp /
+	// jxIeeeRem in languages/lib/java-strings.js.
+	o.set("ulp", jsHostFunc("ulp", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		v := argAt(args, 0)
+		f := math.Abs(rt.toNumber(v))
+		minExp, mant := -126, 23
+		if jvIsDouble(v) {
+			minExp, mant = -1022, 52
+		}
+		u := f
+		if !math.IsNaN(f) && !math.IsInf(f, 0) {
+			if f < math.Ldexp(1, minExp) {
+				u = math.Ldexp(1, minExp-mant)
+			} else {
+				_, e := math.Frexp(f)
+				u = math.Ldexp(1, e-1-mant)
+			}
+		}
+		if jvIsDouble(v) {
+			return dbl(u)
+		}
+		return jsJFlo{f: u, sty: floJavaF}
+	}))
+	o.set("IEEEremainder", jsHostFunc("IEEEremainder", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return dbl(math.Remainder(rt.toNumber(argAt(args, 0)), rt.toNumber(argAt(args, 1))))
+	}))
 	// floorDiv / floorMod round the quotient toward -Infinity, through the
 	// language's own / and % so the width and the "/ by zero" throw follow.
 	o.set("floorDiv", jsHostFunc("floorDiv", func(rt *jsrt, this uint64, args []interface{}) interface{} {
@@ -626,6 +654,19 @@ func jvCharMembers(o *jsObject) {
 		}
 		return int(rt.toNumber(v))
 	}
+	// Character.toChars: a code point's one or two chars. Twin of
+	// jCharMembers in java-interpreter.abnf.
+	o.set("toChars", jsHostFunc("toChars", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		cp := int(jvToLong(rt, argAt(args, 0)))
+		if cp < 0 || cp > 0x10FFFF {
+			rt.jvThrowCls(jvIaeCls, "Not a valid Unicode code point: 0x"+strings.ToUpper(strconv.FormatUint(uint64(uint32(int32(cp))), 16)))
+		}
+		var elems []interface{}
+		for _, u := range utf16.Encode([]rune{rune(cp)}) {
+			elems = append(elems, jsChar{code: int32(u)})
+		}
+		return &jsArray{elems: elems, kind: jvArrTagKind("[C")}
+	}))
 	like := func(v interface{}, c int) interface{} {
 		if _, ok := v.(jsChar); ok {
 			return jsChar{code: int32(c)}
@@ -1040,6 +1081,26 @@ func jvFloType(o *jsObject, sty uint8) {
 	o.set("compare", jsHostFunc("compare", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		return jvDoubleCompare(rt.toNumber(argAt(args, 0)), rt.toNumber(argAt(args, 1)))
 	}))
+	// The bit patterns, NaN canonical (JLS 4.2.3); hashCode is the boxed
+	// value's. Twin of jFloType in java-interpreter.abnf.
+	if f32 {
+		bits := jsHostFunc("floatToIntBits", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return jvHashFloat(rt.toNumber(argAt(args, 0)))
+		})
+		o.set("floatToIntBits", bits)
+		o.set("hashCode", bits)
+	} else {
+		o.set("doubleToLongBits", jsHostFunc("doubleToLongBits", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			f := rt.toNumber(argAt(args, 0))
+			if f != f {
+				return jvBox(0x7ff8000000000000)
+			}
+			return jvBox(int64(math.Float64bits(f)))
+		}))
+		o.set("hashCode", jsHostFunc("hashCode", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return jvHashDouble(rt.toNumber(argAt(args, 0)))
+		}))
+	}
 	for name, fn := range map[string]func(float64, float64) float64{
 		"sum": func(a, b float64) float64 { return a + b }, "max": jvMaxD, "min": jvMinD,
 	} {
@@ -1110,6 +1171,69 @@ func jvRadixOf(rt *jsrt, v interface{}, w uint8, radix int, uns bool) string {
 // numberOfLeadingZeros / numberOfTrailingZeros, highestOneBit /
 // lowestOneBit - at the width w. Twin of jAddBitOps in java-interpreter.abnf
 // and jvBitOps in languages/lib/java-rt.metajs.
+// jvUnsignedOps adds Integer's unsigned readings and bit permutations. Twin of
+// jAddUnsigned in java-interpreter.abnf.
+func jvUnsignedOps(o *jsObject) {
+	u32 := func(rt *jsrt, v interface{}) uint32 { return uint32(jvI(rt, v)) }
+	fn := func(name string, f func(rt *jsrt, args []interface{}) interface{}) {
+		o.set(name, jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} { return f(rt, args) }))
+	}
+	fn("reverse", func(rt *jsrt, a []interface{}) interface{} { return float64(int32(bits.Reverse32(u32(rt, argAt(a, 0))))) })
+	fn("reverseBytes", func(rt *jsrt, a []interface{}) interface{} {
+		return float64(int32(bits.ReverseBytes32(u32(rt, argAt(a, 0)))))
+	})
+	fn("rotateLeft", func(rt *jsrt, a []interface{}) interface{} {
+		return float64(int32(bits.RotateLeft32(u32(rt, argAt(a, 0)), int(jvI(rt, argAt(a, 1))&31))))
+	})
+	fn("rotateRight", func(rt *jsrt, a []interface{}) interface{} {
+		return float64(int32(bits.RotateLeft32(u32(rt, argAt(a, 0)), -int(jvI(rt, argAt(a, 1))&31))))
+	})
+	fn("toUnsignedLong", func(rt *jsrt, a []interface{}) interface{} { return jvBox(int64(u32(rt, argAt(a, 0)))) })
+	fn("compareUnsigned", func(rt *jsrt, a []interface{}) interface{} {
+		x, y := u32(rt, argAt(a, 0)), u32(rt, argAt(a, 1))
+		switch {
+		case x < y:
+			return float64(-1)
+		case x > y:
+			return float64(1)
+		}
+		return float64(0)
+	})
+	divide := func(rem bool) func(rt *jsrt, a []interface{}) interface{} {
+		return func(rt *jsrt, a []interface{}) interface{} {
+			x, y := u32(rt, argAt(a, 0)), u32(rt, argAt(a, 1))
+			if y == 0 {
+				rt.jvThrowArith("/ by zero")
+			}
+			if rem {
+				return float64(int32(x % y))
+			}
+			return float64(int32(x / y))
+		}
+	}
+	fn("divideUnsigned", divide(false))
+	fn("remainderUnsigned", divide(true))
+	fn("toUnsignedString", func(rt *jsrt, a []interface{}) interface{} {
+		r := jvRadixArg(rt, a)
+		if r < 2 || r > 36 {
+			r = 10
+		}
+		return strconv.FormatUint(uint64(u32(rt, argAt(a, 0))), r)
+	})
+	fn("parseUnsignedInt", func(rt *jsrt, a []interface{}) interface{} {
+		rt.jvParseNull(argAt(a, 0))
+		s := rt.toString(argAt(a, 0))
+		if strings.HasPrefix(s, "-") {
+			rt.jvThrowCls(jvNfeCls, "Illegal leading minus sign on unsigned string "+s+".")
+		}
+		v := jvToLong(rt, rt.jvParseInt(s, 64, jvRadixArg(rt, a)))
+		if uint64(v)>>32 != 0 {
+			rt.jvThrowCls(jvNfeCls, "String value "+s+" exceeds range of unsigned int.")
+		}
+		return float64(int32(uint32(v)))
+	})
+}
+
 func jvBitOps(o *jsObject, w uint8) {
 	bitsOf := func(rt *jsrt, v interface{}) uint64 {
 		p := uint64(jvToLong(rt, jvNarrow(rt, v, w)))
@@ -1249,6 +1373,7 @@ func (rt *jsrt) jvBoxType(name string) *jsObject {
 		o.set("valueOf", jvValueOfHost(32))
 		jvRadixMembers(o, 32)
 		jvBitOps(o, 32)
+		jvUnsignedOps(o)
 	case "Long":
 		o.set("MAX_VALUE", jvBox(math.MaxInt64))
 		o.set("MIN_VALUE", jvBox(math.MinInt64))
