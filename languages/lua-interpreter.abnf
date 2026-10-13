@@ -3366,6 +3366,21 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return luaLen(v)
     }
     globalScope["_VERSION"] = "Lua 5.5"
+    // _G, the globals as a table. The globals live in the global scope and not in
+    // a table, so _G is a proxy whose metatable reads and writes that scope by
+    // name; a key that is no string is an ordinary field of the proxy. Twin of
+    // libGIndex / libGNewIndex in lua-to-llvm-ir.abnf.
+    var luaGMeta = {}
+    luaRawSet(luaGMeta, luaKey("__index"), function(t, k) {
+        if (typeof k == "string" && hasOwn(globalScope, k)) { return globalScope[k] }
+        return undefined
+    })
+    luaRawSet(luaGMeta, luaKey("__newindex"), function(t, k, v) {
+        if (typeof k == "string") { globalScope[k] = v } else { luaRawSet(t, luaWriteKey(k), v) }
+    })
+    var luaG = {}
+    luaG.__mt = luaGMeta
+    globalScope["_G"] = luaG
     // setmetatable(t, mt) and getmetatable(v), lbaselib's: a __metatable field
     // protects the metatable and is what getmetatable answers instead. Twins of
     // js_lusetmt / js_lugetmt in abnf/jsrtlumeta.go and lib/lua-rt.metajs.

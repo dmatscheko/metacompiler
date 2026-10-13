@@ -1848,11 +1848,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // are emitted into jsmain's scope only when the program actually references them,
     // so a program that uses none of them emits none of them. makeVarRef is the
     // single read path for a bare name, so it is where a reference is noticed.
-    var libNeed = {math: false, string: false, table: false, next: false, ipairs: false, pairs: false,
-                   error: false, pcall: false, xpcall: false, select: false, tostring: false,
-                   tonumber: false, type: false, assert: false, rawequal: false, rawget: false,
-                   rawset: false, rawlen: false, _VERSION: false, io: false, setmetatable: false, getmetatable: false}
+    // A program that names _G can reach any of them by a computed name, so it gets
+    // them all.
+    var libNames = ["math", "string", "table", "next", "ipairs", "pairs", "error", "pcall", "xpcall", "select",
+                    "tostring", "tonumber", "type", "assert", "rawequal", "rawget", "rawset", "rawlen", "_VERSION",
+                    "io", "setmetatable", "getmetatable", "_G"]
+    var libNeed = {}
+    for (var lni = 0; lni < libNames.length; lni++) { libNeed[libNames[lni]] = false }
     makeVarRef = function(name) {
+        if (name == "_G") {
+            for (var lnj = 0; lnj < libNames.length; lnj++) { libNeed[libNames[lnj]] = true }
+        }
         if (libNeed[name] === false) { libNeed[name] = true }
         return function(b) {
             return {b: b, v: callLua(b, "lua_getvar", [curScopeV, emitStr(b, name)])}
@@ -3059,6 +3065,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (libNeed.type) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "type"), callExt(b, "js_closure", [handle(emitLibFunc(libType)), curScopeV])])
         }
+        if (libNeed._G) {
+            // _G, the globals as a table: a proxy whose metatable reads and writes
+            // jsmain's scope by name (the proxy's own scope is a child of it).
+            var gp = callExt(b, "js_obj_new", [])
+            var gmt = callExt(b, "js_obj_new", [])
+            b = libSet(b, gmt, luaNameKey("__index"), emitLibFunc(libGIndex))
+            b = libSet(b, gmt, luaNameKey("__newindex"), emitLibFunc(libGNewIndex))
+            callExt(b, "js_set", [gp, emitStr(b, "__f"), gmt])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "_G"), gp])
+        }
         if (libNeed._VERSION) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "_VERSION"), emitStr(b, "Lua 5.5")])
         }
@@ -3141,6 +3157,28 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "io"), iot])
         }
         return b
+    }
+    // _G's metamethods: a string key is a global's name; any other key is an
+    // ordinary field of the proxy. Twin of luaGMeta in lua-interpreter.abnf.
+    function libGIndex(bb, argsH) {
+        var k = libArg(bb, argsH, 1)
+        var nameB = curF.NewBlock("")
+        var otherB = curF.NewBlock("")
+        bb.NewCondBr(rawTruthy(bb, callExt(bb, "js_seq", [callExt(bb, "js_typeof", [k]), emitStr(bb, "string")])), nameB, otherB)
+        nameB.NewRet(callLua(nameB, "lua_getvar", [curScopeV, k]))
+        return {b: otherB, v: hUndef}
+    }
+    function libGNewIndex(bb, argsH) {
+        var t = libArg(bb, argsH, 0)
+        var k = libArg(bb, argsH, 1)
+        var v = libArg(bb, argsH, 2)
+        var nameB = curF.NewBlock("")
+        var otherB = curF.NewBlock("")
+        bb.NewCondBr(rawTruthy(bb, callExt(bb, "js_seq", [callExt(bb, "js_typeof", [k]), emitStr(bb, "string")])), nameB, otherB)
+        callExt(nameB, "js_scope_set_or_create", [curScopeV, k, v])
+        nameB.NewRet(hUndef)
+        callExt(otherB, "js_set", [t, callExt(otherB, "js_luwkey", [k]), v])
+        return {b: otherB, v: hUndef}
     }
     function libWrite(from) {
         return function(bb, argsH) {

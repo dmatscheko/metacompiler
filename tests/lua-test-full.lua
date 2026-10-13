@@ -1988,6 +1988,21 @@ function s45()
         "attempt to perform arithmetic on a Point value (upvalue 'P')|attempt to concatenate a FILE* value (field 'stdout')")
 end
 
+-- ===== SECTION 46: _G =====
+-- The globals as a table: a global reads and writes through _G by a computed
+-- name, a local is not in it, and the library is reachable from it.
+function s46()
+    local loc = 5
+    s46g = 10
+    check("g1", tostring(_G.s46g) .. " " .. tostring(_G.loc) .. " " .. tostring(_G.print == print) .. " " .. tostring(_G._G == _G), "10 nil true true")
+    _G.s46h = 20
+    local name = "s46g"
+    _G[name] = _G[name] + 1
+    check("g2", s46h .. " " .. s46g .. " " .. _G["math"].floor(2.5), "20 11 2")
+    s46g = nil
+    check("g3", tostring(_G.s46g) .. " " .. type(_G), "nil table")
+end
+
 s25() -- SECTION-CALL 25
 s26() -- SECTION-CALL 26
 s27() -- SECTION-CALL 27
@@ -2009,5 +2024,6 @@ s42() -- SECTION-CALL 42
 s43() -- SECTION-CALL 43
 s44() -- SECTION-CALL 44
 s45() -- SECTION-CALL 45
+s46() -- SECTION-CALL 46
 print("full: " .. checks .. " checks, " .. failures .. " failures")
 exit(failures)
