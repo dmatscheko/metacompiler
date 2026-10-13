@@ -504,6 +504,12 @@ func toUpper(r rune) rune {
 		return 'I'
 	case r == 0x17F:
 		return 'S'
+	// The Latin digraphs come in threes - upper, title, lower - and upper-case to
+	// the first: Ǆ ǅ ǆ, Ǉ ǈ ǉ, Ǌ ǋ ǌ, Ǳ ǲ ǳ.
+	case r == 0x1C5 || r == 0x1C6 || r == 0x1C8 || r == 0x1C9 || r == 0x1CB || r == 0x1CC:
+		return r - (r-0x1C4)%3
+	case r == 0x1F2 || r == 0x1F3:
+		return 0x1F1
 	case r == 0x3C2:
 		return 0x3A3
 	case r >= 0x3B1 && r <= 0x3CB:
@@ -542,6 +548,18 @@ func toLower(r rune) rune {
 		return 'i'
 	case r == 0x178:
 		return 0xFF
+	case r >= 0x1C4 && r <= 0x1CC && (r-0x1C4)%3 != 2:
+		return r + 2 - (r-0x1C4)%3
+	case r == 0x1F1 || r == 0x1F2:
+		return 0x1F3
+	case r == 0x1E9E:
+		return 0xDF
+	case r == 0x2126:
+		return 0x3C9
+	case r == 0x212A:
+		return 'k'
+	case r == 0x212B:
+		return 0xE5
 	case r >= 0x391 && r <= 0x3AB && r != 0x3A2:
 		return r + 32
 	case r == 0x386:

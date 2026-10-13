@@ -4007,6 +4007,14 @@ func s71() {
 	check("ivr1", got == "efbfbd efbfbd efbfbd f48fbfbf " && string([]rune{0xDFFF, 'a'}) == "�a")
 }
 
+// ===== SECTION 72: Unicode case of digraphs and of the letterlike symbols =====
+func s72() {
+	check("ucs1", strings.ToUpper("ǅungla") == "ǄUNGLA" && strings.ToLower("ǅungla") == "ǆungla" &&
+		strings.ToUpper("ǳ") == "Ǳ" && strings.ToLower("ẞΩ") == "ßω")
+	check("ucs2", strings.EqualFold("ǅ", "ǆ") && strings.EqualFold("K", "k") &&
+		strings.EqualFold("Å", "å") && !strings.EqualFold("ǲ", "dz"))
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -4079,6 +4087,7 @@ func main() {
 	s69() // SECTION-CALL 69
 	s70() // SECTION-CALL 70
 	s71() // SECTION-CALL 71
+	s72() // SECTION-CALL 72
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }
