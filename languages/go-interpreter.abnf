@@ -2967,12 +2967,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // A folded constant becomes a value ONCE, here. A float constant is the correctly
     // rounded double in a {__flo} box; an integer constant goes through the same
     // 64 bit wrap a literal of that value would (i64FromStr wraps, szNorm re-boxes),
-    // except that one in [2^63, 2^64) is a uint64 box: only a uint64 or a float can
-    // hold it, and both read the box at its true magnitude. Twin of cMaterialize in
-    // go-to-llvm-ir.abnf.
+    // except that one in [2^63, 2^64) is a uint64 box (only a uint64 or a float can
+    // hold it, and both read the box at its true magnitude) and one beyond both
+    // ranges is the float it rounds to, the only kind of location that can hold it.
+    // Twin of cMaterialize in go-to-llvm-ir.abnf.
     function cMaterialize(c) {
         if (cIsCx(c)) { return makeCx(cToF64(c.re), cToF64(c.im)) }
-        if (c.f) { return makeConst(gFlo(cToF64(c))) }
+        if (c.f || cOnlyFloat(c)) { return makeConst(gFlo(cToF64(c))) }
         var p = i64FromStr(cbToDec(c.n))
         if (c.s < 0) { p = i64Neg(p) }
         return makeConst(szNorm(p, 64, cIsU64Only(c)))

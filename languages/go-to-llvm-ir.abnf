@@ -1947,11 +1947,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // rounded double behind js_gflo; an integer constant emits a plain number while a
     // double still holds it exactly and otherwise hands js_gilit its DIGITS, exactly
     // as goIntLitAt does for a literal too wide for emitNum - unsigned for one in
-    // [2^63, 2^64), which only a uint64 or a float can hold. Twin of cMaterialize in
-    // go-interpreter.abnf.
+    // [2^63, 2^64), which only a uint64 or a float can hold, and the rounded float
+    // for one beyond both ranges. Twin of cMaterialize in go-interpreter.abnf.
     function cMaterialize(c) {
         if (cIsCx(c)) { return makeCx(cToF64(c.re), cToF64(c.im)) }
-        if (c.f) { return makeFloConst(cToF64(c)) }
+        if (c.f || cOnlyFloat(c)) { return makeFloConst(cToF64(c)) }
         if (cbCmp(c.n, cbFromDec("9007199254740992")) < 0) {
             var m = cbToNum(c.n)
             return makeConst(c.s < 0 ? 0 - m : m)

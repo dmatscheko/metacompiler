@@ -332,6 +332,8 @@ var cbTwo63 = cbShl(cbOne(), 63)
 var cbTwo64 = cbShl(cbOne(), 64)
 // An integer constant that only a uint64 (or a float) can hold: one in [2^63, 2^64).
 function cIsU64Only(c) { return c.s > 0 && cbCmp(c.n, cbTwo63) >= 0 && cbCmp(c.n, cbTwo64) < 0 }
+// An integer constant no 64-bit integer type holds: only a float location can.
+function cOnlyFloat(c) { return !cIsCx(c) && !cFitsInt(c, 64, false) && !cIsU64Only(c) }
 // Is integer constant c representable in a w bit integer, unsigned when u?
 function cFitsInt(c, w, u) {
     if (c.s === 0) { return true }

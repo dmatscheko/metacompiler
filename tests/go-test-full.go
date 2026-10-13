@@ -4249,7 +4249,17 @@ func s81() {
 	var h float64 = 1<<64 + 1
 	check("ucv4", fmt.Sprint(u81(1<<63), f81(1<<64), h, u81(math.MaxUint64)) ==
 		"9223372036854775809 9.223372036854776e+18 1.8446744073709552e+19 18446744073709551615")
+	// No 64-bit integer holds 1 << 64, so wherever it lands is a float.
+	p := P81{1 << 64}
+	ys := []float64{-1 << 64}
+	ch := make(chan float64, 1)
+	ch <- 1 << 65
+	check("ucv5", fmt.Sprint(r81(), p, ys, <-ch) == "1.8446744073709552e+19 {1.8446744073709552e+19} [-1.8446744073709552e+19] 3.6893488147419103e+19")
 }
+
+type P81 struct{ F float64 }
+
+func r81() float64 { return 1 << 64 }
 
 func main() {
 	s01() // SECTION-CALL 01
