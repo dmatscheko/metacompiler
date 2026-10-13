@@ -144,7 +144,7 @@ an O(1) byte-at host builtin in the floor (CORE: runtime.c).
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-582 swift: missing traps — Int(huge Double), inverted range, compiled removeLast on empty; the ratchet does not compile under swiftc · P1 · SW · OPEN [V]
+### T-582 swift: missing traps — Int(huge Double), inverted range, compiled removeLast on empty; the ratchet does not compile under swiftc · P1 · SW · IN PROGRESS (SW worker, round 4) [V]
 `let d = 1e300; print(Int(d))` → all legs 0 (swiftc traps "Double value cannot be converted to Int because the result would be
 greater than Int.max", 133). `let a = [3]; let r = a[0]..<1; print(r)` → `3..<1` (swiftc traps "Range requires lowerBound <=
 upperBound"). `var e: [Int] = []; e.removeLast()` → interp right ("Can't remove last element from an empty collection", 133),
