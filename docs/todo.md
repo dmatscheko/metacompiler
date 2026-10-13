@@ -144,7 +144,7 @@ an O(1) byte-at host builtin in the floor (CORE: runtime.c).
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-585 swift: Range `lowerBound`/`upperBound`; `contains` on Double and String ranges · P1 · SW · OPEN [V]
+### T-585 swift: Range `lowerBound`/`upperBound`; `contains` on Double and String ranges · P1 · SW · IN PROGRESS (SW worker, round 5) [V]
 `let a = [1.5]; let r = a[0]..<2.5; print(r.lowerBound, r.upperBound)` → nil in all three legs (swiftc `1.5 2.5`).
 `(1.5..<2.5).contains(2.0)` → interp false (swiftc, run, native true). `("a"..."c").contains("b")` → run and native false
 (swiftc and interp true).
