@@ -5597,6 +5597,9 @@ KwContinue  = "continue" KwEnd ;
         }
     }
     function swRunTop(xs) {
+        // The call arguments parsed so far get their parameters' types (swDsFlush),
+        // which an existential one passes to the literals in them (swLitCells).
+        swDsFlush()
         try {
             swTopSeq(xs)
         } catch (e) {
@@ -6363,7 +6366,7 @@ KwContinue  = "continue" KwEnd ;
         // being any inout target, `&p.log` and `&xs[1]` included, opened and
         // written back as an inout argument is.
         if ((name == "print" || name == "debugPrint") && lookupSig(name) == null) {
-            for (var lq = 0; lq < recs.length; lq++) { if (recs[lq].lbl == null) { swLitStop(recs[lq].txt, true) } }
+            for (var lq = 0; lq < recs.length; lq++) { if (recs[lq].lbl == null) { swLitStop(recs[lq].txt) } }
             var pos = []
             var sepT = null
             var termT = null
@@ -7517,7 +7520,6 @@ KwContinue  = "continue" KwEnd ;
         // append / insert / a write to a new key adopt. Twin in swift-to-llvm-ir.abnf.
         if (k == 1 && items[2] != undefined && swIsCollCtor(items[2].itext)) { scopePut(declTyReg, "$" + name, annTxt) }
         swNoteLocalAnn(name, swLocalNumAnn(annTxt, items, k))
-        if (items[k + 1] != undefined && swLitAnnStops(annTxt)) { swLitStop(items[k + 1].itext, false) }
         var init = swDotWant(items[k], items[k + 1], annTxt)
         if (init != undefined && swIsSetArrTy(annTxt)) {
             var setsT = init

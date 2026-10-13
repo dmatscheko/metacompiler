@@ -4190,7 +4190,20 @@ func s90() {
     let an: [Any] = [1, 2.5]
     let a2: Any = flag[0] ? 1.5 : 3
     check("90e", "\(an)" == "[1, 2.5]" && "\(a2)" == "3" && "\(flag[0] ? 1 : 2)" == "2")
+    // An existential PARAMETER keeps each arm's own type too, and a collection
+    // literal is existential-context by its ELEMENT type: [[Any]] and [String: [Any]]
+    // keep the Int, while a literal that is itself the Any value still joins.
+    let n2: [[Any]] = [[1, 2.5], [3]]
+    let nk: [String: [Any]] = ["k": [1, 2.5]]
+    let whole: Any = [1, 2.5]
+    check("90f", "\(n2)" == "[[1, 2.5], [3]]" && "\(nk)" == "[\"k\": [1, 2.5]]" && "\(whole)" == "[1.0, 2.5]")
+    check("90g", desc90(flag[0] ? 1.5 : 3) == "3" && desc90(flag[1] ? 1.5 : 3) == "1.5"
+        && descs90([1, 2.5]) == "[1, 2.5]" && desc90([1, 2.5]) == "[1.0, 2.5]" && later90(flag[0]) == "3")
 }
+func desc90(_ x: Any) -> String { return "\(x)" }
+func descs90(_ x: [Any]) -> String { return "\(x)" }
+func later90(_ c: Bool) -> String { return below90(c ? 1.5 : 3) }
+func below90(_ x: Any) -> String { return "\(x)" }
 
 // ===== SECTION 91: a String's debug form =====
 // Inside a collection a String is quoted with \0 \t \n \r \" \' \\ escaped and

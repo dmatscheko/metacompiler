@@ -318,6 +318,7 @@ function swDsScan(s, base, from, to, ty, out) {
     for (var k = 0; k < top.length; k++) {
         var p = top[k]
         if (s.charAt(p) == "?" && p > a && swDsWs(s.charAt(p - 1)) && s.charAt(p + 1) != "?") {
+            if (swLitExist(t)) { out.push({at: swDsByte(s, base, a), lit: true}) }
             var depth = 0
             for (var m = k + 1; m < top.length; m++) {
                 var q = top[m]
@@ -366,6 +367,7 @@ function swDsMemberEnd(s, i, z) {
 function swDsColl(s, base, a, z, t, out) {
     var ct = swDsCollTy(t)
     if (ct.length == 0) { return }
+    if (swLitExistIn(ct[ct.length - 1])) { out.push({at: swDsByte(s, base, a), lit: true}) }
     var parts = swDsSplit(s, a + 1, z - 1, ",")
     for (var i = 0; i < parts.length; i = i + 2) {
         if (ct.length == 1) { swDsScan(s, base, parts[i], parts[i + 1], ct[0], out); continue }
@@ -442,12 +444,14 @@ function swDsWantSpan(iat, ty) {
 }
 // The same for the text src, which starts at byte base of file.
 function swDsWantText(src, base, ty, file) {
-    if (!swDsMayHold(src, 0)) { return }
+    if (!swDsMayHold(src, 0) && !swLitMayHold(src, ty)) { return }
     var out = []
     swDsScan(src, base, 0, src.length, ty, out)
     for (var i = 0; i < out.length; i++) {
         var k = "$" + file + "@" + out[i].at
-        if (out[i].clo !== true) {
+        if (out[i].lit === true) {
+            if (hasOwn(swLitCells, k)) { swLitCells[k].off = true }
+        } else if (out[i].clo !== true) {
             if (hasOwn(swDsDots, k)) { swDsApply(swDsDots[k], out[i].ty) }
         } else if (hasOwn(swDsParked, k)) {
             var ps = swDsParked[k]
@@ -495,6 +499,11 @@ function swDsParkRets(from, to) {
 // name -> every parameter list declared under it.
 var swDsSigs = {}
 function swDsNoteSig(name, params) {
+    if (hasOwn(swDsWait, "$" + name)) {
+        var ws = swDsWait["$" + name]
+        for (var w = 0; w < ws.length; w++) { swDsCalls.push(ws[w]) }
+        swDsWait["$" + name] = []
+    }
     if (!hasOwn(swDsSigs, "$" + name)) { swDsSigs["$" + name] = [] }
     swDsSigs["$" + name].push(params)
 }
@@ -572,13 +581,18 @@ function swDsGenSubst(name, k, key, pt) {
 }
 // A call `name(args)` spanning [from, to), trailing closures included: its
 // arguments are typed once the walk is complete (swDsFlush), when every
-// declaration is known. A call with no dot in it holds no implicit member and
-// is not kept. The first trailing closure carries the label "*".
+// declaration is known. A call with no dot, `?` or `[` in it holds no implicit
+// member and no literal (swLitCells) and is not kept. The first trailing closure
+// carries the label "*". A call flushed before any function of its name is
+// declared waits in swDsWait for the first one (a function body may call one
+// declared below it).
 var swDsCalls = []
+var swDsWait = {}
 function swDsNoteCall(name, from, to) {
     var src = c.srcSlice(from, to)
     var op = src.indexOf(name) + name.length
-    if (name.length == 0 || op < name.length || !swDsMayHold(src, op)) { return }
+    if (name.length == 0 || op < name.length) { return }
+    if (!swDsMayHold(src, op) && src.indexOf("?", op) < 0 && src.indexOf("[", op) < 0) { return }
     var args = swDsCallArgs(src, from, op)
     if (args.length > 0) {
         swDsCalls.push({name: name, file: c.curFile(), args: args, key: "$" + c.curFile() + "@" + swDsByte(src, from, op - name.length)})
@@ -846,24 +860,47 @@ function swLitPlain(items) {
     }
     return ts
 }
-// An EXISTENTIAL context types each operand on its own: `print(c ? 1.5 : 3)`
-// prints 3 and `let a: [Any] = [1, 2.5]` holds the Int 1 (swiftc 6.1.2). The
-// literal built last records its text and a switch, {txt, cell: {off}}; a print
-// argument or an initializer of an annotation naming Any whose text is that
-// literal's turns the adoption off (swLitStop).
-// A collection literal under print still joins its elements (`print([1.5, 3])`
-// prints [1.5, 3.0]), so a print argument stops a ternary only (tern).
+// An EXISTENTIAL context types each operand on its own: `f(c ? 1.5 : 3)` with
+// `func f(_ x: Any)` prints 3, and `let a: [[Any]] = [[1, 2.5]]` holds the Int
+// 1 (swiftc 6.1.2). Every ternary and collection literal registers a switch,
+// {off}, under its offset (swDsKey); the scan of a typed slot (swDsScan) turns
+// off a ternary whose own type is existential and a collection literal whose
+// ELEMENTS' is (swLitExist). A literal that is itself the existential value
+// still joins: `let a: Any = [1, 2.5]` is [1.0, 2.5].
+// print is a host function with no signature, so its argument is matched by
+// text against the literal built last (swLitStop): a ternary argument only.
 var swLitLast = null
+var swLitCells = {}
 function swLitNote(txt, tern) {
     var cell = {off: false}
     swLitLast = {txt: txt, cell: cell, tern: tern}
+    swLitCells["$" + swDsKey(up.start)] = cell
     return cell
 }
-function swLitStop(txt, ternOnly) {
+function swLitStop(txt) {
     if (swLitLast == null || txt == undefined || swLitLast.txt != txt) { return }
-    if (!ternOnly || swLitLast.tern) { swLitLast.cell.off = true }
+    if (swLitLast.tern) { swLitLast.cell.off = true }
 }
-function swLitAnnStops(ann) { return ann != undefined && ann.indexOf("Any") >= 0 }
+// Whether the type t is existential: Any, AnyObject, AnyHashable or `any P`,
+// optional or not, or a variadic parameter's `Any...`.
+function swLitExist(t) {
+    var u = swDsUnopt(t)
+    if (u.length > 3 && u.substring(u.length - 3, u.length) == "...") { u = swDsUnopt(u.substring(0, u.length - 3)) }
+    if (u == "Any" || u == "AnyObject" || u == "AnyHashable") { return true }
+    return u.length > 3 && u.substring(0, 3) == "any" && u.charAt(3) >= "A" && u.charAt(3) <= "Z"
+}
+// Whether the element type t is existential or a collection of them at any depth:
+// `[[1, 2.5], [3]]` typed [[Any]] must not join its elements to [[Double]].
+function swLitExistIn(t) {
+    if (swLitExist(t)) { return true }
+    var ct = swDsCollTy(t)
+    return ct.length > 0 && swLitExistIn(ct[ct.length - 1])
+}
+// Whether the text src of a slot typed ty can hold a literal the scan switches off.
+function swLitMayHold(src, ty) {
+    if (ty.indexOf("Any") < 0 && ty.indexOf("any") < 0) { return false }
+    return src.indexOf("?") >= 0 || src.indexOf("[") >= 0
+}
 // A Dictionary literal's entries {dk, dv, dkt, dvt}: the keys and the values
 // each adopt to the type their texts join to, in place.
 function swLitDictAdopt(items) {
@@ -945,7 +982,11 @@ function swDsFlush() {
     swDsCalls = []
     for (var i = 0; i < calls.length; i++) {
         var cl = calls[i]
-        if (!hasOwn(swDsSigs, "$" + cl.name)) { continue }
+        if (!hasOwn(swDsSigs, "$" + cl.name)) {
+            if (!hasOwn(swDsWait, "$" + cl.name)) { swDsWait["$" + cl.name] = [] }
+            swDsWait["$" + cl.name].push(cl)
+            continue
+        }
         var cands = swDsSigs["$" + cl.name]
         var tys = []
         var fits = 0

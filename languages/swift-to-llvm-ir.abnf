@@ -4935,6 +4935,10 @@ KwContinue  = "continue" KwEnd ;
         var plain = swLitPlain(items.slice(1))
         var cell = swLitNote(txt, true)
         return function(b) {
+            // The pending call arguments get their parameters' types first
+            // (swDsFlush), which an existential one passes to the literals in
+            // them (swLitCells); the same at makeArray and makeDict.
+            swDsFlush()
             var thenT = cell.off ? plain[0] : arms[0]
             var elseT = cell.off ? plain[1] : arms[1]
             var r = condT(b)
@@ -4985,6 +4989,7 @@ KwContinue  = "continue" KwEnd ;
         var plain = swLitPlain(items0)
         var cell = swLitNote(txt, false)
         return function(b) {
+            swDsFlush()
             var items = cell.off ? plain : adopted
             var arrV = callExt(b, "js_arr_new", [])
             for (var i = 0; i < items.length; i++) {
@@ -5004,6 +5009,7 @@ KwContinue  = "continue" KwEnd ;
         var adopted = swLitDictAdopt(plain)
         var cell = swLitNote(txt, false)
         return function(b) {
+            swDsFlush()
             var items = cell.off ? plain : adopted
             var d = callExt(b, "js_dict_new", [])
             for (var i = 0; i < items.length; i++) {
@@ -6433,7 +6439,7 @@ KwContinue  = "continue" KwEnd ;
         // (js_swprintstr answers the text) - s being any inout target, `&p.log` and
         // `&xs[1]` included, opened and written back as an inout argument is.
         if ((name == "print" || name == "debugPrint") && lookupSig(name) == null && classNames[name] != 1 && enumNames[name] != 1) {
-            for (var lq = 0; lq < args.length; lq++) { if (args[lq].lbl == null) { swLitStop(args[lq].txt, true) } }
+            for (var lq = 0; lq < args.length; lq++) { if (args[lq].lbl == null) { swLitStop(args[lq].txt) } }
             var pos = []
             var sepT = null
             var termT = null
@@ -7529,7 +7535,6 @@ KwContinue  = "continue" KwEnd ;
         // append / insert / a write to a new key adopt. Twin in swift-interpreter.abnf.
         if (k == 1 && items[2] != undefined && swIsCollCtor(items[2].itext)) { declTyReg["$" + name] = annTxt }
         swNoteLocalAnn(name, swLocalNumAnn(annTxt, items, k))
-        if (items[k + 1] != undefined && swLitAnnStops(annTxt)) { swLitStop(items[k + 1].itext, false) }
         var init = swDotWant(items[k], items[k + 1], annTxt)
         if (init != undefined && swIsSetArrTy(annTxt)) { init = swSetArrInit(init) }
         else if (init != undefined && swIsSetKeyTy(annTxt)) { init = swSetKeysInit(init) }
