@@ -337,14 +337,14 @@ first). Separately `io.write(...)` → interp "attempt to index a nil value (glo
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-567 bash: line continuation, loop status, redirected assignments, echo -e escapes · P1 · SH · OPEN [V]
+### T-567 bash: line continuation, loop status, redirected assignments, echo -e escapes · P1 · SH · IN PROGRESS (SH worker, round 3) [V]
 All legs unless noted (oracle /opt/homebrew/bin/bash 5.3): `f a \<newline> b` with f printing `$#:[$1][$2][$3]` → ours
 `3:[a][][b]`, bash `2:[a][b][]`. `while (( 0 )); do :; done; echo $?` → ours 1, bash 0; `while true; do false; break; done;
 echo $?` → ours 1, bash 0 (a loop whose body never ran, or left by break, has status 0). `r=$(echo x) 2>/dev/null` → "command
 not found: 2", `r=$(echo y) >/dev/null` fails to parse (bash: assignment with a redirection). `echo -e`: bash keeps `\101`
 literal, `\0101` → A, `\c` stops all output; ours interp `\b1|A`, compiler empty, `\c` ignored.
 
-### T-568 bash: `${x@Q}` of ESC, `$'..'` inside `${v/p/r}`, `"${!r}"` with r='arr[@]', byte-wise printf %c / precision · P3 · SH · OPEN [V]
+### T-568 bash: `${x@Q}` of ESC, `$'..'` inside `${v/p/r}`, `"${!r}"` with r='arr[@]', byte-wise printf %c / precision · P3 · SH · IN PROGRESS (SH worker, round 3) [V]
 The compiler's `${x@Q}` renders ESC as `\033` (interp and bash `\E`; rt_shquote). `k=hello; echo "${k/l/$'\x26'}"` → bash
 `he&lo` (BraceSeg has no AnsiSeg). `r='arr[@]'; printf '<%s>' "${!r}"` → one word here, bash one word per element. The
 interpreter's printf `%c` and `%.Ns` cut by character, bash by byte (non-ASCII only). `let "x = $e * 2"` and `for ((;;))`
