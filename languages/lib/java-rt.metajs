@@ -755,6 +755,7 @@ function jvBoxType(name) {
         o["decode"] = function(s) { return jvDecode(s, 64) }
         jvRadixMembers(o, 64)
         jvBitOps(o, 64)
+        jvUnsignedLongOps(o)
         return o
     }
     if (name == "Byte") {
@@ -893,6 +894,37 @@ function jvMathMembers(o) {
     o["ulp"] = function(v) {
         if (jvIsDouble(v)) { return flo(jxUlp(floNum(v), false), 0) }
         return flo(jxUlp(rtF32Round(rtjNum(v)), true), 3)
+    }
+    // nextUp / nextDown: the float overload takes an integral argument, as
+    // ulp's; nextDown(x) is -nextUp(-x).
+    o["nextUp"] = function(v) {
+        if (jvIsDouble(v)) { return flo(jxNextUp(floNum(v), false), 0) }
+        return flo(jxNextUp(rtF32Round(rtjNum(v)), true), 3)
+    }
+    o["nextDown"] = function(v) {
+        if (jvIsDouble(v)) { return flo(-jxNextUp(-floNum(v), false), 0) }
+        return flo(-jxNextUp(-rtF32Round(rtjNum(v)), true), 3)
+    }
+    // clamp(value, min, max): the double overload when an argument is a double,
+    // the float one when one is a float, else (long, int, int) -> int or (long,
+    // long, long) -> long. Twin of the clamp member in java-interpreter.abnf.
+    o["clamp"] = function(v, lo, hi) {
+        if (floIs(v) || floIs(lo) || floIs(hi)) {
+            var f32 = !(jvIsDouble(v) || jvIsDouble(lo) || jvIsDouble(hi))
+            var x = jvFloNum(lo, f32)
+            var y = jvFloNum(hi, f32)
+            if (!(x < y)) {
+                if (x !== x) { jvThrowCls(jvIaeCls, "min is NaN") }
+                if (y !== y) { jvThrowCls(jvIaeCls, "max is NaN") }
+                if (jvDoubleCompare(x, y) > 0) { jvThrowCls(jvIaeCls, jpStr(jvFloOf(x, f32)) + " > " + jpStr(jvFloOf(y, f32))) }
+            }
+            return jvFloOf(jvMinD(y, jvMaxD(jvFloNum(v, f32), x)), f32)
+        }
+        if (jvCmp(">", lo, hi)) { jvThrowCls(jvIaeCls, jpStr(lo) + " > " + jpStr(hi)) }
+        var r = v
+        if (jvCmp("<", v, lo)) { r = lo } else if (jvCmp(">", v, hi)) { r = hi }
+        if (jvIsLong(lo) || jvIsLong(hi)) { return jvNarrow(r, 64) }
+        return jvNarrow(r, 32)
     }
     o["IEEEremainder"] = function(a, b) { return flo(jxIeeeRem(rtjNum(a), rtjNum(b)), 0) }
     o["multiplyHigh"] = function(a, b) {
@@ -1219,12 +1251,19 @@ function jvFloType(o, f32) {
     // value's. Twin of jvFloType in abnf/jsrtjava.go.
     if (f32) {
         o["floatToIntBits"] = function(v) { return jvFloatBits(rtjNum(v)) }
+        o["intBitsToFloat"] = function(v) { return flo(jxBitsFlt(jxU32(jvI(v))), 3) }
         o["hashCode"] = function(v) { return jvFloatBits(rtjNum(v)) }
     } else {
         o["doubleToLongBits"] = function(v) {
             var b = jvDblBits(rtjNum(v))
             return sintRaw(b.hi, b.lo, 64, false)
         }
+        o["longBitsToDouble"] = function(v) {
+            var lb = jvToLongBox(v)
+            return flo(jxBitsDbl(sintHi(lb), sintLo(lb)), 0)
+        }
+        // toHexString is %a's rendering (lib/java-strings.js).
+        o["toHexString"] = function(v) { return jxHexFloat(rtjNum(v), "", 0, 0 - 1, false) }
         o["hashCode"] = function(v) { return js_jhash(flo(rtjNum(v), 0)) }
     }
     o["sum"] = function(a, b) { return jvFloOf(rtjNum(a) + rtjNum(b), f32) }
@@ -1240,6 +1279,12 @@ function jvFloType(o, f32) {
         return jvFloOf(rtjNum(v), f32)
     }
     o["toString"] = function(v) { return jpStr(jvFloOf(rtjNum(v), f32)) }
+}
+
+// The number of v converted to a double (f32 false) or a float (f32 true).
+function jvFloNum(v, f32) {
+    if (f32) { return rtF32Round(rtjNum(v)) }
+    return rtjNum(v)
 }
 
 // A double (f32 false) or a float (f32 true) box of the number f.
@@ -1311,6 +1356,55 @@ function jvUnsignedOps(o) {
         return jxI32(sintLo(l))
     }
 }
+
+// Long's unsigned readings and bit permutations (lib/java-strings.js; the
+// division is the floor's on UNSIGNED boxes). Twin of jvUnsignedLongOps in
+// abnf/jsrtjava.go and jAddUnsignedLong in java-interpreter.abnf.
+function jvUnsignedLongOps(o) {
+    o["reverse"] = function(v) { return jvLongOfHalves(jvHalvesFn(v, 0, 0)) }
+    o["reverseBytes"] = function(v) { return jvLongOfHalves(jvHalvesFn(v, 1, 0)) }
+    o["rotateLeft"] = function(v, d) { return jvLongOfHalves(jvHalvesFn(v, 2, jvI(d))) }
+    o["rotateRight"] = function(v, d) { return jvLongOfHalves(jvHalvesFn(v, 2, 0 - jvI(d))) }
+    o["compareUnsigned"] = function(a, b) {
+        var c = sintCmp(jvUnsignedBox(a), jvUnsignedBox(b))
+        if (c < 0) { return 0 - 1 }
+        if (c > 0) { return 1 }
+        return 0
+    }
+    o["divideUnsigned"] = function(a, b) { return jvDivUnsigned(a, b, 3) }
+    o["remainderUnsigned"] = function(a, b) { return jvDivUnsigned(a, b, 4) }
+    o["toUnsignedString"] = function(v, r) { return jvRadixStr(v, 64, r, true) }
+    o["parseUnsignedLong"] = function(s, r) {
+        if (s === null) { jvThrowCls(jvNfeCls, "Cannot parse null string") }
+        var hl = jxParseU64(jpStr(s), jvRadixOf(r))
+        return sintRaw(hl[0], hl[1], 64, false)
+    }
+}
+
+// The long v's bits as an unsigned 64-bit box.
+function jvUnsignedBox(v) {
+    var b = jvToLongBox(v)
+    return sintRaw(sintHi(b), sintLo(b), 64, true)
+}
+
+// divideUnsigned (op 3) / remainderUnsigned (op 4) of two longs.
+function jvDivUnsigned(a, b, op) {
+    var y = jvUnsignedBox(b)
+    if (sintHi(y) == 0 && sintLo(y) == 0) { jvThrowArith("/ by zero") }
+    var r = sintOp(op, jvUnsignedBox(a), y)
+    return sintRaw(sintHi(r), sintLo(r), 64, false)
+}
+
+// reverse (kind 0), reverseBytes (1) or rotateLeft by d (2) of the long v, as
+// [hi, lo] halves.
+function jvHalvesFn(v, kind, d) {
+    var b = jvToLongBox(v)
+    if (kind == 0) { return jxReverse64(sintHi(b), sintLo(b)) }
+    if (kind == 1) { return jxReverseBytes64(sintHi(b), sintLo(b)) }
+    return jxRotl64(sintHi(b), sintLo(b), d)
+}
+
+function jvLongOfHalves(hl) { return sintRaw(hl[0], hl[1], 64, false) }
 
 // The unsigned upper 32 bits of a value at width w (0 at 32).
 function jvHiOf(v, w) {
@@ -2445,6 +2539,8 @@ function js_jvstrm(s, name, args) {
     if (name == "strip") { return jxStrip(s, true, true) }
     if (name == "stripLeading") { return jxStrip(s, true, false) }
     if (name == "stripTrailing") { return jxStrip(s, false, true) }
+    if (name == "indent") { return jxIndent(s, jvI(a0)) }
+    if (name == "stripIndent") { return jxStripIndent(s) }
     // The FULL mapping with the final sigma (lib/utf16-strings.js has the rest).
     if (name == "toUpperCase") { return unicodeCase(s, 3) }
     if (name == "toLowerCase") { return unicodeCase(s, 6) }
@@ -2910,7 +3006,7 @@ function jvDblBits(d) {
 // floatToIntBits of a value that is ALREADY binary32 (a float box holds the
 // rounded value), as one unsigned 32-bit number turned signed.
 function jvFloatBits(d) {
-    if (d !== d) { return 2143289344 - 4294967296 }      // 0x7fc00000, signed
+    if (d !== d) { return 2143289344 }   // 0x7fc00000
     var sign = jvSignBit(d) ? 2147483648 : 0
     var a = d < 0 ? 0 - d : d
     var bits = 0

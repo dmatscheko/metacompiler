@@ -158,6 +158,7 @@ class Main {
         S72.run(); // SECTION-CALL 72
         S73.run(); // SECTION-CALL 73
         S74.run(); // SECTION-CALL 74
+        S75.run(); // SECTION-CALL 75
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -4207,5 +4208,109 @@ class S74 {
         String behind = "x1y2".replaceAll("(?<=x)\\d", "#") + "aXbX".replaceAll("(?<!a)X", "_") + m("aa(?<=a+)b", "aab") + m("ab(?<=(?<=a)b)", "ab")
             + m("(?<=a{1,3})b", "b") + "a1b22c333d".split("\\d{1,2}").length;
         Main.check("lb74", behind.equals("x#y2aXb_truetruefalse5"));
+    }
+}
+
+// ===== SECTION 75: Math.clamp / nextUp, Long's unsigned family, bit patterns, indent, TreeMap ranges, read-only views =====
+//
+// Math.clamp picks its overload from the argument types and rejects min > max
+// (in Double.compare's order) or a NaN bound; nextUp / nextDown step one ulp,
+// a negative power of two by half of one. Long reads its bits unsigned for
+// toUnsignedString, parseUnsignedLong, divideUnsigned and friends. The bit
+// pattern readers are doubleToLongBits' and floatToIntBits' inverses (a NaN
+// float's bits are 0x7fc00000). indent and stripIndent work on lines().
+// headMap / tailMap / subMap are live views of a key range, and an
+// unmodifiable map's keySet, values and entries refuse every change.
+// Every expected value is java 24.0.2's.
+class S75 {
+    static String iae(double v, double lo, double hi) {
+        try { double r = Math.clamp(v, lo, hi); return "" + r; } catch (IllegalArgumentException e) { return e.getMessage(); }
+    }
+    static void run() {
+        long[] lv = {5L, -5L, 3000000000L, Long.MIN_VALUE};
+        String cl = "";
+        for (long v : lv) {
+            int c = Math.clamp(v, 0, 10);
+            long l = Math.clamp(v, -7L, 2999999999L);
+            double d = Math.clamp((double) v, -1.5, 1.5);
+            float f = Math.clamp((float) v, -1.5f, 1.5f);
+            cl = cl + c + "/" + l + "/" + d + "/" + f + " ";
+        }
+        String bad = "";
+        try { int b = Math.clamp(5L, 3, 2); bad = bad + b; } catch (IllegalArgumentException e) { bad = bad + e.getMessage(); }
+        Main.check("cl75", (cl + bad + "|" + iae(5.0, 3.0, 2.0) + "|" + iae(5.0, Double.NaN, 2.0) + "|" + iae(5.0, 0.0, -0.0) + "|" + iae(Double.NaN, 0.0, 1.0))
+            .equals("5/5/1.5/1.5 0/-5/-1.5/-1.5 10/2999999999/1.5/1.5 0/-7/-1.5/-1.5 3 > 2|3.0 > 2.0|min is NaN|0.0 > -0.0|NaN"));
+        double[] dv = {1.5, -0.0, Double.MAX_VALUE, Double.MIN_VALUE, -Double.MIN_VALUE, -1.0, Double.NEGATIVE_INFINITY, 1e-310};
+        String nx = "";
+        for (double d : dv) { nx = nx + Math.nextUp(d) + "," + Math.nextDown(d) + " "; }
+        float fu = Math.nextUp(1.0f);
+        float fd = Math.nextDown(-Float.MIN_VALUE);
+        float fm = Math.nextUp(Float.MAX_VALUE);
+        Main.check("nx75", (nx + fu + " " + fd + " " + fm).equals("1.5000000000000002,1.4999999999999998 4.9E-324,-4.9E-324 Infinity,1.7976931348623155E308 "
+            + "9.9E-324,0.0 -0.0,-9.9E-324 -0.9999999999999999,-1.0000000000000002 -1.7976931348623157E308,-Infinity "
+            + "1.00000000000005E-310,9.9999999999995E-311 1.0000001 -2.8E-45 Infinity"));
+        long[] uv = {-1L, Long.MIN_VALUE, 1234567890123L, -1234567890123L};
+        String un = "";
+        for (long a : uv) {
+            un = un + Long.toUnsignedString(a) + " " + Long.toUnsignedString(a, 36) + " " + Long.divideUnsigned(a, 1000000007L) + " "
+                + Long.remainderUnsigned(a, -3L) + " " + Long.compareUnsigned(a, 5L) + " " + Long.reverse(a) + " " + Long.reverseBytes(a) + " "
+                + Long.rotateLeft(a, 37) + " " + Long.rotateRight(a, -3) + ";";
+        }
+        Main.check("un75", un.equals("18446744073709551615 3w5e11264sgsf 18446743944 2 1 -1 -1 -1 -1;"
+            + "9223372036854775808 1y2p0ij32e8e8 9223371972 -9223372036854775808 1 1 128 68719476736 4;"
+            + "1234567890123 fr5hugnf 1234 1234567890123 1 -3233338727304527872 -3817650120833302528 4566818659749602286 9876543120984;"
+            + "18446742839141661493 3w5e0lb0my051 18446742710 -1234567890123 1 -5990033309550247937 3889707714871230463 -4566818522310648815 -9876543120977;"));
+        String[] us = {"18446744073709551615", "18446744073709551616", "+12", "-1", "+", "12a"};
+        String pu = "";
+        for (String s : us) {
+            try { pu = pu + Long.parseUnsignedLong(s) + ";"; } catch (NumberFormatException e) { pu = pu + e.getMessage() + ";"; }
+        }
+        long hx = Long.parseUnsignedLong("ffffffffffffffff", 16);
+        Main.check("pu75", (pu + hx).equals("-1;String value 18446744073709551616 exceeds range of unsigned long.;12;"
+            + "Illegal leading minus sign on unsigned string -1.;For input string: \"+\";For input string: \"12a\";-1"));
+        long[] bl = {Long.MIN_VALUE, 0x7ff0000000000000L, 0x7ff8000000000000L, 1L, 0xbff8000000000000L, 0x000fffffffffffffL};
+        String bits = "";
+        for (long b : bl) { bits = bits + Double.longBitsToDouble(b) + " "; }
+        int[] fb = {0x80000000, 0x7f800000, 0x7fc00000, 1, 0x7f7fffff, 0x00800000};
+        for (int b : fb) { bits = bits + Float.intBitsToFloat(b) + " "; }
+        bits = bits + Float.floatToIntBits(Float.NaN) + " " + Double.toHexString(1.0) + " " + Double.toHexString(-Double.MIN_VALUE) + " "
+            + Double.toHexString(0.1) + " " + Double.toHexString(Double.NaN);
+        Main.check("bt75", bits.equals("-0.0 Infinity NaN 4.9E-324 -1.5 2.225073858507201E-308 -0.0 Infinity NaN 1.4E-45 3.4028235E38 1.1754944E-38 "
+            + "2143289344 0x1.0p0 -0x0.0000000000001p-1022 0x1.999999999999ap-4 NaN"));
+        String in = "a\n  b".indent(2) + "|" + "  a\n    b\r\nc".indent(-1) + "|" + "".indent(3) + "|" + "   a\n     b\n   c   ".stripIndent()
+            + "|" + "  x\n  y\n".stripIndent() + "|" + "\ta\n b".stripIndent();
+        Main.check("in75", in.equals("  a\n    b\n| a\n   b\nc\n||a\n  b\nc|  x\n  y\n|a\nb"));
+        TreeMap<String, Integer> t = new TreeMap<>();
+        String[] ks = {"d", "b", "f", "a", "c", "e"};
+        for (int i = 0; i < ks.length; i++) { t.put(ks[i], i); }
+        Map<String, Integer> h = t.headMap("c");
+        Map<String, Integer> s = t.subMap("b", "e");
+        Map<String, Integer> ti = t.tailMap("c", false);
+        String tv = h + " " + s + " " + ti + " " + t.headMap("c", true) + " " + t.subMap("b", false, "e", true);
+        t.put("bb", 9);
+        t.remove("d");
+        s.put("cc", 7);
+        String ex = "";
+        try { s.put("z", 1); } catch (IllegalArgumentException e) { ex = ex + e.getMessage(); }
+        try { t.subMap("e", "b"); } catch (IllegalArgumentException e) { ex = ex + "|" + e.getMessage(); }
+        s.keySet().remove("c");
+        h.clear();
+        Main.check("tm75", (tv + " " + t + " " + s + " " + s.size() + " " + h.isEmpty() + " " + ex + " " + t.tailMap("bb").keySet() + t.tailMap("cc").values())
+            .equals("{a=3, b=1} {b=1, c=4, d=0} {d=0, e=5, f=2} {a=3, b=1, c=4} {c=4, d=0, e=5} {cc=7, e=5, f=2} {cc=7} 1 true "
+                + "key out of range|fromKey > toKey [cc, e, f][7, 5, 2]"));
+        Map<String, Integer> um = Collections.unmodifiableMap(new HashMap<>(Map.of("a", 1, "b", 2)));
+        String ro = "";
+        try { um.keySet().remove("a"); } catch (UnsupportedOperationException e) { ro = ro + "K"; }
+        try { um.values().clear(); } catch (UnsupportedOperationException e) { ro = ro + "V"; }
+        try { Iterator<String> it = um.keySet().iterator(); it.next(); it.remove(); } catch (UnsupportedOperationException e) { ro = ro + "I"; }
+        try { for (Map.Entry<String, Integer> e : um.entrySet()) { e.setValue(5); } } catch (UnsupportedOperationException e) { ro = ro + "S"; }
+        try { Map.of("x", 1).keySet().remove("x"); } catch (UnsupportedOperationException e) { ro = ro + "M"; }
+        Object one = 1;
+        Object oneL = 1L;
+        Map<Object, String> hm = new HashMap<>();
+        hm.put(1, "i");
+        hm.put(1L, "l");
+        Main.check("ro75", (ro + " " + um + " " + one.equals(oneL) + hm.size() + hm.get(1) + hm.get(1L) + " "
+            + String.CASE_INSENSITIVE_ORDER.reversed().compare("a", "B")).equals("KVISM {a=1, b=2} false2il 1"));
     }
 }

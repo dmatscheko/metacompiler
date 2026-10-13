@@ -137,6 +137,65 @@ function jxLines(s) {
     if (start < s.length) { out.push(s.substring(start, s.length)) }
     return out
 }
+// The index of s's first non-whitespace unit (Character.isWhitespace), and
+// the end of its last one; s.length and 0 for a blank s.
+function jxFirstNonWs(s) {
+    var i = 0
+    while (i < s.length && jxIsWs(s.charCodeAt(i))) { i = i + 1 }
+    return i
+}
+function jxEndNonWs(s) {
+    var e = s.length
+    while (e > 0 && jxIsWs(s.charCodeAt(e - 1))) { e = e - 1 }
+    return e
+}
+// indent(n): every line of lines() with n spaces put in front, or up to -n of
+// its leading whitespace taken off, and each ended by "\n". Twin of jxIndent in
+// abnf/jsrtjavastr.go.
+function jxIndent(s, n) {
+    if (s.length == 0) { return "" }
+    var ls = jxLines(s)
+    var pad = n > 0 ? jxRepeat(" ", n) : ""
+    var out = ""
+    for (var i = 0; i < ls.length; i++) {
+        var l = ls[i]
+        if (n < 0) {
+            var k = jxFirstNonWs(l)
+            l = l.substring(0 - n < k ? 0 - n : k)
+        }
+        out = out + pad + l + "\n"
+    }
+    return out
+}
+// stripIndent: each line loses its trailing whitespace and the leading
+// whitespace every non-blank line (and a blank last line) shares; a string
+// ending in a line terminator keeps all its indentation and gets a final "\n".
+// Twin of jxStripIndent in abnf/jsrtjavastr.go.
+function jxStripIndent(s) {
+    if (s.length == 0) { return "" }
+    var last = s.charAt(s.length - 1)
+    var optOut = last == "\n" || last == "\r"
+    var ls = jxLines(s)
+    var outdent = 0
+    if (!optOut) {
+        outdent = 2147483647
+        for (var i = 0; i < ls.length; i++) {
+            var k = jxFirstNonWs(ls[i])
+            if (k != ls[i].length && k < outdent) { outdent = k }
+        }
+        var ll = ls[ls.length - 1]
+        if (jxFirstNonWs(ll) == ll.length && ll.length < outdent) { outdent = ll.length }
+    }
+    var out = ""
+    for (var j = 0; j < ls.length; j++) {
+        var l = ls[j]
+        var f = jxFirstNonWs(l)
+        var e = jxEndNonWs(l)
+        if (j > 0) { out = out + "\n" }
+        if (f < e) { out = out + l.substring(f < outdent ? f : outdent, e) }
+    }
+    return optOut ? out + "\n" : out
+}
 // regionMatches: the len units of s from to and of o from oo, folded as
 // compareToIgnoreCase folds them when ic; false when a region runs off its
 // string.
@@ -215,6 +274,58 @@ function jxUlp(f, f32) {
     }
     return Math.pow(2, e - mant)
 }
+// Math.nextUp: the next double (f32: float) toward +Infinity. Upward the gap is
+// ulp(f); below a negative power of two it is half that, the subnormal range
+// aside. -MIN_VALUE steps to -0.0, -Infinity to -MAX_VALUE. Twin of
+// math.Nextafter / Nextafter32 in abnf/jsrtjava.go.
+function jxNextUp(f, f32) {
+    if (f !== f || (f - f !== 0 && f > 0)) { return f }
+    var mant = f32 ? 23 : 52
+    var maxV = (2 - Math.pow(2, 0 - mant)) * Math.pow(2, f32 ? 127 : 1023)
+    if (f - f !== 0) { return -maxV }
+    if (f == 0) { return Math.pow(2, f32 ? 0 - 149 : 0 - 1074) }
+    var u = jxUlp(f, f32)
+    if (f > 0) {
+        var up = f + u
+        return up > maxV ? u / 0 : up
+    }
+    var a = -f
+    if (a > Math.pow(2, f32 ? 0 - 126 : 0 - 1022) && u * Math.pow(2, mant) == a) { u = u / 2 }
+    var down = f + u
+    if (down == 0) { return -down }
+    return down
+}
+// The double of a doubleToLongBits pattern (unsigned 32-bit halves) and the
+// float of a floatToIntBits one (unsigned): Double.longBitsToDouble and
+// Float.intBitsToFloat. Every NaN pattern reads as NaN. Twins: math.Float64frombits
+// and math.Float32frombits in abnf/jsrtjava.go.
+function jxBitsDbl(hi, lo) {
+    return jxBitsFloat(hi, lo, 11, 52)
+}
+function jxBitsFlt(bits) {
+    return jxBitsFloat(bits, 0, 8, 23)
+}
+// The value of the IEEE-754 pattern whose top 32 bits are hi and whose low 32
+// are lo (0 for a float), with an exponent field of ebits bits and mbits
+// mantissa bits.
+function jxBitsFloat(hi, lo, ebits, mbits) {
+    var neg = hi >= 2147483648
+    var h = neg ? hi - 2147483648 : hi
+    var span = Math.pow(2, 31 - ebits)
+    var biased = Math.floor(h / span)
+    var mant = (h - biased * span) * (mbits > 31 ? 4294967296 : 1) + lo
+    var bias = Math.pow(2, ebits - 1) - 1
+    var v = 0
+    if (biased == bias * 2 + 1) {
+        if (mant != 0) { return 0 / v }
+        v = 1 / v
+    } else if (biased == 0) {
+        v = mant * Math.pow(2, 1 - bias - mbits)
+    } else {
+        v = (mant + Math.pow(2, mbits)) * Math.pow(2, biased - bias - mbits)
+    }
+    return neg ? -v : v
+}
 // IEEEremainder: x - p * n, n the integer nearest x / p (ties to even), with
 // x's sign - fdlibm's __ieee754_remainder, whose every step is exact.
 function jxIeeeRem(x, p) {
@@ -269,6 +380,53 @@ function jxSub64(r, sh, sl) {
     var h = r[0] - sh - borrow
     if (h < 0) { h = h + 4294967296 }
     return [h, l + borrow * 4294967296]
+}
+// Long.parseUnsignedLong(s, radix) as unsigned 32-bit halves [hi, lo]: an
+// optional "+" and then digits (Character.digit) up to 2^64 - 1, each running
+// past it "exceeds range". Twin of jvParseU64 in abnf/jsrtjava.go.
+function jxParseU64(s, radix) {
+    if (radix < 2) { jxkThrow("NumberFormatException", "radix " + radix + " less than Character.MIN_RADIX") }
+    if (radix > 36) { jxkThrow("NumberFormatException", "radix " + radix + " greater than Character.MAX_RADIX") }
+    var bad = "For input string: \"" + s + "\"" + (radix == 10 ? "" : " under radix " + radix)
+    if (s.length > 0 && s.charAt(0) == "-") {
+        jxkThrow("NumberFormatException", "Illegal leading minus sign on unsigned string " + s + ".")
+    }
+    var i = s.length > 0 && s.charAt(0) == "+" ? 1 : 0
+    if (i == s.length) { jxkThrow("NumberFormatException", bad) }
+    var hi = 0
+    var lo = 0
+    while (i < s.length) {
+        var d = jcDigitVal(s.charCodeAt(i))
+        if (d >= radix) { jxkThrow("NumberFormatException", bad) }
+        var l2 = lo * radix + d
+        var carry = Math.floor(l2 / 4294967296)
+        lo = l2 - carry * 4294967296
+        hi = hi * radix + carry
+        if (hi >= 4294967296) { jxkThrow("NumberFormatException", "String value " + s + " exceeds range of unsigned long.") }
+        i = i + 1
+    }
+    return [hi, lo]
+}
+// Long.reverse / reverseBytes / rotateLeft over unsigned 32-bit halves, as
+// [hi, lo]. A rotation by 32 or more swaps the halves first.
+function jxReverse64(h, l) { return [jxU32(jxReverse32(jxI32(l))), jxU32(jxReverse32(jxI32(h)))] }
+function jxReverseBytes64(h, l) { return [jxU32(jxReverseBytes32(jxI32(l))), jxU32(jxReverseBytes32(jxI32(h)))] }
+function jxRotl64(h, l, dist) {
+    var d = dist % 64
+    if (d < 0) { d = d + 64 }
+    var a = h
+    var b = l
+    if (d >= 32) {
+        a = l
+        b = h
+        d = d - 32
+    }
+    if (d == 0) { return [a, b] }
+    var p = Math.pow(2, d)
+    var q = Math.pow(2, 32 - d)
+    var ah = Math.floor(a / q)
+    var bh = Math.floor(b / q)
+    return [(a - ah * q) * p + bh, (b - bh * q) * p + ah]
 }
 // A code point as its one or two UTF-16 units.
 function jxCpStr(cp) {

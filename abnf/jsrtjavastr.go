@@ -49,6 +49,101 @@ func jxStrip(s string, lead, trail bool) string {
 	return strFromUnits(u[b:e])
 }
 
+// jxLines is String.lines(): the lines of s, each without its \n, \r or \r\n.
+// Twin of jxLines in languages/lib/java-strings.js.
+func jxLines(s []uint16) [][]uint16 {
+	var out [][]uint16
+	start := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\n' || s[i] == '\r' {
+			out = append(out, s[start:i])
+			if s[i] == '\r' && i+1 < len(s) && s[i+1] == '\n' {
+				i++
+			}
+			start = i + 1
+		}
+	}
+	if start < len(s) {
+		out = append(out, s[start:])
+	}
+	return out
+}
+
+// The index of the first non-whitespace unit, and the end of the last one.
+func jxFirstNonWs(s []uint16) int {
+	i := 0
+	for i < len(s) && jxIsWs(int(s[i])) {
+		i++
+	}
+	return i
+}
+
+func jxEndNonWs(s []uint16) int {
+	e := len(s)
+	for e > 0 && jxIsWs(int(s[e-1])) {
+		e--
+	}
+	return e
+}
+
+// jxIndent is String.indent(n); twin of jxIndent in languages/lib/java-strings.js.
+func jxIndent(s []uint16, n int) string {
+	var b strings.Builder
+	for _, l := range jxLines(s) {
+		if n > 0 {
+			b.WriteString(strings.Repeat(" ", n))
+		} else if n < 0 {
+			k := jxFirstNonWs(l)
+			if -n < k {
+				k = -n
+			}
+			l = l[k:]
+		}
+		b.WriteString(strFromUnits(l))
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+// jxStripIndent is String.stripIndent; twin of jxStripIndent in
+// languages/lib/java-strings.js.
+func jxStripIndent(s []uint16) string {
+	if len(s) == 0 {
+		return ""
+	}
+	optOut := s[len(s)-1] == '\n' || s[len(s)-1] == '\r'
+	ls := jxLines(s)
+	outdent := 0
+	if !optOut {
+		outdent = math.MaxInt32
+		for _, l := range ls {
+			if k := jxFirstNonWs(l); k != len(l) && k < outdent {
+				outdent = k
+			}
+		}
+		if ll := ls[len(ls)-1]; jxFirstNonWs(ll) == len(ll) && len(ll) < outdent {
+			outdent = len(ll)
+		}
+	}
+	var b strings.Builder
+	for j, l := range ls {
+		f, e := jxFirstNonWs(l), jxEndNonWs(l)
+		if j > 0 {
+			b.WriteByte('\n')
+		}
+		if f < e {
+			if outdent < f {
+				f = outdent
+			}
+			b.WriteString(strFromUnits(l[f:e]))
+		}
+	}
+	if optOut {
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
 func jxAt(s, t []uint16, i int) bool {
 	if i < 0 || i+len(t) > len(s) {
 		return false
@@ -1425,18 +1520,8 @@ func init() {
 			case "lines":
 				cls = u(a[4])
 				arr.kind = jvArrTagKind("[Ljava.lang.String;")
-				start := 0
-				for i := 0; i < len(su); i++ {
-					if su[i] == '\n' || su[i] == '\r' {
-						arr.elems = append(arr.elems, strFromUnits(su[start:i]))
-						if su[i] == '\r' && i+1 < len(su) && su[i+1] == '\n' {
-							i++
-						}
-						start = i + 1
-					}
-				}
-				if start < len(su) {
-					arr.elems = append(arr.elems, strFromUnits(su[start:]))
+				for _, l := range jxLines(su) {
+					arr.elems = append(arr.elems, strFromUnits(l))
 				}
 			case "chars":
 				arr.kind = jvArrTagKind("[I")
@@ -1582,6 +1667,10 @@ func init() {
 				r = jxStrip(s, true, false)
 			case "stripTrailing":
 				r = jxStrip(s, false, true)
+			case "indent":
+				r = jxIndent(su, num(0))
+			case "stripIndent":
+				r = jxStripIndent(su)
 			case "toUpperCase":
 				r = caseMapMode(s, caseUpper|caseFull)
 			case "toLowerCase":

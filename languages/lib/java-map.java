@@ -487,6 +487,57 @@ class MapOf<K, V> extends HashMap<K, V> {
     public V compute(K key, java.util.function.BiFunction<? super K, ? super V, ? extends V> f) { throw new UnsupportedOperationException(); }
     public V merge(K key, V value, java.util.function.BiFunction<? super V, ? super V, ? extends V> f) { throw new UnsupportedOperationException(); }
     public void replaceAll(java.util.function.BiFunction<? super K, ? super V, ? extends V> f) { throw new UnsupportedOperationException(); }
+    public Collection<K> keySet() { return new UnmodifiableView<K>(super.keySet(), false); }
+    public Collection<V> values() { return new UnmodifiableView<V>(super.values(), false); }
+    public Collection<Map.Entry<K, V>> entrySet() { return new UnmodifiableView<Map.Entry<K, V>>(super.entrySet(), true); }
+}
+
+// A read-only view of a collection: the keySet, values and entrySet of
+// Collections.unmodifiableMap and of Map.of. Its iterator cannot remove, and
+// an entry read through it (entries true) cannot be set.
+class UnmodifiableView<E> implements Collection<E> {
+    Collection<E> c;
+    boolean entries;
+    UnmodifiableView(Collection<E> c, boolean entries) {
+        this.c = c;
+        this.entries = entries;
+    }
+    public int size() { return c.size(); }
+    public boolean isEmpty() { return c.isEmpty(); }
+    public boolean contains(Object o) { return c.contains(o); }
+    public Iterator<E> iterator() { return new UnmodifiableItr<E>(c.iterator(), entries); }
+    public boolean add(E e) { throw new UnsupportedOperationException(); }
+    public boolean remove(Object o) { throw new UnsupportedOperationException(); }
+    public void clear() { throw new UnsupportedOperationException(); }
+    public boolean removeIf(java.util.function.Predicate<? super E> filter) { throw new UnsupportedOperationException(); }
+    public String toString() { return c.toString(); }
+}
+class UnmodifiableItr<E> implements Iterator<E> {
+    Iterator<E> it;
+    boolean entries;
+    UnmodifiableItr(Iterator<E> it, boolean entries) {
+        this.it = it;
+        this.entries = entries;
+    }
+    public boolean hasNext() { return it.hasNext(); }
+    @SuppressWarnings("unchecked")
+    public E next() {
+        E e = it.next();
+        if (!entries) { return e; }
+        Map.Entry<Object, Object> me = (Map.Entry<Object, Object>) e;
+        return (E) new UnmodifiableEntry<Object, Object>(me);
+    }
+    public void remove() { throw new UnsupportedOperationException(); }
+}
+class UnmodifiableEntry<K, V> implements Map.Entry<K, V> {
+    Map.Entry<K, V> e;
+    UnmodifiableEntry(Map.Entry<K, V> e) { this.e = e; }
+    public K getKey() { return e.getKey(); }
+    public V getValue() { return e.getValue(); }
+    public V setValue(V value) { throw new UnsupportedOperationException(); }
+    public boolean equals(Object o) { return e.equals(o); }
+    public int hashCode() { return e.hashCode(); }
+    public String toString() { return e.toString(); }
 }
 
 // The table in bin order, each bin front to back; kind 0 answers the keys, 1 the
@@ -763,9 +814,26 @@ class TreeMap<K, V> implements Map<K, V> {
     public K higherKey(K key) { return keyOrNull(above(key, false)); }
     public Map.Entry<K, V> floorEntry(K key) { return entryAt(below(key, true)); }
     public Map.Entry<K, V> ceilingEntry(K key) { return entryAt(above(key, true)); }
-    public Collection<K> keySet() { return new TreeMapView<K>(this, 0); }
-    public Collection<V> values() { return new TreeMapView<V>(this, 1); }
-    public Collection<Map.Entry<K, V>> entrySet() { return new TreeMapView<Map.Entry<K, V>>(this, 2); }
+    public Collection<K> keySet() { return new TreeMapView<K>(this, null, 0); }
+    public Collection<V> values() { return new TreeMapView<V>(this, null, 1); }
+    public Collection<Map.Entry<K, V>> entrySet() { return new TreeMapView<Map.Entry<K, V>>(this, null, 2); }
+    // headMap / tailMap / subMap: live views of a key range (TreeSubMap); a bound
+    // is checked as a key is (a null one throws under the natural order).
+    public TreeSubMap<K, V> headMap(K to) { return headMap(to, false); }
+    public TreeSubMap<K, V> headMap(K to, boolean inclusive) {
+        order(to, to);
+        return new TreeSubMap<K, V>(this, false, null, false, true, to, inclusive);
+    }
+    public TreeSubMap<K, V> tailMap(K from) { return tailMap(from, true); }
+    public TreeSubMap<K, V> tailMap(K from, boolean inclusive) {
+        order(from, from);
+        return new TreeSubMap<K, V>(this, true, from, inclusive, false, null, false);
+    }
+    public TreeSubMap<K, V> subMap(K from, K to) { return subMap(from, true, to, false); }
+    public TreeSubMap<K, V> subMap(K from, boolean fromInclusive, K to, boolean toInclusive) {
+        if (order(from, to) > 0) { throw new IllegalArgumentException("fromKey > toKey"); }
+        return new TreeSubMap<K, V>(this, true, from, fromInclusive, true, to, toInclusive);
+    }
     public boolean equals(Object o) {
         if (o == this) { return true; }
         if (!(o instanceof Map)) { return false; }
@@ -790,37 +858,170 @@ class TreeMap<K, V> implements Map<K, V> {
         return s + "}";
     }
 }
-// A TreeMap's keys (kind 0), values (1) or entries (2) in key order.
+// A view of the TreeMap's entries from index from() up to (not including)
+// to(), the keys between the bounds, read afresh at every call so it follows
+// the map's changes either way. A key outside the bounds cannot be put.
+class TreeSubMap<K, V> implements Map<K, V> {
+    TreeMap<K, V> m;
+    boolean hasLo;
+    K lo;
+    boolean loInc;
+    boolean hasHi;
+    K hi;
+    boolean hiInc;
+    TreeSubMap(TreeMap<K, V> m, boolean hasLo, K lo, boolean loInc, boolean hasHi, K hi, boolean hiInc) {
+        this.m = m;
+        this.hasLo = hasLo;
+        this.lo = lo;
+        this.loInc = loInc;
+        this.hasHi = hasHi;
+        this.hi = hi;
+        this.hiInc = hiInc;
+    }
+    int from() { return hasLo ? m.above(lo, loInc) : 0; }
+    int to() {
+        int t = hasHi ? m.below(hi, hiInc) + 1 : m.size;
+        int f = from();
+        return t < f ? f : t;
+    }
+    boolean tooLow(Object key) {
+        if (!hasLo) { return false; }
+        int c = m.order(key, lo);
+        return c < 0 || (c == 0 && !loInc);
+    }
+    boolean tooHigh(Object key) {
+        if (!hasHi) { return false; }
+        int c = m.order(key, hi);
+        return c > 0 || (c == 0 && !hiInc);
+    }
+    boolean inRange(Object key) { return !tooLow(key) && !tooHigh(key); }
+    public int size() { return to() - from(); }
+    public boolean isEmpty() { return to() == from(); }
+    public V get(Object key) { return inRange(key) ? m.get(key) : null; }
+    public V getOrDefault(Object key, V dflt) { return inRange(key) && m.containsKey(key) ? m.get(key) : dflt; }
+    public boolean containsKey(Object key) { return inRange(key) && m.containsKey(key); }
+    public V put(K key, V value) {
+        if (!inRange(key)) { throw new IllegalArgumentException("key out of range"); }
+        return m.put(key, value);
+    }
+    public V putIfAbsent(K key, V value) {
+        V old = get(key);
+        if (old == null) { put(key, value); }
+        return old;
+    }
+    public V remove(Object key) { return inRange(key) ? m.remove(key) : null; }
+    public void clear() {
+        int n = size();
+        int f = from();
+        for (int i = 0; i < n; i++) { m.removeAt(f); }
+    }
+    public Collection<K> keySet() { return new TreeMapView<K>(m, this, 0); }
+    public Collection<V> values() { return new TreeMapView<V>(m, this, 1); }
+    public Collection<Map.Entry<K, V>> entrySet() { return new TreeMapView<Map.Entry<K, V>>(m, this, 2); }
+    public void forEach(java.util.function.BiConsumer<? super K, ? super V> f) {
+        int t = to();
+        for (int i = from(); i < t; i++) { f.accept(m.keyAt(i), m.valAt(i)); }
+    }
+    K keyOrThrow(int i) {
+        if (isEmpty()) { throw new NoSuchElementException(); }
+        return m.keyAt(i);
+    }
+    public K firstKey() { return keyOrThrow(from()); }
+    public K lastKey() { return keyOrThrow(to() - 1); }
+    public Map.Entry<K, V> firstEntry() { return isEmpty() ? null : m.entryAt(from()); }
+    public Map.Entry<K, V> lastEntry() { return isEmpty() ? null : m.entryAt(to() - 1); }
+    // Whether a new bound fits this view: an inclusive one must be in range, an
+    // exclusive one may also sit on this view's own exclusive bound.
+    boolean fits(Object key, boolean inclusive) {
+        if (inclusive) { return inRange(key); }
+        return (!hasLo || m.order(key, lo) >= 0) && (!hasHi || m.order(key, hi) <= 0);
+    }
+    // A view of a view: the narrower bounds, a bound that does not fit this
+    // view being IllegalArgumentException.
+    TreeSubMap<K, V> range(boolean hasL, K l, boolean lInc, boolean hasH, K h, boolean hInc) {
+        if (hasL && !fits(l, lInc)) { throw new IllegalArgumentException("fromKey out of range"); }
+        if (hasH && !fits(h, hInc)) { throw new IllegalArgumentException("toKey out of range"); }
+        if (hasL && hasH && m.order(l, h) > 0) { throw new IllegalArgumentException("fromKey > toKey"); }
+        return new TreeSubMap<K, V>(m, hasL || hasLo, hasL ? l : lo, hasL ? lInc : loInc, hasH || hasHi, hasH ? h : hi, hasH ? hInc : hiInc);
+    }
+    public TreeSubMap<K, V> headMap(K to) { return range(false, null, false, true, to, false); }
+    public TreeSubMap<K, V> headMap(K to, boolean inclusive) { return range(false, null, false, true, to, inclusive); }
+    public TreeSubMap<K, V> tailMap(K from) { return range(true, from, true, false, null, false); }
+    public TreeSubMap<K, V> tailMap(K from, boolean inclusive) { return range(true, from, inclusive, false, null, false); }
+    public TreeSubMap<K, V> subMap(K from, K to) { return range(true, from, true, true, to, false); }
+    public TreeSubMap<K, V> subMap(K from, boolean fromInclusive, K to, boolean toInclusive) {
+        return range(true, from, fromInclusive, true, to, toInclusive);
+    }
+    public boolean equals(Object o) {
+        if (o == this) { return true; }
+        if (!(o instanceof Map)) { return false; }
+        Map<?, ?> other = (Map<?, ?>) o;
+        if (other.size() != size()) { return false; }
+        int t = to();
+        for (int i = from(); i < t; i++) {
+            if (!other.containsKey(m.keys[i]) || !HashMap.same(m.vals[i], other.get(m.keys[i]))) { return false; }
+        }
+        return true;
+    }
+    public int hashCode() {
+        int h = 0;
+        int t = to();
+        for (int i = from(); i < t; i++) { h += (m.keys[i] == null ? 0 : m.keys[i].hashCode()) ^ (m.vals[i] == null ? 0 : m.vals[i].hashCode()); }
+        return h;
+    }
+    public String toString() {
+        String s = "{";
+        int t = to();
+        for (int i = from(); i < t; i++) {
+            if (i > from()) { s = s + ", "; }
+            s = s + m.keys[i] + "=" + m.vals[i];
+        }
+        return s + "}";
+    }
+}
+// A TreeMap's keys (kind 0), values (1) or entries (2) in key order: all of
+// them, or those of the sub-map view sub.
 class TreeMapView<E> implements Collection<E> {
     TreeMap<?, ?> map;
+    TreeSubMap<?, ?> sub;
     int kind;
-    TreeMapView(TreeMap<?, ?> map, int kind) {
+    TreeMapView(TreeMap<?, ?> map, TreeSubMap<?, ?> sub, int kind) {
         this.map = map;
+        this.sub = sub;
         this.kind = kind;
     }
-    public int size() { return map.size; }
-    public boolean isEmpty() { return map.size == 0; }
+    int base() { return sub == null ? 0 : sub.from(); }
+    public int size() { return sub == null ? map.size : sub.size(); }
+    public boolean isEmpty() { return size() == 0; }
     @SuppressWarnings("unchecked")
-    E at(int i) { return (E) (kind == 0 ? map.keys[i] : (kind == 1 ? map.vals[i] : map.entryAt(i))); }
+    E at(int i) {
+        int j = base() + i;
+        return (E) (kind == 0 ? map.keys[j] : (kind == 1 ? map.vals[j] : map.entryAt(j)));
+    }
     public Iterator<E> iterator() { return new TreeMapItr<E>(this); }
     public boolean contains(Object o) {
-        for (int i = 0; i < map.size; i++) { if (HashMap.same(o, at(i))) { return true; } }
+        int n = size();
+        for (int i = 0; i < n; i++) { if (HashMap.same(o, at(i))) { return true; } }
         return false;
     }
     public boolean remove(Object o) {
-        for (int i = 0; i < map.size; i++) {
+        int n = size();
+        for (int i = 0; i < n; i++) {
             if (HashMap.same(o, at(i))) {
-                map.removeAt(i);
+                map.removeAt(base() + i);
                 return true;
             }
         }
         return false;
     }
     public boolean add(E e) { throw new UnsupportedOperationException(); }
-    public void clear() { map.clear(); }
+    public void clear() {
+        if (sub == null) { map.clear(); } else { sub.clear(); }
+    }
     public String toString() {
         String s = "[";
-        for (int i = 0; i < map.size; i++) { s = s + (i > 0 ? ", " : "") + at(i); }
+        int n = size();
+        for (int i = 0; i < n; i++) { s = s + (i > 0 ? ", " : "") + at(i); }
         return s + "]";
     }
 }
@@ -828,15 +1029,15 @@ class TreeMapItr<E> implements Iterator<E> {
     TreeMapView<E> view;
     int cursor;
     TreeMapItr(TreeMapView<E> view) { this.view = view; }
-    public boolean hasNext() { return cursor < view.map.size; }
+    public boolean hasNext() { return cursor < view.size(); }
     public E next() {
-        if (cursor >= view.map.size) { throw new NoSuchElementException(); }
+        if (cursor >= view.size()) { throw new NoSuchElementException(); }
         cursor++;
         return view.at(cursor - 1);
     }
     public void remove() {
         cursor--;
-        view.map.removeAt(cursor);
+        view.map.removeAt(view.base() + cursor);
     }
 }
 
@@ -1034,9 +1235,9 @@ class UnmodifiableMap<K, V> implements Map<K, V> {
     public V get(Object key) { return m.get(key); }
     public V getOrDefault(Object key, V dflt) { return m.containsKey(key) ? m.get(key) : dflt; }
     public boolean containsKey(Object key) { return m.containsKey(key); }
-    public Collection<Map.Entry<K, V>> entrySet() { return m.entrySet(); }
-    public Collection<K> keySet() { return m.keySet(); }
-    public Collection<V> values() { return m.values(); }
+    public Collection<Map.Entry<K, V>> entrySet() { return new UnmodifiableView<Map.Entry<K, V>>(m.entrySet(), true); }
+    public Collection<K> keySet() { return new UnmodifiableView<K>(m.keySet(), false); }
+    public Collection<V> values() { return new UnmodifiableView<V>(m.values(), false); }
     public void forEach(java.util.function.BiConsumer<? super K, ? super V> f) { m.forEach(f); }
     public V put(K key, V value) { throw new UnsupportedOperationException(); }
     public V remove(Object key) { throw new UnsupportedOperationException(); }

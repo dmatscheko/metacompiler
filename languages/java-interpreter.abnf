@@ -2344,6 +2344,37 @@ HasStatic   = :script(~~
             var u = jxUlp(jNumD(v), !dbl)
             return dbl ? jFlo(u) : jFlo32(u)
         },
+        // nextUp / nextDown: the float overload takes an integral argument, as
+        // ulp's; nextDown(x) is -nextUp(-x).
+        nextUp: function(v) {
+            var dbl = jIsFlo(v) && !jIsF32(v)
+            return dbl ? jFlo(jxNextUp(jNumD(v), false)) : jFlo32(jxNextUp(coreF32Round(jNumD(v)), true))
+        },
+        nextDown: function(v) {
+            var dbl = jIsFlo(v) && !jIsF32(v)
+            return dbl ? jFlo(-jxNextUp(-jNumD(v), false)) : jFlo32(-jxNextUp(-coreF32Round(jNumD(v)), true))
+        },
+        // clamp(value, min, max): the double overload when an argument is a
+        // double, the float one when one is a float, else (long, int, int) -> int
+        // or (long, long, long) -> long. min above max (Double.compare's order,
+        // so 0.0 > -0.0) or a NaN bound is IllegalArgumentException.
+        clamp: function(v, lo, hi) {
+            if (jIsFlo(v) || jIsFlo(lo) || jIsFlo(hi)) {
+                var dbl = (jIsFlo(v) && !jIsF32(v)) || (jIsFlo(lo) && !jIsF32(lo)) || (jIsFlo(hi) && !jIsF32(hi))
+                var mk = function(f) { return dbl ? jFlo(f) : jFlo32(f) }
+                var x = mk(jNumD(lo)).__flo
+                var y = mk(jNumD(hi)).__flo
+                if (!(x < y)) {
+                    if (x !== x) { jThrowExc("IllegalArgumentException", "min is NaN") }
+                    if (y !== y) { jThrowExc("IllegalArgumentException", "max is NaN") }
+                    if (jDblCompare(x, y) > 0) { jThrowExc("IllegalArgumentException", jstr(mk(x)) + " > " + jstr(mk(y))) }
+                }
+                return mk(jMinD(y, jMaxD(mk(jNumD(v)).__flo, x)))
+            }
+            if (jCmp(">", lo, hi)) { jThrowExc("IllegalArgumentException", jstr(lo) + " > " + jstr(hi)) }
+            var r = jCmp("<", v, lo) ? lo : (jCmp(">", v, hi) ? hi : v)
+            return jNarrow(r, jIsLong(lo) || jIsLong(hi) ? 64 : 32)
+        },
         IEEEremainder: function(a, b) { return jFlo(jxIeeeRem(jNumD(a), jNumD(b))) },
         multiplyHigh: function(a, b) {
             var x = szPair(jNarrow(a, 64))
@@ -2657,6 +2688,31 @@ HasStatic   = :script(~~
             return jxI32(p.l)
         }
     }
+    // Long's unsigned readings and bit permutations, on the value's unsigned
+    // 32 bit halves (lib/int64.js, lib/java-strings.js). Twin of jvUnsignedLongOps
+    // in abnf/jsrtjava.go and languages/lib/java-rt.metajs.
+    function jAddUnsignedLong(o) {
+        var pair = function(v) { return szPair(jNarrow(v, 64)) }
+        var mk = function(hl) { return szMake(i64Make(hl[0], hl[1]), 64, jNoU) }
+        o.reverse = function(v) { var p = pair(v); return mk(jxReverse64(p.h, p.l)) }
+        o.reverseBytes = function(v) { var p = pair(v); return mk(jxReverseBytes64(p.h, p.l)) }
+        o.rotateLeft = function(v, d) { var p = pair(v); return mk(jxRotl64(p.h, p.l, jI(d))) }
+        o.rotateRight = function(v, d) { var p = pair(v); return mk(jxRotl64(p.h, p.l, 0 - jI(d))) }
+        o.compareUnsigned = function(a, b) { var c = i64CmpU(pair(a), pair(b)); return c < 0 ? jNegOne : c }
+        var divide = function(a, b, rem) {
+            var y = pair(b)
+            if (i64IsZero(y)) { jThrowExc("ArithmeticException", "/ by zero") }
+            var d = i64DivModU(pair(a), y)
+            return szMake(rem ? d.r : d.q, 64, jNoU)
+        }
+        o.divideUnsigned = function(a, b) { return divide(a, b, false) }
+        o.remainderUnsigned = function(a, b) { return divide(a, b, true) }
+        o.toUnsignedString = function(v, radix) { return jRadixStr(v, 64, radix, true) }
+        o.parseUnsignedLong = function(s, radix) {
+            if (s === null) { jThrowExc("NumberFormatException", "Cannot parse null string") }
+            return mk(jxParseU64("" + s, radix === undefined ? 10 : jI(radix)))
+        }
+    }
     // The value's two unsigned 32 bit halves at width w (h is 0 at 32).
     function jHalves(v, w) {
         var p = szPair(jNarrow(v, 64))
@@ -2779,6 +2835,7 @@ HasStatic   = :script(~~
     jAddBitOps(hostGlobals["Integer"], 32)
     jAddBitOps(hostGlobals["Long"], 64)
     jAddUnsigned(hostGlobals["Integer"])
+    jAddUnsignedLong(hostGlobals["Long"])
     // Built with szMake / i64Make rather than through the helpers below, because
     // this runs at SCRIPT BODY time and only the included lib is textually in
     // scope by now; the pairs are the sign-extended 64 bit readings of each width's
@@ -2889,12 +2946,19 @@ HasStatic   = :script(~~
         // languages/lib/java-rt.metajs.
         if (f32) {
             o.floatToIntBits = function(v) { return jFloatBits(jNumD(v)) }
+            o.intBitsToFloat = function(v) { return jFlo32(jxBitsFlt(jxU32(jI(v)))) }
             o.hashCode = function(v) { return jFloatBits(jNumD(v)) }
         } else {
             o.doubleToLongBits = function(v) {
                 var db = jDblBits(jNumD(v))
                 return szMake(i64Make(db.hi, db.lo), 64, jNoU)
             }
+            o.longBitsToDouble = function(v) {
+                var lp = szPair(jNarrow(v, 64))
+                return jFlo(jxBitsDbl(lp.h, lp.l))
+            }
+            // toHexString is %a's rendering (lib/java-strings.js).
+            o.toHexString = function(v) { return jxHexFloat(jNumD(v), "", 0, 0 - 1, false) }
             o.hashCode = function(v) { var hb = jDblBits(jNumD(v)); return hb.hi ^ hb.lo }
         }
         o.sum = function(a, b) { return jFloRes(jNumD(a) + jNumD(b), f32) }
@@ -3894,6 +3958,8 @@ HasStatic   = :script(~~
         if (name == "strip") { return jxStrip(s, true, true) }
         if (name == "stripLeading") { return jxStrip(s, true, false) }
         if (name == "stripTrailing") { return jxStrip(s, false, true) }
+        if (name == "indent") { return jxIndent(s, jI(a0)) }
+        if (name == "stripIndent") { return jxStripIndent(s) }
         // The FULL mapping with the final sigma (lib/utf16-strings.js has the rest).
         if (name == "toUpperCase") { return unicodeCase(s, 3) }
         if (name == "toLowerCase") { return unicodeCase(s, 6) }
@@ -6119,7 +6185,7 @@ HasStatic   = :script(~~
     // floatToIntBits of a value that is ALREADY binary32 (a float box holds the
     // rounded value), as a signed 32-bit number.
     function jFloatBits(d) {
-        if (d !== d) { return 2143289344 - 4294967296 }   // 0x7fc00000, signed
+        if (d !== d) { return 2143289344 }   // 0x7fc00000
         var sign = jZeroNeg(d) ? 2147483648 : 0
         var a = d < 0 ? 0 - d : d
         var bits = 0
@@ -6715,6 +6781,9 @@ HasStatic   = :script(~~
         if (items.length == 1) { return items[0] }
         var primary = items[0]
         var suffixes = items.slice(1)
+        // String.CASE_INSENSITIVE_ORDER is a java.util.Comparator, so it wants
+        // lib/java-util.java loaded as an import of Comparator would.
+        if (suffixes[0].kind == "field" && suffixes[0].name == "CASE_INSENSITIVE_ORDER") { jUtilWant = true }
         if (text != undefined) {
             jChainRecvTys(suffixes, text)
             for (var vi = 0; vi < suffixes.length; vi++) { if (suffixes[vi].kind == "mcall") { jVaWrapSfx(suffixes[vi]) } }

@@ -3681,7 +3681,7 @@ HasStatic   = :script(~~
     var jStrMethods = {}
     var jStrMethodList = ["isEmpty", "isBlank", "indexOf", "lastIndexOf", "contains", "contentEquals", "startsWith", "endsWith",
                           "equalsIgnoreCase", "compareTo", "compareToIgnoreCase", "concat", "replace", "replaceAll",
-                          "replaceFirst", "matches", "split", "trim", "strip", "stripLeading", "stripTrailing",
+                          "replaceFirst", "matches", "split", "trim", "strip", "stripLeading", "stripTrailing", "indent", "stripIndent",
                           "toUpperCase", "toLowerCase", "repeat", "codePointAt", "subSequence", "intern",
                           "formatted", "regionMatches", "codePointCount"]
     for (var jsm = 0; jsm < jStrMethodList.length; jsm++) { jStrMethods["$" + jStrMethodList[jsm]] = true }
@@ -3691,6 +3691,9 @@ HasStatic   = :script(~~
         if (items.length == 1) return items[0]
         var primary = items[0]
         var suffixes = items.slice(1)
+        // String.CASE_INSENSITIVE_ORDER is a java.util.Comparator, so it wants
+        // lib/java-util.java loaded as an import of Comparator would.
+        if (suffixes[0].kind == "field" && suffixes[0].name == "CASE_INSENSITIVE_ORDER") { jUtilWant = true }
         if (text != undefined) {
             jChainRecvTys(suffixes, text)
             for (var vi = 0; vi < suffixes.length; vi++) { if (suffixes[vi].kind == "mcall") { jVaWrapSfx(suffixes[vi]) } }

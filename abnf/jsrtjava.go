@@ -540,6 +540,65 @@ func jvMathMembers(o *jsObject) {
 		}
 		return jsJFlo{f: u, sty: floJavaF}
 	}))
+	// nextUp / nextDown: the float overload takes an integral argument, as ulp's.
+	// Twin of jxNextUp in languages/lib/java-strings.js.
+	for name, to := range map[string]float64{"nextUp": math.Inf(1), "nextDown": math.Inf(-1)} {
+		to := to
+		o.set(name, jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			v := argAt(args, 0)
+			if jvIsDouble(v) {
+				return dbl(math.Nextafter(rt.toNumber(v), to))
+			}
+			return jsJFlo{f: float64(math.Nextafter32(float32(rt.toNumber(v)), float32(to))), sty: floJavaF}
+		}))
+	}
+	// clamp(value, min, max): the double overload when an argument is a double,
+	// the float one when one is a float, else (long, int, int) -> int or (long,
+	// long, long) -> long. Twin of the clamp member in java-interpreter.abnf.
+	o.set("clamp", jsHostFunc("clamp", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		v, lo, hi := argAt(args, 0), argAt(args, 1), argAt(args, 2)
+		_, fv := v.(jsJFlo)
+		_, flo := lo.(jsJFlo)
+		_, fhi := hi.(jsJFlo)
+		if fv || flo || fhi {
+			sty := uint8(floJavaF)
+			if jvIsDouble(v) || jvIsDouble(lo) || jvIsDouble(hi) {
+				sty = floJava
+			}
+			num := func(a interface{}) float64 {
+				if sty == floJavaF {
+					return jvmFround(rt.toNumber(a))
+				}
+				return rt.toNumber(a)
+			}
+			x, y := num(lo), num(hi)
+			if !(x < y) {
+				if x != x {
+					rt.jvThrowCls(jvIaeCls, "min is NaN")
+				}
+				if y != y {
+					rt.jvThrowCls(jvIaeCls, "max is NaN")
+				}
+				if jvDoubleCompare(x, y) > 0 {
+					rt.jvThrowCls(jvIaeCls, rt.jvpStr(jsJFlo{f: x, sty: sty})+" > "+rt.jvpStr(jsJFlo{f: y, sty: sty}))
+				}
+			}
+			return jsJFlo{f: jvMinD(y, jvMaxD(num(v), x)), sty: sty}
+		}
+		if rt.jvCmp(">", lo, hi) {
+			rt.jvThrowCls(jvIaeCls, rt.jvpStr(lo)+" > "+rt.jvpStr(hi))
+		}
+		r := v
+		if rt.jvCmp("<", v, lo) {
+			r = lo
+		} else if rt.jvCmp(">", v, hi) {
+			r = hi
+		}
+		if jvIsLong(lo) || jvIsLong(hi) {
+			return jvNarrow(rt, r, 64)
+		}
+		return jvNarrow(rt, r, 32)
+	}))
 	o.set("IEEEremainder", jsHostFunc("IEEEremainder", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		return dbl(math.Remainder(rt.toNumber(argAt(args, 0)), rt.toNumber(argAt(args, 1))))
 	}))
@@ -1104,8 +1163,18 @@ func jvFloType(o *jsObject, sty uint8) {
 			return jvHashFloat(rt.toNumber(argAt(args, 0)))
 		})
 		o.set("floatToIntBits", bits)
+		o.set("intBitsToFloat", jsHostFunc("intBitsToFloat", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return mk(float64(math.Float32frombits(uint32(jvI(rt, argAt(args, 0))))))
+		}))
 		o.set("hashCode", bits)
 	} else {
+		o.set("longBitsToDouble", jsHostFunc("longBitsToDouble", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return mk(math.Float64frombits(uint64(jvToLong(rt, argAt(args, 0)))))
+		}))
+		// toHexString is %a's rendering (jsrtjavastr.go).
+		o.set("toHexString", jsHostFunc("toHexString", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return jxHexFloat(rt.toNumber(argAt(args, 0)), "", 0, -1, false)
+		}))
 		o.set("doubleToLongBits", jsHostFunc("doubleToLongBits", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			f := rt.toNumber(argAt(args, 0))
 			if f != f {
@@ -1259,6 +1328,100 @@ func jvUnsignedOps(o *jsObject) {
 		}
 		return float64(int32(uint32(v)))
 	})
+}
+
+// jvUnsignedLongOps adds Long's unsigned readings and bit permutations. Twin of
+// jAddUnsignedLong in java-interpreter.abnf and languages/lib/java-rt.metajs.
+func jvUnsignedLongOps(o *jsObject) {
+	u64 := func(rt *jsrt, v interface{}) uint64 { return uint64(jvToLong(rt, v)) }
+	fn := func(name string, f func(rt *jsrt, args []interface{}) interface{}) {
+		o.set(name, jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} { return f(rt, args) }))
+	}
+	box := func(x uint64) interface{} { return jvBox(int64(x)) }
+	fn("reverse", func(rt *jsrt, a []interface{}) interface{} { return box(bits.Reverse64(u64(rt, argAt(a, 0)))) })
+	fn("reverseBytes", func(rt *jsrt, a []interface{}) interface{} { return box(bits.ReverseBytes64(u64(rt, argAt(a, 0)))) })
+	fn("rotateLeft", func(rt *jsrt, a []interface{}) interface{} {
+		return box(bits.RotateLeft64(u64(rt, argAt(a, 0)), int(jvI(rt, argAt(a, 1))&63)))
+	})
+	fn("rotateRight", func(rt *jsrt, a []interface{}) interface{} {
+		return box(bits.RotateLeft64(u64(rt, argAt(a, 0)), -int(jvI(rt, argAt(a, 1))&63)))
+	})
+	fn("compareUnsigned", func(rt *jsrt, a []interface{}) interface{} {
+		x, y := u64(rt, argAt(a, 0)), u64(rt, argAt(a, 1))
+		switch {
+		case x < y:
+			return float64(-1)
+		case x > y:
+			return float64(1)
+		}
+		return float64(0)
+	})
+	divide := func(rem bool) func(rt *jsrt, a []interface{}) interface{} {
+		return func(rt *jsrt, a []interface{}) interface{} {
+			x, y := u64(rt, argAt(a, 0)), u64(rt, argAt(a, 1))
+			if y == 0 {
+				rt.jvThrowArith("/ by zero")
+			}
+			if rem {
+				return box(x % y)
+			}
+			return box(x / y)
+		}
+	}
+	fn("divideUnsigned", divide(false))
+	fn("remainderUnsigned", divide(true))
+	fn("toUnsignedString", func(rt *jsrt, a []interface{}) interface{} {
+		r := jvRadixArg(rt, a)
+		if r < 2 || r > 36 {
+			r = 10
+		}
+		return strconv.FormatUint(u64(rt, argAt(a, 0)), r)
+	})
+	fn("parseUnsignedLong", func(rt *jsrt, a []interface{}) interface{} {
+		rt.jvParseNull(argAt(a, 0))
+		return box(rt.jvParseU64(rt.toString(argAt(a, 0)), jvRadixArg(rt, a)))
+	})
+}
+
+// jvParseU64 is Long.parseUnsignedLong; twin of jxParseU64 in
+// languages/lib/java-strings.js.
+func (rt *jsrt) jvParseU64(s string, radix int) uint64 {
+	nfe := func(msg string) { rt.jvThrowCls(jvNfeCls, msg) }
+	if radix < 2 {
+		nfe("radix " + strconv.Itoa(radix) + " less than Character.MIN_RADIX")
+	}
+	if radix > 36 {
+		nfe("radix " + strconv.Itoa(radix) + " greater than Character.MAX_RADIX")
+	}
+	bad := "For input string: \"" + s + "\""
+	if radix != 10 {
+		bad += " under radix " + strconv.Itoa(radix)
+	}
+	su := strUnits(s)
+	if len(su) > 0 && su[0] == '-' {
+		nfe("Illegal leading minus sign on unsigned string " + s + ".")
+	}
+	i := 0
+	if len(su) > 0 && su[0] == '+' {
+		i = 1
+	}
+	if i == len(su) {
+		nfe(bad)
+	}
+	var v uint64
+	for ; i < len(su); i++ {
+		d := jcDigitVal(int(su[i]))
+		if d >= radix {
+			nfe(bad)
+		}
+		hi, lo := bits.Mul64(v, uint64(radix))
+		lo, carry := bits.Add64(lo, uint64(d), 0)
+		if hi != 0 || carry != 0 {
+			nfe("String value " + s + " exceeds range of unsigned long.")
+		}
+		v = lo
+	}
+	return v
 }
 
 func jvBitOps(o *jsObject, w uint8) {
@@ -1417,6 +1580,7 @@ func (rt *jsrt) jvBoxType(name string) *jsObject {
 		o.set("decode", jvDecodeHost(64))
 		jvRadixMembers(o, 64)
 		jvBitOps(o, 64)
+		jvUnsignedLongOps(o)
 	case "Byte":
 		o.set("MAX_VALUE", jsGInt{v: 127, w: 8})
 		o.set("MIN_VALUE", jsGInt{v: -128, w: 8})
