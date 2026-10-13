@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-575** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-576** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -64,27 +64,14 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-556 python: bytes and bytearray are lists · P2 · PY · IN PROGRESS (PY worker, round 3) [V]
-`(255).to_bytes(2, "big", signed=True)` → all legs `[0, 255]` (python `b'\x00\xff'`); `type(b"ab").__name__` → `list`,
-`b"ab" == [97, 98]` → True (python False); `int(b"12")`, `float(b"1.5")` → TypeError naming 'list' (python 12, 1.5). A real
-bytes type in the value model (repr `b'..'`, immutability, `==` against a list False, int()/float() parsing), all engines.
-
-### T-557 python: str.maketrans, `__import__`, translate with a non-dict table, non-ASCII isidentifier · P3 · PY · IN PROGRESS (PY worker, round 3) [V]
-`str.maketrans("ab","xy")` is missing: the unbound `str.X(...)` dispatch passes the first argument as the receiver, so a
-static method needs dispatch work in all engines. `__import__` missing. `"ab".translate([..])` → TypeError (CPython accepts any
-`__getitem__` mapping). `"😀".isidentifier()` → True (python False): past ASCII every printable code point counts as a letter;
-use the XID_Start/XID_Continue tables.
-
-### T-558 python: any/all/max/min/sum materialise a generator argument; an endless source never finishes · P1 · PY · IN PROGRESS (PY worker, round 3) [V]
-`from itertools import count; print(any(x > 2 for x in count()))` → every leg runs until killed (python True). The
-builtins turn the argument into a list before scanning, so short-circuiting never happens (also for a generator function).
-Consume the iterator step by step in all engines.
-
-### T-559 python: divmod() error text and dispatch · P3 · PY · IN PROGRESS (PY worker, round 3) [V]
-`divmod("a", 1)` → TypeError "unsupported operand type(s) for //: 'str' and 'int'" (python "... for divmod(): 'str' and
-'int'"). A class with `__floordiv__`/`__mod__` but no `__divmod__` (unprobed, from the code): divmod() uses the two, CPython
-raises TypeError. Dict "keys changed during iteration" is detected only when the iterator runs out (snapshot compare); for
-"pop a not-yet-reached key, then add one" CPython yields the remaining keys without an error while we raise.
+### T-575 python: module `__name__`, builtin class methods with keywords, `slice`, bytes method gaps · P2 · PY · OPEN [V]
+`import math; print(math.__name__)` (also sys, re, typing, builtins) → AttributeError in all legs (python `math`).
+`dict.fromkeys("ab", value=1)` → interp `{'a': None, 'b': None}`, run/native use the keyword dict as the value; python
+TypeError "dict.fromkeys() takes no keyword arguments" (built-in class methods lose keywords in the compiled halves).
+`slice(1, 3)` → NameError in the interpreter (other legs unprobed); `bytearray.__delitem__` AttributeError in the interpreter.
+bytes: `splitlines`, `translate`, `maketrans`, `hex(sep)`, `decode(errors=)` missing; `b"%s" % 5` → `b'5'` (python TypeError);
+`%r` of a bytes argument loses the `b` prefix. Dict iteration: pop and re-add an already-yielded key at equal size → we end
+quietly, CPython raises "dictionary keys changed during iteration".
 
 ---
 
@@ -700,6 +687,10 @@ T-464 java: interface default overload hiding; functional-interface overload cho
 T-503 java: Throwable.toString ignores an overridden getMessage(); message and Unicode details — DONE 7355360d
 T-506 java: commonly hit missing API — DONE e7916619
 T-504 java: Integer identity outside the -128..127 cache — DECLINED: an Integer is a plain number in every engine, so == compares values; identity outside the cache needs boxes with identity in the value model of all engines (same reason as T-256), and `Integer b = a; a == b` must stay true
+T-558 python: any/all/max/min/sum materialise a generator argument; an endless source never finishes — DONE 862aad9f
+T-559 python: divmod() error text and dispatch — DONE 2d349ea5
+T-557 python: str.maketrans, `__import__`, translate with a non-dict table, non-ASCII isidentifier — DONE 27088c06
+T-556 python: bytes and bytearray are lists — DONE cce63c26
 
 # Settled — do not re-open
 
