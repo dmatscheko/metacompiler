@@ -5709,12 +5709,12 @@ function js_pysum(args) {
         mode = 1
         f = t["__flo"]
     }
-    var els = pyElemsOf(pos[0])
-    var i = 0
-    while (i < els.length) {
+    var src = pyAStepper(pos[0])
+    while (true) {
+        var st = pyAStep(src)
+        if (st["done"]) { break }
         var e = anytype
-        e = els[i]
-        i = i + 1
+        e = st["value"]
         var isInt = typeof e == "number" || typeof e == "boolean"
         if (mode == 1) {
             if (pyIsFlo(e)) {
@@ -5774,31 +5774,36 @@ function pyAMinMax(argsV, want) {
     var hasDflt = false
     if (pyIsDict(kw)) { hasDflt = pyDictFind(kw["keys"], "default") >= 0 }
     if (elems.length == 0) { pyRaiseExc("TypeError", fname + " expected at least 1 argument, got 0") }
-    if (elems.length == 1) { // Any iterable: max("abc"), max({1, 2}), max(map(f, xs)).
-        elems = pyElemsOf(elems[0])
-    } else if (hasDflt) {
+    if (elems.length > 1 && hasDflt) {
         pyRaiseExc("TypeError", "Cannot specify a default for " + fname + "() with multiple positional arguments")
     }
-    if (elems.length == 0) {
+    var src = anytype
+    if (elems.length == 1) { // Any iterable: max("abc"), max({1, 2}), max(map(f, xs)).
+        src = pyAStepper(elems[0])
+    } else {
+        src = pyAStepper(elems)
+    }
+    var st = pyAStep(src)
+    if (st["done"]) {
         if (hasDflt) { return pyKwArg(kw, "default") }
         pyRaiseExc("ValueError", fname + "() iterable argument is empty")
     }
     var noKey = key === undefined || key === null
     var best = anytype
-    best = elems[0]
+    best = st["value"]
     var bestK = anytype
     bestK = best
     if (!noKey) { bestK = pyDCallPyValue(key, [best], undefined) }
-    var i = 1
-    while (i < elems.length) {
+    while (true) {
+        st = pyAStep(src)
+        if (st["done"]) { break }
         var k = anytype
-        k = elems[i]
+        k = st["value"]
         if (!noKey) { k = pyDCallPyValue(key, [k], undefined) }
         if (pyAOrder(op, k, bestK)) {
-            best = elems[i]
+            best = st["value"]
             bestK = k
         }
-        i = i + 1
     }
     return best
 }
@@ -6292,22 +6297,23 @@ function js_pysorted(args) {
     return a
 }
 
+// all/any stop at the first deciding item, so an endless source ends.
 function js_pyall(v) {
-    var a = pyElemsOf(v)
-    var i = 0
-    while (i < a.length) {
-        if (!js_pybool(a[i])) { return false }
-        i = i + 1
+    var src = pyAStepper(v)
+    while (true) {
+        var st = pyAStep(src)
+        if (st["done"]) { return true }
+        if (!js_pybool(st["value"])) { return false }
     }
     return true
 }
 
 function js_pyany2(v) {
-    var a = pyElemsOf(v)
-    var i = 0
-    while (i < a.length) {
-        if (js_pybool(a[i])) { return true }
-        i = i + 1
+    var src = pyAStepper(v)
+    while (true) {
+        var st = pyAStep(src)
+        if (st["done"]) { return false }
+        if (js_pybool(st["value"])) { return true }
     }
     return false
 }

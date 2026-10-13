@@ -5993,6 +5993,34 @@ def s114():
           and not ch[7].isprintable() and not ch[8].isprintable() and not ("ok" + ch[11]).isprintable()
           and not ("ok" + ch[2]).isprintable())
 
+# ===== SECTION 115: any/all/max/min/sum step their argument =====
+# The five builtins pull one item at a time, so any/all over an endless source
+# stop at the first deciding item, what they leave of an iterator is still
+# there, and a key function sees the items in order. Rows from CPython 3.14.
+from itertools import count as S115count
+
+def S115gen():
+    i = 0
+    while True:
+        yield i
+        i += 1
+
+def s115():
+    check("stp1", any(x > 2 for x in S115count()) and not all(x < 3 for x in S115count())
+          and any(x == 5 for x in S115gen()) and not all(x < 5 for x in S115gen()))
+    it = iter([1, 0, 3, 4])
+    r = all(it)
+    it2 = iter([0, 0, 3, 4])
+    r2 = any(it2)
+    check("stp2", not r and list(it) == [3, 4] and r2 and list(it2) == [4])
+    seen = []
+    def key(v):
+        seen.append(v)
+        return -v
+    check("stp3", max((x for x in [3, 1, 2]), key=key) == 1 and seen == [3, 1, 2]
+          and min(iter([]), default="d") == "d" and sum(x * 2 for x in range(4)) == 12
+          and max(3, 9, 2) == 9 and min(iter([5, 4, 6])) == 4)
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -6105,5 +6133,6 @@ def main():
     s112() # SECTION-CALL 112
     s113() # SECTION-CALL 113
     s114() # SECTION-CALL 114
+    s115() # SECTION-CALL 115
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

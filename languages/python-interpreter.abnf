@@ -1852,30 +1852,30 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         pyKwOnly(kw, fname, "key", "default")
         var key = pyKwArg(kw, "key")
         var hasDflt = kw !== null && kw !== undefined && dictFind(kw, "default") >= 0
-        var vals = []
-        var i
         if (args.length == 0) { pyListErr("TypeError", fname + " expected at least 1 argument, got 0") }
-        if (args.length == 1) { vals = iterToList(args[0]) }
-        else {
-            if (hasDflt) {
-                pyListErr("TypeError", "Cannot specify a default for " + fname + "() with multiple positional arguments")
-            }
-            for (i = 0; i < args.length; i++) { vals.push(args[i]) }
+        if (args.length > 1 && hasDflt) {
+            pyListErr("TypeError", "Cannot specify a default for " + fname + "() with multiple positional arguments")
         }
-        if (vals.length == 0) {
+        var vals = []
+        for (var i = 0; i < args.length; i++) { vals.push(args[i]) }
+        var src = pyStepper(args.length == 1 ? args[0] : vals)
+        var st = pyStep(src)
+        if (st.done) {
             if (hasDflt) { return pyKwArg(kw, "default") }
             pyListErr("ValueError", fname + "() iterable argument is empty")
         }
         var best = anytype
-        best = vals[0]
+        best = st.value
         var bestK = anytype
         bestK = key === undefined || key === null ? best : pyCall(key, [best], null)
         // Through binOp so a boxed operand (a float, a bigint) compares by VALUE
         // rather than as an object: max(1, 2.5) is 2.5.
-        for (i = 1; i < vals.length; i++) {
+        while (true) {
+            st = pyStep(src)
+            if (st.done) { break }
             var k = anytype
-            k = key === undefined || key === null ? vals[i] : pyCall(key, [vals[i]], null)
-            if (pytruthy(binOp(sign > 0 ? ">" : "<", k, bestK))) { best = vals[i]; bestK = k }
+            k = key === undefined || key === null ? st.value : pyCall(key, [st.value], null)
+            if (pytruthy(binOp(sign > 0 ? ">" : "<", k, bestK))) { best = st.value; bestK = k }
         }
         return best
     }
@@ -1916,7 +1916,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (typeof start == "string") { pyListErr("TypeError", "sum() can't sum strings [use ''.join(seq) instead]") }
             t = start
         }
-        var a = iterToList(arguments[0])
+        var src = pyStepper(arguments[0])
         var mode = 2
         if (typeof t == "number") { mode = 0 }
         var f = 0
@@ -1925,9 +1925,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             mode = 1
             f = t.__flo
         }
-        for (var i = 0; i < a.length; i++) {
+        while (true) {
+            var st = pyStep(src)
+            if (st.done) { break }
             var e = anytype
-            e = a[i]
+            e = st.value
             var isInt = typeof e == "number" || typeof e == "boolean"
             if (mode == 1) {
                 if (isFlo(e)) {
@@ -2367,14 +2369,23 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         pySortList(a, [], kw)
         return a
     }
+    // all/any stop at the first deciding item, so an endless source ends.
     hostGlobals["all"] = function(v) {
-        var a = iterToList(v)
-        for (var i = 0; i < a.length; i++) { if (!pytruthy(a[i])) { return false } }
+        var src = pyStepper(v)
+        while (true) {
+            var st = pyStep(src)
+            if (st.done) { return true }
+            if (!pytruthy(st.value)) { return false }
+        }
         return true
     }
     hostGlobals["any"] = function(v) {
-        var a = iterToList(v)
-        for (var i = 0; i < a.length; i++) { if (pytruthy(a[i])) { return true } }
+        var src = pyStepper(v)
+        while (true) {
+            var st = pyStep(src)
+            if (st.done) { return false }
+            if (pytruthy(st.value)) { return true }
+        }
         return false
     }
     // bin/hex/oct: CPython's 0b/0x/0o prefix with the sign OUTSIDE it, so
@@ -9812,6 +9823,22 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return {__udeleg: it, nx: pyUserNextFn(it)}
         }
         return pyMkIter(pyItKind(v), iterToList(v).slice(0))
+    }
+    // Any iterable stepped one value at a time, as a for loop runs it: a list by
+    // index (so a write during the scan is seen), anything else as a delegate.
+    // Twin of rt.pyStepper in abnf/jsrt.go and pyAStepper in lib/python-rt.metajs.
+    function pyStepper(v) {
+        if (Array.isArray(v)) { return {a: v, i: 0} }
+        return {g: pyDelegOf(v)}
+    }
+    function pyStep(st) {
+        if (st.g === undefined) {
+            var a = st.a
+            if (st.i >= a.length) { return {done: true, value: undefined} }
+            st.i = st.i + 1
+            return {done: false, value: a[st.i - 1]}
+        }
+        return pyDelegStep(st.g, undefined)
     }
     // One step of a delegate, in the {done, value} shape. When it reports done the
     // value is the delegate's RETURN value, which is what `yield from` evaluates to.

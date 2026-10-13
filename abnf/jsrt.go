@@ -17405,8 +17405,10 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			rt.pySortList(out, nil, el[1])
 			return w(out)
 		},
+		// all/any stop at the first deciding item, so an endless source ends.
 		"js_pyall": func(a []uint64) uint64 {
-			for _, e := range rt.pyElemsOf(u(a[0])) {
+			next := rt.pyStepper(u(a[0]))
+			for e, ok := next(); ok; e, ok = next() {
 				if !rt.pyTruthyOf(e) {
 					return boolH(false)
 				}
@@ -17414,7 +17416,8 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			return boolH(true)
 		},
 		"js_pyany2": func(a []uint64) uint64 {
-			for _, e := range rt.pyElemsOf(u(a[0])) {
+			next := rt.pyStepper(u(a[0]))
+			for e, ok := next(); ok; e, ok = next() {
 				if rt.pyTruthyOf(e) {
 					return boolH(true)
 				}
@@ -23582,16 +23585,19 @@ func (rt *jsrt) pyMinMax(argsV interface{}, want int) uint64 {
 	rt.pyKwOnly(kw, fname, "key", "default")
 	key := rt.pyKwArg(kw, "key")
 	dflt, hasDflt := rt.pyKwArg(kw, "default"), rt.pyKwHas(kw, "default")
+	var src interface{} = el[0]
 	switch {
 	case len(elems) == 0:
 		panic(&jsThrown{value: rt.pyExcInstance("TypeError", fname+" expected at least 1 argument, got 0")})
 	case len(elems) == 1: // Any iterable: max("abc"), max({1, 2}), max(map(f, xs)).
-		elems = rt.pyElemsOf(elems[0])
+		src = elems[0]
 	case hasDflt:
 		panic(&jsThrown{value: rt.pyExcInstance("TypeError",
 			"Cannot specify a default for "+fname+"() with multiple positional arguments")})
 	}
-	if len(elems) == 0 {
+	next := rt.pyStepper(src)
+	best, ok := next()
+	if !ok {
 		if hasDflt {
 			return rt.wrap(dflt)
 		}
@@ -23603,9 +23609,8 @@ func (rt *jsrt) pyMinMax(argsV interface{}, want int) uint64 {
 		}
 		return rt.callPyValue(key, []interface{}{e}, jsUndef)
 	}
-	best := elems[0]
 	bestK := keyOf(best)
-	for _, e := range elems[1:] {
+	for e, ok := next(); ok; e, ok = next() {
 		if k := keyOf(e); rt.pyOrder(op, k, bestK) {
 			best, bestK = e, k
 		}
@@ -23858,7 +23863,8 @@ func (rt *jsrt) pySum(iter, start interface{}) interface{} {
 	case *jsPyFlo:
 		mode, f = 1, tv.f
 	}
-	for _, e := range rt.pyElemsOf(iter) {
+	next := rt.pyStepper(iter)
+	for e, ok := next(); ok; e, ok = next() {
 		_, isNum := e.(float64)
 		_, isBool := e.(bool)
 		isInt := isNum || isBool
