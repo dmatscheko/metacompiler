@@ -65,7 +65,7 @@ done
 FULL_TIMEOUT=900
 
 # A FLOOR on the total ratchet assertion count (the files legitimately grow).
-FULL_ASSERTIONS=12527
+FULL_ASSERTIONS=12871
 
 # A CEILING on section gaps, summed per half over all languages. A gapped half
 # still reports the assertions it ran, so the total barely moves when a section
@@ -88,9 +88,9 @@ LINT_FINDINGS=0
 # A FLOOR on the matrix entry count (.vscode/launch.json), and on the abort rows
 # specifically: they are the only rows that compare abort messages, and a row
 # losing its "SHOULD ABORT" or "ALL HALVES" token silently downgrades it.
-MATRIX_ENTRIES=402
-ABORT_ROWS=19             # rows whose name says SHOULD ABORT
-ABORT_ALL_ROWS=18         # of those, the ones that also compare the interpreter
+MATRIX_ENTRIES=412
+ABORT_ROWS=23             # rows whose name says SHOULD ABORT
+ABORT_ALL_ROWS=22         # of those, the ones that also compare the interpreter
                           # half (ALL HALVES)
 
 FAILED=()
