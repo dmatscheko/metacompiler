@@ -819,7 +819,24 @@ func luExpFix(s string) string {
 
 // luKeyBack is a stored key text as the key the program wrote: a text that
 // reads as a numeral and addresses the same slot again was that number.
+// An escaped text (luStrKey) was a string or a boolean, and the store spells
+// the two infinities its own way.
 func (rt *jsrt) luKeyBack(s string) interface{} {
+	if rest, esc := strings.CutPrefix(s, luKeyEsc); esc {
+		switch rest {
+		case "true":
+			return true
+		case "false":
+			return false
+		}
+		return rest
+	}
+	switch s {
+	case "Infinity":
+		return math.Inf(1)
+	case "-Infinity":
+		return math.Inf(-1)
+	}
 	if n, isNum := luParseNum(s); isNum && rt.toString(luKey(n)) == s {
 		return n
 	}
@@ -831,7 +848,22 @@ func (rt *jsrt) luKeyBack(s string) interface{} {
 // that INTEGER key, which is Lua's own rule (t[2.0] is t[2]). An integer past
 // 2^53 has to become its exact decimal TEXT, because its double reading would
 // collide with its neighbour's.
+//
+// A string that could spell anything else - a number's text (a leading digit or
+// '-', Infinity, NaN) or a runtime field ("__f", "__mv", the store's own
+// __-prefixed slots) - is escaped with U+0100, which no Lua byte string holds;
+// a boolean is the escape plus its name. Twin of luaKey in
+// lua-interpreter.abnf and js_lukey in languages/lib/lua-rt.metajs.
 func luKey(v interface{}) interface{} {
+	if s, ok := v.(string); ok {
+		return luStrKey(s)
+	}
+	if b, ok := v.(bool); ok {
+		if b {
+			return luKeyEsc + "true"
+		}
+		return luKeyEsc + "false"
+	}
 	if b, ok := v.(jsGInt); ok {
 		return strconv.FormatInt(b.v, 10)
 	}
@@ -847,6 +879,19 @@ func luKey(v interface{}) interface{} {
 		return f
 	}
 	return v
+}
+
+const luKeyEsc = "Ā"
+
+func luStrKey(s string) string {
+	if s == "" {
+		return s
+	}
+	c := s[0]
+	if (c >= '0' && c <= '9') || c == '-' || strings.HasPrefix(s, "__") || s == "Infinity" || s == "NaN" {
+		return luKeyEsc + s
+	}
+	return s
 }
 
 // luForPrep is forprep (lvm.c): the loop runs on integers when the start AND the

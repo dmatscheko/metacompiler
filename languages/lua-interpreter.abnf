@@ -1245,7 +1245,22 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // round-trip is not an injective name for the double - two neighbouring doubles
     // (1.7385704740834339e+92 and 1.738570474083434e+92) would share one slot, and
     // pairs(), whose luaKeyBack re-reads the key text, would hand back the wrong number.
+    //
+    // A STRING key is escaped when it could spell anything else: a number's text
+    // (it starts with a digit or '-', or is Infinity / NaN), or a runtime field
+    // (it starts with "__": the __keys list, the {__mv} and {__f} boxes). The
+    // escape is U+0100, which a Lua byte string cannot contain, so the map stays
+    // injective; a boolean key is that escape plus its name. Twin of js_lukey in
+    // lib/lua-rt.metajs and luKey in abnf/jsrtlua.go.
+    var luaKeyEsc = String.fromCharCode(256)
+    function luaStrKey(s) {
+        var c = s.charCodeAt(0)
+        if ((c >= 48 && c <= 57) || c === 45 || (c === 95 && s.charCodeAt(1) === 95) || s == "Infinity" || s == "NaN") { return luaKeyEsc + s }
+        return s
+    }
     function luaKey(k) {
+        if (typeof k == "string") { return luaStrKey(k) }
+        if (k === true || k === false) { return luaKeyEsc + k }
         if (szIs(k)) { return szStr(k) }
         if (isNum(k)) {
             var n = numOf(k)
@@ -1874,7 +1889,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         for (var j = 0; j < all.length; j++) { luaRawSet(t, "" + pos, all[j]); pos++ }
                     } else { luaRawSet(t, "" + pos, luaFirst(f.v())); pos++ }
                 }
-                else if (f.fkind == "name") { luaRawSet(t, f.name, luaFirst(f.v())) }
+                else if (f.fkind == "name") { luaRawSet(t, luaStrKey(f.name), luaFirst(f.v())) }
                 else {
                     var fk = anytype // The key may be of any type.
                     fk = luaFirst(f.k())
@@ -2552,8 +2567,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             i = i + 1
         }
         while (i < keys.length) {
-            var v = anytype // The value at the candidate key.
-            v = luaIndex(t, keys[i])
+            var v = anytype // The value at the candidate key, addressed by its stored text.
+            v = t[keys[i]]
             if (v !== undefined && v !== null) { return mkMulti([luaKeyBack(keys[i]), v]) }
             i = i + 1
         }
@@ -2562,7 +2577,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // The keys are stored in their string form (that is how the map addresses them), so
     // an iteration hands a numeric key back as the number it was written as - t[1] is
     // reached by the integer 1, not by "1".
+    // An escaped key (luaStrKey) was a string or a boolean, and the two infinities
+    // are spelled the way the map spells them.
     function luaKeyBack(kk) {
+        if (kk.charCodeAt(0) === 256) {
+            var rest = kk.substring(1)
+            if (rest == "true") { return true }
+            if (rest == "false") { return false }
+            return rest
+        }
+        if (kk == "Infinity") { return 1 / 0 }
+        if (kk == "-Infinity") { return -1 / 0 }
         var n = anytype // The key read back as a number, when it spells one.
         n = luaNumVal(kk)
         if (n !== undefined && luaKey(n) === kk) { return n }

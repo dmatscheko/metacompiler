@@ -970,6 +970,7 @@ function luExpFix(s) {
 // with an exact integer value normalises to that INTEGER key (t[2.0] is t[2]). An
 // integer past 2^53 has to become its exact decimal TEXT, because its double
 // reading would collide with its neighbour's.
+var luKeyEsc = String.fromCharCode(256)
 function js_lukey(v) {
     // An int32 plain number - the common key - is answered with no call at all:
     // luNorm builds a sized integer only past 2^53, so ToInt32 of one can never
@@ -980,6 +981,16 @@ function js_lukey(v) {
     // neighbour's - so it addresses the table by its exact decimal TEXT.
     if (luIsBox(v)) { return i64StrS(luPair(v)) }
     if (typeof v == "number") { return v }
+    // A string that could spell a number's text or a runtime field takes the
+    // U+0100 escape, and a boolean is the escape plus its name: luStrKey in
+    // abnf/jsrtlua.go.
+    if (typeof v == "string") {
+        var c = v.charCodeAt(0)
+        if ((c >= 48 && c <= 57) || c === 45 || (c === 95 && v.charCodeAt(1) === 95) || v == "Infinity" || v == "NaN") { return luKeyEsc + v }
+        return v
+    }
+    if (v === true) { return luKeyEsc + "true" }
+    if (v === false) { return luKeyEsc + "false" }
     var f = luFloOf(v)
     if (f !== undefined) {
         if (f === f && f !== luInf() && f !== 0 - luInf() && Math.floor(f) === f) {
@@ -1025,9 +1036,17 @@ function js_luwkey(v) {
 // A table key as pairs hands it to the program: the text js_keys answers turns
 // back into the number that addresses the same slot, and stays a string
 // otherwise. "" + the key is the store's own spelling of it. Twin of
-// js_lukeyback in abnf/jsrtlua.go.
+// js_lukeyback in abnf/jsrtlua.go. An escaped text was a string or a boolean.
 function js_lukeyback(k) {
     if (typeof k != "string") { return k }
+    if (k.charCodeAt(0) === 256) {
+        var rest = k.substring(1, k.length)
+        if (rest == "true") { return true }
+        if (rest == "false") { return false }
+        return rest
+    }
+    if (k == "Infinity") { return luInf() }
+    if (k == "-Infinity") { return 0 - luInf() }
     var n = luParseNum(k)
     if (n !== undefined && ("" + js_lukey(n)) === k) { return n }
     return k

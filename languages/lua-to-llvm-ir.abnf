@@ -1990,7 +1990,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // obj:m(args): look up m on the receiver, then call it with the
             // receiver prepended as the first argument (self).
             b.NewStore(handle(s.at.code), gLuaPos)
-            var mr = emitMemberGet(b, v, emitStr(b, s.name), sfx)
+            var mr = emitMemberGet(b, v, emitStr(b, luaNameKey(s.name)), sfx)
             b = mr.b
             var fn = mr.v
             var margs = callExt(b, "js_arr_new", [])
@@ -2003,7 +2003,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return {b: b, v: luaCallTail(b, tail, fn, margs), call: true}
         }
         if (s.kind == "field") {
-            var fr = emitMemberGet(b, v, emitStr(b, s.name), sfx)
+            var fr = emitMemberGet(b, v, emitStr(b, luaNameKey(s.name)), sfx)
             return {b: fr.b, v: fr.v, call: false}
         }
         var ir = s.idx(b)
@@ -2030,6 +2030,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Any other value that is not a table is a Lua error ("attempt to index a
     // number value"), as in luaIndex; the table test comes first, so a table
     // access still pays one compare.
+    // A field NAME as the table key js_lukey would make of it, decided at compile
+    // time: a name cannot start with a digit or '-', so only the "__" prefix and
+    // Infinity / NaN take the U+0100 escape. Twin of luaStrKey in
+    // lua-interpreter.abnf.
+    function luaNameKey(name) {
+        if ((name.charCodeAt(0) === 95 && name.charCodeAt(1) === 95) || name == "Infinity" || name == "NaN") { return String.fromCharCode(256) + name }
+        return name
+    }
     // `sfx` names the indexed expression in an error (luaDescText).
     function emitMemberGet(b, v, kV, sfx) {
         var tyV = callExt(b, "js_typeof", [v])
@@ -2155,7 +2163,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 } else if (f.fkind == "name") {
                     var rv2 = f.v(b)
                     b = rv2.b
-                    callExt(b, "js_set", [t, emitStr(b, f.name), callLua(b, "lua_first", [rv2.v])])
+                    callExt(b, "js_set", [t, emitStr(b, luaNameKey(f.name)), callLua(b, "lua_first", [rv2.v])])
                 } else {
                     var rk = f.k(b)
                     b = rk.b
@@ -2173,7 +2181,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // A target's key: a field's name, or the index's first value, which is made a
     // table key only when it is written (js_luwkey rejects nil and NaN there).
     function pathKeyV(b, p) {
-        if (p.kind == "field") { return {b: b, v: emitStr(b, p.name), raw: false} }
+        if (p.kind == "field") { return {b: b, v: emitStr(b, luaNameKey(p.name)), raw: false} }
         var r = p.idx(b)
         return {b: r.b, v: callLua(r.b, "lua_first", [r.v]), raw: true}
     }
@@ -2392,9 +2400,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             var o = callExt(b, "js_scope_get", [curScopeV, emitStr(b, nameDesc.fbase)])
             for (var i = 0; i < nameDesc.fsteps.length - 1; i++) {
-                o = callExt(b, "js_get", [o, emitStr(b, nameDesc.fsteps[i])])
+                o = callExt(b, "js_get", [o, emitStr(b, luaNameKey(nameDesc.fsteps[i]))])
             }
-            callExt(b, "js_set", [o, emitStr(b, nameDesc.fsteps[nameDesc.fsteps.length - 1]), cl])
+            callExt(b, "js_set", [o, emitStr(b, luaNameKey(nameDesc.fsteps[nameDesc.fsteps.length - 1])), cl])
             return b
         }
     }

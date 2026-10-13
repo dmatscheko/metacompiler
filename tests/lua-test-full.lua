@@ -1771,6 +1771,39 @@ function s38()
     check("rng3", math.type(tonumber(ns[1])), "float")
 end
 
+-- ===== SECTION 39: a key's type is part of the key =====
+-- t[1], t["1"], t[true] and t["true"] are four slots, and a string that names a
+-- runtime field (__keys, __mv, __f) is an ordinary key. Values printed by lua 5.5.
+function s39()
+    local ks = {1, "1", 1.5, "1.5", true, "true", -2, "-2", 1 / 0, "Infinity"}
+    local t = {}
+    for i = 1, #ks do t[ks[i]] = i end
+    local got = ""
+    for i = 1, #ks do got = got .. t[ks[i]] .. " " end
+    check("key1", got, "1 2 3 4 5 6 7 8 9 10 ")
+    local n, sum = 0, 0
+    for k, v in pairs(t) do
+        n = n + 1
+        if ks[v] == k and math.type(ks[v]) == math.type(k) then sum = sum + v end
+    end
+    check("key2", n .. " " .. sum, "10 55")
+    local function f() return {__mv = true, a = {1, 2}} end
+    local x, y = f()
+    check("key3", type(x) .. " " .. tostring(y) .. " " .. tostring(x.__mv), "table nil true")
+    local u = {}
+    u.__keys = 5
+    u.a = 1
+    local c = 0
+    for _ in pairs(u) do c = c + 1 end
+    check("key4", c .. " " .. u.__keys, "2 5")
+    local b = {__f = true, v = 3}
+    check("key5", type(b) .. " " .. tostring(math.type(b)), "table nil")
+    local w = {}
+    w["__x"] = 1
+    local wk = next(w)
+    check("key6", wk, "__x")
+end
+
 s25() -- SECTION-CALL 25
 s26() -- SECTION-CALL 26
 s27() -- SECTION-CALL 27
@@ -1785,5 +1818,6 @@ s35() -- SECTION-CALL 35
 s36() -- SECTION-CALL 36
 s37() -- SECTION-CALL 37
 s38() -- SECTION-CALL 38
+s39() -- SECTION-CALL 39
 print("full: " .. checks .. " checks, " .. failures .. " failures")
 exit(failures)
