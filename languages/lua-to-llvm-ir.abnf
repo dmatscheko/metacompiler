@@ -1370,6 +1370,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // indexing luaCallNames / luaCallDescs from 1; 0 for a call the library makes
     // itself (pcall's).
     var gLuaCallee = m.NewGlobalDef("lua.callee", handle(0))
+    // The running coroutine's thread object, 0 in the main one (libCoResume).
+    var gLuaCo = m.NewGlobalDef("lua.co", handle(0))
     // The empty multi-value a function that runs off its end returns; nothing
     // writes into a multi-value's array, so one serves every such return.
     var gLuaNone = m.NewGlobalDef("lua.none", handle(0))
@@ -1852,7 +1854,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // them all.
     var libNames = ["math", "string", "table", "next", "ipairs", "pairs", "error", "pcall", "xpcall", "select",
                     "tostring", "tonumber", "type", "assert", "rawequal", "rawget", "rawset", "rawlen", "_VERSION",
-                    "io", "setmetatable", "getmetatable", "_G"]
+                    "io", "setmetatable", "getmetatable", "_G", "coroutine"]
     var libNeed = {}
     for (var lni = 0; lni < libNames.length; lni++) { libNeed[libNames[lni]] = false }
     makeVarRef = function(name) {
@@ -3065,6 +3067,25 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (libNeed.type) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "type"), callExt(b, "js_closure", [handle(emitLibFunc(libType)), curScopeV])])
         }
+        if (libNeed.coroutine) {
+            var cot = callExt(b, "js_obj_new", [])
+            var resumeClo = callExt(b, "js_closure", [handle(emitLibFunc(libCoResume)), curScopeV])
+            callExt(b, "js_set", [cot, emitStr(b, "resume"), resumeClo])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0coresume"), resumeClo])
+            b = libSet(b, cot, "create", emitLibFunc(libCoCreate))
+            b = libSet(b, cot, "yield", emitLibFunc(libCoYield))
+            b = libSet(b, cot, "status", emitLibFunc(libCoStatus))
+            b = libSet(b, cot, "running", emitLibFunc(libCoRunning))
+            b = libSet(b, cot, "isyieldable", emitLibFunc(libCoYieldable))
+            b = libSet(b, cot, "wrap", emitLibFunc(libCoWrap))
+            b = libSet(b, cot, "close", emitLibFunc(libCoClose))
+            // The main thread, which running() answers outside every coroutine.
+            var mainTh = callExt(b, "js_obj_new", [])
+            callExt(b, "js_set", [mainTh, emitStr(b, "__luco"), hTrue])
+            callExt(b, "js_set", [mainTh, emitStr(b, "__lust"), emitStr(b, "running")])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0comain"), mainTh])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "coroutine"), cot])
+        }
         if (libNeed._G) {
             // _G, the globals as a table: a proxy whose metatable reads and writes
             // jsmain's scope by name (the proxy's own scope is a child of it).
@@ -3157,6 +3178,221 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "io"), iot])
         }
         return b
+    }
+    // ----- coroutines -----
+    // A coroutine is a THREAD OBJECT - a table marked __luco, which type() reads as
+    // a thread - over a generator of the floor's (js_genfn / js_yield: a body on a
+    // stack of its own in runtime.c, on a goroutine in abnf/jsrt.go, so a yield
+    // suspends from any call depth). The generator is made at the first resume,
+    // from that resume's arguments, because a generator's body starts at its first
+    // next() with the arguments it was made with; every later next() hands the
+    // resume's arguments to the js_yield the body is parked at, and a yield hands
+    // its own arguments back as next()'s value. __lust is the status lua reports,
+    // __luerv the error a dead coroutine died of. lua.pos and lua.csp belong to
+    // whichever side runs, so each switch puts back its own.
+    function libCoArgFail(bb, argsH, fname, want) {
+        var got = bb.NewSelect(rawTruthy(bb, callExt(bb, "js_lt", [callExt(bb, "js_get", [argsH, emitStr(bb, "length")]), emitNum(bb, 1)])),
+                               emitStr(bb, "no value"), callExt(bb, "js_lutname", [libArg(bb, argsH, 0)]))
+        callLua(bb, "lua_argerr", [emitNum(bb, 1), emitStr(bb, fname), callExt(bb, "js_add", [emitStr(bb, want + " expected, got "), got])])
+        bb.NewRet(hUndef)
+    }
+    // The block that continues when argument 1 is of type `want`.
+    function libCoCheck(bb, argsH, fname, want) {
+        var okB = curF.NewBlock("")
+        var badB = curF.NewBlock("")
+        bb.NewCondBr(rawTruthy(bb, callExt(bb, "js_seq", [callExt(bb, "js_lutypeof", [libArg(bb, argsH, 0)]), emitStr(bb, want)])), okB, badB)
+        libCoArgFail(badB, argsH, fname, want)
+        return okB
+    }
+    function emitCoNew(b, f) {
+        var sc = callExt(b, "js_scope_new", [curScopeV])
+        callExt(b, "js_scope_decl", [sc, emitStr(b, "0cof"), f])
+        var co = callExt(b, "js_obj_new", [])
+        callExt(b, "js_set", [co, emitStr(b, "__luco"), hTrue])
+        callExt(b, "js_set", [co, emitStr(b, "__lugf"), callExt(b, "js_genfn", [callExt(b, "js_closure", [handle(emitLibFunc(libCoBody)), sc])])])
+        callExt(b, "js_set", [co, emitStr(b, "__lust"), emitStr(b, "suspended")])
+        return co
+    }
+    function libCoBody(bb, argsH) {
+        bb.NewStore(handle(0), gLuaCallee)
+        return {b: bb, v: callExt(bb, "js_call", [callLua(bb, "lua_getvar", [curScopeV, emitStr(bb, "0cof")]), hUndef, argsH])}
+    }
+    function libCoCreate(bb, argsH) {
+        var b = libCoCheck(bb, argsH, "coroutine.create", "function")
+        return {b: b, v: emitCoNew(b, libArg(b, argsH, 0))}
+    }
+    function libCoPair(b, ok, v) {
+        var arr = callExt(b, "js_arr_new", [])
+        callExt(b, "js_arr_push", [arr, ok])
+        callExt(b, "js_arr_push", [arr, v])
+        return arr
+    }
+    function libCoResume(bb, argsH) {
+        var b = libCoCheck(bb, argsH, "coroutine.resume", "thread")
+        var co = libArg(b, argsH, 0)
+        var st = callExt(b, "js_get", [co, emitStr(b, "__lust")])
+        var deadB = curF.NewBlock("")
+        var liveB = curF.NewBlock("")
+        var busyB = curF.NewBlock("")
+        var goB = curF.NewBlock("")
+        b.NewCondBr(rawTruthy(b, callExt(b, "js_seq", [st, emitStr(b, "dead")])), deadB, liveB)
+        deadB.NewRet(callLua(deadB, "lua_mk", [libCoPair(deadB, hFalse, emitStr(deadB, "cannot resume dead coroutine"))]))
+        liveB.NewCondBr(rawTruthy(liveB, callExt(liveB, "js_seq", [st, emitStr(liveB, "suspended")])), goB, busyB)
+        busyB.NewRet(callLua(busyB, "lua_mk", [libCoPair(busyB, hFalse, emitStr(busyB, "cannot resume non-suspended coroutine"))]))
+        var rest = callLua(goB, "lua_tail", [argsH, emitNum(goB, 1)])
+        var g0 = callExt(goB, "js_get", [co, emitStr(goB, "__lugen")])
+        var newB = curF.NewBlock("")
+        var runB = curF.NewBlock("")
+        goB.NewCondBr(goB.NewICmp(llvm.enum.IPredEQ, g0, hUndef), newB, runB)
+        var g1 = callExt(newB, "js_call", [callExt(newB, "js_get", [co, emitStr(newB, "__lugf")]), hUndef, rest])
+        callExt(newB, "js_set", [co, emitStr(newB, "__lugen"), g1])
+        newB.NewBr(runB)
+        var g = runB.NewPhi([llvm.ir.NewIncoming(g0, goB), llvm.ir.NewIncoming(g1, newB)])
+        var sent = runB.NewPhi([llvm.ir.NewIncoming(rest, goB), llvm.ir.NewIncoming(hUndef, newB)])
+        var prev = runB.NewLoad(i64, gLuaCo)
+        var hasPrev = runB.NewICmp(llvm.enum.IPredNE, prev, handle(0))
+        var normB = curF.NewBlock("")
+        var stepB = curF.NewBlock("")
+        runB.NewCondBr(hasPrev, normB, stepB)
+        callExt(normB, "js_set", [prev, emitStr(normB, "__lust"), emitStr(normB, "normal")])
+        normB.NewBr(stepB)
+        callExt(stepB, "js_set", [co, emitStr(stepB, "__lust"), emitStr(stepB, "running")])
+        stepB.NewStore(co, gLuaCo)
+        var pos = stepB.NewLoad(i64, gLuaPos)
+        var csp = stepB.NewLoad(i64, gLuaCsp)
+        var sc = callExt(stepB, "js_scope_new", [curScopeV])
+        callExt(stepB, "js_scope_decl", [sc, emitStr(stepB, "g"), g])
+        callExt(stepB, "js_scope_decl", [sc, emitStr(stepB, "s"), sent])
+        var r = callExt(stepB, "js_try", [callExt(stepB, "js_closure", [handle(emitLibFunc(libCoStep)), sc]),
+                                          callExt(stepB, "js_closure", [handle(emitLibFunc(libCoFail)), sc]), hUndef])
+        stepB.NewStore(pos, gLuaPos)
+        stepB.NewStore(csp, gLuaCsp)
+        stepB.NewStore(prev, gLuaCo)
+        var backB = curF.NewBlock("")
+        var afterB = curF.NewBlock("")
+        stepB.NewCondBr(hasPrev, backB, afterB)
+        callExt(backB, "js_set", [prev, emitStr(backB, "__lust"), emitStr(backB, "running")])
+        backB.NewBr(afterB)
+        var failB = curF.NewBlock("")
+        var okB = curF.NewBlock("")
+        afterB.NewCondBr(rawTruthy(afterB, callExt(afterB, "js_get", [r, emitNum(afterB, 0)])), okB, failB)
+        var ev = callExt(failB, "js_get", [r, emitNum(failB, 1)])
+        callExt(failB, "js_set", [co, emitStr(failB, "__lust"), emitStr(failB, "dead")])
+        callExt(failB, "js_set", [co, emitStr(failB, "__luerv"), ev])
+        failB.NewRet(callLua(failB, "lua_mk", [libCoPair(failB, hFalse, ev)]))
+        var res = callExt(okB, "js_get", [r, emitNum(okB, 1)])
+        var val = callExt(okB, "js_get", [res, emitStr(okB, "value")])
+        var out = callExt(okB, "js_arr_new", [])
+        callExt(okB, "js_arr_push", [out, hTrue])
+        var doneB = curF.NewBlock("")
+        var yieldB = curF.NewBlock("")
+        okB.NewCondBr(rawTruthy(okB, callExt(okB, "js_get", [res, emitStr(okB, "done")])), doneB, yieldB)
+        // A finished body answers its results, a yield the arguments it was given.
+        callExt(doneB, "js_set", [co, emitStr(doneB, "__lust"), emitStr(doneB, "dead")])
+        callLua(doneB, "lua_appendall", [out, val])
+        doneB.NewRet(callLua(doneB, "lua_mk", [out]))
+        callExt(yieldB, "js_set", [co, emitStr(yieldB, "__lust"), emitStr(yieldB, "suspended")])
+        yieldB = emitArrExtend(yieldB, out, val)
+        return {b: yieldB, v: callLua(yieldB, "lua_mk", [out])}
+    }
+    // The two clauses of resume's js_try: [true, next()'s {value, done}] or [false,
+    // the error object, as pcall would hand it over].
+    function libCoStep(bb, argsH) {
+        var g = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "g")])
+        var sargs = callExt(bb, "js_arr_new", [])
+        callExt(bb, "js_arr_push", [sargs, callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "s")])])
+        var res = callExt(bb, "js_call", [callExt(bb, "js_get", [g, emitStr(bb, "next")]), hUndef, sargs])
+        return {b: bb, v: libCoPair(bb, hTrue, res)}
+    }
+    function libCoFail(bb, argsH) {
+        return {b: bb, v: libCoPair(bb, hFalse, callLua(bb, "lua_errval", [libArg(bb, argsH, 0)]))}
+    }
+    function libCoYield(bb, argsH) {
+        var inB = curF.NewBlock("")
+        var outB = curF.NewBlock("")
+        bb.NewCondBr(bb.NewICmp(llvm.enum.IPredEQ, bb.NewLoad(i64, gLuaCo), handle(0)), outB, inB)
+        callLua(outB, "lua_raise", [emitStr(outB, "attempt to yield from outside a coroutine")])
+        outB.NewRet(hUndef)
+        var pos = inB.NewLoad(i64, gLuaPos)
+        var csp = inB.NewLoad(i64, gLuaCsp)
+        var sent = callExt(inB, "js_yield", [argsH])
+        inB.NewStore(pos, gLuaPos)
+        inB.NewStore(csp, gLuaCsp)
+        return {b: inB, v: callLua(inB, "lua_mk", [sent])}
+    }
+    function libCoStatus(bb, argsH) {
+        var b = libCoCheck(bb, argsH, "coroutine.status", "thread")
+        return {b: b, v: callExt(b, "js_get", [libArg(b, argsH, 0), emitStr(b, "__lust")])}
+    }
+    // running(): the running coroutine and false, or the main thread and true.
+    function libCoRunning(bb, argsH) {
+        var co = bb.NewLoad(i64, gLuaCo)
+        var isMain = bb.NewICmp(llvm.enum.IPredEQ, co, handle(0))
+        var th = bb.NewSelect(isMain, callLua(bb, "lua_getvar", [curScopeV, emitStr(bb, "0comain")]), co)
+        return {b: bb, v: callLua(bb, "lua_mk", [libCoPair(bb, th, bb.NewSelect(isMain, hTrue, hFalse))])}
+    }
+    function libCoYieldable(bb, argsH) {
+        return {b: bb, v: bb.NewSelect(bb.NewICmp(llvm.enum.IPredEQ, bb.NewLoad(i64, gLuaCo), handle(0)), hFalse, hTrue)}
+    }
+    // wrap(f): a function that resumes a coroutine over f and answers what it
+    // yields; an error propagates, a string one behind the caller's position
+    // (luaB_auxwrap).
+    function libCoWrap(bb, argsH) {
+        var b = libCoCheck(bb, argsH, "coroutine.wrap", "function")
+        var sc = callExt(b, "js_scope_new", [curScopeV])
+        callExt(b, "js_scope_decl", [sc, emitStr(b, "0co"), emitCoNew(b, libArg(b, argsH, 0))])
+        return {b: b, v: callExt(b, "js_closure", [handle(emitLibFunc(libCoWrapCall)), sc])}
+    }
+    function libCoWrapCall(bb, argsH) {
+        var rargs = callExt(bb, "js_arr_new", [])
+        callExt(bb, "js_arr_push", [rargs, callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "0co")])])
+        bb = emitArrExtend(bb, rargs, argsH)
+        bb.NewStore(handle(0), gLuaCallee)
+        var all = callLua(bb, "lua_all", [callExt(bb, "js_call", [callLua(bb, "lua_getvar", [curScopeV, emitStr(bb, "0coresume")]), hUndef, rargs])])
+        var errB = curF.NewBlock("")
+        var okB = curF.NewBlock("")
+        bb.NewCondBr(rawTruthy(bb, callExt(bb, "js_get", [all, emitNum(bb, 0)])), okB, errB)
+        var ev = callExt(errB, "js_get", [all, emitNum(errB, 1)])
+        var strB = curF.NewBlock("")
+        var plainB = curF.NewBlock("")
+        errB.NewCondBr(rawTruthy(errB, callExt(errB, "js_seq", [callExt(errB, "js_typeof", [ev]), emitStr(errB, "string")])), strB, plainB)
+        callExt(strB, "js_throw", [callExt(strB, "js_add", [callLua(strB, "lua_whereat", [emitNum(strB, 1)]), ev])])
+        strB.NewRet(hUndef)
+        callExt(plainB, "js_throw", [ev])
+        plainB.NewRet(hUndef)
+        return {b: okB, v: callLua(okB, "lua_mk", [callLua(okB, "lua_tail", [all, emitNum(okB, 1)])])}
+    }
+    // close(co): a suspended coroutine is closed (its generator returns, running
+    // its pending finally clauses) and is dead; a dead one answers false and its
+    // error if it died of one.
+    function libCoClose(bb, argsH) {
+        var b = libCoCheck(bb, argsH, "coroutine.close", "thread")
+        var co = libArg(b, argsH, 0)
+        var st = callExt(b, "js_get", [co, emitStr(b, "__lust")])
+        var suspB = curF.NewBlock("")
+        var notSuspB = curF.NewBlock("")
+        var deadB = curF.NewBlock("")
+        var busyB = curF.NewBlock("")
+        var errB = curF.NewBlock("")
+        var fineB = curF.NewBlock("")
+        b.NewCondBr(rawTruthy(b, callExt(b, "js_seq", [st, emitStr(b, "suspended")])), suspB, notSuspB)
+        var g = callExt(suspB, "js_get", [co, emitStr(suspB, "__lugen")])
+        var retB = curF.NewBlock("")
+        var markB = curF.NewBlock("")
+        suspB.NewCondBr(suspB.NewICmp(llvm.enum.IPredEQ, g, hUndef), markB, retB)
+        var nargs = callExt(retB, "js_arr_new", [])
+        callExt(retB, "js_arr_push", [nargs, hUndef])
+        callExt(retB, "js_call", [callExt(retB, "js_get", [g, emitStr(retB, "return")]), hUndef, nargs])
+        retB.NewBr(markB)
+        callExt(markB, "js_set", [co, emitStr(markB, "__lust"), emitStr(markB, "dead")])
+        markB.NewRet(hTrue)
+        notSuspB.NewCondBr(rawTruthy(notSuspB, callExt(notSuspB, "js_seq", [st, emitStr(notSuspB, "dead")])), deadB, busyB)
+        callLua(busyB, "lua_raise", [callExt(busyB, "js_add", [callExt(busyB, "js_add", [emitStr(busyB, "cannot close a "), st]), emitStr(busyB, " coroutine")])])
+        busyB.NewRet(hUndef)
+        var ev = callExt(deadB, "js_get", [co, emitStr(deadB, "__luerv")])
+        deadB.NewCondBr(deadB.NewICmp(llvm.enum.IPredEQ, ev, hUndef), fineB, errB)
+        fineB.NewRet(hTrue)
+        return {b: errB, v: callLua(errB, "lua_mk", [libCoPair(errB, hFalse, ev)])}
     }
     // _G's metamethods: a string key is a global's name; any other key is an
     // ordinary field of the proxy. Twin of luaGMeta in lua-interpreter.abnf.

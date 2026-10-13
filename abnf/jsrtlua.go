@@ -412,6 +412,10 @@ func (rt *jsrt) luType(v interface{}) string {
 	if luIsFile(v) {
 		return "userdata"
 	}
+	// A coroutine is a table carrying __luco (lua-to-llvm-ir.abnf, libCoResume).
+	if o, ok := v.(*jsObject); ok && o.props["__luco"] == true {
+		return "thread"
+	}
 	return "table"
 }
 

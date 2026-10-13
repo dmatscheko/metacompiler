@@ -2003,6 +2003,78 @@ function s46()
     check("g3", tostring(_G.s46g) .. " " .. type(_G), "nil table")
 end
 
+-- ===== SECTION 47: coroutines =====
+-- create/resume/yield with values both ways, status, errors inside a coroutine,
+-- yield from a nested call and from inside a pcall, wrap as an iterator,
+-- running/isyieldable and close. Values printed by lua 5.5. (The coroutine
+-- bodies here write no shared state before a yield: the interpreter half runs a
+-- coroutine by replay - see its :description.)
+function s47()
+    local function try(f, ...)
+        local ok, e = pcall(f, ...)
+        if ok then return "ok" end
+        return (tostring(e):gsub("^[^:]*:%d+: ", ""))
+    end
+    local function pack(...)
+        local out = {}
+        for i = 1, select("#", ...) do out[i] = tostring((select(i, ...))) end
+        return table.concat(out, " ")
+    end
+    local co = coroutine.create(function(a, b)
+        local c = coroutine.yield(a + b)
+        local d, e = coroutine.yield(c * 2)
+        return "done", d .. e
+    end)
+    local got = type(co) .. " " .. coroutine.status(co)
+    got = got .. "|" .. pack(coroutine.resume(co, 1, 2)) .. "|" .. coroutine.status(co)
+    got = got .. "|" .. pack(coroutine.resume(co, 10)) .. "|" .. pack(coroutine.resume(co, "x", "y"))
+    got = got .. "|" .. coroutine.status(co) .. "|" .. pack(coroutine.resume(co))
+    check("co1", got, "thread suspended|true 3|suspended|true 20|true done xy|dead|false cannot resume dead coroutine")
+    local ce = coroutine.create(function() error("oops") end)
+    local ok, e = coroutine.resume(ce)
+    check("co2", tostring(ok) .. " " .. e:gsub("^[^:]*:%d+: ", "") .. " " .. coroutine.status(ce), "false oops dead")
+    local ce2 = coroutine.create(function() error({code = 7}) end)
+    local ok2, e2 = coroutine.resume(ce2)
+    check("co3", tostring(ok2) .. " " .. e2.code, "false 7")
+    check("co4", try(coroutine.yield, 1) .. "|" .. tostring(coroutine.isyieldable()) .. "|" .. tostring(select(2, coroutine.running())),
+        "attempt to yield from outside a coroutine|false|true")
+    local function deep(n) if n == 0 then return coroutine.yield("bottom") end return deep(n - 1) end
+    local cd = coroutine.create(function() return deep(5) end)
+    check("co5", pack(coroutine.resume(cd)) .. "|" .. pack(coroutine.resume(cd, "back")), "true bottom|true back")
+    local gen = coroutine.wrap(function(n) for i = 1, n do coroutine.yield(i) end return "end" end)
+    check("co6", pack(gen(3), gen(), gen(), gen()) .. "|" .. try(gen), "1 2 3 end|cannot resume dead coroutine")
+    check("co7", try(coroutine.wrap(function() error("werr") end)), "werr")
+    local function range(n) return coroutine.wrap(function() for i = 1, n do coroutine.yield(i) end end) end
+    local s = 0
+    for i in range(10) do s = s + i end
+    check("co8", s, 55)
+    local outer
+    local seen = ""
+    outer = coroutine.create(function()
+        local inner = coroutine.create(function() coroutine.yield(coroutine.status(outer)) end)
+        local _, st = coroutine.resume(inner)
+        coroutine.yield(coroutine.status(outer) .. " " .. st .. " " .. coroutine.status(inner))
+    end)
+    local _, r = coroutine.resume(outer)
+    check("co9", r .. " " .. coroutine.status(outer), "running normal suspended suspended")
+    local cp = coroutine.create(function()
+        local okp, err = pcall(function() coroutine.yield("in pcall"); error("after") end)
+        coroutine.yield(tostring(okp) .. " " .. err:gsub("^[^:]*:%d+: ", ""))
+        return "fin"
+    end)
+    check("co10", pack(coroutine.resume(cp)) .. "|" .. pack(coroutine.resume(cp)) .. "|" .. pack(coroutine.resume(cp)),
+        "true in pcall|true false after|true fin")
+    local cc = coroutine.create(function() coroutine.yield(1) end)
+    coroutine.resume(cc)
+    check("co11", tostring(coroutine.close(cc)) .. " " .. coroutine.status(cc) .. " " .. tostring(coroutine.close(coroutine.create(print))), "true dead true")
+    check("co12", try(coroutine.resume, 1) .. "|" .. try(coroutine.create, 1) .. "|" .. pack(coroutine.resume(coroutine.running())),
+        "bad argument #1 to 'coroutine.resume' (thread expected, got number)|bad argument #1 to 'coroutine.create' (function expected, got number)|false cannot resume non-suspended coroutine")
+    -- A pipeline: a filter coroutine resumes a producer it did not create.
+    local prod = coroutine.wrap(function() for i = 1, 6 do coroutine.yield(i) end end)
+    local evens = coroutine.wrap(function() while true do local v = prod(); if v == nil then return end; if v % 2 == 0 then coroutine.yield(v) end end end)
+    check("co13", pack(evens(), evens(), evens()), "2 4 6")
+end
+
 s25() -- SECTION-CALL 25
 s26() -- SECTION-CALL 26
 s27() -- SECTION-CALL 27
@@ -2025,5 +2097,6 @@ s43() -- SECTION-CALL 43
 s44() -- SECTION-CALL 44
 s45() -- SECTION-CALL 45
 s46() -- SECTION-CALL 46
+s47() -- SECTION-CALL 47
 print("full: " .. checks .. " checks, " .. failures .. " failures")
 exit(failures)

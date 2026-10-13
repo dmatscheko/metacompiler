@@ -510,6 +510,8 @@ function luType(v) {
     if (typeof v == "string") { return "string" }
     if (typeof v == "function") { return "function" }
     if (luIsFile(v)) { return "userdata" }
+    // A coroutine is a table carrying __luco (lua-to-llvm-ir.abnf, libCoResume).
+    if (v["__luco"] === true) { return "thread" }
     return "table"
 }
 // A file of the io library is a table carrying the runtime field __luf, which no
