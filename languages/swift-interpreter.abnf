@@ -3039,47 +3039,84 @@ KwContinue  = "continue" KwEnd ;
         var h = i64Shl(one, (w > 64 ? 64 : w) - 1)
         return {mx: szNorm(i64Sub(h, one), w, false), mn: szNorm(i64Neg(h), w, false)}
     }
-    // Int("17") / UInt8("300"): the failable string initializer. Swift answers nil
-    // for anything that is not a complete, in-range integer; an out-of-range one is
-    // nil too, which is the one place a conversion does NOT wrap.
-    function swIntFromStr(s, w, u) {
+    // Int("17") / UInt8("300") / Int("ff", radix: 16): the failable string
+    // initializer. Swift answers nil for anything that is not a complete, in-range
+    // integer in the radix (an optional sign, then digits 0-9 and letters of either
+    // case); an out-of-range one is nil too, which is the one place a conversion
+    // does NOT wrap. The digits accumulate wrapping at 64 bits, and the range check
+    // is that the result reads back in the same radix as the canonical input.
+    // Twins: swIntFromStr in lib/swift-rt.metajs and abnf/jsrtswift.go.
+    function swIntFromStr(s, w, u, radix) {
         var i = 0
         var neg = false
         if (i < s.length && (s.charAt(i) == "+" || s.charAt(i) == "-")) { neg = s.charAt(i) == "-"; i++ }
         if (i >= s.length) { return null }
         var acc = i64Make(0, 0)
-        var ten = i64Make(0, 10)
+        var rp = i64Make(0, radix)
+        var canon = ""
         for (var k = i; k < s.length; k++) {
-            var cc = s.charCodeAt(k)
-            if (cc < 48 || cc > 57) { return null }
-            acc = i64Add(i64Mul(acc, ten), i64Make(0, cc - 48))
+            var d = swDigitVal(s.charCodeAt(k))
+            if (d < 0 || d >= radix) { return null }
+            acc = i64Add(i64Mul(acc, rp), i64Make(0, d))
+            if (canon != "" || d != 0) { canon += swDigitChars.charAt(d) }
         }
-        var p = neg ? i64Neg(acc) : acc
-        var v = szNorm(p, w, u)
-        // Range check: the wrapped value has to read back as the digits it came from.
-        if (szStr(v) != swIntCanon(s, neg)) { return null }
+        if (canon == "") { canon = "0" }
+        else if (neg) { canon = "-" + canon }
+        var v = szNorm(neg ? i64Neg(acc) : acc, w, u)
+        if (swRadixStr(v, radix, false) != canon) { return null }
         return v
     }
-    // The canonical decimal text of a digit run, for the range check above: the sign
-    // and the leading zeros removed, and "-0" spelled "0".
-    function swIntCanon(s, neg) {
-        var d = ""
-        var seen = false
-        for (var k = 0; k < s.length; k++) {
-            var ch = s.charAt(k)
-            if (ch == "+" || ch == "-") { continue }
-            if (ch == "0" && !seen) { continue }
-            seen = true
-            d += ch
+    var swDigitChars = "0123456789abcdefghijklmnopqrstuvwxyz"
+    // The value of one digit character in any radix up to 36, or -1.
+    function swDigitVal(c) {
+        if (c >= 48 && c <= 57) { return c - 48 }
+        if (c >= 97 && c <= 122) { return c - 87 }
+        if (c >= 65 && c <= 90) { return c - 55 }
+        return 0 - 1
+    }
+    // String(v, radix:, uppercase:): a negative value is "-" and its magnitude.
+    // Twins: swRadixStr in lib/swift-rt.metajs and abnf/jsrtswift.go.
+    function swRadixStr(v, radix, upper) {
+        var neg = szCmp(v, 0) < 0
+        var mag = neg ? i64Neg(szPair(v)) : szPair(v)
+        if (i64IsZero(mag)) { return "0" }
+        var out = ""
+        while (!i64IsZero(mag)) {
+            var dm = i64DivModSmall(mag, radix)
+            var ch = swDigitChars.charAt(dm.r)
+            out = (upper ? ch.toUpperCase() : ch) + out
+            mag = dm.q
         }
-        if (d == "") { return "0" }
-        return neg ? "-" + d : d
+        return neg ? "-" + out : out
+    }
+    // Int8(clamping: x) / UInt8(exactly: x) / Int("ff", radix: 16) and the plain
+    // conversion, told apart by the argument labels. A value fits a width when its
+    // conversion reads back as the same decimal text; clamping answers the bound
+    // on the side of the value's sign, exactly answers nil (and nil for a Double
+    // with a fraction). Twins: js_swintlab in lib/swift-rt.metajs and
+    // abnf/jsrtswift.go.
+    function swIntInit(argv, labels, w, u) {
+        var x = argv.length > 0 ? argv[0] : undefined
+        var lb = labels.length > 0 ? labels[0] : null
+        if (typeof x == "string") { return swIntFromStr(x, w, u, argv.length > 1 && labels[1] == "radix" ? szNum(argv[1]) : 10) }
+        if (lb == "exactly" && isFlo(x)) {
+            var f = x.__flo
+            if (f !== f || f !== Math.floor(f)) { return null }
+            var fc = szConv(f, w, u)
+            return swD(fc) === f ? fc : null
+        }
+        var c = swIntConv(x, w, u)
+        if (lb != "clamping" && lb != "exactly") { return c }
+        if (szStr(c) == szStr(x)) { return c }
+        if (lb == "exactly") { return null }
+        var bd = swIntBounds(w, u)
+        return szCmp(x, 0) < 0 ? bd.mn : bd.mx
     }
     // Int(x) / Int8(x) / UInt64(x): a value conversion at width w. A Double
     // truncates toward zero; an integer wraps to the width (see the divergence
     // note above - real Swift traps instead); a String is failable.
     function swIntConv(x, w, u) {
-        if (typeof x == "string") { return swIntFromStr(x, w, u) }
+        if (typeof x == "string") { return swIntFromStr(x, w, u, 10) }
         // Int(3.7) TRUNCATES toward zero (3), Int(-3.7) is -3.
         if (isFlo(x)) {
             var f = x.__flo
@@ -3093,13 +3130,13 @@ KwContinue  = "continue" KwEnd ;
         if (typeof x != "number") { fail("integer conversion of a non number") }
         return szConv(x < 0 ? Math.ceil(x) : Math.floor(x), w, u)
     }
-    // One integer type: a callable descriptor. `__conv` is what makeCall reaches for
+    // One integer type: a callable descriptor. `__convl` is what makeCall reaches for
     // when the callee is an object rather than a function, so `Int(x)` works while
     // `Int.max` stays an ordinary property read.
     function swIntType(w, u) {
         var b = swIntBounds(w, u)
         return {max: b.mx, min: b.mn, bitWidth: w > 64 ? 64 : w, zero: szConv(0, w, u),
-                __conv: function(x) { return swIntConv(x, w, u) }, __tname: swIntTyName(w, u)}
+                __convl: function(argv, labels) { return swIntInit(argv, labels, w, u) }, __tname: swIntTyName(w, u)}
     }
     // The declared width of `var u: UInt8 = 250` (swIntWidth is consulted by
     // makeDecl); the name has to survive the annotation for the value to carry it.
@@ -9735,6 +9772,7 @@ KwContinue  = "continue" KwEnd ;
         var x = argv.length > 0 ? argv[0] : undefined
         var lb = labels.length > 0 ? labels[0] : null
         if (lb == null && argv.length == 1 && Array.isArray(x)) { return swStrJoin(x) }
+        if (argv.length > 1 && labels[1] == "radix") { return swRadixStr(x, szNum(argv[1]), argv.length > 2 && argv[2] === true) }
         return swstr(x)
     }
     hostGlobals["String"] = {__convl: swStrInit, __tname: "String"}

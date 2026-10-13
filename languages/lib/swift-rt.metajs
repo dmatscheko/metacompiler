@@ -486,14 +486,15 @@ function swIsDigit(c) { return c >= "0" && c <= "9" }
 
 // ===================================================== integer conversion ===
 //
-// swIntFromStr is Int("17") / UInt8("300"): the failable string initializer. It
-// answers undefined for anything that is not a complete, in-range decimal
-// integer. The Go twin accumulates in a uint64 and rejects past 2^64; MetaJS has
-// only the double, so the accumulation runs through sintOp (the floor's exact 64
-// bit multiply-add, which WRAPS) and the range check below - the value read back
-// as text must equal the canonical input - catches every wrap, exactly as it
-// catches an out-of-width truncation. So one check does both jobs.
-function swIntFromStr(s, w, u) {
+// swIntFromStr is Int("17") / UInt8("300") / Int("ff", radix: 16): the failable
+// string initializer. It answers undefined for anything that is not a complete,
+// in-range integer in the radix - an optional sign, then digits and letters of
+// either case. MetaJS has only the double, so the accumulation runs through
+// sintOp (the floor's exact 64 bit multiply-add, which WRAPS) and the range check
+// - the value read back in the radix must equal the canonical input - catches
+// every wrap, exactly as it catches an out-of-width truncation. Twin of
+// swIntFromStr in languages/swift-interpreter.abnf and abnf/jsrtswift.go.
+function swIntFromStr(s, w, u, radix) {
     var i = 0
     var neg = false
     if (i < s.length && (s.charAt(i) == "+" || s.charAt(i) == "-")) {
@@ -502,40 +503,100 @@ function swIntFromStr(s, w, u) {
     }
     if (i >= s.length) { return undefined }
     var acc = 0
+    var canon = ""
     var k = i
-    var digits = 0
     while (k < s.length) {
-        var c = s.charAt(k)
-        if (!swIsDigit(c)) { return undefined }
-        acc = sintOp(0, sintOp(2, acc, 10), c.charCodeAt(0) - 48)
-        digits = digits + 1
-        // 20 digits is the most a 64 bit value can have; past that the wrap the
-        // Go twin rejects outright has certainly happened, and the canonical
-        // check below would still catch it - this only keeps the loop honest.
-        if (digits > 20) { return undefined }
+        var d = swDigitVal(s.charCodeAt(k))
+        if (d < 0 || d >= radix) { return undefined }
+        acc = sintOp(0, sintOp(2, acc, radix), d)
+        if (canon.length > 0 || d > 0) { canon = canon + RT_DIGITS.charAt(d) }
+        // 64 significant digits is the most a 64 bit value has in any radix; past
+        // that the wrap has certainly happened, and the check below would still
+        // catch it - this only keeps the loop honest.
+        if (canon.length > 64) { return undefined }
         k = k + 1
     }
+    if (canon.length == 0) { canon = "0" }
+    else if (neg) { canon = "-" + canon }
     var v = acc
     if (neg) { v = sintOp(1, 0, acc) }
     var out = sintConv(v, w, u)
-    var back = sintStr(out)
-    if (back !== swIntCanon(s, neg)) { return undefined }
+    if (swRadixStr(out, radix, false) !== canon) { return undefined }
     return out
 }
 
-// The canonical decimal text of a digit run - the sign and the leading zeros
-// removed - for the range check above.
-function swIntCanon(s, neg) {
-    var i = 0
-    while (i < s.length && (s.charAt(i) == "+" || s.charAt(i) == "-")) { i = i + 1 }
-    while (i < s.length - 1 && s.charAt(i) == "0") { i = i + 1 }
-    var d = s.substring(i, s.length)
-    while (d.length > 1 && d.charAt(0) == "0") { d = d.substring(1, d.length) }
-    if (d.length == 0) { return "0" }
-    if (d === "0") { return "0" }
-    if (neg) { return "-" + d }
-    return d
+// The value of one digit character in any radix up to 36, or -1.
+function swDigitVal(c) {
+    if (c >= 48 && c <= 57) { return c - 48 }
+    if (c >= 97 && c <= 122) { return c - 87 }
+    if (c >= 65 && c <= 90) { return c - 55 }
+    return 0 - 1
 }
+
+// String(v, radix:, uppercase:): a negative value is "-" and its magnitude, which
+// is divided UNSIGNED so Int.min's magnitude 2^63 survives. Twin of swRadixStr in
+// languages/swift-interpreter.abnf and abnf/jsrtswift.go.
+function swRadixStr(v, radix, upper) {
+    var neg = sintCmp(v, 0) < 0
+    var mag = sintConv(v, 64, true)
+    if (neg) { mag = sintConv(sintOp(1, 0, v), 64, true) }
+    var b = sintRaw(0, radix, 64, true)
+    var zero = sintRaw(0, 0, 64, true)
+    var digits = RT_DIGITS
+    if (upper) { digits = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ" }
+    if (sintCmp(mag, zero) == 0) { return "0" }
+    var out = ""
+    while (sintCmp(mag, zero) != 0) {
+        out = digits.charAt(sintNum(sintOp(4, mag, b))) + out
+        mag = sintOp(3, mag, b)
+    }
+    if (neg) { return "-" + out }
+    return out
+}
+
+// Int8(clamping: x) / UInt8(exactly: x) / Int(s, radix: r): (value, bits,
+// unsigned, first label, radix). A value fits a width when its conversion reads
+// back as the same decimal text; clamping answers the bound on the value's side,
+// exactly answers nil (and nil for a Double with a fraction). Twins: swIntInit in
+// languages/swift-interpreter.abnf and js_swintlab in abnf/jsrtswift.go.
+function js_swintlab(v, bits, uns, label, radix) {
+    if (typeof v == "string") {
+        var r = swIntFromStr(v, bits, uns, swNum(radix))
+        if (r === undefined) { return null }
+        return r
+    }
+    if (v === undefined || v === null) { fail("integer conversion of nil") }
+    if (label === "exactly") {
+        if (floIs(v)) {
+            var f = floNum(v)
+            if (f !== f) { return null }
+            if (f !== Math.floor(f)) { return null }
+            var fc = sintConv(v, bits, uns)
+            if (swIntToD(fc) !== f) { return null }
+            return fc
+        }
+    }
+    var c = sintConv(v, bits, uns)
+    if (label !== "clamping") { if (label !== "exactly") { return c } }
+    if (sintStr(c) === sintStr(v)) { return c }
+    if (label === "exactly") { return null }
+    if (sintCmp(v, 0) < 0) {
+        if (uns) { return sintConv(0, bits, true) }
+        return swIntMin(bits)
+    }
+    if (uns) { return sintConv(0 - 1, bits, true) }
+    return sintConv(sintOp(1, swIntMin(bits), 1), bits, false)
+}
+
+// The most negative value of a signed width: 1 << (bits - 1), wrapped.
+function swIntMin(bits) {
+    var b = bits
+    if (b > 64) { b = 64 }
+    return sintConv(sintOp(9, 1, b - 1), bits, false)
+}
+
+// String(v, radix: r, uppercase: up).
+function js_swradixstr(v, radix, upper) { return swRadixStr(v, swNum(radix), upper === true) }
 
 // ===================================================== object shapes ========
 
@@ -3093,7 +3154,7 @@ function js_swnot(v) {
 // integer - and is the one conversion that does not wrap.
 function js_swintconv(v, bits, uns) {
     if (typeof v == "string") {
-        var r = swIntFromStr(v, bits, uns)
+        var r = swIntFromStr(v, bits, uns, 10)
         if (r === undefined) { return null }
         return r
     }

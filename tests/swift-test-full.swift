@@ -4043,6 +4043,34 @@ func s85() {
     check("85f", f[0].rounded(.toNearestOrEven) == 2 && "\(f[0].rounded(.up))" == "3.0")
 }
 
+// ===== SECTION 86: the labelled integer initializers =====
+// init(clamping:) saturates, init(exactly:) is failable, init(_:radix:) reads and
+// String(_:radix:uppercase:) writes any base from 2 to 36. Operands are read out
+// of arrays. Every value read off swiftc 6.1.2.
+func s86() {
+    let n = [256, -1, 255, -129, 4294967296]
+    check("86a", UInt8(clamping: n[0]) == 255 && UInt8(clamping: n[1]) == 0 && Int8(clamping: n[2]) == 127
+        && Int8(clamping: n[3]) == -128 && Int32(clamping: n[4]) == 2147483647 && UInt16(clamping: n[2]) == 255)
+    check("86b", UInt8(exactly: n[0]) == nil && Int8(exactly: n[2]) == nil && UInt8(exactly: n[1]) == nil
+        && Int16(exactly: n[3]) == -129 && UInt8(truncatingIfNeeded: n[0]) == 0 && Int8(truncatingIfNeeded: n[2]) == -1)
+    let big: [UInt64] = [UInt64.max]
+    let low: [Int64] = [Int64.min]
+    check("86c", Int(clamping: big[0]) == Int.max && Int(exactly: big[0]) == nil && UInt64(clamping: low[0]) == 0
+        && Int8(clamping: low[0]) == -128)
+    let f = [3.9, 3.0, 1e19, -2.0]
+    check("86d", Int64(exactly: f[0]) == nil && Int(exactly: f[1]) == 3 && Int(exactly: f[2]) == nil
+        && UInt64(exactly: f[2]) == 10000000000000000000 && UInt8(exactly: f[3]) == nil)
+    let s = ["ff", "-101", "z", "FF", "8000000000000000", "0x1f", "-8000000000000000"]
+    let r = [16, 2, 36, 16, 16, 16, 16]
+    check("86e", Int(s[0], radix: r[0]) ?? -1 == 255 && Int(s[1], radix: r[1]) == -5 && Int(s[2], radix: r[2]) == 35
+        && UInt8(s[3], radix: r[3]) == 255 && Int8(s[3], radix: r[3]) == nil && Int(s[4], radix: r[4]) == nil
+        && Int(s[5], radix: r[5]) == nil && Int(s[6], radix: r[6]) == Int.min)
+    let v = [42, -255, Int.min]
+    check("86f", String(v[0], radix: 16) == "2a" && String(v[1], radix: 2) == "-11111111"
+        && String(v[0], radix: 16, uppercase: true) == "2A" && String(v[2], radix: 36) == "-1y2p0ij32e8e8"
+        && String(big[0], radix: 16) == "ffffffffffffffff")
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -4129,6 +4157,7 @@ func main() {
     s83() // SECTION-CALL 83
     s84() // SECTION-CALL 84
     s85() // SECTION-CALL 85
+    s86() // SECTION-CALL 86
     print("full: \(checks) checks, \(fails) failures")
 }
 

@@ -6684,6 +6684,17 @@ KwContinue  = "continue" KwEnd ;
         }
         // Character(c) is its one-cluster String, so it renders its argument:
         // a String is itself and a Unicode.Scalar its glyph.
+        // String(v, radix: r, uppercase: up).
+        if (name == "String" && args.length > 1 && args[1].lbl == "radix"
+            && lookupSig(name) == null && classNames[name] != 1 && enumNames[name] != 1) {
+            return function(b) {
+                var er = emitArgRecs(b, args)
+                b = er.b
+                var upV = args.length > 2 ? callExt(b, "js_swidx", [er.v, emitNum(b, 2)]) : hFalse
+                return {b: b, v: callExt(b, "js_swradixstr", [callExt(b, "js_swidx", [er.v, emitNum(b, 0)]),
+                    callExt(b, "js_swidx", [er.v, emitNum(b, 1)]), upV])}
+            }
+        }
         if ((name == "Double" || name == "Float" || name == "String" || (name == "Character" && args.length == 1))
             && lookupSig(name) == null && classNames[name] != 1 && enumNames[name] != 1) {
             var convExt = (name == "String" || name == "Character") ? "js_swstr" : "js_swflo"
@@ -6702,6 +6713,19 @@ KwContinue  = "continue" KwEnd ;
         }
         var swIt = swIntWidthOf(name)
         if (swIt != null && lookupSig(name) == null && classNames[name] != 1 && enumNames[name] != 1) {
+            // A labelled initializer - clamping:, exactly:, truncatingIfNeeded:, or a
+            // String with radix: - is js_swintlab, told the label it was written with.
+            var lab0 = args.length > 0 && args[0].lbl != null ? args[0].lbl : ""
+            var hasRadix = args.length > 1 && args[1].lbl == "radix"
+            if (lab0 != "" || hasRadix) {
+                return function(b) {
+                    var el = emitArgRecs(b, args)
+                    b = el.b
+                    var rx = hasRadix ? callExt(b, "js_swidx", [el.v, emitNum(b, 1)]) : emitNum(b, 10)
+                    return {b: b, v: callExt(b, "js_swintlab", [callExt(b, "js_swidx", [el.v, emitNum(b, 0)]),
+                        emitNum(b, swIt.w), swIt.u ? hTrue : hFalse, emitStr(b, lab0), rx])}
+                }
+            }
             return function(b) {
                 var ec = emitArgRecs(b, args)
                 b = ec.b

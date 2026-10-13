@@ -1378,7 +1378,7 @@ func init() {
 			bits := uint8(jsToInt(rt.toNumber(u(a[1]))))
 			uns := rt.truthy(u(a[2]))
 			if s, ok := v.(string); ok {
-				r, ok2 := swIntFromStr(s, bits, uns)
+				r, ok2 := swIntFromStr(s, bits, uns, 10)
 				if !ok2 {
 					return jsHNull
 				}
@@ -1388,6 +1388,29 @@ func init() {
 				rt.fail("integer conversion of nil")
 			}
 			return w(rt.giConv(v, bits, uns))
+		}
+		// Int8(clamping: x), UInt8(exactly: x), Int(s, radix: r):
+		// (value, bits, unsigned, first label, radix). The emitter passes the
+		// label it saw; "radix" is the string form.
+		m["js_swintlab"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			bits := uint8(jsToInt(rt.toNumber(u(a[1]))))
+			uns := rt.truthy(u(a[2]))
+			if s, ok := v.(string); ok {
+				r, ok2 := swIntFromStr(s, bits, uns, int(giVal(rt, u(a[4]))))
+				if !ok2 {
+					return jsHNull
+				}
+				return w(r)
+			}
+			if isNullish(v) {
+				rt.fail("integer conversion of nil")
+			}
+			return w(rt.swIntLabeled(v, bits, uns, rt.toString(u(a[3]))))
+		}
+		// String(v, radix: r, uppercase: up).
+		m["js_swradixstr"] = func(a []uint64) uint64 {
+			return rt.wrapStr(swRadixStr(u(a[0]), int(giVal(rt, u(a[1]))), rt.truthy(u(a[2]))))
 		}
 		// The four ordered comparisons. A box has to go through giCmp rather than
 		// the shared jsCompare, because a UInt64 above 2^63 reads as a NEGATIVE
@@ -2193,58 +2216,114 @@ func swIntToD(rt *jsrt, v interface{}) float64 {
 	return giFloat(rt, v)
 }
 
-// swIntFromStr is Int("17") / UInt8("300"): the failable string initializer. It
-// reports false for anything that is not a complete, in-range decimal integer.
-func swIntFromStr(s string, w uint8, u bool) (interface{}, bool) {
-	i, neg := 0, false
-	if i < len(s) && (s[i] == '+' || s[i] == '-') {
-		neg = s[i] == '-'
-		i++
+// swIntFromStr is Int("17") / UInt8("300") / Int("ff", radix: 16): the failable
+// string initializer. It reports false for anything that is not a complete,
+// in-range integer in the radix - an optional sign, then digits and letters of
+// either case. Twin of swIntFromStr in languages/swift-interpreter.abnf and
+// lib/swift-rt.metajs.
+func swIntFromStr(s string, w uint8, u bool, radix int) (interface{}, bool) {
+	neg := false
+	if s != "" && (s[0] == '+' || s[0] == '-') {
+		neg = s[0] == '-'
+		s = s[1:]
 	}
-	if i >= len(s) {
+	if s == "" || s[0] == '+' || s[0] == '-' || strings.IndexByte(s, '_') >= 0 {
 		return nil, false
 	}
-	var acc uint64
-	for k := i; k < len(s); k++ {
-		c := s[k]
-		if c < '0' || c > '9' {
-			return nil, false
-		}
-		d := uint64(c - '0')
-		if acc > (1<<64-1-d)/10 {
-			return nil, false // beyond 64 bits: out of range for every width
-		}
-		acc = acc*10 + d
+	mag, err := strconv.ParseUint(s, radix, 64)
+	if err != nil {
+		return nil, false // not a digit run, or beyond 64 bits: out of range for every width
 	}
-	v := int64(acc)
+	v := int64(mag)
 	if neg {
 		v = -v
 	}
-	// The range check: the truncated value has to read back as what came in.
 	out := giNorm(v, w, u)
-	var back string
-	if b, ok := out.(jsGInt); ok {
-		back = giStr(b)
-	} else {
-		back = strconv.FormatInt(int64(out.(float64)), 10)
-	}
-	if back != swIntCanon(s, neg) {
+	if on, om := swIntMag(out); om != mag || (on != neg && mag != 0) {
 		return nil, false
 	}
 	return out, true
 }
 
-// swIntCanon is the canonical decimal text of a digit run - the sign and the
-// leading zeros removed - for the range check above.
-func swIntCanon(s string, neg bool) string {
-	d := strings.TrimLeft(strings.TrimLeft(s, "+-"), "0")
-	if d == "" {
-		return "0"
+// swIntMag is an integer's sign and magnitude, which tell whether a conversion
+// kept its value whatever the two widths.
+func swIntMag(v interface{}) (bool, uint64) {
+	var x int64
+	switch t := v.(type) {
+	case jsGInt:
+		if t.u {
+			return false, giU(t.v, t.w)
+		}
+		x = t.v
+	case float64:
+		x = int64(t)
+	}
+	if x < 0 {
+		return true, uint64(-x)
+	}
+	return false, uint64(x)
+}
+
+// swRadixStr is String(v, radix:, uppercase:). Twin of swRadixStr in
+// languages/swift-interpreter.abnf and lib/swift-rt.metajs.
+func swRadixStr(v interface{}, radix int, upper bool) string {
+	neg, mag := swIntMag(v)
+	out := strconv.FormatUint(mag, radix)
+	if upper {
+		out = strings.ToUpper(out)
 	}
 	if neg {
-		return "-" + d
+		return "-" + out
 	}
-	return d
+	return out
+}
+
+// swIntLabeled is Int8(clamping:) / UInt8(exactly:) / Int(truncatingIfNeeded:):
+// a value fits a width when its conversion keeps its sign and magnitude;
+// clamping answers the bound on the value's side, exactly answers nil (and nil
+// for a Double with a fraction). Twin of swIntInit in
+// languages/swift-interpreter.abnf and js_swintlab in lib/swift-rt.metajs.
+func (rt *jsrt) swIntLabeled(x interface{}, w uint8, u bool, label string) interface{} {
+	if f, ok := x.(jsJFlo); ok && label == "exactly" {
+		if f.f != math.Trunc(f.f) || math.IsInf(f.f, 0) {
+			return jsNull
+		}
+		c := rt.giConv(f.f, w, u)
+		if swIntToD(rt, c) != f.f {
+			return jsNull
+		}
+		return c
+	}
+	c := rt.giConv(x, w, u)
+	if label != "clamping" && label != "exactly" {
+		return c
+	}
+	cn, cm := swIntMag(c)
+	xn, xm := swIntMag(x)
+	if cn == xn && cm == xm {
+		return c
+	}
+	if label == "exactly" {
+		return jsNull
+	}
+	if xn {
+		if u {
+			return giNorm(0, w, u)
+		}
+		return giNorm(math.MinInt64>>(64-swBits(w)), w, u)
+	}
+	if u {
+		return giNorm(-1, w, u)
+	}
+	return giNorm(math.MaxInt64>>(64-swBits(w)), w, u)
+}
+
+// swBits is a width as a bit count: Int64 and UInt64 are width 65 (swAdoptWidth).
+func swBits(w uint8) uint {
+	if w > 64 {
+		return 64
+	}
+	return uint(w)
 }
 
 // ----------------------------------------------------------------------------
