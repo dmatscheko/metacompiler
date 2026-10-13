@@ -318,7 +318,7 @@ func (rt *jsrt) jxRe(pattern string) *rxRe {
 // jxReMsg is Java's PatternSyntaxException message for a regex error: a J error
 // is Java's own description at its own index (at); for the shared kinds the index
 // is read off the shortest failing prefix of the \Q-expanded pattern. Twin of
-// jxReMsg in languages/lib/java-strings.js.
+// jxReMsg in languages/lib/java-regex.js.
 func jxReMsg(pattern, err string, at int) string {
 	if at >= 0 {
 		return jxReFmt(pattern, err, at)

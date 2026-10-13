@@ -80,6 +80,7 @@ import "./runtime.metajs"
 import "./fdlibm.js"
 import "./java-chars.js"
 import "./regex.js"
+import "./java-regex.js"
 import "./utf16-strings.js"
 import "./java-strings.js"
 

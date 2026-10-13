@@ -2494,11 +2494,15 @@ NotMemberKw = :script(~~
 
     // The shared regular-expression engine (rxCompile / rxSearch / rxGroup / ...). It
     // is language neutral, so the RegexOption enum is translated to its own flag
-    // letters in krxFlags below. rxFail is a KNOB, overridden by ASSIGNMENT (not by
-    // declaration, see docs/abnf-dialect-gotchas.md) so a bad pattern reports like
-    // every other Kotlin runtime error.
+    // letters in krxFlags below. Kotlin/JVM's Regex is java.util.regex, so it runs the
+    // J dialect with java's \p{..} table and PatternSyntaxException text
+    // (lib/java-regex.js). rxFail and rxPropHit are KNOBS, overridden by ASSIGNMENT
+    // (not by declaration, see docs/abnf-dialect-gotchas.md).
+    include("lib/java-chars.js")
     include("lib/regex.js")
+    include("lib/java-regex.js")
     rxFail = function (msg) { fail(msg) }
+    rxPropHit = function (id, c) { return jxPropHit(id, c) }
 
     // kotlin.math on doubles (lib/kotlin-math.js), over StrictMath's fdlibm.
     include("lib/fdlibm.js")
@@ -4310,11 +4314,10 @@ NotMemberKw = :script(~~
             var raw = (Array.isArray(opts) || kIsSet(opts)) ? kElems(opts) : [opts]
             for (var i = 0; i < raw.length; i++) { list.push(kstr2(raw[i])) }
         }
-        // "q" unconditionally: the JVM regex dialect always understands \Q...\E quote
-        // regions, which is what Pattern.quote (Regex.escape / RegexOption.LITERAL)
-        // emits. It is a FLAG rather than the engine's default because in JavaScript
-        // \Q is an identity escape and /\Qa.b\E/ matches the text "Qa.bE".
-        var flags = "q"
+        // "qJ" unconditionally: Kotlin/JVM's Regex is java.util.regex - \Q...\E quote
+        // regions (what Pattern.quote, so Regex.escape / RegexOption.LITERAL, emits)
+        // and the J dialect.
+        var flags = "qJ"
         var literal = false
         for (var k = 0; k < list.length; k++) {
             var o = list[k]
@@ -4352,7 +4355,8 @@ NotMemberKw = :script(~~
         var key = "$" + fo.flags + "\x00" + src
         if (hasOwn(krxCache, key)) { return krxCache[key] }
         var prog = rxCompile(src, fo.flags)
-        if (!prog.ok) { fail("invalid regex '" + src + "': " + prog.err) }
+        // Pattern.compile throws PatternSyntaxException, an IllegalArgumentException.
+        if (!prog.ok) { kThrowExc("PatternSyntaxException", jxReMsg(src, prog.err, prog.errAt)) }
         // matches() / matchEntire() want the WHOLE input, which is rxMatchWhole -
         // one program, no second compile and no anchoring wrapper to get wrong.
         var v = {__krx: true, src: src, flags: fo.flags, prog: prog}
@@ -10646,7 +10650,9 @@ NotMemberKw = :script(~~
                      // Under IndexOutOfBoundsException, not RuntimeException (java
                      // instanceof). `"ab"[5]` throws it; the COLLECTION read throws plain
                      // IndexOutOfBoundsException, see kIndex.
-                     "StringIndexOutOfBoundsException"]
+                     "StringIndexOutOfBoundsException",
+                     // java.util.regex's, under IllegalArgumentException (java instanceof).
+                     "PatternSyntaxException"]
         var supers = ["", "Throwable", "Throwable", "Exception",
                       "RuntimeException", "RuntimeException",
                       "RuntimeException", "RuntimeException",
@@ -10655,7 +10661,7 @@ NotMemberKw = :script(~~
                       "RuntimeException", "IllegalArgumentException",
                       "Exception", "Error", "Error",
                       "Error", "RuntimeException",
-                      "IndexOutOfBoundsException"]
+                      "IndexOutOfBoundsException", "IllegalArgumentException"]
         for (var i = 0; i < names.length; i++) {
             var cls = newDescriptor(names[i], i == 0 ? [] : [{name: supers[i], args: null, deleg: null}])
             // The PACKAGE-QUALIFIED (binary) name, which is what Throwable#toString

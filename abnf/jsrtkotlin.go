@@ -183,6 +183,8 @@ func ktExcHierarchy() map[string]*jsObject {
 	// NumberFormatException is under IllegalArgumentException, not directly under
 	// RuntimeException - checked with `instanceof` under java (JDK 24).
 	h["NumberFormatException"] = mk("NumberFormatException", h["IllegalArgumentException"])
+	// java.util.regex.PatternSyntaxException is under IllegalArgumentException too.
+	h["PatternSyntaxException"] = mk("PatternSyntaxException", h["IllegalArgumentException"])
 	// StringIndexOutOfBoundsException is under IndexOutOfBoundsException, not
 	// directly under RuntimeException - checked with `instanceof` under java (JDK
 	// 24), which also gives the message an out-of-range charAt carries:

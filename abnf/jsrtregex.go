@@ -232,7 +232,7 @@ func rxIsVSpaceJ(c rune) bool {
 }
 
 // rxPropHit answers whether c has the \p{..} property id, over java.lang.Character's
-// table (jsrtjavachars.go). Twin of jxPropHit in lib/java-strings.js.
+// table (jsrtjavachars.go). Twin of jxPropHit in lib/java-regex.js.
 func rxPropHit(id int, c rune) bool {
 	switch id {
 	case rxPL:

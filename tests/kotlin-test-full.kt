@@ -590,8 +590,15 @@ fun s22() {
 // has no regexp literal, so every pattern arrives as Regex("...") or
 // "...".toRegex(). Regex.escape is Pattern.quote and answers the same \Q...\E TEXT
 // the JVM does; RegexOption.CANON_EQ and UNIX_LINES are reported as unsupported
-// instead of being silently ignored, and lookbehind, POSIX brackets and \p{...}
-// are not implemented by the engine.
+// instead of being silently ignored. The dialect is java.util.regex's, and a bad
+// pattern throws its PatternSyntaxException; both checked against kotlin-stdlib
+// 2.2.21's Regex driven from java.
+fun rxErr23(p: String): String {
+    try { Regex(p) } catch (e: IllegalArgumentException) {
+        return e::class.simpleName + ": " + e.message!!.replace("\n", "|")
+    }
+    return "ok"
+}
 fun s23() {
     val word23 = Regex("[a-c]+")
     check("re01", word23.matches("abc") && !word23.matches("abcd"))
@@ -672,6 +679,26 @@ fun s23() {
                   && !Regex("a.b", RegexOption.LITERAL).matches("axb"))
     // Named backreferences inside a pattern.
     check("re48", Regex("(?<n>a)\\k<n>").matches("aa") && !Regex("(?<n>a)\\k<n>").matches("ab"))
+    // The java.util.regex dialect: nested classes and &&, \p{..}, \h \v \R, \x{h},
+    // lookbehind, and a backreference to a group that did not take part fails.
+    check("re49", Regex("[a-z&&[^aeiou]]+").matches("bcd") && !Regex("[a-z&&[^aeiou]]+").matches("bad"))
+    check("re50", Regex("\\p{Lu}+").matches("ABC") && !Regex("\\p{Lu}+").matches("AbC")
+                  && Regex("\\p{L}+").matches("\u00e9t\u00e9"))
+    check("re51", Regex("\\h+").matches(" \t") && Regex("a\\Rb").matches("a\r\nb")
+                  && Regex("\\x{41}").matches("A") && Regex("\\0101").matches("A"))
+    check("re52", !Regex("(?<=a)b").containsMatchIn("b") && Regex("(?<=a)b").containsMatchIn("ab")
+                  && !Regex("(a)|\\1b").containsMatchIn("b"))
+    check("re53", Regex("a{0,2147483647}").matches("a") && !Regex("a{1,2}{2}").matches("aaaa"))
+    // A bad pattern throws PatternSyntaxException (an IllegalArgumentException) with
+    // java's message, including a repeat bound that does not fit an int.
+    check("re54", rxErr23("a{99999999999}") == "PatternSyntaxException: Illegal repetition range near index 11|a{99999999999}|           ^")
+    check("re55", rxErr23("a{2,1}") == "PatternSyntaxException: Illegal repetition range near index 5|a{2,1}|     ^"
+                  && rxErr23("x{a}") == "PatternSyntaxException: Illegal repetition near index 2|x{a}|  ^")
+    check("re56", rxErr23("(") == "PatternSyntaxException: Unclosed group near index 1|("
+                  && rxErr23("[abc") == "PatternSyntaxException: Unclosed character class near index 3|[abc|   ^"
+                  && rxErr23("*a") == "PatternSyntaxException: Dangling meta character '*' near index 0|*a|^")
+    check("re57", rxErr23("\\k<nope>") == "PatternSyntaxException: named capturing group <nope> does not exist near index 7|\\k<nope>|       ^"
+                  && rxErr23("[]a]") == "ok")
 }
 
 // ===== SECTION 24: floating point arithmetic =====

@@ -2238,6 +2238,7 @@ HasStatic   = :script(~~
     include("lib/fdlibm.js")
     include("lib/java-chars.js")
     include("lib/regex.js")
+    include("lib/java-regex.js")
     include("lib/utf16-strings.js")
     include("lib/java-strings.js")
     // rxFail (the error) and rxPropHit (\p{..}) are regex.js's KNOBS, set by assignment.

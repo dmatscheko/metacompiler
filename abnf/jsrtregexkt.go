@@ -125,11 +125,10 @@ func (rt *jsrt) ktRxFlags(opts interface{}) (string, bool) {
 			names = append(names, rt.toString(opts))
 		}
 	}
-	// "q" unconditionally: the JVM regex dialect always understands \Q...\E quote
-	// regions, which is what Pattern.quote (Regex.escape / RegexOption.LITERAL) emits.
-	// It is a FLAG rather than the engine's default because in JavaScript \Q is an
-	// identity escape and /\Qa.b\E/ matches the text "Qa.bE".
-	flags, literal := "q", false
+	// "qJ" unconditionally: Kotlin/JVM's Regex is java.util.regex - \Q...\E quote
+	// regions (what Pattern.quote, so Regex.escape / RegexOption.LITERAL, emits) and
+	// the J dialect.
+	flags, literal := "qJ", false
 	for _, o := range names {
 		switch o {
 		case "IGNORE_CASE":
@@ -165,7 +164,10 @@ func (rt *jsrt) ktRxNew(pat, opts interface{}) *jsObject {
 	if literal {
 		src = ktRxQuote(src)
 	}
-	rt.ktRxCheck(rxGet(src, flags))
+	// Pattern.compile throws PatternSyntaxException, an IllegalArgumentException.
+	if re := rxGet(src, flags); !re.ok {
+		rt.ktRaise("PatternSyntaxException", jxReMsg(src, re.err, re.errAt))
+	}
 	return rxNewRegexObj(src, flags)
 }
 

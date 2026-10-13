@@ -675,6 +675,8 @@ function ktExcHierarchy() {
     // NumberFormatException is under IllegalArgumentException, not directly under
     // RuntimeException - checked with `instanceof` under java (JDK 24).
     h["NumberFormatException"] = k0MkExc("NumberFormatException", h["IllegalArgumentException"])
+    // java.util.regex.PatternSyntaxException is under IllegalArgumentException too.
+    h["PatternSyntaxException"] = k0MkExc("PatternSyntaxException", h["IllegalArgumentException"])
     // StringIndexOutOfBoundsException is under IndexOutOfBoundsException, not
     // directly under RuntimeException - checked with `instanceof` under java (JDK
     // 24). It is what `"ab"[5]` throws; the COLLECTION read throws plain
@@ -8965,7 +8967,11 @@ function k4NameVal(v, name) {
 //
 // The engine's names are rx* / RX_*; everything invented for Kotlin here is k5*.
 
+// Kotlin/JVM's Regex is java.util.regex: the J dialect with java's \p{..} table and
+// PatternSyntaxException text (lib/java-regex.js).
+import "./java-chars.js"
 import "./regex.js"
+import "./java-regex.js"
 
 // ===================================================== the Kotlin layer =====
 //
@@ -8979,6 +8985,7 @@ import "./regex.js"
 // regexp" path of the knob is unreachable from here - k5Check runs first and
 // reports the pattern the way ktRxCheck does.
 rxFail = function (msg) { fail("regexp: " + msg) }
+rxPropHit = function (id, c) { return jxPropHit(id, c) }
 
 // The compile cache is shared as rxCache / rxGet (lib/regex.js): ONE cache for
 // js, kotlin, python and ruby, as in abnf/jsrtregex.go.
@@ -9057,8 +9064,8 @@ function k5MatchOf(v) { return rxMatchOf(v) }
 // one for one; Kotlin, like Java and unlike Ruby, anchors ^/$ to the whole input
 // UNLESS MULTILINE is given, so "m" is NOT forced on. LITERAL is not a match
 // mode - it quotes the pattern. CANON_EQ and UNIX_LINES are reported rather than
-// silently ignored. "q" is unconditional: the JVM dialect always understands
-// \Q...\E quote regions, which is what Pattern.quote emits.
+// silently ignored. "qJ" is unconditional: Kotlin/JVM's Regex is java.util.regex,
+// \Q...\E quote regions (what Pattern.quote emits) and the J dialect.
 function k5Flags(opts) {
     var names = []
     if (!rtIsNil(opts)) {
@@ -9080,7 +9087,7 @@ function k5Flags(opts) {
             names.push(ktRender(opts))
         }
     }
-    var flags = "q"
+    var flags = "qJ"
     var literal = false
     var k = 0
     while (k < names.length) {
@@ -9321,7 +9328,9 @@ function ktRxNew(src, flags) {
     var fl = k5Flags(flags)
     var pat = ktRender(src)
     if (fl["literal"]) { pat = k5Quote(pat) }
-    k5Check(rxGet(pat, fl["flags"]))
+    // Pattern.compile throws PatternSyntaxException, an IllegalArgumentException.
+    var re = rxGet(pat, fl["flags"])
+    if (!re["ok"]) { ktRaise("PatternSyntaxException", jxReMsg(pat, re["err"], re["errAt"])) }
     return {__rxsrc: pat, __rxflags: fl["flags"]}
 }
 
