@@ -7583,6 +7583,7 @@ KwContinue  = "continue" KwEnd ;
         // append / insert / a write to a new key adopt. Twin in swift-interpreter.abnf.
         if (k == 1 && items[2] != undefined && swIsCollCtor(items[2].itext)) { declTyReg["$" + name] = annTxt }
         swNoteLocalAnn(name, swLocalNumAnn(annTxt, items, k))
+        swDsNoteFnVar(name, annTxt)
         var init = swDotWant(items[k], items[k + 1], annTxt)
         if (init != undefined && swIsSetArrTy(annTxt)) { init = swSetArrInit(init) }
         else if (init != undefined && swIsSetKeyTy(annTxt)) { init = swSetKeysInit(init) }

@@ -202,6 +202,21 @@ function swDsTupleTys(t) {
     for (var i = 0; i < parts.length; i = i + 2) { out.push(swDsDropLabel(u, parts[i], parts[i + 1])) }
     return out
 }
+// A variable of function type is called as a function is, so its parameter
+// types type the arguments too: `let cl: (Any) -> Void` keeps cl(c ? 1.5 : 3)'s
+// Int arm.
+function swDsNoteFnVar(name, ann) {
+    if (swDsFnResult(ann) == "") { return }
+    var u = swDsUnopt(ann)
+    var p = u.indexOf("(")
+    var parts = swDsSplit(u, p + 1, swDsGroupEnd(u, p), ",")
+    var params = []
+    for (var i = 0; i < parts.length; i = i + 2) {
+        var ty = stripWs(swDsDropLabel(u, parts[i], parts[i + 1]))
+        if (ty != "") { params.push({label: "", type: ty, hasDefault: false, variadic: false}) }
+    }
+    swDsNoteSig(name, params)
+}
 // The text of [from, to) without a leading `label:`.
 function swDsDropLabel(s, from, to) {
     var a = swDsLabelEnd(s, from, to)

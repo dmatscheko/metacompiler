@@ -4207,6 +4207,8 @@ func s90() {
     check("90f", "\(n2)" == "[[1, 2.5], [3]]" && "\(nk)" == "[\"k\": [1, 2.5]]" && "\(whole)" == "[1.0, 2.5]")
     check("90g", desc90(flag[0] ? 1.5 : 3) == "3" && desc90(flag[1] ? 1.5 : 3) == "1.5"
         && descs90([1, 2.5]) == "[1, 2.5]" && desc90([1, 2.5]) == "[1.0, 2.5]" && later90(flag[0]) == "3")
+    let cl: (Any) -> String = { "\($0)" }
+    check("90h", cl(flag[0] ? 1.5 : 3) == "3" && cl([1, 2.5]) == "[1.0, 2.5]")
 }
 func desc90(_ x: Any) -> String { return "\(x)" }
 func descs90(_ x: [Any]) -> String { return "\(x)" }
