@@ -3682,8 +3682,23 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return mt
     }
 
-    // table.*: ltablib.c over the sequence border (#t).
-    function luaSeti(t, i, v) { luaRawSet(t, luaKey(i), v) }
+    // table.*: ltablib.c over the sequence border (#t). Its reads and writes are
+    // lua_geti / lua_seti, so they go through __index / __newindex (luaGet,
+    // luaNewIndex), and its length is luaL_len, which asks __len (luaTabLen).
+    // Twins: luGeti / luSeti / luLen in abnf/jsrtlutab.go and lib/lua-rt.metajs.
+    function luaSeti(t, i, v) {
+        if (t.__mt === undefined) { luaRawSet(t, luaKey(i), v) } else { luaNewIndex(t, i, v) }
+    }
+    function luaTabLen(t) {
+        var h = anytype
+        h = luaTm(t, "__len")
+        if (h === undefined) { return luaLen(t) }
+        // lua_tointegerx: an integral float and a numeric string are lengths too.
+        var n = anytype
+        n = toNumV(luaCallVal(h, [t, t]))
+        if (n === undefined || numOf(n) - numOf(n) !== 0 || Math.floor(numOf(n)) !== numOf(n)) { fail("object length is not an integer") }
+        return numOf(n)
+    }
     // sort_comp: the comparator's first result, or a < b.
     function luaSortLess(cmp, a, b) {
         if (cmp === undefined || cmp === null) { return luaCmp("<", a, b) }
@@ -3691,8 +3706,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function luaSwap(t, i, j) {
         var a = anytype
-        a = luaIndex(t, i)
-        luaSeti(t, i, luaIndex(t, j))
+        a = luaGet(t, i)
+        luaSeti(t, i, luaGet(t, j))
         luaSeti(t, j, a)
     }
     // ltablib.c's auxsort with the middle element as the pivot (lua randomizes the
@@ -3702,26 +3717,26 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var lo = lo0
         var up = up0
         while (lo < up) {
-            if (luaSortLess(cmp, luaIndex(t, up), luaIndex(t, lo))) { luaSwap(t, lo, up) }
+            if (luaSortLess(cmp, luaGet(t, up), luaGet(t, lo))) { luaSwap(t, lo, up) }
             if (up - lo === 1) { return undefined }
             var p = lo + Math.floor((up - lo) / 2)
-            if (luaSortLess(cmp, luaIndex(t, p), luaIndex(t, lo))) { luaSwap(t, p, lo) }
-            else if (luaSortLess(cmp, luaIndex(t, up), luaIndex(t, p))) { luaSwap(t, p, up) }
+            if (luaSortLess(cmp, luaGet(t, p), luaGet(t, lo))) { luaSwap(t, p, lo) }
+            else if (luaSortLess(cmp, luaGet(t, up), luaGet(t, p))) { luaSwap(t, p, up) }
             if (up - lo === 2) { return undefined }
             var pv = anytype // The pivot value.
-            pv = luaIndex(t, p)
+            pv = luaGet(t, p)
             luaSwap(t, p, up - 1)
             var i = lo
             var j = up - 1
             var going = true
             while (going) {
                 i = i + 1
-                while (luaSortLess(cmp, luaIndex(t, i), pv)) {
+                while (luaSortLess(cmp, luaGet(t, i), pv)) {
                     if (i === up - 1) { fail("invalid order function for sorting") }
                     i = i + 1
                 }
                 j = j - 1
-                while (luaSortLess(cmp, pv, luaIndex(t, j))) {
+                while (luaSortLess(cmp, pv, luaGet(t, j))) {
                     if (j < i) { fail("invalid order function for sorting") }
                     j = j - 1
                 }
@@ -3745,11 +3760,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var sp = luaOptStr("table.concat", 2, sep, nargs, "")
             var k = luaOptInt("table.concat", 3, i, nargs, 1)
             var last = luaOptInt("table.concat", 4, j, nargs, 0 - 1)
-            if (j === undefined || j === null) { last = luaLen(t) }
+            if (j === undefined || j === null) { last = luaTabLen(t) }
             var out = ""
             while (k <= last) {
                 var v = anytype
-                v = luaIndex(t, k)
+                v = luaGet(t, k)
                 if (typeof v == "string") { out = out + v }
                 else if (isNum(v)) { out = out + luaNumStr(v) }
                 else { fail("invalid value (" + luaType(v) + ") at index " + k + " in table for 'concat'") }
@@ -3761,7 +3776,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         insert: function(t, a, b) {
             var nargs = arguments.length
             luaCheckTab("table.insert", 1, t, nargs)
-            var e = luaLen(t) + 1
+            var e = luaTabLen(t) + 1
             if (nargs === 2) {
                 luaSeti(t, e, a)
             } else if (nargs === 3) {
@@ -3769,7 +3784,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (pos < 1 || pos > e) { luaArgErr("table.insert", 2, "position out of bounds") }
                 var i = e
                 while (i > pos) {
-                    luaSeti(t, i, luaIndex(t, i - 1))
+                    luaSeti(t, i, luaGet(t, i - 1))
                     i = i - 1
                 }
                 luaSeti(t, pos, b)
@@ -3781,13 +3796,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         remove: function(t, p) {
             var nargs = arguments.length
             luaCheckTab("table.remove", 1, t, nargs)
-            var size = luaLen(t)
+            var size = luaTabLen(t)
             var pos = luaOptInt("table.remove", 2, p, nargs, size)
             if (pos !== size && (pos < 1 || pos > size + 1)) { luaArgErr("table.remove", 2, "position out of bounds") }
             var val = anytype // The removed element.
-            val = luaIndex(t, pos)
+            val = luaGet(t, pos)
             while (pos < size) {
-                luaSeti(t, pos, luaIndex(t, pos + 1))
+                luaSeti(t, pos, luaGet(t, pos + 1))
                 pos = pos + 1
             }
             luaSeti(t, pos, undefined)
@@ -3798,13 +3813,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             luaCheckTab("table.unpack", 1, t, nargs)
             var k = luaOptInt("table.unpack", 2, i, nargs, 1)
             var e = luaOptInt("table.unpack", 3, j, nargs, 0 - 1)
-            if (j === undefined || j === null) { e = luaLen(t) }
+            if (j === undefined || j === null) { e = luaTabLen(t) }
             var out = []
             if (k > e) { return mkMulti(out) }
             // lua's stack limit (LUAI_MAXSTACK) is what refuses a huge range.
             if (e - k >= 1000000) { fail("too many results to unpack") }
             while (k <= e) {
-                out.push(luaIndex(t, k))
+                out.push(luaGet(t, k))
                 k = k + 1
             }
             return mkMulti(out)
@@ -3818,7 +3833,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         sort: function(t, cmp) {
             var nargs = arguments.length
             luaCheckTab("table.sort", 1, t, nargs)
-            var n = luaLen(t)
+            var n = luaTabLen(t)
             if (n > 1) {
                 if (n >= 2147483647) { luaArgErr("table.sort", 1, "array too big") }
                 if (cmp !== undefined && cmp !== null && typeof cmp != "function") { luaArgTypeErr("table.sort", 2, "function", cmp, nargs) }
@@ -3840,9 +3855,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (e >= f) {
                 var n = e - f + 1
                 if (d > e || d <= f || (other && a1 !== dst)) {
-                    for (var i = 0; i < n; i++) { luaSeti(dst, d + i, luaIndex(a1, f + i)) }
+                    for (var i = 0; i < n; i++) { luaSeti(dst, d + i, luaGet(a1, f + i)) }
                 } else {
-                    for (var k = n - 1; k >= 0; k--) { luaSeti(dst, d + k, luaIndex(a1, f + k)) }
+                    for (var k = n - 1; k >= 0; k--) { luaSeti(dst, d + k, luaGet(a1, f + k)) }
                 }
             }
             return dst

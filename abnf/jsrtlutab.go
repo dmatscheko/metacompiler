@@ -6,6 +6,8 @@ package abnf
 // globalScope library in lua-interpreter.abnf. Each extern takes the call's
 // ARGUMENT ARRAY, so an absent argument can be told from a nil one.
 
+import "math"
+
 // luIsTable is Lua's type(v) == "table".
 func (rt *jsrt) luIsTable(v interface{}) bool { return rt.luType(v) == "table" }
 
@@ -18,20 +20,45 @@ func (rt *jsrt) luCheckTab(fn string, n int, args []interface{}) interface{} {
 	return v
 }
 
-// luGeti / luSeti are t[i] for an integer index, addressed the way the emitted
-// module's own t[i] addresses it (luKey).
+// luGeti / luSeti are lua_geti / lua_seti, t[i] for an integer index: addressed
+// the way the emitted module's own t[i] addresses it (luKey), and through
+// __index / __newindex when t has a metatable. Twins of luaGet / luaSeti in
+// lua-interpreter.abnf and luGeti / luSeti in lib/lua-rt.metajs.
 func (rt *jsrt) luGeti(t interface{}, i int64) interface{} {
-	return rt.getMember(t, luKey(giNorm(i, 64, false)))
+	v := rt.getMember(t, luKey(giNorm(i, 64, false)))
+	if luIsNil(v) && rt.luMetaOf(t) != nil {
+		return rt.luIndexMeta(t, giNorm(i, 64, false))
+	}
+	return v
 }
 
 func (rt *jsrt) luSeti(t interface{}, i int64, v interface{}) {
+	if rt.luMetaOf(t) != nil {
+		rt.luSetIndexMeta(t, giNorm(i, 64, false), v)
+		return
+	}
 	rt.setMember(t, luKey(giNorm(i, 64, false)), v)
 }
 
-// luBorder is #t of a table: the first n with t[n + 1] nil.
+// luLen is luaL_len, the length the table library works to: __len's answer,
+// which has to be an integer (an integral float or a numeric string converts),
+// else the border.
+func (rt *jsrt) luLen(t interface{}) int64 {
+	h := rt.luTm(t, "__len")
+	if h == nil {
+		return rt.luBorder(t)
+	}
+	n, ok := luToNum(rt.luTmCall(h, t, t))
+	if f := luNumOf(n); !ok || !luIsInt(n) && (f != math.Trunc(f) || math.IsInf(f, 0)) {
+		rt.luFail("object length is not an integer")
+	}
+	return luIntOf(n)
+}
+
+// luBorder is the raw #t of a table: the first n with t[n + 1] nil.
 func (rt *jsrt) luBorder(t interface{}) int64 {
 	n := int64(0)
-	for !luIsNil(rt.luGeti(t, n+1)) {
+	for !luIsNil(rt.getMember(t, luKey(giNorm(n+1, 64, false)))) {
 		n++
 	}
 	return n
@@ -301,7 +328,7 @@ func init() {
 			i := ival(rt.luOptInt("table.concat", 3, args, 1))
 			last := int64(0)
 			if luIsNil(luArgAt(args, 4)) {
-				last = rt.luBorder(t)
+				last = rt.luLen(t)
 			} else {
 				last = ival(rt.luCheckInt("table.concat", 4, args))
 			}
@@ -325,7 +352,7 @@ func init() {
 		m["js_luinsert"] = func(a []uint64) uint64 {
 			args := argsOf(a[0])
 			t := rt.luCheckTab("table.insert", 1, args)
-			e := rt.luBorder(t) + 1
+			e := rt.luLen(t) + 1
 			switch len(args) {
 			case 2:
 				rt.luSeti(t, e, args[1])
@@ -346,7 +373,7 @@ func init() {
 		m["js_luremove"] = func(a []uint64) uint64 {
 			args := argsOf(a[0])
 			t := rt.luCheckTab("table.remove", 1, args)
-			size := rt.luBorder(t)
+			size := rt.luLen(t)
 			pos := size
 			if !luIsNil(luArgAt(args, 2)) {
 				pos = ival(rt.luCheckInt("table.remove", 2, args))
@@ -367,7 +394,7 @@ func init() {
 			i := ival(rt.luOptInt("table.unpack", 2, args, 1))
 			var e int64
 			if luIsNil(luArgAt(args, 3)) {
-				e = rt.luBorder(t)
+				e = rt.luLen(t)
 			} else {
 				e = ival(rt.luCheckInt("table.unpack", 3, args))
 			}
@@ -396,7 +423,7 @@ func init() {
 		m["js_lusort"] = func(a []uint64) uint64 {
 			args := argsOf(a[0])
 			t := rt.luCheckTab("table.sort", 1, args)
-			n := rt.luBorder(t)
+			n := rt.luLen(t)
 			if n > 1 {
 				if n >= 2147483647 {
 					rt.luArgErr("table.sort", 1, "array too big")

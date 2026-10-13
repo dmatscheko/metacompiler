@@ -2160,6 +2160,34 @@ function s50()
         "bad argument #1 to 'collectgarbage' (invalid option 'bogus')|bad argument #2 to 'collectgarbage' (invalid option 'bogus')")
 end
 
+-- ===== SECTION 51: the table library through metamethods =====
+-- table.insert/remove/concat/unpack/sort/move read and write with lua_geti /
+-- lua_seti and measure with luaL_len, so a proxy's __index, __newindex and
+-- __len take part; rawlen does not. Values printed by lua 5.5.
+function s51()
+    local function try(f, ...)
+        local ok, e = pcall(f, ...)
+        if ok then return "ok" end
+        return (tostring(e):gsub("^[^:]*:%d+: ", ""))
+    end
+    local log = {}
+    local store = {10, 20, 30}
+    local p = setmetatable({}, {__index = store, __newindex = function(t, k, v) log[#log + 1] = k .. "=" .. tostring(v); store[k] = v end,
+                                __len = function() return #store end})
+    table.insert(p, 40)
+    check("tm1", #store .. " " .. store[4] .. " " .. table.concat(log, ",") .. "|" .. table.concat(p, "-") .. "|" .. select("#", table.unpack(p)), "4 40 4=40|10-20-30-40|4")
+    check("tm2", table.remove(p) .. " " .. #store .. " " .. table.concat(log, ","), "40 3 4=40,4=nil")
+    table.sort(p, function(a, b) return a > b end)
+    table.insert(p, 1, 5)
+    check("tm3", table.concat(store, " ") .. " " .. rawlen(p) .. " " .. #p, "5 30 20 10 0 4")
+    local q = table.move(p, 1, 2, 1, {})
+    check("tm4", q[1] .. " " .. q[2], "5 30")
+    local f = setmetatable({}, {__len = function() return 2.0 end, __index = function(t, i) return i * 3 end})
+    local s = setmetatable({}, {__len = function() return "3" end, __index = function(t, i) return i end})
+    check("tm5", table.concat(f, ",") .. "|" .. table.concat({table.unpack(s)}, ","), "3,6|1,2,3")
+    check("tm6", try(table.insert, setmetatable({}, {__len = function() return "x" end}), 1), "object length is not an integer")
+end
+
 s25() -- SECTION-CALL 25
 s26() -- SECTION-CALL 26
 s27() -- SECTION-CALL 27
@@ -2186,5 +2214,6 @@ s47() -- SECTION-CALL 47
 s48() -- SECTION-CALL 48
 s49() -- SECTION-CALL 49
 s50() -- SECTION-CALL 50
+s51() -- SECTION-CALL 51
 print("full: " .. checks .. " checks, " .. failures .. " failures")
 exit(failures)

@@ -2062,16 +2062,39 @@ function js_luiotype(args) {
 }
 
 // ----- the table library -----
+// Its reads and writes are lua_geti / lua_seti and its length is luaL_len, so a
+// table with a metatable goes through __index / __newindex / __len (luGetiM,
+// luSetiM, luLen). Each function reads the table's metatable slot (__f, see
+// luMetaOf) ONCE and indexes a plain table raw. Twins of luGeti / luSeti / luLen
+// in abnf/jsrtlutab.go and of luaGet / luaSeti / luaTabLen in
+// lua-interpreter.abnf.
+function luGetiM(t, i) {
+    var v = t[i]
+    if (v === undefined || v === null) { return js_luindex(t, i) }
+    return v
+}
+function luSetiM(t, i, v) { js_lusetindex(t, i, v) }
+function luLen(t) {
+    var h = luTm(t, "__len")
+    if (h === undefined) { return luBorder(t) }
+    // lua_tointegerx: an integral float and a numeric string are lengths too.
+    var n = luToNum(luFirstOf(h(t, t)))
+    if (n === undefined) { luFail("object length is not an integer") }
+    var d = luNumOf(n)
+    if (d - d !== 0 || Math.floor(d) !== d) { luFail("object length is not an integer") }
+    return d
+}
 function js_luconcat(args) {
     var t = luCheckTab("table.concat", 1, args)
+    var mt = typeof t["__f"] == "object"
     var sep = luOptStr("table.concat", 2, args, "")
     var i = luOptInt("table.concat", 3, args, 1)
     var last = 0
     var lv = luArgAt(args, 4)
-    if (lv === undefined || lv === null) { last = luBorder(t) } else { last = luCheckInt("table.concat", 4, args) }
+    if (lv === undefined || lv === null) { last = (mt ? luLen(t) : luBorder(t)) } else { last = luCheckInt("table.concat", 4, args) }
     var out = ""
     while (i <= last) {
-        var v = t[i]
+        var v = mt ? luGetiM(t, i) : t[i]
         if (typeof v == "string") { out = out + v }
         else if (luIsNum(v)) { out = out + js_lustr(v) }
         else { luFail("invalid value (" + luType(v) + ") at index " + js_lustr(i) + " in table for 'concat'") }
@@ -2082,18 +2105,19 @@ function js_luconcat(args) {
 }
 function js_luinsert(args) {
     var t = luCheckTab("table.insert", 1, args)
-    var e = luBorder(t) + 1
+    var mt = typeof t["__f"] == "object"
+    var e = (mt ? luLen(t) : luBorder(t)) + 1
     if (args.length === 2) {
-        t[e] = args[1]
+        if (mt) { luSetiM(t, e, args[1]) } else { t[e] = args[1] }
     } else if (args.length === 3) {
         var pos = luCheckInt("table.insert", 2, args)
         if (pos < 1 || pos > e) { luArgErr("table.insert", 2, "position out of bounds") }
         var i = e
         while (i > pos) {
-            t[i] = t[i - 1]
+            if (mt) { luSetiM(t, i, luGetiM(t, i - 1)) } else { t[i] = t[i - 1] }
             i = i - 1
         }
-        t[pos] = args[2]
+        if (mt) { luSetiM(t, pos, args[2]) } else { t[pos] = args[2] }
     } else {
         luFail("wrong number of arguments to 'insert'")
     }
@@ -2101,29 +2125,31 @@ function js_luinsert(args) {
 }
 function js_luremove(args) {
     var t = luCheckTab("table.remove", 1, args)
-    var size = luBorder(t)
+    var mt = typeof t["__f"] == "object"
+    var size = (mt ? luLen(t) : luBorder(t))
     var pos = luOptInt("table.remove", 2, args, size)
     if (pos !== size && (pos < 1 || pos > size + 1)) { luArgErr("table.remove", 2, "position out of bounds") }
-    var v = t[pos]
+    var v = mt ? luGetiM(t, pos) : t[pos]
     while (pos < size) {
-        t[pos] = t[pos + 1]
+        if (mt) { luSetiM(t, pos, luGetiM(t, pos + 1)) } else { t[pos] = t[pos + 1] }
         pos = pos + 1
     }
-    t[pos] = undefined
+    if (mt) { luSetiM(t, pos, undefined) } else { t[pos] = undefined }
     return v
 }
 function js_luunpack(args) {
     var t = luCheckTab("table.unpack", 1, args)
+    var mt = typeof t["__f"] == "object"
     var i = luOptInt("table.unpack", 2, args, 1)
     var e = 0
     var ev = luArgAt(args, 3)
-    if (ev === undefined || ev === null) { e = luBorder(t) } else { e = luCheckInt("table.unpack", 3, args) }
+    if (ev === undefined || ev === null) { e = (mt ? luLen(t) : luBorder(t)) } else { e = luCheckInt("table.unpack", 3, args) }
     var out = []
     if (i > e) { return luMk(out) }
     // lua's stack limit (LUAI_MAXSTACK) is what refuses a huge range.
     if (e - i >= 1000000) { luFail("too many results to unpack") }
     while (i <= e) {
-        out.push(t[i])
+        out.push(mt ? luGetiM(t, i) : t[i])
         i = i + 1
     }
     return luMk(out)
@@ -2140,48 +2166,56 @@ function luSortLess(cmp, a, b) {
     var r = luFirstOf(cmp.apply(undefined, [a, b]))
     return r !== undefined && r !== null && r !== false
 }
-function luSwap(t, i, j) {
+// `mt` says the table has a metatable, here and in luAuxSort.
+function luSwap(t, i, j, mt) {
+    if (mt) {
+        var b = luGetiM(t, i)
+        luSetiM(t, i, luGetiM(t, j))
+        luSetiM(t, j, b)
+        return undefined
+    }
     var a = t[i]
     t[i] = t[j]
     t[j] = a
+    return undefined
 }
 // ltablib.c's auxsort with the middle element as the pivot (lua randomizes the
 // pivot only for a badly unbalanced partition of more than 100 elements), so a
 // comparator sees the same calls in the same order.
-function luAuxSort(t, cmp, lo0, up0) {
+function luAuxSort(t, cmp, lo0, up0, mt) {
     var lo = lo0
     var up = up0
     while (lo < up) {
-        if (luSortLess(cmp, t[up], t[lo])) { luSwap(t, lo, up) }
+        if (luSortLess(cmp, (mt ? luGetiM(t, up) : t[up]), (mt ? luGetiM(t, lo) : t[lo]))) { luSwap(t, lo, up, mt) }
         if (up - lo === 1) { return undefined }
         var p = lo + Math.floor((up - lo) / 2)
-        if (luSortLess(cmp, t[p], t[lo])) { luSwap(t, p, lo) }
-        else if (luSortLess(cmp, t[up], t[p])) { luSwap(t, p, up) }
+        if (luSortLess(cmp, (mt ? luGetiM(t, p) : t[p]), (mt ? luGetiM(t, lo) : t[lo]))) { luSwap(t, p, lo, mt) }
+        else if (luSortLess(cmp, (mt ? luGetiM(t, up) : t[up]), (mt ? luGetiM(t, p) : t[p]))) { luSwap(t, p, up, mt) }
         if (up - lo === 2) { return undefined }
-        var pv = t[p]
-        luSwap(t, p, up - 1)
+        var pv = (mt ? luGetiM(t, p) : t[p])
+        luSwap(t, p, up - 1, mt)
         var i = lo
         var j = up - 1
         var going = true
         while (going) {
             i = i + 1
-            while (luSortLess(cmp, t[i], pv)) {
+            while (luSortLess(cmp, (mt ? luGetiM(t, i) : t[i]), pv)) {
                 if (i === up - 1) { luFail("invalid order function for sorting") }
                 i = i + 1
             }
             j = j - 1
-            while (luSortLess(cmp, pv, t[j])) {
+            while (luSortLess(cmp, pv, (mt ? luGetiM(t, j) : t[j]))) {
                 if (j < i) { luFail("invalid order function for sorting") }
                 j = j - 1
             }
-            if (j < i) { going = false } else { luSwap(t, i, j) }
+            if (j < i) { going = false } else { luSwap(t, i, j, mt) }
         }
-        luSwap(t, up - 1, i)
+        luSwap(t, up - 1, i, mt)
         if (i - lo < up - i) {
-            luAuxSort(t, cmp, lo, i - 1)
+            luAuxSort(t, cmp, lo, i - 1, mt)
             lo = i + 1
         } else {
-            luAuxSort(t, cmp, i + 1, up)
+            luAuxSort(t, cmp, i + 1, up, mt)
             up = i - 1
         }
     }
@@ -2189,12 +2223,13 @@ function luAuxSort(t, cmp, lo0, up0) {
 }
 function js_lusort(args) {
     var t = luCheckTab("table.sort", 1, args)
-    var n = luBorder(t)
+    var mt = typeof t["__f"] == "object"
+    var n = (mt ? luLen(t) : luBorder(t))
     if (n > 1) {
         if (n >= 2147483647) { luArgErr("table.sort", 1, "array too big") }
         var cmp = luArgAt(args, 2)
         if (cmp !== undefined && cmp !== null && luType(cmp) != "function") { luArgTypeErr("table.sort", 2, "function", args) }
-        luAuxSort(t, cmp, 1, n)
+        luAuxSort(t, cmp, 1, n, mt)
     }
     return undefined
 }
@@ -2207,12 +2242,20 @@ function js_lumove(args) {
     if (dv !== undefined && dv !== null) { tt = 5 }
     var src = luCheckTab("table.move", 1, args)
     var dst = luCheckTab("table.move", tt, args)
+    var smt = typeof src["__f"] == "object"
+    var dmt = typeof dst["__f"] == "object"
     if (e >= f) {
         var n = e - f + 1
         if (d > e || d <= f || (tt !== 1 && src !== dst)) {
-            for (var i = 0; i < n; i++) { dst[d + i] = src[f + i] }
+            for (var i = 0; i < n; i++) {
+                var v = smt ? luGetiM(src, f + i) : src[f + i]
+                if (dmt) { luSetiM(dst, d + i, v) } else { dst[d + i] = v }
+            }
         } else {
-            for (var k = n - 1; k >= 0; k--) { dst[d + k] = src[f + k] }
+            for (var k = n - 1; k >= 0; k--) {
+                var w = smt ? luGetiM(src, f + k) : src[f + k]
+                if (dmt) { luSetiM(dst, d + k, w) } else { dst[d + k] = w }
+            }
         }
     }
     return dst
