@@ -6467,6 +6467,7 @@ HasStatic   = :script(~~
         }
     }
     function buildRecord(items) {
+        jNoteRecComps(items[0], items[1].rparams)
         jOvDeclare(items[0], items.slice(2))
         jExitClass(items[0], buildClassFrom(items[0], items.slice(2), items[1].rparams))
     }

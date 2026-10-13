@@ -2527,13 +2527,13 @@ function jvOvAccepts(t, v, phase) {
         return t == jvOvBox(k)
     }
     if (t == "*") { return true }
-    if (k == "fn") { return false }
+    if (k == "fn") { return t.charAt(0) == "~" }
     if (t == "Object") { return true }
     if (k == "[]") { return false }
     if (k == "String") { return t == k }
-    // A class token, or "#" + a declared interface's name; rtClassIs walks the
-    // interfaces too.
-    if (t.charAt(0) == "#") { return rtClassIs(v["__class"], t.substring(1, t.length), 0) }
+    // A class token, or "#" / "~" + a declared interface's name (jOvTok in
+    // lib/java-decltypes.js); rtClassIs walks the interfaces too.
+    if (t.charAt(0) == "#" || t.charAt(0) == "~") { return rtClassIs(v["__class"], t.substring(1, t.length), 0) }
     return rtClassIs(v["__class"], t, 0)
 }
 

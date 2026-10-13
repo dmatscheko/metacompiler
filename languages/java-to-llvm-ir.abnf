@@ -5138,6 +5138,7 @@ HasStatic   = :script(~~
     function makeRecordStmt(items) {
         jExitClass()
         recordComponents["$" + items[0]] = items[1].rparams
+        jNoteRecComps(items[0], items[1].rparams)
         jOvDeclare(items[0], items.slice(2))
         return buildClassStmt(items[0], items.slice(2), items[1].rparams)
     }

@@ -134,6 +134,7 @@ class Main {
         S63.run(); // SECTION-CALL 63
         S64.run(); // SECTION-CALL 64
         S65.run(); // SECTION-CALL 65
+        S66.run(); // SECTION-CALL 66
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -3716,5 +3717,50 @@ class S65 {
             && Arrays.toString(l.toArray(new String[3])).equals("[p, q, null]")
             && (s.getClass().getComponentType().getName() + " " + ia.getClass().getComponentType() + " " + "x".getClass().getComponentType()).equals("java.lang.String int null")
             && made.getClass().getName().equals("[Ljava.lang.String;") && Arrays.toString((Object[]) made).equals("[null, null]"));
+    }
+}
+
+// ===== SECTION 66: inherited default overloads, functional-interface overloads, thenComparing =====
+//
+// A class overriding one overload of an interface's default method inherits
+// the others (JLS 8.4.8), whatever the receiver's static type. An overload
+// whose parameter is a functional interface takes a lambda or an instance of
+// that interface, not any reference. A lambda or method reference matches only
+// a functional interface of its own arity (JLS 15.12.2.1), which tells
+// thenComparing's key-extractor form from its Comparator form. Every expected
+// value is java 24.0.2's.
+interface S66Shape {
+    double area();
+    default String describe() { return "area " + area(); }
+    default String describe(String unit) { return "area " + area() + " " + unit; }
+}
+class S66Sq implements S66Shape {
+    double s;
+    S66Sq(double s) { this.s = s; }
+    public double area() { return s * s; }
+    public String describe(String unit) { return "square " + area() + unit; }
+}
+record S66P(String name, int age) {}
+class S66 {
+    static String kind(S66Shape s) { return "shape"; }
+    static String kind(Object o) { return "object"; }
+    static void run() {
+        S66Shape q = new S66Sq(1.5);
+        List<S66Shape> l = List.of(q);
+        String d = "";
+        for (S66Shape x : l) { d = d + x.describe() + "|" + x.describe("cm"); }
+        Object o = q;
+        Main.check("df66", (q.describe() + "|" + q.describe("m")).equals("area 2.25|square 2.25m") && d.equals("area 2.25|square 2.25cm")
+            && ((S66Shape) o).describe().equals("area 2.25"));
+        Main.check("fk66", (kind("s") + kind(q) + kind(() -> 2.0) + kind(3)).equals("objectshapeshapeobject"));
+        List<S66P> ps = new ArrayList<>(List.of(new S66P("bo", 30), new S66P("al", 25), new S66P("cy", 30)));
+        ps.sort(Comparator.comparing(S66P::age).thenComparing(S66P::name));
+        String a = ps.toString();
+        ps.sort(Comparator.comparing(S66P::age).reversed().thenComparing(p -> p.name()));
+        String b = ps.toString();
+        ps.sort(Comparator.comparing(S66P::name).thenComparingInt(S66P::age));
+        Main.check("tc66", a.equals("[S66P[name=al, age=25], S66P[name=bo, age=30], S66P[name=cy, age=30]]")
+            && b.equals("[S66P[name=bo, age=30], S66P[name=cy, age=30], S66P[name=al, age=25]]")
+            && ps.toString().equals("[S66P[name=al, age=25], S66P[name=bo, age=30], S66P[name=cy, age=30]]"));
     }
 }

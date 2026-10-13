@@ -26,7 +26,7 @@ function jVarTy(dtext) {
     var e = dtext.indexOf("=")
     if (e < 0) { return "var" }
     var t = jStaticTy(dtext.substring(e + 1, dtext.length))
-    if (t == "" || t == "null" || t == "fn") { return "var" }
+    if (t == "" || t == "null" || jIsFnTy(t)) { return "var" }
     return t
 }
 // An enhanced for's variable is declared with its FeType (`for (Integer x :
@@ -683,12 +683,14 @@ function jIsConvTy(ty) { return jIsPrimTy(ty) || jSamSig(ty) != null }
 function jOvCands(cls, mname) {
     var out = []
     var seen = {}
+    var chain = []
     var c = cls
     var guard = 0
     while (c != "" && guard < 64) {
         guard++
         var rec = jOvCls["$" + c]
         if (rec == undefined) { break }
+        chain.push(c)
         for (var i = 0; i < rec.ms.length; i++) {
             var m = rec.ms[i]
             if (m.name != mname || seen["$" + m.raw] == true) { continue }
@@ -697,9 +699,29 @@ function jOvCands(cls, mname) {
         }
         c = rec.sup
     }
+    // A default method of an implemented interface is inherited where no
+    // class on the chain declares its signature (JLS 8.4.8).
+    for (var k = 0; k < chain.length; k++) { jOvIfaceDefaults(chain[k], mname, out, seen, 0) }
     if (out.length < 2) { return null }
     for (var k = 1; k < out.length; k++) { if (out[k].statik != out[0].statik) { return null } }
     return out
+}
+// The default methods named mname of the interfaces type t implements or
+// extends, directly or further up, that out does not hold a signature of yet.
+function jOvIfaceDefaults(t, mname, out, seen, depth) {
+    var sups = jOvSupers["$" + t]
+    if (sups == undefined || depth > 64) { return undefined }
+    for (var i = 0; i < sups.length; i++) {
+        var ms = jOvIfaceMs["$" + sups[i]]
+        for (var k = 0; ms != undefined && k < ms.length; k++) {
+            var m = ms[k]
+            if (m.name != mname || !m.body || m.statik || seen["$" + m.raw] == true) { continue }
+            seen["$" + m.raw] = true
+            out.push(m)
+        }
+        jOvIfaceDefaults(sups[i], mname, out, seen, depth + 1)
+    }
+    return undefined
 }
 // Does any class or interface dispatch over `mname`? Then every declaration of
 // it is stored under its "name#sig" slot as well, so a class's override of an
@@ -729,13 +751,14 @@ var jOvCore = ",String,Object,Integer,Long,Double,Float,Short,Byte,Character,Boo
 function jOvIsPrim(t) { return jOvPrims.indexOf("," + t + ",") >= 0 }
 // The token a parameter type is matched with: a primitive or a java.lang name
 // as itself, an array as its element's token plus "[]", a declared class by
-// name, a declared interface that is not functional as "#" + its name, and
-// everything else (a functional interface, a type variable, a library type) as
-// "*", which takes any reference and any lambda.
+// name, a declared interface as "#" + its name or, when it is functional,
+// "~" + its name (which a lambda matches as well as an instance), and
+// everything else (a library functional interface, a type variable, a library
+// type) as "*", which takes any reference and any lambda.
 function jOvTok(raw) {
     if (raw.length > 2 && raw.substring(raw.length - 2) == "[]") { return jOvTok(raw.substring(0, raw.length - 2)) + "[]" }
     if (jOvIsPrim(raw) || jOvCore.indexOf("," + raw + ",") >= 0) { return raw }
-    if (jOvIfaces["$" + raw] == true) { return jSamUser["$" + raw] == undefined ? "#" + raw : "*" }
+    if (jOvIfaces["$" + raw] == true) { return jOvIfaceTok(raw) }
     if (jOvCls["$" + raw] != undefined) { return raw }
     var er = jTyVarErasure(raw)
     if (er != "") { return jOvTok(er) }
@@ -765,8 +788,11 @@ function jOvSub(s, t) {
     if (t == "Number") { return ",Integer,Long,Double,Float,Short,Byte,".indexOf("," + s + ",") >= 0 }
     return jOvExtends(jOvUntag(s), jOvUntag(t), 0)
 }
-// A declared interface's token without its "#".
-function jOvUntag(t) { return t.charAt(0) == "#" ? t.substring(1) : t }
+// A declared interface's token: "~" + a functional one's name, "#" + any
+// other's.
+function jOvIfaceTok(name) { return (jSamUser["$" + name] == undefined ? "#" : "~") + name }
+// A declared interface's token without its "#" or "~".
+function jOvUntag(t) { return t.charAt(0) == "#" || t.charAt(0) == "~" ? t.substring(1) : t }
 // Does declared type s extend or implement t, directly or through its supertypes?
 function jOvExtends(s, t, depth) {
     var sups = jOvSupers["$" + s]
@@ -890,7 +916,7 @@ function jOvAccepts(t, v, phase, kindOf, isA) {
         return t == jOvBox(k)
     }
     if (t == "*") { return true }
-    if (k == "fn") { return false }
+    if (k == "fn") { return t.charAt(0) == "~" }
     if (t == "Object") { return true }
     if (k == "String") { return t == k }
     return k == "obj" && isA(v, jOvUntag(t))
@@ -1025,14 +1051,18 @@ var jLibRetTys = {
 }
 // The static type of an expression's whitespace-free text, "" when unknown.
 // "null" is the null literal's type and "fn" a lambda's or method
-// reference's, which only a functional interface accepts.
+// reference's, which only a functional interface accepts - "fn" + its
+// parameter count when jFnArity can read it ("fn1").
 function jStaticTy(t) {
     if (t.length == 0) { return "" }
     var pt = jExprTy(t)
     if (pt != "") { return pt }
     if (t == "null") { return "null" }
     if (t == "true" || t == "false") { return "boolean" }
-    if (jTopFind(t, "->") >= 0 || jTopFind(t, "::") >= 0) { return "fn" }
+    if (jTopFind(t, "->") >= 0 || jTopFind(t, "::") >= 0) {
+        var n = jFnArity(t)
+        return n < 0 ? "fn" : "fn" + n
+    }
     if (jTopFind(t, "?") >= 0) { return jCondTy(t) }
     if (jTopOp(t, 1) >= 0) { return jConcatTy(t) }
     var c0 = t.charAt(0)
@@ -1048,6 +1078,64 @@ function jStaticTy(t) {
     var nt = jNewTy(t)
     if (nt != "") { return nt }
     return jChainTy(t)
+}
+function jIsFnTy(t) { return t == "fn" || (t.length == 3 && t.substring(0, 2) == "fn") }
+// The parameter count a lambda or method reference (whitespace-free text)
+// takes, -1 when it cannot be read: `x -> e` is 1 and `(a, b) -> e` 2;
+// `T::m` of a declared T is m's count, one more for an instance method (its
+// receiver), and 1 for a record component; a few java.lang ones are known
+// (jLibMrefArity). A functional interface of another arity cannot take it
+// (JLS 15.12.2.1).
+var jLibMrefArity = {"$String.length": 1, "$String.toLowerCase": 1, "$String.toUpperCase": 1, "$String.trim": 1,
+                     "$String.strip": 1, "$String.isEmpty": 1, "$String.hashCode": 1, "$String.compareTo": 2,
+                     "$String.compareToIgnoreCase": 2, "$String.valueOf": 1, "$Integer.compare": 2,
+                     "$Integer.compareTo": 2, "$Integer.intValue": 1, "$Integer.parseInt": 1, "$Integer.valueOf": 1,
+                     "$Long.compare": 2, "$Double.compare": 2, "$Object.toString": 1}
+var jRecComps = {}
+function jNoteRecComps(name, comps) { jRecComps["$" + name] = comps }
+function jFnArity(t) {
+    var ar = jTopFind(t, "->")
+    if (ar >= 0) {
+        var ps = t.substring(0, ar)
+        if (ps.charAt(0) != "(") { return 1 }
+        if (ps == "()") { return 0 }
+        return jSplitArgs(ps.substring(1, ps.length - 1)).length
+    }
+    var cc = jTopFind(t, "::")
+    var ty = t.substring(0, cc)
+    var m = t.substring(cc + 2)
+    var lib = jLibMrefArity["$" + ty + "." + m]
+    if (lib != undefined) { return lib }
+    var rec = jOvCls["$" + ty]
+    if (rec == undefined) { return 0 - 1 }
+    var found = 0 - 1
+    for (var i = 0; i < rec.ms.length; i++) {
+        if (rec.ms[i].name != m) { continue }
+        var n = rec.ms[i].ptys.length + (rec.ms[i].statik ? 0 : 1)
+        if (found >= 0 && found != n) { return 0 - 1 }
+        found = n
+    }
+    if (found >= 0) { return found }
+    var comps = jRecComps["$" + ty]
+    for (var k = 0; comps != undefined && k < comps.length; k++) { if (comps[k] == m) { return 1 } }
+    return 0 - 1
+}
+// The parameter count of the functional interface a parameter token t (raw
+// its declared type) stands for, -1 when it is not known.
+var jLibSamArity = {"$Runnable": 0, "$Callable": 0, "$Supplier": 0, "$Function": 1, "$Consumer": 1, "$Predicate": 1,
+                    "$UnaryOperator": 1, "$ToIntFunction": 1, "$ToLongFunction": 1, "$ToDoubleFunction": 1,
+                    "$IntFunction": 1, "$BiFunction": 2, "$BiConsumer": 2, "$BiPredicate": 2, "$BinaryOperator": 2}
+function jSamArity(t, raw) {
+    if (t.charAt(0) == "~") {
+        var sig = jSamUser["$" + t.substring(1)]
+        var ps = sig.substring(0, sig.indexOf(">"))
+        return ps == "" ? 0 : ps.split(",").length
+    }
+    var b = jOvBare(raw)
+    var from = 0
+    for (var i = 0; i < b.length; i++) { if (b.charAt(i) == ".") { from = i + 1 } }
+    var n = jLibSamArity["$" + b.substring(from)]
+    return n == undefined ? 0 - 1 : n
 }
 // `new T(...)`, `new T(...){...}`, `new T[n]...` and `new T[]{...}` - the
 // text reads "newT(...)" once its whitespace is gone, so a method of that
@@ -1357,14 +1445,14 @@ function jConcatTy(t) {
 // vocabulary), "" when it is not one this can judge: a type variable or a
 // library type. A declared interface is "#Name", which no class token takes.
 function jOvSTok(ty) {
-    if (ty == "null" || ty == "fn" || ty == "") { return ty }
+    if (ty == "null" || jIsFnTy(ty) || ty == "") { return ty }
     var b = jOvBare(ty)
     if (jOvIsArr(b)) {
         var et = jOvSTok(b.substring(0, b.length - 2))
-        return (et == "" || et == "null" || et == "fn") ? "" : et + "[]"
+        return (et == "" || et == "null" || jIsFnTy(et)) ? "" : et + "[]"
     }
     if (jOvIsPrim(b) || jOvCore.indexOf("," + b + ",") >= 0) { return b }
-    if (jOvIfaces["$" + b] == true) { return "#" + b }
+    if (jOvIfaces["$" + b] == true) { return jOvIfaceTok(b) }
     if (jOvCls["$" + b] != undefined) { return b }
     var er = jTyVarErasure(b)
     if (er != "") { return jOvSTok(er) }
@@ -1398,7 +1486,8 @@ function jOvLibAccepts(raw, s) {
     var impl = jLibIfaces["$" + raw]
     if (impl == undefined) { impl = jSamLib["$" + raw] != undefined ? ",fn," : undefined }
     if (impl == undefined) { return true }
-    if (s == "fn" || jOvCore.indexOf("," + s + ",") >= 0) { return impl.indexOf("," + s + ",") >= 0 }
+    if (jIsFnTy(s)) { return impl.indexOf(",fn,") >= 0 }
+    if (jOvCore.indexOf("," + s + ",") >= 0) { return impl.indexOf("," + s + ",") >= 0 }
     return !jOvIsArr(s)
 }
 // Can an argument of static token s be passed to a parameter of token t in
@@ -1414,7 +1503,11 @@ function jOvSAccepts(t, s, phase, raw) {
         return jOvSAccepts(et, es, 1, raw.substring(0, raw.length - 2))
     }
     if (jOvIsArr(s)) { return t == "Object" || (t == "*" && jOvLibAccepts(raw, s)) }
-    if (s == "fn") { return t == "*" && jOvLibAccepts(raw, s) }
+    if (jIsFnTy(s)) {
+        if (!((t == "*" && jOvLibAccepts(raw, s)) || t.charAt(0) == "~")) { return false }
+        var sa = jSamArity(t, raw)
+        return s == "fn" || sa < 0 || sa == parseInt(s.substring(2), 10)
+    }
     if (jOvIsPrim(t)) {
         if (jOvIsPrim(s)) { return jOvWiden(s, t) }
         if (phase < 2) { return false }

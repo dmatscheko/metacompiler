@@ -20,8 +20,8 @@ interface Iterator<E> {
 // Comparable's compareTo, as java's do. Each comparator is built in a local of
 // type Comparator, which makes the lambda an instance of this interface, so a
 // chained reversed() or thenComparing() reaches the defaults. thenComparing's
-// one-argument Function form is left out: a lambda carries no parameter types
-// to tell it from the Comparator form at run time.
+// Function and Comparator forms are told apart by the argument's arity where
+// the call site is resolved statically (jFnArity in lib/java-decltypes.js).
 interface Comparator<T> {
     int compare(T a, T b);
 
@@ -48,6 +48,14 @@ interface Comparator<T> {
         Comparator<T> c = (a, b) -> Integer.compare(key.applyAsInt(a), key.applyAsInt(b));
         return c;
     }
+    static <T> Comparator<T> comparingLong(java.util.function.ToLongFunction<? super T> key) {
+        Comparator<T> c = (a, b) -> Long.compare(key.applyAsLong(a), key.applyAsLong(b));
+        return c;
+    }
+    static <T> Comparator<T> comparingDouble(java.util.function.ToDoubleFunction<? super T> key) {
+        Comparator<T> c = (a, b) -> Double.compare(key.applyAsDouble(a), key.applyAsDouble(b));
+        return c;
+    }
     default Comparator<T> reversed() {
         Comparator<T> self = this;
         Comparator<T> c = (a, b) -> self.compare(b, a);
@@ -63,6 +71,18 @@ interface Comparator<T> {
     }
     default <U> Comparator<T> thenComparing(java.util.function.Function<? super T, ? extends U> key, Comparator<? super U> keyCmp) {
         return thenComparing(comparing(key, keyCmp));
+    }
+    default <U extends Comparable<? super U>> Comparator<T> thenComparing(java.util.function.Function<? super T, ? extends U> key) {
+        return thenComparing(comparing(key));
+    }
+    default Comparator<T> thenComparingInt(java.util.function.ToIntFunction<? super T> key) {
+        return thenComparing(comparingInt(key));
+    }
+    default Comparator<T> thenComparingLong(java.util.function.ToLongFunction<? super T> key) {
+        return thenComparing(comparingLong(key));
+    }
+    default Comparator<T> thenComparingDouble(java.util.function.ToDoubleFunction<? super T> key) {
+        return thenComparing(comparingDouble(key));
     }
 }
 
