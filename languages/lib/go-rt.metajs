@@ -2865,7 +2865,7 @@ function js_gochan_new(ty) {
 
 function js_gochan_send(ch, v) {
     if (!goIsChan(ch)) { fail("send on a non-channel") }
-    if (ch.closed === true) { fail("send on closed channel") }
+    if (ch.closed === true) { throw goRTErr("runtime.plainError", "send on closed channel") }
     ch.buf.push(v)
     return undefined
 }
@@ -2887,12 +2887,30 @@ function js_gochan_ready(ch) {
     return ch.closed === true
 }
 
-// close(ch): the callee's argument array.
+// close(ch): the callee's argument array. Closing a nil or an already closed
+// channel is a run-time panic. Twins: js_gochan_close in abnf/jsrt.go, close in
+// go-interpreter.abnf.
 function js_gochan_close(args) {
     if (!Array.isArray(args) || args.length == 0) { fail("close() needs a channel") }
     var ch = args[0]
+    if (ch === undefined || ch === null) { throw goRTErr("runtime.plainError", "close of nil channel") }
     if (!goIsChan(ch)) { fail("close() needs a channel") }
+    if (ch.closed === true) { throw goRTErr("runtime.plainError", "close of closed channel") }
     ch.closed = true
+    return undefined
+}
+
+// make([]T, n, c) and make(chan T, n): the run-time panics of a negative length,
+// a capacity below the length and a negative buffer size. Twins: js_gomakesl /
+// js_gomakech in abnf/jsrtgolang.go, makeMakeCall in go-interpreter.abnf.
+function js_gomakesl(n, c) {
+    var ln = goNum(n)
+    if (ln < 0) { goRTPanic("makeslice: len out of range") }
+    if (goNum(c) < ln) { goRTPanic("makeslice: cap out of range") }
+    return undefined
+}
+function js_gomakech(n) {
+    if (goNum(n) < 0) { throw goRTErr("runtime.plainError", "makechan: size out of range") }
     return undefined
 }
 

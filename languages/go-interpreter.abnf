@@ -2492,7 +2492,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     function chanSend(ch, v) {
         if (!isChan(ch)) fail("send on a non-channel")
-        if (ch.closed) fail("send on closed channel")
+        if (ch.closed) { goPlainPanic("send on closed channel") }
         ch.buf.push(v)
     }
     // {v, ok}: ok is false exactly when the channel is closed and drained, and then
@@ -2530,8 +2530,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (ch.buf.length == 0 && !ch.closed) { goDrain() }
         return ch.buf.length > 0 || ch.closed
     }
+    // Closing a nil or an already closed channel is a run-time panic. Twins:
+    // js_gochan_close in lib/go-rt.metajs and abnf/jsrt.go.
     hostGlobals["close"] = function(ch) {
+        if (ch === null || ch === undefined) { goPlainPanic("close of nil channel") }
         if (!isChan(ch)) fail("close() needs a channel")
+        if (ch.closed) { goPlainPanic("close of closed channel") }
         ch.closed = true
     }
 
@@ -4022,13 +4026,20 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
         if (d.mkind == "chan") {
             var cz = d.czero
-            return function() { return newChan(capT != null ? capT() : 0, cz) }
+            return function() {
+                var cn = lenT != null ? szNum(lenT()) : 0
+                if (cn < 0) { goPlainPanic("makechan: size out of range") }
+                return newChan(cn, cz)
+            }
         }
         var ez = d.cet
+        // A negative length, or a capacity below the length, is a run-time panic.
+        // Twin of js_gomakesl in lib/go-rt.metajs and abnf/jsrtgolang.go.
         return function() {
-            var n = lenT != null ? lenT() : 0
-            var cp = capT != null ? capT() : n
-            if (cp < n) { fail("make: capacity smaller than length") }
+            var n = lenT != null ? szNum(lenT()) : 0
+            var cp = capT != null ? szNum(capT()) : n
+            if (n < 0) { goRTPanic("makeslice: len out of range") }
+            if (cp < n) { goRTPanic("makeslice: cap out of range") }
             var a = []
             for (var i = 0; i < cp; i++) { a.push(zeroOfType2(ez)) }
             return slT(newSl(a, 0, n, cp), ez)

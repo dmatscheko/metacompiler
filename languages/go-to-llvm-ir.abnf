@@ -1121,12 +1121,12 @@ NewCall     <~~ push(makeNew(pop().nty)) ~~>
 NewType     <~~ push({nty: firstType(up.in)}) ~~>
             = Type ;
 
-// make(chan T) / make(chan T, n): the buffer size is parsed and discarded (a send
-// never blocks in this model); the ELEMENT type decides what a receive from a closed
+// make(chan T) / make(chan T, n): the buffer size is only checked (a send never
+// blocks in this model); the ELEMENT type decides what a receive from a closed
 // channel yields.
 MakeChan    <~~ push(makeMakeChan(takeAll())); regSt(up.pos, goMakeTy(up.in)) ~~>
             = "make" KwEnd "(" ( "chan" KwEnd [ "<-" ] | "<-" "chan" KwEnd ) ChanElemT
-              [ "," Expression <~~ pop() ~~> ] ")" ;
+              [ "," Expression ] ")" ;
 ChanElemT   <~~ push({cet: firstType(up.in)}) ~~> = Type ;
 MapTypeZ    = "map" KwEnd "[" KType "]" ZType ;
 // The KEY type text, which an elided struct key is built against (see MapKey).
@@ -2538,6 +2538,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 b = rc.b
                 cp = rc.v
             }
+            // js_gomakesl panics on a negative length or a capacity below it.
+            callExt(b, "js_gomakesl", [rl.v, cp])
             return {b: b, v: emitHelper(b, "$smake", [rl.v, cp, emitZeroDecl(b, cet), emitStr(b, cet)])}
         }
     }
@@ -2573,9 +2575,18 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     // items = [{cet}]: make(chan T[, n]). The element type text travels to the runtime,
     // where a receive from a closed, drained channel answers its zero value.
+    // A negative buffer size is a run-time panic (js_gomakech).
     function makeMakeChan(items) {
         var ty = items[0].cet
-        return function(b) { return {b: b, v: callExt(b, "js_gochan_new", [emitStr(b, ty)])} }
+        var szT = items.length > 1 ? items[1] : null
+        return function(b) {
+            if (szT != null) {
+                var rs = szT(b)
+                b = rs.b
+                callExt(b, "js_gomakech", [rs.v])
+            }
+            return {b: b, v: callExt(b, "js_gochan_new", [emitStr(b, ty)])}
+        }
     }
     function makeMakeMap(items) {
         var zero = items[items.length - 1].mzero

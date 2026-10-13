@@ -2293,6 +2293,25 @@ func init() {
 		}
 		m["js_goptreq"] = func(a []uint64) uint64 { return w(rt.goPtrEq(u(a[0]), u(a[1]))) }
 		m["js_goptrne"] = func(a []uint64) uint64 { return w(!rt.goPtrEq(u(a[0]), u(a[1]))) }
+		// js_gomakesl(n, c) / js_gomakech(n): the run-time panics of make. Twins:
+		// js_gomakesl / js_gomakech in lib/go-rt.metajs, makeMakeCall in
+		// languages/go-interpreter.abnf.
+		m["js_gomakesl"] = func(a []uint64) uint64 {
+			n, c := rt.toNumber(u(a[0])), rt.toNumber(u(a[1]))
+			if n < 0 {
+				goRTFail("makeslice: len out of range")
+			}
+			if c < n {
+				goRTFail("makeslice: cap out of range")
+			}
+			return w(jsUndef)
+		}
+		m["js_gomakech"] = func(a []uint64) uint64 {
+			if rt.toNumber(u(a[0])) < 0 {
+				panic(goRTErr("runtime.plainError", "makechan: size out of range"))
+			}
+			return w(jsUndef)
+		}
 		// js_goifeq / js_goifne: == on two interface values. Twins: js_goifeq in
 		// lib/go-rt.metajs, goIfEq in languages/go-interpreter.abnf.
 		m["js_goifeq"] = func(a []uint64) uint64 { return w(rt.goIfEq(u(a[0]), u(a[1]))) }

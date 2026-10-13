@@ -15506,7 +15506,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				rt.fail("send on a non-channel")
 			}
 			if o.props["closed"] == true {
-				rt.fail("send on closed channel")
+				panic(goRTErr("runtime.plainError", "send on closed channel"))
 			}
 			buf.elems = append(buf.elems, u(a[1]))
 			return 0
@@ -15537,9 +15537,18 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if args == nil || len(args.elems) == 0 {
 				rt.fail("close() needs a channel")
 			}
+			// A nil or an already closed channel is a run-time panic. Twins:
+			// js_gochan_close in lib/go-rt.metajs, close in go-interpreter.abnf.
+			switch args.elems[0].(type) {
+			case jsUndefT, jsNullT:
+				panic(goRTErr("runtime.plainError", "close of nil channel"))
+			}
 			o, _, ok := goChanParts(args.elems[0])
 			if !ok {
 				rt.fail("close() needs a channel")
+			}
+			if o.props["closed"] == true {
+				panic(goRTErr("runtime.plainError", "close of closed channel"))
 			}
 			o.set("closed", true)
 			return w(jsUndef)

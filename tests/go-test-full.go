@@ -3907,6 +3907,28 @@ func s66() {
 	check("mm3", fmt.Sprint(min(is[0], is[1]), max(is[0], is[1]), min(us[0], us[1])) == "-2 3 18446744073709551614")
 }
 
+// ===== SECTION 67: run-time panics of close, send and make =====
+func rc67(f func()) (s string) {
+	defer func() { s = fmt.Sprint(recover()) }()
+	f()
+	return "none"
+}
+
+func s67() {
+	ns := []int{3, 2, -1, 0}
+	got := rc67(func() { c := make(chan int); close(c); close(c) }) + "|" +
+		rc67(func() { var c chan int; close(c) }) + "|" +
+		rc67(func() { c := make(chan int, 1); close(c); c <- 1 })
+	check("pch1", got == "close of closed channel|close of nil channel|send on closed channel")
+	got = rc67(func() { _ = make([]int, ns[0], ns[1]) }) + "|" +
+		rc67(func() { _ = make([]int, ns[2]) }) + "|" +
+		rc67(func() { _ = make([]int, ns[3], ns[2]) }) + "|" +
+		rc67(func() { _ = make(chan int, ns[2]) }) + "|" +
+		rc67(func() { _ = make([]int, ns[1], ns[0]) })
+	check("pmk1", got == "runtime error: makeslice: cap out of range|runtime error: makeslice: len out of range|"+
+		"runtime error: makeslice: cap out of range|makechan: size out of range|<nil>")
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -3974,6 +3996,7 @@ func main() {
 	s64() // SECTION-CALL 64
 	s65() // SECTION-CALL 65
 	s66() // SECTION-CALL 66
+	s67() // SECTION-CALL 67
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }
