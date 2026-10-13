@@ -2621,7 +2621,8 @@ KwContinue  = "continue" KwEnd ;
     // arguments and returns extName(...). abs/max/min need it because the Swift
     // spellings are Double-aware externs rather than the shared Math members, and
     // the program calls them like any other function value.
-    // post, when given, maps the extern's answer before the closure returns it.
+    // post, when given, maps the extern's answer before the closure returns it; an
+    // empty extName passes the first argument straight to post.
     function swIntConvPost(it) { return function(fb, v) { return swEmitConv(fb, v, it) } }
     function emitExtFn(b, extName, arity, post) {
         funcCount++
@@ -2634,7 +2635,7 @@ KwContinue  = "continue" KwEnd ;
         curScopeV = callExt(fb, "js_scope_new", [f.Params[0]])
         var argv = []
         for (var i = 0; i < arity; i++) { argv.push(callExt(fb, "js_arg", [f.Params[1], handle(i)])) }
-        var rv = callExt(fb, extName, argv)
+        var rv = extName == "" ? argv[0] : callExt(fb, extName, argv)
         fb.NewRet(post == undefined ? rv : post(fb, rv))
         curF = savedF
         curScopeV = savedScope
@@ -5676,6 +5677,25 @@ KwContinue  = "continue" KwEnd ;
                     var rc = withTypeCtx(nkC, function() { return emitConstruct(bC, nkC, clsC, argsC) })
                     b = rc.b
                     cur = rc.v
+                } else if (s.kind == "mcall" && s.name == "init" && pathKey != null && typeAt(pathKey) != null
+                           && typeAt(pathKey).kind == "enum") {
+                    // `E.init(rawValue: r)`: the failable raw-value initializer.
+                    var rea = withTypeCtx(pathKey, function() { return emitArgRecs(b, s.args) })
+                    b = rea.b
+                    cur = b.NewCall(rtRawCase(), [cur, callExt(b, "js_swidx", [rea.v, emitNum(b, 0)])])
+                    pathKey = null
+                } else if (s.kind == "mcall" && s.name == "init" && pathKey != null && typeAt(pathKey) != null
+                           && typeAt(pathKey).kind != "proto") {
+                    // `S.init(x: 1)` on a type the prefix names statically: the
+                    // construction S(x: 1) is, its initializer picked by label.
+                    var ikC = pathKey
+                    var ibC = b
+                    var iaC = s.args
+                    var iclsC = cur
+                    var irc = withTypeCtx(ikC, function() { return emitConstruct(ibC, ikC, iclsC, iaC) })
+                    b = irc.b
+                    cur = irc.v
+                    pathKey = null
                 } else if (s.kind == "mcall") {
                     var ea = emitArgRecsInto(b, s.args, null, i == 0 ? eTy0 : swArgAnn(s.name, anns[i]))
                     b = ea.b
@@ -5705,6 +5725,8 @@ KwContinue  = "continue" KwEnd ;
                         omB.NewBr(jmB)
                         b = jmB
                         cur = jmB.NewPhi([llvm.ir.NewIncoming(r1, sa.b), llvm.ir.NewIncoming(r2, omB)])
+                    } else if (s.name == "init" && !(i == 0 && (headName == "self" || headName == "super"))) {
+                        cur = b.NewCall(rtDynCall(), [cur, ea.v])
                     } else {
                         cur = swEmitLMCall(b, cur, s, mnameV, ea.v)
                     }
@@ -6869,10 +6891,38 @@ KwContinue  = "continue" KwEnd ;
                 return {b: xJoinB, v: xjv}
             }
             var fV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, name)])
-            var rv = callExt(b, "js_call", [fV, hUndef, ea.v])
+            // A capitalised name no function declares may be a generic parameter
+            // bound to a type at run time (`T()` in `func make<T: P>(_: T.Type)`).
+            var cap = name.charCodeAt(0) >= 65 && name.charCodeAt(0) <= 90 && lookupSig(name) == null
+            var rv = cap ? b.NewCall(rtDynCall(), [fV, ea.v]) : callExt(b, "js_call", [fV, hUndef, ea.v])
             emitWriteBacks(b, ea.boxes)
             return {b: b, v: rv}
         }
+    }
+    // A call of a value that may be a TYPE at run time - a generic parameter, or
+    // `t.init(...)` on a metatype - constructs it as emitConstruct does, through
+    // its first-declared initializer (the overload cannot be picked by label
+    // without the static type); a function value is called as usual. Twin of the
+    // init arm of mcall in swift-interpreter.abnf.
+    function rtDynCall() {
+        return rtFunc("sw_dyncall", 2, function(b, ps) {
+            var tyB = curF.NewBlock("")
+            var notB = curF.NewBlock("")
+            var btB = curF.NewBlock("")
+            var fnB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, b.NewCall(rtProbe("sw_isclass", "__isclass"), [ps[0]])), tyB, notB)
+            // A builtin's type value (String, Int8, ...) converts through its init.
+            notB.NewCondBr(truthy(notB, notB.NewCall(rtProbe("sw_istname", "__tname"), [ps[0]])), btB, fnB)
+            btB.NewRet(callExt(btB, "js_call", [callExt(btB, "js_get", [ps[0], emitStr(btB, "init")]), hUndef, ps[1]]))
+            fnB.NewRet(callExt(fnB, "js_call", [ps[0], hUndef, ps[1]]))
+            var objV = callExt(tyB, "js_obj_new", [])
+            callExt(tyB, "js_set", [objV, emitStr(tyB, "__class"), ps[0]])
+            var ctorArgs = callExt(tyB, "js_arr_new", [])
+            callExt(tyB, "js_arr_push", [ctorArgs, objV])
+            callExt(tyB, "js_call", [callExt(tyB, "js_get", [ps[0], emitStr(tyB, "__ctor")]), hUndef, ctorArgs])
+            var iret = tyB.NewCall(rtPrependCall(), [objV, callExt(tyB, "js_get", [ps[0], emitStr(tyB, "init")]), ps[1]])
+            tyB.NewRet(tyB.NewSelect(truthy(tyB, callExt(tyB, "js_seq", [iret, hNull])), hNull, objV))
+        })
     }
 
     // Assignment: a plain name goes through js_kget/js_kset (locals, then the
@@ -8591,6 +8641,30 @@ KwContinue  = "continue" KwEnd ;
     // A numeric declared type adopts, exactly as it does on a local: `struct T { var
     // a: Double = 3 }` stores 3.0, and `T(a: 3)` binds 3.0 through the memberwise
     // initializer's parameter (memberwiseParams copies `ty` into its `adopt`).
+    // The type an unannotated stored property takes from a decimal float-literal
+    // default: `var x = 0.0` is a Double, so its memberwise argument and every write
+    // adopt as an annotated one would. "" for any other default (`1...5` included).
+    // Twin of swLitDefTy in swift-interpreter.abnf.
+    function swLitDefTy(t0) {
+        var t = stripWs(t0)
+        var i = t.length > 0 && t.charAt(0) == "-" ? 1 : 0
+        if (i >= t.length || t.charCodeAt(i) < 48 || t.charCodeAt(i) > 57) { return "" }
+        var frac = false
+        var dots = 0
+        for (var j = i; j < t.length; j++) {
+            var ch = t.charAt(j)
+            var dig = t.charCodeAt(j) >= 48 && t.charCodeAt(j) <= 57
+            if (ch == ".") {
+                dots = dots + 1
+                if (dots > 1 || j + 1 >= t.length || t.charCodeAt(j + 1) < 48 || t.charCodeAt(j + 1) > 57) { return "" }
+                frac = true
+            } else if (ch == "e" || ch == "E") { frac = true }
+            else if (ch == "+" || ch == "-") {
+                if (j == 0 || (t.charAt(j - 1) != "e" && t.charAt(j - 1) != "E")) { return "" }
+            } else if (!dig && ch != "_") { return "" }
+        }
+        return frac ? "Double" : ""
+    }
     function makeProp(items) {
         var k = 1
         var ty = ""
@@ -8602,6 +8676,10 @@ KwContinue  = "continue" KwEnd ;
         else if (items[k] != undefined && items[k].atype != undefined) { ty = items[k].atype; k++ }
         var annTxt = ty
         if (items[k] != undefined && items[k].otype != undefined) { annTxt = items[k].otype; k++ }
+        if (ty == "" && annTxt == "" && items[k + 1] != undefined && items[k + 1].itext != undefined) {
+            ty = swLitDefTy(items[k + 1].itext)
+            annTxt = ty
+        }
         notePropTy(items[0], annTxt)
         var pinit = swDotWant(items[k], items[k + 1], annTxt)
         if (pinit != undefined && swIsSetTy(annTxt)) {
@@ -10579,6 +10657,10 @@ KwContinue  = "continue" KwEnd ;
             // The answer takes the receiver's type: `Int8.random(in: 3...3)` is an Int8.
             callExt(b, "js_set", [intV, emitStr(b, "random"),
                                   emitExtFn(b, "js_swrandom", 1, swIntConvPost(it))])
+            // `Int8.init` as a value (`xs.map(Int8.init)`) and `Int8.init(x)`: the
+            // one-argument conversion Int8(x) is. Twin: swGetField's init arm in
+            // swift-interpreter.abnf.
+            callExt(b, "js_set", [intV, emitStr(b, "init"), emitExtFn(b, "", 1, swIntConvPost(it))])
             callExt(b, "js_set", [intV, emitStr(b, "__tname"), emitStr(b, tn)])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, tn), intV])
         }
@@ -10607,6 +10689,7 @@ KwContinue  = "continue" KwEnd ;
             callExt(b, "js_set", [floV, emitStr(b, "zero"), zeroV])
             callExt(b, "js_set", [floV, emitStr(b, "random"),
                                   emitExtFn(b, floTypeNames[fi] == "Float" ? "js_swrandomf" : "js_swrandomd", 1)])
+            callExt(b, "js_set", [floV, emitStr(b, "init"), emitExtFn(b, floExt, 1)])
             // The FloatingPoint statics that name the type's range. Each is
             // spelled as TEXT and handed to parseFloat because the tag dialect has no
             // exponent literal - `5e-324` lexes as the identifier `e324` - and each
@@ -10628,6 +10711,7 @@ KwContinue  = "continue" KwEnd ;
         for (var bi = 0; bi < swPlainTypeNames.length; bi++) {
             var btV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [btV, emitStr(b, "__tname"), emitStr(b, swPlainTypeNames[bi])])
+            if (swPlainTypeNames[bi] == "String") { callExt(b, "js_set", [btV, emitStr(b, "init"), emitExtFn(b, "js_swstrinit", 1)]) }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, swPlainTypeNames[bi]), btV])
         }
         // abs/max/min are Double-aware: Math.abs would truncate a boxed operand to

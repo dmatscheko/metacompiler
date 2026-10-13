@@ -4645,6 +4645,31 @@ func s104() {
     check("104a", a.toArray() == [1] && b.toArray() == ["x", "y"] && b.count() == 2)
 }
 
+// ===== SECTION 105: float-literal defaults; type values that construct =====
+// `var x = 0.0` declares a Double, so the memberwise argument 3 is 3.0. A type
+// VALUE constructs: a generic `T()` / `T(x:)`, `t.init()` on a metatype, the
+// explicit `S.init(x:)` and `E.init(rawValue:)`, and a builtin's `init` passed
+// as a function (`map(String.init)`, `compactMap(Int.init)`). Every value read
+// off swiftc 6.1.2.
+struct Pt105 { var x = 0.0, y = 0.0 }
+protocol Mk105 { init(x: Int); var x: Int { get } }
+struct S105: Mk105 { var x: Int }
+final class C105: Mk105 { let x: Int; init(x: Int) { self.x = x * 10 } }
+func build105<T: Mk105>(_ t: T.Type, _ v: Int) -> T { T(x: v) }
+class B105 { required init() {}; func who() -> String { "base" } }
+class D105: B105 { required init() { super.init() }; override func who() -> String { "derived" } }
+enum E105: Int { case a = 1, b }
+func s105() {
+    let p = Pt105(x: 3, y: 4)
+    check("105a", "\(p.x) \(p.y) \(Pt105())" == "3.0 4.0 Pt105(x: 0.0, y: 0.0)")
+    let mt: Mk105.Type = C105.self
+    let ts: [B105.Type] = [B105.self, D105.self]
+    check("105b", build105(S105.self, 3).x == 3 && build105(C105.self, 3).x == 30 && mt.init(x: 2).x == 20
+        && ts.map { $0.init().who() } == ["base", "derived"] && S105.init(x: 5).x == 5 && E105.init(rawValue: 2) == .b)
+    check("105c", [1, 2].map(String.init) == ["1", "2"] && ["1", "x", "3"].compactMap(Int.init) == [1, 3]
+        && "\([1, 2].map(Double.init))" == "[1.0, 2.0]" && String.init(5) == "5")
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -4750,6 +4775,7 @@ func main() {
     s102() // SECTION-CALL 102
     s103() // SECTION-CALL 103
     s104() // SECTION-CALL 104
+    s105() // SECTION-CALL 105
     print("full: \(checks) checks, \(fails) failures")
 }
 

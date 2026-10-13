@@ -3697,7 +3697,16 @@ KwContinue  = "continue" KwEnd ;
         if (!Array.isArray(arr) || arr.length == 0) { return null }
         return wantLast ? arr[arr.length - 1] : arr[0]
     }
+    // A builtin type's `init` as a value (`xs.map(String.init)`): its one-argument
+    // conversion. Twin: the "init" slot of the builtin descriptors in
+    // swift-to-llvm-ir.abnf.
+    function swBuiltinInit(t) {
+        if (typeof t.__convl == "function") { return function(x) { return t.__convl([x], []) } }
+        return function(x) { return t.__conv(x) }
+    }
     function swGetField(o, name) {
+        if (name == "init" && o !== null && typeof o == "object" && o.__tname !== undefined
+            && (typeof o.__convl == "function" || typeof o.__conv == "function")) { return swBuiltinInit(o) }
         // A value of a program type (an instance, or a descriptor for a static)
         // reads its own `count`; anything else is a collection. Twin of
         // sw_uprop_count in swift-to-llvm-ir.abnf.
@@ -4336,6 +4345,13 @@ KwContinue  = "continue" KwEnd ;
         if (target.__isenum === true && hasOwn(target, name) && typeof target[name] == "function") {
             return target[name].apply(undefined, args)
         }
+        // `t.init(...)` on a type VALUE (a metatype, `let t: P.Type = S.self`) is a
+        // construction of that type. Twin of rtDynCall in swift-to-llvm-ir.abnf.
+        if (name == "init" && isTypeVal(target) && target.__isclass === true) {
+            return constructInstance(target, args, mcLabels)
+        }
+        if (name == "init" && target.__isenum === true) { return enumFromRaw(target, args.length > 0 ? args[0] : undefined) }
+        if (name == "init" && target.__tname !== undefined) { return swBuiltinInit(target)(args.length > 0 ? args[0] : undefined) }
         if (isTypeVal(target)) {
             var tt = accTable(target)
             var sf = tt == null ? null : classFind(tt, "__static_" + name)
@@ -8590,6 +8606,30 @@ KwContinue  = "continue" KwEnd ;
     // A numeric declared type adopts, exactly as it does on a local: `struct T { var
     // a: Double = 3 }` stores 3.0, and `T(a: 3)` binds 3.0 through the memberwise
     // initializer's parameter (memberwiseParams copies `ty` into its `adopt`).
+    // The type an unannotated stored property takes from a decimal float-literal
+    // default: `var x = 0.0` is a Double, so its memberwise argument and every write
+    // adopt as an annotated one would. "" for any other default (`1...5` included).
+    // Twin of swLitDefTy in swift-to-llvm-ir.abnf.
+    function swLitDefTy(t0) {
+        var t = stripWs(t0)
+        var i = t.length > 0 && t.charAt(0) == "-" ? 1 : 0
+        if (i >= t.length || t.charCodeAt(i) < 48 || t.charCodeAt(i) > 57) { return "" }
+        var frac = false
+        var dots = 0
+        for (var j = i; j < t.length; j++) {
+            var ch = t.charAt(j)
+            var dig = t.charCodeAt(j) >= 48 && t.charCodeAt(j) <= 57
+            if (ch == ".") {
+                dots = dots + 1
+                if (dots > 1 || j + 1 >= t.length || t.charCodeAt(j + 1) < 48 || t.charCodeAt(j + 1) > 57) { return "" }
+                frac = true
+            } else if (ch == "e" || ch == "E") { frac = true }
+            else if (ch == "+" || ch == "-") {
+                if (j == 0 || (t.charAt(j - 1) != "e" && t.charAt(j - 1) != "E")) { return "" }
+            } else if (!dig && ch != "_") { return "" }
+        }
+        return frac ? "Double" : ""
+    }
     function makeProp(items) {
         var k = 1
         var ty = ""
@@ -8601,6 +8641,10 @@ KwContinue  = "continue" KwEnd ;
         else if (items[k] != undefined && items[k].atype != undefined) { ty = items[k].atype; k++ }
         var annTxt = ty
         if (items[k] != undefined && items[k].otype != undefined) { annTxt = items[k].otype; k++ }
+        if (ty == "" && annTxt == "" && items[k + 1] != undefined && items[k + 1].itext != undefined) {
+            ty = swLitDefTy(items[k + 1].itext)
+            annTxt = ty
+        }
         notePropTy(items[0], annTxt)
         var pinit = swDotWant(items[k], items[k + 1], annTxt)
         if (pinit != undefined && swIsSetTy(annTxt)) {
