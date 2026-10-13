@@ -4423,11 +4423,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return 0
         }
         if (cmd == "exit") {
-            var code = (args.length > 0) ? strToInt(args[0]) : lastStatus
+            var code = (args.length > 0) ? (arPair(arStr(args[0])).l & 255) : lastStatus
             return {ret: code, isExit: 1}
         }
         if (cmd == "return") {
-            var rc = (args.length > 0) ? strToInt(args[0]) : lastStatus
+            // `return N` and `exit N` are N modulo 256: 300 is 44, -1 is 255.
+            var rc = (args.length > 0) ? (arPair(arStr(args[0])).l & 255) : lastStatus
             return {ret: rc}
         }
         var key = "$" + cmd

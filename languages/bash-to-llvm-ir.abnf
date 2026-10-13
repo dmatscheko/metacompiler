@@ -3837,7 +3837,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             if (cmd == "exit") {
                 var code = zero
-                if (argTs.length > 0) { var r = evalWord(b, argTs[0]); b = r.b; code = s2i(b, r.v) } else { code = b.NewLoad(i32, gStatus) }
+                // An exit status is N modulo 256: `exit 300` is 44, `exit -2` is 254.
+                if (argTs.length > 0) { var r = evalWord(b, argTs[0]); b = r.b; code = b.NewAnd(s2i(b, r.v), llvm.constant.NewInt(i32, 255)) }
+                else { code = b.NewLoad(i32, gStatus) }
                 b.NewStore(code, gExitCode)
                 b.NewStore(one, gExited)
                 b.NewBr(curExit)
@@ -3845,7 +3847,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             if (cmd == "return") {
                 var rv = null
-                if (argTs.length > 0) { var r2 = evalWord(b, argTs[0]); b = r2.b; rv = s2i(b, r2.v) } else { rv = b.NewLoad(i32, gStatus) }
+                // `return N` is N modulo 256, like an exit status: 300 is 44, -1 is 255.
+                if (argTs.length > 0) { var r2 = evalWord(b, argTs[0]); b = r2.b; rv = b.NewAnd(s2i(b, r2.v), llvm.constant.NewInt(i32, 255)) }
+                else { rv = b.NewLoad(i32, gStatus) }
                 if (curFrame != null) { emitFnRet(b, rv); return deadBlock() }
                 storeStatus(b, rv); return b
             }
@@ -4079,7 +4083,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return {pats: pats, body: body, cterm: term}
     }
     // items = [subjectWordObj, clause...]. One clause = one pattern test and one body block;
-    // ";;&" branches on to the NEXT clause after its body instead of to the merge block.
+    // ";;&" branches on to the NEXT clause's test after its body, ";&" falls into the next
+    // clause's BODY without testing it, ";;" ends the case. The status is the last body
+    // command's, 0 when no clause matched or the body is empty (`false; case x in x) ;; esac`
+    // is 0). Twin of makeCase in bash-interpreter.abnf.
     function makeCase(items) {
         var subjT = items[0]
         var clauses = items.slice(1)
@@ -4089,6 +4096,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var subj = r0.v
             var merge = curF.NewBlock("")
             var i
+            var bodies = []
+            for (i = 0; i < clauses.length; i++) { bodies.push(curF.NewBlock("")) }
             for (i = 0; i < clauses.length; i++) {
                 var cl = clauses[i]
                 var hit = zero
@@ -4098,12 +4107,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     b = rp.b
                     hit = b.NewOr(hit, b.NewCall(rtGlob, [rp.v, subj]))
                 }
-                var thenB = curF.NewBlock(""), nextB = curF.NewBlock("")
-                b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, hit, zero), thenB, nextB)
-                var tb = cl.body(thenB)
-                if (cl.cterm == ";;&") { tb.NewBr(nextB) } else { tb.NewBr(merge) }
+                var nextB = curF.NewBlock("")
+                b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, hit, zero), bodies[i], nextB)
+                storeStatusI(bodies[i], 0)
+                var tb = cl.body(bodies[i])
+                if (cl.cterm == ";;&") { tb.NewBr(nextB) }
+                else if (cl.cterm == ";&" && i + 1 < clauses.length) { tb.NewBr(bodies[i + 1]) }
+                else { tb.NewBr(merge) }
                 b = nextB
             }
+            storeStatusI(b, 0)
             b.NewBr(merge)
             return merge
         }

@@ -2203,6 +2203,39 @@ s41() {
   check nt2 "$r" "01101"
 }
 
+# ===== SECTION 42: return / exit modulo 256, case fall-through and status =====
+# `return N` and `exit N` are N modulo 256; ";&" falls into the next clause's body without
+# testing it, ";;&" tests the next clause; a case whose matched body is empty, or that
+# matches nothing, answers 0. Every expected value is bash 5.3's.
+s42() {
+  local r="" s
+  f42a() { return 300; }
+  f42b() { return -1; }
+  f42c() { return 4294967297; }
+  f42a; r="$r $?"
+  f42b; r="$r $?"
+  f42c; r="$r $?"
+  (exit 300); r="$r $?"
+  (exit -2); r="$r $?"
+  check rt1 "$r" " 44 255 1 44 254"
+  r=""
+  for s in a b c; do
+    case "$s" in a) r="${r}A;" ;& b) r="${r}B;" ;; c) r="${r}C;" ;;& *) r="${r}S;" ;; esac
+  done
+  check cs1 "$r" "A;B;B;C;S;"
+  r=""
+  case a in a) r="${r}1" ;& b) r="${r}2" ;& c) r="${r}3" ;; d) r="${r}4" ;; esac
+  case b in a) r="${r}5" ;;& b) r="${r}6" ;;& *) r="${r}7" ;;& c) r="${r}8" ;; esac
+  check cs2 "$r" "12367"
+  r=""
+  false; case x in y) ;; esac; r="$r$?"
+  false; case x in x) ;; esac; r="$r$?"
+  case x in x) false ;; esac; r="$r$?"
+  case x in x) false ;& y) ;; esac; r="$r$?"
+  case x in x) ;& y) false ;; esac; r="$r$?"
+  check cs3 "$r" "00101"
+}
+
 s01   # SECTION-CALL 01
 s02   # SECTION-CALL 02
 s03   # SECTION-CALL 03
@@ -2244,5 +2277,6 @@ s38   # SECTION-CALL 38
 s39   # SECTION-CALL 39
 s40   # SECTION-CALL 40
 s41   # SECTION-CALL 41
+s42   # SECTION-CALL 42
 echo "full: $checks checks, $fails failures"
 exit $fails
