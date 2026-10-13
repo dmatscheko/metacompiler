@@ -138,6 +138,15 @@ func (rt *jsrt) jvThrowCls(cls *jsObject, msg interface{}) {
 
 func (rt *jsrt) jvThrowArith(msg string) { rt.jvThrowCls(jvArithExcCls, msg) }
 
+// jvNpeIfNull throws the NullPointerException a null raises where Java unboxes
+// it (JLS 5.1.8) or a library method dereferences it. Twin of jvNpeIfNull in
+// languages/lib/java-rt.metajs.
+func (rt *jsrt) jvNpeIfNull(v interface{}) {
+	if _, isNull := v.(jsNullT); isNull {
+		rt.jvThrowCls(jvNpeCls, jsNull)
+	}
+}
+
 // Is the value part of the java.lang Throwable hierarchy at all? The 64-deep cap
 // is the one every __class/__super walk here carries (manual chapter 7.9).
 func jvIsThrowable(v interface{}) bool {
@@ -300,6 +309,7 @@ func jvToLong(rt *jsrt, v interface{}) int64 {
 	case float64:
 		return int64(t) // an int is exact
 	}
+	rt.jvNpeIfNull(v)
 	return jvNarrowFloat(rt.toNumber(v), 64)
 }
 
@@ -1525,6 +1535,8 @@ func init() {
 				return w(rt.jvmArith(op[0], l, r))
 			}
 			if !jvIsIntegral(l) || !jvIsIntegral(r) {
+				rt.jvNpeIfNull(l)
+				rt.jvNpeIfNull(r)
 				// & | ^ on two booleans are Java's non-short-circuit boolean
 				// operators; anything else is not a program javac accepts.
 				lb, lok := l.(bool)
@@ -1544,6 +1556,8 @@ func init() {
 			return w(rt.jvArith(op, l, r))
 		}
 		m["js_jvshift"] = func(a []uint64) uint64 {
+			rt.jvNpeIfNull(u(a[1]))
+			rt.jvNpeIfNull(u(a[2]))
 			return w(rt.jvShift(opOf(a[0]), u(a[1]), u(a[2])))
 		}
 		// An ordered comparison. Two integers compare at the promoted width;
@@ -1555,6 +1569,8 @@ func init() {
 			}
 			// A float operand promotes the other side to float too (JLS 5.6.2),
 			// so 16777217 < 16777216f is FALSE - the int converts to 1.6777216E7.
+			rt.jvNpeIfNull(l)
+			rt.jvNpeIfNull(r)
 			l, r = jvmFloCmpPair(rt, l, r)
 			c := rt.jsCompare(l, r)
 			// jsCompare answers the SENTINEL 2 for a NaN operand ("every
@@ -1584,6 +1600,7 @@ func init() {
 		m["js_jvadopt"] = func(a []uint64) uint64 {
 			v := u(a[0])
 			if !jvIsIntegral(v) {
+				rt.jvNpeIfNull(v)
 				return a[0]
 			}
 			return w(jvNarrow(rt, v, uint8(jsToInt(rt.toNumber(u(a[1]))))))
@@ -1627,6 +1644,7 @@ func init() {
 			if jvIsLong(v) {
 				return w(jvBox(-giVal(rt, v)))
 			}
+			rt.jvNpeIfNull(v)
 			return rt.wrapNum(float64(-jvI(rt, v)))
 		}
 		m["js_jvnot"] = func(a []uint64) uint64 {
@@ -1634,6 +1652,7 @@ func init() {
 			if jvIsLong(v) {
 				return w(jvBox(^giVal(rt, v)))
 			}
+			rt.jvNpeIfNull(v)
 			return rt.wrapNum(float64(^jvI(rt, v)))
 		}
 		// ++ / -- keep the type of what they step, which is the same implicit
@@ -1653,6 +1672,7 @@ func init() {
 			case jsGInt:
 				return w(jvNarrow(rt, rt.jvArith("+", t, float64(d)), t.w))
 			}
+			rt.jvNpeIfNull(v)
 			return rt.wrapNum(float64(jvI(rt, v) + int32(d)))
 		}
 		// The result of a COMPOUND assignment: the operation, then the implicit
@@ -1703,7 +1723,14 @@ func init() {
 			if b, ok := u(a[0]).(jsGInt); ok {
 				return rt.wrapNum(float64(b.v))
 			}
+			rt.jvNpeIfNull(u(a[0]))
 			return a[0]
+		}
+		// A null reference used as an object or unboxed, at a site the emitter
+		// checks itself (a Boolean condition, `throw null`, a switch).
+		m["js_jvnpe"] = func(a []uint64) uint64 {
+			rt.jvThrowCls(jvNpeCls, jsNull)
+			return 0
 		}
 
 		// System.out.println(x) / System.out.print(x). The argument ARRAY of the
@@ -1940,6 +1967,8 @@ func init() {
 			if jvIsIntegral(l) && jvIsIntegral(r) {
 				return w(rt.jvArith("+", l, r))
 			}
+			rt.jvNpeIfNull(l)
+			rt.jvNpeIfNull(r)
 			return w(rt.jsAdd(l, r))
 		}
 	})

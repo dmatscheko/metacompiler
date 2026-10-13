@@ -474,13 +474,15 @@ Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" { Statement } "}" ;
 
 If          <~~ push(makeIf(takeAll())) ~~>
-            = KwIf "(" Expression ")" SubStmt [ KwElse SubStmt ] ;
+            = KwIf "(" CondE ")" SubStmt [ KwElse SubStmt ] ;
+CondE       <~~ push(jCondChk(pop(), up.in)) ~~>
+            = Expression ;
 
 While       <~~ push(makeWhile(pop(), pop())) ~~>
-            = KwWhile "(" Expression ")" SubStmt ;
+            = KwWhile "(" CondE ")" SubStmt ;
 
 Do          <~~ push(makeDo(pop(), pop())) ~~>
-            = KwDo SubStmt KwWhile "(" Expression ")" ";" ;
+            = KwDo SubStmt KwWhile "(" CondE ")" ";" ;
 
 // The classic colon switch (on int or String): execution starts at the first matching
 // label and runs until a break or the end of the switch. Labels may stack.
@@ -583,7 +585,7 @@ ForVar      = DeclCore ;
 // The init and update parts are comma-separated expression lists (JLS 14.14.1):
 // `for (i = 0, j = n; ...; i++, j--)`, run left to right.
 ForExpr     <~~ push(makeSeq(takeAll())) ~~> = ForStmtExpr { "," ForStmtExpr } ;
-ForCond     <~~ push({k:"cond", t:pop()}) ~~> = Expression ;
+ForCond     <~~ push({k:"cond", t:pop()}) ~~> = CondE ;
 ForPost     <~~ push({k:"post", t:makeSeq(takeAll())}) ~~> = ForStmtExpr { "," ForStmtExpr } ;
 ForStmtExpr <~~ push(exprToStmt(pop())) ~~> = Expression ;
 
@@ -840,7 +842,7 @@ BitXorExpr  <~~ push(foldBinary(takeAll())) ~~>
 BitAndExpr  <~~ push(foldBinary(takeAll())) ~~>
             = EqExpr { "&" <~~ push("&") ~~> EqExpr } ;
 
-EqExpr      <~~ push(foldBinary(takeAll())) ~~>
+EqExpr      <~~ push(jFoldEq(takeAll(), up.in)) ~~>
             = RelExpr { ( "==" | "!=" ) <~~ push(up.in) ~~> RelExpr } ;
 
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
@@ -889,7 +891,7 @@ PreChain    <~~ push(makeChainTarget(takeAll(), up.in)) ~~>
             = Primary ChainSfx { ChainSfx } ;
 Neg         <~~ push(makeNeg(pop())) ~~>
             = "-" UnaryExpr ;
-Not         <~~ push(makeNot(pop())) ~~>
+Not         <~~ push(makeNot(jCondChk(pop(), up.in.substring(1)))) ~~>
             = "!" UnaryExpr ;
 BitNot      <~~ push(makeBitNot(pop(), up.pos)) ~~>
             = "~" UnaryExpr ;
@@ -2233,8 +2235,9 @@ HasStatic   = :script(~~
     function makeCond(items, text) {
         if (items.length == 1) return items[0]
         var cv = jCondConv(text)
+        var condT = jCondChk(items[0], text.substring(0, jTopFind(text, "?")))
         return function(b) {
-            var r = items[0](b)
+            var r = condT(b)
             var thenB = curF.NewBlock("")
             var elseB = curF.NewBlock("")
             var mergeB = curF.NewBlock("")
@@ -3629,9 +3632,10 @@ HasStatic   = :script(~~
                     b.NewCondBr(isFn, callB, mcallB)
                     var cv = callExt(callB, "js_call", [cur, hUndef, ea.v])
                     callB.NewBr(mergeB)
-                    var mv = jEmitNamedCall(mcallB, cur, s, ea.v)
-                    mcallB.NewBr(mergeB)
-                    cur = mergeB.NewPhi([llvm.ir.NewIncoming(cv, callB), llvm.ir.NewIncoming(mv, mcallB)])
+                    var okB = jNullGuard(mcallB, cur)
+                    var mv = jEmitNamedCall(okB, cur, s, ea.v)
+                    okB.NewBr(mergeB)
+                    cur = mergeB.NewPhi([llvm.ir.NewIncoming(cv, callB), llvm.ir.NewIncoming(mv, okB)])
                     b = mergeB
                 } else if (s.kind == "field") {
                     cur = callExt(b, "js_get", [cur, emitStr(b, s.name)])
@@ -3807,13 +3811,46 @@ HasStatic   = :script(~~
         }
     }
     // throw e: evaluate e and raise it with js_throw (a Go panic the runtime unwinds).
+    // `throw e` with e null throws a NullPointerException instead (JLS 14.18).
     function makeThrow(e) {
         return function(b) {
             var r = e(b)
-            callExt(r.b, "js_throw", [r.v])
-            r.b.NewRet(hUndef) // Never reached: js_throw unwinds on the host side.
+            var tb = jNullGuard(r.b, r.v)
+            callExt(tb, "js_throw", [r.v])
+            tb.NewRet(hUndef) // Never reached: js_throw unwinds on the host side.
             return deadBlock()
         }
+    }
+    // Continues in a new block when v is not null, and throws a
+    // NullPointerException (js_jvnpe) when it is: a null used as an object or
+    // unboxed at a site no extern sees. Twin of jNonNull in
+    // java-interpreter.abnf.
+    function jNullGuard(b, v) {
+        var npeB = curF.NewBlock("")
+        var okB = curF.NewBlock("")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, v, hNull), npeB, okB)
+        callExt(npeB, "js_jvnpe", [])
+        npeB.NewRet(hUndef) // Never reached: js_jvnpe throws.
+        return okB
+    }
+    function jNonNull(t) {
+        return function(b) {
+            var r = t(b)
+            return {b: jNullGuard(r.b, r.v), v: r.v}
+        }
+    }
+    // A condition that may be a Boolean box (jCondMayBox) unboxes it. Twin of
+    // jCondChk in java-interpreter.abnf.
+    function jCondChk(t, text) { return jCondMayBox(text) ? jNonNull(t) : t }
+    // `a == b` with one primitive operand unboxes the other (JLS 15.21.1).
+    // Twin of jFoldEq in java-interpreter.abnf.
+    function jFoldEq(items, text) {
+        if (items.length == 3) {
+            var ub = jEqUnbox(text)
+            if (ub.l) { items[0] = jNonNull(items[0]) }
+            if (ub.r) { items[2] = jNonNull(items[2]) }
+        }
+        return foldBinary(items)
     }
     // super(args) / this(args): not implemented; lower the arguments and continue.
     function makeCtorCall(args, pos) {
@@ -4194,6 +4231,8 @@ HasStatic   = :script(~~
                 }
                 b = nextB
             }
+            // A null selector no `case null` took is an NPE (JLS 14.11.3).
+            b = jNullGuard(b, r.v)
             b.NewBr(dfltB)
             var outerCont = loopStack.length > 0 ? loopStack[loopStack.length - 1].cont : null
             loopStack.push({cont: outerCont, brk: exitB})
@@ -4237,9 +4276,10 @@ HasStatic   = :script(~~
             var postB = curF.NewBlock("")
             var exitB = curF.NewBlock("")
             b.NewCondBr(isArr, arrHeadB, itInitB)
-            callExt(itInitB, "js_scope_set", [curScopeV, emitStr(itInitB, iName),
-                                              callExt(itInitB, "js_mcall", [r.v, emitStr(itInitB, "iterator"), callExt(itInitB, "js_arr_new", [])])])
-            itInitB.NewBr(itHeadB)
+            var itOkB = jNullGuard(itInitB, r.v)
+            callExt(itOkB, "js_scope_set", [curScopeV, emitStr(itOkB, iName),
+                                            callExt(itOkB, "js_mcall", [r.v, emitStr(itOkB, "iterator"), callExt(itOkB, "js_arr_new", [])])])
+            itOkB.NewBr(itHeadB)
             var iV = callExt(arrHeadB, "js_scope_get", [curScopeV, emitStr(arrHeadB, iName)])
             var aV = callExt(arrHeadB, "js_scope_get", [curScopeV, emitStr(arrHeadB, aName)])
             var lenV = callExt(arrHeadB, "js_get", [aV, emitStr(arrHeadB, "length")])
@@ -5119,7 +5159,7 @@ HasStatic   = :script(~~
     // So each is gated on the FEATURE, not on the type name: the flags below are
     // set by the grammar actions, which run while the file is walked and are
     // therefore complete before emitBuiltinExc runs.
-    var jUsesIdx = false        // any `a[i]`, System.arraycopy -> AIOOBE + NullPointerException
+    var jUsesIdx = false        // any `a[i]`, System.arraycopy -> ArrayIndexOutOfBoundsException
     var jUsesStrIdx = false     // charAt/substring -> StringIndexOutOfBoundsException
     var jUsesNewArr = false     // new T[n]         -> NegativeArraySizeException
     var jUsesParse = false      // parseInt/parseDouble/valueOf ... -> NumberFormatException
@@ -5142,20 +5182,22 @@ HasStatic   = :script(~~
     // NegativeArraySizeException from `new int[-1]` (JLS 15.10.1, js_jvnewlen),
     // NumberFormatException from Integer.parseInt and its kin, IllegalArgumentException
     // from String.repeat.
-    // js_jvexc registers each descriptor by NAME. ArithmeticException alone is
-    // unconditional: an integer divide by zero is reachable from arithmetic the
-    // emitter cannot see around; the others are gated on the flags above.
+    // js_jvexc registers each descriptor by NAME. ArithmeticException and
+    // NullPointerException are unconditional: an integer divide by zero and a
+    // null dereference are reachable from code the emitter cannot see around;
+    // the others are gated on the flags above.
     var neededExc = {"$ArithmeticException": true, "$RuntimeException": true,
                      "$Exception": true, "$Throwable": true}
     // The names handed to the runtime by js_jvexc. jNoteRuntimeExc, called once
     // the whole file has been walked, adds the feature-gated ones.
     var runtimeExc = {"$ArithmeticException": true}
     function jNoteRuntimeExc() {
+        // Any program can dereference or unbox a null.
+        runtimeExc["$NullPointerException"] = true
+        noteTypeUse("NullPointerException")
         if (jUsesIdx) {
             runtimeExc["$ArrayIndexOutOfBoundsException"] = true
-            runtimeExc["$NullPointerException"] = true
             noteTypeUse("ArrayIndexOutOfBoundsException")
-            noteTypeUse("NullPointerException")
         }
         if (jUsesStrIdx) {
             runtimeExc["$StringIndexOutOfBoundsException"] = true
@@ -5666,6 +5708,18 @@ HasStatic   = :script(~~
                                          callExt(b, "js_jvboxtype", [emitStr(b, jvBoxTypes[jb])])])
         }
         b = emitBuiltinExc(b)
+        // A member read or write on null is a NullPointerException with a null
+        // message: the floor's two hooks answer one to throw where they would
+        // otherwise abort. Twin of jNpe in java-interpreter.abnf.
+        var npeFn = emitFunc([], function(bb) {
+            var oV = callExt(bb, "js_obj_new", [])
+            callExt(bb, "js_set", [oV, emitStr(bb, "__class"), callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "NullPointerException")])])
+            callExt(bb, "js_set", [oV, emitStr(bb, "__msg"), hNull])
+            bb.NewRet(oV)
+            return deadBlock()
+        }, false, null)
+        callExt(b, "js_rt_missmem", [callExt(b, "js_closure", [handle(npeFn), curScopeV])])
+        callExt(b, "js_rt_missset", [callExt(b, "js_closure", [handle(npeFn), curScopeV])])
         b = emitImported(b)
         b = makeSeq(items)(b)
         // The entry defaults to Main.main but -main (c.mainName) can name another static

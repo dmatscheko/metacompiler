@@ -129,6 +129,7 @@ class Main {
         S59.run(); // SECTION-CALL 59
         S60.run(); // SECTION-CALL 60
         S61.run(); // SECTION-CALL 61
+        S62.run(); // SECTION-CALL 62
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -3552,5 +3553,59 @@ class S61 {
         try (S61Res r0 = null) { nul = "ran"; }
         Main.check("tw61", caught.equals("java.lang.RuntimeException: body-ex|1|java.lang.IllegalStateException: close-bad")
             && two.equals("close-bad2|close-bad1") && nul.equals("ran") && S61Res.log.equals("bad;body;bad2;bad1;"));
+    }
+}
+
+// ===== SECTION 62: a null dereferenced or unboxed is a NullPointerException =====
+//
+// A member read or write, a method call, an array length or element, a
+// for-each and a String method's argument on null throw NullPointerException
+// (JLS 15.11.1, 15.12.4.4, 15.10.4, 14.14.2), and so does unboxing a null in
+// arithmetic, a comparison with a primitive, a condition, a switch selector
+// or an assignment to a primitive (JLS 5.1.8, 14.11.3); `throw null` throws
+// one (JLS 14.18). A null compared by reference or concatenated is no
+// unboxing. Every expected value is java 24.0.2's.
+class S62B {
+    int v = 1;
+    int get() { return v; }
+}
+class S62 {
+    static Object[] nulls = {null};
+    static String log = "";
+    static void k(String id, Runnable r) {
+        try { r.run(); log = log + id + ":none "; }
+        catch (NullPointerException e) { log = log + id + ":npe "; }
+        catch (RuntimeException e) { log = log + id + ":other "; }
+    }
+    static void run() {
+        k("a", () -> { S62B b = (S62B) nulls[0]; log = log + b.v; });
+        k("b", () -> { S62B b = (S62B) nulls[0]; log = log + b.get(); });
+        k("c", () -> { int[] a = (int[]) nulls[0]; log = log + a.length; });
+        k("d", () -> { String s = (String) nulls[0]; log = log + s.length(); });
+        k("e", () -> { S62B b = (S62B) nulls[0]; b.v = 5; });
+        k("f", () -> { List<Integer> l = (List<Integer>) nulls[0]; for (int x : l) { log = log + x; } });
+        k("g", () -> { Integer i = (Integer) nulls[0]; log = log + (i + 1); });
+        k("h", () -> { String s = (String) nulls[0]; switch (s) { case "a": log = log + "a"; break; default: log = log + "d"; } });
+        k("i", () -> { Integer i = (Integer) nulls[0]; log = log + (i == 3); });
+        k("j", () -> { Boolean bb = (Boolean) nulls[0]; if (bb) { log = log + "t"; } });
+        k("l", () -> { Object o = nulls[0]; log = log + o.hashCode(); });
+        k("m", () -> { RuntimeException re = (RuntimeException) nulls[0]; throw re; });
+        k("n", () -> { String s = (String) nulls[0]; log = log + s.equals("x"); });
+        k("o", () -> { Object o = nulls[0]; log = log + o.toString(); });
+        k("p", () -> { int[] a = (int[]) nulls[0]; a[0] = 1; });
+        k("q", () -> { Double d = (Double) nulls[0]; double e = d; log = log + e; });
+        k("r", () -> { int v = new HashMap<String, Integer>().get("q"); log = log + v; });
+        k("s", () -> { log = log + "abc".compareTo((String) nulls[0]); });
+        k("t", () -> { Integer i = (Integer) nulls[0]; i++; });
+        k("u", () -> { Integer i = (Integer) nulls[0]; log = log + (-i); });
+        k("w", () -> { Boolean bb = (Boolean) nulls[0]; log = log + !bb; });
+        k("x", () -> { Integer i = (Integer) nulls[0]; log = log + (i < 3); });
+        k("y", () -> { String s = (String) nulls[0]; log = log + "x" + s; });
+        k("z", () -> { Integer i = (Integer) nulls[0]; Object o = nulls[0]; log = log + (i == null) + (o == i); });
+        Main.check("np62", log.equals("a:npe b:npe c:npe d:npe e:npe f:npe g:npe h:npe i:npe j:npe l:npe m:npe n:npe o:npe "
+            + "p:npe q:npe r:npe s:npe t:npe u:npe w:npe x:npe xnully:none truetruez:none "));
+        String msg = "";
+        try { Object o = nulls[0]; o.toString(); } catch (NullPointerException e) { msg = e.getClass().getName(); }
+        Main.check("nm62", msg.equals("java.lang.NullPointerException"));
     }
 }

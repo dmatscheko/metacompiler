@@ -228,6 +228,7 @@ function jvLow32(v) {
         return sintLo(jlFromNum(t))
     }
     if (v === true) { return 1 }
+    jvNpeIfNull(v)
     return 0
 }
 
@@ -275,6 +276,16 @@ var jvNegArrCls = undefined
 var jvNpeCls = undefined
 var jvNfeCls = undefined
 var jvIaeCls = undefined
+
+// The NullPointerException a null raises where Java unboxes it (JLS 5.1.8) or a
+// library method dereferences it. Twin of jvNpeIfNull in abnf/jsrtjava.go.
+function jvNpeIfNull(v) {
+    if (v === null) { jvThrowCls(jvNpeCls, null) }
+    return undefined
+}
+// A null reference used as an object or unboxed, at a site the emitter checks
+// itself (a Boolean condition, `throw null`, a switch).
+function js_jvnpe() { return jvThrowCls(jvNpeCls, null) }
 
 function jvThrowCls(cls, msg) {
     if (cls === undefined) {
@@ -1775,6 +1786,8 @@ function js_jvarith(op, l, r) {
     // have come off a Java float operand.
     if (floIs(l) || floIs(r)) { var rf = rtjArith(op, l, r); if (floStyle(rf) == 3) { return jvFloFix(op, rf, l, r) } return rf }
     if (!rtjIsIntegral(l) || !rtjIsIntegral(r)) {
+        jvNpeIfNull(l)
+        jvNpeIfNull(r)
         // & | ^ on two booleans are Java's non-short-circuit boolean operators;
         // anything else is not a program javac accepts.
         if (typeof l == "boolean" && typeof r == "boolean") {
@@ -1789,7 +1802,11 @@ function js_jvarith(op, l, r) {
     return jvArith(op, l, r)
 }
 
-function js_jvshift(op, l, r) { return jvShift(op, l, r) }
+function js_jvshift(op, l, r) {
+    jvNpeIfNull(l)
+    jvNpeIfNull(r)
+    return jvShift(op, l, r)
+}
 
 // An ordered comparison. Two integers compare at the promoted width; anything
 // else (a double, a string pair) keeps the shared comparison, rtCompare.
@@ -1808,6 +1825,8 @@ function js_jvcmp(op, l, r) {
     // a hot loop condition. The arm is rtjRel's own first line with rtjkCmp
     // expanded (it is jvCmp here), so it is the same answer by construction.
     if (rtjIsIntegral(l) && rtjIsIntegral(r)) { return jvCmp(op, l, r) }
+    jvNpeIfNull(l)
+    jvNpeIfNull(r)
     if (jvFloPromotes(l, r)) { return rtjRel(op, flo(rtF32Round(rtjNum(l)), 3), flo(rtF32Round(rtjNum(r)), 3)) }
     return rtjRel(op, l, r)
 }
@@ -2108,11 +2127,13 @@ function jxkFail(msg) { fail(msg) }
 // first argument, which may also be an int code point.
 function jvStrArg(v) {
     if (typeof v == "string") { return v }
+    jvNpeIfNull(v)
     if (jvIsChar(v)) { return String.fromCharCode(v["__char"]) }
     return jpStr(v)
 }
 function jvStrPat(v) {
     if (typeof v == "string") { return v }
+    jvNpeIfNull(v)
     return jxCpStr(jvCharCode(v))
 }
 function jvArgInt(args, i, dflt) {
@@ -2650,7 +2671,10 @@ function js_jvconv(v, bits) { return jvNarrow(v, rtjNum(bits)) }
 // A declared type applied to an initializer: only an INTEGRAL value narrows, so
 // `Object o = "s"` and a lambda pass through untouched.
 function js_jvadopt(v, bits) {
-    if (!rtjIsIntegral(v)) { return v }
+    if (!rtjIsIntegral(v)) {
+        jvNpeIfNull(v)
+        return v
+    }
     return jvNarrow(v, rtjNum(bits))
 }
 
@@ -2756,6 +2780,7 @@ function js_jvnum(v) {
     if (sintIs(v)) { return rtjNum(v) }
     if (jvIsChar(v)) { return v["__char"] }
     if (floIs(v)) { return floNum(v) }
+    if (v === null) { jvThrowCls(jvNpeCls, null) }
     return v
 }
 
@@ -2803,6 +2828,8 @@ function js_jvadd(l, r) {
     if (typeof l == "string" || typeof r == "string") { return jpStr(l) + jpStr(r) }
     if (floIs(l) || floIs(r)) { var rp = rtjArith("+", l, r); if (floStyle(rp) == 3) { return jvFloFix("+", rp, l, r) } return rp }
     if (rtjIsIntegral(l) && rtjIsIntegral(r)) { return jvArith("+", l, r) }
+    jvNpeIfNull(l)
+    jvNpeIfNull(r)
     return jvGenericAdd(l, r)
 }
 

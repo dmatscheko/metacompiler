@@ -705,6 +705,7 @@ func jxRadix(rt *jsrt, v interface{}, base int) string {
 
 // jxArgStr is a String method's CharSequence or char argument as a string.
 func (rt *jsrt) jxArgStr(v interface{}) string {
+	rt.jvNpeIfNull(v)
 	if c, ok := v.(jsChar); ok {
 		return strFromUnits([]uint16{uint16(c.code)})
 	}
@@ -719,6 +720,7 @@ func (rt *jsrt) jxArgPat(v interface{}) []uint16 {
 	case jsChar:
 		return []uint16{uint16(t.code)}
 	}
+	rt.jvNpeIfNull(v)
 	return strUnits(string(rune(jxCode(rt, v))))
 }
 

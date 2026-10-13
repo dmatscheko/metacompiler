@@ -1296,6 +1296,27 @@ function jCondConv(t) {
     if (!jIsPrimTy(nt)) { return none }
     return {ty: nt, a: a == nt ? "" : nt, b: b == nt ? "" : nt}
 }
+// May the condition written as t (whitespace-free) be a Boolean box, which
+// unboxes on the way and makes a null an NPE? Its static type is Boolean, or
+// it is unknown and t is a primary (a name, a call, a field, a cast) rather
+// than an operator's boolean result.
+function jCondMayBox(t) {
+    var ty = jStaticTy(t)
+    if (ty != "") { return ty == "Boolean" }
+    return jTopOp(t, 1) < 0 && t.charAt(0) != "!" && jTopFind(t, "?") < 0
+}
+// Which operand of `a == b` / `a != b` (its whitespace-free text) unboxes:
+// a box whose other operand is a primitive (JLS 15.21.1, 15.21.2).
+function jEqUnbox(t) {
+    var at = jTopFind(t, "==")
+    if (at < 0) { at = jTopFind(t, "!=") }
+    if (at < 0) { return {l: false, r: false} }
+    var a = jStaticTy(t.substring(0, at))
+    var b = jStaticTy(t.substring(at + 2))
+    var pa = jIsPrimTy(a) || a == "boolean"
+    var pb = jIsPrimTy(b) || b == "boolean"
+    return {l: pb && jOvUnbox(a) != "", r: pa && jOvUnbox(b) != ""}
+}
 // A top-level `+` chain is a String concatenation when any operand is a
 // String (JLS 15.18.1); any other top-level operator makes it unknown.
 function jConcatTy(t) {

@@ -484,13 +484,15 @@ SubStmt     = Block | If | While | Do | ForEach | For | Switch | Return | Yield 
             | Try | Throw | Assert | Synchronized | Labeled | Empty | ExprStmt ;
 
 If          <~~ push(makeIf(takeAll())) ~~>
-            = KwIf "(" Expression ")" SubStmt [ KwElse SubStmt ] ;
+            = KwIf "(" CondE ")" SubStmt [ KwElse SubStmt ] ;
+CondE       <~~ push(jCondChk(pop(), up.in)) ~~>
+            = Expression ;
 
 While       <~~ push(makeWhile(pop(), pop())) ~~>
-            = KwWhile "(" Expression ")" SubStmt ;
+            = KwWhile "(" CondE ")" SubStmt ;
 
 Do          <~~ push(makeDo(pop(), pop())) ~~>
-            = KwDo SubStmt KwWhile "(" Expression ")" ";" ;
+            = KwDo SubStmt KwWhile "(" CondE ")" ";" ;
 
 // The classic colon switch (on int or String): execution starts at the first matching
 // label and runs until a break or the end of the switch. Labels may stack.
@@ -600,7 +602,7 @@ ForVar      = DeclCore ;
 // The init and update parts are comma-separated expression lists (JLS 14.14.1):
 // `for (i = 0, j = n; ...; i++, j--)`, run left to right.
 ForExpr     <~~ push(makeSeq(takeAll())) ~~> = ForStmtExpr { "," ForStmtExpr } ;
-ForCond     <~~ push({k:"cond", t:pop()}) ~~> = Expression ;
+ForCond     <~~ push({k:"cond", t:pop()}) ~~> = CondE ;
 ForPost     <~~ push({k:"post", t:makeSeq(takeAll())}) ~~> = ForStmtExpr { "," ForStmtExpr } ;
 ForStmtExpr <~~ push(exprToStmt(pop())) ~~> = Expression ;
 
@@ -678,7 +680,7 @@ CatchTypes  <~~ push({ctypes: stripWs(up.in)}) ~~>
             = Type { "|" Type } ;
 FinallyClause <~~ push({finbody: pop()}) ~~>
             = KwFinally Block ;
-Throw       <~~ push(excThrow(pop())) ~~>
+Throw       <~~ push(jThrowStmt(pop())) ~~>
             = KwThrow Expression ";" ;
 
 // An explicit constructor invocation (super(args) or this(args)). It may only
@@ -864,7 +866,7 @@ BitXorExpr  <~~ push(foldBinary(takeAll())) ~~>
 BitAndExpr  <~~ push(foldBinary(takeAll())) ~~>
             = EqExpr { "&" <~~ push("&") ~~> EqExpr } ;
 
-EqExpr      <~~ push(foldBinary(takeAll())) ~~>
+EqExpr      <~~ push(jFoldEq(takeAll(), up.in)) ~~>
             = RelExpr { ( "==" | "!=" ) <~~ push(up.in) ~~> RelExpr } ;
 
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
@@ -914,7 +916,7 @@ PreChain    <~~ push(makeChainTarget(takeAll(), up.in)) ~~>
             = Primary ChainSfx { ChainSfx } ;
 Neg         <~~ push(makeNeg(pop())) ~~>
             = "-" UnaryExpr ;
-Not         <~~ push(makeNot(pop())) ~~>
+Not         <~~ push(makeNot(jCondChk(pop(), up.in.substring(1)))) ~~>
             = "!" UnaryExpr ;
 BitNot      <~~ push(makeBitNot(pop(), up.pos)) ~~>
             = "~" UnaryExpr ;
@@ -2971,6 +2973,40 @@ HasStatic   = :script(~~
     function jThrowExc(clsName, msg) {
         throw {__exc: true, v: {__class: globalScope[clsName], message: msg}}
     }
+    // A null reference used as an object or unboxed (JLS 15.12.4.4, 5.1.8): a
+    // NullPointerException with a null message, the compiled halves' js_jvnpe.
+    function jNpe() { jThrowExc("NullPointerException", null) }
+    // A condition: a null Boolean unboxes to an NPE.
+    // `throw e` with e null throws a NullPointerException instead (JLS 14.18).
+    function jThrowStmt(t) {
+        return function() {
+            var v = t()
+            if (v === null) { jNpe() }
+            throw {__exc: true, v: v}
+        }
+    }
+    // A condition (an if, a loop, `!`, `?:`) that may be a Boolean box
+    // (jCondMayBox) unboxes it, and a null there is an NPE. Twin of jCondChk in
+    // java-to-llvm-ir.abnf.
+    function jCondChk(t, text) { return jCondMayBox(text) ? jNonNull(t) : t }
+    // `a == b` with one primitive operand unboxes the other (JLS 15.21.1), so a
+    // null box there is an NPE; jEqUnbox reads which operand from the static
+    // types. Twin of jFoldEq in java-to-llvm-ir.abnf.
+    function jFoldEq(items, text) {
+        if (items.length == 3) {
+            var ub = jEqUnbox(text)
+            if (ub.l) { items[0] = jNonNull(items[0]) }
+            if (ub.r) { items[2] = jNonNull(items[2]) }
+        }
+        return foldBinary(items)
+    }
+    function jNonNull(t) {
+        return function() {
+            var v = t()
+            if (v === null) { jNpe() }
+            return v
+        }
+    }
     // ----- the bounds checks (JLS 10.4, 15.10.4 and java.lang.String) -----
     //
     // EVERY array access is bounds-checked in Java and a violation THROWS
@@ -3603,11 +3639,13 @@ HasStatic   = :script(~~
     // first argument, which may also be an int code point.
     function jStrArg(v) {
         if (typeof v == "string") { return v }
+        if (v === null) { jNpe() }
         if (jIsChar(v)) { return String.fromCharCode(v.__char) }
         return jstr(v)
     }
     function jStrPat(v) {
         if (typeof v == "string") { return v }
+        if (v === null) { jNpe() }
         return jxCpStr(jxkCode(v))
     }
     // The java.lang.String methods past the handful mcall answers itself. Twin
@@ -3712,6 +3750,7 @@ HasStatic   = :script(~~
         // A functional-interface call: a lambda / method-reference value (a closure)
         // is invoked directly, whatever the single abstract method is named.
         if (typeof target == "function") { return target.apply(undefined, args) }
+        if (target === null || target === undefined) { jNpe() }
         // x.hashCode() is Object#hashCode and its overrides, and it reaches values
         // no arm below can dispatch on - a String, a boxed long or double, a plain
         // int, an array, an instance of a class that declares no method by that
@@ -3771,7 +3810,6 @@ HasStatic   = :script(~~
         // the same elements, a shallow copy (JLS 10.7). Twin of js_jvclone in
         // abnf/jsrtjava.go and languages/lib/java-rt.metajs.
         if (name == "clone" && args.length == 0 && Array.isArray(target)) { return arrKindSet(target.slice(0), arrKind(target)) }
-        if (target === undefined || target === null) fail("method call ." + name + "() on null")
         if (target.__class != undefined) {
             // The lookup follows the __super chain and the interfaces along it. Own
             // property reads only: a bare c[name] resolved inherited Object.prototype
@@ -3848,9 +3886,10 @@ HasStatic   = :script(~~
     function makeCond(items, text) {
         if (items.length == 1) return items[0]
         var cv = jCondConv(text)
-        if (cv.ty == "") { return function() { return items[0]() ? items[1]() : items[2]() } }
+        var condT = jCondChk(items[0], text.substring(0, jTopFind(text, "?")))
+        if (cv.ty == "") { return function() { return condT() ? items[1]() : items[2]() } }
         return function() {
-            if (items[0]()) { return cv.a == "" ? items[1]() : jConvTo(items[1](), cv.a) }
+            if (condT()) { return cv.a == "" ? items[1]() : jConvTo(items[1](), cv.a) }
             return cv.b == "" ? items[2]() : jConvTo(items[2](), cv.b)
         }
     }
@@ -3906,6 +3945,7 @@ HasStatic   = :script(~~
     // a char, a byte to a byte (so 127++ is -128), a long to a long, an int to an
     // int32.
     function jStep(v, d) {
+        if (v === null) { jNpe() }
         if (jIsChar(v)) { return jChar((v.__char + d) & 65535) }
         if (jIsFlo(v)) { return jIsF32(v) ? jFlo32(v.__flo + d) : jFlo(v.__flo + d) }
         if (jIsSz(v)) { return jNarrow(jArith("+", v, d), v.w) }
@@ -4041,6 +4081,7 @@ HasStatic   = :script(~~
         return function() {
             var v = anytype
             v = t()
+            if (v === null) { jNpe() }
             if (jIsFlo(v)) { return jIsF32(v) ? {__flo: jNegF(v.__flo), __f32: true} : jFlo(jNegF(v.__flo)) }
             return jArith("-", jIsLong(v) ? jL(0) : 0, v)
         }
@@ -4071,6 +4112,8 @@ HasStatic   = :script(~~
         return v.__sz === true || v.__char !== undefined
     }
     binOp = function(op, l, r) {
+        // Every operator but == and != and a String's + unboxes a null operand.
+        if ((l === null || r === null) && op != "==" && op != "!=" && !(op == "+" && (typeof l == "string" || typeof r == "string"))) { jNpe() }
         // A char unboxes for every operator - Java's char IS an integral type - so
         // 'b' - 'a' == 1, c == 65 and c < 'z' all hold. Gated on one typeof test that
         // an ordinary number fails immediately.
@@ -4959,6 +5002,8 @@ HasStatic   = :script(~~
     // abstract one dispatches back into the closure.
     function jTypeAdopt(v, ty) {
         if (ty == undefined) { return v }
+        // Unboxing null (JLS 5.1.8).
+        if (v === null && jOvIsPrim(ty)) { jNpe() }
         // A declared primitive type CONVERTS its initializer (JLS 5.2, assignment
         // conversion): `double d = 1;` holds 1.0, `int i = 'a';` holds 97.
         if (ty == "double" || ty == "float") {
@@ -5115,6 +5160,7 @@ HasStatic   = :script(~~
                 }
                 if (idx >= 0) { break }
             }
+            if (idx < 0 && v === null) { jNpe() }
             if (idx < 0) { idx = dflt }
             if (idx < 0) { return undefined }
             if (arms[idx].val != null) { return arms[idx].val() }
@@ -5144,6 +5190,7 @@ HasStatic   = :script(~~
                 if (cases[i].isDefault) { dflt = i; continue }
                 if (start < 0 && jLabelHit(cases[i].lab, v)) { start = i }
             }
+            if (start < 0 && v === null) { jNpe() }
             if (start < 0) { start = dflt }
             if (start < 0) { return undefined }
             for (var i = start; i < cases.length; i++) {
@@ -6295,7 +6342,7 @@ HasStatic   = :script(~~
                     var ssig = jSfxSig(s)
                     cur = ssig == "" ? mcall(cur, s.name, argv) : jSigCall(cur, s.name, ssig, argv)
                 } else if (s.kind == "field") {
-                    if (cur === undefined || cur === null) fail("field ." + s.name + " of " + core.nullWord)
+                    if (cur === undefined || cur === null) { jNpe() }
                     cur = core.getField(cur, s.name)
                 } else if (s.kind == "mref") {
                     cur = jBindMethodRef(cur, s.name)
@@ -6327,10 +6374,10 @@ HasStatic   = :script(~~
             var s = ref.path[i]
             if (s.key != undefined) { o = hasOwn(o, s.key) ? o[s.key] : undefined }
             else { o = core.getIndex(o, s.idx()) }
-            if (o === undefined || o === null) fail(core.nullWord + " in assignment path of " + ref.name)
+            if (o === undefined || o === null) { jNpe() }
         }
         var last = ref.path[ref.path.length - 1]
-        if (o === undefined || o === null) fail(core.nullWord + " in assignment path")
+        if (o === undefined || o === null) { jNpe() }
         if (last.key != undefined) { return {obj: o, key: last.key} }
         // The WRITE half of the bounds check: `a[3] = 5` on an int[3] throws
         // rather than growing the array. Every writer - makeAssign, makeIncDec,
