@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-591** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-593** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -121,19 +121,20 @@ not change the renderer.
 
 # GO — Go  (oracle: `go run`)
 
-### T-576 go: `math` transcendentals, Float64bits, NaN sign, untyped math constants, missing members · P3 · GO · IN PROGRESS (GO worker, round 4) [V]
-`math.Exp/Log/Sin/Cos/Tan/Atan/Hypot/Cbrt` missing (Go's arm64 build fuses a*b+c inside them, so a port must match go
-bit-for-bit or stay out); `math.Pow` with a non-integral, non-half exponent panics "not supported". `MaxUint`/`MaxUint64`,
-`Float64bits`/`Float64frombits` missing; `math.Signbit(math.NaN())` sign/payload not modelled. `math.Pi == 3.141592653589793`
-→ ours true, go false (the untyped constant compares at arbitrary precision; a pkg.Name constant does not fold). A missing
-member (`math.Hypot`) reads as `<nil>` instead of a compile error. llvm.Run needs `-max-steps 0` for heavy go-math.go code.
+### T-591 go: uint64 assignment of `1 << 63`; untyped big constant × float in the interp; overflowing constant args; NaN sign · P1 · GO · OPEN [V]
+`var s uint64; s = 1 << 63; fmt.Println(s, s|1)` → all legs `-9223372036854775808 -9223372036854775807` (go
+`9223372036854775808 9223372036854775809`; the declared form `var t uint64 = 1<<63` is right). Interp only:
+`x := 0.5; fmt.Println(18014398509481984*x)` → `NaN` (go, run, native `9.007199254740992e+15`). `fmt.Println(math.MaxUint64)`
+prints `-1`; go rejects it at compile time ("cannot use math.MaxUint64 (untyped int constant 18446744073709551615) as int value
+in argument to fmt.Println (overflows)"). P3: `math.Signbit(-NaN)` false and `Float64bits` of any NaN is NaN()'s pattern — needs
+a float-bits host builtin in the floor, twin and interpreter. llvm.Run's per-call step brake limits heavy math code (the
+3000-row probe needs `-max-steps 0`; the `-frozen` interpreter finishes 35 rows).
 
-### T-577 go: invalid UTF-8 in strings — each engine differs; byte-index cache thrash · P2 · GO · IN PROGRESS (GO worker, round 4) [V]
-`a := "日本語"[0:1]; fmt.Println(len(a), []rune(a), a == "\uFFFD")`: interp `2 [230] false`, llvm.Run `1 [65533] false`, native
-`3 [65533] true`, go `1 [65533] false`. `string([]byte{200})`: twin the raw byte, native U+FFFD, interp È. The twin's `s[i]` of a
-lone surrogate reads WTF-8 bytes, layer 2 U+FFFD. Natively `s[i]` caches the byte form of the last 4 non-ASCII strings: 5+
-distinct non-ASCII strings indexed in turn (or two distinct strings with equal content) are quadratic again; a proper fix is
-an O(1) byte-at host builtin in the floor (CORE: runtime.c).
+### T-592 go: UTF-8-encoded surrogate bytes in strings under llvm.Run and native; interp byte cache · P3 · GO · OPEN [V]
+`s := "\xed\xa0\x80" + "\xed\xb0\x80"; fmt.Println(len(s), []byte(s))` → go `6 [237 160 128 237 176 128]`, interp right;
+llvm.Run and native `4 [240 144 128 128]` and print EF BF BD: the shared str_cat / strConcat and print paths read these bytes as
+WTF-8 (changing them is a CORE floor change; manual 7.9 records it). Interp: `s[i]` still uses a 4-way byte cache, so 5+
+distinct non-ASCII strings indexed in turn are quadratic there.
 
 ---
 
@@ -688,6 +689,8 @@ T-585 swift: Range `lowerBound`/`upperBound`; `contains` on Double and String ra
 T-583 bash: several assignments in one command; `$(( ))` inside `${s:off:len}`; inner stderr of `$( )` — DONE 169887c8 71363b2d (plus redirections undone on return/break/exit, stdin rewound only under a stdin redirection)
 T-584 bash: a value whose first byte is 0x02 is read as a field list — DONE 9b84ee7e
 T-569 lua: runtime bookkeeping keys are visible to programs; the `io` library is missing — DONE 5d41bb3a 3bcbd2fd (key types are part of the key in every engine; io.write/io.stdout:write/io.type; io.read needs a stdin no handle-IR engine has)
+T-577 go: invalid UTF-8 in strings — each engine differs; byte-index cache thrash — DONE 478a79d7 (floor byteAt/byteSub/bytesStr; s[i] O(1) natively; WTF-8 surrogate-byte residual is T-592)
+T-576 go: `math` transcendentals, Float64bits, NaN sign, untyped math constants, missing members — PARTIAL 0deea0ec (Exp/Log/Sin/Cos/Tan/Atan/Hypot/Cbrt/Pow/FMA bit-exact vs go on 3000 inputs in all engines, Float64bits, exact pkg constants, undefined members rejected); NaN sign/payload is T-591
 
 # Settled — do not re-open
 
