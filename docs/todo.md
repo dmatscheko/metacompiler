@@ -152,12 +152,12 @@ an O(1) byte-at host builtin in the floor (CORE: runtime.c).
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-570 swift: a ternary passed to an `Any` parameter unifies; nested existential annotations · P2 · SW · OPEN [V]
+### T-570 swift: a ternary passed to an `Any` parameter unifies; nested existential annotations · P2 · SW · IN PROGRESS (SW worker, round 3) [V]
 `func f(_ x: Any) { print(x) }; f(c ? 1.5 : 3)` with c false → all legs `3.0`, swiftc `3` (an existential context keeps each
 arm's own type; needs the parameter type at the argument through the swDs call typing). `let a: [[Any]] = [[1, 2.5]]` is not
 detected as existential (swiftc `[[1, 2.5]]`).
 
-### T-571 swift: mutating value methods on numbers and Bools; General_Category Character properties; trap exit status · P2 · SW · OPEN [V]
+### T-571 swift: mutating value methods on numbers and Bools; General_Category Character properties; trap exit status · P2 · SW · IN PROGRESS (SW worker, round 3) [V]
 `var m = 2.5; m.round(.down); print(m)` → "unknown Double method: round" (swiftc 2.0); `var b = [true]; b[0].toggle()` →
 interp "unknown method 'toggle'", compiled "method call 'toggle' on a boolean" (swiftc `[false]`); also `negate()`,
 `formRemainder`. `Character.isPunctuation`, `isSymbol`, `isCased`, `isMathSymbol`, `isCurrencySymbol` fail loudly (need
