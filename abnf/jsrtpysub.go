@@ -71,7 +71,9 @@ func (rt *jsrt) pyStrDecode(v, enc interface{}) string {
 	case string:
 		panic(&jsThrown{value: rt.pyExcInstance("TypeError", "decoding str is not supported")})
 	case *jsArray:
-		return rt.pyBytesDecode(b.elems, enc)
+		if pyIsBytes(b) {
+			return rt.pyBytesDecode(b.elems, enc)
+		}
 	}
 	panic(&jsThrown{value: rt.pyExcInstance("TypeError",
 		"decoding to str: need a bytes-like object, "+pyTypeName(rt, v)+" found")})
@@ -351,11 +353,9 @@ func pyBDelAccepts(tname string, o interface{}) bool {
 	case "str":
 		_, ok := o.(string)
 		return ok
-	case "list":
-		_, ok := o.(*jsArray)
-		return ok && !pyIsTup(o)
-	case "tuple":
-		return pyIsTup(o)
+	case "list", "tuple", "bytes", "bytearray":
+		a, ok := o.(*jsArray)
+		return ok && pySeqTName(a) == tname
 	case "set", "frozenset":
 		_, isSet := pySetElems(o)
 		return isSet
@@ -460,10 +460,7 @@ func pyValDunder(v interface{}, name string) (*hostFunc, bool) {
 	case string:
 		tn = "str"
 	case *jsArray:
-		tn = "list"
-		if pyIsTup(v) {
-			tn = "tuple"
-		}
+		tn = pySeqTName(v.(*jsArray))
 	}
 	if _, isSet := pySetElems(v); isSet {
 		tn = "set"
@@ -847,10 +844,10 @@ func (rt *jsrt) pyBytesDecode(bs []interface{}, encV interface{}) string {
 }
 
 // pyBytesNew is bytes(source, encoding, errors), with the keywords already in
-// their slots: a list of byte values in this value model - a str under an
-// encoding (str.encode), a count of zero bytes, or an iterable of ints in
-// range(256). None and an absent argument are the same value here.
-// bytearray(...) (name) builds the same list, under its own error texts. Twins:
+// their slots: a str under an encoding (str.encode), a count of zero bytes, or
+// an iterable of ints in range(256). None and an absent argument are the same
+// value here. bytearray(...) (name) builds the mutable kind, under its own error
+// texts. Twins:
 // pyBytesNew in languages/python-interpreter.abnf and lib/python-rt.metajs.
 func (rt *jsrt) pyBytesNew(args []interface{}, name string) interface{} {
 	raise := func(cls, msg string) { panic(&jsThrown{value: rt.pyExcInstance(cls, msg)}) }
@@ -868,7 +865,12 @@ func (rt *jsrt) pyBytesNew(args []interface{}, name string) interface{} {
 		if enc == jsUndef {
 			raise("TypeError", "string argument without an encoding")
 		}
-		return rt.pysEncode(s, enc, errs)
+		r := rt.pysEncode(s, enc, errs).(*jsArray)
+		r.kind = pyBytesKind
+		if name == "bytearray" {
+			r.kind = pyBArrKind
+		}
+		return r
 	}
 	if enc != jsUndef {
 		raise("TypeError", "encoding without a string argument")
@@ -876,7 +878,10 @@ func (rt *jsrt) pyBytesNew(args []interface{}, name string) interface{} {
 	if errs != jsUndef {
 		raise("TypeError", "errors without a string argument")
 	}
-	out := &jsArray{}
+	out := &jsArray{kind: pyBytesKind}
+	if name == "bytearray" {
+		out.kind = pyBArrKind
+	}
 	if len(args) == 0 {
 		return out
 	}

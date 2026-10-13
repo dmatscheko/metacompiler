@@ -91,8 +91,8 @@ tuple, so 'one = 7,' is the one-element tuple.
 
 String literals are a run of ADJACENT pieces, which Python concatenates implicitly,
 each with its own prefix and quote style: r keeps the backslashes, b makes a bytes
-value (a list of byte numbers, so indexing, + and len are the ordinary list
-machinery), u is accepted and ignored, and f makes the piece an f-string. The
+value (an array of byte numbers marked bytes, so indexing and len are the
+ordinary list machinery), u is accepted and ignored, and f makes the piece an f-string. The
 escapes are Python's - the single letter ones, the three digit octal form, the two
 digit hex form, the four and the eight digit Unicode forms, the named character
 form (from a small name table) and a backslash before a newline, which joins the
@@ -1120,7 +1120,7 @@ ListSpread  <~~ push({lspread: pop()}) ~~> = "*" Expression ;
 // ("ab" "cd", f"a{1}" "b") - each with its own prefix and quote style. A piece with
 // an `f` prefix is an f-string (its {expressions} are parsed); every other piece is
 // a constant whose PREFIX decides how it is decoded: `r` keeps the backslashes, `b`
-// makes it a bytes value (a list of byte numbers), `u` is accepted and ignored.
+// makes it a bytes value (an array of byte numbers, kind 17), `u` is accepted and ignored.
 // Triple-quoted pieces are tried before the single-quoted ones so """...""" is not
 // misread as an empty "" string; their body may span newlines and contain lone or
 // doubled quotes, and only three quotes in a row close it.
@@ -2051,20 +2051,33 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (isb) { return {bytes: v} }
         return {str: v}
     }
-    // bytes are modelled as a LIST of byte numbers, so b"AB"[0] is 65, b"a" + b"b"
-    // concatenates and len counts bytes - all through the ordinary list machinery.
+    // A bytes literal: the list of its byte values, marked bytes (js_pyb).
     function makeBytes(v) {
         var elems = []
         for (var i = 0; i < v.length; i++) { elems.push(makeConst(v.charCodeAt(i) & 255)) }
-        return makeList(elems)
+        var lst = makeList(elems)
+        return function(b) {
+            var r = lst(b)
+            return {b: r.b, v: callExt(r.b, "js_pyb", [r.v])}
+        }
     }
     // Adjacent pieces concatenate (implicit string concatenation). An all-constant
     // run folds to one constant at compile time; a run holding an f-string becomes a
     // chain of js_jadd.
     function makeStrConcat(items) {
-        if (items.length == 1 && items[0].bytes != undefined) { return makeBytes(items[0].bytes) }
+        if (items[0].bytes != undefined) {
+            var bs = ""
+            for (var bi = 0; bi < items.length; bi++) {
+                if (items[bi].bytes == undefined) { fail("SyntaxError: cannot mix bytes and nonbytes literals") }
+                bs += items[bi].bytes
+            }
+            return makeBytes(bs)
+        }
         var allConst = true
-        for (var i = 0; i < items.length; i++) { if (items[i].str == undefined) { allConst = false } }
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].bytes != undefined) { fail("SyntaxError: cannot mix bytes and nonbytes literals") }
+            if (items[i].str == undefined) { allConst = false }
+        }
         if (allConst) {
             var lit = ""
             for (var k = 0; k < items.length; k++) { lit += items[k].str }
@@ -2077,11 +2090,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (var j = 0; j < items.length; j++) {
                 var it = items[j]
                 if (it.str != undefined) { v = callExt(b, "js_jadd", [v, emitStr(b, it.str)]) }
-                else if (it.bytes != undefined) {
-                    var rb = makeBytes(it.bytes)(b)
-                    b = rb.b
-                    v = callExt(b, "js_jadd", [v, callExt(b, "js_pyrxstr", [rb.v])])
-                } else {
+                else {
                     var r = it(b)
                     b = r.b
                     v = callExt(b, "js_jadd", [v, r.v])
@@ -2983,6 +2992,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     pyBuiltinTypes["$dict"] = true
     pyBuiltinTypes["$set"] = true
     pyBuiltinTypes["$bytes"] = true
+    pyBuiltinTypes["$bytearray"] = true
     pyBuiltinTypes["$complex"] = true
     function makeClassPattern(items) {
         var name = items[0].dname
@@ -4288,6 +4298,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     pyTypeBuiltin["$tuple"] = true
     pyTypeBuiltin["$complex"] = true
     pyTypeBuiltin["$bytes"] = true
+    pyTypeBuiltin["$bytearray"] = true
     pyTypeBuiltin["$frozenset"] = true
     // `type` is a class too: `str(type)` is <class 'type'>. Calling it still runs
     // the same js_pytype forwarder, through __conv.

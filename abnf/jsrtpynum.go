@@ -109,7 +109,7 @@ func (rt *jsrt) pyNumMethod(v interface{}, name string, args []interface{}, kw i
 		rt.pyRaise("OverflowError", "int too big to convert")
 	}
 	buf := t.FillBytes(make([]byte, n))
-	out := &jsArray{}
+	out := &jsArray{kind: pyBytesKind}
 	for i := range buf {
 		b := buf[i]
 		if little {
@@ -508,6 +508,14 @@ func (rt *jsrt) pyHashW(v interface{}) uint64 {
 	}
 	if re, im, ok := pyComplexParts(v); ok {
 		return pyHashFix(rt.pyHashF(re, v) + rt.pyHashF(im, v)*1000003)
+	}
+	// bytes hash like the str of the same code units, as CPython's do.
+	if arr, ok := v.(*jsArray); ok && arr.kind == pyBytesKind {
+		us := make([]uint16, len(arr.elems))
+		for i, e := range arr.elems {
+			us[i] = uint16(pyByteOf(e))
+		}
+		return pyHashUnits(us)
 	}
 	if arr, ok := v.(*jsArray); ok && arr.kind == pyTupKind {
 		lanes := make([]uint64, len(arr.elems))

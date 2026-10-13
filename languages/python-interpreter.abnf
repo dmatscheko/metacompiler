@@ -24,7 +24,8 @@ SYNTAX, type hint syntax (erased), and imports.
 Values: int, float, complex (a boxed real/imag pair) and arbitrary precision
 integers (a boxed sign and decimal limb array, entered only when a literal or a
 result leaves the exact range of a double, and left again as soon as one fits),
-bool, None, Ellipsis, str, bytes, list, tuple (an array marked as one), dict and set.
+bool, None, Ellipsis, str, bytes and bytearray (arrays marked as one), list, tuple (an
+array marked as one), dict and set.
 Numeric literals cover the 0x / 0o / 0b prefixes, underscore separators, leading
 and trailing dot floats, exponents and the imaginary j suffix. String literals
 cover every prefix (r, b, u and the rf/br orders), all four quote styles, adjacent
@@ -952,7 +953,7 @@ StarItem    <~~ push({splat: pop()}) ~~>
 // ("ab" "cd", f"a{1}" "b") - each with its own prefix and quote style. A piece with an
 // `f` prefix is an f-string (its {expressions} are parsed); every other piece is a
 // constant whose PREFIX decides how it is decoded: `r` keeps the backslashes, `b`
-// makes it a bytes value (a list of byte numbers), `u` is accepted and ignored.
+// makes it a bytes value (an array of byte numbers, kind 17), `u` is accepted and ignored.
 StringLit   <~~ push(pyNoteStr(makeStrConcat(takeAll()), up.start, up.pos)) ~~>
             = StrPiece { StrPiece } ;
 StrPiece    = FString | TextPiece ;
@@ -1252,6 +1253,24 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // pyIsTup in abnf/jsrt.go and lib/python-rt.metajs.
     function pyTup(a) { return arrKindSet(a, 16) }
     function isTup(v) { return arrKind(v) == 16 }
+    // bytes and bytearray are arrays of byte values carrying kind 17 and 18 the
+    // same way: indexing, len and iteration are the list machinery's, and what
+    // differs asks isBytes. pySeqCls is the kind == compares, so bytes equals a
+    // bytearray of the same bytes and neither equals a list. Twin of pyBytesOf /
+    // pyIsBytes in abnf/jsrtpybytes.go and lib/python-rt.metajs.
+    function pyBytes(a) { return arrKindSet(a, 17) }
+    function isBytes(v) { var k = arrKind(v); return k == 17 || k == 18 }
+    function pySeqCls(v) { var k = arrKind(v); return k == 18 ? 17 : k }
+    // A fresh byte array of kind k (17 or 18).
+    function pyBytesK(a, k) { return arrKindSet(a, k) }
+    // The builtin type name of an array: list, tuple, bytes or bytearray.
+    function pySeqTName(v) {
+        var k = arrKind(v)
+        if (k == 16) { return "tuple" }
+        if (k == 17) { return "bytes" }
+        if (k == 18) { return "bytearray" }
+        return "list"
+    }
     // type(v): the class of a user instance, else the builtin type object.
     function pyTypeOf(v) {
         if (pyUser(v)) { return v.__class }
@@ -1265,7 +1284,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (isFlo(v)) { return hostGlobals["float"] }
         if (bigIsBig(v)) { return hostGlobals["int"] }
         if (isCplx(v)) { return hostGlobals["complex"] }
-        if (Array.isArray(v)) { return hostGlobals[isTup(v) ? "tuple" : "list"] }
+        if (Array.isArray(v)) { return hostGlobals[pySeqTName(v)] }
         if (isSet(v)) { return hostGlobals[v.__frozen === true ? "frozenset" : "set"] }
         if (isDict(v)) { return hostGlobals["dict"] }
         if (isView(v)) { return pyBuiltinTypeObj("dict_" + v.__dview) }
@@ -1561,13 +1580,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "str") {
             if (args.length > 1 && (args[1] !== undefined || (args.length > 2 && args[2] !== undefined))) {
                 if (typeof v == "string") { pyListErr("TypeError", "decoding str is not supported") }
-                if (!Array.isArray(v)) {
+                if (!isBytes(v)) {
                     pyListErr("TypeError", "decoding to str: need a bytes-like object, " + pyTypeOf(v).__name + " found")
                 }
                 return pyBytesDecode(v, args[1])
             }
             return args.length == 0 ? "" : pstr(v)
         }
+        if ((name == "int" || name == "float") && isBytes(v)) { return pyBytesNum(name, args) }
         if (name == "int") { return pyIntNew(args) }
         if (name == "float") {
             if (args.length == 0) { return pyFlo(0) }
@@ -2002,6 +2022,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (var j = 0; j < v.length; j++) { lanes.push(pyHashW(v[j])) }
             return pynHashTuple(lanes)
         }
+        // bytes hash like the str of the same code units, as CPython's do.
+        if (arrKind(v) == 17) { return pynHashUnits(v.slice(0)) }
         if (isSet(v) && v.__frozen === true) {
             var fl = []
             var els = iterToList(v)
@@ -2254,7 +2276,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             return "str_ascii_iterator"
         }
-        if (Array.isArray(v)) { return isTup(v) ? "tuple_iterator" : "list_iterator" }
+        if (Array.isArray(v)) { return pySeqTName(v) + "_iterator" }
         if (isSet(v)) { return "set_iterator" }
         if (isDict(v)) { return "dict_keyiterator" }
         if (isView(v)) { return v.__dview == "keys" ? "dict_keyiterator" : (v.__dview == "values" ? "dict_valueiterator" : "dict_itemiterator") }
@@ -2845,6 +2867,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // is hasattr answering True for a call that then aborts.
     function pyBuiltinAttr(o, name) {
         if (typeof o == "string") { return pySIsStrMethod(name) }
+        if (isBytes(o)) { return pyIsBytesMethod(name, arrKind(o)) }
         if (Array.isArray(o)) { return isTup(o) ? pyIsTupleMethod(name) : pyIsListMethod(name) }
         // A set is a dict whose keys are its members, so it is asked FIRST.
         if (isSet(o)) { return pyIsSetMethod(name) && !(o.__frozen === true && pySetMutator(name)) }
@@ -2873,7 +2896,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // The builtin type a delegate serves for a plain value, or "".
     function pyValTName(v) {
         if (typeof v == "string") { return "str" }
-        if (Array.isArray(v)) { return isTup(v) ? "tuple" : "list" }
+        if (Array.isArray(v)) { return pySeqTName(v) }
         if (isSet(v)) { return v.__frozen === true ? "frozenset" : "set" }
         if (isDict(v)) { return "dict" }
         return pyNumTName(v)
@@ -3141,7 +3164,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     //
     // The OUTER name is the type of the object handed over and the INNER one the
     // type that is unhashable, and the wording differs between the two positions.
-    // A frozenset is hashable; bytearray does not exist in this subset at all.
+    // A frozenset and bytes are hashable; a bytearray is not.
     //
     // Twins: pyHashCheck / pyHashName in languages/lib/python-rt.metajs and
     // pyHashCheck / pyUnhashName in abnf/jsrt.go.
@@ -3149,7 +3172,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (v === null || v === undefined) { return "" }
         if (typeof v != "object") { return "" }
         if (Array.isArray(v)) {
-            if (!isTup(v)) { return "list" }
+            if (arrKind(v) == 17) { return "" }
+            if (!isTup(v)) { return pySeqTName(v) }
             for (var i = 0; i < v.length; i++) {
                 var inner = pyHashName(v[i])
                 if (inner != "") { return inner }
@@ -3223,6 +3247,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (cls.__name == "float" && name == "from_number") {
             return function(x) { return pyFloatFromNumber(x) }
+        }
+        if ((cls.__name == "bytes" || cls.__name == "bytearray") && name == "fromhex") {
+            var fk = cls.__name == "bytes" ? 17 : 18
+            return function(s) { return pyBytesFromHex(s, fk) }
         }
         if (cls.__name == "str" && name == "maketrans") {
             return function() {
@@ -3370,7 +3398,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (isView(a)) { return pyViewEq(a, b) }
         if (isView(b)) { return pyViewEq(b, a) }
         if (Array.isArray(a) && Array.isArray(b)) {
-            if (a.length != b.length || isTup(a) != isTup(b)) { return false }
+            if (a.length != b.length || pySeqCls(a) != pySeqCls(b)) { return false }
             for (var i = 0; i < a.length; i++) { if (!pyEq(a[i], b[i])) { return false } }
             return true
         }
@@ -3561,6 +3589,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return "<re.Match object; span=(" + v.m.begin + ", " + v.m.end + "), match="
                    + prepr(rxGroup(v.prog, v.string, v.m, 0)) + ">"
         }
+        if (isBytes(v)) { return pyBytesRepr(v) }
         if (Array.isArray(v)) {
             var sr = pyReprNest(v, pySeqRepr)
             if (sr === null) { return isTup(v) ? "(...)" : "[...]" }
@@ -4053,8 +4082,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (tname == "float") { return nk == "int" || nk == "float" }
         if (tname == "complex") { return nk != "" }
         if (tname == "str") { return typeof o == "string" }
-        if (tname == "list") { return Array.isArray(o) && !isTup(o) }
-        if (tname == "tuple") { return isTup(o) }
+        if (tname == "list" || tname == "tuple" || tname == "bytes" || tname == "bytearray") {
+            return Array.isArray(o) && pySeqTName(o) == tname
+        }
         if (tname == "set" || tname == "frozenset") { return isSet(o) }
         return isDict(o) && !isSet(o)
     }
@@ -4156,8 +4186,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         var li = pySeqIdx(o, i)
         if (li < 0) li += o.length
-        if (li < 0 || li >= o.length) { pyRaise(pyMakeExc("IndexError", [(isTup(o) ? "tuple" : "list") + " index out of range"])) }
+        if (li < 0 || li >= o.length) { pyRaise(pyMakeExc("IndexError", [pySeqIdxErr(o)])) }
         return o[li]
+    }
+    // The IndexError text of a sequence subscript out of range.
+    function pySeqIdxErr(o) {
+        var tn = pySeqTName(o)
+        return (tn == "bytes" ? "" : tn + " ") + "index out of range"
     }
     // The position a list or str subscript names: an int (a bool is one), or
     // CPython's TypeError naming the key's type. Twin of pySeqIdx in
@@ -4178,8 +4213,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pyNoItemOp(o, del) {
         var tn = pyTypeOf(o).__name
         if (!del) { pyListErr("TypeError", "'" + tn + "' object does not support item assignment") }
-        var seq = typeof o == "string" || isSet(o) || pyUser(o) || isTup(o)
+        var seq = typeof o == "string" || isSet(o) || pyUser(o) || isTup(o) || arrKind(o) == 17
         pyListErr("TypeError", "'" + tn + "' object " + (seq ? "doesn't" : "does not") + " support item deletion")
+    }
+    // del of a slice of an immutable sequence: CPython's mapping-protocol text,
+    // "does not" where an index deletion says "doesn't". Twin of pyNoSliceDel in
+    // abnf/jsrtpybytes.go and lib/python-rt.metajs.
+    function pyNoSliceDel(o) {
+        pyListErr("TypeError", "'" + pyTypeOf(o).__name + "' object does not support item deletion")
     }
     // Slicing with Python bounds: open ends, negative wrap around, clamping.
     function pySlice(o, lo, hi) {
@@ -4190,7 +4231,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (typeof o == "string") return o.slice(lo, hi)
         var out = []
         for (var i = lo; i < hi; i++) out.push(o[i])
-        return isTup(o) ? pyTup(out) : out
+        return pySeqLike(o, out)
     }
     // The list a for loop or comprehension runs over: dicts iterate their keys
     // (a snapshot), strings their characters.
@@ -4973,9 +5014,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Outside ASCII, "cased" is derived from the case mapping (upper != lower), which
     // covers Latin, Greek and Cyrillic; isdigit is ASCII-only, so CPython's Arabic-Indic
     // digits answer False here. isspace carries the Unicode space code points by hand.
-    //
-    // bytes are a list of byte values in this value model, so `encode()` answers
-    // one - and it prints as a list, where CPython prints b'abc'.
 
     // ---- the character primitives ----
 
@@ -6001,8 +6039,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         pyListErr("TypeError", "str." + name + "() takes no keyword arguments")
         return args
     }
-    // str.encode(encoding="utf-8", errors="strict"): the bytes - a list of byte
-    // values in this value model - in UTF-8, ASCII or Latin-1. A run of characters
+    // str.encode(encoding="utf-8", errors="strict"): the bytes in UTF-8, ASCII
+    // or Latin-1. A run of characters
     // the codec cannot encode raises CPython's UnicodeEncodeError under "strict";
     // "ignore", "replace", "backslashreplace" and "xmlcharrefreplace" substitute.
     // Twin of pysEncode in abnf/pystrmethod.go and pyStrEncode in
@@ -6057,7 +6095,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             k = j
         }
-        return out
+        return pyBytes(out)
     }
     // A code point the codec cannot encode: past the limit, or (UTF-8, limit 0) a
     // lone surrogate.
@@ -6314,6 +6352,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (name == "throw") { return genThrow(target, args.length > 0 ? args[0] : undefined) }
             fail("unknown generator method: " + name)
         }
+        if (isBytes(target)) { return pyBytesMethod(target, name, args, kw) }
         if (Array.isArray(target)) {
             // THE WHOLE LIST METHOD SURFACE. The twins are pyListMethod in
             // abnf/jsrt.go and pyListMethod in languages/lib/python-rt.metajs.
@@ -6393,10 +6432,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
 
     // bytes(source, encoding, errors), with the keywords already in their slots:
-    // a list of byte values in this value model - a str under an encoding
-    // (str.encode), a count of zero bytes, or an iterable of ints in range(256).
-    // None and an absent argument are the same value here. bytearray(...) (NAME)
-    // builds the same list, under its own error texts. Twin of rt.pyBytesNew in
+    // a str under an encoding (str.encode), a count of zero bytes, or an
+    // iterable of ints in range(256). None and an absent argument are the same
+    // value here. bytearray(...) (NAME) builds the mutable kind, under its own
+    // error texts. Twin of rt.pyBytesNew in
     // abnf/jsrtpysub.go and pyBytesNew in lib/python-rt.metajs.
     function pyBytesNew(args, name) {
         if (args.length > 3) { pyListErr("TypeError", name + "() takes at most 3 arguments (" + args.length + " given)") }
@@ -6406,11 +6445,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var errs = pyArgAt(args, 2)
         if (typeof v == "string") {
             if (enc === undefined) { pyListErr("TypeError", "string argument without an encoding") }
-            return pyStrEncode(v, enc, errs)
+            return pyBytesK(pyStrEncode(v, enc, errs), name == "bytes" ? 17 : 18)
         }
         if (enc !== undefined) { pyListErr("TypeError", "encoding without a string argument") }
         if (errs !== undefined) { pyListErr("TypeError", "errors without a string argument") }
-        var out = []
+        var out = pyBytesK([], name == "bytes" ? 17 : 18)
         if (args.length == 0) { return out }
         var tn = pyTypeOf(v).__name
         if (tn == "int" || tn == "bool") {
@@ -6431,6 +6470,253 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             out.push(b)
         }
         return out
+    }
+    // ----- bytes and bytearray -----
+    //
+    // repr is b'...' with the quote CPython picks (' unless the bytes hold a '
+    // and no "), \t \n \r and \\ escaped, and \xNN outside printable ASCII.
+    // Twin of pyBytesRepr in abnf/jsrtpybytes.go and lib/python-rt.metajs.
+    function pyBytesRepr(v) {
+        var q = 39
+        var hasD = false
+        var hasS = false
+        for (var i = 0; i < v.length; i++) {
+            if (v[i] == 39) { hasS = true }
+            if (v[i] == 34) { hasD = true }
+        }
+        if (hasS && !hasD) { q = 34 }
+        var hx = "0123456789abcdef"
+        var out = "b" + String.fromCharCode(q)
+        for (var j = 0; j < v.length; j++) {
+            var c = v[j]
+            if (c == q || c == 92) { out += "\\" + String.fromCharCode(c) }
+            else if (c == 9) { out += "\\t" }
+            else if (c == 10) { out += "\\n" }
+            else if (c == 13) { out += "\\r" }
+            else if (c < 32 || c > 126) { out += "\\x" + hx.charAt(Math.floor(c / 16)) + hx.charAt(c % 16) }
+            else { out += String.fromCharCode(c) }
+        }
+        out += String.fromCharCode(q)
+        return arrKind(v) == 18 ? "bytearray(" + out + ")" : out
+    }
+    // A byte as the str methods see it, so bytes methods can run on the str
+    // ones with bytes' ASCII-only meaning: printable ASCII and the controls
+    // stay themselves, U+001C..U+001F (whitespace to str, not to bytes) and
+    // every byte past 127 move to U+F700 + byte, which no str method treats as
+    // a letter, digit or space. pySToBytes undoes it. Twins: pyBytesToS /
+    // pySToBytes in abnf/jsrtpybytes.go and lib/python-rt.metajs.
+    function pyBytesToS(b) {
+        var out = ""
+        for (var i = 0; i < b.length; i++) {
+            var c = b[i]
+            out += String.fromCharCode(c > 127 || (c >= 28 && c <= 31) ? 63232 + c : c)
+        }
+        return out
+    }
+    function pySToBytes(s, k) {
+        var out = []
+        for (var i = 0; i < s.length; i++) {
+            var c = s.charCodeAt(i)
+            out.push(c >= 63232 ? c - 63232 : c)
+        }
+        return arrKindSet(out, k)
+    }
+    // A value stored into a bytearray: an int in range(0, 256).
+    function pyByteVal(v) {
+        var tn = pyTypeOf(v).__name
+        if (tn != "int" && tn != "bool") { pyListErr("TypeError", "'" + tn + "' object cannot be interpreted as an integer") }
+        var b = floVal(v)
+        if (b < 0 || b > 255) { pyListErr("ValueError", "byte must be in range(0, 256)") }
+        return b
+    }
+    // bytearray += x and bytearray.extend(x): x's bytes appended in place.
+    function pyBArrExtend(a, x) {
+        if (typeof x == "string") { pyListErr("TypeError", "expected iterable of integers; got: 'str'") }
+        var src = iterToList(x).slice(0)
+        for (var i = 0; i < src.length; i++) { a.push(pyByteVal(src[i])) }
+        return a
+    }
+    // x in b: an int is a member, a bytes-like value a substring.
+    function pyBytesHas(b, x) {
+        if (isBytes(x)) { return pyBytesToS(b).indexOf(pyBytesToS(x)) >= 0 }
+        var tn = pyTypeOf(x).__name
+        if (tn != "int" && tn != "bool") { pyListErr("TypeError", "a bytes-like object is required, not '" + tn + "'") }
+        var c = pyByteVal(x)
+        for (var i = 0; i < b.length; i++) { if (b[i] == c) { return true } }
+        return false
+    }
+    // int(b) and float(b) read the bytes as ASCII text; a ValueError names
+    // the bytes' own repr.
+    function pyBytesNum(name, args) {
+        var a2 = args.slice(0)
+        a2[0] = pyBytesToS(args[0])
+        var saved = scopes
+        var r = anytype
+        try { r = pyConvert(name, a2, null) }
+        catch (e) {
+            scopes = saved
+            if (e != null && e != undefined && e.__exc === true && pyIsInstance(e.v, hostGlobals["ValueError"])) {
+                var m = pstr(e.v.args[0])
+                var shown = prepr(a2[0])
+                if (m.length >= shown.length && m.substring(m.length - shown.length) == shown) {
+                    pyListErr("ValueError", m.substring(0, m.length - shown.length) + pyBytesRepr(args[0]))
+                }
+            }
+            throw e
+        }
+        return r
+    }
+    // The right operand of bytes % args with each bytes-like value as the str
+    // formatting sees it; a str has no place in bytes. Twin of pyBytesPctArgs
+    // in abnf/jsrtpybytes.go and lib/python-rt.metajs.
+    function pyBytesPctArgs(r) {
+        if (isTup(r)) {
+            var out = []
+            for (var i = 0; i < r.length; i++) { out.push(pyBytesPctArg(r[i])) }
+            return pyTup(out)
+        }
+        return pyBytesPctArg(r)
+    }
+    function pyBytesPctArg(v) {
+        if (isBytes(v)) { return pyBytesToS(v) }
+        if (typeof v == "string") {
+            pyListErr("TypeError", "%b requires a bytes-like object, or an object that implements __bytes__, not 'str'")
+        }
+        return v
+    }
+    // b.hex(): two lowercase hex digits a byte.
+    function pyBytesHex(b) {
+        var hx = "0123456789abcdef"
+        var out = ""
+        for (var i = 0; i < b.length; i++) { out += hx.charAt(Math.floor(b[i] / 16)) + hx.charAt(b[i] % 16) }
+        return out
+    }
+    // bytes.fromhex(s): pairs of hex digits, spaces between pairs skipped.
+    function pyBytesFromHex(s, k) {
+        if (typeof s != "string") { pyListErr("TypeError", "fromhex() argument must be str, not " + pyTypeOf(s).__name) }
+        var out = []
+        var i = 0
+        while (i < s.length) {
+            if (s.charAt(i) == " ") { i = i + 1; continue }
+            var hi = "0123456789abcdef".indexOf(s.charAt(i).toLowerCase())
+            var lo = i + 1 < s.length ? "0123456789abcdef".indexOf(s.charAt(i + 1).toLowerCase()) : 0 - 1
+            if (hi < 0 || lo < 0) {
+                var at = hi < 0 ? i : i + 1
+                pyListErr("ValueError", "non-hexadecimal number found in fromhex() arg at position " + at)
+            }
+            out.push(hi * 16 + lo)
+            i = i + 2
+        }
+        return arrKindSet(out, k)
+    }
+    // The str methods a bytes value answers through pyBytesToS.
+    function pyBytesStrMethod(name) {
+        if (name == "count" || name == "find" || name == "rfind" || name == "index" || name == "rindex") { return true }
+        if (name == "startswith" || name == "endswith" || name == "split" || name == "rsplit") { return true }
+        if (name == "join" || name == "strip" || name == "lstrip" || name == "rstrip" || name == "replace") { return true }
+        if (name == "upper" || name == "lower" || name == "swapcase" || name == "capitalize" || name == "title") { return true }
+        if (name == "isdigit" || name == "isalpha" || name == "isalnum" || name == "isspace") { return true }
+        if (name == "islower" || name == "isupper" || name == "istitle" || name == "isascii") { return true }
+        if (name == "partition" || name == "rpartition" || name == "removeprefix" || name == "removesuffix") { return true }
+        return name == "center" || name == "ljust" || name == "rjust" || name == "zfill" || name == "expandtabs"
+    }
+    // The mutators a bytearray adds.
+    function pyBArrMutator(name) {
+        if (name == "append" || name == "extend" || name == "pop" || name == "insert") { return true }
+        return name == "remove" || name == "reverse" || name == "clear" || name == "copy"
+    }
+    // Twin of pyIsBytesMethod in abnf/jsrtpybytes.go and lib/python-rt.metajs.
+    function pyIsBytesMethod(name, k) {
+        if (name == "decode" || name == "hex" || pyBytesStrMethod(name)) { return true }
+        return k == 18 && pyBArrMutator(name)
+    }
+    // One argument of a str-delegated bytes method, as the str method sees it.
+    // An int stands for its byte where CPython accepts one (the search
+    // methods), a tuple of bytes for each of its members (startswith).
+    function pyBytesArgS(name, v, first) {
+        if (isBytes(v)) { return pyBytesToS(v) }
+        var tn = pyTypeOf(v).__name
+        var search = name == "count" || name == "find" || name == "rfind" || name == "index" || name == "rindex"
+        if (first && search && (tn == "int" || tn == "bool")) { return pyBytesToS([pyByteVal(v)]) }
+        if (first && (name == "startswith" || name == "endswith") && isTup(v)) {
+            var ts = []
+            for (var i = 0; i < v.length; i++) { ts.push(pyBytesArgS(name, v[i], false)) }
+            return pyTup(ts)
+        }
+        if (first && name == "join") {
+            var src = iterToList(v)
+            var js = []
+            for (var j = 0; j < src.length; j++) {
+                if (!isBytes(src[j])) {
+                    pyListErr("TypeError", "sequence item " + j + ": expected a bytes-like object, " + pyTypeOf(src[j]).__name + " found")
+                }
+                js.push(pyBytesToS(src[j]))
+            }
+            return js
+        }
+        if (tn == "str") {
+            if (search) { pyListErr("TypeError", "argument should be integer or bytes-like object, not 'str'") }
+            if (name == "startswith" || name == "endswith") {
+                pyListErr("TypeError", name + " first arg must be bytes or a tuple of bytes, not str")
+            }
+            pyListErr("TypeError", "a bytes-like object is required, not 'str'")
+        }
+        return v
+    }
+    // A str method's answer back as bytes of kind k: a str, or a list or tuple
+    // of them; anything else is unchanged.
+    function pyBytesBack(r, k) {
+        if (typeof r == "string") { return pySToBytes(r, k) }
+        if (Array.isArray(r)) {
+            var out = []
+            for (var i = 0; i < r.length; i++) { out.push(pyBytesBack(r[i], k)) }
+            return isTup(r) ? pyTup(out) : out
+        }
+        return r
+    }
+    // A method of bytes or bytearray. Twin of pyBytesMethod in
+    // abnf/jsrtpybytes.go and lib/python-rt.metajs.
+    function pyBytesMethod(b, name, args, kw) {
+        var k = arrKind(b)
+        if (name == "decode") {
+            var da = args
+            if (kw != null && kw != undefined && kw.keys.length > 0) { da = pyKwPos("decode", args, kw, ["encoding", "errors"], 0) }
+            return pyBytesDecode(b, da.length > 0 ? da[0] : undefined)
+        }
+        if (name == "hex") { return pyBytesHex(b) }
+        if (k == 18 && pyBArrMutator(name)) {
+            if (name == "append") { b.push(pyByteVal(pyArgAt(args, 0))); return undefined }
+            if (name == "extend") { pyBArrExtend(b, pyArgAt(args, 0)); return undefined }
+            if (name == "insert") { args = [args[0], pyByteVal(pyArgAt(args, 1))] }
+            if (name == "remove") {
+                var rv = pyByteVal(pyArgAt(args, 0))
+                for (var ri = 0; ri < b.length; ri++) {
+                    if (b[ri] == rv) { listRemoveAt(b, ri); return undefined }
+                }
+                pyListErr("ValueError", "value not found in bytearray")
+            }
+            if (name == "pop" && b.length == 0) { pyListErr("IndexError", "pop from empty bytearray") }
+            var lr = anytype
+            lr = pyListMethod(b, name, args, kw)
+            return name == "copy" ? pyBytesK(lr, 18) : lr
+        }
+        if (pyBytesStrMethod(name)) {
+            var sa = []
+            for (var i = 0; i < args.length; i++) { sa.push(pyBytesArgS(name, args[i], i == 0)) }
+            var skw = kw
+            if (kw != null && kw != undefined && kw.keys.length > 0) {
+                skw = newDict()
+                for (var j = 0; j < kw.keys.length; j++) { dictSet(skw, kw.keys[j], pyBytesArgS(name, kw.vals[j], false)) }
+            }
+            var s = pyBytesToS(b)
+            if (name == "index" || name == "rindex") {
+                var at = pyStrMethod(s, name == "index" ? "find" : "rfind", sa, skw)
+                if (at < 0) { pyListErr("ValueError", "subsection not found") }
+                return at
+            }
+            return pyBytesBack(pyStrMethod(s, name, sa, skw), k)
+        }
+        pyAttrErr(b, name)
     }
     // bytes.decode(encoding="utf-8") of a list of byte values: UTF-8 (strict,
     // with CPython's UnicodeDecodeError texts), ASCII or Latin-1, and
@@ -6500,9 +6786,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "copy" || name == "count" || name == "sort") { return true }
         if (name == "insert" || name == "remove" || name == "extend") { return true }
         if (name == "index" || name == "reverse") { return true }
-        // A bytes value is a list of ints in this value model, so bytes.decode
-        // is offered on a list.
-        if (name == "decode") { return true }
         return false
     }
     // Every error below is a CATCHABLE Python exception with CPython 3.14's
@@ -6511,11 +6794,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // any of this assertable in one ratchet file.
     function pyListMethod(xs, name, args, kw) {
         var n = xs.length
-        if (name == "decode") {
-            var da = args
-            if (kw != null && kw != undefined && kw.keys.length > 0) { da = pyKwPos("decode", args, kw, ["encoding", "errors"], 0) }
-            return pyBytesDecode(xs, da.length > 0 ? da[0] : undefined)
-        }
         if (name == "append") { xs.push(pyArgAt(args, 0)); return undefined }
         if (name == "clear") { listTruncate(xs, 0); return undefined }
         if (name == "copy") { return xs.slice(0) }
@@ -8485,6 +8763,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // precision int on the right is an ordinary argument, and floOp/boxOp would
         // otherwise take the pair for arithmetic and answer NaN.
         if (op == "%" && typeof l == "string") { return pyPct(l, r) }
+        if (op == "%" && isBytes(l)) { return pySToBytes(pyPct(pyBytesToS(l), pyBytesPctArgs(r)), arrKind(l)) }
         // A set-like view's set algebra takes any iterable on either side.
         if ((op == "&" || op == "|" || op == "-" || op == "^") && (pyViewSetLike(l) || pyViewSetLike(r)) &&
             !pyUser(l) && !pyUser(r) && pyIterable(l) && pyIterable(r)) {
@@ -8556,9 +8835,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // then keeps "99..." out of the box, and it is paid only on the rare side.
         if (op == "+") {
             if (Array.isArray(l) && Array.isArray(r)) {
-                var ltup = isTup(l)
-                if (ltup != isTup(r)) { pyAddCheck(l, r) }
-                return ltup ? pyTup(l.concat(r)) : l.concat(r)
+                if (pySeqCls(l) != pySeqCls(r)) { pyAddCheck(l, r) }
+                return pySeqLike(l, l.concat(r))
             }
             var sadd = l + r
             // A text or NaN result is the only sign of a mixed pair, so the
@@ -8667,7 +8945,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pyAddKind(v) {
         if (typeof v == "number" || typeof v == "boolean") { return "n" }
         if (typeof v == "string") { return "s" }
-        if (Array.isArray(v)) { return isTup(v) ? "u" : "l" }
+        if (Array.isArray(v)) { return pySeqKindCh(v) }
         if (isFlo(v) || bigIsBig(v) || isCplx(v)) { return "n" }
         return ""
     }
@@ -8677,9 +8955,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pyOrdKind(v) {
         if (pyNumeric(v)) { return "n" }
         if (typeof v == "string") { return "s" }
-        if (Array.isArray(v)) { return isTup(v) ? "u" : "l" }
+        if (Array.isArray(v)) { return pySeqKindCh(v) }
         if (isSet(v)) { return "t" }
         return ""
+    }
+    // The kind letter of an array: l a list, u a tuple, b bytes or a bytearray.
+    function pySeqKindCh(v) {
+        var k = pySeqCls(v)
+        if (k == 16) { return "u" }
+        if (k == 17) { return "b" }
+        return "l"
     }
     function pyOrdCheck(op, l, r) {
         var k = pyOrdKind(l)
@@ -8702,6 +8987,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (kl == "s") { return "can only concatenate str (not \"" + pyTypeOf(r).__name + "\") to str" }
             if (kl == "l") { return "can only concatenate list (not \"" + pyTypeOf(r).__name + "\") to list" }
             if (kl == "u") { return "can only concatenate tuple (not \"" + pyTypeOf(r).__name + "\") to tuple" }
+            if (kl == "b") { return "can't concat " + pyTypeOf(r).__name + " to " + pyTypeOf(l).__name }
         }
         var na = pyNumTName(a)
         var nb = pyNumTName(b)
@@ -8710,7 +8996,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var sets = isSet(a) && isSet(b)
         if (op == "-" && (nums || sets)) { return "" }
         if (op == "/" || op == "//" || op == "**") { if (nums) { return "" } }
-        if (op == "%" && (nums || typeof a == "string")) { return "" }
+        if (op == "%" && (nums || typeof a == "string" || isBytes(a))) { return "" }
         if ((op == "<<" || op == ">>") && ints) { return "" }
         if ((op == "&" || op == "|" || op == "^") && (ints || sets)) { return "" }
         if (op == "|" && isDict(a) && isDict(b) && !isSet(a) && !isSet(b)) { return "" }
@@ -8732,6 +9018,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (kl == "s") { pyListErr("TypeError", "can only concatenate str (not \"" + rn + "\") to str") }
         if (kl == "l") { pyListErr("TypeError", "can only concatenate list (not \"" + rn + "\") to list") }
         if (kl == "u") { pyListErr("TypeError", "can only concatenate tuple (not \"" + rn + "\") to tuple") }
+        if (kl == "b") { pyListErr("TypeError", "can't concat " + rn + " to " + pyTypeOf(l).__name) }
         pyListErr("TypeError", "unsupported operand type(s) for +: '" + pyTypeOf(l).__name + "' and '" + rn + "'")
     }
     // The operators pyBinTypeErr rules on in binOp: `+` has pyAddCheck, `%` of a
@@ -8764,14 +9051,20 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 pyListErr("OverflowError", "cannot fit 'int' into an index-sized integer")
             }
         }
-        if (seq.length == 0 || pytruthy(binOp("<=", k, 0))) { return isStr ? "" : (isTup(seq) ? pyTup([]) : []) }
+        if (seq.length == 0 || pytruthy(binOp("<=", k, 0))) { return isStr ? "" : pySeqLike(seq, []) }
         var len = isStr ? pyLen(seq) : seq.length
         if (bigIsBig(k) || len * k > 281474976710656) {
             if (isStr && pytruthy(binOp(">", binOp("*", len, k), pyIdxMax))) { pyListErr("OverflowError", "repeated string is too long") }
             pyListErr("MemoryError", "")
         }
         if (isStr) { return strRepeat(seq, k) }
-        return isTup(seq) ? pyTup(listRepeat(seq, k)) : listRepeat(seq, k)
+        return pySeqLike(seq, listRepeat(seq, k))
+    }
+    // A fresh array out of the same kind as o: a slice of a tuple is a tuple,
+    // of bytes bytes.
+    function pySeqLike(o, out) {
+        var k = arrKind(o)
+        return k >= 16 && k <= 18 ? arrKindSet(out, k) : out
     }
     function listRepeat(a, n) {
         var out = []
@@ -9075,6 +9368,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Python 'x in y' for lists, strings and dict keys.
     function pyIn(l, r) {
         if (typeof r == "string") return r.indexOf(l) >= 0
+        if (isBytes(r)) { return pyBytesHas(r, l) }
         if (isDict(r)) return dictFind(r, l) >= 0
         if (isView(r)) return pyViewHas(r, l)
         if (pyUser(r)) {
@@ -9253,8 +9547,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (isb) { return {bytes: strToBytes(v)} }
         return {str: v}
     }
-    // bytes are modelled as a list of byte numbers, so b"AB"[0] is 65, b"a" + b"b"
-    // concatenates and len counts bytes - all through the ordinary list machinery.
+    // A bytes literal's byte values (the record is copied on the tag stack, so
+    // the kind is set where the constant is made).
     function strToBytes(v) {
         var out = []
         for (var i = 0; i < v.length; i++) { out.push(v.charCodeAt(i) & 255) }
@@ -9262,9 +9556,19 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // Adjacent pieces concatenate. All-constant text folds at build time.
     function makeStrConcat(items) {
-        if (items.length == 1 && items[0].bytes != undefined) { return makeConst(items[0].bytes) }
+        if (items[0].bytes != undefined) {
+            var bs = []
+            for (var bi = 0; bi < items.length; bi++) {
+                if (items[bi].bytes == undefined) { fail("SyntaxError: cannot mix bytes and nonbytes literals") }
+                for (var bj = 0; bj < items[bi].bytes.length; bj++) { bs.push(items[bi].bytes[bj]) }
+            }
+            return makeConst(pyBytes(bs))
+        }
         var allConst = true
-        for (var i = 0; i < items.length; i++) { if (items[i].str == undefined) { allConst = false } }
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].bytes != undefined) { fail("SyntaxError: cannot mix bytes and nonbytes literals") }
+            if (items[i].str == undefined) { allConst = false }
+        }
         if (allConst) {
             var lit = ""
             for (var k = 0; k < items.length; k++) { lit += items[k].str }
@@ -9276,7 +9580,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var out = ""
             for (var j = 0; j < items.length; j++) {
                 if (items[j].str != undefined) { out += items[j].str }
-                else if (items[j].bytes != undefined) { out += pstr(items[j].bytes) }
                 else { out += items[j]() }
             }
             return out
@@ -10384,7 +10687,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var ix = sliceIdx(o.length, lo, hi, st)
         var out = []
         for (var j = 0; j < ix.length; j++) { out.push(o[ix[j]]) }
-        return isTup(o) ? pyTup(out) : out
+        return pySeqLike(o, out)
     }
     // Decide ONCE, at build time, which of the two binders a comprehension clause needs.
     // Both fields are always present and always the right type: the frozen engine is
@@ -10608,13 +10911,18 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // must receive exactly as many values as it selects (Python's rule).
         if (last.kind == "slice") {
             if (pyUser(o) && o.__val !== undefined) { o = o.__val }
-            if (isTup(o)) { pyNoItemOp(o, false) }
+            if (isTup(o) || arrKind(o) == 17) { pyNoItemOp(o, false) }
             var lo = key.lo
             var hi = key.hi
             var st = key.st
             var vals = iterToList(v)
             // xs[a:b] = xs copies the source first: the target changes under the copy.
             if (vals === o) { vals = o.slice(0) }
+            if (isBytes(o)) {
+                var bv = []
+                for (var bi = 0; bi < vals.length; bi++) { bv.push(pyByteVal(vals[bi])) }
+                vals = bv
+            }
             if (st === undefined || st === null || st === 1) {
                 var ixc = sliceIdx(o.length, lo, hi, 1)
                 var at = ixc.length > 0 ? ixc[0] : (lo === undefined || lo === null ? 0 : (lo < 0 ? lo + o.length : (lo > o.length ? o.length : lo)))
@@ -10639,11 +10947,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (o.__owner != undefined) { pyInstDictPush(o) }
             return
         }
-        if (!Array.isArray(o) || isTup(o)) { pyNoItemOp(o, false) }
+        if (!Array.isArray(o) || isTup(o) || arrKind(o) == 17) { pyNoItemOp(o, false) }
         var pos = pySeqIdx(o, idx)
         if (pos < 0) pos += o.length
-        if (pos < 0 || pos >= o.length) { pyListErr("IndexError", "list assignment index out of range") }
-        o[pos] = v
+        if (pos < 0 || pos >= o.length) { pyListErr("IndexError", pySeqTName(o) + " assignment index out of range") }
+        o[pos] = isBytes(o) ? pyByteVal(v) : v
     }
     // A target LIST: one target stays itself, several become a tuple pattern that
     // unpacks the value. A {startgt} entry is the *rest target.
@@ -10781,7 +11089,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (last.kind == "slice") {
             if (pyUser(o) && o.__val !== undefined) { o = o.__val }
-            if (isTup(o)) { pyNoItemOp(o, true) }
+            if (isTup(o) || arrKind(o) == 17) { pyNoSliceDel(o) }
             var ix = sliceIdx(o.length, last.lo != null ? last.lo() : undefined,
                               last.hi != null ? last.hi() : undefined,
                               last.step != null ? last.step() : undefined)
@@ -10848,10 +11156,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (o.__owner != undefined) { pyInstDictPush(o) }
             return
         }
-        if (!Array.isArray(o) || isTup(o)) { pyNoItemOp(o, true) }
+        if (!Array.isArray(o) || isTup(o) || arrKind(o) == 17) { pyNoItemOp(o, true) }
         var pos = pySeqIdx(o, idx)
         if (pos < 0) { pos += o.length }
-        if (pos < 0 || pos >= o.length) { pyListErr("IndexError", "list assignment index out of range") }
+        if (pos < 0 || pos >= o.length) { pyListErr("IndexError", pySeqTName(o) + " assignment index out of range") }
         listRemoveAt(o, pos)
     }
     // Remove one element in place. splice is not available on the frozen engine's
@@ -10908,13 +11216,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (iv !== pyNotImpl) { return iv }
             }
         }
-        if (bop == "+" && Array.isArray(a) && !isTup(a)) {
+        if (bop == "+" && Array.isArray(a) && !isTup(a) && arrKind(a) != 17) {
+            if (isBytes(a)) { return pyBArrExtend(a, b) }
             var src = pyIterOrTypeErr(b).slice(0)
             for (var i = 0; i < src.length; i++) { a.push(src[i]) }
             return a
         }
         // `xs *= n` writes the repetition back into xs.
-        if (bop == "*" && Array.isArray(a) && !isTup(a)) {
+        if (bop == "*" && Array.isArray(a) && !isTup(a) && arrKind(a) != 17) {
             var rep = binOp("*", a, b)
             while (a.length > 0) { a.pop() }
             for (var ri = 0; ri < rep.length; ri++) { a.push(rep[ri]) }
@@ -12048,7 +12357,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         out = pynToBytes(ib.neg, ib.bits, n, little, pytruthy(pyKwArg(kw, "signed")))
         if (out == "neg") { pyListErr("OverflowError", "can't convert negative int to unsigned") }
         if (out == "big") { pyListErr("OverflowError", "int too big to convert") }
-        return out
+        return pyBytes(out)
     }
     // A byteorder argument: true for "little", false for "big" or absent.
     function pyByteOrder(order) {

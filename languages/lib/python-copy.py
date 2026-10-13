@@ -48,7 +48,7 @@ def _mec_cp_copy(x):
         return x
     if hasattr(cls, "__copy__"):
         return x.__copy__()
-    if cls is list or cls is dict or cls is set:
+    if cls is list or cls is dict or cls is set or cls is bytearray:
         return x.copy()
     if hasattr(x, "__dict__"):
         return _mec_cp_instance(x, _mec_cp_same, None)
@@ -89,7 +89,7 @@ def _mec_cp_deepcopy(x, memo=None):
         memo[d] = y
         for k, v in x.items():
             y[_mec_cp_deepcopy(k, memo)] = _mec_cp_deepcopy(v, memo)
-    elif cls is set or cls is frozenset:
+    elif cls is set or cls is frozenset or cls is bytearray:
         y = cls([_mec_cp_deepcopy(a, memo) for a in x])
     elif hasattr(x, "__dict__"):
         y = _mec_cp_instance(x, lambda v: _mec_cp_deepcopy(v, memo), memo)

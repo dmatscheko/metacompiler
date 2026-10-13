@@ -6112,6 +6112,41 @@ def s117():
           and S117err(lambda: __import__("os.nope")) == "ModuleNotFoundError: No module named 'os.nope'; 'os' is not a package"
           and issubclass(ModuleNotFoundError, ImportError))
 
+# ===== SECTION 118: bytes and bytearray are their own types =====
+# Neither is a list: type, repr, == against a list, hashing and immutability
+# are bytes', int() and float() read the bytes as ASCII text, and the str-like
+# methods answer bytes. A bytearray is the mutable one and equals bytes of the
+# same bytes. Rows from CPython 3.14.
+def S118err(f):
+    try:
+        f()
+    except Exception as e:
+        return type(e).__name__ + ": " + str(e)
+    return "no error"
+
+def S118set(b):
+    b[0] = 120
+    return b
+
+def s118():
+    bs = [b"ab", bytearray(b"ab"), b"a'b\x00\xff"]
+    n = [255, 2]
+    check("byt1", (n[0]).to_bytes(n[1], "big", signed=True) == b"\x00\xff" and type(bs[0]).__name__ == "bytes"
+          and type(bs[1]).__name__ == "bytearray" and repr(bs[2]) == "b\"a'b\\x00\\xff\"" and str(bs[1]) == "bytearray(b'ab')")
+    check("byt2", not (bs[0] == [97, 98]) and bs[0] == bs[1] and bs[0] != (97, 98) and list(bs[0]) == [97, 98]
+          and hash(bs[0]) == hash(b"ab") and {bs[0]: 1}[b"ab"] == 1
+          and S118err(lambda: hash(bs[1])) == "TypeError: unhashable type: 'bytearray'")
+    check("byt3", int(b"12") == 12 and float(b"1.5") == 1.5 and int(bytearray(b" -7 ")) == -7
+          and S118err(lambda: int(b"1x")) == "ValueError: invalid literal for int() with base 10: b'1x'"
+          and S118err(lambda: float(b"x")) == "ValueError: could not convert string to float: b'x'")
+    check("byt4", S118err(lambda: S118set(bs[0])) == "TypeError: 'bytes' object does not support item assignment"
+          and S118set(bytearray(b"ab")) == b"xb" and bs[0] + bs[1] == b"abab" and type(bs[1] + bs[0]).__name__ == "bytearray"
+          and S118err(lambda: bs[0] + [1]) == "TypeError: can't concat list to bytes"
+          and bs[0][1:] == b"b" and bs[0] * 2 == b"abab" and S118err(lambda: bs[0].append(1)).startswith("AttributeError"))
+    check("byt5", b"a,b".split(b",") == [b"a", b"b"] and b"-".join([b"x", b"y"]) == b"x-y" and b"aZ\xe9".upper() == b"AZ\xe9"
+          and b"x" in bs[0] + b"x" and 97 in bs[0] and "café".encode() == b"caf\xc3\xa9" and b"\x01\xab".hex() == "01ab"
+          and bytes.fromhex("01 ab") == b"\x01\xab" and b"%d-%s" % (5, b"z") == b"5-z")
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -6227,5 +6262,6 @@ def main():
     s115() # SECTION-CALL 115
     s116() # SECTION-CALL 116
     s117() # SECTION-CALL 117
+    s118() # SECTION-CALL 118
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

@@ -25,8 +25,7 @@ package abnf
 // zfill and the per-character walks) count CODE POINTS, as CPython does.
 //
 // The documented divergences from CPython are listed in the MetaJS chapter's
-// header and are NOT repeated here; the short form is: bytes are a list of byte
-// values (encode() answers one), ASCII-exact classification with a cased-derived fallback outside
+// header and are NOT repeated here; the short form is: ASCII-exact classification with a cased-derived fallback outside
 // it, and the case mapping of abnf/casemap.go.
 
 import (
@@ -1202,7 +1201,7 @@ func (rt *jsrt) pysEncode(s string, encV, errV interface{}) interface{} {
 		}
 		return cp >= limit
 	}
-	out := &jsArray{}
+	out := &jsArray{kind: pyBytesKind}
 	push := func(b int) { out.elems = append(out.elems, float64(b)) }
 	ascii := func(t string) {
 		for i := 0; i < len(t); i++ {

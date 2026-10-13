@@ -145,10 +145,7 @@ func pyOrdKind(v interface{}) byte {
 	case string:
 		return 's'
 	case *jsArray:
-		if t.kind == pyTupKind {
-			return 'u'
-		}
-		return 'l'
+		return pySeqKindCh(t)
 	}
 	if _, ok := pySetElems(v); ok {
 		return 't'
@@ -188,6 +185,8 @@ func (rt *jsrt) pyBinTypeErr(op string, l, r, a, b interface{}) string {
 			return "can only concatenate list (not \"" + rn + "\") to list"
 		case 'u':
 			return "can only concatenate tuple (not \"" + rn + "\") to tuple"
+		case 'b':
+			return "can't concat " + rn + " to " + ln
 		}
 	}
 	na, nb := pyNumTypeName(a), pyNumTypeName(b)
@@ -207,7 +206,7 @@ func (rt *jsrt) pyBinTypeErr(op string, l, r, a, b interface{}) string {
 			return ""
 		}
 	case "%":
-		if nums || isStr {
+		if nums || isStr || pyIsBytes(a) {
 			return ""
 		}
 	case "<<", ">>":
@@ -228,7 +227,7 @@ func (rt *jsrt) pyBinTypeErr(op string, l, r, a, b interface{}) string {
 			return ""
 		}
 		qa, qb := pyAddKind(a), pyAddKind(b)
-		seqA, seqB := qa == 's' || qa == 'l' || qa == 'u', qb == 's' || qb == 'l' || qb == 'u'
+		seqA, seqB := qa == 's' || qa == 'l' || qa == 'u' || qa == 'b', qb == 's' || qb == 'l' || qb == 'u' || qb == 'b'
 		if (seqA && nb == "int") || (seqB && na == "int") {
 			return ""
 		}

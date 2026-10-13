@@ -3830,6 +3830,9 @@ func (rt *jsrt) pyString(v interface{}) string {
 	case *jsBigInt:
 		return rt.pyBigDec(t.v)
 	case *jsArray:
+		if pyIsBytes(t) {
+			return pyBytesRepr(t)
+		}
 		// A tuple is parenthesized, and a one-element one keeps its comma.
 		tup := t.kind == pyTupKind
 		if !rt.pyReprEnter(t) {
@@ -15018,11 +15021,11 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 					idx += len(o.elems)
 				}
 				if idx < 0 || idx >= len(o.elems) {
-					kind := "list"
-					if o.kind == pyTupKind {
-						kind = "tuple"
+					kind := pySeqTName(o) + " "
+					if kind == "bytes " {
+						kind = ""
 					}
-					panic(&jsThrown{value: rt.pyExcInstance("IndexError", kind+" index out of range")})
+					panic(&jsThrown{value: rt.pyExcInstance("IndexError", kind+"index out of range")})
 				}
 				return w(o.elems[idx])
 			case string:
@@ -15071,7 +15074,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				return 0
 			}
 			arr, ok := u(a[0]).(*jsArray)
-			if !ok || arr.kind == pyTupKind {
+			if !ok || arr.kind == pyTupKind || arr.kind == pyBytesKind {
 				rt.pyNoItemOp(u(a[0]), false)
 			}
 			idx := rt.pySeqIdx(arr, u(a[1]))
@@ -15079,9 +15082,13 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				idx += len(arr.elems)
 			}
 			if idx < 0 || idx >= len(arr.elems) {
-				panic(&jsThrown{value: rt.pyExcInstance("IndexError", "list assignment index out of range")})
+				panic(&jsThrown{value: rt.pyExcInstance("IndexError", pySeqTName(arr)+" assignment index out of range")})
 			}
 			arr.dropIdx()
+			if arr.kind == pyBArrKind {
+				arr.elems[idx] = rt.pyByteVal(u(a[2]))
+				return 0
+			}
 			arr.elems[idx] = u(a[2])
 			return 0
 		},
@@ -16215,10 +16222,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				for _, i := range idx {
 					out.elems = append(out.elems, o.elems[i])
 				}
-				if o.kind == pyTupKind {
-					pyTup(out)
-				}
-				return w(out)
+				return w(pySeqLike(o, out))
 			case string:
 				cs := pyStrChars(rt, o)
 				var out strings.Builder
@@ -16239,10 +16243,15 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				rt.fail("slice assignment to a %s", rt.typeOf(u(a[0])))
 				return 0
 			}
-			if arr.kind == pyTupKind {
+			if arr.kind == pyTupKind || arr.kind == pyBytesKind {
 				rt.pyNoItemOp(arr, false)
 			}
 			vals := rt.pySeqElems(u(a[4]))
+			if arr.kind == pyBArrKind {
+				for i, e := range vals {
+					vals[i] = rt.pyByteVal(e)
+				}
+			}
 			if isUndefOrNull(u(a[3])) || rt.toNumber(u(a[3])) == 1 {
 				idx := rt.pySliceIndices(len(arr.elems), u(a[1]), u(a[2]), u(a[3]))
 				lo := len(arr.elems)
@@ -16276,8 +16285,8 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				rt.fail("deleting a slice of a %s", rt.typeOf(u(a[0])))
 				return 0
 			}
-			if arr.kind == pyTupKind {
-				rt.pyNoItemOp(arr, true)
+			if arr.kind == pyTupKind || arr.kind == pyBytesKind {
+				rt.pyNoSliceDel(arr)
 			}
 			idx := rt.pySliceIndices(len(arr.elems), u(a[1]), u(a[2]), u(a[3]))
 			drop := map[int]bool{}
@@ -16527,18 +16536,15 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			switch op {
 			case "+":
-				// Two sequences CONCATENATE in Python ([1] + [2] is [1, 2], and
-				// bytes are a list of byte numbers here), which is not what the
-				// JavaScript + of the shared runtime does with two arrays.
+				// Two sequences CONCATENATE in Python ([1] + [2] is [1, 2]), which
+				// is not what the JavaScript + of the shared runtime does with two
+				// arrays.
 				if la, ok := l.(*jsArray); ok {
-					if ra, ok2 := r.(*jsArray); ok2 && (la.kind == pyTupKind) == (ra.kind == pyTupKind) {
+					if ra, ok2 := r.(*jsArray); ok2 && pySeqCls(la) == pySeqCls(ra) {
 						out := &jsArray{}
 						out.elems = append(out.elems, la.elems...)
 						out.elems = append(out.elems, ra.elems...)
-						if la.kind == pyTupKind {
-							pyTup(out)
-						}
-						return w(out)
+						return w(pySeqLike(la, out))
 					}
 				}
 				rt.pyAddCheck(l, r)
@@ -16585,6 +16591,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				// "fmt" % args is printf-style FORMATTING, not a remainder.
 				if s, isStr := l.(string); isStr {
 					return w(rt.pyPct(s, r))
+				}
+				if la, ok := l.(*jsArray); ok && pyIsBytes(la) {
+					return w(pySToBytes(rt.pyPct(pyBytesToS(la), rt.pyBytesPctArgs(r)), la.kind))
 				}
 				return w(rt.pyFloorOp(op, l, r))
 			case "**":
@@ -16732,7 +16741,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				return 0
 			}
 			arr, ok := u(a[0]).(*jsArray)
-			if !ok || arr.kind == pyTupKind {
+			if !ok || arr.kind == pyTupKind || arr.kind == pyBytesKind {
 				rt.pyNoItemOp(u(a[0]), true)
 			}
 			i := rt.pySeqIdx(arr, u(a[1]))
@@ -16740,7 +16749,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				i += len(arr.elems)
 			}
 			if i < 0 || i >= len(arr.elems) {
-				panic(&jsThrown{value: rt.pyExcInstance("IndexError", "list assignment index out of range")})
+				panic(&jsThrown{value: rt.pyExcInstance("IndexError", pySeqTName(arr)+" assignment index out of range")})
 			}
 			arr.dropIdx()
 			arr.elems = append(arr.elems[:i], arr.elems[i+1:]...)
@@ -16756,6 +16765,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			pos := el[0].(*jsArray).elems
 			if keys, _, ok := dictParts(el[1]); ok && len(keys.elems) > 0 {
 				pos = rt.pyKwPos("int", pos, el[1], []string{"x", "base"}, 1)
+			}
+			if len(pos) > 0 && pyIsBytes(pos[0]) {
+				return w(rt.pyBytesNum("int", pos))
 			}
 			return w(rt.pyIntNew(pos))
 		},
@@ -17082,6 +17094,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			a = []uint64{w(pyUnwrapBuiltin(u(a[0])))}
 			if s, isStr := u(a[0]).(string); isStr {
 				return w(&jsPyFlo{f: rt.pyStrToF(s)})
+			}
+			if pyIsBytes(u(a[0])) {
+				return w(rt.pyBytesNum("float", []interface{}{u(a[0])}))
 			}
 			if bi, ok := u(a[0]).(*jsBigInt); ok {
 				return w(&jsPyFlo{f: rt.pyBigToF(bi.v)})
@@ -18502,11 +18517,14 @@ func (rt *jsrt) pyAugBin(op string, l, r interface{}) interface{} {
 			}
 		}
 	}
-	if la, ok := l.(*jsArray); ok && op == "+" && la.kind != pyTupKind {
+	if la, ok := l.(*jsArray); ok && op == "+" && la.kind != pyTupKind && la.kind != pyBytesKind {
+		if la.kind == pyBArrKind {
+			return rt.pyBArrExtend(la, r)
+		}
 		la.elems = append(la.elems, rt.pyElemsOf(r)...)
 		return l
 	}
-	if la, ok := l.(*jsArray); ok && op == "*" && la.kind != pyTupKind {
+	if la, ok := l.(*jsArray); ok && op == "*" && la.kind != pyTupKind && la.kind != pyBytesKind {
 		rep := rt.pyExt("js_pybin", "*", l, r)
 		if ra, isArr := rep.(*jsArray); isArr {
 			la.elems = append(la.elems[:0:0], ra.elems...)
@@ -18751,7 +18769,7 @@ func (rt *jsrt) pyEqual(x, y interface{}) bool {
 	}
 	if xa, ok := x.(*jsArray); ok {
 		ya, ok2 := y.(*jsArray)
-		if !ok2 || len(xa.elems) != len(ya.elems) || (xa.kind == pyTupKind) != (ya.kind == pyTupKind) {
+		if !ok2 || len(xa.elems) != len(ya.elems) || pySeqCls(xa) != pySeqCls(ya) {
 			return false
 		}
 		for i := range xa.elems {
@@ -19164,8 +19182,8 @@ func (rt *jsrt) pySetAdd(els *jsArray, v interface{}) {
 //	{(1, {}): 1} TypeError: cannot use 'tuple' as a dict key (unhashable type: 'dict')
 //
 // The wording differs between the two positions, and the OUTER name is the type
-// handed over while the INNER one is the type that is unhashable. A frozenset is
-// hashable; bytearray is not in this subset at all. An array is refused only in
+// handed over while the INNER one is the type that is unhashable. A frozenset
+// and bytes are hashable; a bytearray is not. An array is refused only in
 // a Python program (rt.pyLang): the set and dict helpers are shared, and a list
 // is a perfectly good key in dart or swift.
 func (rt *jsrt) pyUnhashName(v interface{}) string {
@@ -19174,8 +19192,11 @@ func (rt *jsrt) pyUnhashName(v interface{}) string {
 		if !rt.pyLang {
 			return ""
 		}
+		if t.kind == pyBytesKind {
+			return ""
+		}
 		if t.kind != pyTupKind {
-			return "list"
+			return pySeqTName(t)
 		}
 		for _, e := range t.elems {
 			if n := rt.pyUnhashName(e); n != "" {
@@ -21221,6 +21242,9 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 	// index: [3,1,2].pop(0) is 3). The twins are pyListMethod
 	// in languages/lib/python-rt.metajs and pyListMethod in
 	// languages/python-interpreter.abnf.
+	if arr, isArr := target.(*jsArray); isArr && pyIsBytes(arr) {
+		return rt.pyBytesMethod(arr, name, args, kw)
+	}
 	if arr, isArr := target.(*jsArray); isArr && pyIsListMethod(name) {
 		if arr.kind != pyTupKind || pyIsTupleMethod(name) {
 			return rt.pyListMethod(arr, name, args, kw)
@@ -21285,8 +21309,6 @@ func pyIsListMethod(name string) bool {
 	case "append", "pop", "clear", "copy", "count",
 		"sort", "insert", "remove", "extend", "index", "reverse":
 		return true
-	case "decode": // A bytes value is a list of ints in this value model.
-		return true
 	}
 	return false
 }
@@ -21297,11 +21319,6 @@ func pyIsListMethod(name string) bool {
 func (rt *jsrt) pyListMethod(arr *jsArray, name string, args []interface{}, kw interface{}) interface{} {
 	n := len(arr.elems)
 	switch name {
-	case "decode":
-		if keys, _, ok := dictParts(kw); ok && len(keys.elems) > 0 {
-			args = rt.pyKwPos("decode", args, kw, []string{"encoding", "errors"}, 0)
-		}
-		return rt.pyBytesDecode(arr.elems, argAt(args, 0))
 	case "append":
 		arr.dropIdx()
 		arr.elems = append(arr.elems, argAt(args, 0))
@@ -21556,6 +21573,14 @@ func (rt *jsrt) pyBuiltinClsMethod(target interface{}, name string) (interface{}
 	case "float.from_number":
 		return jsHostFunc("float.from_number", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			return rt.pyFloatFromNumber(argAt(args, 0))
+		}), true
+	case "bytes.fromhex", "bytearray.fromhex":
+		kind := pyBytesKind
+		if pyBuiltinClsName(target) == "bytearray" {
+			kind = pyBArrKind
+		}
+		return jsHostFunc("bytes.fromhex", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return rt.pyBytesFromHex(argAt(args, 0), kind)
 		}), true
 	case "str.maketrans":
 		return jsHostFunc("str.maketrans", func(rt *jsrt, this uint64, args []interface{}) interface{} {
@@ -21976,6 +22001,9 @@ func (rt *jsrt) pyBuiltinAttr(target interface{}, name string) bool {
 		return pysIsStrMethod(name)
 	}
 	if arr, isArr := target.(*jsArray); isArr {
+		if pyIsBytes(arr) {
+			return pyIsBytesMethod(name, arr.kind)
+		}
 		if arr.kind == pyTupKind {
 			return pyIsTupleMethod(name)
 		}
@@ -22594,10 +22622,7 @@ func pyIterKind(rt *jsrt, v interface{}) string {
 		}
 		return "str_ascii_iterator"
 	case *jsArray:
-		if t.kind == pyTupKind {
-			return "tuple_iterator"
-		}
-		return "list_iterator"
+		return pySeqTName(t) + "_iterator"
 	}
 	if _, ok := pySetElems(v); ok {
 		return "set_iterator"
@@ -22791,7 +22816,7 @@ func (rt *jsrt) pyNoItemOp(c interface{}, del bool) {
 	_, isStr := c.(string)
 	_, isSet := pySetElems(c)
 	_, _, isInst := pyInstance(c)
-	if isStr || isSet || isInst || pyIsTup(c) {
+	if ca, isArr := c.(*jsArray); isStr || isSet || isInst || (isArr && (ca.kind == pyTupKind || ca.kind == pyBytesKind)) {
 		how = "doesn't"
 	}
 	panic(&jsThrown{value: rt.pyExcInstance("TypeError", "'"+tn+"' object "+how+" support item deletion")})
@@ -22960,10 +22985,7 @@ func pyAddKind(v interface{}) byte {
 	case string:
 		return 's'
 	case *jsArray:
-		if t.kind == pyTupKind {
-			return 'u'
-		}
-		return 'l'
+		return pySeqKindCh(t)
 	case *jsObject:
 		if isPyComplex(t) {
 			return 'n'
@@ -22989,6 +23011,8 @@ func (rt *jsrt) pyAddCheck(l, r interface{}) {
 		msg = "can only concatenate list (not \"" + rn + "\") to list"
 	case 'u':
 		msg = "can only concatenate tuple (not \"" + rn + "\") to tuple"
+	case 'b':
+		msg = "can't concat " + rn + " to " + pyTypeName(rt, l)
 	}
 	panic(&jsThrown{value: rt.pyExcInstance("TypeError", msg)})
 }
@@ -23012,10 +23036,7 @@ func pyTypeName(rt *jsrt, v interface{}) string {
 		// float is boxed (jsPyFlo) in the first place.
 		return "int"
 	case *jsArray:
-		if t.kind == pyTupKind {
-			return "tuple"
-		}
-		return "list"
+		return pySeqTName(t)
 	case *jsObject:
 		// type(C) is 'type' for a class object - a BUILTIN one (what type(3)
 		// hands out, which carries only __name and no __mro) as well as a user
@@ -23166,6 +23187,9 @@ func (rt *jsrt) pyBuiltinClass(name string) *jsObject {
 // pyContains is 'x in y' for the builtin containers (the js_pyin logic, reached
 // from js_pybin once no __contains__ answered).
 func (rt *jsrt) pyContains(x, y interface{}) bool {
+	if ya, ok := y.(*jsArray); ok && pyIsBytes(ya) {
+		return rt.pyBytesHas(ya, x)
+	}
 	if pyIsDView(y) {
 		return rt.pyDViewHas(y, x)
 	}
@@ -25157,10 +25181,7 @@ func (rt *jsrt) pySeqRepeat(seq, n interface{}) (interface{}, bool) {
 		for i := 0; i < k; i++ {
 			out.elems = append(out.elems, s.elems...)
 		}
-		if s.kind == pyTupKind {
-			pyTup(out)
-		}
-		return out, true
+		return pySeqLike(s, out), true
 	}
 	return nil, false
 }

@@ -135,6 +135,33 @@ function pyIsArr(v) { return Array.isArray(v) }
 // floor's array cell, which a copy does not inherit).
 function pyTup(a) { return arrKindSet(a, 16) }
 function pyIsTup(v) { return arrKind(v) == 16 }
+// Go: pyBytesKind / pyIsBytes / pySeqCls / pySeqTName / pySeqLike in
+// abnf/jsrtpybytes.go. bytes and bytearray are arrays of byte values carrying
+// kind 17 and 18; == compares kinds by pySeqCls, so bytes equals a bytearray
+// of the same bytes and neither equals a list.
+function pyIsBytes(v) {
+    var k = arrKind(v)
+    return k == 17 || k == 18
+}
+function pySeqCls(v) {
+    var k = arrKind(v)
+    if (k == 18) { return 17 }
+    return k
+}
+function pySeqTName(v) {
+    var k = arrKind(v)
+    if (k == 16) { return "tuple" }
+    if (k == 17) { return "bytes" }
+    if (k == 18) { return "bytearray" }
+    return "list"
+}
+function pySeqLike(o, out) {
+    var k = arrKind(o)
+    if (k >= 16 && k <= 18) { arrKindSet(out, k) }
+    return out
+}
+// Go: js_pyb. A bytes literal's array, marked.
+function js_pyb(a) { return arrKindSet(a, 17) }
 // A tuple's two methods.
 function pyIsTupleMethod(name) { return name == "count" || name == "index" }
 // Go: js_pytup and js_pytupconv. A tuple display marks the array it built, and
@@ -297,11 +324,12 @@ function pyKeyEq(a, b) {
 //
 // The wording differs between the two positions, and the OUTER name is the type
 // handed over while the INNER one is the type that is unhashable: a list, or a
-// tuple holding one, `{(1, [2]): 3}`. A frozenset is hashable; bytearray is not
-// in this subset at all.
+// tuple holding one, `{(1, [2]): 3}`. A frozenset and bytes are hashable; a
+// bytearray is not.
 function pyHashName(v) {
     if (Array.isArray(v)) {
-        if (!pyIsTup(v)) { return "list" }
+        if (arrKind(v) == 17) { return "" }
+        if (!pyIsTup(v)) { return pySeqTName(v) }
         var i = 0
         while (i < v.length) {
             var inner = pyHashName(v[i])
@@ -742,6 +770,7 @@ function pyStr(v) {
         if (typeof cmod == "string") { return "<class '" + cmod + "." + pyClsQual(v) + "'>" }
         return "<class '" + cn + "'>"
     }
+    if (pyIsBytes(v)) { return pyBytesRepr(v) }
     if (Array.isArray(v)) {
         var sr = pyReprNest(v, false)
         if (sr !== null) { return sr }
@@ -1019,10 +1048,7 @@ function pyTypeName(v) {
     // the value can tell the two Python types apart - which is why the float is
     // boxed in the first place.
     if (typeof v == "number") { return "int" }
-    if (Array.isArray(v)) {
-        if (pyIsTup(v)) { return "tuple" }
-        return "list"
-    }
+    if (Array.isArray(v)) { return pySeqTName(v) }
     // CPython's type(gen).__name__, and the name its AttributeError uses.
     if (pyIsGen(v)) { return "generator" }
     if (typeof v == "function") {
@@ -1162,7 +1188,7 @@ function pyEqual(x, y) {
     if (Array.isArray(x)) {
         if (!Array.isArray(y)) { return false }
         if (x.length != y.length) { return false }
-        if (pyIsTup(x) != pyIsTup(y)) { return false }
+        if (pySeqCls(x) != pySeqCls(y)) { return false }
         for (var j = 0; j < x.length; j++) {
             if (!pyEqual(x[j], y[j])) { return false }
         }
@@ -1530,8 +1556,9 @@ function pyBDelAccepts(tname, o) {
     if (tname == "float") { return nk == "int" || nk == "float" }
     if (tname == "complex") { return nk != "" }
     if (tname == "str") { return typeof o == "string" }
-    if (tname == "list") { return pyIsArr(o) && !pyIsTup(o) }
-    if (tname == "tuple") { return pyIsTup(o) }
+    if (tname == "list" || tname == "tuple" || tname == "bytes" || tname == "bytearray") {
+        return pyIsArr(o) && pySeqTName(o) == tname
+    }
     if (tname == "set" || tname == "frozenset") { return pySetElemsOf(o) !== null }
     return pyIsDict(o) && pySetElemsOf(o) === null
 }
@@ -1600,7 +1627,7 @@ function pyValDunder(v, name) {
     if (typeof v == "string") {
         tn = "str"
     } else if (pyIsArr(v)) {
-        tn = pyIsTup(v) ? "tuple" : "list"
+        tn = pySeqTName(v)
     } else if (pySetElemsOf(v) !== null) {
         tn = pySetFrozen(v) ? "frozenset" : "set"
     } else if (pyIsDict(v)) {
@@ -2239,7 +2266,7 @@ function pyNumMethod(o, name, args, kw) {
     out = pynToBytes(pyIntNeg(o), bits, n, little, pyDTruthy(pyKwArg(kw, "signed")))
     if (out == "neg") { pyRaiseExc("OverflowError", "can't convert negative int to unsigned") }
     if (out == "big") { pyRaiseExc("OverflowError", "int too big to convert") }
-    return out
+    return arrKindSet(out, 17)
 }
 
 // A byteorder argument: true for "little", false for "big" or absent.
@@ -2864,6 +2891,11 @@ function pyBuiltinClsMethod(target, name) {
     }
     if (tn == "float" && name == "from_number") {
         return function(x) { return pyFloatFromNumber(x) }
+    }
+    if ((tn == "bytes" || tn == "bytearray") && name == "fromhex") {
+        var fk = 17
+        if (tn == "bytearray") { fk = 18 }
+        return function(s) { return pyBytesFromHex(s, fk) }
     }
     if (tn == "str" && name == "maketrans") {
         return function() {
@@ -3780,8 +3812,7 @@ function pyASeqRepeat(seq, n) {
         }
         a = a + 1
     }
-    if (pyIsTup(seq)) { pyTup(out) }
-    return {v: out}
+    return {v: pySeqLike(seq, out)}
 }
 
 // ============================================================================
@@ -4304,6 +4335,7 @@ function pyABinTypeErr(op, l, r, a, b) {
         if (kl == "s") { return "can only concatenate str (not \"" + pyTypeName(r) + "\") to str" }
         if (kl == "l") { return "can only concatenate list (not \"" + pyTypeName(r) + "\") to list" }
         if (kl == "u") { return "can only concatenate tuple (not \"" + pyTypeName(r) + "\") to tuple" }
+        if (kl == "b") { return "can't concat " + pyTypeName(r) + " to " + pyTypeName(l) }
     }
     var na = pyNumTName(a)
     var nb = pyNumTName(b)
@@ -4314,7 +4346,7 @@ function pyABinTypeErr(op, l, r, a, b) {
     if (op == "/" || op == "//" || op == "**") {
         if (nums) { return "" }
     }
-    if (op == "%" && (nums || typeof a == "string")) { return "" }
+    if (op == "%" && (nums || typeof a == "string" || pyIsBytes(a))) { return "" }
     if ((op == "<<" || op == ">>") && ints) { return "" }
     if ((op == "&" || op == "|" || op == "^") && (ints || sets)) { return "" }
     if (op == "|" && pyIsDict(a) && pyIsDict(b) && pySetElemsOf(a) === null && pySetElemsOf(b) === null) { return "" }
@@ -4335,6 +4367,7 @@ function pyABinTypeErr(op, l, r, a, b) {
 // Go: rt.pyContains
 // ============================================================================
 function pyAContains(x, y) {
+    if (pyIsBytes(y)) { return pyBytesHas(y, x) }
     var els = pySetElemsOf(y)
     if (els !== null) {
         pyHashCheckMember(x)
@@ -4379,14 +4412,18 @@ function pyAContains(x, y) {
 
 // CPython's `+` is defined only within one kind - numbers (bool, int, float,
 // complex), str, a list or a tuple - and raises TypeError for any other pair.
+// Go: pySeqKindCh. l a list, u a tuple, b bytes or a bytearray.
+function pySeqKindCh(v) {
+    var k = pySeqCls(v)
+    if (k == 16) { return "u" }
+    if (k == 17) { return "b" }
+    return "l"
+}
 // Go: rt.pyAddCheck.
 function pyAAddKind(v) {
     if (typeof v == "number" || typeof v == "boolean") { return "n" }
     if (typeof v == "string") { return "s" }
-    if (pyIsArr(v)) {
-        if (pyIsTup(v)) { return "u" }
-        return "l"
-    }
+    if (pyIsArr(v)) { return pySeqKindCh(v) }
     if (pyIsFlo(v) || pyIsBig(v) || pyIsCplx(v)) { return "n" }
     return ""
 }
@@ -4397,10 +4434,7 @@ function pyAAddKind(v) {
 function pyAOrdKind(v) {
     if (typeof v == "number" || typeof v == "boolean") { return "n" }
     if (typeof v == "string") { return "s" }
-    if (pyIsArr(v)) {
-        if (pyIsTup(v)) { return "u" }
-        return "l"
-    }
+    if (pyIsArr(v)) { return pySeqKindCh(v) }
     if (pyIsFlo(v) || pyIsBig(v)) { return "n" }
     if (pySetElemsOf(v) !== null) { return "t" }
     return ""
@@ -4418,6 +4452,7 @@ function pyAAddCheck(l, r) {
     if (kl == "s") { pyRaiseExc("TypeError", "can only concatenate str (not \"" + rn + "\") to str") }
     if (kl == "l") { pyRaiseExc("TypeError", "can only concatenate list (not \"" + rn + "\") to list") }
     if (kl == "u") { pyRaiseExc("TypeError", "can only concatenate tuple (not \"" + rn + "\") to tuple") }
+    if (kl == "b") { pyRaiseExc("TypeError", "can't concat " + rn + " to " + pyTypeName(l)) }
     pyRaiseExc("TypeError", "unsupported operand type(s) for +: '" + pyTypeName(l) + "' and '" + rn + "'")
 }
 
@@ -4444,7 +4479,8 @@ function pyAAug(op, l, r) {
             }
         }
     }
-    if (op == "+" && pyIsArr(l) && !pyIsTup(l)) {
+    if (op == "+" && pyIsArr(l) && !pyIsTup(l) && arrKind(l) != 17) {
+        if (arrKind(l) == 18) { return pyBArrExtend(l, r) }
         var ext = pyElemsOf(r)
         var en = ext.length
         var ei = 0
@@ -4455,7 +4491,7 @@ function pyAAug(op, l, r) {
         return l
     }
     // `xs *= n` writes the repetition back into xs.
-    if (op == "*" && pyIsArr(l) && !pyIsTup(l)) {
+    if (op == "*" && pyIsArr(l) && !pyIsTup(l) && arrKind(l) != 17) {
         var rep = js_pybin("*", l, r)
         while (l.length > 0) { l.pop() }
         var ri = 0
@@ -4701,11 +4737,10 @@ function js_pybin(opv, l, r) {
         }
     }
     if (op == "+") {
-        // Two sequences CONCATENATE in Python ([1] + [2] is [1, 2], and bytes
-        // are a list of byte numbers here), which is not what jsAdd does.
+        // Two sequences CONCATENATE in Python ([1] + [2] is [1, 2]), which is not
+        // what jsAdd does.
         if (pyIsArr(l) && pyIsArr(r)) {
-            var ltup = pyIsTup(l)
-            if (ltup != pyIsTup(r)) { pyAAddCheck(l, r) }
+            if (pySeqCls(l) != pySeqCls(r)) { pyAAddCheck(l, r) }
             var out = []
             var i = 0
             while (i < l.length) {
@@ -4717,8 +4752,7 @@ function js_pybin(opv, l, r) {
                 out.push(r[j])
                 j = j + 1
             }
-            if (ltup) { pyTup(out) }
-            return out
+            return pySeqLike(l, out)
         }
         if (typeof l == "number" && typeof r == "number") {
             var nadd = l + r
@@ -4775,6 +4809,7 @@ function js_pybin(opv, l, r) {
     if (op == "//") { return pyAFloorOp(op, l, r) }
     // "fmt" % args is printf-style FORMATTING, not a remainder.
     if (op == "%" && typeof l == "string") { return pyBPct(l, r) }
+    if (op == "%" && pyIsBytes(l)) { return pySToBytes(pyBPct(pyBytesToS(l), pyBytesPctArgs(r)), arrKind(l)) }
     if (op == "%") { return pyAFloorOp(op, l, r) }
     // Python's exponentiation. Only js_pybin ever passes this operator, and a
     // user class already had its __pow__ / __rpow__ chance above. int ** NEGATIVE
@@ -4893,6 +4928,7 @@ function js_pyint(args) {
     var pos = args[0]
     if (pyIsDict(args[1]) && args[1]["keys"].length > 0) { pos = pyKwPos("int", pos, args[1], ["x", "base"], 1) }
     if (pos.length > 2) { pyRaiseExc("TypeError", "int expected at most 2 arguments, got " + pyIntStr(pos.length)) }
+    if (pos.length > 0 && pyIsBytes(pos[0])) { return pyBytesNum("int", pos) }
     var v = anytype
     v = undefined
     if (pos.length > 0) { v = pyUnwrapBuiltin(pos[0]) }
@@ -5051,7 +5087,7 @@ function js_pystrnew(args) {
     if (pos.length == 0) { return "" }
     if (pos.length > 1 && (pos[1] !== undefined || (pos.length > 2 && pos[2] !== undefined))) {
         if (typeof pos[0] == "string") { pyRaiseExc("TypeError", "decoding str is not supported") }
-        if (!pyIsArr(pos[0])) {
+        if (!pyIsBytes(pos[0])) {
             pyRaiseExc("TypeError", "decoding to str: need a bytes-like object, " + pyTypeName(pos[0]) + " found")
         }
         return pyBytesDecode(pos[0], pos[1])
@@ -5060,10 +5096,9 @@ function js_pystrnew(args) {
 }
 
 // Go: js_pybytes. bytes(source, encoding, errors), bound as [positionals,
-// keywords]: a list of byte values in this value model - a str under an encoding
-// (str.encode), a count of zero bytes, or an iterable of ints in range(256). None
-// and an absent argument are the same value here. bytearray(...) (NAME) builds
-// the same list, under its own error texts.
+// keywords]: a str under an encoding (str.encode), a count of zero bytes, or an
+// iterable of ints in range(256). None and an absent argument are the same value
+// here. bytearray(...) (NAME) builds the mutable kind, under its own error texts.
 function js_pybytes(bound) { return pyBytesNew(bound, "bytes") }
 function js_pybytearray(bound) { return pyBytesNew(bound, "bytearray") }
 function pyBytesNew(bound, name) {
@@ -5076,13 +5111,15 @@ function pyBytesNew(bound, name) {
     v = args.length > 0 ? args[0] : undefined
     var enc = args.length > 1 ? args[1] : undefined
     var errs = args.length > 2 ? args[2] : undefined
+    var bk = 17
+    if (name == "bytearray") { bk = 18 }
     if (typeof v == "string") {
         if (enc === undefined) { pyRaiseExc("TypeError", "string argument without an encoding") }
-        return pyStrEncode(v, enc, errs)
+        return arrKindSet(pyStrEncode(v, enc, errs), bk)
     }
     if (enc !== undefined) { pyRaiseExc("TypeError", "encoding without a string argument") }
     if (errs !== undefined) { pyRaiseExc("TypeError", "errors without a string argument") }
-    var out = []
+    var out = arrKindSet([], bk)
     if (args.length == 0) { return out }
     var tn = pyTypeName(v)
     if (tn == "int" || tn == "bool") {
@@ -5435,6 +5472,7 @@ function js_pyfloat(v0) {
     var v = anytype
     v = pyUnwrapBuiltin(v0)
     if (typeof v == "string") { return pyMkFlo(pyStrToF(v)) }
+    if (pyIsBytes(v)) { return pyBytesNum("float", [v]) }
     if (pyIsBig(v)) { return pyMkFlo(pyBigToF(v)) }
     if (typeof v != "number" && typeof v != "boolean" && !pyIsFlo(v)) { return pyADunderNum(v, "float") }
     return pyMkFlo(pyNum(v))
@@ -5499,6 +5537,8 @@ function pyHashW(v0) {
         }
         return pynHashUnits(us)
     }
+    // bytes hash like the str of the same code units, as CPython's do.
+    if (arrKind(v) == 17) { return pynHashUnits(pyCCopyArr(v)) }
     if (pyIsTup(v)) {
         var lanes = []
         var j = 0
@@ -6054,10 +6094,7 @@ function pyIterKind(v) {
         }
         return "str_ascii_iterator"
     }
-    if (pyIsArr(v)) {
-        if (pyIsTup(v)) { return "tuple_iterator" }
-        return "list_iterator"
-    }
+    if (pyIsArr(v)) { return pySeqTName(v) + "_iterator" }
     if (pySetElemsOf(v) !== null && pySetElemsOf(v) !== undefined) { return "set_iterator" }
     if (pyIsDict(v)) { return "dict_keyiterator" }
     if (pyIsDView(v)) {
@@ -7734,8 +7771,9 @@ function js_pyidx(c, k) {
         idx = pySeqIdx(c, k)
         if (idx < 0) { idx = idx + c.length }
         if (idx < 0 || idx >= c.length) {
-            if (pyIsTup(c)) { pyRaiseExc("IndexError", "tuple index out of range") }
-            pyRaiseExc("IndexError", "list index out of range")
+            var itn = pySeqTName(c) + " "
+            if (itn == "bytes ") { itn = "" }
+            pyRaiseExc("IndexError", itn + "index out of range")
         }
         return c[idx]
     }
@@ -7780,7 +7818,7 @@ function pyNoItemOp(c, del) {
     var tn = pyTypeName(c)
     if (!del) { pyRaiseExc("TypeError", "'" + tn + "' object does not support item assignment") }
     var how = "does not"
-    if (typeof c == "string" || pySetElemsOf(c) !== null || pyInstClassOf(c) !== null || pyIsTup(c)) { how = "doesn't" }
+    if (typeof c == "string" || pySetElemsOf(c) !== null || pyInstClassOf(c) !== null || pyIsTup(c) || arrKind(c) == 17) { how = "doesn't" }
     pyRaiseExc("TypeError", "'" + tn + "' object " + how + " support item deletion")
 }
 
@@ -7804,10 +7842,14 @@ function js_pyset(c, k, v) {
         pyInstDictPush(c)
         return undefined
     }
-    if (!pyIsArr(c) || pyIsTup(c)) { pyNoItemOp(c, false) }
+    if (!pyIsArr(c) || pyIsTup(c) || arrKind(c) == 17) { pyNoItemOp(c, false) }
     var idx = pySeqIdx(c, k)
     if (idx < 0) { idx = idx + c.length }
-    if (idx < 0 || idx >= c.length) { pyRaiseExc("IndexError", "list assignment index out of range") }
+    if (idx < 0 || idx >= c.length) { pyRaiseExc("IndexError", pySeqTName(c) + " assignment index out of range") }
+    if (arrKind(c) == 18) {
+        c[idx] = pyByteVal(v)
+        return undefined
+    }
     c[idx] = v
     return undefined
 }
@@ -8057,8 +8099,7 @@ function js_pyslice3(c0, lo, hi, step) {
             out.push(c[idx[i]])
             i = i + 1
         }
-        if (pyIsTup(c)) { pyTup(out) }
-        return out
+        return pySeqLike(c, out)
     }
     if (typeof c == "string") {
         var cs = pySChars(c)
@@ -8087,8 +8128,17 @@ function js_pysetslice(arr0, lo, hi, step, values) {
         fail("slice assignment to a " + typeof arr)
         return undefined
     }
-    if (pyIsTup(arr)) { pyNoItemOp(arr, false) }
+    if (pyIsTup(arr) || arrKind(arr) == 17) { pyNoItemOp(arr, false) }
     var vals = pySeqElems(values)
+    if (arrKind(arr) == 18) {
+        var vb = []
+        var vi = 0
+        while (vi < vals.length) {
+            vb.push(pyByteVal(vals[vi]))
+            vi = vi + 1
+        }
+        vals = vb
+    }
     if (rtIsNil(step) || pyNum(step) == 1) {
         var idx = pySliceIndices(arr.length, lo, hi, step)
         var from = arr.length
@@ -8139,7 +8189,7 @@ function js_pysetslice(arr0, lo, hi, step, values) {
 function js_pydelslice(arr0, lo, hi, step) {
     var arr = anytype
     arr = pyUnwrapBuiltin(arr0)
-    if (pyIsTup(arr)) { pyNoItemOp(arr, true) }
+    if (pyIsTup(arr) || arrKind(arr) == 17) { pyNoSliceDel(arr) }
     if (!pyIsArr(arr)) {
         fail("deleting a slice of a " + typeof arr)
         return undefined
@@ -8229,10 +8279,10 @@ function js_pydel_item(c, k) {
         pyInstDictPush(c)
         return undefined
     }
-    if (!pyIsArr(c) || pyIsTup(c)) { pyNoItemOp(c, true) }
+    if (!pyIsArr(c) || pyIsTup(c) || arrKind(c) == 17) { pyNoItemOp(c, true) }
     var ai = pySeqIdx(c, k)
     if (ai < 0) { ai = ai + c.length }
-    if (ai < 0 || ai >= c.length) { pyRaiseExc("IndexError", "list assignment index out of range") }
+    if (ai < 0 || ai >= c.length) { pyRaiseExc("IndexError", pySeqTName(c) + " assignment index out of range") }
     pyCRemoveAt(c, ai)
     return undefined
 }
@@ -9607,6 +9657,7 @@ function pyDMethodCall(target, name, args, kw) {
     // `xs.count { pred }`, so Python's list methods are answered here first. Go:
     // pyListMethod in abnf/jsrt.go; the interpreter: pyListMethod in
     // languages/python-interpreter.abnf.
+    if (pyIsBytes(target)) { return pyBytesMethod(target, name, args, kw) }
     if (pyIsArr(target)) {
         if (pyIsListMethod(name)) {
             if (pyIsTupleMethod(name) || !pyIsTup(target)) { return pyListMethod(target, name, args, kw) }
@@ -9665,8 +9716,6 @@ function pyIsListMethod(name) {
     if (name == "copy" || name == "count" || name == "sort") { return true }
     if (name == "insert" || name == "remove" || name == "extend") { return true }
     if (name == "index" || name == "reverse") { return true }
-    // A bytes value is a list of ints in this value model.
-    if (name == "decode") { return true }
     return false
 }
 
@@ -9676,11 +9725,6 @@ function pyIsListMethod(name) {
 // assertable in one ratchet file.
 function pyListMethod(xs, name, args, kw) {
     var n = xs.length
-    if (name == "decode") {
-        var da = args
-        if (pyIsDict(kw) && kw["keys"].length > 0) { da = pyKwPos("decode", args, kw, ["encoding", "errors"], 0) }
-        return pyBytesDecode(xs, pyEArgAt(da, 0))
-    }
     if (name == "append") { xs.push(pyEArgAt(args, 0)); return undefined }
     if (name == "clear") {
         while (xs.length > 0) { xs.pop() }
@@ -10266,6 +10310,7 @@ function pySetAlgebra(els, name, args) {
 function pyDBuiltinAttr(obj, name) {
     if (typeof obj == "string") { return pySIsStrMethod(name) }
     if (pyIsArr(obj)) {
+        if (pyIsBytes(obj)) { return pyIsBytesMethod(name, arrKind(obj)) }
         if (pyIsTup(obj)) { return pyIsTupleMethod(name) }
         return pyIsListMethod(name)
     }
@@ -12092,9 +12137,6 @@ function pySKwGet(kw, nm) {
 // Outside ASCII, "cased" is derived from the case mapping (upper != lower), which
 // covers Latin, Greek and Cyrillic; isdigit is ASCII-only, so CPython's Arabic-Indic
 // digits answer False here. isspace carries the Unicode space code points by hand.
-//
-// bytes are a list of byte values in this value model, so `encode()` answers one
-// - and it prints as a list, where CPython prints b'abc'.
 
 // ---- the character primitives ----
 
@@ -13018,8 +13060,8 @@ function pyStrKwArgs(name, args, kw) {
     pyRaiseExc("TypeError", "str." + name + "() takes no keyword arguments")
     return args
 }
-// str.encode(encoding="utf-8", errors="strict"): the bytes - a list of byte
-// values in this value model - in UTF-8, ASCII or Latin-1. A run of characters
+// str.encode(encoding="utf-8", errors="strict"): the bytes in UTF-8, ASCII or
+// Latin-1. A run of characters
 // the codec cannot encode raises CPython's UnicodeEncodeError under "strict";
 // "ignore", "replace", "backslashreplace" and "xmlcharrefreplace" substitute.
 // Go: rt.pysEncode in abnf/pystrmethod.go.
@@ -13077,7 +13119,7 @@ function pyStrEncode(s, encV, errV) {
         }
         k = j
     }
-    return out
+    return arrKindSet(out, 17)
 }
 // A code point the codec cannot encode: past the limit, or (UTF-8, limit 0) a
 // lone surrogate.
@@ -13413,4 +13455,313 @@ function pyStrMethod(s, name, args, kw) {
     }
     pySFail("unknown String method: " + name)
     return ""
+}
+
+// ============================================================================
+// bytes and bytearray. Go: abnf/jsrtpybytes.go; the interpreter's twins carry
+// the same names in languages/python-interpreter.abnf.
+
+// Go: pyBytesRepr.
+function pyBytesRepr(v) {
+    var q = 39
+    var hasD = false
+    var hasS = false
+    var i = 0
+    while (i < v.length) {
+        if (v[i] == 39) { hasS = true }
+        if (v[i] == 34) { hasD = true }
+        i = i + 1
+    }
+    if (hasS && !hasD) { q = 34 }
+    var hx = "0123456789abcdef"
+    var out = "b" + String.fromCharCode(q)
+    var j = 0
+    while (j < v.length) {
+        var c = v[j]
+        if (c == q || c == 92) { out = out + "\\" + String.fromCharCode(c) }
+        else if (c == 9) { out = out + "\\t" }
+        else if (c == 10) { out = out + "\\n" }
+        else if (c == 13) { out = out + "\\r" }
+        else if (c < 32 || c > 126) { out = out + "\\x" + hx.charAt(Math.floor(c / 16)) + hx.charAt(c % 16) }
+        else { out = out + String.fromCharCode(c) }
+        j = j + 1
+    }
+    out = out + String.fromCharCode(q)
+    if (arrKind(v) == 18) { return "bytearray(" + out + ")" }
+    return out
+}
+// Go: pyBytesToS / pySToBytes.
+function pyBytesToS(b) {
+    var out = ""
+    var i = 0
+    while (i < b.length) {
+        var c = b[i]
+        if (c > 127 || (c >= 28 && c <= 31)) { c = c + 63232 }
+        out = out + String.fromCharCode(c)
+        i = i + 1
+    }
+    return out
+}
+function pySToBytes(s, k) {
+    var out = []
+    var i = 0
+    while (i < s.length) {
+        var c = s.charCodeAt(i)
+        if (c >= 63232) { c = c - 63232 }
+        out.push(c)
+        i = i + 1
+    }
+    return arrKindSet(out, k)
+}
+// Go: rt.pyNoSliceDel.
+function pyNoSliceDel(a) {
+    pyRaiseExc("TypeError", "'" + pySeqTName(a) + "' object does not support item deletion")
+}
+// Go: rt.pyByteVal.
+function pyByteVal(v) {
+    var tn = pyTypeName(v)
+    if (tn != "int" && tn != "bool") { pyRaiseExc("TypeError", "'" + tn + "' object cannot be interpreted as an integer") }
+    var b = pyNum(v)
+    if (b < 0 || b > 255) { pyRaiseExc("ValueError", "byte must be in range(0, 256)") }
+    return b
+}
+// Go: rt.pyBArrExtend.
+function pyBArrExtend(a, x) {
+    if (typeof x == "string") { pyRaiseExc("TypeError", "expected iterable of integers; got: 'str'") }
+    var src = pyCCopyArr(pyElemsOf(x))
+    var i = 0
+    while (i < src.length) {
+        a.push(pyByteVal(src[i]))
+        i = i + 1
+    }
+    return a
+}
+// Go: rt.pyBytesHas.
+function pyBytesHas(b, x) {
+    if (pyIsBytes(x)) { return pyBytesToS(b).indexOf(pyBytesToS(x)) >= 0 }
+    var tn = pyTypeName(x)
+    if (tn != "int" && tn != "bool") { pyRaiseExc("TypeError", "a bytes-like object is required, not '" + tn + "'") }
+    var c = pyByteVal(x)
+    var i = 0
+    while (i < b.length) {
+        if (b[i] == c) { return true }
+        i = i + 1
+    }
+    return false
+}
+// Go: rt.pyBytesNum.
+function pyBytesNum(name, args) {
+    var a2 = pyCCopyArr(args)
+    a2[0] = pyBytesToS(args[0])
+    var r = anytype
+    try {
+        if (name == "int") { r = js_pyint([a2, undefined]) } else { r = js_pyfloat(a2[0]) }
+    } catch (e) {
+        if (pyDIsInstance(e, pyExcClass("ValueError"))) {
+            var m = pyStr(e["args"][0])
+            var shown = pyRepr(a2[0])
+            if (m.length >= shown.length && m.substring(m.length - shown.length, m.length) == shown) {
+                pyRaiseExc("ValueError", m.substring(0, m.length - shown.length) + pyBytesRepr(args[0]))
+            }
+        }
+        throw e
+    }
+    return r
+}
+// Go: rt.pyBytesPctArgs.
+function pyBytesPctArgs(r) {
+    if (pyIsTup(r)) {
+        var out = []
+        var i = 0
+        while (i < r.length) {
+            out.push(pyBytesPctArg(r[i]))
+            i = i + 1
+        }
+        return pyTup(out)
+    }
+    return pyBytesPctArg(r)
+}
+function pyBytesPctArg(v) {
+    if (pyIsBytes(v)) { return pyBytesToS(v) }
+    if (typeof v == "string") {
+        pyRaiseExc("TypeError", "%b requires a bytes-like object, or an object that implements __bytes__, not 'str'")
+    }
+    return v
+}
+// Go: pyBytesHex.
+function pyBytesHex(b) {
+    var hx = "0123456789abcdef"
+    var out = ""
+    var i = 0
+    while (i < b.length) {
+        out = out + hx.charAt(Math.floor(b[i] / 16)) + hx.charAt(b[i] % 16)
+        i = i + 1
+    }
+    return out
+}
+// Go: rt.pyBytesFromHex.
+function pyBytesFromHex(s, k) {
+    if (typeof s != "string") { pyRaiseExc("TypeError", "fromhex() argument must be str, not " + pyTypeName(s)) }
+    var hx = "0123456789abcdef"
+    var out = []
+    var i = 0
+    while (i < s.length) {
+        if (s.charAt(i) == " ") {
+            i = i + 1
+            continue
+        }
+        var hi = hx.indexOf(s.charAt(i).toLowerCase())
+        var lo = 0 - 1
+        if (i + 1 < s.length) { lo = hx.indexOf(s.charAt(i + 1).toLowerCase()) }
+        if (hi < 0 || lo < 0) {
+            var at = i
+            if (hi >= 0) { at = i + 1 }
+            pyRaiseExc("ValueError", "non-hexadecimal number found in fromhex() arg at position " + pyIntStr(at))
+        }
+        out.push(hi * 16 + lo)
+        i = i + 2
+    }
+    return arrKindSet(out, k)
+}
+// Go: pyBytesStrMethod.
+function pyBytesStrMethod(name) {
+    if (name == "count" || name == "find" || name == "rfind" || name == "index" || name == "rindex") { return true }
+    if (name == "startswith" || name == "endswith" || name == "split" || name == "rsplit") { return true }
+    if (name == "join" || name == "strip" || name == "lstrip" || name == "rstrip" || name == "replace") { return true }
+    if (name == "upper" || name == "lower" || name == "swapcase" || name == "capitalize" || name == "title") { return true }
+    if (name == "isdigit" || name == "isalpha" || name == "isalnum" || name == "isspace") { return true }
+    if (name == "islower" || name == "isupper" || name == "istitle" || name == "isascii") { return true }
+    if (name == "partition" || name == "rpartition" || name == "removeprefix" || name == "removesuffix") { return true }
+    return name == "center" || name == "ljust" || name == "rjust" || name == "zfill" || name == "expandtabs"
+}
+// Go: pyBArrMutator.
+function pyBArrMutator(name) {
+    if (name == "append" || name == "extend" || name == "pop" || name == "insert") { return true }
+    return name == "remove" || name == "reverse" || name == "clear" || name == "copy"
+}
+// Go: pyIsBytesMethod.
+function pyIsBytesMethod(name, k) {
+    if (name == "decode" || name == "hex" || pyBytesStrMethod(name)) { return true }
+    return k == 18 && pyBArrMutator(name)
+}
+// Go: rt.pyBytesArgS.
+function pyBytesArgS(name, v, first) {
+    if (pyIsBytes(v)) { return pyBytesToS(v) }
+    var tn = pyTypeName(v)
+    var search = name == "count" || name == "find" || name == "rfind" || name == "index" || name == "rindex"
+    if (first && search && (tn == "int" || tn == "bool")) { return pyBytesToS([pyByteVal(v)]) }
+    if (first && (name == "startswith" || name == "endswith") && pyIsTup(v)) {
+        var ts = []
+        var i = 0
+        while (i < v.length) {
+            ts.push(pyBytesArgS(name, v[i], false))
+            i = i + 1
+        }
+        return pyTup(ts)
+    }
+    if (first && name == "join") {
+        var src = pyElemsOf(v)
+        var js = []
+        var j = 0
+        while (j < src.length) {
+            if (!pyIsBytes(src[j])) {
+                pyRaiseExc("TypeError", "sequence item " + pyIntStr(j) + ": expected a bytes-like object, " + pyTypeName(src[j]) + " found")
+            }
+            js.push(pyBytesToS(src[j]))
+            j = j + 1
+        }
+        return js
+    }
+    if (tn == "str") {
+        if (search) { pyRaiseExc("TypeError", "argument should be integer or bytes-like object, not 'str'") }
+        if (name == "startswith" || name == "endswith") {
+            pyRaiseExc("TypeError", name + " first arg must be bytes or a tuple of bytes, not str")
+        }
+        pyRaiseExc("TypeError", "a bytes-like object is required, not 'str'")
+    }
+    return v
+}
+// Go: pyBytesBack.
+function pyBytesBack(r, k) {
+    if (typeof r == "string") { return pySToBytes(r, k) }
+    if (pyIsArr(r)) {
+        var out = []
+        var i = 0
+        while (i < r.length) {
+            out.push(pyBytesBack(r[i], k))
+            i = i + 1
+        }
+        if (pyIsTup(r)) { return pyTup(out) }
+        return out
+    }
+    return r
+}
+// Go: rt.pyBytesMethod.
+function pyBytesMethod(b, name, args, kw) {
+    var k = arrKind(b)
+    var hasKw = pyIsDict(kw) && kw["keys"].length > 0
+    if (name == "decode") {
+        var da = args
+        if (hasKw) { da = pyKwPos("decode", args, kw, ["encoding", "errors"], 0) }
+        return pyBytesDecode(b, pyEArgAt(da, 0))
+    }
+    if (name == "hex") { return pyBytesHex(b) }
+    if (k == 18 && pyBArrMutator(name)) {
+        if (name == "append") {
+            b.push(pyByteVal(pyEArgAt(args, 0)))
+            return undefined
+        }
+        if (name == "extend") {
+            pyBArrExtend(b, pyEArgAt(args, 0))
+            return undefined
+        }
+        var largs = args
+        if (name == "insert") { largs = [pyEArgAt(args, 0), pyByteVal(pyEArgAt(args, 1))] }
+        if (name == "remove") {
+            var rv = pyByteVal(pyEArgAt(args, 0))
+            var ri = 0
+            while (ri < b.length) {
+                if (b[ri] == rv) {
+                    pyCRemoveAt(b, ri)
+                    return undefined
+                }
+                ri = ri + 1
+            }
+            pyRaiseExc("ValueError", "value not found in bytearray")
+        }
+        if (name == "pop" && b.length == 0) { pyRaiseExc("IndexError", "pop from empty bytearray") }
+        var lr = anytype
+        lr = pyListMethod(b, name, largs, kw)
+        if (name == "copy") { return arrKindSet(lr, 18) }
+        return lr
+    }
+    if (pyBytesStrMethod(name)) {
+        var sa = []
+        var i = 0
+        while (i < args.length) {
+            sa.push(pyBytesArgS(name, args[i], i == 0))
+            i = i + 1
+        }
+        var skw = anytype
+        skw = kw
+        if (hasKw) {
+            skw = pyNewDict()
+            var j = 0
+            while (j < kw["keys"].length) {
+                pyDictSet(skw, kw["keys"][j], pyBytesArgS(name, kw["vals"][j], false))
+                j = j + 1
+            }
+        }
+        var s = pyBytesToS(b)
+        if (name == "index" || name == "rindex") {
+            var fname = "find"
+            if (name == "rindex") { fname = "rfind" }
+            var at = pyStrMethod(s, fname, sa, skw)
+            if (at < 0) { pyRaiseExc("ValueError", "subsection not found") }
+            return at
+        }
+        return pyBytesBack(pyStrMethod(s, name, sa, skw), k)
+    }
+    pyRaiseExc("AttributeError", "'" + pySeqTName(b) + "' object has no attribute '" + name + "'")
+    return undefined
 }

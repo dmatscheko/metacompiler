@@ -769,7 +769,9 @@ a decision was taken:
   corpus-derived, and `Record.toString` is explicitly unspecified in `dart:core`.
 - **Python**: a tuple is an array carrying kind 16 (`arrKind` / `arrKindSet`,
   `jsArray.kind`, field d of the floor's array cell), which every engine already
-  kept. `hash()` of a str is a fixed polynomial over its code units, where
+  kept; bytes and bytearray carry 17 and 18 the same way, and their str-like
+  methods run the str ones over a transcoding that keeps them ASCII-only
+  (`pyBytesToS`, `abnf/jsrtpybytes.go`). `hash()` of a str is a fixed polynomial over its code units, where
   CPython's is SipHash under a per-process random key, so no value of it is
   reproducible anyway; only `hash("") == 0` and equal-strings-hash-equal hold.
 
