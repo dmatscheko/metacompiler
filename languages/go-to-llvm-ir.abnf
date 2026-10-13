@@ -2309,6 +2309,23 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 return emitLenOf(b, args[0], k, name == "len" ? "n" : "c")
             }
         }
+        // clear(s) of a slice whose static type is known stores the ZERO VALUE of the
+        // element type in every element ("" for a string, nil for a pointer, a zero
+        // struct). Twin of makeCall in go-interpreter.abnf.
+        if (name == "clear" && atys != undefined && atys.length == 1 && args.length == 1
+            && !spread && !goNameBound(name) && goSKind(atys[0]) == "sl") {
+            var cet = elemTy(goKnownTy(atys[0]))
+            var ct = args[0]
+            return function(b) {
+                var r = ct(b)
+                var x = r.v
+                var eb = emitCountLoop(r.b, slF(r.b, x, "n"), function(lb, iV) {
+                    emitHelper(lb, "$sset", [x, iV, emitZeroTy(lb, cet)])
+                    return lb
+                })
+                return {b: eb, v: hUndef}
+            }
+        }
         // real/imag/complex are only declared in jsmain when the program uses them
         // (see usesComplex), and a program may reach complex() without ever writing
         // an imaginary literal.

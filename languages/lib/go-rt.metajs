@@ -1827,17 +1827,29 @@ function js_gotypeis(v, want) {
     return goTypeIs(v, goStrOf(want)) == 1
 }
 
-// min()/max(), the Go 1.21 builtins, over the callee's whole argument array.
+// min()/max(), the Go 1.21 builtins, over the callee's whole argument array:
+// strings by byte order, integers exactly (sintCmp), and floats by the spec's two
+// extra rules - a NaN argument makes the result NaN, and -0.0 is less than 0.0.
+// Twins: js_gominmax in abnf/jsrt.go, goMinMax in go-interpreter.abnf.
 function js_gominmax(args, wantMax) {
     if (!Array.isArray(args) || args.length == 0) { fail("min()/max() needs an argument") }
     var best = args[0]
     var i = 1
     while (i < args.length) {
         var v = args[i]
-        var less = false
-        if (typeof best == "string" && typeof v == "string") { less = v < best }
-        else { less = goNum(v) < goNum(best) }
-        if (less != wantMax) { best = v }
+        if (typeof best == "string" && typeof v == "string") {
+            if (wantMax ? v > best : v < best) { best = v }
+        } else if (sintIs(best) || sintIs(v)) {
+            var c = sintCmp(v, best)
+            if (wantMax ? c > 0 : c < 0) { best = v }
+        } else {
+            var a = goNum(best)
+            var x = goNum(v)
+            if (a === a) {
+                if (x !== x || (wantMax ? x > a : x < a)) { best = v }
+                else if (x == 0 && a == 0 && (wantMax ? 1 / x > 0 : 1 / x < 0)) { best = v }
+            }
+        }
         i = i + 1
     }
     return best

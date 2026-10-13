@@ -3877,6 +3877,36 @@ func s65() {
 	check("fkey1", fmt.Sprint(len(fm), fm[0], fm[nan], fm[1]) == "4 4 0 6")
 }
 
+// ===== SECTION 66: clear, min and max =====
+type p66 struct {
+	A int
+	B string
+}
+
+func s66() {
+	s := []string{"a", "b"}
+	clear(s)
+	bs := []bool{true}
+	clear(bs)
+	ps := []p66{{1, "x"}}
+	clear(ps)
+	pp := []*p66{{1, "x"}}
+	clear(pp)
+	ss := [][]int{{1}}
+	clear(ss)
+	check("clr1", fmt.Sprintf("%q %v %v %v %v", s, bs, ps, ss, s[0] == "" && pp[0] == nil && ss[0] == nil) == `["" ""] [false] [{0 }] [[]] true`)
+	zs := []float64{0, -1, 1}
+	nan := zs[0] / zs[0]
+	one := zs[2]
+	check("mm1", fmt.Sprint(max(nan, one), max(one, nan), min(nan, one), min(one, nan)) == "NaN NaN NaN NaN")
+	z := zs[0]
+	nz := zs[0] / zs[1]
+	check("mm2", fmt.Sprint(1/max(z, nz), 1/max(nz, z), 1/min(z, nz), 1/min(nz, z)) == "+Inf +Inf -Inf -Inf")
+	is := []int8{3, -2}
+	us := []uint64{18446744073709551615, 18446744073709551614}
+	check("mm3", fmt.Sprint(min(is[0], is[1]), max(is[0], is[1]), min(us[0], us[1])) == "-2 3 18446744073709551614")
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -3943,6 +3973,7 @@ func main() {
 	s63() // SECTION-CALL 63
 	s64() // SECTION-CALL 64
 	s65() // SECTION-CALL 65
+	s66() // SECTION-CALL 66
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

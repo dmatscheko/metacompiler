@@ -15208,18 +15208,31 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if !ok || len(args.elems) == 0 {
 				rt.fail("min()/max() needs an argument")
 			}
+			// Strings by byte order, integers exactly (giCmp), and floats by the
+			// spec's two extra rules: a NaN argument makes the result NaN, and
+			// -0.0 is less than 0.0. Twins: js_gominmax in lib/go-rt.metajs,
+			// goMinMax in go-interpreter.abnf.
 			wantMax := rt.truthy(u(a[1]))
 			best := args.elems[0]
 			for _, v := range args.elems[1:] {
-				less := false
 				if bs, ok1 := best.(string); ok1 {
-					if vs, ok2 := v.(string); ok2 {
-						less = vs < bs
+					if vs, ok2 := v.(string); ok2 && (wantMax && vs > bs || !wantMax && vs < bs) {
+						best = v
 					}
-				} else {
-					less = rt.toNumber(v) < rt.toNumber(best)
+					continue
 				}
-				if less != wantMax {
+				if giIsInt(best) || giIsInt(v) {
+					if c := rt.giCmp(v, best); wantMax && c > 0 || !wantMax && c < 0 {
+						best = v
+					}
+					continue
+				}
+				x, y := rt.toNumber(best), rt.toNumber(v)
+				switch {
+				case x != x:
+				case y != y, wantMax && y > x, !wantMax && y < x:
+					best = v
+				case y == 0 && x == 0 && math.Signbit(y) != wantMax && math.Signbit(x) == wantMax:
 					best = v
 				}
 			}
