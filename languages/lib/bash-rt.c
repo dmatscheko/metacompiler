@@ -68,30 +68,30 @@ char *las_k[4096];
 char *las_v[4096];
 int las_top;
 
-/* Output capture for $( ) / ` `: a stack of fixed-size arena buffers.
- * CAPMAX = 16, CAPSZ = 8192. */
-char *cap_buf[16];
-int cap_len[16];
-int cap_sz[16];      /* how big cap_buf[i] is; rt_putc doubles it when it fills */
+/* Output capture for $( ) / ` `: one arena buffer per nesting depth, allocated
+ * the first time that depth is reached and REUSED after (rt_cap_end hands back a
+ * copy), so a loop of command substitutions costs only its results. CAPMAX =
+ * 4096 depths, CAPSZ = 8192 bytes to start. */
+char *cap_buf[4096];
+int cap_len[4096];
+int cap_sz[4096];    /* how big cap_buf[i] is; rt_putc doubles it when it fills */
 int cap_depth;
 
-/* Subshell isolation: ( LIST ) snapshots the whole variable array. SSDEPTH = 8. */
-char *ss_save[8192];
-int ss_depth;
-
-/* ...and the whole array store, so `a=(p q); ( a[0]=Z )` leaves the caller with
- * "p q" (a command substitution takes the same snapshot). The store is a flat
- * triple table (arr_nm / arr_k / arr_v, NARR = 4096) whose entries are arena
- * pointers never rewritten in place, so saving the three pointer arrays and arr_n
- * is a complete copy. It is BSS written only as far as arr_n, so only programs
- * with subshells AND arrays make those pages resident.
+/* Subshell isolation: ( LIST ) and $( ) snapshot the whole variable array and
+ * the whole array store, so `a=(p q); ( a[0]=Z )` leaves the caller with "p q".
+ * The store is a flat triple table (arr_nm / arr_k / arr_v, NARR = 4096) whose
+ * entries are arena pointers never rewritten in place, so copying the pointers
+ * and arr_n is a complete snapshot. Each depth keeps its own block - nvars values,
+ * then ss_cap[d] rows of name, key and value - allocated the first time the depth
+ * is reached and reused after, re-allocated only when the store has outgrown it.
+ * So the nesting is bounded by SSMAX = 4096, recursion through $( ) included.
  *
  * Attributes (-i/-u/-l/-A) are not here: bash-to-llvm-ir.abnf keeps them in
  * COMPILE-TIME maps and unwinds its attribute log around a subshell body. */
-char *ss_anm[32768];
-char *ss_ak[32768];
-char *ss_av[32768];
-int ss_an[8];
+char **ss_blk[4096];
+int ss_cap[4096];
+int ss_an[4096];
+int ss_depth;
 
 /* Standard input for `read`: the buffer and the read position. */
 char *stdin_buf;
@@ -338,6 +338,13 @@ char *rt_bump(int n) {
     }
     arena_pos = p + n;
     return &arena[p];
+}
+
+/* The same, 8-byte aligned, for a block of pointers. */
+char *rt_bump8(int n) {
+    int pad = (8 - arena_pos % 8) % 8;
+    rt_bump(pad);
+    return rt_bump(n);
 }
 
 /* i32 rt_strlen(i8* s) */
@@ -4195,20 +4202,23 @@ int rt_cap_begin(int u)
     int d;
     char *buf;
     d = cap_depth;
-    /* CAPMAX = 16. Dying, not refusing the push: the matching rt_cap_end
-     * would still decrement cap_depth and index cap_buf[-1]. */
-    if (d >= 16) {
-        rt_die("command-substitution nesting", 1, d, 16);
+    /* CAPMAX. Dying, not refusing the push: the matching rt_cap_end would
+     * still decrement cap_depth and index cap_buf[-1]. */
+    if (d >= 4096) {
+        rt_die("command-substitution nesting", 1, d, 4096);
     }
-    buf = rt_bump(8192);
-    cap_buf[d] = buf;
-    cap_sz[d] = 8192;
+    if (cap_sz[d] == 0) {
+        buf = rt_bump(8192);
+        cap_buf[d] = buf;
+        cap_sz[d] = 8192;
+    }
     cap_len[d] = 0;
     cap_depth = d + 1;
     return 0;
 }
 
-/* Close the innermost buffer, drop its trailing newlines, NUL-terminate it. */
+/* Close the innermost buffer and answer a COPY of it (the buffer is reused) with
+ * its trailing newlines dropped. */
 char *rt_cap_end(int u)
 {
     int d2;
@@ -4224,8 +4234,7 @@ char *rt_cap_end(int u)
         }
         l = l - 1;
     }
-    buf[l] = (char)0;
-    return buf;
+    return rt_substr(buf, 0, l);
 }
 
 /* Emit each byte until NUL (no trailing newline). */
@@ -4245,26 +4254,29 @@ int rt_ss_save(int u)
 {
     int d;
     int base;
-    int abase;
     int i;
+    char **blk;
     d = ss_depth;
-    /* SSDEPTH = 8: ss_save is 8 * NVARS pointers. */
-    if (d >= 8) {
-        rt_die("subshell nesting", 1, d, 8);
+    if (d >= 4096) {
+        rt_die("subshell nesting", 1, d, 4096);
     }
-    base = d * 1024;
+    if (ss_cap[d] < arr_n || ss_cap[d] == 0) {
+        int cap = arr_n < 64 ? 64 : arr_n * 2;
+        ss_blk[d] = (char **)rt_bump8((nvars + 3 * cap) * 8);
+        ss_cap[d] = cap;
+    }
+    blk = ss_blk[d];
     i = 0;
     while (i < nvars) {
-        ss_save[base + i] = gvars[i];
+        blk[i] = gvars[i];
         i = i + 1;
     }
-    /* NARR = 4096 entries per depth, the same ceiling rt_arr_set enforces. */
-    abase = d * 4096;
+    base = nvars;
     i = 0;
     while (i < arr_n) {
-        ss_anm[abase + i] = arr_nm[i];
-        ss_ak[abase + i] = arr_k[i];
-        ss_av[abase + i] = arr_v[i];
+        blk[base + 3 * i] = arr_nm[i];
+        blk[base + 3 * i + 1] = arr_k[i];
+        blk[base + 3 * i + 2] = arr_v[i];
         i = i + 1;
     }
     ss_an[d] = arr_n;
@@ -4277,24 +4289,24 @@ int rt_ss_restore(int u)
 {
     int d;
     int base;
-    int abase;
     int n;
     int i;
+    char **blk;
     d = ss_depth - 1;
     ss_depth = d;
-    base = d * 1024;
+    blk = ss_blk[d];
     i = 0;
     while (i < nvars) {
-        gvars[i] = ss_save[base + i];
+        gvars[i] = blk[i];
         i = i + 1;
     }
-    abase = d * 4096;
+    base = nvars;
     n = ss_an[d];
     i = 0;
     while (i < n) {
-        arr_nm[i] = ss_anm[abase + i];
-        arr_k[i] = ss_ak[abase + i];
-        arr_v[i] = ss_av[abase + i];
+        arr_nm[i] = blk[base + 3 * i];
+        arr_k[i] = blk[base + 3 * i + 1];
+        arr_v[i] = blk[base + 3 * i + 2];
         i = i + 1;
     }
     arr_n = n;
@@ -4479,8 +4491,6 @@ char *rt_getvar_byname(char *n)
         if (k == 0) return script_name;
         return rt_param(k);
     }
-    /* An array name reads its element 0, as $arr does. */
-    if (rt_arr_count(n) > 0) return rt_arr_get(n, "0");
     sel = &unset_marker[0];
     i = 0;
     while (i < nvars) {
@@ -4489,6 +4499,8 @@ char *rt_getvar_byname(char *n)
         }
         i = i + 1;
     }
+    /* An array name reads its element 0, as $arr does. */
+    if (sel == &unset_marker[0] && rt_arr_count(n) > 0) return rt_arr_get(n, "0");
     return sel;
 }
 

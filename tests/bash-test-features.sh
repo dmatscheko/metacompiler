@@ -746,6 +746,11 @@ check eab3 "$?/$xab" "1/7"
 { (( 5 / xd0 )); xab="$?"; let "xq = 1 / xd0"; xab="$xab$?"; } 2>/dev/null
 check eab4 "$?/$xab" "0/11"
 
+# ----- a long run of command substitutions costs only their results -----
+xcs=0
+for (( xci = 0; xci < 600; xci++ )); do xcv=$(echo "$xci"); xcs=$(( xcs + xcv )); done
+check cs600 "$xcs" 179700
+
 # ----- done -----
 echo "features: $checks checks, $fails failures"
 exit $fails

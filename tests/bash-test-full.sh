@@ -2343,6 +2343,16 @@ s46() {
   check pf11 "$r" "a=1;b=2;5|ab  |"
 }
 
+# ===== SECTION 47: command substitution depth =====
+# Command substitutions nest as deep as the recursion asks: each depth's capture buffer and
+# variable snapshot are allocated once and reused. Every expected value is bash 5.3's.
+s47() {
+  d47() { if [ "$1" -le 0 ]; then echo 0; return; fi; echo $(( 1 + $(d47 $(( $1 - 1 ))) )); }
+  check cd1 "$(d47 6) $(d47 8) $(d47 20)" "6 8 20"
+  f47() { if [ "$1" -lt 2 ]; then echo "$1"; return; fi; echo $(( $(f47 $(( $1 - 1 ))) + $(f47 $(( $1 - 2 ))) )); }
+  check cd2 "$(f47 9)" 34
+}
+
 s01   # SECTION-CALL 01
 s02   # SECTION-CALL 02
 s03   # SECTION-CALL 03
@@ -2389,5 +2399,6 @@ s43   # SECTION-CALL 43
 s44   # SECTION-CALL 44
 s45   # SECTION-CALL 45
 s46   # SECTION-CALL 46
+s47   # SECTION-CALL 47
 echo "full: $checks checks, $fails failures"
 exit $fails
