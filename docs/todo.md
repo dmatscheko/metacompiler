@@ -184,14 +184,14 @@ first). Separately `io.write(...)` → interp "attempt to index a nil value (glo
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-583 bash: several assignments in one command; `$(( ))` inside `${s:off:len}`; inner stderr of `$( )` · P1 · SH · OPEN [V]
+### T-583 bash: several assignments in one command; `$(( ))` inside `${s:off:len}`; inner stderr of `$( )` · P1 · SH · IN PROGRESS (SH worker, round 6) [V]
 `a=1 b=2; echo "$a $b"` and `c=$'x' d=3` → both halves "Not everything could be parsed" (bash `1 2`). `s=abcdef; echo
 "${s:1:$(( 1+1 ))} ${s:$((2)):2}"` → interp exit 127 "command not found: 1+1", compiled ` ab` (bash `bc cd`: `$((` is
 arithmetic, not `$( (`). Compiled only: `echo "$(echo hi >&2)" 2>/dev/null` hides "hi" (bash and interp print it: words are
 expanded before the command's redirections apply). P3: arithmetic error text `bash: division by 0` vs bash `((: v = 1/0 :
 division by 0 (error token is "0 ")`.
 
-### T-584 bash: a value whose first byte is 0x02 is read as a field list · P2 · SH · OPEN [V]
+### T-584 bash: a value whose first byte is 0x02 is read as a field list · P2 · SH · IN PROGRESS (SH worker, round 6) [V]
 `w=$'\x02lead'; printf '<%s>' "$w" ${w}; y=$'a\x02b'; echo "${y:1}"` → bash `<^Blead><^Blead>` and `^Bb`; interp `<>` and an
 empty line, compiled `<leadlead...>` / wrong field counts. The list marker lives inside the value; a fix needs consumers to know
 statically scalar vs list (the emitter's .f flag at rt_catfields, rt_argpush, rt_arr_litwords, the f:true selects) or an
