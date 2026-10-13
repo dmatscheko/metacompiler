@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-615** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-616** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -112,16 +112,12 @@ it for ruby's flag too and add a ruby assertion.
 
 # JS — JavaScript and TypeScript
 
-### T-603 js compiler: a method call inside an assignment target; arguments edges; `"__#"` keys · P1 · JS · IN PROGRESS (JS worker, round 6) [V]
-`class K { constructor(){ this.o = {a:1} } get(i){ return this.o } }; new K().get(1).a = 2` → llvm.Run and native "TypeError:
-k.get is not a function" (interp and node accept); also `m.get(1).a = 3` on a Map. emitRefPath reads the member with memGetExt
-and calls it through jsCallChecked; use the ordinary method-call lowering (js_jsmget, js_jsxcall, js_jsmcall). js and ts. P2:
-`var a = arguments; a[0] = 2` is not mapped to the parameter (node 2, ours 1); generators/async are not mapped (node `g1 5`);
-after a write past the argument count Object.keys / spread see the written slots (node `{"2":1}200`, ours `{"2":1}01230`);
-`arguments.length = 0` truncates storage (node `0:7:1`, ours `0:undefined:1`). `Number.parseInt === parseInt` false (node true).
-`for (var p of xs)`: interp declares p per loop, compiler per function — settle against node. `"__#"` program keys stay hidden:
-add a raw-key path for engine keys (js-builtins.js `["__#@iterator"]`, `#x in o`, emitters' private member names) first, then
-escape `"__#"` like other `"__"` keys.
+### T-615 js: spreading a non-iterable object; arguments passed to another function; holes; `"__#@"` keys · P1 · JS · OPEN [V]
+`[...{}]`, `for (x of {})` → empty in all legs (node "TypeError: object is not iterable") — P1. P3 rest: `h(arguments)` writing
+`a[0]` is not mapped to the caller's parameter (needs a scope back-pointer on the array cell in the C floor and Go twin); a deleted
+index below `length` is still an own key and an explicit `undefined` past `length` is not (no hole representation); a program
+key `"__#@iterator"` still collides with symbol keys (node: TypeError on spread). The js-test-full.3.js header still says
+"sections 44-56, 58-71 and 73" (now to 91).
 
 ---
 
@@ -740,6 +736,7 @@ T-599 lua: os library, load/dofile, `<close>`, a real `_G`, NaN sign in string.p
 T-602 php: spread into a by-ref parameter; lazy copy holder counts; Closure statics by name; caller context in library callbacks — DONE ad2d64a0 for spreads into by-ref params, by-ref variadics, Closure statics by name, caller-frame library callbacks; lazy copy holder counts DECLINED: exact copy-on-write needs decrement-on-drop (refcounting), which manual 7.8 rejects, plus a separation check at ~85 write sites — documented at phpRefHolders
 T-604 java: regex dialect gaps; missing Math/Long/Double API; TreeMap views; unmodifiable view write-through — DONE bc54d07a c6b40b82 (a Java dialect flag J in the shared regex engine, additive; the a{99999999999} runaway now 0.2 s)
 T-586 python: slice ordering and unhashable slice keys — DONE b7d9fd8a (plus f-string {{, exception chaining, namedtuple, exact math ints, __init_subclass__, bound-method keywords, operator, user __format__: 2fcba0c7..cb34806c)
+T-603 js compiler: a method call inside an assignment target; arguments edges; `"__#"` keys — DONE 8034b969 25069eb4 (plus newline-++ ASI, function-sees-lexical scope, generator/alias mapped arguments); remaining arguments/key edges are T-615
 
 # Settled — do not re-open
 
