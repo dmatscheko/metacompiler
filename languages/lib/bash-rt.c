@@ -134,6 +134,8 @@ char *rt_strcat(char *a, char *b);
 char *rt_int2str(long n);
 long rt_str2int(char *s);
 long rt_arith(char *s);
+int rt_isassoc(char *nm);
+char *rt_arr_key(char *nm, char *sub);
 int rt_arith_fail(char *expr, char *msg, char *tok);
 int rt_class(char *p, int ch);
 int rt_cpw(char *s);
@@ -721,12 +723,20 @@ char *ar_name(void)
     return rt_substr(ar_s, s, ar_p - s);
 }
 
-/* [ EXPR ] after a name, or 0 when the name has no subscript. */
+/* [ EXPR ] after a name, or 0 when the name has no subscript. An associative
+ * array's subscript is the literal text up to the "]". */
 char *ar_subscript(char *nm)
 {
     long k;
     if (ar_at(0) != 91) return 0;
     ar_p = ar_p + 1;
+    if (rt_isassoc(nm) != 0) {
+        int s0 = ar_p;
+        while (ar_p < ar_len && ar_at(0) != 93) ar_p = ar_p + 1;
+        if (ar_at(0) != 93) { ar_err("missing `]'"); return 0; }
+        ar_p = ar_p + 1;
+        return rt_substr(ar_s, s0, ar_p - s0 - 1);
+    }
     k = ar_comma();
     ar_ws();
     if (ar_at(0) != 93) { ar_err("missing `]'"); return 0; }
@@ -2513,10 +2523,34 @@ char *rt_arr_ikey(char *nm, long k) {
     return rt_int2str(k);
 }
 
-/* The key of an indexed subscript's TEXT, an arithmetic expression; "@" and "*"
- * name the whole array and pass through. */
+/* The names declared associative anywhere in the program, registered by main's
+ * entry block from the emitter's whole-program list: a subscript of one of them is
+ * a literal key, not arithmetic, wherever it is met at run time. */
+char *assoc_nm[256];
+int assoc_n;
+int rt_assoc_add(char *nm) {
+    if (assoc_n >= 256) {
+        rt_die("associative-array names", 1, assoc_n, 256);
+    }
+    assoc_nm[assoc_n] = nm;
+    assoc_n = assoc_n + 1;
+    return 0;
+}
+int rt_isassoc(char *nm) {
+    int i = 0;
+    while (i < assoc_n) {
+        if (rt_streq(nm, assoc_nm[i]) != 0) return 1;
+        i = i + 1;
+    }
+    return 0;
+}
+
+/* The key a subscript's TEXT names: an associative array's is the text itself, an
+ * indexed array's the value of the text as an arithmetic expression; "@" and "*"
+ * name the whole array and pass through. Twin of subKey in bash-interpreter.abnf. */
 char *rt_arr_key(char *nm, char *sub) {
     if (rt_streq(sub, "@") != 0 || rt_streq(sub, "*") != 0) return sub;
+    if (rt_isassoc(nm) != 0) return sub;
     return rt_arr_ikey(nm, rt_arith(sub));
 }
 
@@ -3534,13 +3568,15 @@ int rt_argpush(char *v) {
 }
 
 /* i8* rt_param(i32 n): the n-th positional parameter ("" past the end). */
+/* A positional parameter past $# is UNSET, so ${2-word} and ${1+word} can tell
+ * it from a set, empty one. */
 char *rt_param(int n) {
     int cnt = frame_n;
     if (n >= 1 && n <= cnt) {
         int idx = frame_base + (n - 1);
         return argv[idx];
     }
-    return empty;
+    return &unset_marker[0];
 }
 
 /* i8* rt_params(i8* sep, i32 star): "$@" when sep is the field marker, "$*"
@@ -3908,6 +3944,23 @@ char *rt_getvar_byname(char *n)
     int i;
     int c0;
     int allDigits;
+    int len = rt_strlen(n);
+    /* NAME[SUB]: ${!r} with r='arr[1]' reads the element, and r='arr[@]' the joined
+     * list, exactly as ${arr[1]} / ${arr[@]} would. Twin of the subscript arm of
+     * getVarVal in bash-interpreter.abnf. */
+    if (len > 2 && n[len - 1] == 93) {
+        i = 0;
+        while (i < len && n[i] != 91) i = i + 1;
+        if (i > 0 && i < len - 1) {
+            char *nm = rt_substr(n, 0, i);
+            char *sub = rt_substr(n, i + 1, len - i - 2);
+            char *k;
+            if (rt_streq(sub, "@") != 0 || rt_streq(sub, "*") != 0) return rt_sc_list(nm, rt_ifsfirst(), 1, 0);
+            k = rt_arr_key(nm, sub);
+            if (rt_sc_has(nm, k) == 0) return &unset_marker[0];
+            return rt_sc_get(nm, k);
+        }
+    }
     /* THE SPECIAL PARAMETERS ARE NOT IN varnames[]: $0..$9, $#, $@, $* and $?
      * have no slot (`z=0; echo "${!z}"` is the script path in bash).
      * languages/bash-interpreter.abnf's getVarVal answers the same set. */
@@ -3933,6 +3986,8 @@ char *rt_getvar_byname(char *n)
         if (k == 0) return script_name;
         return rt_param(k);
     }
+    /* An array name reads its element 0, as $arr does. */
+    if (rt_arr_count(n) > 0) return rt_arr_get(n, "0");
     sel = &unset_marker[0];
     i = 0;
     while (i < nvars) {

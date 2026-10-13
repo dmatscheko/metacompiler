@@ -2236,6 +2236,23 @@ s42() {
   check cs3 "$r" "00101"
 }
 
+# ===== SECTION 43: ${N-w} / ${N+w} on positional parameters, ${!ref} to an element =====
+# A positional parameter past $# is UNSET to the - and + operators; an indirection may land
+# on NAME[SUB] (the element, or the joined list for *), and on an array name (element 0).
+# A subscript of an associative array met at run time is literal. bash 5.3's answers.
+s43() {
+  f43() { echo "[${2-unset}] [${3:-dflt}] [${1+set}] [${1:+set2}] [${0+zero}] [${10-ten}]"; }
+  check pp1 "$(f43) $(f43 one)" "[unset] [dflt] [] [] [zero] [ten] [unset] [dflt] [set] [set2] [zero] [ten]"
+  g43() { echo "[${2-u}] [${2:-e}] [${2+s}] [${2:+t}] [${4-u}]"; }
+  check pp2 "$(g43 a "" c)" "[] [e] [s] [] [u]"
+  local arr=(x y z) r1='arr[1]' r2=arr r3='arr[*]' r4='arr[-1]' r5='arr[i+1]' r7='arr[7]' i=0
+  check ir1 "[${!r1}] [${!r2}] [${!r3}] [${!r4}] [${!r5}]" "[y] [x] [x y z] [z] [y]"
+  check ir2 "[${!r7-none}] [${!r1-none}] [${!r7:+p}] [${!r1:+p}]" "[none] [y] [] [p]"
+  local -A m43=([foo]=F [bar]=7)
+  local r6='m43[foo]' r8='m43[bar]' e43='m43[bar] * 2'
+  check ir3 "[${!r6}] $(( ${!r8} + 1 )) $(( $e43 ))" "[F] 8 14"
+}
+
 s01   # SECTION-CALL 01
 s02   # SECTION-CALL 02
 s03   # SECTION-CALL 03
@@ -2278,5 +2295,6 @@ s39   # SECTION-CALL 39
 s40   # SECTION-CALL 40
 s41   # SECTION-CALL 41
 s42   # SECTION-CALL 42
+s43   # SECTION-CALL 43
 echo "full: $checks checks, $fails failures"
 exit $fails

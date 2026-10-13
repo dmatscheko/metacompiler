@@ -1345,6 +1345,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // rule, and rt_arr_slice slices by index.
     var rtArrIset = rtDecl("rt_arr_iset", false, [1, 1, 1])
     var rtArrKey = rtDecl("rt_arr_key", true, [1, 1])
+    var rtAssocAdd = rtDecl("rt_assoc_add", false, [1])
     var rtArrIkey = rtDecl("rt_arr_ikey", true, [1, 3])
     var rtArrLitKey = rtDecl("rt_arr_litkey", 3, [1, 1, 1, 3])
     var rtArrLitWords = rtDecl("rt_arr_litwords", 3, [1, 1, 3])
@@ -2651,7 +2652,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // subscript is normalised at two sites that are themselves walk-time (${v@a} and the
         // NAME[SUB] split), and a name is never both kinds in one program.
         for (k = 0; k < names.length; k++) {
-            if (assoc && !query) { assocArrays["$" + names[k]] = true }
+            if (assoc && !query && !hasOwn(assocArrays, "$" + names[k])) { assocArrays["$" + names[k]] = true; assocList.push(names[k]) }
         }
         return function(b) {
             var j
@@ -2739,6 +2740,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var upVars = {}       // `declare -u`
     var loVars = {}       // `declare -l`
     var assocArrays = {}  // names declared with `declare -A` / `local -A`
+    var assocList = []    // the same names in order, registered with the runtime (rt_assoc_add)
     // An attribute map holds FALSE for a name whose attribute was dropped - by `unset`, or by
     // a function body ending - so membership alone is not the answer.
     function attrOn(m, name) {
@@ -4508,6 +4510,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                            entry.NewGetElementPtr(gvarsTy, gVarNames, zero, llvm.constant.NewInt(i32, i)))
         }
         entry.NewStore(llvm.constant.NewInt(i32, varIdList.length), gNvars)
+        // The run-time half of assocArrays: a subscript the runtime meets in a string
+        // (rt_arith, ${!r}) is literal for these names.
+        for (i = 0; i < assocList.length; i++) { entry.NewCall(rtAssocAdd, gepStr(entry, assocList[i])) }
         entry.NewBr(body)
     }
 

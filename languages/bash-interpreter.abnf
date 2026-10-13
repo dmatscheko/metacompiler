@@ -1195,8 +1195,19 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     vars["$IFS"] = " \t\n"; varsHas["$IFS"] = true; varNames.push("IFS")
     function isSetVar(name) {
         var key = "$" + name
+        // $1.. is set up to $#, and $0 always is: ${2-word}, ${1+word}.
+        if (allDigits(name)) { var ix = strToInt(name); return ix == 0 || ix <= posParams.length }
+        if (isElemRef(name)) { var sp = splitSubscript(name); return scHas(sp.name, subKey(sp.name, sp.key)) }
         if (!hasOwn(varsHas, key)) { return false }
         return varsHas[key]
+    }
+    // NAME[SUB] as a NAME, which only an indirection makes: ${!r} with r='arr[1]' reads the
+    // element and r='arr[@]' the joined list. Twin of the same arm of rt_getvar_byname.
+    function isElemRef(name) { return name.length > 2 && name.charAt(name.length - 1) == "]" }
+    function elemRefVal(name) {
+        var sp = splitSubscript(name)
+        if (sp.key == "@" || sp.key == "*") { return starJoin(scValList(sp.name)) }
+        return scGet(sp.name, subKey(sp.name, sp.key))
     }
     function unsetVar(name) { touchVar(name); vars["$" + name] = ""; varsHas["$" + name] = false }
 
@@ -1292,6 +1303,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (isArr(name)) { return arrGet(name, "0") }
         var key = "$" + name
         if (hasOwn(vars, key) && (!hasOwn(varsHas, key) || varsHas[key])) { return vars[key] }
+        if (isElemRef(name)) { return elemRefVal(name) }
         // set -u: an unbound variable ends the (sub)shell. Expansion has no way to return a
         // status, so the abort is recorded and picked up by the command about to run.
         // The diagnostic is bash 5.3's minus the "line N:" part, which no engine here keeps
@@ -3394,6 +3406,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function arSubscript(nm) {
         if (arAt(0) != 91) { return null }
         arP = arP + 1
+        // An associative array's subscript is the literal text up to the "]".
+        if (assocFact(nm, false)) {
+            var s0 = arP
+            while (arP < arLen && arAt(0) != 93) { arP = arP + 1 }
+            if (arAt(0) != 93) { arErr("missing `]'"); return null }
+            arP = arP + 1
+            return arS.slice(s0, arP - 1)
+        }
         var k = arComma()
         arWs()
         if (arAt(0) != 93) { arErr("missing `]'"); return null }
