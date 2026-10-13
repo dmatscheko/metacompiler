@@ -64,7 +64,7 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-610 python: name mangling; legacy `__getitem__` iteration; duplicate keyword via `**`; compiled implicit `__context__` · P1 · PY · OPEN [V]
+### T-610 python: name mangling; legacy `__getitem__` iteration; duplicate keyword via `**`; compiled implicit `__context__` · P1 · PY · IN PROGRESS (PY worker, round 6) [V]
 `class A: def __init__(self): self.__x = 1` → stored as `__x` (python `_A__x`; base and subclass privates collide, `__dict__`
 shows the wrong name). `class Seq: def __getitem__(self, i): if i < 3: return i; raise IndexError` → `list(Seq())` "'Seq' object
 is not iterable" in all legs (python `[0, 1, 2]`: the legacy sequence protocol, at every iteration entry point).
@@ -73,31 +73,31 @@ is not iterable" in all legs (python `[0, 1, 2]`: the legacy sequence protocol, 
 except body, has `__context__` None (interp and python chain it) — needs a runtime "currently handled exception" stack around
 js_try.
 
-### T-611 python: metaclasses, and the `enum` module on top of them · P2 · PY · OPEN [V]
+### T-611 python: metaclasses, and the `enum` module on top of them · P2 · PY · IN PROGRESS (PY worker, round 6) [V]
 `class M(type): def __iter__(cls): ...` + `class C(metaclass=M)` → "'type' object is not iterable"; `__call__`/`__getitem__` on a
 metaclass are ignored; `import enum` is unresolved. Implement metaclass dispatch (class creation via M.__new__/__init__, attribute
 lookup and operators on the class through M) in all engines, then write enum (Enum, IntEnum, auto, members, iteration, value/
 name, `__members__`) as lib/python-enum.py.
 
-### T-612 python: set iteration order of ints differs from CPython · P2 · PY · OPEN [V]
+### T-612 python: set iteration order of ints differs from CPython · P2 · PY · IN PROGRESS (PY worker, round 6) [V]
 `print({x % 3 for x in [5, 4, 3]})` → ours `{2, 1, 0}` (insertion order), python `{0, 1, 2}`; CPython's order for int
 elements is deterministic (hash(i) = i, table size 8/32/...), so programs printing int sets disagree with the oracle. Model
 CPython's open-addressing slot order for sets whose elements all hash deterministically (ints, and tuples of ints); strings are
 salted per run, so leave those in insertion order and record it in manual 7.9.
 
-### T-613 python/js interpreters: generators still run by replay · P2 · CORE · OPEN [V]
+### T-613 python/js interpreters: generators still run by replay · P2 · CORE · IN PROGRESS (PY worker, round 6) [V]
 Both tag hosts now have a real suspension primitive (coNew/coResume/coYield: goja coroutine.go and frozen jsGenerator.suspend,
 manual 7.14), used by lua's interpreter. The python and js/ts interpreter halves still replay generator bodies, so side effects
 before a yield repeat after `throw()`, `send`, `yield from` (python: an extra "caught in gen" / "got ret" line) — and the
 js interpreter's description still says no primitive exists. Move both onto the primitive; measure interpreter speed.
 
-### T-614 python: smaller gaps — math, object repr prefix, OSError errno subclass, `__hash__` attribute · P3 · PY · OPEN [V]
+### T-614 python: smaller gaps — math, object repr prefix, OSError errno subclass, `__hash__` attribute · P3 · PY · IN PROGRESS (PY worker, round 6) [V]
 math lacks dist, exp2, frexp, ldexp, modf, nextafter, ulp, erf, gamma, ... (bit-exact against CPython or left out). Plain object
 repr prints `<Grid object>` (CPython `<__main__.Grid object at 0x...>`; the address cannot match, the module prefix can).
 `OSError(2, 'nf')` repr → `OSError(2, 'nf')` (CPython maps errno 2 to `FileNotFoundError(2, 'nf')`). A class defining `__eq__`
 without `__hash__` should have `X.__hash__` None (hashing already raises correctly).
 
-### T-607 python regex: inline flags `(?i)` `(?s)` `(?x)` `(?i:..)`; a backreference to an unset group matches empty · P1 · PY · OPEN [V]
+### T-607 python regex: inline flags `(?i)` `(?s)` `(?x)` `(?i:..)`; a backreference to an unset group matches empty · P1 · PY · IN PROGRESS (PY worker, round 6) [V]
 `re.match(r"(?i)A", "a")` → every leg "unsupported group form" (python3 matches; also `(?s)`, `(?x)`, `(?m)`, scoped `(?i:..)`).
 `re.fullmatch(r"(b)?a\1", "a")` → ours a match (JS semantics: an unset group's backreference matches empty), python3 None.
 Both live in the shared lib/regex.js / abnf/jsrtregex.go: add them under python's own dialect flag (as java's J), additive,
