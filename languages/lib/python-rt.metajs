@@ -1371,7 +1371,7 @@ function pyBDelegate(tname, name) {
     if (tname == "tuple") {
         if (name.substring(0, 2) != "__") { return undefined }
     } else if (tname != "str" && tname != "int" && tname != "float" && tname != "list" && tname != "dict" &&
-               tname != "set" && tname != "frozenset" && tname != "complex") {
+               tname != "set" && tname != "frozenset" && tname != "complex" && tname != "bytes" && tname != "bytearray") {
         return undefined
     }
     var key = tname + "." + name
@@ -1407,6 +1407,8 @@ function pyBuiltinHasMethod(tname, name) {
     if (tname == "frozenset") { return pyIsSetMethod(name) && !pySetMutator(name) }
     if (tname == "complex") { return name == "conjugate" }
     if (tname == "int" || tname == "float") { return pyIsNumMethod(pyDTypeSample(tname), name) }
+    if (tname == "bytes") { return pyIsBytesMethod(name, 17) }
+    if (tname == "bytearray") { return pyIsBytesMethod(name, 18) }
     return false
 }
 
@@ -1424,9 +1426,13 @@ function pyBDelMake(tname, name, meth) {
         }
     }
     var num = tname == "int" || tname == "float"
-    var seq = tname == "list" || tname == "tuple" || tname == "str"
+    var seq = tname == "list" || tname == "tuple" || tname == "str" || tname == "bytes" || tname == "bytearray"
     var setLike = tname == "set" || tname == "frozenset"
     var cplx = tname == "complex"
+    // A bytearray's repr names the receiver's own type: BA(b'hi').
+    if (name == "__repr__" && tname == "bytearray") {
+        return function(self) { return pyTypeName(self) + pyRepr(pyUnwrapBuiltin(self)).slice(9) }
+    }
     if (name == "__repr__") { return function(self) { return pyRepr(pyUnwrapBuiltin(self)) } }
     if (name == "__str__" && tname == "str") { return function(self) { return pyUnwrapBuiltin(self) } }
     // Every other builtin's __str__ is object's, which renders through the
@@ -1485,10 +1491,12 @@ function pyBDelMake(tname, name, meth) {
         if (name == "__iter__") { return function(self) { return js_pyiterfn(pyUnwrapBuiltin(self)) } }
         if (name == "__contains__") { return function(self, k) { return pyAContains(k, pyUnwrapBuiltin(self)) } }
         if (name == "__getitem__" && !setLike) { return function(self, k) { return pyBGetItem(self, k) } }
-        if (tname == "list" || tname == "dict") {
+        if (tname == "list" || tname == "dict" || tname == "bytearray") {
             if (name == "__setitem__") { return function(self, k, v) { return js_pyset(pyUnwrapBuiltin(self), k, v) } }
             if (name == "__delitem__") { return function(self, k) { return js_pydel_item(pyUnwrapBuiltin(self), k) } }
-            if (name == "__reversed__") { return function(self) { return js_pyreversed(pyUnwrapBuiltin(self)) } }
+        }
+        if ((tname == "list" || tname == "dict") && name == "__reversed__") {
+            return function(self) { return js_pyreversed(pyUnwrapBuiltin(self)) }
         }
     }
     var iop = pyBDelInplace(tname, name)
@@ -1497,7 +1505,7 @@ function pyBDelMake(tname, name, meth) {
     if (num) { ops = ["+", "*", "<", ">", "<=", ">=", "-", "/", "//", "%", "**"] }
     if (tname == "int") { ops = ["+", "*", "<", ">", "<=", ">=", "-", "/", "//", "%", "**", "|", "&", "^", "<<", ">>"] }
     if (seq) { ops = ["+", "*", "<", ">", "<=", ">="] }
-    if (tname == "str") { ops = ["+", "*", "<", ">", "<=", ">=", "%"] }
+    if (tname == "str" || tname == "bytes" || tname == "bytearray") { ops = ["+", "*", "<", ">", "<=", ">=", "%"] }
     if (tname == "dict") { ops = ["|", "<", ">", "<=", ">="] }
     if (setLike) { ops = ["|", "&", "-", "^", "<", ">", "<=", ">="] }
     if (cplx) { ops = ["+", "-", "*", "/", "**", "<", ">", "<=", ">="] }
@@ -1516,12 +1524,12 @@ function pyBDelMake(tname, name, meth) {
 
 // Go: pyBHashNone. The builtin types whose __hash__ is None: the mutable
 // containers. hasattr(list, "__hash__") is True and list.__hash__ is None.
-function pyBHashNone(tname) { return tname == "list" || tname == "dict" || tname == "set" }
+function pyBHashNone(tname) { return tname == "list" || tname == "dict" || tname == "set" || tname == "bytearray" }
 
 // Go: pyBDelInplace. The binary operator of tname's in-place dunder name, or "":
-// list's += and *=, dict's |=, set's |= &= -= ^=.
+// list's and bytearray's += and *=, dict's |=, set's |= &= -= ^=.
 function pyBDelInplace(tname, name) {
-    if (tname == "list") {
+    if (tname == "list" || tname == "bytearray") {
         if (name == "__iadd__") { return "+" }
         if (name == "__imul__") { return "*" }
     }
@@ -1640,9 +1648,10 @@ function pyValDunder(v, name) {
     return pyBDelegate(tn, name)
 }
 function pyValDunderAttr(v, name) { return pyValDunder(v, name) !== undefined }
-// Go: pyValHashNone. A list, a dict or a set: a value whose __hash__ is None.
+// Go: pyValHashNone. A list, a bytearray, a dict or a set: a value whose
+// __hash__ is None.
 function pyValHashNone(v) {
-    if (pyIsArr(v)) { return !pyIsTup(v) }
+    if (pyIsArr(v)) { return pyBHashNone(pySeqTName(v)) }
     if (pySetElemsOf(v) !== null) { return !pySetFrozen(v) }
     return pyIsDict(v)
 }
@@ -1658,7 +1667,9 @@ var pyNotImpl = {__pyconst: "NotImplemented"}
 function pyBDelBin(tname, op, reflected) {
     var ordered = op == "<" || op == ">" || op == "<=" || op == ">="
     if (ordered && (tname == "dict" || tname == "complex")) { return function(self, o) { return pyNotImpl } }
-    var gated = ordered || !(tname == "list" || tname == "tuple" || tname == "str")
+    // A reflected % serves only its own type: "%d".__rmod__(3) declines.
+    var gated = ordered || (reflected && op == "%") ||
+                !(tname == "list" || tname == "tuple" || tname == "str" || tname == "bytes" || tname == "bytearray")
     return function(self, o) {
         var a = pyUnwrapBuiltin(self)
         var b = pyUnwrapBuiltin(o)
@@ -2038,6 +2049,8 @@ function pyGetAttrRaw(obj, name) {
     // data slots (math.pi) must win.
     if (pyIsObj(obj)) {
         if (obj["__pymod"] !== undefined && obj[name] === undefined) {
+            // Every module names itself. Twin of rt.pyModuleAttr in abnf/jsrtpydesc.go.
+            if (name == "__name__") { return obj["__pymod"] }
             if (pyMHas(obj["__pymod"], name)) { return pyDModuleFn(obj, name) }
             pyRaiseExc("AttributeError",
                        "module '" + pyToStr(obj["__pymod"]) + "' has no attribute '" + name + "'")
@@ -2046,7 +2059,7 @@ function pyGetAttrRaw(obj, name) {
     // A method the builtin TYPE OBJECT itself carries - dict.fromkeys - is a
     // built-in method bound to that type.
     var bcm = pyBuiltinClsMethod(obj, name)
-    if (bcm !== undefined) { return pyBMSet(bcm, name, obj, null) }
+    if (bcm !== undefined) { return bcm }
     if (name == "__mro__" || name == "__bases__") {
         if (pyClassName(obj) !== null) { return pyTup(pyMroAttr(obj, name)) }
     }
@@ -2073,9 +2086,10 @@ function pyGetAttrRaw(obj, name) {
             var bmk = pyBMTab[bmj + 4]
             if (name == "__name__") { return pyBMTab[bmj + 1] }
             if (name == "__qualname__") {
-                // An unbound descriptor's owner is the TYPE OBJECT itself, and a
+                // An unbound descriptor's owner, and the receiver of a type's own
+                // method (dict.fromkeys), is the TYPE OBJECT itself, and a
                 // module function's qualname is its bare name.
-                if (bmk == "d") { return pyToStr(pyBMTab[bmj + 2]["__name"]) + "." + pyToStr(pyBMTab[bmj + 1]) }
+                if (bmk == "d" || bmk == "t") { return pyToStr(pyBMTab[bmj + 2]["__name"]) + "." + pyToStr(pyBMTab[bmj + 1]) }
                 if (bmk == "m") { return pyBMTab[bmj + 1] }
                 var bfq = pyFnQual(pyBMTab[bmj + 3])
                 if (bfq !== undefined) { return bfq }
@@ -2281,14 +2295,16 @@ function pyByteOrder(order) {
 // int.from_bytes(bytes, byteorder="big", *, signed=False). A builtin receives its
 // keyword dict as a trailing positional (pyBindCall); byteorder is a str, so a
 // trailing dict is the dict.
-function pyIntFromBytes(args) {
-    var pos = args
-    var kw = anytype
-    kw = undefined
-    if (args.length >= 2) {
-        if (pyIsDict(args[args.length - 1])) {
-            kw = args[args.length - 1]
-            pos = args.slice(0, args.length - 1)
+function pyIntFromBytes(pos, kw) {
+    if (pyIsDict(kw)) {
+        var ks = kw["keys"]
+        var ki = 0
+        while (ki < ks.length) {
+            var kn = pyToStr(ks[ki])
+            if (kn != "bytes" && kn != "byteorder" && kn != "signed") {
+                pyRaiseExc("TypeError", "from_bytes() got an unexpected keyword argument '" + kn + "'")
+            }
+            ki = ki + 1
         }
     }
     var bs = anytype
@@ -2863,52 +2879,56 @@ function pyBuiltinClsName(v) {
     return pyToStr(v["__name"])
 }
 
-// The method surface a builtin TYPE OBJECT itself carries - only dict.fromkeys so
-// far. Its RECEIVER is the type rather than an instance, so it reaches neither
-// the dict dispatcher nor a class MRO, and each of the three engines resolves
-// such a receiver in an arm of its own. Both the mcall path (pyDMethodCall) and
-// the value path (pyGetAttr) need it, or it is reachable one way and not the
-// other. Keep in step with pyBuiltinClsMethod in abnf/jsrt.go and in
+// The methods a builtin TYPE OBJECT itself carries (pyBuiltinClsHas). Its
+// RECEIVER is the type rather than an instance, so it reaches neither the dict
+// dispatcher nor a class MRO, and each of the three engines resolves such a
+// receiver in an arm of its own. Only int.from_bytes takes keywords. Keep in
+// step with pyBuiltinClsCall in abnf/jsrt.go and in
 // languages/python-interpreter.abnf.
+function pyBuiltinClsHas(tn, name) {
+    if (tn == "dict") { return name == "fromkeys" }
+    if (tn == "int") { return name == "from_bytes" }
+    if (tn == "float") { return name == "fromhex" || name == "from_number" }
+    if (tn == "bytes" || tn == "bytearray") { return name == "fromhex" || name == "maketrans" }
+    return tn == "str" && name == "maketrans"
+}
+
+function pyBuiltinClsCall(tn, name, args, kw) {
+    if (tn == "int") { return pyIntFromBytes(args, kw) }
+    if (pyIsDict(kw)) {
+        if (kw["keys"].length > 0) { pyRaiseExc("TypeError", tn + "." + name + "() takes no keyword arguments") }
+    }
+    if (tn == "dict") { return pyDictFromKeys(pyEArgAt(args, 0), pyEArgAt(args, 1)) }
+    if (tn == "str") { return pySMakeTrans(args) }
+    if ((tn == "bytes" || tn == "bytearray") && name == "maketrans") { return pyBytesMakeTrans(pyEArgAt(args, 0), pyEArgAt(args, 1)) }
+    if (tn == "bytes") { return pyBytesFromHex(pyEArgAt(args, 0), 17) }
+    if (tn == "bytearray") { return pyBytesFromHex(pyEArgAt(args, 0), 18) }
+    if (name == "fromhex") { return pyFloatFromHex(pyEArgAt(args, 0)) }
+    return pyFloatFromNumber(pyEArgAt(args, 0))
+}
+
+// Such a method as a VALUE, `f = dict.fromkeys`: a bound method of the type,
+// whose keyword call arrives after pyDKwMark (kind "t").
 function pyBuiltinClsMethod(target, name) {
     var tn = pyBuiltinClsName(target)
-    if (tn == "dict" && name == "fromkeys") {
-        return function(ks, dv) { return pyDictFromKeys(ks, dv) }
-    }
-    if (tn == "int" && name == "from_bytes") {
-        return function() {
-            var args = []
-            var i = 0
-            while (i < arguments.length) {
-                args.push(arguments[i])
-                i = i + 1
-            }
-            return pyIntFromBytes(args)
+    if (!pyBuiltinClsHas(tn, name)) { return undefined }
+    var f = function() {
+        var args = []
+        var i = 0
+        while (i < arguments.length) {
+            args.push(arguments[i])
+            i = i + 1
         }
-    }
-    if (tn == "float" && name == "fromhex") {
-        return function(s) { return pyFloatFromHex(s) }
-    }
-    if (tn == "float" && name == "from_number") {
-        return function(x) { return pyFloatFromNumber(x) }
-    }
-    if ((tn == "bytes" || tn == "bytearray") && name == "fromhex") {
-        var fk = 17
-        if (tn == "bytearray") { fk = 18 }
-        return function(s) { return pyBytesFromHex(s, fk) }
-    }
-    if (tn == "str" && name == "maketrans") {
-        return function() {
-            var args = []
-            var i = 0
-            while (i < arguments.length) {
-                args.push(arguments[i])
-                i = i + 1
-            }
-            return pySMakeTrans(args)
+        var kw = anytype
+        kw = undefined
+        var n = args.length
+        if (n >= 2 && args[n - 2] === pyDKwMark) {
+            kw = args[n - 1]
+            args = args.slice(0, n - 2)
         }
+        return pyBuiltinClsCall(tn, name, args, kw)
     }
-    return undefined
+    return pyBMSetK(f, name, target, null, "t")
 }
 
 // Go: rt.pyFloatFromNumber. float.from_number(x): float(x) for a real number
@@ -4273,8 +4293,8 @@ function pyADunderBin(op, l, r) {
     var lc = pyInstClassOf(l)
     var rc = pyInstClassOf(r)
     if (lc === null && rc === null) { return null }
-    // "fmt" % x is str's formatting whatever x is.
-    if (op == "%" && typeof l == "string") { return null }
+    // "fmt" % x is str's formatting whatever x is, and b"fmt" % x bytes'.
+    if (op == "%" && (typeof l == "string" || pyIsBytes(l))) { return null }
     if (lc !== null) {
         var n1 = pyABinDunder(op)
         if (n1 != "" && pyLookupHas(lc, n1)) {
@@ -4808,8 +4828,8 @@ function js_pybin(opv, l, r) {
     }
     if (op == "//") { return pyAFloorOp(op, l, r) }
     // "fmt" % args is printf-style FORMATTING, not a remainder.
-    if (op == "%" && typeof l == "string") { return pyBPct(l, r) }
-    if (op == "%" && pyIsBytes(l)) { return pySToBytes(pyBPct(pyBytesToS(l), pyBytesPctArgs(r)), arrKind(l)) }
+    if (op == "%" && typeof l == "string") { return pyBPct(l, r, false) }
+    if (op == "%" && pyIsBytes(l)) { return pySToBytes(pyBPct(pyBytesToS(l), r, true), arrKind(l)) }
     if (op == "%") { return pyAFloorOp(op, l, r) }
     // Python's exponentiation. Only js_pybin ever passes this operator, and a
     // user class already had its __pow__ / __rpow__ chance above. int ** NEGATIVE
@@ -5090,7 +5110,7 @@ function js_pystrnew(args) {
         if (!pyIsBytes(pos[0])) {
             pyRaiseExc("TypeError", "decoding to str: need a bytes-like object, " + pyTypeName(pos[0]) + " found")
         }
-        return pyBytesDecode(pos[0], pos[1])
+        return pyBytesDecode(pos[0], pos[1], pyEArgAt(pos, 2))
     }
     return js_pyrxstr(pos[0])
 }
@@ -5152,12 +5172,14 @@ function pyBytesNew(bound, name) {
     return out
 }
 
-// Go: rt.pyBytesDecode. bytes.decode(encoding="utf-8") of a list of byte values:
-// UTF-8 (strict, with CPython's UnicodeDecodeError texts), ASCII or Latin-1, and
-// LookupError for any other codec.
-function pyBytesDecode(bs, encV) {
+// Go: rt.pyBytesDecode. bytes.decode(encoding="utf-8", errors="strict") of a
+// list of byte values: UTF-8, ASCII or Latin-1, and LookupError for any other
+// codec; each undecodable run goes to the error handler (pyDecodeBad).
+function pyBytesDecode(bs, encV, errV) {
     var enc = "utf-8"
     if (encV !== undefined && encV !== null) { enc = pyToStr(encV) }
+    var err = "strict"
+    if (errV !== undefined && errV !== null) { err = pyToStr(errV) }
     var e = ""
     var ei = 0
     while (ei < enc.length) {
@@ -5177,8 +5199,8 @@ function pyBytesDecode(bs, encV) {
     }
     if (e == "ascii" || e == "us-ascii") {
         while (i < n) {
-            if (bs[i] > 127) { pyDecodeErr("ascii", bs, i, i + 1, "ordinal not in range(128)") }
-            out = out + js_pychr(bs[i])
+            if (bs[i] > 127) { out = out + pyDecodeBad("ascii", bs, i, i + 1, "ordinal not in range(128)", err) }
+            else { out = out + js_pychr(bs[i]) }
             i = i + 1
         }
         return out
@@ -5196,27 +5218,60 @@ function pyBytesDecode(bs, encV) {
         if (b0 >= 194 && b0 <= 223) { need = 1; cp = b0 % 32 }
         else if (b0 >= 224 && b0 <= 239) { need = 2; cp = b0 % 16 }
         else if (b0 >= 240 && b0 <= 244) { need = 3; cp = b0 % 8 }
-        else { pyDecodeErr("utf-8", bs, i, i + 1, "invalid start byte") }
+        var why = ""
+        if (need == 0) { why = "invalid start byte" }
+        var to = i + 1
         var k = 1
-        while (k <= need) {
-            if (i + k >= n) { pyDecodeErr("utf-8", bs, i, n, "unexpected end of data") }
-            var c = bs[i + k]
-            var lo = 128
-            var hi = 191
-            if (k == 1 && b0 == 224) { lo = 160 }
-            if (k == 1 && b0 == 237) { hi = 159 }
-            if (k == 1 && b0 == 240) { lo = 144 }
-            if (k == 1 && b0 == 244) { hi = 143 }
-            if (c < lo || c > hi) { pyDecodeErr("utf-8", bs, i, i + k, "invalid continuation byte") }
-            cp = cp * 64 + c % 64
-            k = k + 1
+        while (why == "" && k <= need) {
+            if (i + k >= n) {
+                why = "unexpected end of data"
+                to = n
+            } else {
+                var c = bs[i + k]
+                var lo = 128
+                var hi = 191
+                if (k == 1 && b0 == 224) { lo = 160 }
+                if (k == 1 && b0 == 237) { hi = 159 }
+                if (k == 1 && b0 == 240) { lo = 144 }
+                if (k == 1 && b0 == 244) { hi = 143 }
+                if (c < lo || c > hi) {
+                    why = "invalid continuation byte"
+                    to = i + k
+                } else {
+                    cp = cp * 64 + c % 64
+                    k = k + 1
+                }
+            }
+        }
+        if (why != "") {
+            out = out + pyDecodeBad("utf-8", bs, i, to, why, err)
+            i = to
+            continue
         }
         out = out + js_pychr(cp)
         i = i + need + 1
     }
     return out
 }
-
+// Go: pyBytesDecode's bad. What the error handler errs puts in place of the
+// undecodable bytes [from, to); "strict" raises.
+function pyDecodeBad(codec, bs, from, to, why, errs) {
+    if (errs == "strict") { pyDecodeErr(codec, bs, from, to, why) }
+    if (errs == "ignore") { return "" }
+    if (errs == "replace") { return js_pychr(65533) }
+    if (errs == "backslashreplace") {
+        var hx = "0123456789abcdef"
+        var out = ""
+        var i = from
+        while (i < to) {
+            out = out + "\\x" + hx.charAt(Math.floor(bs[i] / 16) % 16) + hx.charAt(bs[i] % 16)
+            i = i + 1
+        }
+        return out
+    }
+    pyRaiseExc("LookupError", "unknown error handler name '" + errs + "'")
+    return ""
+}
 function pyDecodeErr(codec, bs, from, to, why) {
     var hx = "0123456789abcdef"
     var b = bs[from]
@@ -6646,13 +6701,13 @@ function pyDHasAttr(obj, name) {
     // has to agree with what `math.sqrt` answers.
     if (pyIsObj(obj)) {
         if (obj["__pymod"] !== undefined) {
-            if (obj[name] !== undefined) { return true }
+            if (obj[name] !== undefined || name == "__name__") { return true }
             return pyMHas(obj["__pymod"], name)
         }
     }
     // What pyGetAttr answers on a builtin TYPE OBJECT: dict.fromkeys, and the
     // unbound methods (list.count).
-    if (pyBuiltinClsMethod(obj, name) !== undefined) { return true }
+    if (pyBuiltinClsHas(pyBuiltinClsName(obj), name)) { return true }
     var htn = pyClassName(obj)
     if (htn !== null) {
         var hsamp = pyDTypeSample(htn)
@@ -7173,7 +7228,10 @@ function pyBPctStar(args, ai, keyed) {
     return pyNum(w)
 }
 
-function pyBPct(f, arg) {
+// Go: rt.pyPct. bytes (bytes % args) formats the bytes as the str methods see
+// them: each argument goes through pyBytesPctArg first, a mapping key is bytes,
+// and a bytes right operand is one argument rather than a mapping.
+function pyBPct(f, arg, bytes) {
     var args = []
     var dict = null
     if (pyIsTup(arg)) { args = arg }
@@ -7183,7 +7241,7 @@ function pyBPct(f, arg) {
     var ai = 0
     // A dict or a list is a mapping to PyUnicode_Format, as in pyPct of
     // python-interpreter.abnf.
-    var mapped = !pyIsTup(arg) && (pyIsArr(arg) || (pyIsDict(arg) && pySetElemsOf(arg) === null))
+    var mapped = !pyIsTup(arg) && ((pyIsArr(arg) && !(bytes && pyIsBytes(arg))) || (pyIsDict(arg) && pySetElemsOf(arg) === null))
     var i = 0
     while (i < f.length) {
         var c = f.charAt(i)
@@ -7246,28 +7304,39 @@ function pyBPct(f, arg) {
         while (i < f.length && (f.charAt(i) == "l" || f.charAt(i) == "h" || f.charAt(i) == "L")) { i = i + 1 }
         if (i >= f.length) { pyRaiseExc("ValueError", "incomplete format") }
         var typ = f.charAt(i)
-        if ("sraiduxXofFeEgGc".indexOf(typ) < 0) {
+        if ("sraiduxXofFeEgGc".indexOf(typ) < 0 && !(bytes && typ == "b")) {
             pyRaiseExc("ValueError", "unsupported format character '" + typ + "' (" +
                        pyRadixOf(typ.charCodeAt(0), 16, "0x") + ") at index " + pyIntStr(i))
         }
         i = i + 1
         var v = anytype
         if (hasKey) {
+            var kv = anytype
+            kv = key
+            if (bytes) { kv = pySToBytes(key, 17) }
             if (dict === null && pyIsArr(arg) && !pyIsTup(arg) && pyTypeName(arg) == "list") {
-                pyBPctTypeErr("list indices must be integers or slices, not str")
+                pyBPctTypeErr("list indices must be integers or slices, not " + pyTypeName(kv))
             }
             if (dict === null) { pyBPctTypeErr("format requires a mapping") }
-            var at = pyDictFind(dict["keys"], key)
-            if (at < 0) { pyRaiseExcV("KeyError", key) }
+            var at = pyDictFind(dict["keys"], kv)
+            if (at < 0) { pyRaiseExcV("KeyError", kv) }
             v = dict["vals"][at]
         } else {
             if (ai >= args.length) { pyBPctTypeErr("not enough arguments for format string") }
             v = args[ai]
             ai = ai + 1
         }
+        if (bytes) {
+            v = pyBytesPctArg(v, typ)
+            if (typ == "b" || typ == "r" || typ == "a") { typ = "s" }
+        }
         out = out + pyBPctOne(v, typ, left, zero, plus, space, alt, width, prec)
     }
-    if (!mapped && ai < args.length) { pyBPctTypeErr("not all arguments converted during string formatting") }
+    if (!mapped && ai < args.length) {
+        var what = "string"
+        if (bytes) { what = "bytes" }
+        pyBPctTypeErr("not all arguments converted during " + what + " formatting")
+    }
     return out
 }
 
@@ -9023,8 +9092,9 @@ function pyBindCall(callee, pos, kw) {
     if (si < 0) {
         // A builtin (no declared signature) takes the keyword dict as one extra
         // trailing argument - which is exactly what dict(a=1) / dict(**m) want.
-        // A module function (pyDModuleFn) gets pyDKwMark before it, since its
-        // positionals may end in a dict.
+        // A module function (pyDModuleFn) and a type's own method
+        // (pyBuiltinClsMethod) get pyDKwMark before it, since their positionals
+        // may end in a dict.
         if (hasKw) {
             i = 0
             while (i < pos.length) {
@@ -9032,7 +9102,9 @@ function pyBindCall(callee, pos, kw) {
                 i = i + 1
             }
             var bmi = pyBMFind(callee)
-            if (bmi >= 0 && pyBMTab[bmi + 4] === "m") { out.push(pyDKwMark) }
+            if (bmi >= 0) {
+                if (pyBMTab[bmi + 4] === "m" || pyBMTab[bmi + 4] === "t") { out.push(pyDKwMark) }
+            }
             out.push(kw)
             return out
         }
@@ -9504,11 +9576,9 @@ function pyDMethodCall(target, name, args, kw) {
         }
         if (name == "close") { return pyGenClose(target) }
     }
-    // str.maketrans(...) goes to the str dispatcher, which refuses a keyword.
-    if (name == "maketrans" && pyBuiltinClsName(target) == "str") { return pyStrMethod("", name, args, kw) }
     // A method the builtin TYPE OBJECT itself carries - dict.fromkeys.
-    var bcm = pyBuiltinClsMethod(target, name)
-    if (bcm !== undefined) { return bcm.apply(undefined, pyBindCall(bcm, args, kw)) }
+    var bctn = pyBuiltinClsName(target)
+    if (pyBuiltinClsHas(bctn, name)) { return pyBuiltinClsCall(bctn, name, args, kw) }
     // list.count(xs, 2) - the UNBOUND descriptor CALLED straight off the type
     // object rather than read as a value. The emitter routes a method call
     // through js_pyrxmcall and never through pyGetAttr, so the arm has to exist
@@ -10477,6 +10547,8 @@ function pyDTypeSample(tname) {
     if (tname == "dict") { return pyNewDict() }
     if (tname == "int") { return 0 }
     if (tname == "float") { return pyMkFlo(0) }
+    if (tname == "bytes") { return arrKindSet([], 17) }
+    if (tname == "bytearray") { return arrKindSet([], 18) }
     return undefined
 }
 
@@ -13568,26 +13640,128 @@ function pyBytesNum(name, args) {
     }
     return r
 }
-// Go: rt.pyBytesPctArgs.
-function pyBytesPctArgs(r) {
-    if (pyIsTup(r)) {
-        var out = []
-        var i = 0
-        while (i < r.length) {
-            out.push(pyBytesPctArg(r[i]))
-            i = i + 1
+// Go: rt.pyBytesPctArg. One argument of bytes % args for conversion typ, as
+// the str formatter then sees it.
+function pyBytesPctArg(v, typ) {
+    if (typ == "r" || typ == "a") { return js_pyascii(v) }
+    if (typ == "s" || typ == "b") {
+        if (pyIsBytes(v)) { return pyBytesToS(v) }
+        var cls = pyInstClassOf(v)
+        if (cls !== null) {
+            if (pyLookupHas(cls, "__bytes__")) {
+                var bv = pyCallSelf(pyLookupVal(cls, "__bytes__"), v, [])
+                if (pyIsBytes(bv)) { return pyBytesToS(bv) }
+            }
         }
-        return pyTup(out)
+        pyRaiseExc("TypeError", "%b requires a bytes-like object, or an object that implements __bytes__, not '" +
+                   pyTypeName(v) + "'")
     }
-    return pyBytesPctArg(r)
-}
-function pyBytesPctArg(v) {
-    if (pyIsBytes(v)) { return pyBytesToS(v) }
-    if (typeof v == "string") {
-        pyRaiseExc("TypeError", "%b requires a bytes-like object, or an object that implements __bytes__, not 'str'")
+    if (typ == "c") {
+        var cn = "%c requires an integer in range(256) or a single byte, not "
+        if (pyIsBytes(v)) {
+            if (v.length != 1) { pyRaiseExc("TypeError", cn + "a bytes object of length " + pyIntStr(v.length)) }
+            return pyBytesToS(v)
+        }
+        if (pyNumTName(v) != "int") { pyRaiseExc("TypeError", cn + pyTypeName(v)) }
+        if (pyIsBig(v)) { pyRaiseExc("OverflowError", "%c arg not in range(256)") }
+        var n = pyNum(v)
+        if (n < 0 || n > 255) { pyRaiseExc("OverflowError", "%c arg not in range(256)") }
+        return pyBytesToS([n])
     }
     return v
 }
+// Go: rt.pyBytesHexSep. b.hex(sep, per): a separator between every |per|
+// bytes, counted from the right for a positive per, from the left for a
+// negative one.
+function pyBytesHexSep(b, sep, per) {
+    var ss = ""
+    if (typeof sep == "string") { ss = sep }
+    else if (pyIsBytes(sep)) { ss = pyBytesToS(sep) }
+    else { pyRaiseExc("TypeError", "object of type '" + pyTypeName(sep) + "' has no len()") }
+    if (pyStrLen(ss) != 1) { pyRaiseExc("ValueError", "sep must be length 1.") }
+    if (ss.charCodeAt(0) > 127) { pyRaiseExc("ValueError", "sep must be ASCII.") }
+    var h = pyBytesHex(b)
+    if (per == 0) { return h }
+    var g = Math.abs(per)
+    var n = b.length
+    var out = ""
+    var i = 0
+    while (i < n) {
+        if (i > 0 && ((per > 0 && (n - i) % g == 0) || (per < 0 && i % g == 0))) { out = out + ss }
+        out = out + h.substring(2 * i, 2 * i + 2)
+        i = i + 1
+    }
+    return out
+}
+
+// Go: pyBytesSplitLines. Lines end at \n, \r or \r\n only.
+function pyBytesSplitLines(b, keep) {
+    var k = arrKind(b)
+    var out = []
+    var st = 0
+    var i = 0
+    while (i < b.length) {
+        var c = b[i]
+        if (c != 10 && c != 13) {
+            i = i + 1
+            continue
+        }
+        var e = i + 1
+        if (c == 13 && e < b.length && b[e] == 10) { e = e + 1 }
+        var end = i
+        if (keep) { end = e }
+        out.push(arrKindSet(b.slice(st, end), k))
+        st = e
+        i = e
+    }
+    if (st < b.length) { out.push(arrKindSet(b.slice(st, b.length), k)) }
+    return out
+}
+
+// Go: rt.pyBytesLike.
+function pyBytesLike(v) {
+    if (!pyIsBytes(v)) { pyRaiseExc("TypeError", "a bytes-like object is required, not '" + pyTypeName(v) + "'") }
+    return v
+}
+
+// Go: rt.pyBytesTranslate.
+function pyBytesTranslate(b, table, del) {
+    var tab = anytype
+    tab = null
+    if (table !== undefined && table !== null) {
+        tab = pyBytesLike(table)
+        if (tab.length != 256) { pyRaiseExc("ValueError", "translation table must be 256 characters long") }
+    }
+    var out = []
+    var i = 0
+    while (i < b.length) {
+        if (del.indexOf(b[i]) < 0) {
+            if (tab === null) { out.push(b[i]) } else { out.push(tab[b[i]]) }
+        }
+        i = i + 1
+    }
+    return arrKindSet(out, arrKind(b))
+}
+
+// Go: rt.pyBytesMakeTrans.
+function pyBytesMakeTrans(frm, to) {
+    var f = pyBytesLike(frm)
+    var t = pyBytesLike(to)
+    if (f.length != t.length) { pyRaiseExc("ValueError", "maketrans arguments must have same length") }
+    var out = []
+    var i = 0
+    while (i < 256) {
+        out.push(i)
+        i = i + 1
+    }
+    var j = 0
+    while (j < f.length) {
+        out[f[j]] = t[j]
+        j = j + 1
+    }
+    return arrKindSet(out, 17)
+}
+
 // Go: pyBytesHex.
 function pyBytesHex(b) {
     var hx = "0123456789abcdef"
@@ -13642,6 +13816,7 @@ function pyBArrMutator(name) {
 // Go: pyIsBytesMethod.
 function pyIsBytesMethod(name, k) {
     if (name == "decode" || name == "hex" || pyBytesStrMethod(name)) { return true }
+    if (name == "splitlines" || name == "translate" || name == "maketrans") { return true }
     return k == 18 && pyBArrMutator(name)
 }
 // Go: rt.pyBytesArgS.
@@ -13700,12 +13875,33 @@ function pyBytesBack(r, k) {
 function pyBytesMethod(b, name, args, kw) {
     var k = arrKind(b)
     var hasKw = pyIsDict(kw) && kw["keys"].length > 0
+    var a = args
     if (name == "decode") {
-        var da = args
-        if (hasKw) { da = pyKwPos("decode", args, kw, ["encoding", "errors"], 0) }
-        return pyBytesDecode(b, pyEArgAt(da, 0))
+        if (hasKw) { a = pyKwPos("decode", args, kw, ["encoding", "errors"], 0) }
+        var de = pyEArgAt(a, 1)
+        if (de !== undefined && typeof de != "string") {
+            pyRaiseExc("TypeError", "decode() argument 'errors' must be str, not " + pyTypeName(de))
+        }
+        return pyBytesDecode(b, pyEArgAt(a, 0), de)
     }
-    if (name == "hex") { return pyBytesHex(b) }
+    if (name == "hex") {
+        if (hasKw) { a = pyKwPos("hex", args, kw, ["sep", "bytes_per_sep"], 0) }
+        if (a.length == 0) { return pyBytesHex(b) }
+        var per = 1
+        if (a.length > 1) { per = pyNum(a[1]) }
+        return pyBytesHexSep(b, a[0], per)
+    }
+    if (name == "splitlines") {
+        if (hasKw) { a = pyKwPos("splitlines", args, kw, ["keepends"], 0) }
+        return pyBytesSplitLines(b, pyDTruthy(pyEArgAt(a, 0)))
+    }
+    if (name == "translate") {
+        if (hasKw) { a = pyKwPos("translate", args, kw, ["table", "delete"], 1) }
+        var del = []
+        if (a.length > 1) { del = pyBytesLike(a[1]) }
+        return pyBytesTranslate(b, pyEArgAt(a, 0), del)
+    }
+    if (name == "maketrans") { return pyBytesMakeTrans(pyEArgAt(args, 0), pyEArgAt(args, 1)) }
     if (k == 18 && pyBArrMutator(name)) {
         if (name == "append") {
             b.push(pyByteVal(pyEArgAt(args, 0)))
@@ -13762,6 +13958,8 @@ function pyBytesMethod(b, name, args, kw) {
         }
         return pyBytesBack(pyStrMethod(s, name, sa, skw), k)
     }
+    var bdel = pyValDunder(b, name)
+    if (bdel !== undefined) { return bdel.apply(undefined, [b].concat(args)) }
     pyRaiseExc("AttributeError", "'" + pySeqTName(b) + "' object has no attribute '" + name + "'")
     return undefined
 }

@@ -37,7 +37,7 @@ func pyBuiltinDelegate(tname, name string) (*hostFunc, bool) {
 		if !strings.HasPrefix(name, "__") {
 			return nil, false
 		}
-	case "str", "int", "float", "list", "dict", "set", "frozenset", "complex":
+	case "str", "int", "float", "list", "dict", "set", "frozenset", "complex", "bytes", "bytearray":
 	default:
 		return nil, false
 	}
@@ -66,13 +66,13 @@ func pyIsBDelMethod(v interface{}) bool {
 
 // pyStrDecode is str(object, encoding[, errors]): the decoding form, for a
 // bytes value only.
-func (rt *jsrt) pyStrDecode(v, enc interface{}) string {
+func (rt *jsrt) pyStrDecode(v, enc, errs interface{}) string {
 	switch b := v.(type) {
 	case string:
 		panic(&jsThrown{value: rt.pyExcInstance("TypeError", "decoding str is not supported")})
 	case *jsArray:
 		if pyIsBytes(b) {
-			return rt.pyBytesDecode(b.elems, enc)
+			return rt.pyBytesDecode(b.elems, enc, errs)
 		}
 	}
 	panic(&jsThrown{value: rt.pyExcInstance("TypeError",
@@ -103,6 +103,10 @@ func pyBuiltinHasMethod(tname, name string) bool {
 		return name == "conjugate"
 	case "int", "float":
 		return pyIsNumMethod(pyDescTypeSample(tname), name)
+	case "bytes":
+		return pyIsBytesMethod(name, pyBytesKind)
+	case "bytearray":
+		return pyIsBytesMethod(name, pyBArrKind)
 	}
 	return false
 }
@@ -136,9 +140,14 @@ func pyBDelMake(tname, name string) *hostFunc {
 		return f
 	}
 	num := tname == "int" || tname == "float"
-	seq := tname == "list" || tname == "tuple" || tname == "str"
+	seq := tname == "list" || tname == "tuple" || tname == "str" || tname == "bytes" || tname == "bytearray"
 	setLike := tname == "set" || tname == "frozenset"
 	switch {
+	case name == "__repr__" && tname == "bytearray":
+		// A bytearray's repr names the receiver's own type: BA(b'hi').
+		return mkSelf(func(rt *jsrt, self, v interface{}, _ []interface{}) interface{} {
+			return pyTypeName(rt, self) + rt.pyRepr(v)[len("bytearray"):]
+		})
 	case name == "__repr__":
 		return mk(func(rt *jsrt, v interface{}, _ []interface{}) interface{} { return rt.pyRepr(v) })
 	case name == "__str__" && tname == "str":
@@ -230,14 +239,14 @@ func pyBDelMake(tname, name string) *hostFunc {
 		})
 	case seq && name == "__getitem__":
 		return mk(func(rt *jsrt, v interface{}, a []interface{}) interface{} { return rt.pyExt("js_pyidx", v, arg(a)) })
-	case (tname == "list" || tname == "dict") && name == "__setitem__":
+	case (tname == "list" || tname == "dict" || tname == "bytearray") && name == "__setitem__":
 		return mk(func(rt *jsrt, v interface{}, a []interface{}) interface{} {
 			if len(a) < 2 {
 				a = append(a, jsUndef, jsUndef)
 			}
 			return rt.pyExt("js_pyset", v, a[0], a[1])
 		})
-	case (tname == "list" || tname == "dict") && name == "__delitem__":
+	case (tname == "list" || tname == "dict" || tname == "bytearray") && name == "__delitem__":
 		return mk(func(rt *jsrt, v interface{}, a []interface{}) interface{} {
 			return rt.pyExt("js_pydel_item", v, arg(a))
 		})
@@ -267,7 +276,7 @@ func pyBDelMake(tname, name string) *hostFunc {
 		}
 	case seq:
 		ops = []string{"+", "*", "<", ">", "<=", ">="}
-		if tname == "str" {
+		if tname == "str" || tname == "bytes" || tname == "bytearray" {
 			ops = append(ops, "%")
 		}
 	case tname == "dict":
@@ -293,8 +302,8 @@ func pyBDelMake(tname, name string) *hostFunc {
 		}
 		// A number's, a dict's and a set's operators decline a foreign operand;
 		// str's and list's `+`, `*` and `%` raise their own TypeError instead,
-		// and only their orderings decline.
-		gated := !seq || ordered
+		// and only their orderings and a reflected % ("%d".__rmod__(3)) decline.
+		gated := !seq || ordered || (reflected && op == "%")
 		return mk(func(rt *jsrt, v interface{}, a []interface{}) interface{} {
 			o := pyUnwrapBuiltin(arg(a))
 			if gated && !pyBDelAccepts(tname, o) {
@@ -313,15 +322,17 @@ func pyBDelMake(tname, name string) *hostFunc {
 // containers. hasattr(list, "__hash__") is True and list.__hash__ is None.
 // Twin of pyBHashNone in languages/python-interpreter.abnf and
 // lib/python-rt.metajs.
-func pyBHashNone(tname string) bool { return tname == "list" || tname == "dict" || tname == "set" }
+func pyBHashNone(tname string) bool {
+	return tname == "list" || tname == "dict" || tname == "set" || tname == "bytearray"
+}
 
 // pyBDelInplace is the binary operator of tname's in-place dunder name, or "":
-// list's += and *=, dict's |=, set's |= &= -= ^=.
+// list's and bytearray's += and *=, dict's |=, set's |= &= -= ^=.
 func pyBDelInplace(tname, name string) string {
 	switch {
-	case tname == "list" && name == "__iadd__":
+	case (tname == "list" || tname == "bytearray") && name == "__iadd__":
 		return "+"
-	case tname == "list" && name == "__imul__":
+	case (tname == "list" || tname == "bytearray") && name == "__imul__":
 		return "*"
 	case (tname == "dict" || tname == "set") && name == "__ior__":
 		return "|"
@@ -481,11 +492,11 @@ func pyValDunder(v interface{}, name string) (*hostFunc, bool) {
 func pyIsTupleMethod(name string) bool { return name == "count" || name == "index" }
 
 // pyValHashNone says whether v is a value whose __hash__ is None (pyBHashNone):
-// a list, a dict or a set. Twin of pyValHashNone in
+// a list, a bytearray, a dict or a set. Twin of pyValHashNone in
 // languages/python-interpreter.abnf and lib/python-rt.metajs.
 func pyValHashNone(v interface{}) bool {
-	if _, isArr := v.(*jsArray); isArr {
-		return !pyIsTup(v)
+	if a, isArr := v.(*jsArray); isArr {
+		return pyBHashNone(pySeqTName(a))
 	}
 	if _, isSet := pySetElems(v); isSet {
 		return !pySetFrozen(v)
@@ -756,28 +767,47 @@ func (rt *jsrt) pyExt(name string, args ...interface{}) interface{} {
 	return rt.unwrap(pyExternMaps[rt][name](hs))
 }
 
-// pyBytesDecode is bytes.decode(encoding="utf-8") of a list of byte values:
-// UTF-8 (strict, with CPython's UnicodeDecodeError texts), ASCII or Latin-1,
-// and LookupError for any other codec.
-func (rt *jsrt) pyBytesDecode(bs []interface{}, encV interface{}) string {
-	enc := "utf-8"
+// pyBytesDecode is bytes.decode(encoding="utf-8", errors="strict") of a list
+// of byte values: UTF-8, ASCII or Latin-1, and LookupError for any other codec.
+// Each undecodable run [from, to) - CPython's UnicodeDecodeError start and end -
+// goes to the error handler (bad).
+func (rt *jsrt) pyBytesDecode(bs []interface{}, encV, errV interface{}) string {
+	enc, errs := "utf-8", "strict"
 	if !isUndefOrNull(encV) {
 		enc = rt.pyString(encV)
+	}
+	if !isUndefOrNull(errV) {
+		errs = rt.pyString(errV)
 	}
 	e := strings.ReplaceAll(strings.ToLower(enc), "_", "-")
 	b := make([]int, len(bs))
 	for i, x := range bs {
 		b[i] = int(rt.toNumber(x))
 	}
-	fail := func(codec string, from, to int, why string) {
-		where := fmt.Sprintf("byte 0x%02x in position %d", b[from], from)
-		if to-from > 1 {
-			where = fmt.Sprintf("bytes in position %d-%d", from, to-1)
-		}
-		panic(&jsThrown{value: rt.pyExcInstance("UnicodeDecodeError",
-			"'"+codec+"' codec can't decode "+where+": "+why)})
-	}
 	var sb strings.Builder
+	// bad writes what the handler puts in place of b[from:to]; "strict"
+	// raises. A handler name is only looked up once it is needed, as CPython
+	// does.
+	bad := func(codec string, from, to int, why string) {
+		switch errs {
+		case "strict":
+			where := fmt.Sprintf("byte 0x%02x in position %d", b[from], from)
+			if to-from > 1 {
+				where = fmt.Sprintf("bytes in position %d-%d", from, to-1)
+			}
+			panic(&jsThrown{value: rt.pyExcInstance("UnicodeDecodeError",
+				"'"+codec+"' codec can't decode "+where+": "+why)})
+		case "ignore":
+		case "replace":
+			sb.WriteRune(0xFFFD)
+		case "backslashreplace":
+			for _, c := range b[from:to] {
+				fmt.Fprintf(&sb, "\\x%02x", c)
+			}
+		default:
+			panic(&jsThrown{value: rt.pyExcInstance("LookupError", "unknown error handler name '"+errs+"'")})
+		}
+	}
 	switch e {
 	case "latin-1", "latin1", "iso-8859-1", "iso8859-1":
 		for _, c := range b {
@@ -787,9 +817,10 @@ func (rt *jsrt) pyBytesDecode(bs []interface{}, encV interface{}) string {
 	case "ascii", "us-ascii":
 		for i, c := range b {
 			if c > 127 {
-				fail("ascii", i, i+1, "ordinal not in range(128)")
+				bad("ascii", i, i+1, "ordinal not in range(128)")
+			} else {
+				sb.WriteRune(rune(c))
 			}
-			sb.WriteRune(rune(c))
 		}
 		return sb.String()
 	case "utf-8", "utf8":
@@ -810,13 +841,16 @@ func (rt *jsrt) pyBytesDecode(bs []interface{}, encV interface{}) string {
 			need = 2
 		case b0 >= 0xF0 && b0 <= 0xF4:
 			need = 3
-		default:
-			fail("utf-8", i, i+1, "invalid start byte")
+		}
+		why, to := "", i+1
+		if need == 0 {
+			why = "invalid start byte"
 		}
 		cp := b0 & (0x3F >> need)
-		for k := 1; k <= need; k++ {
+		for k := 1; why == "" && k <= need; k++ {
 			if i+k >= len(b) {
-				fail("utf-8", i, len(b), "unexpected end of data")
+				why, to = "unexpected end of data", len(b)
+				break
 			}
 			c := b[i+k]
 			lo, hi := 0x80, 0xBF
@@ -833,9 +867,15 @@ func (rt *jsrt) pyBytesDecode(bs []interface{}, encV interface{}) string {
 				}
 			}
 			if c < lo || c > hi {
-				fail("utf-8", i, i+k, "invalid continuation byte")
+				why, to = "invalid continuation byte", i+k
+				break
 			}
 			cp = cp<<6 | c&0x3F
+		}
+		if why != "" {
+			bad("utf-8", i, to, why)
+			i = to
+			continue
 		}
 		sb.WriteRune(rune(cp))
 		i += need + 1

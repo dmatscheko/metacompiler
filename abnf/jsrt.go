@@ -322,7 +322,9 @@ type pyBoundInfo struct {
 	typ  string
 	// kind distinguishes the three callables this record describes -
 	// "" a bound method, "d" an unbound method descriptor (list.count),
-	// "m" a module-level builtin function (math.sqrt). They print, name and
+	// "m" a module-level builtin function (math.sqrt). "t" is a bound method
+	// of a builtin type object (dict.fromkeys), which differs from "" only in
+	// taking its keywords after pyKwMark. They print, name and
 	// introspect differently; see abnf/jsrtpydesc.go, which is where the three
 	// are minted, and the matching fifth pyBMTab slot in
 	// languages/lib/python-rt.metajs and languages/python-interpreter.abnf.
@@ -16601,10 +16603,10 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			case "%":
 				// "fmt" % args is printf-style FORMATTING, not a remainder.
 				if s, isStr := l.(string); isStr {
-					return w(rt.pyPct(s, r))
+					return w(rt.pyPct(s, r, false))
 				}
 				if la, ok := l.(*jsArray); ok && pyIsBytes(la) {
-					return w(pySToBytes(rt.pyPct(pyBytesToS(la), rt.pyBytesPctArgs(r)), la.kind))
+					return w(pySToBytes(rt.pyPct(pyBytesToS(la), r, true), la.kind))
 				}
 				return w(rt.pyFloorOp(op, l, r))
 			case "**":
@@ -16798,7 +16800,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				return rt.wrapStr("")
 			}
 			if len(pos) > 1 && (pos[1] != jsUndef || (len(pos) > 2 && pos[2] != jsUndef)) {
-				return rt.wrapStr(rt.pyStrDecode(pos[0], pos[1]))
+				return rt.wrapStr(rt.pyStrDecode(pos[0], pos[1], argAt(pos, 2)))
 			}
 			return pyExternMaps[rt]["js_pyrxstr"]([]uint64{w(pos[0])})
 		},
@@ -20381,7 +20383,6 @@ func (rt *jsrt) pyGetAttrRaw(obj interface{}, name string) interface{} {
 	// A method the builtin TYPE OBJECT itself carries - dict.fromkeys - is a
 	// built-in method bound to that type.
 	if m, ok := rt.pyBuiltinClsMethod(obj, name); ok {
-		m.(*hostFunc).pybm = &pyBoundInfo{name: name, self: obj, fn: nil, typ: "type"}
 		return m
 	}
 	if name == "__mro__" || name == "__bases__" {
@@ -20422,6 +20423,9 @@ func (rt *jsrt) pyGetAttrRaw(obj interface{}, name string) interface{} {
 			}
 			if bi.kind == "m" {
 				return bi.name
+			}
+			if bi.kind == "t" {
+				return pyBuiltinClsName(bi.self) + "." + bi.name
 			}
 			return bi.typ + "." + bi.name
 		case "__objclass__":
@@ -21093,13 +21097,9 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 			return rt.pyGenClose(g)
 		}
 	}
-	// str.maketrans(...) goes to the str dispatcher, which refuses a keyword.
-	if name == "maketrans" && pyBuiltinClsName(target) == "str" {
-		return rt.pyExt("js_pymcall", "", name, &jsArray{elems: args}, kw)
-	}
 	// A method the builtin TYPE OBJECT itself carries - dict.fromkeys.
-	if m, ok := rt.pyBuiltinClsMethod(target, name); ok {
-		return rt.call(m, jsUndef, rt.pyBindCall(m, args, kw))
+	if tn := pyBuiltinClsName(target); pyBuiltinClsHas(tn, name) {
+		return rt.pyBuiltinClsCall(tn, name, args, kw)
 	}
 	if p, isProp := pyPropOf(target); isProp {
 		return rt.callPyValue(rt.pyPropAttr(p, name), args, kw)
@@ -21559,46 +21559,65 @@ func pyBuiltinClsName(v interface{}) string {
 	return n
 }
 
-// pyBuiltinClsMethod is the method surface a builtin TYPE OBJECT itself carries -
-// only dict.fromkeys so far, and it is the reason this exists at all. Its
-// RECEIVER is the type rather than an instance, so it reaches neither the dict
-// dispatcher nor a class MRO, and each of the three engines resolves such a
-// receiver in an arm of its own. Both the mcall path (pyMethodCall) and the value
-// path (pyGetAttr) need it, or it is reachable one way and not the other. Keep in
-// step with pyBuiltinClsMethod in languages/lib/python-rt.metajs and in
-// languages/python-interpreter.abnf.
-func (rt *jsrt) pyBuiltinClsMethod(target interface{}, name string) (interface{}, bool) {
-	switch pyBuiltinClsName(target) + "." + name {
-	case "dict.fromkeys":
-		return jsHostFunc("dict.fromkeys", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			return rt.pyDictFromKeys(argAt(args, 0), argAt(args, 1))
-		}), true
-	case "int.from_bytes":
-		return jsHostFunc("int.from_bytes", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			return rt.pyIntFromBytes(args, jsUndef)
-		}), true
-	case "float.fromhex":
-		return jsHostFunc("float.fromhex", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			return rt.pyFloatFromHex(rt.toString(argAt(args, 0)))
-		}), true
-	case "float.from_number":
-		return jsHostFunc("float.from_number", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			return rt.pyFloatFromNumber(argAt(args, 0))
-		}), true
-	case "bytes.fromhex", "bytearray.fromhex":
-		kind := pyBytesKind
-		if pyBuiltinClsName(target) == "bytearray" {
-			kind = pyBArrKind
-		}
-		return jsHostFunc("bytes.fromhex", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			return rt.pyBytesFromHex(argAt(args, 0), kind)
-		}), true
-	case "str.maketrans":
-		return jsHostFunc("str.maketrans", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			return rt.pyExt("js_pymcall", "", "maketrans", &jsArray{elems: args}, jsUndef)
-		}), true
+// pyBuiltinClsCall runs a method a builtin TYPE OBJECT itself carries
+// (pyBuiltinClsHas). Its RECEIVER is the type rather than an instance, so it
+// reaches neither the dict dispatcher nor a class MRO, and each of the three
+// engines resolves such a receiver in an arm of its own. Only int.from_bytes
+// takes keywords. Keep in step with pyBuiltinClsCall in
+// languages/lib/python-rt.metajs and in languages/python-interpreter.abnf.
+func (rt *jsrt) pyBuiltinClsCall(tn, name string, args []interface{}, kw interface{}) interface{} {
+	if tn == "int" {
+		return rt.pyIntFromBytes(args, kw)
 	}
-	return nil, false
+	if k, _, ok := dictParts(kw); ok && len(k.elems) > 0 {
+		rt.pyRaise("TypeError", tn+"."+name+"() takes no keyword arguments")
+	}
+	switch tn {
+	case "dict":
+		return rt.pyDictFromKeys(argAt(args, 0), argAt(args, 1))
+	case "str":
+		return rt.pyExt("js_pymcall", "", "maketrans", &jsArray{elems: args}, jsUndef)
+	case "bytes", "bytearray":
+		if name == "maketrans" {
+			return rt.pyBytesMakeTrans(argAt(args, 0), argAt(args, 1))
+		}
+		if tn == "bytes" {
+			return rt.pyBytesFromHex(argAt(args, 0), pyBytesKind)
+		}
+		return rt.pyBytesFromHex(argAt(args, 0), pyBArrKind)
+	}
+	if name == "fromhex" {
+		return rt.pyFloatFromHex(rt.toString(argAt(args, 0)))
+	}
+	return rt.pyFloatFromNumber(argAt(args, 0))
+}
+
+// pyBuiltinClsHas says whether a builtin type object carries method `name`.
+func pyBuiltinClsHas(tn, name string) bool {
+	switch tn + "." + name {
+	case "dict.fromkeys", "int.from_bytes", "float.fromhex", "float.from_number",
+		"bytes.fromhex", "bytearray.fromhex", "bytes.maketrans", "bytearray.maketrans", "str.maketrans":
+		return true
+	}
+	return false
+}
+
+// pyBuiltinClsMethod is such a method as a VALUE, `f = dict.fromkeys`: a bound
+// method of the type, whose keyword call arrives after pyKwMark (kind "t").
+func (rt *jsrt) pyBuiltinClsMethod(target interface{}, name string) (interface{}, bool) {
+	tn := pyBuiltinClsName(target)
+	if !pyBuiltinClsHas(tn, name) {
+		return nil, false
+	}
+	h := jsHostFunc(tn+"."+name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		var kw interface{} = jsUndef
+		if n := len(args); n >= 2 && args[n-2] == pyKwMark {
+			args, kw = args[:n-2], args[n-1]
+		}
+		return rt.pyBuiltinClsCall(tn, name, args, kw)
+	})
+	h.pybm = &pyBoundInfo{name: name, self: target, fn: nil, typ: "type", kind: "t"}
+	return h, true
 }
 
 // float.from_number(x): float(x) for a real number only - an int, a float, a
@@ -22724,7 +22743,7 @@ func (rt *jsrt) pyHasAttrRaw(obj interface{}, name string) bool {
 	}
 	// What pyGetAttr answers on a builtin TYPE OBJECT: dict.fromkeys, and the
 	// unbound methods (list.count).
-	if _, ok := rt.pyBuiltinClsMethod(obj, name); ok {
+	if pyBuiltinClsHas(pyBuiltinClsName(obj), name) {
 		return true
 	}
 	if tn, isType := rt.pyClassName(obj); isType {
@@ -23374,7 +23393,10 @@ func (rt *jsrt) pyDunderBin(op string, l, r interface{}) (interface{}, bool) {
 	if !li && !ri {
 		return nil, false
 	}
-	// "fmt" % x is str's formatting whatever x is.
+	// "fmt" % x is str's formatting whatever x is, and b"fmt" % x bytes'.
+	if la, isArr := l.(*jsArray); op == "%" && isArr && pyIsBytes(la) {
+		return nil, false
+	}
 	if _, isStr := l.(string); isStr && op == "%" {
 		return nil, false
 	}
@@ -23463,10 +23485,11 @@ func (rt *jsrt) pyBindCallR(callee interface{}, pos []interface{}, kw interface{
 	if sig == nil {
 		// A builtin (no declared signature) takes the keyword dict as one extra
 		// trailing argument - which is exactly what dict(a=1) / dict(**m) want.
-		// A module function (pyModuleFn) gets pyKwMark before it, since its
-		// positionals may end in a dict.
+		// A module function (pyModuleFn) and a type's own method
+		// (pyBuiltinClsMethod) get pyKwMark before it, since their positionals
+		// may end in a dict.
 		if hasKw {
-			if h, ok := callee.(*hostFunc); ok && h.pybm != nil && h.pybm.kind == "m" {
+			if h, ok := callee.(*hostFunc); ok && h.pybm != nil && (h.pybm.kind == "m" || h.pybm.kind == "t") {
 				return append(append([]interface{}{}, pos...), pyKwMark, kw), true
 			}
 			return append(append([]interface{}{}, pos...), kw), true
@@ -24485,7 +24508,10 @@ func pyPctExp(n float64, typ byte, prec int) string {
 	return s
 }
 
-func (rt *jsrt) pyPct(f string, arg interface{}) string {
+// bytes (bytes % args) formats the bytes as the str methods see them
+// (pyBytesToS): each argument goes through pyBytesPctArg first, a mapping key
+// is bytes, and a bytes right operand is one argument rather than a mapping.
+func (rt *jsrt) pyPct(f string, arg interface{}, bytes bool) string {
 	var args []interface{}
 	var dictK, dictV *jsArray
 	if arr, ok := arg.(*jsArray); ok && arr.kind == pyTupKind {
@@ -24503,7 +24529,7 @@ func (rt *jsrt) pyPct(f string, arg interface{}) string {
 	// A dict or a list is a mapping to PyUnicode_Format, as in pyPct of
 	// languages/python-interpreter.abnf.
 	arr, isArr := arg.(*jsArray)
-	mapped := (isArr && arr.kind != pyTupKind) || dictK != nil
+	mapped := (isArr && arr.kind != pyTupKind && !(bytes && pyIsBytes(arr))) || dictK != nil
 	i := 0
 	for i < len(f) {
 		if f[i] != '%' {
@@ -24594,21 +24620,25 @@ func (rt *jsrt) pyPct(f string, arg interface{}) string {
 			rt.pyPctValueErr("incomplete format")
 		}
 		typ := f[i]
-		if !strings.ContainsRune("sraiduxXofFeEgGc", rune(typ)) {
+		if !strings.ContainsRune("sraiduxXofFeEgGc", rune(typ)) && !(bytes && typ == 'b') {
 			rt.pyPctValueErr(fmt.Sprintf("unsupported format character '%c' (0x%x) at index %d", typ, typ, i))
 		}
 		i++
 		var v interface{}
 		if hasKey {
+			var kv interface{} = key
+			if bytes {
+				kv = pySToBytes(key, pyBytesKind)
+			}
 			if dictK == nil && isArr && arr.kind != pyTupKind && pyTypeName(rt, arg) == "list" {
-				rt.pyPctTypeErr("list indices must be integers or slices, not str")
+				rt.pyPctTypeErr("list indices must be integers or slices, not " + pyTypeName(rt, kv))
 			}
 			if dictK == nil {
 				rt.pyPctTypeErr("format requires a mapping")
 			}
-			at := rt.pyDictFind(dictK, key)
+			at := rt.pyDictFind(dictK, kv)
 			if at < 0 {
-				panic(&jsThrown{value: rt.pyExcInstanceV("KeyError", key)})
+				panic(&jsThrown{value: rt.pyExcInstanceV("KeyError", kv)})
 			}
 			v = dictV.elems[at]
 		} else {
@@ -24618,10 +24648,20 @@ func (rt *jsrt) pyPct(f string, arg interface{}) string {
 			v = args[ai]
 			ai++
 		}
+		if bytes {
+			v = rt.pyBytesPctArg(v, typ)
+			if typ == 'b' || typ == 'r' || typ == 'a' {
+				typ = 's'
+			}
+		}
 		out += rt.pyPctOne(v, typ, left, zero, plus, space, alt, width, prec)
 	}
 	if !mapped && ai < len(args) {
-		rt.pyPctTypeErr("not all arguments converted during string formatting")
+		what := "string"
+		if bytes {
+			what = "bytes"
+		}
+		rt.pyPctTypeErr("not all arguments converted during " + what + " formatting")
 	}
 	return out
 }

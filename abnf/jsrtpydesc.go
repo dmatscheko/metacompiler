@@ -217,6 +217,10 @@ func pyDescTypeSample(tname string) interface{} {
 		return &jsArray{}
 	case "tuple":
 		return &jsArray{kind: pyTupKind}
+	case "bytes":
+		return &jsArray{kind: pyBytesKind}
+	case "bytearray":
+		return &jsArray{kind: pyBArrKind}
 	case "str":
 		return ""
 	case "set":
@@ -306,6 +310,10 @@ func (rt *jsrt) pyModuleFn(mod *jsObject, name string) interface{} {
 func (rt *jsrt) pyModuleAttr(mod *jsObject, name string) (interface{}, bool) {
 	if v, has := mod.props[name]; has {
 		return v, true
+	}
+	// Every module names itself.
+	if name == "__name__" {
+		return mod.props["__pymod"], true
 	}
 	if pyModHas(rt.toString(mod.props["__pymod"]), name) {
 		return rt.pyModuleFn(mod, name), true

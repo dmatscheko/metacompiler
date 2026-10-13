@@ -6147,6 +6147,72 @@ def s118():
           and b"x" in bs[0] + b"x" and 97 in bs[0] and "café".encode() == b"caf\xc3\xa9" and b"\x01\xab".hex() == "01ab"
           and bytes.fromhex("01 ab") == b"\x01\xab" and b"%d-%s" % (5, b"z") == b"5-z")
 
+# ===== SECTION 119: module names, a type's own methods, the bytes dunders and methods =====
+# Every module answers __name__. dict.fromkeys and the other methods a builtin
+# type object carries refuse keywords (int.from_bytes alone takes them), called
+# or read as a value. bytes and bytearray answer their dunders like list does;
+# splitlines breaks at \n \r \r\n only; translate/maketrans, hex(sep),
+# decode(errors=) and bytes % follow CPython's per-conversion rules. Rows from
+# CPython 3.14.
+def S119err(f):
+    try:
+        f()
+    except Exception as e:
+        return type(e).__name__ + ": " + str(e)
+    return "no error"
+
+class S119B:
+    def __bytes__(self):
+        return b"BB"
+
+def s119():
+    import math
+    import collections
+    mods = [math, sys, collections]
+    check("mod1", [m.__name__ for m in mods] == ["math", "sys", "collections"] and hasattr(math, "__name__")
+          and getattr(sys, "__name__") == "sys")
+    fk = dict.fromkeys
+    check("tkw1", S119err(lambda: dict.fromkeys("ab", value=1)) == "TypeError: dict.fromkeys() takes no keyword arguments"
+          and S119err(lambda: fk("ab", value=1)) == "TypeError: dict.fromkeys() takes no keyword arguments"
+          and fk("ab", {}) == {"a": {}, "b": {}} and fk.__qualname__ == "dict.fromkeys")
+    fb = int.from_bytes
+    check("tkw2", S119err(lambda: float.fromhex("1", x=1)) == "TypeError: float.fromhex() takes no keyword arguments"
+          and S119err(lambda: bytes.fromhex("01", x=1)) == "TypeError: bytes.fromhex() takes no keyword arguments"
+          and fb(b"\x01\x00", byteorder="little") == 1 and fb(b"\xff", "big", signed=True) == -1
+          and S119err(lambda: int.from_bytes(b"\x01", x=1)) == "TypeError: from_bytes() got an unexpected keyword argument 'x'")
+    ba = bytearray(b"abcdef")
+    ba.__delitem__(0)
+    ba.__setitem__(0, 65)
+    bs = [b"a", b"b", bytearray(b"a")]
+    check("bdun1", ba == b"Acdef" and ba.__getitem__(1) == 99 and ba.__len__() == 5 and ba.__contains__(99)
+          and S119err(lambda: ba.__setitem__(0, 300)) == "ValueError: byte must be in range(0, 256)"
+          and S119err(lambda: bs[0].__delitem__(0)) == "AttributeError: 'bytes' object has no attribute '__delitem__'"
+          and hasattr(ba, "__delitem__") and not hasattr(bs[0], "__setitem__") and not hasattr(ba, "__reversed__"))
+    check("bdun2", bs[0].__add__(bs[1]) == b"ab" and bs[0].__mul__(3) == b"aaa" and bs[0].__rmul__(2) == b"aa"
+          and bs[0].__eq__(bs[2]) is NotImplemented and bs[0].__lt__(bs[1]) and bytearray.__hash__ is None
+          and bs[0].__hash__() == hash(b"a") and bytes.__len__(b"abc") == 3 and "%d".__rmod__(3) is NotImplemented
+          and S119err(lambda: bs[0].__add__([1])) == "TypeError: can't concat list to bytes")
+    tb = bytes.maketrans(b"abc", b"xyz")
+    ls = [b"a\nb\r\nc", b"d\x0be\x0cf\x1cg\r\r\n"]
+    check("bmeth1", ls[0].splitlines() == [b"a", b"b", b"c"] and ls[1].splitlines(keepends=True) == [b"d\x0be\x0cf\x1cg\r", b"\r\n"]
+          and bytearray(b"a\nb").splitlines() == [bytearray(b"a"), bytearray(b"b")]
+          and len(tb) == 256 and tb[97:100] == b"xyz" and b"abcabc".translate(tb, b"b") == b"xzxz"
+          and bytearray(b"abc").translate(None, b"ac") == bytearray(b"b")
+          and S119err(lambda: b"a".translate(b"x")) == "ValueError: translation table must be 256 characters long")
+    hb = b"\x01\x02\x03\x04\x05"
+    check("bmeth2", hb.hex(":") == "01:02:03:04:05" and hb.hex(":", 2) == "01:0203:0405" and hb.hex(b"-", -2) == "0102-0304-05"
+          and hb.hex(sep="|", bytes_per_sep=9) == "0102030405" and S119err(lambda: hb.hex("::")) == "ValueError: sep must be length 1.")
+    ds = [b"a\xe2\x82b", b"\xf0\x9f\x98"]
+    check("bdec1", [d.decode("utf-8", "replace") for d in ds] == ["a�b", "�"]
+          and ds[0].decode(errors="ignore") == "ab" and ds[0].decode("ascii", "backslashreplace") == "a\\xe2\\x82b"
+          and str(ds[1], "utf-8", "backslashreplace") == "\\xf0\\x9f\\x98" and b"ok".decode("utf-8", "bogus") == "ok"
+          and S119err(lambda: ds[0].decode("utf-8", "bogus")) == "LookupError: unknown error handler name 'bogus'")
+    pa = [5, b"x", "\xe9", 200]
+    check("bpct1", S119err(lambda: b"%s" % pa[0]) == "TypeError: %b requires a bytes-like object, or an object that implements __bytes__, not 'int'"
+          and b"%r|%a" % (pa[1], pa[2]) == b"b'x'|'\\xe9'" and b"%c%c" % (pa[3], pa[1]) == b"\xc8x" and b"%b" % pa[1] == b"x"
+          and b"%s" % S119B() == b"BB" and b"%(k)s" % {b"k": b"v"} == b"v" and b"%5.2r|" % pa[1] == b"   b'|"
+          and S119err(lambda: b"" % pa[1]) == "TypeError: not all arguments converted during bytes formatting")
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -6263,5 +6329,6 @@ def main():
     s116() # SECTION-CALL 116
     s117() # SECTION-CALL 117
     s118() # SECTION-CALL 118
+    s119() # SECTION-CALL 119
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

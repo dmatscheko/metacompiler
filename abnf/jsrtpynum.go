@@ -145,10 +145,11 @@ func (rt *jsrt) pyByteOrder(v interface{}) bool {
 // as a value and called, a builtin receives its keyword dict as a trailing
 // positional (pyBindCallR); byteorder is a str, so a trailing dict is the dict.
 func (rt *jsrt) pyIntFromBytes(args []interface{}, kw interface{}) interface{} {
-	if len(args) >= 2 {
-		if _, _, isDict := dictParts(args[len(args)-1]); isDict {
-			kw = args[len(args)-1]
-			args = args[:len(args)-1]
+	if keys, _, ok := dictParts(kw); ok {
+		for _, k := range keys.elems {
+			if kn := rt.toString(k); kn != "bytes" && kn != "byteorder" && kn != "signed" {
+				rt.pyRaise("TypeError", "from_bytes() got an unexpected keyword argument '"+kn+"'")
+			}
 		}
 	}
 	bs := pyArgOrKw(rt, args, 0, kw, "bytes")

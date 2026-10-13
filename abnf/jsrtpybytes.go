@@ -3,6 +3,7 @@ package abnf
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 // Python's bytes and bytearray: arrays of byte values carrying kind 17 and 18,
@@ -229,26 +230,175 @@ func (rt *jsrt) pyExcArg0(exc interface{}) interface{} {
 	return jsUndef
 }
 
-// pyBytesPctArgs is the right operand of bytes % args with each bytes-like
-// value as the str formatting sees it; a str has no place in bytes.
-func (rt *jsrt) pyBytesPctArgs(r interface{}) interface{} {
-	one := func(v interface{}) interface{} {
+// pyBytesPctArg is one argument of bytes % args for conversion typ, as the str
+// formatter then sees it: %s and %b take a bytes-like value or an object with
+// __bytes__, %r and %a the ascii() of any value, %c an int in range(256) or a
+// single byte; a number conversion takes the value as it is. Twin of
+// pyBytesPctArg in languages/python-interpreter.abnf and lib/python-rt.metajs.
+func (rt *jsrt) pyBytesPctArg(v interface{}, typ byte) interface{} {
+	switch typ {
+	case 'r', 'a':
+		return rt.pyExt("js_pyascii", v)
+	case 's', 'b':
 		if a, ok := v.(*jsArray); ok && pyIsBytes(a) {
 			return pyBytesToS(a)
 		}
-		if _, isStr := v.(string); isStr {
-			rt.pyRaise("TypeError", "%b requires a bytes-like object, or an object that implements __bytes__, not 'str'")
+		if _, cls, ok := pyInstance(v); ok {
+			if f, found := pyLookup(cls, "__bytes__"); found {
+				if a, ok := rt.call(f, jsUndef, []interface{}{v}).(*jsArray); ok && pyIsBytes(a) {
+					return pyBytesToS(a)
+				}
+			}
 		}
-		return v
-	}
-	if t, ok := r.(*jsArray); ok && t.kind == pyTupKind {
-		out := &jsArray{kind: pyTupKind}
-		for _, e := range t.elems {
-			out.elems = append(out.elems, one(e))
+		rt.pyRaise("TypeError", "%b requires a bytes-like object, or an object that implements __bytes__, not '"+
+			pyTypeName(rt, v)+"'")
+	case 'c':
+		cn := "%c requires an integer in range(256) or a single byte, not "
+		if a, ok := v.(*jsArray); ok && pyIsBytes(a) {
+			if len(a.elems) != 1 {
+				rt.pyRaise("TypeError", fmt.Sprintf("%sa bytes object of length %d", cn, len(a.elems)))
+			}
+			return pyBytesToS(a)
 		}
-		return out
+		if pyNumTypeName(v) != "int" {
+			rt.pyRaise("TypeError", cn+pyTypeName(rt, v))
+		}
+		n, isNum := v.(float64)
+		if b, isBool := v.(bool); isBool {
+			n, isNum = 0, true
+			if b {
+				n = 1
+			}
+		}
+		if !isNum || n < 0 || n > 255 {
+			rt.pyRaise("OverflowError", "%c arg not in range(256)")
+		}
+		return pyBytesToS(&jsArray{elems: []interface{}{n}})
 	}
-	return one(r)
+	return v
+}
+
+// pyBytesHexSep is b.hex(sep, per): a separator between every |per| bytes, the
+// groups counted from the right for a positive per and from the left for a
+// negative one; sep is one ASCII character, as a str or as bytes.
+func (rt *jsrt) pyBytesHexSep(a *jsArray, sep interface{}, per int) string {
+	ss := ""
+	switch s := sep.(type) {
+	case string:
+		ss = s
+	case *jsArray:
+		if !pyIsBytes(s) {
+			rt.pyRaise("TypeError", "object of type '"+pyTypeName(rt, sep)+"' has no len()")
+		}
+		ss = pyBytesToS(s)
+	default:
+		rt.pyRaise("TypeError", "object of type '"+pyTypeName(rt, sep)+"' has no len()")
+	}
+	if utf8.RuneCountInString(ss) != 1 {
+		rt.pyRaise("ValueError", "sep must be length 1.")
+	}
+	if ss[0] > 127 {
+		rt.pyRaise("ValueError", "sep must be ASCII.")
+	}
+	h := pyBytesHex(a)
+	if per == 0 {
+		return h
+	}
+	g, n := per, len(a.elems)
+	if g < 0 {
+		g = -g
+	}
+	var sb strings.Builder
+	for i := 0; i < n; i++ {
+		if i > 0 && ((per > 0 && (n-i)%g == 0) || (per < 0 && i%g == 0)) {
+			sb.WriteString(ss)
+		}
+		sb.WriteString(h[2*i : 2*i+2])
+	}
+	return sb.String()
+}
+
+// pyBytesSplitLines is b.splitlines(keepends): lines end at \n, \r or \r\n
+// only - not at the \v, \f and \x1c..\x1e str also breaks at.
+func pyBytesSplitLines(b *jsArray, keep bool) *jsArray {
+	out := &jsArray{}
+	st := 0
+	for i := 0; i < len(b.elems); {
+		c := pyByteOf(b.elems[i])
+		if c != '\n' && c != '\r' {
+			i++
+			continue
+		}
+		e := i + 1
+		if c == '\r' && e < len(b.elems) && pyByteOf(b.elems[e]) == '\n' {
+			e++
+		}
+		end := i
+		if keep {
+			end = e
+		}
+		out.elems = append(out.elems, &jsArray{kind: b.kind, elems: append([]interface{}{}, b.elems[st:end]...)})
+		st, i = e, e
+	}
+	if st < len(b.elems) {
+		out.elems = append(out.elems, &jsArray{kind: b.kind, elems: append([]interface{}{}, b.elems[st:]...)})
+	}
+	return out
+}
+
+// pyBytesLike is a bytes-like argument (bytes or a bytearray), else CPython's
+// TypeError.
+func (rt *jsrt) pyBytesLike(v interface{}) *jsArray {
+	if a, ok := v.(*jsArray); ok && pyIsBytes(a) {
+		return a
+	}
+	rt.pyRaise("TypeError", "a bytes-like object is required, not '"+pyTypeName(rt, v)+"'")
+	return nil
+}
+
+// pyBytesTranslate is b.translate(table, delete): each byte not in delete
+// mapped through the 256-byte table, or kept as it is when the table is None.
+func (rt *jsrt) pyBytesTranslate(b *jsArray, table interface{}, del *jsArray) *jsArray {
+	var tab *jsArray
+	if !isUndefOrNull(table) {
+		if tab = rt.pyBytesLike(table); len(tab.elems) != 256 {
+			rt.pyRaise("ValueError", "translation table must be 256 characters long")
+		}
+	}
+	var gone [256]bool
+	for _, d := range del.elems {
+		gone[pyByteOf(d)] = true
+	}
+	out := &jsArray{kind: b.kind}
+	for _, e := range b.elems {
+		c := pyByteOf(e)
+		if gone[c] {
+			continue
+		}
+		if tab != nil {
+			e = tab.elems[c]
+		}
+		out.elems = append(out.elems, e)
+	}
+	return out
+}
+
+// pyBytesMakeTrans is bytes.maketrans(from, to): the 256-byte table
+// translate() reads, mapping each byte of from to the byte of to at the same
+// position.
+func (rt *jsrt) pyBytesMakeTrans(frm, to interface{}) *jsArray {
+	f, t := rt.pyBytesLike(frm), rt.pyBytesLike(to)
+	if len(f.elems) != len(t.elems) {
+		rt.pyRaise("ValueError", "maketrans arguments must have same length")
+	}
+	out := &jsArray{kind: pyBytesKind, elems: make([]interface{}, 256)}
+	for i := range out.elems {
+		out.elems[i] = float64(i)
+	}
+	for i, c := range f.elems {
+		out.elems[pyByteOf(c)] = t.elems[i]
+	}
+	return out
 }
 
 // pyBytesHex is b.hex(): two lowercase hex digits a byte.
@@ -317,7 +467,11 @@ func pyBArrMutator(name string) bool {
 
 // pyIsBytesMethod is the method name set of bytes (kind 17) or a bytearray.
 func pyIsBytesMethod(name string, kind int) bool {
-	return name == "decode" || name == "hex" || pyBytesStrMethod(name) || (kind == pyBArrKind && pyBArrMutator(name))
+	switch name {
+	case "decode", "hex", "splitlines", "translate", "maketrans":
+		return true
+	}
+	return pyBytesStrMethod(name) || (kind == pyBArrKind && pyBArrMutator(name))
 }
 
 // pyBytesArgS is one argument of a str-delegated bytes method, as the str
@@ -388,9 +542,40 @@ func (rt *jsrt) pyBytesMethod(b *jsArray, name string, args []interface{}, kw in
 		if hasKw {
 			args = rt.pyKwPos("decode", args, kw, []string{"encoding", "errors"}, 0)
 		}
-		return rt.pyBytesDecode(b.elems, argAt(args, 0))
+		if de := argAt(args, 1); de != jsUndef {
+			if _, isStr := de.(string); !isStr {
+				rt.pyRaise("TypeError", "decode() argument 'errors' must be str, not "+pyTypeName(rt, de))
+			}
+		}
+		return rt.pyBytesDecode(b.elems, argAt(args, 0), argAt(args, 1))
 	case name == "hex":
-		return pyBytesHex(b)
+		if hasKw {
+			args = rt.pyKwPos("hex", args, kw, []string{"sep", "bytes_per_sep"}, 0)
+		}
+		if len(args) == 0 {
+			return pyBytesHex(b)
+		}
+		per := 1
+		if len(args) > 1 {
+			per = int(rt.toNumber(args[1]))
+		}
+		return rt.pyBytesHexSep(b, args[0], per)
+	case name == "splitlines":
+		if hasKw {
+			args = rt.pyKwPos("splitlines", args, kw, []string{"keepends"}, 0)
+		}
+		return pyBytesSplitLines(b, rt.pyTruthyOf(argAt(args, 0)))
+	case name == "translate":
+		if hasKw {
+			args = rt.pyKwPos("translate", args, kw, []string{"table", "delete"}, 1)
+		}
+		del := &jsArray{}
+		if len(args) > 1 {
+			del = rt.pyBytesLike(args[1])
+		}
+		return rt.pyBytesTranslate(b, argAt(args, 0), del)
+	case name == "maketrans":
+		return rt.pyBytesMakeTrans(argAt(args, 0), argAt(args, 1))
 	case b.kind == pyBArrKind && pyBArrMutator(name):
 		switch name {
 		case "append":
@@ -444,6 +629,9 @@ func (rt *jsrt) pyBytesMethod(b *jsArray, name string, args []interface{}, kw in
 			return at
 		}
 		return pyBytesBack(rt.pyExt("js_pymcall", s, name, &jsArray{elems: sa}, skw), b.kind)
+	}
+	if d, ok := pyValDunder(b, name); ok {
+		return rt.call(d, jsUndef, append([]interface{}{b}, args...))
 	}
 	rt.pyRaise("AttributeError", "'"+pySeqTName(b)+"' object has no attribute '"+name+"'")
 	return nil
