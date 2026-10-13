@@ -3505,6 +3505,10 @@ func (rt *jsrt) dictKeyEq(a, b interface{}) bool {
 				return pyUnionEq(ua, ub)
 			}
 		}
+		// A slice key, by its bounds.
+		if _, isA := pySliceParts(a); isA {
+			return rt.pyEqual(a, b)
+		}
 	}
 	// GO: a struct or array key compares BY VALUE (goValueEq), because both are
 	// value types and Go's == on them is element-by-element. Neither is
@@ -3940,6 +3944,9 @@ func (rt *jsrt) pyString(v interface{}) string {
 		// here takes the built-in spelling.
 		if mod, isMod := pyIsModule(t); isMod {
 			return "<module '" + rt.toString(mod.props["__pymod"]) + "' (built-in)>"
+		}
+		if sl, isSl := pySliceParts(t); isSl {
+			return "slice(" + rt.pyRepr(sl[0]) + ", " + rt.pyRepr(sl[1]) + ", " + rt.pyRepr(sl[2]) + ")"
 		}
 		if c, ok := t.props["__pyconst"].(string); ok {
 			return c
@@ -15066,6 +15073,12 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 					return 0
 				}
 			}
+			if sl, isSl := pySliceParts(u(a[1])); isSl {
+				if _, isArr := u(a[0]).(*jsArray); isArr {
+					rt.pyExt("js_pysetslice", u(a[0]), sl[0], sl[1], sl[2], u(a[2]))
+					return 0
+				}
+			}
 			if keys, vals, ok := dictParts(u(a[0])); ok {
 				if i := rt.goMapKeyIdx(u(a[0]), keys, u(a[1]), true); i >= 0 {
 					vals.elems[i] = u(a[2])
@@ -16228,7 +16241,12 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// undefined and mean what Python's defaults mean for the DIRECTION of the step,
 		// so xs[::-1] is the reversal.
 		"js_pyslice3": func(a []uint64) uint64 { // (sequence, lo, hi, step)
-			switch o := pyUnwrapBuiltin(u(a[0])).(type) { // A builtin subclass slices its value.
+			// An instance's __getitem__ receives the slice object, CPython's
+			// subscript; a builtin subclass's (the delegate) slices its value.
+			if _, _, isInst := pyInstance(u(a[0])); isInst {
+				return pyExternMaps[rt]["js_pyidx"]([]uint64{a[0], w(pySliceOf(u(a[1]), u(a[2]), u(a[3])))})
+			}
+			switch o := u(a[0]).(type) {
 			case *jsArray:
 				idx := rt.pySliceIndices(len(o.elems), u(a[1]), u(a[2]), u(a[3]))
 				out := &jsArray{}
@@ -16251,10 +16269,14 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// different length, so xs[1:3] = [9] shortens the list); an extended step
 		// assigns element by element and needs exactly as many values as it selects.
 		"js_pysetslice": func(a []uint64) uint64 { // (list, lo, hi, step, values)
-			arr, isArr := pyUnwrapBuiltin(u(a[0])).(*jsArray)
-			if !isArr {
-				rt.fail("slice assignment to a %s", rt.typeOf(u(a[0])))
+			// An instance's __setitem__ receives the slice object.
+			if _, _, isInst := pyInstance(u(a[0])); isInst {
+				rt.pyExt("js_pyset", u(a[0]), pySliceOf(u(a[1]), u(a[2]), u(a[3])), u(a[4]))
 				return 0
+			}
+			arr, isArr := u(a[0]).(*jsArray)
+			if !isArr {
+				rt.pyNoItemOp(u(a[0]), false)
 			}
 			if arr.kind == pyTupKind || arr.kind == pyBytesKind {
 				rt.pyNoItemOp(arr, false)
@@ -16293,10 +16315,14 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		},
 		// del xs[lo:hi:step]: drop every selected element.
 		"js_pydelslice": func(a []uint64) uint64 { // (list, lo, hi, step)
-			arr, isArr := pyUnwrapBuiltin(u(a[0])).(*jsArray)
-			if !isArr {
-				rt.fail("deleting a slice of a %s", rt.typeOf(u(a[0])))
+			// An instance's __delitem__ receives the slice object.
+			if _, _, isInst := pyInstance(u(a[0])); isInst {
+				rt.pyExt("js_pydel_item", u(a[0]), pySliceOf(u(a[1]), u(a[2]), u(a[3])))
 				return 0
+			}
+			arr, isArr := u(a[0]).(*jsArray)
+			if !isArr {
+				rt.pyNoItemOp(u(a[0]), true)
 			}
 			if arr.kind == pyTupKind || arr.kind == pyBytesKind {
 				rt.pyNoSliceDel(arr)
@@ -16739,6 +16765,12 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if _, cls, isInst := pyInstance(u(a[0])); isInst { // A user class may define __delitem__.
 				if m, found := pyLookup(cls, "__delitem__"); found && isCallable(m) {
 					rt.call(m, jsUndef, []interface{}{u(a[0]), u(a[1])})
+					return 0
+				}
+			}
+			if sl, isSl := pySliceParts(u(a[1])); isSl {
+				if _, isArr := u(a[0]).(*jsArray); isArr {
+					rt.pyExt("js_pydelslice", u(a[0]), sl[0], sl[1], sl[2])
 					return 0
 				}
 			}
@@ -18759,6 +18791,10 @@ func pyFloDigits(f float64) string {
 // decides where Python says it should. Cycles are not expected in this value model and
 // are not guarded against.
 func (rt *jsrt) pyEqual(x, y interface{}) bool {
+	if xs, ok := pySliceParts(x); ok {
+		ys, ok2 := pySliceParts(y)
+		return ok2 && rt.pyEqual(&jsArray{elems: xs}, &jsArray{elems: ys})
+	}
 	if pyIsDView(x) {
 		return rt.pyDViewEq(x, y)
 	}
@@ -20323,6 +20359,9 @@ func (rt *jsrt) pyGetAttrRaw(obj interface{}, name string) interface{} {
 	if u, ok := pyUnionOf(obj); ok && name == "__args__" {
 		return pyTup(&jsArray{elems: append([]interface{}{}, u.elems...)})
 	}
+	if sl, ok := pySliceParts(obj); ok && pySliceField(name) >= 0 {
+		return sl[pySliceField(name)]
+	}
 	if inst, cls, ok := pyInstance(obj); ok {
 		switch name {
 		case "__class__":
@@ -21256,6 +21295,9 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 	if arr, isArr := target.(*jsArray); isArr && pyIsBytes(arr) {
 		return rt.pyBytesMethod(arr, name, args, kw)
 	}
+	if sl, isSl := pySliceParts(target); isSl && name == "indices" {
+		return rt.pySliceIndicesOf(sl, argAt(args, 0))
+	}
 	if arr, isArr := target.(*jsArray); isArr && pyIsListMethod(name) {
 		if arr.kind != pyTupKind || pyIsTupleMethod(name) {
 			return rt.pyListMethod(arr, name, args, kw)
@@ -22030,6 +22072,9 @@ func (rt *jsrt) pyBuiltinAttr(target interface{}, name string) bool {
 	if _, isStr := target.(string); isStr {
 		return pysIsStrMethod(name)
 	}
+	if _, isSl := pySliceParts(target); isSl {
+		return name == "indices"
+	}
 	if arr, isArr := target.(*jsArray); isArr {
 		if pyIsBytes(arr) {
 			return pyIsBytesMethod(name, arr.kind)
@@ -22765,6 +22810,9 @@ func (rt *jsrt) pyHasAttrRaw(obj interface{}, name string) bool {
 	if name == "__class__" || rt.pyBuiltinAttr(obj, name) || pyValDunderAttr(obj, name) || (name == "__hash__" && pyValHashNone(obj)) {
 		return true
 	}
+	if _, ok := pySliceParts(obj); ok && pySliceField(name) >= 0 {
+		return true
+	}
 	if _, ok := pyNumAttr(obj, name); ok {
 		return true
 	}
@@ -23128,6 +23176,9 @@ func pyTypeName(rt *jsrt, v interface{}) string {
 		}
 		if _, isMod := t.props["__pymod"]; isMod {
 			return "module"
+		}
+		if _, isSl := pySliceParts(t); isSl {
+			return "slice"
 		}
 		if _, isU := pyUnionOf(t); isU {
 			return "typing.Union"

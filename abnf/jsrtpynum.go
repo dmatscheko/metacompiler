@@ -446,8 +446,9 @@ func pyHashFloat(v float64) uint64 {
 	return pyHashFix(x)
 }
 
-// pyHashTuple is tuplehash: xxHash's round over the items' hashes.
-func pyHashTuple(lanes []uint64) uint64 {
+// pyHashTuple is tuplehash: xxHash's round over the items' hashes, then the
+// length; slice_hash (slice) is the same rounds without the length.
+func pyHashTuple(lanes []uint64, slice bool) uint64 {
 	const p1, p2, p5 = 11400714785074694791, 14029467366897019727, 2870177450012600261
 	acc := uint64(p5)
 	for _, l := range lanes {
@@ -455,7 +456,9 @@ func pyHashTuple(lanes []uint64) uint64 {
 		acc = acc<<31 | acc>>33
 		acc *= p1
 	}
-	acc += uint64(len(lanes)) ^ (p5 ^ 3527539)
+	if !slice {
+		acc += uint64(len(lanes)) ^ (p5 ^ 3527539)
+	}
 	if acc == ^uint64(0) {
 		return 1546275796
 	}
@@ -523,7 +526,10 @@ func (rt *jsrt) pyHashW(v interface{}) uint64 {
 		for i, e := range arr.elems {
 			lanes[i] = rt.pyHashW(e)
 		}
-		return pyHashTuple(lanes)
+		return pyHashTuple(lanes, false)
+	}
+	if sl, ok := pySliceParts(v); ok {
+		return pyHashTuple([]uint64{rt.pyHashW(sl[0]), rt.pyHashW(sl[1]), rt.pyHashW(sl[2])}, true)
 	}
 	if els, ok := pySetElems(v); ok && pySetFrozen(v) {
 		lanes := make([]uint64, len(els.elems))

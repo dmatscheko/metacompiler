@@ -1240,7 +1240,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // isinstance(x, str), type(x) is Dog and the class patterns of `match` all go
     // through the same machinery.
     var pyTypeNames = ["object", "type", "str", "int", "float", "bool", "list", "tuple",
-                       "dict", "set", "frozenset", "bytes", "bytearray", "function", "NoneType", "complex", "property"]
+                       "dict", "set", "frozenset", "bytes", "bytearray", "function", "NoneType", "complex", "property", "slice"]
     for (var pti = 0; pti < pyTypeNames.length; pti++) {
         hostGlobals[pyTypeNames[pti]] = {__isclass: true, __name: pyTypeNames[pti], __bases: [], __builtin: true}
     }
@@ -1341,6 +1341,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (v.__pyunion !== undefined) { return pyBuiltinTypeObj("typing.Union") }
         if (v.__genalias === true) { return pyBuiltinTypeObj("types.GenericAlias") }
         if (v.__pyconst !== undefined) { return pyBuiltinTypeObj(v.__pyconst == "Ellipsis" ? "ellipsis" : v.__pyconst + "Type") }
+        if (isSlice(v)) { return hostGlobals["slice"] }
         return hostGlobals["object"]
     }
     // X | Y over type objects and None is CPython's typing.Union, here
@@ -1554,6 +1555,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 pyListErr("TypeError", "object() takes no arguments")
             }
             return {__class: hostGlobals["object"]}
+        }
+        if (name == "slice") {
+            if (named != null && named.keys.length > 0) { pyListErr("TypeError", "slice() takes no keyword arguments") }
+            return pySliceNew(args)
         }
         if (name == "property") {
             var pa = named != null ? pyKwPos("property", args, named, ["fget", "fset", "fdel", "doc"], 0) : args
@@ -2021,6 +2026,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var lanes = []
             for (var j = 0; j < v.length; j++) { lanes.push(pyHashW(v[j])) }
             return pynHashTuple(lanes)
+        }
+        if (isSlice(v)) {
+            var sb = v.__pyslice
+            return pynHashSlice([pyHashW(sb[0]), pyHashW(sb[1]), pyHashW(sb[2])])
         }
         // bytes hash like the str of the same code units, as CPython's do.
         if (arrKind(v) == 17) { return pynHashUnits(v.slice(0)) }
@@ -2824,6 +2833,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // The BUILT-IN methods of str / list / dict / set, and
         // __class__, which EVERY value has (None.__class__ is NoneType).
         if (name == "__class__") { return true }
+        if (isSlice(o) && pySliceField(name) >= 0) { return true }
         if (pyBuiltinAttr(o, name) || pyValDunder(o, name) != null) { return true }
         if (name == "__hash__" && pyValHashNone(o)) { return true }
         if (pyNumAttr(o, name) !== undefined) { return true }
@@ -2867,6 +2877,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // is hasattr answering True for a call that then aborts.
     function pyBuiltinAttr(o, name) {
         if (typeof o == "string") { return pySIsStrMethod(name) }
+        if (isSlice(o)) { return name == "indices" }
         if (isBytes(o)) { return pyIsBytesMethod(name, arrKind(o)) }
         if (Array.isArray(o)) { return isTup(o) ? pyIsTupleMethod(name) : pyIsListMethod(name) }
         // A set is a dict whose keys are its members, so it is asked FIRST.
@@ -3326,6 +3337,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // A frozenset key, by its members.
         if (isSet(a) && isSet(b)) { return pyEq(a, b) }
         if (pyIsUnion(a) && pyIsUnion(b)) { return pyUnionEq(a.__pyunion, b.__pyunion) }
+        // A slice key, by its bounds.
+        if (isSlice(a) && isSlice(b)) { return pyEq(a, b) }
         if (!pyNumeric(a) || !pyNumeric(b)) { return false }
         return floVal(a) == floVal(b)
     }
@@ -3389,6 +3402,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (pyIsUnion(a) && pyIsUnion(b)) { return pyUnionEq(a.__pyunion, b.__pyunion) }
         if (a === null || a === undefined || b === null || b === undefined) { return false }
+        if (isSlice(a) && isSlice(b)) { return pyEq(a.__pyslice, b.__pyslice) }
         if (isView(a)) { return pyViewEq(a, b) }
         if (isView(b)) { return pyViewEq(b, a) }
         if (Array.isArray(a) && Array.isArray(b)) {
@@ -3639,6 +3653,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return "<function " + (fnQual(v) !== undefined ? fnQual(v) : fnName(v)) + ">"
         }
         if (typeof v == "object" && v.__pyconst !== undefined) { return v.__pyconst }
+        if (isSlice(v)) {
+            var sb = v.__pyslice
+            return "slice(" + prepr(sb[0]) + ", " + prepr(sb[1]) + ", " + prepr(sb[2]) + ")"
+        }
         return "" + v
     }
     // A user object renders through its dunders, else like Python's default
@@ -4169,6 +4187,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var di = dictFind(o, i)
             if (di < 0) { pyRaise(pyMakeExc("KeyError", [i])) }
             return o.vals[di]
+        }
+        if (isSlice(i) && (typeof o == "string" || Array.isArray(o))) {
+            return pySliceStep(o, i.__pyslice[0], i.__pyslice[1], i.__pyslice[2])
         }
         // A key is a typed local in MetaJS, so the position gets its own: a bool
         // key would otherwise pin it to boolean.
@@ -6356,6 +6377,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             fail("unknown generator method: " + name)
         }
         if (isBytes(target)) { return pyBytesMethod(target, name, args, kw) }
+        if (isSlice(target) && name == "indices") { return pySliceIndices(target, pyArgAt(args, 0)) }
         if (Array.isArray(target)) {
             // THE WHOLE LIST METHOD SURFACE. The twins are pyListMethod in
             // abnf/jsrt.go and pyListMethod in languages/lib/python-rt.metajs.
@@ -10781,11 +10803,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // items = [{sitem} | {sslice}...] -> the TUPLE a mixed subscript indexes with.
     // `d[1:2, 1:2]` is one key in CPython too: a tuple whose sliced entries are slice
-    // objects. This value model has no slice type, so a sliced entry is the three-element
-    // tuple (start, stop, step) with None for an omitted bound. That is enough to store
-    // through such a subscript, read
-    // it back and pull the bounds apart; it is NOT a CPython slice object (it has no
-    // .start / .stop / .step attributes and no indices() method).
+    // objects.
     function makeSubTuple(items) {
         return function() {
             var a = []
@@ -10793,15 +10811,66 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var it = items[i]
                 if (it.sslice != undefined) {
                     var sl = it.sslice
-                    var one = []
-                    one.push(sl.lo != null ? sl.lo() : null)
-                    one.push(sl.hi != null ? sl.hi() : null)
-                    one.push(sl.step != null ? sl.step() : null)
-                    a.push(pyTup(one))
+                    a.push(pySliceOf(sl.lo != null ? sl.lo() : undefined, sl.hi != null ? sl.hi() : undefined,
+                                     sl.step != null ? sl.step() : undefined))
                 } else { a.push(it.sitem()) }
             }
             return pyTup(a)
         }
+    }
+    // ----- slice objects ---------------------------------------------------------
+    //
+    // slice(stop) / slice(start, stop[, step]) is {__pyslice: [start, stop, step]},
+    // an omitted bound None. Subscripting a sequence with one is slicing it, and the
+    // slice syntax hands one to an instance's __getitem__, __setitem__ and
+    // __delitem__. Twin of rt.pySliceNew in abnf/jsrtpysub.go and pySliceNew in
+    // lib/python-rt.metajs.
+    function pySliceOf(lo, hi, st) { return {__pyslice: [lo, hi, st]} }
+    function isSlice(v) { return v !== null && v !== undefined && typeof v == "object" && v.__pyslice !== undefined }
+    function pySliceNew(args) {
+        if (args.length == 0) { pyListErr("TypeError", "slice expected at least 1 argument, got 0") }
+        if (args.length > 3) { pyListErr("TypeError", "slice expected at most 3 arguments, got " + args.length) }
+        if (args.length == 1) { return pySliceOf(undefined, args[0], undefined) }
+        return pySliceOf(args[0], args[1], args.length > 2 ? args[2] : undefined)
+    }
+    // The bound an attribute name reads, or -1.
+    function pySliceField(name) {
+        if (name == "start") { return 0 }
+        if (name == "stop") { return 1 }
+        if (name == "step") { return 2 }
+        return -1
+    }
+    // s.indices(n): (start, stop, step) clamped to a sequence of length n,
+    // CPython's PySlice_GetIndicesEx.
+    function pySliceIndices(s, nv) {
+        if (typeof nv != "number" && typeof nv != "boolean") {
+            pyListErr("TypeError", "'" + pyTypeOf(nv).__name + "' object cannot be interpreted as an integer")
+        }
+        var n = floVal(nv)
+        if (n < 0) { pyListErr("ValueError", "length should not be negative") }
+        var b = s.__pyslice
+        var step = 1
+        if (b[2] !== undefined && b[2] !== null) { step = pySliceInt(b[2]) }
+        if (step == 0) { pyListErr("ValueError", "slice step cannot be zero") }
+        var lower = step < 0 ? -1 : 0
+        var upper = step < 0 ? n - 1 : n
+        return pyTup([pySliceBound(b[0], n, lower, upper, step < 0 ? upper : lower),
+                      pySliceBound(b[1], n, lower, upper, step < 0 ? lower : upper), step])
+    }
+    function pySliceBound(v, n, lower, upper, dflt) {
+        if (v === undefined || v === null) { return dflt }
+        var x = pySliceInt(v)
+        if (x < 0) {
+            x = x + n
+            if (x < lower) { x = lower }
+        } else if (x > upper) { x = upper }
+        return x
+    }
+    function pySliceInt(v) {
+        if (typeof v != "number" && typeof v != "boolean") {
+            pyListErr("TypeError", "slice indices must be integers or None or have an __index__ method")
+        }
+        return floVal(v)
     }
     // The indices a slice selects, in order - Python's rules: negative bounds wrap,
     // open ends follow the direction, and a negative step walks backwards.
@@ -10822,8 +10891,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return out
     }
     function pySliceStep(o, lo, hi, st) {
-        // A subclass of a builtin type slices its value (and answers the plain type).
-        if (pyUser(o) && o.__val !== undefined) { return pySliceStep(o.__val, lo, hi, st) }
+        // An instance's __getitem__ receives the slice object, CPython's
+        // subscript; a builtin subclass's (the delegate) slices its value.
+        if (pyUser(o)) { return pyget(o, pySliceOf(lo, hi, st)) }
         if (typeof o == "string") {
             var cs = pySChars(o)
             var ixs = sliceIdx(cs.length, lo, hi, st)
@@ -11057,11 +11127,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // xs[a:b:c] = values: a contiguous slice may change length, an extended one
         // must receive exactly as many values as it selects (Python's rule).
         if (last.kind == "slice") {
-            if (pyUser(o) && o.__val !== undefined) { o = o.__val }
-            if (isTup(o) || arrKind(o) == 17) { pyNoItemOp(o, false) }
             var lo = key.lo
             var hi = key.hi
             var st = key.st
+            // An instance's __setitem__ receives the slice object.
+            if (pyUser(o)) {
+                var ss = clsFind(o.__class, "__setitem__")
+                if (ss != null) { ss(o, pySliceOf(lo, hi, st), v); return }
+                pyNoItemOp(o, false)
+            }
+            if (isTup(o) || arrKind(o) == 17 || !Array.isArray(o)) { pyNoItemOp(o, false) }
             var vals = iterToList(v)
             // xs[a:b] = xs copies the source first: the target changes under the copy.
             if (vals === o) { vals = o.slice(0) }
@@ -11088,6 +11163,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (pyUser(o)) {
             var si = clsFind(o.__class, "__setitem__")
             if (si != null) { si(o, idx, v); return }
+        }
+        if (isSlice(idx) && Array.isArray(o)) {
+            refStore(o, {kind: "slice"}, {lo: idx.__pyslice[0], hi: idx.__pyslice[1], st: idx.__pyslice[2]}, v)
+            return
         }
         if (isDict(o) && !isSet(o)) {
             dictSet(o, idx, v)
@@ -11235,20 +11314,23 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return
         }
         if (last.kind == "slice") {
-            if (pyUser(o) && o.__val !== undefined) { o = o.__val }
-            if (isTup(o) || arrKind(o) == 17) { pyNoSliceDel(o) }
-            var ix = sliceIdx(o.length, last.lo != null ? last.lo() : undefined,
-                              last.hi != null ? last.hi() : undefined,
-                              last.step != null ? last.step() : undefined)
-            var drop = newSet()
-            for (var d = 0; d < ix.length; d++) { setAdd(drop, ix[d]) }
-            var keep = []
-            for (var j = 0; j < o.length; j++) { if (dictFind(drop, j) < 0) { keep.push(o[j]) } }
-            listTruncate(o, 0)
-            for (var q = 0; q < keep.length; q++) { o.push(keep[q]) }
+            pyDelItem(o, pySliceOf(last.lo != null ? last.lo() : undefined,
+                                   last.hi != null ? last.hi() : undefined,
+                                   last.step != null ? last.step() : undefined))
             return
         }
         pyDelItem(o, last.idx())
+    }
+    // del xs[a:b:c]: every selected element dropped.
+    function pyDelSlice(o, lo, hi, st) {
+        if (isTup(o) || arrKind(o) == 17) { pyNoSliceDel(o) }
+        var ix = sliceIdx(o.length, lo, hi, st)
+        var drop = newSet()
+        for (var d = 0; d < ix.length; d++) { setAdd(drop, ix[d]) }
+        var keep = []
+        for (var j = 0; j < o.length; j++) { if (dictFind(drop, j) < 0) { keep.push(o[j]) } }
+        listTruncate(o, 0)
+        for (var q = 0; q < keep.length; q++) { o.push(keep[q]) }
     }
     // del o.name.
     function pyDelAttr(o, name, raw) {
@@ -11293,6 +11375,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (pyUser(o)) {
             var dl = clsFind(o.__class, "__delitem__")
             if (dl != null) { dl(o, idx); return }
+        }
+        if (isSlice(idx) && Array.isArray(o)) {
+            pyDelSlice(o, idx.__pyslice[0], idx.__pyslice[1], idx.__pyslice[2])
+            return
         }
         if (isDict(o) && !isSet(o)) {
             var di = dictFind(o, idx)
@@ -12337,6 +12423,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // d.keys is the method. x.__class__ is the same class object type(x)
         // hands out, so `[].__class__ is list` holds.
         if (pyIsUnion(o) && name == "__args__") { return pyTup(o.__pyunion.slice(0)) }
+        if (isSlice(o) && pySliceField(name) >= 0) { return o.__pyslice[pySliceField(name)] }
         if (o !== null && o !== undefined && typeof o == "object" && o.__genalias === true) {
             if (name == "__args__") { return pyTup(o.targs.slice(0)) }
             if (name == "__origin__") { return o.origin }

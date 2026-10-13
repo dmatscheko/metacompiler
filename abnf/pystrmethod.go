@@ -1682,6 +1682,13 @@ func init() {
 		// js_pyidx in lib/python-rt.metajs.
 		get := m["js_pyget"]
 		m["js_pyidx"] = func(a []uint64) uint64 {
+			// Subscripting a sequence with a slice object is slicing it.
+			if sl, isSl := pySliceParts(u(a[1])); isSl {
+				switch u(a[0]).(type) {
+				case string, *jsArray:
+					return m["js_pyslice3"]([]uint64{a[0], rt.wrap(sl[0]), rt.wrap(sl[1]), rt.wrap(sl[2])})
+				}
+			}
 			s, isStr := u(a[0]).(string)
 			if !isStr {
 				return get(a)

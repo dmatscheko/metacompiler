@@ -311,6 +311,8 @@ function pyKeyEq(a, b) {
         // A frozenset key, by its members; a union key likewise.
         if (pySetElemsOf(a) !== null && pySetElemsOf(b) !== null) { return pyEqual(a, b) }
         if (pyUnionOf(a) !== null && pyUnionOf(b) !== null) { return pyUnionEq(pyUnionOf(a), pyUnionOf(b)) }
+        // A slice key, by its bounds.
+        if (pyIsSlice(a) && pyIsSlice(b)) { return pyEqual(a, b) }
     }
     return false
 }
@@ -813,6 +815,10 @@ function pyStr(v) {
     // the built-in spelling. Without this a module printed [object Object].
     if (pyIsObj(v)) {
         if (v["__pymod"] !== undefined) { return "<module '" + pyToStr(v["__pymod"]) + "' (built-in)>" }
+        if (v["__pyslice"] !== undefined) {
+            var sb = v["__pyslice"]
+            return "slice(" + pyRepr(sb[0]) + ", " + pyRepr(sb[1]) + ", " + pyRepr(sb[2]) + ")"
+        }
         if (v["__pyunion"] !== undefined) { return pyUnionStr(v["__pyunion"]) }
         if (v["__galias"] !== undefined) { return pyToStr(v["__galias"]) }
     }
@@ -1105,6 +1111,7 @@ function pyTypeName(v) {
         if (v["__pycm"] !== undefined) { return "classmethod" }
         if (v["__pyprop"] !== undefined) { return "property" }
         if (v["__pymod"] !== undefined) { return "module" }
+        if (v["__pyslice"] !== undefined) { return "slice" }
         if (v["__pyunion"] !== undefined) { return "typing.Union" }
         if (v["__galias"] !== undefined) { return "types.GenericAlias" }
         // An instance of a user class is a "'C' object" in every message.
@@ -1212,6 +1219,7 @@ function pyEqual(x, y) {
         var uy = pyUnionOf(y)
         return uy !== null && pyUnionEq(x["__pyunion"], uy)
     }
+    if (pyIsSlice(x)) { return pyIsSlice(y) && pyEqual(x["__pyslice"], y["__pyslice"]) }
     // An instance on either side: its class's __eq__, as the == operator asks it,
     // so a list, tuple or dict holding one compares through it.
     if (pyInstClassOf(x) !== null || pyInstClassOf(y) !== null) {
@@ -2047,6 +2055,7 @@ function pyGetAttrRaw(obj, name) {
     // sys function becomes a first-class value the same way `re`'s constants already
     // were readable. Placed before the bound-builtin arm because a module's own
     // data slots (math.pi) must win.
+    if (pyIsSlice(obj) && pySliceField(name) >= 0) { return obj["__pyslice"][pySliceField(name)] }
     if (pyIsObj(obj)) {
         if (obj["__pymod"] !== undefined && obj[name] === undefined) {
             // Every module names itself. Twin of rt.pyModuleAttr in abnf/jsrtpydesc.go.
@@ -5603,6 +5612,10 @@ function pyHashW(v0) {
         }
         return pynHashTuple(lanes)
     }
+    if (pyIsSlice(v)) {
+        var sb = v["__pyslice"]
+        return pynHashSlice([pyHashW(sb[0]), pyHashW(sb[1]), pyHashW(sb[2])])
+    }
     if (pySetElemsOf(v) !== null && pySetFrozen(v)) {
         var fl = []
         var els = pySetElemsOf(v)
@@ -6699,6 +6712,7 @@ function pyDHasAttr(obj, name) {
     }
     // A MODULE object, mirroring pyGetAttr's module arm - hasattr(math, "sqrt")
     // has to agree with what `math.sqrt` answers.
+    if (pyIsSlice(obj) && pySliceField(name) >= 0) { return true }
     if (pyIsObj(obj)) {
         if (obj["__pymod"] !== undefined) {
             if (obj[name] !== undefined || name == "__name__") { return true }
@@ -7836,6 +7850,13 @@ function js_pyidx(c, k) {
         return c["vals"][di]
     }
     var idx = 0
+    // Subscripting a sequence with a slice object is slicing it.
+    if (typeof k != "number") {
+        if (pyIsSlice(k) && (typeof c == "string" || pyIsArr(c))) {
+            var sk = k["__pyslice"]
+            return js_pyslice3(c, sk[0], sk[1], sk[2])
+        }
+    }
     if (pyIsArr(c)) {
         idx = pySeqIdx(c, k)
         if (idx < 0) { idx = idx + c.length }
@@ -7910,6 +7931,12 @@ function js_pyset(c, k, v) {
         pyDictSet(c, k, v)
         pyInstDictPush(c)
         return undefined
+    }
+    if (typeof k != "number") {
+        if (pyIsSlice(k) && pyIsArr(c)) {
+            var sk = k["__pyslice"]
+            return js_pysetslice(c, sk[0], sk[1], sk[2], v)
+        }
     }
     if (!pyIsArr(c) || pyIsTup(c) || arrKind(c) == 17) { pyNoItemOp(c, false) }
     var idx = pySeqIdx(c, k)
@@ -8158,8 +8185,11 @@ function js_pyset_spread(dst, src) {
 // what Python's defaults mean for the DIRECTION of the step, so xs[::-1] is the
 // reversal.
 function js_pyslice3(c0, lo, hi, step) {
+    // An instance's __getitem__ receives the slice object, CPython's subscript; a
+    // builtin subclass's (the delegate) slices its value.
+    if (pyInstClassOf(c0) !== null) { return js_pyidx(c0, pySliceOf(lo, hi, step)) }
     var c = anytype
-    c = pyUnwrapBuiltin(c0) // A builtin subclass slices its value.
+    c = c0
     if (pyIsArr(c)) {
         var idx = pySliceIndices(c.length, lo, hi, step)
         var out = []
@@ -8191,12 +8221,11 @@ function js_pyslice3(c0, lo, hi, step) {
 // different length, so xs[1:3] = [9] shortens the list); an extended step
 // assigns element by element and needs exactly as many values as it selects.
 function js_pysetslice(arr0, lo, hi, step, values) {
+    // An instance's __setitem__ receives the slice object.
+    if (pyInstClassOf(arr0) !== null) { return js_pyset(arr0, pySliceOf(lo, hi, step), values) }
     var arr = anytype
-    arr = pyUnwrapBuiltin(arr0)
-    if (!pyIsArr(arr)) {
-        fail("slice assignment to a " + typeof arr)
-        return undefined
-    }
+    arr = arr0
+    if (!pyIsArr(arr)) { pyNoItemOp(arr, false) }
     if (pyIsTup(arr) || arrKind(arr) == 17) { pyNoItemOp(arr, false) }
     var vals = pySeqElems(values)
     if (arrKind(arr) == 18) {
@@ -8256,13 +8285,12 @@ function js_pysetslice(arr0, lo, hi, step, values) {
 // map[int]bool and then compacts; a boolean array over the same range is the
 // same thing without a map.
 function js_pydelslice(arr0, lo, hi, step) {
+    // An instance's __delitem__ receives the slice object.
+    if (pyInstClassOf(arr0) !== null) { return js_pydel_item(arr0, pySliceOf(lo, hi, step)) }
     var arr = anytype
-    arr = pyUnwrapBuiltin(arr0)
+    arr = arr0
+    if (!pyIsArr(arr)) { pyNoItemOp(arr, true) }
     if (pyIsTup(arr) || arrKind(arr) == 17) { pyNoSliceDel(arr) }
-    if (!pyIsArr(arr)) {
-        fail("deleting a slice of a " + typeof arr)
-        return undefined
-    }
     var idx = pySliceIndices(arr.length, lo, hi, step)
     var drop = []
     var d = 0
@@ -8347,6 +8375,12 @@ function js_pydel_item(c, k) {
         pyCRemoveAt(vals, i)
         pyInstDictPush(c)
         return undefined
+    }
+    if (typeof k != "number") {
+        if (pyIsSlice(k) && pyIsArr(c)) {
+            var sk = k["__pyslice"]
+            return js_pydelslice(c, sk[0], sk[1], sk[2])
+        }
     }
     if (!pyIsArr(c) || pyIsTup(c) || arrKind(c) == 17) { pyNoItemOp(c, true) }
     var ai = pySeqIdx(c, k)
@@ -9728,6 +9762,7 @@ function pyDMethodCall(target, name, args, kw) {
     // pyListMethod in abnf/jsrt.go; the interpreter: pyListMethod in
     // languages/python-interpreter.abnf.
     if (pyIsBytes(target)) { return pyBytesMethod(target, name, args, kw) }
+    if (pyIsSlice(target) && name == "indices") { return pySliceIndicesOf(target["__pyslice"], pyEArgAt(args, 0)) }
     if (pyIsArr(target)) {
         if (pyIsListMethod(name)) {
             if (pyIsTupleMethod(name) || !pyIsTup(target)) { return pyListMethod(target, name, args, kw) }
@@ -10379,6 +10414,7 @@ function pySetAlgebra(els, name, args) {
 // hasattr answering True for a call that then aborts.
 function pyDBuiltinAttr(obj, name) {
     if (typeof obj == "string") { return pySIsStrMethod(name) }
+    if (pyIsSlice(obj)) { return name == "indices" }
     if (pyIsArr(obj)) {
         if (pyIsBytes(obj)) { return pyIsBytesMethod(name, arrKind(obj)) }
         if (pyIsTup(obj)) { return pyIsTupleMethod(name) }
@@ -10642,6 +10678,70 @@ function pyDForeign(target, name) {
 
 // type(v): the class object of an instance, else a synthetic class object
 // naming the builtin type (so type(x).__name__ answers for everything).
+// ----- slice objects ------------------------------------------------------
+// Go: abnf/jsrtpysub.go's slice section, whose comment explains the model: an
+// object carrying __pyslice, the [start, stop, step] array.
+function pySliceOf(lo, hi, st) { return {__pyslice: [lo, hi, st]} }
+function pyIsSlice(v) { return pyIsObj(v) && v["__pyslice"] !== undefined }
+
+// Go: js_pyslicenew. slice(...), bound as [positionals, keywords].
+function js_pyslicenew(bound) {
+    if (pyIsDict(bound[1])) {
+        if (bound[1]["keys"].length > 0) { pyRaiseExc("TypeError", "slice() takes no keyword arguments") }
+    }
+    var pos = bound[0]
+    if (pos.length == 0) { pyRaiseExc("TypeError", "slice expected at least 1 argument, got 0") }
+    if (pos.length > 3) { pyRaiseExc("TypeError", "slice expected at most 3 arguments, got " + pyIntStr(pos.length)) }
+    if (pos.length == 1) { return pySliceOf(undefined, pos[0], undefined) }
+    return pySliceOf(pos[0], pos[1], pyEArgAt(pos, 2))
+}
+
+// Go: pySliceField. The bound an attribute name reads, or -1.
+function pySliceField(name) {
+    if (name == "start") { return 0 }
+    if (name == "stop") { return 1 }
+    if (name == "step") { return 2 }
+    return 0 - 1
+}
+
+// Go: rt.pySliceIndicesOf. s.indices(n), CPython's PySlice_GetIndicesEx.
+function pySliceIndicesOf(b, nv) {
+    if (pyNumTName(nv) != "int") {
+        pyRaiseExc("TypeError", "'" + pyTypeName(nv) + "' object cannot be interpreted as an integer")
+    }
+    var n = pyNum(nv)
+    if (n < 0) { pyRaiseExc("ValueError", "length should not be negative") }
+    var step = 1
+    if (b[2] !== undefined && b[2] !== null) { step = pySliceInt(b[2]) }
+    if (step == 0) { pyRaiseExc("ValueError", "slice step cannot be zero") }
+    var lower = 0
+    var upper = n
+    if (step < 0) {
+        lower = 0 - 1
+        upper = n - 1
+    }
+    var start = pySliceBound(b[0], n, lower, upper, lower)
+    var stop = pySliceBound(b[1], n, lower, upper, upper)
+    if (step < 0) {
+        start = pySliceBound(b[0], n, lower, upper, upper)
+        stop = pySliceBound(b[1], n, lower, upper, lower)
+    }
+    return pyTup([start, stop, step])
+}
+function pySliceBound(v, n, lower, upper, dflt) {
+    if (v === undefined || v === null) { return dflt }
+    var x = pySliceInt(v)
+    if (x < 0) {
+        x = x + n
+        if (x < lower) { x = lower }
+    } else if (x > upper) { x = upper }
+    return x
+}
+function pySliceInt(v) {
+    if (pyNumTName(v) != "int") { pyRaiseExc("TypeError", "slice indices must be integers or None or have an __index__ method") }
+    return pyNum(v)
+}
+
 function js_pytype(v) {
     var cls = pyInstClassOf(v)
     if (cls !== null) { return cls }

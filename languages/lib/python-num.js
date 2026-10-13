@@ -658,10 +658,26 @@ function pynHashCplx(hr, hi) { return pynWFix(pynWAdd(hr, pynWMul(hi, pynWNum(10
 
 // hash(tuple), tuplehash: xxHash's round over the items' hashes.
 function pynHashTuple(lanes) {
+    var p5 = pynW(10196, 60207, 5718, 26565)
+    var acc = pynWAdd(pynHashRounds(lanes), pynWXor(pynWNum(lanes.length), pynWXor(p5, pynWNum(3527539))))
+    if (pynWEq(acc, pynWM1)) { return pynWNum(1546275796) }
+    return acc
+}
+
+// hash(slice), slice_hash: tuplehash's rounds over (start, stop, step), with no
+// length mixed in.
+function pynHashSlice(lanes) {
+    var acc = pynHashRounds(lanes)
+    if (pynWEq(acc, pynWM1)) { return pynWNum(1546275796) }
+    return acc
+}
+
+// xxHash's round over the lanes, from its PRIME_5 seed: the body tuplehash and
+// slice_hash share.
+function pynHashRounds(lanes) {
     var p1 = pynW(40503, 31153, 34283, 51847)
     var p2 = pynW(49842, 44605, 10196, 60239)
-    var p5 = pynW(10196, 60207, 5718, 26565)
-    var acc = p5
+    var acc = pynW(10196, 60207, 5718, 26565)
     var i = 0
     while (i < lanes.length) {
         acc = pynWAdd(acc, pynWMul(lanes[i], p2))
@@ -669,8 +685,6 @@ function pynHashTuple(lanes) {
         acc = pynWMul(acc, p1)
         i = i + 1
     }
-    acc = pynWAdd(acc, pynWXor(pynWNum(lanes.length), pynWXor(p5, pynWNum(3527539))))
-    if (pynWEq(acc, pynWM1)) { return pynWNum(1546275796) }
     return acc
 }
 

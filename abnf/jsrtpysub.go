@@ -64,6 +64,91 @@ func pyIsBDelMethod(v interface{}) bool {
 	return pyBDelMethods[hf]
 }
 
+// ------------------------------------------------------- slice objects --
+
+// slice(stop) / slice(start, stop[, step]) is an object carrying __pyslice, the
+// [start, stop, step] array, an omitted bound None. Subscripting a sequence with
+// one is slicing it (js_pyidx), and the slice syntax hands one to an instance's
+// __getitem__, __setitem__ and __delitem__ (js_pyslice3, js_pysetslice,
+// js_pydelslice). Twin of pySliceNew in languages/python-interpreter.abnf and in
+// lib/python-rt.metajs.
+func pySliceOf(lo, hi, st interface{}) *jsObject {
+	o := newJSObject()
+	o.set("__pyslice", &jsArray{elems: []interface{}{lo, hi, st}})
+	return o
+}
+
+// pySliceParts is a slice object's [start, stop, step].
+func pySliceParts(v interface{}) ([]interface{}, bool) {
+	if o, ok := v.(*jsObject); ok {
+		if b, ok := o.props["__pyslice"].(*jsArray); ok {
+			return b.elems, true
+		}
+	}
+	return nil, false
+}
+
+// pySliceField is the bound an attribute name reads, or -1.
+func pySliceField(name string) int {
+	switch name {
+	case "start":
+		return 0
+	case "stop":
+		return 1
+	case "step":
+		return 2
+	}
+	return -1
+}
+
+// pySliceIndicesOf is s.indices(n): (start, stop, step) clamped to a sequence
+// of length n, CPython's PySlice_GetIndicesEx.
+func (rt *jsrt) pySliceIndicesOf(b []interface{}, nv interface{}) interface{} {
+	toInt := func(v interface{}) float64 {
+		if pyNumTypeName(v) != "int" {
+			rt.pyRaise("TypeError", "slice indices must be integers or None or have an __index__ method")
+		}
+		return rt.toNumber(v)
+	}
+	if pyNumTypeName(nv) != "int" {
+		rt.pyRaise("TypeError", "'"+pyTypeName(rt, nv)+"' object cannot be interpreted as an integer")
+	}
+	n := rt.toNumber(nv)
+	if n < 0 {
+		rt.pyRaise("ValueError", "length should not be negative")
+	}
+	step := 1.0
+	if !isUndefOrNull(b[2]) {
+		step = toInt(b[2])
+	}
+	if step == 0 {
+		rt.pyRaise("ValueError", "slice step cannot be zero")
+	}
+	lower, upper := 0.0, n
+	if step < 0 {
+		lower, upper = -1, n-1
+	}
+	bound := func(v interface{}, dflt float64) float64 {
+		if isUndefOrNull(v) {
+			return dflt
+		}
+		x := toInt(v)
+		if x < 0 {
+			if x += n; x < lower {
+				x = lower
+			}
+		} else if x > upper {
+			x = upper
+		}
+		return x
+	}
+	start, stop := bound(b[0], lower), bound(b[1], upper)
+	if step < 0 {
+		start, stop = bound(b[0], upper), bound(b[1], lower)
+	}
+	return pyTup(&jsArray{elems: []interface{}{start, stop, step}})
+}
+
 // pyStrDecode is str(object, encoding[, errors]): the decoding form, for a
 // bytes value only.
 func (rt *jsrt) pyStrDecode(v, enc, errs interface{}) string {
@@ -966,6 +1051,23 @@ func init() {
 			}
 		}
 		m["js_pybytes"] = bytesNew("bytes")
+		// slice(...), bound as [positionals, keywords].
+		m["js_pyslicenew"] = func(a []uint64) uint64 {
+			el := rt.unwrap(a[0]).(*jsArray).elems
+			if keys, _, ok := dictParts(el[1]); ok && len(keys.elems) > 0 {
+				rt.pyRaise("TypeError", "slice() takes no keyword arguments")
+			}
+			pos := el[0].(*jsArray).elems
+			switch {
+			case len(pos) == 0:
+				rt.pyRaise("TypeError", "slice expected at least 1 argument, got 0")
+			case len(pos) > 3:
+				rt.pyRaise("TypeError", fmt.Sprintf("slice expected at most 3 arguments, got %d", len(pos)))
+			case len(pos) == 1:
+				return rt.wrap(pySliceOf(jsUndef, pos[0], jsUndef))
+			}
+			return rt.wrap(pySliceOf(pos[0], pos[1], argAt(pos, 2)))
+		}
 		m["js_pybytearray"] = bytesNew("bytearray")
 		// frozenset(iterable=()). Twins: pyConvert in
 		// languages/python-interpreter.abnf, js_pyfrozenset in lib/python-rt.metajs.

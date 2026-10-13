@@ -6213,6 +6213,61 @@ def s119():
           and b"%s" % S119B() == b"BB" and b"%(k)s" % {b"k": b"v"} == b"v" and b"%5.2r|" % pa[1] == b"   b'|"
           and S119err(lambda: b"" % pa[1]) == "TypeError: not all arguments converted during bytes formatting")
 
+# ===== SECTION 120: slice objects =====
+# slice() builds the object the slice syntax stands for: its bounds read back
+# as start/stop/step, indices() clamps them, subscripting a sequence with one
+# slices it (reading, assigning, deleting), equal slices are one dict key, and
+# an instance's __getitem__/__setitem__/__delitem__ receives one for a[i:j],
+# alone or inside a tuple. Rows from CPython 3.14.
+def S120err(f):
+    try:
+        f()
+    except Exception as e:
+        return type(e).__name__ + ": " + str(e)
+    return "no error"
+
+class S120C:
+    def __init__(self):
+        self.log = []
+    def __getitem__(self, k):
+        return k
+    def __setitem__(self, k, v):
+        self.log.append(("set", k, v))
+    def __delitem__(self, k):
+        self.log.append(("del", k))
+
+class S120L(list):
+    pass
+
+class S120D:
+    pass
+
+def s120():
+    bs = [(1, 3), (None, None, -1), (5,), (4, 0, -2)]
+    ss = [slice(*b) for b in bs]
+    check("slc1", [repr(s) for s in ss] == ["slice(1, 3, None)", "slice(None, None, -1)", "slice(None, 5, None)", "slice(4, 0, -2)"]
+          and (ss[0].start, ss[0].stop, ss[0].step) == (1, 3, None) and type(ss[0]) is slice and isinstance(ss[1], slice)
+          and ss[1].indices(6) == (5, -1, -1) and ss[3].indices(2) == (1, 0, -2) and ss[2].indices(9) == (0, 5, 1))
+    xs = [0, 1, 2, 3, 4, 5]
+    check("slc2", xs[ss[0]] == [1, 2] and "abcdef"[ss[1]] == "fedcba" and (0, 1, 2, 3, 4, 5)[ss[3]] == (4, 2)
+          and b"abcdef"[ss[2]] == b"abcde" and ss[0] == slice(1, 3) and ss[0] != slice(1, 4)
+          and {ss[0]: "a"}[slice(1, 3)] == "a" and hash(slice(1, 2)) == hash(slice(1, 2)))
+    ys = [0, 1, 2, 3, 4, 5]
+    ys[slice(1, 3)] = ["a"]
+    del ys[slice(None, None, 2)]
+    check("slc3", ys == ["a", 4] and S120err(lambda: slice()) == "TypeError: slice expected at least 1 argument, got 0"
+          and S120err(lambda: slice(None, None, 0).indices(3)) == "ValueError: slice step cannot be zero"
+          and S120err(lambda: slice(1).nope) == "AttributeError: 'slice' object has no attribute 'nope'")
+    c = S120C()
+    c[1:2] = [5]
+    del c[2:]
+    check("slc4", c[1:3] == slice(1, 3) and c[::2] == slice(None, None, 2) and c[1:2, 3] == (slice(1, 2), 3)
+          and c.log == [("set", slice(1, 2), [5]), ("del", slice(2, None))])
+    sl = S120L([0, 1, 2, 3])
+    sl[0:2] = [9]
+    check("slc5", sl[1:] == [2, 3] and type(sl[1:]) is list and sl == [9, 2, 3]
+          and S120err(lambda: S120D()[1:2]) == "TypeError: 'S120D' object is not subscriptable")
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -6330,5 +6385,6 @@ def main():
     s117() # SECTION-CALL 117
     s118() # SECTION-CALL 118
     s119() # SECTION-CALL 119
+    s120() # SECTION-CALL 120
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

@@ -2384,9 +2384,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return {kind: "slice", lo: lo, hi: hi, step: step}
     }
     // items = [{sitem} | {sslice}...] -> the TUPLE a mixed subscript indexes with, the
-    // compiler half of makeSubTuple in python-interpreter.abnf. Same modelling: a sliced
-    // entry is the three-element tuple (start, stop, step), an omitted bound being None
-    // (hUndef, which this runtime prints as None), so the key stays hashable.
+    // compiler half of makeSubTuple in python-interpreter.abnf: a sliced entry is a
+    // slice object, built by the slice builtin's own js_pyslicenew.
     function makeSubTuple(items) {
         return function(b) {
             var arr = callExt(b, "js_arr_new", [])
@@ -2399,7 +2398,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     callExt(b, "js_arr_push", [one, sb.lo])
                     callExt(b, "js_arr_push", [one, sb.hi])
                     callExt(b, "js_arr_push", [one, sb.step])
-                    callExt(b, "js_arr_push", [arr, callExt(b, "js_pytup", [one])])
+                    var bound = callExt(b, "js_arr_new", [])
+                    callExt(b, "js_arr_push", [bound, one])
+                    callExt(b, "js_arr_push", [bound, hUndef])
+                    callExt(b, "js_arr_push", [arr, callExt(b, "js_pyslicenew", [bound])])
                     continue
                 }
                 var r = it.sitem(b)
@@ -4305,6 +4307,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     pyTypeBuiltin["$type"] = true
     pyTypeBuiltin["$object"] = true
     pyTypeBuiltin["$property"] = true
+    pyTypeBuiltin["$slice"] = true
     // The six builtins CPython prints as CLASSES that are NOT in pyTypeBuiltin
     // above: they answer a cursor rather than convert, so binding them to a class
     // object would change what CALLING them does, and only their RENDERING is at
@@ -4564,6 +4567,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // property(fget, fset, fdel, doc): a data descriptor the class-member
         // lookups run (newPyProp in abnf/jsrtpydesc.go).
         b = declKwBuiltin(b, "property", "js_pyproperty", [])
+        // slice(start, stop, step): js_pyslicenew in abnf/jsrtpysub.go and
+        // lib/python-rt.metajs, hostGlobals' slice type in python-interpreter.abnf.
+        b = declKwBuiltin(b, "slice", "js_pyslicenew", [])
         // The builtin TYPE names that carry no conversion function. The
         // interpreter's pyTypeNames has fourteen and declBuiltin/pyTypeBuiltin
         // only reaches the ones that are callable; these are the rest, so
