@@ -2663,7 +2663,9 @@ function k2StrMethod2(s, name, args) {
     if (name == "contains") { return s.indexOf(ktStrArg(ktArg(args, 0))) >= 0 }
     if (name == "toInt" || name == "toLong" || name == "toDouble" || name == "toFloat" ||
         name == "toIntOrNull" || name == "toLongOrNull" || name == "toDoubleOrNull" || name == "toFloatOrNull") {
-        return k2ParseNum(s, name)
+        var radix = 10
+        if (args.length > 0) { radix = k2Int(args[0]) }
+        return k2ParseNum(s, name, radix)
     }
     if (name == "format") {
         // "%.2f".format(x): the receiver is the format string, as
@@ -2907,7 +2909,7 @@ function k2TrimIndent(s) {
 // The integer forms are Integer.parseInt / Long.parseLong (no trimming, out of
 // range is an error), the floating ones Double.parseDouble (k2JavaFloat). Twin of
 // kParseNum in languages/kotlin-interpreter.abnf.
-function k2ParseNum(s, name) {
+function k2ParseNum(s, name, radix) {
     var orNull = name == "toIntOrNull" || name == "toLongOrNull" || name == "toDoubleOrNull" || name == "toFloatOrNull"
     if (name == "toDouble" || name == "toFloat" || name == "toDoubleOrNull" || name == "toFloatOrNull") {
         var jf = k2JavaFloat(s, name == "toFloat" || name == "toFloatOrNull")
@@ -2919,6 +2921,7 @@ function k2ParseNum(s, name) {
         if (name == "toFloat" || name == "toFloatOrNull") { return flo(rtF32Round(jf.v), 3) }
         return flo(jf.v, 0)
     }
+    if (radix < 2 || radix > 36) { ktRaise("IllegalArgumentException", "radix " + radix + " was not in valid range 2..36") }
     var long = name == "toLong" || name == "toLongOrNull"
     var neg = false
     var body = s
@@ -2929,18 +2932,20 @@ function k2ParseNum(s, name) {
         body = body.substring(1, body.length)
     }
     var bad = body.length == 0
-    var ascii = ""
+    var ds = []
     var i = 0
     while (!bad && i < body.length) {
-        var dv = k2DecDigit(body.charCodeAt(i))
-        if (dv < 0) { bad = true } else { ascii = ascii + String.fromCharCode(48 + dv) }
+        var dv = k2RadixDigit(body.charCodeAt(i), radix)
+        if (dv < 0) { bad = true } else { ds.push(dv) }
         i = i + 1
     }
-    body = ascii
+    body = k2DecimalOf(ds, radix)
     if (!bad) { bad = !k2DigitsFit(body, neg, long) }
     if (bad) {
         if (orNull) { return null }
-        ktRaise("NumberFormatException", "For input string: \"" + s + "\"")
+        var msg = "For input string: \"" + s + "\""
+        if (radix != 10) { msg = msg + " under radix " + radix }
+        ktRaise("NumberFormatException", msg)
     }
     var acc = k1Digits(body, 10)
     if (neg) { acc = sintOp(1, 0, acc) }
@@ -2963,6 +2968,47 @@ function k2DecDigit(c) {
         i = i + 1
     }
     return 0 - 1
+}
+
+// k2RadixDigit is kRadixDigit: Character.digit(c, radix).
+function k2RadixDigit(c, radix) {
+    var d = k2DecDigit(c)
+    if (d < 0) {
+        if (c >= 65 && c <= 90) { d = c - 55 }
+        else if (c >= 97 && c <= 122) { d = c - 87 }
+        else if (c >= 65313 && c <= 65338) { d = c - 65303 }
+        else if (c >= 65345 && c <= 65370) { d = c - 65335 }
+    }
+    if (d < radix) { return d }
+    return 0 - 1
+}
+
+// k2DecimalOf is kDecimalOf: the decimal text of the radix digits ds.
+function k2DecimalOf(ds, radix) {
+    var dec = [0]
+    var i = 0
+    while (i < ds.length) {
+        var carry = ds[i]
+        var j = 0
+        while (j < dec.length) {
+            var t = dec[j] * radix + carry
+            dec[j] = t % 10
+            carry = Math.floor(t / 10)
+            j = j + 1
+        }
+        while (carry > 0) {
+            dec.push(carry % 10)
+            carry = Math.floor(carry / 10)
+        }
+        i = i + 1
+    }
+    var out = ""
+    var k = dec.length - 1
+    while (k >= 0) {
+        out = out + String.fromCharCode(48 + dec[k])
+        k = k - 1
+    }
+    return out
 }
 
 // k2HexRound is kHexRound: the hex digits ds times 2^e2, rounded once to p
@@ -3981,6 +4027,13 @@ function ktEnumMethod(recv, name, args) {
 // kotlin-stdlib's overload for that kind uses. See ktNoElemKind.
 function ktSeqMethod(arr, name, args) { return ktSeqMethodK(arr, name, args, "List") }
 
+// k3ValueOf is ktValueOf (jsrtkotlin.go): groupBy / associateBy's optional
+// valueTransform applied to e.
+function k3ValueOf(args, e) {
+    if (args.length > 1 && !rtIsNil(args[1])) { return ktCall1(args[1], e) }
+    return e
+}
+
 function ktSeqMethodK(arr, name, args, kind) {
     if (kind == "List") { kind = ktArrWord(arrKind(arr)) }
     var es = arr
@@ -4363,8 +4416,8 @@ function ktSeqMethodK(arr, name, args, kind) {
         for (i = 0; i < es.length; i = i + 1) {
             v = ktCall1(f, es[i])
             j = ktMapFind(ktMapKeys(mp), v)
-            if (j < 0) { ktMapPut(mp, v, [es[i]]) }
-            else { ktMapVals(mp)[j].push(es[i]) }
+            if (j < 0) { ktMapPut(mp, v, [k3ValueOf(args, es[i])]) }
+            else { ktMapVals(mp)[j].push(k3ValueOf(args, es[i])) }
         }
         return mp
     }
@@ -4384,7 +4437,7 @@ function ktSeqMethodK(arr, name, args, kind) {
     }
     if (name == "associateBy") {
         mp = ktMakeMap()
-        for (i = 0; i < es.length; i = i + 1) { ktMapPut(mp, ktCall1(f, es[i]), es[i]) }
+        for (i = 0; i < es.length; i = i + 1) { ktMapPut(mp, ktCall1(f, es[i]), k3ValueOf(args, es[i])) }
         return mp
     }
     if (name == "toMap") {
@@ -4395,22 +4448,31 @@ function ktSeqMethodK(arr, name, args, kind) {
         return mp
     }
     if (name == "joinToString") {
-        // The TRANSFORM is joinToString's last parameter, so `joinToString { }`
-        // passes a function, which is not the SEPARATOR.
+        // (separator, prefix, postfix, limit, truncated, transform) by slot; a
+        // function in any slot is the trailing transform (jsrtkotlin.go).
         best = undefined
         b = false
+        s = ", "
+        n = 0 - 1
+        var trunc = "..."
         for (i = 0; i < args.length; i = i + 1) {
             if (ktIsFn(args[i])) {
                 best = args[i]
                 b = true
-            } else { out.push(args[i]) }
+            } else if (!rtIsNil(args[i])) {
+                if (i == 0) { s = k3StrArg(args[i]) }
+                else if (i == 1) { pre = k3StrArg(args[i]) }
+                else if (i == 2) { post = k3StrArg(args[i]) }
+                else if (i == 3) { n = k2Int(args[i]) }
+                else if (i == 4) { trunc = k3StrArg(args[i]) }
+            }
         }
-        s = ", "
-        if (out.length > 0) { s = k3StrArg(out[0]) }
-        if (out.length > 1) { pre = k3StrArg(out[1]) }
-        if (out.length > 2) { post = k3StrArg(out[2]) }
         for (i = 0; i < es.length; i = i + 1) {
             if (i > 0) { body = body + s }
+            if (n >= 0 && i >= n) {
+                body = body + trunc
+                break
+            }
             if (b) { body = body + k3Str2(ktCall1(best, es[i])) }
             else { body = body + ktRender(es[i]) }
         }

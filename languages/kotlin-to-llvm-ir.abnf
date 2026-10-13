@@ -3374,7 +3374,10 @@ KwContract  = "contract" KwEnd ;
     }
     function paramsFor(name, args) {
         var alts = methodParamAlts["$" + name]
-        if (alts == undefined) { return methodParams["$" + name] }
+        if (alts == undefined) {
+            var mp = methodParams["$" + name]
+            return mp == undefined ? ktStdParams(name) : mp
+        }
         for (var i = alts.length - 1; i >= 0; i--) {
             var ok = true
             for (var j = 0; j < args.length; j++) {

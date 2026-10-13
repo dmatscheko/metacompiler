@@ -677,3 +677,13 @@ function ktPlusTys(items, txt, at) {
 function ktMResType(name, nargs, el) {
     return (name == "sum" && nargs == 0 && el.v != "Int") ? el.v : ""
 }
+
+// The parameter names of the stdlib members a call may fill by NAME
+// (`xs.joinToString(limit = 2)`), in declaration order, for a member no user
+// declaration of that name claims. Each grammar places the named arguments into
+// these slots and leaves a skipped slot undefined, which the member reads as its
+// default.
+var ktStdParamNames = {
+    "$joinToString": ["separator", "prefix", "postfix", "limit", "truncated", "transform"]
+}
+function ktStdParams(name) { return ktStdParamNames["$" + name] }

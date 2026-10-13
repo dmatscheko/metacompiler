@@ -2887,7 +2887,11 @@ func (rt *jsrt) ktStrMethod2(s, name string, args []interface{}) (interface{}, b
 	case "contains":
 		return rt.strIndexOf(s, rt.ktStrArg(argAt(args, 0))) >= 0, true
 	case "toInt", "toLong", "toDouble", "toFloat", "toIntOrNull", "toLongOrNull", "toDoubleOrNull", "toFloatOrNull":
-		return ktParseNum(rt, s, name)
+		radix := 10
+		if len(args) > 0 {
+			radix = jsToInt(rt.toNumber(args[0]))
+		}
+		return ktParseNum(rt, s, name, radix)
 	case "format":
 		// "%.2f".format(x): the receiver is the format string, as kotlin.text.format
 		// declares it (String.Companion.format has the arguments the other way round).
@@ -3124,7 +3128,7 @@ func ktTrimIndent(s string) string {
 // Integer.parseInt / Long.parseLong (no trimming, out of range is an error), the
 // floating ones Double.parseDouble (ktJavaFloat). Twin of kParseNum in
 // languages/kotlin-interpreter.abnf and k2ParseNum in languages/lib/kotlin-rt.metajs.
-func ktParseNum(rt *jsrt, s, name string) (interface{}, bool) {
+func ktParseNum(rt *jsrt, s, name string, radix int) (interface{}, bool) {
 	orNull := strings.HasSuffix(name, "OrNull")
 	if name == "toDouble" || name == "toFloat" || name == "toDoubleOrNull" || name == "toFloatOrNull" {
 		f, ok, empty := ktJavaFloat(s, name == "toFloat" || name == "toFloatOrNull")
@@ -3142,6 +3146,9 @@ func ktParseNum(rt *jsrt, s, name string) (interface{}, bool) {
 		}
 		return jsJFlo{f: f}, true
 	}
+	if radix < 2 || radix > 36 {
+		rt.ktRaise("IllegalArgumentException", fmt.Sprintf("radix %d was not in valid range 2..36", radix))
+	}
 	long := name == "toLong" || name == "toLongOrNull"
 	neg := false
 	body := s
@@ -3151,16 +3158,16 @@ func ktParseNum(rt *jsrt, s, name string) (interface{}, bool) {
 		body = body[1:]
 	}
 	bad := body == ""
-	ascii := make([]byte, 0, len(body))
+	var ds []int
 	for _, r := range body {
-		d := ktDecDigit(r)
+		d := ktRadixDigit(r, radix)
 		if d < 0 {
 			bad = true
 			break
 		}
-		ascii = append(ascii, byte('0'+d))
+		ds = append(ds, d)
 	}
-	body = string(ascii)
+	body = ktDecimalOf(ds, radix)
 	if !bad {
 		bad = !ktDigitsFit(body, neg, long)
 	}
@@ -3168,7 +3175,11 @@ func ktParseNum(rt *jsrt, s, name string) (interface{}, bool) {
 		if orNull {
 			return jsNull, true
 		}
-		rt.ktRaise("NumberFormatException", fmt.Sprintf("For input string: \"%s\"", s))
+		msg := fmt.Sprintf("For input string: \"%s\"", s)
+		if radix != 10 {
+			msg += fmt.Sprintf(" under radix %d", radix)
+		}
+		rt.ktRaise("NumberFormatException", msg)
 	}
 	var acc uint64
 	for _, r := range body {
@@ -3201,6 +3212,50 @@ func ktDecDigit(c rune) int {
 		}
 	}
 	return -1
+}
+
+// ktRadixDigit is Character.digit(c, radix): a decimal digit, or a Latin letter
+// (ASCII or fullwidth) worth 10 and up; -1 when the radix has no such digit. Twin of
+// kRadixDigit in languages/kotlin-interpreter.abnf.
+func ktRadixDigit(c rune, radix int) int {
+	d := ktDecDigit(c)
+	if d < 0 {
+		switch {
+		case c >= 'A' && c <= 'Z':
+			d = int(c-'A') + 10
+		case c >= 'a' && c <= 'z':
+			d = int(c-'a') + 10
+		case c >= 0xFF21 && c <= 0xFF3A:
+			d = int(c-0xFF21) + 10
+		case c >= 0xFF41 && c <= 0xFF5A:
+			d = int(c-0xFF41) + 10
+		}
+	}
+	if d < radix {
+		return d
+	}
+	return -1
+}
+
+// ktDecimalOf is the decimal text of the radix digits ds, so ktDigitsFit can
+// range-check it as text. Twin of kDecimalOf.
+func ktDecimalOf(ds []int, radix int) string {
+	dec := []int{0}
+	for _, carry := range ds {
+		for j := range dec {
+			t := dec[j]*radix + carry
+			dec[j], carry = t%10, t/10
+		}
+		for carry > 0 {
+			dec = append(dec, carry%10)
+			carry /= 10
+		}
+	}
+	out := make([]byte, len(dec))
+	for i, d := range dec {
+		out[len(dec)-1-i] = byte('0' + d)
+	}
+	return string(out)
 }
 
 // ktDigitsFit: do these decimal digits fit an Int (or a Long), with the sign already
@@ -4297,6 +4352,16 @@ func (rt *jsrt) ktSeqMethod(o *jsArray, name string, args []interface{}) (interf
 // `kind` is the receiver's COLLECTION KIND, and it exists because the elements are
 // already materialized by the time an empty-receiver message is chosen. See
 // ktNoElemKind for what the word is and where the two unreachable kinds went.
+// ktValueOf applies groupBy / associateBy's optional second lambda, the
+// valueTransform, to e. Twin of kValueOf in languages/kotlin-interpreter.abnf
+// and k3ValueOf in languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktValueOf(args []interface{}, e interface{}) interface{} {
+	if len(args) > 1 && !isUndefOrNull(args[1]) {
+		return rt.ktCall(args[1], e)
+	}
+	return e
+}
+
 func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind string) (interface{}, bool) {
 	if kind == ktKindList && o.kind != 0 {
 		kind = ktArrWords[o.kind]
@@ -4783,14 +4848,15 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		m := ktMakeMap()
 		for _, e := range es {
 			k := rt.ktCall(f, e)
+			v := rt.ktValueOf(args, e)
 			keys, vals, _ := dictParts(m)
 			i := rt.ktMapFind(keys, k)
 			if i < 0 {
-				rt.ktMapPut(m, k, arr([]interface{}{e}))
+				rt.ktMapPut(m, k, arr([]interface{}{v}))
 				continue
 			}
 			b := vals.elems[i].(*jsArray)
-			b.elems = append(b.elems, e)
+			b.elems = append(b.elems, v)
 		}
 		return m, true
 	case "associate":
@@ -4813,7 +4879,7 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 	case "associateBy":
 		m := ktMakeMap()
 		for _, e := range es {
-			rt.ktMapPut(m, rt.ktCall(f, e), e)
+			rt.ktMapPut(m, rt.ktCall(f, e), rt.ktValueOf(args, e))
 		}
 		return m, true
 	case "toMap":
@@ -4825,37 +4891,47 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		}
 		return m, true
 	case "joinToString":
-		// The TRANSFORM is joinToString's last parameter, so `joinToString { ... }`
-		// passes a function, which is not the SEPARATOR.
+		// (separator, prefix, postfix, limit, truncated, transform), each slot by its
+		// position and undefined for one the call left out; a function in any slot is
+		// the trailing transform. Twin of the joinToString arm of kSeqMethodK in
+		// languages/kotlin-interpreter.abnf.
 		var transform interface{}
-		text := []interface{}{}
-		for _, a := range args {
-			if isCallable(a) {
+		sep, pre, post, limit, trunc := ", ", "", "", -1, "..."
+		for i, a := range args {
+			switch {
+			case isCallable(a):
 				transform = a
-			} else {
-				text = append(text, a)
+			case isUndefOrNull(a):
+			case i == 0:
+				sep = rt.ktStrArg(a)
+			case i == 1:
+				pre = rt.ktStrArg(a)
+			case i == 2:
+				post = rt.ktStrArg(a)
+			case i == 3:
+				limit = jsToInt(rt.toNumber(a))
+			case i == 4:
+				trunc = rt.ktStrArg(a)
 			}
 		}
-		sep := ", "
-		if len(text) > 0 {
-			sep = rt.ktStrArg(text[0])
-		}
-		pre, post := "", ""
-		if len(text) > 1 {
-			pre = rt.ktStrArg(text[1])
-		}
-		if len(text) > 2 {
-			post = rt.ktStrArg(text[2])
-		}
-		parts := make([]string, len(es))
+		var sb strings.Builder
+		sb.WriteString(pre)
 		for i, e := range es {
+			if i > 0 {
+				sb.WriteString(sep)
+			}
+			if limit >= 0 && i >= limit {
+				sb.WriteString(trunc)
+				break
+			}
 			if transform != nil {
-				parts[i] = rt.ktStr2(rt.ktCall(transform, e))
+				sb.WriteString(rt.ktStr2(rt.ktCall(transform, e)))
 				continue
 			}
-			parts[i] = rt.ktpRender(e, 0)
+			sb.WriteString(rt.ktpRender(e, 0))
 		}
-		return pre + strings.Join(parts, sep) + post, true
+		sb.WriteString(post)
+		return sb.String(), true
 	case "hashCode":
 		// java.util.AbstractList.hashCode: 31 * acc + element.
 		var h int32 = 1

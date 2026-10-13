@@ -4709,6 +4709,33 @@ fun sec94() {
     check("ch94d", cs[0].toInt() == 97 && cs[0].toLong() * 3000000000 == 291000000000L && cs[1].toByte() == (-23).toByte() && cs[1].toShort() == 233.toShort())
 }
 
+// ===== SECTION 95: kotlin.text and kotlin.collections against kotlin-stdlib =====
+// Every row was read off kotlin-stdlib 2.2.21 driven from java (JDK 24, Locale.US).
+// String.toInt(radix) and its OrNull / Long forms read Character.digit(c, radix):
+// letters, ASCII or fullwidth, and any Unicode decimal digit; the range check is the
+// target type's, and a bad radix is an IllegalArgumentException. groupBy and
+// associateBy take an optional valueTransform; joinToString's parameters can be
+// passed by NAME, and `limit` writes the separator and then `truncated`.
+fun s95err(f: () -> Any?): String {
+    try { return "" + f() } catch (e: Exception) { return e::class.simpleName + ": " + e.message }
+}
+fun sec95() {
+    val rx = listOf("ff", "zz", "-80000000", "80000000", "\uff41\uff10", "0x10", "12")
+    check("rad95a", rx[0].toIntOrNull(16) == 255 && rx[1].toIntOrNull(36) == 1295 && rx[1].toIntOrNull(16) == null && rx[6].toIntOrNull(16) == 18)
+    check("rad95b", rx[2].toIntOrNull(16) == Int.MIN_VALUE && rx[3].toIntOrNull(16) == null && rx[3].toLongOrNull(16) == 2147483648L)
+    check("rad95c", rx[4].toInt(16) == 160 && rx[5].toIntOrNull(16) == null && rx[5].toInt(36) == 42804)
+    check("rad95d", s95err { rx[1].toInt(16) } == "NumberFormatException: For input string: \"zz\" under radix 16"
+                    && s95err { rx[0].toInt(10) } == "NumberFormatException: For input string: \"ff\""
+                    && s95err { rx[6].toIntOrNull(37) } == "IllegalArgumentException: radix 37 was not in valid range 2..36")
+    val l5 = listOf(1, 2, 3, 4, 5)
+    check("grp95e", "" + l5.groupBy({ it % 2 }, { "v" + it }) == "{1=[v1, v3, v5], 0=[v2, v4]}"
+                    && "" + l5.associateBy({ it % 2 }, { it * 10 }) == "{1=50, 0=40}")
+    check("jts95f", l5.joinToString(limit = 2) == "1, 2, ..." && l5.joinToString("/", limit = 3, truncated = "!") == "1/2/3/!")
+    check("jts95g", l5.joinToString(limit = 2) { "<" + it + ">" } == "<1>, <2>, ..."
+                    && l5.joinToString(prefix = "[", postfix = "]", limit = 0) == "[...]"
+                    && l5.joinToString(", ", "[", "]", 5) == "[1, 2, 3, 4, 5]")
+}
+
 
 fun main() {
     s01() // SECTION-CALL 01
@@ -4805,6 +4832,7 @@ fun main() {
     sec92() // SECTION-CALL 92
     sec93() // SECTION-CALL 93
     sec94() // SECTION-CALL 94
+    sec95() // SECTION-CALL 95
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }
