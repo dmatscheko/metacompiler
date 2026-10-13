@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-600** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-602** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -113,11 +113,13 @@ not change the renderer.
 
 # GO — Go  (oracle: `go run`)
 
-### T-593 go: an overflowing constant is not rejected at compound assignment, typed const, return, element, send, `_ =` · P2 · GO · IN PROGRESS (GO worker, round 6) [V]
-`var u8 uint8; u8 += 256`, `const c uint8 = 256`, `func f() uint8 { return 256 }`, `[]uint8{256}`, `ch <- 256` (chan uint8),
-`_ = 1 << 63` (int): go rejects each at compile time ("cannot use 256 (untyped int constant) as uint8 value in ... (overflows)"
-/ "constant 256 overflows uint8"); every engine accepts and wraps. Route these sites through goConstTo (go-constfold.js), as
-stores and arguments now are.
+### T-601 go: typed constant folding; named constant string index; float32 constant overflow; canonical error text · P3 · GO · OPEN [V]
+`const a uint8 = 200; const b = a + a` → both halves 144 (go "a + a (constant 400 of type uint8) overflows uint8"; typed
+constants are not folded); `float64(1) / 0` accepted (go: division by zero). `const s = "abc"; _ = s[3]` / `s[1:5]` panic at run
+time (go rejects at compile time; only literals are measured). `var f float32 = 1e40` → +Inf (go "cannot use 1e40 (untyped
+float constant 1e+40) as float32 value in variable declaration (overflows)"). Wording: we print the source as written
+(`1<<63`) where go prints its canonical form (`1 << 63`); a named float constant in "cannot convert" lacks its value;
+non-integral floats use JS formatting, not %g.
 
 ---
 
@@ -136,14 +138,16 @@ element as an expression pattern) does not parse in either half (range bounds do
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-595 php: `[$closure, '__invoke']` callbacks; `[&$k, 4]` in the compiler; callback-form static fallback; bindTo identity · P2 · PHP · IN PROGRESS (PHP worker, round 2) [V spec-only]
-`call_user_func([$m, '__invoke'], 3, 4)` → both halves "first array member is not a valid class name or object" (PHP: a
-Closure is an object with __invoke; valid). `$a = [&$k, 4];` → compiler "array element by reference not implemented" (interp
-accepts). `call_user_func('M::sp')` from a compatible subclass instance → ours `__call`, php-src `__callStatic` (the lookup runs in
-call_user_func's internal frame); `['M','sp']` → PHP the named class's `__call`, ours `$this`'s class (differs only when the
-subclass overrides __call). `$c->bindTo(...)` on a function-made closure returns the same object (PHP a new one, `===` false).
-Method signatures are keyed by name only: two classes declaring one name with different by-ref parameters make that call
-site pass by value.
+### T-600 php compiler: arrays passed by value are not copied; array copies drop references; spread of references · P1 · PHP · OPEN [V spec-only]
+`function h($xs){ $xs[0]=5; } $a=[1]; h($a); echo $a[0];` → llvm.Run and native `5`, interp `1` (PHP 1: arrays are values,
+copy-on-write). All engines: arrCopy / phpArrCopy dereference every cell, so `$n=1; $a[0]=&$n; $b=$a; $b[0]=7; echo $n;` → 1
+(PHP 7: a reference with refcount > 1 survives zend_array_dup; a refcount-1 one, e.g. after unset($v) of a foreach-by-ref,
+does not — decide the model). Hence `$k=1; $a=[&$k,4]; $a[0]=9;` leaves $k=1 (PHP 9). `call_user_func_array('inc', $a)` /
+`inc(...$a)` with `$a[0]=&$n` and `function inc(&$x)` does not increment $n (PHP does). `$c->bind(...)`,
+`$c->fromCallable(...)`, `[$c,'bind']` raise "Call to undefined method Closure::bind()" (PHP calls the static method).
+Residual callback edges: `array_map(['N','q'])` with N having only __callStatic reaches it (PHP TypeError); cbVis's
+inaccessible-method + __call-with-object path tests only __callStatic; an ambiguous by-ref method called with named/spread
+arguments passes by value; a first-class callable from a strict `['C','m']` via fakeCall uses $this's __call.
 
 ### T-596 php: binding and undefined-variable warnings are never printed · P3 · PHP · BLOCKED - needs a user decision
 PHP CLI prints `Warning: Cannot unbind $this of closure using $this in <file> on line <n>` (and undefined-variable/-index
@@ -698,6 +702,8 @@ T-580 js/ts: no temporal dead zone for let / const / class — DONE 1c0e5be6 (ch
 T-581 js: arguments object, `__`-prefixed user keys, `String.prototype.normalize`, BigInt callee text — PARTIAL f67bcd8d df30f42f (normalize UAX #15 checked on every code point vs node, arguments object kind, __ user keys, BigInt callee text); arguments length/mapping is T-597
 T-589 lua: tables and functions as keys collide — DONE 991c9c71
 T-590 lua: metatables and the missing standard library — PARTIAL 9512ba5c..57ffd73d (metatables and all metamethods at +0.05%, _G proxy, coroutine on floor generators, utf8, math.random bit-exact, collectgarbage, string.pack, table lib via metamethods, FILE* type); rest is T-598, T-599
+T-595 php: `[$closure, '__invoke']` callbacks; `[&$k, 4]` in the compiler; callback-form static fallback; bindTo identity — DONE 8ee86d4a (the call_user_func('M::sp') claim refuted by php-src: __call is right, bug45180/bug45186 phpts)
+T-593 go: an overflowing constant is not rejected at compound assignment, typed const, return, element, send, `_ =` — DONE 89ffe028 (plus division by constant zero, negative constant shifts, constant index/slice/conversion range, truncated float constants: 86e8cea2..5208be9f)
 
 # Settled — do not re-open
 
