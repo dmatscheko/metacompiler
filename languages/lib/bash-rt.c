@@ -161,7 +161,6 @@ char *rt_field(char *l, char *ifs, int idx, int rest);
 int rt_nifs(char *l, char *ifs);
 char *rt_radix(char *s, int base, int upper, int alt);
 char *rt_pfq(char *s);
-char *rt_unescape(char *s);
 int rt_nfields(char *v);
 char *rt_getfield(char *v, int k);
 char *rt_wordjoin(char *v);
@@ -2228,7 +2227,7 @@ int pf_hexval(int c)
 }
 
 /* The escape at s[i] (a backslash), appended to pf_e; answers the bytes it used.
- * pctb is 1 for a %b operand. */
+ * pctb is 0 for the format, 1 for a %b operand, 2 for `echo -e` (pf_bstr). */
 int pf_escape(char *s, int i, int pctb)
 {
     int c = (int)(unsigned char)s[i + 1];
@@ -2250,15 +2249,18 @@ int pf_escape(char *s, int i, int pctb)
     if (c == 116) t = pf_chr(9);
     if (c == 118) t = pf_chr(11);
     if (c == 92) t = "\\";
-    if (c == 34) t = "\"";
-    if (c == 39) t = "'";
-    if (c == 63) t = "?";
+    if (pctb == 0) {
+        if (c == 34) t = "\"";
+        if (c == 39) t = "'";
+        if (c == 63) t = "?";
+    }
     if (t != 0) {
         pf_e = rt_strcat(pf_e, t);
         return 2;
     }
-    if (c >= 48 && c <= 55) {
-        /* the format: one to three digits; %b: \0 and then up to three, or \NNN */
+    if (c >= 48 && c <= 55 && (pctb != 2 || c == 48)) {
+        /* the format: one to three digits; %b: \0 and then up to three, or \NNN;
+         * echo -e: only \0 and then up to three */
         n = i + 1;
         maxd = 3;
         if (pctb != 0 && c == 48) n = i + 2;
@@ -2293,8 +2295,9 @@ int pf_escape(char *s, int i, int pctb)
     return 2;
 }
 
-/* A %b operand with its escapes applied (pf_stop at \c). */
-char *pf_bstr(char *s)
+/* A %b operand (mode 1) or an `echo -e` word (mode 2) with its escapes applied
+ * (pf_stop at \c). */
+char *pf_bstr(char *s, int mode)
 {
     char *saved = pf_e;
     char *r;
@@ -2302,7 +2305,7 @@ char *pf_bstr(char *s)
     pf_e = empty;
     while (s[i] != 0 && pf_stop == 0) {
         if (s[i] == 92) {
-            i = i + pf_escape(s, i, 1);
+            i = i + pf_escape(s, i, mode);
         } else {
             pf_e = rt_strcat(pf_e, rt_substr(s, i, 1));
             i = i + 1;
@@ -2530,7 +2533,7 @@ int pf_conv(char *fmt, int i, char *args, int nargs)
     } else {
         piece = a;
         if (cv == 99) piece = rt_substr(a, 0, 1);
-        if (cv == 98) piece = pf_bstr(a);
+        if (cv == 98) piece = pf_bstr(a, 1);
         if (cv == 113) piece = rt_pfq(a);
         if (prec >= 0 && cv != 99 && rt_strlen(piece) > prec) piece = rt_substr(piece, 0, prec);
         piece = pf_pad(piece, w, left, zero, 0);
@@ -2573,40 +2576,6 @@ char *rt_printf(char *fmt, char *args)
         used = pf_ai > before ? 1 : 0;
     }
     return pf_e;
-}
-
-/* rt_unescape: echo -e's backslash escapes. */
-char *rt_unescape(char *s) {
-    int len = rt_strlen(s);
-    char *dst = rt_bump(len + 1);
-    int i = 0, o = 0;
-    while (1) {
-        int c0 = (int)(unsigned char)s[i];
-        int isEsc = (c0 == 92) && (i + 1 < len);
-        int c;
-        if (c0 == 0) break;
-        if (isEsc) {
-            int n1 = (int)(unsigned char)s[i + 1];
-            c = n1;
-            if (n1 == 110) c = 10;   /* n */
-            if (n1 == 116) c = 9;    /* t */
-            if (n1 == 114) c = 13;   /* r */
-            if (n1 == 97) c = 7;     /* a */
-            if (n1 == 98) c = 8;     /* b */
-            if (n1 == 102) c = 12;   /* f */
-            if (n1 == 118) c = 11;   /* v */
-            if (n1 == 101) c = 27;   /* e */
-            if (n1 == 48) c = 0;     /* 0 */
-            i = i + 2;
-        } else {
-            c = c0;
-            i = i + 1;
-        }
-        dst[o] = (char)c;
-        o = o + 1;
-    }
-    dst[o] = 0;
-    return dst;
 }
 
 /* ---- field lists ----------------------------------------------------------
@@ -4048,21 +4017,42 @@ char *rt_catfields(char *a, char *b) {
  * `escapes` carry in whatever the constant prefix already settled, and the scan
  * continues over the fields the expansions produced - which is the same order
  * languages/bash-interpreter.abnf's echoCmd walks. */
+/* An echo option word is "-" and one or more of n e E (`-en` = `-e -n`): 1 when f is one.
+ * Twin of echoFlags in languages/bash-interpreter.abnf. */
+int echo_flags(char *f) {
+    int j = 1;
+    if (f[0] != 45 || f[1] == 0) return 0;
+    while (f[j] != 0) {
+        if (f[j] != 110 && f[j] != 101 && f[j] != 69) return 0;
+        j = j + 1;
+    }
+    return 1;
+}
+
 int rt_echo(char *fields, int newline, int escapes) {
     int n = rt_nfields(fields);
     int i = 0;
     int flagging = 1;
     int first = 1;
+    pf_stop = 0;
     while (i < n) {
         char *f = rt_getfield(fields, i);
         if (flagging != 0) {
-            if (rt_streq(f, "-n") != 0) { newline = 0; i = i + 1; continue; }
-            if (rt_streq(f, "-e") != 0) { escapes = 1; i = i + 1; continue; }
-            if (rt_streq(f, "-E") != 0) { escapes = 0; i = i + 1; continue; }
+            if (echo_flags(f) != 0) {
+                int j = 1;
+                while (f[j] != 0) {
+                    if (f[j] == 110) newline = 0;
+                    else escapes = f[j] == 101 ? 1 : 0;
+                    j = j + 1;
+                }
+                i = i + 1;
+                continue;
+            }
             flagging = 0;
         }
         if (first == 0) rt_prints(" ");
-        rt_prints(escapes != 0 ? rt_unescape(f) : f);
+        rt_prints(escapes != 0 ? pf_bstr(f, 2) : f);
+        if (pf_stop != 0) return 0;     /* \c: no further output, not even the newline */
         first = 0;
         i = i + 1;
     }
@@ -4237,12 +4227,15 @@ int rt_cap_begin(int u)
 }
 
 /* Close the innermost buffer and answer a COPY of it (the buffer is reused) with
- * its trailing newlines dropped. */
+ * its trailing newlines dropped. Copied here, not by rt_substr: that answers its
+ * argument itself for a whole-string slice, and this buffer is not immutable. */
 char *rt_cap_end(int u)
 {
     int d2;
     char *buf;
+    char *dst;
     int l;
+    int i;
     d2 = cap_depth - 1;
     cap_depth = d2;
     buf = cap_buf[d2];
@@ -4253,9 +4246,14 @@ char *rt_cap_end(int u)
         }
         l = l - 1;
     }
-    /* terminated first: the reused buffer still holds an earlier, longer text */
-    buf[l] = (char)0;
-    return rt_substr(buf, 0, l);
+    dst = rt_bump(l + 1);
+    i = 0;
+    while (i < l) {
+        dst[i] = buf[i];
+        i = i + 1;
+    }
+    dst[l] = (char)0;
+    return dst;
 }
 
 /* Emit each byte until NUL (no trailing newline). */

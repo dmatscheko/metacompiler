@@ -2376,6 +2376,41 @@ s48() {
   check us1 "${!d[*]}" "0 1"
 }
 
+# ===== SECTION 49: line continuation, loop status, redirected assignments, echo -e =====
+# A backslash-newline between two words is no word at all. A loop's status is its last body
+# command's, 0 when the body never ran or was left by break / continue. An assignment can carry
+# a redirection, which does not apply to its command substitution. echo -e reads octal only as
+# \0NNN, keeps \" as written, accepts combined flags, and its \c ends all output. Two
+# command substitutions in a row each keep their own text. Every expected value is bash 5.3's.
+s49() {
+  s49f() { echo "$#:[$1][$2][$3]"; }
+  check lc1 "$(s49f a \
+ b)" "2:[a][b][]"
+  check lc2 "$(s49f a\
+b c)" "2:[ab][c][]"
+  local r="" i
+  while (( 0 )); do :; done; r="$r $?"
+  while true; do false; break; done; r="$r $?"
+  false; until true; do :; done; r="$r $?"
+  for i in 1 2; do false; continue; done; r="$r $?"
+  false; for ((i = 0; i < 0; i++)); do :; done; r="$r $?"
+  for ((i = 0; i < 2; i++)); do false; done; r="$r $?"
+  false; for i in; do :; done; r="$r $?"
+  false; if false; then :; fi; r="$r $?"
+  check lst1 "$r" " 0 0 0 0 0 1 0 0"
+  local a b
+  a=$(echo x) 2>/dev/null
+  b=$(echo y; false) >/dev/null
+  check asr1 "$a $b $?" "x y 1"
+  a=$(echo p)
+  b=$(echo q)
+  check csa1 "$a$b" "pq"
+  check ece1 "$(echo -e 'a\101b|a\0101b|q\"q|h\x41\xZ')" 'a\101b|aAb|q\"q|hA\xZ'
+  check ece2 "$(echo -e 'x\cy' z; echo -n w)" "xw"
+  check ece3 "$(echo -en 'p\tq'; echo -nE '\t|')" "p	q\\t|"
+  check ece4 "$(printf '%b' 'q\"q|\0101\101')" 'q\"q|AA'
+}
+
 s01   # SECTION-CALL 01
 s02   # SECTION-CALL 02
 s03   # SECTION-CALL 03
@@ -2424,5 +2459,6 @@ s45   # SECTION-CALL 45
 s46   # SECTION-CALL 46
 s47   # SECTION-CALL 47
 s48   # SECTION-CALL 48
+s49   # SECTION-CALL 49
 echo "full: $checks checks, $fails failures"
 exit $fails
