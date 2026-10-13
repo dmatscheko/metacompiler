@@ -2629,34 +2629,6 @@ NotFuncHead = :script(~~
             out.push(elems[i])
         }
     }
-    // Number#toString(radix).
-    function jsRadixStr(x, radix) {
-        if (x != x) { return "NaN" }
-        var digits = "0123456789abcdefghijklmnopqrstuvwxyz"
-        var sign = ""
-        var v = x
-        if (v < 0) { sign = "-"; v = -v }
-        var ip = Math.floor(v)
-        var frac = v - ip
-        var out = ""
-        if (ip == 0) { out = "0" }
-        while (ip >= 1) {
-            var d = ip - Math.floor(ip / radix) * radix
-            out = digits.charAt(d) + out
-            ip = Math.floor(ip / radix)
-        }
-        if (frac == 0) { return sign + out }
-        out = out + "."
-        for (var i = 0; i < 52 && frac > 0; i++) {
-            frac = frac * radix
-            var fd = Math.floor(frac)
-            out = out + digits.charAt(fd)
-            frac = frac - fd
-        }
-        while (out.length > 0 && out.charAt(out.length - 1) == "0") { out = out.substring(0, out.length - 1) }
-        if (out.charAt(out.length - 1) == ".") { out = out.substring(0, out.length - 1) }
-        return sign + out
-    }
 
     // ----- The Object global -----
     // See the twin of this comment in js-interpreter.abnf.
@@ -3231,6 +3203,16 @@ NotFuncHead = :script(~~
                 for (var fi = 0; fi < args.length; fi++) { fs = fs + String.fromCharCode(args[fi] - 0) }
                 return {v: fs}
             }
+            if (name == "fromCodePoint") {
+                var cs = ""
+                for (var ci = 0; ci < args.length; ci++) {
+                    var cn = jsToNum(args[ci])
+                    var cu = jsnCodePoint(cn)
+                    if (cu == "") { biRaise("RangeError: Invalid code point " + jsStr(cn)) }
+                    cs = cs + cu
+                }
+                return {v: cs}
+            }
             return null
         }
         if (typeof target == "string") { return jsStringMethod(target, name, args) }
@@ -3361,6 +3343,8 @@ NotFuncHead = :script(~~
             var want = jsnToInt(jsArgNum(args, 0, 0))
             var fill = (args.length > 1 && args[1] !== undefined && args[1] !== null) ? jsStr(args[1]) : " "
             if (want <= n || fill == "") { return {v: s} }
+            // V8's String::kMaxLength, the limit `repeat` checks too.
+            if (want > 536870888) { biRaise("RangeError: Invalid string length") }
             var pad = ""
             while (pad.length < want - n) { pad = pad + fill }
             pad = pad.substring(0, want - n)
@@ -3598,8 +3582,8 @@ NotFuncHead = :script(~~
             if (radix == 10) { return {v: "" + x} }
             // node makes an out-of-range radix a CATCHABLE RangeError, as on the BigInt
         // path beside it.
-        if (radix < 2 || radix > 36) { biRaise("RangeError: toString() radix must be between 2 and 36") }
-            return {v: jsRadixStr(x, radix)}
+        if (radix < 2 || radix > 36) { biRaise("RangeError: toString() radix argument must be between 2 and 36") }
+            return {v: jsnRadixStr(x, radix)}
         }
         return null
     }
@@ -4116,7 +4100,7 @@ NotFuncHead = :script(~~
     var stVals = {}
     var stNames = {"Object": ["assign", "entries", "freeze", "fromEntries", "getOwnPropertyNames", "is", "keys",
                               "seal", "values"],
-                   "String": ["fromCharCode"], "Promise": ["resolve", "reject", "all", "allSettled", "race", "any"],
+                   "String": ["fromCharCode", "fromCodePoint"], "Promise": ["resolve", "reject", "all", "allSettled", "race", "any"],
                    "Array": ["isArray"], "Symbol": ["for", "keyFor"]}
     function staticValue(g, k) {
         var gn = ""
@@ -5472,7 +5456,9 @@ NotFuncHead = :script(~~
             if (name == "test") { return {v: reTest(target, s0)} }
             if (name == "exec") { return {v: reExec(target, s0)} }
             if (name == "toString") { return {v: "/" + target.source + "/" + target.flags} }
-            fail("unknown RegExp method: " + name)
+            // Any other name is no method of a RegExp: the caller raises node's
+            // "is not a function" TypeError.
+            return null
         }
         if (typeof target != "string") { return null }
         var pat = (args.length > 0) ? args[0] : undefined
@@ -6566,7 +6552,7 @@ NotFuncHead = :script(~~
     }
     // See the twin of this comment in js-interpreter.abnf.
     function newGenObject(params, bodyT, env, self, args, isAg) {
-        var st = {sent: [], count: 0, done: false, ag: isAg, closeV: undefined, closing: false, log: []}
+        var st = {sent: [], count: 0, done: false, ag: isAg, closeV: undefined, closing: false, log: [], running: false}
         var g = {}
         g["__gen"] = true
         if (genRuns.length > 0) { glStamp(g) }
@@ -6594,6 +6580,7 @@ NotFuncHead = :script(~~
     }
     // See the twin of this comment in js-interpreter.abnf.
     function genThrow(st, params, bodyT, env, self, args, tv) {
+        genBusyCheck(st)
         if (st.done || st.count == 0) {
             st.done = true
             throw {__exc: true, v: tv}
@@ -6612,6 +6599,7 @@ NotFuncHead = :script(~~
     var jpCloseV = anytype
     jpCloseV = undefined
     function genClose(st, params, bodyT, env, self, args, rv) {
+        genBusyCheck(st)
         if (st.done || st.count == 0) {
             st.done = true
             return {value: rv, done: true, __keys: ["value", "done"]}
@@ -6620,9 +6608,15 @@ NotFuncHead = :script(~~
         st.closing = true
         return genNext(st, params, bodyT, env, self, args, {__genExitIn: true})
     }
+    // See the twin of this comment in js-interpreter.abnf.
+    function genBusyCheck(st) {
+        if (st.running) { biRaise("TypeError: Generator is already running") }
+    }
     // One step: replay the body up to yield number st.count, and report what happened.
     function genNext(st, params, bodyT, env, self, args, sendv) {
+        genBusyCheck(st)
         if (st.done) { return {value: undefined, done: true, __keys: ["value", "done"]} }
+        st.running = true
         st.sent.push(sendv)
         var run = {target: st.count, k: 0, sent: st.sent, out: undefined, ag: st.ag, log: st.log, lp: 0, floor: glSerial}
         genRuns.push(run)
@@ -6653,8 +6647,9 @@ NotFuncHead = :script(~~
             // The exit record a close raised left the body: it completes with the
             // close's value.
             else if (e != undefined && e != null && e.__genExit == true) { ret = jpCloseV }
-            else { scopes = saved; genRuns.pop(); jpCloseV = savedCloseV; throw e }
+            else { st.running = false; scopes = saved; genRuns.pop(); jpCloseV = savedCloseV; throw e }
         }
+        st.running = false
         jpCloseV = savedCloseV
         scopes = saved
         genRuns.pop()
@@ -6967,7 +6962,7 @@ NotFuncHead = :script(~~
             if (name == "toString") {
                 var radix = 10
                 if (args.length > 0 && args[0] !== undefined) { radix = args[0] - 0 }
-                if (radix < 2 || radix > 36) { biRaise("RangeError: toString() radix must be between 2 and 36") }
+                if (radix < 2 || radix > 36) { biRaise("RangeError: toString() radix argument must be between 2 and 36") }
                 return biToStr(target, radix)
             }
             if (name == "valueOf") { return target }

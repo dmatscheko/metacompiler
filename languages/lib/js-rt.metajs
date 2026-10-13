@@ -1899,7 +1899,7 @@ function jvStaticHas(g, key) {
         return key == "assign" || key == "entries" || key == "freeze" || key == "fromEntries" ||
             key == "getOwnPropertyNames" || key == "is" || key == "keys" || key == "seal" || key == "values"
     }
-    if (g == "String") { return key == "fromCharCode" }
+    if (g == "String") { return key == "fromCharCode" || key == "fromCodePoint" }
     if (g == "Promise") {
         return key == "resolve" || key == "reject" || key == "all" || key == "allSettled" || key == "race" || key == "any"
     }
@@ -3413,6 +3413,8 @@ function jvStrMethod(s, name, args) {
         }
         if (want <= units) { return s }
         if (fill == "") { return s }
+        // V8's String::kMaxLength, the limit `repeat` checks too.
+        if (want > 536870888) { jbRaise("RangeError: Invalid string length") }
         var pad = ""
         while (pad.length < want - units) { pad = pad + fill }
         pad = pad.substring(0, want - units)
@@ -3876,49 +3878,6 @@ function jvArrMethod(a, name, args) {
 // ===================================================== Number methods ======
 
 
-// jsvRadixString: Number#toString(radix) for a radix other than 10. The integer part
-// is exact; the fraction is emitted to 52 digits and trailing zeros dropped.
-function jvRadixString(x, radix) {
-    if (x !== x) { return "NaN" }
-    if (x === Infinity) { return "Infinity" }
-    if (x === -Infinity) { return "-Infinity" }
-    var sign = ""
-    var v = x
-    if (v < 0) {
-        sign = "-"
-        v = -v
-    }
-    var ip = Math.floor(v)
-    var frac = v - ip
-    var digits = "0123456789abcdefghijklmnopqrstuvwxyz"
-    var intPart = ""
-    if (ip === 0) { intPart = "0" }
-    while (ip >= 1) {
-        var d = Math.trunc(ip % radix)
-        intPart = digits.charAt(d) + intPart
-        ip = Math.floor(ip / radix)
-    }
-    if (frac === 0) { return sign + intPart }
-    var out = intPart + "."
-    var i = 0
-    while (i < 52 && frac > 0) {
-        frac = frac * radix
-        var fd = Math.floor(frac)
-        out = out + digits.charAt(fd)
-        frac = frac - fd
-        i = i + 1
-    }
-    var end = out.length
-    while (end > 0) {
-        if (out.charAt(end - 1) != "0") { break }
-        end = end - 1
-    }
-    if (end > 0) {
-        if (out.charAt(end - 1) == ".") { end = end - 1 }
-    }
-    return sign + out.substring(0, end)
-}
-
 // (255n).toString(16). The conversion runs on the DECIMAL TEXT (jbStr): repeated
 // long division of the digit string by the radix. Exact for any magnitude, which is
 // the whole point of a BigInt.
@@ -3973,8 +3932,8 @@ function jvNumMethod(x, name, args) {
         if (radix === 10) { return x + "" }
         // node makes an out-of-range radix a CATCHABLE RangeError, as on the BigInt
         // path beside it.
-        if (radix < 2 || radix > 36) { jbRaise("RangeError: toString() radix must be between 2 and 36") }
-        return jvRadixString(x, radix)
+        if (radix < 2 || radix > 36) { jbRaise("RangeError: toString() radix argument must be between 2 and 36") }
+        return jsnRadixStr(x, radix)
     }
     if (name == "valueOf") { return x }
     return jvMiss
@@ -4224,7 +4183,7 @@ function js_jsmcall(recv, key, args) {
             // The RANGE CHECK is abnf/jsrtjsbig.go's jsvBigIntMethod. An unknown
             // method name deliberately falls THROUGH rather than failing, because the
             // Go twin answers (nil, false).
-            if (radix < 2 || radix > 36) { jbRaise("RangeError: toString() radix must be between 2 and 36") }
+            if (radix < 2 || radix > 36) { jbRaise("RangeError: toString() radix argument must be between 2 and 36") }
             if (radix === 10) { return jbStr(recv) }
             return jvBigRadix(jbStr(recv), radix)
         }
@@ -4247,6 +4206,19 @@ function js_jsmcall(recv, key, args) {
             }
             return out
         }
+        if (name == "fromCodePoint") {
+            var cs = ""
+            var ci = 0
+            while (ci < args.length) {
+                var cn = jvToNumber(args[ci])
+                var cu = jsnCodePoint(cn)
+                if (cu == "") { jbRaise("RangeError: Invalid code point " + jvStr(cn)) }
+                cs = cs + cu
+                ci = ci + 1
+            }
+            return cs
+        }
+        if (jvMissCallSet) { return jvMissCall }
         fail("unknown String method: " + name)
     }
     if (typeof recv == "string") {
@@ -5796,6 +5768,7 @@ function jxMcall(recv, name, args) {
         if (name == "test") { return jxTest(recv, jxToStr(jvArg(args, 0))) }
         if (name == "exec") { return jxExec(recv, jxToStr(jvArg(args, 0))) }
         if (name == "toString") { return jxStr(recv) }
+        if (jvMissCallSet) { return jvMissCall }
         fail("unknown RegExp method: " + name)
     }
     if (typeof recv != "string") { return jxMiss }

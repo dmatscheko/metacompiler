@@ -274,7 +274,7 @@ func (rt *jsrt) jsonParse(text, reviver interface{}) interface{} {
 	v := p.value()
 	p.ws()
 	if p.i < len(p.s) {
-		p.bad()
+		p.badAt("Unexpected non-whitespace character after JSON")
 	}
 	if rt.jsonIsFn(reviver) {
 		root := newJSObject()
@@ -284,11 +284,45 @@ func (rt *jsrt) jsonParse(text, reviver interface{}) interface{} {
 	return v
 }
 
+// bad and badAt are node 24's messages. Twins of jsonBad and jsonBadAt in
+// languages/lib/json.js, where the rules are.
 func (p *jsonParser) bad() {
-	if p.i >= len(p.s) {
+	n := len(p.s)
+	if p.i >= n {
 		p.rt.bigRaise("%s", "SyntaxError: Unexpected end of JSON input")
 	}
-	p.rt.bigRaise("SyntaxError: Unexpected token '%s' in JSON at position %d", strFromUnits(p.s[p.i:p.i+1]), p.i)
+	src := strFromUnits(p.s)
+	switch src {
+	case "undefined", "NaN", "Infinity", "[object Object]":
+		p.rt.bigRaise("SyntaxError: \"%s\" is not valid JSON", src)
+	}
+	ctx := "\"" + src + "\""
+	if n > 20 {
+		switch {
+		case p.i < 10:
+			ctx = "\"" + strFromUnits(p.s[:p.i+10]) + "\"..."
+		case p.i < n-10:
+			ctx = "...\"" + strFromUnits(p.s[p.i-10:p.i+10]) + "\"..."
+		default:
+			ctx = "...\"" + strFromUnits(p.s[p.i-10:]) + "\""
+		}
+	}
+	p.rt.bigRaise("SyntaxError: Unexpected token '%s', %s is not valid JSON", strFromUnits(p.s[p.i:p.i+1]), ctx)
+}
+
+func (p *jsonParser) badAt(what string) {
+	line, start := 1, 0
+	for k := 0; k < p.i; k++ {
+		c := p.s[k]
+		if c == '\r' && k+1 < p.i && p.s[k+1] == '\n' {
+			k++
+		}
+		if c == '\n' || c == '\r' {
+			line++
+			start = k + 1
+		}
+	}
+	p.rt.bigRaise("SyntaxError: %s at position %d (line %d column %d)", what, p.i, line, p.i-start+1)
 }
 
 func (p *jsonParser) ws() {
@@ -339,13 +373,14 @@ func (p *jsonParser) value() interface{} {
 	return jsUndef
 }
 
-func (p *jsonParser) digits() {
-	start := p.i
-	for p.i < len(p.s) && p.s[p.i] >= '0' && p.s[p.i] <= '9' {
-		p.i++
+func (p *jsonParser) isDigit() bool { return p.i < len(p.s) && p.s[p.i] >= '0' && p.s[p.i] <= '9' }
+
+func (p *jsonParser) digits(what string) {
+	if !p.isDigit() {
+		p.badAt(what)
 	}
-	if p.i == start {
-		p.bad()
+	for p.isDigit() {
+		p.i++
 	}
 }
 
@@ -359,19 +394,22 @@ func (p *jsonParser) number() interface{} {
 	}
 	if p.at('0') {
 		p.i++
+		if p.isDigit() {
+			p.badAt("Unexpected number in JSON")
+		}
 	} else {
-		p.digits()
+		p.digits("No number after minus sign in JSON")
 	}
 	if p.at('.') {
 		p.i++
-		p.digits()
+		p.digits("Unterminated fractional number in JSON")
 	}
 	if p.at('e') || p.at('E') {
 		p.i++
 		if p.at('+') || p.at('-') {
 			p.i++
 		}
-		p.digits()
+		p.digits("Exponent part is missing a number in JSON")
 	}
 	f, _ := strconv.ParseFloat(strFromUnits(p.s[start:p.i]), 64)
 	return f
@@ -382,14 +420,14 @@ func (p *jsonParser) str() string {
 	out := []uint16{}
 	for {
 		if p.i >= len(p.s) {
-			p.bad()
+			p.badAt("Unterminated string in JSON")
 		}
 		c := p.s[p.i]
 		if c == '"' {
 			break
 		}
 		if c < 32 {
-			p.bad()
+			p.badAt("Bad control character in string literal in JSON")
 		}
 		if c != '\\' {
 			out = append(out, c)
@@ -423,7 +461,7 @@ func (p *jsonParser) str() string {
 					h = jsonHexVal(p.s[p.i])
 				}
 				if h < 0 {
-					p.bad()
+					p.badAt("Bad Unicode escape in JSON")
 				}
 				cu = cu*16 + uint16(h)
 				p.i++
@@ -431,7 +469,7 @@ func (p *jsonParser) str() string {
 			out = append(out, cu)
 		default:
 			p.i--
-			p.bad()
+			p.badAt("Bad escaped character in JSON")
 		}
 	}
 	p.i++
@@ -461,17 +499,12 @@ func (p *jsonParser) array() interface{} {
 	for {
 		out.elems = append(out.elems, p.value())
 		p.ws()
-		if p.i >= len(p.s) {
-			p.bad()
+		if !p.at(']') && !p.at(',') {
+			p.badAt("Expected ',' or ']' after array element in JSON")
 		}
-		c := p.s[p.i]
 		p.i++
-		if c == ']' {
+		if p.s[p.i-1] == ']' {
 			return out
-		}
-		if c != ',' {
-			p.i--
-			p.bad()
 		}
 	}
 }
@@ -484,30 +517,27 @@ func (p *jsonParser) object() interface{} {
 		p.i++
 		return o
 	}
+	keyRule := "Expected property name or '}' in JSON"
 	for {
 		p.ws()
 		if !p.at('"') {
-			p.bad()
+			p.badAt(keyRule)
 		}
+		keyRule = "Expected double-quoted property name in JSON"
 		k := p.str()
 		p.ws()
 		if !p.at(':') {
-			p.bad()
+			p.badAt("Expected ':' after property name in JSON")
 		}
 		p.i++
 		o.set(k, p.value())
 		p.ws()
-		if p.i >= len(p.s) {
-			p.bad()
+		if !p.at('}') && !p.at(',') {
+			p.badAt("Expected ',' or '}' after property value in JSON")
 		}
-		c := p.s[p.i]
 		p.i++
-		if c == '}' {
+		if p.s[p.i-1] == '}' {
 			return o
-		}
-		if c != ',' {
-			p.i--
-			p.bad()
 		}
 	}
 }

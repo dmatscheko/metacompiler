@@ -116,8 +116,8 @@ function jsnParseFloat(s) {
 // prefix read when r is 0 or 16, then the longest run of digits below r; NaN when
 // there is none. A sign applies to a zero too ("-0" is -0). The value is exact for
 // base ten (the decimal literal path) and a power-of-two base; in another base the
-// specification leaves a value past 2^53 to the implementation, and here it is the
-// digit-by-digit multiply-add.
+// specification leaves a value past 2^53 to the implementation, and here it is V8's
+// (jsnIntGeneric).
 function jsnParseInt(s, r) {
     var i = 0
     while (i < s.length && jsnIsWs(s.charCodeAt(i))) { i = i + 1 }
@@ -142,11 +142,62 @@ function jsnParseInt(s, r) {
     var v = 0
     if (radix == 10) { v = jsnDecVal(s.substring(start, i)) }
     else if (radix == 2 || radix == 4 || radix == 8 || radix == 16 || radix == 32) { v = jsnIntPow2(s, start, i, radix) }
-    else {
-        for (var k = start; k < i; k++) { v = v * radix + jsnDigitVal(s.charCodeAt(k)) }
-    }
+    else { v = jsnIntGeneric(s, start, i, radix) }
     if (neg) { return -v }
     return v
+}
+
+// The digits s[a..b) in a radix that is neither 10 nor a power of two, read as V8
+// reads them: in chunks whose multiplier radix^k stays at most 0xFFFFFFFF / 36, each
+// folded into the value as ONE fused multiply-add, v * multiplier + chunk rounded
+// once - what node computes on arm64. Leading zeros are skipped first, so they do not
+// shift the chunks.
+function jsnIntGeneric(s, a, b, radix) {
+    var v = 0
+    var k = a
+    while (k < b && s.charCodeAt(k) == 48) { k = k + 1 }
+    while (k < b) {
+        var part = 0
+        var mult = 1
+        while (k < b && mult * radix <= 119304647) {
+            part = part * radix + jsnDigitVal(s.charCodeAt(k))
+            mult = mult * radix
+            k = k + 1
+        }
+        v = jsnFma(v, mult, part)
+    }
+    return v
+}
+
+// v * mult + part rounded once, half to even, for an integral v >= 0 and
+// 0 <= part < mult < 2^27. Below 2^53 the product is exact and the sum rounds once;
+// above, the exact sum is built in base 16 (every step exact in a double) and
+// rounded by jsnIntPow2.
+function jsnFma(v, mult, part) {
+    if (v * mult < 9007199254740992) { return v * mult + part }
+    if (v - v !== 0) { return v }
+    var d = []
+    var x = v
+    while (x > 0) {
+        var r = x % 16
+        d.push(r)
+        x = (x - r) / 16
+    }
+    var carry = part
+    for (var j = 0; j < d.length; j++) {
+        var t = d[j] * mult + carry
+        var lo = t % 16
+        d[j] = lo
+        carry = (t - lo) / 16
+    }
+    while (carry > 0) {
+        var r2 = carry % 16
+        d.push(r2)
+        carry = (carry - r2) / 16
+    }
+    var h = ""
+    for (var q = d.length - 1; q >= 0; q--) { h = h + "0123456789abcdef".charAt(d[q]) }
+    return jsnIntPow2(h, 0, h.length, 16)
 }
 
 // The digits s[a..b) in a power-of-two base, rounded once, half to even: the first
@@ -173,6 +224,93 @@ function jsnIntPow2(s, a, b, radix) {
     if (rnd == 1 && (sticky || v % 2 == 1)) { v = v + 1 }
     if (exp > 0) { v = v * Math.pow(2, exp) }
     return v
+}
+
+// Number#toString(radix) for a radix other than 10, which ECMA-262 leaves to the
+// implementation: V8's DoubleToRadixCString. The fraction gets digits only while the
+// remainder is at least delta, half the gap to the next double, and the last digit is
+// rounded half to even, carrying back through the digits already written; the
+// integer part is exact while it is below 2^53 times the radix and zero-filled above.
+// Twin of jsvRadixString in abnf/jsrtjsprint.go.
+function jsnRadixStr(x, radix) {
+    if (x !== x) { return "NaN" }
+    if (x - x !== 0) {
+        if (x > 0) { return "Infinity" }
+        return "-Infinity"
+    }
+    if (x == 0) { return "0" }
+    var digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+    var v = x
+    if (v < 0) { v = -v }
+    var integer = Math.floor(v)
+    var fraction = v - integer
+    var delta = jsnHalfGap(v)
+    var fd = []
+    if (fraction >= delta) {
+        while (true) {
+            fraction = fraction * radix
+            delta = delta * radix
+            var digit = Math.floor(fraction)
+            fd.push(digit)
+            fraction = fraction - digit
+            if ((fraction > 0.5 || (fraction == 0.5 && digit % 2 == 1)) && fraction + delta > 1) {
+                while (true) {
+                    if (fd.length == 0) {
+                        integer = integer + 1
+                        break
+                    }
+                    var last = fd.pop()
+                    if (last + 1 < radix) {
+                        fd.push(last + 1)
+                        break
+                    }
+                }
+                break
+            }
+            if (fraction < delta) { break }
+        }
+    }
+    var out = ""
+    while (integer / radix >= 9007199254740992) {
+        integer = integer / radix
+        out = out + "0"
+    }
+    while (true) {
+        var rem = integer % radix
+        out = digits.charAt(rem) + out
+        integer = (integer - rem) / radix
+        if (integer <= 0) { break }
+    }
+    if (fd.length > 0) {
+        out = out + "."
+        for (var i = 0; i < fd.length; i++) { out = out + digits.charAt(fd[i]) }
+    }
+    if (x < 0) { return "-" + out }
+    return out
+}
+
+// One code point of String.fromCodePoint (ES2023 22.1.2.2) as UTF-16 text, or ""
+// when n is not an integral code point, for which the caller raises node's
+// "RangeError: Invalid code point <n>".
+function jsnCodePoint(n) {
+    if (n !== n || n - n !== 0 || n != Math.floor(n) || n < 0 || n > 1114111) { return "" }
+    if (n < 65536) { return String.fromCharCode(n) }
+    var c = n - 65536
+    return String.fromCharCode(55296 + Math.floor(c / 1024)) + String.fromCharCode(56320 + c % 1024)
+}
+
+// Half the gap from a positive finite v to the next double up, and at least the
+// smallest subnormal: 2^(e-53) for 2^e <= v < 2^(e+1), found by exact scaling.
+function jsnHalfGap(v) {
+    var p = 1
+    while (p > v) { p = p / 2 }
+    while (p * 2 <= v) { p = p * 2 }
+    var d = p / 9007199254740992
+    if (d == 0) {
+        d = p
+        while (d / 2 > 0) { d = d / 2 }
+    }
+    return d
 }
 
 // JavaScript's order of two strings, -1, 0 or 1: by UTF-16 code units (ECMA-262

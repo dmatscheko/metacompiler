@@ -3735,6 +3735,108 @@ function s75() {
     check("gp75j", [...s75try(new S75Flaky(4))].join(",") === "1,1!boom,1!boom3,1!boom34");
 }
 
+// ===== SECTION 76: a generator resuming itself, padStart's limit, a missing method, labeled jumps across try =====
+// A generator body that resumes itself gets a catchable TypeError and the generator
+// goes on; padStart / padEnd past V8's string length limit raise a RangeError instead
+// of building the string; a method a builtin object lacks is a catchable TypeError; a
+// labeled break or continue that crosses several try bodies closes every for-of
+// iterator it leaves, innermost first, each after the finally around it. Values read
+// off node 24.
+let s76me: any = null;
+function* s76self(): Generator<any> {
+    let r = "none";
+    try { s76me.next(); } catch (e: any) { r = (e instanceof TypeError) + " " + e.message; }
+    yield r;
+    yield 2;
+}
+function s76iter(name: string, log: string[]): any {
+    let i = 0;
+    const it: any = { next(): any { i++; return { value: i, done: i > 3 }; }, return(): any { log.push("close " + name); return { done: true }; } };
+    it[Symbol.iterator] = function () { return it; };
+    return it;
+}
+function s76() {
+    s76me = s76self();
+    check("gr76a", s76me.next().value === "true Generator is already running");
+    check("gr76b", s76me.next().value === 2 && s76me.next().done === true);
+    let pe = "";
+    try { "abc".padStart(Infinity, "*"); } catch (e: any) { pe = e.name + ": " + e.message; }
+    check("ps76a", pe === "RangeError: Invalid string length");
+    pe = "";
+    try { "abc".padEnd(536870889, "*"); } catch (e: any) { pe = e.name + ": " + e.message; }
+    check("ps76b", pe === "RangeError: Invalid string length");
+    check("ps76c", "abc".padStart(Infinity, "") === "abc" && "abc".padEnd(-Infinity, "*") === "abc");
+    let me = "";
+    try { (String as any).nope(65); } catch (e: any) { me = e.name + ": " + e.message; }
+    check("mm76a", me === "TypeError: String.nope is not a function");
+    me = "";
+    try { (/a/ as any).nope(1); } catch (e: any) { me = e.name + ": " + e.message; }
+    check("mm76b", me === "TypeError: /a/.nope is not a function");
+    let log: string[] = [];
+    outer: for (const a of s76iter("A", log)) {
+        try {
+            for (const b of s76iter("B", log)) {
+                try {
+                    for (const c of s76iter("C", log)) {
+                        try { for (const d of s76iter("D", log)) { break outer; } } finally { log.push("f3"); }
+                    }
+                } finally { log.push("f2"); }
+            }
+        } finally { log.push("f1"); }
+    }
+    check("lb76a", log.join(",") === "close D,f3,close C,f2,close B,f1,close A");
+    log = [];
+    outer2: for (const a of s76iter("A", log)) {
+        try {
+            for (const b of s76iter("B", log)) {
+                try { for (const c of s76iter("C", log)) { continue outer2; } } finally { log.push("f2"); }
+            }
+        } finally { log.push("f1"); }
+    }
+    check("lb76b", log.join(",") === "close C,f2,close B,f1,close C,f2,close B,f1,close C,f2,close B,f1");
+    log = [];
+    blk: {
+        try {
+            for (const b of s76iter("B", log)) {
+                try { for (const c of s76iter("C", log)) { break blk; } } finally { log.push("f2"); }
+            }
+        } finally { log.push("f1"); }
+    }
+    check("lb76c", log.join(",") === "close C,f2,close B,f1");
+}
+
+// ===== SECTION 77: Number#toString(radix), parseInt in an odd radix, JSON.parse's errors, String.fromCodePoint =====
+// toString(radix) is V8's DoubleToRadixCString: fraction digits only while they are
+// significant, the last rounded half to even, the integer part zero-filled past 2^53
+// times the radix. parseInt in a radix other than 10 or a power of two folds V8's
+// digit chunks in with one rounding each. JSON.parse names the rule a malformed text
+// breaks, with its position, line and column, or quotes the text around an
+// unexpected character. Values read off node 24.
+function s77err(f: any) {
+    try { f(); return "no error"; } catch (e: any) { return e.name + ": " + e.message; }
+}
+function s77() {
+    check("rx77a", (1e21).toString(36) === "5v1j4f4ds7c000" && Math.pow(2, 60).toString(7) === "2031000661631341064200");
+    check("rx77b", (0.1).toString(3) === "0.0022002200220022002200220022002201" && (-255.5).toString(7) === "-513.33333333333333334");
+    check("rx77c", (1 / 3).toString(2) === "0.010101010101010101010101010101010101010101010101010101" && (0.5).toString(36) === "0.i");
+    check("rx77d", s77err(function () { (5).toString(1); }) === "RangeError: toString() radix argument must be between 2 and 36");
+    check("pi77a", String(parseInt("1000000000000000000000", 7)) === "558545864083284030");
+    check("pi77b", String(parseInt("001210100002101012010100020021201011200121011222102221000020101", 3)) === "7.589052697856112e+28");
+    check("js77a", s77err(function () { JSON.parse("{bad"); }) === "SyntaxError: Expected property name or '}' in JSON at position 1 (line 1 column 2)");
+    check("js77b", s77err(function () { JSON.parse("[1 2]"); }) === "SyntaxError: Expected ',' or ']' after array element in JSON at position 3 (line 1 column 4)");
+    check("js77c", s77err(function () { JSON.parse("\"abc"); }) === "SyntaxError: Unterminated string in JSON at position 4 (line 1 column 5)");
+    check("js77d", s77err(function () { JSON.parse("abc"); }) === "SyntaxError: Unexpected token 'a', \"abc\" is not valid JSON");
+    check("js77e", s77err(function () { JSON.parse("[1,2,3,4,5,6,7,8,9,10,11,12,13,14,x]"); }) === "SyntaxError: Unexpected token 'x', ...\",12,13,14,x]\" is not valid JSON");
+    check("js77f", s77err(function () { JSON.parse("{\n\"a\": 1,\n\"b\" 2\n}"); }) === "SyntaxError: Expected ':' after property name in JSON at position 14 (line 3 column 5)");
+    check("js77g", s77err(function () { JSON.parse("01"); }) === "SyntaxError: Unexpected number in JSON at position 1 (line 1 column 2)");
+    check("js77h", s77err(function () { JSON.parse("1 2"); }) === "SyntaxError: Unexpected non-whitespace character after JSON at position 2 (line 1 column 3)");
+    check("js77i", s77err(function () { JSON.parse("undefined"); }) === "SyntaxError: \"undefined\" is not valid JSON");
+    const cp = (String as any).fromCodePoint(65, 128512);
+    check("fc77a", cp.length === 3 && cp.charCodeAt(1) === 0xD83D && cp.charCodeAt(2) === 0xDE00 && (String as any).fromCodePoint() === "");
+    check("fc77b", s77err(function () { (String as any).fromCodePoint(1.5); }) === "RangeError: Invalid code point 1.5" &&
+        s77err(function () { (String as any).fromCodePoint(0x110000); }) === "RangeError: Invalid code point 1114112");
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -3813,6 +3915,8 @@ function main(): number {
     s73(); // SECTION-CALL 73
     s74(); // SECTION-CALL 74
     s75(); // SECTION-CALL 75
+    s76(); // SECTION-CALL 76
+    s77(); // SECTION-CALL 77
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

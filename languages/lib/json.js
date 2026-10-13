@@ -22,9 +22,9 @@
 //   jsonHParseNum(s)        the double a JSON number lexeme denotes
 //   jsonHRaise(text)        throw the Error the text names ("TypeError: ...")
 //
-// What is not here: an error MESSAGE of JSON.parse is node's only for a truncated
-// text ("Unexpected end of JSON input"); every other malformed text raises a
-// SyntaxError with a message of this file's own.
+// The error MESSAGES of JSON.parse are node 24's (V8's json-parser): a rule the
+// parser names (jsonBadAt) carries the position, line and column, and any other
+// unexpected character quotes the text around it (jsonBad).
 
 var jsonMiss = {"__jsonmiss": true}
 
@@ -223,7 +223,7 @@ function jsonParse(text, reviver) {
     var v = anytype // The parsed value, of any type.
     v = jsonValue(p)
     jsonWs(p)
-    if (p["i"] < p["s"].length) { jsonBad(p) }
+    if (p["i"] < p["s"].length) { jsonBadAt(p, "Unexpected non-whitespace character after JSON") }
     if (jsonHIsFn(reviver)) {
         var root = jsonHNew()
         jsonHPut(root, "", v)
@@ -232,11 +232,45 @@ function jsonParse(text, reviver) {
     return v
 }
 
+// An unexpected character at the cursor, or the end of the text. The text is quoted
+// whole up to 20 characters, else the 10 on either side of the cursor; four words
+// that ToString makes of a non-JSON value are named alone.
 function jsonBad(p) {
     var s = p["s"]
     var i = p["i"]
     if (i >= s.length) { jsonHRaise("SyntaxError: Unexpected end of JSON input") }
-    jsonHRaise("SyntaxError: Unexpected token '" + s.charAt(i) + "' in JSON at position " + jsonHStr(i))
+    if (s == "undefined" || s == "NaN" || s == "Infinity" || s == "[object Object]") {
+        jsonHRaise("SyntaxError: \"" + s + "\" is not valid JSON")
+    }
+    var ctx = "\"" + s + "\""
+    if (s.length > 20) {
+        if (i < 10) { ctx = "\"" + s.substring(0, i + 10) + "\"..." }
+        else if (i < s.length - 10) { ctx = "...\"" + s.substring(i - 10, i + 10) + "\"..." }
+        else { ctx = "...\"" + s.substring(i - 10, s.length) + "\"" }
+    }
+    jsonHRaise("SyntaxError: Unexpected token '" + s.charAt(i) + "', " + ctx + " is not valid JSON")
+    return undefined
+}
+
+// A malformed text breaking the rule `what` at the cursor, the end of the text
+// included. The line counts CR, LF and CRLF as one break each.
+function jsonBadAt(p, what) {
+    var s = p["s"]
+    var i = p["i"]
+    var line = 1
+    var start = 0
+    var k = 0
+    while (k < i) {
+        var c = s.charCodeAt(k)
+        if (c == 13 && k + 1 < i && s.charCodeAt(k + 1) == 10) { k = k + 1 }
+        if (c == 10 || c == 13) {
+            line = line + 1
+            start = k + 1
+        }
+        k = k + 1
+    }
+    jsonHRaise("SyntaxError: " + what + " at position " + jsonHStr(i) + " (line " + jsonHStr(line) +
+               " column " + jsonHStr(i - start + 1) + ")")
     return undefined
 }
 
@@ -285,13 +319,14 @@ function jsonValue(p) {
     return undefined
 }
 
-function jsonDigits(p) {
-    var s = p["s"]
-    var i = p["i"]
-    var start = i
-    while (i < s.length && s.charCodeAt(i) >= 48 && s.charCodeAt(i) <= 57) { i = i + 1 }
-    p["i"] = i
-    if (i == start) { jsonBad(p) }
+function jsonIsDigit(p) {
+    return p["i"] < p["s"].length && p["s"].charCodeAt(p["i"]) >= 48 && p["s"].charCodeAt(p["i"]) <= 57
+}
+
+// One or more digits, or the rule `what` is broken.
+function jsonDigits(p, what) {
+    if (!jsonIsDigit(p)) { jsonBadAt(p, what) }
+    while (jsonIsDigit(p)) { p["i"] = p["i"] + 1 }
     return undefined
 }
 
@@ -300,16 +335,18 @@ function jsonParseNum(p) {
     var s = p["s"]
     var start = p["i"]
     if (s.charCodeAt(p["i"]) == 45) { p["i"] = p["i"] + 1 }
-    if (p["i"] < s.length && s.charCodeAt(p["i"]) == 48) { p["i"] = p["i"] + 1 }
-    else { jsonDigits(p) }
+    if (p["i"] < s.length && s.charCodeAt(p["i"]) == 48) {
+        p["i"] = p["i"] + 1
+        if (jsonIsDigit(p)) { jsonBadAt(p, "Unexpected number in JSON") }
+    } else { jsonDigits(p, "No number after minus sign in JSON") }
     if (p["i"] < s.length && s.charCodeAt(p["i"]) == 46) {
         p["i"] = p["i"] + 1
-        jsonDigits(p)
+        jsonDigits(p, "Unterminated fractional number in JSON")
     }
     if (p["i"] < s.length && (s.charCodeAt(p["i"]) == 101 || s.charCodeAt(p["i"]) == 69)) {
         p["i"] = p["i"] + 1
         if (p["i"] < s.length && (s.charCodeAt(p["i"]) == 43 || s.charCodeAt(p["i"]) == 45)) { p["i"] = p["i"] + 1 }
-        jsonDigits(p)
+        jsonDigits(p, "Exponent part is missing a number in JSON")
     }
     return jsonHParseNum(s.substring(start, p["i"]))
 }
@@ -322,13 +359,13 @@ function jsonParseStr(p) {
     while (true) {
         if (i >= s.length) {
             p["i"] = i
-            jsonBad(p)
+            jsonBadAt(p, "Unterminated string in JSON")
         }
         var c = s.charCodeAt(i)
         if (c == 34) { break }
         if (c < 32) {
             p["i"] = i
-            jsonBad(p)
+            jsonBadAt(p, "Bad control character in string literal in JSON")
         }
         if (c == 92) {
             out = out + s.substring(run, i)
@@ -354,7 +391,7 @@ function jsonParseStr(p) {
                     if (i < s.length) { h = jsonHexVal(s.charCodeAt(i)) }
                     if (h < 0) {
                         p["i"] = i
-                        jsonBad(p)
+                        jsonBadAt(p, "Bad Unicode escape in JSON")
                     }
                     cu = cu * 16 + h
                     i = i + 1
@@ -363,7 +400,7 @@ function jsonParseStr(p) {
                 out = out + String.fromCharCode(cu)
             } else {
                 p["i"] = i - 1
-                jsonBad(p)
+                jsonBadAt(p, "Bad escaped character in JSON")
             }
             run = i
             continue
@@ -391,14 +428,11 @@ function jsonParseArr(p) {
     while (true) {
         out.push(jsonValue(p))
         jsonWs(p)
-        if (p["i"] >= p["s"].length) { jsonBad(p) }
-        var c = p["s"].charCodeAt(p["i"])
+        var c = -1
+        if (p["i"] < p["s"].length) { c = p["s"].charCodeAt(p["i"]) }
+        if (c != 93 && c != 44) { jsonBadAt(p, "Expected ',' or ']' after array element in JSON") }
         p["i"] = p["i"] + 1
         if (c == 93) { return out }
-        if (c != 44) {
-            p["i"] = p["i"] - 1
-            jsonBad(p)
-        }
     }
     return out
 }
@@ -411,23 +445,22 @@ function jsonParseObj(p) {
         p["i"] = p["i"] + 1
         return o
     }
+    var keyRule = "Expected property name or '}' in JSON"
     while (true) {
         jsonWs(p)
-        if (p["i"] >= p["s"].length || p["s"].charCodeAt(p["i"]) != 34) { jsonBad(p) }
+        if (p["i"] >= p["s"].length || p["s"].charCodeAt(p["i"]) != 34) { jsonBadAt(p, keyRule) }
+        keyRule = "Expected double-quoted property name in JSON"
         var k = jsonParseStr(p)
         jsonWs(p)
-        if (p["i"] >= p["s"].length || p["s"].charCodeAt(p["i"]) != 58) { jsonBad(p) }
+        if (p["i"] >= p["s"].length || p["s"].charCodeAt(p["i"]) != 58) { jsonBadAt(p, "Expected ':' after property name in JSON") }
         p["i"] = p["i"] + 1
         jsonHPut(o, k, jsonValue(p))
         jsonWs(p)
-        if (p["i"] >= p["s"].length) { jsonBad(p) }
-        var c = p["s"].charCodeAt(p["i"])
+        var c = -1
+        if (p["i"] < p["s"].length) { c = p["s"].charCodeAt(p["i"]) }
+        if (c != 125 && c != 44) { jsonBadAt(p, "Expected ',' or '}' after property value in JSON") }
         p["i"] = p["i"] + 1
         if (c == 125) { return o }
-        if (c != 44) {
-            p["i"] = p["i"] - 1
-            jsonBad(p)
-        }
     }
     return o
 }

@@ -6975,27 +6975,39 @@ NotFuncHead = :script(~~
     // excDispatch branches a goto signal (a labeled break or continue out of the try
     // body, see labelGotoN) straight to the label's block, which would leave this
     // function's for-of loops between the label and the try open. For the dispatch,
-    // each such label's block is swapped for a pad that closes them first.
+    // each such label's block is swapped for a pad that closes them first. A label in
+    // an ENCLOSING function (this is itself a try body) is left by every for-of loop
+    // here, so its pad closes all of them and forwards the signal outwards, which
+    // excDispatch would otherwise do with the loops still open.
     function excDispatchLabels(b, ctl) {
         var swaps = []
         for (var i = 0; i < labelStack.length; i++) {
             var l = labelStack[i]
             if (l.tag == curFTag && forOfIters.length > l.fon) {
-                labelPad(l.brkN, l.fon, swaps)
-                labelPad(l.contN, l.fon, swaps)
+                labelPad(l.brkN, l.fon, swaps, null)
+                labelPad(l.contN, l.fon, swaps, null)
+            }
+            if (l.tag != curFTag && forOfIters.length > 0 && inCtlBody()) {
+                labelPad(l.brkN, 0, swaps, ctl)
+                labelPad(l.contN, 0, swaps, ctl)
             }
         }
         var r = excDispatch(b, ctl)
-        for (var j = 0; j < swaps.length; j++) { ctlLabels[swaps[j].n].blk = swaps[j].blk }
+        for (var j = 0; j < swaps.length; j++) {
+            ctlLabels[swaps[j].n].blk = swaps[j].blk
+            ctlLabels[swaps[j].n].tag = swaps[j].tag
+        }
         return r
     }
-    function labelPad(n, fon, swaps) {
+    // fwd is the signal to return when the label lies outside this function, else null.
+    function labelPad(n, fon, swaps, fwd) {
         if (n < 0) { return }
         var pad = curF.NewBlock("")
         emitIterUnwind(pad, fon)
-        pad.NewBr(ctlLabels[n].blk)
-        swaps.push({n: n, blk: ctlLabels[n].blk})
+        if (fwd == null) { pad.NewBr(ctlLabels[n].blk) } else { pad.NewRet(fwd) }
+        swaps.push({n: n, blk: ctlLabels[n].blk, tag: ctlLabels[n].tag})
         ctlLabels[n].blk = pad
+        ctlLabels[n].tag = curFTag
     }
     function labelGotoN(tag, blk) {
         ctlLabels.push({tag: tag, blk: blk})
@@ -7426,6 +7438,16 @@ NotFuncHead = :script(~~
         callExt(b, "js_rt_missvar", [callExt(b, "js_closure", [handle(vIdx), curScopeV])])
         callExt(b, "js_rt_missmem", [callExt(b, "js_closure", [handle(mIdx), curScopeV])])
         callExt(b, "js_rt_missset", [callExt(b, "js_closure", [handle(sIdx), curScopeV])])
+
+        // A generator resumed while its own body runs (it stepped itself) raises
+        // node's catchable "TypeError: Generator is already running" through the
+        // floor's RT_GEN_BUSY and the twin's genBusy hook, instead of aborting.
+        funcCount++
+        var gIdx = funcCount
+        var gf = m.NewFunc("jsf_" + gIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var gb = gf.NewBlock("entry")
+        gb.NewRet(callExt(gb, "js_jserrmk", [emitStr(gb, "TypeError: Generator is already running")]))
+        callExt(b, "js_rt_genbusy", [callExt(b, "js_closure", [handle(gIdx), curScopeV])])
 
         // The fourth of the family, and the one the call site needs: js_rt_misscall
         // hands both engines the MISS SENTINEL, after which a method call nothing

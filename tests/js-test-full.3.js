@@ -1911,6 +1911,108 @@ function s81() {
     check("gp81j", [...s81try(new S81Flaky(4))].join(",") === "1,1!boom,1!boom3,1!boom34")
 }
 
+// ===== SECTION 82: a generator resuming itself, padStart's limit, a missing method, labeled jumps across try =====
+// A generator body that resumes itself gets a catchable TypeError and the generator
+// goes on; padStart / padEnd past V8's string length limit raise a RangeError instead
+// of building the string; a method a builtin object lacks is a catchable TypeError; a
+// labeled break or continue that crosses several try bodies closes every for-of
+// iterator it leaves, innermost first, each after the finally around it. Values read
+// off node 24.
+var s82me = null
+function* s82self() {
+    let r = "none"
+    try { s82me.next() } catch (e) { r = (e instanceof TypeError) + " " + e.message }
+    yield r
+    yield 2
+}
+function s82iter(name, log) {
+    let i = 0
+    const it = { next() { i++; return { value: i, done: i > 3 } }, return() { log.push("close " + name); return { done: true } } }
+    it[Symbol.iterator] = function () { return it }
+    return it
+}
+function s82() {
+    s82me = s82self()
+    check("gr82a", s82me.next().value === "true Generator is already running")
+    check("gr82b", s82me.next().value === 2 && s82me.next().done === true)
+    let pe = ""
+    try { "abc".padStart(Infinity, "*") } catch (e) { pe = e.name + ": " + e.message }
+    check("ps82a", pe === "RangeError: Invalid string length")
+    pe = ""
+    try { "abc".padEnd(536870889, "*") } catch (e) { pe = e.name + ": " + e.message }
+    check("ps82b", pe === "RangeError: Invalid string length")
+    check("ps82c", "abc".padStart(Infinity, "") === "abc" && "abc".padEnd(-Infinity, "*") === "abc")
+    let me = ""
+    try { String.nope(65) } catch (e) { me = e.name + ": " + e.message }
+    check("mm82a", me === "TypeError: String.nope is not a function")
+    me = ""
+    try { /a/.nope(1) } catch (e) { me = e.name + ": " + e.message }
+    check("mm82b", me === "TypeError: /a/.nope is not a function")
+    let log = []
+    outer: for (const a of s82iter("A", log)) {
+        try {
+            for (const b of s82iter("B", log)) {
+                try {
+                    for (const c of s82iter("C", log)) {
+                        try { for (const d of s82iter("D", log)) { break outer } } finally { log.push("f3") }
+                    }
+                } finally { log.push("f2") }
+            }
+        } finally { log.push("f1") }
+    }
+    check("lb82a", log.join(",") === "close D,f3,close C,f2,close B,f1,close A")
+    log = []
+    outer2: for (const a of s82iter("A", log)) {
+        try {
+            for (const b of s82iter("B", log)) {
+                try { for (const c of s82iter("C", log)) { continue outer2 } } finally { log.push("f2") }
+            }
+        } finally { log.push("f1") }
+    }
+    check("lb82b", log.join(",") === "close C,f2,close B,f1,close C,f2,close B,f1,close C,f2,close B,f1")
+    log = []
+    blk: {
+        try {
+            for (const b of s82iter("B", log)) {
+                try { for (const c of s82iter("C", log)) { break blk } } finally { log.push("f2") }
+            }
+        } finally { log.push("f1") }
+    }
+    check("lb82c", log.join(",") === "close C,f2,close B,f1")
+}
+
+// ===== SECTION 83: Number#toString(radix), parseInt in an odd radix, JSON.parse's errors, String.fromCodePoint =====
+// toString(radix) is V8's DoubleToRadixCString: fraction digits only while they are
+// significant, the last rounded half to even, the integer part zero-filled past 2^53
+// times the radix. parseInt in a radix other than 10 or a power of two folds V8's
+// digit chunks in with one rounding each. JSON.parse names the rule a malformed text
+// breaks, with its position, line and column, or quotes the text around an
+// unexpected character. Values read off node 24.
+function s83err(f) {
+    try { f(); return "no error" } catch (e) { return e.name + ": " + e.message }
+}
+function s83() {
+    check("rx83a", (1e21).toString(36) === "5v1j4f4ds7c000" && Math.pow(2, 60).toString(7) === "2031000661631341064200")
+    check("rx83b", (0.1).toString(3) === "0.0022002200220022002200220022002201" && (-255.5).toString(7) === "-513.33333333333333334")
+    check("rx83c", (1 / 3).toString(2) === "0.010101010101010101010101010101010101010101010101010101" && (0.5).toString(36) === "0.i")
+    check("rx83d", s83err(function () { (5).toString(1) }) === "RangeError: toString() radix argument must be between 2 and 36")
+    check("pi83a", String(parseInt("1000000000000000000000", 7)) === "558545864083284030")
+    check("pi83b", String(parseInt("001210100002101012010100020021201011200121011222102221000020101", 3)) === "7.589052697856112e+28")
+    check("js83a", s83err(function () { JSON.parse("{bad") }) === "SyntaxError: Expected property name or '}' in JSON at position 1 (line 1 column 2)")
+    check("js83b", s83err(function () { JSON.parse("[1 2]") }) === "SyntaxError: Expected ',' or ']' after array element in JSON at position 3 (line 1 column 4)")
+    check("js83c", s83err(function () { JSON.parse("\"abc") }) === "SyntaxError: Unterminated string in JSON at position 4 (line 1 column 5)")
+    check("js83d", s83err(function () { JSON.parse("abc") }) === "SyntaxError: Unexpected token 'a', \"abc\" is not valid JSON")
+    check("js83e", s83err(function () { JSON.parse("[1,2,3,4,5,6,7,8,9,10,11,12,13,14,x]") }) === "SyntaxError: Unexpected token 'x', ...\",12,13,14,x]\" is not valid JSON")
+    check("js83f", s83err(function () { JSON.parse("{\n\"a\": 1,\n\"b\" 2\n}") }) === "SyntaxError: Expected ':' after property name in JSON at position 14 (line 3 column 5)")
+    check("js83g", s83err(function () { JSON.parse("01") }) === "SyntaxError: Unexpected number in JSON at position 1 (line 1 column 2)")
+    check("js83h", s83err(function () { JSON.parse("1 2") }) === "SyntaxError: Unexpected non-whitespace character after JSON at position 2 (line 1 column 3)")
+    check("js83i", s83err(function () { JSON.parse("undefined") }) === "SyntaxError: \"undefined\" is not valid JSON")
+    const cp = String.fromCodePoint(65, 128512)
+    check("fc83a", cp.length === 3 && cp.charCodeAt(1) === 0xD83D && cp.charCodeAt(2) === 0xDE00 && String.fromCodePoint() === "")
+    check("fc83b", s83err(function () { String.fromCodePoint(1.5) }) === "RangeError: Invalid code point 1.5" &&
+        s83err(function () { String.fromCodePoint(0x110000) }) === "RangeError: Invalid code point 1114112")
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1950,6 +2052,8 @@ function main() {
     s79() // SECTION-CALL 79
     s80() // SECTION-CALL 80
     s81() // SECTION-CALL 81
+    s82() // SECTION-CALL 82
+    s83() // SECTION-CALL 83
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

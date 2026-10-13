@@ -445,6 +445,9 @@ func (rt *jsrt) jsxMethod(target interface{}, name string, args []interface{}) (
 			fl, _ := o.props["flags"].(string)
 			return "/" + src + "/" + fl, true
 		}
+		if v, ok := rt.mcallMiss(); ok {
+			return v, true
+		}
 		rt.fail("unknown RegExp method: %s", name)
 	}
 	s, isStr := target.(string)

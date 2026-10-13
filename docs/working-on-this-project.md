@@ -806,7 +806,7 @@ byte's Latin-1 character); `[]byte(s)` itself is the exact UTF-8 bytes. An
 ~~astral character prints as two U+FFFD in swift~~ - **NO LONGER TRUE for string
 literals, 2026-08-10**: `swUnescape` was copying a literal one code unit at a time
 and handing the host a LONE SURROGATE, which UTF-8 cannot encode. All four legs
-print the character now. JS: `(0.1).toString(3)` emits 52 fraction digits, the `d` flag builds no `m.indices`.
+print the character now. JS: the `d` flag builds no `m.indices`.
 Python: integral floats render as int, `&|^` are ToInt32, `inf`/`nan` spell
 `Infinity`/`NaN`, the format mini-language is a subset.
 A Python str is indexed, sliced, iterated and searched by CODE POINT over the

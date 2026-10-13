@@ -29,6 +29,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf16"
 	"unicode/utf8"
 )
 
@@ -270,7 +271,7 @@ func jsvObjProtoName(k string) bool {
 // languages/lib/js-rt.metajs.
 var jsvStaticNames = map[string][]string{
 	"Object":  {"assign", "entries", "freeze", "fromEntries", "getOwnPropertyNames", "is", "keys", "seal", "values"},
-	"String":  {"fromCharCode"},
+	"String":  {"fromCharCode", "fromCodePoint"},
 	"Promise": {"resolve", "reject", "all", "allSettled", "race", "any"},
 	"Array":   {"isArray"},
 	"Symbol":  {"for", "keyFor"},
@@ -1400,9 +1401,9 @@ func jsToIntOrInf(n float64) float64 {
 	return math.Trunc(n) + 0
 }
 
-// jsvRadixString is Number#toString(radix) for a radix other than 10. The integer
-// part is exact; the fraction is emitted to 52 digits and trailing zeros dropped,
-// which is what V8 does for every value a program is likely to print.
+// jsvRadixString is Number#toString(radix) for a radix other than 10: V8's
+// DoubleToRadixCString. Twin of jsnRadixStr in languages/lib/js-num.js, where the
+// rules are.
 func jsvRadixString(x float64, radix int) string {
 	if math.IsNaN(x) {
 		return "NaN"
@@ -1413,35 +1414,66 @@ func jsvRadixString(x float64, radix int) string {
 	if math.IsInf(x, -1) {
 		return "-Infinity"
 	}
-	sign := ""
+	if x == 0 {
+		return "0"
+	}
+	const digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+	r := float64(radix)
+	v := math.Abs(x)
+	integer := math.Floor(v)
+	fraction := v - integer
+	delta := math.Max(0.5*(math.Nextafter(v, math.Inf(1))-v), math.SmallestNonzeroFloat64)
+	var fd []int
+	if fraction >= delta {
+		for {
+			fraction = float64(fraction * r)
+			delta = float64(delta * r)
+			digit := int(fraction)
+			fd = append(fd, digit)
+			fraction -= float64(digit)
+			if (fraction > 0.5 || (fraction == 0.5 && digit%2 == 1)) && fraction+delta > 1 {
+				for {
+					if len(fd) == 0 {
+						integer++
+						break
+					}
+					last := fd[len(fd)-1]
+					fd = fd[:len(fd)-1]
+					if last+1 < radix {
+						fd = append(fd, last+1)
+						break
+					}
+				}
+				break
+			}
+			if fraction < delta {
+				break
+			}
+		}
+	}
+	out := ""
+	for integer/r >= 1<<53 {
+		integer /= r
+		out += "0"
+	}
+	for {
+		rem := math.Mod(integer, r)
+		out = string(digits[int(rem)]) + out
+		integer = (integer - rem) / r
+		if integer <= 0 {
+			break
+		}
+	}
+	if len(fd) > 0 {
+		out += "."
+		for _, d := range fd {
+			out += string(digits[d])
+		}
+	}
 	if x < 0 {
-		sign, x = "-", -x
+		return "-" + out
 	}
-	ip := math.Floor(x)
-	frac := x - ip
-	digits := "0123456789abcdefghijklmnopqrstuvwxyz"
-	intPart := ""
-	if ip == 0 {
-		intPart = "0"
-	}
-	for ip >= 1 {
-		d := int(math.Mod(ip, float64(radix)))
-		intPart = string(digits[d]) + intPart
-		ip = math.Floor(ip / float64(radix))
-	}
-	if frac == 0 {
-		return sign + intPart
-	}
-	out := intPart + "."
-	for i := 0; i < 52 && frac > 0; i++ {
-		frac *= float64(radix)
-		d := int(math.Floor(frac))
-		out += string(digits[d])
-		frac -= float64(d)
-	}
-	out = strings.TrimRight(out, "0")
-	out = strings.TrimSuffix(out, ".")
-	return sign + out
+	return out
 }
 
 // jsvSortDefault is Array#sort with no comparator: undefined sorts last and every
@@ -1631,6 +1663,17 @@ func (rt *jsrt) jsvMethod(target interface{}, name string, args []interface{}) (
 			units := make([]uint16, len(args))
 			for i, x := range args {
 				units[i] = uint16(jsToInt(rt.toNumber(x)))
+			}
+			return strFromUnits(units), true
+		case "fromCodePoint":
+			// Twin of jsnCodePoint in languages/lib/js-num.js.
+			var units []uint16
+			for _, x := range args {
+				n := rt.toNumber(x)
+				if n != math.Trunc(n) || n < 0 || n > 0x10FFFF {
+					rt.bigRaise("RangeError: Invalid code point %s", rt.jsvString(n))
+				}
+				units = append(units, utf16.Encode([]rune{rune(n)})...)
 			}
 			return strFromUnits(units), true
 		}
@@ -1836,6 +1879,10 @@ func (rt *jsrt) jsvStringMethod(s string, name string, args []interface{}) (inte
 		}
 		if want <= units || fill == "" {
 			return s, true
+		}
+		// V8's String::kMaxLength, the limit "repeat" checks too.
+		if want > 536870888 {
+			rt.bigRaise("RangeError: Invalid string length")
 		}
 		pad := ""
 		for rt.strLen(pad) < want-units {
@@ -2308,7 +2355,7 @@ func (rt *jsrt) jsvNumberMethod(x float64, name string, args []interface{}) (int
 		if radix < 2 || radix > 36 {
 			// node makes an out-of-range radix a CATCHABLE RangeError, as on the
 			// BigInt path beside it (jsrtjsbig.go).
-			rt.bigRaise("RangeError: toString() radix must be between 2 and 36")
+			rt.bigRaise("RangeError: toString() radix argument must be between 2 and 36")
 		}
 		return jsvRadixString(x, radix), true
 	case "valueOf":

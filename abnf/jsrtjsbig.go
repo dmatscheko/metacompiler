@@ -571,7 +571,7 @@ func (rt *jsrt) jsvBigIntMethod(x *big.Int, name string, args []interface{}) (in
 			}
 		}
 		if radix < 2 || radix > 36 {
-			rt.bigRaise("RangeError: toString() radix must be between 2 and 36")
+			rt.bigRaise("RangeError: toString() radix argument must be between 2 and 36")
 		}
 		return x.Text(radix), true
 	case "valueOf":
@@ -825,10 +825,19 @@ func jsParseIntJS(s string, r int32) float64 {
 			v *= math.Pow(2, float64(exp))
 		}
 	default:
-		// The explicit float64() keeps Go from fusing the multiply-add (manual
-		// chapter 4), which the other engines do not.
-		for _, c := range u[start:i] {
-			v = float64(v*float64(radix)) + float64(digit(c))
+		// V8's chunks, each folded in with one rounding (jsnIntGeneric).
+		k := start
+		for k < i && u[k] == '0' {
+			k++
+		}
+		for k < i {
+			part, mult := 0, 1
+			for k < i && mult*radix <= 119304647 {
+				part = part*radix + digit(u[k])
+				mult *= radix
+				k++
+			}
+			v = math.FMA(v, float64(mult), float64(part))
 		}
 	}
 	if neg {

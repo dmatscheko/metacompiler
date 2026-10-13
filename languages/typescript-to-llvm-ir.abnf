@@ -5842,21 +5842,30 @@ NotFuncHead = :script(~~
         for (var i = 0; i < labelStack.length; i++) {
             var l = labelStack[i]
             if (l.tag == curFTag && forOfIters.length > l.fon) {
-                labelPad(l.brkN, l.fon, swaps)
-                labelPad(l.contN, l.fon, swaps)
+                labelPad(l.brkN, l.fon, swaps, null)
+                labelPad(l.contN, l.fon, swaps, null)
+            }
+            if (l.tag != curFTag && forOfIters.length > 0 && inCtlBody()) {
+                labelPad(l.brkN, 0, swaps, ctl)
+                labelPad(l.contN, 0, swaps, ctl)
             }
         }
         var r = excDispatch(b, ctl)
-        for (var j = 0; j < swaps.length; j++) { ctlLabels[swaps[j].n].blk = swaps[j].blk }
+        for (var j = 0; j < swaps.length; j++) {
+            ctlLabels[swaps[j].n].blk = swaps[j].blk
+            ctlLabels[swaps[j].n].tag = swaps[j].tag
+        }
         return r
     }
-    function labelPad(n, fon, swaps) {
+    // fwd is the signal to return when the label lies outside this function, else null.
+    function labelPad(n, fon, swaps, fwd) {
         if (n < 0) { return }
         var pad = curF.NewBlock("")
         emitIterUnwind(pad, fon)
-        pad.NewBr(ctlLabels[n].blk)
-        swaps.push({n: n, blk: ctlLabels[n].blk})
+        if (fwd == null) { pad.NewBr(ctlLabels[n].blk) } else { pad.NewRet(fwd) }
+        swaps.push({n: n, blk: ctlLabels[n].blk, tag: ctlLabels[n].tag})
         ctlLabels[n].blk = pad
+        ctlLabels[n].tag = curFTag
     }
     function labelGotoN(tag, blk) {
         ctlLabels.push({tag: tag, blk: blk})
@@ -6218,6 +6227,14 @@ NotFuncHead = :script(~~
         callExt(b, "js_rt_missvar", [callExt(b, "js_closure", [handle(vIdx), curScopeV])])
         callExt(b, "js_rt_missmem", [callExt(b, "js_closure", [handle(mIdx), curScopeV])])
         callExt(b, "js_rt_missset", [callExt(b, "js_closure", [handle(sIdx), curScopeV])])
+
+        // See the twin of this comment in js-to-llvm-ir.abnf (js_rt_genbusy).
+        funcCount++
+        var gIdx = funcCount
+        var gf = m.NewFunc("jsf_" + gIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var gb = gf.NewBlock("entry")
+        gb.NewRet(callExt(gb, "js_jserrmk", [emitStr(gb, "TypeError: Generator is already running")]))
+        callExt(b, "js_rt_genbusy", [callExt(b, "js_closure", [handle(gIdx), curScopeV])])
 
         // See the twin of this comment in js-to-llvm-ir.abnf.
         var missV = callExt(b, "js_gc_pin", [callExt(b, "js_obj_new", [])])
