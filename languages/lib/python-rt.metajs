@@ -346,6 +346,17 @@ function pyHashName(v) {
         return "set"
     }
     if (v["__dict"] === true) { return "dict" }
+    // A slice hashes as its (start, stop, step) tuple.
+    if (v["__pyslice"] !== undefined) {
+        var sb = v["__pyslice"]
+        var si = 0
+        while (si < 3) {
+            var sn = pyHashName(sb[si])
+            if (sn != "") { return sn }
+            si = si + 1
+        }
+        return ""
+    }
     // An instance whose class cannot hash, or whose builtin base cannot, is named
     // by its own class.
     var cls = pyInstClassOf(v)
@@ -4458,14 +4469,15 @@ function pyAAddKind(v) {
 }
 
 // CPython orders two values only within one kind: numbers (bool, int, float -
-// not complex), str, two lists, two tuples, two sets. Go: rt.pyOrdCheck in
-// abnf/pyarith.go.
+// not complex), str, two lists, two tuples, two sets, two slices. Go:
+// rt.pyOrdCheck in abnf/pyarith.go.
 function pyAOrdKind(v) {
     if (typeof v == "number" || typeof v == "boolean") { return "n" }
     if (typeof v == "string") { return "s" }
     if (pyIsArr(v)) { return pySeqKindCh(v) }
     if (pyIsFlo(v) || pyIsBig(v)) { return "n" }
     if (pySetElemsOf(v) !== null) { return "t" }
+    if (pyIsSlice(v)) { return "c" }
     return ""
 }
 function pyAOrdCheck(op, l, r) {
@@ -4869,6 +4881,8 @@ function js_pybin(opv, l, r) {
         // class has had its __lt__ / reflected __gt__ chance above.
         if (typeof l != "number" || typeof r != "number") { pyAOrdCheck(op, l, r) }
         if (pyIsArr(l) && pyIsArr(r)) { return pyASeqOrder(op, l, r) }
+        // Two slices order as their (start, stop, step) tuples.
+        if (pyIsSlice(l) && pyIsSlice(r)) { return pyASeqOrder(op, l["__pyslice"], r["__pyslice"]) }
     }
     if (op == "<") { return pyACompare(l, r) == -1 }
     if (op == ">") { return pyACompare(l, r) == 1 }

@@ -3190,6 +3190,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             return ""
         }
+        // A slice hashes as its (start, stop, step) tuple.
+        if (isSlice(v)) {
+            for (var si = 0; si < 3; si++) {
+                var sn = pyHashName(v.__pyslice[si])
+                if (sn != "") { return sn }
+            }
+            return ""
+        }
         if (v.__set === true) { return v.__frozen === true ? "" : "set" }
         if (v.__dict === true) { return "dict" }
         // An instance whose class sets __hash__ to None, or defines __eq__ without
@@ -9069,6 +9077,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return binOp(op, l.length, r.length)
             }
         }
+        // Two slices order as their (start, stop, step) tuples.
+        if (isSlice(l) && isSlice(r) && (op == "<" || op == ">" || op == "<=" || op == ">=")) {
+            return binOp(op, l.__pyslice, r.__pyslice)
+        }
         if (op == "<")  return l < r
         if (op == ">")  return l > r
         if (op == "<=") return l <= r
@@ -9108,13 +9120,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return ""
     }
     // CPython orders two values only within one kind: numbers (bool, int, float -
-    // not complex), str, two lists, two tuples, two sets. Twin of
+    // not complex), str, two lists, two tuples, two sets, two slices. Twin of
     // rt.pyOrdCheck in abnf/pyarith.go and pyAOrdCheck in lib/python-rt.metajs.
     function pyOrdKind(v) {
         if (pyNumeric(v)) { return "n" }
         if (typeof v == "string") { return "s" }
         if (Array.isArray(v)) { return pySeqKindCh(v) }
         if (isSet(v)) { return "t" }
+        if (isSlice(v)) { return "c" }
         return ""
     }
     // The kind letter of an array: l a list, u a tuple, b bytes or a bytearray.

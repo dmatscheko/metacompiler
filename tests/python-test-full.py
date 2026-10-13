@@ -6267,6 +6267,14 @@ def s120():
     sl[0:2] = [9]
     check("slc5", sl[1:] == [2, 3] and type(sl[1:]) is list and sl == [9, 2, 3]
           and S120err(lambda: S120D()[1:2]) == "TypeError: 'S120D' object is not subscriptable")
+    # Slices order and hash as their (start, stop, step) tuples.
+    check("slc6", ss[0] < slice(1, 4) and ss[3] > ss[0] and ss[0] <= slice(1, 3) and not (ss[0] >= slice(2, 0))
+          and sorted([ss[3], ss[0], slice(1, 2)]) == [slice(1, 2), ss[0], ss[3]] and max([ss[0], ss[3]]) == ss[3]
+          and S120err(lambda: slice(1, 2, 3) >= slice(1, 2)) == "TypeError: '>=' not supported between instances of 'int' and 'NoneType'"
+          and S120err(lambda: ss[0] < (1, 3)) == "TypeError: '<' not supported between instances of 'slice' and 'tuple'")
+    check("slc7", S120err(lambda: {slice(xs): 0}) == "TypeError: cannot use 'slice' as a dict key (unhashable type: 'list')"
+          and S120err(lambda: {slice(1, {})}) == "TypeError: cannot use 'slice' as a set element (unhashable type: 'dict')"
+          and S120err(lambda: hash(slice(1, xs))) == "TypeError: unhashable type: 'list'")
 
 def main():
     s01() # SECTION-CALL 01

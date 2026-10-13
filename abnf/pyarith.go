@@ -136,7 +136,7 @@ func pyDecAscii(s string) string {
 
 // pyOrdCheck raises CPython's TypeError for an ORDERING of two values of
 // different kinds: only numbers (bool, int, float - not complex), str, two lists,
-// two tuples and two sets have an order. Twin of pyOrdCheck in
+// two tuples, two sets and two slices have an order. Twin of pyOrdCheck in
 // languages/python-interpreter.abnf and pyAOrdCheck in lib/python-rt.metajs.
 func pyOrdKind(v interface{}) byte {
 	switch t := v.(type) {
@@ -149,6 +149,9 @@ func pyOrdKind(v interface{}) byte {
 	}
 	if _, ok := pySetElems(v); ok {
 		return 't'
+	}
+	if _, ok := pySliceParts(v); ok {
+		return 'c'
 	}
 	return 0
 }

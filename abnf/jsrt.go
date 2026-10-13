@@ -16710,6 +16710,12 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 						return w(rt.pySeqOrder(op, la.elems, ra.elems))
 					}
 				}
+				// Two slices order as their (start, stop, step) tuples.
+				if lp, ok := pySliceParts(l); ok {
+					if rp, ok := pySliceParts(r); ok {
+						return w(rt.pySeqOrder(op, lp, rp))
+					}
+				}
 			}
 			switch op {
 			case "<":
@@ -19277,6 +19283,15 @@ func (rt *jsrt) pyUnhashName(v interface{}) string {
 		}
 		if tag, has := t.props["__dict"]; has && tag == true {
 			return "dict"
+		}
+		// A slice hashes as its (start, stop, step) tuple.
+		if parts, ok := pySliceParts(v); ok && rt.pyLang {
+			for _, e := range parts {
+				if n := rt.pyUnhashName(e); n != "" {
+					return n
+				}
+			}
+			return ""
 		}
 		// An instance whose class cannot hash, or whose builtin base cannot, is
 		// named by its own class.
