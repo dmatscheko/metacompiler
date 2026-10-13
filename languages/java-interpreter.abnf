@@ -936,8 +936,10 @@ CastPrim    <~~ push({ct: stripWs(up.in)}) ~~>
 // next to the bitwise-and level because a genuine `(a & b)` is followed by an
 // operator, and UnaryNoPM refuses to start on one - so the whole RefCast rolls
 // back and the parenthesized-expression Primary picks it up.
-RefCast     <~~ push(makeCast(pop(), "")) ~~>
-            = "(" RefType { ( "&" !"&" ) RefType } ")" UnaryNoPM ;
+RefCast     <~~ var rcInner = pop(); push(makeRefCast(rcInner, pop().rt)) ~~>
+            = "(" CastRefTy ")" UnaryNoPM ;
+CastRefTy   <~~ push({rt: stripWs(up.in)}) ~~>
+            = RefType { ( "&" !"&" ) RefType } ;
 // Cast is in here so that a cast of a cast - `(String) (Object) null`, which the
 // OpenJDK suite is full of - parses; without it the inner cast is not a legal
 // operand of the outer one.
@@ -4504,6 +4506,52 @@ HasStatic   = :script(~~
         if (ty == "float") { return function() { return jFlo32(jNumD(inner())) } }
         if (ty == "double") { return function() { return jFlo(jNumD(inner())) } }
         return inner
+    }
+    // (T) v for a reference type T: a ClassCastException when v is not a T (JLS
+    // 5.5.3, 15.16). Judged for java.lang's String, boxes and Number and for a
+    // type the program declares (jCastDest); for Comparable and CharSequence
+    // only when v is a box, a String or an array, the values whose interfaces
+    // the value model knows; a lambda and null pass. Twin of
+    // js_jvcast in abnf/jsrtjavastr.go and languages/lib/java-rt.metajs.
+    function makeRefCast(inner, tytext) {
+        var t = jCastTarget(tytext)
+        if (t == "") { return inner }
+        var dest = anytype // the target's binary name once the classes exist, "" when it is not judged
+        return function() {
+            var v = inner()
+            if (v === null || v === undefined || typeof v == "function") { return v }
+            if (dest === undefined) { dest = jCastDest(t) }
+            if (dest != "" && !jIsType(v, t) && (!jCastIface(t) || jBoxName(v) != "" || Array.isArray(v))) {
+                jThrowExc("ClassCastException", jCceMsg(jGetClass(v).__cname, dest))
+            }
+            return v
+        }
+    }
+    function jCastDest(t) {
+        if (jCastLang.indexOf("," + t + ",") >= 0 || jCastIface(t)) { return "java.lang." + t }
+        var d = globalScope[t]
+        if (d == undefined || d == null || d.__isclass !== true) { return "" }
+        var bn = jClassBin(d)
+        return bn.substring(0, 5) == "java." ? "" : bn
+    }
+    // java 24's ClassCastException message: the two classes and where each was
+    // loaded from (java.base for java.*, an array of primitives and an array of
+    // java.* classes; the unnamed module of the app loader otherwise).
+    function jCceMsg(src, dst) {
+        var head = "class " + src + " cannot be cast to class " + dst + " ("
+        var bs = jCceBase(src)
+        var bd = jCceBase(dst)
+        if (bs && bd) { return head + src + " and " + dst + " are in module java.base of loader 'bootstrap')" }
+        if (!bs && !bd) { return head + src + " and " + dst + " are in unnamed module of loader 'app')" }
+        return head + src + jCceWhere(bs) + "; " + dst + jCceWhere(bd) + ")"
+    }
+    function jCceWhere(base) { return base ? " is in module java.base of loader 'bootstrap'" : " is in unnamed module of loader 'app'" }
+    function jCceBase(n) {
+        var i = 0
+        while (n.charAt(i) == "[") { i = i + 1 }
+        if (i > 0 && n.charAt(i) != "L") { return true }
+        if (i > 0) { i = i + 1 }
+        return n.substring(i, i + 5) == "java."
     }
     // A lambda is a real closure: evaluating the lambda expression captures the
     // defining scope chain; each call binds the params in a fresh frame on top of

@@ -274,6 +274,7 @@ var jvAioobeCls = undefined
 var jvSioobeCls = undefined
 var jvNegArrCls = undefined
 var jvNpeCls = undefined
+var jvCceCls = undefined
 var jvNfeCls = undefined
 var jvIaeCls = undefined
 
@@ -1608,6 +1609,7 @@ function js_jvexc(name, cls) {
     else if (name == "NullPointerException") { jvNpeCls = cls }
     else if (name == "NumberFormatException") { jvNfeCls = cls }
     else if (name == "IllegalArgumentException") { jvIaeCls = cls }
+    else if (name == "ClassCastException") { jvCceCls = cls }
     return undefined
 }
 
@@ -2076,6 +2078,37 @@ function js_jvis(v, t0) {
     if (t == "Number") { return bn != "String" && bn != "Boolean" && bn != "Character" }
     return t == "CharSequence" && bn == "String"
 }
+// (T) v: (v, T's simple name, T's binary name). A ClassCastException when v is
+// not a T; Comparable and CharSequence are judged only for a box, a String or
+// an array. Twin of js_jvcast in abnf/jsrtjavastr.go.
+function js_jvcast(v, t, dst) {
+    if (v === undefined || v === null || typeof v == "function" || js_jvis(v, t)) { return v }
+    if ((t == "Comparable" || t == "CharSequence") && jvBoxName(v) == "" && !Array.isArray(v)) { return v }
+    jvThrowCls(jvCceCls, jvCceMsg(js_jvgetclass(v)["__cname"], dst))
+    return v
+}
+// java 24's ClassCastException message. Twin of jvCceMsg in
+// abnf/jsrtjavastr.go.
+function jvCceMsg(src, dst) {
+    var head = "class " + src + " cannot be cast to class " + dst + " ("
+    var bs = jvCceBase(src)
+    var bd = jvCceBase(dst)
+    if (bs && bd) { return head + src + " and " + dst + " are in module java.base of loader 'bootstrap')" }
+    if (!bs && !bd) { return head + src + " and " + dst + " are in unnamed module of loader 'app')" }
+    return head + src + jvCceWhere(bs) + "; " + dst + jvCceWhere(bd) + ")"
+}
+function jvCceWhere(base) {
+    if (base) { return " is in module java.base of loader 'bootstrap'" }
+    return " is in unnamed module of loader 'app'"
+}
+function jvCceBase(n) {
+    var i = 0
+    while (n.charAt(i) == "[") { i = i + 1 }
+    if (i > 0 && n.charAt(i) != "L") { return true }
+    if (i > 0) { i = i + 1 }
+    return n.substring(i, i + 5) == "java."
+}
+
 function js_jvgetclass(v) {
     if (v === undefined || v === null) {
         fail("method call .getClass() on null")

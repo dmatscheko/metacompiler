@@ -1296,6 +1296,24 @@ function jCondConv(t) {
     if (!jIsPrimTy(nt)) { return none }
     return {ty: nt, a: a == nt ? "" : nt, b: b == nt ? "" : nt}
 }
+// The type a reference cast `(T) e` checks its operand against, from T's
+// whitespace-free text: its simple name without type arguments, "" for a type
+// no engine judges - an array, an intersection, an annotated type, a type
+// variable (which erases to its bound and is checked nowhere). Which simple
+// names are judged at all is the grammar's question (jCastDest), because it
+// needs every class declared.
+var jCastLang = ",String,Integer,Long,Double,Float,Short,Byte,Character,Boolean,Number,"
+function jCastIface(t) { return t == "Comparable" || t == "CharSequence" }
+function jCastTarget(t) {
+    if (t.indexOf("[") >= 0 || t.indexOf("&") >= 0 || t.indexOf("@") >= 0) { return "" }
+    var lt = t.indexOf("<")
+    var b = lt < 0 ? t : t.substring(0, lt)
+    var from = 0
+    for (var i = 0; i < b.length; i++) { if (b.charAt(i) == ".") { from = i + 1 } }
+    var simple = b.substring(from)
+    if (jTyVarErasure(simple) != "") { return "" }
+    return simple
+}
 // May the condition written as t (whitespace-free) be a Boolean box, which
 // unboxes on the way and makes a null an NPE? Its static type is Boolean, or
 // it is unknown and t is a primary (a name, a call, a field, a cast) rather

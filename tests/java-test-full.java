@@ -130,6 +130,7 @@ class Main {
         S60.run(); // SECTION-CALL 60
         S61.run(); // SECTION-CALL 61
         S62.run(); // SECTION-CALL 62
+        S63.run(); // SECTION-CALL 63
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -3607,5 +3608,42 @@ class S62 {
         String msg = "";
         try { Object o = nulls[0]; o.toString(); } catch (NullPointerException e) { msg = e.getClass().getName(); }
         Main.check("nm62", msg.equals("java.lang.NullPointerException"));
+    }
+}
+
+// ===== SECTION 63: a reference cast checks its operand (ClassCastException) =====
+//
+// (T) e throws ClassCastException when e's class is not T or a subtype (JLS
+// 5.5.3, 15.16), and its message names both classes and their modules; null
+// passes any cast. A user class' module line names the loader, which differs
+// between the source launcher and javac + java, so only its type is checked
+// here. Every expected value is java 24.0.2's.
+interface S63Shape { double area(); }
+class S63Sq implements S63Shape { public double area() { return 1; } }
+class S63A {}
+class S63B extends S63A {}
+class S63 {
+    static Object[] vals = {"x", 3, 2.5, new S63B(), new S63Sq(), null, 'c', 7L};
+    static String cast(int i, int to) {
+        Object o = vals[i];
+        try {
+            Object r = to == 0 ? (Integer) o : to == 1 ? (String) o : to == 2 ? (S63A) o : to == 3 ? (S63B) o
+                : to == 4 ? (S63Shape) o : to == 5 ? (Number) o : (Long) o;
+            return "ok";
+        } catch (ClassCastException e) { return "cce"; }
+    }
+    static void run() {
+        String grid = "";
+        for (int i = 0; i < vals.length; i++) {
+            for (int to = 0; to < 7; to++) { grid = grid + (cast(i, to).equals("ok") ? "o" : "x"); }
+            grid = grid + " ";
+        }
+        Main.check("cc63", grid.equals("xoxxxxx oxxxxox xxxxxox xxooxxx xxxxoxx ooooooo xxxxxxx xxxxxoo "));
+        String msg = "";
+        try { Object o = vals[0]; Integer n = (Integer) o; msg = "" + n; } catch (ClassCastException e) { msg = e.getMessage(); }
+        String msg2 = "";
+        try { Object o = vals[1]; String t = (String) o; msg2 = t; } catch (ClassCastException e) { msg2 = e.toString(); }
+        Main.check("cm63", msg.equals("class java.lang.String cannot be cast to class java.lang.Integer (java.lang.String and java.lang.Integer are in module java.base of loader 'bootstrap')")
+            && msg2.equals("java.lang.ClassCastException: class java.lang.Integer cannot be cast to class java.lang.String (java.lang.Integer and java.lang.String are in module java.base of loader 'bootstrap')"));
     }
 }

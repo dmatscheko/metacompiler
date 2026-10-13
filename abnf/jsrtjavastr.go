@@ -793,6 +793,39 @@ func (rt *jsrt) jvIsType(v interface{}, t string) bool {
 	return t == "CharSequence" && bn == "String"
 }
 
+// jvCceMsg is java 24's ClassCastException message: the two classes and where
+// each was loaded from (java.base for java.*, an array of primitives and an
+// array of java.* classes; the unnamed module of the app loader otherwise).
+// Twin of jCceMsg in java-interpreter.abnf and jvCceMsg in
+// languages/lib/java-rt.metajs.
+func jvCceMsg(src, dst string) string {
+	where := func(n string) bool {
+		e := strings.TrimLeft(n, "[")
+		if len(e) < len(n) && !strings.HasPrefix(e, "L") {
+			return true
+		}
+		if len(e) < len(n) {
+			e = e[1:]
+		}
+		return strings.HasPrefix(e, "java.")
+	}
+	phrase := func(base bool) string {
+		if base {
+			return " is in module java.base of loader 'bootstrap'"
+		}
+		return " is in unnamed module of loader 'app'"
+	}
+	head := "class " + src + " cannot be cast to class " + dst + " ("
+	bs, bd := where(src), where(dst)
+	switch {
+	case bs && bd:
+		return head + src + " and " + dst + " are in module java.base of loader 'bootstrap')"
+	case !bs && !bd:
+		return head + src + " and " + dst + " are in unnamed module of loader 'app')"
+	}
+	return head + src + phrase(bs) + "; " + dst + phrase(bd) + ")"
+}
+
 func init() {
 	rxExtraExterns = append(rxExtraExterns, func(rt *jsrt, m map[string]func(args []uint64) uint64) {
 		u := rt.unwrap
@@ -848,6 +881,23 @@ func init() {
 		}
 		m["js_jvis"] = func(a []uint64) uint64 {
 			return w(rt.jvIsType(u(a[0]), rt.toString(u(a[1]))))
+		}
+		// (T) v: (v, T's simple name, T's binary name). A ClassCastException
+		// when v is not a T; Comparable and CharSequence are judged only for a
+		// box, a String or an array. Twin of makeRefCast in
+		// java-interpreter.abnf and js_jvcast in languages/lib/java-rt.metajs.
+		m["js_jvcast"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			t := rt.toString(u(a[1]))
+			if isUndefOrNull(v) || isCallable(v) || rt.jvIsType(v, t) {
+				return a[0]
+			}
+			if _, isArr := v.(*jsArray); (t == "Comparable" || t == "CharSequence") && jvBoxName(v) == "" && !isArr {
+				return a[0]
+			}
+			cls, _ := u(m["js_jvgetclass"]([]uint64{a[0]})).(*jsObject)
+			rt.jvThrowCls(jvCceCls, jvCceMsg(rt.toString(cls.props["__cname"]), rt.toString(u(a[2]))))
+			return 0
 		}
 		// A java.lang.String method on a string receiver, compareTo and the
 		// unboxing members on a boxed primitive too; any other receiver is an ordinary call of a method by

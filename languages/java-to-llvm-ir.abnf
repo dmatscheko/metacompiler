@@ -910,8 +910,10 @@ CastPrim    <~~ push({ct: stripWs(up.in)}) ~~>
 // operand. It stays identity like every other reference cast. A genuine
 // `(a & b)` is followed by an operator, and UnaryNoPM refuses to start on one,
 // so the whole RefCast rolls back and the parenthesized Primary picks it up.
-RefCast     <~~ push(makeCast(pop())) ~~>
-            = "(" RefType { ( "&" !"&" ) RefType } ")" UnaryNoPM ;
+RefCast     <~~ var rcInner = pop(); push(makeRefCast(rcInner, pop().rt)) ~~>
+            = "(" CastRefTy ")" UnaryNoPM ;
+CastRefTy   <~~ push({rt: stripWs(up.in)}) ~~>
+            = RefType { ( "&" !"&" ) RefType } ;
 // Cast is in here so a cast of a cast - `(String) (Object) null` - parses.
 UnaryNoPM   = Not | Cast | PostfixExpr ;
 RefType     = { Annotation } ( "String" KwEnd | Id [ SkipAngle ] { "." { Annotation } Id [ SkipAngle ] } ) { { Annotation } "[" "]" } ;
@@ -3305,8 +3307,32 @@ HasStatic   = :script(~~
         var desc = jArrDesc(ty)
         if (desc != "") { callExt(b, "js_jvarrtag", [arrV, emitStr(b, desc)]) }
     }
-    // A cast is identity: (Type) expr lowers to expr.
-    function makeCast(inner) { return inner }
+    // (T) v for a reference type T checks v with js_jvcast, which throws a
+    // ClassCastException when v is not a T (JLS 5.5.3): for java.lang's
+    // String, boxes, Number, Comparable and CharSequence and for a type the
+    // program declares (jCastDestOf). Twin of makeRefCast in
+    // java-interpreter.abnf.
+    var jUsesCast = false
+    function makeRefCast(inner, tytext) {
+        var t = jCastTarget(tytext)
+        if (t == "") { return inner }
+        jUsesCast = true
+        return function(b) {
+            var r = inner(b)
+            var dest = jCastDestOf(t)
+            if (dest == "") { return r }
+            return {b: r.b, v: callExt(r.b, "js_jvcast", [r.v, emitStr(r.b, t), emitStr(r.b, dest)])}
+        }
+    }
+    // The binary name of a cast's target type, "" when it is not judged: a
+    // library type, a built-in exception or a name no declaration made.
+    function jCastDestOf(t) {
+        if (jCastLang.indexOf("," + t + ",") >= 0 || jCastIface(t)) { return "java.lang." + t }
+        if (classNames["$" + t] != true) { return "" }
+        if (builtinExcParent["$" + t] != undefined && userDeclared["$" + t] != true) { return "" }
+        var bn = jBinOf(t)
+        return bn.substring(0, 5) == "java." ? "" : bn
+    }
     // A PRIMITIVE cast converts: (double)/(float) box their operand into a double
     // (that is what makes (double)7 / 2 == 3.5), the integral casts narrow to
     // their own WIDTH - (byte)200 is -56 and (int)3000000000L is -1294967296 -
@@ -5214,6 +5240,10 @@ HasStatic   = :script(~~
         if (jUsesRepeat) {
             runtimeExc["$IllegalArgumentException"] = true
             noteTypeUse("IllegalArgumentException")
+        }
+        if (jUsesCast) {
+            runtimeExc["$ClassCastException"] = true
+            noteTypeUse("ClassCastException")
         }
     }
     var userDeclared = {}

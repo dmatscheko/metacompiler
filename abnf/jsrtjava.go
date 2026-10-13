@@ -121,6 +121,7 @@ var jvSioobeCls *jsObject
 var jvNegArrCls *jsObject
 var jvNpeCls *jsObject
 var jvNfeCls *jsObject
+var jvCceCls *jsObject
 
 func (rt *jsrt) jvThrowCls(cls *jsObject, msg interface{}) {
 	if cls == nil {
@@ -1329,6 +1330,8 @@ func init() {
 				jvNfeCls = o
 			case "IllegalArgumentException":
 				jvIaeCls = o
+			case "ClassCastException":
+				jvCceCls = o
 			}
 			return 0
 		}
