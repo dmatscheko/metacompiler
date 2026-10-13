@@ -119,7 +119,7 @@ the interpreter half.
 
 # JV — Java
 
-### T-464 java: interface default overload hiding; functional-interface overload choice; Object[] element types · P2 · JV · OPEN [V]
+### T-464 java: interface default overload hiding; functional-interface overload choice; Object[] element types · P2 · JV · IN PROGRESS (JV worker, round 2) [V]
 javac/java 24: (a) a class overriding one overload of an interface default hides the other overloads under dynamic
 dispatch (`q.describe()` answers `square 2.25null`, java `area 2.25`) — overload candidates must walk the interfaces.
 (b) overload choice treats a functional-interface parameter as accepting any reference (`kind(Shape)` vs `kind(Object)` with
@@ -127,7 +127,7 @@ a String picks Shape; java Object). (c) one-dimensional Object[] stays untagged:
 `Arrays.copyOf(s, 3)` Object[], `toArray()` String[]; needs Class.getComponentType / Array.newInstance in all engines.
 (d) `thenComparing(Function)` (one-arg key form) not provided — indistinguishable from the Comparator form at run time.
 
-### T-494 java: null dereference and unboxing never raise a catchable NullPointerException · P1 · JV · OPEN [V]
+### T-494 java: null dereference and unboxing never raise a catchable NullPointerException · P1 · JV · IN PROGRESS (JV worker, round 2) [V]
 18 cases, each in `try { ... } catch (NullPointerException e)`, operands from `static Object[] nulls = {null}`; java prints
 "k NPE" for all. Ours: `b.v`, `b.get()`, `a.length`, `s.length()`, `l.size()`, `b.v = 5`, `s.toCharArray()`, for-each over a
 null List ABORT the program (interp "java interpreter error: field .v of null", run/native "js runtime error: member 'v' of
@@ -138,30 +138,30 @@ aborts, compiled false), `o.toString()` (aborts / "null"), `a[0] = 1` on a null 
 `"abc".compareTo(null)` → -13 (java NPE). Files: member/call/field paths in java-interpreter.abnf (core.getIndex ~6283
 already raises), java-to-llvm-ir.abnf, the twin, lib/java-rt.metajs unboxing.
 
-### T-495 java: casts never throw ClassCastException · P1 · JV · OPEN [V]
+### T-495 java: casts never throw ClassCastException · P1 · JV · IN PROGRESS (JV worker, round 2) [V]
 `Object o = "x"; Integer i = (Integer) o; System.out.println(i);` prints `x` in all legs; java throws `ClassCastException:
 class java.lang.String cannot be cast to class java.lang.Integer (...)`; `(String)` of an Integer is silent too. Files: cast
 lowering in both java grammars (the value model carries the type, manual 7.15).
 
-### T-496 java: the conditional operator ignores binary numeric promotion (JLS 15.25) · P1 · JV · OPEN [V]
+### T-496 java: the conditional operator ignores binary numeric promotion (JLS 15.25) · P1 · JV · IN PROGRESS (JV worker, round 2) [V]
 t from `boolean[]{true,false}`: `t ? cv : iv` (char/int) prints `b` (java 98); `t ? iv : 2.5` → 7 (7.0); `t ? boxed : 1.5` → 4
 (4.0); `Object o = t ? iv : 2.0` → 7 (7.0); `t ? 1f : iv` → 7 (7.0); `!t ? 1.0 : iv` → 7 (7.0); `!t ? 'x' : 0` → `0` (java
 char NUL); `true ? 1 : 'a'` → 1 (java char U+0001). All legs. Assignment conversion is right. Files: conditional typing in
 both java grammars (java-decltypes.js).
 
-### T-497 java interp: a static field initialised with a prelude class (HashMap, StringBuilder) fails · P1 · JV · OPEN [V]
+### T-497 java interp: a static field initialised with a prelude class (HashMap, StringBuilder) fails · P1 · JV · IN PROGRESS (JV worker, round 2) [V]
 `public class Main { static Map<String,Integer> mp = new HashMap<>(); ... }` → interp `java interpreter error: unknown class:
 HashMap`, exit 1; run, native, java `[1] {k=2}`. Same for `static StringBuilder sb2 = new StringBuilder("o")` in any class;
 `static List<Integer> lst = new ArrayList<>()` works. Static initialisers run before the java-util.java prelude is installed.
 File: java-interpreter.abnf (static-init order vs prelude install).
 
-### T-498 java: try-with-resources lets close()'s exception replace the body's · P1 · JV · OPEN [V]
+### T-498 java: try-with-resources lets close()'s exception replace the body's · P1 · JV · IN PROGRESS (JV worker, round 2) [V]
 `try (Res r1 = new Res("bad")) { throw new RuntimeException("body-ex"); } catch (RuntimeException e) { println("caught " + e); }`
 with close() throwing `IllegalStateException("close-bad")`: all legs `caught java.lang.IllegalStateException: close-bad`;
 java `caught java.lang.RuntimeException: body-ex` with close-bad suppressed (`getSuppressed` is also missing). Files:
 try-with-resources lowering in both grammars.
 
-### T-499 java: Formatter exceptions are uncatchable; `%#.0f` drops the point · P1 · JV · OPEN [V]
+### T-499 java: Formatter exceptions are uncatchable; `%#.0f` drops the point · P1 · JV · IN PROGRESS (JV worker, round 2) [V]
 `try { String.format("%d", v) } catch (Exception e)` with v = "str" or 3.0: every leg ends the program ("java interpreter
 error: IllegalFormatConversionException: d != str", compiled "js runtime error: ..."); java catches
 `IllegalFormatConversionException: d != java.lang.String` (note the class name in the message). Same for
@@ -169,32 +169,32 @@ MissingFormatArgument / UnknownFormatConversion; java also has IllegalFormatPrec
 IllegalFormatCodePoint (`%c` 0x110000). `String.format("%#.0f", 2.5)` → `2` (java `2.`). Cause: `jxkFail` in
 languages/lib/java-strings.js (~269, ~333) is a host failure, not a Java throw; abnf/jsrtjavastr.go and java-rt mirror it.
 
-### T-500 java compiler: `(char)` of a double outside the int range wraps instead of saturating first · P1 · JV · OPEN [V]
+### T-500 java compiler: `(char)` of a double outside the int range wraps instead of saturating first · P1 · JV · IN PROGRESS (JV worker, round 2) [V]
 `(int)(char) d` for d in {1e10, -1e10, 3e9, -3e9}: interp and java `65535 0 65535 0`; run and native `58368 7168 24064 41472`.
 JLS 5.1.3 narrows double → int (saturating) → char. Files: java-to-llvm-ir.abnf ~3309 (`js_jvchar`), its twin, java-rt.metajs.
 
-### T-501 java: `StringBuilder.append(char[])` appends the array identity · P1 · JV · OPEN [V]
+### T-501 java: `StringBuilder.append(char[])` appends the array identity · P1 · JV · IN PROGRESS (JV worker, round 2) [V]
 `sb.append(new char[]{'x','y'})` → `...[C@1a2b3c01...`, java `...xy...` (all legs; `String.valueOf(char[])` and
 `new String(char[])` are right). File: languages/lib/java-lang.java StringBuilder.append.
 
-### T-502 java: varargs forwarding and a homogeneous Object[] break String.format · P1 · JV · OPEN [V]
+### T-502 java: varargs forwarding and a homogeneous Object[] break String.format · P1 · JV · IN PROGRESS (JV worker, round 2) [V]
 Symptom of T-464(c) that raises its priority: `Object[] one = {3}; String.format("%s", one)` → `[I@1a2b3c01` (java `3`);
 `static String g(String fmt, Object... xs) { return String.format(fmt, xs); }`: `g("%d", 8)` aborts
 `IllegalFormatConversionException: d != obj`, `g("%s|%s", 8, 9)` aborts MissingFormatArgument (java `8`, `8|9`). Mixed element
 types work. Cause: the array is tagged from its CONTENTS (Object[] of ints becomes `[I`) and `jxFormat`'s spread test
 (`k1 == "L" || "["`, java-interpreter.abnf ~3681) rejects it. The forwarding idiom is very common. Fix with T-464(c).
 
-### T-503 java: Throwable.toString ignores an overridden getMessage(); message and Unicode details · P3 · JV · OPEN [V]
+### T-503 java: Throwable.toString ignores an overridden getMessage(); message and Unicode details · P3 · JV · IN PROGRESS (JV worker, round 2) [V]
 `class Sub extends MyEx { public String getMessage() { return "sub-msg"; } }`, `println(e)` → `Sub` (java `Sub: sub-msg`).
 `Integer.parseInt(null)` → `For input string: "null"` (java `Cannot parse null string`); `List.of(1,2).get(5)` → `Index 5 out
 of bounds for length 2` (java `Index: 5 Size: 2`); `"a😀".compareToIgnoreCase("a￿")` → -10178 (java 62977, code points
 since JDK 16); a lone surrogate printed → U+FFFD (java `?`). All legs.
 
-### T-504 java: Integer identity outside the -128..127 cache · P3 · JV · OPEN [V finder only]
+### T-504 java: Integer identity outside the -128..127 cache · P3 · JV · IN PROGRESS (JV worker, round 2) [V finder only]
 `Integer a3 = 128, a4 = 128; a3 == a4` → true (java false; also -129). Same value-model class as T-256 (String identity,
 DECLINED): decide whether it is declined for the same reason before working it.
 
-### T-506 java: commonly hit missing API · P3 · JV · OPEN [V finder only]
+### T-506 java: commonly hit missing API · P3 · JV · IN PROGRESS (JV worker, round 2) [V finder only]
 `System.out.printf`, `java.util.Collections`, `Objects`, `TreeMap`, `ArrayDeque`, `Throwable.getCause` and the (msg, cause)
 constructor are what real programs hit most; also String.formatted/regionMatches/codePointCount/codePoints/chars/lines,
 `%a`/`%h`, Integer.parseUnsignedInt/toUnsignedString/divideUnsigned/reverse/reverseBytes/rotateLeft,
