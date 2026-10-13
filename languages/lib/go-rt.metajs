@@ -1413,22 +1413,24 @@ function goDecodeUtf8(bs) {
 // js_gospread is the C FLOOR's (lib/runtime.c, next to js_bytelen); a copy here as
 // well would be a duplicate-symbol link error.
 
-// The PLAN of a range loop, made once per loop: [keys, base, off, n]. The i-th key
-// is keys[i] (i itself when keys is null) and the i-th value base[off + i], so the
-// emitted loop reads both with the floor's js_get alone. An int is its own bound; a
-// slice reads its backing array in place; a string, a channel and a map read the
-// dict goRangeDict makes of them; nil ranges zero times. Twin of js_gorplan in
-// abnf/jsrtgolang.go.
+// The PLAN of a range loop, made once per loop: [keys, base, off, n, m]. The i-th
+// key is keys[i] (i itself when keys is null) and the i-th value base[off + i], so
+// the emitted loop reads both with the floor's js_get alone. An int is its own
+// bound; a slice reads its backing array in place; a string and a channel read the
+// dict goRangeDict makes of them; nil ranges zero times. For a map, m is the map,
+// keys a copy of its keys and the value is read live: an entry deleted before it
+// is reached is skipped. Twin of js_gorplan in abnf/jsrtgolang.go.
 function js_gorplan(v) {
-    if (v === undefined || v === null) { return [null, null, 0, 0] }
-    if (typeof v == "number") { return [null, null, 0, goNum(v)] }
-    if (Array.isArray(v)) { return [null, v, 0, v.length] }
+    if (v === undefined || v === null) { return [null, null, 0, 0, null] }
+    if (typeof v == "number") { return [null, null, 0, goNum(v), null] }
+    if (Array.isArray(v)) { return [null, v, 0, v.length, null] }
     var c = goClassOf(v)
-    if (c !== undefined && goStrOf(c.__name) == "$sl") { return [null, v.a, v.o, v.n] }
+    if (c !== undefined && goStrOf(c.__name) == "$sl") { return [null, v.a, v.o, v.n, null] }
+    if (goIsDict(v)) { return [v.keys.slice(0), null, 0, v.keys.length, v] }
     var d = goRangeDict(v)
-    if (goIsDict(d)) { return [d.keys, d.vals, 0, d.keys.length] }
+    if (goIsDict(d)) { return [d.keys, d.vals, 0, d.keys.length, null] }
     fail("range over a " + typeof v)
-    return [null, null, 0, 0]
+    return [null, null, 0, 0, null]
 }
 
 // ===================================================== Go's own externs =====

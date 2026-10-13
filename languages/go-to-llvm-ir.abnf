@@ -4666,16 +4666,24 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var baseV = callExt(b, "js_get", [plan, emitNum(b, 1)])
             var offV = callExt(b, "js_get", [plan, emitNum(b, 2)])
             var lenV = callExt(b, "js_get", [plan, emitNum(b, 3)])
+            // A map (plan[4]) ranges over a copy of its keys: an entry deleted
+            // before it is reached is skipped, and the value is read live.
+            var mapV = callExt(b, "js_get", [plan, emitNum(b, 4)])
+            var isMapI = truthy(b, mapV)
             var zeroV = emitNum(b, 0)
             var preB = b
             var headB = curF.NewBlock("")
             var bodyB = curF.NewBlock("")
+            var chkB = curF.NewBlock("")
+            var runB = curF.NewBlock("")
             var postB = curF.NewBlock("")
             var exitB = curF.NewBlock("")
             b.NewBr(headB)
             var cV = headB.NewPhi([llvm.ir.NewIncoming(zeroV, preB)])
             headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [cV, lenV])), bodyB, exitB)
-            var bb = bodyB
+            bodyB.NewCondBr(isMapI, chkB, runB)
+            chkB.NewCondBr(truthy(chkB, callExt(chkB, "js_pyin", [callExt(chkB, "js_get", [keysV, cV]), mapV])), runB, postB)
+            var bb = runB
             // Go 1.22: `:=` gives every iteration FRESH variables, so a closure made in
             // the body keeps this turn's values - a scope per iteration, as in
             // makeForClassic. The `=` form writes the enclosing variables.
@@ -4689,7 +4697,16 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 callExt(bb, setExt, [curScopeV, emitStr(bb, iName), ks.v])
             }
             if (vName != null && vName != "_") {
-                var ev = callExt(bb, "js_get", [baseV, callExt(bb, "js_add", [offV, cV])])
+                var mvB = curF.NewBlock("")
+                var svB = curF.NewBlock("")
+                var evB = curF.NewBlock("")
+                bb.NewCondBr(isMapI, mvB, svB)
+                var mv = callExt(mvB, "js_map_get", [mapV, callExt(mvB, "js_get", [keysV, cV])])
+                mvB.NewBr(evB)
+                var sv = callExt(svB, "js_get", [baseV, callExt(svB, "js_add", [offV, cV])])
+                svB.NewBr(evB)
+                bb = evB
+                var ev = evB.NewPhi([llvm.ir.NewIncoming(mv, mvB), llvm.ir.NewIncoming(sv, svB)])
                 callExt(bb, setExt, [curScopeV, emitStr(bb, vName), emitStoreCopy(bb, ev, rcopy)])
             }
             loopStack.push({cont: postB, brk: exitB, lbl: lbl})

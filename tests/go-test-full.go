@@ -3814,6 +3814,34 @@ func s63() {
 	check("cpy2", string(b) == "ababc")
 }
 
+// ===== SECTION 64: deleting and updating map entries during range =====
+func s64() {
+	m := map[int]int{}
+	for i := 0; i < 10; i++ {
+		m[i] = i * i
+	}
+	cnt := 0
+	for k := range m {
+		delete(m, k)
+		delete(m, 9-k)
+		cnt++
+	}
+	check("mrd1", cnt == 5 && len(m) == 0 && fmt.Sprint(m) == "map[]")
+	m3 := map[int]int{1: 1, 2: 2}
+	for k := range m3 {
+		delete(m3, k)
+		m3[k] = 5
+	}
+	check("mrd2", fmt.Sprint(m3) == "map[1:5 2:5]")
+	m4 := map[string]int{"a": 1, "b": 2, "c": 3}
+	sum := 0
+	for _, v := range m4 {
+		m4["a"], m4["b"], m4["c"] = 100, 100, 100
+		sum += v
+	}
+	check("mrd3", sum > 200)
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -3878,6 +3906,7 @@ func main() {
 	s61() // SECTION-CALL 61
 	s62() // SECTION-CALL 62
 	s63() // SECTION-CALL 63
+	s64() // SECTION-CALL 64
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

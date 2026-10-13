@@ -4572,7 +4572,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             }
             var keys = null
             var vals = null
-            if (isMap(arr)) { keys = arr.keys.slice(0); vals = arr.vals.slice(0) }
+            if (isMap(arr)) { keys = arr.keys.slice(0) }
             else if (typeof arr == "string") {
                 // Go ranges a string by RUNE: the index is the rune's BYTE OFFSET and
                 // the value is its code point (an int32), not a one-character string.
@@ -4594,10 +4594,16 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var res = undefined
             scopes.push({})
             var top = scopes.length - 1
+            // A map ranges over a copy of its keys and reads each value live: an
+            // entry deleted before it is reached is not produced. Twin of
+            // js_gorplan in lib/go-rt.metajs.
+            var live = isMap(arr)
             for (var i = 0; i < n; i++) {
+                var mi = live ? mapFind(arr, keys[i]) : 0
+                if (mi < 0) { continue }
                 scopes[top] = {}
                 if (iName != null) { rBind(iName, keys != null ? keys[i] : i) }
-                if (vName != null) { rBind(vName, goStoreRT(vals != null ? vals[i] : goIndex(arr, i), rcopy)) }
+                if (vName != null) { rBind(vName, goStoreRT(live ? arr.vals[mi] : (vals != null ? vals[i] : goIndex(arr, i)), rcopy)) }
                 var r = bodyT()
                 var s = loopSig(r, lbl)
                 if (s == 1) { break }

@@ -2579,9 +2579,10 @@ func init() {
 			return w(rt.call(u(a[3]), jsUndef, append([]interface{}{u(a[0])}, args.elems...)))
 		}
 		// js_gorplan(v): the PLAN of a range loop, made once per loop, as
-		// [keys, base, off, n]: the i-th key is keys[i] (i itself when keys is
+		// [keys, base, off, n, m]: the i-th key is keys[i] (i itself when keys is
 		// null) and the i-th value base[off+i], so the emitted loop reads both with
-		// js_get alone. An int is its own bound; a slice reads its backing array in
+		// js_get alone. For a map, m is the map, keys a copy of its keys and the
+		// value is read live: an entry deleted before it is reached is skipped. An int is its own bound; a slice reads its backing array in
 		// place; nil ranges zero times. A string ranges by RUNE (i the rune's BYTE
 		// offset, the value its code point) and a channel yields each received value
 		// until it is closed and drained - under the cooperative model every producer
@@ -2589,7 +2590,7 @@ func init() {
 		// Both, and a map, read as keys/vals. Twin of js_gorplan in lib/go-rt.metajs.
 		m["js_gorplan"] = func(a []uint64) uint64 {
 			plan := func(keys, base interface{}, off, n interface{}) uint64 {
-				return w(&jsArray{elems: []interface{}{keys, base, off, n}})
+				return w(&jsArray{elems: []interface{}{keys, base, off, n, jsNull}})
 			}
 			v := u(a[0])
 			switch x := v.(type) {
@@ -2625,8 +2626,9 @@ func init() {
 				}
 				return plan(keys, keys, 0.0, float64(len(keys.elems)))
 			}
-			if keys, vals, ok := dictParts(v); ok {
-				return plan(keys, vals, 0.0, float64(len(keys.elems)))
+			if keys, _, ok := dictParts(v); ok {
+				snap := &jsArray{elems: append([]interface{}(nil), keys.elems...)}
+				return w(&jsArray{elems: []interface{}{snap, jsNull, 0.0, float64(len(snap.elems)), v}})
 			}
 			rt.fail("range over a %s", rt.typeOf(v))
 			return 0
