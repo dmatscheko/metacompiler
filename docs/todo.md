@@ -118,7 +118,7 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-609 kotlin: Regex should use the Java dialect (flag J) · P2 · KT · OPEN [V spec-only]
+### T-609 kotlin: Regex should use the Java dialect (flag J) · P2 · KT · IN PROGRESS (KT worker, round 1) [V spec-only]
 Kotlin/JVM's Regex is java.util.regex, but the kotlin grammars pass only `q` to the shared regex engine, so every gap the J
 dialect fixes for java remains, including the `Regex("a{99999999999}")` runaway (java PSE "Illegal repetition range"). Pass J in
 the kotlin grammars and twins, map errors to PatternSyntaxException as java does, assert in tests/kotlin-test-full.kt. (The real
