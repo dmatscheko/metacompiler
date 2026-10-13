@@ -18,7 +18,7 @@
 //   jxkThrow(c, msg) throw a new java.util exception of class c with message msg
 //
 // It also holds Integer's unsigned and bit members over plain int values, and
-// Math.ulp and Math.IEEEremainder over doubles.
+// Math.ulp, Math.IEEEremainder and Math.multiplyHigh.
 //   jxkFail(msg)     a format or a pattern this subset does not support
 //
 // Case mapping and the literal search are lib/utf16-strings.js's, which both
@@ -102,6 +102,39 @@ function jxCpAt(s, i) {
         if (h >= 55296 && h < 56320) { return 65536 + (h - 55296) * 1024 + (c - 56320) }
     }
     return c
+}
+// String.chars and codePoints as int arrays (a surrogate pair is one code
+// point), and lines' parts: split at \n, \r and \r\n, with no empty last line.
+function jxChars(s) {
+    var out = []
+    for (var i = 0; i < s.length; i++) { out.push(s.charCodeAt(i)) }
+    return out
+}
+function jxCodePoints(s) {
+    var out = []
+    var i = 0
+    while (i < s.length) {
+        var cp = jxCpAt(s, i)
+        out.push(cp)
+        i = i + (cp > 65535 ? 2 : 1)
+    }
+    return out
+}
+function jxLines(s) {
+    var out = []
+    var start = 0
+    var i = 0
+    while (i < s.length) {
+        var c = s.charAt(i)
+        if (c == "\n" || c == "\r") {
+            out.push(s.substring(start, i))
+            if (c == "\r" && i + 1 < s.length && s.charAt(i + 1) == "\n") { i = i + 1 }
+            start = i + 1
+        }
+        i = i + 1
+    }
+    if (start < s.length) { out.push(s.substring(start, s.length)) }
+    return out
 }
 // regionMatches: the len units of s from to and of o from oo, folded as
 // compareToIgnoreCase folds them when ic; false when a region runs off its
@@ -204,6 +237,37 @@ function jxIeeeRem(x, p) {
     }
     if (neg) { return -hx }
     return hx
+}
+// Math.multiplyHigh: the high 64 bits of the signed 128-bit product of two
+// longs, each given as its unsigned 32-bit halves; the answer is [hi, lo]
+// halves. Sixteen-bit limbs keep every partial product exact; the unsigned
+// product is corrected for a negative operand by subtracting the other.
+function jxMulHigh(ah, al, bh, bl) {
+    var a = [al % 65536, Math.floor(al / 65536), ah % 65536, Math.floor(ah / 65536)]
+    var b = [bl % 65536, Math.floor(bl / 65536), bh % 65536, Math.floor(bh / 65536)]
+    var col = [0, 0, 0, 0, 0, 0, 0, 0]
+    for (var i = 0; i < 4; i++) {
+        for (var j = 0; j < 4; j++) { col[i + j] = col[i + j] + a[i] * b[j] }
+    }
+    var limbs = []
+    var carry = 0
+    for (var k = 0; k < 8; k++) {
+        var t = col[k] + carry
+        limbs.push(t % 65536)
+        carry = Math.floor(t / 65536)
+    }
+    var r = [limbs[7] * 65536 + limbs[6], limbs[5] * 65536 + limbs[4]]
+    if (ah >= 2147483648) { r = jxSub64(r, bh, bl) }
+    if (bh >= 2147483648) { r = jxSub64(r, ah, al) }
+    return r
+}
+// [h, l] - (sh, sl) modulo 2^64, all unsigned 32-bit halves.
+function jxSub64(r, sh, sl) {
+    var l = r[1] - sl
+    var borrow = l < 0 ? 1 : 0
+    var h = r[0] - sh - borrow
+    if (h < 0) { h = h + 4294967296 }
+    return [h, l + borrow * 4294967296]
 }
 // A code point as its one or two UTF-16 units.
 function jxCpStr(cp) {

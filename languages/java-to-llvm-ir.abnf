@@ -3598,6 +3598,13 @@ HasStatic   = :script(~~
     // String.toCharArray (js_jvchars) is java-only for the same reason,
     // and so is an array's clone() (js_jvclone).
     function jEmitNamedCall(b, cur, s, argsV) {
+        // String's chars / codePoints / lines build lib/java-stream.java's
+        // stream themselves (js_jvstrstream); any other receiver is a call.
+        if (jStrStreamName(s.name, s.args.length)) {
+            return callExt(b, "js_jvstrstream", [cur, emitStr(b, s.name), argsV,
+                                                 callExt(b, "js_scope_get", [curScopeV, emitStr(b, "IntStream")]),
+                                                 callExt(b, "js_scope_get", [curScopeV, emitStr(b, "Stream")])])
+        }
         return (s.name == "substring")
                  ? callExt(b, "js_jvsub", [cur, argsV])
                  : ((s.name == "toCharArray" && s.args.length == 0)

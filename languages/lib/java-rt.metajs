@@ -885,6 +885,12 @@ function jvMathMembers(o) {
         return flo(jxUlp(rtF32Round(rtjNum(v)), true), 3)
     }
     o["IEEEremainder"] = function(a, b) { return flo(jxIeeeRem(rtjNum(a), rtjNum(b)), 0) }
+    o["multiplyHigh"] = function(a, b) {
+        var x = jvToLongBox(a)
+        var y = jvToLongBox(b)
+        var r = jxMulHigh(sintHi(x), sintLo(x), sintHi(y), sintLo(y))
+        return sintRaw(r[0], r[1], 64, false)
+    }
     // signum keeps a double a double and a float a float; an integral argument
     // takes the float overload. NaN and both zeros answer themselves.
     o["signum"] = function(v) {
@@ -2247,6 +2253,16 @@ function jvCceBase(n) {
     if (i > 0 && n.charAt(i) != "L") { return true }
     if (i > 0) { i = i + 1 }
     return n.substring(i, i + 5) == "java."
+}
+
+// String's chars / codePoints / lines: the stream's of() over the receiver's
+// array, or an ordinary call when the receiver is no String. Twin of
+// js_jvstrstream in abnf/jsrtjavastr.go.
+function js_jvstrstream(s, name, args, intStream, stream) {
+    if (typeof s != "string") { return js_mcall(s, name, args) }
+    if (name == "lines") { return stream["of"](js_jvarrtag(jxLines(s), "[Ljava.lang.String;")) }
+    if (name == "chars") { return intStream["of"](js_jvarrtag(jxChars(s), "[I")) }
+    return intStream["of"](js_jvarrtag(jxCodePoints(s), "[I"))
 }
 
 function js_jvgetclass(v) {

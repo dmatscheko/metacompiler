@@ -1286,6 +1286,53 @@ func init() {
 			rt.fail("getClass() of a value with no class")
 			return 0
 		}
+		// String's chars / codePoints / lines: (receiver, name, args,
+		// IntStream, Stream) - the stream's of() over the receiver's array, or
+		// an ordinary call when the receiver is no String. Twin of jStrMethod
+		// in java-interpreter.abnf and js_jvstrstream in
+		// languages/lib/java-rt.metajs.
+		m["js_jvstrstream"] = func(a []uint64) uint64 {
+			s, isStr := u(a[0]).(string)
+			if !isStr {
+				return baseMcall(a[:3])
+			}
+			su := strUnits(s)
+			arr := &jsArray{}
+			cls := u(a[3])
+			switch rt.toString(u(a[1])) {
+			case "lines":
+				cls = u(a[4])
+				arr.kind = jvArrTagKind("[Ljava.lang.String;")
+				start := 0
+				for i := 0; i < len(su); i++ {
+					if su[i] == '\n' || su[i] == '\r' {
+						arr.elems = append(arr.elems, strFromUnits(su[start:i]))
+						if su[i] == '\r' && i+1 < len(su) && su[i+1] == '\n' {
+							i++
+						}
+						start = i + 1
+					}
+				}
+				if start < len(su) {
+					arr.elems = append(arr.elems, strFromUnits(su[start:]))
+				}
+			case "chars":
+				arr.kind = jvArrTagKind("[I")
+				for _, c := range su {
+					arr.elems = append(arr.elems, float64(c))
+				}
+			default:
+				arr.kind = jvArrTagKind("[I")
+				for i := 0; i < len(su); i++ {
+					cp := jxCpAt(su, i)
+					arr.elems = append(arr.elems, float64(cp))
+					if cp > 0xFFFF {
+						i++
+					}
+				}
+			}
+			return w(rt.call(rt.getMember(cls, "of"), jsUndef, []interface{}{arr}))
+		}
 		m["js_jvis"] = func(a []uint64) uint64 {
 			return w(rt.jvIsType(u(a[0]), rt.toString(u(a[1]))))
 		}

@@ -1615,9 +1615,11 @@ function jRecvTy(t) {
     }
     return jStaticTy(t)
 }
+// String's chars(), codePoints() and lines(), which answer a stream.
+function jStrStreamName(name, n) { return n == 0 && (name == "chars" || name == "codePoints" || name == "lines") }
 // A `.name(args)` suffix record, with its text and its arguments' static types.
 function jMcallSfx(name, args, text) {
-    if (name == "stream") { jStreamWant = true }
+    if (name == "stream" || jStrStreamName(name, args.length)) { jStreamWant = true }
     return {kind: "mcall", name: name, args: args, stext: text, atys: jCallArgTys(text, args.length)}
 }
 // Gives each `.m(...)` suffix of a member chain `rty`, its receiver's static

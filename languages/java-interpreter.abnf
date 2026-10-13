@@ -2342,6 +2342,12 @@ HasStatic   = :script(~~
             return dbl ? jFlo(u) : jFlo32(u)
         },
         IEEEremainder: function(a, b) { return jFlo(jxIeeeRem(jNumD(a), jNumD(b))) },
+        multiplyHigh: function(a, b) {
+            var x = szPair(jNarrow(a, 64))
+            var y = szPair(jNarrow(b, 64))
+            var r = jxMulHigh(x.h, x.l, y.h, y.l)
+            return szMake(i64Make(r[0], r[1]), 64, jNoU)
+        },
         // signum keeps a double a double and a float a float; an integral
         // argument takes the float overload. NaN and both zeros answer themselves.
         signum: function(v) {
@@ -3797,6 +3803,13 @@ HasStatic   = :script(~~
         if (name == "isEmpty") { return s.length == 0 }
         if (name == "isBlank") { return jxIsBlank(s) }
         if (name == "formatted") { return jStrStatic("format", concat2impl([s], args)) }
+        // chars, codePoints and lines are lib/java-stream.java's streams over
+        // an array. Twin of js_jvstrstream in abnf/jsrtjavastr.go and
+        // languages/lib/java-rt.metajs.
+        if (jStrStreamName(name, args.length)) {
+            if (name == "lines") { return mcall(globalScope["Stream"], "of", [jArrTag(jxLines(s), "[Ljava.lang.String;")]) }
+            return mcall(globalScope["IntStream"], "of", [jArrTag(name == "chars" ? jxChars(s) : jxCodePoints(s), "[I")])
+        }
         if (name == "regionMatches") {
             if (typeof a0 == "boolean") { return jxRegionMatches(s, a0, jI(args[1]), jStrArg(args[2]), jI(args[3]), jI(args[4])) }
             return jxRegionMatches(s, false, jI(a0), jStrArg(args[1]), jI(args[2]), jI(args[3]))

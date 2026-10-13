@@ -557,6 +557,19 @@ func jvMathMembers(o *jsObject) {
 	o.set("IEEEremainder", jsHostFunc("IEEEremainder", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		return dbl(math.Remainder(rt.toNumber(argAt(args, 0)), rt.toNumber(argAt(args, 1))))
 	}))
+	// The high 64 bits of the signed 128-bit product: the unsigned one, less
+	// the other operand for each negative one. Twin of jxMulHigh.
+	o.set("multiplyHigh", jsHostFunc("multiplyHigh", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		a, b := jvToLong(rt, argAt(args, 0)), jvToLong(rt, argAt(args, 1))
+		hi, _ := bits.Mul64(uint64(a), uint64(b))
+		if a < 0 {
+			hi -= uint64(b)
+		}
+		if b < 0 {
+			hi -= uint64(a)
+		}
+		return jvBox(int64(hi))
+	}))
 	// floorDiv / floorMod round the quotient toward -Infinity, through the
 	// language's own / and % so the width and the "/ by zero" throw follow.
 	o.set("floorDiv", jsHostFunc("floorDiv", func(rt *jsrt, this uint64, args []interface{}) interface{} {

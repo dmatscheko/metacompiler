@@ -3897,5 +3897,12 @@ class S68 {
             && Float.floatToIntBits(1.5f) == 1069547520 && Double.doubleToLongBits(-0.0) == Long.MIN_VALUE
             && Math.ulp(1.0) == 2.220446049250313E-16 && Math.ulp(1e-310) == 4.9E-324 && Math.ulp(1f) == 1.1920929E-7f
             && Math.IEEEremainder(5.0, 3.0) == -1.0 && Math.IEEEremainder(7.0, 2.0) == -1.0 && Math.IEEEremainder(-5.5, 3.0) == 0.5);
+        long[] ls = {-1L, Long.MAX_VALUE, -987654321098765L};
+        String mh = "";
+        for (long x : ls) { for (long y : ls) { mh = mh + Math.multiplyHigh(x, y) + " "; } }
+        String two = "a😀b";
+        Main.check("sm68", mh.equals("0 -1 0 -1 4611686018427387903 -493827160549383 0 -493827160549383 52879849912 ")
+            && two.chars().count() == 4 && two.codePoints().count() == 3 && "abc".chars().sum() == 294
+            && "x\ny\r\nz\r".lines().collect(Collectors.toList()).toString().equals("[x, y, z]"));
     }
 }
