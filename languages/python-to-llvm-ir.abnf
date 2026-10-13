@@ -3768,19 +3768,27 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (t != null) {
                 var r = t(b)
                 b = r.b
-                v = r.v
+                var rc = null
                 if (causeT != null) {
-                    var rc = causeT(b)
+                    rc = causeT(b)
                     b = rc.b
+                }
+                // `raise SomeClass` names a CLASS, and CPython raises an INSTANCE of
+                // it: js_pyraiseval instantiates one. Throwing the class object
+                // itself would match no except clause.
+                v = callExt(b, "js_pyraiseval", [r.v])
+                // Implicit chaining, for a raise written inside an except body.
+                if (handlerDepth > 0) {
+                    callExt(b, "js_pyexcctx", [v, callExt(b, "js_scope_get", [curScopeV, emitStr(b, "__caught")])])
+                }
+                if (rc != null) {
                     callExt(b, "js_pysetattr", [v, emitStr(b, "__cause__"), rc.v])
+                    callExt(b, "js_pysetattr", [v, emitStr(b, "__suppress_context__"), hTrue])
                 }
             } else if (handlerDepth > 0) {
                 v = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "__caught")])
             }
-            // `raise SomeClass` names a CLASS, and CPython raises an INSTANCE of
-            // it: js_pyraiseval instantiates one. Throwing the class object itself
-            // would match no except clause.
-            callExt(b, "js_throw", [callExt(b, "js_pyraiseval", [v])])
+            callExt(b, "js_throw", [v])
             b.NewRet(hUndef) // Never reached: js_throw unwinds on the host side.
             return deadBlock()
         }

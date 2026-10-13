@@ -567,6 +567,27 @@ def s18():
     except* OtherError as go:
         groups.append(f"O{len(go.exceptions)}")
     check("exc7", groups == ["S1", "O1"])
+    # A raise inside an except body chains the handled exception as __context__;
+    # `from` sets __cause__ and suppresses the context; nothing chained reads None.
+    chain = []
+    for frm in [False, True]:
+        try:
+            try:
+                raise AppError("first")
+            except AppError as e:
+                if frm:
+                    raise OtherError("second") from None
+                raise OtherError("second")
+        except OtherError as e2:
+            chain.append((repr(e2.__context__), e2.__cause__, e2.__suppress_context__))
+    try:
+        try:
+            raise AppError("only")
+        except AppError as e3:
+            raise
+    except AppError as e4:
+        chain.append((e4.__context__, e4.__cause__, e4.__suppress_context__, hasattr(e4, "__context__")))
+    check("exc8", chain == [("AppError('first')", None, False), ("AppError('first')", None, True), (None, None, False, True)])
 class AppError(Exception):
     pass
 class SubError(AppError):

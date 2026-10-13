@@ -16388,6 +16388,17 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			return a[0]
 		},
+		// (raised, handled): a `raise` inside an except body records the handled
+		// exception as the raised one's __context__, unless it re-raises that very
+		// one. Twin of pyRaise in languages/python-interpreter.abnf and
+		// js_pyexcctx in lib/python-rt.metajs.
+		"js_pyexcctx": func(a []uint64) uint64 {
+			v, cur := u(a[0]), u(a[1])
+			if _, _, ok := pyInstance(v); ok && v != cur {
+				rt.pySetAttrRaw(v, "__context__", cur)
+			}
+			return 0
+		},
 		// The type test of an except clause. It is isinstance, PLUS the one thing an
 		// except clause has to answer that isinstance must not: this subset lets a
 		// program raise a value that is no class instance at all (raise "boom"), and
@@ -20427,6 +20438,12 @@ func (rt *jsrt) pyGetAttrRaw(obj interface{}, name string) interface{} {
 		if name == "code" && rt.pyIsInstance(obj, rt.pyExcClass("SystemExit")) {
 			return pyExitCode(inst)
 		}
+		if rt.pyExcChainSlot(obj, name) {
+			if name == "__suppress_context__" {
+				return false
+			}
+			return jsUndef
+		}
 		if m := rt.pyObjectMethod(name); m != nil {
 			return rt.pyBindObjectMethod(obj, m, name)
 		}
@@ -20834,6 +20851,14 @@ func pyExcSlot(k string) bool {
 		return true
 	}
 	return false
+}
+
+// pyExcChainSlot names the chaining slots every exception has before anything
+// chains it: __cause__ and __context__ None, __suppress_context__ False. Twin of
+// pyExcChainSlot in languages/python-interpreter.abnf and lib/python-rt.metajs.
+func (rt *jsrt) pyExcChainSlot(obj interface{}, k string) bool {
+	return (k == "__cause__" || k == "__context__" || k == "__suppress_context__") &&
+		rt.pyIsInstance(obj, rt.pyExcClass("BaseException"))
 }
 
 // pyNoteDunder records that the program wrote the __-prefixed attribute name.
@@ -22808,7 +22833,7 @@ func (rt *jsrt) pyHasAttrRaw(obj interface{}, name string) bool {
 		if _, isProp := pyPropOf(m); found && isProp {
 			return rt.pyHookHas(obj, name)
 		}
-		return found || rt.pyObjectMethod(name) != nil
+		return found || rt.pyObjectMethod(name) != nil || rt.pyExcChainSlot(obj, name)
 	}
 	// A MODULE object, mirroring pyGetAttr's module arm - hasattr(math, "sqrt")
 	// has to agree with what `math.sqrt` answers.

@@ -1924,6 +1924,13 @@ function pyExcSlot(k) {
            k == "__suppress_context__"
 }
 
+// Go: pyExcChainSlot. The chaining slots every exception has before anything
+// chains it: __cause__ and __context__ None, __suppress_context__ False.
+function pyExcChainSlot(obj, k) {
+    return (k == "__cause__" || k == "__context__" || k == "__suppress_context__")
+           && pyDIsInstance(obj, pyExcClass("BaseException"))
+}
+
 // Records name in obj's __ord: an instance's starts at its first __-prefixed
 // attribute (pyInstanceDict), a class's at its first member (pyClassDict).
 function pyOrdNote(obj, name) {
@@ -2054,6 +2061,10 @@ function pyGetAttrRaw(obj, name) {
         }
         if (name == "__new__") { return pyClsNew(cls) }
         if (name == "code" && pyDIsInstance(obj, pyExcClass("SystemExit"))) { return pyExitCode(obj) }
+        if (pyExcChainSlot(obj, name)) {
+            if (name == "__suppress_context__") { return false }
+            return undefined
+        }
         var iom = pyObjectMethod(name)
         if (iom !== null) { return pyBindObjectMethod(obj, iom, name) }
         pyRaiseExc("AttributeError",
@@ -6722,7 +6733,7 @@ function pyDHasAttr(obj, name) {
         if (obj[name] !== undefined || pyNoneBound(obj, name)) { return true }
         // A property answers what its getter does (Go: pyHasAttrRaw).
         if (pyLookupHas(cls, name) && pyDIsProp(pyLookupVal(cls, name))) { return pyDHookHas(obj, name) }
-        return pyLookupHas(cls, name) || pyObjectMethod(name) !== null
+        return pyLookupHas(cls, name) || pyObjectMethod(name) !== null || pyExcChainSlot(obj, name)
     }
     // A MODULE object, mirroring pyGetAttr's module arm - hasattr(math, "sqrt")
     // has to agree with what `math.sqrt` answers.
@@ -9479,6 +9490,13 @@ function pyBuiltinVal(bt, args, kw) {
 function js_pyraiseval(v) {
     if (pyClassOf(v) === null) { return v }
     return pyDInstantiate(pyClassOf(v), [], undefined)
+}
+
+// Go: js_pyexcctx. A `raise` inside an except body records the handled
+// exception as the raised one's __context__, unless it re-raises that one.
+function js_pyexcctx(v, cur) {
+    if (pyInstClassOf(v) !== null && v !== cur) { pySetAttrRaw(v, "__context__", cur) }
+    return undefined
 }
 
 // callPyValue calls a value that may itself be a class or a

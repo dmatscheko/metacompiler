@@ -2852,6 +2852,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // catches AttributeError.
             if (pyIsProp(clsFind(o.__class, name))) { return pyHookHas(o, name) }
             return clsFind(o.__class, name) != null || clsHas(o.__class, name) || pyObjectMethod(name) != null
+                   || pyExcChainSlot(o.__class, name)
         }
         if (typeof o == "function") {
             if (name == "__name__" || name == "__qualname__") { return true }
@@ -11870,7 +11871,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "ExceptionGroup" && args.length > 1) { inst.exceptions = pyTup(args[1].slice(0)) }
         return inst
     }
-    function pyRaise(v) { throw {__exc: true, v: v} }
+    // An exception raised while another is being handled records that one as its
+    // __context__ (CPython's implicit chaining); re-raising the handled one does not.
+    function pyRaise(v) {
+        if (pyCurExc.length > 0 && typeof v == "object" && pyUser(v)) {
+            var cur = pyCurExc[pyCurExc.length - 1]
+            if (cur !== v) { v.__context__ = cur }
+        }
+        throw {__exc: true, v: v}
+    }
     // The exception currently being handled, for a bare `raise`.
     var pyCurExc = []
     // The Ellipsis singleton (`...`), used as a body placeholder and as a value.
@@ -12050,7 +12059,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             v = t()
             // `raise SomeClass` (not an instance) instantiates it, like Python.
             if (v != null && v != undefined && v.__isclass == true) { v = pyNew(v, [], null) }
-            if (causeT != null && pyUser(v)) { v.__cause__ = causeT() }
+            if (causeT != null && pyUser(v)) {
+                v.__cause__ = causeT()
+                v.__suppress_context__ = true
+            }
             pyRaise(v)
         }
     }
@@ -12469,6 +12481,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             if (clsHas(o.__class, name)) { return undefined }
             if (name == "code" && clsIsSub(o.__class, hostGlobals["SystemExit"])) { return pyExitCode(o) }
+            if (pyExcChainSlot(o.__class, name)) { return name == "__suppress_context__" ? false : undefined }
             if (name == "__new__") { return pyClsNew(o.__class) }
             var iom = pyObjectMethod(name)
             if (iom != null) { return pyBindObjectMethod(o, iom, name) }
@@ -12717,6 +12730,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pyExcSlot(k) {
         return k == "args" || k == "__cause__" || k == "__context__" || k == "__traceback__" ||
                k == "__suppress_context__"
+    }
+    // The chaining slots every exception has before anything chains it: __cause__
+    // and __context__ None, __suppress_context__ False. Twin of pyExcChainSlot in
+    // abnf/jsrt.go and lib/python-rt.metajs.
+    function pyExcChainSlot(cls, k) {
+        return (k == "__cause__" || k == "__context__" || k == "__suppress_context__")
+               && clsIsSub(cls, hostGlobals["BaseException"])
     }
     function pyInstDictPush(d) {
         var o = d.__owner
