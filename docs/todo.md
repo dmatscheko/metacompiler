@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-602** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-603** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -138,16 +138,15 @@ element as an expression pattern) does not parse in either half (range bounds do
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-600 php compiler: arrays passed by value are not copied; array copies drop references; spread of references · P1 · PHP · IN PROGRESS (PHP worker, round 3) [V spec-only]
-`function h($xs){ $xs[0]=5; } $a=[1]; h($a); echo $a[0];` → llvm.Run and native `5`, interp `1` (PHP 1: arrays are values,
-copy-on-write). All engines: arrCopy / phpArrCopy dereference every cell, so `$n=1; $a[0]=&$n; $b=$a; $b[0]=7; echo $n;` → 1
-(PHP 7: a reference with refcount > 1 survives zend_array_dup; a refcount-1 one, e.g. after unset($v) of a foreach-by-ref,
-does not — decide the model). Hence `$k=1; $a=[&$k,4]; $a[0]=9;` leaves $k=1 (PHP 9). `call_user_func_array('inc', $a)` /
-`inc(...$a)` with `$a[0]=&$n` and `function inc(&$x)` does not increment $n (PHP does). `$c->bind(...)`,
-`$c->fromCallable(...)`, `[$c,'bind']` raise "Call to undefined method Closure::bind()" (PHP calls the static method).
-Residual callback edges: `array_map(['N','q'])` with N having only __callStatic reaches it (PHP TypeError); cbVis's
-inaccessible-method + __call-with-object path tests only __callStatic; an ambiguous by-ref method called with named/spread
-arguments passes by value; a first-class callable from a strict `['C','m']` via fakeCall uses $this's __call.
+### T-602 php: spread into a by-ref parameter; lazy copy holder counts; Closure statics by name; caller context in library callbacks · P2 · PHP · OPEN [V spec-only]
+`$a=[1]; inc(...$a); echo $a[0];` with `function inc(&$x)` → all legs 1 (PHP 2: ZEND_SEND_UNPACK makes the element a reference;
+needs the callee's mask at merge time, a js_phmerge variant). Copies are eager, so reference holder counts are read at assignment
+instead of at the copy's first write: `$x=1;$a=[&$x];$b=$a;unset($x);$b[0]=5;echo $a[0];` → 5 (PHP 1); a literal's temporary
+counts as a holder; holders gone by frame return are never decremented (documented at phpRefHolders).
+`call_user_func(['Closure','bind'], ...)`, `'Closure::bind'`, `['Closure','fromCallable']` → "class "Closure" not found" in all
+engines; `call_user_func_array([$c,'fromCallable'], ...)` fails in llvm.Run and native (interp right). Library callbacks
+(`array_map(['N','q'])` with only __callStatic, cbVis's __call-with-object path, a strict `['C','m']` first-class callable via
+fakeCall) need the caller's `$this` and the library's "where" text passed through libCallable into the check, in all engines.
 
 ### T-596 php: binding and undefined-variable warnings are never printed · P3 · PHP · BLOCKED - needs a user decision
 PHP CLI prints `Warning: Cannot unbind $this of closure using $this in <file> on line <n>` (and undefined-variable/-index
@@ -704,6 +703,7 @@ T-589 lua: tables and functions as keys collide — DONE 991c9c71
 T-590 lua: metatables and the missing standard library — PARTIAL 9512ba5c..57ffd73d (metatables and all metamethods at +0.05%, _G proxy, coroutine on floor generators, utf8, math.random bit-exact, collectgarbage, string.pack, table lib via metamethods, FILE* type); rest is T-598, T-599
 T-595 php: `[$closure, '__invoke']` callbacks; `[&$k, 4]` in the compiler; callback-form static fallback; bindTo identity — DONE 8ee86d4a (the call_user_func('M::sp') claim refuted by php-src: __call is right, bug45180/bug45186 phpts)
 T-593 go: an overflowing constant is not rejected at compound assignment, typed const, return, element, send, `_ =` — DONE 89ffe028 (plus division by constant zero, negative constant shifts, constant index/slice/conversion range, truncated float constants: 86e8cea2..5208be9f)
+T-600 php compiler: arrays passed by value are not copied; array copies drop references; spread of references — PARTIAL 2393d44a 464bc456 49c99ffa (by-value array params copied when written, shared references kept through copies and spreads, Closure::bind/fromCallable via an instance, named by-ref args); rest is T-602
 
 # Settled — do not re-open
 
