@@ -800,13 +800,11 @@ Grouped     <~~ push(makeParen(takeAll())) ~~>
 // { e for x in it [if c] } / { a, b, ... } (SetComp / SetLit below): a genuine set - a
 // dict whose keys are the members (so membership, len and insertion order come for free)
 // marked __set.
-// ( e for x in it [if c] ): a parenthesized generator expression.
-GenExpParen <~~ push(makeListComp(takeAll())) ~~>
+// ( e for x in it [if c] ): a parenthesized generator expression (makeGenExp).
+GenExpParen <~~ push(makeGenExp(takeAll())) ~~>
             = "(" :whitespace(WhitespaceNL) Expression CompFor { CompClause } ")" :whitespace(Whitespace) ;
 // list(v * v for v in range(4)): a generator expression as the sole call argument.
-// The value model has no lazy iterator, so it is built eagerly as a list - which
-// behaves the same for every use in this subset (iterate it, or hand it to list()).
-GenExpArg   <~~ push(makeListComp(takeAll())) ~~>
+GenExpArg   <~~ push(makeGenExp(takeAll())) ~~>
             = Expression CompFor { CompClause } ;
 SetComp     <~~ push(makeSetComp(takeAll())) ~~>
             = "{" :whitespace(WhitespaceNL) Expression CompFor { CompClause } "}" :whitespace(Whitespace) ;
@@ -9892,7 +9890,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (st.done) { return {yielded: false, value: st.ret} }
         if (g.running === true) { pyListErr("ValueError", "generator already executing") }
         g.running = true
-        try { return genReplay(g, st, sendv) } finally { g.running = false }
+        try {
+            if (g.gx !== undefined) { return gxStep(g, sendv) }
+            return genReplay(g, st, sendv)
+        } finally { g.running = false }
     }
     function genReplay(g, st, sendv) {
         st.sent.push(sendv)
@@ -10246,6 +10247,74 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             scopes.pop()
             return out
         }
+    }
+    // ( e for x in it ... ): a GENERATOR, as in CPython - lazy and single-use, its
+    // outermost iterable evaluated (and iter()'d) where the expression stands and
+    // everything else as it is stepped. It is not a replayed body: the clause
+    // chain is a resumable walk (gxNext) over one delegate per `for`, in the
+    // expression's own scope, so a step costs what one element does.
+    // python-to-llvm-ir.abnf's makeGenExp compiles the same shape to a coroutine.
+    var pyGenExpPlist = {locals: [], slots: [], rest: null, kwrest: null}
+    function makeGenExp(items) {
+        var exprT = items[0]
+        var cl = compClauses(items, 1)
+        return function() {
+            var src = pyDelegOf(cl[0].citer())
+            var g = newGenObject(function() { return undefined }, scopes.slice(), pyGenExpPlist, [], [], null)
+            var own = scopes.slice()
+            own.push({__pyfn: true, __pyd: ""})
+            g.gx = {cl: cl, exprT: exprT, src: src, lv: [], started: false, scopes: own}
+            return g
+        }
+    }
+    // One step of a generator expression, in genRun's {yielded, value} shape. A
+    // throw-in (close(), g.throw()) finishes it and raises there; a value sent in
+    // is ignored, as a genexp's `yield` discards it.
+    function gxStep(g, sendv) {
+        if (isThrowIn(sendv)) { g.st.done = true; pyRaise(sendv.v) }
+        var saved = scopes
+        scopes = g.gx.scopes
+        var r = anytype
+        try { r = gxNext(g.gx) }
+        catch (e) { g.st.done = true; throw e }
+        finally { scopes = saved }
+        if (r === null) {
+            g.st.done = true
+            return {yielded: false, value: undefined}
+        }
+        g.st.count = g.st.count + 1
+        return {yielded: true, value: r.v}
+    }
+    // The next element, or null when the outermost `for` ran out. lv holds the
+    // delegate of every `for` on the current path; a resume first advances the
+    // innermost one, and an exhausted one hands over to the `for` around it.
+    function gxNext(x) {
+        var cl = x.cl
+        var i = 0
+        var adv = x.started
+        x.started = true
+        while (true) {
+            if (adv) {
+                if (x.lv.length == 0) { return null }
+                var top = x.lv[x.lv.length - 1]
+                var st = anytype
+                st = pyDelegStep(top.d, undefined)
+                if (st.done) { x.lv.pop(); continue }
+                bindTarget(cl[top.i].cfor, st.value)
+                i = top.i + 1
+                adv = false
+                continue
+            }
+            if (i >= cl.length) { return {v: x.exprT()} }
+            var c = cl[i]
+            if (c.cif != undefined) {
+                if (pytruthy(c.cif())) { i = i + 1 } else { adv = true }
+                continue
+            }
+            x.lv.push({i: i, d: i == 0 ? x.src : pyDelegOf(c.citer())})
+            adv = true
+        }
+        return null
     }
     function makeSetComp(items) {
         var listT = makeListComp(items)

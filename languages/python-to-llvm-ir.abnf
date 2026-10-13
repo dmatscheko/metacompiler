@@ -869,7 +869,7 @@ AttrSfx     <~~ push({kind: "attr", name: pop().aname, pos: up.pos}) ~~>
 CallArg     = CallKw | CallDblStar | CallStar | CallGenExp | CallPos ;
 // f(expr for x in it): a generator expression needs no parentheses of its own
 // when it is the only argument of a call.
-CallGenExp  <~~ push(makeListComp(takeAll())) ~~>
+CallGenExp  <~~ push(makeGenExp(takeAll())) ~~>
             = Expression CompFor { CompClause } ;
 CallKw      <~~ var kv = pop(); push({ckwname: pop().kwn, ckwval: kv}) ~~>
             = Id <~~ push({kwn: up.in}) ~~> "=" Expression ;
@@ -966,9 +966,8 @@ PyJ         = "j" | "J" ;
 // tuple (js_pytup). A single parenthesized expression ( a ) is plain grouping.
 EmptyTuple  <~~ push(makeTupleLit([])) ~~>
             = "(" :whitespace(WhitespaceNL) ")" :whitespace(Whitespace) ;
-// ( expr for x in it [if c] ): a generator expression. It is materialized
-// eagerly here - the sequence is the same, only the laziness is missing.
-GenExpParen <~~ push(makeListComp(takeAll())) ~~>
+// ( expr for x in it [if c] ): a generator expression (makeGenExp).
+GenExpParen <~~ push(makeGenExp(takeAll())) ~~>
             = "(" :whitespace(WhitespaceNL) Expression CompFor { CompClause } ")" :whitespace(Whitespace) ;
 Grouped     <~~ push(makeParen(takeAll(), up.pos)) ~~>
             = "(" :whitespace(WhitespaceNL) ListItem { "," <~~ push({tcomma: true}) ~~> [ ListItem ] } ")" :whitespace(Whitespace) ;
@@ -2457,6 +2456,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (i >= cl.length) {
             var re = elemT(b)
             var eb = re.b
+            // A generator expression's chain (makeGenExp) yields each element.
+            if (oName == null) {
+                callExt(eb, "js_yield", [re.v])
+                return eb
+            }
             var oV = callExt(eb, "js_scope_get", [curScopeV, emitStr(eb, oName)])
             callExt(eb, "js_arr_push", [oV, re.v])
             return eb
@@ -2470,6 +2474,24 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             cb.NewCondBr(truthy(cb, rc.v), keepB, skipB)
             emitCompChain(keepB, cl, i + 1, oName, elemT).NewBr(skipB)
             return skipB
+        }
+        // A generator expression's outermost `for` STEPS its source, the iterator
+        // its parameter holds, through the {value, done} protocol.
+        if (cc.cstep != undefined) {
+            var sV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, cc.cstep)])
+            declCompNames(b, cc.cfor)
+            var sHead = curF.NewBlock("")
+            var sBody = curF.NewBlock("")
+            var sExit = curF.NewBlock("")
+            b.NewBr(sHead)
+            var stV = callExt(sHead, "js_call", [callExt(sHead, "js_get", [sV, emitStr(sHead, "next")]), hUndef,
+                                                 callExt(sHead, "js_arr_new", [])])
+            sHead.NewCondBr(truthy(sHead, callExt(sHead, "js_get", [stV, emitStr(sHead, "done")])), sExit, sBody)
+            pyCompTgt = compTgtAllNames(cc.cfor)
+            var sb = writeTarget(sBody, cc.cfor, callExt(sBody, "js_get", [stV, emitStr(sBody, "value")]))
+            pyCompTgt = false
+            emitCompChain(sb, cl, i + 1, oName, elemT).NewBr(sHead)
+            return sExit
         }
         hidCount++
         var iName = "$ci" + hidCount
@@ -2522,6 +2544,31 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             curScopeV = saved
             walrusScopeV = savedWal
             return {b: endB, v: outV}
+        }
+    }
+    // ( e for x in it ... ): a GENERATOR, as in CPython - lazy and single-use. The
+    // outermost iterable is evaluated (and iter()'d, js_pyyfsrc) where the
+    // expression stands; the clause chain is the body of a generator function
+    // that takes it as its one parameter and yields each element, called at once.
+    // Twin of makeGenExp in languages/python-interpreter.abnf.
+    function makeGenExp(items) {
+        var exprT = items[0]
+        var cl = compClauses(items, 1)
+        var inner = [{cfor: cl[0].cfor, cstep: "gx*src"}]
+        for (var k = 1; k < cl.length; k++) { inner.push(cl[k]) }
+        return function(b) {
+            var r = cl[0].citer(b)
+            b = r.b
+            var srcV = callExt(b, "js_pyyfsrc", [r.v])
+            // A walrus scope belongs to the enclosing function's IR.
+            var savedWal = walrusScopeV
+            walrusScopeV = null
+            var idx = emitClosure(["gx*src"], function(fb) { return emitCompChain(fb, inner, 0, null, exprT) }, false)
+            walrusScopeV = savedWal
+            var clo = callExt(b, "js_genfn", [callExt(b, "js_closure", [handle(idx), curScopeV])])
+            var argsV = callExt(b, "js_arr_new", [])
+            callExt(b, "js_arr_push", [argsV, srcV])
+            return {b: b, v: callExt(b, "js_call", [clo, hUndef, argsV])}
         }
     }
     // {k: v for ...}: the shared clause walker collects [key, value] pairs, which a second

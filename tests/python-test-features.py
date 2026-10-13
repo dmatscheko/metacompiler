@@ -2774,6 +2774,34 @@ check("tuple-index-error", [fe_try(lambda: fe_v[3][5]), fe_try(lambda: fe_v[3][-
       ["IndexError: tuple index out of range", "IndexError: tuple index out of range"])
 
 
+# ----- SECTION: generator expressions are lazy generators -----
+#
+# A generator expression evaluates its outermost iterable where it stands and
+# everything else as it is stepped, and it is single-use. Rows from CPython 3.14.
+ge_src = [1, 2, 3]
+ge_g = (x * 10 for x in ge_src)
+ge_log = []
+def ge_f(v):
+    ge_log.append(v)
+    return v
+ge_g2 = (ge_f(x) for x in ge_src)
+ge_first = [list(ge_log), next(ge_g2), list(ge_log)]
+def ge_count():
+    n = 0
+    while True:
+        yield n
+        n += 1
+ge_g3 = (n * n for n in ge_count() if n % 2)
+ge_it = iter([1, 2, 3, 4])
+ge_g4 = (x for x in ge_it)
+check("genexp-lazy", [sum(ge_g), sum(ge_g), next((x for x in ge_src)), ge_first, [next(ge_g3), next(ge_g3)],
+                      [next(ge_g4), list(ge_it), list(ge_g4)], type(ge_g).__name__],
+      [60, 0, 1, [[], 1, [1]], [1, 9], [1, [2, 3, 4], []], "generator"])
+check("genexp-shapes", [list((a, b) for a in range(3) for b in "xy" if a != 1), sorted(x for x in [3, 1, 2]),
+                        dict((k, k * 2) for k in "ab"), list(zip((c for c in "abc"), (d for d in ge_count())))],
+      [[(0, "x"), (0, "y"), (2, "x"), (2, "y")], [1, 2, 3], {"a": "aa", "b": "bb"}, [("a", 0), ("b", 1), ("c", 2)]])
+
+
 # ----- import edges -----
 # `from M import *` binds a runtime module's public names and a library
 # module's __all__, `import P.S` binds P, and a module function keeps its
