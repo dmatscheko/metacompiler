@@ -155,6 +155,7 @@ char *rt_replace(char *s, char *p, char *r, int mode);
 char *rt_case(char *s, int mode, char *pat);
 char *rt_shquote(char *sq);
 char *rt_ansic(char *ac);
+char *rt_unraw(char *s);
 int rt_haschar(char *s, int ch);
 char *rt_read_line(int u);
 char *rt_field(char *l, char *ifs, int idx, int rest);
@@ -238,6 +239,7 @@ int rt_pop_locals(int d);
 int rt_unset_up(int id, int d, int fn);
 int rt_fskind(char *p);
 char *rt_getvar_byname(char *n);
+char *rt_getvar_ind(char *n);
 int rt_varslot(char *n);
 int rt_setvar_byname(char *n, char *v);
 int rt_eval_assign(char *s);
@@ -356,14 +358,13 @@ int rt_strlen(char *s) {
 }
 
 /* rt_charlen: the number of CHARACTERS in s, which is what bash's ${#s} counts -
- * not bytes and not UTF-16 units. A UTF-8 continuation byte is 10xxxxxx, so
- * every byte with (b & 0xC0) != 0x80 starts one character. */
+ * not bytes and not UTF-16 units. A byte that is not part of a well-formed
+ * UTF-8 sequence is a character of its own (rt_cpw). */
 int rt_charlen(char *s) {
     int i = 0, n = 0;
     while (s[i] != 0) {
-        int c = (int)(unsigned char)s[i];
-        if ((c & 192) != 128) n = n + 1;
-        i = i + 1;
+        i = i + rt_cpw(s + i);
+        n = n + 1;
     }
     return n;
 }
@@ -372,12 +373,9 @@ int rt_charlen(char *s) {
 int rt_charoff(char *s, int k) {
     int i = 0, n = 0;
     while (s[i] != 0) {
-        int c = (int)(unsigned char)s[i];
-        if ((c & 192) != 128) {
-            if (n >= k) return i;
-            n = n + 1;
-        }
-        i = i + 1;
+        if (n >= k) return i;
+        n = n + 1;
+        i = i + rt_cpw(s + i);
     }
     return i;
 }
@@ -510,15 +508,19 @@ int rt_clsid(char *nm) {
  * A bracket expression matches one CHARACTER (`[[ ï == [ïn] ]]` is true in
  * bash 5.3), so the glob matcher reads codepoints, not bytes.
  *
- * rt_cpw answers 1 for anything that is not a well-formed sequence, so invalid
- * UTF-8 still advances and compares byte-for-byte. */
+ * rt_cpw answers 1 for anything that is not a well-formed sequence - a stray
+ * byte, an overlong form, a surrogate, a code point past U+10FFFF - so invalid
+ * UTF-8 still advances and compares byte-for-byte. Twin of bytesStr in
+ * bash-interpreter.abnf. */
 int rt_cpw(char *s) {
     int c0 = (int)(unsigned char)s[0];
+    int c1 = (int)(unsigned char)s[1];
     int w = 1;
     int i;
-    if (c0 >= 240) { w = 4; }
-    else if (c0 >= 224) { w = 3; }
-    else if (c0 >= 192) { w = 2; }
+    if (c0 >= 194 && c0 <= 223) { w = 2; }
+    else if (c0 >= 224 && c0 <= 239) { w = 3; }
+    else if (c0 >= 240 && c0 <= 244) { w = 4; }
+    if ((c0 == 224 && c1 < 160) || (c0 == 237 && c1 > 159) || (c0 == 240 && c1 < 144) || (c0 == 244 && c1 > 143)) return 1;
     i = 1;
     while (i < w) {
         int cc = (int)(unsigned char)s[i];
@@ -1779,83 +1781,58 @@ char *rt_case(char *s, int mode, char *pat) {
 
 /* rt_shquote: the ${v@Q} / ${v@K} / ${v@k} form - sq quoted so the shell would
  * read it back unchanged. Single quotes normally, with an embedded ' spelled
- * '\'', and the $'...' form as soon as the value holds a control character. */
+ * '\'', and the $'...' form (rt_ansiqs) as soon as the value holds a control
+ * character. */
 char *rt_shquote(char *sq) {
     int len = rt_strlen(sq);
-    /* 4 bytes per input byte is the worst case ('\'' and \xNN alike), plus $'' and NUL. */
-    char *dst = rt_bump(len * 4 + 8);
+    char *dst;
     int o = 0;
     int i = 0;
-    int ctl = 0;
-    /* pass 1: is there a control character? */
     while (i < len) {
         int c0 = (int)(unsigned char)sq[i];
-        int isCtl = (c0 < 32) || (c0 == 127);
-        ctl = isCtl ? 1 : ctl;
+        if ((c0 < 32) || (c0 == 127)) return rt_ansiqs(sq);
         i = i + 1;
     }
-    if (ctl != 0) {
-        dst[o] = (char)36; o = o + 1;
-        dst[o] = (char)39; o = o + 1;
-        int k = 0;
-        while (k < len) {
-            int c0 = (int)(unsigned char)sq[k];
-            if (c0 == 39) {
-                dst[o] = (char)92; o = o + 1;
-                dst[o] = (char)39; o = o + 1;
-            } else if (c0 == 92) {
-                dst[o] = (char)92; o = o + 1;
-                dst[o] = (char)92; o = o + 1;
-            } else if (c0 == 7) {
-                dst[o] = (char)92; o = o + 1;
-                dst[o] = (char)97; o = o + 1;
-            } else if (c0 == 8) {
-                dst[o] = (char)92; o = o + 1;
-                dst[o] = (char)98; o = o + 1;
-            } else if (c0 == 9) {
-                dst[o] = (char)92; o = o + 1;
-                dst[o] = (char)116; o = o + 1;
-            } else if (c0 == 10) {
-                dst[o] = (char)92; o = o + 1;
-                dst[o] = (char)110; o = o + 1;
-            } else if (c0 == 11) {
-                dst[o] = (char)92; o = o + 1;
-                dst[o] = (char)118; o = o + 1;
-            } else if (c0 == 12) {
-                dst[o] = (char)92; o = o + 1;
-                dst[o] = (char)102; o = o + 1;
-            } else if (c0 == 13) {
-                dst[o] = (char)92; o = o + 1;
-                dst[o] = (char)114; o = o + 1;
-            } else if ((c0 < 32) || (c0 == 127)) {
-                /* bash 5.3.15 writes OCTAL here - ${v@Q} of $'\001' is $'\001',
-                 * not $'\x01'. */
-                dst[o] = (char)92; o = o + 1;
-                dst[o] = (char)(48 + (c0 / 64)); o = o + 1;
-                dst[o] = (char)(48 + ((c0 / 8) % 8)); o = o + 1;
-                dst[o] = (char)(48 + (c0 % 8)); o = o + 1;
-            } else {
-                dst[o] = (char)c0; o = o + 1;
-            }
-            k = k + 1;
+    /* 4 bytes per input byte is the worst case ('\''), plus the quotes and NUL. */
+    dst = rt_bump(len * 4 + 3);
+    dst[o] = (char)39; o = o + 1;
+    i = 0;
+    while (i < len) {
+        int c0 = (int)(unsigned char)sq[i];
+        if (c0 == 39) {
+            dst[o] = (char)39; o = o + 1;
+            dst[o] = (char)92; o = o + 1;
+            dst[o] = (char)39; o = o + 1;
+            dst[o] = (char)39; o = o + 1;
+        } else {
+            dst[o] = (char)c0; o = o + 1;
         }
-        dst[o] = (char)39; o = o + 1;
-    } else {
-        dst[o] = (char)39; o = o + 1;
-        int j = 0;
-        while (j < len) {
-            int c0 = (int)(unsigned char)sq[j];
-            if (c0 == 39) {
-                dst[o] = (char)39; o = o + 1;
-                dst[o] = (char)92; o = o + 1;
-                dst[o] = (char)39; o = o + 1;
-                dst[o] = (char)39; o = o + 1;
-            } else {
-                dst[o] = (char)c0; o = o + 1;
-            }
-            j = j + 1;
+        i = i + 1;
+    }
+    dst[o] = (char)39; o = o + 1;
+    dst[o] = 0;
+    return dst;
+}
+
+/* A $'...' constant holding raw bytes: the emitter interns each raw byte B as the
+ * WTF-8 of U+DC00+B (ED B2 80 .. ED B3 BF, never valid UTF-8), and this turns every
+ * such triple back into B. See ansiWord in bash-to-llvm-ir.abnf. */
+char *rt_unraw(char *s) {
+    int len = rt_strlen(s);
+    char *dst = rt_bump(len + 1);
+    int i = 0;
+    int o = 0;
+    while (i < len) {
+        int c0 = (int)(unsigned char)s[i];
+        int c1 = (int)(unsigned char)s[i + 1];
+        if (c0 == 237 && (c1 == 178 || c1 == 179) && i + 2 < len) {
+            dst[o] = (char)(128 + (c1 - 178) * 64 + ((int)(unsigned char)s[i + 2] - 128));
+            i = i + 3;
+        } else {
+            dst[o] = (char)c0;
+            i = i + 1;
         }
-        dst[o] = (char)39; o = o + 1;
+        o = o + 1;
     }
     dst[o] = 0;
     return dst;
@@ -4503,6 +4480,18 @@ char *rt_ifsfirst(void)
     return rt_substr(v, 0, 1);
 }
 
+/* The bare ${!r}: rt_getvar_byname, except that a name for a whole list - r='arr[@]'
+ * or r='@' - answers a FIELD list, one field per element, as "${arr[@]}" does. Twin of
+ * indVal in bash-interpreter.abnf. */
+char *rt_getvar_ind(char *n)
+{
+    int len = rt_strlen(n);
+    if (rt_streq(n, "@") != 0) return rt_params(rt_ifsfirst(), 0);
+    if (len > 3 && n[len - 1] == 93 && n[len - 2] == 64 && n[len - 3] == 91)
+        return rt_sc_list(rt_substr(n, 0, len - 3), rt_ifsfirst(), 0, 0);
+    return rt_getvar_byname(n);
+}
+
 char *rt_getvar_byname(char *n)
 {
     char *sel;
@@ -4531,9 +4520,8 @@ char *rt_getvar_byname(char *n)
      * languages/bash-interpreter.abnf's getVarVal answers the same set. */
     if (rt_streq(n, "?") != 0) return rt_int2str(last_status);
     if (rt_streq(n, "#") != 0) return rt_int2str(frame_n);
-    /* ${!r} answers ONE string - the indirection path has no way to hand a field
-     * list back - so both $@ and $* come through as the joined form, which is
-     * what `"${!r}"` prints in bash either way. */
+    /* $@ and $* both come through joined here; the bare ${!r} asks rt_getvar_ind,
+     * which hands "$@" back as a field list. */
     if (rt_streq(n, "*") != 0 || rt_streq(n, "@") != 0) return rt_params(rt_ifsfirst(), 1);
     if (rt_streq(n, "$") != 0) return "1000";
     if (rt_streq(n, "!") != 0) return "0";

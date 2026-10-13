@@ -2411,6 +2411,36 @@ b c)" "2:[ab][c][]"
   check ece4 "$(printf '%b' 'q\"q|\0101\101')" 'q\"q|AA'
 }
 
+# ===== SECTION 50: $'...' in ${...} words, ${!r} of a list, textual let / for (( )), bytes =====
+# ${x@Q} spells ESC \E. A $'...' part of a ${...} word - default, pattern, replacement - is
+# ANSI-C quoted, inside "..." too, and its "&" is literal. ${!r} with r='arr[@]' is one word
+# per element. let "..." and the parts of for (( ; ; )) are expanded as TEXT before they are
+# evaluated, and a part may be empty. \xHH / \NNN make BYTES: %c and %.Ns cut by byte, a
+# lone byte counts as one character, and bytes that spell a character are that character.
+# Every expected value is bash 5.3's.
+s50() {
+  local x=$'a\eb' k=hello u
+  check aq1 "${x@Q}" "\$'a\\Eb'"
+  check aq2 "${k/l/$'\x26'}|${k//l/$'\x26'}|${k#$'\x68'}|${u:-$'\x41b'}|${u-$'q\tq'}" "he&lo|he&&o|ello|Ab|q	q"
+  local arr=(p 'q r' s) r='arr[@]' o
+  o=$(printf '<%s>' "${!r}" ${!r})
+  check ind1 "$o" "<p><q r><s><p><q><r><s>"
+  local e='1 + 2' y i n=0
+  let "y = $e * 2"
+  for (( i = $e * 0; i < $e * 2; i += 3 )); do n=$((n + i)); done
+  check txa1 "$y $n" "5 5"
+  i=0
+  for (( ; i < $e; )); do i=$((i + 1)); done
+  for (( ; ; )); do break; done
+  check txa2 "$i" "3"
+  local z=$'\303\251' b=$'\xc3' c d
+  c=$(printf '%c' é)
+  d=$(printf '[%.1s|%.3s|%3.1s]' é aéb é)
+  check byt1 "${#z} ${#b} ${#c} $z" "1 1 1 é"
+  check byt2 "$c|$d" "$b|[$b|aé|  $b]"
+  check byt3 "$(printf '%s' "$b"$'\xa9')" "é"
+}
+
 s01   # SECTION-CALL 01
 s02   # SECTION-CALL 02
 s03   # SECTION-CALL 03
@@ -2460,5 +2490,6 @@ s46   # SECTION-CALL 46
 s47   # SECTION-CALL 47
 s48   # SECTION-CALL 48
 s49   # SECTION-CALL 49
+s50   # SECTION-CALL 50
 echo "full: $checks checks, $fails failures"
 exit $fails

@@ -137,8 +137,19 @@ UntilStmt   <~~ push(makeUntil(takeAll())) ~~>
             = KwUntil CompoundList KwDo CompoundList KwDone ;
 
 // for (( init; cond; step )); do LIST; done
+// Each part is arithmetic text that, like (( )), is expanded FIRST when it holds an
+// expansion (e='1 + 2'; `i < $e * 2` is i < 5), and may be empty: an empty condition is 1.
 CForStmt    <~~ push(makeCFor(takeAll())) ~~>
-            = KwFor "((" :whitespace(Whitespace) ArList ";" ArList ";" ArList "))" OptSep KwDo CompoundList KwDone ;
+            = KwFor "((" :whitespace() CfPart ";" CfCond ";" CfPart "))" :whitespace(Whitespace) OptSep KwDo CompoundList KwDone ;
+CfPart      = CfDyn | CfSt | CfZero ;
+CfCond      = CfDyn | CfSt | CfOne ;
+CfDyn       <~~ push(mkArDyn(pop())) ~~> = CfHasExp CfDynWord ;
+CfDynWord   <~~ push(mkNsWord(takeAll())) ~~> = CfDynSeg { CfDynSeg } ;
+CfDynSeg    = DqSeg | ExpSeg | ArDynParen | CfDynBare ;
+CfDynBare   <~~ push(makeConst(up.in)) ~~> = !@+"()$`\";" ;
+CfSt        = WsNL :whitespace(Whitespace) ArList :whitespace() WsNL ;
+CfZero      <~~ push(mkNum("0")) ~~> = WsNL ;
+CfOne       <~~ push(mkNum("1")) ~~> = WsNL ;
 
 // for NAME in WORD...; do LIST; done   /   for NAME; do LIST; done (the positional parameters)
 // Each word is one iteration value (no re-splitting).
@@ -224,7 +235,11 @@ RedirItem   = HereDoc | Redir ;
 // let EXPR ... : the same evaluator as (( )); a quoted argument is parsed as arithmetic.
 LetCmd      <~~ push(makeLetCmd(takeAll())) ~~> = KwLet LetArg { LetArg } ;
 KwLet       = "let" KwEnd ;
-LetArg      = LetDq | LetSq | ArAssign ;
+// A double-quoted argument holding an expansion is expanded first and then evaluated, as
+// (( )) is: e='1 + 2'; `let "x = $e * 2"` sets 5.
+LetArg      = LetDqDyn | LetDq | LetSq | ArAssign ;
+LetDqDyn    <~~ push(mkArDyn(pop())) ~~> = LetHasExp LetDqWord ;
+LetDqWord   <~~ push(mkNsWord(takeAll())) ~~> = DqSeg ;
 LetDq       = '"' :whitespace(Whitespace) ArList '"' ;
 LetSq       = "'" :whitespace(Whitespace) ArList "'" ;
 
@@ -506,7 +521,7 @@ PePatOp     <~~ push({pe: up.in}) ~~> = "##" | "#" | "%%" | "%" ;
 // The PATTERN operand of ${v#p} ${v%p} ${v^p} and ${v/p/r}: a quoted part is literal, as in
 // [[ == ]] (`${s%"$p"}` with p='?' strips nothing).
 PeGlobArg   <~~ push(mkWord(takeAll())) ~~> = { PeGlobSeg } ;
-PeGlobSeg   = PatSq | PatDq | ExpSeg | LineCont | PatEsc | BraceBare ;
+PeGlobSeg   = PatSq | PatDq | PatAnsi | ExpSeg | LineCont | PatEsc | BraceBare ;
 
 // ${v^} ${v^^} ${v,} ${v,,} : case conversion of the first / of every character.
 PeCaseForm  = PeTarget PeCaseOp [ PeGlobArg ] ;
@@ -521,18 +536,20 @@ PeReplAll   <~~ push({pe: up.in}) ~~> = "//" ;
 PeReplOne   <~~ push({pe: up.in}) ~~> = "/" ;
 PeReplAnchor <~~ push({anchor: up.in}) ~~> = "#" | "%" ;
 ReplPat     <~~ push(mkWord(takeAll())) ~~> = { ReplSeg } ;
-ReplSeg     = PatSq | PatDq | ExpSeg | PatEsc | ReplBare ;
+ReplSeg     = PatSq | PatDq | PatAnsi | ExpSeg | PatEsc | ReplBare ;
 ReplBare    <~~ push(makeConst(up.in)) ~~> = !@+"}/\"'\\$`" ;
 // The REPLACEMENT: an unquoted "&" is the matched text (bash 5.2+'s patsub_replacement), so
 // a quoted or backslash-escaped part has its "&" and "\" escaped (repEscape), which the
 // replace step undoes (repSubst / rt_repsub).
 ReplTail    = "/" ReplArg ;
 ReplArg     <~~ push(mkWord(takeAll())) ~~> = { ReplArgSeg } ;
-ReplArgSeg  = RepSq | RepDq | ExpSeg | LineCont | RepEsc | BraceBare ;
+ReplArgSeg  = RepSq | RepDq | RepAnsi | ExpSeg | LineCont | RepEsc | BraceBare ;
 RepSq       = "'" :whitespace() { !@+"'" } <~~ push(makeConst(repEscape(up.in))) ~~> "'" ;
 RepDq       <~~ push(mkQuotedRep(mkDqWord(takeAll()))) ~~>
             = '"' :whitespace() { ExpSeg | DqCont | DqEsc | DqLit } '"' ;
 RepEsc      <~~ push(makeConst(repEscape(escChar(up.in)))) ~~> = "\\" AnyCh ;
+RepAnsi     = "$'" :whitespace() RepAnsiBody "'" ;
+RepAnsiBody <~~ push(makeConst(repEscape(ansiC(up.in)))) ~~> = { AnsiEsc | AnsiLit } ;
 
 // ${v:off} and ${v:off:len} : the offsets are arithmetic, so whitespace matters again -
 // which is also what tells ${v: -1} (a substring) from ${v:-default}.
@@ -549,13 +566,14 @@ ArEmpty     <~~ push(mkNum("0")) ~~> = ArEndHere ;
 PeArPad     = { PeBlank } ;
 PeBlank     = @+" \t" ;
 
-// A word inside ${...}: anything up to the closing brace, expansions included.
+// A word inside ${...}: anything up to the closing brace, expansions included. A $'...'
+// part is ANSI-C quoted there too, even inside "...": bash 5.3 prints `"${u:-$'\x41'}"` as A.
 BraceWord   <~~ push(mkBraceWord(takeAll())) ~~> = BraceWSeg { BraceWSeg } ;
-BraceWSeg   = SqSeg | DqSeg | BraceUq | LineCont | EscSeg ;
+BraceWSeg   = SqSeg | DqSeg | AnsiSeg | BraceUq | LineCont | EscSeg ;
 // The UNQUOTED parts of a ${v-w} word: split when the ${...} itself stands unquoted
 // (see mkBraceWord).
 BraceUq     <~~ push({uq: pop()}) ~~> = ExpSeg | BraceBare ;
-BraceSeg    = SqSeg | DqSeg | ExpSeg | LineCont | EscSeg | BraceBare ;
+BraceSeg    = SqSeg | DqSeg | AnsiSeg | ExpSeg | LineCont | EscSeg | BraceBare ;
 BraceBare   <~~ push(makeConst(up.in)) ~~> = !@+"}\"'\\$`" ;
 DollarName  = "$" VarName <~~ push(mkVarRef(up.in)) ~~> ;
 DollarDigit = "$" ArgDigit <~~ push(mkVarRef(up.in)) ~~> ;
@@ -926,6 +944,43 @@ ArHasExp = :script(~~
         }
     })()
 ~~) ;
+// The same question for one part of a for (( ; ; )), whose text ends at a ";" or the
+// unmatched ")".
+CfHasExp = :script(~~
+    (function() {
+        var i = 0
+        var depth = 0
+        while (true) {
+            var cc = c.peek(i)
+            if (cc === -1) { return abnf.newToken("\x01ar-static", 0) }
+            if (cc === 36 || cc === 96 || cc === 34) { return }
+            if (cc === 59 && depth === 0) { return abnf.newToken("\x01ar-static", 0) }
+            if (cc === 40) { depth = depth + 1 }
+            if (cc === 41) {
+                if (depth === 0) { return abnf.newToken("\x01ar-static", 0) }
+                depth = depth - 1
+            }
+            i = i + 1
+        }
+    })()
+~~) ;
+// And for a double-quoted `let` argument: a "$" or "`" before the closing quote.
+LetHasExp = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9) { i = i + 1; cc = c.peek(i) }
+        if (cc !== 34) { return abnf.newToken("\x01let-static", 0) }
+        i = i + 1
+        while (true) {
+            cc = c.peek(i)
+            if (cc === -1 || cc === 34) { return abnf.newToken("\x01let-static", 0) }
+            if (cc === 36 || cc === 96) { return }
+            if (cc === 92) { i = i + 1 }
+            i = i + 1
+        }
+    })()
+~~) ;
 
 // Succeeds (consuming nothing) when the arithmetic slot of a ${v:off:len} is EMPTY, i.e.
 // when the next non-blank character is the ":" before the length or the closing "}".
@@ -1147,8 +1202,75 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (ch == 1) { errBuf = errBuf + s; flushErrLines(); return }
         if (ch != 0) { return }
         if (capStack.length > 0) { capStack[capStack.length - 1] = capStack[capStack.length - 1] + s }
+        else if (rawSeen && hasRaw(s)) { writeBytes(bytesText(strBytes(s))) }
         else { print(s) }
     }
+
+    // ---- raw bytes ----
+    // bash's strings are BYTES, these are characters. A byte that is not part of a UTF-8
+    // character - $'\xff', printf '\303', the first byte %c takes of "é" - is held as the
+    // lone surrogate U+DC80..U+DCFF (Python's surrogateescape): one character, one byte, and
+    // writeChan writes it back as that byte. rawSeen keeps the output path from scanning for
+    // one until one has been made. The compiled half's strings are bytes already.
+    var rawSeen = false
+    function rawByte(b) { rawSeen = true; return String.fromCharCode(56320 + b) }
+    function isRawCh(cc) { return cc >= 56448 && cc <= 56575 }
+    function hasRaw(s) {
+        var i
+        for (i = 0; i < s.length; i++) { if (isRawCh(s.charCodeAt(i))) { return true } }
+        return false
+    }
+    // The UTF-8 bytes of s, a raw byte as itself.
+    function strBytes(s) {
+        var out = []
+        var i
+        for (i = 0; i < s.length; i++) {
+            var cc = s.charCodeAt(i)
+            if (isRawCh(cc)) { out.push(cc - 56320) }
+            else if (cc < 128) { out.push(cc) }
+            else if (cc < 2048) { out.push(192 + (cc >> 6)); out.push(128 + (cc & 63)) }
+            else if (cc >= 55296 && cc <= 56319 && i + 1 < s.length) {
+                var cp = 65536 + (cc - 55296) * 1024 + (s.charCodeAt(i + 1) - 56320)
+                i = i + 1
+                out.push(240 + (cp >> 18)); out.push(128 + ((cp >> 12) & 63))
+                out.push(128 + ((cp >> 6) & 63)); out.push(128 + (cp & 63))
+            }
+            else { out.push(224 + (cc >> 12)); out.push(128 + ((cc >> 6) & 63)); out.push(128 + (cc & 63)) }
+        }
+        return out
+    }
+    // One character per byte, for the writeBytes host call.
+    function bytesText(bs) {
+        var out = ""
+        var i
+        for (i = 0; i < bs.length; i++) { out = out + String.fromCharCode(bs[i]) }
+        return out
+    }
+    // Bytes read back as text: each well-formed UTF-8 sequence becomes its character, any
+    // other byte >= 0x80 a raw byte.
+    function bytesStr(bs) {
+        var out = ""
+        var i = 0
+        while (i < bs.length) {
+            var b0 = bs[i]
+            var n = 0
+            var cp = 0
+            if (b0 >= 194 && b0 <= 223) { n = 1; cp = b0 - 192 }
+            else if (b0 >= 224 && b0 <= 239) { n = 2; cp = b0 - 224 }
+            else if (b0 >= 240 && b0 <= 244) { n = 3; cp = b0 - 240 }
+            var k = 1
+            while (k <= n && i + k < bs.length && bs[i + k] >= 128 && bs[i + k] <= 191) { cp = cp * 64 + (bs[i + k] - 128); k = k + 1 }
+            var ok = n > 0 && k == n + 1 && !(n == 2 && (cp < 2048 || (cp >= 55296 && cp <= 57343))) && !(n == 3 && (cp < 65536 || cp > 1114111))
+            if (b0 < 128) { out = out + String.fromCharCode(b0); i = i + 1 }
+            else if (ok) { out = out + pfChr(cp); i = i + n + 1 }
+            else { out = out + rawByte(b0); i = i + 1 }
+        }
+        return out
+    }
+    // s with any run of raw bytes that spells a character merged into it: $'\303\251' is é.
+    function normBytes(s) { return (rawSeen && hasRaw(s)) ? bytesStr(strBytes(s)) : s }
+    // A byte an escape produced (\xHH, \NNN): a character below 0x80, a raw byte above.
+    function escByte(v) { return (v < 128) ? pfChr(v) : rawByte(v) }
     // Emit every COMPLETE line sitting in errBuf. charCodeAt, not indexOf on a "\n"
     // literal: the frozen MetaJS subset the grammar hosts share is the reason every scan in
     // this file is written as an explicit loop.
@@ -1177,6 +1299,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (!hasOwn(varsHas, "$" + name)) { varNames.push(name) }
     }
     function setVarVal(name, val) {
+        if (rawSeen) { val = normBytes(val) }
         if (isArr(name)) { arrSet(name, "0", val); return }
         touchVar(name); vars["$" + name] = attrCase(name, val); varsHas["$" + name] = true
     }
@@ -1246,6 +1369,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var sp = splitSubscript(name)
         if (sp.key == "@" || sp.key == "*") { return starJoin(scValList(sp.name)) }
         return scGet(sp.name, subKey(sp.name, sp.key))
+    }
+    // The bare ${!r}: as getVarVal, except that r='arr[@]' answers every element as its own
+    // field, as "${arr[@]}" does (and r='@' already does). Twin of rt_getvar_ind.
+    function indVal(t) {
+        if (isElemRef(t)) { var sp = splitSubscript(t); if (sp.key == "@") { return encFields(scValList(sp.name)) } }
+        return getVarVal(t)
     }
     function unsetVar(name) { touchVar(name); vars["$" + name] = ""; varsHas["$" + name] = false }
 
@@ -2034,7 +2163,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         // ${#v} counts CHARACTERS in bash; .length counts UTF-16 code units.
         if (pe == "len") { return function() { return numToStr(charLen(getVarVal(name))) } }
-        if (pe == "ind") { return function() { return getVarVal(getVarVal(name)) } }
+        if (pe == "ind") { return function() { return indVal(getVarVal(name)) } }
         // ${!prefix*} and ${!prefix@} answer the NAMES of the set variables with that prefix,
         // in sorted order. Measured: `Zq=1; Zw=2; echo "${!Z*}"` -> "Zq Zw".
         if (pfx != "") {
@@ -3145,7 +3274,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     while (on < 3 && i < t.length && t.charAt(i) >= "0" && t.charAt(i) <= "7") {
                         ov = ov * 8 + (t.charCodeAt(i) - 48); i = i + 1; on = on + 1
                     }
-                    out = out + String.fromCharCode(ov % 256)
+                    out = out + escByte(ov % 256)
                 }
                 else if (e == "x") {
                     // A \x with no hex digit after it stays literal, as bash leaves it.
@@ -3153,13 +3282,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     else {
                         var v = 0, n = 0
                         while (n < 2 && i < t.length && hexVal(t.charCodeAt(i)) >= 0) { v = v * 16 + hexVal(t.charCodeAt(i)); i = i + 1; n = n + 1 }
-                        out = out + String.fromCharCode(v)
+                        out = out + escByte(v)
                     }
                 }
                 else { out = out + "\\" + e }
             }
         }
-        return out
+        return normBytes(out)
     }
     function hexVal(cc) {
         if (cc >= 48 && cc <= 57) { return cc - 48 }
@@ -3989,9 +4118,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // a conversion past the last operand reads "" or 0. Measured against bash 5.3: the flags
     // - + space # 0, width and precision (a literal or *; a negative * width left-justifies, a
     // negative * precision is none), the length modifiers h l L j z t (ignored), and
-    // d i o u x X c s b q. Width and precision count UTF-8 BYTES (a cut never splits a
-    // character here, where bash would). A numeric operand is read like strtoimax with base 0
-    // (0x1f is 31, 010 is 8) - strtoumax for o u x X - or 'C / "C for a character's code; one
+    // d i o u x X c s b q. Width and precision count UTF-8 BYTES, and %c is the first byte.
+    // A numeric operand is read like strtoimax with base 0 (0x1f is 31, 010 is 8) -
+    // strtoumax for o u x X - or 'C / "C for a character's code; one
     // that is not entirely a number is reported and its leading number used, with status 1.
     // An invalid conversion character ends the output there, status 1. NOT IMPLEMENTED:
     // %e %f %g %a print the operand as it is, since the compiled half's runtime has no
@@ -4032,7 +4161,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 v = v * 8 + (s.charCodeAt(n + k) - 48)
                 k = k + 1
             }
-            pf.e = pf.e + pfChr(v % 256)
+            pf.e = pf.e + escByte(v % 256)
             return n + k - i
         }
         if (c == "x" || c == "u" || c == "U") {
@@ -4042,7 +4171,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 k = k + 1
             }
             if (k == 0) { pf.e = pf.e + s.slice(i, i + 2); return 2 }
-            pf.e = pf.e + pfChr(v)
+            pf.e = pf.e + ((c == "x") ? escByte(v) : pfChr(v))
             return 2 + k
         }
         if (c == "c" && pctb != 0) { pf.stop = true; return 2 }
@@ -4117,24 +4246,20 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         pf.have = k < args.length
         return pf.have ? args[k] : ""
     }
-    // The UTF-8 byte length of s, and its longest prefix of at most n bytes.
+    // The UTF-8 byte length of s, and its first n bytes (a cut inside a character leaves
+    // raw bytes, as bash's does).
     function pfBytes(s) {
         var n = 0
         var i
         for (i = 0; i < s.length; i++) {
             var cc = s.charCodeAt(i)
-            if (cc < 128) { n = n + 1 } else if (cc < 2048) { n = n + 2 } else if (cc >= 55296 && cc <= 56319) { n = n + 4; i = i + 1 } else { n = n + 3 }
+            if (cc < 128 || isRawCh(cc)) { n = n + 1 } else if (cc < 2048) { n = n + 2 } else if (cc >= 55296 && cc <= 56319) { n = n + 4; i = i + 1 } else { n = n + 3 }
         }
         return n
     }
     function pfCut(s, n) {
-        var i = 0
-        while (i < s.length) {
-            var ch = chunkAt(s, i)
-            if (pfBytes(s.slice(0, i + ch.length)) > n) { return s.slice(0, i) }
-            i = i + ch.length
-        }
-        return s
+        if (pfBytes(s) <= n) { return s }
+        return bytesStr(strBytes(s).slice(0, n))
     }
     function pfPad(s, w, left, zero, keep) {
         var fill = ""
@@ -4208,7 +4333,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (pf.have) { nv = pfNum(a, cv != "d" && cv != "i") }
             piece = pfInt(nv, cv, f)
         } else {
-            if (cv == "c") { piece = (a.length > 0) ? chunkAt(a, 0) : "" }
+            if (cv == "c") { piece = (a.length > 0) ? pfCut(a, 1) : "" }
             else if (cv == "b") { piece = pfBstr(a, 1) }
             else if (cv == "q") { piece = printfQuote(a) }
             if (f.prec >= 0 && cv != "c") { piece = pfCut(piece, f.prec) }
@@ -4242,7 +4367,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             used = pf.ai > before
         }
-        if (dest != null) { setVarVal(dest, pf.e) } else { emitOut(pf.e) }
+        var res = normBytes(pf.e)
+        if (dest != null) { setVarVal(dest, res) } else { emitOut(res) }
         return pf.rc
     }
     // printf's %x/%X/%o/%u: the operand as an UNSIGNED 64-bit value in the given base.
@@ -4471,12 +4597,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (!first) { out = out + " " }
             out = out + (escapes ? pfBstr(args[i], 2) : args[i])
             // \c ends all further output, the newline included. Twin of rt_echo.
-            if (pf.stop) { emitOut(out); return }
+            if (pf.stop) { emitOut(normBytes(out)); return }
             first = false
             i = i + 1
         }
         if (newline) { out = out + "\n" }
-        emitOut(out)
+        emitOut(normBytes(out))
     }
 
     // ---- the test builtin -------------------------------------------------------------

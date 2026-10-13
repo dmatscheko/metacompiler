@@ -130,8 +130,19 @@ UntilStmt   <~~ push(makeUntil(takeAll())) ~~>
             = KwUntil CompoundList KwDo CompoundList KwDone ;
 
 // for (( init; cond; step )); do LIST; done
+// Each part is arithmetic text that, like (( )), is expanded FIRST when it holds an
+// expansion (e='1 + 2'; `i < $e * 2` is i < 5), and may be empty: an empty condition is 1.
 CForStmt    <~~ push(makeCFor(takeAll())) ~~>
-            = KwFor "((" :whitespace(Whitespace) ArList ";" ArList ";" ArList "))" OptSep KwDo CompoundList KwDone ;
+            = KwFor "((" :whitespace() CfPart ";" CfCond ";" CfPart "))" :whitespace(Whitespace) OptSep KwDo CompoundList KwDone ;
+CfPart      = CfDyn | CfSt | CfZero ;
+CfCond      = CfDyn | CfSt | CfOne ;
+CfDyn       <~~ push(mkArDyn(pop())) ~~> = CfHasExp CfDynWord ;
+CfDynWord   <~~ push(mkNsWord(takeAll())) ~~> = CfDynSeg { CfDynSeg } ;
+CfDynSeg    = DqSeg | ExpSeg | ArDynParen | CfDynBare ;
+CfDynBare   <~~ push(makeConst(up.in)) ~~> = !@+"()$`\";" ;
+CfSt        = WsNL :whitespace(Whitespace) ArList :whitespace() WsNL ;
+CfZero      <~~ push(mkNum("0")) ~~> = WsNL ;
+CfOne       <~~ push(mkNum("1")) ~~> = WsNL ;
 
 // for NAME in WORD...; do LIST; done   /   for NAME; do LIST; done (the positional parameters)
 ForStmt     <~~ push(makeFor(takeAll())) ~~>
@@ -215,7 +226,11 @@ RedirItem   = HereDoc | Redir ;
 // let EXPR ... : the same evaluator as (( )); a quoted argument is parsed as arithmetic.
 LetCmd      <~~ push(makeLetCmd(takeAll())) ~~> = KwLet LetArg { LetArg } ;
 KwLet       = "let" KwEnd ;
-LetArg      = LetDq | LetSq | ArAssign ;
+// A double-quoted argument holding an expansion is expanded first and then evaluated, as
+// (( )) is: e='1 + 2'; `let "x = $e * 2"` sets 5.
+LetArg      = LetDqDyn | LetDq | LetSq | ArAssign ;
+LetDqDyn    <~~ push(mkArDyn(pop())) ~~> = LetHasExp LetDqWord ;
+LetDqWord   <~~ push(mkNsWord(takeAll())) ~~> = DqSeg ;
 LetDq       = '"' :whitespace(Whitespace) ArList '"' ;
 LetSq       = "'" :whitespace(Whitespace) ArList "'" ;
 
@@ -340,7 +355,7 @@ LineCont    <~~ push(makeConst("")) ~~> = "\\" "\n" ;
 
 // $'...' : ANSI-C quoting. The body is taken raw and decoded by ansiC (\n \t \xHH \0NNN ...).
 AnsiSeg     = "$'" :whitespace() AnsiBody "'" ;
-AnsiBody    <~~ push(makeConst(ansiC(up.in))) ~~> = { AnsiEsc | AnsiLit } ;
+AnsiBody    <~~ push(ansiWord(ansiC(up.in))) ~~> = { AnsiEsc | AnsiLit } ;
 AnsiEsc     = "\\" AnyCh ;
 AnsiLit     = !@+"'\\" ;
 
@@ -457,7 +472,7 @@ PePatOp     <~~ push({pe: up.in}) ~~> = "##" | "#" | "%%" | "%" ;
 // The PATTERN operand of ${v#p} ${v%p} ${v^p} and ${v/p/r}: a quoted part is literal, as in
 // [[ == ]] (`${s%"$p"}` with p='?' strips nothing).
 PeGlobArg   <~~ push(mkWord(takeAll())) ~~> = { PeGlobSeg } ;
-PeGlobSeg   = PatSq | PatDq | ExpSeg | LineCont | PatEsc | BraceBare ;
+PeGlobSeg   = PatSq | PatDq | PatAnsi | ExpSeg | LineCont | PatEsc | BraceBare ;
 
 // ${v^} ${v^^} ${v,} ${v,,} : case conversion of the first / of every character.
 PeCaseForm  = PeTarget PeCaseOp [ PeGlobArg ] ;
@@ -472,18 +487,20 @@ PeReplAll   <~~ push({pe: up.in}) ~~> = "//" ;
 PeReplOne   <~~ push({pe: up.in}) ~~> = "/" ;
 PeReplAnchor <~~ push({anchor: up.in}) ~~> = "#" | "%" ;
 ReplPat     <~~ push(mkWord(takeAll())) ~~> = { ReplSeg } ;
-ReplSeg     = PatSq | PatDq | ExpSeg | PatEsc | ReplBare ;
+ReplSeg     = PatSq | PatDq | PatAnsi | ExpSeg | PatEsc | ReplBare ;
 ReplBare    <~~ push(makeConst(up.in)) ~~> = !@+"}/\"'\\$`" ;
 // The REPLACEMENT: an unquoted "&" is the matched text (bash 5.2+'s patsub_replacement), so
 // a quoted or backslash-escaped part has its "&" and "\" escaped (repEscape), which
 // rt_repsub undoes. Twin of ReplTail in bash-interpreter.abnf.
 ReplTail    = "/" ReplArg ;
 ReplArg     <~~ push(mkWord(takeAll())) ~~> = { ReplArgSeg } ;
-ReplArgSeg  = RepSq | RepDq | ExpSeg | LineCont | RepEsc | BraceBare ;
+ReplArgSeg  = RepSq | RepDq | RepAnsi | ExpSeg | LineCont | RepEsc | BraceBare ;
 RepSq       = "'" :whitespace() { !@+"'" } <~~ push(makeConst(repEscape(up.in))) ~~> "'" ;
 RepDq       <~~ push(mkQuotedRep(mkDqWord(takeAll()))) ~~>
             = '"' :whitespace() { ExpSeg | DqCont | DqEsc | DqLit } '"' ;
 RepEsc      <~~ push(makeConst(repEscape(escChar(up.in)))) ~~> = "\\" AnyCh ;
+RepAnsi     = "$'" :whitespace() RepAnsiBody "'" ;
+RepAnsiBody <~~ push(ansiWord(repEscape(ansiC(up.in)))) ~~> = { AnsiEsc | AnsiLit } ;
 
 // ${v:off} and ${v:off:len}: arithmetic offsets (so ${v: -1} is a substring, not ${v:-d}),
 // either may be empty; PeArPad eats a blank before the "}".
@@ -497,11 +514,11 @@ PeBlank     = @+" \t" ;
 
 // A word inside ${...}: anything up to the closing brace, expansions included.
 BraceWord   <~~ push(mkBraceWord(takeAll())) ~~> = BraceWSeg { BraceWSeg } ;
-BraceWSeg   = SqSeg | DqSeg | BraceUq | EscSeg ;
+BraceWSeg   = SqSeg | DqSeg | AnsiSeg | BraceUq | EscSeg ;
 // The UNQUOTED parts of a ${v-w} word: split when the ${...} itself stands unquoted
 // (see mkBraceWord).
 BraceUq     <~~ push({uq: pop()}) ~~> = ExpSeg | BraceBare ;
-BraceSeg    = SqSeg | DqSeg | ExpSeg | EscSeg | BraceBare ;
+BraceSeg    = SqSeg | DqSeg | AnsiSeg | ExpSeg | EscSeg | BraceBare ;
 BraceBare   <~~ push(makeConst(up.in)) ~~> = !@+"}\"'\\$`" ;
 DollarName  = "$" VarName <~~ push(mkVarRef(up.in)) ~~> ;
 DollarDigit = "$" ArgDigit <~~ push(mkVarRef(up.in)) ~~> ;
@@ -639,7 +656,7 @@ PatSq       = "'" :whitespace() { !@+"'" } <~~ push(makeConst(globEscape(up.in))
 PatDq       <~~ push(mkQuotedPat(mkDqWord(takeAll()))) ~~>
             = '"' :whitespace() { ExpSeg | DqCont | DqEsc | DqLit } '"' ;
 PatAnsi     = "$'" :whitespace() PatAnsiBody "'" ;
-PatAnsiBody <~~ push(makeConst(globEscape(ansiC(up.in)))) ~~> = { AnsiEsc | AnsiLit } ;
+PatAnsiBody <~~ push(ansiWord(globEscape(ansiC(up.in)))) ~~> = { AnsiEsc | AnsiLit } ;
 PatEsc      <~~ push(makeConst(globEscape(escChar(up.in)))) ~~> = "\\" AnyCh ;
 CondBinOp   <~~ push({cop: up.in}) ~~> = CondBinTok ;
 CondBinTok  = "==" | "!=" | "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge" | "-nt" | "-ot" | "-ef" | "=" | "<" | ">" ;
@@ -809,6 +826,43 @@ ArHasExp = :script(~~
         }
     })()
 ~~) ;
+// The same question for one part of a for (( ; ; )), whose text ends at a ";" or the
+// unmatched ")".
+CfHasExp = :script(~~
+    (function() {
+        var i = 0
+        var depth = 0
+        while (true) {
+            var cc = c.peek(i)
+            if (cc === -1) { return abnf.newToken("\x01ar-static", 0) }
+            if (cc === 36 || cc === 96 || cc === 34) { return }
+            if (cc === 59 && depth === 0) { return abnf.newToken("\x01ar-static", 0) }
+            if (cc === 40) { depth = depth + 1 }
+            if (cc === 41) {
+                if (depth === 0) { return abnf.newToken("\x01ar-static", 0) }
+                depth = depth - 1
+            }
+            i = i + 1
+        }
+    })()
+~~) ;
+// And for a double-quoted `let` argument: a "$" or "`" before the closing quote.
+LetHasExp = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9) { i = i + 1; cc = c.peek(i) }
+        if (cc !== 34) { return abnf.newToken("\x01let-static", 0) }
+        i = i + 1
+        while (true) {
+            cc = c.peek(i)
+            if (cc === -1 || cc === 34) { return abnf.newToken("\x01let-static", 0) }
+            if (cc === 36 || cc === 96) { return }
+            if (cc === 92) { i = i + 1 }
+            i = i + 1
+        }
+    })()
+~~) ;
 
 // Succeeds (consuming nothing) when the arithmetic slot of a ${v:off:len} is EMPTY, i.e.
 // when the next non-blank character is the ":" before the length or the closing "}".
@@ -948,6 +1002,23 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function hasOwn(o, name) { return Object.prototype.hasOwnProperty.call(o, name) }
     function fail(msg) { println("bash-to-llvm-ir error: " + msg); exit(2) }
 
+    // A byte a \xHH / \NNN escape produced: a character below 0x80; above, the lone surrogate
+    // U+DC80..U+DCFF standing for that raw byte (see ansiWord).
+    function escByte(v) { return String.fromCharCode((v < 128) ? v : 56320 + v) }
+    // A decoded $'...' text as a word segment. A constant cannot hold a raw byte - the IR
+    // string is the text's UTF-8 - so a text with one is interned with each raw byte as its
+    // three WTF-8 bytes and turned back into that byte at run time by rt_unraw. Twin of
+    // rawByte in bash-interpreter.abnf.
+    function ansiWord(s) {
+        var i
+        for (i = 0; i < s.length; i++) {
+            var cc = s.charCodeAt(i)
+            if (cc >= 56448 && cc <= 56575) {
+                return {c: undefined, fn: function(b) { return {b: b, v: b.NewCall(rtUnraw, gepStr(b, s))} }}
+            }
+        }
+        return makeConst(s)
+    }
     // $'...' body -> the decoded string (bash's ANSI-C escapes).
     function ansiC(t) {
         var out = ""
@@ -976,7 +1047,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     while (on < 3 && i < t.length && t.charAt(i) >= "0" && t.charAt(i) <= "7") {
                         ov = ov * 8 + (t.charCodeAt(i) - 48); i = i + 1; on = on + 1
                     }
-                    out = out + String.fromCharCode(ov % 256)
+                    out = out + escByte(ov % 256)
                 }
                 else if (e == "x") {
                     // A \x with no hex digit after it stays literal, as bash leaves it.
@@ -984,7 +1055,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     else {
                         var v = 0, n = 0
                         while (n < 2 && i < t.length && hexVal(t.charCodeAt(i)) >= 0) { v = v * 16 + hexVal(t.charCodeAt(i)); i = i + 1; n = n + 1 }
-                        out = out + String.fromCharCode(v)
+                        out = out + escByte(v)
                     }
                 }
                 else { out = out + "\\" + e }
@@ -1242,6 +1313,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtSetByName = rtDecl("rt_setvar_byname", false, [1, 1])
     var rtEvalAssign = rtDecl("rt_eval_assign", false, [1])
     var rtGetByName = rtDecl("rt_getvar_byname", true, [1])
+    var rtGetInd = rtDecl("rt_getvar_ind", true, [1])
 
     var funcs = {}        // user functions: "$"+name -> IR func (bashfn_NAME)
     var declaredFuncs = {}  // every name the program DEFINES somewhere (collected during the
@@ -1327,6 +1399,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtCase = rtDecl("rt_case", true, [1, 0, 1])
     var rtShQuote = rtDecl("rt_shquote", true, [1])
     var rtAnsiC = rtDecl("rt_ansic", true, [1])
+    var rtUnraw = rtDecl("rt_unraw", true, [1])
     var rtHasChar = rtDecl("rt_haschar", false, [1, 0])
     var rtReadLine = rtDecl("rt_read_line", true, [0])
 
@@ -1871,9 +1944,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return {b: b, v: i2s(b, b.NewCall(rtCharLen, varString(b, name)))}
             }}
         }
+        // r='arr[@]' (or '@') makes the bare ${!r} a field list, hence f.
         if (pe == "ind") {
-            return {c: undefined, fn: function(b) {
-                return {b: b, v: b.NewCall(rtGetByName, varString(b, name))}
+            return {f: true, c: undefined, fn: function(b) {
+                return {b: b, v: b.NewCall(rtGetInd, varString(b, name))}
             }}
         }
         // ${#v OP arg} is a parse-time-legal, run-time-illegal combination in bash:
