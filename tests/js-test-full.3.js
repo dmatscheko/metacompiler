@@ -2237,6 +2237,49 @@ function s89() {
     check("ar89d", n1(v[0]) === "9:1:1" && n2(v[1]) === "0,0,1" && n3(v[0]) === 8 && o.m(v[0]) === 6)
 }
 
+// ===== SECTION 90: calls inside an assignment target, the restricted '++', a body's functions =====
+// A method call in the middle of a target is the ordinary method call, receiver and
+// all ('k.get(1).a = 2'), under every assignment operator, in a destructuring and a
+// for-of head. Two signs in a row are the '++'/'--' token, so 'x' + newline + '++y' is
+// two statements. A function declared in a body that also has a var closes over the
+// body's let and const. Values read off node 24.
+function s90() {
+    const v = [1, 2, 3]
+    class K { constructor() { this.o = {a: v[0]} } get(i) { return this.o } m() { return v[0] } }
+    const k = new K()
+    const mp = new Map([["k", {a: v[0]}]])
+    const log = []
+    function key(x) { log.push("k" + x); return x }
+    function obj() { log.push("o"); return k }
+    k.get(v[0]).a = 2
+    mp.get("k").a = 3
+    mp.get("k").a += 4
+    obj().get(key(1))[key("b")] = v[2]
+    check("tg90a", k.o.a === 2 && mp.get("k").a === 7 && k.o.b === 3 && log.join() === "o,k1,kb")
+    k.get(v[0]).a ||= 9
+    k.get(v[0]).c ??= 4
+    k.get(v[0]).a++
+    ;++k.get(v[0]).a
+    ;[k.get(1).d, k.get(2).e] = [v[1], v[2]]
+    ;({x: k.get(1).f} = {x: v[0]})
+    for (k.get(1).g of v) {}
+    k.m.x = 5
+    check("tg90b", k.o.a === 4 && k.o.c === 4 && k.o.d === 2 && k.o.e === 3 && k.o.f === 1 && k.o.g === 3 &&
+        k.m.x === 5)
+    let t = 5, y = 10, z = 1
+    const r = typeof t--
+    var a = t
+    ++z
+    var b = y
+    --z
+    var c = t + +z, d = - -z
+    check("tg90c", r === "number" && t === 4 && a === 4 && b === 10 && z === 1 && c === 5 && d === 1)
+    const lex = v[2]
+    function seesLex() { return lex }
+    var hoisted = v[1]
+    check("tg90d", seesLex() === 3 && hoisted === 2)
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -2284,6 +2327,7 @@ function main() {
     s87() // SECTION-CALL 87
     s88() // SECTION-CALL 88
     s89() // SECTION-CALL 89
+    s90() // SECTION-CALL 90
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

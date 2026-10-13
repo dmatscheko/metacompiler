@@ -455,7 +455,7 @@ ShiftExpr   <~~ push(foldBinary(takeAll())) ~~>
             = AddExpr { ( "<<" | ">>>" | ">>" ) <~~ push(up.in) ~~> AddExpr } ;
 
 AddExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
+            = MulExpr { ( "+" NotDoubled | "-" NotDoubled ) <~~ push(up.in) ~~> MulExpr } ;
 
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
             = ExpExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> ExpExpr } ;
@@ -510,9 +510,9 @@ PreUpdateExpr <~~ takeAll(); push(notImplExpr("update of an expression target", 
             = ( "++" | "--" ) UnaryExpr ;
 // See the twin of this comment in js-interpreter.abnf.
 Neg         <~~ push(makeNeg(pop())) ~~>
-            = "-" !"-" UnaryExpr ;
+            = "-" NotDoubled UnaryExpr ;
 Pos         <~~ push(makePos(pop())) ~~>
-            = "+" !"+" UnaryExpr ;
+            = "+" NotDoubled UnaryExpr ;
 Not         <~~ push(makeNot(pop())) ~~>
             = "!" UnaryExpr ;
 BitNot      <~~ push(makeBitNot(pop())) ~~>
@@ -532,13 +532,13 @@ PostfixExpr = SuperPostUpdate | IncDec | SuperCall | CallMemberUpdate ;
 // only refuse it), so the postfix super form is taken here instead, where the SuperKey
 // is still in hand. It only ever costs a parse when the expression begins with 'super'.
 SuperPostUpdate <~~ push(makeSuperUpdate(takeAll())) ~~>
-            = KwSuper SuperKey { DotSuffix | IndexSuffix } ( "++" | "--" ) <~~ push(up.in) ~~> ;
+            = KwSuper SuperKey { DotSuffix | IndexSuffix } NoLineBreak ( "++" | "--" ) <~~ push(up.in) ~~> ;
 CallMemberUpdate <~~ push(makeMaybeUpdate(takeAll(), up.pos)) ~~>
             = CallMember [ UpdateOp ] ;
 UpdateOp    <~~ push({upd: up.in}) ~~>
-            = "++" | "--" ;
+            = NoLineBreak ( "++" | "--" ) ;
 IncDec      <~~ push(makeIncDec(takeAll())) ~~>
-            = Target ( "++" | "--" ) <~~ push(up.in) ~~> ;
+            = Target NoLineBreak ( "++" | "--" ) <~~ push(up.in) ~~> ;
 
 // super(args) delegates to the parent constructor; super.m(args) invokes the parent's
 // method on 'this'. popName pulls the optional '.m' out, leaving the argument thunks.
@@ -2146,6 +2146,13 @@ NotArrow    = :script(~~
 ~~) ;
 
 // See the twin of this comment in js-interpreter.abnf.
+NotDoubled  = :script(~~
+    (function() {
+        return (c.peek(0) === c.peek(-1)) ? abnf.newToken("\x01doubled", 0) : undefined
+    })()
+~~) ;
+
+// See the twin of this comment in js-interpreter.abnf.
 NoLineBreak = :script(~~
     (function() {
         var i = 0, cc = c.peek(0)
@@ -2173,7 +2180,9 @@ NoLineBreak = :script(~~
 NotSuffix   = :script(~~
     (function() {
         var i = 0, cc = c.peek(0)
+        var nl = false
         while (cc === 32 || cc === 9 || cc === 10 || cc === 13 || cc === 11 || cc === 12) {
+            if (cc === 10 || cc === 13) { nl = true }
             i = i + 1
             cc = c.peek(i)
         }
@@ -2184,8 +2193,9 @@ NotSuffix   = :script(~~
         }
         // '++' / '--' glued to the name is an UPDATE expression, so the operand is not a
         // bare name either: 'typeof t--' is typeof (t--). A single '-' or '+' is the
-        // ordinary binary operator and must stay out of it ('typeof a - 1').
-        if ((cc === 43 || cc === 45) && c.peek(i + 1) === cc) { return abnf.newToken("\x01suffix", 0) }
+        // ordinary binary operator and must stay out of it ('typeof a - 1'). On the next
+        // line it is a PREFIX update of the next statement: a postfix one is restricted.
+        if (!nl && (cc === 43 || cc === 45) && c.peek(i + 1) === cc) { return abnf.newToken("\x01suffix", 0) }
         return (cc === 46 || cc === 91 || cc === 40 || cc === 96) ? abnf.newToken("\x01suffix", 0) : undefined
     })()
 ~~) ;
@@ -4026,7 +4036,7 @@ NotFuncHead = :script(~~
                 if (names.indexOf(annex[a]) < 0) { names.push(annex[a]) }
             }
         }
-        return hoistVars(names, makeSeq(withLexInit(lex, withFnInit(fns, out))))
+        return hoistVars(names, makeSeq(withLexInit(lex, withFnInit(fns, out, 0))))
     }
     // See the twin of this comment in js-interpreter.abnf.
     function itemsStrict(items) {
@@ -8006,7 +8016,7 @@ NotFuncHead = :script(~~
         for (var f = 0; f < fns.length; f++) { fns[f].ns = true }
         hoistLexKill(from, to)
         var annex = hoistNames(hoistClaimAnnex(from, to))
-        var initT = fns.length > 0 ? withFnInit(fns, [])[0] : null
+        var initT = fns.length > 0 ? withFnInit(fns, [], 0)[0] : null
         var vars = claimVars(from, to)
         var expVars = []
         var body = []
@@ -8808,9 +8818,8 @@ NotFuncHead = :script(~~
         var lex = hoistLexKill(from, to).names
         var annex = hoistNames(hoistClaimAnnex(from, to))
         var names = claimVars(from, to)
-        if (names.length == 0 && annex.length == 0) { return makeBlockStmt(withLexInit(lex, withFnInit(fns, items))) }
-        var bodyT = makeBlockStmt(withLexInit(lex, items))
-        var initT = fns.length > 0 ? withFnInit(fns, [])[0] : null
+        if (names.length == 0 && annex.length == 0) { return makeBlockStmt(withLexInit(lex, withFnInit(fns, items, 0))) }
+        var bodyT = makeBlockStmt(withLexInit(lex, withFnInit(fns, items, 1)))
         return function() {
             var ps = scopes[scopes.length - 1]
             var vs = {}
@@ -8827,7 +8836,6 @@ NotFuncHead = :script(~~
             }
             if (annex.length > 0) { annexHoist(vs, ps, annex) }
             scopes.push(vs)
-            if (initT != null) { initT() }
             var r = bodyT()
             scopes.pop()
             return r
@@ -8837,10 +8845,13 @@ NotFuncHead = :script(~~
     // See the twin of this comment in js-interpreter.abnf. A namespace body is a
     // function body here (makeNamespace).
     // The statement list with the instantiation of its functions in front.
-    function withFnInit(fns, items) {
+    // up counts the scopes above the current one that bind them: a function body's
+    // functions close over its lexical scope and are bound in the var scope under it.
+    function withFnInit(fns, items, up) {
         if (fns.length == 0) { return items }
         var out = [function() {
-            for (var i = 0; i < fns.length; i++) { declVar(fns[i].name, fns[i].mk()) }
+            var sc = scopes[scopes.length - 1 - up]
+            for (var i = 0; i < fns.length; i++) { scopePut(sc, fns[i].name, fns[i].mk()) }
         }]
         for (var j = 0; j < items.length; j++) { out.push(items[j]) }
         return out
@@ -8882,13 +8893,13 @@ NotFuncHead = :script(~~
     }
     function makeJsBlock(items, from, to) {
         var hb = hoistBlockFns(from, to)
-        return makeBlockStmt(withLexInit(hb.names, withFnInit(hb.fns, items)))
+        return makeBlockStmt(withLexInit(hb.names, withFnInit(hb.fns, items, 0)))
     }
     // See the twin of this comment in js-interpreter.abnf.
     function makeJsSwitch(items, from, to) {
         var hb = hoistBlockFns(from, to, true)
         if (hb.fns.length == 0 && hb.names.length == 0) { return makeSwitch(items) }
-        var initT = withLexInit(hb.names, withFnInit(hb.fns, []))
+        var initT = withLexInit(hb.names, withFnInit(hb.fns, [], 0))
         var subj = items[0]
         items[0] = function() {
             var v = anytype // The discriminant may be of any type.
@@ -8908,7 +8919,7 @@ NotFuncHead = :script(~~
     function makeIfBody(t, from, to) {
         var fns = hoistBlockFns(from, to).fns
         if (fns.length == 0) { return t }
-        return makeBlockStmt(withFnInit(fns, [t]))
+        return makeBlockStmt(withFnInit(fns, [t], 0))
     }
     // See the twin of this comment in js-interpreter.abnf.
     function varSet(name, v) {

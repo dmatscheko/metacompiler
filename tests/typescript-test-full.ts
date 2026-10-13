@@ -4042,6 +4042,49 @@ function s83() {
     check("ar83c", u1(v[0]) === 1 && u2(v[0]) === 1 && u4(v[0]) === 1 && new C().m(v[0], v[1]) === "1:2");
 }
 
+// ===== SECTION 84: calls inside an assignment target, the restricted '++', a body's functions =====
+// A method call in the middle of a target is the ordinary method call, receiver and
+// all ('k.get(1).a = 2'), under every assignment operator, in a destructuring and a
+// for-of head. Two signs in a row are the '++'/'--' token, so 'x' + newline + '++y' is
+// two statements. A function declared in a body that also has a var closes over the
+// body's let and const. Values read off node 24.
+function s84(): void {
+    const v: any[] = [1, 2, 3]
+    class K { o: any; constructor() { this.o = {a: v[0]} } get(i) { return this.o } m() { return v[0] } }
+    const k: any = new K()
+    const mp = new Map<string, any>([["k", {a: v[0]}]])
+    const log: string[] = []
+    function key(x: any): any { log.push("k" + x); return x }
+    function obj(): K { log.push("o"); return k }
+    k.get(v[0]).a = 2
+    mp.get("k").a = 3
+    mp.get("k").a += 4
+    obj().get(key(1))[key("b")] = v[2]
+    check("tg84a", k.o.a === 2 && mp.get("k").a === 7 && k.o.b === 3 && log.join() === "o,k1,kb")
+    k.get(v[0]).a ||= 9
+    k.get(v[0]).c ??= 4
+    k.get(v[0]).a++
+    ;++k.get(v[0]).a
+    ;[k.get(1).d, k.get(2).e] = [v[1], v[2]]
+    ;({x: k.get(1).f} = {x: v[0]})
+    for (k.get(1).g of v) {}
+    (k.m as any).x = 5
+    check("tg84b", k.o.a === 4 && k.o.c === 4 && k.o.d === 2 && k.o.e === 3 && k.o.f === 1 && k.o.g === 3 &&
+        (k.m as any).x === 5)
+    let t = 5, y = 10, z = 1
+    const r = typeof t--
+    var a = t
+    ++z
+    var b = y
+    --z
+    var c = t + +z, d = - -z
+    check("tg84c", r === "number" && t === 4 && a === 4 && b === 10 && z === 1 && c === 5 && d === 1)
+    const lex = v[2]
+    function seesLex(): number { return lex }
+    var hoisted = v[1]
+    check("tg84d", seesLex() === 3 && hoisted === 2)
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -4128,6 +4171,7 @@ function main(): number {
     s81(); // SECTION-CALL 81
     s82(); // SECTION-CALL 82
     s83(); // SECTION-CALL 83
+    s84(); // SECTION-CALL 84
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

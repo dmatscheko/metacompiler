@@ -630,7 +630,7 @@ ShiftExpr   <~~ push(foldBinary(takeAll())) ~~>
             = AddExpr { ( "<<" | ">>>" | ">>" ) <~~ push(up.in) ~~> AddExpr } ;
 
 AddExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
+            = MulExpr { ( "+" NotDoubled | "-" NotDoubled ) <~~ push(up.in) ~~> MulExpr } ;
 
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
             = ExpExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> ExpExpr } ;
@@ -759,7 +759,9 @@ UseStrictAhead = :script(~~
 NotSuffix   = :script(~~
     (function() {
         var i = 0, cc = c.peek(0)
+        var nl = false
         while (cc === 32 || cc === 9 || cc === 10 || cc === 13 || cc === 11 || cc === 12) {
+            if (cc === 10 || cc === 13) { nl = true }
             i = i + 1
             cc = c.peek(i)
         }
@@ -770,8 +772,9 @@ NotSuffix   = :script(~~
         }
         // '++' / '--' glued to the name is an UPDATE expression, so the operand is not a
         // bare name either: 'typeof t--' is typeof (t--). A single '-' or '+' is the
-        // ordinary binary operator and must stay out of it ('typeof a - 1').
-        if ((cc === 43 || cc === 45) && c.peek(i + 1) === cc) { return abnf.newToken("\x01suffix", 0) }
+        // ordinary binary operator and must stay out of it ('typeof a - 1'). On the next
+        // line it is a PREFIX update of the next statement: a postfix one is restricted.
+        if (!nl && (cc === 43 || cc === 45) && c.peek(i + 1) === cc) { return abnf.newToken("\x01suffix", 0) }
         return (cc === 46 || cc === 91 || cc === 40 || cc === 96) ? abnf.newToken("\x01suffix", 0) : undefined
     })()
 ~~) ;
@@ -797,9 +800,9 @@ TypeofExpr  <~~ push(makeUnary(pop(), typeofExt())) ~~>
 // The postfix forms: i++ evaluates to the old value.
 PostfixExpr = SuperPostUpdate | IncDec | SuperCall | CallMember ;
 SuperPostUpdate <~~ push(makeSuperUpdate(takeAll(), up.pos)) ~~>
-            = KwSuper SuperKey { TargetSuffix } ( "++" | "--" ) <~~ push(up.in) ~~> ;
+            = KwSuper SuperKey { TargetSuffix } SameLine ( "++" | "--" ) <~~ push(up.in) ~~> ;
 IncDec      <~~ push(makeIncDec(takeAll())) ~~>
-            = Target ( "++" | "--" ) <~~ push(up.in) ~~> ;
+            = Target SameLine ( "++" | "--" ) <~~ push(up.in) ~~> ;
 
 // super(args) delegates to the parent constructor; super.m(args) invokes the parent's
 // method on 'this'. popName pulls the optional '.m' out, leaving the argument thunks.
@@ -2168,6 +2171,13 @@ ArrowAhead  = :script(~~
     })()
 ~~) ;
 
+// See the twin of this comment in js-interpreter.abnf.
+NotDoubled  = :script(~~
+    (function() {
+        return (c.peek(0) === c.peek(-1)) ? abnf.newToken("\x01doubled", 0) : undefined
+    })()
+~~) ;
+
 // See the twin of this comment in js-to-llvm-ir.abnf.
 SameLine    = :script(~~
     (function() {
@@ -3471,6 +3481,34 @@ NotFuncHead = :script(~~
         if (head == undefined || head.parenchainIx == undefined) { return items }
         return chainItems[head.parenchainIx].concat(items.slice(2))
     }
+    // A method call objV[keyV](args): name is the key's spelling when it is a dotted
+    // name, site the callee's text for the TypeError. Shared by an ordinary call chain
+    // and a call inside an assignment target ('o.get(1).a = 2').
+    function emitMethodCall(b, objV, keyV, name, args, site) {
+        // See the twin of this comment in js-to-llvm-ir.abnf.
+        var fV = callExt(b, (name === "return") ? "js_jsretmget" : "js_jsmget", [objV, keyV])
+        var argsV = callExt(b, "js_arr_new", [])
+        b = pushArgs(b, argsV, args)
+        var isFn = truthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [fV]), emitStr(b, "function")]))
+        var thenB = curF.NewBlock("")
+        var elseB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        b.NewCondBr(isFn, thenB, elseB)
+        // See the twin of this comment in js-to-llvm-ir.abnf.
+        var tv = callExt(jsThisSet(thenB, objV), "js_jsxcall", [fV, objV, argsV])
+        thenB.NewBr(mergeB)
+        // js_jsmcall is js_jsxmcall plus JavaScript's String / Array /
+        // Number / Object method surface (abnf/jsrtjsprint.go).
+        var ev = callExt(jsThisSet(elseB, objV), "js_jsmcall", [objV, keyV, argsV])
+        // See the twin of this comment in js-to-llvm-ir.abnf.
+        var mOkB = curF.NewBlock("")
+        var mBadB = curF.NewBlock("")
+        elseB.NewCondBr(elseB.NewICmp(llvm.enum.IPredEQ, ev, elseB.NewLoad(i64, mcallMissGlob())),
+                        mBadB, mOkB)
+        emitSiteThrow(mBadB, site + " is not a function")
+        mOkB.NewBr(mergeB)
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(tv, thenB), llvm.ir.NewIncoming(ev, mOkB)])}
+    }
     foldCallMember = function(items, txt) {
         items = flattenParen(items)
         // Recorded for parenPrimary. A caller with no text (NewCallee) records no chain:
@@ -3517,33 +3555,9 @@ NotFuncHead = :script(~~
                     var kr = s.key(b)
                     b = kr.b
                     if (i + 1 < suffixes.length && suffixes[i + 1].kind == "call") {
-                        var callS = suffixes[i + 1]
-                        var objV = cur
-                        var keyV = kr.v
-                        // See the twin of this comment in js-to-llvm-ir.abnf.
-                        var fV = callExt(b, (s.name === "return") ? "js_jsretmget" : "js_jsmget", [objV, keyV])
-                        var argsV = callExt(b, "js_arr_new", [])
-                        b = pushArgs(b, argsV, callS.args)
-                        var isFn = truthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [fV]), emitStr(b, "function")]))
-                        var thenB = curF.NewBlock("")
-                        var elseB = curF.NewBlock("")
-                        var mergeB = curF.NewBlock("")
-                        b.NewCondBr(isFn, thenB, elseB)
-                        // See the twin of this comment in js-to-llvm-ir.abnf.
-                        var tv = callExt(jsThisSet(thenB, objV), "js_jsxcall", [fV, objV, argsV])
-                        thenB.NewBr(mergeB)
-                        // js_jsmcall is js_jsxmcall plus JavaScript's String / Array /
-                        // Number / Object method surface (abnf/jsrtjsprint.go).
-                        var ev = callExt(jsThisSet(elseB, objV), "js_jsmcall", [objV, keyV, argsV])
-                        // See the twin of this comment in js-to-llvm-ir.abnf.
-                        var mOkB = curF.NewBlock("")
-                        var mBadB = curF.NewBlock("")
-                        elseB.NewCondBr(elseB.NewICmp(llvm.enum.IPredEQ, ev, elseB.NewLoad(i64, mcallMissGlob())),
-                                        mBadB, mOkB)
-                        emitSiteThrow(mBadB, sTexts[i + 1] + " is not a function")
-                        mOkB.NewBr(mergeB)
-                        cur = mergeB.NewPhi([llvm.ir.NewIncoming(tv, thenB), llvm.ir.NewIncoming(ev, mOkB)])
-                        b = mergeB
+                        var mc = emitMethodCall(b, cur, kr.v, s.name, suffixes[i + 1].args, sTexts[i + 1])
+                        b = mc.b
+                        cur = mc.v
                         curThis = hUndef
                         i = i + 2
                     } else {
@@ -3602,23 +3616,44 @@ NotFuncHead = :script(~~
             cur = refRead(b, ref, emitStr(b, ref.name))
         }
         var curThis = hUndef
-        for (var i = 0; i < ref.path.length - 1; i++) {
+        var sTexts = siteTexts(refSiteText(ref), ref.path)
+        var n = ref.path.length - 1
+        var i = 0
+        while (i < n) {
             var s = ref.path[i]
             if (s.kind == "member") {
-                curThis = cur
                 var kr = s.key(b)
                 b = kr.b
-                // `F.prototype.m = ...`: a prototype is answered by the value read only.
-                cur = callExt(b, (s.name === "prototype") ? "js_jsvget" : memGetExt(), [cur, kr.v])
+                if (i + 1 < n && ref.path[i + 1].kind == "call") {
+                    // 'o.get(1).a = 2' is the ordinary method call, receiver and all.
+                    var mc = emitMethodCall(b, cur, kr.v, s.name, ref.path[i + 1].args, sTexts[i + 1])
+                    b = mc.b
+                    cur = mc.v
+                    curThis = hUndef
+                    i = i + 2
+                } else {
+                    curThis = cur
+                    // The value read, as for 'o.m' anywhere else: `F.prototype.m = ...`
+                    // and `k.m.x = 1` on a class method need what only it answers.
+                    cur = callExt(b, "js_jsvget", [cur, kr.v])
+                    i = i + 1
+                }
+            } else if (s.kind == "tag") {
+                var tr = emitTagCall(b, cur, curThis, s.parts, sTexts[i])
+                b = tr.b
+                cur = tr.v
+                curThis = hUndef
+                i = i + 1
             } else {
                 var argsV = callExt(b, "js_arr_new", [])
                 b = pushArgs(b, argsV, s.args)
                 // A call in the MIDDLE of an assignment target ('f().x = 1'): the same
                 // check the ordinary call site makes.
-                var rcr = jsCallChecked(b, cur, curThis, argsV, siteTexts(refSiteText(ref), ref.path)[i])
+                var rcr = jsCallChecked(b, cur, curThis, argsV, sTexts[i])
                 b = rcr.b
                 cur = rcr.v
                 curThis = hUndef
+                i = i + 1
             }
         }
         var last = ref.path[ref.path.length - 1].key(b)
@@ -4506,14 +4541,16 @@ NotFuncHead = :script(~~
         var tdz = hoistLexKill(from, to, fns).tdz
         var annex = hoistClaimAnnex(from, to)
         var names = claimVars(from, to)
-        if (names.length == 0 && annex.length == 0) { return makeBlockStmt(withTdzInit(tdz, withFnInit(fns, items))) }
-        var bodyT = makeBlockStmt(withTdzInit(tdz, items))
+        if (names.length == 0 && annex.length == 0) { return makeBlockStmt(withTdzInit(tdz, withFnInit(fns, items, []))) }
+        var varScopeAt = [] // The body's var scope, while the body is emitted.
+        var bodyT = makeBlockStmt(withTdzInit(tdz, withFnInit(fns, items, varScopeAt)))
         return function(b) {
             var fnScope = curScopeV
             curScopeV = callExt(b, "js_scope_new", [fnScope])
             b = emitHoist(b, curScopeV, fnScope, varsOverParams(names, emitParams))
             if (annex.length > 0) { b = emitAnnexHoist(b, annex, names, emitParams) }
-            var endB = bodyT(emitFnInit(b, fns))
+            varScopeAt[0] = curScopeV
+            var endB = bodyT(b)
             curScopeV = fnScope
             return endB
         }
@@ -4539,18 +4576,21 @@ NotFuncHead = :script(~~
     // See the twin of this comment in js-to-llvm-ir.abnf. A namespace body is a
     // function body here (makeNamespace).
     var emitParams = [] // The parameter list of the function being emitted.
-    function emitFnInit(b, fns) {
+    // Each function closes over the current scope and is bound in sc.
+    function emitFnInit(b, fns, sc) {
         for (var i = 0; i < fns.length; i++) {
             var r = fns[i].fnT(b)
             b = r.b
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, fns[i].name), r.v])
+            callExt(b, "js_scope_decl", [sc, emitStr(b, fns[i].name), r.v])
         }
         return b
     }
-    // The statement list with the instantiation of its functions in front.
-    function withFnInit(fns, items) {
+    // The statement list with the instantiation of its functions in front, bound in
+    // the current scope, or in scAt[0] when scAt holds one: a function body's
+    // functions close over its lexical scope and are bound in the var scope under it.
+    function withFnInit(fns, items, scAt) {
         if (fns.length == 0) { return items }
-        var out = [function(b) { return emitFnInit(b, fns) }]
+        var out = [function(b) { return emitFnInit(b, fns, (scAt.length == 0) ? curScopeV : scAt[0]) }]
         for (var j = 0; j < items.length; j++) { out.push(items[j]) }
         return out
     }
@@ -4595,7 +4635,7 @@ NotFuncHead = :script(~~
     }
     function makeJsBlock(items, from, to) {
         var hb = hoistBlockFns(from, to)
-        return makeBlockStmt(withTdzInit(hb.tdz, withFnInit(hb.fns, items)))
+        return makeBlockStmt(withTdzInit(hb.tdz, withFnInit(hb.fns, items, [])))
     }
     // See the twin of this comment in js-to-llvm-ir.abnf.
     function makeJsSwitch(items, from, to) {
@@ -4607,7 +4647,7 @@ NotFuncHead = :script(~~
             var r = subj(b)
             saved.push(curScopeV)
             curScopeV = callExt(r.b, "js_scope_new", [curScopeV])
-            return {b: emitFnInit(tdzDecl(r.b, hb.tdz), hb.fns), v: r.v}
+            return {b: emitFnInit(tdzDecl(r.b, hb.tdz), hb.fns, curScopeV), v: r.v}
         }
         var swT = makeSwitch(items)
         return function(b) {
@@ -4620,7 +4660,7 @@ NotFuncHead = :script(~~
     function makeIfBody(t, from, to) {
         var fns = hoistBlockFns(from, to).fns
         if (fns.length == 0) { return t }
-        return makeBlockStmt(withFnInit(fns, [t]))
+        return makeBlockStmt(withFnInit(fns, [t], []))
     }
     // A for-in/of head with a declaration keyword: let / const bind the target afresh
     // (a plain name in the loop's one slot), var assigns the hoisted names.
@@ -5728,7 +5768,7 @@ NotFuncHead = :script(~~
             nsEmitLocals = savedLocals.concat(locals)
             if (vars.length > 0) { b = emitHoist(b, curScopeV, curScopeV, vars) }
             if (annex.length > 0) { b = emitAnnexHoist(b, annex, vars, []) }
-            b = emitFnInit(b, fns)
+            b = emitFnInit(b, fns, curScopeV)
             for (var i = 0; i < stmts.length; i++) {
                 var st = stmts[i]
                 if (st.nsexport == undefined) {
@@ -6420,7 +6460,7 @@ NotFuncHead = :script(~~
             var hoisted = [function(hb) {
                 hb = tdzDecl(emitHoist(hb, curScopeV, curScopeV, topVars), topTdz)
                 if (topAnnex.length > 0) { hb = emitAnnexHoist(hb, topAnnex, topVars, []) }
-                return emitFnInit(hb, topFns)
+                return emitFnInit(hb, topFns, curScopeV)
             }]
             for (var hi = 0; hi < items.length; hi++) { hoisted.push(items[hi]) }
             items = hoisted

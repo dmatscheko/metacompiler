@@ -482,7 +482,7 @@ ShiftExpr   <~~ push(foldBinary(takeAll())) ~~>
             = AddExpr { ( "<<" | ">>>" | ">>" ) <~~ push(up.in) ~~> AddExpr } ;
 
 AddExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
+            = MulExpr { ( "+" NotDoubled | "-" NotDoubled ) <~~ push(up.in) ~~> MulExpr } ;
 
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
             = ExpExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> ExpExpr } ;
@@ -521,9 +521,9 @@ PreIncDec   <~~ push(makePreIncDec(pop(), pop())) ~~>
 // the lookahead tests the very next character and does not skip whitespace. The real
 // prefix forms never get here: PreIncDec is tried first and takes them.
 Neg         <~~ push(makeNeg(pop())) ~~>
-            = "-" !"-" UnaryExpr ;
+            = "-" NotDoubled UnaryExpr ;
 Pos         <~~ push(makePos(pop())) ~~>
-            = "+" !"+" UnaryExpr ;
+            = "+" NotDoubled UnaryExpr ;
 Not         <~~ push(makeNot(pop())) ~~>
             = "!" UnaryExpr ;
 BitNot      <~~ push(makeBitNot(pop())) ~~>
@@ -3080,6 +3080,16 @@ NotYieldWord = :script(~~
 // 'break'/'continue' must be on the same line as the keyword. Returns the impossible
 // token to FAIL when a line terminator comes first, undefined to succeed. Only spaces
 // and tabs are stepped over - a line break is exactly what is being looked for.
+// Fails right after a '+' or '-' that is GLUED to another of the same sign: the two are
+// the '++'/'--' token, never a sum or a sign ('a' + newline + '++b' is 'a;' then '++b',
+// 'a ++b' is a syntax error, 'a + +b' and '- -1' are fine). A :script on c.peek, because
+// a '!"+"' lookahead skips the whitespace in front of it.
+NotDoubled  = :script(~~
+    (function() {
+        return (c.peek(0) === c.peek(-1)) ? abnf.newToken("\x01doubled", 0) : undefined
+    })()
+~~) ;
+
 NoLineBreak = :script(~~
     (function() {
         // Whatever the whitespace rule would skip here has to be examined rather than
@@ -3223,10 +3233,15 @@ NotStmtHead = :script(~~
 NotSuffix   = :script(~~
     (function() {
         var i = 0, cc = c.peek(0)
+        var nl = false
         while (cc === 32 || cc === 9 || cc === 10 || cc === 13 || cc === 11 || cc === 12) {
+            if (cc === 10 || cc === 13) { nl = true }
             i = i + 1
             cc = c.peek(i)
         }
+        // A '++'/'--' on the same line makes the name an update's operand ('typeof t--'
+        // is typeof (t--)); on the next line it is a prefix update of the next statement.
+        if (!nl && (cc === 43 || cc === 45) && c.peek(i + 1) === cc) { return abnf.newToken("\x01suffix", 0) }
         return (cc === 46 || cc === 91 || cc === 40 || cc === 96) ? abnf.newToken("\x01suffix", 0) : undefined
     })()
 ~~) ;
@@ -5276,7 +5291,7 @@ NotFuncHead = :script(~~
                 if (names.indexOf(annex[a]) < 0) { names.push(annex[a]) }
             }
         }
-        return hoistVars(names, makeSeq(withLexInit(lex, withFnInit(fns, out))))
+        return hoistVars(names, makeSeq(withLexInit(lex, withFnInit(fns, out, 0))))
     }
     // The UseStrictMark of a function production, and the same item list without it. The
     // mark is optional and sits directly in front of the body thunk, which the builders
@@ -10244,16 +10259,16 @@ NotFuncHead = :script(~~
     // A function body with vars runs in a scope of its own under the parameters',
     // binding each to undefined - or to the argument of a parameter of that name, which
     // keeps it. A closure in a default value therefore does not see the body's vars.
-    // The body's functions are instantiated in that scope too, so an Annex B
-    // assignment and a var of the same name write the binding they read.
+    // The body's functions are bound in that scope too, so an Annex B assignment and a
+    // var of the same name write the binding they read, but close over the body's
+    // lexical scope, where its let and const live (ECMA-262 10.2.11 step 36).
     function makeFuncBody(items, from, to) {
         var fns = hoistClaimFns(from, to)
         var lex = hoistLexKill(from, to).names
         var annex = hoistNames(hoistClaimAnnex(from, to))
         var names = claimVars(from, to)
-        if (names.length == 0 && annex.length == 0) { return makeBlockStmt(withLexInit(lex, withFnInit(fns, items))) }
-        var bodyT = makeBlockStmt(withLexInit(lex, items))
-        var initT = fns.length > 0 ? withFnInit(fns, [])[0] : null
+        if (names.length == 0 && annex.length == 0) { return makeBlockStmt(withLexInit(lex, withFnInit(fns, items, 0))) }
+        var bodyT = makeBlockStmt(withLexInit(lex, withFnInit(fns, items, 1)))
         return function() {
             var ps = scopes[scopes.length - 1]
             var vs = {}
@@ -10270,7 +10285,6 @@ NotFuncHead = :script(~~
             }
             if (annex.length > 0) { annexHoist(vs, ps, annex) }
             scopes.push(vs)
-            if (initT != null) { initT() }
             var r = bodyT()
             scopes.pop()
             return r
@@ -10280,10 +10294,13 @@ NotFuncHead = :script(~~
     // Which scope instantiates each one, and which block functions get an Annex B
     // binding: lib/js-hoist.js. Twin in js-to-llvm-ir.abnf.
     // The statement list with the instantiation of its functions in front.
-    function withFnInit(fns, items) {
+    // up counts the scopes above the current one that bind them: a function body's
+    // functions close over its lexical scope and are bound in the var scope under it.
+    function withFnInit(fns, items, up) {
         if (fns.length == 0) { return items }
         var out = [function() {
-            for (var i = 0; i < fns.length; i++) { declVar(fns[i].name, fns[i].mk()) }
+            var sc = scopes[scopes.length - 1 - up]
+            for (var i = 0; i < fns.length; i++) { scopePut(sc, fns[i].name, fns[i].mk()) }
         }]
         for (var j = 0; j < items.length; j++) { out.push(items[j]) }
         return out
@@ -10321,14 +10338,14 @@ NotFuncHead = :script(~~
     }
     function makeJsBlock(items, from, to) {
         var hb = hoistBlockFns(from, to)
-        return makeBlockStmt(withLexInit(hb.names, withFnInit(hb.fns, items)))
+        return makeBlockStmt(withLexInit(hb.names, withFnInit(hb.fns, items, 0)))
     }
     // A switch's case block is one scope for the functions and lexical names declared
     // in it, entered after the discriminant is evaluated.
     function makeJsSwitch(items, from, to) {
         var hb = hoistBlockFns(from, to, true)
         if (hb.fns.length == 0 && hb.names.length == 0) { return makeSwitch(items) }
-        var initT = withLexInit(hb.names, withFnInit(hb.fns, []))
+        var initT = withLexInit(hb.names, withFnInit(hb.fns, [], 0))
         var subj = items[0]
         items[0] = function() {
             var v = anytype // The discriminant may be of any type.
@@ -10348,7 +10365,7 @@ NotFuncHead = :script(~~
     function makeIfBody(t, from, to) {
         var fns = hoistBlockFns(from, to).fns
         if (fns.length == 0) { return t }
-        return makeBlockStmt(withFnInit(fns, [t]))
+        return makeBlockStmt(withFnInit(fns, [t], 0))
     }
     // A var's assignment: to the binding the chain has, else (a host global's name)
     // a new one here.
