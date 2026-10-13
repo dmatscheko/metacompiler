@@ -270,19 +270,20 @@ accept_leg() {   # accept_leg NAME [module]
         reject "$name" "died on signal $((rc - 128)) (exit $rc) - a crashing leg is not a measurement"
         return 1
     fi
-    # The IR interpreter's endless-loop brake stops mid-program and leaves a
-    # PARTIAL file.
-    if grep -q 'step limit exceeded' "$work/$name.err" "$work/$name.raw" 2>/dev/null; then
-        reject "$name" "hit the IR step brake - output is TRUNCATED (raise -max-steps)"
-        return 1
-    fi
-
     if [ "$cut" = module ]; then
         local k; k="$(module_lines "$work/$name.raw")"
         is_handover_banner "$work/$name.raw" "$((k + 1))" && k=$((k + 1))
         tail -n "+$((k + 1))" "$work/$name.raw" | strip_engine >"$work/$name.out"
     else
         strip_engine <"$work/$name.raw" >"$work/$name.out"
+    fi
+
+    # The IR interpreter's endless-loop brake stops mid-program and leaves a
+    # PARTIAL file. Only the program's output and stderr are searched: the module
+    # itself may carry the same words as a string constant (bash's =~ does).
+    if grep -q 'IR interpreter: step limit exceeded' "$work/$name.err" "$work/$name.out" 2>/dev/null; then
+        reject "$name" "hit the IR step brake - output is TRUNCATED (raise -max-steps)"
+        return 1
     fi
 
     local lines; lines="$(wc -l <"$work/$name.out" | tr -d ' ')"
