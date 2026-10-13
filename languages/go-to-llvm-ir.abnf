@@ -572,10 +572,11 @@ TgtParen    <~~ push(makeTargetRef(takeAll())) ~~>
             = "(" TgtCore { "." Id <~~ push({key: up.in}) ~~> | TIndex } ")"
               { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
 TgtCore     = { "*" <~~ push({star: true}) ~~> } Id <~~ push(cAssignName(up.in)) ~~> ;
-TIndex      <~~ var tks = pop().ksty; push({idx: pop(), ksty: tks}) ~~>
+TIndex      <~~ var tkm = pop(); push({idx: pop(), ksty: tkm.ksty, kk: tkm.kr}) ~~>
             = "[" IdxE "]" ;
-// An index or map key reports its static type after it (goKeyBoxTy).
-IdxE        <~~ var ie = pop(); push(ie); push({ksty: stAt(up.pos)}) ~~> = Expression ;
+// An index or map key reports its static type after it (goKeyBoxTy), and its
+// goKRec record (goIdxCheck).
+IdxE        <~~ var ie = pop(); push(ie); push({ksty: stAt(up.pos), kr: goKRec(up.start, up.pos)}) ~~> = Expression ;
 
 ExprList    = StoreExpr { "," StoreExpr } ;
 // One value of a := / = / var, followed by the static type it reports (goSplitSty).
@@ -850,9 +851,10 @@ NonExprT     = "[" "]" Type | ArrayTypeT | MapTypeT | FuncTypeT | ChanTypeT | If
 // s[lo:hi] / s[lo:hi:max]. Tried before IndexSfx so the ':' inside the brackets is
 // reached (an index would fail there and the whole chain with it). Each bound is
 // tagged, so an omitted one is told apart from a following one.
-SliceSfx    <~~ push(makeSliceSfx(takeAll())) ~~>
-            = "[" [ Expression <~~ push({lo: pop()}) ~~> ] ":" [ Expression <~~ push({hi: pop()}) ~~> ]
-              [ ":" Expression <~~ push({mx: pop()}) ~~> ] "]" ;
+SliceSfx    <~~ push(makeSliceSfx(takeAll(), up.start)) ~~>
+            = "[" [ Expression <~~ push({lo: pop(), sk: goKRec(up.start, up.pos)}) ~~> ] ":"
+              [ Expression <~~ push({hi: pop(), sk: goKRec(up.start, up.pos)}) ~~> ]
+              [ ":" Expression <~~ push({mx: pop(), sk: goKRec(up.start, up.pos)}) ~~> ] "]" ;
 // A call on an arbitrary value, not on a name: fs[0](), mk(1)(), p.f().g(). Primary's
 // Call covers only the 'Id(args)' form, so without this suffix a call on any other
 // expression does not parse at all.
@@ -862,7 +864,7 @@ MethodSfx   <~~ push(makeMethodSfx(popName(), takeAll(), up.start)) ~~>
             = "." Id <~~ push({mname: up.in}) ~~> "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
 FieldSfx    <~~ push({kind: "field", name: pop().fname, at: up.start, rc: null}) ~~>
             = "." Id <~~ push({fname: up.in}) ~~> ;
-IndexSfx    <~~ var iks = pop().ksty; push({kind:"index", idx: pop(), ksty: iks, at: up.start, rc: null}) ~~>
+IndexSfx    <~~ var ikm = pop(); push({kind:"index", idx: pop(), ksty: ikm.ksty, kk: ikm.kr, at: up.start, rc: null}) ~~>
             = "[" IdxE "]" ;
 // x.(T): a type assertion. The value is unchanged, but it is CHECKED, and a value
 // that does not hold the target type panics the way Go does: js_goifas by method set
@@ -904,8 +906,10 @@ PanicFresh  <~~ push(makeCall(["$panicf", pop()])) ~~> = Expression ;
 // float64(i)/2 a float division and ^uint8(x) an eight bit complement. A conversion
 // to a user-defined type still goes through Call. Longest spelling first: this is a
 // PEG, so "uint" matching the front of "uint16" would never be retried.
-ConvExpr    <~~ push(makeConv(takeAll(), up.pos)) ~~>
-            = ConvType "(" Expression [ "," ] ")" ;
+ConvExpr    <~~ push(makeConv(goConvC(takeAll()), up.pos)) ~~>
+            = ConvType "(" ConvArg [ "," ] ")" ;
+// The converted value, followed by its source range (goConvC).
+ConvArg     <~~ var cv = pop(); push(cv); push({cks: up.start, cke: up.pos}) ~~> = Expression ;
 // (chan int)(nil), (func())(nil), (map[string]int)(nil), ([]byte)(s): a conversion whose
 // target type is PARENTHESIZED. ParenConvT deliberately leaves out the bare-name and
 // pointer types, which are the two shapes that are also EXPRESSIONS: `(f)(3)` has to
@@ -5106,14 +5110,17 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function makeSelSend(items) { return {kind: "send", chT: items[0], valT: items[1], body: items[2]} }
     function makeSelDefault(items) { return {kind: "default", body: items[0]} }
     // items = [{lo}?, {hi}?, {mx}?]: the s[lo:hi:max] suffix of a postfix chain.
-    function makeSliceSfx(items) {
+    // at: the '[' (goRecvsC); sks: the bounds' goKRec records, in order.
+    function makeSliceSfx(items, at) {
         var lo = null, hi = null, mx = null
+        var sks = []
         for (var i = 0; i < items.length; i++) {
             if (items[i].lo != undefined) { lo = items[i].lo }
             if (items[i].hi != undefined) { hi = items[i].hi }
             if (items[i].mx != undefined) { mx = items[i].mx }
+            sks.push(items[i].sk)
         }
-        return {kind: "slice", lo: lo, hi: hi, mx: mx}
+        return {kind: "slice", lo: lo, hi: hi, mx: mx, at: at, sks: sks}
     }
     // A written-out conversion, handed to the same runtime conversion as string(x).
     // The target type is recorded against this source position (see regConv), so the

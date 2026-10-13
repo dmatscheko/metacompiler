@@ -731,6 +731,42 @@
             "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-shift.go", "-q"]
         },
         {
+            "name": "Go interpreter constant slice bounds out of order SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-slice.go", "-q"]
+        },
+        {
+            "name": "Go compiler constant slice bounds out of order SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-slice.go", "-q"]
+        },
+        {
+            "name": "Go interpreter constant index out of range SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-index.go", "-q"]
+        },
+        {
+            "name": "Go compiler constant index out of range SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-index.go", "-q"]
+        },
+        {
+            "name": "Go interpreter constant conversion overflow SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-convert.go", "-q"]
+        },
+        {
+            "name": "Go compiler constant conversion overflow SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-convert.go", "-q"]
+        },
+        {
             "name": "Python interpreter",
             "type": "go",
             "request": "launch",

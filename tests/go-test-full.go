@@ -4321,7 +4321,20 @@ func s82() {
 	// zero are compile errors (go-fail-test-shift.go, go-fail-test-divzero.go).
 	c := 1i
 	check("cke4", fmt.Sprint(x<<0, x>>63, c/0, -1<<2>>1) == "5 0 (NaN+Infi) -2")
+	// A converted constant must fit the type, and a constant index or slice bound
+	// must lie inside an array or a constant string (go-fail-test-convert.go,
+	// -index.go, -slice.go); these are the extremes that do.
+	check("cke5", fmt.Sprint(uint8(255), int8(-128), uint64(1<<64-1), int(2.0), U82(255), rune(0x10FFFF), uint(0)) ==
+		"255 -128 18446744073709551615 2 255 1114111 0")
+	arr := [3]int{1, 2, 3}
+	pa := &arr
+	arr[2] = 4
+	mn := map[int]int{-1: 9}
+	check("cke6", fmt.Sprint(arr[2], pa[2], arr[3:], arr[0:3:3], "abc"[2], "abc"[3:], "héllo"[5], mn[-1]) ==
+		"4 4 [] [1 2 4] 99111 9")
 }
+
+type U82 uint8
 
 func main() {
 	s01() // SECTION-CALL 01

@@ -1099,6 +1099,29 @@ function goShiftCountOk(kr) {
     if (kr != null && kr.k.s < 0) { goKFail(kr, "invalid operation: negative shift count " + goKDesc(kr)) }
 }
 function goDivZeroFail(ks) { fail(c.curFile() + ":" + c.lineOf(ks) + ": invalid operation: division by zero") }
+// A conversion `to(c)` of an untyped constant c (source [ks, ke]) to an integer
+// type must represent it exactly: `uint8(256)` is "constant 256 overflows
+// uint8" and `int(2.5)` "cannot convert 2.5 (untyped float constant) to type int".
+function goConvConst(k, ks, ke, to) {
+    if (k == null || cIsCx(k)) { return }
+    var it = goIntUnder(to)
+    if (it == null) { return }
+    var v = k
+    if (k.f) {
+        var qr = cbDivMod(k.n, k.d)
+        if (!cbIsZero(qr.r)) {
+            goKFail({k: k, ks: ks, ke: ke}, "cannot convert " + stTrim(c.srcSlice(ks, ke)) + " (untyped float constant) to type " + to)
+            return
+        }
+        v = cInt(k.s, qr.q)
+    }
+    if (!cFitsInt(v, it.w, it.u)) { goKFail({k: v, ks: ks, ke: ke}, "constant " + (v.s < 0 ? "-" : "") + cbToDec(v.n) + " overflows " + to) }
+}
+// items = [{conv}, thunk, {cks, cke}] of a conversion whose type is written out.
+function goConvC(items) {
+    goConvConst(constAt(items[2].cke), items[2].cks, items[2].cke, items[0].conv)
+    return [items[0], items[1]]
+}
 // `=` storing value kr into target lref, one of n targets: the blank identifier
 // takes a constant at its default type.
 function goAssignConstTo(t, kr, lref, n) {
@@ -1740,7 +1763,9 @@ function goRefKeysC(ref) {
     while (k < ref.path.length) {
         var p = ref.path[k]
         if (p != null && typeof p == "object" && p.idx !== undefined && p.ksty !== undefined) {
-            p.idx = goKeyBoxC(p.idx, goRefTy({name: ref.name, path: ref.path.slice(0, k), stars: 0}), p.ksty)
+            var pty = goRefTy({name: ref.name, path: ref.path.slice(0, k), stars: 0})
+            goIdxCheck(p.kk, pty, -1, -1)
+            p.idx = goKeyBoxC(p.idx, pty, p.ksty)
         }
         k = k + 1
     }
@@ -1762,6 +1787,10 @@ function goCallBoxC(items) {
     var out = [name]
     if (name == "delete" && sp.args.length == 2 && !sp.spread) {
         sp.args[1] = goKeyBoxC(sp.args[1], sp.atys[0], sp.atys[1])
+    }
+    // A conversion to a defined type, which is spelled as a call.
+    if (sp.args.length == 1 && sp.krs[0] != null && typeof definedUnder[name] == "string" && !cIsLocal(name)) {
+        goConvConst(sp.krs[0].k, sp.krs[0].ks, sp.krs[0].ke, name)
     }
     var j = 0
     while (j < sp.args.length) {
@@ -2224,11 +2253,102 @@ function goRecvsC(items, start) {
         var s = items[i]
         if (s != null && typeof s == "object" && (s.kind == "mcall" || s.kind == "field" || s.kind == "index") && s.at != undefined) {
             s.rc = goRecvC(start, s.at)
-            if (s.kind == "index") { s.idx = goKeyBoxC(s.idx, stChainFrom(s.rc.head, s.rc.hty, s.rc.loc, s.rc.text), s.ksty) }
+            if (s.kind == "index") {
+                var ity = stChainFrom(s.rc.head, s.rc.hty, s.rc.loc, s.rc.text)
+                goIdxCheck(s.kk, ity, start, s.at)
+                s.idx = goKeyBoxC(s.idx, ity, s.ksty)
+            }
+        } else if (s != null && typeof s == "object" && s.kind == "slice" && s.at != undefined) {
+            var src = goRecvC(start, s.at)
+            goSliceKCheck(s.sks, stChainFrom(src.head, src.hty, src.loc, src.text), start, s.at)
         }
         i = i + 1
     }
     return items
+}
+// ----- A CONSTANT INDEX -----
+// A constant index must not be negative (except as a map key), and must lie
+// inside an array or a constant string: `a[3]` of a [3]int is "invalid argument:
+// index 3 out of bounds [0:3]". ty is the indexed operand's static type and
+// [os, oe] its source (-1: none), which a string literal's length is read from.
+function goIdxCheck(kr, ty, os, oe) {
+    if (kr == null) { return }
+    var t = goIdxTy(ty)
+    var n = goArrLen(t)
+    if (n < 0 && os >= 0) { n = goStrLitLen(stTrim(c.srcSlice(os, oe))) }
+    if (t.indexOf("map[") == 0 || (n < 0 && t != "string" && t.charAt(0) != "[")) { return }
+    if (kr.k.s < 0) { goKFail(kr, "invalid argument: index " + goKIdxDesc(kr) + " must not be negative"); return }
+    if (n >= 0 && cbCmp(kr.k.n, cbFromSmall(n)) >= 0) { goKFail(kr, "invalid argument: index " + cbToDec(kr.k.n) + " out of bounds [0:" + n + "]") }
+}
+// The constant bounds of a slice expression (goIdxCheck's arguments, ks in
+// order): none negative, none beyond an array's or a constant string's length,
+// and none below the one before it - `a[2:1]` is "invalid slice indices: 1 < 2".
+function goSliceKCheck(ks, ty, os, oe) {
+    var t = goIdxTy(ty)
+    var n = goArrLen(t)
+    if (n < 0) { n = goStrLitLen(stTrim(c.srcSlice(os, oe))) }
+    var prev = null
+    var i = 0
+    while (i < ks.length) {
+        var kr = ks[i]
+        if (kr != null && kr != undefined) {
+            if (kr.k.s < 0) { goKFail(kr, "invalid argument: index " + goKIdxDesc(kr) + " must not be negative") }
+            if (n >= 0 && cbCmp(kr.k.n, cbFromSmall(n)) > 0) {
+                goKFail(kr, "invalid argument: index " + cbToDec(kr.k.n) + " out of bounds [0:" + (n + 1) + "]")
+            }
+            if (prev != null && cbCmp(kr.k.n, prev.k.n) < 0) {
+                goKFail(kr, "invalid slice indices: " + cbToDec(kr.k.n) + " < " + cbToDec(prev.k.n))
+            }
+            prev = kr
+        }
+        i = i + 1
+    }
+}
+// "-1 (constant of type int)", "i (constant -1 of type int)".
+function goKIdxDesc(kr) {
+    var src = stTrim(c.srcSlice(kr.ks, kr.ke))
+    var dec = (kr.k.s < 0 ? "-" : "") + cbToDec(kr.k.n)
+    return src + " (constant" + (src == dec ? "" : " " + dec) + " of type int)"
+}
+// An indexed type with a pointer to an array and a defined type seen through.
+function goIdxTy(ty) {
+    var t = stBare(ty)
+    if (t.charAt(0) == "*" && t.charAt(1) == "[") { t = t.substring(1) }
+    if (goTyWord(t) == t && typeof definedUnder[t] == "string") { t = stBare(resolveDefined(t)) }
+    return t
+}
+// The length of array type t written with a decimal length, else -1.
+function goArrLen(t) {
+    if (t.charAt(0) != "[") { return -1 }
+    var e = t.indexOf("]")
+    if (e < 2) { return -1 }
+    var n = 0
+    var i = 1
+    while (i < e) {
+        var d = t.charCodeAt(i) - 48
+        if (d < 0 || d > 9 || n > 100000000) { return -1 }
+        n = n * 10 + d
+        i = i + 1
+    }
+    return n
+}
+// The length in bytes of a string literal without escapes, else -1.
+function goStrLitLen(s) {
+    if (s.length < 2) { return -1 }
+    var q = s.charAt(0)
+    if ((q != "\"" && q != "`") || s.charAt(s.length - 1) != q) { return -1 }
+    var n = 0
+    var i = 1
+    while (i < s.length - 1) {
+        var cc = s.charCodeAt(i)
+        if (cc == 92 || cc == 13 || s.charAt(i) == q) { return -1 }
+        if (cc < 128) { n = n + 1 }
+        else if (cc < 2048) { n = n + 2 }
+        else if (cc >= 55296 && cc <= 56319) { n = n + 4; i = i + 1 }
+        else { n = n + 3 }
+        i = i + 1
+    }
+    return n
 }
 // The receiver record of the mcall suffix that starts at source offset at, in a
 // chain starting at start: the head name, its binding type now, the stripped text.
