@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-588** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-589** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -176,18 +176,10 @@ first). Separately `io.write(...)` → interp "attempt to index a nil value (glo
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-583 bash: several assignments in one command; `$(( ))` inside `${s:off:len}`; inner stderr of `$( )` · P1 · SH · IN PROGRESS (SH worker, round 6) [V]
-`a=1 b=2; echo "$a $b"` and `c=$'x' d=3` → both halves "Not everything could be parsed" (bash `1 2`). `s=abcdef; echo
-"${s:1:$(( 1+1 ))} ${s:$((2)):2}"` → interp exit 127 "command not found: 1+1", compiled ` ab` (bash `bc cd`: `$((` is
-arithmetic, not `$( (`). Compiled only: `echo "$(echo hi >&2)" 2>/dev/null` hides "hi" (bash and interp print it: words are
-expanded before the command's redirections apply). P3: arithmetic error text `bash: division by 0` vs bash `((: v = 1/0 :
-division by 0 (error token is "0 ")`.
-
-### T-584 bash: a value whose first byte is 0x02 is read as a field list · P2 · SH · IN PROGRESS (SH worker, round 6) [V]
-`w=$'\x02lead'; printf '<%s>' "$w" ${w}; y=$'a\x02b'; echo "${y:1}"` → bash `<^Blead><^Blead>` and `^Bb`; interp `<>` and an
-empty line, compiled `<leadlead...>` / wrong field counts. The list marker lives inside the value; a fix needs consumers to know
-statically scalar vs list (the emitter's .f flag at rt_catfields, rt_argpush, rt_arr_litwords, the f:true selects) or an
-out-of-band list type in the interpreter (~40 sites, one extra call on the `${a[i]}` path — measure the bench).
+### T-588 bash: `$[ expr ]`; `$'\uDFFF'` length; native stdout buffering vs stderr order · P3 · SH · OPEN [V]
+`echo $[ 3 + 4 ]` → both halves print `$[ 3 + 4 ]` literally (bash 7, legacy arithmetic). Interp: `v=$'\uDFFF'; echo ${#v}` → 6
+(bash 3: bytes ED BF BF; the `\u` escape is not decoded for a surrogate value). Native binaries buffer stdout until exit, so
+`cmd 2>&1` interleaves stdout and stderr differently from bash (order only, not values).
 
 ---
 
@@ -687,6 +679,8 @@ T-579 bash: an arithmetic error does not cancel the assignment; bytes 0x01/0x02 
 T-582 swift: missing traps — Int(huge Double), inverted range, compiled removeLast on empty; the ratchet does not compile under swiftc — DONE de9fcee2 (the whole ratchet now runs on swiftc: 769 checks, 0 failures)
 T-575 python: module `__name__`, builtin class methods with keywords, `slice`, bytes method gaps — DONE 411114f9 6bd49c7f except the dict pop/re-add-at-equal-size detection — DECLINED: CPython's answer depends on its hash table's resize/compaction history (a 4-key dict ends quietly, a 3-key one raises); a deletion counter made 46 of 116 probe rows wrong vs 38 before; matching it needs CPython's entry table per dict in all engines, a cost on every insert
 T-585 swift: Range `lowerBound`/`upperBound`; `contains` on Double and String ranges — DONE b3f96517 (plus isEmpty, clamped, overlaps, indices, Int8 elements, count near Int.max, variable range-pattern bounds)
+T-583 bash: several assignments in one command; `$(( ))` inside `${s:off:len}`; inner stderr of `$( )` — DONE 169887c8 71363b2d (plus redirections undone on return/break/exit, stdin rewound only under a stdin redirection)
+T-584 bash: a value whose first byte is 0x02 is read as a field list — DONE 9b84ee7e
 
 # Settled — do not re-open
 
