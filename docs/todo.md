@@ -121,14 +121,14 @@ not change the renderer.
 
 # GO — Go  (oracle: `go run`)
 
-### T-576 go: `math` transcendentals, Float64bits, NaN sign, untyped math constants, missing members · P3 · GO · OPEN [V]
+### T-576 go: `math` transcendentals, Float64bits, NaN sign, untyped math constants, missing members · P3 · GO · IN PROGRESS (GO worker, round 4) [V]
 `math.Exp/Log/Sin/Cos/Tan/Atan/Hypot/Cbrt` missing (Go's arm64 build fuses a*b+c inside them, so a port must match go
 bit-for-bit or stay out); `math.Pow` with a non-integral, non-half exponent panics "not supported". `MaxUint`/`MaxUint64`,
 `Float64bits`/`Float64frombits` missing; `math.Signbit(math.NaN())` sign/payload not modelled. `math.Pi == 3.141592653589793`
 → ours true, go false (the untyped constant compares at arbitrary precision; a pkg.Name constant does not fold). A missing
 member (`math.Hypot`) reads as `<nil>` instead of a compile error. llvm.Run needs `-max-steps 0` for heavy go-math.go code.
 
-### T-577 go: invalid UTF-8 in strings — each engine differs; byte-index cache thrash · P2 · GO · OPEN [V]
+### T-577 go: invalid UTF-8 in strings — each engine differs; byte-index cache thrash · P2 · GO · IN PROGRESS (GO worker, round 4) [V]
 `a := "日本語"[0:1]; fmt.Println(len(a), []rune(a), a == "\uFFFD")`: interp `2 [230] false`, llvm.Run `1 [65533] false`, native
 `3 [65533] true`, go `1 [65533] false`. `string([]byte{200})`: twin the raw byte, native U+FFFD, interp È. The twin's `s[i]` of a
 lone surrogate reads WTF-8 bytes, layer 2 U+FFFD. Natively `s[i]` caches the byte form of the last 4 non-ASCII strings: 5+
