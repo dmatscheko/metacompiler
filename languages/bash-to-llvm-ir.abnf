@@ -1436,7 +1436,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtReadLine = rtDecl("rt_read_line", true, [0])
 
     // field lists: a value carrying more than one word is "\x02" followed by the fields,
-    // each terminated by "\x01".
+    // each terminated by "\x01"; rt_fput appends one field, escaped (bash-rt.c).
+    var rtFput = rtDecl("rt_fput", true, [1, 1])
     var rtField = rtDecl("rt_field", true, [1, 1, 0, 0])
     var rtPrintf = rtDecl("rt_printf", true, [1, 1])
     var rtPfOut = rtDecl("rt_pf_out", false, [1])
@@ -1624,7 +1625,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             subEnd.NewCall(rtSsRestore, zero)
             restoreOpts(subEnd, optSave)
             subEnd.NewStore(st, gStatus)
-            var v = subEnd.NewCall(rtCapEnd, zero)
+            var v = subEnd.NewCall(rtCapEnd, one)
             return {b: subEnd, v: v}
         }}
     }
@@ -2278,7 +2279,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 }
             }
             uqStarEmit = svq
-            var full = b.NewCall(rtStrcat, [b.NewCall(rtStrcat, [acc, open]), gepStr(b, "\x01")])
+            var full = b.NewCall(rtFput, [acc, open])
             return {b: b, v: b.NewSelect(b.NewICmp(llvm.enum.IPredNE, opened, zero), full, acc)}
         }}
     }
@@ -2393,7 +2394,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     acc = nacc
                 }
             }
-            var full = b.NewCall(rtStrcat, [b.NewCall(rtStrcat, [acc, open]), gepStr(b, "\x01")])
+            var full = b.NewCall(rtFput, [acc, open])
             return {b: b, v: b.NewSelect(b.NewICmp(llvm.enum.IPredNE, opened, zero), full, acc)}
         }}
     }
@@ -2493,7 +2494,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b = rk.b
             var v = arLhsGet(b, lhs.lhs, rk.k)
             var nv = (iop == "++") ? b.NewAdd(v, one64) : b.NewSub(v, one64)
-            arLhsSet(b, lhs.lhs, rk.k, nv)
+            b = arLhsSet(b, lhs.lhs, rk.k, nv)
             return {b: b, v: (pre == 1) ? nv : v}
         }
     }
@@ -2514,7 +2515,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 b = res.b
                 nv = res.v
             }
-            arLhsSet(b, lhs.lhs, rk.k, nv)
+            b = arLhsSet(b, lhs.lhs, rk.k, nv)
             return {b: b, v: nv}
         }
     }
@@ -2572,10 +2573,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (k == null) { return b.NewCall(rtArith, varString(b, name)) }
         return b.NewCall(rtArith, b.NewCall(rtScGet, [gepStr(b, name), k]))
     }
+    // Nothing is stored once an error has been raised: bash abandons the whole expression,
+    // so `(( w = 2, w2 = 1/0 ))` sets w alone. Twin of arLhsSet in bash-interpreter.abnf.
     function arLhsSet(b, name, k, v) {
-        if (k == null) { storeVar(b, name, b.NewCall(rtInt2str, v)); return }
-        var setF = hasOwn(assocArrays, "$" + name) ? rtArrSet : rtArrIset
-        b.NewCall(setF, [gepStr(b, name), k, b.NewCall(rtInt2str, v)])
+        var st = curF.NewBlock(""), jb = curF.NewBlock("")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, b.NewLoad(i32, gArithErr), zero), st, jb)
+        if (k == null) { storeVar(st, name, st.NewCall(rtInt2str, v)) }
+        else {
+            var setF = hasOwn(assocArrays, "$" + name) ? rtArrSet : rtArrIset
+            st.NewCall(setF, [gepStr(st, name), k, st.NewCall(rtInt2str, v)])
+        }
+        st.NewBr(jb)
+        return jb
     }
     // / and % go through rt_idiv, which knows bash's two cases the hardware does not (a zero
     // divisor, LONG_MIN / -1); a literal divisor (rlit, never negative: a sign is a unary
@@ -2687,6 +2696,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 vals.push({k: null, v: rw.v})
             }
         }
+        b = emitAbortCheck(b)
         if (!append) { b.NewCall(rtArrClear, nm) }
         // A literal makes the name a SET array even with no element (rt_arr_mark).
         b.NewCall(rtArrMark, nm)
@@ -2713,6 +2723,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return b
     }
+    // An expansion error in a value abandons the command before anything is stored:
+    // `k=$(( 1/0 ))` leaves k as it was. Twin of runAssign in bash-interpreter.abnf.
     function emitAssign(b, a, assoc0) {
         // Associative-ness is a property of the NAME (declare -A), not of this statement.
         var assoc = assoc0 || hasOwn(assocArrays, "$" + a.name)
@@ -2723,10 +2735,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var r = a.valT.fn(b)
             b = r.b
             v = (a.valT.f == true) ? b.NewCall(rtWordJoin, r.v) : r.v
+            if (a.valT.c == undefined) { b = emitAbortCheck(b) }
         }
         if (a.idxT != null) {
             var rk = subKeyOf(b, a.name, a.idxT)
             b = rk.b
+            b = emitAbortCheck(b)
             if (a.op == "+=") { v = b.NewCall(rtStrcat, [b.NewCall(rtArrGet, [nm, rk.k]), v]) }
             b.NewCall(assoc ? rtArrSet : rtArrIset, [nm, rk.k, v])
             return b
@@ -2744,6 +2758,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 rv = b.NewCall(rtArith, v)
             }
             if (a.op == "+=") { rv = b.NewAdd(b.NewCall(rtStr2int, loadVar(b, a.name)), rv) }
+            b = emitAbortCheck(b)
             storeVar(b, a.name, b.NewCall(rtInt2str, rv))
             return b
         }

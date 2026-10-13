@@ -2511,6 +2511,61 @@ s52() {
   check lpl1 "$t $?" "10a11a12a20a21a22a30a31a32a 0"
 }
 
+# ===== SECTION 53: an arithmetic error abandons the expression, control bytes as data =====
+# The first arithmetic error ends the whole expression: nothing after it is evaluated or
+# stored, and an assignment whose value fails to expand is not made (the command is
+# abandoned, which the EXIT trap of a command substitution observes). Bytes 0x01 and 0x02
+# are ordinary data inside a field, and a command substitution that drops a NUL byte warns.
+# Every expected value is bash 5.3's.
+s53() {
+  local z=0 v w w2 u=5 c=1 g=3 r='q1 = 6' q1 a=(1 2 3) n1 n2 o
+  (( v = 1/z )) 2>/dev/null
+  check aer1 "$? ${v:-unset}" "1 unset"
+  (( w = 2, w2 = 1/z )) 2>/dev/null
+  check aer2 "${w:-unset} ${w2:-unset}" "2 unset"
+  (( u = 7 + 1/z, c++ )) 2>/dev/null
+  check aer3 "$u $c" "5 1"
+  (( c++, 1/z, c++ )) 2>/dev/null
+  check aer4 "$c" "2"
+  (( g = 1 ? 2/z : 4 )) 2>/dev/null
+  check aer5 "$g" "3"
+  (( 1/z, $r )) 2>/dev/null
+  check aer6 "${q1:-unset}" "unset"
+  (( a[1] = 1/z )) 2>/dev/null
+  check aer7 "${a[*]}" "1 2 3"
+  let "n1 = 4" "n2 = 1/z" 2>/dev/null
+  check aer8 "$? $n1 ${n2:-unset}" "1 4 unset"
+  { o=$( trap 'echo "k=$k"' EXIT; k=4; k=$(( 1/z )) ); } 2>/dev/null
+  check aer9 "$? $o" "1 k=4"
+  { o=$( trap 'echo "${#b[@]} ${b[*]}"' EXIT; b=(5 6); b=(1 $(( 2/z )) 3) ); } 2>/dev/null
+  check aer10 "$o" "2 5 6"
+  { o=$( trap 'echo "${b[*]}"' EXIT; b=(5 6); b[1]=$(( 2/z )) ); } 2>/dev/null
+  check aer11 "$o" "5 6"
+  { o=$( trap 'echo "$k"' EXIT; k=4; k+=$(( 2/z )) ); } 2>/dev/null
+  check aer12 "$o" "4"
+  { o=$( trap 'echo "${d-unset}"' EXIT; declare d=$(( 1/z )) ); } 2>/dev/null
+  check aer13 "$? $o" "1 unset"
+  o=$( { (( 1/z + 2/z )); } 2>&1 )
+  o=${o//division by 0/@}
+  check aer14 "${o//[^@]/}" "@"
+  local x=$'a\x01b' y=$'a\x02b' p=$'p\x01q\x02r' e
+  check cbf1 "$(printf '<%s>' "$x" "$y")" "<$x><$y>"
+  local l=("$x" "$y" "$p")
+  check cbf2 "${#l[@]} ${#l[0]} ${#l[2]} $(printf '<%s>' "${l[@]}")" "3 3 5 <$x><$y><$p>"
+  local qx=$'Q\x01b' qy=$'Q\x02b'
+  check cbf3 "$(printf '<%s>' "${l[@]/a/Q}" "${l[@]:1:1}")" "<$qx><$qy><$p><$y>"
+  s53f() { printf '%s:' "$#" "$@"; }
+  check cbf4 "$(s53f "$x" "$p")" "2:$x:$p:"
+  check cbf5 "$(s53f $x "${x}z")" "2:$x:${x}z:"
+  o=
+  for e in "$x" $y; do o="$o[$e]"; done
+  check cbf6 "$o" "[$x][$y]"
+  check cbf7 "$(IFS=$'\x01'; printf '<%s>' $x)" "<a><b>"
+  check cbf8 "$(printf '%c|%b|%.2s' "$x" "$x" "$x")" "a|$x|a${x:1:1}"
+  o=$( { e=$(printf 'n\0m'); echo "$e"; } 2>&1 )
+  check nul2 "${o##*$'\n'}|${o//*: warning: command substitution: ignored null byte in input$'\n'*/W}" "nm|W"
+}
+
 s01   # SECTION-CALL 01
 s02   # SECTION-CALL 02
 s03   # SECTION-CALL 03
@@ -2563,5 +2618,6 @@ s49   # SECTION-CALL 49
 s50   # SECTION-CALL 50
 s51   # SECTION-CALL 51
 s52   # SECTION-CALL 52
+s53   # SECTION-CALL 53
 echo "full: $checks checks, $fails failures"
 exit $fails

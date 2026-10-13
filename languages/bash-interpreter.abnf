@@ -1228,7 +1228,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function writeChan(ch, s) {
         if (ch == 1) { errBuf = errBuf + s; flushErrLines(); return }
         if (ch != 0) { return }
-        if (capStack.length > 0) { capStack[capStack.length - 1] = capStack[capStack.length - 1] + (nulSeen ? dropNul(s) : s) }
+        if (capStack.length > 0) {
+            var cs = nulSeen ? dropNul(s) : s
+            if (cs.length != s.length) { capNul["$" + capStack.length] = true }
+            capStack[capStack.length - 1] = capStack[capStack.length - 1] + cs
+        }
         else if (rawSeen && hasRaw(s)) { writeBytes(bytesText(strBytes(s))) }
         else { print(s) }
     }
@@ -1243,6 +1247,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // A NUL byte exists only on its way out of printf / echo -e (pfChr): written to the
     // output, dropped by a command substitution, the end of a printf -v value.
     var nulSeen = false
+    var capNul = {}       // capture depth -> a NUL was dropped there (mkCmdSub warns)
     function dropNul(s) {
         var out = ""
         var i
@@ -2353,6 +2358,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 else if (localize && !isArray) { unsetVar(names[k]) }
                 if (asgs[k] == null && !isArray && kw != "export" && kw != "readonly") { dclVars["$" + names[k]] = true }
             }
+            var ab = takeAbort()
+            if (ab != null) { return ab }
             setStatus(0)
             return 0
         }
@@ -2598,10 +2605,24 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // answers an ENCODED list instead: "\x02" followed by each field and a "\x01" after it.
     // The trailing separator makes the empty list ("\x02") and the one-empty-field list
     // ("\x02\x01") different, which is what makes `a=($empty)` produce no element at all.
+    // Inside a field a "\x02" escapes the character after it, so a field can hold "\x01" and
+    // "\x02" themselves. Twin of rt_fput / rt_getfield in languages/lib/bash-rt.c.
+    function encField(f0) {
+        var f = "" + f0
+        if (f.indexOf("\x01") < 0 && f.indexOf("\x02") < 0) { return f }
+        var out = ""
+        var i
+        for (i = 0; i < f.length; i++) {
+            var ch = f.charAt(i)
+            if (ch == "\x01" || ch == "\x02") { out = out + "\x02" }
+            out = out + ch
+        }
+        return out
+    }
     function encFields(list) {
         var out = "\x02"
         var i
-        for (i = 0; i < list.length; i++) { out = out + list[i] + "\x01" }
+        for (i = 0; i < list.length; i++) { out = out + encField(list[i]) + "\x01" }
         return out
     }
     function isFields(s) { return s.length > 0 && s.charAt(0) == "\x02" }
@@ -2612,7 +2633,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var i
         for (i = 1; i < s.length; i++) {
             var ch = s.charAt(i)
-            if (ch == "\x01") { out.push(cur); cur = "" } else { cur = cur + ch }
+            if (ch == "\x02" && i + 1 < s.length) { i = i + 1; cur = cur + s.charAt(i) }
+            else if (ch == "\x01") { out.push(cur); cur = "" } else { cur = cur + ch }
         }
         return out
     }
@@ -3006,9 +3028,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         while (n > 0 && s.charAt(n - 1) == "\n") { n = n - 1 }
         return s.slice(0, n)
     }
+    // A dropped NUL byte is warned about, as bash 5.3 does. Twin of rt_cap_end.
     function mkCmdSub(bodyT) {
         return function() {
             capStack.push("")
+            capNul["$" + capStack.length] = false
             var saved = saveShellState()
             var savedFrames = localFrames
             localFrames = []
@@ -3020,7 +3044,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             runExitTrap()
             restoreShellState(saved)
             localFrames = savedFrames
+            var nulGone = capNul["$" + capStack.length]
             var out = capStack.pop()
+            if (nulGone) { emitErr("bash: warning: command substitution: ignored null byte in input\n") }
             if (typeof r == "object") { setStatus(r.ret) } else { setStatus(r) }
             cmdSubRan = true
             return stripTrailNL(out)
@@ -3495,12 +3521,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function arLhsKey(lhs) { return (lhs.sub != undefined) ? subKey(lhs.lhs, wordJoin(lhs.sub())) : null }
     function arLhsGet(name, key) { return arEval((key != null) ? scGet(name, key) : getVarVal(name)) }
     function arLhsSet(name, key, v) {
+        if (arithErr) { return }
         if (key != null) { arrSet(name, key, numToStr(v)) } else { setVarVal(name, numToStr(v)) }
     }
-    // An arithmetic error: bash reports it on standard error and abandons the command.
+    // An arithmetic error: bash reports it on standard error and abandons the command, so
+    // only the first is reported and nothing after it is stored (arLhsSet, arStore).
     // Twin of rt_arith_fail.
     var arithErr = false
     function arFailAt(expr, msg, tok) {
+        if (arithErr) { return }
         var t = (tok != "") ? " (error token is \"" + tok + "\")" : ""
         emitErr("bash: " + ((expr != "") ? expr + ": " : "") + msg + t + "\n")
         arithErr = true
@@ -3659,7 +3688,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return arEval(v)
     }
     function arStore(nm, key, v) {
-        if (arNoeval > 0) { return v }
+        if (arNoeval > 0 || arithErr) { return v }
         if (key != null) { arrSet(nm, key, numToStr(v)) } else { setVarVal(nm, numToStr(v)) }
         return v
     }
@@ -4047,26 +4076,32 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // A command that evaluates arithmetic ITSELF ((( )), let, [[ -eq ]], for (( ))) fails
     // with status 1 on an error instead: this answers whether one was raised, and clears it.
     function takeArithErr() { var e = arithErr; arithErr = false; return e }
+    // An expansion error in a value abandons the command before anything is stored:
+    // `k=$(( 1/0 ))` leaves k as it was. Twin of the emitAbortCheck in emitAssign.
     function runAssign(a, assoc) {
         if (a.lit != null) {
-            applyArrayLit(a.name, evalArrayLit(a.lit), a.op == "+=", assoc)
+            var lv = evalArrayLit(a.lit)
+            if (arithErr || abortSignal != null) { return }
+            applyArrayLit(a.name, lv, a.op == "+=", assoc)
             return
         }
         var v = (a.valT != null) ? wordJoin(a.valT()) : ""
         if (a.idxT != null) {
             arrEnsure(a.name, assoc)
             var key = subKey(a.name, wordJoin(a.idxT()))
+            if (arithErr || abortSignal != null) { return }
             if (a.op == "+=") { arrSet(a.name, key, arrGet(a.name, key) + v) } else { arrSet(a.name, key, v) }
             return
         }
+        if (arithErr || abortSignal != null) { return }
         if (a.op == "+=") {
             if (isArr(a.name)) { arrAppendList(a.name, [v]) }
-            else if (attrOn(intVars, a.name)) { setVarVal(a.name, numToStr(arOp("+", arEval(getVarVal(a.name)), arEval(v)))) }
+            else if (attrOn(intVars, a.name)) { var sv = arOp("+", arEval(getVarVal(a.name)), arEval(v)); if (!arithErr) { setVarVal(a.name, numToStr(sv)) } }
             else { setVarVal(a.name, getVarVal(a.name) + v) }
             return
         }
         // `declare -i n` makes n=EXPR evaluate EXPR as arithmetic.
-        if (attrOn(intVars, a.name)) { setVarVal(a.name, numToStr(arEval(v))); return }
+        if (attrOn(intVars, a.name)) { var iv = arEval(v); if (!arithErr) { setVarVal(a.name, numToStr(iv)) }; return }
         setVarVal(a.name, v)
     }
 
