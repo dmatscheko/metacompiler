@@ -11229,6 +11229,32 @@ KwContinue  = "continue" KwEnd ;
     // makeVarRef is overridden to use sw_kget and is the only site that reads a name.
     core.scopeGetExt = "js_scope_get"
 
+    // lib/swift-stdlib.swift: the standard-library types that are plain Swift
+    // declarations (Result), compiled ahead of a program whose text names one, as
+    // an imported file is. Twin in swift-interpreter.abnf.
+    function swStdlibNamed(src, word) {
+        var at = src.indexOf(word)
+        while (at >= 0) {
+            var pre = at == 0 ? 32 : src.charCodeAt(at - 1)
+            var post = at + word.length >= src.length ? 32 : src.charCodeAt(at + word.length)
+            if (!swStdlibIdCh(pre) && !swStdlibIdCh(post)) { return true }
+            at = src.indexOf(word, at + 1)
+        }
+        return false
+    }
+    function swStdlibIdCh(k) { return (k >= 97 && k <= 122) || (k >= 65 && k <= 90) || (k >= 48 && k <= 57) || k == 95 }
+    // A program that declares its own Result keeps it.
+    var stdSrc = c.srcSlice(0, 2147483647)
+    if (swStdlibNamed(stdSrc, "Result") && !swStdlibNamed(stdSrc, "enum Result") && !swStdlibNamed(stdSrc, "struct Result")
+        && !swStdlibNamed(stdSrc, "class Result") && !swStdlibNamed(stdSrc, "typealias Result")) {
+        var stdText = load("lib/swift-stdlib.swift")
+        var stdAsg = c.parse(c.agrammar, stdText, null, "swift-stdlib.swift")
+        c.pushSource("swift-stdlib.swift", stdText)
+        importDepth = importDepth + 1
+        c.compile(stdAsg)
+        importDepth = importDepth - 1
+        c.popSource()
+    }
     c.compile(c.asg)
 
     // ----- the native build -----

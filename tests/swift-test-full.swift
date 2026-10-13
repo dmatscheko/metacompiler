@@ -4772,6 +4772,35 @@ func s110() {
     check("110b", n.v == 12 && n.nxt == nil && S110().o == nil && !(S110().o != nil))
 }
 
+// ===== SECTION 111: Result =====
+// The stdlib's Result: its two cases, switch and if-case over them, get()
+// throwing the failure, map / mapError / flatMap. Every value read off swiftc
+// 6.1.2.
+enum Err111: Error { case bad(Int), worse }
+func parse111(_ s: String) -> Result<Int, Err111> {
+    if let n = Int(s) { return .success(n) }
+    return s.isEmpty ? .failure(.worse) : .failure(.bad(s.count))
+}
+func s111() {
+    var outs: [String] = []
+    for s in ["42", "xy", ""] {
+        switch parse111(s) {
+        case .success(let v): outs.append("ok \(v)")
+        case .failure(let e): outs.append("err \(e)")
+        }
+    }
+    check("111a", outs == ["ok 42", "err bad(2)", "err worse"])
+    let r = parse111("7")
+    var caught = ""
+    do { _ = try parse111("").get() } catch { caught = "\(error)" }
+    check("111b", (try? r.get()) == 7 && "\(r.map { $0 * 2 })" == "success(14)" && (try? parse111("q").get()) == nil
+        && caught == "worse" && "\(parse111("3").flatMap { $0 > 2 ? .success($0 * 10) : .failure(.worse) })" == "success(30)")
+    let rs: [Result<Int, Err111>] = [.success(1), .failure(.worse), .success(3)]
+    var mapped = ""
+    if case .failure(let f) = parse111("abc").mapError({ _ in Err111.worse }) { mapped = "\(f)" }
+    check("111c", rs.compactMap { try? $0.get() } == [1, 3] && mapped == "worse")
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -4883,6 +4912,7 @@ func main() {
     s108() // SECTION-CALL 108
     s109() // SECTION-CALL 109
     s110() // SECTION-CALL 110
+    s111() // SECTION-CALL 111
     print("full: \(checks) checks, \(fails) failures")
 }
 
