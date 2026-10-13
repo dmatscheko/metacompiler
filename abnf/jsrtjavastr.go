@@ -169,6 +169,34 @@ func jxCpAt(s []uint16, i int) int {
 	return c
 }
 
+// jxDecode is Integer.decode / Long.decode's split: the text parseInt reads
+// and its radix. Twin of jxDecode in languages/lib/java-strings.js.
+func (rt *jsrt) jxDecode(s string) (string, int) {
+	if s == "" {
+		rt.jvThrowNamed("NumberFormatException", "Zero length string")
+	}
+	i, sign, radix := 0, "", 10
+	if s[0] == '-' || s[0] == '+' {
+		if s[0] == '-' {
+			sign = "-"
+		}
+		i = 1
+	}
+	rest := s[i:]
+	switch {
+	case strings.HasPrefix(rest, "0x") || strings.HasPrefix(rest, "0X"):
+		i, radix = i+2, 16
+	case strings.HasPrefix(rest, "#"):
+		i, radix = i+1, 16
+	case strings.HasPrefix(rest, "0") && len(rest) > 1:
+		i, radix = i+1, 8
+	}
+	if strings.HasPrefix(s[i:], "-") || strings.HasPrefix(s[i:], "+") {
+		rt.jvThrowNamed("NumberFormatException", "Sign character in wrong position")
+	}
+	return sign + s[i:], radix
+}
+
 // jxForDigit is Character.forDigit: the lowercase digit d stands for in radix
 // r, 0 for a digit or radix out of range. Twin of jxForDigit in
 // languages/lib/java-strings.js.
@@ -1520,6 +1548,8 @@ func init() {
 				r = float64(jxLastIndexOf(su, rt.jxArgPat(arg(0)), from))
 			case "contains":
 				r = jxIndexOf(su, strUnits(rt.jxArgStr(arg(0))), 0) >= 0
+			case "contentEquals":
+				r = s == rt.jxArgStr(arg(0))
 			case "startsWith":
 				off := 0
 				if len(av) > 1 {

@@ -3520,9 +3520,10 @@ HasStatic   = :script(~~
             // inherited one included) is unbound too. Decided at emit time, when
             // every declaration is known. Twin of makeMethodRef in
             // java-interpreter.abnf.
-            if (parts.length == 1 && classNames["$" + parts[0]] == true) {
-                var refKind = lookupMethodKind(parts[0], methodPart)
-                if (refKind == "instance" || (refKind == null && interfaceNames["$" + parts[0]] == true)) {
+            var refCls = parts[parts.length - 1]
+            if (classNames["$" + refCls] == true) {
+                var refKind = lookupMethodKind(refCls, methodPart)
+                if (refKind == "instance" || (refKind == null && interfaceNames["$" + refCls] == true)) {
                     return makeUnboundRef(methodPart)(b)
                 }
             }
@@ -3678,7 +3679,7 @@ HasStatic   = :script(~~
                           : jEmitMcall(b, cur, s, argsV))))))))
     }
     var jStrMethods = {}
-    var jStrMethodList = ["isEmpty", "isBlank", "indexOf", "lastIndexOf", "contains", "startsWith", "endsWith",
+    var jStrMethodList = ["isEmpty", "isBlank", "indexOf", "lastIndexOf", "contains", "contentEquals", "startsWith", "endsWith",
                           "equalsIgnoreCase", "compareTo", "compareToIgnoreCase", "concat", "replace", "replaceAll",
                           "replaceFirst", "matches", "split", "trim", "strip", "stripLeading", "stripTrailing",
                           "toUpperCase", "toLowerCase", "repeat", "codePointAt", "subSequence", "intern",
@@ -3705,6 +3706,21 @@ HasStatic   = :script(~~
                 var sa = emitArgs(b, s0.args)
                 b = sa.b
                 cur = callExt(b, "js_jvstrstatic", [emitStr(b, s0.name), sa.v])
+                i0 = 1
+            } else if (s0.kind == "field" && s0.name == "CASE_INSENSITIVE_ORDER" && classNames["$String"] != true
+                       && text != undefined && jUnPkg(text).substring(0, 29) == "String.CASE_INSENSITIVE_ORDER") {
+                // String.CASE_INSENSITIVE_ORDER is String::compareToIgnoreCase, a
+                // Comparator once java.util's is loaded. Twin of jStrField in
+                // java-interpreter.abnf.
+                var cio = makeUnboundRef("compareToIgnoreCase")(b)
+                b = cio.b
+                cur = cio.v
+                var cioSam = samOf("Comparator")
+                if (cioSam != null) {
+                    var cs = emitSam(b, cur, "Comparator", cioSam)
+                    b = cs.b
+                    cur = cs.v
+                }
                 i0 = 1
             } else {
                 var r = primary(b)
@@ -4144,7 +4160,7 @@ HasStatic   = :script(~~
         var rawTy = ""
         var thunks = []
         for (var i = 0; i < items.length; i++) {
-            if (items[i].dty != undefined) { ty = baseTypeName(items[i].dty); rawTy = items[i].dty; continue }
+            if (items[i].dty != undefined) { ty = jUnPkg(baseTypeName(items[i].dty)); rawTy = items[i].dty; continue }
             var d = items[i].dname
             var dims = ""
             var rest = d.slice(1)

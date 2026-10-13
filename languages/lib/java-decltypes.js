@@ -944,7 +944,7 @@ function jUtilWants(path) {
     var rest = path.substring(10)
     var dot = rest.indexOf(".")
     if (dot >= 0) { rest = rest.substring(0, dot) }
-    return ",ArrayList,List,ListIterator,Collection,Comparator,Iterator,NoSuchElementException,ConcurrentModificationException,AbstractList,Arrays,Optional,OptionalInt,OptionalLong,OptionalDouble,Map,HashMap,Objects,Collections,Queue,Deque,ArrayDeque,TreeMap,".indexOf("," + rest + ",") >= 0
+    return ",ArrayList,List,ListIterator,Collection,Comparator,Iterator,NoSuchElementException,ConcurrentModificationException,AbstractList,Arrays,Optional,OptionalInt,OptionalLong,OptionalDouble,Map,HashMap,Objects,Collections,Queue,Deque,ArrayDeque,TreeMap,LinkedList,Stack,EmptyStackException,PriorityQueue,StringJoiner,Random,".indexOf("," + rest + ",") >= 0
 }
 
 // Does this import, or the class a `new` creates, name a type lib/java-map.java

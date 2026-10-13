@@ -426,8 +426,9 @@ func (rt *jsrt) jvParseInt(s string, width uint8, radix int) interface{} {
 		limit++
 	}
 	var acc uint64
-	for i := 0; i < len(t); i++ {
-		d := jvDigitOf(t[i])
+	// Character.digit's value: a decimal digit of any script counts.
+	for _, r := range t {
+		d := jcDigitVal(int(r))
 		if d >= radix || acc > (limit-uint64(d))/uint64(radix) {
 			rt.jvThrowCls(jvNfeCls, bad)
 		}
@@ -438,20 +439,6 @@ func (rt *jsrt) jvParseInt(s string, width uint8, radix int) interface{} {
 		v = -v
 	}
 	return jvNarrow(rt, jvBox(v), width)
-}
-
-// jvDigitOf is Character.digit's ASCII reading: 0-9, then a-z / A-Z as 10-35,
-// and 99 - which no radix accepts - for anything else.
-func jvDigitOf(c byte) int {
-	switch {
-	case c >= '0' && c <= '9':
-		return int(c - '0')
-	case c >= 'a' && c <= 'z':
-		return int(c-'a') + 10
-	case c >= 'A' && c <= 'Z':
-		return int(c-'A') + 10
-	}
-	return 99
 }
 
 // jvRadixArg is the optional radix argument of parseInt / valueOf: 10 if absent.
@@ -1160,6 +1147,17 @@ func jvFloType(o *jsObject, sty uint8) {
 
 // jvValueOfHost is Integer.valueOf / Long.valueOf: a String parses exactly as
 // parseInt / parseLong does, anything else narrows.
+// jvDecodeHost is Integer.decode / Long.decode at width (jxDecode). Twin of
+// the "decode" members in java-interpreter.abnf and jvDecode in
+// languages/lib/java-rt.metajs.
+func jvDecodeHost(width uint8) *hostFunc {
+	return jsHostFunc("decode", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		rt.jvNpeIfNull(argAt(args, 0))
+		text, radix := rt.jxDecode(rt.toString(argAt(args, 0)))
+		return rt.jvParseInt(text, width, radix)
+	})
+}
+
 func jvValueOfHost(width uint8) *hostFunc {
 	return jsHostFunc("valueOf", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		if s, ok := argAt(args, 0).(string); ok {
@@ -1403,6 +1401,7 @@ func (rt *jsrt) jvBoxType(name string) *jsObject {
 			return rt.jvParseInt(rt.toString(argAt(args, 0)), 32, jvRadixArg(rt, args))
 		}))
 		o.set("valueOf", jvValueOfHost(32))
+		o.set("decode", jvDecodeHost(32))
 		jvRadixMembers(o, 32)
 		jvBitOps(o, 32)
 		jvUnsignedOps(o)
@@ -1415,6 +1414,7 @@ func (rt *jsrt) jvBoxType(name string) *jsObject {
 			return rt.jvParseInt(rt.toString(argAt(args, 0)), 64, jvRadixArg(rt, args))
 		}))
 		o.set("valueOf", jvValueOfHost(64))
+		o.set("decode", jvDecodeHost(64))
 		jvRadixMembers(o, 64)
 		jvBitOps(o, 64)
 	case "Byte":

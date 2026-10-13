@@ -47,13 +47,25 @@ interface Map<K, V> {
         V getValue();
         V setValue(V value);
 
+        // Built in a local of type Comparator, as Comparator's own statics are,
+        // so a chained thenComparing() or reversed() reaches the defaults.
         @SuppressWarnings("unchecked")
         static <K, V> java.util.Comparator<Map.Entry<K, V>> comparingByKey() {
-            return (a, b) -> ((Comparable<Object>) a.getKey()).compareTo(b.getKey());
+            Comparator<Map.Entry<K, V>> c = (a, b) -> ((Comparable<Object>) a.getKey()).compareTo(b.getKey());
+            return c;
         }
         @SuppressWarnings("unchecked")
         static <K, V> java.util.Comparator<Map.Entry<K, V>> comparingByValue() {
-            return (a, b) -> ((Comparable<Object>) a.getValue()).compareTo(b.getValue());
+            Comparator<Map.Entry<K, V>> c = (a, b) -> ((Comparable<Object>) a.getValue()).compareTo(b.getValue());
+            return c;
+        }
+        static <K, V> java.util.Comparator<Map.Entry<K, V>> comparingByKey(java.util.Comparator<? super K> cmp) {
+            Comparator<Map.Entry<K, V>> c = (a, b) -> cmp.compare(a.getKey(), b.getKey());
+            return c;
+        }
+        static <K, V> java.util.Comparator<Map.Entry<K, V>> comparingByValue(java.util.Comparator<? super V> cmp) {
+            Comparator<Map.Entry<K, V>> c = (a, b) -> cmp.compare(a.getValue(), b.getValue());
+            return c;
         }
     }
 }

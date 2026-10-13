@@ -43,12 +43,14 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.ConcurrentModificationException;
+import java.util.EmptyStackException;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.ListIterator;
 import java.util.Map;
@@ -56,7 +58,11 @@ import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.PriorityQueue;
+import java.util.Random;
 import java.util.Set;
+import java.util.Stack;
+import java.util.StringJoiner;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.stream.Collectors;
@@ -149,6 +155,7 @@ class Main {
         S69.run(); // SECTION-CALL 69
         S70.run(); // SECTION-CALL 70
         S71.run(); // SECTION-CALL 71
+        S72.run(); // SECTION-CALL 72
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -4065,5 +4072,62 @@ class S71 {
             + " " + Byte.hashCode((byte) -3) + " " + Character.hashCode('x') + " " + Boolean.hashCode(false) + " " + Character.forDigit(11, 16)
             + (int) Character.forDigit(7, 2) + " " + Character.toString(97) + Character.toString('b');
         Main.check("hc71", hc.equals("-1 -300 -7 256 -2 -3 120 1237 b0 ab"));
+    }
+}
+
+// ===== SECTION 72: PriorityQueue, LinkedList, Stack, StringJoiner, Random, decode and the comparator helpers =====
+//
+// A PriorityQueue is java's binary heap, so its array order (toString) is
+// java's; Random(seed) is java's generator; Map.Entry's comparators chain;
+// a lambda in a local of a package-qualified interface type is an instance of
+// it; String.CASE_INSENSITIVE_ORDER is a Comparator; Integer.decode reads the
+// 0x / # / 0 prefixes; parseInt takes any script's decimal digits.
+// Every expected value is java 24.0.2's.
+class S72 {
+    static void run() {
+        PriorityQueue<Integer> pq = new PriorityQueue<>(List.of(5, 1, 4, 2, 3));
+        pq.add(0);
+        String heap = pq.toString();
+        String drained = "";
+        while (!pq.isEmpty()) { drained = drained + pq.poll(); }
+        PriorityQueue<String> pq2 = new PriorityQueue<>(Comparator.comparing(String::length).reversed());
+        pq2.addAll(List.of("aa", "b", "cccc", "ddd"));
+        LinkedList<Integer> ll = new LinkedList<>(List.of(1, 2, 3));
+        ll.addFirst(0);
+        ll.removeFirst();
+        ll.add(1, 9);
+        String lle = "";
+        try { ll.get(7); } catch (IndexOutOfBoundsException e) { lle = e.getMessage(); }
+        Stack<String> stk = new Stack<>();
+        stk.push("a");
+        stk.push("b");
+        String se = "";
+        try { new Stack<Integer>().pop(); } catch (EmptyStackException e) { se = "E" + e.getMessage(); }
+        String q = heap + drained + " " + pq2.poll() + pq2.peek() + " " + ll + ll.peekLast() + ll.pop() + " " + lle + " " + stk.peek() + stk.search("a")
+            + stk.pop() + stk + se + " " + new StringJoiner(", ", "{", "}").add("a").add("b") + new StringJoiner("-").setEmptyValue("E");
+        Main.check("pq72", q.equals("[0, 2, 1, 5, 3, 4]012345 ccccddd [1, 9, 2, 3]31 Index: 7, Size: 4 b2b[a]Enull {a, b}E"));
+        Random r = new Random(42);
+        String rs = r.nextInt(100) + " " + r.nextInt() + " " + r.nextLong() + " " + r.nextDouble() + " " + r.nextBoolean() + " " + r.nextInt(5, 10);
+        Main.check("rn72", rs.equals("30 234785527 -5843495416241995736 0.30871945533265976 false 8"));
+        Map<String, Integer> m = new HashMap<>(Map.of("a", 2, "b", 1, "c", 2));
+        java.util.Comparator<Integer> qc = (x, y) -> x - y;
+        String cmp = m.entrySet().stream().sorted(Map.Entry.<String, Integer>comparingByValue().reversed().thenComparing(Map.Entry.comparingByKey()))
+                .map(Map.Entry::getKey).toList() + " " + m.entrySet().stream().sorted(Map.Entry.comparingByValue(Comparator.reverseOrder())).findFirst().get().getValue()
+            + " " + qc.reversed().compare(1, 2);
+        String[] strs = {"b", "C", "a", "B"};
+        Arrays.sort(strs, String.CASE_INSENSITIVE_ORDER);
+        cmp = cmp + " " + Arrays.toString(strs) + String.CASE_INSENSITIVE_ORDER.reversed().compare("a", "B");
+        Main.check("cm72", cmp.equals("[a, c, b] 2 1 [a, b, B, C]1"));
+        String dec = Integer.decode("0x1F") + " " + Integer.decode("-010") + " " + Long.decode("#ff") + " " + Integer.decode("+7") + " " + Integer.parseInt("٣٤");
+        try { Integer.decode("-+1"); } catch (NumberFormatException e) { dec = dec + " " + e.getMessage(); }
+        try { Integer.decode(""); } catch (NumberFormatException e) { dec = dec + " " + e.getMessage(); }
+        Main.check("dc72", dec.equals("31 -8 255 7 34 Sign character in wrong position Zero length string"));
+        int[] a = {5, 2, 8, 1};
+        List<Integer> al = new ArrayList<>(List.of(4, 5));
+        String misc = Arrays.stream(a, 1, 3).sum() + " " + Arrays.compare(new int[]{1, 2}, new int[]{1, 3}) + Arrays.compare(new int[]{1}, new int[]{1, 0})
+            + " " + Arrays.mismatch(new int[]{1, 2}, new int[]{1, 3}) + Arrays.mismatch(new int[]{1}, new int[]{1}) + " " + Objects.requireNonNullElseGet(null, () -> "g")
+            + " " + new StringBuilder().appendCodePoint(128512).length() + " " + "abc".contentEquals(new StringBuilder("abc")) + " " + al.getFirst() + al.getLast()
+            + al.removeFirst() + al;
+        Main.check("mi72", misc.equals("10 -1-1 1-1 g 2 true 454[5]"));
     }
 }

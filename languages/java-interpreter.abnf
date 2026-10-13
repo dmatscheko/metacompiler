@@ -2587,7 +2587,8 @@ HasStatic   = :script(~~
         var hi = 0
         var lo = 0
         while (i < t.length) {
-            var d = jDigitOf(t.charCodeAt(i))
+            // Character.digit's value: a decimal digit of any script counts.
+            var d = jcDigitVal(t.charCodeAt(i))
             if (d >= radix) { jThrowExc("NumberFormatException", bad) }
             lo = lo * radix + d
             var carry = Math.floor(lo / 4294967296)
@@ -2602,14 +2603,6 @@ HasStatic   = :script(~~
         var p = i64Make(hi, lo)
         if (neg) { p = i64Neg(p) }
         return jNarrow(szMake(p, 64, jNoU), w)
-    }
-    // Character.digit's ASCII reading: 0-9, then a-z / A-Z as 10-35; 99 for
-    // anything else, which no radix accepts.
-    function jDigitOf(c) {
-        if (c >= 48 && c <= 57) { return c - 48 }
-        if (c >= 97 && c <= 122) { return c - 87 }
-        if (c >= 65 && c <= 90) { return c - 55 }
-        return 99
     }
     // Integer / Long .sum, signum and the bit queries - bitCount,
     // numberOfLeadingZeros / numberOfTrailingZeros, highestOneBit /
@@ -2745,9 +2738,17 @@ HasStatic   = :script(~~
         if (typeof v == "string") return v.toLowerCase() == "true"
         return v === true
     }
+    // Integer.decode / Long.decode at width w (jxDecode). Twin of jvDecode in
+    // languages/lib/java-rt.metajs and jvDecodeHost in abnf/jsrtjava.go.
+    function jDecode(s, w) {
+        if (s === null) { jNpe() }
+        var d = jxDecode(s)
+        return jParseInt(d.text, w, d.radix)
+    }
     hostGlobals["Integer"] = {
         MAX_VALUE: 2147483647, MIN_VALUE: 0 - 2147483648, SIZE: 32, BYTES: 4,
         parseInt: function(s, radix) { return jParseInt(s, 32, radix) },
+        decode: function(s) { return jDecode(s, 32) },
         toHexString: function(v) { return jRadixStr(v, 32, 16, true) },
         toOctalString: function(v) { return jRadixStr(v, 32, 8, true) },
         toBinaryString: function(v) { return jRadixStr(v, 32, 2, true) },
@@ -2763,6 +2764,7 @@ HasStatic   = :script(~~
         MIN_VALUE: szMake(i64Make(0x80000000, 0), 64, false),
         SIZE: 64, BYTES: 8,
         parseLong: function(s, radix) { return jParseInt(s, 64, radix) },
+        decode: function(s) { return jDecode(s, 64) },
         toHexString: function(v) { return jRadixStr(v, 64, 16, true) },
         toOctalString: function(v) { return jRadixStr(v, 64, 8, true) },
         toBinaryString: function(v) { return jRadixStr(v, 64, 2, true) },
@@ -3872,6 +3874,7 @@ HasStatic   = :script(~~
         if (name == "indexOf") { return jxIndexOf(s, jStrPat(a0), n1 ? jI(args[1]) : 0) }
         if (name == "lastIndexOf") { return jxLastIndexOf(s, jStrPat(a0), n1 ? jI(args[1]) : s.length) }
         if (name == "contains") { return jxIndexOf(s, jStrArg(a0), 0) >= 0 }
+        if (name == "contentEquals") { return s === jStrArg(a0) }
         if (name == "startsWith") { return jxAt(s, jStrArg(a0), n1 ? jI(args[1]) : 0) }
         if (name == "endsWith") {
             var suf = jStrArg(a0)
@@ -3916,6 +3919,13 @@ HasStatic   = :script(~~
     // languages/lib/java-rt.metajs.
     var jStrNS = {}
     hostGlobals["String"] = jStrNS
+    // String.CASE_INSENSITIVE_ORDER is String::compareToIgnoreCase, a Comparator
+    // (so reversed() and thenComparing() reach the defaults) once java.util's
+    // is loaded. Twin of foldCallMember in java-to-llvm-ir.abnf.
+    function jStrField(name) {
+        if (name != "CASE_INSENSITIVE_ORDER") { fail("unknown field 'String." + name + "'") }
+        return jTypeAdopt(function(a, b) { return mcall(a, "compareToIgnoreCase", [b]) }, "Comparator")
+    }
     function jStrStatic(name, args) {
         if (args.length == 0) { fail("unknown method 'String." + name + "'") }
         if (name == "valueOf" || name == "copyValueOf") {
@@ -4868,7 +4878,7 @@ HasStatic   = :script(~~
                 // inherited one included) is unbound: m is dispatched on the
                 // first argument, as a call on it would be. Twin of
                 // makeMethodRef in java-to-llvm-ir.abnf.
-                if (parts.length == 1 && argv.length > 0 && recv != null && recv.__isclass === true) {
+                if (argv.length > 0 && recv != null && recv.__isclass === true) {
                     var kind = jLookupKind(recv.__name, methodPart)
                     if (kind == "instance" || (kind == null && recv.__isiface === true)) {
                         return mcall(argv[0], methodPart, argv.slice(1))
@@ -5370,7 +5380,7 @@ HasStatic   = :script(~~
         var base = ty
         var lt = base.indexOf("<")
         if (lt >= 0) { base = base.substring(0, lt) }
-        var t = globalScope[base]
+        var t = globalScope[jUnPkg(base)]
         if (t == undefined || t == null || t.__isiface !== true) { return v }
         return {__class: t, __sam: v}
     }
@@ -6724,7 +6734,7 @@ HasStatic   = :script(~~
                     cur = ssig == "" ? mcall(cur, s.name, argv) : jSigCall(cur, s.name, ssig, argv)
                 } else if (s.kind == "field") {
                     if (cur === undefined || cur === null) { jNpe() }
-                    cur = core.getField(cur, s.name)
+                    cur = cur === jStrNS ? jStrField(s.name) : core.getField(cur, s.name)
                 } else if (s.kind == "mref") {
                     cur = jBindMethodRef(cur, s.name)
                 } else if (s.kind == "qnew") {

@@ -287,6 +287,34 @@ function jxJoin(delim, parts) {
     return out
 }
 
+// Integer.decode / Long.decode: the text parseInt reads and its radix - an
+// optional sign, then 0x, 0X or # for hex, or a leading 0 before more digits for
+// octal. Twin of jxDecode in abnf/jsrtjavastr.go.
+function jxDecode(s) {
+    if (s.length == 0) { jxkThrow("NumberFormatException", "Zero length string") }
+    var i = 0
+    var sign = ""
+    var c = s.charAt(0)
+    if (c == "-" || c == "+") {
+        if (c == "-") { sign = "-" }
+        i = 1
+    }
+    var radix = 10
+    var two = s.substring(i, i + 2)
+    if (two == "0x" || two == "0X") {
+        i = i + 2
+        radix = 16
+    } else if (s.substring(i, i + 1) == "#") {
+        i = i + 1
+        radix = 16
+    } else if (s.substring(i, i + 1) == "0" && s.length > i + 1) {
+        i = i + 1
+        radix = 8
+    }
+    var d = s.substring(i, i + 1)
+    if (d == "-" || d == "+") { jxkThrow("NumberFormatException", "Sign character in wrong position") }
+    return {text: sign + s.substring(i), radix: radix}
+}
 // Character.forDigit: the lowercase digit d stands for in radix r, '\0' for a
 // digit or radix out of range. Twin of jxForDigit in abnf/jsrtjavastr.go.
 function jxForDigit(d, r) {

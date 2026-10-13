@@ -718,6 +718,13 @@ function jpHex(n) {
 // jvBoxType builds one of java.lang's boxed-primitive types. MIN_VALUE /
 // MAX_VALUE are the whole reason a sized integer had to exist: Long.MAX_VALUE
 // cannot be written as a plain number at all.
+// Integer.decode / Long.decode at width w (jxDecode). Twin of the "decode"
+// members in java-interpreter.abnf and abnf/jsrtjava.go.
+function jvDecode(s, w) {
+    jvNpeIfNull(s)
+    var d = jxDecode(jpStr(s))
+    return jvParseInt(d["text"], w, d["radix"])
+}
 function jvBoxType(name) {
     var o = {}
     if (name == "Integer") {
@@ -729,6 +736,7 @@ function jvBoxType(name) {
             return jvParseInt(jpStr(s), 32, jvRadixOf(r))
         }
         o["valueOf"] = function(v, r) { return jvValueOf(v, 32, r) }
+        o["decode"] = function(s) { return jvDecode(s, 32) }
         jvRadixMembers(o, 32)
         jvBitOps(o, 32)
         jvUnsignedOps(o)
@@ -743,6 +751,7 @@ function jvBoxType(name) {
             return jvParseInt(jpStr(s), 64, jvRadixOf(r))
         }
         o["valueOf"] = function(v, r) { return jvValueOf(v, 64, r) }
+        o["decode"] = function(s) { return jvDecode(s, 64) }
         jvRadixMembers(o, 64)
         jvBitOps(o, 64)
         return o
@@ -1464,7 +1473,8 @@ function jvParseInt(s, width, radix) {
     var hi = 0
     var lo = 0
     while (i < s.length) {
-        var d = jvDigitOf(s.charCodeAt(i))
+        // Character.digit's value: a decimal digit of any script counts.
+        var d = jcDigitVal(s.charCodeAt(i))
         if (d >= radix) { jvThrowCls(jvNfeCls, bad) }
         lo = lo * radix + d
         var carry = Math.floor(lo / 4294967296)
@@ -1483,15 +1493,6 @@ function jvParseInt(s, width, radix) {
     var acc = sintRaw(hi, lo, 64, false)
     if (neg) { acc = jlNeg(acc) }
     return jvNarrow(acc, width)
-}
-
-// Character.digit's ASCII reading: 0-9, then a-z / A-Z as 10-35, and 99 -
-// which no radix accepts - for anything else.
-function jvDigitOf(c) {
-    if (c >= 48 && c <= 57) { return c - 48 }
-    if (c >= 97 && c <= 122) { return c - 87 }
-    if (c >= 65 && c <= 90) { return c - 55 }
-    return 99
 }
 
 // The optional radix argument of parseInt / valueOf: 10 when absent.
@@ -2420,6 +2421,7 @@ function js_jvstrm(s, name, args) {
     if (name == "indexOf") { return jxIndexOf(s, jvStrPat(a0), jvArgInt(args, 1, 0)) }
     if (name == "lastIndexOf") { return jxLastIndexOf(s, jvStrPat(a0), jvArgInt(args, 1, s.length)) }
     if (name == "contains") { return jxIndexOf(s, jvStrArg(a0), 0) >= 0 }
+    if (name == "contentEquals") { return s === jvStrArg(a0) }
     if (name == "startsWith") { return jxAt(s, jvStrArg(a0), jvArgInt(args, 1, 0)) }
     if (name == "endsWith") {
         var suf = jvStrArg(a0)

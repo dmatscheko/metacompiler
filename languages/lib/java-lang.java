@@ -90,6 +90,7 @@ final class StringBuilder {
         return this;
     }
     public StringBuilder append(char[] str) { return append(new String(str)); }
+    public StringBuilder appendCodePoint(int cp) { return append(Character.toString(cp)); }
     public StringBuilder append(char[] str, int offset, int len) { return append(new String(str, offset, len)); }
     public StringBuilder append(CharSequence s, int start, int end) {
         String t = "" + s;

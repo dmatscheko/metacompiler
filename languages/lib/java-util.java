@@ -279,6 +279,25 @@ class ArrayList<E> implements List<E> {
         if (out.length > count) { out[count] = null; }
         return out;
     }
+    // java 21's SequencedCollection ends; an empty list has none.
+    public E getFirst() {
+        if (count == 0) { throw new NoSuchElementException(); }
+        return get(0);
+    }
+    public E getLast() {
+        if (count == 0) { throw new NoSuchElementException(); }
+        return get(count - 1);
+    }
+    public void addFirst(E e) { add(0, e); }
+    public void addLast(E e) { add(e); }
+    public E removeFirst() {
+        if (count == 0) { throw new NoSuchElementException(); }
+        return remove(0);
+    }
+    public E removeLast() {
+        if (count == 0) { throw new NoSuchElementException(); }
+        return remove(count - 1);
+    }
     public Iterator<E> iterator() { return new ArrayListItr<E>(this, 0); }
     public ListIterator<E> listIterator() { return new ArrayListItr<E>(this, 0); }
     public ListIterator<E> listIterator(int index) {
@@ -567,6 +586,13 @@ final class Objects {
         if (obj != null) { return obj; }
         if (dflt == null) { throw new NullPointerException("defaultObj"); }
         return dflt;
+    }
+    public static <T> T requireNonNullElseGet(T obj, java.util.function.Supplier<? extends T> f) {
+        if (obj != null) { return obj; }
+        if (f == null) { throw new NullPointerException("supplier"); }
+        T v = f.get();
+        if (v == null) { throw new NullPointerException("supplier.get()"); }
+        return v;
     }
     public static <T> int compare(T a, T b, Comparator<? super T> c) { return a == b ? 0 : c.compare(a, b); }
     public static int checkIndex(int index, int length) {
@@ -1014,6 +1040,28 @@ class Arrays {
         return -(lo + 1);
     }
     public static int binarySearch(Object[] a, Object key) { return search(a, key, null); }
+
+    // mismatch: the first index where a and b differ, the shorter length when
+    // one is a prefix of the other, -1 when they are equal. compare: the
+    // elements' own compareTo there (each wrapper's compare for a primitive
+    // array), else the length difference; a null array sorts first.
+    public static int mismatch(Object[] a, Object[] b) {
+        int n = Math.min(a.length, b.length);
+        for (int i = 0; i < n; i++) {
+            if (!(a[i] == null ? b[i] == null : a[i].equals(b[i]))) { return i; }
+        }
+        return a.length == b.length ? -1 : n;
+    }
+    public static int compare(Object[] a, Object[] b) {
+        if (a == b) { return 0; }
+        if (a == null || b == null) { return a == null ? -1 : 1; }
+        int i = mismatch(a, b);
+        if (i >= 0 && i < Math.min(a.length, b.length)) {
+            if (a[i] == null || b[i] == null) { return a[i] == null ? -1 : 1; }
+            return order(a[i], b[i], null);
+        }
+        return a.length - b.length;
+    }
     public static <T> int binarySearch(T[] a, T key, Comparator<? super T> c) { return search(a, key, c); }
 
     @SafeVarargs
@@ -1024,6 +1072,18 @@ class Arrays {
     public static java.util.stream.IntStream stream(int[] a) { return IntStream.of(a); }
     public static java.util.stream.LongStream stream(long[] a) { return LongStream.of(a); }
     public static java.util.stream.DoubleStream stream(double[] a) { return DoubleStream.of(a); }
+    // Over a[from..to), checked as java's spliterator checks its bounds.
+    static Object[] streamRange(Object a, int from, int to) {
+        Object[] es = elems(a);
+        if (from > to) { throw new ArrayIndexOutOfBoundsException("origin(" + from + ") > fence(" + to + ")"); }
+        if (from < 0) { throw new ArrayIndexOutOfBoundsException("Array index out of range: " + from); }
+        if (to > es.length) { throw new ArrayIndexOutOfBoundsException("Array index out of range: " + to); }
+        return es;
+    }
+    public static <T> java.util.stream.Stream<T> stream(T[] a, int from, int to) { return new Stream<T>(new StreamOfArray(streamRange(a, from, to), from, to)); }
+    public static java.util.stream.IntStream stream(int[] a, int from, int to) { return new IntStream(new StreamOfArray(streamRange(a, from, to), from, to)); }
+    public static java.util.stream.LongStream stream(long[] a, int from, int to) { return new LongStream(new StreamOfArray(streamRange(a, from, to), from, to)); }
+    public static java.util.stream.DoubleStream stream(double[] a, int from, int to) { return new DoubleStream(new StreamOfArray(streamRange(a, from, to), from, to)); }
 
     // asList's fixed-size list: reads and set write through to the array, and
     // the size never changes, so add and remove throw.
@@ -1196,4 +1256,289 @@ final class OptionalDouble {
     }
     public double orElse(double other) { return present ? value : other; }
     public String toString() { return present ? "OptionalDouble[" + value + "]" : "OptionalDouble.empty"; }
+}
+
+// java.util.LinkedList: an ArrayList here (the answers are a list's; only the
+// cost differs) that is also a Deque, with LinkedList's own index message.
+class LinkedList<E> extends ArrayList<E> implements Deque<E> {
+    public LinkedList() { super(); }
+    public LinkedList(Collection<? extends E> c) { super(c); }
+    void checkIndex(int index) {
+        if (index < 0 || index >= count) { throw new IndexOutOfBoundsException("Index: " + index + ", Size: " + count); }
+    }
+    public boolean offer(E e) { return add(e); }
+    public boolean offerFirst(E e) {
+        addFirst(e);
+        return true;
+    }
+    public boolean offerLast(E e) { return add(e); }
+    public E peek() { return count == 0 ? null : get(0); }
+    public E peekFirst() { return peek(); }
+    public E peekLast() { return count == 0 ? null : get(count - 1); }
+    public E poll() { return count == 0 ? null : remove(0); }
+    public E pollFirst() { return poll(); }
+    public E pollLast() { return count == 0 ? null : remove(count - 1); }
+    public E element() { return getFirst(); }
+    public E remove() { return removeFirst(); }
+    public void push(E e) { addFirst(e); }
+    public E pop() { return removeFirst(); }
+}
+
+// java.util.Stack: push, pop and peek at the end of the list.
+class Stack<E> extends ArrayList<E> {
+    public Stack() { super(); }
+    public E push(E e) {
+        add(e);
+        return e;
+    }
+    public E pop() {
+        E e = peek();
+        remove(count - 1);
+        return e;
+    }
+    public E peek() {
+        if (count == 0) { throw new EmptyStackException(); }
+        return get(count - 1);
+    }
+    public boolean empty() { return count == 0; }
+    // 1 for the top, 2 below it, ...; -1 when absent.
+    public int search(Object o) {
+        int i = lastIndexOf(o);
+        return i >= 0 ? count - i : -1;
+    }
+}
+class EmptyStackException extends RuntimeException {
+    public EmptyStackException() { super(); }
+}
+
+// java.util.PriorityQueue: java's binary heap - the same sift up and down and
+// the same heapify of a copied collection, so peek, poll and the iteration
+// (array) order are java's.
+class PriorityQueue<E> implements Queue<E> {
+    Object[] queue;
+    int size;
+    Comparator<? super E> cmp;
+    int modCount;
+
+    public PriorityQueue() { this(11, null); }
+    public PriorityQueue(int capacity) { this(capacity, null); }
+    public PriorityQueue(Comparator<? super E> cmp) { this(11, cmp); }
+    public PriorityQueue(int capacity, Comparator<? super E> cmp) {
+        if (capacity < 1) { throw new IllegalArgumentException(); }
+        queue = new Object[capacity];
+        this.cmp = cmp;
+    }
+    public PriorityQueue(Collection<? extends E> c) {
+        queue = new Object[Math.max(1, c.size())];
+        Iterator<? extends E> it = c.iterator();
+        while (it.hasNext()) {
+            Object e = it.next();
+            if (e == null) { throw new NullPointerException(); }
+            queue[size] = e;
+            size++;
+        }
+        for (int i = (size >>> 1) - 1; i >= 0; i--) { siftDown(i, queue[i]); }
+    }
+
+    @SuppressWarnings("unchecked")
+    int order(Object a, Object b) {
+        return cmp == null ? ((Comparable<Object>) a).compareTo(b) : ((Comparator<Object>) cmp).compare(a, b);
+    }
+    void siftUp(int k, Object x) {
+        while (k > 0) {
+            int parent = (k - 1) >>> 1;
+            Object e = queue[parent];
+            if (order(x, e) >= 0) { break; }
+            queue[k] = e;
+            k = parent;
+        }
+        queue[k] = x;
+    }
+    void siftDown(int k, Object x) {
+        int half = size >>> 1;
+        while (k < half) {
+            int child = (k << 1) + 1;
+            Object c = queue[child];
+            int right = child + 1;
+            if (right < size && order(c, queue[right]) > 0) {
+                child = right;
+                c = queue[child];
+            }
+            if (order(x, c) <= 0) { break; }
+            queue[k] = c;
+            k = child;
+        }
+        queue[k] = x;
+    }
+
+    public boolean add(E e) { return offer(e); }
+    public boolean offer(E e) {
+        if (e == null) { throw new NullPointerException(); }
+        modCount++;
+        if (size >= queue.length) {
+            Object[] more = new Object[queue.length * 2 + 2];
+            System.arraycopy(queue, 0, more, 0, size);
+            queue = more;
+        }
+        siftUp(size, e);
+        size++;
+        return true;
+    }
+    @SuppressWarnings("unchecked")
+    public E peek() { return size == 0 ? null : (E) queue[0]; }
+    public E element() {
+        if (size == 0) { throw new NoSuchElementException(); }
+        return peek();
+    }
+    @SuppressWarnings("unchecked")
+    public E poll() {
+        if (size == 0) { return null; }
+        E result = (E) queue[0];
+        modCount++;
+        size--;
+        Object x = queue[size];
+        queue[size] = null;
+        if (size > 0) { siftDown(0, x); }
+        return result;
+    }
+    public E remove() {
+        if (size == 0) { throw new NoSuchElementException(); }
+        return poll();
+    }
+    int indexOf(Object o) {
+        if (o != null) {
+            for (int i = 0; i < size; i++) { if (o.equals(queue[i])) { return i; } }
+        }
+        return -1;
+    }
+    public boolean remove(Object o) {
+        int i = indexOf(o);
+        if (i < 0) { return false; }
+        modCount++;
+        size--;
+        if (size == i) {
+            queue[i] = null;
+        } else {
+            Object moved = queue[size];
+            queue[size] = null;
+            siftDown(i, moved);
+            if (queue[i] == moved) { siftUp(i, moved); }
+        }
+        return true;
+    }
+    public boolean contains(Object o) { return indexOf(o) >= 0; }
+    public int size() { return size; }
+    public boolean isEmpty() { return size == 0; }
+    public void clear() {
+        modCount++;
+        for (int i = 0; i < size; i++) { queue[i] = null; }
+        size = 0;
+    }
+    public boolean addAll(Collection<? extends E> c) {
+        boolean changed = false;
+        Iterator<? extends E> it = c.iterator();
+        while (it.hasNext()) { if (add(it.next())) { changed = true; } }
+        return changed;
+    }
+    public Object[] toArray() { return Arrays.copyOf(queue, size); }
+    public Iterator<E> iterator() { return new PriorityQueueItr<E>(this); }
+    public void forEach(java.util.function.Consumer<? super E> action) {
+        Iterator<E> it = iterator();
+        while (it.hasNext()) { action.accept(it.next()); }
+    }
+    public String toString() {
+        String s = "[";
+        for (int i = 0; i < size; i++) {
+            if (i > 0) { s = s + ", "; }
+            s = s + (queue[i] == this ? "(this Collection)" : "" + queue[i]);
+        }
+        return s + "]";
+    }
+}
+// The heap's array order; fail-fast, as java's is.
+class PriorityQueueItr<E> implements Iterator<E> {
+    PriorityQueue<E> pq;
+    int cursor;
+    int expected;
+    PriorityQueueItr(PriorityQueue<E> pq) {
+        this.pq = pq;
+        expected = pq.modCount;
+    }
+    public boolean hasNext() { return cursor < pq.size; }
+    @SuppressWarnings("unchecked")
+    public E next() {
+        if (pq.modCount != expected) { throw new ConcurrentModificationException(); }
+        if (cursor >= pq.size) { throw new NoSuchElementException(); }
+        cursor++;
+        return (E) pq.queue[cursor - 1];
+    }
+}
+
+// java.util.StringJoiner: the prefix, the added texts between delimiters, the
+// suffix; with nothing added, the empty value (prefix + suffix by default).
+final class StringJoiner {
+    String prefix;
+    String delim;
+    String suffix;
+    String text;
+    String emptyValue;
+    public StringJoiner(CharSequence delim) { this(delim, "", ""); }
+    public StringJoiner(CharSequence delim, CharSequence prefix, CharSequence suffix) {
+        this.delim = "" + delim;
+        this.prefix = "" + prefix;
+        this.suffix = "" + suffix;
+    }
+    public StringJoiner add(CharSequence s) {
+        text = text == null ? "" + s : text + delim + s;
+        return this;
+    }
+    public StringJoiner setEmptyValue(CharSequence v) {
+        emptyValue = "" + v;
+        return this;
+    }
+    public int length() { return toString().length(); }
+    public String toString() {
+        if (text == null && emptyValue != null) { return emptyValue; }
+        return prefix + (text == null ? "" : text) + suffix;
+    }
+}
+
+// java.util.Random: java's 48 bit linear congruential generator, so a seeded
+// one answers java's sequence. Unseeded, the seed comes from Math.random().
+class Random {
+    long seed;
+    public Random() { this((long) (Math.random() * 281474976710656.0)); }
+    public Random(long seed) { setSeed(seed); }
+    public void setSeed(long s) { seed = (s ^ 0x5DEECE66DL) & ((1L << 48) - 1); }
+    int next(int bits) {
+        seed = (seed * 0x5DEECE66DL + 0xBL) & ((1L << 48) - 1);
+        return (int) (seed >>> (48 - bits));
+    }
+    public int nextInt() { return next(32); }
+    public int nextInt(int bound) {
+        if (bound <= 0) { throw new IllegalArgumentException("bound must be positive"); }
+        int r = next(31);
+        int m = bound - 1;
+        if ((bound & m) == 0) { return (int) ((bound * (long) r) >> 31); }
+        for (int u = r; u - (r = u % bound) + m < 0; u = next(31)) { }
+        return r;
+    }
+    // RandomGenerator.nextInt(origin, bound): java's bounded draw from nextInt().
+    public int nextInt(int origin, int bound) {
+        if (origin >= bound) { throw new IllegalArgumentException("bound must be greater than origin"); }
+        int r = nextInt();
+        int n = bound - origin;
+        int m = n - 1;
+        if ((n & m) == 0) { return (r & m) + origin; }
+        if (n > 0) {
+            for (int u = r >>> 1; u + m - (r = u % n) < 0; u = nextInt() >>> 1) { }
+            return r + origin;
+        }
+        while (r < origin || r >= bound) { r = nextInt(); }
+        return r;
+    }
+    public long nextLong() { return ((long) next(32) << 32) + next(32); }
+    public boolean nextBoolean() { return next(1) != 0; }
+    public double nextDouble() { return (((long) next(26) << 27) + next(27)) * 0x1.0p-53; }
+    public float nextFloat() { return next(24) / ((float) (1 << 24)); }
 }
