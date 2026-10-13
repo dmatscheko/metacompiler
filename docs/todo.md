@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-598** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-600** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -155,17 +155,21 @@ line tracking at warning sites is worth its cost.
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
 
-### T-589 lua: tables and functions as keys collide · P1 · LUA · IN PROGRESS (LUA worker, round 4) [V]
-`local t = {}; local a, b = {}, {}; t[a] = 1; t[b] = 2; print(t[a], t[b])` → all legs `2 2` (lua `1 2`): an object key falls
-through to its text. Needs a per-object identity (a hidden id given when the table / closure is made) and a way back from the
-id to the object for pairs/next. All three engines; measure tests/bench.sh lua.
+### T-598 lua: interpreter coroutines replay side effects; `ipairs("abc")`; indexing a coroutine · P1 · LUA · OPEN [V]
+The interpreter half runs coroutines by replay: a write to an upvalue, global or shared table made before the yield it is
+paused at runs once per resume. A producer appending to a shared table gives `p1,c1,p1,p2,...` where lua gives
+`p1,c1,p2,...` (compiled halves right). Give the interpreter real suspension (the tag host's generators / a continuation of
+the walk) or run the coroutine body on the host's own coroutine mechanism. `ipairs("abc")` yields characters in all engines
+(lua: error "bad argument #1 to 'for iterator' (table expected, got string)"). `co.x` / `co.x = 1` on a coroutine works (lua
+"attempt to index a thread value").
 
-### T-590 lua: metatables and the missing standard library · P2 · LUA · IN PROGRESS (LUA worker, round 4) [V]
-`setmetatable` / `getmetatable` are nil in both halves (no `__index`, `__newindex`, `__call`, arithmetic/comparison/`__tostring`/
-`__len`/`__eq` metamethods). Also nil: `_G`, `coroutine`, `utf8`, `os`, `string.pack/unpack`, `math.random/randomseed`,
-`load`, `collectgarbage`, `select('#')` was fine. Metatables first (the core of idiomatic Lua: OOP, `__index` inheritance);
-then `_G`, `coroutine` (the floor has coroutines), `utf8`, `math.random`. Also: `io.stdout.x = 1` succeeds (lua "attempt to
-index a FILE* value"); the interpreter prints an uncaught error to stdout (compiled legs and lua: stderr).
+### T-599 lua: os library, load/dofile, `<close>`, a real `_G`, NaN sign in string.pack · P3 · LUA · OPEN [V]
+`os.time/clock/date/getenv/exit` missing (needs a time-zone offset primitive in the three hosts and a handle→C-string bridge
+for getenv natively). `load`/`loadfile`/`dofile` missing (interp could use c.parseFrom; the compiled half has no run-time
+compiler — constant strings only, as bash's eval). `local x <close>` (__close) needs block-exit hooks on every exit path.
+`rawget(_G, k)` / `pairs(_G)` see only the proxy's fields (globals are not stored in a table). `string.pack("d", -(0/0))`
+packs a positive NaN. __gc / __mode are out of reach (no engine lets a program drive its collector) — record as declined if
+nothing else is done.
 
 ---
 
@@ -692,6 +696,8 @@ T-592 go: UTF-8-encoded surrogate bytes in strings under llvm.Run and native; in
 T-463 php: $this outside object context; bind/call on non-literal closures; binding warnings; S63T var_dump id divergence — PARTIAL 30ee93ac 35841d78 (a, b, d, e, f, g done from php-src; c's refusals done); printing binding warnings is T-596 (needs a warning-channel decision)
 T-580 js/ts: no temporal dead zone for let / const / class — DONE 1c0e5be6 (checks only where a reference can reach the dead zone; bench mod.js module byte-identical)
 T-581 js: arguments object, `__`-prefixed user keys, `String.prototype.normalize`, BigInt callee text — PARTIAL f67bcd8d df30f42f (normalize UAX #15 checked on every code point vs node, arguments object kind, __ user keys, BigInt callee text); arguments length/mapping is T-597
+T-589 lua: tables and functions as keys collide — DONE 991c9c71
+T-590 lua: metatables and the missing standard library — PARTIAL 9512ba5c..57ffd73d (metatables and all metamethods at +0.05%, _G proxy, coroutine on floor generators, utf8, math.random bit-exact, collectgarbage, string.pack, table lib via metamethods, FILE* type); rest is T-598, T-599
 
 # Settled — do not re-open
 
