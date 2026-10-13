@@ -3998,6 +3998,15 @@ func s70() {
 	check("nsl2", fmt.Sprint(b == nil, len(b), l == nil, l) == "true 0 true []")
 }
 
+// ===== SECTION 71: string of an invalid code point =====
+func s71() {
+	got := ""
+	for _, r := range []int{-1, 0xD800, 0x110000, 0x10FFFF} {
+		got += fmt.Sprintf("%x ", string(rune(r)))
+	}
+	check("ivr1", got == "efbfbd efbfbd efbfbd f48fbfbf " && string([]rune{0xDFFF, 'a'}) == "�a")
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -4069,6 +4078,7 @@ func main() {
 	s68() // SECTION-CALL 68
 	s69() // SECTION-CALL 69
 	s70() // SECTION-CALL 70
+	s71() // SECTION-CALL 71
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

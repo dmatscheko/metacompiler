@@ -2581,7 +2581,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             if (isSl(v) || Array.isArray(v)) {
                 var els = isSl(v) ? slElems(v) : v
                 var s = ""
-                for (var i = 0; i < els.length; i++) { s += fromCodePoint(szNum(els[i])) }
+                for (var i = 0; i < els.length; i++) { s += fromCodePoint(els[i]) }
                 return s
             }
             return "" + v
@@ -2631,6 +2631,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // A []byte / []rune element is a SIZED box, and String.fromCharCode wants
         // a plain number, so unwrap first.
         var cp = szIs(cpIn) ? szNum(cpIn) : cpIn
+        // A value that is not a Unicode scalar value - negative, a surrogate, past
+        // U+10FFFF - converts to U+FFFD, as string(rune(r)) does in Go.
+        if (cp < 0 || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) { return String.fromCharCode(0xfffd) }
         if (cp < 0x10000) { return String.fromCharCode(cp) }
         var x = cp - 0x10000
         return String.fromCharCode(0xd800 + gtrunc(x / 1024)) + String.fromCharCode(0xdc00 + (x % 1024))
