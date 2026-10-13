@@ -5304,6 +5304,12 @@ HasStatic   = :script(~~
             bb.NewRet(callExt(bb, "js_get", [tV, emitStr(bb, "__msg")]))
             return deadBlock()
         }, false, null)
+        // getLocalizedMessage() is getMessage(), an override of it included.
+        var getLoc = emitFunc([], function(bb) {
+            var tV = callExt(bb, "js_arg", [curF.Params[1], handle(0)])
+            bb.NewRet(callExt(bb, "js_mcall", [tV, emitStr(bb, "getMessage"), callExt(bb, "js_arr_new", [])]))
+            return deadBlock()
+        }, false, null)
         // Throwable's suppressed list, the hidden __supp slot (absent while
         // empty). Twin of jExcAddSuppressed in java-interpreter.abnf.
         var addSupp = emitFunc([], function(bb) {
@@ -5348,6 +5354,7 @@ HasStatic   = :script(~~
             callExt(b, "js_set", [clsV, emitStr(b, "__ctor"),
                                   callExt(b, "js_closure", [handle(emitCtorDispatch(name, [0, 1])), curScopeV])])
             callExt(b, "js_set", [clsV, emitStr(b, "getMessage"), callExt(b, "js_closure", [handle(getMsg), curScopeV])])
+            callExt(b, "js_set", [clsV, emitStr(b, "getLocalizedMessage"), callExt(b, "js_closure", [handle(getLoc), curScopeV])])
             callExt(b, "js_set", [clsV, emitStr(b, "addSuppressed"), callExt(b, "js_closure", [handle(addSupp), curScopeV])])
             callExt(b, "js_set", [clsV, emitStr(b, "getSuppressed"), callExt(b, "js_closure", [handle(getSupp), curScopeV])])
             // Hand the four runtime-raised descriptors over once each, BY NAME, so

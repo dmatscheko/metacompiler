@@ -724,7 +724,10 @@ function jvBoxType(name) {
         o["MAX_VALUE"] = 2147483647
         o["MIN_VALUE"] = 0 - 2147483648
         jvAddCommon(o, 32, 32, 4)
-        o["parseInt"] = function(s, r) { return jvParseInt(jpStr(s), 32, jvRadixOf(r)) }
+        o["parseInt"] = function(s, r) {
+            if (s === null) { jvThrowCls(jvNfeCls, "Cannot parse null string") }
+            return jvParseInt(jpStr(s), 32, jvRadixOf(r))
+        }
         o["valueOf"] = function(v, r) { return jvValueOf(v, 32, r) }
         jvRadixMembers(o, 32)
         jvBitOps(o, 32)
@@ -734,7 +737,10 @@ function jvBoxType(name) {
         o["MAX_VALUE"] = rtjMaxL()
         o["MIN_VALUE"] = rtjMinL()
         jvAddCommon(o, 64, 64, 8)
-        o["parseLong"] = function(s, r) { return jvParseInt(jpStr(s), 64, jvRadixOf(r)) }
+        o["parseLong"] = function(s, r) {
+            if (s === null) { jvThrowCls(jvNfeCls, "Cannot parse null string") }
+            return jvParseInt(jpStr(s), 64, jvRadixOf(r))
+        }
         o["valueOf"] = function(v, r) { return jvValueOf(v, 64, r) }
         jvRadixMembers(o, 64)
         jvBitOps(o, 64)
@@ -1187,7 +1193,10 @@ function jvFloType(o, f32) {
     o["sum"] = function(a, b) { return jvFloOf(rtjNum(a) + rtjNum(b), f32) }
     o["max"] = function(a, b) { return jvFloOf(jvMaxD(rtjNum(a), rtjNum(b)), f32) }
     o["min"] = function(a, b) { return jvFloOf(jvMinD(rtjNum(a), rtjNum(b)), f32) }
-    var parse = function(s) { return jvFloOf(jvParseDbl(jpStr(s), f32), f32) }
+    var parse = function(s) {
+        jvNpeIfNull(s)
+        return jvFloOf(jvParseDbl(jpStr(s), f32), f32)
+    }
     if (f32) { o["parseFloat"] = parse } else { o["parseDouble"] = parse }
     o["valueOf"] = function(v) {
         if (typeof v == "string") { return jvFloOf(jvParseDbl(v, f32), f32) }
@@ -1696,7 +1705,11 @@ function js_jvexcmatch(v, n) {
 // Twins: jExcTopLine / jReportUncaught in languages/java-interpreter.abnf and
 // js_jvtop in abnf/jsrtjvm.go. The shape - the whole entry call inside one js_try
 // whose catch clause calls this - is ruby's js_rtop and go's js_gotop.
+// getLocalizedMessage(), which is getMessage() unless a class overrides
+// either. Twin of jExcMessageOf in java-interpreter.abnf.
 function jvExcMessageOf(v) {
+    var f = rtFindMethod(v["__class"], "getLocalizedMessage")
+    if (f !== undefined) { return f.apply(undefined, [v]) }
     var m = v["message"]
     if (m === undefined) { m = v["__msg"] }
     return m
@@ -2894,13 +2907,34 @@ function js_jvnum(v) {
 // closure arrives whole, so the no-argument println(), which writes just the line
 // terminator, is distinguishable from println(null).
 function js_jvprint(args) {
-    println(jpFirst(args))
+    println(jvOutText(jpFirst(args)))
     return undefined
 }
 
 function js_jvwrite(args) {
-    print(jpFirst(args))
+    print(jvOutText(jpFirst(args)))
     return undefined
+}
+
+// A String as System.out writes it: UTF-8 cannot carry a lone surrogate, which
+// the encoder replaces with '?'. Twin of jOutText in java-interpreter.abnf.
+function jvOutText(s) {
+    if (byteLen(s) == s.length) { return s }
+    var out = ""
+    var i = 0
+    while (i < s.length) {
+        var c = s.charCodeAt(i)
+        if (c >= 55296 && c < 56320 && i + 1 < s.length && s.charCodeAt(i + 1) >= 56320 && s.charCodeAt(i + 1) < 57344) {
+            out = out + s.substring(i, i + 2)
+            i = i + 1
+        } else if (c >= 55296 && c < 57344) {
+            out = out + "?"
+        } else {
+            out = out + s.charAt(i)
+        }
+        i = i + 1
+    }
+    return out
 }
 
 function jpFirst(args) {

@@ -135,6 +135,7 @@ class Main {
         S64.run(); // SECTION-CALL 64
         S65.run(); // SECTION-CALL 65
         S66.run(); // SECTION-CALL 66
+        S67.run(); // SECTION-CALL 67
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -3762,5 +3763,46 @@ class S66 {
         Main.check("tc66", a.equals("[S66P[name=al, age=25], S66P[name=bo, age=30], S66P[name=cy, age=30]]")
             && b.equals("[S66P[name=bo, age=30], S66P[name=cy, age=30], S66P[name=al, age=25]]")
             && ps.toString().equals("[S66P[name=al, age=25], S66P[name=bo, age=30], S66P[name=cy, age=30]]"));
+    }
+}
+
+// ===== SECTION 67: Throwable#toString through getMessage, parse of null, List.of's get =====
+//
+// Throwable#toString prints getLocalizedMessage(), which is getMessage(), so an
+// override of either shows. Integer.parseInt(null) throws "Cannot parse null
+// string" and Double.parseDouble(null) a NullPointerException. List.of's get
+// out of range throws as java's ImmutableCollections do: List12 (one or two
+// elements) "Index: i Size: n", ListN ArrayIndexOutOfBoundsException.
+// compareToIgnoreCase compares code points where a surrogate pair differs.
+// Every expected value is java 24.0.2's.
+class S67MyEx extends RuntimeException {
+    S67MyEx(String m) { super(m); }
+}
+class S67Sub extends S67MyEx {
+    S67Sub() { super("orig"); }
+    public String getMessage() { return "sub-msg"; }
+}
+class S67Loc extends Exception {
+    public String getLocalizedMessage() { return "loc"; }
+}
+class S67 {
+    static String[] strs = {null, "a😀", "a￿"};
+    static String oob(List<Integer> l, int i) {
+        try { return "" + l.get(i); } catch (IndexOutOfBoundsException e) { return e.getClass().getName().substring(10) + ":" + e.getMessage(); }
+    }
+    static void run() {
+        Main.check("ts67", ("" + new S67Sub()).equals("S67Sub: sub-msg") && new S67Sub().getLocalizedMessage().equals("sub-msg")
+            && ("" + new S67Loc()).equals("S67Loc: loc") && ("" + new RuntimeException("r")).equals("java.lang.RuntimeException: r"));
+        String p = "";
+        try { Integer.parseInt(strs[0]); } catch (NumberFormatException e) { p = p + e.getMessage() + "|"; }
+        try { Long.parseLong(strs[0]); } catch (NumberFormatException e) { p = p + e.getMessage() + "|"; }
+        try { Double.parseDouble(strs[0]); } catch (NullPointerException e) { p = p + "npe"; }
+        Main.check("pn67", p.equals("Cannot parse null string|Cannot parse null string|npe"));
+        Main.check("lo67", (oob(List.of(1, 2), 5) + " " + oob(List.of(1), -1) + " " + oob(List.of(1, 2, 3), 3) + " " + oob(List.of(), 0)
+            + " " + oob(new ArrayList<>(List.of(1, 2)), 5)).equals("IndexOutOfBoundsException:Index: 5 Size: 2 IndexOutOfBoundsException:Index: -1 Size: 1 "
+            + "ArrayIndexOutOfBoundsException:Index 3 out of bounds for length 3 ArrayIndexOutOfBoundsException:Index 0 out of bounds for length 0 "
+            + "IndexOutOfBoundsException:Index 5 out of bounds for length 2"));
+        Main.check("ci67", strs[1].compareToIgnoreCase(strs[2]) == 62977 && strs[2].compareToIgnoreCase(strs[1]) == -62977
+            && strs[1].compareTo(strs[2]) == -10178 && "Ab".compareToIgnoreCase("aC") == -1);
     }
 }

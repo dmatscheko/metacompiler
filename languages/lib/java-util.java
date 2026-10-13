@@ -122,6 +122,7 @@ interface List<E> extends Collection<E> {
             l.add(es[i]);
         }
         l.frozen = true;
+        l.listOf = true;
         return l;
     }
 }
@@ -130,6 +131,10 @@ class ArrayList<E> implements List<E> {
     Object[] elems;
     int count;
     boolean frozen;
+    // List.of's list, whose get answers java's ImmutableCollections: List12
+    // (one or two elements) and ListN (any other count) word an index out of
+    // range differently.
+    boolean listOf;
     // Counts the structural changes (a size change; set is not one) so an
     // iterator or forEach running across one fails fast, as java's does.
     int modCount;
@@ -175,6 +180,10 @@ class ArrayList<E> implements List<E> {
     }
     @SuppressWarnings("unchecked")
     public E get(int index) {
+        if (listOf && (index < 0 || index >= count)) {
+            if (count == 1 || count == 2) { throw new IndexOutOfBoundsException("Index: " + index + " Size: " + count); }
+            throw new ArrayIndexOutOfBoundsException("Index " + index + " out of bounds for length " + count);
+        }
         checkIndex(index);
         return (E) elems[index];
     }

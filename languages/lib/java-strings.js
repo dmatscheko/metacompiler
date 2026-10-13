@@ -56,7 +56,9 @@ function jxCompare(a, b) {
     return a.length - b.length
 }
 // compareToIgnoreCase / equalsIgnoreCase fold each unit to upper case and then
-// to lower case, as java.lang.String does.
+// to lower case, as java.lang.String does; where the units differ inside a
+// surrogate pair the whole code points are compared (JDK 16 and later). A
+// supplementary code point folds to itself here.
 function jxFold(c) { return jxChLo(jxChUp(c)) }
 function jxCompareIC(a, b) {
     var n = a.length
@@ -68,11 +70,35 @@ function jxCompareIC(a, b) {
         if (x != y) {
             x = jxFold(x)
             y = jxFold(y)
-            if (x != y) { return x - y }
+            if (x != y) {
+                var cx = jxCpAt(a, i)
+                var cy = jxCpAt(b, i)
+                if (cx > 65535 || cy > 65535) {
+                    if (cx < 65536) { cx = jxFold(cx) }
+                    if (cy < 65536) { cy = jxFold(cy) }
+                    if (cx != cy) { return cx - cy }
+                } else {
+                    return x - y
+                }
+            }
         }
         i = i + 1
     }
     return a.length - b.length
+}
+// The code point the unit at i belongs to: a surrogate pair's whole value
+// whichever half i is, the unit itself otherwise.
+function jxCpAt(s, i) {
+    var c = s.charCodeAt(i)
+    if (c >= 55296 && c < 56320 && i + 1 < s.length) {
+        var d = s.charCodeAt(i + 1)
+        if (d >= 56320 && d < 57344) { return 65536 + (c - 55296) * 1024 + (d - 56320) }
+    }
+    if (c >= 56320 && c < 57344 && i > 0) {
+        var h = s.charCodeAt(i - 1)
+        if (h >= 55296 && h < 56320) { return 65536 + (h - 55296) * 1024 + (c - 56320) }
+    }
+    return c
 }
 // A code point as its one or two UTF-16 units.
 function jxCpStr(cp) {

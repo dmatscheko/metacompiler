@@ -2246,8 +2246,8 @@ HasStatic   = :script(~~
         out: {
             // println() with no argument writes just the line terminator; without
             // the arity test the missing parameter rendered as "null".
-            println: function(x) { println(arguments.length == 0 ? "" : jstr(x)) },
-            print: function(x) { print(jstr(x)) }
+            println: function(x) { println(arguments.length == 0 ? "" : jOutText(jstr(x))) },
+            print: function(x) { print(jOutText(jstr(x))) }
         },
         exit: function(code) { exit(code | 0) },
         // Twin of js_jvarraycopy in lib/java-rt.metajs, which documents the checks.
@@ -2551,6 +2551,7 @@ HasStatic   = :script(~~
     // off radix 10. Twin of jvParseInt in languages/lib/java-rt.metajs and
     // abnf/jsrtjava.go.
     function jParseInt(s, w, radixArg) {
+        if (s === null) { jThrowExc("NumberFormatException", "Cannot parse null string") }
         var radix = radixArg === undefined ? 10 : jNum(radixArg)
         var t = "" + s
         var bad = "For input string: \"" + t + "\"" + (radix == 10 ? "" : " under radix " + radix)
@@ -2809,7 +2810,10 @@ HasStatic   = :script(~~
         o.sum = function(a, b) { return jFloRes(jNumD(a) + jNumD(b), f32) }
         o.max = function(a, b) { return jFloRes(jMaxD(jNumD(a), jNumD(b)), f32) }
         o.min = function(a, b) { return jFloRes(jMinD(jNumD(a), jNumD(b)), f32) }
-        var parse = function(s) { return jFloRes(jParseDbl("" + s, f32), f32) }
+        var parse = function(s) {
+            if (s === null) { jNpe() }
+            return jFloRes(jParseDbl("" + s, f32), f32)
+        }
         if (f32) { o.parseFloat = parse } else { o.parseDouble = parse }
         o.valueOf = function(v) { return typeof v == "string" ? parse(v) : jFloRes(jNumD(v), f32) }
         o.toString = function(v) { return jstr(jFloRes(jNumD(v), f32)) }
@@ -2974,6 +2978,25 @@ HasStatic   = :script(~~
     // interp-core's exception protocol is {__exc: true, v: <thrown value>}.
     function jThrowExc(clsName, msg) {
         throw {__exc: true, v: {__class: globalScope[clsName], message: msg}}
+    }
+    // A String as System.out writes it: UTF-8 cannot carry a lone surrogate,
+    // which the encoder replaces with '?'. Twin of jvOutText in
+    // languages/lib/java-rt.metajs and abnf/jsrtjava.go.
+    function jOutText(s) {
+        if (byteLen(s) == s.length) { return s }
+        var out = ""
+        for (var i = 0; i < s.length; i++) {
+            var c = s.charCodeAt(i)
+            if (c >= 55296 && c < 56320 && i + 1 < s.length && s.charCodeAt(i + 1) >= 56320 && s.charCodeAt(i + 1) < 57344) {
+                out = out + s.substring(i, i + 2)
+                i = i + 1
+            } else if (c >= 55296 && c < 57344) {
+                out = out + "?"
+            } else {
+                out = out + s.charAt(i)
+            }
+        }
+        return out
     }
     // A null reference used as an object or unboxed (JLS 15.12.4.4, 5.1.8): a
     // NullPointerException with a null message, the compiled halves' js_jvnpe.
@@ -4814,6 +4837,7 @@ HasStatic   = :script(~~
         }
     }
     function jExcGetMessage() { return arguments[0].message }
+    function jExcGetLocalized() { return mcall(arguments[0], "getMessage", []) }
     // Throwable's suppressed list, the hidden __supp slot (absent while empty).
     // Twin of jExcSuppressFns in java-to-llvm-ir.abnf.
     function jExcAddSuppressed() {
@@ -4851,7 +4875,7 @@ HasStatic   = :script(~~
         if (superName != null) { cls.__super = globalScope[superName] }
         cls.__ctor = jExcCtor(cls)
         cls.getMessage = jExcGetMessage
-        cls.getLocalizedMessage = jExcGetMessage
+        cls.getLocalizedMessage = jExcGetLocalized
         cls.addSuppressed = jExcAddSuppressed
         cls.getSuppressed = jExcGetSuppressed
         globalScope[name] = cls
@@ -4912,7 +4936,12 @@ HasStatic   = :script(~~
     // differs between the halves - this one writes `message`, the emitted builtin
     // constructor writes `__msg` (emitBuiltinExc) - so both are read here and in
     // both twins, and the three engines then answer the same string.
+    // Throwable#toString prints getLocalizedMessage(), which is getMessage()
+    // unless a class overrides either. Twin of jvExcMessageOf in
+    // languages/lib/java-rt.metajs and jvmThrowableStr in abnf/jsrtjvm.go.
     function jExcMessageOf(v) {
+        var f = v.__class == undefined ? undefined : jFindMember(v.__class, "getLocalizedMessage")
+        if (typeof f == "function") { return f.apply(undefined, [v]) }
         var m = anytype
         m = v.message
         if (m === undefined) { m = v.__msg }

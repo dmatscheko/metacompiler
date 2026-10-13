@@ -118,12 +118,40 @@ func jxCompare(a, b []uint16, fold bool) int {
 		x, y := int(a[i]), int(b[i])
 		if x != y && fold {
 			x, y = jvChLo(jvChUp(x)), jvChLo(jvChUp(y))
+			// Inside a surrogate pair the whole code points compare (JDK 16
+			// and later); a supplementary one folds to itself. Twin of
+			// jxCompareIC in languages/lib/java-strings.js.
+			if cx, cy := jxCpAt(a, i), jxCpAt(b, i); x != y && (cx > 0xFFFF || cy > 0xFFFF) {
+				if cx <= 0xFFFF {
+					cx = jvChLo(jvChUp(cx))
+				}
+				if cy <= 0xFFFF {
+					cy = jvChLo(jvChUp(cy))
+				}
+				if cx == cy {
+					continue
+				}
+				return cx - cy
+			}
 		}
 		if x != y {
 			return x - y
 		}
 	}
 	return len(a) - len(b)
+}
+
+// jxCpAt is the code point the unit at i belongs to: a surrogate pair's whole
+// value whichever half i is, the unit itself otherwise.
+func jxCpAt(s []uint16, i int) int {
+	c := int(s[i])
+	if c >= 0xD800 && c < 0xDC00 && i+1 < len(s) && s[i+1] >= 0xDC00 && s[i+1] < 0xE000 {
+		return 0x10000 + (c-0xD800)*1024 + int(s[i+1]) - 0xDC00
+	}
+	if c >= 0xDC00 && c < 0xE000 && i > 0 && s[i-1] >= 0xD800 && s[i-1] < 0xDC00 {
+		return 0x10000 + (int(s[i-1])-0xD800)*1024 + c - 0xDC00
+	}
+	return c
 }
 
 // ----- the regex methods -----

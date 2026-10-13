@@ -142,6 +142,37 @@ func (rt *jsrt) jvThrowCls(cls *jsObject, msg interface{}) {
 
 func (rt *jsrt) jvThrowArith(msg string) { rt.jvThrowCls(jvArithExcCls, msg) }
 
+// jvParseNull is Integer.parseInt(null) and Long.parseLong(null). Twin of
+// jParseInt in java-interpreter.abnf and jvParseInt in
+// languages/lib/java-rt.metajs.
+func (rt *jsrt) jvParseNull(v interface{}) {
+	if _, isNull := v.(jsNullT); isNull {
+		rt.jvThrowCls(jvNfeCls, "Cannot parse null string")
+	}
+}
+
+// jvOutText is a String as System.out writes it: UTF-8 cannot carry a lone
+// surrogate, which the encoder replaces with '?' (wtf8Clean writes U+FFFD).
+// Twin of jOutText in java-interpreter.abnf.
+func jvOutText(s string) string {
+	i := strings.IndexByte(s, 0xED)
+	if i < 0 {
+		return s
+	}
+	b := make([]byte, 0, len(s))
+	b = append(b, s[:i]...)
+	for i < len(s) {
+		if wtf8Surrogate(s[i:]) != 0 {
+			b = append(b, '?')
+			i += 3
+			continue
+		}
+		b = append(b, s[i])
+		i++
+	}
+	return string(b)
+}
+
 // jvNpeIfNull throws the NullPointerException a null raises where Java unboxes
 // it (JLS 5.1.8) or a library method dereferences it. Twin of jvNpeIfNull in
 // languages/lib/java-rt.metajs.
@@ -1018,6 +1049,7 @@ func jvFloType(o *jsObject, sty uint8) {
 		}))
 	}
 	parse := jsHostFunc("parse", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		rt.jvNpeIfNull(argAt(args, 0))
 		return mk(rt.jvParseDbl(rt.toString(argAt(args, 0)), f32))
 	})
 	if f32 {
@@ -1211,6 +1243,7 @@ func (rt *jsrt) jvBoxType(name string) *jsObject {
 		o.set("MIN_VALUE", float64(math.MinInt32))
 		addCommon(32, 32, 4)
 		o.set("parseInt", jsHostFunc("parseInt", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			rt.jvParseNull(argAt(args, 0))
 			return rt.jvParseInt(rt.toString(argAt(args, 0)), 32, jvRadixArg(rt, args))
 		}))
 		o.set("valueOf", jvValueOfHost(32))
@@ -1221,6 +1254,7 @@ func (rt *jsrt) jvBoxType(name string) *jsObject {
 		o.set("MIN_VALUE", jvBox(math.MinInt64))
 		addCommon(64, 64, 8)
 		o.set("parseLong", jsHostFunc("parseLong", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			rt.jvParseNull(argAt(args, 0))
 			return rt.jvParseInt(rt.toString(argAt(args, 0)), 64, jvRadixArg(rt, args))
 		}))
 		o.set("valueOf", jvValueOfHost(64))
@@ -1745,11 +1779,11 @@ func init() {
 		// emitted closure arrives whole, so the no-argument println(), which
 		// writes just the line terminator, is distinguishable from println(null).
 		m["js_jvprint"] = func(a []uint64) uint64 {
-			fmt.Fprintln(outWriter, wtf8Clean(jvpFirst(rt, u(a[0]))))
+			fmt.Fprintln(outWriter, jvOutText(jvpFirst(rt, u(a[0]))))
 			return 0
 		}
 		m["js_jvwrite"] = func(a []uint64) uint64 {
-			fmt.Fprint(outWriter, wtf8Clean(jvpFirst(rt, u(a[0]))))
+			fmt.Fprint(outWriter, jvOutText(jvpFirst(rt, u(a[0]))))
 			return 0
 		}
 		// System.arraycopy(src, srcPos, dest, destPos, length), its argument

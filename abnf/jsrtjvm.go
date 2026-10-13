@@ -508,8 +508,12 @@ func (rt *jsrt) jvmThrowableStr(o *jsObject) string {
 	if cls, isObj := o.props["__class"].(*jsObject); isObj {
 		name = jvpClassName(cls)
 	}
+	// getLocalizedMessage(), which is getMessage() unless a class overrides
+	// either. Twin of jExcMessageOf in java-interpreter.abnf.
 	msg := o.props["message"]
-	if jvmNullish(msg) {
+	if f, ok := jvpFindMember(o, "getLocalizedMessage"); ok {
+		msg = rt.call(f, o, []interface{}{o})
+	} else if jvmNullish(msg) {
 		msg = o.props["__msg"]
 	}
 	if jvmNullish(msg) {
