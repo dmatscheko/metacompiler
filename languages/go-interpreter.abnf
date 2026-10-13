@@ -1906,26 +1906,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
         return out
     }
-    // The indices of a map's keys in fmt's print order: numerically for a numeric key
-    // type, bytewise for a string key, false before true for a bool. A Go map has ONE
-    // key type, so the kind of the keys decides. Insertion sort - the frozen engine has
-    // no Array.sort - and the twin of gopKeyOrder in abnf/jsrtgolang.go.
+    // The indices of a map's keys in fmt's print order: an insertion sort over
+    // gKeyCmp (the frozen engine has no Array.sort). Twin of gopKeyOrder in
+    // abnf/jsrtgolang.go.
     function gKeyOrder(keys) {
         var ord = []
-        var num = []
-        var txt = []
-        var numeric = keys.length > 0
-        for (var i = 0; i < keys.length; i++) {
-            ord.push(i)
-            var k = keys[i]
-            if (typeof k == "number" || isFlo(k)) { num.push(gNumF(k)); txt.push("") }
-            else if (szIs(k)) { num.push(szNum(k)); txt.push("") }
-            else if (typeof k == "boolean") { numeric = false; num.push(0); txt.push(k ? "1" : "0") }
-            else { numeric = false; num.push(0); txt.push("" + k) }
-        }
+        for (var i = 0; i < keys.length; i++) { ord.push(i) }
         for (var s = 1; s < ord.length; s++) {
             var j2 = s
-            while (j2 > 0 && gKeyLess(numeric, num, txt, ord[j2], ord[j2 - 1])) {
+            while (j2 > 0 && gKeyCmp(keys[ord[j2]], keys[ord[j2 - 1]]) < 0) {
                 var t = ord[j2]
                 ord[j2] = ord[j2 - 1]
                 ord[j2 - 1] = t
@@ -1934,9 +1923,42 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
         return ord
     }
-    function gKeyLess(numeric, num, txt, a, b) {
-        if (numeric) { return num[a] < num[b] }
-        return txt[a] < txt[b]
+    // fmt's key order (internal/fmtsort): numbers numerically with NaN first,
+    // strings bytewise, false before true, arrays element by element and structs
+    // field by field; anything else by its rendered text. Twin of gopKeyCmp in
+    // abnf/jsrtgolang.go and lib/go-rt.metajs.
+    function gKeyCmp(a, b) {
+        var an = typeof a == "number" || isFlo(a) || szIs(a)
+        var bn = typeof b == "number" || isFlo(b) || szIs(b)
+        if (an && bn) {
+            if (szIs(a) || szIs(b)) { return szCmp(a, b) }
+            var x = gNumF(a)
+            var y = gNumF(b)
+            if (x !== x) { return y !== y ? 0 : 0 - 1 }
+            if (y !== y) { return 1 }
+            return x < y ? 0 - 1 : (x > y ? 1 : 0)
+        }
+        if (typeof a == "boolean" && typeof b == "boolean") { return a === b ? 0 : (a ? 1 : 0 - 1) }
+        if (typeof a == "string" && typeof b == "string") { return a < b ? 0 - 1 : (a > b ? 1 : 0) }
+        if (Array.isArray(a) && Array.isArray(b)) {
+            for (var i = 0; i < a.length && i < b.length; i++) {
+                var c = gKeyCmp(a[i], b[i])
+                if (c != 0) { return c }
+            }
+            return a.length - b.length
+        }
+        if (a != null && b != null && typeof a == "object" && typeof b == "object" && a.__class != undefined
+            && a.__class === b.__class && Array.isArray(a.__class.__fields)) {
+            var fs = a.__class.__fields
+            for (var k = 0; k < fs.length; k++) {
+                var fc = gKeyCmp(a[fs[k]], b[fs[k]])
+                if (fc != 0) { return fc }
+            }
+            return 0
+        }
+        var ta = gstr(a)
+        var tb = gstr(b)
+        return ta < tb ? 0 - 1 : (ta > tb ? 1 : 0)
     }
 
     // ----- Postfix suffixes: (args), [lo:hi:max] -----

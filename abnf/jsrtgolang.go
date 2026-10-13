@@ -282,7 +282,7 @@ func (rt *jsrt) gopObj(o *jsObject, depth int) (string, bool) {
 	// A map: map[k:v k:v], with the keys SORTED, which is what fmt has done since
 	// go 1.12. The value model keeps insertion order, so the order is computed here.
 	if keys, vals, ok := dictParts(o); ok {
-		order := gopKeyOrder(keys.elems)
+		order := rt.gopKeyOrder(keys.elems)
 		kt, vt := goMapTys(o)
 		parts := make([]string, 0, len(order))
 		for _, i := range order {
@@ -388,54 +388,84 @@ func (rt *jsrt) gopObj(o *jsObject, depth int) (string, bool) {
 	return "", false
 }
 
-// gopKeyOrder answers the indices of a map's keys in fmt's print order. fmt sorts
-// map keys (go 1.12+): numerically for a numeric key type, bytewise for a string
-// key, false before true for a bool. A Go map has ONE key type, so the kind of the
-// first key decides; anything else falls back to the rendered text. Insertion sort,
-// which keeps the order stable and mirrors the interpreter half's own loop.
-func gopKeyOrder(keys []interface{}) []int {
+// gopKeyOrder answers the indices of a map's keys in fmt's print order (fmt sorts
+// map keys since go 1.12): an insertion sort over gopKeyCmp, which keeps the order
+// stable and mirrors the interpreter half's own loop.
+func (rt *jsrt) gopKeyOrder(keys []interface{}) []int {
 	order := make([]int, len(keys))
 	for i := range order {
 		order[i] = i
 	}
-	num := make([]float64, len(keys))
-	txt := make([]string, len(keys))
-	numeric := len(keys) > 0
-	for i, k := range keys {
-		switch t := k.(type) {
-		case float64:
-			num[i] = t
-		case jsJFlo:
-			num[i] = t.f
-		case bool:
-			numeric = false
-			if t {
-				txt[i] = "1"
-			} else {
-				txt[i] = "0"
-			}
-		case string:
-			numeric = false
-			txt[i] = t
-		default:
-			numeric = false
-			txt[i] = fmt.Sprint(k)
-		}
-	}
-	less := func(a, b int) bool {
-		if numeric {
-			return num[a] < num[b]
-		}
-		return txt[a] < txt[b]
-	}
 	for i := 1; i < len(order); i++ {
 		j := i
-		for j > 0 && less(order[j], order[j-1]) {
+		for j > 0 && rt.gopKeyCmp(keys[order[j]], keys[order[j-1]]) < 0 {
 			order[j], order[j-1] = order[j-1], order[j]
 			j--
 		}
 	}
 	return order
+}
+
+// gopKeyCmp is fmt's key order (internal/fmtsort): numbers numerically with NaN
+// first, strings bytewise, false before true, arrays element by element and
+// structs field by field; anything else by its rendered text. Twins: gopKeyCmp in
+// lib/go-rt.metajs, gKeyCmp in languages/go-interpreter.abnf.
+func (rt *jsrt) gopKeyCmp(a, b interface{}) int {
+	if giIsNumeric(a) && giIsNumeric(b) {
+		if giIsInt(a) || giIsInt(b) {
+			return rt.giCmp(a, b)
+		}
+		x, y := rt.toNumber(a), rt.toNumber(b)
+		switch {
+		case x != x && y != y:
+			return 0
+		case x != x, x < y:
+			return -1
+		case y != y, x > y:
+			return 1
+		}
+		return 0
+	}
+	switch x := a.(type) {
+	case bool:
+		if y, ok := b.(bool); ok {
+			if x == y {
+				return 0
+			}
+			if !x {
+				return -1
+			}
+			return 1
+		}
+	case string:
+		if y, ok := b.(string); ok {
+			return strings.Compare(x, y)
+		}
+	case *jsArray:
+		if y, ok := b.(*jsArray); ok {
+			for i := 0; i < len(x.elems) && i < len(y.elems); i++ {
+				if c := rt.gopKeyCmp(x.elems[i], y.elems[i]); c != 0 {
+					return c
+				}
+			}
+			return len(x.elems) - len(y.elems)
+		}
+	case *jsObject:
+		ac, bc := goClassOf(a), goClassOf(b)
+		if ac != nil && ac == bc {
+			if fs, ok := ac.props["__fields"].(*jsArray); ok {
+				y := b.(*jsObject)
+				for _, f := range fs.elems {
+					k := rt.toString(f)
+					if c := rt.gopKeyCmp(x.props[k], y.props[k]); c != 0 {
+						return c
+					}
+				}
+				return 0
+			}
+		}
+	}
+	return strings.Compare(fmt.Sprint(a), fmt.Sprint(b))
 }
 
 // ----------------------------------------------------------------------------
@@ -692,7 +722,7 @@ func (rt *jsrt) gopGoSyn(f gopFlags, v interface{}, slot string, depth int) stri
 		vt := ty[len(kt)+5:]
 		keys, vals, _ := dictParts(v)
 		b.WriteString(ty + "{")
-		for n, i := range gopKeyOrder(keys.elems) {
+		for n, i := range rt.gopKeyOrder(keys.elems) {
 			if n > 0 {
 				b.WriteString(", ")
 			}
@@ -1629,7 +1659,7 @@ func (rt *jsrt) gopArg(f gopFlags, v interface{}, verb rune, depth int, noMeth b
 		kt, vt := goMapTys(v.(*jsObject))
 		var b strings.Builder
 		b.WriteString("map[")
-		for n, i := range gopKeyOrder(keys.elems) {
+		for n, i := range rt.gopKeyOrder(keys.elems) {
 			if n > 0 {
 				b.WriteByte(' ')
 			}

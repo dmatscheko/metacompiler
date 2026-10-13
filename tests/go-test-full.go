@@ -3967,6 +3967,24 @@ func s68() {
 	check("rt3", fmt.Sprint(freq, freq['a'], n) == "map[97:2 98:1 99:1] 2 25")
 }
 
+// ===== SECTION 69: fmt's order of composite and float map keys =====
+type k69 struct {
+	A int
+	B string
+}
+
+func s69() {
+	m := map[k69]int{{1, "a"}: 1, {0, "b"}: 2, {1, ""}: 3, {-1, "z"}: 4, {10, "a"}: 5, {2, "a"}: 6}
+	check("mko1", fmt.Sprint(m) == "map[{-1 z}:4 {0 b}:2 {1 }:3 {1 a}:1 {2 a}:6 {10 a}:5]")
+	a := map[[2]int]string{{1, 1}: "a", {1, 2}: "b", {10, 0}: "c", {2, 1}: "d"}
+	check("mko2", fmt.Sprint(a) == "map[[1 1]:a [1 2]:b [2 1]:d [10 0]:c]")
+	zs := []float64{0}
+	nan := zs[0] / zs[0]
+	fm := map[float64]int{3: 1, nan: 2, -1: 3}
+	r := map[rune]int{'d': 1, 'a': 2}
+	check("mko3", fmt.Sprint(fm, r) == "map[NaN:2 -1:3 3:1] map[97:2 100:1]")
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -4036,6 +4054,7 @@ func main() {
 	s66() // SECTION-CALL 66
 	s67() // SECTION-CALL 67
 	s68() // SECTION-CALL 68
+	s69() // SECTION-CALL 69
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }
