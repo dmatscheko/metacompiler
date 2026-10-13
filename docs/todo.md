@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-603** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-604** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -76,12 +76,16 @@ its report; anything structural there is a CORE ticket.
 
 # JS — JavaScript and TypeScript
 
-### T-597 js: arguments length and mapping; `Object.hasOwn`; `"__#"` user keys · P2 · JS · IN PROGRESS (JS worker, round 5) [V]
-`function f(){ arguments[0]=9; return arguments.length }; f()` → 1 (node 0): the value model keeps no length apart from the
-array storage and has no non-enumerable own `length` (needs a length field beside the array cell in the C floor, twin and
-MetaJS, or non-enumerable own properties). Sloppy mapped arguments: `function g(p){ p=5; return arguments[0] }; g(1)` → 1
-(node 5). `Object.hasOwn({a:1}, "a")` → TypeError "Object.hasOwn is not a function" in all engines (node true). A program key
-starting with `"__#"` stays hidden (it shares the private-name / symbol namespace).
+### T-603 js compiler: a method call inside an assignment target; arguments edges; `"__#"` keys · P1 · JS · OPEN [V]
+`class K { constructor(){ this.o = {a:1} } get(i){ return this.o } }; new K().get(1).a = 2` → llvm.Run and native "TypeError:
+k.get is not a function" (interp and node accept); also `m.get(1).a = 3` on a Map. emitRefPath reads the member with memGetExt
+and calls it through jsCallChecked; use the ordinary method-call lowering (js_jsmget, js_jsxcall, js_jsmcall). js and ts. P2:
+`var a = arguments; a[0] = 2` is not mapped to the parameter (node 2, ours 1); generators/async are not mapped (node `g1 5`);
+after a write past the argument count Object.keys / spread see the written slots (node `{"2":1}200`, ours `{"2":1}01230`);
+`arguments.length = 0` truncates storage (node `0:7:1`, ours `0:undefined:1`). `Number.parseInt === parseInt` false (node true).
+`for (var p of xs)`: interp declares p per loop, compiler per function — settle against node. `"__#"` program keys stay hidden:
+add a raw-key path for engine keys (js-builtins.js `["__#@iterator"]`, `#x in o`, emitters' private member names) first, then
+escape `"__#"` like other `"__"` keys.
 
 ---
 
@@ -704,6 +708,7 @@ T-590 lua: metatables and the missing standard library — PARTIAL 9512ba5c..57f
 T-595 php: `[$closure, '__invoke']` callbacks; `[&$k, 4]` in the compiler; callback-form static fallback; bindTo identity — DONE 8ee86d4a (the call_user_func('M::sp') claim refuted by php-src: __call is right, bug45180/bug45186 phpts)
 T-593 go: an overflowing constant is not rejected at compound assignment, typed const, return, element, send, `_ =` — DONE 89ffe028 (plus division by constant zero, negative constant shifts, constant index/slice/conversion range, truncated float constants: 86e8cea2..5208be9f)
 T-600 php compiler: arrays passed by value are not copied; array copies drop references; spread of references — PARTIAL 2393d44a 464bc456 49c99ffa (by-value array params copied when written, shared references kept through copies and spreads, Closure::bind/fromCallable via an instance, named by-ref args); rest is T-602
+T-597 js: arguments length and mapping; `Object.hasOwn`; `"__#"` user keys — PARTIAL 3687b718 (Object.hasOwn/groupBy/fromEntries, Map.groupBy, Number statics, String.raw, structuredClone, sloppy mapped arguments, arguments length slot); rest is T-603
 
 # Settled — do not re-open
 
