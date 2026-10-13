@@ -108,7 +108,13 @@ CaseStmt    <~~ push(makeCase(takeAll())) ~~>
             = KwCase NsWord KwIn CaseSepOpt { CaseClause } KwEsac ;
 CaseClause  <~~ push(mkCaseClause(takeAll())) ~~>
             = [ "(" ] CasePats ")" CaseBody [ CaseTerm ] CaseSepOpt ;
-CasePats    <~~ push({pats: takeAll()}) ~~> = NsWord { "|" NsWord } ;
+CasePats    <~~ push({pats: takeAll()}) ~~> = CasePat { "|" CasePat } ;
+// A case PATTERN is a word whose QUOTED parts are literal (`'*')` matches only "*"): the
+// quoting-aware segments of [[ == ]]'s right hand side (PatSq, PatDq, PatAnsi, PatEsc). Twin of
+// CasePat in bash-interpreter.abnf.
+CasePat     <~~ push(mkNsWord(takeAll())) ~~> = CaseFirst :whitespace() { CaseSeg } ;
+CaseFirst   = Tilde | CaseSeg ;
+CaseSeg     = PatSq | PatDq | PatAnsi | UqExp | LineCont | PatEsc | BraceLit | EgPfxLit | BareSeg ;
 CaseBody    <~~ push(makeSeq(linkAsync(takeAll()))) ~~>
             = CaseSepOpt [ Statement { ListSep Statement } ListOptSep ] ;
 CaseSep     = NotCaseTerm SepTok { NotCaseTerm SepTok } ;
@@ -444,12 +450,16 @@ PeDigits    = "0"..."9" { "0"..."9" } ;
 PeOp        <~~ push({op: up.in}) ~~> = ":-" | ":=" | ":?" | ":+" | "-" | "=" | "?" | "+" ;
 // ${v#pat} ${v##pat} ${v%pat} ${v%%pat} : strip a matching prefix / suffix (# from the
 // front, % from the back; doubled = longest match).
-PePatForm   = PeTarget PePatOp PePatArg ;
+PePatForm   = PeTarget PePatOp PeGlobArg ;
 PePatOp     <~~ push({pe: up.in}) ~~> = "##" | "#" | "%%" | "%" ;
 PePatArg    <~~ push(mkWord(takeAll())) ~~> = { BraceSeg } ;
+// The PATTERN operand of ${v#p} ${v%p} ${v^p} and ${v/p/r}: a quoted part is literal, as in
+// [[ == ]] (`${s%"$p"}` with p='?' strips nothing); the replacement stays a PePatArg.
+PeGlobArg   <~~ push(mkWord(takeAll())) ~~> = { PeGlobSeg } ;
+PeGlobSeg   = PatSq | PatDq | ExpSeg | LineCont | PatEsc | BraceBare ;
 
 // ${v^} ${v^^} ${v,} ${v,,} : case conversion of the first / of every character.
-PeCaseForm  = PeTarget PeCaseOp [ PePatArg ] ;
+PeCaseForm  = PeTarget PeCaseOp [ PeGlobArg ] ;
 PeCaseOp    <~~ push({pe: up.in}) ~~> = "^^" | "^" | ",," | "," ;
 
 // ${v/pat/rep} first match, ${v//pat/rep} every match, ${v/#pat/rep} anchored at the
@@ -461,7 +471,7 @@ PeReplAll   <~~ push({pe: up.in}) ~~> = "//" ;
 PeReplOne   <~~ push({pe: up.in}) ~~> = "/" ;
 PeReplAnchor <~~ push({anchor: up.in}) ~~> = "#" | "%" ;
 ReplPat     <~~ push(mkWord(takeAll())) ~~> = { ReplSeg } ;
-ReplSeg     = SqSeg | DqSeg | ExpSeg | EscSeg | ReplBare ;
+ReplSeg     = PatSq | PatDq | ExpSeg | PatEsc | ReplBare ;
 ReplBare    <~~ push(makeConst(up.in)) ~~> = !@+"}/\"'\\$`" ;
 ReplTail    = "/" PePatArg ;
 
@@ -598,7 +608,13 @@ CondPrim    = CondParen | CondUn | CondMatch | CondBin | CondSingle ;
 CondMatch   <~~ push(mkCondMatch(takeAll())) ~~> = NsWord CondMatchOp RegexWord ;
 CondMatchOp <~~ push({cop: up.in}) ~~> = "=~" ;
 RegexWord   <~~ push(mkNsWord(takeAll())) ~~> = RegexSeg :whitespace() { RegexSeg } ;
-RegexSeg    = SqSeg | DqSeg | ExpSeg | EscSeg | RegexBare ;
+// A QUOTED or backslash-escaped part of the regex is literal ([[ abc =~ "a.c" ]] is false
+// in bash 5.3), so those segments are regex-escaped.
+RegexSeg    = RxSq | RxDq | ExpSeg | RxEsc | RegexBare ;
+RxSq        = "'" :whitespace() { !@+"'" } <~~ push(makeConst(regexEscape(up.in))) ~~> "'" ;
+RxDq        <~~ push(mkQuotedRx(mkDqWord(takeAll()))) ~~>
+            = '"' :whitespace() { ExpSeg | DqCont | DqEsc | DqLit } '"' ;
+RxEsc       <~~ push(makeConst(regexEscape(escChar(up.in)))) ~~> = "\\" AnyCh ;
 RegexBare   <~~ push(makeConst(up.in)) ~~> = !@+" \t\n\r;&<>$'\"\\`" ;
 CondParen   = "(" CondOr ")" ;
 CondUn      <~~ push(mkCondUn(takeAll())) ~~> = CondUnOp NsWord ;
@@ -1358,6 +1374,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtArrAppend = rtDecl("rt_arr_append", false, [1, 1])
     var rtSliceFields = rtDecl("rt_slicefields", true, [1, 0, 0, 1, 0])
     var rtGlobEsc = rtDecl("rt_globescape", true, [1])
+    var rtRxEsc = rtDecl("rt_rxescape", true, [1])
     var rtCatFields = rtDecl("rt_catfields", true, [1, 1])
     var rtMapf = rtDecl("rt_mapf", true, [1, 0, 1, 1, 0, 1, 0])
 
@@ -3217,6 +3234,24 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
     // A quoted part of a [[ ]] pattern is literal: escape its glob metacharacters.
+    // Make every ERE metacharacter of s literal (a quoted part of a =~ regex); rt_rxescape
+    // is the run-time half. Twin of regexEscape in bash-interpreter.abnf.
+    function regexEscape(s0) {
+        var out = ""
+        var i
+        for (i = 0; i < s0.length; i++) {
+            var ch = s0.charAt(i)
+            if ("\\.[]()*+?{}|^$".indexOf(ch) >= 0) { out = out + "\\" }
+            out = out + ch
+        }
+        return out
+    }
+    function mkQuotedRx(t) {
+        return {c: undefined, fn: function(b) {
+            var r = evalWord(b, t)
+            return {b: r.b, v: r.b.NewCall(rtRxEsc, r.v)}
+        }}
+    }
     function mkQuotedPat(t) {
         return {c: undefined, fn: function(b) {
             var r = evalWord(b, t)

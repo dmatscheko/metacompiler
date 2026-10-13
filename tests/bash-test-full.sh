@@ -2253,6 +2253,37 @@ s43() {
   check ir3 "[${!r6}] $(( ${!r8} + 1 )) $(( $e43 ))" "[F] 8 14"
 }
 
+# ===== SECTION 44: quoted pattern characters are literal =====
+# In a case pattern, the pattern operand of ${v#p} ${v%p} ${v/p/r} ${v^^p} and the regex of
+# [[ =~ ]], a quoted or backslash-escaped part matches itself; an unquoted expansion stays a
+# pattern. Every expected value is bash 5.3's.
+s44() {
+  local s r="" p='?' q='*' rx='b+'
+  for s in x '*' a.c abc; do
+    case $s in '*') r="${r}star " ;; *) r="${r}other " ;; esac
+    case $s in "a.c"|\*) r="${r}lit " ;; *) r="${r}no " ;; esac
+  done
+  check qp1 "$r" "other no star lit other lit other no "
+  s='*'
+  check qp2 "[${s#\*}] [${s%"$p"}] [${s%$p}] [${s/'*'/R}] [${s//"*"/R}] [${s#"$q"}] [${s#$q}]" "[] [*] [] [R] [R] [] [*]"
+  s=x
+  check qp3 "[${s/'*'/R}] [${s/"?"/R}] [${s/?/R}] [${s//[x]/R}] [${s//"[x]"/R}]" "[x] [x] [R] [R] [x]"
+  s='a*b*c'
+  check qp4 "[${s//\*/-}] [${s%%"*"*}] [${s#*"*"}]" "[a-b-c] [a] [b*c]"
+  s=abc
+  check qp5 "[${s^^"b"}] [${s^^'[ab]'}] [${s^^[ab]}]" "[aBc] [abc] [ABc]"
+  r=""
+  [[ abc =~ "a.c" ]]; r="$r$?"
+  [[ abc =~ a"."c ]]; r="$r$?"
+  [[ a.c =~ a"."c ]]; r="$r$?"
+  [[ abc =~ a\.c ]]; r="$r$?"
+  [[ 'a$' =~ a'$' ]]; r="$r$?"
+  [[ abbb =~ a$rx ]]; r="$r$?"
+  [[ abbb =~ a"$rx" ]]; r="$r$?"
+  [[ 'ab+' =~ a"$rx" ]]; r="$r$?"
+  check qp6 "$r" "11010010"
+}
+
 s01   # SECTION-CALL 01
 s02   # SECTION-CALL 02
 s03   # SECTION-CALL 03
@@ -2296,5 +2327,6 @@ s40   # SECTION-CALL 40
 s41   # SECTION-CALL 41
 s42   # SECTION-CALL 42
 s43   # SECTION-CALL 43
+s44   # SECTION-CALL 44
 echo "full: $checks checks, $fails failures"
 exit $fails

@@ -116,7 +116,12 @@ CaseStmt    <~~ push(makeCase(takeAll())) ~~>
             = KwCase NsWord KwIn CaseSepOpt { CaseClause } KwEsac ;
 CaseClause  <~~ push(mkCaseClause(takeAll())) ~~>
             = [ "(" ] CasePats ")" CaseBody [ CaseTerm ] CaseSepOpt ;
-CasePats    <~~ push({pats: takeAll()}) ~~> = NsWord { "|" NsWord } ;
+CasePats    <~~ push({pats: takeAll()}) ~~> = CasePat { "|" CasePat } ;
+// A case PATTERN is a word whose QUOTED parts are literal (`'*')` matches only "*"): the
+// quoting-aware segments of [[ == ]]'s right hand side (PatSq, PatDq, PatAnsi, PatEsc).
+CasePat     <~~ push(mkNsWord(takeAll())) ~~> = CaseFirst :whitespace() { CaseSeg } ;
+CaseFirst   = Tilde | CaseSeg ;
+CaseSeg     = PatSq | PatDq | PatAnsi | UqExp | LineCont | PatEsc | BraceLit | EgPfxLit | BareSeg ;
 CaseBody    <~~ push(makeSeq(linkAsync(takeAll()))) ~~>
             = CaseSepOpt [ Statement { ListSep Statement } ListOptSep ] ;
 CaseSep     = NotCaseTerm SepTok { NotCaseTerm SepTok } ;
@@ -494,12 +499,16 @@ PeDigits    = "0"..."9" { "0"..."9" } ;
 PeOp        <~~ push({op: up.in}) ~~> = ":-" | ":=" | ":?" | ":+" | "-" | "=" | "?" | "+" ;
 // ${v#pat} ${v##pat} ${v%pat} ${v%%pat} : strip a matching prefix / suffix (# from the
 // front, % from the back; doubled = longest match).
-PePatForm   = PeTarget PePatOp PePatArg ;
+PePatForm   = PeTarget PePatOp PeGlobArg ;
 PePatOp     <~~ push({pe: up.in}) ~~> = "##" | "#" | "%%" | "%" ;
 PePatArg    <~~ push(mkWord(takeAll())) ~~> = { BraceSeg } ;
+// The PATTERN operand of ${v#p} ${v%p} ${v^p} and ${v/p/r}: a quoted part is literal, as in
+// [[ == ]] (`${s%"$p"}` with p='?' strips nothing); the replacement stays a PePatArg.
+PeGlobArg   <~~ push(mkWord(takeAll())) ~~> = { PeGlobSeg } ;
+PeGlobSeg   = PatSq | PatDq | ExpSeg | LineCont | PatEsc | BraceBare ;
 
 // ${v^} ${v^^} ${v,} ${v,,} : case conversion of the first / of every character.
-PeCaseForm  = PeTarget PeCaseOp [ PePatArg ] ;
+PeCaseForm  = PeTarget PeCaseOp [ PeGlobArg ] ;
 PeCaseOp    <~~ push({pe: up.in}) ~~> = "^^" | "^" | ",," | "," ;
 
 // ${v/pat/rep} first match, ${v//pat/rep} every match, ${v/#pat/rep} anchored at the
@@ -511,7 +520,7 @@ PeReplAll   <~~ push({pe: up.in}) ~~> = "//" ;
 PeReplOne   <~~ push({pe: up.in}) ~~> = "/" ;
 PeReplAnchor <~~ push({anchor: up.in}) ~~> = "#" | "%" ;
 ReplPat     <~~ push(mkWord(takeAll())) ~~> = { ReplSeg } ;
-ReplSeg     = SqSeg | DqSeg | ExpSeg | EscSeg | ReplBare ;
+ReplSeg     = PatSq | PatDq | ExpSeg | PatEsc | ReplBare ;
 ReplBare    <~~ push(makeConst(up.in)) ~~> = !@+"}/\"'\\$`" ;
 ReplTail    = "/" PePatArg ;
 
@@ -666,7 +675,13 @@ CondPrim    = CondParen | CondUn | CondMatch | CondBin | CondSingle ;
 CondMatch   <~~ push(mkCondMatch(takeAll())) ~~> = NsWord CondMatchOp RegexWord ;
 CondMatchOp <~~ push({cop: up.in}) ~~> = "=~" ;
 RegexWord   <~~ push(mkNsWord(takeAll())) ~~> = RegexSeg :whitespace() { RegexSeg } ;
-RegexSeg    = SqSeg | DqSeg | ExpSeg | EscSeg | RegexBare ;
+// A QUOTED or backslash-escaped part of the regex is literal ([[ abc =~ "a.c" ]] is false
+// in bash 5.3), so those segments are regex-escaped.
+RegexSeg    = RxSq | RxDq | ExpSeg | RxEsc | RegexBare ;
+RxSq        = "'" :whitespace() { !@+"'" } <~~ push(makeConst(regexEscape(up.in))) ~~> "'" ;
+RxDq        <~~ push(mkQuotedRx(mkDqWord(takeAll()))) ~~>
+            = '"' :whitespace() { ExpSeg | DqCont | DqEsc | DqLit } '"' ;
+RxEsc       <~~ push(makeConst(regexEscape(escChar(up.in)))) ~~> = "\\" AnyCh ;
 RegexBare   <~~ push(makeConst(up.in)) ~~> = !@+" \t\n\r;&<>$'\"\\`" ;
 CondParen   = "(" CondOr ")" ;
 CondUn      <~~ push(mkCondUn(takeAll())) ~~> = CondUnOp NsWord ;
@@ -4818,6 +4833,20 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return out
     }
     function mkQuotedPat(t) { return function() { return globEscape(wordJoin(t())) } }
+    // Make every ERE metacharacter of s literal (a quoted part of a =~ regex). Twin of
+    // rt_rxescape.
+    function regexEscape(s) {
+        var out = ""
+        var i = 0
+        while (i < s.length) {
+            var ch = chunkAt(s, i)
+            i = i + ch.length
+            if (ch.length == 1 && "\\.[]()*+?{}|^$".indexOf(ch) >= 0) { out = out + "\\" }
+            out = out + ch
+        }
+        return out
+    }
+    function mkQuotedRx(t) { return function() { return regexEscape(wordJoin(t())) } }
 
     function mkCondBin(items) {
         var l = items[0], op = items[1].cop, r = items[2]

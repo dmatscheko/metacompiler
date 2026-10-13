@@ -3472,6 +3472,28 @@ char *rt_globescape(char *s) {
     return dst;
 }
 
+/* i8* rt_rxescape(i8* s): make every ERE metacharacter of s literal, which is
+ * what a QUOTED part of a [[ =~ ]] regex is ([[ abc =~ "a.c" ]] is false). */
+char *rt_rxescape(char *s) {
+    int len = rt_strlen(s);
+    char *dst = rt_bump(len * 2 + 1);
+    int i = 0, o = 0;
+    while (i < len) {
+        int ch = (int)(unsigned char)s[i];
+        int meta = ch == 92 || ch == 46 || ch == 91 || ch == 93 || ch == 40 || ch == 41 || ch == 42
+                || ch == 43 || ch == 63 || ch == 123 || ch == 125 || ch == 124 || ch == 94 || ch == 36;
+        if (meta) {
+            dst[o] = 92;
+            o = o + 1;
+        }
+        dst[o] = (char)ch;
+        o = o + 1;
+        i = i + 1;
+    }
+    dst[o] = 0;
+    return dst;
+}
+
 /* i8* rt_mapf(i8* v, i32 op, i8* p, i8* r, i32 mode, i8* sep, i32 star): one
  * pattern operator applied to EVERY FIELD of a field list.
  *
