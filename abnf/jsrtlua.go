@@ -833,6 +833,10 @@ func luExpFix(s string) string {
 // An escaped text (luStrKey) was a string or a boolean, and the store spells
 // the two infinities its own way.
 func (rt *jsrt) luKeyBack(s string) interface{} {
+	if rest, obj := strings.CutPrefix(s, luKeyObj); obj {
+		n, _ := strconv.Atoi(rest)
+		return luIdObjs[n-1]
+	}
 	if rest, esc := strings.CutPrefix(s, luKeyEsc); esc {
 		switch rest {
 		case "true":
@@ -889,10 +893,17 @@ func luKey(v interface{}) interface{} {
 		}
 		return f
 	}
+	switch v.(type) {
+	case *jsObject, *jsClosure:
+		// A table or a function addresses the map by its identity number behind
+		// the escape U+0101, and luKeyBack finds the object again from it.
+		return luKeyObj + strconv.Itoa(luObjId(v))
+	}
 	return v
 }
 
 const luKeyEsc = "Ā"
+const luKeyObj = "ā"
 
 func luStrKey(s string) string {
 	if s == "" {

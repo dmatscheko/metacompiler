@@ -487,9 +487,24 @@ func (rt *jsrt) luFmtToStr(v interface{}) string {
 	return rt.luIdent(v)
 }
 
-// luIdents numbers the tables and functions luIdent has rendered. One compile runs
-// one program, so a package-level map is per program.
+// luIdents numbers the tables and functions in first-use order, and luIdObjs[n-1]
+// is object n. The number is both how luIdent renders the object and its identity
+// as a table key (luKey). One compile runs one program, so package-level state is
+// per program.
 var luIdents = map[interface{}]int{}
+var luIdObjs []interface{}
+
+// luObjId is the identity number of a table or a function. Twin of luObjId in
+// languages/lib/lua-rt.metajs and luaObjId in lua-interpreter.abnf.
+func luObjId(v interface{}) int {
+	n, ok := luIdents[v]
+	if !ok {
+		luIdObjs = append(luIdObjs, v)
+		n = len(luIdObjs)
+		luIdents[v] = n
+	}
+	return n
+}
 
 // luIdent is how a table or a function renders: its type and an identity,
 // `table: 0x...`. Real lua prints the address, which differs between runs, so
@@ -497,11 +512,7 @@ var luIdents = map[interface{}]int{}
 // objects differently; a per-run counter gives that. Twin of js_luident in
 // languages/lib/lua-rt.metajs.
 func (rt *jsrt) luIdent(v interface{}) string {
-	n, ok := luIdents[v]
-	if !ok {
-		n = len(luIdents) + 1
-		luIdents[v] = n
-	}
+	n := luObjId(v)
 	hex := strconv.FormatInt(int64(0x55550000+16*n), 16)
 	if luIsFile(v) {
 		return "file (0x" + hex + ")"

@@ -1009,8 +1009,12 @@ function js_lukey(v) {
         }
         return f
     }
+    // A table or a function addresses the map by its identity number behind the
+    // escape U+0101, and js_lukeyback finds the object again from it.
+    if (v !== undefined && v !== null) { return luKeyObj + luObjId(v) }
     return v
 }
+var luKeyObj = String.fromCharCode(257)
 
 // forprep (lvm.c): the loop runs on integers when the start AND the step are
 // integers, and then only the step is checked (a zero step would never end) and
@@ -1052,6 +1056,7 @@ function js_lukeyback(k) {
         if (rest == "false") { return false }
         return rest
     }
+    if (k.charCodeAt(0) === 257) { return luIdObjs[luAtoi(k.substring(1, k.length)) - 1] }
     if (k == "Infinity") { return luInf() }
     if (k == "-Infinity") { return 0 - luInf() }
     var n = luParseNum(k)
@@ -1528,12 +1533,27 @@ function lsFmtToStr(args, n) {
 // is that one object renders the same way every time and two objects differently;
 // a per-run counter gives that, found by IDENTITY in a parallel array (MetaJS has
 // no map keyed by an object). Twin of rt.luIdent in abnf/jsrtlua.go.
+//
+// The same number is the object's identity as a table key (js_lukey). A table
+// keeps it in the hidden __lid field; a function is a floor cell that can hold
+// no field, so it is found by the scan. luIdObjs[n - 1] is object n. Twin of
+// luObjId in abnf/jsrtluafmt.go and luaObjId in lua-interpreter.abnf.
 var luIdObjs = []
-function js_luident(v) {
+function luObjId(v) {
+    if (typeof v == "object") {
+        var have = v["__lid"]
+        if (have !== undefined) { return have }
+        luIdObjs.push(v)
+        v["__lid"] = luIdObjs.length
+        return luIdObjs.length
+    }
     var i = 0
     while (i < luIdObjs.length && luIdObjs[i] !== v) { i = i + 1 }
     if (i === luIdObjs.length) { luIdObjs.push(v) }
-    var n = 1431633920 + 16 * (i + 1)
+    return i + 1
+}
+function js_luident(v) {
+    var n = 1431633920 + 16 * luObjId(v)
     var digits = "0123456789abcdef"
     var hex = ""
     while (n > 0) {

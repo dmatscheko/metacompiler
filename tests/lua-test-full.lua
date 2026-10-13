@@ -1843,6 +1843,29 @@ function s42()
     check("rep1", string.rep("", ns[1]) .. "|" .. string.rep("", ns[2], ""), "|")
 end
 
+-- ===== SECTION 43: tables and functions as keys =====
+-- Each table and each function is a key of its own, found again by identity and
+-- handed back by pairs and next as the object itself.
+function s43()
+    local t = {}
+    local a, b = {}, {}
+    local f, g = function() end, function() end
+    t[a] = 1; t[b] = 2; t[f] = 3; t[g] = 4
+    check("ok1", tostring(t[a]) .. tostring(t[b]) .. tostring(t[f]) .. tostring(t[g]), "1234")
+    local n, sum = 0, 0
+    for k, v in pairs(t) do
+        n = n + 1
+        if t[k] == v and (k == a or k == b or k == f or k == g) then sum = sum + v end
+    end
+    check("ok2", n .. " " .. sum, "4 10")
+    t[a] = nil
+    check("ok3", tostring(t[a]) .. " " .. tostring(t[b]), "nil 2")
+    local k1, v1 = next({[g] = "x"})
+    check("ok4", k1 == g and v1 == "x", true)
+    check("ok5", rawget(t, b), 2)
+    check("ok6", ({[t] = "self"})[t], "self")
+end
+
 s25() -- SECTION-CALL 25
 s26() -- SECTION-CALL 26
 s27() -- SECTION-CALL 27
@@ -1861,5 +1884,6 @@ s39() -- SECTION-CALL 39
 s40() -- SECTION-CALL 40
 s41() -- SECTION-CALL 41
 s42() -- SECTION-CALL 42
+s43() -- SECTION-CALL 43
 print("full: " .. checks .. " checks, " .. failures .. " failures")
 exit(failures)

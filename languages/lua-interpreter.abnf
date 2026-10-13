@@ -1285,8 +1285,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (n !== n || n - n !== 0) { return "" + n }
             return luaFloKey(n)
         }
+        // A table or a function addresses the map by its identity number
+        // (luaObjId) behind the escape U+0101, which no Lua byte string holds;
+        // luaKeyBack finds the object again from that number.
+        if ((typeof k == "object" && k !== null) || typeof k == "function") { return luaKeyObj + luaObjId(k) }
         return "" + k
     }
+    var luaKeyObj = String.fromCharCode(257)
     // JavaScript's exponent form rewritten into C's %g one - always signed, at least
     // two digits. Only the INTEGER arm of luaNumStr uses it (where it is the
     // identity, an integer's text being digits only); the float arm builds its own
@@ -1431,12 +1436,27 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // is that one object renders the same way every time and two objects
     // differently; a per-run counter gives that, found by identity. Twin of
     // js_luident in lib/lua-rt.metajs and rt.luIdent in abnf/jsrtluafmt.go.
+    //
+    // The same number is the object's identity as a table key (luaKey). It is
+    // handed out in first-use order, kept on a table in the hidden __lid field and
+    // found by a scan for a function, which cannot carry a field in every engine;
+    // luaIdObjs[n - 1] is object n. Twin of luObjId in lib/lua-rt.metajs and
+    // abnf/jsrtluafmt.go.
     var luaIdObjs = []
-    function luaIdent(v) {
+    function luaObjId(v) {
+        if (typeof v == "object") {
+            if (v.__lid !== undefined) { return v.__lid }
+            luaIdObjs.push(v)
+            v.__lid = luaIdObjs.length
+            return luaIdObjs.length
+        }
         var i = 0
         while (i < luaIdObjs.length && luaIdObjs[i] !== v) { i = i + 1 }
         if (i === luaIdObjs.length) { luaIdObjs.push(v) }
-        var n = 1431633920 + 16 * (i + 1)
+        return i + 1
+    }
+    function luaIdent(v) {
+        var n = 1431633920 + 16 * luaObjId(v)
         var digits = "0123456789abcdef"
         var hex = ""
         while (n > 0) {
@@ -2624,6 +2644,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (rest == "false") { return false }
             return rest
         }
+        if (kk.charCodeAt(0) === 257) { return luaIdObjs[luaAtoi(kk.substring(1)) - 1] }
         if (kk == "Infinity") { return 1 / 0 }
         if (kk == "-Infinity") { return -1 / 0 }
         var n = anytype // The key read back as a number, when it spells one.
