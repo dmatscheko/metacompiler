@@ -255,7 +255,7 @@ AssignStat  <~~ push(makeAssign(takeAll())) ~~>
 // are all ordinary Lua. The chain is therefore the SAME one an
 // expression parses; emitTargetSlot walks all but the last step and emitSlotWrite writes
 // into the slot the last step names.
-Target      <~~ push(makeTargetRef(takeAll())) ~~>
+Target      <~~ push(luaTargetRef(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> { CallSfx | MethodSfx | StrCallSfx | TblCallSfx | DotSfx | IndexSfx } ;
 
 CallStat    <~~ push(exprToStmt(pop())) ~~>
@@ -1857,11 +1857,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     "io", "setmetatable", "getmetatable", "_G", "coroutine", "utf8", "collectgarbage"]
     var libNeed = {}
     for (var lni = 0; lni < libNames.length; lni++) { libNeed[libNames[lni]] = false }
-    makeVarRef = function(name) {
+    function luaNoteRef(name) {
         if (name == "_G") {
             for (var lnj = 0; lnj < libNames.length; lnj++) { libNeed[libNames[lnj]] = true }
         }
         if (libNeed[name] === false) { libNeed[name] = true }
+    }
+    makeVarRef = function(name) {
+        luaNoteRef(name)
         return function(b) {
             return {b: b, v: callLua(b, "lua_getvar", [curScopeV, emitStr(b, name)])}
         }
@@ -2231,6 +2234,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
 
     // ----- Assignment -----
+    // A target with a path READS its base name (getmetatable("").__index = f), so a
+    // library name there is a reference too.
+    function luaTargetRef(items) {
+        if (items.length > 1) { luaNoteRef(items[0]) }
+        return makeTargetRef(items)
+    }
     // A target's key: a field's name, or the index's first value, which is made a
     // table key only when it is written (js_luwkey rejects nil and NaN there).
     function pathKeyV(b, p) {

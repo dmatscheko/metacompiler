@@ -1972,6 +1972,10 @@ function s44()
     check("mt25", tostring(setmetatable(rt, {__index = {q = 1}}) == rt) .. rt.q, "true1")
     setmetatable(rt, nil)
     check("mt26", tostring(rt.q) .. " " .. tostring(getmetatable(rt)), "nil nil")
+    -- A call as the base of an assignment target.
+    local gt = setmetatable({}, {})
+    getmetatable(gt).__index = {x = 5}
+    check("mt27", gt.x, 5)
 end
 
 -- ===== SECTION 45: a file is no table, and __name names a type =====
