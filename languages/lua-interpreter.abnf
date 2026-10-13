@@ -1620,11 +1620,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var v = 0
         if (op == "+")       { v = x + y }
         else if (op == "-")  { v = x - y }
-        else if (op == "*")  { v = x * y }
+        else if (op == "*")  {
+            v = x * y
+            // The dialect keeps an integral product as an integer, which has no
+            // signed zero: -7 * 0.0 is -0.0 (IEEE: the sign is the XOR of the signs).
+            if (v === 0 && luaNegSign(x) !== luaNegSign(y)) { v = 0 / (0 - 1) }
+        }
         else if (op == "//") { v = Math.floor(x / y) }
         else                 { v = luaMod(x, y) }
         return mkFlt(v)
     }
+    function luaNegSign(n) { return n < 0 || (n === 0 && 1 / n < 0) }
     // Equality compares numbers across the two subtypes (1 == 1.0) and everything else
     // by identity; the ordering comparisons work on the numeric values or on strings.
     // Two integers compare on the exact layer, because past 2^53 their double readings

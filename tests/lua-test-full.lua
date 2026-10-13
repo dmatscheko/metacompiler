@@ -1822,6 +1822,20 @@ function s40()
     check("io9", io.stdout:write() == io.stdout, true)
 end
 
+-- ===== SECTION 41: signed zeros and nan through the math library =====
+-- An integer times a float zero takes the XOR of the signs, and the rounding
+-- functions keep a nan a float. Values printed by lua 5.5.
+function s41()
+    local xs = {-7, 0.0, 2, -0.0}
+    local ys = {0.0, -2, -0.0, 0}
+    local got = ""
+    for i = 1, #xs do got = got .. tostring(xs[i] * ys[i]) .. " " end
+    check("zs1", got, "-0.0 -0.0 -0.0 -0.0 ")
+    local nan = xs[2] / xs[2]
+    check("zs2", math.type(math.floor(nan)) .. " " .. math.type(math.ceil(nan)), "float float")
+    check("zs3", tostring(math.floor(nan)) == tostring(nan), true)
+end
+
 s25() -- SECTION-CALL 25
 s26() -- SECTION-CALL 26
 s27() -- SECTION-CALL 27
@@ -1838,5 +1852,6 @@ s37() -- SECTION-CALL 37
 s38() -- SECTION-CALL 38
 s39() -- SECTION-CALL 39
 s40() -- SECTION-CALL 40
+s41() -- SECTION-CALL 41
 print("full: " .. checks .. " checks, " .. failures .. " failures")
 exit(failures)

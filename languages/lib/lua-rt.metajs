@@ -275,6 +275,9 @@ function luPair(v) {
 // luI64 turns an integral double into an integer value, or undefined when it does
 // not fit the signed 64 bit range. 2^63 is the first magnitude that is not one.
 function luI64(n) {
+    // NaN fits nothing: math.floor(0/0) is the float nan. Twin of luI64 in
+    // abnf/jsrtlua.go.
+    if (n !== n) { return undefined }
     if (n >= 9223372036854775808) { return undefined }
     if (n < 0 - 9223372036854775808) { return undefined }
     return luNorm(i64FromNum(n))

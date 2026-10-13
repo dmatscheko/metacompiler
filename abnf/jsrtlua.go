@@ -112,9 +112,10 @@ func luNumOf(v interface{}) float64 {
 }
 
 // luI64 turns an integral double into an integer value, or answers false when it
-// does not fit the signed 64 bit range.
+// does not fit the signed 64 bit range (NaN fits nothing: math.floor(0/0) is
+// the float nan).
 func luI64(n float64) (interface{}, bool) {
-	if n >= luMinIntF || n < -luMinIntF {
+	if !(n < luMinIntF && n >= -luMinIntF) {
 		return nil, false
 	}
 	return giNorm(int64(n), 64, false), true
