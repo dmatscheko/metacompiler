@@ -3224,6 +3224,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (cls.__name == "float" && name == "from_number") {
             return function(x) { return pyFloatFromNumber(x) }
         }
+        if (cls.__name == "str" && name == "maketrans") {
+            return function() {
+                var kw = kTakeNamed()
+                if (kw != null && kw.keys.length > 0) { pySRaise("TypeError", "str.maketrans() takes no keyword arguments") }
+                var args = []
+                for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]) }
+                return pySMakeTrans(args)
+            }
+        }
         return null
     }
 
@@ -5758,33 +5767,38 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // with no parameters, a single-argument one, and Argument Clinic's
     // positional-only ("expected at least") and keyword-capable ("takes at most")
     // forms. format takes any number.
-    // str.isidentifier: a letter or "_" first, then letters, digits and "_". Past
-    // ASCII a printable code point counts as a letter, which approximates
-    // Unicode's XID classes (no engine here carries them). Twin of
+    // str.isidentifier: an XID_Start code point or "_" first, then XID_Continue
+    // ones (pyIsXidStart / pyIsXidCont in lib/python-printable.js). Twin of
     // pyStrEnv.isIdent in abnf/pystrmethod.go and lib/python-rt.metajs.
     function pySIsIdent(s) {
         var cs = pySChars(s)
         if (cs.length == 0) { return false }
-        for (var i = 0; i < cs.length; i++) {
-            var c = cs[i].charCodeAt(0)
-            var ok = c == 95 || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (i > 0 && c >= 48 && c <= 57)
-                     || (c >= 128 && pyStrIsPrintable(cs[i]))
-            if (!ok) { return false }
+        if (!pyIsXidStart(hostGlobals["ord"](cs[0]))) { return false }
+        for (var i = 1; i < cs.length; i++) {
+            if (!pyIsXidCont(hostGlobals["ord"](cs[i]))) { return false }
         }
         return true
     }
-    // str.translate(table) over a dict keyed by code point: a str value replaces
-    // the character, an int is a code point, None deletes it, a missing key keeps
+    // str.translate(table): table[ord(c)] for each character, so any mapping or
+    // sequence serves - a dict is read directly, anything else is subscripted,
+    // and a LookupError (a missing key, an index past a list) keeps the
+    // character. A str value replaces it, an int is a code point, None deletes
     // it. Twin of pyStrEnv.translate in abnf/pystrmethod.go and lib/python-rt.metajs.
     function pySTranslate(s, table) {
-        if (!isDict(table) || isSet(table)) { pySRaise("TypeError", "'" + pyTypeOf(table).__name + "' object is not subscriptable") }
+        var plain = isDict(table) && !isSet(table)
         var cs = pySChars(s)
         var out = ""
         for (var i = 0; i < cs.length; i++) {
-            var at = dictFind(table, hostGlobals["ord"](cs[i]))
-            if (at < 0) { out += cs[i]; continue }
             var v = anytype
-            v = table.vals[at]
+            if (plain) {
+                var at = dictFind(table, hostGlobals["ord"](cs[i]))
+                if (at < 0) { out += cs[i]; continue }
+                v = table.vals[at]
+            } else {
+                var got = pySTransGet(table, hostGlobals["ord"](cs[i]))
+                if (got === null) { out += cs[i]; continue }
+                v = got.v
+            }
             if (v === null || v === undefined) { continue }
             if (typeof v == "string") { out += v; continue }
             if (typeof v != "number" && typeof v != "boolean" && !bigIsBig(v)) {
@@ -5795,6 +5809,64 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             out += codePoint(cp)
         }
         return out
+    }
+    // table[cp] as {v}, or null when it raises LookupError.
+    function pySTransGet(table, cp) {
+        var saved = scopes
+        var r = anytype
+        try { r = {v: pyget(table, cp)} }
+        catch (e) {
+            scopes = saved
+            if (e != null && e != undefined && e.__exc === true && pyIsInstance(e.v, hostGlobals["LookupError"])) { return null }
+            throw e
+        }
+        return r
+    }
+    // str.maketrans(x[, y[, z]]): a dict of code points. One argument is a dict
+    // whose str keys of length 1 become their code points; two equal-length
+    // strs map each character of x to the one at the same place in y, and z's
+    // characters map to None. Argument Clinic checks y and z before x. Twin of
+    // pyStrEnv.makeTrans in abnf/pystrmethod.go and lib/python-rt.metajs.
+    function pySMakeTrans(args) {
+        var n = args.length
+        if (n == 0) { pySRaise("TypeError", "maketrans expected at least 1 argument, got 0") }
+        if (n > 3) { pySRaise("TypeError", "maketrans expected at most 3 arguments, got " + n) }
+        var d = newDict()
+        var i = 0
+        if (n == 1) {
+            var x = args[0]
+            if (!isDict(x) || isSet(x)) { pySRaise("TypeError", "if you give only one argument to maketrans it must be a dict") }
+            for (i = 0; i < x.keys.length; i++) {
+                var k = anytype
+                k = x.keys[i]
+                if (typeof k == "string") {
+                    if (pyLen(k) != 1) { pySRaise("ValueError", "string keys in translatetable must be of length 1") }
+                    dictSet(d, hostGlobals["ord"](k), x.vals[i])
+                } else if (pyNumTName(k) == "int") {
+                    dictSet(d, k, x.vals[i])
+                } else {
+                    pySRaise("TypeError", "keys in translate table mustbe strings or integers")
+                }
+            }
+            return d
+        }
+        for (i = 1; i < n; i++) {
+            if (typeof args[i] != "string") {
+                pySRaise("TypeError", "maketrans() argument " + (i + 1) + " must be str, not " + pyTypeOf(args[i]).__name)
+            }
+        }
+        if (typeof args[0] != "string") {
+            pySRaise("TypeError", "first maketrans argument must be a string if there is a second argument")
+        }
+        var xs = pySChars(args[0])
+        var ys = pySChars(args[1])
+        if (xs.length != ys.length) { pySRaise("ValueError", "the first two maketrans arguments must have equal length") }
+        for (i = 0; i < xs.length; i++) { dictSet(d, hostGlobals["ord"](xs[i]), hostGlobals["ord"](ys[i])) }
+        if (n == 3) {
+            var zs = pySChars(args[2])
+            for (i = 0; i < zs.length; i++) { dictSet(d, hostGlobals["ord"](zs[i]), undefined) }
+        }
+        return d
     }
     function pySArity(name, n) {
         var lo = 0
@@ -5904,7 +5976,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "isdigit" || name == "isdecimal" || name == "isnumeric") { return true }
         if (name == "isalpha" || name == "isalnum" || name == "isspace") { return true }
         if (name == "islower" || name == "isupper" || name == "istitle" || name == "isascii") { return true }
-        if (name == "isprintable" || name == "isidentifier" || name == "translate") { return true }
+        if (name == "isprintable" || name == "isidentifier" || name == "translate" || name == "maketrans") { return true }
         if (name == "center" || name == "ljust" || name == "rjust" || name == "zfill") { return true }
         if (name == "expandtabs" || name == "encode") { return true }
         if (name == "partition" || name == "rpartition") { return true }
@@ -6027,6 +6099,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
 
     function pyStrMethod(s, name, args, kw) {
+        // maketrans is a static method: the receiver plays no part.
+        if (name == "maketrans") {
+            if (kw !== null && kw !== undefined && kw.keys.length > 0) { pySRaise("TypeError", "str.maketrans() takes no keyword arguments") }
+            return pySMakeTrans(args)
+        }
         if (kw !== null && kw !== undefined && kw.keys.length > 0) { args = pyStrKwArgs(name, args, kw) }
         else { pySArity(name, args.length) }
         var n = s.length
@@ -7015,6 +7092,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // argument - neither of which a value can carry. See pySuperHere.
         // languages/python-to-llvm-ir.abnf's makeVarRef does the same thing.
         if (name == "super") { return function() { return pySuperHere() } }
+        // __import__ is lib/python-importlib.py's, compiled in at its first
+        // mention. Twin of the same line in python-to-llvm-ir.abnf's makeVarRef.
+        if (name == "__import__") { core.importFile("importlib", null) }
         return function() {
             var v = anytype
             v = getVar(name)
@@ -11168,7 +11248,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                       "NameError", "UnboundLocalError", "AttributeError", "RuntimeError",
                       "StopIteration", "NotImplementedError", "AssertionError",
                       "OSError", "ExceptionGroup", "OverflowError", "UnicodeError", "UnicodeDecodeError",
-                      "UnicodeEncodeError", "GeneratorExit", "MemoryError", "SystemExit", "ImportError"]
+                      "UnicodeEncodeError", "GeneratorExit", "MemoryError", "SystemExit", "ImportError", "ModuleNotFoundError"]
     var pyExcParent = {}
     pyExcParent["Exception"] = "BaseException"
     pyExcParent["ArithmeticError"] = "Exception"
@@ -11197,6 +11277,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     pyExcParent["MemoryError"] = "Exception"
     pyExcParent["SystemExit"] = "BaseException"
     pyExcParent["ImportError"] = "Exception"
+    pyExcParent["ModuleNotFoundError"] = "ImportError"
     function installExceptions() {
         for (var i = 0; i < pyExcNames.length; i++) {
             var n = pyExcNames[i]

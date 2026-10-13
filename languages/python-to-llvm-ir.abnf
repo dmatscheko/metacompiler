@@ -4607,7 +4607,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         "OSError", "ExceptionGroup", "AssertionError",
                         "ZeroDivisionError", "IndexError", "KeyError", "UnboundLocalError",
                         "NotImplementedError", "OverflowError", "UnicodeError", "UnicodeDecodeError",
-                        "UnicodeEncodeError", "GeneratorExit", "MemoryError", "SystemExit", "ImportError"]
+                        "UnicodeEncodeError", "GeneratorExit", "MemoryError", "SystemExit", "ImportError", "ModuleNotFoundError"]
         var excParent = {}
         excParent["ZeroDivisionError"] = "ArithmeticError"
         excParent["IndexError"] = "LookupError"
@@ -4622,6 +4622,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         excParent["UnicodeEncodeError"] = "UnicodeError"
         excParent["GeneratorExit"] = "BaseException"
         excParent["SystemExit"] = "BaseException"
+        excParent["ModuleNotFoundError"] = "ImportError"
         var excMade = {}
         excMade["BaseException"] = excRoot
         for (var e0 = 0; e0 < excNames.length; e0++) {
@@ -4816,6 +4817,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return {b: b, v: callExt(b, "js_pysuper", [clsV, selfV])}
             }
         }
+        // __import__ is lib/python-importlib.py's, compiled in at its first
+        // mention. Twin of the same line in python-interpreter.abnf's makeVarRef.
+        if (name == "__import__") { core.importFile("importlib", null) }
         return function(b) {
             return {b: b, v: pyGetVar(b, curScopeV, emitStr(b, name))}
         }

@@ -21061,6 +21061,10 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 			return rt.pyGenClose(g)
 		}
 	}
+	// str.maketrans(...) goes to the str dispatcher, which refuses a keyword.
+	if name == "maketrans" && pyBuiltinClsName(target) == "str" {
+		return rt.pyExt("js_pymcall", "", name, &jsArray{elems: args}, kw)
+	}
 	// A method the builtin TYPE OBJECT itself carries - dict.fromkeys.
 	if m, ok := rt.pyBuiltinClsMethod(target, name); ok {
 		return rt.call(m, jsUndef, rt.pyBindCall(m, args, kw))
@@ -21552,6 +21556,10 @@ func (rt *jsrt) pyBuiltinClsMethod(target interface{}, name string) (interface{}
 	case "float.from_number":
 		return jsHostFunc("float.from_number", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			return rt.pyFloatFromNumber(argAt(args, 0))
+		}), true
+	case "str.maketrans":
+		return jsHostFunc("str.maketrans", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return rt.pyExt("js_pymcall", "", "maketrans", &jsArray{elems: args}, jsUndef)
 		}), true
 	}
 	return nil, false

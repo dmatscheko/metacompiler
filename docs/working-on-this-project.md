@@ -1034,7 +1034,8 @@ python-dir.js             <- python-rt.metajs, python interpreter (the fixed
                              names dir() of a user class answers; Go twin:
                              pyDirObject in abnf/jsrt.go)
 python-printable.js       <- python-rt.metajs, python interpreter (Unicode
-                             printability for repr() and str.isprintable(); Go
+                             printability for repr() and str.isprintable(), and
+                             XID_Start/XID_Continue for str.isidentifier(); Go
                              twin: abnf/pyprintable.go)
 java-chars.js             <- java-rt.metajs, java interpreter, csharp-rt.metajs,
                              csharp interpreter (Go twin: abnf/jsrtjavachars.go)

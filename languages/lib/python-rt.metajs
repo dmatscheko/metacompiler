@@ -2865,6 +2865,17 @@ function pyBuiltinClsMethod(target, name) {
     if (tn == "float" && name == "from_number") {
         return function(x) { return pyFloatFromNumber(x) }
     }
+    if (tn == "str" && name == "maketrans") {
+        return function() {
+            var args = []
+            var i = 0
+            while (i < arguments.length) {
+                args.push(arguments[i])
+                i = i + 1
+            }
+            return pySMakeTrans(args)
+        }
+    }
     return undefined
 }
 
@@ -9443,6 +9454,8 @@ function pyDMethodCall(target, name, args, kw) {
         }
         if (name == "close") { return pyGenClose(target) }
     }
+    // str.maketrans(...) goes to the str dispatcher, which refuses a keyword.
+    if (name == "maketrans" && pyBuiltinClsName(target) == "str") { return pyStrMethod("", name, args, kw) }
     // A method the builtin TYPE OBJECT itself carries - dict.fromkeys.
     var bcm = pyBuiltinClsMethod(target, name)
     if (bcm !== undefined) { return bcm.apply(undefined, pyBindCall(bcm, args, kw)) }
@@ -12980,7 +12993,7 @@ function pySIsStrMethod(name) {
     if (name == "isdigit" || name == "isdecimal" || name == "isnumeric") { return true }
     if (name == "isalpha" || name == "isalnum" || name == "isspace") { return true }
     if (name == "islower" || name == "isupper" || name == "istitle" || name == "isascii") { return true }
-    if (name == "isprintable" || name == "isidentifier" || name == "translate") { return true }
+    if (name == "isprintable" || name == "isidentifier" || name == "translate" || name == "maketrans") { return true }
     if (name == "center" || name == "ljust" || name == "rjust" || name == "zfill") { return true }
     if (name == "expandtabs" || name == "encode") { return true }
     if (name == "partition" || name == "rpartition") { return true }
@@ -13110,40 +13123,47 @@ function pyEncEsc(cp) {
     return head + hex
 }
 
-// Go: pyStrEnv.isIdent. str.isidentifier: a letter or "_" first, then
-// letters, digits and "_"; past ASCII a printable code point counts as a letter.
+// Go: pyStrEnv.isIdent. str.isidentifier: an XID_Start code point or "_"
+// first, then XID_Continue ones (python-printable.js).
 function pySIsIdent(s) {
     var cs = pySChars(s)
     if (cs.length == 0) { return false }
-    var i = 0
+    if (!pyIsXidStart(js_pyord(cs[0]))) { return false }
+    var i = 1
     while (i < cs.length) {
-        var c = cs[i].charCodeAt(0)
-        var ok = c == 95 || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (i > 0 && c >= 48 && c <= 57)
-        if (!ok && c >= 128) { ok = pyStrIsPrintable(cs[i]) }
-        if (!ok) { return false }
+        if (!pyIsXidCont(js_pyord(cs[i]))) { return false }
         i = i + 1
     }
     return true
 }
 
-// Go: pyStrEnv.translate. str.translate(table) over a dict keyed by code point.
+// Go: pyStrEnv.translate. str.translate(table): table[ord(c)] for each
+// character - a dict read directly, anything else subscripted, a LookupError
+// keeping the character.
 function pySTranslate(s, table) {
-    if (!pyIsDict(table) || pySetElemsOf(table) !== null) {
-        pySRaise("TypeError", "'" + pyTypeName(table) + "' object is not subscriptable")
-    }
+    var plain = pyIsDict(table) && pySetElemsOf(table) === null
     var cs = pySChars(s)
     var out = ""
     var i = 0
     while (i < cs.length) {
         var ch = cs[i]
         i = i + 1
-        var at = pyDictFind(table["keys"], js_pyord(ch))
-        if (at < 0) {
-            out = out + ch
-            continue
-        }
         var v = anytype
-        v = table["vals"][at]
+        if (plain) {
+            var at = pyDictFind(table["keys"], js_pyord(ch))
+            if (at < 0) {
+                out = out + ch
+                continue
+            }
+            v = table["vals"][at]
+        } else {
+            var got = pySTransGet(table, js_pyord(ch))
+            if (got === null) {
+                out = out + ch
+                continue
+            }
+            v = got["v"]
+        }
         if (v === null || v === undefined) { continue }
         if (typeof v == "string") {
             out = out + v
@@ -13158,8 +13178,82 @@ function pySTranslate(s, table) {
     }
     return out
 }
+// Go: pyStrEnv.transGet. table[cp] as {v}, or null when it raises LookupError.
+function pySTransGet(table, cp) {
+    var r = anytype
+    try {
+        r = {v: js_pyidx(table, cp)}
+    } catch (e) {
+        if (!pyDIsInstance(e, pyExcClass("LookupError"))) { throw e }
+        return null
+    }
+    return r
+}
+
+// Go: pyStrEnv.makeTrans. str.maketrans(x[, y[, z]]): a dict of code points.
+// Argument Clinic checks y and z before x.
+function pySMakeTrans(args) {
+    var n = args.length
+    if (n == 0) { pySRaise("TypeError", "maketrans expected at least 1 argument, got 0") }
+    if (n > 3) { pySRaise("TypeError", "maketrans expected at most 3 arguments, got " + pyIntStr(n)) }
+    var d = pyNewDict()
+    var i = 0
+    if (n == 1) {
+        var x = args[0]
+        if (!pyIsDict(x) || pySetElemsOf(x) !== null) {
+            pySRaise("TypeError", "if you give only one argument to maketrans it must be a dict")
+        }
+        var xk = x["keys"]
+        while (i < xk.length) {
+            var k = anytype
+            k = xk[i]
+            if (typeof k == "string") {
+                if (pySChars(k).length != 1) { pySRaise("ValueError", "string keys in translatetable must be of length 1") }
+                pyDictSet(d, js_pyord(k), x["vals"][i])
+            } else if (pyNumTName(k) == "int") {
+                pyDictSet(d, k, x["vals"][i])
+            } else {
+                pySRaise("TypeError", "keys in translate table mustbe strings or integers")
+            }
+            i = i + 1
+        }
+        return d
+    }
+    i = 1
+    while (i < n) {
+        if (typeof args[i] != "string") {
+            pySRaise("TypeError", "maketrans() argument " + pyIntStr(i + 1) + " must be str, not " + pyTypeName(args[i]))
+        }
+        i = i + 1
+    }
+    if (typeof args[0] != "string") {
+        pySRaise("TypeError", "first maketrans argument must be a string if there is a second argument")
+    }
+    var xs = pySChars(args[0])
+    var ys = pySChars(args[1])
+    if (xs.length != ys.length) { pySRaise("ValueError", "the first two maketrans arguments must have equal length") }
+    i = 0
+    while (i < xs.length) {
+        pyDictSet(d, js_pyord(xs[i]), js_pyord(ys[i]))
+        i = i + 1
+    }
+    if (n == 3) {
+        var zs = pySChars(args[2])
+        i = 0
+        while (i < zs.length) {
+            pyDictSet(d, js_pyord(zs[i]), undefined)
+            i = i + 1
+        }
+    }
+    return d
+}
 
 function pyStrMethod(s, name, args, kw) {
+    // maketrans is a static method: the receiver plays no part.
+    if (name == "maketrans") {
+        if (pyIsDict(kw) && kw["keys"].length > 0) { pySRaise("TypeError", "str.maketrans() takes no keyword arguments") }
+        return pySMakeTrans(args)
+    }
     if (pyIsDict(kw) && kw["keys"].length > 0) { args = pyStrKwArgs(name, args, kw) }
     else { pySArity(name, args.length) }
     var n = s.length

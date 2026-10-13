@@ -6071,6 +6071,47 @@ def s116():
           and S116walk("i", 2, "c", "y") == [("a", 1), ("b", 2), ("y", 9)]
           and S116walk("i", 1, "a", "z") == [("a", 1), ("b", 2), ("c", 7), "dictionary keys changed during iteration"])
 
+# ===== SECTION 117: str.maketrans, translate over any mapping, isidentifier, __import__ =====
+# str.maketrans is a static method answering a dict of code points; translate
+# subscripts any table, a LookupError keeping the character; isidentifier asks
+# Unicode's XID_Start / XID_Continue, not printability; __import__ answers the
+# top-level module (the named one with a fromlist). Rows from CPython 3.14.
+def S117err(f):
+    try:
+        f()
+    except Exception as e:
+        return type(e).__name__ + ": " + str(e)
+    return "no error"
+
+def s117():
+    ab = ["ab", "xy", "c"]
+    t = str.maketrans(ab[0], ab[1], ab[2])
+    check("mkt1", t == {97: 120, 98: 121, 99: None} and "abcab".translate(t) == "xyxy"
+          and "q".maketrans(ab[0], ab[1]) == {97: 120, 98: 121}
+          and str.maketrans({"é": "e", 98: None}) == {233: "e", 98: None})
+    check("mkt2", S117err(lambda: str.maketrans(ab[0], ab[2])) == "ValueError: the first two maketrans arguments must have equal length"
+          and S117err(lambda: str.maketrans(ab)) == "TypeError: if you give only one argument to maketrans it must be a dict"
+          and S117err(lambda: str.maketrans({ab[0]: 1})) == "ValueError: string keys in translatetable must be of length 1"
+          and S117err(lambda: str.maketrans(1, ab[0])) == "TypeError: first maketrans argument must be a string if there is a second argument")
+    tbl = [str(i) for i in range(100)]
+    tbl[97] = "A"
+    class Up:
+        def __getitem__(self, k):
+            if k == 98:
+                raise KeyError(k)
+            return chr(k).upper()
+    check("mkt3", "abc".translate(tbl) == "A9899" and "abc".translate(Up()) == "AbC"
+          and "aé".translate("xyz" * 80) == "yz"
+          and S117err(lambda: "a".translate(5)) == "TypeError: 'int' object is not subscriptable")
+    ids = ["_x1", "é", "\U0001f600", "a\U0001f600", "x·", "·x", "a₁", "Ⅷ", "á", "x‍"]
+    check("xid1", [s.isidentifier() for s in ids] == [True, True, False, False, True, False, False, True, True, True])
+    names = ["math", "os.path", "nope.x"]
+    check("imp1", __import__(names[0]).floor(2.5) == 2 and __import__(names[1]).path.join("a", "b") == "a/b"
+          and __import__(names[1], fromlist=["join"]).join("c", "d") == "c/d"
+          and S117err(lambda: __import__(names[2])) == "ModuleNotFoundError: No module named 'nope'"
+          and S117err(lambda: __import__("os.nope")) == "ModuleNotFoundError: No module named 'os.nope'; 'os' is not a package"
+          and issubclass(ModuleNotFoundError, ImportError))
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -6185,5 +6226,6 @@ def main():
     s114() # SECTION-CALL 114
     s115() # SECTION-CALL 115
     s116() # SECTION-CALL 116
+    s117() # SECTION-CALL 117
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

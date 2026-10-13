@@ -1120,7 +1120,7 @@ func pysIsStrMethod(name string) bool {
 		"split", "rsplit", "splitlines", "join", "replace",
 		"find", "rfind", "index", "rindex", "count", "startswith", "endswith",
 		"isdigit", "isdecimal", "isnumeric", "isalpha", "isalnum", "isspace",
-		"islower", "isupper", "istitle", "isascii", "isprintable", "isidentifier", "translate",
+		"islower", "isupper", "istitle", "isascii", "isprintable", "isidentifier", "translate", "maketrans",
 		"center", "ljust", "rjust", "zfill", "expandtabs", "encode",
 		"partition", "rpartition", "removeprefix", "removesuffix",
 		"format", "format_map":
@@ -1275,19 +1275,20 @@ func pysEncEsc(cp int) string {
 	return fmt.Sprintf("\\U%08x", cp)
 }
 
-// isIdent is str.isidentifier: a letter or "_" first, then letters, digits and
-// "_"; past ASCII a printable code point counts as a letter, which approximates
-// Unicode's XID classes. Twin of pySIsIdent in languages/python-interpreter.abnf
-// and lib/python-rt.metajs.
+// isIdent is str.isidentifier: an XID_Start code point or "_" first, then
+// XID_Continue ones (pyIsXidStart / pyIsXidCont). Twin of pySIsIdent in
+// languages/python-interpreter.abnf and lib/python-rt.metajs.
 func (e *pyStrEnv) isIdent(s string) bool {
 	cs := e.chars(s)
 	if len(cs) == 0 {
 		return false
 	}
 	for i, ch := range cs {
-		c := []rune(ch)[0]
-		ok := c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (i > 0 && c >= '0' && c <= '9') ||
-			(c >= 128 && pyStrIsPrintable(ch))
+		c := wtf8Surrogate(ch)
+		if c == 0 {
+			c = []rune(ch)[0]
+		}
+		ok := (i == 0 && pyIsXidStart(c)) || (i > 0 && pyIsXidCont(c))
 		if !ok {
 			return false
 		}
@@ -1295,23 +1296,35 @@ func (e *pyStrEnv) isIdent(s string) bool {
 	return true
 }
 
-// translate is str.translate(table) over a dict keyed by code point: a str value
-// replaces the character, an int is a code point, None deletes it, a missing key
-// keeps it. Twin of pySTranslate in languages/python-interpreter.abnf and
+// translate is str.translate(table): table[ord(c)] for each character, so any
+// mapping or sequence serves - a dict is read directly, anything else is
+// subscripted, and a LookupError (a missing key, an index past a list) keeps
+// the character. A str value replaces it, an int is a code point, None deletes
+// it. Twin of pySTranslate in languages/python-interpreter.abnf and
 // lib/python-rt.metajs.
 func (e *pyStrEnv) translate(s string, table interface{}) string {
-	keys, vals, ok := dictParts(table)
-	if _, isSet := pySetElems(table); !ok || isSet {
-		e.raise("TypeError", "'"+pyTypeName(e.rt, table)+"' object is not subscriptable")
+	keys, vals, plain := dictParts(table)
+	if _, isSet := pySetElems(table); isSet {
+		plain = false
 	}
 	out := ""
 	for _, ch := range e.chars(s) {
-		at := e.rt.pyDictFind(keys, float64([]rune(ch)[0]))
-		if at < 0 {
+		cp := e.rt.pyExt("js_pyord", ch)
+		var v interface{}
+		if plain {
+			at := e.rt.pyDictFind(keys, cp)
+			if at < 0 {
+				out += ch
+				continue
+			}
+			v = vals.elems[at]
+		} else if got, ok := e.transGet(table, cp); ok {
+			v = got
+		} else {
 			out += ch
 			continue
 		}
-		switch v := vals.elems[at].(type) {
+		switch v := v.(type) {
 		case jsUndefT, jsNullT:
 		case string:
 			out += v
@@ -1326,6 +1339,86 @@ func (e *pyStrEnv) translate(s string, table interface{}) string {
 		}
 	}
 	return out
+}
+
+// transGet is table[cp], ok false when it raises LookupError.
+func (e *pyStrEnv) transGet(table interface{}, cp interface{}) (v interface{}, ok bool) {
+	defer func() {
+		if p := recover(); p != nil {
+			if th, isT := p.(*jsThrown); isT && e.rt.pyIsInstance(th.value, e.rt.pyExcClass("LookupError")) {
+				v, ok = nil, false
+				return
+			}
+			panic(p)
+		}
+	}()
+	return e.rt.pyExt("js_pyidx", table, cp), true
+}
+
+// makeTrans is str.maketrans(x[, y[, z]]): a dict of code points. One argument
+// is a dict whose str keys of length 1 become their code points; two
+// equal-length strs map each character of x to the one at the same place in y,
+// and z's characters map to None. Argument Clinic checks y and z before x.
+// Twin of pySMakeTrans in languages/python-interpreter.abnf and
+// lib/python-rt.metajs.
+func (e *pyStrEnv) makeTrans(args []interface{}) interface{} {
+	rt := e.rt
+	n := len(args)
+	if n == 0 {
+		e.raise("TypeError", "maketrans expected at least 1 argument, got 0")
+	}
+	if n > 3 {
+		e.raise("TypeError", fmt.Sprintf("maketrans expected at most 3 arguments, got %d", n))
+	}
+	keys, vals := &jsArray{}, &jsArray{}
+	put := func(k, v interface{}) {
+		if i := rt.pyDictFind(keys, k); i >= 0 {
+			vals.elems[i] = v
+			return
+		}
+		dictAppend(keys, vals, k, v)
+	}
+	if n == 1 {
+		xk, xv, ok := dictParts(args[0])
+		if _, isSet := pySetElems(args[0]); !ok || isSet {
+			e.raise("TypeError", "if you give only one argument to maketrans it must be a dict")
+		}
+		for i, k := range xk.elems {
+			if ks, isStr := k.(string); isStr {
+				if len(e.chars(ks)) != 1 {
+					e.raise("ValueError", "string keys in translatetable must be of length 1")
+				}
+				put(rt.pyExt("js_pyord", ks), xv.elems[i])
+			} else if pyNumTypeName(k) == "int" {
+				put(k, xv.elems[i])
+			} else {
+				e.raise("TypeError", "keys in translate table mustbe strings or integers")
+			}
+		}
+	} else {
+		for i := 1; i < n; i++ {
+			if _, isStr := args[i].(string); !isStr {
+				e.raise("TypeError", fmt.Sprintf("maketrans() argument %d must be str, not %s", i+1, pyTypeName(rt, args[i])))
+			}
+		}
+		x, isStr := args[0].(string)
+		if !isStr {
+			e.raise("TypeError", "first maketrans argument must be a string if there is a second argument")
+		}
+		xs, ys := e.chars(x), e.chars(args[1].(string))
+		if len(xs) != len(ys) {
+			e.raise("ValueError", "the first two maketrans arguments must have equal length")
+		}
+		for i := range xs {
+			put(rt.pyExt("js_pyord", xs[i]), rt.pyExt("js_pyord", ys[i]))
+		}
+		if n == 3 {
+			for _, z := range e.chars(args[2].(string)) {
+				put(rt.pyExt("js_pyord", z), jsUndef)
+			}
+		}
+	}
+	return &jsObject{props: map[string]interface{}{"__dict": true, "keys": keys, "vals": vals}}
 }
 
 func (e *pyStrEnv) call(s, name string, args []interface{}, kw interface{}) interface{} {
@@ -1567,7 +1660,14 @@ func init() {
 							rt.fail("js_pymcall args must be an array")
 						}
 						args, kw := arr.elems, u(a[3])
-						if keys, _, isDict := dictParts(kw); isDict && len(keys.elems) > 0 {
+						keys, _, isDict := dictParts(kw)
+						if name == "maketrans" { // A static method: the receiver plays no part.
+							if isDict && len(keys.elems) > 0 {
+								env.raise("TypeError", "str.maketrans() takes no keyword arguments")
+							}
+							return w(env.makeTrans(args))
+						}
+						if isDict && len(keys.elems) > 0 {
 							args = rt.pysKwArgs(name, args, kw)
 						} else {
 							env.arity(name, len(args))
