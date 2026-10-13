@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-606** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-607** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -147,15 +147,11 @@ element as an expression pattern) does not parse in either half (range bounds do
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-602 php: spread into a by-ref parameter; lazy copy holder counts; Closure statics by name; caller context in library callbacks · P2 · PHP · IN PROGRESS (PHP worker, round 4) [V spec-only]
-`$a=[1]; inc(...$a); echo $a[0];` with `function inc(&$x)` → all legs 1 (PHP 2: ZEND_SEND_UNPACK makes the element a reference;
-needs the callee's mask at merge time, a js_phmerge variant). Copies are eager, so reference holder counts are read at assignment
-instead of at the copy's first write: `$x=1;$a=[&$x];$b=$a;unset($x);$b[0]=5;echo $a[0];` → 5 (PHP 1); a literal's temporary
-counts as a holder; holders gone by frame return are never decremented (documented at phpRefHolders).
-`call_user_func(['Closure','bind'], ...)`, `'Closure::bind'`, `['Closure','fromCallable']` → "class "Closure" not found" in all
-engines; `call_user_func_array([$c,'fromCallable'], ...)` fails in llvm.Run and native (interp right). Library callbacks
-(`array_map(['N','q'])` with only __callStatic, cbVis's __call-with-object path, a strict `['C','m']` first-class callable via
-fakeCall) need the caller's `$this` and the library's "where" text passed through libCallable into the check, in all engines.
+### T-606 php: library callbacks outside libCbArg; argument-error order; named arg into a by-ref variadic · P3 · PHP · OPEN [V spec-only]
+array_walk_recursive, the array_udiff/uintersect family (__mec_takecb) and other dynamically-named callbacks are still judged in
+the library's frame, not the caller's. The callback is checked before earlier arguments, so `usort($notArray, 'bad')` reports
+Argument #2 where PHP reports Argument #1 (all engines). A named argument collected by a by-reference variadic is not passed by
+reference (all engines). (PHP 8.2's "Deprecated: Use of "self" in callables" needs T-596's warning channel.)
 
 ### T-596 php: binding and undefined-variable warnings are never printed · P3 · PHP · BLOCKED - needs a user decision
 PHP CLI prints `Warning: Cannot unbind $this of closure using $this in <file> on line <n>` (and undefined-variable/-index
@@ -706,6 +702,7 @@ T-597 js: arguments length and mapping; `Object.hasOwn`; `"__#"` user keys — P
 T-578 java: PatternSyntaxException message wording; class literals of unloaded JDK types — DONE 6096b47d (plus a java.util/java.lang API sweep: 46e77cc7 cd485893 caf757fb)
 T-598 lua: interpreter coroutines replay side effects; `ipairs("abc")`; indexing a coroutine — DONE 3d17ef92 (a real suspension primitive in both tag hosts: goja coroutine + frozen jsGenerator.suspend)
 T-599 lua: os library, load/dofile, `<close>`, a real `_G`, NaN sign in string.pack — DONE 82a5666c 117bdd13 3a1cd51e for <close>, os (time/clock/date/difftime/getenv/exit), _G raw access; load/loadfile/dofile DECLINED (a native binary has no run-time Lua compiler, and constant-only load would make load(s) depend on whether s is a literal); NaN sign in string.pack DECLINED (goja canonicalises NaN, MetaJS cannot see a double's bits); __gc/__mode DECLINED (no engine lets a program drive its collector)
+T-602 php: spread into a by-ref parameter; lazy copy holder counts; Closure statics by name; caller context in library callbacks — DONE ad2d64a0 for spreads into by-ref params, by-ref variadics, Closure statics by name, caller-frame library callbacks; lazy copy holder counts DECLINED: exact copy-on-write needs decrement-on-drop (refcounting), which manual 7.8 rejects, plus a separation check at ~85 write sites — documented at phpRefHolders
 
 # Settled — do not re-open
 
