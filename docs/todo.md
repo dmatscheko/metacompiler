@@ -87,7 +87,7 @@ starting with `"__#"` stays hidden (it shares the private-name / symbol namespac
 
 # JV — Java
 
-### T-578 java: PatternSyntaxException message wording; class literals of unloaded JDK types · P3 · JV · OPEN [V]
+### T-578 java: PatternSyntaxException message wording; class literals of unloaded JDK types · P3 · JV · IN PROGRESS (JV worker, round 4) [V]
 `"a".matches("(")` → getMessage `unterminated group` (lib/regex.js wording) in all engines; java 24 `Unclosed group near index 1`
 + newline + the pattern + a caret line. regex.js / jsrtregex.go are shared by every language: map the error kinds to Java's
 text in java's own layer (jxRe), not in the shared engine. `List.class` without lib/java-util.java loaded prints `List`
