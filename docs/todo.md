@@ -81,14 +81,14 @@ quietly, CPython raises "dictionary keys changed during iteration".
 
 # JS — JavaScript and TypeScript
 
-### T-580 js/ts: no temporal dead zone for let / const / class · P1 · JS · OPEN [V]
+### T-580 js/ts: no temporal dead zone for let / const / class · P1 · JS · IN PROGRESS (JS worker, round 4) [V]
 `let q = "outer"; { println(q); let q = 1; }` → all legs print `outer`; node `ReferenceError: Cannot access 'q' before
 initialization`. `typeof u` before `const u = 1` in the same block → `undefined` (node ReferenceError). Pre-declare let/const/
 class names with a sentinel at block entry in both interpreters and the emitter, and check reads, writes and typeof; in the
 compiler emit the check only at sites that can reach the TDZ (textually-earlier reads, closures declared in the block) so
 block entry and scope reads stay cheap. Measure tests/bench.sh js.
 
-### T-581 js: arguments object, `__`-prefixed user keys, `String.prototype.normalize`, BigInt callee text · P2 · JS · OPEN [V]
+### T-581 js: arguments object, `__`-prefixed user keys, `String.prototype.normalize`, BigInt callee text · P2 · JS · IN PROGRESS (JS worker, round 4) [V]
 `function f(){ arguments[0]=9; return arguments.length }; f()` → 1 (node 0); `Array.isArray(arguments)` → true (node false):
 arguments is a plain array in all engines. `JSON.parse('{"__proto__":1,"__x":2,"y":3}')` keys → `y` (node `__proto__,__x,y`):
 `__` keys are value-model slots (manual 7.9); user keys need escaping at every property path. `"é".normalize("NFD")`: goja
