@@ -34,7 +34,7 @@ func pyBuiltinDelegate(tname, name string) (*hostFunc, bool) {
 	case "bool":
 		return pyBuiltinDelegate("int", name)
 	case "tuple":
-		if !strings.HasPrefix(name, "__") {
+		if !strings.HasPrefix(name, "__") && !pyIsTupleMethod(name) {
 			return nil, false
 		}
 	case "str", "int", "float", "list", "dict", "set", "frozenset", "complex", "bytes", "bytearray":
@@ -178,6 +178,8 @@ func pyBuiltinHasMethod(tname, name string) bool {
 		return pysIsStrMethod(name)
 	case "list":
 		return pyIsListMethod(name)
+	case "tuple":
+		return pyIsTupleMethod(name)
 	case "dict":
 		return pyIsDictMethod(name)
 	case "set":

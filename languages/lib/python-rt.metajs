@@ -1388,7 +1388,7 @@ var pyBDelTab = []
 function pyBDelegate(tname, name) {
     if (tname == "bool") { return pyBDelegate("int", name) }
     if (tname == "tuple") {
-        if (name.substring(0, 2) != "__") { return undefined }
+        if (name.substring(0, 2) != "__" && !pyIsTupleMethod(name)) { return undefined }
     } else if (tname != "str" && tname != "int" && tname != "float" && tname != "list" && tname != "dict" &&
                tname != "set" && tname != "frozenset" && tname != "complex" && tname != "bytes" && tname != "bytearray") {
         return undefined
@@ -1421,6 +1421,7 @@ function pyIsBDelMethod(m) {
 function pyBuiltinHasMethod(tname, name) {
     if (tname == "str") { return pySIsStrMethod(name) }
     if (tname == "list") { return pyIsListMethod(name) }
+    if (tname == "tuple") { return pyIsTupleMethod(name) }
     if (tname == "dict") { return pyIsDictMethod(name) }
     if (tname == "set") { return pyIsSetMethod(name) }
     if (tname == "frozenset") { return pyIsSetMethod(name) && !pySetMutator(name) }
@@ -2407,9 +2408,11 @@ function pySlotsAllow(cls, name) {
     var i = 0
     while (i < mro.length) {
         var sl = mro[i]["__slots__"]
-        // object itself has no __dict__: its instances take no attribute.
+        // object and the builtin value types (tuple, list, int, ...) have no
+        // __dict__: their instances take no attribute. Exceptions do have one.
         if (sl === undefined) {
-            if (mro[i]["__mro"] !== undefined || mro[i]["__name"] != "object") { all = false }
+            if (mro[i]["__mro"] !== undefined
+                || (mro[i]["__name"] != "object" && pyBDelegate(pyToStr(mro[i]["__name"]), "__repr__") === undefined)) { all = false }
         } else {
             if (pySlotAllows(sl, name)) { return true }
         }
@@ -7271,16 +7274,19 @@ function pyBPctStar(args, ai, keyed) {
 // them: each argument goes through pyBytesPctArg first, a mapping key is bytes,
 // and a bytes right operand is one argument rather than a mapping.
 function pyBPct(f, arg, bytes) {
+    // An instance of a tuple or dict subclass is read as its builtin value,
+    // while a lone argument keeps the instance.
+    var ua = pyUnwrapBuiltin(arg)
     var args = []
     var dict = null
-    if (pyIsTup(arg)) { args = arg }
-    else if (pyIsDict(arg) && pySetElemsOf(arg) === null) { dict = arg ; args = [arg] }
+    if (pyIsTup(ua)) { args = ua }
+    else if (pyIsDict(ua) && pySetElemsOf(ua) === null) { dict = ua ; args = [arg] }
     else { args = [arg] }
     var out = ""
     var ai = 0
     // A dict or a list is a mapping to PyUnicode_Format, as in pyPct of
     // python-interpreter.abnf.
-    var mapped = !pyIsTup(arg) && ((pyIsArr(arg) && !(bytes && pyIsBytes(arg))) || (pyIsDict(arg) && pySetElemsOf(arg) === null))
+    var mapped = !pyIsTup(ua) && ((pyIsArr(ua) && !(bytes && pyIsBytes(ua))) || (pyIsDict(ua) && pySetElemsOf(ua) === null))
     var i = 0
     while (i < f.length) {
         var c = f.charAt(i)

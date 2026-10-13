@@ -21046,8 +21046,9 @@ func (rt *jsrt) pySlotsAllow(cls *jsObject, name string) bool {
 	for _, k := range pyMRO(cls) {
 		slots, has := k.props["__slots__"]
 		if !has {
-			// object itself has no __dict__: its instances take no attribute.
-			if !pyIsObjectCls(k) {
+			// object and the builtin value types (tuple, list, int, ...) have no
+			// __dict__: their instances take no attribute. Exceptions do have one.
+			if !pyIsObjectCls(k) && !pyIsValueTypeCls(k) {
 				all = false
 			}
 			continue
@@ -21064,6 +21065,20 @@ func (rt *jsrt) pySlotsAllow(cls *jsObject, name string) bool {
 func pyIsObjectCls(k *jsObject) bool {
 	_, hasMRO := k.props["__mro"]
 	return !hasMRO && k.props["__name"] == "object"
+}
+
+// pyIsValueTypeCls reports whether k is a builtin value type's class (tuple,
+// list, str, int, ...): the types whose methods a subclass delegates to.
+func pyIsValueTypeCls(k *jsObject) bool {
+	if _, hasMRO := k.props["__mro"]; hasMRO {
+		return false
+	}
+	n, isStr := k.props["__name"].(string)
+	if !isStr {
+		return false
+	}
+	_, ok := pyBuiltinDelegate(n, "__repr__")
+	return ok
 }
 
 // pySlotAllows answers whether ONE __slots__ declaration (a list, a
@@ -24618,12 +24633,15 @@ func pyPctExp(n float64, typ byte, prec int) string {
 // (pyBytesToS): each argument goes through pyBytesPctArg first, a mapping key
 // is bytes, and a bytes right operand is one argument rather than a mapping.
 func (rt *jsrt) pyPct(f string, arg interface{}, bytes bool) string {
+	// An instance of a tuple or dict subclass is read as its builtin value,
+	// while a lone argument keeps the instance (pyPct in python-interpreter.abnf).
+	ua := pyUnwrapBuiltin(arg)
 	var args []interface{}
 	var dictK, dictV *jsArray
-	if arr, ok := arg.(*jsArray); ok && arr.kind == pyTupKind {
+	if arr, ok := ua.(*jsArray); ok && arr.kind == pyTupKind {
 		args = arr.elems
-	} else if k, v, ok := dictParts(arg); ok {
-		if _, isSet := pySetElems(arg); !isSet {
+	} else if k, v, ok := dictParts(ua); ok {
+		if _, isSet := pySetElems(ua); !isSet {
 			dictK, dictV = k, v
 		}
 		args = []interface{}{arg}
@@ -24634,7 +24652,7 @@ func (rt *jsrt) pyPct(f string, arg interface{}, bytes bool) string {
 	ai := 0
 	// A dict or a list is a mapping to PyUnicode_Format, as in pyPct of
 	// languages/python-interpreter.abnf.
-	arr, isArr := arg.(*jsArray)
+	arr, isArr := ua.(*jsArray)
 	mapped := (isArr && arr.kind != pyTupKind && !(bytes && pyIsBytes(arr))) || dictK != nil
 	i := 0
 	for i < len(f) {

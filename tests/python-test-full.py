@@ -6299,6 +6299,52 @@ def s120():
           and S120err(lambda: {slice(1, {})}) == "TypeError: cannot use 'slice' as a set element (unhashable type: 'dict')"
           and S120err(lambda: hash(slice(1, xs))) == "TypeError: unhashable type: 'list'")
 
+# ===== SECTION 121: namedtuple and tuple subclasses =====
+# collections.namedtuple (lib/python-collections.py): field access, defaults,
+# keywords, _make/_replace/_asdict, and the texts its generated __new__ raises.
+# Under it sit tuple subclasses: their count/index, `%` reading one as the
+# argument tuple, `__slots__ = ()` leaving no __dict__, and an unbound builtin
+# method run on a subclass instance. Rows from CPython 3.14.
+from collections import namedtuple as S121nt
+
+def S121err(f):
+    try:
+        f()
+    except Exception as e:
+        return type(e).__name__ + ": " + str(e)
+    return "no error"
+
+class S121T(tuple):
+    __slots__ = ()
+
+class S121D(dict):
+    pass
+
+def s121():
+    P = S121nt("P", "x y", defaults=[0])
+    Q = S121nt("Q", ["a", "b", "c"])
+    q = Q(1, b=2, c=3)
+    check("ntp1", repr(q) == "Q(a=1, b=2, c=3)" and (q.a, q[1], q.c) == (1, 2, 3) and q == (1, 2, 3)
+          and isinstance(q, tuple) and repr(P(5)) == "P(x=5, y=0)" and P(y=1, x=2) == (2, 1)
+          and q._asdict() == {"a": 1, "b": 2, "c": 3} and q._replace(a=9) == (9, 2, 3)
+          and Q._make(range(3)) == (0, 1, 2) and Q._fields == ("a", "b", "c") and P._field_defaults == {"y": 0})
+    check("ntp2", [S121err(f) for f in [lambda: P(), lambda: P(1, 2, 3), lambda: P(1, z=2), lambda: P(1, x=2),
+                                         lambda: Q(), lambda: P(1)._replace(q=1), lambda: setattr(q, "a", 0),
+                                         lambda: S121nt("R", "x x"), lambda: S121nt("R", "_x")]]
+          == ["TypeError: P.__new__() missing 1 required positional argument: 'x'",
+              "TypeError: P.__new__() takes from 2 to 3 positional arguments but 4 were given",
+              "TypeError: P.__new__() got an unexpected keyword argument 'z'",
+              "TypeError: P.__new__() got multiple values for argument 'x'",
+              "TypeError: Q.__new__() missing 3 required positional arguments: 'a', 'b', and 'c'",
+              "TypeError: Got unexpected field names: ['q']",
+              "AttributeError: can't set attribute",
+              "ValueError: Encountered duplicate field name: 'x'",
+              "ValueError: Field names cannot start with an underscore: '_x'"])
+    t = S121T((1, 2, 2))
+    check("ntp3", t.count(2) == 2 and t.index(2) == 1 and tuple.index(t, 2) == 1 and q.count(2) == 1
+          and "%s-%s-%s" % t == "1-2-2" and "%(k)s" % S121D(k=3) == "3"
+          and S121err(lambda: setattr(t, "z", 1)) == "AttributeError: 'S121T' object has no attribute 'z' and no __dict__ for setting new attributes")
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -6417,5 +6463,6 @@ def main():
     s118() # SECTION-CALL 118
     s119() # SECTION-CALL 119
     s120() # SECTION-CALL 120
+    s121() # SECTION-CALL 121
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

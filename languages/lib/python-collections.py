@@ -3,7 +3,7 @@
 # python grammars), so one implementation serves all three engines.
 #
 # Imports here are flat (the module's top-level names bind directly), so
-# deque, defaultdict, OrderedDict and Counter are bound as themselves and the
+# deque, defaultdict, OrderedDict, Counter and namedtuple are bound as themselves and the
 # module object carrying them is _mec_mod_collections; helpers carry the
 # _mec_co prefix so that a program's own names cannot replace them.
 #
@@ -353,12 +353,157 @@ class Counter(dict):
         return result
 
 
+# namedtuple builds a tuple subclass whose fields read through
+# _mec_co_tuplegetter. Lib/collections builds __new__ with eval() to get a real
+# signature; here one generic __new__ binds the arguments itself and raises the
+# texts that signature would.
+_mec_co_kwlist = ["False", "None", "True", "and", "as", "assert", "async", "await",
+                  "break", "class", "continue", "def", "del", "elif", "else", "except",
+                  "finally", "for", "from", "global", "if", "import", "in", "is",
+                  "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try",
+                  "while", "with", "yield"]
+
+
+class _mec_co_tuplegetter:
+    def __init__(self, index, doc):
+        self._mec_co_index = index
+        self.__doc__ = doc
+
+    def __get__(self, obj, owner=None):
+        if obj is None:
+            return self
+        return obj[self._mec_co_index]
+
+    def __set__(self, obj, value):
+        raise AttributeError("can't set attribute")
+
+    def __repr__(self):
+        return "_tuplegetter(" + repr(self._mec_co_index) + ", " + repr(self.__doc__) + ")"
+
+
+def _mec_co_missing(names):
+    quoted = [repr(n) for n in names]
+    if len(quoted) == 1:
+        return quoted[0]
+    if len(quoted) == 2:
+        return quoted[0] + " and " + quoted[1]
+    return ", ".join(quoted[:-1]) + ", and " + quoted[-1]
+
+
+def namedtuple(typename, field_names, *, rename=False, defaults=None, module=None):
+    if isinstance(field_names, str):
+        field_names = field_names.replace(",", " ").split()
+    field_names = list(map(str, field_names))
+    typename = str(typename)
+    if rename:
+        seen = set()
+        for index, name in enumerate(field_names):
+            if (not name.isidentifier() or name in _mec_co_kwlist
+                    or name.startswith("_") or name in seen):
+                field_names[index] = "_" + str(index)
+            seen.add(name)
+    for name in [typename] + field_names:
+        if not name.isidentifier():
+            raise ValueError("Type names and field names must be valid identifiers: " + repr(name))
+        if name in _mec_co_kwlist:
+            raise ValueError("Type names and field names cannot be a keyword: " + repr(name))
+    seen = set()
+    for name in field_names:
+        if name.startswith("_") and not rename:
+            raise ValueError("Field names cannot start with an underscore: " + repr(name))
+        if name in seen:
+            raise ValueError("Encountered duplicate field name: " + repr(name))
+        seen.add(name)
+    field_defaults = {}
+    if defaults is not None:
+        defaults = tuple(defaults)
+        if len(defaults) > len(field_names):
+            raise TypeError("Got more default values than field names")
+        field_defaults = dict(reversed(list(zip(reversed(field_names), reversed(defaults)))))
+    field_names = tuple(field_names)
+    num_fields = len(field_names)
+    repr_fmt = "(" + ", ".join(name + "=%r" for name in field_names) + ")"
+    where = typename + ".__new__()"
+
+    def __new__(cls, *args, **kwargs):
+        if len(args) > num_fields:
+            least = num_fields - len(field_defaults)
+            if least == num_fields:
+                takes = str(num_fields + 1)
+            else:
+                takes = "from " + str(least + 1) + " to " + str(num_fields + 1)
+            raise TypeError(where + " takes " + takes + " positional arguments but "
+                            + str(len(args) + 1) + " were given")
+        values = list(args)
+        for key in kwargs:
+            if key not in field_names:
+                raise TypeError(where + " got an unexpected keyword argument " + repr(key))
+            if field_names.index(key) < len(args):
+                raise TypeError(where + " got multiple values for argument " + repr(key))
+        missing = []
+        for index in range(len(args), num_fields):
+            name = field_names[index]
+            if name in kwargs:
+                values.append(kwargs[name])
+            elif name in field_defaults:
+                values.append(field_defaults[name])
+            else:
+                missing.append(name)
+        if missing:
+            plural = "argument" if len(missing) == 1 else "arguments"
+            raise TypeError(where + " missing " + str(len(missing)) + " required positional "
+                            + plural + ": " + _mec_co_missing(missing))
+        return tuple.__new__(cls, values)
+
+    def _make(cls, iterable):
+        result = tuple.__new__(cls, iterable)
+        if len(result) != num_fields:
+            raise TypeError("Expected " + str(num_fields) + " arguments, got " + str(len(result)))
+        return result
+
+    def _replace(self, /, **kwds):
+        result = self._make(map(kwds.pop, field_names, self))
+        if kwds:
+            raise TypeError("Got unexpected field names: " + repr(list(kwds)))
+        return result
+
+    def __repr__(self):
+        return self.__class__.__name__ + repr_fmt % self
+
+    def _asdict(self):
+        return dict(zip(self._fields, self))
+
+    def __getnewargs__(self):
+        return tuple(self)
+
+    namespace = {
+        "__doc__": typename + "(" + ", ".join(field_names) + ")",
+        "__slots__": (),
+        "_fields": field_names,
+        "_field_defaults": field_defaults,
+        "__new__": __new__,
+        "_make": classmethod(_make),
+        "__replace__": _replace,
+        "_replace": _replace,
+        "__repr__": __repr__,
+        "_asdict": _asdict,
+        "__getnewargs__": __getnewargs__,
+        "__match_args__": field_names,
+    }
+    for index, name in enumerate(field_names):
+        namespace[name] = _mec_co_tuplegetter(index, "Alias for field number " + str(index))
+    result = type(typename, (tuple,), namespace)
+    if module is not None:
+        result.__module__ = module
+    return result
+
+
 def _mec_co_count(pair):
     return pair[1]
 
 
 class _mec_co_module:
-    __all__ = ["Counter", "OrderedDict", "defaultdict", "deque"]
+    __all__ = ["Counter", "OrderedDict", "defaultdict", "deque", "namedtuple"]
 
     def __repr__(self):
         return "<module 'collections'>"
@@ -380,3 +525,4 @@ _mec_co_module.deque = deque
 _mec_co_module.defaultdict = defaultdict
 _mec_co_module.OrderedDict = OrderedDict
 _mec_co_module.Counter = Counter
+_mec_co_module.namedtuple = staticmethod(namedtuple)

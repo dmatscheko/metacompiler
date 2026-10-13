@@ -2956,7 +2956,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 pyRaise(pyMakeExc("TypeError",
                     ["unbound method " + cls.__name + "." + name + "() needs an argument"]))
             }
-            var recv = args[0]
+            // A subclass instance runs the builtin's own method on its value.
+            var recv = pyBDelSelf(args[0])
             var rest = []
             for (var k = 1; k < args.length; k++) { rest.push(args[k]) }
             return mcall(recv, name, rest, undefined)
@@ -3806,9 +3807,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var mro = clsMRO(cls)
         var all = true
         for (var i = 0; i < mro.length; i++) {
-            // object itself has no __dict__: its instances take no attribute.
+            // object and the builtin value types (tuple, list, int, ...) have no
+            // __dict__: their instances take no attribute. Exceptions do have one.
             if (!hasOwn(mro[i], "__slots__")) {
-                if (mro[i] !== hostGlobals["object"]) { all = false }
+                if (mro[i] !== hostGlobals["object"]
+                    && !(mro[i].__builtin === true && pyBDelegate(mro[i].__name, "__repr__") != null)) { all = false }
                 continue
             }
             var sl = iterToList(mro[i].__slots__)
@@ -3887,7 +3890,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pyBDelegate(tname, name) {
         if (tname == "bool") { return pyBDelegate("int", name) }
         if (tname == "tuple") {
-            if (name.substring(0, 2) != "__") { return null }
+            if (name.substring(0, 2) != "__" && !pyIsTupleMethod(name)) { return null }
         } else if (tname != "str" && tname != "int" && tname != "float" && tname != "list" && tname != "dict" &&
                    tname != "set" && tname != "frozenset" && tname != "complex" && tname != "bytes" && tname != "bytearray") {
             return null
@@ -9447,17 +9450,21 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // (pyBytesToS): each argument goes through pyBytesPctArg first, a mapping key
     // is bytes, and a bytes right operand is one argument rather than a mapping.
     function pyPct(fmt, arg, bytes) {
+        // An instance of a tuple or dict subclass is read as its builtin value
+        // (PyTuple_Check / the mapping protocol), while a lone argument keeps the
+        // instance. Twin of rt.pyPct in abnf/jsrt.go and pyBPct in lib/python-rt.metajs.
+        var ua = pyBDelSelf(arg)
         var args = anytype
         var dict = null
-        if (isTup(arg)) { args = arg }
-        else if (isDict(arg) && !isSet(arg)) { dict = arg ; args = [arg] }
+        if (isTup(ua)) { args = ua }
+        else if (isDict(ua) && !isSet(ua)) { dict = ua ; args = [arg] }
         else { args = [arg] }
         var out = ""
         var ai = 0
         // A subscriptable right operand other than a tuple or a str (a dict, a
         // list) is a mapping to PyUnicode_Format, which then never complains
         // that arguments were left over.
-        var mapped = !isTup(arg) && ((Array.isArray(arg) && !(bytes && isBytes(arg))) || (isDict(arg) && !isSet(arg)))
+        var mapped = !isTup(ua) && ((Array.isArray(ua) && !(bytes && isBytes(ua))) || (isDict(ua) && !isSet(ua)))
         var i = 0
         while (i < fmt.length) {
             var c = fmt.charAt(i)
@@ -12208,6 +12215,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (minit != null) {
                     kSetNamed(named)
                     minit.apply(undefined, concat2impl([made], args))
+                    // A builtin base's __init__ leaves the keywords unread.
+                    kTakeNamed()
                 }
             }
             return made
