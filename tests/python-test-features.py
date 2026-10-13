@@ -2595,6 +2595,50 @@ check("int-non-number", [nb_try(int, nb_vals[i]) for i in [1, 2, 4, 5, 6, 7]],
        "TypeError: __int__ returned non-int (type str)"])
 
 
+# ----- SECTION: self-containing containers and slice errors -----
+#
+# A list, tuple or dict inside its own repr renders as [...], (...) or {...}
+# (Py_ReprEnter), and a __repr__ that raises leaves nothing open. A slice
+# assignment from the list itself copies first, and a zero step or a size
+# mismatch is a catchable ValueError. Rows from CPython 3.14.
+class SrBad:
+    def __repr__(self):
+        raise ValueError("no")
+sr_a = [1, 2]
+sr_a.append(sr_a)
+sr_d = {"k": 1}
+sr_d["self"] = sr_d
+sr_t = ([],)
+sr_t[0].append(sr_t)
+sr_c = [SrBad()]
+sr_c.append(sr_c)
+try:
+    repr(sr_c)
+except ValueError:
+    pass
+sr_c[0] = 5
+check("repr-self-containing", [repr(sr_a), str(sr_d), repr(sr_t), repr([sr_a, sr_a]), repr(sr_c)],
+      ["[1, 2, [...]]", "{'k': 1, 'self': {...}}", "([(...)],)", "[[1, 2, [...]], [1, 2, [...]]]", "[5, [...]]"])
+sr_z = [1, 2, 3, 4]
+sr_z[::-1] = sr_z
+sr_y = [1, 2, 3]
+sr_y[1:1] = sr_y
+check("slice-assign-self", [sr_z, sr_y], [[4, 3, 2, 1], [1, 1, 2, 3, 2, 3]])
+def sr_err(f):
+    try:
+        f()
+    except ValueError as e:
+        return "ValueError: " + str(e)
+    return "no error"
+sr_x = [1, 2, 3, 4]
+sr_0 = [0]
+def sr_set_ext():
+    sr_x[::2] = []
+check("slice-errors-catchable", [sr_err(lambda: sr_x[::sr_0[0]]), sr_err(sr_set_ext), sr_err(lambda: "abc"[::sr_0[0]])],
+      ["ValueError: slice step cannot be zero", "ValueError: attempt to assign sequence of size 0 to extended slice of size 2",
+       "ValueError: slice step cannot be zero"])
+
+
 # ----- import edges -----
 # `from M import *` binds a runtime module's public names and a library
 # module's __all__, `import P.S` binds P, and a module function keeps its

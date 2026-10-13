@@ -3383,6 +3383,39 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
 
     // Python style rendering: True/False/None, lists in brackets, dicts in braces.
+    // CPython's Py_ReprEnter: the lists, tuples and dicts whose repr is under
+    // way. RENDER(c) for a container not yet open, null for one that is, so a
+    // container that contains itself renders as [...], (...) or {...}. Twin of
+    // rt.pyReprEnter in abnf/jsrt.go and pyReprNest in lib/python-rt.metajs.
+    var pyReprOpen = []
+    function pyReprNest(c, render) {
+        for (var i = 0; i < pyReprOpen.length; i++) {
+            if (pyReprOpen[i] === c) { return null }
+        }
+        pyReprOpen.push(c)
+        var r = ""
+        try { r = render(c) } finally { pyReprOpen.pop() }
+        return r
+    }
+    // A tuple is parenthesized, and a one-element one keeps its comma.
+    function pySeqRepr(v) {
+        var tup = isTup(v)
+        var out = tup ? "(" : "["
+        for (var i = 0; i < v.length; i++) {
+            if (i > 0) out += ", "
+            out += prepr(v[i])
+        }
+        if (tup) { return v.length == 1 ? out + ",)" : out + ")" }
+        return out + "]"
+    }
+    function pyDictRepr(v) {
+        var out = "{"
+        for (var k = 0; k < v.keys.length; k++) {
+            if (k > 0) out += ", "
+            out += prepr(v.keys[k]) + ": " + prepr(v.vals[k])
+        }
+        return out + "}"
+    }
     function prepr(v) {
         if (typeof v == "string") return pyStrRepr(v)
         if (pyUser(v)) { return pyUserRender(v, true) }
@@ -3408,15 +3441,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                    + prepr(rxGroup(v.prog, v.string, v.m, 0)) + ">"
         }
         if (Array.isArray(v)) {
-            // A tuple is parenthesized, and a one-element one keeps its comma.
-            var tup = isTup(v)
-            var out = tup ? "(" : "["
-            for (var i = 0; i < v.length; i++) {
-                if (i > 0) out += ", "
-                out += prepr(v[i])
-            }
-            if (tup) { return v.length == 1 ? out + ",)" : out + ")" }
-            return out + "]"
+            var sr = pyReprNest(v, pySeqRepr)
+            if (sr === null) { return isTup(v) ? "(...)" : "[...]" }
+            return sr
         }
         if (isSet(v)) {
             var fz = v.__frozen === true
@@ -3430,12 +3457,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (isView(v)) { return "dict_" + v.__dview + "(" + prepr(pyViewElems(v)) + ")" }
         if (isDict(v)) {
-            var out2 = "{"
-            for (var k = 0; k < v.keys.length; k++) {
-                if (k > 0) out2 += ", "
-                out2 += prepr(v.keys[k]) + ": " + prepr(v.vals[k])
-            }
-            return out2 + "}"
+            var dr = pyReprNest(v, pyDictRepr)
+            if (dr === null) { return "{...}" }
+            return dr
         }
         if (pyUser(v)) { return pyUserRender(v, false) }
         // A MODULE object. CPython prints <module 'builtins' (built-in)> for a
@@ -10018,7 +10042,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // open ends follow the direction, and a negative step walks backwards.
     function sliceIdx(n, lo, hi, st) {
         if (st === undefined || st === null) { st = 1 }
-        if (st === 0) { fail("ValueError: slice step cannot be zero") }
+        if (st === 0) { pyListErr("ValueError", "slice step cannot be zero") }
         var out = []
         var i
         if (st > 0) {
@@ -10204,6 +10228,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var hi = key.hi
             var st = key.st
             var vals = iterToList(v)
+            // xs[a:b] = xs copies the source first: the target changes under the copy.
+            if (vals === o) { vals = o.slice(0) }
             if (st === undefined || st === null || st === 1) {
                 var ixc = sliceIdx(o.length, lo, hi, 1)
                 var at = ixc.length > 0 ? ixc[0] : (lo === undefined || lo === null ? 0 : (lo < 0 ? lo + o.length : (lo > o.length ? o.length : lo)))
@@ -10214,7 +10240,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return
             }
             var ixe = sliceIdx(o.length, lo, hi, st)
-            if (ixe.length != vals.length) { fail("ValueError: attempt to assign sequence of size " + vals.length + " to extended slice of size " + ixe.length) }
+            if (ixe.length != vals.length) { pyListErr("ValueError", "attempt to assign sequence of size " + vals.length + " to extended slice of size " + ixe.length) }
             for (var e2 = 0; e2 < ixe.length; e2++) { o[ixe[e2]] = vals[e2] }
             return
         }

@@ -468,6 +468,10 @@ type jsrt struct {
 	// far, in order (see pyHashId in jsrtpynum.go).
 	pyHashIds []interface{}
 
+	// pyReprOpen is CPython's Py_ReprEnter set: the lists, tuples and dicts
+	// whose repr is under way (see pyReprEnter).
+	pyReprOpen []interface{}
+
 	// rubyMethodVals remembers which callables `method(:x)` handed out, and the
 	// owner and name each one carries. MRI's Method is a class of its own -
 	// #class is Method, #to_s is `#<Method: Object#x>` and #arity counts optionals
@@ -3763,6 +3767,22 @@ func (rt *jsrt) pyClsName(cls *jsObject) string {
 
 // pyString renders a value like Python's str(): True/False/None capitalized,
 // lists in bracket and dicts in brace notation.
+// pyReprEnter is CPython's Py_ReprEnter: false when the repr of container c is
+// already under way, so a list, tuple or dict that contains itself renders as
+// [...], (...) or {...}; otherwise c is open until pyReprLeave. Twin of
+// pyReprNest in languages/python-interpreter.abnf and lib/python-rt.metajs.
+func (rt *jsrt) pyReprEnter(c interface{}) bool {
+	for _, o := range rt.pyReprOpen {
+		if o == c {
+			return false
+		}
+	}
+	rt.pyReprOpen = append(rt.pyReprOpen, c)
+	return true
+}
+
+func (rt *jsrt) pyReprLeave() { rt.pyReprOpen = rt.pyReprOpen[:len(rt.pyReprOpen)-1] }
+
 func (rt *jsrt) pyString(v interface{}) string {
 	switch t := v.(type) {
 	case jsUndefT, jsNullT:
@@ -3777,6 +3797,13 @@ func (rt *jsrt) pyString(v interface{}) string {
 	case *jsArray:
 		// A tuple is parenthesized, and a one-element one keeps its comma.
 		tup := t.kind == pyTupKind
+		if !rt.pyReprEnter(t) {
+			if tup {
+				return "(...)"
+			}
+			return "[...]"
+		}
+		defer rt.pyReprLeave()
 		out := "["
 		if tup {
 			out = "("
@@ -3835,6 +3862,10 @@ func (rt *jsrt) pyString(v interface{}) string {
 			return out + "}"
 		}
 		if keys, vals, ok := dictParts(t); ok {
+			if !rt.pyReprEnter(t) {
+				return "{...}"
+			}
+			defer rt.pyReprLeave()
 			out := "{"
 			for i := range keys.elems {
 				if i > 0 {
@@ -16157,8 +16188,8 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			idx := rt.pySliceIndices(len(arr.elems), u(a[1]), u(a[2]), u(a[3]))
 			if len(idx) != len(vals) {
-				rt.fail("attempt to assign sequence of size %d to extended slice of size %d",
-					len(vals), len(idx))
+				rt.pyRaise("ValueError", fmt.Sprintf("attempt to assign sequence of size %d to extended slice of size %d",
+					len(vals), len(idx)))
 			}
 			for k, i := range idx {
 				arr.elems[i] = vals[k]
@@ -18842,7 +18873,7 @@ func (rt *jsrt) pySliceIndices(n int, loV, hiV, stepV interface{}) []int {
 	if !isUndefOrNull(stepV) {
 		step = int(rt.toNumber(stepV))
 		if step == 0 {
-			rt.fail("slice step cannot be zero")
+			rt.pyRaise("ValueError", "slice step cannot be zero")
 		}
 	}
 	lo, hi := 0, n

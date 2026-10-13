@@ -679,6 +679,52 @@ function pyStrLen(s) {
 //
 // abnf/jsrt.go's pyString and pyRepr, one for one.
 
+// CPython's Py_ReprEnter: the lists, tuples and dicts whose repr is under way.
+// The repr of container c (a dict when ISDICT), or null when c is already open,
+// so a container that contains itself renders as [...], (...) or {...}.
+// Go: rt.pyReprEnter.
+var pyReprOpen = []
+function pyReprNest(c, isDict) {
+    for (var i = 0; i < pyReprOpen.length; i++) {
+        if (pyReprOpen[i] === c) { return null }
+    }
+    pyReprOpen.push(c)
+    var r = ""
+    try {
+        if (isDict) { r = pyDictRepr(c) } else { r = pySeqRepr(c) }
+    } catch (e) {
+        pyReprOpen.pop()
+        throw e
+    }
+    pyReprOpen.pop()
+    return r
+}
+// A tuple is parenthesized, and a one-element one keeps its comma.
+function pySeqRepr(v) {
+    var tup = pyIsTup(v)
+    var out = "["
+    if (tup) { out = "(" }
+    for (var i = 0; i < v.length; i++) {
+        if (i > 0) { out = out + ", " }
+        out = out + pyRepr(v[i])
+    }
+    if (tup) {
+        if (v.length == 1) { return out + ",)" }
+        return out + ")"
+    }
+    return out + "]"
+}
+function pyDictRepr(v) {
+    var ks = v["keys"]
+    var vs = v["vals"]
+    var d = "{"
+    for (var k = 0; k < ks.length; k++) {
+        if (k > 0) { d = d + ", " }
+        d = d + pyRepr(ks[k]) + ": " + pyRepr(vs[k])
+    }
+    return d + "}"
+}
+
 function pyStr(v) {
     if (v === null) { return "None" }
     if (v === undefined) { return "None" }
@@ -697,19 +743,10 @@ function pyStr(v) {
         return "<class '" + cn + "'>"
     }
     if (Array.isArray(v)) {
-        // A tuple is parenthesized, and a one-element one keeps its comma.
-        var tup = pyIsTup(v)
-        var out = "["
-        if (tup) { out = "(" }
-        for (var i = 0; i < v.length; i++) {
-            if (i > 0) { out = out + ", " }
-            out = out + pyRepr(v[i])
-        }
-        if (tup) {
-            if (v.length == 1) { return out + ",)" }
-            return out + ")"
-        }
-        return out + "]"
+        var sr = pyReprNest(v, false)
+        if (sr !== null) { return sr }
+        if (pyIsTup(v)) { return "(...)" }
+        return "[...]"
     }
     if (pyIsObj(v)) {
         var els = pySetElemsOf(v)
@@ -729,14 +766,9 @@ function pyStr(v) {
         }
         if (typeof v == "object" && pyIsDView(v)) { return "dict_" + pyToStr(v["__dview"]) + "(" + pyRepr(pyDViewElems(v)) + ")" }
         if (pyIsDict(v)) {
-            var ks = v["keys"]
-            var vs = v["vals"]
-            var d = "{"
-            for (var k = 0; k < ks.length; k++) {
-                if (k > 0) { d = d + ", " }
-                d = d + pyRepr(ks[k]) + ": " + pyRepr(vs[k])
-            }
-            return d + "}"
+            var dr = pyReprNest(v, true)
+            if (dr !== null) { return dr }
+            return "{...}"
         }
     }
     var ic = pyInstClassOf(v)
@@ -3049,7 +3081,7 @@ function pySliceIndices(n, loV, hiV, stepV) {
     var step = 1
     if (!rtIsNil(stepV)) {
         step = Math.trunc(pyNum(stepV))
-        if (step == 0) { fail("slice step cannot be zero") }
+        if (step == 0) { pyRaiseExc("ValueError", "slice step cannot be zero") }
     }
     var lo = 0
     var hi = n
@@ -7874,8 +7906,8 @@ function js_pysetslice(arr0, lo, hi, step, values) {
     }
     var xidx = pySliceIndices(arr.length, lo, hi, step)
     if (xidx.length != vals.length) {
-        fail("attempt to assign sequence of size " + vals.length +
-             " to extended slice of size " + xidx.length)
+        pyRaiseExc("ValueError", "attempt to assign sequence of size " + vals.length +
+                   " to extended slice of size " + xidx.length)
     }
     var k = 0
     while (k < xidx.length) {
