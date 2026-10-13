@@ -816,10 +816,11 @@ func init() {
 				return boolH(want(rt.jsCompare(l, r)))
 			}
 		}
-		rel("js_gilt", func(c int) bool { return c < 0 })
-		rel("js_gile", func(c int) bool { return c <= 0 })
-		rel("js_gigt", func(c int) bool { return c > 0 })
-		rel("js_gige", func(c int) bool { return c >= 0 })
+		// jsCompare answers 2 for a NaN operand, so each test names its values.
+		rel("js_gilt", func(c int) bool { return c == -1 })
+		rel("js_gile", func(c int) bool { return c == -1 || c == 0 })
+		rel("js_gigt", func(c int) bool { return c == 1 })
+		rel("js_gige", func(c int) bool { return c == 1 || c == 0 })
 		// '+' is the one arithmetic operator that is not only arithmetic: in Go
 		// it also concatenates strings, and a float operand keeps its box. Two
 		// integers add at 64 bits and wrap to the result type's width.

@@ -3747,6 +3747,21 @@ func s60() {
 	check("na2", fmt.Sprint(g) == "{[k0 k4] [[k5 k6]] [2 0]}" && fmt.Sprintf("%+v", map[string][2]k60{"x": {1, 2}}) == "map[x:[k1 k2]]")
 }
 
+// ===== SECTION 61: ordered comparisons with a NaN operand =====
+func s61() {
+	zs := []float64{0, 1}
+	a := zs[0] / zs[0]
+	b := zs[1]
+	check("nan1", fmt.Sprint(a > b, a >= b, b > a, b >= a, a < b, a <= b, b < a, b <= a) == "false false false false false false false false")
+	m := a
+	for _, v := range []float64{1, 2} {
+		if v > m {
+			m = v
+		}
+	}
+	check("nan2", m != m)
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -3808,6 +3823,7 @@ func main() {
 	s58() // SECTION-CALL 58
 	s59() // SECTION-CALL 59
 	s60() // SECTION-CALL 60
+	s61() // SECTION-CALL 61
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }
