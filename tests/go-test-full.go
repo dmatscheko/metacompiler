@@ -3985,6 +3985,19 @@ func s69() {
 	check("mko3", fmt.Sprint(fm, r) == "map[NaN:2 -1:3 3:1] map[97:2 100:1]")
 }
 
+// ===== SECTION 70: conversion of nil to a slice type =====
+type l70 []int
+
+func s70() {
+	z := []int(nil)
+	var e []int
+	a := append(z, e...)
+	check("nsl1", fmt.Sprint(z == nil, len(z), z, a == nil) == "true 0 [] true")
+	b := []byte(nil)
+	l := l70(nil)
+	check("nsl2", fmt.Sprint(b == nil, len(b), l == nil, l) == "true 0 true []")
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -4055,6 +4068,7 @@ func main() {
 	s67() // SECTION-CALL 67
 	s68() // SECTION-CALL 68
 	s69() // SECTION-CALL 69
+	s70() // SECTION-CALL 70
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

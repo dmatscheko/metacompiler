@@ -5046,20 +5046,19 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             // `b2 := []byte(bs); b2[0] = 106` is seen by bs.
             // Only a string (or a plain array) is converted, and the fresh header
             // records the element type so a later bs[0] += 200 wraps at 8 bits.
+            // []T(nil) is the nil slice of that type (js_not: null or undefined).
             if (isSliceTy) {
                 var et = elemTy(to)
                 var toS = to
                 return emitSelect(eb, emitIsSl(eb, r.v),
                     function(tb) { return {b: tb, v: r.v} },
                     function(fb) {
-                        var cv = callExt(fb, "js_goconv", [emitStr(fb, toS),
-                                 callExt(fb, "js_gival", [emitHelper(fb, "$sels", [r.v])])])
-                        return {b: fb, v: emitSlT(fb, emitSlOf(fb, cv), et)}
+                        return emitSelect(fb, callExt(fb, "js_not", [r.v]),
+                            function(nb) { return {b: nb, v: emitZeroTy(nb, toS)} },
+                            function(cb) { return {b: cb, v: emitSlT(cb, emitSlOf(cb, emitConvV(cb, toS, r.v)), et)} })
                     })
             }
-            var v = callExt(eb, "js_goconv", [emitStr(eb, to),
-                            callExt(eb, "js_gival", [emitHelper(eb, "$sels", [r.v])])])
-            return {b: eb, v: v}
+            return {b: eb, v: emitConvV(eb, to, r.v)}
         }
     }
     // Does this type text spell an interface? `interface{}`, `interface{M()int}` and
@@ -5621,17 +5620,21 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             // target width and leaves that width ON the value - js_goconv answers
             // a plain number and could not carry it.
             if (itc != null) { return {b: fb, v: emitGiConv(fb, a[0], itc)} }
-            // js_goconv only knows plain arrays, so a slice argument hands over its
-            // ELEMENTS (string(bs)) and a slice result is wrapped back into a header;
-            // js_gival unwraps a sized integer to its plain number and passes
-            // everything else through, so string(rune(65)) still answers "A".
-            var v = callExt(fb, "js_goconv", [emitStr(fb, t),
-                            callExt(fb, "js_gival", [emitHelper(fb, "$sels", [a[0]])])])
+            if (!isSliceTy) { return {b: fb, v: emitConvV(fb, t, a[0])} }
             // []byte(s) / []rune(s): the header records the element type, so a later
-            // bs[0] += 200 wraps at 8 bits the way Go's byte does.
-            if (isSliceTy) { v = emitSlT(fb, emitSlOf(fb, v), elemTy(t)) }
-            return {b: fb, v: v}
+            // bs[0] += 200 wraps at 8 bits the way Go's byte does. T(nil) of a slice
+            // type is its nil slice (js_not: null or undefined); twin of makeConv.
+            return emitSelect(fb, callExt(fb, "js_not", [a[0]]),
+                              function(nb) { return {b: nb, v: emitZeroTy(nb, t)} },
+                              function(cb) { return {b: cb, v: emitSlT(cb, emitSlOf(cb, emitConvV(cb, t, a[0])), elemTy(t))} })
         })
+    }
+    // js_goconv only knows plain arrays, so a slice argument hands over its
+    // ELEMENTS (string(bs)) and a slice result is wrapped back into a header;
+    // js_gival unwraps a sized integer to its plain number and passes everything
+    // else through, so string(rune(65)) still answers "A".
+    function emitConvV(b, t, v) {
+        return callExt(b, "js_goconv", [emitStr(b, t), callExt(b, "js_gival", [emitHelper(b, "$sels", [v])])])
     }
     // A builtin whose extern takes the callee's ARGUMENT ARRAY (plus an optional
     // constant flag), bound in the jsmain scope under `name`.

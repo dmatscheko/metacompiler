@@ -2572,6 +2572,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // so int8(300) is 44 and the 44 still knows it is an int8. string(int) is the
     // rune spelling, string([]byte) joins the bytes.
     function goConvert(to, v) {
+        // T(nil) of a slice type is its nil slice. Twin of makeConv and declConv in
+        // go-to-llvm-ir.abnf.
+        if ((v === null || v === undefined) && to.indexOf("[]") == 0) { return goZeroTy(to) }
         if (to == "string") {
             if (szIs(v)) { return fromCodePoint(szNum(v)) }
             if (typeof v == "number") { return fromCodePoint(v) }
