@@ -4341,6 +4341,55 @@ func s95() {
     check("95d", walked == 3 && e.isEmpty && e.count == 0)
 }
 
+// ===== SECTION 96: Range and ClosedRange members over every bound type =====
+// lowerBound / upperBound / isEmpty / contains / ~= / clamped(to:) / overlaps
+// answer from the bounds under the bound type's own ordering, so they hold for a
+// Double, a String and a Character range; a Range<Int> is its own indices; an
+// Int8 range's elements are Int8s; a range pattern's bound may be a variable or
+// an element; `a...` at the end of a line is the postfix PartialRangeFrom.
+// Operands are read out of arrays. Every value read off swiftc 6.1.2.
+func s96() {
+    let ds = [1.5, 2.5, 2.0, 1.0000001]
+    let dr = ds[0]..<ds[1]
+    check("96a", "\(dr.lowerBound) \(dr.upperBound)" == "1.5 2.5" && dr.contains(ds[2]) && !dr.contains(ds[1])
+        && (ds[0]...ds[1]).contains(ds[1]) && !dr.isEmpty && (ds[0]..<ds[0]).isEmpty && dr ~= ds[2]
+        && dr == (1.5..<2.5) && "\(dr.clamped(to: ds[2]..<3.0))" == "2.0..<2.5" && !dr.overlaps(ds[1]...3.0))
+    let ss = ["a", "c", "b", "d", "apple", "cherry"]
+    let sr = ss[0]...ss[1]
+    check("96b", sr.contains(ss[2]) && !sr.contains(ss[3]) && (ss[0]..<ss[1]).contains(ss[4]) && !(ss[0]..<ss[1]).contains(ss[1])
+        && sr.lowerBound == "a" && sr.upperBound == "c" && sr ~= ss[2] && !sr.isEmpty
+        && "\((ss[4]..<ss[5]).clamped(to: ss[2]..<ss[5]))" == "b..<cherry" && sr.overlaps(ss[1]..."z"))
+    let cs: [Character] = ["a", "e", "c"]
+    let chr = cs[0]...cs[1]
+    check("96c", chr.contains(cs[2]) && !(chr ~= "f") && "\(chr.lowerBound)\(chr.upperBound)" == "ae"
+        && "\(chr.clamped(to: "b"..."z"))" == "b...e")
+    let ns = [2, 7, 4, 0, 10]
+    let ir = ns[0]..<ns[1]
+    let cr = ns[0]...ns[1]
+    check("96d", ir.lowerBound == 2 && cr.upperBound == 7 && "\(ir.clamped(to: ns[2]..<ns[4]))" == "4..<7"
+        && "\(cr.clamped(to: ns[2]...ns[4]))" == "4...7" && "\(ir.clamped(to: ns[4]..<ns[4]))" == "10..<10"
+        && ir.overlaps(ns[2]..<ns[4]) && !ir.overlaps(7..<9) && cr.overlaps(7...9) && !(ns[3]..<ns[3]).overlaps(ns[3]..<ns[4])
+        && !(ns[3]..<ns[4]).overlaps(ns[4]...ns[4]) && (ns[3]...ns[4]).overlaps(ns[4]...ns[4]))
+    check("96e", ir.startIndex == 2 && ir.endIndex == 7 && "\(ir.indices)" == "2..<7" && ir.firstIndex(of: ns[2]) == 4
+        && ir.lastIndex(where: { $0 < 5 }) == 4 && ir.contains(where: { $0 > 5 }) && !cr.contains { $0 > ns[1] })
+    let i8: [Int8] = [3, 6]
+    let r8 = i8[0]..<i8[1]
+    var tys = ""
+    for x in r8 { tys += "\(type(of: x)) " }
+    check("96f", tys == "Int8 Int8 Int8 " && "\(type(of: r8.lowerBound))" == "Int8" && "\(type(of: r8.map { $0 * 2 }[1]))" == "Int8"
+        && r8.count == 3 && "\(type(of: r8.firstIndex(of: 4)!))" == "Int8")
+    let big = [Int.max - 2]
+    let lo = ns[0]
+    var hit = ""
+    switch ns[2] {
+    case lo..<ns[0]: hit = "empty"
+    case lo...ns[1]: hit = "in"
+    default: hit = "out"
+    }
+    let pr = ns[2]...
+    check("96g", (big[0]..<Int.max).count == 2 && hit == "in" && pr.contains(ns[4]) && !pr.contains(ns[0]))
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -4437,6 +4486,7 @@ func main() {
     s93() // SECTION-CALL 93
     s94() // SECTION-CALL 94
     s95() // SECTION-CALL 95
+    s96() // SECTION-CALL 96
     print("full: \(checks) checks, \(fails) failures")
 }
 

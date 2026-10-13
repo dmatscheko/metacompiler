@@ -913,9 +913,13 @@ PatIsType   <~~ push(stripWs(up.in)) ~~> = Type ;
 // PatEnum and PatExpr, both of which would match the lower bound on its own and
 // then leave the range operator behind.
 PatRange    = PatRangeCC | PatRangeUp | PatRangeDn ;
-PatRangeCC  <~~ push(makePatRange(takeAll())) ~~> = PatOperand RangeOp PatOperand ;
-PatRangeUp  <~~ push(makePatRange(takeAll())) ~~> = PatOperand RangeOp ;
-PatRangeDn  <~~ push(makePatRange(takeAll())) ~~> = RangeOp PatOperand ;
+PatRangeCC  <~~ push(makePatRange(takeAll())) ~~> = PatBound RangeOp PatBound ;
+PatRangeUp  <~~ push(makePatRange(takeAll())) ~~> = PatBound RangeOp ;
+PatRangeDn  <~~ push(makePatRange(takeAll())) ~~> = RangeOp PatBound ;
+// A range bound may also be a variable, a member or an element (`lo...xs[1]`):
+// the range operator that must follow keeps a bare name from being read as one.
+PatBound    = PatOperand | PatRef ;
+PatRef      <~~ push(foldCallMember(takeAll(), up.in)) ~~> = VarRef { FieldSfx | IndexSfx } ;
 // A value pattern compares the subject with ==. Its operand is deliberately NOT the
 // full expression grammar: a `{ ... }` would be read as a closure and swallow the
 // body of `catch { ... }`, whose pattern is optional.
@@ -1191,7 +1195,20 @@ Cast        <~~ push(makeCast(takeAll(), up.pos, up.in)) ~~>
 // through. The DOWN form (`a[...1]`) is IndexArg's own alternative, which is safe
 // unordered because no expression can begin with `...` or `..<`.
 RangeExpr   <~~ push(makeRange(takeAll())) ~~>
-            = RangeOp AddExpr | AddExpr [ RangeOp [ AddExpr ] ] ;
+            = RangeOp AddExpr | AddExpr [ RangeOp [ RangeBinary AddExpr ] ] ;
+// Swift reads an operator as BINARY only when its two sides are alike, so `a...`
+// tight on the left with whitespace after is the postfix PartialRangeFrom: a
+// `let r = a...` line does not take the next line as its upper bound. Both range
+// operators are three characters long.
+RangeBinary = :script(~~
+    (function() {
+        var l = c.peek(-4)
+        var r = c.peek(0)
+        var lws = l === 32 || l === 9 || l === 10 || l === 13
+        var rws = r === 32 || r === 9 || r === 10 || r === 13
+        return (!lws && rws) ? abnf.newToken("\x01postfix-range", 0) : undefined
+    })()
+~~) ;
 CastOp      <~~ push({cast: stripWs(up.in)}) ~~>
             = ( "as" KwEnd [ "?" | "!" ] | "is" KwEnd ) ;
 CastType    <~~ push({ctype: stripWs(up.in)}) ~~> = Type ;
@@ -2136,13 +2153,12 @@ KwContinue  = "continue" KwEnd ;
         var lo = opAt == 1 ? items[0] : null
         var closed = items[opAt].rop == "..."
         var hi = items.length > opAt + 1 ? items[opAt + 1] : null
-        // The bounds are read as plain numbers: a range is walked and measured with
-        // ordinary arithmetic, and a sized-integer box (Int32(3), Int.max) would
-        // otherwise arrive here as an object and compare as NaN.
+        // The bounds keep their own type (an Int8 range's lowerBound is an Int8);
+        // rangeLen and rangeAt read a sized-integer box through szNum.
         return function() {
             var r = {__range: true,
-                     lo: lo == null ? null : szNum(lo()),
-                     hi: hi == null ? null : szNum(hi()),
+                     lo: lo == null ? null : lo(),
+                     hi: hi == null ? null : hi(),
                      closed: closed}
             if (lo != null && hi != null) { swRangeChk(r.lo, r.hi) }
             return r
@@ -2158,21 +2174,58 @@ KwContinue  = "continue" KwEnd ;
         return v !== null && v !== undefined && typeof v == "object" && v.__range === true
     }
     function rangeLen(r) {
-        var n = (r.closed ? r.hi - r.lo + 1 : r.hi - r.lo) | 0
+        // As 64 bit Ints: two bounds near Int.max are one double apart, and the
+        // count of an Int8 range need not fit an Int8.
+        var n = szNum(szArith("-", szConv(r.hi, 64, false), szConv(r.lo, 64, false)))
+        if (r.closed) { n++ }
         return n < 0 ? 0 : n
+    }
+    // The i-th element, of the bound's own integer type. Twins: swRangeAt in
+    // abnf/jsrtswift.go and lib/swift-rt.metajs.
+    function rangeAt(r, i) {
+        var x = szNum(r.lo) + i
+        return szIs(r.lo) ? szConv(x, r.lo.w, r.lo.u) : x
     }
     function rangeArray(r) {
         var out = []
         var n = rangeLen(r)
-        for (var i = 0; i < n; i++) { out.push((r.lo + i) | 0) }
+        for (var i = 0; i < n; i++) { out.push(rangeAt(r, i)) }
         return out
     }
+    // `a < b` (`a <= b` when orEq) between two range bounds, under the bound
+    // type's own ordering, so a Double or a String range compares as one.
+    function rangeLess(a, b, orEq) { return core.test(binOp(orEq ? "<=" : "<", a, b)) }
     // A missing bound (a one-sided range) admits everything on its side.
     function rangeHas(r, v) {
-        var x = szNum(v)
-        if (r.lo !== null && r.lo !== undefined && x < r.lo) { return false }
+        if (r.lo !== null && r.lo !== undefined && !rangeLess(r.lo, v, true)) { return false }
         if (r.hi === null || r.hi === undefined) { return true }
-        return r.closed ? x <= r.hi : x < r.hi
+        return rangeLess(v, r.hi, r.closed)
+    }
+    // Range.isEmpty: a half-open range with equal bounds. A ClosedRange always
+    // holds its lowerBound.
+    function rangeEmpty(r) { return !r.closed && swEq(r.lo, r.hi) }
+    // The members a range answers from its bounds alone, so they hold for a
+    // Double or a String range too: contains, clamped(to:) and overlaps, as the
+    // Swift standard library spells them (Range.swift, ClosedRange.swift).
+    // undefined for anything else. Twins: swRangeMethod in abnf/jsrtswift.go and
+    // lib/swift-rt.metajs.
+    function rangeMethod(r, name, args) {
+        if (args.length != 1) { return undefined }
+        if (name == "contains" && typeof args[0] != "function") { return rangeHas(r, args[0]) }
+        var o = args[0]
+        if (!isRange(o)) { return undefined }
+        if (name == "clamped") {
+            var lo = rangeLess(r.lo, o.lo, false) ? o.lo : (rangeLess(o.hi, r.lo, false) ? o.hi : r.lo)
+            var hi = rangeLess(o.hi, r.hi, false) ? o.hi : (rangeLess(r.hi, o.lo, false) ? o.lo : r.hi)
+            return {__range: true, lo: lo, hi: hi, closed: r.closed}
+        }
+        if (name == "overlaps") {
+            // Disjoint when one range ends before the other starts - at its
+            // upperBound itself for a half-open range - or either is empty.
+            return !(rangeLess(o.hi, r.lo, !o.closed) || rangeLess(r.hi, o.lo, !r.closed)
+                     || rangeEmpty(r) || rangeEmpty(o))
+        }
+        return undefined
     }
 
     // ----- Literals -----
@@ -2494,9 +2547,9 @@ KwContinue  = "continue" KwEnd ;
         if (v.__range === true) {
             var rop = v.closed ? "..." : "..<"
             if (v.lo === null || v.lo === undefined) {
-                return (v.closed ? "PartialRangeThrough" : "PartialRangeUpTo") + "(upperBound: " + v.hi + ")"
+                return (v.closed ? "PartialRangeThrough" : "PartialRangeUpTo") + "(upperBound: " + swRender(v.hi, false, depth + 1) + ")"
             }
-            if (v.hi === null || v.hi === undefined) { return "PartialRangeFrom(lowerBound: " + v.lo + ")" }
+            if (v.hi === null || v.hi === undefined) { return "PartialRangeFrom(lowerBound: " + swRender(v.lo, false, depth + 1) + ")" }
             return swRender(v.lo, false, depth + 1) + rop + swRender(v.hi, false, depth + 1)
         }
         if (Array.isArray(v)) {
@@ -3564,6 +3617,18 @@ KwContinue  = "continue" KwEnd ;
         // reads its own `count`; anything else is a collection. Twin of
         // sw_uprop_count in swift-to-llvm-ir.abnf.
         if (name == "count" && !(typeof o == "object" && o !== null && (o.__class != undefined || isTypeVal(o)))) { return swlen(o) }
+        // A range's bounds and isEmpty, whatever the bound type. Twins: js_swget in
+        // abnf/jsrtswift.go and lib/swift-rt.metajs.
+        if (isRange(o)) {
+            if (name == "lowerBound") { return o.lo }
+            if (name == "upperBound") { return o.hi }
+            if (name == "isEmpty") { return rangeEmpty(o) }
+            // A Range<Int> is its own indices; a ClosedRange's Index is an enum
+            // this interpreter does not model.
+            if (name == "startIndex" && !o.closed) { return o.lo }
+            if (name == "endIndex" && !o.closed) { return o.hi }
+            if (name == "indices" && !o.closed) { return o }
+        }
         if (name == "isEmpty" && swIsColl(o)) { return swlen(o) == 0 }
         // indices is a PROPERTY on every Collection. Only an
         // Array is answered: a String's indices are String.Index values with no
@@ -3917,7 +3982,7 @@ KwContinue  = "continue" KwEnd ;
         var n = oa ? ys.length : (ob || xs.length < ys.length ? xs.length : ys.length)
         var out = []
         for (var i = 0; i < n; i++) {
-            out.push(newTupleVal([oa ? a.lo + i : xs[i], ob ? b.lo + i : ys[i]]))
+            out.push(newTupleVal([oa ? rangeAt(a, i) : xs[i], ob ? rangeAt(b, i) : ys[i]]))
         }
         return out
     }
@@ -4098,9 +4163,16 @@ KwContinue  = "continue" KwEnd ;
         // bounds, so a one-sided range answers it too. Twin: js_swmcall in
         // abnf/jsrtswift.go and lib/swift-rt.metajs.
         if (isRange(target)) {
-            if (name == "contains" && args.length == 1) { return rangeHas(target, args[0]) }
+            var rm = rangeMethod(target, name, args)
+            if (rm !== undefined) { return rm }
             if (target.lo === null || target.hi === null) { fail("method ." + name + " on a one-sided range") }
-            return arrayMethod(rangeArray(target), name, args)
+            var res = arrayMethod(rangeArray(target), name, args)
+            // A Range<Int> is its own indices: the index of an element is the
+            // element, not its offset.
+            if ((name == "firstIndex" || name == "lastIndex") && !target.closed && res !== null && res !== undefined) {
+                return rangeAt(target, res)
+            }
+            return res
         }
         if (isFlo(target)) {
             var tf = target.__flo
@@ -9595,7 +9667,7 @@ KwContinue  = "continue" KwEnd ;
     // `0..<3 == 0..<3` is true there, not an object IDENTITY test.
         if (isRange(l) || isRange(r)) {
             if (!isRange(l) || !isRange(r)) { return false }
-            return l.lo === r.lo && l.hi === r.hi && l.closed === r.closed
+            return swEqD(l.lo, r.lo, depth + 1) && swEqD(l.hi, r.hi, depth + 1) && l.closed === r.closed
         }
         if (l !== null && l !== undefined && r !== null && r !== undefined
             && typeof l == "object" && typeof r == "object") {

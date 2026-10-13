@@ -902,9 +902,13 @@ PatIsType   <~~ push(stripWs(up.in)) ~~> = Type ;
 // PatEnum and PatExpr, both of which would match the lower bound on its own and
 // then leave the range operator behind.
 PatRange    = PatRangeCC | PatRangeUp | PatRangeDn ;
-PatRangeCC  <~~ push(makePatRange(takeAll())) ~~> = PatOperand RangeOp PatOperand ;
-PatRangeUp  <~~ push(makePatRange(takeAll())) ~~> = PatOperand RangeOp ;
-PatRangeDn  <~~ push(makePatRange(takeAll())) ~~> = RangeOp PatOperand ;
+PatRangeCC  <~~ push(makePatRange(takeAll())) ~~> = PatBound RangeOp PatBound ;
+PatRangeUp  <~~ push(makePatRange(takeAll())) ~~> = PatBound RangeOp ;
+PatRangeDn  <~~ push(makePatRange(takeAll())) ~~> = RangeOp PatBound ;
+// A range bound may also be a variable, a member or an element (`lo...xs[1]`):
+// the range operator that must follow keeps a bare name from being read as one.
+PatBound    = PatOperand | PatRef ;
+PatRef      <~~ push(foldCallMember(takeAll(), up.in)) ~~> = VarRef { FieldSfx | IndexSfx } ;
 // A value pattern compares the subject with ==. Its operand is deliberately NOT the
 // full expression grammar: a `{ ... }` would be read as a closure and swallow the
 // body of `catch { ... }`, whose pattern is optional.
@@ -1172,7 +1176,20 @@ Cast        <~~ push(makeCast(takeAll(), up.pos, up.in)) ~~>
 // through. The DOWN form (`a[...1]`) is IndexArg's own alternative, which is safe
 // unordered because no expression can begin with `...` or `..<`.
 RangeExpr   <~~ push(makeRange(takeAll())) ~~>
-            = RangeOp AddExpr | AddExpr [ RangeOp [ AddExpr ] ] ;
+            = RangeOp AddExpr | AddExpr [ RangeOp [ RangeBinary AddExpr ] ] ;
+// Swift reads an operator as BINARY only when its two sides are alike, so `a...`
+// tight on the left with whitespace after is the postfix PartialRangeFrom: a
+// `let r = a...` line does not take the next line as its upper bound. Both range
+// operators are three characters long.
+RangeBinary = :script(~~
+    (function() {
+        var l = c.peek(-4)
+        var r = c.peek(0)
+        var lws = l === 32 || l === 9 || l === 10 || l === 13
+        var rws = r === 32 || r === 9 || r === 10 || r === 13
+        return (!lws && rws) ? abnf.newToken("\x01postfix-range", 0) : undefined
+    })()
+~~) ;
 CastOp      <~~ push({cast: stripWs(up.in)}) ~~>
             = ( "as" KwEnd [ "?" | "!" ] | "is" KwEnd ) ;
 CastType    <~~ push({ctype: stripWs(up.in)}) ~~> = Type ;
@@ -3720,11 +3737,17 @@ KwContinue  = "continue" KwEnd ;
             var notStrB = curF.NewBlock("")
             b.NewCondBr(truthy(b, callExt(b, "js_is_type", [ps[0], emitStr(b, "String")])), strB, notStrB)
             strB.NewRet(callExt(strB, "js_seq", [callExt(strB, "js_pylen", [ps[0]]), emitNum(strB, 0)]))
-            var seqV = notStrB.NewCall(rtRangeArr(), [ps[0]])
+            // A range answers from its bounds (js_swget), so a Double or a String
+            // range is never walked.
+            var rngB = curF.NewBlock("")
+            var seqB = curF.NewBlock("")
+            notStrB.NewCondBr(truthy(notStrB, notStrB.NewCall(rtProbe("sw_isrange", "__range"), [ps[0]])), rngB, seqB)
+            rngB.NewRet(callExt(rngB, "js_swget", [ps[0], emitStr(rngB, "isEmpty")]))
+            var seqV = hasSets ? seqB.NewCall(rtRangeArr(), [ps[0]]) : ps[0]
             var collB = curF.NewBlock("")
             var chkB = curF.NewBlock("")
             var othB = curF.NewBlock("")
-            var rdE = rtIsDictStrict(notStrB, seqV)
+            var rdE = rtIsDictStrict(seqB, seqV)
             rdE.b.NewCondBr(truthy(rdE.b, rdE.v), collB, chkB)
             chkB.NewCondBr(truthy(chkB, callExt(chkB, "js_is_type", [seqV, emitStr(chkB, "Array")])), collB, othB)
             collB.NewRet(callExt(collB, "js_seq", [callExt(collB, "js_pylen", [seqV]), emitNum(collB, 0)]))
@@ -4090,7 +4113,7 @@ KwContinue  = "continue" KwEnd ;
             colB.NewRet(end ? colB.NewCall(rtSwCount(hasUniStr), [ps[0]]) : emitNum(colB, 0))
             var pn = end ? "endIndex" : "startIndex"
             if (isComputedName(pn)) { othB.NewRet(othB.NewCall(rtGetProp(), [ps[0], emitStr(othB, pn)])) }
-            else { othB.NewRet(callExt(othB, "js_get", [ps[0], emitStr(othB, pn)])) }
+            else { othB.NewRet(callExt(othB, "js_swget", [ps[0], emitStr(othB, pn)])) }
         })
     }
     function swEmitLMCall(b, recvV, s, nameV, argsV) {
@@ -5104,6 +5127,8 @@ KwContinue  = "continue" KwEnd ;
             // with a member of that name is not hijacked. It PRODUCES a Range, so it
             // arms hasRanges: a program can hold one with no `...` in its text.
             || name == "indices"
+            // A range's bounds, which js_swget reads off a range only.
+            || name == "lowerBound" || name == "upperBound"
             // A Dictionary's .values: the floor's js_get does not know the name.
             || name == "values"
             // A String's UTF-8 bytes, UTF-16 units and code points, as arrays.
@@ -10746,12 +10771,19 @@ KwContinue  = "continue" KwEnd ;
             rB.NewBr(headB)
             var iV = callExt(headB, "js_scope_get", [sc, emitStr(headB, "i")])
             headB.NewCondBr(truthy(headB, closed), cmpB, openB)
-            cmpB.NewCondBr(truthy(cmpB, callExt(cmpB, "js_le", [iV, hi])), bodyB, doneB)
-            openB.NewCondBr(truthy(openB, callExt(openB, "js_lt", [iV, hi])), bodyB, doneB)
+            cmpB.NewCondBr(truthy(cmpB, callExt(cmpB, "js_swle", [iV, hi])), bodyB, doneB)
+            openB.NewCondBr(truthy(openB, callExt(openB, "js_swlt", [iV, hi])), bodyB, doneB)
             var i2 = callExt(bodyB, "js_scope_get", [sc, emitStr(bodyB, "i")])
             callExt(bodyB, "js_arr_push", [out, i2])
-            callExt(bodyB, "js_scope_set", [sc, emitStr(bodyB, "i"), callExt(bodyB, "js_jadd", [i2, emitNum(bodyB, 1)])])
-            bodyB.NewBr(headB)
+            // The step keeps the bound's integer type (js_swarith), so a closed
+            // range stops AT its upperBound: one more step past Int8.max wraps.
+            var endB = curF.NewBlock("")
+            var stepB = curF.NewBlock("")
+            bodyB.NewCondBr(truthy(bodyB, closed), endB, stepB)
+            endB.NewCondBr(truthy(endB, callExt(endB, "js_swge", [i2, hi])), doneB, stepB)
+            var i3 = callExt(stepB, "js_scope_get", [sc, emitStr(stepB, "i")])
+            callExt(stepB, "js_scope_set", [sc, emitStr(stepB, "i"), callExt(stepB, "js_swarith", [emitStr(stepB, "+"), i3, emitNum(stepB, 1)])])
+            stepB.NewBr(headB)
             doneB.NewRet(out)
             if (!hasSets) { asIs.NewRet(ps[0]); return }
             var setB = curF.NewBlock("")

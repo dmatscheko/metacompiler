@@ -1202,8 +1202,8 @@ func init() {
 				if r, ok := u(a[0]).(*jsObject); ok && swIsRange(r) {
 					name := rt.toString(u(a[1]))
 					args := rt.swArgList(u(a[2]))
-					if name == "contains" && len(args) == 1 {
-						return boolH(rt.swRangeHas(r, args[0]))
+					if v, ok := rt.swRangeMethod(r, name, args); ok {
+						return w(v)
 					}
 					lo, hi := r.props["lo"], r.props["hi"]
 					if isNullish(lo) || isNullish(hi) {
@@ -1215,9 +1215,15 @@ func init() {
 					}
 					elems := []interface{}{}
 					for i := 0; i < n; i++ {
-						elems = append(elems, swNum(rt, lo)+float64(i))
+						elems = append(elems, swRangeAt(rt, lo, i))
 					}
-					return m["js_swmcall"]([]uint64{w(&jsArray{elems: elems}), a[1], a[2]})
+					res := u(m["js_swmcall"]([]uint64{w(&jsArray{elems: elems}), a[1], a[2]}))
+					// A Range<Int> is its own indices: the index of an element
+					// is the element, not its offset.
+					if (name == "firstIndex" || name == "lastIndex") && r.props["closed"] != true && !isNullish(res) {
+						res = swRangeAt(rt, lo, int(swNum(rt, res)))
+					}
+					return w(res)
 				}
 				if els, isSet := swSetElems(u(a[0])); isSet {
 					return w(rt.swSetMethod(els, rt.toString(u(a[1])), rt.swArgList(u(a[2])),
@@ -1482,45 +1488,11 @@ func init() {
 		m["js_swradixstr"] = func(a []uint64) uint64 {
 			return rt.wrapStr(swRadixStr(u(a[0]), int(giVal(rt, u(a[1]))), rt.truthy(u(a[2]))))
 		}
-		// The four ordered comparisons. A box has to go through giCmp rather than
-		// the shared jsCompare, because a UInt64 above 2^63 reads as a NEGATIVE
-		// int64 there, so UInt64.max < 0 would hold.
+		// The four ordered comparisons, over swRel.
 		rel := func(name string, want func(int) bool) {
 			m[name] = func(a []uint64) uint64 {
-				l, r := u(a[0]), u(a[1])
-				// A float box is an object to the shared comparison, so it has
-				// to be unboxed first: `1.5 < 2.0` between two boxes is not a
-				// numeric comparison at all.
-				if swIsFlo(l) || swIsFlo(r) {
-					x, y := swNum(rt, l), swNum(rt, r)
-					// A Float operand makes the other side a Float too,
-					// so `16777217 < f` compares two binary32 values -
-					// swift will only ever have put a literal there.
-					if swIsF32(l) || swIsF32(r) {
-						x, y = jvmFround(x), jvmFround(y)
-					}
-					c := 0
-					if x < y {
-						c = -1
-					} else if x > y {
-						c = 1
-					} else if x != y {
-						return jsHFalse // a NaN operand: every ordering is false
-					}
-					return boolH(want(c))
-				}
-				if giIsInt(l) || giIsInt(r) {
-					if giIsIntegral(l) && giIsIntegral(r) {
-						return boolH(want(rt.giCmp(l, r)))
-					}
-				}
-				// Two Strings order by their NFC scalars (swcStrCmp).
-				if ls, ok := l.(string); ok {
-					if rs, ok := r.(string); ok {
-						return boolH(want(swcStrCmp(ls, rs)))
-					}
-				}
-				return boolH(want(rt.jsCompare(l, r)))
+				c := rt.swRel(u(a[0]), u(a[1]))
+				return boolH(c != swUnordered && want(c))
 			}
 		}
 		// A String's Characters and their count: UAX #29 (abnf/jsrtswiftchars.go).
@@ -1587,6 +1559,33 @@ func init() {
 			// swiftc 6.1.2 prints `0..<3` for [3, 1, 2].indices.
 			if arr, ok := u(a[0]).(*jsArray); ok && rt.toString(u(a[1])) == "indices" {
 				return w(swMkRange(0, float64(len(arr.elems)), false))
+			}
+			// A range's bounds and isEmpty, whatever the bound type. Twins:
+			// swGetField in languages/swift-interpreter.abnf and js_swget in
+			// languages/lib/swift-rt.metajs.
+			if r, ok := u(a[0]).(*jsObject); ok && swIsRange(r) {
+				switch rt.toString(u(a[1])) {
+				case "lowerBound":
+					return w(r.props["lo"])
+				case "upperBound":
+					return w(r.props["hi"])
+				case "isEmpty":
+					return boolH(rt.swRangeEmpty(r))
+				// A Range<Int> is its own indices; a ClosedRange's Index is
+				// an enum this runtime does not model.
+				case "startIndex":
+					if r.props["closed"] != true {
+						return w(r.props["lo"])
+					}
+				case "endIndex":
+					if r.props["closed"] != true {
+						return w(r.props["hi"])
+					}
+				case "indices":
+					if r.props["closed"] != true {
+						return w(r)
+					}
+				}
 			}
 			// A String's views, as arrays: `.utf8` the UTF-8 bytes and
 			// `.unicodeScalars` one String per code point. Twins: swGetField in
@@ -3511,21 +3510,126 @@ func swSeqK(rt *jsrt, args []interface{}, dflt, n int) int {
 	return k
 }
 
-// swRangeHas is a range's bounds test; a missing bound admits everything on
-// its side.
+// swUnordered is swRel's answer for a NaN operand, on which every ordering is
+// false.
+const swUnordered = 2
+
+// swRel is Swift's ordering of two values: -1, 0, 1, or swUnordered. A box has
+// to go through giCmp rather than the shared jsCompare, because a UInt64 above
+// 2^63 reads as a NEGATIVE int64 there, so UInt64.max < 0 would hold. Twin of
+// swRel in languages/lib/swift-rt.metajs.
+func (rt *jsrt) swRel(l, r interface{}) int {
+	// A float box is an object to the shared comparison, so it has to be
+	// unboxed first: `1.5 < 2.0` between two boxes is not a numeric
+	// comparison at all.
+	if swIsFlo(l) || swIsFlo(r) {
+		x, y := swNum(rt, l), swNum(rt, r)
+		// A Float operand makes the other side a Float too, so `16777217 < f`
+		// compares two binary32 values - swift will only ever have put a
+		// literal there.
+		if swIsF32(l) || swIsF32(r) {
+			x, y = jvmFround(x), jvmFround(y)
+		}
+		switch {
+		case x < y:
+			return -1
+		case x > y:
+			return 1
+		case x != y:
+			return swUnordered
+		}
+		return 0
+	}
+	if giIsInt(l) || giIsInt(r) {
+		if giIsIntegral(l) && giIsIntegral(r) {
+			return rt.giCmp(l, r)
+		}
+	}
+	// Two Strings order by their NFC scalars (swcStrCmp).
+	if ls, ok := l.(string); ok {
+		if rs, ok := r.(string); ok {
+			return swcStrCmp(ls, rs)
+		}
+	}
+	return rt.jsCompare(l, r)
+}
+
+// swRangeLess is `a < b` (`a <= b` when orEq) between two range bounds.
+func (rt *jsrt) swRangeLess(a, b interface{}, orEq bool) bool {
+	c := rt.swRel(a, b)
+	return c != swUnordered && (c < 0 || orEq && c == 0)
+}
+
+// swRangeAt is the i-th element of a range starting at lo, of lo's own integer
+// type. Twins: rangeAt in languages/swift-interpreter.abnf and swRangeAt in
+// languages/lib/swift-rt.metajs.
+func swRangeAt(rt *jsrt, lo interface{}, i int) interface{} {
+	if g, ok := lo.(jsGInt); ok {
+		return giNorm(g.v+int64(i), g.w, g.u)
+	}
+	return swNum(rt, lo) + float64(i)
+}
+
+// swRangeHas is a range's bounds test, under the bound type's own ordering; a
+// missing bound admits everything on its side.
 func (rt *jsrt) swRangeHas(r *jsObject, v interface{}) bool {
-	x := swNum(rt, v)
-	if lo := r.props["lo"]; !isNullish(lo) && x < swNum(rt, lo) {
+	if lo := r.props["lo"]; !isNullish(lo) && !rt.swRangeLess(lo, v, true) {
 		return false
 	}
 	hi := r.props["hi"]
-	if isNullish(hi) {
-		return true
+	return isNullish(hi) || rt.swRangeLess(v, hi, r.props["closed"] == true)
+}
+
+// swRangeEmpty is Range.isEmpty: a half-open range with equal bounds. A
+// ClosedRange always holds its lowerBound.
+func (rt *jsrt) swRangeEmpty(r *jsObject) bool {
+	return r.props["closed"] != true && rt.swRel(r.props["lo"], r.props["hi"]) == 0
+}
+
+// swRangeMethod answers the members a range answers from its bounds alone, so
+// they hold for a Double or a String range too: contains, clamped(to:) and
+// overlaps, as the Swift standard library spells them (Range.swift,
+// ClosedRange.swift). Twins: rangeMethod in languages/swift-interpreter.abnf and
+// swRangeMethod in languages/lib/swift-rt.metajs.
+func (rt *jsrt) swRangeMethod(r *jsObject, name string, args []interface{}) (interface{}, bool) {
+	if len(args) != 1 {
+		return nil, false
 	}
-	if r.props["closed"] == true {
-		return x <= swNum(rt, hi)
+	if name == "contains" && !isCallable(args[0]) {
+		return rt.swRangeHas(r, args[0]), true
 	}
-	return x < swNum(rt, hi)
+	o, ok := args[0].(*jsObject)
+	if !ok || !swIsRange(o) {
+		return nil, false
+	}
+	lo, hi, olo, ohi := r.props["lo"], r.props["hi"], o.props["lo"], o.props["hi"]
+	switch name {
+	case "clamped":
+		nlo, nhi := lo, hi
+		if rt.swRangeLess(lo, olo, false) {
+			nlo = olo
+		} else if rt.swRangeLess(ohi, lo, false) {
+			nlo = ohi
+		}
+		if rt.swRangeLess(ohi, hi, false) {
+			nhi = ohi
+		} else if rt.swRangeLess(hi, olo, false) {
+			nhi = olo
+		}
+		c := newJSObject()
+		c.set("__range", true)
+		c.set("lo", nlo)
+		c.set("hi", nhi)
+		c.set("closed", r.props["closed"])
+		return c, true
+	case "overlaps":
+		// Disjoint when one range ends before the other starts - at its
+		// upperBound itself for a half-open range - or either is empty.
+		return !(rt.swRangeLess(ohi, lo, o.props["closed"] != true) ||
+			rt.swRangeLess(hi, olo, r.props["closed"] != true) ||
+			rt.swRangeEmpty(r) || rt.swRangeEmpty(o)), true
+	}
+	return nil, false
 }
 
 // swIntMethod is the BinaryInteger members on an Int of any width (ok false

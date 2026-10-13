@@ -2968,15 +2968,22 @@ function js_swmcall(recv, name, args) {
         // bounds, so a one-sided range answers it too. Twins: mcall in
         // languages/swift-interpreter.abnf and js_swmcall in abnf/jsrtswift.go.
         if (swIsRange(recv)) {
-            if (name === "contains" && args.length == 1) { return swRangeHas(recv, args[0]) }
+            var rm = swRangeMethod(recv, name, args)
+            if (rm !== undefined) { return rm }
             if (recv["lo"] === null || recv["hi"] === null) { fail("method ." + name + " on a one-sided range") }
             var lo = swNum(recv["lo"])
             var n = swNum(recv["hi"]) - lo
             if (recv["closed"] === true) { n = n + 1 }
             var elems = []
             var ri = 0
-            while (ri < n) { elems.push(lo + ri); ri = ri + 1 }
-            return js_swmcall(elems, name, args)
+            while (ri < n) { elems.push(swRangeAt(recv["lo"], ri)); ri = ri + 1 }
+            var res = js_swmcall(elems, name, args)
+            // A Range<Int> is its own indices: the index of an element is the
+            // element, not its offset.
+            if ((name === "firstIndex" || name === "lastIndex") && recv["closed"] !== true && res !== null && res !== undefined) {
+                return swRangeAt(recv["lo"], swNum(res))
+            }
+            return res
         }
         if (name === "insert" && rtIsArr(recv) && args.length > 1) {
             var at = swNum(args[1]) | 0
@@ -3009,13 +3016,64 @@ function js_swmcall(recv, name, args) {
     return undefined
 }
 
-// A range's bounds test; a missing bound admits everything on its side.
+// The i-th element of a range starting at lo, of lo's own integer type. Twins:
+// rangeAt in languages/swift-interpreter.abnf and swRangeAt in abnf/jsrtswift.go.
+function swRangeAt(lo, i) {
+    if (sintIs(lo)) { return sintConv(swNum(lo) + i, sintWidth(lo), sintUns(lo)) }
+    return swNum(lo) + i
+}
+
+// `a < b` (`a <= b` when orEq) between two range bounds, under swRel.
+function swRangeLess(a, b, orEq) {
+    var c = swRel(a, b)
+    if (c === 0 - 2) { return false }
+    if (c < 0) { return true }
+    return orEq && c === 0
+}
+
+// A range's bounds test, under the bound type's own ordering; a missing bound
+// admits everything on its side.
 function swRangeHas(r, v) {
-    var x = swNum(v)
-    if (r["lo"] !== null && r["lo"] !== undefined) { if (x < swNum(r["lo"])) { return false } }
+    if (r["lo"] !== null && r["lo"] !== undefined) { if (!swRangeLess(r["lo"], v, true)) { return false } }
     if (r["hi"] === null || r["hi"] === undefined) { return true }
-    if (r["closed"] === true) { return x <= swNum(r["hi"]) }
-    return x < swNum(r["hi"])
+    return swRangeLess(v, r["hi"], r["closed"] === true)
+}
+
+// Range.isEmpty: a half-open range with equal bounds. A ClosedRange always holds
+// its lowerBound.
+function swRangeEmpty(r) {
+    if (r["closed"] === true) { return false }
+    return swRel(r["lo"], r["hi"]) === 0
+}
+
+// The members a range answers from its bounds alone, so they hold for a Double or
+// a String range too: contains, clamped(to:) and overlaps, as the Swift standard
+// library spells them (Range.swift, ClosedRange.swift). undefined for anything
+// else. Twins: rangeMethod in languages/swift-interpreter.abnf and swRangeMethod
+// in abnf/jsrtswift.go.
+function swRangeMethod(r, name, args) {
+    if (args.length != 1) { return undefined }
+    if (name === "contains" && typeof args[0] != "function") { return swRangeHas(r, args[0]) }
+    var o = args[0]
+    if (!swIsRange(o)) { return undefined }
+    if (name === "clamped") {
+        var c = {__range: true}
+        c["lo"] = r["lo"]
+        if (swRangeLess(r["lo"], o["lo"], false)) { c["lo"] = o["lo"] } else if (swRangeLess(o["hi"], r["lo"], false)) { c["lo"] = o["hi"] }
+        c["hi"] = r["hi"]
+        if (swRangeLess(o["hi"], r["hi"], false)) { c["hi"] = o["hi"] } else if (swRangeLess(r["hi"], o["lo"], false)) { c["hi"] = o["lo"] }
+        c["closed"] = r["closed"]
+        return c
+    }
+    if (name === "overlaps") {
+        // Disjoint when one range ends before the other starts - at its
+        // upperBound itself for a half-open range - or either is empty.
+        if (swRangeLess(o["hi"], r["lo"], o["closed"] !== true)) { return false }
+        if (swRangeLess(r["hi"], o["lo"], r["closed"] !== true)) { return false }
+        if (swRangeEmpty(r)) { return false }
+        return !swRangeEmpty(o)
+    }
+    return undefined
 }
 
 // The BinaryInteger members on an Int of any width; the answer keeps the
@@ -3510,6 +3568,20 @@ function js_swget(v, k) {
     // indices is a PROPERTY on every Collection. Only an Array is answered: a String's indices are String.Index values
     // with no printable form here. swiftc 6.1.2 prints `0..<3` for [3, 1, 2].indices.
     if (k === "indices" && rtIsArr(v)) { return swMkRange(0, v.length, false) }
+    // A range's bounds and isEmpty, whatever the bound type. Twins: swGetField in
+    // languages/swift-interpreter.abnf and js_swget in abnf/jsrtswift.go.
+    if (swIsRange(v)) {
+        if (k === "lowerBound") { return v["lo"] }
+        if (k === "upperBound") { return v["hi"] }
+        if (k === "isEmpty") { return swRangeEmpty(v) }
+        // A Range<Int> is its own indices; a ClosedRange's Index is an enum this
+        // runtime does not model.
+        if (v["closed"] !== true) {
+            if (k === "startIndex") { return v["lo"] }
+            if (k === "endIndex") { return v["hi"] }
+            if (k === "indices") { return v }
+        }
+    }
     // A String's views, as arrays: `.utf8` the UTF-8 bytes and `.unicodeScalars`
     // one String per code point. Twins: swGetField in
     // languages/swift-interpreter.abnf and js_swget in abnf/jsrtswift.go.
