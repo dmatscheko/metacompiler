@@ -2284,6 +2284,30 @@ s44() {
   check qp6 "$r" "11010010"
 }
 
+# ===== SECTION 45: ${v/p/r} - "&", an empty subject, extglob, characters =====
+# An unquoted "&" in the replacement is the matched text (patsub_replacement, on by default
+# in bash 5.2+); a quoted or escaped one is literal. An empty value is a subject, an unset
+# one is not. The extended globs are patterns only under `shopt -s extglob` (and always in
+# [[ == ]]). A pattern never splits a UTF-8 character. Every expected value is bash 5.3's.
+s45() {
+  local k=hello r='<&>' e="" s=aXa v=hé w=éàü
+  check rp1 "[${k/l/<&>}] [${k//l/&&}] [${k/l/\&}] [${k/l/"&"}] [${k/l/'&'}] [${k/l*/(&)}]" "[he<l>lo] [hellllo] [he&lo] [he&lo] [he&lo] [he(llo)]"
+  check rp2 "[${k/l/$r}] [${k/l/"$r"}] [${k//[el]/[&]}] [${k/#h/&&}] [${k/%o/&!}]" "[he<l>lo] [he<&>lo] [h[e][l][l]o] [hhello] [hello!]"
+  r='a\&b'
+  check rp3 "[${k/l/$r}] [${k/l/\\}] [${k/l/a\b}] [${k/l/"\&"}] [${k/l/\\&}]" "[hea&blo] [he\lo] [heablo] [he\&lo] [he\llo]"
+  check rp4 "[${e/*/R}] [${e//*/R}] [${e/#/R}] [${e/%/R}] [${e/x/R}] [${nosuch45/*/R}]" "[R] [R] [R] [R] [] []"
+  check eg1 "[${s#@(a|X)}] [${s//@(a|X)/-}] [${s/+(a)/-}]" "[aXa] [aXa] [aXa]"
+  shopt -s extglob
+  shopt -q extglob; local q45=$?
+  check eg2 "[${s#@(a|X)}] [${s//@(a|X)/-}] [${s/+(a)/-}] $q45" "[Xa] [---] [-Xa] 0"
+  shopt -u extglob
+  [[ aXa == @(a|X)Xa ]]; local d45=$?
+  shopt -q extglob
+  check eg3 "[${s#@(a|X)}] $d45 $?" "[aXa] 0 1"
+  check u81 "[${v%?}] [${v#?}] [${v%%?}] [${v/%?/Z}] [${v/#?/Z}]" "[h] [é] [h] [hZ] [Zé]"
+  check u82 "[${w%?}] [${w%??}] [${w#?}] [${w/?/-}] [${w//?/-}]" "[éà] [é] [àü] [-àü] [---]"
+}
+
 s01   # SECTION-CALL 01
 s02   # SECTION-CALL 02
 s03   # SECTION-CALL 03
@@ -2328,5 +2352,6 @@ s41   # SECTION-CALL 41
 s42   # SECTION-CALL 42
 s43   # SECTION-CALL 43
 s44   # SECTION-CALL 44
+s45   # SECTION-CALL 45
 echo "full: $checks checks, $fails failures"
 exit $fails

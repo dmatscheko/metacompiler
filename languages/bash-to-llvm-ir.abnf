@@ -114,7 +114,7 @@ CasePats    <~~ push({pats: takeAll()}) ~~> = CasePat { "|" CasePat } ;
 // CasePat in bash-interpreter.abnf.
 CasePat     <~~ push(mkNsWord(takeAll())) ~~> = CaseFirst :whitespace() { CaseSeg } ;
 CaseFirst   = Tilde | CaseSeg ;
-CaseSeg     = PatSq | PatDq | PatAnsi | UqExp | LineCont | PatEsc | BraceLit | EgPfxLit | BareSeg ;
+CaseSeg     = PatSq | PatDq | PatAnsi | UqExp | LineCont | PatEsc | BraceLit | ExtGlob | EgPfxLit | BareSeg ;
 CaseBody    <~~ push(makeSeq(linkAsync(takeAll()))) ~~>
             = CaseSepOpt [ Statement { ListSep Statement } ListOptSep ] ;
 CaseSep     = NotCaseTerm SepTok { NotCaseTerm SepTok } ;
@@ -452,9 +452,8 @@ PeOp        <~~ push({op: up.in}) ~~> = ":-" | ":=" | ":?" | ":+" | "-" | "=" | 
 // front, % from the back; doubled = longest match).
 PePatForm   = PeTarget PePatOp PeGlobArg ;
 PePatOp     <~~ push({pe: up.in}) ~~> = "##" | "#" | "%%" | "%" ;
-PePatArg    <~~ push(mkWord(takeAll())) ~~> = { BraceSeg } ;
 // The PATTERN operand of ${v#p} ${v%p} ${v^p} and ${v/p/r}: a quoted part is literal, as in
-// [[ == ]] (`${s%"$p"}` with p='?' strips nothing); the replacement stays a PePatArg.
+// [[ == ]] (`${s%"$p"}` with p='?' strips nothing).
 PeGlobArg   <~~ push(mkWord(takeAll())) ~~> = { PeGlobSeg } ;
 PeGlobSeg   = PatSq | PatDq | ExpSeg | LineCont | PatEsc | BraceBare ;
 
@@ -473,7 +472,16 @@ PeReplAnchor <~~ push({anchor: up.in}) ~~> = "#" | "%" ;
 ReplPat     <~~ push(mkWord(takeAll())) ~~> = { ReplSeg } ;
 ReplSeg     = PatSq | PatDq | ExpSeg | PatEsc | ReplBare ;
 ReplBare    <~~ push(makeConst(up.in)) ~~> = !@+"}/\"'\\$`" ;
-ReplTail    = "/" PePatArg ;
+// The REPLACEMENT: an unquoted "&" is the matched text (bash 5.2+'s patsub_replacement), so
+// a quoted or backslash-escaped part has its "&" and "\" escaped (repEscape), which
+// rt_repsub undoes. Twin of ReplTail in bash-interpreter.abnf.
+ReplTail    = "/" ReplArg ;
+ReplArg     <~~ push(mkWord(takeAll())) ~~> = { ReplArgSeg } ;
+ReplArgSeg  = RepSq | RepDq | ExpSeg | LineCont | RepEsc | BraceBare ;
+RepSq       = "'" :whitespace() { !@+"'" } <~~ push(makeConst(repEscape(up.in))) ~~> "'" ;
+RepDq       <~~ push(mkQuotedRep(mkDqWord(takeAll()))) ~~>
+            = '"' :whitespace() { ExpSeg | DqCont | DqEsc | DqLit } '"' ;
+RepEsc      <~~ push(makeConst(repEscape(escChar(up.in)))) ~~> = "\\" AnyCh ;
 
 // ${v:off} and ${v:off:len}: arithmetic offsets (so ${v: -1} is a substring, not ${v:-d}),
 // either may be empty; PeArPad eats a blank before the "}".
@@ -1375,6 +1383,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtSliceFields = rtDecl("rt_slicefields", true, [1, 0, 0, 1, 0])
     var rtGlobEsc = rtDecl("rt_globescape", true, [1])
     var rtRxEsc = rtDecl("rt_rxescape", true, [1])
+    var rtRepEsc = rtDecl("rt_repescape", true, [1])
+    // [[ == ]] matches with the extended globs on whatever shopt says (rt_glob_x).
+    var rtGlobX = rtDecl("rt_glob_x", false, [1, 1])
+    var gOptExtglob = rtGlobal("opt_extglob", i32)
     var rtCatFields = rtDecl("rt_catfields", true, [1, 1])
     var rtMapf = rtDecl("rt_mapf", true, [1, 0, 1, 1, 0, 1, 0])
 
@@ -3246,6 +3258,24 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return out
     }
+    // A quoted part of a ${v/p/r} replacement: its "&" and "\" are literal; rt_repescape is
+    // the run-time half. Twin of repEscape in bash-interpreter.abnf.
+    function repEscape(s0) {
+        var out = ""
+        var i
+        for (i = 0; i < s0.length; i++) {
+            var ch = s0.charAt(i)
+            if (ch == "&" || ch == "\\") { out = out + "\\" }
+            out = out + ch
+        }
+        return out
+    }
+    function mkQuotedRep(t) {
+        return {c: undefined, fn: function(b) {
+            var r = evalWord(b, t)
+            return {b: r.b, v: r.b.NewCall(rtRepEsc, r.v)}
+        }}
+    }
     function mkQuotedRx(t) {
         return {c: undefined, fn: function(b) {
             var r = evalWord(b, t)
@@ -3352,8 +3382,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var rl = evalWord(b, lw); b = rl.b
             var rr = evalWord(b, rw); b = rr.b
             // == and != glob-match their right hand side inside [[ ]]; = is a synonym of ==.
-            if (op == "==" || op == "=") { return {b: b, v: b.NewCall(rtGlob, [rr.v, rl.v])} }
-            if (op == "!=") { return {b: b, v: b.NewXor(b.NewCall(rtGlob, [rr.v, rl.v]), one)} }
+            if (op == "==" || op == "=") { return {b: b, v: b.NewCall(rtGlobX, [rr.v, rl.v])} }
+            if (op == "!=") { return {b: b, v: b.NewXor(b.NewCall(rtGlobX, [rr.v, rl.v]), one)} }
             if (op == "=~") { fail("[[ =~ ]] (regex matching) is not supported") }
             // The numeric tests evaluate BOTH sides as arithmetic expressions inside [[ ]].
             // Twin of mkCondBin in bash-interpreter.abnf.
@@ -3738,16 +3768,37 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // A subshell must restore the shell OPTIONS as well as the variables (set -e inside
     // $( ) does not leak out), so they are stashed in allocas around the body.
     function saveOpts(b) {
-        var se = b.NewAlloca(i32), su = b.NewAlloca(i32), sp = b.NewAlloca(i32)
+        var se = b.NewAlloca(i32), su = b.NewAlloca(i32), sp = b.NewAlloca(i32), sx = b.NewAlloca(i32)
         b.NewStore(b.NewLoad(i32, gOptE), se)
         b.NewStore(b.NewLoad(i32, gOptU), su)
         b.NewStore(b.NewLoad(i32, gOptPf), sp)
-        return {e: se, u: su, pf: sp}
+        b.NewStore(b.NewLoad(i32, gOptExtglob), sx)
+        return {e: se, u: su, pf: sp, x: sx}
     }
     function restoreOpts(b, sv) {
         b.NewStore(b.NewLoad(i32, sv.e), gOptE)
         b.NewStore(b.NewLoad(i32, sv.u), gOptU)
         b.NewStore(b.NewLoad(i32, sv.pf), gOptPf)
+        b.NewStore(b.NewLoad(i32, sv.x), gOptExtglob)
+    }
+    // `shopt` knows extglob (-s / -u / -q); every other option is accepted and reported as
+    // success, and a -q query of one answers "on". Only LITERAL words are read. Twin of the
+    // shopt arm of runCommand in bash-interpreter.abnf.
+    function emitShopt(b, argTs) {
+        var flag = ""
+        var st = zero
+        var i
+        for (i = 0; i < argTs.length; i++) {
+            var a = argTs[i].c
+            if (a == "-s" || a == "-u" || a == "-q") { flag = a }
+            else if (a == "extglob") {
+                if (flag == "-s") { b.NewStore(one, gOptExtglob) }
+                if (flag == "-u") { b.NewStore(zero, gOptExtglob) }
+                if (flag == "-q") { st = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, gOptExtglob), zero), zero, one) }
+            }
+        }
+        storeStatus(b, st)
+        return b
     }
 
     // Emit the EXIT traps a (sub)shell registered, each behind its own flag.
@@ -3906,6 +3957,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             if (cmd == "printf") { return emitPrintf(b, argTs) }
             if (cmd == "set") { return emitSet(b, argTs) }
+            if (cmd == "shopt") { return emitShopt(b, argTs) }
             if (cmd == "trap") {
                 if (argTs.length == 0 || argTs[0].c == undefined) {
                     fail("trap needs a literal handler in this compiler")

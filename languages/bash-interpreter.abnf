@@ -121,7 +121,7 @@ CasePats    <~~ push({pats: takeAll()}) ~~> = CasePat { "|" CasePat } ;
 // quoting-aware segments of [[ == ]]'s right hand side (PatSq, PatDq, PatAnsi, PatEsc).
 CasePat     <~~ push(mkNsWord(takeAll())) ~~> = CaseFirst :whitespace() { CaseSeg } ;
 CaseFirst   = Tilde | CaseSeg ;
-CaseSeg     = PatSq | PatDq | PatAnsi | UqExp | LineCont | PatEsc | BraceLit | EgPfxLit | BareSeg ;
+CaseSeg     = PatSq | PatDq | PatAnsi | UqExp | LineCont | PatEsc | BraceLit | ExtGlob | EgPfxLit | BareSeg ;
 CaseBody    <~~ push(makeSeq(linkAsync(takeAll()))) ~~>
             = CaseSepOpt [ Statement { ListSep Statement } ListOptSep ] ;
 CaseSep     = NotCaseTerm SepTok { NotCaseTerm SepTok } ;
@@ -501,9 +501,8 @@ PeOp        <~~ push({op: up.in}) ~~> = ":-" | ":=" | ":?" | ":+" | "-" | "=" | 
 // front, % from the back; doubled = longest match).
 PePatForm   = PeTarget PePatOp PeGlobArg ;
 PePatOp     <~~ push({pe: up.in}) ~~> = "##" | "#" | "%%" | "%" ;
-PePatArg    <~~ push(mkWord(takeAll())) ~~> = { BraceSeg } ;
 // The PATTERN operand of ${v#p} ${v%p} ${v^p} and ${v/p/r}: a quoted part is literal, as in
-// [[ == ]] (`${s%"$p"}` with p='?' strips nothing); the replacement stays a PePatArg.
+// [[ == ]] (`${s%"$p"}` with p='?' strips nothing).
 PeGlobArg   <~~ push(mkWord(takeAll())) ~~> = { PeGlobSeg } ;
 PeGlobSeg   = PatSq | PatDq | ExpSeg | LineCont | PatEsc | BraceBare ;
 
@@ -522,7 +521,16 @@ PeReplAnchor <~~ push({anchor: up.in}) ~~> = "#" | "%" ;
 ReplPat     <~~ push(mkWord(takeAll())) ~~> = { ReplSeg } ;
 ReplSeg     = PatSq | PatDq | ExpSeg | PatEsc | ReplBare ;
 ReplBare    <~~ push(makeConst(up.in)) ~~> = !@+"}/\"'\\$`" ;
-ReplTail    = "/" PePatArg ;
+// The REPLACEMENT: an unquoted "&" is the matched text (bash 5.2+'s patsub_replacement), so
+// a quoted or backslash-escaped part has its "&" and "\" escaped (repEscape), which the
+// replace step undoes (repSubst / rt_repsub).
+ReplTail    = "/" ReplArg ;
+ReplArg     <~~ push(mkWord(takeAll())) ~~> = { ReplArgSeg } ;
+ReplArgSeg  = RepSq | RepDq | ExpSeg | LineCont | RepEsc | BraceBare ;
+RepSq       = "'" :whitespace() { !@+"'" } <~~ push(makeConst(repEscape(up.in))) ~~> "'" ;
+RepDq       <~~ push(mkQuotedRep(mkDqWord(takeAll()))) ~~>
+            = '"' :whitespace() { ExpSeg | DqCont | DqEsc | DqLit } '"' ;
+RepEsc      <~~ push(makeConst(repEscape(escChar(up.in)))) ~~> = "\\" AnyCh ;
 
 // ${v:off} and ${v:off:len} : the offsets are arithmetic, so whitespace matters again -
 // which is also what tells ${v: -1} (a substring) from ${v:-default}.
@@ -1370,20 +1378,22 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (mode == "#") {
             var j = matchLenAt(pat, v, 0)
             if (j < 0) { return v }
-            return rep + v.slice(j)
+            return repSubst(rep, v.slice(0, j)) + v.slice(j)
         }
         if (mode == "%") {
             var i0 = matchAtEnd(pat, v)
             if (i0 < 0) { return v }
-            return v.slice(0, i0) + rep
+            return v.slice(0, i0) + repSubst(rep, v.slice(i0))
         }
+        // An empty subject is one like any other: e=""; ${e/*/R} is R.
+        if (v == "") { return globMatch(pat, v) ? repSubst(rep, v) : v }
         var out = ""
         var i = 0
         var done = false
         while (i <= v.length && !done) {
             var j2 = matchLenAt(pat, v, i)
             if (j2 > i) {
-                out = out + rep
+                out = out + repSubst(rep, v.slice(i, j2))
                 i = j2
                 if (mode == "one") { out = out + v.slice(i); done = true }
             } else {
@@ -2053,7 +2063,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return function() {
                 var pat = (pT != null) ? wordJoin(pT()) : ""
                 var rep = (rT != null) ? wordJoin(rT()) : ""
-                return applyPatOp(getVarVal(nameOf()), sPe, sAnch, pat, rep)
+                var pnm = nameOf()
+                var pv = getVarVal(pnm)
+                // An UNSET value is left alone by ${v/p/r}; an empty one is a subject.
+                if (pv == "" && (sPe == "/" || sPe == "//") && !isSetVar(pnm) && !isArr(pnm)) { return "" }
+                return applyPatOp(pv, sPe, sAnch, pat, rep)
             }
         }
         if (op == "" && name == "*" && !indirect) { return function() { return starJoin(posParams) } }
@@ -2273,7 +2287,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var pc = p.charCodeAt(pi)
             // An extglob prefix only counts when a "(" follows it; "*" and "?" are otherwise
             // the ordinary wildcards, which is why this test comes first.
-            if ((pc == 64 || pc == 63 || pc == 42 || pc == 43 || pc == 33) && pi + 1 < p.length && p.charCodeAt(pi + 1) == 40) {
+            if ((pc == 64 || pc == 63 || pc == 42 || pc == 43 || pc == 33) && pi + 1 < p.length && p.charCodeAt(pi + 1) == 40
+                && (optExtglob || egForce)) {
                 var ee = egEnd(p, pi + 1)
                 if (ee > 0) { return egMatch(pc, egAlts(p.slice(pi + 2, ee - 1)), p.slice(ee), s, si) }
             }
@@ -2379,6 +2394,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return {ok: 1, hit: hit ? 1 : 0, next: j + 1}
     }
     function globMatch(pat, s) { return globAt(pat, 0, s, 0) }
+    // The extended globs are patterns only under `shopt -s extglob` - and always on the right
+    // hand side of [[ == ]], which matches through globMatchX. Otherwise "@(a|X)" is text: bash
+    // 5.3 leaves aXa alone for ${s#@(a|X)}. Twin of opt_extglob / eg_force / rt_glob_x.
+    var optExtglob = false
+    var egForce = false
+    function globMatchX(pat, s) {
+        var saved = egForce
+        egForce = true
+        var r = globMatch(pat, s)
+        egForce = saved
+        return r
+    }
 
     // ---- field lists ------------------------------------------------------------------
     // A word thunk normally answers a plain string (exactly one field). When a word can
@@ -4405,11 +4432,22 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // to wait for and no job list to print. LIMIT: `wait PID` answers 0 rather than the
         // job's real status, and `jobs` prints nothing.
         if (cmd == "wait") { setStatus(0); return 0 }
-        // LIMIT: `shopt` accepts and reports success for anything. The one option scripts in
-        // the corpus actually turn on is extglob, and globAt() understands extended globs
-        // unconditionally, so setting it changes nothing here. A `shopt -q` QUERY therefore
-        // answers "on" for every option, which is not what bash does.
-        if (cmd == "shopt") { setStatus(0); return 0 }
+        // `shopt` knows extglob (-s / -u / -q); every other option is accepted and reported
+        // as success, and a -q query of one answers "on". Twin of emitShopt.
+        if (cmd == "shopt") {
+            var sflag = "", si2, sst = 0
+            for (si2 = 0; si2 < args.length; si2++) {
+                var sa = args[si2]
+                if (sa == "-s" || sa == "-u" || sa == "-q") { sflag = sa }
+                else if (sa == "extglob") {
+                    if (sflag == "-s") { optExtglob = true }
+                    if (sflag == "-u") { optExtglob = false }
+                    if (sflag == "-q" && !optExtglob) { sst = 1 }
+                }
+            }
+            setStatus(sst)
+            return sst
+        }
         if (cmd == "unset") {
             var ui
             for (ui = 0; ui < args.length; ui++) {
@@ -4675,7 +4713,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // the shell options and the EXIT trap.
     function saveShellState() {
         return {vars: snapshotVars(), pos: posParams, frames: localFrames, st: snapshotState(),
-                e: optErrExit, u: optNounset, pf: optPipefail, tr: exitTrap}
+                e: optErrExit, u: optNounset, pf: optPipefail, eg: optExtglob, tr: exitTrap}
     }
     function restoreShellState(st) {
         restoreVars(st.vars)
@@ -4685,6 +4723,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         optErrExit = st.e
         optNounset = st.u
         optPipefail = st.pf
+        optExtglob = st.eg
         exitTrap = st.tr
     }
     // ( LIST ) : variables and positional parameters are restored afterwards, and both a
@@ -4847,6 +4886,33 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return out
     }
     function mkQuotedRx(t) { return function() { return regexEscape(wordJoin(t())) } }
+    // A quoted part of a ${v/p/r} replacement: its "&" and "\" are literal. Twin of
+    // rt_repescape.
+    function repEscape(s) {
+        var out = ""
+        var i
+        for (i = 0; i < s.length; i++) {
+            var ch = s.charAt(i)
+            if (ch == "&" || ch == "\\") { out = out + "\\" }
+            out = out + ch
+        }
+        return out
+    }
+    function mkQuotedRep(t) { return function() { return repEscape(wordJoin(t())) } }
+    // The replacement with the matched text m for every unquoted "&": "\&" and "\\" are a
+    // literal & and \, a backslash before anything else is itself. Twin of rt_repsub.
+    function repSubst(r, m) {
+        var out = ""
+        var i = 0
+        while (i < r.length) {
+            var ch = r.charAt(i)
+            var nx = (i + 1 < r.length) ? r.charAt(i + 1) : ""
+            if (ch == "\\" && (nx == "&" || nx == "\\")) { out = out + nx; i = i + 2 }
+            else if (ch == "&") { out = out + m; i = i + 1 }
+            else { out = out + ch; i = i + 1 }
+        }
+        return out
+    }
 
     function mkCondBin(items) {
         var l = items[0], op = items[1].cop, r = items[2]
@@ -4854,8 +4920,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var lv = wordJoin(l())
             var rv = wordJoin(r())
             // == and != glob-match their right hand side inside [[ ]]; = is a synonym of ==.
-            if (op == "==" || op == "=") { return globMatch(rv, lv) }
-            if (op == "!=") { return !globMatch(rv, lv) }
+            if (op == "==" || op == "=") { return globMatchX(rv, lv) }
+            if (op == "!=") { return !globMatchX(rv, lv) }
             // The numeric tests evaluate BOTH sides as arithmetic expressions inside [[ ]]
             // ([[ 2+3 -eq 5 ]], [[ 010 -eq 8 ]], [[ x -eq 4 ]]), where test / [ want integers.
             if (hasOwn(testNumOps, op)) { return arOp(testNumOps[op], arEval(lv), arEval(rv)) == 1 }

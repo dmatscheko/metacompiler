@@ -1276,7 +1276,14 @@ int rt_egalt(char *eaq, int eaa)
  * The same matcher backs case and [[ == ]], exactly like the shell. Both
  * functions walk raw char* pointers; "*" backtracks by CALLING rt_glob again,
  * so the call stack is the backtracking stack.
+ *
+ * The extended globs @( ) ?( ) *( ) +( ) !( ) are patterns only under
+ * `shopt -s extglob` (opt_extglob) - and always on the right hand side of
+ * [[ == ]], which matches through rt_glob_x (eg_force). Otherwise "@(a|X)" is
+ * text: bash 5.3 leaves aXa alone for ${s#@(a|X)}.
  */
+int opt_extglob;
+int eg_force;
 
 /* rt_glob and rt_eg are mutually recursive; this prototype is the forward
  * declaration, with the POINTER parameters the definition has
@@ -1326,7 +1333,7 @@ int rt_glob(char *p, char *s)
          * arms; all five prefixes are only that when "(" is the next byte. */
         isPfx = (pc == 64) || (pc == 63) || (pc == 42) || (pc == 43) || (pc == 33);
         nextc = (int)(unsigned char)pcur[1];
-        if (isPfx && nextc == 40) return rt_eg(pcur, sp, 0);
+        if (isPfx && nextc == 40 && (opt_extglob != 0 || eg_force != 0)) return rt_eg(pcur, sp, 0);
 
         if (pc == 42) {
             /* skip a run of "*" */
@@ -1503,6 +1510,25 @@ int rt_eg(char *egp, char *egs, int egstar)
     return 0;
 }
 
+/* [[ == ]]: a match with the extended globs on, whatever shopt says. */
+int rt_glob_x(char *p, char *s)
+{
+    int saved = eg_force;
+    int r;
+    eg_force = 1;
+    r = rt_glob(p, s);
+    eg_force = saved;
+    return r;
+}
+
+/* 1 when byte offset k of s is a CHARACTER boundary: a pattern operator never
+ * cuts a UTF-8 sequence (bash 5.3: v=hé; ${v%?} is h, not h\xC3). */
+int rt_isbound(char *s, int k)
+{
+    if (k <= 0 || s[k] == 0) return 1;
+    return ((int)(unsigned char)s[k] & 192) != 128;
+}
+
 /* int rt_matchlen(char *p, char *s, int i): end index of the LONGEST match of
  * p starting at i, or -1. */
 int rt_matchlen(char *p, char *s, int i)
@@ -1513,8 +1539,10 @@ int rt_matchlen(char *p, char *s, int i)
     j = rt_strlen(s);
     while (1) {
         if (j < i) return -1;
-        cand = rt_substr(s, i, j - i);
-        if (rt_glob(p, cand) != 0) return j;
+        if (rt_isbound(s, j) != 0) {
+            cand = rt_substr(s, i, j - i);
+            if (rt_glob(p, cand) != 0) return j;
+        }
         j = j - 1;
     }
 }
@@ -1531,8 +1559,10 @@ int rt_matchend(char *p, char *s)
     i = 0;
     while (1) {
         if (i > len) return -1;
-        cand = rt_substr(s, i, -1);
-        if (rt_glob(p, cand) != 0) return i;
+        if (rt_isbound(s, i) != 0) {
+            cand = rt_substr(s, i, -1);
+            if (rt_glob(p, cand) != 0) return i;
+        }
         i = i + 1;
     }
 }
@@ -1556,7 +1586,7 @@ char *rt_strip(char *s, char *p, int mode) {
         char *pre = rt_substr(s, 0, k);
         char *suf = rt_substr(s, k, -1);
         char *cand = isPre ? pre : suf;
-        if (rt_glob(p, cand) != 0) {
+        if (rt_isbound(s, k) != 0 && rt_glob(p, cand) != 0) {
             char *rpre = rt_substr(s, k, -1);
             char *rsuf = rt_substr(s, 0, k);
             return isPre ? rpre : rsuf;
@@ -1566,38 +1596,99 @@ char *rt_strip(char *s, char *p, int mode) {
     return s;
 }
 
+/* The REPLACEMENT of ${v/p/r} with the matched text m substituted for every
+ * unquoted "&" (bash 5.2+'s patsub_replacement, on by default): k=hello;
+ * ${k//l/&&} is hellllo. A quoted part of the word reaches here with its "&"
+ * and "\" escaped by a backslash (rt_repescape), an expansion's value raw; either
+ * way "\&" and "\\" are a literal & and \, and a backslash before anything else
+ * is itself. Twin of repSubst in bash-interpreter.abnf. */
+char *rt_repsub(char *r, char *m)
+{
+    int i = 0;
+    int special = 0;
+    char *out;
+    while (r[i] != 0) {
+        if (r[i] == 38 || r[i] == 92) special = 1;
+        i = i + 1;
+    }
+    if (special == 0) return r;
+    out = empty;
+    i = 0;
+    while (r[i] != 0) {
+        int c = (int)(unsigned char)r[i];
+        int n = (int)(unsigned char)r[i + 1];
+        if (c == 92 && (n == 38 || n == 92)) {
+            out = rt_strcat(out, rt_substr(r, i + 1, 1));
+            i = i + 2;
+        } else if (c == 38) {
+            out = rt_strcat(out, m);
+            i = i + 1;
+        } else {
+            out = rt_strcat(out, rt_substr(r, i, 1));
+            i = i + 1;
+        }
+    }
+    return out;
+}
+
+/* A quoted part of a ${v/p/r} REPLACEMENT: its "&" and "\" are literal. */
+char *rt_repescape(char *s) {
+    int len = rt_strlen(s);
+    char *dst = rt_bump(len * 2 + 1);
+    int i = 0, o = 0;
+    while (i < len) {
+        int ch = (int)(unsigned char)s[i];
+        if (ch == 38 || ch == 92) {
+            dst[o] = 92;
+            o = o + 1;
+        }
+        dst[o] = (char)ch;
+        o = o + 1;
+        i = i + 1;
+    }
+    dst[o] = 0;
+    return dst;
+}
+
 /* rt_replace: ${v/p/r} and friends; mode 0 = first, 1 = all, 2 = anchored at the
- * start (#), 3 = anchored at the end (%). */
+ * start (#), 3 = anchored at the end (%). An UNSET value is left alone, while an
+ * empty one is a subject like any other, which a lone star pattern matches. */
 char *rt_replace(char *s, char *p, char *r, int mode) {
     int len = rt_strlen(s);
     char *out = empty;
     int i = 0;
     int done = 0;
+    if (s == &unset_marker[0]) return s;
     if (mode >= 2) {
         if (mode == 2) {
             int jj = rt_matchlen(p, s, 0);
             if (jj < 0) return s;
-            return rt_strcat(r, rt_substr(s, jj, -1));
+            return rt_strcat(rt_repsub(r, rt_substr(s, 0, jj)), rt_substr(s, jj, -1));
         }
         int ii = rt_matchend(p, s);
         if (ii < 0) return s;
-        return rt_strcat(rt_substr(s, 0, ii), r);
+        return rt_strcat(rt_substr(s, 0, ii), rt_repsub(r, rt_substr(s, ii, -1)));
+    }
+    if (len == 0) {
+        if (rt_glob(p, s) != 0) return rt_repsub(r, s);
+        return s;
     }
     while (1) {
         if (i > len || done != 0) return out;
         int j = rt_matchlen(p, s, i);
         if (j > i) {
             /* a real (non empty) match: append the replacement and jump past it */
-            out = rt_strcat(out, r);
+            out = rt_strcat(out, rt_repsub(r, rt_substr(s, i, j - i)));
             i = j;
             if (mode == 0) {
                 out = rt_strcat(out, rt_substr(s, j, -1));
                 done = 1;
             }
         } else {
-            /* no match here: carry one character across */
-            out = rt_strcat(out, rt_substr(s, i, 1));
-            i = i + 1;
+            /* no match here: carry one CHARACTER across */
+            int w = (i < len) ? rt_cpw(&s[i]) : 1;
+            out = rt_strcat(out, rt_substr(s, i, w));
+            i = i + w;
         }
     }
     return out;
