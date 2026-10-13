@@ -1199,18 +1199,19 @@ ArrayLit    <~~ push(makeArray(takeAll())) ~~>
             = "[" [ ArrayItem { "," ArrayItem } [ "," ] ] "]"
             | KwArray "(" [ ArrayItem { "," ArrayItem } [ "," ] ] ")" ;
 ArrayItem   = SpreadItem | RefItem | KeyedItem | PlainItem ;
-// [&$a] / array(&$a): the element is a REFERENCE to the variable. References are not
-// modelled inside array storage in this subset, so the element is stored by value and
-// only the syntax is accepted; '&' can start nothing else in an array item, so the
-// alternative is unambiguous.
-RefItem     <~~ push({elem: pop()}) ~~>
-            = "&" !"&" Expression ;
+// [&$a] / [$k => &$a] / array(&$a): the element is a REFERENCE to the variable (or
+// element, or property): the array slot holds that target's storage cell. '&' can
+// start nothing else in an array item, so the alternative is unambiguous.
+RefItem     <~~ push({er: pop()}) ~~>
+            = "&" !"&" Target ;
 // [...$a, ...$b] : an array unpack. String keys are preserved, integer keys are
 // renumbered (PHP 8.1), which makeArray implements.
 SpreadItem  <~~ push({spread: pop()}) ~~>
             = "..." Expression ;
-KeyedItem   <~~ var v = pop(); push({hk: pop(), hv: v}) ~~>
-            = Expression "=>" Expression ;
+KeyedItem   <~~ var v = pop(); v.hk = pop(); push(v) ~~>
+            = Expression "=>" ( KeyedRef | KeyedVal ) ;
+KeyedRef    <~~ push({hr: pop()}) ~~> = "&" !"&" Target ;
+KeyedVal    <~~ push({hv: pop()}) ~~> = Expression ;
 PlainItem   <~~ push({elem: pop()}) ~~>
             = Expression ;
 
@@ -3104,12 +3105,17 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // lazy copy-on-write - observationally the same for a single-threaded program).
     function phpCopy(v) { return isArr(v) ? arrCopy(v) : v }
 
+    // A by-reference element (er, or hr under the key hk) holds its target's
+    // storage cell; the key is evaluated before the target (zend_compile_array).
+    // Twin of makeArray in php-to-llvm-ir.abnf.
     function makeArray(items) {
         return function() {
             var d = newArr()
             for (var k = 0; k < items.length; k++) {
                 var it = items[k]
-                if (it.hk != undefined) { arrSet(d, it.hk(), phpCopy(it.hv())) }
+                if (it.hr != undefined) { arrRefAt(d, phpKey(it.hk()), it.hr) }
+                else if (it.er != undefined) { arrRefAt(d, undefined, it.er) }
+                else if (it.hk != undefined) { arrSet(d, it.hk(), phpCopy(it.hv())) }
                 else if (it.spread != undefined) {
                     var sv = it.spread()
                     if (isArr(sv)) {
@@ -3123,6 +3129,20 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             }
             return d
         }
+    }
+    // Puts ref's cell into d's slot for key, appended when key is undefined; a
+    // slot already there is replaced, not written through.
+    function arrRefAt(d, key, ref) {
+        var cell = targetCell(ref)
+        if (cell == null) { fail("cannot take a reference to this expression") }
+        var at = key === undefined ? -1 : dictFind(d, key)
+        if (at < 0) {
+            if (key === undefined) { arrPush(d, null) } else { arrSet(d, key, null) }
+            at = d.keys.length - 1
+        }
+        var vs = d.vals
+        vs[at] = cell
+        d.vals = vs
     }
 
     // ----- string coercion and concatenation (PHP '.') -----
@@ -3896,7 +3916,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             var recv = anytype
             recv = arrGet(cur, 0)
             var mname = phpStr(arrGet(cur, 1))
-            if (isObj(recv)) { return mcall(recv, mname, argset) }
+            if (isObj(recv) || typeof recv == "function") { return mcall(recv, mname, argset) }
             var rn = relName(phpStr(recv))
             return dynStatic(rn, mname, argset)
         }
@@ -4018,14 +4038,53 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (where.charAt(where.length - 1) == ":") { phpRaise("TypeError", where + " " + reason) }
         phpRaise("TypeError", where + ", " + reason)
     }
-    function cbMethod(where, cls, mname, cn, ns) {
+    // form is CB_STR ('C::m'), CB_ARR (['C', 'm']) or CB_INT ('C::m' checked from
+    // a method of an internal class, Closure::fromCallable).
+    var CB_STR = 0
+    var CB_ARR = 1
+    var CB_INT = 2
+    function cbMethod(where, cls, mname, cn, ns, form) {
         if (classFind(cls, mname) != null || classFind(cls, phsCase(mname, false)) != null) {
             if (ns) { cbNonStatic(where, cls, mname, cn) }
             cbVis(where, cls, mname, "__callstatic", false)
             return null
         }
-        if (classFind(cls, "__callstatic") != null) { return null }
+        if (cbFallback(cls, cn, form) != null) { return null }
         cbFail(where, "class " + cls.__name + " does not have a method \"" + mname + "\"")
+    }
+    // Where a callback naming a method cls lacks goes (zend_is_callable_check_func):
+    // {self, via} for the __call of via run on self, {self: null} for cls's
+    // __callStatic, null for nowhere (no valid callback). ['C', 'm'] with an object
+    // bound (cbBound) takes C's own __call - for ['self', 'm'] that object's -
+    // and nothing else. Otherwise get_static_method_fallback decides, with the
+    // frame's $this when the check runs in a function (call_user_func, whose frame
+    // zend_get_this_object passes) and none in a method of an internal class
+    // (CB_INT). Twin of phpCbFallback in abnf/jsrtphp.go and phCbFallback in
+    // lib/php-rt.metajs.
+    function cbFallback(cls, cn, form) {
+        if (form == CB_ARR) {
+            var ob = cbBound(cls, cn)
+            if (ob != null) {
+                var vc = relName(cn) == "self" ? ob.__class : cls
+                return classFind(vc, "__call") != null ? {self: ob, via: vc} : null
+            }
+        }
+        var tv = anytype
+        tv = form == CB_INT ? null : frameThis()
+        if (classFind(cls, "__call") != null && isObj(tv) && classIs(tv.__class, cls.__name)) { return {self: tv, via: tv.__class} }
+        if (classFind(cls, "__callstatic") != null) { return {self: null, via: null} }
+        return null
+    }
+    // The object a callback named through its class cn binds (fcc->object): any
+    // $this of the frame for a relative name, else cbThis's.
+    function cbBound(cls, cn) {
+        var rn = relName(cn)
+        if (rn == "self" || rn == "parent" || rn == "static") {
+            var t = anytype
+            t = frameThis()
+            return isObj(t) ? t : null
+        }
+        return cbThis(cls, "")
     }
     // A non-static method named through its class cn is no valid callback without
     // an object: the frame's $this, when the frame's class scope is an instance of
@@ -4085,7 +4144,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // Twin of makeIsCallable in php-to-llvm-ir.abnf.
     function phpIsCallable(v) {
         try {
-            phpCheckCallback(v, "is_callable()", true)
+            phpCheckCallback(v, "is_callable()", true, false)
         } catch (e) {
             if (excIsUser(e) && isObj(e.v) && e.v.__class.__name == "TypeError") { return false }
             throw e
@@ -4104,13 +4163,14 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     // ns says the check runs in the frame the callback is named in (cbNonStatic); a
     // library function's own check runs in its frame and leaves that to the caller's.
-    function phpCheckCallback(cur, where, ns) {
+    // internal says the check runs in a method of an internal class (CB_INT).
+    function phpCheckCallback(cur, where, ns, internal) {
         if (typeof cur == "function") { return cur }
         if (typeof cur == "string") {
             var sep = cur.indexOf("::")
             if (sep >= 0) {
                 var scn = cur.substring(0, sep)
-                cbMethod(where, resolveClassName(scn, where), cur.substring(sep + 2), scn, ns)
+                cbMethod(where, resolveClassName(scn, where), cur.substring(sep + 2), scn, ns, internal ? CB_INT : CB_STR)
                 return cur
             }
             var fnm = fnName(cur)
@@ -4121,10 +4181,14 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (cur.keys.length != 2) { cbFail(where, "array must have exactly two members") }
             var recv = anytype
             recv = arrGet(cur, 0)
-            if (!isObj(recv) && typeof recv != "string") { cbFail(where, "first array member is not a valid class name or object") }
+            if (!isObj(recv) && typeof recv != "string" && typeof recv != "function") { cbFail(where, "first array member is not a valid class name or object") }
             var mn = anytype
             mn = arrGet(cur, 1)
             if (typeof mn != "string") { cbFail(where, "second array member is not a valid method") }
+            if (typeof recv == "function") {
+                if (!cloHasMethod(mn)) { cbFail(where, "class Closure does not have a method \"" + mn + "\"") }
+                return cur
+            }
             if (isObj(recv)) {
                 if (classFind(recv.__class, mn) == null && classFind(recv.__class, phsCase(mn, false)) == null
                     && classFind(recv.__class, "__call") == null) {
@@ -4133,7 +4197,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 cbVis(where, recv.__class, mn, "__call", true)
                 return cur
             }
-            cbMethod(where, resolveClassName(recv, where), mn, recv, ns)
+            cbMethod(where, resolveClassName(recv, where), mn, recv, ns, CB_ARR)
             return cur
         }
         if (isObj(cur) && classFind(cur.__class, "__invoke") != null) { return cur }
@@ -4363,6 +4427,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         var ft = anytype
         ft = m == null ? phpCallFallback(cls, bound != undefined ? bound.self : frameThis()) : null
+        // A callback's missing method goes where cbFallback resolved it.
+        var fb = anytype
+        fb = m == null && bound != undefined && bound.fb != undefined ? bound.fb : null
+        if (fb != null) { ft = fb.self }
         if (argset.fcc === true) {
             if (ft != null) { return fakeCall(ft, name) }
             if (m == null) {
@@ -4375,7 +4443,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             pendingStatic = bind
             return m(self, argset)
         }
-        if (ft != null) { return classFind(ft.__class, "__call")(ft, argsOf([name, arrOf(argset.pos)])) }
+        if (ft != null) { return classFind(fb != null ? fb.via : ft.__class, "__call")(ft, argsOf([name, arrOf(argset.pos)])) }
         var cs = classFind(cls, "__callstatic")
         if (cs != null) {
             pendingStatic = bind
@@ -4541,12 +4609,16 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 var cb = anytype
                 cb = evalArgs(fa).pos[0]
                 var fc = anytype
-                fc = phpCheckCallback(cb, "Failed to create closure from callable:", true)
+                fc = phpCheckCallback(cb, "Failed to create closure from callable:", true, true)
                 // [$obj, 'm'] is the closure $obj->m(...) makes.
                 if (isArr(fc) && fc.keys.length == 2 && isObj(arrGet(fc, 0))) {
                     return mcall(arrGet(fc, 0), phpStr(arrGet(fc, 1)), {pos: [], named: null, nkeys: [], tgts: [], fcc: true, holes: []})
                 }
-                return asCallable(cbResolve(fc))
+                // [$closure, '__invoke'] is $closure itself (zend_create_closure_from_callable).
+                if (isArr(fc) && typeof arrGet(fc, 0) == "function" && phsCase(phpStr(arrGet(fc, 1)), false) == "__invoke") {
+                    return arrGet(fc, 0)
+                }
+                return asCallable(cbResolve(fc, true))
             }
         }
         // Closure::bind($c, $newThis, $newScope) is $c->bindTo($newThis, $newScope).
@@ -4770,7 +4842,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (r == null) {
             var fr = fakeRecOf(f)
             if (fr != null) { return fakeBind(fr, nthis, scope, keep) }
-            if (keep || scope == null) { return f }
+            // A new Closure object, as zend_create_closure_ex always makes one.
+            if (keep || scope == null) { return function(argset) { return f(argset) } }
             return null
         }
         if (r.st === true && isObj(nthis)) { return null }
@@ -4855,12 +4928,21 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (cls == null) { return null }
         return cloBind(f, nthis, cls, false)
     }
+    // A Closure is an object whose class declares bind, bindTo, call and
+    // fromCallable, and whose get_method answers __invoke (zend_closure_get_method),
+    // so [$closure, 'm'] is a valid callback for exactly those names. Twin of
+    // phCloHas in lib/php-rt.metajs and phpCloHas in abnf/jsrtphp.go.
+    function cloHasMethod(name) {
+        var lc = phsCase(name, false)
+        return lc == "__invoke" || lc == "bind" || lc == "bindto" || lc == "call" || lc == "fromcallable"
+    }
     // The methods a Closure answers: __invoke calls it, bindTo rebinds it, call
     // rebinds it to an object and that object's class and calls it at once. Twin
     // of phCloCall in lib/php-rt.metajs and abnf/jsrtphp.go.
     function cloMethod(f, name, args) {
         var lc = phsCase(name, false)
-        if (lc == "__invoke") { return f(args) }
+        // $c->__invoke(...) is $c itself (zend_closure_from_frame).
+        if (lc == "__invoke") { return args.fcc === true ? f : f(args) }
         var pos = args.pos
         var nthis = anytype
         nthis = pos.length > 0 ? pos[0] : null
@@ -5553,7 +5635,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         cn = relName(cn)
         if (cn != "self" && cn != "static" && cn != "parent") {
             var nc = findClass(cn)
-            if (nc != null && cbThis(nc, mn) != null) { return boundStatic(nc, mn, cn, false) }
+            if (nc != null && cbThis(nc, mn) != null) { return boundStatic(nc, mn, cn, false, isArr(cur) ? CB_ARR : CB_STR) }
             return cur
         }
         var s = ctxSelf()
@@ -5562,7 +5644,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (classFind(cls, mn) == null && classFind(cls, phsCase(mn, false)) == null && classFind(cls, "__callstatic") == null) {
             return cls.__name + "::" + mn
         }
-        return boundStatic(cls, mn, cn, false)
+        return boundStatic(cls, mn, cn, false, isArr(cur) ? CB_ARR : CB_STR)
     }
     // A method callable whose method some class restricts, which the CALLER's class
     // scope may call, as a closure that calls it: the library function that calls
@@ -5598,13 +5680,14 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (rel && (scope == null || (cn == "parent" && (scope.__super == null || scope.__super == undefined)))) { return cur }
         var cls = resolveClassName(cn)
         if (classFind(cls, lc) == null || phpMethodAccess(cls, lc, scope, false) != 0) { return cur }
-        return boundStatic(cls, mn, cn, true)
+        return boundStatic(cls, mn, cn, true, CB_STR)
     }
     // The closure a static callable becomes. A relative name forwards the CALLER's
     // late-static-binding class and $this, which the library function's frame no
     // longer has, and a non-static method named outright binds the caller's $this
     // where cbThis allows it; checked says the caller's scope may call the method.
-    function boundStatic(cls, mn, cn, checked) {
+    // A method cls lacks goes where cbFallback sends it (via), looked up here.
+    function boundStatic(cls, mn, cn, checked, form) {
         var bound = anytype
         bound = undefined
         var tv = anytype
@@ -5616,16 +5699,23 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (tv != null) { bound = {self: tv, bind: tv.__class, ok: checked} }
             else if (checked) { bound = {self: null, bind: cls, ok: true} }
         }
+        if (classFind(cls, mn) == null && classFind(cls, phsCase(mn, false)) == null) {
+            var fb = cbFallback(cls, cn, form)
+            if (fb != null) {
+                if (bound == undefined) { bound = {self: null, bind: cls, ok: false} }
+                bound.fb = fb
+            }
+        }
         return function(a2) { return staticCall(cls, mn, a2, cn, bound) }
     }
     function callerCallable(cur, fname) {
-        phpCheckCallback(cur, fname + "(): Argument #1 ($callback) must be a valid callback", true)
-        return cbResolve(cur)
+        phpCheckCallback(cur, fname + "(): Argument #1 ($callback) must be a valid callback", true, false)
+        return cbResolve(cur, false)
     }
     // A checked callback bound in the frame it is handed over in: a method some
     // class restricts as visBound binds it, a method named through its class as
     // boundStatic does, anything else as it is.
-    function cbResolve(cur) {
+    function cbResolve(cur, internal) {
         var vb = visBound(cur)
         if (typeof vb == "function") { return vb }
         var cn = ""
@@ -5633,12 +5723,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (typeof cur == "string" && cur.indexOf("::") >= 0) {
             cn = cur.substring(0, cur.indexOf("::"))
             mn = cur.substring(cur.indexOf("::") + 2)
-        } else if (isArr(cur) && cur.keys.length == 2 && !isObj(arrGet(cur, 0))) {
+        } else if (isArr(cur) && cur.keys.length == 2 && typeof arrGet(cur, 0) == "string") {
             cn = phpStr(arrGet(cur, 0))
             mn = phpStr(arrGet(cur, 1))
         } else { return cur }
         cn = relName(cn)
-        return boundStatic(resolveClassName(cn), mn, cn, false)
+        return boundStatic(resolveClassName(cn), mn, cn, false, isArr(cur) ? CB_ARR : (internal ? CB_INT : CB_STR))
     }
     function makeCall(items) {
         var name = phpLibRef(items[0])
@@ -6443,7 +6533,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (p !== null && p !== undefined) { phpPrecision = phpInt(p) }
             return old
         },
-        "__mec_callable": function(cb, where) { return phpCheckCallback(cb, phpStr(where), true) },
+        "__mec_callable": function(cb, where) { return phpCheckCallback(cb, phpStr(where), true, false) },
         "is_callable": function(v) { return phpIsCallable(v) },
         "__mec_ifaces": function(v) { return phpIfaceNames(v) },
         "__mec_math": function(op, x, y) { return mkFlo(phsMath(phpStr(op), numOf(toNumV(x)), numOf(toNumV(y)))) },

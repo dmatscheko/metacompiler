@@ -1677,6 +1677,19 @@ function js_phfakerec(src, nt) {
     return {fk: true, s: r["s"], mk: r["mk"], n: r["n"], sc: r["sc"], st: r["st"], t: nt, f: r["f"]}
 }
 
+// The methods [$closure, name] names validly. Twin of phpCloHas in
+// abnf/jsrtphp.go.
+function phCloHas(name) {
+    var lc = phsCase(name, false)
+    return lc == "__invoke" || lc == "bind" || lc == "bindto" || lc == "call" || lc == "fromcallable"
+}
+// recv for a closure and __invoke, whose callable form is the closure itself
+// (zend_closure_from_frame, zend_create_closure_from_callable); undefined
+// otherwise. Twin of m["js_phcloinv"] in abnf/jsrtphp.go.
+function js_phcloinv(recv, name) {
+    if (typeof recv == "function" && phsCase(phStr(name), false) == "__invoke") { return recv }
+    return undefined
+}
 // A method call on a Closure: __invoke calls it, bindTo rebinds it, call rebinds
 // it to an object and that object's class and calls it at once. Twin of
 // phpCloCall in abnf/jsrtphp.go and cloMethod in php-interpreter.abnf.
@@ -1716,8 +1729,13 @@ function phCloBind(f, nthis, scope, keep) {
     if (r === undefined) {
         var fr = phFakeRec(f)
         if (fr !== undefined) { return phFakeBind(f, fr, nthis, scope, keep) }
-        // A function's closure has no class scope, so it takes none other.
-        if (keep || rtIsNil(scope)) { return f }
+        // A function's closure has no class scope, so it takes none other. The
+        // binding is a new Closure object (zend_create_closure_ex) running f.
+        if (keep || rtIsNil(scope)) {
+            var g = function() { return f.apply(undefined, rtCopyArr(arguments)) }
+            fnMetaSet(g, fnMeta(f, "name"), fnMeta(f, "length"))
+            return g
+        }
         return null
     }
     if (r["f"] === undefined) { fail("binding a Closure that is not a closure literal is not modelled") }
@@ -2022,6 +2040,8 @@ function phBadMethod(cls, name, scope, ctor) {
 // that stands in for a missing one is there. Twin of phpMethodVis in
 // abnf/jsrtphp.go.
 function phMethodVis(target, name, scope, where) {
+    // A Closure's methods are public.
+    if (typeof target == "function") { return undefined }
     var cls = phClassOf(target)
     var inst = phIsObj(target)
     var acc = phMethodAccess(cls, phsCase(name, false), scope, inst)
@@ -3500,6 +3520,14 @@ function js_phrefat(f, i) {
     if (typeof fn != "function") { return false }
     return Math.floor(fnMeta(fn, "length") / Math.pow(2, i)) % 2 == 1
 }
+// Is parameter i of the method `name` of target (an object, or a class for a
+// static call) by reference? false when there is no such method. Twin of
+// m["js_phmrefat"] in abnf/jsrtphp.go.
+function js_phmrefat(target, name, i) {
+    var mm = phMethodOf(target, name)
+    if (typeof mm != "function") { return false }
+    return Math.floor(fnMeta(mm, "length") / Math.pow(2, i)) % 2 == 1
+}
 // A call's arguments laid out in the parameter positions of a callee known only at
 // run time, from the parameter list recorded in its meta name (withSig in
 // php-to-llvm-ir.abnf). Twin of phpPlaceArgs in abnf/jsrtphp.go, which documents
@@ -3534,11 +3562,16 @@ function js_phcbarr(v, where) {
         if (phLen(v) != 2) { phCbFail(where, "array must have exactly two members") }
         var recv = phArrGet(v, 0)
         var isCls = typeof recv == "string"
-        if (!isCls && !phIsObj(recv)) { phCbFail(where, "first array member is not a valid class name or object") }
+        var isClo = typeof recv == "function"
+        if (!isCls && !isClo && !phIsObj(recv)) { phCbFail(where, "first array member is not a valid class name or object") }
         var mn = phArrGet(v, 1)
         if (typeof mn != "string") { phCbFail(where, "second array member is not a valid method") }
+        if (isClo) {
+            if (!phCloHas(mn)) { phCbFail(where, "class Closure does not have a method \"" + mn + "\"") }
+            return false
+        }
         if (isCls) { return true }
-        js_phcbmeth(where, recv, mn)
+        phCbMeth(where, recv, mn)
         return false
     }
     if (phIsObj(v)) {
@@ -3976,13 +4009,55 @@ function js_phrelcb(v, self, stat, ncls, thisv) {
 }
 // The method half of a callback check: target (an object, or a class for a static
 // callable) has the method, or the magic method that stands in for a missing one.
-// Twin of js_phcbmeth in abnf/jsrtphp.go.
-function js_phcbmeth(where, target, name) {
+// Twin of phpCbMeth in abnf/jsrtphp.go.
+function phCbMeth(where, target, name) {
     if (typeof phMethodOf(target, name) == "function") { return undefined }
     var magic = "__callStatic"
     if (phIsObj(target)) { magic = "__call" }
     if (typeof phMethodOf(target, magic) == "function") { return undefined }
     phCbFail(where, "class " + phStr(phClassOf(target)["__name"]) + " does not have a method \"" + phStr(name) + "\"")
+    return undefined
+}
+// The method half of the check of a callback naming mn through its class cn: a
+// method cls lacks must go somewhere (phCbFallback). Twin of m["js_phcbcls"] in
+// abnf/jsrtphp.go.
+function js_phcbcls(where, cls, mn, cn, self, scope, form) {
+    if (cls === undefined || cls === null || typeof cls != "object") { return undefined }
+    if (typeof phMethodOf(cls, mn) == "function") { return undefined }
+    if (phCbFallback(cls, phStr(cn), form, self, scope) === undefined) {
+        phCbFail(where, "class " + phStr(cls["__name"]) + " does not have a method \"" + phStr(mn) + "\"")
+    }
+    return undefined
+}
+// Where a callback's method cls lacks goes: the class whose __call runs on self,
+// false for cls's __callStatic, undefined when cls has the method (or nothing
+// takes it). Twin of m["js_phcbfb"] in abnf/jsrtphp.go.
+function js_phcbfb(cls, cn, mn, self, scope, form) {
+    if (cls === undefined || cls === null || typeof cls != "object") { return undefined }
+    if (typeof phMethodOf(cls, mn) == "function") { return undefined }
+    var r = phCbFallback(cls, phStr(cn), form, self, scope)
+    if (r === null) { return false }
+    return r
+}
+// Where a callback naming a method cls lacks goes: the class whose __call runs on
+// self, null for cls's __callStatic, undefined for nowhere. Twin of
+// phpCbFallback in abnf/jsrtphp.go, which documents the rule.
+function phCbFallback(cls, cn, form, self, scope) {
+    var rn = cn
+    if (rn.length > 0 && rn.charCodeAt(0) == 92) { rn = rn.substring(1) }
+    rn = phsCase(rn, false)
+    var rel = rn == "self" || rn == "parent" || rn == "static"
+    if (form == 1 && phIsObj(self)) {
+        var sco = scope !== undefined && scope !== null && typeof scope == "object"
+        if (rel || (sco && phIsA(self, phStr(scope["__name"])) && phIsA(scope, phStr(cls["__name"])))) {
+            var vc = anytype
+            vc = rn == "self" ? self["__class"] : cls
+            if (phOwner(vc, "__call") === undefined) { return undefined }
+            return vc
+        }
+    }
+    if (form != 2 && phCallFallback(cls, self)) { return self["__class"] }
+    if (phOwner(cls, "__callstatic") !== undefined) { return null }
     return undefined
 }
 // `new C`: the class is initialized before its first instance.

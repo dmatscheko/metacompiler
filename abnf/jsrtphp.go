@@ -1068,7 +1068,7 @@ func (rt *jsrt) phpCbFail(where, reason string) {
 
 // phpCbMeth is the method half of a callback check: target (an object, or a class
 // for a static callable) has the method, or the magic method that stands in for a
-// missing one. Twin of js_phcbmeth in languages/lib/php-rt.metajs.
+// missing one. Twin of phCbMeth in languages/lib/php-rt.metajs.
 func (rt *jsrt) phpCbMeth(where string, target, name interface{}) {
 	if rt.phpMethodOf(target, name) != nil {
 		return
@@ -1097,6 +1097,50 @@ func (rt *jsrt) phpMethodOf(target, nameV interface{}) interface{} {
 		return meth
 	}
 	return rt.phpFindMethod(cls, phpCase(name, false))
+}
+
+// phpCbFallback is where a callback naming a method cls lacks goes
+// (zend_is_callable_check_func): the class whose __call runs on this, nil for
+// cls's __callStatic, ok false for nowhere. form is 0 for 'C::m', 1 for
+// ['C', 'm'] and 2 for 'C::m' checked from a method of an internal class
+// (Closure::fromCallable). ['C', 'm'] with an object bound - any $this for a
+// relative name, else this when the class scope is an instance of cls and this
+// one of the scope - takes C's own __call (that object's for ['self', 'm'])
+// and nothing else. Otherwise get_static_method_fallback decides, with this
+// when the check runs in a function and none in a method of an internal class.
+// Twin of cbFallback in php-interpreter.abnf and phCbFallback in
+// languages/lib/php-rt.metajs.
+func (rt *jsrt) phpCbFallback(cls *jsObject, cn string, form int, this, scope interface{}) (*jsObject, bool) {
+	rn := phpCase(strings.TrimPrefix(cn, "\\"), false)
+	rel := rn == "self" || rn == "parent" || rn == "static"
+	if form == 1 && phpIsObj(this) {
+		sc, _ := scope.(*jsObject)
+		if rel || (sc != nil && rt.phpIsA(this, rt.phpStr(sc.props["__name"])) && rt.phpIsA(sc, rt.phpStr(cls.props["__name"]))) {
+			vc := cls
+			if rn == "self" {
+				vc, _ = this.(*jsObject).props["__class"].(*jsObject)
+			}
+			if phpOwner(vc, "__call") == nil {
+				return nil, false
+			}
+			return vc, true
+		}
+	}
+	if form != 2 && rt.phpCallFallback(cls, this) {
+		c, _ := this.(*jsObject).props["__class"].(*jsObject)
+		return c, true
+	}
+	return nil, phpOwner(cls, "__callstatic") != nil
+}
+
+// phpCloHas: the methods [$closure, name] names validly. Twin of cloHasMethod
+// in php-interpreter.abnf.
+func phpCloHas(name string) bool {
+	switch phpCase(name, false) {
+	case "__invoke", "bind", "bindto", "call", "fromcallable":
+		return true
+	}
+	return false
 }
 
 // phpCloCall is a method call on a Closure: __invoke calls it, bindTo rebinds
@@ -1154,9 +1198,13 @@ func (rt *jsrt) phpCloBind(f, nthis, scope interface{}, keep bool) interface{} {
 		if fr := phpFakeRec(f); fr != nil {
 			return rt.phpFakeBind(f, fr, nthis, scope, keep)
 		}
-		// A function's closure has no class scope, so it takes none other.
+		// A function's closure has no class scope, so it takes none other. The
+		// binding is a new Closure object (zend_create_closure_ex) running f.
 		if keep || isNullish(scope) {
-			return f
+			mi := jsvFnMeta(f)
+			return &hostFunc{name: "closure", meta: &mi, fn: func(rt *jsrt, this uint64, args []interface{}) interface{} {
+				return rt.call(f, jsUndef, args)
+			}}
 		}
 		return jsNull
 	}
@@ -2962,6 +3010,10 @@ func (rt *jsrt) phpBadMethod(cls *jsObject, name string, scope *jsObject, ctor b
 // unless the magic method that stands in for a missing one is there. Twin of
 // js_phmvis in languages/lib/php-rt.metajs.
 func (rt *jsrt) phpMethodVis(target interface{}, name string, scope *jsObject, where interface{}) {
+	// A Closure's methods are public.
+	if isCallable(target) {
+		return
+	}
 	cls := rt.phpClassOf(target)
 	inst := phpIsObj(target)
 	acc := rt.phpMethodAccess(cls, phpCase(name, false), scope, inst)
@@ -3612,6 +3664,16 @@ func init() {
 			}
 			return boolH((jsvFnMeta(f).length>>uint(i))&1 == 1)
 		}
+		// (target, name, i) -> is parameter i of the method `name` of target (an
+		// object, or a class for a static call) by reference; false when there is
+		// no such method. Twin of js_phmrefat in languages/lib/php-rt.metajs.
+		m["js_phmrefat"] = func(a []uint64) uint64 {
+			meth := rt.phpMethodOf(u(a[0]), u(a[1]))
+			if meth == nil {
+				return jsHFalse
+			}
+			return boolH((jsvFnMeta(meth).length>>uint(int(rt.toNumber(u(a[2])))))&1 == 1)
+		}
 		// An object called as a function places its arguments for its __invoke.
 		m["js_phplace"] = func(a []uint64) uint64 {
 			f := u(a[0])
@@ -3645,12 +3707,18 @@ func init() {
 				}
 				recv := rt.phpArrGet(v, float64(0))
 				_, isCls := recv.(string)
-				if !isCls && !phpIsObj(recv) {
+				if !isCls && !phpIsObj(recv) && !isCallable(recv) {
 					rt.phpCbFail(where, "first array member is not a valid class name or object")
 				}
 				mn, isStr := rt.phpArrGet(v, float64(1)).(string)
 				if !isStr {
 					rt.phpCbFail(where, "second array member is not a valid method")
+				}
+				if isCallable(recv) {
+					if !phpCloHas(mn) {
+						rt.phpCbFail(where, "class Closure does not have a method \""+mn+"\"")
+					}
+					return jsHFalse
 				}
 				if isCls {
 					return jsHTrue
@@ -3675,8 +3743,6 @@ func init() {
 			}
 			return jsHFalse
 		}
-		// The method half of a callback check. Twin of js_phcbmeth in
-		// languages/lib/php-rt.metajs.
 		// count($value): an array's element count, a Countable's count(); anything
 		// else is a TypeError. Twin of js_phcount in languages/lib/php-rt.metajs and
 		// phpCount in php-interpreter.abnf.
@@ -3749,9 +3815,37 @@ func init() {
 			rt.phpCbFail(rt.phpStr(u(a[0])), rt.phpStr(u(a[1])))
 			return jsHUndefined
 		}
-		m["js_phcbmeth"] = func(a []uint64) uint64 {
-			rt.phpCbMeth(rt.phpStr(u(a[0])), u(a[1]), u(a[2]))
+		// js_phcbcls(where, cls, mn, cn, this, scope, form): the method half of
+		// the check of a callback naming mn through its class cn: a method cls
+		// lacks must go somewhere (phpCbFallback). Twin of js_phcbcls in
+		// languages/lib/php-rt.metajs.
+		m["js_phcbcls"] = func(a []uint64) uint64 {
+			cls, _ := u(a[1]).(*jsObject)
+			if cls == nil || rt.phpMethodOf(cls, u(a[2])) != nil {
+				return jsHUndefined
+			}
+			if _, ok := rt.phpCbFallback(cls, rt.phpStr(u(a[3])), int(rt.toNumber(u(a[6]))), u(a[4]), u(a[5])); !ok {
+				rt.phpCbFail(rt.phpStr(u(a[0])), "class "+rt.phpStr(cls.props["__name"])+" does not have a method \""+rt.phpStr(u(a[2]))+"\"")
+			}
 			return jsHUndefined
+		}
+		// js_phcbfb(cls, cn, mn, this, scope, form): where a callback's method
+		// cls lacks goes: the class whose __call runs on this, false for cls's
+		// __callStatic, undefined when cls has the method (or nothing takes it).
+		// Twin of js_phcbfb in languages/lib/php-rt.metajs.
+		m["js_phcbfb"] = func(a []uint64) uint64 {
+			cls, _ := u(a[0]).(*jsObject)
+			if cls == nil || rt.phpMethodOf(cls, u(a[2])) != nil {
+				return jsHUndefined
+			}
+			via, ok := rt.phpCbFallback(cls, rt.phpStr(u(a[1])), int(rt.toNumber(u(a[5]))), u(a[3]), u(a[4]))
+			if !ok {
+				return jsHUndefined
+			}
+			if via == nil {
+				return jsHFalse
+			}
+			return w(via)
 		}
 		// The class a callable's class NAME forwards as the late-static-binding
 		// class: the caller's own for self / parent / static, none for a class named
@@ -3767,6 +3861,16 @@ func init() {
 		// target (an object, or a class for a static method): a closure that
 		// dispatches to a method places its arguments as the method would. Twin of
 		// js_phbindsig in languages/lib/php-rt.metajs.
+		// (recv, name) -> recv for a closure and __invoke, whose callable form
+		// is the closure itself (zend_closure_from_frame,
+		// zend_create_closure_from_callable); undefined otherwise. Twin of
+		// js_phcloinv in languages/lib/php-rt.metajs.
+		m["js_phcloinv"] = func(a []uint64) uint64 {
+			if isCallable(u(a[0])) && phpCase(rt.phpStr(u(a[1])), false) == "__invoke" {
+				return a[0]
+			}
+			return jsHUndefined
+		}
 		// (recv, name, this, factory) -> the record of the closure PHP makes from a
 		// callable (zend_create_fake_closure): the method name that recv (an
 		// object, or a class) answers, or the __call / __callStatic standing in

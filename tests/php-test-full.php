@@ -3424,6 +3424,94 @@ function s68() {
         && $p->arrowUse()->bindTo(new S68Q)() === 2);
 }
 
+// ===== SECTION 69: callbacks naming Closure methods and missing methods, array references =====
+// A Closure is an object: [$closure, 'm'] is a valid callback for its methods
+// (__invoke, bind, bindTo, call, fromCallable), and $c->__invoke(...) or
+// Closure::fromCallable([$c, '__invoke']) is $c itself (zend_closure_from_frame).
+// A callback naming a method its class lacks goes where
+// zend_is_callable_check_func sends it: ['C', 'm'] with an object bound takes
+// C's own __call, and nothing else; 'C::m' takes the __call of the frame's
+// $this (call_user_func's frame is passed over) or C's __callStatic, and checked
+// from Closure::fromCallable, a method of an internal class, only the latter
+// (Zend/tests/magic_methods/bug45186_2.phpt). [&$v] / [$k => &$v] makes the
+// element a reference. Binding a closure always makes a new Closure. A method's
+// by-reference parameter binds the variable even when another class declares
+// the same name by value.
+class S69M {
+    function __call($n, $a) { return "M:" . $n . ":" . get_class($this); }
+    static function __callStatic($n, $a) { return "Ms:" . $n; }
+}
+class S69S extends S69M {
+    function __call($n, $a) { return "S:" . $n; }
+    function t() {
+        return [call_user_func('S69M::sp'), call_user_func(['S69M', 'sp']), call_user_func_array(['S69M', 'sp'], []),
+                array_map(['S69M', 'sp'], [1])[0], array_map('S69M::sp', [1])[0],
+                call_user_func(['parent', 'pp']), call_user_func('parent::pp'), call_user_func(['self', 'ss']),
+                Closure::fromCallable('S69M::fc')(), Closure::fromCallable(['S69M', 'fc'])()];
+    }
+}
+class S69N { static function __callStatic($n, $a) { return "Ns:" . $n; } }
+class S69P extends S69N {
+    function __call($n, $a) { return "P:" . $n; }
+    function t() {
+        $r = [call_user_func('S69N::q'), (is_callable(['S69N', 'q']) ? "y" : "n") . (is_callable('S69N::q') ? "y" : "n")];
+        try { call_user_func(['S69N', 'q']); } catch (TypeError $e) { $r[] = $e->getMessage(); }
+        return $r;
+    }
+}
+class S69Q { function __call($n, $a) { return "Q:" . $n; } }
+class S69R extends S69Q {
+    function t() {
+        $r = [call_user_func('S69Q::w')];
+        try { Closure::fromCallable('S69Q::w'); } catch (TypeError $e) { $r[] = $e->getMessage(); }
+        return $r;
+    }
+}
+class S69V { public $v = 3; }
+class S69A { function m(&$x) { $x = "A"; } static function s(&$x) { $x = "As"; } }
+class S69B { function m($x, $y = 0) { $x = "B"; } static function s($x, $y = 0) { $x = "Bs"; } }
+function s69twice($x) { return $x * 2; }
+function s69() {
+    $m = function($a, $b) { return $a + $b; };
+    $iv = [$m, '__invoke'];
+    $bad = "";
+    try { call_user_func([$m, 'nope']); } catch (TypeError $e) { $bad = $e->getMessage(); }
+    check("cli1", call_user_func([$m, '__invoke'], 3, 4) === 7 && call_user_func_array([$m, '__INVOKE'], [5, 6]) === 11
+        && $iv(10, 20) === 30 && array_map([$m, '__invoke'], [1, 2], [3, 4]) === [4, 6]
+        && is_callable([$m, 'bindTo']) && !is_callable([$m, 'nope'])
+        && $bad === 'call_user_func(): Argument #1 ($callback) must be a valid callback, class Closure does not have a method "nope"');
+    $g = function($k) { return $this->v * $k; };
+    check("cli2", call_user_func([$g, 'bindTo'], new S69V, 'S69V')(2) === 6 && call_user_func([$g, 'call'], new S69V, 4) === 12
+        && Closure::fromCallable([$m, '__invoke']) === $m && $m->__invoke(...) === $m);
+    $p = 1;
+    $q = 2;
+    foreach ([&$p, &$q] as &$x) { $x = $x * 10; }
+    unset($x);
+    $arr = [1, 2];
+    $o = new S69V;
+    foreach (['a' => &$arr[1], 'b' => &$fresh, 'c' => &$o->v] as $k => &$y) { $y = $k; }
+    unset($y);
+    check("arf1", $p === 10 && $q === 20 && $arr[1] === "a" && $fresh === "b" && $o->v === "c"
+        && count([&$p, 'k' => &$q, 5]) === 3);
+    $c = s69twice(...);
+    $u = Closure::fromCallable('strtoupper');
+    check("fbi1", $c->bindTo(null) !== $c && $c->bindTo(null)(4) === 8 && Closure::bind($c, new S69V) !== $c
+        && $u->bindTo(null) !== $u && $u->bindTo(null)("x") === "X");
+    check("cbf1", (new S69S)->t() === ["S:sp", "M:sp:S69S", "M:sp:S69S", "M:sp:S69S", "S:sp",
+                                      "M:pp:S69S", "S:pp", "S:ss", "Ms:fc", "M:fc:S69S"]);
+    check("cbf2", (new S69P)->t() === ["Ns:q", "ny",
+            'call_user_func(): Argument #1 ($callback) must be a valid callback, class S69N does not have a method "q"']
+        && (new S69R)->t() === ["Q:w", 'Failed to create closure from callable: class S69Q does not have a method "w"']);
+    $v1 = 1; (new S69A)->m($v1);
+    $v2 = 1; S69A::s($v2);
+    $v3 = 1; (new S69B)->m($v3);
+    $seen = "";
+    foreach ([new S69A, new S69B] as $ob) { $v = 1; $ob->m($v); $seen .= $v; }
+    $mn = "m";
+    $v4 = 1; (new S69A)->$mn($v4);
+    check("mbr1", $v1 === "A" && $v2 === "As" && $v3 === 1 && $seen === "A1" && $v4 === "A");
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -3501,6 +3589,7 @@ function main() {
     s66(); // SECTION-CALL 66
     s67(); // SECTION-CALL 67
     s68(); // SECTION-CALL 68
+    s69(); // SECTION-CALL 69
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }
