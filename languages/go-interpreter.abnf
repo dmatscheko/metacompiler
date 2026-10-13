@@ -477,8 +477,9 @@ SimpleStmt  = ( AssertOk | RecvOk | MapOk | ShortDecl | IncDecStmt | Assign | Ch
 RecvOk      <~~ push(makeRecvOk(takeAll())) ~~>
             = Id <~~ push(cPoisonName(up.in)) ~~> "," Id <~~ push(cPoisonName(up.in)) ~~>
               ( ":=" <~~ push({decl: true}) ~~> | "=" <~~ push({decl: false}) ~~> ) "<-" Expression NotComma ;
+// A '<-' that opens a line is the next statement's receive, not this send.
 ChanSend    <~~ push(makeChanSend(goChanSendBoxC(takeAll(), up.in, up.pos), up.pos)) ~~>
-            = PostfixExpr "<-" Expression ;
+            = PostfixExpr SameLine "<-" Expression ;
 
 // Every two-name comma-ok form ends here: NOTHING may follow but the end of the
 // statement. Otherwise each of them matches the FIRST element of an ordinary
@@ -734,9 +735,10 @@ EqExpr      <~~ push(goCmpFold(takeAll())) ~~>
             = RelExpr <~~ push({at: up.pos}) ~~>
               { ( "==" | "!=" ) <~~ push(up.in) ~~> RelExpr <~~ push({at: up.pos}) ~~> } ;
 
+// SameLine: a '<' opening a line is the receive '<-ch' of the next statement.
 RelExpr     <~~ push(goCmpFold(takeAll())) ~~>
             = AddExpr <~~ push({at: up.pos}) ~~>
-              { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> AddExpr <~~ push({at: up.pos}) ~~> } ;
+              { SameLine ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> AddExpr <~~ push({at: up.pos}) ~~> } ;
 
 // Go's two binary levels below the comparisons: '+ - | ^' bind loosest, then
 // '* / % << >> & &^'. The single-character '&' and '|' must not swallow the first
@@ -2427,6 +2429,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (isSl(x)) { return x.n }
         if (isMap(x)) { return x.keys.length }
         if (typeof x == "string") { return byteLen(x) }
+        if (isChan(x)) { return chanLen(x) }
         return x.length
     }
     function goCap(xIn) {
@@ -2434,6 +2437,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (x === undefined || x === null) { return 0 }
         if (isSl(x)) { return x.c }
         if (isMap(x)) { return x.keys.length }
+        if (isChan(x)) { return x.cap }
         return x.length
     }
     // Indexing that works on a slice header, an array, a map and a string alike.
@@ -2504,7 +2508,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // makes a single-threaded interpreter able to run the handshake at all: the sender
     // hands its value over and the receiver picks it up when it drains the queue.
     // A receive on a channel that stays empty with nothing left to run is a deadlock.
-    function newChan(n, zero) { return {__chan: true, buf: [], closed: false, czero: zero} }
+    // cap is the buffer size of make(chan T, n). Twin of js_gochan_new in
+    // lib/go-rt.metajs and abnf/jsrt.go.
+    function newChan(n, zero) { return {__chan: true, buf: [], closed: false, czero: zero, cap: n} }
+    // len(ch): the values queued, which a send that never blocks can push past the
+    // buffer size, so at most cap - Go's own count, where that send would wait.
+    function chanLen(ch) { return ch.buf.length < ch.cap ? ch.buf.length : ch.cap }
     function isChan(v) { return v != undefined && v != null && typeof v == "object" && v.__chan == true }
     var goQueue = []
     function goSpawn(t) { goQueue.push(t) }
@@ -2584,6 +2593,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             if (typeof v == "number") { return fromCodePoint(v) }
             if (isSl(v) || Array.isArray(v)) {
                 var els = isSl(v) ? slElems(v) : v
+                if (goByteEls(els)) {
+                    var bs = []
+                    for (var j = 0; j < els.length; j++) { bs.push(szNum(els[j])) }
+                    return utf8Decode(bs)
+                }
                 var s = ""
                 for (var i = 0; i < els.length; i++) { s += fromCodePoint(els[i]) }
                 return s
@@ -2596,18 +2610,21 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             // is seen by bs. Only a STRING is decoded below.
             if (isSl(v)) { return v }
             if (Array.isArray(v)) { return slT(slOf(v), to == "[]byte" ? "byte" : "rune") }
-            // A rune is an int32. The "bytes" are code points too (the strings are
-            // UTF-16), so only the rune form can carry its type on the element.
+            // A byte is a uint8 of the UTF-8 encoding, a rune an int32 code point.
             var out = []
             var t = "" + v
+            if (to == "[]byte") {
+                var ub = utf8Bytes(t)
+                for (var i3 = 0; i3 < ub.length; i3++) { out.push(szConv(ub[i3], 8, true)) }
+                return slT(slOf(out), "byte")
+            }
             var i2 = 0
-            var rn = to == "[]rune"
             while (i2 < t.length) {
                 var r = strRuneAt(t, i2)
-                out.push(rn ? szConv(r.cp, 32, false) : r.cp)
+                out.push(szConv(r.cp, 32, false))
                 i2 += r.n
             }
-            return slT(slOf(out), to == "[]byte" ? "byte" : "rune")
+            return slT(slOf(out), "rune")
         }
         if (to == "bool") { return v ? true : false }
         // [N]T(s): a slice-to-ARRAY conversion COPIES (an array is a value), so the
@@ -2630,6 +2647,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var it = goIntTy(to)
         if (it != null) { return szConv(v, it.w, it.u) }
         return v
+    }
+    // string(x) of a slice decodes UTF-8 when its elements are bytes and joins code
+    // points when they are runes; a []byte's elements are uint8 boxes. Twin of
+    // goByteEls in lib/go-rt.metajs and goByteElems in abnf/jsrtgolang.go.
+    function goByteEls(els) {
+        for (var i = 0; i < els.length; i++) {
+            if (szIs(els[i]) && els[i].w == 8 && els[i].u) { return true }
+        }
+        return false
     }
     function fromCodePoint(cpIn) {
         // A []byte / []rune element is a SIZED box, and String.fromCharCode wants

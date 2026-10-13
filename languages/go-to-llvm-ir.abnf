@@ -494,8 +494,9 @@ SimpleStmt  = ( MapOk | TypeOk | RecvOk | ShortDecl | IncDecStmt | Assign | Chan
 RecvOk      <~~ push(makeRecvOk(takeAll())) ~~>
             = Id <~~ push(cPoisonName(up.in)) ~~> "," Id <~~ push(cPoisonName(up.in)) ~~>
               ( ":=" <~~ push({decl: true}) ~~> | "=" <~~ push({decl: false}) ~~> ) "<-" Expression NotComma ;
+// A '<-' that opens a line is the next statement's receive, not this send.
 ChanSend    <~~ push(makeChanSend(goChanSendBoxC(takeAll(), up.in, up.pos), up.pos)) ~~>
-            = PostfixExpr "<-" Expression ;
+            = PostfixExpr SameLine "<-" Expression ;
 
 // Every two-name comma-ok form ends here: NOTHING may follow but the end of the
 // statement, or MapOk would match the FIRST element of an ordinary two-name
@@ -755,9 +756,10 @@ EqExpr      <~~ push(goCmpFold(takeAll())) ~~>
             = RelExpr <~~ push({at: up.pos}) ~~>
               { ( "==" | "!=" ) <~~ push(up.in) ~~> RelExpr <~~ push({at: up.pos}) ~~> } ;
 
+// SameLine: a '<' opening a line is the receive '<-ch' of the next statement.
 RelExpr     <~~ push(goCmpFold(takeAll())) ~~>
             = AddExpr <~~ push({at: up.pos}) ~~>
-              { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> AddExpr <~~ push({at: up.pos}) ~~> } ;
+              { SameLine ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> AddExpr <~~ push({at: up.pos}) ~~> } ;
 
 // Go's two binary levels below the comparisons: '+ - | ^' bind loosest, then
 // '* / % << >> & &^'. The single-character '&' and '|' must not swallow the first
@@ -2201,7 +2203,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (spread) {
             var eb = ea.b
             var last = callExt(eb, "js_sub", [callExt(eb, "js_golen", [ea.v]), emitNum(eb, 1)])
-            callExt(eb, "js_pyset", [ea.v, last, emitHelper(eb, "$sels", [callExt(eb, "js_map_get", [ea.v, last])])])
+            callExt(eb, "js_pyset", [ea.v, last, emitHelper(eb, "$spread", [callExt(eb, "js_map_get", [ea.v, last])])])
             callExt(eb, "js_gospread", [ea.v])
             return ea
         }
@@ -2576,18 +2578,21 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
     }
     // items = [{cet}]: make(chan T[, n]). The element type text travels to the runtime,
-    // where a receive from a closed, drained channel answers its zero value.
+    // where a receive from a closed, drained channel answers its zero value, and so
+    // does the buffer size, which cap and len answer.
     // A negative buffer size is a run-time panic (js_gomakech).
     function makeMakeChan(items) {
         var ty = items[0].cet
         var szT = items.length > 1 ? items[1] : null
         return function(b) {
+            var nV = emitNum(b, 0)
             if (szT != null) {
                 var rs = szT(b)
                 b = rs.b
                 callExt(b, "js_gomakech", [rs.v])
+                nV = rs.v
             }
-            return {b: b, v: callExt(b, "js_gochan_new", [emitStr(b, ty)])}
+            return {b: b, v: callExt(b, "js_gochan_new", [emitStr(b, ty), nV])}
         }
     }
     // items = [{mkey}, {mzero}, hintThunk?]: the size hint is evaluated and
@@ -3351,7 +3356,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var x = rd.v
             return emitSelect(fb, emitIsSl(fb, x),
                               function(tb) { return {b: tb, v: slF(tb, x, "c")} },
-                              function(eb) { return {b: eb, v: callExt(eb, "js_golen", [x])} })
+                              function(eb) { return {b: eb, v: callExt(eb, "js_gocap", [x])} })
         })
         // x[i] and x[i] = v, both of which have to reach through a header's offset.
         b = declFn(b, "$sidx", 2, function(fb, a) {
@@ -3402,6 +3407,14 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 })
                 return {b: eb2, v: out}
             }, function(eb) { return {b: eb, v: x} })
+        })
+        // The elements xs... hands over: a slice's, or a string's BYTES
+        // (append(bs, s...)).
+        b = declFn(b, "$spread", 1, function(fb, a) {
+            var x = a[0]
+            return emitSelect(fb, callExt(fb, "js_seq", [callExt(fb, "js_typeof", [x]), emitStr(fb, "string")]),
+                              function(sb) { return {b: sb, v: callExt(sb, "js_goconv", [emitStr(sb, "[]byte"), x])} },
+                              function(ob) { return {b: ob, v: emitHelper(ob, "$sels", [x])} })
         })
         // x[lo:hi:mx] - a new header into the SAME backing array. A string slices with
         // the extern (it is a byte range and copies, exactly as in the interpreter).

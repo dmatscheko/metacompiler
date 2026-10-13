@@ -800,7 +800,9 @@ none.
 
 Per-language divergences from real toolchains, recorded and permanent: Go byte-
 slicing a rune in half cannot be represented at all (the floor's strings are
-UTF-16); Go counts `len([]byte(s))` in RUNES. An
+UTF-16), so `string(bs)` of bytes that are not valid UTF-8 differs per engine (the
+Go twin keeps the raw byte, the native leg prints U+FFFD, the interpreter the
+byte's Latin-1 character); `[]byte(s)` itself is the exact UTF-8 bytes. An
 ~~astral character prints as two U+FFFD in swift~~ - **NO LONGER TRUE for string
 literals, 2026-08-10**: `swUnescape` was copying a literal one code unit at a time
 and handing the host a LONE SURROGATE, which UTF-8 cannot encode. All four legs

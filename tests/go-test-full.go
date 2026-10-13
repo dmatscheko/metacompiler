@@ -4046,6 +4046,30 @@ func s74() {
 	check("sidx2", ss[1][1] == 151 && "€€"[5] == 172 && strings.Repeat("ü", 7)[13] == 188 && ss[3][1] == 195 && ss[3][2] == 169)
 }
 
+// ===== SECTION 75: []byte holds the UTF-8 bytes; a channel's len and cap =====
+// A string spread into append hands over its bytes, and a '<-' opening a line is a
+// receive statement, not the continuation of the line before.
+func s75() {
+	b := []byte("az")
+	check("byt1", fmt.Sprintf("%T %T", b[0], b) == "uint8 []uint8" && b[0]+200 == 41)
+	u := []byte("hé日")
+	check("byt2", len(u) == 6 && fmt.Sprint(u) == "[104 195 169 230 151 165]" && string(u) == "hé日")
+	u = append([]byte("x:"), "€"...)
+	check("byt3", len(u) == 5 && u[2] == 226 && string(u) == "x:€")
+	var sb strings.Builder
+	sb.Write([]byte{0xe2, 0x82, 0xac})
+	check("byt4", sb.String() == "€" && string([]rune("é€")) == "é€" && len([]rune("é€")) == 2)
+	c := make(chan int, 3)
+	c <- 1
+	c <- 2
+	check("chc1", cap(c) == 3 && len(c) == 2)
+	<-c
+	check("chc2", len(c) == 1)
+	d := make(chan string)
+	var e chan int
+	check("chc3", cap(d) == 0 && len(d) == 0 && cap(e) == 0 && len(e) == 0)
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -4121,6 +4145,7 @@ func main() {
 	s72() // SECTION-CALL 72
 	s73() // SECTION-CALL 73
 	s74() // SECTION-CALL 74
+	s75() // SECTION-CALL 75
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

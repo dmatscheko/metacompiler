@@ -1822,6 +1822,8 @@ function js_golen(v) {
     if (Array.isArray(v)) { return v.length }
     if (v === undefined || v === null) { return 0 }   // a nil slice / map
     if (goIsDict(v)) { return v.keys.length }
+    // len(ch): the values queued, at most cap - see chanLen in go-interpreter.abnf.
+    if (goIsChan(v)) { return Math.min(v.buf.length, v.cap) }
     fail("len() of a " + typeof v)
     return 0
 }
@@ -1912,6 +1914,19 @@ function js_goclear(args) {
     return undefined
 }
 
+// string(x) of a slice decodes UTF-8 when its elements are bytes and joins code
+// points when they are runes; a []byte's elements are uint8 boxes. Twin of
+// goByteEls in go-interpreter.abnf and goByteElems in abnf/jsrtgolang.go.
+function goByteEls(els) {
+    var i = 0
+    while (i < els.length) {
+        var e = els[i]
+        if (sintIs(e) && sintWidth(e) == 8 && sintUns(e)) { return true }
+        i = i + 1
+    }
+    return false
+}
+
 // A Go named-type conversion T(v). One numeric type carries every integer width,
 // so the sized forms truncate and mask; string(r) is the rune spelling and
 // string([]byte{...}) joins the code points. This is the UNSIZED path - the sized
@@ -1920,24 +1935,30 @@ function js_goconv(to, v) {
     if (to == "string") {
         if (typeof v == "number") { return goRuneStr(goIdx(v)) }
         if (Array.isArray(v)) {
-            var out = ""
             var i = 0
+            if (goByteEls(v)) {
+                var bs = []
+                while (i < v.length) { bs.push(goIdx(v[i])); i = i + 1 }
+                return goDecodeUtf8(bs)
+            }
+            var out = ""
             while (i < v.length) { out = out + goRuneStr(goIdx(v[i])); i = i + 1 }
             return out
         }
         return goStrOf(v)
     }
-    if (to == "[]byte" || to == "[]rune") {
-        // Both spellings decode to CODE POINTS, exactly like the interpreter's
-        // goConvert: the value model has one array type, so a later string(x)
-        // cannot tell bytes from runes apart. Identical for ASCII, which is what
-        // the byte form is used on.
-        // A rune is an int32; only the rune form carries its type on the element.
+    // A byte is a uint8 of the UTF-8 encoding, a rune an int32 code point, exactly
+    // like the interpreter's goConvert.
+    var arr = []
+    var k = 0
+    if (to == "[]byte") {
+        var ub = goBytes(goStrOf(v))
+        while (k < ub.length) { arr.push(sintConv(ub[k], 8, true)); k = k + 1 }
+        return arr
+    }
+    if (to == "[]rune") {
         var r = goRunes(goStrOf(v))
-        var arr = []
-        var k = 0
-        var rn = to == "[]rune"
-        while (k < r.cps.length) { arr.push(rn ? sintConv(r.cps[k], 32, false) : r.cps[k]); k = k + 1 }
+        while (k < r.cps.length) { arr.push(sintConv(r.cps[k], 32, false)); k = k + 1 }
         return arr
     }
     if (to == "bool") { return goTruthy(v) }
@@ -2902,8 +2923,16 @@ function goZeroOf(ty) {
     return null
 }
 
-function js_gochan_new(ty) {
-    return {__chan: true, buf: [], closed: false, czero: goStrOf(ty)}
+// make(chan T, n): a send never blocks, so n is only what cap and len answer.
+function js_gochan_new(ty, n) {
+    return {__chan: true, buf: [], closed: false, czero: goStrOf(ty), cap: goIdx(n)}
+}
+
+// cap(x) of anything but a slice header: a channel's buffer size, else what len
+// answers. Twin of js_gocap in abnf/jsrtgolang.go, goCap in go-interpreter.abnf.
+function js_gocap(v) {
+    if (goIsChan(v)) { return v.cap }
+    return js_golen(v)
 }
 
 function js_gochan_send(ch, v) {

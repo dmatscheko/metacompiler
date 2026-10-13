@@ -15189,6 +15189,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if keys, _, ok := dictParts(u(a[0])); ok {
 				return rt.wrapNum(float64(len(keys.elems)))
 			}
+			if o, buf, ok := goChanParts(u(a[0])); ok {
+				return rt.wrapNum(math.Min(float64(len(buf.elems)), rt.toNumber(o.props["cap"])))
+			}
 			rt.fail("len() of a %s", rt.typeOf(u(a[0])))
 			return 0
 		},
@@ -15339,6 +15342,13 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				case float64:
 					return w(string(rune(int64(t))))
 				case *jsArray:
+					if goByteElems(t.elems) {
+						bs := make([]byte, len(t.elems))
+						for i, e := range t.elems {
+							bs[i] = byte(int64(rt.toNumber(e)))
+						}
+						return w(string(bs))
+					}
 					out := ""
 					for _, e := range t.elems {
 						out += string(rune(int64(rt.toNumber(e))))
@@ -15347,19 +15357,18 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				}
 				return w(rt.toString(v))
 			case "[]byte", "[]rune":
-				// Both spellings decode to CODE POINTS, exactly like the interpreter's
-				// goConvert: the value model has one array type, so a later string(x)
-				// cannot tell bytes from runes apart. Identical for ASCII, which is
-				// what the byte form is used on.
-				// A rune is an int32; only the rune form carries its type on the
-				// element.
+				// A byte is a uint8 of the UTF-8 encoding, a rune an int32 code point,
+				// exactly like the interpreter's goConvert.
 				out := &jsArray{}
-				for _, r := range rt.toString(v) {
-					if to == "[]rune" {
-						out.elems = append(out.elems, giNorm(int64(r), 32, false))
-					} else {
-						out.elems = append(out.elems, float64(r))
+				str := rt.toString(v)
+				if to == "[]byte" {
+					for i := 0; i < len(str); i++ {
+						out.elems = append(out.elems, giNorm(int64(str[i]), 8, true))
 					}
+					return w(out)
+				}
+				for _, r := range str {
+					out.elems = append(out.elems, giNorm(int64(r), 32, false))
 				}
 				return w(out)
 			case "bool":
@@ -15508,14 +15517,16 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			return rt.wrapNum(math.Trunc(l / math.Pow(2, n)))
 		},
-		// make(chan T[, n]): the buffer size is not modeled (a send never blocks), the
-		// ELEMENT TYPE is, so a receive from a closed channel yields its zero value.
+		// make(chan T, n): a send never blocks, so the buffer size n is only what
+		// cap and len answer; the ELEMENT TYPE makes a receive from a closed channel
+		// yield its zero value.
 		"js_gochan_new": func(a []uint64) uint64 {
 			o := newJSObject()
 			o.set("__chan", true)
 			o.set("buf", &jsArray{})
 			o.set("closed", false)
 			o.set("czero", rt.toString(u(a[0])))
+			o.set("cap", rt.toNumber(u(a[1])))
 			return w(o)
 		},
 		"js_gochan_send": func(a []uint64) uint64 {

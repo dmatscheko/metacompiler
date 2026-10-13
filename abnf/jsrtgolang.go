@@ -2172,6 +2172,17 @@ func init() {
 		baseSet := m["js_set"]
 		basePyset := m["js_pyset"]
 		baseMapGet := m["js_map_get"]
+		baseGolen := m["js_golen"]
+
+		// cap(x) of anything but a slice header: a channel's buffer size, else
+		// what len answers. Twin of js_gocap in lib/go-rt.metajs, goCap in
+		// go-interpreter.abnf.
+		m["js_gocap"] = func(a []uint64) uint64 {
+			if o, _, ok := goChanParts(u(a[0])); ok {
+				return rt.wrapNum(rt.toNumber(o.props["cap"]))
+			}
+			return baseGolen(a)
+		}
 
 		// (typeText, value): the declared width of a slot whose type IS written at
 		// the site - an append into a []uint8, a parameter binding.
@@ -3310,4 +3321,16 @@ func goDynKind(v interface{}) int {
 // goIfEq is == on two interface values: the dynamic types must match as well.
 func (rt *jsrt) goIfEq(a, b interface{}) bool {
 	return goDynKind(a) == goDynKind(b) && rt.goValueEq(a, b)
+}
+
+// goByteElems: string(x) of a slice decodes UTF-8 when its elements are bytes and
+// joins code points when they are runes; a []byte's elements are uint8 boxes.
+// Twin of goByteEls in go-interpreter.abnf and lib/go-rt.metajs.
+func goByteElems(els []interface{}) bool {
+	for _, e := range els {
+		if g, ok := e.(jsGInt); ok && g.w == 8 && g.u {
+			return true
+		}
+	}
+	return false
 }
