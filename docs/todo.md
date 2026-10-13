@@ -76,7 +76,7 @@ its report; anything structural there is a CORE ticket.
 
 # JS — JavaScript and TypeScript
 
-### T-603 js compiler: a method call inside an assignment target; arguments edges; `"__#"` keys · P1 · JS · OPEN [V]
+### T-603 js compiler: a method call inside an assignment target; arguments edges; `"__#"` keys · P1 · JS · IN PROGRESS (JS worker, round 6) [V]
 `class K { constructor(){ this.o = {a:1} } get(i){ return this.o } }; new K().get(1).a = 2` → llvm.Run and native "TypeError:
 k.get is not a function" (interp and node accept); also `m.get(1).a = 3` on a Map. emitRefPath reads the member with memGetExt
 and calls it through jsCallChecked; use the ordinary method-call lowering (js_jsmget, js_jsxcall, js_jsmcall). js and ts. P2:
