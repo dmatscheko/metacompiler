@@ -731,6 +731,21 @@ check xtf16 "$(echo $xo x; echo '|')" 'x|'
 xna=(-n hi)
 check xtf17 "$(echo "${xna[@]}"; echo '|')" 'hi|'
 
+# ----- an expansion error abandons the rest of its command LINE with status 1 -----
+xd0=0
+xab=0
+{ xab=1; echo "r=$(( 7 / xd0 ))"; xab=2; } 2>/dev/null; xab=3
+check eab1 "$?/$xab" "1/1"
+xabf() { xab=4; echo "r=$(( 7 / xd0 ))"; xab=5; }
+{ xabf; xab=6; } 2>/dev/null
+check eab2 "$?/$xab" "1/4"
+xs0=abc
+{ xab=7; : "${xs0:1:-3}"; xab=8; } 2>/dev/null
+check eab3 "$?/$xab" "1/7"
+# ...while a command that evaluates arithmetic itself only fails
+{ (( 5 / xd0 )); xab="$?"; let "xq = 1 / xd0"; xab="$xab$?"; } 2>/dev/null
+check eab4 "$?/$xab" "0/11"
+
 # ----- done -----
 echo "features: $checks checks, $fails failures"
 exit $fails

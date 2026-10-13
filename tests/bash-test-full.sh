@@ -2154,6 +2154,36 @@ s39() {
   check sp6 "${!l6[*]} = ${l6[*]} / ${!l7[*]} = ${l7[*]}" "2 4 8 16 = z w x y / 0 2 3 = x z w"
 }
 
+# ===== SECTION 40: expansion errors =====
+# ${v:?w} on an unset value ends the (sub)shell with status 1; an arithmetic or substring
+# error in an EXPANSION abandons the command line - in a subshell, the subshell - with status
+# 1, while (( )), let and for (( )) only fail. Each case runs in a command substitution so
+# the abandoned line is its own. Every expected value is bash 5.3's.
+s40() {
+  local e40="" r
+  r=$( (: ${u40:?custom}) 2>/dev/null; echo "a$?"; (: ${u40?}) 2>/dev/null; echo "b$?"; (: ${e40:?}) 2>/dev/null; echo "c$?"; (: ${e40?}) 2>/dev/null; echo "d$?" )
+  check ex1 "$r" "a1
+b1
+c1
+d0"
+  r=$( { : ${u40:?gone}; echo never; } 2>/dev/null )
+  check ex2 "$?[$r]" "1[]"
+  r=$( { d=0; f40() { echo "r=$(( 7 / d ))"; echo after; }; f40; echo "st=$?"; } 2>/dev/null )
+  check ex3 "$?[$r]" "1[]"
+  r=$( { : $(( 2 ** -1 )); echo never; } 2>/dev/null )
+  check ex4 "$?[$r]" "1[]"
+  r=$( { s=abc; t=${s:1:-3}; echo never; } 2>/dev/null )
+  check ex5 "$?[$r]" "1[]"
+  r=$( { s=abc; echo "[${s: -5:-1}] [${s:5:-1}] [${s:2:-1}]"; } 2>/dev/null )
+  check ex6 "$?$r" "0[] [] []"
+  r=$( { a=(); a[-1]=x; echo never; } 2>/dev/null )
+  check ex7 "$?[$r]" "1[]"
+  r=$( { d=0; (( 5 / d )); echo -n "a$?"; let x=1/d; echo -n "b$?"; for (( i = 0; i < 1/d; i++ )); do :; done; echo -n "c$?"; (( 1 + )); echo -n "d$?"; } 2>/dev/null )
+  check ex8 "$r" "a1b1c1d1"
+  r=$( { n=08; echo "$(( 1 + 1 ))"; x=$(( n )); echo never; } 2>/dev/null )
+  check ex9 "$?[$r]" "1[2]"
+}
+
 s01   # SECTION-CALL 01
 s02   # SECTION-CALL 02
 s03   # SECTION-CALL 03
@@ -2193,5 +2223,6 @@ s36   # SECTION-CALL 36
 s37   # SECTION-CALL 37
 s38   # SECTION-CALL 38
 s39   # SECTION-CALL 39
+s40   # SECTION-CALL 40
 echo "full: $checks checks, $fails failures"
 exit $fails

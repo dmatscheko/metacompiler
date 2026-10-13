@@ -537,6 +537,34 @@ int rt_cpat(char *s) {
     return v;
 }
 
+/* ${v?word} / ${v:?word} on an unset (or, with the colon, empty) value: the word
+ * - or bash's own text when it is empty - on the standard error channel, and the
+ * abort flag, which ends the (sub)shell with status 1. */
+char *rt_pcheck(char *v, int bad, char *name, char *msg)
+{
+    int saved;
+    if (bad != 0) {
+        saved = sink_out;
+        sink_out = sink_err;
+        rt_prints("bash: ");
+        rt_prints(name);
+        rt_prints(": ");
+        rt_prints(msg);
+        rt_prints("\n");
+        sink_out = saved;
+        abort_flag = 1;
+    }
+    return v;
+}
+
+/* ${v:off:len} with a negative len that ends before off: bash's "substring
+ * expression < 0", which abandons the command like an arithmetic error. */
+int rt_suberr(int bad, int len)
+{
+    if (bad != 0) rt_arith_fail(rt_int2str((long)len), "substring expression < 0", empty);
+    return 0;
+}
+
 /* ---- arithmetic -----------------------------------------------------------
  * bash's integers are intmax_t: 64 bits, wrapping on overflow, / and %
  * truncating toward zero. The emitter compiles an expression whose text is
@@ -547,9 +575,10 @@ int rt_cpat(char *s) {
  *
  * An error (division by 0, a negative exponent, a syntax error, a digit too
  * great for its base) is reported on the standard error channel and raises
- * arith_err; the expression answers 0 and the emitter's check after it abandons
- * the command, as bash does. Twin of arEval and its helpers in
- * bash-interpreter.abnf. */
+ * arith_err; the expression answers 0. A command that evaluates arithmetic itself
+ * ((( )), let, for (( )), [[ -eq ]]) then fails with status 1; an EXPANSION
+ * error abandons the command line it is part of (emitAbortCheck), as bash does.
+ * Twin of arEval and its helpers in bash-interpreter.abnf. */
 int arith_err;
 
 int rt_arith_fail(char *expr, char *msg, char *tok)
@@ -2427,7 +2456,10 @@ int rt_arr_iset(char *nm, char *k, char *v) {
     int pos;
     int i;
     long kv;
-    if (k == &bad_key[0]) return 0;
+    if (k == &bad_key[0]) {
+        arith_err = 1;
+        return 0;
+    }
     at = rt_arr_find(nm, k);
     if (at >= 0) {
         arr_v[at] = v;

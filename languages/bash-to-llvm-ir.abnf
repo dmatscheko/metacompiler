@@ -55,8 +55,14 @@ a command name computed at run time can only reach echo, the trivial builtins an
 
 // A whole script: statements separated by ; or newlines (blank / comment lines collapse).
 // The production tag runs all top level statement thunks and exits with the final status.
-Program     <~~ runProgram(linkAsync(takeAll())) ~~>
-            = OptSep [ Statement { ListSep Statement } ListOptSep ] ;
+// A top-level separator run that holds a newline also ENDS A LINE ({nl}): an expansion
+// error abandons the rest of its line, as bash abandons the command line it read.
+Program     <~~ runProgram(takeAll()) ~~>
+            = OptSep [ Statement { TopSep Statement } TopOptSep ] ;
+TopSep      = TopAmpSep | TopSepRun ;
+TopOptSep   = [ TopSep ] ;
+TopAmpSep   <~~ push({amp: 1}); pushLineEnd(up.in) ~~> = AmpTok { NotCaseTerm SepTok } ;
+TopSepRun   <~~ pushLineEnd(up.in) ~~> = NotCaseTerm SepTok { NotCaseTerm SepTok } ;
 
 // Statement separators: one or more ; or newlines. Leading whitespace (incl. #comments) is
 // skipped before each separator token, so blank and comment-only lines vanish here.
@@ -188,9 +194,12 @@ BraceGroup  <~~ push(makeGroupR(takeAll())) ~~> = "{" BraceKwEnd CompoundList "}
 // (( expr )) as a command: status 0 when the value is non-zero.
 // (( EXPR )): a text holding an expansion is expanded first and then evaluated, exactly as
 // $(( EXPR )) is. Twin of ArithCmd in bash-interpreter.abnf.
-ArithCmd    = ArithCmdDyn | ArithCmdSt ;
+ArithCmd    = ArithCmdDyn | ArithCmdSt | ArithCmdRaw ;
 ArithCmdSt  <~~ push(makeArithCmd(pop())) ~~> = "((" :whitespace(Whitespace) ArList "))" ;
 ArithCmdDyn <~~ push(makeArithCmd(mkArDyn(pop()))) ~~> = "((" :whitespace() ArHasExp ArDynWord "))" ;
+// A text the arithmetic grammar rejects (`(( 1 + ))`) is still an arithmetic command: the
+// run-time evaluator reports bash's syntax error and the command fails with status 1.
+ArithCmdRaw <~~ push(makeArithCmd(mkArDyn(pop()))) ~~> = "((" :whitespace() ArDynWord "))" ;
 // [[ ... ]] : the conditional command (no word splitting, glob and regex matching).
 CondCmd     <~~ push(makeCondCmd(pop())) ~~> = "[[" :whitespace(Whitespace) CondOr "]]" ;
 
@@ -384,9 +393,10 @@ BackSub     <~~ push(mkCmdSub(pop())) ~~>
 // $(( EXPR )): a text holding an expansion (or a double quote, which bash removes) is kept as
 // a word, expanded, and read by rt_arith at run time - bash expands first and parses after,
 // so e="1 + 2"; $(( $e * 2 )) is 5. Twin of ArithExp in bash-interpreter.abnf.
-ArithExp    = ArithDyn | ArithSt ;
+ArithExp    = ArithDyn | ArithSt | ArithRaw ;
 ArithSt     <~~ push(mkArith(pop())) ~~> = "$((" :whitespace(Whitespace) ArList "))" ;
 ArithDyn    <~~ push(mkArith(mkArDyn(pop()))) ~~> = "$((" :whitespace() ArHasExp ArDynWord "))" ;
+ArithRaw    <~~ push(mkArith(mkArDyn(pop()))) ~~> = "$((" :whitespace() ArDynWord "))" ;
 ArDynWord   <~~ push(mkNsWord(takeAll())) ~~> = { ArDynSeg } ;
 ArDynSeg    = DqSeg | ExpSeg | ArDynParen | ArDynBare ;
 ArDynParen  = ArDynOpen { ArDynSeg } ArDynClose ;
@@ -1131,6 +1141,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var gOptU = rtGlobal("opt_nounset", i32)
     var gOptPf = rtGlobal("opt_pipefail", i32)
     var gAbort = rtGlobal("abort_flag", i32)
+    var gArithErr = rtGlobal("arith_err", i32)   // an arithmetic or substring error (rt_arith_fail)
     var gCondErr = rtGlobal("cond_err", i32)   // a [[ ]] that could not be evaluated
 
     // Two output channels. 0 = standard output (captured by $( ) when one is open), 1 = the
@@ -1243,6 +1254,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // run time; rt_idiv / rt_ipow are / % and ** with bash's error cases. Any of them can
     // raise arith_err (see languages/lib/bash-rt.c).
     var rtArith = rtDecl("rt_arith", 3, [1])
+    var rtPcheck = rtDecl("rt_pcheck", true, [1, 0, 1, 1])
+    var rtSubErr = rtDecl("rt_suberr", false, [0, 0])
     var rtIdiv = rtDecl("rt_idiv", 3, [3, 3, 0])
     var rtIpow = rtDecl("rt_ipow", 3, [3, 3])
     // An i32 as a decimal string, and a decimal string read back as an i32 - the status,
@@ -1744,6 +1757,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         pickedL = b.NewSelect(blankL, b.NewSelect(star, emptyPtr(b), gepStr(b, "\x02")), de)
                     }
                     if (idxO == "=") { b.NewCall(isAssoc ? rtArrSet : rtArrIset, [nmOf(b), kk, pickedE]) }
+                    if (idxO == "?") {
+                        var qmsg = gepStr(b, idxColon ? "parameter null or not set" : "parameter not set")
+                        if (idxWordT != null) { qmsg = b.NewSelect(isEmptyStr(b, de), qmsg, de) }
+                        var qnm = b.NewCall(rtStrcat, [b.NewCall(rtStrcat, [gepStr(b, name + "["), rs.v]), gepStr(b, "]")])
+                        // ONE check covers both arms: the subscript decides which emptiness counts.
+                        var qbad = b.NewSelect(whole, blankL, blankE)
+                        pickedE = b.NewCall(rtPcheck, [one1, b.NewZExt(qbad, i32), qnm, qmsg])
+                        pickedL = lst
+                    }
                     one1 = pickedE
                     lst = pickedL
                 }
@@ -1857,9 +1879,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 }
                 var rl = lenT(b)
                 b = rl.b
-                // a negative length is an offset from the end of the string
+                // a negative length is an offset from the end of the string, and one that ends
+                // before the offset is "substring expression < 0"
                 var n = b.NewSelect(b.NewICmp(llvm.enum.IPredSLT, rl.v, zero),
                                     b.NewSub(b.NewAdd(len, rl.v), off), rl.v)
+                // (an offset outside the string selects nothing and is no error)
+                var offIn = b.NewAnd(b.NewICmp(llvm.enum.IPredSGE, b.NewAdd(len, ro.v), zero),
+                                     b.NewICmp(llvm.enum.IPredSLE, ro.v, len))
+                b.NewCall(rtSubErr, [b.NewZExt(b.NewAnd(offIn, b.NewICmp(llvm.enum.IPredSLT, n, zero)), i32), rl.v])
                 n = b.NewSelect(b.NewICmp(llvm.enum.IPredSLT, n, zero), zero, n)
                 return {b: b, v: b.NewCall(rtCSubstr, [v, off, n])}
             }}
@@ -1926,6 +1953,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 d = r.v
             }
             if (o == "+") { return {b: b, v: b.NewSelect(blank, emptyPtr(b), d)} }
+            if (o == "?") {
+                var dmsg = gepStr(b, colon ? "parameter null or not set" : "parameter not set")
+                var msg = (wordT != null) ? b.NewSelect(isEmptyStr(b, d), dmsg, d) : dmsg
+                return {b: b, v: b.NewCall(rtPcheck, [v, b.NewZExt(blank, i32), gepStr(b, name), msg])}
+            }
             var picked = b.NewSelect(blank, d, v)
             if (o == "=") { setOf(b, picked) }
             return {b: b, v: picked}
@@ -3115,7 +3147,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return function(b) {
             var r = exprT(b)
             b = r.b
-            storeStatus(b, b.NewSelect(b.NewICmp(llvm.enum.IPredNE, r.v, zero64), zero, one))
+            var st = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, r.v, zero64), zero, one)
+            storeStatus(b, b.NewSelect(takeArithErr(b), one, st))
             return b
         }
     }
@@ -3124,7 +3157,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var v = zero64
             var i
             for (i = 0; i < items.length; i++) { var r = items[i](b); b = r.b; v = r.v }
-            storeStatus(b, b.NewSelect(b.NewICmp(llvm.enum.IPredNE, v, zero64), zero, one))
+            var st = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, v, zero64), zero, one)
+            storeStatus(b, b.NewSelect(takeArithErr(b), one, st))
             return b
         }
     }
@@ -3138,6 +3172,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // 0 true, 1 false, 2 the condition could not be evaluated (a bad =~ pattern).
             var err = b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, gCondErr), zero)
             var tf = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, r.v, zero), zero, one)
+            tf = b.NewSelect(takeArithErr(b), one, tf)
             storeStatus(b, b.NewSelect(err, llvm.constant.NewInt(i32, 2), tf))
             return b
         }
@@ -3602,16 +3637,29 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return b
     }
 
-    // The abort a set -u expansion raised: end the (sub)shell before running the command.
+    // An error an expansion raised, checked before the command runs. set -u and ${v:?} end
+    // the (sub)shell (exited 1); an arithmetic or substring error abandons the command line
+    // (exited 2, which a subshell treats as any exit and a top-level line catches - see
+    // runProgram). Both leave status 1. Twin of takeAbort in bash-interpreter.abnf.
     function emitAbortCheck(b) {
-        var isAb = b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, gAbort), zero)
+        var ab = b.NewLoad(i32, gAbort)
+        var isAb = b.NewICmp(llvm.enum.IPredNE, ab, zero)
+        var isAr = b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, gArithErr), zero)
         var kill = curF.NewBlock(""), cont = curF.NewBlock("")
-        b.NewCondBr(isAb, kill, cont)
+        b.NewCondBr(b.NewOr(isAb, isAr), kill, cont)
         kill.NewStore(zero, gAbort)
+        kill.NewStore(zero, gArithErr)
         kill.NewStore(one, gExitCode)
-        kill.NewStore(one, gExited)
+        kill.NewStore(kill.NewSelect(isAb, one, llvm.constant.NewInt(i32, 2)), gExited)
         kill.NewBr(curExit)
         return cont
+    }
+    // A command that evaluates arithmetic ITSELF ((( )), let, [[ -eq ]], for (( ))) fails
+    // with status 1 on an error instead: this answers whether one was raised, and clears it.
+    function takeArithErr(b) {
+        var e = b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, gArithErr), zero)
+        b.NewStore(zero, gArithErr)
+        return e
     }
     // set -e: leave on a failing command, unless it is running as a condition.
     function emitErrExitCheck(b) {
@@ -3759,11 +3807,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (cmd == undefined) { return emitComputedCommand(b, cmdT, argTs) }
             if (cmd == "echo") { return emitEcho(b, argTs) }
             if (cmd == "[" || cmd == "test") { return emitTest(b, cmd, argTs) }
-            if (cmd == "true" || cmd == ":") { storeStatusI(b, 0); return b }
             // `cmd &` already ran to completion (see mkAsync), so there is never anything
             // left to wait for. LIMIT: `wait PID` answers 0, not the job's real status.
-            if (cmd == "wait") { storeStatusI(b, 0); return b }
-            if (cmd == "false") { storeStatusI(b, 1); return b }
+            // The arguments of these four are still EXPANDED, for their side effects and
+            // errors: `: $(( n++ ))` and `: ${v:?unset}` are idioms.
+            if (cmd == "true" || cmd == ":" || cmd == "wait" || cmd == "false") {
+                var tbox = {b: b}
+                evalArgs(tbox, argTs)
+                b = emitAbortCheck(tbox.b)
+                storeStatusI(b, (cmd == "false") ? 1 : 0)
+                return b
+            }
             if (cmd == "exit") {
                 var code = zero
                 if (argTs.length > 0) { var r = evalWord(b, argTs[0]); b = r.b; code = s2i(b, r.v) } else { code = b.NewLoad(i32, gStatus) }
@@ -3891,6 +3945,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     b = ra.b
                     b.NewCall(rtArgPush, ra.v)
                 }
+                b = emitAbortCheck(b)
                 var base = b.NewLoad(i32, savedTop)
                 b.NewStore(base, gFrameBase)
                 b.NewStore(b.NewSub(b.NewLoad(i32, gArgvTop), base), gFrameN)
@@ -3923,6 +3978,22 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // `cmd &` : the parser leaves an {amp} marker AFTER the statement it applies to, so a
     // statement list is a mix of thunks and markers. linkAsync folds the markers away.
+    // The {nl} marker a top-level separator run with a newline in it leaves (see Program).
+    function pushLineEnd(t) {
+        var i
+        for (i = 0; i < t.length; i++) { if (t.charAt(i) == "\n") { push({nl: 1}); return } }
+    }
+    // The top-level items as lines of statements, each list folded by linkAsync.
+    function splitLines(items) {
+        var lines = [], cur = []
+        var i
+        for (i = 0; i < items.length; i++) {
+            if (typeof items[i] != "function" && items[i].nl != undefined) { lines.push(linkAsync(cur)); cur = [] }
+            else { cur.push(items[i]) }
+        }
+        lines.push(linkAsync(cur))
+        return lines
+    }
     function linkAsync(items) {
         var out = []
         var i
@@ -4216,18 +4287,24 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function makeCFor(items) {
         var initT = items[0], condT = items[1], stepT = items[2], bodyT = items[3]
         return function(b) {
+            // An arithmetic error in any of the three parts ends the loop with status 1.
             var r0 = initT(b)
             b = r0.b
             var head = curF.NewBlock(""), body = curF.NewBlock(""), step = curF.NewBlock(""), ex = curF.NewBlock("")
-            b.NewBr(head)
+            var bad = curF.NewBlock("")
+            b.NewCondBr(takeArithErr(b), bad, head)
             var rc = condT(head)
-            rc.b.NewCondBr(rc.b.NewICmp(llvm.enum.IPredNE, rc.v, zero64), body, ex)
+            var go = curF.NewBlock("")
+            rc.b.NewCondBr(takeArithErr(rc.b), bad, go)
+            go.NewCondBr(go.NewICmp(llvm.enum.IPredNE, rc.v, zero64), body, ex)
             loopStack.push({brk: ex, cont: step})
             var bb = bodyT(body)
             loopStack.pop()
             bb.NewBr(step)
             var rs = stepT(step)
-            rs.b.NewBr(head)
+            rs.b.NewCondBr(takeArithErr(rs.b), bad, head)
+            storeStatusI(bad, 1)
+            bad.NewBr(ex)
             return ex
         }
     }
@@ -4328,7 +4405,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     //  Program: build main(), run the top-level statements, finish.
     // ===================================================================================
 
-    function runProgram(stmts) {
+    function runProgram(items) {
+        var lines = splitLines(items)
         var main = m.NewFunc("main", i32)
         curF = main
         var entry = main.NewBlock("entry")
@@ -4337,10 +4415,28 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // An explicit `exit N` still runs the EXIT trap on its way out.
         var mainExit = curExit
         curFrame = null
-        // Emit the whole program into `body`; getVarId fills varIdList as a side effect.
+        // Emit the whole program into `body`; getVarId fills varIdList as a side effect. Each
+        // LINE has its own exit block: exited == 2 there is an expansion error abandoning the
+        // line (status 1, on to the next one); anything else is a real exit.
         var b = body
         var i
-        for (i = 0; i < stmts.length; i++) { b = stmts[i](b); b = emitErrExitCheck(b) }
+        var li
+        for (li = 0; li < lines.length; li++) {
+            var stmts = lines[li]
+            var lineExit = main.NewBlock(""), next = main.NewBlock("")
+            curExit = lineExit
+            for (i = 0; i < stmts.length; i++) { b = stmts[i](b); b = emitErrExitCheck(b) }
+            b = emitAbortCheck(b)
+            b.NewBr(next)
+            var soft = lineExit.NewICmp(llvm.enum.IPredEQ, lineExit.NewLoad(i32, gExited), llvm.constant.NewInt(i32, 2))
+            var softB = main.NewBlock("")
+            lineExit.NewCondBr(soft, softB, mainExit)
+            softB.NewStore(zero, gExited)
+            storeStatusI(softB, 1)
+            softB.NewBr(next)
+            b = next
+        }
+        curExit = mainExit
         var progTraps = trapList
         b = emitTraps(b, progTraps)
         b.NewRet(b.NewLoad(i32, gStatus)) // normal completion -> exit code is $?

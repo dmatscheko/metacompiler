@@ -57,8 +57,14 @@ thing on its line (HdScan refuses those rather than mis-parsing them).") ;
 
 // A whole script: statements separated by ; or newlines (blank / comment lines collapse).
 // The production tag runs all top level statement thunks and exits with the final status.
-Program     <~~ runProgram(linkAsync(takeAll())) ~~>
-            = OptSep [ Statement { ListSep Statement } ListOptSep ] ;
+// A top-level separator run that holds a newline also ENDS A LINE ({nl}): an expansion
+// error abandons the rest of its line, as bash abandons the command line it read.
+Program     <~~ runProgram(takeAll()) ~~>
+            = OptSep [ Statement { TopSep Statement } TopOptSep ] ;
+TopSep      = TopAmpSep | TopSepRun ;
+TopOptSep   = [ TopSep ] ;
+TopAmpSep   <~~ push({amp: 1}); pushLineEnd(up.in) ~~> = AmpTok { NotCaseTerm SepTok } ;
+TopSepRun   <~~ pushLineEnd(up.in) ~~> = NotCaseTerm SepTok { NotCaseTerm SepTok } ;
 
 // Statement separators: one or more ; or newlines. Leading whitespace (incl. #comments) is
 // skipped before each separator token, so blank and comment-only lines vanish here.
@@ -198,9 +204,12 @@ BraceGroup  <~~ push(makeGroupR(takeAll())) ~~> = "{" BraceKwEnd CompoundList "}
 // (( expr )) as a command: status 0 when the value is non-zero.
 // (( EXPR )): a text holding an expansion is expanded first and then evaluated, exactly as
 // $(( EXPR )) is (see ArithExp).
-ArithCmd    = ArithCmdDyn | ArithCmdSt ;
+ArithCmd    = ArithCmdDyn | ArithCmdSt | ArithCmdRaw ;
 ArithCmdSt  <~~ push(makeArithCmd(pop())) ~~> = "((" :whitespace(Whitespace) ArList "))" ;
 ArithCmdDyn <~~ push(makeArithCmd(mkArDyn(pop()))) ~~> = "((" :whitespace() ArHasExp ArDynWord "))" ;
+// A text the arithmetic grammar rejects (`(( 1 + ))`) is still an arithmetic command: the
+// run-time evaluator reports bash's syntax error and the command fails with status 1.
+ArithCmdRaw <~~ push(makeArithCmd(mkArDyn(pop()))) ~~> = "((" :whitespace() ArDynWord "))" ;
 // [[ ... ]] : the conditional command (no word splitting, glob and regex matching).
 CondCmd     <~~ push(makeCondCmd(pop())) ~~> = "[[" :whitespace(Whitespace) CondOr "]]" ;
 
@@ -417,9 +426,10 @@ BackSub     <~~ push(mkCmdSub(pop())) ~~>
 // contribute operators: e="1 + 2"; $(( $e * 2 )) is 5, not 6. A text holding an expansion (or
 // a double quote, which is removed) is therefore kept as a word and read by the run-time
 // evaluator, arEval; a text without one is parsed here, once.
-ArithExp    = ArithDyn | ArithSt ;
+ArithExp    = ArithDyn | ArithSt | ArithRaw ;
 ArithSt     <~~ push(mkArith(pop())) ~~> = "$((" :whitespace(Whitespace) ArList "))" ;
 ArithDyn    <~~ push(mkArith(mkArDyn(pop()))) ~~> = "$((" :whitespace() ArHasExp ArDynWord "))" ;
+ArithRaw    <~~ push(mkArith(mkArDyn(pop()))) ~~> = "$((" :whitespace() ArDynWord "))" ;
 ArDynWord   <~~ push(mkNsWord(takeAll())) ~~> = { ArDynSeg } ;
 ArDynSeg    = DqSeg | ExpSeg | ArDynParen | ArDynBare ;
 ArDynParen  = ArDynOpen { ArDynSeg } ArDynClose ;
@@ -1170,7 +1180,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var optPipefail = false
     var exitTrap = null      // a statement thunk, or null
     var condDepth = 0        // >0 while a command runs as a CONDITION (set -e does not fire)
-    var abortSignal = null   // set by a set -u failure during expansion
+    var abortSignal = null   // set by a set -u or ${v:?} failure during expansion
 
     // $0 and the prefix on every diagnostic: the program's own path, exactly as this
     // process was given it, which is what a real shell answers.
@@ -1405,7 +1415,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var ln = arNum(lenT())
         if (ln < 0) {
             var end = vlen + ln
-            if (end < off) { return "" }
+            if (end < off) { arFailAt(numToStr(ln), "substring expression < 0", ""); return "" }
             return v.slice(charIdx(v, off), charIdx(v, end))
         }
         var e2 = off + ln
@@ -2033,11 +2043,20 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return v
             }
             if (o == "?") {
-                if (blank) { fail(nameOf() + ": " + ((wordT != null) ? wordJoin(wordT()) : "parameter null or not set")) }
+                if (blank) { paramErr(nameOf(), wordT, colon) }
                 return v
             }
             return v
         }
+    }
+    // ${v?word} / ${v:?word} on an unset (or, with the colon, empty) value: the word - or
+    // bash's own text when it is empty - on standard error, and the (sub)shell ends with
+    // status 1. Twin of rt_pcheck.
+    function paramErr(nm, wordT, colon) {
+        var msg = (wordT != null) ? wordJoin(wordT()) : ""
+        if (msg == "") { msg = colon ? "parameter null or not set" : "parameter not set" }
+        emitErr("bash: " + nm + ": " + msg + "\n")
+        abortSignal = {ret: 1, isExit: 1}
     }
 
     // items = [{dkw}, {dflag}*, ({dname} | {aname, val})*]
@@ -2525,7 +2544,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return numToStr(arStr(key))
     }
     function arrSet(name, key, val) {
-        if (key == BAD_KEY) { return }
+        if (key == BAD_KEY) { arithErr = true; return }
         var a = arrEnsure(name, false)
         var kk = arrNorm(a, key)
         if (!hasOwn(a.vals, "$" + kk)) {
@@ -2663,7 +2682,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return v
         }
         if (o == "?") {
-            if (blank) { fail(name + "[" + sub + "]: " + ((wordT != null) ? wordJoin(wordT()) : "parameter null or not set")) }
+            if (blank) { paramErr(name + "[" + sub + "]", wordT, colon) }
             return v
         }
         return v
@@ -3092,6 +3111,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // ---- arithmetic thunks: function() -> an arithmetic value (see arNorm) ----
 
     // A numeric literal: 0xHH hexadecimal, BASE#DIGITS, a leading 0 octal, else decimal.
+    // null for one bash rejects (a digit too great for its base, a base outside 2..64),
+    // which mkNum leaves to arEval so the error is reported when it runs, as in bash.
     function parseNumLit(t) {
         if (t.length > 2 && t.charAt(0) == "0" && (t.charAt(1) == "x" || t.charAt(1) == "X")) {
             return digitsInBase(t.slice(2), 16)
@@ -3099,7 +3120,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var h = -1
         var i
         for (i = 0; i < t.length; i++) { if (t.charAt(i) == "#") { h = i } }
-        if (h > 0) { return digitsInBase(t.slice(h + 1), arNum(digitsInBase(t.slice(0, h), 10))) }
+        if (h > 0) {
+            var bs = digitsInBase(t.slice(0, h), 10)
+            if (bs == null || arOp("<", bs, 2) == 1 || arOp(">", bs, 64) == 1) { return null }
+            return digitsInBase(t.slice(h + 1), bs)
+        }
         if (t.length > 1 && t.charAt(0) == "0") { return digitsInBase(t.slice(1), 8) }
         return digitsInBase(t, 10)
     }
@@ -3120,17 +3145,22 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else if (cc >= 65 && cc <= 90) { d = (base > 36) ? cc - 29 : cc - 55 }
             else if (cc == 64) { d = 62 }
             else if (cc == 95) { d = 63 }
-            if (d < 0 || d >= base) { d = 0 }
+            if (d < 0 || d >= base) { return null }
             v = arOp("+", arOp("*", v, base), d)
         }
         return v
     }
-    // items = [baseWordThunk, digitsWordThunk] - see the ArBaseDyn rule.
+    // items = [baseWordThunk, digitsWordThunk] - see the ArBaseDyn rule. Either side was built
+    // by expansion, so the constant is put back together and read by arEval.
     function mkArBaseDyn(items) {
         var lw = items[0], rw = items[1]
-        return function() { return digitsInBase(wordJoin(rw()), arNum(arStr(wordJoin(lw())))) }
+        return function() { return arEval(wordJoin(lw()) + "#" + wordJoin(rw())) }
     }
-    function mkNum(text) { var n = parseNumLit(text); return function() { return n } }
+    function mkNum(text) {
+        var n = parseNumLit(text)
+        if (n == null) { return function() { return arEval(text) } }
+        return function() { return n }
+    }
     function mkArOfStr(t) { return function() { return arEval(wordJoin(t())) } }
     function mkUn(op, t) {
         return function() {
@@ -3739,10 +3769,24 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return function() {
             cmdSubRan = false
             runAssign(a, false)
+            var ab = takeAbort()
+            if (ab != null) { return ab }
             if (!cmdSubRan) { setStatus(0) }
             return lastStatus
         }
     }
+    // An error an expansion raised, taken before the command runs. set -u and ${v:?} end the
+    // (sub)shell; an arithmetic or substring error ({soft}) abandons the command line - a
+    // subshell treats it as any exit, a top-level line catches it (runProgram). Both leave
+    // status 1. Twin of emitAbortCheck in bash-to-llvm-ir.abnf.
+    function takeAbort() {
+        if (abortSignal != null) { var ab = abortSignal; abortSignal = null; arithErr = false; return ab }
+        if (arithErr) { arithErr = false; return {ret: 1, isExit: 1, soft: 1} }
+        return null
+    }
+    // A command that evaluates arithmetic ITSELF ((( )), let, [[ -eq ]], for (( ))) fails
+    // with status 1 on an error instead: this answers whether one was raised, and clears it.
+    function takeArithErr() { var e = arithErr; arithErr = false; return e }
     function runAssign(a, assoc) {
         if (a.lit != null) {
             applyArrayLit(a.name, evalArrayLit(a.lit), a.op == "+=", assoc)
@@ -3784,7 +3828,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var cf = wordFields(cmdT())
             var rest = expandWords(argTs)
             var k
-            if (abortSignal != null) { var ab = abortSignal; abortSignal = null; return ab }
+            var ab = takeAbort()
+            if (ab != null) { return ab }
             var all = []
             for (k = 0; k < cf.length; k++) { all.push(cf[k]) }
             for (k = 0; k < rest.length; k++) { all.push(rest[k]) }
@@ -4639,7 +4684,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // (( expr )) : status 0 when the value is non-zero (the opposite of C).
     function makeArithCmd(exprT) {
-        return function() { var st = !arIsZero(exprT()) ? 0 : 1; setStatus(st); return st }
+        return function() {
+            var st = !arIsZero(exprT()) ? 0 : 1
+            if (takeArithErr()) { st = 1 }
+            setStatus(st)
+            return st
+        }
     }
     // let EXPR ... : same evaluator, status from the LAST expression.
     function makeLetCmd(items) {
@@ -4649,6 +4699,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var i
             for (i = 0; i < items.length; i++) { v = items[i]() }
             var st = !arIsZero(v) ? 0 : 1
+            if (takeArithErr()) { st = 1 }
             setStatus(st)
             return st
         }
@@ -4661,6 +4712,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             condErr = 0
             var v = t()
             var st = (condErr != 0) ? condErr : (v ? 0 : 1)
+            if (takeArithErr() && condErr == 0) { st = 1 }
             setStatus(st)
             return st
         }
@@ -4904,18 +4956,23 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function makeCFor(items) {
         var initT = items[0], condT = items[1], stepT = items[2], bodyT = items[3]
         return function() {
+            // An arithmetic error in any of the three parts ends the loop with status 1.
             var last = 0
             var r = anytype
             initT()
+            if (takeArithErr()) { setStatus(1); return 1 }
             var go = true
-            while (go && !arIsZero(condT())) {
+            while (go) {
+                var cv = condT()
+                if (takeArithErr()) { setStatus(1); return 1 }
+                if (arIsZero(cv)) { go = false; continue }
                 r = bodyT()
                 if (typeof r == "object") {
                     var sg = loopSignal(r)
                     if (sg == 0 || sg == 3) { return (sg == 3) ? loopOuter(r) : r }
                     if (sg == 1) { go = false }
                 } else { last = r }
-                if (go) { stepT() }
+                if (go) { stepT(); if (takeArithErr()) { setStatus(1); return 1 } }
             }
             return last
         }
@@ -5012,14 +5069,42 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // Build all statement thunks, then run them top to bottom. The exit code of the whole
     // metacompiler run is the status of the last command (or an explicit exit N).
-    function runProgram(stmts) {
+    // The {nl} marker a top-level separator run with a newline in it leaves (see Program).
+    function pushLineEnd(t) {
+        var i
+        for (i = 0; i < t.length; i++) { if (t.charAt(i) == "\n") { push({nl: 1}); return } }
+    }
+    // The top-level items as lines of statements, each list folded by linkAsync.
+    function splitLines(items) {
+        var lines = [], cur = []
+        var i
+        for (i = 0; i < items.length; i++) {
+            if (typeof items[i] != "function" && items[i].nl != undefined) { lines.push(linkAsync(cur)); cur = [] }
+            else { cur.push(items[i]) }
+        }
+        lines.push(linkAsync(cur))
+        return lines
+    }
+    function runProgram(items) {
+        var lines = splitLines(items)
+        var li
         var i
         var r = anytype
-        for (i = 0; i < stmts.length; i++) {
-            r = stmts[i]()
-            if (typeof r == "object") {
-                if (r.isExit != undefined) { setStatus(r.ret); runExitTrap(); flushErrTail(); exit(r.ret) }
-                setStatus(r.ret)
+        for (li = 0; li < lines.length; li++) {
+            var stmts = lines[li]
+            for (i = 0; i < stmts.length; i++) {
+                r = stmts[i]()
+                if (typeof r == "object") {
+                    // An expansion error abandons the rest of its line, with status 1.
+                    if (r.soft != undefined) { setStatus(1); i = stmts.length; continue }
+                    if (r.isExit != undefined) { setStatus(r.ret); runExitTrap(); flushErrTail(); exit(r.ret) }
+                    setStatus(r.ret)
+                }
+            }
+            r = takeAbort()
+            if (r != null) {
+                if (r.soft == undefined) { setStatus(r.ret); runExitTrap(); flushErrTail(); exit(r.ret) }
+                setStatus(1)
             }
         }
         runExitTrap()
