@@ -890,7 +890,7 @@ BindName    <~~ push(swBt(up.in)) ~~> = Wildcard | Id ;
 // reference otherwise, so emitMatchCore carries that flag down the tree.
 Pattern     <~~ push(makePattern(takeAll())) ~~>
             = PatCore { NoSpace "?" <~~ push({popt: 1}) ~~> } ;
-PatCore     = PatIs | PatLet | PatTuple | PatWild | PatRange | PatEnum | PatExpr ;
+PatCore     = PatIs | PatLet | PatTuple | PatWild | PatRange | PatElem | PatEnum | PatExpr ;
 // `case is Double:` - a TYPE pattern, which did not parse in either half and took
 // the whole switch statement down with it. It runs exactly the test the `is`
 // OPERATOR runs, so it agrees with `case let z where z is Double` by construction.
@@ -912,6 +912,11 @@ PatRef      <~~ push(foldCallMember(takeAll(), up.in)) ~~> = VarRef { FieldSfx |
 // A value pattern compares the subject with ==. Its operand is deliberately NOT the
 // full expression grammar: a `{ ... }` would be read as a closure and swallow the
 // body of `catch { ... }`, whose pattern is optional.
+// An element as a value pattern, `case xs[0]:`. The subscript is required, so a
+// bare name or a qualified path still reaches PatEnum; tried before it, which would
+// match `xs` alone and leave the subscript behind.
+PatElem     <~~ push({pexpr: foldCallMember(takeAll(), up.in)}) ~~>
+            = VarRef { FieldSfx } IndexSfx { FieldSfx | IndexSfx } ;
 PatExpr     <~~ push({pexpr: pop()}) ~~> = PatOperand ;
 PatOperand  = PatNegLit | PatQual | Template | NumberLit | True | False | Nil ;
 PatNegLit   <~~ push(makeNeg(pop())) ~~> = "-" NumberLit ;
@@ -4087,8 +4092,14 @@ KwContinue  = "continue" KwEnd ;
                 goB.NewRet(callExt(goB, "js_swmcall", [ps[0], emitStr(goB, lname), na]))
             } else {
                 var chkB = curF.NewBlock("")
+                var rngChkB = curF.NewBlock("")
+                var rngB = curF.NewBlock("")
                 b.NewCondBr(truthy(b, isArr), colB, chkB)
-                chkB.NewCondBr(truthy(chkB, callExt(chkB, "js_is_type", [ps[0], emitStr(chkB, "String")])), colB, othB)
+                chkB.NewCondBr(truthy(chkB, callExt(chkB, "js_is_type", [ps[0], emitStr(chkB, "String")])), colB, rngChkB)
+                // A range moves its own indices (a ClosedRange's are an enum), so
+                // the runtime gets the label-renamed member.
+                rngChkB.NewCondBr(truthy(rngChkB, rngChkB.NewCall(rtProbe("sw_isrange", "__range"), [ps[0]])), rngB, othB)
+                rngB.NewRet(callExt(rngB, "js_swmcall", [ps[0], emitStr(rngB, lname), ps[1]]))
                 var i0 = callExt(colB, "js_arg", [ps[1], handle(0)])
                 var rv = null
                 if (lname == "$idxAfter") { rv = callExt(colB, "js_jadd", [i0, emitNum(colB, 1)]) }

@@ -4390,6 +4390,42 @@ func s96() {
     check("96g", (big[0]..<Int.max).count == 2 && hit == "in" && pr.contains(ns[4]) && !pr.contains(ns[0]))
 }
 
+// ===== SECTION 97: range indices; an element as an expression pattern =====
+// A ClosedRange's Index is the enum inRange(Bound) / pastEnd: it prints as such
+// (nested in a collection, module-qualified with the bound type), subscripts the
+// range, moves, measures and orders; a Range<Int>'s index is the element itself.
+// `case xs[0]:` compares the subject with an element. Every value read off
+// swiftc 6.1.2.
+func s97() {
+    let ns = [-2, 3, 0, 1, 5]
+    let cr = ns[0]...ns[1]
+    let i = cr.firstIndex(of: ns[2])!
+    check("97a", "\(i)" == "inRange(0)" && "\(cr.endIndex)" == "pastEnd" && cr[i] == 0
+        && "\([cr.startIndex, cr.endIndex])" == "[(extension in Swift):Swift.ClosedRange<Swift.Int>.Index.inRange(-2), (extension in Swift):Swift.ClosedRange<Swift.Int>.Index.pastEnd]")
+    check("97b", "\(cr.index(cr.startIndex, offsetBy: 2))" == "inRange(0)" && "\(cr.index(before: cr.endIndex))" == "inRange(3)"
+        && cr[cr.index(after: i)] == 1 && cr.distance(from: i, to: cr.endIndex) == 4
+        && i > cr.startIndex && i != cr.endIndex && i == cr.firstIndex(of: 0)! && i < cr.endIndex)
+    check("97c", "\(cr.lastIndex(where: { $0 * $0 == 4 })!)" == "inRange(2)" && cr.firstIndex(of: ns[4]) == nil
+        && cr.indices.count == 6)
+    var sum = 0
+    var k = cr.startIndex
+    while k != cr.endIndex { sum += cr[k]; k = cr.index(after: k) }
+    let b8: [Int8] = [1, 4]
+    let c8 = b8[0]...b8[1]
+    check("97d", sum == 3 && c8[c8.firstIndex(of: 3)!] == 3
+        && "\([c8.endIndex])" == "[(extension in Swift):Swift.ClosedRange<Swift.Int8>.Index.pastEnd]")
+    let hr = ns[1]..<9
+    check("97e", hr.index(after: 4) == 5 && hr.index(before: 6) == 5 && hr.distance(from: 4, to: 8) == 4
+        && hr.index(4, offsetBy: 3) == 7 && hr[ns[4]] == 5)
+    var hit = ""
+    switch ns[2] {
+    case ns[1]: hit = "three"
+    case ns[2]: hit = "zero"
+    default: hit = "none"
+    }
+    check("97f", hit == "zero")
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -4487,6 +4523,7 @@ func main() {
     s94() // SECTION-CALL 94
     s95() // SECTION-CALL 95
     s96() // SECTION-CALL 96
+    s97() // SECTION-CALL 97
     print("full: \(checks) checks, \(fails) failures")
 }
 

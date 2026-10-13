@@ -1205,6 +1205,9 @@ func init() {
 					if v, ok := rt.swRangeMethod(r, name, args); ok {
 						return w(v)
 					}
+					if swIsIdxMoveName(name) {
+						return w(rt.swCrIxMove(r, name, args))
+					}
 					lo, hi := r.props["lo"], r.props["hi"]
 					if isNullish(lo) || isNullish(hi) {
 						rt.fail("method .%s on a one-sided range", name)
@@ -1218,10 +1221,8 @@ func init() {
 						elems = append(elems, swRangeAt(rt, lo, i))
 					}
 					res := u(m["js_swmcall"]([]uint64{w(&jsArray{elems: elems}), a[1], a[2]}))
-					// A Range<Int> is its own indices: the index of an element
-					// is the element, not its offset.
-					if (name == "firstIndex" || name == "lastIndex") && r.props["closed"] != true && !isNullish(res) {
-						res = swRangeAt(rt, lo, int(swNum(rt, res)))
+					if (name == "firstIndex" || name == "lastIndex" || name == "index") && !isNullish(res) {
+						res = rt.swCrIxAt(r, int(swNum(rt, res)))
 					}
 					return w(res)
 				}
@@ -1571,20 +1572,20 @@ func init() {
 					return w(r.props["hi"])
 				case "isEmpty":
 					return boolH(rt.swRangeEmpty(r))
-				// A Range<Int> is its own indices; a ClosedRange's Index is
-				// an enum this runtime does not model.
 				case "startIndex":
-					if r.props["closed"] != true {
-						return w(r.props["lo"])
-					}
+					return w(rt.swCrIxAt(r, 0))
 				case "endIndex":
-					if r.props["closed"] != true {
-						return w(r.props["hi"])
-					}
+					return w(rt.swCrIxAt(r, rt.swRangeLen(r)))
+				// A ClosedRange's indices, as the array of its Index values.
 				case "indices":
 					if r.props["closed"] != true {
 						return w(r)
 					}
+					ixs := []interface{}{}
+					for p := 0; p < rt.swRangeLen(r); p++ {
+						ixs = append(ixs, rt.swCrIxAt(r, p))
+					}
+					return w(&jsArray{elems: ixs})
 				}
 			}
 			// A String's views, as arrays: `.utf8` the UTF-8 bytes and
@@ -1740,6 +1741,15 @@ func init() {
 					lo, hi := rt.swSliceBounds(r, rt.strLen(c))
 					return rt.wrapStr(rt.strRange(c, lo, hi))
 				}
+			}
+			// A range's element at an index (see swCrIxAt).
+			if r, ok := base.(*jsObject); ok && swIsRange(r) && !swIsRange(u(a[1])) &&
+				!isNullish(r.props["lo"]) && !isNullish(r.props["hi"]) {
+				p := rt.swCrIxPos(r, u(a[1]))
+				if p < 0 || p >= rt.swRangeLen(r) {
+					rt.swAbort("Fatal error: Index out of range")
+				}
+				return w(swRangeAt(rt, r.props["lo"], p))
 			}
 			if keys, _, ok := dictParts(base); ok {
 				if rt.pyDictFind(keys, u(a[1])) < 0 {
@@ -2654,6 +2664,16 @@ func (rt *jsrt) swRender(v interface{}, nested bool, depth int) string {
 			}
 			return s
 		}
+		if ty, ok := t.props["__crix"].(string); ok {
+			c := "pastEnd"
+			if v, has := t.props["v"]; has {
+				c = "inRange(" + rt.swRender(v, false, depth+1) + ")"
+			}
+			if nested {
+				return "(extension in Swift):Swift.ClosedRange<Swift." + ty + ">.Index." + c
+			}
+			return c
+		}
 		// A Set prints as its members; nested in a collection it is `Set([...])`.
 		if els, ok := swSetElems(t); ok {
 			s := rt.swRender(els, true, depth)
@@ -3299,6 +3319,13 @@ func (rt *jsrt) swEqualDepth(l, r interface{}, depth int) bool {
 		}
 		return true
 	}
+	if li, ok := swCrIx(l); ok {
+		ri, ok := swCrIx(r)
+		return ok && rt.swCrIxCmp(li, ri) == 0
+	}
+	if _, ok := swCrIx(r); ok {
+		return false
+	}
 	// Two RANGES compare by their bounds - a Range is Equatable in Swift and
 	// `0..<3 == 0..<3` is true there, not an object IDENTITY test.
 	if swIsRange(l) || swIsRange(r) {
@@ -3545,6 +3572,11 @@ func (rt *jsrt) swRel(l, r interface{}) int {
 			return rt.giCmp(l, r)
 		}
 	}
+	if li, ok := swCrIx(l); ok {
+		if ri, ok := swCrIx(r); ok {
+			return rt.swCrIxCmp(li, ri)
+		}
+	}
 	// Two Strings order by their NFC scalars (swcStrCmp).
 	if ls, ok := l.(string); ok {
 		if rs, ok := r.(string); ok {
@@ -3682,6 +3714,95 @@ func swMkRange(lo, hi float64, closed bool) *jsObject {
 	o.set("hi", hi)
 	o.set("closed", closed)
 	return o
+}
+
+// A ClosedRange's Index is Swift's enum `inRange(Bound)` / `pastEnd`, held as an
+// object {__crix: bound type name, v: bound} with no `v` for pastEnd; a
+// half-open Range<Int> is its own indices. An index stands for a POSITION (its
+// offset from lowerBound, the count for the end), and the moves, distance and
+// ordering are position arithmetic. Twins: swCrIx* in
+// languages/swift-interpreter.abnf and lib/swift-rt.metajs.
+func swCrIx(v interface{}) (*jsObject, bool) {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return nil, false
+	}
+	_, has := o.props["__crix"]
+	return o, has
+}
+
+func (rt *jsrt) swRangeLen(r *jsObject) int {
+	n := int(swNum(rt, r.props["hi"]) - swNum(rt, r.props["lo"]))
+	if r.props["closed"] == true {
+		n++
+	}
+	if n < 0 {
+		return 0
+	}
+	return n
+}
+
+func (rt *jsrt) swCrIxAt(r *jsObject, pos int) interface{} {
+	if r.props["closed"] != true {
+		return swRangeAt(rt, r.props["lo"], pos)
+	}
+	o := newJSObject()
+	o.set("__crix", rt.swTypeOf(r.props["lo"]))
+	if pos != rt.swRangeLen(r) {
+		o.set("v", swRangeAt(rt, r.props["lo"], pos))
+	}
+	return o
+}
+
+func (rt *jsrt) swCrIxPos(r *jsObject, i interface{}) int {
+	if o, ok := swCrIx(i); ok {
+		v, has := o.props["v"]
+		if !has {
+			return rt.swRangeLen(r)
+		}
+		i = v
+	}
+	return int(swNum(rt, i) - swNum(rt, r.props["lo"]))
+}
+
+func swIsIdxMoveName(n string) bool {
+	return n == "$idxAfter" || n == "$idxBefore" || n == "$idxOffset" || n == "$distance"
+}
+
+func (rt *jsrt) swCrIxMove(r *jsObject, n string, args []interface{}) interface{} {
+	p0 := rt.swCrIxPos(r, args[0])
+	switch n {
+	case "$idxAfter":
+		return rt.swCrIxAt(r, p0+1)
+	case "$idxBefore":
+		return rt.swCrIxAt(r, p0-1)
+	case "$idxOffset":
+		return rt.swCrIxAt(r, p0+int(swNum(rt, args[1])))
+	}
+	return float64(rt.swCrIxPos(r, args[1]) - p0)
+}
+
+// swCrIxCmp is -1, 0 or 1; pastEnd follows every inRange.
+func (rt *jsrt) swCrIxCmp(a, b *jsObject) int {
+	av, ah := a.props["v"]
+	bv, bh := b.props["v"]
+	if !ah || !bh {
+		return swB2i(!ah) - swB2i(!bh)
+	}
+	if rt.swRangeLess(av, bv, false) {
+		return -1
+	}
+	if rt.swRangeLess(bv, av, false) {
+		return 1
+	}
+	return 0
+}
+
+func swB2i(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 func swIsRange(v interface{}) bool {

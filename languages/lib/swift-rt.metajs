@@ -929,6 +929,13 @@ function swRender(v, nested, depth) {
             if (nested) { return swScalarDebug(usc) }
             return usc
         }
+        var crty = v["__crix"]
+        if (crty !== undefined) {
+            var crc = "pastEnd"
+            if (v["v"] !== undefined) { crc = "inRange(" + swRender(v["v"], false, depth + 1) + ")" }
+            if (nested) { return "(extension in Swift):Swift.ClosedRange<Swift." + crty + ">.Index." + crc }
+            return crc
+        }
         // A Set prints as its members; nested in a collection it is `Set([...])`.
         if (v["__set"] === true) {
             var sout = swRender(v["elems"], true, depth)
@@ -1104,6 +1111,11 @@ function swEqual(l, r, depth) {
             i = i + 1
         }
         return true
+    }
+    if (swIsCrIx(l) || swIsCrIx(r)) {
+        if (!swIsCrIx(l)) { return false }
+        if (!swIsCrIx(r)) { return false }
+        return swCrIxCmp(l, r) === 0
     }
     // Two RANGES compare by their bounds - a Range is Equatable in Swift and
     // `0..<3 == 0..<3` is true there, not an object IDENTITY test.
@@ -1284,6 +1296,53 @@ function swIsRange(v) {
     if (!swIsObj(v)) { return false }
     return v["__range"] === true
 }
+// A ClosedRange's Index is Swift's enum `inRange(Bound)` / `pastEnd`, held as
+// {__crix: bound type name, v: bound} with no `v` for pastEnd; a half-open
+// Range<Int> is its own indices. An index stands for a POSITION (its offset from
+// lowerBound, the count for the end), and the moves, distance and ordering are
+// position arithmetic. Twins: swCrIx* in languages/swift-interpreter.abnf and
+// abnf/jsrtswift.go.
+function swIsCrIx(v) {
+    if (!swIsObj(v)) { return false }
+    return v["__crix"] !== undefined
+}
+function swCrIxAt(r, pos) {
+    if (r["closed"] !== true) { return swRangeAt(r["lo"], pos) }
+    var o = {}
+    o["__crix"] = js_swtypeof(r["lo"])
+    if (pos !== swRangeLen(r)) { o["v"] = swRangeAt(r["lo"], pos) }
+    return o
+}
+function swCrIxPos(r, i) {
+    if (swIsCrIx(i)) {
+        if (i["v"] === undefined) { return swRangeLen(r) }
+        return swNum(i["v"]) - swNum(r["lo"])
+    }
+    return swNum(i) - swNum(r["lo"])
+}
+function swIsIdxMoveName(n) {
+    return n === "$idxAfter" || n === "$idxBefore" || n === "$idxOffset" || n === "$distance"
+}
+function swCrIxMove(r, n, args) {
+    var p0 = swCrIxPos(r, args[0])
+    if (n === "$idxAfter") { return swCrIxAt(r, p0 + 1) }
+    if (n === "$idxBefore") { return swCrIxAt(r, p0 - 1) }
+    if (n === "$idxOffset") { return swCrIxAt(r, p0 + swNum(args[1])) }
+    return swCrIxPos(r, args[1]) - p0
+}
+// -1, 0 or 1; pastEnd follows every inRange.
+function swCrIxCmp(a, b) {
+    var ae = a["v"] === undefined
+    var be = b["v"] === undefined
+    if (ae || be) {
+        if (ae && be) { return 0 }
+        if (ae) { return 1 }
+        return 0 - 1
+    }
+    if (swRangeLess(a["v"], b["v"], false)) { return 0 - 1 }
+    if (swRangeLess(b["v"], a["v"], false)) { return 1 }
+    return 0
+}
 function swRangeLen(r) {
     var lo = swNum(r["lo"])
     var hi = swNum(r["hi"])
@@ -1326,6 +1385,12 @@ function swSlice(c, r) {
 
 function js_swidx(c, k) {
     if (swIsRange(k) && (rtIsArr(c) || typeof c == "string")) { return swSlice(c, k) }
+    // A range's element at an index (see swCrIxAt).
+    if (swIsRange(c) && !swIsRange(k) && c["lo"] !== null && c["hi"] !== null) {
+        var rp = swCrIxPos(c, k)
+        if (rp < 0 || rp >= swRangeLen(c)) { swAbort("Fatal error: Index out of range") }
+        return swRangeAt(c["lo"], rp)
+    }
     if (rtIsDictObj(c)) {
         var i = rtkDictFind(c["keys"], k)
         if (i < 0) { return null }
@@ -2970,6 +3035,7 @@ function js_swmcall(recv, name, args) {
         if (swIsRange(recv)) {
             var rm = swRangeMethod(recv, name, args)
             if (rm !== undefined) { return rm }
+            if (swIsIdxMoveName(name)) { return swCrIxMove(recv, name, args) }
             if (recv["lo"] === null || recv["hi"] === null) { fail("method ." + name + " on a one-sided range") }
             var lo = swNum(recv["lo"])
             var n = swNum(recv["hi"]) - lo
@@ -2978,10 +3044,8 @@ function js_swmcall(recv, name, args) {
             var ri = 0
             while (ri < n) { elems.push(swRangeAt(recv["lo"], ri)); ri = ri + 1 }
             var res = js_swmcall(elems, name, args)
-            // A Range<Int> is its own indices: the index of an element is the
-            // element, not its offset.
-            if ((name === "firstIndex" || name === "lastIndex") && recv["closed"] !== true && res !== null && res !== undefined) {
-                return swRangeAt(recv["lo"], swNum(res))
+            if ((name === "firstIndex" || name === "lastIndex" || name === "index") && res !== null && res !== undefined) {
+                return swCrIxAt(recv, swNum(res))
             }
             return res
         }
@@ -3409,6 +3473,7 @@ function swRel(l, r) {
     // Mapping it to 0 (EQUAL) would make `<=` and `>=` TRUE for a raw NaN pair;
     // Swift makes all four false, like C# and Java.
     if (typeof l == "string") { if (typeof r == "string") { return swcStrCmp(l, r) } }
+    if (typeof l == "object") { if (swIsCrIx(l)) { if (swIsCrIx(r)) { return swCrIxCmp(l, r) } } }
     var a = swNum(l)
     var b = swNum(r)
     if (a !== a) { return 0 - 2 }
@@ -3574,12 +3639,15 @@ function js_swget(v, k) {
         if (k === "lowerBound") { return v["lo"] }
         if (k === "upperBound") { return v["hi"] }
         if (k === "isEmpty") { return swRangeEmpty(v) }
-        // A Range<Int> is its own indices; a ClosedRange's Index is an enum this
-        // runtime does not model.
-        if (v["closed"] !== true) {
-            if (k === "startIndex") { return v["lo"] }
-            if (k === "endIndex") { return v["hi"] }
-            if (k === "indices") { return v }
+        if (k === "startIndex") { return swCrIxAt(v, 0) }
+        if (k === "endIndex") { return swCrIxAt(v, swRangeLen(v)) }
+        // A ClosedRange's indices, as the array of its Index values.
+        if (k === "indices") {
+            if (v["closed"] !== true) { return v }
+            var ixs = []
+            var ip = 0
+            while (ip < swRangeLen(v)) { ixs.push(swCrIxAt(v, ip)); ip = ip + 1 }
+            return ixs
         }
     }
     // A String's views, as arrays: `.utf8` the UTF-8 bytes and `.unicodeScalars`

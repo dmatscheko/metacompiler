@@ -902,7 +902,7 @@ BindName    <~~ push(swBt(up.in)) ~~> = Wildcard | Id ;
 // reference otherwise, so matchCore carries that flag down the tree.
 Pattern     <~~ push(makePattern(takeAll())) ~~>
             = PatCore { NoSpace "?" <~~ push({popt: 1}) ~~> } ;
-PatCore     = PatIs | PatLet | PatTuple | PatWild | PatRange | PatEnum | PatExpr ;
+PatCore     = PatIs | PatLet | PatTuple | PatWild | PatRange | PatElem | PatEnum | PatExpr ;
 // `case is Double:` - a TYPE pattern. It runs exactly the test the `is`
 // OPERATOR runs, so it agrees with `case let z where z is Double` by construction.
 // It is tried FIRST: PatEnum would otherwise read the bare word `is` as a case
@@ -923,6 +923,11 @@ PatRef      <~~ push(foldCallMember(takeAll(), up.in)) ~~> = VarRef { FieldSfx |
 // A value pattern compares the subject with ==. Its operand is deliberately NOT the
 // full expression grammar: a `{ ... }` would be read as a closure and swallow the
 // body of `catch { ... }`, whose pattern is optional.
+// An element as a value pattern, `case xs[0]:`. The subscript is required, so a
+// bare name or a qualified path still reaches PatEnum; tried before it, which would
+// match `xs` alone and leave the subscript behind.
+PatElem     <~~ push({pexpr: foldCallMember(takeAll(), up.in)}) ~~>
+            = VarRef { FieldSfx } IndexSfx { FieldSfx | IndexSfx } ;
 PatExpr     <~~ push({pexpr: pop()}) ~~> = PatOperand ;
 PatOperand  = PatNegLit | PatQual | Template | NumberLit | True | False | Nil ;
 PatNegLit   <~~ push(makeNeg(pop())) ~~> = "-" NumberLit ;
@@ -2227,6 +2232,40 @@ KwContinue  = "continue" KwEnd ;
         }
         return undefined
     }
+    // A ClosedRange's Index is Swift's enum `inRange(Bound)` / `pastEnd`, held as
+    // {__crix: bound type name, v: bound} with no `v` for pastEnd. A half-open
+    // Range<Int> is its own indices, so its index IS the element. Either way an
+    // index stands for a POSITION (its offset from lowerBound, the count for the
+    // end), and the moves, distance and ordering are position arithmetic. Twins:
+    // swCrIx* in abnf/jsrtswift.go and lib/swift-rt.metajs.
+    function swIsCrIx(v) { return v !== null && v !== undefined && typeof v == "object" && v.__crix !== undefined }
+    function swCrIxAt(r, pos) {
+        if (!r.closed) { return rangeAt(r, pos) }
+        if (pos == rangeLen(r)) { return {__crix: swTypeOf(r.lo)} }
+        return {__crix: swTypeOf(r.lo), v: rangeAt(r, pos)}
+    }
+    function swCrIxPos(r, i) {
+        if (swIsCrIx(i)) { return i.v === undefined ? rangeLen(r) : szNum(i.v) - szNum(r.lo) }
+        return szNum(i) - szNum(r.lo)
+    }
+    function swCrIxMove(r, n, args) {
+        var p0 = swCrIxPos(r, args[0])
+        if (n == "$idxAfter") { return swCrIxAt(r, p0 + 1) }
+        if (n == "$idxBefore") { return swCrIxAt(r, p0 - 1) }
+        if (n == "$idxOffset") { return swCrIxAt(r, p0 + szNum(args[1])) }
+        return swCrIxPos(r, args[1]) - p0
+    }
+    // -1, 0 or 1; pastEnd follows every inRange.
+    function swCrIxCmp(a, b) {
+        if (a.v === undefined || b.v === undefined) { return (a.v === undefined ? 1 : 0) - (b.v === undefined ? 1 : 0) }
+        return rangeLess(a.v, b.v, false) ? 0 - 1 : (rangeLess(b.v, a.v, false) ? 1 : 0)
+    }
+    // `inRange(4)` as a description; nested in a collection, the debug form swiftc
+    // prints, which names the bound type.
+    function swCrIxDesc(i, nested) {
+        var c = i.v === undefined ? "pastEnd" : "inRange(" + swRender(i.v, false, 1) + ")"
+        return nested ? "(extension in Swift):Swift.ClosedRange<Swift." + i.__crix + ">.Index." + c : c
+    }
 
     // ----- Literals -----
     // The exact value of an integer literal in any of Swift's four bases, ignoring
@@ -2538,6 +2577,7 @@ KwContinue  = "continue" KwEnd ;
         // Optional does, its value in the nested form: Optional("hi").
         if (v.__optany !== undefined) { return "Optional(" + swRender(v.__optany, true, depth + 1) + ")" }
         if (v.__usc !== undefined) { return nested ? swScalarDebug(v.__usc) : v.__usc }
+        if (v.__crix !== undefined) { return swCrIxDesc(v, nested) }
         // A Range printed as itself: swiftc 6.1.2 prints
         // `0..<3` and `1...3`, which is what a...b / a..<b are spelled as.
         // A ONE-SIDED range prints Swift's PartialRangeFrom/Through/UpTo, whose real
@@ -3623,11 +3663,15 @@ KwContinue  = "continue" KwEnd ;
             if (name == "lowerBound") { return o.lo }
             if (name == "upperBound") { return o.hi }
             if (name == "isEmpty") { return rangeEmpty(o) }
-            // A Range<Int> is its own indices; a ClosedRange's Index is an enum
-            // this interpreter does not model.
-            if (name == "startIndex" && !o.closed) { return o.lo }
-            if (name == "endIndex" && !o.closed) { return o.hi }
-            if (name == "indices" && !o.closed) { return o }
+            if (name == "startIndex") { return swCrIxAt(o, 0) }
+            if (name == "endIndex") { return swCrIxAt(o, rangeLen(o)) }
+            // A ClosedRange's indices, as the array of its Index values.
+            if (name == "indices") {
+                if (!o.closed) { return o }
+                var ixs = []
+                for (var ip = 0; ip < rangeLen(o); ip++) { ixs.push(swCrIxAt(o, ip)) }
+                return ixs
+            }
         }
         if (name == "isEmpty" && swIsColl(o)) { return swlen(o) == 0 }
         // indices is a PROPERTY on every Collection. Only an
@@ -3809,6 +3853,12 @@ KwContinue  = "continue" KwEnd ;
         var sg = subAccessor(o, "__sub_get")
         if (sg != null) { return sg.apply(undefined, concat2impl([o], idxArgs(i))) }
         if (isRange(i) && (Array.isArray(o) || typeof o == "string")) { return swSlice(o, i) }
+        // A range's element at an index (see swCrIxAt).
+        if (isRange(o) && !isRange(i) && o.lo !== null && o.lo !== undefined && o.hi !== null && o.hi !== undefined) {
+            var rp = swCrIxPos(o, i)
+            if (rp < 0 || rp >= rangeLen(o)) { swIndexFail("range") }
+            return rangeAt(o, rp)
+        }
         if (isDict(o)) {
             var di = dictFind(o, i)
             if (di < 0) { return null }
@@ -4165,12 +4215,12 @@ KwContinue  = "continue" KwEnd ;
         if (isRange(target)) {
             var rm = rangeMethod(target, name, args)
             if (rm !== undefined) { return rm }
+            var rln = swLabelName(name, mcLabels)
+            if (swIsIdxMove(rln)) { return swCrIxMove(target, rln, args) }
             if (target.lo === null || target.hi === null) { fail("method ." + name + " on a one-sided range") }
             var res = arrayMethod(rangeArray(target), name, args)
-            // A Range<Int> is its own indices: the index of an element is the
-            // element, not its offset.
-            if ((name == "firstIndex" || name == "lastIndex") && !target.closed && res !== null && res !== undefined) {
-                return rangeAt(target, res)
+            if ((name == "firstIndex" || name == "lastIndex" || name == "index") && res !== null && res !== undefined) {
+                return swCrIxAt(target, res)
             }
             return res
         }
@@ -9665,6 +9715,7 @@ KwContinue  = "continue" KwEnd ;
         }
     // Two RANGES compare by their bounds - a Range is Equatable in Swift and
     // `0..<3 == 0..<3` is true there, not an object IDENTITY test.
+        if (swIsCrIx(l) || swIsCrIx(r)) { return swIsCrIx(l) && swIsCrIx(r) && swCrIxCmp(l, r) == 0 }
         if (isRange(l) || isRange(r)) {
             if (!isRange(l) || !isRange(r)) { return false }
             return swEqD(l.lo, r.lo, depth + 1) && swEqD(l.hi, r.hi, depth + 1) && l.closed === r.closed
@@ -9798,6 +9849,7 @@ KwContinue  = "continue" KwEnd ;
         if (isF32(l) || isF32(r)) { return want(coreF32Round(swD(l)), coreF32Round(swD(r))) }
         if (isFlo(l) || isFlo(r)) { return want(swD(l), swD(r)) }
         if (szIs(l) || szIs(r)) { return want(szCmp(l, r), 0) }
+        if (swIsCrIx(l) && swIsCrIx(r)) { return want(swCrIxCmp(l, r), 0) }
         // Two Strings order by their NFC scalars (lib/swift-chars.js).
         if (typeof l == "string" && typeof r == "string") { return want(swcStrCmp(l, r), 0) }
         return want(l, r)
