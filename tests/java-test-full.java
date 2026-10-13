@@ -142,6 +142,7 @@ class Main {
         S66.run(); // SECTION-CALL 66
         S67.run(); // SECTION-CALL 67
         S68.run(); // SECTION-CALL 68
+        S69.run(); // SECTION-CALL 69
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -3904,5 +3905,61 @@ class S68 {
         Main.check("sm68", mh.equals("0 -1 0 -1 4611686018427387903 -493827160549383 0 -493827160549383 52879849912 ")
             && two.chars().count() == 4 && two.codePoints().count() == 3 && "abc".chars().sum() == 294
             && "x\ny\r\nz\r".lines().collect(Collectors.toList()).toString().equals("[x, y, z]"));
+    }
+}
+
+// ===== SECTION 69: regex exceptions, package-qualified names, class literals, varargs by static type =====
+//
+// A bad pattern throws the catchable java.util.regex.PatternSyntaxException (an
+// IllegalArgumentException), a bad replacement IllegalArgumentException or
+// IndexOutOfBoundsException; a JDK class named through its package
+// (java.lang.Math.max, java.lang.reflect.Array.newInstance) is the class, a
+// catch may name its type that way too; a class literal is the Class object
+// getClass() answers; a variable arity call wraps its last argument by its
+// STATIC type, so (Object) arr is one element; initCause sets the cause.
+// Every expected value is java 24.0.2's.
+class S69 {
+    interface Sh { }
+    static class Bx { }
+    static String cls(Object... a) { return a.getClass().getName() + a.length; }
+    static String over(Object o) { return "o"; }
+    static String over(Object... a) { return "v" + a.length; }
+    static <T> String gen(T x) { return cls(x); }
+    String inst(Object... a) { return "i" + a.length; }
+    static void run() {
+        String[] pats = {"(", "[a", "a", "*"};
+        String rx = "";
+        for (String p : pats) {
+            try { rx = rx + "a".matches(p); } catch (java.util.regex.PatternSyntaxException e) { rx = rx + "P:" + e.getClass().getName(); }
+        }
+        String[] reps = {"$9", "\\", "$", "${nm}", "$x", "<$0>"};
+        for (String r : reps) {
+            try { rx = rx + "|" + "a".replaceAll("a", r); }
+            catch (IndexOutOfBoundsException e) { rx = rx + "|O:" + e.getMessage(); }
+            catch (IllegalArgumentException e) { rx = rx + "|I:" + e.getMessage(); }
+        }
+        boolean isPse = false;
+        try { "x(y".split("("); } catch (IllegalArgumentException e) { isPse = e instanceof java.util.regex.PatternSyntaxException; }
+        String ae = "";
+        try { int z = 0; ae = "" + (1 / z); } catch (java.lang.ArithmeticException e) { ae = e.getMessage(); }
+        Main.check("rx69", rx.equals("P:java.util.regex.PatternSyntaxExceptionP:java.util.regex.PatternSyntaxExceptiontrueP:java.util.regex.PatternSyntaxException"
+            + "|O:No group 9|I:character to be escaped is missing|I:Illegal group reference: group index is missing"
+            + "|I:No group with name {nm}|I:Illegal group reference|<a>") && isPse && ae.equals("/ by zero"));
+        Main.check("pq69", java.lang.Math.max(3, 4) == 4 && java.lang.Integer.parseInt("42") == 42 && java.lang.String.valueOf(7).equals("7")
+            && java.lang.Integer.MAX_VALUE == 2147483647 && java.util.Objects.equals("a", "a") && java.lang.Character.isDigit('7'));
+        Object made = java.lang.reflect.Array.newInstance(String.class, 2);
+        String cl = int.class + " " + void.class + " " + String.class + " " + int[][].class + " " + Bx.class + " " + Bx[].class
+            + " " + Sh.class + " " + RuntimeException.class.getSimpleName() + " " + Bx.class.getSimpleName();
+        Main.check("cl69", cl.equals("int void class java.lang.String class [[I class S69$Bx class [LS69$Bx; interface S69$Sh RuntimeException Bx")
+            && "x".getClass() == String.class && new Bx().getClass() == Bx.class && int.class != Integer.class
+            && Integer.valueOf(3).getClass() == Integer.class && String[].class.getComponentType() == String.class
+            && made.getClass().getName().equals("[Ljava.lang.String;") && java.lang.reflect.Array.getLength(made) == 2);
+        String[] arr = {"x", "y"};
+        Object o = arr;
+        String va = cls((Object) arr) + cls((Object[]) arr) + cls(o) + S69.cls(o) + new S69().inst(o) + gen(arr) + over(o) + cls(null, null);
+        Main.check("va69", va.equals("[Ljava.lang.Object;1[Ljava.lang.String;2[Ljava.lang.Object;1[Ljava.lang.Object;1i1[Ljava.lang.Object;1o[Ljava.lang.Object;2"));
+        RuntimeException a = new RuntimeException("a");
+        IllegalStateException b = new IllegalStateException("b");
+        Main.check("ic69", a.initCause(b) == a && a.getCause() == b);
     }
 }

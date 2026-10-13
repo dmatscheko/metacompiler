@@ -121,8 +121,7 @@ var jvNpeCls *jsObject
 var jvNfeCls *jsObject
 var jvCceCls *jsObject
 
-// java.util.Formatter's exceptions and IndexOutOfBoundsException, by name
-// (jvThrowNamed).
+// Every runtime-raised class, by name (jvThrowNamed).
 var jvExcNamed = map[string]*jsObject{}
 
 func (rt *jsrt) jvThrowNamed(cls, msg string) { rt.jvThrowCls(jvExcNamed[cls], msg) }
@@ -1490,7 +1489,9 @@ func init() {
 			if !ok {
 				return 0
 			}
-			switch rt.toString(u(a[0])) {
+			name := rt.toString(u(a[0]))
+			jvExcNamed[name] = o
+			switch name {
 			case "ArithmeticException":
 				jvArithExcCls = o
 			case "ArrayIndexOutOfBoundsException":
@@ -1507,8 +1508,6 @@ func init() {
 				jvIaeCls = o
 			case "ClassCastException":
 				jvCceCls = o
-			default:
-				jvExcNamed[rt.toString(u(a[0]))] = o
 			}
 			return 0
 		}

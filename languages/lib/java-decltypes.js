@@ -1602,12 +1602,26 @@ function jOvStaticSig(rty, mname, atys, wantStatic) {
     }
     return jOvPickStatic(jOvSpec(cands), stoks)
 }
+// "java.lang.Math.max(1,2)" -> "Math.max(1,2)": the package segments of a JDK
+// class named through its package, as the grammars' PkgClass drops them.
+function jUnPkg(t) {
+    var i = 0
+    if (t.substring(0, 5) == "java.") { i = 5 } else if (t.substring(0, 6) == "javax.") { i = 6 } else { return t }
+    while (true) {
+        var c0 = t.charCodeAt(i)
+        if (!(c0 >= 97 && c0 <= 122)) { return t.substring(i) }
+        var e = jIdentEnd(t, i)
+        if (e >= t.length || t.charAt(e) != ".") { return t }
+        i = e + 1
+    }
+}
 // The receiver of a member call, from the text before its `.name(`: a class
 // name is a static access ("static:" + name), anything else jStaticTy's type.
 // A bare name that is no local is kept as "static?:" + name: a class declared
 // further down is not yet known when the walk passes the call, so jSfxSig
 // decides once the walk is complete.
 function jRecvTy(t) {
+    t = jUnPkg(t)
     var e = jIdentEnd(t, 0)
     if (e == t.length && e > 0 && jTyOf(t) == undefined && jFieldTys["$" + t] == undefined) {
         if (jIsClassName(t)) { return "static:" + t }
@@ -1654,6 +1668,69 @@ function jSfxSig(s) {
         s.sig = (rty == undefined || rty == "") ? "" : jOvMemberSig(rty, s.name, s.atys)
     }
     return s.sig
+}
+// A VARIABLE ARITY INVOCATION wraps the trailing arguments into an array by
+// their STATIC type (JLS 15.12.4.2): `f((Object) arr)` of `f(Object... a)`
+// passes a one-element Object[], because Object is no array type, while the
+// callee's own test (an array given alone passes through) only sees the
+// value. So a call site whose last argument has a static type that is no
+// array yet may hold one at run time - Object, Cloneable, Serializable or a
+// type variable - wraps it itself when jVaScalar names the element type.
+function jVaMayBeArr(atys) {
+    if (atys == null || atys.length == 0) { return false }
+    var b = jOvBare(atys[atys.length - 1])
+    return b == "Object" || b == "Cloneable" || b == "Serializable" || jTyVarErasure(b) != ""
+}
+// The element type of the varargs parameter an n-argument call of mname on
+// class cls passes its last argument to, when mname is declared ONCE in cls
+// and its superclasses, with n parameters, the last of them a reference
+// varargs one; "" otherwise (an overloaded name keeps the runtime test).
+function jVaScalar(cls, mname, n) {
+    var hits = []
+    var c = cls
+    var guard = 0
+    while (c != "" && guard < 64) {
+        guard++
+        var rec = jOvCls["$" + c]
+        if (rec == undefined) { break }
+        for (var i = 0; i < rec.ms.length; i++) {
+            if (rec.ms[i].name == mname) { hits.push(rec.ms[i]) }
+        }
+        c = rec.sup
+    }
+    if (hits.length != 1 || !hits[0].isVar || hits[0].ptys.length != n) { return "" }
+    var ety = hits[0].ptys[n - 1]
+    return jOvIsPrim(jOvBare(ety)) ? "" : ety
+}
+// The class a member call's receiver type rty (jRecvTy) names.
+function jVaRecvCls(rty) {
+    if (rty == undefined || rty == "") { return "" }
+    if (rty.length > 7 && rty.substring(0, 7) == "static:") { return rty.substring(7) }
+    if (rty.length > 8 && rty.substring(0, 8) == "static?:") {
+        var nm = rty.substring(8)
+        return jFieldTys["$" + nm] == undefined ? nm : ""
+    }
+    return jOvBare(rty)
+}
+// A class literal's text ("int.class", "String[][].class", "Main.Box.class")
+// as its element type's simple name, its dimension count, whether the element
+// is a primitive (or void), and the binary name to use when no class
+// descriptor answers it: java.lang's for the java.lang types, otherwise the
+// name as written.
+var jLangTypes = ",Object,String,Integer,Long,Short,Byte,Character,Boolean,Double,Float,Number,Math,StrictMath,"
+    + "System,StringBuilder,StringBuffer,CharSequence,Comparable,Iterable,Runnable,Thread,Class,Enum,Record,"
+    + "Void,Cloneable,AutoCloseable,"
+function jClassLit(text) {
+    var t = text.substring(0, text.length - 6)
+    var dims = 0
+    while (t.length > 2 && t.substring(t.length - 2) == "[]") {
+        dims = dims + 1
+        t = t.substring(0, t.length - 2)
+    }
+    t = t.split("<")[0]
+    var name = t
+    if (t.indexOf(".") < 0 && jLangTypes.indexOf("," + t + ",") >= 0) { name = "java.lang." + t }
+    return {simple: jOvBare(t), dims: dims, prim: jOvIsPrim(t) || t == "void", name: name}
 }
 // jOvStaticSig for a member call whose receiver jRecvTy read as rty.
 function jOvMemberSig(rty, mname, atys) {

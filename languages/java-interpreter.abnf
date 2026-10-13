@@ -1054,9 +1054,18 @@ ArmValue    <~~ push({sval: pop()}) ~~>
 ArmStmts    <~~ push({sstmts: takeAll()}) ~~>
             = { Statement } ;
 
-Primary     = ArrClassLit | PrimClassLit | NewExpr | SwitchExpr | Lambda | MethodRef | "(" Expression ")" | TextBlock | JavaStr | CharLit
+Primary     = ClassLit | NewExpr | SwitchExpr | Lambda | MethodRef | "(" Expression ")" | TextBlock | JavaStr | CharLit
             | JNum | True | False | Null
-            | OuterThis | SuperCall | BareCall | VarRef ;
+            | OuterThis | SuperCall | PkgClass | BareCall | VarRef ;
+// A JDK class named through its package - java.lang.Math.max(1, 2),
+// java.lang.reflect.Array.newInstance(...) - is the class itself: the package
+// segments (lower-case, which every java.* and javax.* package is) are dropped
+// and the class name reads as a VarRef. jRecvTy in lib/java-decltypes.js drops
+// the same prefix from a member chain's text. Its library is loaded as an
+// import of the class would load it (jNotePkgClass).
+PkgClass    <~~ jNotePkgClass(stripWs(up.in)) ~~>
+            = ( "javax" | "java" ) KwEnd { "." JdkSeg } "." VarRef ;
+JdkSeg      = "a"..."z" :whitespace() { JIdPart } :whitespace(Whitespace) ;
 
 // An UNQUALIFIED method call - `check(x)` rather than `this.check(x)` or
 // `Main.check(x)`. Java's own rule picks the receiver: a method the enclosing
@@ -1075,19 +1084,12 @@ BareCall    <~~ push(makeBareCall(takeAll(), up.in)); jNoteCall(up.in) ~~>
 BareName    <~~ push(stripWs(up.in)) ~~>
             = "this" KwEnd | KwSuper | NotResvKw Id ;
 
-// `int.class`, `void.class` - a class literal over a PRIMITIVE type. It is no
-// member chain (a reserved word is not a variable), so it needs its own Primary.
-// Class objects are not modelled: the value is null, exactly as for the array
-// form below.
-PrimClassLit <~~ push(makeConst(null)) ~~>
-            = ( PrimName KwEnd | "void" KwEnd ) "." "class" KwEnd ;
-
-// `int[].class` / `String[].class` - a class literal over an ARRAY type. The
-// plain `Foo.class` needs nothing (it reads as a field), but this one is no
-// member chain: `String[` starts an index that has no subscript. Class objects
-// are not modelled, so the value is null. It has to beat VarRef.
-ArrClassLit <~~ push(makeConst(null)) ~~>
-            = ( PrimName KwEnd | Id { "." Id } ) [ SkipAngle ] "[" "]" { "[" "]" } "." "class" KwEnd ;
+// A class literal - `int.class`, `void.class`, `String[].class`,
+// `Main.Box.class` (JLS 15.8.2): the java.lang.Class object getClass() answers
+// for a value of that type. It has to beat VarRef, which would read `Foo` as
+// the class and `.class` as a field.
+ClassLit    <~~ push(makeClassLit(stripWs(up.in))) ~~>
+            = ( PrimName KwEnd | "void" KwEnd | Id { "." NotResvKw Id } ) [ SkipAngle ] { "[" "]" } "." "class" KwEnd ;
 
 // Outer.this - the enclosing instance of an inner class. It has to beat VarRef,
 // which would read `Outer` as the class and then look for a field named `this`.
@@ -3621,7 +3623,12 @@ HasStatic   = :script(~~
     var jClassCls = {__isclass: true, __name: "Class", __bname: "java.lang.Class"}
     jClassCls.getName = function(self) { return self.__cname }
     jClassCls.getSimpleName = function(self) { return self.__csimple }
-    jClassCls.toString = function(self) { return (jOvIsPrim(self.__cname) ? "" : "class ") + self.__cname }
+    // Class#toString: a primitive or void by its keyword, an interface (a
+    // class literal marks it __ciface) as "interface " + its name.
+    jClassCls.toString = function(self) {
+        if (jOvIsPrim(self.__cname) || self.__cname == "void") { return self.__cname }
+        return (self.__ciface === true ? "interface " : "class ") + self.__cname
+    }
     var jClassObjs = {}
     function jClassOf(name, simple) {
         var key = "$" + name
@@ -3631,6 +3638,30 @@ HasStatic   = :script(~~
         return c
     }
     function jLangClass(simple) { return jClassOf("java.lang." + simple, simple) }
+    // A class literal (jClassLit in lib/java-decltypes.js): the class a
+    // descriptor in scope names, else the literal's own name; an array of it
+    // per dimension. Twin of js_jvclasslit in abnf/jsrtjavastr.go and
+    // languages/lib/java-rt.metajs.
+    function makeClassLit(text) {
+        var lit = jClassLit(text)
+        return function() {
+            var cls = lit.prim ? undefined : jResolveClass(lit.simple)
+            var n = lit.name
+            var sm = lit.simple
+            if (cls != undefined && cls != null && cls.__isclass === true) {
+                n = jClassBin(cls)
+                sm = cls.__name
+            }
+            if (lit.dims == 0) {
+                var c = jClassOf(n, sm)
+                if (cls != undefined && cls != null && cls.__isiface === true) { c.__ciface = true }
+                return c
+            }
+            var tag = jArrOfDesc(n)
+            for (var i = 1; i < lit.dims; i++) { tag = "[" + tag }
+            return jClassOf(tag, jArraySimple(tag))
+        }
+    }
     // Class#getComponentType: an array class's element class, null for any
     // other; and java.lang.reflect.Array.newInstance(c, n), a new c[n] of
     // c's zeros. A primitive class is named by its keyword ("int"). Twins:
@@ -3647,6 +3678,11 @@ HasStatic   = :script(~~
         return jClassOf(simple, simple)
     }
     hostGlobals["Array"] = {
+        getLength: function(a) {
+            if (a === null || a === undefined) { jThrowExc("NullPointerException", null) }
+            if (!Array.isArray(a)) { jThrowExc("IllegalArgumentException", "Argument is not an array") }
+            return a.length
+        },
         newInstance: function(cls, len) {
             var n = jNum(len)
             if (n < 0) { jThrowExc("NegativeArraySizeException", "" + n) }
@@ -4525,9 +4561,10 @@ HasStatic   = :script(~~
     }
     function makeNew(items, text) {
         var clsName = items[0]
-        if (jLangWants(clsName)) { jLangWant = true }
+        var simple = jSimpleName(clsName)
+        if (jLangWants(simple)) { jLangWant = true }
         if (jUtilWants(clsName)) { jUtilWant = true }
-        if (jMapWants(clsName)) { jMapWant = true }
+        if (jMapWants(simple) || jMapWants(clsName)) { jMapWant = true }
         var args = items.slice(1)
         var atys = text == undefined ? null : jCallArgTys(text, args.length)
         var sig = anytype // the static constructor signature, resolved at the first run
@@ -4979,8 +5016,9 @@ HasStatic   = :script(~~
     // THE PACKAGE-QUALIFIED (binary) NAME of a built-in Throwable: in java 24.0.2
     // `new RuntimeException("x").getClass().getName()` is
     // "java.lang.RuntimeException", and Throwable#toString - which is what the
-    // launcher's uncaught-exception line prints - spells the same name. Only
-    // IOException of the names jExcTree lists lives outside java.lang.
+    // launcher's uncaught-exception line prints - spells the same name. Outside
+    // java.lang are IOException (java.io), PatternSyntaxException
+    // (java.util.regex) and the Formatter exceptions below (java.util).
     // The emitter (emitBuiltinExc in java-to-llvm-ir.abnf) writes the same
     // string as __bname, which is where the Go twin (jvpClassName in
     // abnf/jsrtjava.go) and layer 2 (jpClassName) read it.
@@ -4993,6 +5031,7 @@ HasStatic   = :script(~~
         + "IllegalFormatWidthException,DuplicateFormatFlagsException,IllegalFormatArgumentIndexException,"
     function jExcFqcn(name) {
         if (name == "IOException") { return "java.io." + name }
+        if (name == "PatternSyntaxException") { return "java.util.regex." + name }
         if (jUtilExcs.indexOf("," + name + ",") >= 0) { return "java.util." + name }
         return "java.lang." + name
     }
@@ -5027,6 +5066,7 @@ HasStatic   = :script(~~
                     "StringIndexOutOfBoundsException", "IndexOutOfBoundsException",
                     "NegativeArraySizeException", "RuntimeException",
                     "NumberFormatException", "IllegalArgumentException",
+                    "PatternSyntaxException", "IllegalArgumentException",
                     "StackOverflowError", "VirtualMachineError",
                     "AssertionError", "Error",
                     "IllegalFormatException", "IllegalArgumentException"]
@@ -5085,13 +5125,29 @@ HasStatic   = :script(~~
         if (msg === undefined || msg === null) { return name }
         return name + ": " + jstr(msg)
     }
+    // Then one "Caused by: " line per cause down the getCause() chain, as
+    // printStackTrace writes them (less their frames); a cause seen before
+    // ends the chain as "[CIRCULAR REFERENCE: ...]".
     function jExcTopLine(v) {
         var head = "Exception in thread \"main\" "
         if (v === null || v === undefined || typeof v != "object") { return head + jstr(v) }
-        return head + jThrowableStr(v)
+        var out = head + jThrowableStr(v)
+        var seen = [v]
+        var c = anytype
+        c = v.__cause
+        while (c !== undefined && c !== null && typeof c == "object") {
+            var circ = false
+            for (var i = 0; i < seen.length; i++) { if (seen[i] === c) { circ = true } }
+            if (circ) { return out + "\nCaused by: [CIRCULAR REFERENCE: " + jThrowableStr(c) + "]" }
+            seen.push(c)
+            out = out + "\nCaused by: " + jThrowableStr(c)
+            c = c.__cause
+        }
+        return out
     }
     // A typed catch matches when the thrown value is an instance of ANY of the
-    // clause's types (multi-catch is one clause with several).
+    // clause's types (multi-catch is one clause with several), each compared by
+    // its simple name as jIsType does.
     // Is the value part of the java.lang Throwable hierarchy at all? This subset
     // lets a program throw any object, and such a value is caught by the general
     // exception types the way `catch (Exception e)` is written in practice.
@@ -5106,7 +5162,7 @@ HasStatic   = :script(~~
         var names = t.split("|")
         var general = !jIsThrowable(v)
         for (var i = 0; i < names.length; i++) {
-            var n = names[i]
+            var n = jSimpleName(names[i])
             if (n == "") { continue }
             if (rtIsType(v, n)) { return true }
             if (general && (n == "Exception" || n == "Throwable" || n == "RuntimeException" || n == "Error")) { return true }
@@ -5574,6 +5630,32 @@ HasStatic   = :script(~~
         for (i = np - 1; i < args.length; i++) { rest.push(jConvTo(args[i], ety)) }
         out.push(jArrTag(rest, jArrDesc(vty + "[]")))
         return out
+    }
+    // A call's argument thunks with the last one wrapped into a one-element
+    // array when jVaScalar says the call is a variable arity invocation of
+    // it (see jVaMayBeArr in lib/java-decltypes.js); clsOf answers the
+    // receiver's class once the walk is complete. Twin of jVaWrap in
+    // java-to-llvm-ir.abnf.
+    function jVaWrap(args, atys, name, clsOf) {
+        if (!jVaMayBeArr(atys)) { return args }
+        var out = args.slice(0, args.length - 1)
+        var last = args[args.length - 1]
+        var ety = anytype
+        out.push(function() {
+            var v = anytype
+            v = last()
+            var e = ety
+            if (e === undefined) {
+                e = jVaScalar(clsOf(), name, args.length)
+                if (jWalkDone) { ety = e }
+            }
+            if (e == "") { return v }
+            return jArrTag([v], jArrDesc(e + "[]"))
+        })
+        return out
+    }
+    function jVaWrapSfx(s) {
+        s.args = jVaWrap(s.args, s.atys, s.name, function() { return jVaRecvCls(s.rty) })
     }
     // Is a an array of references (an Object[], a String[], an int[][])?
     function jIsRefArray(a) {
@@ -6195,7 +6277,7 @@ HasStatic   = :script(~~
         }
         jOvIface(name, members)
         jOvIfaceSupers(name, supers)
-        var cls = {__isclass: true, __isiface: true, __name: name, __abstract: []}
+        var cls = {__isclass: true, __isiface: true, __name: name, __bname: jBinOf(name), __abstract: []}
         globalScope[name] = cls
         var inherited = []
         var i2 = 0
@@ -6378,9 +6460,9 @@ HasStatic   = :script(~~
     }
     function makeBareCall(items, text) {
         var name = items[0]
-        var args = items.slice(1)
         var cls = curClassName
-        var atys = jCallArgTys(text, args.length)
+        var atys = jCallArgTys(text, items.length - 1)
+        var args = jVaWrap(items.slice(1), atys, name, function() { return cls })
         var sig = anytype // the static signature, resolved at the first call (jOvStaticSig)
         return function() {
             var argv = []
@@ -6478,6 +6560,14 @@ HasStatic   = :script(~~
         var ip = stripWs(path)
         jLoadLibs(jUtilWants(ip), jMapWants(ip), jStreamWants(ip))
         resolveImport(path, pos)
+    }
+    // A class named through its package (PkgClass) wants the library an
+    // import of it loads, after the walk (jLoadWanted). Twin of jNotePkgClass
+    // in java-to-llvm-ir.abnf.
+    function jNotePkgClass(ip) {
+        if (jUtilWants(ip)) { jUtilWant = true }
+        if (jMapWants(ip)) { jMapWant = true }
+        if (jStreamWants(ip)) { jStreamWant = true }
     }
     function jEnterClass(n) {
         jClassStack.push(curClassName)
@@ -6595,7 +6685,10 @@ HasStatic   = :script(~~
         if (items.length == 1) { return items[0] }
         var primary = items[0]
         var suffixes = items.slice(1)
-        if (text != undefined) { jChainRecvTys(suffixes, text) }
+        if (text != undefined) {
+            jChainRecvTys(suffixes, text)
+            for (var vi = 0; vi < suffixes.length; vi++) { if (suffixes[vi].kind == "mcall") { jVaWrapSfx(suffixes[vi]) } }
+        }
         return function() {
             var cur = anytype // A member chain hops between types: obj.name.length is object, string, number.
             cur = primary()

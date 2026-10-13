@@ -174,7 +174,7 @@ func jxCpAt(s []uint16, i int) int {
 func (rt *jsrt) jxRe(pattern string) *rxRe {
 	re := rxGet(pattern, "q")
 	if !re.ok {
-		rt.fail("PatternSyntaxException: %s", re.err)
+		rt.jvThrowNamed("PatternSyntaxException", re.err)
 	}
 	return re
 }
@@ -267,7 +267,7 @@ func (rt *jsrt) jxExpand(re *rxRe, text []rune, m *rxMatch, repl []rune) string 
 		c := repl[i]
 		if c == '\\' {
 			if i+1 >= len(repl) {
-				rt.fail("IllegalArgumentException: character to be escaped is missing")
+				rt.jvThrowNamed("IllegalArgumentException", "character to be escaped is missing")
 			}
 			out.WriteRune(repl[i+1])
 			i += 2
@@ -280,7 +280,7 @@ func (rt *jsrt) jxExpand(re *rxRe, text []rune, m *rxMatch, repl []rune) string 
 		}
 		i++
 		if i >= len(repl) {
-			rt.fail("IllegalArgumentException: Illegal group reference: group index is missing")
+			rt.jvThrowNamed("IllegalArgumentException", "Illegal group reference: group index is missing")
 		}
 		g := -1
 		if repl[i] == '{' {
@@ -290,18 +290,18 @@ func (rt *jsrt) jxExpand(re *rxRe, text []rune, m *rxMatch, repl []rune) string 
 			}
 			nm := string(repl[i+1 : e])
 			if g = re.indexOfName(nm); g < 0 {
-				rt.fail("IllegalArgumentException: No group with name {%s}", nm)
+				rt.jvThrowNamed("IllegalArgumentException", "No group with name {"+nm+"}")
 			}
 			i = e + 1
 		} else {
 			d := int(repl[i]) - '0'
 			if d < 0 || d > 9 {
-				rt.fail("IllegalArgumentException: Illegal group reference")
+				rt.jvThrowNamed("IllegalArgumentException", "Illegal group reference")
 			}
 			g = d
 			i++
 			if g > re.ngroups {
-				rt.fail("IndexOutOfBoundsException: No group %d", g)
+				rt.jvThrowNamed("IndexOutOfBoundsException", "No group "+strconv.Itoa(g))
 			}
 			for i < len(repl) {
 				d2 := int(repl[i]) - '0'
@@ -1204,8 +1204,11 @@ func init() {
 		slot("getSimpleName", func(self *jsObject) string { return rt.toString(self.props["__csimple"]) })
 		slot("toString", func(self *jsObject) string {
 			n := rt.toString(self.props["__cname"])
-			if jvPrimZero(n) != nil {
+			if jvPrimZero(n) != nil || n == "void" {
 				return n
+			}
+			if self.props["__ciface"] == true {
+				return "interface " + n
 			}
 			return "class " + n
 		})
@@ -1241,6 +1244,15 @@ func init() {
 			return classOf(simple, simple)
 		}))
 		reflArray := newJSObject()
+		reflArray.set("getLength", jsHostFunc("getLength", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			v := argAt(args, 0)
+			rt.jvNpeIfNull(v)
+			arr, ok := v.(*jsArray)
+			if !ok {
+				rt.jvThrowCls(jvIaeCls, "Argument is not an array")
+			}
+			return float64(len(arr.elems))
+		}))
 		reflArray.set("newInstance", jsHostFunc("newInstance", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			cls, _ := argAt(args, 0).(*jsObject)
 			n := int(jvToLong(rt, argAt(args, 1)))
@@ -1267,6 +1279,26 @@ func init() {
 				}
 			}
 			return jsHFalse
+		}
+		// A class literal: (descriptor or undefined, name, simple name, dims,
+		// is an interface).
+		// Twin of js_jvclasslit in languages/lib/java-rt.metajs and
+		// makeClassLit in java-interpreter.abnf.
+		m["js_jvclasslit"] = func(a []uint64) uint64 {
+			name, simple := rt.toString(u(a[1])), rt.toString(u(a[2]))
+			if cls, ok := u(a[0]).(*jsObject); ok {
+				name, simple = jvpClassName(cls), rt.toString(cls.props["__name"])
+			}
+			dims := int(jvToLong(rt, u(a[3])))
+			if dims == 0 {
+				c := classOf(name, simple)
+				if u(a[4]) == true {
+					c.set("__ciface", true)
+				}
+				return w(c)
+			}
+			tag := strings.Repeat("[", dims-1) + jvArrOfDesc(name)
+			return w(classOf(tag, jxArraySimple(tag)))
 		}
 		m["js_jvgetclass"] = func(a []uint64) uint64 {
 			if bn := jvBoxName(u(a[0])); bn != "" {

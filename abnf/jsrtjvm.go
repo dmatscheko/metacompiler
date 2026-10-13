@@ -493,7 +493,20 @@ func (rt *jsrt) jvmExcTopLine(v interface{}) string {
 	if !ok {
 		return jvmMainHead + rt.jvpStr(v)
 	}
-	return jvmMainHead + rt.jvmThrowableStr(o)
+	// Then one "Caused by: " line per cause, as printStackTrace writes them
+	// (less their frames); a cause seen before ends the chain.
+	var out strings.Builder
+	out.WriteString(jvmMainHead + rt.jvmThrowableStr(o))
+	seen := map[*jsObject]bool{o: true}
+	for c, ok := o.props["__cause"].(*jsObject); ok; c, ok = c.props["__cause"].(*jsObject) {
+		if seen[c] {
+			out.WriteString("\nCaused by: [CIRCULAR REFERENCE: " + rt.jvmThrowableStr(c) + "]")
+			break
+		}
+		seen[c] = true
+		out.WriteString("\nCaused by: " + rt.jvmThrowableStr(c))
+	}
+	return out.String()
 }
 
 // jvmThrowableStr is java.lang.Throwable#toString - the whole of the abort line

@@ -275,8 +275,7 @@ var jvSioobeCls = undefined
 var jvNegArrCls = undefined
 var jvNpeCls = undefined
 var jvCceCls = undefined
-// java.util.Formatter's exceptions and IndexOutOfBoundsException, by name
-// (jxkThrow).
+// Every runtime-raised class, by name (jxkThrow).
 var jvExcNamed = {}
 var jvNfeCls = undefined
 var jvIaeCls = undefined
@@ -1676,6 +1675,7 @@ function js_mcall(recv, name, args) {
 // init so that the externs below can THROW rather than abort.
 function js_jvexc(name, cls) {
     if (cls === undefined || cls === null || typeof cls != "object") { return undefined }
+    jvExcNamed["$" + name] = cls
     if (name == "ArithmeticException") { jvArithExcCls = cls }
     else if (name == "ArrayIndexOutOfBoundsException") { jvAioobeCls = cls }
     else if (name == "StringIndexOutOfBoundsException") { jvSioobeCls = cls }
@@ -1684,7 +1684,6 @@ function js_jvexc(name, cls) {
     else if (name == "NumberFormatException") { jvNfeCls = cls }
     else if (name == "IllegalArgumentException") { jvIaeCls = cls }
     else if (name == "ClassCastException") { jvCceCls = cls }
-    else { jvExcNamed["$" + name] = cls }
     return undefined
 }
 
@@ -1792,7 +1791,20 @@ function jvExcTopLine(v) {
     var head = "Exception in thread \"main\" "
     if (v === null || v === undefined) { return head + jpStr(v) }
     if (typeof v != "object") { return head + jpStr(v) }
-    return head + jvThrowableStr(v)
+    var out = head + jvThrowableStr(v)
+    var seen = [v]
+    var c = v["__cause"]
+    while (c !== undefined && c !== null && typeof c == "object") {
+        var i = 0
+        while (i < seen.length) {
+            if (seen[i] === c) { return out + "\nCaused by: [CIRCULAR REFERENCE: " + jvThrowableStr(c) + "]" }
+            i = i + 1
+        }
+        seen.push(c)
+        out = out + "\nCaused by: " + jvThrowableStr(c)
+        c = c["__cause"]
+    }
+    return out
 }
 function js_jvtop(exc) {
     eprintln(jvExcTopLine(exc))
@@ -2054,7 +2066,8 @@ function jvClassOf(name, simple) {
         cc["getName"] = function(self) { return self["__cname"] }
         cc["getSimpleName"] = function(self) { return self["__csimple"] }
         cc["toString"] = function(self) {
-            if (jvPrimZero(self["__cname"]) !== undefined) { return self["__cname"] }
+            if (jvPrimZero(self["__cname"]) !== undefined || self["__cname"] == "void") { return self["__cname"] }
+            if (self["__ciface"] === true) { return "interface " + self["__cname"] }
             return "class " + self["__cname"]
         }
         cc["getComponentType"] = function(self) { return jvComponent(self["__cname"]) }
@@ -2086,6 +2099,11 @@ var jvReflArray = undefined
 function js_jvreflarray() {
     if (jvReflArray === undefined) {
         var o = {}
+        o["getLength"] = function(a) {
+            jvNpeIfNull(a)
+            if (!Array.isArray(a)) { jvThrowCls(jvIaeCls, "Argument is not an array") }
+            return a.length
+        }
         o["newInstance"] = function(cls, len) {
             var n = jvI(len)
             if (n < 0) { jvThrowCls(jvNegArrCls, "" + n) }
@@ -2263,6 +2281,31 @@ function js_jvstrstream(s, name, args, intStream, stream) {
     if (name == "lines") { return stream["of"](js_jvarrtag(jxLines(s), "[Ljava.lang.String;")) }
     if (name == "chars") { return intStream["of"](js_jvarrtag(jxChars(s), "[I")) }
     return intStream["of"](js_jvarrtag(jxCodePoints(s), "[I"))
+}
+
+// A class literal: the class of descriptor cls when the program has one, else
+// the one named name; an array of it per dimension. iface marks an interface
+// for toString. Twin of js_jvclasslit in abnf/jsrtjavastr.go and makeClassLit
+// in java-interpreter.abnf.
+function js_jvclasslit(cls, name, simple, dims, iface) {
+    var n = name
+    var sm = simple
+    if (cls !== undefined && cls !== null && typeof cls == "object") {
+        n = jpClassName(cls)
+        sm = cls["__name"]
+    }
+    if (dims == 0) {
+        var c = jvClassOf(n, sm)
+        if (iface === true) { c["__ciface"] = true }
+        return c
+    }
+    var tag = jvArrOfDesc(n)
+    var i = 1
+    while (i < dims) {
+        tag = "[" + tag
+        i = i + 1
+    }
+    return jvClassOf(tag, jvArraySimple(tag))
 }
 
 function js_jvgetclass(v) {

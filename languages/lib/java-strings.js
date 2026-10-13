@@ -15,11 +15,12 @@
 //   jxkDblStr(a)     Double.toString(a) of a double a > 0
 //   jxkClass(v)      v.getClass().getName() of a non-null v
 //   jxkHash(v)       v.hashCode() of a non-null v
-//   jxkThrow(c, msg) throw a new java.util exception of class c with message msg
+//   jxkThrow(c, msg) throw a new built-in exception of simple class name c with
+//                    message msg
 //
 // It also holds Integer's unsigned and bit members over plain int values, and
 // Math.ulp, Math.IEEEremainder and Math.multiplyHigh.
-//   jxkFail(msg)     a format or a pattern this subset does not support
+//   jxkFail(msg)     a format conversion this subset does not support
 //
 // Case mapping and the literal search are lib/utf16-strings.js's, which both
 // importers include first.
@@ -291,7 +292,7 @@ function jxJoin(delim, parts) {
 // Java's pattern flags in regex.js's terms: \Q...\E quoting.
 function jxRe(pattern) {
     var re = rxGet(pattern, "q")
-    if (!re.ok) { jxkFail("PatternSyntaxException: " + re.err) }
+    if (!re.ok) { jxkThrow("PatternSyntaxException", re.err) }
     return re
 }
 // Matcher.find's next start: after an empty match the search moves one on.
@@ -362,7 +363,7 @@ function jxExpand(re, s, m, repl) {
     while (i < repl.length) {
         var c = repl.charAt(i)
         if (c == "\\") {
-            if (i + 1 >= repl.length) { jxkFail("IllegalArgumentException: character to be escaped is missing") }
+            if (i + 1 >= repl.length) { jxkThrow("IllegalArgumentException", "character to be escaped is missing") }
             out = out + repl.charAt(i + 1)
             i = i + 2
             continue
@@ -373,21 +374,21 @@ function jxExpand(re, s, m, repl) {
             continue
         }
         i = i + 1
-        if (i >= repl.length) { jxkFail("IllegalArgumentException: Illegal group reference: group index is missing") }
+        if (i >= repl.length) { jxkThrow("IllegalArgumentException", "Illegal group reference: group index is missing") }
         var g = 0 - 1
         if (repl.charAt(i) == "{") {
             var e = i + 1
             while (e < repl.length && repl.charAt(e) != "}") { e = e + 1 }
             var nm = repl.substring(i + 1, e)
             g = rxIndexOfName(re, nm)
-            if (g < 0) { jxkFail("IllegalArgumentException: No group with name {" + nm + "}") }
+            if (g < 0) { jxkThrow("IllegalArgumentException", "No group with name {" + nm + "}") }
             i = e + 1
         } else {
             var d = repl.charCodeAt(i) - 48
-            if (d < 0 || d > 9) { jxkFail("IllegalArgumentException: Illegal group reference") }
+            if (d < 0 || d > 9) { jxkThrow("IllegalArgumentException", "Illegal group reference") }
             g = d
             i = i + 1
-            if (g > rxGroupCount(re)) { jxkFail("IndexOutOfBoundsException: No group " + g) }
+            if (g > rxGroupCount(re)) { jxkThrow("IndexOutOfBoundsException", "No group " + g) }
             while (i < repl.length) {
                 var d2 = repl.charCodeAt(i) - 48
                 if (d2 < 0 || d2 > 9) { break }

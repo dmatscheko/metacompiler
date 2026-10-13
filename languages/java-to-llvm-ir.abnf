@@ -1022,9 +1022,18 @@ SwYield     <~~ push(makeYield(pop())) ~~>
 ArrLit      <~~ push(makeArray(takeAll())) ~~>
             = "{" [ Expression { "," Expression } ] [ "," ] "}" ;
 
-Primary     = ArrClassLit | PrimClassLit | ArrLit | NewExpr | SwitchExpr | Lambda | MethodRef | "(" Expression ")" | TextBlock | JavaStr | CharLit
+Primary     = ClassLit | ArrLit | NewExpr | SwitchExpr | Lambda | MethodRef | "(" Expression ")" | TextBlock | JavaStr | CharLit
             | JNum | True | False | Null
-            | OuterThis | SuperCall | BareCall | VarRef ;
+            | OuterThis | SuperCall | PkgClass | BareCall | VarRef ;
+// A JDK class named through its package - java.lang.Math.max(1, 2),
+// java.lang.reflect.Array.newInstance(...) - is the class itself: the package
+// segments (lower-case, which every java.* and javax.* package is) are dropped
+// and the class name reads as a VarRef. jRecvTy in lib/java-decltypes.js drops
+// the same prefix from a member chain's text. Its library is loaded as an
+// import of the class would load it (jNotePkgClass).
+PkgClass    <~~ jNotePkgClass(stripWs(up.in)) ~~>
+            = ( "javax" | "java" ) KwEnd { "." JdkSeg } "." VarRef ;
+JdkSeg      = "a"..."z" :whitespace() { JIdPart } :whitespace(Whitespace) ;
 // Every numeric literal in the language goes through NumOk first, so a literal
 // javac's scanner refuses never reaches the parser.
 JNum        = NumOk ( HexLit | BinLit | OctLit | FloatLit | UscoreInt | SuffInt | IntLit ) ;
@@ -1122,19 +1131,12 @@ MRefCore    <~~ push(makeMethodRef(jNoteRefText(stripWs(up.in)), up.pos)) ~~>
 
 Null        <~~ push(makeConst(null)) ~~>  = "null" KwEnd ;
 
-// `int[].class` / `String[].class` - a class literal over an ARRAY type. The plain
-// `Foo.class` needs nothing (it reads as a field), but this one is no member chain:
-// `String[` starts an index that has no subscript. Class objects are not modelled,
-// so the value is null. It has to beat VarRef.
-ArrClassLit <~~ push(makeConst(null)) ~~>
-            = ( PrimName KwEnd | Id { "." Id } ) [ SkipAngle ] "[" "]" { "[" "]" } "." "class" KwEnd ;
-
-// `int.class`, `void.class` - a class literal over a PRIMITIVE type. It is no
-// member chain (there is no variable named `int` to read a field from), so it
-// needs its own Primary. Class objects are not modelled: the value is null,
-// exactly as for the array form above.
-PrimClassLit <~~ push(makeConst(null)) ~~>
-            = ( PrimName KwEnd | "void" KwEnd ) "." "class" KwEnd ;
+// A class literal - `int.class`, `void.class`, `String[].class`,
+// `Main.Box.class` (JLS 15.8.2): the java.lang.Class object getClass() answers
+// for a value of that type. It has to beat VarRef, which would read `Foo` as
+// the class and `.class` as a field.
+ClassLit    <~~ push(makeClassLit(stripWs(up.in))) ~~>
+            = ( PrimName KwEnd | "void" KwEnd | Id { "." NotResvKw Id } ) [ SkipAngle ] { "[" "]" } "." "class" KwEnd ;
 
 // `Outer.this`: the enclosing instance of an inner-class instance, stored as
 // __outer when it is created. Tried before VarRef, which would otherwise read
@@ -3112,9 +3114,9 @@ HasStatic   = :script(~~
     }
     function makeBareCall(items, text) {
         var name = items[0]
-        var args = items.slice(1)
         var cls = curClassName
-        var atys = jCallArgTys(text, args.length)
+        var atys = jCallArgTys(text, items.length - 1)
+        var args = jVaWrap(items.slice(1), atys, name, function() { return cls })
         return function(b) {
             var kind = lookupMethodKind(cls, name)
             var recvV
@@ -3140,6 +3142,22 @@ HasStatic   = :script(~~
         }
     }
 
+    // A class literal (jClassLit in lib/java-decltypes.js): js_jvclasslit is
+    // handed the descriptor of a class the program has (a builtin exception
+    // included), else undefined and the literal's own name, and whether it is
+    // an interface. Twin of makeClassLit in java-interpreter.abnf.
+    function makeClassLit(text) {
+        var lit = jClassLit(text)
+        if (!lit.prim) { noteTypeUse(lit.simple) }
+        return function(b) {
+            var descV = hUndef
+            if (!lit.prim && classNames["$" + lit.simple] == true) {
+                descV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, lit.simple)])
+            }
+            var ifV = interfaceNames["$" + lit.simple] == true ? hTrue : hFalse
+            return {b: b, v: callExt(b, "js_jvclasslit", [descV, emitStr(b, lit.name), emitStr(b, lit.simple), emitNum(b, lit.dims), ifV])}
+        }
+    }
     // Outer.this - the enclosing instance of the named class: js_jouterthis walks
     // out along __outer until an instance whose class chain is named Outer (two
     // levels of nesting need two hops). Twin of makeOuterThis in
@@ -3306,6 +3324,29 @@ HasStatic   = :script(~~
     function jEmitArrTag(b, arrV, ty) {
         var desc = jArrDesc(ty)
         if (desc != "") { callExt(b, "js_jvarrtag", [arrV, emitStr(b, desc)]) }
+    }
+    // A call's argument thunks with the last one wrapped into a one-element
+    // array when jVaScalar says the call is a variable arity invocation of
+    // it (see jVaMayBeArr in lib/java-decltypes.js); clsOf answers the
+    // receiver's class at emit time, after the walk. Twin of jVaWrap in
+    // java-interpreter.abnf.
+    function jVaWrap(args, atys, name, clsOf) {
+        if (!jVaMayBeArr(atys)) { return args }
+        var out = args.slice(0, args.length - 1)
+        var last = args[args.length - 1]
+        out.push(function(b) {
+            var r = last(b)
+            var ety = jVaScalar(clsOf(), name, args.length)
+            if (ety == "") { return r }
+            var arrV = callExt(r.b, "js_arr_new", [])
+            callExt(r.b, "js_arr_push", [arrV, r.v])
+            jEmitArrTag(r.b, arrV, ety + "[]")
+            return {b: r.b, v: arrV}
+        })
+        return out
+    }
+    function jVaWrapSfx(s) {
+        s.args = jVaWrap(s.args, s.atys, s.name, function() { return jVaRecvCls(s.rty) })
     }
     // (T) v for a reference type T checks v with js_jvcast, which throws a
     // ClassCastException when v is not a T (JLS 5.5.3): for java.lang's
@@ -3636,7 +3677,10 @@ HasStatic   = :script(~~
         if (items.length == 1) return items[0]
         var primary = items[0]
         var suffixes = items.slice(1)
-        if (text != undefined) { jChainRecvTys(suffixes, text) }
+        if (text != undefined) {
+            jChainRecvTys(suffixes, text)
+            for (var vi = 0; vi < suffixes.length; vi++) { if (suffixes[vi].kind == "mcall") { jVaWrapSfx(suffixes[vi]) } }
+        }
         return function(b) {
             var cur = hUndef
             var i0 = 0
@@ -4648,6 +4692,15 @@ HasStatic   = :script(~~
         jLoadLibs(jUtilWants(ip), jMapWants(ip), jStreamWants(ip))
         resolveImport(path, pos)
     }
+    // A class named through its package (PkgClass) wants what an import of it
+    // loads, after the walk (jLoadWanted). Twin of jNotePkgClass in
+    // java-interpreter.abnf.
+    function jNotePkgClass(ip) {
+        if (ip == "java.lang.reflect.Array") { jUsesReflArray = true }
+        if (jUtilWants(ip)) { jUtilWant = true }
+        if (jMapWants(ip)) { jMapWant = true }
+        if (jStreamWants(ip)) { jStreamWant = true }
+    }
     function jEnterClass(n) {
         jClassStack.push(curClassName)
         jBinStack.push(jCurBin)
@@ -5174,7 +5227,8 @@ HasStatic   = :script(~~
                            "StringIndexOutOfBoundsException", "NegativeArraySizeException",
                            "ClassCastException", "UnsupportedOperationException",
                            "NumberFormatException", "InterruptedException", "IOException",
-                           "StackOverflowError", "AssertionError", "IllegalFormatException"]
+                           "StackOverflowError", "AssertionError", "IllegalFormatException",
+                           "PatternSyntaxException"]
     // java.util.Formatter's exceptions, which String.format throws: each an
     // IllegalFormatException, itself an IllegalArgumentException. Twin of
     // jUtilExcs in java-interpreter.abnf.
@@ -5189,10 +5243,12 @@ HasStatic   = :script(~~
     // languages/lib/java-rt.metajs and jvpClassName in abnf/jsrtjava.go read, and
     // therefore what the uncaught-exception line prints. Measured, java 24.0.2:
     // `new RuntimeException("x").getClass().getName()` is
-    // "java.lang.RuntimeException". Only IOException of the twenty lives outside
-    // java.lang. The twin is jExcFqcn in java-interpreter.abnf.
+    // "java.lang.RuntimeException". Outside java.lang are IOException (java.io),
+    // PatternSyntaxException (java.util.regex) and the Formatter exceptions
+    // (java.util). The twin is jExcFqcn in java-interpreter.abnf.
     function jExcFqcn(name) {
         if (name == "IOException") { return "java.io." + name }
+        if (name == "PatternSyntaxException") { return "java.util.regex." + name }
         if (jUtilExcs.indexOf("," + name + ",") >= 0) { return "java.util." + name }
         return "java.lang." + name
     }
@@ -5211,6 +5267,7 @@ HasStatic   = :script(~~
                             "$ClassCastException": "RuntimeException",
                             "$UnsupportedOperationException": "RuntimeException",
                             "$NumberFormatException": "IllegalArgumentException",
+                            "$PatternSyntaxException": "IllegalArgumentException",
                             "$InterruptedException": "Exception", "$IOException": "Exception",
                             "$IllegalFormatException": "IllegalArgumentException"}
     for (var jfp = 2; jfp < jFmtExcs.length - 1; jfp = jfp + 1) { builtinExcParent["$" + jFmtExcs[jfp]] = "IllegalFormatException" }
@@ -5231,6 +5288,8 @@ HasStatic   = :script(~~
     var jUsesRepeat = false     // String.repeat, Character.toChars -> IllegalArgumentException
     var jUsesFormat = false     // String.format    -> java.util.Formatter's exceptions
     var jUsesRange = false      // codePointCount   -> IndexOutOfBoundsException
+    var jUsesRegex = false      // matches/replaceAll/replaceFirst/split -> PatternSyntaxException,
+                                // and the replacement's IllegalArgument/IndexOutOfBounds
     function jNoteIdx(sfx) { jUsesIdx = true; return sfx }
     function jNoteMSfx(sfx) {
         if (sfx.name == "charAt" || sfx.name == "substring" || sfx.name == "codePointAt"
@@ -5239,6 +5298,8 @@ HasStatic   = :script(~~
         if (sfx.name == "repeat" || sfx.name == "toChars") { jUsesRepeat = true }
         if (sfx.name == "format" || sfx.name == "formatted" || sfx.name == "printf") { jUsesFormat = true }
         if (sfx.name == "arraycopy") { jUsesIdx = true }
+        if (sfx.name == "matches" || sfx.name == "replaceAll" || sfx.name == "replaceFirst"
+            || sfx.name == "split") { jUsesRegex = true }
         if (sfx.name == "parseInt" || sfx.name == "parseLong" || sfx.name == "parseDouble"
             || sfx.name == "parseFloat" || sfx.name == "valueOf" || sfx.name == "parseUnsignedInt") { jUsesParse = true }
         return sfx
@@ -5250,7 +5311,8 @@ HasStatic   = :script(~~
     // js_jvidx), StringIndexOutOfBoundsException from charAt/substring and
     // NegativeArraySizeException from `new int[-1]` (JLS 15.10.1, js_jvnewlen),
     // NumberFormatException from Integer.parseInt and its kin, IllegalArgumentException
-    // from String.repeat.
+    // from String.repeat and Array.getLength, PatternSyntaxException from the
+    // regex methods.
     // js_jvexc registers each descriptor by NAME. ArithmeticException and
     // NullPointerException are unconditional: an integer divide by zero and a
     // null dereference are reachable from code the emitter cannot see around;
@@ -5280,7 +5342,13 @@ HasStatic   = :script(~~
             runtimeExc["$NumberFormatException"] = true
             noteTypeUse("NumberFormatException")
         }
-        if (jUsesRepeat) {
+        if (jUsesRegex) {
+            runtimeExc["$PatternSyntaxException"] = true
+            noteTypeUse("PatternSyntaxException")
+            runtimeExc["$IndexOutOfBoundsException"] = true
+            noteTypeUse("IndexOutOfBoundsException")
+        }
+        if (jUsesRepeat || jUsesRegex || jUsesReflArray) {
             runtimeExc["$IllegalArgumentException"] = true
             noteTypeUse("IllegalArgumentException")
         }
@@ -5339,6 +5407,14 @@ HasStatic   = :script(~~
             bb.NewRet(bb.NewSelect(bb.NewICmp(llvm.enum.IPredEQ, cV, hUndef), hNull, cV))
             return deadBlock()
         }, false, null)
+        // initCause(c) sets the cause and answers the throwable. Twin of
+        // jExcInitCause in java-interpreter.abnf.
+        var initCause = emitFunc([], function(bb) {
+            var tV = callExt(bb, "js_arg", [curF.Params[1], handle(0)])
+            callExt(bb, "js_set", [tV, emitStr(bb, "__cause"), callExt(bb, "js_arg", [curF.Params[1], handle(1)])])
+            bb.NewRet(tV)
+            return deadBlock()
+        }, false, null)
         var getMsg = emitFunc([], function(bb) {
             var tV = callExt(bb, "js_arg", [curF.Params[1], handle(0)])
             bb.NewRet(callExt(bb, "js_get", [tV, emitStr(bb, "__msg")]))
@@ -5395,6 +5471,7 @@ HasStatic   = :script(~~
             callExt(b, "js_set", [clsV, emitStr(b, "__ctor"),
                                   callExt(b, "js_closure", [handle(emitCtorDispatch(name, [0, 1, 2])), curScopeV])])
             callExt(b, "js_set", [clsV, emitStr(b, "getCause"), callExt(b, "js_closure", [handle(getCause), curScopeV])])
+            callExt(b, "js_set", [clsV, emitStr(b, "initCause"), callExt(b, "js_closure", [handle(initCause), curScopeV])])
             callExt(b, "js_set", [clsV, emitStr(b, "getMessage"), callExt(b, "js_closure", [handle(getMsg), curScopeV])])
             callExt(b, "js_set", [clsV, emitStr(b, "getLocalizedMessage"), callExt(b, "js_closure", [handle(getLoc), curScopeV])])
             callExt(b, "js_set", [clsV, emitStr(b, "addSuppressed"), callExt(b, "js_closure", [handle(addSupp), curScopeV])])
