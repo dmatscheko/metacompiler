@@ -15405,6 +15405,11 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				ntDepth := len(rt.newTargetStack)
 				defer func() {
 					if caught := recover(); caught != nil {
+						// rt.fail is the runtime's own hard abort, as the C floor's
+						// fail() is natively: not a Go panic, so no frame recovers it.
+						if s, isFail := caught.(string); isFail && strings.HasPrefix(s, "js runtime error: ") {
+							panic(caught)
+						}
 						if rt.trackThis {
 							if len(rt.thisStack) > depth {
 								rt.thisStack = rt.thisStack[:depth]
@@ -15441,8 +15446,8 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			panic(&jsThrown{value: v})
 		},
 		// recover(): the pending panic of the frame whose defers are running, or nil.
-		// A runtime error (rt.fail panics a plain string) recovers as that message,
-		// which is what Go's recover of a runtime error yields in spirit.
+		// A host panic other than a thrown value recovers as its text (rt.fail's
+		// never gets here: js_gotry lets it through).
 		"js_gorecover": func(a []uint64) uint64 {
 			if len(rt.goDeferAt) == 0 {
 				return w(jsNull)
