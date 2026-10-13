@@ -64,20 +64,20 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-541 python: float `//`, `%`, `divmod` use the naive formula instead of CPython's float_divmod · P1 · PY · OPEN [V]
+### T-541 python: float `//`, `%`, `divmod` use the naive formula instead of CPython's float_divmod · P1 · PY · IN PROGRESS (PY worker, round 1) [V]
 xs=[1.0,3.0,9007199254740992,3.0,-0.0], ys=[0.1,0.1,-1.5,-1.5,1.5]: `1.0 // 0.1` → all legs 10.0 (python 9.0, so `q*b + r != a`);
 `3.0 // 0.1` → 30.0 (29.0); `9007199254740992 // -1.5` → -6004799503160661.0 (-6004799503160662.0); a zero remainder keeps the
 dividend's sign: `3.0 % -1.5` → 0.0 (python -0.0), `-0.0 % 1.5` → -0.0 (0.0). Port float_divmod (fmod, sign fix-up, floor,
 copysign) to every site: python-interpreter.abnf fdiv/fmod (~6787), lib/python-rt.metajs `pyAFloorMod` (~3542) and the `//`
 site, abnf/jsrt.go `pyFloorMod` and `js_pydivmod`.
 
-### T-542 python compiler: `divmod()` with a big-int operand returns (NaN, NaN) · P1 · PY · OPEN [V]
+### T-542 python compiler: `divmod()` with a big-int operand returns (NaN, NaN) · P1 · PY · IN PROGRESS (PY worker, round 1) [V]
 `divmod(2**53+1, 3)` → run/native `(NaN, NaN)`, interp and python `(3002399751580331, 0)`; also `divmod(10**20, 3)`,
 `divmod(7, 2**61)` (python `(0, 7)`), `divmod(7.5, 10**20+1)` → `(nan, nan)` (python `(0.0, 7.5)`). `//` and `%` on the same
 operands are right. `js_pydivmod` (python-rt.metajs ~6213, jsrt.go ~17343) goes through `pyNum`/`rt.toNumber` instead of
 the int-op path.
 
-### T-543 python: three-argument `pow()` is wrong in all three engines, each differently · P1 · PY · OPEN [V]
+### T-543 python: three-argument `pow()` is wrong in all three engines, each differently · P1 · PY · IN PROGRESS (PY worker, round 1) [V]
 | call | interp = native | llvm.Run | python |
 |---|---|---|---|
 | `pow(2,-1,7)` | 1 | 4 | 4 |
@@ -90,70 +90,70 @@ the int-op path.
 Layer 2 `js_pypow` (python-rt.metajs ~6270) and the interpreter skip the loop for e ≤ 0 and return an unreduced 1; the twin's
 `big.Int.Exp` returns nil without an inverse, answers in [0,|m|) ignoring the modulus sign, and treats m = 0 as plain pow.
 
-### T-544 python: `abs`/`round`/`float`/`int` of a non-number answer garbage instead of TypeError · P1 · PY · OPEN [V]
+### T-544 python: `abs`/`round`/`float`/`int` of a non-number answer garbage instead of TypeError · P1 · PY · IN PROGRESS (PY worker, round 1) [V]
 `abs("s")` → interp `'s'`, compiled `NaN` (python TypeError "bad operand type for abs(): 'str'"); `round("s")` → ValueError
 (python TypeError "type str doesn't define __round__ method"); finder: `abs([1])` → `[1]` / NaN, `float(None)` →
 `[object Object]` / nan, `float([1])` → 1.0 / nan, `float({})` → `-inf` / nan, `int([1])` → 1 / NaN, `int({})` → NaN, `round(None)`
 → ValueError / 0, `round(1j)` → ValueError / NaN. JavaScript ToNumber leaks; `float("s")`/`int("s")` are right. Every site:
 interpreter builtins, python-rt.metajs, the twin.
 
-### T-545 python: repr of a self-containing list or dict never finishes · P1 · PY · OPEN [V]
+### T-545 python: repr of a self-containing list or dict never finishes · P1 · PY · IN PROGRESS (PY worker, round 1) [V]
 `a=[1,2]; a.append(a); print(a)` → interp hangs (killed), llvm.Run Go "goroutine stack exceeds 1000000000-byte limit"
 exit 2, native SIGSEGV exit 139; python `[1, 2, [...]]` (dict: `{'k': 1, 'self': {...}}`). No recursion guard in prepr,
 layer-2 repr or the twin; CPython's Py_ReprEnter set is the model.
 
-### T-546 python: a generator that re-enters itself never finishes · P1 · PY · OPEN [V]
+### T-546 python: a generator that re-enters itself never finishes · P1 · PY · IN PROGRESS (PY worker, round 1) [V]
 A generator body doing `yield next(me)` → interp hangs, llvm.Run "fatal error: all goroutines are asleep - deadlock!" in
 `jsGenerator.step` exit 2, native SIGSEGV; python `ValueError: generator already executing`. Files: abnf/jsrt.go jsGenerator,
 the floor's coroutine switch, the interpreter's generator — each needs a running flag.
 
-### T-547 python interp: slice-assigning a list into itself · P1 · PY · OPEN [V]
+### T-547 python interp: slice-assigning a list into itself · P1 · PY · IN PROGRESS (PY worker, round 1) [V]
 `z=[1,2,3,4]; z[::-1]=z` → interp `[1, 2, 2, 1]`, others `[4, 3, 2, 1]`; `y=[1,2,3]; y[1:1]=y` → interp hangs, others
 `[1, 1, 2, 3, 2, 3]`. `iterToList(v)` returns the target itself, which grows while it is copied (python-interpreter.abnf
 ~10150): copy first.
 
-### T-548 python: slice ValueErrors are uncatchable · P1 · PY · OPEN [V]
+### T-548 python: slice ValueErrors are uncatchable · P1 · PY · IN PROGRESS (PY worker, round 1) [V]
 `try: x[::z[0]]` (z[0] = 0) / `x[::2] = []` `except ValueError` → interp `python interpreter error: ValueError: slice step cannot
 be zero` exit 1, run/native `js runtime error: slice step cannot be zero` exit 1, no output; python `caught slice step cannot be
 zero`, `caught attempt to assign sequence of size 0 to extended slice of size 2`, `end`. Sites raise with `fail()` instead of a
 Python exception: python-interpreter.abnf ~9965 and ~10161, python-rt.metajs ~3051 and ~7851, abnf/jsrt.go ~16160 and
 ~18825.
 
-### T-549 python: mutation during iteration is never detected (dict, set, `sort(key=)`) · P1 · PY · OPEN [V]
+### T-549 python: mutation during iteration is never detected (dict, set, `sort(key=)`) · P1 · PY · IN PROGRESS (PY worker, round 1) [V]
 Adding keys in `for k in d` → all legs `{1: 1, 2: 2, 11: 0, 12: 0}` (python `RuntimeError: dictionary changed size during
 iteration`); `s.add` in `for k in s` (`Set changed size during iteration`); `del d2[k]` in `for k in d2`; likewise `.items()`,
 `.values()` and pop-then-add ("dictionary keys changed during iteration"). A `sort(key=)` whose key appends to the list →
 interp and native hang (killed), llvm.Run `[1, 2, 3]`, python `ValueError: list modified during sort`.
 
-### T-550 python: generator expressions are eager lists; `zip(it, it)` over one iterator yields nothing · P1 · PY · OPEN [V]
+### T-550 python: generator expressions are eager lists; `zip(it, it)` over one iterator yields nothing · P1 · PY · IN PROGRESS (PY worker, round 1) [V]
 `g=(x*10 for x in src); print(sum(g), sum(g))` → all legs `60 60` (python `60 0`); `next((x for x in src))` → `'list' object is
 not an iterator` (python 1). `GenExpParen`/`GenExpArg` call `makeListComp` (python-interpreter.abnf ~804-809, mirrored in the
 compiler), so a genexp is never lazy (side effects run early, an infinite source never finishes) — a value-model change.
 `it=iter([1,2,3,4]); list(zip(it,it)), list(it)` → interp and native `[] []`, llvm.Run `[] [1, 2, 3, 4]`, python
 `[(1, 2), (3, 4)] []`; next/list/for/enumerate/map/filter/reversed over the same iterator are right.
 
-### T-551 python: `zip(..., strict=)` — compiled treats the keyword as an argument, the interpreter ignores it · P1 · PY · OPEN [V]
+### T-551 python: `zip(..., strict=)` — compiled treats the keyword as an argument, the interpreter ignores it · P1 · PY · IN PROGRESS (PY worker, round 1) [V]
 `zip([1,2], [3,4,5], strict=X)`: run/native `[(1, 3, 'strict')]` for both values; interp `[(1, 3), (2, 4)]` for both; python
 `[(1, 3), (2, 4)]` and, for True, `ValueError: zip() argument 2 is longer than argument 1`.
 
-### T-552 python interp: unpacking in a comprehension target does not check the count · P1 · PY · OPEN [V]
+### T-552 python interp: unpacking in a comprehension target does not check the count · P1 · PY · IN PROGRESS (PY worker, round 1) [V]
 `[a for a, b in [(1,2,3)]]` → interp `[1]`; `{a: b for a, b in [(1,)]}` → `{1: None}`; run, native and python raise
 "too many values to unpack (expected 2, got 3)" / "not enough values to unpack (expected 2, got 1)". A plain `for a, b` is right.
 
-### T-553 python: an int can carry negative zero · P2 · PY · OPEN [V]
+### T-553 python: an int can carry negative zero · P2 · PY · IN PROGRESS (PY worker, round 1) [V]
 `float(int(v)), float(round(v)), float(math.floor(v+0.4)), float(math.ceil(v)), float(math.trunc(v))` for v = -0.5: interp
 `0.0 -0.0 -1.0 -0.0 -0.0`, run/native `-0.0 -0.0 -1.0 -0.0 -0.0`, python `0.0 0.0 -1.0 0.0 0.0`; for v = -0.0 every leg gives
 `-0.0` where python gives `0.0`. `int()`, `round()`, `math.ceil()`, `math.trunc()` return an int holding -0.0 (shows through
 `float()` and `x*1.0`); for `int(-0.5)` the halves also disagree. Normalise at every float→int site.
 
-### T-554 python: `int.to_bytes` returns a list; `format(x, "%")` overflow prints `+Inf`; `%a` and f-string `!a` do not escape · P1 · PY · OPEN [V]
+### T-554 python: `int.to_bytes` returns a list; `format(x, "%")` overflow prints `+Inf`; `%a` and f-string `!a` do not escape · P1 · PY · IN PROGRESS (PY worker, round 1) [V]
 `(255).to_bytes(2, "big", signed=True)` → all legs `[0, 255]` (python `b'\x00\xff'`); `(-1).to_bytes(2, ...)` → `[255, 255]`.
 `format(1e307, "%")` → `+Inf%` (python `inf%`), `format(-1e308, ".1%")` → `-+Inf%` (`-inf%`): the inf check precedes `a*100`
 (python-interpreter.abnf ~9100) and `pyFixed(Infinity)` renders Go's "+Inf". `"%a" % (s,)` and `f"{s!a}"` with s = "é" →
 `'é'` and `é` (python `'\xe9'` both): `%a` falls back to repr (`pyPctOne` ~8517), and f-string `!a` without a spec does no
 conversion (`makeFField` ~8970, compiler ~2127); `ascii()` and `str.format`'s `!a` are right. All legs.
 
-### T-555 python: format/messages and missing str methods · P3 · PY · OPEN [V]
+### T-555 python: format/messages and missing str methods · P3 · PY · IN PROGRESS (PY worker, round 1) [V]
 `(1,2)[5]` → "list index out of range" (python "tuple index out of range"). `"%*d" % (5, 42)` and `"%.*f"` → every leg aborts
 "unsupported format character '*'" (python `   42`, `3.142`). Finder: `format("ab","z")`/`format(65,"z")` accepted (python
 "Negative zero coercion (z) not allowed"); `format(x, ",_")` says "Unknown format code ','" (python "Cannot specify both ','
@@ -168,7 +168,7 @@ and '_'."); `g(a, b, k=f(), *[f()])` evaluates the keyword before the star (CPyt
 
 # JS — JavaScript and TypeScript
 
-### T-478 js: a `let`/`const` in a loop head is one shared binding, not one per iteration · P1 · JS · OPEN [V]
+### T-478 js: a `let`/`const` in a loop head is one shared binding, not one per iteration · P1 · JS · IN PROGRESS (JS worker, round 1) [V]
 `var f1=[]; for (let i=0;i<3;i++) f1.push(()=>i)` → all legs `3,3,3`, node `0,1,2`. Same for `for (let x of src)` (`9,9,9`
 vs `7,8,9`), `for (let k in {a:1,b:2})` (`b,b` vs `a,b`), `for (const x of src)`, `for (let x of src) { ... }` with a block
 body, `for (let [a,b] of [[1,2],[3,4]])` (`7,7` vs `3,7`). A `let` inside the body and `while`+`let` are right. Interp
@@ -176,7 +176,7 @@ also: `for (let i=0, get=()=>i; i<2; i++) fs.push(get)` gives `2,2`, node `0,0` 
 test uses `for (let`. Files: for / for-of / for-in lowering in js-interpreter.abnf and js-to-llvm-ir.abnf (check
 typescript-*.abnf too, which shares the shape).
 
-### T-479 assignment evaluates the RHS before the LHS reference; compound assignment reads the LHS after the RHS (js, java) · P1 · JS · OPEN [V]
+### T-479 assignment evaluates the RHS before the LHS reference; compound assignment reads the LHS after the RHS (js, java) · P1 · JS · IN PROGRESS (JS worker, round 1) [V]
 ECMA-262 13.15.2 and JLS 15.26 both evaluate the left-hand reference (object, key/index) first and, for `op=`, read the
 old value before the RHS. All legs agree and are wrong in BOTH languages (go has the tuple-assign variant, T-466).
 js vs node: `o[f("k")] = f("v")` logs `vk` (node `kv`); `a[i++] = i` → `0,2` (node `1,2`); `x += (x=5,10)` → 15 (node 11);
@@ -188,13 +188,13 @@ compound-assignment builders of js-*, typescript-* and java-* grammars; check li
 first in case the order lives in a shared helper, and probe the other languages' compound assignment while there.
 Shared: JV (java grammars) — a worker taking this needs both groups' files.
 
-### T-480 js interp: a non-string computed key (`o[1]=v`, `o[true]`, `o[null]`) is stored but not tracked as an own key · P1 · JS · OPEN [V]
+### T-480 js interp: a non-string computed key (`o[1]=v`, `o[true]`, `o[null]`) is stored but not tracked as an own key · P1 · JS · IN PROGRESS (JS worker, round 1) [V]
 `var o={}; o[ks[i]]="v"` with `ks=[1,"s",true,null]` then `Object.keys(o).length, for-in count, JSON.stringify(o), o[ks[i]]`:
 interp `key 1 0 0 {} v` (goja and -frozen), run/native/node `key 1 1 1 {"1":"v"} v`; `p[2]="x"; p["k"]="y"` keys: interp `k`,
 others `2|k`. `setMember` (js-interpreter.abnf ~5812) calls `trackKey(o, k)` with the raw key and `trackKey` (~7528) returns
 early on `typeof key != "string"`.
 
-### T-481 js: own-key order ignores the array-index rule (indices ascending first, then strings in insertion order) · P2 · JS · OPEN [V]
+### T-481 js: own-key order ignores the array-index rule (indices ascending first, then strings in insertion order) · P2 · JS · IN PROGRESS (JS worker, round 1) [V]
 Keys inserted `b,2,a,1,-1,01,4294967295,4294967294,1.5,0,10,1e3," 3",9007199254740993,3`: all legs print insertion order;
 node `0|1|2|3|10|4294967294|b|a|-1|01|4294967295|1.5|1e3| 3|9007199254740993` — affects `Object.keys`, `for-in`,
 `JSON.stringify`, entries/values. Literal `{z:1,5:2,y:3,0:4,"-0":5}`: ours `z|5|y|0|-0`, node `0|5|z|y|-0`.
@@ -203,31 +203,31 @@ insertion-order `keysOf` but nothing exempts js from ECMA-262 OrdinaryOwnPropert
 (keys from numbers/booleans/null) prints nothing — T-480. Files: interp `__keys`, `js_keys` in runtime.c / jsrt.go /
 js-rt.metajs; decide whether the order is applied at enumeration (cheap) or kept at insertion.
 
-### T-482 js compiler: labeled break/continue out of `try`/`finally` inside a loop loops forever or fails to build · P1 · JS · OPEN [V]
+### T-482 js compiler: labeled break/continue out of `try`/`finally` inside a loop loops forever or fails to build · P1 · JS · IN PROGRESS (JS worker, round 1) [V]
 `bl: for (var i=0;i<3;i++){ try { if (i===1) break bl; lt.push("t"+i); } finally { lt.push("f"+i); } }` → interp and node
 `t0,f0,f1`; llvm.Run hits the step brake (endless loop); `-exe` fails to link: unresolved `js_jsxcall` (finder also saw
 `use of undefined value '%55'` in a larger module). `continue label` from an inner loop through a finally is the same.
 Unlabelled break/continue through finally is fine. File: js-to-llvm-ir.abnf (labels crossing the control-signal path;
 check typescript-to-llvm-ir.abnf, and why the module references an extern nothing defines).
 
-### T-483 js compiler: `for-of` over an array mutated during iteration uses the starting length · P1 · JS · OPEN [V]
+### T-483 js compiler: `for-of` over an array mutated during iteration uses the starting length · P1 · JS · IN PROGRESS (JS worker, round 1) [V]
 `a=[1,2,3,4]; for (x of a) { out.push(x); if (x===2) a.shift(); }` → run/native `1,2,4,undefined`, interp/node `1,2,4`;
 pop while iterating `[1,2,3]` → `1,2,undefined` vs `1,2`; push while iterating `[1,2]` → `1,2` vs `1,2,10,20`. The array
 iterator re-reads `length` every step. File: js-to-llvm-ir.abnf (array fast path of for-of), typescript likewise.
 
-### T-484 js: string `<`/`>` and default `sort()` compare code points, not UTF-16 code units · P1 · JS · OPEN [V]
+### T-484 js: string `<`/`>` and default `sort()` compare code points, not UTF-16 code units · P1 · JS · IN PROGRESS (JS worker, round 1) [V]
 s = ["", "\ud800", "\udc00x", "𝄞", "￿"]: node orders by code units, so `"𝄞" < ""`. run, native and
 interp -frozen: `"𝄞" < ""` false; default sort `d800,e000,ffff,d834` (node `d800,d834,e000,ffff`). Interp under goja
 gets astral right but a lone surrogate wrong (`"" < "\ud800"` true; sort `e000,d800,ffff,d834`). Files: `jsCompare` in
 abnf/jsrt.go (~2333, Go string `<`), `js_compare` in runtime.c (~2881), the interp sort comparator. Check which other
 languages share these comparators before changing them (java/kotlin/csharp/dart compare UTF-16 too; python/go/swift do not).
 
-### T-485 js: the Go twin's `Math.max`/`Math.min` drop NaN next to ±Infinity · P1 · JS · OPEN [V]
+### T-485 js: the Go twin's `Math.max`/`Math.min` drop NaN next to ±Infinity · P1 · JS · IN PROGRESS (JS worker, round 1) [V]
 `Math.max(NaN, Infinity)`, `Math.min(-Infinity, NaN)`, `Math.max.apply(null,[1,NaN,Infinity])`: interp (goja and -frozen)
 and llvm.Run `Infinity`/`-Infinity`, native and node `NaN`. abnf/jsrt.go ~17604 folds with Go's `math.Max`/`math.Min`,
 which define Max(x,+Inf)=+Inf even for NaN x. Check go's min/max (T-470) and other languages that route through it.
 
-### T-486 js: parseInt edge cases, a different leg wrong per case · P1 · JS · OPEN [V]
+### T-486 js: parseInt edge cases, a different leg wrong per case · P1 · JS · IN PROGRESS (JS worker, round 1) [V]
 node: `parseInt("-0")`, `"-00"`, `"-0x0"` → -0 (interp goja and native give 0: runtime.c `js_parse_int` does `0.0 - val`);
 `parseInt(" 7")`, `"  9"`, `"　10"` → 7, 9, 10 (native NaN: `is_space` is ASCII-only); `parseInt("﻿8")` → 8
 (run and interp -frozen NaN: Go `strings.TrimSpace` does not trim U+FEFF); `parseInt("11", 37)` → NaN (run/-frozen 38: no
@@ -235,39 +235,39 @@ node: `parseInt("-0")`, `"-00"`, `"-0x0"` → -0 (interp goja and native give 0:
 results differ in the last digit across legs (`parseInt("9007199254740993", 36)`). Files: abnf/jsrt.go `jsParseInt`
 (~17885), runtime.c `js_parse_int` (~5986), goja's parseInt for the interp.
 
-### T-487 js interp (goja): ToInt32/ToUint32 of |x| ≥ 2^63 saturates · P1 · JS · OPEN [V]
+### T-487 js interp (goja): ToInt32/ToUint32 of |x| ≥ 2^63 saturates · P1 · JS · IN PROGRESS (JS worker, round 1) [V]
 `x = 1e21`: interp `x|0 = -1`, `x>>>0 = 4294967295`, `~x = 0`, `1<<x = -2147483648`; run, native, interp -frozen and node
 `-559939584 3735027712 559939583 1`. 2^63 and 2^64+2^33 also wrong. Cause: third_party/goja/runtime.go:946 and :961
 `int32(int64(f))` — Go saturates on arm64. A goja patch like the ftoa one (manual ch. 4); add a cross-host pin test.
 
-### T-488 js: TypeError/RangeError raised by runtime builtins is uncatchable; `repeat(Infinity)` hangs or panics · P1 · JS · OPEN [V]
+### T-488 js: TypeError/RangeError raised by runtime builtins is uncatchable; `repeat(Infinity)` hangs or panics · P1 · JS · IN PROGRESS (JS worker, round 1) [V]
 `try { "a".repeat(-1) } catch(e) {...}` and `try { [].reduce((a,b)=>a+b) } catch(e)`: every leg ends the program with
 `js runtime error: Invalid count value: -1` / `Reduce of empty array with no initial value`, exit 1; node catches a
 RangeError / TypeError. `"ab".repeat(Infinity)` in a try: interp and native run until killed, run panics in Go
 (`strings: Repeat output length overflow`); node RangeError. `new Array(-1)` is already catchable — copy its path.
 Files: the builtin error raise in jsrt.go / runtime.c / js-rt.metajs / js-interpreter.abnf.
 
-### T-489 js: fromIndex and separator arguments of includes / lastIndexOf / join · P1 · JS · OPEN [V]
+### T-489 js: fromIndex and separator arguments of includes / lastIndexOf / join · P1 · JS · IN PROGRESS (JS worker, round 1) [V]
 `arr=[1,2,1]`: `arr.includes(1,5)`, `arr.includes(1,3)` → true (node false: fromIndex ignored); `arr.lastIndexOf(1,-5)` → 2
 (node -1); `"abcabc".lastIndexOf("a",-1)` → 3 (node 0, also for -5); `[1,2].join(null)` → `1,2` (node `1null2`). All legs.
 
-### T-490 js: regex `replace` replacement patterns `` $` `` `$'` and literal `$n`/`$<x>` · P1 · JS · OPEN [V]
+### T-490 js: regex `replace` replacement patterns `` $` `` `$'` and literal `$n`/`$<x>` · P1 · JS · IN PROGRESS (JS worker, round 1) [V]
 `"xabcx".replace(/b/, "$\`")` → `xa$\`cx` (node `xaxacx`); `"$'"` → `xa$'cx` (node `xacxcx`); finder also: `"$<x>"` with no named
 groups → `xacx` (node `xa$<x>cx`), `"$2"` with no group 2 → `xacx` (node `xa$2cx`), `"$10"` → `xa0cx` (node `xa$10cx`). The
 string-pattern form is right. All legs. Files: the regex replace expander (lib/regex.js and its twins).
 
-### T-491 js interp: index arguments are not ToIntegerOrInfinity'd (NaN, fractions) · P1 · JS · OPEN [V]
+### T-491 js interp: index arguments are not ToIntegerOrInfinity'd (NaN, fractions) · P1 · JS · IN PROGRESS (JS worker, round 1) [V]
 `"abc".at(NaN)`, `"abc".substr(NaN,1)`, `[5,6].at(NaN)` → interp `""`, `""`, `undefined`; run/native/node `a`, `a`, `5`. For
 `-0.5`: interp `charAt ""`, `charCodeAt NaN`, `at "c"`, `substr "c"`, `[5,6].at → 6`; node `a 97 a a 5`.
 `"abc".indexOf("c", NaN)` → NaN (node 2). File: js-interpreter.abnf string/array builtins.
 
-### T-492 js: missing TypeErrors — const assignment, `in` on a primitive, `instanceof` a non-object · P2 · JS · OPEN [V]
+### T-492 js: missing TypeErrors — const assignment, `in` on a primitive, `instanceof` a non-object · P2 · JS · IN PROGRESS (JS worker, round 1) [V]
 `const c=1; c=2;` accepted (node TypeError "Assignment to constant variable."); `"a" in "abc"` → false (node TypeError
 "Cannot use 'in' operator to search for 'a' in abc"); `({}) instanceof 5` → false (node TypeError "Right-hand side of
 'instanceof' is not an object"). P3 wording: TDZ says "q is not defined" (node "Cannot access 'q' before initialization"),
 toString radix message, JSON.parse syntax-error text is older V8 wording. All legs.
 
-### T-493 js: low-value divergences and gaps · P3 · JS · OPEN [V finder only]
+### T-493 js: low-value divergences and gaps · P3 · JS · IN PROGRESS (JS worker, round 1) [V finder only]
 `(1e21).toString(36)` / `(2**60).toString(7)`: interp and compiler disagree (implementation-defined, but the halves must
 agree). Tagged template `s.raw` undefined in the compiler (`s.raw.join is not a function`). `arguments[0]=9` in a
 zero-arg call makes `arguments.length` 1 (node 0). `JSON.parse('{"__proto__":1}')` → `{}` (node keeps the key). Missing in
@@ -380,13 +380,13 @@ not change the renderer.
 
 # GO — Go  (oracle: `go run`)
 
-### T-465 go: the Go twin answers `>`/`>=` true when either side is NaN · P1 · GO · OPEN [V]
+### T-465 go: the Go twin answers `>`/`>=` true when either side is NaN · P1 · GO · IN PROGRESS (GO worker, round 1) [V]
 `a := zs[0]/zs[0]; b := zs[1]` (zs = []float64{0,1}): `a > b, a >= b, b > a, b >= a` — llvm.Run `true true true true`, interp,
 native and `go run` all `false`. A NaN-seeded running max ends at 2 instead of NaN. `rel()` in abnf/jsrtint.go (~807-822)
 feeds `rt.jsCompare`'s NaN marker 2 into `c > 0`/`c >= 0`; the shared `js_gt` tests `== 1` and the floor's `si_rel` is right.
 Only go uses `js_gi*`. Engine wrong: the Go twin.
 
-### T-466 go: tuple assignment does not evaluate LHS index/pointer operands before assigning · P1 · GO · OPEN [V]
+### T-466 go: tuple assignment does not evaluate LHS index/pointer operands before assigning · P1 · GO · IN PROGRESS (GO worker, round 1) [V]
 Go evaluates every LHS index expression and pointer indirection, then every RHS, then assigns left to right. All three of our
 legs agree and are wrong: `i := 0; i, a[i] = 1, 9` on `[1 2 3]` gives `1 [1 9 3]` (go `1 [9 2 3]`); `n := 1; n, m[n] = 5, n`
 gives `map[5:1]` (go `map[1:1]`); `s, s[0] = []int{9}, 100` writes the NEW slice (go writes the old backing array);
@@ -394,12 +394,12 @@ gives `map[5:1]` (go `map[1:1]`); `s, s[0] = []int{9}, 100` writes the NEW slice
 val 6); `k, c[k], c[k+1] = 2, c[k+2], c[k]` on len 3 panics index out of range (go `2 [30 10 30]`). Files: the tuple-assign
 lowering in go-interpreter.abnf and go-to-llvm-ir.abnf.
 
-### T-467 go: `copy` with overlapping slices copies forward and smears · P1 · GO · OPEN [V]
+### T-467 go: `copy` with overlapping slices copies forward and smears · P1 · GO · IN PROGRESS (GO worker, round 1) [V]
 `x := []int{1,2,3,4,5}; n := copy(x[1:], x)` — all legs `4 [1 1 1 1 1]`, go `4 [1 1 2 3 4]` (memmove semantics);
 `b := []byte("abcde"); copy(b[2:], b)` ours `ababa`, go `ababc`. All three legs wrong. Files: the copy builtin in both go
 grammars, lib/go-rt.metajs, the Go twin.
 
-### T-468 go: deleting map entries during `for range` · P1 · GO · OPEN [V]
+### T-468 go: deleting map entries during `for range` · P1 · GO · IN PROGRESS (GO worker, round 1) [V]
 10 entries `m[i]=i*i`; `for k := range m { delete(m,k); delete(m,9-k); cnt++ }; Println(cnt, len(m), m)`: go `5 0 map[]`
 (an entry deleted before it is reached is never produced, so 5 is deterministic); interp and native `10 0 map[]` (they range
 over a snapshot); llvm.Run `10 2 map[3:9 6:36]` — deletes are LOST and a nested range sees `<nil>` keys. Also
@@ -407,13 +407,13 @@ over a snapshot); llvm.Run `10 2 map[3:9 6:36]` — deletes are LOST and a neste
 `js_map_del` (abnf/jsrt.go ~15054) shifts `keys.elems`/`vals.elems` in place, corrupting a range snapshot that shares the
 backing array. Engines wrong: twin badly; interp and native via snapshot semantics.
 
-### T-469 go: interface equality and `map[interface{}]` keys ignore the dynamic type for int vs float64 · P1 · GO · OPEN [V]
+### T-469 go: interface equality and `map[interface{}]` keys ignore the dynamic type for int vs float64 · P1 · GO · IN PROGRESS (GO worker, round 1) [V]
 `var a interface{} = fs[0]` (float64 1), `var b interface{} = is[0]` (int 1): `a == b` — all legs `true`, go `false`
 (`%T` is right everywhere). `m[a]="float"; m[b]="int"; len(m), m[a], m[b]`: interp `2 float int` (right), llvm.Run and native
 `1 int int`. int64 vs int is already right. Files: strict_eq / `goMapKeyIdx` with the float box (manual 7.6), the go-rt map
 key lookup, the twin.
 
-### T-470 go: `clear(slice)` writes integer 0; `min`/`max` on NaN and -0; interp `min` of sized ints · P1 · GO · OPEN [V]
+### T-470 go: `clear(slice)` writes integer 0; `min`/`max` on NaN and -0; interp `min` of sized ints · P1 · GO · IN PROGRESS (GO worker, round 1) [V]
 `clear([]string{"a","b"})` → all legs `['\x00' '\x00']`, `s[0]==""` false (go `["" ""] true`); `[]bool` → `[0]`, structs → `[0]`,
 `[]*P` element not `nil`. `max(nan,1), max(1,nan), min(nan,1), min(1,nan)`: interp `NaN 1 NaN 1`, run/native `1 NaN NaN 1`,
 go `NaN NaN NaN NaN`. `max(0,-0), max(-0,0), min(0,-0), min(-0,0)`: interp `0 -0 0 -0`, run/native `-0 0 0 -0`, go `0 0 -0 -0`.
@@ -421,7 +421,7 @@ Interp only: `min(int8(3), int8(-2))` prints `3` (a sized-int box never wins in 
 hostGlobals clear/min/max (~1581-1599), lib/go-rt.metajs `js_gominmax` / `js_goclear`, abnf/jsrt.go twin. `clear` needs the
 element type's zero value.
 
-### T-471 go: channel and `make` runtime panics missing or wrong; a floor runtime error is unrecoverable natively · P1 · GO · OPEN [V]
+### T-471 go: channel and `make` runtime panics missing or wrong; a floor runtime error is unrecoverable natively · P1 · GO · IN PROGRESS (GO worker, round 1) [V]
 Each case wrapped in `defer func(){ fmt.Printf("recovered: %v\n", recover()) }()`. Close of a closed channel: all legs
 print "after" and recover nil (go `close of closed channel`). `make([]int, 3, 2)` (operands from a slice): interp an
 uncatchable "go interpreter error: make: capacity smaller than length", run/native `3 2 [0 0 <nil>]`, go
@@ -432,13 +432,13 @@ range`; `make([]int,0,-1)`; `make(chan int,-1)` (go `makechan: size out of range
 runtime error is a recoverable panic under llvm.Run but a fatal exit natively. Files: chan close/send and make in
 lib/go-rt.metajs, abnf/jsrt.go, both go grammars, the native panic path.
 
-### T-472 go: runes and bytes produced by literals, range and indexing have dynamic type `int` · P2 · GO · OPEN [V]
+### T-472 go: runes and bytes produced by literals, range and indexing have dynamic type `int` · P2 · GO · IN PROGRESS (GO worker, round 1) [V]
 `fmt.Printf("%T", c)` for `c` from `range "az"`, and `%T` of `'z'`, `[]rune(s)[0]`, `s[0]`: all legs `int int int int`,
 go `int32 int32 int32 uint8`. A type switch therefore takes `case int` for a rune. `var r rune` / `var b byte` are already
 right. Not T-071 (rune vs int32 naming): here the value loses its sized type. Files: rune literal, range-over-string and
 string-index typing in both go grammars.
 
-### T-473 go: map key semantics — composite-key print order, and interp float keys NaN / -0 · P1 · GO · OPEN [V]
+### T-473 go: map key semantics — composite-key print order, and interp float keys NaN / -0 · P1 · GO · IN PROGRESS (GO worker, round 1) [V]
 `fmt.Println(map[K]int{{1,"a"}:1,{0,"b"}:2,{1,""}:3,{-1,"z"}:4,{10,"a"}:5,{2,"a"}:6})` (K struct{A int; B string}): go sorts
 field-wise `map[{-1 z}:4 {0 b}:2 {1 }:3 {1 a}:1 {2 a}:6 {10 a}:5]`; interp and run print insertion order; native sorts by the
 RENDERED string (`{1 a}` before `{1 }`, `{10 a}` before `{2 a}`) — three different answers. Array keys likewise (finder:
@@ -446,21 +446,21 @@ interp `[1 1] [1 2] [10 0] [2 1]`, go `[1 1] [1 2] [2 1] [10 0]`). Interp only: 
 len(fn), fn[0], fn[nan]` → `3 0 2`, go/run/native `3 4 0` (-0 must hit the 0 key; a NaN lookup never finds). Files: fmt map
 printing in all three engines (go-rt.metajs, twin, interpreter), the interpreter's float-key map index.
 
-### T-474 go: `[]T(nil)` conversion crashes the compiled legs · P2 · GO · OPEN [V]
+### T-474 go: `[]T(nil)` conversion crashes the compiled legs · P2 · GO · IN PROGRESS (GO worker, round 1) [V]
 `z := []int(nil); fmt.Println(z == nil, len(z))`: interp `true 0` (right), llvm.Run panics `js runtime error: member
 'length' of null`, native dies with the same message, exit 1. Finder: in interp `append(z, e...) == nil` with empty `e`
 is false (go true). Files: conversion lowering in go-to-llvm-ir.abnf, go-rt nil-slice handling.
 
-### T-475 go: interp `string(rune(r))` of an invalid code point is not U+FFFD · P1 · GO · OPEN [V]
+### T-475 go: interp `string(rune(r))` of an invalid code point is not U+FFFD · P1 · GO · IN PROGRESS (GO worker, round 1) [V]
 `string(rune(r))` for r = -1, 0xD800, 0x110000 printed `%q %x`: interp `"￿" efbfbf`, `"\ud800" eda080`,
 `"\udc00\udc00" edb080edb080`; run, native and go `"�" efbfbd` each. File: goConvert string(rune) in go-interpreter.abnf.
 
-### T-476 go: Unicode case — titlecase digraphs and simple-fold orbits · P3 · GO · OPEN [V]
+### T-476 go: Unicode case — titlecase digraphs and simple-fold orbits · P3 · GO · IN PROGRESS (GO worker, round 1) [V]
 `strings.ToUpper("ǅungla")`, `ToLower`: all legs `ǅUNGLA ǅungla`, go `ǄUNGLA ǆungla` (U+01C5 has upper and lower mappings).
 `strings.EqualFold("ǅ","ǆ")`: ours false, go true (finder also reports `EqualFold("K","K")` with the Kelvin sign false; the
 master's ASCII re-run was true). Files: abnf/casemap.go, runtime.c case_str, go EqualFold.
 
-### T-477 go: features where the engines disagree on support · P3 · GO · OPEN [V finder only]
+### T-477 go: features where the engines disagree on support · P3 · GO · IN PROGRESS (GO worker, round 1) [V finder only]
 `make(map[K]V, hint)` parses in interp but not in the compiler; `fmt.Sprintln`, `fmt.Fprintf(&strings.Builder)` unknown
 method; `strings.Title` unknown in interp only; `math.*` unknown name in both. Missing-feature tickets: fix where cheap.
 
@@ -613,7 +613,7 @@ formats (lua `bad argument #2 to 'format' (string contains zeros)`; also `%.0s`,
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-517 bash: indexed-array subscripts are not arithmetic; array elements inside `$(( ))`; negative subscripts · P1 · SH · OPEN [V]
+### T-517 bash: indexed-array subscripts are not arithmetic; array elements inside `$(( ))`; negative subscripts · P1 · SH · IN PROGRESS (SH worker, round 1) [V]
 `a=(a0 a1 a2 a3 a4); i=2; echo "${a[i]} ${a[i+1]} ${a[$i+1]}"; a[i+2]=W; echo "${a[*]}"` → all legs `a0 a0 a2` / `W a1 a2 a3 a4`,
 bash `a2 a3 a3` / `a0 a1 a2 a3 W` (the subscript is literal text through strToInt, though bash-interpreter.abnf:456 says
 "read as an arithmetic index"; `arr[i++]=X` and `${arr[n++]}` lose the side effect). `nums=(3 4 5); echo "sum=$(( nums[0] +
@@ -623,34 +623,34 @@ nums[2] ))"; echo after` → interp `command not found: nums[0]` and the WHOLE p
 compiled `0 1 2 3 -1 = p q r s S`); bash `[s] [r]` / `0 1 2 3 = p q r S`. Files: IdxWord / arr* paths in
 bash-interpreter.abnf, subscript normalisation and the arithmetic grammar in bash-to-llvm-ir.abnf, bash-rt.c rt_arr_*.
 
-### T-518 bash: sparse indexed arrays — compiler keeps insertion order; `([k]=v w)` continues from the wrong index; `${a[@]:off:len}` counts positions · P1 · SH · OPEN [V]
+### T-518 bash: sparse indexed arrays — compiler keeps insertion order; `([k]=v w)` continues from the wrong index; `${a[@]:off:len}` counts positions · P1 · SH · IN PROGRESS (SH worker, round 1) [V]
 `a=(); a[5]=x; a[2]=y; echo "${!a[*]} = ${a[*]}"` → interp and bash `2 5 = y x`, run/native `5 2 = x y`.
 `b=([3]=c [1]=a b)` → interp `1 3 4 = a c b`, compiled `3 1 4 = c a b`, bash `1 2 3 = a b c` (an unindexed element takes the
 last explicit index + 1). `sp[2]=x; sp[5]=y; sp[9]=z; echo "[${sp[*]:3}] [${sp[*]:1:1}] [${sp[*]: -4}]"` → all legs
 `[] [y] []`, bash `[y z] [x] [z]` (offset = first index ≥ off; a negative offset is relative to max index + 1). Files:
 bash-rt.c rt_arr_* key order, both grammars' compound assignment and array slicing.
 
-### T-519 bash: quoted or escaped glob characters stay active in case patterns, `${v#p}`/`${v%p}`/`${v/p/r}`, and `=~` · P1 · SH · OPEN [V]
+### T-519 bash: quoted or escaped glob characters stay active in case patterns, `${v#p}`/`${v%p}`/`${v/p/r}`, and `=~` · P1 · SH · IN PROGRESS (SH worker, round 1) [V]
 For s in `x`, `*`: `case $s in '*') c=star ;; *) c=other ;; esac` → `star` for BOTH (bash `other` for x); `${s#\*}` on `*` →
 `*` (bash empty); `p='?'; ${s%"$p"}` → empty (bash keeps s); `${s/'*'/R}` on `x` → `R` (bash `x`). `[[ abc =~ "a.c" ]]` and
 `[[ abc =~ a"."c ]]` → rc 0 (bash 1: a quoted part of the regex is literal). `[[ x == "$p" ]]` is already right — copy its
 quoting-aware word building. All legs. Files: case / pattern-operand word building in both grammars, rt_glob /
 rt_strip / rt_replace, the =~ regex builder.
 
-### T-520 bash: INT32_MIN prints as `-`; the compiler's shift by ≥ 32 or negative is IR poison · P1 · SH · OPEN [V]
+### T-520 bash: INT32_MIN prints as `-`; the compiler's shift by ≥ 32 or negative is IR poison · P1 · SH · IN PROGRESS (SH worker, round 1) [V]
 `v=(-2147483648 2147483647); m=${v[0]}; x=${v[1]}; echo "[$(( m ))] [$(( x + 1 ))] [$(( 1 << 31 ))]"` → all legs `[-] [-] [-]`;
 rt_int2str (bash-rt.c ~425) and numToStr (bash-interpreter.abnf ~943) cannot negate INT_MIN; a later `printf %d` of it prints
 0. Shifts `$(( 1 << s )) $(( -8 >> s ))` for s in 32, 33, -1: interp and native wrap mod 32 (`1`, `-8`; `2`, `-4`; `-`, `-1`),
 llvm.Run gives `0 -1` / `0 -1` / `0 -1` — the emitted `shl`/`ashr` (bash-to-llvm-ir.abnf ~2306-2307) is unmasked, poison per
 LangRef. Bash (64-bit): `4294967296 -1`, `8589934592 -1`, `-9223372036854775808 -1` — see T-521 for the width.
 
-### T-521 bash: the arithmetic model is 32-bit, bash's is 64-bit · P2 · SH · OPEN [V]
+### T-521 bash: the arithmetic model is 32-bit, bash's is 64-bit · P2 · SH · IN PROGRESS (SH worker, round 1) [V]
 `t=10; big=3000000000; h=65536` (from an array): `$(( t ** t )) $(( big + 0 )) $(( h * h ))` → all legs
 `1410065408 -1294967296 0`, bash `10000000000 3000000000 4294967296`; literals above 2^31 wrap. The source says so
 (bash-interpreter.abnf ~3308) but manual 7.9 records only the `printf %x` consequence. Decide: widen to i64 in both
 halves and bash-rt.c, or record the whole model as a permanent divergence in 7.9.
 
-### T-522 bash: arithmetic `&&`/`||` do not short-circuit; the compiler's `?:` evaluates both arms; a variable's value is not evaluated as an expression · P1 · SH · OPEN [V]
+### T-522 bash: arithmetic `&&`/`||` do not short-circuit; the compiler's `?:` evaluates both arms; a variable's value is not evaluated as an expression · P1 · SH · IN PROGRESS (SH worker, round 1) [V]
 `z=0; echo "$(( z && (z = 9) )) z=$z"` → `0 z=9` (bash `0 z=0`); `$(( 1 || (z = 9) ))` → z=9 (bash 0). All legs.
 `k=1; echo "$(( k == 1 ? k++ : k-- )) k=$k"` → interp and bash `1 k=2`, run/native `1 k=1` (a select instead of branches).
 `r=a; a=7; echo "$(( r + 1 ))"` → `1` (bash 8: a name's value is itself evaluated); `e="1 + 2"; echo "$(( e * 2 )) $(( $e * 2 ))"`
@@ -658,23 +658,23 @@ halves and bash-rt.c, or record the whole model as a permanent divergence in 7.9
 has no arithmetic evaluator at runtime"; the interpreter can do it, and the compiler's answer should at least be an error
 rather than a silent 1. Files: arithmetic evaluation in both grammars.
 
-### T-523 bash: `return N` is not reduced mod 256; the compiler ignores `;&` and leaves `$?` after a case · P1 · SH · OPEN [V]
+### T-523 bash: `return N` is not reduced mod 256; the compiler ignores `;&` and leaves `$?` after a case · P1 · SH · IN PROGRESS (SH worker, round 1) [V]
 `f(){ return 300; }; f; echo $?` → 300 (bash 44); `g(){ return -1; }` → -1 (bash 255). All legs.
 `case "$1" in a) echo -n "A;" ;& b) echo -n "B;" ;; esac` with `a` → interp and bash `A;B;`, run/native `A;`.
 `false; case x in y) ;; esac; echo $?` and `false; case x in x) ;; esac; echo $?` → interp and bash 0 0, compiled 1 1.
 Files: return and case lowering in bash-to-llvm-ir.abnf; return in both grammars.
 
-### T-524 bash: `[[ A -eq B ]]` operands are not arithmetic · P1 · SH · OPEN [V]
+### T-524 bash: `[[ A -eq B ]]` operands are not arithmetic · P1 · SH · IN PROGRESS (SH worker, round 1) [V]
 `[[ 2+3 -eq 5 ]]`, `[[ 010 -eq 8 ]]`, `x=4; [[ x -eq 4 ]]` → rc 1 1 1 in all legs, bash 0 0 0 (the numeric tests evaluate both
 sides as arithmetic expressions; octal included). Same for -ne/-lt/-le/-gt/-ge. Files: [[ ]] numeric tests in both grammars.
 
-### T-525 bash: `${N-word}`/`${N+word}` on positional parameters; `${!ref}` through an array element · P1 · SH · OPEN [V]
+### T-525 bash: `${N-word}`/`${N+word}` on positional parameters; `${!ref}` through an array element · P1 · SH · IN PROGRESS (SH worker, round 1) [V]
 `f(){ echo "[${2-unset}] [${3:-dflt}] [${1+set}]"; }; f; f one` → interp `[unset] [dflt] []` twice (wrong for `${1+set}` when
 $1 is set), run/native `[] [dflt] [set]` twice, bash `[unset] [dflt] []` / `[unset] [dflt] [set]`. `arr=(x y z); r1='arr[1]';
 r2=arr; echo "[${!r1}] [${!r2}]"` → interp `[] [x]`, compiled `[] []`, bash `[y] [x]`. Files: parameter expansion in both
 grammars.
 
-### T-526 bash: printf flags, operands and escapes · P1 · SH · OPEN [V]
+### T-526 bash: printf flags, operands and escapes · P1 · SH · IN PROGRESS (SH worker, round 1) [V]
 All legs: `%05d` of -7 → `000-7` (bash `-0007`); `%#05x` 255 → `00xff` (`0x0ff`); `%+d`, `% d` ignored (`+5`, ` 5`); `%-+4d` 3 →
 `3   ` (`+3  `); `"'A"` / `"'a"` operands → 0 0 (65 97); `%*d` / `%.*s` unsupported (`<5d><42s>`, bash `<   42><ab>`);
 `printf -- fmt` treats `--` as the format. Finder also: escapes in the FORMAT (`\101`, `\x41`) left literal; `%b` of `\0101`
@@ -682,26 +682,26 @@ All legs: `%05d` of -7 → `000-7` (bash `-0007`); `%#05x` 255 → `00xff` (`0x0
 (interp right); rc stays 0 on an invalid number. Files: printfBuiltin (bash-interpreter.abnf ~3305), printf lowering in
 bash-to-llvm-ir.abnf, bash-rt.c rt_pad / rt_unescape.
 
-### T-527 bash: `${v/p/r}` details — `&` in the replacement, an empty subject, extglob without shopt; the compiler's `${v%?}` splits UTF-8 · P1 · SH · OPEN [V]
+### T-527 bash: `${v/p/r}` details — `&` in the replacement, an empty subject, extglob without shopt; the compiler's `${v%?}` splits UTF-8 · P1 · SH · IN PROGRESS (SH worker, round 1) [V]
 `k=hello; echo "[${k/l/<&>}] [${k//l/&&}]"` → `[he<&>lo] [he&&&&o]` (bash 5.2+ patsub_replacement: `[he<l>lo] [hellllo]`).
 `e=""; echo "[${e/*/R}] [${e//*/R}]"` → `[] []` (bash `[R] [R]`). `s=aXa; echo "[${s#@(a|X)}] [${s//@(a|X)/-}]"` → `[Xa] [---]`
 (bash without `shopt -s extglob`: `[aXa] [aXa]`). These three in all legs. `v=hé; echo "[${v%?}]"` → interp and bash `[h]`,
 run/native `[h\xC3]` (bash-rt.c rt_strip suffix branch; `${v#?}` is right).
 
-### T-528 bash: `${x:?msg}` in a subshell, and silent arithmetic / substring errors · P1 · SH · OPEN [V]
+### T-528 bash: `${x:?msg}` in a subshell, and silent arithmetic / substring errors · P1 · SH · IN PROGRESS (SH worker, round 1) [V]
 `(: ${u:?custom}) 2>/dev/null; echo "rc=$?"; echo after` → interp prints `bash interpreter error: u: custom` and the WHOLE
 program exits 2; run/native `rc=0` (no error at all); bash `rc=1`, `after`. `f(){ echo "r=$(( 7 / d ))"; echo after; }` with
 d=0, `$(( 2 ** -1 ))`, `${s:1:-3}` on `abc` → all legs answer `r=0`, `pow=1`, `sub=[]` and carry on; bash reports division by 0
 / negative exponent / substring expression < 0 and aborts the command (`st=1`). Files: error paths in both grammars and
 bash-rt.c.
 
-### T-529 bash: command substitution nests at most 8 deep natively · P2 · SH · OPEN [V]
+### T-529 bash: command substitution nests at most 8 deep natively · P2 · SH · IN PROGRESS (SH worker, round 1) [V]
 `d(){ if [ "$1" -le 0 ]; then echo 0; return; fi; echo $(( 1 + $(d $(( $1 - 1 ))) )); }; echo $(d 6); echo $(d 7); echo $(d 8)`
 → interp and bash `6 7 8`; native `6 7` then `bash-rt: subshell nesting exhausted ... 8 of 8`, exit 70; llvm.Run no output at
 all (rt_die's `write` is undefined under llvm.Run). Ordinary recursive functions (fib 10) hit it. `SSDEPTH 8` in
 bash-rt.c ~3037: grow the save stack dynamically.
 
-### T-531 bash compiler: `break N` beyond the loop depth is a compile error · P3 · SH · OPEN [V]
+### T-531 bash compiler: `break N` beyond the loop depth is a compile error · P3 · SH · IN PROGRESS (SH worker, round 1) [V]
 `for i in 1 2; do for j in 1 2; do break 5; done; echo never; done; echo "done rc=$?"` → interp and bash `done rc=0`; the
 compiler stops with `break used outside a loop` (bash breaks every enclosing loop). Finder also hit compiler rejects
 `unset "d[$((i+1))]"` ("unset needs a literal name") and a non-literal printf format.
