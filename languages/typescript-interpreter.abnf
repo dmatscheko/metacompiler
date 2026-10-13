@@ -6966,7 +6966,7 @@ NotFuncHead = :script(~~
                 return biToStr(target, radix)
             }
             if (name == "valueOf") { return target }
-            fail("unknown method '" + name + "' on a BigInt")
+            biRaise("TypeError: " + site + " is not a function")
         }
         if (target != undefined && target != null && target.__class != undefined) {
             var m = undefined

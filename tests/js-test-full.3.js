@@ -1948,6 +1948,10 @@ function s82() {
     me = ""
     try { /a/.nope(1) } catch (e) { me = e.name + ": " + e.message }
     check("mm82b", me === "TypeError: /a/.nope is not a function")
+    me = ""
+    const big = 5n
+    try { big.nope(1) } catch (e) { me = e.name + ": " + e.message }
+    check("mm82c", me === "TypeError: big.nope is not a function")
     let log = []
     outer: for (const a of s82iter("A", log)) {
         try {

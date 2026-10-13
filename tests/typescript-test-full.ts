@@ -3772,6 +3772,10 @@ function s76() {
     me = "";
     try { (/a/ as any).nope(1); } catch (e: any) { me = e.name + ": " + e.message; }
     check("mm76b", me === "TypeError: /a/.nope is not a function");
+    me = "";
+    const big: any = 5n;
+    try { big.nope(1); } catch (e: any) { me = e.name + ": " + e.message; }
+    check("mm76c", me === "TypeError: big.nope is not a function");
     let log: string[] = [];
     outer: for (const a of s76iter("A", log)) {
         try {
