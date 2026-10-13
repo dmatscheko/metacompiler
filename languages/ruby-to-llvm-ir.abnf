@@ -5475,10 +5475,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // on), and "p" is the engine's POSIX BRACKET EXPRESSIONS and nothing else: Ruby
     // has [[:alpha:]] but is NOT a POSIX ERE - it keeps \d, \w, \s, lazy quantifiers,
     // (?...) groups and an escaping backslash inside a bracket, all of which the
-    // engine's whole-dialect "e" letter would remove. o/u/n/e/s are encoding and
+    // engine's whole-dialect "e" letter would remove. The engine's "n" makes a
+    // backreference to a group that did not take part fail. o/u/n/e/s are encoding and
     // once-only hints that do not change the match; they are accepted and ignored.
     function rubyReFlags(rflags) {
-        var out = "mp"
+        var out = "mpn"
         for (var i = 0; i < rflags.length; i++) {
             var f = rflags.charAt(i)
             if (f == "i") { out += "i" }

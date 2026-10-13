@@ -6454,6 +6454,33 @@ def s123():
           and S123err(lambda: f"{p:x}") == "TypeError: unsupported format string passed to S123P.__format__"
           and S123err(lambda: format(p, ">3")) == "TypeError: unsupported format string passed to S123P.__format__")
 
+# ===== SECTION 124: regex inline flags, unset backreferences, $ and \Z =====
+# (?aiLmsux) at the start sets flags for the whole pattern and shows in .flags;
+# (?imsx-imsx:...) scopes them. A backreference to a group that did not take
+# part fails. $ also matches before a final newline; \Z only at the very end.
+import re as S124re
+
+def S124m(p, s, fl=0):
+    m = S124re.search(p, s, fl)
+    return None if m is None else m.group(0)
+
+def s124():
+    check("rxif1", [S124m(r"(?i)A", "xa"), S124m(r"(?s)a.b", "a\nb"), S124m(r"(?x) a b # c", "ab"),
+                    S124m(r"(?m)^b$", "a\nb\nc"), S124m(r"(?im)^B$", "x\nb\ny"), S124m(r"(?i)[^a]", "AaB")]
+          == ["a", "a\nb", "ab", "b", "b", "B"])
+    check("rxif2", [S124m(r"a(?i:B)c", "aBc"), S124m(r"a(?-i:B)c", "abc", S124re.I), S124m(r"(?i)a(?-i:b)", "AB"),
+                    S124m(r"(?i)a(?-i:b)", "Ab"), S124m(r"x(?i:[a-c]+)y", "xBcAy"), S124m(r"(?x:a b)c d", "abc d"),
+                    S124m(r"(?s:a.)b.", "a\nb\n"), S124m(r"(?s:a.)b.", "a\nbx"), S124m(r"(?m:^b)", "a\nb")]
+          == ["aBc", None, None, "Ab", "xBcAy", "abc d", None, "a\nbx", "b"])
+    check("rxif3", S124re.compile("(?i)a").flags == 34 and S124re.compile("(?s)a", S124re.M).flags == 56
+          and S124re.compile("(?im)a").flags == 42 and S124re.compile("a(?i:b)").flags == 32)
+    check("rxif4", S124m(r"(?i)(a)\1", "aA") == "aA" and S124m(r"(?i:(a)\1)", "aA") == "aA" and S124m(r"(a)\1", "aA") is None)
+    check("rxbr1", S124re.fullmatch(r"(b)?a\1", "a") is None and S124re.fullmatch(r"(b)?a\1", "bab").group(0) == "bab"
+          and S124re.search(r"(?:(x)|y)z\1", "yzx") is None)
+    check("rxeol1", [S124m("a$", "a\n"), S124m(r"a\Z", "a\n"), S124m(r"a\Z", "xa"), S124m("^b", "a\nb"),
+                     S124m("a$", "a\nb", S124re.M)] == ["a", None, "a", None, "a"]
+          and S124re.findall(r"\w$", "ab\ncd\n") == ["d"] and S124re.findall(r"^\w", "ab\ncd", S124re.M) == ["a", "c"])
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -6575,5 +6602,6 @@ def main():
     s121() # SECTION-CALL 121
     s122() # SECTION-CALL 122
     s123() # SECTION-CALL 123
+    s124() # SECTION-CALL 124
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

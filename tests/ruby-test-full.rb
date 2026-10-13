@@ -3897,6 +3897,15 @@ def s88
   check("stf88b", fl == [:bad, 16.0, -16.0, 0.5, 1000.0, 10000000000.0, :bad, Float::INFINITY, 3.0, :bad, :bad])
 end
 
+# ===== SECTION 89: a backreference to a group that did not take part =====
+# Onigmo fails it, where JavaScript matches the empty string. Every right-hand
+# side is /usr/bin/ruby 2.6.10's own answer. THIS SECTION RUNS UNDER REAL RUBY.
+def s89
+  check("rxbr89a", ("a" =~ /\A(b)?a\1\z/) == nil && ("bab" =~ /\A(b)?a\1\z/) == 0 && "xa".sub(/(b)?a\1/, "Z") == "xa")
+  check("rxbr89b", Regexp.new("\\A(b)?a\\1\\z").match("a") == nil && "a".match("(b)?a\\1") == nil &&
+        /(x)?y\1/i.match("Y") == nil)
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -3947,5 +3956,6 @@ s85() # SECTION-CALL 85
 s86() # SECTION-CALL 86
 s87() # SECTION-CALL 87
 s88() # SECTION-CALL 88
+s89() # SECTION-CALL 89
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

@@ -4491,7 +4491,7 @@ function rbRxMatchOp(l, r) {
 // abnf/jsrtregex.go, which states the rule.
 function rbReOpts(flags, embed) {
     var f = flags
-    if (f.substring(0, 2) == "mp") { f = f.substring(2, f.length) }
+    if (f.substring(0, 3) == "mpn") { f = f.substring(3, f.length) }
     var m = f.indexOf("s") >= 0
     var i = f.indexOf("i") >= 0
     var x = f.indexOf("x") >= 0
@@ -4523,7 +4523,7 @@ function rbReDescSrc(src) {
 // abnf/jsrtregex.go.
 function rbReOptBits(flags) {
     var f = flags
-    if (f.substring(0, 2) == "mp") { f = f.substring(2, f.length) }
+    if (f.substring(0, 3) == "mpn") { f = f.substring(3, f.length) }
     var n = 0
     if (f.indexOf("i") >= 0) { n = n + 1 }
     if (f.indexOf("x") >= 0) { n = n + 2 }
@@ -4539,7 +4539,7 @@ function rbRegexNew(argv) {
     var bits = 0
     if (typeof o == "number") { bits = Math.floor(o) }
     else if (!rtIsNil(o) && o !== false) { bits = 1 }
-    var f = "mp"
+    var f = "mpn"
     if (bits % 2 == 1) { f = f + "i" }
     if (Math.floor(bits / 4) % 2 == 1) { f = f + "s" }
     if (Math.floor(bits / 2) % 2 == 1) { f = f + "x" }
@@ -4630,7 +4630,7 @@ function rbRxMethod(target, name, args) {
             // it LITERALLY ("a.c".gsub(".", "-") is "a-c").
             var psrc = rbStr(args[0])
             if (name != "match" && name != "match?" && name != "=~") { psrc = rbRxQuoteLit(psrc) }
-            pat = rbRxNewRegex(psrc, "m")
+            pat = rbRxNewRegex(psrc, "mpn")
         }
         var sblk = rbBlockOf(args)
         if (sblk !== null && (name == "sub" || name == "sub!" || name == "gsub" || name == "gsub!")) {

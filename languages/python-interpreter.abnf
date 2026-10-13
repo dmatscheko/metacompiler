@@ -4378,7 +4378,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pyReFlagStr(fl) {
         var n = 0
         if (typeof fl == "number") { n = fl | 0 }
-        var s = ""
+        var s = "P"
         if ((n & PY_RE_I) != 0) { s += "i" }
         if ((n & PY_RE_S) != 0) { s += "s" }
         if ((n & PY_RE_M) != 0) { s += "m" }
@@ -4444,9 +4444,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var neutral = pyReFlagStr(fl)
         var tr = pyRePat(pat)
         if (!tr.ok) { fail("re.error: " + tr.err) }
-        // Python's own .flags always reports re.UNICODE for a str pattern.
-        return {__pyre: true, pattern: pat, flags: pyReFlagNum(fl) | PY_RE_U,
-                __src: tr.src, __nf: neutral, prog: pyReProg(tr.src, neutral)}
+        // Python's own .flags always reports re.UNICODE for a str pattern, and the
+        // pattern's leading inline flags.
+        var prog = pyReProg(tr.src, neutral)
+        return {__pyre: true, pattern: pat, flags: pyReFlagNum(fl) | PY_RE_U | rxGFlagBits(prog.gflags),
+                __src: tr.src, __nf: neutral, prog: prog}
     }
     function isPyRe(v) { return v !== null && v !== undefined && typeof v == "object" && v.__pyre === true }
     function isPyMatch(v) { return v !== null && v !== undefined && typeof v == "object" && v.__pymatch === true }

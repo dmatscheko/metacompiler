@@ -70,6 +70,15 @@
 //                                            not take part FAILS; the errors are
 //                                            Java's descriptions, positioned in
 //                                            re.errAt)
+//                                            n (a backreference to a group that did
+//                                            not take part FAILS, as in Python and
+//                                            Ruby, instead of matching empty; J and
+//                                            P imply n)
+//                                            P (Python: inline flags (?aiLmsux) at
+//                                            the start and scoped (?imsx-imsx:...),
+//                                            $ also matches before a final newline,
+//                                            \Z is the very end; re.gflags answers
+//                                            the inline letters for .flags)
 //                                            re.ok is false and re.err is set on a
 //                                            bad pattern; re.errAt is the error's
 //                                            index into the pattern, or -1.
@@ -125,6 +134,8 @@ var RX_NWORDB = 4  // \B
 var RX_BOS = 5     // \A
 var RX_EOS = 6     // \z
 var RX_EOSNL = 7   // \Z (end, or just before a final newline)
+var RX_MBOL = 8    // ^ under P with m in force: a line start whatever re.multi says
+var RX_MEOL = 9    // $ under P with m in force
 
 // ----- Character-class shorthands -----
 var RX_SD = 1      // \d
@@ -299,6 +310,30 @@ function rxSwapCase(c) {
     if (c >= 65 && c <= 90) { return c + 32 }
     if (c >= 97 && c <= 122) { return c - 32 }
     return -1
+}
+
+// rxClsFold adds the other case of every ASCII letter in the class's ranges, which
+// is rxClsMatch's icase rule decided at parse time: P resolves a scoped (?i:...)
+// that way, so the matcher's re.icase stays one flag for the whole pattern.
+// Shorthands are closed under case already.
+function rxClsFold(cls) {
+    var lo = cls.lo
+    var hi = cls.hi
+    var n = lo.length
+    var i = 0
+    while (i < n) {
+        var a = lo[i]
+        var b = hi[i]
+        if (a < 65) { a = 65 }
+        if (b > 90) { b = 90 }
+        if (a <= b) { rxClsAdd(cls, a + 32, b + 32) }
+        a = lo[i]
+        b = hi[i]
+        if (a < 97) { a = 97 }
+        if (b > 122) { b = 122 }
+        if (a <= b) { rxClsAdd(cls, a - 32, b - 32) }
+        i = i + 1
+    }
 }
 
 // rxClsHit is the raw membership test, BEFORE negation.
@@ -1254,6 +1289,7 @@ function rxParseGroup(st) {
             rxExpect(st, 41, "unterminated group")
             return ng
         }
+        if (st.py && "aiLmsux-".indexOf(p.charAt(st.i)) >= 0) { return rxParseFlagsP(st) }
         rxErr(st, "unsupported group form (?" + p.charAt(st.i) + ")")
         return rxNode("empty")
     }
@@ -1265,6 +1301,81 @@ function rxParseGroup(st) {
     st.depth = st.depth - 1
     rxExpect(st, 41, st.ere ? "Unmatched ( or \\(" : "unterminated group")
     return cg
+}
+
+// rxParseFlagsP reads Python's inline flags; st.i is at the first letter after
+// "(?". (?aiLmsux) sets flags for the whole pattern and is legal only where
+// nothing but other such groups precedes it (st.gend); (?imsx-imsx:...) scopes them
+// to a non-capturing group. Under P, i decides case folding per atom
+// (rxParsePiece) and m picks the kind of ^ and $ as they are read, so neither needs
+// state in the matcher. a and u are accepted and change nothing here.
+function rxParseFlagsP(st) {
+    var p = st.p
+    var open = st.i - 2
+    var on = ""
+    var off = ""
+    var neg = false
+    while (st.i < st.n) {
+        var c = p.charAt(st.i)
+        if (c == "-" && !neg) {
+            neg = true
+        } else if ("aiLmsux".indexOf(c) >= 0) {
+            if (neg) {
+                if ("imsx".indexOf(c) < 0) {
+                    rxErr(st, "bad inline flag: cannot turn off flags 'a', 'u' and 'L'")
+                    return rxNode("empty")
+                }
+                off = off + c
+            } else {
+                on = on + c
+            }
+        } else {
+            break
+        }
+        st.i = st.i + 1
+    }
+    if (on.indexOf("L") >= 0) {
+        rxErr(st, "bad inline flag: cannot use 'L' flag with a str pattern")
+        return rxNode("empty")
+    }
+    var k = st.i < st.n ? p.charCodeAt(st.i) : 0
+    if (k == 41 && !neg) {
+        st.i = st.i + 1
+        if (open != st.gend) {
+            rxErrAt(st, "global flags not at the start of the expression", open)
+            return rxNode("empty")
+        }
+        st.gend = st.i
+        st.gflags = st.gflags + on
+        rxFlagsSetP(st, on, true)
+        return rxNode("empty")
+    }
+    if (k != 58) {
+        rxErr(st, neg ? "missing :" : "missing -, : or )")
+        return rxNode("empty")
+    }
+    st.i = st.i + 1
+    var icase = st.icase
+    var multi = st.multi
+    var dotall = st.dotall
+    var ext = st.ext
+    rxFlagsSetP(st, on, true)
+    rxFlagsSetP(st, off, false)
+    var g = rxNode("group")
+    g.items.push(rxParseAlt(st))
+    rxExpect(st, 41, "missing ), unterminated subpattern")
+    st.icase = icase
+    st.multi = multi
+    st.dotall = dotall
+    st.ext = ext
+    return g
+}
+
+function rxFlagsSetP(st, letters, v) {
+    if (letters.indexOf("i") >= 0) { st.icase = v }
+    if (letters.indexOf("m") >= 0) { st.multi = v }
+    if (letters.indexOf("s") >= 0) { st.dotall = v }
+    if (letters.indexOf("x") >= 0) { st.ext = v }
 }
 
 function rxExpect(st, code, msg) {
@@ -1299,12 +1410,14 @@ function rxParseAtom(st) {
         st.i = st.i + 1
         var b = rxNode("assert")
         b.gidx = RX_BOL
+        if (st.py) { b.gidx = st.multi ? RX_MBOL : RX_BOS }
         return b
     }
     if (c == 36) { // $
         st.i = st.i + 1
         var d = rxNode("assert")
         d.gidx = RX_EOL
+        if (st.py) { d.gidx = st.multi ? RX_MEOL : RX_EOSNL }
         return d
     }
     if (c == 92 && st.ere) {
@@ -1350,7 +1463,7 @@ function rxParseAtom(st) {
             if (nxt == 66) { a.gidx = RX_NWORDB }
             if (nxt == 65) { a.gidx = RX_BOS }
             if (nxt == 122) { a.gidx = RX_EOS }
-            if (nxt == 90) { a.gidx = RX_EOSNL }
+            if (nxt == 90) { a.gidx = st.py ? RX_EOS : RX_EOSNL }
             return a
         }
         st.i = st.i + 1
@@ -1500,6 +1613,10 @@ function rxParseBoundJ(st) {
 
 function rxParsePiece(st) {
     var atom = rxParseAtom(st)
+    if (st.py && st.icase) {
+        if (atom.t == "cls") { rxClsFold(atom.cls) }
+        if (atom.t == "bref") { atom.min = 1 }
+    }
     rxSkipX(st)
     var seen = 0
     while (st.i < st.n) {
@@ -1685,7 +1802,7 @@ function rxEmit(pg, node) {
         return
     }
     if (t == "bref") {
-        rxAdd(pg, RX_BREF, node.gidx, 0, pg.dummy)
+        rxAdd(pg, RX_BREF, node.gidx, node.min, pg.dummy)
         return
     }
     if (t == "cat") {
@@ -1929,6 +2046,8 @@ function rxCompile(pattern, flags) {
     var jsrep = false
     var posix = false
     var java = false
+    var py = false
+    var bfail = false
     var fi = 0
     while (fi < flags.length) {
         var f = flags.charAt(fi)
@@ -1942,8 +2061,11 @@ function rxCompile(pattern, flags) {
         else if (f == "j") { jsrep = true }
         else if (f == "p") { posix = true }
         else if (f == "J") { java = true }
+        else if (f == "P") { py = true }
+        else if (f == "n") { bfail = true }
         fi = fi + 1
     }
+    if (java || py) { bfail = true }
     // The POSIX ERE dialect (bash's [[ =~ ]]). What it changes is spelled out at each
     // site; the two whole-engine consequences are here. A "." matches a newline in an
     // ERE (there is no "dot does not cross a line" rule to switch off), and an ERE has
@@ -1968,7 +2090,13 @@ function rxCompile(pattern, flags) {
         p: pat, i: 0, n: pat.length, err: "",
         ngroups: 0, names: [], nameGroups: [], pending: [], ext: ext, dotall: dotall,
         octal: octal, ntotal: ere ? 0 : rxCountGroups(pat), ere: ere, posix: posix,
-        depth: 0, java: java, errAt: -1, pcls: rxNewCls()
+        depth: 0, java: java, errAt: -1, pcls: rxNewCls(),
+        py: py, icase: icase, multi: multi, gend: 0, gflags: ""
+    }
+    // Under P case folding and line anchoring were decided per atom while parsing.
+    if (py) {
+        icase = false
+        multi = false
     }
     var ast = rxParseAlt(st)
     // Resolve every \k<name> now that the whole name table is known.
@@ -1988,6 +2116,7 @@ function rxCompile(pattern, flags) {
         return {ok: false, err: st.err, errAt: st.errAt, ops: [], as: [], bs: [], clss: [],
                 ngroups: 0, nmarks: 0, names: [], nameGroups: [],
                 icase: icase, dotall: dotall, multi: multi, jsrep: jsrep, java: java,
+                bfail: bfail, gflags: "",
                 cmin: [], cmax: [], cgreedy: [], lbmin: [], lbmax: [],
                 src: pattern, flags: flags}
     }
@@ -2001,6 +2130,7 @@ function rxCompile(pattern, flags) {
         ok: true, err: "", errAt: -1, ops: pg.ops, as: pg.as, bs: pg.bs, clss: pg.clss,
         ngroups: st.ngroups, nmarks: pg.nmarks, names: st.names, nameGroups: st.nameGroups,
         icase: icase, dotall: dotall, multi: multi, jsrep: jsrep, java: java,
+        bfail: bfail, gflags: st.gflags,
         cmin: pg.cmin, cmax: pg.cmax, cgreedy: pg.cgreedy, lbmin: pg.lbmin, lbmax: pg.lbmax,
         src: pattern, flags: flags
     }
@@ -2017,14 +2147,14 @@ function rxAssertOK(re, text, kind, sp) {
         if (sp == n) { return true }
         return sp == n - 1 && text.charCodeAt(sp) == 10
     }
-    if (kind == RX_BOL) {
+    if (kind == RX_BOL || kind == RX_MBOL) {
         if (sp == 0) { return true }
-        if (!re.multi) { return false }
+        if (!re.multi && kind == RX_BOL) { return false }
         return text.charCodeAt(sp - 1) == 10
     }
-    if (kind == RX_EOL) {
+    if (kind == RX_EOL || kind == RX_MEOL) {
         if (sp == n) { return true }
-        if (!re.multi) { return false }
+        if (!re.multi && kind == RX_EOL) { return false }
         return text.charCodeAt(sp) == 10
     }
     var before = false
@@ -2144,8 +2274,8 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st) {
             }
             if (from < 0 || to < 0) {
                 // A group that did not take part matches the empty string - except
-                // in Java, where the backreference fails.
-                if (re.java) { return -1 }
+                // under n (Java, Python, Ruby), where the backreference fails.
+                if (re.bfail) { return -1 }
                 pc = pc + 1
             } else {
                 var len = to - from
@@ -2155,7 +2285,7 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st) {
                     var lc = text.charCodeAt(from + bi)
                     var rc = text.charCodeAt(sp + bi)
                     if (lc != rc) {
-                        if (!re.icase) { return -1 }
+                        if (!re.icase && bs[pc] == 0) { return -1 }
                         var alt = rxSwapCase(rc)
                         if (alt != lc) { return -1 }
                     }
@@ -2475,7 +2605,7 @@ function rxSplit(re, text) {
 // happens to spell an Object.prototype member ("toString", "valueOf") would
 // otherwise read back a function from the prototype instead of undefined. See
 // docs/abnf-dialect-gotchas.md. The neutral flag string is only ever drawn from
-// "ismxqjpeJ", so the space is an unambiguous separator.
+// "ismxqjpeJnP", so the space is an unambiguous separator.
 var rxCache = {}
 
 function rxGet(pattern, flags) {
@@ -2485,6 +2615,19 @@ function rxGet(pattern, flags) {
     var re = rxCompile(pattern, flags)
     rxCache[key] = re
     return re
+}
+
+// rxGFlagBits answers CPython's flag bits for P's inline flag letters (re.gflags),
+// which Python ORs into a pattern's .flags. Twin in abnf/jsrtregex.go.
+function rxGFlagBits(letters) {
+    var n = 0
+    if (letters.indexOf("i") >= 0) { n = n | 2 }
+    if (letters.indexOf("m") >= 0) { n = n | 8 }
+    if (letters.indexOf("s") >= 0) { n = n | 16 }
+    if (letters.indexOf("u") >= 0) { n = n | 32 }
+    if (letters.indexOf("x") >= 0) { n = n | 64 }
+    if (letters.indexOf("a") >= 0) { n = n | 256 }
+    return n
 }
 
 // ----- The neutral Regexp / MatchData value -----

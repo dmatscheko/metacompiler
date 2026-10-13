@@ -11203,11 +11203,11 @@ var pyEReU = 32
 var pyEReX = 64
 var pyEReA = 256
 
-// pyEReFlagStr is Go pyReFlagStr: the bitmask onto the engine's four neutral
+// pyEReFlagStr is Go pyReFlagStr: the bitmask onto the Python dialect P and four neutral
 // letters. re.A is the engine's only behaviour and re.U is the py3 default, so
 // both are accepted and ignored; re.L has no locale to read.
 function pyEReFlagStr(n) {
-    var s = ""
+    var s = "P"
     if ((n & pyEReI) != 0) { s = s + "i" }
     if ((n & pyEReS) != 0) { s = s + "s" }
     if ((n & pyEReM) != 0) { s = s + "m" }
@@ -11331,7 +11331,7 @@ function pyERxCompile(pat, flags) {
     var re = rxGet(src, neutral)
     if (!re["ok"]) { fail("re.error: " + re["err"]) }
     // Python's own .flags always reports re.UNICODE for a str pattern.
-    return {__pyre: true, pattern: pat, flags: flags | pyEReU, __src: src, __nf: neutral}
+    return {__pyre: true, pattern: pat, flags: flags | pyEReU | rxGFlagBits(re["gflags"]), __src: src, __nf: neutral}
 }
 
 // pyERxSlotStr reads a string slot off one of the three shapes, defaulting to ""

@@ -38,11 +38,11 @@ const (
 	pyReA = 256
 )
 
-// pyReFlagStr maps the bitmask onto the engine's four neutral letters. re.A is the
-// engine's only behaviour and re.U is the py3 default, so both are accepted and
-// ignored; re.L has no locale to read.
+// pyReFlagStr maps the bitmask onto the engine's Python dialect P and four neutral
+// letters. re.A is the engine's only behaviour and re.U is the py3 default, so
+// both are accepted and ignored; re.L has no locale to read.
 func pyReFlagStr(n int) string {
-	s := ""
+	s := "P"
 	if n&pyReI != 0 {
 		s += "i"
 	}
@@ -192,7 +192,7 @@ func (rt *jsrt) rxPyCompile(pat string, flags int) *jsObject {
 	o.set("__pyre", true)
 	o.set("pattern", pat)
 	// Python's own .flags always reports re.UNICODE for a str pattern.
-	o.set("flags", float64(flags|pyReU))
+	o.set("flags", float64(flags|pyReU|rxGFlagBits(re.gflags)))
 	o.set("__src", src)
 	o.set("__nf", neutral)
 	return o

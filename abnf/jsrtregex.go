@@ -58,6 +58,8 @@ const (
 	rxBOS    = 5 // \A
 	rxEOS    = 6 // \z
 	rxEOSNL  = 7 // \Z
+	rxMBOL   = 8 // ^ under P with m in force
+	rxMEOL   = 9 // $ under P with m in force
 )
 
 // ----- Character-class shorthands -----
@@ -286,6 +288,30 @@ func (c *rxCls) matchX(ch rune, icase bool) bool {
 	return hit != c.neg
 }
 
+// fold adds the other case of every ASCII letter in the class's ranges. Twin of
+// rxClsFold in lib/regex.js.
+func (c *rxCls) fold() {
+	n := len(c.lo)
+	for i := 0; i < n; i++ {
+		for _, r := range [2][2]rune{{'A', 'Z'}, {'a', 'z'}} {
+			a, b := c.lo[i], c.hi[i]
+			if a < r[0] {
+				a = r[0]
+			}
+			if b > r[1] {
+				b = r[1]
+			}
+			if a <= b {
+				d := rune(32)
+				if r[0] == 'a' {
+					d = -32
+				}
+				c.add(a+d, b+d)
+			}
+		}
+	}
+}
+
 // rxSwapCase answers the other-case code point of an ASCII letter, or -1.
 func rxSwapCase(c rune) rune {
 	if c >= 'A' && c <= 'Z' {
@@ -374,6 +400,14 @@ type rxSt struct {
 	java  bool
 	errAt int
 	pcls  *rxCls
+	// py is the P flag; icase and multi the i and m in force where the parser
+	// stands, gend the end of the leading global flag groups and gflags their
+	// letters.
+	py     bool
+	icase  bool
+	multi  bool
+	gend   int
+	gflags string
 }
 
 // rxIsMetaCh answers whether a character has to be backslashed to stay a literal.
@@ -1342,6 +1376,9 @@ func (st *rxSt) parseGroup() *rxNode {
 			st.expect(')', "unterminated group")
 			return ng
 		}
+		if st.py && strings.ContainsRune("aiLmsux-", k) {
+			return st.parseFlagsP()
+		}
 		st.fail("unsupported group form (?" + string(st.p[st.i]) + ")")
 		return rxNewNode("empty")
 	}
@@ -1357,6 +1394,83 @@ func (st *rxSt) parseGroup() *rxNode {
 		st.expect(')', "unterminated group")
 	}
 	return cg
+}
+
+// parseFlagsP reads Python's inline flags. Twin of rxParseFlagsP in
+// lib/regex.js, which states the rules.
+func (st *rxSt) parseFlagsP() *rxNode {
+	open := st.i - 2
+	on, off := "", ""
+	neg := false
+	for ; st.i < st.n; st.i++ {
+		c := st.p[st.i]
+		if c == '-' && !neg {
+			neg = true
+		} else if strings.ContainsRune("aiLmsux", c) {
+			if neg {
+				if !strings.ContainsRune("imsx", c) {
+					st.fail("bad inline flag: cannot turn off flags 'a', 'u' and 'L'")
+					return rxNewNode("empty")
+				}
+				off += string(c)
+			} else {
+				on += string(c)
+			}
+		} else {
+			break
+		}
+	}
+	if strings.Contains(on, "L") {
+		st.fail("bad inline flag: cannot use 'L' flag with a str pattern")
+		return rxNewNode("empty")
+	}
+	k := rune(0)
+	if st.i < st.n {
+		k = st.p[st.i]
+	}
+	if k == ')' && !neg {
+		st.i++
+		if open != st.gend {
+			st.failAt("global flags not at the start of the expression", open)
+			return rxNewNode("empty")
+		}
+		st.gend = st.i
+		st.gflags += on
+		st.setFlagsP(on, true)
+		return rxNewNode("empty")
+	}
+	if k != ':' {
+		if neg {
+			st.fail("missing :")
+		} else {
+			st.fail("missing -, : or )")
+		}
+		return rxNewNode("empty")
+	}
+	st.i++
+	icase, multi, dotall, ext := st.icase, st.multi, st.dotall, st.ext
+	st.setFlagsP(on, true)
+	st.setFlagsP(off, false)
+	g := rxNewNode("group")
+	g.items = append(g.items, st.parseAlt())
+	st.expect(')', "missing ), unterminated subpattern")
+	st.icase, st.multi, st.dotall, st.ext = icase, multi, dotall, ext
+	return g
+}
+
+func (st *rxSt) setFlagsP(letters string, v bool) {
+	if strings.Contains(letters, "i") {
+		st.icase = v
+	}
+	if strings.Contains(letters, "m") {
+		st.multi = v
+	}
+	if strings.Contains(letters, "s") {
+		st.dotall = v
+	}
+	if strings.Contains(letters, "x") {
+		st.ext = v
+	}
 }
 
 func (st *rxSt) parseAtom() *rxNode {
@@ -1383,11 +1497,23 @@ func (st *rxSt) parseAtom() *rxNode {
 		st.i++
 		b := rxNewNode("assert")
 		b.gidx = rxBOL
+		if st.py {
+			b.gidx = rxBOS
+			if st.multi {
+				b.gidx = rxMBOL
+			}
+		}
 		return b
 	case '$':
 		st.i++
 		d := rxNewNode("assert")
 		d.gidx = rxEOL
+		if st.py {
+			d.gidx = rxEOSNL
+			if st.multi {
+				d.gidx = rxMEOL
+			}
+		}
 		return d
 	case '\\':
 		if st.ere {
@@ -1440,6 +1566,9 @@ func (st *rxSt) parseAtom() *rxNode {
 				a.gidx = rxEOS
 			case 'Z':
 				a.gidx = rxEOSNL
+				if st.py {
+					a.gidx = rxEOS
+				}
 			}
 			return a
 		}
@@ -1601,6 +1730,14 @@ func (st *rxSt) parseBound() (int, int, bool) {
 
 func (st *rxSt) parsePiece() *rxNode {
 	atom := st.parseAtom()
+	if st.py && st.icase {
+		if atom.t == "cls" {
+			atom.cls.fold()
+		}
+		if atom.t == "bref" {
+			atom.min = 1
+		}
+	}
 	st.skipX()
 	seen := 0
 	for st.i < st.n {
@@ -1825,7 +1962,7 @@ func (pg *rxProg) emit(node *rxNode) {
 	case "assert":
 		pg.add(rxOpAssert, node.gidx, 0, pg.dummy)
 	case "bref":
-		pg.add(rxOpBref, node.gidx, 0, pg.dummy)
+		pg.add(rxOpBref, node.gidx, node.min, pg.dummy)
 	case "cat":
 		for _, it := range node.items {
 			pg.emit(it)
@@ -2059,8 +2196,12 @@ type rxRe struct {
 	jsrep bool
 	// java is the J flag, errAt the index of a J error (-1: none), and the rest
 	// the counted-loop and lookbehind tables (rxProg).
-	java                bool
-	errAt               int
+	java  bool
+	errAt int
+	// bfail is the n flag (implied by J and P): a backreference to a group that
+	// did not take part fails. gflags are P's leading inline flag letters.
+	bfail               bool
+	gflags              string
 	cmin, cmax, cgreedy []int
 	lbmin, lbmax        []int
 	src                 string
@@ -2078,6 +2219,8 @@ func rxCompile(pattern, flags string) *rxRe {
 	jsrep := strings.ContainsRune(flags, 'j')
 	posix := strings.ContainsRune(flags, 'p')
 	java := strings.ContainsRune(flags, 'J')
+	py := strings.ContainsRune(flags, 'P')
+	bfail := java || py || strings.ContainsRune(flags, 'n')
 	// The POSIX ERE dialect (bash's [[ =~ ]]). What it changes is spelled out at each
 	// site; the two whole-engine consequences are here. A "." matches a newline in an
 	// ERE, and an ERE has POSIX capture semantics, of which the visible one is that an
@@ -2100,7 +2243,12 @@ func rxCompile(pattern, flags string) *rxRe {
 	if quoting {
 		pat = rxExpandQuotes(pat)
 	}
-	st := &rxSt{p: pat, ext: ext, dotall: dotall, octal: octal, ere: ere, posix: posix, java: java, errAt: -1}
+	st := &rxSt{p: pat, ext: ext, dotall: dotall, octal: octal, ere: ere, posix: posix, java: java, errAt: -1,
+		py: py, icase: icase, multi: multi}
+	// Under P case folding and line anchoring are decided per atom while parsing.
+	if py {
+		icase, multi = false, false
+	}
 	st.n = len(st.p)
 	if !ere {
 		st.ntotal = rxCountGroups(st.p)
@@ -2123,7 +2271,7 @@ func rxCompile(pattern, flags string) *rxRe {
 	}
 	if st.err != "" {
 		return &rxRe{ok: false, err: st.err, errAt: st.errAt, icase: icase, dotall: dotall, multi: multi,
-			jsrep: jsrep, java: java, src: pattern, flags: flags}
+			jsrep: jsrep, java: java, bfail: bfail, src: pattern, flags: flags}
 	}
 	pg := &rxProg{jsrep: jsrep, dummy: rxNewCls()}
 	pg.add(rxOpSave, 0, 0, pg.dummy)
@@ -2134,6 +2282,7 @@ func rxCompile(pattern, flags string) *rxRe {
 		ok: true, ops: pg.ops, as: pg.as, bs: pg.bs, clss: pg.clss,
 		ngroups: st.ngroups, nmarks: pg.nmarks, names: st.names, nameGroups: st.nameGroups,
 		icase: icase, dotall: dotall, multi: multi, jsrep: jsrep, java: java, errAt: -1,
+		bfail: bfail, gflags: st.gflags,
 		cmin: pg.cmin, cmax: pg.cmax, cgreedy: pg.cgreedy, lbmin: pg.lbmin, lbmax: pg.lbmax,
 		src: pattern, flags: flags,
 	}
@@ -2165,19 +2314,19 @@ func (re *rxRe) assertOK(text []rune, kind, sp int) bool {
 			return true
 		}
 		return sp == n-1 && text[sp] == '\n'
-	case rxBOL:
+	case rxBOL, rxMBOL:
 		if sp == 0 {
 			return true
 		}
-		if !re.multi {
+		if !re.multi && kind == rxBOL {
 			return false
 		}
 		return text[sp-1] == '\n'
-	case rxEOL:
+	case rxEOL, rxMEOL:
 		if sp == n {
 			return true
 		}
-		if !re.multi {
+		if !re.multi && kind == rxEOL {
 			return false
 		}
 		return text[sp] == '\n'
@@ -2304,9 +2453,9 @@ func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt)
 				from, to = caps[2*g], caps[2*g+1]
 			}
 			if from < 0 || to < 0 {
-				// A group that did not take part matches the empty string - except in
-				// Java, where the backreference fails.
-				if re.java {
+				// A group that did not take part matches the empty string - except
+				// under n (Java, Python, Ruby), where the backreference fails.
+				if re.bfail {
 					return -1
 				}
 				pc++
@@ -2319,7 +2468,7 @@ func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt)
 			for bi := 0; bi < length; bi++ {
 				lc, rc := text[from+bi], text[sp+bi]
 				if lc != rc {
-					if !re.icase || rxSwapCase(rc) != lc {
+					if (!re.icase && re.bs[pc] == 0) || rxSwapCase(rc) != lc {
 						return -1
 					}
 				}
@@ -2581,6 +2730,21 @@ func (re *rxRe) expand(text []rune, m *rxMatch, repl string) string {
 // loop is compiled once even though the emitted IR hands the pattern over as a
 // plain string on every call.
 var rxCache = map[string]*rxRe{}
+
+// rxGFlagBits answers CPython's flag bits for P's inline flag letters. Twin of
+// rxGFlagBits in lib/regex.js.
+func rxGFlagBits(letters string) int {
+	n := 0
+	for _, b := range []struct {
+		c string
+		v int
+	}{{"i", 2}, {"m", 8}, {"s", 16}, {"u", 32}, {"x", 64}, {"a", 256}} {
+		if strings.Contains(letters, b.c) {
+			n |= b.v
+		}
+	}
+	return n
+}
 
 func rxGet(pattern, flags string) *rxRe {
 	key := flags + "\x00" + pattern
@@ -3013,7 +3177,7 @@ func (rt *jsrt) rxRegexMethod(target interface{}, name string, args []interface{
 				if name != "match" && name != "match?" && name != "=~" {
 					src = rxQuoteText(src)
 				}
-				reObj = rxNewRegexObj(src, "m")
+				reObj = rxNewRegexObj(src, "mpn")
 			}
 			switch name {
 			case "match":
@@ -3195,7 +3359,7 @@ func rubyReDescSrc(src string) string {
 // rubyReOptBits is Regexp#options from the engine flags: IGNORECASE 1, EXTENDED
 // 2, MULTILINE 4. Twin of reOptBits in ruby-interpreter.abnf.
 func rubyReOptBits(flags string) int {
-	flags = strings.TrimPrefix(flags, "mp")
+	flags = strings.TrimPrefix(flags, "mpn")
 	n := 0
 	if strings.Contains(flags, "i") {
 		n += 1
@@ -3222,7 +3386,7 @@ func (rt *jsrt) rubyRegexNew(args []interface{}) interface{} {
 	} else if rubyTruthy(argAt(args, 1)) {
 		bits = 1
 	}
-	flags := "mp"
+	flags := "mpn"
 	if bits&1 != 0 {
 		flags += "i"
 	}
@@ -3240,10 +3404,10 @@ func (rt *jsrt) rubyRegexNew(args []interface{}) interface{} {
 }
 
 // rubyReOpts is a Ruby Regexp's options as MRI writes them, from the engine flags
-// the ruby grammars compile with ("mp" then i, s for Ruby's m, x). Twin of reOpts
+// the ruby grammars compile with ("mpn" then i, s for Ruby's m, x). Twin of reOpts
 // in languages/ruby-interpreter.abnf, which states the rule.
 func rubyReOpts(flags string, embed bool) string {
-	flags = strings.TrimPrefix(flags, "mp")
+	flags = strings.TrimPrefix(flags, "mpn")
 	m, i, x := strings.Contains(flags, "s"), strings.Contains(flags, "i"), strings.Contains(flags, "x")
 	on, off := "", ""
 	for _, o := range []struct {

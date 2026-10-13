@@ -7199,7 +7199,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // (/"x" =~ /[[:alpha:]]/ matches) but is NOT a POSIX ERE - it keeps \d, \w,
         // \s, lazy quantifiers, (?...) groups and an escaping backslash inside a
         // bracket, all of which the engine's whole-dialect "e" letter would remove.
-        var neutral = "mp"
+        // "n": a backreference to a group that did not take part fails.
+        var neutral = "mpn"
         for (var i = 0; i < rflags.length; i++) {
             var f = rflags.charAt(i)
             if (f == "i") { neutral += "i" }
