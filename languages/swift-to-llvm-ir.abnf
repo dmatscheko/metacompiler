@@ -5159,8 +5159,7 @@ KwContinue  = "continue" KwEnd ;
             // time by sw_extget (the read counterpart of js_swextcall's method case),
             // so a user type with a member of the same name is not hijacked: only a
             // value with no descriptor of its own reaches the $ext$ table.
-            var tbl = b.NewCall(rtKGet(), [curScopeV, emitStr(b, "$ext$" + bt)])
-            return b.NewCall(rtExtGet(), [cur, emitStr(b, name), tbl])
+            return b.NewCall(rtExtGet(), [cur, emitStr(b, name), swEmitExtTbl(b, bt, cur)])
         }
         if (isComputedName(name)) { return b.NewCall(rtGetProp(), [cur, emitStr(b, name)]) }
         // The three members a sized integer answers for itself. js_swget falls
@@ -5672,7 +5671,7 @@ KwContinue  = "continue" KwEnd ;
                     var eb = callExt(b, "js_arr_new", [])
                     var eab = emitArgRecsInto(b, s.args, eb)
                     b = eab.b
-                    var btbl = b.NewCall(rtKGet(), [curScopeV, emitStr(b, "$ext$" + builtinMethOf(s.name))])
+                    var btbl = swEmitExtTbl(b, builtinMethOf(s.name), cur)
                     cur = callExt(b, "js_swextcall", [cur, emitStr(b, s.name), eb, btbl])
                     emitWriteBacks(b, eab.boxes)
                 } else if (s.kind == "mcall" && (s.name == "map" || s.name == "flatMap") && swTyIsOpt(anns[i])) {
@@ -6877,7 +6876,7 @@ KwContinue  = "continue" KwEnd ;
                 var selfRV = selfB.NewCall(rtKGet(), [curScopeV, emitStr(selfB, "self")])
                 var sv
                 if (builtinMethOf(name) != null) {
-                    var sbt = selfB.NewCall(rtKGet(), [curScopeV, emitStr(selfB, "$ext$" + builtinMethOf(name))])
+                    var sbt = swEmitExtTbl(selfB, builtinMethOf(name), selfRV)
                     sv = callExt(selfB, "js_swextcall", [selfRV, emitStr(selfB, name), ea.v, sbt])
                 } else {
                     // In a static member self is a descriptor, whose methods only
@@ -9964,11 +9963,61 @@ KwContinue  = "continue" KwEnd ;
     // A protocol default reached by a builtin conformer, by its protoMembers key: a
     // `__get_x` is the computed property x, anything else a method.
     function swNoteBuiltinKey(k, base) {
-        if (k.substring(0, 6) == "__get_") { builtinComp["$" + k.substring(6)] = base }
-        else if (k.substring(0, 6) != "__set_") { builtinMeth["$" + k] = base }
+        if (k.substring(0, 6) == "__get_") { swNoteBuiltinMember(builtinComp, k.substring(6), base) }
+        else if (k.substring(0, 6) != "__set_") { swNoteBuiltinMember(builtinMeth, k, base) }
+    }
+    // Per member NAME, every builtin base an extension gave it: `extension Int: P`
+    // and `extension String: P` both implement P's requirement, and the receiver
+    // decides which runs (swEmitExtTbl).
+    function swNoteBuiltinMember(reg, n, base) {
+        if (!hasOwn(reg, "$" + n)) { reg["$" + n] = [] }
+        var bs = reg["$" + n]
+        for (var i = 0; i < bs.length; i++) { if (bs[i] == base) { return } }
+        // A collection protocol's table is the fallback, so it goes last.
+        if (swIsStdSeqProto(base)) { bs.push(base) } else { bs.unshift(base) }
     }
     function builtinCompOf(n) { return hasOwn(builtinComp, "$" + n) ? builtinComp["$" + n] : null }
     function builtinMethOf(n) { return hasOwn(builtinMeth, "$" + n) ? builtinMeth["$" + n] : null }
+    // The $ext$ table a builtin receiver takes the member from: the only one, or
+    // the one whose base is the receiver's type (sw_extpick).
+    function swEmitExtTbl(b, bases, recvV) {
+        if (bases.length == 1) { return b.NewCall(rtKGet(), [curScopeV, emitStr(b, "$ext$" + bases[0])]) }
+        var args = [recvV]
+        for (var i = 0; i < bases.length; i++) { args.push(b.NewCall(rtKGet(), [curScopeV, emitStr(b, "$ext$" + bases[i])])) }
+        return b.NewCall(rtExtPick(bases), args)
+    }
+    // Tested in order, the last table being the fallback. A value with a member
+    // table of its own never reads the answer (js_swextcall / sw_extget take its
+    // own member), so it is not typed at all.
+    function rtExtPick(bases) {
+        return rtFunc("sw_extpick$" + bases.join("$"), 1 + bases.length, function(b, ps) {
+            var ownB = curF.NewBlock("")
+            var tyB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, b.NewCall(rtClassOf(), [ps[0]])), ownB, tyB)
+            ownB.NewRet(ps[bases.length])
+            var tn = callExt(tyB, "js_swtypeof", [ps[0]])
+            var cur = tyB
+            for (var i = 0; i + 1 < bases.length; i++) {
+                var bn = bases[i] == "Character" ? "String" : bases[i]
+                var hit = null
+                if (bn == "Array" || bn == "Dictionary" || bn == "Set") {
+                    var pa = callExt(cur, "js_arr_new", [])
+                    callExt(cur, "js_arr_push", [pa, emitStr(cur, bn + "<")])
+                    hit = callExt(cur, "js_swmcall", [tn, emitStr(cur, "hasPrefix"), pa])
+                } else { hit = callExt(cur, "js_seq", [tn, emitStr(cur, bn)]) }
+                var hitB = curF.NewBlock("")
+                var nextB = curF.NewBlock("")
+                cur.NewCondBr(truthy(cur, hit), hitB, nextB)
+                hitB.NewRet(ps[1 + i])
+                cur = nextB
+            }
+            cur.NewRet(ps[bases.length])
+        })
+    }
+    function swIsStdSeqProto(n) {
+        return n == "Sequence" || n == "Collection" || n == "BidirectionalCollection" || n == "RandomAccessCollection"
+            || n == "MutableCollection" || n == "RangeReplaceableCollection"
+    }
     function isBuiltinTypeName(n) {
         return n == "Int" || n == "Int8" || n == "Int16" || n == "Int32" || n == "Int64"
             || n == "UInt" || n == "Double" || n == "Float" || n == "String" || n == "Character"
@@ -9986,7 +10035,7 @@ KwContinue  = "continue" KwEnd ;
     function swInBuiltinExt() {
         if (typeStack.length == 0) { return false }
         var n = typeStack[typeStack.length - 1].name
-        return isBuiltinTypeName(n) && classNames[n] != 1 && protoNames[n] != 1 && enumNames[n] != 1
+        return (isBuiltinTypeName(n) || swIsStdSeqProto(n)) && classNames[n] != 1 && protoNames[n] != 1 && enumNames[n] != 1
     }
     // Adopting P adopts everything P INHERITS first, from the parent's OWN table.
     // The recursion is what makes a later `extension A1 { func a() }` reach a type
@@ -10251,9 +10300,14 @@ KwContinue  = "continue" KwEnd ;
         // site (4.squared15, "x".trimmed()). A name a user type also declares stays on
         // the ordinary dispatch path.
         if (!isKnown) {
-            if (!isBuiltinTypeName(base)) { return notImplStmt("extension of an unknown type", up.pos) }
-            for (var ci = 0; ci < mem.comps.length; ci++) { builtinComp["$" + mem.comps[ci].name] = base }
-            for (var mi = 0; mi < mem.methods.length; mi++) { builtinMeth["$" + mem.methods[mi].name] = base }
+            // `extension Collection { ... }` (or Sequence, ...) gets a $ext$ table of
+            // its own, which every builtin receiver reaches as it reaches an
+            // `extension Array` one: the member bodies dispatch on self. Twin of the
+            // swIsStdSeqProto arm in swift-interpreter.abnf.
+            var stdProto = swIsStdSeqProto(base)
+            if (!isBuiltinTypeName(base) && !stdProto) { return notImplStmt("extension of an unknown type", up.pos) }
+            for (var ci = 0; ci < mem.comps.length; ci++) { swNoteBuiltinMember(builtinComp, mem.comps[ci].name, base) }
+            for (var mi = 0; mi < mem.methods.length; mi++) { swNoteBuiltinMember(builtinMeth, mem.methods[mi].name, base) }
             // `extension Int: P { ... }` conforms a BUILTIN. There is no descriptor
             // to hang a __conf_ marker on, so the conformers are recorded here and
             // emitIsType passes the list to js_swconf statically. The protocol's own
@@ -10278,7 +10332,7 @@ KwContinue  = "continue" KwEnd ;
             // reachable from every use site.
             var firstBlock = !hasOwn(builtinExtTbl, "$" + base)
             builtinExtTbl["$" + base] = 1
-            var linkDesc = (mem.statMethods.length + mem.statComps.length + mem.statProps.length > 0
+            var linkDesc = !stdProto && (mem.statMethods.length + mem.statComps.length + mem.statProps.length > 0
                             || mem.inherits.length > 0) && !hasOwn(builtinDescs, "$" + base)
             if (linkDesc) { builtinDescs["$" + base] = 1 }
             return function(b) {

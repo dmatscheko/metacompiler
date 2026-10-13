@@ -9347,6 +9347,11 @@ KwContinue  = "continue" KwEnd ;
         if (isDict(v)) { return builtinTable("Dictionary", false) }
         return null
     }
+    // The stdlib collection protocols an extension may add members to.
+    function swIsStdSeqProto(n) {
+        return n == "Sequence" || n == "Collection" || n == "BidirectionalCollection" || n == "RandomAccessCollection"
+            || n == "MutableCollection" || n == "RangeReplaceableCollection"
+    }
     function isBuiltinTypeName(n) {
         return n == "Int" || n == "Int8" || n == "Int16" || n == "Int32" || n == "Int64"
             || n == "UInt" || n == "Double" || n == "Float" || n == "String" || n == "Character"
@@ -9403,6 +9408,15 @@ KwContinue  = "continue" KwEnd ;
                 if (h.v.__isprotocol === true) { target = h.v.__members }
                 else if (h.v.__isenum === true) { target = h.v.__members }
                 else if (h.v.__isclass === true) { target = h.v }
+            }
+            // `extension Collection { ... }` (or Sequence, ...): the members every
+            // builtin collection answers - Array, String and Dictionary each get
+            // them. Twin of the swIsStdSeqProto arm of makeExtensionStmt in
+            // swift-to-llvm-ir.abnf.
+            if (target == null && swIsStdSeqProto(base)) {
+                var colls = ["Array", "String", "Dictionary"]
+                for (var ci = 0; ci < colls.length; ci++) { installMembers(builtinTable(colls[ci], true), mem) }
+                return
             }
             if (target == null) {
                 if (!isBuiltinTypeName(base)) { return }

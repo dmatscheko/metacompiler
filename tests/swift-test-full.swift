@@ -4813,6 +4813,27 @@ func s112() {
         && Array([1, 1, 2, 1].trimmingPrefix(while: { $0 == 1 })) == [2, 1])
 }
 
+// ===== SECTION 113: extensions of the collection protocols; one member, many builtins =====
+// `extension Collection` / `extension Sequence` add members every builtin
+// collection answers, using self's own members unqualified. Two builtins
+// implementing one protocol requirement (`extension Int: P`, `extension String:
+// P`) each answer with their own. Every value read off swiftc 6.1.2.
+extension Collection {
+    var second113: Element? { dropFirst().first }
+}
+extension Sequence where Element: Comparable {
+    func isSorted113() -> Bool { zip(self, dropFirst()).allSatisfy { $0 <= $1 } }
+}
+protocol Desc113 { func describe113() -> String }
+extension Int: Desc113 { func describe113() -> String { "int \(self)" } }
+extension String: Desc113 { func describe113() -> String { "str \(self)" } }
+func s113() {
+    check("113a", [4, 5, 6].second113! == 5 && "xyz".second113! == "y" && [Int]().second113 == nil
+        && [1, 2, 2, 5].isSorted113() && ![3, 1].isSorted113())
+    let ds: [Desc113] = [1, "x"]
+    check("113b", ds.map { $0.describe113() } == ["int 1", "str x"] && 5.describe113() == "int 5" && "q".describe113() == "str q")
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -4926,6 +4947,7 @@ func main() {
     s110() // SECTION-CALL 110
     s111() // SECTION-CALL 111
     s112() // SECTION-CALL 112
+    s113() // SECTION-CALL 113
     print("full: \(checks) checks, \(fails) failures")
 }
 
