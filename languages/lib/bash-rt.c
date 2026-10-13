@@ -1067,23 +1067,34 @@ long ar_comma(void)
 }
 
 /* Evaluate the whole string. An empty expression is 0, as in bash, and a plain
- * decimal number (blanks around, one sign, no leading 0) needs no parse. */
+ * decimal number (blanks around, one sign, no leading 0) needs no parse: it is
+ * read in the same pass that recognises it, since every variable an arithmetic
+ * expression names comes through here. */
 long rt_arith(char *s)
 {
-    char *saveS = ar_s;
-    int saveLen = ar_len;
-    int saveP = ar_p;
+    char *saveS;
+    int saveLen;
+    int saveP;
     long v = 0;
     int i = 0;
+    int neg = 0;
     int d0;
-    int d1;
     while (s[i] == 32 || s[i] == 9 || s[i] == 10) i = i + 1;
+    if (s[i] == 45) neg = 1;
     if (s[i] == 45 || s[i] == 43) i = i + 1;
     d0 = i;
-    while (s[i] >= 48 && s[i] <= 57) i = i + 1;
-    d1 = i;
-    while (s[i] == 32 || s[i] == 9 || s[i] == 10) i = i + 1;
-    if (s[i] == 0 && d1 > d0 && (s[d0] != 48 || d1 == d0 + 1)) return rt_str2int(s);
+    while (s[i] >= 48 && s[i] <= 57) {
+        v = v * 10 + (long)((int)s[i] - 48);
+        i = i + 1;
+    }
+    if (i > d0 && (s[d0] != 48 || i == d0 + 1)) {
+        while (s[i] == 32 || s[i] == 9 || s[i] == 10) i = i + 1;
+        if (s[i] == 0) return neg != 0 ? 0 - v : v;
+    }
+    v = 0;
+    saveS = ar_s;
+    saveLen = ar_len;
+    saveP = ar_p;
     ar_s = s;
     ar_len = rt_strlen(s);
     ar_p = 0;

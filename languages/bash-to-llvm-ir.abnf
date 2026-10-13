@@ -2410,7 +2410,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var n = parseNumLit(text)
         if (n == null) { return function(b) { return {b: b, v: b.NewCall(rtArith, gepStr(b, text))} } }
         var c = llvm.constant.NewInt(i64, n)
-        return function(b) { return {b: b, v: c} }
+        return function(b) { return {b: b, v: c, lit: n} }
     }
     // items = [baseWordThunk, digitsWordThunk] - see the ArBaseDyn rule. Either side was built
     // by expansion, so the constant is put back together and read by rt_arith.
@@ -2476,7 +2476,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b = r.b
             var nv = r.v
             if (aop != "=") {
-                var res = arOp(b, aop.slice(0, aop.length - 1), cur, r.v)
+                var res = arOp(b, aop.slice(0, aop.length - 1), cur, r.v, r.lit)
                 b = res.b
                 nv = res.v
             }
@@ -2544,12 +2544,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b.NewCall(setF, [gepStr(b, name), k, b.NewCall(rtInt2str, v)])
     }
     // / and % go through rt_idiv, which knows bash's two cases the hardware does not (a zero
-    // divisor, LONG_MIN / -1). A shift count is taken modulo 64, which is what bash's own
-    // shift instruction does on both arm64 and x86-64; an unmasked count is poison in LLVM.
-    function arOp(b, op, l, r) {
+    // divisor, LONG_MIN / -1); a literal divisor (rlit, never negative: a sign is a unary
+    // operator) other than 0 has neither, so it divides inline. A shift count is taken
+    // modulo 64, which is what bash's own shift instruction does on both arm64 and x86-64;
+    // an unmasked count is poison in LLVM.
+    function arOp(b, op, l, r, rlit) {
         if (op == "+") { return {b: b, v: b.NewAdd(l, r)} }
         if (op == "-") { return {b: b, v: b.NewSub(l, r)} }
         if (op == "*") { return {b: b, v: b.NewMul(l, r)} }
+        if ((op == "/" || op == "%") && rlit != undefined && rlit != 0) {
+            return {b: b, v: (op == "%") ? b.NewSRem(l, r) : b.NewSDiv(l, r)}
+        }
         if (op == "/" || op == "%") {
             return {b: b, v: b.NewCall(rtIdiv, [l, r, (op == "%") ? one : zero])}
         }
@@ -2591,7 +2596,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     bb = jb
                 } else {
                     var r2 = items[i + 1](bb)
-                    var res = arOp(r2.b, op, v, r2.v)
+                    var res = arOp(r2.b, op, v, r2.v, r2.lit)
                     bb = res.b
                     v = res.v
                 }
@@ -2680,7 +2685,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var nm = gepStr(b, a.name)
         if (a.lit != null) { return emitArrayLit(b, a.name, a.lit, a.op == "+=", assoc) }
         var v = emptyPtr(b)
-        if (a.valT != null) { var r = a.valT.fn(b); b = r.b; v = b.NewCall(rtWordJoin, r.v) }
+        if (a.valT != null) {
+            var r = a.valT.fn(b)
+            b = r.b
+            v = (a.valT.f == true) ? b.NewCall(rtWordJoin, r.v) : r.v
+        }
         if (a.idxT != null) {
             var rk = subKeyOf(b, a.name, a.idxT)
             b = rk.b
@@ -3137,12 +3146,28 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (op == "-c") { return boolStatus(b, b.NewICmp(llvm.enum.IPredEQ, k, llvm.constant.NewInt(i32, 3))) }
         return one
     }
+    // A numeric operand of test: rt_str2int's value, read at compile time when the word is a
+    // literal decimal number that a double holds exactly.
+    function testInt(b, w) {
+        var t = w.c
+        if (t == undefined) { return b.NewCall(rtStr2int, w.v) }
+        var i = (t.charAt(0) == "-" || t.charAt(0) == "+") ? 1 : 0
+        if (t.length == i || t.length - i > 15) { return b.NewCall(rtStr2int, w.v) }
+        var n = 0
+        var j
+        for (j = i; j < t.length; j++) {
+            var cc = t.charCodeAt(j)
+            if (cc < 48 || cc > 57) { return b.NewCall(rtStr2int, w.v) }
+            n = n * 10 + (cc - 48)
+        }
+        return llvm.constant.NewInt(i64, (t.charAt(0) == "-") ? -n : n)
+    }
     function testBinaryIR(b, l, op, r) {
         if (op == "=" || op == "==") { return boolStatus(b, b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtStreq, [l.v, r.v]), zero)) }
         if (op == "!=") { return boolStatus(b, b.NewICmp(llvm.enum.IPredEQ, b.NewCall(rtStreq, [l.v, r.v]), zero)) }
         if (op == "<") { return boolStatus(b, b.NewICmp(llvm.enum.IPredSLT, b.NewCall(rtStrcmp, [l.v, r.v]), zero)) }
         if (op == ">") { return boolStatus(b, b.NewICmp(llvm.enum.IPredSGT, b.NewCall(rtStrcmp, [l.v, r.v]), zero)) }
-        var il = b.NewCall(rtStr2int, l.v), ir = b.NewCall(rtStr2int, r.v)
+        var il = testInt(b, l), ir = testInt(b, r)
         if (op == "-eq") { return boolStatus(b, b.NewICmp(llvm.enum.IPredEQ, il, ir)) }
         if (op == "-ne") { return boolStatus(b, b.NewICmp(llvm.enum.IPredNE, il, ir)) }
         if (op == "-lt") { return boolStatus(b, b.NewICmp(llvm.enum.IPredSLT, il, ir)) }

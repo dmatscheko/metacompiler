@@ -2441,6 +2441,31 @@ s50() {
   check byt3 "$(printf '%s' "$b"$'\xa9')" "é"
 }
 
+# ===== SECTION 51: numbers read by arithmetic and test =====
+# A variable holding a number may be padded with blanks, newline included, on either side.
+# A literal divisor divides like any other, a negative left side truncating toward zero.
+# test reads its integer operands in decimal, one sign allowed. An assignment of one
+# expansion keeps its value whole. Every expected value is bash 5.3's.
+s51() {
+  local x=$'\n5' y=$'\t-7 \n' n=-7 m=17
+  check num1 "$(( x )) $(( x + 1 )) $(( y * 2 ))" "5 6 -14"
+  (( m %= 5 ))
+  check num2 "$(( n % 3 )) $(( n / 2 )) $(( n % 7 )) $(( 7 / 1 )) $(( n / 7 )) $m" "-1 -3 0 7 -1 2"
+  local t=""
+  [ -3 -lt +2 ] && t="${t}a"
+  [ 40000 -gt 39999 ] && t="${t}b"
+  [ 012 -eq 12 ] && t="${t}c"
+  [ -0 -eq 0 ] && t="${t}d"
+  [ 5 -lt -5 ] || t="${t}e"
+  check num3 "$t" "abcde"
+  set -- p 'q  r'
+  local a1 a2 a3
+  a1=$*
+  a2=$@
+  a3=$(( 2 * 3 ))$#
+  check num4 "$a1|$a2|$a3" "p q  r|p q  r|62"
+}
+
 s01   # SECTION-CALL 01
 s02   # SECTION-CALL 02
 s03   # SECTION-CALL 03
@@ -2491,5 +2516,6 @@ s47   # SECTION-CALL 47
 s48   # SECTION-CALL 48
 s49   # SECTION-CALL 49
 s50   # SECTION-CALL 50
+s51   # SECTION-CALL 51
 echo "full: $checks checks, $fails failures"
 exit $fails

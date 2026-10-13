@@ -3867,7 +3867,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         while (j < n && s.charCodeAt(j) >= 48 && s.charCodeAt(j) <= 57) { j = j + 1 }
         var d1 = j
         while (j < n && (s.charCodeAt(j) == 32 || s.charCodeAt(j) == 9 || s.charCodeAt(j) == 10)) { j = j + 1 }
-        if (j == n && d1 > d0 && (s.charCodeAt(d0) != 48 || d1 == d0 + 1)) { return arStr(s) }
+        if (j == n && d1 > d0 && (s.charCodeAt(d0) != 48 || d1 == d0 + 1)) { return arStr(s.slice(i)) }
         var saveS = arS, saveLen = arLen, saveP = arP
         var v = anytype
         v = 0
