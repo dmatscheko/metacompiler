@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-578** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-579** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -106,13 +106,11 @@ the interpreter half.
 
 # JV — Java
 
-### T-574 java: regex errors are uncatchable; fully qualified static calls; `(Object) arr` to Object...; "Caused by:" · P1 · JV · IN PROGRESS (JV worker, round 3) [V]
-`try { "a".matches("("); } catch (java.util.regex.PatternSyntaxException e)` → every leg aborts "PatternSyntaxException:
-unterminated group"; java throws a catchable PatternSyntaxException. `"a".replaceAll("a", "$9")` aborts; java throws
-IndexOutOfBoundsException "No group 9" (jxkFail in lib/java-strings.js, rt.fail in jsrtjavastr.go, all engines).
-`java.lang.reflect.Array.newInstance(String.class, 2)` → interp "unknown name: java", compiled "variable not defined: java".
-`cls((Object) arr)` with `cls(Object... a)` forwards the array (ours `[Ljava.lang.String;2`, java `[Ljava.lang.Object;1`:
-javac wraps by static type). Minor: an uncaught exception with a cause prints no "Caused by:" on stderr.
+### T-578 java: PatternSyntaxException message wording; class literals of unloaded JDK types · P3 · JV · OPEN [V]
+`"a".matches("(")` → getMessage `unterminated group` (lib/regex.js wording) in all engines; java 24 `Unclosed group near index 1`
++ newline + the pattern + a caret line. regex.js / jsrtregex.go are shared by every language: map the error kinds to Java's
+text in java's own layer (jxRe), not in the shared engine. `List.class` without lib/java-util.java loaded prints `List`
+(java `interface java.util.List`).
 
 ---
 
@@ -695,6 +693,7 @@ T-556 python: bytes and bytearray are lists — DONE cce63c26
 T-564 go native: `s[i]` on a string converts the whole string to bytes per index — PARTIAL 260975a8 (ASCII strings indexed in place, a 4-entry byte-form cache for non-ASCII; 77 s -> 0.34 s for 50 passes); the cache-thrash remainder is T-577
 T-562 go: `[]byte(s)[i]` has dynamic type int; `cap()` of a channel — DONE 1fdfe139
 T-563 go: `fmt.Fprint*` / `os.Stdout` / io.Writer, and the `math` package — PARTIAL cf215ba0 (Fprint*, io.Writer, os.Stdout/Stderr, math constants and exact functions, Sqrt, Pow for integral/half exponents); transcendentals are T-576
+T-574 java: regex errors are uncatchable; fully qualified static calls; `(Object) arr` to Object...; "Caused by:" — DONE 049e1dfd
 
 # Settled — do not re-open
 
