@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-582** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-583** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -144,16 +144,13 @@ an O(1) byte-at host builtin in the floor (CORE: runtime.c).
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-570 swift: a ternary passed to an `Any` parameter unifies; nested existential annotations · P2 · SW · IN PROGRESS (SW worker, round 3) [V]
-`func f(_ x: Any) { print(x) }; f(c ? 1.5 : 3)` with c false → all legs `3.0`, swiftc `3` (an existential context keeps each
-arm's own type; needs the parameter type at the argument through the swDs call typing). `let a: [[Any]] = [[1, 2.5]]` is not
-detected as existential (swiftc `[[1, 2.5]]`).
-
-### T-571 swift: mutating value methods on numbers and Bools; General_Category Character properties; trap exit status · P2 · SW · IN PROGRESS (SW worker, round 3) [V]
-`var m = 2.5; m.round(.down); print(m)` → "unknown Double method: round" (swiftc 2.0); `var b = [true]; b[0].toggle()` →
-interp "unknown method 'toggle'", compiled "method call 'toggle' on a boolean" (swiftc `[false]`); also `negate()`,
-`formRemainder`. `Character.isPunctuation`, `isSymbol`, `isCased`, `isMathSymbol`, `isCurrencySymbol` fail loudly (need
-General_Category data). P3: a trap exits 1 in every leg, swiftc 133 (SIGTRAP).
+### T-582 swift: missing traps — Int(huge Double), inverted range, compiled removeLast on empty; the ratchet does not compile under swiftc · P1 · SW · OPEN [V]
+`let d = 1e300; print(Int(d))` → all legs 0 (swiftc traps "Double value cannot be converted to Int because the result would be
+greater than Int.max", 133). `let a = [3]; let r = a[0]..<1; print(r)` → `3..<1` (swiftc traps "Range requires lowerBound <=
+upperBound"). `var e: [Int] = []; e.removeLast()` → interp right ("Can't remove last element from an empty collection", 133),
+llvm.Run and native "js runtime error: pop from empty list", exit 1 (twin and layer 2). P3: tests/swift-test-full.swift does
+not compile under swiftc (line ~1820 `seen35 += c` with c a Character); fix the test so the whole ratchet can be run on the
+oracle. Integer overflow wrapping is the recorded deliberate divergence, not part of this ticket.
 
 ---
 
@@ -686,6 +683,8 @@ T-572 bash: `let` with a redirection; unquoted `let` field splitting; NUL bytes;
 T-560 js/ts: a generator that re-enters itself aborts instead of throwing TypeError — DONE 1e54eac7
 T-566 js: `padStart(Infinity)` hangs; a missing method aborts natively; nested-try labeled jumps; big-radix parseInt — DONE 1e54eac7 28476b59 (incl. V8's fused parseInt for odd radices, verified on this arm64 node)
 T-565 js: wording and remaining low-value gaps — PARTIAL 1e54eac7 (toString(radix) = V8 DoubleToRadixCString, radix message, node-24 JSON.parse messages, String.fromCodePoint); TDZ is T-580, arguments/__ keys/normalize are T-581
+T-570 swift: a ternary passed to an `Any` parameter unifies; nested existential annotations — DONE ecc7bd12 bcaa1c28
+T-571 swift: mutating value methods on numbers and Bools; General_Category Character properties; trap exit status — DONE 0562ad3a (traps exit 133 in every leg; probe.sh accepts 133 for swift)
 
 # Settled — do not re-open
 
