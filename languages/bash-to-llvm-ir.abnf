@@ -3318,11 +3318,28 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (op == "==" || op == "=") { return {b: b, v: b.NewCall(rtGlob, [rr.v, rl.v])} }
             if (op == "!=") { return {b: b, v: b.NewXor(b.NewCall(rtGlob, [rr.v, rl.v]), one)} }
             if (op == "=~") { fail("[[ =~ ]] (regex matching) is not supported") }
+            // The numeric tests evaluate BOTH sides as arithmetic expressions inside [[ ]].
+            // Twin of mkCondBin in bash-interpreter.abnf.
+            var npred = condNumPred(op)
+            if (npred != null) {
+                var al = b.NewCall(rtArith, rl.v)
+                var ar = b.NewCall(rtArith, rr.v)
+                return {b: b, v: b.NewZExt(b.NewICmp(npred, al, ar), i32)}
+            }
             var st = testBinaryIR(b, {v: rl.v, c: lw.c}, op, {v: rr.v, c: rw.c})
             return {b: b, v: b.NewZExt(b.NewICmp(llvm.enum.IPredEQ, st, zero), i32)}
         }
     }
 
+    function condNumPred(op) {
+        if (op == "-eq") { return llvm.enum.IPredEQ }
+        if (op == "-ne") { return llvm.enum.IPredNE }
+        if (op == "-lt") { return llvm.enum.IPredSLT }
+        if (op == "-le") { return llvm.enum.IPredSLE }
+        if (op == "-gt") { return llvm.enum.IPredSGT }
+        if (op == "-ge") { return llvm.enum.IPredSGE }
+        return null
+    }
     function mkRedir(items) {
         var op = "", fd = "", t = null
         var i

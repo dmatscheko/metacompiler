@@ -2184,6 +2184,25 @@ d0"
   check ex9 "$?[$r]" "1[2]"
 }
 
+# ===== SECTION 41: [[ A -eq B ]] operands are arithmetic =====
+# Inside [[ ]] the numeric tests evaluate both sides as arithmetic expressions (octal,
+# names, operators included); test / [ still compare decimal integers. bash 5.3's answers.
+s41() {
+  local x=4 y="1 + 2" i=0 d=0 r=""
+  [[ 2+3 -eq 5 ]]; r="$r$?"
+  [[ 010 -eq 8 ]]; r="$r$?"
+  [[ x -eq 4 ]]; r="$r$?"
+  [[ $y -eq 3 ]]; r="$r$?"
+  [[ "2 * 3" -eq 6 ]]; r="$r$?"
+  check nt1 "$r" "00000"
+  r=""
+  [[ 1 -ne 2 && x+1 -gt x && 3 -lt 0x10 && 1 -le 1 && 3000000000 -ge 2147483648 ]]; r="$r$?"
+  [ 010 -eq 8 ]; r="$r$?"
+  [[ 1 -eq 1/d ]] 2>/dev/null; r="$r$?"
+  [[ i++ -eq 0 ]]; r="$r$?$i"
+  check nt2 "$r" "01101"
+}
+
 s01   # SECTION-CALL 01
 s02   # SECTION-CALL 02
 s03   # SECTION-CALL 03
@@ -2224,5 +2243,6 @@ s37   # SECTION-CALL 37
 s38   # SECTION-CALL 38
 s39   # SECTION-CALL 39
 s40   # SECTION-CALL 40
+s41   # SECTION-CALL 41
 echo "full: $checks checks, $fails failures"
 exit $fails

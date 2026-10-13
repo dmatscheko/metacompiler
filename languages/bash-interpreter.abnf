@@ -4806,6 +4806,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // == and != glob-match their right hand side inside [[ ]]; = is a synonym of ==.
             if (op == "==" || op == "=") { return globMatch(rv, lv) }
             if (op == "!=") { return !globMatch(rv, lv) }
+            // The numeric tests evaluate BOTH sides as arithmetic expressions inside [[ ]]
+            // ([[ 2+3 -eq 5 ]], [[ 010 -eq 8 ]], [[ x -eq 4 ]]), where test / [ want integers.
+            if (hasOwn(testNumOps, op)) { return arOp(testNumOps[op], arEval(lv), arEval(rv)) == 1 }
             return testBinary(lv, op, rv) == 0
         }
     }
