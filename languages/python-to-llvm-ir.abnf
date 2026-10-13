@@ -2165,8 +2165,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 body = callExt(b, "js_pyascii", [r.v])
             } else if (conv == "r" || (debug && conv == null)) {
                 body = callExt(b, "js_pyrepr", [r.v])
-            } else {
+            } else if (conv == "s") {
                 body = callExt(b, "js_pyrxstr", [r.v])
+            } else {
+                body = callExt(b, "js_pyfstr", [r.v])
             }
             if (prefix != "") { body = callExt(b, "js_jadd", [emitStr(b, prefix), body]) }
             return {b: b, v: body}

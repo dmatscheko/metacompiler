@@ -6379,11 +6379,12 @@ def s122():
               "ValueError: factorial() not defined for negative values", "ValueError: -inf + inf in fsum",
               "OverflowError: intermediate overflow in fsum"])
 
-# ===== SECTION 123: __init_subclass__, bound methods with keywords, operator =====
+# ===== SECTION 123: __init_subclass__, bound methods with keywords, operator, __format__ =====
 # A class statement ends by calling the nearest base's __init_subclass__ with
 # the new class (implicitly a classmethod, ending at object's). A bound method
 # held as a value - a user one or a builtin one - takes keyword arguments.
-# The operator module (lib/python-operator.py). Rows from CPython 3.14.
+# The operator module (lib/python-operator.py), and a class's own __format__.
+# Rows from CPython 3.14.
 import operator as S123op
 from operator import itemgetter as S123ig, attrgetter as S123ag, methodcaller as S123mc
 
@@ -6413,6 +6414,19 @@ class S123P:
     def f(self, a, b=0):
         return self.n * a + b
 
+class S123F:
+    def __format__(self, spec):
+        return "<" + spec + ">"
+    def __str__(self):
+        return "S"
+
+def S123err(f):
+    try:
+        f()
+    except Exception as e:
+        return type(e).__name__ + ": " + str(e)
+    return "no error"
+
 def s123():
     check("isub1", S123Plugin.seen == ["S123A", "S123B"] and S123X.tag == "s123x" and not hasattr(S123Tag, "tag")
           and type("S123C", (S123A,), {}).__name__ == "S123C" and S123Plugin.seen[-1] == "S123C")
@@ -6432,6 +6446,13 @@ def s123():
           and S123op.contains([1, 2], 2) and S123op.indexOf("abc", "c") == 2 and S123op.countOf([1, 1, 2], 1) == 2
           and repr(S123ig(1)) == "operator.itemgetter(1)" and repr(S123mc("f", 1, k=2)) == "operator.methodcaller('f', 1, k=2)"
           and S123op.index(True) == 1 and S123op.abs(-2.5) == 2.5 and S123op.not_(0) is True)
+    # format(), f-strings and str.format all ask the class's own __format__; a
+    # plain field is format(v, ""), and object's refuses a non-empty spec.
+    m = S123F()
+    check("ufmt1", [format(m, "usd"), f"{m:abc}", f"{m}", "{:q}".format(m), "{}".format(m), f"{m!s:>3}"]
+          == ["<usd>", "<abc>", "<>", "<q>", "<>", "  S"]
+          and S123err(lambda: f"{p:x}") == "TypeError: unsupported format string passed to S123P.__format__"
+          and S123err(lambda: format(p, ">3")) == "TypeError: unsupported format string passed to S123P.__format__")
 
 def main():
     s01() # SECTION-CALL 01

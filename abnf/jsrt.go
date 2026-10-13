@@ -17713,6 +17713,15 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_pyformat": func(a []uint64) uint64 {
 			return rt.wrapStr(rt.pyFormat(u(a[0]), rt.toString(u(a[1])), rt.toString(u(a[2]))))
 		},
+		// An f-string field with no spec and no conversion: format(value, ""),
+		// which a class's own __format__ answers, and str() otherwise. Twin of
+		// js_pyfstr in languages/lib/python-rt.metajs.
+		"js_pyfstr": func(a []uint64) uint64 {
+			if s, ok := rt.pyUserFormat(u(a[0]), ""); ok {
+				return rt.wrapStr(s)
+			}
+			return pyExternMaps[rt]["js_pyrxstr"](a)
+		},
 		// The format(value[, spec]) builtin. Twin of js_pyformatfn in
 		// languages/lib/python-rt.metajs and hostGlobals["format"] in
 		// languages/python-interpreter.abnf.
@@ -24380,6 +24389,38 @@ func (rt *jsrt) pyExcInstance(name string, msg string) interface{} {
 	return inst
 }
 
+// pyUserFormat is format() of an instance: its class's own __format__
+// answers, and object's refuses a non-empty spec; ok is false for anything
+// else, including an instance of a builtin type's subclass, which the builtin
+// formatter serves. Twin of pyUserFormat in languages/python-interpreter.abnf
+// and lib/python-rt.metajs.
+func (rt *jsrt) pyUserFormat(x interface{}, spec string) (string, bool) {
+	inst, cls, ok := pyInstance(x)
+	if !ok {
+		return "", false
+	}
+	if _, isCls := inst.props["__mro"]; isCls {
+		return "", false
+	}
+	for _, k := range pyMRO(cls) {
+		if _, user := k.props["__mro"]; !user {
+			continue
+		}
+		if f, has := k.props["__format__"]; has {
+			r := rt.callPyValue(f, []interface{}{x, spec}, jsUndef)
+			s, isStr := r.(string)
+			if !isStr {
+				rt.pyRaise("TypeError", "__format__ must return a str, not "+pyTypeName(rt, r))
+			}
+			return s, true
+		}
+	}
+	if spec != "" && pyBuiltinBase(cls) == "" {
+		rt.pyRaise("TypeError", "unsupported format string passed to "+pyTypeName(rt, x)+".__format__")
+	}
+	return "", false
+}
+
 // ----- Python's format mini-language (js_pyformat): see pyFormat -----
 func pyIsAlign(ch byte) bool { return ch == '<' || ch == '>' || ch == '^' || ch == '=' }
 
@@ -24887,6 +24928,9 @@ func (rt *jsrt) pyFormat(v interface{}, spec, conv string) string {
 		x = rt.pyString(v)
 	case "a":
 		x = pyAsciiOf(rt.pyRepr(v))
+	}
+	if s, ok := rt.pyUserFormat(x, spec); ok {
+		return s
 	}
 	if spec == "" {
 		if xs, ok := x.(string); ok {

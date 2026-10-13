@@ -7404,6 +7404,39 @@ function pyFmtDigit(spec, i) {
 }
 
 // format(value[, spec]). Go: js_pyformatfn.
+// format() of an instance: its class's own __format__ answers, and object's
+// refuses a non-empty spec; null for anything else, including an instance of a
+// builtin type's subclass, which the builtin formatter serves. Go:
+// rt.pyUserFormat.
+function pyUserFormat(x, spec) {
+    var cls = pyInstClassOf(x)
+    if (cls === null || x["__mro"] !== undefined) { return null }
+    var mro = pyMRO(cls)
+    var i = 0
+    while (i < mro.length) {
+        var f = mro[i]["__format__"]
+        if (mro[i]["__mro"] !== undefined && f !== undefined) {
+            var r = anytype
+            r = pyDCallPyValue(f, [x, spec], undefined)
+            if (typeof r != "string") { pyRaiseExc("TypeError", "__format__ must return a str, not " + pyTypeName(r)) }
+            return r
+        }
+        i = i + 1
+    }
+    if (spec != "" && pyBuiltinBase(cls) == "") {
+        pyRaiseExc("TypeError", "unsupported format string passed to " + pyTypeName(x) + ".__format__")
+    }
+    return null
+}
+
+// An f-string field with no spec and no conversion: format(value, ""), which a
+// class's own __format__ answers, and str() otherwise. Go: js_pyfstr.
+function js_pyfstr(v) {
+    var uf = pyUserFormat(v, "")
+    if (uf !== null) { return uf }
+    return js_pyrxstr(v)
+}
+
 function js_pyformatfn(args) {
     if (args.length < 2) { return js_pyformat(pyEArgAt(args, 0), "", "") }
     var spec = args[1]
@@ -7461,6 +7494,8 @@ function js_pyformat(v, specV, convV) {
     if (conv == "r") { x = pyRepr(v) }
     else if (conv == "s") { x = pyStr(v) }
     else if (conv == "a") { x = js_pyascii(v) }
+    var uf = pyUserFormat(x, spec)
+    if (uf !== null) { return uf }
     if (spec == "") {
         if (typeof x == "string") { return x }
         return pyStr(x)

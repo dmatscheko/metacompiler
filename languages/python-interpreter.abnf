@@ -9992,9 +9992,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var v = anytype
             v = exprT()
             var body = anytype
-            if (conv == "a") { body = hostGlobals["ascii"](v) }
-            else { body = (conv == "r" || (debug && conv == null && spec == null)) ? prepr(v) : pstr(v) }
             if (spec != null) { body = pyFormat(v, specText(spec), conv) }
+            else if (conv == "a") { body = hostGlobals["ascii"](v) }
+            else if (conv == "r" || (debug && conv == null)) { body = prepr(v) }
+            // A field is format(value, ""), which a class's own __format__ answers.
+            else if (typeof v == "object" && pyUser(v)) { body = pyFormat(v, "", conv) }
+            else { body = pstr(v) }
             return prefix + body
         }
     }
@@ -10025,6 +10028,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (conv == "r") { x = prepr(v) }
         else if (conv == "s") { x = pstr(v) }
         else if (conv == "a") { x = hostGlobals["ascii"](v) }
+        if (typeof x == "object" && pyUser(x) && x.__isclass !== true) {
+            var uf = pyUserFormat(x, spec)
+            if (uf !== null) { return uf }
+        }
         if (spec == "") { return (typeof x == "string") ? x : pstr(x) }
         var tn = isCplx(x) ? "complex" : pyTypeOf(x).__name
         var i = 0
@@ -13047,6 +13054,26 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function pyObjRepr(a) { return "<" + (pyUser(a) ? pyClsQual(a.__class) : pyTypeOf(a).__name) + " object>" }
     function pyObjStr(a) { return prepr(a) }
+    // format() of an instance: its class's own __format__ answers, and object's
+    // refuses a non-empty spec; null leaves an instance of a builtin type's
+    // subclass to the builtin formatter. Twin of rt.pyUserFormat in
+    // abnf/jsrt.go and pyUserFormat in lib/python-rt.metajs.
+    function pyUserFormat(x, spec) {
+        var mro = clsMRO(x.__class)
+        for (var i = 0; i < mro.length; i++) {
+            if (!hasOwn(mro[i], "__format__")) { continue }
+            var r = anytype
+            r = pyCall(mro[i].__format__, [x, spec], null)
+            if (typeof r != "string") {
+                pyListErr("TypeError", "__format__ must return a str, not " + pyTypeOf(r).__name)
+            }
+            return r
+        }
+        if (spec != "" && pyBuiltinBase(x.__class) == "") {
+            pyListErr("TypeError", "unsupported format string passed to " + pyTypeOf(x).__name + ".__format__")
+        }
+        return null
+    }
     function pyObjFormat(a, spec) {
         if (spec !== undefined && spec !== "") {
             pyListErr("TypeError", "unsupported format string passed to " + pyTypeOf(a).__name + ".__format__")
