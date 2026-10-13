@@ -10318,9 +10318,15 @@ KwContinue  = "continue" KwEnd ;
         if (st != "") { return st }
         // A case name exactly one enum declares is that enum's. Twin of swDotOwner
         // in swift-interpreter.abnf.
-        if (!hasOwn(swCaseOwners, "$" + dname)) { return "" }
+        if (!hasOwn(swCaseOwners, "$" + dname)) { return swDotFloStatic(dname) }
         var os = swCaseOwners["$" + dname]
         return os.length == 1 && typeAt(typeKeyOf(os[0])) != null ? os[0] : ""
+    }
+    // `2 * .pi`: a floating-point static no program type declares is Double's.
+    // Twin of swDotFloStatic in swift-interpreter.abnf.
+    function swDotFloStatic(dname) {
+        return dname == "pi" || dname == "infinity" || dname == "nan" || dname == "greatestFiniteMagnitude"
+            || dname == "leastNormalMagnitude" || dname == "leastNonzeroMagnitude" || dname == "ulpOfOne" ? "Double" : ""
     }
     // Per enum case NAME, the enums declaring it.
     var swCaseOwners = {}

@@ -4670,6 +4670,15 @@ func s105() {
         && "\([1, 2].map(Double.init))" == "[1.0, 2.0]" && String.init(5) == "5")
 }
 
+// ===== SECTION 106: a floating-point static as an implicit member =====
+// `2.0 * .pi` / `x < .infinity`: a floating-point static no program type declares
+// is Double's. Every value read off swiftc 6.1.2.
+func s106() {
+    let rs = [2.0, 1.0]
+    check("106a", "\(rs[0] * .pi)" == "6.283185307179586" && rs[1] < .infinity && "\(rs[1] * .pi / 2)" == "1.5707963267948966"
+        && (rs[0] + .nan).isNaN && rs[0] < .greatestFiniteMagnitude)
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -4776,6 +4785,7 @@ func main() {
     s103() // SECTION-CALL 103
     s104() // SECTION-CALL 104
     s105() // SECTION-CALL 105
+    s106() // SECTION-CALL 106
     print("full: \(checks) checks, \(fails) failures")
 }
 

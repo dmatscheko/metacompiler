@@ -9560,9 +9560,16 @@ KwContinue  = "continue" KwEnd ;
         // With no typed slot to say which enum is meant (an enum case's own
         // associated value, `.node(1, .empty)`), a case name exactly one enum
         // declares is that enum's, so the value carries its methods.
-        if (!hasOwn(swCaseOwners, "$" + dname)) { return "" }
+        if (!hasOwn(swCaseOwners, "$" + dname)) { return swDotFloStatic(dname) }
         var os = swCaseOwners["$" + dname]
         return os.length == 1 && swResolve(os[0]) != null ? os[0] : ""
+    }
+    // `2 * .pi`: a floating-point static no program type declares is Double's - the
+    // type an operand context would most often give it, and the only one a
+    // context-free literal could mean. Twin in swift-to-llvm-ir.abnf.
+    function swDotFloStatic(dname) {
+        return dname == "pi" || dname == "infinity" || dname == "nan" || dname == "greatestFiniteMagnitude"
+            || dname == "leastNormalMagnitude" || dname == "leastNonzeroMagnitude" || dname == "ulpOfOne" ? "Double" : ""
     }
     // Per enum case NAME, the enums declaring it. Twin in swift-to-llvm-ir.abnf.
     var swCaseOwners = {}
@@ -9719,7 +9726,7 @@ KwContinue  = "continue" KwEnd ;
         if (args == null) {
             return function() {
                 if (stTn === null) { stTn = swDotOwner(dname, cell) }
-                if (stTn != "") { return core.getField(swResolve(stTn).v, dname) }
+                if (stTn != "") { return core.getField(swDotOwnerVal(stTn), dname) }
                 if (swDotOptional(dname, -1) == "none") { return null }
                 return newCaseVal(null, dname, undefined, null, null, undefined)
             }
@@ -9730,7 +9737,7 @@ KwContinue  = "continue" KwEnd ;
             var ea = evalArgs(recs)
             if (stTn != "") {
                 pendingLabels = recLabels(recs)
-                var r = mcall(swResolve(stTn).v, dname, ea.argv)
+                var r = mcall(swDotOwnerVal(stTn), dname, ea.argv)
                 pendingLabels = null
                 writeBacks(ea.boxes)
                 return r
@@ -9738,6 +9745,11 @@ KwContinue  = "continue" KwEnd ;
             if (swDotOptional(dname, ea.argv.length) == "some") { return ea.argv[0] }
             return newCaseVal(null, dname, undefined, ea.argv, null, undefined)
         }
+    }
+    // The owner swDotOwner named: a program type, or a builtin's type value (Double).
+    function swDotOwnerVal(tn) {
+        var h = swResolve(tn)
+        return h != null ? h.v : hostGlobals[tn]
     }
     // The leading-dot member the walk built last, and its source span.
     var swLastDot = {at: "", dname: "", args: null, cell: null}
