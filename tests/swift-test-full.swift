@@ -4098,6 +4098,52 @@ func s87() {
     check("87d", n == 1 && s.count == 2)
 }
 
+// ===== SECTION 88: switch patterns on qualified statics and big integers =====
+// A qualified path with no arguments is an expression pattern when the subject is
+// no enum case (`case Int.min:`), and a range pattern orders a sized integer the
+// way `<` does, bounds included. Every value read off swiftc 6.1.2.
+struct Lim88 { static let top = 40 }
+enum Hue88 { case red, blue }
+func k88(_ n: Int) -> String {
+    switch n {
+    case Int.min: return "min"
+    case Int.max: return "max"
+    case Lim88.top: return "top"
+    case 0...: return "nonneg"
+    default: return "other"
+    }
+}
+func r88(_ n: Int) -> String {
+    switch n {
+    case ..<0: return "neg"
+    case 0...5: return "small"
+    case 6..<Int.max: return "mid"
+    default: return "end"
+    }
+}
+func s88() {
+    let ns = [Int.min, -5, Int.max, 40, 7]
+    check("88a", ns.map(k88) == ["min", "other", "max", "top", "nonneg"])
+    check("88b", ns.map(r88) == ["neg", "neg", "end", "mid", "mid"])
+    let bs: [UInt64] = [UInt64.max, 5]
+    var got: [String] = []
+    for b in bs {
+        switch b {
+        case 9_000_000_000_000_000_000...: got.append("huge")
+        case UInt64.max: got.append("never")
+        default: got.append("not")
+        }
+    }
+    let hs = [Hue88.blue, Hue88.red]
+    for h in hs {
+        switch h {
+        case Hue88.red: got.append("r")
+        case Hue88.blue: got.append("b")
+        }
+    }
+    check("88c", got == ["huge", "not", "b", "r"])
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -4186,6 +4232,7 @@ func main() {
     s85() // SECTION-CALL 85
     s86() // SECTION-CALL 86
     s87() // SECTION-CALL 87
+    s88() // SECTION-CALL 88
     print("full: \(checks) checks, \(fails) failures")
 }
 

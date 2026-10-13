@@ -909,8 +909,10 @@ PatRangeDn  <~~ push(makePatRange(takeAll())) ~~> = RangeOp PatOperand ;
 // full expression grammar: a `{ ... }` would be read as a closure and swallow the
 // body of `catch { ... }`, whose pattern is optional.
 PatExpr     <~~ push({pexpr: pop()}) ~~> = PatOperand ;
-PatOperand  = PatNegLit | Template | NumberLit | True | False | Nil ;
+PatOperand  = PatNegLit | PatQual | Template | NumberLit | True | False | Nil ;
 PatNegLit   <~~ push(makeNeg(pop())) ~~> = "-" NumberLit ;
+// A qualified static as a range bound: `6..<Int.max`, `Limits.lo...`.
+PatQual     <~~ push(foldCallMember(takeAll(), up.in)) ~~> = VarRef FieldSfx { FieldSfx } ;
 PatLet      <~~ push({plet: pop()}) ~~> = ( "let" | "var" ) KwEnd Pattern ;
 PatTuple    <~~ push({ptup: takeAll()}) ~~> = "(" Pattern { "," Pattern } ")" ;
 PatWild     <~~ push({pwild: 1}) ~~> = Wildcard ;
@@ -4759,7 +4761,18 @@ KwContinue  = "continue" KwEnd ;
             else if (items[i].ppath != undefined) { path = items[i].ppath }
             else if (items[i].pargs != undefined) { args = items[i].pargs }
         }
-        return {pdot: dot, ppath: path, pargs: args}
+        return {pdot: dot, ppath: path, pargs: args, pval: swPatPathVal(dot, path, args)}
+    }
+    // A qualified path with no arguments (`case Int.min:`) is an enum case or an
+    // EXPRESSION pattern; for a subject that is no enum case it is the value the
+    // path reads, compared with ==. null for every other pattern. Twin of
+    // swPatPathVal in swift-interpreter.abnf.
+    function swPatPathVal(dot, path, args) {
+        if (dot || args != null || path.indexOf(".") < 0) { return null }
+        var ps = path.split(".")
+        var chain = [makeVarRef(ps[0])]
+        for (var i = 1; i < ps.length; i++) { chain.push(makeFieldSfx(ps[i])) }
+        return foldCallMember(chain, path)
     }
     // A nil / undefined test that branches to failB; returns the block to carry on in.
     function emitNotNil(b, v, failB) {
@@ -4809,16 +4822,17 @@ KwContinue  = "continue" KwEnd ;
         if (k.prange != undefined) {
             var rg = k.prange
             if (rg.lo != null) {
+                // The bounds compare through the operators, so a sized-integer box,
+                // a Double and a user Comparable all order as `<` does.
                 var rl = rg.lo(b)
                 var okL = curF.NewBlock("")
-                rl.b.NewCondBr(truthy(rl.b, callExt(rl.b, "js_ge", [v, rl.v])), okL, failB)
+                rl.b.NewCondBr(truthy(rl.b, emitBin(rl.b, ">=", v, rl.v)), okL, failB)
                 b = okL
             }
             if (rg.hi != null) {
                 var rh = rg.hi(b)
                 var okH = curF.NewBlock("")
-                var cmp = rg.rop == "..<" ? "js_lt" : "js_le"
-                rh.b.NewCondBr(truthy(rh.b, callExt(rh.b, cmp, [v, rh.v])), okH, failB)
+                rh.b.NewCondBr(truthy(rh.b, emitBin(rh.b, rg.rop == "..<" ? "<" : "<=", v, rh.v)), okH, failB)
                 b = okH
             }
             return b
@@ -4853,6 +4867,14 @@ KwContinue  = "continue" KwEnd ;
         // value that is not an enum case, so the test is safe for any subject.
         var okB = curF.NewBlock("")
         var nm = b.NewCall(rtEName(), [v])
+        if (k.pval != null) {
+            var caseB = curF.NewBlock("")
+            var valB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [nm, hUndef])), valB, caseB)
+            var rv = k.pval(valB)
+            rv.b.NewCondBr(truthy(rv.b, emitBin(rv.b, "==", v, rv.v)), okB, failB)
+            b = caseB
+        }
         b.NewCondBr(truthy(b, callExt(b, "js_seq", [nm, emitStr(b, patCaseName(k))])), okB, failB)
         b = okB
         if (k.pargs != null && k.pargs.length > 0) {

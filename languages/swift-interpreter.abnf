@@ -920,8 +920,10 @@ PatRangeDn  <~~ push(makePatRange(takeAll())) ~~> = RangeOp PatOperand ;
 // full expression grammar: a `{ ... }` would be read as a closure and swallow the
 // body of `catch { ... }`, whose pattern is optional.
 PatExpr     <~~ push({pexpr: pop()}) ~~> = PatOperand ;
-PatOperand  = PatNegLit | Template | NumberLit | True | False | Nil ;
+PatOperand  = PatNegLit | PatQual | Template | NumberLit | True | False | Nil ;
 PatNegLit   <~~ push(makeNeg(pop())) ~~> = "-" NumberLit ;
+// A qualified static as a range bound: `6..<Int.max`, `Limits.lo...`.
+PatQual     <~~ push(foldCallMember(takeAll(), up.in)) ~~> = VarRef FieldSfx { FieldSfx } ;
 PatLet      <~~ push({plet: pop()}) ~~> = ( "let" | "var" ) KwEnd Pattern ;
 PatTuple    <~~ push({ptup: takeAll()}) ~~> = "(" Pattern { "," Pattern } ")" ;
 PatWild     <~~ push({pwild: 1}) ~~> = Wildcard ;
@@ -5275,7 +5277,18 @@ KwContinue  = "continue" KwEnd ;
             else if (items[i].ppath != undefined) { path = items[i].ppath }
             else if (items[i].pargs != undefined) { args = items[i].pargs }
         }
-        return {pdot: dot, ppath: path, pargs: args}
+        return {pdot: dot, ppath: path, pargs: args, pval: swPatPathVal(dot, path, args)}
+    }
+    // A qualified path with no arguments (`case Int.min:`) is an enum case or an
+    // EXPRESSION pattern; for a subject that is no enum case it is the value the
+    // path reads, compared with ==. null for every other pattern. Twin of
+    // swPatPathVal in swift-to-llvm-ir.abnf.
+    function swPatPathVal(dot, path, args) {
+        if (dot || args != null || path.indexOf(".") < 0) { return null }
+        var ps = path.split(".")
+        var chain = [swVarRef(ps[0])]
+        for (var i = 1; i < ps.length; i++) { chain.push({kind: "field", name: ps[i]}) }
+        return foldCallMember(chain, path)
     }
     // Matches v against the pattern, declaring the names of every `let`/`var` sub
     // pattern in the CURRENT scope. binding says a bare identifier names a new
@@ -5307,12 +5320,13 @@ KwContinue  = "continue" KwEnd ;
         if (k.pwild != undefined) { return true }
         if (k.pexpr != undefined) { return swEq(v, k.pexpr()) }
         if (k.prange != undefined) {
+            // The bounds compare through the operators, so a sized-integer box, a
+            // Double and a user Comparable all order as `<` does.
             var rg = k.prange
-            if (rg.lo != null && !(v >= rg.lo())) { return false }
+            if (rg.lo != null && !core.test(binOp(">=", v, rg.lo()))) { return false }
             if (rg.hi != null) {
                 var hi = rg.hi()
-                if (rg.rop == "..<") { if (!(v < hi)) { return false } }
-                else if (!(v <= hi)) { return false }
+                if (!core.test(binOp(rg.rop == "..<" ? "<" : "<=", v, hi))) { return false }
             }
             return true
         }
@@ -5350,6 +5364,7 @@ KwContinue  = "continue" KwEnd ;
             return true
         }
         if (k.pargs != null && k.pargs.length > 0) { return false }
+        if (k.pval != null) { return swEq(v, k.pval()) }
         // A bare name with no enum value behind it is a value pattern: compare with
         // whatever the name holds, and fall back to the case name when it holds nothing.
         if (cut < 0 && !k.pdot) {
