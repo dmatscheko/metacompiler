@@ -2366,6 +2366,57 @@ function s53()
     check("tb18", take(), "13 mb:nil")
 end
 
+-- ===== SECTION 54: the os library =====
+-- time, clock, date, difftime and getenv. A clock reading or the local zone is no
+-- fixed value, so what is asserted is UTC text at fixed times, shapes, relations
+-- (a local date round-trips through os.time) and the errors. Values printed by
+-- lua 5.5.
+function s54()
+    local function try(f, ...)
+        local ok, e = pcall(f, ...)
+        if ok then return "ok:" .. tostring(e) end
+        return (tostring(e):gsub("^[^:]*:%d+: ", ""))
+    end
+    check("os1", math.type(os.time()) .. " " .. math.type(os.clock()) .. " " .. tostring(os.time() > 1700000000) .. " " .. tostring(os.getenv("MEC_SURELY_UNSET_VARIABLE")),
+        "integer float true nil")
+    local c0 = os.clock()
+    local x = 0
+    for i = 1, 20000 do x = x + i end
+    check("os2", os.clock() >= c0 and type(os.getenv("PATH")) == "string", true)
+    check("os3", os.date("!%Y-%m-%d %H:%M:%S", 0) .. "|" .. os.date("!%c", 0) .. "|" .. os.date("!%x %X %p %Z", 86400 * 400 + 3600 * 15) .. "|" .. os.date("!"),
+        "1970-01-01 00:00:00|Thu Jan  1 00:00:00 1970|02/05/71 15:00:00 PM UTC|")
+    local all = "aAbBcCdDeFgGhHIjmMnprRStTuUVwWxXyYZ%"
+    local out = {}
+    for i = 1, #all do local c = all:sub(i, i); out[#out + 1] = c .. "=" .. os.date("!%" .. c, 1700000000) end
+    check("os4", table.concat(out, "|"), "a=Tue|A=Tuesday|b=Nov|B=November|c=Tue Nov 14 22:13:20 2023|C=20|d=14|D=11/14/23|e=14|F=2023-11-14|g=23|G=2023|h=Nov|H=22|I=10|j=318|m=11|M=13|n=\n|p=PM|r=10:13:20 PM|R=22:13|S=20|t=\t|T=22:13:20|u=2|U=46|V=46|w=2|W=46|x=11/14/23|X=22:13:20|y=23|Y=2023|Z=UTC|%=%")
+    local rows = {}
+    for _, t in ipairs({951782400, 1104537600, -86400, 253402300799}) do
+        rows[#rows + 1] = os.date("!%F %a %j %U %W %V %G %g %u %w %e %C %y %I %Ey %Od", t)
+    end
+    check("os5", table.concat(rows, "|"), "2000-02-29 Tue 060 09 09 09 2000 00 2 2 29 20 00 12 00 29|2005-01-01 Sat 001 00 00 53 2004 04 6 6  1 20 05 12 05 01|1969-12-31 Wed 365 52 52 01 1970 70 3 3 31 19 69 12 69 31|9999-12-31 Fri 365 52 52 52 9999 99 5 5 31 99 99 11 99 31")
+    local d = os.date("!*t", 1700000000)
+    local keys = {}
+    for k, v in pairs(d) do keys[#keys + 1] = k .. "=" .. tostring(v) end
+    table.sort(keys)
+    check("os6", table.concat(keys, " "), "day=14 hour=22 isdst=false min=13 month=11 sec=20 wday=3 yday=318 year=2023")
+    local trips = true
+    for _, t in ipairs({0, 951782400, 1700000000, 1720000000}) do trips = trips and os.time(os.date("*t", t)) == t end
+    check("os7", trips and type(os.date("*t").isdst) == "boolean" and string.match(os.date("%z"), "^[+-]%d%d%d%d$") ~= nil, true)
+    local n = {year = 2000, month = 14, day = 35, hour = 12, min = 61, sec = 61}
+    local tt = os.time(n)
+    check("os8", n.year .. " " .. n.month .. " " .. n.day .. " " .. n.hour .. " " .. n.min .. " " .. n.sec .. " " .. n.yday .. " " .. n.wday .. " " .. os.date("%Y-%m-%d %H:%M:%S", tt),
+        "2001 3 7 13 2 1 66 4 2001-03-07 13:02:01")
+    check("os9", os.time({year = 2000, month = 1, day = 1, hour = 0}) - os.time({year = 1999, month = 12, day = 31, hour = 0}), 86400)
+    check("os10", try(os.date, "%Ez") .. "|" .. try(os.date, "x%") .. "|" .. try(os.date, "%qab") .. "|" .. try(os.date, "%Y", 1.5) .. "|" .. try(os.date, "%Y", "x") .. "|" .. try(os.date, 5),
+        "bad argument #1 to 'os.date' (invalid conversion specifier '%Ez')|bad argument #1 to 'os.date' (invalid conversion specifier '%')|bad argument #1 to 'os.date' (invalid conversion specifier '%qab')|bad argument #2 to 'os.date' (number has no integer representation)|bad argument #2 to 'os.date' (number expected, got string)|ok:5")
+    check("os11", try(os.time, {year = 2000}) .. "|" .. try(os.time, {year = "x", month = 1, day = 1}) .. "|" .. try(os.time, {year = 2000, month = 1.5, day = 1}) .. "|" .. try(os.time, 5) .. "|" .. try(os.time, {year = 2000, month = 1, day = 1, hour = 2^31}),
+        "field 'month' missing in date table|field 'year' is not an integer|field 'month' is not an integer|bad argument #1 to 'os.time' (table expected, got number)|field 'hour' is out-of-bound")
+    check("os12", try(os.date, "%Y", 2^60) .. "|" .. try(os.difftime, 1) .. "|" .. os.difftime(10, 3) .. " " .. math.type(os.difftime("5", 3)) .. "|" .. try(os.getenv) .. "|" .. try(os.exit, "x"),
+        "date result cannot be represented in this installation|bad argument #2 to 'os.difftime' (number expected, got no value)|7.0 float|bad argument #1 to 'os.getenv' (string expected, got no value)|bad argument #1 to 'os.exit' (number expected, got string)")
+    local mt = setmetatable({}, {__index = function(_, k) return ({year = 2001, month = 2, day = 3, hour = 12})[k] end})
+    check("os13", os.time(mt) == os.time({year = 2001, month = 2, day = 3}) and rawget(mt, "year") == 2001, true)
+end
+
 s25() -- SECTION-CALL 25
 s26() -- SECTION-CALL 26
 s27() -- SECTION-CALL 27
@@ -2395,5 +2446,6 @@ s50() -- SECTION-CALL 50
 s51() -- SECTION-CALL 51
 s52() -- SECTION-CALL 52
 s53() -- SECTION-CALL 53
+s54() -- SECTION-CALL 54
 print("full: " .. checks .. " checks, " .. failures .. " failures")
 exit(failures)

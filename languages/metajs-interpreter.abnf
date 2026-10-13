@@ -1089,6 +1089,9 @@ KwDefault   = "default" KwEnd ;
         "byteAt": byteAt,
         "byteSub": byteSub,
         "bytesStr": bytesStr,
+        // osQuery(kind, arg): host id 104, the clock, time zone and environment;
+        // bound by both grammar hosts like the byte trio.
+        "osQuery": osQuery,
         // The ten boxed-double names, the same set languages/lib/runtime.c
         // seeds (ids 51..60) and abnf/jsrtjvm.go's jfBindings adds.
         "flo": flHost,

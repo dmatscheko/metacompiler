@@ -241,6 +241,18 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 	installGojaFnMeta(vm)
 	installGojaArrKind(vm)
 	installGojaCoroutines(vm)
+	// osQuery(kind, arg): the machine's clock, time zone and environment; the
+	// frozen and program hosts' osBindings (jsrtint.go).
+	vm.Set("osQuery", func(call goja.FunctionCall) goja.Value {
+		kind := int(call.Argument(0).ToInteger())
+		if kind == 5 {
+			if v, ok := os.LookupEnv(call.Argument(1).String()); ok {
+				return vm.ToValue(v)
+			}
+			return goja.Undefined()
+		}
+		return vm.ToValue(osQuery(kind, call.Argument(1).ToFloat()))
+	})
 
 	// The WTF-8 byte length of a string. JS .length counts UTF-16 code units,
 	// but the emitters need the byte count of the char arrays they emit

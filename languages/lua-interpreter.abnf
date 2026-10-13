@@ -38,8 +38,10 @@ Coroutines suspend for real: a coroutine's function runs on the tag host's own
 coroutine (coNew / coResume / coYield), so a yield parks it at any depth of calls
 and every statement runs once.
 
-Not in the subset: the loading functions of the base library (load, loadfile,
-dofile), os and the rest of io; collectgarbage collects nothing.
+os has time, clock, date, difftime, getenv and exit (the local time zone is the
+host's). Not in the subset: the loading functions of the base library (load,
+loadfile, dofile), the file system half of os and the rest of io; collectgarbage
+collects nothing.
 
 There is no main(): the file simply runs top to bottom. Self checking programs count
 their failures and end with exit(fails). The same language with the same semantics is
@@ -837,9 +839,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // A long literal takes no escapes, so its whole body is source text and is UTF-8
     // encoded into the byte string exactly like the plain runs of a quoted literal.
     function luaLong(s) {
-        if (s.length > 0 && s.charCodeAt(0) === 10) { return luaUtf8(s.slice(1)) }
-        if (s.length > 1 && s.charCodeAt(0) === 13 && s.charCodeAt(1) === 10) { return luaUtf8(s.slice(2)) }
-        return luaUtf8(s)
+        if (s.length > 0 && s.charCodeAt(0) === 10) { return lu8FromHost(s.slice(1)) }
+        if (s.length > 1 && s.charCodeAt(0) === 13 && s.charCodeAt(1) === 10) { return lu8FromHost(s.slice(2)) }
+        return lu8FromHost(s)
     }
 
     // ----- The number model: Lua's integer and float subtypes -----
@@ -1019,29 +1021,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // operators, whose code-unit order IS byte order - and \xNN / \ddd become the single
     // byte they name instead of a code point.
     //
-    // luaUtf8 encodes source text and \u{...} on the way IN (it is called only from the
-    // literal readers), and print writes the bytes OUT raw (writeBytes), so what a
-    // program prints is the byte sequence it holds. Nothing in between needs to know.
-    // A code point's bytes are lu8Esc's (lib/lua-strlib.js, included below).
-    // Host text (UTF-16, surrogate pairs included) to its UTF-8 bytes.
-    function luaUtf8(s) {
-        var out = ""
-        var i = 0
-        while (i < s.length) {
-            var c = s.charCodeAt(i)
-            if (c >= 55296 && c < 56320 && i + 1 < s.length) {
-                var lo = s.charCodeAt(i + 1)
-                if (lo >= 56320 && lo < 57344) {
-                    out = out + lu8Esc(65536 + (c - 55296) * 1024 + (lo - 56320))
-                    i = i + 2
-                    continue
-                }
-            }
-            out = out + lu8Esc(c)
-            i = i + 1
-        }
-        return out
-    }
+    // lu8FromHost (lib/lua-strlib.js, included below) encodes source text and \u{...}
+    // on the way IN (the literal readers call it), and print writes the bytes OUT raw
+    // (writeBytes), so what a program prints is the byte sequence it holds. Nothing in
+    // between needs to know.
     // The byte string back to host text, for the message of an uncaught error, which
     // is printed as text. A byte that starts no valid sequence is passed through as its
     // own code point.
@@ -3023,7 +3006,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             out += luaToStr(arguments[i])
         }
         // The byte string leaves the program as the bytes it holds (see the byte-string
-        // note above luaUtf8).
+        // note above lu8FromHost).
         writeBytes(out + "\n")
     }
     globalScope["exit"] = function(code) { exit(numOf(code) | 0) }
@@ -3063,6 +3046,95 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         },
         stdout: luaStdout
     }
+
+    // os (loslib.c): time, clock, date, difftime, getenv and exit, over the civil
+    // time of lib/lua-strlib.js (lo*). The file system, os.execute and setlocale are
+    // not in the subset. Twins: js_luos* in lib/lua-rt.metajs and abnf/jsrtluaos.go.
+    // getfield: an integer field of os.time's table, d when it is nil (a required
+    // one has d < 0), and in struct tm's int range once delta is taken off.
+    function luaOsField(t, key, d, delta) {
+        var v = anytype
+        v = luaGet(t, key)
+        var n = anytype
+        n = toNumV(v)
+        var r = n === undefined ? 0 : numOf(n)
+        if (n === undefined || (!isInt(n) && (r - r !== 0 || Math.floor(r) !== r || luaI64(r) === undefined))) {
+            if (v !== undefined && v !== null) { fail("field '" + key + "' is not an integer") }
+            if (d < 0) { fail("field '" + key + "' missing in date table") }
+            return d
+        }
+        if (!(r >= 0 ? r - delta <= LO_INT_MAX : 0 - LO_INT_MAX - 1 + delta <= r)) { fail("field '" + key + "' is out-of-bound") }
+        return r
+    }
+    // setallfields: a broken-down time into t, in loslib.c's order.
+    function luaOsFill(t, f) {
+        luaSetIndex(t, "year", f.year)
+        luaSetIndex(t, "month", f.month)
+        luaSetIndex(t, "day", f.day)
+        luaSetIndex(t, "hour", f.hour)
+        luaSetIndex(t, "min", f.min)
+        luaSetIndex(t, "sec", f.sec)
+        luaSetIndex(t, "yday", f.yday)
+        luaSetIndex(t, "wday", f.wday)
+        luaSetIndex(t, "isdst", f.isdst)
+    }
+    var luaOs = {}
+    luaRawSet(luaOs, "time", function(t) {
+        if (t === undefined || t === null) { return osQuery(0, 0) }
+        luaCheckTab("os.time", 1, t, arguments.length)
+        var y = luaOsField(t, "year", 0 - 1, 1900)
+        var mo = luaOsField(t, "month", 0 - 1, 1)
+        var d = luaOsField(t, "day", 0 - 1, 0)
+        var h = luaOsField(t, "hour", 12, 0)
+        var mi = luaOsField(t, "min", 0, 0)
+        var sec = luaOsField(t, "sec", 0, 0)
+        var dst = anytype
+        dst = luaGet(t, "isdst")
+        var r = loMkTime(y, mo, d, h, mi, sec, (dst === undefined || dst === null) ? 0 - 1 : (luatruthy(dst) ? 1 : 0))
+        var f = anytype
+        f = loBreak(r, false)
+        if (f === null) { fail("time result cannot be represented in this installation") }
+        luaOsFill(t, f)
+        return r
+    })
+    luaRawSet(luaOs, "clock", function() { return mkFlt(osQuery(1, 0)) })
+    luaRawSet(luaOs, "date", function(fmt, t) {
+        var nargs = arguments.length
+        var s = luaOptStr("os.date", 1, fmt, nargs, "%c")
+        var tv = anytype
+        tv = (t === undefined || t === null) ? osQuery(0, 0) : luaCheckInt("os.date", 2, t, nargs)
+        var utc = s.length > 0 && s.charCodeAt(0) === 33
+        if (utc) { s = s.substring(1) }
+        var f = anytype
+        f = loBreak(tv, utc)
+        if (f === null) { fail("date result cannot be represented in this installation") }
+        if (s == "*t") {
+            var out = {}
+            luaOsFill(out, f)
+            return out
+        }
+        var r = loFormat(s, f)
+        if (!r[0]) { luaArgErr("os.date", 1, "invalid conversion specifier '%" + r[1] + "'") }
+        return r[1]
+    })
+    luaRawSet(luaOs, "difftime", function(t1, t2) {
+        var nargs = arguments.length
+        var a = luaCheckInt("os.difftime", 1, t1, nargs)
+        return mkFlt(a - luaCheckInt("os.difftime", 2, t2, nargs))
+    })
+    luaRawSet(luaOs, "getenv", function(name) {
+        var v = anytype
+        v = osQuery(5, luaOut(luaCheckStr("os.getenv", 1, name, arguments.length)))
+        if (v === undefined) { return undefined }
+        return lu8FromHost(v)
+    })
+    // exit([code]): true or absent is EXIT_SUCCESS, false EXIT_FAILURE.
+    luaRawSet(luaOs, "exit", function(code) {
+        if (code === undefined || code === null || code === true) { exit(0) }
+        if (code === false) { exit(1) }
+        exit(luaCheckInt("os.exit", 1, code, arguments.length))
+    })
+    globalScope["os"] = luaOs
 
     // next(t [, k]): the table iterator, walking the table's own keys in insertion order
     // (the hidden __keys list) and skipping the ones whose value is nil. It returns the

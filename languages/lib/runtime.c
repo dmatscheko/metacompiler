@@ -54,6 +54,8 @@ void *malloc(unsigned long n);
 char *getenv(const char *name);
 int getentropy(void *buf, unsigned long n);
 long time(long *t);
+long clock(void);
+void *localtime_r(long *t, long *tm);
 int setjmp(void *env);
 void longjmp(void *env, int v);
 void exit(int code);
@@ -6540,6 +6542,41 @@ long host_call(long id, long self, long args) {
 		sb(h, len);
 		return h;
 	}
+	/* osQuery(kind, arg): what an os library needs from the machine - 0 the
+	 * time in seconds, 1 the processor time in seconds (clock() counts
+	 * microseconds on darwin and glibc), 2 the local zone's offset east of UTC
+	 * in seconds at time arg, 3 its abbreviation, 4 whether daylight saving time
+	 * is in effect then, 5 the environment variable named arg, undefined when
+	 * unset. localtime_r's struct tm is read as longs: tm_isdst is the low half
+	 * of word 4, tm_gmtoff word 5 and tm_zone word 6, the layout of darwin and
+	 * glibc on a 64-bit machine. Twin of osBindings in abnf/jsrtint.go. */
+	case 104: {
+		long kind = d_to_long(arg_num(args, 0));
+		long tm[8];
+		long t;
+		if (kind == 0) { return mk_num(d_from_long(time(0))); }
+		if (kind == 1) { return mk_dnum((double)clock() / 1000000.0); }
+		if (kind == 5) {
+			long s = arg_str(args, 1);
+			long len = str_len(s);
+			char *buf = ar_alloc(len + 1);
+			char *e;
+			while (i < len) { buf[i] = str_ptr(s)[i]; i = i + 1; }
+			buf[len] = 0;
+			e = getenv(buf);
+			if (e == 0) { return H_UNDEF; }
+			return mk_cstr(e);
+		}
+		t = d_to_long(arg_num(args, 1));
+		if (localtime_r(&t, tm) == 0) {
+			if (kind == 3) { return mk_cstr("UTC"); }
+			if (kind == 4) { return mk_bool(0); }
+			return mk_num(d_from_long(0));
+		}
+		if (kind == 2) { return mk_num(d_from_long(tm[5])); }
+		if (kind == 3) { return mk_cstr((const char *)tm[6]); }
+		return mk_bool((tm[4] & 4294967295) != 0);
+	}
 	}
 	die("unknown host function");
 	return H_UNDEF;
@@ -7397,6 +7434,7 @@ void boot(void) {
 	seed_root("byteAt", mk_host(101));
 	seed_root("byteSub", mk_host(102));
 	seed_root("bytesStr", mk_host(103));
+	seed_root("osQuery", mk_host(104));
 	seed_root("Infinity", mk_num(DINF));
 	seed_root("NaN", mk_num(DNAN));
 	seed_root("anytype", cell_new(12));

@@ -1,8 +1,8 @@
 // lua-strlib.js -- Lua's pattern matching and the byte-level string library:
 // string.find, match, gmatch, gsub, byte, reverse, sub, rep, upper, lower and
 // format, as lstrlib.c (Lua 5.5) does them; at the end the utf8 library's core
-// (lutf8lib.c), math.random's generator (lmathlib.c) and string.pack / unpack,
-// which the same two includers share. Lua patterns are NOT regular expressions: no alternation, a
+// (lutf8lib.c), math.random's generator (lmathlib.c), string.pack / unpack and
+// os.date / os.time's civil time (loslib.c), which the same two includers share. Lua patterns are NOT regular expressions: no alternation, a
 // quantifier applies to one character class only, and %b, %f and back-references
 // (%1) exist instead. The names below follow lstrlib.c.
 //
@@ -1348,4 +1348,193 @@ function lpUnpack(qual, fmt, data, init) {
     }
     out.push(lpMkInt(i64FromNum(pos + 1)))
     return out
+}
+
+// Host text (UTF-16, surrogate pairs included) as the byte string of its UTF-8:
+// source text and \u{...} on the way into the interpreter, and the text the host
+// clock and environment answer (os.date's %Z, os.getenv).
+function lu8FromHost(s) {
+    var out = ""
+    var i = 0
+    while (i < s.length) {
+        var c = s.charCodeAt(i)
+        if (c >= 55296 && c < 56320 && i + 1 < s.length) {
+            var lo = s.charCodeAt(i + 1)
+            if (lo >= 56320 && lo < 57344) {
+                out = out + lu8Esc(65536 + (c - 55296) * 1024 + (lo - 56320))
+                i = i + 2
+                continue
+            }
+        }
+        out = out + lu8Esc(c)
+        i = i + 1
+    }
+    return out
+}
+
+// ----- os.date / os.time (loslib.c) -----
+// Civil time over the host clock, in the C locale. osQuery(kind, arg) is the one
+// host builtin it needs: kind 0 the time in seconds, 1 the processor time in
+// seconds, 2 the local zone's offset east of UTC in seconds at time arg, 3 that
+// zone's abbreviation, 4 whether daylight saving time is in effect then, 5 the
+// environment variable named arg, undefined when it is unset (host id 104 of
+// languages/lib/runtime.c, osBindings in abnf/jsrtint.go). A time is integral
+// seconds in a double. Go twin: abnf/jsrtluaos.go.
+var LO_DAY = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+var LO_MON = ["January", "February", "March", "April", "May", "June", "July", "August", "September",
+    "October", "November", "December"]
+var LO_INT_MAX = 2147483647
+function loMod(a, b) { return a - Math.floor(a / b) * b }
+// Days from 1970-01-01 to y-m-d (m 1..12) in the proleptic Gregorian calendar.
+function loDays(y, m, d) {
+    var yy = m <= 2 ? y - 1 : y
+    var era = Math.floor(yy / 400)
+    var yoe = yy - era * 400
+    var mp = m > 2 ? m - 3 : m + 9
+    var doy = Math.floor((153 * mp + 2) / 5) + d - 1
+    return era * 146097 + yoe * 365 + Math.floor(yoe / 4) - Math.floor(yoe / 100) + doy - 719468
+}
+// The date of day z counted from 1970-01-01, as [y, m, d].
+function loCivil(z0) {
+    var z = z0 + 719468
+    var era = Math.floor(z / 146097)
+    var doe = z - era * 146097
+    var yoe = Math.floor((doe - Math.floor(doe / 1460) + Math.floor(doe / 36524) - Math.floor(doe / 146096)) / 365)
+    var doy = doe - (365 * yoe + Math.floor(yoe / 4) - Math.floor(yoe / 100))
+    var mp = Math.floor((5 * doy + 2) / 153)
+    var m = mp < 10 ? mp + 3 : mp - 9
+    var y = yoe + era * 400
+    if (m <= 2) { y = y + 1 }
+    return [y, m, doy - Math.floor((153 * mp + 2) / 5) + 1]
+}
+// The broken-down time t, UTC or local, in lua's units (month 1..12, wday 1..7
+// from Sunday, yday from 1), or null when its year leaves struct tm's int range
+// (lua's "date result cannot be represented"). zoff is what %z prints: for a UTC
+// time darwin's strftime, the oracle's, prints the zone's standard offset as of
+// now (loStdOff).
+function loBreak(t, utc) {
+    var y0 = loCivil(Math.floor(t / 86400))[0] - 1900
+    if (y0 > LO_INT_MAX || y0 < 0 - LO_INT_MAX - 1) { return null }
+    var zoff = utc ? loStdOff() : osQuery(2, t)
+    var lt = utc ? t : t + zoff
+    var days = Math.floor(lt / 86400)
+    var secs = lt - days * 86400
+    var ymd = loCivil(days)
+    return {year: ymd[0], month: ymd[1], day: ymd[2], hour: Math.floor(secs / 3600), min: Math.floor(secs / 60) % 60,
+            sec: secs % 60, wday: loMod(days + 4, 7) + 1, yday: days - loDays(ymd[0], 1, 1) + 1,
+            isdst: utc ? false : osQuery(4, t), zoff: zoff, zone: utc ? "UTC" : lu8FromHost(osQuery(3, t))}
+}
+// The local zone's offset in t's year at a time whose daylight saving state is
+// dst - mid-January or mid-July, one of which is outside it. A zone that never
+// is in that state gets mktime's guess: daylight saving time one hour ahead.
+function loOffWhere(t, dst) {
+    var y = loCivil(Math.floor(t / 86400))[0]
+    var jan = loDays(y, 1, 15) * 86400
+    var jul = loDays(y, 7, 15) * 86400
+    if (osQuery(4, jan) === dst) { return osQuery(2, jan) }
+    if (osQuery(4, jul) === dst) { return osQuery(2, jul) }
+    return osQuery(2, t) + (dst ? 3600 : 0 - 3600)
+}
+function loStdOff() { return loOffWhere(osQuery(0, 0), false) }
+// mktime over lua's fields (month 1-based, any of them out of its range): the time
+// whose local reading they are, found by asking the offset twice, so that a zone
+// change between the guess and the answer moves it once. isdst is mktime's hint
+// (-1 none): one that disagrees with the zone at that time reads the fields in the
+// offset of the hinted state (loOffWhere).
+function loMkTime(y, mo, d, h, mi, s, isdst) {
+    var yy = y + Math.floor((mo - 1) / 12)
+    var local = (loDays(yy, loMod(mo - 1, 12) + 1, 1) + d - 1) * 86400 + h * 3600 + mi * 60 + s
+    var t = local - osQuery(2, local)
+    t = local - osQuery(2, t)
+    if (isdst >= 0 && (isdst > 0) !== osQuery(4, t)) { return local - loOffWhere(t, isdst > 0) }
+    return t
+}
+function loPad(n, w) {
+    var s = "" + n
+    while (s.length < w) { s = "0" + s }
+    return s
+}
+function loYear(y) { return y >= 0 ? loPad(y, 4) : "" + y }
+function loIsoP(y) { return loMod(y + Math.floor(y / 4) - Math.floor(y / 100) + Math.floor(y / 400), 7) }
+function loIsoWeeks(y) { return (loIsoP(y) === 4 || loIsoP(y - 1) === 3) ? 53 : 52 }
+// The ISO 8601 [year, week] of a broken-down time (%G, %g, %V).
+function loIso(f) {
+    var wd = f.wday === 1 ? 7 : f.wday - 1
+    var wk = Math.floor((f.yday - wd + 10) / 7)
+    if (wk < 1) { return [f.year - 1, loIsoWeeks(f.year - 1)] }
+    if (wk > loIsoWeeks(f.year)) { return [f.year + 1, 1] }
+    return [f.year, wk]
+}
+// One conversion of strftime in the C locale.
+function loConv(c, f) {
+    if (c == "a") { return LO_DAY[f.wday - 1].substring(0, 3) }
+    if (c == "A") { return LO_DAY[f.wday - 1] }
+    if (c == "b" || c == "h") { return LO_MON[f.month - 1].substring(0, 3) }
+    if (c == "B") { return LO_MON[f.month - 1] }
+    if (c == "c") { return loConv("a", f) + " " + loConv("b", f) + " " + loConv("e", f) + " " + loConv("T", f) + " " + loConv("Y", f) }
+    if (c == "C") { return loPad(Math.floor(f.year / 100), 2) }
+    if (c == "d") { return loPad(f.day, 2) }
+    if (c == "D" || c == "x") { return loConv("m", f) + "/" + loConv("d", f) + "/" + loConv("y", f) }
+    if (c == "e") { return f.day < 10 ? " " + f.day : "" + f.day }
+    if (c == "F") { return loConv("Y", f) + "-" + loConv("m", f) + "-" + loConv("d", f) }
+    if (c == "g") { return loPad(loMod(loIso(f)[0], 100), 2) }
+    if (c == "G") { return loYear(loIso(f)[0]) }
+    if (c == "H") { return loPad(f.hour, 2) }
+    if (c == "I") { return loPad(f.hour % 12 === 0 ? 12 : f.hour % 12, 2) }
+    if (c == "j") { return loPad(f.yday, 3) }
+    if (c == "m") { return loPad(f.month, 2) }
+    if (c == "M") { return loPad(f.min, 2) }
+    if (c == "n") { return "\n" }
+    if (c == "p") { return f.hour < 12 ? "AM" : "PM" }
+    if (c == "r") { return loConv("I", f) + ":" + loConv("M", f) + ":" + loConv("S", f) + " " + loConv("p", f) }
+    if (c == "R") { return loConv("H", f) + ":" + loConv("M", f) }
+    if (c == "S") { return loPad(f.sec, 2) }
+    if (c == "t") { return "\t" }
+    if (c == "T" || c == "X") { return loConv("H", f) + ":" + loConv("M", f) + ":" + loConv("S", f) }
+    if (c == "u") { return "" + (f.wday === 1 ? 7 : f.wday - 1) }
+    if (c == "U") { return loPad(Math.floor((f.yday + 7 - f.wday) / 7), 2) }
+    if (c == "V") { return loPad(loIso(f)[1], 2) }
+    if (c == "w") { return "" + (f.wday - 1) }
+    if (c == "W") { return loPad(Math.floor((f.yday + 6 - loMod(f.wday + 5, 7)) / 7), 2) }
+    if (c == "y") { return loPad(loMod(f.year, 100), 2) }
+    if (c == "Y") { return loYear(f.year) }
+    if (c == "z") {
+        var a = f.zoff < 0 ? 0 - f.zoff : f.zoff
+        return (f.zoff < 0 ? "-" : "+") + loPad(Math.floor(a / 3600), 2) + loPad(Math.floor(a / 60) % 60, 2)
+    }
+    if (c == "Z") { return f.zone }
+    return "%"
+}
+// os.date's format over a broken-down time: [true, the text], or [false, the rest
+// of the format from a conversion lua 5.5 does not accept] for its "invalid
+// conversion specifier". The accepted ones are LUA_STRFTIMEOPTIONS: one
+// character, or E or O and one.
+var LO_OPT1 = "aAbBcCdDeFgGhHIjmMnprRStTuUVwWxXyYzZ%"
+var LO_OPTE = "cCxXyY"
+var LO_OPTO = "deHImMSuUVwWy"
+function loFormat(fmt, f) {
+    var out = ""
+    var i = 0
+    while (i < fmt.length) {
+        var ch = fmt.charAt(i)
+        if (ch != "%") {
+            out = out + ch
+            i = i + 1
+            continue
+        }
+        var cc = i + 1 < fmt.length ? fmt.charAt(i + 1) : ""
+        var conv = cc
+        var used = 2
+        if (cc == "E" || cc == "O") {
+            var c2 = i + 2 < fmt.length ? fmt.charAt(i + 2) : ""
+            if (c2 == "" || (cc == "E" ? LO_OPTE : LO_OPTO).indexOf(c2) < 0) { return [false, fmt.substring(i + 1)] }
+            conv = c2
+            used = 3
+        } else if (cc == "" || LO_OPT1.indexOf(cc) < 0) {
+            return [false, fmt.substring(i + 1)]
+        }
+        out = out + loConv(conv, f)
+        i = i + used
+    }
+    return [true, out]
 }

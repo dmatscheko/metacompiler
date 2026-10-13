@@ -46,8 +46,11 @@ package abnf
 
 import (
 	"math"
+	"os"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 )
 
 // giExact is 2^53: the largest magnitude an integer keeps exactly in a float64.
@@ -474,6 +477,7 @@ func programJSBindings() map[string]interface{} {
 	fnMetaBindings(b)
 	arrKindBindings(b)
 	byteBindings(b)
+	osBindings(b)
 	// fail(msg): a RUNTIME ERROR, not an exception - the twin of host id 36 in
 	// languages/lib/runtime.c (rt.fail panics with exactly that text). Every
 	// layer-2 file calls it, so it must be bound under llvm.Run too.
@@ -625,6 +629,46 @@ func arrKindBindings(b map[string]interface{}) {
 		}
 		return v
 	})
+}
+
+// osBindings adds osQuery(kind, arg), host id 104 of languages/lib/runtime.c:
+// what an os library needs from the machine, which MetaJS cannot ask - kind 0
+// the time in seconds, 1 the processor time in seconds, 2 the local zone's
+// offset east of UTC in seconds at time arg, 3 its abbreviation, 4 whether
+// daylight saving time is in effect then, 5 the environment variable named arg,
+// undefined when unset. commonscript.go binds the goja twin over osQuery.
+func osBindings(b map[string]interface{}) {
+	b["osQuery"] = jsHostFunc("osQuery", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		kind := int(jsToInt(rt.toNumber(argAt(args, 0))))
+		if kind == 5 {
+			if v, ok := os.LookupEnv(rt.toString(argAt(args, 1))); ok {
+				return v
+			}
+			return jsUndef
+		}
+		return osQuery(kind, rt.toNumber(argAt(args, 1)))
+	})
+}
+
+// osQuery answers kinds 0..4 of the osQuery builtin.
+func osQuery(kind int, arg float64) interface{} {
+	switch kind {
+	case 0:
+		return float64(time.Now().Unix())
+	case 1:
+		var ru syscall.Rusage
+		syscall.Getrusage(syscall.RUSAGE_SELF, &ru)
+		return float64(ru.Utime.Sec+ru.Stime.Sec) + float64(int64(ru.Utime.Usec)+int64(ru.Stime.Usec))/1e6
+	}
+	lt := time.Unix(int64(arg), 0)
+	name, off := lt.Zone()
+	switch kind {
+	case 2:
+		return float64(off)
+	case 3:
+		return name
+	}
+	return lt.IsDST()
 }
 
 // byteBindings adds byteAt(s, i), byteSub(s, lo, hi) and bytesStr(a), host ids

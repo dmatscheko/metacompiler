@@ -619,6 +619,34 @@ type jsrt struct {
 	promFn *hostFunc
 }
 
+// luOutText decodes a Lua byte string (one unit per byte) as UTF-8 host text, a
+// byte that starts no valid sequence passed through as its own code point. Twin
+// of js_luaout in languages/lib/lua-rt.metajs.
+func luOutText(s string) string {
+	units := strUnits(s)
+	b := make([]byte, 0, len(units))
+	for _, c := range units {
+		b = append(b, byte(c))
+	}
+	out := make([]rune, 0, len(b))
+	for i := 0; i < len(b); {
+		if b[i] < utf8.RuneSelf {
+			out = append(out, rune(b[i]))
+			i++
+			continue
+		}
+		r, n := utf8.DecodeRune(b[i:])
+		if r == utf8.RuneError && n <= 1 {
+			out = append(out, rune(b[i]))
+			i++
+			continue
+		}
+		out = append(out, r)
+		i += n
+	}
+	return string(out)
+}
+
 // ----------------------------------------------------------------------------
 // Generators
 //
@@ -17075,28 +17103,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// the engine's own failure channel. A byte that starts no valid sequence is
 		// passed through as its own code point. Only the Lua compiler emits this.
 		"js_luaout": func(a []uint64) uint64 {
-			units := strUnits(rt.toString(u(a[0])))
-			b := make([]byte, 0, len(units))
-			for _, c := range units {
-				b = append(b, byte(c))
-			}
-			out := make([]rune, 0, len(b))
-			for i := 0; i < len(b); {
-				if b[i] < utf8.RuneSelf {
-					out = append(out, rune(b[i]))
-					i++
-					continue
-				}
-				r, n := utf8.DecodeRune(b[i:])
-				if r == utf8.RuneError && n <= 1 {
-					out = append(out, rune(b[i]))
-					i++
-					continue
-				}
-				out = append(out, r)
-				i += n
-			}
-			return rt.wrapStr(string(out))
+			return rt.wrapStr(luOutText(rt.toString(u(a[0]))))
 		},
 		// Lua's 64-bit logical shift: value << k / value >> k over the two's
 		// complement 64-bit integer, k >= 64 clears, a negative k reverses the

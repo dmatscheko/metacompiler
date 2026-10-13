@@ -1023,9 +1023,10 @@ regex.js                  <- js python ruby kotlin java dart
 int64.js                  <- interp-core.js, bash interpreter (the exact {h, l} 64-bit
                              pair; bash's arithmetic is intmax_t)
 lua-rt.metajs             <- imports lua-strlib.js and runtime.metajs ONLY
-lua-strlib.js             <- lua-rt.metajs, lua interpreter (Lua patterns and
-                             string.format; Go twins: abnf/jsrtluastr.go,
-                             abnf/jsrtluafmt.go)
+lua-strlib.js             <- lua-rt.metajs, lua interpreter (Lua patterns,
+                             string.format and os.date / os.time; Go twins:
+                             abnf/jsrtluastr.go, abnf/jsrtluafmt.go,
+                             abnf/jsrtluaos.go)
 js-rt.metajs              <- imports regex.js, json.js and js-num.js ONLY
 json.js                   <- js-rt.metajs, js and typescript interpreters
                              (Go twin: abnf/jsrtjson.go)

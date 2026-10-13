@@ -2078,6 +2078,97 @@ function js_luiotype(args) {
     return undefined
 }
 
+// ----- os (loslib.c) -----
+// time, clock, date, difftime, getenv and exit over lib/lua-strlib.js's lo* civil
+// time. Twins: abnf/jsrtluaos.go and the os table in lua-interpreter.abnf.
+// getfield: an integer field of os.time's table (lua_getfield, so through its
+// __index), d when it is nil (a required one has d < 0), and in struct tm's int
+// range once delta is taken off.
+function luOsField(t, key, d, delta) {
+    var v = anytype
+    v = t[js_lukey(key)]
+    if ((v === undefined || v === null) && typeof t["__f"] == "object") { v = js_luindex(t, key) }
+    var n = luToNum(v)
+    var r = n === undefined ? 0 : luNumOf(n)
+    if (n === undefined || (!luIsInt(n) && (r - r !== 0 || Math.floor(r) !== r || luI64(r) === undefined))) {
+        if (v !== undefined && v !== null) { luFail("field '" + key + "' is not an integer") }
+        if (d < 0) { luFail("field '" + key + "' missing in date table") }
+        return d
+    }
+    if (!(r >= 0 ? r - delta <= LO_INT_MAX : 0 - LO_INT_MAX - 1 + delta <= r)) { luFail("field '" + key + "' is out-of-bound") }
+    return r
+}
+// setallfields: a broken-down time into t, in loslib.c's order.
+function luOsFill(t, f) {
+    js_lusetindex(t, "year", f.year)
+    js_lusetindex(t, "month", f.month)
+    js_lusetindex(t, "day", f.day)
+    js_lusetindex(t, "hour", f.hour)
+    js_lusetindex(t, "min", f.min)
+    js_lusetindex(t, "sec", f.sec)
+    js_lusetindex(t, "yday", f.yday)
+    js_lusetindex(t, "wday", f.wday)
+    js_lusetindex(t, "isdst", f.isdst)
+}
+function js_luostime(args) {
+    var t = luArgAt(args, 1)
+    if (t === undefined || t === null) { return osQuery(0, 0) }
+    luCheckTab("os.time", 1, args)
+    var y = luOsField(t, "year", 0 - 1, 1900)
+    var mo = luOsField(t, "month", 0 - 1, 1)
+    var d = luOsField(t, "day", 0 - 1, 0)
+    var h = luOsField(t, "hour", 12, 0)
+    var mi = luOsField(t, "min", 0, 0)
+    var sec = luOsField(t, "sec", 0, 0)
+    var dst = anytype
+    dst = t[js_lukey("isdst")]
+    if ((dst === undefined || dst === null) && typeof t["__f"] == "object") { dst = js_luindex(t, "isdst") }
+    var hint = 0 - 1
+    if (dst !== undefined && dst !== null) { hint = luTruthy(dst) ? 1 : 0 }
+    var r = loMkTime(y, mo, d, h, mi, sec, hint)
+    var f = loBreak(r, false)
+    if (f === null) { luFail("time result cannot be represented in this installation") }
+    luOsFill(t, f)
+    return r
+}
+function js_luosclock(args) { return luMkFlo(osQuery(1, 0)) }
+function js_luosdate(args) {
+    var s = luOptStr("os.date", 1, args, "%c")
+    var tv = 0
+    var a2 = luArgAt(args, 2)
+    if (a2 === undefined || a2 === null) { tv = osQuery(0, 0) } else { tv = luCheckInt("os.date", 2, args) }
+    var utc = s.length > 0 && s.charCodeAt(0) === 33
+    if (utc) { s = s.substring(1) }
+    var f = loBreak(tv, utc)
+    if (f === null) { luFail("date result cannot be represented in this installation") }
+    if (s == "*t") {
+        var out = {}
+        luOsFill(out, f)
+        return out
+    }
+    var r = loFormat(s, f)
+    if (!r[0]) { luArgErr("os.date", 1, "invalid conversion specifier '%" + r[1] + "'") }
+    return r[1]
+}
+function js_luosdifftime(args) {
+    var a = luCheckInt("os.difftime", 1, args)
+    return luMkFlo(a - luCheckInt("os.difftime", 2, args))
+}
+function js_luosgetenv(args) {
+    var v = anytype
+    v = osQuery(5, js_luaout(luCheckStr("os.getenv", 1, args)))
+    if (v === undefined) { return undefined }
+    return lu8FromHost(v)
+}
+// exit([code]): true or absent is EXIT_SUCCESS, false EXIT_FAILURE.
+function js_luosexit(args) {
+    var c = luArgAt(args, 1)
+    if (c === undefined || c === null || c === true) { exit(0) }
+    if (c === false) { exit(1) }
+    exit(luCheckInt("os.exit", 1, args))
+    return undefined
+}
+
 // ----- the table library -----
 // Its reads and writes are lua_geti / lua_seti and its length is luaL_len, so a
 // table with a metatable goes through __index / __newindex / __len (luGetiM,

@@ -2051,7 +2051,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // them all.
     var libNames = ["math", "string", "table", "next", "ipairs", "pairs", "error", "pcall", "xpcall", "select",
                     "tostring", "tonumber", "type", "assert", "rawequal", "rawget", "rawset", "rawlen", "_VERSION",
-                    "io", "setmetatable", "getmetatable", "_G", "coroutine", "utf8", "collectgarbage"]
+                    "io", "setmetatable", "getmetatable", "_G", "coroutine", "utf8", "collectgarbage", "os"]
     var libNeed = {}
     for (var lni = 0; lni < libNames.length; lni++) { libNeed[libNames[lni]] = false }
     function luaNoteRef(name) {
@@ -3433,6 +3433,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var smt = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [smt, emitStr(b, luaNameKey("__index")), st])
             callExt(b, "js_lustrmeta", [callExt(b, "js_gc_pin", [smt])])
+        }
+        if (libNeed.os) {
+            // os: one extern each over the argument array (abnf/jsrtluaos.go, layer 2
+            // over lib/lua-strlib.js's civil time).
+            var ost = callExt(b, "js_obj_new", [])
+            var osnames = ["time", "clock", "date", "difftime", "getenv", "exit"]
+            for (var oi = 0; oi < osnames.length; oi++) { b = libSet(b, ost, osnames[oi], emitLibFunc(libArgsExt("js_luos" + osnames[oi]))) }
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "os"), ost])
         }
         if (libNeed.table) {
             var tt = callExt(b, "js_obj_new", [])
