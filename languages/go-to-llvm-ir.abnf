@@ -3824,41 +3824,18 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         emitHelper(b, "$sset", [x, iv, v])
         return b
     }
-    function emitRefRead(b, ref) {
-        if (ref.path.length == 0 && ref.stars > 0) {
-            var sb = emitStarBase(b, ref)
-            return emitDerefV(sb.b, sb.v)
-        }
-        var o = callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)])
-        for (var i = 0; i < ref.path.length; i++) {
-            var s = ref.path[i]
-            if (s.key != undefined) {
-                o = callExt(b, "js_gofield", [o, emitStr(b, s.key)])
-            } else {
-                var r = s.idx(b)
-                b = r.b
-                o = emitIdxGet(b, o, r.v, ref.tys[i])
-            }
-        }
-        return {b: b, v: o}
-    }
-    function emitRefWrite(b, ref, v) {
+    // Go assigns in two phases: the index operands and pointer indirections of
+    // every target are evaluated first (emitRefLoc), then the values are stored
+    // left to right (emitLocWrite). Twin of refLoc in go-interpreter.abnf.
+    // loc: the star base for `*p`, null for a plain name, else {o, k}: the
+    // container and the last step's key (a field name or an emitted index).
+    function emitRefLoc(b, ref) {
         if (ref.path.length == 0) {
             if (ref.stars > 0) {
                 var sb = emitStarBase(b, ref)
-                var nm = ref.name
-                var r = emitSelect(sb.b, emitIsPtr(sb.b, sb.v),
-                                   function(tb) { return {b: emitCellSet(tb, sb.v, v), v: v} },
-                                   function(eb) {
-                                       if (nm != "_") { callExt(eb, "js_scope_set", [curScopeV, emitStr(eb, nm), v]) }
-                                       return {b: eb, v: v}
-                                   })
-                return r.b
+                return {b: sb.b, loc: sb.v}
             }
-            if (ref.name != "_") {
-                callExt(b, "js_scope_set", [curScopeV, emitStr(b, ref.name), emitArrCopy(b, v, ref.tys[0])])
-            }
-            return b
+            return {b: b, loc: null}
         }
         var o = callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)])
         for (var i = 0; i < ref.path.length - 1; i++) {
@@ -3872,16 +3849,45 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             }
         }
         var last = ref.path[ref.path.length - 1]
-        if (last.key != undefined) {
+        if (last.key != undefined) { return {b: b, loc: {o: o, k: last.key}} }
+        var kr = last.idx(b)
+        return {b: kr.b, loc: {o: o, k: kr.v}}
+    }
+    function emitLocRead(b, ref, loc) {
+        if (ref.path.length == 0) {
+            if (ref.stars > 0) { return emitDerefV(b, loc) }
+            return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)])}
+        }
+        var n = ref.path.length - 1
+        if (ref.path[n].key != undefined) { return {b: b, v: callExt(b, "js_gofield", [loc.o, emitStr(b, loc.k)])} }
+        return {b: b, v: emitIdxGet(b, loc.o, loc.k, ref.tys[n])}
+    }
+    function emitLocWrite(b, ref, loc, v) {
+        if (ref.path.length == 0) {
+            if (ref.stars > 0) {
+                var nm = ref.name
+                var r = emitSelect(b, emitIsPtr(b, loc),
+                                   function(tb) { return {b: emitCellSet(tb, loc, v), v: v} },
+                                   function(eb) {
+                                       if (nm != "_") { callExt(eb, "js_scope_set", [curScopeV, emitStr(eb, nm), v]) }
+                                       return {b: eb, v: v}
+                                   })
+                return r.b
+            }
+            if (ref.name != "_") {
+                callExt(b, "js_scope_set", [curScopeV, emitStr(b, ref.name), emitArrCopy(b, v, ref.tys[0])])
+            }
+            return b
+        }
+        var n = ref.path.length - 1
+        if (ref.path[n].key != undefined) {
             // js_gosetfield, not js_set: a struct field has a DECLARED type on the
             // descriptor, and the value has to adopt its width (s.b = 255 into a
             // uint8 field, so that the s.b++ after it is 0 and not 256).
-            callExt(b, "js_gosetfield", [o, emitStr(b, last.key), v])
+            callExt(b, "js_gosetfield", [loc.o, emitStr(b, loc.k), v])
             return b
         }
-        var kr = last.idx(b)
-        b = kr.b
-        return emitIdxSet(b, o, kr.v, v, ref.tys[ref.path.length - 1])
+        return emitIdxSet(b, loc.o, loc.k, v, ref.tys[n])
     }
 
     // items = [ref..., {op}, exprThunks...]
@@ -3912,11 +3918,18 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
         return function(b) {
             if (op != "=") {
-                var rr = emitRefRead(b, refs[0])
+                var rl = emitRefLoc(b, refs[0])
+                var rr = emitLocRead(rl.b, refs[0], rl.loc)
                 b = rr.b
                 var rv = exprs[0](b)
                 b = rv.b
-                return emitRefWrite(b, refs[0], emitBin(b, op, rr.v, rv.v))
+                return emitLocWrite(b, refs[0], rl.loc, emitBin(b, op, rr.v, rv.v))
+            }
+            var locs = []
+            for (var q = 0; q < refs.length; q++) {
+                var lq = emitRefLoc(b, refs[q])
+                b = lq.b
+                locs.push(lq.loc)
             }
             var vals = []
             for (var k = 0; k < exprs.length; k++) {
@@ -3927,12 +3940,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             if (refs.length > 1 && exprs.length == 1) {
                 var mvA = emitMvArr(b, vals[0])
                 for (var t = 0; t < refs.length; t++) {
-                    b = emitRefWrite(b, refs[t], callExt(b, "js_get", [mvA, emitNum(b, t)]))
+                    b = emitLocWrite(b, refs[t], locs[t], callExt(b, "js_get", [mvA, emitNum(b, t)]))
                 }
                 return b
             }
             for (var t2 = 0; t2 < refs.length; t2++) {
-                b = emitRefWrite(b, refs[t2], vals[t2])
+                b = emitLocWrite(b, refs[t2], locs[t2], vals[t2])
             }
             return b
         }
@@ -4044,11 +4057,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var ref = items[0]
         var step = (items[1] == "++") ? 1 : 0 - 1
         return function(b) {
-            var rr = emitRefRead(b, ref)
+            var rl = emitRefLoc(b, ref)
+            var rr = emitLocRead(rl.b, ref, rl.loc)
             b = rr.b
             // js_giadd steps at the slot's OWN width: `var i8 int8 = 127; i8++`
             // is -128, and int64max++ is -9223372036854775808.
-            return emitRefWrite(b, ref, callExt(b, "js_giadd", [rr.v, emitNum(b, step)]))
+            return emitLocWrite(b, ref, rl.loc, callExt(b, "js_giadd", [rr.v, emitNum(b, step)]))
         }
     }
 

@@ -3762,6 +3762,46 @@ func s61() {
 	check("nan2", m != m)
 }
 
+// ===== SECTION 62: the two phases of a tuple assignment =====
+type sv62 struct{ v []int }
+
+var tr62 = ""
+
+func ix62(i int) int { tr62 += fmt.Sprint("i", i, " "); return i }
+func vl62(i int) int { tr62 += fmt.Sprint("v", i, " "); return i }
+
+func s62() {
+	a := []int{1, 2, 3}
+	i := 0
+	i, a[i] = 1, 9
+	m := map[int]int{}
+	n := 1
+	n, m[n] = 5, n
+	check("tup1", fmt.Sprint(i, a, n, m) == "1 [9 2 3] 5 map[1:1]")
+	s := []int{7}
+	old := s
+	s, s[0] = []int{9}, 100
+	ps := &sv62{v: []int{1}}
+	ops := ps
+	ps, ps.v[0] = &sv62{v: []int{2}}, 42
+	check("tup2", fmt.Sprint(s, old, ps.v, ops.v) == "[9] [100] [2] [42]")
+	d := []int{0, 0}
+	d[ix62(0)], d[ix62(1)] = vl62(5), vl62(6)
+	check("tup3", fmt.Sprint(d) == "[5 6]" && tr62 == "i0 i1 v5 v6 ")
+	c := []int{10, 20, 30}
+	k := 0
+	k, c[k], c[k+1] = 2, c[k+2], c[k]
+	x, y := 1, 2
+	px := &x
+	px, *px = &y, 7
+	check("tup4", fmt.Sprint(k, c, x, y) == "2 [30 10 30] 7 2")
+	tr62 = ""
+	e := []int{1, 2}
+	e[ix62(1)] += vl62(3)
+	e[ix62(0)]++
+	check("tup5", fmt.Sprint(e) == "[2 5]" && tr62 == "i1 v3 i0 ")
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -3824,6 +3864,7 @@ func main() {
 	s59() // SECTION-CALL 59
 	s60() // SECTION-CALL 60
 	s61() // SECTION-CALL 61
+	s62() // SECTION-CALL 62
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

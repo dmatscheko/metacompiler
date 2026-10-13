@@ -4144,28 +4144,25 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         while (i < items.length && typeof items[i] != "string") { i++ }
         return goRefKeysC({name: items[i], path: items.slice(i + 1), stars: i})
     }
-    function assignRef(ref, v) {
+    // Go assigns in two phases: the index operands and pointer indirections of
+    // every target are evaluated first (refLoc), then the values are stored left
+    // to right (locWrite). So `i, a[i] = 1, 9` writes a[0], and `s, s[0] = t, 1`
+    // writes the OLD s. Twin of emitRefLoc in go-to-llvm-ir.abnf.
+    function refLoc(ref) {
+        if (ref.path.length == 0) { return ref.stars > 0 ? derefTarget(ref) : null }
+        return resolveRef(ref)
+    }
+    function locWrite(ref, loc, v) {
         if (ref.path.length == 0) {
-            if (ref.stars > 0) {
-                var cell = derefTarget(ref)
-                if (cell != null) { ptrSet(cell, v); return }
-            }
+            if (loc != null) { ptrSet(loc, v); return }
             setVar(ref.name, goVal(v))
             return
         }
-        var p = resolveRef(ref)
-        goSetAt(p.obj, p.key, goVal(v))
+        goSetAt(loc.obj, loc.key, goVal(v))
     }
-    function readRef(ref) {
-        if (ref.path.length == 0) {
-            if (ref.stars > 0) {
-                var cell = derefTarget(ref)
-                if (cell != null) { return ptrGet(cell) }
-            }
-            return getVar(ref.name)
-        }
-        var p = resolveRef(ref)
-        return goIndex(p.obj, p.key)
+    function locRead(ref, loc) {
+        if (ref.path.length == 0) { return loc != null ? ptrGet(loc) : getVar(ref.name) }
+        return goIndex(loc.obj, loc.key)
     }
     // items = [ref..., {op}, exprThunks...]: parallel assignment, or unpacking of a
     // multi value call when there are more targets than expressions.
@@ -4193,15 +4190,20 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 exprs[ai] = goDtBoxThunk(exprs[ai], goDtBoxTo(sp.tys[ai], goRefTy(lref)))
             }
         }
+        if (op != "=") {
+            return function() {
+                var loc = refLoc(refs[0])
+                var cur = locRead(refs[0], loc)
+                locWrite(refs[0], loc, applyOp(op, cur, exprs[0]()))
+            }
+        }
         return function() {
+            var locs = []
+            for (var q = 0; q < refs.length; q++) locs.push(refLoc(refs[q]))
             var vals = []
             for (var k = 0; k < exprs.length; k++) vals.push(exprs[k]())
             if (refs.length > 1 && exprs.length == 1) vals = goMvArr(vals[0]) // Unpack multi returns.
-            if (op != "=") {
-                assignRef(refs[0], applyOp(op, readRef(refs[0]), vals[0]))
-                return
-            }
-            for (var r = 0; r < refs.length; r++) assignRef(refs[r], vals[r])
+            for (var r = 0; r < refs.length; r++) locWrite(refs[r], locs[r], vals[r])
         }
     }
     // lastDeclNames is written at BUILD time by the short declaration just built, and
@@ -4261,9 +4263,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var d = (items[1] == "++") ? 1 : -1
         return function() {
             var cur = anytype // The slot may hold a number or a float64 box.
-            cur = readRef(ref)
+            var loc = refLoc(ref)
+            cur = locRead(ref, loc)
             // A sized slot steps at ITS width: `var i8 int8 = 127; i8++` is -128.
-            assignRef(ref, isFlo(cur) ? gFlo(cur.__flo + d) : szArith("+", cur, d))
+            locWrite(ref, loc, isFlo(cur) ? gFlo(cur.__flo + d) : szArith("+", cur, d))
         }
     }
 
