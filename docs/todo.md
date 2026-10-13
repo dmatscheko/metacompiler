@@ -112,7 +112,7 @@ it for ruby's flag too and add a ruby assertion.
 
 # JS — JavaScript and TypeScript
 
-### T-615 js: spreading a non-iterable object; arguments passed to another function; holes; `"__#@"` keys · P1 · JS · OPEN [V]
+### T-615 js: spreading a non-iterable object; arguments passed to another function; holes; `"__#@"` keys · P1 · JS · IN PROGRESS (JS worker, round 7) [V]
 `[...{}]`, `for (x of {})` → empty in all legs (node "TypeError: object is not iterable") — P1. P3 rest: `h(arguments)` writing
 `a[0]` is not mapped to the caller's parameter (needs a scope back-pointer on the array cell in the C floor and Go twin); a deleted
 index below `length` is still an own key and an explicit `undefined` past `length` is not (no hole representation); a program
