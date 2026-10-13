@@ -105326,56 +105326,39 @@ entry:
 	%5 = phi i64 [ %2, %3 ]
 	%6 = call i64 @js_scope_cget(i64* getelementptr ([4 x i64], [4 x i64]* @jsgc.1000368, i64 0, i64 0), i64 %env, i8* getelementptr ([6 x i8], [6 x i8]* @str.1001003, i64 0, i64 0), i64 6)
 	%7 = call i64 @js_scope_cget(i64* getelementptr ([4 x i64], [4 x i64]* @jsgc.1000323, i64 0, i64 0), i64 %env, i8* getelementptr ([7 x i8], [7 x i8]* @str.1001008, i64 0, i64 0), i64 7)
-	%8 = call i64 @js_scope_cget(i64* getelementptr ([4 x i64], [4 x i64]* @jsgc.1000375, i64 0, i64 0), i64 %env, i8* getelementptr ([8 x i8], [8 x i8]* @str.1001011, i64 0, i64 0), i64 8)
-	%9 = call i64 @js_num_i(i64 64)
-	%10 = load i64, i64* @jsfdc.1000222
-	%11 = icmp eq i64 %8, %10
-	br i1 %11, label %12, label %15
+	%8 = load i64, i64* @jsfdc.1000220
+	%9 = icmp eq i64 %7, %8
+	br i1 %9, label %10, label %13
 
-12:
-	%13 = load i64, i64* @jsfde.1000222
-	%14 = call i64 @jsfd_1000222(i64 %13, i64 %0, i64 %9)
-	br label %17
+10:
+	%11 = load i64, i64* @jsfde.1000220
+	%12 = call i64 @jsfd_1000220(i64 %11, i64 %0)
+	br label %15
+
+13:
+	%14 = call i64 @js_call1(i64 %7, i64 %0)
+	br label %15
 
 15:
-	%16 = call i64 @js_call2(i64 %8, i64 %0, i64 %9)
-	br label %17
-
-17:
-	%18 = phi i64 [ %14, %12 ], [ %16, %15 ]
-	%19 = load i64, i64* @jsfdc.1000220
-	%20 = icmp eq i64 %7, %19
+	%16 = phi i64 [ %12, %10 ], [ %14, %13 ]
+	%17 = call i64 @jsnum.1000421()
+	%18 = call i64 @js_band(i64 %16, i64 %17)
+	%19 = load i64, i64* @jsfdc.1000214
+	%20 = icmp eq i64 %6, %19
 	br i1 %20, label %21, label %24
 
 21:
-	%22 = load i64, i64* @jsfde.1000220
-	%23 = call i64 @jsfd_1000220(i64 %22, i64 %18)
+	%22 = load i64, i64* @jsfde.1000214
+	%23 = call i64 @jsfd_1000214(i64 %22, i64 %18)
 	br label %26
 
 24:
-	%25 = call i64 @js_call1(i64 %7, i64 %18)
+	%25 = call i64 @js_call1(i64 %6, i64 %18)
 	br label %26
 
 26:
 	%27 = phi i64 [ %23, %21 ], [ %25, %24 ]
-	%28 = call i64 @jsnum.1000421()
-	%29 = call i64 @js_band(i64 %27, i64 %28)
-	%30 = load i64, i64* @jsfdc.1000214
-	%31 = icmp eq i64 %6, %30
-	br i1 %31, label %32, label %35
-
-32:
-	%33 = load i64, i64* @jsfde.1000214
-	%34 = call i64 @jsfd_1000214(i64 %33, i64 %29)
-	br label %37
-
-35:
-	%36 = call i64 @js_call1(i64 %6, i64 %29)
-	br label %37
-
-37:
-	%38 = phi i64 [ %34, %32 ], [ %36, %35 ]
-	ret i64 %38
+	ret i64 %27
 
 dead1445:
 	ret i64 0

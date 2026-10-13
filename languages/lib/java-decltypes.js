@@ -1208,11 +1208,10 @@ function jTopOp(t, from) {
     }
     return -1
 }
-// `c ? a : b` (JLS 15.25): the arms' common type when one arm's type is the
-// other's or a supertype of it, "" for any other pair (a numeric promotion, a
-// boxing, a least upper bound).
-function jCondTy(t) {
+// The two arms' texts of `c ? a : b`, null when t is no conditional.
+function jCondArms(t) {
     var q = jTopFind(t, "?")
+    if (q < 0) { return null }
     var rest = t.substring(q + 1)
     var depth = 0
     var i = 0
@@ -1227,10 +1226,20 @@ function jCondTy(t) {
             i++
         }
     }
-    if (col < 0) { return "" }
-    var a = jStaticTy(rest.substring(0, col))
-    var b = jStaticTy(rest.substring(col + 1))
+    if (col < 0) { return null }
+    return {a: rest.substring(0, col), b: rest.substring(col + 1)}
+}
+// `c ? a : b` (JLS 15.25): a numeric conditional's type (jCondNumTy), the
+// arms' common type when one arm's type is the other's or a supertype of it,
+// "" for any other pair (a boxing, a least upper bound).
+function jCondTy(t) {
+    var arms = jCondArms(t)
+    if (arms == null) { return "" }
+    var a = jStaticTy(arms.a)
+    var b = jStaticTy(arms.b)
     if (a == b) { return a }
+    var nt = jCondNumTy(a, b, arms.b, arms.a)
+    if (nt != "") { return nt }
     var sa = jOvSTok(a)
     var sb = jOvSTok(b)
     if (sa == "" || sb == "" || jOvIsPrim(sa) || jOvIsPrim(sb)) { return "" }
@@ -1239,6 +1248,53 @@ function jCondTy(t) {
     if (jOvSAccepts(sb, sa, 1, jOvBare(b))) { return b }
     if (jOvSAccepts(sa, sb, 1, jOvBare(a))) { return a }
     return ""
+}
+// The type of a conditional whose arms have the different static types a and
+// b, each a primitive or its box (JLS 15.25.2): byte and short make short; a
+// byte, short or char arm with an int CONSTANT arm representable in it keeps
+// its type; boolean arms are boolean; otherwise binary numeric promotion.
+// btext and atext are the arms' texts, b's first. "" for any other pair.
+function jCondNumTy(a, b, btext, atext) {
+    var ua = jIsPrimTy(a) || a == "boolean" ? a : jOvUnbox(a)
+    var ub = jIsPrimTy(b) || b == "boolean" ? b : jOvUnbox(b)
+    if (ua == "" || ub == "") { return "" }
+    if (ua == "boolean" || ub == "boolean") { return ua == ub ? "boolean" : "" }
+    if (ua == ub) { return ua }
+    if ((ua == "byte" && ub == "short") || (ua == "short" && ub == "byte")) { return "short" }
+    if (jCondFits(a, b, btext)) { return a }
+    if (jCondFits(b, a, atext)) { return b }
+    return jPromote(ua, ub)
+}
+// Is the arm of type ty and text `text` an int constant representable in the
+// primitive narrow type nt (byte, short or char)?
+function jCondFits(nt, ty, text) {
+    if (ty != "int" || (nt != "byte" && nt != "short" && nt != "char")) { return false }
+    var neg = text.charAt(0) == "-"
+    var from = neg ? 1 : 0
+    var lit = jNumLit(text, from)
+    if (lit.end != text.length || lit.ty != "int" || text.charAt(from) == "0" && text.length > from + 1) { return false }
+    var v = 0
+    for (var i = from; i < text.length; i++) {
+        if (text.charAt(i) != "_") { v = v * 10 + text.charCodeAt(i) - 48 }
+    }
+    if (neg) { v = -v }
+    if (nt == "char") { return v >= 0 && v <= 65535 }
+    if (nt == "short") { return v >= -32768 && v <= 32767 }
+    return v >= -128 && v <= 127
+}
+// The primitive type `c ? a : b` (its whitespace-free text) converts both
+// arms to, with the arms that need the conversion: {ty, a, b}, a and b the
+// type to convert that arm to or "" when its static type already is ty.
+function jCondConv(t) {
+    var none = {ty: "", a: "", b: ""}
+    var arms = jCondArms(t)
+    if (arms == null) { return none }
+    var a = jStaticTy(arms.a)
+    var b = jStaticTy(arms.b)
+    if (a == b) { return none }
+    var nt = jCondNumTy(a, b, arms.b, arms.a)
+    if (!jIsPrimTy(nt)) { return none }
+    return {ty: nt, a: a == nt ? "" : nt, b: b == nt ? "" : nt}
 }
 // A top-level `+` chain is a String concatenation when any operand is a
 // String (JLS 15.18.1); any other top-level operator makes it unknown.

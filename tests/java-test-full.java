@@ -128,6 +128,7 @@ class Main {
         S58.run(); // SECTION-CALL 58
         S59.run(); // SECTION-CALL 59
         S60.run(); // SECTION-CALL 60
+        S61.run(); // SECTION-CALL 61
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -3489,5 +3490,67 @@ class S60 {
         ws.sort(Comparator.comparing(String::length, Comparator.reverseOrder()));
         Main.check("cm60", ps.toString().equals("[S60P[name=al, age=25], S60P[name=cy, age=30], S60P[name=bo, age=30]]")
             && ws.toString().equals("[apple, pear, fig]"));
+    }
+}
+
+// ===== SECTION 61: static library fields, append(char[]), (char) of a double, ?: promotion, suppressed =====
+//
+// A static field may be initialised with a java.lang library type. append of a
+// char[] appends its characters. (char) of a double narrows to int first,
+// saturating (JLS 5.1.3). A numeric conditional has the promoted type of its
+// arms, except that a char, byte or short arm keeps its type against an int
+// constant that fits it (JLS 15.25.2). try-with-resources keeps the body's
+// exception and adds close()'s to its suppressed list (JLS 14.20.3.1). Every
+// expected value is java 24.0.2's.
+class S61Res implements AutoCloseable {
+    String n;
+    static String log = "";
+    S61Res(String n) { this.n = n; }
+    public void close() {
+        log = log + n + ";";
+        if (n.startsWith("bad")) { throw new IllegalStateException("close-" + n); }
+    }
+}
+class S61 {
+    static StringBuilder sb = new StringBuilder("o");
+    static void run() {
+        sb.append(new char[]{'x', 'y'});
+        char[] cs = {'p', 'q', 'r'};
+        StringBuilder b2 = new StringBuilder("a").append(cs).append(cs, 1, 2).insert(1, cs);
+        Main.check("sb61", sb.toString().equals("oxy") && b2.toString().equals("apqrpqrqr"));
+        double[] ds = {1e10, -1e10, 3e9, -3e9, 65.7, Double.NaN};
+        String chs = "";
+        for (double d : ds) { chs = chs + (int) (char) d + " "; }
+        float[] fs = {3e9f, -3e9f};
+        for (float f : fs) { chs = chs + (int) (char) f + " "; }
+        long[] ls = {10000000000L, -1L};
+        for (long l : ls) { chs = chs + (int) (char) l + " "; }
+        Main.check("ch61", chs.equals("65535 0 65535 0 65 0 65535 0 58368 65535 "));
+        boolean[] tt = {true, false};
+        boolean t = tt[0];
+        char cv = 'b';
+        int iv = 7;
+        Integer boxed = 4;
+        byte by = 2;
+        Object o = t ? iv : 2.0;
+        String cond = "" + (t ? cv : iv) + "," + (t ? iv : 2.5) + "," + (t ? boxed : 1.5) + "," + o + "," + (t ? 1f : iv)
+            + "," + (!t ? 1.0 : iv) + "," + (int) (!t ? 'x' : 0) + "," + (t ? 66 : 'a') + "," + (t ? by : 100) + "," + (t ? by : 200);
+        Main.check("cd61", cond.equals("98,7.0,4.0,7.0,1.0,7.0,0,B,2,2") && (true ? 1 : 'a') == '\u0001');
+        String caught = "";
+        try (S61Res r1 = new S61Res("bad")) {
+            throw new RuntimeException("body-ex");
+        } catch (RuntimeException e) {
+            caught = e + "|" + e.getSuppressed().length + "|" + e.getSuppressed()[0];
+        }
+        String two = "";
+        try (S61Res r1 = new S61Res("bad1"); S61Res r2 = new S61Res("bad2")) {
+            S61Res.log = S61Res.log + "body;";
+        } catch (IllegalStateException e) {
+            two = e.getMessage() + "|" + e.getSuppressed()[0].getMessage();
+        }
+        String nul = "";
+        try (S61Res r0 = null) { nul = "ran"; }
+        Main.check("tw61", caught.equals("java.lang.RuntimeException: body-ex|1|java.lang.IllegalStateException: close-bad")
+            && two.equals("close-bad2|close-bad1") && nul.equals("ran") && S61Res.log.equals("bad;body;bad2;bad1;"));
     }
 }

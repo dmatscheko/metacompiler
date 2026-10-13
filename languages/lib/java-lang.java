@@ -89,6 +89,8 @@ final class StringBuilder {
         if (tail.length() >= 64) { carry(); }
         return this;
     }
+    public StringBuilder append(char[] str) { return append(new String(str)); }
+    public StringBuilder append(char[] str, int offset, int len) { return append(new String(str, offset, len)); }
     public StringBuilder append(CharSequence s, int start, int end) {
         String t = "" + s;
         return append(t.substring(start, end));
@@ -99,6 +101,7 @@ final class StringBuilder {
         set(s.substring(0, offset) + o + s.substring(offset));
         return this;
     }
+    public StringBuilder insert(int offset, char[] str) { return insert(offset, new String(str)); }
     public int length() { return before + tail.length(); }
     public boolean isEmpty() { return length() == 0; }
     public char charAt(int index) {

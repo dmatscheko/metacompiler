@@ -843,7 +843,7 @@ PlainTarget <~~ push(makeTargetRef(takeAll())) ~~>
 TIndex      <~~ push({idx: pop()}) ~~>
             = "[" Expression "]" ;
 
-CondExpr    <~~ push(makeCond(takeAll())) ~~>
+CondExpr    <~~ push(makeCond(takeAll(), up.in)) ~~>
             = OrExpr [ "?" Expression ":" Expression ] ;
 
 OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
@@ -3842,9 +3842,17 @@ HasStatic   = :script(~~
         if (typeof v == "string") return v
         return jstr(v)
     }
-    function makeCond(items) {
+    // A numeric conditional converts the arm it takes to the conditional's type
+    // (jCondConv, JLS 15.25.2): `t ? 'b' : 7` is the int 98. Twin of makeCond in
+    // java-to-llvm-ir.abnf.
+    function makeCond(items, text) {
         if (items.length == 1) return items[0]
-        return function() { return items[0]() ? items[1]() : items[2]() }
+        var cv = jCondConv(text)
+        if (cv.ty == "") { return function() { return items[0]() ? items[1]() : items[2]() } }
+        return function() {
+            if (items[0]()) { return cv.a == "" ? items[1]() : jConvTo(items[1](), cv.a) }
+            return cv.b == "" ? items[2]() : jConvTo(items[2](), cv.b)
+        }
     }
 
     // items = [primaryThunk, {kind:"mcall"|"field"|"index", ...}...].
@@ -4614,18 +4622,42 @@ HasStatic   = :script(~~
     // ends the block - a return, a break or a thrown exception.
     function jWithResources(res, bodyT) {
         return function() {
-            var opened = []
             scopes.push({})
             try {
-                for (var i = 0; i < res.length; i++) { opened.push(res[i]()) }
-                return bodyT()
+                return jWithResource(res, 0, bodyT)
             } finally {
-                for (var k = opened.length - 1; k >= 0; k--) {
-                    var o = opened[k]
-                    if (o != null && o != undefined) { mcall(o, "close", []) }
-                }
                 scopes.pop()
             }
+        }
+    }
+    // Resource i encloses the rest (JLS 14.20.3.1): when what it encloses throws,
+    // an exception from its close() is added to that one's suppressed list and
+    // the first exception propagates. Twin of makeResourceTry in
+    // java-to-llvm-ir.abnf.
+    function jWithResource(res, i, bodyT) {
+        if (i == res.length) { return bodyT() }
+        var r = res[i]()
+        var primary = anytype
+        primary = null
+        try {
+            return jWithResource(res, i + 1, bodyT)
+        } catch (e) {
+            if (excIsUser(e)) { primary = e.v }
+            throw e
+        } finally {
+            if (r != null && r != undefined) {
+                if (primary == null) { mcall(r, "close", []) } else { jCloseSuppressed(r, primary) }
+            }
+        }
+    }
+    // A function of its own: goja hands a catch nested in a finally the
+    // exception that finally is unwinding instead of its own.
+    function jCloseSuppressed(r, primary) {
+        try {
+            mcall(r, "close", [])
+        } catch (e) {
+            if (!excIsUser(e)) { throw e }
+            mcall(primary, "addSuppressed", [e.v])
         }
     }
     function makeResDecl(items) {
@@ -4654,6 +4686,18 @@ HasStatic   = :script(~~
         }
     }
     function jExcGetMessage() { return arguments[0].message }
+    // Throwable's suppressed list, the hidden __supp slot (absent while empty).
+    // Twin of jExcSuppressFns in java-to-llvm-ir.abnf.
+    function jExcAddSuppressed() {
+        var self = arguments[0]
+        if (self.__supp == undefined) { self.__supp = [] }
+        self.__supp.push(arguments[1])
+        return undefined
+    }
+    function jExcGetSuppressed() {
+        var self = arguments[0]
+        return self.__supp == undefined ? [] : self.__supp.slice(0)
+    }
     // THE PACKAGE-QUALIFIED (binary) NAME of a built-in Throwable: in java 24.0.2
     // `new RuntimeException("x").getClass().getName()` is
     // "java.lang.RuntimeException", and Throwable#toString - which is what the
@@ -4672,6 +4716,8 @@ HasStatic   = :script(~~
         cls.__ctor = jExcCtor(cls)
         cls.getMessage = jExcGetMessage
         cls.getLocalizedMessage = jExcGetMessage
+        cls.addSuppressed = jExcAddSuppressed
+        cls.getSuppressed = jExcGetSuppressed
         globalScope[name] = cls
         return cls
     }
@@ -5445,6 +5491,9 @@ HasStatic   = :script(~~
         // run in a scope carrying __jcls, so `static int a = 1; static int b = a+1;`
         // and a `static { c = a; }` block can name the class' own statics
         // unqualified - the same reading jSelfWith gives a static method body.
+        // They run now, during the walk, so the library types they create must
+        // exist first.
+        if (statics.length > 0) { jLoadWanted() }
         scopes.push({__jcls: cls})
         for (i = 0; i < statics.length; i++) {
             var st = statics[i]
@@ -6071,14 +6120,23 @@ HasStatic   = :script(~~
     var jUtilWant = false
     var jLangWant = false
     var jPkgPrefix = ""
+    var jLangLoaded = false
+    // A library is a set of top-level types even when it is compiled from inside
+    // a class body (a static initializer creating one, see buildClassFrom).
     function jLoadLib(file, prefix) {
         var text = load(file)
         var asg = c.parse(c.agrammar, text, null, file)
+        var bin = jCurBin
+        var cur = curClassName
+        jCurBin = ""
+        curClassName = ""
         jPkgPrefix = prefix
         c.pushSource(file, text)
         c.compile(asg)
         c.popSource()
         jPkgPrefix = ""
+        jCurBin = bin
+        curClassName = cur
     }
     // lib/java-util.java, lib/java-map.java and lib/java-stream.java, each once,
     // each after the files it builds on.
@@ -6094,6 +6152,14 @@ HasStatic   = :script(~~
         if (!jStreamLoaded && stream) {
             jStreamLoaded = true
             jLoadLib("lib/java-stream.java", "java.util.stream.")
+        }
+    }
+    // Every library the walk has asked for so far.
+    function jLoadWanted() {
+        jLoadLibs(jUtilWant, jMapWant, jStreamWant)
+        if (jLangWant && !jLangLoaded) {
+            jLangLoaded = true
+            jLoadLib("lib/java-lang.java", "java.lang.")
         }
     }
     function jImport(path, pos) {
@@ -6503,8 +6569,7 @@ HasStatic   = :script(~~
     }
 
     c.compile(c.asg)
-    jLoadLibs(jUtilWant, jMapWant, jStreamWant)
-    if (jLangWant) { jLoadLib("lib/java-lang.java", "java.lang.") }
+    jLoadWanted()
     jWalkDone = true
 
     // The entry point defaults to the static main of class Main, but the -main flag

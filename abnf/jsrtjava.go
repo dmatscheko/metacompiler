@@ -1691,9 +1691,11 @@ func init() {
 		m["js_jvboxtype"] = func(a []uint64) uint64 { return w(rt.jvBoxType(rt.toString(u(a[0])))) }
 		// A (char) cast: narrow to 16 bits and re-box. char is the one integral
 		// type that is UNSIGNED, so the mask rather than a sign extension is the
-		// whole answer - (char)-1 is 65535 and (char)70000 is 4464.
+		// whole answer - (char)-1 is 65535 and (char)70000 is 4464. A floating
+		// operand saturates at the int range first (JLS 5.1.3): (char)1e10 is
+		// 65535.
 		m["js_jvchar"] = func(a []uint64) uint64 {
-			return w(jsChar{code: int32(jvToLong(rt, u(a[0])) & 65535)})
+			return w(jsChar{code: int32(int64(jvNarrow(rt, u(a[0]), 32).(float64)) & 65535)})
 		}
 		// The plain-number reading a raw consumer needs (an array index, a length,
 		// a bound): a box is not a float64 and every such consumer wants one.

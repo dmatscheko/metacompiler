@@ -818,7 +818,7 @@ PlainTarget <~~ push(makeTargetRef(takeAll())) ~~>
 TIndex      <~~ push(jNoteIdx({idx: pop()})) ~~>
             = "[" Expression "]" ;
 
-CondExpr    <~~ push(makeCond(takeAll())) ~~>
+CondExpr    <~~ push(makeCond(takeAll(), up.in)) ~~>
             = OrExpr [ "?" Expression ":" Expression ] ;
 
 OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
@@ -2228,8 +2228,11 @@ HasStatic   = :script(~~
 
     // ----- Expression thunks: function(block) -> {b, v} -----
 
-    function makeCond(items) {
+    // A numeric conditional converts each arm to the conditional's type
+    // (jCondConv, JLS 15.25.2). Twin of makeCond in java-interpreter.abnf.
+    function makeCond(items, text) {
         if (items.length == 1) return items[0]
+        var cv = jCondConv(text)
         return function(b) {
             var r = items[0](b)
             var thenB = curF.NewBlock("")
@@ -2237,10 +2240,12 @@ HasStatic   = :script(~~
             var mergeB = curF.NewBlock("")
             r.b.NewCondBr(truthy(r.b, r.v), thenB, elseB)
             var rt = items[1](thenB)
+            var tv = cv.a == "" ? rt.v : declConvert(rt.b, rt.v, cv.a)
             rt.b.NewBr(mergeB)
             var re = items[2](elseB)
+            var ev = cv.b == "" ? re.v : declConvert(re.b, re.v, cv.b)
             re.b.NewBr(mergeB)
-            var phi = mergeB.NewPhi([llvm.ir.NewIncoming(rt.v, rt.b), llvm.ir.NewIncoming(re.v, re.b)])
+            var phi = mergeB.NewPhi([llvm.ir.NewIncoming(tv, rt.b), llvm.ir.NewIncoming(ev, re.b)])
             return {b: mergeB, v: phi}
         }
     }
@@ -3670,12 +3675,49 @@ HasStatic   = :script(~~
     }
     // Wraps `innerT` in `try { innerT } finally { r.close() }`, with the resource
     // declared just before. Applied innermost-last, so several resources close in
-    // reverse order, like Java's.
+    // reverse order, like Java's. JLS 14.20.3.1: an exception leaving innerT is
+    // recorded (the catch closure stores it and rethrows), and when there is one
+    // an exception from close() is added to its suppressed list instead of
+    // replacing it. A null resource is not closed. Twin of jWithResource in
+    // java-interpreter.abnf.
+    var jTwrCount = 0
     function makeResourceTry(r, innerT) {
-        var closeT = function(b) {
+        jTwrCount++
+        var pname = "__twrp" + jTwrCount
+        var callClose = function(b) {
             var vV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, r.res)])
             callExt(b, "js_mcall", [vV, emitStr(b, "close"), callExt(b, "js_arr_new", [])])
             return b
+        }
+        var suppress = function(b) {
+            var argsV = callExt(b, "js_arr_new", [])
+            callExt(b, "js_arr_push", [argsV, callExt(b, "js_scope_get", [curScopeV, emitStr(b, "__caught")])])
+            callExt(b, "js_mcall", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, pname)]), emitStr(b, "addSuppressed"), argsV])
+            return b
+        }
+        var record = function(b) {
+            var cV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "__caught")])
+            callExt(b, "js_scope_set", [curScopeV, emitStr(b, pname), cV])
+            callExt(b, "js_throw", [cV])
+            b.NewRet(hUndef)
+            return deadBlock()
+        }
+        var closeT = function(b) {
+            var vV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, r.res)])
+            var pV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, pname)])
+            var liveB = curF.NewBlock("")
+            var plainB = curF.NewBlock("")
+            var suppB = curF.NewBlock("")
+            var endB = curF.NewBlock("")
+            var isNull = b.NewICmp(llvm.enum.IPredEQ, vV, hNull)
+            b.NewCondBr(isNull, endB, liveB)
+            liveB.NewCondBr(liveB.NewICmp(llvm.enum.IPredEQ, pV, hNull), plainB, suppB)
+            callClose(plainB).NewBr(endB)
+            var cClo = callExt(suppB, "js_closure", [handle(emitFunc([], callClose, false, null)), curScopeV])
+            var sClo = callExt(suppB, "js_closure", [handle(emitFunc(["__caught"], suppress, false, null)), curScopeV])
+            callExt(suppB, "js_try", [cClo, sClo, hUndef])
+            suppB.NewBr(endB)
+            return endB
         }
         return function(b) {
             if (r.rinit != null) {
@@ -3683,9 +3725,11 @@ HasStatic   = :script(~~
                 b = ir.b
                 callExt(b, "js_scope_decl", [curScopeV, emitStr(b, r.res), ir.v])
             }
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, pname), hNull])
             var tryClo = callExt(b, "js_closure", [handle(emitFunc([], innerT, false, null, null, null, true)), curScopeV])
+            var recClo = callExt(b, "js_closure", [handle(emitFunc(["__caught"], record, false, null)), curScopeV])
             var finClo = callExt(b, "js_closure", [handle(emitFunc([], closeT, false, null, null, null, true)), curScopeV])
-            return excDispatch(b, callExt(b, "js_try", [tryClo, hUndef, finClo]))
+            return excDispatch(b, callExt(b, "js_try", [tryClo, recClo, finClo]))
         }
     }
     // A catch clause, with the DECLARED type(s) of its parameter. The twin of
@@ -5160,6 +5204,31 @@ HasStatic   = :script(~~
             bb.NewRet(callExt(bb, "js_get", [tV, emitStr(bb, "__msg")]))
             return deadBlock()
         }, false, null)
+        // Throwable's suppressed list, the hidden __supp slot (absent while
+        // empty). Twin of jExcAddSuppressed in java-interpreter.abnf.
+        var addSupp = emitFunc([], function(bb) {
+            var tV = callExt(bb, "js_arg", [curF.Params[1], handle(0)])
+            var sV = callExt(bb, "js_get", [tV, emitStr(bb, "__supp")])
+            var mkB = curF.NewBlock("")
+            var pushB = curF.NewBlock("")
+            bb.NewCondBr(bb.NewICmp(llvm.enum.IPredEQ, sV, hUndef), mkB, pushB)
+            var nV = callExt(mkB, "js_arr_new", [])
+            callExt(mkB, "js_set", [tV, emitStr(mkB, "__supp"), nV])
+            mkB.NewBr(pushB)
+            var aV = pushB.NewPhi([llvm.ir.NewIncoming(sV, bb), llvm.ir.NewIncoming(nV, mkB)])
+            callExt(pushB, "js_arr_push", [aV, callExt(pushB, "js_arg", [curF.Params[1], handle(1)])])
+            pushB.NewRet(hUndef)
+            return deadBlock()
+        }, false, null)
+        var getSupp = emitFunc([], function(bb) {
+            var sV = callExt(bb, "js_get", [callExt(bb, "js_arg", [curF.Params[1], handle(0)]), emitStr(bb, "__supp")])
+            var noneB = curF.NewBlock("")
+            var someB = curF.NewBlock("")
+            bb.NewCondBr(bb.NewICmp(llvm.enum.IPredEQ, sV, hUndef), noneB, someB)
+            noneB.NewRet(callExt(noneB, "js_arr_new", []))
+            someB.NewRet(callExt(someB, "js_jvclone", [sV]))
+            return deadBlock()
+        }, false, null)
         for (var i = 0; i < builtinExcOrder.length; i++) {
             var name = builtinExcOrder[i]
             if (neededExc["$" + name] != true) { continue }
@@ -5179,6 +5248,8 @@ HasStatic   = :script(~~
             callExt(b, "js_set", [clsV, emitStr(b, "__ctor"),
                                   callExt(b, "js_closure", [handle(emitCtorDispatch(name, [0, 1])), curScopeV])])
             callExt(b, "js_set", [clsV, emitStr(b, "getMessage"), callExt(b, "js_closure", [handle(getMsg), curScopeV])])
+            callExt(b, "js_set", [clsV, emitStr(b, "addSuppressed"), callExt(b, "js_closure", [handle(addSupp), curScopeV])])
+            callExt(b, "js_set", [clsV, emitStr(b, "getSuppressed"), callExt(b, "js_closure", [handle(getSupp), curScopeV])])
             // Hand the four runtime-raised descriptors over once each, BY NAME, so
             // that a divide by zero, an out-of-range index and a negative array
             // length can THROW a catchable exception from inside js_jvarith /
