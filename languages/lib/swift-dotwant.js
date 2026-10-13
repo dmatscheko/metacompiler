@@ -716,6 +716,183 @@ function swDsHasFloElem(s) {
     }
     return false
 }
+// ----- the type a literal takes from its neighbours -----
+// An integer literal has no type of its own: next to a Double it IS a Double.
+// `c ? 1.5 : 3`, `[1.5, 3]`, `["a": 1.5, "b": 3]` and `[[1, 2.5], [3, 4]]` are
+// all Double throughout (swiftc 6.1.2). swLitTy reads the type an operand's TEXT
+// shows - "#" for an integer literal, "Double" for a float literal, a collection
+// literal's joined element types, else the grammar's swExprAnn - and swLitJoin
+// joins two, "" when they do not visibly agree. A join that is "" or holds no
+// floating-point leaf adopts nothing, so a literal with a String or an untyped
+// operand among its elements (`[Any]`'s usual shape) is left alone.
+function swLitTy(t) {
+    if (t == "") { return "" }
+    if (t.indexOf("..") >= 0) { return swExprAnn(t) }
+    var a = t.charAt(0) == "-" ? 1 : 0
+    if (a < t.length && t.charAt(a) >= "0" && t.charAt(a) <= "9") {
+        var hex = t.substring(a, a + 2) == "0x"
+        var flo = false
+        for (var i = a; i < t.length; i++) {
+            var ch = t.charAt(i)
+            if (ch == "." || ch == "p" || (!hex && (ch == "e" || ch == "E"))) { flo = true }
+            else if (!(swDsIdCh(ch) || ch == "+" || ch == "-")) { return swExprAnn(t) }
+        }
+        return flo ? "Double" : "#"
+    }
+    if (t.charAt(0) == "(" && swDsGroupEnd(t, 0) == t.length - 1) {
+        var tp = swDsSplit(t, 1, t.length - 1, ",")
+        if (tp.length == 2) { return swLitTy(t.substring(1, t.length - 1)) }
+        // A tuple's element types, its labels dropped (adoption is positional).
+        var tt = "("
+        for (var q = 0; q < tp.length; q = q + 2) {
+            var et = swLitTy(stripWs(t.substring(swDsLabelEnd(t, tp[q], tp[q + 1]), tp[q + 1])))
+            if (et == "") { return "" }
+            tt = tt + (q > 0 ? "," : "") + et
+        }
+        return tt + ")"
+    }
+    if (t.charAt(0) != "[" || t.length < 3 || swDsGroupEnd(t, 0) != t.length - 1) { return swExprAnn(t) }
+    var parts = swDsSplit(t, 1, t.length - 1, ",")
+    var kt = "?"
+    var vt = "?"
+    var dict = false
+    for (var p = 0; p < parts.length; p = p + 2) {
+        if (swDsTrimStart(t, parts[p], parts[p + 1]) >= parts[p + 1]) { continue }
+        var kv = swDsSplit(t, parts[p], parts[p + 1], ":")
+        if (p == 0) { dict = kv.length == 4 && swDsSplit(t, parts[p], parts[p + 1], "?").length == 2 }
+        if (dict) {
+            if (kv.length != 4) { return "" }
+            kt = swLitJoin(kt, swLitTy(stripWs(t.substring(kv[0], kv[1]))))
+            vt = swLitJoin(vt, swLitTy(stripWs(t.substring(kv[2], kv[3]))))
+        } else {
+            vt = swLitJoin(vt, swLitTy(stripWs(t.substring(parts[p], parts[p + 1]))))
+        }
+    }
+    if (vt == "" || vt == "?" || kt == "") { return "" }
+    return dict ? "[" + kt + ":" + vt + "]" : "[" + vt + "]"
+}
+function swLitIsNum(t) { return t == "Double" || t == "Float" || t == "CGFloat" || swIntWidthOf(t) != null }
+function swLitJoin(a, b) {
+    if (a == "?") { return b }
+    if (a == "" || b == "") { return "" }
+    if (a == b) { return a }
+    if (a == "#" && swLitIsNum(swDsUnopt(b))) { return b }
+    if (b == "#" && swLitIsNum(swDsUnopt(a))) { return a }
+    if (a.charAt(0) == "(" && b.charAt(0) == "(" && a.charAt(a.length - 1) == ")" && b.charAt(b.length - 1) == ")") {
+        var ap = swDsSplit(a, 1, a.length - 1, ",")
+        var bp = swDsSplit(b, 1, b.length - 1, ",")
+        if (ap.length != bp.length) { return "" }
+        var jt = "("
+        for (var p = 0; p < ap.length; p = p + 2) {
+            var ej = swLitJoin(a.substring(ap[p], ap[p + 1]), b.substring(bp[p], bp[p + 1]))
+            if (ej == "") { return "" }
+            jt = jt + (p > 0 ? "," : "") + ej
+        }
+        return jt + ")"
+    }
+    if (a.charAt(0) == "[" && b.charAt(0) == "[" && a.charAt(a.length - 1) == "]" && b.charAt(b.length - 1) == "]") {
+        var ak = swDsSplit(a, 1, a.length - 1, ":")
+        var bk = swDsSplit(b, 1, b.length - 1, ":")
+        if (ak.length != bk.length) { return "" }
+        if (ak.length == 2) {
+            var e = swLitJoin(a.substring(1, a.length - 1), b.substring(1, b.length - 1))
+            return e == "" ? "" : "[" + e + "]"
+        }
+        if (ak.length != 4) { return "" }
+        var k = swLitJoin(a.substring(ak[0], ak[1]), b.substring(bk[0], bk[1]))
+        var v = swLitJoin(a.substring(ak[2], ak[3]), b.substring(bk[2], bk[3]))
+        return k == "" || v == "" ? "" : "[" + k + ":" + v + "]"
+    }
+    return ""
+}
+// The type operands of the texts txts adopt to, or "" for none: their join, when
+// it has a floating-point leaf (an Int literal needs no adoption to be an Int).
+function swLitCtxTy(txts) {
+    var j = "?"
+    for (var i = 0; i < txts.length; i++) { j = swLitJoin(j, swLitTy(txts[i])) }
+    if (j == "" || j == "?") { return "" }
+    var out = ""
+    var flo = false
+    for (var c = 0; c < j.length; c++) {
+        if (j.charAt(c) == "#") { out = out + "Int" } else { out = out + j.charAt(c) }
+        if (j.substring(c, c + 6) == "Double" || j.substring(c, c + 5) == "Float") { flo = true }
+    }
+    return flo ? out : ""
+}
+// The type the right side of `a ?? b` adopts from a's text: a's own type when it
+// is floating point, and Double(...) / Float(...)'s result. "" for none.
+function swLitCoalTy(t) {
+    if (t.substring(0, 7) == "Double(") { return "Double" }
+    if (t.substring(0, 6) == "Float(") { return "Float" }
+    var a = swDsUnopt(swLitTy(t))
+    return a == "Double" || a == "Float" ? a : ""
+}
+// Splits a literal's items - each operand followed by its {ltxt} text record -
+// into the operands, adopted to the type their texts join to (swLitCtxTy).
+function swLitOperands(items) {
+    var ts = swLitPlain(items)
+    var txts = []
+    for (var i = 0; i < items.length; i++) {
+        if (items[i] != undefined && items[i].ltxt != undefined) { txts.push(items[i].ltxt) }
+    }
+    if (txts.length != ts.length) { return ts }
+    return swLitAdoptAll(ts, txts, swLitCtxTy(txts))
+}
+// The operands alone, unadopted.
+function swLitPlain(items) {
+    var ts = []
+    for (var i = 0; i < items.length; i++) {
+        if (items[i] == undefined || items[i].ltxt == undefined) { ts.push(items[i]) }
+    }
+    return ts
+}
+// An EXISTENTIAL context types each operand on its own: `print(c ? 1.5 : 3)`
+// prints 3 and `let a: [Any] = [1, 2.5]` holds the Int 1 (swiftc 6.1.2). The
+// literal built last records its text and a switch, {txt, cell: {off}}; a print
+// argument or an initializer of an annotation naming Any whose text is that
+// literal's turns the adoption off (swLitStop).
+// A collection literal under print still joins its elements (`print([1.5, 3])`
+// prints [1.5, 3.0]), so a print argument stops a ternary only (tern).
+var swLitLast = null
+function swLitNote(txt, tern) {
+    var cell = {off: false}
+    swLitLast = {txt: txt, cell: cell, tern: tern}
+    return cell
+}
+function swLitStop(txt, ternOnly) {
+    if (swLitLast == null || txt == undefined || swLitLast.txt != txt) { return }
+    if (!ternOnly || swLitLast.tern) { swLitLast.cell.off = true }
+}
+function swLitAnnStops(ann) { return ann != undefined && ann.indexOf("Any") >= 0 }
+// A Dictionary literal's entries {dk, dv, dkt, dvt}: the keys and the values
+// each adopt to the type their texts join to, in place.
+function swLitDictAdopt(items) {
+    var ks = []
+    var vs = []
+    var kts = []
+    var vts = []
+    for (var i = 0; i < items.length; i++) {
+        if (items[i].dkt == undefined) { return items }
+        ks.push(items[i].dk)
+        vs.push(items[i].dv)
+        kts.push(items[i].dkt)
+        vts.push(items[i].dvt)
+    }
+    var ka = swLitAdoptAll(ks, kts, swLitCtxTy(kts))
+    var va = swLitAdoptAll(vs, vts, swLitCtxTy(vts))
+    var out = []
+    for (var j = 0; j < items.length; j++) { out.push({dk: ka[j], dv: va[j]}) }
+    return out
+}
+// Wraps each operand thunk ts[i] whose own text is not already of type ty in the
+// grammar's swAdoptThunk; ts unchanged when ty is "".
+function swLitAdoptAll(ts, txts, ty) {
+    if (ty == "") { return ts }
+    var out = []
+    for (var i = 0; i < ts.length; i++) { out.push(swLitTy(txts[i]) == ty ? ts[i] : swAdoptThunk(ts[i], ty)) }
+    return out
+}
+
 // An additive chain [operand, op, operand, ...] spanning [from, to): an Array
 // concatenation wraps every operand in the grammar's swAdoptThunk.
 function swFoldAdd(items, from, to) {

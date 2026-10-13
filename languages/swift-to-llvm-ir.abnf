@@ -629,7 +629,7 @@ ECase       <~~ push({ecase: makeECase(takeAll())}) ~~>
             = Id <~~ push({cname: swBt(up.in)}) ~~> [ ECaseAssoc | "=" ECaseRaw ] ;
 ECaseAssoc  <~~ push({cassoc: takeAll()}) ~~>
             = "(" [ ECaseParam { "," ECaseParam } ] ")" ;
-ECaseParam  <~~ push(makeECaseParam(takeAll())) ~~> = [ ECaseLabel ] Type ;
+ECaseParam  <~~ push(makeECaseParam(takeAll())) ~~> = [ ECaseLabel ] Type <~~ push({cty: stripWs(up.in)}) ~~> ;
 ECaseLabel  = Id <~~ push({clabel: swBt(up.in)}) ~~> ":" ;
 ECaseRaw    <~~ push({craw: pop()}) ~~> = Expression ;
 
@@ -1141,8 +1141,8 @@ TForce      = NoSpace "!" NotChar61 ;
 TIndex      <~~ var ia = takeAll(); push({idx: makeIndexKey(swIdxKeys(ia)), dflt: swIdxDfltOf(ia)}) ~~>
             = "[" IndexArg { "," IndexArg } "]" ;
 
-Ternary     <~~ push(makeTernary(takeAll())) ~~>
-            = OrExpr [ "?" Expression ":" Ternary ] ;
+Ternary     <~~ push(makeTernary(takeAll(), up.in)) ~~>
+            = OrExpr [ "?" Expression <~~ push({ltxt: up.in}) ~~> ":" Ternary <~~ push({ltxt: up.in}) ~~> ] ;
 OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
             = AndExpr { "||" AndExpr } ;
 AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
@@ -1157,7 +1157,7 @@ RelExpr     <~~ push(foldBinary(takeAll())) ~~>
 // Swift's precedence order, tightest first, is range formation, casting, nil
 // coalescing, comparison: `x as? Double ?? -1` is `(x as? Double) ?? -1`.
 Coalesce    <~~ push(makeCoalesce(takeAll())) ~~>
-            = Cast <~~ push({at: up.pos}) ~~> { "??" Cast } ;
+            = Cast <~~ push({at: up.pos, ltxt: up.in}) ~~> { "??" Cast } ;
 // e as T / e as? T / e as! T / e is T. With no cast operator it is a pure
 // pass-through (a single item).
 Cast        <~~ push(makeCast(takeAll(), up.pos, up.in)) ~~>
@@ -1592,12 +1592,14 @@ LamAssign   <~~ push(exprToStmt(pop())) ~~> = Assignment ;
 LamExpr     <~~ push({expr: pop()}) ~~>
             = Expression [ ";" ] ;
 
-DictLit     <~~ push(makeDict(takeAll())) ~~>
+DictLit     <~~ push(makeDict(takeAll(), up.in)) ~~>
             = "[" ( ":" | DictEntry { "," DictEntry } [ "," ] ) "]" ;
-DictEntry   <~~ var v = pop(); push({dk: pop(), dv: v}) ~~>
-            = Expression ":" Expression ;
-ArrayLit    <~~ push(makeArray(takeAll())) ~~>
-            = "[" [ Expression { "," Expression } [ "," ] ] "]" ;
+DictEntry   <~~ var vt = pop(); var v = pop(); var kt = pop(); push({dk: pop(), dv: v, dkt: kt.ltxt, dvt: vt.ltxt}) ~~>
+            = Expression <~~ push({ltxt: up.in}) ~~> ":" Expression <~~ push({ltxt: up.in}) ~~> ;
+// Each element is followed by its text, from which the literal's element type is
+// read (swLitOperands in lib/swift-dotwant.js).
+ArrayLit    <~~ push(makeArray(takeAll(), up.in)) ~~>
+            = "[" [ Expression <~~ push({ltxt: up.in}) ~~> { "," Expression <~~ push({ltxt: up.in}) ~~> } [ "," ] ] "]" ;
 // `[Int].self` / `[String: Int].self`: a collection type written with the sugar,
 // as a VALUE - its canonical name, which is what type(of:) answers for a value
 // of that type (swiftc 6.1.2 prints `Array<Int>`).
@@ -5098,12 +5100,17 @@ KwContinue  = "continue" KwEnd ;
     }
 
     // cond ? a : b -> a diamond with a phi merge (like an if expression).
-    function makeTernary(items) {
+    // items = [cond] or [cond, then, {ltxt}, else, {ltxt}]; an Int literal arm
+    // next to a Double one is a Double.
+    function makeTernary(items, txt) {
         if (items.length == 1) { return items[0] }
         var condT = items[0]
-        var thenT = items[1]
-        var elseT = items[2]
+        var arms = swLitOperands(items.slice(1))
+        var plain = swLitPlain(items.slice(1))
+        var cell = swLitNote(txt, true)
         return function(b) {
+            var thenT = cell.off ? plain[0] : arms[0]
+            var elseT = cell.off ? plain[1] : arms[1]
             var r = condT(b)
             var thenB = curF.NewBlock("")
             var elseB = curF.NewBlock("")
@@ -5124,6 +5131,7 @@ KwContinue  = "continue" KwEnd ;
     function makeCoalesce(items) {
         if (items.length == 2) { return items[0] }
         var aty = swAsqTyOf(items[1].at)
+        if (aty == "") { aty = swLitCoalTy(items[1].ltxt) }
         return function(b) {
             var r = items[0](b)
             b = r.b
@@ -5146,8 +5154,12 @@ KwContinue  = "continue" KwEnd ;
         }
     }
 
-    function makeArray(items) {
+    function makeArray(items0, txt) {
+        var adopted = swLitOperands(items0)
+        var plain = swLitPlain(items0)
+        var cell = swLitNote(txt, false)
         return function(b) {
+            var items = cell.off ? plain : adopted
             var arrV = callExt(b, "js_arr_new", [])
             for (var i = 0; i < items.length; i++) {
                 var r = items[i](b)
@@ -5162,8 +5174,11 @@ KwContinue  = "continue" KwEnd ;
         var isDictTy = items.length > 0 && items[0].dictty != undefined
         return isDictTy ? makeDict([]) : makeArray([])
     }
-    function makeDict(items) {
+    function makeDict(plain, txt) {
+        var adopted = swLitDictAdopt(plain)
+        var cell = swLitNote(txt, false)
         return function(b) {
+            var items = cell.off ? plain : adopted
             var d = callExt(b, "js_dict_new", [])
             for (var i = 0; i < items.length; i++) {
                 var rk = items[i].dk(b)
@@ -6592,6 +6607,7 @@ KwContinue  = "continue" KwEnd ;
         // (js_swprintstr answers the text) - s being any inout target, `&p.log` and
         // `&xs[1]` included, opened and written back as an inout argument is.
         if ((name == "print" || name == "debugPrint") && lookupSig(name) == null && classNames[name] != 1 && enumNames[name] != 1) {
+            for (var lq = 0; lq < args.length; lq++) { if (args[lq].lbl == null) { swLitStop(args[lq].txt, true) } }
             var pos = []
             var sepT = null
             var termT = null
@@ -7634,6 +7650,18 @@ KwContinue  = "continue" KwEnd ;
         return nm
     }
 
+    // The type a local's name reads as in a literal's join (swLitTy): its
+    // annotation, which for a numeric one is its type, or for an unannotated one
+    // the floating-point type its initializer's text shows (`let d = 2.5`).
+    function swLocalNumAnn(annTxt, items, k) {
+        if (annTxt != "") { return annTxt }
+        for (var i = 1; i < k; i++) {
+            if (items[i] != undefined && items[i].itype != undefined) { return items[i].itype }
+        }
+        var ini = items[k + 1]
+        if (ini == undefined || ini.itext == undefined) { return "" }
+        return swLitCtxTy([ini.itext])
+    }
     function makePlainDecl(items) {
         var name = items[0]
         var labels = null
@@ -7673,7 +7701,8 @@ KwContinue  = "continue" KwEnd ;
         // `var a: [Double] = []`: the initializer names the element type that
         // append / insert / a write to a new key adopt. Twin in swift-interpreter.abnf.
         if (k == 1 && items[2] != undefined && swIsCollCtor(items[2].itext)) { declTyReg["$" + name] = annTxt }
-        swNoteLocalAnn(name, annTxt)
+        swNoteLocalAnn(name, swLocalNumAnn(annTxt, items, k))
+        if (items[k + 1] != undefined && swLitAnnStops(annTxt)) { swLitStop(items[k + 1].itext, false) }
         var init = swDotWant(items[k], items[k + 1], annTxt)
         if (init != undefined && swIsSetArrTy(annTxt)) { init = swSetArrInit(init) }
         else if (init != undefined && swIsSetKeyTy(annTxt)) { init = swSetKeysInit(init) }
@@ -10105,12 +10134,17 @@ KwContinue  = "continue" KwEnd ;
     // the leading-dot form, whose type this front end cannot know, compare equal to
     // the qualified one.
     var enumNames = {}
+    // An associated value's label and declared type; the type is "" when a
+    // payload of it needs no adoption (swAdoptNeeded), so `case b(Double)` makes
+    // `K.b(3)` hold 3.0.
     function makeECaseParam(items) {
         var lbl = ""
+        var ty = ""
         for (var i = 0; i < items.length; i++) {
             if (items[i] != undefined && items[i].clabel != undefined) { lbl = items[i].clabel }
+            if (items[i] != undefined && items[i].cty != undefined && swAdoptNeeded(items[i].cty)) { ty = items[i].cty }
         }
-        return {clabel: lbl}
+        return {clabel: lbl, cty: ty}
     }
     function makeECase(items) {
         var cname = ""
@@ -10316,6 +10350,7 @@ KwContinue  = "continue" KwEnd ;
             var key = emitStr(b, cname + "(")
             for (var i = 0; i < n; i++) {
                 var av = b.NewCall(rtKGet(), [curScopeV, emitStr(b, pnames[i])])
+                if (cs.cassoc[i].cty != "") { av = swEmitAdopt(b, av, cs.cassoc[i].cty) }
                 callExt(b, "js_arr_push", [vals, av])
                 key = callExt(b, "js_jadd", [key, b.NewCall(rtKey(), [av])])
                 key = callExt(b, "js_jadd", [key, emitStr(b, ",")])

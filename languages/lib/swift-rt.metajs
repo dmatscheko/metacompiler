@@ -2788,12 +2788,15 @@ function swPick(l, r, wantGt) {
     if (floIs(l) || floIs(r)) {
         var x = swNum(l)
         var y = swNum(r)
+        // The pick is a Double: an Int operand beside a Double is an Int
+        // literal, so `min(1, 2.5)` is 1.0.
+        var f32 = swIsF32(l) || swIsF32(r)
         if (wantGt) {
-            if (y >= x) { return r }
-            return l
+            if (y >= x) { return swReFlo(y, f32) }
+            return swReFlo(x, f32)
         }
-        if (y < x) { return r }
-        return l
+        if (y < x) { return swReFlo(y, f32) }
+        return swReFlo(x, f32)
     }
     if (swIntegral(l) && swIntegral(r)) {
         var ic = sintCmp(l, r)

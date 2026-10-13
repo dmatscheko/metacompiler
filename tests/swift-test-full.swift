@@ -4164,6 +4164,34 @@ func s89() {
         && Pl89.allCases.map { $0.rawValue } == [1, 2, 3])
 }
 
+// ===== SECTION 90: an integer literal typed by its neighbours =====
+// Next to a Double, an Int literal is a Double: a ternary's arms, a collection
+// literal's elements (nested and tuple ones too), the right side of ??, an enum
+// payload declared Double and min/max's operands. In an existential context each
+// operand keeps its own type. Every value read off swiftc 6.1.2.
+enum K90 { case b(Double); case c(x: Double) }
+func s90() {
+    let flag = [false, true]
+    let t1 = flag[1] ? 1.5 : 3
+    let t2 = flag[0] ? 1.5 : 3
+    check("90a", t1 / 2 == 0.75 && t2 / 2 == 1.5 && [1.5, 3][1] / 2 == 1.5 && "\([1.5, 2]) \([2, 1.5])" == "[1.5, 2.0] [2.0, 1.5]")
+    let nd: [Double?] = [nil]
+    let dd = ["a": 1.5, "b": 3]
+    var pay = 0.0
+    if case .b(let v) = K90.b(3) { pay = v / 2 }
+    check("90b", (nd[0] ?? 3) / 2 == 1.5 && dd["b"]! / 2 == 1.5 && pay == 1.5 && "\(K90.c(x: 2))" == "c(x: 2.0)")
+    let ss = ["x"]
+    let vs = [2.5]
+    check("90c", "\(Double(ss[0]) ?? -999)" == "-999.0" && "\(max(1, vs[0])) \(min(1, vs[0]))" == "2.5 1.0")
+    let d = 2.5
+    let mixed = [[1, 2.5], [3, 4]]
+    let tp = [(1, 2.5), (3, 4)]
+    check("90d", "\([d, 3])" == "[2.5, 3.0]" && "\(mixed)" == "[[1.0, 2.5], [3.0, 4.0]]" && "\(tp)" == "[(1, 2.5), (3, 4.0)]")
+    let an: [Any] = [1, 2.5]
+    let a2: Any = flag[0] ? 1.5 : 3
+    check("90e", "\(an)" == "[1, 2.5]" && "\(a2)" == "3" && "\(flag[0] ? 1 : 2)" == "2")
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -4254,6 +4282,7 @@ func main() {
     s87() // SECTION-CALL 87
     s88() // SECTION-CALL 88
     s89() // SECTION-CALL 89
+    s90() // SECTION-CALL 90
     print("full: \(checks) checks, \(fails) failures")
 }
 

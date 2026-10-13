@@ -1058,17 +1058,20 @@ func init() {
 			return func(a []uint64) uint64 {
 				l, r := u(a[0]), u(a[1])
 				if swIsFlo(l) || swIsFlo(r) {
+					// The pick is a Double: an Int operand beside a Double is
+					// an Int literal, so `min(1, 2.5)` is 1.0.
 					x, y := swNum(rt, l), swNum(rt, r)
+					f32 := swIsF32(l) || swIsF32(r)
 					if wantMax {
 						if y >= x {
-							return a[1]
+							return w(swReFlo(y, f32))
 						}
-						return a[0]
+						return w(swReFlo(x, f32))
 					}
 					if y < x {
-						return a[1]
+						return w(swReFlo(y, f32))
 					}
-					return a[0]
+					return w(swReFlo(x, f32))
 				}
 				if giIsIntegral(l) && giIsIntegral(r) {
 					if want(rt.giCmp(l, r)) {
