@@ -4609,8 +4609,23 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return 0
         }
         if (cmd == "false") { setStatus(1); return 1 }
-        if (cmd == "break") { return {brk: (args.length > 0) ? strToInt(args[0]) : 1} }
-        if (cmd == "continue") { return {cont: (args.length > 0) ? strToInt(args[0]) : 1} }
+        // `break N` / `continue N` past the loops there are act on the outermost one; outside
+        // any loop they only complain; a level below 1 is an error that leaves EVERY loop.
+        if (cmd == "break" || cmd == "continue") {
+            var lv = (args.length > 0) ? strToInt(args[0]) : 1
+            if (loopDepth == 0) {
+                emitErr("bash: " + cmd + ": only meaningful in a `for', `while', or `until' loop\n")
+                setStatus(0)
+                return 0
+            }
+            if (lv < 1) {
+                emitErr("bash: " + cmd + ": " + args[0] + ": loop count out of range\n")
+                setStatus(1)
+                return {brk: loopDepth}
+            }
+            if (lv > loopDepth) { lv = loopDepth }
+            return (cmd == "break") ? {brk: lv} : {cont: lv}
+        }
         if (cmd == "set") { return setBuiltin(args) }
         if (cmd == "trap") {
             // trap 'CODE' EXIT : only the EXIT trap is modelled. The code is re-parsed with
@@ -4670,7 +4685,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function callFunc(name, args) {
         var body = funcs["$" + name]
         var saved = posParams
+        var savedLoops = loopDepth
         posParams = args
+        loopDepth = 0
         pushLocalFrame()
         declareLocal("FUNCNAME")
         setVarVal("FUNCNAME", name)
@@ -4678,6 +4695,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         r = body()
         popLocalFrame()
         posParams = saved
+        loopDepth = savedLoops
         if (typeof r == "object") {
             if (r.isExit != undefined) { return r }   // an exit unwinds past the caller too
             return r.ret
@@ -5183,6 +5201,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // sequence, conditional and loop already propagates an object result unchanged.
     // loopSignal answers what a loop should do with one: 0 = not mine, 1 = break,
     // 2 = continue, 3 = propagate one level further out.
+    // How many loops the running code is inside. A function body starts at 0: bash's loops do
+    // not reach into a called function. Twin of loopStack in bash-to-llvm-ir.abnf.
+    var loopDepth = 0
+    function inLoop(t) {
+        return function() {
+            loopDepth = loopDepth + 1
+            var r = anytype
+            r = t()
+            loopDepth = loopDepth - 1
+            return r
+        }
+    }
     function loopSignal(r) {
         if (r.brk != undefined) { return (r.brk <= 1) ? 1 : 3 }
         if (r.cont != undefined) { return (r.cont <= 1) ? 2 : 3 }
@@ -5196,7 +5226,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function mkCond(items) { return {cond: items[0], body: items[1]} }
     function makeUntil(items) {
         var condT = items[0], bodyT = items[1]
-        return function() {
+        return inLoop(function() {
             var last = 0
             var cst = anytype
             var r = anytype
@@ -5214,12 +5244,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 }
             }
             return last
-        }
+        })
     }
     // items = [initExpr, condExpr, stepExpr, bodyThunk]
     function makeCFor(items) {
         var initT = items[0], condT = items[1], stepT = items[2], bodyT = items[3]
-        return function() {
+        return inLoop(function() {
             // An arithmetic error in any of the three parts ends the loop with status 1.
             var last = 0
             var r = anytype
@@ -5239,7 +5269,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (go) { stepT(); if (takeArithErr()) { setStatus(1); return 1 } }
             }
             return last
-        }
+        })
     }
     function mkElse(bodyT) { return {els: bodyT} }
     // clauses = [{cond,body} (if), {cond,body} (elif)*, {els} (else)?].
@@ -5262,7 +5292,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function makeWhile(items) {
         var condT = items[0]
         var bodyT = items[1]
-        return function() {
+        return inLoop(function() {
             var last = 0
             var cst = anytype
             var r = anytype
@@ -5280,7 +5310,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 }
             }
             return last
-        }
+        })
     }
 
     // items = [{fname}, {words:[wordThunks]}, bodyThunk] in source order.
@@ -5295,7 +5325,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else if (it.words != undefined) { wordThunks = it.words }
             else if (it.fname != undefined) { fname = it.fname }
         }
-        return function() {
+        return inLoop(function() {
             // `for NAME; do` with no `in` list iterates the positional parameters.
             var vals = []
             if (wordThunks == null) {
@@ -5315,7 +5345,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 } else { last = r }
             }
             return last
-        }
+        })
     }
 
     // items = [{fname}, bodyThunk]. Registration happens when the statement runs.

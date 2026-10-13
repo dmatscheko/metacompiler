@@ -2353,6 +2353,29 @@ s47() {
   check cd2 "$(f47 9)" 34
 }
 
+# ===== SECTION 48: break / continue levels, a computed unset =====
+# `break N` / `continue N` past the enclosing loops act on the outermost; outside a loop (a
+# called function's body included) they only complain; a level below 1 leaves every loop with
+# status 1; the level may be computed. unset of a name built by expansion. Every expected value
+# is bash 5.3's.
+s48() {
+  local r="" i j x
+  for i in 1 2; do for j in 1 2; do break 5; done; r="${r}never"; done
+  r="$r rc=$?"
+  for i in 1 2; do for j in 1 2; do r="$r $i$j"; continue 9; done; r="${r}never"; done
+  check bk1 "$r" " rc=0 11 21"
+  r=""
+  f48() { break; }
+  for i in 1 2 3; do r="$r f$i"; f48 2>/dev/null; done
+  for i in 1 2; do x=2; for j in 1 2; do r="$r $i$j"; break $x; done; done
+  for i in 1 2; do break 0 2>/dev/null; r="$r z$i"; done
+  check bk2 "$r rc=$?" " f1 f2 f3 11 rc=1"
+  local d=(5 6 7)
+  i=1
+  unset "d[$((i+1))]"
+  check us1 "${!d[*]}" "0 1"
+}
+
 s01   # SECTION-CALL 01
 s02   # SECTION-CALL 02
 s03   # SECTION-CALL 03
@@ -2400,5 +2423,6 @@ s44   # SECTION-CALL 44
 s45   # SECTION-CALL 45
 s46   # SECTION-CALL 46
 s47   # SECTION-CALL 47
+s48   # SECTION-CALL 48
 echo "full: $checks checks, $fails failures"
 exit $fails

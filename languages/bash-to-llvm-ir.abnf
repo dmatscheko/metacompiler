@@ -1368,6 +1368,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtArrIset = rtDecl("rt_arr_iset", false, [1, 1, 1])
     var rtArrKey = rtDecl("rt_arr_key", true, [1, 1])
     var rtAssocAdd = rtDecl("rt_assoc_add", false, [1])
+    var rtUnsetName = rtDecl("rt_unset_name", false, [1])
     var rtIsAssoc = rtDecl("rt_isassoc", false, [1])
     var rtArrIkey = rtDecl("rt_arr_ikey", true, [1, 3])
     var rtArrLitKey = rtDecl("rt_arr_litkey", 3, [1, 1, 1, 3])
@@ -3786,16 +3787,45 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             // break / continue are real branches here: the loop being emitted knows both of
             // its target blocks, so no control signal has to travel through the runtime.
+            // `break N` / `continue N` past the loops there are act on the outermost one; outside
+            // any loop they only complain; a level below 1 is an error that leaves EVERY loop
+            // (status 1). A level that is not a
+            // literal is compared against each enclosing loop at run time. Twin of the same arm
+            // of runCommand in bash-interpreter.abnf.
             if (cmd == "break" || cmd == "continue") {
-                var n = 1
-                if (argTs.length > 0) {
-                    if (argTs[0].c == undefined) { fail(cmd + " needs a literal level in this compiler") }
-                    n = parseDec(argTs[0].c)
+                var depth = loopStack.length
+                var isBrk = cmd == "break"
+                if (depth == 0) {
+                    emitOnStderr(b, gepStr(b, "bash: " + cmd + ": only meaningful in a `for', `while', or `until' loop\n"))
+                    storeStatusI(b, 0)
+                    return b
                 }
-                if (n < 1) { n = 1 }
-                if (loopStack.length < n) { fail(cmd + " used outside a loop") }
-                var lp = loopStack[loopStack.length - n]
-                b.NewBr((cmd == "break") ? lp.brk : lp.cont)
+                var rangeMsg = function(bb, lvText) {
+                    emitOnStderr(bb, bb.NewCall(rtStrcat, [bb.NewCall(rtStrcat, [gepStr(bb, "bash: " + cmd + ": "), lvText]),
+                                                          gepStr(bb, ": loop count out of range\n")]))
+                    storeStatusI(bb, 1)
+                }
+                var target = function(k) { var lp = loopStack[depth - k]; return isBrk ? lp.brk : lp.cont }
+                if (argTs.length == 0 || argTs[0].c != undefined) {
+                    var n = (argTs.length > 0) ? parseDec(argTs[0].c) : 1
+                    if (n < 1) { rangeMsg(b, gepStr(b, argTs[0].c)); b.NewBr(loopStack[0].brk); return deadBlock() }
+                    b.NewBr(target((n > depth) ? depth : n))
+                    return deadBlock()
+                }
+                var rl = evalWord(b, argTs[0])
+                b = rl.b
+                var lvl = s2i(b, rl.v)
+                var badB = curF.NewBlock(""), okB = curF.NewBlock("")
+                b.NewCondBr(b.NewICmp(llvm.enum.IPredSLT, lvl, one), badB, okB)
+                rangeMsg(badB, rl.v)
+                badB.NewBr(loopStack[0].brk)
+                var k
+                for (k = 1; k < depth; k++) {
+                    var nextB = curF.NewBlock("")
+                    okB.NewCondBr(okB.NewICmp(llvm.enum.IPredEQ, lvl, llvm.constant.NewInt(i32, k)), target(k), nextB)
+                    okB = nextB
+                }
+                okB.NewBr(target(depth))
                 return deadBlock()
             }
             if (cmd == "printf") { return emitPrintf(b, argTs) }
@@ -3857,7 +3887,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (cmd == "unset") {
                 var uk
                 for (uk = 0; uk < argTs.length; uk++) {
-                    if (argTs[uk].c == undefined) { fail("unset needs a literal name in this compiler") }
+                    // A name built by expansion (`unset "d[$((i+1))]"`) is resolved at run time;
+                    // the attribute and local bookkeeping below needs a literal one.
+                    if (argTs[uk].c == undefined) {
+                        var ru = evalWord(b, argTs[uk])
+                        b = ru.b
+                        b.NewCall(rtUnsetName, ru.v)
+                        continue
+                    }
                     var sp0 = splitSubscript(argTs[uk].c)
                     if (sp0.key == null) {
                         storeVarRaw(b, sp0.name, unsetPtr(b))
@@ -4340,7 +4377,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 funcs[key] = f
             }
             definedFuncs[key] = true
-            var savedF = curF, savedExit = curExit, savedFrame = curFrame
+            // bash's loops do not reach into a called function: the body starts with none.
+            var savedF = curF, savedExit = curExit, savedFrame = curFrame, savedLoops = loopStack
+            loopStack = []
             curF = f
             var entry = f.NewBlock("entry")
             curExit = f.NewBlock("exit")
@@ -4357,7 +4396,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var endb = bodyT(entry)
             emitFnRet(endb, endb.NewLoad(i32, gStatus))
             attrUnwind(undoBase)
-            curF = savedF; curExit = savedExit; curFrame = savedFrame
+            curF = savedF; curExit = savedExit; curFrame = savedFrame; loopStack = savedLoops
             storeStatusI(b, 0)
             return b
         }

@@ -4519,6 +4519,25 @@ int rt_setvar_byname(char *n, char *v)
     return 0;
 }
 
+/* `unset WORD` where the word came out of an expansion: NAME[SUB] removes the
+ * element (the usual subscript rules), NAME the variable and its array. */
+int rt_unset_name(char *n)
+{
+    int len = rt_strlen(n);
+    int i = 0;
+    if (len > 2 && n[len - 1] == 93) {
+        while (i < len && n[i] != 91) i = i + 1;
+        if (i > 0 && i < len - 1) {
+            char *nm = rt_substr(n, 0, i);
+            rt_arr_del(nm, rt_arr_key(nm, rt_substr(n, i + 1, len - i - 2)));
+            return 0;
+        }
+    }
+    rt_setvar_byname(n, &unset_marker[0]);
+    rt_arr_clear(n);
+    return 0;
+}
+
 /* `NAME=VALUE` as one string (what `export` / `declare` / `eval` hand over):
  * split at the FIRST '=' and assign. No '=' at all assigns nothing. */
 int rt_eval_assign(char *s)
