@@ -166,7 +166,7 @@ from a compatible B instance — php-src suggests static:: is B, ours gives A. (
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
 
-### T-569 lua: runtime bookkeeping keys are visible to programs; the `io` library is missing · P2 · LUA · OPEN [U]
+### T-569 lua: runtime bookkeeping keys are visible to programs; the `io` library is missing · P2 · LUA · IN PROGRESS (LUA worker, round 3) [U]
 Tables carry internal bookkeeping under plain string keys (`__keys` in the interpreter; `{__mv = true, a = ...}` marks a
 multi-value box in both halves), so a program can forge them: `return {__mv = true, a = {1, 2}}` is reportedly taken for
 multiple return values, and `t.__keys = 5` breaks pairs (two interpreter spots confirmed by reading, compiler unchecked; probe
