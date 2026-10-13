@@ -4132,6 +4132,18 @@ func s77() {
 	check("fpr3", k == 0 && e2 == nil && j == 0)
 }
 
+// ===== SECTION 78: a literal 0 at the end of a line =====
+// The x, o or b of 0x, 0o, 0b belongs to the literal only when glued to the 0.
+func s78() {
+	a := 0
+	x1, b1 := 3, 4
+	c := 0
+	o2 := 5
+	d := 0
+	b3 := 6
+	check("rdx1", a+c+d == 0 && x1 == 3 && b1 == 4 && o2 == 5 && b3 == 6 && 0x1f+0o17+0b11 == 49)
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -4210,6 +4222,7 @@ func main() {
 	s75() // SECTION-CALL 75
 	s76() // SECTION-CALL 76
 	s77() // SECTION-CALL 77
+	s78() // SECTION-CALL 78
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }
