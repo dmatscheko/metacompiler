@@ -6345,6 +6345,40 @@ def s121():
           and "%s-%s-%s" % t == "1-2-2" and "%(k)s" % S121D(k=3) == "3"
           and S121err(lambda: setattr(t, "z", 1)) == "AttributeError: 'S121T' object has no attribute 'z' and no __dict__ for setting new attributes")
 
+# ===== SECTION 122: math's integer helpers, prod and fsum =====
+# isqrt / comb / perm / gcd / lcm are exact on ints of any size (lcm of two
+# small operands can pass 2^53), prod multiplies with Python's own `*` from
+# start, and fsum is the exactly rounded sum. Rows from CPython 3.14.
+import math as S122m
+
+def S122err(f):
+    try:
+        f()
+    except Exception as e:
+        return type(e).__name__ + ": " + str(e)
+    return "no error"
+
+def s122():
+    ns = [0, 3, 4, 99, 10**20, 10**20 - 1, 2**100 + 7, True]
+    check("mint1", [S122m.isqrt(n) for n in ns] == [0, 1, 2, 9, 10**10, 10**10 - 1, 2**50, 1]
+          and [S122m.comb(n, k) for n, k in [(5, 2), (3, 5), (50, 25), (60, 30)]] == [10, 0, 126410606437752, 118264581564861424]
+          and S122m.perm(5, 2) == 20 and S122m.perm(5) == 120 and S122m.perm(30, 25) == 2210440498434925488635904000000
+          and S122m.gcd(2**70, 2**65 * 3) == 2**65 and S122m.gcd(10**30 + 1, 10**15 + 1) == 1
+          and S122m.lcm(2**40, 3**30) == 226379693794030958489370624 and S122m.lcm() == 1 and S122m.lcm(4, 0) == 0)
+    check("mint2", S122m.prod([1, 2, 3, 4]) == 24 and S122m.prod([]) == 1 and S122m.prod(range(1, 30)) == 8841761993739701954543616000000
+          and S122m.prod([2, 3], start=10) == 60 and S122m.prod(x for x in [2, 2.5]) == 5.0 and S122m.prod(["ab"], start=2) == "abab"
+          and S122m.fsum([0.1] * 10) == 1.0 and S122m.fsum([1e100, 1.0, -1e100, 1e-100, 1e50, -1.0, -1e50]) == 1e-100
+          and S122m.fsum([2.0**53, -0.5, -2.0**-54]) == 9007199254740991.0 and S122m.fsum([1.0, 1e-16, 1e-16]) == 1.0000000000000002
+          and S122m.fsum([float("inf"), 1.0]) == float("inf") and S122m.fsum([]) == 0.0)
+    check("mint3", [S122err(f) for f in [lambda: S122m.isqrt(-1), lambda: S122m.isqrt(2.0), lambda: S122m.comb(-1, 2),
+                                          lambda: S122m.comb(3, -2), lambda: S122m.perm(-3),
+                                          lambda: S122m.fsum([float("inf"), -float("inf")]), lambda: S122m.fsum([1e308, 1e308])]]
+          == ["ValueError: isqrt() argument must be nonnegative",
+              "TypeError: 'float' object cannot be interpreted as an integer",
+              "ValueError: n must be a non-negative integer", "ValueError: k must be a non-negative integer",
+              "ValueError: factorial() not defined for negative values", "ValueError: -inf + inf in fsum",
+              "OverflowError: intermediate overflow in fsum"])
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -6464,5 +6498,6 @@ def main():
     s119() # SECTION-CALL 119
     s120() # SECTION-CALL 120
     s121() # SECTION-CALL 121
+    s122() # SECTION-CALL 122
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

@@ -11769,7 +11769,8 @@ function js_pyrxmcall(target, name, args, kw) {
 // Every arm routes to the host `Math`, which the C floor seeds in full
 // (runtime.c host ids 51-93) - d_pow / d_exp / d_log / d_sqrt already exist in
 // the floor and must NOT be reimplemented here. What is NOT in Math is written
-// out: expm1, log1p, fmod, copysign, gcd, lcm and factorial.
+// out: expm1, log1p, fmod, copysign, factorial, fsum, and the integer helpers
+// (isqrt, comb, perm, gcd, lcm), which run on Python's own int operators.
 //
 // THE ANSWER'S TYPE IS PART OF THE SPECIFICATION, and CPython is not uniform:
 // sqrt / exp / log / pow / fabs / hypot / atan2 and the trigonometric family
@@ -11820,7 +11821,7 @@ function pyMHas(mod, name) {
     if (name == "floor" || name == "ceil" || name == "trunc" || name == "gcd") { return true }
     if (name == "lcm" || name == "factorial" || name == "isnan" || name == "isinf") { return true }
     if (name == "isfinite" || name == "isclose" || name == "cbrt") { return true }
-    return false
+    return name == "isqrt" || name == "comb" || name == "perm" || name == "prod" || name == "fsum"
 }
 
 function js_pymath_module() {
@@ -11855,6 +11856,7 @@ function pyMathKwArgs(name, args, kw) {
     if (!pyIsDict(kw)) { return args }
     var ks = kw["keys"]
     if (ks.length == 0 || !pyMHas("math", name)) { return args }
+    if (name == "prod" && ks.length == 1 && pyToStr(ks[0]) == "start") { return [pyEArgAt(args, 0), kw["vals"][0]] }
     if (name != "isclose") { pyRaiseExc("TypeError", "math." + name + "() takes no keyword arguments") }
     var out = [pyEArgAt(args, 0), pyEArgAt(args, 1), pyMkFlo(0.000000001), 0]
     var i = 0
@@ -12047,22 +12049,16 @@ function pyMathCall(name, args) {
     if (name == "trunc") { return pyMInt(Math.trunc(pyMArg(args, 0))) }
     if (name == "gcd") {
         if (args.length == 0) { return 0 }
+        if (pyMAnyBig(args)) { return pyMGcdBig(args, true) }
         var g = Math.abs(Math.trunc(pyNum(args[0])))
         var gi = 1
         while (gi < args.length) { g = pyMGcd2(g, pyNum(args[gi])); gi = gi + 1 }
         return g
     }
+    // lcm is always exact: two small operands can have a multiple past 2^53.
     if (name == "lcm") {
         if (args.length == 0) { return 1 }
-        var l = Math.abs(Math.trunc(pyNum(args[0])))
-        var li = 1
-        while (li < args.length) {
-            var lb = Math.abs(Math.trunc(pyNum(args[li])))
-            if (l === 0 || lb === 0) { return 0 }
-            l = l / pyMGcd2(l, lb) * lb
-            li = li + 1
-        }
-        return l
+        return pyMGcdBig(args, false)
     }
     if (name == "factorial") {
         var fn = pyMArg(args, 0)
@@ -12095,7 +12091,191 @@ function pyMathCall(name, args) {
         var cd = Math.abs(ca - cb)
         return cd <= Math.abs(crel * cb) || cd <= Math.abs(crel * ca) || cd <= cabs
     }
+    if (name == "isqrt") { return pyMIsqrt(pyMIntArg(args[0])) }
+    if (name == "comb") { return pyMComb(pyMIntArg(args[0]), pyMIntArg(args[1]), true) }
+    if (name == "perm") {
+        var pn = pyMIntArg(args[0])
+        if (args.length > 1 && args[1] !== undefined && args[1] !== null) { return pyMComb(pn, pyMIntArg(args[1]), false) }
+        // perm(n) is factorial(n), its error text included.
+        if (pyMLess(pn, 0)) { pyRaiseExc("ValueError", "factorial() not defined for negative values") }
+        return pyMComb(pn, pn, false)
+    }
+    if (name == "prod") {
+        var pr = anytype
+        pr = 1
+        if (args.length > 1) { pr = args[1] }
+        var psrc = pyAStepper(args[0])
+        while (true) {
+            var pst = pyAStep(psrc)
+            if (pst["done"]) { break }
+            pr = js_pybin("*", pr, pst["value"])
+        }
+        return pr
+    }
+    if (name == "fsum") {
+        var fsrc = pyAStepper(args[0])
+        var fds = []
+        while (true) {
+            var fst = pyAStep(fsrc)
+            if (fst["done"]) { break }
+            fds.push(pyMArg([fst["value"]], 0))
+        }
+        return pyMkFlo(pyMFsum(fds))
+    }
     pyRaiseExc("AttributeError", "module 'math' has no attribute '" + name + "'")
+}
+
+// The integer argument of isqrt / comb / perm: an int or a bool, as an int.
+// Go: rt.pyMathIntArg.
+function pyMIntArg(v) {
+    if (v === true) { return 1 }
+    if (v === false) { return 0 }
+    if (typeof v == "number" || pyIsBig(v)) { return v }
+    pyRaiseExc("TypeError", "'" + pyTypeName(v) + "' object cannot be interpreted as an integer")
+    return 0
+}
+
+function pyMLess(a, b) { return pyATruthy(js_pybin("<", a, b)) }
+
+function pyMAnyBig(args) {
+    var i = 0
+    while (i < args.length) {
+        if (pyIsBig(args[i])) { return true }
+        i = i + 1
+    }
+    return false
+}
+
+// gcd / lcm once an operand is past the exact-double range: Euclid on Python
+// ints. Go: the big.Int arm of pyMathCall.
+function pyMGcdBig(args, gcd) {
+    var acc = anytype
+    acc = js_pyabs(pyMIntArg(args[0]))
+    var i = 1
+    while (i < args.length) {
+        var b = anytype
+        b = js_pyabs(pyMIntArg(args[i]))
+        var x = anytype
+        x = acc
+        var y = anytype
+        y = b
+        while (pyATruthy(y)) {
+            var t = anytype
+            t = js_pybin("%", x, y)
+            x = y
+            y = t
+        }
+        if (gcd) { acc = x }
+        else if (!pyATruthy(x)) { acc = 0 }
+        else { acc = js_pybin("*", js_pybin("//", acc, x), b) }
+        i = i + 1
+    }
+    return acc
+}
+
+// isqrt by Newton's iteration on Python ints (pyMIsqrt in
+// python-interpreter.abnf explains it). Go: big.Int.Sqrt in pyMathCall.
+function pyMIsqrt(n) {
+    if (pyMLess(n, 0)) { pyRaiseExc("ValueError", "isqrt() argument must be nonnegative") }
+    if (pyMLess(n, 2)) { return n }
+    var x = anytype
+    x = n
+    var y = anytype
+    y = js_pybin("//", js_pybin("+", x, 1), 2)
+    while (pyMLess(y, x)) {
+        x = y
+        y = js_pybin("//", js_pybin("+", x, js_pybin("//", n, x)), 2)
+    }
+    return x
+}
+
+// comb(n, k) / perm(n, k) on Python ints. Go: rt.pyMathComb.
+function pyMComb(n, k, choose) {
+    if (pyMLess(n, 0)) { pyRaiseExc("ValueError", "n must be a non-negative integer") }
+    if (pyMLess(k, 0)) { pyRaiseExc("ValueError", "k must be a non-negative integer") }
+    if (pyMLess(n, k)) { return 0 }
+    var steps = anytype
+    steps = k
+    if (choose && pyMLess(js_pybin("-", n, k), k)) { steps = js_pybin("-", n, k) }
+    var r = anytype
+    r = 1
+    var i = 0
+    while (pyMLess(i, steps)) {
+        r = js_pybin("*", r, js_pybin("-", n, i))
+        i = i + 1
+        if (choose) { r = js_pybin("//", r, i) }
+    }
+    return r
+}
+
+// fsum: Shewchuk's exactly rounded sum, CPython's math_fsum. Go:
+// rt.pyMathFsum; pyMFsum in python-interpreter.abnf explains it.
+function pyMFsum(xs) {
+    var partials = []
+    var special = 0
+    var infSum = 0
+    var k = 0
+    while (k < xs.length) {
+        var x = xs[k]
+        var xsave = x
+        var n = 0
+        var j = 0
+        while (j < partials.length) {
+            var y = partials[j]
+            if (Math.abs(x) < Math.abs(y)) {
+                var t = x
+                x = y
+                y = t
+            }
+            var hi = x + y
+            var lo = y - (hi - x)
+            if (lo != 0) {
+                partials[n] = lo
+                n = n + 1
+            }
+            x = hi
+            j = j + 1
+        }
+        partials = partials.slice(0, n)
+        if (x != 0) {
+            if (x - x != 0) {
+                if (xsave - xsave == 0) { pyRaiseExc("OverflowError", "intermediate overflow in fsum") }
+                if (xsave == xsave) { infSum = infSum + xsave }
+                special = special + xsave
+                partials = []
+            } else {
+                partials.push(x)
+            }
+        }
+        k = k + 1
+    }
+    if (special != 0) {
+        if (infSum != infSum) { pyRaiseExc("ValueError", "-inf + inf in fsum") }
+        return special
+    }
+    return pyMFsumTail(partials)
+}
+
+function pyMFsumTail(partials) {
+    var m = partials.length
+    if (m == 0) { return 0 }
+    m = m - 1
+    var hi = partials[m]
+    var lo = 0
+    while (m > 0) {
+        var x = hi
+        m = m - 1
+        var y = partials[m]
+        hi = x + y
+        lo = y - (hi - x)
+        if (lo != 0) { break }
+    }
+    if (m > 0 && ((lo < 0 && partials[m - 1] < 0) || (lo > 0 && partials[m - 1] > 0))) {
+        var y2 = lo * 2
+        var x2 = hi + y2
+        if (y2 == x2 - hi) { hi = x2 }
+    }
+    return hi
 }
 
 

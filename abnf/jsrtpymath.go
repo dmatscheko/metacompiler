@@ -18,12 +18,12 @@ import (
 // WHAT IS IN SCOPE, AND WHY THAT LINE. Everything here is a pure function of
 // doubles or of integers, which is what this value model can carry exactly and
 // what the C floor already offers through Math (runtime.c seeds thirty-one
-// members, host ids 51-93). DELIBERATELY ABSENT: the complex-number surface
-// (cmath's job), the statistics helpers (fsum, prod, dist, comb, perm - each is
-// a real algorithm rather than a rename, and none is in the corpus), nextafter /
-// ulp / ldexp / frexp / modf (they read a double's BIT LAYOUT, which is manual
-// chapter 7.7's rule about d_frexp / d_ldexp: the floor owns those and MetaJS
-// cannot express them). Adding any of them later is one arm in three engines.
+// members, host ids 51-93). The integer helpers (isqrt, comb, perm, gcd, lcm)
+// work on math/big. DELIBERATELY ABSENT: the complex-number surface (cmath's
+// job), dist, nextafter / ulp / ldexp / frexp / modf (they read a double's BIT
+// LAYOUT, which is manual chapter 7.7's rule about d_frexp / d_ldexp: the floor
+// owns those and MetaJS cannot express them). Adding any of them later is one
+// arm in three engines.
 //
 // THE TYPE OF EACH ANSWER IS PART OF THE SPECIFICATION and CPython is not
 // uniform about it: sqrt/exp/log/pow/fabs/hypot/atan2 and the trigonometric
@@ -146,7 +146,8 @@ func pyModHas(mod, name string) bool {
 			"fabs", "fmod", "copysign", "atan2", "hypot",
 			"sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh",
 			"degrees", "radians", "floor", "ceil", "trunc",
-			"gcd", "lcm", "factorial", "isnan", "isinf", "isfinite", "isclose":
+			"gcd", "lcm", "factorial", "isnan", "isinf", "isfinite", "isclose",
+			"isqrt", "comb", "perm", "prod", "fsum":
 			return true
 		}
 	case "re":
@@ -182,6 +183,9 @@ func (rt *jsrt) pyMathKwArgs(name string, args []interface{}, kw interface{}) []
 	keys, vals, ok := dictParts(kw)
 	if !ok || len(keys.elems) == 0 || !pyModHas("math", name) {
 		return args
+	}
+	if name == "prod" && len(keys.elems) == 1 && keys.elems[0] == "start" {
+		return []interface{}{argAt(args, 0), vals.elems[0]}
 	}
 	if name != "isclose" {
 		rt.pyRaise("TypeError", "math."+name+"() takes no keyword arguments")
@@ -329,24 +333,22 @@ func (rt *jsrt) pyMathCall(name string, args []interface{}) interface{} {
 		if len(args) == 0 {
 			return 0.0
 		}
+		for _, a := range args {
+			if _, isBig := a.(*jsBigInt); isBig {
+				return rt.pyBigNarrow(rt.pyMathGcdBig(args, true))
+			}
+		}
 		g := math.Abs(math.Trunc(rt.pyToF(args[0])))
 		for i := 1; i < len(args); i++ {
 			g = pyMathGcd(g, rt.pyToF(args[i]))
 		}
 		return g
 	case "lcm":
+		// Always exact: two small operands can have a multiple past 2^53.
 		if len(args) == 0 {
 			return 1.0
 		}
-		l := math.Abs(math.Trunc(rt.pyToF(args[0])))
-		for i := 1; i < len(args); i++ {
-			b := math.Abs(math.Trunc(rt.pyToF(args[i])))
-			if l == 0 || b == 0 {
-				return 0.0
-			}
-			l = l / pyMathGcd(l, b) * b
-		}
-		return l
+		return rt.pyBigNarrow(rt.pyMathGcdBig(args, false))
 	case "factorial":
 		n := math.Trunc(pyMathArg(rt, args, 0))
 		if n < 0 || n != pyMathArg(rt, args, 0) {
@@ -400,9 +402,172 @@ func (rt *jsrt) pyMathCall(name string, args []interface{}) interface{} {
 		}
 		d := math.Abs(a - b)
 		return d <= math.Abs(rel*b) || d <= math.Abs(rel*a) || d <= abs
+	case "isqrt":
+		n := rt.pyMathIntArg(argAt(args, 0))
+		if n.Sign() < 0 {
+			rt.pyRaise("ValueError", "isqrt() argument must be nonnegative")
+		}
+		return rt.pyBigNarrow(new(big.Int).Sqrt(n))
+	case "comb", "perm":
+		n := rt.pyMathIntArg(argAt(args, 0))
+		k := n
+		if a := argAt(args, 1); name == "comb" || !isUndefOrNull(a) {
+			k = rt.pyMathIntArg(a)
+		} else if n.Sign() < 0 {
+			// perm(n) is factorial(n), its error text included.
+			rt.pyRaise("ValueError", "factorial() not defined for negative values")
+		}
+		return rt.pyBigNarrow(rt.pyMathComb(n, k, name == "comb"))
+	case "prod":
+		var acc interface{} = 1.0
+		if len(args) > 1 {
+			acc = args[1]
+		}
+		next := rt.pyStepper(argAt(args, 0))
+		for x, ok := next(); ok; x, ok = next() {
+			acc = rt.pyExt("js_pybin", "*", acc, x)
+		}
+		return acc
+	case "fsum":
+		var fs []float64
+		next := rt.pyStepper(argAt(args, 0))
+		for x, ok := next(); ok; x, ok = next() {
+			fs = append(fs, pyMathArg(rt, []interface{}{x}, 0))
+		}
+		return pyMathFlo(rt.pyMathFsum(fs))
 	}
 	panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
 		"module 'math' has no attribute '"+name+"'")})
+}
+
+// pyMathGcdBig is gcd / lcm once an operand is past the exact-double range.
+// Twin of pyMGcdBig in languages/python-interpreter.abnf and
+// lib/python-rt.metajs.
+func (rt *jsrt) pyMathGcdBig(args []interface{}, gcd bool) *big.Int {
+	acc := new(big.Int).Abs(rt.pyMathIntArg(args[0]))
+	for _, a := range args[1:] {
+		b := new(big.Int).Abs(rt.pyMathIntArg(a))
+		g := new(big.Int).GCD(nil, nil, acc, b)
+		switch {
+		case gcd:
+			acc = g
+		case g.Sign() == 0:
+			acc = new(big.Int)
+		default:
+			acc = new(big.Int).Mul(new(big.Int).Quo(acc, g), b)
+		}
+	}
+	return acc
+}
+
+// pyMathIntArg is the integer argument of isqrt / comb / perm: an int or a
+// bool. Twin of pyMIntArg in languages/python-interpreter.abnf and
+// lib/python-rt.metajs.
+func (rt *jsrt) pyMathIntArg(v interface{}) *big.Int {
+	if _, isFlo := v.(*jsPyFlo); !isFlo {
+		if b, ok := pyBigOperand(v); ok {
+			return b
+		}
+	}
+	rt.pyRaise("TypeError", "'"+pyTypeName(rt, v)+"' object cannot be interpreted as an integer")
+	return nil
+}
+
+// pyMathComb is comb(n, k) (choose) or perm(n, k) (choose, ordered). Twin of
+// pyMComb in languages/python-interpreter.abnf and lib/python-rt.metajs.
+func (rt *jsrt) pyMathComb(n, k *big.Int, choose bool) *big.Int {
+	if n.Sign() < 0 {
+		rt.pyRaise("ValueError", "n must be a non-negative integer")
+	}
+	if k.Sign() < 0 {
+		rt.pyRaise("ValueError", "k must be a non-negative integer")
+	}
+	if k.Cmp(n) > 0 {
+		return new(big.Int)
+	}
+	steps := k
+	if rest := new(big.Int).Sub(n, k); choose && rest.Cmp(k) < 0 {
+		steps = rest
+	}
+	r := big.NewInt(1)
+	i := new(big.Int)
+	for i.Cmp(steps) < 0 {
+		r.Mul(r, new(big.Int).Sub(n, i))
+		i.Add(i, big.NewInt(1))
+		if choose {
+			r.Quo(r, i)
+		}
+	}
+	return r
+}
+
+// pyMathFsum is Shewchuk's exactly rounded sum as CPython's math_fsum computes
+// it. Twin of pyMFsum in languages/python-interpreter.abnf and
+// lib/python-rt.metajs, which explain it.
+func (rt *jsrt) pyMathFsum(xs []float64) float64 {
+	var partials []float64
+	special, infSum := 0.0, 0.0
+	for _, x := range xs {
+		xsave := x
+		n := 0
+		for _, y := range partials {
+			if math.Abs(x) < math.Abs(y) {
+				x, y = y, x
+			}
+			hi := x + y
+			lo := y - (hi - x)
+			if lo != 0 {
+				partials[n] = lo
+				n++
+			}
+			x = hi
+		}
+		partials = partials[:n]
+		if x != 0 {
+			if math.IsInf(x, 0) || math.IsNaN(x) {
+				if !math.IsInf(xsave, 0) && !math.IsNaN(xsave) {
+					rt.pyRaise("OverflowError", "intermediate overflow in fsum")
+				}
+				if math.IsInf(xsave, 0) {
+					infSum += xsave
+				}
+				special += xsave
+				partials = partials[:0]
+			} else {
+				partials = append(partials, x)
+			}
+		}
+	}
+	if special != 0 {
+		if math.IsNaN(infSum) {
+			rt.pyRaise("ValueError", "-inf + inf in fsum")
+		}
+		return special
+	}
+	m := len(partials)
+	if m == 0 {
+		return 0
+	}
+	m--
+	hi, lo := partials[m], 0.0
+	for m > 0 {
+		x := hi
+		m--
+		y := partials[m]
+		hi = x + y
+		lo = y - (hi - x)
+		if lo != 0 {
+			break
+		}
+	}
+	if m > 0 && ((lo < 0 && partials[m-1] < 0) || (lo > 0 && partials[m-1] > 0)) {
+		y := lo * 2
+		x := hi + y
+		if y == x-hi {
+			hi = x
+		}
+	}
+	return hi
 }
 
 func init() {

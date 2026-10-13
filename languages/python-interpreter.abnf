@@ -4703,12 +4703,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // `re` above is, and `import math` binds it.
     //
     // SCOPE. Everything here is a pure function of doubles or of integers, which
-    // is what this value model carries exactly. DELIBERATELY ABSENT: the complex
-    // surface (cmath's job), the statistics helpers (fsum / prod / dist / comb /
-    // perm - each a real algorithm rather than a rename), and nextafter / ulp /
-    // ldexp / frexp / modf, which read a double's BIT LAYOUT and therefore belong
-    // to the C floor (manual chapter 7.7). Adding any of them later is one arm in
-    // three engines.
+    // is what this value model carries exactly. The integer helpers (isqrt / comb /
+    // perm / gcd / lcm) run on Python's own int operators, so an arbitrary-precision
+    // operand needs nothing extra. DELIBERATELY ABSENT: the complex surface
+    // (cmath's job), dist, and nextafter / ulp / ldexp / frexp / modf, which read
+    // a double's BIT LAYOUT and therefore belong to the C floor (manual chapter
+    // 7.7). Adding any of them later is one arm in three engines.
     //
     // THE ANSWER'S TYPE IS PART OF THE SPECIFICATION and CPython is not uniform:
     // sqrt / exp / log / pow / fabs / hypot / atan2 and the trigonometric family
@@ -4745,6 +4745,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // in abnf/jsrtpymath.go and lib/python-rt.metajs.
     function pyMathKwArgs(name, args, kw) {
         if (kw === null || kw === undefined || kw.keys.length == 0 || !pyModHas("math", name)) { return args }
+        if (name == "prod" && kw.keys.length == 1 && kw.keys[0] == "start") { return [args[0], kw.vals[0]] }
         if (name != "isclose") { pyListErr("TypeError", "math." + name + "() takes no keyword arguments") }
         var out = [args[0], args[1], pyFlo(0.000000001), 0]
         for (var i = 0; i < kw.keys.length; i++) {
@@ -4944,22 +4945,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "trunc") { return pyMInt(Math.trunc(pyMArg(args, 0))) }
         if (name == "gcd") {
             if (args.length == 0) { return 0 }
+            if (pyMAnyBig(args)) { return pyMGcdBig(args, true) }
             var g = Math.abs(Math.trunc(floVal(args[0])))
             var gi = 1
             while (gi < args.length) { g = pyMGcd2(g, floVal(args[gi])); gi = gi + 1 }
             return g
         }
+        // lcm is always exact: two small operands can have a multiple past 2^53.
         if (name == "lcm") {
             if (args.length == 0) { return 1 }
-            var l = Math.abs(Math.trunc(floVal(args[0])))
-            var li = 1
-            while (li < args.length) {
-                var lb = Math.abs(Math.trunc(floVal(args[li])))
-                if (l === 0 || lb === 0) { return 0 }
-                l = l / pyMGcd2(l, lb) * lb
-                li = li + 1
-            }
-            return l
+            return pyMGcdBig(args, false)
         }
         if (name == "factorial") {
             var fn = pyMArg(args, 0)
@@ -4990,8 +4985,172 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var cd = Math.abs(ca - cb)
             return cd <= Math.abs(crel * cb) || cd <= Math.abs(crel * ca) || cd <= cabs
         }
+        if (name == "isqrt") { return pyMIsqrt(pyMIntArg(args[0])) }
+        if (name == "comb") { return pyMComb(pyMIntArg(args[0]), pyMIntArg(args[1]), true) }
+        if (name == "perm") {
+            var pn = pyMIntArg(args[0])
+            if (args.length > 1 && args[1] !== undefined && args[1] !== null) { return pyMComb(pn, pyMIntArg(args[1]), false) }
+            // perm(n) is factorial(n), its error text included.
+            if (binOp("<", pn, 0)) { pyListErr("ValueError", "factorial() not defined for negative values") }
+            return pyMComb(pn, pn, false)
+        }
+        if (name == "prod") {
+            var pr = anytype
+            pr = args.length > 1 ? args[1] : 1
+            var pxs = iterToList(args[0])
+            for (var pi = 0; pi < pxs.length; pi++) { pr = binOp("*", pr, pxs[pi]) }
+            return pr
+        }
+        if (name == "fsum") {
+            var fxs = iterToList(args[0])
+            var fds = []
+            for (var fi = 0; fi < fxs.length; fi++) { fds.push(pyMArg(fxs, fi)) }
+            return pyFlo(pyMFsum(fds))
+        }
         pyRaise(pyMakeExc("AttributeError", ["module 'math' has no attribute '" + name + "'"]))
         return undefined
+    }
+    function pyMAnyBig(args) {
+        for (var i = 0; i < args.length; i++) { if (bigIsBig(args[i])) { return true } }
+        return false
+    }
+    // gcd / lcm once an operand is past the exact-double range: Euclid on Python
+    // ints. Twin of the big.Int arm of pyMathCall in abnf/jsrtpymath.go and
+    // pyMGcdBig in lib/python-rt.metajs.
+    function pyMGcdBig(args, gcd) {
+        var acc = anytype
+        acc = hostGlobals["abs"](pyMIntArg(args[0]))
+        for (var i = 1; i < args.length; i++) {
+            var b = anytype
+            b = hostGlobals["abs"](pyMIntArg(args[i]))
+            var x = anytype
+            x = acc
+            var y = anytype
+            y = b
+            while (pytruthy(y)) {
+                var t = anytype
+                t = binOp("%", x, y)
+                x = y
+                y = t
+            }
+            if (gcd) { acc = x }
+            else if (!pytruthy(x)) { acc = 0 }
+            else { acc = binOp("*", binOp("//", acc, x), b) }
+        }
+        return acc
+    }
+    // The integer argument of isqrt / comb / perm: an int or a bool, as an int.
+    // Twin of pyMathIntArg in abnf/jsrtpymath.go and pyMIntArg in
+    // lib/python-rt.metajs.
+    function pyMIntArg(v) {
+        if (typeof v == "boolean") { return v ? 1 : 0 }
+        if (typeof v == "number" || bigIsBig(v)) { return v }
+        pyListErr("TypeError", "'" + pyTypeOf(v).__name + "' object cannot be interpreted as an integer")
+        return 0
+    }
+    // isqrt by Newton's iteration on Python ints, so an arbitrary-precision
+    // operand needs nothing extra: from x = n, (x + n // x) // 2 falls to the
+    // floor of the square root and stops there.
+    function pyMIsqrt(n) {
+        if (binOp("<", n, 0)) { pyListErr("ValueError", "isqrt() argument must be nonnegative") }
+        if (binOp("<", n, 2)) { return n }
+        var x = anytype
+        x = n
+        var y = anytype
+        y = binOp("//", binOp("+", x, 1), 2)
+        while (binOp("<", y, x)) {
+            x = y
+            y = binOp("//", binOp("+", x, binOp("//", n, x)), 2)
+        }
+        return x
+    }
+    // comb(n, k) (choose) and perm(n, k) (choose, ordered), on Python ints:
+    // the running product of n, n-1, ... divided at each step by the step count
+    // for comb, which keeps every intermediate an exact integer.
+    function pyMComb(n, k, choose) {
+        if (binOp("<", n, 0)) { pyListErr("ValueError", "n must be a non-negative integer") }
+        if (binOp("<", k, 0)) { pyListErr("ValueError", "k must be a non-negative integer") }
+        if (binOp(">", k, n)) { return 0 }
+        var steps = anytype
+        steps = k
+        if (choose && binOp("<", binOp("-", n, k), k)) { steps = binOp("-", n, k) }
+        var r = anytype
+        r = 1
+        var i = 0
+        while (binOp("<", i, steps)) {
+            r = binOp("*", r, binOp("-", n, i))
+            i = i + 1
+            if (choose) { r = binOp("//", r, i) }
+        }
+        return r
+    }
+    // fsum: Shewchuk's exactly rounded sum as CPython's math_fsum computes it -
+    // non-overlapping partials, the infinities and NaNs summed apart, and the
+    // final half-way correction. Twin of pyMathFsum in abnf/jsrtpymath.go and
+    // pyMFsum in lib/python-rt.metajs.
+    function pyMFsum(xs) {
+        var partials = []
+        var special = 0
+        var infSum = 0
+        for (var k = 0; k < xs.length; k++) {
+            var x = xs[k]
+            var xsave = x
+            var n = 0
+            for (var j = 0; j < partials.length; j++) {
+                var y = partials[j]
+                if (Math.abs(x) < Math.abs(y)) {
+                    var t = x
+                    x = y
+                    y = t
+                }
+                var hi = x + y
+                var lo = y - (hi - x)
+                if (lo != 0) {
+                    partials[n] = lo
+                    n = n + 1
+                }
+                x = hi
+            }
+            partials = partials.slice(0, n)
+            if (x != 0) {
+                if (x - x != 0) {
+                    if (xsave - xsave == 0) { pyListErr("OverflowError", "intermediate overflow in fsum") }
+                    if (xsave == xsave) { infSum = infSum + xsave }
+                    special = special + xsave
+                    partials = []
+                } else {
+                    partials.push(x)
+                }
+            }
+        }
+        if (special != 0) {
+            if (infSum != infSum) { pyListErr("ValueError", "-inf + inf in fsum") }
+            return special
+        }
+        return pyMFsumTail(partials)
+    }
+    // The partials summed from the top, then CPython's correction for a result
+    // that lies exactly half-way between two doubles.
+    function pyMFsumTail(partials) {
+        var m = partials.length
+        if (m == 0) { return 0 }
+        m = m - 1
+        var hi = partials[m]
+        var lo = 0
+        while (m > 0) {
+            var x = hi
+            m = m - 1
+            var y = partials[m]
+            hi = x + y
+            lo = y - (hi - x)
+            if (lo != 0) { break }
+        }
+        if (m > 0 && ((lo < 0 && partials[m - 1] < 0) || (lo > 0 && partials[m - 1] > 0))) {
+            var y2 = lo * 2
+            var x2 = hi + y2
+            if (y2 == x2 - hi) { hi = x2 }
+        }
+        return hi
     }
 
     // ---- the four engine adapters this chapter is written against ----
