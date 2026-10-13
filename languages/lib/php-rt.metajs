@@ -1626,11 +1626,55 @@ function js_phclo(d, s, e, t) {
 }
 // A closure literal's record, or undefined.
 function phCloRec(v) {
+    var r = phMetaRec(v)
+    if (r !== undefined && r["fk"] !== true) { return r }
+    return undefined
+}
+// The record of a closure made from a callable (js_phfake), or undefined.
+function phFakeRec(v) {
+    var r = phMetaRec(v)
+    if (r !== undefined && r["fk"] === true) { return r }
+    return undefined
+}
+function phMetaRec(v) {
     if (typeof v != "function") { return undefined }
     var r = anytype
     r = fnMeta(v, "name")
     if (typeof r == "object" && r !== null) { return r }
     return undefined
+}
+// The record of the closure PHP makes from a callable (zend_create_fake_closure):
+// the method name that recv (an object, or a class) answers, or the __call /
+// __callStatic standing in for it. It keeps the method's signature and by-reference
+// mask (mk), the method's class sc, whether it is static, the $this it is bound to
+// - recv's, or self for a static dispatch of a non-static method - and the
+// emitted factory phFakeBind makes a rebound one with (fakeFactory in
+// php-to-llvm-ir.abnf). The emitter puts it in the closure's meta. Twin of
+// m["js_phfake"] in abnf/jsrtphp.go and fakeClosure in php-interpreter.abnf.
+function js_phfake(recv, name, self, fac) {
+    var cls = anytype
+    cls = phIsObj(recv) ? recv["__class"] : recv
+    var nm = phStr(name)
+    var lc = phsCase(nm, false)
+    var mm = phMethodOf(recv, nm)
+    var d = phMethodDecl(cls, lc)
+    var st = false
+    if (d === undefined) {
+        st = !phIsObj(recv) || phOwner(cls, "__call") === undefined
+        d = phMethodDecl(cls, st ? "__callstatic" : "__call")
+    } else { st = phStaticIn(d["k"], lc) }
+    var t = anytype
+    t = undefined
+    if (!st) { t = phIsObj(recv) ? recv : self }
+    var fm = typeof mm == "function"
+    return {fk: true, s: fm ? phSigOf(mm) : "", mk: fm ? fnMeta(mm, "length") : 0, n: nm,
+            sc: d === undefined ? cls : d["k"], st: st, t: t, f: fac}
+}
+// The record of the closure the factory makes from the one src, bound to nt.
+// Twin of m["js_phfakerec"] in abnf/jsrtphp.go.
+function js_phfakerec(src, nt) {
+    var r = phFakeRec(src)
+    return {fk: true, s: r["s"], mk: r["mk"], n: r["n"], sc: r["sc"], st: r["st"], t: nt, f: r["f"]}
 }
 
 // A method call on a Closure: __invoke calls it, bindTo rebinds it, call rebinds
@@ -1662,19 +1706,60 @@ function phCloCall(f, name, args) {
 // f with its $this and class scope replaced (zend_create_closure_ex), made by the
 // factory a closure literal's record keeps (cloFactory in php-to-llvm-ir.abnf),
 // which also resolves a class NAME. keep leaves the class scope the record holds.
-// No instance binds to a static closure: PHP warns (not modelled) and answers
-// null. Twin of phpCloBind in abnf/jsrtphp.go and cloBind in
-// php-interpreter.abnf.
+// A binding zend_valid_closure_binding refuses answers null (PHP also warns,
+// which is not modelled): an instance for a static closure, none for a closure
+// using $this that has one, and for a closure made from a callable (phFakeBind)
+// or a function any other scope. Twin of phpCloBind in abnf/jsrtphp.go and
+// cloBind in php-interpreter.abnf.
 function phCloBind(f, nthis, scope, keep) {
     var r = phCloRec(f)
-    if (r === undefined || r["f"] === undefined) { fail("binding a Closure that is not a closure literal is not modelled") }
+    if (r === undefined) {
+        var fr = phFakeRec(f)
+        if (fr !== undefined) { return phFakeBind(f, fr, nthis, scope, keep) }
+        // A function's closure has no class scope, so it takes none other.
+        if (keep || rtIsNil(scope)) { return f }
+        return null
+    }
+    if (r["f"] === undefined) { fail("binding a Closure that is not a closure literal is not modelled") }
     var t = anytype
     t = nthis
-    if (!phIsObj(t)) { t = null }
+    if (!phIsObj(t)) {
+        t = null
+        if (r["ut"] === true && phIsObj(r["t"])) { return null }
+    }
     else if (r["st"] === true) { return null }
     var sc = anytype
     sc = keep ? r["sc"] : scope
     return r["f"].apply(undefined, [t, sc])
+}
+
+// A closure made from a callable keeps its method's class as its scope: it binds
+// an instance of that class unless the method is static, none unless it is, and
+// no other scope (zend_valid_closure_binding). The record's factory makes the new
+// closure, which runs the same method (js_phscall through its class) with the new
+// $this. Twin of phpFakeBind in abnf/jsrtphp.go and fakeBind in
+// php-interpreter.abnf.
+function phFakeBind(f, fr, nthis, scope, keep) {
+    var sc = fr["sc"]
+    if (phIsObj(nthis)) {
+        if (fr["st"] === true) { return null }
+        if (!phIsA(nthis, phStr(sc["__name"]))) { return null }
+    } else if (fr["st"] !== true) { return null }
+    if (!keep && !phSameClass(scope, sc)) { return null }
+    var nt = anytype
+    nt = phIsObj(nthis) ? nthis : undefined
+    var lsb = anytype
+    lsb = nt !== undefined ? nt["__class"] : sc
+    return fr["f"].apply(undefined, [sc, fr["n"], nt, lsb, f])
+}
+// Whether a bind scope - a class, a class name, or null - is the class sc.
+function phSameClass(scope, sc) {
+    if (typeof scope == "string") {
+        var n = scope
+        if (n.length > 0 && n.charCodeAt(0) == 92) { n = n.substring(1) }
+        return phsCase(n, false) == phsCase(phStr(sc["__name"]), false)
+    }
+    return scope === sc
 }
 
 // An object's handle, or a closure literal's; any other Closure keeps none and

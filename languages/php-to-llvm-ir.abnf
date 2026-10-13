@@ -1651,7 +1651,14 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // captures its free variables BY VALUE, and this log plus the mark its 'fn'
     // keyword records is what tells makeArrowFn which names its body could reach.
     var varLog = []
-    function noteVarName(n) { varLog.push(n); return n }
+    // A $this written in a function's own body marks it (ZEND_ACC_USES_THIS), which
+    // keeps a closure from being unbound (phCloBind). Twin of noteVarName in
+    // php-interpreter.abnf.
+    function noteVarName(n) {
+        varLog.push(n)
+        if (n == "$this" && cloScopes.length > 0) { cloScopes[cloScopes.length - 1].ut = true }
+        return n
+    }
     function varMark() { return varLog.length }
     // The distinct names logged since mark, minus exclude, in order of first
     // appearance. One pass with a seen-set: a bare $GLOBALS walks the WHOLE log, so a
@@ -3792,7 +3799,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                     var dnV = callExt(b, "js_phstr", [rn.v])
                     // $o->$m(...): a callable bound to this receiver and that name.
                     if (hasFcc(s.args)) {
-                        cur = boundDyn(b, curScopeV, "mcall", cur, dnV, hUndef, hUndef)
+                        cur = boundDyn(b, curScopeV, "mcall", cur, dnV, hUndef, hUndef, true)
                         continue
                     }
                     var ed = emitMethArgs(b, cur, dnV, null, s.args)
@@ -4498,7 +4505,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                     emitNsCheck(b, rb.v, rn8.v, null)
                     // C::$m(...): a callable dispatching statically to that name.
                     if (hasFcc(args)) {
-                        return {b: b, v: boundDyn(b, curScopeV, "scall", rb.v, rn8.v, phThis(b), fwdLsb(b, baseText))}
+                        return {b: b, v: boundDyn(b, curScopeV, "scall", rb.v, rn8.v, phThis(b), fwdLsb(b, baseText), true)}
                     }
                     var ea8 = emitMethArgs(b, rb.v, rn8.v, null, args)
                     b = ea8.b
@@ -4823,6 +4830,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         callExt(b, "js_set", [rec, emitStr(b, "f"), callExt(b, "js_closure", [handle(facIdx), envV])])
         callExt(b, "js_set", [rec, emitStr(b, "sc"), scopeV])
         if (sc.st === true) { callExt(b, "js_set", [rec, emitStr(b, "st"), hTrue]) }
+        if (sc.ut === true) { callExt(b, "js_set", [rec, emitStr(b, "ut"), hTrue]) }
     }
     // A closure literal's factory: called with ($this, scope) from js_phmcall's
     // Closure arm (phCloBind), it makes the same closure over a scope that copies
@@ -5908,14 +5916,52 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         curScopeV = savedScope
         loopStack = savedLoops
         curFTag = savedTag
-        return bindMethodSig(b, callExt(b, "js_closure", [handle(idx), env]), recvV, emitStr(b, name))
+        return bindMethodSig(b, callExt(b, "js_closure", [handle(idx), env]), recvV, emitStr(b, name),
+                             ext == "scall" ? phThis(b) : hUndef, env)
     }
     // A closure that dispatches to a METHOD takes over that method's recorded
     // parameter list (js_phbindsig), so a call through it places named arguments
-    // and a variadic tail exactly as a call of the method would.
-    function bindMethodSig(b, clo, recvV, nameV) {
+    // and a variadic tail exactly as a call of the method would. fakeThis, when
+    // given, makes it the closure PHP makes from a callable (js_phfake), which
+    // records the method as well, with the $this a static dispatch binds; envV is
+    // a scope of the function being emitted.
+    function bindMethodSig(b, clo, recvV, nameV, fakeThis, envV) {
+        if (fakeThis !== undefined) {
+            var frec = callExt(b, "js_phfake", [recvV, nameV, fakeThis, callExt(b, "js_closure", [handle(fakeFactory()), envV])])
+            return callExt(b, "js_jsfnmeta", [clo, frec, callExt(b, "js_get", [frec, emitStr(b, "mk")])])
+        }
         if (!dynPlaceNamed && !dynPlaceVariadic) { return clo }
         return callExt(b, "js_phbindsig", [clo, recvV, nameV])
+    }
+    // The factory a rebound closure made from a callable comes from (phFakeBind):
+    // called with (class, name, $this, called scope, the closure rebound), it makes
+    // a closure that runs that method through its class (js_phscall) with that
+    // $this, under the record js_phfakerec copies. Emitted once, with its dispatch
+    // body.
+    var fakeFacIdx = 0
+    function fakeFactory() {
+        if (fakeFacIdx != 0) { return fakeFacIdx }
+        var keys = ["\x00fksc", "\x00fknm", "\x00fkthis", "\x00fklsb"]
+        funcCount++
+        var dIdx = funcCount
+        var df = m.NewFunc("jsf_" + dIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var db = df.NewBlock("entry")
+        var dv = []
+        for (var i = 0; i < keys.length; i++) { dv.push(callExt(db, "js_scope_get", [df.Params[0], emitStr(db, keys[i])])) }
+        db.NewRet(callExt(db, "js_phscall", [dv[0], dv[1], dv[2], phListOf(db, df.Params[1]), dv[3]]))
+        funcCount++
+        fakeFacIdx = funcCount
+        var ff = m.NewFunc("jsf_" + fakeFacIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var fb = ff.NewBlock("entry")
+        var holder = callExt(fb, "js_scope_new", [ff.Params[0]])
+        for (var k = 0; k < keys.length; k++) {
+            callExt(fb, "js_scope_decl", [holder, emitStr(fb, keys[k]), callExt(fb, "js_arg", [ff.Params[1], handle(k)])])
+        }
+        var clo = callExt(fb, "js_closure", [handle(dIdx), holder])
+        var rec = callExt(fb, "js_phfakerec", [callExt(fb, "js_arg", [ff.Params[1], handle(4)]),
+                                               callExt(fb, "js_arg", [ff.Params[1], handle(2)])])
+        fb.NewRet(callExt(fb, "js_jsfnmeta", [clo, rec, callExt(fb, "js_get", [rec, emitStr(fb, "mk")])]))
+        return fakeFacIdx
     }
     // js_phscall wants its arguments as a PHP array; a call frame hands them over as
     // the runtime's plain list, so copy them across.
@@ -6060,7 +6106,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var objB = f.NewBlock("obj")
         var clsB = f.NewBlock("cls")
         arrB.NewCondBr(emitIsObj(arrB, recvV), objB, clsB)
-        objB.NewRet(boundDyn(objB, env, "mcall", recvV, mnA, hUndef, hUndef))
+        objB.NewRet(boundDyn(objB, env, "mcall", recvV, mnA, hUndef, hUndef, true))
         var cnA = callExt(clsB, "js_phstr", [recvV])
         var clsA = clsB.NewCall(classNamedFn(), [env, cnA, hUndef])
         clsB.NewRet(boundStatic(clsB, env, cnA, clsA, mnA, f.Params[2]))
@@ -6080,7 +6126,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var named = b.NewICmp(llvm.enum.IPredEQ, lsbV, hUndef)
         var fwdThis = b.NewSelect(named, nsThis, thisV)
         var fwdLsb = b.NewSelect(named, b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, nsThis, hUndef), hUndef, hTrue), lsbV)
-        return boundDyn(b, env, "scall", clsV, mnV, fwdThis, fwdLsb)
+        return boundDyn(b, env, "scall", clsV, mnV, fwdThis, fwdLsb, false)
     }
     // A callback handed to an internal function is checked where it is handed over:
     // anything that is not a valid callback is a TypeError worded as
@@ -6167,9 +6213,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     }
     // The closure a method callable becomes: one shared emitted body per dispatch kind,
     // reading its receiver (an object, or a class for a static call) and the method
-    // name from the scope it closes over.
+    // name from the scope it closes over. fake says it is a closure PHP makes from
+    // the callable, one Closure::bind can rebind (bindMethodSig).
     var boundDynIdx = {}
-    function boundDyn(b, env, ext, recvV, nameV, thisV, lsbV) {
+    function boundDyn(b, env, ext, recvV, nameV, thisV, lsbV, fake) {
         if (boundDynIdx[ext] == undefined) {
             funcCount++
             var idx = funcCount
@@ -6204,7 +6251,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             callExt(b, "js_scope_decl", [holder, emitStr(b, "\x00dcthis"), thisV])
             callExt(b, "js_scope_decl", [holder, emitStr(b, "\x00dclsb"), lsbV])
         }
-        return bindMethodSig(b, callExt(b, "js_closure", [handle(boundDynIdx[ext]), holder]), recvV, nameV)
+        return bindMethodSig(b, callExt(b, "js_closure", [handle(boundDynIdx[ext]), holder]), recvV, nameV,
+                             fake ? (ext == "scall" ? thisV : hUndef) : undefined, holder)
     }
 
     // ----- calls, defs, classes -----

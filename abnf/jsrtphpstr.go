@@ -541,7 +541,7 @@ func init() {
 			if o, ok := u(a[0]).(*jsObject); ok && phpIsObj(o) {
 				return rt.wrapNum(float64(rt.phpDumpID(o)))
 			}
-			if rec := jsvFnMeta(u(a[0])).rec; rec != nil {
+			if rec := phpLitRec(u(a[0])); rec != nil {
 				return rt.wrapNum(rec.props["i"].(float64))
 			}
 			return rt.wrapNum(0)

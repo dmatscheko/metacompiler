@@ -3366,6 +3366,64 @@ function s67() {
     check("fcc1", ($o->$m(...))(7) === "call:sp:7" && (S67M::$m(...))(8) === "cs:sp:8" && (S67B::$w(...))() === "S67B");
 }
 
+// ===== SECTION 68: rebinding closures made from callables, and closures using $this =====
+// A closure made from a callable ($o->m(...), C::m(...), f(...),
+// Closure::fromCallable) keeps the method's class as its scope: bindTo / call give
+// it an instance of that class unless the method is static, none unless it is,
+// and no other scope; one made from a function takes no scope at all. A closure
+// whose own body uses $this (isset($this) included, a nested function's use not)
+// cannot lose the $this it has. A refused binding answers null with a warning
+// (zend_valid_closure_binding); the new closure runs the same method, called in
+// the new $this's class, or in the method's class for a static one
+// (do_closure_bind). A __call or __callStatic standing in for a method rebinds
+// like one (Zend/tests/closures/closure_call_bind.phpt).
+class S68P {
+    public $v = 1;
+    function m() { return "P::m" . $this->v . static::class; }
+    function inc(&$x) { $x += $this->v; }
+    static function sm() { return "sm" . static::class; }
+    function arrowUse() { return fn() => $this->v; }
+    function nested() { return function() { return fn() => 2; }; }
+    function nestedThis() { return function() { return function() { return $this; }; }; }
+    function viaIsset() { return function() { return isset($this); }; }
+    function plainUse() { return function() { return 5; }; }
+    static function __callStatic($n, $a) { return "cs:" . $n . ":" . static::class; }
+}
+class S68Q extends S68P { public $v = 2; function m() { return "Q::m"; } }
+class S68R { public $v = 9; }
+class S68F { function __call($n, $a) { return "call:" . $n . ":" . get_class($this); } }
+class S68G extends S68F {}
+function s68plain() { return "plain"; }
+function s68() {
+    $p = new S68P;
+    $fm = $p->m(...);
+    check("fkb1", $fm->call(new S68P) === "P::m1S68P" && $fm->call(new S68Q) === null
+        && $fm->bindTo(new S68Q)() === "P::m2S68Q" && $fm->bindTo(new S68Q)->bindTo(new S68P)() === "P::m1S68P"
+        && $fm->bindTo(null) === null && $fm->bindTo(new S68R) === null && $fm->bindTo(new S68P, 'S68R') === null
+        && Closure::fromCallable([$p, 'm'])->bindTo(new S68Q)() === "P::m2S68Q");
+    $i = $p->inc(...);
+    $n = 5;
+    $i($n);
+    $i->bindTo(new S68Q)($n);
+    $sq = S68Q::sm(...);
+    check("fkb2", $n === 8 && $sq() === "smS68Q" && $sq->bindTo(null)() === "smS68P"
+        && $sq->bindTo(null, 'S68P')() === "smS68P" && $sq->bindTo(new S68P) === null && $sq->bindTo(null, 'S68Q') === null);
+    $cs = S68P::nope(...);
+    $pl = s68plain(...);
+    $up = Closure::fromCallable('strtoupper');
+    check("fkb3", $cs() === "cs:nope:S68P" && $cs->bindTo(new S68P) === null && $cs->bindTo(null)() === "cs:nope:S68P"
+        && $pl->bindTo(new S68P)() === "plain" && $pl->call(new S68P) === null && $pl->bindTo(null, 'S68P') === null
+        && $up->bindTo(null)("x") === "X" && $up->bindTo(null, 'S68P') === null);
+    $f = new S68F;
+    $nm = "foo";
+    check("fkb4", Closure::fromCallable([$f, $nm . "bar"])->bindTo(new S68G)() === "call:foobar:S68G"
+        && $f->{$nm . "bar"}(...)->bindTo(new S68F)() === "call:foobar:S68F");
+    check("ubt1", $p->arrowUse()->bindTo(null) === null && Closure::bind($p->arrowUse(), null) === null
+        && $p->viaIsset()->bindTo(null) === null && $p->nested()->bindTo(null)()() === 2
+        && $p->nestedThis()->bindTo(null) !== null && $p->plainUse()->bindTo(null)() === 5
+        && $p->arrowUse()->bindTo(new S68Q)() === 2);
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -3442,6 +3500,7 @@ function main() {
     s65(); // SECTION-CALL 65
     s66(); // SECTION-CALL 66
     s67(); // SECTION-CALL 67
+    s68(); // SECTION-CALL 68
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

@@ -3818,18 +3818,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                     m = null
                 }
             }
-            if (args.fcc === true && m != null) {
-                var fm = m
-                return function(a2) { return fm(target, a2) }
-            }
+            if (args.fcc === true && m != null) { return fakeMethod(m, target.__class, phsCase(name, false), target, target.__class) }
             if (m != null) { return m(target, args) }
             // A closure stored in a property is callable through ->name() only via
             // __call in real PHP; the magic method is the documented door.
             var mc = classFind(target.__class, "__call")
-            if (mc != null && args.fcc === true) {
-                var fmc = mc
-                return function(a3) { return fmc(target, argsOf([name, arrOf(a3.pos)])) }
-            }
+            if (mc != null && args.fcc === true) { return fakeCall(target, name) }
             if (mc != null) { return mc(target, argsOf([name, arrOf(args.pos)])) }
             phpRaise("Error", "Call to undefined method " + target.__class.__name + "::" + name + "()")
         }
@@ -4370,23 +4364,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var ft = anytype
         ft = m == null ? phpCallFallback(cls, bound != undefined ? bound.self : frameThis()) : null
         if (argset.fcc === true) {
-            if (ft != null) {
-                var fmc = classFind(ft.__class, "__call")
-                var fft = ft
-                var fnm = name
-                return function(a4) { return fmc(fft, argsOf([fnm, arrOf(a4.pos)])) }
-            }
+            if (ft != null) { return fakeCall(ft, name) }
             if (m == null) {
-                var fcs = classFind(cls, "__callstatic")
-                if (fcs == null) { phpRaise("Error", "Call to undefined method " + cls.__name + "::" + name + "()") }
-                var fbind = bind
-                var fname = name
-                return function(a3) { pendingStatic = fbind; return fcs(null, argsOf([fname, arrOf(a3.pos)])) }
+                if (classFind(cls, "__callstatic") == null) { phpRaise("Error", "Call to undefined method " + cls.__name + "::" + name + "()") }
+                return fakeCallStatic(cls, name, bind)
             }
-            var mm = m
-            var bs = bind
-            var fself = self
-            return function(a2) { pendingStatic = bs; return mm(fself, a2) }
+            return fakeMethod(m, cls, phsCase(name, false), self, bind)
         }
         if (m != null) {
             pendingStatic = bind
@@ -4559,6 +4542,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 cb = evalArgs(fa).pos[0]
                 var fc = anytype
                 fc = phpCheckCallback(cb, "Failed to create closure from callable:", true)
+                // [$obj, 'm'] is the closure $obj->m(...) makes.
+                if (isArr(fc) && fc.keys.length == 2 && isObj(arrGet(fc, 0))) {
+                    return mcall(arrGet(fc, 0), phpStr(arrGet(fc, 1)), {pos: [], named: null, nkeys: [], tgts: [], fcc: true, holes: []})
+                }
                 return asCallable(cbResolve(fc))
             }
         }
@@ -4620,11 +4607,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // property on a closure, so the closure ANSWERS its record when called with
     // cloProbe, and fnMeta's name marks the closures that do (cloRecOf).
     // The record also keeps what cloBind rebuilds the closure from: its
-    // parameters, body, captured chain and generator flag, and st for a static one.
+    // parameters, body, captured chain and generator flag, st for a static one and
+    // ut for one whose body uses $this.
     var cloProbe = {probe: true}
-    function closureBody(params, body, captured, env, isGen, desc, self, st) {
+    function closureBody(params, body, captured, env, isGen, desc, self, st, ut) {
         objHandles = objHandles + 1
-        var rec = {d: desc, i: objHandles, e: env, t: self, p: params, b: body, c: captured, g: isGen, st: st}
+        var rec = {d: desc, i: objHandles, e: env, t: self, p: params, b: body, c: captured, g: isGen, st: st, ut: ut}
         return fnMetaSet(function(argset) {
             if (argset === cloProbe) { return rec }
             if (isGen === true) { return newGen(runClosureRun(params, body, captured, env, argset)) }
@@ -4751,7 +4739,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             var env = {}
             for (var i = 0; i < byval.length; i++) { scopePut(env, byval[i], phpCopy(getVar(byval[i]))) }
             for (var j = 0; j < byref.length; j++) { scopePut(env, byref[j], varCell(byref[j])) }
-            return closureBody(params, body, captured, env, isGen, desc, cloThis(self), sc.st)
+            return closureBody(params, body, captured, env, isGen, desc, cloThis(self), sc.st, sc.ut === true)
         }
     }
     // The scope chain a closure made here captures. A static closure written where
@@ -4771,13 +4759,22 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     // Closure::bind / bindTo / call: the same closure with its $this and class
     // scope replaced, both read through one overlay scope over what it captured
-    // (zend_create_closure_ex); keep leaves the class scope as it is. No instance
-    // binds to a static closure: PHP warns (not modelled) and answers null.
-    // Twin of js_phclobind in abnf/jsrtphp.go and lib/php-rt.metajs.
+    // (zend_create_closure_ex); keep leaves the class scope as it is. A binding
+    // zend_valid_closure_binding refuses answers null (PHP also warns, which is not
+    // modelled): an instance for a static closure, none for a closure using $this
+    // that has one, and for a closure made from a callable (fakeBind) or a
+    // function, which has no class scope, any other scope. Twin of phCloBind in
+    // lib/php-rt.metajs and phpCloBind in abnf/jsrtphp.go.
     function cloBind(f, nthis, scope, keep) {
         var r = cloRecOf(f)
-        if (r == null) { fail("binding a Closure that is not a closure literal is not modelled") }
+        if (r == null) {
+            var fr = fakeRecOf(f)
+            if (fr != null) { return fakeBind(fr, nthis, scope, keep) }
+            if (keep || scope == null) { return f }
+            return null
+        }
         if (r.st === true && isObj(nthis)) { return null }
+        if (!isObj(nthis) && isObj(r.t) && r.ut === true) { return null }
         var sc = anytype
         sc = scope
         if (keep) {
@@ -4793,6 +4790,59 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var ch = r.c.slice(0)
         ch.push(ov)
         return closureBody(r.p, r.b, ch, r.e, r.g, r.d, isObj(nthis) ? nthis : null, r.st)
+    }
+    // A closure made from a callable (zend_create_fake_closure): a method, or the
+    // __call / __callStatic that stands in for one. call(t, cs, argset) runs it
+    // with the $this t and the called scope cs; sc is the class of the method it
+    // was made from and st marks a static one. It answers its record when called
+    // with cloProbe, as a literal does. Twin of js_phfake in lib/php-rt.metajs and
+    // abnf/jsrtphp.go.
+    function fakeClosure(call, sc, st, t, cs) {
+        var rec = {call: call, sc: sc, st: st, t: t, cs: cs}
+        return fnMetaSet(function(argset) {
+            if (argset === cloProbe) { return rec }
+            return call(t, cs, argset)
+        }, "fake", 0)
+    }
+    function fakeRecOf(v) {
+        if (typeof v != "function" || fnMeta(v, "name") != "fake") { return null }
+        return v(cloProbe)
+    }
+    // The method m that cls answers for lc, as a closure bound to t and called in cs.
+    function fakeMethod(m, cls, lc, t, cs) {
+        var d = phpMethodDecl(cls, lc)
+        var st = phpNonStatic(cls, lc) == ""
+        var fm = m
+        return fakeClosure(function(ft, fcs, a) { pendingStatic = fcs; return fm(ft, a) },
+                           d == null ? cls : d.k, st, st ? null : t, cs)
+    }
+    // t's __call standing in for the method name.
+    function fakeCall(t, name) {
+        var d = phpMethodDecl(t.__class, "__call")
+        return fakeClosure(function(ft, fcs, a) { return classFind(ft.__class, "__call")(ft, argsOf([name, arrOf(a.pos)])) },
+                           d.k, false, t, t.__class)
+    }
+    // cls's __callStatic standing in for the method name, called in bind.
+    function fakeCallStatic(cls, name, bind) {
+        var d = phpMethodDecl(cls, "__callstatic")
+        var fcs = classFind(cls, "__callstatic")
+        return fakeClosure(function(ft, c2, a) { pendingStatic = c2; return fcs(null, argsOf([name, arrOf(a.pos)])) },
+                           d.k, true, null, bind)
+    }
+    // A closure made from a callable keeps its method's class as its scope: it
+    // binds an instance of that class unless the method is static, none unless it
+    // is, and no other scope (zend_valid_closure_binding).
+    function fakeBind(fr, nthis, scope, keep) {
+        var ce = anytype
+        ce = keep ? fr.sc : scope
+        if (isObj(nthis)) {
+            if (fr.st === true) { return null }
+            if (!classIs(nthis.__class, fr.sc.__name)) { return null }
+        } else if (fr.st !== true) { return null }
+        if (ce !== fr.sc) { return null }
+        var nt = anytype
+        nt = isObj(nthis) ? nthis : null
+        return fakeClosure(fr.call, fr.sc, fr.st, nt, nt != null ? nt.__class : ce)
     }
     // bindTo's $newScope: an object's class, a class name, null for none, and
     // "static" (the default) for the closure's own. A name no class has binds
@@ -4855,13 +4905,19 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             for (var j = 0; j < captured.length; j++) {
                 scopePut(env, captured[j], phpCopy(deref(rawSlot(captured[j]))))
             }
-            return closureBody(params, body, cloChain(sc), env, false, desc, cloThis(self), sc.st)
+            return closureBody(params, body, cloChain(sc), env, false, desc, cloThis(self), sc.st, sc.ut === true)
         }
     }
     // The variable names the source mentions, in parse order, and the mark an arrow
     // function's 'fn' keyword takes of it. Same mechanism as php-to-llvm-ir.abnf.
     var varLog = []
-    function noteVarName(n) { varLog.push(n); return n }
+    // A $this written in a function's own body marks it (ZEND_ACC_USES_THIS), which
+    // keeps a closure from being unbound (cloBind).
+    function noteVarName(n) {
+        varLog.push(n)
+        if (n == "$this" && cloScopes.length > 0) { cloScopes[cloScopes.length - 1].ut = true }
+        return n
+    }
     function varMark() { return varLog.length }
     // The distinct names logged since mark, minus exclude, in order of first
     // appearance. One pass with a seen-set: a bare $GLOBALS walks the WHOLE log, so a

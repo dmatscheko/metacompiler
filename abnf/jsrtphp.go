@@ -1143,16 +1143,31 @@ func (rt *jsrt) phpCloCall(f interface{}, name string, args []interface{}) inter
 // phpCloBind is f with its $this and class scope replaced (zend_create_closure_ex),
 // made by the factory a closure literal's record keeps (cloFactory in
 // php-to-llvm-ir.abnf), which also resolves a class NAME. keep leaves the class
-// scope the record holds. No instance binds to a static closure: PHP warns (not
-// modelled) and answers null. Twin of phCloBind in languages/lib/php-rt.metajs
-// and cloBind in php-interpreter.abnf.
+// scope the record holds. A binding zend_valid_closure_binding refuses answers
+// null (PHP also warns, which is not modelled): an instance for a static closure,
+// none for a closure using $this that has one, and for a closure made from a
+// callable (phpFakeBind) or a function any other scope. Twin of phCloBind in
+// languages/lib/php-rt.metajs and cloBind in php-interpreter.abnf.
 func (rt *jsrt) phpCloBind(f, nthis, scope interface{}, keep bool) interface{} {
-	rec := jsvFnMeta(f).rec
-	if rec == nil || rec.props["f"] == nil {
+	rec := phpLitRec(f)
+	if rec == nil {
+		if fr := phpFakeRec(f); fr != nil {
+			return rt.phpFakeBind(f, fr, nthis, scope, keep)
+		}
+		// A function's closure has no class scope, so it takes none other.
+		if keep || isNullish(scope) {
+			return f
+		}
+		return jsNull
+	}
+	if rec.props["f"] == nil {
 		rt.fail("binding a Closure that is not a closure literal is not modelled")
 	}
 	if !phpIsObj(nthis) {
 		nthis = jsNull
+		if rec.props["ut"] == true && phpIsObj(rec.props["t"]) {
+			return jsNull
+		}
 	} else if rec.props["st"] == true {
 		return jsNull
 	}
@@ -1160,6 +1175,59 @@ func (rt *jsrt) phpCloBind(f, nthis, scope interface{}, keep bool) interface{} {
 		scope = rec.props["sc"]
 	}
 	return rt.call(rec.props["f"], jsUndef, []interface{}{nthis, scope})
+}
+
+// phpLitRec is a closure literal's record (js_phclo), phpFakeRec that of a closure
+// made from a callable (js_phfake); nil for anything else.
+func phpLitRec(v interface{}) *jsObject {
+	if rec := jsvFnMeta(v).rec; rec != nil && rec.props["fk"] != true {
+		return rec
+	}
+	return nil
+}
+
+func phpFakeRec(v interface{}) *jsObject {
+	if rec := jsvFnMeta(v).rec; rec != nil && rec.props["fk"] == true {
+		return rec
+	}
+	return nil
+}
+
+// phpFakeBind: a closure made from a callable keeps its method's class as its
+// scope: it binds an instance of that class unless the method is static, none
+// unless it is, and no other scope (zend_valid_closure_binding). The record's
+// factory makes the new closure, which runs the same method (js_phscall through
+// its class) with the new $this. Twin of phFakeBind in
+// languages/lib/php-rt.metajs and fakeBind in php-interpreter.abnf.
+func (rt *jsrt) phpFakeBind(f interface{}, fr *jsObject, nthis, scope interface{}, keep bool) interface{} {
+	sc, _ := fr.props["sc"].(*jsObject)
+	st := fr.props["st"] == true
+	if phpIsObj(nthis) {
+		if st || !rt.phpIsA(nthis, rt.phpStr(sc.props["__name"])) {
+			return jsNull
+		}
+	} else if !st {
+		return jsNull
+	}
+	if !keep && !rt.phpSameClass(scope, sc) {
+		return jsNull
+	}
+	var nt interface{} = jsUndef
+	var lsb interface{} = sc
+	if phpIsObj(nthis) {
+		nt = nthis
+		lsb = nthis.(*jsObject).props["__class"]
+	}
+	return rt.call(fr.props["f"], jsUndef, []interface{}{sc, fr.props["n"], nt, lsb, f})
+}
+
+// phpSameClass: whether a bind scope - a class, a class name, or null - is sc.
+func (rt *jsrt) phpSameClass(scope interface{}, sc *jsObject) bool {
+	if s, ok := scope.(string); ok {
+		return phpCase(strings.TrimPrefix(s, "\\"), false) == phpCase(rt.phpStr(sc.props["__name"]), false)
+	}
+	o, ok := scope.(*jsObject)
+	return ok && o == sc
 }
 
 // ----- comparison ------------------------------------------------------------
@@ -2355,7 +2423,7 @@ func (rt *jsrt) phpDump(v interface{}, ind int) string {
 		}
 		return out + pad + "}\n"
 	}
-	if phpIsObj(v) || jsvFnMeta(v).rec != nil {
+	if phpIsObj(v) || phpLitRec(v) != nil {
 		for _, d := range phpDumping[rt] {
 			if d == v {
 				return pad + "*RECURSION*\n"
@@ -2413,7 +2481,7 @@ func (rt *jsrt) phpDumpObj(v interface{}, ind int, pad string) string {
 		}
 		return out + pad + "}\n"
 	}
-	rec := jsvFnMeta(v).rec
+	rec := phpLitRec(v)
 	d := rt.phpStr(rec.props["d"])
 	env, _ := rec.props["e"].(*jsScope)
 	var sd []string
@@ -3699,6 +3767,71 @@ func init() {
 		// target (an object, or a class for a static method): a closure that
 		// dispatches to a method places its arguments as the method would. Twin of
 		// js_phbindsig in languages/lib/php-rt.metajs.
+		// (recv, name, this, factory) -> the record of the closure PHP makes from a
+		// callable (zend_create_fake_closure): the method name that recv (an
+		// object, or a class) answers, or the __call / __callStatic standing in
+		// for it. It keeps the method's signature and by-reference mask (mk), the
+		// method's class sc, whether it is static, the $this it is bound to -
+		// recv's, or this for a static dispatch of a non-static method - and the
+		// emitted factory phpFakeBind makes a rebound one with. Twin of js_phfake
+		// in languages/lib/php-rt.metajs and fakeClosure in php-interpreter.abnf.
+		m["js_phfake"] = func(a []uint64) uint64 {
+			recv := u(a[0])
+			cls, _ := recv.(*jsObject)
+			if phpIsObj(recv) {
+				cls, _ = cls.props["__class"].(*jsObject)
+			}
+			nm := rt.phpStr(u(a[1]))
+			lc := phpCase(nm, false)
+			meth := rt.phpMethodOf(recv, nm)
+			k, _ := rt.phpMethodDecl(cls, lc)
+			st := false
+			if k == nil {
+				st = !phpIsObj(recv) || phpOwner(cls, "__call") == nil
+				magic := "__call"
+				if st {
+					magic = "__callstatic"
+				}
+				k, _ = rt.phpMethodDecl(cls, magic)
+			} else {
+				st = phpStaticIn(k, lc)
+			}
+			if k == nil {
+				k = cls
+			}
+			var t interface{} = jsUndef
+			if !st {
+				t = u(a[2])
+				if phpIsObj(recv) {
+					t = recv
+				}
+			}
+			sig := ""
+			if meth != nil {
+				sig = rt.phpSigOf(meth)
+			}
+			rec := newJSObject()
+			rec.set("fk", true)
+			rec.set("s", sig)
+			rec.set("mk", float64(jsvFnMeta(meth).length))
+			rec.set("n", nm)
+			rec.set("sc", k)
+			rec.set("st", st)
+			rec.set("t", t)
+			rec.set("f", u(a[3]))
+			return w(rec)
+		}
+		// (src, this) -> the record of the closure the factory makes from the one
+		// src, bound to this. Twin of js_phfakerec in languages/lib/php-rt.metajs.
+		m["js_phfakerec"] = func(a []uint64) uint64 {
+			src := phpFakeRec(u(a[0]))
+			rec := newJSObject()
+			for _, k := range []string{"fk", "s", "mk", "n", "sc", "st", "f"} {
+				rec.set(k, src.props[k])
+			}
+			rec.set("t", u(a[1]))
+			return w(rec)
+		}
 		m["js_phbindsig"] = func(a []uint64) uint64 {
 			if meth := rt.phpMethodOf(u(a[1]), u(a[2])); meth != nil {
 				jsvFnMetaSet(u(a[0]), rt.phpSigOf(meth), jsvFnMeta(meth).length)
