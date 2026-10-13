@@ -76,7 +76,7 @@ its report; anything structural there is a CORE ticket.
 
 # JS — JavaScript and TypeScript
 
-### T-597 js: arguments length and mapping; `Object.hasOwn`; `"__#"` user keys · P2 · JS · OPEN [V]
+### T-597 js: arguments length and mapping; `Object.hasOwn`; `"__#"` user keys · P2 · JS · IN PROGRESS (JS worker, round 5) [V]
 `function f(){ arguments[0]=9; return arguments.length }; f()` → 1 (node 0): the value model keeps no length apart from the
 array storage and has no non-enumerable own `length` (needs a length field beside the array cell in the C floor, twin and
 MetaJS, or non-enumerable own properties). Sloppy mapped arguments: `function g(p){ p=5; return arguments[0] }; g(1)` → 1
