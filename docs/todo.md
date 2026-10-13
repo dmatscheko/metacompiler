@@ -138,7 +138,7 @@ element as an expression pattern) does not parse in either half (range bounds do
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-602 php: spread into a by-ref parameter; lazy copy holder counts; Closure statics by name; caller context in library callbacks · P2 · PHP · OPEN [V spec-only]
+### T-602 php: spread into a by-ref parameter; lazy copy holder counts; Closure statics by name; caller context in library callbacks · P2 · PHP · IN PROGRESS (PHP worker, round 4) [V spec-only]
 `$a=[1]; inc(...$a); echo $a[0];` with `function inc(&$x)` → all legs 1 (PHP 2: ZEND_SEND_UNPACK makes the element a reference;
 needs the callee's mask at merge time, a js_phmerge variant). Copies are eager, so reference holder counts are read at assignment
 instead of at the copy's first write: `$x=1;$a=[&$x];$b=$a;unset($x);$b[0]=5;echo $a[0];` → 5 (PHP 1); a literal's temporary
