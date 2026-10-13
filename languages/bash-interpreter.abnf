@@ -269,8 +269,10 @@ DeclName    <~~ push({dname: up.in}) ~~> = Name ;
 // (name= is valid) and starts immediately after = with no space.
 // It may carry redirections (`r=$(cmd) 2>/dev/null`): bash performs them after the
 // assignment, so they do not apply to a command substitution on the right hand side.
-Assignment  <~~ push(makeAssign(takeAll())) ~~>
-            = AsgIdent <~~ push({aname: up.in}) ~~> AsgTail [ RedirList ] ;
+// Several may share one command (`a=1 b=$a`): they run left to right, each seeing the last.
+Assignment  <~~ push(makeAssign(takeAll())) ~~> = AsgOne { AsgOne } [ RedirList ] ;
+AsgOne      <~~ push({a: parseAssign(takeAll())}) ~~>
+            = AsgIdent <~~ push({aname: up.in}) ~~> AsgTail ;
 
 // The right hand side of an assignment: a word, or a parenthesised array literal. `+=`
 // appends (a string for a scalar, elements for an array).
@@ -646,7 +648,7 @@ ArNot       <~~ push(mkUn("!", pop())) ~~> = "!" NotEq ArUnary ;
 ArBnot      <~~ push(mkUn("~", pop())) ~~> = "~" ArUnary ;
 
 // A $-prefixed operand (Bash expands it before evaluating): $name, $1..$9, $# and $?.
-ArPrimary   = ArGroup | ArBaseDyn | ArNum | ArPostInc | ArCmdSub | ArDollarDigit | ArDollarHash | ArDollarQ | ArDollarVar | ArDollarBrace | ArElem | ArVar ;
+ArPrimary   = ArGroup | ArBaseDyn | ArNum | ArPostInc | ArArithSub | ArCmdSub | ArDollarDigit | ArDollarHash | ArDollarQ | ArDollarVar | ArDollarBrace | ArElem | ArVar ;
 ArGroup     = "(" ArList ")" ;
 ArPostInc   <~~ push(mkIncDec(takeAll())) ~~> = ArLhs ArPostOp ;
 ArPostOp    <~~ push({iop: up.in, pre: 0}) ~~> = "++" | "--" ;
@@ -685,6 +687,8 @@ ArDec       = "0"..."9" :whitespace() { "0"..."9" } ;
 ArVar       <~~ push(mkArVar(up.in)) ~~> = ArName ;
 ArDollarVar = "$" ArName <~~ push(mkArVar(up.in)) ~~> ;
 ArDollarBrace <~~ push(mkArOfStr(pop())) ~~> = DollarBrace :whitespace(Whitespace) ;
+// A nested $(( )) is arithmetic, not a $( ( ) ) command substitution, so it is tried first.
+ArArithSub  <~~ push(mkArOfStr(pop())) ~~> = ArithExp :whitespace(Whitespace) ;
 ArDollarDigit = "$" ArgDigit <~~ push(mkArVar(up.in)) ~~> :whitespace(Whitespace) ;
 ArDollarHash <~~ push(mkArVar("#")) ~~> = "$#" :whitespace(Whitespace) ;
 ArDollarQ   <~~ push(mkArVar("?")) ~~> = "$?" :whitespace(Whitespace) ;
@@ -4043,26 +4047,28 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             arrSet(name, plain[i], (i + 1 < plain.length) ? plain[i + 1] : "")
         }
     }
+    // items: one {a} per assignment, then the redirection records. The status is that of
+    // the last command substitution any of them ran, else 0. Twin of makeAssign in
+    // bash-to-llvm-ir.abnf.
     function makeAssign(items) {
-        var a = parseAssign(items)
-        var redirs = asgRedirs(items)
+        var as = []
+        var redirs = []
+        var i
+        for (i = 0; i < items.length; i++) {
+            if (items[i].a != undefined) { as.push(items[i].a) } else { redirs.push(items[i]) }
+        }
         return function() {
             cmdSubRan = false
-            runAssign(a, false)
-            var ab = takeAbort()
-            if (ab != null) { return ab }
+            var k
+            for (k = 0; k < as.length; k++) {
+                runAssign(as[k], false)
+                var ab = takeAbort()
+                if (ab != null) { return ab }
+            }
             if (!cmdSubRan) { setStatus(0) }
             if (redirs.length > 0) { closeRedirs(openRedirs(redirs)) }
             return lastStatus
         }
-    }
-    // The redirection records among an assignment's items. Twin of asgRedirs in
-    // bash-to-llvm-ir.abnf.
-    function asgRedirs(items) {
-        var out = []
-        var i
-        for (i = 1; i < items.length; i++) { if (typeof items[i] != "function" && items[i].rd != undefined) { out.push(items[i]) } }
-        return out
     }
     // An error an expansion raised, taken before the command runs. set -u and ${v:?} end the
     // (sub)shell; an arithmetic or substring error ({soft}) abandons the command line - a

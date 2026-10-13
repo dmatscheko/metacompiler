@@ -260,8 +260,10 @@ DeclName    <~~ push({dname: up.in}) ~~> = Name ;
 // (name= is valid) and starts immediately after = with no space.
 // It may carry redirections (`r=$(cmd) 2>/dev/null`): bash performs them after the
 // assignment, so they do not apply to a command substitution on the right hand side.
-Assignment  <~~ push(makeAssign(takeAll())) ~~>
-            = AsgIdent <~~ push({aname: up.in}) ~~> AsgTail [ RedirList ] ;
+// Several may share one command (`a=1 b=$a`): they run left to right, each seeing the last.
+Assignment  <~~ push(makeAssign(takeAll())) ~~> = AsgOne { AsgOne } [ RedirList ] ;
+AsgOne      <~~ push({a: parseAssign(takeAll())}) ~~>
+            = AsgIdent <~~ push({aname: up.in}) ~~> AsgTail ;
 
 // The right hand side of an assignment: a word, or a parenthesised array literal. `+=`
 // appends (a string for a scalar, elements for an array).
@@ -591,7 +593,7 @@ ArNot       <~~ push(mkUn("!", pop())) ~~> = "!" NotEq ArUnary ;
 ArBnot      <~~ push(mkUn("~", pop())) ~~> = "~" ArUnary ;
 
 // A $-prefixed operand (Bash expands it before evaluating): $name, $1..$9, $# and $?.
-ArPrimary   = ArGroup | ArBaseDyn | ArNum | ArPostInc | ArCmdSub | ArDollarDigit | ArDollarHash | ArDollarQ | ArDollarVar | ArDollarBrace | ArElem | ArVar ;
+ArPrimary   = ArGroup | ArBaseDyn | ArNum | ArPostInc | ArArithSub | ArCmdSub | ArDollarDigit | ArDollarHash | ArDollarQ | ArDollarVar | ArDollarBrace | ArElem | ArVar ;
 ArGroup     = "(" ArList ")" ;
 ArPostInc   <~~ push(mkIncDec(takeAll())) ~~> = ArLhs ArPostOp ;
 ArPostOp    <~~ push({iop: up.in, pre: 0}) ~~> = "++" | "--" ;
@@ -617,6 +619,8 @@ ArDec       = "0"..."9" :whitespace() { "0"..."9" } ;
 ArVar       <~~ push(mkArVar(up.in)) ~~> = ArName ;
 ArDollarVar = "$" ArName <~~ push(mkArVar(up.in)) ~~> ;
 ArDollarBrace <~~ push(mkArOfStr(pop())) ~~> = DollarBrace :whitespace(Whitespace) ;
+// A nested $(( )) is arithmetic, not a $( ( ) ) command substitution, so it is tried first.
+ArArithSub  <~~ push(mkArOfStr(pop())) ~~> = ArithExp :whitespace(Whitespace) ;
 ArDollarDigit = "$" ArgDigit <~~ push(mkArVar(up.in)) ~~> :whitespace(Whitespace) ;
 ArDollarHash <~~ push(mkArVar("#")) ~~> = "$#" :whitespace(Whitespace) ;
 ArDollarQ   <~~ push(mkArVar("?")) ~~> = "$?" :whitespace(Whitespace) ;
@@ -1312,6 +1316,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var curF = null       // the IR function currently being emitted into
     var curEntry = null   // ...and its entry block, where every alloca goes (slotOf)
     var curExit = null     // its exit block (an `exit N` / propagated exit branches here)
+    var curExitRd = 0      // redirStack.length where curExit was set
+    // The redirections open around the code being emitted (emitOpenRedirs records), innermost
+    // last. A branch that leaves some of them - exit, an expansion error, return, break - has to
+    // close them on its way out (unwindRedirs), or the stream stays redirected afterwards.
+    var redirStack = []
     var curFrame = null    // null at top level, else {params: [9 i8* values], argc: i32 value}
     var condDepth = 0      // >0 while emitting a CONDITION (set -e must not fire there)
     var loopStack = []     // {brk, cont} target blocks of the loops being emitted
@@ -1599,11 +1608,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function mkCmdSub(bodyT) {
         return {s: true, c: undefined, fn: function(b) {
             b.NewCall(rtCapBegin, zero)
-            var savedExit = curExit
+            var savedExit = curExit, savedExitRd = curExitRd
             var savedTraps = trapList
             trapList = []
             var subEnd = curF.NewBlock("")
             curExit = subEnd
+            curExitRd = redirStack.length
             b.NewCall(rtSsSave, zero)
             var optSave = saveOpts(b)
             var undoBase = attrUndo.length
@@ -1616,6 +1626,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             attrUnwind(undoBase)
             eb.NewBr(subEnd)
             curExit = savedExit
+            curExitRd = savedExitRd
             var myTraps = trapList
             trapList = savedTraps
             subEnd = emitTraps(subEnd, myTraps)
@@ -2782,28 +2793,32 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         strB2.NewBr(mg2)
         return mg2
     }
+    // items: one {a} per assignment, then the redirection records. Twin of makeAssign in
+    // bash-interpreter.abnf.
     function makeAssign(items) {
-        var a = parseAssign(items)
-        var redirs = asgRedirs(items)
+        var as = []
+        var redirs = []
+        var subs = false
+        var i
+        for (i = 0; i < items.length; i++) {
+            if (items[i].a != undefined) {
+                as.push(items[i].a)
+                if (items[i].a.valT != null && items[i].a.valT.s == true) { subs = true }
+            } else { redirs.push(items[i]) }
+        }
         return function(b) {
-            b = emitAssign(b, a, false)
-            if (a.valT == null || a.valT.s != true) { storeStatusI(b, 0) }
+            var k
+            for (k = 0; k < as.length; k++) { b = emitAssign(b, as[k], false) }
+            if (!subs) { storeStatusI(b, 0) }
             if (redirs.length > 0) { var sv = emitOpenRedirs(b, redirs); b = sv.b; emitCloseRedirs(b, sv) }
             return b
         }
-    }
-    // The redirection records among an assignment's items. Twin of asgRedirs in
-    // bash-interpreter.abnf.
-    function asgRedirs(items) {
-        var out = []
-        var i
-        for (i = 1; i < items.length; i++) { if (items[i].rd != undefined) { out.push(items[i]) } }
-        return out
     }
 
     // Every `ret` out of a user function first unwinds the local save stack back to the
     // depth the call recorded on entry, so `local` bindings do not leak to the caller.
     function emitFnRet(b, v) {
+        unwindRedirs(b, 0)
         if (curFrame != null) { b.NewCall(rtPopLocals, b.NewLoad(i32, curFrame.depth)) }
         b.NewRet(v)
     }
@@ -2963,7 +2978,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function emitExitCheck(b) {
         var isEx = b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, gExited), zero)
         var cont = curF.NewBlock("")
-        b.NewCondBr(isEx, curExit, cont)
+        b.NewCondBr(isEx, viaUnwind(curExit, curExitRd), cont)
         return cont
     }
 
@@ -3350,11 +3365,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return function(b) {
             b.NewCall(rtSsSave, zero)
             var optSave = saveOpts(b)
-            var savedExit = curExit
+            var savedExit = curExit, savedExitRd = curExitRd
             var savedTraps = trapList
             trapList = []
             var subEnd = curF.NewBlock("")
             curExit = subEnd
+            curExitRd = redirStack.length
             var undoBase = attrUndo.length
             subDepth = subDepth + 1
             var eb = bodyT(b)
@@ -3362,6 +3378,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             attrUnwind(undoBase)
             eb.NewBr(subEnd)
             curExit = savedExit
+            curExitRd = savedExitRd
             var myTraps = trapList
             trapList = savedTraps
             subEnd = emitTraps(subEnd, myTraps)
@@ -3824,7 +3841,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         kill.NewStore(zero, gArithErr)
         kill.NewStore(one, gExitCode)
         kill.NewStore(kill.NewSelect(isAb, one, llvm.constant.NewInt(i32, 2)), gExited)
-        kill.NewBr(curExit)
+        kill.NewBr(viaUnwind(curExit, curExitRd))
         return cont
     }
     // A command that evaluates arithmetic ITSELF ((( )), let, [[ -eq ]], for (( ))) fails
@@ -3844,7 +3861,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b.NewCondBr(bad, kill, cont)
         kill.NewStore(st, gExitCode)
         kill.NewStore(one, gExited)
-        kill.NewBr(curExit)
+        kill.NewBr(viaUnwind(curExit, curExitRd))
         return cont
     }
     // Emit a thunk as a CONDITION.
@@ -3980,7 +3997,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b.NewCall(rtPrints, gepStr(b, "\n"))
         b.NewStore(llvm.constant.NewInt(i32, 127), gExitCode)
         b.NewStore(one, gExited)
-        b.NewBr(curExit)
+        b.NewBr(viaUnwind(curExit, curExitRd))
         return done
     }
 
@@ -4019,7 +4036,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 else { code = b.NewLoad(i32, gStatus) }
                 b.NewStore(code, gExitCode)
                 b.NewStore(one, gExited)
-                b.NewBr(curExit)
+                b.NewBr(viaUnwind(curExit, curExitRd))
                 return deadBlock()
             }
             if (cmd == "return") {
@@ -4050,10 +4067,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                                                           gepStr(bb, ": loop count out of range\n")]))
                     storeStatusI(bb, 1)
                 }
-                var target = function(k) { var lp = loopStack[depth - k]; return isBrk ? lp.brk : lp.cont }
+                var target = function(k) { var lp = loopStack[depth - k]; return viaUnwind(isBrk ? lp.brk : lp.cont, lp.rd) }
                 if (argTs.length == 0 || argTs[0].c != undefined) {
                     var n = (argTs.length > 0) ? parseDec(argTs[0].c) : 1
-                    if (n < 1) { rangeMsg(b, gepStr(b, argTs[0].c)); storeLoopStatus(b, one); b.NewBr(loopStack[0].brk); return deadBlock() }
+                    if (n < 1) { rangeMsg(b, gepStr(b, argTs[0].c)); storeLoopStatus(b, one); b.NewBr(viaUnwind(loopStack[0].brk, loopStack[0].rd)); return deadBlock() }
                     storeLoopStatus(b, zero)
                     b.NewBr(target((n > depth) ? depth : n))
                     return deadBlock()
@@ -4065,7 +4082,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 b.NewCondBr(b.NewICmp(llvm.enum.IPredSLT, lvl, one), badB, okB)
                 rangeMsg(badB, rl.v)
                 storeLoopStatus(badB, one)
-                badB.NewBr(loopStack[0].brk)
+                badB.NewBr(viaUnwind(loopStack[0].brk, loopStack[0].rd))
                 storeLoopStatus(okB, zero)
                 var k
                 for (k = 1; k < depth; k++) {
@@ -4201,17 +4218,60 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b.NewCall(rtPrints, gepStr(b, c.file + ": command not found: " + cmd + "\n"))
             b.NewStore(llvm.constant.NewInt(i32, 127), gExitCode)
             b.NewStore(one, gExited)
-            b.NewBr(curExit)
+            b.NewBr(viaUnwind(curExit, curExitRd))
             return deadBlock()
         }
         if (redirs.length == 0) { return inner }
         return function(b) {
             var sv = emitOpenRedirs(b, redirs)
             b = sv.b
+            var cmd0 = cmdT, args0 = argTs
+            cmdT = preRedirWord(cmd0, sv)
+            argTs = []
+            var k
+            for (k = 0; k < args0.length; k++) { argTs.push(preRedirWord(args0[k], sv)) }
+            redirStack.push(sv)
             b = inner(b)
+            redirStack.pop()
+            cmdT = cmd0
+            argTs = args0
             emitCloseRedirs(b, sv)
             return b
         }
+    }
+    // bash expands a command's words BEFORE it applies the command's redirections, so what an
+    // expansion writes to stderr (a command substitution's own stderr, an arithmetic error) or
+    // reads from stdin goes to the streams in effect before them: `echo "$(echo hi >&2)"
+    // 2>/dev/null` prints hi. The builtins interleave expansion with their own work, so each
+    // non-literal word runs with the saved streams exchanged back in. Twin of makeSimpleCommand
+    // in bash-interpreter.abnf, which expands every word before openRedirs.
+    function preRedirWord(w, sv) {
+        if (w.c != undefined) { return w }
+        var o = {s: w.s, f: w.f, c: undefined, fn: preRedirFn(w.fn, sv)}
+        if (w.spw != undefined) { o.spw = {s: w.spw.s, f: w.spw.f, c: w.spw.c, fn: preRedirFn(w.spw.fn, sv)} }
+        return o
+    }
+    function preRedirFn(fn, sv) {
+        // While swapped the globals already hold the outer streams, so a branch out of the
+        // expansion must not "close" sv again: it is off redirStack for the duration.
+        return function(b) {
+            swapRedirs(b, sv)
+            var top = redirStack.pop()
+            var r = fn(b)
+            redirStack.push(top)
+            swapRedirs(r.b, sv)
+            return r
+        }
+    }
+    // Exchanges the stream globals with emitOpenRedirs' saved copies.
+    function swapRedirs(b, sv) {
+        var o = b.NewLoad(i32, gSinkOut), e = b.NewLoad(i32, gSinkErr)
+        var ib = null, ip = null
+        if (sv.sb != null) { ib = b.NewLoad(i8ptr, gStdin); ip = b.NewLoad(i32, gStdinPos) }
+        emitCloseRedirs(b, sv)
+        b.NewStore(o, sv.so)
+        b.NewStore(e, sv.se)
+        if (sv.sb != null) { b.NewStore(ib, sv.sb); b.NewStore(ip, sv.sp) }
     }
 
     // `cmd &` : the parser leaves an {amp} marker AFTER the statement it applies to, so a
@@ -4388,21 +4448,31 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return function(b) {
             var sv = emitOpenRedirs(b, redirs)
             b = sv.b
+            redirStack.push(sv)
             b = bodyT(b)
+            redirStack.pop()
             emitCloseRedirs(b, sv)
             return b
         }
     }
 
     // Apply a redirection list by rerouting the two output channels and the stdin buffer.
+    // Saves the streams the list changes and applies it; emitCloseRedirs puts them back. The
+    // stdin buffer and position are saved only under a stdin redirection: without one, what
+    // the command reads stays read (`read x 2>/dev/null; read y` reads two lines).
     function emitOpenRedirs(b, redirs) {
         var so = slotOf(i32), se = slotOf(i32)
-        var sb = slotOf(i8ptr), sp = slotOf(i32)
         b.NewStore(b.NewLoad(i32, gSinkOut), so)
         b.NewStore(b.NewLoad(i32, gSinkErr), se)
-        b.NewStore(b.NewLoad(i8ptr, gStdin), sb)
-        b.NewStore(b.NewLoad(i32, gStdinPos), sp)
+        var sb = null, sp = null
         var i
+        for (i = 0; i < redirs.length; i++) {
+            if (redirs[i].rd == "<<" || redirs[i].rd == "<<<" || redirs[i].rd == "<") { sb = slotOf(i8ptr); sp = slotOf(i32) }
+        }
+        if (sb != null) {
+            b.NewStore(b.NewLoad(i8ptr, gStdin), sb)
+            b.NewStore(b.NewLoad(i32, gStdinPos), sp)
+        }
         for (i = 0; i < redirs.length; i++) {
             var r = redirs[i]
             var tgt = null
@@ -4437,8 +4507,24 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function emitCloseRedirs(b, sv) {
         b.NewStore(b.NewLoad(i32, sv.so), gSinkOut)
         b.NewStore(b.NewLoad(i32, sv.se), gSinkErr)
-        b.NewStore(b.NewLoad(i8ptr, sv.sb), gStdin)
-        b.NewStore(b.NewLoad(i32, sv.sp), gStdinPos)
+        if (sv.sb != null) {
+            b.NewStore(b.NewLoad(i8ptr, sv.sb), gStdin)
+            b.NewStore(b.NewLoad(i32, sv.sp), gStdinPos)
+        }
+    }
+    // Closes every redirection opened above redirStack[base], innermost first.
+    function unwindRedirs(b, base) {
+        var k
+        for (k = redirStack.length - 1; k >= base; k--) { emitCloseRedirs(b, redirStack[k]) }
+    }
+    // The block to branch to for `target` from inside redirStack[base..]: target itself when
+    // nothing is open, else a block that closes those first.
+    function viaUnwind(target, base) {
+        if (redirStack.length <= base) { return target }
+        var u = curF.NewBlock("")
+        unwindRedirs(u, base)
+        u.NewBr(target)
+        return u
     }
 
     function mkPrefixAsg(items) {
@@ -4529,7 +4615,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b.NewBr(head)
             var hb = emitCond(condT, head)
             hb.NewCondBr(hb.NewICmp(llvm.enum.IPredEQ, hb.NewLoad(i32, gStatus), zero), body, exit)
-            loopStack.push({brk: exit, cont: head, lst: lst})
+            loopStack.push({brk: exit, cont: head, lst: lst, rd: redirStack.length})
             var bb = bodyT(body)
             loopStack.pop()
             bb.NewStore(bb.NewLoad(i32, gStatus), lst)
@@ -4547,7 +4633,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b.NewBr(head)
             var hb = emitCond(condT, head)
             hb.NewCondBr(hb.NewICmp(llvm.enum.IPredEQ, hb.NewLoad(i32, gStatus), zero), ex, body)
-            loopStack.push({brk: ex, cont: head, lst: lst})
+            loopStack.push({brk: ex, cont: head, lst: lst, rd: redirStack.length})
             var bb = bodyT(body)
             loopStack.pop()
             bb.NewStore(bb.NewLoad(i32, gStatus), lst)
@@ -4571,7 +4657,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var go = curF.NewBlock("")
             rc.b.NewCondBr(takeArithErr(rc.b), bad, go)
             go.NewCondBr(go.NewICmp(llvm.enum.IPredNE, rc.v, zero64), body, ex)
-            loopStack.push({brk: ex, cont: step, lst: lst})
+            loopStack.push({brk: ex, cont: step, lst: lst, rd: redirStack.length})
             var bb = bodyT(body)
             loopStack.pop()
             bb.NewStore(bb.NewLoad(i32, gStatus), lst)
@@ -4621,7 +4707,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var i = head.NewLoad(i32, ip)
             head.NewCondBr(head.NewICmp(llvm.enum.IPredSLT, i, head.NewCall(rtNFields, list)), body, ex)
             storeVar(body, fname, body.NewCall(rtGetField, [list, i]))
-            loopStack.push({brk: ex, cont: step, lst: lst})
+            loopStack.push({brk: ex, cont: step, lst: lst, rd: redirStack.length})
             var bb = bodyT(body)
             loopStack.pop()
             bb.NewStore(bb.NewLoad(i32, gStatus), lst)
@@ -4659,7 +4745,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             definedFuncs[key] = true
             // bash's loops do not reach into a called function: the body starts with none.
             var savedF = curF, savedEntry = curEntry, savedExit = curExit, savedFrame = curFrame, savedLoops = loopStack
+            var savedExitRd = curExitRd, savedRedirs = redirStack
             loopStack = []
+            redirStack = []
+            curExitRd = 0
             curF = f
             var entry = f.NewBlock("entry")
             curEntry = entry
@@ -4678,6 +4767,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             emitFnRet(endb, endb.NewLoad(i32, gStatus))
             attrUnwind(undoBase)
             curF = savedF; curEntry = savedEntry; curExit = savedExit; curFrame = savedFrame; loopStack = savedLoops
+            curExitRd = savedExitRd; redirStack = savedRedirs
             storeStatusI(b, 0)
             return b
         }

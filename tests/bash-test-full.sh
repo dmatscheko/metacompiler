@@ -2566,6 +2566,36 @@ s53() {
   check nul2 "${o##*$'\n'}|${o//*: warning: command substitution: ignored null byte in input$'\n'*/W}" "nm|W"
 }
 
+# ===== SECTION 54: several assignments in one command, nested $(( )), expansion before redirection =====
+# `a=1 b=$a` runs its assignments left to right. A $(( )) nested in an arithmetic context is
+# arithmetic, not `$( ( ) )`. A command's words are expanded BEFORE its redirections apply, and
+# a redirection is undone by every way out of its command: return, break, an expansion error.
+# Every expected value is bash 5.3's.
+s54() {
+  local a b c d s=abcdef o i z=0 l1 l2
+  a=1 b=2; check mas1 "$a $b" "1 2"
+  c=$'x' d=$c; check mas2 "$c $d" "x x"
+  false; a=$? b=$?; check mas3 "$a $b" "1 1"
+  a=$(false) b=1; check mas4 "$?" 1
+  a=(1 2) b[3]=x c+=z 2>/dev/null; check mas5 "${a[*]} ${b[3]} $c" "1 2 x xz"
+  check nar1 "${s:1:$(( 1+1 ))} ${s:$((2)):2}" "bc cd"
+  check nar2 "$(( $(( 2*3 )) + 1 ))" 7
+  o=$( { echo "$(echo hi >&2)" 2>/dev/null; } 2>&1 )
+  check xbr1 "$o" hi
+  s54f() { printf '%s' "$1"; }
+  o=$( { s54f "$(echo e2 >&2)" 2>/dev/null; } 2>&1 )
+  check xbr2 "$o" e2
+  s54r() { { echo in; return 3; } >/dev/null; }
+  o=$(s54r; echo "after $?")
+  check xbr3 "$o" "after 3"
+  o=$(for i in 1 2; do { echo x; break; } >/dev/null; done; echo after)
+  check xbr4 "$o" after
+  o=$( ( echo "$(( 3/z ))" >/dev/null ) 2>/dev/null; echo after)
+  check xbr5 "$o" after
+  o=$(printf 'l1\nl2\n' | { read l1 2>/dev/null; read l2; echo "$l1 $l2"; })
+  check xbr6 "$o" "l1 l2"
+}
+
 s01   # SECTION-CALL 01
 s02   # SECTION-CALL 02
 s03   # SECTION-CALL 03
@@ -2619,5 +2649,6 @@ s50   # SECTION-CALL 50
 s51   # SECTION-CALL 51
 s52   # SECTION-CALL 52
 s53   # SECTION-CALL 53
+s54   # SECTION-CALL 54
 echo "full: $checks checks, $fails failures"
 exit $fails
