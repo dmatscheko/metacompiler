@@ -467,7 +467,19 @@ function goImagLitC(text, pos) {
     regConst(pos, im == null ? null : cxMk(cMk(0, [], cbOne(), true), im))
     return makeImag(parseImag(text))
 }
+// The KIND of a constant result: an integer constant combined with a rune constant
+// is a rune constant ('a' + 1), and a shift keeps its left operand's kind.
 function cApply(op, a, b) {
+    var r = cApply0(op, a, b)
+    if (r == null || r.f || cIsCx(r)) { return r }
+    var sh = op == "<<" || op == ">>"
+    if (a.rn === true || (!sh && b.rn === true)) {
+        r = cMk(r.s, r.n, r.d, r.f)
+        r.rn = true
+    }
+    return r
+}
+function cApply0(op, a, b) {
     if (cIsCx(a) || cIsCx(b)) { return cxApply(op, a, b) }
     if (op == "+") { return cAddSub(a, b, false) }
     if (op == "-") { return cAddSub(a, b, true) }
@@ -973,16 +985,22 @@ function goAddrNameC(t, name, pos) {
 }
 // The value list of a := / = / var: every value is followed by its {sty} (StoreExpr),
 // split here into the thunks and their static types.
+// rns[k]: value k is a rune constant (StoreExpr), which a declaration without a
+// type binds at its default type, int32.
 function goSplitSty(xs) {
     var ts = []
     var tys = []
+    var rns = []
     var i = 0
     while (i < xs.length) {
-        if (typeof xs[i] == "function") { ts.push(xs[i]); tys.push("") }
-        else if (xs[i].sty != undefined && tys.length > 0) { tys[tys.length - 1] = xs[i].sty }
+        if (typeof xs[i] == "function") { ts.push(xs[i]); tys.push(""); rns.push(false) }
+        else if (xs[i].sty != undefined && tys.length > 0) {
+            tys[tys.length - 1] = xs[i].sty
+            rns[rns.length - 1] = xs[i].rn === true
+        }
         i = i + 1
     }
-    return {ts: ts, tys: tys}
+    return {ts: ts, tys: tys, rns: rns}
 }
 // A composite literal of type ty: a fresh value.
 function goLitC(t, ty, pos) {
@@ -1285,16 +1303,22 @@ function goCaseTy(ct, w) { return goCompTy(ct) ? ct : goQualWord(ct, w) }
 function goSplitArgs(items) {
     var args = []
     var atys = []
+    var rns = []   // a returned value that is a rune constant (RetExpr)
     var spread = false
     var i = 0
     while (i < items.length) {
         var it = items[i]
-        if (typeof it == "function") { args.push(it); atys.push("") }
-        else if (it != null && it.aty !== undefined) { if (atys.length > 0) { atys[atys.length - 1] = it.aty } }
+        if (typeof it == "function") { args.push(it); atys.push(""); rns.push(false) }
+        else if (it != null && it.aty !== undefined) {
+            if (atys.length > 0) {
+                atys[atys.length - 1] = it.aty
+                rns[rns.length - 1] = it.rn === true
+            }
+        }
         else if (it != null && it.spread === true) { spread = true }
         i = i + 1
     }
-    return {args: args, atys: atys, spread: spread}
+    return {args: args, atys: atys, rns: rns, spread: spread}
 }
 // The parameter type argument j of a call meets, from goPreParams' list.
 function goParamTyAt(pts, j) {
@@ -1481,6 +1505,7 @@ function goChanSendBoxC(items, text, pos) {
     else if (ct.indexOf("chan") == 0) { ct = ct.substring(4) }
     else { return items }
     items[1] = goDtBoxThunk(items[1], goDtBoxTo(stAt(pos), ct))
+    if (goIsRuneC(pos) && goRuneSlotTy(ct)) { items[1] = goI32Thunk(items[1]) }
     return items
 }
 // The static type of an assignment target {name, path, stars} (makeTargetRef): a
@@ -2259,6 +2284,20 @@ function cBindSpec(items) {
     var z = 0
     while (z < rest.length) { out.push(rest[z]); z = z + 1 }
     return out
+}
+// A RUNE constant whose value lands where it takes its DEFAULT type - a call
+// argument, a returned value, `x := 'a'` - becomes an int32 there (goI32Thunk in
+// each grammar); a typed slot converts it again on the way in, as a typed slot
+// does any value.
+function goRuneDefC(t, pos) { return goIsRuneC(pos) ? goI32Thunk(t) : t }
+// A result or slot of this type takes a rune constant as an int32.
+function goRuneSlotTy(t) {
+    var b = stBare(t)
+    return b == "rune" || b == "int32" || goIsIfaceTy(b)
+}
+function goIsRuneC(pos) {
+    var c = constAt(pos)
+    return c != null && c.rn === true
 }
 // A rune literal is an ordinary INTEGER constant in Go ('A' is 65). Its value is
 // built inside the rule rather than read back off the matched text, so it is

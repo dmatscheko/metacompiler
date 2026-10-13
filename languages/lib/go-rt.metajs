@@ -1719,7 +1719,7 @@ function js_map_get(c, k) {
         var si = goIdx(k)
         var bs = goBytes(c)
         if (si < 0 || si >= bs.length) { goIdxPanic(si, bs.length) }
-        return bs[si]
+        return sintConv(bs[si], 8, true)
     }
     if (goIsFn(c)) { return c }
     fail("indexing a " + typeof c)
@@ -1813,7 +1813,7 @@ function goRangeDict(v) {
     var i = 0
     while (i < r.cps.length) {
         keys.push(r.offs[i])
-        vals.push(r.cps[i])
+        vals.push(sintConv(r.cps[i], 32, false))
         i = i + 1
     }
     return {__dict: true, keys: keys, vals: vals}
@@ -1891,10 +1891,12 @@ function js_goconv(to, v) {
         // goConvert: the value model has one array type, so a later string(x)
         // cannot tell bytes from runes apart. Identical for ASCII, which is what
         // the byte form is used on.
+        // A rune is an int32; only the rune form carries its type on the element.
         var r = goRunes(goStrOf(v))
         var arr = []
         var k = 0
-        while (k < r.cps.length) { arr.push(r.cps[k]); k = k + 1 }
+        var rn = to == "[]rune"
+        while (k < r.cps.length) { arr.push(rn ? sintConv(r.cps[k], 32, false) : r.cps[k]); k = k + 1 }
         return arr
     }
     if (to == "bool") { return goTruthy(v) }

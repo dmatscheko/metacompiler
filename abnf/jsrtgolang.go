@@ -2630,7 +2630,7 @@ func init() {
 				vals := &jsArray{}
 				for i, r := range x {
 					keys.elems = append(keys.elems, float64(i))
-					vals.elems = append(vals.elems, float64(r))
+					vals.elems = append(vals.elems, giNorm(int64(r), 32, false))
 				}
 				return plan(keys, vals, 0.0, float64(len(keys.elems)))
 			}

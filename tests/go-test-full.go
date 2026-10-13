@@ -3929,6 +3929,44 @@ func s67() {
 		"runtime error: makeslice: cap out of range|makechan: size out of range|<nil>")
 }
 
+// ===== SECTION 68: the dynamic type of runes and bytes =====
+func k68(v any) string {
+	switch v.(type) {
+	case int:
+		return "int"
+	case int32:
+		return "int32"
+	case uint8:
+		return "uint8"
+	}
+	return "other"
+}
+
+func r68() rune { return 'r' }
+func i68() int  { return 'i' }
+
+func s68() {
+	s := "az"
+	got := ""
+	for _, c := range s {
+		got += k68(c) + " "
+	}
+	check("rt1", got == "int32 int32 " && fmt.Sprintf("%T %T %T", 'z', []rune(s)[0], s[0]) == "int32 int32 uint8")
+	x := 'q'
+	var y = 'a' + 1
+	var z any = 'w'
+	check("rt2", fmt.Sprintf("%T %T %T %T %T", x, y, z, r68(), i68()) == "int32 int32 int32 int32 int")
+	freq := map[rune]int{}
+	for _, c := range "abca" {
+		freq[c]++
+	}
+	n := 0
+	for i := 0; i < len(s); i++ {
+		n = n*1000 + int(s[i]-'a')
+	}
+	check("rt3", fmt.Sprint(freq, freq['a'], n) == "map[97:2 98:1 99:1] 2 25")
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -3997,6 +4035,7 @@ func main() {
 	s65() // SECTION-CALL 65
 	s66() // SECTION-CALL 66
 	s67() // SECTION-CALL 67
+	s68() // SECTION-CALL 68
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

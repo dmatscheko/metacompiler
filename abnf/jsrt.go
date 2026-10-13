@@ -15107,12 +15107,12 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				}
 				return w(arr.elems[i])
 			}
-			if str, ok := u(a[0]).(string); ok { // s[i] is the i-th BYTE of a Go string
+			if str, ok := u(a[0]).(string); ok { // s[i] is the i-th BYTE of a Go string, a uint8
 				i := int(rt.toNumber(u(a[1])))
 				if i < 0 || i >= len(str) {
 					goIdxFail(i, len(str))
 				}
-				return rt.wrapNum(float64(str[i]))
+				return w(giNorm(int64(str[i]), 8, true))
 			}
 			// f[int] / Stack[K, V]: a generic instantiation. Generics are ERASED in the
 			// Go grammars, so instantiating is the identity on the function it indexes.
@@ -15344,9 +15344,15 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				// goConvert: the value model has one array type, so a later string(x)
 				// cannot tell bytes from runes apart. Identical for ASCII, which is
 				// what the byte form is used on.
+				// A rune is an int32; only the rune form carries its type on the
+				// element.
 				out := &jsArray{}
 				for _, r := range rt.toString(v) {
-					out.elems = append(out.elems, float64(r))
+					if to == "[]rune" {
+						out.elems = append(out.elems, giNorm(int64(r), 32, false))
+					} else {
+						out.elems = append(out.elems, float64(r))
+					}
 				}
 				return w(out)
 			case "bool":

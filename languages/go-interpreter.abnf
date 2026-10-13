@@ -561,7 +561,7 @@ IdxE        <~~ var ie = pop(); push(ie); push({ksty: stAt(up.pos)}) ~~> = Expre
 
 ExprList    = StoreExpr { "," StoreExpr } ;
 // One value of a := / = / var, followed by the static type it reports (goSplitSty).
-StoreExpr   <~~ var se = pop(); push(se); push({sty: stStoreAt(up.pos)}) ~~> = Expression ;
+StoreExpr   <~~ var se = pop(); push(se); push({sty: stStoreAt(up.pos), rn: goIsRuneC(up.pos)}) ~~> = Expression ;
 
 Empty       <~~ push(function() {}) ~~>
             = ";" ;
@@ -635,7 +635,7 @@ Return      <~~ push(makeReturn(takeAll())) ~~>
 // Go's semicolon insertion makes `return` a RESTRICTED production: a line break right
 // after it ends the statement. Without SameLine a bare `return` followed by `case <-c:`
 // reads `case` as the start of its result expression and the whole switch falls apart.
-RetVals     = ArgExpr { "," ArgExpr } ;
+RetVals     = RetExpr { "," RetExpr } ;
 
 // break / continue carry an optional label; the labelled forms travel up as a
 // signal until the loop that carries that label catches them.
@@ -1067,7 +1067,9 @@ NewType     <~~ push({nty: firstType(up.in)}) ~~>
 Call        <~~ var ci = goAppendC(takeAll(), up.in); push(makeCall(goCallBoxC(ci), goSplitArgs(ci.slice(1)).atys)) ~~>
             = Id <~~ push(up.in) ~~> "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
 // A call argument reports its static type after it, for goSplitArgs.
-ArgExpr     <~~ var ae = pop(); push(ae); push({aty: stAt(up.pos)}) ~~> = Expression ;
+ArgExpr     <~~ var ae = pop(); push(goRuneDefC(ae, up.pos)); push({aty: stAt(up.pos)}) ~~> = Expression ;
+// A returned value, which takes a rune constant at the RESULT's type (makeReturn).
+RetExpr     <~~ var re = pop(); push(re); push({aty: stAt(up.pos), rn: goIsRuneC(up.pos)}) ~~> = Expression ;
 
 // KeyAhead answers "is this composite-literal element keyed?" - is there a ':' before
 // the element's ',' or the closing '}' at bracket depth 0. Like InitAhead it decides
@@ -1917,6 +1919,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             ord.push(i)
             var k = keys[i]
             if (typeof k == "number" || isFlo(k)) { num.push(gNumF(k)); txt.push("") }
+            else if (szIs(k)) { num.push(szNum(k)); txt.push("") }
             else if (typeof k == "boolean") { numeric = false; num.push(0); txt.push(k ? "1" : "0") }
             else { numeric = false; num.push(0); txt.push("" + k) }
         }
@@ -2423,10 +2426,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (isSl(o)) { return slGet(o, ix) }
         // An out of range read is a PANIC in Go. The array and the string arms match
         // js_map_get in abnf/jsrtgolang.go and languages/lib/go-rt.metajs.
+        // s[i] is a byte: a uint8.
         if (typeof o == "string") {
             var bs = utf8Bytes(o)
             if (ix < 0 || ix >= bs.length) { goIdxPanic(ix, bs.length) }
-            return bs[ix]
+            return szConv(bs[ix], 8, true)
         }
         if (Array.isArray(o)) {
             if (ix < 0 || ix >= o.length) { goIdxPanic(ix, o.length) }
@@ -2552,7 +2556,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             if (isSl(v) || Array.isArray(v)) {
                 var els = isSl(v) ? slElems(v) : v
                 var s = ""
-                for (var i = 0; i < els.length; i++) { s += fromCodePoint(els[i]) }
+                for (var i = 0; i < els.length; i++) { s += fromCodePoint(szNum(els[i])) }
                 return s
             }
             return "" + v
@@ -2563,12 +2567,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             // is seen by bs. Only a STRING is decoded below.
             if (isSl(v)) { return v }
             if (Array.isArray(v)) { return slT(slOf(v), to == "[]byte" ? "byte" : "rune") }
+            // A rune is an int32. The "bytes" are code points too (the strings are
+            // UTF-16), so only the rune form can carry its type on the element.
             var out = []
             var t = "" + v
             var i2 = 0
+            var rn = to == "[]rune"
             while (i2 < t.length) {
                 var r = strRuneAt(t, i2)
-                out.push(r.cp)
+                out.push(rn ? szConv(r.cp, 32, false) : r.cp)
                 i2 += r.n
             }
             return slT(slOf(out), to == "[]byte" ? "byte" : "rune")
@@ -2691,6 +2698,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (isDtBox(v) || (ty.charAt(0) != "*" && goIsStructVal(v))) { return v }
         return {__class: goDtClass(ty), __dv: v}
     }
+    // The int32 a rune constant becomes at its default type (goRuneDefC).
+    function goI32Thunk(t) { return function() { return szConv(t(), 32, false) } }
     function goDtBoxThunk(t, ty) {
         if (ty == "") { return t }
         return function() { return goDtBox(t(), ty) }
@@ -4270,6 +4279,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 if (cty == "" && lref.path.length == 0 && lref.stars == 0) { cty = goStCopyTy(cTyLookup(lref.name)) }
                 exprs[ai] = goStoreThunk(exprs[ai], cty)
                 exprs[ai] = goDtBoxThunk(exprs[ai], goDtBoxTo(sp.tys[ai], goRefTy(lref)))
+                if (sp.rns[ai] && goIsIfaceTy(stBare(goRefTy(lref)))) { exprs[ai] = goI32Thunk(exprs[ai]) }
             }
         }
         if (op != "=") {
@@ -4328,6 +4338,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             for (var si = 0; si < exprs.length; si++) {
                 cBindTy(names[si], stBare(sp.tys[si]))
                 exprs[si] = goStoreThunk(exprs[si], goStCopyTy(sp.tys[si]))
+                if (sp.rns[si]) { exprs[si] = goI32Thunk(exprs[si]) }
             }
         }
         return function() {
@@ -4416,6 +4427,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             for (var vi = 0; vi < inits.length; vi++) {
                 if (ty == "") { cBindTy(names[vi], stBare(sp.tys[vi])) }
                 inits[vi] = goDtBoxThunk(goStoreThunk(inits[vi], goStCopyTy(sp.tys[vi])), goDtBoxTo(sp.tys[vi], ty))
+                if (sp.rns[vi] && (ty == "" || goIsIfaceTy(stBare(ty)))) { inits[vi] = goI32Thunk(inits[vi]) }
             }
         }
         return function() {
@@ -4650,7 +4662,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             if (isMap(arr)) { keys = arr.keys.slice(0) }
             else if (typeof arr == "string") {
                 // Go ranges a string by RUNE: the index is the rune's BYTE OFFSET and
-                // the value is its code point (an int32), not a one-character string.
+                // the value is its code point as an int32, not a one-character string.
                 keys = []
                 vals = []
                 var off = 0
@@ -4658,7 +4670,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 while (b < arr.length) {
                     var ru = strRuneAt(arr, b)
                     keys.push(off)
-                    vals.push(ru.cp)
+                    vals.push(szConv(ru.cp, 32, false))
                     off += utf8Len(ru.cp)
                     b += ru.n
                 }
@@ -4964,7 +4976,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var items = sp.args
         var bx = null
         for (var b = 0; b < items.length; b++) {
-            var bt = goDtBoxTy(sp.atys[b])
+            // "$r": a rune constant, an int32 where the result type takes one.
+            var bt = sp.rns[b] ? "$r" : goDtBoxTy(sp.atys[b])
             if (bt != "") {
                 if (bx == null) { bx = []; for (var z = 0; z < items.length; z++) { bx.push("") } }
                 bx[b] = bt
@@ -4984,12 +4997,14 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     // A returned value boxed where its declared result type is an interface.
     function goRetBox(v, bx, rtl) {
-        if (bx.length == 1) { return (rtl.length == 1 && bx[0] != "" && goIsIfaceTy(rtl[0])) ? goDtBox(v, bx[0]) : v }
+        if (bx.length == 1) { return rtl.length == 1 ? goRetBox1(v, bx[0], rtl[0]) : v }
         var out = []
-        for (var i = 0; i < v.length; i++) {
-            out.push((i < rtl.length && bx[i] != "" && goIsIfaceTy(rtl[i])) ? goDtBox(v[i], bx[i]) : v[i])
-        }
+        for (var i = 0; i < v.length; i++) { out.push(i < rtl.length ? goRetBox1(v[i], bx[i], rtl[i]) : v[i]) }
         return out
+    }
+    function goRetBox1(v, bt, rt) {
+        if (bt == "$r") { return goRuneSlotTy(rt) ? szConv(v, 32, false) : v }
+        return (bt != "" && goIsIfaceTy(rt)) ? goDtBox(v, bt) : v
     }
     // items = [{v: thunk}...]: one label; no values means 'default'.
     function makeCaseLabel(items) {

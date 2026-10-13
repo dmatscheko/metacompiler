@@ -576,7 +576,7 @@ IdxE        <~~ var ie = pop(); push(ie); push({ksty: stAt(up.pos)}) ~~> = Expre
 
 ExprList    = StoreExpr { "," StoreExpr } ;
 // One value of a := / = / var, followed by the static type it reports (goSplitSty).
-StoreExpr   <~~ var se = pop(); push(se); push({sty: stStoreAt(up.pos)}) ~~> = Expression ;
+StoreExpr   <~~ var se = pop(); push(se); push({sty: stStoreAt(up.pos), rn: goIsRuneC(up.pos)}) ~~> = Expression ;
 
 Empty       <~~ push(function(b) { return b }) ~~>
             = ";" ;
@@ -653,7 +653,7 @@ Return      <~~ push(makeReturn(takeAll())) ~~>
 // Go's semicolon insertion makes `return` a RESTRICTED production: a line break right
 // after it ends the statement. Without SameLine a bare `return` followed by `case <-c:`
 // reads `case` as the start of its result expression and the whole switch falls apart.
-RetVals     = ArgExpr { "," ArgExpr } ;
+RetVals     = RetExpr { "," RetExpr } ;
 
 // break / continue carry an optional label: they leave (resp. re-enter) the loop that
 // carries that label rather than the innermost one.
@@ -1190,7 +1190,9 @@ LitExpr     <~~ var le = pop(); push(le); push({lesty: goLitEsty(up.pos)}) ~~> =
 Call        <~~ var ci = goAppendC(takeAll(), up.in); push(makeCall(goCallBoxC(ci), goSplitArgs(ci.slice(1)).atys)) ~~>
             = Id <~~ push(up.in) ~~> "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
 // A call argument reports its static type after it, for goSplitArgs.
-ArgExpr     <~~ var ae = pop(); push(ae); push({aty: stAt(up.pos)}) ~~> = Expression ;
+ArgExpr     <~~ var ae = pop(); push(goRuneDefC(ae, up.pos)); push({aty: stAt(up.pos)}) ~~> = Expression ;
+// A returned value, which takes a rune constant at the RESULT's type (makeReturn).
+RetExpr     <~~ var re = pop(); push(re); push({aty: stAt(up.pos), rn: goIsRuneC(up.pos)}) ~~> = Expression ;
 
 VarRef      <~~ push(goNameC(up.in, up.pos)) ~~>
             = Id ;
@@ -3971,6 +3973,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 if (cty == "" && lref.path.length == 0 && lref.stars == 0) { cty = goStCopyTy(cTyLookup(lref.name)) }
                 exprs[ai] = goStoreThunk(exprs[ai], cty)
                 exprs[ai] = goDtBoxThunk(exprs[ai], goDtBoxTo(sp.tys[ai], goRefTy(lref)))
+                if (sp.rns[ai] && goIsIfaceTy(stBare(goRefTy(lref)))) { exprs[ai] = goI32Thunk(exprs[ai]) }
             }
         }
         return function(b) {
@@ -4075,6 +4078,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             for (var si = 0; si < exprs.length; si++) {
                 cBindTy(names[si], stBare(sp.tys[si]))
                 exprs[si] = goStoreThunk(exprs[si], goStCopyTy(sp.tys[si]))
+                if (sp.rns[si]) { exprs[si] = goI32Thunk(exprs[si]) }
             }
         }
         return function(b) {
@@ -4196,6 +4200,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             for (var vi = 0; vi < inits.length; vi++) {
                 if (ty == "") { cBindTy(names[vi], stBare(sp.tys[vi])) }
                 inits[vi] = goDtBoxThunk(goStoreThunk(inits[vi], goStCopyTy(sp.tys[vi])), goDtBoxTo(sp.tys[vi], ty))
+                if (sp.rns[vi] && (ty == "" || goIsIfaceTy(stBare(ty)))) { inits[vi] = goI32Thunk(inits[vi]) }
             }
         }
         return function(b) {
@@ -4839,6 +4844,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 b = r.b
                 v = curRtys.length == 1 ? emitStoreCopy(b, r.v, curRtys[0]) : r.v
                 if (curRtys.length == 1 && goDtBoxTo(atys[0], curRtys[0]) != "") { v = emitDtBox(b, v, goDtBoxTo(atys[0], curRtys[0])) }
+                if (curRtys.length == 1 && sp.rns[0] && goRuneSlotTy(curRtys[0])) { v = emitGiConv(b, v, {w: 32, u: false}) }
             } else if (items.length > 1) {
                 var arr = callExt(b, "js_arr_new", [])
                 for (var i = 0; i < items.length; i++) {
@@ -4846,6 +4852,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                     b = r2.b
                     var rv = i < curRtys.length ? emitStoreCopy(b, r2.v, curRtys[i]) : r2.v
                     if (i < curRtys.length && goDtBoxTo(atys[i], curRtys[i]) != "") { rv = emitDtBox(b, rv, goDtBoxTo(atys[i], curRtys[i])) }
+                    if (i < curRtys.length && sp.rns[i] && goRuneSlotTy(curRtys[i])) { rv = emitGiConv(b, rv, {w: 32, u: false}) }
                     callExt(b, "js_arr_push", [arr, rv])
                 }
                 v = arr
@@ -5651,6 +5658,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     var goDtSeen = {}
     function goDtNote(ty) {
         if (goDtSeen["$" + ty] !== true) { goDtSeen["$" + ty] = true; goDtUsed.push(ty) }
+    }
+    // The int32 a rune constant becomes at its default type (goRuneDefC).
+    function goI32Thunk(t) {
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: emitGiConv(r.b, r.v, {w: 32, u: false})}
+        }
     }
     function goDtBoxThunk(t, ty) {
         if (ty == "") { return t }
