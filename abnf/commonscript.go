@@ -240,6 +240,7 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 
 	installGojaFnMeta(vm)
 	installGojaArrKind(vm)
+	installGojaCoroutines(vm)
 
 	// The WTF-8 byte length of a string. JS .length counts UTF-16 code units,
 	// but the emitters need the byte count of the char arrays they emit
@@ -681,6 +682,34 @@ func installGojaArrKind(vm *goja.Runtime) {
 			}
 		}
 		return a
+	})
+}
+
+// installGojaCoroutines binds coNew(f), coResume(co, v) and coYield(v), the
+// tag scripts' suspension primitive: f runs on a call stack of its own
+// (goja.Coroutine), coResume answers {value, done} and coYield answers the next
+// coResume's v. The goja twin of coroutineBindings (frozen.go).
+func installGojaCoroutines(vm *goja.Runtime) {
+	vm.Set("coNew", func(call goja.FunctionCall) goja.Value {
+		f, ok := goja.AssertFunction(call.Argument(0))
+		if !ok {
+			panic(vm.NewTypeError("coNew needs a function"))
+		}
+		return vm.ToValue(vm.NewCoroutine(f))
+	})
+	vm.Set("coResume", func(call goja.FunctionCall) goja.Value {
+		c, ok := call.Argument(0).Export().(*goja.Coroutine)
+		if !ok {
+			panic(vm.NewTypeError("coResume needs a coroutine"))
+		}
+		v, done := c.Resume(call.Argument(1))
+		res := vm.NewObject()
+		res.Set("value", v)
+		res.Set("done", done)
+		return res
+	})
+	vm.Set("coYield", func(call goja.FunctionCall) goja.Value {
+		return vm.Yield(call.Argument(0))
 	})
 }
 

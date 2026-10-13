@@ -2828,23 +2828,41 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // was stored as (js_lukeyback).
     // ipairs' iterator is stateless (its control value is the index), pairs' is a closure
     // over a cursor cell - the loop feeds the control value back either way.
+    // ipairs' step is lua_geti(t, i): a table's raw element, else its __index; a
+    // string's through the string metatable; anything else - a float box or a thread
+    // (an __f slot that holds no metatable) among them - raises lua's error, which
+    // has no position because lua raises it inside a C function.
     function libINext(bb, argsH) {
         var t = libArg(bb, argsH, 0)
         var nk = callExt(bb, "js_add", [libArg(bb, argsH, 1), emitNum(bb, 1)])
-        var rawV = callExt(bb, "js_get", [t, nk])
-        var nilB = curF.NewBlock("")
-        var okB = curF.NewBlock("")
-        bb.NewCondBr(truthy(bb, callExt(bb, "js_seq", [rawV, hUndef])), nilB, okB)
-        // A raw miss on a table with a metatable asks its __index, as lua_geti does.
+        var tyV = callExt(bb, "js_typeof", [t])
         var objB = curF.NewBlock("")
+        var notObjB = curF.NewBlock("")
+        var strB = curF.NewBlock("")
+        var badB = curF.NewBlock("")
+        var missB = curF.NewBlock("")
+        var slotB = curF.NewBlock("")
         var mtB = curF.NewBlock("")
+        var gotB = curF.NewBlock("")
         var endB = curF.NewBlock("")
-        nilB.NewCondBr(rawTruthy(nilB, callExt(nilB, "js_seq", [callExt(nilB, "js_typeof", [t]), emitStr(nilB, "object")])), objB, endB)
-        objB.NewCondBr(rawTruthy(objB, callExt(objB, "js_seq", [callExt(objB, "js_typeof", [callExt(objB, "js_get", [t, emitStr(objB, "__f")])]), emitStr(objB, "object")])), mtB, endB)
+        bb.NewCondBr(rawTruthy(bb, callExt(bb, "js_seq", [tyV, emitStr(bb, "object")])), objB, notObjB)
+        var rawV = callExt(objB, "js_get", [t, nk])
+        objB.NewCondBr(rawTruthy(objB, callExt(objB, "js_seq", [rawV, hUndef])), missB, gotB)
+        var fV = callExt(missB, "js_get", [t, emitStr(missB, "__f")])
+        missB.NewCondBr(rawTruthy(missB, callExt(missB, "js_seq", [fV, hUndef])), endB, slotB)
+        slotB.NewCondBr(rawTruthy(slotB, callExt(slotB, "js_seq", [callExt(slotB, "js_typeof", [fV]), emitStr(slotB, "object")])), mtB, badB)
         var mv = callExt(mtB, "js_luindex", [t, nk])
-        mtB.NewCondBr(truthy(mtB, callExt(mtB, "js_seq", [mv, hUndef])), endB, okB)
+        mtB.NewBr(gotB)
+        notObjB.NewCondBr(rawTruthy(notObjB, callExt(notObjB, "js_seq", [tyV, emitStr(notObjB, "string")])), strB, badB)
+        var sv = callExt(strB, "js_get", [callLua(strB, "lua_getvar", [curScopeV, emitStr(strB, "0strlib")]), nk])
+        strB.NewBr(gotB)
+        callExt(badB, "js_throw", [callExt(badB, "js_add", [callExt(badB, "js_add", [emitStr(badB, "attempt to index a "),
+            callExt(badB, "js_lutname", [t])]), emitStr(badB, " value")])])
+        badB.NewRet(hUndef)
+        var v = gotB.NewPhi([llvm.ir.NewIncoming(rawV, objB), llvm.ir.NewIncoming(mv, mtB), llvm.ir.NewIncoming(sv, strB)])
+        var okB = curF.NewBlock("")
+        gotB.NewCondBr(rawTruthy(gotB, callExt(gotB, "js_seq", [v, hUndef])), endB, okB)
         endB.NewRet(hUndef)
-        var v = okB.NewPhi([llvm.ir.NewIncoming(rawV, bb), llvm.ir.NewIncoming(mv, mtB)])
         var arr = callExt(okB, "js_arr_new", [])
         callExt(okB, "js_arr_push", [arr, nk])
         callExt(okB, "js_arr_push", [arr, v])
@@ -3033,6 +3051,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Emit only the referenced libraries; a program that uses none emits nothing here.
     function emitLibs(b) {
         if (libNeed.getmetatable) { libNeed.string = true } // getmetatable("") is the strings' metatable
+        if (libNeed.ipairs) { libNeed.string = true } // libINext's string arm
         if (libNeed.error) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "error"), callExt(b, "js_closure", [handle(emitLibFunc(libError)), curScopeV])])
         }
@@ -3243,6 +3262,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         callExt(b, "js_scope_decl", [sc, emitStr(b, "0cof"), f])
         var co = callExt(b, "js_obj_new", [])
         callExt(b, "js_set", [co, emitStr(b, "__luco"), hTrue])
+        // An __f slot holding neither a float's number nor a metatable sends every
+        // member read that misses and every store to the not-a-table error, so
+        // indexing a thread raises at no cost to a table access (emitMemberGet,
+        // emitSlotWrite).
+        callExt(b, "js_set", [co, emitStr(b, "__f"), hTrue])
         callExt(b, "js_set", [co, emitStr(b, "__lugf"), callExt(b, "js_genfn", [callExt(b, "js_closure", [handle(emitLibFunc(libCoBody)), sc])])])
         callExt(b, "js_set", [co, emitStr(b, "__lust"), emitStr(b, "suspended")])
         return co

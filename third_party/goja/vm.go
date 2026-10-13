@@ -155,6 +155,8 @@ type vm struct {
 	interrupted   uint32
 	interruptVal  interface{}
 	interruptLock sync.Mutex
+
+	co *Coroutine // the coroutine this vm runs; nil on the main stack
 }
 
 type instruction interface {

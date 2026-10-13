@@ -32,13 +32,9 @@ statement that raised it.
 Metatables are in, with every operator metamethod and __index / __newindex /
 __call / __tostring / __name / __len / __pairs (not __close, __gc or __mode).
 
-Coroutines run by REPLAY here (the compiled half suspends for real): every
-resume re-runs the coroutine's function from the top and answers the yields it
-already passed from a log. Output while a passed segment re-runs is dropped and a
-resume of a coroutine the replaying run did not create is logged, so values,
-order and printed text match lua; what differs is that any OTHER side effect
-before the yield a coroutine is parked at - a write to an upvalue, a global or a
-table it did not create - happens once per resume instead of once.
+Coroutines suspend for real: a coroutine's function runs on the tag host's own
+coroutine (coNew / coResume / coYield), so a yield parks it at any depth of calls
+and every statement runs once.
 
 Not in the subset: the loading functions of the base library (load, loadfile,
 dofile), os and the rest of io; collectgarbage collects nothing.
@@ -873,9 +869,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Box n as a float when it would otherwise read back as an integer. (n - n === 0
     // rejects the infinities and NaN, which are floats already and never need a box.)
     function mkFlt(n) { if (n - n === 0 && Math.floor(n) === n) { return {__f: true, v: n} } return n }
-    // A Lua TABLE. Both number boxes are host objects too, so a plain
+    // A Lua TABLE. Both number boxes and a thread are host objects too, so a plain
     // `typeof v == "object"` test has to exclude them.
-    function isTbl(v) { return v !== null && v !== undefined && typeof v == "object" && !isFlt(v) && !szIs(v) }
+    function isTbl(v) { return v !== null && v !== undefined && typeof v == "object" && !isFlt(v) && !szIs(v) && v.__luth !== true }
     // The two ends of the signed 64 bit range, built from their bit pattern because
     // neither survives a double: math.maxinteger reads back as 9223372036854775808.
     function luaMaxInt() { return szNorm(i64Make(2147483647, 4294967295), 64, false) }
@@ -2756,88 +2752,75 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (var i = 1; i < arguments.length; i++) { args.push(arguments[i]) }
         return luaProtect(arguments[0], args, undefined)
     }
-    // ----- coroutines, by REPLAY -----
-    // A tree walker has no way to suspend a body in the middle of a call chain, so
-    // a coroutine is replayed: every resume runs its function again from the top,
-    // each yield the earlier resumes already passed answers what the resume after
-    // it was given (the log), and the first new yield throws back to the resume.
-    // The compiled halves suspend for real (libCoResume in lua-to-llvm-ir.abnf).
-    // What the replay repeats is muted or logged: output while any running
-    // coroutine is still re-running a passed segment is dropped, and a resume of a
-    // coroutine the replaying run did not create (born before it) is logged on the
-    // live run and answered from the log on a replay, so a pipeline of coroutines
-    // advances each one once. Any other side effect before the parked yield - a
-    // write to an upvalue, a global or a shared table - happens once per resume.
-    var luaCoFrames = []   // the running coroutines, innermost last
-    var luaCoSerial = 0
+    // ----- coroutines -----
+    // A coroutine runs its function on a host coroutine (coNew / coResume / coYield,
+    // the tag host's own suspension), so a yield suspends the body at any depth of
+    // calls and the next resume continues it there. The interpreter's run state - the
+    // scope chain, the call positions - belongs to the side that runs: a resume
+    // installs the coroutine's, a yield files it back, and the resumer reinstalls its
+    // own when the body yields, returns or raises. Twin of libCoResume in
+    // lua-to-llvm-ir.abnf.
+    var luaCoCur = anytype   // the running coroutine, null on the main thread
+    luaCoCur = null
     var luaMainThread = {__luth: true, st: "running"}
     function isLuaThread(v) { return typeof v == "object" && v !== null && v.__luth === true }
-    function luaCoMuted() {
-        for (var i = 0; i < luaCoFrames.length; i++) {
-            if (luaCoFrames[i].k < luaCoFrames[i].co.log.length - 1) { return true }
-        }
-        return false
+    function luaCtxSave() {
+        return {sc: scopes, fb: luaFnBase, bb: luaBlockBase, cp: luaCallPos, pos: luaPos, own: luaOwnTop, trim: seqTrim}
+    }
+    function luaCtxLoad(x) {
+        scopes = x.sc
+        luaFnBase = x.fb
+        luaBlockBase = x.bb
+        luaCallPos = x.cp
+        luaPos = x.pos
+        luaOwnTop = x.own
+        seqTrim = x.trim
+        luaTail = false
+        luaTrampFn = null
     }
     function luaCoNew(f) {
-        luaCoSerial = luaCoSerial + 1
-        return {__luth: true, f: f, st: "suspended", log: [], pulls: [], born: luaCoSerial, err: undefined}
+        var co = {__luth: true, f: f, st: "suspended", args: [], ctx: null, err: undefined}
+        co.h = coNew(function() {
+            luaCallName = null
+            return luaAll(luaCallAll(co.f, co.args))
+        })
+        return co
     }
     function luaCoCheck(qual, v, nargs) { if (!isLuaThread(v)) { luaArgTypeErr(qual, 1, "thread", v, nargs) } }
     function luaCoResume(co, args) {
         if (co.st == "dead") { return [false, "cannot resume dead coroutine"] }
         if (co.st != "suspended") { return [false, "cannot resume non-suspended coroutine"] }
-        var top = anytype // The innermost running coroutine's frame, if any.
-        top = luaCoFrames.length > 0 ? luaCoFrames[luaCoFrames.length - 1] : null
-        var foreign = top !== null && co.born <= top.start
-        if (foreign && top.k < top.co.log.length - 1) {
-            // A replayed resume of a coroutine this run did not create.
-            top.pk = top.pk + 1
-            return top.co.pulls[top.pk - 1]
+        var mine = luaCtxSave()
+        var prev = anytype // The resumer, a coroutine or the main thread (null).
+        prev = luaCoCur
+        if (co.ctx === null) {
+            // The body starts as a call made from here: the resumer's chain, and its
+            // position as the caller's entry of a call-position stack of its own.
+            co.args = args
+            var cp = luaCallPos.slice()
+            cp.push(luaPos)
+            co.ctx = {sc: scopes.slice(), fb: luaFnBase, bb: luaBlockBase, cp: cp, pos: "", own: false, trim: true}
         }
-        var savedChain = scopes.slice()
-        var savedBase = luaFnBase
-        var savedBlock = luaBlockBase
-        var depth = luaCallPos.length
-        var savedPos = luaPos
-        co.log.push(args)
-        if (top !== null) { top.co.st = "normal" }
+        if (prev !== null) { prev.st = "normal" }
         co.st = "running"
-        luaCoFrames.push({co: co, k: 0, pk: 0, start: luaCoSerial})
-        luaTail = false
-        luaCallPos.push(luaPos)
-        luaPos = ""
+        luaCoCur = co
+        luaCtxLoad(co.ctx)
         var out = anytype // [ok, values...]
         try {
-            luaCallName = null
-            var all = luaAll(luaCallAll(co.f, co.log[0]))
-            co.st = "dead"
-            out = [true].concat(all)
+            var r = coResume(co.h, args)
+            co.st = r.done ? "dead" : "suspended"
+            out = [true].concat(r.value)
         } catch (e) {
-            if (e !== null && typeof e == "object" && e.__luyield === co) {
-                co.st = "suspended"
-                out = [true].concat(e.v)
-            } else if (excIsUser(e)) {
-                co.st = "dead"
-                co.err = e.v
-                out = [false, e.v]
-            } else {
-                luaCoFrames.pop()
-                throw e
-            }
-            scopes = savedChain.slice()
-            luaFnBase = savedBase
-            luaBlockBase = savedBlock
-            luaTrampFn = null
+            luaCtxLoad(mine)
+            luaCoCur = prev
+            if (!excIsUser(e)) { throw e }
+            co.st = "dead"
+            co.err = e.v
+            out = [false, e.v]
         }
-        luaCoFrames.pop()
-        while (luaCallPos.length > depth) { luaCallPos.pop() }
-        luaPos = savedPos
-        luaTail = false
-        if (top !== null) { top.co.st = "running" }
-        if (foreign) {
-            top.pk = top.pk + 1
-            top.co.pulls.push(out)
-        }
+        luaCtxLoad(mine)
+        luaCoCur = prev
+        if (prev !== null) { prev.st = "running" }
         return out
     }
     var luaCo = {}
@@ -2852,23 +2835,23 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return mkMulti(luaCoResume(co, args))
     }
     luaCo["yield"] = function() {
-        if (luaCoFrames.length === 0) { fail("attempt to yield from outside a coroutine") }
-        var fr = luaCoFrames[luaCoFrames.length - 1]
-        fr.k = fr.k + 1
-        if (fr.k < fr.co.log.length) { return mkMulti(fr.co.log[fr.k]) }
+        var co = anytype
+        co = luaCoCur
+        if (co === null) { fail("attempt to yield from outside a coroutine") }
         var vals = []
         for (var i = 0; i < arguments.length; i++) { vals.push(arguments[i]) }
-        throw {__luyield: fr.co, v: vals}
+        co.ctx = luaCtxSave()
+        return mkMulti(coYield(vals))
     }
     luaCo.status = function(co) {
         luaCoCheck("coroutine.status", co, arguments.length)
         return co.st
     }
     luaCo.running = function() {
-        if (luaCoFrames.length === 0) { return mkMulti([luaMainThread, true]) }
-        return mkMulti([luaCoFrames[luaCoFrames.length - 1].co, false])
+        if (luaCoCur === null) { return mkMulti([luaMainThread, true]) }
+        return mkMulti([luaCoCur, false])
     }
-    luaCo.isyieldable = function() { return luaCoFrames.length > 0 }
+    luaCo.isyieldable = function() { return luaCoCur !== null }
     // wrap(f): resumes a coroutine over f and answers what it yields; an error
     // propagates, a string one behind the caller's position (luaB_auxwrap).
     luaCo.wrap = function(f) {
@@ -2921,7 +2904,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         // The byte string leaves the program as the bytes it holds (see the byte-string
         // note above luaUtf8).
-        if (luaCoFrames.length === 0 || !luaCoMuted()) { writeBytes(out + "\n") }
+        writeBytes(out + "\n")
     }
     globalScope["exit"] = function(code) { exit(numOf(code) | 0) }
 
@@ -2934,7 +2917,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function luaWrite(qual, args, from) {
         for (var i = from; i < args.length; i++) {
             var s = luaCheckStr(qual, i + 1, args[i], args.length)
-            if (luaCoFrames.length === 0 || !luaCoMuted()) { writeBytes(s) }
+            writeBytes(s)
         }
     }
     var luaStdout = {__luf: true}
@@ -3020,10 +3003,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // ipairs(t): the 1-based array walk, as the same kind of triple - its iterator counts
     // the control value up and stops at the first nil element.
+    // ipairs' step is lua_geti, inside a C function: an error it raises has no
+    // position.
     function luaINext(t, i) {
         var nk = numOf(i) + 1
         var v = anytype // The element at the next index.
+        var ep = luaPos
+        luaPos = ""
         v = luaGet(t, nk)
+        luaPos = ep
         if (v === undefined || v === null) { return undefined }
         return mkMulti([nk, v])
     }

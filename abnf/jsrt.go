@@ -769,6 +769,13 @@ func genDelegated(v interface{}) bool {
 	return false
 }
 
+// suspend parks the running body, handing v to the step() that resumed it, and
+// answers what the next resume sends in.
+func (g *jsGenerator) suspend(v interface{}) interface{} {
+	g.yields <- &genStep{value: v, done: false}
+	return <-g.resume
+}
+
 // enter marks the body running for one resume. A resume of a body that is
 // already running - it stepped itself, directly or through another generator -
 // would wait on its own handshake for ever, so it raises what rt.genBusy
@@ -13707,8 +13714,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if g == nil {
 				rt.fail("yield outside of a generator")
 			}
-			g.yields <- &genStep{value: u(a[0]), done: false}
-			sent := <-g.resume
+			sent := g.suspend(u(a[0]))
 			// finish() resumes with genExit to CLOSE the body: this yield does
 			// not answer, it panics, so the body unwinds through its own
 			// finally clauses.

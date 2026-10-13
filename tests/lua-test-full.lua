@@ -1746,6 +1746,12 @@ function s36()
     check("bt62", tostring(ta) ~= tostring(tb) and tostring(ta) == tostring(ta), true)
     check("bt63", string.match(tostring(ta), "^table: 0x%x+$") ~= nil and string.match(tostring(fa), "^function: 0x%x+$") ~= nil, true)
     check("bt64", string.format("%s", fa) == tostring(fa) and tostring(fa) ~= tostring(print), true)
+    -- ipairs indexes as lua_geti does: a string through its metatable (the string
+    -- library holds no integer keys), anything else is an error raised inside a C
+    -- function, so it has no position.
+    local function icount(v) local n = 0; for _ in ipairs(v) do n = n + 1 end; return n end
+    local okn, en = pcall(icount, 5)
+    check("bt65", icount("abc") .. "|" .. tostring(okn) .. " " .. en, "0|false attempt to index a number value")
 end
 
 -- ===== SECTION 37: ^ is correctly rounded =====
@@ -2006,9 +2012,8 @@ end
 -- ===== SECTION 47: coroutines =====
 -- create/resume/yield with values both ways, status, errors inside a coroutine,
 -- yield from a nested call and from inside a pcall, wrap as an iterator,
--- running/isyieldable and close. Values printed by lua 5.5. (The coroutine
--- bodies here write no shared state before a yield: the interpreter half runs a
--- coroutine by replay - see its :description.)
+-- running/isyieldable and close, side effects between yields, and a thread
+-- being no table. Values printed by lua 5.5.
 function s47()
     local function try(f, ...)
         local ok, e = pcall(f, ...)
@@ -2074,6 +2079,30 @@ function s47()
     local evens = coroutine.wrap(function() while true do local v = prod(); if v == nil then return end; if v % 2 == 0 then coroutine.yield(v) end end end)
     check("co13", pack(evens(), evens(), evens()), "2 4 6")
     check("co14", try(function() local th = coroutine.create(print); return #th end), "attempt to get length of a thread value (local 'th')")
+    -- Each step of a body runs once: a producer appending to a shared table, and
+    -- an upvalue counted between yields.
+    local log = {}
+    local p = coroutine.create(function() for i = 1, 3 do log[#log + 1] = "p" .. i; coroutine.yield(i) end end)
+    for i = 1, 4 do local _, v = coroutine.resume(p); log[#log + 1] = "c" .. tostring(v) end
+    check("co15", table.concat(log, ","), "p1,c1,p2,c2,p3,c3,cnil")
+    local n = 0
+    local w = coroutine.wrap(function(a, b)
+        n = n + 1
+        local c = coroutine.yield(a + b)
+        n = n + 1
+        local d, e = coroutine.yield(c * 2)
+        n = n + 1
+        return d + e
+    end)
+    check("co16", pack(w(1, 2), w(10), w(3, 4), n), "3 20 7 3")
+    local function walk(t) if t then walk(t.l); coroutine.yield(t.v); walk(t.r) end end
+    local seq = {}
+    for v in coroutine.wrap(function() walk({l = {v = 1}, v = 2, r = {l = {v = 3}, v = 4}}) end) do seq[#seq + 1] = v end
+    check("co17", table.concat(seq, " "), "1 2 3 4")
+    local th = coroutine.create(print)
+    check("co18", try(function() return th.x end) .. "|" .. try(function() th.x = 1 end) .. "|" .. try(function() return th[1] end),
+        "attempt to index a thread value (upvalue 'th')|attempt to index a thread value (upvalue 'th')|attempt to index a thread value (upvalue 'th')")
+    check("co19", try(rawget, th, 1) .. "|" .. try(next, th), "bad argument #1 to 'rawget' (table expected, got thread)|bad argument #1 to 'next' (table expected, got thread)")
 end
 
 -- ===== SECTION 48: utf8 =====

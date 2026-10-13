@@ -382,7 +382,33 @@ func frozenBaseBindings(preventDefaultOutput bool) map[string]interface{} {
 	arrKindBindings(b)
 	// byteAt / byteSub / bytesStr - a string's bytes (byteBindings).
 	byteBindings(b)
+	coroutineBindings(b)
 	return b
+}
+
+// coroutineBindings binds coNew(f), coResume(co, v) and coYield(v), the tag
+// scripts' suspension primitive, over the generator machinery of the compiled
+// programs: f runs on a goroutine of its own, coResume answers {value, done}
+// (the first resume's v is not delivered, f takes no arguments) and re-raises
+// what f throws, and coYield answers the next coResume's v. Twin of
+// installGojaCoroutines (commonscript.go).
+func coroutineBindings(b map[string]interface{}) {
+	b["coNew"] = jsHostFunc("coNew", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return &jsGenerator{fn: argAt(args, 0)}
+	})
+	b["coResume"] = jsHostFunc("coResume", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		g, ok := argAt(args, 0).(*jsGenerator)
+		if !ok {
+			rt.fail("coResume needs a coroutine")
+		}
+		return g.step(rt, argAt(args, 1))
+	})
+	b["coYield"] = jsHostFunc("coYield", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		if rt.curGen == nil {
+			rt.fail("coYield outside a coroutine")
+		}
+		return rt.curGen.suspend(argAt(args, 0))
+	})
 }
 
 // ----------------------------------------------------------------------------

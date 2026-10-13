@@ -963,6 +963,15 @@ Two things follow that are worth knowing before touching this area:
   invisible to it. This is the same defect §7.14 fixed one arm further out, it
   survived that round, and it was a live halves divergence: 2 of 4 legs.
 
+**Both tag hosts now have a real suspension primitive**, so replay is no longer
+forced: `coNew(f)`, `coResume(co, v)` (answers `{value, done}`, re-raises what f
+throws) and `coYield(v)` run f on a call stack of its own - under goja a goroutine
+over a vm of its own (`third_party/goja/coroutine.go`, the handshake switches
+`r.vm`), under `-frozen` the compiled programs' `jsGenerator`. The interpreter's
+own run state (scope chain, call positions) has to be switched by the script at
+every resume and yield. lua's coroutines run on it; python's and js's generators
+still replay.
+
 ## 7.15 The value model already carries the type — you rarely need a type table
 
 Swift's write-site adoption looked like it needed a per-variable declared-type
