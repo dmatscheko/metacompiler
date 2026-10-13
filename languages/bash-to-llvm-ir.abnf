@@ -24,7 +24,7 @@ ret unwinds back to it. Positional parameters live in a second global stack with
 count, so \"$@\" can expand to any number of words and shift and set -- are ordinary writes; a
 call pushes its field-expanded arguments and restores base, count and top afterwards, which is
 what makes recursion nest. And a word whose expansion can yield several fields is carried as an
-encoded FIELD LIST (a leading 0x02, each field followed by 0x01), so \"$@\", \"${a[@]}\" and an
+encoded FIELD LIST (0x02, each field followed by 0x01, in the arena region rt_islist knows), so \"$@\", \"${a[@]}\" and an
 unquoted expansion split on IFS all flow through the same one representation; a builtin with a
 fixed argument list flattens it with rt_wordjoin.
 
@@ -1226,6 +1226,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // against it answers ${v-default} / ${v:+alt} and friends.
     var gUnset = rtGlobal("unset_marker", emptyTy)
     function unsetPtr(b) { return b.NewGetElementPtr(emptyTy, gUnset, zero, zero) }
+    // The empty field list. A list is known by its address, not its first byte (rt_islist).
+    var nilTy = llvm.types.NewArray(2, i8)
+    var gListNil = rtGlobal("list_nil", nilTy)
+    function nilList(b) { return b.NewGetElementPtr(nilTy, gListNil, zero, zero) }
 
     // Variable storage is ONE global array of char*, indexed by a compile-time id, so the
     // `local` unwinder can restore a slot chosen at run time (a per-name global could only
@@ -1444,7 +1448,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtHasChar = rtDecl("rt_haschar", false, [1, 0])
     var rtReadLine = rtDecl("rt_read_line", true, [0])
 
-    // field lists: a value carrying more than one word is "\x02" followed by the fields,
+    // field lists: a value carrying more than one word is "\x02" followed by the fields (rt_islist),
     // each terminated by "\x01"; rt_fput appends one field, escaped (bash-rt.c).
     var rtFput = rtDecl("rt_fput", true, [1, 1])
     var rtField = rtDecl("rt_field", true, [1, 1, 0, 0])
@@ -1523,6 +1527,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // the positional parameters.
     var rtArgPush = rtDecl("rt_argpush", false, [1])
+    var rtIsList = rtDecl("rt_islist", false, [1])
     // `echo` with its flag scan at RUN TIME - see emitEcho.
     var rtEcho = rtDecl("rt_echo", false, [1, 0, 0])
     var rtParam = rtDecl("rt_param", true, [0])
@@ -1917,7 +1922,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     if (idxO == "+") {
                         pickedE = b.NewSelect(blankE, emptyPtr(b), de)
                         // An unset or empty [@] list stays that empty list: "${a[@]+x}" is no word.
-                        pickedL = b.NewSelect(blankL, b.NewSelect(star, emptyPtr(b), gepStr(b, "\x02")), de)
+                        pickedL = b.NewSelect(blankL, b.NewSelect(star, emptyPtr(b), nilList(b)), de)
                     }
                     if (idxO == "=") { b.NewCall(isAssoc ? rtArrSet : rtArrIset, [nmOf(b), kk, pickedE]) }
                     if (idxO == "?") {
@@ -2272,7 +2277,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // Quoted: a $* inside joins even within an unquoted ${x:-"$*"}.
             var svq = uqStarEmit
             uqStarEmit = false
-            var acc = gepStr(b, "\x02")
+            var acc = nilList(b)
             var open = emptyPtr(b)      // the field being built
             var opened = zero
             var k
@@ -2361,7 +2366,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // last close) joins acc and open as loop-carried state. rt_bnd_acc2 in bash-rt.c has the
         // rule; bash-interpreter.abnf's mkWord is the same state machine.
         return {s: anySub, f: true, c: undefined, fn: function(b) {
-            var acc = gepStr(b, "\x02")
+            var acc = nilList(b)
             var open = emptyPtr(b)
             var opened = zero
             var k
@@ -2381,9 +2386,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     // with no boundary of its own.
                     var ifsv = ifsValue(b)
                     var uv = b.NewCall(rtUqList, [r.v, ifsv])
-                    var isL = b.NewICmp(llvm.enum.IPredEQ,
-                                b.NewZExt(b.NewLoad(i8, b.NewGetElementPtr(i8, uv, zero)), i32),
-                                llvm.constant.NewInt(i32, 2))
+                    var isL = b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtIsList, uv), zero)
                     fv = b.NewSelect(isL, uv, b.NewCall(rtSplitIfs, [uv, ifsv]))
                     lead = b.NewSelect(isL, zero, b.NewCall(rtIfsLead, [uv, ifsv]))
                     trail = b.NewSelect(isL, zero, b.NewCall(rtIfsTrail, [uv, ifsv]))
@@ -3063,7 +3066,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // rt_echo: its \c ends all further output.
         if (runtimeFlags || escapes) {
             var ei
-            var acc = gepStr(b, "\x02")
+            var acc = nilList(b)
             // NOT evalWord: that JOINS a field list into one word, and the whole point
             // here is that `a=(-n hi); echo "${a[@]}"` hands echo two words and bash reads
             // the first as a flag. rt_catfields takes a plain string as one field, so the
@@ -3442,7 +3445,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (k = 0; k < args.length; k++) {
                 var list = zero64
                 if (typeof args[k] != "function") {
-                    list = gepStr(b, "\x02")
+                    list = nilList(b)
                     var w
                     for (w = 0; w < args[k].letws.length; w++) {
                         var rw = args[k].letws[w].fn(b)
@@ -3724,7 +3727,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b = rf.b
         // The operands as ONE field list: an unquoted operand is field-split, so the number of
         // operands is a run-time fact (`x="  a   b  "; printf '%s|' $x` prints `a|b|`).
-        var listV = gepStr(b, "\x02")
+        var listV = nilList(b)
         var i
         for (i = 1; i < a.length; i++) {
             var rw = a[i].fn(b)
@@ -3930,7 +3933,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // `command not found` fallback here, where the interpreter runs them.
     function emitComputedCommand(b, cmdT, argTs) {
         var listP = slotOf(i8ptr)
-        b.NewStore(gepStr(b, "\x02"), listP)
+        b.NewStore(nilList(b), listP)
         var rw = cmdT.fn(b)
         b = rw.b
         b.NewStore(b.NewCall(rtCatFields, [b.NewLoad(i8ptr, listP), rw.v]), listP)
@@ -4689,7 +4692,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (wordThunks == null) {
                 b.NewStore(b.NewCall(rtParams, [gepStr(b, " "), zero]), listP)
             } else {
-                b.NewStore(gepStr(b, "\x02"), listP)
+                b.NewStore(nilList(b), listP)
                 var k
                 for (k = 0; k < wordThunks.length; k++) {
                     var r = wordThunks[k].fn(b)

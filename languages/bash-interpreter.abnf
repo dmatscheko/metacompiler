@@ -2606,11 +2606,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // ---- field lists ------------------------------------------------------------------
     // A word thunk normally answers a plain string (exactly one field). When a word can
     // expand to SEVERAL fields - "$@", "${a[@]}", or an unquoted expansion split on IFS - it
-    // answers an ENCODED list instead: "\x02" followed by each field and a "\x01" after it.
-    // The trailing separator makes the empty list ("\x02") and the one-empty-field list
-    // ("\x02\x01") different, which is what makes `a=($empty)` produce no element at all.
+    // answers an ENCODED list instead: LIST_MARK followed by each field and a "\x01" after it.
+    // The trailing separator makes the empty list (LIST_MARK) and the one-empty-field list
+    // (LIST_MARK "\x01") different, which is what makes `a=($empty)` produce no element at all.
     // Inside a field a "\x02" escapes the character after it, so a field can hold "\x01" and
-    // "\x02" themselves. Twin of rt_fput / rt_getfield in languages/lib/bash-rt.c.
+    // "\x02" themselves. LIST_MARK is U+DFFF, which no value can start with: a byte becomes
+    // a character or a raw-byte surrogate U+DC80..U+DCFF, and any other low surrogate only
+    // follows a high one. So `w=$'\x02x'` stays a plain one-field string.
+    // Twin of rt_fput / rt_getfield in languages/lib/bash-rt.c, where a list's type is static.
+    var LIST_MARK = String.fromCharCode(57343)
     function encField(f0) {
         var f = "" + f0
         if (f.indexOf("\x01") < 0 && f.indexOf("\x02") < 0) { return f }
@@ -2624,12 +2628,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return out
     }
     function encFields(list) {
-        var out = "\x02"
+        var out = LIST_MARK
         var i
         for (i = 0; i < list.length; i++) { out = out + encField(list[i]) + "\x01" }
         return out
     }
-    function isFields(s) { return s.length > 0 && s.charAt(0) == "\x02" }
+    function isFields(s) { return s.length > 0 && s.charAt(0) == LIST_MARK }
     function decFields(s) {
         if (!isFields(s)) { return [s] }
         var out = []

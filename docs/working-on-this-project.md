@@ -738,9 +738,7 @@ a decision was taken:
   `cc` says 16); `_Bool b = 5` holds 5; identical string literals are not merged
   (unspecified in C); `c-interpreter.abnf` deliberately lacks the varargs `printf`
   family, `exit`/`abort`, `qsort`/`bsearch` and `malloc`/`free`.
-- **Bash**: a string whose first byte is `0x02` is read as the in-band field-LIST
-  marker, so `${#v}` of a lone `$'\x02'` is 0 where bash says 1 (fixing it means
-  re-plumbing the field encoding in both grammars); both our engines accept
+- **Bash**: both our engines accept
   `[[:word:]]` and `[[:ascii:]]` which bash rejects, and converging means changing
   `regex.js`, shared by ten languages; bash *errors* on
   `declare -A f=([k]=v one two)` where we accept; bash's associative-array

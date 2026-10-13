@@ -2596,6 +2596,30 @@ s54() {
   check xbr6 "$o" "l1 l2"
 }
 
+# ===== SECTION 55: a value whose first byte is 0x02 =====
+# 0x02 is ordinary data at the START of a value too: a plain string is one field whatever
+# its first byte. Every expected value is bash 5.3's.
+s55() {
+  local w=$'\x02lead' y=$'a\x02b' s=$'\x02' o e a
+  check stx1 "$(printf '<%s>' "$w" ${w})" "<$w><$w>"
+  check stx2 "${y:1}" "${s}b"
+  check stx3 "${#s} ${#w}" "1 5"
+  check stx4 "$(printf '<%s>' $w "$w"x x"$w")" "<$w><${w}x><x$w>"
+  a=("$w" "$s" b)
+  check stx5 "${#a[@]} ${#a[0]} $(printf '<%s>' "${a[@]}")" "3 5 <$w><$s><b>"
+  s55f() { printf '%s:' "$#" "$@"; }
+  check stx6 "$(s55f "$w") $(s55f $w) $(s55f "$s")" "1:$w: 1:$w: 1:$s:"
+  set -- "$w" z
+  check stx7 "$(printf '<%s>' "$@" "$1")" "<$w><z><$w>"
+  o=
+  for e in "$w" $w; do o="$o[$e]"; done
+  check stx8 "$o" "[$w][$w]"
+  o=$(printf '%s' "$w")
+  check stx9 "${#o} ${w/l/L} ${s:-dflt}" "5 ${s}Lead $s"
+  e="${w}${w}"; o=${w:0:3}
+  check stx10 "${#e} ${#o}" "10 3"
+}
+
 s01   # SECTION-CALL 01
 s02   # SECTION-CALL 02
 s03   # SECTION-CALL 03
@@ -2650,5 +2674,6 @@ s51   # SECTION-CALL 51
 s52   # SECTION-CALL 52
 s53   # SECTION-CALL 53
 s54   # SECTION-CALL 54
+s55   # SECTION-CALL 55
 echo "full: $checks checks, $fails failures"
 exit $fails

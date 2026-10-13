@@ -29,6 +29,8 @@ int exit_code;
  * ${v-default} / ${v:+alt}. */
 char empty[1];
 char unset_marker[1];
+/* The empty field list (see rt_fput); every other list lives in the arena's list region. */
+char list_nil[2] = {2, 0};
 
 /* $0: the program's own path, stored by main's entry block from c.file. It is a
  * global rather than an argument because rt_getvar_byname has to answer ${!r}
@@ -126,6 +128,9 @@ int frame_n;
 
 /* ---- prototypes of every runtime helper (any chunk may call any other) ---- */
 char *rt_bump(int n);
+char *rt_lbump(int n);
+int rt_islist(char *v);
+char *rt_lcat(char *a, char *b);
 int rt_strlen(char *s);
 int rt_charlen(char *s);
 int rt_charoff(char *s, int k);
@@ -329,19 +334,55 @@ void rt_die(char *what, int want, int used, int cap)
  *
  * The bounds check is essential: without it a program that outruns 4 MiB
  * writes over the globals after the arena and dies silently with SIGSEGV.
- * The comparison is written `n > 4194304 - p` and not `p + n > 4194304` so it
- * cannot itself overflow: p is always in [0, 4194304] and n >= 0.
+ * The comparison is written `n > list_pos - p` and not `p + n > list_pos` so it
+ * cannot itself overflow: p is always in [0, list_pos] and n >= 0.
+ *
+ * FIELD LISTS ARE ALLOCATED FROM THE OTHER END (rt_lbump), downward from
+ * list_pos, and a value IS a list exactly when it lies in that region or is
+ * list_nil (rt_islist). The 0x02 a list starts with is therefore not what makes
+ * it one, and a plain string may start with that byte too: `w=$'\x02x'` is one
+ * field holding three characters.
  */
 char arena[4194304];
 int arena_pos;
+int list_pos = 4194304;
 
 char *rt_bump(int n) {
     int p = arena_pos;
-    if (n < 0 || n > 4194304 - p) {
-        rt_die("string arena", n, p, 4194304);
+    if (n < 0 || n > list_pos - p) {
+        rt_die("string arena", n, p + (4194304 - list_pos), 4194304);
     }
     arena_pos = p + n;
     return &arena[p];
+}
+
+char *rt_lbump(int n) {
+    int p = list_pos;
+    if (n < 0 || n > p - arena_pos) {
+        rt_die("string arena", n, arena_pos + (4194304 - p), 4194304);
+    }
+    list_pos = p - n;
+    return &arena[p - n];
+}
+
+int rt_islist(char *v) {
+    char *lo;
+    if (v[0] != 2) return 0;
+    lo = &arena[list_pos];
+    return (v == &list_nil[0] || (v >= lo && v < lo + (4194304 - list_pos))) ? 1 : 0;
+}
+
+/* The list a followed by the raw bytes b (more fields, already encoded). */
+char *rt_lcat(char *a, char *b) {
+    int la = rt_strlen(a);
+    int lb = rt_strlen(b);
+    char *dst = rt_lbump(la + lb + 1);
+    int i = 0;
+    while (i < la) { dst[i] = a[i]; i = i + 1; }
+    i = 0;
+    while (i < lb) { dst[la + i] = b[i]; i = i + 1; }
+    dst[la + lb] = 0;
+    return dst;
 }
 
 /* The same, 8-byte aligned, for a block of pointers. */
@@ -2660,13 +2701,13 @@ char *rt_printf(char *fmt, char *args)
 }
 
 /* ---- field lists ----------------------------------------------------------
- * A plain string is ONE field; a string that starts with "\x02" is a list, each
- * field followed by "\x01". Inside a field a 0x02 escapes the byte after it, so
- * a field can hold 0x01 and 0x02 themselves (`x=$'a\x01b'; printf '%s' "$x"` is
- * one operand): rt_fput writes a field so, rt_getfield reads it back. Twin of
+ * A plain string is ONE field; a list (rt_islist) is "\x02" followed by each
+ * field and a "\x01" after it. Inside a field a 0x02 escapes the byte after it,
+ * so a field can hold 0x01 and 0x02 themselves (`x=$'a\x01b'; printf '%s' "$x"`
+ * is one operand): rt_fput writes a field so, rt_getfield reads it back. Twin of
  * encFields / decFields in bash-interpreter.abnf. */
 
-/* acc followed by the field f, escaped, and its terminator. */
+/* The list acc followed by the field f, escaped, and its terminator. */
 char *rt_fput(char *acc, char *f) {
     int la = rt_strlen(acc);
     int lf = 0, ne = 0;
@@ -2676,7 +2717,7 @@ char *rt_fput(char *acc, char *f) {
         if (f[lf] == 1 || f[lf] == 2) ne = ne + 1;
         lf = lf + 1;
     }
-    dst = rt_bump(la + lf + ne + 2);
+    dst = rt_lbump(la + lf + ne + 2);
     while (i < la) { dst[i] = acc[i]; i = i + 1; }
     d = la;
     i = 0;
@@ -2692,9 +2733,8 @@ char *rt_fput(char *acc, char *f) {
 }
 
 int rt_nfields(char *v) {
-    int c0 = (int)(unsigned char)v[0];
     int i = 1, n = 0;
-    if (c0 != 2) return 1;
+    if (rt_islist(v) == 0) return 1;
     while (v[i] != 0) {
         if (v[i] == 2 && v[i + 1] != 0) i = i + 1;
         else if (v[i] == 1) n = n + 1;
@@ -2705,11 +2745,10 @@ int rt_nfields(char *v) {
 
 /* Field k of a list, its escapes removed. */
 char *rt_getfield(char *v, int k) {
-    int c0 = (int)(unsigned char)v[0];
     int i = 1, n = 0, s = 1, ne = 0;
     char *dst;
     int j, o;
-    if (c0 != 2) {
+    if (rt_islist(v) == 0) {
         if (k == 0) return v;
         return &empty[0];
     }
@@ -2754,10 +2793,10 @@ char *rt_uqlist(char *l, char *ifs) {
     int i = 1;
     int o = 0;
     char *dst;
-    if ((int)(unsigned char)l[0] != 2 || rt_isfin(l) != 0) return l;
-    if (len < 2) return sep == 0 ? "\x02" : &empty[0];
-    dst = rt_bump(len + 1);
+    if (rt_islist(l) == 0 || rt_isfin(l) != 0) return l;
+    if (len < 2) return sep == 0 ? &list_nil[0] : &empty[0];
     if (sep == 0) {
+        dst = rt_lbump(len + 1);
         /* the list as it is, minus the terminator of each empty field; fs is
          * where the field being copied starts. */
         int fs = 1;
@@ -2777,6 +2816,7 @@ char *rt_uqlist(char *l, char *ifs) {
             i = i + 1;
         }
     } else {
+        dst = rt_bump(len + 1);
         while (i < len) {
             if (l[i] == 2 && i + 1 < len) { i = i + 1; dst[o] = l[i]; o = o + 1; }
             else if (l[i] != 1) { dst[o] = l[i]; o = o + 1; }
@@ -2790,11 +2830,10 @@ char *rt_uqlist(char *l, char *ifs) {
 
 /* rt_wordjoin: a field list flattened back to one string, fields space-joined. */
 char *rt_wordjoin(char *v) {
-    int c0 = (int)(unsigned char)v[0];
     int n = rt_nfields(v);
     char *op = &empty[0];
     int i = 0;
-    if (c0 != 2) return v;
+    if (rt_islist(v) == 0) return v;
     while (i < n) {
         char *cur = op;
         char *withsp = rt_strcat(cur, " ");
@@ -2827,9 +2866,9 @@ char *rt_splitifs(char *v, char *ifs) {
     dst = &empty[0];
     /* A field list is split as the one value rt_uqlist makes of it; under a null
      * IFS that is a list again, already split. */
-    if ((int)(unsigned char)v[0] == 2) {
+    if (rt_islist(v) != 0) {
         v = rt_uqlist(v, ifs);
-        if ((int)(unsigned char)v[0] == 2) return v;
+        if (rt_islist(v) != 0) return v;
     }
     len = rt_strlen(v);
     /* THE POSIX DELIMITER RULE: bash 5.3.15 splits "a:b::c" under IFS=: into
@@ -2850,9 +2889,8 @@ char *rt_splitifs(char *v, char *ifs) {
      * is measurably faster for the common separator-free value: no IFS
      * character anywhere means one field spanning the whole value, and a plain
      * string IS a one-field list in this protocol. An empty value has NO fields
-     * (the "\x02" literal below), and a value already carrying the 0x02 marker
-     * must not be returned as itself or it would be re-read as a list. */
-    if (len > 0 && (int)(unsigned char)v[0] != 2) {
+     * (list_nil below). */
+    if (len > 0) {
         while (q < len && rt_haschar(ifs, (int)(unsigned char)v[q]) == 0) { q = q + 1; }
         if (q == len) return v;
     }
@@ -2884,16 +2922,14 @@ char *rt_splitifs(char *v, char *ifs) {
         }
         if (pass == 0) {
             /* no fields at all: the empty list is a module literal. */
-            if (nf == 0) return "\x02";
+            if (nf == 0) return &list_nil[0];
             /* EXACTLY ONE FIELD AND NO SEPARATOR BYTE AT ALL - by far the
              * commonest case, and it needs no allocation, because a plain string
              * IS a one-field list in this protocol: rt_nfields answers 1 for it,
              * rt_getfield(v, 0) answers v, rt_wordjoin returns it unchanged, and
-             * rt_bnd_acc/rt_bnd_open both go through rt_nfields. The only value
-             * that must not take this path is one whose first byte is already the
-             * 0x02 list marker, which would then be re-read as a list. */
-            if (nf == 1 && tot == len && (int)(unsigned char)v[0] != 2) return v;
-            dst = rt_bump(1 + tot + ne + nf + 1);
+             * rt_bnd_acc/rt_bnd_open both go through rt_nfields. */
+            if (nf == 1 && tot == len) return v;
+            dst = rt_lbump(1 + tot + ne + nf + 1);
             dst[0] = 2;
         } else {
             dst[o] = 0;
@@ -3256,7 +3292,7 @@ int rt_arr_count(char *nm) {
 char *rt_arr_list(char *nm, char *sep, int star, int keys) {
     int n = arr_n;
     int isStar = star != 0;
-    char *out = isStar ? empty : "\002";
+    char *out = isStar ? empty : list_nil;
     int i = 0, c = 0;
     while (i < n) {
         int same = rt_streq(nm, arr_nm[i]) != 0;
@@ -3298,8 +3334,8 @@ long rt_arr_nextidx(char *nm) {
  * dfltWord's {fin} in bash-interpreter.abnf. */
 char *fin_last;
 char *rt_finlist(char *v) {
-    if ((int)(unsigned char)v[0] == 2) fin_last = rt_strcat(v, empty);
-    else fin_last = rt_fput("\002", v);
+    if (rt_islist(v) != 0) fin_last = rt_lcat(v, empty);
+    else fin_last = rt_fput(list_nil, v);
     return fin_last;
 }
 
@@ -3447,16 +3483,16 @@ char *rt_sc_list(char *nm, char *sep, int star, int keys) {
     if (rt_isposnm(nm) != 0) return rt_params(sep, star);
     if (rt_arr_any(nm) != 0) return rt_arr_list(nm, sep, star, keys);
     v = rt_getvar_byname(nm);
-    if (v == &unset_marker[0]) return star != 0 ? &empty[0] : "\002";
+    if (v == &unset_marker[0]) return star != 0 ? &empty[0] : &list_nil[0];
     if (keys != 0) v = "0";
     if (star != 0) return v;
-    return rt_fput("\002", v);
+    return rt_fput(list_nil, v);
 }
 
 /* The positional parameters as a field list that starts at $0, which is what
  * ${@:off:len} counts from ("${@:1}" is $1 on). */
 char *rt_params0(void) {
-    return rt_catfields(rt_fput("\002", script_name), rt_params(empty, 0));
+    return rt_catfields(rt_fput(list_nil, script_name), rt_params(empty, 0));
 }
 
 /* ${!p*} / ${!p@}: the names of the SET variables starting with p, sorted - a
@@ -3498,13 +3534,12 @@ char *rt_pfxnames(char *p, char *sep, int star) {
         }
         i = i + 1;
     }
-    out = star != 0 ? empty : "\002";
+    out = star != 0 ? empty : list_nil;
     i = 0;
     while (i < n) {
         t = out;
         if (star != 0 && i > 0) t = rt_strcat(t, sep);
-        t = rt_strcat(t, nm[i]);
-        if (star == 0) t = rt_strcat(t, "\001");
+        if (star != 0) t = rt_strcat(t, nm[i]); else t = rt_fput(t, nm[i]);
         out = t;
         i = i + 1;
     }
@@ -3697,19 +3732,15 @@ char *rt_declxa(char *nm, char *at, char *v, int isset, int assoc, char *ifs, in
         out = rt_strcat(out, " ");
         return rt_strcat(out, asg);
     }
-    if (ifs[0] == 0) {
-        out = rt_strcat("\002declare\001", flag);
-        out = rt_strcat(out, "\001");
-        out = rt_strcat(out, asg);
-        return rt_strcat(out, "\001");
-    }
+    if (ifs[0] == 0) return rt_fput(rt_fput(rt_fput(list_nil, "declare"), flag), asg);
     val = rt_substr(asg, rt_strlen(nm) + 1, rt_strlen(asg) - rt_strlen(nm) - 1);
     txt = rt_strcat(rt_strcat(rt_strcat("declare ", flag), " "), rt_strcat(nm, "="));
     fs = rt_splitifs(txt, ifs);
-    if ((int)(unsigned char)fs[0] != 2) return rt_strcat(fs, val);
+    if (rt_islist(fs) == 0) return rt_strcat(fs, val);
     n = rt_strlen(fs);
-    if (n < 2 || rt_ifstrail(txt, ifs) != 0) return rt_strcat(rt_strcat(fs, val), "\001");
-    return rt_strcat(rt_strcat(rt_substr(fs, 0, n - 1), val), "\001");
+    if (n < 2 || rt_ifstrail(txt, ifs) != 0) return rt_fput(fs, val);
+    /* glued onto the last field: drop its terminator and append */
+    return rt_fput(rt_substr(fs, 0, n - 1), val);
 }
 
 /* ${@@A} / ${*@A}: the command that would recreate the positional parameters,
@@ -3735,26 +3766,24 @@ char *rt_declpos(char *ifs, char *sep, int star) {
         }
         return out;
     }
-    if (cnt == 0) return "\002";
+    if (cnt == 0) return list_nil;
     if (ifs[0] == 0) {
-        out = "\002set\001--\001";
+        out = rt_fput(rt_fput(list_nil, "set"), "--");
     } else {
         fs = rt_splitifs("set -- ", ifs);
         n = rt_strlen(fs);
-        if ((int)(unsigned char)fs[0] != 2) {
-            out = rt_strcat(rt_strcat("\002", fs), rt_shquote(argv[frame_base]));
-            out = rt_strcat(out, "\001");
+        if (rt_islist(fs) == 0) {
+            out = rt_fput(list_nil, rt_strcat(fs, rt_shquote(argv[frame_base])));
             i = 1;
         } else if (n < 2 || rt_ifstrail("set -- ", ifs) != 0) {
             out = fs;
         } else {
-            out = rt_strcat(rt_substr(fs, 0, n - 1), rt_shquote(argv[frame_base]));
-            out = rt_strcat(out, "\001");
+            out = rt_fput(rt_substr(fs, 0, n - 1), rt_shquote(argv[frame_base]));
             i = 1;
         }
     }
     while (i < cnt) {
-        out = rt_strcat(rt_strcat(out, rt_shquote(argv[frame_base + i])), "\001");
+        out = rt_fput(out, rt_shquote(argv[frame_base + i]));
         i = i + 1;
     }
     return out;
@@ -3783,7 +3812,7 @@ char *rt_kvq(char *nm, int assoc, char *v, int isset) {
 
 /* ${a[@]@k}: the same pairs, unquoted, as separate FIELDS. */
 char *rt_kvp(char *nm, char *sep, int star, char *v, int isset) {
-    char *out = star != 0 ? empty : "\002";
+    char *out = star != 0 ? empty : list_nil;
     int c = 0;
     int i = 0;
     if (rt_arr_any(nm) == 0) return rt_shq(v, isset);
@@ -3815,14 +3844,13 @@ char *rt_attrf(char *nm, char *at, char *sep, int star) {
     } else if (n == 0) {
         n = 1;
     }
-    out = star != 0 ? empty : "\002";
+    out = star != 0 ? empty : list_nil;
     while (i < n) {
         if (star != 0) {
             if (i > 0) out = rt_strcat(out, sep);
             out = rt_strcat(out, at);
         } else {
-            out = rt_strcat(out, at);
-            out = rt_strcat(out, "\001");
+            out = rt_fput(out, at);
         }
         i = i + 1;
     }
@@ -4015,7 +4043,7 @@ int rt_arr_append(char *nm, char *f) {
 char *rt_arr_slice(char *nm, long off, long len, int haslen, char *sep, int star) {
     int n = arr_n;
     int isStar = star != 0;
-    char *out = isStar ? empty : "\002";
+    char *out = isStar ? empty : list_nil;
     int i = 0;
     long taken = 0;
     if (haslen != 0 && len < 0) {
@@ -4051,7 +4079,7 @@ char *rt_arr_slice(char *nm, long off, long len, int haslen, char *sep, int star
 char *rt_slicefields(char *f, int off, int n, char *sep, int star) {
     int cnt = rt_nfields(f);
     int isStar = star != 0;
-    char *out = isStar ? empty : "\002";
+    char *out = isStar ? empty : list_nil;
     int i = off, taken = 0;
     while (i < cnt && taken < n) {
         char *cur = out;
@@ -4128,7 +4156,7 @@ char *rt_mapf(char *v, int op, char *p, char *r, int mode, char *sep, int star) 
     int n = rt_nfields(v);
     int i = 0;
     char *out;
-    if (star != 0) out = &empty[0]; else out = "\002";
+    if (star != 0) out = &empty[0]; else out = list_nil;
     while (i < n) {
         char *f = rt_getfield(v, i);
         char *g;
@@ -4152,7 +4180,7 @@ char *rt_mapf(char *v, int op, char *p, char *r, int mode, char *sep, int star) 
 /* i8* rt_catfields(i8* a, i8* b): the list a followed by b's fields, a plain b
  * being one field. */
 char *rt_catfields(char *a, char *b) {
-    if ((int)(unsigned char)b[0] == 2) return rt_strcat(a, &b[1]);
+    if (rt_islist(b) != 0) return rt_lcat(a, &b[1]);
     return rt_fput(a, b);
 }
 
@@ -4239,7 +4267,7 @@ char *rt_params(char *sep, int star) {
     int cnt = frame_n;
     int base = frame_base;
     int isStar = star != 0;
-    char *out = isStar ? empty : "\002";
+    char *out = isStar ? empty : list_nil;
     int i = 0;
     while (i < cnt) {
         char *v = argv[base + i];
