@@ -188,6 +188,37 @@ function swRound(x) {
     return Math.floor(a + 0.5)
 }
 
+// Double.rounded(_ rule:), the rule an unqualified case value (`.down`) read by
+// name. Every rule but the default works off Math.floor, exact below 2^52 (every
+// double at or above it is already integral); a zero result from a negative
+// operand keeps its sign. Twin of swRoundRule in languages/swift-interpreter.abnf
+// and abnf/jsrtswift.go.
+function swRoundRule(x, rv) {
+    var rule = "toNearestOrAwayFromZero"
+    if (swIsObj(rv)) { if (rv["__ecase"] === true) { rule = rv["__ename"] } }
+    if (rule === "toNearestOrAwayFromZero") { return swRound(x) }
+    if (x !== x) { return x }
+    if (x === 0) { return x }
+    var a = x
+    if (a < 0) { a = -a }
+    if (a >= 4503599627370496) { return x }
+    var fl = Math.floor(x)
+    var up = fl
+    if (fl !== x) { up = fl + 1 }
+    var r = fl
+    if (rule === "up") { r = up }
+    else if (rule === "towardZero") { if (x < 0) { r = up } }
+    else if (rule === "awayFromZero") { if (x >= 0) { r = up } }
+    else if (rule === "toNearestOrEven") {
+        var d = x - fl
+        if (d > 0.5) { r = up }
+        else if (d === 0.5) { if (fl % 2 !== 0) { r = up } }
+    }
+    else if (rule !== "down") { fail("unknown rounding rule: " + rule) }
+    if (r === 0) { if (x < 0) { return 0 / (0 - 1) } }
+    return r
+}
+
 // ===================================================== float rendering ======
 //
 // swFloStr is Swift's Double.description (SwiftDtoa): the shortest decimal that
@@ -2854,7 +2885,7 @@ function js_swmcall(recv, name, args) {
     // Float. squareRoot is correctly rounded at 32 bits by the same
     // double-then-round argument as the operators.
     var f32 = swIsF32(recv)
-    if (name === "rounded") { return swReFlo(swRound(f), f32) }
+    if (name === "rounded") { return swReFlo(swRoundRule(f, args.length > 0 ? args[0] : undefined), f32) }
     if (name === "squareRoot") { return swReFlo(Math.sqrt(f), f32) }
     if (name === "truncatingRemainder") { return swReFlo(f % a0, f32) }
     if (name === "isMultiple") { return (f % a0) === 0 }
@@ -3227,6 +3258,12 @@ function js_swget(v, k) {
         if (k === "isZero") { return f === 0 }
         if (k === "description") { return swFloDesc(v) }
         if (k === "magnitude") { return swReFlo(Math.abs(f), swIsF32(v)) }
+        // .sign is a FloatingPointSign case, compared and printed by name.
+        if (k === "sign") {
+            var neg = f < 0
+            if (f === 0) { neg = 1 / f < 0 }
+            return {__ecase: true, __etype: "FloatingPointSign", __ename: neg ? "minus" : "plus"}
+        }
     }
     if (sintIs(v)) {
         if (k === "description") { return sintStr(v) }

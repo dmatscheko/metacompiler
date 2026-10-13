@@ -2950,6 +2950,30 @@ KwContinue  = "continue" KwEnd ;
         }
         return Math.round(f)
     }
+    // Double.rounded(_ rule:), the rule an unqualified case value (`.down`) whose
+    // name is read here. Every rule but the default works off floor(f), which is
+    // exact below 2^52 (every double at or above it is already integral); a zero
+    // result from a negative operand keeps its sign. Twins: swRoundRule in
+    // lib/swift-rt.metajs and abnf/jsrtswift.go.
+    function swRoundRule(f, rv) {
+        var rule = rv != undefined && rv !== null && typeof rv == "object" && rv.__ecase === true ? rv.__ename : "toNearestOrAwayFromZero"
+        if (rule == "toNearestOrAwayFromZero") { return swRoundHalfAway(f) }
+        if (f !== f || f === 0 || f === swInfF || f === swInfF * swNegOne) { return f }
+        if (f >= 4503599627370496 || f <= -4503599627370496) { return f }
+        var fl = Math.floor(f)
+        var up = fl === f ? fl : fl + 1
+        var r = fl
+        if (rule == "up") { r = up }
+        else if (rule == "towardZero") { r = f < 0 ? up : fl }
+        else if (rule == "awayFromZero") { r = f < 0 ? fl : up }
+        else if (rule == "toNearestOrEven") {
+            var d = f - fl
+            r = d < 0.5 ? fl : (d > 0.5 ? up : (fl % 2 === 0 ? fl : up))
+        }
+        else if (rule != "down") { fail("unknown rounding rule: " + rule) }
+        if (r === 0 && f < 0) { return 0 / swNegOne }
+        return r
+    }
     // Int arithmetic is 64 bit at the operand's width; Double arithmetic is not. The
     // two are told apart by the BOX (see swFlo above): an operation whose operands
     // are both integral answers like Int, and one with a boxed operand answers a
@@ -3600,6 +3624,8 @@ KwContinue  = "continue" KwEnd ;
             // and the compiled halves through Math.abs). The sign of a zero only
             // shows through 1/v - the same guard the `abs` host global carries.
             if (name == "magnitude") { return swReFlo(fv < 0 || (fv == 0 && 1 / fv < 0) ? 0 - fv : fv, isF32(o)) }
+            // .sign is a FloatingPointSign case, compared and printed by name.
+            if (name == "sign") { return newCaseVal("FloatingPointSign", fv < 0 || (fv == 0 && 1 / fv < 0) ? "minus" : "plus", undefined, null, null, undefined) }
             var ft = builtinTable("Double", false)
             if (ft != null && hasOwn(ft, name)) { return ft[name] }
             // A computed property an `extension Double` added.
@@ -4068,7 +4094,7 @@ KwContinue  = "continue" KwEnd ;
             // Every one of these keeps the RECEIVER'S width: a Float method
             // answers a Float.
             var tf32 = isF32(target)
-            if (name == "rounded") { return swReFlo(swRoundHalfAway(tf), tf32) }
+            if (name == "rounded") { return swReFlo(swRoundRule(tf, args[0]), tf32) }
             if (name == "squareRoot") { return swReFlo(Math.sqrt(tf), tf32) }
             if (name == "truncatingRemainder") { return swReFlo(tf % swD(args[0]), tf32) }
             if (name == "isMultiple") { return tf % swD(args[0]) === 0 }

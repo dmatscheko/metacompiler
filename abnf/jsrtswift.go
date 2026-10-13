@@ -1307,7 +1307,11 @@ func init() {
 			f32 := f.sty == floJavaF
 			switch name {
 			case "rounded":
-				return w(swReFlo(swRoundHalfAway(f.f), f32))
+				var rv interface{} = jsUndef
+				if args != nil && len(args.elems) > 0 {
+					rv = args.elems[0]
+				}
+				return w(swReFlo(rt.swRoundRule(f.f, rv), f32))
 			case "squareRoot":
 				return w(swReFlo(math.Sqrt(f.f), f32))
 			case "truncatingRemainder":
@@ -1441,6 +1445,12 @@ func init() {
 					return rt.wrapStr(swFloDesc(f))
 				case "magnitude":
 					return w(swReFlo(math.Abs(f.f), f.sty == floJavaF))
+				case "sign": // a FloatingPointSign case, compared and printed by name
+					sign := "plus"
+					if math.Signbit(f.f) {
+						sign = "minus"
+					}
+					return w(swCaseVal("FloatingPointSign", sign))
 				}
 			}
 			if b, ok := u(a[0]).(jsGInt); ok {
@@ -1825,10 +1835,44 @@ func swIsNumeric(v interface{}) bool {
 	return false
 }
 
-// swRoundHalfAway is Double.rounded(), i.e. .toNearestOrAwayFromZero - which is
-// what Go's math.Round does, and NOT what a half-to-even or half-up rule gives:
-// (-2.5).rounded() is -3.
-func swRoundHalfAway(f float64) float64 { return math.Round(f) }
+// swRoundRule is Double.rounded(_ rule:); the rule is an unqualified case value
+// (`.down`) read by name, and no argument is .toNearestOrAwayFromZero - Go's
+// math.Round, so (-2.5).rounded() is -3. Twin of swRoundRule in
+// languages/swift-interpreter.abnf and lib/swift-rt.metajs.
+func (rt *jsrt) swRoundRule(f float64, rv interface{}) float64 {
+	rule := "toNearestOrAwayFromZero"
+	if o, ok := rv.(*jsObject); ok && o.props["__ecase"] == true {
+		rule, _ = o.props["__ename"].(string)
+	}
+	switch rule {
+	case "toNearestOrAwayFromZero":
+		return math.Round(f)
+	case "toNearestOrEven":
+		return math.RoundToEven(f)
+	case "up":
+		return math.Ceil(f)
+	case "down":
+		return math.Floor(f)
+	case "towardZero":
+		return math.Trunc(f)
+	case "awayFromZero":
+		if f < 0 {
+			return math.Floor(f)
+		}
+		return math.Ceil(f)
+	}
+	rt.fail("unknown rounding rule: %s", rule)
+	return f
+}
+
+// swCaseVal is a payload-free enum case of a builtin enum type.
+func swCaseVal(etype, name string) *jsObject {
+	o := newJSObject()
+	o.set("__ecase", true)
+	o.set("__etype", etype)
+	o.set("__ename", name)
+	return o
+}
 
 // swFloStr is Swift's Double.description (SwiftDtoa): the shortest decimal that
 // round-trips, written as a plain decimal when the scientific exponent is >= -4

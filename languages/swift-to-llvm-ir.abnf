@@ -5180,7 +5180,7 @@ KwContinue  = "continue" KwEnd ;
         // straight through to js_get for every other receiver, and only these
         // names emit it. (swGetField in swift-interpreter.abnf is the twin.)
         if (name == "description" || name == "debugDescription" || name == "bitWidth" || name == "magnitude"
-            || name == "isNaN" || name == "isInfinite" || name == "isFinite" || name == "isZero"
+            || name == "isNaN" || name == "isInfinite" || name == "isFinite" || name == "isZero" || name == "sign"
             // .indices is a Collection PROPERTY. js_swget answers a Range for an
             // Array and falls through to js_get for everything else, so a user type
             // with a member of that name is not hijacked. It PRODUCES a Range, so it

@@ -4025,6 +4025,24 @@ func s84() {
     check("84h", "\([2.5] + [3])" == "[2.5, 3.0]" && "\([1] + [2.5])" == "[1.0, 2.5]" && "\([Float]() + [2.5])" == "[2.5]")
 }
 
+// ===== SECTION 85: rounding rules and the sign of a Double =====
+// rounded(_:) honours its FloatingPointRoundingRule, and .sign is .minus for a
+// negative value and for -0.0. Operands are read out of an array so no constant
+// folder sees them. Every value read off swiftc 6.1.2.
+func s85() {
+    let d: [Double] = [1.5, 2.5, -2.5, 1e-05, 4.35, -0.5, -0.0]
+    check("85a", d[0].rounded(.down) == 1.0 && d[0].rounded(.towardZero) == 1.0 && d[1].rounded(.toNearestOrEven) == 2.0
+        && d[1].rounded(.down) == 2.0 && d[1].rounded() == 3.0 && d[1].rounded(.toNearestOrAwayFromZero) == 3.0)
+    check("85b", d[2].rounded(.toNearestOrEven) == -2.0 && d[2].rounded(.up) == -2.0 && d[2].rounded(.towardZero) == -2.0
+        && d[2].rounded(.down) == -3.0 && d[2].rounded(.awayFromZero) == -3.0)
+    check("85c", d[3].rounded(.up) == 1.0 && d[3].rounded(.awayFromZero) == 1.0 && d[4].rounded(.up) == 5.0
+        && d[4].rounded(.awayFromZero) == 5.0 && d[4].rounded(.toNearestOrEven) == 4.0)
+    check("85d", "\(d[5].rounded(.up)) \(d[5].rounded(.toNearestOrEven)) \(d[6].rounded(.down))" == "-0.0 -0.0 -0.0")
+    check("85e", d[6].sign == .minus && d[2].sign == .minus && d[0].sign == .plus && "\(d[2].sign)" == "minus")
+    let f: [Float] = [2.5]
+    check("85f", f[0].rounded(.toNearestOrEven) == 2 && "\(f[0].rounded(.up))" == "3.0")
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -4110,6 +4128,7 @@ func main() {
     s82() // SECTION-CALL 82
     s83() // SECTION-CALL 83
     s84() // SECTION-CALL 84
+    s85() // SECTION-CALL 85
     print("full: \(checks) checks, \(fails) failures")
 }
 
