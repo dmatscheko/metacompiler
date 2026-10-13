@@ -156,6 +156,7 @@ class Main {
         S70.run(); // SECTION-CALL 70
         S71.run(); // SECTION-CALL 71
         S72.run(); // SECTION-CALL 72
+        S73.run(); // SECTION-CALL 73
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -4129,5 +4130,31 @@ class S72 {
             + " " + new StringBuilder().appendCodePoint(128512).length() + " " + "abc".contentEquals(new StringBuilder("abc")) + " " + al.getFirst() + al.getLast()
             + al.removeFirst() + al;
         Main.check("mi72", misc.equals("10 -1-1 1-1 g 2 true 454[5]"));
+    }
+}
+
+// ===== SECTION 73: Collections' shuffle, rotate and views, Set.of, Character.equals =====
+//
+// shuffle(list, rnd) is java's swap walk over java's Random, rotate java's
+// cycle walk; the unmodifiable and singleton views refuse changes; Set.of
+// rejects a repeat; Character.equals is true only for a Character.
+// Every expected value is java 24.0.2's.
+class S73 {
+    static void run() {
+        List<Integer> l = new ArrayList<>(List.of(1, 2, 3, 4, 5, 6, 7, 8));
+        Collections.shuffle(l, new Random(7));
+        String sh = l.toString();
+        Collections.rotate(l, 2);
+        String ex = "";
+        try { Collections.unmodifiableMap(new HashMap<String, Integer>()).put("a", 1); } catch (UnsupportedOperationException e) { ex = ex + "U"; }
+        try { Collections.singleton(1).add(2); } catch (UnsupportedOperationException e) { ex = ex + "S"; }
+        try { Set.of(1, 1); } catch (IllegalArgumentException e) { ex = ex + e.getMessage(); }
+        String c = sh + l + " " + Collections.unmodifiableMap(new TreeMap<>(Map.of("b", 2, "a", 1))) + Collections.emptyMap() + Collections.emptySet()
+            + Collections.singletonMap("k", "v") + Collections.unmodifiableSet(new TreeSet<>(Set.of(2, 1))) + " " + ex + " " + List.copyOf(l).size()
+            + Collections.disjoint(List.of(1, 2), List.of(3)) + Collections.indexOfSubList(List.of(1, 2, 3, 2, 3), List.of(2, 3));
+        Main.check("cl73", c.equals("[1, 3, 7, 2, 5, 4, 8, 6][8, 6, 1, 3, 7, 2, 5, 4] {a=1, b=2}{}[]{k=v}[1, 2] USduplicate element: 1 8true1"));
+        Object ch = 'a';
+        Object str = "a";
+        Main.check("ce73", !ch.equals(str) && !ch.equals(97) && ch.equals('a') && new HashSet<>(Arrays.asList("1", '1')).size() == 2);
     }
 }

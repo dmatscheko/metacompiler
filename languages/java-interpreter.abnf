@@ -4003,14 +4003,10 @@ HasStatic   = :script(~~
             return jStrMethod(target, name, args)
         }
         if (target === jStrNS) { return jStrStatic(name, args) }
-        // A char answers the handful of methods a program calls on one. equals()
-        // accepts both a char and the one-character string it renders as.
+        // A char answers the handful of methods a program calls on one.
+        // Character.equals is true only for a Character of the same value.
         if (typeof target == "object" && target !== null && target.__char !== undefined) {
-            if (name == "equals") {
-                var oc = args[0]
-                if (typeof oc == "string") { return String.fromCharCode(target.__char) === oc }
-                return jNum(oc) === target.__char
-            }
+            if (name == "equals") { return jIsChar(args[0]) && args[0].__char === target.__char }
             if (name == "toString") { return String.fromCharCode(target.__char) }
             if (name == "compareTo") { return (target.__char - jNum(args[0])) | 0 }
         }

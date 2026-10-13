@@ -135,6 +135,13 @@ interface List<E> extends Collection<E> {
         l.listOf = true;
         return l;
     }
+    @SuppressWarnings("unchecked")
+    static <E> List<E> copyOf(Collection<? extends E> c) {
+        Object[] es = new Object[c.size()];
+        Iterator<? extends E> it = c.iterator();
+        for (int i = 0; it.hasNext(); i++) { es[i] = it.next(); }
+        return List.of((E[]) es);
+    }
 }
 
 class ArrayList<E> implements List<E> {
@@ -700,6 +707,54 @@ final class Collections {
     public static <T> void fill(List<? super T> list, T obj) {
         for (int i = 0; i < list.size(); i++) { list.set(i, obj); }
     }
+    // java's shuffle: from the end, each slot swapped with one drawn below it.
+    public static void shuffle(List<?> list) { shuffle(list, new Random()); }
+    public static void shuffle(List<?> list, Random rnd) {
+        for (int i = list.size(); i > 1; i--) { swap(list, i - 1, rnd.nextInt(i)); }
+    }
+    // java's rotate by cycles: element i moves to (i + distance) mod size.
+    @SuppressWarnings("unchecked")
+    public static void rotate(List<?> list, int distance) {
+        List<Object> l = (List<Object>) list;
+        int size = l.size();
+        if (size == 0) { return; }
+        distance = distance % size;
+        if (distance < 0) { distance += size; }
+        if (distance == 0) { return; }
+        for (int cycleStart = 0, nMoved = 0; nMoved != size; cycleStart++) {
+            Object displaced = l.get(cycleStart);
+            int i = cycleStart;
+            do {
+                i += distance;
+                if (i >= size) { i -= size; }
+                displaced = l.set(i, displaced);
+                nMoved++;
+            } while (i != cycleStart);
+        }
+    }
+    public static boolean disjoint(Collection<?> a, Collection<?> b) {
+        Iterator<?> it = a.iterator();
+        while (it.hasNext()) { if (b.contains(it.next())) { return false; } }
+        return true;
+    }
+    public static int indexOfSubList(List<?> source, List<?> target) {
+        int n = source.size();
+        int m = target.size();
+        for (int i = 0; i + m <= n; i++) {
+            boolean hit = true;
+            for (int j = 0; j < m && hit; j++) { hit = Objects.equals(source.get(i + j), target.get(j)); }
+            if (hit) { return i; }
+        }
+        return -1;
+    }
+    // The Map and Set ones are lib/java-map.java's (a call of one loads it,
+    // jMcallSfx in lib/java-decltypes.js).
+    public static <K, V> Map<K, V> emptyMap() { return Map.of(); }
+    public static <K, V> Map<K, V> singletonMap(K k, V v) { return UnmodifiableMap.single(k, v); }
+    public static <K, V> Map<K, V> unmodifiableMap(Map<? extends K, ? extends V> m) { return new UnmodifiableMap<K, V>(m); }
+    public static <T> Set<T> emptySet() { return Set.of(); }
+    public static <T> Set<T> singleton(T o) { return UnmodifiableSet.single(o); }
+    public static <T> Set<T> unmodifiableSet(Set<? extends T> s) { return new UnmodifiableSet<T>(s); }
 }
 
 // java.util.Queue, Deque and ArrayDeque: a circular buffer that doubles when

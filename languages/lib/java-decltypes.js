@@ -1636,6 +1636,9 @@ function jStrStreamName(name, n) { return n == 0 && (name == "chars" || name == 
 // A `.name(args)` suffix record, with its text and its arguments' static types.
 function jMcallSfx(name, args, text) {
     if (name == "stream" || jStrStreamName(name, args.length)) { jStreamWant = true }
+    // Collections' Map and Set members are lib/java-map.java's types.
+    if (name == "emptyMap" || name == "singletonMap" || name == "unmodifiableMap" || name == "emptySet"
+        || name == "singleton" || name == "unmodifiableSet") { jMapWant = true }
     return {kind: "mcall", name: name, args: args, stext: text, atys: jCallArgTys(text, args.length)}
 }
 // Gives each `.m(...)` suffix of a member chain `rty`, its receiver's static

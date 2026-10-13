@@ -24,6 +24,9 @@ interface Map<K, V> {
     boolean containsKey(Object key);
     void clear();
     Collection<Map.Entry<K, V>> entrySet();
+    Collection<K> keySet();
+    Collection<V> values();
+    void forEach(java.util.function.BiConsumer<? super K, ? super V> f);
 
     // Map.of: an unmodifiable map of up to ten pairs (MapOf).
     static <K, V> Map<K, V> of() { return new MapOf<K, V>(new Object[]{}); }
@@ -838,6 +841,14 @@ class TreeMapItr<E> implements Iterator<E> {
 }
 
 interface Set<E> extends Collection<E> {
+    // Set.of: an unmodifiable set; a null or a repeated element is rejected.
+    @SafeVarargs
+    static <E> Set<E> of(E... es) { return new SetOf<E>(es); }
+    @SuppressWarnings("unchecked")
+    static <E> Set<E> copyOf(Collection<? extends E> c) {
+        HashSet<E> h = new HashSet<E>(c);
+        return new SetOf<E>((E[]) h.toArray());
+    }
 }
 
 // The members every Set here answers from size, iterator, contains, add and
@@ -972,4 +983,65 @@ class TreeSet<E> extends AbstractSet<E> {
         Map.Entry<E, Object> e = map.pollLastEntry();
         return e == null ? null : e.getKey();
     }
+}
+
+// Set.of's set: a HashSet, so it iterates in HashSet's order (java leaves the
+// order unspecified and varies it from run to run), that refuses changes.
+class SetOf<E> extends HashSet<E> {
+    SetOf(E[] es) {
+        for (int i = 0; i < es.length; i++) {
+            if (es[i] == null) { throw new NullPointerException(); }
+            if (map.put(es[i], Boolean.TRUE) != null) { throw new IllegalArgumentException("duplicate element: " + es[i]); }
+        }
+    }
+    public boolean add(E e) { throw new UnsupportedOperationException(); }
+    public boolean remove(Object o) { throw new UnsupportedOperationException(); }
+    public void clear() { throw new UnsupportedOperationException(); }
+    public boolean removeIf(java.util.function.Predicate<? super E> filter) { throw new UnsupportedOperationException(); }
+}
+
+// Collections.unmodifiableSet / singleton: a read-only view of a set.
+class UnmodifiableSet<E> extends AbstractSet<E> {
+    Set<? extends E> s;
+    UnmodifiableSet(Set<? extends E> s) { this.s = s; }
+    static <E> Set<E> single(E o) {
+        HashSet<E> h = new HashSet<E>();
+        h.add(o);
+        return new UnmodifiableSet<E>(h);
+    }
+    public int size() { return s.size(); }
+    public boolean contains(Object o) { return s.contains(o); }
+    @SuppressWarnings("unchecked")
+    public Iterator<E> iterator() { return (Iterator<E>) s.iterator(); }
+    public boolean add(E e) { throw new UnsupportedOperationException(); }
+    public boolean remove(Object o) { throw new UnsupportedOperationException(); }
+    public void clear() { throw new UnsupportedOperationException(); }
+    public boolean removeIf(java.util.function.Predicate<? super E> filter) { throw new UnsupportedOperationException(); }
+}
+
+// Collections.unmodifiableMap / singletonMap: a read-only view of a map.
+@SuppressWarnings("unchecked")
+class UnmodifiableMap<K, V> implements Map<K, V> {
+    Map<K, V> m;
+    UnmodifiableMap(Map<? extends K, ? extends V> m) { this.m = (Map<K, V>) m; }
+    static <K, V> Map<K, V> single(K k, V v) {
+        HashMap<K, V> h = new HashMap<K, V>();
+        h.put(k, v);
+        return new UnmodifiableMap<K, V>(h);
+    }
+    public int size() { return m.size(); }
+    public boolean isEmpty() { return m.isEmpty(); }
+    public V get(Object key) { return m.get(key); }
+    public V getOrDefault(Object key, V dflt) { return m.containsKey(key) ? m.get(key) : dflt; }
+    public boolean containsKey(Object key) { return m.containsKey(key); }
+    public Collection<Map.Entry<K, V>> entrySet() { return m.entrySet(); }
+    public Collection<K> keySet() { return m.keySet(); }
+    public Collection<V> values() { return m.values(); }
+    public void forEach(java.util.function.BiConsumer<? super K, ? super V> f) { m.forEach(f); }
+    public V put(K key, V value) { throw new UnsupportedOperationException(); }
+    public V remove(Object key) { throw new UnsupportedOperationException(); }
+    public void clear() { throw new UnsupportedOperationException(); }
+    public boolean equals(Object o) { return o == this || m.equals(o); }
+    public int hashCode() { return m.hashCode(); }
+    public String toString() { return m.toString(); }
 }
