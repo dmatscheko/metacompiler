@@ -194,7 +194,7 @@ first). Separately `io.write(...)` → interp "attempt to index a nil value (glo
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-573 bash native: the mod.sh benchmark regressed +26% with the 64-bit arithmetic rework · P1 · SH · OPEN [V]
+### T-573 bash native: the mod.sh benchmark regressed +26% with the 64-bit arithmetic rework · P1 · SH · IN PROGRESS (SH worker, round 4) [V]
 `tests/bench.sh bash --draws 5`: at 5ef127fe (before the round-1 bash merge) median 52,905,579 instructions (+0.15% vs the
 recorded 52,823,855, spread 0.36%); at 735e73f9 median 66,637,920 (+26.15%, spread 2.73%) — REGRESSED. The loop is `while [ $i
 -lt 40000 ]; do s=$(( s + i % 7 )); i=$(( i + 1 )); done`. Suspects: `$(( ))` text now going through the run-time evaluator
@@ -202,7 +202,7 @@ recorded 52,823,855, spread 0.36%); at 735e73f9 median 66,637,920 (+26.15%, spre
 per-function instruction profile, restore compiled arithmetic for literal expressions, and get back inside the spread
 without losing any bash assertion.
 
-### T-572 bash: `let` with a redirection; unquoted `let` field splitting; NUL bytes; per-iteration stack growth · P2 · SH · OPEN [V]
+### T-572 bash: `let` with a redirection; unquoted `let` field splitting; NUL bytes; per-iteration stack growth · P2 · SH · IN PROGRESS (SH worker, round 4) [V]
 `let x=1 2>/dev/null` does not parse in either half (LetCmd has no RedirList); bash accepts it. Unquoted `e='1 + 2'; let x=$e*2`
 must field-split into several let arguments (bash: status 1, x=1); ours evaluates one expression. A NUL byte (`echo -e
 '\0'X`, `printf '\0'`) is dropped in all engines; bash writes it. Compiled loops emit their allocas (makeFor's slots, the loop
