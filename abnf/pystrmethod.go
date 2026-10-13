@@ -1069,7 +1069,7 @@ func (e *pyStrEnv) arity(name string, n int) {
 	switch name {
 	case "format":
 		return
-	case "join", "zfill", "partition", "rpartition", "removeprefix", "removesuffix", "format_map":
+	case "join", "zfill", "partition", "rpartition", "removeprefix", "removesuffix", "format_map", "translate":
 		lo, hi, style = 1, 1, 1
 	case "strip", "lstrip", "rstrip":
 		hi, style = 1, 2
@@ -1120,7 +1120,7 @@ func pysIsStrMethod(name string) bool {
 		"split", "rsplit", "splitlines", "join", "replace",
 		"find", "rfind", "index", "rindex", "count", "startswith", "endswith",
 		"isdigit", "isdecimal", "isnumeric", "isalpha", "isalnum", "isspace",
-		"islower", "isupper", "istitle", "isascii", "isprintable",
+		"islower", "isupper", "istitle", "isascii", "isprintable", "isidentifier", "translate",
 		"center", "ljust", "rjust", "zfill", "expandtabs", "encode",
 		"partition", "rpartition", "removeprefix", "removesuffix",
 		"format", "format_map":
@@ -1275,6 +1275,59 @@ func pysEncEsc(cp int) string {
 	return fmt.Sprintf("\\U%08x", cp)
 }
 
+// isIdent is str.isidentifier: a letter or "_" first, then letters, digits and
+// "_"; past ASCII a printable code point counts as a letter, which approximates
+// Unicode's XID classes. Twin of pySIsIdent in languages/python-interpreter.abnf
+// and lib/python-rt.metajs.
+func (e *pyStrEnv) isIdent(s string) bool {
+	cs := e.chars(s)
+	if len(cs) == 0 {
+		return false
+	}
+	for i, ch := range cs {
+		c := []rune(ch)[0]
+		ok := c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (i > 0 && c >= '0' && c <= '9') ||
+			(c >= 128 && pyStrIsPrintable(ch))
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// translate is str.translate(table) over a dict keyed by code point: a str value
+// replaces the character, an int is a code point, None deletes it, a missing key
+// keeps it. Twin of pySTranslate in languages/python-interpreter.abnf and
+// lib/python-rt.metajs.
+func (e *pyStrEnv) translate(s string, table interface{}) string {
+	keys, vals, ok := dictParts(table)
+	if _, isSet := pySetElems(table); !ok || isSet {
+		e.raise("TypeError", "'"+pyTypeName(e.rt, table)+"' object is not subscriptable")
+	}
+	out := ""
+	for _, ch := range e.chars(s) {
+		at := e.rt.pyDictFind(keys, float64([]rune(ch)[0]))
+		if at < 0 {
+			out += ch
+			continue
+		}
+		switch v := vals.elems[at].(type) {
+		case jsUndefT, jsNullT:
+		case string:
+			out += v
+		case float64, bool, *jsBigInt:
+			cp := e.rt.toNumber(v)
+			if cp < 0 || cp > 0x10ffff {
+				e.raise("ValueError", "character mapping must be in range(0x110000)")
+			}
+			out += string(rune(int(cp)))
+		default:
+			e.raise("TypeError", "character mapping must return integer, None or str")
+		}
+	}
+	return out
+}
+
 func (e *pyStrEnv) call(s, name string, args []interface{}, kw interface{}) interface{} {
 	n := e.sLen(s)
 	rt := e.rt
@@ -1422,6 +1475,10 @@ func (e *pyStrEnv) call(s, name string, args []interface{}, kw interface{}) inte
 		return e.isAscii(s)
 	case "isprintable":
 		return pyStrIsPrintable(s)
+	case "isidentifier":
+		return e.isIdent(s)
+	case "translate":
+		return e.translate(s, pysArgAt(args, 0))
 
 	case "center":
 		return e.center(s, e.intArg(args, 0, 0, false), e.fillArg(args, 1))

@@ -2802,6 +2802,32 @@ check("genexp-shapes", [list((a, b) for a in range(3) for b in "xy" if a != 1), 
       [[(0, "x"), (0, "y"), (2, "x"), (2, "y")], [1, 2, 3], {"a": "aa", "b": "bb"}, [("a", 0), ("b", 1), ("c", 2)]])
 
 
+# ----- SECTION: argument order, isidentifier, translate -----
+#
+# A call evaluates its positional and *seq arguments before its keyword ones,
+# wherever they are written. str.isidentifier and str.translate over a dict.
+# Rows from CPython 3.14.
+ao_log = []
+def ao_f(x):
+    ao_log.append(x)
+    return x
+def ao_g(*a, **k):
+    return a, k
+check("call-arg-order", [ao_g(1, k=ao_f("kw"), *[ao_f("star")]), ao_log], [((1, "star"), {"k": "kw"}), ["star", "kw"]])
+check("str-isidentifier", [s.isidentifier() for s in ["a_b", "1a", "", "é", "class", "_1", "a b"]],
+      [True, False, False, True, True, True, False])
+def ao_try(f):
+    try:
+        return f()
+    except (TypeError, ValueError) as e:
+        return type(e).__name__ + ": " + str(e)
+check("str-translate", [ao_try(lambda: "abc".translate({97: "zz", 98: None})), ao_try(lambda: "abc".translate({97: 120, 98: 121})),
+                        ao_try(lambda: "abc".translate(5)), ao_try(lambda: "abc".translate({97: 3.5})),
+                        ao_try(lambda: "abc".translate({97: -1}))],
+      ["zzc", "xyc", "TypeError: 'int' object is not subscriptable", "TypeError: character mapping must return integer, None or str",
+       "ValueError: character mapping must be in range(0x110000)"])
+
+
 # ----- import edges -----
 # `from M import *` binds a runtime module's public names and a library
 # module's __all__, `import P.S` binds P, and a module function keeps its

@@ -5696,13 +5696,51 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // with no parameters, a single-argument one, and Argument Clinic's
     // positional-only ("expected at least") and keyword-capable ("takes at most")
     // forms. format takes any number.
+    // str.isidentifier: a letter or "_" first, then letters, digits and "_". Past
+    // ASCII a printable code point counts as a letter, which approximates
+    // Unicode's XID classes (no engine here carries them). Twin of
+    // pyStrEnv.isIdent in abnf/pystrmethod.go and lib/python-rt.metajs.
+    function pySIsIdent(s) {
+        var cs = pySChars(s)
+        if (cs.length == 0) { return false }
+        for (var i = 0; i < cs.length; i++) {
+            var c = cs[i].charCodeAt(0)
+            var ok = c == 95 || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (i > 0 && c >= 48 && c <= 57)
+                     || (c >= 128 && pyStrIsPrintable(cs[i]))
+            if (!ok) { return false }
+        }
+        return true
+    }
+    // str.translate(table) over a dict keyed by code point: a str value replaces
+    // the character, an int is a code point, None deletes it, a missing key keeps
+    // it. Twin of pyStrEnv.translate in abnf/pystrmethod.go and lib/python-rt.metajs.
+    function pySTranslate(s, table) {
+        if (!isDict(table) || isSet(table)) { pySRaise("TypeError", "'" + pyTypeOf(table).__name + "' object is not subscriptable") }
+        var cs = pySChars(s)
+        var out = ""
+        for (var i = 0; i < cs.length; i++) {
+            var at = dictFind(table, hostGlobals["ord"](cs[i]))
+            if (at < 0) { out += cs[i]; continue }
+            var v = anytype
+            v = table.vals[at]
+            if (v === null || v === undefined) { continue }
+            if (typeof v == "string") { out += v; continue }
+            if (typeof v != "number" && typeof v != "boolean" && !bigIsBig(v)) {
+                pySRaise("TypeError", "character mapping must return integer, None or str")
+            }
+            var cp = floVal(v)
+            if (cp < 0 || cp > 1114111) { pySRaise("ValueError", "character mapping must be in range(0x110000)") }
+            out += codePoint(cp)
+        }
+        return out
+    }
     function pySArity(name, n) {
         var lo = 0
         var hi = 0
         var style = 0
         if (name == "format") { return }
         if (name == "join" || name == "zfill" || name == "partition" || name == "rpartition" ||
-            name == "removeprefix" || name == "removesuffix" || name == "format_map") { lo = 1; hi = 1; style = 1 }
+            name == "removeprefix" || name == "removesuffix" || name == "format_map" || name == "translate") { lo = 1; hi = 1; style = 1 }
         else if (name == "strip" || name == "lstrip" || name == "rstrip") { hi = 1; style = 2 }
         else if (name == "find" || name == "rfind" || name == "index" || name == "rindex" ||
                  name == "count" || name == "startswith" || name == "endswith") { lo = 1; hi = 3; style = 2 }
@@ -5804,7 +5842,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "isdigit" || name == "isdecimal" || name == "isnumeric") { return true }
         if (name == "isalpha" || name == "isalnum" || name == "isspace") { return true }
         if (name == "islower" || name == "isupper" || name == "istitle" || name == "isascii") { return true }
-        if (name == "isprintable") { return true }
+        if (name == "isprintable" || name == "isidentifier" || name == "translate") { return true }
         if (name == "center" || name == "ljust" || name == "rjust" || name == "zfill") { return true }
         if (name == "expandtabs" || name == "encode") { return true }
         if (name == "partition" || name == "rpartition") { return true }
@@ -6044,6 +6082,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "istitle") { return pySIsTitle(s) }
         if (name == "isascii") { return pySIsAscii(s) }
         if (name == "isprintable") { return pyStrIsPrintable(s) }
+        if (name == "isidentifier") { return pySIsIdent(s) }
+        if (name == "translate") { return pySTranslate(s, args[0]) }
 
         if (name == "center") { return pySCenter(s, pySIntArg(args, 0, 0, false), pySFillArg(args, 1)) }
         if (name == "ljust") { return pySJust(s, pySIntArg(args, 0, 0, false), pySFillArg(args, 1), false) }
@@ -12399,11 +12439,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // A call argument list evaluates into {pos, named}: a plain thunk is positional, a
     // {splat} splices its iterable in, a {cdblstar} splices a mapping into the keyword
     // map and a {ckwname} is one keyword argument.
+    // The positional and *seq arguments are evaluated first and the keyword ones
+    // after them, wherever they are written, as in CPython. Twin of emitCallArgs
+    // in python-to-llvm-ir.abnf.
     function kevalArgs(items) {
         var pos = []
         var named = null
-        for (var i = 0; i < items.length; i++) {
+        for (var n = 0; n < items.length * 2; n++) {
+            var i = n % items.length
             var a = items[i]
+            var isKw = typeof a != "function" && a.splat == undefined
+            if (isKw != (n >= items.length)) { continue }
             if (typeof a == "function") { pos.push(a()); continue }
             if (a.splat != undefined) {
                 var arr = iterToList(a.splat())

@@ -2219,7 +2219,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // The argument list of one call: the positional values go into an array, the
     // keyword ones into a dict (created only when there is one, so the ordinary
     // call still emits exactly the two instructions it always did). *seq appends
-    // to the array and **map merges into the dict, both at run time.
+    // to the array and **map merges into the dict, both at run time. As in
+    // CPython the positional and *seq arguments are evaluated first and the
+    // keyword ones after them, wherever they are written.
     function emitCallArgs(b, items) {
         var anyKw = false
         for (var i = 0; i < items.length; i++) {
@@ -2228,8 +2230,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var pos = callExt(b, "js_arr_new", [])
         var kw = hUndef
         if (anyKw) { kw = callExt(b, "js_dict_new", []) }
-        for (var j = 0; j < items.length; j++) {
+        for (var n = 0; n < items.length * 2; n++) {
+            var j = n % items.length
             var it = items[j]
+            var isKw = typeof it != "function" && (it.ckwname != undefined || it.ckwspread != undefined)
+            if (isKw != (n >= items.length)) { continue }
             if (typeof it == "function") {
                 var r = it(b)
                 b = r.b
