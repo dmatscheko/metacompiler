@@ -253,8 +253,8 @@ AssignStat  <~~ push(makeAssign(takeAll())) ~~>
 // - so everything a prefixexp may contain sits in front of the final field or index,
 // CALLS included: `getmetatable(t).__index = f`, `a[1], f(a)[2], b = ...` and `o:m().x = 1`
 // are all ordinary Lua. The chain is therefore the SAME one an
-// expression parses; emitTargetWrite walks all but the last step and writes into the slot
-// the last step names.
+// expression parses; emitTargetSlot walks all but the last step and emitSlotWrite writes
+// into the slot the last step names.
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> { CallSfx | MethodSfx | StrCallSfx | TblCallSfx | DotSfx | IndexSfx } ;
 
@@ -1937,7 +1937,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // ONE suffix step of a prefixexp, emitted. `pre` says whether the value coming in is a
     // possible multi-value (it is exactly after a call), in which case it is truncated
-    // first. Shared by the expression folder below and by emitTargetWrite, which is what
+    // first. Shared by the expression folder below and by emitTargetSlot, which is what
     // makes `getmetatable(t).__index = f` emit exactly the chain `getmetatable(t).__index`
     // reads. Answers {b, v, call} - `call` is the next step's `pre`.
     // A call step with `tail` set is the call of `return f(...)`: lua.tail tells the
@@ -2140,11 +2140,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var r = p.idx(b)
         return {b: r.b, v: callLua(r.b, "lua_cmpv", [callLua(r.b, "lua_first", [r.v])])}
     }
-    function emitTargetWrite(b, ref, v) {
-        if (ref.path.length == 0) {
-            callExt(b, "js_scope_set_or_create", [curScopeV, emitStr(b, ref.name), v])
-            return b
-        }
+    // An indexed target's table and key, evaluated before any right-hand side, as
+    // lua does (manual 3.3.3: in `i, a[i] = i+1, 20` the a[i] is a[old i]); whether
+    // the table takes a field is only asked when it is written (emitSlotWrite). A
+    // plain name has no slot. Twin of targetSlot in lua-interpreter.abnf.
+    function emitTargetSlot(b, ref) {
+        if (ref.path.length == 0) { return {b: b, o: null} }
         var o = callLua(b, "lua_getvar", [curScopeV, emitStr(b, ref.name)])
         // emitLuaStep, not a bare js_get: the leading steps of a target may be calls
         // (getmetatable(t).__index = f), which is ordinary Lua - see the Target production.
@@ -2159,7 +2160,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (afterCall) { o = callLua(b, "lua_first", [o]) }
         var lk = pathKeyV(b, ref.path[ref.path.length - 1])
-        b = lk.b
+        return {b: lk.b, o: o, k: lk.v, d: pdescs[ref.path.length - 1]}
+    }
+    function emitSlotWrite(b, ref, slot, v) {
+        if (slot.o == null) {
+            callExt(b, "js_scope_set_or_create", [curScopeV, emitStr(b, ref.name), v])
+            return b
+        }
+        var o = slot.o
         // Only a table takes a field - not the {__f} box of an integral float -
         // and anything else is a Lua error, as in luaSetIndex.
         var objB = curF.NewBlock("")
@@ -2168,14 +2176,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var doneB = curF.NewBlock("")
         b.NewCondBr(rawTruthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [o]), emitStr(b, "object")])), objB, badB)
         objB.NewCondBr(rawTruthy(objB, callExt(objB, "js_seq", [callExt(objB, "js_get", [o, emitStr(objB, "__f")]), hUndef])), setB, badB)
-        callExt(setB, "js_set", [o, lk.v, v])
+        callExt(setB, "js_set", [o, slot.k, v])
         setB.NewBr(doneB)
-        luaIndexError(badB, o, luaDescText(pdescs[ref.path.length - 1]))
+        luaIndexError(badB, o, luaDescText(slot.d))
         badB.NewBr(doneB)
         return doneB
     }
-    // items interleave targets (objects) and value thunks (functions); all right hand
-    // sides are evaluated first, then assigned positionally (missing values are nil).
+    // items interleave targets (objects) and value thunks (functions). The targets'
+    // tables and keys are evaluated first, left to right, then all right hand sides,
+    // then the stores run right to left as lua's do (`a, a = 1, 2` leaves 1); missing
+    // values are nil. Twin of makeAssign in lua-interpreter.abnf.
     function makeAssign(items) {
         var targets = []
         var vals = []
@@ -2188,14 +2198,20 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // it does not need the positional array at all: lua_first(v) IS
             // js_get(appendall([], v), 0) for every v, the empty multi-value included
             // (both answer nil), and the array would be an allocation per execution.
+            var slots = []
+            for (var s = 0; s < targets.length; s++) {
+                var sl = emitTargetSlot(b, targets[s])
+                b = sl.b
+                slots.push(sl)
+            }
             if (targets.length == 1 && vals.length == 1) {
                 var r1 = vals[0](b)
-                return emitTargetWrite(r1.b, targets[0], callLua(r1.b, "lua_first", [r1.v]))
+                return emitSlotWrite(r1.b, targets[0], slots[0], callLua(r1.b, "lua_first", [r1.v]))
             }
             var ra = emitListArr(b, vals)
             b = ra.b
-            for (var t = 0; t < targets.length; t++) {
-                b = emitTargetWrite(b, targets[t], callExt(b, "js_get", [ra.v, emitNum(b, t)]))
+            for (var t = targets.length - 1; t >= 0; t--) {
+                b = emitSlotWrite(b, targets[t], slots[t], callExt(b, "js_get", [ra.v, emitNum(b, t)]))
             }
             return b
         }

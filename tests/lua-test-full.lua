@@ -164,6 +164,26 @@ function s06()
     local i, j, k = 1, 2, 3
     i, j, k = k, i, j                   -- all right sides evaluated first
     check("mul9", "" .. i .. j .. k, "312")
+    -- An indexed target's table and key are evaluated before anything is assigned
+    -- (the manual's own example), and the stores then run right to left.
+    local V = {1, 20}
+    local ii, aa = V[1], {}
+    ii, aa[ii] = ii + 1, V[2]
+    check("mul10", aa[1], 20)
+    local cur, nxt = {}, {}
+    local old = cur
+    cur, cur.x = nxt, 5
+    check("mul11", old.x, 5)
+    local idx, fl = 1, {}
+    idx, fl[idx], fl[idx + 1] = 3, "a", "b"
+    check("mul12", fl[1] .. fl[2], "ab")
+    local log, q6 = "", {}
+    local function kk(n) log = log .. n; return n end
+    q6[kk(1)], q6[kk(2)] = kk(3), kk(4)
+    check("mul13", log, "1234")
+    local w6
+    w6, w6 = V[1], V[2]
+    check("mul14", w6, 1)
 end
 
 -- ===== SECTION 07: goto and labels =====

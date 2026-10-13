@@ -270,8 +270,8 @@ AssignStat  <~~ push(makeAssign(takeAll())) ~~>
 // - so everything a prefixexp may contain sits in front of the final field or index,
 // CALLS included: `getmetatable(t).__index = f`, `a[1], f(a)[2], b = ...` and `o:m().x = 1`
 // are all ordinary Lua. The chain is therefore the SAME one an
-// expression parses; assignTarget walks all but the last step and writes into the slot the
-// last step names. (A trailing call - `f(a) = 1` - is not valid Lua and simply fails at
+// expression parses; targetSlot walks all but the last step and assignSlot writes into the
+// slot the last step names. (A trailing call - `f(a) = 1` - is not valid Lua and simply fails at
 // run time, which is where an assignment to a non-slot belongs anyway.)
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> { CallSfx | MethodSfx | StrCallSfx | TblCallSfx | DotSfx | IndexSfx } ;
@@ -1699,7 +1699,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // (so the whole expression can expand in a list position) and the next step around
     // it truncates to the first value, exactly like Lua.
     // ONE suffix step of a prefixexp. It is shared by the expression folder below and by
-    // assignTarget, which is what makes `f(a).x = 1` walk exactly the chain `f(a).x` reads.
+    // targetSlot, which is what makes `f(a).x = 1` walk exactly the chain `f(a).x` reads.
     // A call step with `tail` set is the call of `return f(...)` inside a Lua
     // function: the callee takes over the caller's frame (see makeClosure). `cname`
     // is the step's entry of luaCalleeNames.
@@ -1832,8 +1832,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (p.kind == "field") { return p.name }
         return luaFirst(p.idx())
     }
-    function assignTarget(ref, v) {
-        if (ref.path.length == 0) { setVar(ref.name, v); return }
+    // An indexed target's table and key, evaluated before any right-hand side, as
+    // lua does (manual 3.3.3: in `i, a[i] = i+1, 20` the a[i] is a[old i]). Whether
+    // the table takes a field is only asked when it is written (assignSlot).
+    function targetSlot(ref) {
         var o = anytype // The containers along the path may be of mixed types.
         o = getVar(ref.name)
         // luaStep, not luaIndex: the leading steps of a target may be calls (f(a).x = 1).
@@ -1842,11 +1844,19 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (var i = 0; i < ref.path.length - 1; i++) { o = luaStep(o, ref.path[i], false, cnames[i], pdescs[i]) }
         var tgt = anytype // The table written into.
         tgt = luaFirst(o)
-        if (!isTbl(tgt)) { fail("attempt to index a " + luaType(tgt) + " value" + luaDescText(pdescs[ref.path.length - 1])) }
-        luaSetIndex(tgt, pathKey(ref.path[ref.path.length - 1]), v)
+        var key = anytype
+        key = pathKey(ref.path[ref.path.length - 1])
+        return {t: tgt, k: key, d: pdescs[ref.path.length - 1]}
     }
-    // items interleave targets (objects) and value thunks (functions); all right hand
-    // sides are evaluated first, then assigned positionally (missing values are nil).
+    function assignSlot(ref, slot, v) {
+        if (ref.path.length == 0) { setVar(ref.name, v); return }
+        if (!isTbl(slot.t)) { fail("attempt to index a " + luaType(slot.t) + " value" + luaDescText(slot.d)) }
+        luaSetIndex(slot.t, slot.k, v)
+    }
+    // items interleave targets (objects) and value thunks (functions). The targets'
+    // tables and keys are evaluated first, left to right, then all right hand sides,
+    // then the stores run right to left as lua's do (`a, a = 1, 2` leaves 1); missing
+    // values are nil.
     function makeAssign(items) {
         var targets = []
         var vals = []
@@ -1854,10 +1864,20 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (typeof items[i] == "function") { vals.push(items[i]) }
             else { targets.push(items[i]) }
         }
+        if (targets.length == 1) {
+            var one = targets[0]
+            return function() {
+                var sl = one.path.length == 0 ? null : targetSlot(one)
+                var v1 = evalList(vals)
+                assignSlot(one, sl, v1.length > 0 ? v1[0] : undefined)
+            }
+        }
         return function() {
+            var slots = []
+            for (var s = 0; s < targets.length; s++) { slots.push(targets[s].path.length == 0 ? null : targetSlot(targets[s])) }
             var vs = evalList(vals)
-            for (var t = 0; t < targets.length; t++) {
-                assignTarget(targets[t], t < vs.length ? vs[t] : undefined)
+            for (var t = targets.length - 1; t >= 0; t--) {
+                assignSlot(targets[t], slots[t], t < vs.length ? vs[t] : undefined)
             }
         }
     }
