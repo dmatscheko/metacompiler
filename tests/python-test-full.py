@@ -115,6 +115,8 @@ def s04():
     check("fst8", f"{"q" + "r"}" == "qr")  # 3.12: quotes may repeat inside
     check("fst9", f"""t{x}
 u""" == "t5\nu")
+    # A leading `{{` is the escaped brace even when a set display could follow.
+    check("fst10", f"{{x}}" == "{x}" and f'{{x}}{x}' == "{x}5" and f"{{{x}}}" == "{5}" and f"{ {x} }" == "{5}")
 
 # ===== SECTION 05: tuples, sets and slicing =====
 def s05():

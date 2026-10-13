@@ -1036,8 +1036,9 @@ FSq         = "'" :whitespace() { FExpr | FChunkS } "'" :whitespace(Whitespace) 
 //     * 2}'''
 // is. With the newline-less Whitespace the comment would run to the end of its line, and
 // in shorter cases the field would silently end early and print the rest as literal text.
+// `{{` is always the escaped brace, never a field opening on a set display: f"{{x}}" is "{x}".
 FExpr       <~~ push(makeFField(takeAll(), up.in)) ~~>
-            = "{" :whitespace(WhitespaceNL) ExprList [ FDebug ] [ FConv ] [ FSpec ] "}" :whitespace() ;
+            = !"{{" "{" :whitespace(WhitespaceNL) ExprList [ FDebug ] [ FConv ] [ FSpec ] "}" :whitespace() ;
 // The `=` debug form. Skipped whitespace never reaches up.in, so the spaces around
 // the `=` are matched as ORDINARY TOKENS (whitespace skipping off for this
 // production only) - that is what makes f"{x = }" echo "x = 5" and not "x=5".
