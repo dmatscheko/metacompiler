@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-593** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-595** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -121,20 +121,11 @@ not change the renderer.
 
 # GO — Go  (oracle: `go run`)
 
-### T-591 go: uint64 assignment of `1 << 63`; untyped big constant × float in the interp; overflowing constant args; NaN sign · P1 · GO · IN PROGRESS (GO worker, round 5) [V]
-`var s uint64; s = 1 << 63; fmt.Println(s, s|1)` → all legs `-9223372036854775808 -9223372036854775807` (go
-`9223372036854775808 9223372036854775809`; the declared form `var t uint64 = 1<<63` is right). Interp only:
-`x := 0.5; fmt.Println(18014398509481984*x)` → `NaN` (go, run, native `9.007199254740992e+15`). `fmt.Println(math.MaxUint64)`
-prints `-1`; go rejects it at compile time ("cannot use math.MaxUint64 (untyped int constant 18446744073709551615) as int value
-in argument to fmt.Println (overflows)"). P3: `math.Signbit(-NaN)` false and `Float64bits` of any NaN is NaN()'s pattern — needs
-a float-bits host builtin in the floor, twin and interpreter. llvm.Run's per-call step brake limits heavy math code (the
-3000-row probe needs `-max-steps 0`; the `-frozen` interpreter finishes 35 rows).
-
-### T-592 go: UTF-8-encoded surrogate bytes in strings under llvm.Run and native; interp byte cache · P3 · GO · IN PROGRESS (GO worker, round 5) [V]
-`s := "\xed\xa0\x80" + "\xed\xb0\x80"; fmt.Println(len(s), []byte(s))` → go `6 [237 160 128 237 176 128]`, interp right;
-llvm.Run and native `4 [240 144 128 128]` and print EF BF BD: the shared str_cat / strConcat and print paths read these bytes as
-WTF-8 (changing them is a CORE floor change; manual 7.9 records it). Interp: `s[i]` still uses a 4-way byte cache, so 5+
-distinct non-ASCII strings indexed in turn are quadratic there.
+### T-593 go: an overflowing constant is not rejected at compound assignment, typed const, return, element, send, `_ =` · P2 · GO · OPEN [V]
+`var u8 uint8; u8 += 256`, `const c uint8 = 256`, `func f() uint8 { return 256 }`, `[]uint8{256}`, `ch <- 256` (chan uint8),
+`_ = 1 << 63` (int): go rejects each at compile time ("cannot use 256 (untyped int constant) as uint8 value in ... (overflows)"
+/ "constant 256 overflows uint8"); every engine accepts and wraps. Route these sites through goConstTo (go-constfold.js), as
+stores and arguments now are.
 
 ---
 
@@ -195,6 +186,14 @@ index a FILE* value"); the interpreter prints an uncaught error to stdout (compi
 ---
 
 # CORE — MetaJS, the engines, shared runtime, tooling
+
+### T-594 go (CORE): UTF-8-encoded surrogate bytes are rejoined by the shared string floor · P3 · CORE · OPEN [V]
+`s := "\xed\xa0\x80" + "\xed\xb0\x80"; fmt.Println(len(s), []byte(s))` → go `6 [237 160 128 237 176 128]` and raw output;
+interp right; llvm.Run and native `4 [240 144 128 128]`, a lone triple prints EF BF BD. The floor's str_cat / strConcat and
+the print path (print_val → fmt_top → wtf8_clean, writeBytes writes code units) read the bytes as WTF-8. Needs a go-mode raw
+concatenation and a raw print primitive in the floor and twin, and an audit of go-rt.metajs / go-fmt.js concatenations that
+rely on rejoining (go-rt.metajs ~1208 builds an astral character from two fromCharCode halves). Full matrix, native-full and
+bench for all languages.
 
 ### T-184 dart: `IndexError` vs `RangeError` text for `[1,2,3][7]` · P3 · DA · BLOCKED - needs a Dart VM to settle [U spec-only]
 A reviewer argued the VM prints `RangeError (index): Invalid value: Not in inclusive
@@ -691,6 +690,8 @@ T-584 bash: a value whose first byte is 0x02 is read as a field list — DONE 9b
 T-569 lua: runtime bookkeeping keys are visible to programs; the `io` library is missing — DONE 5d41bb3a 3bcbd2fd (key types are part of the key in every engine; io.write/io.stdout:write/io.type; io.read needs a stdin no handle-IR engine has)
 T-577 go: invalid UTF-8 in strings — each engine differs; byte-index cache thrash — DONE 478a79d7 (floor byteAt/byteSub/bytesStr; s[i] O(1) natively; WTF-8 surrogate-byte residual is T-592)
 T-576 go: `math` transcendentals, Float64bits, NaN sign, untyped math constants, missing members — PARTIAL 0deea0ec (Exp/Log/Sin/Cos/Tan/Atan/Hypot/Cbrt/Pow/FMA bit-exact vs go on 3000 inputs in all engines, Float64bits, exact pkg constants, undefined members rejected); NaN sign/payload is T-591
+T-591 go: uint64 assignment of `1 << 63`; untyped big constant × float in the interp; overflowing constant args; NaN sign — DONE 94cf36c7 b030493b for the P1 parts; the NaN sign/payload part DECLINED: goja's floatToValue collapses every NaN result to one value and the interpreter negates by multiplying, so a float-bits builtin would split llvm.Run/native from the interpreter and goja from -frozen; it needs NaN-carrying float boxes in the interpreter first
+T-592 go: UTF-8-encoded surrogate bytes in strings under llvm.Run and native; interp byte cache — PARTIAL c90fdc51 (interp byte cache set-associative); surrogate bytes moved to CORE as T-594
 
 # Settled — do not re-open
 
