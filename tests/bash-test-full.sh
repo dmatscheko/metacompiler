@@ -2308,6 +2308,41 @@ s45() {
   check u82 "[${w%?}] [${w%??}] [${w#?}] [${w/?/-}] [${w//?/-}]" "[éà] [é] [àü] [-àü] [---]"
 }
 
+# ===== SECTION 46: printf flags, operands and escapes =====
+# The + space # 0 - flags with widths and precisions (also from * operands), numeric operands
+# read like strtoimax / strtoumax with base 0 or as 'C character codes (an invalid one is
+# reported, its leading number used, status 1), escapes in the FORMAT, and %b's own escapes
+# with \c ending all output. Every expected value is bash 5.3's.
+s46() {
+  local r x f
+  r=$(printf '[%05d] [%#05x] [%+d] [% d] [%-+4d] [%d] [%d]' -7 255 5 5 3 "'A" "'a")
+  check pf1 "$r" "[-0007] [0x0ff] [+5] [ 5] [+3  ] [65] [97]"
+  r=$(printf '<%*d><%.*s><%-*s|>' 5 42 2 abcdef 4 x; printf -- '[%s]' dd)
+  check pf2 "$r" "<   42><ab><x   |>[dd]"
+  x=$(printf '\101\x41\0101|\q|\"|\\|\c|☺|after')
+  check pf3 "${x@Q}" "\$'AA\\b1|\\\\q|\"|\\\\|\\\\c|☺|after'"
+  r=$(printf '[%b] [%b] [%b] [%b]' '\0101' '\x41' '\101' 'a\qb'; printf '[%b]' 'x\cy' 'z'; printf '|')
+  check pf4 "$r" '[A] [A] [A] [a\qb][x|'
+  r=$(printf '[%d]' abc 2>/dev/null; echo "rc=$?"; printf '[%d]' "1+2" 2>/dev/null; echo "rc=$?")
+  check pf5 "$r" "[0]rc=1
+[1]rc=1"
+  r=$(printf '[%d] [%d] [%d] [%i] [%x] [%o] [%u] [%X]' 0x1f 010 -0x10 " 12" 0x1f 010 -1 255)
+  check pf6 "$r" "[31] [8] [-16] [12] [1f] [10] [18446744073709551615] [FF]"
+  r=$(printf '[%5d] [%-5d] [%05.3d] [%.0d] [%.3d] [%#o] [%#x] [%#X] [%#.0o] [%+.0d]' 42 42 7 0 -7 8 0 255 0 0)
+  check pf7 "$r" "[   42] [42   ] [  007] [] [-007] [010] [0] [0XFF] [0] [+]"
+  r=$(printf '[% 5d] [%+5d] [%+05d] [% 05d] [%-05d] [%.3x] [%#.3o] [%8.3x]' 3 3 3 3 3 10 8 255)
+  check pf8 "$r" "[    3] [   +3] [+0003] [ 0003] [3    ] [00a] [010] [     0ff]"
+  r=$(printf '[%d]' 99999999999999999999 2>/dev/null; echo "rc=$?"; printf '[%x]' 0xffffffffffffffff; echo "rc=$?")
+  check pf9 "$r" "[9223372036854775807]rc=1
+[ffffffffffffffff]rc=0"
+  r=$(printf '[%y]' 1 2>/dev/null; echo "rc=$?"; printf '[%q] [%q] [%ld] [%hd]' "a b" "" 5 6)
+  check pf10 "$r" "[rc=1
+[a\\ b] [''] [5] [6]"
+  f='%s=%d;'
+  r=$(printf "$f" a 1 b 2; printf '%.*d|%*s|' -1 5 -4 ab)
+  check pf11 "$r" "a=1;b=2;5|ab  |"
+}
+
 s01   # SECTION-CALL 01
 s02   # SECTION-CALL 02
 s03   # SECTION-CALL 03
@@ -2353,5 +2388,6 @@ s42   # SECTION-CALL 42
 s43   # SECTION-CALL 43
 s44   # SECTION-CALL 44
 s45   # SECTION-CALL 45
+s46   # SECTION-CALL 46
 echo "full: $checks checks, $fails failures"
 exit $fails

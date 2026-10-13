@@ -3960,109 +3960,262 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         r = t()
     }
 
-    // printf FORMAT [ARG...] : %s %d %i %u %c %x %X %o %b %q %% with a width, a precision,
-    // the "-" / "0" / "#" flags and the usual backslash escapes. The format is reused until
-    // the arguments run out, exactly like the shell.
-    //
-    // NOT IMPLEMENTED, in either half: %e %f %g %a and the ' flag. The whole runtime is
-    // integer-only (bash-rt.c has no double), so a float conversion would first need a
-    // float parser and an exact formatter in the C runtime.
+    // printf [-v NAME] [--] FORMAT [ARG...]. The format is reused until the operands run out;
+    // a conversion past the last operand reads "" or 0. Measured against bash 5.3: the flags
+    // - + space # 0, width and precision (a literal or *; a negative * width left-justifies, a
+    // negative * precision is none), the length modifiers h l L j z t (ignored), and
+    // d i o u x X c s b q. Width and precision count UTF-8 BYTES (a cut never splits a
+    // character here, where bash would). A numeric operand is read like strtoimax with base 0
+    // (0x1f is 31, 010 is 8) - strtoumax for o u x X - or 'C / "C for a character's code; one
+    // that is not entirely a number is reported and its leading number used, with status 1.
+    // An invalid conversion character ends the output there, status 1. NOT IMPLEMENTED:
+    // %e %f %g %a print the operand as it is, since the compiled half's runtime has no
+    // double. Escapes are pfEscape's. Twin of rt_printf in languages/lib/bash-rt.c.
+    var pf = {e: "", stop: false, ai: 0, have: false, rc: 0}
+    var pfSimple = {a: 7, b: 8, e: 27, E: 27, f: 12, n: 10, r: 13, t: 9, v: 11}
+    function pfHex(cc) {
+        if (cc >= 48 && cc <= 57) { return cc - 48 }
+        if (cc >= 97 && cc <= 102) { return cc - 87 }
+        if (cc >= 65 && cc <= 70) { return cc - 55 }
+        return -1
+    }
+    // A code point as a string (a NUL is dropped: a string here cannot hold one).
+    function pfChr(cp) {
+        if (cp == 0) { return "" }
+        if (cp < 65536) { return String.fromCharCode(cp) }
+        var off = cp - 65536
+        return String.fromCharCode(55296 + ((off - (off % 1024)) / 1024)) + String.fromCharCode(56320 + (off % 1024))
+    }
+    // The escape at s[i] (a backslash), appended to pf.e; answers the characters it used.
+    // The FORMAT knows \a \b \e \E \f \n \r \t \v \\ \" \' \?, \NNN octal (one to three
+    // digits, \0 included), \xHH, \uHHHH, \UHHHHHHHH, and keeps anything else - \c included -
+    // as written. A %b operand (pctb) reads octal as \0NNN or \NNN, and its \c ends ALL output.
+    function pfEscape(s, i, pctb) {
+        if (i + 1 >= s.length) { pf.e = pf.e + "\\"; return 1 }
+        var c = s.charAt(i + 1)
+        if (hasOwn(pfSimple, c)) { pf.e = pf.e + String.fromCharCode(pfSimple[c]); return 2 }
+        if (c == "\\" || c == "\"" || c == "'" || c == "?") { pf.e = pf.e + c; return 2 }
+        var cc = s.charCodeAt(i + 1)
+        var k = 0
+        var v = 0
+        if (cc >= 48 && cc <= 55) {
+            var n = i + 1
+            if (pctb && cc == 48) { n = i + 2 }
+            while (k < 3 && n + k < s.length && s.charCodeAt(n + k) >= 48 && s.charCodeAt(n + k) <= 55) {
+                v = v * 8 + (s.charCodeAt(n + k) - 48)
+                k = k + 1
+            }
+            pf.e = pf.e + pfChr(v % 256)
+            return n + k - i
+        }
+        if (c == "x" || c == "u" || c == "U") {
+            var maxd = (c == "x") ? 2 : ((c == "u") ? 4 : 8)
+            while (k < maxd && i + 2 + k < s.length && pfHex(s.charCodeAt(i + 2 + k)) >= 0) {
+                v = v * 16 + pfHex(s.charCodeAt(i + 2 + k))
+                k = k + 1
+            }
+            if (k == 0) { pf.e = pf.e + s.slice(i, i + 2); return 2 }
+            pf.e = pf.e + pfChr(v)
+            return 2 + k
+        }
+        if (c == "c" && pctb) { pf.stop = true; return 2 }
+        pf.e = pf.e + s.slice(i, i + 2)
+        return 2
+    }
+    function pfBstr(s) {
+        var saved = pf.e
+        pf.e = ""
+        var i = 0
+        while (i < s.length && !pf.stop) {
+            if (s.charAt(i) == "\\") { i = i + pfEscape(s, i, true) }
+            else { pf.e = pf.e + s.charAt(i); i = i + 1 }
+        }
+        var r = pf.e
+        pf.e = saved
+        return r
+    }
+    function pfBad(a, msg) { emitErr("bash: printf: " + a + ": " + msg + "\n"); pf.rc = 1 }
+    // Would the digits a[ds..de) in `base` exceed the largest magnitude the conversion holds -
+    // 2^63 - 1, 2^63 for a negative signed operand, 2^64 - 1 for an unsigned one (o u x X read
+    // like strtoumax)? Compared as text against that limit. Twin of pf_over.
+    var pfLims = {s10: "9223372036854775807", n10: "9223372036854775808", u10: "18446744073709551615",
+                  s16: "7fffffffffffffff", n16: "8000000000000000", u16: "ffffffffffffffff",
+                  s8: "777777777777777777777", n8: "1000000000000000000000", u8: "1777777777777777777777"}
+    function pfOver(a, ds, de, base, neg, uns) {
+        while (ds < de && a.charAt(ds) == "0") { ds = ds + 1 }
+        var lim = pfLims[(uns ? "u" : (neg ? "n" : "s")) + base]
+        var n = de - ds
+        if (n != lim.length) { return n > lim.length }
+        var dg = a.slice(ds, de).toLowerCase()
+        return dg > lim
+    }
+    // A numeric operand, as an arithmetic value (see arNorm); uns for o u x X.
+    function pfNum(a, uns) {
+        if (a.length > 0 && (a.charAt(0) == "'" || a.charAt(0) == "\"")) { return (a.length > 1) ? a.charCodeAt(1) : 0 }
+        var i = 0
+        while (i < a.length && (a.charAt(i) == " " || a.charAt(i) == "\t" || a.charAt(i) == "\n")) { i = i + 1 }
+        var neg = false
+        if (i < a.length && (a.charAt(i) == "-" || a.charAt(i) == "+")) { neg = a.charAt(i) == "-"; i = i + 1 }
+        var base = 10
+        if (a.charAt(i) == "0" && (a.charAt(i + 1) == "x" || a.charAt(i + 1) == "X") && i + 2 < a.length && pfHex(a.charCodeAt(i + 2)) >= 0) {
+            base = 16
+            i = i + 2
+        } else if (a.charAt(i) == "0") { base = 8 }
+        var v = i64Make(0, 0)
+        var bp = i64Make(0, base)
+        var ds = i
+        while (i < a.length) {
+            var d = pfHex(a.charCodeAt(i))
+            if (d < 0 || d >= base) { break }
+            v = i64Add(i64Mul(v, bp), i64Make(0, d))
+            i = i + 1
+        }
+        if (pfOver(a, ds, i, base, neg, uns)) {
+            pfBad(a, "Result too large")
+            if (uns) { return -1 }
+            return arNorm(neg ? i64Make(0x80000000, 0) : i64Make(0x7fffffff, 0xffffffff))
+        }
+        if (i == ds || i < a.length) {
+            var tc = a.charAt(i)
+            if (tc == "x" || tc == "X") { pfBad(a, "invalid hexadecimal number") }
+            else if (base == 8 && tc >= "0" && tc <= "9") { pfBad(a, "invalid octal number") }
+            else { pfBad(a, "invalid number") }
+        }
+        return arNorm(neg ? i64Neg(v) : v)
+    }
+    function pfArg(args) {
+        var k = pf.ai
+        pf.ai = k + 1
+        pf.have = k < args.length
+        return pf.have ? args[k] : ""
+    }
+    // The UTF-8 byte length of s, and its longest prefix of at most n bytes.
+    function pfBytes(s) {
+        var n = 0
+        var i
+        for (i = 0; i < s.length; i++) {
+            var cc = s.charCodeAt(i)
+            if (cc < 128) { n = n + 1 } else if (cc < 2048) { n = n + 2 } else if (cc >= 55296 && cc <= 56319) { n = n + 4; i = i + 1 } else { n = n + 3 }
+        }
+        return n
+    }
+    function pfCut(s, n) {
+        var i = 0
+        while (i < s.length) {
+            var ch = chunkAt(s, i)
+            if (pfBytes(s.slice(0, i + ch.length)) > n) { return s.slice(0, i) }
+            i = i + ch.length
+        }
+        return s
+    }
+    function pfPad(s, w, left, zero, keep) {
+        var fill = ""
+        var len = pfBytes(s)
+        while (len < w) { fill = fill + (zero ? "0" : " "); len = len + 1 }
+        if (left) { return s + fill }
+        if (zero) { return s.slice(0, keep) + fill + s.slice(keep) }
+        return fill + s
+    }
+    function pfInt(v, conv, f) {
+        var dg = ""
+        var pre = ""
+        if (conv == "d" || conv == "i") {
+            dg = numToStr(v)
+            if (dg.charAt(0) == "-") { dg = dg.slice(1); pre = "-" }
+            else if (f.plus) { pre = "+" }
+            else if (f.space) { pre = " " }
+        } else {
+            dg = radixStr(v, (conv == "o") ? 8 : ((conv == "u") ? 10 : 16), conv == "X")
+        }
+        if (f.prec == 0 && arIsZero(v)) { dg = "" }
+        while (dg.length < f.prec) { dg = "0" + dg }
+        if (conv == "o" && f.alt && dg.charAt(0) != "0") { dg = "0" + dg }
+        if ((conv == "x" || conv == "X") && f.alt && !arIsZero(v)) { pre = (conv == "X") ? "0X" : "0x" }
+        return pfPad(pre + dg, f.w, f.left, f.zero && f.prec < 0 && !f.left, pre.length)
+    }
+    // The conversion at fmt[i] (just past the "%"), appended to pf.e; answers the index after
+    // it, or -1 for an invalid conversion character.
+    function pfConv(fmt, i, args) {
+        var f = {left: false, plus: false, space: false, alt: false, zero: false, w: 0, prec: -1}
+        var start = i - 1
+        var flagging = true
+        while (flagging && i < fmt.length) {
+            var fc = fmt.charAt(i)
+            if (fc == "-") { f.left = true } else if (fc == "+") { f.plus = true } else if (fc == " ") { f.space = true }
+            else if (fc == "#") { f.alt = true } else if (fc == "0") { f.zero = true } else { flagging = false }
+            if (flagging) { i = i + 1 }
+        }
+        if (fmt.charAt(i) == "*") {
+            var wv = arNum(pfNum(pfArg(args), false))
+            if (wv < 0) { f.left = true; wv = 0 - wv }
+            f.w = wv
+            i = i + 1
+        } else {
+            while (i < fmt.length && fmt.charCodeAt(i) >= 48 && fmt.charCodeAt(i) <= 57) { f.w = f.w * 10 + (fmt.charCodeAt(i) - 48); i = i + 1 }
+        }
+        if (fmt.charAt(i) == ".") {
+            i = i + 1
+            f.prec = 0
+            if (fmt.charAt(i) == "*") {
+                var pv = arNum(pfNum(pfArg(args), false))
+                f.prec = (pv < 0) ? -1 : pv
+                i = i + 1
+            } else {
+                while (i < fmt.length && fmt.charCodeAt(i) >= 48 && fmt.charCodeAt(i) <= 57) { f.prec = f.prec * 10 + (fmt.charCodeAt(i) - 48); i = i + 1 }
+            }
+        }
+        while (i < fmt.length && "hlLjzt".indexOf(fmt.charAt(i)) >= 0) { i = i + 1 }
+        var cv = (i < fmt.length) ? fmt.charAt(i) : ""
+        if (cv == "" || "diouxXcsbqeEfFgGaA".indexOf(cv) < 0) {
+            emitErr("bash: printf: `" + ((cv == "") ? fmt.slice(start) : cv) + "': invalid format character\n")
+            pf.rc = 1
+            return -1
+        }
+        i = i + 1
+        var a = pfArg(args)
+        var piece = a
+        if ("diouxX".indexOf(cv) >= 0) {
+            var nv = anytype
+            nv = 0
+            if (pf.have) { nv = pfNum(a, cv != "d" && cv != "i") }
+            piece = pfInt(nv, cv, f)
+        } else {
+            if (cv == "c") { piece = (a.length > 0) ? chunkAt(a, 0) : "" }
+            else if (cv == "b") { piece = pfBstr(a) }
+            else if (cv == "q") { piece = printfQuote(a) }
+            if (f.prec >= 0 && cv != "c") { piece = pfCut(piece, f.prec) }
+            piece = pfPad(piece, f.w, f.left, f.zero, 0)
+        }
+        pf.e = pf.e + piece
+        return i
+    }
     function printfBuiltin(args) {
         var dest = null
         var a = args
         if (a.length >= 2 && a[0] == "-v") { dest = a[1]; a = a.slice(2) }
+        if (a.length > 0 && a[0] == "--") { a = a.slice(1) }
         if (a.length == 0) { return 0 }
         var fmt = a[0]
         var rest = a.slice(1)
-        var out = ""
-        var ai = 0
+        pf = {e: "", stop: false, ai: 0, have: false, rc: 0}
         var pass = 0
-        while (pass == 0 || ai < rest.length) {
+        var used = false
+        var bad = false
+        while (!bad && (pass == 0 || (used && pf.ai < rest.length && !pf.stop))) {
+            var before = pf.ai
             pass = pass + 1
-            var used = false
             var i = 0
-            while (i < fmt.length) {
+            while (i < fmt.length && !pf.stop && !bad) {
                 var ch = fmt.charAt(i)
-                if (ch == "\\" && i + 1 < fmt.length) {
-                    var e = fmt.charAt(i + 1)
-                    i = i + 2
-                    if (e == "n") { out = out + "\n" }
-                    else if (e == "t") { out = out + "\t" }
-                    else if (e == "r") { out = out + "\r" }
-                    else if (e == "\\") { out = out + "\\" }
-                    else { out = out + "\\" + e }
-                } else if (ch == "%") {
-                    i = i + 1
-                    if (fmt.charAt(i) == "%") { out = out + "%"; i = i + 1 }
-                    else {
-                        var left = false
-                        var zero = false
-                        var alt = false
-                        var flagging = true
-                        while (flagging && i < fmt.length) {
-                            var fc = fmt.charAt(i)
-                            if (fc == "-") { left = true; i = i + 1 }
-                            else if (fc == "0") { zero = true; i = i + 1 }
-                            else if (fc == "#") { alt = true; i = i + 1 }
-                            else if (fc == "+" || fc == " ") { i = i + 1 }
-                            else { flagging = false }
-                        }
-                        var width = 0
-                        while (i < fmt.length && fmt.charCodeAt(i) >= 48 && fmt.charCodeAt(i) <= 57) {
-                            width = width * 10 + (fmt.charCodeAt(i) - 48)
-                            i = i + 1
-                        }
-                        var prec = -1
-                        if (fmt.charAt(i) == ".") {
-                            i = i + 1
-                            prec = 0
-                            while (i < fmt.length && fmt.charCodeAt(i) >= 48 && fmt.charCodeAt(i) <= 57) {
-                                prec = prec * 10 + (fmt.charCodeAt(i) - 48)
-                                i = i + 1
-                            }
-                        }
-                        var conv = fmt.charAt(i)
-                        i = i + 1
-                        var arg = (ai < rest.length) ? rest[ai] : ""
-                        ai = ai + 1
-                        used = true
-                        var piece = ""
-                        var isNum = (conv == "d" || conv == "i" || conv == "u" || conv == "x" || conv == "X" || conv == "o")
-                        if (conv == "s") { piece = arg; if (prec >= 0 && piece.length > prec) { piece = piece.slice(0, prec) } }
-                        else if (conv == "d" || conv == "i") { piece = numToStr(arStr(arg)) }
-                        else if (conv == "c") { piece = (arg.length > 0) ? arg.charAt(0) : "" }
-                        else if (conv == "u") { piece = radixStr(arStr(arg), 10, false) }
-                        else if (conv == "o") { piece = radixStr(arStr(arg), 8, false) }
-                        else if (conv == "x" || conv == "X") { piece = radixStr(arStr(arg), 16, conv == "X") }
-                        else if (conv == "b") { piece = ansiC(arg) }
-                        else if (conv == "q") { piece = printfQuote(arg) }
-                        else { piece = arg }
-                        // A PRECISION ON AN INTEGER is a minimum DIGIT count, and it cancels
-                        // the 0 flag: `%.3d` of 7 is 007, `%.0d` of 0 is the empty string,
-                        // `%8.3d` of 7 is five spaces then 007.
-                        if (isNum && prec >= 0) {
-                            zero = false
-                            piece = intPrec(piece, prec)
-                        }
-                        // # : 0/0X/0x prefixes. bash leaves a zero operand alone.
-                        if (alt && conv == "o" && piece.charAt(0) != "0") { piece = "0" + piece }
-                        if (alt && (conv == "x" || conv == "X") && piece != "" && piece != "0") {
-                            piece = ((conv == "X") ? "0X" : "0x") + piece
-                        }
-                        while (piece.length < width) {
-                            if (left) { piece = piece + " " }
-                            // bash pads with ZEROS on a %s too: `printf '%05s' ab` is 000ab.
-                            else if (zero) { piece = "0" + piece }
-                            else { piece = " " + piece }
-                        }
-                        out = out + piece
-                    }
-                } else { var lch = chunkAt(fmt, i); out = out + lch; i = i + lch.length }
+                if (ch == "\\") { i = i + pfEscape(fmt, i, false) }
+                else if (ch == "%" && fmt.charAt(i + 1) == "%") { pf.e = pf.e + "%"; i = i + 2 }
+                else if (ch == "%") { i = pfConv(fmt, i + 1, rest); if (i < 0) { bad = true } }
+                else { var lch = chunkAt(fmt, i); pf.e = pf.e + lch; i = i + lch.length }
             }
-            if (!used) { ai = rest.length }
+            used = pf.ai > before
         }
-        if (dest != null) { setVarVal(dest, out) } else { emitOut(out) }
-        return 0
+        if (dest != null) { setVarVal(dest, pf.e) } else { emitOut(pf.e) }
+        return pf.rc
     }
     // printf's %x/%X/%o/%u: the operand as an UNSIGNED 64-bit value in the given base.
     function radixStr(n, base, upper) {
@@ -4077,14 +4230,6 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             v = i64ShrU(v, bits)
         }
         return out
-    }
-    // A minimum digit count, applied to the digits only - a "-" sign is not one of them.
-    function intPrec(sv, prec) {
-        var neg = (sv.length > 0 && sv.charAt(0) == "-")
-        var body = neg ? sv.slice(1, sv.length) : sv
-        if (prec == 0 && body == "0") { body = "" }
-        while (body.length < prec) { body = "0" + body }
-        return neg ? ("-" + body) : body
     }
     // printf %q: bash's BACKSLASH form, which is not ${v@Q}'s single-quoted form -
     // `printf %q "a b"` is `a\ b` while `${v@Q}` is `'a b'`. An empty operand is '' and a

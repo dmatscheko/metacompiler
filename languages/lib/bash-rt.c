@@ -159,9 +159,7 @@ int rt_haschar(char *s, int ch);
 char *rt_read_line(int u);
 char *rt_field(char *l, char *ifs, int idx, int rest);
 int rt_nifs(char *l, char *ifs);
-char *rt_pad(char *s, int w, int left, int zero);
 char *rt_radix(char *s, int base, int upper, int alt);
-char *rt_intprec(char *s, int prec);
 char *rt_pfq(char *s);
 char *rt_unescape(char *s);
 int rt_nfields(char *v);
@@ -2036,21 +2034,6 @@ char *rt_field(char *l, char *ifs, int idx, int rest) {
     return &empty[0];
 }
 
-/* rt_pad: printf's field padding. */
-char *rt_pad(char *s, int w, int left, int zero) {
-    char *v = s;
-    while (rt_strlen(v) < w) {
-        char *padCh;
-        char *a;
-        char *b;
-        if (zero != 0) padCh = "0"; else padCh = " ";
-        a = rt_strcat(v, " ");
-        b = rt_strcat(padCh, v);
-        if (left != 0) v = a; else v = b;
-    }
-    return v;
-}
-
 /* rt_radix: printf's %x / %X / %o / %u - the operand as an UNSIGNED 64-bit
  * value in `base`, with the # prefix when `alt` and the value is not zero.
  *
@@ -2114,32 +2097,6 @@ char *rt_radix(char *s, int base, int upper, int alt) {
     return dst;
 }
 
-/* rt_intprec: printf's PRECISION on an integer - a minimum DIGIT count, which a
- * "-" sign is not part of. `%.3d` of 7 is 007 and `%.0d` of 0 is empty. */
-char *rt_intprec(char *s, int prec) {
-    int neg = s[0] == 45;
-    int off = 0;
-    int len;
-    int pad;
-    char *dst;
-    int d;
-    int i;
-    if (neg != 0) off = 1;
-    len = rt_strlen(s) - off;
-    if (prec == 0 && len == 1 && s[off] == 48) len = 0;
-    pad = prec - len;
-    if (pad < 0) pad = 0;
-    dst = rt_bump(off + pad + len + 1);
-    d = 0;
-    if (neg != 0) { dst[0] = 45; d = 1; }
-    i = 0;
-    while (i < pad) { dst[d] = 48; d = d + 1; i = i + 1; }
-    i = 0;
-    while (i < len) { dst[d] = s[off + i]; d = d + 1; i = i + 1; }
-    dst[d] = 0;
-    return dst;
-}
-
 /* rt_pfq: printf %q. This is bash's BACKSLASH form, NOT ${v@Q}'s single-quoted
  * one - `printf %q "a b"` is `a\ b` while `${v@Q}` is `'a b'`. An empty operand
  * is '' and a value holding a control character falls back to rt_shquote, which
@@ -2186,7 +2143,430 @@ char *rt_pfq(char *s) {
     return dst;
 }
 
-/* rt_unescape: echo -e / printf backslash escapes. */
+/* ---- printf -----------------------------------------------------------------
+ * bash's printf FORMAT [ARG...], read at run time: the format may come out of an
+ * expansion, and `%*d` takes its width from an operand. The format is reused
+ * until the operands run out; a conversion past the last operand reads "" or 0.
+ *
+ * Measured against bash 5.3: the flags - + space # 0, width and precision (a
+ * literal or *; a negative * width left-justifies, a negative * precision is
+ * none), the length modifiers h l L j z t (ignored), and d i o u x X c s b q.
+ * Width and precision count BYTES. A numeric operand is read like strtoimax with
+ * base 0 (0x1f is 31, 010 is 8) - strtoumax for o u x X - or 'C / "C for a
+ * character's code; an operand that is not entirely a number is reported and
+ * its leading number used, with status 1. An invalid conversion character ends
+ * the output there, status 1.
+ * %e %f %g %a are not implemented: the operand is printed as it is (bash-rt.c
+ * has no double).
+ *
+ * Escapes: the FORMAT knows \a \b \e \E \f \n \r \t \v \\ \" \' \?, \NNN octal
+ * (one to three digits, \0 included), \xHH, \uHHHH and \UHHHHHHHH, and keeps
+ * anything else - \c included - as written. A %b operand knows the same, reads
+ * octal as \0NNN or \NNN, and its \c ends ALL output. A NUL byte cannot be held
+ * in a string here and is dropped (a command substitution drops it too).
+ * Twin of printfBuiltin in bash-interpreter.abnf. */
+int printf_rc;
+int pf_stop;      /* a %b operand's \c: no further output                 */
+char *pf_e;       /* the text pf_escape appends to                         */
+int pf_ai;        /* the next operand                                      */
+int pf_have;      /* the operand pf_arg answered existed                   */
+
+/* One character as a string; 0 is dropped (see above). */
+char *pf_chr(int c)
+{
+    char *d;
+    if (c == 0) return empty;
+    d = rt_bump(2);
+    d[0] = (char)c;
+    d[1] = 0;
+    return d;
+}
+
+/* The UTF-8 encoding of a code point (\u / \U). */
+char *pf_utf8(long cp)
+{
+    char *d = rt_bump(5);
+    if (cp == 0) {
+        d[0] = 0;
+    } else if (cp < 128) {
+        d[0] = (char)cp;
+        d[1] = 0;
+    } else if (cp < 2048) {
+        d[0] = (char)(192 + cp / 64);
+        d[1] = (char)(128 + cp % 64);
+        d[2] = 0;
+    } else if (cp < 65536) {
+        d[0] = (char)(224 + cp / 4096);
+        d[1] = (char)(128 + (cp / 64) % 64);
+        d[2] = (char)(128 + cp % 64);
+        d[3] = 0;
+    } else {
+        d[0] = (char)(240 + cp / 262144);
+        d[1] = (char)(128 + (cp / 4096) % 64);
+        d[2] = (char)(128 + (cp / 64) % 64);
+        d[3] = (char)(128 + cp % 64);
+        d[4] = 0;
+    }
+    return d;
+}
+
+int pf_hexval(int c)
+{
+    if (c >= 48 && c <= 57) return c - 48;
+    if (c >= 97 && c <= 102) return c - 87;
+    if (c >= 65 && c <= 70) return c - 55;
+    return -1;
+}
+
+/* The escape at s[i] (a backslash), appended to pf_e; answers the bytes it used.
+ * pctb is 1 for a %b operand. */
+int pf_escape(char *s, int i, int pctb)
+{
+    int c = (int)(unsigned char)s[i + 1];
+    int k = 0;
+    long v = 0;
+    int n;
+    int maxd;
+    char *t = 0;
+    if (c == 0) {
+        pf_e = rt_strcat(pf_e, "\\");
+        return 1;
+    }
+    if (c == 97) t = pf_chr(7);
+    if (c == 98) t = pf_chr(8);
+    if (c == 101 || c == 69) t = pf_chr(27);
+    if (c == 102) t = pf_chr(12);
+    if (c == 110) t = pf_chr(10);
+    if (c == 114) t = pf_chr(13);
+    if (c == 116) t = pf_chr(9);
+    if (c == 118) t = pf_chr(11);
+    if (c == 92) t = "\\";
+    if (c == 34) t = "\"";
+    if (c == 39) t = "'";
+    if (c == 63) t = "?";
+    if (t != 0) {
+        pf_e = rt_strcat(pf_e, t);
+        return 2;
+    }
+    if (c >= 48 && c <= 55) {
+        /* the format: one to three digits; %b: \0 and then up to three, or \NNN */
+        n = i + 1;
+        maxd = 3;
+        if (pctb != 0 && c == 48) n = i + 2;
+        while (k < maxd && s[n + k] >= 48 && s[n + k] <= 55) {
+            v = v * 8 + (long)(s[n + k] - 48);
+            k = k + 1;
+        }
+        pf_e = rt_strcat(pf_e, pf_chr((int)(v & 255)));
+        return n + k - i;
+    }
+    if (c == 120 || c == 117 || c == 85) {
+        maxd = 8;
+        if (c == 120) maxd = 2;
+        if (c == 117) maxd = 4;
+        while (k < maxd && pf_hexval((int)(unsigned char)s[i + 2 + k]) >= 0) {
+            v = v * 16 + (long)pf_hexval((int)(unsigned char)s[i + 2 + k]);
+            k = k + 1;
+        }
+        if (k == 0) {
+            pf_e = rt_strcat(pf_e, rt_substr(s, i, 2));
+            return 2;
+        }
+        if (c == 120) pf_e = rt_strcat(pf_e, pf_chr((int)v));
+        else pf_e = rt_strcat(pf_e, pf_utf8(v));
+        return 2 + k;
+    }
+    if (c == 99 && pctb != 0) {
+        pf_stop = 1;
+        return 2;
+    }
+    pf_e = rt_strcat(pf_e, rt_substr(s, i, 2));
+    return 2;
+}
+
+/* A %b operand with its escapes applied (pf_stop at \c). */
+char *pf_bstr(char *s)
+{
+    char *saved = pf_e;
+    char *r;
+    int i = 0;
+    pf_e = empty;
+    while (s[i] != 0 && pf_stop == 0) {
+        if (s[i] == 92) {
+            i = i + pf_escape(s, i, 1);
+        } else {
+            pf_e = rt_strcat(pf_e, rt_substr(s, i, 1));
+            i = i + 1;
+        }
+    }
+    r = pf_e;
+    pf_e = saved;
+    return r;
+}
+
+int pf_bad(char *a, char *msg)
+{
+    int saved = sink_out;
+    sink_out = sink_err;
+    rt_prints("bash: printf: ");
+    rt_prints(a);
+    rt_prints(": ");
+    rt_prints(msg);
+    rt_prints("\n");
+    sink_out = saved;
+    printf_rc = 1;
+    return 0;
+}
+
+/* Would the digits s[ds..de) in `base` exceed the largest magnitude the
+ * conversion holds - 2^63 - 1, 2^63 for a negative signed operand, 2^64 - 1 for
+ * an unsigned one (o u x X read like strtoumax, so 0xffffffffffffffff is fine)?
+ * Compared as text against that limit, with the leading zeros dropped. */
+int pf_over(char *s, int ds, int de, long base, int neg, int uns)
+{
+    char *lim;
+    int n;
+    int ln;
+    int k;
+    while (ds < de && s[ds] == 48) ds = ds + 1;
+    n = de - ds;
+    if (base == 10) lim = uns != 0 ? "18446744073709551615" : (neg != 0 ? "9223372036854775808" : "9223372036854775807");
+    else if (base == 16) lim = uns != 0 ? "ffffffffffffffff" : (neg != 0 ? "8000000000000000" : "7fffffffffffffff");
+    else lim = uns != 0 ? "1777777777777777777777" : (neg != 0 ? "1000000000000000000000" : "777777777777777777777");
+    ln = rt_strlen(lim);
+    if (n != ln) return n > ln ? 1 : 0;
+    k = 0;
+    while (k < n) {
+        int c = (int)(unsigned char)s[ds + k];
+        if (c >= 65 && c <= 70) c = c + 32;
+        if (c != (int)(unsigned char)lim[k]) return c > (int)(unsigned char)lim[k] ? 1 : 0;
+        k = k + 1;
+    }
+    return 0;
+}
+
+/* A numeric operand (see the head comment); uns for o u x X. */
+long pf_num(char *a, int uns)
+{
+    int i = 0;
+    int neg = 0;
+    long base = 10;
+    long v = 0;
+    int ds;
+    long d;
+    if (a[0] == 39 || a[0] == 34) {
+        if (a[1] == 0) return 0;
+        return (long)rt_cpat(&a[1]);
+    }
+    while (a[i] == 32 || a[i] == 9 || a[i] == 10) i = i + 1;
+    if (a[i] == 45 || a[i] == 43) {
+        neg = a[i] == 45;
+        i = i + 1;
+    }
+    if (a[i] == 48 && (a[i + 1] == 120 || a[i + 1] == 88) && pf_hexval((int)(unsigned char)a[i + 2]) >= 0) {
+        base = 16;
+        i = i + 2;
+    } else if (a[i] == 48) {
+        base = 8;
+    }
+    ds = i;
+    while (1) {
+        d = (long)pf_hexval((int)(unsigned char)a[i]);
+        if (d < 0 || d >= base) break;
+        v = v * base + d;
+        i = i + 1;
+    }
+    if (pf_over(a, ds, i, base, neg, uns) != 0) {
+        pf_bad(a, "Result too large");
+        if (uns != 0) return -1;
+        if (neg != 0) return 0 - 9223372036854775807L - 1;
+        return 9223372036854775807L;
+    }
+    if (neg != 0) v = 0 - v;
+    if (i == ds || a[i] != 0) {
+        if (a[i] == 120 || a[i] == 88) pf_bad(a, "invalid hexadecimal number");
+        else if (base == 8 && a[i] >= 48 && a[i] <= 57) pf_bad(a, "invalid octal number");
+        else pf_bad(a, "invalid number");
+    }
+    return v;
+}
+
+/* Pad s to width w: spaces on the left, on the right (left), or zeros after the
+ * first `keep` bytes (a sign or a 0x prefix). */
+char *pf_pad(char *s, int w, int left, int zero, int keep)
+{
+    int len = rt_strlen(s);
+    char *fill = empty;
+    while (len < w) {
+        if (zero != 0) fill = rt_strcat(fill, "0");
+        else fill = rt_strcat(fill, " ");
+        len = len + 1;
+    }
+    if (left != 0) return rt_strcat(s, fill);
+    if (zero != 0) return rt_strcat(rt_strcat(rt_substr(s, 0, keep), fill), rt_substr(s, keep, -1));
+    return rt_strcat(fill, s);
+}
+
+/* One integer conversion: conv is d i o u x or X. */
+char *pf_int(long v, int conv, int left, int plus, int space, int alt, int zero, int w, int prec)
+{
+    char *dg;
+    char *pre = empty;
+    int len;
+    int base = 16;
+    if (conv == 100 || conv == 105) {
+        dg = rt_int2str(v);
+        if (dg[0] == 45) {
+            dg = rt_substr(dg, 1, -1);
+            pre = "-";
+        } else if (plus != 0) {
+            pre = "+";
+        } else if (space != 0) {
+            pre = " ";
+        }
+    } else {
+        if (conv == 111) base = 8;
+        if (conv == 117) base = 10;
+        dg = rt_radix(rt_int2str(v), base, conv == 88 ? 1 : 0, 0);
+    }
+    if (prec == 0 && v == 0) dg = empty;
+    len = rt_strlen(dg);
+    while (len < prec) {
+        dg = rt_strcat("0", dg);
+        len = len + 1;
+    }
+    if (conv == 111 && alt != 0 && dg[0] != 48) dg = rt_strcat("0", dg);
+    if ((conv == 120 || conv == 88) && alt != 0 && v != 0) {
+        if (conv == 88) pre = "0X";
+        else pre = "0x";
+    }
+    return pf_pad(rt_strcat(pre, dg), w, left, (zero != 0 && prec < 0 && left == 0) ? 1 : 0, rt_strlen(pre));
+}
+
+/* The next operand of the field list args (nargs of them), "" past the end. */
+char *pf_arg(char *args, int nargs)
+{
+    int k = pf_ai;
+    pf_ai = k + 1;
+    pf_have = k < nargs ? 1 : 0;
+    if (k >= nargs) return empty;
+    return rt_getfield(args, k);
+}
+
+/* The conversion at fmt[i] (just past the "%"), appended to pf_e; answers the index
+ * after it, or -1 for an invalid conversion character. */
+int pf_conv(char *fmt, int i, char *args, int nargs)
+{
+    int left = 0, plus = 0, space = 0, alt = 0, zero = 0;
+    int w = 0, prec = -1, cv, saved;
+    long nv;
+    char *a;
+    char *piece;
+    int start = i - 1;
+    while (fmt[i] == 45 || fmt[i] == 43 || fmt[i] == 32 || fmt[i] == 35 || fmt[i] == 48) {
+        if (fmt[i] == 45) left = 1;
+        if (fmt[i] == 43) plus = 1;
+        if (fmt[i] == 32) space = 1;
+        if (fmt[i] == 35) alt = 1;
+        if (fmt[i] == 48) zero = 1;
+        i = i + 1;
+    }
+    if (fmt[i] == 42) {
+        nv = pf_num(pf_arg(args, nargs), 0);
+        if (nv < 0) {
+            left = 1;
+            nv = 0 - nv;
+        }
+        w = (int)nv;
+        i = i + 1;
+    } else {
+        while (fmt[i] >= 48 && fmt[i] <= 57) {
+            w = w * 10 + (fmt[i] - 48);
+            i = i + 1;
+        }
+    }
+    if (fmt[i] == 46) {
+        i = i + 1;
+        prec = 0;
+        if (fmt[i] == 42) {
+            nv = pf_num(pf_arg(args, nargs), 0);
+            prec = nv < 0 ? -1 : (int)nv;
+            i = i + 1;
+        } else {
+            while (fmt[i] >= 48 && fmt[i] <= 57) {
+                prec = prec * 10 + (fmt[i] - 48);
+                i = i + 1;
+            }
+        }
+    }
+    while (fmt[i] != 0 && rt_haschar("hlLjzt", (int)(unsigned char)fmt[i]) != 0) i = i + 1;
+    cv = (int)(unsigned char)fmt[i];
+    if (cv == 0 || rt_haschar("diouxXcsbqeEfFgGaA", cv) == 0) {
+        saved = sink_out;
+        sink_out = sink_err;
+        rt_prints("bash: printf: `");
+        if (cv == 0) rt_prints(rt_substr(fmt, start, -1));
+        else rt_prints(rt_substr(fmt, i, 1));
+        rt_prints("': invalid format character\n");
+        sink_out = saved;
+        printf_rc = 1;
+        return -1;
+    }
+    i = i + 1;
+    a = pf_arg(args, nargs);
+    if (rt_haschar("diouxX", cv) != 0) {
+        nv = 0;
+        if (pf_have != 0) nv = pf_num(a, (cv == 100 || cv == 105) ? 0 : 1);
+        piece = pf_int(nv, cv, left, plus, space, alt, zero, w, prec);
+    } else {
+        piece = a;
+        if (cv == 99) piece = rt_substr(a, 0, 1);
+        if (cv == 98) piece = pf_bstr(a);
+        if (cv == 113) piece = rt_pfq(a);
+        if (prec >= 0 && cv != 99 && rt_strlen(piece) > prec) piece = rt_substr(piece, 0, prec);
+        piece = pf_pad(piece, w, left, zero, 0);
+    }
+    pf_e = rt_strcat(pf_e, piece);
+    return i;
+}
+
+/* The whole command's output; printf_rc is its status. */
+char *rt_printf(char *fmt, char *args)
+{
+    int nargs = rt_nfields(args);
+    int pass = 0;
+    int used = 0;
+    int i;
+    int c;
+    pf_e = empty;
+    pf_stop = 0;
+    pf_ai = 0;
+    printf_rc = 0;
+    while (pass == 0 || (used != 0 && pf_ai < nargs && pf_stop == 0)) {
+        int before = pf_ai;
+        pass = pass + 1;
+        i = 0;
+        while (fmt[i] != 0 && pf_stop == 0) {
+            c = (int)(unsigned char)fmt[i];
+            if (c == 92) {
+                i = i + pf_escape(fmt, i, 0);
+            } else if (c == 37 && fmt[i + 1] == 37) {
+                pf_e = rt_strcat(pf_e, "%");
+                i = i + 2;
+            } else if (c == 37) {
+                i = pf_conv(fmt, i + 1, args, nargs);
+                if (i < 0) return pf_e;
+            } else {
+                pf_e = rt_strcat(pf_e, rt_substr(fmt, i, 1));
+                i = i + 1;
+            }
+        }
+        used = pf_ai > before ? 1 : 0;
+    }
+    return pf_e;
+}
+
+/* rt_unescape: echo -e's backslash escapes. */
 char *rt_unescape(char *s) {
     int len = rt_strlen(s);
     char *dst = rt_bump(len + 1);

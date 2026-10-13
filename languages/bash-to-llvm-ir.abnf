@@ -1318,10 +1318,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // field lists: a value carrying more than one word is "\x02" followed by the fields,
     // each terminated by "\x01".
     var rtField = rtDecl("rt_field", true, [1, 1, 0, 0])
-    var rtPad = rtDecl("rt_pad", true, [1, 0, 0, 0])
-    var rtRadix = rtDecl("rt_radix", true, [1, 0, 0, 0])
-    var rtIntPrec = rtDecl("rt_intprec", true, [1, 0])
-    var rtPfq = rtDecl("rt_pfq", true, [1])
+    var rtPrintf = rtDecl("rt_printf", true, [1, 1])
+    var gPrintfRc = rtGlobal("printf_rc", i32)
     var rtUnescape = rtDecl("rt_unescape", true, [1])
     var rtNFields = rtDecl("rt_nfields", false, [1])
     var rtGetField = rtDecl("rt_getfield", true, [1, 0])
@@ -3425,211 +3423,32 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return c.compile(frag).stack[0]
     }
 
-    // ONE pass over the format, emitted into b. The operand of the j-th conversion comes
-    // from `vals[base + j]` when listV is null (the arity is known while emitting) and from
-    // rt_getfield(listV, baseV + j) when it is not - see emitPrintf.
-    // Answers {b, out, used, n}: `used` is false for a format with no conversion at all
-    // (which consumes nothing and must not be repeated), `n` the number consumed.
-    function emitPrintfPass(b, fmt, out, vals, base, listV, baseV) {
-        var used = false
-        var lit = ""
-        var nc = 0
-        var i = 0
-        while (i < fmt.length) {
-            var ch = fmt.charAt(i)
-            if (ch == "\\" && i + 1 < fmt.length) {
-                var e = fmt.charAt(i + 1)
-                i = i + 2
-                if (e == "n") { lit = lit + "\n" }
-                else if (e == "t") { lit = lit + "\t" }
-                else if (e == "r") { lit = lit + "\r" }
-                else if (e == "\\") { lit = lit + "\\" }
-                else { lit = lit + "\\" + e }
-            } else if (ch == "%") {
-                i = i + 1
-                if (fmt.charAt(i) == "%") { lit = lit + "%"; i = i + 1 }
-                else {
-                    if (lit != "") { out = b.NewCall(rtStrcat, [out, gepStr(b, lit)]); lit = "" }
-                    var left = 0, zpad = 0, alt = 0
-                    var flagging = true
-                    while (flagging && i < fmt.length) {
-                        var fc = fmt.charAt(i)
-                        if (fc == "-") { left = 1; i = i + 1 }
-                        else if (fc == "0") { zpad = 1; i = i + 1 }
-                        else if (fc == "#") { alt = 1; i = i + 1 }
-                        else if (fc == "+" || fc == " ") { i = i + 1 }
-                        else { flagging = false }
-                    }
-                    var width = 0
-                    while (i < fmt.length && fmt.charCodeAt(i) >= 48 && fmt.charCodeAt(i) <= 57) {
-                        width = width * 10 + (fmt.charCodeAt(i) - 48)
-                        i = i + 1
-                    }
-                    var prec = -1
-                    if (fmt.charAt(i) == ".") {
-                        i = i + 1
-                        prec = 0
-                        while (i < fmt.length && fmt.charCodeAt(i) >= 48 && fmt.charCodeAt(i) <= 57) {
-                            prec = prec * 10 + (fmt.charCodeAt(i) - 48)
-                            i = i + 1
-                        }
-                    }
-                    var conv = fmt.charAt(i)
-                    i = i + 1
-                    var av = emptyPtr(b)
-                    if (listV == null) {
-                        if (base + nc < vals.length) { av = vals[base + nc] }
-                    } else {
-                        av = b.NewCall(rtGetField,
-                                       [listV, b.NewAdd(baseV, llvm.constant.NewInt(i32, nc))])
-                    }
-                    nc = nc + 1
-                    used = true
-                    var piece = av
-                    var isNum = (conv == "d" || conv == "i" || conv == "u" || conv == "x" || conv == "X" || conv == "o")
-                    var altC = llvm.constant.NewInt(i32, alt)
-                    if (conv == "d" || conv == "i") { piece = b.NewCall(rtInt2str, b.NewCall(rtStr2int, av)) }
-                    else if (conv == "c") { piece = b.NewCall(rtSubstr, [av, zero, one]) }
-                    else if (conv == "u") { piece = b.NewCall(rtRadix, [av, llvm.constant.NewInt(i32, 10), zero, zero]) }
-                    else if (conv == "o") { piece = b.NewCall(rtRadix, [av, llvm.constant.NewInt(i32, 8), zero, altC]) }
-                    else if (conv == "x") { piece = b.NewCall(rtRadix, [av, llvm.constant.NewInt(i32, 16), zero, altC]) }
-                    else if (conv == "X") { piece = b.NewCall(rtRadix, [av, llvm.constant.NewInt(i32, 16), one, altC]) }
-                    else if (conv == "b") { piece = b.NewCall(rtUnescape, av) }
-                    else if (conv == "q") { piece = b.NewCall(rtPfq, av) }
-                    else if (conv == "s" && prec >= 0) {
-                        piece = b.NewCall(rtSubstr, [av, zero, llvm.constant.NewInt(i32, prec)])
-                    }
-                    // A precision on an integer is a minimum DIGIT count and it cancels
-                    // the 0 flag, exactly as in the interpreter half.
-                    if (isNum && prec >= 0) {
-                        zpad = 0
-                        piece = b.NewCall(rtIntPrec, [piece, llvm.constant.NewInt(i32, prec)])
-                    }
-                    if (width > 0) {
-                        piece = b.NewCall(rtPad, [piece, llvm.constant.NewInt(i32, width),
-                                                  llvm.constant.NewInt(i32, left),
-                                                  llvm.constant.NewInt(i32, zpad)])
-                    }
-                    out = b.NewCall(rtStrcat, [out, piece])
-                }
-            } else { lit = lit + ch; i = i + 1 }
-        }
-        if (lit != "") { out = b.NewCall(rtStrcat, [out, gepStr(b, lit)]) }
-        return {b: b, out: out, used: used, n: nc}
-    }
-
-    // printf FORMAT [ARG...] : the format is a compile-time literal, so it is parsed here and
-    // the passes over the argument list are unrolled. The result is built with rt_strcat and
-    // then printed, or stored when -v NAME was given.
-    //
-    // The conversion set and rules are printfBuiltin's in languages/bash-interpreter.abnf; see
-    // there for why %e %f %g are absent.
+    // printf [-v NAME] [--] FORMAT [ARG...]: the whole command runs in rt_printf
+    // (languages/lib/bash-rt.c), so the format may come out of an expansion and `%*d` takes
+    // its width from an operand; printf_rc is its status. Twin of printfBuiltin in
+    // languages/bash-interpreter.abnf, which documents the conversions.
     function emitPrintf(b, args) {
         var a = args
         var dest = null
         if (a.length >= 2 && a[0].c == "-v") { dest = a[1].c; a = a.slice(2) }
+        if (a.length > 0 && a[0].c == "--") { a = a.slice(1) }
         if (a.length == 0) { storeStatusI(b, 0); return b }
-        if (a[0].c == undefined) { fail("printf needs a literal format string in this compiler") }
-        var fmt = a[0].c
-        var rest = a.slice(1)
-        var out = emptyPtr(b)
+        var rf = evalWord(b, a[0])
+        b = rf.b
+        // The operands as ONE field list: an unquoted operand is field-split, so the number of
+        // operands is a run-time fact (`x="  a   b  "; printf '%s|' $x` prints `a|b|`).
+        var listV = gepStr(b, "\x02")
         var i
-        // An unquoted operand is field-split, which makes the arity a RUN-TIME number: the format
-        // is reused until the operands run out (`x="  a   b  "; printf '%s|' $x` prints `a|b|`).
-        // Only a word that can produce several fields (the `.f` flag evalWord tests) forces the
-        // run-time form; quoted and literal operands keep the fully unrolled emission.
-        var dyn = false
-        for (i = 0; i < rest.length; i++) { if (rest[i].f == true) { dyn = true } }
-        if (!dyn) {
-            var vals = []
-            for (i = 0; i < rest.length; i++) { var rv = evalWord(b, rest[i]); b = rv.b; vals.push(rv.v) }
-            var ai = 0
-            var pass = 0
-            while (pass == 0 || ai < vals.length) {
-                pass = pass + 1
-                var pr = emitPrintfPass(b, fmt, out, vals, ai, null, null)
-                b = pr.b
-                out = pr.out
-                if (pr.used) { ai = ai + pr.n } else { ai = vals.length }
-            }
-        } else {
-            // The operands as ONE field list, walked by a real loop. rt_getfield answers ""
-            // past the end, which is what a short last pass wants.
-            var listP = b.NewAlloca(i8ptr)
-            b.NewStore(gepStr(b, "\x02"), listP)
-            for (i = 0; i < rest.length; i++) {
-                var rw = rest[i].fn(b)
-                b = rw.b
-                b.NewStore(b.NewCall(rtCatFields, [b.NewLoad(i8ptr, listP), rw.v]), listP)
-            }
-            var listV = b.NewLoad(i8ptr, listP)
-            var nargs = b.NewCall(rtNFields, listV)
-            // How many conversions one pass consumes. Emitting a throwaway pass to count
-            // them would emit the calls too, so the format is scanned here.
-            var nconv = printfArity(fmt)
-            if (nconv == 0) {
-                var pr0 = emitPrintfPass(b, fmt, out, [], 0, null, null)
-                b = pr0.b
-                out = pr0.out
-            } else {
-                // out and the operand cursor are loop-carried, so they live in allocas of
-                // the block BEFORE the loop - an alloca inside the body would grow the
-                // frame once per pass.
-                var outP = b.NewAlloca(i8ptr)
-                b.NewStore(out, outP)
-                var aiP = b.NewAlloca(i32)
-                b.NewStore(zero, aiP)
-                var body = curF.NewBlock("")
-                var done = curF.NewBlock("")
-                b.NewBr(body)
-                var baseV = body.NewLoad(i32, aiP)
-                // The pass emits calls only, never a block, so it ends where it began and
-                // the back edge is body -> body.
-                var prd = emitPrintfPass(body, fmt, body.NewLoad(i8ptr, outP), [], 0, listV, baseV)
-                var bb = prd.b
-                bb.NewStore(prd.out, outP)
-                var nextAi = bb.NewAdd(baseV, llvm.constant.NewInt(i32, nconv))
-                bb.NewStore(nextAi, aiP)
-                bb.NewCondBr(bb.NewICmp(llvm.enum.IPredSLT, nextAi, nargs), body, done)
-                b = done
-                out = done.NewLoad(i8ptr, outP)
-            }
+        for (i = 1; i < a.length; i++) {
+            var rw = a[i].fn(b)
+            b = rw.b
+            listV = b.NewCall(rtCatFields, [listV, rw.v])
         }
+        b = emitAbortCheck(b)
+        var out = b.NewCall(rtPrintf, [rf.v, listV])
         if (dest != null) { storeVar(b, dest, out) } else { b.NewCall(rtPrints, out) }
-        storeStatusI(b, 0)
+        storeStatus(b, b.NewLoad(i32, gPrintfRc))
         return b
-    }
-
-    // The number of conversions one pass over `fmt` consumes: the same walk emitPrintfPass
-    // makes, with everything but the cursor removed. "%%" is a literal percent and consumes
-    // nothing.
-    function printfArity(fmt) {
-        var n = 0
-        var i = 0
-        while (i < fmt.length) {
-            var ch = fmt.charAt(i)
-            if (ch == "\\" && i + 1 < fmt.length) { i = i + 2 }
-            else if (ch == "%") {
-                i = i + 1
-                if (fmt.charAt(i) == "%") { i = i + 1 }
-                else {
-                    var flagging = true
-                    while (flagging && i < fmt.length) {
-                        var fc = fmt.charAt(i)
-                        if (fc == "-" || fc == "0" || fc == "#" || fc == "+" || fc == " ") { i = i + 1 }
-                        else { flagging = false }
-                    }
-                    while (i < fmt.length && fmt.charCodeAt(i) >= 48 && fmt.charCodeAt(i) <= 57) { i = i + 1 }
-                    if (fmt.charAt(i) == ".") {
-                        i = i + 1
-                        while (i < fmt.length && fmt.charCodeAt(i) >= 48 && fmt.charCodeAt(i) <= 57) { i = i + 1 }
-                    }
-                    i = i + 1
-                    n = n + 1
-                }
-            } else { i = i + 1 }
-        }
-        return n
     }
 
     // read [-r] NAME... : one line of standard input, split on IFS, the last name taking the

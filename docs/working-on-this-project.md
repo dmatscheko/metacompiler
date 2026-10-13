@@ -792,10 +792,9 @@ same-named nested types apart.
 reproducible here and `StackTrace.empty` would be a divergence of a different
 shape; an uncaught `__dexc` in the compiler half prints `bad` rather than
 `FormatException: bad` (the handler is `runJSModule` in the shared `abnf/jsrt.go`).
-**Bash** the compiler's attribute scope is LEXICAL where bash's is dynamic; `printf '%d' 0x1f`
-is 0 where bash says 31, because bash routes operands through its arithmetic
-evaluator and the compiler has none at runtime; `readonly` is not enforced;
-`%e %f %g %a` need a double in `bash-rt.c`, which has none.
+**Bash** the compiler's attribute scope is LEXICAL where bash's is dynamic;
+`readonly` is not enforced; `%e %f %g %a` need a double in `bash-rt.c`, which has
+none.
 
 Per-language divergences from real toolchains, recorded and permanent: Go byte-
 slicing a rune in half cannot be represented at all (the floor's strings are
