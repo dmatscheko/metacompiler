@@ -544,6 +544,21 @@ function s18()
     local function setg() g18 = N[1] end
     setg()
     check("clo15", g18, 3)              -- a bare assignment in a function is global
+    -- Tail calls run at one depth (the depth that overflows a nested call is past
+    -- this file's budget under -frozen); what they hand back is unchanged: every
+    -- value, through a method, a builtin and a mutual recursion.
+    local D = {3000}
+    local function multi(n) if n == 0 then return 1, nil, 3 end return multi(n - 1) end
+    check("clo16", select("#", multi(D[1])), 3)
+    local ev, od
+    ev = function(n) if n == 0 then return "even" end return od(n - 1) end
+    od = function(n) if n == 0 then return "odd" end return ev(n - 1) end
+    check("clo17", ev(D[1] + 1), "odd")
+    local obj = {tag = "m"}
+    function obj:walk(n) if n == 0 then return select(2, "a", self.tag) end return self:walk(n - 1) end
+    check("clo18", obj:walk(D[1]), "m")
+    local function none(n) if n > 0 then return none(n - 1) end end
+    check("clo19", select("#", none(D[1])), 0)
 end
 
 -- ===== SECTION 19: interpreter/compiler agreement ratchet =====

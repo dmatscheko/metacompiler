@@ -1746,10 +1746,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var fv = anytype // The callee, truncated to one value.
             fv = luaFirst(cur)
             if (typeof fv != "function") { fail("attempt to call a " + luaType(fv) + " value" + luaDescText(pd)) }
-            if (tail && luaCallPos.length > 0) { luaTail = true }
+            if (tail && luaCallPos.length > 0) { return {__luatc: LUA_TC, f: fv, a: argv, n: cname, p: luaPos} }
             luaCallName = cname
             out = fv.apply(undefined, argv)
-            luaTail = false
         } else if (s.kind == "method") {
             var fn = anytype // The looked-up method value.
             var recv = anytype // The receiver, truncated to one value.
@@ -1759,10 +1758,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var margv = evalList(s.args)
             luaPos = s.at.here
             if (typeof fn != "function") { fail("attempt to call a " + luaType(fn) + " value" + luaDescText({k: "method", n: s.name})) }
-            if (tail && luaCallPos.length > 0) { luaTail = true }
+            if (tail && luaCallPos.length > 0) { return {__luatc: LUA_TC, f: fn, a: [recv].concat(margv), n: cname, p: luaPos} }
             luaCallName = cname
             out = fn.apply(undefined, [recv].concat(margv))
-            luaTail = false
         } else if (s.kind == "field") {
             out = luaIndexAt(luaFirst(cur), s.name, pd)
         } else {
@@ -1991,7 +1989,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // Every frame of the running function is now shared with the closure. The ones
         // below luaFnBase were marked when the running function itself was made.
         for (var mi = luaFnBase; mi < scopes.length; mi++) { rawSet(scopes[mi], "\x00c", true) }
-        return function() {
+        var self = anytype // The closure itself, which luaTramp names when it calls it.
+        self = function() {
+            var tramp = luaTrampFn === self
+            luaTrampFn = null
             var args = []
             for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]) }
             var saved = scopes
@@ -2015,12 +2016,46 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (luaTail) { luaTail = false; sp = sp - 1 } else { luaCallPos.push(ep) }
             luaOwnTop = true
             var r = bodyT()
-            while (luaCallPos.length > sp) { luaCallPos.pop() }
-            luaPos = ep
+            var res = anytype // The return value, or a tail call still to make.
+            res = (r != undefined && r.isRet) ? r.v : LUA_NONE
+            // A tail call leaves this frame's luaCallPos entry for its callee.
+            var tc = luaIsTail(res)
+            while (luaCallPos.length > (tc ? sp + 1 : sp)) { luaCallPos.pop() }
             scopes = saved
             luaFnBase = savedBase
-            return (r != undefined && r.isRet) ? r.v : LUA_NONE
+            if (tc && !tramp) { res = luaTramp(res, sp) }
+            luaPos = ep
+            return res
         }
+        return self
+    }
+    // Proper tail calls (manual 3.4.10). `return f(args)` in a Lua function does not
+    // call f: it answers the record {__luatc, f, a} (luaStep), and the closure that
+    // returned it - or, when luaTramp itself called that closure, luaTramp's loop -
+    // makes the call, so a chain of tail calls runs at one depth. luaTrampFn names
+    // the callee being called from the loop, which then hands its own tail call
+    // back instead of looping; any other closure clears it on entry. The callee
+    // takes over the luaCallPos entry at sp (luaTail), as a tail call does.
+    var LUA_TC = {}
+    var luaTrampFn = anytype
+    luaTrampFn = null
+    function luaIsTail(v) { return v !== null && v !== undefined && typeof v == "object" && v.__luatc === LUA_TC }
+    function luaTramp(rec, sp) {
+        var cur = anytype // The pending tail call, then the final value.
+        cur = rec
+        while (luaIsTail(cur)) {
+            var f = anytype
+            f = cur.f
+            luaTrampFn = f
+            luaTail = true
+            luaCallName = cur.n
+            luaPos = cur.p
+            cur = f.apply(undefined, cur.a)
+            luaTail = false
+            luaTrampFn = null
+        }
+        while (luaCallPos.length > sp) { luaCallPos.pop() }
+        return cur
     }
     function makeFuncExpr(bodyT, plist) {
         return function() { return makeClosure(plist.params, bodyT) }
@@ -2306,7 +2341,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // which only error's levels can observe (luaStep).
     function makeReturn(items, text) {
         var ts = items
-        if (items.length == 1 && lastCallFold !== null && text == "return" + lastCallFold.text) { ts = [lastCallFold.tail] }
+        if (items.length == 1 && lastCallFold !== null && text == "return" + lastCallFold.text) {
+            var tt = lastCallFold.tail
+            return function() {
+                var v = anytype // A tail call to make (makeClosure), or the call's values.
+                v = tt()
+                if (!luaIsTail(v)) { v = mkMulti(luaAll(v)) }
+                return {isRet: true, v: v}
+            }
+        }
         return function() { return {isRet: true, v: mkMulti(evalList(ts))} }
     }
 
@@ -2421,6 +2464,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             scopes = savedChain.slice()
             luaFnBase = savedBase
             luaBlockBase = savedBlock
+            luaTrampFn = null
             var ev = anytype // The error object, or what the handler made of it.
             ev = e.v
             if (handler !== undefined) { ev = luaHandle(handler, ev) }

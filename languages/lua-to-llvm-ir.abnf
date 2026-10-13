@@ -854,7 +854,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function callLua(b, name, args) { return b.NewCall(luaFn(name), args) }
     var luaFnArity = {lua_catstr: 2, lua_where: 1, lua_whereat: 1, lua_errlevel: 1, lua_errval: 1, lua_errtext: 1, lua_raise: 1,
                       lua_getvar: 2, lua_ismv: 1, lua_first: 1, lua_all: 1, lua_mk: 1, lua_appendall: 2, lua_extend: 2, lua_spread: 3,
-                      lua_tail: 2, lua_shift: 3, lua_strall: 1,
+                      lua_tail: 2, lua_shift: 3, lua_strall: 1, lua_tramp: 1,
                       lua_num: 1, lua_isnum: 1, lua_isint: 1, lua_mkflt: 1, lua_res: 3,
                       lua_arith: 3, lua_eq: 2, lua_cmp: 3, lua_cmpv: 1, lua_str: 1,
                       lua_argerr: 3, lua_argmsg: 2, lua_needany: 3, lua_opmsg: 2}
@@ -1230,6 +1230,31 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b.NewRet(callExt(b, "js_lubit", [b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, ps[0], handle(1)), handle(3), handle(4)), ps[1], ps[2]]))
             return
         }
+        if (name == "lua_tramp") {
+            // The trampoline that makes tail calls proper (manual 3.4.10): p0 is a
+            // tail call [f, args] that a Lua function returned instead of making it.
+            // Each callee is entered with lua.tail = 2, so it takes over the frame
+            // entry the returning function left in place (luaEnter) and hands its
+            // own tail call back here (lua.tcpend set) rather than nesting a call.
+            var slot = b.NewAlloca(i64)
+            b.NewStore(ps[0], slot)
+            var lpB = curF.NewBlock("")
+            var agB = curF.NewBlock("")
+            var dnB = curF.NewBlock("")
+            b.NewBr(lpB)
+            var rec = lpB.NewLoad(i64, slot)
+            var fnV = callExt(lpB, "js_get", [rec, emitNum(lpB, 0)])
+            var argV = callExt(lpB, "js_get", [rec, emitNum(lpB, 1)])
+            lpB.NewStore(handle(2), gLuaTail)
+            var rv = callExt(lpB, "js_call", [fnV, hUndef, argV])
+            lpB.NewStore(handle(0), gLuaTail)
+            lpB.NewCondBr(lpB.NewICmp(llvm.enum.IPredNE, lpB.NewLoad(i64, gLuaTcPend), handle(0)), agB, dnB)
+            agB.NewStore(handle(0), gLuaTcPend)
+            agB.NewStore(rv, slot)
+            agB.NewBr(lpB)
+            dnB.NewRet(rv)
+            return
+        }
         if (name == "lua_tail") {
             // The extra arguments of a variadic call: a fresh array of args[n...].
             var out = callExt(b, "js_arr_new", [])
@@ -1320,8 +1345,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var gLuaPos = m.NewGlobalDef("lua.pos", llvm.constant.NewInt(i64, 0 - 1))
     var gLuaCs = m.NewGlobalDef("lua.cs", llvm.constant.NewZeroInitializer(luaCsTy))
     var gLuaCsp = m.NewGlobalDef("lua.csp", handle(0))
-    // 1 between a tail call's js_call and the callee's luaEnter.
+    // 1 between a tail call's js_call and the callee's luaEnter, 2 when the call is
+    // lua_tramp's.
     var gLuaTail = m.NewGlobalDef("lua.tail", handle(0))
+    // 1 while the value a function returns to lua_tramp is a tail call to make.
+    var gLuaTcPend = m.NewGlobalDef("lua.tcpend", handle(0))
     // The running call site: the function name it spelled (luaCalleeNames), which
     // an argument error reports, and the name of the called expression, which a
     // call error appends ("(global 'f')"). 2*k, plus 1 for a method call, with k
@@ -1668,11 +1696,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // needs to put both back on the way out. A Lua function entered by a tail call
     // (lua.tail) takes over its caller's entry instead, so the frame below it is
     // the caller's caller; a C function (pcall) never does.
+    // `tramp` is set when lua_tramp made the call.
     function luaEnter(b, canTail) {
         var ep = b.NewLoad(i64, gLuaPos)
         var sp = b.NewLoad(i64, gLuaCsp)
+        var tramp = null
         if (canTail) {
-            var isTail = b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i64, gLuaTail), handle(0))
+            var tv = b.NewLoad(i64, gLuaTail)
+            tramp = b.NewICmp(llvm.enum.IPredEQ, tv, handle(2))
+            var isTail = b.NewICmp(llvm.enum.IPredNE, tv, handle(0))
             sp = b.NewSelect(isTail, b.NewSub(sp, handle(1)), sp)
             var slot = luaCsSlot(b, sp)
             b.NewStore(b.NewSelect(isTail, b.NewLoad(i64, slot), ep), slot)
@@ -1681,7 +1713,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         b.NewStore(handle(0), gLuaTail)
         b.NewStore(b.NewAdd(sp, handle(1)), gLuaCsp)
-        return {ep: ep, sp: sp}
+        return {ep: ep, sp: sp, tramp: tramp}
     }
     function luaLeave(b, fr) {
         b.NewStore(fr.ep, gLuaPos)
@@ -1979,12 +2011,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var xr = emitMemberGet(b, v, callLua(b, "lua_cmpv", [callLua(b, "lua_first", [ir.v])]), sfx)
         return {b: xr.b, v: xr.v, call: false}
     }
+    // A tail call is not made here: it becomes the pair [f, args] that makeReturn
+    // hands to lua_tramp.
     function luaCallTail(b, tail, fn, args) {
         if (!tail) { return callExt(b, "js_call", [fn, hUndef, args]) }
-        b.NewStore(handle(1), gLuaTail)
-        var r = callExt(b, "js_call", [fn, hUndef, args])
-        b.NewStore(handle(0), gLuaTail)
-        return r
+        var rec = callExt(b, "js_arr_new", [])
+        callExt(b, "js_arr_push", [rec, fn])
+        callExt(b, "js_arr_push", [rec, args])
+        return rec
     }
     // Every Lua string shares one metatable whose __index is the string library, so
     // s:sub(2) / s:len() resolve there instead of aborting on "attempt to index a string
@@ -2602,14 +2636,27 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // return e1, e2, ...: all the values travel back as one Lua value (a single one
     // unwrapped, any other count as a multi-value box), the last expression expanding -
     // so 'return f()' propagates everything f returned.
-    // `return f(...)` inside a Lua function is a TAIL CALL (luaCallTail); in the
-    // main chunk there is no frame to take over.
+    // `return f(...)` inside a Lua function is a TAIL CALL; in the main chunk there
+    // is no frame to take over. The function's frame entry stays in place for the
+    // callee, and a function lua_tramp called hands the call back to it, so a chain
+    // of tail calls runs at one depth.
     function makeReturn(items, text) {
         var tailT = null
         if (items.length == 1 && lastCallFold !== null && text == "return" + lastCallFold.text) { tailT = lastCallFold.tail }
         return function(b) {
+            if (tailT != null && luaFrame != null) {
+                var rt = tailT(b)
+                var trB = curF.NewBlock("")
+                var ownB = curF.NewBlock("")
+                rt.b.NewCondBr(luaFrame.tramp, trB, ownB)
+                trB.NewStore(handle(1), gLuaTcPend)
+                trB.NewRet(rt.v)
+                var res = callLua(ownB, "lua_tramp", [rt.v])
+                luaLeave(ownB, luaFrame)
+                ownB.NewRet(res)
+                return deadBlock()
+            }
             var ts = items
-            if (tailT != null && luaFrame != null) { ts = [tailT] }
             var ra = emitListArr(b, ts)
             b = ra.b
             var rv = callLua(b, "lua_mk", [ra.v])
@@ -2636,6 +2683,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var b = f.NewBlock("entry")
         var savedFrame = luaFrame
         luaFrame = null
+        // lua.tail is meant for a Lua function's luaEnter; one a library function
+        // calls must not mistake itself for the callee of a tail call.
+        b.NewStore(handle(0), gLuaTail)
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
         var r = bodyEmit(b, f.Params[1])
         r.b.NewRet(r.v)
