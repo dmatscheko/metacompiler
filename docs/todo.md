@@ -64,7 +64,7 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-586 python: slice ordering and unhashable slice keys · P3 · PY · OPEN [V]
+### T-586 python: slice ordering and unhashable slice keys · P3 · PY · IN PROGRESS (PY worker, round 5) [V]
 `slice(1, 2) < slice(1, 3)` → TypeError "'<' not supported" in all legs (python True: slices compare as tuples). `{slice([1]):
 0}` is accepted (CPython TypeError "unhashable type: 'list'"); only `hash()` was checked, probe the dict-key case first.
 
