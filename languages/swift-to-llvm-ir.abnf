@@ -2618,7 +2618,9 @@ KwContinue  = "continue" KwEnd ;
     // arguments and returns extName(...). abs/max/min need it because the Swift
     // spellings are Double-aware externs rather than the shared Math members, and
     // the program calls them like any other function value.
-    function emitExtFn(b, extName, arity) {
+    // post, when given, maps the extern's answer before the closure returns it.
+    function swIntConvPost(it) { return function(fb, v) { return swEmitConv(fb, v, it) } }
+    function emitExtFn(b, extName, arity, post) {
         funcCount++
         var idx = funcCount
         var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
@@ -2629,7 +2631,8 @@ KwContinue  = "continue" KwEnd ;
         curScopeV = callExt(fb, "js_scope_new", [f.Params[0]])
         var argv = []
         for (var i = 0; i < arity; i++) { argv.push(callExt(fb, "js_arg", [f.Params[1], handle(i)])) }
-        fb.NewRet(callExt(fb, extName, argv))
+        var rv = callExt(fb, extName, argv)
+        fb.NewRet(post == undefined ? rv : post(fb, rv))
         curF = savedF
         curScopeV = savedScope
         return callExt(b, "js_closure", [handle(idx), curScopeV])
@@ -3817,7 +3820,7 @@ KwContinue  = "continue" KwEnd ;
             || name == "enumerated" || name == "allSatisfy" || name == "compactMap"
             || name == "flatMap" || name == "reduce" || name == "prefix" || name == "suffix"
             || name == "dropFirst" || name == "dropLast" || name == "min" || name == "max"
-            || name == "forEach" || name == "shuffled" || name == "first" || name == "last"
+            || name == "forEach" || name == "shuffled" || name == "randomElement" || name == "first" || name == "last"
             || name == "count" || name == "contains" || name == "split" || name == "drop"
             || name == "firstIndex" || name == "lastIndex" || name == "elementsEqual"
     }
@@ -10517,6 +10520,9 @@ KwContinue  = "continue" KwEnd ;
             callExt(b, "js_set", [intV, emitStr(b, "min"), swEmitBound(b, it.w, it.u, false)])
             callExt(b, "js_set", [intV, emitStr(b, "bitWidth"), emitNum(b, it.w > 64 ? 64 : it.w)])
             callExt(b, "js_set", [intV, emitStr(b, "zero"), swEmitConv(b, emitNum(b, 0), it)])
+            // The answer takes the receiver's type: `Int8.random(in: 3...3)` is an Int8.
+            callExt(b, "js_set", [intV, emitStr(b, "random"),
+                                  emitExtFn(b, "js_swrandom", 1, swIntConvPost(it))])
             callExt(b, "js_set", [intV, emitStr(b, "__tname"), emitStr(b, tn)])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, tn), intV])
         }
@@ -10543,6 +10549,8 @@ KwContinue  = "continue" KwEnd ;
                                   callExt(b, "js_swarith", [emitStr(b, "/"), zeroV, zeroV])])
             callExt(b, "js_set", [floV, emitStr(b, "pi"), callExt(b, floExt, [emitNum(b, floPi)])])
             callExt(b, "js_set", [floV, emitStr(b, "zero"), zeroV])
+            callExt(b, "js_set", [floV, emitStr(b, "random"),
+                                  emitExtFn(b, floTypeNames[fi] == "Float" ? "js_swrandomf" : "js_swrandomd", 1)])
             // The FloatingPoint statics that name the type's range. Each is
             // spelled as TEXT and handed to parseFloat because the tag dialect has no
             // exponent literal - `5e-324` lexes as the identifier `e324` - and each

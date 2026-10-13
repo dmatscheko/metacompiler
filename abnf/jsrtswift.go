@@ -1189,6 +1189,31 @@ func init() {
 		baseMcall := m["js_mcall"]
 		// One deterministic generator per runtime: see swRndState.
 		swRnd := &swRndState{s: 20260810}
+		// T.random(in: r), from the same stream: an element of an integer range,
+		// or for Double and Float lo + u * (hi - lo) with u in [0, 1) - the
+		// type's, since `Double.random(in: 0..<1)` has Int literals for bounds.
+		// Twins: swRandomIn in languages/swift-interpreter.abnf and js_swrandom*
+		// in languages/lib/swift-rt.metajs.
+		swRandom := func(a []uint64, fk int) uint64 {
+			r, ok := u(a[0]).(*jsObject)
+			if !ok || !swIsRange(r) {
+				rt.fail("random(in:) needs a range")
+			}
+			lo, hi := r.props["lo"], r.props["hi"]
+			if fk > 0 {
+				uf := float64(swRnd.next()&1073741823) / 1073741824
+				// float64() keeps Go from fusing the multiply-add (manual ch. 4).
+				return w(swReFlo(swNum(rt, lo)+float64(uf*(swNum(rt, hi)-swNum(rt, lo))), fk == 2))
+			}
+			n := rt.swRangeLen(r)
+			if n <= 0 {
+				rt.swAbort("Fatal error: Can't get random value with an empty range")
+			}
+			return w(swRangeAt(rt, lo, swRnd.below(n)))
+		}
+		m["js_swrandom"] = func(a []uint64) uint64 { return swRandom(a, 0) }
+		m["js_swrandomd"] = func(a []uint64) uint64 { return swRandom(a, 1) }
+		m["js_swrandomf"] = func(a []uint64) uint64 { return swRandom(a, 2) }
 		m["js_swmcall"] = func(a []uint64) uint64 {
 			f, isFlo := u(a[0]).(jsJFlo)
 			if !isFlo {
@@ -1260,7 +1285,7 @@ func init() {
 				// languages/lib/swift-rt.metajs, swMethodCall in
 				// languages/swift-interpreter.abnf.
 				if s, isStr := u(a[0]).(string); isStr {
-					if v, ok := swStrMethod(s, rt.toString(u(a[1])), rt.swArgList(u(a[2]))); ok {
+					if v, ok := swStrMethod(rt, s, rt.toString(u(a[1])), rt.swArgList(u(a[2]))); ok {
 						return w(v)
 					}
 				}
@@ -3977,6 +4002,11 @@ func (rt *jsrt) swSeqMethod(o *jsArray, name string, args []interface{}, rnd *sw
 	case "sort":
 		o.elems = swMergeSort(o.elems, rt.swLessOf(args))
 		return jsUndef, true
+	case "randomElement":
+		if n == 0 {
+			return jsNull, true
+		}
+		return o.elems[rnd.below(n)], true
 	case "shuffled":
 		out := make([]interface{}, n)
 		copy(out, o.elems)
@@ -4002,12 +4032,14 @@ func (rt *jsrt) swSeqMethod(o *jsArray, name string, args []interface{}, rnd *sw
 		less := rt.swLessOf(args)
 		best := o.elems[0]
 		for i := 1; i < n; i++ {
-			// Swift's own min/max keep the LEFT operand on a tie.
+			// Sequence.min/max(by:) replace the running answer only when
+			// the next element orders strictly before / after it, so a tie
+			// (or a NaN) keeps the EARLIER element.
 			if name == "min" {
 				if less(o.elems[i], best) {
 					best = o.elems[i]
 				}
-			} else if !less(o.elems[i], best) {
+			} else if less(best, o.elems[i]) {
 				best = o.elems[i]
 			}
 		}
@@ -4275,7 +4307,7 @@ func (rt *jsrt) swSplitSeq(t []interface{}, args []interface{}) *jsArray {
 // swStrMethod answers the String members that take a String argument and compare
 // text, with no Character walk. Twins: the String arm of mcall in
 // languages/swift-interpreter.abnf and of js_mcall in languages/lib/swift-rt.metajs.
-func swStrMethod(s, name string, args []interface{}) (interface{}, bool) {
+func swStrMethod(rt *jsrt, s, name string, args []interface{}) (interface{}, bool) {
 	if len(args) == 0 {
 		return nil, false
 	}
@@ -4290,6 +4322,16 @@ func swStrMethod(s, name string, args []interface{}) (interface{}, bool) {
 		return swcHasSuffix(s, p), true
 	case "contains":
 		return swcContains(s, p), true
+	case "replacing":
+		if len(args) > 1 {
+			if r, ok := args[1].(string); ok {
+				n := -1
+				if len(args) > 2 {
+					n = int(swNum(rt, args[2]))
+				}
+				return swcReplacing(s, p, r, n), true
+			}
+		}
 	}
 	return nil, false
 }
@@ -4306,7 +4348,7 @@ func swIsLazyName(name string) bool {
 	switch name {
 	case "makeIterator", "next", "map", "filter", "sorted", "reversed", "enumerated",
 		"allSatisfy", "compactMap", "flatMap", "reduce", "prefix", "suffix", "dropFirst",
-		"dropLast", "min", "max", "forEach", "shuffled", "first", "last", "count",
+		"dropLast", "min", "max", "forEach", "shuffled", "randomElement", "first", "last", "count",
 		"contains", "split", "drop", "firstIndex", "lastIndex", "elementsEqual":
 		return true
 	}

@@ -379,6 +379,43 @@ func swcHasSuffix(s, p string) bool {
 	return true
 }
 
+// swcReplacing is s.replacing(p, with: r, maxReplacements: n): the Character runs
+// equal to p, left to right and not overlapping, each replaced by r; n < 0 is no
+// limit; an empty p matches at every position, the end included. Twin of
+// swcReplacing in languages/lib/swift-chars.js.
+func swcReplacing(s, p, r string, n int) string {
+	cs, cp := swcGraphemes(s), swcGraphemes(p)
+	out := ""
+	done := 0
+	if len(cp) == 0 {
+		for at := 0; at <= len(cs); at++ {
+			if n < 0 || done < n {
+				out += r
+				done++
+			}
+			if at < len(cs) {
+				out += cs[at]
+			}
+		}
+		return out
+	}
+	for at := 0; at < len(cs); {
+		ok := at+len(cp) <= len(cs) && (n < 0 || done < n)
+		for i := 0; i < len(cp) && ok; i++ {
+			ok = swcStrEq(cs[at+i], cp[i])
+		}
+		if ok {
+			out += r
+			at += len(cp)
+			done++
+		} else {
+			out += cs[at]
+			at++
+		}
+	}
+	return out
+}
+
 func swcContains(s, p string) bool {
 	cs, cp := swcGraphemes(s), swcGraphemes(p)
 	for at := 0; at+len(cp) <= len(cs); at++ {

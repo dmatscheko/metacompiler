@@ -482,6 +482,36 @@ function swcHasPrefix(s, p) {
     for (var i = 0; i < cp.length; i++) { if (!swcStrEq(cs[i], cp[i])) { return false } }
     return true
 }
+// s.replacing(p, with: r, maxReplacements: n): the Character runs equal to p,
+// left to right and not overlapping, each replaced by r; n < 0 is no limit. An
+// empty p matches at every position, the end included. Twin of swcReplacing in
+// abnf/jsrtswiftchars.go.
+function swcReplacing(s, p, r, n) {
+    var cs = swcGraphemes(s)
+    var cp = swcGraphemes(p)
+    var out = ""
+    var at = 0
+    var done = 0
+    while (at < cs.length || (cp.length == 0 && at == cs.length)) {
+        if (cp.length == 0) {
+            if (n < 0 || done < n) { out = out + r; done = done + 1 }
+            if (at < cs.length) { out = out + cs[at] }
+            at = at + 1
+            continue
+        }
+        var ok = at + cp.length <= cs.length && (n < 0 || done < n)
+        for (var i = 0; i < cp.length && ok; i++) { if (!swcStrEq(cs[at + i], cp[i])) { ok = false } }
+        if (ok) {
+            out = out + r
+            at = at + cp.length
+            done = done + 1
+        } else {
+            out = out + cs[at]
+            at = at + 1
+        }
+    }
+    return out
+}
 function swcHasSuffix(s, p) {
     var cs = swcGraphemes(s)
     var cp = swcGraphemes(p)

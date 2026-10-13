@@ -3177,6 +3177,8 @@ KwContinue  = "continue" KwEnd ;
     function swIntType(w, u) {
         var b = swIntBounds(w, u)
         return {max: b.mx, min: b.mn, bitWidth: w > 64 ? 64 : w, zero: szConv(0, w, u),
+                // The answer takes the receiver's type: `Int8.random(in: 3...3)` is an Int8.
+                random: function(r) { return swIntInit([swRandomIn(r, 0)], [], w, u) },
                 __convl: function(argv, labels) { return swIntInit(argv, labels, w, u) }, __tname: swIntTyName(w, u)}
     }
     // The declared width of `var u: UInt8 = 250` (swIntWidth is consulted by
@@ -4194,6 +4196,9 @@ KwContinue  = "continue" KwEnd ;
                 if (name == "hasSuffix") { return swcHasSuffix(target, sa) }
                 if (name == "contains") { return swcContains(target, sa) }
                 if (name == "elementsEqual") { return swcStrEq(target, sa) }
+                if (name == "replacing" && args.length > 1 && typeof args[1] == "string") {
+                    return swcReplacing(target, sa, args[1], args.length > 2 ? szNum(args[2]) : 0 - 1)
+                }
             }
             // A String IS a Collection of Characters in Swift, so every Sequence
             // member applies to it - `"hello".map { $0 }` is
@@ -4326,6 +4331,10 @@ KwContinue  = "continue" KwEnd ;
             return m.apply(undefined, concat2impl([target], args))
         }
         if (swIsLazyMember(target, name)) { return swLazyMethod(target, name, args, mcLabels) }
+        // A builtin type's own static function (`Int.random(in:)`).
+        if (target.__tname !== undefined && hasOwn(target, name) && typeof target[name] == "function") {
+            return target[name].apply(undefined, args)
+        }
         fail("unknown method '" + name + "'")
     }
     // The BinaryInteger members, on an Int of any width; the answer keeps the
@@ -4576,6 +4585,20 @@ KwContinue  = "continue" KwEnd ;
         if (n <= 1) { return 0 }
         return (swRndNext() & 1073741823) % n
     }
+    // T.random(in: r), from the same stream: an element of an integer range, or for
+    // Double (fk 1) and Float (fk 2) lo + u * (hi - lo) with u in [0, 1) - the
+    // type's, since `Double.random(in: 0..<1)` has Int literals for bounds. Twins:
+    // js_swrandom / js_swrandomd / js_swrandomf in abnf/jsrtswift.go and
+    // lib/swift-rt.metajs.
+    function swRandomIn(r, fk) {
+        if (fk > 0) {
+            var u = (swRndNext() & 1073741823) / 1073741824
+            return swReFlo(swD(r.lo) + u * (swD(r.hi) - swD(r.lo)), fk == 2)
+        }
+        var n = rangeLen(r)
+        if (n <= 0) { fail("Fatal error: Can't get random value with an empty range") }
+        return rangeAt(r, swRndBelow(n))
+    }
     // The count Swift takes from `prefix(k)` / `dropFirst(k)` etc: the argument, or
     // the default 1, clamped into 0...length. swiftc traps on a NEGATIVE argument
     // ("Can't take a prefix of negative length from a collection"); clamping to 0 is
@@ -4618,7 +4641,7 @@ KwContinue  = "continue" KwEnd ;
             || name == "enumerated" || name == "allSatisfy" || name == "compactMap"
             || name == "flatMap" || name == "reduce" || name == "prefix" || name == "suffix"
             || name == "dropFirst" || name == "dropLast" || name == "min" || name == "max"
-            || name == "forEach" || name == "shuffled" || name == "first" || name == "last"
+            || name == "forEach" || name == "shuffled" || name == "randomElement" || name == "first" || name == "last"
             || name == "count" || name == "contains" || name == "split" || name == "drop"
             || name == "firstIndex" || name == "lastIndex" || name == "elementsEqual"
     }
@@ -4825,6 +4848,8 @@ KwContinue  = "continue" KwEnd ;
             for (i = 0; i < n; i++) { t[i] = so[i] }
             return undefined
         }
+        // randomElement(): from the same stream as shuffled(); nil when empty.
+        if (name == "randomElement") { return n == 0 ? null : t[swRndBelow(n)] }
         if (name == "shuffled") {
             out = t.slice(0)
             for (i = out.length - 1; i > 0; i--) {
@@ -4853,10 +4878,11 @@ KwContinue  = "continue" KwEnd ;
             var less = swLessOf(args)
             var best = t[0]
             for (i = 1; i < n; i++) {
-                // Swift's own min/max keep the LEFT operand on a tie: min is
-                // `y < x ? y : x` and max `y >= x ? y : x`.
+                // Sequence.min/max(by:) replace the running answer only when the
+                // next element orders strictly before / after it, so a tie (or a
+                // NaN) keeps the EARLIER element (SequenceAlgorithms.swift).
                 if (name == "min") { if (less(t[i], best)) { best = t[i] } }
-                else { if (!less(t[i], best)) { best = t[i] } }
+                else { if (less(best, t[i])) { best = t[i] } }
             }
             return best
         }
@@ -10038,7 +10064,7 @@ KwContinue  = "continue" KwEnd ;
     }
     function swFloType() {
         return swAddFloStatics({infinity: swFlo(swInfF), nan: swFlo(swNanF), pi: swFlo(3.141592653589793),
-                zero: swFlo(0), __conv: swFloConv, __tname: "Double"}, false)
+                zero: swFlo(0), random: function(r) { return swRandomIn(r, 1) }, __conv: swFloConv, __tname: "Double"}, false)
     }
     // Float's own statics are FLOATS, so Float.pi prints 3.1415925 and not the
     // double's 3.141592653589793.
@@ -10051,7 +10077,7 @@ KwContinue  = "continue" KwEnd ;
     // 3.1415927.
     function swF32Type() {
         return swAddFloStatics({infinity: swF32(swInfF), nan: swF32(swNanF), pi: swF32(3.1415925025939941),
-                zero: swF32(0), __conv: swF32Conv, __tname: "Float"}, true)
+                zero: swF32(0), random: function(r) { return swRandomIn(r, 2) }, __conv: swF32Conv, __tname: "Float"}, true)
     }
     hostGlobals["Double"] = swFloType()
     hostGlobals["Float"] = swF32Type()

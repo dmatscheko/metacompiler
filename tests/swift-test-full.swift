@@ -4534,6 +4534,36 @@ func s100() {
     check("100d", cl.t == 10 && g100 == 10 && l == 1 && dids100 == 3)
 }
 
+// ===== SECTION 101: max/min(by:) ties; replacing; random(in:) =====
+// Sequence.max(by:) / min(by:) replace the running answer only on a strict
+// ordering, so a tie or a NaN keeps the earlier element. String.replacing(_:with:)
+// replaces Character runs left to right, an empty pattern at every position.
+// T.random(in:) and randomElement() draw from a deterministic stream here, so
+// only their ranges and types are asserted. Every value read off swiftc 6.1.2.
+func s101() {
+    let ps = [(1, "a"), (3, "b"), (3, "c"), (1, "d")]
+    let ds = [Double.nan, 1.0]
+    let zs = [0.0, -0.0]
+    check("101a", ps.max { $0.0 < $1.0 }!.1 == "b" && ps.min { $0.0 < $1.0 }!.1 == "a"
+        && "\(ds.max()!) \(ds.min()!) \(zs.max()!) \(zs.min()!)" == "nan nan 0.0 0.0")
+    let ss = ["Hello, World", "aaa", "aa", "b", "", "a-b-c", "-"]
+    check("101b", ss[0].replacing("World", with: "Swift") == "Hello, Swift" && ss[1].replacing(ss[2], with: ss[3]) == "ba"
+        && ss[1].replacing(ss[4], with: "z") == "zazazaz" && ss[5].replacing(ss[6], with: "", maxReplacements: 1) == "ab-c"
+        && ss[4].replacing(ss[4], with: "z") == "z")
+    var ok = true
+    var seen = Set<Int>()
+    for _ in 0..<200 {
+        let x = Int.random(in: 1...6)
+        seen.insert(x)
+        let d = Double.random(in: 0..<1)
+        let e = [7, 8].randomElement()!
+        if x < 1 || x > 6 || d < 0 || d >= 1 || e < 7 || e > 8 || Int.random(in: 0..<3) >= 3 { ok = false }
+    }
+    let b8 = Int8.random(in: 3...3)
+    check("101c", ok && seen.count == 6 && b8 == 3 && "\(type(of: b8)) \(type(of: Float.random(in: 0..<1)))" == "Int8 Float"
+        && [Int]().randomElement() == nil)
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -4635,6 +4665,7 @@ func main() {
     s98() // SECTION-CALL 98
     s99() // SECTION-CALL 99
     s100() // SECTION-CALL 100
+    s101() // SECTION-CALL 101
     print("full: \(checks) checks, \(fails) failures")
 }
 

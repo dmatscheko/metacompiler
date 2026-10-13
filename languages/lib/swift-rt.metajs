@@ -1749,6 +1749,11 @@ function js_mcall(recv, name, args) {
             if (name === "contains") { return swcContains(recv, sa) }
             if (name === "hasPrefix" || name === "starts") { return swcHasPrefix(recv, sa) }
             if (name === "hasSuffix") { return swcHasSuffix(recv, sa) }
+            if (name === "replacing" && args.length > 1 && typeof args[1] == "string") {
+                var rn = 0 - 1
+                if (args.length > 2) { rn = swNum(args[2]) }
+                return swcReplacing(recv, sa, args[1], rn)
+            }
         }
         fail("unknown String method: " + name)
     }
@@ -1994,6 +1999,22 @@ function swRndNext() {
     SW_RND["s"] = x
     return x
 }
+// T.random(in: r), from the same stream: an element of an integer range, or for
+// Double and Float lo + u * (hi - lo) with u in [0, 1) - the type's, since
+// `Double.random(in: 0..<1)` has Int literals for bounds. Twins: swRandomIn in
+// languages/swift-interpreter.abnf and js_swrandom* in abnf/jsrtswift.go.
+function js_swrandom(r) {
+    var n = swRangeLen(r)
+    if (n <= 0) { swAbort("Fatal error: Can't get random value with an empty range") }
+    return swRangeAt(r["lo"], swRndBelow(n))
+}
+function swRandomFlo(r, f32) {
+    var uf = (swRndNext() & 1073741823) / 1073741824
+    var flo = swNum(r["lo"])
+    return swReFlo(flo + uf * (swNum(r["hi"]) - flo), f32)
+}
+function js_swrandomd(r) { return swRandomFlo(r, false) }
+function js_swrandomf(r) { return swRandomFlo(r, true) }
 function swRndBelow(n) {
     if (n <= 1) { return 0 }
     return (swRndNext() & 1073741823) % n
@@ -2160,6 +2181,10 @@ function swSeqMethod(o, name, args) {
         while (i < n) { o[i] = so[i]; i = i + 1 }
         return undefined
     }
+    if (name === "randomElement") {
+        if (n == 0) { return null }
+        return o[swRndBelow(n)]
+    }
     if (name === "shuffled") {
         out = rtCopyArr(o)
         i = out.length - 1
@@ -2191,12 +2216,13 @@ function swSeqMethod(o, name, args) {
         best = o[0]
         i = 1
         while (i < n) {
-            // Swift's own min/max keep the LEFT operand on a tie: min is
-            // `y < x ? y : x` and max `y >= x ? y : x`.
+            // Sequence.min/max(by:) replace the running answer only when the
+            // next element orders strictly before / after it, so a tie (or a
+            // NaN) keeps the EARLIER element.
             if (name === "min") {
                 if (less(o[i], best)) { best = o[i] }
             } else {
-                if (!less(o[i], best)) { best = o[i] }
+                if (less(best, o[i])) { best = o[i] }
             }
             i = i + 1
         }
@@ -3289,7 +3315,7 @@ function swIsLazyMember(v, name) {
         || name === "sorted" || name === "reversed" || name === "enumerated" || name === "allSatisfy"
         || name === "compactMap" || name === "flatMap" || name === "reduce" || name === "prefix"
         || name === "suffix" || name === "dropFirst" || name === "dropLast" || name === "min"
-        || name === "max" || name === "forEach" || name === "shuffled" || name === "first"
+        || name === "max" || name === "forEach" || name === "shuffled" || name === "randomElement" || name === "first"
         || name === "last" || name === "count" || name === "contains" || name === "split"
         || name === "drop" || name === "firstIndex" || name === "lastIndex" || name === "elementsEqual"
     return known && swIsLazy(v)
