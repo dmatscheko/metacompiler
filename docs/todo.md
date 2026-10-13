@@ -121,7 +121,7 @@ not change the renderer.
 
 # GO — Go  (oracle: `go run`)
 
-### T-593 go: an overflowing constant is not rejected at compound assignment, typed const, return, element, send, `_ =` · P2 · GO · OPEN [V]
+### T-593 go: an overflowing constant is not rejected at compound assignment, typed const, return, element, send, `_ =` · P2 · GO · IN PROGRESS (GO worker, round 6) [V]
 `var u8 uint8; u8 += 256`, `const c uint8 = 256`, `func f() uint8 { return 256 }`, `[]uint8{256}`, `ch <- 256` (chan uint8),
 `_ = 1 << 63` (int): go rejects each at compile time ("cannot use 256 (untyped int constant) as uint8 value in ... (overflows)"
 / "constant 256 overflows uint8"); every engine accepts and wraps. Route these sites through goConstTo (go-constfold.js), as
