@@ -1740,13 +1740,13 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             // named argument no earlier parameter took, under its name.
             if (p.variadic === true) {
                 var rest = newArr()
-                for (var j = i; j < pos.length; j++) { arrPush(rest, argValue(pos[j])) }
+                for (var j = i; j < pos.length; j++) { arrPush(rest, phpCopy(argValue(pos[j]))) }
                 if (named != null) {
                     for (var q = 0; q < argset.nkeys.length; q++) {
                         var nk = argset.nkeys[q]
                         var took = false
                         for (var r = 0; r < i; r++) { if (params[r].name == nk) { took = true } }
-                        if (!took) { arrSet(rest, nk.substring(1), named[nk]) }
+                        if (!took) { arrSet(rest, nk.substring(1), phpCopy(named[nk])) }
                     }
                 }
                 declVar(p.name, rest)

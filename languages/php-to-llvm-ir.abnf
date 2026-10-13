@@ -1650,6 +1650,19 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // anything (buildMain is the Program tag), so the flag is final at emit time.
     var usesRefs = false
     function noteRef() { usesRefs = true }
+    // The variables the function being emitted may modify IN PLACE - an element or
+    // property write, a reference taken, an element unset, array_push/array_pop - by
+    // name, or "*" for all of them (a variable-variable target). emitFunc copies a
+    // by-value array parameter on entry only when it is in here: an unwritten one
+    // shares the caller's array. Exception: a write to the caller's array made
+    // during the call through another name (a global, a property, a reference) is
+    // seen through such a parameter, where PHP's copy-on-write separation hides it.
+    var curWrites = {}
+    function noteWrite(ref) {
+        if (ref == null || ref == undefined || ref.headT != undefined || ref.sbase != undefined || ref.gkey != undefined) { return }
+        if (ref.nameT != null && ref.nameT != undefined) { curWrites["*"] = true }
+        else { curWrites[ref.name] = true }
+    }
     // The variable names the source mentions, in parse order. An arrow function
     // captures its free variables BY VALUE, and this log plus the mark its 'fn'
     // keyword records is what tells makeArrowFn which names its body could reach.
@@ -1974,7 +1987,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         makeB.NewBr(mergeB)
         return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(raw, haveB), llvm.ir.NewIncoming(cell, makeB)])}
     }
-    function varCell(b, name) { return varCellV(b, emitStr(b, name)) }
+    function varCell(b, name) {
+        curWrites[name] = true
+        return varCellV(b, emitStr(b, name))
+    }
     // The storage cell of an array element. js_phcell creates it on demand and hands
     // the EXISTING one back when the element already holds one, so two references to
     // the same element share a cell; an ordinary value written to that slot afterwards
@@ -1984,6 +2000,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     }
     // The cell a '&' target denotes: a variable, or an array element.
     function targetCell(b, ref) {
+        noteWrite(ref)
         if (ref.path.length == 0) {
             if (ref.sbase != undefined) { return {b: b, v: hNull} }
             var rn0 = refNameV(b, ref)
@@ -2994,6 +3011,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var refT = false
         for (var ri = 1; ri < items.length; ri++) { if (items[ri].feref != undefined) { refT = true } }
         var iterT = function(b) {
+            // 'as &$v' writes into a source that is only an expression here.
+            if (refT) { curWrites["*"] = true }
             var r = srcT(b)
             var scope = scopeProbe(r.b, emitStr(r.b, frameClsName("self")), hNull)
             return {b: r.b, v: callExt(r.b, "js_phfeobj", [r.v, scope, refT ? hTrue : hFalse])}
@@ -4385,6 +4404,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                         callExt(b, "js_scope_decl", [curScopeV, rn3.v, hUndef])
                     }
                 } else {
+                    noteWrite(ref)
                     var p = emitRefPath(b, ref)
                     b = p.b
                     if (p.kind == "index") { callExt(b, "js_phunset", [p.obj, p.key]) }
@@ -5209,6 +5229,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     function emitRefPath(b, ref) { return emitRefPathV(b, ref, false, false) }
     function emitRefPathIs(b, ref) { return emitRefPathV(b, ref, false, true) }
     function emitRefPathV(b, ref, viv, isf) {
+        if (viv) { noteWrite(ref) }
         var rr = refRootV(b, ref, viv)
         b = rr.b
         var o = rr.v
@@ -5348,6 +5369,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 b = setVarV(b, nameV, v)
             } else if (op == "=" && isStrTarget(ref)) {
                 // $x[i] = e : an array element, or one byte of a string.
+                noteWrite(ref)
                 var rn6 = refNameV(b, ref)
                 b = rn6.b
                 var rcv = readVarV(b, rn6.v)
@@ -6371,6 +6393,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         return ""
     }
     function emitBuiltin(b, name, args) {
+        if ((name == "array_push" || name == "array_pop") && args.length > 0 && args[0].vtext != null) {
+            noteWrite(argTarget(args[0].vtext))
+        }
         var vs = []
         for (var i = 0; i < args.length; i++) { var r = args[i].pos(b); b = r.b; vs.push(r.v) }
         // strlen counts BYTES (PHP strings are byte strings), count() counts elements.
@@ -6670,10 +6695,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, frameClsName("static")),
                                          callExt(b, "js_phlsb", [thisArg, selfV])])
         }
-        for (var i = 0; i < params.length; i++) {
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, params[i]),
-                                         callExt(b, "js_arg", [f.Params[1], handle(i + off)])])
-        }
+        var savedWrites = curWrites
+        if (!isCtl) { curWrites = {} }
+        var bodyB = f.NewBlock("")
         var savedSaw = sawYield
         var savedSelf = curSelfName
         if (isMethod) { curSelfName = selfName == undefined ? "" : selfName }
@@ -6687,7 +6711,19 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             curThisSure = isMethod && isStatic !== true
         }
         sawYield = false
-        var endB = bodyStmt(b)
+        var endB = bodyStmt(bodyB)
+        // The parameters are bound once the body is known: a by-value array is copied
+        // only where the body may modify it in place, or always in a generator, whose
+        // frame outlives the call.
+        for (var i = 0; i < params.length; i++) {
+            var argV = callExt(b, "js_arg", [f.Params[1], handle(i + off)])
+            if (sawYield || curWrites["*"] === true || curWrites[params[i]] === true) {
+                argV = callExt(b, "js_phcopy", [argV])
+            }
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, params[i]), argV])
+        }
+        b.NewBr(bodyB)
+        curWrites = savedWrites
         curSelfName = savedSelf
         curThisOwn = savedOwn
         curThisSure = savedSure

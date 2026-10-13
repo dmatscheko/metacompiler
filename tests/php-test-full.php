@@ -3512,6 +3512,30 @@ function s69() {
     check("mbr1", $v1 === "A" && $v2 === "As" && $v3 === 1 && $seen === "A1" && $v4 === "A");
 }
 
+// ===== SECTION 70: arrays passed by value, and references inside array copies =====
+function s70set($xs) { $xs[0] = 5; return $xs[0]; }
+function s70push($xs) { $xs[] = 3; array_push($xs, 4); return count($xs); }
+function s70deep($xs) { $xs['k'][0] = 9; unset($xs['j']); return $xs['k'][0]; }
+function s70refs($xs) { foreach ($xs as &$v) { $v = 8; } unset($v); $r = &$xs[1]; $r = 7; return $xs[0] + $xs[1]; }
+function s70rest(...$xs) { $xs[0][0] = 6; return $xs[0][0]; }
+function s70read($xs) { return $xs[0] + count($xs); }
+function s70gen($xs) { yield $xs[0]; yield $xs[0]; }
+class S70M { public $items = [1]; function m($xs) { $xs[] = 2; return count($xs); } static function s($xs) { $xs[0]++; return $xs[0]; } }
+function s70() {
+    $a = [1, 2];
+    $n = ['k' => [1], 'j' => 2];
+    $f = function($xs) { $xs[0] = 4; return $xs[0]; };
+    $k = new S70M;
+    check("abv1", s70set($a) === 5 && s70push($a) === 4 && s70deep($n) === 9 && s70refs($a) === 15
+        && s70rest($a) === 6 && $f($a) === 4 && call_user_func($f, $a) === 4 && S70M::s($a) === 2
+        && $k->m($k->items) === 2 && $a === [1, 2] && $n === ['k' => [1], 'j' => 2] && $k->items === [1]);
+    $g = s70gen($a);
+    $first = $g->current();
+    $a[0] = 5;
+    $g->next();
+    check("abv2", s70read($a) === 7 && $first === 1 && $g->current() === 1);
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -3590,6 +3614,7 @@ function main() {
     s67(); // SECTION-CALL 67
     s68(); // SECTION-CALL 68
     s69(); // SECTION-CALL 69
+    s70(); // SECTION-CALL 70
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }
