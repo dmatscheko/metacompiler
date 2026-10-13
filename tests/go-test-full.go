@@ -4028,6 +4028,24 @@ func s73() {
 	check("feat3", strings.Title("hello wOrld-foo_bar x.y ǆz") == "Hello WOrld-Foo_bar X.Y ǅz")
 }
 
+// ===== SECTION 74: indexing several long strings in turn =====
+// s[i] is a byte of the UTF-8 encoding; four strings indexed round robin, two of
+// them equal in length and different in content, then two more.
+func s74() {
+	ss := []string{strings.Repeat("aé", 300), strings.Repeat("日x", 200), "plain ascii",
+		strings.Repeat("a", 1) + strings.Repeat("éa", 300)}
+	sum := 0
+	for r := 0; r < 3; r++ {
+		for i := 0; i < 600; i++ {
+			for k, s := range ss {
+				sum += int(s[i%len(s)]) * (k + 1)
+			}
+		}
+	}
+	check("sidx1", sum == 2514786)
+	check("sidx2", ss[1][1] == 151 && "€€"[5] == 172 && strings.Repeat("ü", 7)[13] == 188 && ss[3][1] == 195 && ss[3][2] == 169)
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -4102,6 +4120,7 @@ func main() {
 	s71() // SECTION-CALL 71
 	s72() // SECTION-CALL 72
 	s73() // SECTION-CALL 73
+	s74() // SECTION-CALL 74
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

@@ -2454,7 +2454,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // js_map_get in abnf/jsrtgolang.go and languages/lib/go-rt.metajs.
         // s[i] is a byte: a uint8.
         if (typeof o == "string") {
-            var bs = utf8Bytes(o)
+            var bs = goByteForm(o)
             if (ix < 0 || ix >= bs.length) { goIdxPanic(ix, bs.length) }
             return szConv(bs[ix], 8, true)
         }
@@ -5284,6 +5284,25 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             out.push(0x80 | (cp % 64))
         }
         return out
+    }
+    // utf8Bytes of the last GO_BYTE_WAYS strings indexed, replaced round robin, so a
+    // loop over s[i] encodes s once rather than once per index. Twin of goByteForm in
+    // lib/go-rt.metajs.
+    var GO_BYTE_WAYS = 4
+    var goByteS = ["", "", "", ""]
+    var goByteB = [[], [], [], []]
+    var goByteNext = 0
+    function goByteForm(s) {
+        var k = 0
+        while (k < GO_BYTE_WAYS) {
+            if (goByteS[k] === s) { return goByteB[k] }
+            k = k + 1
+        }
+        var bs = utf8Bytes(s)
+        goByteS[goByteNext] = s
+        goByteB[goByteNext] = bs
+        goByteNext = (goByteNext + 1) % GO_BYTE_WAYS
+        return bs
     }
     // The inverse: a byte list back to a host string. A byte that does not start a
     // well-formed sequence is passed through as its own code point (Go would render

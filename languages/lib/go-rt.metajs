@@ -1734,13 +1734,37 @@ function js_map_get(c, k) {
     }
     if (typeof c == "string") {
         var si = goIdx(k)
-        var bs = goBytes(c)
-        if (si < 0 || si >= bs.length) { goIdxPanic(si, bs.length) }
-        return sintConv(bs[si], 8, true)
+        var n = byteLen(c)
+        if (si < 0 || si >= n) { goIdxPanic(si, n) }
+        // byteLen is O(1) and the unit count is memoised in the string cell, so
+        // an ASCII string is indexed in place; any other one through goByteForm.
+        if (n == c.length) { return sintConv(c.charCodeAt(si), 8, true) }
+        return sintConv(goByteForm(c)[si], 8, true)
     }
     if (goIsFn(c)) { return c }
     fail("indexing a " + typeof c)
     return undefined
+}
+
+// goBytes of the last GO_BYTE_WAYS non-ASCII strings indexed, replaced round
+// robin, so a loop indexing a few strings encodes each once rather than once per
+// index. A string is immutable, and === compares a string handle by identity,
+// then by length, before its bytes. Twin of goByteForm in go-interpreter.abnf.
+var GO_BYTE_WAYS = 4
+var goByteS = ["", "", "", ""]
+var goByteB = [[], [], [], []]
+var goByteNext = 0
+function goByteForm(s) {
+    var k = 0
+    while (k < GO_BYTE_WAYS) {
+        if (goByteS[k] === s) { return goByteB[k] }
+        k = k + 1
+    }
+    var bs = goBytes(s)
+    goByteS[goByteNext] = s
+    goByteB[goByteNext] = bs
+    goByteNext = (goByteNext + 1) % GO_BYTE_WAYS
+    return bs
 }
 
 // The UTF-8 bytes of a string: s[i] is the i-th BYTE of a Go string, so the
