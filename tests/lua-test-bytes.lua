@@ -10,3 +10,9 @@ for i = 1, #ss do
 end
 print(table.concat(ss, "|"))
 print(string.char(255) .. "x", 1.5, nil, true)
+-- io.write writes the same bytes with no separator and no newline, and a number
+-- as tostring renders it.
+local ns = {1, 1.0, -0.0, 1e15, 2^63, 0.1 + 0.2, 1 / 0}
+for i = 1, #ns do io.write(ns[i], ";") end
+io.write("\n", ss[1], ss[3], "\n")
+io.write("chain"):write(" ", 7, "\n")

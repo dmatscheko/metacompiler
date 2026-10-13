@@ -265,6 +265,34 @@ func init() {
 			return w(giNorm(rt.luBorder(v), 64, false))
 		}
 
+		// ----- the io library -----
+		// io.write (from 0) and file:write (from 1, the file is self): each
+		// argument is written as it is checked, a number as tostring renders it.
+		// The caller answers the file. Twin of luaWrite in lua-interpreter.abnf.
+		m["js_luwrite"] = func(a []uint64) uint64 {
+			args := argsOf(a[0])
+			from := int(rt.toNumber(u(a[1])))
+			qual := "io.write"
+			if from == 1 {
+				qual = "?"
+				if !luIsFile(luArgAt(args, 1)) {
+					rt.luArgTypeErr(qual, 1, "FILE*", args)
+				}
+			}
+			for i := from; i < len(args); i++ {
+				outWriter.Write(lowBytes(rt.luCheckStr(qual, i+1, args)))
+			}
+			return w(jsUndef)
+		}
+		m["js_luiotype"] = func(a []uint64) uint64 {
+			args := argsOf(a[0])
+			rt.luCheckAny("io.type", 1, args)
+			if luIsFile(args[0]) {
+				return rt.wrapStr("file")
+			}
+			return w(jsUndef)
+		}
+
 		// ----- the table library -----
 		m["js_luconcat"] = func(a []uint64) uint64 {
 			args := argsOf(a[0])

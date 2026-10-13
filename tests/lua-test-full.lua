@@ -1804,6 +1804,24 @@ function s39()
     check("key6", wk, "__x")
 end
 
+-- ===== SECTION 40: io.write and io.stdout =====
+-- What io.write writes is pinned by tests/lua-bytes.expected; here its answer,
+-- the file's type, and the argument errors, as lua 5.5 reports them.
+function s40()
+    local r = io.write()
+    check("io1", r == io.stdout, true)
+    check("io2", type(io.stdout) .. " " .. io.type(io.stdout) .. " " .. tostring(io.type({})), "userdata file nil")
+    check("io3", tostring(io.stdout):match("^file %(0x%x+%)$") ~= nil, true)
+    check("io4", select(2, pcall(io.write, {})), "bad argument #1 to 'io.write' (string expected, got table)")
+    check("io5", select(2, pcall(io.stdout.write, nil)), "bad argument #1 to '?' (FILE* expected, got nil)")
+    local ok, e = pcall(function() io.write("", true) end)
+    check("io6", e:match("bad argument.*"), "bad argument #2 to 'write' (string expected, got boolean)")
+    ok, e = pcall(function() io.stdout:write({}) end)
+    check("io7", e:match("bad argument.*"), "bad argument #1 to 'write' (string expected, got table)")
+    check("io8", select(2, pcall(io.type)), "bad argument #1 to 'io.type' (value expected)")
+    check("io9", io.stdout:write() == io.stdout, true)
+end
+
 s25() -- SECTION-CALL 25
 s26() -- SECTION-CALL 26
 s27() -- SECTION-CALL 27
@@ -1819,5 +1837,6 @@ s36() -- SECTION-CALL 36
 s37() -- SECTION-CALL 37
 s38() -- SECTION-CALL 38
 s39() -- SECTION-CALL 39
+s40() -- SECTION-CALL 40
 print("full: " .. checks .. " checks, " .. failures .. " failures")
 exit(failures)

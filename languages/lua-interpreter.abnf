@@ -1225,8 +1225,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (isNum(v)) { return "number" }
         if (typeof v == "string") { return "string" }
         if (typeof v == "function") { return "function" }
+        if (isLuaFile(v)) { return "userdata" }
         return "table"
     }
+    // A file of the io library is a table carrying the runtime field __luf, which
+    // no program can set (luaStrKey escapes the name).
+    function isLuaFile(v) { return typeof v == "object" && v.__luf === true }
     // Only false and nil are falsy in Lua (0 and "" are true). A multi-value is tested
     // by its first value, which is what a bare call in a condition means.
     function luatruthy(v) {
@@ -1440,6 +1444,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             hex = digits.charAt(n - q * 16) + hex
             n = q
         }
+        if (isLuaFile(v)) { return "file (0x" + hex + ")" }
         return luaType(v) + ": 0x" + hex
     }
     function luaIndex(o, k) {
@@ -2549,6 +2554,33 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         writeBytes(out + "\n")
     }
     globalScope["exit"] = function(code) { exit(numOf(code) | 0) }
+
+    // io: standard output is the one file (no engine has a stdin, so there is no
+    // io.read). write takes strings and numbers - a number as tostring renders it -
+    // and writes each argument as it is checked, so an error leaves the earlier ones
+    // written, as lua's g_write does. io.write answers the file; the method is the
+    // same with the file as self, and lua has no global name for it ('?'). Twin of
+    // js_luwrite in lib/lua-rt.metajs and abnf/jsrtlua.go.
+    function luaWrite(qual, args, from) {
+        for (var i = from; i < args.length; i++) { writeBytes(luaCheckStr(qual, i + 1, args[i], args.length)) }
+    }
+    var luaStdout = {__luf: true}
+    luaRawSet(luaStdout, "write", function(f) {
+        if (!isLuaFile(f)) { luaArgTypeErr("?", 1, "FILE*", f, arguments.length) }
+        luaWrite("?", arguments, 1)
+        return f
+    })
+    globalScope["io"] = {
+        write: function() {
+            luaWrite("io.write", arguments, 0)
+            return luaStdout
+        },
+        type: function(v) {
+            luaCheckAny("io.type", 1, arguments.length)
+            return isLuaFile(v) ? "file" : undefined
+        },
+        stdout: luaStdout
+    }
 
     // next(t [, k]): the table iterator, walking the table's own keys in insertion order
     // (the hidden __keys list) and skipping the ones whose value is nil. It returns the

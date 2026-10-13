@@ -491,8 +491,12 @@ function luTypeName(v) {
     if (luIsNum(v)) { return "number" }
     if (typeof v == "string") { return "string" }
     if (typeof v == "function") { return "function" }
+    if (luIsFile(v)) { return "userdata" }
     return "table"
 }
+// A file of the io library is a table carrying the runtime field __luf, which no
+// program can set (js_lukey escapes the name). Twin of luIsFile in abnf/jsrtlua.go.
+function luIsFile(v) { return v["__luf"] === true }
 
 // ------------------------------------------------------- the operators -----
 
@@ -1534,7 +1538,9 @@ function js_luident(v) {
         hex = digits.charAt(n - q * 16) + hex
         n = q
     }
-    return luTypeName(v) + ": 0x" + hex
+    var tn = luTypeName(v)
+    if (tn == "userdata") { return "file (0x" + hex + ")" }
+    return tn + ": 0x" + hex
 }
 function lsFmtLitKind(args, n) {
     var v = luArgAt(args, n)
@@ -1685,6 +1691,25 @@ function js_lurawlen(args) {
     if (typeof v == "string") { return v.length }
     if (!luIsTable(v)) { luArgTypeErr("rawlen", 1, "table or string", args) }
     return luBorder(v)
+}
+
+// ----- the io library -----
+// io.write (from 0) and file:write (from 1, the file is self): each argument is
+// written as it is checked, a number as tostring renders it. The caller answers
+// the file. Twin of js_luwrite in abnf/jsrtlutab.go.
+function js_luwrite(args, from) {
+    var qual = "io.write"
+    if (from === 1) {
+        qual = "?"
+        if (luTypeName(luArgAt(args, 1)) != "userdata") { luArgTypeErr(qual, 1, "FILE*", args) }
+    }
+    for (var i = from; i < args.length; i++) { writeBytes(luCheckStr(qual, i + 1, args)) }
+    return undefined
+}
+function js_luiotype(args) {
+    luCheckAny("io.type", 1, args)
+    if (luTypeName(args[0]) == "userdata") { return "file" }
+    return undefined
 }
 
 // ----- the table library -----

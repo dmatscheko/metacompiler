@@ -392,7 +392,17 @@ func (rt *jsrt) luTypeName(v interface{}) string {
 	if _, ok := v.(*jsClosure); ok {
 		return "function"
 	}
+	if luIsFile(v) {
+		return "userdata"
+	}
 	return "table"
+}
+
+// luIsFile: a file of the io library is a table carrying the runtime field
+// __luf, which no program can set (luStrKey escapes the name).
+func luIsFile(v interface{}) bool {
+	o, ok := v.(*jsObject)
+	return ok && o.props["__luf"] == true
 }
 
 // luIDiv / luIMod are integer FLOOR division and FLOOR modulo. Go's / and %

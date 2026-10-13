@@ -1837,7 +1837,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var libNeed = {math: false, string: false, table: false, next: false, ipairs: false, pairs: false,
                    error: false, pcall: false, xpcall: false, select: false, tostring: false,
                    tonumber: false, type: false, assert: false, rawequal: false, rawget: false,
-                   rawset: false, rawlen: false, _VERSION: false}
+                   rawset: false, rawlen: false, _VERSION: false, io: false}
     makeVarRef = function(name) {
         if (libNeed[name] === false) { libNeed[name] = true }
         return function(b) {
@@ -3024,7 +3024,28 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (var ti = 0; ti < tnames.length; ti++) { b = libSet(b, tt, tnames[ti], emitLibFunc(libArgsExt("js_lu" + tnames[ti]))) }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "table"), tt])
         }
+        if (libNeed.io) {
+            // Standard output is the one file: a table carrying the runtime field
+            // __luf, which type() reads as a userdata. io.write answers it from the
+            // reserved name 0stdout; its write method answers its self.
+            var fo = callExt(b, "js_obj_new", [])
+            callExt(b, "js_set", [fo, emitStr(b, "__luf"), hTrue])
+            b = libSet(b, fo, "write", emitLibFunc(libWrite(1)))
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0stdout"), fo])
+            var iot = callExt(b, "js_obj_new", [])
+            b = libSet(b, iot, "write", emitLibFunc(libWrite(0)))
+            b = libSet(b, iot, "type", emitLibFunc(libArgsExt("js_luiotype")))
+            callExt(b, "js_set", [iot, emitStr(b, "stdout"), fo])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "io"), iot])
+        }
         return b
+    }
+    function libWrite(from) {
+        return function(bb, argsH) {
+            callExt(bb, "js_luwrite", [argsH, emitNum(bb, from)])
+            if (from === 1) { return {b: bb, v: libArg(bb, argsH, 0)} }
+            return {b: bb, v: callLua(bb, "lua_getvar", [curScopeV, emitStr(bb, "0stdout")])}
+        }
     }
 
     // jsmain: declare print, then run the file top to bottom.

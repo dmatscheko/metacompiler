@@ -502,7 +502,11 @@ func (rt *jsrt) luIdent(v interface{}) string {
 		n = len(luIdents) + 1
 		luIdents[v] = n
 	}
-	return rt.luTypeName(v) + ": 0x" + strconv.FormatInt(int64(0x55550000+16*n), 16)
+	hex := strconv.FormatInt(int64(0x55550000+16*n), 16)
+	if luIsFile(v) {
+		return "file (0x" + hex + ")"
+	}
+	return rt.luTypeName(v) + ": 0x" + hex
 }
 
 func (rt *jsrt) lsLiteral(args []interface{}, n int) string {
