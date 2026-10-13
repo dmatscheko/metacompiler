@@ -1974,7 +1974,11 @@ function goDtPlan(rc, name) {
 }
 // The standard packages WRITTEN IN GO (lib/go-<name>.go), compiled with a program that
 // imports one and has no file of that name of its own: the grammar-relative path, or "".
-function goLibFile(path) { return path == "strings" ? "lib/go-strings.go" : "" }
+function goLibFile(path) {
+    if (path == "strings") { return "lib/go-strings.go" }
+    if (path == "math") { return "lib/go-math.go" }
+    return ""
+}
 // The method EXPRESSION T.M of a defined type T (`f := Color.String`): the method's
 // own function "T.M", which takes the receiver as its first argument; "" when rc.name
 // is not one. A pointer method is spelled (*T).M and is not one.

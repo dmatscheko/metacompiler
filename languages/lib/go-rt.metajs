@@ -2928,6 +2928,21 @@ function js_gochan_new(ty, n) {
     return {__chan: true, buf: [], closed: false, czero: goStrOf(ty), cap: goIdx(n)}
 }
 
+// js_gofdwrite(fd, s): os.Stdout's (1) and os.Stderr's (2) Write. Standard error is
+// reached through eprintln, which ends every write with one newline, so a write's
+// own trailing newline is dropped first. Twin of js_gofdwrite in abnf/jsrtgolang.go,
+// goFdWrite in go-interpreter.abnf.
+function js_gofdwrite(fd, s) {
+    if (goNum(fd) == 1) { print(s); return undefined }
+    if (s.length > 0 && s.charCodeAt(s.length - 1) == 10) { eprintln(s.substring(0, s.length - 1)) } else { eprintln(s) }
+    return undefined
+}
+
+// goMathSqrt(x): the correctly rounded square root lib/go-math.go's Sqrt is, a
+// float64. Twin of js_gosqrt in abnf/jsrtgolang.go, goMathSqrt in
+// go-interpreter.abnf.
+function js_gosqrt(args) { return flo(Math.sqrt(goNum(args[0])), 1) }
+
 // cap(x) of anything but a slice header: a channel's buffer size, else what len
 // answers. Twin of js_gocap in abnf/jsrtgolang.go, goCap in go-interpreter.abnf.
 function js_gocap(v) {

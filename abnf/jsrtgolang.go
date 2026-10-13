@@ -2174,6 +2174,29 @@ func init() {
 		baseMapGet := m["js_map_get"]
 		baseGolen := m["js_golen"]
 
+		// js_gofdwrite(fd, s): os.Stdout's (1) and os.Stderr's (2) Write. Standard
+		// error goes the way eprintln writes it, ending every write with one newline,
+		// so a write's own trailing newline is dropped first. Twin of js_gofdwrite in
+		// lib/go-rt.metajs, goFdWrite in go-interpreter.abnf.
+		m["js_gofdwrite"] = func(a []uint64) uint64 {
+			s := wtf8Clean(rt.toString(u(a[1])))
+			if rt.toNumber(u(a[0])) == 1 {
+				fmt.Fprint(outWriter, s)
+			} else {
+				fmt.Fprintln(warnWriter, strings.TrimSuffix(s, "\n"))
+			}
+			return 0
+		}
+		// goMathSqrt(x): the correctly rounded square root lib/go-math.go's Sqrt is,
+		// a float64. Twin of js_gosqrt in lib/go-rt.metajs, goMathSqrt in
+		// go-interpreter.abnf.
+		m["js_gosqrt"] = func(a []uint64) uint64 {
+			args, _ := u(a[0]).(*jsArray)
+			if args == nil || len(args.elems) == 0 {
+				rt.fail("goMathSqrt() needs an argument")
+			}
+			return w(jsJFlo{f: math.Sqrt(rt.toNumber(args.elems[0])), sty: floGo})
+		}
 		// cap(x) of anything but a slice header: a channel's buffer size, else
 		// what len answers. Twin of js_gocap in lib/go-rt.metajs, goCap in
 		// go-interpreter.abnf.

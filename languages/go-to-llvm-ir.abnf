@@ -971,7 +971,7 @@ DotFloatLit <~~ push(goFloLitC("0" + up.in, up.pos)) ~~>
 // 0x1p4 / 0x1.8p1: a HEX float. The 'p' exponent is decimal and scales by a power of
 // TWO, and it is mandatory - without it the same text is the hex integer above.
 HexFloatLit <~~ push(goHexFloLitC(up.in, up.pos)) ~~>
-            = "0" ( "x" | "X" ) :whitespace() HexDigits [ "." { HexDigit | "_" } ]
+            = "0" :whitespace() HexX HexDigits [ "." { HexDigit | "_" } ]
               ( "p" | "P" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } :whitespace(Whitespace) ;
 // 017: the LEGACY octal form, which has no base letter - 017 is 15, not 17. Tried
 // after the 0x/0o/0b forms and before the decimal ones, and it needs at least one
@@ -986,14 +986,20 @@ FloatLit    <~~ push(goFloLitC(up.in, up.pos)) ~~>
               ( "." { "0"..."9" } [ ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } ]
               | ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } ) :whitespace(Whitespace) ;
 HexLit      <~~ push(goRadixLitC(up.in, up.pos)) ~~>
-            = "0" ( "x" | "X" ) :whitespace() HexDigits :whitespace(Whitespace) ;
+            = "0" :whitespace() HexX HexDigits :whitespace(Whitespace) ;
 // Go allows the digit separator right after the base prefix, too: 0x_FF_f.
 HexDigits   = { "_" } HexDigit { HexDigit | "_" } ;
 HexDigit    = "0"..."9" | "a"..."f" | "A"..."F" ;
+// The radix letter is glued to its "0", so `a := 0` NEWLINE `x1, b := f()` is not
+// the hex literal 0x1. A named rule, not a group: see the Times trap in
+// docs/abnf-dialect-gotchas.md.
+HexX        = "x" | "X" ;
+OctO        = "o" | "O" ;
+BinB        = "b" | "B" ;
 OctLit      <~~ push(goRadixLitC(up.in, up.pos)) ~~>
-            = "0" ( "o" | "O" ) :whitespace() "0"..."7" { "0"..."7" | "_" } :whitespace(Whitespace) ;
+            = "0" :whitespace() OctO "0"..."7" { "0"..."7" | "_" } :whitespace(Whitespace) ;
 BinLit      <~~ push(goRadixLitC(up.in, up.pos)) ~~>
-            = "0" ( "b" | "B" ) :whitespace() BinDigits :whitespace(Whitespace) ;
+            = "0" :whitespace() BinB BinDigits :whitespace(Whitespace) ;
 BinDigits   = BinDigit { BinDigit | "_" } ;
 BinDigit    = "0" | "1" ;
 DecULit     <~~ push(goRadixLitC(up.in, up.pos)) ~~>
@@ -3686,6 +3692,53 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return b
     }
 
+    // fmt.Fprint / Fprintln / Fprintf(w, ...): the text Sprint / Sprintln / Sprintf
+    // make of the other arguments, handed to w.Write as a []byte - Go's io.Writer
+    // contract - and the answer is Write's. Twin of the Fprint arms of
+    // hostGlobals["fmt"] in go-interpreter.abnf.
+    function declFprint(b, target, name, mode) {
+        funcCount++
+        var idx = funcCount
+        var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var fb = f.NewBlock("entry")
+        var argsV = f.Params[1]
+        var s = callExt(fb, "js_gostr", [callExt(fb, "js_goslice", [argsV, emitNum(fb, 1), hUndef]), emitNum(fb, mode)])
+        var bs = emitSlT(fb, emitSlOf(fb, callExt(fb, "js_goconv", [emitStr(fb, "[]byte"), s])), "byte")
+        var wa = callExt(fb, "js_arr_new", [])
+        callExt(fb, "js_arr_push", [wa, bs])
+        fb.NewRet(callExt(fb, "js_gomcall", [callExt(fb, "js_arg", [argsV, handle(0)]), emitStr(fb, "Write"), wa]))
+        callExt(b, "js_set", [target, emitStr(b, name), callExt(b, "js_closure", [handle(idx), curScopeV])])
+        return b
+    }
+    // os.Stdout / os.Stderr: writers whose Write and WriteString print through
+    // js_gofdwrite and answer (bytes written, nil). Twin of goOsFile in
+    // go-interpreter.abnf.
+    function declOsFile(b, osV, name, fd) {
+        var fo = callExt(b, "js_obj_new", [])
+        var wn = "$" + name + ".Write"
+        var sn = "$" + name + ".WriteString"
+        b = declFn(b, wn, 1, function(fb, a) {
+            var s = callExt(fb, "js_goconv", [emitStr(fb, "string"), emitHelper(fb, "$sels", [a[0]])])
+            callExt(fb, "js_gofdwrite", [emitNum(fb, fd), s])
+            return {b: fb, v: emitWrote(fb, emitHelper(fb, "len", [a[0]]))}
+        })
+        b = declFn(b, sn, 1, function(fb, a) {
+            callExt(fb, "js_gofdwrite", [emitNum(fb, fd), a[0]])
+            return {b: fb, v: emitWrote(fb, callExt(fb, "js_golen", [a[0]]))}
+        })
+        callExt(b, "js_set", [fo, emitStr(b, "Write"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, wn)])])
+        callExt(b, "js_set", [fo, emitStr(b, "WriteString"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, sn)])])
+        callExt(b, "js_set", [osV, emitStr(b, name), fo])
+        return b
+    }
+    // (n, nil): a two-result answer, marked the way every multi-value result is.
+    function emitWrote(b, n) {
+        var arr = callExt(b, "js_arr_new", [])
+        callExt(b, "js_arr_push", [arr, n])
+        callExt(b, "js_arr_push", [arr, hNull])
+        return usesMultiRet ? emitMvWrap(b, arr) : arr
+    }
+
     // ----- Pointers -----
     // A pointer to a variable is a CELL: a tiny class instance named "$ptr" carrying
     // the scope that holds the variable (o) and its name (k). The class shape is what
@@ -5800,6 +5853,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // 0 errors.New, 1 fmt.Errorf, 2 errors.Is, 3 errors.Unwrap, 4 errors.As,
         // 5 errors.Join.
         b = declPrint(b, fmtV, "Errorf", "js_goerrors", 1)
+        b = declFprint(b, fmtV, "Fprint", 1)
+        b = declFprint(b, fmtV, "Fprintln", 0)
+        b = declFprint(b, fmtV, "Fprintf", 4)
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "fmt"), fmtV])
         var errV = callExt(b, "js_obj_new", [])
         b = declPrint(b, errV, "New", "js_goerrors", 0)
@@ -5816,7 +5872,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         b = declPrint(b, null, "print", "js_gowrite", 3)
         var osV = callExt(b, "js_obj_new", [])
         callExt(b, "js_set", [osV, emitStr(b, "Exit"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "exit")])])
+        b = declOsFile(b, osV, "Stdout", 1)
+        b = declOsFile(b, osV, "Stderr", 2)
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "os"), osV])
+        // The correctly rounded square root lib/go-math.go's Sqrt is, declared when
+        // the program imports math. Twin of goMathSqrt in go-interpreter.abnf.
+        if (importedFiles["$" + goLibFile("math")] == true) { b = declBuiltin(b, "goMathSqrt", "js_gosqrt", null) }
         // len/cap/copy/append/clear come from declSlices (they have to reach through a
         // slice header); delete(m, k) is still a one-liner.
         funcCount++
@@ -5982,7 +6043,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
 
     // Go stdlib packages the runtime provides (resolveImport lives in lib/compile-core.js;
     // exact-match paths, so sub-packages like "encoding/json" are listed in full).
-    core.stdlibImports = ["fmt", "os", "strconv", "math", "sort", "errors", "bufio", "io", "time", "sync", "bytes", "unicode", "regexp", "path", "encoding/json", "context", "flag", "log", "reflect"]
+    core.stdlibImports = ["fmt", "os", "strconv", "sort", "errors", "bufio", "io", "time", "sync", "bytes", "unicode", "regexp", "path", "encoding/json", "context", "flag", "log", "reflect"]
     function fail(msg) { println("go compiler error: " + msg); exit(1) }
 
     // Project-file imports: import "mathbox" -> mathbox.go (a slash path like "a/b" ->

@@ -27,7 +27,8 @@
 // Deliberately out of scope (not syntax, or unrunnable in this harness):
 // imports and the standard library (the prologue's fmt/os calls are the whole
 // harness, mirroring the feature-matrix file; SECTION 46 adds fmt.Errorf and
-// the errors package), packages and modules, cgo,
+// the errors package, SECTIONS 76-77 the math package and fmt.Fprint* on an
+// io.Writer), packages and modules, cgo,
 // unsafe, build tags, reflection (struct tags appear as syntax only), and
 // goroutine scheduling beyond deterministic channel operations; generic
 // method constraints do not exist in Go 1.22 and are n/a. Unlike the
@@ -43,6 +44,8 @@ import (
 	"errors"
 	"fmt"
 	f27 "fmt"
+	"io"
+	"math"
 	"os"
 	"strings"
 )
@@ -4070,6 +4073,65 @@ func s75() {
 	check("chc3", cap(d) == 0 && len(d) == 0 && cap(e) == 0 && len(e) == 0)
 }
 
+// ===== SECTION 76: the math package =====
+// Every operand is read out of a slice so nothing folds at compile time; the
+// expected texts are go run's.
+func s76() {
+	xs := []float64{2.5, -2.5, 0.49999999999999994, -0.5, 1e-300, 5e-324, 4503599627370495.5}
+	got := ""
+	for _, x := range xs {
+		fr, ex := math.Frexp(x)
+		ip, fp := math.Modf(x)
+		got += fmt.Sprint(math.Floor(x), math.Ceil(x), math.Trunc(x), math.Round(x), math.RoundToEven(x),
+			math.Sqrt(math.Abs(x)), fr, ex, ip, fp, math.Mod(x, 0.75), math.Pow(x, 3), math.Ldexp(x, -1070)) + ";"
+	}
+	check("mth1", got == "2 3 2 3 2 1.5811388300841898 0.625 2 2 0.5 0.25 15.625 2e-322;"+
+		"-3 -2 -2 -3 -2 1.5811388300841898 -0.625 2 -2 -0.5 -0.25 -15.625 -2e-322;"+
+		"0 1 0 0 0 0.7071067811865475 0.9999999999999999 -1 0 0.49999999999999994 0.49999999999999994 0.12499999999999996 4e-323;"+
+		"-1 -0 -0 -1 -0 0.7071067811865476 -0.5 0 -0 -0.5 -0.5 -0.125 -4e-323;"+
+		"0 1 0 0 0 1e-150 0.6696928794914171 -996 0 1e-300 1e-300 0 0;"+
+		"0 1 0 0 0 2.2227587494850775e-162 0.5 -1073 0 5e-324 5e-324 0 0;"+
+		"4.503599627370495e+15 4.503599627370496e+15 4.503599627370495e+15 4.503599627370496e+15 4.503599627370496e+15 "+
+		"6.710886399999999e+07 0.9999999999999999 52 4.503599627370495e+15 0.5 0.5 9.13438523331814e+46 3.560118173611522e-307;")
+	vs := []float64{0, -1, 2, 10}
+	check("mth2", fmt.Sprint(math.Pow(vs[3], -3), math.Pow(vs[2], 0.5), math.Pow(vs[1], 1e300), math.Pow(vs[0], -1),
+		math.Sqrt(vs[1]), math.Max(vs[0], -vs[0]), math.Min(vs[0], -vs[0]), math.Dim(vs[2], vs[3])) ==
+		"0.001 1.4142135623730951 1 +Inf NaN 0 -0 0")
+	// A float64 holding the constant: the constant itself compares at arbitrary
+	// precision in Go, so math.Pi == 3.141592653589793 is false there.
+	pi, tiny := math.Pi, math.SmallestNonzeroFloat64
+	check("mth3", math.IsNaN(math.NaN()) && math.IsInf(math.Inf(-1), -1) && !math.IsInf(math.MaxFloat64, 0) &&
+		math.Signbit(math.Copysign(0, -1)) && pi == 3.141592653589793 && math.MaxInt64 == 1<<63-1 &&
+		math.MinInt64 == -1<<63 && math.MaxUint8 == 255 && tiny == 5e-324 && tiny/2 == 0)
+}
+
+// ===== SECTION 77: fmt.Fprint* and io.Writer =====
+// Fprint, Fprintln and Fprintf hand their text to w.Write as a []byte and answer
+// what Write answers; os.Stdout is a writer too.
+type w77 struct{ parts []string }
+
+func (w *w77) Write(p []byte) (int, error) {
+	w.parts = append(w.parts, string(p))
+	return len(p), nil
+}
+
+func put77(w io.Writer, k string, v int) (int, error) { return fmt.Fprintf(w, "%s=%03d;", k, v) }
+
+func s77() {
+	var sb strings.Builder
+	n, err := fmt.Fprintf(&sb, "%d-%s|", 5, "é")
+	fmt.Fprint(&sb, "a", 1, 2, "b")
+	fmt.Fprintln(&sb, "", 3.5)
+	check("fpr1", sb.String() == "5-é|a1 2b 3.5\n" && n == 5 && err == nil)
+	w := &w77{}
+	m, _ := put77(w, "k", 7)
+	put77(w, "z", -1)
+	check("fpr2", m == 6 && strings.Join(w.parts, "") == "k=007;z=-01;" && len(w.parts) == 2)
+	k, e2 := os.Stdout.WriteString("")
+	j, _ := fmt.Fprint(os.Stdout)
+	check("fpr3", k == 0 && e2 == nil && j == 0)
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -4146,6 +4208,8 @@ func main() {
 	s73() // SECTION-CALL 73
 	s74() // SECTION-CALL 74
 	s75() // SECTION-CALL 75
+	s76() // SECTION-CALL 76
+	s77() // SECTION-CALL 77
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

@@ -1007,7 +1007,7 @@ DotFloatLit <~~ push(goFloLitC("0" + up.in, up.pos)) ~~>
 // 0x1p4 / 0x1.8p1: a HEX float. The 'p' exponent is decimal and scales by a power of
 // TWO, and it is mandatory - without it the same text is the hex integer above.
 HexFloatLit <~~ push(goHexFloLitC(up.in, up.pos)) ~~>
-            = "0" ( "x" | "X" ) :whitespace() HexDigits [ "." { HexDigit | "_" } ]
+            = "0" :whitespace() HexX HexDigits [ "." { HexDigit | "_" } ]
               ( "p" | "P" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } :whitespace(Whitespace) ;
 // 017: the LEGACY octal form, which has no base letter - 017 is 15, not 17. Tried
 // after the 0x/0o/0b forms and before the decimal ones, and it needs at least one
@@ -1022,14 +1022,20 @@ FloatLit    <~~ push(goFloLitC(up.in, up.pos)) ~~>
               ( "." { "0"..."9" } [ ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } ]
               | ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } ) :whitespace(Whitespace) ;
 HexLit      <~~ push(goRadixLitC(up.in, up.pos)) ~~>
-            = "0" ( "x" | "X" ) :whitespace() HexDigits :whitespace(Whitespace) ;
+            = "0" :whitespace() HexX HexDigits :whitespace(Whitespace) ;
 // Go allows the digit separator right after the base prefix, too: 0x_FF_f.
 HexDigits   = { "_" } HexDigit { HexDigit | "_" } ;
 HexDigit    = "0"..."9" | "a"..."f" | "A"..."F" ;
+// The radix letter is glued to its "0", so `a := 0` NEWLINE `x1, b := f()` is not
+// the hex literal 0x1. A named rule, not a group: see the Times trap in
+// docs/abnf-dialect-gotchas.md.
+HexX        = "x" | "X" ;
+OctO        = "o" | "O" ;
+BinB        = "b" | "B" ;
 OctLit      <~~ push(goRadixLitC(up.in, up.pos)) ~~>
-            = "0" ( "o" | "O" ) :whitespace() "0"..."7" { "0"..."7" | "_" } :whitespace(Whitespace) ;
+            = "0" :whitespace() OctO "0"..."7" { "0"..."7" | "_" } :whitespace(Whitespace) ;
 BinLit      <~~ push(goRadixLitC(up.in, up.pos)) ~~>
-            = "0" ( "b" | "B" ) :whitespace() BinDigits :whitespace(Whitespace) ;
+            = "0" :whitespace() BinB BinDigits :whitespace(Whitespace) ;
 BinDigits   = BinDigit { BinDigit | "_" } ;
 BinDigit    = "0" | "1" ;
 DecULit     <~~ push(goRadixLitC(up.in, up.pos)) ~~>
@@ -1455,6 +1461,38 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // type text may carry trailing whitespace, so match the prefix).
     function zeroOfType(t) { return goZeroTy(t) }
 
+    // The text of fmt.Print: a space between two operands neither of which is a string.
+    function gPrText(args) {
+        var out = ""
+        var prevStr = true
+        for (var i = 0; i < args.length; i++) {
+            var isStr = goKindStr(args[i])
+            if (i > 0 && !prevStr && !isStr) { out += " " }
+            out += gstr(args[i])
+            prevStr = isStr
+        }
+        return out
+    }
+    function gArgsFrom(args, k) {
+        var out = []
+        for (var i = k; i < args.length; i++) { out.push(args[i]) }
+        return out
+    }
+    function goFprint(w, s) { return mcall(w, "Write", [goConvert("[]byte", s)]) }
+    // os.Stdout and os.Stderr: writers whose Write prints. Standard error is reached
+    // through eprintln, which ends every write with its own newline, so a write's
+    // trailing newline is dropped first. Twin of js_gofdwrite in abnf/jsrtgolang.go and
+    // lib/go-rt.metajs.
+    function goOsFile(fd) {
+        return {
+            Write: function(p) { goFdWrite(fd, goConvert("string", p)); return goMv([goLen(p), null]) },
+            WriteString: function(s) { goFdWrite(fd, s); return goMv([byteLen(s), null]) }
+        }
+    }
+    function goFdWrite(fd, s) {
+        if (fd == 1) { print(s); return }
+        if (s.length > 0 && s.charCodeAt(s.length - 1) == 10) { eprintln(s.substring(0, s.length - 1)) } else { eprintln(s) }
+    }
     // The text of fmt.Println: every operand, a space between each pair.
     function gLnText(args) {
         var out = ""
@@ -1470,29 +1508,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         Sprintln: function() { return gLnText(arguments) + "\n" },
         // fmt.Print puts a space between two operands when NEITHER of them is a
         // string, which is what the handle runtime's print does too.
-        Print: function() {
-            var out = ""
-            var prevStr = true
-            for (var i = 0; i < arguments.length; i++) {
-                var isStr = goKindStr(arguments[i])
-                if (i > 0 && !prevStr && !isStr) { out += " " }
-                out += gstr(arguments[i])
-                prevStr = isStr
-            }
-            print(out)
-        },
+        Print: function() { print(gPrText(arguments)) },
         // fmt.Sprint: Print's text, returned instead of printed.
-        Sprint: function() {
-            var out = ""
-            var prevStr = true
-            for (var i = 0; i < arguments.length; i++) {
-                var isStr = goKindStr(arguments[i])
-                if (i > 0 && !prevStr && !isStr) { out += " " }
-                out += gstr(arguments[i])
-                prevStr = isStr
-            }
-            return out
-        },
+        Sprint: function() { return gPrText(arguments) },
         // fmt.Printf / fmt.Sprintf: gfFormat in lib/go-fmt.js, over the gfH* hooks
         // below. The twin is gopFormat in abnf/jsrtgolang.go.
         Printf: function() {
@@ -1504,6 +1522,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var a2 = []
             for (var j = 1; j < arguments.length; j++) { a2.push(arguments[j]) }
             return gfFormat(gstr(arguments[0]), a2, GF_NOWRAP)
+        },
+        // fmt.Fprint / Fprintln / Fprintf hand their text to w.Write as a []byte, Go's
+        // io.Writer contract, and answer what Write answers. Twin of the Fprint arms of
+        // buildMain in go-to-llvm-ir.abnf.
+        Fprint: function() { return goFprint(arguments[0], gPrText(gArgsFrom(arguments, 1))) },
+        Fprintln: function() { return goFprint(arguments[0], gLnText(gArgsFrom(arguments, 1)) + "\n") },
+        Fprintf: function() {
+            var a4 = gArgsFrom(arguments, 2)
+            return goFprint(arguments[0], gfFormat(gstr(arguments[1]), a4, GF_NOWRAP))
         },
         Errorf: function() {
             var a3 = []
@@ -1547,7 +1574,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         for (var i = 0; i < arguments.length; i++) { out += gstr(arguments[i]) }
         print(out)
     }
-    hostGlobals["os"] = { Exit: function(code) { exit(code | 0) } }
+    hostGlobals["os"] = { Exit: function(code) { exit(code | 0) }, Stdout: goOsFile(1), Stderr: goOsFile(2) }
+    // The correctly rounded square root lib/go-math.go's Sqrt is. Twin of js_gosqrt in
+    // abnf/jsrtgolang.go and lib/go-rt.metajs.
+    hostGlobals["goMathSqrt"] = function(x) { return gFlo(Math.sqrt(szNum(gNumF(x)))) }
     // len(string) counts BYTES in Go, not runes and not UTF-16 code units:
     // len("héllo") is 6 (byteLen is the host's UTF-8 length); a nil slice has length 0.
     hostGlobals["len"] = function(x) { return goLen(x) }
@@ -5874,7 +5904,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     core.blank = "_"
     // Go stdlib packages the runtime provides (resolveImport lives in lib/interp-core.js;
     // exact-match paths, so sub-packages like "encoding/json" are listed in full).
-    core.stdlibImports = ["fmt", "os", "strconv", "math", "sort", "errors", "bufio", "io", "time", "sync", "bytes", "unicode", "regexp", "path", "encoding/json", "context", "flag", "log", "reflect"]
+    core.stdlibImports = ["fmt", "os", "strconv", "sort", "errors", "bufio", "io", "time", "sync", "bytes", "unicode", "regexp", "path", "encoding/json", "context", "flag", "log", "reflect"]
     core.nullWord = "nil"
     // `p.In.X = 1` with a nil p.In walks resolveRef's path; in Go it is a recoverable
     // panic. The hook is additive in lib/interp-core.js - every language that leaves
