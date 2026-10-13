@@ -928,6 +928,17 @@ func toInt16(v Value) int16 {
 	return 0
 }
 
+// modUint32 is ToUint32's modulo of a finite f: truncate, then reduce modulo 2^32
+// (ECMA-262 7.1.7). Not uint32(int64(f)): converting a float64 outside the int64
+// range is implementation defined in Go, and arm64 saturates.
+func modUint32(f float64) uint32 {
+	m := math.Mod(math.Trunc(f), 4294967296)
+	if m < 0 {
+		m += 4294967296
+	}
+	return uint32(m)
+}
+
 func toUint16(v Value) uint16 {
 	v = v.ToNumber()
 	if i, ok := v.(valueInt); ok {
@@ -937,7 +948,7 @@ func toUint16(v Value) uint16 {
 	if f, ok := v.(valueFloat); ok {
 		f := float64(f)
 		if !math.IsNaN(f) && !math.IsInf(f, 0) {
-			return uint16(int64(f))
+			return uint16(modUint32(f))
 		}
 	}
 	return 0
@@ -952,7 +963,7 @@ func toInt32(v Value) int32 {
 	if f, ok := v.(valueFloat); ok {
 		f := float64(f)
 		if !math.IsNaN(f) && !math.IsInf(f, 0) {
-			return int32(int64(f))
+			return int32(modUint32(f))
 		}
 	}
 	return 0
@@ -967,7 +978,7 @@ func toUint32(v Value) uint32 {
 	if f, ok := v.(valueFloat); ok {
 		f := float64(f)
 		if !math.IsNaN(f) && !math.IsInf(f, 0) {
-			return uint32(int64(f))
+			return uint32(modUint32(f))
 		}
 	}
 	return 0

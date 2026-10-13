@@ -109,6 +109,70 @@ function jsnParseFloat(s) {
     return jsnDecVal(s.substring(i, at + n))
 }
 
+// parseInt(string, radix) (ES2023 19.2.5), r being ToInt32(radix): leading white
+// space and one sign skipped, r 0 means 10 and r outside 2..36 NaN, an 0x / 0X
+// prefix read when r is 0 or 16, then the longest run of digits below r; NaN when
+// there is none. A sign applies to a zero too ("-0" is -0). The value is exact for
+// base ten (the decimal literal path) and a power-of-two base; in another base the
+// specification leaves a value past 2^53 to the implementation, and here it is the
+// digit-by-digit multiply-add.
+function jsnParseInt(s, r) {
+    var i = 0
+    while (i < s.length && jsnIsWs(s.charCodeAt(i))) { i = i + 1 }
+    var neg = false
+    if (i < s.length && (s.charAt(i) == "+" || s.charAt(i) == "-")) {
+        neg = s.charAt(i) == "-"
+        i = i + 1
+    }
+    var radix = r
+    var prefix = true
+    if (radix != 0) {
+        if (radix < 2 || radix > 36) { return NaN }
+        if (radix != 16) { prefix = false }
+    } else { radix = 10 }
+    if (prefix && i + 1 < s.length && s.charAt(i) == "0" && (s.charAt(i + 1) == "x" || s.charAt(i + 1) == "X")) {
+        i = i + 2
+        radix = 16
+    }
+    var start = i
+    while (i < s.length && jsnDigitVal(s.charCodeAt(i)) < radix) { i = i + 1 }
+    if (i == start) { return NaN }
+    var v = 0
+    if (radix == 10) { v = jsnDecVal(s.substring(start, i)) }
+    else if (radix == 2 || radix == 4 || radix == 8 || radix == 16 || radix == 32) { v = jsnIntPow2(s, start, i, radix) }
+    else {
+        for (var k = start; k < i; k++) { v = v * radix + jsnDigitVal(s.charCodeAt(k)) }
+    }
+    if (neg) { return -v }
+    return v
+}
+
+// The digits s[a..b) in a power-of-two base, rounded once, half to even: the first
+// 53 significant bits, then the first dropped bit and whether any later one is set.
+function jsnIntPow2(s, a, b, radix) {
+    var v = 0
+    var nb = 0
+    var exp = 0
+    var rnd = 0
+    var sticky = false
+    for (var i = a; i < b; i++) {
+        var d = jsnDigitVal(s.charCodeAt(i))
+        for (var p = radix / 2; p >= 1; p = p / 2) {
+            var bit = 0
+            if (d >= p) { bit = 1; d = d - p }
+            if (nb < 53) {
+                if (nb > 0 || bit == 1) { v = v * 2 + bit; nb = nb + 1 }
+            } else {
+                if (exp == 0) { rnd = bit } else if (bit == 1) { sticky = true }
+                exp = exp + 1
+            }
+        }
+    }
+    if (rnd == 1 && (sticky || v % 2 == 1)) { v = v + 1 }
+    if (exp > 0) { v = v * Math.pow(2, exp) }
+    return v
+}
+
 // ----- Number#toFixed / toExponential / toPrecision (ES2023 21.1.3) -----
 //
 // Each rounds the EXACT binary value, and of two equally close candidates takes the

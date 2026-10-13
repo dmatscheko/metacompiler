@@ -714,6 +714,33 @@ check("assign-lhs-first", (function () {
         && JSON.stringify(obj) === '{"a":5}' && s === "abb" && e.join(",") === "101,2";
 })());
 
+// ----- parseInt: sign, white space, radix range and ToInt32 of the radix -----
+check("parseint-edges", (function () {
+    var ss = ["-0", "-0x0", "　10", "﻿8", " 7", "11", "11", "11", "0x1f"];
+    var rs = [10, 0, 0, 0, 0, 37, 4294967312, 1, 16];
+    var got = [];
+    for (var i = 0; i < ss.length; i++) {
+        var v = parseInt(ss[i], rs[i]);
+        got.push((v === 0 && 1 / v < 0) ? "-0" : String(v));
+    }
+    return got.join(",") === "-0,-0,10,8,7,NaN,17,NaN,31" && parseInt(ss[0]) === 0 && 1 / parseInt(ss[0]) < 0;
+})());
+
+// ----- Math.max / Math.min: a NaN argument wins over an infinity -----
+check("math-max-nan-inf", (function () {
+    var a = [NaN, Infinity, -Infinity];
+    return isNaN(Math.max(a[0], a[1])) && isNaN(Math.min(a[2], a[0])) && isNaN(Math.max.apply(null, [1, a[0], a[1]]))
+        && Math.max(a[1], 1) === Infinity && Math.min() === Infinity;
+})());
+
+// ----- ToInt32 / ToUint32 of a magnitude past 2^63 is a modulo 2^32 -----
+check("toint32-huge", (function () {
+    var xs = [1e21, Math.pow(2, 64) + Math.pow(2, 33), -1e21];
+    var x = xs[0];
+    return (x | 0) === -559939584 && (x >>> 0) === 3735027712 && (~x) === 559939583 && (1 << x) === 1
+        && (xs[1] | 0) === 0 && (xs[2] | 0) === 559939584;
+})());
+
 function main() {
     println("features: " + checks + " checks, " + failures + " failures");
     return failures;

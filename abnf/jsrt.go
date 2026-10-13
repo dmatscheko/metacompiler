@@ -17737,18 +17737,29 @@ func standardJSBindings() map[string]interface{} {
 		return math.Abs(rt.toNumber(argAt(args, 0)))
 	}))
 	// max/min are variadic like in JS: 0 arguments give -/+Infinity, and a NaN
-	// argument wins (math.Max/Min propagate NaN).
+	// argument wins (ECMA-262 21.3.2.24). Not math.Max/Min alone: Go defines
+	// Max(x, +Inf) = +Inf even for a NaN x.
 	mathObj.set("max", jsHostFunc("max", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-		acc := math.Inf(-1)
+		acc, nan := math.Inf(-1), false
 		for _, a := range args {
-			acc = math.Max(acc, rt.toNumber(a))
+			x := rt.toNumber(a)
+			nan = nan || x != x
+			acc = math.Max(acc, x)
+		}
+		if nan {
+			return math.NaN()
 		}
 		return acc
 	}))
 	mathObj.set("min", jsHostFunc("min", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-		acc := math.Inf(1)
+		acc, nan := math.Inf(1), false
 		for _, a := range args {
-			acc = math.Min(acc, rt.toNumber(a))
+			x := rt.toNumber(a)
+			nan = nan || x != x
+			acc = math.Min(acc, x)
+		}
+		if nan {
+			return math.NaN()
 		}
 		return acc
 	}))

@@ -6219,8 +6219,9 @@ NotFuncHead = :script(~~
         // back out of a BigInt, since unary '+' refuses it.
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "BigInt"), callExt(b, "js_jsbigintfn", [])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Number"), callExt(b, "js_jsnumberfn", [])])
-        // parseFloat is JavaScript's (lib/js-num.js), not the runtime root's shared one.
+        // parseFloat and parseInt are JavaScript's (lib/js-num.js), not the runtime root's.
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "parseFloat"), callExt(b, "js_jsparsefloatfn", [])])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "parseInt"), callExt(b, "js_jsparseintfn", [])])
         // The Math global: the shared one with an ECMAScript pow (js_jsmath).
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Math"),
                 callExt(b, "js_jsmath", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, "Math")])])])

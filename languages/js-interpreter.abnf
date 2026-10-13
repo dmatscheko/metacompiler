@@ -4908,7 +4908,7 @@ NotFuncHead = :script(~~
         // println / print render every argument with JAVASCRIPT's ToString first (the
         // shared host functions print Go's %v). js_jsprintfn is the compiler twin.
         "println": jsPrintln, "print": jsPrint, "printf": printf, "sprintf": sprintf,
-        "parseInt": parseInt, "parseFloat": function(v) { return jsnParseFloat(jsStr(v)) }, "Math": jsMathObj, "String": jsStringFn,
+        "parseInt": function(v, r) { return jsnParseInt(jsStr(v), jsToNum(r) | 0) }, "parseFloat": function(v) { return jsnParseFloat(jsStr(v)) }, "Math": jsMathObj, "String": jsStringFn,
         // BigInt(v) is ToBigInt and Number(v) is ToNumber; the latter is the only way
         // back out of a BigInt, since unary '+' refuses it.
         "BigInt": jsBigIntFn, "Number": jsNumberFn,

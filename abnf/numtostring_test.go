@@ -93,3 +93,61 @@ func TestNumberToStringAgreesAcrossHosts(t *testing.T) {
 		t.Errorf("%d of %d doubles print differently under goja and the frozen host", bad, len(xs))
 	}
 }
+
+// ToInt32 and ToUint32 (`x | 0`, `x >>> 0`, `~x`, a shift count) are a modulo 2^32
+// in both grammar hosts, also for a magnitude outside the int64 range, where Go's
+// float64-to-int64 conversion is implementation defined: the frozen host reduces
+// with rt.toInt32, goja with its patched modUint32 (third_party/goja/runtime.go).
+func TestToInt32AgreesAcrossHosts(t *testing.T) {
+	vm := goja.New()
+	fm := map[string]r.Object{}
+	NewCommonScript(vm, &fm, true)
+	if _, err := vm.RunString(`function __i32(xs) { return xs.map(function (x) { return [x | 0, x >>> 0, ~x, 1 << x]; }); }`); err != nil {
+		t.Fatal(err)
+	}
+	fn, _ := goja.AssertFunction(vm.Get("__i32"))
+	var xs []float64
+	for e := 0; e <= 1023; e++ {
+		for _, d := range []float64{-1, 0, 1, 3} {
+			v := math.Ldexp(1, e) + d
+			xs = append(xs, v, -v)
+		}
+	}
+	xs = append(xs, 1e21, 1e19, 1e20, math.MaxFloat64, 0.5, -0.5, 4294967295.5, math.Ldexp(1, 64)+math.Ldexp(1, 33))
+	rnd := rand.New(rand.NewSource(1))
+	for i := 0; i < 20000; i++ {
+		v := math.Float64frombits(rnd.Uint64())
+		if !math.IsNaN(v) && !math.IsInf(v, 0) {
+			xs = append(xs, v)
+		}
+	}
+	args := make([]interface{}, len(xs))
+	for i, v := range xs {
+		args[i] = v
+	}
+	res, err := fn(goja.Undefined(), vm.ToValue(args))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got [][]float64
+	if err := vm.ExportTo(res, &got); err != nil {
+		t.Fatal(err)
+	}
+	rt := newJSRT(nil)
+	bad := 0
+	for i, v := range xs {
+		i32 := rt.toInt32(v)
+		want := []float64{float64(i32), float64(uint32(i32)), float64(^i32), float64(int32(1) << (uint32(i32) & 31))}
+		for j := range want {
+			if got[i][j] != want[j] {
+				bad++
+				if bad <= 10 {
+					t.Errorf("%v op %d: goja %v, frozen %v", strconv.FormatFloat(v, 'g', -1, 64), j, got[i][j], want[j])
+				}
+			}
+		}
+	}
+	if bad > 0 {
+		t.Errorf("%d of %d results differ between goja and the frozen host", bad, 4*len(xs))
+	}
+}

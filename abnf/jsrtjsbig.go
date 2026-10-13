@@ -550,6 +550,13 @@ func (rt *jsrt) addJSBigIntExterns(m map[string]func(args []uint64) uint64) {
 			return jsParseFloatJS(rt.jsvString(argAt(args, 0)))
 		}))
 	}
+	// The parseInt global, the same way.
+	m["js_jsparseintfn"] = func(a []uint64) uint64 {
+		return w(jsHostFunc("parseInt", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			s := rt.jsvString(argAt(args, 0))
+			return jsParseIntJS(s, rt.toInt32(rt.jsvToNum(argAt(args, 1))))
+		}))
+	}
 }
 
 // jsvBigIntMethod is BigInt.prototype: toString([radix]) and valueOf, the two that
@@ -740,6 +747,94 @@ func jsStrToNum(s string) float64 {
 		return math.NaN()
 	}
 	return jsDecValJS(string(utf16.Decode(t)))
+}
+
+// jsParseIntJS is the global parseInt (ES2023 19.2.5), r being ToInt32(radix). Twin
+// of jsnParseInt in languages/lib/js-num.js, where the rules are.
+func jsParseIntJS(s string, r int32) float64 {
+	u := utf16.Encode([]rune(s))
+	i := 0
+	for i < len(u) && jsIsWsJS(u[i]) {
+		i++
+	}
+	neg := false
+	if i < len(u) && (u[i] == '+' || u[i] == '-') {
+		neg = u[i] == '-'
+		i++
+	}
+	radix, prefix := int(r), true
+	if radix != 0 {
+		if radix < 2 || radix > 36 {
+			return math.NaN()
+		}
+		prefix = radix == 16
+	} else {
+		radix = 10
+	}
+	if prefix && i+1 < len(u) && u[i] == '0' && (u[i+1] == 'x' || u[i+1] == 'X') {
+		i += 2
+		radix = 16
+	}
+	digit := func(c uint16) int {
+		if c >= 128 || digitValue(byte(c)) < 0 {
+			return 99
+		}
+		return digitValue(byte(c))
+	}
+	start := i
+	for i < len(u) && digit(u[i]) < radix {
+		i++
+	}
+	if i == start {
+		return math.NaN()
+	}
+	var v float64
+	switch radix {
+	case 10:
+		v = jsDecValJS(string(utf16.Decode(u[start:i])))
+	case 2, 4, 8, 16, 32:
+		// The first 53 significant bits, then the first dropped bit and whether
+		// any later one is set: one rounding, half to even.
+		nb, exp, rnd, sticky := 0, 0, 0, false
+		for _, c := range u[start:i] {
+			d := digit(c)
+			for p := radix / 2; p >= 1; p /= 2 {
+				bit := 0
+				if d >= p {
+					bit, d = 1, d-p
+				}
+				if nb < 53 {
+					if nb > 0 || bit == 1 {
+						v = v*2 + float64(bit)
+						nb++
+					}
+				} else {
+					if exp == 0 {
+						rnd = bit
+					} else if bit == 1 {
+						sticky = true
+					}
+					exp++
+				}
+			}
+		}
+		if rnd == 1 && (sticky || math.Mod(v, 2) == 1) {
+			v++
+		}
+		if exp > 0 {
+			v *= math.Pow(2, float64(exp))
+		}
+	default:
+		// The explicit float64() keeps Go from fusing the multiply-add (manual
+		// chapter 4), which the other engines do not.
+		for _, c := range u[start:i] {
+			v = float64(v*float64(radix)) + float64(digit(c))
+		}
+	}
+	if neg {
+		return -v
+	}
+	return v
 }
 
 // jsParseFloatJS is the global parseFloat (ES2023 19.2.4). Twin of jsnParseFloat in

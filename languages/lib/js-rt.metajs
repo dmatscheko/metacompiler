@@ -5014,6 +5014,10 @@ function js_jsnumberfn() {
 function js_jsparsefloatfn() {
     return function (v) { return jsnParseFloat(jvStr(v)) }
 }
+// The parseInt global, the same way.
+function js_jsparseintfn() {
+    return function (v, r) { return jsnParseInt(jvStr(v), jvToNumber(r) | 0) }
+}
 
 // Unary '+' is the ONE operator a BigInt refuses outright: there is no number
 // to coerce it to without losing precision.
