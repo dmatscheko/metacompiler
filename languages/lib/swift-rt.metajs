@@ -1318,12 +1318,10 @@ function js_swidx(c, k) {
     }
     var idx = swNum(k)
     if (rtIsArr(c)) {
-        if (idx < 0) { idx = idx + c.length }
         if (idx < 0 || idx >= c.length) { swAbort("Fatal error: Index out of range") }
         return c[idx]
     }
     if (typeof c == "string") {
-        if (idx < 0) { idx = idx + c.length }
         if (idx < 0 || idx >= c.length) { swAbort("Fatal error: String index is out of bounds") }
         return c.charAt(idx)
     }
@@ -1367,6 +1365,12 @@ function js_swdset(c, k, v) {
         keys.pop()
         vals.pop()
         return undefined
+    }
+    // An Array element write is in range or a trap, like the read: Swift never
+    // grows an array through its subscript.
+    if (rtIsArr(c)) {
+        var ai = swNum(k)
+        if (ai < 0 || ai >= c.length) { swAbort("Fatal error: Index out of range") }
     }
     return js_pyset(c, k, v)
 }

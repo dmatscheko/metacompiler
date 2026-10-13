@@ -2458,6 +2458,18 @@
             "program": "${workspaceFolder}","args": ["languages/swift-to-llvm-ir.abnf", "tests/swift-abort-test.swift", "-q", "-exe", "tests/swift-abort-index.out"]
         },
         {
+            "name": "Swift abort probe, array element write out of range (interpreter, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/swift-interpreter.abnf", "tests/swift-abort-test-write.swift", "-q"]
+        },
+        {
+            "name": "Swift abort probe, array element write out of range, native binary SHOULD ABORT, ALL HALVES (interpreter vs llvm.Run vs native)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/swift-to-llvm-ir.abnf", "tests/swift-abort-test-write.swift", "-q", "-exe", "tests/swift-abort-write.out"]
+        },
+        {
             "name": "Swift abort probe, uncaught throw (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",

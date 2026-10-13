@@ -1605,6 +1605,13 @@ func init() {
 				}
 				return 0
 			}
+			// An Array element write is in range or a trap, like the read:
+			// Swift never grows an array through its subscript.
+			if arr, ok := u(a[0]).(*jsArray); ok {
+				if idx := int(giVal(rt, u(a[1]))); idx < 0 || idx >= len(arr.elems) {
+					rt.swAbort("Fatal error: Index out of range")
+				}
+			}
 			return basePyset(a)
 		}
 		// `x!`: an Optional IS its value in this model, so only nil traps. Twin
@@ -1647,18 +1654,12 @@ func init() {
 			switch o := base.(type) {
 			case *jsArray:
 				idx := int(rt.toNumber(u(a[1])))
-				if idx < 0 {
-					idx += len(o.elems)
-				}
 				if idx < 0 || idx >= len(o.elems) {
 					rt.swAbort("Fatal error: Index out of range")
 				}
 			case string:
 				idx := int(rt.toNumber(u(a[1])))
 				n := rt.strLen(o)
-				if idx < 0 {
-					idx += n
-				}
 				if idx < 0 || idx >= n {
 					rt.swAbort("Fatal error: String index is out of bounds")
 				}

@@ -3789,7 +3789,6 @@ KwContinue  = "continue" KwEnd ;
         }
         if (typeof o == "string") {
             var si = szNum(i)
-            if (si < 0) { si += o.length }
             if (si < 0 || si >= o.length) { swIndexFail("string") }
             return o.charAt(si)
         }
@@ -3797,7 +3796,6 @@ KwContinue  = "continue" KwEnd ;
         // NOT guarded on Array.isArray: an object with numeric slots (a tuple) is
         // indexable here and the length test below is inert for it.
         var ai = szNum(i)
-        if (ai < 0) { ai += o.length }
         if (ai < 0 || ai >= o.length) { swIndexFail("array") }
         return o[ai]
     }
@@ -3815,9 +3813,11 @@ KwContinue  = "continue" KwEnd ;
         }
         if (isDict(o)) { dictSet(o, k, v); return }
         if (o === null || o === undefined) { fail("assignment into nil") }
+        // An Array element write is in range or a trap, like the read: Swift
+        // never grows an array through its subscript.
         if (Array.isArray(o)) {
-            var i = k
-            if (i < 0) { i += o.length }
+            var i = szNum(k)
+            if (i < 0 || i >= o.length) { swIndexFail("array") }
             o[i] = v
             return
         }
