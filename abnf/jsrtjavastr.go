@@ -1052,6 +1052,42 @@ func (rt *jsrt) jvIsType(v interface{}, t string) bool {
 	return t == "CharSequence" && bn == "String"
 }
 
+// jvPrimZero is the zero of the primitive type named n, nil for a reference type.
+func jvPrimZero(n string) interface{} {
+	switch n {
+	case "int":
+		return float64(0)
+	case "long":
+		return jvBox(0)
+	case "short":
+		return jsGInt{w: 16}
+	case "byte":
+		return jsGInt{w: 8}
+	case "char":
+		return jsChar{}
+	case "boolean":
+		return false
+	case "double":
+		return jsJFlo{}
+	case "float":
+		return jsJFlo{sty: floJavaF}
+	}
+	return nil
+}
+
+// jvArrOfDesc is the binary name of an array of the class named comp.
+func jvArrOfDesc(comp string) string {
+	for c, p := range map[byte]string{'I': "int", 'J': "long", 'S': "short", 'B': "byte", 'F': "float", 'D': "double", 'C': "char", 'Z': "boolean"} {
+		if p == comp {
+			return "[" + string(c)
+		}
+	}
+	if strings.HasPrefix(comp, "[") {
+		return "[" + comp
+	}
+	return "[L" + comp + ";"
+}
+
 // jvClassNameOf is v.getClass().getName() of a non-null value. Twin of
 // jxkClass in java-interpreter.abnf and languages/lib/java-rt.metajs.
 func jvClassNameOf(v interface{}) string {
@@ -1123,7 +1159,13 @@ func init() {
 		}
 		slot("getName", func(self *jsObject) string { return rt.toString(self.props["__cname"]) })
 		slot("getSimpleName", func(self *jsObject) string { return rt.toString(self.props["__csimple"]) })
-		slot("toString", func(self *jsObject) string { return "class " + rt.toString(self.props["__cname"]) })
+		slot("toString", func(self *jsObject) string {
+			n := rt.toString(self.props["__cname"])
+			if jvPrimZero(n) != nil {
+				return n
+			}
+			return "class " + n
+		})
 		classObjs := map[string]*jsObject{}
 		classOf := func(name, simple string) *jsObject {
 			if c, ok := classObjs[name]; ok {
@@ -1137,6 +1179,52 @@ func init() {
 			return c
 		}
 		lang := func(simple string) *jsObject { return classOf("java.lang."+simple, simple) }
+		// Class#getComponentType and java.lang.reflect.Array.newInstance. Twin
+		// of getComponentType / hostGlobals["Array"] in java-interpreter.abnf
+		// and jvClassOf / js_jvreflarray in languages/lib/java-rt.metajs.
+		classCls.set("getComponentType", jsHostFunc("getComponentType", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			self, _ := argAt(args, 0).(*jsObject)
+			n := rt.toString(self.props["__cname"])
+			if !strings.HasPrefix(n, "[") {
+				return jsNull
+			}
+			simple := strings.TrimSuffix(jxArraySimple(n), "[]")
+			switch n[1] {
+			case 'L':
+				return classOf(n[2:len(n)-1], simple)
+			case '[':
+				return classOf(n[1:], simple)
+			}
+			return classOf(simple, simple)
+		}))
+		reflArray := newJSObject()
+		reflArray.set("newInstance", jsHostFunc("newInstance", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			cls, _ := argAt(args, 0).(*jsObject)
+			n := int(jvToLong(rt, argAt(args, 1)))
+			if n < 0 {
+				rt.jvThrowCls(jvNegArrCls, strconv.Itoa(n))
+			}
+			comp := rt.toString(cls.props["__cname"])
+			z := jvPrimZero(comp)
+			if z == nil {
+				z = jsNull
+			}
+			elems := make([]interface{}, n)
+			for i := range elems {
+				elems[i] = z
+			}
+			return &jsArray{elems: elems, kind: jvArrTagKind(jvArrOfDesc(comp))}
+		}))
+		m["js_jvreflarray"] = func(a []uint64) uint64 { return w(reflArray) }
+		// Is v an array of references (an Object[], a String[], an int[][])?
+		m["js_jvrefarr"] = func(a []uint64) uint64 {
+			if arr, ok := u(a[0]).(*jsArray); ok {
+				if t := jvpArrayTag(arr); t[1] == 'L' || t[1] == '[' {
+					return jsHTrue
+				}
+			}
+			return jsHFalse
+		}
 		m["js_jvgetclass"] = func(a []uint64) uint64 {
 			if bn := jvBoxName(u(a[0])); bn != "" {
 				return w(lang(bn))

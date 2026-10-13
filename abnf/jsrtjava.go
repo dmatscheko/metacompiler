@@ -25,12 +25,10 @@ package abnf
 //     the SAME program, so no assertion can ever depend on the digits; what the two
 //     halves DO have to agree on is that the same object renders the same way twice
 //     and that a program's output is reproducible, which a counter gives.
-//   - An array created with a declared type other than a one-dimensional
-//     Object[] carries that type (js_jvarrtag). Any other array's ELEMENT TYPE is
-//     inferred from the elements: plain number -> [I, boxed double -> [D, String
-//     -> [Ljava.lang.String;, boolean -> [Z, char -> [C, and empty or mixed ->
-//     [Ljava.lang.Object;. So `Object[] o = {1, 2}` renders as `[I@...` where
-//     real java says `[Ljava.lang.Object;@...`.
+//   - An array created with a declared type carries that type (js_jvarrtag).
+//     Any other array's ELEMENT TYPE is inferred from the elements: plain number
+//     -> [I, boxed double -> [D, String -> [Ljava.lang.String;, boolean -> [Z,
+//     char -> [C, and empty or mixed -> [Ljava.lang.Object;.
 //   - `Object#toString` IS a callable member: `b.toString()` on a class that
 //     declares none routes to js_jvstr, the same rendering println / `+` /
 //     String.valueOf use, and `b.equals(o)` routes to js_jvaleq. Both dispatch to a

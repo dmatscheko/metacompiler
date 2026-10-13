@@ -67,12 +67,9 @@ function jElemTy(ty) {
 }
 // The binary name java.lang.Class#getName gives the array type ty, which an
 // array created with that type carries (jArrTag in each grammar):
-// "String[][]" is "[[Ljava.lang.String;", "Main.P[]" is "[LMain$P;". "" when
-// ty is no array type or names no type this program knows, and for a
-// one-dimensional Object[]: lib/java-util.java builds every array it hands
-// back as one, whatever the caller's type was, so the element-type inference
-// of an untagged array stays the better answer there. Read once every class is
-// declared, and memoized.
+// "String[][]" is "[[Ljava.lang.String;", "Main.P[]" is "[LMain$P;", a type
+// variable's array its erasure's. "" when ty is no array type or names no type
+// this program knows. Read once every class is declared, and memoized.
 var jArrDescs = {}
 var jPrimDescs = {"$int": "I", "$long": "J", "$short": "S", "$byte": "B", "$char": "C",
                   "$float": "F", "$double": "D", "$boolean": "Z"}
@@ -90,11 +87,12 @@ function jArrDesc(ty) {
         var from = 0
         for (var i = 0; i < t.length; i++) { if (t.charAt(i) == ".") { from = i + 1 } }
         var simple = t.substring(from)
+        var er = jTyVarErasure(simple)
+        if (er != "") { simple = er }
         var bin = jBinName["$" + simple]
         if (jPrimDescs["$" + t] != undefined) { d = dims + jPrimDescs["$" + t] }
-        else if (jLangStatics["$" + simple] != undefined) { d = dims + "Ljava.lang." + simple + ";" }
+        else if (jLangStatics["$" + simple] != undefined || simple == "Object") { d = dims + "Ljava.lang." + simple + ";" }
         else if (bin != undefined) { d = dims + "L" + bin + ";" }
-        if (d == "[Ljava.lang.Object;") { d = "" }
     }
     jArrDescs["$" + ty] = d
     return d

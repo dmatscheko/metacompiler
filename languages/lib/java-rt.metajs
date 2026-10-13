@@ -1977,7 +1977,11 @@ function jvClassOf(name, simple) {
         cc["__bname"] = "java.lang.Class"
         cc["getName"] = function(self) { return self["__cname"] }
         cc["getSimpleName"] = function(self) { return self["__csimple"] }
-        cc["toString"] = function(self) { return "class " + self["__cname"] }
+        cc["toString"] = function(self) {
+            if (jvPrimZero(self["__cname"]) !== undefined) { return self["__cname"] }
+            return "class " + self["__cname"]
+        }
+        cc["getComponentType"] = function(self) { return jvComponent(self["__cname"]) }
         jvClassCls = cc
     }
     var key = "$" + name
@@ -1991,6 +1995,69 @@ function jvClassOf(name, simple) {
     return c
 }
 function jvLangClass(simple) { return jvClassOf("java.lang." + simple, simple) }
+// Class#getComponentType and java.lang.reflect.Array.newInstance. Twin of
+// getComponentType / js_jvreflarray in abnf/jsrtjavastr.go.
+function jvComponent(n) {
+    if (n.charAt(0) != "[") { return null }
+    var simple = jvArraySimple(n)
+    simple = simple.substring(0, simple.length - 2)
+    var c = n.charAt(1)
+    if (c == "L") { return jvClassOf(n.substring(2, n.length - 1), simple) }
+    if (c == "[") { return jvClassOf(n.substring(1), simple) }
+    return jvClassOf(simple, simple)
+}
+var jvReflArray = undefined
+function js_jvreflarray() {
+    if (jvReflArray === undefined) {
+        var o = {}
+        o["newInstance"] = function(cls, len) {
+            var n = jvI(len)
+            if (n < 0) { jvThrowCls(jvNegArrCls, "" + n) }
+            var comp = cls["__cname"]
+            var z = jvPrimZero(comp)
+            if (z === undefined) { z = null }
+            var a = []
+            var i = 0
+            while (i < n) {
+                a.push(z)
+                i = i + 1
+            }
+            return js_jvarrtag(a, jvArrOfDesc(comp))
+        }
+        jvReflArray = o
+    }
+    return jvReflArray
+}
+// The zero of the primitive type named n, undefined for a reference type.
+function jvPrimZero(n) {
+    if (n == "int") { return 0 }
+    if (n == "long") { return jvNarrow(0, 64) }
+    if (n == "short") { return sint(0, 0, 16, 0) }
+    if (n == "byte") { return sint(0, 0, 8, 0) }
+    if (n == "char") { return jvChar(0) }
+    if (n == "boolean") { return false }
+    if (n == "double") { return flo(0, 0) }
+    if (n == "float") { return flo(0, 3) }
+    return undefined
+}
+// The binary name of an array of the class named comp.
+function jvArrOfDesc(comp) {
+    var letters = "IJSBFDCZ"
+    var names = ["int", "long", "short", "byte", "float", "double", "char", "boolean"]
+    var i = 0
+    while (i < 8) {
+        if (names[i] == comp) { return "[" + letters.charAt(i) }
+        i = i + 1
+    }
+    if (comp.charAt(0) == "[") { return "[" + comp }
+    return "[L" + comp + ";"
+}
+// Is v an array of references (an Object[], a String[], an int[][])?
+function js_jvrefarr(v) {
+    if (!Array.isArray(v)) { return false }
+    var c = jpArrayTag(v).charAt(1)
+    return c == "L" || c == "["
+}
 // An array's simple name from its binary name: [I is int[], [[LMain$1P; is
 // P[][] (a nested or local class goes by its own name). Twin of jxArraySimple
 // in abnf/jsrtjavastr.go and jArraySimple in java-interpreter.abnf.

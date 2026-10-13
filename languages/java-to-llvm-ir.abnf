@@ -4536,13 +4536,18 @@ HasStatic   = :script(~~
         var doneB = curF.NewBlock("")
         b.NewCondBr(truthy(b, callExt(b, "js_seq", [lenV, emitNum(b, startIdx + 1)])), chkB, collB)
         var soleV = callExt(chkB, "js_arg", [argsP, handle(startIdx)])
-        chkB.NewCondBr(truthy(chkB, callExt(chkB, "js_is_type", [soleV, emitStr(chkB, "Array")])), passB, collB)
+        // A primitive array given to a reference varargs parameter is one
+        // element (an int[] to Object...).
+        var takesV = jOvIsPrim(ety) || ety == "" ? callExt(chkB, "js_is_type", [soleV, emitStr(chkB, "Array")])
+                                                 : callExt(chkB, "js_jvrefarr", [soleV])
+        chkB.NewCondBr(truthy(chkB, takesV), passB, collB)
         callExt(passB, "js_scope_set", [curScopeV, emitStr(passB, name),
                                         callExt(passB, "js_arg", [argsP, handle(startIdx)])])
         passB.NewBr(doneB)
         vaCount++
         var iName = "$va" + vaCount
         callExt(collB, "js_scope_decl", [curScopeV, emitStr(collB, iName), emitNum(collB, startIdx)])
+        jEmitArrTag(collB, callExt(collB, "js_scope_get", [curScopeV, nameV]), ety + "[]")
         var headB = curF.NewBlock("")
         var bodyB = curF.NewBlock("")
         collB.NewBr(headB)
@@ -4617,8 +4622,12 @@ HasStatic   = :script(~~
             jLoadLib("lib/java-stream.java", "java.util.stream.")
         }
     }
+    // java.lang.reflect.Array, whose newInstance lib/java-util.java's
+    // copyOf and toArray build a typed array with.
+    var jUsesReflArray = false
     function jImport(path, pos) {
         var ip = stripWs(path)
+        if (ip == "java.lang.reflect.Array" || ip == "java.lang.reflect.*") { jUsesReflArray = true }
         jLoadLibs(jUtilWants(ip), jMapWants(ip), jStreamWants(ip))
         resolveImport(path, pos)
     }
@@ -5754,6 +5763,9 @@ HasStatic   = :script(~~
         for (var jb = 0; jb < jvBoxTypes.length; jb++) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, jvBoxTypes[jb]),
                                          callExt(b, "js_jvboxtype", [emitStr(b, jvBoxTypes[jb])])])
+        }
+        if (jUsesReflArray && userDeclared["$Array"] != true) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Array"), callExt(b, "js_jvreflarray", [])])
         }
         b = emitBuiltinExc(b)
         // A member read or write on null is a NullPointerException with a null

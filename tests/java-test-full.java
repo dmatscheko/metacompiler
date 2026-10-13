@@ -35,6 +35,7 @@
 // code), organized after the Java Language Specification (SE 21) with the
 // ANTLR grammars-v4 java grammar as a coverage checklist.
 
+import java.lang.reflect.Array;
 import java.util.AbstractList;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -132,6 +133,7 @@ class Main {
         S62.run(); // SECTION-CALL 62
         S63.run(); // SECTION-CALL 63
         S64.run(); // SECTION-CALL 64
+        S65.run(); // SECTION-CALL 65
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -3684,5 +3686,35 @@ class S64 {
             + "0x0.00000000007e8p-1022 0x1.0p-1063 0X0.00000000007E8P-1022|-0x1.5555555555555p-2 -0x1.5p-2 -0X1.5555555555555P-2|"
             + "0x1.08p0 0x1.0p0 0X1.08P0|0x1.18p0 0x1.2p0 0X1.18P0|"));
         Main.check("fh64", String.format("%h %H %#.0f %#.0e %.2s", "hi", 255, 2.5, 2.5, null).equals("d01 FF 3. 3.e+00 nu"));
+    }
+}
+
+// ===== SECTION 65: an Object[] is an Object[], varargs forwarding, Array.newInstance =====
+//
+// An array created as Object[] (a literal, `new Object[n]`, a varargs
+// parameter's collected arguments) is an Object[] whatever it holds, so
+// String.format spreads it as its arguments; a primitive array given to an
+// Object... parameter is one argument. Arrays.copyOf and toArray(T[]) keep
+// the array's own type, through Class.getComponentType and
+// java.lang.reflect.Array.newInstance. Every expected value is java 24.0.2's.
+class S65 {
+    static String g(String fmt, Object... xs) { return String.format(fmt, xs); }
+    static String cls(Object... xs) { return xs.getClass().getName() + xs.length; }
+    static void run() {
+        Object[] one = {3};
+        Main.check("va65", String.format("%s", one).equals("3") && g("%d", 8).equals("8") && g("%s|%s", 8, 9).equals("8|9")
+            && (cls() + cls(1, 2) + cls(new int[]{4, 5}) + cls(new String[]{"a"})).equals("[Ljava.lang.Object;0[Ljava.lang.Object;2[Ljava.lang.Object;1[Ljava.lang.String;1")
+            && new Object[]{"a"}.getClass().getName().equals("[Ljava.lang.Object;") && one.getClass().getName().equals("[Ljava.lang.Object;"));
+        String[] s = {"x", "y"};
+        int[] ia = {1, 2};
+        List<String> l = new ArrayList<>(List.of("p", "q"));
+        Object made = Array.newInstance(s.getClass().getComponentType(), 2);
+        Main.check("ct65", Arrays.copyOf(s, 3).getClass().getName().equals("[Ljava.lang.String;")
+            && Arrays.toString(Arrays.copyOfRange(s, 1, 3)).equals("[y, null]")
+            && l.toArray().getClass().getName().equals("[Ljava.lang.Object;")
+            && l.toArray(new String[0]).getClass().getName().equals("[Ljava.lang.String;")
+            && Arrays.toString(l.toArray(new String[3])).equals("[p, q, null]")
+            && (s.getClass().getComponentType().getName() + " " + ia.getClass().getComponentType() + " " + "x".getClass().getComponentType()).equals("java.lang.String int null")
+            && made.getClass().getName().equals("[Ljava.lang.String;") && Arrays.toString((Object[]) made).equals("[null, null]"));
     }
 }

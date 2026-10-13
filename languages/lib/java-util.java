@@ -9,6 +9,8 @@
 // of the backing array are not observable.
 package java.util;
 
+import java.lang.reflect.Array;
+
 interface Iterator<E> {
     boolean hasNext();
     E next();
@@ -222,6 +224,15 @@ class ArrayList<E> implements List<E> {
     public Object[] toArray() {
         Object[] out = new Object[count];
         System.arraycopy(elems, 0, out, 0, count);
+        return out;
+    }
+    // Into a, or a new array of a's type when a is too short; the slot after
+    // the last element is set to null.
+    @SuppressWarnings("unchecked")
+    public <T> T[] toArray(T[] a) {
+        T[] out = a.length >= count ? a : (T[]) Array.newInstance(a.getClass().getComponentType(), count);
+        System.arraycopy(elems, 0, out, 0, count);
+        if (out.length > count) { out[count] = null; }
         return out;
     }
     public Iterator<E> iterator() { return new ArrayListItr<E>(this); }
@@ -487,12 +498,14 @@ class Arrays {
         System.arraycopy(src, from, dst, 0, Math.min(length - from, to - from));
         return dst;
     }
+    // A new array of a's own type: copyOf of a String[] is a String[].
+    static Object newLike(Object[] a, int n) { return Array.newInstance(a.getClass().getComponentType(), n); }
     static int span(int from, int to) {
         if (from > to) { throw new IllegalArgumentException(from + " > " + to); }
         return to - from;
     }
     @SuppressWarnings("unchecked")
-    public static <T> T[] copyOf(T[] a, int n) { return (T[]) copyInto(a, a.length, 0, n, new Object[n]); }
+    public static <T> T[] copyOf(T[] a, int n) { return (T[]) copyInto(a, a.length, 0, n, newLike(a, n)); }
     public static int[] copyOf(int[] a, int n) { return (int[]) copyInto(a, a.length, 0, n, new int[n]); }
     public static long[] copyOf(long[] a, int n) { return (long[]) copyInto(a, a.length, 0, n, new long[n]); }
     public static double[] copyOf(double[] a, int n) { return (double[]) copyInto(a, a.length, 0, n, new double[n]); }
@@ -502,7 +515,7 @@ class Arrays {
     public static char[] copyOf(char[] a, int n) { return (char[]) copyInto(a, a.length, 0, n, new char[n]); }
     public static boolean[] copyOf(boolean[] a, int n) { return (boolean[]) copyInto(a, a.length, 0, n, new boolean[n]); }
     @SuppressWarnings("unchecked")
-    public static <T> T[] copyOfRange(T[] a, int from, int to) { return (T[]) copyInto(a, a.length, from, to, new Object[span(from, to)]); }
+    public static <T> T[] copyOfRange(T[] a, int from, int to) { return (T[]) copyInto(a, a.length, from, to, newLike(a, span(from, to))); }
     public static int[] copyOfRange(int[] a, int from, int to) { return (int[]) copyInto(a, a.length, from, to, new int[span(from, to)]); }
     public static long[] copyOfRange(long[] a, int from, int to) { return (long[]) copyInto(a, a.length, from, to, new long[span(from, to)]); }
     public static double[] copyOfRange(double[] a, int from, int to) { return (double[]) copyInto(a, a.length, from, to, new double[span(from, to)]); }

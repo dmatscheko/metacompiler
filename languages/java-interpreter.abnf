@@ -3397,9 +3397,8 @@ HasStatic   = :script(~~
     // part of that name. An array created with a declared type carries it
     // (jArrTag); any other's is inferred from the elements: all-int -> [I,
     // all-double -> [D, all-String -> [Ljava.lang.String;, all-boolean -> [Z,
-    // all-char -> [C, and empty or mixed -> [Ljava.lang.Object;. A deliberate
-    // simplification, shared with the compiler half: `Object[] o = {1, 2}`
-    // therefore renders as [I@... where real java writes [Ljava.lang.Object;@...
+    // all-char -> [C, and empty or mixed -> [Ljava.lang.Object;, shared with the
+    // compiler half.
     function jElemTag(e) {
         if (e === undefined || e === null) return ""
         var t = typeof e
@@ -3514,7 +3513,7 @@ HasStatic   = :script(~~
     var jClassCls = {__isclass: true, __name: "Class", __bname: "java.lang.Class"}
     jClassCls.getName = function(self) { return self.__cname }
     jClassCls.getSimpleName = function(self) { return self.__csimple }
-    jClassCls.toString = function(self) { return "class " + self.__cname }
+    jClassCls.toString = function(self) { return (jOvIsPrim(self.__cname) ? "" : "class ") + self.__cname }
     var jClassObjs = {}
     function jClassOf(name, simple) {
         var key = "$" + name
@@ -3524,6 +3523,41 @@ HasStatic   = :script(~~
         return c
     }
     function jLangClass(simple) { return jClassOf("java.lang." + simple, simple) }
+    // Class#getComponentType: an array class's element class, null for any
+    // other; and java.lang.reflect.Array.newInstance(c, n), a new c[n] of
+    // c's zeros. A primitive class is named by its keyword ("int"). Twins:
+    // getComponentType and js_jvnewarray in abnf/jsrtjavastr.go and
+    // languages/lib/java-rt.metajs.
+    jClassCls.getComponentType = function(self) {
+        var n = self.__cname
+        if (n.charAt(0) != "[") { return null }
+        var simple = jArraySimple(n)
+        simple = simple.substring(0, simple.length - 2)
+        var c = n.charAt(1)
+        if (c == "L") { return jClassOf(n.substring(2, n.length - 1), simple) }
+        if (c == "[") { return jClassOf(n.substring(1), simple) }
+        return jClassOf(simple, simple)
+    }
+    hostGlobals["Array"] = {
+        newInstance: function(cls, len) {
+            var n = jNum(len)
+            if (n < 0) { jThrowExc("NegativeArraySizeException", "" + n) }
+            var comp = cls.__cname
+            var z = jZeroOf(comp)
+            var a = []
+            for (var i = 0; i < n; i++) { a.push(z) }
+            return jArrTag(a, jArrOfDesc(comp))
+        }
+    }
+    // The binary name of an array of the class named comp.
+    function jArrOfDesc(comp) {
+        var letters = "IJSBFDCZ"
+        for (var i = 0; i < letters.length; i++) {
+            if (jAcNames[letters.charAt(i)] == comp) { return "[" + letters.charAt(i) }
+        }
+        if (comp.charAt(0) == "[") { return "[" + comp }
+        return "[L" + comp + ";"
+    }
     // An array's simple name from its binary name: [I is int[], [[LMain$1P; is
     // P[][] (a nested or local class goes by its own name). Twin of
     // jxArraySimple in abnf/jsrtjavastr.go and jvArraySimple in
@@ -5364,22 +5398,30 @@ HasStatic   = :script(~~
         return {params: names, ptys: tys, vararg: isVar}
     }
     // Reshapes a call's arguments for a varargs parameter: the trailing ones are
-    // collected into an array, unless the call already passes exactly one array
-    // there (sumV(given) forwards the array itself, as Java does).
-    // The collected elements convert to the varargs ELEMENT type ety.
-    function jFixVarargs(isVar, np, args, ety) {
+    // collected into an array of the parameter's type, unless the call already
+    // passes exactly one array there that the parameter takes (sumV(given)
+    // forwards the array itself, as Java does; an int[] given to Object... is
+    // one element). The collected elements convert to ety; vty is the declared
+    // element type. Twin of emitVarargs in java-to-llvm-ir.abnf.
+    function jFixVarargs(isVar, np, args, ety, vty) {
         if (!isVar || np == 0) { return args }
         var out = []
         var i
         for (i = 0; i < np - 1; i++) { out.push(i < args.length ? args[i] : undefined) }
-        if (args.length == np && Array.isArray(args[np - 1])) {
-            out.push(args[np - 1])
+        var last = args[np - 1]
+        if (args.length == np && Array.isArray(last) && (jOvIsPrim(vty) || jIsRefArray(last))) {
+            out.push(last)
             return out
         }
         var rest = []
         for (i = np - 1; i < args.length; i++) { rest.push(jConvTo(args[i], ety)) }
-        out.push(rest)
+        out.push(jArrTag(rest, jArrDesc(vty + "[]")))
         return out
+    }
+    // Is a an array of references (an Object[], a String[], an int[][])?
+    function jIsRefArray(a) {
+        var c = jArrayTag(a).charAt(1)
+        return c == "L" || c == "["
     }
     // A call's arguments, shaped for varargs and converted to the declared
     // parameter types of m (a method or constructor record).
@@ -5392,9 +5434,10 @@ HasStatic   = :script(~~
             conv = m.ptys != undefined && jNeedsConv(m.ptys)
             if (jWalkDone) { m.conv = conv }
         }
-        if (!conv) { return jFixVarargs(m.vararg, np, args, "") }
+        var vty = m.vararg && m.ptys != undefined ? m.ptys[np - 1] : ""
+        if (!conv) { return jFixVarargs(m.vararg, np, args, "", vty) }
         var tys = jMethodBoundTys(m)
-        var a = jFixVarargs(m.vararg, np, args, np > 0 ? tys[np - 1] : "")
+        var a = jFixVarargs(m.vararg, np, args, np > 0 ? tys[np - 1] : "", vty)
         var n = m.vararg ? np - 1 : np
         for (var i = 0; i < n && i < a.length; i++) { a[i] = jConvTo(a[i], tys[i]) }
         return a
