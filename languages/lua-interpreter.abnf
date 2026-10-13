@@ -1923,7 +1923,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return function() {
             var v = anytype
             v = luaFirst(t())
-            if ((typeof v != "string" && !isTbl(v)) || isLuaFile(v)) { fail("attempt to get length of a " + luaTypeName(v) + " value" + luaOpSfx(0)) }
+            if (typeof v != "string" && luaType(v) != "table") { fail("attempt to get length of a " + luaTypeName(v) + " value" + luaOpSfx(0)) }
             if (isTbl(v)) {
                 var h = anytype
                 h = luaTm(v, "__len")

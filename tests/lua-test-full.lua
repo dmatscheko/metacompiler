@@ -2073,6 +2073,7 @@ function s47()
     local prod = coroutine.wrap(function() for i = 1, 6 do coroutine.yield(i) end end)
     local evens = coroutine.wrap(function() while true do local v = prod(); if v == nil then return end; if v % 2 == 0 then coroutine.yield(v) end end end)
     check("co13", pack(evens(), evens(), evens()), "2 4 6")
+    check("co14", try(function() local th = coroutine.create(print); return #th end), "attempt to get length of a thread value (local 'th')")
 end
 
 -- ===== SECTION 48: utf8 =====
