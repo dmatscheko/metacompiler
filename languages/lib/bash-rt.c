@@ -204,7 +204,9 @@ char *rt_sc_list(char *nm, char *sep, int star, int keys);
 int rt_isposnm(char *nm);
 char *rt_params0(void);
 char *rt_pfxnames(char *p, char *sep, int star);
-int rt_arr_nextidx(char *nm);
+long rt_arr_nextidx(char *nm);
+int rt_arr_iset(char *nm, char *k, char *v);
+char *rt_arr_ikey(char *nm, long k);
 int rt_arr_clear(char *nm);
 int rt_arr_mark(char *nm);
 int rt_arr_dmark(char *nm);
@@ -690,14 +692,6 @@ char *ar_name(void)
     return rt_substr(ar_s, s, ar_p - s);
 }
 
-/* The key an indexed subscript names: a negative index counts back from one past
- * the highest index (`${a[-1]}` is the last element). */
-char *ar_key(char *nm, long k)
-{
-    if (k < 0) k = (long)rt_arr_nextidx(nm) + k;
-    return rt_int2str(k);
-}
-
 /* [ EXPR ] after a name, or 0 when the name has no subscript. */
 char *ar_subscript(char *nm)
 {
@@ -708,7 +702,7 @@ char *ar_subscript(char *nm)
     ar_ws();
     if (ar_at(0) != 93) { ar_err("missing `]'"); return 0; }
     ar_p = ar_p + 1;
-    return ar_key(nm, k);
+    return rt_arr_ikey(nm, k);
 }
 
 /* A variable's value as an operand: empty is 0, anything else is itself an
@@ -728,8 +722,8 @@ long ar_value(char *nm, char *key)
 long ar_store(char *nm, char *key, long v)
 {
     if (ar_noeval > 0) return v;
-    if (key != 0) rt_arr_set(nm, key, rt_int2str(v));
-    else if (rt_arr_count(nm) > 0) rt_arr_set(nm, "0", rt_int2str(v));
+    if (key != 0) rt_arr_iset(nm, key, rt_int2str(v));
+    else if (rt_arr_count(nm) > 0) rt_arr_iset(nm, "0", rt_int2str(v));
     else rt_setvar_byname(nm, rt_int2str(v));
     return v;
 }
@@ -2380,8 +2374,9 @@ int rt_bnd_opened2(int opened, char *f, int lead, int trail) {
 
 /* ---- arrays ---------------------------------------------------------------
  * One flat store of (arrayName, key, value) triples with a linear scan. Keys
- * are strings for both kinds of array; entries stay in INSERTION order, which
- * is also the order ${!a[*]} and ${a[@]} report. NARR = 4096.
+ * are strings for both kinds of array, and the row order is the order ${!a[*]}
+ * and ${a[@]} report: index order for an indexed array (rt_arr_iset), insertion
+ * order for an associative one (rt_arr_set). NARR = 4096.
  */
 char *arr_nm[4096];   /* NEW GLOBAL */
 char *arr_k[4096];    /* NEW GLOBAL */
@@ -2418,6 +2413,102 @@ int rt_arr_set(char *nm, char *k, char *v) {
     arr_v[n] = v;
     arr_n = n + 1;
     return 0;
+}
+
+/* AN INDEXED ARRAY KEEPS ITS ROWS IN INDEX ORDER, the order bash lists ${!a[*]}
+ * and ${a[@]} in whatever order the elements were assigned (a[5]=x; a[2]=y lists
+ * 2 5): a new row goes in front of the first row of the same array with a greater
+ * index. An associative array keeps insertion order (manual 7.9), so its writes and
+ * the store's own marks stay on rt_arr_set. A write to bad_key is dropped. */
+char bad_key[1];
+int rt_arr_iset(char *nm, char *k, char *v) {
+    int at;
+    int n;
+    int pos;
+    int i;
+    long kv;
+    if (k == &bad_key[0]) return 0;
+    at = rt_arr_find(nm, k);
+    if (at >= 0) {
+        arr_v[at] = v;
+        return 0;
+    }
+    n = arr_n;
+    if (n >= 4096) {
+        rt_die("array store", 1, n, 4096);
+    }
+    kv = rt_str2int(k);
+    pos = n;
+    i = 0;
+    while (i < n) {
+        if (rt_streq(nm, arr_nm[i]) != 0 && rt_str2int(arr_k[i]) > kv) {
+            pos = i;
+            break;
+        }
+        i = i + 1;
+    }
+    i = n;
+    while (i > pos) {
+        arr_nm[i] = arr_nm[i - 1];
+        arr_k[i] = arr_k[i - 1];
+        arr_v[i] = arr_v[i - 1];
+        i = i - 1;
+    }
+    arr_nm[pos] = nm;
+    arr_k[pos] = k;
+    arr_v[pos] = v;
+    arr_n = n + 1;
+    return 0;
+}
+
+/* The key an INDEXED subscript's value names: a negative index counts back from
+ * one past the highest one (${a[-1]} is the last element). One still negative
+ * after that is bash's "bad array subscript": reported, and answered with
+ * bad_key, which no element has and rt_arr_iset refuses to write. Twin of
+ * subKey in bash-interpreter.abnf. */
+char *rt_arr_ikey(char *nm, long k) {
+    int saved;
+    if (k < 0) k = rt_arr_nextidx(nm) + k;
+    if (k < 0) {
+        saved = sink_out;
+        sink_out = sink_err;
+        rt_prints("bash: ");
+        rt_prints(nm);
+        rt_prints(": bad array subscript\n");
+        sink_out = saved;
+        return &bad_key[0];
+    }
+    return rt_int2str(k);
+}
+
+/* The key of an indexed subscript's TEXT, an arithmetic expression; "@" and "*"
+ * name the whole array and pass through. */
+char *rt_arr_key(char *nm, char *sub) {
+    if (rt_streq(sub, "@") != 0 || rt_streq(sub, "*") != 0) return sub;
+    return rt_arr_ikey(nm, rt_arith(sub));
+}
+
+/* One [k]=v of an INDEXED array literal. The answer is the index a following bare
+ * word takes, one past k - b=([3]=c [1]=a b) puts b at 2 - or `next` unchanged
+ * when k was a bad subscript. */
+long rt_arr_litkey(char *nm, char *k, char *v, long next) {
+    char *key = rt_arr_key(nm, k);
+    if (key == &bad_key[0]) return next;
+    rt_arr_iset(nm, key, v);
+    return rt_str2int(key) + 1;
+}
+
+/* The fields of a bare word of an INDEXED array literal, stored from index next
+ * on; the answer is the index after the last one. */
+long rt_arr_litwords(char *nm, char *f, long next) {
+    int n = rt_nfields(f);
+    int i = 0;
+    while (i < n) {
+        rt_arr_iset(nm, rt_int2str(next), rt_getfield(f, i));
+        next = next + 1;
+        i = i + 1;
+    }
+    return next;
 }
 
 /* i8* rt_arr_get(i8* nm, i8* k): the value, or "" when absent. */
@@ -2495,13 +2586,14 @@ char *rt_arr_list(char *nm, char *sep, int star, int keys) {
     return out;
 }
 
-/* i32 rt_arr_nextidx(i8* nm): one past the largest numeric key. */
-int rt_arr_nextidx(char *nm) {
+/* rt_arr_nextidx(nm): one past the largest numeric key, 0 for none. */
+long rt_arr_nextidx(char *nm) {
     int n = arr_n;
-    int i = 0, mx = 0;
+    int i = 0;
+    long mx = 0;
     while (i < n) {
         int same = rt_streq(nm, arr_nm[i]) != 0;
-        int kn = rt_str2int(arr_k[i]);
+        long kn = rt_str2int(arr_k[i]);
         int bigger = same && kn >= mx;
         mx = bigger ? kn + 1 : mx;
         i = i + 1;
@@ -3218,13 +3310,56 @@ int rt_arr_append(char *nm, char *f) {
     int n = rt_nfields(f);
     int i = 0;
     while (i < n) {
-        int idx = rt_arr_nextidx(nm);
+        long idx = rt_arr_nextidx(nm);
         char *ks = rt_int2str(idx);
         char *vs = rt_getfield(f, i);
         rt_arr_set(nm, ks, vs);
         i = i + 1;
     }
     return 0;
+}
+
+/* ${a[@]:off:len} on an INDEXED array counts INDICES, not positions: the slice
+ * starts at the first element whose index is >= off (a negative off is relative
+ * to one past the highest index) and takes len elements, all of them when haslen
+ * is 0. bash 5.3 with sp[2]=x sp[5]=y sp[9]=z: ${sp[*]:3} is "y z", ${sp[*]: -4}
+ * is "z". A name with no rows (a scalar, one element at index 0) is sliced by
+ * position, which for it is the same thing. A negative len is bash's "substring
+ * expression < 0". */
+char *rt_arr_slice(char *nm, long off, long len, int haslen, char *sep, int star) {
+    int n = arr_n;
+    int isStar = star != 0;
+    char *out = isStar ? empty : "\002";
+    int i = 0;
+    long taken = 0;
+    if (haslen != 0 && len < 0) {
+        rt_arith_fail(rt_int2str(len), "substring expression < 0", empty);
+        return out;
+    }
+    if (rt_arr_count(nm) == 0) {
+        char *all = rt_sc_list(nm, sep, 0, 0);
+        int cnt = rt_nfields(all);
+        if (off < 0) off = off + cnt;
+        if (off < 0 || off > cnt) return out;
+        if (haslen == 0 || len > cnt) len = cnt;
+        return rt_slicefields(all, (int)off, (int)len, sep, star);
+    }
+    if (off < 0) {
+        off = rt_arr_nextidx(nm) + off;
+        if (off < 0) return out;
+    }
+    while (i < n) {
+        if (rt_streq(nm, arr_nm[i]) != 0 && rt_str2int(arr_k[i]) >= off && (haslen == 0 || taken < len)) {
+            char *cur = out;
+            if (isStar && taken > 0) cur = rt_strcat(cur, sep);
+            cur = rt_strcat(cur, arr_v[i]);
+            if (!isStar) cur = rt_strcat(cur, "\001");
+            out = cur;
+            taken = taken + 1;
+        }
+        i = i + 1;
+    }
+    return out;
 }
 
 /* i8* rt_slicefields(i8* f, i32 off, i32 n, i8* sep, i32 star) */

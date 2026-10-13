@@ -2097,6 +2097,63 @@ s38() {
   check ev6 "$(( n$((1+1)) )) $(( 1 + (2 ? 3 : 4) * 2 ))" "0 7"
 }
 
+# ===== SECTION 39: indexed subscripts are arithmetic; sparse arrays =====
+# An indexed array's subscript is an arithmetic expression, evaluated once, and a negative
+# one counts back from one past the highest index; NAME[SUB] is an operand and an assignment
+# target inside arithmetic too. An indexed array lists in INDEX order, an unindexed element
+# of a literal takes the index after the element before it, and ${a[@]:off:len} counts
+# indices. Every expected value is bash 5.3's.
+s39() {
+  local a=(a0 a1 a2 a3 a4) i=2
+  check ix1 "${a[i]} ${a[i+1]} ${a[$i+1]}" "a2 a3 a3"
+  a[i+2]=W
+  check ix2 "${a[*]}" "a0 a1 a2 a3 W"
+  local nums=(3 4 5) m=(1 2 3) p=1
+  (( m[p]++ ))
+  check ix3 "sum=$(( nums[0] + nums[2] )) ${m[*]}" "sum=8 1 3 3"
+  local b=(p q r s)
+  check ix4 "[${b[-1]}] [${b[-2]}]" "[s] [r]"
+  b[-1]=S
+  check ix5 "${!b[*]} = ${b[*]}" "0 1 2 3 = p q r S"
+  local c=(x y)
+  c[i++]=Z
+  check ix6 "i=$i ${!c[*]} ${c[*]} [${c[i--]}] i=$i" "i=3 0 1 2 x y Z [] i=2"
+  local -A h
+  h[foo]=3
+  h[i+1]=7
+  check ix7 "$(( h[foo] + 1 )) ${!h[*]}" "4 foo i+1"
+  local f=(5 6 7) g=(5 6 7) k=(9 8 7) q=() s=(1 2 3) x=5
+  unset 'f[-1]'
+  [[ -v g[-1] ]]; local vr=$?
+  (( q[3] = 4, q[1] += 2 ))
+  check ix8 "${!f[*]} $vr ${#k[-1]} ${k[*]: -1} ${!q[*]} ${q[*]}" "0 1 0 1 7 1 3 2 4"
+  check ix9 "$(( s[1] * s[2] )) $(( s )) $(( x[0] + 1 ))" "6 1 6"
+  local e=() sp=()
+  e[5]=x
+  e[2]=y
+  check sp1 "${!e[*]} = ${e[*]}" "2 5 = y x"
+  local l1=([3]=c [1]=a b) l2=([2]=x [2]=y z) l3=(1 2 3)
+  l3+=([7]=q r)
+  check sp2 "${!l1[*]} = ${l1[*]} / ${!l2[*]} = ${l2[*]} / ${!l3[*]} = ${l3[*]}" "1 2 3 = a b c / 2 3 = y z / 0 1 2 7 8 = 1 2 3 q r"
+  sp[2]=x
+  sp[5]=y
+  sp[9]=z
+  check sp3 "[${sp[*]:3}] [${sp[*]:1:1}] [${sp[*]: -4}] [${sp[*]:5:2}]" "[y z] [x] [z] [y z]"
+  check sp7 "$(printf '<%s>' "${sp[@]:5}" "${sp[@]:3:1}")" "<y><z><y>"
+  check sp4 "[${sp[*]:0:2}] [${sp[*]:9}] [${sp[*]:10}] [${sp[*]: -1}] [${sp[*]: -20}]" "[x y] [z] [] [z] []"
+  local l4=(a b c) l5=() l6=() l7=(x y z)
+  l4=([5]=x "${l4[@]}")
+  l5[10]=a
+  l5[3]=b
+  l5+=(c)
+  i=1
+  l6=([010]=x [0x10]=y [1+1]=z [i+3]=w)
+  unset 'l7[1]'
+  l7+=(w)
+  check sp5 "${!l4[*]} = ${l4[*]} / ${!l5[*]} = ${l5[*]}" "5 6 7 8 = x a b c / 3 10 11 = b a c"
+  check sp6 "${!l6[*]} = ${l6[*]} / ${!l7[*]} = ${l7[*]}" "2 4 8 16 = z w x y / 0 2 3 = x z w"
+}
+
 s01   # SECTION-CALL 01
 s02   # SECTION-CALL 02
 s03   # SECTION-CALL 03
@@ -2135,5 +2192,6 @@ s35   # SECTION-CALL 35
 s36   # SECTION-CALL 36
 s37   # SECTION-CALL 37
 s38   # SECTION-CALL 38
+s39   # SECTION-CALL 39
 echo "full: $checks checks, $fails failures"
 exit $fails

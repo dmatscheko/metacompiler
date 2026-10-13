@@ -496,7 +496,13 @@ ArgDigit    = "0"..."9" ;
 ArList      <~~ push(foldComma(takeAll())) ~~> = ArAssign { "," ArAssign } ;
 ArAssign    = ArAssignForm | ArCond ;
 ArAssignForm <~~ push(mkArAssign(takeAll())) ~~> = ArLhs ArAsgOp ArAssign ;
-ArLhs       <~~ push({lhs: up.in}) ~~> = ArName ;
+// NAME[SUBSCRIPT] is an array element, an operand and an assignment target alike. Twin of
+// ArLhs / ArElem in bash-interpreter.abnf.
+ArLhs       = ArLhsElem | ArLhsName ;
+ArLhsElem   <~~ push(mkArLhs(takeAll())) ~~> = ArElemName "[" IdxWord "]" ;
+ArElemName  <~~ push({lhs: up.in}) ~~> = ArName ;
+ArLhsName   <~~ push({lhs: up.in}) ~~> = ArName ;
+ArElem      <~~ push(mkArElem(takeAll())) ~~> = ArElemName "[" IdxWord "]" ;
 ArAsgOp     <~~ push({aop: up.in}) ~~>
             = "+=" | "-=" | "*=" | "/=" | "%=" | "<<=" | ">>=" | "&=" | "^=" | "|=" | ArPlainAsg ;
 ArPlainAsg  = "=" NotEq ;
@@ -534,7 +540,7 @@ ArNot       <~~ push(mkUn("!", pop())) ~~> = "!" NotEq ArUnary ;
 ArBnot      <~~ push(mkUn("~", pop())) ~~> = "~" ArUnary ;
 
 // A $-prefixed operand (Bash expands it before evaluating): $name, $1..$9, $# and $?.
-ArPrimary   = ArGroup | ArBaseDyn | ArNum | ArPostInc | ArCmdSub | ArDollarDigit | ArDollarHash | ArDollarQ | ArDollarVar | ArDollarBrace | ArVar ;
+ArPrimary   = ArGroup | ArBaseDyn | ArNum | ArPostInc | ArCmdSub | ArDollarDigit | ArDollarHash | ArDollarQ | ArDollarVar | ArDollarBrace | ArElem | ArVar ;
 ArGroup     = "(" ArList ")" ;
 ArPostInc   <~~ push(mkIncDec(takeAll())) ~~> = ArLhs ArPostOp ;
 ArPostOp    <~~ push({iop: up.in, pre: 0}) ~~> = "++" | "--" ;
@@ -1320,7 +1326,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtKvp = rtDecl("rt_kvp", true, [1, 1, 0])
     var rtAttrf = rtDecl("rt_attrf", true, [1, 1, 1, 0])
     var rtPrompt = rtDecl("rt_prompt", true, [1])
-    var rtArrNext = rtDecl("rt_arr_nextidx", false, [1])
+    var rtArrNext = rtDecl("rt_arr_nextidx", 3, [1])
+    // The indexed-array quartet: rt_arr_iset keeps index order, rt_arr_key evaluates a
+    // subscript's text (negative from the end), the literal helpers carry bash's next-index
+    // rule, and rt_arr_slice slices by index.
+    var rtArrIset = rtDecl("rt_arr_iset", false, [1, 1, 1])
+    var rtArrKey = rtDecl("rt_arr_key", true, [1, 1])
+    var rtArrIkey = rtDecl("rt_arr_ikey", true, [1, 3])
+    var rtArrLitKey = rtDecl("rt_arr_litkey", 3, [1, 1, 1, 3])
+    var rtArrLitWords = rtDecl("rt_arr_litwords", 3, [1, 1, 3])
+    var rtArrSlice = rtDecl("rt_arr_slice", true, [1, 3, 3, 0, 1, 0])
     var rtArrClear = rtDecl("rt_arr_clear", false, [1])
     var rtArrMark = rtDecl("rt_arr_mark", false, [1])
     var rtArrDmark = rtDecl("rt_arr_dmark", false, [1])
@@ -1584,20 +1599,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             wordT = (words.length > 0) ? words[words.length - 1] : null
             var isAssoc = hasOwn(assocArrays, "$" + name)
             var nmOf = function(b) { return gepStr(b, name) }
-            var subOf = function(b) {
-                var r = evalWord(b, idxW)
-                var sub = r.v
-                return {b: r.b, v: sub}
-            }
+            // The subscript, and the key it names: an associative array's is the text, an
+            // indexed array's an arithmetic expression (rt_arr_key; a canonical literal index
+            // needs no evaluation). Computed ONCE per expansion, so `${a[i++]}` steps i once.
+            var subOf = function(b) { return subKeyOf(b, name, idxW) }
             var kindOf = function(b, sub) {
                 // 0 = a plain key, 1 = "@" (fields), 2 = "*" (joined)
                 var isAt = b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtStreq, [sub, gepStr(b, "@")]), zero)
                 var isStar = b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtStreq, [sub, gepStr(b, "*")]), zero)
                 return b.NewSelect(isAt, one, b.NewSelect(isStar, llvm.constant.NewInt(i32, 2), zero))
-            }
-            var keyOf = function(b, sub) {
-                if (isAssoc) { return sub }
-                return b.NewCall(rtInt2str, b.NewCall(rtStr2int, sub))
             }
             if (pe == "len") {
                 return {c: undefined, fn: function(b) {
@@ -1606,7 +1616,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     var whole = b.NewICmp(llvm.enum.IPredNE, k, zero)
                     return {b: b, v: b.NewSelect(whole,
                         i2s(b, b.NewCall(rtScCount, nmOf(b))),
-                        i2s(b, b.NewCall(rtCharLen, b.NewCall(rtScGet, [nmOf(b), keyOf(b, rs.v)]))))}
+                        i2s(b, b.NewCall(rtCharLen, b.NewCall(rtScGet, [nmOf(b), rs.k]))))}
                 }}
             }
             if (pe == "ind") {
@@ -1626,21 +1636,29 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     var k = kindOf(b, rs.v)
                     var whole = b.NewICmp(llvm.enum.IPredNE, k, zero)
                     var star = b.NewICmp(llvm.enum.IPredEQ, k, llvm.constant.NewInt(i32, 2))
-                    // The positional list counts from $0: "${@:1}" is $1 on.
-                    var all = (name == "@" || name == "*") ? b.NewCall(rtParams0)
-                                                           : b.NewCall(rtScList, [nmOf(b), ifsFirstValue(b), zero, zero])
                     var ro = offT(b); b = ro.b
                     var rlv = null
                     if (lenT != null) { var rl = lenT(b); b = rl.b; rlv = rl.v }
-                    var cnt = b.NewCall(rtNFields, all)
-                    var off = b.NewSelect(b.NewICmp(llvm.enum.IPredSLT, ro.v, zero), b.NewAdd(cnt, ro.v), ro.v)
-                    // A negative offset reaching past the start selects nothing.
-                    off = b.NewSelect(b.NewICmp(llvm.enum.IPredSLT, off, zero), cnt, off)
-                    var n = b.NewSub(cnt, off)
-                    if (rlv != null) { n = rlv }
-                    var lstV = b.NewCall(rtSliceFields, [all, off, n, ifsFirstValue(b), starArg(b, b.NewZExt(star, i32))])
+                    var lstV = null
+                    if (name == "@" || name == "*" || isAssoc) {
+                        // The positional list counts from $0: "${@:1}" is $1 on.
+                        var all = (name == "@" || name == "*") ? b.NewCall(rtParams0)
+                                                               : b.NewCall(rtScList, [nmOf(b), ifsFirstValue(b), zero, zero])
+                        var cnt = b.NewCall(rtNFields, all)
+                        var off = b.NewSelect(b.NewICmp(llvm.enum.IPredSLT, ro.v, zero), b.NewAdd(cnt, ro.v), ro.v)
+                        // A negative offset reaching past the start selects nothing.
+                        off = b.NewSelect(b.NewICmp(llvm.enum.IPredSLT, off, zero), cnt, off)
+                        var n = b.NewSub(cnt, off)
+                        if (rlv != null) { n = rlv }
+                        lstV = b.NewCall(rtSliceFields, [all, off, n, ifsFirstValue(b), starArg(b, b.NewZExt(star, i32))])
+                    } else {
+                        // An indexed array is sliced by INDEX (rt_arr_slice), not by position.
+                        lstV = b.NewCall(rtArrSlice, [nmOf(b), b.NewSExt(ro.v, i64),
+                            (rlv != null) ? b.NewSExt(rlv, i64) : zero64, (rlv != null) ? one : zero,
+                            ifsFirstValue(b), starArg(b, b.NewZExt(star, i32))])
+                    }
                     // ${a[i]:off:len} slices the ELEMENT, not the element list.
-                    var ev = b.NewCall(rtScGet, [nmOf(b), keyOf(b, rs.v)])
+                    var ev = b.NewCall(rtScGet, [nmOf(b), rs.k])
                     var elen = b.NewCall(rtCharLen, ev)
                     var eoff = b.NewSelect(b.NewICmp(llvm.enum.IPredSLT, ro.v, zero), b.NewAdd(elen, ro.v), ro.v)
                     eoff = b.NewSelect(b.NewICmp(llvm.enum.IPredSLT, eoff, zero), elen, eoff)
@@ -1678,7 +1696,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     var mStar = b.NewZExt(star, i32)
                     if (mOp != 0) { mStar = starArg(b, mStar) }
                     var lstM = b.NewCall(rtMapf, [allE, mOpC, pv, rv3, mModeC, mSep, mStar])
-                    var evM = b.NewCall(rtScGet, [nmOf(b), keyOf(b, rs.v)])
+                    var evM = b.NewCall(rtScGet, [nmOf(b), rs.k])
                     var elM = evM
                     if (mOp == 0) { elM = b.NewCall(rtStrip, [evM, pv, mModeC]) }
                     else if (mOp == 1) { elM = b.NewCall(rtReplace, [evM, pv, rv3, mModeC]) }
@@ -1698,9 +1716,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var star = b.NewICmp(llvm.enum.IPredEQ, k, llvm.constant.NewInt(i32, 2))
                 var starA = starArg(b, b.NewZExt(star, i32))
                 var lst = b.NewCall(rtScList, [nmOf(b), ifsFirstValue(b), starA, zero])
-                var one1 = b.NewCall(rtScGet, [nmOf(b), keyOf(b, rs.v)])
+                var one1 = b.NewCall(rtScGet, [nmOf(b), rs.k])
                 if (op != "") {
-                    var kk = keyOf(b, rs.v)
+                    var kk = rs.k
                     var blankE = b.NewICmp(llvm.enum.IPredEQ, b.NewCall(rtScHas, [nmOf(b), kk]), zero)
                     if (idxColon) { blankE = b.NewOr(blankE, isEmptyStr(b, one1)) }
                     // ${a[@]-D} tests whether the array has ANY element, and the ":" form
@@ -1725,7 +1743,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         // An unset or empty [@] list stays that empty list: "${a[@]+x}" is no word.
                         pickedL = b.NewSelect(blankL, b.NewSelect(star, emptyPtr(b), gepStr(b, "\x02")), de)
                     }
-                    if (idxO == "=") { b.NewCall(rtArrSet, [nmOf(b), kk, pickedE]) }
+                    if (idxO == "=") { b.NewCall(isAssoc ? rtArrSet : rtArrIset, [nmOf(b), kk, pickedE]) }
                     one1 = pickedE
                     lst = pickedL
                 }
@@ -1733,7 +1751,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 // Is the ELEMENT the plain-subscript arm reads actually set? ${a[9]@Q} is
                 // empty in bash and ${a[9]@A} is `declare -a a`, both of which need this
                 // and neither of which the value alone can answer.
-                var elemSet = b.NewCall(rtScHas, [nmOf(b), keyOf(b, rs.v)])
+                var elemSet = b.NewCall(rtScHas, [nmOf(b), rs.k])
                 var assocI = llvm.constant.NewInt(i32, isAssoc ? 1 : 0)
                 // ${a[@]@Q} transforms EVERY ELEMENT and stays a field list (`'pa' 'pb'`), via rt_mapf.
                 // @A, @K and @k with a @ or * subscript describe the WHOLE variable instead (a=(pa pb)):
@@ -2280,25 +2298,30 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
     function mkIncDec(items) {
-        var lhs = "", iop = "++", pre = 0
+        var lhs = null, iop = "++", pre = 0
         var i
         for (i = 0; i < items.length; i++) {
             var it = items[i]
-            if (it.lhs != undefined) { lhs = it.lhs } else { iop = it.iop; pre = it.pre }
+            if (it.lhs != undefined) { lhs = it } else { iop = it.iop; pre = it.pre }
         }
         return function(b) {
-            var v = b.NewCall(rtArith, varString(b, lhs))
+            var rk = arLhsKey(b, lhs)
+            b = rk.b
+            var v = arLhsGet(b, lhs.lhs, rk.k)
             var nv = (iop == "++") ? b.NewAdd(v, one64) : b.NewSub(v, one64)
-            storeVar(b, lhs, b.NewCall(rtInt2str, nv))
+            arLhsSet(b, lhs.lhs, rk.k, nv)
             return {b: b, v: (pre == 1) ? nv : v}
         }
     }
     function mkArAssign(items) {
-        var lhs = items[0].lhs
+        var lhs = items[0]
         var aop = items[1].aop
         var t = items[2]
         return function(b) {
-            var cur = b.NewCall(rtArith, varString(b, lhs))
+            var rk = arLhsKey(b, lhs)
+            b = rk.b
+            // Plain = does not read the target: `x=q; (( x = 5 ))` is no recursion error.
+            var cur = (aop != "=") ? arLhsGet(b, lhs.lhs, rk.k) : null
             var r = t(b)
             b = r.b
             var nv = r.v
@@ -2307,7 +2330,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 b = res.b
                 nv = res.v
             }
-            storeVar(b, lhs, b.NewCall(rtInt2str, nv))
+            arLhsSet(b, lhs.lhs, rk.k, nv)
             return {b: b, v: nv}
         }
     }
@@ -2346,6 +2369,30 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // A name's value is itself an expression (x=010 is 8, r=a reads a), so rt_arith reads it.
     function mkArVar(name) { return function(b) { return {b: b, v: b.NewCall(rtArith, varString(b, name))} } }
+    // NAME[SUB]: items = [{lhs}, subscriptWord]. Twin of mkArLhs / mkArElem in
+    // bash-interpreter.abnf.
+    function mkArLhs(items) { return {lhs: items[0].lhs, sub: items[1]} }
+    function mkArElem(items) {
+        var name = items[0].lhs, w = items[1]
+        return function(b) {
+            var rk = subKeyOf(b, name, w)
+            return {b: rk.b, v: rk.b.NewCall(rtArith, rk.b.NewCall(rtScGet, [gepStr(rk.b, name), rk.k]))}
+        }
+    }
+    // An assignment target's key ({b, k}, k null for a plain name), its value, and the store.
+    function arLhsKey(b, lhs) {
+        if (lhs.sub == undefined) { return {b: b, k: null} }
+        return subKeyOf(b, lhs.lhs, lhs.sub)
+    }
+    function arLhsGet(b, name, k) {
+        if (k == null) { return b.NewCall(rtArith, varString(b, name)) }
+        return b.NewCall(rtArith, b.NewCall(rtScGet, [gepStr(b, name), k]))
+    }
+    function arLhsSet(b, name, k, v) {
+        if (k == null) { storeVar(b, name, b.NewCall(rtInt2str, v)); return }
+        var setF = hasOwn(assocArrays, "$" + name) ? rtArrSet : rtArrIset
+        b.NewCall(setF, [gepStr(b, name), k, b.NewCall(rtInt2str, v)])
+    }
     // / and % go through rt_idiv, which knows bash's two cases the hardware does not (a zero
     // divisor, LONG_MIN / -1). A shift count is taken modulo 64, which is what bash's own
     // shift instruction does on both arm64 and x86-64; an unmasked count is poison in LLVM.
@@ -2434,34 +2481,47 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return {name: name, idxT: idxT, op: op, valT: valT, lit: lit}
     }
-    // An array literal element list; a bare word contributes one element per FIELD.
+    // An array literal element list; a bare word contributes one element per FIELD. Every
+    // word is expanded BEFORE the array is cleared: f=([5]=x "${f[@]}") reads the old f.
     function emitArrayLit(b, name, litItems, append, assoc) {
         var nm = gepStr(b, name)
-        if (!append) { b.NewCall(rtArrClear, nm) }
-        // A literal makes the name a SET array even with no element (rt_arr_mark).
-        b.NewCall(rtArrMark, nm)
+        var vals = []
         var i
-        var pendKey = null    // an assoc literal's bare words pair up; this is the odd one
         for (i = 0; i < litItems.length; i++) {
             var it = litItems[i]
             if (it.kv != undefined) {
                 var rk = it.key.fn(b); b = rk.b
                 var rv = it.val.fn(b); b = rv.b
-                b.NewCall(rtArrSet, [nm, b.NewCall(rtWordJoin, rk.v), b.NewCall(rtWordJoin, rv.v)])
+                vals.push({k: b.NewCall(rtWordJoin, rk.v), v: b.NewCall(rtWordJoin, rv.v)})
             } else {
                 var rw = it.fn(b); b = rw.b
-                // Bare words in an ASSOCIATIVE array literal are KEY VALUE pairs - bash 5.3.15 reads
-                // `declare -A b=(one two three four)` as b[one]=two b[three]=four, and a trailing odd word
-                // takes an empty value.
-                if (assoc) {
-                    var w = b.NewCall(rtWordJoin, rw.v)
-                    if (pendKey == null) { pendKey = w }
-                    else { b.NewCall(rtArrSet, [nm, pendKey, w]); pendKey = null }
-                }
-                else { b.NewCall(rtArrAppend, [nm, rw.v]) }
+                vals.push({k: null, v: rw.v})
             }
         }
-        if (pendKey != null) { b.NewCall(rtArrSet, [nm, pendKey, emptyPtr(b)]) }
+        if (!append) { b.NewCall(rtArrClear, nm) }
+        // A literal makes the name a SET array even with no element (rt_arr_mark).
+        b.NewCall(rtArrMark, nm)
+        // Bare words in an ASSOCIATIVE array literal are KEY VALUE pairs - bash 5.3.15 reads
+        // `declare -A b=(one two three four)` as b[one]=two b[three]=four, and a trailing odd word
+        // takes an empty value.
+        if (assoc) {
+            var pendKey = null
+            for (i = 0; i < vals.length; i++) {
+                if (vals[i].k != null) { b.NewCall(rtArrSet, [nm, vals[i].k, vals[i].v]); continue }
+                var w = b.NewCall(rtWordJoin, vals[i].v)
+                if (pendKey == null) { pendKey = w } else { b.NewCall(rtArrSet, [nm, pendKey, w]); pendKey = null }
+            }
+            if (pendKey != null) { b.NewCall(rtArrSet, [nm, pendKey, emptyPtr(b)]) }
+            return b
+        }
+        // In an INDEXED literal a bare word takes the index after the element before it
+        // (b=([3]=c [1]=a b) is 1 2 3 = a b c), so the next index is threaded through
+        // rt_arr_litkey / rt_arr_litwords. Twin of applyArrayLit in bash-interpreter.abnf.
+        var next = append ? b.NewCall(rtArrNext, nm) : zero64
+        for (i = 0; i < vals.length; i++) {
+            if (vals[i].k != null) { next = b.NewCall(rtArrLitKey, [nm, vals[i].k, vals[i].v, next]) }
+            else { next = b.NewCall(rtArrLitWords, [nm, vals[i].v, next]) }
+        }
         return b
     }
     function emitAssign(b, a, assoc0) {
@@ -2472,12 +2532,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var v = emptyPtr(b)
         if (a.valT != null) { var r = a.valT.fn(b); b = r.b; v = b.NewCall(rtWordJoin, r.v) }
         if (a.idxT != null) {
-            var rk = a.idxT.fn(b)
+            var rk = subKeyOf(b, a.name, a.idxT)
             b = rk.b
-            var key = b.NewCall(rtWordJoin, rk.v)
-            if (!assoc) { key = b.NewCall(rtInt2str, b.NewCall(rtStr2int, key)) }
-            if (a.op == "+=") { v = b.NewCall(rtStrcat, [b.NewCall(rtArrGet, [nm, key]), v]) }
-            b.NewCall(rtArrSet, [nm, key, v])
+            if (a.op == "+=") { v = b.NewCall(rtStrcat, [b.NewCall(rtArrGet, [nm, rk.k]), v]) }
+            b.NewCall(assoc ? rtArrSet : rtArrIset, [nm, rk.k, v])
             return b
         }
         // `declare -i n` makes n=EXPR evaluate EXPR as arithmetic, and n+=EXPR an arithmetic ADD
@@ -2800,6 +2858,29 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtFskind = rtDecl("rt_fskind", false, [1])
 
     // "name" or "name[key]"
+    // A subscript text that is already a canonical index needs no evaluation.
+    function isIndexLit(t) {
+        if (t.length == 0 || t.length > 15 || (t.charAt(0) == "0" && t.length > 1)) { return false }
+        var i
+        for (i = 0; i < t.length; i++) { var cc = t.charCodeAt(i); if (cc < 48 || cc > 57) { return false } }
+        return true
+    }
+    // A subscript word and the key it names, {b, v: text, k: key}: an associative array's key
+    // is the text, an indexed array's the value of the text as an arithmetic expression
+    // (rt_arr_key, negative from the end). Evaluated ONCE per use, so `${a[i++]}` steps i once.
+    function subKeyOf(b, name, w) {
+        var r = evalWord(b, w)
+        var key = r.v
+        if (hasOwn(assocArrays, "$" + name)) { key = r.v }
+        else if (w.c != undefined && isIndexLit(w.c)) { key = gepStr(r.b, w.c) }
+        else { key = r.b.NewCall(rtArrKey, [gepStr(r.b, name), r.v]) }
+        return {b: r.b, v: r.v, k: key}
+    }
+    // The same for a literal subscript text (unset 'a[k]', [[ -v a[k] ]]).
+    function litKeyOf(b, name, t) {
+        if (hasOwn(assocArrays, "$" + name) || isIndexLit(t)) { return gepStr(b, t) }
+        return b.NewCall(rtArrKey, [gepStr(b, name), gepStr(b, t)])
+    }
     function splitSubscript(s0) {
         var i
         for (i = 0; i < s0.length; i++) {
@@ -2834,10 +2915,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (arg.c == undefined) { fail("test -v needs a literal variable name in this compiler") }
             var sv = splitSubscript(arg.c)
             if (sv.key != null) {
-                var kk2 = sv.key
-                if (!hasOwn(assocArrays, "$" + sv.name)) { kk2 = numToStr(parseDec(kk2)) }
                 return boolStatus(b, b.NewICmp(llvm.enum.IPredNE,
-                    b.NewCall(rtArrHas, [gepStr(b, sv.name), gepStr(b, kk2)]), zero))
+                    b.NewCall(rtArrHas, [gepStr(b, sv.name), litKeyOf(b, sv.name, sv.key)]), zero))
             }
             var setScalar = b.NewICmp(llvm.enum.IPredNE, loadVar(b, arg.c), unsetPtr(b))
             var setArray = b.NewICmp(llvm.enum.IPredSGT, b.NewCall(rtArrCount, gepStr(b, arg.c)), zero)
@@ -3790,9 +3869,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                                                   llvm.constant.NewInt(i32, getVarId("FUNCNAME"))])
                         }
                     } else {
-                        var kk = sp0.key
-                        if (!hasOwn(assocArrays, "$" + sp0.name)) { kk = numToStr(parseDec(kk)) }
-                        b.NewCall(rtArrDel, [gepStr(b, sp0.name), gepStr(b, kk)])
+                        b.NewCall(rtArrDel, [gepStr(b, sp0.name), litKeyOf(b, sp0.name, sp0.key)])
                     }
                 }
                 storeStatusI(b, 0)

@@ -551,7 +551,13 @@ ArgDigit    = "0"..."9" ;
 ArList      <~~ push(foldComma(takeAll())) ~~> = ArAssign { "," ArAssign } ;
 ArAssign    = ArAssignForm | ArCond ;
 ArAssignForm <~~ push(mkArAssign(takeAll())) ~~> = ArLhs ArAsgOp ArAssign ;
-ArLhs       <~~ push({lhs: up.in}) ~~> = ArName ;
+// NAME[SUBSCRIPT] is an array element, an operand and an assignment target alike:
+// `$(( nums[0] + nums[2] ))`, `(( m[p]++ ))`, `(( a[i] += 2 ))`.
+ArLhs       = ArLhsElem | ArLhsName ;
+ArLhsElem   <~~ push(mkArLhs(takeAll())) ~~> = ArElemName "[" IdxWord "]" ;
+ArElemName  <~~ push({lhs: up.in}) ~~> = ArName ;
+ArLhsName   <~~ push({lhs: up.in}) ~~> = ArName ;
+ArElem      <~~ push(mkArElem(takeAll())) ~~> = ArElemName "[" IdxWord "]" ;
 ArAsgOp     <~~ push({aop: up.in}) ~~>
             = "+=" | "-=" | "*=" | "/=" | "%=" | "<<=" | ">>=" | "&=" | "^=" | "|=" | ArPlainAsg ;
 ArPlainAsg  = "=" NotEq ;
@@ -589,7 +595,7 @@ ArNot       <~~ push(mkUn("!", pop())) ~~> = "!" NotEq ArUnary ;
 ArBnot      <~~ push(mkUn("~", pop())) ~~> = "~" ArUnary ;
 
 // A $-prefixed operand (Bash expands it before evaluating): $name, $1..$9, $# and $?.
-ArPrimary   = ArGroup | ArBaseDyn | ArNum | ArPostInc | ArCmdSub | ArDollarDigit | ArDollarHash | ArDollarQ | ArDollarVar | ArDollarBrace | ArVar ;
+ArPrimary   = ArGroup | ArBaseDyn | ArNum | ArPostInc | ArCmdSub | ArDollarDigit | ArDollarHash | ArDollarQ | ArDollarVar | ArDollarBrace | ArElem | ArVar ;
 ArGroup     = "(" ArList ")" ;
 ArPostInc   <~~ push(mkIncDec(takeAll())) ~~> = ArLhs ArPostOp ;
 ArPostOp    <~~ push({iop: up.in, pre: 0}) ~~> = "++" | "--" ;
@@ -1825,10 +1831,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (idxT != null) {
             var readIdx = function() {
-                var sub = wordJoin(idxT())
-                if (sub == "@" || sub == "*") { return sub }
-                if (isArr(name) && arrs[arrKey(name)].assoc) { return sub }
-                return numToStr(strToInt(sub))
+                return subKey(name, wordJoin(idxT()))
             }
             if (pe == "len") {
                 return function() {
@@ -1856,6 +1859,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     // starts with the script name.
                     var vals = scValList(name)
                     if (isPosName(name)) { vals = [scriptName]; for (var pv = 0; pv < posParams.length; pv++) { vals.push(posParams[pv]) } }
+                    if (!isPosName(name) && isArr(name) && !arrs[arrKey(name)].assoc) {
+                        var sl = arrSlice(name, offT(), (lenT != null) ? lenT() : null)
+                        return (sub == "@") ? encFields(sl) : starJoin(sl)
+                    }
                     var off = arNum(offT())
                     // A negative offset counts from the end, and one reaching past the
                     // start selects nothing (bash 5.3: a=(p q r); "${a[@]: -5}" is no word).
@@ -2514,10 +2521,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return arrs[k]
     }
     function arrNorm(a, key) {
-        if (a.assoc) { return key }
+        if (a.assoc || key == BAD_KEY) { return key }
         return numToStr(arStr(key))
     }
     function arrSet(name, key, val) {
+        if (key == BAD_KEY) { return }
         var a = arrEnsure(name, false)
         var kk = arrNorm(a, key)
         if (!hasOwn(a.vals, "$" + kk)) {
@@ -2673,6 +2681,24 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var i
         for (i = 0; i < list.length; i++) { arrSet(name, numToStr(arOp("+", next, i)), list[i]) }
     }
+    // ${a[@]:off:len} on an INDEXED array counts INDICES: the slice starts at the first element
+    // whose index is >= off (a negative off counts from one past the highest index) and takes
+    // len elements. bash 5.3, sp[2]=x sp[5]=y sp[9]=z: ${sp[*]:3} is "y z", ${sp[*]: -4} is
+    // "z". A negative len is "substring expression < 0". Twin of rt_arr_slice.
+    function arrSlice(name, off0, len) {
+        var out = []
+        if (len != null && arIsNeg(len)) { arFailAt(numToStr(len), "substring expression < 0", ""); return out }
+        var off = anytype
+        off = off0
+        if (arIsNeg(off)) { off = arOp("+", arrNextIdx(name), off); if (arIsNeg(off)) { return out } }
+        var ks = arrKeyList(name)
+        var i
+        for (i = 0; i < ks.length; i++) {
+            if (len != null && arOp("<", out.length, len) == 0) { return out }
+            if (arOp(">=", arStr(ks[i]), off) == 1) { out.push(arrGet(name, ks[i])) }
+        }
+        return out
+    }
     // One past the highest index of an indexed array (0 for none). Twin of rt_arr_nextidx.
     function arrNextIdx(name) {
         var next = anytype
@@ -2686,11 +2712,23 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return next
     }
-    // The key an indexed subscript names: a negative index counts back from one past the
-    // highest index, so ${a[-1]} is the last element. Twin of ar_key.
+    // The key an indexed subscript's value names: a negative index counts back from one past
+    // the highest index, so ${a[-1]} is the last element. One still negative after that is
+    // bash's "bad array subscript": reported, and answered with BAD_KEY, which no element has
+    // and arrSet refuses to write. Twin of rt_arr_ikey.
+    var BAD_KEY = "\x03bad"
     function arrIdxKey(name, k) {
-        if (arIsNeg(k)) { return numToStr(arOp("+", arrNextIdx(name), k)) }
-        return numToStr(k)
+        var kk = anytype
+        kk = k
+        if (arIsNeg(kk)) { kk = arOp("+", arrNextIdx(name), kk) }
+        if (arIsNeg(kk)) { emitErr("bash: " + name + ": bad array subscript\n"); return BAD_KEY }
+        return numToStr(kk)
+    }
+    // The key a subscript's TEXT names: an associative array's is the text itself, an indexed
+    // array's an arithmetic expression; "@" and "*" name the whole array. Twin of rt_arr_key.
+    function subKey(name, sub) {
+        if (sub == "@" || sub == "*" || assocFact(name, false)) { return sub }
+        return arrIdxKey(name, arEval(sub))
     }
     function joinList(list, sep) {
         var out = ""
@@ -3105,30 +3143,34 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // items = [thunk] | [{iop,pre}, {lhs}] | [{lhs}, {iop,pre}]
     function mkIncDec(items) {
-        var lhs = "", iop = "++", pre = 0
+        var lhs = null, iop = "++", pre = 0
         var i
         for (i = 0; i < items.length; i++) {
             var it = items[i]
-            if (it.lhs != undefined) { lhs = it.lhs } else { iop = it.iop; pre = it.pre }
+            if (it.lhs != undefined) { lhs = it } else { iop = it.iop; pre = it.pre }
         }
         return function() {
-            var v = arEval(getVarVal(lhs))
+            var key = arLhsKey(lhs)
+            var v = arLhsGet(lhs.lhs, key)
             var nv = arOp((iop == "++") ? "+" : "-", v, 1)
-            setVarVal(lhs, numToStr(nv))
+            arLhsSet(lhs.lhs, key, nv)
             return (pre == 1) ? nv : v
         }
     }
     // items = [{lhs}, {aop}, valueThunk]
     function mkArAssign(items) {
-        var lhs = items[0].lhs
+        var lhs = items[0]
         var aop = items[1].aop
         var t = items[2]
         return function() {
-            var cur = arEval(getVarVal(lhs))
+            var key = arLhsKey(lhs)
+            var cur = anytype
+            cur = 0
+            if (aop != "=") { cur = arLhsGet(lhs.lhs, key) }
             var nv = anytype
             nv = t()
             if (aop != "=") { nv = arOp(aop.slice(0, aop.length - 1), cur, nv) }
-            setVarVal(lhs, numToStr(nv))
+            arLhsSet(lhs.lhs, key, nv)
             return nv
         }
     }
@@ -3170,6 +3212,19 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // A name's value is itself an expression: x=010 is 8, r=a reads a.
     function mkArVar(name) { return function() { return arEval(getVarVal(name)) } }
+    // NAME[SUB]: items = [{lhs}, subscriptWordThunk].
+    function mkArLhs(items) { return {lhs: items[0].lhs, sub: items[1]} }
+    function mkArElem(items) {
+        var name = items[0].lhs, w = items[1]
+        return function() { return arEval(scGet(name, subKey(name, wordJoin(w())))) }
+    }
+    // The current value of an assignment target, and the store back into it; `key` is null
+    // for a plain name.
+    function arLhsKey(lhs) { return (lhs.sub != undefined) ? subKey(lhs.lhs, wordJoin(lhs.sub())) : null }
+    function arLhsGet(name, key) { return arEval((key != null) ? scGet(name, key) : getVarVal(name)) }
+    function arLhsSet(name, key, v) {
+        if (key != null) { arrSet(name, key, numToStr(v)) } else { setVarVal(name, numToStr(v)) }
+    }
     // An arithmetic error: bash reports it on standard error and abandons the command.
     // Twin of rt_arith_fail.
     var arithErr = false
@@ -3652,22 +3707,31 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (!append) { arrNew(name, assoc) }
         else { arrEnsure(name, assoc) }
         arrs[arrKey(name)].lit = true
-        var plain = []
         var i
-        for (i = 0; i < pairs.length; i++) {
-            if (pairs[i].k == null) { plain.push(pairs[i].v) } else { arrSet(name, pairs[i].k, pairs[i].v) }
+        // In an INDEXED literal a bare word takes the index after the element before it, so
+        // b=([3]=c [1]=a b) is 1 2 3 = a b c in bash 5.3; [k] is an arithmetic expression.
+        // Twin of rt_arr_litkey / rt_arr_litwords.
+        if (!arrs[arrKey(name)].assoc) {
+            var next = anytype
+            next = append ? arrNextIdx(name) : 0
+            for (i = 0; i < pairs.length; i++) {
+                if (pairs[i].k == null) { arrSet(name, numToStr(next), pairs[i].v); next = arOp("+", next, 1) }
+                else {
+                    var key = subKey(name, pairs[i].k)
+                    if (key != BAD_KEY) { arrSet(name, key, pairs[i].v); next = arOp("+", arStr(key), 1) }
+                }
+            }
+            return
         }
         // Bare words in an ASSOCIATIVE array literal are KEY VALUE PAIRS - bash 5.3.15
         // reads `declare -A b=(one two three four)` as b[one]=two b[three]=four, and a
-        // trailing odd word takes an empty value, so `a+=(zz)` gives a["zz"]="". (The
-        // indexed path would ask for the next free INTEGER index - every string key reads as
-        // 0 - and create a["1"]="zz".)
-        if (plain.length > 0) {
-            if (arrs[arrKey(name)].assoc) {
-                for (i = 0; i < plain.length; i = i + 2) {
-                    arrSet(name, plain[i], (i + 1 < plain.length) ? plain[i + 1] : "")
-                }
-            } else { arrAppendList(name, plain) }
+        // trailing odd word takes an empty value, so `a+=(zz)` gives a["zz"]="".
+        var plain = []
+        for (i = 0; i < pairs.length; i++) {
+            if (pairs[i].k == null) { plain.push(pairs[i].v) } else { arrSet(name, pairs[i].k, pairs[i].v) }
+        }
+        for (i = 0; i < plain.length; i = i + 2) {
+            arrSet(name, plain[i], (i + 1 < plain.length) ? plain[i + 1] : "")
         }
     }
     function makeAssign(items) {
@@ -3686,9 +3750,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         var v = (a.valT != null) ? wordJoin(a.valT()) : ""
         if (a.idxT != null) {
-            var key = wordJoin(a.idxT())
             arrEnsure(a.name, assoc)
-            if (!arrs[arrKey(a.name)].assoc) { key = numToStr(arStr(key)) }
+            var key = subKey(a.name, wordJoin(a.idxT()))
             if (a.op == "+=") { arrSet(a.name, key, arrGet(a.name, key) + v) } else { arrSet(a.name, key, v) }
             return
         }
@@ -4175,7 +4238,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (op == "-n") { return (s != "") ? 0 : 1 }
         if (op == "-v") {
             var sp = splitSubscript(s)
-            if (sp.key != null) { return arrHas(sp.name, sp.key) ? 0 : 1 }
+            if (sp.key != null) { return arrHas(sp.name, subKey(sp.name, sp.key)) ? 0 : 1 }
             return (isSetVar(s) || isArr(s)) ? 0 : 1
         }
         // See fsKind for the model and for why stat() was declined. -s is "exists and has a
@@ -4277,7 +4340,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         if (localHere(sp.name)) { dclVars["$" + sp.name] = true }
                     }
                 }
-                else { arrDel(sp.name, sp.key) }
+                else { arrDel(sp.name, subKey(sp.name, sp.key)) }
             }
             setStatus(0)
             return 0
