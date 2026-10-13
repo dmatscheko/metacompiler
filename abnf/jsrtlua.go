@@ -576,9 +576,42 @@ func (rt *jsrt) luEq(l, r interface{}) bool {
 		return luInt64(l) == luInt64(r)
 	}
 	if luIsNum(l) && luIsNum(r) {
+		if luIsInt(l) {
+			return luCmpIntFlo(luInt64(l), luNumOf(r)) == 0
+		}
+		if luIsInt(r) {
+			return luCmpIntFlo(luInt64(r), luNumOf(l)) == 0
+		}
 		return luNumOf(l) == luNumOf(r)
 	}
 	return rt.strictEq(l, r)
+}
+
+// luCmpIntFlo compares an integer with a float EXACTLY (lvm.c's LTintfloat and
+// luaV_equalobj), not on the integer's double reading: 2^53 + 1 is not 2^53. The
+// answer is the sign of i - f, or 2 for a NaN f. Twin of luaCmpIntFlt in
+// lua-interpreter.abnf and luCmpIntFlo in lib/lua-rt.metajs.
+func luCmpIntFlo(i int64, f float64) int {
+	if f != f {
+		return 2
+	}
+	if f >= 9223372036854775808.0 {
+		return -1
+	}
+	if f < -9223372036854775808.0 {
+		return 1
+	}
+	fl := math.Floor(f)
+	if fi := int64(fl); i != fi {
+		if i < fi {
+			return -1
+		}
+		return 1
+	}
+	if fl == f {
+		return 0
+	}
+	return -1
 }
 
 func (rt *jsrt) luCmp(op int, l, r interface{}) bool {
@@ -589,6 +622,15 @@ func (rt *jsrt) luCmp(op int, l, r interface{}) bool {
 			c = -1
 		} else if a > b {
 			c = 1
+		}
+	} else if luIsNum(l) && luIsNum(r) && (luIsInt(l) || luIsInt(r)) {
+		if luIsInt(l) {
+			c = luCmpIntFlo(luInt64(l), luNumOf(r))
+		} else if c = luCmpIntFlo(luInt64(r), luNumOf(l)); c != 2 {
+			c = -c
+		}
+		if c == 2 {
+			return false // a NaN operand is unordered
 		}
 	} else if luIsNum(l) && luIsNum(r) {
 		a, b := luNumOf(l), luNumOf(r)

@@ -534,8 +534,35 @@ function luToIntOp(v, opnd) {
 
 // luCmpV is the -1/0/1 of Lua's ordered comparison, or 2 for "unordered" (a NaN
 // operand), which makes every relation false.
+// luCmpIntFlo compares an integer with a float EXACTLY (lvm.c's LTintfloat and
+// luaV_equalobj), not on the integer's double reading: 2^53 + 1 is not 2^53. The
+// answer is the sign of i - f, or 2 for a NaN f. Inside 2^53 the double reading
+// is exact; past it the float is compared with floor(f) as an integer. Twin of
+// luCmpIntFlo in abnf/jsrtlua.go.
+function luCmpIntFlo(i, f) {
+    if (!luIsBox(i)) {
+        if (i < f) { return 0 - 1 }
+        if (i > f) { return 1 }
+        if (i === f) { return 0 }
+        return 2
+    }
+    if (f !== f) { return 2 }
+    if (f >= 9223372036854775808) { return 0 - 1 }
+    if (f < 0 - 9223372036854775808) { return 1 }
+    var fl = Math.floor(f)
+    var c = i64CmpS(luPair(i), i64FromNum(fl))
+    if (c !== 0) { return c }
+    if (fl === f) { return 0 }
+    return 0 - 1
+}
 function luCmpV(l, r, swap) {
     if (luIsInt(l) && luIsInt(r)) { return i64CmpS(luPair(l), luPair(r)) }
+    if (luIsInt(l) && luIsNum(r)) { return luCmpIntFlo(l, luNumOf(r)) }
+    if (luIsInt(r) && luIsNum(l)) {
+        var rc = luCmpIntFlo(r, luNumOf(l))
+        if (rc === 2) { return 2 }
+        return 0 - rc
+    }
     if (luIsNum(l) && luIsNum(r)) {
         var a = luNumOf(l)
         var b = luNumOf(r)
@@ -756,7 +783,7 @@ function js_lueq(l, r) {
     // double never equals one because a box exists only outside 2^53.
     if (typeof l == "number" && typeof r == "number") { return l === r }
     if (luIsInt(l) && luIsInt(r)) { return i64Eq(luPair(l), luPair(r)) }
-    if (luIsNum(l) && luIsNum(r)) { return luNumOf(l) === luNumOf(r) }
+    if (luIsNum(l) && luIsNum(r)) { return luCmpV(l, r, false) === 0 }
     return l === r
 }
 
@@ -1054,17 +1081,19 @@ function js_luabs(args) {
 // math.max / math.min keep the WINNING argument, so the subtype survives - and
 // the tie goes to the FIRST one, which is real Lua's rule (its loop replaces the
 // running best only on a strict '<'), so math.max(1, 1.0) is the integer 1.
+// The running best is an INDEX: a local holding the value would keep the type of
+// the first argument, and a float box cannot replace a plain number.
 function js_lumax(args) {
     luCheckAny("math.max", 1, args)
-    var best = args[0]
-    for (var i = 1; i < args.length; i++) { if (js_lucmp(0, best, args[i])) { best = args[i] } }
-    return best
+    var bi = 0
+    for (var i = 1; i < args.length; i++) { if (js_lucmp(0, args[bi], args[i])) { bi = i } }
+    return args[bi]
 }
 function js_lumin(args) {
     luCheckAny("math.min", 1, args)
-    var best = args[0]
-    for (var i = 1; i < args.length; i++) { if (js_lucmp(0, args[i], best)) { best = args[i] } }
-    return best
+    var bi = 0
+    for (var i = 1; i < args.length; i++) { if (js_lucmp(0, args[i], args[bi])) { bi = i } }
+    return args[bi]
 }
 
 // math.fmod keeps C's fmod: the remainder takes the sign of the DIVIDEND, which

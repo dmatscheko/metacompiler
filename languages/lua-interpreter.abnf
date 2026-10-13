@@ -1579,14 +1579,40 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // by identity; the ordering comparisons work on the numeric values or on strings.
     // Two integers compare on the exact layer, because past 2^53 their double readings
     // are equal for values that are not (math.maxinteger and math.maxinteger - 1).
+    // An integer and a float compare EXACTLY too (lvm.c's LTintfloat and
+    // luaV_equalobj), not on the integer's double reading: 2^53 + 1 is not 2^53.
+    // The answer is the sign of i - f, or 2 for a NaN f. Inside 2^53 the double
+    // reading is exact; past it the float is compared with floor(f) as an integer.
+    // Twin of luCmpIntFlo in abnf/jsrtlua.go and lib/lua-rt.metajs.
+    function luaCmpIntFlt(i, f) {
+        if (!szIs(i)) { return i < f ? 0 - 1 : (i > f ? 1 : (i === f ? 0 : 2)) }
+        if (f !== f) { return 2 }
+        if (f >= 9223372036854775808) { return 0 - 1 }
+        if (f < 0 - 9223372036854775808) { return 1 }
+        var fl = Math.floor(f)
+        var c = i64CmpS(szPair(i), i64FromNum(fl))
+        if (c !== 0) { return c }
+        return fl === f ? 0 : 0 - 1
+    }
     function luaEq(l, r) {
         if (isInt(l) && isInt(r)) { return szEq(l, r) }
-        if (isNum(l) && isNum(r)) { return numOf(l) === numOf(r) }
+        if (isNum(l) && isNum(r)) {
+            if (isInt(l)) { return luaCmpIntFlt(l, numOf(r)) === 0 }
+            if (isInt(r)) { return luaCmpIntFlt(r, numOf(l)) === 0 }
+            return numOf(l) === numOf(r)
+        }
         return l === r
     }
     function luaCmp(op, l, r) {
-        if (isInt(l) && isInt(r)) {
-            var c = szCmp(l, r)
+        var c = 3 // 3: not an integer comparison
+        if (isInt(l) && isInt(r)) { c = szCmp(l, r) }
+        else if (isInt(l) && isNum(r)) { c = luaCmpIntFlt(l, numOf(r)) }
+        else if (isInt(r) && isNum(l)) {
+            c = luaCmpIntFlt(r, numOf(l))
+            if (c !== 2) { c = 0 - c }
+        }
+        if (c === 2) { return false } // an integer against a NaN
+        if (c !== 3) {
             if (op == "<")  { return c < 0 }
             if (op == ">")  { return c > 0 }
             if (op == "<=") { return c <= 0 }

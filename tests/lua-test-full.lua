@@ -709,6 +709,14 @@ function s22()
     check("i64z6", math.type(ms[1] + 0) .. " " .. (ms[1] + 0 == math.mininteger and "min" or "?"), "integer min")
     check("i64z7", math.type(ms[2] + 0) .. math.type(ms[3] + 0), "floatfloat")
     check("i64z8", math.tointeger(ms[1]) == math.mininteger, true)
+    -- An integer and a float compare exactly, not on the integer's double reading.
+    local IF = {9007199254740993, 2^53, math.maxinteger, 2^63, 0/0}
+    check("i64z9", IF[1] == IF[2], false)
+    check("i64z10", tostring(IF[1] < IF[2]) .. tostring(IF[1] <= IF[2]) .. tostring(IF[1] > IF[2]) .. tostring(IF[2] < IF[1]), "falsefalsetruetrue")
+    check("i64z11", IF[3] < IF[4], true)
+    check("i64z12", math.type(math.max(IF[3], IF[4])), "float")
+    check("i64z13", tostring(IF[1] - 1 == IF[2]) .. tostring(IF[2] == IF[1] - 1), "truetrue")
+    check("i64z14", tostring(IF[1] < IF[5]) .. tostring(IF[1] >= IF[5]) .. tostring(IF[1] == IF[5]), "falsefalsefalse")
 end
 
 -- ===== SECTION 23: the float number model, four engines =====
@@ -1125,6 +1133,13 @@ local function s26()
     -- sqrt of a negative is a NaN, which is not equal to itself.
     check("lmath53", math.sqrt(-1) ~= math.sqrt(-1), true)
     check("lmath54", math.log(a[1]), -math.huge)
+    -- max/min answer the winning argument whatever subtype the first one had.
+    local A = {1, 2.0, 2, 1.0, 3}
+    local okm, vm = pcall(math.min, A[3], A[4])
+    check("lmath55", tostring(okm) .. " " .. tostring(vm), "true 1.0")
+    local okx, vx = pcall(math.max, A[2], A[1], A[3])
+    check("lmath56", tostring(okx) .. " " .. tostring(vx), "true 2.0")
+    check("lmath57", math.type(math.max(A[1], A[5], A[2])), "integer")
 end
 
 -- ===== SECTION 27: errors - error, pcall, xpcall =====
