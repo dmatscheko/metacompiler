@@ -4317,6 +4317,10 @@ func s82() {
 	f /= 0
 	g := []float64{1.5}[0]
 	check("dvz1", fmt.Sprint(f, g/0, -g/0) == "+Inf +Inf -Inf")
+	// Only a negative constant shift count and an INTEGER division by a constant
+	// zero are compile errors (go-fail-test-shift.go, go-fail-test-divzero.go).
+	c := 1i
+	check("cke4", fmt.Sprint(x<<0, x>>63, c/0, -1<<2>>1) == "5 0 (NaN+Infi) -2")
 }
 
 func main() {

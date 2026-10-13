@@ -707,6 +707,30 @@
             "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-overflow-blank.go", "-q"]
         },
         {
+            "name": "Go interpreter division by constant zero SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-divzero.go", "-q"]
+        },
+        {
+            "name": "Go compiler division by constant zero SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-divzero.go", "-q"]
+        },
+        {
+            "name": "Go interpreter negative shift count SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-shift.go", "-q"]
+        },
+        {
+            "name": "Go compiler negative shift count SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-shift.go", "-q"]
+        },
+        {
             "name": "Python interpreter",
             "type": "go",
             "request": "launch",

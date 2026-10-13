@@ -750,9 +750,11 @@ function goFoldConst(items, ops, pos, ty) {
     return cMaterialize(acc)
 }
 
-// Go's compile-time check on a binary run (the items layout above; each {at} also
-// carries its operand's start as `as`, and sty is the run's static type): an
-// untyped integer constant operand that the type it is converted to cannot hold. A run of constant operands at the front is ONE
+// Go's compile-time checks on a binary run (the items layout above; each {at} also
+// carries its operand's start as `as`, and sty is the run's static type): a
+// negative constant shift count, a division by a constant zero that is constant
+// or integer arithmetic, and an untyped integer constant operand that the type it
+// is converted to cannot hold. A run of constant operands at the front is ONE
 // constant expression (`200 + 100 + u8` converts 300), so it is checked whole,
 // except as a shift's left operand, whose type the context decides.
 function goRunCheck(items, ops, sty) {
@@ -763,6 +765,9 @@ function goRunCheck(items, ops, sty) {
         var r = items[3 * k + 4]
         var rhs = constAt(r.at)
         var shift = op == "<<" || op == ">>"
+        if (shift) { goShiftCountOk(goKRecOf(rhs, r.as, r.at)) }
+        if ((op == "/" || op == "%") && rhs != null && (cIsCx(rhs) ? rhs.re.s === 0 && rhs.im.s === 0 : rhs.s === 0)
+            && (acc != null || goIntUnder(sty) != null)) { goDivZeroFail(r.as) }
         if (!shift && acc != null && rhs == null) { goOperandFits(goKRecOf(acc, items[1].as, items[3 * k + 1].at), sty) }
         if (!shift && acc == null && rhs != null) { goOperandFits(goKRecOf(rhs, r.as, r.at), sty) }
         acc = (acc != null && rhs != null) ? cApply(op, acc, rhs) : null
@@ -1087,6 +1092,13 @@ function goOperandFits(kr, ty) {
     var it = goIntUnder(ty)
     if (it != null && !cFitsInt(kr.k, it.w, it.u)) { goKFail(kr, goKDesc(kr) + " overflows " + it.name) }
 }
+// A shift count that is a negative constant, and a division by a constant zero
+// that is integer division or constant arithmetic, are compile errors. kr is the
+// right operand's goKRec record (an integer constant).
+function goShiftCountOk(kr) {
+    if (kr != null && kr.k.s < 0) { goKFail(kr, "invalid operation: negative shift count " + goKDesc(kr)) }
+}
+function goDivZeroFail(ks) { fail(c.curFile() + ":" + c.lineOf(ks) + ": invalid operation: division by zero") }
 // `=` storing value kr into target lref, one of n targets: the blank identifier
 // takes a constant at its default type.
 function goAssignConstTo(t, kr, lref, n) {
@@ -1211,7 +1223,8 @@ function goLitWalk(ty0, els) {
 // `x op= v`: v is an operand of x's type ty (a shift's count is not).
 function goAssignOpCheck(op, kr, ty) {
     if (kr == null) { return }
-    if (op == "<<=" || op == ">>=") { return }
+    if (op == "<<=" || op == ">>=") { goShiftCountOk(kr); return }
+    if ((op == "/=" || op == "%=") && kr.k.s === 0 && goIntUnder(ty) != null) { goDivZeroFail(kr.ks) }
     goOperandFits(kr, ty)
 }
 function stTrim(t) {
