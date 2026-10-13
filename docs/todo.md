@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-562** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-565** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -312,89 +312,18 @@ not change the renderer.
 
 # GO — Go  (oracle: `go run`)
 
-### T-465 go: the Go twin answers `>`/`>=` true when either side is NaN · P1 · GO · IN PROGRESS (GO worker, round 1) [V]
-`a := zs[0]/zs[0]; b := zs[1]` (zs = []float64{0,1}): `a > b, a >= b, b > a, b >= a` — llvm.Run `true true true true`, interp,
-native and `go run` all `false`. A NaN-seeded running max ends at 2 instead of NaN. `rel()` in abnf/jsrtint.go (~807-822)
-feeds `rt.jsCompare`'s NaN marker 2 into `c > 0`/`c >= 0`; the shared `js_gt` tests `== 1` and the floor's `si_rel` is right.
-Only go uses `js_gi*`. Engine wrong: the Go twin.
+### T-562 go: `[]byte(s)[i]` has dynamic type int; `cap()` of a channel · P2 · GO · OPEN [V]
+`b := []byte("az"); fmt.Printf("%T", b[0])` → all legs `int` (go `uint8`): `[]byte` elements are held as code points, so they
+carry no sized type. `c := make(chan int, 2); fmt.Println(cap(c))` → interp `<nil>`, llvm.Run and native abort "len() of a
+object" (go 2): the buffer size of `make(chan T, n)` is not recorded where `cap` looks.
 
-### T-466 go: tuple assignment does not evaluate LHS index/pointer operands before assigning · P1 · GO · IN PROGRESS (GO worker, round 1) [V]
-Go evaluates every LHS index expression and pointer indirection, then every RHS, then assigns left to right. All three of our
-legs agree and are wrong: `i := 0; i, a[i] = 1, 9` on `[1 2 3]` gives `1 [1 9 3]` (go `1 [9 2 3]`); `n := 1; n, m[n] = 5, n`
-gives `map[5:1]` (go `map[1:1]`); `s, s[0] = []int{9}, 100` writes the NEW slice (go writes the old backing array);
-`ps, ps.v[0] = &S{...}, 42` likewise; `d[idx(0)], d[idx(1)] = val(5), val(6)` calls val before idx (go: idx 0, idx 1, val 5,
-val 6); `k, c[k], c[k+1] = 2, c[k+2], c[k]` on len 3 panics index out of range (go `2 [30 10 30]`). Files: the tuple-assign
-lowering in go-interpreter.abnf and go-to-llvm-ir.abnf.
+### T-563 go: `fmt.Fprint*` / `os.Stdout` / io.Writer, and the `math` package · P3 · GO · OPEN [V]
+`fmt.Fprintf(&sb, ...)`, `fmt.Fprintln(os.Stdout, ...)` unsupported in every engine (no io.Writer model, no os.Stdout).
+`math.Sqrt` etc. unknown in every engine; needs correctly rounded primitives in all three engines, not a partial package.
 
-### T-467 go: `copy` with overlapping slices copies forward and smears · P1 · GO · IN PROGRESS (GO worker, round 1) [V]
-`x := []int{1,2,3,4,5}; n := copy(x[1:], x)` — all legs `4 [1 1 1 1 1]`, go `4 [1 1 2 3 4]` (memmove semantics);
-`b := []byte("abcde"); copy(b[2:], b)` ours `ababa`, go `ababc`. All three legs wrong. Files: the copy builtin in both go
-grammars, lib/go-rt.metajs, the Go twin.
-
-### T-468 go: deleting map entries during `for range` · P1 · GO · IN PROGRESS (GO worker, round 1) [V]
-10 entries `m[i]=i*i`; `for k := range m { delete(m,k); delete(m,9-k); cnt++ }; Println(cnt, len(m), m)`: go `5 0 map[]`
-(an entry deleted before it is reached is never produced, so 5 is deterministic); interp and native `10 0 map[]` (they range
-over a snapshot); llvm.Run `10 2 map[3:9 6:36]` — deletes are LOST and a nested range sees `<nil>` keys. Also
-`for k := range m3 { delete(m3,k); m3[k] = 5 }` on `{1:1,2:2}`: go `map[1:5 2:5]`, run `map[1:5 2:2]`. Hypothesis for run:
-`js_map_del` (abnf/jsrt.go ~15054) shifts `keys.elems`/`vals.elems` in place, corrupting a range snapshot that shares the
-backing array. Engines wrong: twin badly; interp and native via snapshot semantics.
-
-### T-469 go: interface equality and `map[interface{}]` keys ignore the dynamic type for int vs float64 · P1 · GO · IN PROGRESS (GO worker, round 1) [V]
-`var a interface{} = fs[0]` (float64 1), `var b interface{} = is[0]` (int 1): `a == b` — all legs `true`, go `false`
-(`%T` is right everywhere). `m[a]="float"; m[b]="int"; len(m), m[a], m[b]`: interp `2 float int` (right), llvm.Run and native
-`1 int int`. int64 vs int is already right. Files: strict_eq / `goMapKeyIdx` with the float box (manual 7.6), the go-rt map
-key lookup, the twin.
-
-### T-470 go: `clear(slice)` writes integer 0; `min`/`max` on NaN and -0; interp `min` of sized ints · P1 · GO · IN PROGRESS (GO worker, round 1) [V]
-`clear([]string{"a","b"})` → all legs `['\x00' '\x00']`, `s[0]==""` false (go `["" ""] true`); `[]bool` → `[0]`, structs → `[0]`,
-`[]*P` element not `nil`. `max(nan,1), max(1,nan), min(nan,1), min(1,nan)`: interp `NaN 1 NaN 1`, run/native `1 NaN NaN 1`,
-go `NaN NaN NaN NaN`. `max(0,-0), max(-0,0), min(0,-0), min(-0,0)`: interp `0 -0 0 -0`, run/native `-0 0 0 -0`, go `0 0 -0 -0`.
-Interp only: `min(int8(3), int8(-2))` prints `3` (a sized-int box never wins in `gNumF`). Files: go-interpreter.abnf
-hostGlobals clear/min/max (~1581-1599), lib/go-rt.metajs `js_gominmax` / `js_goclear`, abnf/jsrt.go twin. `clear` needs the
-element type's zero value.
-
-### T-471 go: channel and `make` runtime panics missing or wrong; a floor runtime error is unrecoverable natively · P1 · GO · IN PROGRESS (GO worker, round 1) [V]
-Each case wrapped in `defer func(){ fmt.Printf("recovered: %v\n", recover()) }()`. Close of a closed channel: all legs
-print "after" and recover nil (go `close of closed channel`). `make([]int, 3, 2)` (operands from a slice): interp an
-uncatchable "go interpreter error: make: capacity smaller than length", run/native `3 2 [0 0 <nil>]`, go
-`runtime error: makeslice: cap out of range`. Finder also saw (not re-run by the master): `close(nilChan)` and send on a
-closed channel are uncatchable in interp, recoverable "js runtime error: ..." under run, and kill the native binary with exit
-1 WITHOUT running defers; `make([]int,-1)` no panic (interp/native) vs "cap out of range" (run), go `makeslice: len out of
-range`; `make([]int,0,-1)`; `make(chan int,-1)` (go `makechan: size out of range`). General pattern: a floor-raised js
-runtime error is a recoverable panic under llvm.Run but a fatal exit natively. Files: chan close/send and make in
-lib/go-rt.metajs, abnf/jsrt.go, both go grammars, the native panic path.
-
-### T-472 go: runes and bytes produced by literals, range and indexing have dynamic type `int` · P2 · GO · IN PROGRESS (GO worker, round 1) [V]
-`fmt.Printf("%T", c)` for `c` from `range "az"`, and `%T` of `'z'`, `[]rune(s)[0]`, `s[0]`: all legs `int int int int`,
-go `int32 int32 int32 uint8`. A type switch therefore takes `case int` for a rune. `var r rune` / `var b byte` are already
-right. Not T-071 (rune vs int32 naming): here the value loses its sized type. Files: rune literal, range-over-string and
-string-index typing in both go grammars.
-
-### T-473 go: map key semantics — composite-key print order, and interp float keys NaN / -0 · P1 · GO · IN PROGRESS (GO worker, round 1) [V]
-`fmt.Println(map[K]int{{1,"a"}:1,{0,"b"}:2,{1,""}:3,{-1,"z"}:4,{10,"a"}:5,{2,"a"}:6})` (K struct{A int; B string}): go sorts
-field-wise `map[{-1 z}:4 {0 b}:2 {1 }:3 {1 a}:1 {2 a}:6 {10 a}:5]`; interp and run print insertion order; native sorts by the
-RENDERED string (`{1 a}` before `{1 }`, `{10 a}` before `{2 a}`) — three different answers. Array keys likewise (finder:
-interp `[1 1] [1 2] [10 0] [2 1]`, go `[1 1] [1 2] [2 1] [10 0]`). Interp only: `fn[nan]=1; fn[nan]=2; fn[0.0]=3; fn[-0.0]=4;
-len(fn), fn[0], fn[nan]` → `3 0 2`, go/run/native `3 4 0` (-0 must hit the 0 key; a NaN lookup never finds). Files: fmt map
-printing in all three engines (go-rt.metajs, twin, interpreter), the interpreter's float-key map index.
-
-### T-474 go: `[]T(nil)` conversion crashes the compiled legs · P2 · GO · IN PROGRESS (GO worker, round 1) [V]
-`z := []int(nil); fmt.Println(z == nil, len(z))`: interp `true 0` (right), llvm.Run panics `js runtime error: member
-'length' of null`, native dies with the same message, exit 1. Finder: in interp `append(z, e...) == nil` with empty `e`
-is false (go true). Files: conversion lowering in go-to-llvm-ir.abnf, go-rt nil-slice handling.
-
-### T-475 go: interp `string(rune(r))` of an invalid code point is not U+FFFD · P1 · GO · IN PROGRESS (GO worker, round 1) [V]
-`string(rune(r))` for r = -1, 0xD800, 0x110000 printed `%q %x`: interp `"￿" efbfbf`, `"\ud800" eda080`,
-`"\udc00\udc00" edb080edb080`; run, native and go `"�" efbfbd` each. File: goConvert string(rune) in go-interpreter.abnf.
-
-### T-476 go: Unicode case — titlecase digraphs and simple-fold orbits · P3 · GO · IN PROGRESS (GO worker, round 1) [V]
-`strings.ToUpper("ǅungla")`, `ToLower`: all legs `ǅUNGLA ǅungla`, go `ǄUNGLA ǆungla` (U+01C5 has upper and lower mappings).
-`strings.EqualFold("ǅ","ǆ")`: ours false, go true (finder also reports `EqualFold("K","K")` with the Kelvin sign false; the
-master's ASCII re-run was true). Files: abnf/casemap.go, runtime.c case_str, go EqualFold.
-
-### T-477 go: features where the engines disagree on support · P3 · GO · IN PROGRESS (GO worker, round 1) [V finder only]
-`make(map[K]V, hint)` parses in interp but not in the compiler; `fmt.Sprintln`, `fmt.Fprintf(&strings.Builder)` unknown
-method; `strings.Title` unknown in interp only; `math.*` unknown name in both. Missing-feature tickets: fix where cheap.
+### T-564 go native: `s[i]` on a string converts the whole string to bytes per index · P2 · GO · OPEN [V]
+A loop reading `s[i]` over a 10,000-byte string is quadratic natively (`goBytes` of the whole string for every index): 1,430 × 50
+passes took 581 s. Cache the byte form, or index the UTF-8 directly in lib/go-rt.metajs.
 
 ---
 
@@ -1040,6 +969,19 @@ T-551 python: `zip(..., strict=)` — compiled treats the keyword as an argument
 T-552 python interp: unpacking in a comprehension target does not check the count — DONE c6fcc4a9
 T-553 python: an int can carry negative zero — DONE c6fcc4a9
 T-550 python: generator expressions are eager lists; `zip(it, it)` over one iterator yields nothing — DONE 0494ca00
+T-465 go: the Go twin answers `>`/`>=` true when either side is NaN — DONE 50978db6
+T-466 go: tuple assignment does not evaluate LHS index/pointer operands before assigning — DONE 859ae7da
+T-467 go: `copy` with overlapping slices copies forward and smears — DONE 4cb4bb0e
+T-468 go: deleting map entries during `for range` — DONE 1f303254
+T-469 go: interface equality and `map[interface{}]` keys ignore the dynamic type for int vs float64 — DONE 1bfad68e
+T-470 go: `clear(slice)` writes integer 0; `min`/`max` on NaN and -0; interp `min` of sized ints — DONE 5fbfb220
+T-471 go: channel and `make` runtime panics missing or wrong; a floor runtime error is unrecoverable natively — DONE a7cca8b6
+T-473 go: map key semantics — composite-key print order, and interp float keys NaN / -0 — DONE 5b039f53
+T-474 go: `[]T(nil)` conversion crashes the compiled legs — DONE 04522d5c
+T-475 go: interp `string(rune(r))` of an invalid code point is not U+FFFD — DONE 2478ce86
+T-476 go: Unicode case — titlecase digraphs and simple-fold orbits — DONE 9c2e45b8
+T-472 go: runes and bytes produced by literals, range and indexing have dynamic type `int` — PARTIAL ac022f51 (range/[]rune/literal runes int32, s[i] uint8); []byte elements are T-562
+T-477 go: features where the engines disagree on support — PARTIAL 646e06a3 (make(map,hint), Sprintln, strings.Title); Fprintf/io.Writer and the math package are T-563
 
 # Settled — do not re-open
 
