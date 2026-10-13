@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-576** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-578** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -134,18 +134,19 @@ not change the renderer.
 
 # GO — Go  (oracle: `go run`)
 
-### T-562 go: `[]byte(s)[i]` has dynamic type int; `cap()` of a channel · P2 · GO · IN PROGRESS (GO worker, round 3) [V]
-`b := []byte("az"); fmt.Printf("%T", b[0])` → all legs `int` (go `uint8`): `[]byte` elements are held as code points, so they
-carry no sized type. `c := make(chan int, 2); fmt.Println(cap(c))` → interp `<nil>`, llvm.Run and native abort "len() of a
-object" (go 2): the buffer size of `make(chan T, n)` is not recorded where `cap` looks.
+### T-576 go: `math` transcendentals, Float64bits, NaN sign, untyped math constants, missing members · P3 · GO · OPEN [V]
+`math.Exp/Log/Sin/Cos/Tan/Atan/Hypot/Cbrt` missing (Go's arm64 build fuses a*b+c inside them, so a port must match go
+bit-for-bit or stay out); `math.Pow` with a non-integral, non-half exponent panics "not supported". `MaxUint`/`MaxUint64`,
+`Float64bits`/`Float64frombits` missing; `math.Signbit(math.NaN())` sign/payload not modelled. `math.Pi == 3.141592653589793`
+→ ours true, go false (the untyped constant compares at arbitrary precision; a pkg.Name constant does not fold). A missing
+member (`math.Hypot`) reads as `<nil>` instead of a compile error. llvm.Run needs `-max-steps 0` for heavy go-math.go code.
 
-### T-563 go: `fmt.Fprint*` / `os.Stdout` / io.Writer, and the `math` package · P3 · GO · IN PROGRESS (GO worker, round 3) [V]
-`fmt.Fprintf(&sb, ...)`, `fmt.Fprintln(os.Stdout, ...)` unsupported in every engine (no io.Writer model, no os.Stdout).
-`math.Sqrt` etc. unknown in every engine; needs correctly rounded primitives in all three engines, not a partial package.
-
-### T-564 go native: `s[i]` on a string converts the whole string to bytes per index · P2 · GO · IN PROGRESS (GO worker, round 3) [V]
-A loop reading `s[i]` over a 10,000-byte string is quadratic natively (`goBytes` of the whole string for every index): 1,430 × 50
-passes took 581 s. Cache the byte form, or index the UTF-8 directly in lib/go-rt.metajs.
+### T-577 go: invalid UTF-8 in strings — each engine differs; byte-index cache thrash · P2 · GO · OPEN [V]
+`a := "日本語"[0:1]; fmt.Println(len(a), []rune(a), a == "\uFFFD")`: interp `2 [230] false`, llvm.Run `1 [65533] false`, native
+`3 [65533] true`, go `1 [65533] false`. `string([]byte{200})`: twin the raw byte, native U+FFFD, interp È. The twin's `s[i]` of a
+lone surrogate reads WTF-8 bytes, layer 2 U+FFFD. Natively `s[i]` caches the byte form of the last 4 non-ASCII strings: 5+
+distinct non-ASCII strings indexed in turn (or two distinct strings with equal content) are quadratic again; a proper fix is
+an O(1) byte-at host builtin in the floor (CORE: runtime.c).
 
 ---
 
@@ -691,6 +692,9 @@ T-558 python: any/all/max/min/sum materialise a generator argument; an endless s
 T-559 python: divmod() error text and dispatch — DONE 2d349ea5
 T-557 python: str.maketrans, `__import__`, translate with a non-dict table, non-ASCII isidentifier — DONE 27088c06
 T-556 python: bytes and bytearray are lists — DONE cce63c26
+T-564 go native: `s[i]` on a string converts the whole string to bytes per index — PARTIAL 260975a8 (ASCII strings indexed in place, a 4-entry byte-form cache for non-ASCII; 77 s -> 0.34 s for 50 passes); the cache-thrash remainder is T-577
+T-562 go: `[]byte(s)[i]` has dynamic type int; `cap()` of a channel — DONE 1fdfe139
+T-563 go: `fmt.Fprint*` / `os.Stdout` / io.Writer, and the `math` package — PARTIAL cf215ba0 (Fprint*, io.Writer, os.Stdout/Stderr, math constants and exact functions, Sqrt, Pow for integral/half exponents); transcendentals are T-576
 
 # Settled — do not re-open
 
