@@ -3948,9 +3948,15 @@ KwContinue  = "continue" KwEnd ;
             var lr = fb.NewCall(rtSplat(), [f.Params[1], emitNum(fb, 2)])
             var a0 = callExt(fb, "js_arg", [lr, handle(0)])
             var a1 = callExt(fb, "js_arg", [lr, handle(1)])
-            var argv = [a0, a1]
-            if (ext == "js_swarith" || ext == "js_swshift") { argv = [emitStr(fb, opText), a0, a1] }
-            fb.NewRet(callExt(fb, ext, argv))
+            // An operator a type declares is dispatched as the binary form is.
+            var plainOp = function(pb, x, y) {
+                var xv = x == undefined ? a0 : x
+                var yv = y == undefined ? a1 : y
+                var av = [xv, yv]
+                if (ext == "js_swarith" || ext == "js_swshift") { av = [emitStr(pb, opText), xv, yv] }
+                return callExt(pb, ext, av)
+            }
+            fb.NewRet(emitOverloadable(fb, sym, a0, a1, plainOp))
             curF = savedF
             curScopeV = savedScope
             return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
@@ -5395,6 +5401,30 @@ KwContinue  = "continue" KwEnd ;
         var cands = propTyReg["$" + name]
         for (var i = 1; i < cands.length; i++) { if (cands[i] != cands[0]) { return "" } }
         return cands[0]
+    }
+    // A stored property's declared NUMERIC type, for a write that finds the slot
+    // still nil: through self, the enclosing type's own (up its superclasses);
+    // any other field path, the one type every declaration of the name agrees on.
+    // Twins: swScalarPropTy / swSelfFieldTy in swift-interpreter.abnf.
+    function swScalarPropTy(name) {
+        var t = swTyStripOptText(swPropTyOf(name))
+        return swAdoptable(t) ? t : ""
+    }
+    function swSelfFieldTy(name) {
+        var tn = curType() == null ? null : curType().name
+        var guard = 0
+        while (tn != null && hasOwn(typeFieldAnn, "$" + tn) && guard < 64) {
+            var r = typeFieldAnn["$" + tn]
+            for (var i = 0; i < r.fs.length; i++) {
+                if (r.fs[i].name == name) {
+                    var t = swTyStripOptText(r.fs[i].ty)
+                    return swAdoptable(t) ? t : ""
+                }
+            }
+            tn = r.sup
+            guard = guard + 1
+        }
+        return ""
     }
     // The type an unannotated `let x = <expr>` takes: a bare local's, a member
     // chain's (the one just folded, matched by its text), a dictionary literal's, or
@@ -7022,7 +7052,11 @@ KwContinue  = "continue" KwEnd ;
                 // shape - the interpreter's lookupOrNull declines it in the same way.
                 if (!keepTy) {
                     if (oldL == null) { oldL = b.NewCall(rtKGet(), [curScopeV, nameV]) }
-                    v = callExt(b, "js_swadoptlike", [oldL, v, emitStr(b, declTy)])
+                    // A name no declaration in scope binds is an implicit self.v,
+                    // whose nil slot adopts the property's type.
+                    var selfTy = hasLocal ? declTy : swSelfFieldTy(ref.name)
+                    if (selfTy == "") { selfTy = declTy }
+                    v = callExt(b, "js_swadoptlike", [oldL, v, emitStr(b, selfTy)])
                 }
                 if (obs != null) { emitObsWrite(b, ref.name, nameV, obs, v) }
                 else { b.NewCall(rtKSet(), [curScopeV, nameV, v]) }
@@ -7041,7 +7075,10 @@ KwContinue  = "continue" KwEnd ;
                     if (op != "=" || !keepTy) {
                         var oldf = emitFieldRead(b, p.obj, p.keyName)
                         if (op != "=") { v = emitBin(b, op, oldf, v) }
-                        if (!keepTy) { v = swEmitPathAdopt(b, mode, p.own, exr.key, oldf, v, "") }
+                        if (!keepTy) {
+                            var fty = ref.name == "self" && ref.path.length == 1 ? swSelfFieldTy(p.keyName) : swScalarPropTy(p.keyName)
+                            v = swEmitPathAdopt(b, mode, p.own, exr.key, oldf, v, fty)
+                        }
                     }
                     if (isSetterName(p.keyName)) {
                         b.NewCall(rtSetProp(), [p.obj, p.key, v])
@@ -10931,6 +10968,22 @@ KwContinue  = "continue" KwEnd ;
             callExt(userB, "js_arr_push", [args, ps[0]])
             callExt(userB, "js_arr_push", [args, ps[1]])
             userB.NewRet(callExt(userB, "js_call", [fn, hUndef, args]))
+            // A Comparable type declares only <, and Swift derives the other three:
+            // a > b is b < a, a <= b is !(b < a), a >= b is !(a < b). Twin of
+            // swOverloadable in swift-interpreter.abnf.
+            if (op == ">" || op == "<=" || op == ">=") {
+                var lt = plainB.NewCall(rtOpFn(), [ps[0], ps[1], emitStr(plainB, "<")])
+                var ltB = curF.NewBlock("")
+                var noB = curF.NewBlock("")
+                plainB.NewCondBr(truthy(plainB, lt), ltB, noB)
+                var swap = op != ">="
+                var la = callExt(ltB, "js_arr_new", [])
+                callExt(ltB, "js_arr_push", [la, swap ? ps[1] : ps[0]])
+                callExt(ltB, "js_arr_push", [la, swap ? ps[0] : ps[1]])
+                var lv = callExt(ltB, "js_call", [lt, hUndef, la])
+                ltB.NewRet(op == ">" ? lv : callExt(ltB, "js_not", [lv]))
+                plainB = noB
+            }
             plainB.NewRet(plain(plainB, ps[0], ps[1]))
         })
         return b.NewCall(f, [l, r])

@@ -4564,6 +4564,34 @@ func s101() {
         && [Int]().randomElement() == nil)
 }
 
+// ===== SECTION 102: tuple order, derived Comparable operators, nil-slot adoption =====
+// Tuples compare lexicographically with < <= > >=. A type declaring only < gets
+// >, <= and >= derived from it, also when the operator is passed as a value
+// (`sorted(by: >)`). A write that finds a stored Double still nil (an
+// initializer's `v = 1`, `self.v = 2`, an Optional field) adopts the declared
+// type. Every value read off swiftc 6.1.2.
+struct Ver102: Comparable, CustomStringConvertible {
+    let major: Int, minor: Int
+    static func < (a: Ver102, b: Ver102) -> Bool { (a.major, a.minor) < (b.major, b.minor) }
+    var description: String { "v\(major).\(minor)" }
+}
+struct A102 { var v: Double; init() { v = 1 } }
+struct B102 { var w: Double; init() { self.w = 2 } }
+class D102 { var u: Double; var opt102: Double?; init() { u = 3 } }
+func s102() {
+    let ns = [1, 2, 3]
+    check("102a", (ns[0], ns[1]) < (ns[0], ns[2]) && !((ns[1], ns[0]) < (ns[0], ns[2])) && (ns[0], ns[1]) <= (ns[0], ns[1])
+        && (ns[2], ns[0]) > (ns[1], ns[2]) && !((Double.nan, 1) < (1.0, 2)) && (ns[0], "b") >= (ns[0], "a"))
+    let tuples = [(1, "b"), (1, "a"), (0, "z")]
+    check("102b", tuples.sorted { ($0.0, $0.1) < ($1.0, $1.1) }.map { $0.1 } == ["z", "a", "b"])
+    let vs = [Ver102(major: 1, minor: 2), Ver102(major: 0, minor: 9), Ver102(major: 1, minor: 0)]
+    check("102c", "\(vs.sorted())" == "[v0.9, v1.0, v1.2]" && "\(vs.sorted(by: >))" == "[v1.2, v1.0, v0.9]"
+        && "\(vs.sorted(by: <))" == "[v0.9, v1.0, v1.2]" && vs[0] > vs[2] && vs[2] <= vs[0] && vs[0] >= vs[0] && !(vs[1] >= vs[2]))
+    let d = D102()
+    d.opt102 = 4
+    check("102d", "\(A102().v) \(B102().w) \(d.u) \(d.opt102!)" == "1.0 2.0 3.0 4.0")
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -4666,6 +4694,7 @@ func main() {
     s99() // SECTION-CALL 99
     s100() // SECTION-CALL 100
     s101() // SECTION-CALL 101
+    s102() // SECTION-CALL 102
     print("full: \(checks) checks, \(fails) failures")
 }
 

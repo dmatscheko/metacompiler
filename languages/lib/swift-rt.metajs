@@ -3517,7 +3517,10 @@ function swRel(l, r) {
     // Mapping it to 0 (EQUAL) would make `<=` and `>=` TRUE for a raw NaN pair;
     // Swift makes all four false, like C# and Java.
     if (typeof l == "string") { if (typeof r == "string") { return swcStrCmp(l, r) } }
-    if (typeof l == "object") { if (swIsCrIx(l)) { if (swIsCrIx(r)) { return swCrIxCmp(l, r) } } }
+    if (typeof l == "object") {
+        if (swIsCrIx(l)) { if (swIsCrIx(r)) { return swCrIxCmp(l, r) } }
+        if (swIsObj(l)) { if (swIsObj(r)) { if (swNumProp(l, "__tuple") >= 0) { if (swNumProp(r, "__tuple") >= 0) { return swTupRel(l, r) } } } }
+    }
     var a = swNum(l)
     var b = swNum(r)
     if (a !== a) { return 0 - 2 }
@@ -3531,6 +3534,26 @@ function swRel(l, r) {
 // js_swgsplit / js_swgcount in abnf/jsrtswift.go.
 function js_swgsplit(s) { return swcGraphemes(s) }
 function js_swgcount(s) { return swcGraphemeCount(s) }
+
+// Two tuples order lexicographically: the first unequal pair decides (the
+// stdlib's tuple comparison operators), -2 when that pair is unordered. Twins:
+// swTupRel in languages/swift-interpreter.abnf and abnf/jsrtswift.go.
+function swTupRel(l, r) {
+    var ln = swNumProp(l, "__tuple")
+    var rn = swNumProp(r, "__tuple")
+    var i = 0
+    while (i < ln && i < rn) {
+        var a = l["" + i]
+        var b = r["" + i]
+        if (!swEqual(a, b, 0)) {
+            var c = swRel(a, b)
+            if (c === 0) { return 0 - 2 }
+            return c
+        }
+        i = i + 1
+    }
+    return 0
+}
 
 function js_swlt(l, r) {
     var c = swRel(l, r)

@@ -2136,12 +2136,24 @@ KwContinue  = "continue" KwEnd ;
         var f = classFind(t, "__static_" + op)
         return typeof f == "function" ? f : null
     }
-    // Installs an operator that first offers itself to an operand's type.
+    // Installs an operator that first offers itself to an operand's type. A
+    // Comparable type declares only <, and Swift derives the other three from it:
+    // a > b is b < a, a <= b is !(b < a), a >= b is !(a < b). Twin of
+    // emitOverloadable in swift-to-llvm-ir.abnf.
     function swOverloadable(op, fallback) {
+        var derived = op == ">" || op == "<=" || op == ">="
         binOps[op] = function(l, r) {
             var f = findOpFn(op, l)
             if (f == null) { f = findOpFn(op, r) }
             if (f != null) { return f(undefined, l, r) }
+            if (derived) {
+                var lt = findOpFn("<", l)
+                if (lt == null) { lt = findOpFn("<", r) }
+                if (lt != null) {
+                    if (op == ">") { return lt(undefined, r, l) }
+                    return !core.test(op == "<=" ? lt(undefined, r, l) : lt(undefined, l, r))
+                }
+            }
             return fallback(l, r)
         }
     }
@@ -6806,6 +6818,35 @@ KwContinue  = "continue" KwEnd ;
         for (var i = 1; i < cands.length; i++) { if (cands[i] != cands[0]) { return "" } }
         return cands[0]
     }
+    // A stored property's declared NUMERIC type, for a write that finds the slot
+    // still nil - an initializer's `v = 1` into `var v: Double` - and so has no
+    // value to adopt from. A write through self (`v = 1`, `self.v = 1`) reads the
+    // type self's class declares, up its superclasses; any other field path the
+    // one type every declaration of that name agrees on. "" when there is none or
+    // it is not numeric. Twins: swScalarPropTy / swSelfFieldTy in
+    // swift-to-llvm-ir.abnf, which decides self's type statically.
+    function swScalarPropTy(name) {
+        var t = swTyStripOpt(swPropTyOf(name))
+        return swAdoptable(t) ? t : ""
+    }
+    function swSelfFieldTy(name) {
+        var self = findThis()
+        if (self === null || self === undefined || typeof self != "object" || self.__class == undefined) { return "" }
+        var tn = self.__class.__name
+        var guard = 0
+        while (tn != null && hasOwn(typeFieldAnn, "$" + tn) && guard < 64) {
+            var r = typeFieldAnn["$" + tn]
+            for (var i = 0; i < r.fs.length; i++) {
+                if (r.fs[i].name == name) {
+                    var t = swTyStripOpt(r.fs[i].ty)
+                    return swAdoptable(t) ? t : ""
+                }
+            }
+            tn = r.sup
+            guard = guard + 1
+        }
+        return ""
+    }
     // The type an unannotated `let x = <expr>` takes: a bare local's, a member
     // chain's (the one just folded, matched by its text), a dictionary literal's, or
     // a call's - `Optional(v)` and a function's declared return type. Twin of
@@ -7171,8 +7212,14 @@ KwContinue  = "continue" KwEnd ;
         var optChain = false
         for (var oc = 0; oc < ref.path.length; oc++) { if (ref.path[oc].opt == true) { optChain = true } }
         var lastField = ref.path.length > 0 && ref.path[ref.path.length - 1].key != undefined
+        // The property type a nil slot adopts from: an implicit `self.v` (a name no
+        // declaration in scope binds) or `self.v` by self's class, any other field
+        // path's last name by swScalarPropTy.
+        var viaSelf = (ref.path.length == 0 && !hasLocal) || (ref.name == "self" && ref.path.length == 1 && lastField)
+        var lastKey = lastField ? ref.path[ref.path.length - 1].key : ref.name
         return function() {
             if (mode < 0) { mode = swKeepMode(ref, hasLocal, localAnn) }
+            var propTy = viaSelf ? swSelfFieldTy(lastKey) : (lastField ? swScalarPropTy(lastKey) : "")
             // An optional-chain target is resolved BEFORE the right-hand side, which
             // a nil along the chain skips.
             var pre = anytype
@@ -7198,7 +7245,7 @@ KwContinue  = "continue" KwEnd ;
                 // it already holds carries; an existential slot keeps what it is given.
                 if (mode == 0 || (mode == 2 && !swExfOf(findThis(), exr.key))) {
                     if (oldL != null) { v = swAdoptLike(oldL.v, v, declTy) }
-                    else { v = swAdoptLike(swSelfSlot(ref.name), v, declTy) }
+                    else { v = swAdoptLike(swSelfSlot(ref.name), v, propTy != "" ? propTy : declTy) }
                 }
                 if (obs != null) { swObsWrite(ref.name, obs, v) } else { swSetName(ref.name, v) }
             } else {
@@ -7217,7 +7264,7 @@ KwContinue  = "continue" KwEnd ;
                     v = applyOp(op, oldE, v)
                 }
                 if (mode == 0 || (mode == 2 && !swExfOf(exr.lk < 0 ? findThis() : p.own, exr.key))) {
-                    v = swAdoptLike(swSafeElem(p.obj, p.key), v, elemTy)
+                    v = swAdoptLike(swSafeElem(p.obj, p.key), v, lastField ? propTy : elemTy)
                 }
                 if (lastField) { swSetField(p.obj, p.key, v) } else { setElem(p.obj, p.key, v) }
                 if (p.recs != null) { swPropReplay(p.recs) }
@@ -9908,9 +9955,25 @@ KwContinue  = "continue" KwEnd ;
         if (isFlo(l) || isFlo(r)) { return want(swD(l), swD(r)) }
         if (szIs(l) || szIs(r)) { return want(szCmp(l, r), 0) }
         if (swIsCrIx(l) && swIsCrIx(r)) { return want(swCrIxCmp(l, r), 0) }
+        if (isTupleVal(l) && isTupleVal(r)) { return want(swTupRel(l, r), 0) }
         // Two Strings order by their NFC scalars (lib/swift-chars.js).
         if (typeof l == "string" && typeof r == "string") { return want(swcStrCmp(l, r), 0) }
         return want(l, r)
+    }
+    // Two tuples order lexicographically: the first unequal pair decides, by <
+    // (the stdlib's tuple comparison operators). NaN when that pair is unordered,
+    // so every comparison of it is false. Twins: swTupRel in abnf/jsrtswift.go and
+    // lib/swift-rt.metajs.
+    function swTupRel(l, r) {
+        for (var i = 0; i < l.__tuple && i < r.__tuple; i++) {
+            var a = l["" + i]
+            var b = r["" + i]
+            if (swEq(a, b)) { continue }
+            if (swOrd(a, b, function(x, y) { return x < y })) { return 0 - 1 }
+            if (swOrd(b, a, function(x, y) { return x < y })) { return 1 }
+            return 0 / 0
+        }
+        return 0
     }
     swOverloadable("<", function(l, r) { return swOrd(l, r, function(a, b) { return a < b }) })
     swOverloadable(">", function(l, r) { return swOrd(l, r, function(a, b) { return a > b }) })

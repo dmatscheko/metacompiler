@@ -3623,6 +3623,13 @@ func (rt *jsrt) swRel(l, r interface{}) int {
 			return rt.swCrIxCmp(li, ri)
 		}
 	}
+	if lo, ok := l.(*jsObject); ok {
+		if ro, ok := r.(*jsObject); ok {
+			if c, ok := rt.swTupRel(lo, ro); ok {
+				return c
+			}
+		}
+	}
 	// Two Strings order by their NFC scalars (swcStrCmp).
 	if ls, ok := l.(string); ok {
 		if rs, ok := r.(string); ok {
@@ -3630,6 +3637,31 @@ func (rt *jsrt) swRel(l, r interface{}) int {
 		}
 	}
 	return rt.jsCompare(l, r)
+}
+
+// swTupRel orders two tuples lexicographically: the first unequal pair decides
+// (the stdlib's tuple comparison operators), swUnordered when that pair is.
+// ok is false unless both are tuples. Twins: swTupRel in
+// languages/swift-interpreter.abnf and lib/swift-rt.metajs.
+func (rt *jsrt) swTupRel(l, r *jsObject) (int, bool) {
+	ln, lok := swNumProp(l, "__tuple")
+	rn, rok := swNumProp(r, "__tuple")
+	if !lok || !rok {
+		return 0, false
+	}
+	for i := 0; i < ln && i < rn; i++ {
+		k := strconv.Itoa(i)
+		a, b := l.props[k], r.props[k]
+		if rt.swEqualDepth(a, b, 0) {
+			continue
+		}
+		c := rt.swRel(a, b)
+		if c == 0 {
+			return swUnordered, true
+		}
+		return c, true
+	}
+	return 0, true
 }
 
 // swRangeLess is `a < b` (`a <= b` when orEq) between two range bounds.
