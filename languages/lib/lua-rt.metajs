@@ -228,7 +228,10 @@ function luFloOf(v) {
     // is still an OBJECT in BOTH halves (lua-to-llvm-ir.abnf builds it in IR and
     // abnf/jsrtlua.go reads the same shape), so it needs no tag of its own.
     if (typeof v != "object") { return undefined }
-    return v["__f"]
+    // The slot holds a TABLE'S METATABLE too (luMetaOf), which is no number.
+    var f = v["__f"]
+    if (typeof f == "number") { return f }
+    return undefined
 }
 // luMkFlo boxes a float that would otherwise read back as an integer. The
 // infinities and NaN are floats already and never need the box.
@@ -562,7 +565,9 @@ function luCmpIntFlo(i, f) {
     if (fl === f) { return 0 }
     return 0 - 1
 }
-function luCmpV(l, r, swap) {
+// `op` is js_lucmp's operator; c is 4 or 5 when __lt or __le answered true or
+// false.
+function luCmpV(l, r, op) {
     if (luIsInt(l) && luIsInt(r)) { return i64CmpS(luPair(l), luPair(r)) }
     if (luIsInt(l) && luIsNum(r)) { return luCmpIntFlo(l, luNumOf(r)) }
     if (luIsInt(r) && luIsNum(l)) {
@@ -578,12 +583,17 @@ function luCmpV(l, r, swap) {
         if (a !== b) { return 2 }
         return 0
     }
-    // Only two numbers or two strings have an order; the error names the
-    // operands in lua's order (`swap`: a > b is b < a). Twin of luCmp in
-    // abnf/jsrtlua.go.
+    // Only two numbers or two strings have an order; otherwise __lt or __le of
+    // the operands in lua's order decides (a > b is b < a), and without one the
+    // error names them in that order. Twin of luCmp in abnf/jsrtlua.go.
     if (typeof l != "string" || typeof r != "string") {
-        var tl = luTypeName(swap ? r : l)
-        var tr = luTypeName(swap ? l : r)
+        var swap = op === 1 || op === 3
+        var x = swap ? r : l
+        var y = swap ? l : r
+        var h = luBinTm(op >= 2 ? "__le" : "__lt", x, y)
+        if (h !== undefined) { return luTruthy(luFirstOf(h(x, y))) ? 4 : 5 }
+        var tl = luTypeName(x)
+        var tr = luTypeName(y)
         if (tl == tr) { luFail("attempt to compare two " + tl + " values") }
         luFail("attempt to compare " + tl + " with " + tr)
     }
@@ -719,7 +729,14 @@ function js_luarith(op_raw, lv, rv) {
     }
     var l = luToNum(lv)
     var r = luToNum(rv)
-    if (l === undefined || r === undefined) { luArithFail(op, lv, rv, l !== undefined) }
+    if (l === undefined || r === undefined) {
+        // An operand that is no number asks its metamethod; unary minus has one
+        // operand, which lua passes twice.
+        var ra = op === 7 ? lv : rv
+        var h = luBinTm(LU_EVENTS[op], lv, ra)
+        if (h !== undefined) { return luFirstOf(h(lv, ra)) }
+        luArithFail(op, lv, rv, l !== undefined)
+    }
     if (op === 3) { return luMkFlo(luNumOf(l) / luNumOf(r)) }
     if (op === 6) { return luMkFlo(Math.pow(luNumOf(l), luNumOf(r))) }
     if (luIsInt(l) && luIsInt(r)) {
@@ -756,6 +773,11 @@ function js_luarith(op_raw, lv, rv) {
 // the value, and a negative count shifts the other way.
 function js_lubit(op_raw, lv, rv) {
     var op = op_raw
+    // Two plain numbers skip the metamethod test without a call.
+    if ((typeof lv != "number" || typeof rv != "number") && (!luIsNum(lv) || !luIsNum(rv))) {
+        var h = luBinTm(LU_EVENTS[8 + op], lv, rv)
+        if (h !== undefined) { return luFirstOf(h(lv, rv)) }
+    }
     // lua blames the first operand that is no number at all, and only when both
     // are numbers the first that is no integer (luaT_trybinTM).
     if (luIsNum(lv) && !luIsNum(rv)) { luToIntOp(rv, 2) }
@@ -780,7 +802,13 @@ function js_lubit(op_raw, lv, rv) {
     return luNorm(i64Xor(a, b))   // Lua spells exclusive-or '~'
 }
 
-function js_lubnot(v) { return luNorm(i64Not(luToIntOp(v, 1))) }
+function js_lubnot(v) {
+    if (!luIsNum(v)) {
+        var h = luTm(v, "__bnot")
+        if (h !== undefined) { return luFirstOf(h(v, v)) }
+    }
+    return luNorm(i64Not(luToIntOp(v, 1)))
+}
 
 // Two integers compare on the exact 64 bit value, because past 2^53 their double
 // readings are equal for values that are not.
@@ -790,8 +818,15 @@ function js_lueq(l, r) {
     // double never equals one because a box exists only outside 2^53.
     if (typeof l == "number" && typeof r == "number") { return l === r }
     if (luIsInt(l) && luIsInt(r)) { return i64Eq(luPair(l), luPair(r)) }
-    if (luIsNum(l) && luIsNum(r)) { return luCmpV(l, r, false) === 0 }
-    return l === r
+    if (luIsNum(l) && luIsNum(r)) { return luCmpV(l, r, 0) === 0 }
+    if (l === r) { return true }
+    // Two different tables ask __eq, the first one's or else the second's, and
+    // take the truth of its answer.
+    if (typeof l == "object" && typeof r == "object" && luIsTable(l) && luIsTable(r)) {
+        var h = luBinTm("__eq", l, r)
+        if (h !== undefined) { return luTruthy(luFirstOf(h(l, r))) }
+    }
+    return false
 }
 
 // < > <= >=, by index (0..3).
@@ -815,8 +850,9 @@ function js_lucmp(op_raw, l, r) {
         // luCmpV then makes all four comparisons false, which is right.
         if (l === r) { return op === 2 || op === 3 }
     }
-    var c = luCmpV(l, r, op === 1 || op === 3)
+    var c = luCmpV(l, r, op)
     if (c === 2) { return false }         // a NaN operand is unordered
+    if (c >= 4) { return c === 4 }        // a metamethod's answer
     if (op === 0) { return c < 0 }
     if (op === 1) { return c > 0 }
     if (op === 2) { return c <= 0 }
@@ -1552,7 +1588,7 @@ function luObjId(v) {
     if (i === luIdObjs.length) { luIdObjs.push(v) }
     return i + 1
 }
-function js_luident(v) {
+function luIdent(v) {
     var n = 1431633920 + 16 * luObjId(v)
     var digits = "0123456789abcdef"
     var hex = ""
@@ -1564,6 +1600,139 @@ function js_luident(v) {
     var tn = luTypeName(v)
     if (tn == "userdata") { return "file (0x" + hex + ")" }
     return tn + ": 0x" + hex
+}
+// luaL_tolstring of a table or a function: its __tostring's answer, which has to
+// be a string or a number; else the identity, under the metatable's __name when
+// that is a string. Twin of rt.luObjStr in abnf/jsrtlumeta.go.
+function js_luident(v) {
+    var h = luTm(v, "__tostring")
+    if (h !== undefined) {
+        var s = luFirstOf(h(v))
+        if (typeof s == "string") { return s }
+        if (luIsNum(s)) { return js_lustr(s) }
+        luFail("'__tostring' must return a string")
+    }
+    var id = luIdent(v)
+    var nm = luTm(v, "__name")
+    if (typeof nm == "string") { return nm + id.substring(id.indexOf(":"), id.length) }
+    return id
+}
+
+// ============================================================ metatables ===
+// A table's metatable is the hidden field __f of its object (setmetatable),
+// which no program can name because js_lukey escapes the "__" prefix. It is the
+// float box's slot on purpose: every table write and every read miss already
+// reads __f to refuse a box, so the same read finds a metatable and a table
+// without one pays nothing more. A box holds a number there, a table a table.
+// A metamethod is the RAW field of the metatable named by the event, so it is read
+// at the event's escaped key. Every string shares one metatable, whose __index
+// is the string library; the emitted module hands it over with js_lustrmeta.
+// Twin of abnf/jsrtlumeta.go, function for function.
+
+// The events by the code the emitter passes to js_lutm: the arithmetic codes are
+// js_luarith's operator indexes, and 8 + k is js_lubit's operator k.
+var LU_EVENTS = ["__add", "__sub", "__mul", "__div", "__idiv", "__mod", "__pow", "__unm",
+    "__band", "__bor", "__bxor", "__shl", "__shr", "__bnot", "__concat", "__eq", "__lt", "__le", "__len",
+    "__call", "__pairs"]
+var luStrMetas = []
+function js_lustrmeta(m) {
+    luStrMetas.push(m)
+    return undefined
+}
+function luMetaOf(v) {
+    if (typeof v == "string") { return luStrMetas.length > 0 ? luStrMetas[0] : undefined }
+    if (!luIsTable(v)) { return undefined }
+    return v["__f"]
+}
+function luTm(v, ev) {
+    var mt = luMetaOf(v)
+    if (mt === undefined || mt === null) { return undefined }
+    var h = mt[luKeyEsc + ev]
+    if (h === null) { return undefined }
+    return h
+}
+// A binary event's metamethod: the first operand's, else the second's
+// (luaT_trybinTM).
+function luBinTm(ev, a, b) {
+    var h = luTm(a, ev)
+    if (h !== undefined) { return h }
+    return luTm(b, ev)
+}
+function luTruthy(v) { return v !== undefined && v !== null && v !== false }
+// (event code as a raw handle, a, b) -> a's metamethod, else b's, or nil.
+function js_lutm(ev_raw, a, b) { return luBinTm(LU_EVENTS[ev_raw], a, b) }
+
+// luaV_finishget past a raw miss on t: a function answers the lookup, a table is
+// searched raw and then through its own metatable, and anything else is indexed
+// through its type's metatable. 2000 is lvm.c's MAXTAGLOOP.
+function js_luindex(t, k) {
+    var kk = js_lukey(k)
+    var cur = anytype // The value being indexed, a table or not.
+    cur = t
+    for (var loop = 0; loop < 2000; loop++) {
+        var h = anytype // Its __index, any value.
+        h = luTm(cur, "__index")
+        if (h === undefined) {
+            if (!luIsTable(cur)) { luFail("attempt to index a " + luTypeName(cur) + " value") }
+            return undefined
+        }
+        if (typeof h == "function") { return luFirstOf(h(cur, k)) }
+        cur = h
+        if (luIsTable(cur)) {
+            var v = cur[kk]
+            if (v !== undefined && v !== null) { return v }
+        }
+    }
+    luFail("'__index' chain too long; possible loop")
+    return undefined
+}
+// luaV_finishset on t, which has a metatable: a key the table already holds, or
+// a table with no __newindex, is stored raw; a function takes the store, and a
+// table is stored into in its turn.
+function js_lusetindex(t, k, v) {
+    var cur = anytype // The value being stored into, a table or not.
+    cur = t
+    for (var loop = 0; loop < 2000; loop++) {
+        var h = anytype // The __newindex in force, if any.
+        h = undefined
+        if (luIsTable(cur)) {
+            var have = cur[js_lukey(k)]
+            if (have === undefined || have === null) { h = luTm(cur, "__newindex") }
+            if (h === undefined) {
+                cur[js_luwkey(k)] = v
+                return undefined
+            }
+        } else {
+            h = luTm(cur, "__newindex")
+            if (h === undefined) { luFail("attempt to index a " + luTypeName(cur) + " value") }
+        }
+        if (typeof h == "function") {
+            h(cur, k, v)
+            return undefined
+        }
+        cur = h
+    }
+    luFail("'__newindex' chain too long; possible loop")
+    return undefined
+}
+
+// setmetatable(t, mt) and getmetatable(v), lbaselib's: a __metatable field
+// protects the metatable and is what getmetatable answers instead.
+function js_lusetmt(args) {
+    var t = luCheckTab("setmetatable", 1, args)
+    var mt = luArgAt(args, 2)
+    if (args.length < 2 || (mt !== undefined && mt !== null && !luIsTable(mt))) { luArgTypeErr("setmetatable", 2, "nil or table", args) }
+    if (luTm(t, "__metatable") !== undefined) { luFail("cannot change a protected metatable") }
+    if (mt === null) { t["__f"] = undefined } else { t["__f"] = mt }
+    return t
+}
+function js_lugetmt(args) {
+    luCheckAny("getmetatable", 1, args)
+    var mt = luMetaOf(args[0])
+    if (mt === undefined || mt === null) { return undefined }
+    var prot = luTm(args[0], "__metatable")
+    if (prot !== undefined) { return prot }
+    return mt
 }
 function lsFmtLitKind(args, n) {
     var v = luArgAt(args, n)
@@ -1695,7 +1864,10 @@ function js_luassert(args) {
 function js_lurawequal(args) {
     luCheckAny("rawequal", 1, args)
     luCheckAny("rawequal", 2, args)
-    return js_lueq(args[0], args[1])
+    // Only == of two tables asks a metamethod, so a raw equality is js_lueq's
+    // number arm or identity.
+    if (luIsNum(args[0]) && luIsNum(args[1])) { return js_lueq(args[0], args[1]) }
+    return args[0] === args[1]
 }
 function js_lurawget(args) {
     var t = luCheckTab("rawget", 1, args)

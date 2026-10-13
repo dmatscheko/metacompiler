@@ -394,7 +394,7 @@ type jsrt struct {
 	missVar interface{} // f(name)      -> the value to throw, or nil = abort
 	missMem interface{} // f(key, obj)  -> the value to throw, or nil = abort
 	missSet interface{} // f(key, obj)  -> the value to throw, or nil = abort
-	missFn  interface{} // f(callee)    -> the value to throw, or nil = abort (lua)
+	missFn  interface{} // f(callee, args) -> the call's result, or nil = abort (lua; see rt_miss_fn)
 
 	// The FOURTH of the family, and the odd one out: it is a plain VALUE, not a
 	// closure. memberCall cannot build node's message for a call of a non-function
@@ -3169,8 +3169,8 @@ func (rt *jsrt) callInner(callee interface{}, this interface{}, args []interface
 		if rv.Kind() == reflect.Func {
 			return rt.reflectCall(rv, args)
 		}
-		if exc, ok := rt.runMissHook(&rt.missFn, callee); ok {
-			panic(&jsThrown{value: exc})
+		if rt.missFn != nil {
+			return rt.call(rt.missFn, jsUndef, []interface{}{callee, &jsArray{elems: args}})
 		}
 		// The wording is the floor's die2 in languages/lib/runtime.c, byte for byte:
 		// this message is reachable from a metajs program and the two engines have
@@ -13130,9 +13130,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// The CALL sibling, and a value rather than a closure: see the missCall
 		// field.
 		"js_rt_misscall": func(a []uint64) uint64 { rt.missCall = u(a[0]); return 0 },
-		// The closure hook for a call of a non-function value, which lua's pcall
-		// catches as "attempt to call a nil value". Twin of js_rt_missfn in
-		// languages/lib/runtime.c.
+		// The closure hook for a call of a non-function value: it answers the
+		// call's result (lua's __call) or raises "attempt to call a nil value".
+		// Twin of js_rt_missfn in languages/lib/runtime.c.
 		"js_rt_missfn": func(a []uint64) uint64 { rt.missFn = u(a[0]); return 0 },
 
 		"js_num_i": func(a []uint64) uint64 { // (i64 value) -> number handle

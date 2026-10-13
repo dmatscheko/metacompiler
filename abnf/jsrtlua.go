@@ -31,6 +31,8 @@ package abnf
 //	                           only case the plain reading could not tell from an
 //	                           integer. The Lua compiler grammar creates this box
 //	                           in IR and reads it directly, so the shape is fixed.
+//	                           A TABLE holds its metatable in the same slot
+//	                           (jsrtlumeta.go), so only a float64 there is a box.
 //
 // Registration is additive: an init() appends a registrar to rxExtraExterns, so
 // nothing here runs unless a program calls one of the js_lu* externs, which only
@@ -440,6 +442,15 @@ func (rt *jsrt) luArith(op int, lv, rv interface{}) interface{} {
 	l, lok := luToNum(lv)
 	r, rok := luToNum(rv)
 	if !lok || !rok {
+		// An operand that is no number asks its metamethod; unary minus has one
+		// operand, which lua passes twice.
+		rarg := rv
+		if op == 7 {
+			rarg = lv
+		}
+		if h := rt.luBinTm(luEvents[op], lv, rarg); h != nil {
+			return rt.luTmCall(h, lv, rarg)
+		}
 		rt.luArithFail(op, lv, rv, lok)
 	}
 	if op == 3 {
@@ -549,6 +560,11 @@ func (rt *jsrt) luToIntOp(v interface{}, opnd int) int64 {
 // LOGICAL in both directions - Lua's >> never sign-extends - a count of 64 or
 // more clears the value, and a negative count shifts the other way.
 func (rt *jsrt) luBit(op int, lv, rv interface{}) interface{} {
+	if !luIsNum(lv) || !luIsNum(rv) {
+		if h := rt.luBinTm(luEvents[8+op], lv, rv); h != nil {
+			return rt.luTmCall(h, lv, rv)
+		}
+	}
 	// lua blames the first operand that is no number at all, and only when both
 	// are numbers the first that is no integer (luaT_trybinTM).
 	if luIsNum(lv) && !luIsNum(rv) {
@@ -659,10 +675,15 @@ func (rt *jsrt) luCmp(op int, l, r interface{}) bool {
 		ls, lok := l.(string)
 		rs, rok := r.(string)
 		if !lok || !rok {
-			tl, tr := rt.luTypeName(l), rt.luTypeName(r)
+			// Otherwise __lt or __le of the operands in that order decides.
+			x, y := l, r
 			if op == 1 || op == 3 {
-				tl, tr = tr, tl
+				x, y = r, l
 			}
+			if h := rt.luBinTm(luEvents[16+op/2], x, y); h != nil {
+				return luTruthy(rt.luTmCall(h, x, y))
+			}
+			tl, tr := rt.luTypeName(x), rt.luTypeName(y)
 			if tl == tr {
 				rt.luFail("attempt to compare two %s values", tl)
 			}
@@ -1015,16 +1036,35 @@ func init() {
 			return w(rt.luBit(int(a[0]), u(a[1]), u(a[2])))
 		}
 		m["js_lubnot"] = func(a []uint64) uint64 {
-			return w(giNorm(^rt.luToIntOp(u(a[0]), 1), 64, false))
+			v := u(a[0])
+			if !luIsNum(v) {
+				if h := rt.luTm(v, "__bnot"); h != nil {
+					return w(rt.luTmCall(h, v, v))
+				}
+			}
+			return w(giNorm(^rt.luToIntOp(v, 1), 64, false))
 		}
-		m["js_lueq"] = func(a []uint64) uint64 { return boolH(rt.luEq(u(a[0]), u(a[1]))) }
+		// == in the program: two different tables ask __eq, the first one's or
+		// else the second's, and take the truth of its answer.
+		m["js_lueq"] = func(a []uint64) uint64 {
+			l, r := u(a[0]), u(a[1])
+			if rt.luEq(l, r) {
+				return jsHTrue
+			}
+			if _, lt := l.(*jsObject); lt && rt.luIsTable(l) && rt.luIsTable(r) {
+				if h := rt.luBinTm("__eq", l, r); h != nil {
+					return boolH(luTruthy(rt.luTmCall(h, l, r)))
+				}
+			}
+			return boolH(false)
+		}
 		m["js_lucmp"] = func(a []uint64) uint64 {
 			return boolH(rt.luCmp(int(a[0]), u(a[1]), u(a[2])))
 		}
 		m["js_lustr"] = func(a []uint64) uint64 { return rt.wrapStr(luNumStr(u(a[0]))) }
 		m["js_lukey"] = func(a []uint64) uint64 { return w(luKey(u(a[0]))) }
 		m["js_luwkey"] = func(a []uint64) uint64 { return w(rt.luWriteKey(u(a[0]))) }
-		m["js_luident"] = func(a []uint64) uint64 { return rt.wrapStr(rt.luIdent(u(a[0]))) }
+		m["js_luident"] = func(a []uint64) uint64 { return rt.wrapStr(rt.luObjStr(u(a[0]))) }
 		m["js_luforprep"] = func(a []uint64) uint64 { return w(rt.luForPrep(u(a[0]), u(a[1]), u(a[2]))) }
 		// A table key as pairs hands it to the program. The object store
 		// addresses a number by its text, so js_keys answers text: a text that

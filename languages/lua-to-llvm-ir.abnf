@@ -855,7 +855,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return f
     }
     function callLua(b, name, args) { return b.NewCall(luaFn(name), args) }
-    var luaFnArity = {lua_catstr: 2, lua_where: 1, lua_whereat: 1, lua_errlevel: 1, lua_errval: 1, lua_errtext: 1, lua_raise: 1,
+    var luaFnArity = {lua_catstr: 4, lua_metabin: 3, lua_where: 1, lua_whereat: 1, lua_errlevel: 1, lua_errval: 1, lua_errtext: 1, lua_raise: 1,
                       lua_getvar: 2, lua_ismv: 1, lua_first: 1, lua_all: 1, lua_mk: 1, lua_appendall: 2, lua_extend: 2, lua_spread: 3,
                       lua_tail: 2, lua_shift: 3, lua_strall: 1, lua_tramp: 1,
                       lua_num: 1, lua_isnum: 1, lua_isint: 1, lua_mkflt: 1, lua_res: 3,
@@ -865,18 +865,32 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // is enough - Lua's own truthiness (the `truthy` override below) would recurse.
     function rawTruthy(b, v) { return b.NewICmp(llvm.enum.IPredNE, callExt(b, "js_truthy", [v]), handle(0)) }
     function luaFnBody(name, b, ps) {
+        if (name == "lua_metabin") {
+            // The first result of the metamethod of event p0 (js_lutm's code, a raw
+            // handle) of the operands p1 and p2, called with both.
+            var margs = callExt(b, "js_arr_new", [])
+            callExt(b, "js_arr_push", [margs, ps[1]])
+            callExt(b, "js_arr_push", [margs, ps[2]])
+            b.NewRet(callLua(b, "lua_first", [callExt(b, "js_call", [callExt(b, "js_lutm", [ps[0], ps[1], ps[2]]), hUndef, margs])]))
+            return
+        }
         if (name == "lua_catstr") {
             // A concatenation operand: a string as it is, a number as tostring
             // renders it, anything else a Lua error naming the operand (p1, which
-            // one). Twin of luaCatStr in lua-interpreter.abnf.
+            // one) - unless the pair p2 .. p3 has a __concat, when the answer is
+            // nil and makeConcat calls it. Twin of luaCatStr in lua-interpreter.abnf.
             var isStrB = curF.NewBlock("")
             var notStrB = curF.NewBlock("")
             var numB = curF.NewBlock("")
+            var tmB = curF.NewBlock("")
             var badB = curF.NewBlock("")
             b.NewCondBr(rawTruthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [ps[0]]), emitStr(b, "string")])), isStrB, notStrB)
             isStrB.NewRet(ps[0])
-            notStrB.NewCondBr(rawTruthy(notStrB, callLua(notStrB, "lua_isnum", [ps[0]])), numB, badB)
+            notStrB.NewCondBr(rawTruthy(notStrB, callLua(notStrB, "lua_isnum", [ps[0]])), numB, tmB)
             numB.NewRet(callExt(numB, "js_lustr", [ps[0]]))
+            var hasTmB = curF.NewBlock("")
+            tmB.NewCondBr(tmB.NewICmp(llvm.enum.IPredEQ, callExt(tmB, "js_lutm", [handle(14), ps[2], ps[3]]), hUndef), badB, hasTmB)
+            hasTmB.NewRet(hUndef)
             var catMk = luaMarker(badB, callExt(badB, "js_add", [callExt(badB, "js_add", [emitStr(badB, "attempt to concatenate a "),
                 callExt(badB, "js_lutname", [ps[0]])]), emitStr(badB, " value")]))
             callExt(badB, "js_set", [catMk, emitStr(badB, "__luop"), ps[1]])
@@ -1837,7 +1851,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var libNeed = {math: false, string: false, table: false, next: false, ipairs: false, pairs: false,
                    error: false, pcall: false, xpcall: false, select: false, tostring: false,
                    tonumber: false, type: false, assert: false, rawequal: false, rawget: false,
-                   rawset: false, rawlen: false, _VERSION: false, io: false}
+                   rawset: false, rawlen: false, _VERSION: false, io: false, setmetatable: false, getmetatable: false}
     makeVarRef = function(name) {
         if (libNeed[name] === false) { libNeed[name] = true }
         return function(b) {
@@ -1861,9 +1875,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // On the integer side MUL by -1 is the 64-bit wrapping negation,
     // math.mininteger (its own negation) included, because i64Mul wraps.
     //
-    // Metatables are not in the subset, so a table operand reaches no metamethod
-    // and fails with "attempt to perform arithmetic on a table value". Whichever
-    // half implements metatables must implement __unm with it (not __mul).
+    // A table operand reaches __unm (js_luarith names operator 7 by that event,
+    // not by __mul) and is passed to it twice.
     makeNeg = function(t) {
         return function(b) {
             var r = t(b)
@@ -1905,7 +1918,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var notStrB = curF.NewBlock("")
             var badB = curF.NewBlock("")
             b.NewCondBr(truthy(b, callExt(b, "js_seq", [tyV, emitStr(b, "string")])), strB, notStrB)
-            notStrB.NewCondBr(truthy(notStrB, callExt(notStrB, "js_seq", [tyV, emitStr(notStrB, "object")])), headB, badB)
+            // A table with a __len answers what it answers.
+            var objB = curF.NewBlock("")
+            var lenTmB = curF.NewBlock("")
+            notStrB.NewCondBr(truthy(notStrB, callExt(notStrB, "js_seq", [tyV, emitStr(notStrB, "object")])), objB, badB)
+            objB.NewCondBr(objB.NewICmp(llvm.enum.IPredEQ, callExt(objB, "js_lutm", [handle(18), tv, tv]), hUndef), headB, lenTmB)
+            callExt(lenTmB, "js_scope_set", [curScopeV, emitStr(lenTmB, rName), callLua(lenTmB, "lua_metabin", [handle(18), tv, tv])])
+            lenTmB.NewBr(joinB)
             var lenMk = luaMarker(badB, callExt(badB, "js_add", [callExt(badB, "js_add", [emitStr(badB, "attempt to get length of a "),
                 callExt(badB, "js_lutname", [tv])]), emitStr(badB, " value")]))
             callExt(badB, "js_set", [lenMk, emitStr(badB, "__luop"), emitNum(badB, 1)])
@@ -1939,9 +1958,20 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b = rl.b
             var rr = r(b)
             b = rr.b
-            var ls = callLua(b, "lua_catstr", [callLua(b, "lua_first", [rl.v]), emitNum(b, 1)])
-            var rs = callLua(b, "lua_catstr", [callLua(b, "lua_first", [rr.v]), emitNum(b, 2)])
-            return {b: b, v: callExt(b, "js_add", [ls, rs])}
+            var lv = callLua(b, "lua_first", [rl.v])
+            var rv = callLua(b, "lua_first", [rr.v])
+            var ls = callLua(b, "lua_catstr", [lv, emitNum(b, 1), lv, rv])
+            var rs = callLua(b, "lua_catstr", [rv, emitNum(b, 2), lv, rv])
+            // A nil side means the pair has a __concat (lua_catstr).
+            var catB = curF.NewBlock("")
+            var tmB = curF.NewBlock("")
+            var joinB = curF.NewBlock("")
+            b.NewCondBr(b.NewOr(b.NewICmp(llvm.enum.IPredEQ, ls, hUndef), b.NewICmp(llvm.enum.IPredEQ, rs, hUndef)), tmB, catB)
+            var sv = callExt(catB, "js_add", [ls, rs])
+            catB.NewBr(joinB)
+            var tv = callLua(tmB, "lua_metabin", [handle(14), lv, rv])
+            tmB.NewBr(joinB)
+            return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(sv, catB), llvm.ir.NewIncoming(tv, tmB)])}
         }
     }
 
@@ -1990,7 +2020,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // obj:m(args): look up m on the receiver, then call it with the
             // receiver prepended as the first argument (self).
             b.NewStore(handle(s.at.code), gLuaPos)
-            var mr = emitMemberGet(b, v, emitStr(b, luaNameKey(s.name)), sfx)
+            var mr = emitMemberGet(b, v, emitStr(b, luaNameKey(s.name)), sfx, s.name, hUndef)
             b = mr.b
             var fn = mr.v
             var margs = callExt(b, "js_arr_new", [])
@@ -2003,12 +2033,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return {b: b, v: luaCallTail(b, tail, fn, margs), call: true}
         }
         if (s.kind == "field") {
-            var fr = emitMemberGet(b, v, emitStr(b, luaNameKey(s.name)), sfx)
+            var fr = emitMemberGet(b, v, emitStr(b, luaNameKey(s.name)), sfx, s.name, hUndef)
             return {b: fr.b, v: fr.v, call: false}
         }
         var ir = s.idx(b)
         b = ir.b
-        var xr = emitMemberGet(b, v, callLua(b, "lua_cmpv", [callLua(b, "lua_first", [ir.v])]), sfx)
+        var kFirst = callLua(b, "lua_first", [ir.v])
+        var xr = emitMemberGet(b, v, callLua(b, "lua_cmpv", [kFirst]), sfx, "", kFirst)
         return {b: xr.b, v: xr.v, call: false}
     }
     // A tail call is not made here: it becomes the pair [f, args] that makeReturn
@@ -2038,8 +2069,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if ((name.charCodeAt(0) === 95 && name.charCodeAt(1) === 95) || name == "Infinity" || name == "NaN") { return String.fromCharCode(256) + name }
         return name
     }
-    // `sfx` names the indexed expression in an error (luaDescText).
-    function emitMemberGet(b, v, kV, sfx) {
+    // `sfx` names the indexed expression in an error (luaDescText). The key as the
+    // program wrote it, which an __index function is handed, is the field name
+    // keyName (emitted only where it is used), or keyV when keyName is "".
+    function emitMemberGet(b, v, kV, sfx, keyName, keyV) {
         var tyV = callExt(b, "js_typeof", [v])
         var objB = curF.NewBlock("")
         var notObjB = curF.NewBlock("")
@@ -2049,15 +2082,23 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b.NewCondBr(rawTruthy(b, callExt(b, "js_seq", [tyV, emitStr(b, "object")])), objB, notObjB)
         var ov = callExt(objB, "js_get", [v, kV])
         // Only a MISS can be the {__f} box of an integral float (2.0), which is a
-        // number and not a table: the check costs nothing on a hit.
+        // number and not a table: the check costs nothing on a hit. The same slot
+        // holds a table's metatable (lib/lua-rt.metajs, luMetaOf), and then the
+        // miss goes to its __index (js_luindex) - one read for both.
         var missB = curF.NewBlock("")
         var hitB = curF.NewBlock("")
         objB.NewCondBr(rawTruthy(objB, callExt(objB, "js_seq", [ov, hUndef])), missB, hitB)
         hitB.NewBr(joinB)
+        var slotB = curF.NewBlock("")
         var boxB = curF.NewBlock("")
-        missB.NewCondBr(rawTruthy(missB, callExt(missB, "js_sne", [callExt(missB, "js_get", [v, emitStr(missB, "__f")]), hUndef])), boxB, joinB)
+        var metaB = curF.NewBlock("")
+        var fV = callExt(missB, "js_get", [v, emitStr(missB, "__f")])
+        missB.NewCondBr(rawTruthy(missB, callExt(missB, "js_sne", [fV, hUndef])), slotB, joinB)
+        slotB.NewCondBr(rawTruthy(slotB, callExt(slotB, "js_seq", [callExt(slotB, "js_typeof", [fV]), emitStr(slotB, "object")])), metaB, boxB)
         luaIndexError(boxB, v, sfx)
         boxB.NewBr(joinB)
+        var mv = callExt(metaB, "js_luindex", [v, keyName != "" ? emitStr(metaB, keyName) : keyV])
+        metaB.NewBr(joinB)
         notObjB.NewCondBr(rawTruthy(notObjB, callExt(notObjB, "js_seq", [tyV, emitStr(notObjB, "string")])), strB, badB)
         var libV = callLua(strB, "lua_getvar", [curScopeV, emitStr(strB, "0strlib")])
         var sv = callExt(strB, "js_get", [libV, kV])
@@ -2065,6 +2106,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         luaIndexError(badB, v, sfx)
         badB.NewBr(joinB)
         return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(ov, hitB), llvm.ir.NewIncoming(hUndef, missB),
+                                           llvm.ir.NewIncoming(mv, metaB),
                                            llvm.ir.NewIncoming(hUndef, boxB), llvm.ir.NewIncoming(sv, strB),
                                            llvm.ir.NewIncoming(hUndef, badB)])}
     }
@@ -2181,9 +2223,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // A target's key: a field's name, or the index's first value, which is made a
     // table key only when it is written (js_luwkey rejects nil and NaN there).
     function pathKeyV(b, p) {
-        if (p.kind == "field") { return {b: b, v: emitStr(b, luaNameKey(p.name)), raw: false} }
+        if (p.kind == "field") { return {b: b, v: emitStr(b, luaNameKey(p.name)), raw: false, name: p.name} }
         var r = p.idx(b)
-        return {b: r.b, v: callLua(r.b, "lua_first", [r.v]), raw: true}
+        return {b: r.b, v: callLua(r.b, "lua_first", [r.v]), raw: true, name: ""}
     }
     // An indexed target's table and key, evaluated before any right-hand side, as
     // lua does (manual 3.3.3: in `i, a[i] = i+1, 20` the a[i] is a[old i]); whether
@@ -2205,7 +2247,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (afterCall) { o = callLua(b, "lua_first", [o]) }
         var lk = pathKeyV(b, ref.path[ref.path.length - 1])
-        return {b: lk.b, o: o, k: lk.v, raw: lk.raw, d: pdescs[ref.path.length - 1]}
+        return {b: lk.b, o: o, k: lk.v, raw: lk.raw, name: lk.name, d: pdescs[ref.path.length - 1]}
     }
     function emitSlotWrite(b, ref, slot, v) {
         if (slot.o == null) {
@@ -2214,15 +2256,23 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         var o = slot.o
         // Only a table takes a field - not the {__f} box of an integral float -
-        // and anything else is a Lua error, as in luaSetIndex.
+        // and anything else is a Lua error, as in luaSetIndex. A table whose __f
+        // slot holds its metatable takes the store to js_lusetindex (__newindex),
+        // with the key as the program wrote it.
         var objB = curF.NewBlock("")
         var setB = curF.NewBlock("")
+        var slotB = curF.NewBlock("")
+        var metaB = curF.NewBlock("")
         var badB = curF.NewBlock("")
         var doneB = curF.NewBlock("")
         b.NewCondBr(rawTruthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [o]), emitStr(b, "object")])), objB, badB)
-        objB.NewCondBr(rawTruthy(objB, callExt(objB, "js_seq", [callExt(objB, "js_get", [o, emitStr(objB, "__f")]), hUndef])), setB, badB)
+        var fV = callExt(objB, "js_get", [o, emitStr(objB, "__f")])
+        objB.NewCondBr(rawTruthy(objB, callExt(objB, "js_seq", [fV, hUndef])), setB, slotB)
         callExt(setB, "js_set", [o, slot.raw ? callExt(setB, "js_luwkey", [slot.k]) : slot.k, v])
         setB.NewBr(doneB)
+        slotB.NewCondBr(rawTruthy(slotB, callExt(slotB, "js_seq", [callExt(slotB, "js_typeof", [fV]), emitStr(slotB, "object")])), metaB, badB)
+        callExt(metaB, "js_lusetindex", [o, slot.raw ? slot.k : emitStr(metaB, slot.name), v])
+        metaB.NewBr(doneB)
         luaIndexError(badB, o, luaDescText(slot.d))
         badB.NewBr(doneB)
         return doneB
@@ -2385,6 +2435,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // writes the closure into the last field of the resolved table path.
     function makeFunc(bodyT, plist, nameDesc) {
         var params = plist.params
+        if (nameDesc.fsteps.length > 1) { libNeed.string = true } // emitMemberGet's string arm
         if (nameDesc.fmethod) {
             var mp = []
             mp.push("self")
@@ -2400,10 +2451,21 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             var o = callExt(b, "js_scope_get", [curScopeV, emitStr(b, nameDesc.fbase)])
             for (var i = 0; i < nameDesc.fsteps.length - 1; i++) {
-                o = callExt(b, "js_get", [o, emitStr(b, luaNameKey(nameDesc.fsteps[i]))])
+                var st = emitMemberGet(b, o, emitStr(b, luaNameKey(nameDesc.fsteps[i])), "", nameDesc.fsteps[i], hUndef)
+                b = st.b
+                o = st.v
             }
-            callExt(b, "js_set", [o, emitStr(b, luaNameKey(nameDesc.fsteps[nameDesc.fsteps.length - 1])), cl])
-            return b
+            // `function t.f` is the store t.f = function, so a metatable sees it.
+            var fname = nameDesc.fsteps[nameDesc.fsteps.length - 1]
+            var rawB = curF.NewBlock("")
+            var metaB = curF.NewBlock("")
+            var doneB = curF.NewBlock("")
+            b.NewCondBr(rawTruthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [callExt(b, "js_get", [o, emitStr(b, "__f")])]), emitStr(b, "object")])), metaB, rawB)
+            callExt(rawB, "js_set", [o, emitStr(rawB, luaNameKey(fname)), cl])
+            rawB.NewBr(doneB)
+            callExt(metaB, "js_lusetindex", [o, emitStr(metaB, fname), cl])
+            metaB.NewBr(doneB)
+            return doneB
         }
     }
     function makeLocalFunc(bodyT, plist, name) {
@@ -2755,11 +2817,20 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function libINext(bb, argsH) {
         var t = libArg(bb, argsH, 0)
         var nk = callExt(bb, "js_add", [libArg(bb, argsH, 1), emitNum(bb, 1)])
-        var v = callExt(bb, "js_get", [t, nk])
+        var rawV = callExt(bb, "js_get", [t, nk])
         var nilB = curF.NewBlock("")
         var okB = curF.NewBlock("")
-        bb.NewCondBr(truthy(bb, callExt(bb, "js_seq", [v, hUndef])), nilB, okB)
-        nilB.NewRet(hUndef)
+        bb.NewCondBr(truthy(bb, callExt(bb, "js_seq", [rawV, hUndef])), nilB, okB)
+        // A raw miss on a table with a metatable asks its __index, as lua_geti does.
+        var objB = curF.NewBlock("")
+        var mtB = curF.NewBlock("")
+        var endB = curF.NewBlock("")
+        nilB.NewCondBr(rawTruthy(nilB, callExt(nilB, "js_seq", [callExt(nilB, "js_typeof", [t]), emitStr(nilB, "object")])), objB, endB)
+        objB.NewCondBr(rawTruthy(objB, callExt(objB, "js_seq", [callExt(objB, "js_typeof", [callExt(objB, "js_get", [t, emitStr(objB, "__f")])]), emitStr(objB, "object")])), mtB, endB)
+        var mv = callExt(mtB, "js_luindex", [t, nk])
+        mtB.NewCondBr(truthy(mtB, callExt(mtB, "js_seq", [mv, hUndef])), endB, okB)
+        endB.NewRet(hUndef)
+        var v = okB.NewPhi([llvm.ir.NewIncoming(rawV, bb), llvm.ir.NewIncoming(mv, mtB)])
         var arr = callExt(okB, "js_arr_new", [])
         callExt(okB, "js_arr_push", [arr, nk])
         callExt(okB, "js_arr_push", [arr, v])
@@ -2819,6 +2890,19 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         callExt(otherB, "js_arr_push", [oarr, hUndef])
         callExt(otherB, "js_arr_push", [oarr, hUndef])
         otherB.NewRet(callLua(otherB, "lua_mk", [oarr]))
+        // A __pairs metamethod answers the iterator triple itself: its first three
+        // results.
+        var pmB = curF.NewBlock("")
+        var plainB = curF.NewBlock("")
+        var pm = callExt(tabB, "js_lutm", [handle(20), t, t])
+        tabB.NewCondBr(tabB.NewICmp(llvm.enum.IPredEQ, pm, hUndef), plainB, pmB)
+        var pargs = callExt(pmB, "js_arr_new", [])
+        callExt(pmB, "js_arr_push", [pargs, t])
+        var pall = callLua(pmB, "lua_all", [callExt(pmB, "js_call", [pm, hUndef, pargs])])
+        var three = callExt(pmB, "js_arr_new", [])
+        for (var pi = 0; pi < 3; pi++) { callExt(pmB, "js_arr_push", [three, libArg(pmB, pall, pi)]) }
+        pmB.NewRet(callLua(pmB, "lua_mk", [three]))
+        tabB = plainB
         var st = callExt(tabB, "js_obj_new", [])
         callExt(tabB, "js_set", [st, emitStr(tabB, "t"), t])
         callExt(tabB, "js_set", [st, emitStr(tabB, "k"), callExt(tabB, "js_keys", [t])])
@@ -2934,6 +3018,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // Emit only the referenced libraries; a program that uses none emits nothing here.
     function emitLibs(b) {
+        if (libNeed.getmetatable) { libNeed.string = true } // getmetatable("") is the strings' metatable
         if (libNeed.error) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "error"), callExt(b, "js_closure", [handle(emitLibFunc(libError)), curScopeV])])
         }
@@ -2956,7 +3041,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // in lib/lua-rt.metajs).
         var baseExt = [["next", "js_lunext"], ["tonumber", "js_lutonumber"], ["assert", "js_luassert"],
                        ["rawequal", "js_lurawequal"], ["rawget", "js_lurawget"], ["rawset", "js_lurawset"],
-                       ["rawlen", "js_lurawlen"]]
+                       ["rawlen", "js_lurawlen"], ["setmetatable", "js_lusetmt"], ["getmetatable", "js_lugetmt"]]
         for (var bi = 0; bi < baseExt.length; bi++) {
             if (libNeed[baseExt[bi][0]]) {
                 callExt(b, "js_scope_decl", [curScopeV, emitStr(b, baseExt[bi][0]), callExt(b, "js_closure", [handle(emitLibFunc(libArgsExt(baseExt[bi][1]))), curScopeV])])
@@ -3017,6 +3102,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // The same table under a name no Lua program can spell, so the string
             // metatable lookup cannot be broken by `local string = 1`.
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0strlib"), st])
+            // The strings' metatable, {__index = string}, for getmetatable and an
+            // __index chain that reaches a string (js_lustrmeta).
+            var smt = callExt(b, "js_obj_new", [])
+            callExt(b, "js_set", [smt, emitStr(b, luaNameKey("__index")), st])
+            callExt(b, "js_lustrmeta", [callExt(b, "js_gc_pin", [smt])])
         }
         if (libNeed.table) {
             var tt = callExt(b, "js_obj_new", [])
@@ -3097,8 +3187,21 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function libIndexNil(bb, argsH) {
         return {b: bb, v: luaMarker(bb, emitStr(bb, "attempt to index a nil value"))}
     }
+    // The floor's hook for a call of a value that is no function, with the callee
+    // and the argument array: a value with a __call is called through it, with
+    // itself as the first argument (luaD_tryfuncTM); anything else is lua's error.
     function libCallBad(bb, argsH) {
-        var msg = callExt(bb, "js_add", [callExt(bb, "js_add", [emitStr(bb, "attempt to call a "), callExt(bb, "js_lutname", [libArg(bb, argsH, 0)])]), emitStr(bb, " value")])
+        var callee = libArg(bb, argsH, 0)
+        var cm = callExt(bb, "js_lutm", [handle(19), callee, callee])
+        var tmB = curF.NewBlock("")
+        var errB = curF.NewBlock("")
+        bb.NewCondBr(bb.NewICmp(llvm.enum.IPredEQ, cm, hUndef), errB, tmB)
+        var withSelf = callExt(tmB, "js_arr_new", [])
+        callExt(tmB, "js_arr_push", [withSelf, callee])
+        tmB = emitArrExtend(tmB, withSelf, libArg(tmB, argsH, 1))
+        tmB.NewRet(callExt(tmB, "js_call", [cm, hUndef, withSelf]))
+        bb = errB
+        var msg = callExt(bb, "js_add", [callExt(bb, "js_add", [emitStr(bb, "attempt to call a "), callExt(bb, "js_lutname", [callee])]), emitStr(bb, " value")])
         var code = bb.NewLoad(i64, gLuaCallee)
         var namedB = curF.NewBlock("")
         var doneB = curF.NewBlock("")
@@ -3106,7 +3209,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var named = callExt(namedB, "js_add", [msg, namedB.NewCall(luaCallDescFn(), [namedB.NewLShr(code, handle(1))])])
         namedB.NewBr(doneB)
         var full = doneB.NewPhi([llvm.ir.NewIncoming(msg, bb), llvm.ir.NewIncoming(named, namedB)])
-        return {b: doneB, v: luaMarker(doneB, full)}
+        return {b: doneB, v: callExt(doneB, "js_throw", [luaMarker(doneB, full)])}
     }
     function libUncaught(bb, argsH) {
         var text = callLua(bb, "lua_errtext", [callLua(bb, "lua_errval", [libArg(bb, argsH, 0)])])

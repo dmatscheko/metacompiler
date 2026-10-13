@@ -484,7 +484,7 @@ func (rt *jsrt) luFmtToStr(v interface{}) string {
 	if luIsNum(v) {
 		return luNumStr(v)
 	}
-	return rt.luIdent(v)
+	return rt.luObjStr(v)
 }
 
 // luIdents numbers the tables and functions in first-use order, and luIdObjs[n-1]

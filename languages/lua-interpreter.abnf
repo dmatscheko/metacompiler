@@ -29,10 +29,13 @@ Errors are Lua's: error(v [, level]) with the chunk:line position of its level,
 pcall and xpcall, and every runtime error catchable the same way, positioned at the
 statement that raised it.
 
-Not in the subset: metatables, coroutines, and the standard library beyond the
-base library built below (print, exit and the rest without the metatable, loading
-and collector functions), the table library, and the string and math tables
-(string.pack/unpack and math.random excepted).
+Metatables are in, with every operator metamethod and __index / __newindex /
+__call / __tostring / __name / __len / __pairs (not __close, __gc or __mode).
+
+Not in the subset: coroutines, and the standard library beyond the base library
+built below (print, exit and the rest without the loading and collector
+functions), the table library, and the string and math tables (string.pack/unpack
+and math.random excepted).
 
 There is no main(): the file simply runs top to bottom. Self checking programs count
 their failures and end with exit(fails). The same language with the same semantics is
@@ -1428,8 +1431,28 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (v === true) { return "true" }
         if (v === false) { return "false" }
         if (isNum(v)) { return luaNumStr(v) }
-        if (typeof v == "object" || typeof v == "function") { return luaIdent(v) }
+        if (typeof v == "object" || typeof v == "function") { return luaObjStr(v) }
         return "" + v
+    }
+    // luaL_tolstring of a table or a function: its __tostring's answer, which has
+    // to be a string or a number; else the identity, under the metatable's __name
+    // when that is a string. Twin of rt.luIdent in abnf/jsrtluafmt.go and
+    // js_luident in lib/lua-rt.metajs.
+    function luaObjStr(v) {
+        var h = anytype
+        h = luaTm(v, "__tostring")
+        if (h !== undefined) {
+            var s = anytype
+            s = luaCallVal(h, [v])
+            if (typeof s == "string") { return s }
+            if (isNum(s)) { return luaNumStr(s) }
+            fail("'__tostring' must return a string")
+        }
+        var nm = anytype
+        nm = luaTm(v, "__name")
+        var id = luaIdent(v)
+        if (typeof nm == "string") { return nm + id.substring(id.indexOf(":")) }
+        return id
     }
     // How a table or a function renders: its type and an identity, `table: 0x...`.
     // Real lua prints the address, which differs between runs, so what has to hold
@@ -1490,10 +1513,117 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (!hasOwn(o, kk)) { o.__keys.push(kk) }
         o[kk] = v
     }
+    // t[k] = v in the program: a raw store, unless the table has a metatable.
     function luaSetIndex(o, k, v) {
         if (o === undefined || o === null) { fail("attempt to index a nil value") }
         if (!isTbl(o)) { fail("attempt to index a " + luaType(o) + " value") }
-        luaRawSet(o, luaWriteKey(k), v)
+        if (o.__mt === undefined) { luaRawSet(o, luaWriteKey(k), v); return }
+        luaNewIndex(o, k, v)
+    }
+
+    // ----- metatables -----
+    // A table's metatable is its hidden __mt field (setmetatable), which no program
+    // can name because luaStrKey escapes the "__" prefix. A metamethod is the RAW
+    // field of the metatable named by the event, read at its escaped key. Every
+    // string shares one metatable whose __index is the string library. Twin of luTm
+    // in abnf/jsrtlumeta.go and lib/lua-rt.metajs.
+    var luaStrMetas = []
+    function luaStringMeta() {
+        if (luaStrMetas.length === 0) {
+            var sm = {}
+            luaRawSet(sm, luaKey("__index"), globalScope["string"])
+            luaStrMetas.push(sm)
+        }
+        return luaStrMetas[0]
+    }
+    function luaTm(v, ev) {
+        var mt = anytype // The metatable, when v has one.
+        if (typeof v == "string") { mt = luaStringMeta() }
+        else if (isTbl(v) && v.__mt !== undefined) { mt = v.__mt }
+        else { return undefined }
+        var kk = luaKeyEsc + ev
+        if (!hasOwn(mt, kk) || mt[kk] === null) { return undefined }
+        return mt[kk]
+    }
+    // A binary event's metamethod: the first operand's, else the second's
+    // (luaT_trybinTM).
+    function luaBinTm(ev, a, b) {
+        var h = anytype
+        h = luaTm(a, ev)
+        if (h === undefined) { h = luaTm(b, ev) }
+        return h
+    }
+    // A call the library makes: a value that is no function is called through its
+    // __call, with itself as the first argument (luaD_tryfuncTM).
+    function luaCallAll(f, args) {
+        var fn = anytype // The function actually called.
+        fn = f
+        var a = args
+        while (typeof fn != "function") {
+            var cm = anytype
+            cm = luaTm(fn, "__call")
+            if (cm === undefined) { fail("attempt to call a " + luaType(fn) + " value") }
+            a = [fn].concat(a)
+            fn = cm
+        }
+        return fn.apply(undefined, a)
+    }
+    // The first result of calling a metamethod.
+    function luaCallVal(f, args) { return luaFirst(luaCallAll(f, args)) }
+    // t[k] in the program: the raw value, or, when that is nil and the table has a
+    // metatable, what its __index answers (luaV_finishget).
+    function luaGet(o, k) {
+        var v = anytype
+        v = luaIndex(o, k)
+        if ((v === undefined || v === null) && isTbl(o) && o.__mt !== undefined) { return luaIndexMeta(o, k) }
+        return v
+    }
+    // The __index chain: a function answers the lookup, a table is searched raw and
+    // then through its own metatable, and anything else is indexed through its
+    // type's metatable. Twin of rt.luIndexMeta in abnf/jsrtlumeta.go and
+    // js_luindex in lib/lua-rt.metajs.
+    function luaIndexMeta(t, k) {
+        var cur = anytype // The value being indexed, a table or not.
+        cur = t
+        for (var loop = 0; loop < 2000; loop++) {
+            var h = anytype
+            h = luaTm(cur, "__index")
+            if (h === undefined) {
+                if (!isTbl(cur)) { fail("attempt to index a " + luaType(cur) + " value") }
+                return undefined
+            }
+            if (typeof h == "function") { return luaFirst(h(cur, k)) }
+            cur = h
+            if (isTbl(cur)) {
+                var v = anytype
+                v = luaIndex(cur, k)
+                if (v !== undefined && v !== null) { return v }
+            }
+        }
+        fail("'__index' chain too long; possible loop")
+    }
+    // The __newindex chain (luaV_finishset): a key the table already holds, or a
+    // table with no __newindex, is stored raw; a function takes the store, and a
+    // table is stored into in its turn. Twin of rt.luSetIndexMeta in
+    // abnf/jsrtlumeta.go and js_lusetindex in lib/lua-rt.metajs.
+    function luaNewIndex(t, k, v) {
+        var cur = anytype // The value being stored into, a table or not.
+        cur = t
+        for (var loop = 0; loop < 2000; loop++) {
+            var h = anytype
+            if (isTbl(cur)) {
+                var have = anytype
+                have = luaIndex(cur, k)
+                h = (have === undefined || have === null) ? luaTm(cur, "__newindex") : undefined
+                if (h === undefined) { luaRawSet(cur, luaWriteKey(k), v); return }
+            } else {
+                h = luaTm(cur, "__newindex")
+                if (h === undefined) { fail("attempt to index a " + luaType(cur) + " value") }
+            }
+            if (typeof h == "function") { h(cur, k, v); return }
+            cur = h
+        }
+        fail("'__newindex' chain too long; possible loop")
     }
     // The key a table is WRITTEN under: lua rejects nil and NaN there (luaH_newkey),
     // while reading t[nil] is just nil. Twin of js_luwkey in lib/lua-rt.metajs and
@@ -1532,6 +1662,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // and both types; otherwise it names the first operand that is not a number.
     // Twin of rt.luArithFail in abnf/jsrtlua.go.
     var luaArithNames = {"+": "add", "-": "sub", "*": "mul", "/": "div", "//": "idiv", "%": "mod", "^": "pow", "unm": "unm"}
+    // The metamethod event of each arithmetic and bitwise operator.
+    var luaArithEv = {"+": "__add", "-": "__sub", "*": "__mul", "/": "__div", "//": "__idiv", "%": "__mod", "^": "__pow",
+                      "&": "__band", "|": "__bor", "~": "__bxor", "<<": "__shl", ">>": "__shr"}
     function luaArithFail(op, l, r, lok) {
         if (typeof l == "string" || typeof r == "string") {
             fail("attempt to " + luaArithNames[op] + " a '" + luaType(l) + "' with a '" + luaType(r) + "'")
@@ -1565,6 +1698,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return iv
     }
     function luaBit(op, l, r) {
+        if (!isNum(l) || !isNum(r)) {
+            var h = anytype
+            h = luaBinTm(luaArithEv[op], l, r)
+            if (h !== undefined) { return luaCallVal(h, [l, r]) }
+        }
         // lua blames the first operand that is no number at all, and only when both
         // are numbers the first that is no integer (luaT_trybinTM).
         if (isNum(l) && !isNum(r)) { toIntOp(r, 2) }
@@ -1582,7 +1720,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (op == "|") { return szArith("|", a, b) }
         return szArith("^", a, b)   // Lua spells exclusive-or '~'
     }
-    function luaBitNot(v) { return szNot(toIntOp(v, 1)) }
+    // A unary metamethod is called with the operand twice, as lua does.
+    function luaBitNot(v) {
+        if (!isNum(v)) {
+            var h = anytype
+            h = luaTm(v, "__bnot")
+            if (h !== undefined) { return luaCallVal(h, [v, v]) }
+        }
+        return szNot(toIntOp(v, 1))
+    }
 
     // ----- Overridden operator / expression builders -----
 
@@ -1625,7 +1771,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var b = anytype // The right operand as a number.
         a = toNumV(l)
         b = toNumV(r)
-        if (a === undefined || b === undefined) { luaArithFail(op, l, r, a !== undefined) }
+        if (a === undefined || b === undefined) {
+            var h = anytype
+            h = luaBinTm(luaArithEv[op], l, r)
+            if (h !== undefined) { return luaCallVal(h, [l, r]) }
+            luaArithFail(op, l, r, a !== undefined)
+        }
         if (op == "/") { return mkFlt(numOf(a) / numOf(b)) }
         if (op == "^") { return mkFlt(Math.pow(numOf(a), numOf(b))) }
         if (isInt(a) && isInt(b)) {
@@ -1679,6 +1830,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return l === r
     }
+    // == in the program: two different tables ask __eq, the first one's or else
+    // the second's, and take the truth of its answer. Twin of js_lueq in
+    // abnf/jsrtlua.go and lib/lua-rt.metajs.
+    function luaEqTm(l, r) {
+        if (luaEq(l, r)) { return true }
+        if (!isTbl(l) || !isTbl(r)) { return false }
+        var h = anytype
+        h = luaBinTm("__eq", l, r)
+        return h !== undefined && luatruthy(luaCallVal(h, [l, r]))
+    }
     function luaCmp(op, l, r) {
         var c = 3 // 3: not an integer comparison
         if (isInt(l) && isInt(r)) { c = szCmp(l, r) }
@@ -1699,6 +1860,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // is b < a. Twin of luCmp in abnf/jsrtlua.go and js_lucmp in lua-rt.metajs.
         if (!(isNum(l) && isNum(r)) && !(typeof l == "string" && typeof r == "string")) {
             var swap = op == ">" || op == ">="
+            // Otherwise __lt or __le of the operands in that order decides.
+            var x = anytype
+            var y = anytype
+            x = swap ? r : l
+            y = swap ? l : r
+            var h = anytype
+            h = luaBinTm(op == "<" || op == ">" ? "__lt" : "__le", x, y)
+            if (h !== undefined) { return luatruthy(luaCallVal(h, [x, y])) }
             var tl = luaType(swap ? r : l)
             var tr = luaType(swap ? l : r)
             if (tl == tr) { fail("attempt to compare two " + tl + " values") }
@@ -1718,8 +1887,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var b = anytype
         a = luaFirst(l)
         b = luaFirst(r)
-        if (op == "==") { return luaEq(a, b) }
-        if (op == "~=") { return !luaEq(a, b) }
+        if (op == "==") { return luaEqTm(a, b) }
+        if (op == "~=") { return !luaEqTm(a, b) }
         if (op == "<" || op == ">" || op == "<=" || op == ">=") { return luaCmp(op, a, b) }
         if (op == "&" || op == "|" || op == "~" || op == "<<" || op == ">>") { return luaBit(op, a, b) }
         return luaArith(op, a, b)
@@ -1729,7 +1898,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var v = anytype // The operand, before the string coercion.
             v = luaFirst(t())
             var a = toNumV(v)
-            if (a === undefined) { luaArithFail("unm", v, v, false) }
+            if (a === undefined) {
+                var h = anytype
+                h = luaTm(v, "__unm")
+                if (h !== undefined) { return luaCallVal(h, [v, v]) }
+                luaArithFail("unm", v, v, false)
+            }
             // A FLOAT negates by IEEE sign flip, NOT by `0 - v`: `0 - 0.0` is
             // +0.0, while lua prints -0.0 for `-0.0`. `v * (0 - 1)` is exact for
             // every double - zeros, infinities and NaN included - and is the same
@@ -1749,6 +1923,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var v = anytype
             v = luaFirst(t())
             if (typeof v != "string" && !isTbl(v)) { fail("attempt to get length of a " + luaType(v) + " value" + luaOpSfx(0)) }
+            if (isTbl(v)) {
+                var h = anytype
+                h = luaTm(v, "__len")
+                if (h !== undefined) { return luaCallVal(h, [v, v]) }
+            }
             return luaLen(v)
         }
     }
@@ -1773,6 +1952,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             a = luaFirst(l())
             var b = anytype
             b = luaFirst(r())
+            // An operand that is neither a string nor a number asks __concat.
+            if ((typeof a != "string" && !isNum(a)) || (typeof b != "string" && !isNum(b))) {
+                var h = anytype
+                h = luaBinTm("__concat", a, b)
+                if (h !== undefined) { return luaCallVal(h, [a, b]) }
+            }
             return luaCatStr(a, 1) + luaCatStr(b, 2)
         }
     }
@@ -1813,7 +1998,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             luaPos = s.at.here
             var fv = anytype // The callee, truncated to one value.
             fv = luaFirst(cur)
-            if (typeof fv != "function") { fail("attempt to call a " + luaType(fv) + " value" + luaDescText(pd)) }
+            while (typeof fv != "function") {
+                // A value that is no function is called through its __call, with
+                // itself as the first argument (luaD_tryfuncTM).
+                var cm = anytype
+                cm = luaTm(fv, "__call")
+                if (cm === undefined) { fail("attempt to call a " + luaType(fv) + " value" + luaDescText(pd)) }
+                argv = [fv].concat(argv)
+                fv = cm
+            }
             if (tail && luaCallPos.length > 0) { return {__luatc: LUA_TC, f: fv, a: argv, n: cname, p: luaPos} }
             luaCallName = cname
             out = fv.apply(undefined, argv)
@@ -1825,10 +2018,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             fn = luaIndexAt(recv, s.name, pd)
             var margv = evalList(s.args)
             luaPos = s.at.here
-            if (typeof fn != "function") { fail("attempt to call a " + luaType(fn) + " value" + luaDescText({k: "method", n: s.name})) }
-            if (tail && luaCallPos.length > 0) { return {__luatc: LUA_TC, f: fn, a: [recv].concat(margv), n: cname, p: luaPos} }
+            var mfull = [recv].concat(margv)
+            while (typeof fn != "function") {
+                var mcm = anytype
+                mcm = luaTm(fn, "__call")
+                if (mcm === undefined) { fail("attempt to call a " + luaType(fn) + " value" + luaDescText({k: "method", n: s.name})) }
+                mfull = [fn].concat(mfull)
+                fn = mcm
+            }
+            if (tail && luaCallPos.length > 0) { return {__luatc: LUA_TC, f: fn, a: mfull, n: cname, p: luaPos} }
             luaCallName = cname
-            out = fn.apply(undefined, [recv].concat(margv))
+            out = fn.apply(undefined, mfull)
         } else if (s.kind == "field") {
             out = luaIndexAt(luaFirst(cur), s.name, pd)
         } else {
@@ -1843,7 +2043,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (o === undefined || o === null || (typeof o != "string" && !isTbl(o))) {
             fail("attempt to index a " + luaType(o) + " value" + luaDescText(pd))
         }
-        return luaIndex(o, k)
+        return luaGet(o, k)
     }
     // The name lua 5.5 gives the function each call step of a chain calls, which is
     // the name an argument error reports: a method's own name, the field a call
@@ -2156,7 +2356,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (nameDesc.fsteps.length == 0) { setVar(nameDesc.fbase, cl); return }
             var o = anytype // The containers along the path may be of mixed types.
             o = getVar(nameDesc.fbase)
-            for (var i = 0; i < nameDesc.fsteps.length - 1; i++) { o = luaIndex(o, nameDesc.fsteps[i]) }
+            for (var i = 0; i < nameDesc.fsteps.length - 1; i++) { o = luaGet(o, nameDesc.fsteps[i]) }
             luaSetIndex(o, nameDesc.fsteps[nameDesc.fsteps.length - 1], cl)
         }
     }
@@ -2373,7 +2573,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             f = vs.length > 0 ? vs[0] : undefined
             st = vs.length > 1 ? vs[1] : undefined
             ctl = vs.length > 2 ? vs[2] : undefined
-            if (typeof f != "function") { fail("attempt to call a " + luaType(f) + " value") }
+            if (typeof f != "function") {
+                var fo = anytype // A callable value: the loop calls it through its __call.
+                fo = f
+                if (luaTm(fo, "__call") === undefined) { fail("attempt to call a " + luaType(f) + " value") }
+                f = function(a1, a2) { return luaCallAll(fo, [a1, a2]) }
+            }
             var res = undefined
             var running = true
             while (running) {
@@ -2520,11 +2725,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         luaPos = ""
         var out = anytype // The multi-value pcall answers.
         try {
-            if (typeof f != "function") { fail("attempt to call a " + luaType(f) + " value") }
             var vs = []
             vs.push(true)
             luaCallName = null
-            var all = luaAll(f.apply(undefined, args))
+            var all = luaAll(luaCallAll(f, args))
             for (var i = 0; i < all.length; i++) { vs.push(all[i]) }
             out = mkMulti(vs)
         } catch (e) {
@@ -2656,6 +2860,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // lua 5.5's pairs answers four values, the last one nil (a closing value).
     globalScope["pairs"] = function(t) {
         luaCheckAny("pairs", 1, arguments.length)
+        // A __pairs metamethod answers the iterator triple itself.
+        var h = anytype
+        h = luaTm(t, "__pairs")
+        if (h !== undefined) {
+            var all = luaAll(luaCallAll(h, [t]))
+            return mkMulti([all.length > 0 ? all[0] : undefined, all.length > 1 ? all[1] : undefined, all.length > 2 ? all[2] : undefined])
+        }
         return mkMulti([luaNext, t, undefined, undefined])
     }
     // ipairs(t): the 1-based array walk, as the same kind of triple - its iterator counts
@@ -2663,7 +2874,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function luaINext(t, i) {
         var nk = numOf(i) + 1
         var v = anytype // The element at the next index.
-        v = luaIndex(t, nk)
+        v = luaGet(t, nk)
         if (v === undefined || v === null) { return undefined }
         return mkMulti([nk, v])
     }
@@ -3138,6 +3349,29 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return luaLen(v)
     }
     globalScope["_VERSION"] = "Lua 5.5"
+    // setmetatable(t, mt) and getmetatable(v), lbaselib's: a __metatable field
+    // protects the metatable and is what getmetatable answers instead. Twins of
+    // js_lusetmt / js_lugetmt in abnf/jsrtlumeta.go and lib/lua-rt.metajs.
+    globalScope["setmetatable"] = function(t, mt) {
+        var nargs = arguments.length
+        if (!isTbl(t) || isLuaFile(t)) { luaArgTypeErr("setmetatable", 1, "table", t, nargs) }
+        if (mt !== undefined && mt !== null && (!isTbl(mt) || isLuaFile(mt))) { luaArgTypeErr("setmetatable", 2, "nil or table", mt, nargs) }
+        if (nargs < 2) { luaArgTypeErr("setmetatable", 2, "nil or table", mt, nargs) }
+        if (luaTm(t, "__metatable") !== undefined) { fail("cannot change a protected metatable") }
+        t.__mt = mt === null ? undefined : mt
+        return t
+    }
+    globalScope["getmetatable"] = function(v) {
+        luaCheckAny("getmetatable", 1, arguments.length)
+        var mt = anytype // The metatable, when there is one.
+        if (typeof v == "string") { mt = luaStringMeta() }
+        else if (isTbl(v) && v.__mt !== undefined) { mt = v.__mt }
+        else { return undefined }
+        var prot = anytype
+        prot = luaTm(v, "__metatable")
+        if (prot !== undefined) { return prot }
+        return mt
+    }
 
     // table.*: ltablib.c over the sequence border (#t).
     function luaSeti(t, i, v) { luaRawSet(t, luaKey(i), v) }

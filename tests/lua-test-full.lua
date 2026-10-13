@@ -24,10 +24,10 @@
 -- subtype visible at all - math.type/tointeger/fmod/maxinteger/mininteger,
 -- without which sections 21 and 22 could not be written - and the pattern
 -- half of the string library with select (SECTION 30), string.format
--- (SECTION 35) and the base and table library (SECTION 36). That rules out
--- setmetatable - so metatables, the operator metamethods and the <close>
--- attribute (needs __close) stay untested - and likewise coroutine.* (library
--- calls, not syntax). error/pcall/xpcall are in, because
+-- (SECTION 35), the base and table library (SECTION 36) and metatables with the
+-- operator metamethods (SECTION 44). The <close> attribute (needs __close) stays
+-- untested, and likewise coroutine.* (library calls, not syntax).
+-- error/pcall/xpcall are in, because
 -- without them no error is observable at all (SECTION 27). Lua has no
 -- chained comparisons (a < b < c is a type error by design), so none appear.
 --
@@ -1866,6 +1866,108 @@ function s43()
     check("ok6", ({[t] = "self"})[t], "self")
 end
 
+-- ===== SECTION 44: metatables =====
+-- setmetatable/getmetatable, __index and __newindex (tables, functions, chains),
+-- __call, __tostring/__name, __len, the arithmetic, bitwise, concatenation and
+-- comparison metamethods, and the raw functions that bypass them. Values printed
+-- by lua 5.5.
+function s44()
+    local function try(f, ...)
+        local ok, e = pcall(f, ...)
+        if ok then return "ok" end
+        return (tostring(e):gsub("^[^:]*:%d+: ", ""))
+    end
+    local Base = {}
+    Base.__index = Base
+    function Base.new(x) return setmetatable({x = x}, Base) end
+    function Base:get() return self.x end
+    local Derived = setmetatable({}, {__index = Base})
+    Derived.__index = Derived
+    function Derived.new(x, y) local o = Base.new(x); o.y = y; return setmetatable(o, Derived) end
+    function Derived:sum() return self.x + self.y end
+    local d = Derived.new(3, 4)
+    check("mt1", d:get() .. " " .. d:sum() .. " " .. tostring(getmetatable(d) == Derived) .. " " .. tostring(rawget(d, "get")), "3 7 true nil")
+    local log = {}
+    local p = setmetatable({}, {__index = function(t, k) log[#log + 1] = k; return k .. "!" end})
+    check("mt2", p.foo .. p[1] .. p[2.0] .. " " .. #log .. " " .. math.type(log[3]), "foo!1!2.0! 3 float")
+    p.foo = "set"
+    check("mt3", p.foo .. rawget(p, "foo"), "setset")
+    local w = setmetatable({}, {__newindex = function(t, k, v) rawset(t, k, v * 2) end})
+    w.a = 5; w.a = 7
+    local store = {}
+    local w2 = setmetatable({}, {__newindex = store})
+    w2.q = 1
+    check("mt4", w.a .. " " .. tostring(rawget(w2, "q")) .. " " .. store.q, "7 nil 1")
+    local c = setmetatable({}, {__call = function(self, a, b) return a + b, self end})
+    local r1, r2 = c(2, 3)
+    local function tail(x) return c(x, 1) end
+    check("mt5", r1 .. " " .. tostring(r2 == c) .. " " .. tail(5) .. " " .. select(2, pcall(c, 2, 3)), "5 true 6 5")
+    check("mt6", try(function() local q = setmetatable({}, {}); q() end), "attempt to call a table value (local 'q')")
+    local ts = setmetatable({}, {__tostring = function() return "TS!" end})
+    check("mt7", tostring(ts) .. string.format("%s", ts) .. tostring(setmetatable({}, {__tostring = function() return 12 end})), "TS!TS!12")
+    check("mt8", try(tostring, setmetatable({}, {__tostring = function() return {} end})), "'__tostring' must return a string")
+    check("mt9", (tostring(setmetatable({}, {__name = "MyType"})):gsub("0x%x+", "A")), "MyType: A")
+    local l = setmetatable({1, 2, 3}, {__len = function() return 42 end})
+    check("mt10", #l .. " " .. rawlen(l), "42 3")
+    local V = {}
+    local function vec(x) return setmetatable({x = x}, V) end
+    V.__add = function(a, b) return vec((type(a) == "table" and a.x or a) + (type(b) == "table" and b.x or b)) end
+    V.__unm = function(a, b) return "unm" .. tostring(a == b) end
+    V.__idiv = function() return "idiv" end
+    V.__band = function() return "band" end
+    V.__shl = function() return "shl" end
+    V.__bnot = function(a, b) return "bnot" .. tostring(a == b) end
+    V.__concat = function(a, b) return "cat:" .. type(a) .. type(b) end
+    V.__eq = function(a, b) return a.x == b.x end
+    V.__lt = function(a, b) return a.x < b.x end
+    V.__le = function(a, b) return a.x <= b.x end
+    local v1, v2 = vec(1), vec(2)
+    check("mt11", (v1 + v2).x .. (v1 + 10).x .. (10 + v2).x .. ("5" + v2).x, "311127")
+    check("mt12", -v1 .. " " .. v1 // 1 .. " " .. (1 & v1) .. " " .. (v1 << 1) .. " " .. ~v1, "unmtrue idiv band shl bnottrue")
+    check("mt13", (v1 .. "s") .. " " .. ("s" .. v1) .. " " .. (v1 .. v2) .. " " .. (1 .. v1) .. " " .. ("x" .. "y" .. v1),
+        "cat:tablestring cat:stringtable cat:tabletable cat:numbertable xcat:stringtable")
+    local cmps = {v1 == vec(1), v1 == v2, v1 ~= vec(1), v1 < v2, v1 <= v2, v1 > v2, v1 >= v2, v1 == 1, rawequal(v1, vec(1))}
+    local got = ""
+    for i = 1, #cmps do got = got .. (cmps[i] and "T" or "F") end
+    check("mt14", got, "TFFTTFFFF")
+    check("mt15", try(function() return {} + 1 end) .. "|" .. try(function() return {} .. "x" end) .. "|" .. try(function() return {} < {} end),
+        "attempt to perform arithmetic on a table value|attempt to concatenate a table value|attempt to compare two table values")
+    local prot = setmetatable({}, {__metatable = "locked"})
+    check("mt16", getmetatable(prot) .. " " .. try(setmetatable, prot, {}), "locked cannot change a protected metatable")
+    check("mt17", try(setmetatable, 1, {}) .. "|" .. try(setmetatable, {}, 1) .. "|" .. try(setmetatable, {}),
+        "bad argument #1 to 'setmetatable' (table expected, got number)|bad argument #2 to 'setmetatable' (nil or table expected, got number)|bad argument #2 to 'setmetatable' (nil or table expected, got no value)")
+    check("mt18", tostring(getmetatable("abc").__index == string) .. " " .. tostring(getmetatable(1)) .. " " .. tostring(getmetatable({})), "true nil nil")
+    local chain = setmetatable({}, {__index = setmetatable({}, {__index = {deep = "yes"}})})
+    local si = setmetatable({}, {__index = "abc"})
+    check("mt19", chain.deep .. " " .. tostring(si.len == string.len) .. " " .. try(function() return setmetatable({}, {__index = 5}).x end), "yes true attempt to index a number value")
+    local ip = setmetatable({}, {__index = function(t, i) if i <= 3 then return i * 10 end end})
+    local acc = ""
+    for i, v in ipairs(ip) do acc = acc .. v .. " " end
+    check("mt20", acc, "10 20 30 ")
+    local pp = setmetatable({}, {__pairs = function(t) return function(_, k) if not k then return 1, "one" end end, t, nil end})
+    local pk = ""
+    for k, v in pairs(pp) do pk = pk .. k .. v end
+    check("mt21", pk, "1one")
+    local P = {__lt = function(a, b) return a.v < b.v end}
+    local ps = {}
+    for i, v in ipairs({5, 3, 9, 1}) do ps[i] = setmetatable({v = v}, P) end
+    table.sort(ps)
+    check("mt22", ps[1].v .. ps[2].v .. ps[3].v .. ps[4].v, "1359")
+    local c2 = setmetatable({}, {__call = c})
+    check("mt23", try(function() return c2(1, 2) end), "attempt to perform arithmetic on a table value (local 'a')")
+    local n = 0
+    local it = setmetatable({}, {__call = function(self, s, i) if i < 3 then return i + 1 end end})
+    for i in it, nil, 0 do n = n + i end
+    local decl = {}
+    local proxy = setmetatable({}, {__newindex = function(t, k, v) decl[k] = v end})
+    function proxy.hello() return "hi" end
+    check("mt24", n .. " " .. tostring(rawget(proxy, "hello")) .. " " .. decl.hello(), "6 nil hi")
+    local rt = {}
+    check("mt25", tostring(setmetatable(rt, {__index = {q = 1}}) == rt) .. rt.q, "true1")
+    setmetatable(rt, nil)
+    check("mt26", tostring(rt.q) .. " " .. tostring(getmetatable(rt)), "nil nil")
+end
+
 s25() -- SECTION-CALL 25
 s26() -- SECTION-CALL 26
 s27() -- SECTION-CALL 27
@@ -1885,5 +1987,6 @@ s40() -- SECTION-CALL 40
 s41() -- SECTION-CALL 41
 s42() -- SECTION-CALL 42
 s43() -- SECTION-CALL 43
+s44() -- SECTION-CALL 44
 print("full: " .. checks .. " checks, " .. failures .. " failures")
 exit(failures)

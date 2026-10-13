@@ -463,7 +463,7 @@ long NIC_YOUNG;      /* likewise for the small-integer cache */
 long RT_MISS_VAR;    /* closure(name)      -> the value to throw, or 0 = abort */
 long RT_MISS_MEM;    /* closure(key, obj)  -> the value to throw, or 0 = abort */
 long RT_MISS_SET;    /* closure(key, obj)  -> the value to throw, or 0 = abort */
-long RT_MISS_FN;     /* closure(callee)    -> the value to throw, or 0 = abort */
+long RT_MISS_FN;     /* closure(callee, args) -> the call's result, or 0 = abort */
 long RT_GEN_BUSY;    /* closure()          -> the value to throw, or 0 = abort (gen_busy) */
 long RNG_STATE;      /* Math.random's xorshift64 state, 0 until the first call */
 
@@ -3710,19 +3710,16 @@ long rt_miss_set(long key, long obj) {
 	return v;
 }
 
-/* The CALL sibling: a call of a value that is no function (lua's pcall catches
- * it as "attempt to call a nil value"). */
-long rt_miss_fn(long callee) {
-	long h = RT_MISS_FN;
-	long args;
-	long v;
-	if (h == 0) { return 0; }
-	RT_MISS_FN = 0;
-	args = mk_arr();
-	arr_push(args, callee);
-	v = js_call(h, H_UNDEF, args);
-	RT_MISS_FN = h;
-	return v;
+/* The CALL sibling: a call of a value that is no function. Unlike the others the
+ * closure takes the callee AND the argument array and its answer IS the call's
+ * result: lua calls a table through its __call there and raises "attempt to call
+ * a nil value" itself. It stays registered while it runs, because the __call it
+ * makes runs program code. */
+long rt_miss_fn(long callee, long args) {
+	long a = mk_arr();
+	arr_push(a, callee);
+	arr_push(a, args);
+	return js_call(RT_MISS_FN, H_UNDEF, a);
 }
 
 long scope_get(long s, long name) {
@@ -4183,8 +4180,7 @@ long js_call(long callee, long self, long args) {
 	if (t == 9) { return builtin_method(fa(callee), fb(callee), args); }
 	/* A generator FUNCTION: calling it runs NOTHING and answers a generator. */
 	if (t == 16) { return gen_create(callee, args); }
-	t = rt_miss_fn(callee);
-	if (t != 0) { js_throw(t); }
+	if (RT_MISS_FN != 0) { return rt_miss_fn(callee, args); }
 	die2("call of a non function value: ", callee);
 	return H_UNDEF;
 }
