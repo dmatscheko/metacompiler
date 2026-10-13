@@ -158,6 +158,7 @@ function pyIsCallable(v) { return typeof v == "function" }
 function pyIsDict(v) { return rtTag(v, "__dict") }
 function pyIsCplx(v) { return rtTag(v, "__cplx") }
 function pyIsBig(v) { return rtTag(v, "__pybig") }
+function pyIsIntOrBool(v) { return typeof v == "number" || typeof v == "boolean" || pyIsBig(v) }
 
 // Python's float: a boxed double (abnf/jsrt.go's jsPyFlo, python-interpreter.abnf's
 // pyFlo). int and float are two DIFFERENT Python types - they print differently
@@ -3535,15 +3536,29 @@ function pyAToF(v) {
     return pyNum(v)
 }
 
-// Go: pyFloorMod. Python's % takes the SIGN OF THE DIVISOR.
-// math.Mod is fmod, which JavaScript's % is exactly - and, unlike
-// `x - math.Floor(x/y)*y`, it is not the expression clang refuses to fuse, so
-// this is a byte-for-byte match rather than an approximation.
+// Go: pyFloorMod. Python's % of two ints takes the SIGN OF THE DIVISOR, and a
+// zero is the int 0, never -0. Two floats go to pynFloMod.
 function pyAFloorMod(x, y) {
     if (y == 0) { pyRaiseExc("ZeroDivisionError", "division by zero") }
     var r = x % y
-    if (r != 0 && (r < 0) != (y < 0)) { return r + y }
+    if (r == 0) { return 0 }
+    if ((r < 0) != (y < 0)) { return r + y }
     return r
+}
+
+// Go: pyFloorOp. `//` or `%` of two numeric operands.
+function pyAFloorOp(op, l, r) {
+    var x = pyAOperand(l, op, l, r)
+    var y = pyAOperand(r, op, l, r)
+    if (y == 0) { pyRaiseExc("ZeroDivisionError", "division by zero") }
+    if (pyIsFlo(l) || pyIsFlo(r)) {
+        if (op == "//") { return pyMkFlo(pynFloDiv(x, y)) }
+        return pyMkFlo(pynFloMod(x, y))
+    }
+    if (op == "%") { return pyAFloorMod(x, y) }
+    var q = Math.floor(x / y)
+    if (q == 0) { return 0 }
+    return q
 }
 
 // ============================================================================
@@ -4706,14 +4721,10 @@ function js_pybin(opv, l, r) {
         }
         return pyMkFlo(pyAOperand(l, op, l, r) / fr)
     }
-    if (op == "//") {
-        var qr = pyAOperand(r, op, l, r)
-        if (qr == 0) { pyRaiseExc("ZeroDivisionError", "division by zero") }
-        return pyIntOrFlo(Math.floor(pyAOperand(l, op, l, r) / qr), l, r)
-    }
+    if (op == "//") { return pyAFloorOp(op, l, r) }
     // "fmt" % args is printf-style FORMATTING, not a remainder.
     if (op == "%" && typeof l == "string") { return pyBPct(l, r) }
-    if (op == "%") { return pyIntOrFlo(pyAFloorMod(pyAOperand(l, op, l, r), pyAOperand(r, op, l, r)), l, r) }
+    if (op == "%") { return pyAFloorOp(op, l, r) }
     // Python's exponentiation. Only js_pybin ever passes this operator, and a
     // user class already had its __pow__ / __rpow__ chance above. int ** NEGATIVE
     // int is a float (2 ** -1 is 0.5); every other pair of ints stays an int,
@@ -4833,10 +4844,11 @@ function js_pyint(args) {
     v = undefined
     if (pos.length > 0) { v = pyUnwrapBuiltin(pos[0]) }
     if (pos.length < 2 || pos[1] === undefined) {
-        if (v === undefined) { return 0 }
+        if (pos.length == 0) { return 0 }
         if (typeof v == "string") { return pyParseInt(v, 10) }
         if (pyIsBig(v)) { return v }
         if (pyIsFlo(v)) { return pyFToInt(v["__flo"]) }
+        if (typeof v != "number" && typeof v != "boolean") { return pyADunderNum(v, "int") }
         return Math.trunc(pyNum(v))
     }
     if (v === undefined) { pyRaiseExc("TypeError", "int() missing string argument") }
@@ -5369,7 +5381,43 @@ function js_pyfloat(v0) {
     v = pyUnwrapBuiltin(v0)
     if (typeof v == "string") { return pyMkFlo(pyStrToF(v)) }
     if (pyIsBig(v)) { return pyMkFlo(pyBigToF(v)) }
+    if (typeof v != "number" && typeof v != "boolean" && !pyIsFlo(v)) { return pyADunderNum(v, "float") }
     return pyMkFlo(pyNum(v))
+}
+
+// Go: rt.pyDunderNum. int(v) or float(v) (KIND) of a value that is no number
+// and no str: its class's __int__ / __float__, else its __index__, as CPython's
+// PyNumber_Long and PyNumber_Float; anything else is CPython's TypeError.
+function pyADunderNum(v, kind) {
+    var cls = pyInstClassOf(v)
+    if (cls !== null) {
+        var own = "__float__"
+        if (kind == "int") { own = "__int__" }
+        var r = anytype
+        if (pyLookupHas(cls, own)) {
+            r = pyCallSelf(pyLookupVal(cls, own), v, [])
+            if ((kind == "int" && pyNumTName(r) != "int") || (kind != "int" && !pyIsFlo(r))) {
+                var who = ""
+                if (kind != "int") { who = pyTypeName(v) + "." }
+                pyRaiseExc("TypeError", who + own + " returned non-" + kind + " (type " + pyTypeName(r) + ")")
+            }
+            return r
+        }
+        if (pyLookupHas(cls, "__index__")) {
+            r = pyCallSelf(pyLookupVal(cls, "__index__"), v, [])
+            if (pyNumTName(r) != "int") {
+                pyRaiseExc("TypeError", "__index__ returned non-int (type " + pyTypeName(r) + ")")
+            }
+            if (kind == "int") { return js_pyint([[r], undefined]) }
+            return js_pyfloat(r)
+        }
+    }
+    if (kind == "int") {
+        pyRaiseExc("TypeError", "int() argument must be a string, a bytes-like object or a real number, not '"
+                   + pyTypeName(v) + "'")
+    }
+    pyRaiseExc("TypeError", "float() argument must be a string or a real number, not '" + pyTypeName(v) + "'")
+    return undefined
 }
 
 // Go: js_pyhash. hash(v); the rules are hostGlobals["hash"]'s in
@@ -5551,6 +5599,9 @@ function js_pyabs(v) {
     if (pyIsBig(v)) {
         if (rtABigCmp(v, rtABigFromNum(0)) < 0) { return rtABigNeg(v) }
         return v
+    }
+    if (typeof v != "number" && typeof v != "boolean") {
+        pyRaiseExc("TypeError", "bad operand type for abs(): '" + pyTypeName(v) + "'")
     }
     var n = pyNum(v)
     if (n < 0) { return 0 - n }
@@ -6138,34 +6189,6 @@ function pyRadixOf(n, base, prefix) {
     return sign + prefix + pynBitsRadix(pyIntBits(n), base)
 }
 
-// INTEGER *, //, % over operands of either width, with a POSITIVE divisor - the
-// two callers are the radix loop (base 2/8/16) and modular pow (modulus > 0).
-// pyABigArith cannot be used directly: it requires BOTH sides to be big already,
-// where these mix a big with a small literal, and its % is the TRUNCATED
-// remainder while Python's is FLOORED. Both are handled here: the operands are
-// promoted with pyABigOperand and a negative remainder is corrected by adding
-// the divisor. Go: math/big does the same job in rt.pyRadix and js_pypow.
-function pyAIntOp(op, l, r) {
-    if (pyIsBig(l) || pyIsBig(r)) {
-        var bl = pyABigOperand(l)
-        var br = pyABigOperand(r)
-        if (bl !== null && br !== null && !rtABigIsZero(br)) {
-            if (op == "*") { return rtABigNarrow(rtABigMul(bl, br)) }
-            var q = pyABigQuo(bl, br)
-            var m = pyABigRem(bl, br)
-            if (rtABigCmp(m, rtABigFromNum(0)) < 0) {
-                m = rtABigAdd(m, br)          // The divisor is positive here.
-                q = rtABigSub(q, rtABigFromNum(1))
-            }
-            if (op == "//") { return rtABigNarrow(q) }
-            return rtABigNarrow(m)
-        }
-    }
-    if (op == "*") { return pyNum(l) * pyNum(r) }
-    if (op == "//") { return Math.floor(pyNum(l) / pyNum(r)) }
-    return pyAFloorMod(pyNum(l), pyNum(r))
-}
-
 // SystemExit.code: None for no argument, the argument for one, the args tuple
 // for more. Go: pyExitCode.
 function pyExitCode(e) {
@@ -6211,11 +6234,7 @@ function js_pyuncaught(v) {
 // divmod(a, b) is the pair (a // b, a % b): FLOOR division and the floored
 // remainder, so divmod(-7, 2) is (-4, 1).
 function js_pydivmod(l, r) {
-    if (pyNum(r) == 0) {
-        pyRaiseExc("ZeroDivisionError", "division by zero")
-    }
-    return pyTup([pyIntOrFlo(Math.floor(pyNum(l) / pyNum(r)), l, r),
-                  pyIntOrFlo(pyAFloorMod(pyNum(l), pyNum(r)), l, r)])
+    return pyTup([js_pybin("//", l, r), js_pybin("%", l, r)])
 }
 
 // round(x[, n]) rounds HALF TO EVEN, so round(0.5) is 0, round(1.5) is 2 and
@@ -6230,9 +6249,21 @@ function js_pydivmod(l, r) {
 function js_pyround(args) {
     var v = pyEArgAt(args, 0)
     var hasN = args.length >= 2 && args[1] !== undefined && args[1] !== null
+    var cls = pyInstClassOf(v)
+    if (cls !== null && pyLookupHas(cls, "__round__")) {
+        if (hasN) { return pyCallSelf(pyLookupVal(cls, "__round__"), v, [args[1]]) }
+        return pyCallSelf(pyLookupVal(cls, "__round__"), v, [])
+    }
+    var tn = pyNumTName(v)
+    if (tn != "int" && tn != "float") {
+        pyRaiseExc("TypeError", "type " + pyTypeName(v) + " doesn't define __round__ method")
+    }
+    if (hasN && pyNumTName(args[1]) != "int") {
+        pyRaiseExc("TypeError", "'" + pyTypeName(args[1]) + "' object cannot be interpreted as an integer")
+    }
     var n = 0
     if (hasN) { n = Math.min(400, Math.trunc(pyNum(args[1]))) }
-    if (pyNumTName(v) == "int") {
+    if (tn == "int") {
         var i = js_pyint([[v], undefined])
         if (n >= 0) { return i }
         return pyARoundTens(i, 0 - n, false)
@@ -6265,25 +6296,21 @@ function pyARoundTens(i, k, sticky) {
     return r
 }
 
-// pow(a, b[, m]): the ** operator, plus CPython's three-argument MODULAR form,
-// computed by repeated squaring so an arbitrary-precision base stays exact.
+// pow(a, b[, m]): the ** operator, plus CPython's three-argument MODULAR form
+// (pynPowMod in python-num.js, over js_pybin). Go: js_pypow.
 function js_pypow(args) {
     var l = pyEArgAt(args, 0)
     var r = pyEArgAt(args, 1)
     if (args.length > 2 && args[2] !== undefined && args[2] !== null) {
         var m = args[2]
-        var base = anytype
-        base = pyAIntOp("%", l, m)
-        var acc = anytype
-        acc = 1
-        var e = anytype
-        e = r
-        while (pyACompare(e, 0) == 1) {
-            if (pyAEqual(pyAIntOp("%", e, 2), 1)) { acc = pyAIntOp("%", pyAIntOp("*", acc, base), m) }
-            e = pyAIntOp("//", e, 2)
-            base = pyAIntOp("%", pyAIntOp("*", base, base), m)
+        if (!pyIsIntOrBool(l) || !pyIsIntOrBool(r) || !pyIsIntOrBool(m)) {
+            pyRaiseExc("TypeError", "pow() 3rd argument not allowed unless all arguments are integers")
         }
-        return acc
+        if (js_pybin("==", m, 0) === true) { pyRaiseExc("ValueError", "pow() 3rd argument cannot be 0") }
+        var res = anytype
+        res = pynPowMod(l, r, m, js_pybin)
+        if (res === null) { pyRaiseExc("ValueError", "base is not invertible for the given modulus") }
+        return res
     }
     // Two arguments are exactly the ** operator.
     return js_pybin("**", l, r)

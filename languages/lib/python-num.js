@@ -249,6 +249,84 @@ function pynScale2(m, k) {
     return v
 }
 
+// CPython's float_divmod for a nonzero divisor. The remainder is fmod (JS %, exact)
+// moved to the divisor's sign, and the quotient is the exact (x - fmod) / y,
+// rounded to the nearest integer, so q*y + r stays x where floor(x / y) rounds
+// past it (1.0 // 0.1 is 9.0, not 10.0). A zero remainder takes the divisor's
+// sign, a zero quotient the sign of x / y. Go twin: pyFloDivmod in abnf/jsrt.go.
+function pynFloMod(x, y) {
+    var m = x % y
+    if (m != 0) {
+        if ((y < 0) != (m < 0)) { return m + y }
+        return m
+    }
+    if (y < 0) { return 0 / (0 - 1) }
+    return 0
+}
+function pynFloDiv(x, y) {
+    var m = x % y
+    var d = (x - m) / y
+    if (m != 0 && (y < 0) != (m < 0)) { d = d - 1 }
+    if (d != 0) {
+        var f = Math.floor(d)
+        if (d - f > 0.5) { return f + 1 }
+        return f
+    }
+    var q = x / y
+    if (q < 0 || 1 / q < 0) { return 0 / (0 - 1) }
+    return 0
+}
+
+// pow(a, b, m) for three ints and a nonzero m, over the engine's own binary
+// operator OP(op, l, r), so an arbitrary precision operand stays exact. As in
+// CPython the work is done modulo |m|, a negative exponent first inverts the
+// base (extended Euclid), and a nonzero answer takes m's sign. null when the
+// base has no inverse. Go twin: js_pypow in abnf/jsrt.go (math/big).
+function pynPowMod(a, b, m, op) {
+    var neg = op("<", m, 0) === true
+    var mm = anytype
+    mm = m
+    if (neg) { mm = op("-", 0, m) }
+    var base = anytype
+    base = op("%", a, mm)
+    var e = anytype
+    e = b
+    if (op("<", e, 0) === true) {
+        var r0 = anytype
+        r0 = base
+        var r1 = anytype
+        r1 = mm
+        var s0 = anytype
+        s0 = 1
+        var s1 = anytype
+        s1 = 0
+        while (op("!=", r1, 0) === true) {
+            var q = anytype
+            q = op("//", r0, r1)
+            var rn = anytype
+            rn = op("-", r0, op("*", q, r1))
+            r0 = r1
+            r1 = rn
+            var st = anytype
+            st = op("-", s0, op("*", q, s1))
+            s0 = s1
+            s1 = st
+        }
+        if (op("!=", r0, 1) === true) { return null }
+        base = op("%", s0, mm)
+        e = op("-", 0, e)
+    }
+    var acc = anytype
+    acc = op("%", 1, mm)
+    while (op(">", e, 0) === true) {
+        if (op("==", op("%", e, 2), 1) === true) { acc = op("%", op("*", acc, base), mm) }
+        e = op("//", e, 2)
+        base = op("%", op("*", base, base), mm)
+    }
+    if (neg && op("!=", acc, 0) === true) { return op("+", acc, m) }
+    return acc
+}
+
 // float.as_integer_ratio: {neg, bits, dexp}, the numerator's magnitude bits over
 // the denominator 2^dexp, in lowest terms. "inf" / "nan" for CPython's
 // OverflowError / ValueError.

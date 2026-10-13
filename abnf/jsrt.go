@@ -16476,19 +16476,13 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				}
 				return w(&jsPyFlo{f: rt.pyToF(l) / rt.pyToF(r)})
 			case "//":
-				if rt.toNumber(r) == 0 {
-					rt.pyZeroDiv()
-				}
-				return w(pyIntOrFlo(math.Floor(rt.toNumber(l)/rt.toNumber(r)), l, r))
+				return w(rt.pyFloorOp(op, l, r))
 			case "%":
 				// "fmt" % args is printf-style FORMATTING, not a remainder.
 				if s, isStr := l.(string); isStr {
 					return w(rt.pyPct(s, r))
 				}
-				if rt.toNumber(r) == 0 {
-					rt.pyZeroDiv()
-				}
-				return w(pyIntOrFlo(pyFloorMod(rt.toNumber(l), rt.toNumber(r)), l, r))
+				return w(rt.pyFloorOp(op, l, r))
 			case "**":
 				// Python's exponentiation. Only js_pybin (the Python compilers and
 				// nothing else) ever passes this operator, and a user class already
@@ -16985,6 +16979,11 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if bi, ok := u(a[0]).(*jsBigInt); ok {
 				return w(&jsPyFlo{f: rt.pyBigToF(bi.v)})
 			}
+			switch v := u(a[0]).(type) {
+			case float64, bool, *jsPyFlo:
+			default:
+				return w(rt.pyDunderNum(v, "float"))
+			}
 			return w(&jsPyFlo{f: rt.toNumber(u(a[0]))})
 		},
 		// id(v): 16 times the identity index pyHashId numbers values by. Twin
@@ -17020,6 +17019,12 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			if bi, ok := v.(*jsBigInt); ok {
 				return w(&jsBigInt{v: new(big.Int).Abs(bi.v)})
+			}
+			switch v.(type) {
+			case float64, bool:
+			default:
+				panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+					"bad operand type for abs(): '"+pyTypeName(rt, v)+"'")})
 			}
 			return rt.wrapNum(math.Abs(rt.toNumber(v)))
 		},
@@ -17342,11 +17347,8 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// floored remainder, so divmod(-7, 2) is (-4, 1).
 		"js_pydivmod": func(a []uint64) uint64 {
 			l, r := u(a[0]), u(a[1])
-			if rt.toNumber(r) == 0 {
-				rt.pyZeroDiv()
-			}
-			q := pyIntOrFlo(math.Floor(rt.toNumber(l)/rt.toNumber(r)), l, r)
-			m := pyIntOrFlo(pyFloorMod(rt.toNumber(l), rt.toNumber(r)), l, r)
+			q := rt.pyExt("js_pybin", "//", l, r)
+			m := rt.pyExt("js_pybin", "%", l, r)
 			return w(pyTup(&jsArray{elems: []interface{}{q, m}}))
 		},
 		// round(x[, n]): CPython rounds HALF TO EVEN, so round(2.5) is 2 and
@@ -17366,7 +17368,25 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 					panic(&jsThrown{value: rt.pyExcInstance("TypeError",
 						"pow() 3rd argument not allowed unless all arguments are integers")})
 				}
-				return w(rt.pyBigNarrow(new(big.Int).Exp(bl, br, bm)))
+				if bm.Sign() == 0 {
+					panic(&jsThrown{value: rt.pyExcInstance("ValueError", "pow() 3rd argument cannot be 0")})
+				}
+				// Modulo |m|; a negative exponent inverts the base first, and a
+				// nonzero answer takes m's sign, as CPython's long_pow does.
+				mm := new(big.Int).Abs(bm)
+				base := new(big.Int).Mod(bl, mm)
+				e := br
+				if br.Sign() < 0 {
+					if base = new(big.Int).ModInverse(base, mm); base == nil {
+						panic(&jsThrown{value: rt.pyExcInstance("ValueError", "base is not invertible for the given modulus")})
+					}
+					e = new(big.Int).Neg(br)
+				}
+				res := new(big.Int).Mod(new(big.Int).Exp(base, e, mm), mm)
+				if bm.Sign() < 0 && res.Sign() != 0 {
+					res.Add(res, bm)
+				}
+				return w(rt.pyBigNarrow(res))
 			}
 			// Two arguments are exactly the ** operator.
 			return w(rt.pyExt("js_pybin", "**", l, r))
@@ -22867,13 +22887,62 @@ func (rt *jsrt) pyContains(x, y interface{}) bool {
 	return false
 }
 
-// pyFloorMod is Python's %: the result takes the sign of the divisor.
-func pyFloorMod(x, y float64) float64 {
-	r := math.Mod(x, y)
-	if r != 0 && (r < 0) != (y < 0) {
-		r += y
+// pyFloorOp is `//` or `%` of two numeric operands. Two ints floor, the
+// remainder taking the divisor's sign, and a zero answer is the int 0, never -0.
+// A float operand takes CPython's float_divmod (pyFloDivmod).
+// Twin of pyAFloorOp in languages/lib/python-rt.metajs.
+func (rt *jsrt) pyFloorOp(op string, l, r interface{}) interface{} {
+	x, y := rt.toNumber(l), rt.toNumber(r)
+	if y == 0 {
+		rt.pyZeroDiv()
 	}
-	return r
+	if pyIsFlo(l) || pyIsFlo(r) {
+		q, m := pyFloDivmod(x, y)
+		if op == "//" {
+			return &jsPyFlo{f: q}
+		}
+		return &jsPyFlo{f: m}
+	}
+	if op == "%" {
+		m := math.Mod(x, y)
+		if m == 0 {
+			return 0.0
+		}
+		if (m < 0) != (y < 0) {
+			m += y
+		}
+		return m
+	}
+	if q := math.Floor(x / y); q != 0 {
+		return q
+	}
+	return 0.0
+}
+
+// pyFloDivmod is CPython's float_divmod for a nonzero divisor: the remainder is
+// fmod moved to the divisor's sign, the quotient the exact (x - fmod) / y rounded
+// to the nearest integer, so q*y + r stays x where floor(x / y) rounds past it
+// (1.0 // 0.1 is 9.0). A zero remainder takes the divisor's sign, a zero quotient
+// the sign of x / y. Twin of pynFloDiv / pynFloMod in languages/lib/python-num.js.
+func pyFloDivmod(x, y float64) (float64, float64) {
+	m := math.Mod(x, y)
+	d := (x - m) / y
+	if m != 0 {
+		if (y < 0) != (m < 0) {
+			m += y
+			d--
+		}
+	} else {
+		m = math.Copysign(0, y)
+	}
+	if d == 0 {
+		return math.Copysign(0, x/y), m
+	}
+	f := math.Floor(d)
+	if d-f > 0.5 {
+		f++
+	}
+	return f, m
 }
 
 // pyArith is -, * and / with the bigint path js_sub/js_mul/js_div take.
@@ -23314,6 +23383,50 @@ func (rt *jsrt) pyKwPos(fname string, pos []interface{}, kw interface{}, names [
 	return out
 }
 
+// pyDunderNum is int(v) or float(v) (kind) of a value that is no number and no
+// str: its class's __int__ / __float__, else its __index__, as CPython's
+// PyNumber_Long and PyNumber_Float; anything else is CPython's TypeError. Twin
+// of pyDunderNum in languages/python-interpreter.abnf and pyADunderNum in
+// languages/lib/python-rt.metajs.
+func (rt *jsrt) pyDunderNum(v interface{}, kind string) interface{} {
+	if _, cls, ok := pyInstance(v); ok {
+		own := "__float__"
+		if kind == "int" {
+			own = "__int__"
+		}
+		if m, found := pyLookup(cls, own); found && isCallable(m) {
+			r := rt.call(m, jsUndef, []interface{}{v})
+			_, isFlo := r.(*jsPyFlo)
+			if (kind == "int" && pyNumTypeName(r) != "int") || (kind != "int" && !isFlo) {
+				who := ""
+				if kind != "int" {
+					who = pyTypeName(rt, v) + "."
+				}
+				panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+					who+own+" returned non-"+kind+" (type "+pyTypeName(rt, r)+")")})
+			}
+			return r
+		}
+		if m, found := pyLookup(cls, "__index__"); found && isCallable(m) {
+			r := rt.call(m, jsUndef, []interface{}{v})
+			if pyNumTypeName(r) != "int" {
+				panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+					"__index__ returned non-int (type "+pyTypeName(rt, r)+")")})
+			}
+			if kind == "int" {
+				return rt.pyIntNew([]interface{}{r})
+			}
+			return rt.pyExt("js_pyfloat", r)
+		}
+	}
+	if kind == "int" {
+		panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+			"int() argument must be a string, a bytes-like object or a real number, not '"+pyTypeName(rt, v)+"'")})
+	}
+	panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+		"float() argument must be a string or a real number, not '"+pyTypeName(rt, v)+"'")})
+}
+
 // pyIntNew is int(x=0, /, base=10). With a base, x must be a str and is parsed
 // in that base; without one, a str is parsed in base 10 and a number TRUNCATES
 // (a bigint stays exact).
@@ -23327,17 +23440,20 @@ func (rt *jsrt) pyIntNew(args []interface{}) interface{} {
 		v = pyUnwrapBuiltin(args[0])
 	}
 	if len(args) < 2 || args[1] == jsUndef {
-		switch x := v.(type) {
-		case jsUndefT:
+		if len(args) == 0 {
 			return 0.0
+		}
+		switch x := v.(type) {
 		case string:
 			return rt.pyParseInt(x, 10)
 		case *jsBigInt:
 			return x
 		case *jsPyFlo:
 			return rt.pyFloatToInt(x.f)
+		case float64, bool:
+			return math.Trunc(rt.toNumber(v))
 		}
-		return math.Trunc(rt.toNumber(v))
+		return rt.pyDunderNum(v, "int")
 	}
 	if v == jsUndef {
 		panic(&jsThrown{value: rt.pyExcInstance("TypeError", "int() missing string argument")})

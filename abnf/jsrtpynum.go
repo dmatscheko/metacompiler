@@ -315,11 +315,27 @@ func (rt *jsrt) pyFloatFromHex(src string) interface{} {
 func (rt *jsrt) pyRound(args []interface{}) interface{} {
 	v := argAt(args, 0)
 	hasN := len(args) >= 2 && !isUndefOrNull(args[1])
+	if _, cls, ok := pyInstance(v); ok {
+		if m, found := pyLookup(cls, "__round__"); found && isCallable(m) {
+			if hasN {
+				return rt.call(m, jsUndef, []interface{}{v, args[1]})
+			}
+			return rt.call(m, jsUndef, []interface{}{v})
+		}
+	}
+	tn := pyNumTypeName(v)
+	if tn != "int" && tn != "float" {
+		panic(&jsThrown{value: rt.pyExcInstance("TypeError", "type "+pyTypeName(rt, v)+" doesn't define __round__ method")})
+	}
+	if hasN && pyNumTypeName(args[1]) != "int" {
+		panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+			"'"+pyTypeName(rt, args[1])+"' object cannot be interpreted as an integer")})
+	}
 	n := 0
 	if hasN {
 		n = int(math.Max(-1e6, math.Min(400, math.Trunc(rt.toNumber(args[1])))))
 	}
-	if pyNumTypeName(v) == "int" {
+	if tn == "int" {
 		i := rt.pyIntNew([]interface{}{v})
 		if n >= 0 {
 			return i

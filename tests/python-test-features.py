@@ -2515,6 +2515,86 @@ check("fmt-str", [fm("abcdef", ".2"), fm("ab", "^6"), fm("ab", "=5"), fm("ab", "
 check("fmt-strformat-fstring", ["{:>6,}".format(fm_vals[4]), f"{fm_vals[0]:08.3f}", "{0!r:>5}".format("a")],
       ["1,234,567", "0002.700", "  'a'"])
 
+# ----- SECTION: float floor division and divmod -----
+#
+# A float // or % is CPython's float_divmod: the quotient is the exact
+# (x - fmod(x, y)) / y rounded, not floor(x / y), and a zero remainder takes the
+# divisor's sign. divmod of an arbitrary precision int is exact. Rows from
+# CPython 3.14, compared through repr so a zero's sign counts.
+fd_x = [1.0, 3.0, 9007199254740992, 3.0, -0.0, -5.0, 0, -6]
+fd_y = [0.1, 0.1, -1.5, -1.5, 1.5, float("inf"), -5, 3]
+check("floordiv-float", [repr(fd_x[i] // fd_y[i]) for i in range(6)],
+      ["9.0", "29.0", "-6004799503160662.0", "-2.0", "-0.0", "-1.0"])
+check("mod-float-zero-sign", [repr(fd_x[i] % fd_y[i]) for i in range(6)],
+      ["0.09999999999999995", "0.09999999999999984", "-1.0", "-0.0", "0.0", "inf"])
+check("floordiv-int-zero", [repr(float(fd_x[6] // fd_y[6])), repr(float(fd_x[7] % fd_y[7])), repr(divmod(fd_x[0], fd_y[0]))],
+      ["0.0", "0.0", "(9.0, 0.09999999999999995)"])
+dm_x = [2 ** 53 + 1, 10 ** 20, 7, 7.5, -(10 ** 20)]
+dm_y = [3, 3, 2 ** 61, 10 ** 20 + 1, 7]
+check("divmod-big", [divmod(dm_x[i], dm_y[i]) for i in range(5)],
+      [(3002399751580331, 0), (33333333333333333333, 1), (0, 7), (0.0, 7.5), (-14285714285714285715, 5)])
+
+
+# ----- SECTION: three-argument pow -----
+#
+# pow(a, b, m) works modulo |m| and a nonzero answer takes m's sign; a negative
+# exponent inverts the base first. m == 0, a base with no inverse and a float
+# operand are errors. Rows from CPython 3.14.
+def pm_try(a, b, m):
+    try:
+        return pow(a, b, m)
+    except (TypeError, ValueError) as e:
+        return type(e).__name__ + ": " + str(e)
+
+
+pm_rows = [(2, -1, 7), (3, -2, 13), (2, -1, -7), (5, 0, 1), (3, 5, -7), (2 ** 70, 3, 10 ** 9 + 7), (7, -1, 2 ** 64 + 1)]
+check("pow3-values", [pm_try(a, b, m) for a, b, m in pm_rows],
+      [4, 3, -3, 0, -2, 431750151, 5270498306774157605])
+check("pow3-errors", [pm_try(2, 3, 0), pm_try(2, -1, 8), pm_try(2.0, 3, 5)],
+      ["ValueError: pow() 3rd argument cannot be 0", "ValueError: base is not invertible for the given modulus",
+       "TypeError: pow() 3rd argument not allowed unless all arguments are integers"])
+
+
+# ----- SECTION: abs, round, float and int of a non-number -----
+#
+# Each asks the operand's class (__abs__, __round__, __int__ / __float__, then
+# __index__) and is CPython's TypeError for anything else. Rows from CPython 3.14.
+def nb_try(f, v):
+    try:
+        return f(v)
+    except (TypeError, ValueError) as e:
+        return type(e).__name__ + ": " + str(e)
+
+
+class NbConv:
+    def __float__(self): return 2.5
+    def __int__(self): return 7
+    def __round__(self, n=None): return ("r", n)
+class NbIndex:
+    def __index__(self): return 9
+class NbBad:
+    def __int__(self): return "x"
+    def __float__(self): return 3
+nb_vals = ["s", [1], None, {}, 1j, NbConv(), NbIndex(), NbBad()]
+check("abs-non-number", [nb_try(abs, nb_vals[i]) for i in [0, 1, 2]],
+      ["TypeError: bad operand type for abs(): 'str'", "TypeError: bad operand type for abs(): 'list'",
+       "TypeError: bad operand type for abs(): 'NoneType'"])
+check("round-non-number", [nb_try(round, nb_vals[i]) for i in [0, 2, 4, 5]] + [nb_try(lambda v: round(v, 2), nb_vals[5]), nb_try(lambda v: round(2.5, v), 1.5)],
+      ["TypeError: type str doesn't define __round__ method", "TypeError: type NoneType doesn't define __round__ method",
+       "TypeError: type complex doesn't define __round__ method", ("r", None), ("r", 2),
+       "TypeError: 'float' object cannot be interpreted as an integer"])
+check("float-non-number", [nb_try(float, nb_vals[i]) for i in [1, 2, 3, 5, 6, 7]],
+      ["TypeError: float() argument must be a string or a real number, not 'list'",
+       "TypeError: float() argument must be a string or a real number, not 'NoneType'",
+       "TypeError: float() argument must be a string or a real number, not 'dict'", 2.5, 9.0,
+       "TypeError: NbBad.__float__ returned non-float (type int)"])
+check("int-non-number", [nb_try(int, nb_vals[i]) for i in [1, 2, 4, 5, 6, 7]],
+      ["TypeError: int() argument must be a string, a bytes-like object or a real number, not 'list'",
+       "TypeError: int() argument must be a string, a bytes-like object or a real number, not 'NoneType'",
+       "TypeError: int() argument must be a string, a bytes-like object or a real number, not 'complex'", 7, 9,
+       "TypeError: __int__ returned non-int (type str)"])
+
+
 # ----- import edges -----
 # `from M import *` binds a runtime module's public names and a library
 # module's __all__, `import P.S` binds P, and a module function keeps its

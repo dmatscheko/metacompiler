@@ -1575,6 +1575,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (args.length == 0) { return pyFlo(0) }
             if (typeof v == "string") { return pyFlo(pyStrToF(v)) }
             if (bigIsBig(v)) { return pyFlo(bigToFlo(v)) }
+            if (typeof v != "number" && typeof v != "boolean" && !isFlo(v)) { return pyDunderNum(v, "float") }
             return pyFlo(floVal(v))
         }
         if (name == "bool") { return pytruthy(v) }
@@ -1641,7 +1642,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var v = anytype
         v = args.length > 0 ? args[0] : undefined
         if (args.length < 2 || args[1] === undefined) {
-            if (v === undefined) { return 0 }
+            if (args.length == 0) { return 0 }
             return pyToInt(v)
         }
         if (v === undefined) { pyListErr("TypeError", "int() missing string argument") }
@@ -1807,9 +1808,43 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (typeof v == "string") { return pyParseInt(v, 10) }
         if (bigIsBig(v)) { return v }
         if (isFlo(v)) { return floToInt(v.__flo) }
+        if (typeof v != "number" && typeof v != "boolean") { return pyDunderNum(v, "int") }
         var f = floVal(v)
         if (f < 0) { return 0 - Math.floor(0 - f) }
         return Math.floor(f)
+    }
+    // int(v) or float(v) (KIND) of a value that is no number and no str: its
+    // class's __int__ / __float__, else its __index__, as CPython's PyNumber_Long
+    // and PyNumber_Float; anything else is CPython's TypeError. Twin of
+    // rt.pyDunderNum in abnf/jsrt.go and pyADunderNum in lib/python-rt.metajs.
+    function pyDunderNum(v, kind) {
+        if (pyUser(v)) {
+            var own = kind == "int" ? "__int__" : "__float__"
+            var r = anytype
+            var f = clsFind(v.__class, own)
+            if (f != null) {
+                r = f(v)
+                if (kind == "int" ? pyNumTName(r) != "int" : !isFlo(r)) {
+                    var who = kind == "int" ? "" : pyTypeOf(v).__name + "."
+                    pyRaise(pyMakeExc("TypeError", [who + own + " returned non-" + kind + " (type " + pyTypeOf(r).__name + ")"]))
+                }
+                return r
+            }
+            var ix = clsFind(v.__class, "__index__")
+            if (ix != null) {
+                r = ix(v)
+                if (pyNumTName(r) != "int") {
+                    pyRaise(pyMakeExc("TypeError", ["__index__ returned non-int (type " + pyTypeOf(r).__name + ")"]))
+                }
+                if (kind == "int") { return pyToInt(r) }
+                return pyConvert("float", [r], null)
+            }
+        }
+        if (kind == "int") {
+            pyRaise(pyMakeExc("TypeError", ["int() argument must be a string, a bytes-like object or a real number, not '"
+                                            + pyTypeOf(v).__name + "'"]))
+        }
+        pyRaise(pyMakeExc("TypeError", ["float() argument must be a string or a real number, not '" + pyTypeOf(v).__name + "'"]))
     }
     // max/min(iterable, *, key=None, default=...) and max/min(a, b, *args,
     // key=None). The first of equal extremes wins. Twin of rt.pyMinMax in
@@ -2069,6 +2104,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (isFlo(v)) { var f = v.__flo; return pyFlo(f < 0 || 1 / f < 0 ? floNegate(f) : f) }
         if (pyBoxed(v)) { return pytruthy(binOp("<", v, 0)) ? binOp("-", 0, v) : v }
         if (typeof v == "boolean") { return v ? 1 : 0 }
+        if (typeof v != "number") {
+            pyRaise(pyMakeExc("TypeError", ["bad operand type for abs(): '" + pyTypeOf(v).__name + "'"]))
+        }
         return v < 0 ? -v : v
     }
     // max/min over the arguments, or over a single iterable one - the same shape
@@ -2320,7 +2358,18 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // 10**-n (pyRoundTens). Past 400 digits a float is its own rounding. Twin
     // of rt.pyRound in abnf/jsrtpynum.go and js_pyround in lib/python-rt.metajs.
     hostGlobals["round"] = function(x, nd) {
-        var isInt = pyNumTName(x) == "int"
+        if (pyUser(x)) {
+            var rf = clsFind(x.__class, "__round__")
+            if (rf != null) { return nd === undefined || nd === null ? rf(x) : rf(x, nd) }
+        }
+        var tn = pyNumTName(x)
+        if (tn != "int" && tn != "float") {
+            pyRaise(pyMakeExc("TypeError", ["type " + pyTypeOf(x).__name + " doesn't define __round__ method"]))
+        }
+        if (nd !== undefined && nd !== null && pyNumTName(nd) != "int") {
+            pyRaise(pyMakeExc("TypeError", ["'" + pyTypeOf(nd).__name + "' object cannot be interpreted as an integer"]))
+        }
+        var isInt = tn == "int"
         var n = 0
         if (nd !== undefined && nd !== null) { n = Math.min(400, Math.trunc(floVal(nd))) }
         if (isInt && n >= 0) { return pyConvert("int", [x], null) }
@@ -2350,23 +2399,20 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return neg ? binOp("-", 0, r) : r
     }
     // pow(a, b[, m]): the ** operator, plus CPython's three-argument MODULAR
-    // form. The modular one is computed by repeated squaring through binOp, so
-    // an arbitrary-precision base stays exact.
+    // form (pynPowMod in lib/python-num.js, over binOp). Twin of js_pypow in
+    // abnf/jsrt.go and languages/lib/python-rt.metajs.
     hostGlobals["pow"] = function(a, b, m) {
         if (m === undefined || m === null) { return binOp("**", a, b) }
-        var base = anytype
-        base = binOp("%", a, m)
-        var acc = anytype
-        acc = 1
-        var e = anytype
-        e = b
-        while (pytruthy(binOp(">", e, 0))) {
-            if (pytruthy(binOp("==", binOp("%", e, 2), 1))) { acc = binOp("%", binOp("*", acc, base), m) }
-            e = binOp("//", e, 2)
-            base = binOp("%", binOp("*", base, base), m)
+        if (!pyIsIntOrBool(a) || !pyIsIntOrBool(b) || !pyIsIntOrBool(m)) {
+            pyRaise(pyMakeExc("TypeError", ["pow() 3rd argument not allowed unless all arguments are integers"]))
         }
-        return acc
+        if (binOp("==", m, 0) === true) { pyRaise(pyMakeExc("ValueError", ["pow() 3rd argument cannot be 0"])) }
+        var r = anytype
+        r = pynPowMod(a, b, m, binOp)
+        if (r === null) { pyRaise(pyMakeExc("ValueError", ["base is not invertible for the given modulus"])) }
+        return r
     }
+    function pyIsIntOrBool(v) { return typeof v == "number" || typeof v == "boolean" || bigIsBig(v) }
     // callable(x): a function, a class object, or an instance whose class
     // defines __call__.
     hostGlobals["callable"] = function(v) {
@@ -6784,14 +6830,18 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // `//` and `%` arms of js_pybin in abnf/jsrt.go and languages/lib/python-rt.metajs.
     // The test is inlined at each site so the ordinary division pays no call.
     function pyZeroDiv() { pyRaise(pyMakeExc("ZeroDivisionError", ["division by zero"])) }
+    // Two ints: exact below 2^53, and a zero answer is the int 0, never -0.
     function fdiv(a, b) {
         if (b === 0 || b === false) { pyZeroDiv() }
-        return Math.floor(a / b)
+        var q = Math.floor(a / b)
+        if (q == 0) { return 0 }
+        return q
     }
     function fmod(a, b) {
         if (b === 0 || b === false) { pyZeroDiv() }
         var r = a % b
-        if (r != 0 && ((r < 0) != (b < 0))) r += b
+        if (r == 0) { return 0 }
+        if ((r < 0) != (b < 0)) r += b
         return r
     }
     // The set algebra: | union, & intersection, - difference, ^ symmetric difference.
@@ -7090,8 +7140,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         // Python's // and % answer an int from two ints and a float as soon as
         // either side is one - and one side always is, to be here at all.
-        if (op == "//") { return {v: pyFlo(fdiv(x, y))} }
-        if (op == "%") { return {v: pyFlo(fmod(x, y))} }
+        if (op == "//") {
+            if (y === 0) { pyZeroDiv() }
+            return {v: pyFlo(pynFloDiv(x, y))}
+        }
+        if (op == "%") {
+            if (y === 0) { pyZeroDiv() }
+            return {v: pyFlo(pynFloMod(x, y))}
+        }
         if (op == "**") {
             if (pyPowIsCplx(x, y)) { return {v: pyPowCplx(x, y)} }
             return {v: pyFlo(pyPowF(x, y))}
