@@ -4426,6 +4426,79 @@ func s97() {
     check("97f", hit == "zero")
 }
 
+// ===== SECTION 98: declared types reach getters and statics; String(repeating:) =====
+// A computed property's getter returns its declared type, so `var a: Double { 1 }`
+// adopts the literal as a function's return does - on a struct, an enum, a class
+// and a static. A static stored property adopts its initial value and every
+// write. Every value read off swiftc 6.1.2.
+struct Ad98 {
+    var k = 2
+    var a: Double { 1 }
+    var c: Double {
+        if k > 1 { return 3 }
+        return 4
+    }
+    var d: Double { get { 5 } }
+    static var e: Double { 6 }
+    static let sk: Double = 2
+    static var sj: Double = 3
+    static let sarr: [Double] = [1, 2]
+}
+enum En98 {
+    case x, y
+    var v: Double {
+        switch self {
+        case .x: return 0
+        case .y: return 1.5
+        }
+    }
+}
+class Cl98 { var w: Double { 9 } }
+func s98() {
+    let ad = Ad98()
+    check("98a", "\(ad.a) \(ad.c) \(ad.d) \(Ad98.e)" == "1.0 3.0 5.0 6.0" && "\(En98.x.v) \(Cl98().w)" == "0.0 9.0")
+    check("98b", "\(Ad98.sk) \(Ad98.sj) \(Ad98.sarr)" == "2.0 3.0 [1.0, 2.0]")
+    Ad98.sj = 5
+    check("98c", "\(Ad98.sj)" == "5.0")
+    let ns = [3, 0]
+    let ps = ["ab", "-"]
+    check("98d", String(repeating: ps[0], count: ns[0]) == "ababab" && String(repeating: ps[1], count: ns[1]) == ""
+        && String(repeating: Character("x"), count: 2) == "xx")
+}
+
+// ===== SECTION 99: a protocol extension declared after its conformers =====
+// Swift's extensions are not ordered: a default added by an extension written
+// below a conforming struct, enum, class, child-protocol conformer or builtin
+// still reaches it, and a type's own member still wins. A default's body reads
+// a builtin conformer's own computed property, and a static of the same name as
+// a builtin's default is still the type's own. Every value read off swiftc 6.1.2.
+protocol Desc99 { var name: String { get } }
+struct St99: Desc99 { var name: String { "st" } }
+enum En99: Desc99 { case one; var name: String { "en" } }
+class Cl99: Desc99 { var name: String { "cl" } }
+class Sub99: Cl99 { override var name: String { "sub" } }
+protocol Kid99: Desc99 {}
+struct Ki99: Kid99 { var name: String { "ki" } }
+extension Int: Desc99 { var name: String { "int\(self)" } }
+struct Stat99 { static var loud: String { "static" } }
+struct Own99: Desc99 {
+    var name: String { "own" }
+    var loud: String { "mine" }
+}
+extension Desc99 {
+    var loud: String { name.uppercased() }
+    func tagged(_ t: String) -> String { "\(t):\(name)" }
+    var half: Double { 1 }
+}
+func s99() {
+    check("99a", St99().loud == "ST" && En99.one.loud == "EN" && Cl99().loud == "CL" && Sub99().loud == "SUB"
+        && Ki99().tagged("k") == "k:ki")
+    check("99b", Own99().loud == "mine" && Own99().tagged("o") == "o:own" && "\(St99().half)" == "1.0"
+        && Stat99.loud == "static")
+    let n = [5]
+    check("99c", n[0].loud == "INT5" && n[0].tagged("t") == "t:int5")
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -4524,6 +4597,8 @@ func main() {
     s95() // SECTION-CALL 95
     s96() // SECTION-CALL 96
     s97() // SECTION-CALL 97
+    s98() // SECTION-CALL 98
+    s99() // SECTION-CALL 99
     print("full: \(checks) checks, \(fails) failures")
 }
 

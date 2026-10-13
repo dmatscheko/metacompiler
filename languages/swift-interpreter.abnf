@@ -8589,7 +8589,9 @@ KwContinue  = "continue" KwEnd ;
     function installComputed(cp, cls) {
         if (cp.observed) { observedAccessors(cp, cls); return }
         if (cp.get != null) {
-            tput(cls, "__get_" + cp.name, makeMethodClosure({name: "__get_" + cp.name, params: [], body: cp.get}, cls))
+            // The getter returns the property's declared type, so `var a: Double { 1 }`
+            // adopts its literal as a function's return does.
+            tput(cls, "__get_" + cp.name, makeMethodClosure({name: "__get_" + cp.name, params: [], body: cp.get, rtype: cp.ty}, cls))
         }
         if (cp.set != null) {
             tput(cls, "__set_" + cp.name, makeMethodClosure({name: "__set_" + cp.name, params: [plainParam(cp.setP)], body: cp.set}, cls))
@@ -8778,7 +8780,7 @@ KwContinue  = "continue" KwEnd ;
         }
         for (var sc = 0; sc < mem.statComps.length; sc++) {
             var sp = mem.statComps[sc]
-            if (sp.get != null) { tput(cls, "__get_" + sp.name, makeMethodClosure({name: "__get_" + sp.name, params: [], body: sp.get}, cls)) }
+            if (sp.get != null) { tput(cls, "__get_" + sp.name, makeMethodClosure({name: "__get_" + sp.name, params: [], body: sp.get, rtype: sp.ty}, cls)) }
             if (sp.set != null) { tput(cls, "__set_" + sp.name, makeMethodClosure({name: "__set_" + sp.name, params: [plainParam(sp.setP)], body: sp.set}, cls)) }
         }
         // A nested type is installed on the enclosing descriptor and NOWHERE else -
@@ -8802,12 +8804,14 @@ KwContinue  = "continue" KwEnd ;
         var cell = {}
         var build = sp.init == null ? null
             : makeMethodClosure({name: "__stinit_" + sp.name, params: [], body: makeExprBody(sp.init)}, cls)
+        // Both the initial value and a write adopt the declared type, as a stored
+        // instance property's do.
         var get = function(self) {
-            if (!hasOwn(cell, "v")) { scopePut(cell, "v", build == null ? null : build(cls)) }
+            if (!hasOwn(cell, "v")) { scopePut(cell, "v", build == null ? null : swAdoptAnn(build(cls), sp.ty)) }
             return cell.v
         }
         tput(cls, "__get_" + sp.name, get)
-        tput(cls, "__set_" + sp.name, function(self, v) { get(self); scopePut(cell, "v", v) })
+        tput(cls, "__set_" + sp.name, function(self, v) { get(self); scopePut(cell, "v", swAdoptAnn(v, sp.ty)) })
     }
 
     // items = [name, {inherit}..., ({prop}|{cprop}|{method}|{mstatic})...] -> a
@@ -8975,7 +8979,7 @@ KwContinue  = "continue" KwEnd ;
         markNestedAll(mem)
         var myIdx = noteDeclIdx(name)
         return function() {
-            var p = {__isprotocol: true, __name: name, __inherits: mem.inherits}
+            var p = {__isprotocol: true, __name: name, __inherits: mem.inherits, __adopters: []}
             var tbl = {__name: name}
             installMembers(tbl, mem)
             // WHICH names the protocol DECLARES is what decides dispatch inside its
@@ -9054,6 +9058,7 @@ KwContinue  = "continue" KwEnd ;
         }
         scopePut(cls, "__conf_" + p.__name, true)
         copyDefaults(cls, p.__members)
+        p.__adopters.push(cls)
     }
     // `v is P` for a user protocol P: the conformance marker, up the superclass chain
     // (a subclass of a conforming class conforms too).
@@ -9160,6 +9165,14 @@ KwContinue  = "continue" KwEnd ;
                 }
             }
             installMembers(target, mem)
+            // A protocol extension declared after a conforming type still reaches
+            // it: Swift's extensions are not ordered, so the new defaults go to every
+            // type that adopted the protocol already. Twin of emitReadopt in
+            // swift-to-llvm-ir.abnf.
+            if (h != null && h.v.__isprotocol === true) {
+                var ads = h.v.__adopters
+                for (var ai = 0; ai < ads.length; ai++) { copyDefaults(ads[ai], target) }
+            }
             // Extension-declared stored fields do not exist in Swift, but a
             // conformance in the clause does apply.
             for (var j = 0; j < mem.inherits.length; j++) {
@@ -10042,6 +10055,11 @@ KwContinue  = "continue" KwEnd ;
         // String(reflecting:) is the debug form: "s" quoted, as inside a collection.
         if (lb == "reflecting") { return swRender(x, true, 0) }
         if (lb == null && argv.length == 1 && Array.isArray(x)) { return swStrJoin(x) }
+        if (lb == "repeating" && argv.length == 2) {
+            var rep = ""
+            for (var ri = 0; ri < szNum(argv[1]); ri++) { rep = rep + swstr(x) }
+            return rep
+        }
         if (argv.length > 1 && labels[1] == "radix") { return swRadixStr(x, szNum(argv[1]), argv.length > 2 && argv[2] === true) }
         return swstr(x)
     }

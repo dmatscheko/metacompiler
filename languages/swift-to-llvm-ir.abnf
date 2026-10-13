@@ -3458,6 +3458,10 @@ KwContinue  = "continue" KwEnd ;
                 callExt(selfB, "js_arr_push", [pga, selfV])
                 sv = callExt(selfB, "js_call",
                              [callExt(selfB, "js_get", [pgV, emitStr(selfB, "__get_" + name)]), hUndef, pga])
+            } else if (builtinCompOf(name) != null) {
+                // A builtin conformer's own property, in a protocol default's body
+                // (sw_extget picks the table by the receiver).
+                sv = emitFieldRead(selfB, selfV, name)
             } else if (isComputedName(name)) { sv = selfB.NewCall(rtGetProp(), [selfV, emitStr(selfB, name)]) }
             else { sv = callExt(selfB, "js_get", [selfV, emitStr(selfB, name)]) }
             selfB.NewBr(joinB)
@@ -4428,12 +4432,15 @@ KwContinue  = "continue" KwEnd ;
     // The property read of an `extension Int { var half: Int { ... } }`, chosen by
     // the RECEIVER rather than by the name alone: an instance (anything with a
     // __class of its own) takes the ordinary sw_getprop path, and only a builtin
-    // reaches the extension's table. See js_swextcall for the method half.
+    // reaches the extension's table. A type descriptor (`V.half`, a static) is not
+    // a builtin either. See js_swextcall for the method half.
     function rtExtGet() {
         return rtFunc("sw_extget", 3, function(b, ps) {
             var extB = curF.NewBlock("")
             var ownB = curF.NewBlock("")
-            b.NewCondBr(truthy(b, b.NewCall(rtClassOf(), [ps[0]])), ownB, extB)
+            var tyB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, b.NewCall(rtClassOf(), [ps[0]])), ownB, tyB)
+            tyB.NewCondBr(truthy(tyB, tyB.NewCall(rtIsTypeVal(), [ps[0]])), ownB, extB)
             ownB.NewRet(ownB.NewCall(rtGetProp(), [ps[0], ps[1]]))
             var ta = callExt(extB, "js_arr_new", [])
             callExt(extB, "js_arr_push", [ta, ps[0]])
@@ -6654,6 +6661,18 @@ KwContinue  = "continue" KwEnd ;
             return function(b) {
                 var eo = emitArgRecs(b, args)
                 return {b: eo.b, v: callExt(eo.b, "js_swidx", [eo.v, emitNum(eo.b, 0)])}
+            }
+        }
+        // String(repeating: s, count: n): the n copies, joined. Twin of the repeating
+        // arm of swStrInit in swift-interpreter.abnf.
+        if (name == "String" && args.length == 2 && args[0].lbl == "repeating"
+            && lookupSig(name) == null && classNames[name] != 1 && enumNames[name] != 1) {
+            return function(b) {
+                var erp = emitArgRecs(b, args)
+                b = erp.b
+                var reps = b.NewCall(rtArrayRep(), [callExt(b, "js_swidx", [erp.v, emitNum(b, 0)]),
+                    callExt(b, "js_swidx", [erp.v, emitNum(b, 1)])])
+                return {b: b, v: callExt(b, "js_swstrinit", [reps])}
             }
         }
         // Character(c) is its one-cluster String, so it renders its argument:
@@ -9349,7 +9368,7 @@ KwContinue  = "continue" KwEnd ;
             var sp = mem.statComps[sc]
             if (sp.get != null) {
                 callExt(b, "js_set", [statV, emitStr(b, "__get_" + sp.name),
-                                      callExt(b, "js_closure", [handle(emitStatFunc([], sp.get, true)), curScopeV])])
+                                      callExt(b, "js_closure", [handle(emitStatFunc([], sp.get, true, undefined, sp.ty)), curScopeV])])
             }
             if (sp.set != null) {
                 callExt(b, "js_set", [statV, emitStr(b, "__set_" + sp.name),
@@ -9392,7 +9411,7 @@ KwContinue  = "continue" KwEnd ;
             if (init != null) {
                 var r = init(buildB)
                 vb = r.b
-                v = r.v
+                v = swEmitAdopt(vb, r.v, sp.ty)
             }
             callExt(vb, "js_scope_set", [curScopeV, emitStr(vb, cell), v])
             vb.NewBr(doneB)
@@ -9404,7 +9423,7 @@ KwContinue  = "continue" KwEnd ;
         var setBody = function(bb) {
             callExt(bb, "js_call", [callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, cell + "g")]), hUndef, callExt(bb, "js_arr_new", [])])
             callExt(bb, "js_scope_set", [curScopeV, emitStr(bb, cell),
-                                         bb.NewCall(rtKGet(), [curScopeV, emitStr(bb, "$new")])])
+                                         swEmitAdopt(bb, bb.NewCall(rtKGet(), [curScopeV, emitStr(bb, "$new")]), sp.ty)])
             bb.NewRet(hUndef)
             return deadBlock()
         }
@@ -9458,8 +9477,10 @@ KwContinue  = "continue" KwEnd ;
             return b
         }
         if (cp.get != null) {
+            // The getter returns the property's declared type, so `var a: Double { 1 }`
+            // adopts its literal as a function's return does.
             callExt(b, "js_set", [tblV, emitStr(b, "__get_" + cp.name),
-                                  callExt(b, "js_closure", [handle(emitFunc([], cp.get, true)), curScopeV])])
+                                  callExt(b, "js_closure", [handle(emitFunc([], cp.get, true, false, undefined, cp.ty)), curScopeV])])
         }
         if (cp.set != null) {
             callExt(b, "js_set", [tblV, emitStr(b, "__set_" + cp.name),
@@ -9704,6 +9725,12 @@ KwContinue  = "continue" KwEnd ;
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$ext$" + base), tV])
         return tV
     }
+    // A protocol default reached by a builtin conformer, by its protoMembers key: a
+    // `__get_x` is the computed property x, anything else a method.
+    function swNoteBuiltinKey(k, base) {
+        if (k.substring(0, 6) == "__get_") { builtinComp["$" + k.substring(6)] = base }
+        else if (k.substring(0, 6) != "__set_") { builtinMeth["$" + k] = base }
+    }
     function builtinCompOf(n) { return hasOwn(builtinComp, "$" + n) ? builtinComp["$" + n] : null }
     function builtinMethOf(n) { return hasOwn(builtinMeth, "$" + n) ? builtinMeth["$" + n] : null }
     function isBuiltinTypeName(n) {
@@ -9731,14 +9758,28 @@ KwContinue  = "continue" KwEnd ;
     // the PARENT's table. (The interpreter's adoptProtocol recurses the same way.)
     // statV is where the type keeps its STATIC members (an enum's descriptor, not its
     // member table); the default's __static_ keys go there.
-    function emitAdoptProtocol(b, clsV, pn, statV) { return emitAdoptProtocolD(b, clsV, statV == undefined ? clsV : statV, pn, 0) }
-    function emitAdoptProtocolD(b, clsV, statV, pn, d) {
+    // An adoption is also RECORDED, as a [table, statics] pair on the protocol's
+    // __adopters, for emitReadopt; `reg` is false when emitReadopt itself re-runs it.
+    function emitAdoptProtocol(b, clsV, pn, statV) { return emitAdoptProtocolD(b, clsV, statV == undefined ? clsV : statV, pn, 0, true) }
+    function emitAdoptProtocolD(b, clsV, statV, pn, d, reg) {
         if (d > 16) { return b }
         var ps0 = protoParentsOf(pn)
-        for (var q0 = 0; q0 < ps0.length; q0++) { b = emitAdoptProtocolD(b, clsV, statV, ps0[q0], d + 1) }
+        for (var q0 = 0; q0 < ps0.length; q0++) { b = emitAdoptProtocolD(b, clsV, statV, ps0[q0], d + 1, reg) }
         var keys = protoMembers["$" + pn]
         if (keys == undefined) { return b }
         var pv = b.NewCall(rtKGet(), [curScopeV, emitStr(b, typeKeyOf(pn))])
+        if (reg) {
+            var adV = callExt(b, "js_get", [pv, emitStr(b, "__adopters")])
+            var regB = curF.NewBlock("")
+            var regJ = curF.NewBlock("")
+            b.NewCondBr(truthy(b, adV), regB, regJ)
+            var pair = callExt(regB, "js_arr_new", [])
+            callExt(regB, "js_arr_push", [pair, clsV])
+            callExt(regB, "js_arr_push", [pair, statV])
+            callExt(regB, "js_arr_push", [adV, pair])
+            regB.NewBr(regJ)
+            b = regJ
+        }
         for (var i = 0; i < keys.length; i++) {
             var toV = keys[i].slice(0, 9) == "__static_" ? statV : clsV
             var have = callExt(b, "js_get", [toV, emitStr(b, keys[i])])
@@ -9750,6 +9791,28 @@ KwContinue  = "continue" KwEnd ;
             b = joinB
         }
         return b
+    }
+    // A protocol extension declared after a conforming type still reaches it:
+    // Swift's extensions are not ordered, so the adoption is re-run for every type
+    // on the protocol's __adopters. Twin of the __adopters loop in
+    // swift-interpreter.abnf's makeExtensionStmt.
+    function emitReadopt(b, pV, pn) {
+        var adV = callExt(b, "js_get", [pV, emitStr(b, "__adopters")])
+        var sc = callExt(b, "js_scope_new", [handle(0)])
+        callExt(b, "js_scope_decl", [sc, emitStr(b, "i"), emitNum(b, 0)])
+        var headB = curF.NewBlock("")
+        var bodyB = curF.NewBlock("")
+        var doneB = curF.NewBlock("")
+        b.NewBr(headB)
+        var iV = callExt(headB, "js_scope_get", [sc, emitStr(headB, "i")])
+        headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, callExt(headB, "js_pylen", [adV])])), bodyB, doneB)
+        var pair = callExt(bodyB, "js_swidx", [adV, iV])
+        var endB = emitAdoptProtocolD(bodyB, callExt(bodyB, "js_swidx", [pair, emitNum(bodyB, 0)]),
+                                      callExt(bodyB, "js_swidx", [pair, emitNum(bodyB, 1)]), pn, 0, false)
+        callExt(endB, "js_scope_set", [sc, emitStr(endB, "i"),
+                                       callExt(endB, "js_jadd", [callExt(endB, "js_scope_get", [sc, emitStr(endB, "i")]), emitNum(endB, 1)])])
+        endB.NewBr(headB)
+        return doneB
     }
     // Which protocols each protocol INHERITS, and which BUILTIN type names an
     // `extension Int: P` conformed. Both are complete by the time any emitter
@@ -9881,6 +9944,7 @@ KwContinue  = "continue" KwEnd ;
             typeStack.push({name: name, key: rec.key, superName: null})
             var pV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [pV, emitStr(b, "__isprotocol"), hTrue])
+            callExt(b, "js_set", [pV, emitStr(b, "__adopters"), callExt(b, "js_arr_new", [])])
             callExt(b, "js_set", [pV, emitStr(b, "__name"), emitStr(b, name)])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, rec.key), pV])
             for (var pi = 0; pi < mem.inherits.length; pi++) {
@@ -9925,7 +9989,15 @@ KwContinue  = "continue" KwEnd ;
         var base = parts[parts.length - 1]
         var mem = splitMembers(items, k)
         swNoteStatics(base, mem)
-        if (protoNames[base] == 1) { noteProtoKeys(base, mem) }
+        if (protoNames[base] == 1) {
+            noteProtoKeys(base, mem)
+            // A builtin that conformed before this extension reaches its members too.
+            var bcs = hasOwn(protoBuiltinConf, "$" + base) ? protoBuiltinConf["$" + base] : []
+            var nks = protoMembers["$" + base]
+            for (var bc = 0; bc < bcs.length; bc++) {
+                for (var nk = 0; nk < nks.length; nk++) { swNoteBuiltinKey(nks[nk], bcs[bc]) }
+            }
+        }
         var pathKey = typeKeyOfPath(path)
         var rec = pathKey == null ? typeRec(base) : typeRec(pathKey)
         // Each initializer an extension adds takes the next overload slot, decided at
@@ -9961,7 +10033,7 @@ KwContinue  = "continue" KwEnd ;
                 protoBuiltinConf["$" + bpn] = lst
                 var pks = protoMembers["$" + bpn]
                 if (pks != undefined) {
-                    for (var pz = 0; pz < pks.length; pz++) { builtinMeth["$" + pks[pz]] = base }
+                    for (var pz = 0; pz < pks.length; pz++) { swNoteBuiltinKey(pks[pz], base) }
                 }
             }
             // A SECOND `extension Int { ... }` must reuse the first block's table (a
@@ -9998,6 +10070,7 @@ KwContinue  = "continue" KwEnd ;
             if (protoNames[base] == 1) { protoCtx = base }
             b = emitExtMembers(b, instV, tV, mem, rec.key, initIdxs)
             protoCtx = savedPC
+            if (protoNames[base] == 1) { b = emitReadopt(b, tV, base) }
             for (var pi = 0; pi < mem.inherits.length; pi++) {
                 var pn = baseTypeName(mem.inherits[pi])
                 if (protoNames[pn] != 1) { continue }
