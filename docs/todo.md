@@ -193,7 +193,7 @@ first). Separately `io.write(...)` → interp "attempt to index a nil value (glo
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-579 bash: an arithmetic error does not cancel the assignment; bytes 0x01/0x02 break field lists · P1 · SH · OPEN [V]
+### T-579 bash: an arithmetic error does not cancel the assignment; bytes 0x01/0x02 break field lists · P1 · SH · IN PROGRESS (SH worker, round 5) [V]
 `(( v = 1/0 ))` leaves v=0 (bash: v unset); `(( w = 2, w2 = 1/0 ))` sets w2=0 (bash: w=2, w2 unset) — the rest of the
 expression is still evaluated after the error, so the whole expression must short-circuit, both halves.
 `x=$'a\x01b'; printf '%s\n' "$x"` prints `a` and `b` as two fields in all engines (bash `a\001b`): 0x01/0x02 are the
