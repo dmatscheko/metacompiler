@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-597** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-598** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -76,20 +76,12 @@ its report; anything structural there is a CORE ticket.
 
 # JS — JavaScript and TypeScript
 
-### T-580 js/ts: no temporal dead zone for let / const / class · P1 · JS · IN PROGRESS (JS worker, round 4) [V]
-`let q = "outer"; { println(q); let q = 1; }` → all legs print `outer`; node `ReferenceError: Cannot access 'q' before
-initialization`. `typeof u` before `const u = 1` in the same block → `undefined` (node ReferenceError). Pre-declare let/const/
-class names with a sentinel at block entry in both interpreters and the emitter, and check reads, writes and typeof; in the
-compiler emit the check only at sites that can reach the TDZ (textually-earlier reads, closures declared in the block) so
-block entry and scope reads stay cheap. Measure tests/bench.sh js.
-
-### T-581 js: arguments object, `__`-prefixed user keys, `String.prototype.normalize`, BigInt callee text · P2 · JS · IN PROGRESS (JS worker, round 4) [V]
-`function f(){ arguments[0]=9; return arguments.length }; f()` → 1 (node 0); `Array.isArray(arguments)` → true (node false):
-arguments is a plain array in all engines. `JSON.parse('{"__proto__":1,"__x":2,"y":3}')` keys → `y` (node `__proto__,__x,y`):
-`__` keys are value-model slots (manual 7.9); user keys need escaping at every property path. `"é".normalize("NFD")`: goja
-interp answers through the host, -frozen / run / native "normalize is not a function" — a goja-vs-frozen divergence no test
-sees; needs decomposition/composition tables in all engines. P3: `(5n).nope()` message says `5n.nope` (node
-`(intermediate value).nope is not a function`).
+### T-597 js: arguments length and mapping; `Object.hasOwn`; `"__#"` user keys · P2 · JS · OPEN [V]
+`function f(){ arguments[0]=9; return arguments.length }; f()` → 1 (node 0): the value model keeps no length apart from the
+array storage and has no non-enumerable own `length` (needs a length field beside the array cell in the C floor, twin and
+MetaJS, or non-enumerable own properties). Sloppy mapped arguments: `function g(p){ p=5; return arguments[0] }; g(1)` → 1
+(node 5). `Object.hasOwn({a:1}, "a")` → TypeError "Object.hasOwn is not a function" in all engines (node true). A program key
+starting with `"__#"` stays hidden (it shares the private-name / symbol namespace).
 
 ---
 
@@ -698,6 +690,8 @@ T-576 go: `math` transcendentals, Float64bits, NaN sign, untyped math constants,
 T-591 go: uint64 assignment of `1 << 63`; untyped big constant × float in the interp; overflowing constant args; NaN sign — DONE 94cf36c7 b030493b for the P1 parts; the NaN sign/payload part DECLINED: goja's floatToValue collapses every NaN result to one value and the interpreter negates by multiplying, so a float-bits builtin would split llvm.Run/native from the interpreter and goja from -frozen; it needs NaN-carrying float boxes in the interpreter first
 T-592 go: UTF-8-encoded surrogate bytes in strings under llvm.Run and native; interp byte cache — PARTIAL c90fdc51 (interp byte cache set-associative); surrogate bytes moved to CORE as T-594
 T-463 php: $this outside object context; bind/call on non-literal closures; binding warnings; S63T var_dump id divergence — PARTIAL 30ee93ac 35841d78 (a, b, d, e, f, g done from php-src; c's refusals done); printing binding warnings is T-596 (needs a warning-channel decision)
+T-580 js/ts: no temporal dead zone for let / const / class — DONE 1c0e5be6 (checks only where a reference can reach the dead zone; bench mod.js module byte-identical)
+T-581 js: arguments object, `__`-prefixed user keys, `String.prototype.normalize`, BigInt callee text — PARTIAL f67bcd8d df30f42f (normalize UAX #15 checked on every code point vs node, arguments object kind, __ user keys, BigInt callee text); arguments length/mapping is T-597
 
 # Settled — do not re-open
 
