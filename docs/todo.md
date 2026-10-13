@@ -152,7 +152,7 @@ element as an expression pattern) does not parse in either half (range bounds do
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-463 php: $this outside object context; bind/call on non-literal closures; binding warnings; S63T var_dump id divergence · P2 · PHP · OPEN [V]
+### T-463 php: $this outside object context; bind/call on non-literal closures; binding warnings; S63T var_dump id divergence · P2 · PHP · IN PROGRESS (PHP worker, round 1) [V]
 php-src semantics: (a) `$this` in a static method or static closure should raise Error "Using $this when not in object
 context"; the interpreter stops with "unknown name: $this" or reads null, the compiler aborts "member 'x' of undefined".
 (b) `bindTo`/`call` on a non-literal closure (first-class callable, fromCallable result) aborts "not modelled"
