@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-610** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-615** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -64,16 +64,45 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
+### T-610 python: name mangling; legacy `__getitem__` iteration; duplicate keyword via `**`; compiled implicit `__context__` · P1 · PY · OPEN [V]
+`class A: def __init__(self): self.__x = 1` → stored as `__x` (python `_A__x`; base and subclass privates collide, `__dict__`
+shows the wrong name). `class Seq: def __getitem__(self, i): if i < 3: return i; raise IndexError` → `list(Seq())` "'Seq' object
+is not iterable" in all legs (python `[0, 1, 2]`: the legacy sequence protocol, at every iteration entry point).
+`f(1, 2, c=1, **{"c": 2})` accepted (python "TypeError: f() got multiple values for keyword argument 'c'"; wording per callee,
+`dict()` for builtins). Compiled only: a raise inside a function called from an except block, or an implicit error (`1/0`) in an
+except body, has `__context__` None (interp and python chain it) — needs a runtime "currently handled exception" stack around
+js_try.
+
+### T-611 python: metaclasses, and the `enum` module on top of them · P2 · PY · OPEN [V]
+`class M(type): def __iter__(cls): ...` + `class C(metaclass=M)` → "'type' object is not iterable"; `__call__`/`__getitem__` on a
+metaclass are ignored; `import enum` is unresolved. Implement metaclass dispatch (class creation via M.__new__/__init__, attribute
+lookup and operators on the class through M) in all engines, then write enum (Enum, IntEnum, auto, members, iteration, value/
+name, `__members__`) as lib/python-enum.py.
+
+### T-612 python: set iteration order of ints differs from CPython · P2 · PY · OPEN [V]
+`print({x % 3 for x in [5, 4, 3]})` → ours `{2, 1, 0}` (insertion order), python `{0, 1, 2}`; CPython's order for int
+elements is deterministic (hash(i) = i, table size 8/32/...), so programs printing int sets disagree with the oracle. Model
+CPython's open-addressing slot order for sets whose elements all hash deterministically (ints, and tuples of ints); strings are
+salted per run, so leave those in insertion order and record it in manual 7.9.
+
+### T-613 python/js interpreters: generators still run by replay · P2 · CORE · OPEN [V]
+Both tag hosts now have a real suspension primitive (coNew/coResume/coYield: goja coroutine.go and frozen jsGenerator.suspend,
+manual 7.14), used by lua's interpreter. The python and js/ts interpreter halves still replay generator bodies, so side effects
+before a yield repeat after `throw()`, `send`, `yield from` (python: an extra "caught in gen" / "got ret" line) — and the
+js interpreter's description still says no primitive exists. Move both onto the primitive; measure interpreter speed.
+
+### T-614 python: smaller gaps — math, object repr prefix, OSError errno subclass, `__hash__` attribute · P3 · PY · OPEN [V]
+math lacks dist, exp2, frexp, ldexp, modf, nextafter, ulp, erf, gamma, ... (bit-exact against CPython or left out). Plain object
+repr prints `<Grid object>` (CPython `<__main__.Grid object at 0x...>`; the address cannot match, the module prefix can).
+`OSError(2, 'nf')` repr → `OSError(2, 'nf')` (CPython maps errno 2 to `FileNotFoundError(2, 'nf')`). A class defining `__eq__`
+without `__hash__` should have `X.__hash__` None (hashing already raises correctly).
+
 ### T-607 python regex: inline flags `(?i)` `(?s)` `(?x)` `(?i:..)`; a backreference to an unset group matches empty · P1 · PY · OPEN [V]
 `re.match(r"(?i)A", "a")` → every leg "unsupported group form" (python3 matches; also `(?s)`, `(?x)`, `(?m)`, scoped `(?i:..)`).
 `re.fullmatch(r"(b)?a\1", "a")` → ours a match (JS semantics: an unset group's backreference matches empty), python3 None.
 Both live in the shared lib/regex.js / abnf/jsrtregex.go: add them under python's own dialect flag (as java's J), additive,
 full matrix + native-full + gen-all; ruby has the same backreference rule (`"a" =~ /\A(b)?a\1\z/` → nil in ruby 2.6) — enable
 it for ruby's flag too and add a ruby assertion.
-
-### T-586 python: slice ordering and unhashable slice keys · P3 · PY · IN PROGRESS (PY worker, round 5) [V]
-`slice(1, 2) < slice(1, 3)` → TypeError "'<' not supported" in all legs (python True: slices compare as tuples). `{slice([1]):
-0}` is accepted (CPython TypeError "unhashable type: 'list'"); only `hash()` was checked, probe the dict-key case first.
 
 ---
 
@@ -710,6 +739,7 @@ T-598 lua: interpreter coroutines replay side effects; `ipairs("abc")`; indexing
 T-599 lua: os library, load/dofile, `<close>`, a real `_G`, NaN sign in string.pack — DONE 82a5666c 117bdd13 3a1cd51e for <close>, os (time/clock/date/difftime/getenv/exit), _G raw access; load/loadfile/dofile DECLINED (a native binary has no run-time Lua compiler, and constant-only load would make load(s) depend on whether s is a literal); NaN sign in string.pack DECLINED (goja canonicalises NaN, MetaJS cannot see a double's bits); __gc/__mode DECLINED (no engine lets a program drive its collector)
 T-602 php: spread into a by-ref parameter; lazy copy holder counts; Closure statics by name; caller context in library callbacks — DONE ad2d64a0 for spreads into by-ref params, by-ref variadics, Closure statics by name, caller-frame library callbacks; lazy copy holder counts DECLINED: exact copy-on-write needs decrement-on-drop (refcounting), which manual 7.8 rejects, plus a separation check at ~85 write sites — documented at phpRefHolders
 T-604 java: regex dialect gaps; missing Math/Long/Double API; TreeMap views; unmodifiable view write-through — DONE bc54d07a c6b40b82 (a Java dialect flag J in the shared regex engine, additive; the a{99999999999} runaway now 0.2 s)
+T-586 python: slice ordering and unhashable slice keys — DONE b7d9fd8a (plus f-string {{, exception chaining, namedtuple, exact math ints, __init_subclass__, bound-method keywords, operator, user __format__: 2fcba0c7..cb34806c)
 
 # Settled — do not re-open
 
