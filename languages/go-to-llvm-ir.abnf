@@ -1430,6 +1430,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // == on POINTERS (goCmpFold in go-constfold.js) is identity for two structs.
     binExt["==p"] = "js_goptreq"
     binExt["!=p"] = "js_goptrne"
+    // == on INTERFACES (goCmpFold) also compares the dynamic types.
+    binExt["==i"] = "js_goifeq"
+    binExt["!=i"] = "js_goifne"
 
     binExt["<<="] = "js_goshl"
     binExt[">>="] = "js_goshr"
@@ -2568,6 +2571,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var mV = callExt(b, "js_dict_new", [])
         callExt(b, "js_set", [mV, emitStr(b, "zero"), emitZero(b, zero)])
         callExt(b, "js_set", [mV, emitStr(b, "mty"), emitStr(b, mty)])
+        if (goIfKeyedTy(mty)) { callExt(b, "js_set", [mV, emitStr(b, "ik"), hTrue]) }
         return mV
     }
     function emitZero(b, t) { return emitZeroTy(b, t) }
@@ -4464,8 +4468,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function makeCaseLabel(items) {
         var vals = []
         var stys = []
-        for (var i = 0; i < items.length; i++) { vals.push(items[i].v); stys.push(items[i].sty) }
-        return {isDefault: items.length == 0, vals: vals, stys: stys}
+        // ieqs: filled by goSwBoxC by index (the label reaches it through the tag
+        // stack, where a push onto the array would not be kept).
+        var ieqs = []
+        for (var i = 0; i < items.length; i++) { vals.push(items[i].v); stys.push(items[i].sty); ieqs.push(false) }
+        return {isDefault: items.length == 0, vals: vals, stys: stys, ieqs: ieqs}
     }
     // items = [{subj}?, label or statement thunk...]: Go switch. The flat item list is
     // regrouped (every statement belongs to the last label). The dispatch compares (or,
@@ -4488,7 +4495,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             } else if (it.subj != undefined) {
                 subj = it.subj
             } else {
-                cur = {isDefault: it.isDefault, vals: it.vals, body: [], falls: false}
+                cur = {isDefault: it.isDefault, vals: it.vals, ieqs: it.ieqs, body: [], falls: false}
                 cases.push(cur)
             }
         }
@@ -4517,8 +4524,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                     var rv = cases[i].vals[v](b)
                     b = rv.b
                     // js_goeq, not js_seq: a switch compares its subject to each case value
-                    // with Go's '==', which for a STRUCT value compares the fields.
-                    var condV = subjV != null ? callExt(b, "js_goeq", [subjV, rv.v]) : rv.v
+                    // with Go's '==', which for a STRUCT value compares the fields
+                    // (js_goifeq for an interface, see goSwBoxC).
+                    var condV = subjV != null ? callExt(b, cases[i].ieqs[v] ? "js_goifeq" : "js_goeq", [subjV, rv.v]) : rv.v
                     var nextB = curF.NewBlock("")
                     b.NewCondBr(truthy(b, condV), bodyBs[i], nextB)
                     b = nextB

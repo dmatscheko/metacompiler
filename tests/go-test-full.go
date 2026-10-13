@@ -3842,6 +3842,41 @@ func s64() {
 	check("mrd3", sum > 200)
 }
 
+// ===== SECTION 65: interface equality and map keys by dynamic type =====
+func s65() {
+	fs := []float64{1, 0, -1}
+	is := []int{1}
+	var a interface{} = fs[0]
+	var b interface{} = is[0]
+	var c interface{} = float32(1)
+	var d interface{} = uint8(1)
+	check("ieq1", fmt.Sprint(a == b, b == a, a == c, b == d, a == fs[0], a == 1, a == 1.0, b == 1) == "false false false false true false true true")
+	m := map[interface{}]string{}
+	m[a] = "float"
+	m[b] = "int"
+	m[c] = "f32"
+	m[d] = "u8"
+	check("ieq2", len(m) == 4 && m[a]+" "+m[b]+" "+m[1]+" "+m[1.0]+" "+m[uint8(1)] == "float int int float u8")
+	got := ""
+	switch b {
+	case 1.0:
+		got = "float"
+	case 1:
+		got = "int"
+	}
+	check("ieq3", got == "int")
+	nan := fs[1] / fs[1]
+	negz := fs[1] / fs[2]
+	fm := map[float64]int{}
+	fm[nan] = 1
+	fm[nan] = 2
+	fm[0.0] = 3
+	fm[negz] = 4
+	fm[fs[0]] = 5
+	fm[1] = 6
+	check("fkey1", fmt.Sprint(len(fm), fm[0], fm[nan], fm[1]) == "4 4 0 6")
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -3907,6 +3942,7 @@ func main() {
 	s62() // SECTION-CALL 62
 	s63() // SECTION-CALL 63
 	s64() // SECTION-CALL 64
+	s65() // SECTION-CALL 65
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

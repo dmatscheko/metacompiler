@@ -1358,7 +1358,17 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function isMap(v) {
         return v !== undefined && v !== null && typeof v == "object" && v.__dict === true
     }
-    function newMap(zero, mty) { return {__dict: true, keys: [], vals: [], zero: zero, mty: mty} }
+    function newMap(zero, mty) { return {__dict: true, keys: [], vals: [], zero: zero, mty: mty, ik: goIkOf(mty)} }
+    // `ik`: the key type is an interface (goIfKeyedTy), cached per type text.
+    var goIkCache = {}
+    function goIkOf(mty) {
+        var c = goIkCache["$" + mty]
+        if (c === undefined) {
+            c = goIfKeyedTy(mty)
+            goIkCache["$" + mty] = c
+        }
+        return c
+    }
     // THE ZERO VALUE OF A MAP TYPE IS A MARKED EMPTY MAP, not null.
     //
     // In Go a nil map READS like an empty one - `var m map[string]int; m["k"]` is 0,
@@ -1368,7 +1378,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // builds the same object in emitZeroTy, and the mark is read by goIsNilMap in
     // languages/lib/go-rt.metajs and giIsNilMap in abnf/jsrt.go. `[]T` zeroes to an
     // empty slice HEADER carrying the same mark - see newNilSl.
-    function newNilMap(zero, mty) { return {__dict: true, keys: [], vals: [], zero: zero, mty: mty, __nil: true} }
+    function newNilMap(zero, mty) { return {__dict: true, keys: [], vals: [], zero: zero, mty: mty, ik: goIkOf(mty), __nil: true} }
     function isNilMap(v) { return isMap(v) && v.__nil == true }
     // indexOf compares with ===, like the scan it replaces. A SIZED INTEGER key is
     // a box, and two boxes holding the same value are different objects, so a
@@ -1383,20 +1393,34 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // legal map key and stays on identity. The twins are goKeyIsVal/goMapFind in
         // languages/lib/go-rt.metajs and the goLang arm of dictKeyEq in abnf/jsrt.go.
         // A POINTER key (`map[*T]V`) is identity: two &T{1} are two keys.
+        // An INTERFACE key also compares the dynamic type: float64(1) and 1 are
+        // two keys of a map[any]V (goIfEq).
+        if (m.ik === true) {
+            for (var ii = 0; ii < m.keys.length; ii++) {
+                if (goIfEq(m.keys[ii], k)) { return ii }
+            }
+            return 0 - 1
+        }
         if (goKeyIsVal(k) && !goPtrKeyed(m)) {
             for (var vi = 0; vi < m.keys.length; vi++) {
                 if (goEq(m.keys[vi], k)) { return vi }
             }
             return 0 - 1
         }
-        if (szIs(k)) { goSeenSized = true }
+        // A float or sized-integer key compares by VALUE (a fresh box is a new
+        // object): -0.0 finds the key 0, and a NaN key never finds anything.
+        if (szIs(k) || isFlo(k)) { goSeenSized = true }
         if (!goSeenSized) { return m.keys.indexOf(k) }
-        var i = m.keys.indexOf(k)
-        if (i >= 0) { return i }
-        if (!szIs(k) && typeof k != "number") { return 0 - 1 }
+        if (!isFlo(k)) {
+            var i = m.keys.indexOf(k)
+            if (i >= 0) { return i }
+        }
+        if (!szIs(k) && !isFlo(k) && typeof k != "number") { return 0 - 1 }
         for (var j = 0; j < m.keys.length; j++) {
             var kk = m.keys[j]
-            if ((szIs(kk) || szIs(k)) && (szIs(kk) || typeof kk == "number") && szEq(kk, k)) { return j }
+            if (isFlo(kk) || isFlo(k)) {
+                if ((isFlo(kk) || typeof kk == "number") && gNumF(kk) === gNumF(k)) { return j }
+            } else if ((szIs(kk) || szIs(k)) && (szIs(kk) || typeof kk == "number") && szEq(kk, k)) { return j }
         }
         return 0 - 1
     }
@@ -3264,6 +3288,17 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // they are the same object; a cell or nil compares as before. Twin of js_goptreq.
     binOps["==p"] = function(l, r) { return goPtrEq(l, r) }
     binOps["!=p"] = function(l, r) { return !goPtrEq(l, r) }
+    // == on INTERFACES (goCmpFold): the dynamic types must match as well, and a
+    // plain number, a float64, a float32 and each sized integer type are all
+    // different ones. Twin of js_goifeq in lib/go-rt.metajs and abnf/jsrtgolang.go.
+    binOps["==i"] = function(l, r) { return goIfEq(l, r) }
+    binOps["!=i"] = function(l, r) { return !goIfEq(l, r) }
+    function goDynKind(v) {
+        if (isFlo(v)) { return isF32(v) ? 4 : 1 }
+        if (szIs(v)) { return 16 + v.w * 2 + (v.u ? 1 : 0) }
+        return typeof v == "number" ? 0 : 0 - 1
+    }
+    function goIfEq(l, r) { return goDynKind(l) == goDynKind(r) && goEq(l, r) }
     function goPtrEq(l, r) {
         if (goIsStructVal(l) && goIsStructVal(r)) { return l === r }
         return goEq(l, r)
@@ -4920,8 +4955,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function makeCaseLabel(items) {
         var vals = []
         var stys = []
-        for (var i = 0; i < items.length; i++) { vals.push(items[i].v); stys.push(items[i].sty) }
-        return {isDefault: items.length == 0, vals: vals, stys: stys}
+        // ieqs: filled by goSwBoxC by index (the label reaches it through the tag
+        // stack, where a push onto the array would not be kept).
+        var ieqs = []
+        for (var i = 0; i < items.length; i++) { vals.push(items[i].v); stys.push(items[i].sty); ieqs.push(false) }
+        return {isDefault: items.length == 0, vals: vals, stys: stys, ieqs: ieqs}
     }
     // items = [{subj}?, label or statement thunk...]: Go switch, no fallthrough.
     // The flat item list is regrouped: every statement belongs to the last label.
@@ -4939,7 +4977,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             } else if (it.subj != undefined) {
                 subj = it.subj
             } else {
-                cur = {isDefault: it.isDefault, vals: it.vals, body: []}
+                cur = {isDefault: it.isDefault, vals: it.vals, ieqs: it.ieqs, body: []}
                 cases.push(cur)
             }
         }
@@ -4961,7 +4999,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             if (cases[i].isDefault) { dflt = i; continue }
             for (var v = 0; v < cases[i].vals.length && hit < 0; v++) {
                 var val = cases[i].vals[v]()
-                if (subj != null ? goEq(val, s) : core.test(val)) hit = i
+                if (subj == null ? core.test(val) : (cases[i].ieqs[v] ? goIfEq(s, val) : goEq(val, s))) hit = i
             }
         }
         if (hit < 0) hit = dflt

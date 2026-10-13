@@ -2293,6 +2293,10 @@ func init() {
 		}
 		m["js_goptreq"] = func(a []uint64) uint64 { return w(rt.goPtrEq(u(a[0]), u(a[1]))) }
 		m["js_goptrne"] = func(a []uint64) uint64 { return w(!rt.goPtrEq(u(a[0]), u(a[1]))) }
+		// js_goifeq / js_goifne: == on two interface values. Twins: js_goifeq in
+		// lib/go-rt.metajs, goIfEq in languages/go-interpreter.abnf.
+		m["js_goifeq"] = func(a []uint64) uint64 { return w(rt.goIfEq(u(a[0]), u(a[1]))) }
+		m["js_goifne"] = func(a []uint64) uint64 { return w(!rt.goIfEq(u(a[0]), u(a[1]))) }
 		// panic(v) and $panicf(v): the second argument says the value was computed
 		// at the panic, which goPanicReport needs (see PanicCall in the grammars).
 		basePanic := m["js_gopanic"]
@@ -3229,4 +3233,28 @@ func goNilDeref(rt *jsrt, v interface{}) {
 	if isUndefOrNull(v) {
 		goRTFail("invalid memory address or nil pointer dereference")
 	}
+}
+
+// goDynKind tells apart the dynamic types that share the number representation:
+// a plain number (int), a float box by its style (float64, float32) and a sized
+// integer by width and sign. Anything else answers -1 and is left to goValueEq.
+func goDynKind(v interface{}) int {
+	switch x := v.(type) {
+	case float64:
+		return 0
+	case jsJFlo:
+		return int(x.sty)
+	case jsGInt:
+		k := 16 + int(x.w)*2
+		if x.u {
+			k++
+		}
+		return k
+	}
+	return -1
+}
+
+// goIfEq is == on two interface values: the dynamic types must match as well.
+func (rt *jsrt) goIfEq(a, b interface{}) bool {
+	return goDynKind(a) == goDynKind(b) && rt.goValueEq(a, b)
 }

@@ -3528,6 +3528,16 @@ func (rt *jsrt) dictKeyEq(a, b interface{}) bool {
 // value. Twins: goMapFind in lib/go-rt.metajs, mapFind in go-interpreter.abnf.
 func (rt *jsrt) goMapKeyIdx(m interface{}, keys *jsArray, k interface{}, py bool) int {
 	if rt.goLang {
+		// A map whose key type is an interface (`ik`) tells its keys apart by
+		// dynamic type as well (goIfEq in jsrtgolang.go).
+		if m.(*jsObject).props["ik"] == true {
+			for i, e := range keys.elems {
+				if rt.goIfEq(e, k) {
+					return i
+				}
+			}
+			return -1
+		}
 		if t, _ := m.(*jsObject).props["mty"].(string); strings.HasPrefix(t, "map[*") {
 			for i, e := range keys.elems {
 				if e == k {

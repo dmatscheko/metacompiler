@@ -226,6 +226,16 @@ function goClassOf(v) {
 // go-interpreter.abnf.
 function goMapFind(m, k) {
     var keys = m.keys
+    // A map whose key type is an interface (`ik`, set by the emitter) tells its
+    // keys apart by dynamic type as well: float64(1) and 1 are two keys.
+    if (m.ik === true) {
+        var ii = 0
+        while (ii < keys.length) {
+            if (goIfEq(keys[ii], k)) { return ii }
+            ii = ii + 1
+        }
+        return 0 - 1
+    }
     // The typeof gate is the fast path: a string or number key - which is nearly every
     // Go map - leaves here without a call.
     if (typeof k == "object" && k !== null && goKeyIsVal(k) && !goPtrKeyed(m)) {
@@ -1925,6 +1935,18 @@ function goTruthy(v) {
 // Go's == and != (see goValueEq: value equality for structs and arrays).
 function js_goeq(a, b) { return goValueEq(a, b) }
 function js_gone(a, b) { return !goValueEq(a, b) }
+// == on two INTERFACE values: the dynamic types must match as well, and a plain
+// number, a float64, a float32 and each sized integer type are different ones.
+// Twins: js_goifeq in abnf/jsrtgolang.go, goIfEq in go-interpreter.abnf.
+function goDynKind(v) {
+    if (typeof v != "number") { return 0 - 1 }
+    if (floIs(v)) { return floStyle(v) }
+    if (sintIs(v)) { return 16 + sintWidth(v) * 2 + (sintUns(v) ? 1 : 0) }
+    return 0
+}
+function goIfEq(a, b) { return goDynKind(a) == goDynKind(b) && goValueEq(a, b) }
+function js_goifeq(a, b) { return goIfEq(a, b) }
+function js_goifne(a, b) { return !goIfEq(a, b) }
 
 // ----- struct fields and methods --------------------------------------------
 

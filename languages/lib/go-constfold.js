@@ -1377,10 +1377,12 @@ function goSwBoxC(items) {
     while (i < items.length) {
         var it = items[i]
         if (it != null && typeof it == "object" && it.vals !== undefined) {
+            // ieqs[k]: the subject and case k compare as interfaces (goCmpFold's "==i").
             var k = 0
             while (k < it.vals.length) {
                 it.vals[k] = goDtBoxThunk(it.vals[k], goDtBoxTo(it.stys[k], subj.sty))
                 if (goDtBoxTo(subj.sty, it.stys[k]) != "") { subj.subj = goDtBoxThunk(subj.subj, goDtBoxTo(subj.sty, it.stys[k])) }
+                it.ieqs[k] = goIsIfaceTy(stBare(subj.sty)) || goIsIfaceTy(stBare(it.stys[k]))
                 k = k + 1
             }
         }
@@ -1404,6 +1406,14 @@ function stMapKeyTy(t) {
         i = i + 1
     }
     return ""
+}
+// Is the key type of map type mty an interface? Such a map tells its keys apart by
+// dynamic type as well as value (the "==i" rule), so its maker marks it `ik`.
+function goIfKeyedTy(mty) {
+    var t = stBare(mty)
+    if (t.indexOf("map[") != 0) { t = resolveDefined(t) }
+    if (t.indexOf("map[") != 0) { return false }
+    return goIsIfaceTy(stBare(stMapKeyTy(t)))
 }
 // The box a key of static type ksty takes in a map of static type mty, or "".
 function goKeyBoxTy(mty, ksty) {
@@ -2289,6 +2299,9 @@ function goCmpFold(items) {
         if (ops[0] == "==" || ops[0] == "!=") {
             ts[0] = goDtBoxThunk(ts[0], goDtBoxTo(lt, rt))
             ts[1] = goDtBoxThunk(ts[1], goDtBoxTo(rt, lt))
+            // Two interface values are equal only when their DYNAMIC types are
+            // too, so float64(1) and int(1) differ: "==i" / "!=i".
+            if (goIsIfaceTy(lt) || goIsIfaceTy(rt)) { ops[0] = ops[0] + "i" }
         }
         var l = constAt(items[1].at)
         var r = constAt(items[4].at)
