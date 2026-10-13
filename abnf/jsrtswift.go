@@ -4379,6 +4379,8 @@ func swStrMethod(rt *jsrt, s, name string, args []interface{}) (interface{}, boo
 		return swcHasSuffix(s, p), true
 	case "contains":
 		return swcContains(s, p), true
+	case "trimmingPrefix":
+		return swcTrimPrefix(s, p), true
 	case "replacing":
 		if len(args) > 1 {
 			if r, ok := args[1].(string); ok {

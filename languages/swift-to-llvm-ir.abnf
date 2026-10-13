@@ -1362,7 +1362,8 @@ NotChar61   = :script(~~
 NotChar63   = :script(~~
     (function() { return (c.peek(0) === 63) ? abnf.newToken("\x01q-follows", 0) : undefined })()
 ~~) ;
-MethodSfx   <~~ var mn = popName(); swDsNoteCall(mn, up.start, up.pos); push({kind:"mcall", name: mn, args: takeAll(), span: up.start + ":" + up.pos}) ~~>
+// `trimmingPrefix(while: p)` is drop(while: p) under its newer name.
+MethodSfx   <~~ var mn = popName(); swDsNoteCall(mn, up.start, up.pos); var ma = takeAll(); if (mn == "trimmingPrefix" && ma.length == 1 && ma[0].lbl == "while") { mn = "drop" }; push({kind:"mcall", name: mn, args: ma, span: up.start + ":" + up.pos}) ~~>
             = "." Id <~~ push({mname: swBt(up.in)}) ~~> MArgs ;
 FieldSfx    = "." Id <~~ push(makeFieldSfx(swBt(up.in))) ~~> ;
 // t.0 / t.1: a tuple element read. A tuple is an object whose elements live under

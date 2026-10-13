@@ -512,6 +512,15 @@ function swcReplacing(s, p, r, n) {
     }
     return out
 }
+// s.trimmingPrefix(p): s without p when s starts with it, by Characters. Twin of
+// swcTrimPrefix in abnf/jsrtswiftchars.go.
+function swcTrimPrefix(s, p) {
+    if (!swcHasPrefix(s, p)) { return s }
+    var cs = swcGraphemes(s)
+    var out = ""
+    for (var i = swcGraphemes(p).length; i < cs.length; i++) { out = out + cs[i] }
+    return out
+}
 function swcHasSuffix(s, p) {
     var cs = swcGraphemes(s)
     var cp = swcGraphemes(p)

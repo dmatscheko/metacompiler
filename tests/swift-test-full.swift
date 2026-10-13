@@ -4801,6 +4801,18 @@ func s111() {
     check("111c", rs.compactMap { try? $0.get() } == [1, 3] && mapped == "worse")
 }
 
+// ===== SECTION 112: trimmingPrefix =====
+// trimmingPrefix(_:) drops one leading occurrence, by Characters;
+// trimmingPrefix(while:) drops the leading run, on a String or an Array. Every
+// value read off swiftc 6.1.2.
+func s112() {
+    let ss = ["  padded  ", "0x1F", "abc", "", "éa"]
+    check("112a", ss[0].trimmingPrefix(" ") == " padded  " && ss[1].trimmingPrefix("0x") == "1F" && ss[2].trimmingPrefix("x") == "abc"
+        && ss[3].trimmingPrefix("a") == "" && ss[4].trimmingPrefix("é") == "a")
+    check("112b", ss[0].trimmingPrefix(while: { $0 == " " }) == "padded  " && ss[0].trimmingPrefix(while: \.isWhitespace) == "padded  "
+        && Array([1, 1, 2, 1].trimmingPrefix(while: { $0 == 1 })) == [2, 1])
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -4913,6 +4925,7 @@ func main() {
     s109() // SECTION-CALL 109
     s110() // SECTION-CALL 110
     s111() // SECTION-CALL 111
+    s112() // SECTION-CALL 112
     print("full: \(checks) checks, \(fails) failures")
 }
 

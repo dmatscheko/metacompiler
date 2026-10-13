@@ -352,6 +352,19 @@ func swcStrCmp(a, b string) int {
 
 // swcHasPrefix / swcHasSuffix / swcContains compare CHARACTERS: "é" neither
 // starts with nor contains "e".
+// swcTrimPrefix is s.trimmingPrefix(p): s without p when s starts with it, by
+// Characters. Twin of swcTrimPrefix in languages/lib/swift-chars.js.
+func swcTrimPrefix(s, p string) string {
+	if !swcHasPrefix(s, p) {
+		return s
+	}
+	out := ""
+	for _, c := range swcGraphemes(s)[len(swcGraphemes(p)):] {
+		out += c
+	}
+	return out
+}
+
 func swcHasPrefix(s, p string) bool {
 	cs, cp := swcGraphemes(s), swcGraphemes(p)
 	if len(cp) > len(cs) {

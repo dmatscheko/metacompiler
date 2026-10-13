@@ -1749,6 +1749,7 @@ function js_mcall(recv, name, args) {
             if (name === "contains") { return swcContains(recv, sa) }
             if (name === "hasPrefix" || name === "starts") { return swcHasPrefix(recv, sa) }
             if (name === "hasSuffix") { return swcHasSuffix(recv, sa) }
+            if (name === "trimmingPrefix") { return swcTrimPrefix(recv, sa) }
             if (name === "replacing" && args.length > 1 && typeof args[1] == "string") {
                 var rn = 0 - 1
                 if (args.length > 2) { rn = swNum(args[2]) }
