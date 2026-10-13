@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-595** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-597** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -144,15 +144,20 @@ element as an expression pattern) does not parse in either half (range bounds do
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-463 php: $this outside object context; bind/call on non-literal closures; binding warnings; S63T var_dump id divergence · P2 · PHP · IN PROGRESS (PHP worker, round 1) [V]
-php-src semantics: (a) `$this` in a static method or static closure should raise Error "Using $this when not in object
-context"; the interpreter stops with "unknown name: $this" or reads null, the compiler aborts "member 'x' of undefined".
-(b) `bindTo`/`call` on a non-literal closure (first-class callable, fromCallable result) aborts "not modelled"
-(closure_call_bind). (c) binding warnings are not printed; "Cannot unbind $this of closure using $this" is not enforced.
-(d) compiled `$closure->__invoke($n)` passes a by-reference parameter by value (closure_invoke_case_insensitive).
-(e) dynamic calls to an inaccessible method do not route to __call/__callStatic. (f) unverified: `call_user_func(['A','s'])`
-from a compatible B instance — php-src suggests static:: is B, ours gives A. (g) the full ratchet's var_dump of S63T shows
-#470 interp vs #469 compiled (object-id model; the suite does not compare it — check why the s63dump comparison misses it).
+### T-595 php: `[$closure, '__invoke']` callbacks; `[&$k, 4]` in the compiler; callback-form static fallback; bindTo identity · P2 · PHP · OPEN [V spec-only]
+`call_user_func([$m, '__invoke'], 3, 4)` → both halves "first array member is not a valid class name or object" (PHP: a
+Closure is an object with __invoke; valid). `$a = [&$k, 4];` → compiler "array element by reference not implemented" (interp
+accepts). `call_user_func('M::sp')` from a compatible subclass instance → ours `__call`, php-src `__callStatic` (the lookup runs in
+call_user_func's internal frame); `['M','sp']` → PHP the named class's `__call`, ours `$this`'s class (differs only when the
+subclass overrides __call). `$c->bindTo(...)` on a function-made closure returns the same object (PHP a new one, `===` false).
+Method signatures are keyed by name only: two classes declaring one name with different by-ref parameters make that call
+site pass by value.
+
+### T-596 php: binding and undefined-variable warnings are never printed · P3 · PHP · BLOCKED - needs a user decision
+PHP CLI prints `Warning: Cannot unbind $this of closure using $this in <file> on line <n>` (and undefined-variable/-index
+warnings) on stdout with display_errors=1, plus possibly a `PHP Warning:` log line on stderr depending on ini. No PHP engine here
+has a warning channel or tracks runtime line numbers at those sites. Decide: which stream/ini model to emulate, and whether
+line tracking at warning sites is worth its cost.
 
 ---
 
@@ -692,6 +697,7 @@ T-577 go: invalid UTF-8 in strings — each engine differs; byte-index cache thr
 T-576 go: `math` transcendentals, Float64bits, NaN sign, untyped math constants, missing members — PARTIAL 0deea0ec (Exp/Log/Sin/Cos/Tan/Atan/Hypot/Cbrt/Pow/FMA bit-exact vs go on 3000 inputs in all engines, Float64bits, exact pkg constants, undefined members rejected); NaN sign/payload is T-591
 T-591 go: uint64 assignment of `1 << 63`; untyped big constant × float in the interp; overflowing constant args; NaN sign — DONE 94cf36c7 b030493b for the P1 parts; the NaN sign/payload part DECLINED: goja's floatToValue collapses every NaN result to one value and the interpreter negates by multiplying, so a float-bits builtin would split llvm.Run/native from the interpreter and goja from -frozen; it needs NaN-carrying float boxes in the interpreter first
 T-592 go: UTF-8-encoded surrogate bytes in strings under llvm.Run and native; interp byte cache — PARTIAL c90fdc51 (interp byte cache set-associative); surrogate bytes moved to CORE as T-594
+T-463 php: $this outside object context; bind/call on non-literal closures; binding warnings; S63T var_dump id divergence — PARTIAL 30ee93ac 35841d78 (a, b, d, e, f, g done from php-src; c's refusals done); printing binding warnings is T-596 (needs a warning-channel decision)
 
 # Settled — do not re-open
 
