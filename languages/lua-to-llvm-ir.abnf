@@ -1198,18 +1198,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             s1B.NewCondBr(rawTruthy(s1B, callExt(s1B, "js_seq", [stv, emitStr(s1B, "boolean")])), sbB, s2B)
             sbB.NewRet(sbB.NewSelect(rawTruthy(sbB, ps[0]), emitStr(sbB, "true"), emitStr(sbB, "false")))
             s2B.NewCondBr(rawTruthy(s2B, callLua(s2B, "lua_isnum", [ps[0]])), smB, s3B)
-            // A table and a function have no printable value in Lua (real Lua prints
-            // `table: 0x...`, an address nothing here can reproduce), so they render by
-            // TYPE NAME, as lua-interpreter.abnf's luaToStr does (the shared js_pystr
-            // would spell them "[object Object]" and "[function]").
+            // A table and a function render as their type and an identity, `table:
+            // 0x...` (js_luident; the shared js_pystr would spell them "[object
+            // Object]" and "[function]").
             var sgB = curF.NewBlock("")
             var soB = curF.NewBlock("")
-            var spB = curF.NewBlock("")
             var sxB = curF.NewBlock("")
             s3B.NewCondBr(rawTruthy(s3B, callExt(s3B, "js_seq", [stv, emitStr(s3B, "function")])), sgB, soB)
-            sgB.NewRet(emitStr(sgB, "function"))
-            soB.NewCondBr(rawTruthy(soB, callExt(soB, "js_seq", [stv, emitStr(soB, "object")])), spB, sxB)
-            spB.NewRet(emitStr(spB, "table"))
+            sgB.NewRet(callExt(sgB, "js_luident", [ps[0]]))
+            soB.NewCondBr(rawTruthy(soB, callExt(soB, "js_seq", [stv, emitStr(soB, "object")])), sgB, sxB)
             sxB.NewRet(callExt(sxB, "js_pystr", [ps[0]]))
             // js_lustr is Lua's number rendering, both subtypes at once: an integer
             // without a fraction and EXACTLY (js_pystr would have spelled

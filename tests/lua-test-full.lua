@@ -1722,6 +1722,12 @@ function s36()
     check("bt59", table.concat(table.move({1, 2, 3}, 1, 3, 2), " "), "1 1 2 3")
     check("bt60", table.concat(table.move({1, 2, 3}, 1, 2, 1, {}), " "), "1 2")
     check("bt61", msg(table.move, {1}, 1, 1), "bad argument #4 to 'table.move' (number expected, got no value)")
+    -- A table or a function renders with an identity: one object always the same
+    -- way, two objects differently (the address digits are lua's own).
+    local ta, tb, fa = {}, {}, function() end
+    check("bt62", tostring(ta) ~= tostring(tb) and tostring(ta) == tostring(ta), true)
+    check("bt63", string.match(tostring(ta), "^table: 0x%x+$") ~= nil and string.match(tostring(fa), "^function: 0x%x+$") ~= nil, true)
+    check("bt64", string.format("%s", fa) == tostring(fa) and tostring(fa) ~= tostring(print), true)
 end
 
 -- ===== SECTION 37: ^ is correctly rounded =====

@@ -1401,9 +1401,28 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (v === true) { return "true" }
         if (v === false) { return "false" }
         if (isNum(v)) { return luaNumStr(v) }
-        if (typeof v == "object") { return "table" }
-        if (typeof v == "function") { return "function" }
+        if (typeof v == "object" || typeof v == "function") { return luaIdent(v) }
         return "" + v
+    }
+    // How a table or a function renders: its type and an identity, `table: 0x...`.
+    // Real lua prints the address, which differs between runs, so what has to hold
+    // is that one object renders the same way every time and two objects
+    // differently; a per-run counter gives that, found by identity. Twin of
+    // js_luident in lib/lua-rt.metajs and rt.luIdent in abnf/jsrtluafmt.go.
+    var luaIdObjs = []
+    function luaIdent(v) {
+        var i = 0
+        while (i < luaIdObjs.length && luaIdObjs[i] !== v) { i = i + 1 }
+        if (i === luaIdObjs.length) { luaIdObjs.push(v) }
+        var n = 1431633920 + 16 * (i + 1)
+        var digits = "0123456789abcdef"
+        var hex = ""
+        while (n > 0) {
+            var q = Math.floor(n / 16)
+            hex = digits.charAt(n - q * 16) + hex
+            n = q
+        }
+        return luaType(v) + ": 0x" + hex
     }
     function luaIndex(o, k) {
         if (o === undefined || o === null) { fail("attempt to index a nil value") }

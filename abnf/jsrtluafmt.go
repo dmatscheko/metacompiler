@@ -484,7 +484,25 @@ func (rt *jsrt) luFmtToStr(v interface{}) string {
 	if luIsNum(v) {
 		return luNumStr(v)
 	}
-	return rt.luTypeName(v)
+	return rt.luIdent(v)
+}
+
+// luIdents numbers the tables and functions luIdent has rendered. One compile runs
+// one program, so a package-level map is per program.
+var luIdents = map[interface{}]int{}
+
+// luIdent is how a table or a function renders: its type and an identity,
+// `table: 0x...`. Real lua prints the address, which differs between runs, so
+// what has to hold is that one object renders the same way every time and two
+// objects differently; a per-run counter gives that. Twin of js_luident in
+// languages/lib/lua-rt.metajs.
+func (rt *jsrt) luIdent(v interface{}) string {
+	n, ok := luIdents[v]
+	if !ok {
+		n = len(luIdents) + 1
+		luIdents[v] = n
+	}
+	return rt.luTypeName(v) + ": 0x" + strconv.FormatInt(int64(0x55550000+16*n), 16)
 }
 
 func (rt *jsrt) lsLiteral(args []interface{}, n int) string {

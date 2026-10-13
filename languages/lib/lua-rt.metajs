@@ -1494,7 +1494,28 @@ function lsFmtToStr(args, n) {
     if (v === undefined || v === null) { return "nil" }
     if (v === true) { return "true" }
     if (v === false) { return "false" }
-    return luTypeName(v)
+    return js_luident(v)
+}
+
+// How a table or a function renders: its type and an identity, `table: 0x...`.
+// Real lua prints the address, which differs between runs, so what has to hold
+// is that one object renders the same way every time and two objects differently;
+// a per-run counter gives that, found by IDENTITY in a parallel array (MetaJS has
+// no map keyed by an object). Twin of rt.luIdent in abnf/jsrtlua.go.
+var luIdObjs = []
+function js_luident(v) {
+    var i = 0
+    while (i < luIdObjs.length && luIdObjs[i] !== v) { i = i + 1 }
+    if (i === luIdObjs.length) { luIdObjs.push(v) }
+    var n = 1431633920 + 16 * (i + 1)
+    var digits = "0123456789abcdef"
+    var hex = ""
+    while (n > 0) {
+        var q = Math.floor(n / 16)
+        hex = digits.charAt(n - q * 16) + hex
+        n = q
+    }
+    return luTypeName(v) + ": 0x" + hex
 }
 function lsFmtLitKind(args, n) {
     var v = luArgAt(args, n)

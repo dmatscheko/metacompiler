@@ -957,6 +957,7 @@ func init() {
 		m["js_lustr"] = func(a []uint64) uint64 { return rt.wrapStr(luNumStr(u(a[0]))) }
 		m["js_lukey"] = func(a []uint64) uint64 { return w(luKey(u(a[0]))) }
 		m["js_luwkey"] = func(a []uint64) uint64 { return w(rt.luWriteKey(u(a[0]))) }
+		m["js_luident"] = func(a []uint64) uint64 { return rt.wrapStr(rt.luIdent(u(a[0]))) }
 		m["js_luforprep"] = func(a []uint64) uint64 { return w(rt.luForPrep(u(a[0]), u(a[1]), u(a[2]))) }
 		// A table key as pairs hands it to the program. The object store
 		// addresses a number by its text, so js_keys answers text: a text that
