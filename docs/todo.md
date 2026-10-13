@@ -134,7 +134,7 @@ non-integral floats use JS formatting, not %g.
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-587 swift: ClosedRange.Index; an element as an expression pattern · P3 · SW · OPEN [V]
+### T-587 swift: ClosedRange.Index; an element as an expression pattern · P3 · SW · IN PROGRESS (SW worker, round 6) [V]
 `let cr = 2...7; print(cr.firstIndex(of: 4) as Any)` → all legs `2` (swiftc
 `Optional(Swift.ClosedRange<Swift.Int>.Index.inRange(4))`: the Index enum is not modelled). `switch 1 { case xs[0]: ... }` (an
 element as an expression pattern) does not parse in either half (range bounds do).
