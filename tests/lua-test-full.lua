@@ -193,6 +193,19 @@ function s07()
     do path = path .. "x"; goto after end -- forward jump out of a do-block
     ::after::
     check("lbl4", path .. "y", "xy")
+    -- A jump back to a label leaves the scope of the locals after it: each pass
+    -- declares a fresh one, and before its declaration the name is the outer one.
+    local fs, k, seen = {}, 1, ""
+    do
+        ::again::
+        seen = seen .. tostring(v7)
+        local v7 = k * 2
+        fs[k] = function() return v7 end
+        k = k + 1
+        if k <= 3 then goto again end
+    end
+    check("lbl5", fs[1]() .. fs[2]() .. fs[3](), "246")
+    check("lbl6", seen, "nilnilnil")
 end
 
 -- ===== SECTION 08: numeric for refinements =====
@@ -446,6 +459,40 @@ function s18()
         return function() return function() return hidden * 2 end end
     end
     check("clo5", outer()()(), 42)      -- upvalue through two nesting levels
+    -- Every pass of a loop binds fresh variables: a closure made in the body keeps
+    -- its own pass's loop variable and body locals.
+    local N, fs = {3}, {}
+    for i = 1, N[1] do fs[i] = function() return i end end
+    check("clo6", fs[1]() .. fs[2]() .. fs[3](), "123")
+    fs = {}
+    for i = 1, N[1] do local c = i * 10; fs[i] = function() return c end end
+    check("clo7", fs[1]() .. fs[3](), "1030")
+    fs = {}
+    for k, v in ipairs({"a", "b"}) do fs[k] = function() return k .. v end end
+    check("clo8", fs[1]() .. fs[2](), "1a2b")
+    fs = {}
+    local j = 0
+    while j < N[1] do j = j + 1; local c = j; fs[j] = function() return c end end
+    check("clo9", fs[1]() .. fs[2]() .. fs[3](), "123")
+    -- A local is visible only after its declaration, and only in its block.
+    local x, seen = "o", ""
+    for i = 1, 2 do seen = seen .. x; local x = i end
+    check("clo10", seen, "oo")
+    j = 0
+    while j < 1 do j = j + 1; local leak = 5 end
+    check("clo11", leak, nil)
+    if N[1] > 0 then local x = 2 end
+    check("clo12", x, "o")
+    local y = 1
+    local function gy() return y end
+    local y = 2
+    check("clo13", gy() * 10 + y, 12)   -- the closure keeps the first y
+    local function gz() return zz18 end
+    local zz18 = 5
+    check("clo14", gz(), nil)           -- a later local is not an upvalue
+    local function setg() g18 = N[1] end
+    setg()
+    check("clo15", g18, 3)              -- a bare assignment in a function is global
 end
 
 -- ===== SECTION 19: interpreter/compiler agreement ratchet =====

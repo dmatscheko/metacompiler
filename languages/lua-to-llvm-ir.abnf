@@ -25,8 +25,9 @@ functions named lua_* and called directly, rather than inline at every operator.
 
 Functions become IR functions jsf_N(env, args) plus a js_closure at the creation site;
 locals live in scope chain objects (js_scope_new / js_scope_decl / js_scope_get /
-js_scope_set), a bare assignment goes through js_pyset_var (assign up the chain, else
-create) and a read through lua_getvar (an unset global reads as nil). Tables are host
+js_scope_set), a bare assignment goes through js_scope_set_or_create (assign up the
+chain, else create a global) and a read through lua_getvar (an unset global reads as
+nil). Tables are host
 objects (js_obj_new, js_get, js_set) with 1 based numeric keys stringified like the
 interpreter; #t probes t[1], t[2], ... for the sequence border. print and the small
 math/string/table libraries plus next/ipairs/pairs are emitted as IR functions, and only
@@ -1520,6 +1521,24 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Set by repeat-until for the block it emits next, whose locals its condition
     // still sees: that block declares into the scope repeat pushed.
     var luaDeclShared = false
+    // The run-time scope a `local` declares into. A local is scoped to its block and
+    // becomes visible only after its declaration, so it needs a scope the emitting
+    // block owns (luaScopeOwned) that no closure has captured yet: every function
+    // emitted since the scope was made (funcCount past luaScopeStamp) closes over it,
+    // and a name declared into it later would leak into that closure - `local function
+    // g() return y end; local y = 1` reads the GLOBAL y. Otherwise the local gets a
+    // fresh scope, made where it is declared, so a loop body makes one per pass. A loop
+    // or function that made a scope for its own variables sets luaOwnTop, and the block
+    // it emits next owns that scope. Twin of luaLocalFrame in lua-interpreter.abnf.
+    var luaScopeOwned = false
+    var luaScopeStamp = 0
+    var luaOwnTop = false
+    function luaLocalScope(b) {
+        if (luaScopeOwned && funcCount == luaScopeStamp) { return }
+        curScopeV = callExt(b, "js_scope_new", [curScopeV])
+        luaScopeOwned = true
+        luaScopeStamp = funcCount
+    }
     function luaDeclPush(isFn) {
         luaDeclNames.push([])
         luaDeclFn.push(isFn)
@@ -1687,6 +1706,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var ownDecls = !luaDeclShared
             luaDeclShared = false
             if (ownDecls) { luaDeclPush(false) }
+            var savedScope = curScopeV
+            var savedOwned = luaScopeOwned
+            var savedStamp = luaScopeStamp
+            luaScopeOwned = luaOwnTop
+            luaOwnTop = false
             var scope = {}
             var any = false
             for (var i = 0; i < items.length; i++) {
@@ -1703,6 +1727,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         var lb = scope["$" + it.__label]
                         b.NewBr(lb)
                         b = lb
+                        // A goto back here leaves the scope of the locals after the
+                        // label: they get a fresh scope on every pass.
+                        luaScopeOwned = false
                     }
                     continue
                 }
@@ -1710,6 +1737,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             if (any) { labelScopes.pop() }
             if (ownDecls) { luaDeclPop() }
+            // repeat's condition still reads the scope the body's last local made.
+            if (ownDecls) { curScopeV = savedScope }
+            luaScopeOwned = savedOwned
+            luaScopeStamp = savedStamp
             return b
         }
     }
@@ -2111,7 +2142,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function emitTargetWrite(b, ref, v) {
         if (ref.path.length == 0) {
-            callExt(b, "js_pyset_var", [curScopeV, emitStr(b, ref.name), v])
+            callExt(b, "js_scope_set_or_create", [curScopeV, emitStr(b, ref.name), v])
             return b
         }
         var o = callLua(b, "lua_getvar", [curScopeV, emitStr(b, ref.name)])
@@ -2205,26 +2236,20 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         var folded = luaFolded(items)
         return function(b) {
-            var before = funcCount
             // `local x = e` - one name, one value - skips the positional array for the
             // same reason makeAssign does; see the note there.
             if (names.length == 1 && vals.length == 1) {
                 var r1 = vals[0](b)
                 b = r1.b
                 var v1 = callLua(b, "lua_first", [r1.v])
-                if (funcCount != before) { curScopeV = callExt(b, "js_scope_new", [curScopeV]) }
+                luaLocalScope(b)
                 callExt(b, "js_scope_decl", [curScopeV, emitStr(b, names[0]), v1])
                 luaDeclare(folded[0] ? "\x00k" + names[0] : names[0])
                 return b
             }
             var ra = emitListArr(b, vals)
             b = ra.b
-            // The new locals must stay invisible to a closure one of the initializers
-            // just built - 'local f = function() return f end' reads the GLOBAL f in Lua -
-            // and that closure captured the current frame, so the declarations go into a
-            // fresh one. Only the case that really built a function pays for the frame,
-            // and the enclosing block restores curScopeV on its way out.
-            if (funcCount != before) { curScopeV = callExt(b, "js_scope_new", [curScopeV]) }
+            luaLocalScope(b)
             for (var n = 0; n < names.length; n++) {
                 callExt(b, "js_scope_decl", [curScopeV, emitStr(b, names[n]), callExt(b, "js_get", [ra.v, emitNum(b, n)])])
                 luaDeclare(folded[n] ? "\x00k" + names[n] : names[n])
@@ -2260,7 +2285,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, params[i]), callExt(b, "js_arg", [f.Params[1], handle(i)])])
             luaDeclare(params[i])
         }
+        luaOwnTop = true
+        var savedStamp = luaScopeStamp
+        luaScopeStamp = funcCount
         var endB = bodyT(b)
+        luaScopeStamp = savedStamp
         luaDeclPop()
         luaLeave(endB, luaFrame)
         // Running off the end returns NO value (select('#', f()) is 0, print(f())
@@ -2305,7 +2334,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var idx = emitFunction(params, bodyT)
             var cl = callExt(b, "js_closure", [handle(idx), curScopeV])
             if (nameDesc.fsteps.length == 0) {
-                callExt(b, "js_pyset_var", [curScopeV, emitStr(b, nameDesc.fbase), cl])
+                callExt(b, "js_scope_set_or_create", [curScopeV, emitStr(b, nameDesc.fbase), cl])
                 return b
             }
             var o = callExt(b, "js_scope_get", [curScopeV, emitStr(b, nameDesc.fbase)])
@@ -2318,6 +2347,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function makeLocalFunc(bodyT, plist, name) {
         return function(b) {
+            luaLocalScope(b)
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), hUndef])
             luaDeclare(name)
             var idx = emitFunction(plist.params, bodyT)
@@ -2388,7 +2418,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 stepV = rst.v
             }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, stepName), stepV])
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), hUndef])
             // The step is written once, at the head of the loop, and nothing can
             // reassign $fs (the name is unspellable in Lua), so its SIGN is loop
             // invariant: lua_num(step) (a layer-2 call) is computed once here, in the
@@ -2418,13 +2447,21 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             downB.NewBr(testB)
             var condH = testB.NewPhi([llvm.ir.NewIncoming(leCond, upB), llvm.ir.NewIncoming(geCond, downB)])
             testB.NewCondBr(truthy(testB, condH), bodyB, exitB)
-            callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, name), callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])])
+            // The loop variable is a fresh binding per pass, in a scope of its own that
+            // the body's locals share; its parent is the scope outside the loop, so the
+            // body reads its upvalues no deeper than it would without one.
+            var forScope = curScopeV
+            curScopeV = callExt(bodyB, "js_scope_new", [saved])
+            callExt(bodyB, "js_scope_decl", [curScopeV, emitStr(bodyB, name), callExt(bodyB, "js_scope_get", [forScope, emitStr(bodyB, iName)])])
             loopStack.push({cont: postB, brk: exitB})
             luaDeclPush(false)
             luaDeclare(name)
+            luaOwnTop = true
+            luaScopeStamp = funcCount
             block(bodyB).NewBr(postB)
             luaDeclPop()
             loopStack.pop()
+            curScopeV = forScope
             var iV2 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, iName)])
             var stpV2 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, stepName)])
             var nextV = callLua(postB, "lua_arith", [handle(0), iV2, stpV2])
@@ -2465,6 +2502,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             loopStack.push({cont: contB, brk: exitB})
             luaDeclPush(false)
             luaDeclShared = true
+            luaOwnTop = true
+            luaScopeStamp = funcCount
             block(bodyB).NewBr(contB)
             loopStack.pop()
             var r = condT(contB)
@@ -2501,9 +2540,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, fName), callExt(b, "js_get", [ra.v, emitNum(b, 0)])])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, sName), callExt(b, "js_get", [ra.v, emitNum(b, 1)])])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, cName), callExt(b, "js_get", [ra.v, emitNum(b, 2)])])
-            for (var n = 0; n < names.length; n++) {
-                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, names[n]), hUndef])
-            }
             var headB = curF.NewBlock("")
             var bodyB = curF.NewBlock("")
             var postB = curF.NewBlock("")
@@ -2518,29 +2554,28 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var firstV = callExt(headB, "js_get", [allV, emitNum(headB, 0)])
             headB.NewCondBr(truthy(headB, callExt(headB, "js_sne", [firstV, hUndef])), bodyB, exitB)
             callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, cName), firstV])
+            // A fresh scope per pass for the loop names, as in makeNumFor.
+            var forScope = curScopeV
+            curScopeV = callExt(bodyB, "js_scope_new", [saved])
             for (var n2 = 0; n2 < names.length; n2++) {
-                callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, names[n2]), callExt(bodyB, "js_get", [allV, emitNum(bodyB, n2)])])
+                callExt(bodyB, "js_scope_decl", [curScopeV, emitStr(bodyB, names[n2]), callExt(bodyB, "js_get", [allV, emitNum(bodyB, n2)])])
             }
             loopStack.push({cont: postB, brk: exitB})
             luaDeclPush(false)
             for (var n3 = 0; n3 < names.length; n3++) { luaDeclare(names[n3]) }
+            luaOwnTop = true
+            luaScopeStamp = funcCount
             block(bodyB).NewBr(postB)
             luaDeclPop()
             loopStack.pop()
+            curScopeV = forScope
             postB.NewBr(headB)
             curScopeV = saved
             return exitB
         }
     }
-    function makeDoBlock(block) {
-        return function(b) {
-            var saved = curScopeV
-            curScopeV = callExt(b, "js_scope_new", [curScopeV])
-            b = block(b)
-            curScopeV = saved
-            return b
-        }
-    }
+    // A block scopes its own locals (makeSeq), so do ... end is just its block.
+    function makeDoBlock(block) { return block }
     // return e1, e2, ...: all the values travel back as one Lua value (a single one
     // unwrapped, any other count as a multi-value box), the last expression expanding -
     // so 'return f()' propagates everything f returned.

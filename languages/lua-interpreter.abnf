@@ -1897,13 +1897,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         var folded = luaFolded(items)
         return function() {
-            var before = closureCount
             var vs = evalList(vals)
-            // The new locals must stay invisible to a closure that one of the initializers
-            // just built - 'local f = function() return f end' reads the GLOBAL f in Lua -
-            // and that closure captured the current frame, so the declarations go into a
-            // fresh one. Only the case that actually built a closure pays for the frame.
-            if (closureCount != before) { scopes.push({}) }
+            luaLocalFrame()
             for (var n = 0; n < names.length; n++) {
                 declVar(names[n], n < vs.length ? vs[n] : undefined)
                 if (folded[n]) { rawSet(scopes[scopes.length - 1], "\x00k" + names[n], true) }
@@ -1911,11 +1906,21 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
 
+    // The frame a `local` declares into. A local is scoped to its block and becomes
+    // visible only after its declaration, so it needs a frame the running block owns
+    // (index luaBlockBase on, see makeSeq) and that no closure has captured yet: a
+    // closure keeps the frames it was made over (marked "\x00c" by makeClosure), and a
+    // name declared into one later would leak into it - `local function g() return y
+    // end; local y = 1` reads the GLOBAL y.
+    var luaBlockBase = 0
+    function luaLocalFrame() {
+        if (scopes.length <= luaBlockBase || hasOwn(scopes[scopes.length - 1], "\x00c")) { scopes.push({}) }
+    }
+
     // ----- Functions -----
     // A Lua closure captures its defining scope chain and gets a fresh frame per call. A
     // trailing '...' parameter makes it variadic: the arguments beyond the named ones are
     // kept in the frame under the name '...', where makeVararg reads them.
-    var closureCount = 0
     // A function that runs off its end returns NO value, which select('#', f())
     // and print(f()) can tell from a nil. Nothing writes into a multi-value's
     // array, so one empty box serves every such return.
@@ -1925,7 +1930,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var nfix = params.length
         var variadic = false
         if (nfix > 0 && params[nfix - 1] == "...") { variadic = true; nfix = nfix - 1 }
-        closureCount = closureCount + 1
+        // Every frame of the running function is now shared with the closure. The ones
+        // below luaFnBase were marked when the running function itself was made.
+        for (var mi = luaFnBase; mi < scopes.length; mi++) { rawSet(scopes[mi], "\x00c", true) }
         return function() {
             var args = []
             for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]) }
@@ -1948,6 +1955,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var ep = luaPos
             var sp = luaCallPos.length
             if (luaTail) { luaTail = false; sp = sp - 1 } else { luaCallPos.push(ep) }
+            luaOwnTop = true
             var r = bodyT()
             while (luaCallPos.length > sp) { luaCallPos.pop() }
             luaPos = ep
@@ -1993,6 +2001,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function makeLocalFunc(bodyT, plist, name) {
         return function() {
+            luaLocalFrame()
             declVar(name, undefined)
             setVar(name, makeClosure(plist.params, bodyT))
         }
@@ -2014,7 +2023,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     //    local dies with its block and a loop body does not pile up one frame per pass.
     // repeat/until is the exception - its condition is evaluated in the body's scope and
     // must still see the body's locals - so makeRepeat clears seqTrim for one block.
+    // A loop or function that pushed a frame for its own variables sets luaOwnTop, and
+    // the block it runs next declares its locals into that frame too.
     var seqTrim = true
+    var luaOwnTop = false
     // Assigned rather than declared: interp-core.js has its own makeSeq, and only an
     // assignment overrides it identically under goja and the frozen engine.
     makeSeq = function(items) {
@@ -2030,15 +2042,31 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var trim = seqTrim
             seqTrim = true
             var depth = scopes.length
+            var savedBase = luaBlockBase
+            luaBlockBase = luaOwnTop ? depth - 1 : depth
+            luaOwnTop = false
+            // A goto back to a label leaves the scope of every local declared after
+            // it, so the locals after a label go into frames above the depth the label
+            // was passed at (ldep), and a jump back drops those frames.
+            var ldep = hasLabel ? {} : null
             var res = undefined
             var i = 0
             while (i < items.length) {
                 var it = items[i]
-                if (typeof it != "function") { i = i + 1; continue }
+                if (typeof it != "function") {
+                    if (hasLabel) {
+                        ldep["$" + it.__label] = scopes.length
+                        luaBlockBase = scopes.length
+                    }
+                    i = i + 1
+                    continue
+                }
                 var r = it()
                 if (r != undefined) {
                     if (hasLabel && r.__goto != undefined && hasOwn(labels, "$" + r.__goto)) {
-                        i = labels["$" + r.__goto] + 1
+                        var lk = "$" + r.__goto
+                        if (hasOwn(ldep, lk)) { while (scopes.length > ldep[lk]) { scopes.pop() } }
+                        i = labels[lk]
                         continue
                     }
                     res = r
@@ -2048,6 +2076,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 i = i + 1
             }
             if (trim) { while (scopes.length > depth) { scopes.pop() } }
+            luaBlockBase = savedBase
             return res
         }
     }
@@ -2073,7 +2102,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // for i = start, limit [, step]. The three values keep their number subtype, so a
     // float start or step makes the control variable a float; the loop variable is a
-    // fresh binding per iteration and assigning to it does not steer the loop.
+    // fresh binding per iteration (a frame of its own, which the body's locals share)
+    // and assigning to it does not steer the loop.
     function makeNumFor(items) {
         var name = items[0].fname
         var startT = items[1]
@@ -2087,13 +2117,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var step = anytype // The increment, 1 when the loop did not spell one out.
             step = stepT != null ? luaFirst(stepT()) : 1
             var stp = numOf(step)
-            scopes.push({})
             var res = undefined
             // luaCmp, not a comparison of the double readings: an integer loop that runs
             // near math.maxinteger has to stop on the exact value, not on the rounded one.
             while (stp > 0 ? luaCmp("<=", i, limit) : luaCmp(">=", i, limit)) {
-                scopes[scopes.length - 1][name] = i
+                var fr = {}
+                fr[name] = i
+                scopes.push(fr)
+                luaOwnTop = true
                 var r = block()
+                scopes.pop()
                 if (r != undefined) {
                     if (r === BRK) { break }
                     if (r !== CONT) { res = r; break }
@@ -2109,7 +2142,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (stp > 0 ? luaCmp("<=", nxt, i) : luaCmp(">=", nxt, i)) { break }
                 i = nxt
             }
-            scopes.pop()
             return res
         }
     }
@@ -2122,6 +2154,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             while (running) {
                 var depth = scopes.length
                 scopes.push({})
+                luaOwnTop = true
                 seqTrim = false // The until condition still needs the body's locals.
                 var r = block()
                 var brk = false
@@ -2160,8 +2193,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             st = vs.length > 1 ? vs[1] : undefined
             ctl = vs.length > 2 ? vs[2] : undefined
             if (typeof f != "function") { fail("attempt to call a " + luaType(f) + " value") }
-            scopes.push({})
-            var frame = scopes[scopes.length - 1]
             var res = undefined
             var running = true
             while (running) {
@@ -2172,26 +2203,24 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (head === undefined || head === null) { running = false }
                 else {
                     ctl = head
+                    // A fresh frame per pass, as in makeNumFor.
+                    var frame = {}
                     for (var n = 0; n < names.length; n++) { frame[names[n]] = n < all.length ? all[n] : undefined }
+                    scopes.push(frame)
+                    luaOwnTop = true
                     var r = block()
+                    scopes.pop()
                     if (r != undefined) {
                         if (r === BRK) { running = false }
                         else if (r !== CONT) { res = r; running = false }
                     }
                 }
             }
-            scopes.pop()
             return res
         }
     }
-    function makeDoBlock(block) {
-        return function() {
-            scopes.push({})
-            var r = block()
-            scopes.pop()
-            return r
-        }
-    }
+    // A block scopes its own locals (makeSeq), so do ... end is just its block.
+    function makeDoBlock(block) { return block }
     // return e1, e2, ...: all the values travel back, the last expression expanding, so
     // 'return f()' propagates everything f returned (Lua's tail-call value rule).
     //
@@ -2217,6 +2246,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         luaFnBase = scopes.length - 1
         luaRunning = true
         try {
+            luaOwnTop = true
             items[0]()
         } catch (e) {
             if (!excIsUser(e)) { throw e }
@@ -2293,6 +2323,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function luaProtect(f, args, handler) {
         var savedChain = scopes.slice()
         var savedBase = luaFnBase
+        var savedBlock = luaBlockBase
         var depth = luaCallPos.length
         var savedPos = luaPos
         luaTail = false
@@ -2311,6 +2342,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (!excIsUser(e)) { throw e }
             scopes = savedChain.slice()
             luaFnBase = savedBase
+            luaBlockBase = savedBlock
             var ev = anytype // The error object, or what the handler made of it.
             ev = e.v
             if (handler !== undefined) { ev = luaHandle(handler, ev) }
