@@ -4623,6 +4623,28 @@ func s103() {
     check("103c", caesar103("Hello, World!", 3) == "Khoor, Zruog!")
 }
 
+// ===== SECTION 104: an implicit case as an enum's own associated value =====
+// `.node(1, .empty)` has no typed slot to say which enum `.empty` belongs to;
+// a case name exactly one enum declares is that enum's, so the value has the
+// enum's methods (a recursive walk over a generic indirect enum). Every value
+// read off swiftc 6.1.2.
+indirect enum Lst104<T> {
+    case nil104
+    case cons104(T, Lst104<T>)
+    func toArray() -> [T] {
+        switch self {
+        case .nil104: return []
+        case let .cons104(v, rest): return [v] + rest.toArray()
+        }
+    }
+    func count() -> Int { toArray().count }
+}
+func s104() {
+    let a = Lst104<Int>.cons104(1, .nil104)
+    let b: Lst104<String> = .cons104("x", .cons104("y", .nil104))
+    check("104a", a.toArray() == [1] && b.toArray() == ["x", "y"] && b.count() == 2)
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -4727,6 +4749,7 @@ func main() {
     s101() // SECTION-CALL 101
     s102() // SECTION-CALL 102
     s103() // SECTION-CALL 103
+    s104() // SECTION-CALL 104
     print("full: \(checks) checks, \(fails) failures")
 }
 

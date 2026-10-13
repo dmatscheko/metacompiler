@@ -10236,8 +10236,16 @@ KwContinue  = "continue" KwEnd ;
         var want = cell.want
         if (want != "" && typeAt(typeKeyOf(want)) != null
             && (swHasStatic(dname, want) || swEnumCaseReg["$" + want + "." + dname] === true)) { return want }
-        return swDotStatic(dname)
+        var st = swDotStatic(dname)
+        if (st != "") { return st }
+        // A case name exactly one enum declares is that enum's. Twin of swDotOwner
+        // in swift-interpreter.abnf.
+        if (!hasOwn(swCaseOwners, "$" + dname)) { return "" }
+        var os = swCaseOwners["$" + dname]
+        return os.length == 1 && typeAt(typeKeyOf(os[0])) != null ? os[0] : ""
     }
+    // Per enum case NAME, the enums declaring it.
+    var swCaseOwners = {}
     // Every enum case, keyed "Enum.case".
     var swEnumCaseReg = {}
     function swHasStatic(dname, tn) {
@@ -10291,7 +10299,15 @@ KwContinue  = "continue" KwEnd ;
         var name = items[0]
         var mem = splitMembers(items, 1)
         swNoteStatics(name, mem)
-        for (var ci = 0; ci < mem.cases.length; ci++) { swEnumCaseReg["$" + name + "." + mem.cases[ci].cname] = true }
+        for (var ci = 0; ci < mem.cases.length; ci++) {
+            swEnumCaseReg["$" + name + "." + mem.cases[ci].cname] = true
+            var cok = "$" + mem.cases[ci].cname
+            if (!hasOwn(swCaseOwners, cok)) { swCaseOwners[cok] = [] }
+            var cos = swCaseOwners[cok]
+            var cseen = false
+            for (var cj = 0; cj < cos.length; cj++) { if (cos[cj] == name) { cseen = true } }
+            if (!cseen) { cos.push(name) }
+        }
         var kind = rawKind(mem.raw)
         enumNames[name] = 1
         hasRichEnum = true

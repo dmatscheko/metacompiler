@@ -9511,7 +9511,26 @@ KwContinue  = "continue" KwEnd ;
             var th = swResolve(want)
             if (th != null && isTypeVal(th.v) && (swHasStatic(dname, want) || (th.v.__isenum === true && hasOwn(th.v, dname)))) { return want }
         }
-        return swDotStatic(dname)
+        var st = swDotStatic(dname)
+        if (st != "") { return st }
+        // With no typed slot to say which enum is meant (an enum case's own
+        // associated value, `.node(1, .empty)`), a case name exactly one enum
+        // declares is that enum's, so the value carries its methods.
+        if (!hasOwn(swCaseOwners, "$" + dname)) { return "" }
+        var os = swCaseOwners["$" + dname]
+        return os.length == 1 && swResolve(os[0]) != null ? os[0] : ""
+    }
+    // Per enum case NAME, the enums declaring it. Twin in swift-to-llvm-ir.abnf.
+    var swCaseOwners = {}
+    function swNoteCaseOwner(en, mem) {
+        for (var i = 0; i < mem.cases.length; i++) {
+            var k = "$" + mem.cases[i].cname
+            if (!hasOwn(swCaseOwners, k)) { scopePut(swCaseOwners, k, []) }
+            var os = swCaseOwners[k]
+            var seen = false
+            for (var j = 0; j < os.length; j++) { if (os[j] == en) { seen = true } }
+            if (!seen) { os.push(en) }
+        }
     }
     function swHasStatic(dname, tn) {
         if (!hasOwn(swStaticReg, "$" + dname)) { return false }
@@ -9579,6 +9598,7 @@ KwContinue  = "continue" KwEnd ;
         var name = items[0]
         var mem = splitMembers(items, 1)
         swNoteStatics(name, mem)
+        swNoteCaseOwner(name, mem)
         markNestedAll(mem)
         var myIdx = noteDeclIdx(name)
         var kind = rawKind(mem.raw)
