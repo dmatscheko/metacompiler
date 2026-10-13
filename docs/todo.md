@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-583** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-585** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -184,12 +184,18 @@ first). Separately `io.write(...)` → interp "attempt to index a nil value (glo
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-579 bash: an arithmetic error does not cancel the assignment; bytes 0x01/0x02 break field lists · P1 · SH · IN PROGRESS (SH worker, round 5) [V]
-`(( v = 1/0 ))` leaves v=0 (bash: v unset); `(( w = 2, w2 = 1/0 ))` sets w2=0 (bash: w=2, w2 unset) — the rest of the
-expression is still evaluated after the error, so the whole expression must short-circuit, both halves.
-`x=$'a\x01b'; printf '%s\n' "$x"` prints `a` and `b` as two fields in all engines (bash `a\001b`): 0x01/0x02 are the
-field-list protocol's separators; escape them in values. P3: the stderr warning "command substitution: ignored null byte in
-input" is not printed (the NUL itself is dropped correctly).
+### T-583 bash: several assignments in one command; `$(( ))` inside `${s:off:len}`; inner stderr of `$( )` · P1 · SH · OPEN [V]
+`a=1 b=2; echo "$a $b"` and `c=$'x' d=3` → both halves "Not everything could be parsed" (bash `1 2`). `s=abcdef; echo
+"${s:1:$(( 1+1 ))} ${s:$((2)):2}"` → interp exit 127 "command not found: 1+1", compiled ` ab` (bash `bc cd`: `$((` is
+arithmetic, not `$( (`). Compiled only: `echo "$(echo hi >&2)" 2>/dev/null` hides "hi" (bash and interp print it: words are
+expanded before the command's redirections apply). P3: arithmetic error text `bash: division by 0` vs bash `((: v = 1/0 :
+division by 0 (error token is "0 ")`.
+
+### T-584 bash: a value whose first byte is 0x02 is read as a field list · P2 · SH · OPEN [V]
+`w=$'\x02lead'; printf '<%s>' "$w" ${w}; y=$'a\x02b'; echo "${y:1}"` → bash `<^Blead><^Blead>` and `^Bb`; interp `<>` and an
+empty line, compiled `<leadlead...>` / wrong field counts. The list marker lives inside the value; a fix needs consumers to know
+statically scalar vs list (the emitter's .f flag at rt_catfields, rt_argpush, rt_arr_litwords, the f:true selects) or an
+out-of-band list type in the interpreter (~40 sites, one extra call on the `${a[i]}` path — measure the bench).
 
 ---
 
@@ -685,6 +691,7 @@ T-566 js: `padStart(Infinity)` hangs; a missing method aborts natively; nested-t
 T-565 js: wording and remaining low-value gaps — PARTIAL 1e54eac7 (toString(radix) = V8 DoubleToRadixCString, radix message, node-24 JSON.parse messages, String.fromCodePoint); TDZ is T-580, arguments/__ keys/normalize are T-581
 T-570 swift: a ternary passed to an `Any` parameter unifies; nested existential annotations — DONE 5b5742db 72163636
 T-571 swift: mutating value methods on numbers and Bools; General_Category Character properties; trap exit status — DONE d8070820 (traps exit 133 in every leg; probe.sh accepts 133 for swift, 83fd0c9f)
+T-579 bash: an arithmetic error does not cancel the assignment; bytes 0x01/0x02 break field lists — DONE e57f7553
 
 # Settled — do not re-open
 
