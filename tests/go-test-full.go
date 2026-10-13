@@ -3802,6 +3802,18 @@ func s62() {
 	check("tup5", fmt.Sprint(e) == "[2 5]" && tr62 == "i1 v3 i0 ")
 }
 
+// ===== SECTION 63: copy between overlapping slices =====
+func s63() {
+	x := []int{1, 2, 3, 4, 5}
+	n := copy(x[1:], x)
+	y := []int{1, 2, 3, 4, 5}
+	m := copy(y, y[2:])
+	check("cpy1", fmt.Sprint(n, x, m, y) == "4 [1 1 2 3 4] 3 [3 4 5 4 5]")
+	b := []byte("abcde")
+	copy(b[2:], b)
+	check("cpy2", string(b) == "ababc")
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -3865,6 +3877,7 @@ func main() {
 	s60() // SECTION-CALL 60
 	s61() // SECTION-CALL 61
 	s62() // SECTION-CALL 62
+	s63() // SECTION-CALL 63
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

@@ -1572,8 +1572,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return goAdoptLike(proto, v)
     }
     hostGlobals["cap"] = function(x) { return goCap(x) }
+    // copy is a memmove: when dst starts later in the same backing array than src,
+    // a forward copy would read elements it has already overwritten, so it runs
+    // backwards. Twin of copy in go-to-llvm-ir.abnf.
     hostGlobals["copy"] = function(dst, src) {
         var n = goLen(dst) < goLen(src) ? goLen(dst) : goLen(src)
+        if (isSl(dst) && isSl(src) && dst.a === src.a && dst.o > src.o) {
+            for (var j = n - 1; j >= 0; j--) { goSetAt(dst, j, goIndex(src, j)) }
+            return n
+        }
         for (var i = 0; i < n; i++) { goSetAt(dst, i, goIndex(src, i)) }
         return n
     }

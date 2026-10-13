@@ -3522,7 +3522,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             callExt(nilR.b, "js_set", [outH, emitStr(nilR.b, "__nil"), nilR.v])
             return {b: nilR.b, v: outH}
         })
-        // copy(dst, src): as many elements as the shorter one holds.
+        // copy(dst, src): as many elements as the shorter one holds. It is a
+        // memmove: when dst starts later in the same backing array than src, the
+        // elements are copied from the last one down. Twin of hostGlobals["copy"]
+        // in go-interpreter.abnf.
         b = declFn(b, "copy", 2, function(fb, a) {
             var d = a[0]
             var sc2 = a[1]
@@ -3531,11 +3534,33 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var nr = emitSelect(fb, callExt(fb, "js_lt", [dn, sn]),
                                 function(tb) { return {b: tb, v: dn} },
                                 function(eb) { return {b: eb, v: sn} })
-            var eb3 = emitCountLoop(nr.b, nr.v, function(lb, iV) {
-                emitHelper(lb, "$sset", [d, iV, emitHelper(lb, "$sidx", [sc2, iV])])
-                return lb
-            })
-            return {b: eb3, v: nr.v}
+            var both = emitSelect(nr.b, emitIsSl(nr.b, d),
+                                  function(tb) { return {b: tb, v: emitIsSl(tb, sc2)} },
+                                  function(eb) { return {b: eb, v: hFalse} })
+            var back = emitSelect(both.b, both.v,
+                                  function(tb) {
+                                      var same = emitSelect(tb, callExt(tb, "js_seq", [slF(tb, d, "a"), slF(tb, sc2, "a")]),
+                                                            function(t2) { return {b: t2, v: callExt(t2, "js_gt", [slF(t2, d, "o"), slF(t2, sc2, "o")])} },
+                                                            function(e2) { return {b: e2, v: hFalse} })
+                                      return same
+                                  },
+                                  function(eb) { return {b: eb, v: hFalse} })
+            var last = callExt(back.b, "js_sub", [nr.v, emitNum(back.b, 1)])
+            var done = emitSelect(back.b, back.v,
+                                  function(tb) {
+                                      return {b: emitCountLoop(tb, nr.v, function(lb, iV) {
+                                          var jV = callExt(lb, "js_sub", [last, iV])
+                                          emitHelper(lb, "$sset", [d, jV, emitHelper(lb, "$sidx", [sc2, jV])])
+                                          return lb
+                                      }), v: hUndef}
+                                  },
+                                  function(eb) {
+                                      return {b: emitCountLoop(eb, nr.v, function(lb, iV) {
+                                          emitHelper(lb, "$sset", [d, iV, emitHelper(lb, "$sidx", [sc2, iV])])
+                                          return lb
+                                      }), v: hUndef}
+                                  })
+            return {b: done.b, v: nr.v}
         })
         // clear(m) empties a map; clear(s) zeroes a slice's elements in place.
         b = declFn(b, "clear", 0, function(fb, a, f) {
