@@ -1,6 +1,8 @@
 // js-num.js -- JavaScript's reading of a STRING as a number: StringToNumber (the
-// ToNumber of a string, ES2023 7.1.4.1.1) and the global parseFloat (19.2.4); and
-// the writing of one by Number#toFixed, toExponential and toPrecision.
+// ToNumber of a string, ES2023 7.1.4.1.1) and the globals parseFloat and parseInt
+// (19.2.4, 19.2.5); the writing of one by Number#toFixed, toExponential and
+// toPrecision; and the code-unit order of two strings, which relations and the
+// default sort use.
 //
 // Included by both js and typescript interpreters (include("lib/js-num.js")) and
 // imported by languages/lib/js-rt.metajs, so the interpreters and layer 2 run one
@@ -171,6 +173,28 @@ function jsnIntPow2(s, a, b, radix) {
     if (rnd == 1 && (sticky || v % 2 == 1)) { v = v + 1 }
     if (exp > 0) { v = v * Math.pow(2, exp) }
     return v
+}
+
+// JavaScript's order of two strings, -1, 0 or 1: by UTF-16 code units (ECMA-262
+// IsLessThan), where both hosts' own `<` - and the floor's - is the code point
+// order, which puts an astral character above U+E000..U+FFFF. The two orders agree
+// whenever one side is ASCII, which the byte count tells. Twin of jsvStrCmp in
+// abnf/jsrtjsprint.go.
+function jsnStrCmp(a, b) {
+    if (a === b) { return 0 }
+    if (byteLen(a) == a.length || byteLen(b) == b.length) {
+        if (a < b) { return -1 }
+        return 1
+    }
+    var n = a.length
+    if (b.length < n) { n = b.length }
+    for (var i = 0; i < n; i++) {
+        var d = a.charCodeAt(i) - b.charCodeAt(i)
+        if (d < 0) { return -1 }
+        if (d > 0) { return 1 }
+    }
+    if (a.length < b.length) { return -1 }
+    return 1
 }
 
 // ----- Number#toFixed / toExponential / toPrecision (ES2023 21.1.3) -----

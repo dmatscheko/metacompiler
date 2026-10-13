@@ -882,11 +882,7 @@ function jvCmpPrim(a, b) {
         }
     }
     if (typeof a == "string") {
-        if (typeof b == "string") {
-            if (a < b) { return -1 }
-            if (a > b) { return 1 }
-            return 0
-        }
+        if (typeof b == "string") { return jsnStrCmp(a, b) }
     }
     var x = jvToNumber(a)
     var y = jvToNumber(b)
@@ -3416,7 +3412,7 @@ function jvStrMethod(s, name, args) {
 
 function jvSortLess(x, y, cmp) {
     if (jvIsCallable(cmp)) { return jvToNumber(jvCallT(cmp, undefined, [x, y])) < 0 }
-    return jvStr(x) < jvStr(y)
+    return jsnStrCmp(jvStr(x), jvStr(y)) < 0
 }
 
 // Array#sort: undefined sorts last and every other element compares as its STRING

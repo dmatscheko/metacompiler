@@ -3693,7 +3693,7 @@ NotFuncHead = :script(~~
     }
     function jsSortLess(x, y, cmp) {
         if (typeof cmp == "function") { return (callWithThis(cmp, undefined, [x, y]) - 0) < 0 }
-        return jsStr(x) < jsStr(y)
+        return jsnStrCmp(jsStr(x), jsStr(y)) < 0
     }
     function jsFlatten(out, elems, depth) {
         for (var i = 0; i < elems.length; i++) {
@@ -9229,6 +9229,14 @@ NotFuncHead = :script(~~
         if (typeof l == "string" || typeof r == "string") {
             if (op != "===" && op != "!==" && !(typeof l == "string" && typeof r == "string")) {
                 return binOp(op, jsToNum(l), jsToNum(r))
+            }
+            // Two strings relate by code units (jsnStrCmp, lib/js-num.js).
+            if (op == "<" || op == ">" || op == "<=" || op == ">=") {
+                var sc = jsnStrCmp(l, r)
+                if (op == "<") { return sc < 0 }
+                if (op == ">") { return sc > 0 }
+                if (op == "<=") { return sc <= 0 }
+                return sc >= 0
             }
         }
         if (op == "-") return l - r

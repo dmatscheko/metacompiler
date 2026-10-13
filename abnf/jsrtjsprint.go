@@ -29,6 +29,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 func init() {
@@ -539,6 +540,55 @@ func (rt *jsrt) jsvLooseEq(a, b interface{}) bool {
 
 // jsvCompare is the abstract relational comparison: ToPrimitive on both sides, then
 // the shared numeric/string ordering (2 means "NaN was involved", every relation false).
+// jsvStrCmp orders two strings by their UTF-16 code units, which is JavaScript's
+// string order (ECMA-262 IsLessThan) and not the code point order Go's `<` gives
+// a WTF-8 string: an astral character sorts below U+E000..U+FFFF, and a lone
+// surrogate is a unit like any other. Only the character at the first differing
+// byte decides, through its first unit and, for two astral characters behind one
+// high surrogate, the second. Twin of jsnStrCmp in languages/lib/js-num.js.
+func jsvStrCmp(a, b string) int {
+	i := 0
+	for i < len(a) && i < len(b) && a[i] == b[i] {
+		i++
+	}
+	if i == len(a) || i == len(b) {
+		switch {
+		case len(a) < len(b):
+			return -1
+		case len(a) > len(b):
+			return 1
+		}
+		return 0
+	}
+	for i > 0 && a[i]&0xC0 == 0x80 {
+		i--
+	}
+	ca, cb := wtf8Rune(a[i:]), wtf8Rune(b[i:])
+	ka, kb := ca, cb
+	if ka > 0xFFFF {
+		ka = 0xD800 + (ka-0x10000)>>10
+	}
+	if kb > 0xFFFF {
+		kb = 0xD800 + (kb-0x10000)>>10
+	}
+	if ka == kb {
+		ka, kb = ca, cb
+	}
+	if ka < kb {
+		return -1
+	}
+	return 1
+}
+
+// wtf8Rune decodes the character at the start of s, a lone surrogate as itself.
+func wtf8Rune(s string) rune {
+	if c := wtf8Surrogate(s); c != 0 {
+		return rune(c)
+	}
+	r, _ := utf8.DecodeRuneInString(s)
+	return r
+}
+
 func (rt *jsrt) jsvCompare(a, b interface{}) int {
 	rt.jsvSymOperand(a, b)
 	pa, pb := rt.jsvToPrimitive(a, "number"), rt.jsvToPrimitive(b, "number")
@@ -551,6 +601,8 @@ func (rt *jsrt) jsvCompare(a, b interface{}) int {
 		} else {
 			pb = jsStrToNum(sb)
 		}
+	} else if as {
+		return jsvStrCmp(sa, sb)
 	}
 	return rt.jsCompare(pa, pb)
 }
@@ -1411,7 +1463,7 @@ func (rt *jsrt) jsvSort(elems []interface{}, cmp interface{}) {
 		if isCallable(cmp) {
 			return rt.toNumber(rt.call(cmp, jsUndef, []interface{}{vals[i], vals[j]})) < 0
 		}
-		return rt.jsvString(vals[i]) < rt.jsvString(vals[j])
+		return jsvStrCmp(rt.jsvString(vals[i]), rt.jsvString(vals[j])) < 0
 	}
 	sort.SliceStable(vals, less)
 	copy(elems, vals)

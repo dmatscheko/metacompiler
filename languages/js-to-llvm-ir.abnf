@@ -5583,7 +5583,7 @@ NotFuncHead = :script(~~
     //   * an ITERATOR - a generator, or any object whose `next` member is callable - is
     //     driven LAZILY, one next() per iteration through the {value, done} record;
     //   * everything else (an array, a string, an object) iterates BY INDEX: the loop
-    //     opens its own scope holding the iterable, the length and the index (hidden
+    //     opens its own scope holding the iterable and the index (hidden
     //     0-prefixed names that no JS identifier can collide with) and runs
     //     name = iter[i] while i < length.
     // for-in iterates the object's own keys: js_jskeys yields them (insertion order,
@@ -5657,7 +5657,6 @@ NotFuncHead = :script(~~
                 isItV = callExt(b, "js_seq", [callExt(b, "js_typeof", [nxV]), emitStr(b, "function")])
             }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0it"), seqV])
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0len"), hUndef])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0i"), callExt(b, "js_num_i", [handle(0)])])
             if (!isPat) { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), hUndef]) }
             var headB = curF.NewBlock("")
@@ -5665,7 +5664,6 @@ NotFuncHead = :script(~~
             if (lazy) { stepB = curF.NewBlock("") }
             var idxB = curF.NewBlock("")    // the index arm: i < length
             var elemB = curF.NewBlock("")   // the index arm's element read
-            var lenB = curF.NewBlock("")    // the index arm's one-time length read
             var bodyB = curF.NewBlock("")
             var postB = curF.NewBlock("")
             var exitB = curF.NewBlock("")
@@ -5678,11 +5676,8 @@ NotFuncHead = :script(~~
             isItC = handle(0)
             if (lazy) {
                 isItC = truthy(b, isItV)
-                b.NewCondBr(isItC, headB, lenB)
-            } else { b.NewBr(lenB) }
-            callExt(lenB, "js_scope_set", [curScopeV, emitStr(lenB, "0len"),
-                    callExt(lenB, "js_tonum", [callExt(lenB, memGetExt(), [seqV, emitStr(lenB, "length")])])])
-            lenB.NewBr(headB)
+            }
+            b.NewBr(headB)
             if (lazy) { headB.NewCondBr(isItC, stepB, idxB) }
             else      { headB.NewBr(idxB) }
             // The lazy arm. js_call is given the iterator as its receiver, so a
@@ -5703,7 +5698,10 @@ NotFuncHead = :script(~~
             }
             // The index arm.
             var iC = callExt(idxB, "js_scope_get", [curScopeV, emitStr(idxB, "0i")])
-            var lC = callExt(idxB, "js_scope_get", [curScopeV, emitStr(idxB, "0len")])
+            // The length is read again at every step, as the array iterator does
+            // (%ArrayIteratorPrototype%.next), so the body may grow or shrink it.
+            var itL = callExt(idxB, "js_scope_get", [curScopeV, emitStr(idxB, "0it")])
+            var lC = callExt(idxB, "js_tonum", [callExt(idxB, memGetExt(), [itL, emitStr(idxB, "length")])])
             idxB.NewCondBr(truthy(idxB, callExt(idxB, "js_lt", [iC, lC])), elemB, exitB)
             var iB = callExt(elemB, "js_scope_get", [curScopeV, emitStr(elemB, "0i")])
             var itB = callExt(elemB, "js_scope_get", [curScopeV, emitStr(elemB, "0it")])
@@ -6229,7 +6227,7 @@ NotFuncHead = :script(~~
                 unwB.NewBr(afterUnwB)
                 b = afterUnwB
             }
-            return excDispatch(b, ctl)
+            return excDispatchLabels(b, ctl)
         }
     }
 
@@ -6934,12 +6932,46 @@ NotFuncHead = :script(~~
     function makeLabeledStmt(t, name) {
         return function(b) {
             var exitB = curF.NewBlock("")
-            labelStack.push({name: name, brk: exitB, cont: null, fon: forOfIters.length})
+            labelStack.push({name: name, brk: exitB, cont: null, fon: forOfIters.length, tag: curFTag, brkN: -1, contN: -1})
             var eb = t(b)
             labelStack.pop()
             eb.NewBr(exitB)
             return exitB
         }
+    }
+    // A labeled break or continue inside a try body - its own IR closure - cannot
+    // branch to the label's block in the enclosing function. It travels as
+    // compile-core's goto control signal instead (emitGoto), which excDispatch after
+    // each enclosing js_try forwards outwards until the function that holds the block
+    // branches to it. The block is registered once, under that function's tag.
+    // excDispatch branches a goto signal (a labeled break or continue out of the try
+    // body, see labelGotoN) straight to the label's block, which would leave this
+    // function's for-of loops between the label and the try open. For the dispatch,
+    // each such label's block is swapped for a pad that closes them first.
+    function excDispatchLabels(b, ctl) {
+        var swaps = []
+        for (var i = 0; i < labelStack.length; i++) {
+            var l = labelStack[i]
+            if (l.tag == curFTag && forOfIters.length > l.fon) {
+                labelPad(l.brkN, l.fon, swaps)
+                labelPad(l.contN, l.fon, swaps)
+            }
+        }
+        var r = excDispatch(b, ctl)
+        for (var j = 0; j < swaps.length; j++) { ctlLabels[swaps[j].n].blk = swaps[j].blk }
+        return r
+    }
+    function labelPad(n, fon, swaps) {
+        if (n < 0) { return }
+        var pad = curF.NewBlock("")
+        emitIterUnwind(pad, fon)
+        pad.NewBr(ctlLabels[n].blk)
+        swaps.push({n: n, blk: ctlLabels[n].blk})
+        ctlLabels[n].blk = pad
+    }
+    function labelGotoN(tag, blk) {
+        ctlLabels.push({tag: tag, blk: blk})
+        return ctlLabels.length - 1
     }
     function makeLabeledLoop(t, name) {
         var inner = makeLabeledStmt(t, name)
@@ -6954,8 +6986,14 @@ NotFuncHead = :script(~~
         var name = items[0]
         return function(b) {
             var l = findLabel(name)
-            emitIterUnwind(b, l.fon) // A break to an OUTER statement abandons iterators.
-            b.NewBr(l.brk)
+            // A break to an OUTER statement abandons iterators: all of this function's
+            // when the label lies in an enclosing one.
+            emitIterUnwind(b, (l.tag == curFTag) ? l.fon : 0)
+            if (l.tag == curFTag) { b.NewBr(l.brk) }
+            else {
+                if (l.brkN < 0) { l.brkN = labelGotoN(l.tag, l.brk) }
+                emitGoto(b, l.brkN)
+            }
             return deadBlock()
         }
     }
@@ -6968,8 +7006,12 @@ NotFuncHead = :script(~~
                 println("js compiler error: 'continue " + name + "' does not label a loop")
                 exit(1)
             }
-            emitIterUnwind(b, l.fon) // A continue to an OUTER loop abandons iterators.
-            b.NewBr(l.cont)
+            emitIterUnwind(b, (l.tag == curFTag) ? l.fon : 0) // A continue to an OUTER loop, too.
+            if (l.tag == curFTag) { b.NewBr(l.cont) }
+            else {
+                if (l.contN < 0) { l.contN = labelGotoN(l.tag, l.cont) }
+                emitGoto(b, l.contN)
+            }
             return deadBlock()
         }
     }

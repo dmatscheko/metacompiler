@@ -741,6 +741,42 @@ check("toint32-huge", (function () {
         && (xs[1] | 0) === 0 && (xs[2] | 0) === 559939584;
 })());
 
+// ----- strings order by UTF-16 code units, in relations and the default sort -----
+check("string-order-code-units", (function () {
+    var s = ["", "\ud800", "\udc00x", "𝄞", "￿"];
+    var srt = s.slice().sort();
+    var hx = [];
+    for (var i = 0; i < srt.length; i++) { hx.push(srt[i].charCodeAt(0).toString(16)); }
+    return s[3] < s[0] && !(s[0] < s[1]) && s[1] < s[3] && s[3] < s[2] && s[4] >= s[0]
+        && hx.join(",") === "d800,d834,dc00,e000,ffff";
+})());
+
+// ----- for-of over an array re-reads its length at every step -----
+check("forof-live-length", (function () {
+    var a = [1, 2, 3, 4]; var o1 = [];
+    for (var x of a) { o1.push(x); if (x === 2) { a.shift(); } }
+    var b = [1, 2, 3]; var o2 = [];
+    for (var y of b) { o2.push(y); b.pop(); }
+    var c = [1, 2]; var o3 = [];
+    for (var z of c) { o3.push(z); if (z < 3) { c.push(z * 10); } }
+    return o1.join(",") === "1,2,4" && o2.join(",") === "1,2" && o3.join(",") === "1,2,10,20";
+})());
+
+// ----- a labeled break / continue out of a try body, through its finally -----
+check("label-jump-out-of-try", (function () {
+    var lt = [];
+    bl: for (var i = 0; i < 3; i++) { try { if (i === 1) { break bl; } lt.push("t" + i); } finally { lt.push("f" + i); } }
+    var l2 = [];
+    o2: for (var a = 0; a < 2; a++) { for (var b = 0; b < 3; b++) { try { if (b === 1) { continue o2; } l2.push(a + "" + b); } finally { l2.push("f"); } } }
+    var l3 = [];
+    o3: while (true) { try { try { l3.push("in"); break o3; } finally { l3.push("f1"); } } finally { l3.push("f2"); } }
+    var log = [];
+    function* g(n) { try { yield n; yield n + 1; } finally { log.push("c" + n); } }
+    L4: while (true) { for (var z of g(5)) { try { break L4; } finally { log.push("f"); } } }
+    return lt.join(",") === "t0,f0,f1" && l2.join(",") === "00,f,f,10,f,f" && l3.join(",") === "in,f1,f2"
+        && log.join(",") === "f,c5";
+})());
+
 function main() {
     println("features: " + checks + " checks, " + failures + " failures");
     return failures;
