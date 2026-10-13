@@ -1008,7 +1008,7 @@ CallSfx     <~~ push({kind: "call", args: takeAll()}) ~~>
 // An argument list: positional, named (h: 5), spread (...$a) or the PHP 8.1
 // first-class callable placeholder (strlen(...)), with an optional trailing comma.
 ArgList     = Arg { "," Arg } [ "," ] ;
-Arg         = NamedPlaceArg | NamedArg | SpreadArg | FccArg | PlaceArg | GlobalsArg | LvalArg | PosArg ;
+Arg         = NamedPlaceArg | NamedLvalArg | NamedArg | SpreadArg | FccArg | PlaceArg | GlobalsArg | LvalArg | PosArg ;
 // PHP 8.5 partial application: a '?' in an argument position is a PLACEHOLDER, so
 // the call yields a closure taking one parameter per '?' instead of calling. It is
 // spelled 'b: ?' when the placeholder names the parameter it stands for. ArgEnd is
@@ -1043,6 +1043,10 @@ ArgEnd      = :script(~~
         return abnf.newToken("\x01notlval", 0)
     })()
 ~~) ;
+// A named argument that is a storage location binds a by-reference parameter of
+// that name to it, as LvalArg does a positional one.
+NamedLvalArg <~~ var lab = popLabel(); var lv = makeLvalArg(pop()); lv.argname = lab; push(lv) ~~>
+            = ArgLabel Target ArgEnd ;
 NamedArg    <~~ push({argname: popLabel(), argval: pop()}) ~~>
             = ArgLabel Expression ;
 ArgLabel    <~~ push({alabel: up.in}) ~~>
@@ -1656,6 +1660,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var hasNamed = false
         var fcc = false
         var tgts = []
+        var ntgts = {}
         var here = scopes
         for (var i = 0; i < args.length; i++) {
             var a = args[i]
@@ -1693,6 +1698,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 if (hasOwn(named, "$" + a.argname)) { namedTwice("$" + a.argname) }
                 nkeys.push("$" + a.argname)
                 scopePut(named, "$" + a.argname, nv)
+                if (a.argtgt != undefined) { rawSet(ntgts, "$" + a.argname, mkCellMaker(a.argtgt, here, {v: nv})) }
                 hasNamed = true
                 continue
             }
@@ -1701,7 +1707,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             pos.push(av)
             tgts.push(a.argtgt == undefined ? (a.noref === true ? NOREF : null) : mkCellMaker(a.argtgt, here, {v: av}))
         }
-        return {pos: pos, named: hasNamed ? named : null, nkeys: nkeys, tgts: tgts, fcc: fcc, holes: holes}
+        return {pos: pos, named: hasNamed ? named : null, nkeys: nkeys, tgts: tgts, ntgts: ntgts, fcc: fcc, holes: holes}
     }
     // A named argument that no parameter declares and no variadic collects raises,
     // and so does one naming a parameter a positional argument already filled; both
@@ -1763,11 +1769,15 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 scopePut(scopes[scopes.length - 1], p.name, argset.tgts[i]())
                 continue
             }
+            if (p.byref === true && i >= pos.length && named != null && argset.ntgts != undefined && hasOwn(argset.ntgts, p.name)) {
+                scopePut(scopes[scopes.length - 1], p.name, argset.ntgts[p.name]())
+                continue
+            }
             var have = false
             var v = anytype
             v = null
             if (i < pos.length) { v = argValue(pos[i]); have = true }
-            else if (named != null && hasOwn(named, p.name)) { v = named[p.name]; have = true }
+            else if (named != null && hasOwn(named, p.name)) { v = argValue(named[p.name]); have = true }
             if (!have) { v = p.def == null ? null : p.def() }
             declVar(p.name, phpCopy(v))
         }
@@ -4630,21 +4640,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         // what $c(...) yields. Twin of the same arm in php-to-llvm-ir.abnf.
         if (p.name != null && p.args != null && phsCase(p.raw, false) == "closure" && phsCase(p.name, false) == "fromcallable") {
             var fa = p.args
-            return function() {
-                var cb = anytype
-                cb = evalArgs(fa).pos[0]
-                var fc = anytype
-                fc = phpCheckCallback(cb, "Failed to create closure from callable:", true, true)
-                // [$obj, 'm'] is the closure $obj->m(...) makes.
-                if (isArr(fc) && fc.keys.length == 2 && isObj(arrGet(fc, 0))) {
-                    return mcall(arrGet(fc, 0), phpStr(arrGet(fc, 1)), {pos: [], named: null, nkeys: [], tgts: [], fcc: true, holes: []})
-                }
-                // [$closure, '__invoke'] is $closure itself (zend_create_closure_from_callable).
-                if (isArr(fc) && typeof arrGet(fc, 0) == "function" && phsCase(phpStr(arrGet(fc, 1)), false) == "__invoke") {
-                    return arrGet(fc, 0)
-                }
-                return asCallable(cbResolve(fc, true))
-            }
+            return function() { return cloFromCallable(evalArgs(fa).pos[0]) }
         }
         // Closure::bind($c, $newThis, $newScope) is $c->bindTo($newThis, $newScope).
         if (p.name != null && p.args != null && phsCase(p.raw, false) == "closure" && phsCase(p.name, false) == "bind") {
@@ -4962,8 +4958,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return lc == "__invoke" || lc == "bind" || lc == "bindto" || lc == "call" || lc == "fromcallable"
     }
     // The methods a Closure answers: __invoke calls it, bindTo rebinds it, call
-    // rebinds it to an object and that object's class and calls it at once. Twin
-    // of phCloCall in lib/php-rt.metajs and abnf/jsrtphp.go.
+    // rebinds it to an object and that object's class and calls it at once, and
+    // the static bind and fromCallable work through it too. Twin of phCloCall in
+    // lib/php-rt.metajs and abnf/jsrtphp.go (fromCallable: of emitFromCallableOn
+    // in php-to-llvm-ir.abnf, since the runtime cannot resolve a callback's name).
     function cloMethod(f, name, args) {
         var lc = phsCase(name, false)
         // $c->__invoke(...) is $c itself (zend_closure_from_frame).
@@ -4972,12 +4970,33 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var nthis = anytype
         nthis = pos.length > 0 ? pos[0] : null
         if (lc == "bindto") { return cloRebind(f, nthis, pos.length > 1, pos.length > 1 ? pos[1] : null) }
+        // The static bind and fromCallable, called through an instance.
+        if (lc == "bind") {
+            if (typeof nthis != "function") {
+                phpRaise("TypeError", "Closure::bind(): Argument #1 ($closure) must be of type Closure, " + phpValueName(nthis) + " given")
+            }
+            return cloRebind(nthis, pos.length > 1 ? pos[1] : null, pos.length > 2, pos.length > 2 ? pos[2] : null)
+        }
+        if (lc == "fromcallable") { return cloFromCallable(nthis) }
         if (lc == "call") {
             var bf = cloBind(f, nthis, isObj(nthis) ? nthis.__class : null, false)
             if (bf == null) { return null }
             return bf(argsOf(pos.slice(1)))
         }
         phpRaise("Error", "Call to undefined method Closure::" + name + "()")
+    }
+    function cloFromCallable(cb) {
+        var fc = anytype
+        fc = phpCheckCallback(cb, "Failed to create closure from callable:", true, true)
+        // [$obj, 'm'] is the closure $obj->m(...) makes.
+        if (isArr(fc) && fc.keys.length == 2 && isObj(arrGet(fc, 0))) {
+            return mcall(arrGet(fc, 0), phpStr(arrGet(fc, 1)), {pos: [], named: null, nkeys: [], tgts: [], fcc: true, holes: []})
+        }
+        // [$closure, '__invoke'] is $closure itself (zend_create_closure_from_callable).
+        if (isArr(fc) && typeof arrGet(fc, 0) == "function" && phsCase(phpStr(arrGet(fc, 1)), false) == "__invoke") {
+            return arrGet(fc, 0)
+        }
+        return asCallable(cbResolve(fc, true))
     }
     // An arrow function's body: its one expression, returned.
     function arrowBody(t) { return function() { return {ret: true, v: t()} } }

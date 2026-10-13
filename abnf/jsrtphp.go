@@ -1186,6 +1186,13 @@ func (rt *jsrt) phpCloCall(f interface{}, name string, args []interface{}) inter
 	switch phpCase(name, false) {
 	case "__invoke":
 		return rt.call(f, jsUndef, args)
+	case "bind":
+		// The static Closure::bind($closure, $newThis, $newScope), called through
+		// an instance: $closure->bindTo($newThis, $newScope).
+		if len(args) == 0 || !isCallable(args[0]) {
+			rt.phpRaise("TypeError", "Closure::bind(): Argument #1 ($closure) must be of type Closure, "+rt.phpValueName(nthis)+" given")
+		}
+		return rt.phpCloCall(args[0], "bindto", args[1:])
 	case "bindto":
 		if len(args) < 2 {
 			return rt.phpCloBind(f, nthis, jsNull, true)

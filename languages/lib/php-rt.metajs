@@ -1725,6 +1725,14 @@ function phCloCall(f, name, args) {
     if (lc == "__invoke") { return f.apply(undefined, args) }
     var nthis = anytype
     nthis = args.length > 0 ? args[0] : null
+    // The static Closure::bind($closure, $newThis, $newScope), called through an
+    // instance: $closure->bindTo($newThis, $newScope).
+    if (lc == "bind") {
+        if (typeof nthis != "function") {
+            phRaise("TypeError", "Closure::bind(): Argument #1 ($closure) must be of type Closure, " + phValueName(nthis) + " given")
+        }
+        return phCloCall(nthis, "bindto", args.slice(1))
+    }
     if (lc == "bindto") {
         if (args.length < 2) { return phCloBind(f, nthis, null, true) }
         var sv = anytype

@@ -3522,6 +3522,10 @@ function s70read($xs) { return $xs[0] + count($xs); }
 function s70gen($xs) { yield $xs[0]; yield $xs[0]; }
 class S70M { public $items = [1]; function m($xs) { $xs[] = 2; return count($xs); } static function s($xs) { $xs[0]++; return $xs[0]; }
     function inc(&$x) { $x += 10; } }
+class S70V { public $v = 3; }
+class S70A { function m(&$x, $y = 0) { $x = "A"; } }
+class S70B { function m($x, $y = 0) { $x = "B"; } }
+function s70named(&$x, $y = 0) { $x = "F"; }
 function s70inc(&$x) { $x++; }
 function s70set2(&$z) { $z = 3; }
 function s70() {
@@ -3554,6 +3558,24 @@ function s70() {
     (new S70M)->inc(...$sp);
     $plain = [1]; call_user_func_array('s70inc', $plain);
     check("spr1", $m === 14 && $plain === [1]);
+    $th = function() { return $this->v; };
+    $d = function() { return 1; };
+    $cb = [$d, 'bind'];
+    $bad = "";
+    try { $d->bind(1, null); } catch (TypeError $e) { $bad = $e->getMessage(); }
+    $f1 = 1; s70named(y: 2, x: $f1);
+    $f2 = 1; s70named($f2, y: 2);
+    $seen = "";
+    foreach ([new S70A, new S70B] as $ob) {
+        $v1 = 1; $ob->m(y: 2, x: $v1);
+        $v2 = 1; $ob->m($v2);
+        $v3 = 1; $ra = [&$v3]; $ob->m(...$ra);
+        $seen .= $v1 . $v2 . $v3;
+    }
+    check("nbr1", $f1 === "F" && $f2 === "F" && $seen === "AAA111");
+    check("cst1", $d->bind($th, new S70V)() === 3 && $cb($th, new S70V)() === 3
+        && call_user_func([$d, 'bind'], $th, new S70V)() === 3 && $d->fromCallable('strtoupper')("x") === "X"
+        && $bad === 'Closure::bind(): Argument #1 ($closure) must be of type Closure, int given');
 }
 
 // ===== END SECTIONS =====
