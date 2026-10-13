@@ -144,7 +144,7 @@ element as an expression pattern) does not parse in either half (range bounds do
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-595 php: `[$closure, '__invoke']` callbacks; `[&$k, 4]` in the compiler; callback-form static fallback; bindTo identity · P2 · PHP · OPEN [V spec-only]
+### T-595 php: `[$closure, '__invoke']` callbacks; `[&$k, 4]` in the compiler; callback-form static fallback; bindTo identity · P2 · PHP · IN PROGRESS (PHP worker, round 2) [V spec-only]
 `call_user_func([$m, '__invoke'], 3, 4)` → both halves "first array member is not a valid class name or object" (PHP: a
 Closure is an object with __invoke; valid). `$a = [&$k, 4];` → compiler "array element by reference not implemented" (interp
 accepts). `call_user_func('M::sp')` from a compatible subclass instance → ours `__call`, php-src `__callStatic` (the lookup runs in
