@@ -4177,6 +4177,20 @@ func s79() {
 	m := map[string]int{a: 1, w[1:2]: 5}
 	m[string([]byte{0xe6})] += 1
 	check("ibs9", len(m) == 2 && m[a] == 2 && m[w[3:4]] == 2 && m[w[1:2]] == 5)
+	// Six long strings that are not ASCII, indexed in turn: each s[i] is one byte
+	// read, not a fresh encoding of the string (the frozen interpreter's step brake
+	// stops a per-index encoding).
+	var ls []string
+	for k := 0; k < 6; k++ {
+		ls = append(ls, strings.Repeat("é", 1200)+fmt.Sprint(k))
+	}
+	sum := 0
+	for i := 0; i < 200; i++ {
+		for k := range ls {
+			sum += int(ls[k][i*12])
+		}
+	}
+	check("ibs10", sum == 234000 && ls[5][2400] == '5')
 }
 
 // ===== SECTION 80: math's transcendental functions, bits and exact constants =====

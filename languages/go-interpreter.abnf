@@ -5405,22 +5405,32 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
         return out
     }
-    // utf8Bytes of the last GO_BYTE_WAYS strings indexed, replaced round robin, so a
-    // loop over s[i] encodes s once rather than once per index.
+    // utf8Bytes of recently indexed strings, so a loop over s[i] encodes s once
+    // rather than once per index. GO_BYTE_SETS sets of GO_BYTE_WAYS entries, each
+    // replaced round robin; a string's set comes from its length and three of its
+    // code units, which costs O(1) where hashing the whole string would make every
+    // s[i] linear. Several strings indexed in turn therefore each keep their entry.
+    var GO_BYTE_SETS = 16
     var GO_BYTE_WAYS = 4
-    var goByteS = ["", "", "", ""]
-    var goByteB = [[], [], [], []]
-    var goByteNext = 0
+    var goByteS = []
+    var goByteB = []
+    var goByteNext = []
+    for (var gbi = 0; gbi < GO_BYTE_SETS * GO_BYTE_WAYS; gbi++) { goByteS.push(""); goByteB.push([]) }
+    for (var gbj = 0; gbj < GO_BYTE_SETS; gbj++) { goByteNext.push(0) }
     function goByteForm(s) {
+        var n = s.length
+        var set = n == 0 ? 0 : (n + s.charCodeAt(0) * 3 + s.charCodeAt(n >> 1) * 5 + s.charCodeAt(n - 1) * 7) % GO_BYTE_SETS
+        var base = set * GO_BYTE_WAYS
         var k = 0
         while (k < GO_BYTE_WAYS) {
-            if (goByteS[k] === s) { return goByteB[k] }
+            if (goByteS[base + k] === s) { return goByteB[base + k] }
             k = k + 1
         }
         var bs = utf8Bytes(s)
-        goByteS[goByteNext] = s
-        goByteB[goByteNext] = bs
-        goByteNext = (goByteNext + 1) % GO_BYTE_WAYS
+        var at = base + goByteNext[set]
+        goByteS[at] = s
+        goByteB[at] = bs
+        goByteNext[set] = (goByteNext[set] + 1) % GO_BYTE_WAYS
         return bs
     }
     // The inverse: a byte list back to a host string, decoded the way utf8.DecodeRune
