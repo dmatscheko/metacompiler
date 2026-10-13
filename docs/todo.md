@@ -683,8 +683,8 @@ T-572 bash: `let` with a redirection; unquoted `let` field splitting; NUL bytes;
 T-560 js/ts: a generator that re-enters itself aborts instead of throwing TypeError — DONE 1e54eac7
 T-566 js: `padStart(Infinity)` hangs; a missing method aborts natively; nested-try labeled jumps; big-radix parseInt — DONE 1e54eac7 28476b59 (incl. V8's fused parseInt for odd radices, verified on this arm64 node)
 T-565 js: wording and remaining low-value gaps — PARTIAL 1e54eac7 (toString(radix) = V8 DoubleToRadixCString, radix message, node-24 JSON.parse messages, String.fromCodePoint); TDZ is T-580, arguments/__ keys/normalize are T-581
-T-570 swift: a ternary passed to an `Any` parameter unifies; nested existential annotations — DONE ecc7bd12 bcaa1c28
-T-571 swift: mutating value methods on numbers and Bools; General_Category Character properties; trap exit status — DONE 0562ad3a (traps exit 133 in every leg; probe.sh accepts 133 for swift)
+T-570 swift: a ternary passed to an `Any` parameter unifies; nested existential annotations — DONE 5b5742db 72163636
+T-571 swift: mutating value methods on numbers and Bools; General_Category Character properties; trap exit status — DONE d8070820 (traps exit 133 in every leg; probe.sh accepts 133 for swift, 83fd0c9f)
 
 # Settled — do not re-open
 
