@@ -154,8 +154,10 @@ func (rt *jsrt) pyPropDel(p *jsObject, obj interface{}, cls *jsObject) {
 // pySetNames is the __set_name__ pass type.__new__ runs once a class body is
 // a class: a property member learns its name, and a member whose class
 // defines __set_name__ is called with (owner, name). __-prefixed members are
-// skipped, because layer 2's keysOf cannot list them. Twin of pyDSetNames in
-// lib/python-rt.metajs and pySetNames in python-interpreter.abnf.
+// skipped, because layer 2's keysOf cannot list them. Then the nearest base
+// class's __init_subclass__ (implicitly a classmethod) is called with the new
+// class. Twin of js_pysetnames in lib/python-rt.metajs and pySetNames in
+// python-interpreter.abnf.
 func (rt *jsrt) pySetNames(cls *jsObject) {
 	for _, k := range append([]string{}, cls.keys...) {
 		if len(k) >= 2 && k[0] == '_' && k[1] == '_' {
@@ -169,6 +171,19 @@ func (rt *jsrt) pySetNames(cls *jsObject) {
 				rt.callPyValue(f, []interface{}{v, cls, k}, jsUndef)
 			}
 		}
+	}
+	for _, base := range pyMRO(cls)[1:] {
+		_, isUser := base.props["__mro"]
+		h, has := base.props["__init_subclass__"]
+		if !isUser || !has {
+			continue
+		}
+		if pyDescKind(h) == "c" {
+			rt.callPyValue(rt.pyDescGet(h, cls, "__init_subclass__"), nil, jsUndef)
+		} else {
+			rt.callPyValue(h, []interface{}{cls}, jsUndef)
+		}
+		return
 	}
 }
 

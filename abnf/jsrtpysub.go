@@ -1201,7 +1201,8 @@ func pyUnionEq(a, b *jsArray) bool {
 // pyObjectMethod in languages/python-interpreter.abnf and
 // languages/lib/python-rt.metajs.
 var pyObjMethodNames = []string{"__init__", "__new__", "__eq__", "__ne__", "__hash__", "__repr__", "__str__",
-	"__format__", "__setattr__", "__getattribute__", "__delattr__", "__lt__", "__le__", "__gt__", "__ge__"}
+	"__format__", "__setattr__", "__getattribute__", "__delattr__", "__lt__", "__le__", "__gt__", "__ge__",
+	"__init_subclass__"}
 
 // pyObjectMethod is object's method called name, one function per name, or nil.
 func (rt *jsrt) pyObjectMethod(name string) interface{} {
@@ -1302,6 +1303,9 @@ func pyObjMethodBody(name string) func(rt *jsrt, this uint64, args []interface{}
 	case "__lt__", "__le__", "__gt__", "__ge__":
 		// object's four orderings decline every pair.
 		return func(rt *jsrt, this uint64, args []interface{}) interface{} { return pyNotImplemented }
+	case "__init_subclass__":
+		// The end of every hook chain (pySetNames): nothing to do.
+		return func(rt *jsrt, this uint64, args []interface{}) interface{} { return jsUndef }
 	}
 	return func(rt *jsrt, this uint64, args []interface{}) interface{} { // __delattr__
 		rt.pyDelAttrRaw(arg(args, 0), rt.toString(arg(args, 1)))

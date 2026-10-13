@@ -6379,6 +6379,60 @@ def s122():
               "ValueError: factorial() not defined for negative values", "ValueError: -inf + inf in fsum",
               "OverflowError: intermediate overflow in fsum"])
 
+# ===== SECTION 123: __init_subclass__, bound methods with keywords, operator =====
+# A class statement ends by calling the nearest base's __init_subclass__ with
+# the new class (implicitly a classmethod, ending at object's). A bound method
+# held as a value - a user one or a builtin one - takes keyword arguments.
+# The operator module (lib/python-operator.py). Rows from CPython 3.14.
+import operator as S123op
+from operator import itemgetter as S123ig, attrgetter as S123ag, methodcaller as S123mc
+
+class S123Plugin:
+    seen = []
+    def __init_subclass__(cls, **kw):
+        super().__init_subclass__(**kw)
+        S123Plugin.seen.append(cls.__name__)
+
+class S123A(S123Plugin):
+    pass
+
+class S123B(S123A):
+    pass
+
+class S123Tag:
+    @classmethod
+    def __init_subclass__(cls):
+        cls.tag = cls.__name__.lower()
+
+class S123X(S123Tag):
+    pass
+
+class S123P:
+    def __init__(self, n):
+        self.n = n
+    def f(self, a, b=0):
+        return self.n * a + b
+
+def s123():
+    check("isub1", S123Plugin.seen == ["S123A", "S123B"] and S123X.tag == "s123x" and not hasattr(S123Tag, "tag")
+          and type("S123C", (S123A,), {}).__name__ == "S123C" and S123Plugin.seen[-1] == "S123C")
+    p = S123P(3)
+    g = p.f
+    d = {}
+    upd = d.update
+    upd({"a": 1}, b=2)
+    xs = [3, 1, 2]
+    srt = xs.sort
+    srt(reverse=True)
+    check("bmkw1", g(2, b=1) == 7 and g(**{"a": 1, "b": 5}) == 8 and d == {"a": 1, "b": 2} and xs == [3, 2, 1]
+          and getattr("a b c", "split")(maxsplit=1) == ["a", "b c"])
+    rows = [("x", 3), ("y", 1), ("x", 2)]
+    check("oper1", sorted(rows, key=S123ig(1)) == [("y", 1), ("x", 2), ("x", 3)] and S123ig(1, 0)(rows[0]) == (3, "x")
+          and S123ag("n")(p) == 3 and S123mc("f", 2, b=1)(p) == 7 and S123op.add(2, 3) == 5 and S123op.neg(4) == -4
+          and S123op.contains([1, 2], 2) and S123op.indexOf("abc", "c") == 2 and S123op.countOf([1, 1, 2], 1) == 2
+          and repr(S123ig(1)) == "operator.itemgetter(1)" and repr(S123mc("f", 1, k=2)) == "operator.methodcaller('f', 1, k=2)"
+          and S123op.index(True) == 1 and S123op.abs(-2.5) == 2.5 and S123op.not_(0) is True)
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -6499,5 +6553,6 @@ def main():
     s120() # SECTION-CALL 120
     s121() # SECTION-CALL 121
     s122() # SECTION-CALL 122
+    s123() # SECTION-CALL 123
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

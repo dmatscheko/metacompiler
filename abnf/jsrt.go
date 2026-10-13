@@ -20265,8 +20265,14 @@ func (rt *jsrt) pySuperMCall(s *jsObject, name string, args []interface{}, kw in
 // pyattr's bindMethod; layer 2: pyDBindMethod.
 func (rt *jsrt) pyBindMethod(self, m interface{}, name string) interface{} {
 	h := jsHostFunc("pymethod", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		// A keyword call arrives as the positionals, pyKwMark and the dict
+		// (pyBindCallR). Twin of pyDBindMethod in lib/python-rt.metajs.
+		var kw interface{} = jsUndef
+		if n := len(args); n >= 2 && args[n-2] == pyKwMark {
+			kw, args = args[n-1], args[:n-2]
+		}
 		full := append([]interface{}{self}, args...)
-		return rt.call(m, jsUndef, rt.pyBindCall(m, full, jsUndef))
+		return rt.call(m, jsUndef, rt.pyBindCall(m, full, kw))
 	})
 	h.pybm = &pyBoundInfo{name: name, self: self, fn: m, typ: rt.pyOwnerName(self)}
 	return h
@@ -22171,12 +22177,14 @@ func (rt *jsrt) pyBuiltinAttr(target interface{}, name string) bool {
 // pyBoundBuiltin is what getattr() hands back for one of those names: CPython's
 // `<built-in method count of list object ...>`, spelled here as a host function
 // that re-enters the dispatcher with the receiver captured. Keyword arguments
-// are NOT carried through it (a signature-less builtin receives its keyword dict
-// as a trailing positional, which this cannot tell from a real argument), so
-// getattr(xs, "sort")(reverse=True) is not the same as xs.sort(reverse=True);
-// the direct call is.
+// arrive as the positionals, pyKwMark and the dict (pyBindCallR), so
+// getattr(xs, "sort")(reverse=True) is xs.sort(reverse=True).
 func (rt *jsrt) pyBoundBuiltin(target interface{}, name string) interface{} {
 	h := jsHostFunc("pybound."+name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		var kw interface{} = jsUndef
+		if n := len(args); n >= 2 && args[n-2] == pyKwMark {
+			kw, args = args[n-1], args[:n-2]
+		}
 		// A STRING's methods are NOT in pyMethodCall: abnf/pystrmethod.go's
 		// registrar installs them by WRAPPING the js_pymcall extern, so
 		// re-entering pyMethodCall directly reaches the shared member table and
@@ -22186,11 +22194,11 @@ func (rt *jsrt) pyBoundBuiltin(target interface{}, name string) interface{} {
 			if m := pyExternMaps[rt]; m != nil {
 				if f := m["js_pymcall"]; f != nil {
 					return rt.unwrap(f([]uint64{rt.wrap(target), rt.wrap(name),
-						rt.wrap(&jsArray{elems: args}), rt.wrap(jsUndef)}))
+						rt.wrap(&jsArray{elems: args}), rt.wrap(kw)}))
 				}
 			}
 		}
-		return rt.pyMethodCall(target, name, args, jsUndef)
+		return rt.pyMethodCall(target, name, args, kw)
 	})
 	// A builtin method has no underlying python function, and that nil is what
 	// tells __func__ to raise and the repr to say <built-in method ...>.
@@ -23606,11 +23614,12 @@ func (rt *jsrt) pyBindCallR(callee interface{}, pos []interface{}, kw interface{
 	if sig == nil {
 		// A builtin (no declared signature) takes the keyword dict as one extra
 		// trailing argument - which is exactly what dict(a=1) / dict(**m) want.
-		// A module function (pyModuleFn) and a type's own method
-		// (pyBuiltinClsMethod) get pyKwMark before it, since their positionals
-		// may end in a dict.
+		// A module function (pyModuleFn), a type's own method
+		// (pyBuiltinClsMethod) and a bound method (pyBindMethod,
+		// pyBoundBuiltin) get pyKwMark before it, since their positionals may
+		// end in a dict.
 		if hasKw {
-			if h, ok := callee.(*hostFunc); ok && h.pybm != nil && (h.pybm.kind == "m" || h.pybm.kind == "t") {
+			if h, ok := callee.(*hostFunc); ok && h.pybm != nil && h.pybm.kind != "d" {
 				return append(append([]interface{}{}, pos...), pyKwMark, kw), true
 			}
 			return append(append([]interface{}{}, pos...), kw), true

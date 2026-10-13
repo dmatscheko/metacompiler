@@ -2723,13 +2723,13 @@ function pyUnionEq(a, b) {
 // wrapper). Go: rt.pyObjectMethod in abnf/jsrtpysub.go.
 var pyObjMNames = ["__init__", "__new__", "__eq__", "__ne__", "__hash__", "__repr__", "__str__",
                    "__format__", "__setattr__", "__getattribute__", "__delattr__",
-                   "__lt__", "__le__", "__gt__", "__ge__"]
+                   "__lt__", "__le__", "__gt__", "__ge__", "__init_subclass__"]
 var pyObjMFns = []
 function pyObjectMethod(name) {
     if (pyObjMFns.length == 0) {
         pyObjMFns = [pyObjInit, pyObjNew, pyObjEq, pyObjNe, pyObjHash, pyObjRepr, pyObjStr,
                      pyObjFormat, pyObjSetattr, pyGetAttrRaw, pyDDelAttr,
-                     pyObjOrder(), pyObjOrder(), pyObjOrder(), pyObjOrder()]
+                     pyObjOrder(), pyObjOrder(), pyObjOrder(), pyObjOrder(), pyObjInitSub]
         var k = 0
         while (k < pyObjMFns.length) {
             if (k == 1) { js_pybfn(pyObjMFns[k], "__new__") } else { js_pybfn(pyObjMFns[k], "~" + pyObjMNames[k]) }
@@ -2743,6 +2743,9 @@ function pyObjectMethod(name) {
     }
     return null
 }
+// object.__init_subclass__: the end of every hook chain, doing nothing.
+function pyObjInitSub(cls) { return undefined }
+
 // Extra arguments are an error once the class defines its own __init__, or does
 // not define __new__ (CPython's object_init).
 function pyObjInit(self) {
@@ -8690,7 +8693,16 @@ function pyDBindMethod(self, m, name) {
             args.push(arguments[i])
             i = i + 1
         }
-        return pyCall(m, pyBindCall(m, rtPrepend(self, args), undefined))
+        // A keyword call arrives as the positionals, pyDKwMark and the dict
+        // (pyBindCall). Go: rt.pyBindMethod.
+        var kw = anytype
+        kw = undefined
+        var n = args.length
+        if (n >= 2 && args[n - 2] === pyDKwMark) {
+            kw = args[n - 1]
+            args = args.slice(0, n - 2)
+        }
+        return pyCall(m, pyBindCall(m, rtPrepend(self, args), kw))
     }
     return pyBMSet(b, name, self, m)
 }
@@ -9157,9 +9169,10 @@ function pyBindCall(callee, pos, kw) {
     if (si < 0) {
         // A builtin (no declared signature) takes the keyword dict as one extra
         // trailing argument - which is exactly what dict(a=1) / dict(**m) want.
-        // A module function (pyDModuleFn) and a type's own method
-        // (pyBuiltinClsMethod) get pyDKwMark before it, since their positionals
-        // may end in a dict.
+        // A module function (pyDModuleFn), a type's own method
+        // (pyBuiltinClsMethod) and a bound method (pyDBindMethod,
+        // pyDBoundBuiltin) get pyDKwMark before it, since their positionals may
+        // end in a dict.
         if (hasKw) {
             i = 0
             while (i < pos.length) {
@@ -9168,7 +9181,7 @@ function pyBindCall(callee, pos, kw) {
             }
             var bmi = pyBMFind(callee)
             if (bmi >= 0) {
-                if (pyBMTab[bmi + 4] === "m" || pyBMTab[bmi + 4] === "t") { out.push(pyDKwMark) }
+                if (pyBMTab[bmi + 4] !== "d") { out.push(pyDKwMark) }
             }
             out.push(kw)
             return out
@@ -10470,9 +10483,9 @@ function pyDBuiltinAttr(obj, name) {
 
 // What getattr() hands back for one of those names: CPython's `<built-in method
 // count of list object ...>`, spelled here as a closure that re-enters the
-// dispatcher with the receiver captured. Keyword arguments are NOT carried
-// through it, so getattr(xs, "sort")(reverse=True) is not the same as
-// xs.sort(reverse=True); the direct call is.
+// dispatcher with the receiver captured. A keyword call arrives as the
+// positionals, pyDKwMark and the dict (pyBindCall), so
+// getattr(xs, "sort")(reverse=True) is xs.sort(reverse=True).
 function pyDBoundBuiltin(target, name) {
     var f = function() {
         var args = []
@@ -10481,7 +10494,14 @@ function pyDBoundBuiltin(target, name) {
             args.push(arguments[i])
             i = i + 1
         }
-        return pyDMethodCall(target, name, args, undefined)
+        var kw = anytype
+        kw = undefined
+        var n = args.length
+        if (n >= 2 && args[n - 2] === pyDKwMark) {
+            kw = args[n - 1]
+            args = args.slice(0, n - 2)
+        }
+        return pyDMethodCall(target, name, args, kw)
     }
     // null in the fourth slot is what says "a BUILTIN method": it is why
     // __func__ raises and why the repr is <built-in method ...>.
@@ -10516,8 +10536,8 @@ function pyDPropName(p) {
     return undefined
 }
 
-// The __set_name__ pass over a filled class body. Go: rt.pySetNames, which
-// explains it.
+// The __set_name__ pass over a filled class body, then the __init_subclass__
+// hook. Go: rt.pySetNames, which explains it.
 function js_pysetnames(cls) {
     var ks = keysOf(cls)
     for (var i = 0; i < ks.length; i++) {
@@ -10527,6 +10547,17 @@ function js_pysetnames(cls) {
             var sn = pyDescriptor(v, "__set_name__")
             if (sn !== undefined) { pyCall(sn, [v, cls, ks[i]]) }
         }
+    }
+    var mro = pyMRO(cls)
+    var j = 1
+    while (j < mro.length) {
+        var h = mro[j]["__init_subclass__"]
+        if (mro[j]["__mro"] !== undefined && h !== undefined) {
+            if (pyDIsClsM(h)) { pyDCallPyValue(pyDDescGet(h, cls, "__init_subclass__"), [], undefined) }
+            else { pyDCallPyValue(h, [cls], undefined) }
+            return undefined
+        }
+        j = j + 1
     }
     return undefined
 }

@@ -2693,8 +2693,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return pyCall(f, args, null)
     }
-    // The __set_name__ pass type.__new__ runs once a class body is a class.
-    // Twin of rt.pySetNames in abnf/jsrtpydesc.go, which explains it.
+    // The __set_name__ pass type.__new__ runs once a class body is a class, and
+    // then the __init_subclass__ hook. Twin of rt.pySetNames in
+    // abnf/jsrtpydesc.go, which explains it.
     function pySetNames(cls, names) {
         for (var i = 0; i < names.length; i++) {
             var k = names[i]
@@ -2705,6 +2706,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var sn = clsFind(v.__class, "__set_name__")
                 if (sn != null) { pyCall(sn, [v, cls, k], null) }
             }
+        }
+        var mro = clsMRO(cls)
+        for (var j = 1; j < mro.length; j++) {
+            if (!hasOwn(mro[j], "__mro") || !hasOwn(mro[j], "__init_subclass__")) { continue }
+            var h = mro[j].__init_subclass__
+            if (pyIsClsM(h)) { pyCall(pyDescGet(h, cls, "__init_subclass__"), [], null) }
+            else { pyCall(h, [cls], null) }
+            return
         }
     }
     // An attribute of the property object itself.
@@ -2914,14 +2923,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // What getattr() hands back for one of those names: CPython's `<built-in
     // method count of list object ...>`, spelled here as a closure that re-enters
     // the dispatcher with the receiver captured - the same shape bindMethod uses
-    // for a user method. Keyword arguments are NOT carried through it, so
-    // getattr(xs, "sort")(reverse=True) is not the same as xs.sort(reverse=True);
-    // the direct call is.
+    // for a user method. Keyword arguments travel with the call, so
+    // getattr(xs, "sort")(reverse=True) is xs.sort(reverse=True).
     function pyBoundBuiltin(target, name) {
         var f = function() {
             var args = []
             for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]) }
-            return mcall(target, name, args, undefined)
+            return mcall(target, name, args, kTakeNamed())
         }
         return pyBMSet(f, name, target, null)
     }
@@ -12954,13 +12962,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // builtin.
     var pyObjMNames = ["__init__", "__new__", "__eq__", "__ne__", "__hash__", "__repr__", "__str__",
                        "__format__", "__setattr__", "__getattribute__", "__delattr__",
-                       "__lt__", "__le__", "__gt__", "__ge__"]
+                       "__lt__", "__le__", "__gt__", "__ge__", "__init_subclass__"]
     var pyObjMFns = []
     function pyObjectMethod(name) {
         if (pyObjMFns.length == 0) {
             pyObjMFns = [pyObjInit, pyObjNew, pyObjEq, pyObjNe, pyObjHash, pyObjRepr, pyObjStr,
                          pyObjFormat, pySetAttrFn, pyObjGetattr, pyObjDelattr,
-                         pyObjOrder(), pyObjOrder(), pyObjOrder(), pyObjOrder()]
+                         pyObjOrder(), pyObjOrder(), pyObjOrder(), pyObjOrder(), pyObjInitSub]
             for (var k = 0; k < pyObjMFns.length; k++) {
                 bfnFns.push(pyObjMFns[k])
                 bfnCodes.push(k == 1 ? "__new__" : "~" + pyObjMNames[k])
@@ -12969,6 +12977,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (var i = 0; i < pyObjMNames.length; i++) { if (pyObjMNames[i] == name) { return pyObjMFns[i] } }
         return null
     }
+    // object.__init_subclass__: the end of every hook chain, doing nothing.
+    function pyObjInitSub(cls) { return undefined }
     // Extra arguments are an error once the class defines its own __init__, or
     // does not define __new__ (CPython's object_init).
     function pyObjInit(self) {
