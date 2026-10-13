@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-604** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-605** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -91,11 +91,16 @@ escape `"__#"` like other `"__"` keys.
 
 # JV — Java
 
-### T-578 java: PatternSyntaxException message wording; class literals of unloaded JDK types · P3 · JV · IN PROGRESS (JV worker, round 4) [V]
-`"a".matches("(")` → getMessage `unterminated group` (lib/regex.js wording) in all engines; java 24 `Unclosed group near index 1`
-+ newline + the pattern + a caret line. regex.js / jsrtregex.go are shared by every language: map the error kinds to Java's
-text in java's own layer (jxRe), not in the shared engine. `List.class` without lib/java-util.java loaded prints `List`
-(java `interface java.util.List`).
+### T-604 java: regex dialect gaps; missing Math/Long/Double API; TreeMap views; unmodifiable view write-through · P2 · JV · OPEN [V]
+`"a".matches("a{99999999999}")` runs away (17 GB) in the interp (java "Illegal repetition range near index 11"). Java rejects,
+ours accepts: `{`, `a{`, `a{x}`, `a{2`, `x{1,2}{`, `\u12`, `\p{Foo}`, `\c`, `(?<1a>x)`, a duplicate group name; `[a-` and
+`[a-\d]` are "Illegal character range" in java. Java accepts, ours rejects: `\2` (backreference to a missing group),
+`[[:alpha:]]`... (careful: in Java `[[:alpha:]]` is a nested class), lookbehind `(?<=...)`. These need a Java flag in the shared
+lib/regex.js and abnf/jsrtregex.go (a CORE-shared file: additive, flag-gated, full matrix). Missing API in all engines:
+Math.clamp, Math.nextUp; Long.toUnsignedString / parseUnsignedLong / divideUnsigned and the rest of the unsigned family;
+Double.toHexString, longBitsToDouble, Float.intBitsToFloat; TreeMap.headMap/tailMap/subMap live views; String.indent /
+stripIndent. Unmodifiable map keySet/values write through (java: UnsupportedOperationException). String.CASE_INSENSITIVE_ORDER
+is a plain comparator when java.util is not loaded. Check the interp keeps 1 and 1L distinct (twin and layer 2 do).
 
 ---
 
@@ -709,6 +714,7 @@ T-595 php: `[$closure, '__invoke']` callbacks; `[&$k, 4]` in the compiler; callb
 T-593 go: an overflowing constant is not rejected at compound assignment, typed const, return, element, send, `_ =` — DONE 89ffe028 (plus division by constant zero, negative constant shifts, constant index/slice/conversion range, truncated float constants: 86e8cea2..5208be9f)
 T-600 php compiler: arrays passed by value are not copied; array copies drop references; spread of references — PARTIAL 2393d44a 464bc456 49c99ffa (by-value array params copied when written, shared references kept through copies and spreads, Closure::bind/fromCallable via an instance, named by-ref args); rest is T-602
 T-597 js: arguments length and mapping; `Object.hasOwn`; `"__#"` user keys — PARTIAL 3687b718 (Object.hasOwn/groupBy/fromEntries, Map.groupBy, Number statics, String.raw, structuredClone, sloppy mapped arguments, arguments length slot); rest is T-603
+T-578 java: PatternSyntaxException message wording; class literals of unloaded JDK types — DONE 6096b47d (plus a java.util/java.lang API sweep: 46e77cc7 cd485893 caf757fb)
 
 # Settled — do not re-open
 
