@@ -577,7 +577,7 @@ IdxE        <~~ var ie = pop(); push(ie); push({ksty: stAt(up.pos)}) ~~> = Expre
 
 ExprList    = StoreExpr { "," StoreExpr } ;
 // One value of a := / = / var, followed by the static type it reports (goSplitSty).
-StoreExpr   <~~ var se = pop(); push(se); push({sty: stStoreAt(up.pos), rn: goIsRuneC(up.pos)}) ~~> = Expression ;
+StoreExpr   <~~ var se = pop(); push(se); push({sty: stStoreAt(up.pos), rn: goIsRuneC(up.pos), kr: goKRec(up.start, up.pos)}) ~~> = Expression ;
 
 Empty       <~~ push(function(b) { return b }) ~~>
             = ";" ;
@@ -1198,7 +1198,7 @@ LitExpr     <~~ var le = pop(); push(le); push({lesty: goLitEsty(up.pos)}) ~~> =
 Call        <~~ var ci = goAppendC(takeAll(), up.in); push(makeCall(goCallBoxC(ci), goSplitArgs(ci.slice(1)).atys)) ~~>
             = Id <~~ push(up.in) ~~> "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
 // A call argument reports its static type after it, for goSplitArgs.
-ArgExpr     <~~ var ae = pop(); push(goRuneDefC(ae, up.pos)); push({aty: stAt(up.pos)}) ~~> = Expression ;
+ArgExpr     <~~ var ae = pop(); push(goRuneDefC(ae, up.pos)); push({aty: stAt(up.pos), kr: goKRec(up.start, up.pos)}) ~~> = Expression ;
 // A returned value, which takes a rune constant at the RESULT's type (makeReturn).
 RetExpr     <~~ var re = pop(); push(re); push({aty: stAt(up.pos), rn: goIsRuneC(up.pos)}) ~~> = Expression ;
 
@@ -1861,6 +1861,14 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (it != null) { return emitGiConv(b, v, it) }
         return v
     }
+    // goAssignAdopt's conversion (go-constfold.js). Twin of goAdoptThunk in
+    // go-interpreter.abnf.
+    function goAdoptThunk(t, ty) {
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: emitAdoptTy(r.b, ty, r.v)}
+        }
+    }
     function emitGiConv(b, v, it) {
         return callExt(b, "js_giconv", [v, emitNum(b, it.w), it.u ? hTrue : hFalse])
     }
@@ -1938,7 +1946,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // A folded constant becomes IR ONCE, here. A float constant is the correctly
     // rounded double behind js_gflo; an integer constant emits a plain number while a
     // double still holds it exactly and otherwise hands js_gilit its DIGITS, exactly
-    // as goIntLitAt does for a literal too wide for emitNum.
+    // as goIntLitAt does for a literal too wide for emitNum - unsigned for one in
+    // [2^63, 2^64), which only a uint64 or a float can hold. Twin of cMaterialize in
+    // go-interpreter.abnf.
     function cMaterialize(c) {
         if (cIsCx(c)) { return makeCx(cToF64(c.re), cToF64(c.im)) }
         if (c.f) { return makeFloConst(cToF64(c)) }
@@ -1949,7 +1959,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var dg = cbToDec(c.n)
         if (c.s < 0) { dg = "-" + dg }
         return function(b) {
-            return {b: b, v: callExt(b, "js_gilit", [emitStr(b, dg), emitNum(b, 10), emitNum(b, 64), hFalse])}
+            return {b: b, v: callExt(b, "js_gilit", [emitStr(b, dg), emitNum(b, 10), emitNum(b, 64), cIsU64Only(c) ? hTrue : hFalse])}
         }
     }
     // Every numeric literal records its EXACT value against its own end position, so a
@@ -2020,6 +2030,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var sty = goRunSty(items, ops)
         var folded = goFoldConst(items, ops, pos, ty)
         if (folded != null) { return folded }
+        if (ty == null) { goFloOperands(items, ts, sty) }
         regConst(pos, null)
         regCFn(pos, cfn)
         regSt(pos, sty)
@@ -2141,7 +2152,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
 
     function makeMethodSfx(name, items, at) {
         var sp = goSplitArgs(items)
-        return {kind: "mcall", name: name, args: sp.args, atys: sp.atys, spread: sp.spread, at: at, rc: null}
+        return {kind: "mcall", name: name, args: sp.args, atys: sp.atys, krs: sp.krs, spread: sp.spread, at: at, rc: null}
     }
     // A call of a method of a DEFINED type, by its plan (go-constfold.js, goDtPlan):
     // a pointer receiver named by a bare variable gets that variable's cell, a value
@@ -2195,7 +2206,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // chain (goSplitArgs).
     function makeCallSfx(items) {
         var sp = goSplitArgs(items)
-        return {kind: "call", args: sp.args, atys: sp.atys, spread: sp.spread}
+        return {kind: "call", args: sp.args, atys: sp.atys, krs: sp.krs, spread: sp.spread}
     }
     // A trailing {spread} marker is popped off an argument list; it means the last
     // argument is a slice to be spread into the variadic parameter.
@@ -4043,6 +4054,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 var lref = refs[ai]
                 var cty = goStCopyTy(sp.tys[ai])
                 if (cty == "" && lref.path.length == 0 && lref.stars == 0) { cty = goStCopyTy(cTyLookup(lref.name)) }
+                exprs[ai] = goConstTo(exprs[ai], sp.krs[ai], goRefTy(lref), "assignment")
+                if (lref.path.length == 0) { exprs[ai] = goAssignAdopt(exprs[ai], sp.tys[ai], goRefTy(lref)) }
                 exprs[ai] = goStoreThunk(exprs[ai], cty)
                 exprs[ai] = goDtBoxThunk(exprs[ai], goDtBoxTo(sp.tys[ai], goRefTy(lref)))
                 if (sp.rns[ai] && goIsIfaceTy(stBare(goRefTy(lref)))) { exprs[ai] = goI32Thunk(exprs[ai]) }
@@ -4149,6 +4162,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (names.length == exprs.length) {
             for (var si = 0; si < exprs.length; si++) {
                 cBindTy(names[si], stBare(sp.tys[si]))
+                exprs[si] = goConstTo(exprs[si], sp.krs[si], sp.rns[si] ? "rune" : "any", "assignment")
                 exprs[si] = goStoreThunk(exprs[si], goStCopyTy(sp.tys[si]))
                 if (sp.rns[si]) { exprs[si] = goI32Thunk(exprs[si]) }
             }
@@ -4271,6 +4285,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (inits.length == names.length) {
             for (var vi = 0; vi < inits.length; vi++) {
                 if (ty == "") { cBindTy(names[vi], stBare(sp.tys[vi])) }
+                inits[vi] = goConstTo(inits[vi], sp.krs[vi], ty != "" ? ty : (sp.rns[vi] ? "rune" : "any"), "variable declaration")
                 inits[vi] = goDtBoxThunk(goStoreThunk(inits[vi], goStCopyTy(sp.tys[vi])), goDtBoxTo(sp.tys[vi], ty))
                 if (sp.rns[vi] && (ty == "" || goIsIfaceTy(stBare(ty)))) { inits[vi] = goI32Thunk(inits[vi]) }
             }

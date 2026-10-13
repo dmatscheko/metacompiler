@@ -562,7 +562,7 @@ IdxE        <~~ var ie = pop(); push(ie); push({ksty: stAt(up.pos)}) ~~> = Expre
 
 ExprList    = StoreExpr { "," StoreExpr } ;
 // One value of a := / = / var, followed by the static type it reports (goSplitSty).
-StoreExpr   <~~ var se = pop(); push(se); push({sty: stStoreAt(up.pos), rn: goIsRuneC(up.pos)}) ~~> = Expression ;
+StoreExpr   <~~ var se = pop(); push(se); push({sty: stStoreAt(up.pos), rn: goIsRuneC(up.pos), kr: goKRec(up.start, up.pos)}) ~~> = Expression ;
 
 Empty       <~~ push(function() {}) ~~>
             = ";" ;
@@ -1075,7 +1075,7 @@ NewType     <~~ push({nty: firstType(up.in)}) ~~>
 Call        <~~ var ci = goAppendC(takeAll(), up.in); push(makeCall(goCallBoxC(ci), goSplitArgs(ci.slice(1)).atys)) ~~>
             = Id <~~ push(up.in) ~~> "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
 // A call argument reports its static type after it, for goSplitArgs.
-ArgExpr     <~~ var ae = pop(); push(goRuneDefC(ae, up.pos)); push({aty: stAt(up.pos)}) ~~> = Expression ;
+ArgExpr     <~~ var ae = pop(); push(goRuneDefC(ae, up.pos)); push({aty: stAt(up.pos), kr: goKRec(up.start, up.pos)}) ~~> = Expression ;
 // A returned value, which takes a rune constant at the RESULT's type (makeReturn).
 RetExpr     <~~ var re = pop(); push(re); push({aty: stAt(up.pos), rn: goIsRuneC(up.pos)}) ~~> = Expression ;
 
@@ -2002,13 +2002,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // items = [argThunk, {aty}]..., {spread}?] (goSplitArgs)
     function makeCallSfx(items) {
         var sp = goSplitArgs(items)
-        return {kind: "call", args: sp.args, atys: sp.atys, spread: sp.spread}
+        return {kind: "call", args: sp.args, atys: sp.atys, krs: sp.krs, spread: sp.spread}
     }
     // `.m(args)`, whose last argument may be spread too (`fmt.Println(ys...)`).
     // The twin is makeMethodSfx in go-to-llvm-ir.abnf.
     function makeMethodSfx(name, items, at) {
         var c = makeCallSfx(items)
-        return {kind: "mcall", name: name, args: c.args, atys: c.atys, spread: c.spread, at: at, rc: null, dt: null, dtk: false,
+        return {kind: "mcall", name: name, args: c.args, atys: c.atys, krs: c.krs, spread: c.spread, at: at, rc: null, dt: null, dtk: false,
                 pkg: curPkgName}
     }
     function makeSliceSfx(items) {
@@ -2967,13 +2967,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // A folded constant becomes a value ONCE, here. A float constant is the correctly
     // rounded double in a {__flo} box; an integer constant goes through the same
     // 64 bit wrap a literal of that value would (i64FromStr wraps, szNorm re-boxes),
-    // so an expression that overflows int answers what an overflowing literal does.
+    // except that one in [2^63, 2^64) is a uint64 box: only a uint64 or a float can
+    // hold it, and both read the box at its true magnitude. Twin of cMaterialize in
+    // go-to-llvm-ir.abnf.
     function cMaterialize(c) {
         if (cIsCx(c)) { return makeCx(cToF64(c.re), cToF64(c.im)) }
         if (c.f) { return makeConst(gFlo(cToF64(c))) }
         var p = i64FromStr(cbToDec(c.n))
         if (c.s < 0) { p = i64Neg(p) }
-        return makeConst(szNorm(p, 64, false))
+        return makeConst(szNorm(p, 64, cIsU64Only(c)))
     }
     // Every numeric literal records its EXACT value against its own end position, so a
     // fold higher up can read the operands back through constAt. The thunk itself is
@@ -3041,6 +3043,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var sty = goRunSty(items, ops)
         var folded = goFoldConst(items, ops, pos, ty)
         if (folded != null) { return folded }
+        if (ty == null) { goFloOperands(items, ts, sty) }
         regConst(pos, null)
         regCFn(pos, cfn)
         regSt(pos, sty)
@@ -4388,6 +4391,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 var lref = refs[ai]
                 var cty = goStCopyTy(sp.tys[ai])
                 if (cty == "" && lref.path.length == 0 && lref.stars == 0) { cty = goStCopyTy(cTyLookup(lref.name)) }
+                exprs[ai] = goConstTo(exprs[ai], sp.krs[ai], goRefTy(lref), "assignment")
+                if (lref.path.length == 0) { exprs[ai] = goAssignAdopt(exprs[ai], sp.tys[ai], goRefTy(lref)) }
                 exprs[ai] = goStoreThunk(exprs[ai], cty)
                 exprs[ai] = goDtBoxThunk(exprs[ai], goDtBoxTo(sp.tys[ai], goRefTy(lref)))
                 if (sp.rns[ai] && goIsIfaceTy(stBare(goRefTy(lref)))) { exprs[ai] = goI32Thunk(exprs[ai]) }
@@ -4448,6 +4453,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (names.length == exprs.length) {
             for (var si = 0; si < exprs.length; si++) {
                 cBindTy(names[si], stBare(sp.tys[si]))
+                exprs[si] = goConstTo(exprs[si], sp.krs[si], sp.rns[si] ? "rune" : "any", "assignment")
                 exprs[si] = goStoreThunk(exprs[si], goStCopyTy(sp.tys[si]))
                 if (sp.rns[si]) { exprs[si] = goI32Thunk(exprs[si]) }
             }
@@ -4515,6 +4521,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (it != null && (typeof v == "number" || szIs(v))) { return szConv(v, it.w, it.u) }
         return v
     }
+    // goAssignAdopt's conversion (go-constfold.js). Twin of goAdoptThunk in
+    // go-to-llvm-ir.abnf.
+    function goAdoptThunk(t, ty) { return function() { return gAdoptTy(ty, t()) } }
     // The type a `var x T` declaration wrote for each name, at walk time and by name
     // (the latest declaration in the source wins). &x carries it for errors.As, which
     // needs the static type of a nil pointer. Twin of goDeclTys in go-to-llvm-ir.abnf.
@@ -4537,6 +4546,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (inits.length == names.length) {
             for (var vi = 0; vi < inits.length; vi++) {
                 if (ty == "") { cBindTy(names[vi], stBare(sp.tys[vi])) }
+                inits[vi] = goConstTo(inits[vi], sp.krs[vi], ty != "" ? ty : (sp.rns[vi] ? "rune" : "any"), "variable declaration")
                 inits[vi] = goDtBoxThunk(goStoreThunk(inits[vi], goStCopyTy(sp.tys[vi])), goDtBoxTo(sp.tys[vi], ty))
                 if (sp.rns[vi] && (ty == "" || goIsIfaceTy(stBare(ty)))) { inits[vi] = goI32Thunk(inits[vi]) }
             }

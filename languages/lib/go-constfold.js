@@ -328,6 +328,17 @@ function cTooBig(c) {
     if (cIsCx(c)) { return cTooBig(c.re) || cTooBig(c.im) }
     return c.n.length > CB_LIMIT || c.d.length > CB_LIMIT
 }
+var cbTwo63 = cbShl(cbOne(), 63)
+var cbTwo64 = cbShl(cbOne(), 64)
+// An integer constant that only a uint64 (or a float) can hold: one in [2^63, 2^64).
+function cIsU64Only(c) { return c.s > 0 && cbCmp(c.n, cbTwo63) >= 0 && cbCmp(c.n, cbTwo64) < 0 }
+// Is integer constant c representable in a w bit integer, unsigned when u?
+function cFitsInt(c, w, u) {
+    if (c.s === 0) { return true }
+    if (u) { return c.s > 0 && cbBitLen(c.n) <= w }
+    if (c.s > 0) { return cbBitLen(c.n) < w }
+    return cbCmp(c.n, cbShl(cbOne(), w - 1)) <= 0
+}
 function cReduce(c) {
     if (c.s === 0) { return c }
     if (c.d.length === 1 && c.d[0] === 1) { return c }
@@ -987,20 +998,70 @@ function goAddrNameC(t, name, pos) {
 // split here into the thunks and their static types.
 // rns[k]: value k is a rune constant (StoreExpr), which a declaration without a
 // type binds at its default type, int32.
+// krs[k]: value k's goKRec record, or null.
 function goSplitSty(xs) {
     var ts = []
     var tys = []
     var rns = []
+    var krs = []
     var i = 0
     while (i < xs.length) {
-        if (typeof xs[i] == "function") { ts.push(xs[i]); tys.push(""); rns.push(false) }
+        if (typeof xs[i] == "function") { ts.push(xs[i]); tys.push(""); rns.push(false); krs.push(null) }
         else if (xs[i].sty != undefined && tys.length > 0) {
             tys[tys.length - 1] = xs[i].sty
             rns[rns.length - 1] = xs[i].rn === true
+            krs[krs.length - 1] = xs[i].kr == undefined ? null : xs[i].kr
         }
         i = i + 1
     }
-    return {ts: ts, tys: tys, rns: rns}
+    return {ts: ts, tys: tys, rns: rns, krs: krs}
+}
+// ----- AN UNTYPED CONSTANT AT A TYPED LOCATION -----
+// Go converts an untyped constant to the type of the location it reaches - its
+// DEFAULT type (int) where that is an interface, a := or a var without a type -
+// and rejects at compile time an integer constant that type cannot represent:
+// `var b uint8 = 256` and `fmt.Println(1 << 63)` do not compile. An integer
+// constant reaching a float type is rounded from its exact value, so
+// `var f float64 = 1 << 64` holds 2^64. kr is goKRec's record of the value
+// (StoreExpr, ArgExpr), ty its location's type ("" not known: nothing checked).
+function goKRec(start, pos) {
+    var k = constAt(pos)
+    if (k == null || cIsCx(k) || k.f) { return null }
+    return {k: k, ks: start, ke: pos}
+}
+function goConstTo(t, kr, ty, ctx) {
+    if (kr == null || ty == "") { return t }
+    var bt = stBare(ty)
+    var shown = goIsIfaceTy(bt) ? "int" : bt
+    var w = goTyWord(shown)
+    if (typeof definedUnder[w] == "string") { w = goTyWord(resolveDefined(w)) }
+    if (isFloatTy(w)) { return cMaterialize(cAsF(kr.k)) }
+    var it = goIntTy(w)
+    if (it == null || cFitsInt(kr.k, it.w, it.u)) { return t }
+    var src = stTrim(c.srcSlice(kr.ks, kr.ke))
+    var dec = (kr.k.s < 0 ? "-" : "") + cbToDec(kr.k.n)
+    fail(c.curFile() + ":" + c.lineOf(kr.ks) + ": cannot use " + src + " (untyped int constant" + (src == dec ? "" : " " + dec)
+         + ") as " + shown + " value in " + ctx + " (overflows)")
+    return t
+}
+function stTrim(t) {
+    var a = 0
+    var b = t.length
+    while (a < b && t.charCodeAt(a) <= 32) { a = a + 1 }
+    while (b > a && t.charCodeAt(b - 1) <= 32) { b = b - 1 }
+    return t.substring(a, b)
+}
+// An assignment to a numeric variable converts the value to the variable's type
+// (`u8 = 255; u8++` wraps to 0, `f = 3` holds 3.0) unless the value's static type
+// already is that type. goAdoptThunk is the grammar's.
+function goAssignAdopt(t, sty, ty) {
+    var bt = stBare(ty)
+    if (bt == "" || bt == "int" || bt == "int64" || stBare(sty) == bt) { return t }
+    var w = goTyWord(bt)
+    if (w != bt) { return t }
+    if (typeof definedUnder[w] == "string") { w = goTyWord(resolveDefined(w)) }
+    if (!isFloatTy(w) && goIntTy(w) == null) { return t }
+    return goAdoptThunk(t, bt)
 }
 // A composite literal of type ty: a fresh value.
 function goLitC(t, ty, pos) {
@@ -1339,21 +1400,23 @@ function goSplitArgs(items) {
     var args = []
     var atys = []
     var rns = []   // a returned value that is a rune constant (RetExpr)
+    var krs = []   // an argument's goKRec record (ArgExpr)
     var spread = false
     var i = 0
     while (i < items.length) {
         var it = items[i]
-        if (typeof it == "function") { args.push(it); atys.push(""); rns.push(false) }
+        if (typeof it == "function") { args.push(it); atys.push(""); rns.push(false); krs.push(null) }
         else if (it != null && it.aty !== undefined) {
             if (atys.length > 0) {
                 atys[atys.length - 1] = it.aty
                 rns[rns.length - 1] = it.rn === true
+                krs[krs.length - 1] = it.kr == undefined ? null : it.kr
             }
         }
         else if (it != null && it.spread === true) { spread = true }
         i = i + 1
     }
-    return {args: args, atys: atys, rns: rns, spread: spread}
+    return {args: args, atys: atys, rns: rns, krs: krs, spread: spread}
 }
 // The parameter type argument j of a call meets, from goPreParams' list.
 function goParamTyAt(pts, j) {
@@ -1403,6 +1466,7 @@ function goBoxArgsC(items) {
             while (j < s.args.length) {
                 if (!(s.spread && j == s.args.length - 1)) {
                     var vt = s.rc.text == "fmt" ? goFmtVvTy(s.atys[j]) : ""
+                    s.args[j] = goConstTo(s.args[j], s.krs[j], "any", "argument to " + s.rc.text + "." + s.name)
                     if (vt != "") { s.args[j] = goVvThunk(s.args[j], vt) }
                     else { s.args[j] = goDtBoxThunk(s.args[j], s.rc.text == "fmt" ? goFmtBoxTy(s.atys[j], s.name) : goDtBoxTy(s.atys[j])) }
                 }
@@ -1414,7 +1478,10 @@ function goBoxArgsC(items) {
             var mp = goMethPTysOf(s.rc, s.name)
             var k = 0
             while (mp != null && k < s.args.length) {
-                if (!(s.spread && k == s.args.length - 1)) { s.args[k] = goDtBoxThunk(s.args[k], goDtBoxTo(s.atys[k], goParamTyAt(mp, k))) }
+                if (!(s.spread && k == s.args.length - 1)) {
+                    s.args[k] = goConstTo(s.args[k], s.krs[k], goParamTyAt(mp, k), "argument to " + s.rc.text + "." + s.name)
+                    s.args[k] = goDtBoxThunk(s.args[k], goDtBoxTo(s.atys[k], goParamTyAt(mp, k)))
+                }
                 k = k + 1
             }
         }
@@ -1516,7 +1583,10 @@ function goCallBoxC(items) {
     var j = 0
     while (j < sp.args.length) {
         var t = sp.args[j]
-        if (pts != null && !(sp.spread && j == sp.args.length - 1)) { t = goDtBoxThunk(t, goDtBoxTo(sp.atys[j], goParamTyAt(pts, j))) }
+        if (pts != null && !(sp.spread && j == sp.args.length - 1)) {
+            t = goConstTo(t, sp.krs[j], goParamTyAt(pts, j), "argument to " + name)
+            t = goDtBoxThunk(t, goDtBoxTo(sp.atys[j], goParamTyAt(pts, j)))
+        }
         out.push(t)
         j = j + 1
     }
@@ -2356,6 +2426,22 @@ function goRuneLitC(v, pos) {
 // folds: a chain would need the untyped BOOL constant Go's spec has and this front
 // end does not model (and Go rejects `a < b < c` anyway).
 // items = [t0, {at}, op, t1, {at}, ...] - the same shape goFold reads.
+// An integer constant a double cannot hold exactly, as an operand beside one of
+// FLOAT static type sty: Go converts the constant to that float type, and the
+// 64-bit integer box it would otherwise materialize as is no float operand.
+// Operand k of items is ts[k], its end position items[3k + 1].
+var cbTwo53 = cbShl(cbOne(), 53)
+function goFloOperands(items, ts, sty) {
+    var w = goTyWord(stBare(sty))
+    if (typeof definedUnder[w] == "string") { w = goTyWord(resolveDefined(w)) }
+    if (!isFloatTy(w)) { return }
+    var k = 0
+    while (k < ts.length) {
+        var c = constAt(items[3 * k + 1].at)
+        if (c != null && !cIsCx(c) && !c.f && cbCmp(c.n, cbTwo53) >= 0) { ts[k] = cMaterialize(cAsF(c)) }
+        k = k + 1
+    }
+}
 function goCmpFold(items) {
     var ts = [items[0]]
     var ops = []
@@ -2381,6 +2467,7 @@ function goCmpFold(items) {
             // too, so float64(1) and int(1) differ: "==i" / "!=i".
             if (goIsIfaceTy(lt) || goIsIfaceTy(rt)) { ops[0] = ops[0] + "i" }
         }
+        goFloOperands(items, ts, lt != "" ? lt : rt)
         var l = constAt(items[1].at)
         var r = constAt(items[4].at)
         // The clear has to come AFTER the two reads: this node ends exactly where

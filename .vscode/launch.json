@@ -611,6 +611,18 @@
             "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-import.go", "-q", "-warn-imports"]
         },
         {
+            "name": "Go interpreter constant overflow SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-overflow.go", "-q"]
+        },
+        {
+            "name": "Go compiler constant overflow SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-overflow.go", "-q"]
+        },
+        {
             "name": "Python interpreter",
             "type": "go",
             "request": "launch",

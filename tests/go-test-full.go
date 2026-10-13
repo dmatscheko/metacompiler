@@ -4209,6 +4209,34 @@ func s80() {
 		math.MaxUint64/3 == 6148914691236517205 && uint64(math.MaxUint64) == 1<<64-1 && math.E != 2.718281828459045)
 }
 
+// ===== SECTION 81: an untyped constant converts to the type of where it lands =====
+// An assignment converts like a declaration does, an integer constant beyond int64
+// is held by a uint64 or rounded into a float, and one beside a float operand is
+// that float. The expected values are go run's.
+func u81(x uint64) uint64  { return x | 1 }
+func f81(x float64) float64 { return x / 2 }
+
+func s81() {
+	var s uint64
+	s = 1 << 63
+	check("ucv1", fmt.Sprint(s, s|1, s == 1<<63, s > 1<<62) == "9223372036854775808 9223372036854775809 true true")
+	xs := []float64{0.5}
+	x := xs[0]
+	check("ucv2", fmt.Sprint(18014398509481984*x, x*9223372036854775808, x-9223372036854775808, x < 9223372036854775808) ==
+		"9.007199254740992e+15 4.611686018427388e+18 -9.223372036854776e+18 true")
+	var u8 uint8
+	u8 = 255
+	u8++
+	var f float64
+	f = 3
+	g := f / 2
+	f = 1 << 64
+	check("ucv3", u8 == 0 && g == 1.5 && fmt.Sprint(f) == "1.8446744073709552e+19")
+	var h float64 = 1<<64 + 1
+	check("ucv4", fmt.Sprint(u81(1<<63), f81(1<<64), h, u81(math.MaxUint64)) ==
+		"9223372036854775809 9.223372036854776e+18 1.8446744073709552e+19 18446744073709551615")
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -4290,6 +4318,7 @@ func main() {
 	s78() // SECTION-CALL 78
 	s79() // SECTION-CALL 79
 	s80() // SECTION-CALL 80
+	s81() // SECTION-CALL 81
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }
