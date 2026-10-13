@@ -4204,6 +4204,29 @@ func s91() {
     check("91c", String(reflecting: "s") == "\"s\"" && String(reflecting: 5) == "5" && String(reflecting: ["a"]) == "[\"a\"]")
 }
 
+// ===== SECTION 92: integer and range members, utf16, Optional.map =====
+// BinaryInteger's signum / isMultiple(of:) / quotientAndRemainder(dividingBy:),
+// Double.remainder(dividingBy:) (IEEE, ties to even), a Range's Sequence members
+// and a one-sided range's contains, `.utf16`, and map on an Optional Int.
+// Every value read off swiftc 6.1.2.
+func s92() {
+    let ns = [-7, 0, 9, 12]
+    let qr = ns[0].quotientAndRemainder(dividingBy: 4)
+    check("92a", ns.map { $0.signum() } == [-1, 0, 1, 1] && ns[2].isMultiple(of: 3) && !ns[0].isMultiple(of: 3)
+        && ns[1].isMultiple(of: 0) && qr.quotient == -1 && qr.remainder == -3 && "\(ns[3].quotientAndRemainder(dividingBy: 5))" == "(quotient: 2, remainder: 2)")
+    let i8: [Int8] = [-5]
+    check("92b", "\(type(of: i8[0].signum()))" == "Int8" && i8[0].signum() == -1)
+    let xs = [7.5, -7.5, 5.0, -0.0]
+    check("92c", xs[0].remainder(dividingBy: 2) == -0.5 && xs[1].remainder(dividingBy: 2) == 0.5
+        && xs[2].remainder(dividingBy: 2) == 1.0 && "\(xs[3].remainder(dividingBy: 3))" == "-0.0")
+    check("92d", (1...4).map { $0 * 2 } == [2, 4, 6, 8] && (1..<6).filter { $0 % 2 == 0 } == [2, 4]
+        && (1...4).reduce(0, +) == 10 && (0..<3).contains(2) && (..<0).contains(ns[0]) && !(..<0).contains(ns[1])
+        && (3...).contains(10))
+    let arr = [3, 4, 5]
+    check("92e", "héllo😀".utf16.count == 7 && (arr.firstIndex(of: 4).map { $0 * 10 } ?? -1) == 10
+        && (arr.firstIndex(of: 9).map { $0 + 1 } ?? -1) == -1)
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -4296,6 +4319,7 @@ func main() {
     s89() // SECTION-CALL 89
     s90() // SECTION-CALL 90
     s91() // SECTION-CALL 91
+    s92() // SECTION-CALL 92
     print("full: \(checks) checks, \(fails) failures")
 }
 

@@ -1172,7 +1172,7 @@ Cast        <~~ push(makeCast(takeAll(), up.pos, up.in)) ~~>
 // through. The DOWN form (`a[...1]`) is IndexArg's own alternative, which is safe
 // unordered because no expression can begin with `...` or `..<`.
 RangeExpr   <~~ push(makeRange(takeAll())) ~~>
-            = AddExpr [ RangeOp [ AddExpr ] ] ;
+            = RangeOp AddExpr | AddExpr [ RangeOp [ AddExpr ] ] ;
 CastOp      <~~ push({cast: stripWs(up.in)}) ~~>
             = ( "as" KwEnd [ "?" | "!" ] | "is" KwEnd ) ;
 CastType    <~~ push({ctype: stripWs(up.in)}) ~~> = Type ;

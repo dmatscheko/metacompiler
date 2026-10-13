@@ -1191,7 +1191,7 @@ Cast        <~~ push(makeCast(takeAll(), up.pos, up.in)) ~~>
 // through. The DOWN form (`a[...1]`) is IndexArg's own alternative, which is safe
 // unordered because no expression can begin with `...` or `..<`.
 RangeExpr   <~~ push(makeRange(takeAll())) ~~>
-            = AddExpr [ RangeOp [ AddExpr ] ] ;
+            = RangeOp AddExpr | AddExpr [ RangeOp [ AddExpr ] ] ;
 CastOp      <~~ push({cast: stripWs(up.in)}) ~~>
             = ( "as" KwEnd [ "?" | "!" ] | "is" KwEnd ) ;
 CastType    <~~ push({ctype: stripWs(up.in)}) ~~> = Type ;
@@ -2159,9 +2159,11 @@ KwContinue  = "continue" KwEnd ;
         for (var i = 0; i < n; i++) { out.push((r.lo + i) | 0) }
         return out
     }
+    // A missing bound (a one-sided range) admits everything on its side.
     function rangeHas(r, v) {
         var x = szNum(v)
-        if (x < r.lo) { return false }
+        if (r.lo !== null && r.lo !== undefined && x < r.lo) { return false }
+        if (r.hi === null || r.hi === undefined) { return true }
         return r.closed ? x <= r.hi : x < r.hi
     }
 
@@ -4162,6 +4164,15 @@ KwContinue  = "continue" KwEnd ;
         // The Double methods this subset carries. Verified against swift 6.1.2:
         // 2.0.rounded() is 2.0, 2.5.squareRoot() is 1.5811388300841898 and
         // 7.0.truncatingRemainder(dividingBy: 2.0) is 1.0.
+        if (typeof target == "number" || szIs(target)) { return swIntMethod(target, name, args) }
+        // A Range's Sequence members run over its elements; contains tests the
+        // bounds, so a one-sided range answers it too. Twin: js_swmcall in
+        // abnf/jsrtswift.go and lib/swift-rt.metajs.
+        if (isRange(target)) {
+            if (name == "contains" && args.length == 1) { return rangeHas(target, args[0]) }
+            if (target.lo === null || target.hi === null) { fail("method ." + name + " on a one-sided range") }
+            return arrayMethod(rangeArray(target), name, args)
+        }
         if (isFlo(target)) {
             var tf = target.__flo
             // Every one of these keeps the RECEIVER'S width: a Float method
@@ -4170,6 +4181,8 @@ KwContinue  = "continue" KwEnd ;
             if (name == "rounded") { return swReFlo(swRoundRule(tf, args[0]), tf32) }
             if (name == "squareRoot") { return swReFlo(Math.sqrt(tf), tf32) }
             if (name == "truncatingRemainder") { return swReFlo(tf % swD(args[0]), tf32) }
+            if (name == "remainder") { return swReFlo(swIeeeRem(tf, swD(args[0])), tf32) }
+            if (name == "map" || name == "flatMap") { return args[0](target) }
             if (name == "isMultiple") { return tf % swD(args[0]) === 0 }
             if (name == "description") { return swFloDesc(target) }
             fail("unknown Double method: " + name)
@@ -4253,6 +4266,55 @@ KwContinue  = "continue" KwEnd ;
         }
         if (swIsLazyMember(target, name)) { return swLazyMethod(target, name, args, mcLabels) }
         fail("unknown method '" + name + "'")
+    }
+    // The BinaryInteger members, on an Int of any width; the answer keeps the
+    // receiver's type. map/flatMap on an Int are Optional's (an Optional IS its
+    // value here): `a.firstIndex(of: 4).map { $0 * 10 }`. Twins: swIntMethod in
+    // lib/swift-rt.metajs and abnf/jsrtswift.go.
+    function swIntMethod(target, name, args) {
+        var w = szIs(target) ? target.w : 64
+        var u = szIs(target) ? target.u : false
+        if (name == "signum") { return szConv(szCmp(target, 0) < 0 ? 0 - 1 : (szCmp(target, 0) > 0 ? 1 : 0), w, u) }
+        if (name == "isMultiple") {
+            if (szNum(args[0]) === 0) { return szCmp(target, 0) == 0 }
+            return szCmp(binOp("%", target, args[0]), 0) == 0
+        }
+        if (name == "quotientAndRemainder") {
+            var t = {__tuple: 2}
+            var q = binOp("/", target, args[0])
+            var r = binOp("%", target, args[0])
+            scopePut(t, "__tlabels", ["quotient", "remainder"])
+            scopePut(t, "0", q)
+            scopePut(t, "quotient", q)
+            scopePut(t, "1", r)
+            scopePut(t, "remainder", r)
+            return t
+        }
+        if (name == "map" || name == "flatMap") { return args[0](target) }
+        if (name == "description") { return szStr(target) }
+        fail("unknown Int method: " + name)
+    }
+    // Double.remainder(dividingBy:): IEEE 754's remainder, x - y*n with n the
+    // quotient rounded to nearest, ties to even, so 7.5 by 2 is -0.5. fdlibm's
+    // e_remainder.c: reduce modulo 2|y| (exact), then step back once or twice.
+    // Twins: swIeeeRem in lib/swift-rt.metajs; math.Remainder in the Go twin.
+    function swIeeeRem(x, y) {
+        if (x !== x || y !== y || y === 0 || x === swInfF || x === swInfF * swNegOne) { return 0 / swZeroF }
+        if (y === swInfF || y === swInfF * swNegOne) { return x }
+        var p = y < 0 ? 0 - y : y
+        var neg = x < 0 || (x === 0 && 1 / x < 0)
+        var a = x
+        if (p < Math.pow(2, 1023)) { a = a % (p + p) }
+        if (a < 0) { a = 0 - a }
+        if (p < Math.pow(2, 0 - 1021)) {
+            if (a + a > p) { a = a - p; if (a + a >= p) { a = a - p } }
+        } else {
+            var h = 0.5 * p
+            if (a > h) { a = a - p; if (a >= h) { a = a - p } }
+        }
+        if (!neg) { return a }
+        if (a === 0) { return 0 / swNegOne }
+        return 0 - a
     }
     // Members a String or an Array tells apart only by their argument LABELS get a
     // name of their own here: append(contentsOf:) and the index moves. A user type's

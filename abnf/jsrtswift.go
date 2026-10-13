@@ -1192,6 +1192,33 @@ func init() {
 		m["js_swmcall"] = func(a []uint64) uint64 {
 			f, isFlo := u(a[0]).(jsJFlo)
 			if !isFlo {
+				if v, ok := rt.swIntMethod(u(a[0]), rt.toString(u(a[1])), rt.swArgList(u(a[2]))); ok {
+					return w(v)
+				}
+				// A Range's Sequence members run over its elements; contains
+				// tests the bounds, so a one-sided range answers it too.
+				// Twins: mcall in languages/swift-interpreter.abnf and js_swmcall
+				// in languages/lib/swift-rt.metajs.
+				if r, ok := u(a[0]).(*jsObject); ok && swIsRange(r) {
+					name := rt.toString(u(a[1]))
+					args := rt.swArgList(u(a[2]))
+					if name == "contains" && len(args) == 1 {
+						return boolH(rt.swRangeHas(r, args[0]))
+					}
+					lo, hi := r.props["lo"], r.props["hi"]
+					if isNullish(lo) || isNullish(hi) {
+						rt.fail("method .%s on a one-sided range", name)
+					}
+					n := int(swNum(rt, hi) - swNum(rt, lo))
+					if r.props["closed"] == true {
+						n++
+					}
+					elems := []interface{}{}
+					for i := 0; i < n; i++ {
+						elems = append(elems, swNum(rt, lo)+float64(i))
+					}
+					return m["js_swmcall"]([]uint64{w(&jsArray{elems: elems}), a[1], a[2]})
+				}
 				if els, isSet := swSetElems(u(a[0])); isSet {
 					return w(rt.swSetMethod(els, rt.toString(u(a[1])), rt.swArgList(u(a[2])),
 						func(arr *jsArray) interface{} {
@@ -1325,6 +1352,10 @@ func init() {
 				return w(swReFlo(math.Sqrt(f.f), f32))
 			case "truncatingRemainder":
 				return w(swReFlo(math.Mod(f.f, arg0()), f32))
+			case "remainder": // IEEE 754's: the quotient rounded to nearest, ties to even
+				return w(swReFlo(math.Remainder(f.f, arg0()), f32))
+			case "map", "flatMap": // Optional's: an Optional IS its value here
+				return w(rt.call(args.elems[0], jsUndef, []interface{}{f}))
 			case "isMultiple":
 				return boolH(math.Mod(f.f, arg0()) == 0)
 			case "description":
@@ -3408,6 +3439,65 @@ func swSeqK(rt *jsrt, args []interface{}, dflt, n int) int {
 		k = n
 	}
 	return k
+}
+
+// swRangeHas is a range's bounds test; a missing bound admits everything on
+// its side.
+func (rt *jsrt) swRangeHas(r *jsObject, v interface{}) bool {
+	x := swNum(rt, v)
+	if lo := r.props["lo"]; !isNullish(lo) && x < swNum(rt, lo) {
+		return false
+	}
+	hi := r.props["hi"]
+	if isNullish(hi) {
+		return true
+	}
+	if r.props["closed"] == true {
+		return x <= swNum(rt, hi)
+	}
+	return x < swNum(rt, hi)
+}
+
+// swIntMethod is the BinaryInteger members on an Int of any width (ok false
+// for any other receiver or name); the answer keeps the receiver's type, and
+// map/flatMap are Optional's. Twin of swIntMethod in
+// languages/swift-interpreter.abnf and lib/swift-rt.metajs.
+func (rt *jsrt) swIntMethod(v interface{}, name string, args []interface{}) (interface{}, bool) {
+	var wd uint8 = 64
+	uns := false
+	switch t := v.(type) {
+	case jsGInt:
+		wd, uns = t.w, t.u
+	case float64:
+	default:
+		return nil, false
+	}
+	switch name {
+	case "signum":
+		c := rt.giCmp(v, 0.0)
+		return giNorm(int64(c), wd, uns), true
+	case "isMultiple":
+		if giVal(rt, args[0]) == 0 {
+			return rt.giCmp(v, 0.0) == 0, true
+		}
+		return giVal(rt, rt.giArith("%", v, args[0])) == 0, true
+	case "quotientAndRemainder":
+		if giVal(rt, args[0]) == 0 {
+			rt.swAbort("Fatal error: Division by zero")
+		}
+		q, r := rt.giArith("/", v, args[0]), rt.giArith("%", v, args[0])
+		t := newJSObject()
+		t.set("__tuple", float64(2))
+		t.set("__tlabels", &jsArray{elems: []interface{}{"quotient", "remainder"}})
+		t.set("0", q)
+		t.set("quotient", q)
+		t.set("1", r)
+		t.set("remainder", r)
+		return t, true
+	case "map", "flatMap":
+		return rt.call(args[0], jsUndef, []interface{}{v}), true
+	}
+	return nil, false
 }
 
 // swMkRange builds the {__range, lo, hi, closed} object both grammars emit.

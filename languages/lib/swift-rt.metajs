@@ -2956,6 +2956,21 @@ function js_swmcall(recv, name, args) {
         // INSIDE the non-float arm so a Double method call pays nothing for it.
         // Twins: arrayMethod in languages/swift-interpreter.abnf and js_swmcall in
         // abnf/jsrtswift.go.
+        if (typeof recv == "number" || sintIs(recv)) { return swIntMethod(recv, name, args) }
+        // A Range's Sequence members run over its elements; contains tests the
+        // bounds, so a one-sided range answers it too. Twins: mcall in
+        // languages/swift-interpreter.abnf and js_swmcall in abnf/jsrtswift.go.
+        if (swIsRange(recv)) {
+            if (name === "contains" && args.length == 1) { return swRangeHas(recv, args[0]) }
+            if (recv["lo"] === null || recv["hi"] === null) { fail("method ." + name + " on a one-sided range") }
+            var lo = swNum(recv["lo"])
+            var n = swNum(recv["hi"]) - lo
+            if (recv["closed"] === true) { n = n + 1 }
+            var elems = []
+            var ri = 0
+            while (ri < n) { elems.push(lo + ri); ri = ri + 1 }
+            return js_swmcall(elems, name, args)
+        }
         if (name === "insert" && rtIsArr(recv) && args.length > 1) {
             var at = swNum(args[1]) | 0
             if (at < 0) { at = 0 }
@@ -2978,10 +2993,93 @@ function js_swmcall(recv, name, args) {
     if (name === "rounded") { return swReFlo(swRoundRule(f, args.length > 0 ? args[0] : undefined), f32) }
     if (name === "squareRoot") { return swReFlo(Math.sqrt(f), f32) }
     if (name === "truncatingRemainder") { return swReFlo(f % a0, f32) }
+    if (name === "remainder") { return swReFlo(swIeeeRem(f, a0), f32) }
+    // Optional's map: an Optional IS its value here.
+    if (name === "map" || name === "flatMap") { return args[0](recv) }
     if (name === "isMultiple") { return (f % a0) === 0 }
     if (name === "description") { return swFloDesc(recv) }
     fail("unknown Double method: " + name)
     return undefined
+}
+
+// A range's bounds test; a missing bound admits everything on its side.
+function swRangeHas(r, v) {
+    var x = swNum(v)
+    if (r["lo"] !== null && r["lo"] !== undefined) { if (x < swNum(r["lo"])) { return false } }
+    if (r["hi"] === null || r["hi"] === undefined) { return true }
+    if (r["closed"] === true) { return x <= swNum(r["hi"]) }
+    return x < swNum(r["hi"])
+}
+
+// The BinaryInteger members on an Int of any width; the answer keeps the
+// receiver's type, and map/flatMap are Optional's. Anything else is js_mcall's.
+// Twins: swIntMethod in languages/swift-interpreter.abnf and abnf/jsrtswift.go.
+function swIntMethod(v, name, args) {
+    var wd = 64
+    var uns = false
+    if (sintIs(v)) { wd = sintWidth(v); uns = sintUns(v) }
+    if (name === "signum") {
+        var c = sintCmp(v, 0)
+        var sg = 0
+        if (c < 0) { sg = 0 - 1 }
+        if (c > 0) { sg = 1 }
+        return sintConv(sg, wd, uns)
+    }
+    if (name === "isMultiple") {
+        if (sintCmp(args[0], 0) == 0) { return sintCmp(v, 0) == 0 }
+        return sintCmp(sintOp(4, v, args[0]), 0) == 0
+    }
+    if (name === "quotientAndRemainder") {
+        if (sintCmp(args[0], 0) == 0) { swAbort("Fatal error: Division by zero") }
+        var q = sintConv(sintOp(3, v, args[0]), wd, uns)
+        var r = sintConv(sintOp(4, v, args[0]), wd, uns)
+        var t = {__tuple: 2}
+        var lbl = []
+        lbl.push("quotient")
+        lbl.push("remainder")
+        t["__tlabels"] = lbl
+        t["0"] = q
+        t["quotient"] = q
+        t["1"] = r
+        t["remainder"] = r
+        return t
+    }
+    if (name === "map" || name === "flatMap") { return args[0](v) }
+    return js_mcall(v, name, args)
+}
+
+// Double.remainder(dividingBy:): IEEE 754's remainder, x - y*n with n the
+// quotient rounded to nearest, ties to even (fdlibm's e_remainder.c: reduce
+// modulo 2|y|, which is exact, then step back once or twice). Twin of swIeeeRem
+// in languages/swift-interpreter.abnf; the Go twin is math.Remainder.
+function swIeeeRem(x, y) {
+    if (x !== x || y !== y || y === 0 || x === Infinity || 0 - x === Infinity) { return 0 / 0 }
+    if (y === Infinity || 0 - y === Infinity) { return x }
+    var p = y
+    if (p < 0) { p = -p }
+    var neg = x < 0
+    if (x === 0) { neg = 1 / x < 0 }
+    var a = x
+    if (p < Math.pow(2, 1023)) { a = a % (p + p) }
+    if (a < 0) { a = -a }
+    if (p < Math.pow(2, 0 - 1021)) {
+        if (a + a > p) {
+            a = a - p
+            if (a + a >= p) { a = a - p }
+        }
+    } else {
+        var h = 0.5 * p
+        if (a > h) {
+            a = a - p
+            if (a >= h) { a = a - p }
+        }
+    }
+    if (a === 0) {
+        if (neg) { return 0 / (0 - 1) }
+        return 0
+    }
+    if (neg) { return -a }
+    return a
 }
 
 // ===================================================== Lazy sequences =======
