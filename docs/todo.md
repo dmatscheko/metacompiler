@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-572** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-573** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -281,19 +281,11 @@ first). Separately `io.write(...)` → interp "attempt to index a nil value (glo
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-567 bash: line continuation, loop status, redirected assignments, echo -e escapes · P1 · SH · IN PROGRESS (SH worker, round 3) [V]
-All legs unless noted (oracle /opt/homebrew/bin/bash 5.3): `f a \<newline> b` with f printing `$#:[$1][$2][$3]` → ours
-`3:[a][][b]`, bash `2:[a][b][]`. `while (( 0 )); do :; done; echo $?` → ours 1, bash 0; `while true; do false; break; done;
-echo $?` → ours 1, bash 0 (a loop whose body never ran, or left by break, has status 0). `r=$(echo x) 2>/dev/null` → "command
-not found: 2", `r=$(echo y) >/dev/null` fails to parse (bash: assignment with a redirection). `echo -e`: bash keeps `\101`
-literal, `\0101` → A, `\c` stops all output; ours interp `\b1|A`, compiler empty, `\c` ignored.
-
-### T-568 bash: `${x@Q}` of ESC, `$'..'` inside `${v/p/r}`, `"${!r}"` with r='arr[@]', byte-wise printf %c / precision · P3 · SH · IN PROGRESS (SH worker, round 3) [V]
-The compiler's `${x@Q}` renders ESC as `\033` (interp and bash `\E`; rt_shquote). `k=hello; echo "${k/l/$'\x26'}"` → bash
-`he&lo` (BraceSeg has no AnsiSeg). `r='arr[@]'; printf '<%s>' "${!r}"` → one word here, bash one word per element. The
-interpreter's printf `%c` and `%.Ns` cut by character, bash by byte (non-ASCII only). `let "x = $e * 2"` and `for ((;;))`
-operands evaluate a value as a unit, bash textually. (Not reproduced, probably a bash bug: `"${f[*]:1} ${k[@]}"` word
-splitting.)
+### T-572 bash: `let` with a redirection; unquoted `let` field splitting; NUL bytes; per-iteration stack growth · P2 · SH · OPEN [V]
+`let x=1 2>/dev/null` does not parse in either half (LetCmd has no RedirList); bash accepts it. Unquoted `e='1 + 2'; let x=$e*2`
+must field-split into several let arguments (bash: status 1, x=1); ours evaluates one expression. A NUL byte (`echo -e
+'\0'X`, `printf '\0'`) is dropped in all engines; bash writes it. Compiled loops emit their allocas (makeFor's slots, the loop
+status slot) at the loop, not in the function's entry block, so a loop nested in a loop grows the stack every outer pass.
 
 ---
 
@@ -759,6 +751,8 @@ T-515 swift: debug-description escapes and trap wording — DONE 17073228
 T-516 swift: missing features that fail loudly — DONE 5399e731
 T-513 swift: grapheme clusters — ZWJ only in the interpreter; RI pairs, CR LF, emoji modifiers, Hangul never; prefix/contains/`<` not grapheme-aware — DONE f04d4e28
 T-507 swift: a literal typed by context is not adopted, so Double arithmetic runs as Int — PARTIAL c29f70a2 (literals adopt Double next to a Double: ternaries, collections, ??, payloads, min/max); Any-parameter and nested existential cases are T-570
+T-567 bash: line continuation, loop status, redirected assignments, echo -e escapes — DONE 629bcf04
+T-568 bash: `${x@Q}` of ESC, `$'..'` inside `${v/p/r}`, `"${!r}"` with r='arr[@]', byte-wise printf %c / precision — DONE d7d6796b
 
 # Settled — do not re-open
 
