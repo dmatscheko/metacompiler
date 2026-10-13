@@ -4747,6 +4747,31 @@ func s109() {
         && "\(c.xs) \(c.tag)" == "[1.0, 2.0] (3.0, 4)")
 }
 
+// ===== SECTION 110: `x? += 1`; a never-set Optional property is nil =====
+// A target ending in `?` assigns only when it holds a value, and then the
+// right-hand side is not evaluated either (`counts[w]? += 1`). An Optional stored
+// property with no initializer is nil, and == nil says so. Every value read off
+// swiftc 6.1.2.
+class N110 { var v: Int? = 3; var nxt: N110? }
+struct S110 { var o: Int? }
+var log110 = [String]()
+func side110() -> Int { log110.append("rhs"); return 1 }
+func s110() {
+    var counter: Int? = 0
+    counter? += 1
+    var none: Int? = nil
+    none? += 1
+    none? = side110()
+    var counts = ["a": 1]
+    counts["a"]? += 5
+    counts["z"]? += 5
+    check("110a", counter == 1 && none == nil && counts == ["a": 6] && log110.isEmpty)
+    let n = N110()
+    n.v? *= 4
+    n.nxt?.v? += 1
+    check("110b", n.v == 12 && n.nxt == nil && S110().o == nil && !(S110().o != nil))
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -4857,6 +4882,7 @@ func main() {
     s107() // SECTION-CALL 107
     s108() // SECTION-CALL 108
     s109() // SECTION-CALL 109
+    s110() // SECTION-CALL 110
     print("full: \(checks) checks, \(fails) failures")
 }
 

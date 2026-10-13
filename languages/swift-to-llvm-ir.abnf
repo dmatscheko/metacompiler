@@ -1143,9 +1143,12 @@ Assignment  <~~ push(makeAssign(takeAll())) ~~>
 // without the "no = next" test `a != b` would read as the target `a!` followed by
 // `= b` and silently become an assignment. A `!` here is otherwise a no-op - an
 // Optional IS its value in this model - so it pushes nothing.
-Target      <~~ push(swNoteWrite(makeTargetRef(takeAll()))) ~~>
+Target      <~~ push(swNoteWrite(swOptEndRef(makeTargetRef(takeAll())))) ~~>
             = ( Id <~~ push(swBt(up.in)) ~~> | "$" :whitespace() TShort :whitespace(Whitespace) )
-              { TOpt | "." Id <~~ push({key: swBt(up.in)}) ~~> | "." TTupIdx | TForce | TIndex } ;
+              { TOpt | "." Id <~~ push({key: swBt(up.in)}) ~~> | "." TTupIdx | TForce | TIndex } [ TOptEnd ] ;
+// `counts[w]? += 1` / `x? = v`: a trailing `?` makes the whole assignment skip,
+// right-hand side included, when the target itself is nil (swOptEndRef).
+TOptEnd     <~~ push({optend: true}) ~~> = NoSpace "?" NotChar63 ;
 // `a?.b = c` / `a?[i] = c`: an optional-chain target. The segment after the `?`
 // carries `opt`: a nil there skips the whole assignment, right-hand side included.
 TOpt        = NoSpace "?" NotChar63 ( "." Id <~~ push({key: swBt(up.in), opt: true}) ~~> | TOptIdx ) ;
@@ -6998,8 +7001,48 @@ KwContinue  = "continue" KwEnd ;
     // answers the dict arm in both engines. The other sw_safeget callers read a
     // plain object and are unaffected.
     function swSafeElem(b, p) { return callExt(b, "js_swsafeget", [p.obj, p.key]) }
+    // A target ending in `?` (TOptEnd): the flag goes on the ref, off its path.
+    function swOptEndRef(ref) {
+        var n = ref.path.length
+        if (n > 0 && ref.path[n - 1].optend === true) {
+            ref.path = ref.path.slice(0, n - 1)
+            ref.optEnd = true
+        }
+        return ref
+    }
+    // The assignment to such a target runs only when the target holds a value; the
+    // target's path is evaluated once to read it and again by the assignment. Twin
+    // of swOptEndAssign in swift-interpreter.abnf.
+    function swOptEndAssign(items) {
+        var ref = items[0]
+        var it2 = items.slice(0)
+        it2[0] = {name: ref.name, path: ref.path}
+        var inner = makeAssign(it2)
+        return function(b) {
+            var nils = []
+            var cur = null
+            if (ref.path.length == 0) { cur = b.NewCall(rtKGet(), [curScopeV, emitStr(b, ref.name)]) }
+            else {
+                var p = emitRefPath(b, ref, [], nils)
+                b = p.b
+                cur = p.isField ? emitFieldRead(b, p.obj, p.keyName) : swSafeElem(b, p)
+            }
+            var skipB = curF.NewBlock("")
+            var c1B = curF.NewBlock("")
+            var goB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [cur, hNull])), skipB, c1B)
+            c1B.NewCondBr(truthy(c1B, callExt(c1B, "js_seq", [cur, hUndef])), skipB, goB)
+            for (var i = 0; i < nils.length; i++) { nils[i].NewBr(skipB) }
+            var r = inner(goB)
+            var joinB = curF.NewBlock("")
+            r.b.NewBr(joinB)
+            skipB.NewBr(joinB)
+            return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(r.v, r.b), llvm.ir.NewIncoming(hNull, skipB)])}
+        }
+    }
     function makeAssign(items) {
         var ref = items[0]
+        if (ref.optEnd === true) { return swOptEndAssign(items) }
         var op = items[1]
         var valT = items[2]
         // The declared type of this name, if a numeric annotation declared it

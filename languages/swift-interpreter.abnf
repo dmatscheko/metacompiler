@@ -1161,9 +1161,12 @@ Assignment  <~~ push(makeAssign(takeAll())) ~~>
 // without the "no = next" test `a != b` would read as the target `a!` followed by
 // `= b` and silently become an assignment. A `!` here is otherwise a no-op - an
 // Optional IS its value in this model - so it pushes nothing.
-Target      <~~ push(swNoteWrite(makeTargetRef(takeAll()))) ~~>
+Target      <~~ push(swNoteWrite(swOptEndRef(makeTargetRef(takeAll())))) ~~>
             = ( Id <~~ push(swBt(up.in)) ~~> | "$" :whitespace() TShort :whitespace(Whitespace) )
-              { TOpt | "." Id <~~ push({key: swBt(up.in)}) ~~> | "." TTupIdx | TForce | TIndex } ;
+              { TOpt | "." Id <~~ push({key: swBt(up.in)}) ~~> | "." TTupIdx | TForce | TIndex } [ TOptEnd ] ;
+// `counts[w]? += 1` / `x? = v`: a trailing `?` makes the whole assignment skip,
+// right-hand side included, when the target itself is nil (swOptEndRef).
+TOptEnd     <~~ push({optend: true}) ~~> = NoSpace "?" NotChar63 ;
 // `a?.b = c` / `a?[i] = c`: an optional-chain target. The segment after the `?`
 // carries `opt`: a nil there skips the whole assignment, right-hand side included.
 TOpt        = NoSpace "?" NotChar63 ( "." Id <~~ push({key: swBt(up.in), opt: true}) ~~> | TOptIdx ) ;
@@ -7241,8 +7244,37 @@ KwContinue  = "continue" KwEnd ;
     }
     // Assignment understands plain names, object properties (self.x), array
     // elements and dictionary entries.
+    // A target ending in `?` (TOptEnd): the flag goes on the ref, off its path.
+    function swOptEndRef(ref) {
+        var n = ref.path.length
+        if (n > 0 && ref.path[n - 1].optend === true) {
+            ref.path = ref.path.slice(0, n - 1)
+            ref.optEnd = true
+        }
+        return ref
+    }
+    // The assignment to such a target runs only when the target holds a value.
+    // Twin of swOptEndAssign in swift-to-llvm-ir.abnf.
+    function swOptEndAssign(items) {
+        var ref = items[0]
+        var it2 = items.slice(0)
+        it2[0] = {name: ref.name, path: ref.path}
+        var inner = makeAssign(it2)
+        var lastField = ref.path.length > 0 && ref.path[ref.path.length - 1].key != undefined
+        return function() {
+            var cur = anytype
+            if (ref.path.length == 0) { cur = swGetName(ref.name) }
+            else {
+                var p = swResolvePath(ref, false)
+                cur = p === null ? null : (lastField ? swFieldOf(p.obj, p.key) : swSafeElem(p.obj, p.key))
+            }
+            if (cur === null || cur === undefined) { return null }
+            return inner()
+        }
+    }
     function makeAssign(items) {
         var ref = items[0]
+        if (ref.optEnd === true) { return swOptEndAssign(items) }
         var op = items[1]
         var valT = items[2]
         // The declared type of this name, if a numeric annotation declared it
@@ -9945,6 +9977,11 @@ KwContinue  = "continue" KwEnd ;
     function swEq(l, r) { return swEqD(l, r, 0) }
     function swEqD(l, r, depth) {
         if (depth > 32) { return false }
+        // nil is nil whether the slot was never set (undefined) or set to nil.
+        // Twins: the nullish arms of swEqualDepth / swEqual.
+        var ln = l === null || l === undefined
+        var rn = r === null || r === undefined
+        if (ln || rn) { return ln && rn }
         if (typeof l == "string" && typeof r == "string") { return swcStrEq(l, r) }
         // A Unicode.Scalar against a scalar or a String literal: by scalar.
         if ((l !== null && typeof l == "object" && l.__usc !== undefined)
