@@ -1077,7 +1077,7 @@ function js_jskeys(o) {
         if (jvFnPropsN > 0) {
             var fp = anytype
             fp = jvFnPropsOf(o)
-            if (fp !== undefined) { return keysOf(fp) }
+            if (fp !== undefined) { return jvIndexOrder(keysOf(fp)) }
         }
         return []
     }
@@ -1085,7 +1085,7 @@ function js_jskeys(o) {
     // `js_keys(o)` from here would link and then fail at run time in a NATIVE
     // binary. host id 61 IS js_keys (languages/lib/runtime.c), so this is the same
     // function under the name layer 2 can reach.
-    return jvErrHide(o, keysOf(o))
+    return jvErrHide(o, jvIndexOrder(keysOf(o)))
 }
 
 // The Object.prototype SURFACE of a FUNCTION, as methods: `f.toString()`,
@@ -1218,7 +1218,7 @@ function jvStaticEnumKeys(cls) {
         out.push(lst[i])
         i = i + 1
     }
-    return out
+    return jvIndexOrder(out)
 }
 
 // What `x.constructor` answers for an object this engine built: the class descriptor
@@ -2557,6 +2557,61 @@ function jvErrOwn(o, k) {
     return jvMiss
 }
 
+// The value of k as an array index (the canonical decimal spelling of an integer in
+// 0 .. 2^32-2), or -1 when it is not one.
+function jvArrayIndex(k) {
+    var n = k.length
+    if (n == 0 || n > 10) { return -1 }
+    if (n > 1 && k.charCodeAt(0) == 48) { return -1 }
+    var v = 0
+    var i = 0
+    while (i < n) {
+        var c = k.charCodeAt(i)
+        if (c < 48 || c > 57) { return -1 }
+        v = v * 10 + (c - 48)
+        i = i + 1
+    }
+    if (v > 4294967294) { return -1 }
+    return v
+}
+
+// OrdinaryOwnPropertyKeys' order (ECMA-262 10.1.11.1): the array-index keys
+// ascending, then the other string keys in insertion order; ks itself when it holds
+// no array index. Twin of jsvIndexOrder in abnf/jsrtjsprint.go.
+function jvIndexOrder(ks) {
+    var i = 0
+    while (i < ks.length && jvArrayIndex(ks[i]) < 0) { i = i + 1 }
+    if (i == ks.length) { return ks }
+    var idx = []
+    var vals = []
+    var rest = []
+    i = 0
+    while (i < ks.length) {
+        var v = jvArrayIndex(ks[i])
+        if (v < 0) {
+            rest.push(ks[i])
+        } else {
+            var j = vals.length
+            vals.push(v)
+            idx.push(ks[i])
+            while (j > 0 && vals[j - 1] > v) {
+                vals[j] = vals[j - 1]
+                idx[j] = idx[j - 1]
+                j = j - 1
+            }
+            vals[j] = v
+            idx[j] = ks[i]
+        }
+        i = i + 1
+    }
+    i = 0
+    while (i < rest.length) {
+        idx.push(rest[i])
+        i = i + 1
+    }
+    return idx
+}
+
 // An Error instance's own key list without the non-enumerable three, and the Math
 // object's without its builtin members (jvMathHid). Gated on jvErrN, so a program
 // that never built an error pays one identity and one integer compare.
@@ -2942,14 +2997,14 @@ function jvOwnKeys(v) {
     // methods, which node reports on the prototype and never on the constructor
     // (node says ["sf"] for Object.keys(class C { static sf = 1; m(){} })).
     if (jvIsClassDesc(v)) { return jvStaticEnumKeys(v) }
-    if (jvIsObj(v)) { return jvErrHide(v, keysOf(v)) }
+    if (jvIsObj(v)) { return jvErrHide(v, jvIndexOrder(keysOf(v))) }
     // A FUNCTION's own properties live in the side table.
     if (jvFnPropsN > 0) {
         var fp = anytype
         fp = jvFnPropsOf(v)
         if (fp !== undefined) {
-            if (jvArrayFn !== undefined && v === jvArrayFn) { return jvArrayStaticKeys(keysOf(fp)) }
-            return keysOf(fp)
+            if (jvArrayFn !== undefined && v === jvArrayFn) { return jvArrayStaticKeys(jvIndexOrder(keysOf(fp))) }
+            return jvIndexOrder(keysOf(fp))
         }
     }
     if (Array.isArray(v)) {

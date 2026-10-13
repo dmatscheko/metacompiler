@@ -656,6 +656,34 @@ check("object-model-2-10", (function () {
         && d.callx(o) === "B/x" && d.paren() === "B/d" && bm.call(o) === "B/x";
 })());
 
+// ----- a non-string computed key is an own key under its ToString -----
+check("key-nonstring-own", (function () {
+    var ks = [1, "s", true, null];
+    var o = {};
+    for (var i = 0; i < ks.length; i++) { o[ks[i]] = "v"; }
+    var n = 0;
+    for (var k in o) { n++; }
+    return Object.keys(o).join("|") === "1|s|true|null" && n === 4
+        && JSON.stringify(o) === '{"1":"v","s":"v","true":"v","null":"v"}';
+})());
+
+// ----- own-key order: array indices ascending first, then strings in insertion order -----
+check("key-order-index-first", (function () {
+    var ins = ["b", "2", "a", "1", "-1", "01", "4294967295", "4294967294", "1.5", "0", "10", " 3", "3"];
+    var o = {};
+    for (var i = 0; i < ins.length; i++) { o[ins[i]] = i; }
+    var fk = [];
+    for (var k in o) { fk.push(k); }
+    var lit = {z: 1, 5: 2, y: 3, 0: 4, "-0": 5, 1.5: 6};
+    class C { static 7 = 1; static q = 2; static 3 = 4; }
+    var want = "0|1|2|3|10|4294967294|b|a|-1|01|4294967295|1.5| 3";
+    return Object.keys(o).join("|") === want && fk.join("|") === want
+        && Object.keys(lit).join("|") === "0|5|z|y|-0|1.5" && typeof Object.keys(lit)[0] === "string"
+        && JSON.stringify(JSON.parse('{"b":1,"a":2,"1":3}')) === '{"1":3,"b":1,"a":2}'
+        && Object.values({q: 1, 7: 2, 3: 3}).join(",") === "3,2,1"
+        && Object.keys(C).join("|") === "3|7|q";
+})());
+
 function main() {
     println("features: " + checks + " checks, " + failures + " failures");
     return failures;

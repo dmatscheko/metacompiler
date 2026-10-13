@@ -5936,18 +5936,58 @@ NotFuncHead = :script(~~
             for (var j = 0; j < v.length; j++) { a.push("" + j) }
             return a
         }
-        if (hasOwn(v, "__keys")) { return v["__keys"].slice() }
+        if (hasOwn(v, "__keys")) { return jsIndexOrder(v["__keys"]) }
         // A FUNCTION enumerates the own properties written onto it, which node reports
         // and this engine keeps in a side table.
         if (fnPropsN > 0) {
             var fp = anytype
             fp = fnPropsOf(v)
             if (fp !== undefined) {
-                if (v === jsArrayFn) { return jsArrayStaticKeys(fp["__keys"]) }
-                return fp["__keys"].slice()
+                if (v === jsArrayFn) { return jsArrayStaticKeys(jsIndexOrder(fp["__keys"])) }
+                return jsIndexOrder(fp["__keys"])
             }
         }
         return []
+    }
+    // A copy of the key list ks in OrdinaryOwnPropertyKeys' order (ECMA-262
+    // 10.1.11.1): the array-index keys ascending, then the other string keys in
+    // insertion order. Twins: jsvIndexOrder in abnf/jsrtjsprint.go, jvIndexOrder in
+    // languages/lib/js-rt.metajs.
+    function jsIndexOrder(ks) {
+        var idx = []
+        var vals = []
+        var rest = []
+        for (var i = 0; i < ks.length; i++) {
+            var v = jsArrayIndex(ks[i])
+            if (v < 0) { rest.push(ks[i]); continue }
+            var j = vals.length
+            vals.push(v)
+            idx.push(ks[i])
+            while (j > 0 && vals[j - 1] > v) {
+                vals[j] = vals[j - 1]
+                idx[j] = idx[j - 1]
+                j = j - 1
+            }
+            vals[j] = v
+            idx[j] = ks[i]
+        }
+        for (var r = 0; r < rest.length; r++) { idx.push(rest[r]) }
+        return idx
+    }
+    // The value of k as an array index (the canonical decimal spelling of an integer
+    // in 0 .. 2^32-2), or -1 when it is not one.
+    function jsArrayIndex(k) {
+        var n = k.length
+        if (n == 0 || n > 10) { return -1 }
+        if (n > 1 && k.charCodeAt(0) == 48) { return -1 }
+        var v = 0
+        for (var i = 0; i < n; i++) {
+            var c = k.charCodeAt(i)
+            if (c < 48 || c > 57) { return -1 }
+            v = v * 10 + (c - 48)
+        }
+        if (v > 4294967294) { return -1 }
+        return v
     }
     // The Array global's `from` and `of` are lib/js-builtins.js's, written onto it as
     // ordinary properties; node's are not enumerable, so its own keys drop them.
@@ -7421,10 +7461,10 @@ NotFuncHead = :script(~~
     function makeArray(items) {
         return function() { return evalArgs(items) }
     }
-    // PropDef pops [valueThunk, key]; the key is an Id string or a constant string thunk
-    // (calling the pure thunk once at build time yields the key text).
+    // PropDef pops [valueThunk, key]; the key is an Id string or the constant thunk of a
+    // string or number literal, whose ToString at build time is the key text.
     function makeProp(valT, key, txt) {
-        var k = (typeof key == "string") ? key : key()
+        var k = (typeof key == "string") ? key : jsStr(key())
         // NamedEvaluation, the property form: `{ o: (a,b)=>a }` names the arrow "o".
         fnAnonName("" + k, ":", txt)
         return {k: k, t: valT}
@@ -7524,10 +7564,16 @@ NotFuncHead = :script(~~
         return {kt: key, t: fn}
     }
     // Records a newly assigned key on a tracked object (an object carrying __keys). Plain
-    // arrays and untracked values are left alone; only string, non-internal keys count.
+    // arrays and untracked values are left alone; only non-internal keys count. A
+    // number, boolean, null or undefined key is recorded as its ToString, the property
+    // key the write stored it under.
     function trackKey(o, key) {
         if (o == undefined || o == null) { return }
-        if (typeof key != "string") { return }
+        if (typeof key != "string") {
+            if (!hasOwn(o, "__keys")) { return }
+            if (key === null || key === undefined || typeof key == "number" || typeof key == "boolean") { trackKey(o, jsStr(key)) }
+            return
+        }
         if (!hasOwn(o, "__keys")) { return }
         if (isInternalKey(key)) { jsSymTrack(o, key); return }
         // An Error instance's message and stack stay non-enumerable (see jsErrInit).

@@ -600,7 +600,7 @@ func jsvOwnKeys(v interface{}) []string {
 				out = append(out, k)
 			}
 		}
-		return jsvErrHide(o, out)
+		return jsvErrHide(o, jsvIndexOrder(out))
 	case *jsArray:
 		out := make([]string, len(o.elems))
 		for i := range o.elems {
@@ -940,6 +940,49 @@ func (rt *jsrt) jsvHasOwn(v interface{}, k string) bool {
 // jsvIndexKeys is the own enumerable key list of an indexed value - an array or a
 // string - which node answers as the index STRINGS "0".."n-1". Twin: jvIndexKeys in
 // languages/lib/js-rt.metajs.
+// jsvIndexOrder is OrdinaryOwnPropertyKeys' order (ECMA-262 10.1.11.1): the
+// array-index keys ascending, then the other string keys in insertion order. ks is
+// returned as it is when it holds no array index. Twins: jvIndexOrder in
+// languages/lib/js-rt.metajs, jsIndexOrder in both *-interpreter.abnf.
+func jsvIndexOrder(ks []string) []string {
+	var idx []uint64
+	for _, k := range ks {
+		if n, ok := jsvArrayIndex(k); ok {
+			idx = append(idx, n)
+		}
+	}
+	if idx == nil {
+		return ks
+	}
+	sort.Slice(idx, func(i, j int) bool { return idx[i] < idx[j] })
+	out := make([]string, 0, len(ks))
+	for _, n := range idx {
+		out = append(out, strconv.FormatUint(n, 10))
+	}
+	for _, k := range ks {
+		if _, ok := jsvArrayIndex(k); !ok {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// jsvArrayIndex answers whether k is an array index: the canonical decimal spelling
+// of an integer in 0 .. 2^32-2.
+func jsvArrayIndex(k string) (uint64, bool) {
+	if len(k) == 0 || len(k) > 10 || (k[0] == '0' && len(k) > 1) {
+		return 0, false
+	}
+	var n uint64
+	for i := 0; i < len(k); i++ {
+		if k[i] < '0' || k[i] > '9' {
+			return 0, false
+		}
+		n = n*10 + uint64(k[i]-'0')
+	}
+	return n, n <= 4294967294
+}
+
 func jsvIndexKeys(n int) *jsArray {
 	out := &jsArray{}
 	for i := 0; i < n; i++ {
@@ -964,7 +1007,7 @@ func jsvStaticEnumKeys(cls *jsObject) []string {
 			out = append(out, s)
 		}
 	}
-	return out
+	return jsvIndexOrder(out)
 }
 
 // jsvConstructorOf is what `x.constructor` answers for an object this engine built:
@@ -3157,6 +3200,17 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 				}
 				return w(out)
 			}
+			r := baseKeys(a)
+			if arr, ok := u(r).(*jsArray); ok {
+				ks := make([]string, len(arr.elems))
+				for i, k := range arr.elems {
+					ks[i], _ = k.(string)
+				}
+				for i, k := range jsvIndexOrder(ks) {
+					arr.elems[i] = k
+				}
+			}
+			return r
 		case *jsArray:
 			return w(jsvIndexKeys(len(v.elems)))
 		case string:
@@ -3175,7 +3229,6 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			// enumerable keys, and for-in over null/undefined is a no-op.
 			return w(&jsArray{})
 		}
-		return baseKeys(a)
 	}
 
 	m["js_jsstatics"] = func(a []uint64) uint64 {
