@@ -1171,6 +1171,13 @@ function swEqual(l, r, depth) {
             }
             return true
         }
+        // A type's own `==` decides for its values, inside a collection, a tuple
+        // or a Set too. Twin of swEqualDepth in abnf/jsrtswift.go.
+        if (l["__class"] !== undefined || r["__class"] !== undefined) {
+            var uf = swFindMember(l, "==")
+            if (uf === undefined) { uf = swFindMember(r, "==") }
+            if (typeof uf == "function") { return swTruth(uf.apply(undefined, [l, r])) }
+        }
         // Two Sets are equal when they hold the same members, in any order.
         if (l["__set"] === true) {
             if (r["__set"] !== true) {

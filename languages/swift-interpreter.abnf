@@ -10250,6 +10250,14 @@ KwContinue  = "continue" KwEnd ;
                 }
                 return true
             }
+            // A type's own `==` decides for its values, inside a collection, a
+            // tuple or a Set too (`xs.contains(k)`). Twins: swEqualDepth in
+            // abnf/jsrtswift.go, swEqual in lib/swift-rt.metajs.
+            if (l.__class != undefined || r.__class != undefined) {
+                var uf = findOpFn("==", l)
+                if (uf == null) { uf = findOpFn("==", r) }
+                if (uf != null) { return core.test(uf(undefined, l, r)) }
+            }
         }
         // Two Sets are equal when they hold the same members, in any order.
         if (swIsSet(l) || swIsSet(r)) {

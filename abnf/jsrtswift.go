@@ -3521,6 +3521,20 @@ func (rt *jsrt) swEqualDepth(l, r interface{}, depth int) bool {
 			}
 			return true
 		}
+		// A type's own `==` decides for its values, inside a collection, a tuple
+		// or a Set too. Twins: swEqD in languages/swift-interpreter.abnf, swEqual
+		// in languages/lib/swift-rt.metajs.
+		_, lc := lo.props["__class"]
+		_, rc := ro.props["__class"]
+		if lc || rc {
+			f, ok := swFindMember(l, "==")
+			if !ok {
+				f, ok = swFindMember(r, "==")
+			}
+			if ok && isCallable(f) {
+				return rt.truthy(rt.call(f, jsUndef, []interface{}{l, r}))
+			}
+		}
 		// Two Sets are equal when they hold the same members, in any order.
 		if lel, ok := swSetElems(lo); ok {
 			rel, ok := swSetElems(ro)

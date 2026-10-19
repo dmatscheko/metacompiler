@@ -5052,6 +5052,27 @@ func s122() {
         && best!.name == "ann" && best!.first == 9 && lit.count == 3 && lit.first == "f")
 }
 
+// ===== SECTION 123: a type's own == inside collections, tuples and Sets =====
+// A custom `static func ==` is what contains, firstIndex(of:), array and tuple
+// ==, != and Set membership compare with. Every value read off swiftc 6.1.2.
+struct K123: Hashable {
+    let a: String
+    let b: Int
+    func hash(into h: inout Hasher) { h.combine(a) }
+    static func == (l: K123, r: K123) -> Bool { l.a == r.a }
+}
+func s123() {
+    let xs = [K123(a: "x", b: 1), K123(a: "y", b: 2)]
+    check("123a", xs.contains(K123(a: "x", b: 9)) && xs.firstIndex(of: K123(a: "y", b: 0)) == 1
+        && xs == [K123(a: "x", b: 5), K123(a: "y", b: 6)] && !(K123(a: "q", b: 1) != K123(a: "q", b: 2))
+        && (K123(a: "x", b: 1), 1) == (K123(a: "x", b: 2), 1))
+    var seen: Set<K123> = []
+    seen.insert(K123(a: "x", b: 1))
+    seen.insert(K123(a: "x", b: 2))
+    seen.insert(K123(a: "y", b: 1))
+    check("123b", seen.count == 2)
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5175,6 +5196,7 @@ func main() {
     s120() // SECTION-CALL 120
     s121() // SECTION-CALL 121
     s122() // SECTION-CALL 122
+    s123() // SECTION-CALL 123
     print("full: \(checks) checks, \(fails) failures")
 }
 
