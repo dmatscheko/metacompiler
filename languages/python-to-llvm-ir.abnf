@@ -612,7 +612,7 @@ Target      <~~ push(makeTargetRef(takeAll())) ~~>
 // the literal forms first is safe because each of them needs a quote, a digit or a
 // bracket that a bare name can never supply.
 TargetSeed  = TargetExpr | TargetName ;
-TargetName  <~~ push(up.in) ~~> = NotPyKw Id ;
+TargetName  <~~ push(sbMangle(up.in, false)) ~~> = NotPyKw Id ;
 // A target NAME may not be one of Python's reserved words. Otherwise `for x, in [...]`
 // (a one-element tuple target with a trailing comma) would have its `{ "," TargetItem }`
 // repetition match the comma and read `in` as a second target name - PEG repetition is
@@ -749,7 +749,7 @@ TSlice      <~~ push(makeTSlice(takeAll())) ~~>
 // through js_pysetattr, which honours a __set__ descriptor on the class and the
 // __slots__ declaration.
 TAttr       <~~ push({tattr: true, name: pop().taname, pos: up.pos}) ~~>
-            = "." Id <~~ push({taname: up.in}) ~~> ;
+            = "." Id <~~ push({taname: sbMangle(up.in, true)}) ~~> ;
 
 // An expression statement may be a bare TUPLE - `1, 2, 3` on a line of its own is legal
 // Python (and test_grammar checks exactly that), so this takes an expression LIST. Assign
@@ -856,11 +856,11 @@ CallMember  <~~ push(foldCallMember(takeAll())) ~~>
 CallSfx     <~~ push(makeCallSfx(takeAll(), up.pos)) ~~>
             = "(" :whitespace(WhitespaceNL) [ CallArg { "," CallArg } [ "," ] ] ")" :whitespace(Whitespace) ;
 MethodSfx   <~~ push(makeMethodSfx(popName(), takeAll(), up.pos)) ~~>
-            = "." Id <~~ push({mname: up.in}) ~~> "(" :whitespace(WhitespaceNL) [ CallArg { "," CallArg } [ "," ] ] ")" :whitespace(Whitespace) ;
+            = "." Id <~~ push({mname: sbMangle(up.in, true)}) ~~> "(" :whitespace(WhitespaceNL) [ CallArg { "," CallArg } [ "," ] ] ")" :whitespace(Whitespace) ;
 // obj.attr with no call: js_pygetattr - own attributes first, then the MRO of the
 // class (running a __get__ descriptor found there).
 AttrSfx     <~~ push({kind: "attr", name: pop().aname, pos: up.pos}) ~~>
-            = "." Id <~~ push({aname: up.in}) ~~> ;
+            = "." Id <~~ push({aname: sbMangle(up.in, true)}) ~~> ;
 // A call argument: a plain positional expression, a keyword (name=value), or
 // *seq / **map unpacking. The keyword ones are collected into a dict the callee
 // side binds to its parameters (js_pysig / pyBindCall). CallKw must be tried
@@ -1156,7 +1156,7 @@ True        <~~ push(makeConst(true)) ~~>      = "True" KwEnd ;
 False       <~~ push(makeConst(false)) ~~>     = "False" KwEnd ;
 None        <~~ push(makeConst(undefined)) ~~> = "None" KwEnd ;
 
-VarRef      <~~ push(makeVarRef(up.in)) ~~>
+VarRef      <~~ push(makeVarRef(sbMangle(up.in, false))) ~~>
             = Id ;
 
 // A logical line break: one or more newlines (blank and comment lines collapse,
@@ -1747,7 +1747,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var outer = sbFrames[sbFrames.length - 1]
             q = outer.qual + (outer.kind == "d" ? ".<locals>." : ".") + name
         }
-        sbFrames.push({names: [], decl: [], kind: kind, qual: q})
+        sbFrames.push({names: [], decl: [], kind: kind, qual: q, name: name})
     }
     // The names of the frame just closed, de-duplicated, minus anything a `global`
     // or `nonlocal` declaration in the same body claimed for another scope.
@@ -1764,6 +1764,27 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (!skip) { out.push(n) }
         }
         return out
+    }
+    // CPython's private name mangling: inside a class an identifier __x that does
+    // not end in __ is _Class__x, the class name stripped of its leading
+    // underscores (no mangling when nothing is left). An attribute name mangles
+    // under ANY enclosing class (anyDepth); a plain name only where the class body
+    // itself binds or reads it - a function's own locals are renamed consistently
+    // or not at all, so leaving them is unobservable. Twin of sbMangle in
+    // python-interpreter.abnf.
+    function sbMangle(n, anyDepth) {
+        if (n.length < 3 || n.substring(0, 2) != "__" || n.substring(n.length - 2, n.length) == "__") { return n }
+        for (var i = sbFrames.length - 1; i >= 0; i--) {
+            var f = sbFrames[i]
+            if (f.kind == "c") {
+                var c = f.name
+                while (c.length > 0 && c.charAt(0) == "_") { c = c.substring(1, c.length) }
+                if (c == "") { return n }
+                return "_" + c + n
+            }
+            if (!anyDepth) { return n }
+        }
+        return n
     }
     function sbName(n) {
         if (sbFrames.length == 0) { return }
@@ -2234,7 +2255,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // to the array and **map merges into the dict, both at run time. As in
     // CPython the positional and *seq arguments are evaluated first and the
     // keyword ones after them, wherever they are written.
-    function emitCallArgs(b, items) {
+    // calleeV is the callee, or for a method call (mname not "") its receiver,
+    // which js_pykwcheck names in the TypeError for a keyword given twice.
+    function emitCallArgs(b, items, calleeV, mname) {
         var anyKw = false
         for (var i = 0; i < items.length; i++) {
             if (items[i].ckwname != undefined || items[i].ckwspread != undefined) { anyKw = true }
@@ -2242,6 +2265,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var pos = callExt(b, "js_arr_new", [])
         var kw = hUndef
         if (anyKw) { kw = callExt(b, "js_dict_new", []) }
+        // Every ** mapping, and every keyword after one, is first checked by
+        // js_pykwcheck, which refuses a name already there.
+        var spread = false
         for (var n = 0; n < items.length * 2; n++) {
             var j = n % items.length
             var it = items[j]
@@ -2258,10 +2284,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             } else if (it.ckwspread != undefined) {
                 var rk = it.ckwspread(b)
                 b = rk.b
+                callExt(b, "js_pykwcheck", [kw, rk.v, calleeV, emitStr(b, mname)])
                 callExt(b, "js_pykwspread", [kw, rk.v])
+                spread = true
             } else {
                 var rv = it.ckwval(b)
                 b = rv.b
+                if (spread) { callExt(b, "js_pykwcheck", [kw, emitStr(b, it.ckwname), calleeV, emitStr(b, mname)]) }
                 callExt(b, "js_pyset", [kw, emitStr(b, it.ckwname), rv.v])
             }
         }
@@ -2279,11 +2308,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (var i = 0; i < suffixes.length; i++) {
                 var s = suffixes[i]
                 if (s.kind == "call") {
-                    var ea = emitCallArgs(b, s.args)
+                    var ea = emitCallArgs(b, s.args, cur, "")
                     b = ea.b
                     cur = callExt(b, "js_pycall", [cur, ea.pos, ea.kw])
                 } else if (s.kind == "mcall") {
-                    var ea2 = emitCallArgs(b, s.args)
+                    var ea2 = emitCallArgs(b, s.args, cur, s.name)
                     b = ea2.b
                     // js_pyrxmcall is js_pymcall plus the `re` module, a compiled
                     // pattern and a match (abnf/jsrtregexpy.go); every other
@@ -2646,11 +2675,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function emitPathStep(b, o, step) {
         if (step.tattr == true) { return {b: b, v: callExt(b, "js_pygetattr", [o, emitStr(b, step.name)])} }
         if (step.kind == "call") {
-            var ea = emitCallArgs(b, step.args)
+            var ea = emitCallArgs(b, step.args, o, "")
             return {b: ea.b, v: callExt(ea.b, "js_pycall", [o, ea.pos, ea.kw])}
         }
         if (step.kind == "mcall") {
-            var ea2 = emitCallArgs(b, step.args)
+            var ea2 = emitCallArgs(b, step.args, o, step.name)
             return {b: ea2.b, v: callExt(ea2.b, "js_pyrxmcall", [o, emitStr(ea2.b, step.name), ea2.pos, ea2.kw])}
         }
         if (step.kind == "attr") { return {b: b, v: callExt(b, "js_pygetattr", [o, emitStr(b, step.name)])} }
@@ -3287,7 +3316,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function emitYFYield(pfx) {
         return emitClosure([], function(bb) {
             var yv = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, pfx + "out")])
-            var sv = callExt(bb, "js_yield", [yv])
+            var sv = emitPyYield(bb, yv)
             bb.NewRet(sv)
             return deadBlock()
         }, true)
@@ -3308,6 +3337,18 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return deadBlock()
         }, true)
     }
+    // One suspension. A generator's except clause that is running stays out of
+    // the handled-exception stack while it is parked, as CPython keeps a
+    // generator's exception state with its frame: js_pyexcpark takes this
+    // handler's entry (and what is above it) off, js_pyexcunpark puts them back
+    // on resumption.
+    function emitPyYield(b, v) {
+        if (handlerDepth == 0) { return callExt(b, "js_yield", [v]) }
+        var pk = callExt(b, "js_pyexcpark", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, "__caught")])])
+        var sv = callExt(b, "js_yield", [v])
+        callExt(b, "js_pyexcunpark", [pk])
+        return sv
+    }
     // yield [from] EXPR. Plain yield suspends the body and answers what the next
     // send() passes in. 'yield from ITER' yields every value ITER produces in turn,
     // and its own value is the delegate's RETURN value.
@@ -3326,7 +3367,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 b = r.b
                 v = r.v
             }
-            if (!isFrom) { return {b: b, v: callExt(b, "js_yield", [v])} }
+            if (!isFrom) { return {b: b, v: emitPyYield(b, v)} }
             // yield from: the delegate is driven LAZILY, one value at a time,
             // through the {value, done} protocol that a generator cell and a cursor
             // both answer, so an endless delegate works, a .throw() is forwarded to
@@ -3647,6 +3688,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function makeHandlerBody(clauses) {
         return function(b) {
             var caught = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "__caught")])
+            callExt(b, "js_pyexcenter", [caught])
             var endB = curF.NewBlock("")
             var anyStar = false
             for (var s = 0; s < clauses.length; s++) { if (clauses[s].hstar) { anyStar = true } }
@@ -3743,12 +3785,23 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return function(b) {
             var tryClo = callExt(b, "js_closure", [handle(emitClosure([], bodyT, true)), curScopeV])
             var catchClo = hUndef
-            if (clauses.length > 0) {
-                catchClo = callExt(b, "js_closure",
-                                   [handle(emitClosure(["__caught"], makeHandlerBody(clauses), true)), curScopeV])
-            }
             var finClo = hUndef
-            if (finallyT != undefined) {
+            if (clauses.length > 0) {
+                // The handled-exception stack's depth as the statement starts (see
+                // js_pyexcenter in abnf/jsrt.go) lives in a scope between the
+                // statement's closures and the code around it, and the FINALLY cuts
+                // the stack back to it - so it is cut however the statement is
+                // left, by a handler that raises included. "pyexd*" is no Python
+                // name, and a body closure opens its own scope anyway.
+                var exs = callExt(b, "js_scope_new", [curScopeV])
+                callExt(b, "js_scope_decl", [exs, emitStr(b, "pyexd*"), callExt(b, "js_pyexcdepth", [])])
+                catchClo = callExt(b, "js_closure",
+                                   [handle(emitClosure(["__caught"], makeHandlerBody(clauses), true)), exs])
+                finClo = callExt(b, "js_closure", [handle(emitClosure([], function(fb) {
+                    callExt(fb, "js_pyexcleave", [callExt(fb, "js_scope_get", [curScopeV, emitStr(fb, "pyexd*")])])
+                    return finallyT != undefined ? finallyT(fb) : fb
+                }, true)), exs])
+            } else if (finallyT != undefined) {
                 finClo = callExt(b, "js_closure", [handle(emitClosure([], finallyT, true)), curScopeV])
             }
             var ctl = callExt(b, "js_try", [tryClo, catchClo, finClo])
@@ -3779,10 +3832,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 // it: js_pyraiseval instantiates one. Throwing the class object
                 // itself would match no except clause.
                 v = callExt(b, "js_pyraiseval", [r.v])
-                // Implicit chaining, for a raise written inside an except body.
-                if (handlerDepth > 0) {
-                    callExt(b, "js_pyexcctx", [v, callExt(b, "js_scope_get", [curScopeV, emitStr(b, "__caught")])])
-                }
+                callExt(b, "js_pyexcchain", [v])
                 if (rc != null) {
                     callExt(b, "js_pysetattr", [v, emitStr(b, "__cause__"), rc.v])
                     callExt(b, "js_pysetattr", [v, emitStr(b, "__suppress_context__"), hTrue])
@@ -4135,9 +4185,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // AROUND it, so sbName runs after sbPop.
         plist.locals = sbPop()
         plist.qual = sbQual
-        sbName(name)
+        // A method's private name binds mangled; its __name__ stays as written.
+        var bind = sbMangle(name, false)
+        sbName(bind)
         var doc = walkSuiteDoc
-        return {dname: name, dstmt: function(b) {
+        return {dname: bind, dstmt: function(b) {
             var idx = emitClosure(plist, bodyT, false)
             var er = emitDefaultsEnv(b, plist)
             b = er.b
@@ -4149,7 +4201,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             clo = emitSig(b, clo, plist)
             clo = callExt(b, "js_pyfnname", [clo, emitStr(b, name)])
             if (doc != null) { clo = callExt(b, "js_pyfndoc", [clo, emitStr(b, doc)]) }
-            pySetVar(b, curScopeV, name, clo)
+            pySetVar(b, curScopeV, bind, clo)
             return b
         }}
     }

@@ -1747,11 +1747,43 @@ function pyAUserTruthy(cls, v) {
     return true
 }
 
-// Go: rt.pyUserIter. What an instance's __iter__ answers, or undefined.
+// Go: rt.pyUserIter. What an instance's __iter__ answers - or, under the
+// legacy sequence protocol, its pyASeqIter cursor - or undefined.
 function pyAUserIter(v) {
     var cls = pyInstClassOf(v)
-    if (cls === null || !pyLookupHas(cls, "__iter__")) { return undefined }
-    return pyCallSelf(pyLookupVal(cls, "__iter__"), v, [])
+    if (cls === null) { return undefined }
+    if (pyLookupHas(cls, "__iter__")) { return pyCallSelf(pyLookupVal(cls, "__iter__"), v, []) }
+    var gi = pyASeqGetitem(v, cls)
+    if (gi === undefined) { return undefined }
+    return pyASeqIter(v, gi)
+}
+
+// Go: pySeqGetitem. The __getitem__ the legacy sequence protocol iterates by:
+// an instance's whose class has no __iter__ and is no builtin subclass.
+function pyASeqGetitem(v, cls) {
+    if (v["__val"] !== undefined || pyLookupHas(cls, "__iter__") || !pyLookupHas(cls, "__getitem__")) { return undefined }
+    return pyLookupVal(cls, "__getitem__")
+}
+
+// Go: rt.pySeqIter. The lazy cursor (CPython's type "iterator") over
+// __getitem__(0), (1), ... that ends at the first IndexError or StopIteration.
+function pyASeqIter(v, gi) {
+    var ad = {__pyit: "iterator", __i: 0, __done: false}
+    ad["next"] = function() { return pyASeqStep(ad, v, gi) }
+    return ad
+}
+
+function pyASeqStep(ad, v, gi) {
+    if (ad["__done"]) { return {value: undefined, done: true} }
+    var r = anytype
+    try { r = pyCallSelf(gi, v, [ad["__i"]]) }
+    catch (e) {
+        if (!pyDIsInstance(e, pyExcClass("IndexError")) && !pyDIsInstance(e, pyExcClass("StopIteration"))) { throw e }
+        ad["__done"] = true
+        return {value: undefined, done: true}
+    }
+    ad["__i"] = ad["__i"] + 1
+    return {value: r, done: false}
 }
 
 // Go: rt.pyDrainIter. What an __iter__ answered, as a list: a generator or a
@@ -3046,7 +3078,9 @@ function pyDirRefuse(o) {
 // (and `except <ThatName>`) for a StopIteration / UnboundLocalError / AttributeError
 // the RUNTIME raised, exactly like for one the program raised.
 function pyExcInstance(name, msg) {
-    return {__class: pyExcClass(name), args: pyTup([msg])}
+    var inst = {__class: pyExcClass(name), args: pyTup([msg])}
+    js_pyexcchain(inst)
+    return inst
 }
 
 // The class a RUNTIME-raised exception carries, with CPython's hierarchy above
@@ -3087,7 +3121,9 @@ function pyRaiseExc(name, msg) { throw pyExcInstance(name, msg) }
 // because MetaJS is typed and pyExcInstance's msg is a string at every other call
 // site.
 function pyExcInstanceV(name, arg) {
-    return {__class: pyExcClass(name), args: pyTup([arg])}
+    var inst = {__class: pyExcClass(name), args: pyTup([arg])}
+    js_pyexcchain(inst)
+    return inst
 }
 
 function pyRaiseExcV(name, arg) { throw pyExcInstanceV(name, arg) }
@@ -4459,6 +4495,10 @@ function pyAContains(x, y) {
             if (pyAEqual(st["value"], x)) { return true }
         }
     }
+    // An instance without __contains__: the iteration protocol, stopping at the
+    // match.
+    var uit = pyAUserIter(y)
+    if (uit !== undefined) { return pyAContains(x, pyAUserStepper(uit)) }
     pyFail("'in' needs a list, a string, a dict or an object with __contains__")
     return false
 }
@@ -6066,6 +6106,8 @@ function pyMkIter(name, arr) {
 }
 
 function pyItStep(it) {
+    // A cursor with no element array (pyASeqIter, pyAUserStepper) steps itself.
+    if (it["__a"] === undefined) { return it["next"]() }
     if (it["__w"] !== undefined) { pyAWatchCheck(it) }
     if (it["__i"] >= it["__a"].length) { return {value: undefined, done: true} }
     var v = it["__a"][it["__i"]]
@@ -6152,6 +6194,13 @@ function pyIsIter(v) {
 // list(it) does not repeat an element.
 function pyIterRest(it) {
     var out = []
+    if (it["__a"] === undefined) {
+        while (true) {
+            var st = it["next"]()
+            if (st["done"] === true) { return out }
+            out.push(st["value"])
+        }
+    }
     var i = it["__i"]
     while (i < it["__a"].length) {
         out.push(it["__a"][i])
@@ -8153,6 +8202,15 @@ function js_pyspread(arr, it) {
         }
         return undefined
     }
+    if (pyIsIterable(it)) {
+        var es = pyElemsOf(it)
+        var ei = 0
+        while (ei < es.length) {
+            arr.push(es[ei])
+            ei = ei + 1
+        }
+        return undefined
+    }
     fail("cannot unpack a " + typeof it + " with *")
     return undefined
 }
@@ -8161,6 +8219,43 @@ function js_pyspread(arr, it) {
 // ----- js_pykwspread ----------------------------------------------------------
 // (keyword dict, mapping): merge the mapping in, an existing key OVERWRITTEN in
 // place so the insertion order of the destination survives.
+// Go: js_pykwcheck. Before a call's ** mapping (or a keyword after one) joins
+// its keyword dict: a name already there is CPython's TypeError, naming the
+// callee - or, for a method call (mname not ""), the attribute of the receiver.
+// src is the mapping or the one keyword's name.
+function js_pykwcheck(kw, src, callee, mname) {
+    if (!pyIsDict(kw)) { return undefined }
+    var names = [src]
+    if (pyIsDict(src)) { names = src["keys"] }
+    else if (typeof src != "string") { return undefined }
+    var i = 0
+    while (i < names.length) {
+        if (pyDictFind(kw["keys"], names[i]) >= 0) {
+            var f = anytype
+            f = callee
+            if (mname != "") { f = pyGetAttr(callee, mname) }
+            pyRaiseExc("TypeError", pyAFuncStr(f) + " got multiple values for keyword argument '" + pyToStr(names[i]) + "'")
+        }
+        i = i + 1
+    }
+    return undefined
+}
+
+// Go: rt.pyFuncStr. CPython's _PyObject_FunctionStr, the callee's name in a
+// call-time TypeError: "module.qualname()", without the module for a builtin.
+function pyAFuncStr(f) {
+    var q = anytype
+    q = js_pyhasattr(f, "__qualname__") ? pyGetAttr(f, "__qualname__") : undefined
+    if (typeof q != "string") { q = pyTypeName(f) }
+    var tn = pyTypeName(f)
+    var mod = anytype
+    mod = ""
+    if (tn == "function" || tn == "method") { mod = "__main__" }
+    else if (tn == "type" && js_pyhasattr(f, "__module__")) { mod = pyGetAttr(f, "__module__") }
+    if (typeof mod != "string" || mod == "builtins") { mod = "" }
+    return (mod == "" ? "" : mod + ".") + q + "()"
+}
+
 function js_pykwspread(dst, src) {
     if (!pyIsDict(dst)) { fail("js_pykwspread needs a dict") }
     if (!pyIsDict(src)) {
@@ -9546,10 +9641,57 @@ function js_pyraiseval(v) {
     return pyDInstantiate(pyClassOf(v), [], undefined)
 }
 
-// Go: js_pyexcctx. A `raise` inside an except body records the handled
-// exception as the raised one's __context__, unless it re-raises that one.
-function js_pyexcctx(v, cur) {
-    if (pyInstClassOf(v) !== null && v !== cur) { pySetAttrRaw(v, "__context__", cur) }
+// Go: js_pyexcdepth / js_pyexcenter / js_pyexcleave, which state the rule:
+// implicit chaining over the stack of exceptions whose except clause is running.
+var pyExcHandled = []
+
+function js_pyexcdepth() { return pyExcHandled.length }
+
+function js_pyexcenter(v) {
+    pyExcHandled.push(v)
+    return undefined
+}
+
+function js_pyexcchain(v) {
+    var n = pyExcHandled.length
+    if (n > 0 && pyExcHandled[n - 1] !== v && pyInstClassOf(v) !== null) {
+        pySetAttrRaw(v, "__context__", pyExcHandled[n - 1])
+    }
+    return undefined
+}
+
+function js_pyexcpark(v) {
+    var out = []
+    var i = pyExcHandled.length - 1
+    while (i >= 0 && pyExcHandled[i] !== v) { i = i - 1 }
+    if (i < 0) { return out }
+    var j = i
+    while (j < pyExcHandled.length) {
+        out.push(pyExcHandled[j])
+        j = j + 1
+    }
+    js_pyexcleave(i)
+    return out
+}
+
+function js_pyexcunpark(arr) {
+    var i = 0
+    while (i < arr.length) {
+        pyExcHandled.push(arr[i])
+        i = i + 1
+    }
+    return undefined
+}
+
+function js_pyexcleave(d) {
+    if (d >= pyExcHandled.length) { return undefined }
+    var kept = []
+    var i = 0
+    while (i < d) {
+        kept.push(pyExcHandled[i])
+        i = i + 1
+    }
+    pyExcHandled = kept
     return undefined
 }
 
@@ -10335,7 +10477,7 @@ function pyIsIterable(v) {
     var els = pySetElemsOf(v)
     if (els !== null && els !== undefined) { return true }
     var cls = pyInstClassOf(v)
-    return cls !== null && pyLookupHas(cls, "__iter__")
+    return cls !== null && (pyLookupHas(cls, "__iter__") || pyASeqGetitem(v, cls) !== undefined)
 }
 
 // Every member of every argument, each read as ANY iterable.

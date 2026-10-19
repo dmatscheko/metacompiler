@@ -6481,6 +6481,96 @@ def s124():
                      S124m("a$", "a\nb", S124re.M)] == ["a", None, "a", None, "a"]
           and S124re.findall(r"\w$", "ab\ncd\n") == ["d"] and S124re.findall(r"^\w", "ab\ncd", S124re.M) == ["a", "c"])
 
+# ===== SECTION 125: private names, the legacy sequence protocol, keyword clashes, __context__ =====
+# Inside a class, __x is _Class__x. An instance with __getitem__ and no
+# __iter__ iterates by __getitem__(0), (1), ... until IndexError. A keyword
+# given twice through ** is a TypeError naming the callee. An exception raised
+# while another is handled - anywhere, even in a called function - records it
+# as __context__.
+class S125A:
+    __cv = 7
+    def __init__(self):
+        self.__x = 1
+    def __priv(self):
+        return "A"
+    def peek(self):
+        return (self.__x, self.__priv(), self.__cv)
+
+class S125B(S125A):
+    def __init__(self):
+        S125A.__init__(self)
+        self.__x = 2
+    def mine(self):
+        return self.__x
+
+class S125Seq:
+    def __getitem__(self, i):
+        if i < 3:
+            return i * 10
+        raise IndexError(i)
+
+class S125Nat:
+    def __getitem__(self, i):
+        return i
+
+def S125f(a, b=0, **kw):
+    return (a, b, kw)
+
+def S125err(f):
+    try:
+        f()
+    except Exception as e:
+        return type(e).__name__ + ": " + str(e)
+    return "no error"
+
+def S125bad():
+    raise KeyError("inner")
+
+def S125ctx(k):
+    try:
+        try:
+            raise ValueError("outer")
+        except ValueError:
+            if k == 0:
+                S125bad()
+            1 / 0
+    except Exception as e:
+        return repr(e.__context__)
+
+def S125gen():
+    try:
+        raise ValueError("g")
+    except ValueError:
+        yield 1
+
+def s125():
+    b = S125B()
+    check("mng1", sorted(vars(b)) == ["_S125A__x", "_S125B__x"] and b.peek() == (1, "A", 7) and b.mine() == 2
+          and b._S125A__x == 1 and S125A._S125A__priv.__name__ == "__priv" and not hasattr(b, "__x")
+          and "_S125A__cv" in S125A.__dict__)
+    s = S125Seq()
+    it = iter(s)
+    seen = []
+    for x in S125Nat():
+        if x > 3:
+            break
+        seen.append(x)
+    check("lgi1", list(s) == [0, 10, 20] and [*s] == [0, 10, 20] and 20 in s and 5 not in s and 7 in S125Nat()
+          and type(it).__name__ == "iterator" and next(it) == 0 and list(it) == [10, 20] and seen == [0, 1, 2, 3]
+          and sum(s) == 30 and dict.fromkeys(s) == {0: None, 10: None, 20: None})
+    check("kwd1", S125err(lambda: S125f(1, b=1, **{"b": 2})) == "TypeError: __main__.S125f() got multiple values for keyword argument 'b'"
+          and S125err(lambda: S125f(1, **{"z": 1}, z=2)) == "TypeError: __main__.S125f() got multiple values for keyword argument 'z'"
+          and S125err(lambda: dict(a=1, **{"a": 2})) == "TypeError: dict() got multiple values for keyword argument 'a'"
+          and S125err(lambda: {}.update(a=1, **{"a": 2})) == "TypeError: dict.update() got multiple values for keyword argument 'a'"
+          and S125f(1, **{"b": 2}, c=3) == (1, 2, {"c": 3}))
+    out = []
+    for v in S125gen():
+        try:
+            raise KeyError(v)
+        except KeyError as e:
+            out.append(e.__context__)
+    check("ctx1", S125ctx(0) == "ValueError('outer')" and S125ctx(1) == "ValueError('outer')" and out == [None])
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -6603,5 +6693,6 @@ def main():
     s122() # SECTION-CALL 122
     s123() # SECTION-CALL 123
     s124() # SECTION-CALL 124
+    s125() # SECTION-CALL 125
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

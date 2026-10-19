@@ -741,15 +741,76 @@ func (rt *jsrt) pyUserTruthy(cls *jsObject, v interface{}) bool {
 	return true
 }
 
-// pyUserIter is what an instance's __iter__ answers, or false when its class
-// has none.
+// pyUserIter is what an instance's __iter__ answers - or, under the legacy
+// sequence protocol, its pySeqIter cursor - or false when its class has neither.
 func (rt *jsrt) pyUserIter(v interface{}) (interface{}, bool) {
 	if _, cls, ok := pyInstance(v); ok {
 		if m, found := pyLookup(cls, "__iter__"); found && isCallable(m) {
 			return rt.call(m, jsUndef, []interface{}{v}), true
 		}
+		if gi := pySeqGetitem(v); gi != nil {
+			return rt.pySeqIter(v, gi), true
+		}
 	}
 	return nil, false
+}
+
+// pySeqGetitem is the __getitem__ the legacy sequence protocol iterates by: an
+// instance's whose class has no __iter__ and is no builtin subclass, else nil.
+// Twin of pySeqGetitem in python-interpreter.abnf.
+func pySeqGetitem(v interface{}) interface{} {
+	o, cls, ok := pyInstance(v)
+	if !ok {
+		return nil
+	}
+	if _, has := o.props["__val"]; has {
+		return nil
+	}
+	if _, found := pyLookup(cls, "__iter__"); found {
+		return nil
+	}
+	if gi, found := pyLookup(cls, "__getitem__"); found && isCallable(gi) {
+		return gi
+	}
+	return nil
+}
+
+// pySeqIter is the lazy cursor (CPython's type "iterator") over __getitem__(0),
+// (1), ... that ends at the first IndexError or StopIteration. Twin of
+// pySeqIterOf in python-interpreter.abnf and pyASeqIter in lib/python-rt.metajs.
+func (rt *jsrt) pySeqIter(v, gi interface{}) interface{} {
+	i, done := 0, false
+	ad := newJSObject()
+	ad.set("__pyit", "iterator")
+	ad.set("next", jsHostFunc("pyseq.next", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		out := newJSObject()
+		var val interface{} = jsUndef
+		if !done {
+			val, done = rt.pySeqItem(gi, v, i)
+			i++
+		}
+		if done {
+			val = jsUndef
+		}
+		out.set("value", val)
+		out.set("done", done)
+		return out
+	}))
+	return ad
+}
+
+func (rt *jsrt) pySeqItem(gi, v interface{}, i int) (val interface{}, stop bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			if th, ok := r.(*jsThrown); ok && (rt.pyIsInstance(th.value, rt.pyExcClass("IndexError")) ||
+				rt.pyIsInstance(th.value, rt.pyExcClass("StopIteration"))) {
+				stop = true
+				return
+			}
+			panic(r)
+		}
+	}()
+	return rt.call(gi, jsUndef, []interface{}{v, float64(i)}), false
 }
 
 // pyDrainIter is what an __iter__ answered, as a slice: a generator or a
@@ -1491,6 +1552,33 @@ func (rt *jsrt) pyHookGet(obj interface{}, name string) (v interface{}, ok bool)
 		return v, true
 	}
 	return rt.callPyValue(gf, []interface{}{obj, name}, jsUndef), true
+}
+
+// pyFuncStr is CPython's _PyObject_FunctionStr, the callee's name in a
+// call-time TypeError: "module.qualname()", without the module for a builtin. A
+// function here belongs to __main__. Twin of pyFuncStr in
+// python-interpreter.abnf.
+func (rt *jsrt) pyFuncStr(f interface{}) string {
+	q, missed := rt.pyTryAttr(func() interface{} { return rt.pyGetAttr(f, "__qualname__") })
+	qs, isStr := q.(string)
+	if missed || !isStr {
+		qs = pyTypeName(rt, f)
+	}
+	mod := ""
+	switch pyTypeName(rt, f) {
+	case "function", "method":
+		mod = "__main__"
+	case "type":
+		if m, missedM := rt.pyTryAttr(func() interface{} { return rt.pyGetAttr(f, "__module__") }); !missedM {
+			if s, ok := m.(string); ok && s != "builtins" {
+				mod = s
+			}
+		}
+	}
+	if mod == "" {
+		return qs + "()"
+	}
+	return mod + "." + qs + "()"
 }
 
 // pyTryAttr runs f, reporting an AttributeError it raises as missed.

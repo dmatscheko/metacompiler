@@ -474,6 +474,10 @@ type jsrt struct {
 	// whose repr is under way (see pyReprEnter).
 	pyReprOpen []interface{}
 
+	// pyHandled is the stack of exceptions whose except clause is running, for
+	// implicit chaining (js_pyexcenter).
+	pyHandled []interface{}
+
 	// rubyMethodVals remembers which callables `method(:x)` handed out, and the
 	// owner and name each one carries. MRI's Method is a class of its own -
 	// #class is Method, #to_s is `#<Method: Object#x>` and #arity counts optionals
@@ -16118,7 +16122,40 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				arr.elems = append(arr.elems, pyDViewElems(u(a[1]))...)
 				return 0
 			}
+			if rt.pyIsIterable(u(a[1])) {
+				arr.dropIdx()
+				arr.elems = append(arr.elems, rt.pyElemsOf(u(a[1]))...)
+				return 0
+			}
 			rt.fail("cannot unpack a %s with *", rt.typeOf(u(a[1])))
+			return 0
+		},
+		// Before a call's ** mapping (or a keyword after one) joins its keyword
+		// dict: a name already there is CPython's TypeError, naming the callee -
+		// a[2], or for a method call the attribute a[3] of the receiver a[2]. a[1]
+		// is the mapping or the one keyword's name. Twin of js_pykwcheck in
+		// lib/python-rt.metajs.
+		"js_pykwcheck": func(a []uint64) uint64 { // (keyword dict, mapping or name, callee, method name)
+			keys, _, ok := dictParts(u(a[0]))
+			if !ok {
+				return 0
+			}
+			names := []interface{}{u(a[1])}
+			if sk, _, isDict := dictParts(u(a[1])); isDict {
+				names = sk.elems
+			} else if _, isStr := u(a[1]).(string); !isStr {
+				return 0
+			}
+			for _, k := range names {
+				if rt.pyDictFind(keys, k) >= 0 {
+					callee := u(a[2])
+					if mn := rt.toString(u(a[3])); mn != "" {
+						callee = rt.pyGetAttr(callee, mn)
+					}
+					panic(&jsThrown{value: rt.pyExcInstance("TypeError", rt.pyFuncStr(callee)+
+						" got multiple values for keyword argument '"+rt.toString(k)+"'")})
+				}
+			}
 			return 0
 		},
 		"js_pykwspread": func(a []uint64) uint64 { // (keyword dict, mapping)
@@ -16392,14 +16429,49 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			return a[0]
 		},
-		// (raised, handled): a `raise` inside an except body records the handled
-		// exception as the raised one's __context__, unless it re-raises that very
-		// one. Twin of pyRaise in languages/python-interpreter.abnf and
-		// js_pyexcctx in lib/python-rt.metajs.
-		"js_pyexcctx": func(a []uint64) uint64 {
-			v, cur := u(a[0]), u(a[1])
-			if _, _, ok := pyInstance(v); ok && v != cur {
-				rt.pySetAttrRaw(v, "__context__", cur)
+		// Implicit exception chaining over the stack of exceptions whose except
+		// clause is running (rt.pyHandled). A try with except clauses notes the
+		// stack's depth as it starts (js_pyexcdepth); its handler pushes the
+		// caught value (js_pyexcenter); the statement's finally cuts the stack
+		// back to the noted depth (js_pyexcleave), however it is left. A raise
+		// statement (js_pyexcchain) and a runtime-raised exception (pyExcInstance)
+		// take the top as their __context__ - unless the top is the value itself,
+		// a re-raise. Twins in lib/python-rt.metajs; the interpreter's is pyRaise.
+		"js_pyexcdepth": func(a []uint64) uint64 {
+			return w(float64(len(rt.pyHandled)))
+		},
+		"js_pyexcenter": func(a []uint64) uint64 {
+			rt.pyHandled = append(rt.pyHandled, u(a[0]))
+			return 0
+		},
+		"js_pyexcchain": func(a []uint64) uint64 {
+			rt.pyExcChain(u(a[0]))
+			return 0
+		},
+		// (handled value) -> what a parked generator takes off the stack: the
+		// value's own entry and everything above it; js_pyexcunpark puts that
+		// back when the generator resumes.
+		"js_pyexcpark": func(a []uint64) uint64 {
+			v := u(a[0])
+			out := &jsArray{}
+			for i := len(rt.pyHandled) - 1; i >= 0; i-- {
+				if rt.pyHandled[i] == v {
+					out.elems = append(out.elems, rt.pyHandled[i:]...)
+					rt.pyHandled = rt.pyHandled[:i]
+					break
+				}
+			}
+			return w(out)
+		},
+		"js_pyexcunpark": func(a []uint64) uint64 {
+			if arr, ok := u(a[0]).(*jsArray); ok {
+				rt.pyHandled = append(rt.pyHandled, arr.elems...)
+			}
+			return 0
+		},
+		"js_pyexcleave": func(a []uint64) uint64 {
+			if d := int(rt.toNumber(u(a[0]))); d < len(rt.pyHandled) {
+				rt.pyHandled = rt.pyHandled[:d]
 			}
 			return 0
 		},
@@ -22010,7 +22082,7 @@ func (rt *jsrt) pyIsIterable(v interface{}) bool {
 	}
 	if _, cls, ok := pyInstance(v); ok {
 		m, found := pyLookup(cls, "__iter__")
-		return found && isCallable(m)
+		return (found && isCallable(m)) || pySeqGetitem(v) != nil
 	}
 	return false
 }
@@ -22500,6 +22572,12 @@ func (rt *jsrt) pyMkIter(name string, elems []interface{}) *jsObject {
 // One step of an iterator object: the {value, done} record JavaScript's iterator
 // protocol - and the floor's generator cell - answer.
 func (rt *jsrt) pyItStep(it *jsObject) *jsObject {
+	// A cursor with no element array (pySeqIter, pyUserStepper) steps itself.
+	if _, has := it.props["__a"]; !has {
+		if st, ok := rt.call(it.props["next"], jsUndef, nil).(*jsObject); ok {
+			return st
+		}
+	}
 	out := newJSObject()
 	if wv, ok := it.props["__w"]; ok && wv != jsUndef {
 		rt.pyWatchCheck(it, wv)
@@ -22732,6 +22810,16 @@ func (rt *jsrt) pyElemsOf(v interface{}) []interface{} {
 		return g.drain(rt).elems
 	}
 	if o, ok := v.(*jsObject); ok && pyIterName(rt, o) != "" {
+		if _, has := o.props["__a"]; !has {
+			var out []interface{}
+			for {
+				st := rt.pyItStep(o)
+				if done, _ := st.props["done"].(bool); done {
+					return out
+				}
+				out = append(out, st.props["value"])
+			}
+		}
 		a, _ := o.props["__a"].(*jsArray)
 		i := int(rt.toNumber(o.props["__i"]))
 		if a == nil || i >= len(a.elems) {
@@ -23415,6 +23503,11 @@ func (rt *jsrt) pyContains(x, y interface{}) bool {
 				return true
 			}
 		}
+	}
+	// An instance without __contains__: the iteration protocol, stopping at
+	// the match.
+	if it, ok := rt.pyUserIter(y); ok {
+		return rt.pyContains(x, rt.pyUserStepper(it))
 	}
 	rt.fail("'in' needs a list, a string, a dict or an object with __contains__")
 	return false
@@ -24314,6 +24407,7 @@ func (rt *jsrt) pyExcInstanceV(name string, arg interface{}) interface{} {
 	inst := newJSObject()
 	inst.set("__class", rt.pyExcClass(name))
 	inst.set("args", pyTup(&jsArray{elems: []interface{}{arg}}))
+	rt.pyExcChain(inst)
 	return inst
 }
 
@@ -24390,7 +24484,18 @@ func (rt *jsrt) pyExcInstance(name string, msg string) interface{} {
 	inst := newJSObject()
 	inst.set("__class", rt.pyExcClass(name))
 	inst.set("args", pyTup(&jsArray{elems: []interface{}{msg}}))
+	rt.pyExcChain(inst)
 	return inst
+}
+
+// pyExcChain makes the exception being handled v's __context__ (see
+// js_pyexcchain).
+func (rt *jsrt) pyExcChain(v interface{}) {
+	if n := len(rt.pyHandled); n > 0 && rt.pyHandled[n-1] != v {
+		if _, _, ok := pyInstance(v); ok {
+			rt.pySetAttrRaw(v, "__context__", rt.pyHandled[n-1])
+		}
+	}
 }
 
 // pyUserFormat is format() of an instance: its class's own __format__

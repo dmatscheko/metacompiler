@@ -504,7 +504,7 @@ Target      <~~ push(makeTargetRef(takeAll())) ~~>
 // the literal forms first is safe because each of them needs a quote, a digit or a
 // bracket that a bare name can never supply.
 TargetSeed  = TargetExpr | TargetName ;
-TargetName  <~~ push(up.in) ~~> = NotPyKw Id ;
+TargetName  <~~ push(sbMangle(up.in, false)) ~~> = NotPyKw Id ;
 // A target NAME may not be one of Python's reserved words. Otherwise `for x, in [...]`
 // (a one-element tuple target with a trailing comma) would have its `{ "," TargetItem }`
 // repetition match the comma and read `in` as a second target name - PEG repetition is
@@ -647,7 +647,7 @@ NotEqSign   = :script(~~
 ~~) ;
 // obj.attr = ... : an attribute target (common in class methods: self.x = ...).
 TAttr       <~~ push({tattr: true, name: pop().taname, pos: up.pos}) ~~>
-            = "." Id <~~ push({taname: up.in}) ~~> ;
+            = "." Id <~~ push({taname: sbMangle(up.in, true)}) ~~> ;
 
 // An expression statement may be a bare TUPLE - `1, 2, 3` on a line of its own is legal
 // Python (and test_grammar checks exactly that), so this takes an expression LIST. Assign
@@ -749,10 +749,10 @@ CallMember  <~~ push(foldCallMember(takeAll())) ~~>
 CallSfx     <~~ push(makeCallSfx(takeAll())) ~~>
             = "(" :whitespace(WhitespaceNL) [ CallArg { "," CallArg } [ "," ] ] ")" :whitespace(Whitespace) ;
 MethodSfx   <~~ push(makeMethodSfx(popName(), takeAll())) ~~>
-            = "." Id <~~ push({mname: up.in}) ~~> "(" :whitespace(WhitespaceNL) [ CallArg { "," CallArg } [ "," ] ] ")" :whitespace(Whitespace) ;
+            = "." Id <~~ push({mname: sbMangle(up.in, true)}) ~~> "(" :whitespace(WhitespaceNL) [ CallArg { "," CallArg } [ "," ] ] ")" :whitespace(Whitespace) ;
 // obj.attr with no call: a genuine attribute read (pyattr).
 AttrSfx     <~~ push({kind: "attr", name: pop().aname, pos: up.pos}) ~~>
-            = "." Id <~~ push({aname: up.in}) ~~> ;
+            = "." Id <~~ push({aname: sbMangle(up.in, true)}) ~~> ;
 // A call argument: keyword (name=value), *seq / **map unpacking, or positional -
 // all genuine (see kevalArgs). A generator expression may also be the sole argument.
 CallArg     = CallKw | CallDblStar | CallStar | CallPos ;
@@ -1037,7 +1037,7 @@ PyExpOpt    = [ PyExp ] ;
 PyExp       = PyECh PySignOpt PyDig PyDigRest ;
 PySignOpt   = [ "+" | "-" ] ;
 
-VarRef      <~~ push(makeVarRef(up.in)) ~~>
+VarRef      <~~ push(makeVarRef(sbMangle(up.in, false))) ~~>
             = Id ;
 
 // A logical line break: one or more newlines (blank and comment lines collapse,
@@ -2195,9 +2195,44 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return pyItAdvance(it)
     }
     function pyItAdvance(it) {
+        if (it.__g !== undefined) { return pySeqStep(it) }
         if (it.__w !== undefined) { pyWatchCheck(it) }
         if (it.__i >= it.__a.length) { return {value: undefined, done: true} }
         var v = it.__a[it.__i]
+        it.__i = it.__i + 1
+        return {value: v, done: false}
+    }
+    // The legacy sequence protocol: an instance whose class has __getitem__ and no
+    // __iter__ iterates as __getitem__(0), (1), ... until that raises IndexError
+    // or StopIteration. pySeqIterOf answers its lazy cursor (CPython's type
+    // "iterator"), or null for anything else. Twin of pySeqIter in
+    // abnf/jsrtpysub.go and pyASeqIter in lib/python-rt.metajs.
+    function pySeqGetitem(v) {
+        if (!pyUser(v) || v.__val !== undefined || clsFind(v.__class, "__iter__") != null) { return null }
+        return clsFind(v.__class, "__getitem__")
+    }
+    function pySeqIterOf(v) {
+        var gi = pySeqGetitem(v)
+        if (gi == null) { return null }
+        var it = pyMkIter("iterator", [])
+        it.__g = gi
+        it.__s = v
+        return it
+    }
+    function pySeqStep(it) {
+        if (it.__g === null) { return {value: undefined, done: true} }
+        var saved = scopes
+        var v = anytype
+        try { v = it.__g(it.__s, it.__i) }
+        catch (e) {
+            scopes = saved
+            if (e != null && e != undefined && e.__exc === true && pyUser(e.v)
+                && (clsIsSub(e.v.__class, hostGlobals["IndexError"]) || clsIsSub(e.v.__class, hostGlobals["StopIteration"]))) {
+                it.__g = null
+                return {value: undefined, done: true}
+            }
+            throw e
+        }
         it.__i = it.__i + 1
         return {value: v, done: false}
     }
@@ -2269,6 +2304,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function pyItDrain(it) {
         var out = []
+        if (it.__g !== undefined) {
+            while (true) {
+                var s = pySeqStep(it)
+                if (s.done) { return out }
+                out.push(s.value)
+            }
+        }
         for (var i = it.__i; i < it.__a.length; i++) { out.push(it.__a[i]) }
         it.__i = it.__a.length
         return out
@@ -2297,6 +2339,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (pyUser(v)) {
             var itf = clsFind(v.__class, "__iter__")
             if (itf != null) { return itf(v) }
+            var sq = pySeqIterOf(v)
+            if (sq !== null) { return sq }
         }
         if (isDict(v) || isView(v)) { return pyWatchIter(v) }
         return pyMkIter(pyItKind(v), iterToList(v).slice(0))
@@ -4293,6 +4337,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (pyUser(v)) {
             var itf = clsFind(v.__class, "__iter__")
             if (itf != null) { return pyDrainIter(itf(v)) }
+            var sq = pySeqIterOf(v)
+            if (sq !== null) { return pyItRest(sq) }
         }
         pyRaise(pyMakeExc("TypeError", ["'" + pyTypeOf(v).__name + "' object is not iterable"]))
     }
@@ -4350,7 +4396,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Is v something a for loop or an unpacking can walk?
     function pyIterable(v) {
         if (Array.isArray(v) || isGen(v) || isPyIt(v) || isDict(v) || typeof v == "string" || isView(v)) { return true }
-        return pyUser(v) && clsFind(v.__class, "__iter__") != null
+        return pyUser(v) && (clsFind(v.__class, "__iter__") != null || pySeqGetitem(v) != null)
     }
     // ----- Regular expressions: the `re` module -----
     //
@@ -9734,6 +9780,18 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (pyUser(r)) {
             var f = clsFind(r.__class, "__contains__")
             if (f != null) { return pytruthy(f(r, l)) }
+            // No __contains__: the iteration protocol, stopping at the match.
+            if (r.__val === undefined && pyIterable(r)) {
+                var rit = anytype
+                rit = hostGlobals["iter"](r)
+                if (!pyUser(rit)) { return pyIn(l, rit) }
+                var rnx = pyUserNextFn(rit)
+                while (true) {
+                    var us = pyUserStep(rit, rnx)
+                    if (us.done) { return false }
+                    if (pyEq(us.value, l)) { return true }
+                }
+            }
         }
         // A CURSOR or a GENERATOR is CONSUMED by `in`, up to the match - CPython's
         // rule. Neither is an array, so the scan below would read a `length` of
@@ -10525,7 +10583,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var outer = sbFrames[sbFrames.length - 1]
             q = outer.qual + (outer.kind == "d" ? ".<locals>." : ".") + name
         }
-        sbFrames.push({names: [], decl: [], kind: kind, qual: q})
+        sbFrames.push({names: [], decl: [], kind: kind, qual: q, name: name})
     }
     // The names of the frame just closed, de-duplicated, minus anything a `global`
     // or `nonlocal` declaration in the same body claimed for another scope.
@@ -10542,6 +10600,27 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (!skip) { out.push(n) }
         }
         return out
+    }
+    // CPython's private name mangling: inside a class an identifier __x that does
+    // not end in __ is _Class__x, the class name stripped of its leading
+    // underscores (no mangling when nothing is left). An attribute name mangles
+    // under ANY enclosing class (anyDepth); a plain name only where the class body
+    // itself binds or reads it - a function's own locals are renamed consistently
+    // or not at all, so leaving them is unobservable. Twin of sbMangle in
+    // python-to-llvm-ir.abnf.
+    function sbMangle(n, anyDepth) {
+        if (n.length < 3 || n.substring(0, 2) != "__" || n.substring(n.length - 2, n.length) == "__") { return n }
+        for (var i = sbFrames.length - 1; i >= 0; i--) {
+            var f = sbFrames[i]
+            if (f.kind == "c") {
+                var c = f.name
+                while (c.length > 0 && c.charAt(0) == "_") { c = c.substring(1, c.length) }
+                if (c == "") { return n }
+                return "_" + c + n
+            }
+            if (!anyDepth) { return n }
+        }
+        return n
     }
     function sbName(n) {
         if (sbFrames.length == 0) { return }
@@ -10623,6 +10702,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (!pyUser(it)) { return pyBuiltinIterator(it) }
             return {__udeleg: it, nx: pyUserNextFn(it)}
         }
+        var sq = pySeqIterOf(v)
+        if (sq !== null) { return sq }
         return pyMkIter(pyItKind(v), iterToList(v).slice(0))
     }
     // Any iterable stepped one value at a time, as a for loop runs it: a list by
@@ -10924,10 +11005,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (var i = 0; i < suffixes.length; i++) {
                 var s = suffixes[i]
                 if (s.kind == "call") {
-                    var spec = kevalArgs(s.args)
+                    var callee = anytype
+                    callee = cur
+                    var spec = kevalArgs(s.args, function() { return callee })
                     cur = pyCall(cur, spec.pos, spec.named)
                 } else if (s.kind == "mcall") {
-                    var spec2 = kevalArgs(s.args)
+                    var recv = anytype
+                    recv = cur
+                    var mname = s.name
+                    var spec2 = kevalArgs(s.args, function() { return pyattr(recv, mname) })
                     // A method call is an attribute read followed by a call, so a user
                     // object dispatches through its class exactly like Python.
                     if (pyUser(cur) || (cur != null && cur != undefined && cur.__isclass == true)) {
@@ -11266,11 +11352,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pathStep(o, step) {
         if (step.tattr == true) { return pyattr(o, step.name) }
         if (step.kind == "call") {
-            var spec = kevalArgs(step.args)
+            var spec = kevalArgs(step.args, function() { return o })
             return pyCall(o, spec.pos, spec.named)
         }
         if (step.kind == "mcall") {
-            var spec2 = kevalArgs(step.args)
+            var spec2 = kevalArgs(step.args, function() { return pyattr(o, step.name) })
             if (pyUser(o) || (o != null && o != undefined && o.__isclass == true)) {
                 return pyCall(pyattr(o, step.name), spec2.pos, spec2.named)
             }
@@ -11759,6 +11845,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     return undefined
                 }
             }
+            // The legacy sequence protocol is a lazy cursor, stepped below.
+            var seqIt = pySeqIterOf(src)
+            if (seqIt !== null) { src = seqIt }
             // LAZY ITERATION over a generator. iterToList DRAINS, which never ends
             // for `for x in endless(): ... break`, so a generator is STEPPED, one
             // value per iteration; everything else is normalized by iterToList.
@@ -12317,7 +12406,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return function() {
             var bases = []
             if (baseArgs != null) {
-                var spec = kevalArgs(baseArgs)
+                var spec = kevalArgs(baseArgs, function() { return hostGlobals["type"] })
                 for (var b = 0; b < spec.pos.length; b++) {
                     if (spec.pos[b] != null && spec.pos[b] != undefined && spec.pos[b].__isclass) { bases.push(spec.pos[b]) }
                 }
@@ -13396,7 +13485,32 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // The positional and *seq arguments are evaluated first and the keyword ones
     // after them, wherever they are written, as in CPython. Twin of emitCallArgs
     // in python-to-llvm-ir.abnf.
-    function kevalArgs(items) {
+    // CPython's _PyObject_FunctionStr, the callee's name in a call-time
+    // TypeError: "module.qualname()", without the module for a builtin. A
+    // function here belongs to __main__. Twin of rt.pyFuncStr in
+    // abnf/jsrtpysub.go and pyAFuncStr in lib/python-rt.metajs.
+    function pyFuncStr(f) {
+        var q = anytype
+        q = pyHasAttrOf(f, "__qualname__") ? pyattr(f, "__qualname__") : undefined
+        if (typeof q != "string") { q = pyTypeOf(f).__name }
+        var tn = pyTypeOf(f).__name
+        var mod = anytype
+        mod = ""
+        if (tn == "function" || tn == "method") { mod = "__main__" }
+        else if (tn == "type" && pyHasAttrOf(f, "__module__")) { mod = pyattr(f, "__module__") }
+        if (typeof mod != "string" || mod == "builtins") { mod = "" }
+        return (mod == "" ? "" : mod + ".") + q + "()"
+    }
+    // One keyword argument into a call's map; a name given twice (k=1 beside
+    // **{"k": 2}, or in two ** mappings) is CPython's TypeError, naming the
+    // callee `who()` answers.
+    function kwPut(named, k, v, who) {
+        if (dictFind(named, k) >= 0) {
+            pyListErr("TypeError", pyFuncStr(who()) + " got multiple values for keyword argument '" + pstr(k) + "'")
+        }
+        dictSet(named, k, v)
+    }
+    function kevalArgs(items, who) {
         var pos = []
         var named = null
         for (var n = 0; n < items.length * 2; n++) {
@@ -13413,11 +13527,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (a.cdblstar != undefined) {
                 var m = a.cdblstar()
                 if (named == null) { named = newDict() }
-                for (var q = 0; q < m.keys.length; q++) { dictSet(named, m.keys[q], m.vals[q]) }
+                for (var q = 0; q < m.keys.length; q++) { kwPut(named, m.keys[q], m.vals[q], who) }
                 continue
             }
             if (named == null) { named = newDict() }
-            dictSet(named, a.ckwname, a.ckwval())
+            kwPut(named, a.ckwname, a.ckwval(), who)
         }
         return {pos: pos, named: named}
     }
@@ -13843,12 +13957,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // AROUND it, so sbName runs after sbPop.
         plist.locals = sbPop()
         plist.qual = sbQual
-        sbName(name)
+        // A method's private name binds mangled; its __name__ stays as written.
+        var bind = sbMangle(name, false)
+        sbName(bind)
         var doc = walkSuiteDoc
         return function() {
             var defScopes = scopes.slice()
             var dflts = evalDefaults(plist)
-            noteBound(name)
+            noteBound(bind)
             var fn = function() {
                 // `arguments` is copied out before anything else: the frozen engine
                 // does not resolve it from inside a nested block, and kTakeNamed must
@@ -13868,7 +13984,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return (r != undefined && r.isRet) ? r.v : undefined
             }
             fnNameSet(fn, name, plist.qual, doc)
-            pySet(name, fn)
+            pySet(bind, fn)
         }
     }
 
