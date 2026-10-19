@@ -5153,6 +5153,22 @@ func s127() {
     check("127c", lg.lines == [">1 2", "#3"])
 }
 
+// ===== SECTION 128: `case true:` and `case nil:` patterns =====
+// The literals true, false and nil in a pattern compare with the subject - in a
+// switch, a tuple pattern, `for case nil in`, `if case nil =`. Every value read
+// off swiftc 6.1.2.
+func s128() {
+    var out = ""
+    for b in [true, false] { switch b { case true: out += "T"; case false: out += "F" } }
+    switch (true, 2) { case (false, _): out += "f"; case (true, let n): out += "t\(n)" }
+    let vals: [Int?] = [1, nil, 3]
+    for v in vals { switch v { case nil: out += "n"; case let x?: out += "\(x)" } }
+    var nils = 0
+    for case nil in vals { nils += 1 }
+    if case nil = vals[1] { out += "!" }
+    check("128a", out == "TFt21n3!" && nils == 1)
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5281,6 +5297,7 @@ func main() {
     s125() // SECTION-CALL 125
     s126() // SECTION-CALL 126
     s127() // SECTION-CALL 127
+    s128() // SECTION-CALL 128
     print("full: \(checks) checks, \(fails) failures")
 }
 

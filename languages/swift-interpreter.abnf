@@ -915,7 +915,10 @@ Pattern     <~~ push(makePattern(takeAll())) ~~>
 // `case let d as Double` / `catch let e as NetErr`: a type-casting pattern, which
 // matches when the subject `is` that type and then binds or tests it.
 PatAsType   <~~ push({casty: stripWs(up.in)}) ~~> = Type ;
-PatCore     = PatIs | PatLet | PatTuple | PatWild | PatRange | PatElem | PatEnum | PatExpr ;
+PatCore     = PatIs | PatLet | PatTuple | PatWild | PatRange | PatElem | PatKwLit | PatEnum | PatExpr ;
+// `case nil:` / `case true:` compare with the literal; PatEnum would read the
+// keyword as a case NAME and never match.
+PatKwLit    <~~ push({pexpr: pop()}) ~~> = Nil | True | False ;
 // `case is Double:` - a TYPE pattern. It runs exactly the test the `is`
 // OPERATOR runs, so it agrees with `case let z where z is Double` by construction.
 // It is tried FIRST: PatEnum would otherwise read the bare word `is` as a case
