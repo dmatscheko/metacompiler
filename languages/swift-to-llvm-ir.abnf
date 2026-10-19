@@ -974,7 +974,9 @@ ObsKind     = ( "willSet" | "didSet" ) KwEnd ;
 DeclAnnType = FnAnnType | LabelledTupleType | IntAnnType | OptNumAnnType | DeepAnnType | ScalarAnnType | OtherAnnType ;
 // Any other annotation is captured as TEXT only for the write-site check that an
 // EXISTENTIAL slot (`Any`, a protocol, ...) does not adopt; see swKeepMode.
-OtherAnnType <~~ push({otype: stripWs(up.in)}) ~~> = Type ;
+// Each annotation form keeps only its TEXT: a type attribute inside it
+// (`(@escaping (Int) -> Int) -> Int`) pushes a marker that is dropped here.
+OtherAnnType <~~ takeAll(); push({otype: stripWs(up.in)}) ~~> = Type ;
 // A FUNCTION-TYPED SLOT. Every other adoption site in this front end reads the type
 // off the VALUE (see chapter 7.15 of the manual) - floatness and integer width live
 // on the value and a write adopts what the slot already holds. That argument runs
@@ -984,7 +986,7 @@ OtherAnnType <~~ push({otype: stripWs(up.in)}) ~~> = Type ;
 // it is captured (the general Type would discard it) and the declaration wraps the
 // value in a synthetic function that adopts each argument, calls the original and
 // adopts the result - swAdoptFn here, swEmitAdoptFn in the compiler.
-FnAnnType   <~~ push({atype: stripWs(up.in)}) ~~>
+FnAnnType   <~~ takeAll(); push({atype: stripWs(up.in)}) ~~>
             = "(" [ TupleTypeElem { "," TupleTypeElem } ] ")" [ TypeEffects ] "->" Type ;
 IntAnnType  <~~ push({itype: up.in}) ~~> = NumTypeName NotTypeSuffix ;
 NumTypeName = ( "Int64" | "Int32" | "Int16" | "Int8" | "Int"
@@ -1004,11 +1006,11 @@ NumTypeName = ( "Int64" | "Int32" | "Int16" | "Int8" | "Int"
 // The inner types are the general Type: only the top level has to be a container
 // here, and js_swadoptdeep ignores every leaf it does not recognise.
 // `Unicode.Scalar`: a String literal it types becomes a scalar (swMkScalar).
-ScalarAnnType <~~ push({atype: stripWs(up.in)}) ~~>
+ScalarAnnType <~~ takeAll(); push({atype: stripWs(up.in)}) ~~>
             = ( "Unicode" NoSpace "." NoSpace "Scalar" | "UnicodeScalar" ) KwEnd NotTypeSuffix ;
-OptNumAnnType <~~ push({atype: stripWs(up.in)}) ~~>
+OptNumAnnType <~~ takeAll(); push({atype: stripWs(up.in)}) ~~>
             = NumTypeName NoSpace ( "?" | "!" ) NotTypeSuffix ;
-DeepAnnType <~~ push({atype: stripWs(up.in)}) ~~>
+DeepAnnType <~~ takeAll(); push({atype: stripWs(up.in)}) ~~>
             = DeepTyCore { NoSpace ( "?" | "!" ) } NotTypeSuffix ;
 DeepTyCore  = "[" Type [ ":" Type ] "]"
             | "(" TupleTypeElem { "," TupleTypeElem } ")" NotArrow ;
@@ -2404,13 +2406,15 @@ KwContinue  = "continue" KwEnd ;
         }
         return -1
     }
+    // The `>` of a function type's `->` closes nothing, so the arrow is stepped over.
     function swTySplit(s, sep) {
         var out = []
         var depth = 0
         var start = 0
         for (var i = 0; i < s.length; i++) {
             var ch = s.charAt(i)
-            if (ch == "[" || ch == "(" || ch == "<") { depth = depth + 1 }
+            if (ch == "-" && i + 1 < s.length && s.charAt(i + 1) == ">") { i = i + 1 }
+            else if (ch == "[" || ch == "(" || ch == "<") { depth = depth + 1 }
             else if (ch == "]" || ch == ")" || ch == ">") { depth = depth - 1 }
             else if (ch == sep && depth == 0) { out.push(s.substring(start, i)); start = i + 1 }
         }
@@ -2433,7 +2437,8 @@ KwContinue  = "continue" KwEnd ;
         var close = -1
         for (var i = 0; i < ar && close < 0; i++) {
             var ch = t.charAt(i)
-            if (ch == "[" || ch == "(" || ch == "<") { depth = depth + 1 }
+            if (ch == "-" && i + 1 < t.length && t.charAt(i + 1) == ">") { i = i + 1 }
+            else if (ch == "[" || ch == "(" || ch == "<") { depth = depth + 1 }
             else if (ch == "]" || ch == ")" || ch == ">") {
                 depth = depth - 1
                 if (depth == 0) { close = i }

@@ -3211,6 +3211,9 @@ func swTySplit(s string, sep byte) []string {
 	start := 0
 	for i := 0; i < len(s); i++ {
 		switch c := s[i]; {
+		// The `>` of a function type's `->` closes nothing.
+		case c == '-' && i+1 < len(s) && s[i+1] == '>':
+			i++
 		case c == '[' || c == '(' || c == '<':
 			depth++
 		case c == ']' || c == ')' || c == '>':

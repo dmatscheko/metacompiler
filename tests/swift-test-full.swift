@@ -4834,6 +4834,21 @@ func s113() {
     check("113b", ds.map { $0.describe113() } == ["int 1", "str x"] && 5.describe113() == "int 5" && "q".describe113() == "str q")
 }
 
+// ===== SECTION 114: function types inside function-typed slots =====
+// A function-typed slot whose parameters are themselves function types -
+// `((Int) -> Int, Int) -> Int`, `(@escaping (Int) -> Int) -> Int` - calls its
+// closure with the arguments it was given, and returns a closure that can be
+// called in turn. Every value read off swiftc 6.1.2.
+func s114() {
+    let a: ((Int) -> Int, Int) -> Int = { $0($1) }
+    let d: ((Int) -> Int, Int) -> Int = { f, x in f(x) }
+    let ap: (@escaping (Int) -> Int) -> Int = { f in f(1) }
+    let compose: (@escaping (Int) -> Int, @escaping (Int) -> Int) -> (Int) -> Int = { f, g in { g(f($0)) } }
+    let fs: [((Int) -> Int, Double) -> Double] = [{ f, x in Double(f(Int(x))) / 2 }]
+    check("114a", a({ $0 + 1 }, 4) == 5 && d({ $0 * 3 }, 2) == 6 && ap { $0 + 1 } == 2
+        && compose({ $0 + 1 }, { $0 * 2 })(3) == 8 && fs[0]({ $0 + 4 }, 3) == 3.5)
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -4948,6 +4963,7 @@ func main() {
     s111() // SECTION-CALL 111
     s112() // SECTION-CALL 112
     s113() // SECTION-CALL 113
+    s114() // SECTION-CALL 114
     print("full: \(checks) checks, \(fails) failures")
 }
 

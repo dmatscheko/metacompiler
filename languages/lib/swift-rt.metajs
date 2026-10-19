@@ -2728,7 +2728,9 @@ function swTySplit(s, sep) {
     var i = 0
     while (i < s.length) {
         var ch = s.charAt(i)
-        if (ch == "[" || ch == "(" || ch == "<") { depth = depth + 1 }
+        // The `>` of a function type's `->` closes nothing.
+        if (ch == "-" && i + 1 < s.length && s.charAt(i + 1) == ">") { i = i + 1 }
+        else if (ch == "[" || ch == "(" || ch == "<") { depth = depth + 1 }
         else if (ch == "]" || ch == ")" || ch == ">") { depth = depth - 1 }
         else if (ch == sep && depth == 0) { out.push(s.substring(start, i)); start = i + 1 }
         i = i + 1
