@@ -969,8 +969,8 @@ throws) and `coYield(v)` run f on a call stack of its own - under goja a gorouti
 over a vm of its own (`third_party/goja/coroutine.go`, the handshake switches
 `r.vm`), under `-frozen` the compiled programs' `jsGenerator`. The interpreter's
 own run state (scope chain, call positions) has to be switched by the script at
-every resume and yield. lua's coroutines run on it; python's and js's generators
-still replay.
+every resume and yield. lua's coroutines and the js/ts generators and async bodies
+(genNext) run on it; python's generators still replay.
 
 ## 7.15 The value model already carries the type — you rarely need a type table
 

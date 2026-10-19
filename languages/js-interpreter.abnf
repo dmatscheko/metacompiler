@@ -33,7 +33,7 @@ not begin with '(' or '[' (write an explicit ';' before it in that rare case).
 Functions: real closures with an 'arguments' array, default parameters (which may read
 the earlier ones), rest parameters, destructuring parameters, trailing commas, arrow
 functions (which do NOT bind their own 'this'), generator functions (yield and yield*,
-driven by REPLAY - see below and the generator section of the start script), and async
+each on a coroutine - see below and the generator section of the start script), and async
 functions, which answer a Promise and suspend at every 'await', driven by a microtask
 queue drained after the entry point returns (see below).
 
@@ -73,36 +73,24 @@ is not rejected): 'with', and a for-in/of head that is not a reference at all
 ('for (0 of 0)' - an early error in the spec, which this grammar has no pass for).
 Prototypes and the standard library beyond the methods listed above are not modelled.
 
-TWO LIMITATIONS THAT ARE OBSERVABLE, not cosmetic:
+GENERATORS RUN ON A COROUTINE of the tag host (coNew / coResume / coYield): a body
+runs once, and a yield parks it until the next resume, so side effects happen exactly
+once and in node's order.
 
-GENERATORS REPLAY instead of suspending. A thunk cannot be frozen half way, so every
-next() re-runs the body from the top, answers the yields that already happened with the
-values their next(v) sent, and stops at the new one by throwing a signal the driver
-catches. A pure generator behaves exactly right. What differs: every side effect BEFORE
-the yield the generator is parked at happens once per resume, so an array a generator
-pushes to before its first yield ends up [1, 1, 2] where node leaves [1, 2], and driving
-a generator to exhaustion costs O(n squared). The ORDER of finally clauses, closes and
-the driver's prints matches node (jsExcTry lets the suspension signal pass untouched).
-VALUES read from a one-shot source do not repeat: a next() on an iterator the replay did
-not create is logged on the first run and answered from the log by every replay
-(lib/js-genlog.js), so a generator over an iterator it was handed yields every element.
+.return(v) resumes the body with a return completion: an exit record raises at the parked
+yield (genClose), so the finally clauses run as node runs them - one that returns
+overrides v, one that yields keeps the generator going, and a yield* delegate's return()
+is called. A for-of that BREAKS is the same close. .throw(v) raises at the parked yield,
+so the body's own catch may take it; at a yield* it is forwarded to the delegate's
+throw() (a delegate with no throw method is closed through its return() and node's
+TypeError is raised). A generator that has not started, or is done, runs nothing and
+throw() rethrows. A value with no callable [Symbol.iterator] is GetIterator's TypeError
+at a for-of, a spread, an array pattern and a yield*.
 
-.return(v) resumes the body with a return completion: it replays to the parked yield and
-raises an exit record there (genClose), so the finally clauses run as node runs them - one
-that returns overrides v, one that yields keeps the generator going, and a yield*
-delegate's return() is called. A for-of that BREAKS is the same close. .throw(v) raises at the parked yield, so the
-body's own catch may take it; at a yield* it is forwarded to the delegate's throw() (a
-delegate with no throw method is closed through its return() and node's TypeError is
-raised). A generator that has not started, or is done, runs nothing and throw() rethrows.
-[Symbol.iterator] is missing: this subset has no symbols (for-of and yield* test for a
-callable 'next' member).
-
-ASYNC IS AWAITS-AS-YIELDS and inherits exactly that price. An async function answers a
-real Promise, 'await' suspends, and the microtask queue is drained once after the entry
-point returns, so the ordering of .then reactions and async resumptions matches node
-(SECTION 16 of tests/js-test-full.js). An async body is driven as a generator body whose
-awaits are its yields, so a side effect BEFORE an await repeats on every resume, which
-the compiler half (a real coroutine) does not do.
+ASYNC IS AWAITS-AS-YIELDS. An async function answers a real Promise, 'await' suspends
+its coroutine, and the microtask queue is drained once after the entry point returns, so
+the ordering of .then reactions and async resumptions matches node (SECTION 16 of
+tests/js-test-full.js).
 
 'for await' and 'async function*' run. An async generator carries its yields AND its
 awaits on the one suspension channel, told apart by a marker record makeAwait puts on
@@ -111,14 +99,8 @@ next/return/throw each answer a promise. 'yield*' inside an async generator awai
 step of the delegate. ag.throw(e) resumes the body with a {__athrow, v} record that every
 yield unpacks through jpAwaitValue, so a try around the yield catches; at a 'yield*' it is
 forwarded to the delegate's throw() as above. g.return() at a yield* closes the delegate
-innermost first. An UNHANDLED REJECTION is deliberately not reported in any engine:
-replay creates a rejected promise more than once, so the bookkeeping would raise spurious
-aborts here.
-
-The fix for replay is a coroutine. The compiler half has one (abnf/jsrt.go's jsGenerator
-runs the body on a goroutine), but neither tag-script engine (goja, frozen MetaJS)
-exposes a suspend primitive to a script; adding one has to land in both halves at once,
-since tests/js-test-full.js compares them.
+innermost first. An UNHANDLED REJECTION is deliberately not reported in any engine (see
+abnf/jsrt.go's drainMicrotasks).
 
 Every tag composes a small JS closure (a 'thunk') out of the thunks of its children.
 Expression thunks return the value, statement thunks return undefined or a signal object
@@ -1019,12 +1001,11 @@ ATargetSuper <~~ push(makeSuperTarget(takeAll())) ~~>
 // inside a generator.
 DExpr       = Assignment | LogicalAssign | AssignExtended | SuperAssign | CondExpr ;
 
-// try/catch/finally and throw are implemented (excThrow/jsExcTry): throw raises the
+// try/catch/finally and throw are implemented (excThrow/excTry): throw raises the
 // value, catch binds it (the binding is optional - ES2019 catch {}), finally always
 // runs. return/break/continue inside a try still propagate. Each part is marked so
-// jsExcTry can tell them apart on the stack. jsExcTry is interp-core's excTry with one
-// difference this grammar needs and no other language does - see its comment.
-TryStmt     <~~ push(jsExcTry(takeAll())) ~~>
+// excTry can tell them apart on the stack.
+TryStmt     <~~ push(excTry(takeAll())) ~~>
             = KwTry TryBody ( CatchClause [ FinallyClause ] | FinallyClause ) ;
 TryBody     <~~ push({trybody: pop()}) ~~>
             = Block ;
@@ -3290,8 +3271,6 @@ NotFuncHead = :script(~~
     // Which scope instantiates each function declaration (makeFuncBody, makeJsBlock).
     include("lib/js-hoist.js")
     include("lib/js-norm.js")
-    // The pull log of the replay generators (genNext, jsPull).
-    include("lib/js-genlog.js")
 
 
     // ----- JavaScript's own value semantics -----
@@ -3462,7 +3441,6 @@ NotFuncHead = :script(~~
             return r
         }
         it["__#@iterator"] = function() { return it }
-        if (genRuns.length > 0) { glStamp(it) }
         return it
     }
     // [Symbol.iterator] of an array or a string read as a value, bound to the receiver.
@@ -4148,10 +4126,7 @@ NotFuncHead = :script(~~
     }
     // Resume an async body once and re-arm it. sent is the value the pending await
     // answers with; when isThrow is set the await raises it instead. The generator
-    // object is this half's REPLAY generator (see newGenObject), so an async body
-    // repeats the side effects that precede an await exactly as a generator body
-    // repeats the ones that precede a yield - the ordering is right, the repetition
-    // is the same documented price.
+    // object is the one a generator function makes (newGenObject).
     function jpAsyncStep(g, p, sent, isThrow) {
         var send = anytype // Either the settled value or the throw-in marker.
         send = sent
@@ -4198,9 +4173,7 @@ NotFuncHead = :script(~~
     // inside an async generator body unpacks its result through jpAwaitValue, which
     // raises when it sees one - the same record and unpacker an await's rejected operand
     // uses. Nothing is kept across a suspension: the record travels ON the resume, so it
-    // is per-coroutine by construction. Under replay (see the generator note below) the
-    // record is the sent value of the yield being resumed, so it is raised there when
-    // the replay reaches it. A throw before the body has ever run does NOT start it
+    // is per-coroutine by construction. A throw before the body has ever run does NOT start it
     // (st["started"]), which is node's suspendedStart rule, and one that reaches a
     // `yield*` is FORWARDED to the delegate's throw() - the yield* loop takes its resume
     // value RAW (doYieldRaw) and branches on the shape instead of unpacking it here.
@@ -4234,7 +4207,6 @@ NotFuncHead = :script(~~
         st["started"] = false // The body has been entered at least once.
         var ag = {}
         ag["__agen"] = true
-        if (genRuns.length > 0) { glStamp(ag) }
         ag["__keys"] = []
         ag["next"] = function() {
             var a1 = anytype
@@ -4987,7 +4959,7 @@ NotFuncHead = :script(~~
     }
     // A BigInt operation's TypeError / SyntaxError / RangeError is a JAVASCRIPT
     // exception, not an engine abort: node catches every one of them. The raised record
-    // is excThrow's ({__exc, v}) so jsExcTry offers it to the catch clause, and its value
+    // is excThrow's ({__exc, v}) so excTry offers it to the catch clause, and its value
     // is a real Error instance built by jsErrFromText from the class name the message
     // spells, so e.message and `e instanceof TypeError` answer.
     function biRaise(msg) { throw {__exc: true, v: jsErrFromText(msg)} }
@@ -5131,8 +5103,7 @@ NotFuncHead = :script(~~
     // `arguments` itself too ('var a = arguments; a[0] = 2') as long as the call's scope
     // is on the chain of the store. `delete arguments[k]` ends k's mapping. All of it
     // finds the binding at run time, so a closure's store and a shadowing block binding
-    // come out right. A generator replays its body over a fresh copy of its arguments
-    // (genNext), so what one run stores never reaches the next. Twins: js_jsargmap / js_jsargsync / js_jsargput in
+    // come out right. Twins: js_jsargmap / js_jsargsync / js_jsargput in
     // abnf/jsrtjsprint.go and languages/lib/js-rt.metajs, emitArgSync / refMemberSet
     // in js-to-llvm-ir.abnf.
     var paramSeen = {}
@@ -7787,7 +7758,7 @@ NotFuncHead = :script(~~
     // valid JavaScript at all (both grammars accept it as a widening), so it is the
     // identity rather than aborting with "yield outside a generator". The compiler
     // half makes the same decision LEXICALLY, at emit time; this one can only ask whether
-    // a replay is in progress, so the two differ for an await inside a plain function
+    // a generator body is running (genRuns), so the two differ for an await inside a plain function
     // that an async body called - a shape no valid program has.
     function makeAwait(t) {
         return function() {
@@ -7869,7 +7840,6 @@ NotFuncHead = :script(~~
                 else { jsSymTrack(o, key) }
             }
             o["__keys"] = keys
-            if (genRuns.length > 0) { glStamp(o) }
             return o
         }
     }
@@ -8102,7 +8072,7 @@ NotFuncHead = :script(~~
         var out = []
         while (n < 0 || out.length < n) {
             var s = anytype // The iterator result record.
-            s = (genRuns.length > 0) ? jsPull(nx, v, [], "") : callWithThis(nx, v, [])
+            s = callWithThis(nx, v, [])
             if (jsTruthy(getMember(s, "done"))) { return out }
             out.push(getMember(s, "value"))
         }
@@ -8110,24 +8080,12 @@ NotFuncHead = :script(~~
         return out
     }
 
-    // One next() call on an iterator. Under a replay, a pull on an iterator the replay
-    // did not create is answered from the generator's log (lib/js-genlog.js). nx is the
-    // `next` member as read; a class method reads as none and is dispatched by name.
-    function jsPull(nx, it, args, site) {
-        var gi = glExtRun(genRuns, it)
-        if (gi >= 0) { return glPull(genRuns, gi, function() { return jsNextCall(nx, it, args, site) }) }
-        return jsNextCall(nx, it, args, site)
-    }
-    function jsNextCall(nx, it, args, site) {
-        if (typeof nx == "function") { return callWithThis(nx, it, args) }
-        return mcall(it, "next", args, site)
-    }
     // One step of a for-of: the iterator's next(), AWAITED when the loop is a
     // 'for await'. Out of line because a MetaJS local keeps the type of its first
     // assignment, and an awaited step is not the same type as a plain one.
     function forOfStep(nx, it, isAwait) {
         var s = anytype
-        s = (genRuns.length > 0) ? jsPull(nx, it, [], "") : callWithThis(nx, it, [])
+        s = callWithThis(nx, it, [])
         if (isAwait) { s = jpDoAwait(s) }
         return s
     }
@@ -8192,9 +8150,8 @@ NotFuncHead = :script(~~
             // ONE STEP PER ITERATION - which is also what makes a for-of over an endless
             // generator with a break in its body terminate. The test is the same
             // STRUCTURAL one the compiler half emits (js-to-llvm-ir.abnf's makeForOf): a
-            // callable `next` member, which a generator object has and an array, a string
-            // and a plain object have not. There are no symbols in this subset, so
-            // Symbol.iterator cannot be the test; the receiver is passed explicitly so a
+            // callable `next` member on what jsIterOf answered, which an iterator has and
+            // an array and a string have not; the receiver is passed explicitly so a
             // hand-written next() reading `this` works.
             var nx = anytype // The `next` member, of any type at all.
             nx = (it != undefined && it != null && typeof it == "object") ? getMember(it, "next") : undefined
@@ -8209,8 +8166,8 @@ NotFuncHead = :script(~~
                     // A BREAK, a RETURN out of the loop and a LABELED BREAK to an
                     // outer statement all close the iterator, as node does: its
                     // return() is called if it has one. On a generator that return()
-                    // is genClose, which replays to the parked yield and raises an
-                    // exit record there, so the body's `finally` runs HERE, at the
+                    // is genClose, which resumes the parked yield with an exit
+                    // record that raises there, so the body's `finally` runs HERE, at the
                     // break, in the same order both compiled halves run it - and a
                     // second loop over a partially consumed generator answers nothing
                     // in all three.
@@ -8287,19 +8244,11 @@ NotFuncHead = :script(~~
     }
 
     // ----- Generators -----
-    // There are no coroutines in the value model - a thunk cannot be suspended half way
-    // - so a generator is driven by REPLAY: every next() re-runs the body from the top,
-    // hands the yields that already happened the values they were sent, and stops at the
-    // next one by throwing a signal the driver catches. A pure generator behaves exactly
-    // right; one with side effects repeats them, which is the honest price of not having
-    // a stack to freeze. genRuns is the stack of active replays, innermost last, so a
-    // generator driven from inside another generator still finds its own run.
-    //
-    // What it costs is REPETITION, not ORDER. The suspension signal is engine plumbing
-    // and jsExcTry keeps it out of the program's own try/catch/finally, and .return(v)
-    // replays to the parked yield and raises there (genClose) rather than setting a
-    // flag - so every finally clause fires at the moment node fires it, and a delegate
-    // of a `yield*` is closed first (jpYieldDeleg).
+    // A generator body runs on a coroutine of its own (coNew / coResume / coYield, the tag
+    // host's suspension, manual 7.14): a yield parks it at any depth of the body's own
+    // statements and the next resume continues it there. genNext switches the run state
+    // the body shares with its resumer. genRuns is the stack of generator bodies being
+    // run, innermost last: a yield belongs to the top one.
     var genRuns = []
 
     // One step of a `yield* it` delegate. Inside an ASYNC generator body it is
@@ -8308,7 +8257,7 @@ NotFuncHead = :script(~~
     // answers a PROMISE, whose `done` is undefined, so an unawaited drive spins.
     function jpStepDelegate(run, dnx, v, args) {
         var r = anytype
-        r = (genRuns.length > 0) ? jsPull(dnx, v, args, "") : callWithThis(dnx, v, args)
+        r = callWithThis(dnx, v, args)
         if (run.ag) { return jpDoAwait(r) }
         return r
     }
@@ -8354,100 +8303,19 @@ NotFuncHead = :script(~~
     // never reach the delegate's throw(). The record travels ON the resume value and
     // nothing is kept across a suspension, which is what makes this per-coroutine by
     // construction rather than by care.
-    function doYieldRaw(run, v) {
-        if (run.k < run.target) {
-            var sent = run.sent[run.k + 1]
-            run.k = run.k + 1
-            // g.return() puts an EXIT RECORD on the resume channel of the yield the
-            // generator is parked at, and only that yield ever sees it - by
-            // construction, since it is the last one the replay re-runs. Raising here
-            // is what runs the body's `finally` clauses at the moment node runs them
-            // (genClose; the same shape languages/python-interpreter.abnf uses).
-            if (jpIsExitIn(sent)) { throw {__genExit: true} }
-            return sent
-        }
-        run.k = run.k + 1
-        throw {__genYield: true, v: v}
+    function doYieldRaw(v) {
+        var sent = anytype // What the resume sends in.
+        sent = coYield(v)
+        // g.return() puts an EXIT RECORD on the resume value of the yield the
+        // generator is parked at. Raising here is what runs the body's `finally`
+        // clauses at the moment node runs them (genClose).
+        if (jpIsExitIn(sent)) { throw {__genExit: true} }
+        return sent
     }
     // Is this resume value the exit record genClose puts on the channel?
     function jpIsExitIn(v) {
         if (!jpIsObjV(v)) { return false }
         return v["__genExitIn"] === true
-    }
-    // Is this in-flight host throw a generator SUSPENSION rather than a JavaScript
-    // exception? Only jsExcTry asks: the suspension unwinds the host stack the same way
-    // a throw does and must not be seen by the program's own try/catch/finally.
-    function jsIsGenSuspend(e) {
-        return e != undefined && e != null && e.__genYield == true
-    }
-    // interp-core's excTry, copied here for ONE difference, and copied rather than
-    // overridden because a same-name override is the include trap
-    // (docs/working-on-this-project.md 7.12): under goja the host hoists, under the
-    // frozen engine textual position decides, and the two would pick opposite winners.
-    //
-    // THE DIFFERENCE: a generator suspends by THROWING (doYieldRaw), and a host
-    // `finally` runs for any unwinding - so without it a `yield` inside a try/finally
-    // would run the program's `finally` at every suspension, a WRONG ORDER: node runs it
-    // when the generator finishes or is closed. The suspension signal is engine
-    // plumbing and not a JavaScript exception, so it reaches genNext without touching
-    // the catch clause or the finally clause. An `await` is a yield in this half, so
-    // this covers an async body's try/finally too.
-    //
-    // The exit record's raise (__genExit) is deliberately NOT let through: closing a
-    // generator MUST run the finally clauses wrapping its yield. It is not offered to
-    // `catch` either - excIsUser is false for it - which is what both compiled halves do
-    // with the floor's GEN_EXIT sentinel.
-    // items = [{trybody}, {catchbody,catchname}*, {finbody}?].
-    function jsExcTry(items) {
-        var tryT = anytype, catchT = anytype, catchName = anytype, finallyT = anytype
-        var catchBind = anytype
-        for (var i = 0; i < items.length; i++) {
-            if (items[i].trybody != undefined) { tryT = items[i].trybody }
-            else if (items[i].catchbody != undefined) {
-                if (catchT == undefined) {
-                    catchT = items[i].catchbody
-                    catchName = items[i].catchname
-                    if (hasOwn(items[i], "catchbind")) { catchBind = items[i].catchbind }
-                }
-            }
-            else if (items[i].finbody != undefined) { finallyT = items[i].finbody }
-        }
-        return function() {
-            var savedChain = scopes.slice()
-            var box = {sig: undefined}
-            var suspended = false
-            try {
-                box.sig = tryT()
-            } catch (e) {
-                if (jsIsGenSuspend(e)) { suspended = true; throw e }
-                scopes = savedChain.slice()
-                if (excIsUser(e) && catchT != undefined) {
-                    scopes.push({})
-                    if (catchBind != undefined) { catchBind(e.v) }
-                    else if (catchName != undefined) { declVar(catchName, e.v) }
-                    // A `yield` inside the CATCH ARM suspends from in here, where
-                    // the catch clause above can no longer see it, so the finally
-                    // below must not run at that suspension either:
-                    // `try { throw 1 } catch (e) { yield 99 } finally { ... }`.
-                    try { box.sig = catchT() }
-                    catch (e2) { if (jsIsGenSuspend(e2)) { suspended = true } throw e2 }
-                    scopes.pop()
-                } else {
-                    throw e
-                }
-            } finally {
-                if (!suspended) {
-                    scopes = savedChain.slice()
-                    if (finallyT != undefined) {
-                        var fr = finallyT()
-                        // Returning from the host finally overrides the try/catch
-                        // completion AND cancels a rethrown exception, like in JS.
-                        if (fr != undefined) { return fr }
-                    }
-                }
-            }
-            return box.sig
-        }
     }
     // Hand ONE delegated element out. If the generator is CLOSED while parked here the
     // exit record raises inside doYieldRaw, and node runs IteratorClose on the delegate
@@ -8458,7 +8326,7 @@ NotFuncHead = :script(~~
     function jpYieldDeleg(run, val, dv) {
         var s = anytype
         try {
-            s = doYieldRaw(run, val)
+            s = doYieldRaw(val)
         } catch (e) {
             if (e != undefined && e != null && e.__genExit == true) {
                 var dr = anytype
@@ -8481,8 +8349,7 @@ NotFuncHead = :script(~~
             // A delegate that is an ITERATOR is driven through next() - the same
             // structural test the for-of loops use - and one that is an array or a
             // string by index. Driving it lazily is what makes 'yield* endless()'
-            // work: the doYield below throws out of the replay at the yield being
-            // produced, so the delegate is only ever stepped as far as it is needed.
+            // work: the delegate is only ever stepped as far as it is needed.
             v = run.ag ? jsIterOfAsync(v) : jsIterOf(v)
             var dnx = anytype // The delegate's `next` member, of any type.
             dnx = (typeof v == "object") ? getMember(v, "next") : undefined
@@ -8527,7 +8394,7 @@ NotFuncHead = :script(~~
         // here, at the yield it was aimed at, so the body's own try/catch sees it.
         // A PLAIN generator wants exactly what jpAwaitValue does to it, which is
         // why the two paths differ only in the awaiting.
-        sent = doYieldRaw(run, v)
+        sent = doYieldRaw(v)
         if (run.ag) { return jpAwaitValue(sent) }
         if (jpIsThrowIn(sent)) { throw {__exc: true, v: sent["v"]} }
         return sent
@@ -8578,7 +8445,7 @@ NotFuncHead = :script(~~
             }
         }, nm, params, txt)
     }
-    // The value an ASYNC GENERATOR function is: the same replay generator, handed to
+    // The value an ASYNC GENERATOR function is: the same generator, handed to
     // the request-queue driver instead of the one-shot async driver. Its yields and
     // its awaits share ONE suspension channel and are told apart by the {__awt} marker
     // makeAwait puts on every awaited operand (see jpAgStep).
@@ -8624,24 +8491,22 @@ NotFuncHead = :script(~~
     // unawaited never sees a `done` and spins forever.
     // argm is the mapped parameter names (jsArgMapNames), or null.
     function newGenObject(params, bodyT, env, self, args, isAg, argm) {
-        var st = {sent: [], count: 0, done: false, ag: isAg, closeV: undefined, closing: false, log: [], running: false,
-                  argm: argm}
+        var st = {co: null, sc: env, started: false, done: false, ag: isAg, closeV: undefined, running: false}
         var g = {}
         g["__gen"] = true
-        if (genRuns.length > 0) { glStamp(g) }
         g["__keys"] = []
+        st["body"] = function() { return genBody(params, bodyT, env, self, args, argm) }
         g["next"] = function() {
             var sendv = anytype // next(v) may send any value in.
             sendv = (arguments.length > 0) ? arguments[0] : undefined
-            return genNext(st, params, bodyT, env, self, args, sendv)
+            return genNext(st, sendv)
         }
         // g.return(v): resume the body with a return completion at the yield it is
-        // parked at (genClose). It is reachable in the replay model because it needs no
-        // frozen stack: replay to that yield and raise there instead of resuming.
+        // parked at (genClose).
         g["return"] = function() {
             var rv = anytype
             rv = (arguments.length > 0) ? arguments[0] : undefined
-            return genClose(st, params, bodyT, env, self, args, rv)
+            return genClose(st, rv)
         }
         // g.throw(v): raise v AT the yield the body is parked at, so the body's
         // own catch and finally clauses see it - the difference from return(),
@@ -8652,55 +8517,69 @@ NotFuncHead = :script(~~
         g["throw"] = function() {
             var tv = anytype
             tv = (arguments.length > 0) ? arguments[0] : undefined
-            return genThrow(st, params, bodyT, env, self, args, tv)
+            return genThrow(st, tv)
         }
         // A generator is an iterable whose [Symbol.iterator]() is itself.
         g["__#@iterator"] = function() { return g }
         return g
     }
+    // The body, run on the generator's own coroutine by its first resume: the call's
+    // scope, then the statements. The exit record a close raised that leaves the body
+    // completes it with the close's value.
+    function genBody(params, bodyT, env, self, args, argm) {
+        scopes = env.slice()
+        var sc = {}
+        sc["this"] = self
+        var ao = args.slice()
+        sc["arguments"] = jsArgsObj(ao)
+        jsArgMap(sc, argm, ao)
+        scopes.push(sc)
+        bindParams(sc, params, args)
+        var r = anytype // The body's completion record.
+        try { r = bodyT() }
+        catch (e) {
+            if (e != undefined && e != null && e.__genExit == true) { return jpCloseV }
+            throw e
+        }
+        if (r != undefined && r.isRet) { return r.v }
+        return undefined
+    }
     // A generator that is DONE, or that has never been resumed, runs nothing at
     // all - a body that has not begun has no suspension point and therefore no
     // `finally` to unwind - and the value propagates out of throw() itself. Both
     // are node's rule and CPython's.
-    function genThrow(st, params, bodyT, env, self, args, tv) {
+    function genThrow(st, tv) {
         genBusyCheck(st)
-        if (st.done || st.count == 0) {
+        if (st.done || !st.started) {
             st.done = true
             throw {__exc: true, v: tv}
         }
         var m = {}
         m["__athrow"] = true
         m["v"] = tv
-        var r = anytype
-        // A body that does not catch it is DONE, even though the throw leaves
-        // through genNext rather than through its return.
-        try { r = genNext(st, params, bodyT, env, self, args, m) }
-        catch (e) { st.done = true; throw e }
-        return r
+        return genNext(st, m)
     }
     // The close itself: node RESUMES the body with a return completion at the yield
     // it is parked at, and so does this - the exit record raises there and the body's
     // own finally clauses run, as the body's code. A finally that YIELDS makes return()
-    // answer {value, done: false} with the generator suspended inside it, the later
-    // next() calls replay to that point and go on, and the exit completes the body when
-    // it leaves; a finally that RETURNS overrides the value. A generator that has never
-    // been resumed has no suspension point, so it is only marked done - node's rule
-    // too. Twins: genReturn in abnf/jsrtjsprint.go, jvGenReturn in
-    // languages/lib/js-rt.metajs.
-    // jpCloseV is the value the exit completes the body with while a run is in
-    // progress; a `yield*` the body is parked at may replace it (jpReturnDelegate).
-    // st.closeV keeps it between runs, since every later replay raises the exit again.
+    // answer {value, done: false} with the generator suspended inside it, and the exit
+    // completes the body when it leaves; a finally that RETURNS overrides the value. A
+    // generator that has never been resumed has no suspension point, so it is only
+    // marked done - node's rule too. Twins: genReturn in abnf/jsrtjsprint.go,
+    // jvGenReturn in languages/lib/js-rt.metajs.
+    // jpCloseV is the value the exit completes the body with while it runs; a `yield*`
+    // the body is parked at may replace it (jpReturnDelegate). st.closeV keeps it while
+    // the body is suspended.
     var jpCloseV = anytype
     jpCloseV = undefined
-    function genClose(st, params, bodyT, env, self, args, rv) {
+    function genClose(st, rv) {
         genBusyCheck(st)
-        if (st.done || st.count == 0) {
+        if (st.done || !st.started) {
             st.done = true
             return {value: rv, done: true, __keys: ["value", "done"]}
         }
         st.closeV = rv
-        st.closing = true
-        return genNext(st, params, bodyT, env, self, args, {__genExitIn: true})
+        return genNext(st, {__genExitIn: true})
     }
     // A generator resumed while its own body runs (it stepped itself, directly or
     // through another generator) raises node's TypeError. Twin of jsGenerator.enter
@@ -8708,57 +8587,41 @@ NotFuncHead = :script(~~
     function genBusyCheck(st) {
         if (st.running) { biRaise("TypeError: Generator is already running") }
     }
-    // One step: replay the body up to yield number st.count, and report what happened.
-    function genNext(st, params, bodyT, env, self, args, sendv) {
+    // One step: resume the body's coroutine with sendv (the first resume starts it) and
+    // report the next yield or the end. The interpreter's run state belongs to the side
+    // that runs: the resume installs the body's scope chain and close value, and the
+    // resumer's come back when the body yields, returns or raises. A body that raises
+    // is done, even when the raise is a throw() it did not catch.
+    function genNext(st, sendv) {
         genBusyCheck(st)
         if (st.done) { return {value: undefined, done: true, __keys: ["value", "done"]} }
+        if (st.co === null) { st.co = coNew(st.body) }
         st.running = true
-        st.sent.push(sendv)
-        var run = {target: st.count, k: 0, sent: st.sent, out: undefined, ag: st.ag, log: st.log, lp: 0, floor: glSerial}
-        genRuns.push(run)
+        genRuns.push(st)
         var saved = scopes
         var savedCloseV = anytype
         savedCloseV = jpCloseV
         jpCloseV = st.closeV
-        var ret = anytype   // The generator's return value,
-        var out = anytype   // or the value it yielded.
-        ret = undefined
-        out = undefined
-        var yielded = false
-        try {
-            scopes = env.slice()
-            var sc = {}
-            sc["this"] = self
-            // Each replay starts from the call's own arguments: what one run stored into
-            // them (mapped or not) must not reach the parameters of the next.
-            var ao = args.slice()
-            sc["arguments"] = jsArgsObj(ao)
-            jsArgMap(sc, st.argm, ao)
-            scopes.push(sc)
-            bindParams(sc, params, args)
-            var r = bodyT()
-            ret = (r != undefined && r.isRet) ? r.v : undefined
-            // A body a close resumed that ends with no return value of its own answers
-            // the close's: a replay re-steps a delegate the body was HANDED (it is not
-            // re-created), so `yield* it` may run out instead of re-raising the exit.
-            if (st.closing && (r == undefined || !r.isRet)) { ret = jpCloseV }
-        } catch (e) {
-            if (e != undefined && e.__genYield == true) { yielded = true; out = e.v }
-            // The exit record a close raised left the body: it completes with the
-            // close's value.
-            else if (e != undefined && e != null && e.__genExit == true) { ret = jpCloseV }
-            else { st.running = false; scopes = saved; genRuns.pop(); jpCloseV = savedCloseV; throw e }
+        scopes = st.sc
+        var r = anytype // {value, done} from the coroutine.
+        try { r = coResume(st.co, sendv) }
+        catch (e) {
+            st.running = false
+            st.done = true
+            scopes = saved
+            genRuns.pop()
+            jpCloseV = savedCloseV
+            throw e
         }
+        st.sc = scopes
+        st.closeV = jpCloseV
         st.running = false
         jpCloseV = savedCloseV
         scopes = saved
         genRuns.pop()
-        if (yielded) {
-            st.count = st.count + 1
-            return {value: out, done: false, __keys: ["value", "done"]}
-        }
-        st.done = true
-        return {value: ret, done: true, __keys: ["value", "done"]}
+        st.started = true
+        if (r.done) { st.done = true }
+        return {value: r.value, done: r.done, __keys: ["value", "done"]}
     }
     // items = [{isgen}?, name, params, bodyThunk] for a declaration, and the same
     // without the name for an expression. The '*' picks a generator over a function.
@@ -9348,7 +9211,6 @@ NotFuncHead = :script(~~
             if (typeof cls == "function") {
                 var self = {}
                 self["__keys"] = []
-                if (genRuns.length > 0) { glStamp(self) }
                 self["__class"] = ctorDescriptor(clsName, cls)
                 pendingNewTarget = cls
                 var r = anytype // The function may return a replacement object.
@@ -9366,7 +9228,6 @@ NotFuncHead = :script(~~
             var obj = {}
             obj["__class"] = cls
             obj["__keys"] = []
-            if (genRuns.length > 0) { glStamp(obj) }
             var cargv = [obj]
             for (var j = 0; j < argv.length; j++) cargv.push(argv[j])
             var cret = anytype // [[Construct]]: a returned OBJECT replaces the instance.
@@ -9997,12 +9858,6 @@ NotFuncHead = :script(~~
                     curThis = undefined
                 } else {
                     var argv = evalArgs(s.args)
-                    // A next() call is an iterator pull, logged under a replay.
-                    if (genRuns.length > 0 && lastKey === "next") {
-                        cur = jsPull(cur, curThis, argv, sTexts[i])
-                        curThis = undefined
-                        continue
-                    }
                     // The regular-expression surface first: a RegExp receiver has no
                     // members of its own (getMember answered undefined), and a string
                     // receiver whose argument is a pattern must not fall through to the

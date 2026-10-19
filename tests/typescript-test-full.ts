@@ -4160,6 +4160,47 @@ function s86(): void {
         te(() => new Set(v[0])) === "T" && [...(new K86() as any), ...(new (F86 as any)())].join() === "7,8,9")
 }
 
+// ===== SECTION 87: a generator body runs once =====
+// A generator or async body is suspended at a yield or an await and continued there, so
+// the side effects before it happen once: through next(v), throw(), return(), a yield*,
+// a for-of break, an async function's awaits and an async generator. Values read off
+// node 24.
+const log87: string[] = []
+function* g87(): Generator<number, number, any> { log87.push("a"); const x = yield 1; log87.push("b" + x); try { yield 2 } catch (e) { log87.push("c" + e) } finally { log87.push("f") } log87.push("d"); return 9 }
+function* fin87(): Generator<number, void, any> { try { log87.push("s"); yield 1; yield 2 } finally { log87.push("fin") } }
+function* in87(): Generator<number, string, any> { log87.push("i0"); const r = yield 10; log87.push("ir" + r); return "IR" }
+function* out87(): Generator<number, void, any> { log87.push("o0"); const v = yield* in87(); log87.push("ov" + v); yield 20 }
+async function af87(n: number): Promise<number> { log87.push("af" + n); const x = await n; log87.push("aw" + x); return x + 1 }
+async function* ag87(): AsyncGenerator<number, void, any> { log87.push("ag0"); yield 1; log87.push("ag1"); await 0; yield 2; log87.push("ag2") }
+function s87(): void {
+    const g = g87()
+    const r = [g.next(), g.next("X"), g.throw("E"), g.next()].map(function (x: any) { return x.value + "/" + x.done }).join()
+    check("gr87a", r === "1/false,2/false,9/true,undefined/true" && log87.join() === "a,bX,cE,f,d")
+    log87.length = 0
+    const h = fin87()
+    h.next()
+    const hr = h.return(5)
+    const o = out87()
+    const or = [o.next(), o.next("S"), o.next()].map(function (x: any) { return x.value }).join()
+    check("gr87b", hr.value === 5 && hr.done && or === "10,20," && log87.join() === "s,fin,o0,i0,irS,ovIR")
+    log87.length = 0
+    for (const x of fin87()) { break }
+    check("gr87c", log87.join() === "s,fin")
+    log87.length = 0
+    af87(3).then(function (v: number) {
+        const ok = v === 4 && log87.join() === "af3,ag0,aw3"
+        check("gr87d", ok)
+        if (!ok) { exit(1) }
+    })
+    const ys: number[] = []
+    const run = async function () { for await (const y of ag87()) { ys.push(y) } }
+    run().then(function () {
+        const ok = ys.join() === "1,2" && log87.join() === "af3,ag0,aw3,ag1,ag2"
+        check("gr87e", ok)
+        if (!ok) { exit(1) }
+    })
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -4249,6 +4290,7 @@ function main(): number {
     s84(); // SECTION-CALL 84
     s85(); // SECTION-CALL 85
     s86(); // SECTION-CALL 86
+    s87(); // SECTION-CALL 87
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

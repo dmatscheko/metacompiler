@@ -6,7 +6,7 @@
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43, engine agreement, generators, Error, Math
-//   tests/js-test-full.3.js   sections 44-56, 58-71 and 73-92, the call/class/
+//   tests/js-test-full.3.js   sections 44-56, 58-71 and 73-93, the call/class/
 //                             private-name model, iterators, the arguments object and
 //                             the rest of the builtin surface (see its header)
 //   tests/js-test-full.4.mjs  sections 57 and 72, the Module goal
@@ -152,12 +152,11 @@ function s37() {
     check("itc2", again.length === 0)
     check("itc3", a.next().done === true && a.next().value === undefined)
     check("itc4", fins === 1)
-    // Exhausting the loop normally leaves it done as well. No finally count here:
-    // replay runs one per next(), so the two halves reach four and one.
+    // Exhausting the loop normally leaves it done as well, and runs the finally once.
     var b = g37()
     var total = 0
     for (var z of b) { total = total + z }
-    check("itc5", total === 6 && b.next().done === true)
+    check("itc5", total === 6 && b.next().done === true && fins === 2)
     // continue does NOT close; the break after it does.
     var c = g37()
     var got = []

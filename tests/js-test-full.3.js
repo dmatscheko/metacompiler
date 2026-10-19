@@ -1,4 +1,4 @@
-// Full-syntax test: JavaScript - part 3 of 4, sections 44-56, 58-71 and 73-92.
+// Full-syntax test: JavaScript - part 3 of 4, sections 44-56, 58-71 and 73-93.
 //
 // THE JS RATCHET IS FOUR FILES: as one file its -frozen interpreter leg ran into
 // ./test.sh --full's time brake (peak memory grew superlinearly with the file), and
@@ -6,7 +6,7 @@
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43, engine agreement, generators, Error, Math
-//   tests/js-test-full.3.js   sections 44-56, 58-71 and 73-92, the call/class/private-name
+//   tests/js-test-full.3.js   sections 44-56, 58-71 and 73-93, the call/class/private-name
 //                             model, the Unicode identifier tables, iterators, derived
 //                             constructors, JSON, guards, Set and Map, iterator closing,
 //                             hasOwnProperty, delete, Object.prototype, extends Object,
@@ -2353,6 +2353,47 @@ function s92() {
         te(() => new Set(v[0])) === "T" && [...new K92(), ...new F92()].join() === "7,8,9")
 }
 
+// ===== SECTION 93: a generator body runs once =====
+// A generator or async body is suspended at a yield or an await and continued there, so
+// the side effects before it happen once: through next(v), throw(), return(), a yield*,
+// a for-of break, an async function's awaits and an async generator. Values read off
+// node 24.
+const log93 = []
+function* g93() { log93.push("a"); const x = yield 1; log93.push("b" + x); try { yield 2 } catch (e) { log93.push("c" + e) } finally { log93.push("f") } log93.push("d"); return 9 }
+function* fin93() { try { log93.push("s"); yield 1; yield 2 } finally { log93.push("fin") } }
+function* in93() { log93.push("i0"); const r = yield 10; log93.push("ir" + r); return "IR" }
+function* out93() { log93.push("o0"); const v = yield* in93(); log93.push("ov" + v); yield 20 }
+async function af93(n) { log93.push("af" + n); const x = await n; log93.push("aw" + x); return x + 1 }
+async function* ag93() { log93.push("ag0"); yield 1; log93.push("ag1"); await 0; yield 2; log93.push("ag2") }
+function s93() {
+    const g = g93()
+    const r = [g.next(), g.next("X"), g.throw("E"), g.next()].map(function (x) { return x.value + "/" + x.done }).join()
+    check("gr93a", r === "1/false,2/false,9/true,undefined/true" && log93.join() === "a,bX,cE,f,d")
+    log93.length = 0
+    const h = fin93()
+    h.next()
+    const hr = h.return(5)
+    const o = out93()
+    const or = [o.next(), o.next("S"), o.next()].map(function (x) { return x.value }).join()
+    check("gr93b", hr.value === 5 && hr.done && or === "10,20," && log93.join() === "s,fin,o0,i0,irS,ovIR")
+    log93.length = 0
+    for (const x of fin93()) { break }
+    check("gr93c", log93.join() === "s,fin")
+    log93.length = 0
+    af93(3).then(function (v) {
+        const ok = v === 4 && log93.join() === "af3,ag0,aw3"
+        check("gr93d", ok)
+        if (!ok) { exit(1) }
+    })
+    const ys = []
+    const run = async function () { for await (const y of ag93()) { ys.push(y) } }
+    run().then(function () {
+        const ok = ys.join() === "1,2" && log93.join() === "af3,ag0,aw3,ag1,ag2"
+        check("gr93e", ok)
+        if (!ok) { exit(1) }
+    })
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -2403,6 +2444,7 @@ function main() {
     s90() // SECTION-CALL 90
     s91() // SECTION-CALL 91
     s92() // SECTION-CALL 92
+    s93() // SECTION-CALL 93
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }
