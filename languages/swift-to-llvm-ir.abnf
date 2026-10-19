@@ -845,8 +845,7 @@ CatchClause <~~ push(makeCatchClause(takeAll())) ~~>
 // tested by matchPat/emitMatchPat with exactly the `is` operator's test, so a
 // clause whose type does not match falls to the next clause, and
 // `catch let e as T` and `catch is T` agree by construction.
-CatchPat    <~~ push({cpat: makeCatchPat(takeAll())}) ~~> = Pattern [ "as" KwEnd CatchAsType ] ;
-CatchAsType <~~ push({casty: stripWs(up.in)}) ~~> = Type ;
+CatchPat    <~~ push({cpat: pop()}) ~~> = Pattern ;
 CatchWhere  <~~ push({cwhere: pop()}) ~~> = KwWhere Expression ;
 // defer { ... }: everything AFTER it in its block is emitted into a js_try whose
 // FINALLY closure is the defer body, so it runs on the normal path, on a return (a
@@ -896,7 +895,10 @@ BindName    <~~ push(swBt(up.in)) ~~> = Wildcard | Id ;
 // A bare identifier is a BINDING when it sits under a `let`/`var` and an enum case
 // reference otherwise, so emitMatchCore carries that flag down the tree.
 Pattern     <~~ push(makePattern(takeAll())) ~~>
-            = PatCore { NoSpace "?" <~~ push({popt: 1}) ~~> } ;
+            = PatCore { NoSpace "?" <~~ push({popt: 1}) ~~> } [ "as" KwEnd PatAsType ] ;
+// `case let d as Double` / `catch let e as NetErr`: a type-casting pattern, which
+// matches when the subject `is` that type and then binds or tests it.
+PatAsType   <~~ push({casty: stripWs(up.in)}) ~~> = Type ;
 PatCore     = PatIs | PatLet | PatTuple | PatWild | PatRange | PatElem | PatEnum | PatExpr ;
 // `case is Double:` - a TYPE pattern, which did not parse in either half and took
 // the whole switch statement down with it. It runs exactly the test the `is`
@@ -2970,7 +2972,84 @@ KwContinue  = "continue" KwEnd ;
         while (b2 > a && (s.charAt(b2 - 1) == " " || s.charAt(b2 - 1) == "\t")) { b2 = b2 - 1 }
         return s.substring(a, b2)
     }
+    // `xs is [Int]`, `d is [String: Int]`, `t is (Int, String)`: a collection or
+    // tuple type, as {k: "arr" | "dict" | "tup", ts: element types}, else null.
+    // Twin in swift-interpreter.abnf.
+    function swStructTy(t) {
+        if (t.length < 3) { return null }
+        var c0 = t.charAt(0)
+        if ((c0 != "[" && c0 != "(") || swCloseAt(t, 0) != t.length - 1) { return null }
+        var parts = swTySplit(t.substring(1, t.length - 1), c0 == "[" ? ":" : ",")
+        if (c0 == "[") {
+            if (parts.length > 2) { return null }
+            return {k: parts.length == 1 ? "arr" : "dict", ts: parts}
+        }
+        if (parts.length < 2) { return null }
+        var ts = []
+        for (var i = 0; i < parts.length; i++) {
+            var lp = swTySplit(parts[i], ":")
+            ts.push(lp[lp.length - 1])
+        }
+        return {k: "tup", ts: ts}
+    }
+    // A collection or tuple value is that type when every element is its element
+    // type. Twin of swStructIs in swift-interpreter.abnf.
+    function swEmitStructIs(b, v, st, opt) {
+        var okB = curF.NewBlock("")
+        var failB = curF.NewBlock("")
+        var goB = curF.NewBlock("")
+        swEmitNilBr(b, v, opt ? okB : failB, goB)
+        b = goB
+        if (st.k == "arr") {
+            var aB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_is_type", [v, emitStr(b, "Array")])), aB, failB)
+            b = swEmitAllIs(aB, v, st.ts[0], failB)
+        } else if (st.k == "dict") {
+            var rd = rtIsDictStrict(b, v)
+            var dB = curF.NewBlock("")
+            rd.b.NewCondBr(truthy(rd.b, rd.v), dB, failB)
+            b = swEmitAllIs(dB, callExt(dB, "js_get", [v, emitStr(dB, "keys")]), st.ts[0], failB)
+            b = swEmitAllIs(b, callExt(b, "js_get", [v, emitStr(b, "vals")]), st.ts[1], failB)
+        } else {
+            var nV = b.NewCall(rtProbe("sw_tuplen", "__tuple"), [v])
+            var tB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [nV, emitNum(b, st.ts.length)])), tB, failB)
+            b = tB
+            for (var i = 0; i < st.ts.length; i++) {
+                var re = emitIsType(b, callExt(b, "js_get", [v, emitStr(b, "" + i)]), st.ts[i])
+                var nxB = curF.NewBlock("")
+                re.b.NewCondBr(truthy(re.b, re.v), nxB, failB)
+                b = nxB
+            }
+        }
+        b.NewBr(okB)
+        var joinB = curF.NewBlock("")
+        okB.NewBr(joinB)
+        failB.NewBr(joinB)
+        return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(hTrue, okB), llvm.ir.NewIncoming(hFalse, failB)])}
+    }
+    // Every element of the array arrV is a T, or control leaves for failB.
+    function swEmitAllIs(b, arrV, T, failB) {
+        var lenV = callExt(b, "js_pylen", [arrV])
+        var sc = callExt(b, "js_scope_new", [handle(0)])
+        callExt(b, "js_scope_decl", [sc, emitStr(b, "i"), emitNum(b, 0)])
+        var headB = curF.NewBlock("")
+        var bodyB = curF.NewBlock("")
+        var doneB = curF.NewBlock("")
+        b.NewBr(headB)
+        var iV = callExt(headB, "js_scope_get", [sc, emitStr(headB, "i")])
+        headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, doneB)
+        var re = emitIsType(bodyB, callExt(bodyB, "js_swidx", [arrV, iV]), T)
+        var nxB = curF.NewBlock("")
+        re.b.NewCondBr(truthy(re.b, re.v), nxB, failB)
+        callExt(nxB, "js_scope_set", [sc, emitStr(nxB, "i"), callExt(nxB, "js_jadd", [iV, emitNum(nxB, 1)])])
+        nxB.NewBr(headB)
+        return doneB
+    }
     function emitIsType(b, v, tname) {
+        var tb = swTyStripOptText(tname)
+        var st = swStructTy(tb)
+        if (st != null) { return swEmitStructIs(b, v, st, tb.length != tname.length) }
         var comps = swSplitAmp(tname)
         if (comps.length > 1) {
             var failB = curF.NewBlock("")
@@ -4694,18 +4773,15 @@ KwContinue  = "continue" KwEnd ;
     // ----- Patterns and binding conditions -----
     // A pattern is {opt: n, core: k}: n trailing `?` (an optional pattern, which
     // fails on nil and matches the unwrapped value) around one core form.
-    // The pattern of one catch clause, plus the type of its optional `as` suffix.
-    function makeCatchPat(items) {
-        var p = items[0]
-        for (var i = 1; i < items.length; i++) {
-            if (items[i] != undefined && items[i].casty != undefined) { p.asty = items[i].casty }
-        }
-        return p
-    }
     function makePattern(items) {
         var n = 0
-        for (var i = 1; i < items.length; i++) { n++ }
-        return {opt: n, core: items[0]}
+        var asty = ""
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].casty != undefined) { asty = items[i].casty } else { n++ }
+        }
+        var p = {opt: n, core: items[0]}
+        if (asty != "") { p.asty = asty }
+        return p
     }
     // [ "." ] path [ ( subpatterns ) ] - an enum case reference, or (under a `let`)
     // a plain name to bind.

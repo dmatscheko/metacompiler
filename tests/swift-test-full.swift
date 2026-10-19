@@ -4915,6 +4915,40 @@ func s116() {
     check("116b", max(a, b).id == "b" && min(a, b).id == "a" && max(a, b, c).id == "b" && min(c, a, b).id == "c")
 }
 
+// ===== SECTION 117: type-casting patterns; collection and tuple types in is/as? =====
+// `case let x as T` matches when the subject is a T and binds it; `is` and `as?`
+// against [T], [K: V] and a tuple type test every element (an empty array is an
+// array of anything). Every value read off swiftc 6.1.2.
+class A117 {}
+class B117: A117 {}
+func s117() {
+    let things: [Any] = [1, "two", 2.5, B117(), [1, 2], (4, "t"), ["k": 1.5]]
+    var seen = [String]()
+    for t in things {
+        switch t {
+        case let i as Int: seen.append("i\(i)")
+        case let s as String where s.count > 2: seen.append("s" + s)
+        case let b as B117: seen.append(b is A117 ? "B" : "?")
+        case let xs as [Int]: seen.append("a\(xs.count)")
+        case let (n, s) as (Int, String): seen.append("t\(n)\(s)")
+        case let d as [String: Double]: seen.append("d\(d.count)")
+        default: seen.append("-")
+        }
+    }
+    check("117a", seen == ["i1", "stwo", "-", "B", "a2", "t4t", "d1"])
+    var strs = 0
+    for case let s as String in things { strs += s.count }
+    let z: Any = 41
+    var got = 0
+    if case let n as Int = z { got = n + 1 }
+    check("117b", strs == 3 && got == 42)
+    let e: [Any] = []
+    let ws: Any = ["a", "b"]
+    check("117c", things[4] is [Int] && !(things[4] is [String]) && e is [Int] && things[5] is (Int, String)
+        && [B117(), B117()] as Any is [A117] && !([A117(), B117()] as Any is [B117])
+        && (ws as? [String])?.count == 2 && (ws as? [Int]) == nil)
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5032,6 +5066,7 @@ func main() {
     s114() // SECTION-CALL 114
     s115() // SECTION-CALL 115
     s116() // SECTION-CALL 116
+    s117() // SECTION-CALL 117
     print("full: \(checks) checks, \(fails) failures")
 }
 

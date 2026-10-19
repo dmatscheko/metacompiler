@@ -857,8 +857,7 @@ CatchClause <~~ push(makeCatchClause(takeAll())) ~~>
 // tested by matchPat/emitMatchPat with exactly the `is` operator's test, so a
 // clause whose type does not match falls to the next clause, and
 // `catch let e as T` and `catch is T` agree by construction.
-CatchPat    <~~ push({cpat: makeCatchPat(takeAll())}) ~~> = Pattern [ "as" KwEnd CatchAsType ] ;
-CatchAsType <~~ push({casty: stripWs(up.in)}) ~~> = Type ;
+CatchPat    <~~ push({cpat: pop()}) ~~> = Pattern ;
 CatchWhere  <~~ push({cwhere: pop()}) ~~> = KwWhere Expression ;
 // defer { ... }: the block is registered on the enclosing function's defer frame
 // and runs when that function leaves - in LIFO order, on the normal path, on an
@@ -909,7 +908,10 @@ BindName    <~~ push(swBt(up.in)) ~~> = Wildcard | Id ;
 // A bare identifier is a BINDING when it sits under a `let`/`var` and an enum case
 // reference otherwise, so matchCore carries that flag down the tree.
 Pattern     <~~ push(makePattern(takeAll())) ~~>
-            = PatCore { NoSpace "?" <~~ push({popt: 1}) ~~> } ;
+            = PatCore { NoSpace "?" <~~ push({popt: 1}) ~~> } [ "as" KwEnd PatAsType ] ;
+// `case let d as Double` / `catch let e as NetErr`: a type-casting pattern, which
+// matches when the subject `is` that type and then binds or tests it.
+PatAsType   <~~ push({casty: stripWs(up.in)}) ~~> = Type ;
 PatCore     = PatIs | PatLet | PatTuple | PatWild | PatRange | PatElem | PatEnum | PatExpr ;
 // `case is Double:` - a TYPE pattern. It runs exactly the test the `is`
 // OPERATOR runs, so it agrees with `case let z where z is Double` by construction.
@@ -5129,6 +5131,46 @@ KwContinue  = "continue" KwEnd ;
         out.push(stripWs(cur))
         return out
     }
+    // `xs is [Int]`, `d is [String: Int]`, `t is (Int, String)`: a collection or
+    // tuple type, as {k: "arr" | "dict" | "tup", ts: element types}, else null.
+    // Twin in swift-to-llvm-ir.abnf.
+    function swStructTy(t) {
+        if (t.length < 3) { return null }
+        var c0 = t.charAt(0)
+        if ((c0 != "[" && c0 != "(") || swCloseAt(t, 0) != t.length - 1) { return null }
+        var parts = swTySplit(t.substring(1, t.length - 1), c0 == "[" ? ":" : ",")
+        if (c0 == "[") {
+            if (parts.length > 2) { return null }
+            return {k: parts.length == 1 ? "arr" : "dict", ts: parts}
+        }
+        if (parts.length < 2) { return null }
+        var ts = []
+        for (var i = 0; i < parts.length; i++) {
+            var lp = swTySplit(parts[i], ":")
+            ts.push(lp[lp.length - 1])
+        }
+        return {k: "tup", ts: ts}
+    }
+    // A collection or tuple value is that type when every element is its
+    // element type: `[1, 2] as Any is [Int]`, and an empty array is an array of
+    // anything. Twin of swEmitStructIs in swift-to-llvm-ir.abnf.
+    function swStructIs(v, st) {
+        if (st.k == "arr") {
+            if (!Array.isArray(v)) { return false }
+            for (var i = 0; i < v.length; i++) { if (!swIsType(v[i], st.ts[0])) { return false } }
+            return true
+        }
+        if (st.k == "dict") {
+            if (v.__dict !== true) { return false }
+            for (var j = 0; j < v.keys.length; j++) {
+                if (!swIsType(v.keys[j], st.ts[0]) || !swIsType(v.vals[j], st.ts[1])) { return false }
+            }
+            return true
+        }
+        if (v.__tuple !== st.ts.length) { return false }
+        for (var q = 0; q < st.ts.length; q++) { if (!swIsType(v["" + q], st.ts[q])) { return false } }
+        return true
+    }
     function swIsType(v, tname) {
         var comps = swSplitAmp(tname)
         if (comps.length > 1) {
@@ -5136,6 +5178,13 @@ KwContinue  = "continue" KwEnd ;
                 if (!swIsType(v, comps[ci])) { return false }
             }
             return true
+        }
+        var tb = swTyStripOpt(tname)
+        var st = swStructTy(tb)
+        if (st != null) {
+            if (v === null || v === undefined) { return tb.length != tname.length }
+            if (typeof v != "object") { return false }
+            return swStructIs(v, st)
         }
         if (isCaseVal(v)) {
             var t = tname
@@ -5515,18 +5564,15 @@ KwContinue  = "continue" KwEnd ;
     // ----- Patterns and binding conditions -----
     // A pattern is {opt: n, core: k}: n trailing `?` (an optional pattern, which
     // fails on nil and matches the unwrapped value) around one core form.
-    // The pattern of one catch clause, plus the type of its optional `as` suffix.
-    function makeCatchPat(items) {
-        var p = items[0]
-        for (var i = 1; i < items.length; i++) {
-            if (items[i] != undefined && items[i].casty != undefined) { p.asty = items[i].casty }
-        }
-        return p
-    }
     function makePattern(items) {
         var n = 0
-        for (var i = 1; i < items.length; i++) { n++ }
-        return {opt: n, core: items[0]}
+        var asty = ""
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].casty != undefined) { asty = items[i].casty } else { n++ }
+        }
+        var p = {opt: n, core: items[0]}
+        if (asty != "") { p.asty = asty }
+        return p
     }
     // [ "." ] path [ ( subpatterns ) ] - an enum case reference, or (under a `let`)
     // a plain name to bind.
