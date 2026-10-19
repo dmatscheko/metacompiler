@@ -1365,7 +1365,7 @@ NotChar63   = :script(~~
     (function() { return (c.peek(0) === 63) ? abnf.newToken("\x01q-follows", 0) : undefined })()
 ~~) ;
 // `trimmingPrefix(while: p)` is drop(while: p) under its newer name.
-MethodSfx   <~~ var mn = popName(); swDsNoteCall(mn, up.start, up.pos); var ma = takeAll(); if (mn == "trimmingPrefix" && ma.length == 1 && ma[0].lbl == "while") { mn = "drop" }; push({kind:"mcall", name: mn, args: ma, span: up.start + ":" + up.pos}) ~~>
+MethodSfx   <~~ var mn = popName(); swDsNoteCall(mn, up.start, up.pos); var ma = takeAll(); if (mn == "trimmingPrefix" && ma.length == 1 && ma[0].lbl == "while") { mn = "drop" }; if (mn == "init") { swNoteDynInit(ma) }; push({kind:"mcall", name: mn, args: ma, span: up.start + ":" + up.pos}) ~~>
             = "." Id <~~ push({mname: swBt(up.in)}) ~~> MArgs ;
 FieldSfx    = "." Id <~~ push(makeFieldSfx(swBt(up.in))) ~~> ;
 // t.0 / t.1: a tuple element read. A tuple is an object whose elements live under
@@ -1494,6 +1494,9 @@ CallArg     <~~ push(makeCallArg(takeAll(), up.in)) ~~>
 OpRefArg    <~~ push(makeOpRef(stripWs(up.in), up.pos)) ~~>
             = OpRefChar :whitespace() { OpRefChar } :whitespace(Whitespace) ;
 OpRefChar   = @+"+-*/%<>=!&|^~?" ;
+// `["+": (+)]` / `let f: (Int, Int) -> Bool = (<)`: an operator in parentheses is the
+// same value. Tried after Paren, which no run of operator characters can complete.
+OpParen     = "(" OpRefArg ")" ;
 ArgLabel    = Id <~~ push({alabel: swBt(up.in)}) ~~> ":" ;
 // &x: an inout argument. Spelled ( "&" !"&" ) so it cannot start on the first
 // character of a && operator. A PATH after the name (`&p.a`, `&xs[i]`,
@@ -1501,7 +1504,7 @@ ArgLabel    = Id <~~ push({alabel: swBt(up.in)}) ~~> ":" ;
 InoutArg    <~~ var ir = makeTargetRef(takeAll()); push(ir.path.length == 0 ? {aref: ir.name} : {aref: ir.name, apath: ir}) ~~>
             = "&" !"&" Id <~~ push(swBt(up.in)) ~~> { "." Id <~~ push({key: swBt(up.in)}) ~~> | "." TTupIdx | TIndex } ;
 
-Primary     = Paren | MultiStr | RawStrN | RawStr3 | RawStr2 | RawStr1 | Template | NumberLit
+Primary     = Paren | OpParen | MultiStr | RawStrN | RawStr3 | RawStr2 | RawStr1 | Template | NumberLit
             | True | False | Nil
             | PoundExpr | SuperRef | DotMember | Closure | SugarSelf | SugarCall | ArrayTypeLit | DictLit | ArrayLit
             | Shorthand | ProjRef | OptNone | KeyPath | GenCall | GenRef | TrailCall | Call | VarRef ;
@@ -1512,7 +1515,9 @@ Primary     = Paren | MultiStr | RawStrN | RawStr3 | RawStr2 | RawStr1 | Templat
 ProjRef     = "$" :whitespace() Id <~~ push(makeVarRef("$" + swBt(up.in))) ~~> :whitespace(Whitespace) ;
 KeyPath     <~~ push(swKeyPath(takeAll(), up.in, up.pos)) ~~>
             = "\\" :whitespace() [ Id ] KpField { KpField } :whitespace(Whitespace) ;
-KpField     = "." Id <~~ push({kpf: swBt(up.in)}) ~~> ;
+KpField     = "." ( Id <~~ push({kpf: swBt(up.in)}) ~~> | KpTupIdx ) ;
+// `\.0`: a tuple element, which is the field "0" (TupleSfx).
+KpTupIdx    <~~ push({kpf: up.in}) ~~> = "0"..."9" { "0"..."9" } ;
 // x[keyPath: kp]
 KpIndexSfx  <~~ push({kind: "kpath", kp: pop()}) ~~> = "[" "keyPath" ":" Expression "]" ;
 
@@ -3947,7 +3952,7 @@ KwContinue  = "continue" KwEnd ;
         if (sym == ">") { return "js_swgt" }
         if (sym == "<=") { return "js_swle" }
         if (sym == ">=") { return "js_swge" }
-        if (sym == "==") { return "js_sweq" }
+        if (sym == "==" || sym == "!=") { return "js_sweq" }
         if (sym == "<<" || sym == ">>") { return "js_swshift" }
         return ""
     }
@@ -3980,7 +3985,10 @@ KwContinue  = "continue" KwEnd ;
                 if (ext == "js_swarith" || ext == "js_swshift") { av = [emitStr(pb, opText), xv, yv] }
                 return callExt(pb, ext, av)
             }
-            fb.NewRet(emitOverloadable(fb, sym, a0, a1, plainOp))
+            // == and != are emitBin's own: != is the negated ==, and an enum or a
+            // non-ASCII string compares through sw_eq.
+            if (ext == "js_sweq") { fb.NewRet(emitBin(fb, sym, a0, a1)) }
+            else { fb.NewRet(emitOverloadable(fb, sym, a0, a1, plainOp)) }
             curF = savedF
             curScopeV = savedScope
             return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
@@ -5427,11 +5435,49 @@ KwContinue  = "continue" KwEnd ;
     }
     // A stored property's declared NUMERIC type, for a write that finds the slot
     // still nil: through self, the enclosing type's own (up its superclasses);
-    // any other field path, the one type every declaration of the name agrees on.
+    // any other field path, the one type every declaration of the name agrees on,
+    // else the owner's class's (swEmitFieldTy, at the write).
     // Twins: swScalarPropTy / swSelfFieldTy in swift-interpreter.abnf.
-    function swScalarPropTy(name) {
-        var t = swTyStripOptText(swPropTyOf(name))
-        return swAdoptable(t) ? t : ""
+    function swScalarPropTy(name) { return swAdoptableOr(swTyStripOptText(swPropTyOf(name))) }
+    function swAdoptableOr(t) { return swAdoptable(t) ? t : "" }
+    // A property name that types declare with different numeric types: a write
+    // through any path but self reads the declared type off the owner's class,
+    // whose descriptor carries it under swFtyKey (swTypeFieldTys).
+    function swPropTyAmbig(name) {
+        if (!hasOwn(propTyReg, "$" + name)) { return false }
+        var cands = propTyReg["$" + name]
+        if (swPropTyOf(name) != "") { return false }
+        for (var i = 0; i < cands.length; i++) { if (swAdoptableOr(swTyStripOptText(cands[i])) != "") { return true } }
+        return false
+    }
+    function swFtyKey(name) { return "__fty_" + name }
+    // The run-time declared type of obj's property `name`, "" when none is
+    // recorded. Twin of swObjFieldAnn in swift-interpreter.abnf.
+    function swEmitFieldTy(b, obj, name) {
+        if (!swPropTyAmbig(name)) { return emitStr(b, "") }
+        var tv = b.NewCall(rtSafeGet(), [b.NewCall(rtClassOf(), [obj]), emitStr(b, swFtyKey(name))])
+        return b.NewSelect(truthy(b, callExt(b, "js_seq", [tv, hUndef])), emitStr(b, ""), tv)
+    }
+    // The [key, type] pairs a type's descriptor records for swEmitFieldTy, its
+    // inherited properties included (the nearest declaration wins).
+    function swTypeFieldTys(tn0) {
+        var out = []
+        var seen = {}
+        var tn = tn0
+        var guard = 0
+        while (tn != null && hasOwn(typeFieldAnn, "$" + tn) && guard < 64) {
+            var r = typeFieldAnn["$" + tn]
+            for (var i = 0; i < r.fs.length; i++) {
+                var fn = r.fs[i].name
+                if (hasOwn(seen, "$" + fn) || !swPropTyAmbig(fn)) { continue }
+                seen["$" + fn] = 1
+                var t = swAdoptableOr(swTyStripOptText(r.fs[i].ty))
+                if (t != "") { out.push([swFtyKey(fn), t]) }
+            }
+            tn = r.sup
+            guard = guard + 1
+        }
+        return out
     }
     function swSelfFieldTy(name) {
         var t = swTyStripOptText(swSelfFieldAnn(name))
@@ -5748,7 +5794,7 @@ KwContinue  = "continue" KwEnd ;
                         b = jmB
                         cur = jmB.NewPhi([llvm.ir.NewIncoming(r1, sa.b), llvm.ir.NewIncoming(r2, omB)])
                     } else if (s.name == "init" && !(i == 0 && (headName == "self" || headName == "super"))) {
-                        cur = b.NewCall(rtDynCall(), [cur, ea.v])
+                        cur = b.NewCall(rtDynCall(), [cur, ea.v, emitStr(b, swDynInitSlot(s.args))])
                     } else {
                         cur = swEmitLMCall(b, cur, s, mnameV, ea.v)
                     }
@@ -6601,6 +6647,7 @@ KwContinue  = "continue" KwEnd ;
     function makeCall(items) {
         var name = items[0]
         var args = planArgs(name, items.slice(1))
+        if (name.charCodeAt(0) >= 65 && name.charCodeAt(0) <= 90 && lookupSig(name) == null && classNames[name] != 1) { swNoteDynInit(args) }
         // Swift's print(_:separator:terminator:), not the shared `println` host
         // function (which prints the raw runtime value and cannot see the labelled
         // arguments). js_swprint renders every
@@ -6916,18 +6963,19 @@ KwContinue  = "continue" KwEnd ;
             // A capitalised name no function declares may be a generic parameter
             // bound to a type at run time (`T()` in `func make<T: P>(_: T.Type)`).
             var cap = name.charCodeAt(0) >= 65 && name.charCodeAt(0) <= 90 && lookupSig(name) == null
-            var rv = cap ? b.NewCall(rtDynCall(), [fV, ea.v]) : callExt(b, "js_call", [fV, hUndef, ea.v])
+            var rv = cap ? b.NewCall(rtDynCall(), [fV, ea.v, emitStr(b, swDynInitSlot(args))]) : callExt(b, "js_call", [fV, hUndef, ea.v])
             emitWriteBacks(b, ea.boxes)
             return {b: b, v: rv}
         }
     }
     // A call of a value that may be a TYPE at run time - a generic parameter, or
-    // `t.init(...)` on a metatype - constructs it as emitConstruct does, through
-    // its first-declared initializer (the overload cannot be picked by label
-    // without the static type); a function value is called as usual. Twin of the
-    // init arm of mcall in swift-interpreter.abnf.
+    // `t.init(...)` on a metatype - constructs it as emitConstruct does; a function
+    // value is called as usual. ps[2] names the descriptor slot that holds the key
+    // of the initializer these argument labels pick (swEmitDynInits); a type with
+    // no such slot has one initializer. Twin of the init arm of mcall in
+    // swift-interpreter.abnf.
     function rtDynCall() {
-        return rtFunc("sw_dyncall", 2, function(b, ps) {
+        return rtFunc("sw_dyncall", 3, function(b, ps) {
             var tyB = curF.NewBlock("")
             var notB = curF.NewBlock("")
             var btB = curF.NewBlock("")
@@ -6942,9 +6990,49 @@ KwContinue  = "continue" KwEnd ;
             var ctorArgs = callExt(tyB, "js_arr_new", [])
             callExt(tyB, "js_arr_push", [ctorArgs, objV])
             callExt(tyB, "js_call", [callExt(tyB, "js_get", [ps[0], emitStr(tyB, "__ctor")]), hUndef, ctorArgs])
-            var iret = tyB.NewCall(rtPrependCall(), [objV, callExt(tyB, "js_get", [ps[0], emitStr(tyB, "init")]), ps[1]])
+            var ikv = callExt(tyB, "js_get", [ps[0], ps[2]])
+            var ik = tyB.NewSelect(truthy(tyB, callExt(tyB, "js_seq", [ikv, hUndef])), emitStr(tyB, "init"), ikv)
+            var iret = tyB.NewCall(rtPrependCall(), [objV, callExt(tyB, "js_get", [ps[0], ik]), ps[1]])
             tyB.NewRet(tyB.NewSelect(truthy(tyB, callExt(tyB, "js_seq", [iret, hNull])), hNull, objV))
         })
+    }
+    // The argument labels of every call that may construct a type known only at
+    // run time, collected at walk time: each type with several initializers then
+    // records, per label list, the key of the one that list picks, as
+    // pickCandidates does for a statically named type. Several candidates of the
+    // same labels share a dispatcher that picks by argument type.
+    var dynInitSigs = []
+    var dynInitSeen = {}
+    function swDynInitSlot(recs) {
+        var k = "__dinit"
+        for (var i = 0; i < recs.length; i++) { k = k + (recs[i].lbl == null ? "_" : recs[i].lbl) + ":" }
+        return k
+    }
+    function swNoteDynInit(recs) {
+        var k = swDynInitSlot(recs)
+        if (hasOwn(dynInitSeen, "$" + k)) { return }
+        dynInitSeen["$" + k] = 1
+        var lr = []
+        for (var i = 0; i < recs.length; i++) { lr.push({lbl: recs[i].lbl}) }
+        dynInitSigs.push({slot: k, recs: lr})
+    }
+    function swEmitDynInits(b, clsV, inits) {
+        if (inits.length < 2) { return b }
+        for (var i = 0; i < dynInitSigs.length; i++) {
+            var ds = dynInitSigs[i]
+            var cands = pickCandidates("init", inits, ds.recs)
+            if (cands.length == 0 || (cands.length == 1 && cands[0].key == "init")) { continue }
+            var key = cands[0].key
+            if (cands.length > 1) {
+                key = "__dinitf" + ds.slot
+                var didx = emitMemberDispatch("init", cands, 1)
+                var dsc = callExt(b, "js_scope_new", [curScopeV])
+                callExt(b, "js_scope_decl", [dsc, emitStr(b, "__ovtbl"), clsV])
+                callExt(b, "js_set", [clsV, emitStr(b, key), callExt(b, "js_closure", [handle(didx), dsc])])
+            }
+            callExt(b, "js_set", [clsV, emitStr(b, ds.slot), emitStr(b, key)])
+        }
+        return b
     }
 
     // Assignment: a plain name goes through js_kget/js_kset (locals, then the
@@ -7015,29 +7103,19 @@ KwContinue  = "continue" KwEnd ;
         }
         return ref
     }
-    // The assignment to such a target runs only when the target holds a value; the
-    // target's path is evaluated once to read it and again by the assignment. Twin
-    // of swOptEndAssign in swift-interpreter.abnf.
+    // `x? = v` / `x? += 1` on a bare name runs only when x holds a value. A target
+    // with a path is resolved ONCE by makeAssign, which tests it there. Twin of
+    // swOptEndAssign in swift-interpreter.abnf.
     function swOptEndAssign(items) {
         var ref = items[0]
         var it2 = items.slice(0)
         it2[0] = {name: ref.name, path: ref.path}
         var inner = makeAssign(it2)
         return function(b) {
-            var nils = []
-            var cur = null
-            if (ref.path.length == 0) { cur = b.NewCall(rtKGet(), [curScopeV, emitStr(b, ref.name)]) }
-            else {
-                var p = emitRefPath(b, ref, [], nils)
-                b = p.b
-                cur = p.isField ? emitFieldRead(b, p.obj, p.keyName) : swSafeElem(b, p)
-            }
+            var cur = b.NewCall(rtKGet(), [curScopeV, emitStr(b, ref.name)])
             var skipB = curF.NewBlock("")
-            var c1B = curF.NewBlock("")
             var goB = curF.NewBlock("")
-            b.NewCondBr(truthy(b, callExt(b, "js_seq", [cur, hNull])), skipB, c1B)
-            c1B.NewCondBr(truthy(c1B, callExt(c1B, "js_seq", [cur, hUndef])), skipB, goB)
-            for (var i = 0; i < nils.length; i++) { nils[i].NewBr(skipB) }
+            swEmitNilBr(b, cur, skipB, goB)
             var r = inner(goB)
             var joinB = curF.NewBlock("")
             r.b.NewBr(joinB)
@@ -7045,9 +7123,16 @@ KwContinue  = "continue" KwEnd ;
             return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(r.v, r.b), llvm.ir.NewIncoming(hNull, skipB)])}
         }
     }
+    // Branch to nilB when v is nil (null or undefined), else to goB.
+    function swEmitNilBr(b, v, nilB, goB) {
+        var c1B = curF.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_seq", [v, hNull])), nilB, c1B)
+        c1B.NewCondBr(truthy(c1B, callExt(c1B, "js_seq", [v, hUndef])), nilB, goB)
+    }
     function makeAssign(items) {
         var ref = items[0]
-        if (ref.optEnd === true) { return swOptEndAssign(items) }
+        var optEnd = ref.optEnd === true
+        if (optEnd && ref.path.length == 0) { return swOptEndAssign(items) }
         var op = items[1]
         var valT = items[2]
         // The declared type of this name, if a numeric annotation declared it
@@ -7087,6 +7172,7 @@ KwContinue  = "continue" KwEnd ;
         var setKey = ref.path.length == 1 && ref.path[0].key == undefined && hasLocal && swIsSetKeyTy(localAnn)
         var optChain = false
         for (var oc = 0; oc < ref.path.length; oc++) { if (ref.path[oc].opt == true) { optChain = true } }
+        if (optEnd) { optChain = true }
         return function(b) {
             // A write to an existential slot keeps what it is given; see swKeepMode.
             // An implicit `self.x` is decided by the enclosing type, statically.
@@ -7108,6 +7194,16 @@ KwContinue  = "continue" KwEnd ;
                 if (swPropChainHit(ref.name, pathNames)) { b = emitPropHead(b, ref.name, preRecs) }
                 pre = emitRefPath(b, ref, preRecs, nilExits)
                 b = pre.b
+                // `d[k()]? += 1`: the resolved target itself must hold a value.
+                if (optEnd) {
+                    var cur = pre.isField ? emitFieldRead(b, pre.obj, pre.keyName) : swSafeElem(b, pre)
+                    var nilB = curF.NewBlock("")
+                    var goB = curF.NewBlock("")
+                    swEmitNilBr(b, cur, nilB, goB)
+                    nilExits.push(nilB)
+                    b = goB
+                    pre.b = goB
+                }
             }
             var r = valT(b)
             b = r.b
@@ -7202,8 +7298,10 @@ KwContinue  = "continue" KwEnd ;
                         var oldf = emitFieldRead(b, p.obj, p.keyName)
                         if (op != "=") { v = emitBin(b, op, oldf, v) }
                         if (!keepTy) {
-                            var fty = ref.name == "self" && ref.path.length == 1 ? swSelfFieldTy(p.keyName) : swScalarPropTy(p.keyName)
-                            v = swEmitPathAdopt(b, mode, p.own, exr.key, oldf, v, fty)
+                            var viaSelf = ref.name == "self" && ref.path.length == 1
+                            var fty = viaSelf ? swSelfFieldTy(p.keyName) : swScalarPropTy(p.keyName)
+                            var ftyV = fty == "" && !viaSelf ? swEmitFieldTy(b, p.obj, p.keyName) : emitStr(b, fty)
+                            v = swEmitPathAdopt(b, mode, p.own, exr.key, oldf, v, ftyV)
                         }
                     }
                     if (isSetterName(p.keyName)) {
@@ -7221,7 +7319,7 @@ KwContinue  = "continue" KwEnd ;
                         } else { olds = b.NewCall(rtSubGet(), [p.obj, p.key]) }
                         v = emitBin(b, op, olds, v)
                     }
-                    if (!keepTy) { v = swEmitPathAdopt(b, mode, p.own, exr.key, swSafeElem(b, p), v, elemTy) }
+                    if (!keepTy) { v = swEmitPathAdopt(b, mode, p.own, exr.key, swSafeElem(b, p), v, emitStr(b, elemTy)) }
                     b.NewCall(rtSubSet(), [p.obj, p.key, v])
                 } else {
                     if (op != "=") {
@@ -7233,7 +7331,7 @@ KwContinue  = "continue" KwEnd ;
                         } else { oldm = callExt(b, "js_swidx", [p.obj, p.key]) }
                         v = emitBin(b, op, oldm, v)
                     }
-                    if (!keepTy) { v = swEmitPathAdopt(b, mode, p.own, exr.key, swSafeElem(b, p), v, elemTy) }
+                    if (!keepTy) { v = swEmitPathAdopt(b, mode, p.own, exr.key, swSafeElem(b, p), v, emitStr(b, elemTy)) }
                     callExt(b, "js_swdset", [p.obj, p.key, v])
                 }
                 if (precs.length > 0) { b = emitPropReplay(b, precs) }
@@ -7516,8 +7614,8 @@ KwContinue  = "continue" KwEnd ;
     }
     // The adopted value of a path write (mode 0), or, in mode 2, the value as given
     // when the owner's type carries the write's marker.
-    function swEmitPathAdopt(b, mode, own, key, old, v, ty) {
-        var adV = callExt(b, "js_swadoptlike", [old, v, emitStr(b, ty)])
+    function swEmitPathAdopt(b, mode, own, key, old, v, tyV) {
+        var adV = callExt(b, "js_swadoptlike", [old, v, tyV])
         if (mode != 2) { return adV }
         var exfV = b.NewCall(rtSafeGet(), [b.NewCall(rtClassOf(), [own]), emitStr(b, key)])
         return b.NewSelect(truthy(b, exfV), v, adV)
@@ -8619,10 +8717,38 @@ KwContinue  = "continue" KwEnd ;
         }
         return []
     }
+    // Operator functions in walk order, for a type declared BELOW one that names it
+    // (swPendingOps).
+    var globalOpFns = []
+    // The operators declared above type `name` that take it, as {name, slot}; the
+    // type installs them itself (swEmitPendingOps). Twin of swAttachPendingOps in
+    // swift-interpreter.abnf.
+    function swPendingOps(name) {
+        var out = []
+        for (var i = 0; i < globalOpFns.length; i++) {
+            var ps = globalOpFns[i].f.params
+            for (var j = 0; j < ps.length; j++) {
+                if (baseTypeName(ps[j].type) == name) { out.push({name: globalOpFns[i].f.name, slot: globalOpFns[i].slot}); j = ps.length }
+            }
+        }
+        return out
+    }
+    function swEmitPendingOps(b, tblV, ops) {
+        for (var i = 0; i < ops.length; i++) {
+            var setB = curF.NewBlock("")
+            var doneB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_get", [tblV, emitStr(b, ops[i].name)])), doneB, setB)
+            callExt(setB, "js_set", [tblV, emitStr(setB, ops[i].name), setB.NewCall(rtKGet(), [curScopeV, emitStr(setB, ops[i].slot)])])
+            setB.NewBr(doneB)
+            b = doneB
+        }
+        return b
+    }
     function makeFunStmt(f) {
         // A GLOBAL operator function is its parameter types' operator, as a
         // `static func` inside them would be: noted here, installed on each program
-        // type declared above it (unless the type declares the operator itself).
+        // type declared above it (unless the type declares the operator itself);
+        // a type declared below installs it (swPendingOps).
         // Twin of swAttachGlobalOp in swift-interpreter.abnf.
         var opTys = []
         if (isOperatorName(f.name)) {
@@ -8641,6 +8767,7 @@ KwContinue  = "continue" KwEnd ;
         if (lst == null) { lst = []; funcOverloads[key] = lst }
         lst.push({f: f})
         var slot = f.name + "$" + lst.length
+        if (isOperatorName(f.name)) { globalOpFns.push({f: f, slot: slot}) }
         return function(b) {
             var idx = emitFunc(f.params, f.body, false, false, f.rlabels, f.rtype)
             defPos(b, f.pos)
@@ -9855,6 +9982,7 @@ KwContinue  = "continue" KwEnd ;
         }
         rec.fields = fieldNames
         typeFieldAnn["$" + name] = {fs: mem.fields, cs: mem.comps, sup: superName}
+        var pendOps = classNames[name] == 1 ? [] : swPendingOps(name)
         classNames[name] = 1
         noteDeclRec(rec)
         return function(b) {
@@ -9871,6 +9999,8 @@ KwContinue  = "continue" KwEnd ;
             // An existential stored property is marked on the type; see swKeepMode.
             var exf = swTypeExFields(name)
             for (var xf = 0; xf < exf.length; xf++) { callExt(b, "js_set", [clsV, emitStr(b, exf[xf]), hTrue]) }
+            var fts = swTypeFieldTys(name)
+            for (var ft = 0; ft < fts.length; ft++) { callExt(b, "js_set", [clsV, emitStr(b, fts[ft][0]), emitStr(b, fts[ft][1])]) }
             // ONE binding, under the qualified key (== the bare name at top level).
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, rec.key), clsV])
             if (superName != null) {
@@ -9913,6 +10043,8 @@ KwContinue  = "continue" KwEnd ;
                 callExt(b, "js_set", [clsV, emitStr(b, memberKey("init", mwIndex)),
                                       callExt(b, "js_closure", [handle(iidx), curScopeV])])
             }
+            b = swEmitDynInits(b, clsV, rec.inits)
+            b = swEmitPendingOps(b, clsV, pendOps)
             typeStack.pop()
             lastTypeName = name
             lastTypeKey = rec.key
@@ -10555,6 +10687,7 @@ KwContinue  = "continue" KwEnd ;
             if (!cseen) { cos.push(name) }
         }
         var kind = rawKind(mem.raw)
+        var pendOps = enumNames[name] == 1 ? [] : swPendingOps(name)
         enumNames[name] = 1
         hasRichEnum = true
         var rec = newTypeRec(name)
@@ -10619,6 +10752,7 @@ KwContinue  = "continue" KwEnd ;
                 }
                 callExt(b, "js_set", [eV, emitStr(b, "allCases"), allV])
             }
+            b = swEmitPendingOps(b, tblV, pendOps)
             typeStack.pop()
             lastTypeName = name
             lastTypeKey = rec.key

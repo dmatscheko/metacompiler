@@ -4770,6 +4770,12 @@ func s110() {
     n.v? *= 4
     n.nxt?.v? += 1
     check("110b", n.v == 12 && n.nxt == nil && S110().o == nil && !(S110().o != nil))
+    // The target is evaluated once: its index expression runs once per write.
+    var keys110 = 0
+    func key110(_ k: String) -> String { keys110 += 1; return k }
+    counts[key110("a")]? += 1
+    counts[key110("z")]? += side110()
+    check("110c", keys110 == 2 && counts == ["a": 7] && log110.isEmpty)
 }
 
 // ===== SECTION 111: Result =====
@@ -4847,6 +4853,49 @@ func s114() {
     let fs: [((Int) -> Int, Double) -> Double] = [{ f, x in Double(f(Int(x))) / 2 }]
     check("114a", a({ $0 + 1 }, 4) == 5 && d({ $0 * 3 }, 2) == 6 && ap { $0 + 1 } == 2
         && compose({ $0 + 1 }, { $0 * 2 })(3) == 8 && fs[0]({ $0 + 4 }, 3) == 3.5)
+}
+
+// ===== SECTION 115: operator values, tuple key paths, initializers of a metatype =====
+// `(+)` in parentheses is the operator as a function value; `\.0` is a tuple
+// element key path; `t.init(...)` on a metatype picks the initializer its labels
+// (and then its argument types) name; a nil Optional property adopts the type its
+// OWN class declares when other types declare the same name differently; a global
+// operator declared above its parameter's type is still that type's operator.
+// Every value read off swiftc 6.1.2.
+func * (a: V115, k: Int) -> V115 { return V115(x: a.x * k) }
+class A115 {
+    var s: String
+    required init(x: Int) { s = "x\(x)" }
+    required init(name: String) { s = "name:" + name }
+    required init() { s = "none" }
+}
+class B115: A115 {}
+struct M115 {
+    var d: String
+    init(_ v: Int) { d = "int \(v)" }
+    init(_ s: String) { d = "str " + s }
+}
+struct D115 { var o: Double? }
+struct E115 { var o: Int? }
+struct V115 { var x: Int }
+func s115() {
+    let ops: [String: (Int, Int) -> Int] = ["+": (+), "*": (*)]
+    let lt: (Int, Int) -> Bool = (<)
+    let ne: (String, String) -> Bool = (!=)
+    check("115a", ops["+"]!(3, 4) == 7 && ops["*"]!(3, 4) == 12 && lt(1, 2) && ne("a", "b") && !ne("a", "a"))
+    let pairs = [(1, "a"), (2, "b")]
+    check("115b", pairs.map(\.0) == [1, 2] && pairs.map(\.1) == ["a", "b"])
+    let t: A115.Type = B115.self
+    let o = t.init(name: "z")
+    let mt = M115.self
+    check("115c", o.s == "name:z" && o is B115 && t.init(x: 3).s == "x3" && t.init().s == "none"
+        && mt.init("q").d == "str q" && mt.init(5).d == "int 5")
+    var d = D115()
+    d.o = 4
+    var e = E115()
+    e.o = 4
+    check("115d", "\(d.o!)" == "4.0" && "\(e.o!)" == "4")
+    check("115e", (V115(x: 2) * 5).x == 10)
 }
 
 func main() {
@@ -4964,6 +5013,7 @@ func main() {
     s112() // SECTION-CALL 112
     s113() // SECTION-CALL 113
     s114() // SECTION-CALL 114
+    s115() // SECTION-CALL 115
     print("full: \(checks) checks, \(fails) failures")
 }
 

@@ -1516,6 +1516,9 @@ CallArg     <~~ push(makeCallArg(takeAll(), up.in)) ~~>
 OpRefArg    <~~ push(makeOpRef(stripWs(up.in), up.pos)) ~~>
             = OpRefChar :whitespace() { OpRefChar } :whitespace(Whitespace) ;
 OpRefChar   = @+"+-*/%<>=!&|^~?" ;
+// `["+": (+)]` / `let f: (Int, Int) -> Bool = (<)`: an operator in parentheses is the
+// same value. Tried after Paren, which no run of operator characters can complete.
+OpParen     = "(" OpRefArg ")" ;
 ArgLabel    = Id <~~ push({alabel: swBt(up.in)}) ~~> ":" ;
 // &x: an inout argument. Spelled ( "&" !"&" ) so it cannot start on the first
 // character of a && operator. A PATH after the name (`&p.a`, `&xs[i]`,
@@ -1523,7 +1526,7 @@ ArgLabel    = Id <~~ push({alabel: swBt(up.in)}) ~~> ":" ;
 InoutArg    <~~ var ir = makeTargetRef(takeAll()); push(ir.path.length == 0 ? {aref: ir.name} : {aref: ir.name, apath: ir}) ~~>
             = "&" !"&" Id <~~ push(swBt(up.in)) ~~> { "." Id <~~ push({key: swBt(up.in)}) ~~> | "." TTupIdx | TIndex } ;
 
-Primary     = Paren | MultiStr | RawStrN | RawStr3 | RawStr2 | RawStr1 | Template | NumberLit
+Primary     = Paren | OpParen | MultiStr | RawStrN | RawStr3 | RawStr2 | RawStr1 | Template | NumberLit
             | True | False | Nil
             | PoundExpr | SuperRef | DotMember | Closure | SugarSelf | SugarCall | ArrayTypeLit | DictLit | ArrayLit
             | Shorthand | ProjRef | OptNone | KeyPath | GenCall | GenRef | TrailCall | Call | VarRef ;
@@ -1534,7 +1537,9 @@ Primary     = Paren | MultiStr | RawStrN | RawStr3 | RawStr2 | RawStr1 | Templat
 ProjRef     = "$" :whitespace() Id <~~ push(swVarRef("$" + swBt(up.in))) ~~> :whitespace(Whitespace) ;
 KeyPath     <~~ push(swKeyPath(takeAll(), up.in, up.pos)) ~~>
             = "\\" :whitespace() [ Id ] KpField { KpField } :whitespace(Whitespace) ;
-KpField     = "." Id <~~ push({kpf: swBt(up.in)}) ~~> ;
+KpField     = "." ( Id <~~ push({kpf: swBt(up.in)}) ~~> | KpTupIdx ) ;
+// `\.0`: a tuple element, which is the field "0" (TupleSfx).
+KpTupIdx    <~~ push({kpf: up.in}) ~~> = "0"..."9" { "0"..."9" } ;
 // x[keyPath: kp]
 KpIndexSfx  <~~ push({kind: "kpath", kp: pop()}) ~~> = "[" "keyPath" ":" Expression "]" ;
 
@@ -6896,13 +6901,12 @@ KwContinue  = "continue" KwEnd ;
     // still nil - an initializer's `v = 1` into `var v: Double` - and so has no
     // value to adopt from. A write through self (`v = 1`, `self.v = 1`) reads the
     // type self's class declares, up its superclasses; any other field path the
-    // one type every declaration of that name agrees on. "" when there is none or
+    // one type every declaration of that name agrees on, else the owner's class's
+    // (swObjFieldAnn, at the write). "" when there is none or
     // it is not numeric. Twins: swScalarPropTy / swSelfFieldTy in
     // swift-to-llvm-ir.abnf, which decides self's type statically.
-    function swScalarPropTy(name) {
-        var t = swTyStripOpt(swPropTyOf(name))
-        return swAdoptable(t) ? t : ""
-    }
+    function swScalarPropTy(name) { return swAdoptableOr(swTyStripOpt(swPropTyOf(name))) }
+    function swAdoptableOr(t) { return swAdoptable(t) ? t : "" }
     function swSelfFieldTy(name) {
         var t = swTyStripOpt(swSelfFieldAnn(name))
         return swAdoptable(t) ? t : ""
@@ -6914,10 +6918,12 @@ KwContinue  = "continue" KwEnd ;
         return t != "" && swTyIsDeepText(t) && swAdoptNeeded(t) ? t : ""
     }
     // The type self's class (or a superclass) declares a stored property at, "".
-    function swSelfFieldAnn(name) {
-        var self = findThis()
-        if (self === null || self === undefined || typeof self != "object" || self.__class == undefined) { return "" }
-        var tn = self.__class.__name
+    function swSelfFieldAnn(name) { return swObjFieldAnn(findThis(), name) }
+    // The declared type of the stored property `name` of obj's class, up its
+    // superclasses.
+    function swObjFieldAnn(obj, name) {
+        if (obj === null || obj === undefined || typeof obj != "object" || obj.__class == undefined) { return "" }
+        var tn = obj.__class.__name
         var guard = 0
         while (tn != null && hasOwn(typeFieldAnn, "$" + tn) && guard < 64) {
             var r = typeFieldAnn["$" + tn]
@@ -7260,28 +7266,24 @@ KwContinue  = "continue" KwEnd ;
         }
         return ref
     }
-    // The assignment to such a target runs only when the target holds a value.
-    // Twin of swOptEndAssign in swift-to-llvm-ir.abnf.
+    // `x? = v` / `x? += 1` on a bare name runs only when x holds a value. A target
+    // with a path is resolved ONCE by makeAssign, which tests it there. Twin of
+    // swOptEndAssign in swift-to-llvm-ir.abnf.
     function swOptEndAssign(items) {
         var ref = items[0]
         var it2 = items.slice(0)
         it2[0] = {name: ref.name, path: ref.path}
         var inner = makeAssign(it2)
-        var lastField = ref.path.length > 0 && ref.path[ref.path.length - 1].key != undefined
         return function() {
-            var cur = anytype
-            if (ref.path.length == 0) { cur = swGetName(ref.name) }
-            else {
-                var p = swResolvePath(ref, false)
-                cur = p === null ? null : (lastField ? swFieldOf(p.obj, p.key) : swSafeElem(p.obj, p.key))
-            }
+            var cur = swGetName(ref.name)
             if (cur === null || cur === undefined) { return null }
             return inner()
         }
     }
     function makeAssign(items) {
         var ref = items[0]
-        if (ref.optEnd === true) { return swOptEndAssign(items) }
+        var optEnd = ref.optEnd === true
+        if (optEnd && ref.path.length == 0) { return swOptEndAssign(items) }
         var op = items[1]
         var valT = items[2]
         // The declared type of this name, if a numeric annotation declared it
@@ -7327,6 +7329,7 @@ KwContinue  = "continue" KwEnd ;
         var propTrack = -1
         var optChain = false
         for (var oc = 0; oc < ref.path.length; oc++) { if (ref.path[oc].opt == true) { optChain = true } }
+        if (optEnd) { optChain = true }
         var lastField = ref.path.length > 0 && ref.path[ref.path.length - 1].key != undefined
         // The property type a nil slot adopts from: an implicit `self.v` (a name no
         // declaration in scope binds) or `self.v` by self's class, any other field
@@ -7344,6 +7347,11 @@ KwContinue  = "continue" KwEnd ;
                 if (propTrack < 0) { propTrack = swPropChainHit(ref.name, pathNames) ? 1 : 0 }
                 pre = swResolvePath(ref, propTrack == 1)
                 if (pre === null) { return null }
+                // `d[k()]? += 1`: the resolved target itself must hold a value.
+                if (optEnd) {
+                    var cur = lastField ? swFieldOf(pre.obj, pre.key) : swSafeElem(pre.obj, pre.key)
+                    if (cur === null || cur === undefined) { return null }
+                }
             }
             // `var v = anytype` first: MetaJS is typed, a local keeps the type of
             // its first assignment, and the adoption below turns a number into a box.
@@ -7384,7 +7392,12 @@ KwContinue  = "continue" KwEnd ;
                     v = applyOp(op, oldE, v)
                 }
                 if (mode == 0 || (mode == 2 && !swExfOf(exr.lk < 0 ? findThis() : p.own, exr.key))) {
-                    v = swAdoptLike(swSafeElem(p.obj, p.key), v, lastField ? propTy : elemTy)
+                    // A name several types declare with different types is decided
+                    // by the owner's class. Twin of swEmitFieldTy in
+                    // swift-to-llvm-ir.abnf.
+                    var wty = elemTy
+                    if (lastField) { wty = propTy == "" && !viaSelf ? swAdoptableOr(swTyStripOpt(swObjFieldAnn(p.obj, lastKey))) : propTy }
+                    v = swAdoptLike(swSafeElem(p.obj, p.key), v, wty)
                 }
                 if (lastField) { swSetField(p.obj, p.key, v) } else { setElem(p.obj, p.key, v) }
                 if (p.recs != null) { swPropReplay(p.recs) }
@@ -8385,7 +8398,10 @@ KwContinue  = "continue" KwEnd ;
         lst.push({f: f, fn: makeFunClosure(f)})
         if (lst.length == 1) { globalScope[f.name] = lst[0].fn }
         else { globalScope[f.name] = makeOverloadClosure(lst) }
-        if (swIsOpName(f.name)) { swAttachGlobalOp(f, lst[lst.length - 1].fn) }
+        if (swIsOpName(f.name)) {
+            swGlobalOps.push({f: f, fn: lst[lst.length - 1].fn})
+            swAttachGlobalOp(f, lst[lst.length - 1].fn)
+        }
     }
     function swIsOpName(n) {
         var ch = n.charCodeAt(0)
@@ -8403,6 +8419,17 @@ KwContinue  = "continue" KwEnd ;
             var t = accTable(h.v)
             if (t == null || hasOwn(t, "__static_" + f.name)) { continue }
             tput(t, "__static_" + f.name, function(self, a, b) { return arguments.length > 2 ? fn(a, b) : fn(a) })
+        }
+    }
+    // A global operator declared ABOVE its parameter's type joins that type when the
+    // type is declared. Twin of swEmitPendingOps in swift-to-llvm-ir.abnf.
+    var swGlobalOps = []
+    function swAttachPendingOps(name) {
+        for (var i = 0; i < swGlobalOps.length; i++) {
+            var ps = swGlobalOps[i].f.params
+            for (var j = 0; j < ps.length; j++) {
+                if (baseTypeName(ps[j].type) == name) { swAttachGlobalOp(swGlobalOps[i].f, swGlobalOps[i].fn); j = ps.length }
+            }
         }
     }
     // `Crate<Int>?` -> `Crate`: the bare name a declared type spells.
@@ -9499,7 +9526,10 @@ KwContinue  = "continue" KwEnd ;
     }
     function declType(name, v, nested) {
         lastType = {name: name, v: v}
-        if (!nested) { declVar(name, v) }
+        if (!nested) {
+            declVar(name, v)
+            if (swGlobalOps.length > 0) { swAttachPendingOps(name) }
+        }
     }
     // The enclosing descriptor a nested type was installed on, so a bare name inside
     // a member body can be resolved OUTWARD. Hidden (`__` prefixed slots are invisible
