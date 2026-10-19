@@ -4842,6 +4842,30 @@ fun sec97() {
     check("sbe97n", !sb97.equals("x") && sb97.equals(sb97))
 }
 
+// ===== SECTION 98: Char arithmetic, Regex.split and replace =====
+// Every row was read off kotlin-stdlib 2.2.21 driven from java (JDK 24). Char + Int
+// and Char - Int are a Char, Char - Char an Int, and ++ / += keep a Char.
+// Regex.split cuts at every Matcher.find match, an empty one included (a match at
+// index 0 gives a leading ""). replace with an empty oldValue inserts at every
+// index, and replace / replaceFirst / commonPrefixWith take ignoreCase.
+fun sec98() {
+    val cs = listOf('a', 'x', 'z')
+    val ns = listOf(2, 1)
+    var c98 = cs[0]
+    c98++
+    check("chr98a", cs[0] + ns[0] == 'c' && cs[1] - ns[1] == 'w' && cs[2] - cs[0] == 25 && c98 == 'b' && "" + (cs[0] + ns[0]) == "c")
+    c98 += 3
+    check("chr98b", c98 == 'e' && cs[0].inc() == 'b' && cs[2].dec() == 'y' && cs[0].plus(ns[0]) == 'c' && cs[1].minus(cs[0]) == 23)
+    check("rxs98c", "" + "CamelCaseString".split(Regex("(?=[A-Z])")) == "[, Camel, Case, String]"
+                    && "" + Regex("x*").split("xa") == "[, , a, ]" && "" + Regex("\\s+").split(" a b ") == "[, a, b, ]")
+    val rs = listOf("abc", "aAaA", "", "Hello, World")
+    check("rep98d", rs[0].replace(rs[2], "-") == "-a-b-c-" && rs[0].replaceFirst(rs[2], "-") == "-abc"
+                    && rs[1].replace("a", "x", true) == "xxxx" && rs[1].replace('A', 'y', true) == "yyyy" && "aaa".replace("aa", "b") == "ba")
+    check("cmn98e", "Hello".commonPrefixWith("HELP", true) == "Hel" && "xABC".commonSuffixWith("abc", true) == "ABC"
+                    && rs[3].removeRange(0..6) == "World" && rs[3].removeRange(2, 5) == "He, World"
+                    && s95err { "Hello".removeRange(3, 1) } == "IndexOutOfBoundsException: End index (1) is less than start index (3).")
+}
+
 
 fun main() {
     s01() // SECTION-CALL 01
@@ -4941,6 +4965,7 @@ fun main() {
     sec95() // SECTION-CALL 95
     sec96() // SECTION-CALL 96
     sec97() // SECTION-CALL 97
+    sec98() // SECTION-CALL 98
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

@@ -131,6 +131,20 @@ func ktKindDiffers(a, b interface{}) bool {
 	return aok && bok && (aw != bw || au != bu)
 }
 
+// ktCharArith is Char's arithmetic: Char + Int and Char - Int are a Char
+// (wrapping at 16 bits), Char - Char the Int distance. Twin of kCharArith in
+// kotlin-interpreter.abnf and k1CharArith in languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktCharArith(op byte, l jsChar, r interface{}) interface{} {
+	if rc, isCh := r.(jsChar); isCh {
+		return float64(l.code - rc.code)
+	}
+	n := giVal(rt, r)
+	if op == '-' {
+		n = -n
+	}
+	return jsChar{code: int32((int64(l.code) + n) & 65535)}
+}
+
 func ktIsIntegral(v interface{}) bool {
 	switch v.(type) {
 	case jsGInt, float64, jsChar:
@@ -887,6 +901,9 @@ func init() {
 				}
 				return w(rt.jvmArith(op[0], l, r))
 			}
+			if lc, isCh := l.(jsChar); isCh && op == "-" {
+				return w(rt.ktCharArith('-', lc, r))
+			}
 			return w(rt.ktArith(op, l, r))
 		}
 		m["js_ktshift"] = func(a []uint64) uint64 {
@@ -944,6 +961,9 @@ func init() {
 				return w(rt.jvmArith('+', l, r))
 			}
 			if ktIsIntegral(l) && ktIsIntegral(r) {
+				if lc, isCh := l.(jsChar); isCh {
+					return w(rt.ktCharArith('+', lc, r))
+				}
 				return w(rt.ktArith("+", l, r))
 			}
 			// `+` on a COLLECTION is kotlin.collections.plus: a list gains the elements
@@ -2918,14 +2938,37 @@ func (rt *jsrt) ktStrMethod2(s, name string, args []interface{}) (interface{}, b
 	// never reaches here - js_ktsmcall routes a pattern argument to the Regex
 	// dispatcher first.
 	case "replace", "replaceFirst":
-		old, nw := rt.ktStrArg(argAt(args, 0)), rt.ktStrArg(argAt(args, 1))
-		if old == "" {
-			return s, true
+		return rt.ktReplaceText(s, name == "replaceFirst", args), true
+	case "commonPrefixWith", "commonSuffixWith":
+		su, ou := strUnits(s), strUnits(rt.ktStrArg(argAt(args, 0)))
+		ic := ktOptIc(args, 1)
+		pre := name == "commonPrefixWith"
+		n := 0
+		for n < len(su) && n < len(ou) {
+			i, j := n, n
+			if !pre {
+				i, j = len(su)-1-n, len(ou)-1-n
+			}
+			if !ktRegionEq(su, i, ou[j:j+1], ic) {
+				break
+			}
+			n++
 		}
-		if name == "replaceFirst" {
-			return strings.Replace(s, old, nw, 1), true
+		if pre {
+			return strFromUnits(su[:n]), true
 		}
-		return strings.ReplaceAll(s, old, nw), true
+		return strFromUnits(su[len(su)-n:]), true
+	case "removeRange":
+		from, to := 0, 0
+		if rg, isRg := ktRangeOf(argAt(args, 0)); isRg {
+			from, to = int(rg.from), int(rg.to)+1
+		} else {
+			from, to = jsToInt(rt.toNumber(argAt(args, 0))), jsToInt(rt.toNumber(argAt(args, 1)))
+		}
+		if to < from {
+			rt.ktRaise("IndexOutOfBoundsException", fmt.Sprintf("End index (%d) is less than start index (%d).", to, from))
+		}
+		return rt.strRange(s, 0, from) + rt.strRange(s, to, rt.strLen(s)), true
 	case "isBlank", "isNotBlank":
 		return (ktTrim(s, true, true) == "") == (name == "isBlank"), true
 	case "removePrefix":
@@ -4245,6 +4288,14 @@ func (rt *jsrt) ktCharMethod(c jsChar, name string, args []interface{}) (interfa
 		return jcClass(int(r))%8 == 3, true
 	case "isISOControl":
 		return r <= 31 || (r >= 127 && r <= 159), true
+	case "inc":
+		return jsChar{code: (c.code + 1) & 65535}, true
+	case "dec":
+		return jsChar{code: (c.code - 1) & 65535}, true
+	case "plus":
+		return rt.ktCharArith('+', c, argAt(args, 0)), true
+	case "minus":
+		return rt.ktCharArith('-', c, argAt(args, 0)), true
 	case "uppercaseChar":
 		return jsChar{code: int32(ktUpper(r))}, true
 	case "lowercaseChar":
@@ -4526,6 +4577,32 @@ func (rt *jsrt) ktTrimBy(s string, left, right bool, args []interface{}) string 
 		e--
 	}
 	return strFromUnits(u[b:e])
+}
+
+// ktReplaceText is replace / replaceFirst over a String or Char pair, with
+// ignoreCase: every (or the first) occurrence by indexOf, an empty oldValue
+// matching at every index. Twin of the replace arm of kStrMethod2 in
+// kotlin-interpreter.abnf and k2ReplaceText in languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktReplaceText(s string, first bool, args []interface{}) string {
+	sv := strUnits(s)
+	old := strUnits(rt.ktStrArg(argAt(args, 0)))
+	nw := strUnits(rt.ktStrArg(argAt(args, 1)))
+	ic := ktOptIc(args, 2)
+	step := len(old)
+	if step == 0 {
+		step = 1
+	}
+	var out []uint16
+	rp := 0
+	for at := ktFindText(sv, old, 0, ic); at >= 0; {
+		out = append(append(out, sv[rp:at]...), nw...)
+		rp = at + len(old)
+		if first || at >= len(sv) {
+			break
+		}
+		at = ktFindText(sv, old, at+step, ic)
+	}
+	return strFromUnits(append(out, sv[rp:]...))
 }
 
 // ktTrim drops leading (left) and trailing (right) whitespace.

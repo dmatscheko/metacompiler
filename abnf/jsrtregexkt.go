@@ -295,29 +295,25 @@ func (rt *jsrt) ktRxReplaceFn(re *rxRe, s string, fn interface{}) string {
 	return out.String()
 }
 
-// Regex#split. limit 0 (Kotlin's default) means no limit; a positive limit stops
-// after limit-1 cuts and keeps the rest of the input as the last part.
+// Regex#split, over java.util.regex.Matcher.find: every match cuts, an empty one
+// too (so a match at index 0 yields a leading ""), and the next search starts one
+// past an empty match. limit 0 (Kotlin's default) means no limit; a positive
+// limit stops after limit-1 cuts and keeps the rest of the input as the last
+// part. Twin of krxSplit in kotlin-interpreter.abnf and k5Split in
+// languages/lib/kotlin-rt.metajs.
 func (rt *jsrt) ktRxSplit(re *rxRe, s string, limit int) *jsArray {
 	text := []rune(s)
 	parts := &jsArray{}
 	at, last := 0, 0
-	for at <= len(text) {
-		if limit > 0 && len(parts.elems) >= limit-1 {
-			break
-		}
+	for at <= len(text) && (limit <= 0 || len(parts.elems) < limit-1) {
 		m := rt.ktRxSearch(re, text, at)
 		if m == nil {
 			break
 		}
+		parts.elems = append(parts.elems, string(text[last:m.begin]))
+		last, at = m.end, m.end
 		if m.end == m.begin {
-			if m.begin >= len(text) {
-				break
-			}
-			parts.elems = append(parts.elems, string(text[last:m.begin+1]))
-			last, at = m.begin+1, m.begin+1
-		} else {
-			parts.elems = append(parts.elems, string(text[last:m.begin]))
-			last, at = m.end, m.end
+			at++
 		}
 	}
 	parts.elems = append(parts.elems, string(text[last:]))

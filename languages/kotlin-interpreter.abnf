@@ -3177,6 +3177,7 @@ NotMemberKw = :script(~~
                 if (Array.isArray(l)) { return kSeqMethod(l, "minus", [r]).v }
                 if (kIsSet(l)) { return kSetMethod(l, "minus", [r]).v }
                 if (kIsMap(l)) { return kMapMethod(l, "minus", [r]).v }
+                if (kIsChar(l)) { return kCharArith("-", l, r) }
             }
             if (uname != null && kIsUser(l)) {
                 var m = lookupMethod(l, uname)
@@ -3218,6 +3219,14 @@ NotMemberKw = :script(~~
         if (op == ">") return a > b
         if (op == "<=") return a <= b
         return a >= b
+    }
+    // Char's arithmetic: Char + Int and Char - Int are a Char (wrapping at 16 bits),
+    // Char - Char the Int distance. Twin of ktCharArith in abnf/jsrtkotlin.go and
+    // k1CharArith in languages/lib/kotlin-rt.metajs.
+    function kCharArith(op, l, r) {
+        if (kIsChar(r)) { return l.__char - r.__char }
+        var n = szIs(r) ? szNum(r) : kNum(r)
+        return kChar((op == "+" ? l.__char + n : l.__char - n) & 65535)
     }
     function kIsUser(v) {
         return v !== null && v !== undefined && typeof v == "object" && v.__class != undefined && v.__class != null
@@ -4519,24 +4528,19 @@ NotMemberKw = :script(~~
     }
     // Regex#split. limit 0 (Kotlin's default) means no limit; a positive limit stops
     // after limit-1 cuts and keeps the rest of the input as the last part.
+    // Regex#split over Matcher.find: every match cuts, an empty one too, and the
+    // next search starts one past an empty match. Twin of ktRxSplit in
+    // abnf/jsrtregexkt.go.
     function krxSplit(prog, s, limit) {
         var parts = []
         var at = 0
         var last = 0
-        while (at <= s.length) {
-            if (limit > 0 && parts.length >= limit - 1) { break }
+        while (at <= s.length && (limit <= 0 || parts.length < limit - 1)) {
             var m = rxSearch(prog, s, at)
             if (m == null) { break }
-            if (m.end == m.begin) {
-                if (m.begin >= s.length) { break }
-                parts.push(s.substring(last, m.begin + 1))
-                last = m.begin + 1
-                at = m.begin + 1
-            } else {
-                parts.push(s.substring(last, m.begin))
-                last = m.end
-                at = m.end
-            }
+            parts.push(s.substring(last, m.begin))
+            last = m.end
+            at = m.end == m.begin ? m.end + 1 : m.end
         }
         parts.push(s.substring(last, s.length))
         return parts
@@ -4985,6 +4989,8 @@ NotMemberKw = :script(~~
         if (name == "isLowerCase") { return {v: jcIsLower(code)} }
         if (name == "isTitleCase") { return {v: jcClass(code) % 8 == 3} }
         if (name == "isISOControl") { return {v: code <= 31 || (code >= 127 && code <= 159)} }
+        if (name == "inc" || name == "dec") { return {v: kChar((code + (name == "inc" ? 1 : 0 - 1)) & 65535)} }
+        if (name == "plus" || name == "minus") { return {v: kCharArith(name == "plus" ? "+" : "-", cv, args[0])} }
         if (name == "uppercaseChar") { return {v: kChar(kUpperCode(code))} }
         if (name == "lowercaseChar") { return {v: kChar(kLowerCode(code))} }
         if (name == "uppercase") { return {v: unicodeCase(String.fromCharCode(code), 3)} }
@@ -5235,20 +5241,39 @@ NotMemberKw = :script(~~
         // ----- More of kotlin.text. The compiled twin is ktStrMethod2 in
         // abnf/jsrtkotlin.go. A `replace` whose argument is a Regex never reaches
         // here - krxMethod runs before this branch in mcall.
+        // replace / replaceFirst over a String or Char pair, with ignoreCase: every
+        // (or the first) occurrence by indexOf, an empty oldValue matching at every
+        // index. Twin of ktReplaceText in abnf/jsrtkotlin.go and k2ReplaceText in
+        // languages/lib/kotlin-rt.metajs.
         if (name == "replace" || name == "replaceFirst") {
             var oldS = kStrArg(args[0])
             var newS = kStrArg(args[1])
-            if (oldS.length == 0) { return {v: sv} }
+            var ric = kOptIc(args, 2)
+            var hitAt = kFindText(sv, oldS, 0, ric)
             var rout = ""
             var rp = 0
-            while (rp < sv.length) {
-                var hitAt = sv.substring(rp, sv.length).indexOf(oldS)
-                if (hitAt < 0) { rout += sv.substring(rp, sv.length); rp = sv.length; continue }
-                rout += sv.substring(rp, rp + hitAt) + newS
-                rp = rp + hitAt + oldS.length
-                if (name == "replaceFirst") { rout += sv.substring(rp, sv.length); rp = sv.length }
+            while (hitAt >= 0) {
+                rout = rout + sv.substring(rp, hitAt) + newS
+                rp = hitAt + oldS.length
+                if (name == "replaceFirst" || hitAt >= sv.length) { hitAt = 0 - 1 }
+                else { hitAt = kFindText(sv, oldS, hitAt + (oldS.length > 0 ? oldS.length : 1), ric) }
             }
-            return {v: rout}
+            return {v: rout + sv.substring(rp, sv.length)}
+        }
+        if (name == "commonPrefixWith" || name == "commonSuffixWith") {
+            var co = kStrArg(args[0])
+            var cic = kOptIc(args, 1)
+            var cn = 0
+            var pre = name == "commonPrefixWith"
+            while (cn < sv.length && cn < co.length &&
+                   kRegionEq(sv, pre ? cn : sv.length - 1 - cn, co.substring(pre ? cn : co.length - 1 - cn, pre ? cn + 1 : co.length - cn), cic)) { cn++ }
+            return {v: pre ? sv.substring(0, cn) : sv.substring(sv.length - cn, sv.length)}
+        }
+        if (name == "removeRange") {
+            var rs0 = isRange(args[0]) ? args[0].from : kNum(args[0])
+            var re0 = isRange(args[0]) ? args[0].to + 1 : kNum(args[1])
+            if (re0 < rs0) { kThrowExc("IndexOutOfBoundsException", "End index (" + re0 + ") is less than start index (" + rs0 + ").") }
+            return {v: sv.substring(0, rs0) + sv.substring(re0, sv.length)}
         }
         if (name == "isBlank" || name == "isNotBlank") {
             return {v: (kTrimSide(sv, true, true).length == 0) == (name == "isBlank")}
@@ -7543,6 +7568,7 @@ NotMemberKw = :script(~~
         // declared on Set separately from Iterable and keeps the receiver's shape).
         if (kIsSet(l)) { return kSetMethod(l, "plus", [r]).v }
         if (kIsFlo(l) || kIsFlo(r)) { return kFloOp2("+", kNumD(l), kNumD(r), kF32Res(l, r)) }
+        if (kIsChar(l)) { return kCharArith("+", l, r) }
         // Two integral operands: Int + Int wraps at 32 bits, anything with a Long in
         // it at 64, and an unsigned pair at its own width.
         if (kIsIntegral(l) && kIsIntegral(r)) { return kArith("+", l, r) }
@@ -11139,13 +11165,14 @@ NotMemberKw = :script(~~
         return {obj: o, key: last.idx(), isIndex: true}
     }
     // ++ / -- keep the type of what they step: a Double stays a Double, a sized
-    // integer steps at its OWN width (so `var b: Byte = 127; b++` is -128), and
-    // everything else steps as an Int32 (a Char as its code).
+    // integer steps at its OWN width (so `var b: Byte = 127; b++` is -128), a Char
+    // stays a Char, and everything else steps as an Int32.
     function kStep(v, d) {
         // ++/-- keeps the operand's own type, WIDTH included: a Float steps as a
         // Float, so `var f = 16777216f; f++` stays 1.6777216E7.
         if (kIsFlo(v)) { return kIsF32(v) ? kFlo32(v.__flo + d) : kFlo(v.__flo + d) }
         if (szIs(v)) { return kNorm(szPair(szArith("+", v, kSz(d, v.w, v.u))), v.w, v.u) }
+        if (kIsChar(v)) { return kChar((v.__char + d) & 65535) }
         return (kNum(v) + d) | 0
     }
     // items = [op, ref]: the PREFIX form. It writes the same slot makeIncDec writes and

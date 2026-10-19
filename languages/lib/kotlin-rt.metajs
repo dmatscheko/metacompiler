@@ -1746,17 +1746,28 @@ function js_ktarith(op, l, r) {
         }
     }
     if (floIs(l) || floIs(r)) { return k1JvmArith(op, l, r) }
-    if (!ktIntegral(l) || !ktIntegral(r)) {
-        // `and`/`or`/`xor` on two Booleans are Kotlin's non-short-circuit boolean
-        // operators; anything else is not a program kotlinc accepts.
-        if (typeof l == "boolean" && typeof r == "boolean") {
-            if (op == "&") { return l && r }
-            if (op == "|") { return l || r }
-            if (op == "^") { return l != r }
-        }
-        return k1JvmArith(op, l, r)
+    var lc = ktIsChar(l)
+    if ((lc || ktIsInt(l)) && ktIntegral(r)) {
+        if (lc && op == "-") { return k1CharArith(op, l, r) }
+        return k1Arith(op, l, r)
     }
-    return k1Arith(op, l, r)
+    // `and`/`or`/`xor` on two Booleans are Kotlin's non-short-circuit boolean
+    // operators; anything else is not a program kotlinc accepts.
+    if (typeof l == "boolean" && typeof r == "boolean") {
+        if (op == "&") { return l && r }
+        if (op == "|") { return l || r }
+        if (op == "^") { return l != r }
+    }
+    return k1JvmArith(op, l, r)
+}
+
+// k1CharArith is ktCharArith (jsrtkotlin.go): Char + Int and Char - Int are a
+// Char (wrapping at 16 bits), Char - Char the Int distance.
+function k1CharArith(op, l, r) {
+    if (ktIsChar(r)) { return ktCharCode(l) - ktCharCode(r) }
+    var n = k1I32(r)
+    if (op == "-") { n = -n }
+    return ktChar((ktCharCode(l) + n) & 65535)
 }
 
 // jsrtkotlin.go js_ktshift (692).
@@ -1821,7 +1832,11 @@ function js_ktadd(l, r) {
     // converted first and the sum rounded after, and the floor's left-operand
     // style rule gets `Float + Double` (which is a Double) backwards.
     if (floIs(l) || floIs(r)) { return k1JvmArith("+", l, r) }
-    if (ktIntegral(l) && ktIntegral(r)) { return k1Arith("+", l, r) }
+    var lc = ktIsChar(l)
+    if ((lc || ktIsInt(l)) && ktIntegral(r)) {
+        if (lc) { return k1CharArith("+", l, r) }
+        return k1Arith("+", l, r)
+    }
     // `+` on a COLLECTION is kotlin.collections.plus: a list gains the elements
     // of another collection, or the single element. A SET gains them as a Set,
     // because kotlin.collections.plus is declared on Set separately from Iterable
@@ -2548,12 +2563,30 @@ function k2SplitArgs(s, args) {
     return k2SplitBy(s, ds, k2OptIc(args, i), lim)
 }
 
-// k2TextOp is ktTextOp (jsrtkotlin.go): kotlin.text's search members over a
-// String or Char argument, with the optional startIndex and ignoreCase, clamped
-// as java.lang.String clamps them; compareTo is java's.
+// k2ReplaceText is ktReplaceText (jsrtkotlin.go): replace / replaceFirst over a
+// String or Char pair, with ignoreCase; an empty oldValue matches at every index.
+function k2ReplaceText(s, first, args) {
+    var old = ktStrArg(ktArg(args, 0))
+    var nw = ktStrArg(ktArg(args, 1))
+    var ic = k2OptIc(args, 2)
+    var step = old.length
+    if (step == 0) { step = 1 }
+    var out = ""
+    var rp = 0
+    var at = k2FindText(s, old, 0, ic)
+    while (at >= 0) {
+        out = out + s.substring(rp, at) + nw
+        rp = at + old.length
+        if (first || at >= s.length) { at = -1 } else { at = k2FindText(s, old, at + step, ic) }
+    }
+    return out + s.substring(rp, s.length)
+}
+
+// k2TextOp is ktTextOp (jsrtkotlin.go): kotlin.text's search members (equals,
+// compareTo, contains, indexOf, lastIndexOf, startsWith, endsWith - the caller
+// tests the name) over a String or Char argument, with the optional startIndex and
+// ignoreCase, clamped as java.lang.String clamps them; compareTo is java's.
 function k2TextOp(s, name, args) {
-    if (name != "equals" && name != "compareTo" && name != "contains" && name != "indexOf" &&
-        name != "lastIndexOf" && name != "startsWith" && name != "endsWith") { return KT_MISS }
     var a0 = ktArg(args, 0)
     var ic = k2OptIc(args, 1)
     if (name == "equals") {
@@ -2765,8 +2798,11 @@ function k2TrimLeftCut(s) {
 // js_mcall does NOT carry and KT_MISS for everything else, so a name js_mcall
 // already implements keeps exactly the behaviour it had.
 function ktStrMethod(s, name, args) {
-    var tov = k2TextOp(s, name, args)
-    if (!ktMiss(tov)) { return tov }
+    if (name == "equals" || name == "compareTo" || name == "contains" || name == "indexOf" ||
+        name == "lastIndexOf" || name == "startsWith" || name == "endsWith") {
+        var tov = k2TextOp(s, name, args)
+        if (!ktMiss(tov)) { return tov }
+    }
     if (name == "isNotEmpty") { return s.length > 0 }
     if (name == "get") {
         // Bounds-checked, like the indexed read s[i] it is the method spelling of.
@@ -2901,29 +2937,38 @@ function k2StrMethod2(s, name, args) {
     // branch of mcall in kotlin-interpreter.abnf. `replace` with a Regex argument
     // never reaches here - the hub routes a pattern argument to the Regex
     // dispatcher first (js_ktsmcall in jsrtkotlin.go).
-    if (name == "replace" || name == "replaceFirst") {
-        var old = ktStrArg(ktArg(args, 0))
-        var nw = ktStrArg(ktArg(args, 1))
-        if (old.length == 0) { return s }
-        var parts = k2Split(s, old)
-        if (name == "replaceFirst") {
-            if (parts.length < 2) { return s }
-            var head = parts[0] + nw
-            var pi = 1
-            while (pi < parts.length) {
-                if (pi > 1) { head = head + old }
-                head = head + parts[pi]
-                pi = pi + 1
+    if (name == "replace" || name == "replaceFirst") { return k2ReplaceText(s, name == "replaceFirst", args) }
+    if (name == "commonPrefixWith" || name == "commonSuffixWith") {
+        var co = ktStrArg(ktArg(args, 0))
+        var cic = k2OptIc(args, 1)
+        var pre = name == "commonPrefixWith"
+        var cn = 0
+        var cgo = true
+        while (cgo && cn < s.length && cn < co.length) {
+            var ci = cn
+            var cj = cn
+            if (!pre) {
+                ci = s.length - 1 - cn
+                cj = co.length - 1 - cn
             }
-            return head
+            if (k2RegionEq(s, ci, co.substring(cj, cj + 1), cic)) { cn = cn + 1 } else { cgo = false }
         }
-        var ro2 = parts[0]
-        var qi = 1
-        while (qi < parts.length) {
-            ro2 = ro2 + nw + parts[qi]
-            qi = qi + 1
+        if (pre) { return s.substring(0, cn) }
+        return s.substring(s.length - cn, s.length)
+    }
+    if (name == "removeRange") {
+        var a0 = ktArg(args, 0)
+        var rs0 = 0
+        var re0 = 0
+        if (ktIsRange(a0)) {
+            rs0 = k2Int(a0["from"])
+            re0 = k2Int(a0["to"]) + 1
+        } else {
+            rs0 = k2Int(a0)
+            re0 = k2Int(ktArg(args, 1))
         }
-        return ro2
+        if (re0 < rs0) { ktRaise("IndexOutOfBoundsException", "End index (" + re0 + ") is less than start index (" + rs0 + ").") }
+        return s.substring(0, rs0) + s.substring(re0, s.length)
     }
     if (name == "isBlank" || name == "isNotBlank") {
         return (k2TrimSpace(s).length == 0) === (name == "isBlank")
@@ -3618,6 +3663,10 @@ function ktCharMethod(c, name, args) {
     if (name == "isLowerCase") { return jcIsLower(r) }
     if (name == "isTitleCase") { return jcClass(r) % 8 == 3 }
     if (name == "isISOControl") { return r <= 31 || (r >= 127 && r <= 159) }
+    if (name == "inc") { return ktChar((r + 1) & 65535) }
+    if (name == "dec") { return ktChar((r - 1) & 65535) }
+    if (name == "plus") { return k1CharArith("+", c, ktArg(args, 0)) }
+    if (name == "minus") { return k1CharArith("-", c, ktArg(args, 0)) }
     if (name == "uppercaseChar") { return ktChar(k2Upper(r)) }
     if (name == "lowercaseChar") { return ktChar(k2Lower(r)) }
     if (name == "uppercase") { return unicodeCase(k2ChStr(r), 3) }
@@ -9483,26 +9532,25 @@ function k5ReplaceFn(re, s, fn) {
     return out
 }
 
-// Regex#split. limit 0 (Kotlin's default) means no limit; a positive limit stops
-// after limit-1 cuts and keeps the rest of the input as the last part.
+// Regex#split over Matcher.find: every match cuts, an empty one too, and the next
+// search starts one past an empty match. limit 0 (Kotlin's default) means no
+// limit; a positive limit stops after limit-1 cuts and keeps the rest of the input
+// as the last part. Twin of ktRxSplit in abnf/jsrtregexkt.go.
 function k5Split(re, s, limit) {
     k5Check(re)
     var parts = []
     var at = 0
     var last = 0
-    while (at <= s.length) {
-        if (limit > 0 && parts.length >= limit - 1) { break }
+    var go = true
+    while (go && at <= s.length && (limit <= 0 || parts.length < limit - 1)) {
         var m = k5Search(re, s, at)
-        if (m === null) { break }
-        if (m["end"] == m["begin"]) {
-            if (m["begin"] >= s.length) { break }
-            parts.push(s.substring(last, m["begin"] + 1))
-            last = m["begin"] + 1
-            at = m["begin"] + 1
+        if (m === null) {
+            go = false
         } else {
             parts.push(s.substring(last, m["begin"]))
             last = m["end"]
             at = m["end"]
+            if (m["end"] == m["begin"]) { at = at + 1 }
         }
     }
     parts.push(s.substring(last, s.length))
