@@ -2554,6 +2554,7 @@ function ktStrMethod(s, name, args) {
     }
     if (name == "repeat") {
         var rn = k2Int(ktArg(args, 0))
+        if (rn < 0) { ktRaise("IllegalArgumentException", "Count 'n' must be non-negative, but was " + rn + ".") }
         var ro = ""
         var ri = 0
         while (ri < rn) {
@@ -2622,6 +2623,7 @@ function k2StrMethod2(s, name, args) {
     if (name == "endsWith") { return k2EndsWith(s, ktStrArg(ktArg(args, 0))) }
     if (name == "padStart" || name == "padEnd") {
         var want = k2Int(ktArg(args, 0))
+        if (want < 0) { ktRaise("IllegalArgumentException", "Desired length " + want + " is less than zero.") }
         var pad = " "
         if (args.length > 1) { pad = ktStrArg(args[1]) }
         var po = s
@@ -2656,7 +2658,7 @@ function k2StrMethod2(s, name, args) {
     }
     if (name == "drop" || name == "take" || name == "dropLast" || name == "takeLast") {
         var k = k2Int(ktArg(args, 0))
-        if (k < 0) { k = 0 }
+        if (k < 0) { ktRaise("IllegalArgumentException", "Requested character count " + k + " is less than zero.") }
         if (k > n) { k = n }
         if (name == "drop") { return s.substring(k, n) }
         if (name == "take") { return s.substring(0, k) }
@@ -4128,11 +4130,14 @@ function ktSeqMethodK(arr, name, args, kind) {
         if (name == "windowed") {
             n = 1
             b = false
-            if (args.length > 1) { if (!ktIsFn(args[1])) { n = k3Int(args[1]) } }
-            if (args.length > 2) { if (!ktIsFn(args[2])) { b = args[2] === true } }
+            if (args.length > 1) { if (!ktIsFn(args[1]) && !rtIsNil(args[1])) { n = k3Int(args[1]) } }
+            if (args.length > 2) { if (!ktIsFn(args[2]) && !rtIsNil(args[2])) { b = args[2] === true } }
         }
-        if (k <= 0) { fail(name + "() size and step must be positive") }
-        if (n <= 0) { fail(name + "() size and step must be positive") }
+        if (k <= 0 || n <= 0) {
+            // checkWindowSizeStep, as ktWindowBad (jsrtkotlin.go).
+            if (k == n) { ktRaise("IllegalArgumentException", "size " + k + " must be greater than zero.") }
+            ktRaise("IllegalArgumentException", "Both size " + k + " and step " + n + " must be greater than zero.")
+        }
         i = 0
         var cpiece = []
         while (b ? i < es.length : i + k <= es.length) {
@@ -4215,7 +4220,7 @@ function ktSeqMethodK(arr, name, args, kind) {
     }
     if (k3IsTakeDrop(name)) {
         k = k3Int(ktArg(args, 0))
-        if (k < 0) { k = 0 }
+        if (k < 0) { ktRaise("IllegalArgumentException", "Requested element count " + k + " is less than zero.") }
         if (k > es.length) { k = es.length }
         if (name == "take") { return k3Sub(es, 0, k) }
         if (name == "drop") { return k3Sub(es, k, es.length) }
@@ -8099,9 +8104,12 @@ function k4RangeNum(v) {
 
 // js_ktrange is the extern the emitter's makeRange calls. `down` is 1 for downTo
 // and 0 otherwise; the `..<` / until subtraction is the emitter's.
+// k4StepBad is ktStepBad (jsrtkotlin.go): kotlin.ranges' checkStepIsPositive.
+function k4StepBad(st) { ktRaise("IllegalArgumentException", "Step must be positive, was: " + ktRender(st) + ".") }
+
 function js_ktrange(from, to, st, down) {
     var stn = k4RangeNum(st)
-    if (stn <= 0) { fail("range step must be positive") }
+    if (stn <= 0) { k4StepBad(st) }
     // `fl` marks a ClosedFloatingPointRange - `1.0..2.0`. Kotlin declares no step
     // and no iteration for one, and its contains is the BOUNDS test alone
     // (`1.5 in 1.0..2.0` is true).
@@ -8114,7 +8122,7 @@ function js_ktrange(from, to, st, down) {
 function js_ktrestep(r, st) {
     if (!ktIsRange(r)) { fail("step applied to a non-range") }
     var stn = k4RangeNum(st)
-    if (stn <= 0) { fail("range step must be positive") }
+    if (stn <= 0) { k4StepBad(st) }
     // `step` answers an IntProgression, never an IntRange, whatever the step is:
     // `(1..5) step 1` prints "1..5 step 1" and `is IntRange` is false for it.
     return {__range: true, from: r["from"], to: r["to"], st: stn,

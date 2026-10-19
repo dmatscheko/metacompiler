@@ -684,6 +684,10 @@ function ktMResType(name, nargs, el) {
 // these slots and leaves a skipped slot undefined, which the member reads as its
 // default.
 var ktStdParamNames = {
-    "$joinToString": ["separator", "prefix", "postfix", "limit", "truncated", "transform"]
+    "$joinToString": ["separator", "prefix", "postfix", "limit", "truncated", "transform"],
+    "$windowed": ["size", "step", "partialWindows", "transform"],
+    "$chunked": ["size", "transform"],
+    "$padStart": ["length", "padChar"],
+    "$padEnd": ["length", "padChar"]
 }
 function ktStdParams(name) { return ktStdParamNames["$" + name] }

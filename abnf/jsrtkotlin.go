@@ -1478,8 +1478,11 @@ func init() {
 					case "step":
 						if len(arr.elems) == 1 {
 							sn, sok := ktRangeNum(arr.elems[0])
-							if !sok || sn <= 0 {
+							if !sok {
 								rt.fail("range step must be positive")
+							}
+							if sn <= 0 {
+								rt.ktStepBad(arr.elems[0])
 							}
 							rg.st = sn
 							rg.pg = true
@@ -2232,7 +2235,7 @@ func init() {
 				rt.fail("range bound is not a number")
 			}
 			if sn <= 0 {
-				rt.fail("range step must be positive")
+				rt.ktStepBad(st)
 			}
 			_, isCh := from.(jsChar)
 			_, isFl := from.(jsJFlo)
@@ -2247,8 +2250,11 @@ func init() {
 				rt.fail("step applied to a non-range")
 			}
 			sn, sok := ktRangeNum(u(a[1]))
-			if !sok || sn <= 0 {
+			if !sok {
 				rt.fail("range step must be positive")
+			}
+			if sn <= 0 {
+				rt.ktStepBad(u(a[1]))
 			}
 			rg.st = sn
 			// `step` answers an IntProgression, never an IntRange, whatever the
@@ -2752,6 +2758,9 @@ func (rt *jsrt) ktStrMethod(s, name string, args []interface{}) (interface{}, bo
 		return float64(0), true
 	case "repeat":
 		n := jsToInt(rt.toNumber(argAt(args, 0)))
+		if n < 0 {
+			rt.ktRaise("IllegalArgumentException", fmt.Sprintf("Count 'n' must be non-negative, but was %d.", n))
+		}
 		out := ""
 		for i := 0; i < n; i++ {
 			out += s
@@ -2832,6 +2841,9 @@ func (rt *jsrt) ktStrMethod2(s, name string, args []interface{}) (interface{}, b
 		return strings.HasSuffix(s, rt.ktStrArg(argAt(args, 0))), true
 	case "padStart", "padEnd":
 		want := jsToInt(rt.toNumber(argAt(args, 0)))
+		if want < 0 {
+			rt.ktRaise("IllegalArgumentException", fmt.Sprintf("Desired length %d is less than zero.", want))
+		}
 		pad := " "
 		if len(args) > 1 {
 			pad = rt.ktStrArg(args[1])
@@ -2870,7 +2882,7 @@ func (rt *jsrt) ktStrMethod2(s, name string, args []interface{}) (interface{}, b
 	case "drop", "take", "dropLast", "takeLast":
 		k := jsToInt(rt.toNumber(argAt(args, 0)))
 		if k < 0 {
-			k = 0
+			rt.ktRaise("IllegalArgumentException", fmt.Sprintf("Requested character count %d is less than zero.", k))
 		}
 		if k > n {
 			k = n
@@ -4623,10 +4635,10 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		var xf interface{}
 		if name == "windowed" {
 			step, partial = 1, false
-			if len(args) > 1 && !isCallable(args[1]) {
+			if len(args) > 1 && !isCallable(args[1]) && !isUndefOrNull(args[1]) {
 				step = jsToInt(rt.toNumber(args[1]))
 			}
-			if len(args) > 2 && !isCallable(args[2]) {
+			if len(args) > 2 && !isCallable(args[2]) && !isUndefOrNull(args[2]) {
 				partial = rt.truthy(args[2])
 			}
 		}
@@ -4636,7 +4648,7 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 			}
 		}
 		if k <= 0 || step <= 0 {
-			rt.fail("%s() size and step must be positive", name)
+			rt.ktWindowBad(k, step)
 		}
 		out := []interface{}{}
 		for i := 0; ; i += step {
@@ -4746,7 +4758,7 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 	case "take", "drop", "takeLast", "dropLast":
 		k := jsToInt(rt.toNumber(argAt(args, 0)))
 		if k < 0 {
-			k = 0
+			rt.ktRaise("IllegalArgumentException", fmt.Sprintf("Requested element count %d is less than zero.", k))
 		}
 		if k > len(es) {
 			k = len(es)
@@ -7365,6 +7377,21 @@ func (rt *jsrt) ktRaise(cls, msg string) {
 // message is genuinely null - kotlin-stdlib's `?: throw NoSuchElementException()` -
 // can be built. Throwable#toString prints only the class name for that one, which is
 // what java does.
+// ktStepBad is kotlin.ranges' checkStepIsPositive. Twin of kStepBad in
+// languages/kotlin-interpreter.abnf and k4StepBad in languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktStepBad(st interface{}) {
+	rt.ktRaise("IllegalArgumentException", "Step must be positive, was: "+rt.ktpRender(st, 0)+".")
+}
+
+// ktWindowBad is kotlin.collections' checkWindowSizeStep (chunked is windowed with
+// step = size). Twin of kWindowBad in languages/kotlin-interpreter.abnf.
+func (rt *jsrt) ktWindowBad(size, step int) {
+	if size == step {
+		rt.ktRaise("IllegalArgumentException", fmt.Sprintf("size %d must be greater than zero.", size))
+	}
+	rt.ktRaise("IllegalArgumentException", fmt.Sprintf("Both size %d and step %d must be greater than zero.", size, step))
+}
+
 func (rt *jsrt) ktRaiseV(cls string, msg interface{}) {
 	o := newJSObject()
 	o.set("__class", ktExcHierarchy()[cls])

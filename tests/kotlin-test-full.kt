@@ -4720,6 +4720,8 @@ fun sec94() {
 // value's own width, the flags, %e / %g / %a, explicit and relative indexes, and its
 // IllegalFormatException family; a primitive argument is its java.lang box. A
 // narrower integer hashes as its value at its own signed width (UByte 255 is -1).
+// A negative count or size, and a non-positive step, is an IllegalArgumentException
+// with the stdlib's message, never a clamp or an abort.
 fun s95fmt(f: String, vararg a: Any?): String {
     try { return f.format(*a) } catch (e: IllegalArgumentException) { return e::class.simpleName + ": " + e.message }
 }
@@ -4751,6 +4753,17 @@ fun sec95() {
                     && s95fmt("%q", 1) == "UnknownFormatConversionException: Conversion = 'q'")
     check("hsh95k", fv[2].hashCode() == -1 && fv[9].hashCode() == -2 && 255.toUByte().hashCode() == -1 && 65534.toUShort().hashCode() == -2
                     && s95fmt("%h|%h|%h", fv[2], fv[9], fv[10]) == "ffffffff|fffffffe|4")
+    val nz = listOf(-1, 0, 1, 2)
+    check("arg95l", s95err { "ab".padStart(nz[0]) } == "IllegalArgumentException: Desired length -1 is less than zero."
+                    && s95err { l5.chunked(nz[1]) } == "IllegalArgumentException: size 0 must be greater than zero."
+                    && s95err { l5.windowed(nz[1], nz[2]) } == "IllegalArgumentException: Both size 0 and step 1 must be greater than zero.")
+    check("arg95m", s95err { l5.take(nz[0]) } == "IllegalArgumentException: Requested element count -1 is less than zero."
+                    && s95err { "abc".dropLast(nz[0]) } == "IllegalArgumentException: Requested character count -1 is less than zero."
+                    && s95err { "ab".repeat(nz[0]) } == "IllegalArgumentException: Count 'n' must be non-negative, but was -1.")
+    check("arg95n", s95err { (1..10) step nz[1] } == "IllegalArgumentException: Step must be positive, was: 0."
+                    && s95err { (10 downTo 1).step(-2) } == "IllegalArgumentException: Step must be positive, was: -2.")
+    check("win95o", "" + l5.windowed(3, partialWindows = true) == "[[1, 2, 3], [2, 3, 4], [3, 4, 5], [4, 5], [5]]"
+                    && "abcde".padStart(length = 7, padChar = '*') == "**abcde" && "" + "abcde".windowed(3, 2, true) == "[abc, cde, e]")
 }
 
 
