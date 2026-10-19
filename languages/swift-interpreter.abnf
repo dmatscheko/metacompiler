@@ -488,8 +488,11 @@ MemStatic   <~~ push({mstatic: 1}) ~~> = ( "static" | "class" ) KwEnd ;
 MemLazy     <~~ push({mlazy: 1}) ~~> = "lazy" KwEnd ;
 MemMut      <~~ push({mmut: 1}) ~~> = "mutating" KwEnd ;
 // A member attribute keeps its NAME: @Wrapper on a stored property is a property
-// wrapper, and everything else (@objc, @escaping, ...) is parsed and dropped.
-MemAttr     = "@" Id <~~ push({mattr: swBt(up.in)}) ~~> { "." Id } [ SkipParen ] ;
+// wrapper, and everything else (@objc, @escaping, ...) is parsed and dropped. An
+// argument list that reads as call arguments is kept too: `@Clamped(0, 10) var x
+// = 5` constructs the wrapper as Clamped(wrappedValue: 5, 0, 10).
+MemAttr     = "@" Id <~~ push({mattr: swBt(up.in)}) ~~> { "." Id } [ MemAttrArgs | SkipParen ] ;
+MemAttrArgs <~~ push({mattrArgs: takeAll()}) ~~> = "(" [ CallArg { "," CallArg } ] ")" ;
 ClassMod    = "class" KwEnd ;
 
 // func name(label param: Type, ...) -> Ret { ... }
@@ -9011,13 +9014,15 @@ KwContinue  = "continue" KwEnd ;
         var isLazy = false
         var isMut = false
         var attr = null
+        var attrArgs = []
         for (var i = from; i < items.length; i++) {
             var it = items[i]
             if (it == undefined) { continue }
             if (it.mstatic != undefined) { isStatic = true; continue }
             if (it.mlazy != undefined) { isLazy = true; continue }
             if (it.mmut != undefined) { isMut = true; continue }
-            if (it.mattr != undefined) { attr = it.mattr; continue }
+            if (it.mattr != undefined) { attr = it.mattr; attrArgs = []; continue }
+            if (it.mattrArgs != undefined) { attrArgs = it.mattrArgs; continue }
             if (it.nested != undefined) { mem.nested.push(it.nested); mem.nestedIdx.push(it.nidx); continue }
             if (it.inherit != undefined) { mem.inherits.push(it.inherit); continue }
             if (it.eraw != undefined) { mem.raw = it.eraw; continue }
@@ -9035,7 +9040,7 @@ KwContinue  = "continue" KwEnd ;
                     // reads and writes its wrappedValue while $x reads projectedValue.
                     mem.wrapped.push({name: it.prop, wrapper: attr})
                     mem.fields.push({name: it.prop, store: "_" + it.prop, ty: "", hasInit: true,
-                                     init: makeWrapperInit(attr, it.init)})
+                                     init: makeWrapperInit(attr, it.init, attrArgs)})
                     mem.initProps.push(mem.fields[mem.fields.length - 1])
                 } else {
                     mem.fields.push(f)
@@ -9063,6 +9068,7 @@ KwContinue  = "continue" KwEnd ;
             isLazy = false
             isMut = false
             attr = null
+            attrArgs = []
         }
         return mem
     }
@@ -9075,12 +9081,16 @@ KwContinue  = "continue" KwEnd ;
         for (var j = 0; j < mem.fields.length; j++) { if (mem.fields[j].name == "wrappedValue") { return true } }
         return false
     }
-    function makeWrapperInit(wname, dflt) {
+    // The wrapper instance: Wrapper(wrappedValue: initial, <the attribute's own
+    // arguments>). Twin in swift-to-llvm-ir.abnf.
+    function makeWrapperInit(wname, dflt, args) {
+        var recs = dflt == null ? [] : [{lbl: "wrappedValue", t: dflt, ref: null, dflt: null}]
+        for (var i = 0; i < args.length; i++) { recs.push(args[i]) }
         return function() {
             var w = getVar(wname)
-            var argv = dflt == null ? [] : [dflt()]
-            pendingLabels = dflt == null ? [] : ["wrappedValue"]
-            var v = constructInstance(w, argv, pendingLabels)
+            var ea = evalArgs(recs)
+            pendingLabels = recLabels(recs)
+            var v = constructInstance(w, ea.argv, pendingLabels)
             pendingLabels = null
             return v
         }

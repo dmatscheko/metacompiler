@@ -5004,6 +5004,30 @@ func s120() {
     check("120a", arr120() == ["a"] && st120().x == 1 && cls120().x == 9 && nest120() == [1])
 }
 
+// ===== SECTION 121: a property wrapper attribute with arguments =====
+// `@Bounded(max: 10) var a: Int = 50` constructs Bounded(wrappedValue: 50,
+// max: 10); without an initial value the attribute's arguments alone pick the
+// initializer. Every value read off swiftc 6.1.2.
+@propertyWrapper struct Bounded121 {
+    var v: Int
+    let hi: Int
+    init(wrappedValue: Int, max hi: Int) { self.hi = hi; v = min(wrappedValue, hi) }
+    init(max hi: Int) { self.hi = hi; v = 0 }
+    init(wrappedValue: Int, _ lo: Int, _ hi: Int) { self.hi = hi; v = max(lo, min(wrappedValue, hi)) }
+    var wrappedValue: Int { get { v } set { v = min(newValue, hi) } }
+}
+struct Cfg121 {
+    @Bounded121(max: 10) var a: Int = 50
+    @Bounded121(max: 3) var b: Int
+    @Bounded121(5, 8) var c: Int = 1
+}
+func s121() {
+    var c = Cfg121()
+    let first = [c.a, c.b, c.c]
+    c.b = 7
+    check("121a", first == [10, 0, 5] && c.b == 3)
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5125,6 +5149,7 @@ func main() {
     s118() // SECTION-CALL 118
     s119() // SECTION-CALL 119
     s120() // SECTION-CALL 120
+    s121() // SECTION-CALL 121
     print("full: \(checks) checks, \(fails) failures")
 }
 
