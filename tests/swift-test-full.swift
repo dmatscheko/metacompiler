@@ -4898,6 +4898,23 @@ func s115() {
     check("115e", (V115(x: 2) * 5).x == 10)
 }
 
+// ===== SECTION 116: max/min of a Comparable type =====
+// The free max/min compare through the type's own `<`: max(x, y) is
+// `y >= x ? y : x` and min(x, y) is `y < x ? y : x`, so a tie answers the
+// right operand for max and the left one for min. Every value read off
+// swiftc 6.1.2.
+struct K116: Comparable {
+    var r: Int
+    var id: String
+    static func < (a: K116, b: K116) -> Bool { return a.r < b.r }
+    static func == (a: K116, b: K116) -> Bool { return a.r == b.r }
+}
+func s116() {
+    let a = K116(r: 1, id: "a"), b = K116(r: 1, id: "b"), c = K116(r: 0, id: "c"), d = K116(r: 9, id: "d")
+    check("116a", max(a, d).id == "d" && min(a, d).id == "a" && max(d, a).id == "d" && min(d, a).id == "a")
+    check("116b", max(a, b).id == "b" && min(a, b).id == "a" && max(a, b, c).id == "b" && min(c, a, b).id == "c")
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5014,6 +5031,7 @@ func main() {
     s113() // SECTION-CALL 113
     s114() // SECTION-CALL 114
     s115() // SECTION-CALL 115
+    s116() // SECTION-CALL 116
     print("full: \(checks) checks, \(fails) failures")
 }
 

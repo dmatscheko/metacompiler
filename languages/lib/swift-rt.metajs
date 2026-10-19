@@ -2918,9 +2918,15 @@ function swPick(l, r, wantGt) {
         if (ic < 0) { return l }
         return r
     }
-    // rtCompare's NaN sentinel cannot arise here: the two arms above have taken
-    // every float box and every sized integer, so this arm sees strings, and a
-    // string pair never coerces. Folded to 0 so the merge changes no answer.
+    // A Comparable user type: `y < x` through its own `<`.
+    if (swFindMember(l, "<") !== undefined || swFindMember(r, "<") !== undefined) {
+        if (swSortLess(r, l) == wantGt) { return l }
+        return r
+    }
+    // rtCompare's NaN sentinel cannot arise here: the three arms above have taken
+    // every float box, every sized integer and every user type, so this arm sees
+    // strings, and a string pair never coerces. Folded to 0 so the merge changes
+    // no answer.
     var jc = rtCompare(l, r)
     if (jc == 2) { jc = 0 }
     if (wantGt) {

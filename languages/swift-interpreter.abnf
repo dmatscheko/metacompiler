@@ -4064,15 +4064,28 @@ KwContinue  = "continue" KwEnd ;
     // same two-operand rule left to right, which is how the standard library
     // writes it.
     // A Double operand makes both Doubles: the other is an Int literal, so
-    // `max(1, 2.5)` is 2.5 and `min(1, 2.5)` 1.0 (swiftc 6.1.2). Twins: swPick in
+    // `max(1, 2.5)` is 2.5 and `min(1, 2.5)` 1.0 (swiftc 6.1.2). A Comparable
+    // user type compares through its own `<`. Twins: swPick in
     // abnf/jsrtswift.go and lib/swift-rt.metajs.
     function swMax2(a, b) {
         if (isFlo(a) || isFlo(b)) { return swPickFlo(swD(b) >= swD(a) ? b : a, a, b) }
+        var u = swUserLt(b, a)
+        if (u >= 0) { return u == 1 ? a : b }
         return a > b ? a : b
     }
     function swMin2(a, b) {
         if (isFlo(a) || isFlo(b)) { return swPickFlo(swD(b) < swD(a) ? b : a, a, b) }
+        var u = swUserLt(b, a)
+        if (u >= 0) { return u == 1 ? b : a }
         return a < b ? a : b
+    }
+    // y < x through a `<` either operand's type declares: 1 or 0, and -1 when
+    // neither declares one.
+    function swUserLt(y, x) {
+        var f = findOpFn("<", y)
+        if (f == null) { f = findOpFn("<", x) }
+        if (f == null) { return -1 }
+        return f(undefined, y, x) === true ? 1 : 0
     }
     function swPickFlo(p, a, b) {
         if (isFlo(p)) { return p }

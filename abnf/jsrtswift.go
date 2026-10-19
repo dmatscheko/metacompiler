@@ -1085,6 +1085,15 @@ func init() {
 					}
 					return a[1]
 				}
+				// A Comparable user type: `y < x` through its own `<`.
+				_, lu := swFindMember(l, "<")
+				_, ru := swFindMember(r, "<")
+				if lu || ru {
+					if rt.swSortLess(r, l) == wantMax {
+						return a[0]
+					}
+					return a[1]
+				}
 				if want(rt.jsCompare(l, r)) {
 					return a[0]
 				}
