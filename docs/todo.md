@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-619** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-620** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -89,7 +89,7 @@ salted per run, so leave those in insertion order and record it in manual 7.9.
 Both tag hosts now have a real suspension primitive (coNew/coResume/coYield: goja coroutine.go and frozen jsGenerator.suspend,
 manual 7.14), used by lua's interpreter. The python and js/ts interpreter halves still replay generator bodies, so side effects
 before a yield repeat after `throw()`, `send`, `yield from` (python: an extra "caught in gen" / "got ret" line) — and the
-js interpreter's description still says no primitive exists. Move both onto the primitive; measure interpreter speed.
+js interpreter's description still says no primitive exists. Move both onto the primitive; measure interpreter speed. (The js/ts half is DONE in e0c57419; python remains.)
 
 ### T-614 python: smaller gaps — math, object repr prefix, OSError errno subclass, `__hash__` attribute · P3 · PY · IN PROGRESS (PY worker, round 6) [V]
 math lacks dist, exp2, frexp, ldexp, modf, nextafter, ulp, erf, gamma, ... (bit-exact against CPython or left out). Plain object
@@ -112,12 +112,13 @@ it for ruby's flag too and add a ruby assertion.
 
 # JS — JavaScript and TypeScript
 
-### T-615 js: spreading a non-iterable object; arguments passed to another function; holes; `"__#@"` keys · P1 · JS · IN PROGRESS (JS worker, round 7) [V]
-`[...{}]`, `for (x of {})` → empty in all legs (node "TypeError: object is not iterable") — P1. P3 rest: `h(arguments)` writing
-`a[0]` is not mapped to the caller's parameter (needs a scope back-pointer on the array cell in the C floor and Go twin); a deleted
-index below `length` is still an own key and an explicit `undefined` past `length` is not (no hole representation); a program
-key `"__#@iterator"` still collides with symbol keys (node: TypeError on spread). The js-test-full.3.js header still says
-"sections 44-56, 58-71 and 73" (now to 91).
+### T-619 js: `"__#@"` keys vs symbols; arguments passed on; holes; `Object.getOwnPropertySymbols` · P3 · JS · OPEN [V]
+A program key `"__#@iterator"` still collides with symbol keys (escaping it breaks lib/js-builtins.js, which spells
+Symbol.iterator as that string so programs without symbols pay no symbol test: move js-builtins.js to real `[Symbol.iterator]`
+keys and measure). `h(arguments)` writing `a[0]` is not mapped to the caller (needs a scope back-pointer on the array cell in the
+C floor and Go twin); a deleted index below `length` is an own key and an explicit `undefined` past `length` is not (needs a hole
+marker). `Object.getOwnPropertySymbols` missing in all legs. Compiled `[...null]` message says "Cannot read properties of null
+(reading '__#@iterator')" (interp "object null is not iterable"; both TypeErrors).
 
 ---
 
@@ -748,6 +749,7 @@ T-586 python: slice ordering and unhashable slice keys — DONE b7d9fd8a (plus f
 T-603 js compiler: a method call inside an assignment target; arguments edges; `"__#"` keys — DONE 8034b969 25069eb4 (plus newline-++ ASI, function-sees-lexical scope, generator/alias mapped arguments); remaining arguments/key edges are T-615
 T-587 swift: ClosedRange.Index; an element as an expression pattern — DONE f96819ea (plus a 16-commit swiftc-checked sweep: 34b3fd80..f2327f9e)
 T-609 kotlin: Regex should use the Java dialect (flag J) — DONE 3992ef1c (plus radix parsing, groupBy/associateBy valueTransform, joinToString limit/named args, java's Formatter for String.format, signed narrow hashCode, stdlib IAE messages)
+T-615 js: spreading a non-iterable object; arguments passed to another function; holes; `"__#@"` keys — PARTIAL 6cac2349 (non-iterable spread/for-of/yield* TypeError, symbol methods on prototypes, Symbol.asyncIterator); rest is T-619
 
 # Settled — do not re-open
 
