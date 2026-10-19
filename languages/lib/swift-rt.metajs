@@ -1809,6 +1809,13 @@ function js_mcall(recv, name, args) {
             // languages/swift-interpreter.abnf.
             var fld = recv[name]
             if (typeof fld == "function") { return fld.apply(undefined, args) }
+            // So is a lazy or computed property whose value is a closure. Twin of
+            // swGetterFn in abnf/jsrtswift.go.
+            var pg = rtFindMethod(cls, "__get_" + name)
+            if (typeof pg == "function") {
+                var pf = pg.apply(undefined, [recv])
+                if (typeof pf == "function") { return pf.apply(undefined, args) }
+            }
             if (swIsLazyMember(recv, name)) { return swLazyMethod(recv, name, args) }
             fail("unknown method '" + name + "' on an instance")
         }

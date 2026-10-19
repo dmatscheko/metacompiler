@@ -1334,6 +1334,15 @@ func init() {
 					}
 					return w(rt.call(fn, jsUndef, elems))
 				}
+				// So is a lazy or computed property whose value is a closure.
+				if fn := swGetterFn(rt, u(a[0]), rt.toString(u(a[1]))); fn != nil {
+					args, _ := u(a[2]).(*jsArray)
+					var elems []interface{}
+					if args != nil {
+						elems = args.elems
+					}
+					return w(rt.call(fn, jsUndef, elems))
+				}
 				// The Sequence/Collection members, in FRONT of
 				// abnf/jsrt.go's shared list table (whose refusal wording
 				// is not Swift's). Every Array receiver lands here,
@@ -3176,6 +3185,32 @@ func swFieldFn(rt *jsrt, v interface{}, name string) interface{} {
 		return nil
 	}
 	return p
+}
+
+// swGetterFn answers the value of the lazy or computed property `name` of an
+// instance whose member table has no method of that name, when that value is a
+// callable: `c.bump()` on `lazy var bump: () -> Int`. nil otherwise. Twins: the
+// js_mcall instance arm in languages/lib/swift-rt.metajs, mcall in
+// languages/swift-interpreter.abnf.
+func swGetterFn(rt *jsrt, v interface{}, name string) interface{} {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return nil
+	}
+	if _, hasCls := o.props["__class"]; !hasCls {
+		return nil
+	}
+	if _, found := swFindMember(v, name); found {
+		return nil
+	}
+	g, found := swFindMember(v, "__get_"+name)
+	if !found || !isCallable(g) {
+		return nil
+	}
+	if fv := rt.call(g, jsUndef, []interface{}{v}); isCallable(fv) {
+		return fv
+	}
+	return nil
 }
 
 // swStaticFn answers the static method `name` a TYPE DESCRIPTOR (an object with

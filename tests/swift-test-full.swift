@@ -4949,6 +4949,39 @@ func s117() {
         && (ws as? [String])?.count == 2 && (ws as? [Int]) == nil)
 }
 
+// ===== SECTION 118: an enum's own members read rawValue unqualified =====
+// Inside a raw-value enum's computed properties and methods a bare `rawValue`
+// is self.rawValue, unless a local of that name shadows it. Every value read off
+// swiftc 6.1.2.
+enum P118: Int {
+    case one = 1, two
+    var tens: Int { rawValue * 10 }
+    func plus(_ n: Int) -> Int { rawValue + n }
+    func shadow() -> Int { let rawValue = 7; return rawValue }
+}
+enum T118: String { case x = "ex", y; var up: String { rawValue.uppercased() } }
+func s118() {
+    check("118a", P118.two.tens == 20 && P118.one.plus(5) == 6 && P118.two.shadow() == 7)
+    check("118b", T118.x.up == "EX" && T118.y.up == "Y")
+}
+
+// ===== SECTION 119: calling a closure-valued property; `[` opening a line =====
+// A lazy or computed property whose value is a closure is called like a method
+// (`c.bump()`); a `[` that opens a line starts a new statement rather than
+// subscripting the previous line's value. Every value read off swiftc 6.1.2.
+class C119 {
+    var n = 0
+    lazy var bump: () -> Int = { self.n += 1; return self.n }
+    var twice: (Int) -> Int { { $0 * 2 } }
+}
+func s119() {
+    let c = C119()
+    check("119a", c.bump() == 1 && c.bump() == 2 && c.n == 2 && c.twice(21) == 42)
+    var total = 0
+    [1, 2, 3].forEach { total += $0 }
+    check("119b", total == 6)
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5067,6 +5100,8 @@ func main() {
     s115() // SECTION-CALL 115
     s116() // SECTION-CALL 116
     s117() // SECTION-CALL 117
+    s118() // SECTION-CALL 118
+    s119() // SECTION-CALL 119
     print("full: \(checks) checks, \(fails) failures")
 }
 

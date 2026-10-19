@@ -1399,7 +1399,7 @@ TupleSfx    = "." TupleIdx ;
 TupleIdx    <~~ push({kind:"field", name: up.in}) ~~>
             = "0"..."9" { "0"..."9" } ;
 IndexSfx    <~~ var ia = takeAll(); push({kind:"index", idx: makeIndexKey(swIdxKeys(ia)), dflt: swIdxDfltOf(ia)}) ~~>
-            = "[" IndexArg { "," IndexArg } "]" ;
+            = SameLineParen "[" IndexArg { "," IndexArg } "]" ;
 // A subscript index, with the one-sided DOWN range (`a[...1]`, `a[..<2]`) tried
 // first - see RangeExpr for why the UP form cannot be an alternative here.
 IndexArg    = PartRangeDn | IdxDflt | Expression ;
@@ -1421,6 +1421,8 @@ NoSpaceParen = :script(~~
 // The `(` of a call has to be on the callee's line: Swift starts a new statement
 // at a `(` that opens a line, so `let r = a` followed by `(print("hi"))` is two
 // statements. A space before it on the same line is still a call (`print ("x")`).
+// The same holds for the `[` of a subscript: `var t = 0` followed by `[1, 2].forEach`
+// is two statements.
 SameLineParen = :script(~~
     (function() {
         var i = 0
@@ -4409,6 +4411,14 @@ KwContinue  = "continue" KwEnd ;
             // abnf/jsrtswift.go and languages/lib/swift-rt.metajs are the twins).
             if (typeof m != "function" && hasOwn(target, name) && typeof target[name] == "function") {
                 return target[name].apply(undefined, args)
+            }
+            // So is a lazy or computed property whose value is a closure.
+            if (typeof m != "function") {
+                var pg = findAccessor(target, "__get_" + name)
+                if (pg != null) {
+                    var pf = pg(target)
+                    if (typeof pf == "function") { return pf.apply(undefined, args) }
+                }
             }
             if (typeof m != "function" && swIsLazyMember(target, name)) { return swLazyMethod(target, name, args, mcLabels) }
             if (typeof m != "function") { fail("unknown method '" + name + "' on " + target.__class.__name) }
@@ -10817,6 +10827,9 @@ KwContinue  = "continue" KwEnd ;
             var pget = protoStatic("__get_" + name)
             if (pget != null) { return {v: pget(self)} }
             if (hasOwn(self, name)) { return {v: self[name]} }
+            // `rawValue` inside a raw-value enum's own members is self.rawValue.
+            // Twin in makeVarRef of swift-to-llvm-ir.abnf.
+            if (name == "rawValue" && isCaseVal(self)) { return {v: self.__raw} }
             var g = findAccessor(self, "__get_" + name)
             if (g != null) { return {v: g(self)} }
             // The unqualified form of the same rule mcall applies to `self.m()`.

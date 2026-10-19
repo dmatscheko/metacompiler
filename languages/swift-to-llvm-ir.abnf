@@ -1377,7 +1377,7 @@ TupleSfx    = "." TupleIdx ;
 TupleIdx    <~~ push({kind:"field", name: up.in}) ~~>
             = "0"..."9" { "0"..."9" } ;
 IndexSfx    <~~ var ia = takeAll(); push({kind:"index", idx: makeIndexKey(swIdxKeys(ia)), dflt: swIdxDfltOf(ia)}) ~~>
-            = "[" IndexArg { "," IndexArg } "]" ;
+            = SameLineParen "[" IndexArg { "," IndexArg } "]" ;
 // A subscript index, with the one-sided DOWN range (`a[...1]`, `a[..<2]`) tried
 // first - see RangeExpr for why the UP form cannot be an alternative here.
 IndexArg    = PartRangeDn | IdxDflt | Expression ;
@@ -1399,6 +1399,8 @@ NoSpaceParen = :script(~~
 // The `(` of a call has to be on the callee's line: Swift starts a new statement
 // at a `(` that opens a line, so `let r = a` followed by `(print("hi"))` is two
 // statements. A space before it on the same line is still a call (`print ("x")`).
+// The same holds for the `[` of a subscript: `var t = 0` followed by `[1, 2].forEach`
+// is two statements.
 SameLineParen = :script(~~
     (function() {
         var i = 0
@@ -3546,6 +3548,21 @@ KwContinue  = "continue" KwEnd ;
                 var bsv = emitFieldRead(bSelfB, bSelfB.NewCall(rtKGet(), [curScopeV, emitStr(bSelfB, "self")]), name)
                 bSelfB.NewBr(bJoinB)
                 return {b: bJoinB, v: bJoinB.NewPhi([llvm.ir.NewIncoming(blv.v, blv.b), llvm.ir.NewIncoming(bsv, bSelfB)])}
+            }
+            // `rawValue` inside an enum's own members is self.rawValue unless a
+            // binding of that name is in scope. Twin in core.varMiss of
+            // swift-interpreter.abnf.
+            if (name == "rawValue" && curType() != null && enumNames[curType().name] == 1) {
+                var rt = callExt(b, "js_scope_typeof", [curScopeV, emitStr(b, name)])
+                var rLocB = curF.NewBlock("")
+                var rSelfB = curF.NewBlock("")
+                var rJoinB = curF.NewBlock("")
+                b.NewCondBr(truthy(b, callExt(b, "js_seq", [rt, emitStr(b, "undefined")])), rSelfB, rLocB)
+                var rlv = plain(rLocB)
+                rlv.b.NewBr(rJoinB)
+                var rsv = callExt(rSelfB, "js_get", [rSelfB.NewCall(rtKGet(), [curScopeV, emitStr(rSelfB, "self")]), emitStr(rSelfB, "__raw")])
+                rSelfB.NewBr(rJoinB)
+                return {b: rJoinB, v: rJoinB.NewPhi([llvm.ir.NewIncoming(rlv.v, rlv.b), llvm.ir.NewIncoming(rsv, rSelfB)])}
             }
             if (!isComputedName(name) && !isMemberMethod(name)) { return plain(b) }
             var t = callExt(b, "js_scope_typeof", [curScopeV, emitStr(b, name)])
