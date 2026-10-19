@@ -5205,6 +5205,20 @@ func s130() {
     check("130c", (try? ok.get()) == 4 && (try? bad.get()) == nil)
 }
 
+// ===== SECTION 131: an extension initializer beside a defaulted memberwise one =====
+// `Color131(gray: 17)` runs the extension's init, which delegates to the
+// memberwise one; the memberwise init's defaults are not filled in for a call
+// that names another initializer's label. Every value read off swiftc 6.1.2.
+struct Color131 { var r = 0, g = 0, b = 0; let name: String }
+extension Color131 {
+    init(gray v: Int) { self.init(r: v, g: v, b: v, name: "gray\(v)") }
+}
+func s131() {
+    let c = Color131(gray: 17)
+    let d = Color131(r: 255, name: "red")
+    check("131a", [c.r, c.g, c.b] == [17, 17, 17] && c.name == "gray17" && [d.r, d.g, d.b] == [255, 0, 0] && d.name == "red")
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5336,6 +5350,7 @@ func main() {
     s128() // SECTION-CALL 128
     s129() // SECTION-CALL 129
     s130() // SECTION-CALL 130
+    s131() // SECTION-CALL 131
     print("full: \(checks) checks, \(fails) failures")
 }
 

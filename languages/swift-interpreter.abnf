@@ -6583,6 +6583,16 @@ KwContinue  = "continue" KwEnd ;
         return planArgsP(params, recs)
     }
     function planArgsP(params, recs) {
+        // A label no parameter carries means the call is to ANOTHER overload than
+        // the one registered (`Color(gray: 17)` beside the memberwise init), so the
+        // arguments stay as written and the overload is picked at the callee.
+        for (var lq = 0; lq < recs.length; lq++) {
+            var ll = recs[lq].lbl
+            if (ll == null || ll == "") { continue }
+            var known = false
+            for (var pq = 0; pq < params.length; pq++) { if (params[pq].label == ll) { known = true } }
+            if (!known) { return recs }
+        }
         var out = []
         var ai = 0
         for (var p = 0; p < params.length; p++) {
