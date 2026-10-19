@@ -6733,6 +6733,21 @@ def s128():
         dup = str(e)
     check("enum3", msg == "9 is not a valid S128Color" and dup == "duplicate values found in <enum 'S128Num'>: UNO -> ONE")
 
+# ===== SECTION 129: a set of ints iterates in CPython's order =====
+# The slot order of CPython's open-addressed table: hash(i) == i, so small ints
+# come out by value modulo the table size, and collisions probe by
+# perturbation. The sets are built by adding members one at a time (set(),
+# add, comprehensions); a display of three or more constants goes through a
+# frozenset constant in CPython, whose merge sizes the table differently.
+def s129():
+    check("sord1", str({x % 3 for x in [5, 4, 3]}) == "{0, 1, 2}" and list(set([33, 1, 17, 9])) == [33, 9, 1, 17]
+          and list(set(range(20, 0, -1))) == list(range(1, 21)) and list(set([-1, -2, -3, -8, -16, -9])) == [-16, -2, -9, -8, -3, -1]
+          and list(set([100, 8, 16, 0, -1, -2, 3])) == [0, 3, 100, 8, 16, -2, -1]
+          and str(frozenset([9, 1, 17])) == "frozenset({9, 1, 17})" and sorted({5, "a"}, key=str) == [5, "a"])
+    s = set([5, 4, 3])
+    check("sord2", s.pop() == 3 and len(s) == 2
+          and [v for v in set([2**40 + 3, 2**33 + 5, 1, -2**35, 9, 7])] == [-34359738368, 1, 1099511627779, 8589934597, 7, 9])
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -6859,5 +6874,6 @@ def main():
     s126() # SECTION-CALL 126
     s127() # SECTION-CALL 127
     s128() # SECTION-CALL 128
+    s129() # SECTION-CALL 129
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

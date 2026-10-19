@@ -732,3 +732,96 @@ func pyIntDigitsOver(t string, b, lim int) int {
 	}
 	return 0
 }
+
+// pySetOrder is CPython's iteration order of a set of ints, or nil. Twin of
+// pynSetOrder in languages/lib/python-num.js, which states the rule.
+func pySetOrder(vals []interface{}) []int {
+	hs := make([]uint64, len(vals))
+	for i, v := range vals {
+		var f float64
+		switch x := v.(type) {
+		case bool:
+			if x {
+				f = 1
+			}
+		case float64:
+			f = x
+		default:
+			return nil
+		}
+		if f == -1 {
+			f = -2
+		}
+		hs[i] = uint64(int64(f))
+	}
+	place := func(t []int, k int) {
+		mask := uint64(len(t) - 1)
+		perturb := hs[k]
+		i := perturb & mask
+		for {
+			if t[i] < 0 {
+				t[i] = k
+				return
+			}
+			if i+9 <= mask {
+				for j := uint64(1); j <= 9; j++ {
+					if t[i+j] < 0 {
+						t[i+j] = k
+						return
+					}
+				}
+			}
+			perturb >>= 5
+			i = (i*5 + 1 + perturb) & mask
+		}
+	}
+	slots := func(n int) []int {
+		t := make([]int, n)
+		for i := range t {
+			t[i] = -1
+		}
+		return t
+	}
+	table := slots(8)
+	for k := range vals {
+		place(table, k)
+		if (k+1)*5 >= (len(table)-1)*3 {
+			minused := (k + 1) * 4
+			if k+1 > 50000 {
+				minused = (k + 1) * 2
+			}
+			ns := 8
+			for ns <= minused {
+				ns *= 2
+			}
+			nt := slots(ns)
+			for _, e := range table {
+				if e >= 0 {
+					place(nt, e)
+				}
+			}
+			table = nt
+		}
+	}
+	out := make([]int, 0, len(vals))
+	for _, e := range table {
+		if e >= 0 {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// pySetMembers is a set's members in CPython's iteration order where
+// pySetOrder models it, else in insertion order; always a fresh slice.
+func pySetMembers(els *jsArray) []interface{} {
+	ord := pySetOrder(els.elems)
+	if ord == nil {
+		return append([]interface{}{}, els.elems...)
+	}
+	out := make([]interface{}, len(ord))
+	for i, k := range ord {
+		out[i] = els.elems[k]
+	}
+	return out
+}

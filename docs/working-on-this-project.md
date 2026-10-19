@@ -812,6 +812,14 @@ print the character now. JS: the `d` flag builds no `m.indices`.
 Python: integral floats render as int, `&|^` are ToInt32, `inf`/`nan` spell
 `Infinity`/`NaN`, the format mini-language is a subset.
 A plain instance prints as `<__main__.G object>`, without CPython's `at 0x...`.
+A set of ints (and bools) iterates, prints and pops in CPython's slot order
+(pynSetOrder in lib/python-num.js), modelled as if its members had been added
+one at a time in insertion order. That is exact for a set built by adding, and
+can differ where CPython's table has another history: a removed member leaves
+a dummy slot in CPython, a copy or union merges into a table sized for both,
+and a display of three or more constants is built through a frozenset
+constant. A set holding anything else keeps insertion order: a str's hash is
+salted per run in CPython, so no order of one is reproducible.
 math has no exp2, erf, erfc, gamma or lgamma: CPython's answers depend on the
 platform libm (its exp2 differs from `2.0 ** x` in about 0.2% of doubles), so no
 spelling here is bit-exact. OSError(errno, ...) answers a subclass only for the

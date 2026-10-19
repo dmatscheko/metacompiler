@@ -801,9 +801,10 @@ function pyStr(v) {
                 return "set()" // {} is the empty DICT
             }
             var so = "{"
-            for (var j = 0; j < els.length; j++) {
+            var mem = pySetMembers(els)
+            for (var j = 0; j < mem.length; j++) {
                 if (j > 0) { so = so + ", " }
-                so = so + pyRepr(els[j])
+                so = so + pyRepr(mem[j])
             }
             if (fz) { return "frozenset(" + so + "})" }
             return so + "}"
@@ -3210,11 +3211,7 @@ function pyDrainGen(g) {
 
 function pySeqElems(v) {
     var els = pySetElemsOf(v)
-    if (els != null) {
-        var c = []
-        for (var i = 0; i < els.length; i++) { c.push(els[i]) }
-        return c
-    }
+    if (els != null) { return pySetMembers(els) }
     if (Array.isArray(v)) {
         var a = []
         for (var j = 0; j < v.length; j++) { a.push(v[j]) }
@@ -6254,11 +6251,25 @@ function pyIterRest(it) {
 // js_pyiterof's element list, as a fresh array: a generator drains, an iterator
 // gives what is left, a set copies, a dict gives its keys, a string its
 // characters. Go: rt.pyElemsOf.
+// Go: pySetMembers. A set's members in CPython's iteration order where
+// pynSetOrder models it, else in insertion order; always a fresh array.
+function pySetMembers(els) {
+    var ord = pynSetOrder(els)
+    if (ord === null) { return pyCCopyArr(els) }
+    var out = []
+    var i = 0
+    while (i < ord.length) {
+        out.push(els[ord[i]])
+        i = i + 1
+    }
+    return out
+}
+
 function pyElemsOf(v) {
     if (pyIsIter(v)) { return pyIterRest(v) }
     if (pyIsGen(v)) { return pyADrainGen(v) }
     var els = pySetElemsOf(v)
-    if (els !== null && els !== undefined) { return pyCCopyArr(els) }
+    if (els !== null && els !== undefined) { return pySetMembers(els) }
     if (pyIsArr(v)) { return v }
     if (typeof v == "string") { return pySChars(v) }
     if (pyIsDict(v)) { return pyCCopyArr(v["keys"]) }
@@ -8149,7 +8160,7 @@ function js_pylist(v) {
     if (pyIsIter(v)) { return pyIterRest(v) }
     if (pyIsGen(v)) { return pyCDrain(v) }
     var els = pySetElemsOf(v)
-    if (els !== null && els !== undefined) { return pyCCopyArr(els) }
+    if (els !== null && els !== undefined) { return pySetMembers(els) }
     if (pyIsArr(v)) { return pyCCopyArr(v) }
     if (typeof v == "string") { return pySChars(v) }
     if (pyIsDict(v)) { return pyCCopyArr(v["keys"]) }
@@ -8167,7 +8178,7 @@ function js_pyiterof(v) {
     if (pyIsIter(v)) { return pyIterRest(v) }
     if (pyIsGen(v)) { return pyCDrain(v) }
     var els = pySetElemsOf(v)
-    if (els !== null && els !== undefined) { return pyCCopyArr(els) }
+    if (els !== null && els !== undefined) { return pySetMembers(els) }
     if (pyIsArr(v)) { return v }
     if (typeof v == "string") { return pySChars(v) }
     if (pyIsDict(v)) { return pyCCopyArr(v["keys"]) }
@@ -10644,18 +10655,18 @@ function pySetMethod(els, name, args) {
     }
     if (name == "clear") { pyCTruncate(els); return undefined }
     if (name == "copy") { return pyNewSet(pyCCopyArr(els)) } // SHALLOW.
-    // pop() removes and returns an ARBITRARY element - CPython promises no order
-    // at all. This project's sets keep insertion order (it is what makes a set
-    // render deterministically, which the byte-identical goja/frozen invariant
-    // needs), so the first element is the one taken. Assert on membership and
-    // size, never on which element.
+    // pop() takes the first member in iteration order (pySetMembers), as
+    // CPython's does from the start of its table.
     if (name == "pop") {
         if (els.length == 0) {
             throw pyExcInstance("KeyError", "pop from an empty set")
         }
+        var pat = 0
+        var pord = pynSetOrder(els)
+        if (pord !== null) { pat = pord[0] }
         var pv = anytype
-        pv = els[0]
-        pyCRemoveAt(els, 0)
+        pv = els[pat]
+        pyCRemoveAt(els, pat)
         return pv
     }
     // remove() raises KeyError when the member is absent and discard() does not.

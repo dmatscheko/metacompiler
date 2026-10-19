@@ -3106,6 +3106,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // membership, len and insertion order come from the dict machinery unchanged.
     function newSet() { return {__dict: true, __set: true, keys: [], vals: []} }
     function isSet(v) { return v !== null && v !== undefined && typeof v == "object" && v.__set === true }
+    // A set's members in CPython's iteration order where pynSetOrder models it,
+    // else in insertion order; always a fresh array. Twin of pySetMembers in
+    // abnf/jsrtpynum.go and lib/python-rt.metajs.
+    function pySetMembers(s) {
+        var ord = pynSetOrder(s.keys)
+        if (ord === null) { return s.keys.slice(0) }
+        var out = []
+        for (var i = 0; i < ord.length; i++) { out.push(s.keys[ord[i]]) }
+        return out
+    }
     // A dict view - keys(), values() or items() - is a live window on its dict:
     // {__dview: the method's name, __vd: the dict}. It iterates, measures and
     // prints as dict_keys([...]); a keys or items view is also set-like (==,
@@ -3623,9 +3633,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var fz = v.__frozen === true
             if (v.keys.length == 0) { return fz ? "frozenset()" : "set()" }
             var out3 = "{"
-            for (var j = 0; j < v.keys.length; j++) {
+            var mem = pySetMembers(v)
+            for (var j = 0; j < mem.length; j++) {
                 if (j > 0) out3 += ", "
-                out3 += prepr(v.keys[j])
+                out3 += prepr(mem[j])
             }
             return fz ? "frozenset(" + out3 + "})" : out3 + "}"
         }
@@ -4323,6 +4334,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // CPython's rule, and what makes next(it) then list(it) not repeat an
         // element. Both compiled halves do the same in js_pyiter / js_pylist.
         if (isPyIt(v)) return pyItRest(v)
+        if (isSet(v)) return pySetMembers(v)
         if (isDict(v)) return v.keys.slice(0)
         if (typeof v == "string") return pySChars(v)
         if (isView(v)) return pyViewElems(v)
@@ -7568,10 +7580,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (s.keys.length == 0) {
                 pyRaise(pyMakeExc("KeyError", ["pop from an empty set"]))
             }
+            var pat = 0
+            var pord = pynSetOrder(s.keys)
+            if (pord !== null) { pat = pord[0] }
             var pv = anytype
-            pv = s.keys[0]
-            listRemoveAt(s.keys, 0)
-            listRemoveAt(s.vals, 0)
+            pv = s.keys[pat]
+            listRemoveAt(s.keys, pat)
+            listRemoveAt(s.vals, pat)
             s.__idx = null
             return pv
         }

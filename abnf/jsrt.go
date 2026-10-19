@@ -3993,7 +3993,7 @@ func (rt *jsrt) pyString(v interface{}) string {
 				return "set()" // {} is the empty DICT
 			}
 			out := "{"
-			for i, e := range els.elems {
+			for i, e := range pySetMembers(els) {
 				if i > 0 {
 					out += ", "
 				}
@@ -15826,7 +15826,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				return w(&jsArray{elems: rt.pyElemsOf(u(a[0]))})
 			}
 			if els, ok := pySetElems(u(a[0])); ok {
-				return w(&jsArray{elems: append([]interface{}{}, els.elems...)})
+				return w(&jsArray{elems: pySetMembers(els)})
 			}
 			switch o := u(a[0]).(type) {
 			case *jsArray:
@@ -15847,7 +15847,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				return w(g.drain(rt))
 			}
 			if els, ok := pySetElems(u(a[0])); ok { // A set iterates its elements.
-				return w(&jsArray{elems: append([]interface{}{}, els.elems...)})
+				return w(&jsArray{elems: pySetMembers(els)})
 			}
 			switch o := u(a[0]).(type) { // their keys, strings their characters.
 			case *jsArray:
@@ -19415,7 +19415,7 @@ func (rt *jsrt) pySliceStart(n int, loV interface{}) int {
 // right hand side.
 func (rt *jsrt) pySeqElems(v interface{}) []interface{} {
 	if els, ok := pySetElems(v); ok {
-		return append([]interface{}{}, els.elems...)
+		return pySetMembers(els)
 	}
 	if arr, ok := v.(*jsArray); ok {
 		return append([]interface{}{}, arr.elems...)
@@ -22319,16 +22319,17 @@ func (rt *jsrt) pySetMethod(els *jsArray, name string, args []interface{}) inter
 	case "copy":
 		return newPySet(&jsArray{elems: append([]interface{}{}, els.elems...)}) // SHALLOW.
 	case "pop":
-		// pop() removes and returns an ARBITRARY element - CPython promises no
-		// order at all. This project's sets keep insertion order (it is what
-		// makes a set render deterministically, which the byte-identical
-		// goja/frozen invariant needs), so the first element is the one taken.
-		// Assert on membership and size, never on which element.
+		// pop() takes the first member in iteration order (pySetMembers), as
+		// CPython's does from the start of its table.
 		if len(els.elems) == 0 {
 			panic(&jsThrown{value: rt.pyExcInstance("KeyError", "pop from an empty set")})
 		}
-		v := els.elems[0]
-		els.elems = append(els.elems[:0], els.elems[1:]...)
+		at := 0
+		if ord := pySetOrder(els.elems); ord != nil {
+			at = ord[0]
+		}
+		v := els.elems[at]
+		els.elems = append(els.elems[:at], els.elems[at+1:]...)
 		els.dropIdx()
 		return v
 	case "remove", "discard":
@@ -23064,7 +23065,7 @@ func (rt *jsrt) pyElemsOf(v interface{}) []interface{} {
 		return out
 	}
 	if els, ok := pySetElems(v); ok {
-		return append([]interface{}{}, els.elems...)
+		return pySetMembers(els)
 	}
 	switch o := v.(type) {
 	case *jsArray:

@@ -867,3 +867,104 @@ function pynVecNorm(vec, mx) {
     h = h + c / (2 * h)
     return h / scale
 }
+
+// ----- a set's iteration order -----
+//
+// CPython's iteration order of a set of ints: the slot order of its open-
+// addressed table after the members are added in this order (setobject.c's
+// set_add_entry, set_table_resize and set_insert_clean: ten linear probes,
+// then the next slot by perturbation with five more bits of the hash), with
+// hash(i) == i and hash(-1) == -2. Answers the member indexes in slot order,
+// or null when a member is not an int or a bool: a str's hash is salted per
+// run in CPython and the others are not modelled, so such a set keeps
+// insertion order. A removed member leaves no dummy slot here, so after a
+// removal the order is the one the remaining members would have had. Go twin:
+// pySetOrder in abnf/jsrtpynum.go.
+function pynSetOrder(vals) {
+    var hi = []
+    var lo = []
+    var i = 0
+    while (i < vals.length) {
+        var e = anytype
+        e = vals[i]
+        var v = 0
+        if (typeof e == "boolean") { v = e ? 1 : 0 }
+        else if (typeof e == "number") { v = e }
+        else { return null }
+        if (v == 0 - 1) { v = 0 - 2 }
+        if (v >= 0) {
+            hi.push(Math.floor(v / 4294967296))
+            lo.push(v % 4294967296)
+        } else {
+            var a = 0 - v
+            var al = a % 4294967296
+            var ah = Math.floor(a / 4294967296)
+            lo.push(al == 0 ? 0 : 4294967296 - al)
+            hi.push(al == 0 ? (4294967296 - ah) % 4294967296 : 4294967295 - ah)
+        }
+        i = i + 1
+    }
+    var size = 8
+    var table = pynSlots(size)
+    var k = 0
+    while (k < vals.length) {
+        pynSetPlace(table, size, hi[k], lo[k], k)
+        if ((k + 1) * 5 >= (size - 1) * 3) {
+            var minused = k + 1 > 50000 ? (k + 1) * 2 : (k + 1) * 4
+            var ns = 8
+            while (ns <= minused) { ns = ns * 2 }
+            var nt = pynSlots(ns)
+            var s = 0
+            while (s < size) {
+                if (table[s] >= 0) { pynSetPlace(nt, ns, hi[table[s]], lo[table[s]], table[s]) }
+                s = s + 1
+            }
+            table = nt
+            size = ns
+        }
+        k = k + 1
+    }
+    var out = []
+    var t = 0
+    while (t < size) {
+        if (table[t] >= 0) { out.push(table[t]) }
+        t = t + 1
+    }
+    return out
+}
+
+function pynSlots(n) {
+    var t = []
+    var i = 0
+    while (i < n) {
+        t.push(0 - 1)
+        i = i + 1
+    }
+    return t
+}
+
+// The first free slot for a hash whose unsigned 64 bits are hi:lo.
+function pynSetPlace(t, size, hi, lo, k) {
+    var i = lo % size
+    var phi = hi
+    var plo = lo
+    while (true) {
+        if (t[i] < 0) {
+            t[i] = k
+            return
+        }
+        if (i + 9 <= size - 1) {
+            var j = 1
+            while (j <= 9) {
+                if (t[i + j] < 0) {
+                    t[i + j] = k
+                    return
+                }
+                j = j + 1
+            }
+        }
+        plo = Math.floor(plo / 32) + (phi % 32) * 134217728
+        phi = Math.floor(phi / 32)
+        i = (i * 5 + 1 + plo) % size
+    }
+}
