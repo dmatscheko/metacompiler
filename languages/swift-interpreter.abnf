@@ -787,7 +787,7 @@ AnnType     = FnAnnType | LabelledTupleType | IntAnnType | OptNumAnnType | DeepA
 // exactly as the anonymous `(Double, Int)` form does. swAdoptDeep strips each
 // element's `label:` prefix.
 LabelledTupleType <~~ push({tlabels: takeAll(), atype: stripWs(up.in)}) ~~>
-            = "(" LtNamed { "," LtElem } ")" NotArrow ;
+            = "(" LtNamed { "," LtElem } ")" NotArrow NotTypeSuffix ;
 LtElem      = LtNamed | LtAnon ;
 LtNamed     = Id <~~ push(swBt(up.in)) ~~> ":" Type ;
 LtAnon      <~~ push("") ~~> = Type ;
@@ -3339,11 +3339,37 @@ KwContinue  = "continue" KwEnd ;
         var cN = ty.charAt(ty.length - 1)
         return cN == "?" || cN == "!"
     }
+    // Whether a type text names a LABELLED tuple anywhere (`[(k: String, v: Int)]`):
+    // a value written there takes the labels, so `xs[0].k` reads. Twin in swift-to-llvm-ir.abnf.
+    function swTyHasTupLabel(ty) {
+        var st = []
+        for (var i = 0; i < ty.length; i++) {
+            var ch = ty.charAt(i)
+            if (ch == "-" && i + 1 < ty.length && ty.charAt(i + 1) == ">") { i = i + 1 }
+            else if (ch == "(" || ch == "[" || ch == "<") { st.push(ch) }
+            else if (ch == ")" || ch == "]" || ch == ">") { if (st.length > 0) { st.pop() } }
+            else if (ch == ":" && st.length > 0 && st[st.length - 1] == "(") { return true }
+        }
+        return false
+    }
+    // The element labels of a tuple type's parts ("" for an unlabelled one), or
+    // null when none is labelled.
+    function swTyTupLabels(tys) {
+        var out = []
+        var any = false
+        for (var i = 0; i < tys.length; i++) {
+            var lp = swTySplit(tys[i], ":")
+            var l = lp.length == 2 ? swTyTrim(lp[0]) : ""
+            if (l != "") { any = true }
+            out.push(l)
+        }
+        return any ? out : null
+    }
     function swAdoptNeeded(ty) {
         if (ty == undefined || ty == null || ty == "") { return false }
         if (swAdoptable(ty)) { return true }
         if (!swTyIsDeepText(ty)) { return false }
-        return swTyHasAdoptLeaf(ty)
+        return swTyHasAdoptLeaf(ty) || swTyHasTupLabel(ty)
     }
     function swAdoptNum(v) { return typeof v == "number" || szIs(v) }
     function swAdoptTy(v, ty) {
@@ -3511,6 +3537,16 @@ KwContinue  = "continue" KwEnd ;
     // The ELEMENT type of an array or dictionary annotation, when it is a plain
     // adoptable leaf: `[Double]` -> Double, `[String: Double]` -> Double,
     // `[String: [Double]]` -> "" (see makeAssign for why the nested case declines).
+    // A collection type's STRUCTURAL element type when a written element has to
+    // adopt it whole (`[(name: String, age: Int)]` labels the tuple), else "".
+    // Twin in swift-to-llvm-ir.abnf.
+    function swElemDeepOf(ty) {
+        if (ty == undefined || ty == null || ty.length < 3) { return "" }
+        if (ty.charAt(0) != "[" || ty.charAt(ty.length - 1) != "]") { return "" }
+        var kv = swTySplit(ty.substring(1, ty.length - 1), ":")
+        var e = swTyTrim(kv[kv.length - 1])
+        return swTyIsDeepText(e) && swAdoptNeeded(e) ? e : ""
+    }
     function swElemTyOf(ty) {
         if (ty == undefined || ty == null || ty.length < 3) { return "" }
         if (ty.length > 5 && ty.substring(0, 4) == "Set<" && ty.charAt(ty.length - 1) == ">") {
@@ -3574,15 +3610,21 @@ KwContinue  = "continue" KwEnd ;
         return v
     }
     // A tuple's slots are "0".."n-1", and a LABELLED element additionally lives
-    // under its label - both copies have to adopt, or `t.lo` and `t.0` disagree.
+    // under its label - both copies have to adopt, or `t.lo` and `t.0` disagree. An
+    // unlabelled tuple takes the type's labels: `(1, 2.5)` written to a
+    // `(count: Int, sum: Double)` slot answers `.count`.
     function swAdoptTupEls(v, tys) {
         if (!isTupleVal(v)) { return v }
         var lbls = hasOwn(v, "__tlabels") ? v.__tlabels : null
+        var fresh = lbls == null ? swTyTupLabels(tys) : null
+        if (fresh != null && fresh.length != v.__tuple) { fresh = null }
         for (var i = 0; i < v.__tuple && i < tys.length; i++) {
             var nv = swAdoptDeep(v["" + i], swTyElem(tys[i]))
             scopePut(v, "" + i, nv)
             if (lbls != null && i < lbls.length && lbls[i] != "") { scopePut(v, lbls[i], nv) }
+            if (fresh != null && fresh[i] != "") { scopePut(v, fresh[i], nv) }
         }
+        if (fresh != null) { scopePut(v, "__tlabels", fresh) }
         return v
     }
     function swlen(v) {
@@ -3733,6 +3775,9 @@ KwContinue  = "continue" KwEnd ;
     function swGetField(o, name) {
         if (name == "init" && o !== null && typeof o == "object" && o.__tname !== undefined
             && (typeof o.__convl == "function" || typeof o.__conv == "function")) { return swBuiltinInit(o) }
+        // A tuple labelled `count` (or first, last, ...) reads its element. Twin of
+        // rtUserProp's tuple arm in swift-to-llvm-ir.abnf.
+        if (typeof o == "object" && o !== null && o.__tuple != undefined && hasOwn(o, name)) { return o[name] }
         // A value of a program type (an instance, or a descriptor for a static)
         // reads its own `count`; anything else is a collection. Twin of
         // sw_uprop_count in swift-to-llvm-ir.abnf.
@@ -6077,15 +6122,28 @@ KwContinue  = "continue" KwEnd ;
         if (items.length == 2) { return items[0] }
         var aty = swAsqTyOf(items[1].at)
         if (aty == "") { aty = swLitCoalTy(items[1].ltxt) }
+        if (aty == "") { aty = swCoalElemTy(items[1].ltxt) }
         return function() {
             var v = anytype
             v = items[0]()
             for (var i = 2; i < items.length && (v === null || v === undefined); i++) {
                 v = items[i]()
-                if (aty != "") { v = swAdoptTy(v, aty) }
+                if (aty != "") { v = swAdoptAnn(v, aty) }
             }
             return v
         }
+    }
+    // `stats[k] ?? (0, 0)` on a declared `[String: (count: Int, sum: Double)]`:
+    // the right side has the STRUCTURAL element type, labels and all. Twin in swift-to-llvm-ir.abnf.
+    function swCoalElemTy(t) {
+        if (t == undefined || t == null) { return "" }
+        var j = t.indexOf("[")
+        if (j <= 0 || swCloseAt(t, j) != t.length - 1) { return "" }
+        for (var i = 0; i < j; i++) {
+            var c = t.charCodeAt(i)
+            if (!((c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 95)) { return "" }
+        }
+        return swElemDeepOf(declTyOf(t.substring(0, j)))
     }
 
     function makeArray(items0, txt) {
@@ -7068,7 +7126,10 @@ KwContinue  = "continue" KwEnd ;
     // ELEMENT (a Dictionary's value, for updateValue), the receiver's own type for
     // merge/merging, which take a whole dictionary. "" for every other member.
     function swArgAnn(n, dty) {
-        if (n == "append" || n == "insert" || n == "updateValue") { return swElemTyOf(dty) }
+        if (n == "append" || n == "insert" || n == "updateValue") {
+            var et = swElemTyOf(dty)
+            return et != "" ? et : swElemDeepOf(dty)
+        }
         if ((n == "merge" || n == "merging") && swElemTyOf(dty) != "") { return dty }
         return ""
     }
@@ -7368,7 +7429,7 @@ KwContinue  = "continue" KwEnd ;
         var declTy = ref.path.length == 0 ? swTyStripOpt(declTyOf(ref.name)) : ""
         // `xs += [5]` on an `xs` declared `[Double]`: the appended elements are typed
         // by xs. Twin in swift-to-llvm-ir.abnf.
-        var catTy = op == "+=" && declTy.length > 0 && declTy.charAt(0) == "[" && swElemTyOf(declTy) != "" ? declTy : ""
+        var catTy = op == "+=" && declTy.length > 0 && declTy.charAt(0) == "[" && (swElemTyOf(declTy) != "" || swElemDeepOf(declTy) != "") ? declTy : ""
         // `d["b"] = 5` on a NEW key of a `[String: Double]` has NOTHING to adopt
         // from: swSafeElem answers undefined and the value 5 carries no floatness.
         // This is the second site where the value model's own record runs out
@@ -7381,6 +7442,13 @@ KwContinue  = "continue" KwEnd ;
         // swElemTyOf declines it, in both halves.
         var elemTy = (ref.path.length == 1 && ref.path[0].key == undefined)
                      ? swElemTyOf(declTyOf(ref.name)) : ""
+        // `d[k] = (1, 2.5)` into a `[String: (count: Int, sum: Double)]`: a
+        // STRUCTURAL element type adopts the written value whole. Twin in
+        // swift-to-llvm-ir.abnf.
+        if (ref.path.length == 1 && ref.path[0].key == undefined && op == "=") {
+            var elemDeep = swElemDeepOf(declTyOf(ref.name))
+            if (elemDeep != "") { valT = swAdoptThunk(valT, elemDeep) }
+        }
         var localAnn = hasOwn(localAnnReg, "$" + ref.name) ? localAnnReg["$" + ref.name] : "?"
         var hasLocal = localAnn != "?"
         if (hasLocal && ref.path.length == 0 && op == "=") { valT = swDotWant(valT, items[3], localAnn) }

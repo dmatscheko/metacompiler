@@ -2861,21 +2861,44 @@ function swAdoptDictVals(v, vty, fmap) {
     return v
 }
 // A tuple's slots are "0".."n-1", and a LABELLED element additionally lives under
-// its label - both copies have to adopt, or `t.lo` and `t.0` disagree.
+// its label - both copies have to adopt, or `t.lo` and `t.0` disagree. An
+// unlabelled tuple takes the type's labels. Twins: swAdoptTupEls in
+// languages/swift-interpreter.abnf, swAdoptDeep in abnf/jsrtswift.go.
 function swAdoptTupEls(v, tys, fmap) {
     if (v === undefined || v === null) { return v }
     if (typeof v != "object") { return v }
     var n = v["__tuple"]
     if (n === undefined || n === null) { return v }
     var lbls = v["__tlabels"]
+    var fresh = (lbls === undefined || lbls === null) ? swTyTupLabels(tys, n) : null
     var i = 0
     while (i < n && i < tys.length) {
         var nv = js_swadoptdeep(v["" + i], swTyElem(tys[i]), fmap)
         v["" + i] = nv
         if (lbls !== undefined && lbls !== null && i < lbls.length && lbls[i] != "") { v[lbls[i]] = nv }
+        if (fresh !== null && fresh[i] != "") { v[fresh[i]] = nv }
         i = i + 1
     }
+    if (fresh !== null) { v["__tlabels"] = fresh }
     return v
+}
+// The element labels of a tuple type's n parts ("" for an unlabelled one), or
+// null when none is labelled or the arity differs.
+function swTyTupLabels(tys, n) {
+    if (tys.length != n) { return null }
+    var out = []
+    var any = false
+    var i = 0
+    while (i < tys.length) {
+        var lp = swTySplit(tys[i], ":")
+        var l = ""
+        if (lp.length == 2) { l = swTyTrim(lp[0]) }
+        if (l != "") { any = true }
+        out.push(l)
+        i = i + 1
+    }
+    if (!any) { return null }
+    return out
 }
 
 // abs/max/min, Double-aware: a boxed operand keeps its box (abs(-1.5) is 1.5, not

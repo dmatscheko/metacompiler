@@ -453,12 +453,38 @@ func init() {
 				// A LABELLED element lives under its label as well as under its
 				// index, and both copies have to adopt or t.lo and t.0 disagree.
 				lbls := swStrArray(o.props["__tlabels"])
+				// An unlabelled tuple takes the type's labels.
+				var fresh []string
+				if _, has := o.props["__tlabels"]; !has && len(tys) == n {
+					any := false
+					for _, t := range tys {
+						l := ""
+						if lp := swTySplit(t, ':'); len(lp) == 2 {
+							l = strings.TrimSpace(lp[0])
+						}
+						any = any || l != ""
+						fresh = append(fresh, l)
+					}
+					if !any {
+						fresh = nil
+					}
+				}
 				for i := 0; i < n && i < len(tys); i++ {
 					nv := swAdoptDeep(o.props[itoa(i)], swTyElem(tys[i]), fmap)
 					o.set(itoa(i), nv)
 					if i < len(lbls) && lbls[i] != "" {
 						o.set(lbls[i], nv)
 					}
+					if fresh != nil && fresh[i] != "" {
+						o.set(fresh[i], nv)
+					}
+				}
+				if fresh != nil {
+					la := make([]interface{}, len(fresh))
+					for i, l := range fresh {
+						la[i] = l
+					}
+					o.set("__tlabels", &jsArray{elems: la})
 				}
 				return v
 			}

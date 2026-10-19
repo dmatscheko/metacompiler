@@ -5028,6 +5028,30 @@ func s121() {
     check("121a", first == [10, 0, 5] && c.b == 3)
 }
 
+// ===== SECTION 122: labelled tuple types give an unlabelled tuple their labels =====
+// A tuple written where a labelled tuple type is declared - a dictionary or array
+// element, an appended element, a `??` fallback, a reassigned local, an Optional -
+// answers its elements by label, `count` and `first` included. Every value read
+// off swiftc 6.1.2.
+func s122() {
+    var stats: [String: (count: Int, sum: Double)] = [:]
+    for (k, v) in [("a", 1.5), ("b", 2.0), ("a", 3.0)] {
+        let cur = stats[k] ?? (0, 0)
+        stats[k] = (cur.count + 1, cur.sum + v)
+    }
+    check("122a", stats["a"]!.count == 2 && stats["a"]!.sum == 4.5 && stats["b"]!.count == 1)
+    var rows: [(name: String, age: Int)] = []
+    rows.append(("z", 3))
+    rows += [("q", 4)]
+    var p: (x: Int, y: Int) = (1, 2)
+    p = (5, 6)
+    var best: (name: String, first: Int)? = nil
+    best = ("ann", 9)
+    let lit = (count: 3, first: "f")
+    check("122b", rows[0].name == "z" && rows.map(\.age) == [3, 4] && p.x == 5 && p.y == 6
+        && best!.name == "ann" && best!.first == 9 && lit.count == 3 && lit.first == "f")
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5150,6 +5174,7 @@ func main() {
     s119() // SECTION-CALL 119
     s120() // SECTION-CALL 120
     s121() // SECTION-CALL 121
+    s122() // SECTION-CALL 122
     print("full: \(checks) checks, \(fails) failures")
 }
 
