@@ -165,7 +165,7 @@ non-integral floats use JS formatting, not %g.
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-616 swift: `d[f()]? += 1` evaluates the target twice; `(+)` as a value; `\.0` key paths; metatype init overloads · P2 · SW · OPEN [V]
+### T-616 swift: `d[f()]? += 1` evaluates the target twice; `(+)` as a value; `\.0` key paths; metatype init overloads · P2 · SW · IN PROGRESS (SW worker, round 7) [V]
 `d[f()]? += 1` → the compiler evaluates the target path twice, so a side-effecting index runs twice (swiftc once). `["+":
 (+)]` (an operator as a value in parentheses) and the tuple key path `\.0` do not parse in either half. `t.init(...)` on a
 runtime type value uses the first-declared initializer in the compiler (no static type to pick by label). An Optional or
