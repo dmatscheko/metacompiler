@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-617** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-619** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -123,6 +123,12 @@ key `"__#@iterator"` still collides with symbol keys (node: TypeError on spread)
 
 # JV — Java
 
+### T-618 java/kotlin regex: inline flags `(?i)` and atomic groups `(?>..)` under the J dialect · P1 · JV · OPEN [V]
+`"ABC".matches("(?i)abc")`, `Regex("(?i)abc")`, `"aab".matches("(?>a+)b")` → "Unknown inline modifier near index 2" in all legs
+(java and the kotlin-stdlib jar match). The python worker is adding inline flags under python's dialect flag in the shared
+lib/regex.js / abnf/jsrtregex.go (T-607): reuse that for J (Java's flag set: i, d, m, s, u, x, U, and scoped `(?i:..)`), add
+atomic groups and possessive quantifiers (`a*+`), additive and flag-gated, full matrix + native-full + gen-all.
+
 ### T-608 java regex: forward `\k<name>`; `\X \G \N{..} \b{g}` and \p scripts/blocks; PatternSyntaxException getters · P3 · JV · OPEN [V]
 A `\k<name>` referring forward is accepted (java PSE). `\X`, `\G`, `\N{..}`, `\b{g}`, `\p{IsLatin}`, `\p{N}` etc. report
 "unsupported" (java supports them). `PatternSyntaxException.getDescription/getIndex/getPattern` missing.
@@ -143,11 +149,11 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-609 kotlin: Regex should use the Java dialect (flag J) · P2 · KT · IN PROGRESS (KT worker, round 1) [V spec-only]
-Kotlin/JVM's Regex is java.util.regex, but the kotlin grammars pass only `q` to the shared regex engine, so every gap the J
-dialect fixes for java remains, including the `Regex("a{99999999999}")` runaway (java PSE "Illegal repetition range"). Pass J in
-the kotlin grammars and twins, map errors to PatternSyntaxException as java does, assert in tests/kotlin-test-full.kt. (The real
-kotlin-stdlib jar can be driven from a java program to confirm Regex behaviour.)
+### T-617 kotlin: `Char.isLetter` for uncased letters; UInt in format; collection class names in format errors · P2 · KT · OPEN [V spec-only]
+`'中'.isLetter()` → false (JVM true): interp kIsLetterCh and layer 2 k2IsLetter treat a letter without case as a non-letter;
+java-chars.js (now linked into kotlin) has the right table (read in the code, probe first). `"%d".format(1u)` formats as an int
+(JVM IllegalFormatConversionException "d != kotlin.UInt"). `"%d".format(listOf(1,2))` → "d != ArrayList" (JVM
+`java.util.Arrays$ArrayList`). Use the kotlin-stdlib jar driven from java as the oracle.
 
 ---
 
@@ -741,6 +747,7 @@ T-604 java: regex dialect gaps; missing Math/Long/Double API; TreeMap views; unm
 T-586 python: slice ordering and unhashable slice keys — DONE b7d9fd8a (plus f-string {{, exception chaining, namedtuple, exact math ints, __init_subclass__, bound-method keywords, operator, user __format__: 2fcba0c7..cb34806c)
 T-603 js compiler: a method call inside an assignment target; arguments edges; `"__#"` keys — DONE 8034b969 25069eb4 (plus newline-++ ASI, function-sees-lexical scope, generator/alias mapped arguments); remaining arguments/key edges are T-615
 T-587 swift: ClosedRange.Index; an element as an expression pattern — DONE f96819ea (plus a 16-commit swiftc-checked sweep: 34b3fd80..f2327f9e)
+T-609 kotlin: Regex should use the Java dialect (flag J) — DONE 3992ef1c (plus radix parsing, groupBy/associateBy valueTransform, joinToString limit/named args, java's Formatter for String.format, signed narrow hashCode, stdlib IAE messages)
 
 # Settled — do not re-open
 
