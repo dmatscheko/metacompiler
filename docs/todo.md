@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-616** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-617** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -165,10 +165,13 @@ non-integral floats use JS formatting, not %g.
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-587 swift: ClosedRange.Index; an element as an expression pattern · P3 · SW · IN PROGRESS (SW worker, round 6) [V]
-`let cr = 2...7; print(cr.firstIndex(of: 4) as Any)` → all legs `2` (swiftc
-`Optional(Swift.ClosedRange<Swift.Int>.Index.inRange(4))`: the Index enum is not modelled). `switch 1 { case xs[0]: ... }` (an
-element as an expression pattern) does not parse in either half (range bounds do).
+### T-616 swift: `d[f()]? += 1` evaluates the target twice; `(+)` as a value; `\.0` key paths; metatype init overloads · P2 · SW · OPEN [V]
+`d[f()]? += 1` → the compiler evaluates the target path twice, so a side-effecting index runs twice (swiftc once). `["+":
+(+)]` (an operator as a value in parentheses) and the tuple key path `\.0` do not parse in either half. `t.init(...)` on a
+runtime type value uses the first-declared initializer in the compiler (no static type to pick by label). An Optional or
+nil-initialised field written through a non-self path (`d.o = 4` into `var o: Double?`) adopts its type only when every type
+declaring that name agrees. A global operator function declared before its parameter's type is not attached to it in the
+compiler. (Permanent, documented: the Optional box of `as Any`, `main.` module qualification, ArraySlice/Substring/String.Index.)
 
 ---
 
@@ -737,6 +740,7 @@ T-602 php: spread into a by-ref parameter; lazy copy holder counts; Closure stat
 T-604 java: regex dialect gaps; missing Math/Long/Double API; TreeMap views; unmodifiable view write-through — DONE bc54d07a c6b40b82 (a Java dialect flag J in the shared regex engine, additive; the a{99999999999} runaway now 0.2 s)
 T-586 python: slice ordering and unhashable slice keys — DONE b7d9fd8a (plus f-string {{, exception chaining, namedtuple, exact math ints, __init_subclass__, bound-method keywords, operator, user __format__: 2fcba0c7..cb34806c)
 T-603 js compiler: a method call inside an assignment target; arguments edges; `"__#"` keys — DONE 8034b969 25069eb4 (plus newline-++ ASI, function-sees-lexical scope, generator/alias mapped arguments); remaining arguments/key edges are T-615
+T-587 swift: ClosedRange.Index; an element as an expression pattern — DONE f96819ea (plus a 16-commit swiftc-checked sweep: 34b3fd80..f2327f9e)
 
 # Settled — do not re-open
 
