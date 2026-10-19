@@ -4687,7 +4687,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         "OSError", "ExceptionGroup", "AssertionError",
                         "ZeroDivisionError", "IndexError", "KeyError", "UnboundLocalError",
                         "NotImplementedError", "OverflowError", "UnicodeError", "UnicodeDecodeError",
-                        "UnicodeEncodeError", "GeneratorExit", "MemoryError", "SystemExit", "ImportError", "ModuleNotFoundError"]
+                        "UnicodeEncodeError", "GeneratorExit", "MemoryError", "SystemExit", "ImportError", "ModuleNotFoundError",
+                        "BlockingIOError", "ChildProcessError", "ConnectionError", "BrokenPipeError", "ConnectionAbortedError", "ConnectionRefusedError", "ConnectionResetError", "FileExistsError", "FileNotFoundError", "InterruptedError", "IsADirectoryError", "NotADirectoryError", "PermissionError", "ProcessLookupError", "TimeoutError"]
         var excParent = {}
         excParent["ZeroDivisionError"] = "ArithmeticError"
         excParent["IndexError"] = "LookupError"
@@ -4703,6 +4704,21 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         excParent["GeneratorExit"] = "BaseException"
         excParent["SystemExit"] = "BaseException"
         excParent["ModuleNotFoundError"] = "ImportError"
+        excParent["BlockingIOError"] = "OSError"
+        excParent["ChildProcessError"] = "OSError"
+        excParent["ConnectionError"] = "OSError"
+        excParent["BrokenPipeError"] = "ConnectionError"
+        excParent["ConnectionAbortedError"] = "ConnectionError"
+        excParent["ConnectionRefusedError"] = "ConnectionError"
+        excParent["ConnectionResetError"] = "ConnectionError"
+        excParent["FileExistsError"] = "OSError"
+        excParent["FileNotFoundError"] = "OSError"
+        excParent["InterruptedError"] = "OSError"
+        excParent["IsADirectoryError"] = "OSError"
+        excParent["NotADirectoryError"] = "OSError"
+        excParent["PermissionError"] = "OSError"
+        excParent["ProcessLookupError"] = "OSError"
+        excParent["TimeoutError"] = "OSError"
         var excMade = {}
         excMade["BaseException"] = excRoot
         for (var e0 = 0; e0 < excNames.length; e0++) {
@@ -4714,6 +4730,22 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             excMade[excNames[e0]] = eCls
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, excNames[e0]), eCls])
         }
+        // OSError's own __new__, __init__ and __str__ (errno, strerror, filename,
+        // the subclass an errno names): js_pyoserrnew / js_pyoserrinit /
+        // js_pyoserrstr in abnf/jsrt.go. __new__ finds the subclass by name in
+        // the scope its closure keeps.
+        var osErr = excMade["OSError"]
+        var osHooks = ["__new__", "js_pyoserrnew", "__init__", "js_pyoserrinit", "__str__", "js_pyoserrstr"]
+        for (var oh = 0; oh < osHooks.length; oh += 2) {
+            funcCount++
+            var ohIdx = funcCount
+            var ohf = m.NewFunc("jsf_" + ohIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+            var ohb = ohf.NewBlock("entry")
+            ohb.NewRet(ohb.NewCall(getExtern(osHooks[oh + 1], 2), [ohf.Params[1], ohf.Params[0]]))
+            callExt(b, "js_set", [osErr, emitStr(b, osHooks[oh]), callExt(b, "js_closure", [handle(ohIdx), curScopeV])])
+        }
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "IOError"), osErr])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "EnvironmentError"), osErr])
         // ----- the `builtins` module ------------------------------------------
         //
         // CPython's len.__self__ IS the builtins module, and `builtins.len is
@@ -4738,6 +4770,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         callExt(b, "js_set", [bmodV, emitStr(b, "Exception"), excBase])
         callExt(b, "js_set", [bmodV, emitStr(b, "BaseException"), excRoot])
+        callExt(b, "js_set", [bmodV, emitStr(b, "IOError"), excMade["OSError"]])
+        callExt(b, "js_set", [bmodV, emitStr(b, "EnvironmentError"), excMade["OSError"]])
         }
         // The other runtime modules the program imports (pyRtMod), bound as
         // _mec_mod_<name> like a library module's and only there, so a module

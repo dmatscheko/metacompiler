@@ -1199,12 +1199,12 @@ def s27():
     check("ty6", str(int) == "<class 'int'>" and str(str) == "<class 'str'>")
     # __repr__ / __str__ of a user object. CPython prefers __str__ for
     # str()/print() and __repr__ for repr() and container elements.
-    # rp2 and rp3 pin OUR default, "<Name object>": CPython writes
+    # rp2 and rp3 pin OUR default, "<__main__.Name object>": CPython writes
     # "<__main__.Name object at 0x...>" and no engine here can reproduce the
     # address, so those two right-hand sides are deliberately not CPython's.
     check("rp1", str(S27V(3)) == "V(3)" and repr(S27V(3)) == "V(3)" and str([S27V(3)]) == "[V(3)]")
-    check("rp2", str(S27W(1)) == "W!1" and repr(S27W(1)) == "<S27W object>")
-    check("rp3", str(S27X()) == "<S27X object>" and str([S27X()]) == "[<S27X object>]")
+    check("rp2", str(S27W(1)) == "W!1" and repr(S27W(1)) == "<__main__.S27W object>")
+    check("rp3", str(S27X()) == "<__main__.S27X object>" and str([S27X()]) == "[<__main__.S27X object>]")
     # BaseException.__str__, which an exception INHERITS: str(e) is the message,
     # repr(e) is Name(args...).
     check("rp4", str(ValueError("boom")) == "boom" and repr(ValueError("boom")) == "ValueError('boom')")
@@ -6617,6 +6617,40 @@ def s126():
     check("gen2", vals2 == ["a", "b"] and S126log == ["inner", ("inner got", 5), ("ret", "ret")]
           and list(S126app(shared)) == [None, None] and shared == [1, 2])
 
+# ===== SECTION 127: math at the double level, object repr, OSError, __hash__ = None =====
+# frexp/ldexp/modf/ulp/nextafter are exact; hypot and dist are CPython's
+# vector_norm. A plain instance's repr names its module. OSError(errno, ...)
+# answers the subclass the errno names and carries errno/strerror/filename. A
+# class defining __eq__ without __hash__ has __hash__ None.
+import math as S127m
+
+class S127G:
+    class In:
+        pass
+
+class S127E:
+    def __eq__(self, o):
+        return True
+
+def s127():
+    check("mth1", S127m.frexp(12.5) == (0.78125, 4) and S127m.frexp(5e-324) == (0.5, -1073)
+          and S127m.ldexp(0.75, -1074) == 5e-324 and S127m.ldexp(0.5, -1075) == 0.0 and S127m.ldexp(0.75, -1075) == 0.0
+          and repr(S127m.modf(-3.25)) == "(-0.25, -3.0)" and repr(S127m.modf(-2.0)) == "(-0.0, -2.0)"
+          and S127m.ulp(1.0) == 2.220446049250313e-16 and S127m.ulp(1.7976931348623157e308) == 1.99584030953472e+292
+          and S127m.nextafter(1.0, 0.0) == 0.9999999999999999 and repr(S127m.nextafter(-0.0, 0.0)) == "0.0"
+          and S127m.nextafter(5e-324, 0.0) == 0.0)
+    check("mth2", repr(S127m.hypot(0.1, 0.2, 0.3)) == "0.3741657386773941" and S127m.dist((1, 2), (4, 6)) == 5.0
+          and repr(S127m.hypot(1e-310, 3e-310)) == "3.1622776601684e-310" and repr(S127m.hypot(5.4, 1.3, 2.2)) == "5.974110812497539"
+          and S127m.hypot(S127m.inf, S127m.nan) == S127m.inf and repr(S127m.ldexp(1.5, 1023)) == "1.348269851146737e+308")
+    check("orp1", repr(S127G())[:25] == "<__main__.S127G object" + repr(S127G())[22:25]
+          and str(S127G.In()).startswith("<__main__.S127G.In object"))
+    e = OSError(2, "nf", "f.txt")
+    check("ose1", type(e) is FileNotFoundError and e.args == (2, "nf") and e.errno == 2 and e.filename == "f.txt"
+          and str(e) == "[Errno 2] nf: 'f.txt'" and repr(OSError(13, "p")) == "PermissionError(13, 'p')"
+          and type(OSError(99, "z")) is OSError and OSError("a").errno is None and IOError is OSError
+          and issubclass(BrokenPipeError, ConnectionError) and OSError(2, "a", None).args == (2, "a", None))
+    check("hsh1", S127E.__hash__ is None and "__hash__" in vars(S127E))
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -6741,5 +6775,6 @@ def main():
     s124() # SECTION-CALL 124
     s125() # SECTION-CALL 125
     s126() # SECTION-CALL 126
+    s127() # SECTION-CALL 127
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

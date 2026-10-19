@@ -147,7 +147,8 @@ func pyModHas(mod, name string) bool {
 			"sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh",
 			"degrees", "radians", "floor", "ceil", "trunc",
 			"gcd", "lcm", "factorial", "isnan", "isinf", "isfinite", "isclose",
-			"isqrt", "comb", "perm", "prod", "fsum":
+			"isqrt", "comb", "perm", "prod", "fsum",
+			"frexp", "ldexp", "modf", "ulp", "nextafter", "dist":
 			return true
 		}
 	case "re":
@@ -270,26 +271,54 @@ func (rt *jsrt) pyMathCall(name string, args []interface{}) interface{} {
 	case "atan2":
 		return pyMathFlo(fdAtan2(pyMathArg(rt, args, 0), pyMathArg(rt, args, 1)))
 	case "hypot":
-		// VARIADIC since 3.8, and scaled so hypot(1e300, 1e300) does not overflow.
-		mx := 0.0
+		xs := make([]float64, len(args))
 		for i := range args {
-			a := math.Abs(rt.pyToF(args[i]))
-			if math.IsInf(a, 0) {
-				return pyMathFlo(math.Inf(1))
-			}
-			if a > mx {
-				mx = a
-			}
+			xs[i] = rt.pyToF(args[i])
 		}
-		if mx == 0 {
-			return pyMathFlo(0)
+		return pyMathFlo(pyMathNorm(xs))
+	case "dist":
+		p, q := rt.pyElemsOf(argAt(args, 0)), rt.pyElemsOf(argAt(args, 1))
+		if len(p) != len(q) {
+			rt.pyRaise("ValueError", "both points must have the same number of dimensions")
 		}
-		sum := 0.0
-		for i := range args {
-			t := rt.pyToF(args[i]) / mx
-			sum += t * t
+		xs := make([]float64, len(p))
+		for i := range p {
+			xs[i] = rt.pyToF(p[i]) - rt.pyToF(q[i])
 		}
-		return pyMathFlo(mx * math.Sqrt(sum))
+		return pyMathFlo(pyMathNorm(xs))
+	case "frexp":
+		m, e := math.Frexp(pyMathArg(rt, args, 0))
+		return pyTup(&jsArray{elems: []interface{}{pyMathFlo(m), float64(e)}})
+	case "ldexp":
+		x := pyMathArg(rt, args, 0)
+		r := math.Ldexp(x, rt.pyMathLdexpExp(argAt(args, 1)))
+		if math.IsInf(r, 0) && !math.IsInf(x, 0) {
+			rt.pyRaise("OverflowError", "math range error")
+		}
+		return pyMathFlo(r)
+	case "modf":
+		x := pyMathArg(rt, args, 0)
+		ip, fp := math.Modf(x)
+		if math.IsInf(x, 0) {
+			fp = math.Copysign(0, x)
+		}
+		return pyTup(&jsArray{elems: []interface{}{pyMathFlo(fp), pyMathFlo(ip)}})
+	case "ulp":
+		x := math.Abs(pyMathArg(rt, args, 0))
+		if math.IsNaN(x) || math.IsInf(x, 0) {
+			return pyMathFlo(x)
+		}
+		if x == math.MaxFloat64 {
+			return pyMathFlo(x - math.Nextafter(x, 0))
+		}
+		return pyMathFlo(math.Nextafter(x, math.Inf(1)) - x)
+	case "nextafter":
+		// x == y answers y, so nextafter(-0.0, 0.0) is 0.0 (Go's answers x).
+		x, y := pyMathArg(rt, args, 0), pyMathArg(rt, args, 1)
+		if x == y {
+			return pyMathFlo(y)
+		}
+		return pyMathFlo(math.Nextafter(x, y))
 	case "sin":
 		return pyMathFlo(fdSin(pyMathArg(rt, args, 0)))
 	case "cos":
@@ -438,6 +467,92 @@ func (rt *jsrt) pyMathCall(name string, args []interface{}) interface{} {
 	}
 	panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
 		"module 'math' has no attribute '"+name+"'")})
+}
+
+// pyMathNorm is hypot / dist over the coordinates xs: an infinity wins over a
+// NaN, as CPython's math_hypot decides, then CPython's vector_norm. Twin of
+// pyMNorm in languages/python-interpreter.abnf and lib/python-rt.metajs, and of
+// pynVecNorm in lib/python-num.js, which use Dekker's product for the fma.
+func pyMathNorm(xs []float64) float64 {
+	mx, nan := 0.0, false
+	abs := make([]float64, len(xs))
+	for i, x := range xs {
+		abs[i] = math.Abs(x)
+		if math.IsNaN(x) {
+			nan = true
+		} else if abs[i] > mx {
+			mx = abs[i]
+		}
+	}
+	if math.IsInf(mx, 0) {
+		return mx
+	}
+	if nan {
+		return math.NaN()
+	}
+	return pyVecNorm(abs, mx)
+}
+
+func pyVecNorm(vec []float64, mx float64) float64 {
+	if mx == 0 || len(vec) <= 1 {
+		return mx
+	}
+	_, me := math.Frexp(mx)
+	if me < -1022 {
+		big := make([]float64, len(vec))
+		for i, v := range vec {
+			big[i] = math.Ldexp(v, 1022)
+		}
+		return pyVecNorm(big, math.Ldexp(mx, 1022)) * math.Ldexp(1, -1022)
+	}
+	// The float64() conversions keep Go from fusing a product into the add
+	// that follows it, which the other engines cannot do.
+	scale := math.Ldexp(1, -me)
+	csum, frac1, frac2 := 1.0, 0.0, 0.0
+	for _, v := range vec {
+		x := float64(v * scale)
+		hi := float64(x * x)
+		lo := math.FMA(x, x, -hi)
+		s := csum + hi
+		frac2 += (csum - s) + hi
+		csum = s
+		frac1 += lo
+	}
+	h := math.Sqrt(csum - 1 + (frac1 + frac2))
+	phi := float64(-h * h)
+	plo := math.FMA(-h, h, -phi)
+	s := csum + phi
+	frac2 += (csum - s) + phi
+	csum = s
+	frac1 += plo
+	c := csum - 1 + (frac1 + frac2)
+	h += c / (2 * h)
+	return h / scale
+}
+
+// pyMathLdexpExp is ldexp's exponent: an int (a bool is one), clamped to where
+// every finite x has overflowed or underflowed. Twin of pyMLdexpExp in
+// languages/python-interpreter.abnf and lib/python-rt.metajs.
+func (rt *jsrt) pyMathLdexpExp(v interface{}) int {
+	if b, ok := v.(bool); ok {
+		if b {
+			return 1
+		}
+		return 0
+	}
+	if _, isFlo := v.(*jsPyFlo); !isFlo {
+		if bi, ok := pyBigOperand(v); ok {
+			if bi.Cmp(big.NewInt(2200)) > 0 {
+				return 2200
+			}
+			if bi.Cmp(big.NewInt(-2200)) < 0 {
+				return -2200
+			}
+			return int(bi.Int64())
+		}
+	}
+	rt.pyRaise("TypeError", "Expected an int as second argument to ldexp.")
+	return 0
 }
 
 // pyMathGcdBig is gcd / lcm once an operand is past the exact-double range.

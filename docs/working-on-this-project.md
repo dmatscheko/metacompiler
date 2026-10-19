@@ -811,6 +811,12 @@ and handing the host a LONE SURROGATE, which UTF-8 cannot encode. All four legs
 print the character now. JS: the `d` flag builds no `m.indices`.
 Python: integral floats render as int, `&|^` are ToInt32, `inf`/`nan` spell
 `Infinity`/`NaN`, the format mini-language is a subset.
+A plain instance prints as `<__main__.G object>`, without CPython's `at 0x...`.
+math has no exp2, erf, erfc, gamma or lgamma: CPython's answers depend on the
+platform libm (its exp2 differs from `2.0 ** x` in about 0.2% of doubles), so no
+spelling here is bit-exact. OSError(errno, ...) answers a subclass only for the
+errno values every platform numbers alike (EPERM, ENOENT, ESRCH, EINTR, ECHILD,
+EACCES, EEXIST, ENOTDIR, EISDIR, EPIPE).
 A Python str is indexed, sliced, iterated and searched by CODE POINT over the
 floor's UTF-16 strings: python emits `js_pyidx` for a subscript because the
 shared `js_pyget` must stay UTF-16 for dart and csharp, and layer 2 converts

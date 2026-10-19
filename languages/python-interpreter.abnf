@@ -3698,7 +3698,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (var i = 0; i < v.args.length; i++) { if (i > 0) { out4 += ", " }; out4 += prepr(v.args[i]) }
             return out4 + ")"
         }
-        return "<" + pyClsQual(v.__class) + " object>"
+        return "<" + pyClsQualName(v.__class) + " object>"
     }
     // Is this class KeyError, or a subclass of it? KeyError is the one builtin
     // exception whose __str__ differs from BaseException's, and a subclass
@@ -4726,6 +4726,34 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                            nan: {__flo: Math.pow(2, 1024) - Math.pow(2, 1024)}}
 
     function pyMInf() { return Math.pow(2, 1024) }
+    // hypot / dist over the coordinates xs: an infinity wins over a NaN, as
+    // CPython's math_hypot decides before vector_norm. Twin of pyMNorm in
+    // lib/python-rt.metajs and pyMathNorm in abnf/jsrtpymath.go.
+    function pyMNorm(xs) {
+        var mx = 0
+        var nan = false
+        var abs = []
+        for (var i = 0; i < xs.length; i++) {
+            var a = Math.abs(xs[i])
+            if (a !== a) { nan = true }
+            if (a > mx) { mx = a }
+            abs.push(a)
+        }
+        if (mx === pyMInf()) { return mx }
+        if (nan) { return mx - pyMInf() + pyMInf() }
+        return pynVecNorm(abs, mx)
+    }
+    // ldexp's exponent: an int (a bool is one), clamped to where every finite x
+    // has overflowed or underflowed. Twin of pyMLdexpExp in lib/python-rt.metajs
+    // and pyMathLdexpExp in abnf/jsrtpymath.go.
+    function pyMLdexpExp(v) {
+        if (typeof v == "boolean") { return v ? 1 : 0 }
+        if (bigIsBig(v)) { return v.sign < 0 ? 0 - 2200 : 2200 }
+        if (typeof v != "number") { pyListErr("TypeError", "Expected an int as second argument to ldexp.") }
+        if (v > 2200) { return 2200 }
+        if (v < 0 - 2200) { return 0 - 2200 }
+        return v
+    }
     function pyMArg(args, i) {
         if (i >= args.length) { fail("math: missing argument") }
         return floVal(args[i])
@@ -4887,24 +4915,33 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (name == "atan2") { return pyFlo(fdlibm().atan2(pyMArg(args, 0), pyMArg(args, 1))) }
         if (name == "hypot") {
-            var mx = 0
-            var i = 0
-            while (i < args.length) {
-                var av = Math.abs(floVal(args[i]))
-                if (av === pyMInf()) { return pyFlo(pyMInf()) }
-                if (av > mx) { mx = av }
-                i = i + 1
-            }
-            if (mx === 0) { return pyFlo(0) }
-            var sum = 0
-            var j = 0
-            while (j < args.length) {
-                var t2 = floVal(args[j]) / mx
-                sum = sum + t2 * t2
-                j = j + 1
-            }
-            return pyFlo(mx * Math.sqrt(sum))
+            var hv = []
+            for (var hi = 0; hi < args.length; hi++) { hv.push(floVal(args[hi])) }
+            return pyFlo(pyMNorm(hv))
         }
+        if (name == "dist") {
+            var dp = iterToList(pyArgAt(args, 0))
+            var dq = iterToList(pyArgAt(args, 1))
+            if (dp.length != dq.length) { pyListErr("ValueError", "both points must have the same number of dimensions") }
+            var dv = []
+            for (var di = 0; di < dp.length; di++) { dv.push(floVal(dp[di]) - floVal(dq[di])) }
+            return pyFlo(pyMNorm(dv))
+        }
+        if (name == "frexp") {
+            var fr = pynFrexp(pyMArg(args, 0))
+            return pyTup([pyFlo(fr.m), fr.e])
+        }
+        if (name == "ldexp") {
+            var lr = pynLdexp(pyMArg(args, 0), pyMLdexpExp(pyArgAt(args, 1)))
+            if (lr === null) { pyListErr("OverflowError", "math range error") }
+            return pyFlo(lr)
+        }
+        if (name == "modf") {
+            var mr = pynModf(pyMArg(args, 0))
+            return pyTup([pyFlo(mr.f), pyFlo(mr.i)])
+        }
+        if (name == "ulp") { return pyFlo(pynUlp(pyMArg(args, 0))) }
+        if (name == "nextafter") { return pyFlo(pynNextafter(pyMArg(args, 0), pyMArg(args, 1))) }
         if (name == "sin") { return pyFlo(fdlibm().sin(pyMArg(args, 0))) }
         if (name == "cos") { return pyFlo(fdlibm().cos(pyMArg(args, 0))) }
         if (name == "tan") { return pyFlo(fdlibm().tan(pyMArg(args, 0))) }
@@ -11941,7 +11978,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                       "NameError", "UnboundLocalError", "AttributeError", "RuntimeError",
                       "StopIteration", "NotImplementedError", "AssertionError",
                       "OSError", "ExceptionGroup", "OverflowError", "UnicodeError", "UnicodeDecodeError",
-                      "UnicodeEncodeError", "GeneratorExit", "MemoryError", "SystemExit", "ImportError", "ModuleNotFoundError"]
+                      "UnicodeEncodeError", "GeneratorExit", "MemoryError", "SystemExit", "ImportError", "ModuleNotFoundError",
+                      "BlockingIOError", "ChildProcessError", "ConnectionError", "BrokenPipeError", "ConnectionAbortedError", "ConnectionRefusedError", "ConnectionResetError", "FileExistsError", "FileNotFoundError", "InterruptedError", "IsADirectoryError", "NotADirectoryError", "PermissionError", "ProcessLookupError", "TimeoutError"]
     var pyExcParent = {}
     pyExcParent["Exception"] = "BaseException"
     pyExcParent["ArithmeticError"] = "Exception"
@@ -11971,6 +12009,21 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     pyExcParent["SystemExit"] = "BaseException"
     pyExcParent["ImportError"] = "Exception"
     pyExcParent["ModuleNotFoundError"] = "ImportError"
+    pyExcParent["BlockingIOError"] = "OSError"
+    pyExcParent["ChildProcessError"] = "OSError"
+    pyExcParent["ConnectionError"] = "OSError"
+    pyExcParent["BrokenPipeError"] = "ConnectionError"
+    pyExcParent["ConnectionAbortedError"] = "ConnectionError"
+    pyExcParent["ConnectionRefusedError"] = "ConnectionError"
+    pyExcParent["ConnectionResetError"] = "ConnectionError"
+    pyExcParent["FileExistsError"] = "OSError"
+    pyExcParent["FileNotFoundError"] = "OSError"
+    pyExcParent["InterruptedError"] = "OSError"
+    pyExcParent["IsADirectoryError"] = "OSError"
+    pyExcParent["NotADirectoryError"] = "OSError"
+    pyExcParent["PermissionError"] = "OSError"
+    pyExcParent["ProcessLookupError"] = "OSError"
+    pyExcParent["TimeoutError"] = "OSError"
     function installExceptions() {
         for (var i = 0; i < pyExcNames.length; i++) {
             var n = pyExcNames[i]
@@ -11991,6 +12044,65 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
     installExceptions()
+    hostGlobals["IOError"] = hostGlobals["OSError"]
+    hostGlobals["EnvironmentError"] = hostGlobals["OSError"]
+    // OSError(errno, strerror[, filename[, winerror[, filename2]]]): with two to
+    // five arguments the instance carries errno, strerror, filename and
+    // filename2, its args are the first two once a filename is given, and
+    // OSError itself answers the
+    // subclass the errno names (pyOSErrSub). Twin of js_pyoserrnew,
+    // js_pyoserrinit and js_pyoserrstr in abnf/jsrt.go and lib/python-rt.metajs.
+    scopePut(hostGlobals["OSError"], "__new__", function(cls) {
+        kTakeNamed()
+        var c = anytype
+        c = cls
+        if (cls === hostGlobals["OSError"] && arguments.length >= 3 && arguments.length <= 6) {
+            var sub = pyOSErrSub(arguments[1])
+            if (sub != "") { c = hostGlobals[sub] }
+        }
+        return {__class: c}
+    })
+    scopePut(hostGlobals["OSError"], "__init__", function(self) {
+        kTakeNamed()
+        var a = []
+        for (var i = 1; i < arguments.length; i++) { a.push(arguments[i]) }
+        var full = a.length >= 2 && a.length <= 5
+        var named = full && a.length > 2 && a[2] !== undefined && a[2] !== null
+        self.args = pyTup(named ? [a[0], a[1]] : a)
+        self.errno = full ? a[0] : undefined
+        self.strerror = full ? a[1] : undefined
+        self.filename = named ? a[2] : undefined
+        self.filename2 = named && a.length > 4 ? a[4] : undefined
+        return undefined
+    })
+    scopePut(hostGlobals["OSError"], "__str__", function(self) {
+        var head = "[Errno " + pstr(self.errno) + "] " + pstr(self.strerror)
+        if (self.filename !== undefined && self.filename !== null) {
+            if (self.filename2 !== undefined && self.filename2 !== null) {
+                return head + ": " + prepr(self.filename) + " -> " + prepr(self.filename2)
+            }
+            return head + ": " + prepr(self.filename)
+        }
+        if (self.errno !== undefined && self.errno !== null && self.strerror !== undefined && self.strerror !== null) { return head }
+        if (self.args.length == 0) { return "" }
+        if (self.args.length == 1) { return pstr(self.args[0]) }
+        return prepr(self.args)
+    })
+    // The subclass OSError(errno, ...) answers, for the errno values every
+    // platform numbers alike; "" for any other.
+    function pyOSErrSub(n) {
+        if (typeof n != "number") { return "" }
+        if (n == 1 || n == 13) { return "PermissionError" }
+        if (n == 2) { return "FileNotFoundError" }
+        if (n == 3) { return "ProcessLookupError" }
+        if (n == 4) { return "InterruptedError" }
+        if (n == 10) { return "ChildProcessError" }
+        if (n == 17) { return "FileExistsError" }
+        if (n == 20) { return "NotADirectoryError" }
+        if (n == 21) { return "IsADirectoryError" }
+        if (n == 32) { return "BrokenPipeError" }
+        return ""
+    }
     // BaseException.add_note(note): appends to the instance's __notes__ list,
     // made on first use. Twin of js_pyaddnote in abnf/jsrt.go and
     // lib/python-rt.metajs.
@@ -12284,6 +12396,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // The class's own members in definition order, which pySetAttr and
             // pyDelAttr keep from here on (pyClassDict).
             cls.__attrs = ns.__nskeys.slice(0)
+            pyEqHashNone(cls)
             pySetNames(cls, ns.__nskeys)
             var ann = newDict()
             if (hasOwn(ns, "__annots")) {
@@ -12294,6 +12407,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             cls.__annotations__ = ann
             pySet(name, cls)
             noteBound(name)
+        }
+    }
+    // type.__new__'s rule: a class that defines __eq__ and not __hash__ gets
+    // __hash__ = None of its own, so its instances are unhashable and C.__hash__
+    // reads None. Twin of pyEqHashNone in abnf/jsrt.go and lib/python-rt.metajs.
+    function pyEqHashNone(cls) {
+        if (hasOwn(cls, "__eq__") && !hasOwn(cls, "__hash__")) {
+            scopePut(cls, "__hash__", undefined)
+            cls.__attrs.push("__hash__")
         }
     }
     // type(name, bases, ns): the class a class statement with those bases and
@@ -12308,6 +12430,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             pyNoteHook(ns.keys[k])
         }
         cls.__attrs = ns.keys.slice(0)
+        pyEqHashNone(cls)
         pySetNames(cls, cls.__attrs)
         cls.__annotations__ = newDict()
         return cls
@@ -12988,7 +13111,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var s = pynWSigned(pyHashId(a))
         return pyIntOfBits(s.neg, s.bits)
     }
-    function pyObjRepr(a) { return "<" + (pyUser(a) ? pyClsQual(a.__class) : pyTypeOf(a).__name) + " object>" }
+    function pyObjRepr(a) { return "<" + (pyUser(a) ? pyClsQualName(a.__class) : pyTypeOf(a).__name) + " object>" }
     function pyObjStr(a) { return prepr(a) }
     // format() of an instance: its class's own __format__ answers, and object's
     // refuses a non-empty spec; null leaves an instance of a builtin type's

@@ -1337,7 +1337,7 @@ func pyObjMethodBody(name string) func(rt *jsrt, this uint64, args []interface{}
 	case "__repr__":
 		return func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			if _, cls, ok := pyInstance(arg(args, 0)); ok {
-				return "<" + rt.pyClsQual(cls) + " object>"
+				return "<" + rt.pyClsModQual(cls) + " object>"
 			}
 			return "<" + rt.pyOwnerName(arg(args, 0)) + " object>"
 		}

@@ -1,6 +1,7 @@
 // python-num.js -- the bit and double algorithms behind int's and float's own
 // methods (bit_length, bit_count, to_bytes, from_bytes, float.hex,
-// float.fromhex, float.as_integer_ratio), for python-interpreter.abnf (include)
+// float.fromhex, float.as_integer_ratio) and math's frexp, ldexp, modf, ulp,
+// nextafter, hypot and dist, for python-interpreter.abnf (include)
 // and languages/lib/python-rt.metajs (import). An int crosses as its sign and
 // its magnitude's little-endian BITS, the shape both engines' bigint code
 // already converts to and from; an error crosses as a string code that the
@@ -717,4 +718,152 @@ function pynHashUnits(units) {
         i = i + 1
     }
     return pynWNum(h)
+}
+
+// ----- math's functions at the double level -----
+//
+// Exact by construction where CPython's are exact (frexp, ldexp, modf, ulp,
+// nextafter): scaling by two is exact while nothing enters the subnormals, and
+// the one rounding into them is done once, half to even. pynVecNorm is
+// CPython's vector_norm, the algorithm behind hypot and dist, with Dekker's
+// exact product in place of its fma. Go twins in abnf/jsrtpymath.go.
+
+// x = m * 2^e with 0.5 <= |m| < 1; zero, an infinity and a NaN give (x, 0).
+function pynFrexp(x) {
+    if (x == 0 || x !== x || x - x != 0) { return {m: x, e: 0} }
+    var neg = x < 0
+    var a = neg ? -x : x
+    var e = 0
+    while (a >= 1) {
+        a = a / 2
+        e = e + 1
+    }
+    while (a < 0.5) {
+        a = a * 2
+        e = e - 1
+    }
+    return {m: neg ? -a : a, e: e}
+}
+
+// x * 2^n rounded once, or null when it overflows. n is already clamped by the
+// caller to a range where the loops stay short.
+function pynLdexp(x, n) {
+    if (x == 0 || x !== x || x - x != 0) { return x }
+    var f = pynFrexp(x)
+    var t = f.e + n
+    if (t > 1024) { return null }
+    var m = f.m < 0 ? -f.m : f.m
+    var r = 0
+    if (t >= -1021) {
+        r = pynScale2(m, t)
+    } else if (t + 1074 >= -1) {
+        var y = pynScale2(m, t + 1074)
+        var k = Math.floor(y)
+        var d = y - k
+        if (d > 0.5 || (d == 0.5 && k % 2 == 1)) { k = k + 1 }
+        r = pynScale2(k, 0 - 1074)
+    }
+    if (x < 0) { return r / (0 - 1) }
+    return r
+}
+
+// modf: the fractional and the integral part, both with x's sign.
+function pynModf(x) {
+    if (x !== x) { return {f: x, i: x} }
+    if (x - x != 0) { return {f: x > 0 ? 0 : 0 / (0 - 1), i: x} }
+    var neg = x < 0 || (x == 0 && 1 / x < 0)
+    var a = neg ? -x : x
+    var ip = Math.floor(a)
+    var fp = a - ip
+    if (neg) { return {f: fp / (0 - 1), i: ip / (0 - 1)} }
+    return {f: fp, i: ip}
+}
+
+// The value of the least significant bit of |x|.
+function pynUlp(x) {
+    if (x !== x) { return x }
+    var a = x < 0 ? -x : x
+    if (a - a != 0) { return a }
+    var e = 0 - 1074
+    if (a != 0) { e = pynFrexp(a).e - 53 }
+    if (e < 0 - 1074) { e = 0 - 1074 }
+    return pynScale2(1, e)
+}
+
+// The next double after x towards y.
+function pynNextafter(x, y) {
+    if (x !== x || y !== y) { return x + y }
+    if (x == y) { return y }
+    if (x == 0) {
+        var t = pynScale2(1, 0 - 1074)
+        if (y < 0) { return t / (0 - 1) }
+        return t
+    }
+    var up = (y > x) == (x > 0)
+    var a = x < 0 ? -x : x
+    var r = 0
+    if (a - a != 0) {
+        r = pynScale2(9007199254740991, 971)
+    } else {
+        var f = pynFrexp(a)
+        var e = f.e
+        if (!up && f.m == 0.5) { e = e - 1 }
+        e = e - 53
+        if (e < 0 - 1074) { e = 0 - 1074 }
+        var step = pynScale2(1, e)
+        r = up ? a + step : a - step
+    }
+    if (x < 0) { return r / (0 - 1) }
+    return r
+}
+
+// Dekker's exact product: a * b == hi + lo, what fma(a, b, -hi) answers for lo.
+function pynTwoProd(a, b) {
+    var p = a * b
+    var t = 134217729 * a
+    var ah = t - (t - a)
+    var al = a - ah
+    t = 134217729 * b
+    var bh = t - (t - b)
+    var bl = b - bh
+    return {hi: p, lo: ((ah * bh - p) + ah * bl + al * bh) + al * bl}
+}
+
+// CPython's vector_norm over the absolute values vec, mx their maximum, both
+// finite.
+function pynVecNorm(vec, mx) {
+    if (mx == 0 || vec.length <= 1) { return mx }
+    var me = pynFrexp(mx).e
+    if (me < 0 - 1022) {
+        var big = []
+        var i = 0
+        while (i < vec.length) {
+            big.push(pynScale2(vec[i], 1022))
+            i = i + 1
+        }
+        return pynVecNorm(big, pynScale2(mx, 1022)) * pynScale2(1, 0 - 1022)
+    }
+    var scale = pynScale2(1, 0 - me)
+    var csum = 1
+    var frac1 = 0
+    var frac2 = 0
+    var j = 0
+    while (j < vec.length) {
+        var x = vec[j] * scale
+        var pr = pynTwoProd(x, x)
+        var hi = csum + pr.hi
+        frac2 = frac2 + ((csum - hi) + pr.hi)
+        csum = hi
+        frac1 = frac1 + pr.lo
+        j = j + 1
+    }
+    var h = Math.sqrt(csum - 1 + (frac1 + frac2))
+    var pr2 = pynTwoProd(-h, h)
+    var hi2 = csum + pr2.hi
+    frac2 = frac2 + ((csum - hi2) + pr2.hi)
+    csum = hi2
+    frac1 = frac1 + pr2.lo
+    var c = csum - 1 + (frac1 + frac2)
+    h = h + c / (2 * h)
+    return h / scale
 }

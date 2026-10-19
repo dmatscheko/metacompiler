@@ -1047,8 +1047,16 @@ function pyUserRender(v, cls, wantRepr) {
         }
         return out + ")"
     }
-    if (typeof cls["__name"] == "string") { nm = pyClsQual(cls) }
+    if (typeof cls["__name"] == "string") { nm = pyClsModQual(cls) }
     return "<" + nm + " object>"
+}
+
+// Go: rt.pyClsModQual. A class's module-qualified name, the bare one for a
+// builtin, which has no __module__.
+function pyClsModQual(cls) {
+    var mod = cls["__module__"]
+    if (typeof mod == "string") { return mod + "." + pyClsQual(cls) }
+    return pyClsQual(cls)
 }
 
 // abnf/jsrt.go's pyTypeName. A __pybig is an int, which is why the arm is
@@ -2863,7 +2871,7 @@ function pyObjHash(a) {
 }
 function pyObjRepr(a) {
     var c = pyInstClassOf(a)
-    if (c !== null && c !== undefined) { return "<" + pyClsQual(c) + " object>" }
+    if (c !== null && c !== undefined) { return "<" + pyClsModQual(c) + " object>" }
     return "<" + pyTypeName(a) + " object>"
 }
 function pyObjStr(a) { return pyRepr(a) }
@@ -9641,6 +9649,72 @@ function js_pyraiseval(v) {
     return pyDInstantiate(pyClassOf(v), [], undefined)
 }
 
+// Go: js_pyoserrnew / js_pyoserrinit / js_pyoserrstr. OSError(errno,
+// strerror[, filename[, winerror[, filename2]]]), over the hook closure's call
+// arguments [self or class, args...] and its scope.
+function js_pyoserrnew(argv, sc) {
+    var cls = anytype
+    cls = argv[0]
+    var n = argv.length - 1
+    if (n >= 2 && n <= 5 && cls === scopeGet(sc, "OSError")) {
+        var sub = pyOSErrSub(argv[1])
+        if (sub != "") { cls = scopeGet(sc, sub) }
+    }
+    var inst = {}
+    inst["__class"] = cls
+    return inst
+}
+
+function js_pyoserrinit(argv, sc) {
+    var self = argv[0]
+    var rest = []
+    var i = 1
+    while (i < argv.length) {
+        rest.push(argv[i])
+        i = i + 1
+    }
+    var full = rest.length >= 2 && rest.length <= 5
+    var named = full && rest.length > 2 && !rtIsNil(rest[2])
+    pySetAttrRaw(self, "args", pyTup(named ? [rest[0], rest[1]] : rest))
+    pySetAttrRaw(self, "errno", full ? rest[0] : undefined)
+    pySetAttrRaw(self, "strerror", full ? rest[1] : undefined)
+    pySetAttrRaw(self, "filename", named ? rest[2] : undefined)
+    pySetAttrRaw(self, "filename2", named && rest.length > 4 ? rest[4] : undefined)
+    return undefined
+}
+
+function js_pyoserrstr(argv, sc) {
+    var o = argv[0]
+    var head = "[Errno " + pyStr(o["errno"]) + "] " + pyStr(o["strerror"])
+    var fn = o["filename"]
+    var fn2 = o["filename2"]
+    if (!rtIsNil(fn)) {
+        if (!rtIsNil(fn2)) { return head + ": " + pyRepr(fn) + " -> " + pyRepr(fn2) }
+        return head + ": " + pyRepr(fn)
+    }
+    if (!rtIsNil(o["errno"]) && !rtIsNil(o["strerror"])) { return head }
+    var args = o["args"]
+    if (!Array.isArray(args) || args.length == 0) { return "" }
+    if (args.length == 1) { return pyStr(args[0]) }
+    return pyRepr(args)
+}
+
+// Go: pyOSErrSub. The subclass OSError(errno, ...) answers, for the errno values
+// every platform numbers alike; "" for any other.
+function pyOSErrSub(n) {
+    if (typeof n != "number") { return "" }
+    if (n == 1 || n == 13) { return "PermissionError" }
+    if (n == 2) { return "FileNotFoundError" }
+    if (n == 3) { return "ProcessLookupError" }
+    if (n == 4) { return "InterruptedError" }
+    if (n == 10) { return "ChildProcessError" }
+    if (n == 17) { return "FileExistsError" }
+    if (n == 20) { return "NotADirectoryError" }
+    if (n == 21) { return "IsADirectoryError" }
+    if (n == 32) { return "BrokenPipeError" }
+    return ""
+}
+
 // Go: js_pyexcdepth / js_pyexcenter / js_pyexcleave, which state the rule:
 // implicit chaining over the stack of exceptions whose except clause is running.
 var pyExcHandled = []
@@ -10715,7 +10789,15 @@ function pyDPropName(p) {
 
 // The __set_name__ pass over a filled class body, then the __init_subclass__
 // hook. Go: rt.pySetNames, which explains it.
+// Go: rt.pyEqHashNone. type.__new__'s rule: a class that defines __eq__ and
+// not __hash__ gets __hash__ = None of its own. A __hash__ that is already None
+// is written again, which changes nothing.
+function pyEqHashNone(cls) {
+    if (cls["__eq__"] !== undefined && cls["__hash__"] === undefined) { pySetAttrRaw(cls, "__hash__", undefined) }
+}
+
 function js_pysetnames(cls) {
+    pyEqHashNone(cls)
     var ks = keysOf(cls)
     for (var i = 0; i < ks.length; i++) {
         var v = cls[ks[i]]
@@ -12029,6 +12111,8 @@ function pyMHas(mod, name) {
     if (name == "floor" || name == "ceil" || name == "trunc" || name == "gcd") { return true }
     if (name == "lcm" || name == "factorial" || name == "isnan" || name == "isinf") { return true }
     if (name == "isfinite" || name == "isclose" || name == "cbrt") { return true }
+    if (name == "frexp" || name == "ldexp" || name == "modf" || name == "ulp") { return true }
+    if (name == "nextafter" || name == "dist") { return true }
     return name == "isqrt" || name == "comb" || name == "perm" || name == "prod" || name == "fsum"
 }
 
@@ -12051,6 +12135,36 @@ function pyMNaN() { return Math.pow(2, 1024) - Math.pow(2, 1024) }
 function pyMIsMathMod(v) {
     if (!pyIsObj(v)) { return false }
     return v["__pymod"] === "math"
+}
+
+// Go: pyMathNorm. hypot / dist over the coordinates xs: an infinity wins
+// over a NaN, as CPython's math_hypot decides before vector_norm.
+function pyMNorm(xs) {
+    var mx = 0
+    var nan = false
+    var abs = []
+    var i = 0
+    while (i < xs.length) {
+        var a = Math.abs(xs[i])
+        if (a !== a) { nan = true }
+        if (a > mx) { mx = a }
+        abs.push(a)
+        i = i + 1
+    }
+    if (mx === pyMInf()) { return mx }
+    if (nan) { return mx - pyMInf() + pyMInf() }
+    return pynVecNorm(abs, mx)
+}
+
+// Go: pyMathLdexpExp. ldexp's exponent: an int (a bool is one), clamped to
+// where every finite x has overflowed or underflowed.
+function pyMLdexpExp(v) {
+    if (typeof v == "boolean") { return v ? 1 : 0 }
+    if (pyIsBig(v)) { return v["neg"] ? 0 - 2200 : 2200 }
+    if (typeof v != "number") { pyRaiseExc("TypeError", "Expected an int as second argument to ldexp.") }
+    if (v > 2200) { return 2200 }
+    if (v < 0 - 2200) { return 0 - 2200 }
+    return v
 }
 
 function pyMArg(args, i) {
@@ -12209,24 +12323,41 @@ function pyMathCall(name, args) {
     }
     if (name == "atan2") { return pyMkFlo(fdlibm().atan2(pyMArg(args, 0), pyMArg(args, 1))) }
     if (name == "hypot") {
-        var mx = 0
-        var i = 0
-        while (i < args.length) {
-            var av = Math.abs(pyNum(args[i]))
-            if (av === pyMInf()) { return pyMkFlo(pyMInf()) }
-            if (av > mx) { mx = av }
-            i = i + 1
+        var hv = []
+        var hi = 0
+        while (hi < args.length) {
+            hv.push(pyNum(args[hi]))
+            hi = hi + 1
         }
-        if (mx === 0) { return pyMkFlo(0) }
-        var sum = 0
-        var j = 0
-        while (j < args.length) {
-            var t2 = pyNum(args[j]) / mx
-            sum = sum + t2 * t2
-            j = j + 1
-        }
-        return pyMkFlo(mx * Math.sqrt(sum))
+        return pyMkFlo(pyMNorm(hv))
     }
+    if (name == "dist") {
+        var dp = pyElemsOf(pyEArgAt(args, 0))
+        var dq = pyElemsOf(pyEArgAt(args, 1))
+        if (dp.length != dq.length) { pyRaiseExc("ValueError", "both points must have the same number of dimensions") }
+        var dv = []
+        var di = 0
+        while (di < dp.length) {
+            dv.push(pyNum(dp[di]) - pyNum(dq[di]))
+            di = di + 1
+        }
+        return pyMkFlo(pyMNorm(dv))
+    }
+    if (name == "frexp") {
+        var fr = pynFrexp(pyMArg(args, 0))
+        return pyTup([pyMkFlo(fr.m), fr.e])
+    }
+    if (name == "ldexp") {
+        var lr = pynLdexp(pyMArg(args, 0), pyMLdexpExp(pyEArgAt(args, 1)))
+        if (lr === null) { pyRaiseExc("OverflowError", "math range error") }
+        return pyMkFlo(lr)
+    }
+    if (name == "modf") {
+        var mr = pynModf(pyMArg(args, 0))
+        return pyTup([pyMkFlo(mr.f), pyMkFlo(mr.i)])
+    }
+    if (name == "ulp") { return pyMkFlo(pynUlp(pyMArg(args, 0))) }
+    if (name == "nextafter") { return pyMkFlo(pynNextafter(pyMArg(args, 0), pyMArg(args, 1))) }
     if (name == "sin") { return pyMkFlo(fdlibm().sin(pyMArg(args, 0))) }
     if (name == "cos") { return pyMkFlo(fdlibm().cos(pyMArg(args, 0))) }
     if (name == "tan") { return pyMkFlo(fdlibm().tan(pyMArg(args, 0))) }

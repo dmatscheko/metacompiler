@@ -3803,7 +3803,61 @@ func (rt *jsrt) pyUserRender(o *jsObject, cls *jsObject, wantRepr bool) string {
 		}
 		return out + ")"
 	}
-	return "<" + rt.pyClsQual(cls) + " object>"
+	return "<" + rt.pyClsModQual(cls) + " object>"
+}
+
+// pyOSErrSub is the subclass OSError(errno, ...) answers, for the errno values
+// every platform numbers alike; "" for any other. Twin of pyOSErrSub in
+// languages/python-interpreter.abnf and lib/python-rt.metajs.
+func pyOSErrSub(v interface{}) string {
+	n, ok := v.(float64)
+	if !ok {
+		return ""
+	}
+	switch n {
+	case 1, 13:
+		return "PermissionError"
+	case 2:
+		return "FileNotFoundError"
+	case 3:
+		return "ProcessLookupError"
+	case 4:
+		return "InterruptedError"
+	case 10:
+		return "ChildProcessError"
+	case 17:
+		return "FileExistsError"
+	case 20:
+		return "NotADirectoryError"
+	case 21:
+		return "IsADirectoryError"
+	case 32:
+		return "BrokenPipeError"
+	}
+	return ""
+}
+
+// pyEqHashNone is type.__new__'s rule: a class that defines __eq__ and not
+// __hash__ gets __hash__ = None of its own, so its instances are unhashable
+// and C.__hash__ reads None. Twin of pyEqHashNone in
+// languages/python-interpreter.abnf and lib/python-rt.metajs.
+func (rt *jsrt) pyEqHashNone(cls *jsObject) {
+	if _, eq := cls.props["__eq__"]; eq {
+		if _, h := cls.props["__hash__"]; !h {
+			rt.pySetAttrRaw(cls, "__hash__", jsUndef)
+		}
+	}
+}
+
+// pyClsModQual is a class's module-qualified name, "__main__.A.N" for a class a
+// `class` statement made and the bare name for a builtin, which has no
+// __module__. Twin of pyClsQualName in languages/python-interpreter.abnf and
+// pyClsModQual in lib/python-rt.metajs.
+func (rt *jsrt) pyClsModQual(cls *jsObject) string {
+	if mod, ok := cls.props["__module__"].(string); ok {
+		return mod + "." + rt.pyClsQual(cls)
+	}
+	return rt.pyClsQual(cls)
 }
 
 // pyClsQual is a class's __qualname__: the emitter records __qual for a class
@@ -15984,6 +16038,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// The __set_name__ pass over a filled class body (pySetNames).
 		"js_pysetnames": func(a []uint64) uint64 {
 			if cls, ok := u(a[0]).(*jsObject); ok {
+				rt.pyEqHashNone(cls)
 				rt.pySetNames(cls)
 			}
 			return w(jsUndef)
@@ -16437,6 +16492,67 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// statement (js_pyexcchain) and a runtime-raised exception (pyExcInstance)
 		// take the top as their __context__ - unless the top is the value itself,
 		// a re-raise. Twins in lib/python-rt.metajs; the interpreter's is pyRaise.
+		// OSError(errno, strerror[, filename[, winerror[, filename2]]]), the three
+		// hooks the emitter installs on OSError, each over the closure's call
+		// arguments [self or class, args...] and its scope. Twin of the OSError
+		// hooks in languages/python-interpreter.abnf, which state the rule.
+		"js_pyoserrnew": func(a []uint64) uint64 {
+			argv, _ := u(a[0]).(*jsArray)
+			cls := argv.elems[0]
+			sc := rt.scopeOf(a[1])
+			if n := len(argv.elems) - 1; n >= 2 && n <= 5 && cls == rt.scopeGet(sc, "OSError") {
+				if sub := pyOSErrSub(argv.elems[1]); sub != "" {
+					cls = rt.scopeGet(sc, sub)
+				}
+			}
+			inst := newJSObject()
+			inst.set("__class", cls)
+			return w(inst)
+		},
+		"js_pyoserrinit": func(a []uint64) uint64 {
+			argv, _ := u(a[0]).(*jsArray)
+			self, rest := argv.elems[0], argv.elems[1:]
+			full := len(rest) >= 2 && len(rest) <= 5
+			named := full && len(rest) > 2 && !isUndefOrNull(rest[2])
+			at := func(i int) interface{} {
+				if full && i < len(rest) && (i < 2 || named) {
+					return rest[i]
+				}
+				return jsUndef
+			}
+			if named {
+				rt.pySetAttrRaw(self, "args", pyTup(&jsArray{elems: []interface{}{rest[0], rest[1]}}))
+			} else {
+				rt.pySetAttrRaw(self, "args", pyTup(&jsArray{elems: append([]interface{}{}, rest...)}))
+			}
+			rt.pySetAttrRaw(self, "errno", at(0))
+			rt.pySetAttrRaw(self, "strerror", at(1))
+			rt.pySetAttrRaw(self, "filename", at(2))
+			rt.pySetAttrRaw(self, "filename2", at(4))
+			return w(jsUndef)
+		},
+		"js_pyoserrstr": func(a []uint64) uint64 {
+			argv, _ := u(a[0]).(*jsArray)
+			o, _ := argv.elems[0].(*jsObject)
+			none := func(k string) bool { return isUndefOrNull(o.props[k]) }
+			head := "[Errno " + rt.pyString(o.props["errno"]) + "] " + rt.pyString(o.props["strerror"])
+			switch {
+			case !none("filename") && !none("filename2"):
+				return w(head + ": " + rt.pyRepr(o.props["filename"]) + " -> " + rt.pyRepr(o.props["filename2"]))
+			case !none("filename"):
+				return w(head + ": " + rt.pyRepr(o.props["filename"]))
+			case !none("errno") && !none("strerror"):
+				return w(head)
+			}
+			args, _ := o.props["args"].(*jsArray)
+			if args == nil || len(args.elems) == 0 {
+				return w("")
+			}
+			if len(args.elems) == 1 {
+				return w(rt.pyString(args.elems[0]))
+			}
+			return w(rt.pyRepr(args))
+		},
 		"js_pyexcdepth": func(a []uint64) uint64 {
 			return w(float64(len(rt.pyHandled)))
 		},

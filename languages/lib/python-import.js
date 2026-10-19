@@ -13,7 +13,8 @@ var pyMathNames = ["sqrt", "cbrt", "exp", "expm1", "log", "log1p", "log2", "log1
                    "asin", "acos", "atan", "sinh", "cosh", "tanh", "degrees", "radians",
                    "floor", "ceil", "trunc", "gcd", "lcm", "factorial",
                    "isnan", "isinf", "isfinite", "isclose",
-                   "isqrt", "comb", "perm", "prod", "fsum"]
+                   "isqrt", "comb", "perm", "prod", "fsum",
+                   "frexp", "ldexp", "modf", "ulp", "nextafter", "dist"]
 var pyReFnNames = ["compile", "search", "match", "fullmatch", "findall", "finditer",
                    "sub", "subn", "split", "escape", "purge"]
 var pySysFnNames = ["exit", "get_int_max_str_digits", "set_int_max_str_digits"]

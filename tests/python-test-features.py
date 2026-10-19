@@ -1010,7 +1010,7 @@ check("bound-method-qualname", bm2.__qualname__, "Bnd.m")
 check("bound-method-type", type(bm2).__name__, "method")
 check("bound-method-self", bm2.__self__ is bo, True)
 check("bound-method-func", bm2.__func__ is Bnd.m, True)
-check("bound-method-repr", str(bm2), "<bound method Bnd.m of <Bnd object>>")
+check("bound-method-repr", str(bm2), "<bound method Bnd.m of <__main__.Bnd object>>")
 
 # A missing attribute RAISES, catchably, with CPython's exact text - for a
 # builtin value and for a class object.
