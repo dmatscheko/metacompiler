@@ -160,7 +160,7 @@ java-chars.js (now linked into kotlin) has the right table (read in the code, pr
 
 # GO — Go  (oracle: `go run`)
 
-### T-601 go: typed constant folding; named constant string index; float32 constant overflow; canonical error text · P3 · GO · OPEN [V]
+### T-601 go: typed constant folding; named constant string index; float32 constant overflow; canonical error text · P3 · GO · IN PROGRESS (GO worker, round 7) [V]
 `const a uint8 = 200; const b = a + a` → both halves 144 (go "a + a (constant 400 of type uint8) overflows uint8"; typed
 constants are not folded); `float64(1) / 0` accepted (go: division by zero). `const s = "abc"; _ = s[3]` / `s[1:5]` panic at run
 time (go rejects at compile time; only literals are measured). `var f float32 = 1e40` → +Inf (go "cannot use 1e40 (untyped
