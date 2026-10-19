@@ -5169,6 +5169,15 @@ func s128() {
     check("128a", out == "TFt21n3!" && nils == 1)
 }
 
+// ===== SECTION 129: a function named `each` =====
+// `each` is a contextual keyword: `each(1, 2) { ... }`, with the parenthesis
+// adjacent, calls a function of that name. Value read off swiftc 6.1.2.
+func each(_ xs: Int..., then f: (Int) -> Int) -> [Int] { xs.map(f) }
+func s129() {
+    let e = each(1, 2) { $0 * 10 }
+    check("129a", e == [10, 20] && each(3, then: { $0 + 1 }) == [4])
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5298,6 +5307,7 @@ func main() {
     s126() // SECTION-CALL 126
     s127() // SECTION-CALL 127
     s128() // SECTION-CALL 128
+    s129() // SECTION-CALL 129
     print("full: \(checks) checks, \(fails) failures")
 }
 

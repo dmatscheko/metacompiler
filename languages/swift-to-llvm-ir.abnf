@@ -1271,8 +1271,9 @@ OwnStart    = :script(~~
 // `each x` inside a pack expansion - the element of the value pack x for the
 // iteration the enclosing `repeat` is on. `each` is a CONTEXTUAL keyword, so it is
 // also a legal variable name; EachStart is what tells the two apart, by demanding
-// that a name or a parenthesis (never `.`, `[`, `?`, an operator or a comma) follow
-// it. Ordered before CallMember so the modifier reading is tried first.
+// that a name or a SPACED parenthesis (never `.`, `[`, `?`, an operator or a comma)
+// follow it: `each(1, 2)` is a call of a function named each, as swiftc reads it.
+// Ordered before CallMember so the modifier reading is tried first.
 EachExpr    <~~ push(makeEach(pop())) ~~> = "each" KwEnd EachStart UnaryExpr ;
 EachStart   = :script(~~
     (function() {
@@ -1280,7 +1281,7 @@ EachStart   = :script(~~
         var ch = c.peek(i)
         var cap = 0
         while ((ch === 32 || ch === 9 || ch === 10 || ch === 13) && cap < 4096) { i++; cap++; ch = c.peek(i) }
-        var ok = (ch >= 97 && ch <= 122) || (ch >= 65 && ch <= 90) || ch === 95 || ch === 40
+        var ok = (ch >= 97 && ch <= 122) || (ch >= 65 && ch <= 90) || ch === 95 || (ch === 40 && i > 0)
         return ok ? undefined : abnf.newToken("\x01not-a-pack-element", 0)
     })()
 ~~) ;
