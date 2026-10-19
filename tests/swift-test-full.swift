@@ -5088,6 +5088,50 @@ func s124() {
     check("124a", C124().hi() == "c+g" && C124().tag == "GC" && C124.k() == "ck+gk")
 }
 
+// ===== SECTION 125: an initializer sets its own observed properties silently =====
+// A type's own initializer (designated or convenience) writes its own observed
+// properties without running willSet/didSet; a method it calls, and a subclass
+// initializer writing an inherited property, do run them. Every value read off
+// swiftc 6.1.2.
+var log125 = [String]()
+class A125 {
+    var x = 0 { didSet { log125.append("A\(x)") } }
+    init() { x = 1 }
+    convenience init(k: Int) { self.init(); x = k }
+    func bump() { x += 1 }
+}
+class B125: A125 {
+    var y = 0 { didSet { log125.append("B\(y)") } }
+    override init() { y = 7; super.init(); x = 2; self.y = 8 }
+}
+struct S125 {
+    var v: Int { didSet { log125.append("S\(v)") } }
+    init(_ n: Int) { self.v = n; v += 1; setV(9) }
+    mutating func setV(_ k: Int) { v = k }
+}
+func s125() {
+    let a = A125()
+    a.bump()
+    _ = A125(k: 5)
+    _ = B125()
+    var s = S125(3)
+    s.v = 4
+    check("125a", log125 == ["A2", "A2", "S9", "S4"])
+}
+
+// ===== SECTION 126: an unqualified write adopts self's own property type =====
+// `q126 += 1` inside a struct whose `q126` is an Int stays an Int even when
+// another type observes a property of that name and a local elsewhere declares
+// one a Double. Every value read off swiftc 6.1.2.
+class O126 { var q126 = 0 { didSet { } } }
+func d126() -> Double { var q126: Double = 1; q126 += 1; return q126 }
+struct P126 { var q126 = 0; mutating func bump() { q126 += 1 } }
+func s126() {
+    var p = P126()
+    p.bump()
+    check("126a", "\(p.q126)" == "1" && d126() == 2 && O126().q126 == 0)
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5213,6 +5257,8 @@ func main() {
     s122() // SECTION-CALL 122
     s123() // SECTION-CALL 123
     s124() // SECTION-CALL 124
+    s125() // SECTION-CALL 125
+    s126() // SECTION-CALL 126
     print("full: \(checks) checks, \(fails) failures")
 }
 

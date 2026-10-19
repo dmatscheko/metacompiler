@@ -494,7 +494,7 @@ MemAttrArgs <~~ push({mattrArgs: takeAll()}) ~~> = "(" [ CallArg { "," CallArg }
 ClassMod    = "class" KwEnd ;
 
 // func name(label param: Type, ...) -> Ret { ... }
-FunDecl     <~~ var fd = makeFun(takeAll(), up.start, up.pos); swNoteTop(fd.name); push(fd) ~~>
+FunDecl     <~~ var fd = makeFun(takeAll(), up.start, up.pos); swInitClaim(up.start, up.pos, false); swNoteTop(fd.name); push(fd) ~~>
             = KwFunc FuncName [ SkipAngle ] ParamList [ FnEffects ] [ "->" FunRetType <~~ push({rtxt: stripWs(up.in)}) ~~> ] [ GenWhere ] FnBody ;
 // AnnType, except that a type no adoption acts on is captured as TEXT too: the
 // member-chain typer (swChainAnns) reads a function's declared return type.
@@ -575,7 +575,7 @@ MemberSemi  <~~ push({}) ~~> = ";" ;
 // TypeAliasDecl clears lastDeclRec, so it contributes none.
 MemberType  <~~ push({nested: pop(), nrec: lastDeclRec}) ~~>
             = [ Modifiers ] ( StructDecl | ClassDecl | ActorDecl | EnumDecl | TypeAliasDecl ) ;
-InitDecl    <~~ swDotClaim(up.start, up.pos, ""); push({method: makeInit(takeAll())}) ~~>
+InitDecl    <~~ swDotClaim(up.start, up.pos, ""); swInitClaim(up.start, up.pos, true); push({method: makeInit(takeAll())}) ~~>
             = KwInit [ "?" | "!" ] [ SkipAngle ] ParamList [ FnEffects ] [ GenWhere ] FnBody ;
 // deinit is accepted and ignored (the builder ignores its {} marker) - this runtime
 // is garbage collected, so there is no deterministic point at which to run it.
@@ -1138,7 +1138,7 @@ Expression  = PackRepeat | Assignment | Ternary ;
 // as the value pack. `repeat` is a reserved word, and the repeat/while STATEMENT is
 // matched before ExprStmt, so no guard is needed to tell the two apart.
 PackRepeat  <~~ push(makePackRepeat(pop())) ~~> = KwRepeat Expression ;
-Assignment  <~~ push(makeAssign(takeAll())) ~~>
+Assignment  <~~ push(makeAssign(takeAll(), up.start)) ~~>
             = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~>
               Expression <~~ push({itext: up.in, iat: up.start + ":" + up.pos}) ~~> ;
 
@@ -7300,7 +7300,39 @@ KwContinue  = "continue" KwEnd ;
         b.NewCondBr(truthy(b, callExt(b, "js_seq", [v, hNull])), nilB, c1B)
         c1B.NewCondBr(truthy(c1B, callExt(c1B, "js_seq", [v, hUndef])), nilB, goB)
     }
-    function makeAssign(items) {
+    // ----- Writes inside an initializer -----
+    // A type's own initializer sets its own OBSERVED properties without running
+    // the observers: `init() { x = 1 }` beside `var x = 0 { didSet {...} }` prints
+    // nothing, while a subclass initializer writing an inherited one does. An
+    // assignment that may be such a write (`x = v`, `self.x = v`) notes its
+    // position; the InitDecl around it claims it (`on`), a FunDecl around it drops
+    // it, and the write decides against the initializer's type when it runs. Twin
+    // in swift-interpreter.abnf.
+    var swInitPend = []
+    function swInitNote(pos) {
+        var r = {on: false}
+        swInitPend.push({pos: pos, r: r})
+        return r
+    }
+    function swInitClaim(from, to, mark) {
+        if (swInitPend.length == 0) { return }
+        var keep = []
+        for (var i = 0; i < swInitPend.length; i++) {
+            var e = swInitPend[i]
+            if (e.pos >= from && e.pos <= to) { if (mark) { e.r.on = true } }
+            else { keep.push(e) }
+        }
+        swInitPend = keep
+    }
+    // Whether type tn itself (not a superclass) declares `name` as an observed
+    // stored property.
+    function swOwnObserved(tn, name) {
+        if (tn == null || !hasOwn(typeFieldAnn, "$" + tn)) { return false }
+        var cs = typeFieldAnn["$" + tn].cs
+        for (var i = 0; i < cs.length; i++) { if (cs[i].name == name && cs[i].observed) { return true } }
+        return false
+    }
+    function makeAssign(items, pos) {
         var ref = items[0]
         var optEnd = ref.optEnd === true
         if (optEnd && ref.path.length == 0) { return swOptEndAssign(items) }
@@ -7351,7 +7383,12 @@ KwContinue  = "continue" KwEnd ;
         var optChain = false
         for (var oc = 0; oc < ref.path.length; oc++) { if (ref.path[oc].opt == true) { optChain = true } }
         if (optEnd) { optChain = true }
+        var selfField = ref.name == "self" && ref.path.length == 1 && ref.path[0].key != undefined
+        var inInit = (ref.path.length == 0 && !hasLocal) || selfField ? (pos != undefined ? swInitNote(pos) : null) : null
         return function(b) {
+            // A write to the initializer's own observed property skips its observers.
+            var initKey = ref.path.length == 0 ? ref.name : (selfField ? ref.path[0].key : "")
+            var obsInit = inInit != null && inInit.on && curType() != null && swOwnObserved(curType().name, initKey)
             // A write to an existential slot keeps what it is given; see swKeepMode.
             // An implicit `self.x` is decided by the enclosing type, statically.
             var mode = swKeepMode(ref, hasLocal, localAnn)
@@ -7426,17 +7463,23 @@ KwContinue  = "continue" KwEnd ;
                     // An OBSERVED stored property does not live under its own name -
                     // observedAccessors keeps it under `__v_<name>` behind a
                     // generated setter - so `p = 3` inside a method adopts from
-                    // that backing store. The BACKING STORE is read, not the getter:
-                    // a real computed `get` may have side effects, and adoption must
-                    // not run one to decide a type. The interpreter's swObsSlot
-                    // answers exactly the same.
+                    // that backing store, after self's own slot of that name (the
+                    // setter name may belong to another type). The BACKING STORE is
+                    // read, not the getter: a real computed `get` may have side
+                    // effects, and adoption must not run one to decide a type. The
+                    // type is self's declared one before the name's. The
+                    // interpreter's swSelfSlot answers exactly the same.
                     var selfV2 = selfB2.NewCall(rtKGet(), [curScopeV, emitStr(selfB2, "self")])
                     var vSelf = v
                     if (!keepTy) {
-                        var oldObs = selfB2.NewCall(rtSafeGet(), [selfV2, emitStr(selfB2, "__v_" + ref.name)])
-                        vSelf = callExt(selfB2, "js_swadoptlike", [oldObs, v, emitStr(selfB2, declTy)])
+                        var ownOld = selfB2.NewCall(rtSafeGet(), [selfV2, nameV])
+                        var obsOld = selfB2.NewCall(rtSafeGet(), [selfV2, emitStr(selfB2, "__v_" + ref.name)])
+                        var oldObs = selfB2.NewSelect(truthy(selfB2, callExt(selfB2, "js_seq", [ownOld, hUndef])), obsOld, ownOld)
+                        var sfTy = swSelfFieldTy(ref.name)
+                        vSelf = callExt(selfB2, "js_swadoptlike", [oldObs, v, emitStr(selfB2, sfTy != "" ? sfTy : declTy)])
                     }
-                    selfB2.NewCall(rtSetProp(), [selfV2, nameV, vSelf])
+                    if (obsInit) { callExt(selfB2, "js_set", [selfV2, emitStr(selfB2, "__v_" + ref.name), vSelf]) }
+                    else { selfB2.NewCall(rtSetProp(), [selfV2, nameV, vSelf]) }
                     selfB2.NewBr(joinB2)
                     return {b: joinB2, v: v}
                 }
@@ -7482,7 +7525,9 @@ KwContinue  = "continue" KwEnd ;
                             v = swEmitPathAdopt(b, mode, p.own, exr.key, oldf, v, ftyV)
                         }
                     }
-                    if (isSetterName(p.keyName)) {
+                    if (obsInit) {
+                        callExt(b, "js_set", [p.obj, emitStr(b, "__v_" + p.keyName), v])
+                    } else if (isSetterName(p.keyName)) {
                         b.NewCall(rtSetProp(), [p.obj, p.key, v])
                     } else {
                         callExt(b, "js_set", [p.obj, p.key, v])
