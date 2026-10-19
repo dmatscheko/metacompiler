@@ -4251,6 +4251,8 @@ NotFuncHead = :script(~~
             a3 = (arguments.length > 0) ? arguments[0] : undefined
             return jpAgReq(st, 2, a3)
         }
+        // An async generator is an async iterable whose [Symbol.asyncIterator]() is itself.
+        ag["__#@asyncIterator"] = function() { return ag }
         return ag
     }
     function jpAgReq(st, kind, arg) {
@@ -4527,19 +4529,12 @@ NotFuncHead = :script(~~
     }
     // The values an iterable yields, for the statics that take one (Object.fromEntries,
     // Object.groupBy): an array as it is, a string's code points, anything with a
-    // [Symbol.iterator] or a callable `next` driven to the end. Anything else is node's
-    // TypeError. Twins: jsvIterList in abnf/jsrtjsprint.go, jvIterList in
+    // [Symbol.iterator] driven to the end. Anything else is node's TypeError. Twins: jsvIterList in abnf/jsrtjsprint.go, jvIterList in
     // languages/lib/js-rt.metajs.
     function jsIterList(v) {
         if (v === undefined || v === null) { biRaise("TypeError: undefined is not iterable") }
         if (typeof v == "string") { return jsCodePoints(v) }
-        var r = anytype // The drained values, or v itself when it is no iterator.
-        r = iterArr(v, -1)
-        if (Array.isArray(r)) { return r }
-        var t = jsTypeofVal(v)
-        var what = (t == "number" || t == "boolean") ? t + " " + jsStr(v) : t
-        biRaise("TypeError: " + what + " is not iterable (cannot read property Symbol(Symbol.iterator))")
-        return []
+        return iterArr(v, -1)
     }
     // V8's rendering of a non-callable callback in "<x> is not a function": a
     // primitive's string, "#<Object>" for an object. Twins: jsvNotFnText in
@@ -5839,7 +5834,7 @@ NotFuncHead = :script(~~
         return undefined
     }
     function protoWrite(d, k, v) {
-        if (typeof v != "function" || isInternalKey(k)) { return }
+        if (typeof v != "function" || (isInternalKey(k) && !jsIsSymKey(k))) { return }
         d[k] = function() {
             var rest = []
             for (var i = 1; i < arguments.length; i++) { rest.push(arguments[i]) }
@@ -6358,7 +6353,6 @@ NotFuncHead = :script(~~
             if (typeof it == "function") { out.push(it()); continue }
             var v = anytype // The spread operand: an array, a string or an iterator.
             v = it.t()
-            if (v == undefined || v == null) fail("spread of " + v)
             v = iterArr(v, -1)
             if (typeof v == "string") {
                 for (var j = 0; j < v.length; j++) { out.push(v.charAt(j)) }
@@ -8063,18 +8057,41 @@ NotFuncHead = :script(~~
     //
     // What a for-of, a spread, a destructuring or a yield* iterates: what the value's
     // [Symbol.iterator] method answers when it has one - a Set or a Map of
-    // lib/js-builtins.js, or a program's own iterable - and the value itself otherwise.
+    // lib/js-builtins.js, or a program's own iterable - and otherwise the value itself
+    // when it is an array or a string, GetIterator's TypeError when it is anything else.
     // Twin of emitIterOf in js-to-llvm-ir.abnf.
     function jsIterOf(v) {
         // An array is read by index (its [Symbol.iterator] is the same walk); a string
         // is iterated by code point.
         if (typeof v == "string") { return jsSeqIter(v, 1) }
         if (argsWant && jsIsArgs(v)) { return jsArgsView(v) }
-        if (v == undefined || v == null || typeof v != "object" || Array.isArray(v)) { return v }
+        if (Array.isArray(v)) { return v }
         var f = anytype // The [Symbol.iterator] member, of any type at all.
-        f = getMember(v, "__#@iterator")
-        if (typeof f != "function") { return v }
+        f = undefined
+        if (v != undefined && v != null && (typeof v == "object" || typeof v == "function")) { f = getMember(v, "__#@iterator") }
+        if (typeof f != "function") { jsNotIterable(v) }
         return callWithThis(f, v, [])
+    }
+    // GetIterator's TypeError for a value with no callable [Symbol.iterator], in the
+    // wording node gives where it cannot name the source expression.
+    // Twins: jsvNotIterable in abnf/jsrtjsprint.go, jvNotIterable in lib/js-rt.metajs.
+    function jsNotIterable(v) {
+        var t = jsTypeofVal(v)
+        var what = t
+        if (v === null) { what = "object null" }
+        else if (t == "number" || t == "boolean") { what = t + " " + jsStr(v) }
+        biRaise("TypeError: " + what + " is not iterable (cannot read property Symbol(Symbol.iterator))")
+    }
+    // GetIterator's async kind (a for await, a yield* in an async generator): a
+    // [Symbol.asyncIterator] method is asked first, then the sync protocol.
+    // Twin of emitIterOf's isAsync in js-to-llvm-ir.abnf.
+    function jsIterOfAsync(v) {
+        if (v != undefined && v != null && typeof v == "object") {
+            var af = anytype // The [Symbol.asyncIterator] member, of any type at all.
+            af = getMember(v, "__#@asyncIterator")
+            if (typeof af == "function") { return callWithThis(af, v, []) }
+        }
+        return jsIterOf(v)
     }
     function iterArr(src, n) {
         var v = anytype // A string becomes its iterator, so the type changes.
@@ -8168,7 +8185,7 @@ NotFuncHead = :script(~~
         }
         return function() {
             var it = anytype // The iterable is an array, a string or a generator.
-            it = jsIterOf(iterT())
+            it = isAwait ? jsIterOfAsync(iterT()) : jsIterOf(iterT())
             scopes.push({}) // The loop header/variable get their own scope.
             var res = undefined
             // An ITERATOR is not indexable, so it is driven through next() until done,
@@ -8461,52 +8478,48 @@ NotFuncHead = :script(~~
         var run = genRuns[genRuns.length - 1]
         if (run == undefined) fail("yield outside a generator")
         if (star) {
-            var last = anytype // The delegate's return value, once it reports done.
-            last = undefined
-            if (v != undefined && v != null) {
-                // A delegate that is an ITERATOR is driven through next() - the same
-                // structural test the for-of loops use - and one that is an array or a
-                // string by index. Driving it lazily is what makes 'yield* endless()'
-                // work: the doYield below throws out of the replay at the yield being
-                // produced, so the delegate is only ever stepped as far as it is needed.
-                v = jsIterOf(v)
-                var dnx = anytype // The delegate's `next` member, of any type.
-                dnx = (typeof v == "object") ? getMember(v, "next") : undefined
-                if (typeof dnx == "function") {
-                    var dst = anytype // One {value, done} record.
-                    dst = jpStepDelegate(run, dnx, v, [undefined])
-                    while (!dst.done) {
-                        // The RESUME DISPOSITION. A throw-in drives the delegate's
-                        // throw(), so a delegate that would catch it does; anything else
-                        // drives its next() WITH the sent value, which is how g.next(x)
-                        // reaches a delegated generator at all.
-                        var dsent = anytype
-                        dsent = jpYieldDeleg(run, dst.value, v)
-                        if (jpIsObjV(dsent) && dsent["__dret"] !== undefined) {
-                            dst = dsent["__dret"]
-                        } else if (jpIsThrowIn(dsent)) {
-                            var dtf = anytype
-                            dtf = getMember(v, "throw")
-                            if (typeof dtf != "function") { jpNoThrowMethod(v) }
-                            dst = jpStepDelegate(run, dtf, v, [dsent["v"]])
-                        } else {
-                            dst = jpStepDelegate(run, dnx, v, [dsent])
-                        }
+            // A delegate that is an ITERATOR is driven through next() - the same
+            // structural test the for-of loops use - and one that is an array or a
+            // string by index. Driving it lazily is what makes 'yield* endless()'
+            // work: the doYield below throws out of the replay at the yield being
+            // produced, so the delegate is only ever stepped as far as it is needed.
+            v = run.ag ? jsIterOfAsync(v) : jsIterOf(v)
+            var dnx = anytype // The delegate's `next` member, of any type.
+            dnx = (typeof v == "object") ? getMember(v, "next") : undefined
+            if (typeof dnx == "function") {
+                var dst = anytype // One {value, done} record.
+                dst = jpStepDelegate(run, dnx, v, [undefined])
+                while (!dst.done) {
+                    // The RESUME DISPOSITION. A throw-in drives the delegate's
+                    // throw(), so a delegate that would catch it does; anything else
+                    // drives its next() WITH the sent value, which is how g.next(x)
+                    // reaches a delegated generator at all.
+                    var dsent = anytype
+                    dsent = jpYieldDeleg(run, dst.value, v)
+                    if (jpIsObjV(dsent) && dsent["__dret"] !== undefined) {
+                        dst = dsent["__dret"]
+                    } else if (jpIsThrowIn(dsent)) {
+                        var dtf = anytype
+                        dtf = getMember(v, "throw")
+                        if (typeof dtf != "function") { jpNoThrowMethod(v) }
+                        dst = jpStepDelegate(run, dtf, v, [dsent["v"]])
+                    } else {
+                        dst = jpStepDelegate(run, dnx, v, [dsent])
                     }
-                    // The value of 'yield* it' is the delegate's RETURN value - the
-                    // `value` of the record whose `done` ended the loop. An array or a
-                    // string has none, so that path stays undefined.
-                    return dst.value
                 }
-                // An array or a string delegate: it has no throw() to forward to, so a
-                // throw-in closes it and raises the TypeError, exactly as above.
-                for (var i = 0; i < v.length; i++) {
-                    var isent = anytype
-                    isent = jpYieldDeleg(run, v[i], v)
-                    if (jpIsThrowIn(isent)) { jpNoThrowMethod(v) }
-                }
+                // The value of 'yield* it' is the delegate's RETURN value - the
+                // `value` of the record whose `done` ended the loop. An array or a
+                // string has none, so that path stays undefined.
+                return dst.value
             }
-            return last
+            // An array or a string delegate: it has no throw() to forward to, so a
+            // throw-in closes it and raises the TypeError, exactly as above.
+            for (var i = 0; i < v.length; i++) {
+                var isent = anytype
+                isent = jpYieldDeleg(run, v[i], v)
+                if (jpIsThrowIn(isent)) { jpNoThrowMethod(v) }
+            }
+            return undefined
         }
         var sent = anytype
         // The sent value may be a THROW-IN record that g.throw(e) - or, inside an
@@ -8855,7 +8868,7 @@ NotFuncHead = :script(~~
             superSet(pat.skey(), v)
             return
         }
-        if (v == undefined || v == null) fail("cannot destructure " + v)
+        if ((v == undefined || v == null) && pat.dtype != "arr") fail("cannot destructure " + v)
         if (pat.dtype == "arr") {
             v = iterArr(v, pat.rest != null ? -1 : pat.elems.length)
             for (var i = 0; i < pat.elems.length; i++) { bindPatternMode(pat.elems[i], v[i], decl) }

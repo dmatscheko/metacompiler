@@ -582,13 +582,12 @@ function s19() {
     const taken: number[] = [];
     for (const ev of endless()) { if (taken.length === 3) { break; } taken.push(ev); }
     check("asy7", taken.join(",") === "0,1,2" && reached === 3);
-    // A HAND-WRITTEN iterator: an object whose next() answers {value, done}. There are
-    // no symbols in this subset, so a callable `next` is the whole protocol - node
-    // needs a [Symbol.iterator] beside it and throws "cursor is not iterable" without
-    // one, and this line is the deliberate divergence that buys hand-written iterators
-    // a spelling here at all.
+    // A HAND-WRITTEN iterator: an object whose next() answers {value, done}, iterable
+    // through the [Symbol.iterator] beside it (without one, a for-of over it is a
+    // TypeError).
     const cursor = {
         i: 0,
+        [Symbol.iterator]: function (): any { return this; },
         next: function (): any {
             this.i = this.i + 1;
             if (this.i > 3) { return {value: undefined, done: true}; }
@@ -1273,6 +1272,7 @@ function s34(): void {
     var closed = 0
     var iter = {
         n: 0,
+        [Symbol.iterator]: function () { return this },
         next: function () { this.n = this.n + 1; return { value: this.n, done: this.n > 5 } },
         return: function () { closed = closed + 1; return { value: undefined, done: true } }
     }
@@ -1280,7 +1280,8 @@ function s34(): void {
     check("itc14", closed === 1)
     // An iterator WITHOUT a return member is left alone rather than aborting,
     // and an array (the index arm) never looks for one.
-    var bare = { n: 0, next: function () { this.n = this.n + 1; return { value: this.n, done: this.n > 3 } } }
+    var bare = { n: 0, [Symbol.iterator]: function () { return this },
+        next: function () { this.n = this.n + 1; return { value: this.n, done: this.n > 3 } } }
     var bn = 0
     for (var s of bare) { bn = s; break }
     check("itc15", bn === 1)
@@ -3120,8 +3121,7 @@ class S53It {
     next(): {done: boolean, value: any} { this.i++; return this.i > this.n ? {done: true, value: undefined} : {done: false, value: this.i}; }
     return(): {done: boolean} { s53log.push("ret" + this.i); return {done: true}; }
 }
-// node iterates only through Symbol.iterator, which this subset does not have; these
-// engines drive any value with a callable next().
+// Iterable through a [Symbol.iterator] on the prototype.
 if (typeof Symbol !== "undefined") { (S53It.prototype as any)[Symbol.iterator] = function (this: any) { return this; }; }
 function s53() {
     const src: number[] = [3, 1, 3, 2];
@@ -4136,6 +4136,30 @@ function s85(): void {
         JSON.stringify(Object.entries({"__#z": 1})) === '[["__#z",1]]')
 }
 
+// ===== SECTION 86: iterating a value that is not iterable =====
+// GetIterator throws a TypeError for a value with no callable [Symbol.iterator]: a
+// spread, a for-of, an array pattern and a yield* over a plain object, a number, a
+// boolean, null, or an object whose only protocol is a `next` method. A symbol-keyed
+// method written onto a prototype is found on the instances. Values read off node 24.
+function s86(): void {
+    const v: any[] = [{}, {a: 1}, 5, {i: 0, next() { return {value: 1, done: true} }}, true, null]
+    function te(f: () => any): string { try { f(); return "-" } catch (e) { return e instanceof TypeError ? "T" : "E" } }
+    function* yd(x: any): Generator<any, void, any> { yield* x }
+    const r: string[] = []
+    for (let i = 0; i < v.length; i++) {
+        const x: any = v[i]
+        r.push(te(() => [...x]) + te(() => { for (const e of x) {} }) + te(() => { const [p] = x }) +
+            te(() => [...yd(x)]) + te(() => Math.max(...x)))
+    }
+    check("it86a", r.join() === "TTTTT,TTTTT,TTTTT,TTTTT,TTTTT,TTTTT")
+    class K86 {}
+    (K86.prototype as any)[Symbol.iterator] = function () { return [7, 8][Symbol.iterator]() }
+    function F86(this: any): void {}
+    F86.prototype[Symbol.iterator] = function* () { yield 9 }
+    check("it86b", [...[1, 2], ..."ab"].join() === "1,2,a,b" && te(() => Object.fromEntries(v[3])) === "T" &&
+        te(() => new Set(v[0])) === "T" && [...(new K86() as any), ...(new (F86 as any)())].join() === "7,8,9")
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -4224,6 +4248,7 @@ function main(): number {
     s83(); // SECTION-CALL 83
     s84(); // SECTION-CALL 84
     s85(); // SECTION-CALL 85
+    s86(); // SECTION-CALL 86
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

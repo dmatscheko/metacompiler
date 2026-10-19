@@ -190,14 +190,15 @@ func (rt *jsrt) jsvProtoTag(v interface{}) string {
 
 // jsvIterList is the values an iterable yields, for the statics that take one
 // (Object.fromEntries, Object.groupBy): an array as it is, a string's code points, a
-// generator drained, anything with a [Symbol.iterator] or a `next` method driven to
-// the end. Anything else is node's TypeError. Twins: jsIterList in both
+// generator drained, the iterator a [Symbol.iterator] method answers driven to the
+// end. Anything else is node's TypeError. Twins: jsIterList in both
 // *-interpreter.abnf, jvIterList in languages/lib/js-rt.metajs.
 func (rt *jsrt) jsvIterList(v interface{}) []interface{} {
 	it := v
+	iterated := false
 	if o, isObj := v.(*jsObject); isObj {
 		if r, called := rt.jsvCallMethod(o, "__#@iterator"); called {
-			it = r
+			it, iterated = r, true
 		}
 	}
 	switch x := it.(type) {
@@ -209,7 +210,7 @@ func (rt *jsrt) jsvIterList(v interface{}) []interface{} {
 		return x.drain(rt).elems
 	case *jsObject:
 		var out []interface{}
-		for {
+		for iterated {
 			step, called := rt.jsvCallMethod(x, "next")
 			if !called {
 				break
@@ -223,6 +224,15 @@ func (rt *jsrt) jsvIterList(v interface{}) []interface{} {
 	if isUndefOrNull(v) {
 		rt.bigRaise("TypeError: undefined is not iterable")
 	}
+	rt.jsvNotIterable(v)
+	return nil
+}
+
+// jsvNotIterable raises GetIterator's TypeError for a value with no callable
+// [Symbol.iterator], in the wording node gives where it cannot name the source
+// expression. Twins: jsNotIterable in both *-interpreter.abnf, jvNotIterable in
+// languages/lib/js-rt.metajs.
+func (rt *jsrt) jsvNotIterable(v interface{}) {
 	what := "object"
 	switch t := v.(type) {
 	case float64:
@@ -230,7 +240,11 @@ func (rt *jsrt) jsvIterList(v interface{}) []interface{} {
 	case bool:
 		what = "boolean " + rt.jsvString(t)
 	default:
-		if _, ok := bigOf(v); ok {
+		if _, isNull := v.(jsNullT); isNull {
+			what = "object null"
+		} else if _, isUndef := v.(jsUndefT); isUndef {
+			what = "undefined"
+		} else if _, ok := bigOf(v); ok {
 			what = "bigint"
 		} else if jsvIsSym(v) {
 			what = "symbol"
@@ -239,7 +253,6 @@ func (rt *jsrt) jsvIterList(v interface{}) []interface{} {
 		}
 	}
 	rt.bigRaise("TypeError: %s is not iterable (cannot read property Symbol(Symbol.iterator))", what)
-	return nil
 }
 
 // jsvPropKey is ToPropertyKey as a key of the value model: a symbol's __symkey, any
@@ -3065,7 +3078,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		return nil
 	}
 	protoWrite := func(d *jsObject, name string, v interface{}) {
-		if !isCallable(v) || jsvInternalKey(name) {
+		if !isCallable(v) || (jsvInternalKey(name) && !strings.HasPrefix(name, "__#@")) {
 			return
 		}
 		d.set(name, jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
@@ -3321,6 +3334,21 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	//
 	// The twins are js_jsiterclose in languages/lib/js-rt.metajs and closeIterator
 	// in the two *-interpreter.abnf start scripts.
+	// js_jsiterchk is the iteration sites' answer for a value with no callable
+	// "__#@iterator" member: an array or a string passes through to be read by
+	// index, and a generator, whose [Symbol.iterator] is answered only for a symbol
+	// key (it returns the generator), to be driven by next(). Anything else is
+	// GetIterator's TypeError. Twin of js_jsiterchk in languages/lib/js-rt.metajs;
+	// the interpreters' jsIterOf raises in place.
+	m["js_jsiterchk"] = func(a []uint64) uint64 {
+		switch u(a[0]).(type) {
+		case *jsArray, string, *jsGenerator:
+			return a[0]
+		}
+		rt.jsvNotIterable(u(a[0]))
+		return a[0]
+	}
+
 	m["js_jsiterclose"] = func(a []uint64) uint64 {
 		it := u(a[0])
 		if !isUndefOrNull(it) {
@@ -4630,6 +4658,10 @@ func (rt *jsrt) agObject(g *jsGenerator) *jsObject {
 	mk("next", 0)
 	mk("return", 1)
 	mk("throw", 2)
+	// An async generator is an async iterable whose [Symbol.asyncIterator]() is itself.
+	ag.set("__#@asyncIterator", jsHostFunc("[Symbol.asyncIterator]", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return ag
+	}))
 	ag.keys = nil
 	return ag
 }

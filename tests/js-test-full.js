@@ -6,12 +6,10 @@
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43, engine agreement, generators, Error, Math
-//   tests/js-test-full.3.js   sections 44-56 and 58-64, the call/class/private-name
-//                             model, the Unicode identifier tables, iterators, derived
-//                             constructors, JSON, guards, Set and Map, iterator closing,
-//                             hasOwnProperty, delete, Object.prototype, extends Object,
-//                             g.return() at a yield*, generators over outside iterators
-//   tests/js-test-full.4.mjs  section 57, export in a Module
+//   tests/js-test-full.3.js   sections 44-56, 58-71 and 73-92, the call/class/
+//                             private-name model, iterators, the arguments object and
+//                             the rest of the builtin surface (see its header)
+//   tests/js-test-full.4.mjs  sections 57 and 72, the Module goal
 //
 // The section NUMBERS are global (grammar comments and docs cite them), the four
 // files together run the assertions in order, and ./test.sh --full reports them as the
@@ -395,14 +393,12 @@ function s15() {
     var taken = []
     for (var ev of endless()) { if (taken.length === 3) { break } taken[taken.length] = ev }
     check("gen7", taken.length === 3 && taken[2] === 2 && reached === 3)
-    // A HAND-WRITTEN iterator: an object whose next() answers {value, done}. There are
-    // no symbols in this subset, so a callable `next` is the whole protocol - node
-    // needs a [Symbol.iterator] beside it and throws "cursor is not iterable" without
-    // one, and this line is the deliberate divergence that buys hand-written iterators
-    // a spelling here at all. Every OTHER check in this section passes under node
-    // verbatim, this one with a one-line [Symbol.iterator] shim added.
+    // A HAND-WRITTEN iterator: an object whose next() answers {value, done}, iterable
+    // through the [Symbol.iterator] beside it (without one, a for-of over it is a
+    // TypeError).
     var cursor = {
         i: 0,
+        [Symbol.iterator]: function () { return this },
         next: function () {
             this.i = this.i + 1
             if (this.i > 3) { return {value: undefined, done: true} }

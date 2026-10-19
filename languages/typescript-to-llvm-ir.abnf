@@ -2628,18 +2628,33 @@ NotFuncHead = :script(~~
         return exitB
     }
     // See the twin of this comment in js-to-llvm-ir.abnf.
-    function emitIterOf(b, v) {
-        var fV = callExt(b, "js_jsvget", [v, emitStr(b, "__#@iterator")])
+    function emitIterOf(b, v, isAsync) {
+        var fV = anytype // The iterator method: a handle, or a phi of two.
+        if (isAsync) {
+            var aV = callExt(b, "js_jsvget", [v, emitStr(b, "__#@asyncIterator")])
+            var syncB = curF.NewBlock("")
+            var haveB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [aV]), emitStr(b, "function")])), haveB, syncB)
+            var sV = callExt(syncB, "js_jsvget", [v, emitStr(syncB, "__#@iterator")])
+            syncB.NewBr(haveB)
+            fV = haveB.NewPhi([llvm.ir.NewIncoming(aV, b), llvm.ir.NewIncoming(sV, syncB)])
+            b = haveB
+        } else {
+            fV = callExt(b, "js_jsvget", [v, emitStr(b, "__#@iterator")])
+        }
         var callB = curF.NewBlock("")
+        var chkB = curF.NewBlock("")
         var joinB = curF.NewBlock("")
-        b.NewCondBr(truthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [fV]), emitStr(b, "function")])), callB, joinB)
+        b.NewCondBr(truthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [fV]), emitStr(b, "function")])), callB, chkB)
         var rV = callExt(jsThisSet(callB, v), "js_call", [fV, v, callExt(callB, "js_arr_new", [])])
         callB.NewBr(joinB)
-        return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(v, b), llvm.ir.NewIncoming(rV, callB)])}
+        var cV = callExt(chkB, "js_jsiterchk", [v])
+        chkB.NewBr(joinB)
+        return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(cV, chkB), llvm.ir.NewIncoming(rV, callB)])}
     }
     // See the twin of this comment in js-to-llvm-ir.abnf.
     function emitIterArr(b, srcV, n) {
-        var io = emitIterOf(b, srcV)
+        var io = emitIterOf(b, srcV, false)
         b = io.b
         srcV = io.v
         var nxV = callExt(b, "js_jsvget", [srcV, emitStr(b, "next")])
@@ -3203,7 +3218,7 @@ NotFuncHead = :script(~~
             var saved = curScopeV
             curScopeV = callExt(b, "js_scope_new", [saved])
             // See the twin of this comment in js-to-llvm-ir.abnf.
-            var yio = emitIterOf(b, r.v)
+            var yio = emitIterOf(b, r.v, inAsyncGen)
             b = yio.b
             var seqV = yio.v
             var ynxV = callExt(b, "js_jsvget", [seqV, emitStr(b, "next")])
@@ -4152,7 +4167,7 @@ NotFuncHead = :script(~~
             isItV = hFalse
             nxV = hUndef
             if (lazy) {
-                var sio = emitIterOf(b, seqV)
+                var sio = emitIterOf(b, seqV, isAwait)
                 b = sio.b
                 seqV = sio.v
                 nxV = callExt(b, "js_jsvget", [seqV, emitStr(b, "next")])

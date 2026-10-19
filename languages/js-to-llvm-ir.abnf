@@ -3768,20 +3768,38 @@ NotFuncHead = :script(~~
     }
     // What a for-of, a spread, a destructuring or a yield* iterates: what the value's
     // [Symbol.iterator] method answers when it has one - a Set or a Map of
-    // lib/js-builtins.js, or a program's own iterable - and the value itself
-    // otherwise. Twin of jsIterOf in js-interpreter.abnf.
+    // lib/js-builtins.js, or a program's own iterable - and otherwise the value
+    // itself when it is an array or a string (js_jsiterchk), GetIterator's TypeError
+    // when it is anything else. isAsync is GetIterator's async kind (a for await, a
+    // yield* in an async generator): a [Symbol.asyncIterator] method is asked first.
+    // Twin of jsIterOf in js-interpreter.abnf.
     //
     // This probe and the iteration sites' `next`, `return` and `throw` probes read with
     // js_jsvget, the member VALUE read: a class instance's methods live on its __class descriptor, and
     // under llvm.Run only js_jsvget finds them there.
-    function emitIterOf(b, v) {
-        var fV = callExt(b, "js_jsvget", [v, emitStr(b, "__#@iterator")])
+    function emitIterOf(b, v, isAsync) {
+        var fV = anytype // The iterator method: a handle, or a phi of two.
+        if (isAsync) {
+            var aV = callExt(b, "js_jsvget", [v, emitStr(b, "__#@asyncIterator")])
+            var syncB = curF.NewBlock("")
+            var haveB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [aV]), emitStr(b, "function")])), haveB, syncB)
+            var sV = callExt(syncB, "js_jsvget", [v, emitStr(syncB, "__#@iterator")])
+            syncB.NewBr(haveB)
+            fV = haveB.NewPhi([llvm.ir.NewIncoming(aV, b), llvm.ir.NewIncoming(sV, syncB)])
+            b = haveB
+        } else {
+            fV = callExt(b, "js_jsvget", [v, emitStr(b, "__#@iterator")])
+        }
         var callB = curF.NewBlock("")
+        var chkB = curF.NewBlock("")
         var joinB = curF.NewBlock("")
-        b.NewCondBr(truthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [fV]), emitStr(b, "function")])), callB, joinB)
+        b.NewCondBr(truthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [fV]), emitStr(b, "function")])), callB, chkB)
         var rV = callExt(jsThisSet(callB, v), "js_call", [fV, v, callExt(callB, "js_arr_new", [])])
         callB.NewBr(joinB)
-        return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(v, b), llvm.ir.NewIncoming(rV, callB)])}
+        var cV = callExt(chkB, "js_jsiterchk", [v])
+        chkB.NewBr(joinB)
+        return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(cV, chkB), llvm.ir.NewIncoming(rV, callB)])}
     }
     // What a spread or an array pattern reads from an ITERATOR (a callable `next`, the
     // structural test makeForOf makes): its values as a fresh array - all of them for
@@ -3789,7 +3807,7 @@ NotFuncHead = :script(~~
     // array destructuring does. Any other value passes through and is read by index.
     // Answers {b, v}. Twin of iterArr in js-interpreter.abnf.
     function emitIterArr(b, srcV, n) {
-        var io = emitIterOf(b, srcV)
+        var io = emitIterOf(b, srcV, false)
         b = io.b
         srcV = io.v
         var nxV = callExt(b, "js_jsvget", [srcV, emitStr(b, "next")])
@@ -4658,7 +4676,7 @@ NotFuncHead = :script(~~
             // ITERATOR one next() at a time, so 'yield* endless()' is a legal generator
             // rather than a hang inside js_iterable's drain, and anything else - an array,
             // a string - by index.
-            var yio = emitIterOf(b, r.v)
+            var yio = emitIterOf(b, r.v, inAsyncGen)
             b = yio.b
             var seqV = yio.v
             var ynxV = callExt(b, "js_jsvget", [seqV, emitStr(b, "next")])
@@ -5830,7 +5848,7 @@ NotFuncHead = :script(~~
             isItV = hFalse
             nxV = hUndef
             if (lazy) {
-                var sio = emitIterOf(b, seqV)
+                var sio = emitIterOf(b, seqV, isAwait)
                 b = sio.b
                 seqV = sio.v
                 nxV = callExt(b, "js_jsvget", [seqV, emitStr(b, "next")])

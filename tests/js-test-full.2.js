@@ -6,12 +6,10 @@
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43, engine agreement, generators, Error, Math
-//   tests/js-test-full.3.js   sections 44-56 and 58-64, the call/class/private-name
-//                             model, the Unicode identifier tables, iterators, derived
-//                             constructors, JSON, guards, Set and Map, iterator closing,
-//                             hasOwnProperty, delete, Object.prototype, extends Object,
-//                             g.return() at a yield*, generators over outside iterators
-//   tests/js-test-full.4.mjs  section 57, export in a Module
+//   tests/js-test-full.3.js   sections 44-56, 58-71 and 73-92, the call/class/
+//                             private-name model, iterators, the arguments object and
+//                             the rest of the builtin surface (see its header)
+//   tests/js-test-full.4.mjs  sections 57 and 72, the Module goal
 //
 // The section NUMBERS are global (grammar comments and docs cite them), the four
 // files together run the assertions in order, and ./test.sh --full reports them as the
@@ -198,6 +196,7 @@ function s37() {
     var closed = 0
     var iter = {
         n: 0,
+        [Symbol.iterator]: function () { return this },
         next: function () { this.n = this.n + 1; return { value: this.n, done: this.n > 5 } },
         return: function () { closed = closed + 1; return { value: undefined, done: true } }
     }
@@ -205,7 +204,8 @@ function s37() {
     check("itc14", closed === 1)
     // An iterator WITHOUT a return member is left alone rather than aborting,
     // and an array (the index arm) never looks for one.
-    var bare = { n: 0, next: function () { this.n = this.n + 1; return { value: this.n, done: this.n > 3 } } }
+    var bare = { n: 0, [Symbol.iterator]: function () { return this },
+        next: function () { this.n = this.n + 1; return { value: this.n, done: this.n > 3 } } }
     var bn = 0
     for (var s of bare) { bn = s; break }
     check("itc15", bn === 1)

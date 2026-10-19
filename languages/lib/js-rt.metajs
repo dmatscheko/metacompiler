@@ -2260,7 +2260,7 @@ function jvProtoRead(d, key) {
 function jvProtoWrite(d, key, v) {
     if (!jvIsCallable(v)) { return undefined }
     var k = jvStr(key)
-    if (k.length >= 2) { if (k.substring(0, 2) == "__") { return undefined } }
+    if (k.length >= 2 && !jvIsSymKey(k)) { if (k.substring(0, 2) == "__") { return undefined } }
     d[k] = function () {
         var a = []
         var i = 1
@@ -4376,33 +4376,54 @@ function jvObjectGlobalMethod(name, args) {
 }
 
 // The values an iterable yields, for the statics that take one (Object.fromEntries,
-// Object.groupBy): an array as it is, a string's code points, anything with a
-// [Symbol.iterator] or a callable `next` driven to the end. Anything else is node's
+// Object.groupBy): an array as it is, a string's code points, the iterator a
+// [Symbol.iterator] method answers driven to the end. Anything else is node's
 // TypeError. Twins: jsvIterList in abnf/jsrtjsprint.go, jsIterList in both
 // *-interpreter.abnf.
 function jvIterList(v) {
     if (jvUndefOrNull(v)) { jbRaise("TypeError: undefined is not iterable") }
     if (Array.isArray(v)) { return v }
     if (typeof v == "string") { return jvCodePoints(v) }
+    // A generator's [Symbol.iterator] is answered for a symbol key only; it is itself.
     var it = anytype
     it = v
-    if (jvIsCallable(js_jsvget(v, "__#@iterator"))) { it = js_jsmcall(v, "__#@iterator", []) }
-    if (Array.isArray(it)) { return it }
-    if (jvIsCallable(js_jsvget(it, "next"))) {
-        var out = []
-        var step = anytype
-        step = js_jsmcall(it, "next", [])
-        while (!js_jsvget(step, "done")) {
-            out.push(js_jsvget(step, "value"))
-            step = js_jsmcall(it, "next", [])
+    if (!isGenerator(v)) {
+        if (!jvIsCallable(js_jsvget(v, "__#@iterator"))) {
+            jvNotIterable(v)
+            return []
         }
-        return out
+        it = js_jsmcall(v, "__#@iterator", [])
+        if (Array.isArray(it)) { return it }
     }
+    var out = []
+    var step = anytype
+    step = js_jsmcall(it, "next", [])
+    while (!js_jsvget(step, "done")) {
+        out.push(js_jsvget(step, "value"))
+        step = js_jsmcall(it, "next", [])
+    }
+    return out
+}
+
+// GetIterator's TypeError for a value with no callable [Symbol.iterator], in the
+// wording node gives where it cannot name the source expression. Twins:
+// jsvNotIterable in abnf/jsrtjsprint.go, jsNotIterable in both *-interpreter.abnf.
+function jvNotIterable(v) {
     var t = js_jstypeof(v)
     var what = t
-    if (t == "number" || t == "boolean") { what = t + " " + jvStr(v) }
+    if (v === null) { what = "object null" }
+    else if (t == "number" || t == "boolean") { what = t + " " + jvStr(v) }
     jbRaise("TypeError: " + what + " is not iterable (cannot read property Symbol(Symbol.iterator))")
-    return []
+}
+
+// The iteration sites' answer for a value with no callable "__#@iterator" member: an
+// array or a string passes through to be read by index, and a generator (whose
+// [Symbol.iterator] answers itself) to be driven by next(). Anything else is
+// GetIterator's TypeError. Twin of js_jsiterchk in abnf/jsrtjsprint.go.
+function js_jsiterchk(v) {
+    if (Array.isArray(v) || typeof v == "string" || isGenerator(v)) { return v }
+    jvNotIterable(v)
+    return v
 }
 
 // ToPropertyKey as a key of the value model: a symbol's __symkey, any other value's
@@ -6697,6 +6718,8 @@ function jpAgNew(g) {
     ag["next"] = jpAgMethod(st, 0)
     ag["return"] = jpAgMethod(st, 1)
     ag["throw"] = jpAgMethod(st, 2)
+    // An async generator is an async iterable whose [Symbol.asyncIterator]() is itself.
+    ag["__#@asyncIterator"] = function () { return ag }
     return ag
 }
 function jpAgMethod(st, kind) {

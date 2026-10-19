@@ -1,4 +1,4 @@
-// Full-syntax test: JavaScript - part 3 of 4, sections 44-56, 58-71 and 73.
+// Full-syntax test: JavaScript - part 3 of 4, sections 44-56, 58-71 and 73-92.
 //
 // THE JS RATCHET IS FOUR FILES: as one file its -frozen interpreter leg ran into
 // ./test.sh --full's time brake (peak memory grew superlinearly with the file), and
@@ -6,7 +6,7 @@
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43, engine agreement, generators, Error, Math
-//   tests/js-test-full.3.js   sections 44-56, 58-71 and 73, the call/class/private-name
+//   tests/js-test-full.3.js   sections 44-56, 58-71 and 73-92, the call/class/private-name
 //                             model, the Unicode identifier tables, iterators, derived
 //                             constructors, JSON, guards, Set and Map, iterator closing,
 //                             hasOwnProperty, delete, Object.prototype, extends Object,
@@ -1197,8 +1197,7 @@ class It59 {
     return() { log59.push("ret" + this.i); return {done: true} }
     throw(e) { log59.push("thr"); return {done: true} }
 }
-// node iterates only through Symbol.iterator, which this subset does not have; these
-// engines drive any value with a callable next().
+// Iterable through a [Symbol.iterator] on the prototype.
 if (typeof Symbol !== "undefined") { It59.prototype[Symbol.iterator] = function () { return this } }
 function* del59(n) { yield* new It59(n) }
 function lab59(n) { outer: for (var x of [1]) { for (var y of new It59(n)) { if (y == 2) { break outer } } } }
@@ -1325,7 +1324,6 @@ function it64(ans) {
         next() { this.n++; return {value: this.n, done: false} },
         return(v) { log64.push("ret:" + v); return ans }
     }
-    // node iterates only through Symbol.iterator; these engines drive a callable next().
     if (typeof Symbol !== "undefined") { o[Symbol.iterator] = function () { return this } }
     return o
 }
@@ -2331,6 +2329,30 @@ function s91() {
         JSON.stringify(Object.entries({"__#z": 1})) === '[["__#z",1]]')
 }
 
+// ===== SECTION 92: iterating a value that is not iterable =====
+// GetIterator throws a TypeError for a value with no callable [Symbol.iterator]: a
+// spread, a for-of, an array pattern and a yield* over a plain object, a number, a
+// boolean, null, or an object whose only protocol is a `next` method. Values read off
+// node 24.
+function s92() {
+    const v = [{}, {a: 1}, 5, {i: 0, next() { return {value: 1, done: true} }}, true, null]
+    function te(f) { try { f(); return "-" } catch (e) { return e instanceof TypeError ? "T" : "E" } }
+    function* yd(x) { yield* x }
+    const r = []
+    for (let i = 0; i < v.length; i++) {
+        const x = v[i]
+        r.push(te(() => [...x]) + te(() => { for (const e of x) {} }) + te(() => { const [p] = x }) +
+            te(() => [...yd(x)]) + te(() => Math.max(...x)))
+    }
+    check("it92a", r.join() === "TTTTT,TTTTT,TTTTT,TTTTT,TTTTT,TTTTT")
+    class K92 {}
+    K92.prototype[Symbol.iterator] = function () { return [7, 8][Symbol.iterator]() }
+    function F92() {}
+    F92.prototype[Symbol.iterator] = function* () { yield 9 }
+    check("it92b", [...[1, 2], ..."ab"].join() === "1,2,a,b" && te(() => Object.fromEntries(v[3])) === "T" &&
+        te(() => new Set(v[0])) === "T" && [...new K92(), ...new F92()].join() === "7,8,9")
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -2380,6 +2402,7 @@ function main() {
     s89() // SECTION-CALL 89
     s90() // SECTION-CALL 90
     s91() // SECTION-CALL 91
+    s92() // SECTION-CALL 92
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

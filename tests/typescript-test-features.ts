@@ -220,13 +220,16 @@ function* lazyCounter(): Generator<number, void, void> { let i: number = 0; whil
 let lazyTaken: number[] = [];
 for (var lv of lazyCounter()) { if (lazyTaken.length === 3) { break; } lazyTaken.push(lv); }
 check("for-of-lazy-break", lazyTaken.join(",") === "0,1,2" && lazyReached === 3);
-// A hand-written iterator - a callable `next` answering {value, done} - is the whole
-// protocol here: the subset has no symbols, so Symbol.iterator cannot be it. node
-// requires that symbol and throws without it; this is the deliberate divergence.
-let lazyCursor = { i: 0, next: function(): any { this.i = this.i + 1; if (this.i > 3) { return {value: undefined, done: true}; } return {value: this.i * 10, done: false}; } };
+// A hand-written iterator: a callable `next` answering {value, done}, iterable through
+// the [Symbol.iterator] beside it. Without one a for-of over it is a TypeError.
+let lazyCursor = { i: 0, [Symbol.iterator]: function(): any { return this; }, next: function(): any { this.i = this.i + 1; if (this.i > 3) { return {value: undefined, done: true}; } return {value: this.i * 10, done: false}; } };
 let lazyOut: number[] = [];
 for (var cv of lazyCursor) { lazyOut.push(cv); }
 check("for-of-iterator-object", lazyOut.join(",") === "10,20,30");
+var bareNext = [{ next: function(): any { return {value: 1, done: true}; } }];
+var bareErr = "";
+try { for (var bx of bareNext[0]) { } } catch (e) { bareErr = (e instanceof TypeError) ? "T" : "E"; }
+check("for-of-non-iterable", bareErr === "T");
 // 'yield*' delegates to a generator lazily too.
 lazyReached = -1;
 function* lazyDeleg(): Generator<number, void, void> { yield* lazyCounter(); }
