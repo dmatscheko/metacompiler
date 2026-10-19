@@ -5936,7 +5936,7 @@ KwContinue  = "continue" KwEnd ;
                     cur = irc.v
                     pathKey = null
                 } else if (s.kind == "mcall") {
-                    var ea = emitArgRecsInto(b, s.args, null, i == 0 ? eTy0 : swArgAnn(s.name, anns[i]))
+                    var ea = emitArgRecsInto(b, swPlanMethod(s.name, s.args), null, i == 0 ? eTy0 : swArgAnn(s.name, anns[i]))
                     b = ea.b
                     var mnameV = emitStr(b, s.name)
                     // self.init(...) picks the initializer overload by its labels and
@@ -6433,16 +6433,65 @@ KwContinue  = "continue" KwEnd ;
         // type(of:) reads (swStaticCollTy).
         return {lbl: lbl, t: t, ref: ref, rpath: rpath, dflt: null, txt: lbl == null ? txt : txt.substring(txt.indexOf(":") + 1)}
     }
-    function makeTrailArg(t) { return {lbl: null, t: t, ref: null, dflt: null} }
+    // The variadic run as one {__vpack} argument. Twin in swift-interpreter.abnf.
+    function swVarPack(run) {
+        return function(b) {
+            var arr = callExt(b, "js_arr_new", [])
+            for (var i = 0; i < run.length; i++) {
+                var r = run[i].t(b)
+                b = r.b
+                callExt(b, "js_arr_push", [arr, emitCopy(b, r.v)])
+            }
+            var o = callExt(b, "js_obj_new", [])
+            callExt(b, "js_set", [o, emitStr(b, "__vpack"), arr])
+            return {b: b, v: o}
+        }
+    }
+    function makeTrailArg(t) { return {lbl: null, t: t, ref: null, dflt: null, trail: true} }
     function makeLabTrail(items) { return {lbl: items[0].alabel, t: items[1], ref: null, dflt: null} }
 
+    // Methods whose variadic parameter is not the last, by name: a member call has
+    // no static receiver type, so its arguments are planned against the one
+    // declaration of that name (swPlanMethod), and left alone when two disagree.
+    // Twin in swift-interpreter.abnf.
+    var swVarMeths = {}
+    function swNoteVarMethod(m) {
+        var ps = m.params
+        var vi = -1
+        for (var i = 0; i < ps.length; i++) { if (typeof ps[i] == "object" && ps[i].variadic) { vi = i } }
+        if (vi < 0 || vi + 1 >= ps.length) { return }
+        var k = "$" + m.name
+        if (hasOwn(swVarMeths, k)) { swVarMeths[k] = null; return }
+        swVarMeths[k] = ps
+    }
+    function swPlanMethod(name, recs) {
+        var k = "$" + name
+        if (!hasOwn(swVarMeths, k) || swVarMeths[k] == null) { return recs }
+        return planArgsP(swVarMeths[k], recs)
+    }
     function planArgs(name, recs) {
         var params = lookupSig(name)
         if (params == null) { return recs }
+        return planArgsP(params, recs)
+    }
+    function planArgsP(params, recs) {
         var out = []
         var ai = 0
         for (var p = 0; p < params.length; p++) {
             var prm = params[p]
+            // A variadic with parameters after it takes the run of arguments up
+            // to the next labelled one, packed into ONE argument (swVarPack): the
+            // callee cannot tell where the run ends. A last variadic takes the rest.
+            if (prm.variadic && p + 1 < params.length) {
+                var run = []
+                while (ai < recs.length && recs[ai].trail != true
+                       && (recs[ai].lbl == null || recs[ai].lbl == "" || (run.length == 0 && recs[ai].lbl == prm.label))) {
+                    run.push(recs[ai])
+                    ai++
+                }
+                out.push({lbl: null, t: swVarPack(run), ref: null, dflt: null})
+                continue
+            }
             if (prm.variadic) { break }
             var take = false
             if (ai < recs.length) {
@@ -8618,7 +8667,19 @@ KwContinue  = "continue" KwEnd ;
                 continue
             }
             if (prm.variadic) {
-                // Collect the remaining arguments into an array.
+                // A packed run (swVarPack) is exactly the variadic's arguments;
+                // otherwise collect the remaining arguments into an array.
+                var vAfter = null
+                if (i + 1 < params.length) {
+                    var pk = b.NewCall(rtSafeGet(), [callExt(b, "js_arg", [argsP, handle(i + off)]), emitStr(b, "__vpack")])
+                    var pkB = curF.NewBlock("")
+                    var loopB = curF.NewBlock("")
+                    vAfter = curF.NewBlock("")
+                    b.NewCondBr(truthy(b, callExt(b, "js_seq", [pk, hUndef])), loopB, pkB)
+                    callExt(pkB, "js_scope_decl", [curScopeV, emitStr(pkB, prm.name), pk])
+                    pkB.NewBr(vAfter)
+                    b = loopB
+                }
                 var vArr = callExt(b, "js_arr_new", [])
                 var vName = "$va" + i
                 callExt(b, "js_scope_decl", [curScopeV, emitStr(b, vName), emitNum(b, i + off)])
@@ -8635,6 +8696,10 @@ KwContinue  = "continue" KwEnd ;
                 vBody.NewBr(vHead)
                 b = vExit
                 callExt(b, "js_scope_decl", [curScopeV, emitStr(b, prm.name), vArr])
+                if (vAfter != null) {
+                    b.NewBr(vAfter)
+                    b = vAfter
+                }
                 continue
             }
             var av = callExt(b, "js_arg", [argsP, handle(i + off)])
@@ -9375,6 +9440,7 @@ KwContinue  = "continue" KwEnd ;
                     }
                 }
             } else if (it.method != undefined) {
+                swNoteVarMethod(it.method)
                 memberMethods["$" + it.method.name] = 1
                 if (isStatic && isOperatorName(it.method.name)) { hasOpOverload = true }
                 if (isStatic) {

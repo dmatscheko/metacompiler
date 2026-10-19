@@ -5132,6 +5132,27 @@ func s126() {
     check("126a", "\(p.q126)" == "1" && d126() == 2 && O126().q126 == 0)
 }
 
+// ===== SECTION 127: a variadic parameter followed by others =====
+// The variadic takes the run of arguments up to the next labelled one, so the
+// parameters after it - defaulted or not, a second variadic, a function - get
+// theirs, in a free function and in a method. Every value read off swiftc 6.1.2.
+func join127(_ parts: String..., sep: String = "-", end: String = "") -> String { parts.joined(separator: sep) + end }
+func two127(nums xs: Int..., words ws: String...) -> String { "\(xs.reduce(0, +))\(ws.joined())" }
+func map127(_ xs: Int..., then f: (Int) -> Int) -> [Int] { xs.map(f) }
+struct Log127 {
+    var lines: [String] = []
+    mutating func log(_ items: Int..., prefix: String = ">") { lines.append(prefix + items.map { "\($0)" }.joined(separator: " ")) }
+}
+func s127() {
+    check("127a", join127("a", "b", "c") == "a-b-c" && join127("x", "y", sep: "+") == "x+y" && join127(sep: "/") == ""
+        && join127("q", end: "!") == "q!")
+    check("127b", two127(nums: 1, 2, 3, words: "a", "b") == "6ab" && map127(1, 2) { $0 * 10 } == [10, 20])
+    var lg = Log127()
+    lg.log(1, 2)
+    lg.log(3, prefix: "#")
+    check("127c", lg.lines == [">1 2", "#3"])
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5259,6 +5280,7 @@ func main() {
     s124() // SECTION-CALL 124
     s125() // SECTION-CALL 125
     s126() // SECTION-CALL 126
+    s127() // SECTION-CALL 127
     print("full: \(checks) checks, \(fails) failures")
 }
 

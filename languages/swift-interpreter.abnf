@@ -6543,16 +6543,59 @@ KwContinue  = "continue" KwEnd ;
         // type(of:) reads (swStaticCollTy).
         return {lbl: lbl, t: t, ref: ref, rpath: rpath, dflt: null, txt: lbl == null ? txt : txt.substring(txt.indexOf(":") + 1)}
     }
-    function makeTrailArg(t) { return {lbl: null, t: t, ref: null, dflt: null} }
+    // The variadic run as one {__vpack} argument. Twin in swift-to-llvm-ir.abnf.
+    function swVarPack(run) {
+        return function() {
+            var a = []
+            for (var i = 0; i < run.length; i++) { a.push(swCopy(run[i].t())) }
+            return {__vpack: a}
+        }
+    }
+    function makeTrailArg(t) { return {lbl: null, t: t, ref: null, dflt: null, trail: true} }
     function makeLabTrail(items) { return {lbl: items[0].alabel, t: items[1], ref: null, dflt: null} }
 
+    // Methods whose variadic parameter is not the last, by name: a member call has
+    // no static receiver type, so its arguments are planned against the one
+    // declaration of that name (swPlanMethod), and left alone when two disagree.
+    // Twin in swift-to-llvm-ir.abnf.
+    var swVarMeths = {}
+    function swNoteVarMethod(m) {
+        var ps = m.params
+        var vi = -1
+        for (var i = 0; i < ps.length; i++) { if (typeof ps[i] == "object" && ps[i].variadic) { vi = i } }
+        if (vi < 0 || vi + 1 >= ps.length) { return }
+        var k = "$" + m.name
+        if (hasOwn(swVarMeths, k)) { swVarMeths[k] = null; return }
+        swVarMeths[k] = ps
+    }
+    function swPlanMethod(name, recs) {
+        var k = "$" + name
+        if (!hasOwn(swVarMeths, k) || swVarMeths[k] == null) { return recs }
+        return planArgsP(swVarMeths[k], recs)
+    }
     function planArgs(name, recs) {
         var params = lookupSig(name)
         if (params == null) { return recs }
+        return planArgsP(params, recs)
+    }
+    function planArgsP(params, recs) {
         var out = []
         var ai = 0
         for (var p = 0; p < params.length; p++) {
             var prm = params[p]
+            // A variadic with parameters after it takes the run of arguments up
+            // to the next labelled one, packed into ONE argument (swVarPack): the
+            // callee cannot tell where the run ends. A last variadic takes the rest.
+            if (prm.variadic && p + 1 < params.length) {
+                var run = []
+                while (ai < recs.length && recs[ai].trail != true
+                       && (recs[ai].lbl == null || recs[ai].lbl == "" || (run.length == 0 && recs[ai].lbl == prm.label))) {
+                    run.push(recs[ai])
+                    ai++
+                }
+                out.push({lbl: null, t: swVarPack(run), ref: null, dflt: null})
+                continue
+            }
             if (prm.variadic) { break }
             var take = false
             if (ai < recs.length) {
@@ -6618,6 +6661,13 @@ KwContinue  = "continue" KwEnd ;
         for (var p = 0; p < params.length; p++) {
             var prm = params[p]
             if (prm.variadic) {
+                // A packed run (swVarPack) is exactly the variadic's arguments.
+                var pk = ai < args.length ? args[ai] : null
+                if (pk !== null && pk !== undefined && typeof pk == "object" && pk.__vpack != undefined) {
+                    vals.push(pk.__vpack)
+                    ai++
+                    continue
+                }
                 var rest = []
                 while (ai < args.length) { rest.push(args[ai]); ai++ }
                 vals.push(rest)
@@ -7281,7 +7331,8 @@ KwContinue  = "continue" KwEnd ;
                     var oea = evalArgs(s.args)
                     if (cur === null || cur === undefined) { cur = null } else { cur = oea.argv[0](cur) }
                 } else if (s.kind == "mcall") {
-                    var ea = evalArgs(s.args)
+                    if (!hasOwn(s, "vplan")) { s.vplan = swPlanMethod(s.name, s.args) }
+                    var ea = evalArgs(s.vplan)
                     var aTy = i == 0 ? eTy0 : chainC.aety[i]
                     if (aTy != "" && ea.argv.length > 0) {
                         ea.argv[0] = swAdoptAnn(ea.argv[0], aTy)
@@ -9168,6 +9219,7 @@ KwContinue  = "continue" KwEnd ;
                     }
                 }
             } else if (it.method != undefined) {
+                swNoteVarMethod(it.method)
                 if (isStatic) { mem.statMethods.push(it.method) } else {
                     mem.methods.push(it.method)
                     if (it.method.name == "init") { mem.hasInit = true }
