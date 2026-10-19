@@ -3818,16 +3818,21 @@ NotMemberKw = :script(~~
                             MIN_VALUE: kFlo32(parseFloat("1.401298464324817e-45")),
                             NaN: kFlo32(kZeroF / kZeroF), POSITIVE_INFINITY: kFlo32(kInf),
                             NEGATIVE_INFINITY: kFlo32(kNegF(kInf)), SIZE_BITS: 32, SIZE_BYTES: 4}
-    hostGlobals["listOf"] = function() {
+    hostGlobals["mutableListOf"] = function() {
         var out = []
         for (var i = 0; i < arguments.length; i++) out.push(arguments[i])
         return out
     }
-    // The ARRAY and SEQUENCE builders are listOf's list carrying its kind number
-    // (kArrWords). The SET constructors are a shape of their own (see kMakeSet), so
-    // setOf(1, 1, 2) deduplicates and setOf(2, 1) == setOf(1, 2).
-    hostGlobals["mutableListOf"] = hostGlobals["listOf"]
-    hostGlobals["arrayListOf"] = hostGlobals["listOf"]
+    // The read-only listOf / emptyList, the ARRAY and the SEQUENCE builders are
+    // mutableListOf's list carrying a kind number (kArrWords). The SET constructors
+    // are a shape of their own (see kMakeSet), so setOf(1, 1, 2) deduplicates and
+    // setOf(2, 1) == setOf(1, 2).
+    hostGlobals["listOf"] = function() {
+        var out = []
+        for (var i = 0; i < arguments.length; i++) out.push(arguments[i])
+        return arrKindSet(out, 4)
+    }
+    hostGlobals["arrayListOf"] = hostGlobals["mutableListOf"]
     hostGlobals["arrayOf"] = function() {
         var out = []
         for (var i = 0; i < arguments.length; i++) out.push(arguments[i])
@@ -4883,11 +4888,13 @@ NotMemberKw = :script(~~
     }
 
     // ----- Char -----
-    function kIsLetterCh(code) {
-        if ((code >= 97 && code <= 122) || (code >= 65 && code <= 90)) { return true }
-        if (code <= 127) { return false }
-        var g = String.fromCharCode(code)
-        return unicodeCase(g, 1) != unicodeCase(g, 0)
+    // Char.digitToInt / digitToIntOrNull: Character.digit's value in the radix, or -1.
+    // Twin of ktDigitOf in abnf/jsrtkotlin.go.
+    function kDigitOf(code, args) {
+        var radix = args.length > 0 ? kNum(args[0]) : 10
+        if (radix < 2 || radix > 36) { kThrowExc("IllegalArgumentException", "radix " + radix + " was not in valid range 2..36") }
+        var d = jcDigitVal(code)
+        return d < radix ? d : 0 - 1
     }
     // A Char's case is the SIMPLE mapping of one unit (unicodeCase modes 1 and 0); a
     // String's uppercase()/lowercase() is the full one, toUpperCase's.
@@ -4907,21 +4914,25 @@ NotMemberKw = :script(~~
         var ccw = kDeclWidth[kConvName(name)]
         if (ccw != undefined && kDeclUns[kConvName(name)] != true) { return {v: kConv(code, ccw, false)} }
         if (name == "toString") { return {v: String.fromCharCode(code)} }
-        if (name == "isLetter") { return {v: kIsLetterCh(code)} }
-        if (name == "isDigit") { return {v: code >= 48 && code <= 57} }
-        if (name == "isLetterOrDigit") { return {v: kIsLetterCh(code) || (code >= 48 && code <= 57)} }
-        if (name == "isWhitespace") {
-            return {v: code == 32 || code == 9 || code == 10 || code == 13 || code == 12 || code == 11}
-        }
-        if (name == "isUpperCase") { return {v: code >= 65 && code <= 90} }
-        if (name == "isLowerCase") { return {v: code >= 97 && code <= 122} }
+        // The classes are java.lang.Character's (lib/java-chars.js).
+        if (name == "isLetter") { return {v: jcIsLetter(code)} }
+        if (name == "isDigit") { return {v: jcIsDigit(code)} }
+        if (name == "isLetterOrDigit") { return {v: jcIsLetter(code) || jcIsDigit(code)} }
+        if (name == "isWhitespace") { return {v: kIsSpaceCh(code)} }
+        if (name == "isUpperCase") { return {v: jcIsUpper(code)} }
+        if (name == "isLowerCase") { return {v: jcIsLower(code)} }
+        if (name == "isTitleCase") { return {v: jcClass(code) % 8 == 3} }
+        if (name == "isISOControl") { return {v: code <= 31 || (code >= 127 && code <= 159)} }
         if (name == "uppercaseChar") { return {v: kChar(kUpperCode(code))} }
         if (name == "lowercaseChar") { return {v: kChar(kLowerCode(code))} }
         if (name == "uppercase") { return {v: unicodeCase(String.fromCharCode(code), 3)} }
         if (name == "lowercase") { return {v: unicodeCase(String.fromCharCode(code), 6)} }
-        if (name == "digitToInt") {
-            if (code < 48 || code > 57) { fail("Char \"" + String.fromCharCode(code) + "\" is not a digit") }
-            return {v: code - 48}
+        if (name == "digitToInt" || name == "digitToIntOrNull") {
+            var dg = kDigitOf(code, args)
+            if (dg >= 0) { return {v: dg} }
+            if (name == "digitToIntOrNull") { return {v: null} }
+            kThrowExc("IllegalArgumentException", "Char " + String.fromCharCode(code) +
+                (args.length > 0 ? " is not a digit in the given radix=" + kNum(args[0]) : " is not a decimal digit"))
         }
         if (name == "compareTo") {
             var o = kIsChar(args[0]) ? args[0].__char : kNum(args[0])
@@ -4941,8 +4952,13 @@ NotMemberKw = :script(~~
     // A Char argument to a String member is its glyph, so s.indexOf('B') and
     // s.indexOf("B") agree.
     function kStrArg(v) { return kIsChar(v) ? String.fromCharCode(v.__char) : kstr2(v) }
-    function kIsSpaceCh(code) {
-        return code == 32 || code == 9 || code == 10 || code == 13 || code == 12
+    // Char.isWhitespace, which trim and isBlank also read: Character.isWhitespace ||
+    // Character.isSpaceChar, so the controls 9..13 and 28..31 plus every Zs, Zl and
+    // Zp. Twin of ktIsSpace in abnf/jsrtkotlin.go and k2IsSpace in
+    // languages/lib/kotlin-rt.metajs.
+    function kIsSpaceCh(c) {
+        return (c >= 9 && c <= 13) || (c >= 28 && c <= 32) || c == 160 || c == 5760 ||
+            (c >= 8192 && c <= 8202) || c == 8232 || c == 8233 || c == 8239 || c == 8287 || c == 12288
     }
     function kTrimSide(sv, left, right) {
         var b = 0
@@ -5509,7 +5525,7 @@ NotMemberKw = :script(~~
         if (typeof v == "number") { return "int" }
         if (typeof v == "object") {
             if (v.__char !== undefined) { return "char" }
-            if (v.__sz === true) { return "int" }
+            if (v.__sz === true) { return v.u ? "obj" : "int" }
             if (v.__flo !== undefined) { return "float" }
         }
         return "obj"
@@ -5534,8 +5550,23 @@ NotMemberKw = :script(~~
     function jxkDbl(v) { return v.__flo }
     function jxkDblStr(a) { return kFloStr(a) }
     function jxkFail(msg) { fail(msg) }
+    // The JVM class of a List: kotlin-stdlib's listOf answers EmptyList, a
+    // Collections.singletonList or an Arrays.asList by its size; every other List
+    // here is a java.util.ArrayList. An Array or a Sequence keeps its simple name.
+    // Twin of ktJvmListClass in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    function kJvmListClass(kind, n) {
+        if (kind == 4) {
+            if (n == 0) { return "kotlin.collections.EmptyList" }
+            return n == 1 ? "java.util.Collections$SingletonList" : "java.util.Arrays$ArrayList"
+        }
+        return kind == 0 ? "java.util.ArrayList" : "ArrayList"
+    }
     function jxkClass(v) {
+        if (Array.isArray(v)) { return kJvmListClass(arrKind(v), v.length) }
+        if (kIsSet(v)) { return "java.util.LinkedHashSet" }
+        if (kIsMap(v)) { return "java.util.LinkedHashMap" }
         var n = kSimpleName(v)
+        if (szIs(v) && v.u) { return "kotlin." + n }
         if (n == "Int") { return "java.lang.Integer" }
         if (n == "Char") { return "java.lang.Character" }
         if (n == "Long" || n == "Short" || n == "Byte" || n == "Double" || n == "Float" ||
@@ -10415,9 +10446,10 @@ NotMemberKw = :script(~~
     // 1..0 is empty." instead (_Ranges.kt).
     function kNoElemKind(kind) { kNoElem(kind + " is empty.") }
     // The kind numbers kept on a host array (arrKind / arrKindSet): 0 a List, 1 an
-    // Array, 2 a Sequence, 3 a Map's values view. Twin of ktArrWords in
+    // Array, 2 a Sequence, 3 a Map's values view, 4 a read-only List from listOf /
+    // emptyList (whose JVM class kJvmClass names). Twin of ktArrWords in
     // abnf/jsrtkotlin.go.
-    var kArrWords = ["List", "Array", "Sequence", "Collection"]
+    var kArrWords = ["List", "Array", "Sequence", "Collection", "List"]
     // The kind of the array a member call answers: an Array's to*Array / copyOf
     // family and Array.plus answer an Array, asSequence a Sequence, and a Sequence's
     // intermediate operations another Sequence (_Sequences.kt); every other member a
@@ -10603,6 +10635,8 @@ NotMemberKw = :script(~~
         if (name == "ConcurrentModificationException") { return "java.util." + name }
         if (name == "NotImplementedError") { return "kotlin." + name }
         if (name == "UninitializedPropertyAccessException") { return "kotlin." + name }
+        if (name == "PatternSyntaxException") { return "java.util.regex." + name }
+        if (name.indexOf("Format") >= 0 && name != "NumberFormatException") { return "java.util." + name }
         return "java.lang." + name
     }
     // The builtin throwable hierarchy: a class whose supertype list names one of these

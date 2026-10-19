@@ -4766,6 +4766,35 @@ fun sec95() {
                     && "abcde".padStart(length = 7, padChar = '*') == "**abcde" && "" + "abcde".windowed(3, 2, true) == "[abc, cde, e]")
 }
 
+// ===== SECTION 96: kotlin.Char classification and Formatter's class names =====
+// Every row was read off kotlin-stdlib 2.2.21 driven from java (JDK 24). Char's
+// predicates are java.lang.Character's: a letter without case (CJK, Lm, Lo) is a
+// letter, a Nl like U+216B is not, isDigit is any Unicode Nd. isWhitespace is
+// Character.isWhitespace || isSpaceChar - NBSP and U+001C included, U+0085 not -
+// and trim / isBlank read it. digitToInt reads Character.digit. A Formatter mismatch
+// names the argument's JVM class: kotlin.UInt, and for a List the class listOf picks
+// by size; the exception itself is java.util's.
+fun sec96() {
+    val cc = listOf('中', 'ʰ', 'Ⅻ', '٣', 'ß', 'ǅ', ' ', '\u001c', '\u0085', 'Ａ')
+    check("chr96a", cc[0].isLetter() && cc[1].isLetter() && !cc[2].isLetter() && cc[0].isLetterOrDigit() && cc[3].isDigit() && cc[3].isLetterOrDigit())
+    check("chr96b", cc[2].isUpperCase() && cc[1].isLowerCase() && cc[4].isLowerCase() && !cc[5].isUpperCase() && cc[5].isTitleCase() && !cc[4].isTitleCase())
+    check("chr96c", cc[6].isWhitespace() && cc[7].isWhitespace() && !cc[8].isWhitespace() && cc[8].isISOControl() && !cc[6].isISOControl()
+                    && " a ".trim() == "a" && "\u001cb\u0085".trimStart() == "b\u0085" && "　".isBlank())
+    check("chr96d", cc[3].digitToInt() == 3 && cc[9].digitToInt(16) == 10 && cc[0].digitToIntOrNull() == null && 'z'.digitToIntOrNull(36) == 35
+                    && s95err { cc[9].digitToInt() } == "IllegalArgumentException: Char Ａ is not a decimal digit"
+                    && s95err { 'g'.digitToInt(16) } == "IllegalArgumentException: Char g is not a digit in the given radix=16")
+    val fa = listOf<Any?>(1u, listOf(1, 2), mutableListOf(1), listOf(1), emptyList<Int>(), setOf(1, 2), mapOf(1 to 2, 3 to 4))
+    check("fmt96e", s95fmt("%d", fa[0]) == "IllegalFormatConversionException: d != kotlin.UInt" && s95fmt("%s", fa[0]) == "1"
+                    && s95fmt("%d", fa[1]) == "IllegalFormatConversionException: d != java.util.Arrays\$ArrayList"
+                    && s95fmt("%d", fa[2]) == "IllegalFormatConversionException: d != java.util.ArrayList")
+    check("fmt96f", s95fmt("%x", fa[3]) == "IllegalFormatConversionException: x != java.util.Collections\$SingletonList"
+                    && s95fmt("%d", fa[4]) == "IllegalFormatConversionException: d != kotlin.collections.EmptyList"
+                    && s95fmt("%d", fa[5]) == "IllegalFormatConversionException: d != java.util.LinkedHashSet"
+                    && s95fmt("%d", fa[6]) == "IllegalFormatConversionException: d != java.util.LinkedHashMap")
+    val fe = try { "%d".format(fa[1]) } catch (e: Exception) { "" + e }
+    check("fmt96g", fe == "java.util.IllegalFormatConversionException: d != java.util.Arrays\$ArrayList")
+}
+
 
 fun main() {
     s01() // SECTION-CALL 01
@@ -4863,6 +4892,7 @@ fun main() {
     sec93() // SECTION-CALL 93
     sec94() // SECTION-CALL 94
     sec95() // SECTION-CALL 95
+    sec96() // SECTION-CALL 96
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

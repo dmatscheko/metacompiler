@@ -7854,29 +7854,26 @@ KwContract  = "contract" KwEnd ;
         curF = f
         var b = f.NewBlock("entry")
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
-        // listOf/mutableListOf: an IR function that simply returns its argument array.
+        // mutableListOf: an IR function that simply returns its argument array.
         funcCount++
         var loIdx = funcCount
         var lo = m.NewFunc("jsf_" + loIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
         var lob = lo.NewBlock("entry")
         lob.NewRet(lo.Params[1])
         var loV = callExt(b, "js_closure", [handle(loIdx), curScopeV])
-        // The LIST constructors return their argument array. emptyList() with no
-        // arguments yields the empty list, since jsf just returns its arg array. The
-        // ARRAY and SEQUENCE builders are the same list carrying the kind number
-        // kotlin-stdlib's messages need (ktArrWords in abnf/jsrtkotlin.go), so they
-        // are js_ktglobal builders; the SET constructors are too, a Set being its own
+        // The MUTABLE list constructors return their argument array. The read-only
+        // listOf / emptyList, the ARRAY and the SEQUENCE builders are the same list
+        // carrying the kind number kotlin-stdlib's messages and JVM class names need
+        // (ktArrWords in abnf/jsrtkotlin.go), so they are js_ktglobal builders; the SET constructors are too, a Set being its own
         // shape (ktMakeSet). The value model cannot tell one element WIDTH from
         // another (a Byte and an Int are the same host number), so `byteArrayOf(200)`
         // - a Kotlin COMPILE error, whose legal spelling is
         // `byteArrayOf((-56).toByte())` - is accepted here, exactly as in the
         // interpreter half. A Sequence is EAGER in this subset (see
         // kotlin-interpreter.abnf), so every operator on it is the list operator.
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "listOf"), loV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "mutableListOf"), loV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "arrayListOf"), loV])
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "emptyList"), loV])
-        var arrayBuilders = ["arrayOf", "intArrayOf", "longArrayOf", "doubleArrayOf", "floatArrayOf",
+        var arrayBuilders = ["listOf", "emptyList", "arrayOf", "intArrayOf", "longArrayOf", "doubleArrayOf", "floatArrayOf",
                              "booleanArrayOf", "charArrayOf", "byteArrayOf", "shortArrayOf",
                              "ubyteArrayOf", "ushortArrayOf", "uintArrayOf", "ulongArrayOf",
                              "emptyArray", "sequenceOf", "emptySequence"]
@@ -7895,7 +7892,7 @@ KwContract  = "contract" KwEnd ;
                           "with", "run", "repeat", "StringBuilder", "String", "generateSequence",
                           // stdlib top-level functions; their twins are the hostGlobals
                           // block in kotlin-interpreter.abnf. listOfNotNull is here rather
-                          // than on the listOf alias above because it must DROP the nulls.
+                          // than on the mutableListOf closure because it must DROP the nulls.
                           "compareBy", "compareByDescending", "Comparator", "compareValues",
                           // kotlin.properties.Delegates - observable / vetoable / notNull.
                           "Delegates",

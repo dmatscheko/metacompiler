@@ -643,6 +643,8 @@ function ktExcFqcn(name) {
     if (name === "ConcurrentModificationException") { return "java.util." + name }
     if (name === "NotImplementedError") { return "kotlin." + name }
     if (name === "UninitializedPropertyAccessException") { return "kotlin." + name }
+    if (name === "PatternSyntaxException") { return "java.util.regex." + name }
+    if (name.indexOf("Format") >= 0 && name !== "NumberFormatException") { return "java.util." + name }
     return "java.lang." + name
 }
 
@@ -776,8 +778,9 @@ function ktNoElemNull() { ktRaise("NoSuchElementException", null) }
 // empty." instead (_Ranges.kt).
 function ktNoElemKind(kind) { ktNoElem(kind + " is empty.") }
 // The kind numbers kept on a host array (arrKind / arrKindSet, host ids 99/100):
-// 0 a List, 1 an Array, 2 a Sequence, 3 a Map's values view. Twin of ktArrWords in
-// abnf/jsrtkotlin.go.
+// 0 a List, 1 an Array, 2 a Sequence, 3 a Map's values view, 4 a read-only List
+// from listOf / emptyList (whose JVM class ktJvmListClass names). Twin of
+// ktArrWords in abnf/jsrtkotlin.go.
 function ktArrWord(k) {
     if (k == 1) { return "Array" }
     if (k == 2) { return "Sequence" }
@@ -2321,15 +2324,15 @@ function k2Lower(code) {
     return code
 }
 
-// k2IsLetter is ktIsLetter (jsrtkotlin.go:3320): Character.isLetter restricted
-// to what this subset can promise - the ASCII letters plus every rune above
-// 0x7f that Go classifies as a letter, tested exactly as the Go twin tests it.
-function k2IsLetter(code) {
-    if (code >= 97 && code <= 122) { return true }
-    if (code >= 65 && code <= 90) { return true }
-    if (code <= 127) { return false }
-    var s = k2ChStr(code)
-    return unicodeCase(s, 1) !== unicodeCase(s, 0)
+// Char.digitToInt / digitToIntOrNull: Character.digit's value in the radix, or
+// -1. Twin of ktDigitOf in abnf/jsrtkotlin.go.
+function k2DigitOf(code, args) {
+    var radix = 10
+    if (args.length > 0) { radix = k2Int(args[0]) }
+    if (radix < 2 || radix > 36) { ktRaise("IllegalArgumentException", "radix " + radix + " was not in valid range 2..36") }
+    var d = jcDigitVal(code)
+    if (d < radix) { return d }
+    return -1
 }
 
 // The number of CODE POINTS in s (Go's len([]rune(s))), and the code point at a
@@ -2479,36 +2482,35 @@ function k2EndsWith(s, p) {
     return s.substring(s.length - p.length, s.length) === p
 }
 
-// Go's unicode.IsSpace, which is what strings.TrimSpace trims. The host's own
-// trim() IS strings.TrimSpace on the Go side (abnf/jsrt.go:4303) but is ASCII
-// only in the C floor (runtime.c:3714), so the set is spelled out here and the
-// two engines cannot drift.
+// Char.isWhitespace, which trim and isBlank also read: Character.isWhitespace ||
+// Character.isSpaceChar, so the controls 9..13 and 28..31 plus every Zs, Zl and
+// Zp. Twin of ktIsSpace in abnf/jsrtkotlin.go.
 function k2IsSpace(c) {
-    if (c == 32 || c == 9 || c == 10 || c == 11 || c == 12 || c == 13) { return true }
-    if (c == 133 || c == 160) { return true }
-    if (c == 5760) { return true }
+    if ((c >= 9 && c <= 13) || (c >= 28 && c <= 32) || c == 160 || c == 5760) { return true }
     if (c >= 8192 && c <= 8202) { return true }
     if (c == 8232 || c == 8233 || c == 8239 || c == 8287 || c == 12288) { return true }
     return false
 }
 
-function k2TrimSpace(s) {
+// s without its leading (left) and trailing (right) whitespace.
+function k2TrimSide(s, left, right) {
     var a = 0
     var b = s.length
-    var go = true
+    var go = left
     while (go && a < b) {
         if (k2IsSpace(s.charCodeAt(a))) { a = a + 1 } else { go = false }
     }
-    go = true
+    go = right
     while (go && b > a) {
         if (k2IsSpace(s.charCodeAt(b - 1))) { b = b - 1 } else { go = false }
     }
     return s.substring(a, b)
 }
 
-// strings.TrimLeft / TrimRight over the explicit cutset " \t\r\n\f" the Go twin
-// spells for trimStart / trimEnd. NOT the same set as TrimSpace above: that is
-// the Go twin's own asymmetry, reproduced.
+function k2TrimSpace(s) { return k2TrimSide(s, true, true) }
+
+// strings.TrimLeft over the cutset " \t\r\n\f": trimIndent's fallback for a line
+// shorter than the common indent.
 function k2IsCut(c) {
     return c == 32 || c == 9 || c == 13 || c == 10 || c == 12
 }
@@ -2518,15 +2520,6 @@ function k2TrimLeftCut(s) {
     while (i < s.length) {
         if (!k2IsCut(s.charCodeAt(i))) { return s.substring(i, s.length) }
         i = i + 1
-    }
-    return ""
-}
-
-function k2TrimRightCut(s) {
-    var j = s.length
-    while (j > 0) {
-        if (!k2IsCut(s.charCodeAt(j - 1))) { return s.substring(0, j) }
-        j = j - 1
     }
     return ""
 }
@@ -2617,8 +2610,8 @@ function k2StrMethod2(s, name, args) {
     if (name == "toCharArray") { return arrKindSet(ktChars(s), 1) }
     if (name == "toList") { return ktChars(s) }
     if (name == "trim") { return k2TrimSpace(s) }
-    if (name == "trimStart") { return k2TrimLeftCut(s) }
-    if (name == "trimEnd") { return k2TrimRightCut(s) }
+    if (name == "trimStart") { return k2TrimSide(s, true, false) }
+    if (name == "trimEnd") { return k2TrimSide(s, false, true) }
     if (name == "startsWith") { return k2StartsWith(s, ktStrArg(ktArg(args, 0))) }
     if (name == "endsWith") { return k2EndsWith(s, ktStrArg(ktArg(args, 0))) }
     if (name == "padStart" || name == "padEnd") {
@@ -3311,6 +3304,7 @@ function jxkKind(v) {
     if (typeof v == "string") { return "str" }
     if (ktIsChar(v)) { return "char" }
     if (floIs(v)) { return "float" }
+    if (sintIs(v) && sintUns(v)) { return "obj" }
     if (typeof v == "number") { return "int" }
     return "obj"
 }
@@ -3355,8 +3349,22 @@ function jxkRadix(v, r) {
 function jxkDbl(v) { return ktNum(v) }
 function jxkDblStr(a) { return ktRender(flo(a, 0)) }
 function jxkFail(msg) { fail(msg) }
+// The JVM class of a List; twin of ktJvmListClass in abnf/jsrtkotlin.go.
+function ktJvmListClass(kind, n) {
+    if (kind == 4) {
+        if (n == 0) { return "kotlin.collections.EmptyList" }
+        if (n == 1) { return "java.util.Collections$SingletonList" }
+        return "java.util.Arrays$ArrayList"
+    }
+    if (kind == 0) { return "java.util.ArrayList" }
+    return "ArrayList"
+}
 function jxkClass(v) {
+    if (Array.isArray(v)) { return ktJvmListClass(arrKind(v), v.length) }
+    if (ktIsSet(v)) { return "java.util.LinkedHashSet" }
+    if (rtIsDictObj(v)) { return "java.util.LinkedHashMap" }
     var n = k4bSimpleName(v)
+    if (sintIs(v) && sintUns(v)) { return "kotlin." + n }
     if (n == "Int") { return "java.lang.Integer" }
     if (n == "Char") { return "java.lang.Character" }
     if (n == "Long" || n == "Short" || n == "Byte" || n == "Double" || n == "Float" ||
@@ -3378,21 +3386,27 @@ function ktCharMethod(c, name, args) {
     }
     if (name == "code") { return r }
     if (name == "toString") { return k2ChStr(r) }
-    if (name == "isLetter") { return k2IsLetter(r) }
-    if (name == "isDigit") { return r >= 48 && r <= 57 }
-    if (name == "isLetterOrDigit") { return k2IsLetter(r) || (r >= 48 && r <= 57) }
-    if (name == "isWhitespace") {
-        return r == 32 || r == 9 || r == 10 || r == 13 || r == 12 || r == 11
-    }
-    if (name == "isUpperCase") { return r >= 65 && r <= 90 }
-    if (name == "isLowerCase") { return r >= 97 && r <= 122 }
+    // The classes are java.lang.Character's (lib/java-chars.js).
+    if (name == "isLetter") { return jcIsLetter(r) }
+    if (name == "isDigit") { return jcIsDigit(r) }
+    if (name == "isLetterOrDigit") { return jcIsLetter(r) || jcIsDigit(r) }
+    if (name == "isWhitespace") { return k2IsSpace(r) }
+    if (name == "isUpperCase") { return jcIsUpper(r) }
+    if (name == "isLowerCase") { return jcIsLower(r) }
+    if (name == "isTitleCase") { return jcClass(r) % 8 == 3 }
+    if (name == "isISOControl") { return r <= 31 || (r >= 127 && r <= 159) }
     if (name == "uppercaseChar") { return ktChar(k2Upper(r)) }
     if (name == "lowercaseChar") { return ktChar(k2Lower(r)) }
     if (name == "uppercase") { return unicodeCase(k2ChStr(r), 3) }
     if (name == "lowercase") { return unicodeCase(k2ChStr(r), 6) }
-    if (name == "digitToInt") {
-        if (r >= 48 && r <= 57) { return r - 48 }
-        fail("Char \"" + k2ChStr(r) + "\" is not a digit")
+    if (name == "digitToInt" || name == "digitToIntOrNull") {
+        var dg = k2DigitOf(r, args)
+        if (dg >= 0) { return dg }
+        if (name == "digitToIntOrNull") { return null }
+        if (args.length > 0) {
+            ktRaise("IllegalArgumentException", "Char " + k2ChStr(r) + " is not a digit in the given radix=" + k2Int(args[0]))
+        }
+        ktRaise("IllegalArgumentException", "Char " + k2ChStr(r) + " is not a decimal digit")
     }
     if (name == "compareTo") {
         var o = 0
@@ -7162,10 +7176,11 @@ function k4IsListName(n) {
 }
 
 // The kind number a list builder's answer carries: 2 for the Sequence builders, 1
-// for the Array ones, 0 for a List.
+// for the Array ones, 4 for the read-only listOf / emptyList, 0 for a MutableList.
 function k4ListKind(n) {
     if (n == "sequenceOf" || n == "emptySequence") { return 2 }
-    if (n == "listOf" || n == "mutableListOf" || n == "arrayListOf" || n == "emptyList") { return 0 }
+    if (n == "listOf" || n == "emptyList") { return 4 }
+    if (n == "mutableListOf" || n == "arrayListOf") { return 0 }
     return 1
 }
 
@@ -7425,7 +7440,7 @@ function ktGlobalFn(name) {
             return ao
         }
     }
-    // listOfNotNull drops the nulls, so it cannot share listOf's "return the
+    // listOfNotNull drops the nulls, so it cannot share mutableListOf's "return the
     // argument array" function.
     if (name == "listOfNotNull") {
         return function () {

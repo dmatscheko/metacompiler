@@ -241,8 +241,9 @@ func (rt *jsrt) ktLateinitCheck(o *jsObject, name string, v interface{}) interfa
 // the launcher's uncaught-exception line spell. Kotlin's Exception /
 // RuntimeException / IllegalStateException / ... are TYPEALIASES to the java.lang
 // classes on the JVM, so `java` is the oracle (new RuntimeException("x").toString()
-// is "java.lang.RuntimeException: x"). Two of the nineteen live in java.util and two
-// are Kotlin's OWN classes, declared in the `kotlin` package by kotlin-stdlib.
+// is "java.lang.RuntimeException: x"). The collection exceptions and Formatter's
+// live in java.util, PatternSyntaxException in java.util.regex, and two are
+// Kotlin's OWN classes, declared in the `kotlin` package by kotlin-stdlib.
 // The twins are kExcFqcn in languages/kotlin-interpreter.abnf and ktExcFqcn in
 // languages/lib/kotlin-rt.metajs.
 func ktExcFqcn(name string) string {
@@ -251,6 +252,11 @@ func ktExcFqcn(name string) string {
 		return "java.util." + name
 	case "NotImplementedError", "UninitializedPropertyAccessException":
 		return "kotlin." + name
+	case "PatternSyntaxException":
+		return "java.util.regex." + name
+	}
+	if strings.Contains(name, "Format") && name != "NumberFormatException" {
+		return "java.util." + name
 	}
 	return "java.lang." + name
 }
@@ -2830,11 +2836,11 @@ func (rt *jsrt) ktStrMethod2(s, name string, args []interface{}) (interface{}, b
 	case "toList":
 		return &jsArray{elems: chars()}, true
 	case "trim":
-		return strings.TrimSpace(s), true
+		return ktTrim(s, true, true), true
 	case "trimStart":
-		return strings.TrimLeft(s, " \t\r\n\f"), true
+		return ktTrim(s, true, false), true
 	case "trimEnd":
-		return strings.TrimRight(s, " \t\r\n\f"), true
+		return ktTrim(s, false, true), true
 	case "startsWith":
 		return strings.HasPrefix(s, rt.ktStrArg(argAt(args, 0))), true
 	case "endsWith":
@@ -2927,7 +2933,7 @@ func (rt *jsrt) ktStrMethod2(s, name string, args []interface{}) (interface{}, b
 		}
 		return strings.ReplaceAll(s, old, nw), true
 	case "isBlank", "isNotBlank":
-		return (strings.TrimSpace(s) == "") == (name == "isBlank"), true
+		return (ktTrim(s, true, true) == "") == (name == "isBlank"), true
 	case "removePrefix":
 		return strings.TrimPrefix(s, rt.ktStrArg(argAt(args, 0))), true
 	case "removeSuffix":
@@ -2965,7 +2971,7 @@ func (rt *jsrt) ktStrMethod2(s, name string, args []interface{}) (interface{}, b
 		}
 		return s, true
 	case "ifBlank":
-		if strings.TrimSpace(s) == "" {
+		if ktTrim(s, true, true) == "" {
 			return rt.ktCall(argAt(args, 0)), true
 		}
 		return s, true
@@ -3389,6 +3395,20 @@ func ktFormat(rt *jsrt, f string, args []interface{}) string {
 		str:  func(v interface{}) string { return rt.ktpRender(v, 0) },
 		hash: func(v interface{}) int32 { return int32(ktElemHash(rt, v)) },
 		class: func(v interface{}) string {
+			switch t := v.(type) {
+			case *jsArray:
+				return ktJvmListClass(t.kind, len(t.elems))
+			case jsGInt:
+				if t.u {
+					return "kotlin." + ktBoxTypeName(t)
+				}
+			}
+			if ktIsSet(v) {
+				return "java.util.LinkedHashSet"
+			}
+			if _, _, isDict := dictParts(v); isDict {
+				return "java.util.LinkedHashMap"
+			}
 			if bn := jvBoxName(v); bn != "" {
 				return "java.lang." + bn
 			}
@@ -4158,18 +4178,23 @@ func (rt *jsrt) ktCharMethod(c jsChar, name string, args []interface{}) (interfa
 		return float64(c.code), true
 	case "toString":
 		return string(r), true
+	// The classes are java.lang.Character's (jsrtjavachars.go).
 	case "isLetter":
-		return ktIsLetter(r), true
+		return jcIsLetter(int(r)), true
 	case "isDigit":
-		return r >= '0' && r <= '9', true
+		return jcIsDigit(int(r)), true
 	case "isLetterOrDigit":
-		return ktIsLetter(r) || (r >= '0' && r <= '9'), true
+		return jcIsLetter(int(r)) || jcIsDigit(int(r)), true
 	case "isWhitespace":
-		return r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '\f' || r == 0x0b, true
+		return ktIsSpace(r), true
 	case "isUpperCase":
-		return r >= 'A' && r <= 'Z', true
+		return jcIsUpper(int(r)), true
 	case "isLowerCase":
-		return r >= 'a' && r <= 'z', true
+		return jcIsLower(int(r)), true
+	case "isTitleCase":
+		return jcClass(int(r))%8 == 3, true
+	case "isISOControl":
+		return r <= 31 || (r >= 127 && r <= 159), true
 	case "uppercaseChar":
 		return jsChar{code: int32(ktUpper(r))}, true
 	case "lowercaseChar":
@@ -4178,11 +4203,17 @@ func (rt *jsrt) ktCharMethod(c jsChar, name string, args []interface{}) (interfa
 		return caseMapMode(string(r), caseUpper|caseFull), true
 	case "lowercase":
 		return caseMapMode(string(r), caseFull|caseSigma), true
-	case "digitToInt":
-		if r >= '0' && r <= '9' {
-			return float64(r - '0'), true
+	case "digitToInt", "digitToIntOrNull":
+		if d := rt.ktDigitOf(r, args); d >= 0 {
+			return float64(d), true
 		}
-		rt.fail("Char %q is not a digit", string(r))
+		if name == "digitToIntOrNull" {
+			return jsNull, true
+		}
+		if len(args) > 0 {
+			rt.ktRaise("IllegalArgumentException", "Char "+string(r)+" is not a digit in the given radix="+rt.ktpRender(args[0], 0))
+		}
+		rt.ktRaise("IllegalArgumentException", "Char "+string(r)+" is not a decimal digit")
 	case "compareTo":
 		o := int32(0)
 		if oc, ok := argAt(args, 0).(jsChar); ok {
@@ -4212,13 +4243,41 @@ func (rt *jsrt) ktCharMethod(c jsChar, name string, args []interface{}) (interfa
 	return nil, false
 }
 
-// ktIsLetter is Character.isLetter restricted to what this subset can promise: the
-// ASCII letters plus every rune above 0x7f that Go classifies as a letter.
-func ktIsLetter(r rune) bool {
-	if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
-		return true
+// ktDigitOf is Char.digitToInt / digitToIntOrNull: Character.digit's value in the
+// radix (10 without an argument), or -1. Twin of kDigitOf in
+// kotlin-interpreter.abnf and k2DigitOf in languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktDigitOf(r rune, args []interface{}) int {
+	radix := 10
+	if len(args) > 0 {
+		radix = int(giVal(rt, args[0]))
 	}
-	return r > 0x7f && strings.ToUpper(string(r)) != strings.ToLower(string(r))
+	if radix < 2 || radix > 36 {
+		rt.ktRaise("IllegalArgumentException", fmt.Sprintf("radix %d was not in valid range 2..36", radix))
+	}
+	if d := jcDigitVal(int(r)); d < radix {
+		return d
+	}
+	return -1
+}
+
+// ktIsSpace is Char.isWhitespace, which trim and isBlank also read:
+// Character.isWhitespace || Character.isSpaceChar, so the controls 9..13 and
+// 28..31 plus every Zs, Zl and Zp. Twin of kIsSpaceCh in kotlin-interpreter.abnf
+// and k2IsSpace in languages/lib/kotlin-rt.metajs.
+func ktIsSpace(r rune) bool {
+	return (r >= 9 && r <= 13) || (r >= 28 && r <= 32) || r == 160 || r == 5760 ||
+		(r >= 8192 && r <= 8202) || r == 8232 || r == 8233 || r == 8239 || r == 8287 || r == 12288
+}
+
+// ktTrim drops leading (left) and trailing (right) whitespace.
+func ktTrim(s string, left, right bool) string {
+	if left {
+		s = strings.TrimLeftFunc(s, ktIsSpace)
+	}
+	if right {
+		s = strings.TrimRightFunc(s, ktIsSpace)
+	}
+	return s
 }
 
 func ktUpper(r rune) rune {
@@ -7092,7 +7151,7 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 			return out
 		})
 	case "listOfNotNull":
-		// listOfNotNull drops the nulls, so it cannot share listOf's "return the
+		// listOfNotNull drops the nulls, so it cannot share mutableListOf's "return the
 		// argument array" function.
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			out := &jsArray{}
@@ -7108,9 +7167,13 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 	// returns its argument array; they are here too so a QUALIFIED spelling
 	// (kotlin.collections.listOf) resolves through ktPkgMember, which has no reach
 	// into the emitted scope.
-	case "listOf", "mutableListOf", "arrayListOf", "emptyList":
+	case "mutableListOf", "arrayListOf":
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			return &jsArray{elems: append([]interface{}{}, args...)}
+		})
+	case "listOf", "emptyList":
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return &jsArray{elems: append([]interface{}{}, args...), kind: ktArrFixed}
 		})
 	// The Array and Sequence builders are the same list, carrying its kind number.
 	case "arrayOf", "emptyArray",
@@ -7461,16 +7524,37 @@ const (
 )
 
 // The kind numbers kept on a host array (jsArray.kind; arrKind / arrKindSet in the
-// other two engines): 0 a List, 1 an Array, 2 a Sequence, 3 a Map's values view.
+// other two engines): 0 a List, 1 an Array, 2 a Sequence, 3 a Map's values view, 4
+// a read-only List from listOf / emptyList (whose JVM class ktJvmListClass names).
 // Twin of kArrWords in kotlin-interpreter.abnf and ktArrWord in
 // languages/lib/kotlin-rt.metajs.
 const (
 	ktArrArray = 1
 	ktArrSeq   = 2
 	ktArrVals  = 3
+	ktArrFixed = 4
 )
 
-var ktArrWords = [...]string{ktKindList, ktKindArr, ktKindSeq, ktKindColl}
+var ktArrWords = [...]string{ktKindList, ktKindArr, ktKindSeq, ktKindColl, ktKindList}
+
+// ktJvmListClass is the JVM class of a List: kotlin-stdlib's listOf answers
+// EmptyList, a Collections.singletonList or an Arrays.asList by its size; every
+// other List here is a java.util.ArrayList. An Array or a Sequence keeps its simple
+// name. Twin of kJvmListClass in kotlin-interpreter.abnf and ktJvmListClass in
+// languages/lib/kotlin-rt.metajs.
+func ktJvmListClass(kind, n int) string {
+	switch {
+	case kind == ktArrFixed && n == 0:
+		return "kotlin.collections.EmptyList"
+	case kind == ktArrFixed && n == 1:
+		return "java.util.Collections$SingletonList"
+	case kind == ktArrFixed:
+		return "java.util.Arrays$ArrayList"
+	case kind == 0:
+		return "java.util.ArrayList"
+	}
+	return "ArrayList"
+}
 
 // ktArrTagged marks a fresh array with a kind number.
 func ktArrTagged(a *jsArray, k int) *jsArray {

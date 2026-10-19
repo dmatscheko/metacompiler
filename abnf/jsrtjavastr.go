@@ -1177,7 +1177,13 @@ func jxKind(v interface{}) string {
 		return "bool"
 	case jsChar:
 		return "char"
-	case jsGInt, float64:
+	case jsGInt:
+		// An unsigned Kotlin integer is an object to Formatter (kotlin.UInt).
+		if v.(jsGInt).u {
+			return "obj"
+		}
+		return "int"
+	case float64:
 		return "int"
 	case jsJFlo:
 		return "float"
