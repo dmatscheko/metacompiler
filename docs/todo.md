@@ -149,7 +149,7 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-617 kotlin: `Char.isLetter` for uncased letters; UInt in format; collection class names in format errors · P2 · KT · OPEN [V spec-only]
+### T-617 kotlin: `Char.isLetter` for uncased letters; UInt in format; collection class names in format errors · P2 · KT · IN PROGRESS (KT worker, round 2) [V spec-only]
 `'中'.isLetter()` → false (JVM true): interp kIsLetterCh and layer 2 k2IsLetter treat a letter without case as a non-letter;
 java-chars.js (now linked into kotlin) has the right table (read in the code, probe first). `"%d".format(1u)` formats as an int
 (JVM IllegalFormatConversionException "d != kotlin.UInt"). `"%d".format(listOf(1,2))` → "d != ArrayList" (JVM
