@@ -4439,7 +4439,7 @@ KwContinue  = "continue" KwEnd ;
         if (name == "init" && isTypeVal(target) && target.__isclass === true) {
             return constructInstance(target, args, mcLabels)
         }
-        if (name == "init" && target.__isenum === true) { return enumFromRaw(target, args.length > 0 ? args[0] : undefined) }
+        if (name == "init" && target.__isenum === true) { return swEnumCall(target, args, mcLabels == null ? [] : mcLabels) }
         if (name == "init" && target.__tname !== undefined) { return swBuiltinInit(target)(args.length > 0 ? args[0] : undefined) }
         if (isTypeVal(target)) {
             var tt = accTable(target)
@@ -6907,8 +6907,9 @@ KwContinue  = "continue" KwEnd ;
             // E(rawValue: r): the failable initializer every raw-value enum gets for
             // free - the case whose raw value is r, or nil.
             if (f != undefined && f !== null && f.__isenum === true) {
+                var ev = swEnumCall(f, argv, recLabels(recs))
                 writeBacks(ea.boxes)
-                return enumFromRaw(f, argv.length > 0 ? argv[0] : undefined)
+                return ev
             }
             if (f != undefined && f !== null && f.__isclass === true) {
                 var obj = constructInstance(f, argv, recLabels(recs))
@@ -7604,6 +7605,12 @@ KwContinue  = "continue" KwEnd ;
                 var oldL = ref.name == "self" ? null : lookupOrNull(ref.name)
                 if (catTy != "") { v = swAdoptAnn(v, catTy) }
                 if (op != "=") { v = applyOp(op, swGetName(ref.name), v) }
+                // `self = .case` in an enum initializer: the case is the answer
+                // (swEnumCall's holder).
+                if (ref.name == "self") {
+                    var eh = findThis()
+                    if (eh !== null && eh !== undefined && typeof eh == "object" && eh.__eholder === true) { eh.__eself = v }
+                }
                 // `self = X` inside a mutating method rewrites the value in place, so
                 // the caller's variable (which holds the same struct value) changes too.
                 if (ref.name == "self" && isStructVal(v)) { assignSelf(v); return v }
@@ -10225,6 +10232,24 @@ KwContinue  = "continue" KwEnd ;
     }
     // Enum case equality: the case NAME plus the associated values, so a leading-dot
     // case and a qualified one of the same enum compare equal.
+    // `E(args)`: an initializer the enum declares, unless the call is the raw-value
+    // one (`E(rawValue: r)`) or the enum declares none. The initializer runs with a
+    // HOLDER as self; `self = .case` inside it stores the case there (makeAssign),
+    // and that is the answer - nil when a failable one returned nil. Twin of the
+    // enum arm of makeCall in swift-to-llvm-ir.abnf.
+    function swEnumCall(e, argv, labels) {
+        var tbl = e.__members
+        var init = tbl == undefined || tbl === null || !hasOwn(tbl, "init") ? null : tbl["init"]
+        if (typeof init != "function" || (labels.length == 1 && labels[0] == "rawValue")) {
+            return enumFromRaw(e, argv.length > 0 ? argv[0] : undefined)
+        }
+        var holder = {__eholder: true}
+        pendingLabels = labels
+        var r = init.apply(undefined, concat2impl([holder], argv))
+        pendingLabels = null
+        if (r === null || holder.__eself === undefined) { return null }
+        return holder.__eself
+    }
     function enumFromRaw(e, raw) {
         var order = e.__cases
         if (order == undefined || order == null) { return null }

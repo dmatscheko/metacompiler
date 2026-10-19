@@ -5922,10 +5922,16 @@ KwContinue  = "continue" KwEnd ;
                     cur = rc.v
                 } else if (s.kind == "mcall" && s.name == "init" && pathKey != null && typeAt(pathKey) != null
                            && typeAt(pathKey).kind == "enum") {
-                    // `E.init(rawValue: r)`: the failable raw-value initializer.
-                    var rea = withTypeCtx(pathKey, function() { return emitArgRecs(b, s.args) })
-                    b = rea.b
-                    cur = b.NewCall(rtRawCase(), [cur, callExt(b, "js_swidx", [rea.v, emitNum(b, 0)])])
+                    if (swEnumHasInit(typeAt(pathKey), s.args)) {
+                        var eir = swEnumInitCall(b, typeAt(pathKey), pathKey, cur, s.args)
+                        b = eir.b
+                        cur = eir.v
+                    } else {
+                        // `E.init(rawValue: r)`: the failable raw-value initializer.
+                        var rea = withTypeCtx(pathKey, function() { return emitArgRecs(b, s.args) })
+                        b = rea.b
+                        cur = b.NewCall(rtRawCase(), [cur, callExt(b, "js_swidx", [rea.v, emitNum(b, 0)])])
+                    }
                     pathKey = null
                 } else if (s.kind == "mcall" && s.name == "init" && pathKey != null && typeAt(pathKey) != null
                            && typeAt(pathKey).kind != "proto") {
@@ -6592,6 +6598,26 @@ KwContinue  = "continue" KwEnd ;
     // tkey is the QUALIFIED key of the type being constructed - typeKeyOf(name) for a
     // bare name, and the resolved path for `A.Inner(...)`; the bare name would make
     // two same-named nested types share one initializer sig list.
+    // `E(args)` / `E.init(args)`: an initializer the enum declares, unless the call is
+    // the raw-value one. It runs with a HOLDER as self, and `self = .case` inside it
+    // stores the case there (makeAssign); a failable one's nil answers nil. Twin of
+    // swEnumCall in swift-interpreter.abnf.
+    function swEnumHasInit(krec, args) {
+        return krec != null && krec.inits.length > 0 && !(args.length == 1 && args[0].lbl == "rawValue")
+    }
+    function swEnumInitCall(b, krec, ck, eV, args) {
+        var holder = callExt(b, "js_obj_new", [])
+        var iargs = callExt(b, "js_arr_new", [])
+        callExt(b, "js_arr_push", [iargs, holder])
+        var eai = withTypeCtx(ck, function() { return emitArgRecsInto(b, args, iargs) })
+        b = eai.b
+        var ikey = emitOverloadKey(b, "init", krec.inits, args, iargs, 1)
+        var tblV = callExt(b, "js_get", [eV, emitStr(b, "__members")])
+        var iret = callExt(b, "js_call", [callExt(b, "js_get", [tblV, ikey]), hUndef, iargs])
+        emitWriteBacks(b, eai.boxes)
+        var esV = callExt(b, "js_get", [holder, emitStr(b, "__eself")])
+        return {b: b, v: b.NewSelect(truthy(b, callExt(b, "js_seq", [iret, hNull])), hNull, esV)}
+    }
     function emitConstruct(b, tkey, clsV, args) {
         var rec = typeRec(tkey)
         var objV = callExt(b, "js_obj_new", [])
@@ -7095,6 +7121,9 @@ KwContinue  = "continue" KwEnd ;
             var krec = typeAt(ck)
             var isEnumT = krec == null ? enumNames[name] == 1 : krec.kind == "enum"
             var isClassT = krec == null ? classNames[name] == 1 : krec.kind == "class"
+            if (isEnumT && swEnumHasInit(krec, args)) {
+                return swEnumInitCall(b, krec, ck, b.NewCall(rtKGet(), [curScopeV, emitStr(b, ck)]), args)
+            }
             // E(rawValue: r): the failable initializer every raw-value enum gets free.
             if (isEnumT) {
                 var eV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, ck)])
@@ -7535,6 +7564,13 @@ KwContinue  = "continue" KwEnd ;
                     else { selfB2.NewCall(rtSetProp(), [selfV2, nameV, vSelf]) }
                     selfB2.NewBr(joinB2)
                     return {b: joinB2, v: v}
+                }
+                // `self = .case` in an enum initializer: the case is the answer
+                // (the enum arm of makeCall reads it off the holder).
+                if (ref.name == "self" && curType() != null && enumNames[curType().name] == 1) {
+                    callExt(b, "js_set", [b.NewCall(rtKGet(), [curScopeV, emitStr(b, "this")]), emitStr(b, "__eself"), v])
+                    b.NewCall(rtKSet(), [curScopeV, nameV, v])
+                    return {b: b, v: v}
                 }
                 if (ref.name == "self" && hasStructs) {
                     b.NewCall(rtAssignSelf(), [b.NewCall(rtKGet(), [curScopeV, emitStr(b, "this")]), v])
@@ -10992,6 +11028,9 @@ KwContinue  = "continue" KwEnd ;
         hasRichEnum = true
         var rec = newTypeRec(name)
         rec.kind = "enum"
+        for (var mi = 0; mi < mem.methods.length; mi++) {
+            if (mem.methods[mi].name == "init") { rec.inits.push(mem.methods[mi].params) }
+        }
         adoptNested(rec, mem)
         noteDeclRec(rec)
         return function(b) {

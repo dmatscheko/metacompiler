@@ -5178,6 +5178,33 @@ func s129() {
     check("129a", e == [10, 20] && each(3, then: { $0 + 1 }) == [4])
 }
 
+// ===== SECTION 130: an enum's own initializers; Result(catching:) =====
+// `init(...)` in an enum assigns `self = .case`, a failable one may return nil,
+// and `E(rawValue:)` keeps working beside them; the stdlib's Result(catching:)
+// is such an initializer. Every value read off swiftc 6.1.2.
+enum Level130: Int {
+    case low = 1, mid, high
+    init?(score: Int) {
+        if score < 0 { return nil }
+        self = score < 50 ? .low : (score < 80 ? .mid : .high)
+    }
+    init(clamping n: Int) { self = Level130(rawValue: min(max(n, 1), 3))! }
+}
+enum Token130 {
+    case num(Int), word(String)
+    init(_ s: String) { if let n = Int(s) { self = .num(n) } else { self = .word(s) } }
+}
+enum Err130: Error { case zero }
+func half130(_ n: Int) throws -> Int { if n == 0 { throw Err130.zero }; return n / 2 }
+func s130() {
+    check("130a", Level130(score: 90) == .high && Level130(score: -1) == nil && Level130(rawValue: 2) == .mid
+        && Level130(clamping: 9) == .high && Level130.init(score: 60) == .mid)
+    check("130b", "\(Token130("12"))" == "num(12)" && "\(Token130.init("ab"))" == "word(\"ab\")")
+    let ok = Result { try half130(8) }
+    let bad = Result(catching: { try half130(0) })
+    check("130c", (try? ok.get()) == 4 && (try? bad.get()) == nil)
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5308,6 +5335,7 @@ func main() {
     s127() // SECTION-CALL 127
     s128() // SECTION-CALL 128
     s129() // SECTION-CALL 129
+    s130() // SECTION-CALL 130
     print("full: \(checks) checks, \(fails) failures")
 }
 

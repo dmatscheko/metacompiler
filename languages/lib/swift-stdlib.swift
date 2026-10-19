@@ -6,6 +6,10 @@ enum Result<Success, Failure: Error> {
     case success(Success)
     case failure(Failure)
 
+    init(catching body: () throws -> Success) {
+        do { self = .success(try body()) } catch { self = .failure(error) }
+    }
+
     func get() throws -> Success {
         switch self {
         case .success(let v): return v
