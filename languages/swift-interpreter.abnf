@@ -6006,6 +6006,10 @@ KwContinue  = "continue" KwEnd ;
             if (r != undefined) { return r }
             try {
                 r = restT()
+                // The value a return hands back is fixed BEFORE the defer runs, so a
+                // defer that mutates the returned array does not reach the caller.
+                // Twin of swDeferDepth in swift-to-llvm-ir.abnf.
+                if (r != undefined && r !== null && r.isRet === true) { r = {isRet: true, v: swCopy(r.v)} }
             } finally {
                 deferT()
             }

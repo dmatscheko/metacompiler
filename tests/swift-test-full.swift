@@ -4982,6 +4982,28 @@ func s119() {
     check("119b", total == 6)
 }
 
+// ===== SECTION 120: a return value is fixed before the defer runs =====
+// `return log` hands back the array as it is at the return; a defer that then
+// appends to `log` (or mutates a returned struct) does not reach the caller,
+// while a class instance is shared. Every value read off swiftc 6.1.2.
+struct S120 { var x = 1 }
+class K120 { var x = 1 }
+func arr120() -> [String] { var log = ["a"]; defer { log.append("late") }; return log }
+func st120() -> S120 { var s = S120(); defer { s.x = 9 }; return s }
+func cls120() -> K120 { let k = K120(); defer { k.x = 9 }; return k }
+func nest120() -> [Int] {
+    var xs = [1]
+    defer { xs.append(99) }
+    if xs.count > 0 {
+        defer { xs.append(50) }
+        return xs
+    }
+    return []
+}
+func s120() {
+    check("120a", arr120() == ["a"] && st120().x == 1 && cls120().x == 9 && nest120() == [1])
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5102,6 +5124,7 @@ func main() {
     s117() // SECTION-CALL 117
     s118() // SECTION-CALL 118
     s119() // SECTION-CALL 119
+    s120() // SECTION-CALL 120
     print("full: \(checks) checks, \(fails) failures")
 }
 

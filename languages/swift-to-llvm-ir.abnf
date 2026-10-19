@@ -3427,6 +3427,11 @@ KwContinue  = "continue" KwEnd ;
     // as its finally clause. A defer that was never reached - an early return above
     // it - never runs, exactly like Swift's.
     function makeDefer(t) { return {isdefer: t} }
+    // How many defer-protected block tails enclose the code being emitted. A return
+    // there copies its value first: it is fixed BEFORE the defer runs, so a defer
+    // that mutates the returned array does not reach the caller. Twin in
+    // swSeqWithDefers of swift-interpreter.abnf.
+    var swDeferDepth = 0
     function swSeqWithDefers(items) {
         var cut = -1
         for (var i = 0; i < items.length && cut < 0; i++) {
@@ -3440,7 +3445,10 @@ KwContinue  = "continue" KwEnd ;
             b = before(b)
             // The rest of the block is a ctl closure (isCtl), so a return/break/
             // continue leaving it becomes a signal that excDispatch re-issues here.
-            var bodyClo = callExt(b, "js_closure", [handle(emitFunc([], restT, false, true)), curScopeV])
+            swDeferDepth++
+            var bodyIdx = emitFunc([], restT, false, true)
+            swDeferDepth--
+            var bodyClo = callExt(b, "js_closure", [handle(bodyIdx), curScopeV])
             var finClo = callExt(b, "js_closure", [handle(emitFunc([], deferT, false, false)), curScopeV])
             return excDispatch(b, callExt(b, "js_try", [bodyClo, hUndef, finClo]))
         }
@@ -8292,6 +8300,7 @@ KwContinue  = "continue" KwEnd ;
                 var r = t(b)
                 b = r.b
                 v = retLabelled(b, r.v)
+                if (swDeferDepth > 0) { v = emitCopy(b, v) }
             }
             return retStmt(b, v) // plain ret, or a control signal when leaving a try body
         }
