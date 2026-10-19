@@ -6571,6 +6571,52 @@ def s125():
             out.append(e.__context__)
     check("ctx1", S125ctx(0) == "ValueError('outer')" and S125ctx(1) == "ValueError('outer')" and out == [None])
 
+# ===== SECTION 126: a generator's body runs once =====
+# Every statement of a generator body runs exactly once however it is stepped:
+# next(), send(), throw(), close() and yield from resume it where it is parked.
+S126log = []
+
+def S126g():
+    S126log.append("start")
+    try:
+        x = yield 1
+        S126log.append(("got", x))
+        yield 2
+    except ValueError as e:
+        S126log.append(("caught", str(e)))
+        yield 3
+    finally:
+        S126log.append("fin")
+
+def S126inner():
+    S126log.append("inner")
+    r = yield "a"
+    S126log.append(("inner got", r))
+    return "ret"
+
+def S126outer():
+    v = yield from S126inner()
+    S126log.append(("ret", v))
+    yield "b"
+
+def S126app(xs):
+    xs.append(1)
+    yield
+    xs.append(2)
+    yield
+
+def s126():
+    g = S126g()
+    vals = [next(g), g.send("s"), g.throw(ValueError("v"))]
+    g.close()
+    check("gen1", vals == [1, 2, 3] and S126log == ["start", ("got", "s"), ("caught", "v"), "fin"])
+    del S126log[:]
+    o = S126outer()
+    vals2 = [next(o), o.send(5)] + list(o)
+    shared = []
+    check("gen2", vals2 == ["a", "b"] and S126log == ["inner", ("inner got", 5), ("ret", "ret")]
+          and list(S126app(shared)) == [None, None] and shared == [1, 2])
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -6694,5 +6740,6 @@ def main():
     s123() # SECTION-CALL 123
     s124() # SECTION-CALL 124
     s125() # SECTION-CALL 125
+    s126() # SECTION-CALL 126
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

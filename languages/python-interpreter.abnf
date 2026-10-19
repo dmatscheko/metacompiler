@@ -37,47 +37,6 @@ class body binds a LOCAL even when the module already has that name, and global 
 nonlocal are the only way out (see pySet).
 
 Known deviations, all deliberate:
-  - Generators run by REPLAY. There are no coroutines in the value model, so every
-    step re-runs the body from the top, feeds the yields that already happened the
-    values they were sent, and stops at the next one. Same model as
-    languages/js-interpreter.abnf; the two COMPILED halves have genuine coroutines
-    (runtime.c's tag-15 cell) and match CPython exactly, so this is the one place
-    the three engines are not the same machine.
-
-    EXACTLY what differs, and it is only this: every side effect BEFORE the yield
-    the generator is parked at happens once per resume instead of once, so the
-    n-th step re-runs the first n-1 segments of the body and stepping a generator
-    to exhaustion is O(n^2) in the body rather than O(n). A side effect on shared
-    state therefore lands more than once - a list a generator appends to before
-    its first yield ends up [1, 1, 2] where CPython leaves [1, 2].
-
-    VALUES are not affected by that repetition where they come from a one-shot
-    source: a step of an iterator, a generator or a user __next__ object the
-    replay did not create is logged on the first run and answered from the log
-    by every replay (genPull), so a generator over iter(xs) yields every element.
-
-    ORDER IS NOT AFFECTED: an interleaving probe that numbers every driver event
-    and every generator event into one log gives, after collapsing repeats,
-    CPython's sequence - for two generators driven alternately, for a generator
-    mutating shared state, for try / with / finally nested around a yield, for
-    close() mid-run, and for an exception object built before a yield and raised
-    after it. The suspension signal is a host-level throw, so makeTry and runWith
-    let it pass through untouched (isGenSuspend), and close() replays to the
-    parked yield and raises there, which is how the `finally` runs at the moment
-    CPython runs it.
-
-    gen.throw(exc) RAISES AT THE PARKED YIELD, so the body's own except and
-    finally clauses see it, and the record travels on the resume value - which is
-    what makes it per-coroutine by construction. The compiled halves have it as
-    runtime.c's gen_throw and abnf/jsrt.go's throwInto. A generator that has not
-    started, or that is done, runs NOTHING - no `finally` - and the exception
-    propagates out of throw() itself, as in CPython. close() is throw(
-    GeneratorExit()) in all three engines, so `except GeneratorExit` and a bare
-    `except` catch a close and `except Exception` does not.
-
-    At a `yield from` a GeneratorExit is not forwarded to the delegate's throw():
-    the delegate is CLOSED and the GeneratorExit raised in the outer generator,
-    PEP 380's rule, so it is raised there even when the delegate swallows it.
   - Complex division is the textbook formula, not CPython's scaled (Smith)
     one, so a quotient can differ in the last digit.
   - An imported module binds its names flat, without a module object, so the
@@ -2182,19 +2141,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pyMkIter(name, arr) {
         var it = {__pyit: name, __a: arr, __i: 0}
         it.next = function() { return pyItStep(it) }
-        if (genRuns.length > 0) { genStamp(it) }
         return it
     }
-    // A step, or a drain, of a cursor an active replay did not create is a
-    // logged pull (genPull).
     function pyItStep(it) {
-        if (genRuns.length > 0) {
-            var gi = genExtRun(it)
-            if (gi >= 0) { return genPull(gi, function() { return pyItAdvance(it) }) }
-        }
-        return pyItAdvance(it)
-    }
-    function pyItAdvance(it) {
         if (it.__g !== undefined) { return pySeqStep(it) }
         if (it.__w !== undefined) { pyWatchCheck(it) }
         if (it.__i >= it.__a.length) { return {value: undefined, done: true} }
@@ -2296,13 +2245,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // What is LEFT of an iterator, which the read then EXHAUSTS - so next(it)
     // followed by list(it) does not repeat an element.
     function pyItRest(it) {
-        if (genRuns.length > 0) {
-            var gi = genExtRun(it)
-            if (gi >= 0) { return genPull(gi, function() { return pyItDrain(it) }).slice(0) }
-        }
-        return pyItDrain(it)
-    }
-    function pyItDrain(it) {
         var out = []
         if (it.__g !== undefined) {
             while (true) {
@@ -4372,16 +4314,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         pyListErr("TypeError", "iter() returned non-iterator of type '" + pyTypeOf(it).__name + "'")
     }
     // One step of a user iterator, in the {value, done} shape: done carries the
-    // StopIteration __next__ raised, which next() re-raises unchanged. Stepping
-    // one an active replay did not create is a logged pull (genPull).
+    // StopIteration __next__ raised, which next() re-raises unchanged.
     function pyUserStep(it, nx) {
-        if (genRuns.length > 0) {
-            var gi = genExtRun(it)
-            if (gi >= 0) { return genPull(gi, function() { return pyUserAdvance(it, nx) }) }
-        }
-        return pyUserAdvance(it, nx)
-    }
-    function pyUserAdvance(it, nx) {
         var saved = scopes
         var out = anytype
         try { out = {value: nx(it), done: false, stop: null} }
@@ -10479,70 +10413,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
 
-    // ----- Generators, driven by REPLAY -----
-    // There are no coroutines in the value model - a thunk cannot be suspended half way
-    // - so every send() re-runs the body from the top, hands the yields that already
-    // happened the values they were sent, and stops at the next one by throwing a
-    // signal the driver catches. A PURE generator behaves exactly right; one with side
-    // effects repeats them, which is the honest price of not having a stack to freeze
-    // (the same model languages/js-interpreter.abnf uses, and it is stated in the
-    // :description header). genRuns is the stack of active replays, innermost last, so
-    // a generator driven from inside another one still finds its own run.
-    var genRuns = []
-    // THE PULL LOG. Re-running a body is only sound if every value it reads comes
-    // out the same, and a ONE-SHOT source does not: `for x in it` over an iterator
-    // made outside the generator would be pulled again by every replay, so the
-    // generator over iter([5,6,7,8]) would answer [5, 7]. So a pull on an iterator
-    // the replay did NOT create - a cursor, a generator or a user __next__ object
-    // born before the run began - is answered from the generator's log when a
-    // previous run already made it, and made live (and logged) otherwise.
-    //
-    // "Born before the run" is a serial: an iterator made while any replay is
-    // active is stamped (__genborn), each run records the serial it started at
-    // (floor), and anything with no stamp was made outside every run. The pull is
-    // logged by EVERY active run it is external to, because an inner generator
-    // the outer one created is re-created by the outer's replay and must find the
-    // same answers in the outer log.
-    var genSerial = 0
-    function genStamp(o) {
-        genSerial = genSerial + 1
-        o.__genborn = genSerial
-    }
-    // The outermost active run o is external to, or -1 when no run is.
-    function genExtRun(o) {
-        var born = 0
-        if (o.__genborn !== undefined) { born = o.__genborn }
-        for (var i = 0; i < genRuns.length; i++) {
-            if (born <= genRuns[i].floor) { return i }
-        }
-        return 0 - 1
-    }
-    // One logged pull for the runs from index i in: the log entry a run already
-    // holds at this position, else live() - its value or what it raised.
-    function genPull(i, live) {
-        var hit = anytype
-        hit = null
-        var j
-        for (j = i; j < genRuns.length; j++) {
-            if (hit == null && genRuns[j].lp < genRuns[j].log.length) { hit = genRuns[j].log[genRuns[j].lp] }
-        }
-        if (hit == null) {
-            var saved = scopes
-            try { hit = {raised: false, v: live()} }
-            catch (e) {
-                if (isGenSuspend(e)) { throw e }
-                scopes = saved
-                hit = {raised: true, v: e}
-            }
-        }
-        for (j = i; j < genRuns.length; j++) {
-            var rn = genRuns[j]
-            if (rn.lp == rn.log.length) { rn.log.push(hit) }
-            rn.lp = rn.lp + 1
-        }
-        if (hit.raised) { throw hit.v }
-        return hit.v
-    }
     // The walk-time marker: a `yield` anywhere in a def's body makes it a generator.
     var genFlags = []
     function genPush() { genFlags.push(false) }
@@ -10664,28 +10534,27 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (var k = 0; k < p.pkw.length; k++) { sbPattern(p.pkw[k].cpat) }
         }
     }
-    // The value of one `yield`, RAW - without the exit/throw-in unpacking doYield
-    // does below. A replay of an already-produced yield answers with the value the
-    // corresponding send(v) passed in and carries on; the one being produced now
-    // throws out to genSend.
-    //
-    // The RECORD TRAVELS ON THE RESUME VALUE, which is the one thing a replay can
-    // carry into a suspended body (the pattern languages/js-interpreter.abnf uses
-    // for its async .throw()). A close() or a throw() puts its record on the resume
-    // channel of the yield the generator is parked at, and only that yield ever sees
-    // it - by construction, since it is the last one the replay re-runs.
-    //
-    // Only the `yield from` loop wants the value raw: it has to branch on the SHAPE
-    // of what came back, because a record RAISED here could never reach the
-    // delegate's own throw(). Same split as js-interpreter.abnf's doYieldRaw.
-    function doYieldRaw(run, v) {
-        if (run.k < run.target) {
-            var sent = run.sent[run.k + 1]
-            run.k = run.k + 1
-            return sent
-        }
-        run.k = run.k + 1
-        throw {__genYield: true, v: v}
+    // ----- Generators, on the tag host's coroutines -----
+    // A generator's body runs on a coroutine of its own (coNew / coResume /
+    // coYield, manual 7.14), so a yield parks it at any depth of calls and the
+    // next step continues it there, running nothing twice. The interpreter's run
+    // state - the scope chain and the generator's part of pyCurExc, the
+    // exceptions its except clauses are handling - belongs to the side that runs:
+    // a step installs the generator's, a yield files it back, and the stepper
+    // reinstalls its own. genCur is the generators whose bodies are running,
+    // innermost last.
+    var genCur = []
+    // The value of one `yield`, RAW - without the throw-in unpacking doYield does
+    // below. A close() or a throw() puts its record on the RESUME VALUE of the
+    // yield the generator is parked at, so only that yield ever sees it. Only the
+    // `yield from` loop wants the value raw: it has to branch on the SHAPE of what
+    // came back, because a record RAISED here could never reach the delegate's own
+    // throw().
+    function doYieldRaw(g, v) {
+        g.sc = scopes
+        g.exc = []
+        while (pyCurExc.length > g.eb) { g.exc.unshift(pyCurExc.pop()) }
+        return coYield(v)
     }
     // Is this resume value the throw-in record genThrow puts on the channel?
     function isThrowIn(s) { return s != undefined && s != null && s.__genThrowIn == true }
@@ -10753,7 +10622,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pyDelegThrow(d, exc) {
         if (!isGen(d)) { pyRaise(exc) }
         var st = d.st
-        if (st.done || st.count == 0) { st.done = true; pyRaise(exc) }
+        if (st.done || !st.started) { st.done = true; pyRaise(exc) }
         var r = anytype
         try { r = genStep(d, {__genThrowIn: true, v: exc}) }
         catch (e) { st.done = true; throw e }
@@ -10764,13 +10633,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // delegate's return value is kept, a send() reaches it, and a .throw() is
     // offered to the delegate's own except arms, as in CPython. The shape is
     // js-interpreter.abnf's doYield(star) one for one.
-    function doYieldFrom(run, v) {
+    function doYieldFrom(g, v) {
         var d = pyDelegOf(v)
         var st = anytype
         st = pyDelegStep(d, undefined)
         while (!st.done) {
             var sent = anytype
-            sent = doYieldRaw(run, st.value)
+            sent = doYieldRaw(g, st.value)
             // The RESUME DISPOSITION: a throw-in drives the delegate's throw() -
             // close()'s GeneratorExit too - and anything else its next() WITH the
             // sent value, which is how g.send(x) reaches a delegated generator.
@@ -10786,22 +10655,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return st.value
     }
     function doYield(isFrom, v) {
-        var run = genRuns[genRuns.length - 1]
-        if (run == undefined) { fail("yield outside a generator") }
-        if (isFrom) { return doYieldFrom(run, v) }
+        if (genCur.length == 0) { fail("yield outside a generator") }
+        var g = genCur[genCur.length - 1]
+        if (isFrom) { return doYieldFrom(g, v) }
         var sent = anytype
-        sent = doYieldRaw(run, v)
+        sent = doYieldRaw(g, v)
         // g.throw(exc) raises an ORDINARY Python exception here, so the body's own
         // except arms may take it.
         if (isThrowIn(sent)) { pyRaise(sent.v) }
         return sent
-    }
-    // Is this in-flight throw a generator SUSPENSION rather than a Python
-    // exception? Every host-level try in this file has to ask, because the
-    // suspension unwinds the same way an exception does and must not be seen by
-    // the program's own try/except/finally or by a `with`'s __exit__.
-    function isGenSuspend(e) {
-        return e != undefined && e != null && e.__genYield == true
     }
     // items = [valueThunk?, {yfrom}?]
     function makeYield(items, pos) {
@@ -10815,60 +10677,62 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var vt = (t != null) ? t : makeConst(undefined)
         return function() { return doYield(isFrom, vt()) }
     }
+    // The body's coroutine is made at the first step; a generator expression
+    // (makeGenExp) never needs one.
     function newGenObject(bodyT, defScopes, plist, dflts, args, named) {
-        var g = {__gen: true, st: {sent: [], count: 0, done: false, ret: undefined, log: []},
-                 body: bodyT, env: defScopes, plist: plist, dflts: dflts, args: args, named: named}
-        if (genRuns.length > 0) { genStamp(g) }
-        return g
+        return {__gen: true, st: {started: false, done: false, ret: undefined},
+                body: bodyT, env: defScopes, plist: plist, dflts: dflts, args: args, named: named,
+                co: null, sc: null, exc: [], eb: 0}
     }
     // One step. Returns {yielded, value}; when the body runs to completion the
-    // generator is done and its return value is kept for the StopIteration.
-    // Stepping a generator an active replay did not create is a logged pull.
+    // generator is done and its return value is kept for the StopIteration. A
+    // body that RAISES is done as well, so the next step is StopIteration.
     function genStep(g, sendv) {
-        if (genRuns.length > 0) {
-            var gi = genExtRun(g)
-            if (gi >= 0) { return genPull(gi, function() { return genRun(g, sendv) }) }
-        }
-        return genRun(g, sendv)
-    }
-    // A step of a generator whose body is RUNNING (it stepped itself, directly
-    // or through another) is CPython's ValueError. Twin of jsGenerator.enter in
-    // abnf/jsrt.go and gen_busy in languages/lib/runtime.c.
-    function genRun(g, sendv) {
         var st = g.st
         if (st.done) { return {yielded: false, value: st.ret} }
+        // A step of a generator whose body is RUNNING (it stepped itself, directly
+        // or through another) is CPython's ValueError. Twin of jsGenerator.enter
+        // in abnf/jsrt.go and gen_busy in languages/lib/runtime.c.
         if (g.running === true) { pyListErr("ValueError", "generator already executing") }
-        g.running = true
-        try {
-            if (g.gx !== undefined) { return gxStep(g, sendv) }
-            return genReplay(g, st, sendv)
-        } finally { g.running = false }
-    }
-    function genReplay(g, st, sendv) {
-        st.sent.push(sendv)
-        var run = {target: st.count, k: 0, sent: st.sent, log: st.log, lp: 0, floor: genSerial}
-        genRuns.push(run)
-        var saved = scopes
-        var out = anytype
-        out = undefined
-        var yielded = false
-        try {
-            scopes = callScopes(g.env, g.plist, g.dflts, g.args, g.named)
-            var r = g.body()
-            st.ret = (r != undefined && r.isRet) ? r.v : undefined
-            st.done = true
-        } catch (e) {
-            if (e != undefined && e != null && e.__genYield == true) { yielded = true; out = e.v }
-            // A generator whose body RAISES is FINISHED, so the next next() gets
-            // StopIteration and not the same exception again. This half is a
-            // REPLAY engine: without the done flag the failing run would be replayed
-            // from the top on every subsequent step and re-raised for ever.
-            else { st.done = true; scopes = saved; genRuns.pop(); throw e }
+        if (g.gx !== undefined) {
+            g.running = true
+            try { return gxStep(g, sendv) } finally { g.running = false }
         }
-        scopes = saved
-        genRuns.pop()
-        if (yielded) { st.count = st.count + 1 }
-        return {yielded: yielded, value: yielded ? out : st.ret}
+        if (g.co === null) {
+            g.sc = callScopes(g.env, g.plist, g.dflts, g.args, g.named)
+            g.co = coNew(function() {
+                var r = g.body()
+                return (r != undefined && r.isRet) ? r.v : undefined
+            })
+        }
+        var mine = scopes
+        g.eb = pyCurExc.length
+        for (var i = 0; i < g.exc.length; i++) { pyCurExc.push(g.exc[i]) }
+        g.exc = []
+        scopes = g.sc
+        genCur.push(g)
+        g.running = true
+        st.started = true
+        var r = anytype
+        try { r = coResume(g.co, sendv) }
+        catch (e) {
+            st.done = true
+            g.running = false
+            genCur.pop()
+            scopes = mine
+            while (pyCurExc.length > g.eb) { pyCurExc.pop() }
+            throw e
+        }
+        g.running = false
+        genCur.pop()
+        scopes = mine
+        if (r.done) {
+            st.done = true
+            st.ret = r.value
+            while (pyCurExc.length > g.eb) { pyCurExc.pop() }
+            return {yielded: false, value: st.ret}
+        }
+        return {yielded: true, value: r.value}
     }
     // gen.send(v) / next(gen): the next value, or StopIteration carrying the return
     // value once the body has finished - exactly Python's protocol.
@@ -10926,7 +10790,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // `g.throw(SomeClass)` instantiates it, exactly as `raise SomeClass` does.
         if (v != null && v != undefined && v.__isclass == true) { v = pyNew(v, [], null) }
         var st = g.st
-        if (st.done || st.count == 0) {
+        if (st.done || !st.started) {
             st.done = true
             pyRaise(v)
         }
@@ -11252,7 +11116,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // ( e for x in it ... ): a GENERATOR, as in CPython - lazy and single-use, its
     // outermost iterable evaluated (and iter()'d) where the expression stands and
-    // everything else as it is stepped. It is not a replayed body: the clause
+    // everything else as it is stepped. It needs no coroutine: the clause
     // chain is a resumable walk (gxNext) over one delegate per `for`, in the
     // expression's own scope, so a step costs what one element does.
     // python-to-llvm-ir.abnf's makeGenExp compiles the same shape to a coroutine.
@@ -11284,7 +11148,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             g.st.done = true
             return {yielded: false, value: undefined}
         }
-        g.st.count = g.st.count + 1
+        g.st.started = true
         return {yielded: true, value: r.v}
     }
     // The next element, or null when the outermost `for` ran out. lv holds the
@@ -12231,33 +12095,19 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var savedChain = scopes.slice()
             var box = {sig: undefined}
             var threw = false
-            // A generator SUSPENDS by throwing (see doYield), and the host's own
-            // `finally` below runs for ANY unwinding. CPython runs a Python `finally`
-            // around a `yield` once, when the generator finishes or is closed - not at
-            // every suspension. The suspension signal is engine plumbing, not a Python
-            // exception, so it must reach genStep without touching the handlers, the
-            // else clause or the finally clause.
-            var suspended = false
             try {
                 box.sig = tryT()
             } catch (e) {
-                if (isGenSuspend(e)) { suspended = true; throw e }
                 scopes = savedChain.slice()
                 if (!excIsUser(e)) { throw e }
                 threw = true
-                // A `yield` inside an EXCEPT ARM suspends from in here, where the
-                // catch clause above can no longer see it - so the finally below
-                // must skip that suspension too.
-                try { box.sig = runHandlers(clauses, e) }
-                catch (e2) { if (isGenSuspend(e2)) { suspended = true } throw e2 }
+                box.sig = runHandlers(clauses, e)
             } finally {
-                if (!suspended) {
-                    scopes = savedChain.slice()
-                    if (!threw && box.sig == undefined && elseT != null) { box.sig = elseT() }
-                    if (finallyT != null) {
-                        var fr = finallyT()
-                        if (fr != undefined) { return fr }
-                    }
+                scopes = savedChain.slice()
+                if (!threw && box.sig == undefined && elseT != null) { box.sig = elseT() }
+                if (finallyT != null) {
+                    var fr = finallyT()
+                    if (fr != undefined) { return fr }
                 }
             }
             return box.sig
@@ -12370,9 +12220,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         try {
             r = runWith(mgrs, i + 1, body)
         } catch (e) {
-            // A `yield` inside a `with` inside a generator suspends by throwing;
-            // __exit__ must NOT run then. Same reason as makeTry's.
-            if (isGenSuspend(e)) { throw e }
             if (ex != null && excIsUser(e)) {
                 var cls = pyUser(e.v) ? e.v.__class : undefined
                 if (pytruthy(ex(mgr, cls, e.v, undefined))) { return undefined }
@@ -12487,7 +12334,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return made
         }
         var obj = {__class: cls}
-        if (genRuns.length > 0) { genStamp(obj) }
         // A subclass of a builtin type: str/int/float build their value from the
         // arguments (their __new__), list/dict start empty and are filled by
         // __init__ (list.__init__ unless the subclass overrides it).
@@ -13108,7 +12954,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             pyListErr("TypeError", "object.__new__(" + cls.__name + ") is not safe, use " + sb.__name + ".__new__()")
         }
         var obj = {__class: cls}
-        if (genRuns.length > 0) { genStamp(obj) }
         if (clsIsSub(cls, hostGlobals["BaseException"])) {
             var rest = []
             for (var i = 1; i < arguments.length; i++) { rest.push(arguments[i]) }
