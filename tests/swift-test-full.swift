@@ -5073,6 +5073,21 @@ func s123() {
     check("123b", seen.count == 2)
 }
 
+// ===== SECTION 124: super reaches a member the superclass inherits =====
+// `super.hi()` / `super.tag` / `super.k()` in a grandchild find the member the
+// grandparent declares when the parent declares none. Every value read off
+// swiftc 6.1.2.
+class G124 { func hi() -> String { "g" }; var tag: String { "G" }; class func k() -> String { "gk" } }
+class P124: G124 {}
+class C124: P124 {
+    override func hi() -> String { "c+" + super.hi() }
+    override var tag: String { super.tag + "C" }
+    override class func k() -> String { "ck+" + super.k() }
+}
+func s124() {
+    check("124a", C124().hi() == "c+g" && C124().tag == "GC" && C124.k() == "ck+gk")
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5197,6 +5212,7 @@ func main() {
     s121() // SECTION-CALL 121
     s122() // SECTION-CALL 122
     s123() // SECTION-CALL 123
+    s124() // SECTION-CALL 124
     print("full: \(checks) checks, \(fails) failures")
 }
 

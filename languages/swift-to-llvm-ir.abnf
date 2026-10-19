@@ -5773,14 +5773,16 @@ KwContinue  = "continue" KwEnd ;
                     // In a class method, super.m() is the superclass's static m,
                     // declared there or further up.
                     if (swStatCtx) { cur = callExt(b, "js_call", [b.NewCall(rtFindStat(), [sV, emitStr(b, "__static_" + s0.name)]), hUndef, sargs]) }
-                    else { cur = callExt(b, "js_call", [callExt(b, "js_get", [sV, mkeyV]), hUndef, sargs]) }
+                    // A member the superclass inherits is found further up its
+                    // __super chain (js_get reads the one table only).
+                    else { cur = callExt(b, "js_call", [b.NewCall(rtFindStat(), [sV, mkeyV]), hUndef, sargs]) }
                 } else {
                     var gargs = callExt(b, "js_arr_new", [])
                     callExt(b, "js_arr_push", [gargs, thisV])
                     if (swStatCtx) {
                         cur = callExt(b, "js_call", [b.NewCall(rtFindStat(), [sV, emitStr(b, "__get_" + s0.name)]), hUndef, gargs])
                     } else if (isComputedName(s0.name)) {
-                        cur = callExt(b, "js_call", [callExt(b, "js_get", [sV, emitStr(b, "__get_" + s0.name)]), hUndef, gargs])
+                        cur = callExt(b, "js_call", [b.NewCall(rtFindStat(), [sV, emitStr(b, "__get_" + s0.name)]), hUndef, gargs])
                     } else if (false) {} else {
                         cur = callExt(b, "js_get", [thisV, emitStr(b, s0.name)])
                     }
