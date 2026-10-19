@@ -41,12 +41,14 @@ Known deviations, all deliberate:
     one, so a quotient can differ in the last digit.
   - An imported module binds its names flat, without a module object, so the
     from-import style is the one that works (`from m import f as g` binds g).
-    copy, dataclasses, collections, json, itertools, functools, string, random
+    copy, dataclasses, collections, json, itertools, functools, string, random, enum
     and os (with os.path) are written in Python (lib/python-<name>.py) and have
     a module object besides, so `import copy as c` and `from copy import Error`
     work; collections offers deque, defaultdict, OrderedDict and Counter, and
     collections.abc none of its ABCs; dataclass refuses slots, kw_only,
-    weakref_slot, KW_ONLY, InitVar and make_dataclass with NotImplementedError.
+    weakref_slot, KW_ONLY, InitVar and make_dataclass with NotImplementedError;
+    enum offers Enum, IntEnum, StrEnum, auto and unique, not Flag, the
+    functional API or a member-defining __new__.
     An itertools tool over a finite input computes its whole result first, so
     a group from groupby stays readable after the next one is taken; os offers
     no file system or environment access; random has no entropy source, so an
@@ -1175,6 +1177,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         } else if (Array.isArray(x)) {
             return x.length
         }
+        var ml = pyMetaFind(x, "__len__")
+        if (ml != null) { return ml(x) }
         pyListErr("TypeError", "object of type '" + pyTypeOf(x).__name + "' has no len()")
     }
     // list(x): a fresh list from any iterable (lists copy, dicts give their keys).
@@ -1275,7 +1279,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             return hostGlobals["function"]
         }
-        if (v.__isclass == true) { return hostGlobals["type"] }
+        if (v.__isclass == true) { return v.__meta !== undefined ? v.__meta : hostGlobals["type"] }
         // A CURSOR names its own type - CPython's list_iterator /
         // str_ascii_iterator / dict_keyiterator / map / filter / zip /
         // enumerate / reversed. type(it).__name__ reads it, and so does the
@@ -2278,6 +2282,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     hostGlobals["iter"] = function(v) {
         if (isGen(v) || isPyIt(v)) { return v }
+        var mit = pyMetaIter(v)
+        if (mit !== null) { return mit }
         if (pyUser(v)) {
             var itf = clsFind(v.__class, "__iter__")
             if (itf != null) { return itf(v) }
@@ -3581,6 +3587,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function prepr(v) {
         if (typeof v == "string") return pyStrRepr(v)
         if (pyUser(v)) { return pyUserRender(v, true) }
+        var mrepr = pyMetaFind(v, "__repr__")
+        if (mrepr != null) { return mrepr(v) }
         return pstr(v)
     }
     function pstr(v) {
@@ -3592,6 +3600,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // A TYPE object renders as CPython's <class 'name'>, so print(type(1.0))
         // reads <class 'float'> rather than the default object rendering.
         if (v !== null && v !== undefined && typeof v == "object" && v.__isclass == true) {
+            var mstr = pyMetaFind(v, "__str__")
+            if (mstr == null) { mstr = pyMetaFind(v, "__repr__") }
+            if (mstr != null) { return mstr(v) }
             return "<class '" + pyClsQualName(v) + "'>"
         }
         if (pyIsUnion(v)) { return pyUnionStr(v) }
@@ -3881,7 +3892,44 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var pyBDelFns = []
     // bool's are int's; a tuple's are its own dunders, and its two named methods
     // are not delegates.
+    // A class's metaclass method NAME - the hook an operator on a CLASS asks
+    // (iter(C), C[k], len(C), x in C, C(...), repr(C)) - or null. Only a
+    // metaclass's own methods count: type's are the default behaviour.
+    // Twin of rt.pyMetaFind in abnf/jsrtpydesc.go and pyMetaFind in
+    // lib/python-rt.metajs.
+    function pyMetaFind(v, name) {
+        if (v === null || v === undefined || typeof v != "object" || v.__isclass !== true || v.__meta === undefined) { return null }
+        return clsFind(v.__meta, name)
+    }
+    // What iter() of a class answers through its metaclass's __iter__, or null.
+    function pyMetaIter(v) {
+        var f = pyMetaFind(v, "__iter__")
+        if (f == null) { return null }
+        return f(v)
+    }
+    // type's own __new__, __init__ and __call__, reachable from a metaclass:
+    // super().__new__(mcs, name, bases, ns) makes the class, and
+    // super().__call__(*args) makes an instance of it.
+    function pyTypeDelegate(name) {
+        if (name == "__new__") {
+            return function(mcs, name, bases, ns) {
+                kTakeNamed()
+                return pyTypeNew(name, bases, ns, mcs)
+            }
+        }
+        if (name == "__init__") { return function() { kTakeNamed(); return undefined } }
+        if (name == "__call__") {
+            return function(cls) {
+                var named = kTakeNamed()
+                var rest = []
+                for (var i = 1; i < arguments.length; i++) { rest.push(arguments[i]) }
+                return pyNew(cls, rest, named)
+            }
+        }
+        return null
+    }
     function pyBDelegate(tname, name) {
+        if (tname == "type") { return pyTypeDelegate(name) }
         if (tname == "bool") { return pyBDelegate("int", name) }
         if (tname == "tuple") {
             if (name.substring(0, 2) != "__" && !pyIsTupleMethod(name)) { return null }
@@ -4182,6 +4230,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var gi = clsFind(o.__class, "__getitem__")
             if (gi != null) { return gi(o, i) }
         }
+        var mgi = pyMetaFind(o, "__getitem__")
+        if (mgi != null) { return mgi(o, i) }
         // A subscripted TYPE is a generic alias (list[int]); types are erased, so the
         // alias is only a value to compare and inspect.
         if (o != null && o != undefined && typeof o == "object" && o.__isclass == true) {
@@ -4276,6 +4326,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (isDict(v)) return v.keys.slice(0)
         if (typeof v == "string") return pySChars(v)
         if (isView(v)) return pyViewElems(v)
+        var mit = pyMetaIter(v)
+        if (mit !== null) { return pyDrainIter(mit) }
         if (pyUser(v)) {
             var itf = clsFind(v.__class, "__iter__")
             if (itf != null) { return pyDrainIter(itf(v)) }
@@ -4330,6 +4382,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Is v something a for loop or an unpacking can walk?
     function pyIterable(v) {
         if (Array.isArray(v) || isGen(v) || isPyIt(v) || isDict(v) || typeof v == "string" || isView(v)) { return true }
+        if (pyMetaFind(v, "__iter__") != null) { return true }
         return pyUser(v) && (clsFind(v.__class, "__iter__") != null || pySeqGetitem(v) != null)
     }
     // ----- Regular expressions: the `re` module -----
@@ -9745,6 +9798,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Python 'x in y' for lists, strings and dict keys.
     function pyIn(l, r) {
         if (typeof r == "string") return r.indexOf(l) >= 0
+        var mct = pyMetaFind(r, "__contains__")
+        if (mct != null) { return pytruthy(mct(r, l)) }
+        var mit = pyMetaIter(r)
+        if (mit !== null) { return pyIn(l, hostGlobals["iter"](mit)) }
         if (isBytes(r)) { return pyBytesHas(r, l) }
         if (isDict(r)) return dictFind(r, l) >= 0
         if (isView(r)) return pyViewHas(r, l)
@@ -10602,6 +10659,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // iter() does it.
     function pyDelegOf(v) {
         if (isGen(v) || isPyIt(v)) { return v }
+        var mit = pyMetaIter(v)
+        if (mit !== null) { return pyDelegOf(mit) }
         if (pyUser(v) && clsFind(v.__class, "__iter__") != null) {
             var it = anytype
             it = clsFind(v.__class, "__iter__")(v)
@@ -11724,6 +11783,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var src = anytype
             src = listT()
             var broke = false
+            // A class iterates through what its metaclass's __iter__ answers.
+            var metaIt = pyMetaIter(src)
+            if (metaIt !== null) { src = metaIt }
             // A user iterable is iterated through what its __iter__ answers, and a
             // user ITERATOR is stepped one __next__ per iteration, so an endless
             // one ends at a `break` as it does in CPython.
@@ -12364,12 +12426,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return function() {
             var bases = []
+            var kw = null
             if (baseArgs != null) {
                 var spec = kevalArgs(baseArgs, function() { return hostGlobals["type"] })
                 for (var b = 0; b < spec.pos.length; b++) {
                     if (spec.pos[b] != null && spec.pos[b] != undefined && spec.pos[b].__isclass) { bases.push(spec.pos[b]) }
                 }
+                kw = spec.named
             }
+            var meta = pyMetaOf(bases, kw)
             // The class body binds into a RECORDING namespace scope: core.setMiss
             // appends every new name to __nskeys, because the value model has no
             // key enumeration (MetaJS has no for..in).
@@ -12377,6 +12442,29 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             scopes.push(ns)
             bodyT()
             scopes.pop()
+            if (meta !== null) {
+                // A metaclass makes the class: meta(name, bases, namespace, **kw),
+                // which runs its __new__ and __init__ (type's, unless it has its
+                // own), with the namespace as a dict carrying __module__ and
+                // __qualname__ as CPython's does.
+                var nd = newDict()
+                dictSet(nd, "__module__", modName)
+                dictSet(nd, "__qualname__", qual)
+                if (doc != null) { dictSet(nd, "__doc__", doc) }
+                for (var nk = 0; nk < ns.__nskeys.length; nk++) { dictSet(nd, ns.__nskeys[nk], ns[ns.__nskeys[nk]]) }
+                var mkw = newDict()
+                if (kw !== null) {
+                    for (var ki = 0; ki < kw.keys.length; ki++) {
+                        if (kw.keys[ki] != "metaclass") { dictSet(mkw, kw.keys[ki], kw.vals[ki]) }
+                    }
+                }
+                var mcls = anytype
+                mcls = pyCall(meta, [name, pyTup(bases), nd], mkw)
+                ns.__pycls = mcls
+                pySet(name, mcls)
+                noteBound(name)
+                return
+            }
             var cls = {__isclass: true, __name: name, __bases: bases, __module__: modName, __qual: qual}
             // __doc__ is the class's OWN, None without a docstring - it is not
             // inherited.
@@ -12409,6 +12497,24 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             noteBound(name)
         }
     }
+    // The metaclass a class statement uses: the metaclass= keyword, else the most derived metaclass among the bases; null for type.
+    // Twin of rt.pyMetaOf in abnf/jsrtpydesc.go and pyMetaOf in
+    // lib/python-rt.metajs.
+    function pyMetaOf(bases, kw) {
+        var meta = anytype
+        meta = null
+        if (kw !== null && kw !== undefined) {
+            var at = dictFind(kw, "metaclass")
+            if (at >= 0) { meta = kw.vals[at] }
+        }
+        for (var i = 0; i < bases.length; i++) {
+            var bm = pyTypeOf(bases[i])
+            if (bm === hostGlobals["type"]) { continue }
+            if (meta === null || clsIsSub(bm, meta)) { meta = bm }
+        }
+        if (meta === hostGlobals["type"]) { return null }
+        return meta
+    }
     // type.__new__'s rule: a class that defines __eq__ and not __hash__ gets
     // __hash__ = None of its own, so its instances are unhashable and C.__hash__
     // reads None. Twin of pyEqHashNone in abnf/jsrt.go and lib/python-rt.metajs.
@@ -12421,15 +12527,27 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // type(name, bases, ns): the class a class statement with those bases and
     // that body namespace would build. Twin of js_pytypenew in abnf/jsrt.go and
     // lib/python-rt.metajs.
-    function pyTypeNew(name, bases, ns) {
+    // A namespace's __module__, __qualname__ and __doc__ become the class's own
+    // (the first two are no members), and mcs, unless it is type itself, is the
+    // class's metaclass.
+    function pyTypeNew(name, bases, ns, mcs) {
         var bl = iterToList(bases).slice(0)
         var cls = {__isclass: true, __name: name, __bases: bl, __module__: "__main__", __qual: name}
+        if (mcs !== undefined && mcs !== hostGlobals["type"]) { cls.__meta = mcs }
         clsSetMRO(cls, bl)
+        var attrs = []
         for (var k = 0; k < ns.keys.length; k++) {
-            scopePut(cls, ns.keys[k], ns.vals[k])
-            pyNoteHook(ns.keys[k])
+            var key = ns.keys[k]
+            if (key == "__module__") { cls.__module__ = ns.vals[k] }
+            else if (key == "__qualname__") { cls.__qual = ns.vals[k] }
+            else {
+                scopePut(cls, key, ns.vals[k])
+                pyNoteHook(key)
+                attrs.push(key)
+            }
         }
-        cls.__attrs = ns.keys.slice(0)
+        if (!hasOwn(cls, "__doc__")) { cls.__doc__ = undefined }
+        cls.__attrs = attrs
         pyEqHashNone(cls)
         pySetNames(cls, cls.__attrs)
         cls.__annotations__ = newDict()
@@ -12578,6 +12696,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function pySetAttr(o, name, v, raw) {
         if (typeof o == "function") { pyFnSetAttr(o, name, v); return }
+        // A class's __name__ and __qualname__ are its own name slots. Twin of
+        // pySetAttrRaw's class arm in abnf/jsrt.go and lib/python-rt.metajs.
+        if (o !== null && o !== undefined && typeof o == "object" && o.__isclass === true
+            && (name == "__name__" || name == "__qualname__")) {
+            if (typeof v != "string") {
+                pyListErr("TypeError", "can only assign string to " + o.__name + "." + name + ", not '" + pyTypeOf(v).__name + "'")
+            }
+            if (name == "__name__") { o.__name = v } else { o.__qual = v }
+            return
+        }
         if (pyHooks > 0 && raw !== true && pyUser(o)) {
             var sa = clsFind(o.__class, "__setattr__")
             if (sa != null) { sa(o, name, v); return }
@@ -12644,8 +12772,18 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return cv
             }
             if (clsHas(o, name)) { return undefined }
-            // Every class here is an instance of type.
-            if (name == "__class__") { return hostGlobals["type"] }
+            // What the class does not have, its METACLASS answers: a method
+            // binds to the class, a property reads with the class as self.
+            if (o.__meta !== undefined) {
+                var mv = clsFind(o.__meta, name)
+                if (mv != null) {
+                    if (pyIsProp(mv)) { return pyPropCall(mv, "fget", o.__meta, [o]) }
+                    if (pyIsStatic(mv) || pyIsClsM(mv)) { return pyDescGet(mv, o.__meta, name) }
+                    if (typeof mv == "function") { return bindMethod(o, mv, name) }
+                    return mv
+                }
+            }
+            if (name == "__class__") { return pyTypeOf(o) }
             // C.mro(), type's own method: the resolution order as a fresh list.
             if (name == "mro") { return function() { return pyMroAttr(o, "__mro__") } }
             // A method the TYPE OBJECT itself carries - dict.fromkeys - is a
@@ -13187,6 +13325,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var own = clsFind(cls, "__new__")
         if (own != null) { return own }
         var bt = cls.__builtin === true ? cls.__name : pyBuiltinBase(cls)
+        if (bt == "type") { return pyTypeDelegate("__new__") }
         if (bt != "" && bt != "object") { return pyBuiltinNew(hostGlobals[bt]) }
         return pyObjNew
     }
@@ -13243,7 +13382,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pySuperMRO(s) {
         var obj = s.__sobj
         if (obj != undefined && obj != null && typeof obj == "object") {
-            if (obj.__isclass == true) { return clsMRO(obj) }
+            // A class that is no subclass of the start is an INSTANCE of it: a
+            // metaclass method's super() searches the metaclass's MRO.
+            if (obj.__isclass == true) {
+                if (obj.__meta !== undefined && !clsIsSub(obj, s.__scls) && clsIsSub(obj.__meta, s.__scls)) { return clsMRO(obj.__meta) }
+                return clsMRO(obj)
+            }
             if (pyUser(obj)) { return clsMRO(obj.__class) }
         }
         return []
@@ -13513,6 +13657,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pyCall(f, args, named) {
         if (f != null && f != undefined && typeof f == "object" && f.__pysup == true) { return pySuperCall(f, args) }
         if (f != null && f != undefined && f.__isclass == true) {
+            var mcall = pyMetaFind(f, "__call__")
+            if (mcall != null) {
+                kSetNamed(named)
+                return mcall.apply(undefined, concat2impl([f], args))
+            }
             if (f.__builtin == true) { return pyConvert(f.__name, args, named) }
             return pyNew(f, args, named)
         }
@@ -13709,6 +13858,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (Array.isArray(cls)) {
             for (var i = 0; i < cls.length; i++) { if (pyIsInstance(v, cls[i])) { return true } }
             return false
+        }
+        // A class is an instance of its metaclass.
+        if (v !== null && v !== undefined && typeof v == "object" && v.__isclass === true && v.__meta !== undefined) {
+            return clsIsSub(v.__meta, cls)
         }
         if (cls.__builtin == true) {
             // A builtin type object matches the corresponding primitive - through

@@ -779,6 +779,8 @@ function pyStr(v) {
     // reads <class 'float'>. rt.pyClassName in the Go twin.
     var cn = pyClassName(v)
     if (cn !== null) {
+        var ms = pyMetaRender(v, false)
+        if (ms !== null) { return ms }
         var cmod = v["__module__"]
         if (typeof cmod == "string") { return "<class '" + cmod + "." + pyClsQual(v) + "'>" }
         return "<class '" + cn + "'>"
@@ -996,6 +998,8 @@ function pyStrRepr(s) {
 
 function pyRepr(v) {
     if (typeof v == "string") { return pyStrRepr(v) }
+    var mr = pyMetaRender(v, true)
+    if (mr !== null) { return mr }
     var rc = pyInstClassOf(v)
     if (rc !== null && rc !== undefined) { return pyUserRender(v, rc, true) }
     return pyStr(v)
@@ -1758,6 +1762,8 @@ function pyAUserTruthy(cls, v) {
 // Go: rt.pyUserIter. What an instance's __iter__ answers - or, under the
 // legacy sequence protocol, its pyASeqIter cursor - or undefined.
 function pyAUserIter(v) {
+    var mit = pyMetaFind(v, "__iter__")
+    if (mit !== undefined) { return pyCallSelf(mit, v, []) }
     var cls = pyInstClassOf(v)
     if (cls === null) { return undefined }
     if (pyLookupHas(cls, "__iter__")) { return pyCallSelf(pyLookupVal(cls, "__iter__"), v, []) }
@@ -2069,6 +2075,19 @@ function pyGetAttrRaw(obj, name) {
             var cget = pyDescriptor(cv, "__get__")
             if (cget !== undefined) { return cget.apply(undefined, [cv, undefined, obj]) }
             return cv
+        }
+        // What the class does not have, its METACLASS answers: a method binds
+        // to the class, a property reads with the class as self.
+        var meta = pyClassMeta(obj)
+        if (meta !== null) {
+            if (name == "__class__") { return meta }
+            if (pyLookupHas(meta, name)) {
+                var mv = pyLookupVal(meta, name)
+                if (pyDIsProp(mv)) { return pyDPropGet(mv, obj, meta) }
+                if (pyDIsStatic(mv) || pyDIsClsM(mv)) { return pyDDescGet(mv, meta, name) }
+                if (pyIsCallable(mv)) { return pyDBindMethod(obj, mv, name) }
+                return mv
+            }
         }
         // C.mro(), type's own method: the resolution order as a fresh list.
         if (name == "mro") { return function() { return pyMroAttr(obj, "__mro__") } }
@@ -2570,6 +2589,14 @@ function pySetAttrRaw(obj, name, v) {
         return v
     }
     if (pyIsClass(obj)) {
+        // A class's __name__ and __qualname__ are its own name slots.
+        if (name == "__name__" || name == "__qualname__") {
+            if (typeof v != "string") {
+                pyRaiseExc("TypeError", "can only assign string to " + pyToStr(obj["__name"]) + "." + name + ", not '" + pyTypeName(v) + "'")
+            }
+            if (name == "__name__") { obj["__name"] = v } else { obj["__qual"] = v }
+            return v
+        }
         pyOrdNote(obj, name)
         pyPutAttr(obj, name, v)
         pyDNoteHook(name)
@@ -2925,7 +2952,11 @@ function pyClsNew(cls) {
 // (every class here is an instance of type), or one of object's methods.
 function pyClassFallback(cls, name) {
     if (name == "__new__") { return pyClsNew(cls) }
-    if (name == "__class__") { return pyBuiltinClass("type") }
+    if (name == "__class__") {
+        var meta = pyClassMeta(cls)
+        if (meta !== null) { return meta }
+        return pyBuiltinClass("type")
+    }
     return pyObjectMethod(name)
 }
 // One of object's methods bound to an instance is a builtin bound method (a
@@ -4725,6 +4756,8 @@ function js_pybin(opv, l, r) {
             var cm = pyLookupVal(rc, "__contains__")
             if (pyIsCallable(cm)) { return pyATruthy(pyCallSelf(cm, r, [l])) == want }
         }
+        var mct = pyMetaFind(r, "__contains__")
+        if (mct !== undefined) { return pyATruthy(pyCallSelf(mct, r, [l])) == want }
         return pyAContains(l, r) == want
     }
     // A set-like view's set algebra takes any iterable on either side; a pair
@@ -8003,6 +8036,8 @@ function js_pyidx(c, k) {
     // list[int] / dict[str, int]: subscripting a TYPE (a class object or a
     // builtin like list) is a generic alias, not an indexing. One object per
     // (origin, parameter) pair, so 'list[int] == list[int]' holds.
+    var mgi = pyMetaFind(c, "__getitem__")
+    if (mgi !== undefined) { return pyCallSelf(mgi, c, [k]) }
     var alias = pyCGenericAlias(c, k)
     if (alias !== undefined) { return alias }
     // CPython's TypeError, and CATCHABLE, so `None[0]` runs the except clause.
@@ -8100,6 +8135,8 @@ function js_pylenof(v) {
     if (pyIsArr(v)) { return v.length }
     if (pyIsDict(v)) { return v["keys"].length }
     if (typeof v == "object" && pyIsDView(v)) { return pyDViewLen(v) }
+    var ml = pyMetaFind(v, "__len__")
+    if (ml !== undefined) { return pyCallSelf(ml, v, []) }
     pyRaiseExc("TypeError", "object of type '" + pyTypeName(v) + "' has no len()")
     return 0
 }
@@ -8772,7 +8809,13 @@ function pySuperCall(s, args) {
 }
 function pySuperMRO(s) {
     var o = s["__sobj"]
-    if (pyIsClass(o)) { return pyMRO(o) }
+    if (pyIsClass(o)) {
+        // A class that is no subclass of the start is an INSTANCE of it: a
+        // metaclass method's super() searches the metaclass's MRO.
+        var m = pyClassMeta(o)
+        if (m !== null && !pyIsSubclass(o, s["__scls"]) && pyIsSubclass(m, s["__scls"])) { return pyMRO(m) }
+        return pyMRO(o)
+    }
     var c = pyInstClassOf(o)
     if (c !== null) { return pyMRO(c) }
     return []
@@ -8797,6 +8840,10 @@ function pySuperFind(s, name) {
     while (i < mro.length) {
         var v = pyClassMember(mro[i], name)
         if (v !== undefined) { return v }
+        if (pyBuiltinClsName(mro[i]) == "type") {
+            var td = pyTypeDelegate(name)
+            if (td !== undefined) { return td }
+        }
         if (name == "__new__" && pyBuiltinClsName(mro[i]) != "") { return pyClsNew(mro[i]) }
         i = i + 1
     }
@@ -9550,7 +9597,11 @@ function js_pycall(callee, pos, kw) {
         if (pyIsCallable(cv)) { return pyCall(cv, pyConvArgs(callee, cv, pos, kw)) }
     }
     var cls = pyClassOf(callee)
-    if (cls !== null) { return pyDInstantiate(cls, pos, kw) }
+    if (cls !== null) {
+        var mcall = pyMetaFind(cls, "__call__")
+        if (mcall !== undefined) { return pyCall(mcall, pyBindCall(mcall, rtPrepend(cls, pos), kw)) }
+        return pyDInstantiate(cls, pos, kw)
+    }
     var icls = pyInstClassOf(callee)
     if (icls !== null) {
         if (pyLookupHas(icls, "__call__")) {
@@ -9600,8 +9651,9 @@ function pyConvArgs(cls, cv, pos, kw) {
 function pyDInstantiate(cls, args, kw) {
     // A class's own __new__ makes the instance, and __init__ runs only when what
     // it made is an instance of the class.
-    if (pyLookupHas(cls, "__new__")) {
-        var nw = pyLookupVal(cls, "__new__")
+    if (pyLookupHas(cls, "__new__") || pyIsMetaclass(cls)) {
+        var nw = anytype
+        nw = pyLookupHas(cls, "__new__") ? pyLookupVal(cls, "__new__") : pyTypeDelegate("__new__")
         if (pyDIsStatic(nw) || pyDIsClsM(nw)) { nw = pyDDescGet(nw, cls, "__new__") }
         var made = anytype
         made = pyCall(nw, pyBindCall(nw, rtPrepend(cls, args), kw))
@@ -9782,7 +9834,11 @@ function pyDCallPyValue(v, args, kw) {
         if (typeof cv == "function") { return pyCall(cv, pyConvArgs(v, cv, args, kw)) }
     }
     var cls = pyClassOf(v)
-    if (cls !== null) { return pyDInstantiate(cls, args, kw) }
+    if (cls !== null) {
+        var mcall = pyMetaFind(cls, "__call__")
+        if (mcall !== undefined) { return pyCall(mcall, pyBindCall(mcall, rtPrepend(cls, args), kw)) }
+        return pyDInstantiate(cls, args, kw)
+    }
     var icls = pyInstClassOf(v)
     if (icls !== null) {
         if (pyLookupHas(icls, "__call__")) {
@@ -9958,6 +10014,8 @@ function pyDMethodCall(target, name, args, kw) {
             return pyDCallPyValue(cm, args, kw)
         }
         if (name == "mro") { return pyMroAttr(cls, "__mro__") }
+        // A metaclass method, bound to the class (pyGetAttrRaw's arm).
+        if (pyMetaFind(cls, name) !== undefined) { return pyDCallPyValue(pyGetAttrRaw(cls, name), args, kw) }
         var cfm = pyClassFallback(cls, name)
         if (cfm !== null) { return pyDCallPyValue(cfm, args, kw) }
         fail("type object '" + pyToStr(cls["__name"]) + "' has no method '" + name + "'")
@@ -10550,6 +10608,7 @@ function pyIsIterable(v) {
     if (typeof v == "string") { return true }
     var els = pySetElemsOf(v)
     if (els !== null && els !== undefined) { return true }
+    if (pyMetaFind(v, "__iter__") !== undefined) { return true }
     var cls = pyInstClassOf(v)
     return cls !== null && (pyLookupHas(cls, "__iter__") || pyASeqGetitem(v, cls) !== undefined)
 }
@@ -11073,6 +11132,8 @@ function pySliceInt(v) {
 function js_pytype(v) {
     var cls = pyInstClassOf(v)
     if (cls !== null) { return cls }
+    var meta = pyClassMeta(v)
+    if (meta !== null) { return meta }
     return pyBuiltinClass(pyTypeName(v))
 }
 
@@ -11090,20 +11151,152 @@ function js_pyaddnote(self, note) {
 
 // type(name, bases, ns), or type() at any count but one and three: the class a
 // class statement with those bases and body would build. Go: js_pytypenew.
-function js_pytypenew(args) {
-    if (!pyIsArr(args) || args.length != 3) { pyRaiseExc("TypeError", "type() takes 1 or 3 arguments") }
-    var cls = js_pyclass_new(args[0], pyCCopyArr(pyElemsOf(args[1])))
+// ----- metaclasses (Go: the metaclass block of abnf/jsrtpydesc.go) -----
+//
+// A class a metaclass made carries it in __meta (pyTypeNew); type(C) answers
+// it, isinstance(C, M) holds, an attribute C lacks is looked up on it, and an
+// operator on the CLASS asks its methods. Only a metaclass's own methods
+// count: type's are the default behaviour.
+
+function pyClassMeta(v) {
+    if (!pyIsClass(v)) { return null }
+    var m = v["__meta"]
+    if (m === undefined) { return null }
+    return m
+}
+
+// A class's metaclass method name, or undefined.
+function pyMetaFind(v, name) {
+    var m = pyClassMeta(v)
+    if (m === null) { return undefined }
+    if (!pyLookupHas(m, name)) { return undefined }
+    return pyLookupVal(m, name)
+}
+
+function pyIsSubclass(sub, sup) {
+    var mro = pyMRO(sub)
+    var i = 0
+    while (i < mro.length) {
+        if (mro[i] === sup) { return true }
+        i = i + 1
+    }
+    return false
+}
+
+function pyIsMetaclass(cls) {
+    var mro = pyMRO(cls)
+    var i = 0
+    while (i < mro.length) {
+        if (pyBuiltinClsName(mro[i]) == "type") { return true }
+        i = i + 1
+    }
+    return false
+}
+
+// The metaclass a class statement uses: the metaclass= keyword, else the most
+// derived metaclass among the bases; null for type.
+function pyMetaOf(bases, kw) {
+    var meta = anytype
+    meta = null
+    if (pyIsDict(kw)) {
+        var at = pyDictFind(kw["keys"], "metaclass")
+        if (at >= 0) { meta = kw["vals"][at] }
+    }
+    var i = 0
+    while (i < bases.length) {
+        var bm = pyClassMeta(bases[i])
+        if (bm !== null && (meta === null || !pyIsClass(meta) || pyIsSubclass(bm, meta))) { meta = bm }
+        i = i + 1
+    }
+    if (meta !== null && pyBuiltinClsName(meta) == "type") { return null }
+    return meta
+}
+
+// type(name, bases, ns) and type.__new__(mcs, name, bases, ns): a namespace's
+// __module__ and __qualname__ become the class's own, and mcs, unless it is
+// type itself, its metaclass.
+function pyTypeNew(name, bases, ns, mcs) {
+    var cls = js_pyclass_new(name, pyCCopyArr(pyElemsOf(bases)))
     cls["__module__"] = "__main__"
-    var ns = args[2]
+    if (pyIsClass(mcs)) { cls["__meta"] = mcs }
     if (pyIsDict(ns)) {
         var i = 0
         while (i < ns["keys"].length) {
-            js_pysetattr(cls, ns["keys"][i], ns["vals"][i])
+            var k = pyToStr(ns["keys"][i])
+            if (k == "__module__") { cls["__module__"] = ns["vals"][i] }
+            else if (k == "__qualname__") { cls["__qual"] = ns["vals"][i] }
+            else { js_pysetattr(cls, k, ns["vals"][i]) }
             i = i + 1
         }
     }
     js_pysetnames(cls)
     return cls
+}
+
+// type's own __new__, __init__ and __call__, reachable from a metaclass.
+function pyTypeDelegate(name) {
+    if (name == "__new__") { return function(mcs, n, bases, ns) { return pyTypeNew(pyToStr(n), bases, ns, mcs) } }
+    if (name == "__init__") { return function() { return undefined } }
+    if (name == "__call__") {
+        return function() {
+            var args = []
+            var i = 1
+            while (i < arguments.length) {
+                args.push(arguments[i])
+                i = i + 1
+            }
+            return pyDInstantiate(arguments[0], args, undefined)
+        }
+    }
+    return undefined
+}
+
+// repr(C) or str(C) through C's metaclass, or null.
+function pyMetaRender(v, repr) {
+    var f = anytype
+    f = pyMetaFind(v, "__repr__")
+    if (!repr) {
+        var s = pyMetaFind(v, "__str__")
+        if (s !== undefined) { f = s }
+    }
+    if (f === undefined) { return null }
+    return pyToStr(pyCallSelf(f, v, []))
+}
+
+// Go: js_pyclass_meta. (class the statement filled, its keyword arguments) ->
+// the class: with a metaclass, meta(name, bases, namespace, **kw) makes the
+// real one from the filled class's members; otherwise js_pysetnames.
+function js_pyclass_meta(cls, kw) {
+    var bases = pyCCopyArr(cls["__basesl"])
+    var meta = pyMetaOf(bases, kw)
+    if (meta === null) {
+        js_pysetnames(cls)
+        return cls
+    }
+    var ns = pyNewDict()
+    pyDictSet(ns, "__module__", cls["__module__"])
+    pyDictSet(ns, "__qualname__", pyClsQual(cls))
+    if (typeof cls["__doc__"] == "string") { pyDictSet(ns, "__doc__", cls["__doc__"]) }
+    var cd = pyClassDict(cls)
+    var i = 0
+    while (i < cd["keys"].length) {
+        if (cd["keys"][i] != "__module__") { pyDictSet(ns, cd["keys"][i], cd["vals"][i]) }
+        i = i + 1
+    }
+    var rest = pyNewDict()
+    if (pyIsDict(kw)) {
+        var j = 0
+        while (j < kw["keys"].length) {
+            if (kw["keys"][j] != "metaclass") { pyDictSet(rest, kw["keys"][j], kw["vals"][j]) }
+            j = j + 1
+        }
+    }
+    return pyDCallPyValue(meta, [cls["__name"], pyTup(bases), ns], rest)
+}
+
+function js_pytypenew(args) {
+    if (!pyIsArr(args) || args.length != 3) { pyRaiseExc("TypeError", "type() takes 1 or 3 arguments") }
+    return pyTypeNew(pyToStr(args[0]), args[1], args[2], undefined)
 }
 
 // isinstance(v, C) / isinstance(v, (A, B)): a walk of the instance's MRO.
@@ -11117,6 +11310,13 @@ function pyDIsInstance(v, target) {
             i = i + 1
         }
         return false
+    }
+    // A class is an instance of its metaclass.
+    var vm = pyClassMeta(v)
+    if (vm !== null && pyIsObj(target)) {
+        var tn = pyBuiltinClsName(target)
+        if (tn == "type" || tn == "object") { return true }
+        return pyIsClass(target) && pyIsSubclass(vm, target)
     }
     var cls = pyInstClassOf(v)
     if (cls === null) {

@@ -374,3 +374,149 @@ func init() {
 		m["js_pybuiltins_module"] = func(a []uint64) uint64 { return w(rt.pyBuiltinsModule()) }
 	})
 }
+
+// ----------------------------------------------------------- metaclasses ---
+//
+// A class a metaclass made carries it in "__meta" (pyTypeNew); type(C) answers
+// it, isinstance(C, M) holds, an attribute C lacks is looked up on it, and an
+// operator on the CLASS - iter(C), C[k], len(C), x in C, C(...), repr(C) - asks
+// its methods. Only a metaclass's own methods count: type's are the default
+// behaviour. Twins: pyMetaFind, pyMetaOf, pyTypeNew and pyTypeDelegate in
+// languages/python-interpreter.abnf and lib/python-rt.metajs.
+
+// pyClassMeta is the metaclass of a class a metaclass made, or nil.
+func pyClassMeta(v interface{}) *jsObject {
+	if c, ok := pyClassObj(v); ok {
+		if m, ok := c.props["__meta"].(*jsObject); ok {
+			return m
+		}
+	}
+	return nil
+}
+
+// pyMetaFind is a class's metaclass method name, or nil.
+func pyMetaFind(v interface{}, name string) interface{} {
+	if m := pyClassMeta(v); m != nil {
+		if f, found := pyLookup(m, name); found {
+			return f
+		}
+	}
+	return nil
+}
+
+// pyIsMetaclass says whether cls derives from type.
+func pyIsMetaclass(cls *jsObject) bool {
+	for _, k := range pyMRO(cls) {
+		if pyBuiltinClsName(k) == "type" {
+			return true
+		}
+	}
+	return false
+}
+
+// pyMetaOf is the metaclass a class statement uses: the metaclass= keyword,
+// else the most derived metaclass among the bases; nil for type.
+func (rt *jsrt) pyMetaOf(bases *jsArray, kw interface{}) interface{} {
+	var meta interface{}
+	if keys, vals, ok := dictParts(kw); ok {
+		for i, k := range keys.elems {
+			if rt.toString(k) == "metaclass" {
+				meta = vals.elems[i]
+			}
+		}
+	}
+	for _, b := range bases.elems {
+		bm := pyClassMeta(b)
+		if bm == nil {
+			continue
+		}
+		if mc, ok := meta.(*jsObject); !ok || pyIsSubclass(bm, mc) {
+			meta = bm
+		}
+	}
+	if m, ok := meta.(*jsObject); ok && pyBuiltinClsName(m) == "type" {
+		return nil
+	}
+	return meta
+}
+
+// pyIsSubclass says whether sub has sup in its MRO.
+func pyIsSubclass(sub, sup *jsObject) bool {
+	for _, k := range pyMRO(sub) {
+		if k == sup {
+			return true
+		}
+	}
+	return false
+}
+
+// pyTypeNew is type(name, bases, ns) and type.__new__(mcs, name, bases, ns): a
+// namespace's __module__ and __qualname__ become the class's own, and mcs,
+// unless it is type itself, its metaclass.
+func (rt *jsrt) pyTypeNew(name string, basesV, ns, mcs interface{}) *jsObject {
+	bases := &jsArray{elems: append([]interface{}{}, rt.pyElemsOf(basesV)...)}
+	cls := rt.pyClassNew(name, bases)
+	cls.set("__module__", "__main__")
+	if m, ok := mcs.(*jsObject); ok && pyBuiltinClsName(m) != "type" {
+		cls.set("__meta", m)
+	}
+	if keys, vals, ok := dictParts(ns); ok {
+		for i, k := range keys.elems {
+			switch ks := rt.toString(k); ks {
+			case "__module__":
+				cls.set("__module__", vals.elems[i])
+			case "__qualname__":
+				cls.set("__qual", vals.elems[i])
+			default:
+				rt.pySetAttr(cls, ks, vals.elems[i])
+			}
+		}
+	}
+	rt.pyEqHashNone(cls)
+	rt.pySetNames(cls)
+	return cls
+}
+
+// pyTypeDelegate is type's own __new__, __init__ or __call__, reachable from a
+// metaclass: super().__new__(mcs, name, bases, ns) makes the class and
+// super().__call__(*args) an instance of it. nil for any other name.
+func (rt *jsrt) pyTypeDelegate(name string) interface{} {
+	switch name {
+	case "__new__":
+		return jsHostFunc("type.__new__", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			args, _ = pyKwSplit(args)
+			return rt.pyTypeNew(rt.toString(argAt(args, 1)), argAt(args, 2), argAt(args, 3), argAt(args, 0))
+		})
+	case "__init__":
+		return jsHostFunc("type.__init__", func(rt *jsrt, this uint64, args []interface{}) interface{} { return jsUndef })
+	case "__call__":
+		return jsHostFunc("type.__call__", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			args, kw := pyKwSplit(args)
+			cls, _ := argAt(args, 0).(*jsObject)
+			return rt.pyNewInstance(cls, pyArgsAfterFirst(args), kw)
+		})
+	}
+	return nil
+}
+
+// pyKwSplit separates a host function's trailing pyKwMark and keyword dict.
+func pyKwSplit(args []interface{}) ([]interface{}, interface{}) {
+	if n := len(args); n >= 2 && args[n-2] == pyKwMark {
+		return args[:n-2], args[n-1]
+	}
+	return args, jsUndef
+}
+
+// pyMetaRender is repr(C) or str(C) through C's metaclass, if it says.
+func (rt *jsrt) pyMetaRender(v interface{}, repr bool) (string, bool) {
+	f := pyMetaFind(v, "__repr__")
+	if !repr {
+		if s := pyMetaFind(v, "__str__"); s != nil {
+			f = s
+		}
+	}
+	if f == nil {
+		return "", false
+	}
+	return rt.toString(rt.call(f, jsUndef, []interface{}{v})), true
+}

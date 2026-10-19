@@ -1105,7 +1105,7 @@ a java.util.stream import or a call of a method named stream),
 PHP, compiled with a program that names one of its functions or classes),
 `python-copy.py` and `python-dataclasses.py` (both python grammars: the copy and
 dataclasses modules WRITTEN IN PYTHON, compiled with a program that imports
-them),
+them; `python-enum.py`, the enum module, likewise, on the metaclass protocol),
 `kotlin-decltypes.js` (both kotlin grammars: the static types an integer literal
 adopts - type arguments, declared and inferred names, class properties - read at
 walk time, and which `==` has an integer literal operand and so compares across

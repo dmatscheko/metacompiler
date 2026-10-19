@@ -68,7 +68,7 @@ statement's finally ran). A bare 'raise' re-raises the active exception, 'raise 
 from e' records e as X.__cause__, and 'except* T as g' (PEP 654) runs every clause
 whose type matches part of an ExceptionGroup, each with its own sub-group.
 
-copy, dataclasses, collections, json, itertools, functools, string, random and
+copy, dataclasses, collections, json, itertools, functools, string, random, enum and
 os are Python sources (lib/python-<name>.py) compiled with a program that imports them,
 the same ones the interpreter grammar runs;
 python-interpreter.abnf's description lists what they refuse, and what dir() does.
@@ -410,13 +410,14 @@ Class       <~~ push(makeClass(takeAll(), up.pos)) ~~>
               [ ClassBases ] Suite ;
 // The base list may be written across lines (`class C(unittest.TestCase,` / `  Mixin):`)
 // and may carry keyword arguments and a `**kwargs` spread (`class C[T](B, a=1, **kw)`),
-// which the metaclass protocol passes on. They are parsed and dropped here.
+// which the metaclass protocol passes on (metaclass= among them).
 ClassBases  = "(" :whitespace(WhitespaceNL) [ ClassArg { "," ClassArg } [ "," ] ] ")" :whitespace(Whitespace) ;
 ClassArg    = ClassKwSpread | ClassStar | ClassKw | ClassBase ;
-ClassKwSpread <~~ pop() ~~>          = "**" Expression ;
+ClassKwSpread <~~ push({ckwspread: pop()}) ~~> = "**" Expression ;
 // class C(*bases, **kwargs): the base list itself may be spread from a sequence.
 ClassStar   <~~ pop() ~~>            = "*" Expression ;
-ClassKw     <~~ pop() ~~>            = Id "=" NotEqSign Expression ;
+ClassKw     <~~ var kv = pop(); push({ckwname: pop().ckn, ckwval: kv}) ~~>
+            = Id <~~ push({ckn: up.in}) ~~> "=" NotEqSign Expression ;
 ClassBase   <~~ push({cbase: pop()}) ~~> = Expression ;
 
 // async def: compiled as a plain def (the body runs synchronously). Only the
@@ -4211,11 +4212,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function makeClass(items, pos) {
         var name = anytype
         var bases = []
+        var kws = []
         var bodyT = anytype
         var modName = pyCurMod
         for (var i = 0; i < items.length; i++) {
             if (items[i].cname != undefined) { name = items[i].cname }
             else if (items[i].cbase != undefined) { bases.push(items[i].cbase) }
+            else if (items[i].ckwname != undefined || items[i].ckwspread != undefined) { kws.push(items[i]) }
             else { bodyT = items[i] }
         }
         // A CLASS BODY is a namespace, not a function frame: CPython compiles its
@@ -4232,6 +4235,22 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var rb = bases[j](b)
                 b = rb.b
                 callExt(b, "js_arr_push", [basesV, rb.v])
+            }
+            // The keyword arguments, evaluated with the bases, before the body.
+            var kwV = hUndef
+            if (kws.length > 0) {
+                kwV = callExt(b, "js_dict_new", [])
+                for (var kq = 0; kq < kws.length; kq++) {
+                    if (kws[kq].ckwspread != undefined) {
+                        var rks = kws[kq].ckwspread(b)
+                        b = rks.b
+                        callExt(b, "js_pykwspread", [kwV, rks.v])
+                    } else {
+                        var rkv = kws[kq].ckwval(b)
+                        b = rkv.b
+                        callExt(b, "js_pyset", [kwV, emitStr(b, kws[kq].ckwname), rkv.v])
+                    }
+                }
             }
             var cls = callExt(b, "js_pyclass_new", [emitStr(b, name), basesV])
             // A nested class's __qualname__ (pyClsQual in lib/python-rt.metajs).
@@ -4261,7 +4280,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b = bodyT(b)
             pySuperCls = savedSuperCls
             b = pyClassFill(b, cls, bodyScope, pyBindSink)
-            callExt(b, "js_pysetnames", [cls])
+            // js_pyclass_meta finishes the class, or has its metaclass make the
+            // real one from it; the __class__ cell then names that one.
+            cls = callExt(b, "js_pyclass_meta", [cls, kwV])
+            callExt(b, "js_scope_set", [bodyScope, emitStr(b, "__pycls__"), cls])
             // SETUP_ANNOTATIONS: the body HELD an annotation, so the class has an
             // __annotations__ dict whether or not the annotated statement ran.
             if (pyAnnotHere) { b = pyEnsureAnnot(b, cls) }

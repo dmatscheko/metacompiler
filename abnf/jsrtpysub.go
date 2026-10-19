@@ -655,7 +655,11 @@ func pyBuiltinBase(cls *jsObject) string {
 func (rt *jsrt) pyNewInstance(cls *jsObject, args []interface{}, kw interface{}) interface{} {
 	// A class's own __new__ makes the instance, and __init__ runs only when
 	// what it made is an instance of the class.
-	if nw, found := pyLookup(cls, "__new__"); found {
+	nw, found := pyLookup(cls, "__new__")
+	if !found && pyIsMetaclass(cls) {
+		nw, found = rt.pyTypeDelegate("__new__"), true
+	}
+	if found {
 		if pyDescKind(nw) != "" {
 			nw = rt.pyDescGet(nw, cls, "__new__")
 		}
@@ -744,6 +748,9 @@ func (rt *jsrt) pyUserTruthy(cls *jsObject, v interface{}) bool {
 // pyUserIter is what an instance's __iter__ answers - or, under the legacy
 // sequence protocol, its pySeqIter cursor - or false when its class has neither.
 func (rt *jsrt) pyUserIter(v interface{}) (interface{}, bool) {
+	if m := pyMetaFind(v, "__iter__"); m != nil {
+		return rt.call(m, jsUndef, []interface{}{v}), true
+	}
 	if _, cls, ok := pyInstance(v); ok {
 		if m, found := pyLookup(cls, "__iter__"); found && isCallable(m) {
 			return rt.call(m, jsUndef, []interface{}{v}), true
@@ -1495,6 +1502,9 @@ func (rt *jsrt) pyClassFallback(cls *jsObject, name string) interface{} {
 	case "__new__":
 		return rt.pyClsNew(cls)
 	case "__class__":
+		if m := pyClassMeta(cls); m != nil {
+			return m
+		}
 		return rt.pyBuiltinClass("type")
 	}
 	return rt.pyObjectMethod(name)

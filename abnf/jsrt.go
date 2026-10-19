@@ -3740,6 +3740,9 @@ func (rt *jsrt) pyRepr(v interface{}) string {
 	if s, isStr := v.(string); isStr {
 		return pyStrRepr(s)
 	}
+	if s, ok := rt.pyMetaRender(v, true); ok {
+		return s
+	}
 	// A CLASS object is not an instance to render: pyString's own <class 'name'>
 	// arm has to win, exactly as it does for str().
 	if _, isCls := rt.pyClassName(v); !isCls {
@@ -3968,6 +3971,9 @@ func (rt *jsrt) pyString(v interface{}) string {
 			return rt.pyUnionStr(u)
 		}
 		if s, ok := t.props["__galias"].(string); ok {
+			return s
+		}
+		if s, ok := rt.pyMetaRender(t, false); ok {
 			return s
 		}
 		if name, ok := rt.pyClassName(t); ok {
@@ -15157,6 +15163,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			// list[int] / dict[str, int]: subscripting a TYPE (a class object or a
 			// builtin like list) is a generic alias, not an indexing. One object per
 			// (origin, parameter) pair, so 'list[int] == list[int]' holds.
+			if m := pyMetaFind(u(a[0]), "__getitem__"); m != nil {
+				return w(rt.call(m, jsUndef, []interface{}{u(a[0]), u(a[1])}))
+			}
 			if v, ok := rt.pyGenericAlias(u(a[0]), u(a[1])); ok {
 				return w(v)
 			}
@@ -15772,6 +15781,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 					return w(rt.call(m, jsUndef, []interface{}{u(a[0])}))
 				}
 			}
+			if m := pyMetaFind(u(a[0]), "__len__"); m != nil {
+				return w(rt.call(m, jsUndef, []interface{}{u(a[0])}))
+			}
 			if els, ok := pySetElems(u(a[0])); ok {
 				return rt.wrapNum(float64(len(els.elems)))
 			}
@@ -16043,6 +16055,51 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			return w(jsUndef)
 		},
+		// (class the statement filled, its keyword arguments) -> the class. With
+		// a metaclass (pyMetaOf) the filled class only carries the namespace:
+		// meta(name, bases, namespace, **kw) makes the real one, the namespace a
+		// dict of the members in definition order plus __module__ and
+		// __qualname__. Otherwise the class is finished in place
+		// (js_pysetnames). Twin of makeClass's metaclass arm in
+		// languages/python-interpreter.abnf and js_pyclass_meta in
+		// lib/python-rt.metajs.
+		"js_pyclass_meta": func(a []uint64) uint64 {
+			cls, _ := u(a[0]).(*jsObject)
+			kw := u(a[1])
+			bases := &jsArray{}
+			if bs, ok := cls.props["__basesl"].(*jsArray); ok {
+				bases.elems = append(bases.elems, bs.elems...)
+			}
+			meta := rt.pyMetaOf(bases, kw)
+			if meta == nil {
+				rt.pyEqHashNone(cls)
+				rt.pySetNames(cls)
+				return a[0]
+			}
+			ns := pyDescTypeSample("dict")
+			nk, nv, _ := dictParts(ns)
+			dictAppend(nk, nv, "__module__", cls.props["__module__"])
+			dictAppend(nk, nv, "__qualname__", rt.pyClsQual(cls))
+			if doc, isStr := cls.props["__doc__"].(string); isStr {
+				dictAppend(nk, nv, "__doc__", doc)
+			}
+			mk, mv, _ := dictParts(rt.pyClassDict(cls))
+			for i, k := range mk.elems {
+				if rt.toString(k) != "__module__" {
+					dictAppend(nk, nv, k, mv.elems[i])
+				}
+			}
+			rest := pyDescTypeSample("dict")
+			rk, rv, _ := dictParts(rest)
+			if keys, vals, ok := dictParts(kw); ok {
+				for i, k := range keys.elems {
+					if rt.toString(k) != "metaclass" {
+						dictAppend(rk, rv, k, vals.elems[i])
+					}
+				}
+			}
+			return w(rt.callPyValue(meta, []interface{}{rt.pyClsName(cls), pyTup(bases), ns}, rest))
+		},
 		// The class body is a suite: it runs in a scope of its own and every name
 		// it bound (methods, class attributes, __slots__) becomes a class member.
 		"js_pyclass_fill": func(a []uint64) uint64 { // (class, class-body scope)
@@ -16102,6 +16159,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				}
 			}
 			if cls, ok := pyClassObj(callee); ok {
+				if m := pyMetaFind(cls, "__call__"); m != nil {
+					return w(rt.call(m, jsUndef, rt.pyBindCall(m, append([]interface{}{cls}, args.elems...), kw)))
+				}
 				return w(rt.pyNewInstance(cls, args.elems, kw))
 			}
 			if _, cls, ok := pyInstance(callee); ok {
@@ -16243,6 +16303,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if _, cls, ok := pyInstance(v); ok {
 				return w(cls)
 			}
+			if m := pyClassMeta(v); m != nil {
+				return w(m)
+			}
 			return w(rt.pyBuiltinClass(pyTypeName(rt, v)))
 		},
 		// type(name, bases, ns), or type() at any count but one and three: the
@@ -16253,16 +16316,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if args == nil || len(args.elems) != 3 {
 				panic(&jsThrown{value: rt.pyExcInstance("TypeError", "type() takes 1 or 3 arguments")})
 			}
-			bases := &jsArray{elems: append([]interface{}{}, rt.pyElemsOf(args.elems[1])...)}
-			cls := rt.pyClassNew(rt.toString(args.elems[0]), bases)
-			cls.set("__module__", "__main__")
-			if keys, vals, ok := dictParts(args.elems[2]); ok {
-				for i, k := range keys.elems {
-					rt.pySetAttr(cls, rt.toString(k), vals.elems[i])
-				}
-			}
-			rt.pySetNames(cls)
-			return w(cls)
+			return w(rt.pyTypeNew(rt.toString(args.elems[0]), args.elems[1], args.elems[2], nil))
 		},
 		// BaseException.add_note(self, note): appends to the instance's __notes__
 		// list, made on first use. Twin of add_note in
@@ -16654,6 +16708,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 						hit := rt.truthy(rt.call(m, jsUndef, []interface{}{r, l}))
 						return boolH(hit == want)
 					}
+				}
+				if m := pyMetaFind(r, "__contains__"); m != nil {
+					return boolH(rt.truthy(rt.call(m, jsUndef, []interface{}{r, l})) == want)
 				}
 				return boolH(rt.pyContains(l, r) == want)
 			}
@@ -20377,12 +20434,17 @@ func (rt *jsrt) pySuperCall(s *jsObject, args []interface{}) interface{} {
 func (rt *jsrt) pySuperFind(s *jsObject, name string) (interface{}, bool) {
 	var mro []*jsObject
 	obj := s.props["__sobj"]
+	start, _ := s.props["__scls"].(*jsObject)
 	if c, isCls := pyClassObj(obj); isCls {
 		mro = pyMRO(c)
+		// A class that is no subclass of the start is an INSTANCE of it: a
+		// metaclass method's super() searches the metaclass's MRO.
+		if m := pyClassMeta(c); m != nil && !pyIsSubclass(c, start) && pyIsSubclass(m, start) {
+			mro = pyMRO(m)
+		}
 	} else if _, cls, isInst := pyInstance(obj); isInst {
 		mro = pyMRO(cls)
 	}
-	start, _ := s.props["__scls"].(*jsObject)
 	at := -1
 	for i, k := range mro {
 		if k == start && at < 0 {
@@ -20396,6 +20458,11 @@ func (rt *jsrt) pySuperFind(s *jsObject, name string) (interface{}, bool) {
 	for _, k := range mro[at+1:] {
 		if v, ok := pyClassMember(k, name); ok {
 			return v, true
+		}
+		if pyBuiltinClsName(k) == "type" {
+			if d := rt.pyTypeDelegate(name); d != nil {
+				return d, true
+			}
 		}
 		if bn := pyBuiltinClsName(k); bn != "" && name == "__new__" {
 			return rt.pyClsNew(k), true
@@ -20589,6 +20656,25 @@ func (rt *jsrt) pyGetAttrRaw(obj interface{}, name string) interface{} {
 				return rt.call(get, jsUndef, []interface{}{v, jsUndef, cls})
 			}
 			return v
+		}
+		// What the class does not have, its METACLASS answers: a method binds to
+		// the class, a property reads with the class as self.
+		if meta := pyClassMeta(cls); meta != nil {
+			if name == "__class__" {
+				return meta
+			}
+			if v, found := pyLookup(meta, name); found {
+				if p, isProp := pyPropOf(v); isProp {
+					return rt.pyPropGet(p, obj, meta)
+				}
+				if pyDescKind(v) != "" {
+					return rt.pyDescGet(v, meta, name)
+				}
+				if isCallable(v) {
+					return rt.pyBindMethod(obj, v, name)
+				}
+				return v
+			}
 		}
 		// C.mro(), type's own method: the resolution order as a fresh list.
 		if name == "mro" {
@@ -21162,6 +21248,19 @@ func (rt *jsrt) pySetAttrRaw(obj interface{}, name string, v interface{}) {
 		return
 	}
 	if cls, ok := pyClassObj(obj); ok {
+		// A class's __name__ and __qualname__ are its own name slots.
+		if name == "__name__" || name == "__qualname__" {
+			s, isStr := v.(string)
+			if !isStr {
+				rt.pyRaise("TypeError", "can only assign string to "+rt.toString(cls.props["__name"])+"."+name+", not '"+pyTypeName(rt, v)+"'")
+			}
+			if name == "__name__" {
+				cls.set("__name", s)
+			} else {
+				cls.set("__qual", s)
+			}
+			return
+		}
 		pyNoteDunder(cls, name)
 		cls.set(name, v)
 		rt.pyNoteHook(name)
@@ -21458,6 +21557,10 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 		}
 		if name == "mro" {
 			return rt.pyMroAttr(cls, "__mro__")
+		}
+		// A metaclass method, bound to the class (pyGetAttrRaw's arm).
+		if pyMetaFind(cls, name) != nil {
+			return rt.callPyValue(rt.pyGetAttrRaw(cls, name), args, kw)
 		}
 		if m := rt.pyClassFallback(cls, name); m != nil {
 			return rt.callPyValue(m, args, kw)
@@ -22200,7 +22303,7 @@ func (rt *jsrt) pyIsIterable(v interface{}) bool {
 		m, found := pyLookup(cls, "__iter__")
 		return (found && isCallable(m)) || pySeqGetitem(v) != nil
 	}
-	return false
+	return pyMetaFind(v, "__iter__") != nil
 }
 
 // pySetMethod runs one of the set methods.
@@ -22484,6 +22587,9 @@ func (rt *jsrt) callPyValue(v interface{}, args []interface{}, kw interface{}) i
 		}
 	}
 	if cls, ok := pyClassObj(v); ok {
+		if m := pyMetaFind(cls, "__call__"); m != nil {
+			return rt.call(m, jsUndef, rt.pyBindCall(m, append([]interface{}{cls}, args...), kw))
+		}
 		return rt.pyNewInstance(cls, args, kw)
 	}
 	if _, cls, ok := pyInstance(v); ok {
@@ -22587,6 +22693,8 @@ func init() {
 				sized = true
 			} else if pyIsDView(v) {
 				return rt.wrap(float64(pyDViewLen(v)))
+			} else if pyMetaFind(v, "__len__") != nil {
+				sized = true
 			}
 			if !sized {
 				panic(&jsThrown{value: rt.pyExcInstance("TypeError",
@@ -22609,6 +22717,15 @@ func (rt *jsrt) pyIsInstance(v interface{}, target interface{}) bool {
 			}
 		}
 		return false
+	}
+	// A class is an instance of its metaclass.
+	if m := pyClassMeta(v); m != nil {
+		if tc, isCls := target.(*jsObject); isCls {
+			if pyBuiltinClsName(tc) == "type" || pyBuiltinClsName(tc) == "object" {
+				return true
+			}
+			return pyIsSubclass(m, tc)
+		}
 	}
 	_, cls, ok := pyInstance(v)
 	if !ok {

@@ -29,7 +29,7 @@
 #   - main() returns the failure count (exit 0 == full support, verified)
 #
 # Deliberately out of scope (not syntax, or unrunnable in this harness):
-# metaclasses, eval/exec, __slots__-free
+# eval/exec, __slots__-free
 # introspection helpers, and builtins beyond the small set the feature test
 # already leans on plus type/str/int/isinstance and the Exception hierarchy
 # (ExceptionGroup appears once: except* cannot be exercised without it).
@@ -6651,6 +6651,88 @@ def s127():
           and issubclass(BrokenPipeError, ConnectionError) and OSError(2, "a", None).args == (2, "a", None))
     check("hsh1", S127E.__hash__ is None and "__hash__" in vars(S127E))
 
+# ===== SECTION 128: metaclasses and the enum module =====
+# metaclass= (or a base's metaclass) makes the class through M.__new__ and
+# M.__init__; iter(C), C[k], len(C), `in`, C(...) and repr(C) ask M, and an
+# attribute C lacks is M's. enum is written on top of that.
+from enum import Enum as S128Enum, IntEnum as S128IntEnum, auto as S128auto, unique as S128unique
+
+S128log = []
+
+class S128M(type):
+    def __new__(mcs, name, bases, ns, **kw):
+        S128log.append(("new", name, sorted(k for k in ns if not k.startswith("__")), kw))
+        cls = super().__new__(mcs, name, bases, ns)
+        cls.tag = name.lower()
+        return cls
+    def __init__(cls, name, bases, ns, **kw):
+        S128log.append(("init", name))
+        super().__init__(name, bases, ns)
+    def __iter__(cls):
+        return iter([1, 2, 3])
+    def __getitem__(cls, k):
+        return k * 2
+    def __call__(cls, *a):
+        S128log.append(("call", a))
+        return super().__call__(*a)
+    def __len__(cls):
+        return 3
+    def __contains__(cls, x):
+        return x == 2
+    def hello(cls):
+        return "hello " + cls.__name__
+    @property
+    def prop(cls):
+        return "p:" + cls.__name__
+    def __repr__(cls):
+        return "<M " + cls.__name__ + ">"
+
+class S128C(metaclass=S128M, flag=1):
+    x = 1
+    def __init__(self, v=0):
+        self.v = v
+
+class S128D(S128C):
+    pass
+
+class S128Color(S128Enum):
+    RED = S128auto()
+    GREEN = S128auto()
+    BLUE = "b"
+
+class S128Num(S128IntEnum):
+    ONE = 1
+    TWO = 2
+    UNO = 1
+
+def s128():
+    c = S128C(7)
+    check("meta1", [list(S128C), S128C[5], len(S128C), 2 in S128C, 3 in S128C, S128C.hello(), S128C.prop, S128C.tag, repr(S128C)]
+          == [[1, 2, 3], 10, 3, True, False, "hello S128C", "p:S128C", "s128c", "<M S128C>"]
+          and type(S128C) is S128M and isinstance(S128C, S128M) and isinstance(S128C, type) and c.v == 7)
+    check("meta2", S128log == [("new", "S128C", ["x"], {"flag": 1}), ("init", "S128C"), ("new", "S128D", [], {}),
+                               ("init", "S128D"), ("call", (7,))]
+          and type(S128D) is S128M and S128D.tag == "s128d" and S128M("Dyn", (), {"y": 2}).y == 2)
+    check("enum1", [m.name for m in S128Color] == ["RED", "GREEN", "BLUE"] and S128Color.GREEN.value == 2
+          and repr(S128Color.BLUE) == "<S128Color.BLUE: 'b'>" and str(S128Color.RED) == "S128Color.RED"
+          and S128Color(2) is S128Color.GREEN and S128Color["RED"] is S128Color.RED and len(S128Color) == 3
+          and repr(S128Color) == "<enum 'S128Color'>" and isinstance(S128Color.RED, S128Color)
+          and list(S128Color.__members__) == ["RED", "GREEN", "BLUE"])
+    check("enum2", repr(S128Num.ONE) == "<S128Num.ONE: 1>" and str(S128Num.TWO) == "2" and S128Num.ONE + 1 == 2
+          and S128Num.UNO is S128Num.ONE and list(S128Num) == [S128Num.ONE, S128Num.TWO] and 1 in S128Num
+          and f"{S128Num.TWO:>3}" == "  2" and S128Num(2) is S128Num.TWO)
+    msg = ""
+    try:
+        S128Color(9)
+    except ValueError as e:
+        msg = str(e)
+    dup = ""
+    try:
+        S128unique(S128Num)
+    except ValueError as e:
+        dup = str(e)
+    check("enum3", msg == "9 is not a valid S128Color" and dup == "duplicate values found in <enum 'S128Num'>: UNO -> ONE")
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -6776,5 +6858,6 @@ def main():
     s125() # SECTION-CALL 125
     s126() # SECTION-CALL 126
     s127() # SECTION-CALL 127
+    s128() # SECTION-CALL 128
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]
