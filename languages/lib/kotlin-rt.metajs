@@ -455,6 +455,48 @@ function ktMapFind(keys, k) {
     return -1
 }
 
+// k3GroupingMethod is ktGroupingMethod (jsrtkotlin.go): a Grouping's eachCount,
+// fold, reduce and aggregate, each an aggregation per key over the elements in
+// order.
+function k3GroupingMethod(g, name, args) {
+    if (name != "eachCount" && name != "fold" && name != "reduce" && name != "aggregate") { return KT_MISS }
+    var es = g["es"]
+    var key = g["key"]
+    var f = ktArg(args, 0)
+    var op = ktArg(args, 1)
+    var sel = name == "fold" && ktIsFn(f) && ktIsFn(op)
+    var m = ktMakeMap()
+    var i = 0
+    while (i < es.length) {
+        var e = es[i]
+        var k = ktCall1(key, e)
+        var at = ktMapFind(ktMapKeys(m), k)
+        var nv = k3GroupStep(name, sel, f, op, k, at < 0, at < 0 ? null : ktMapVals(m)[at], e)
+        if (at < 0) { ktMapPut(m, k, nv) } else { ktMapVals(m)[at] = nv }
+        i = i + 1
+    }
+    return m
+}
+
+// One element's step of k3GroupingMethod: the key's new accumulator.
+function k3GroupStep(name, sel, f, op, k, first, acc, e) {
+    if (name == "eachCount") {
+        if (first) { return 1 }
+        return ktNum(acc) + 1
+    }
+    if (name == "reduce") {
+        if (first) { return e }
+        return ktCall(f, [k, acc, e])
+    }
+    if (name == "aggregate") { return ktCall(f, [k, acc, e, first]) }
+    if (sel) {
+        if (first) { return ktCall(op, [k, ktCall2(f, k, e), e]) }
+        return ktCall(op, [k, acc, e])
+    }
+    if (first) { return ktCall2(op, f, e) }
+    return ktCall2(op, acc, e)
+}
+
 // ktMapPut (jsrtkotlin.go 3035): insert or replace, keeping insertion order.
 function ktMapPut(m, k, v) {
     var keys = ktMapKeys(m)
@@ -1644,6 +1686,10 @@ function ktNumMethod(recv, name, args) {
     if (name == "coerceIn") {
         var clo = ktArg(args, 0)
         var chi = ktArg(args, 1)
+        if (args.length == 1 && ktIsRange(clo)) { return k1CoerceRange(recv, clo) }
+        if (!rtIsNil(clo) && !rtIsNil(chi) && k1NumLess(chi, clo)) {
+            ktRaise("IllegalArgumentException", "Cannot coerce value to an empty range: maximum " + ktRender(chi) + " is less than minimum " + ktRender(clo) + ".")
+        }
         if (!rtIsNil(clo)) { if (k1NumLess(recv, clo)) { return clo } }
         if (!rtIsNil(chi)) { if (k1NumLess(chi, recv)) { return chi } }
         return recv
@@ -1656,6 +1702,14 @@ function ktNumMethod(recv, name, args) {
     }
     if (name == "hashCode") { return ktElemHash(recv) }
     return KT_MISS
+}
+
+// coerceIn(range): an empty range is an IllegalArgumentException.
+function k1CoerceRange(recv, rg) {
+    if (ktRangeEmpty(rg)) { ktRaise("IllegalArgumentException", "Cannot coerce value to an empty range: " + ktRender(rg) + ".") }
+    if (k1NumLess(recv, rg["from"])) { return rg["from"] }
+    if (k1NumLess(rg["to"], recv)) { return rg["to"] }
+    return recv
 }
 
 // ----- the declared-type adoption pair, OWNED by this section ---------------
@@ -2456,6 +2510,160 @@ function k2Split(s, sep) {
     return out
 }
 
+// k2OptIc / k2OptInt are ktOptIc / ktOptInt (jsrtkotlin.go): the trailing
+// ignoreCase (a Boolean) and Int options of a kotlin.text member, told apart by
+// type because named arguments arrive in source order.
+function k2OptIc(args, from) {
+    var i = from
+    while (i < args.length) {
+        if (args[i] === true) { return true }
+        i = i + 1
+    }
+    return false
+}
+
+function k2OptInt(args, from, dflt) {
+    var i = from
+    while (i < args.length) {
+        if (typeof args[i] != "boolean" && !rtIsNil(args[i])) { return k2Int(args[i]) }
+        i = i + 1
+    }
+    return dflt
+}
+
+// k2SplitArgs is ktSplitArgs (jsrtkotlin.go): kotlin.text.split's leading String
+// / Char delimiters, then the options.
+function k2SplitArgs(s, args) {
+    var ds = []
+    var i = 0
+    var go = true
+    while (go && i < args.length) {
+        if (typeof args[i] == "string" || ktIsChar(args[i])) {
+            ds.push(ktStrArg(args[i]))
+            i = i + 1
+        } else { go = false }
+    }
+    var lim = k2OptInt(args, i, 0)
+    if (lim < 0) { ktRaise("IllegalArgumentException", "Limit must be non-negative, but was " + lim) }
+    return k2SplitBy(s, ds, k2OptIc(args, i), lim)
+}
+
+// k2TextOp is ktTextOp (jsrtkotlin.go): kotlin.text's search members over a
+// String or Char argument, with the optional startIndex and ignoreCase, clamped
+// as java.lang.String clamps them; compareTo is java's.
+function k2TextOp(s, name, args) {
+    if (name != "equals" && name != "compareTo" && name != "contains" && name != "indexOf" &&
+        name != "lastIndexOf" && name != "startsWith" && name != "endsWith") { return KT_MISS }
+    var a0 = ktArg(args, 0)
+    var ic = k2OptIc(args, 1)
+    if (name == "equals") {
+        if (typeof a0 != "string") { return false }
+        return a0.length == s.length && k2RegionEq(s, 0, a0, ic)
+    }
+    if (typeof a0 != "string" && !ktIsChar(a0)) { return KT_MISS }
+    var o = ktStrArg(a0)
+    var n = s.length
+    if (name == "compareTo") { return k2CmpText(s, o, ic) }
+    if (name == "contains") { return k2FindText(s, o, 0, ic) >= 0 }
+    if (name == "indexOf") { return k2FindText(s, o, k2OptInt(args, 1, 0), ic) }
+    if (name == "lastIndexOf") {
+        var at = k2OptInt(args, 1, n - 1)
+        if (at > n - o.length) { at = n - o.length }
+        while (at >= 0) {
+            if (k2RegionEq(s, at, o, ic)) { return at }
+            at = at - 1
+        }
+        return -1
+    }
+    if (name == "startsWith") { return k2RegionEq(s, k2OptInt(args, 1, 0), o, ic) }
+    return k2RegionEq(s, n - o.length, o, ic)
+}
+
+// k2FindText is ktFindText (jsrtkotlin.go): a startIndex past the end clamps to
+// the length unless ic.
+function k2FindText(s, o, from, ic) {
+    var i = from
+    if (i < 0) { i = 0 }
+    if (!ic && i > s.length) { i = s.length }
+    while (i + o.length <= s.length) {
+        if (k2RegionEq(s, i, o, ic)) { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+function k2CmpText(a, b, ic) {
+    var i = 0
+    while (i < a.length && i < b.length) {
+        var c1 = a.charCodeAt(i)
+        var c2 = b.charCodeAt(i)
+        if (c1 != c2) {
+            if (!ic) { return c1 - c2 }
+            var u1 = k2Upper(c1)
+            var u2 = k2Upper(c2)
+            if (u1 != u2 && k2Lower(u1) != k2Lower(u2)) { return k2Lower(u1) - k2Lower(u2) }
+        }
+        i = i + 1
+    }
+    return a.length - b.length
+}
+
+// k2SplitBy is ktSplit (jsrtkotlin.go): at each index the first delimiter in
+// argument order that matches there splits, an empty one matching at every index
+// and the search then moving on by one; a positive limit caps the parts.
+function k2SplitBy(s, ds, ic, lim) {
+    var out = []
+    var start = 0
+    var from = 0
+    var go = true
+    while (go && (lim <= 0 || out.length < lim - 1)) {
+        var at = -1
+        var dl = 0
+        var i = from
+        while (at < 0 && i <= s.length) {
+            var k = 0
+            while (at < 0 && k < ds.length) {
+                if (k2RegionEq(s, i, ds[k], ic)) {
+                    at = i
+                    dl = ds[k].length
+                }
+                k = k + 1
+            }
+            i = i + 1
+        }
+        if (at < 0) {
+            go = false
+        } else {
+            out.push(s.substring(start, at))
+            start = at + dl
+            from = start
+            if (dl == 0) { from = start + 1 }
+            if (from > s.length) { go = false }
+        }
+    }
+    out.push(s.substring(start, s.length))
+    return out
+}
+
+// k2RegionEq is ktRegionEq (jsrtkotlin.go): d occurs in s at index i, under
+// Char.equals(ignoreCase) when ic.
+function k2RegionEq(s, i, d, ic) {
+    if (i < 0 || i + d.length > s.length) { return false }
+    var j = 0
+    while (j < d.length) {
+        var a = s.charCodeAt(i + j)
+        var c = d.charCodeAt(j)
+        if (a != c) {
+            if (!ic) { return false }
+            var au = k2Upper(a)
+            var cu = k2Upper(c)
+            if (au != cu && k2Lower(au) != k2Lower(cu)) { return false }
+        }
+        j = j + 1
+    }
+    return true
+}
+
 // strings.LastIndex, which the frozen engine has neither as lastIndexOf nor as
 // an indexOf with a from-index. The Go twin answers a BYTE offset here and this
 // answers a CODE UNIT offset; the two agree for every ASCII haystack, which is
@@ -2509,6 +2717,32 @@ function k2TrimSide(s, left, right) {
 
 function k2TrimSpace(s) { return k2TrimSide(s, true, true) }
 
+// k2TrimBy is ktTrimBy (jsrtkotlin.go): trim / trimStart / trimEnd given the
+// Chars to drop, or a predicate on each Char.
+function k2TrimBy(s, left, right, args) {
+    var a = 0
+    var b = s.length
+    var go = left
+    while (go && a < b) {
+        if (k2TrimHit(args, s.charCodeAt(a))) { a = a + 1 } else { go = false }
+    }
+    go = right
+    while (go && b > a) {
+        if (k2TrimHit(args, s.charCodeAt(b - 1))) { b = b - 1 } else { go = false }
+    }
+    return s.substring(a, b)
+}
+
+function k2TrimHit(args, c) {
+    if (ktIsFn(args[0]) || k4IsRef(ktRefOf(args[0]))) { return ktCall1(args[0], ktChar(c)) === true }
+    var i = 0
+    while (i < args.length) {
+        if (ktIsChar(args[i]) && ktCharCode(args[i]) == c) { return true }
+        i = i + 1
+    }
+    return false
+}
+
 // strings.TrimLeft over the cutset " \t\r\n\f": trimIndent's fallback for a line
 // shorter than the common indent.
 function k2IsCut(c) {
@@ -2531,6 +2765,8 @@ function k2TrimLeftCut(s) {
 // js_mcall does NOT carry and KT_MISS for everything else, so a name js_mcall
 // already implements keeps exactly the behaviour it had.
 function ktStrMethod(s, name, args) {
+    var tov = k2TextOp(s, name, args)
+    if (!ktMiss(tov)) { return tov }
     if (name == "isNotEmpty") { return s.length > 0 }
     if (name == "get") {
         // Bounds-checked, like the indexed read s[i] it is the method spelling of.
@@ -2539,12 +2775,6 @@ function ktStrMethod(s, name, args) {
         return ktChar(s.charCodeAt(gi))
     }
     if (name == "plus") { return s + k2Str2(ktArg(args, 0)) }
-    if (name == "compareTo") {
-        var o = k2Str2(ktArg(args, 0))
-        if (s < o) { return -1 }
-        if (s > o) { return 1 }
-        return 0
-    }
     if (name == "repeat") {
         var rn = k2Int(ktArg(args, 0))
         if (rn < 0) { ktRaise("IllegalArgumentException", "Count 'n' must be non-negative, but was " + rn + ".") }
@@ -2560,7 +2790,6 @@ function ktStrMethod(s, name, args) {
     // spellings are deprecated but still resolve, so both halves accept all four.
     if (name == "uppercase" || name == "toUpperCase") { return s.toUpperCase() }
     if (name == "lowercase" || name == "toLowerCase") { return s.toLowerCase() }
-    if (name == "contains") { return s.indexOf(k2Str2(ktArg(args, 0))) >= 0 }
     if (name == "hashCode") { return k2StrHash(s) }
     return k2StrMethod2(s, name, args)
 }
@@ -2609,11 +2838,10 @@ function k2StrMethod2(s, name, args) {
     }
     if (name == "toCharArray") { return arrKindSet(ktChars(s), 1) }
     if (name == "toList") { return ktChars(s) }
-    if (name == "trim") { return k2TrimSpace(s) }
-    if (name == "trimStart") { return k2TrimSide(s, true, false) }
-    if (name == "trimEnd") { return k2TrimSide(s, false, true) }
-    if (name == "startsWith") { return k2StartsWith(s, ktStrArg(ktArg(args, 0))) }
-    if (name == "endsWith") { return k2EndsWith(s, ktStrArg(ktArg(args, 0))) }
+    if (name == "trim" || name == "trimStart" || name == "trimEnd") {
+        if (args.length > 0) { return k2TrimBy(s, name != "trimEnd", name != "trimStart", args) }
+        return k2TrimSide(s, name != "trimEnd", name != "trimStart")
+    }
     if (name == "padStart" || name == "padEnd") {
         var want = k2Int(ktArg(args, 0))
         if (want < 0) { ktRaise("IllegalArgumentException", "Desired length " + want + " is less than zero.") }
@@ -2642,12 +2870,10 @@ function k2StrMethod2(s, name, args) {
         return lo
     }
     if (name == "split") {
-        // No argument, or an empty separator, is not this dispatcher's call: the
-        // Regex overload takes it (see the header note on the hub's !pat guard).
+        // No argument is not this dispatcher's call: the Regex overload takes it
+        // (see the header note on the hub's !pat guard).
         if (args.length == 0) { return KT_MISS }
-        var sep = ktStrArg(args[0])
-        if (sep.length == 0) { return KT_MISS }
-        return k2Split(s, sep)
+        return k2SplitArgs(s, args)
     }
     if (name == "drop" || name == "take" || name == "dropLast" || name == "takeLast") {
         var k = k2Int(ktArg(args, 0))
@@ -2658,9 +2884,6 @@ function k2StrMethod2(s, name, args) {
         if (name == "dropLast") { return s.substring(0, n - k) }
         return s.substring(n - k, n)
     }
-    if (name == "indexOf") { return s.indexOf(ktStrArg(ktArg(args, 0))) }
-    if (name == "lastIndexOf") { return k2LastIndexOf(s, ktStrArg(ktArg(args, 0))) }
-    if (name == "contains") { return s.indexOf(ktStrArg(ktArg(args, 0))) >= 0 }
     if (name == "toInt" || name == "toLong" || name == "toDouble" || name == "toFloat" ||
         name == "toIntOrNull" || name == "toLongOrNull" || name == "toDoubleOrNull" || name == "toFloatOrNull") {
         var radix = 10
@@ -2801,8 +3024,8 @@ function k2StrMethod2(s, name, args) {
             return s.substring(sb0, se0)
         }
     }
-    if (name == "filter" || name == "filterNot" || name == "filterIndexed" ||
-        name == "takeWhile" || name == "dropWhile" || name == "onEach") {
+    if (name == "filter" || name == "filterNot" || name == "filterIndexed" || name == "takeWhile" ||
+        name == "dropWhile" || name == "takeLastWhile" || name == "dropLastWhile" || name == "onEach") {
         var fv = ktSeqMethodK(ktChars(s), name, args, "Char sequence")
         if (!ktMiss(fv)) { return k4CharsStr(fv) }
     }
@@ -3478,6 +3701,8 @@ function ktSbMethod(o, name, args) {
         o["s"] = ktRevText(ktSbText(o))
         return o
     }
+    // java.lang.StringBuilder does not override equals: it is identity.
+    if (name == "equals") { return ktIdent(o, ktArg(args, 0)) }
     return ktStrMethod(ktSbText(o), name, args)
 }
 
@@ -3983,6 +4208,20 @@ function ktSeqMethodK(arr, name, args, kind) {
         if (es.length > 1) { ktRaise("IllegalArgumentException", kind + " has more than one element.") }
         return es[0]
     }
+    // singleOrNull: the one element (matching the predicate), or null for none or
+    // more than one.
+    if (name == "singleOrNull") {
+        best = null
+        n = 0
+        for (i = 0; i < es.length; i = i + 1) {
+            if (args.length == 0 || k3Truthy(ktCall1(f, es[i]))) {
+                best = es[i]
+                n = n + 1
+            }
+        }
+        if (n != 1) { return null }
+        return best
+    }
     if (name == "firstOrNull") {
         if (args.length == 1) {
             if (ktIsFn(f)) {
@@ -4035,14 +4274,19 @@ function ktSeqMethodK(arr, name, args, kind) {
         }
         return -1
     }
-    if (name == "fold") {
+    // The Indexed forms pass the element's index first.
+    if (name == "fold" || name == "foldIndexed") {
         acc = ktArg(args, 0)
-        for (i = 0; i < es.length; i = i + 1) { acc = ktCall2(ktArg(args, 1), acc, es[i]) }
+        for (i = 0; i < es.length; i = i + 1) {
+            if (name == "fold") { acc = ktCall2(ktArg(args, 1), acc, es[i]) } else { acc = ktCall(ktArg(args, 1), [i, acc, es[i]]) }
+        }
         return acc
     }
-    if (name == "foldRight") {
+    if (name == "foldRight" || name == "foldRightIndexed") {
         acc = ktArg(args, 0)
-        for (i = es.length - 1; i >= 0; i = i - 1) { acc = ktCall2(ktArg(args, 1), es[i], acc) }
+        for (i = es.length - 1; i >= 0; i = i - 1) {
+            if (name == "foldRight") { acc = ktCall2(ktArg(args, 1), es[i], acc) } else { acc = ktCall(ktArg(args, 1), [i, es[i], acc]) }
+        }
         return acc
     }
     // The OrNull forms answer null for an empty receiver where the others throw.
@@ -4120,6 +4364,15 @@ function ktSeqMethodK(arr, name, args, kind) {
         oth = []
         for (i = 0; i < es.length; i = i + 1) {
             if (k3Truthy(ktCall1(f, es[i]))) { out.push(es[i]) } else { oth.push(es[i]) }
+        }
+        return {first: out, second: oth}
+    }
+    // unzip: a list of Pairs into the Pair of its firsts and its seconds.
+    if (name == "unzip") {
+        oth = []
+        for (i = 0; i < es.length; i = i + 1) {
+            out.push(es[i]["first"])
+            oth.push(es[i]["second"])
         }
         return {first: out, second: oth}
     }
@@ -4249,6 +4502,15 @@ function ktSeqMethodK(arr, name, args, kind) {
             out.push({__ktiv: true, index: i, value: es[i], first: i, second: es[i]})
         }
         return out
+    }
+    // groupingBy: a Grouping of these elements by key, which eachCount / fold /
+    // reduce / aggregate turn into a map (k3GroupingMethod).
+    if (name == "groupingBy") {
+        var gb = {}
+        gb["__grouping"] = true
+        gb["es"] = es
+        gb["key"] = f
+        return gb
     }
     if (name == "groupBy") {
         mp = ktMakeMap()
@@ -4382,6 +4644,8 @@ function ktSeqMethodK(arr, name, args, kind) {
     }
     if (name == "takeWhile") { return k3Sub(es, 0, k3WhileCut(es, f)) }
     if (name == "dropWhile") { return k3Sub(es, k3WhileCut(es, f), es.length) }
+    if (name == "takeLastWhile") { return k3Sub(es, k3LastWhileCut(es, f), es.length) }
+    if (name == "dropLastWhile") { return k3Sub(es, 0, k3LastWhileCut(es, f)) }
     if (name == "distinctBy") {
         for (i = 0; i < es.length; i = i + 1) {
             v = ktCall1(f, es[i])
@@ -4768,6 +5032,16 @@ function k3WhileCut(es, f) {
         if (!k3Truthy(ktCall1(f, es[i]))) { return i }
     }
     return es.length
+}
+
+// takeLastWhile / dropLastWhile cut after the last element the predicate rejects.
+function k3LastWhileCut(es, f) {
+    var i = es.length - 1
+    while (i >= 0) {
+        if (!k3Truthy(ktCall1(f, es[i]))) { return i + 1 }
+        i = i - 1
+    }
+    return 0
 }
 
 function k3SortedWith(es, f) {
@@ -6424,6 +6698,63 @@ function k4CmpKeys(a, b, desc) {
     return c
 }
 
+// k4CmpValues is ktCmpValues (jsrtkotlin.go): compareValues, null sorting first
+// and String comparing as java's compareTo.
+function k4CmpValues(a, b) {
+    if (rtIsNil(a)) {
+        if (rtIsNil(b)) { return 0 }
+        return -1
+    }
+    if (rtIsNil(b)) { return 1 }
+    if (typeof a == "string" && typeof b == "string") { return k2CmpText(a, b, false) }
+    return k4CmpKeys(a, b, false)
+}
+
+// k4CmpBy is ktCmpBy (jsrtkotlin.go): compareBy over one or more selectors, the
+// first whose keys differ under compareValues deciding.
+function k4CmpBy(sels, desc) {
+    return function (a, b) {
+        var i = 0
+        while (i < sels.length) {
+            var c = k4CmpValues(ktCall1(sels[i], a), ktCall1(sels[i], b))
+            if (c != 0) {
+                if (desc) { return -c }
+                return c
+            }
+            i = i + 1
+        }
+        return 0
+    }
+}
+
+// k4CmpMethod is ktCmpMethod (jsrtkotlin.go): a Comparator's compare, reversed and
+// then-family, which consults its second order only on a tie.
+function k4CmpMethod(f, name, args) {
+    if (name == "compare") { return ktCall2(f, ktArg(args, 0), ktArg(args, 1)) }
+    if (name == "reversed") {
+        return function (a, b) { return ktCall2(f, b, a) }
+    }
+    var g = ktArg(args, 0)
+    if (name == "thenBy" || name == "thenByDescending") {
+        var g2 = k4CmpBy([g], name == "thenByDescending")
+        return function (a, b) {
+            var c = k2Int(ktCall2(f, a, b))
+            if (c != 0) { return c }
+            return g2(a, b)
+        }
+    }
+    if (name == "then" || name == "thenComparator" || name == "thenDescending") {
+        var desc = name == "thenDescending"
+        return function (a, b) {
+            var c = k2Int(ktCall2(f, a, b))
+            if (c != 0) { return c }
+            if (desc) { return ktCall2(g, b, a) }
+            return ktCall2(g, a, b)
+        }
+    }
+    return KT_MISS
+}
+
 // ============================================================================
 // THE SCOPE FUNCTIONS
 // ============================================================================
@@ -7288,24 +7619,26 @@ function ktGlobalFn(name) {
             return ktMapOf(as)
         }
     }
+    // The builders take an optional capacity first, so the lambda is the LAST
+    // argument.
     if (name == "buildMap") {
-        return function (f) {
+        return function () {
             var mp = ktMakeMap()
-            ktWithRecv(mp, f, [mp])
+            ktWithRecv(mp, arguments[arguments.length - 1], [mp])
             return mp
         }
     }
     if (name == "buildList") {
-        return function (f) {
+        return function () {
             var l = []
-            ktWithRecv(l, f, [l])
+            ktWithRecv(l, arguments[arguments.length - 1], [l])
             return l
         }
     }
     if (name == "buildString") {
-        return function (f) {
+        return function () {
             var sb = ktMakeSb("")
-            ktWithRecv(sb, f, [sb])
+            ktWithRecv(sb, arguments[arguments.length - 1], [sb])
             return ktSbText(sb)
         }
     }
@@ -7379,28 +7712,29 @@ function ktGlobalFn(name) {
     if (name == "Random") { return K4_RANDOM_FN }
     // A COMPARATOR is a plain function of two elements answering an Int, which is
     // what sortedWith drives.
-    if (name == "compareBy") {
-        return function (sel) {
-            return function (a, b) { return k4CmpKeys(ktCall1(sel, a), ktCall1(sel, b), false) }
+    if (name == "compareBy" || name == "compareByDescending") {
+        var desc = name == "compareByDescending"
+        return function () {
+            var sels = []
+            var i = 0
+            while (i < arguments.length) {
+                sels.push(arguments[i])
+                i = i + 1
+            }
+            return k4CmpBy(sels, desc)
         }
     }
-    if (name == "compareByDescending") {
-        return function (sel) {
-            return function (a, b) { return k4CmpKeys(ktCall1(sel, a), ktCall1(sel, b), true) }
-        }
+    if (name == "naturalOrder") {
+        return function () { return function (a, b) { return k4CmpValues(a, b) } }
+    }
+    if (name == "reverseOrder") {
+        return function () { return function (a, b) { return k4CmpValues(b, a) } }
     }
     if (name == "Comparator") {
         return function (f) { return f }
     }
     if (name == "compareValues") {
-        return function (a, b) {
-            if (rtIsNil(a)) {
-                if (rtIsNil(b)) { return 0 }
-                return -1
-            }
-            if (rtIsNil(b)) { return 1 }
-            return k4CmpKeys(a, b, false)
-        }
+        return function (a, b) { return k4CmpValues(a, b) }
     }
     if (name == "abs") {
         return function (v) { return k4Abs(v) }
@@ -7856,9 +8190,17 @@ function ktSmcall(recv, name, args) {
         var rnm = k4RndMethod(rv, name, as)
         if (!ktMiss(rnm)) { return rnm }
     }
+    if (ktIsObj(rv) && rv["__grouping"] === true) {
+        var grm = k3GroupingMethod(rv, name, as)
+        if (!ktMiss(grm)) { return grm }
+    }
     if (rv === K4_RANDOM_FN) {
         var rcm = k4RndMethod(k4RndDefault(), name, as)
         if (!ktMiss(rcm)) { return rcm }
+    }
+    if (ktIsFn(rv)) {
+        var cmm = k4CmpMethod(rv, name, as)
+        if (!ktMiss(cmm)) { return cmm }
     }
 
     // kotlin.hashCode() and kotlin.toString() are extensions on Any?, so a NULL

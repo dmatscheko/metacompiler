@@ -7894,6 +7894,7 @@ KwContract  = "contract" KwEnd ;
                           // block in kotlin-interpreter.abnf. listOfNotNull is here rather
                           // than on the mutableListOf closure because it must DROP the nulls.
                           "compareBy", "compareByDescending", "Comparator", "compareValues",
+                          "naturalOrder", "reverseOrder",
                           // kotlin.properties.Delegates - observable / vetoable / notNull.
                           "Delegates",
                           // kotlin.random.Random(seed) - the seeded generator a

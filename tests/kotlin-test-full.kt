@@ -4795,6 +4795,53 @@ fun sec96() {
     check("fmt96g", fe == "java.util.IllegalFormatConversionException: d != java.util.Arrays\$ArrayList")
 }
 
+// ===== SECTION 97: kotlin.text search, split, comparators and Grouping =====
+// Every row was read off kotlin-stdlib 2.2.21 driven from java (JDK 24). The text
+// members take an optional startIndex and ignoreCase, by position or by NAME:
+// indexOf clamps startIndex as java.lang.String does, compareTo is java's (the
+// first differing unit's difference), and split takes several delimiters, an
+// empty one matching at every index, and a non-negative limit. compareBy takes
+// several selectors; a Comparator has compare / reversed / thenBy / then; a
+// Grouping (groupingBy) folds per key. coerceIn rejects an empty range.
+fun sec97() {
+    val ts = listOf("Mississippi", "ss", "SS", "abc", "", "a,b;c,,d", "AxBxc")
+    check("idx97a", ts[0].indexOf(ts[1], 3) == 5 && ts[0].lastIndexOf(ts[1], 4) == 2 && ts[3].indexOf(ts[4], 9) == 3
+                    && ts[3].indexOf(ts[4], 9, true) == -1 && ts[0].indexOf(ts[2], ignoreCase = true) == 2 && ts[0].lastIndexOf('s', 4) == 3)
+    check("idx97b", ts[0].contains(ts[2], ignoreCase = true) && !ts[0].contains(ts[2]) && ts[0].startsWith(ts[1], 2)
+                    && ts[0].endsWith("PI", true) && "ab".equals("AB", ignoreCase = true) && !"Straße".equals("STRASSE", true))
+    check("cmp97c", "a".compareTo("c") == -2 && "ABD".compareTo("abc", true) == 1 && ts[3].compareTo(ts[4]) == 3
+                    && compareValues("a", "c") == -2 && compareValues(null, "c") == -1)
+    check("spl97d", "" + ts[5].split(",", limit = 2) == "[a, b;c,,d]" && "" + ts[5].split(",", ";") == "[a, b, c, , d]"
+                    && "" + ts[3].split("") == "[, a, b, c, ]" && "" + ts[6].split("x", ignoreCase = true) == "[A, B, c]"
+                    && "" + ts[5].split(';', ',', limit = 3) == "[a, b, c,,d]")
+    check("spl97e", s95err { ts[3].split(",", limit = -1) } == "IllegalArgumentException: Limit must be non-negative, but was -1")
+    val ws = listOf("pear", "fig", "apple", "kiwi", "banana", "date", "Fig")
+    check("srt97f", "" + ws.sortedWith(compareBy({ it.length }, { it })) == "[Fig, fig, date, kiwi, pear, apple, banana]"
+                    && "" + ws.sortedWith(compareBy<String> { it.length }.thenByDescending { it }) == "[fig, Fig, pear, kiwi, date, apple, banana]")
+    check("srt97g", "" + ws.sortedWith(compareByDescending<String> { it.length }.thenBy { it }) == "[banana, apple, date, kiwi, pear, Fig, fig]"
+                    && "" + ws.sortedWith(compareBy<String> { it.length }.reversed()) == "[banana, apple, pear, kiwi, date, fig, Fig]"
+                    && "" + ws.sortedWith(reverseOrder()) == "[pear, kiwi, fig, date, banana, apple, Fig]")
+    val c97 = compareBy<String> { it.length }
+    check("srt97h", c97.compare(ws[0], ws[1]) == 1 && c97.compare(ws[1], ws[6]) == 0
+                    && "" + ws.sortedWith(c97.then(naturalOrder())) == "[Fig, fig, date, kiwi, pear, apple, banana]"
+                    && "" + listOf("b", null, "a").sortedWith(compareBy { it }) == "[null, a, b]")
+    val n97 = listOf(1, 2, 3)
+    check("fld97i", n97.foldIndexed(0) { i, a, b -> a + i * b } == 8 && n97.foldRightIndexed("") { i, e, a -> a + i + e } == "231201"
+                    && "" + n97.zip(listOf("a", "b", "c")).unzip() == "([1, 2, 3], [a, b, c])")
+    check("lst97j", ws.singleOrNull { it.length == 5 } == "apple" && ws.singleOrNull { it.length == 3 } == null && listOf(7).singleOrNull() == 7
+                    && "" + ws.takeLastWhile { it.length < 6 } == "[date, Fig]" && "" + ws.dropLastWhile { it.length < 6 } == "[pear, fig, apple, kiwi, banana]"
+                    && "abc123".takeLastWhile { it.isDigit() } == "123")
+    check("grp97k", "" + ws.groupingBy { it.length }.eachCount() == "{4=3, 3=2, 5=1, 6=1}"
+                    && "" + ws.groupingBy { it[0] }.fold(0) { acc, e -> acc + e.length } == "{p=4, f=3, a=5, k=4, b=6, d=4, F=3}"
+                    && "" + ws.groupingBy { it.length }.reduce { _, acc, e -> acc + "+" + e } == "{4=pear+kiwi+date, 3=fig+Fig, 5=apple, 6=banana}")
+    check("trm97l", "xyhiyx".trim('x', 'y') == "hi" && "xyhiyx".trimEnd('x') == "xyhiy" && "123abc456".trimStart { it.isDigit() } == "abc456"
+                    && buildString(10) { repeat(3) { append(it) } } == "012")
+    check("coe97m", n97[2].coerceIn(n97[0]..n97[1]) == 2 && s95err { n97[0].coerceIn(n97[2], n97[1]) } == "IllegalArgumentException: Cannot coerce value to an empty range: maximum 2 is less than minimum 3."
+                    && s95err { 5.coerceIn(n97[2]..n97[0]) } == "IllegalArgumentException: Cannot coerce value to an empty range: 3..1.")
+    val sb97 = StringBuilder("x")
+    check("sbe97n", !sb97.equals("x") && sb97.equals(sb97))
+}
+
 
 fun main() {
     s01() // SECTION-CALL 01
@@ -4893,6 +4940,7 @@ fun main() {
     sec94() // SECTION-CALL 94
     sec95() // SECTION-CALL 95
     sec96() // SECTION-CALL 96
+    sec97() // SECTION-CALL 97
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

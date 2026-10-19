@@ -685,9 +685,20 @@ func (rt *jsrt) ktNumMethod(target interface{}, name string, args []interface{})
 			return o, true
 		}
 		return target, true
-	// coerceIn(min, max): the third member of the coerce family.
+	// coerceIn(min, max) / coerceIn(range): the third member of the coerce family.
+	// An empty range is an IllegalArgumentException. Twin of the coerceIn arm of
+	// mcall in kotlin-interpreter.abnf and ktNumMethod in languages/lib/kotlin-rt.metajs.
 	case "coerceIn":
 		lo, hi := argAt(args, 0), argAt(args, 1)
+		if rg, isRg := ktRangeOf(lo); isRg && len(args) == 1 {
+			if ktRangeEmpty(rg) {
+				rt.ktRaise("IllegalArgumentException", "Cannot coerce value to an empty range: "+rt.ktpRender(lo, 0)+".")
+			}
+			lo, hi = rg.from, rg.to
+		} else if !isUndefOrNull(lo) && !isUndefOrNull(hi) && rt.ktNumLess(hi, lo) {
+			rt.ktRaise("IllegalArgumentException", "Cannot coerce value to an empty range: maximum "+
+				rt.ktpRender(hi, 0)+" is less than minimum "+rt.ktpRender(lo, 0)+".")
+		}
 		if !isUndefOrNull(lo) && rt.ktNumLess(target, lo) {
 			return lo, true
 		}
@@ -1598,6 +1609,11 @@ func init() {
 					return rt.wrap(v)
 				}
 			}
+			if isCallable(recv) {
+				if v, handled := rt.ktCmpMethod(recv, mname, arr.elems); handled {
+					return rt.wrap(v)
+				}
+			}
 			if mo, isObj := recv.(*jsObject); isObj {
 				// A kotlin.random.Random receiver.
 				if ktIsRnd(mo) {
@@ -1607,6 +1623,11 @@ func init() {
 				}
 				if ktIsSb(mo) {
 					if v, handled := rt.ktSbMethod(mo, mname, arr.elems); handled {
+						return rt.wrap(v)
+					}
+				}
+				if gb, _ := mo.props["__grouping"].(bool); gb {
+					if v, handled := rt.ktGroupingMethod(mo, mname, arr.elems); handled {
 						return rt.wrap(v)
 					}
 				}
@@ -2741,6 +2762,9 @@ func init() {
 // js_mcall does NOT carry and (nil, false) for everything else, so a name js_mcall
 // already implements keeps exactly the behaviour it had.
 func (rt *jsrt) ktStrMethod(s, name string, args []interface{}) (interface{}, bool) {
+	if v, ok := rt.ktTextOp(s, name, args); ok {
+		return v, true
+	}
 	switch name {
 	case "isNotEmpty":
 		return len(s) > 0, true
@@ -2753,15 +2777,6 @@ func (rt *jsrt) ktStrMethod(s, name string, args []interface{}) (interface{}, bo
 		return jsChar{code: int32(rt.strCodeAt(s, gi))}, true
 	case "plus":
 		return s + rt.ktStr2(argAt(args, 0)), true
-	case "compareTo":
-		o := rt.ktStr2(argAt(args, 0))
-		if s < o {
-			return float64(-1), true
-		}
-		if s > o {
-			return float64(1), true
-		}
-		return float64(0), true
 	case "repeat":
 		n := jsToInt(rt.toNumber(argAt(args, 0)))
 		if n < 0 {
@@ -2778,8 +2793,6 @@ func (rt *jsrt) ktStrMethod(s, name string, args []interface{}) (interface{}, bo
 		return caseMapMode(s, caseUpper|caseFull), true
 	case "lowercase", "toLowerCase":
 		return caseMapMode(s, caseFull|caseSigma), true
-	case "contains":
-		return rt.strIndexOf(s, rt.ktStr2(argAt(args, 0))) >= 0, true
 	case "hashCode":
 		return float64(ktStrHash(rt, s)), true
 	}
@@ -2835,16 +2848,11 @@ func (rt *jsrt) ktStrMethod2(s, name string, args []interface{}) (interface{}, b
 		return &jsArray{elems: chars(), kind: ktArrArray}, true
 	case "toList":
 		return &jsArray{elems: chars()}, true
-	case "trim":
-		return ktTrim(s, true, true), true
-	case "trimStart":
-		return ktTrim(s, true, false), true
-	case "trimEnd":
-		return ktTrim(s, false, true), true
-	case "startsWith":
-		return strings.HasPrefix(s, rt.ktStrArg(argAt(args, 0))), true
-	case "endsWith":
-		return strings.HasSuffix(s, rt.ktStrArg(argAt(args, 0))), true
+	case "trim", "trimStart", "trimEnd":
+		if len(args) > 0 {
+			return rt.ktTrimBy(s, name != "trimEnd", name != "trimStart", args), true
+		}
+		return ktTrim(s, name != "trimEnd", name != "trimStart"), true
 	case "padStart", "padEnd":
 		want := jsToInt(rt.toNumber(argAt(args, 0)))
 		if want < 0 {
@@ -2876,15 +2884,7 @@ func (rt *jsrt) ktStrMethod2(s, name string, args []interface{}) (interface{}, b
 		if len(args) == 0 {
 			return nil, false
 		}
-		sep := rt.ktStrArg(args[0])
-		if sep == "" {
-			return nil, false
-		}
-		out := &jsArray{}
-		for _, p := range strings.Split(s, sep) {
-			out.elems = append(out.elems, p)
-		}
-		return out, true
+		return rt.ktSplitArgs(s, args), true
 	case "drop", "take", "dropLast", "takeLast":
 		k := jsToInt(rt.toNumber(argAt(args, 0)))
 		if k < 0 {
@@ -2902,12 +2902,6 @@ func (rt *jsrt) ktStrMethod2(s, name string, args []interface{}) (interface{}, b
 			return rt.strRange(s, 0, n-k), true
 		}
 		return rt.strRange(s, n-k, n), true
-	case "indexOf":
-		return float64(rt.strIndexOf(s, rt.ktStrArg(argAt(args, 0)))), true
-	case "lastIndexOf":
-		return float64(strings.LastIndex(s, rt.ktStrArg(argAt(args, 0)))), true
-	case "contains":
-		return rt.strIndexOf(s, rt.ktStrArg(argAt(args, 0))) >= 0, true
 	case "toInt", "toLong", "toDouble", "toFloat", "toIntOrNull", "toLongOrNull", "toDoubleOrNull", "toFloatOrNull":
 		radix := 10
 		if len(args) > 0 {
@@ -3043,7 +3037,7 @@ func (rt *jsrt) ktStrMethod2(s, name string, args []interface{}) (interface{}, b
 			}
 			return rt.strRange(s, begin, end), true
 		}
-	case "filter", "filterNot", "filterIndexed", "takeWhile", "dropWhile", "onEach":
+	case "filter", "filterNot", "filterIndexed", "takeWhile", "dropWhile", "takeLastWhile", "dropLastWhile", "onEach":
 		v, handled := rt.ktSeqMethodK(&jsArray{elems: chars()}, name, args, ktKindChar)
 		if handled {
 			return ktCharsStr(v), true
@@ -3906,6 +3900,62 @@ func (rt *jsrt) ktSetFrom(es []interface{}) *jsObject {
 	return s
 }
 
+// ktGroupingMethod is a Grouping's terminal operations, each an aggregation over
+// the elements in order, per key: eachCount counts; fold starts from its initial
+// value (or from initialValueSelector(key, e) when both arguments are lambdas, the
+// operation then taking the key first); reduce starts from the key's first
+// element; aggregate passes (key, accumulator or null, element, first). Twin of
+// kGroupingMethod in kotlin-interpreter.abnf and k3GroupingMethod in
+// languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktGroupingMethod(g *jsObject, name string, args []interface{}) (interface{}, bool) {
+	switch name {
+	case "eachCount", "fold", "reduce", "aggregate":
+	default:
+		return nil, false
+	}
+	es, _ := g.props["es"].(*jsArray)
+	key := g.props["key"]
+	f, op := argAt(args, 0), argAt(args, 1)
+	sel := name == "fold" && isCallable(f) && isCallable(op)
+	m := ktMakeMap()
+	for _, e := range es.elems {
+		k := rt.ktCall(key, e)
+		keys, vals, _ := dictParts(m)
+		at := rt.ktMapFind(keys, k)
+		var acc interface{} = jsNull
+		if at >= 0 {
+			acc = vals.elems[at]
+		}
+		var nv interface{}
+		switch {
+		case name == "eachCount" && at < 0:
+			nv = float64(1)
+		case name == "eachCount":
+			nv = rt.toNumber(acc) + 1
+		case name == "reduce" && at < 0:
+			nv = e
+		case name == "reduce":
+			nv = rt.ktCall(f, k, acc, e)
+		case name == "aggregate":
+			nv = rt.ktCall(f, k, acc, e, at < 0)
+		case sel && at < 0:
+			nv = rt.ktCall(op, k, rt.ktCall(f, k, e), e)
+		case sel:
+			nv = rt.ktCall(op, k, acc, e)
+		case at < 0:
+			nv = rt.ktCall(op, f, e)
+		default:
+			nv = rt.ktCall(op, acc, e)
+		}
+		if at < 0 {
+			rt.ktMapPut(m, k, nv)
+		} else {
+			vals.elems[at] = nv
+		}
+	}
+	return m, true
+}
+
 // ktMapPut inserts or replaces, keeping insertion order.
 func (rt *jsrt) ktMapPut(m *jsObject, k, v interface{}) {
 	keys, vals, _ := dictParts(m)
@@ -4269,6 +4319,215 @@ func ktIsSpace(r rune) bool {
 		(r >= 8192 && r <= 8202) || r == 8232 || r == 8233 || r == 8239 || r == 8287 || r == 12288
 }
 
+// ktSplitArgs is kotlin.text.split's arguments: the leading String / Char
+// delimiters, then the options (ktOptIc / ktOptInt). Twin of kSplitArgs in kotlin-interpreter.abnf and k2SplitArgs in
+// languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktSplitArgs(s string, args []interface{}) *jsArray {
+	var ds [][]uint16
+	i := 0
+	for ; i < len(args); i++ {
+		_, isStr := args[i].(string)
+		_, isCh := args[i].(jsChar)
+		if !isStr && !isCh {
+			break
+		}
+		ds = append(ds, strUnits(rt.ktStrArg(args[i])))
+	}
+	lim := rt.ktOptInt(args, i, 0)
+	if lim < 0 {
+		rt.ktRaise("IllegalArgumentException", fmt.Sprintf("Limit must be non-negative, but was %d", lim))
+	}
+	return ktSplit(strUnits(s), ds, ktOptIc(args, i), lim)
+}
+
+// ktSplit splits sv at its delimiters ds: at each index the first delimiter in
+// argument order that matches there splits, an empty one matching at every index
+// and the search then moving on by one; a positive limit caps the parts, the last
+// taking the rest.
+func ktSplit(sv []uint16, ds [][]uint16, ic bool, lim int) *jsArray {
+	out := &jsArray{}
+	start, from := 0, 0
+	for lim <= 0 || len(out.elems) < lim-1 {
+		at, dl := -1, 0
+		for i := from; i <= len(sv) && at < 0; i++ {
+			for _, d := range ds {
+				if ktRegionEq(sv, i, d, ic) {
+					at, dl = i, len(d)
+					break
+				}
+			}
+		}
+		if at < 0 {
+			break
+		}
+		out.elems = append(out.elems, strFromUnits(sv[start:at]))
+		start = at + dl
+		from = start
+		if dl == 0 {
+			from++
+		}
+		if from > len(sv) {
+			break
+		}
+	}
+	out.elems = append(out.elems, strFromUnits(sv[start:]))
+	return out
+}
+
+// ktRegionEq reports whether d occurs in sv at index i, under
+// Char.equals(ignoreCase) when ic.
+func ktRegionEq(sv []uint16, i int, d []uint16, ic bool) bool {
+	if i < 0 || i+len(d) > len(sv) {
+		return false
+	}
+	for j, c := range d {
+		a := sv[i+j]
+		if a == c {
+			continue
+		}
+		if !ic {
+			return false
+		}
+		if au, cu := ktUpper(rune(a)), ktUpper(rune(c)); au != cu && ktLower(au) != ktLower(cu) {
+			return false
+		}
+	}
+	return true
+}
+
+// ktOptIc / ktOptInt are the trailing options of a kotlin.text member from
+// args[from] on: ignoreCase (a Boolean) and one Int (startIndex, or split's limit).
+// Named arguments arrive in source order, so the two are told apart by type. Twin
+// of kOptIc / kOptInt in kotlin-interpreter.abnf and k2OptIc / k2OptInt in
+// languages/lib/kotlin-rt.metajs.
+func ktOptIc(args []interface{}, from int) bool {
+	for i := from; i < len(args); i++ {
+		if b, isB := args[i].(bool); isB && b {
+			return true
+		}
+	}
+	return false
+}
+
+func (rt *jsrt) ktOptInt(args []interface{}, from, dflt int) int {
+	for i := from; i < len(args); i++ {
+		if _, isB := args[i].(bool); !isB && !isUndefOrNull(args[i]) {
+			return jsToInt(rt.toNumber(args[i]))
+		}
+	}
+	return dflt
+}
+
+// ktTextOp is kotlin.text's search members over a String or Char argument, with
+// the optional startIndex and ignoreCase: indexOf / lastIndexOf clamp startIndex
+// as java.lang.String does, and compareTo is java's (the first differing unit's
+// difference, else the length difference; compareToIgnoreCase's when ic). Twin of
+// kTextOp in kotlin-interpreter.abnf and k2TextOp in languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktTextOp(s, name string, args []interface{}) (interface{}, bool) {
+	switch name {
+	case "equals", "compareTo", "contains", "indexOf", "lastIndexOf", "startsWith", "endsWith":
+	default:
+		return nil, false
+	}
+	a0 := argAt(args, 0)
+	ic := ktOptIc(args, 1)
+	sv := strUnits(s)
+	if name == "equals" {
+		o, isStr := a0.(string)
+		ou := strUnits(o)
+		return isStr && len(ou) == len(sv) && ktRegionEq(sv, 0, ou, ic), true
+	}
+	_, isStr := a0.(string)
+	_, isCh := a0.(jsChar)
+	if !isStr && !isCh {
+		return nil, false
+	}
+	o := strUnits(rt.ktStrArg(a0))
+	n := len(sv)
+	switch name {
+	case "compareTo":
+		return float64(ktCmpText(sv, o, ic)), true
+	case "contains":
+		return ktFindText(sv, o, 0, ic) >= 0, true
+	case "indexOf":
+		return float64(ktFindText(sv, o, rt.ktOptInt(args, 1, 0), ic)), true
+	case "lastIndexOf":
+		at := rt.ktOptInt(args, 1, n-1)
+		if at > n-len(o) {
+			at = n - len(o)
+		}
+		for ; at >= 0; at-- {
+			if ktRegionEq(sv, at, o, ic) {
+				return float64(at), true
+			}
+		}
+		return float64(-1), true
+	case "startsWith":
+		return ktRegionEq(sv, rt.ktOptInt(args, 1, 0), o, ic), true
+	}
+	return ktRegionEq(sv, n-len(o), o, ic), true
+}
+
+// ktFindText clamps a startIndex past the end to the length, as
+// java.lang.String.indexOf does (an empty needle is found there); the ignoreCase
+// scan does not.
+func ktFindText(sv, o []uint16, from int, ic bool) int {
+	if from < 0 {
+		from = 0
+	}
+	if !ic && from > len(sv) {
+		from = len(sv)
+	}
+	for i := from; i+len(o) <= len(sv); i++ {
+		if ktRegionEq(sv, i, o, ic) {
+			return i
+		}
+	}
+	return -1
+}
+
+func ktCmpText(a, b []uint16, ic bool) int {
+	for i := 0; i < len(a) && i < len(b); i++ {
+		if c1, c2 := rune(a[i]), rune(b[i]); c1 != c2 {
+			if !ic {
+				return int(c1 - c2)
+			}
+			u1, u2 := ktUpper(c1), ktUpper(c2)
+			if l1, l2 := ktLower(u1), ktLower(u2); u1 != u2 && l1 != l2 {
+				return int(l1 - l2)
+			}
+		}
+	}
+	return len(a) - len(b)
+}
+
+// ktTrimBy is trim / trimStart / trimEnd given the Chars to drop, or a predicate on
+// each Char. Twin of kTrimBy in kotlin-interpreter.abnf and k2TrimBy in
+// languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktTrimBy(s string, left, right bool, args []interface{}) string {
+	_, isRef := ktRefOf(args[0])
+	hit := func(c uint16) bool {
+		if isRef || isCallable(args[0]) {
+			return rt.ktCall(args[0], jsChar{code: int32(c)}) == true
+		}
+		for _, a := range args {
+			if ch, ok := a.(jsChar); ok && ch.code == int32(c) {
+				return true
+			}
+		}
+		return false
+	}
+	u := strUnits(s)
+	b, e := 0, len(u)
+	for left && b < e && hit(u[b]) {
+		b++
+	}
+	for right && e > b && hit(u[e-1]) {
+		e--
+	}
+	return strFromUnits(u[b:e])
+}
+
 // ktTrim drops leading (left) and trailing (right) whitespace.
 func ktTrim(s string, left, right bool) string {
 	if left {
@@ -4497,6 +4756,20 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 			rt.ktRaise("IllegalArgumentException", kind+" has more than one element.")
 		}
 		return es[0], true
+	// singleOrNull: the one element (matching the predicate), or null for none or
+	// more than one.
+	case "singleOrNull":
+		var one interface{} = jsNull
+		n := 0
+		for _, e := range es {
+			if len(args) == 0 || rt.truthy(rt.ktCall(f, e)) {
+				one, n = e, n+1
+			}
+		}
+		if n != 1 {
+			return jsNull, true
+		}
+		return one, true
 	case "firstOrNull":
 		if len(args) == 1 && isCallable(f) {
 			for _, e := range es {
@@ -4557,16 +4830,25 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 			}
 		}
 		return float64(-1), true
-	case "fold":
+	// The Indexed forms pass the element's index first.
+	case "fold", "foldIndexed":
 		acc := argAt(args, 0)
-		for _, e := range es {
-			acc = rt.ktCall(argAt(args, 1), acc, e)
+		for i, e := range es {
+			if name == "fold" {
+				acc = rt.ktCall(argAt(args, 1), acc, e)
+			} else {
+				acc = rt.ktCall(argAt(args, 1), float64(i), acc, e)
+			}
 		}
 		return acc, true
-	case "foldRight":
+	case "foldRight", "foldRightIndexed":
 		acc := argAt(args, 0)
 		for i := len(es) - 1; i >= 0; i-- {
-			acc = rt.ktCall(argAt(args, 1), es[i], acc)
+			if name == "foldRight" {
+				acc = rt.ktCall(argAt(args, 1), es[i], acc)
+			} else {
+				acc = rt.ktCall(argAt(args, 1), float64(i), es[i], acc)
+			}
 		}
 		return acc, true
 	// The OrNull forms answer null for an empty receiver where the others throw.
@@ -4670,6 +4952,21 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		p := newJSObject()
 		p.set("first", arr(yes))
 		p.set("second", arr(no))
+		return p, true
+	// unzip: a list of Pairs into the Pair of its firsts and its seconds.
+	case "unzip":
+		fs, ss := []interface{}{}, []interface{}{}
+		for _, e := range es {
+			po, _ := e.(*jsObject)
+			if po == nil {
+				rt.fail("unzip of a non-Pair element")
+			}
+			fs = append(fs, po.props["first"])
+			ss = append(ss, po.props["second"])
+		}
+		p := newJSObject()
+		p.set("first", arr(fs))
+		p.set("second", arr(ss))
 		return p, true
 	case "zip":
 		other := ktElems(rt, argAt(args, 0))
@@ -4860,6 +5157,14 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 			out[i] = p
 		}
 		return arr(out), true
+	// groupingBy: a Grouping of these elements by key, which eachCount / fold /
+	// reduce / aggregate turn into a map (ktGroupingMethod).
+	case "groupingBy":
+		g := newJSObject()
+		g.set("__grouping", true)
+		g.set("es", arr(es))
+		g.set("key", f)
+		return g, true
 	case "groupBy":
 		m := ktMakeMap()
 		for _, e := range es {
@@ -5045,6 +5350,19 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 			return arr(append([]interface{}{}, es[:cut]...)), true
 		}
 		return arr(append([]interface{}{}, es[cut:]...)), true
+	// takeLastWhile / dropLastWhile cut at the last element the predicate rejects.
+	case "takeLastWhile", "dropLastWhile":
+		cut := 0
+		for i := len(es) - 1; i >= 0; i-- {
+			if !rt.truthy(rt.ktCall(f, es[i])) {
+				cut = i + 1
+				break
+			}
+		}
+		if name == "takeLastWhile" {
+			return arr(append([]interface{}{}, es[cut:]...)), true
+		}
+		return arr(append([]interface{}{}, es[:cut]...)), true
 	case "distinctBy":
 		out := []interface{}{}
 		keys := []interface{}{}
@@ -6636,6 +6954,9 @@ func (rt *jsrt) ktSbMethod(o *jsObject, name string, args []interface{}) (interf
 	case "reverse":
 		o.set("s", ktRevText(ktSbText(o)))
 		return o, true
+	case "equals":
+		// java.lang.StringBuilder does not override equals: it is identity.
+		return argAt(args, 0) == interface{}(o), true
 	}
 	return rt.ktStrMethod(ktSbText(o), name, args)
 }
@@ -6923,22 +7244,24 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			return rt.ktMapOf(args)
 		})
+	// The builders take an optional capacity first, so the lambda is the LAST
+	// argument.
 	case "buildMap":
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			mp := ktMakeMap()
-			rt.ktWithRecv(mp, argAt(args, 0), mp)
+			rt.ktWithRecv(mp, argAt(args, len(args)-1), mp)
 			return mp
 		})
 	case "buildList":
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			l := &jsArray{}
-			rt.ktWithRecv(l, argAt(args, 0), l)
+			rt.ktWithRecv(l, argAt(args, len(args)-1), l)
 			return l
 		})
 	case "buildString":
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			sb := ktMakeSb("")
-			rt.ktWithRecv(sb, argAt(args, 0), sb)
+			rt.ktWithRecv(sb, argAt(args, len(args)-1), sb)
 			return ktSbText(sb)
 		})
 	case "Pair":
@@ -7027,10 +7350,16 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 	case "compareBy", "compareByDescending":
 		desc := name == "compareByDescending"
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			sel := argAt(args, 0)
+			return ktCmpBy(append([]interface{}{}, args...), desc)
+		})
+	case "naturalOrder", "reverseOrder":
+		rev := name == "reverseOrder"
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			return jsHostFunc("comparator", func(rt *jsrt, this uint64, ab []interface{}) interface{} {
-				ka, kb := rt.ktCall(sel, argAt(ab, 0)), rt.ktCall(sel, argAt(ab, 1))
-				return float64(ktCmpKeys(rt, ka, kb, desc))
+				if rev {
+					return float64(rt.ktCmpValues(argAt(ab, 1), argAt(ab, 0)))
+				}
+				return float64(rt.ktCmpValues(argAt(ab, 0), argAt(ab, 1)))
 			})
 		})
 	case "Comparator":
@@ -7039,17 +7368,7 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 		})
 	case "compareValues":
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			a, b := argAt(args, 0), argAt(args, 1)
-			if isUndefOrNull(a) {
-				if isUndefOrNull(b) {
-					return float64(0)
-				}
-				return float64(-1)
-			}
-			if isUndefOrNull(b) {
-				return float64(1)
-			}
-			return float64(ktCmpKeys(rt, a, b, false))
+			return float64(rt.ktCmpValues(argAt(args, 0), argAt(args, 1)))
 		})
 	// kotlin.math.abs: the operand's own TYPE, so abs(-1.5) is the Double 1.5 and
 	// abs(-3L) a Long (JavaScript's Math.abs would answer a plain number).
@@ -7417,6 +7736,76 @@ func ktPairMethod(o *jsObject, name string) (interface{}, bool) {
 
 // ktCmpKeys is one comparator step over two selector keys: -1, 0 or 1, reversed for
 // compareByDescending.
+// ktCmpValues is kotlin.comparisons.compareValues: null sorts first, then
+// compareTo (String's is java's).
+func (rt *jsrt) ktCmpValues(a, b interface{}) int {
+	if isUndefOrNull(a) {
+		if isUndefOrNull(b) {
+			return 0
+		}
+		return -1
+	}
+	if isUndefOrNull(b) {
+		return 1
+	}
+	if as, ok := a.(string); ok {
+		if bs, ok := b.(string); ok {
+			return ktCmpText(strUnits(as), strUnits(bs), false)
+		}
+	}
+	return ktCmpKeys(rt, a, b, false)
+}
+
+// ktCmpBy is compareBy / compareByDescending over one or more selectors: the first
+// whose keys differ under compareValues decides. Twin of kCmpBy in
+// kotlin-interpreter.abnf and k4CmpBy in languages/lib/kotlin-rt.metajs.
+func ktCmpBy(sels []interface{}, desc bool) *hostFunc {
+	return jsHostFunc("comparator", func(rt *jsrt, this uint64, ab []interface{}) interface{} {
+		for _, sel := range sels {
+			if c := rt.ktCmpValues(rt.ktCall(sel, argAt(ab, 0)), rt.ktCall(sel, argAt(ab, 1))); c != 0 {
+				if desc {
+					c = -c
+				}
+				return float64(c)
+			}
+		}
+		return float64(0)
+	})
+}
+
+// ktCmpMethod is the member surface of a Comparator (a function of two elements):
+// compare, reversed, and the then-family, which consults its second order only on
+// a tie. Twin of kCmpMethod in kotlin-interpreter.abnf and k4CmpMethod in
+// languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktCmpMethod(f interface{}, name string, args []interface{}) (interface{}, bool) {
+	cmp := func(o interface{}, a, b interface{}) int { return jsToInt(rt.toNumber(rt.ktCall(o, a, b))) }
+	g := argAt(args, 0)
+	var tie func(a, b interface{}) int
+	switch name {
+	case "compare":
+		return rt.ktCall(f, argAt(args, 0), argAt(args, 1)), true
+	case "reversed":
+		return jsHostFunc("comparator", func(rt *jsrt, this uint64, ab []interface{}) interface{} {
+			return float64(cmp(f, argAt(ab, 1), argAt(ab, 0)))
+		}), true
+	case "thenBy", "thenByDescending":
+		g2 := ktCmpBy([]interface{}{g}, name == "thenByDescending")
+		tie = func(a, b interface{}) int { return cmp(g2, a, b) }
+	case "then", "thenComparator":
+		tie = func(a, b interface{}) int { return cmp(g, a, b) }
+	case "thenDescending":
+		tie = func(a, b interface{}) int { return cmp(g, b, a) }
+	default:
+		return nil, false
+	}
+	return jsHostFunc("comparator", func(rt *jsrt, this uint64, ab []interface{}) interface{} {
+		if c := cmp(f, argAt(ab, 0), argAt(ab, 1)); c != 0 {
+			return float64(c)
+		}
+		return float64(tie(argAt(ab, 0), argAt(ab, 1)))
+	}), true
+}
+
 func ktCmpKeys(rt *jsrt, a, b interface{}, desc bool) int {
 	c := 0
 	if ktKeyLess(rt, a, b) {
