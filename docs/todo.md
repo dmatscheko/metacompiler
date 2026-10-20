@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-652** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-653** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -79,11 +79,10 @@ is "not supported" under the P dialect (python supports fixed-width lookbehind);
 
 # JS — JavaScript and TypeScript
 
-### T-644 js: own-property details of prototypes and functions · P3 · JS · IN PROGRESS (JS worker, round 10) [V]
-`class B{m(){}}; B.prototype.m = function(){}; B.prototype.x = 1` → `Object.keys(B.prototype)` includes `m` in all engines (node `x`
-only: assigning an existing non-enumerable property keeps it non-enumerable). `Object.getOwnPropertyNames(K)` with `static s(){}` →
-`""` (node `length,name,prototype,s`). A function declaration's names → `length,name` (node adds `arguments,caller,prototype`;
-recorded as a value-model limit). `K.prototype.hasOwnProperty("constructor")` / a declared method name → false (node true).
+### T-652 js: for-in through the prototype chain; `in` on prototype methods; Object.prototype methods as class values; private static getters · P1 · JS · OPEN [V]
+`class B{}; B.prototype.x = 1; for (k in new B()) println(k)` → nothing in all engines (node `x`: for-in walks inherited enumerable
+keys). `class C{ n(){} }; "n" in C.prototype` → false (node true). `typeof K.hasOwnProperty` on a class → "undefined" (node
+"function"). `class K { static get #h(){ return 1 } }` → js-to-llvm-ir.abnf "Not everything could be parsed" (interpreter accepts).
 
 ---
 
@@ -743,6 +742,7 @@ T-647 kotlin: `javaClass` / `::class` names of non-collections and collections; 
 T-638 bash: `@Q` / `printf %q` / `declare -p` of a well-formed non-printable character — DONE 8a8a72b3 (iswprint table derived from bash itself and cross-checked against iswprint)
 T-646 java: static method through a subclass name; RandomAccess / Serializable markers; Matcher.hitEnd — PARTIAL 067791a2 (statics through a subclass, RandomAccess/Serializable via instanceof exclusion at no ArrayList cost, interp binary names after nested lib loads); hitEnd/requireEnd and declaration order are T-650
 T-606 php: library callbacks outside libCbArg; argument-error order; named arg into a by-ref variadic — DONE 8653dda9 (cbn2's expected text corrected to php-src's argument order)
+T-644 js: own-property details of prototypes and functions — DONE 1456360f (a function declaration's arguments/caller/prototype own names stay a recorded value-model limit)
 
 # Settled — do not re-open
 
