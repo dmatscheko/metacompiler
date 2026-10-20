@@ -116,12 +116,6 @@ not change the renderer.
 
 # GO — Go  (oracle: `go run`)
 
-### T-699 go: `int / 2.0` gives a float; `z, w := nil, 5` redeclaring a slice; conversion to another package's interface · P2 · GO · IN PROGRESS (GO worker, round 18) [V]
-`x := 5; fmt.Println(x/2.0)` → `2.5` in all engines (go `2`: the untyped constant converts to the other operand's type); compiled
-halves also give 2.5 for `var k int8 = 5; k/2.0`. The emitter must convert the constant by the other operand's static type (a
-runtime check cannot tell int-var op float-const from int-const op float64-var). `z, w := nil, 5` with `z` already `[]int` →
-`<nil>` (go `[]`; cTyLookup finds the new untyped binding). `pkga.Iface(x)` conversion unhandled.
-
 ---
 
 # SW — Swift  (oracle: swiftc 6.1.2)
@@ -792,6 +786,7 @@ T-690 go: `%T` of a dynamically typed int64 prints `int` — DONE f5f57ab0 (type
 T-661 java: Matcher.hitEnd / requireEnd — DONE ac76281e (hitEnd/requireEnd set at java.util.regex's own node points, Begin root and Start minLength guard, sticky across reset/region — 4 legs = java 24; follow-up T-698)
 T-696 go: compiled element width by type text — float32 and defined small-int slices — DONE 60860073 (defined number types registered for typed slots, float constants rounded/truncated in float32/int slots incl. arrays and maps, interpreter sized-int vs float constant arithmetic — 4 legs = go run)
 T-697 go: nil slice element prints `<nil>`; interpreter cannot convert to a named interface type — DONE 3e8c2cd6 (untyped nil in slice/map slots becomes the typed nil, conversion to a declared interface boxes like any(x), fmt.Stringer — 4 legs = go run; follow-up T-699)
+T-699 go: `int / 2.0` gives a float; `z, w := nil, 5` redeclaring a slice; conversion to another package's interface — DONE 93e55138 (untyped float constant converts by the other operand's static type incl. compound assignment, := nil takes the redeclared type, pkg.Iface(x) conversion — 4 legs = go run)
 
 # Settled — do not re-open
 
