@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-625** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-626** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -89,15 +89,12 @@ marker). `Object.getOwnPropertySymbols` missing in all legs. Compiled `[...null]
 
 # JV — Java
 
-### T-618 java/kotlin regex: inline flags `(?i)` and atomic groups `(?>..)` under the J dialect · P1 · JV · IN PROGRESS (JV worker, round 6) [V]
-`"ABC".matches("(?i)abc")`, `Regex("(?i)abc")`, `"aab".matches("(?>a+)b")` → "Unknown inline modifier near index 2" in all legs
-(java and the kotlin-stdlib jar match). The python worker is adding inline flags under python's dialect flag in the shared
-lib/regex.js / abnf/jsrtregex.go (T-607): reuse that for J (Java's flag set: i, d, m, s, u, x, U, and scoped `(?i:..)`), add
-atomic groups and possessive quantifiers (`a*+`), additive and flag-gated, full matrix + native-full + gen-all.
-
-### T-608 java regex: forward `\k<name>`; `\X \G \N{..} \b{g}` and \p scripts/blocks; PatternSyntaxException getters · P3 · JV · IN PROGRESS (JV worker, round 6) [V]
-A `\k<name>` referring forward is accepted (java PSE). `\X`, `\G`, `\N{..}`, `\b{g}`, `\p{IsLatin}`, `\p{N}` etc. report
-"unsupported" (java supports them). `PatternSyntaxException.getDescription/getIndex/getPattern` missing.
+### T-625 java/kotlin regex: supplementary characters in interp and native; PSE constructor; Kotlin Regex.options · P1 · JV · OPEN [V]
+Under the J dialect the interpreter and native legs match UTF-16 units, the Go twin (runes) and Java code points:
+`"😀".matches(".")`, `.matches("[^a]")`, `.matches("\\p{So}")` → false in interp and native, true in llvm.Run and java;
+`"a😀b".replaceAll(".", "#")` → `####` (java `###`). Make lib/regex.js step by code point under J (additive, flag-gated) and
+assert with astral characters. P3: `new PatternSyntaxException(desc, regex, index)` constructed by a program is not implemented;
+kotlin `Regex("a", IGNORE_CASE).options` and `Regex("(?i)a").options` → `[]` in all engines (kotlin-stdlib `[IGNORE_CASE]`).
 
 ---
 
@@ -734,6 +731,8 @@ T-612 python: set iteration order of ints differs from CPython — DONE af6e7322
 T-616 swift: `d[f()]? += 1` evaluates the target twice; `(+)` as a value; `\.0` key paths; metatype init overloads — DONE fb23c0a5 (plus a 16-commit swiftc-checked sweep: b32fe227..b32b114c)
 T-617 kotlin: `Char.isLetter` for uncased letters; UInt in format; collection class names in format errors — DONE 8af069ec (plus a stdlib sweep, ~40 fixes: text search options, split, comparators, groupingBy, Char arithmetic, Regex.split, minus, radix toString, operator-function calls)
 T-601 go: typed constant folding; named constant string index; float32 constant overflow; canonical error text — DONE fa884729 (plus a sweep: sort/slices/maps/cmp/iter/sync/atomic/strconv/unicode/utf8/bytes written in Go, range-over-func, nil-receiver methods, *T type tests, generic methods, ~15 engine defects)
+T-618 java/kotlin regex: inline flags `(?i)` and atomic groups `(?>..)` under the J dialect — DONE 9a2177eb (java and kotlin; plus line terminators, Unicode case folding, (?U), comments mode)
+T-608 java regex: forward `\k<name>`; `\X \G \N{..} \b{g}` and \p scripts/blocks; PatternSyntaxException getters — DONE 9a2177eb 60e91955 (forward \k error, \G, \X, \b{g}, every \p family from java's own tables, PSE getters; the jxGraphNext bound from the security review fixed); \N{name} DECLINED: needs Unicode's ~35,000-name table (hundreds of KB) in every java/kotlin native binary for a rarely used escape
 
 # Settled — do not re-open
 
