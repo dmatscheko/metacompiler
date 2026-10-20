@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-636** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-637** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -185,10 +185,12 @@ _G proxy, in both halves.
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-635 bash: `$'\cX'` control escapes; `$'\?'` in the interpreter; batch native stdout/stderr order · P2 · SH · IN PROGRESS (SH worker, round 8) [V]
-`v=$'\cA'; echo ${#v}` → all engines 3 (literal `\cA`; bash byte 0x01, length 1); `${v@E}` with `\cX` likewise. Interp: `$'\?'` keeps
-`\?` (bash `?`; the compiled `${v@E}` is right). `v='a\qb\zc\ux\"\?\cA'; echo "${v@E}"` → bash `a\qb\zc\ux"?^A` (13), interp 16
-characters, compiled 15. Check whether batch's native binaries have bash's former stdout-buffered-vs-stderr ordering problem.
+### T-636 batch native: capture nesting limited to 8; rt_die not ordered after stdout; bash `${v@Q}` of a non-UTF-8 byte · P2 · SH · OPEN [V]
+A `call :r` recursion 12 deep with `> nul` on each call: the interpreter prints "before" and "after"; native dies with
+"batch-rt: capture nesting exhausted" exit 70 (a fixed-size table in batch-rt.c; grow it as bash-rt.c's T-529 fix did). batch-rt.c's
+rt_ech does not fflush(0) before writing fd 2 (bash-rt.c does), so with `2>&1` the diagnostic precedes earlier stdout. bash:
+`v=$'\cé'; echo "${v@Q}"` → bash `$'\003\251'`; all our legs print the 0xa9 byte raw (`$'\003<a9>'`): @Q must octal-escape an invalid
+UTF-8 byte.
 
 ---
 
@@ -743,6 +745,7 @@ T-624 go: missing standard packages; append capacity growth — PARTIAL fe55e098
 T-630 kotlin: sorted collections forget order on insert; copyOfRange; java.util imports; extension dispatch limits — DONE cd7fb3ad
 T-631 swift: interp runs a metatype init twice; `is T` with a metatype-bound T; `Int?(5)`; generic enum type(of:); Set returns — DONE d4683967 (is T / as? T with bound T, Int?(5), generic enum type(of:), Set returns, minimumCapacity); the interp double-init P1 did not reproduce in ~40 forms nor at the filing commit (4aa5b951) — closed as not reproducible, assertion 154a pins the case
 T-588 bash: `$[ expr ]`; `$'\uDFFF'` length; native stdout buffering vs stderr order — DONE 77c376cc (plus \u/\U decoding in every engine; stderr ordered against buffered stdout natively)
+T-635 bash: `$'\cX'` control escapes; `$'\?'` in the interpreter; batch native stdout/stderr order — DONE a03ea5f4 (bash); batch has no program-visible stderr — its fatal-diagnostic ordering moved to T-636
 
 # Settled — do not re-open
 
