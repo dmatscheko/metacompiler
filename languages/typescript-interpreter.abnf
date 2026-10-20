@@ -2947,7 +2947,9 @@ NotFuncHead = :script(~~
         // A non-enumerable property is in __keys too, where it was defined.
         if (typeof v == "object" && v !== null && hasOwn(v, "__hidden")) { return jsErrGopn(v, jsIndexOrder(v.__keys)) }
         if (typeof v != "function") { return jsErrGopn(v, jsOwnKeys(v)) }
-        var out = ["length", "name"]
+        var out = []
+        if (fnOwn(v, "length")) { out.push("length") }
+        if (fnOwn(v, "name")) { out.push("name") }
         if (v === jsArrayFn) { out = jsArrayOwnNames.slice() }
         var ks = jsOwnKeys(v)
         for (var i = 0; i < ks.length; i++) { out.push(ks[i]) }
@@ -3659,7 +3661,8 @@ NotFuncHead = :script(~~
                 var dv = anytype // The defined value.
                 dv = getMember(desc, "value")
                 if (isStaticSide(o, key)) { staticSideWrite(o, key, dv) }
-                else if (typeof o != "function" || (key !== "name" && key !== "length")) { setMember(o, key, dv) }
+                else if (typeof o == "function" && (key === "name" || key === "length")) { fnIntrDefine(o, key, desc) }
+                else { setMember(o, key, dv) }
             }
             return
         }
@@ -4805,8 +4808,18 @@ NotFuncHead = :script(~~
             if (k == "apply") { return fnApplyShim(o) }
             if (k == "bind") { return fnBindShim(o) }
             // See the twin of this comment in js-interpreter.abnf.
-            if (k == "name") { return fnNameOf(o) }
-            if (k == "length") { return fnLenOf(o) }
+            if (k == "name" || k == "length") {
+                if (fnPropsN > 0) {
+                    var ir = anytype // A defined or deleted name / length (fnIntrRec).
+                    ir = fnIntrRec(o, k)
+                    if (ir !== undefined) {
+                        if (hasOwn(ir, "del")) { return (k == "name") ? "" : 0 }
+                        return ir.v
+                    }
+                }
+                if (k == "name") { return fnNameOf(o) }
+                return fnLenOf(o)
+            }
             // An own property written onto a FUNCTION lives in the side table, since
             // the host's function value cannot carry one under -frozen. Asked after
             // the three shims, which no program can shadow.
@@ -5371,6 +5384,28 @@ NotFuncHead = :script(~~
         fnPropsN = fnPropsN + 1
         return o
     }
+    // See the twin of this comment in js-interpreter.abnf.
+    function fnIntrRec(f, k) {
+        var r = anytype // The record, or undefined.
+        r = undefined
+        if (fnPropsN == 0) { return r }
+        var fp = anytype
+        fp = fnPropsFind(f)
+        if (fp === undefined || !hasOwn(fp, "__fn" + k)) { return r }
+        return fp["__fn" + k]
+    }
+    function fnIntrDefine(f, k, desc) {
+        var cur = anytype
+        cur = fnIntrRec(f, k)
+        var gone = cur !== undefined && hasOwn(cur, "del")
+        var r = {}
+        r["v"] = undefined
+        if (!gone) { r["v"] = getMember(f, k) }
+        r["w"] = cur !== undefined && !gone && cur.w === true
+        if (propIn("value", desc)) { r["v"] = getMember(desc, "value") }
+        if (propIn("writable", desc)) { r["w"] = jsTruthy(getMember(desc, "writable")) }
+        scopePut(fnPropsMake(f), "__fn" + k, r)
+    }
 
     // Writing a member goes through the SETTER when there is one, which is what makes
     // 'o.v = 2' run the accessor instead of shadowing it with a plain slot.
@@ -5391,7 +5426,13 @@ NotFuncHead = :script(~~
         // cannot carry an expando under -frozen.
         if (typeof o == "function") {
             // See the twin of this comment in js-interpreter.abnf.
-            if (k === "name" || k === "length") { jsRefuse(jsFnRoText(o, k)); return }
+            if (k === "name" || k === "length") {
+                var wr = anytype // A defined or deleted name / length.
+                wr = fnIntrRec(o, k)
+                if (wr !== undefined && !hasOwn(wr, "del") && wr.w === true) { wr["v"] = v; return }
+                jsRefuse(jsFnRoText(o, k))
+                return
+            }
             var fp = fnPropsMake(o)
             if (jsAttrN > 0) {
                 var fr = jsWriteRefusal(fp, k, v)
@@ -5435,7 +5476,11 @@ NotFuncHead = :script(~~
     }
     // See the twin of this comment in js-interpreter.abnf.
     function fnOwn(fn, kk) {
-        if (kk === "name" || kk === "length") { return true }
+        if (kk === "name" || kk === "length") {
+            var orr = anytype // A defined or deleted name / length.
+            orr = fnIntrRec(fn, kk)
+            return orr === undefined || !hasOwn(orr, "del")
+        }
         if (fn === jsArrayFn && jsArrayOwnNames.indexOf(kk) >= 0) { return true }
         if (fn === jsObjectGlobal && jsObjectOwnNames.indexOf(kk) >= 0) { return true }
         if (fnPropsN == 0) { return false }
@@ -6861,6 +6906,12 @@ NotFuncHead = :script(~~
                     jsRefuse(dr)
                     return false
                 }
+            }
+            if (typeof p.obj == "function" && (p.key === "name" || p.key === "length")) {
+                var dr2 = {}
+                dr2["del"] = true
+                scopePut(fnPropsMake(p.obj), "__fn" + p.key, dr2)
+                return true
             }
             // A FUNCTION's own properties live in the side table; the map there takes
             // the delete in the object's place.

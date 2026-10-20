@@ -643,13 +643,15 @@ func (rt *jsrt) jsvDefineProp(v interface{}, key string, desc interface{}) {
 		if !isUndefOrNull(g) || !isUndefOrNull(s) {
 			return
 		}
-		// Unlike `=`, a definition replaces a class's own `name` or `length`; a
-		// function's stay as they are.
+		// Unlike `=`, a definition replaces a function's or a class's own `name` or
+		// `length`.
 		dv := rt.jsvGetKey(desc, "value")
 		if cls, isStatic := jsvIsStaticSide(v, key); isStatic {
 			rt.jsvStaticWrite(cls, key, dv)
 		} else if p := jsvFnPropsMake(v); p != nil {
-			if key != "name" && key != "length" {
+			if key == "name" || key == "length" {
+				rt.jsvFnIntrDefine(v, key, desc)
+			} else {
 				p.set(key, dv)
 			}
 		} else {
@@ -1788,7 +1790,13 @@ func jsvGopnKeys(v interface{}) []string {
 	if jsvIsArrayGlobal(v) {
 		return append(append([]string{}, jsvArrayOwnNames...), jsvOwnKeys(v)...)
 	}
-	return append([]string{"length", "name"}, jsvOwnKeys(v)...)
+	out := []string{}
+	for _, k := range []string{"length", "name"} {
+		if jsvFnOwn(v, k) {
+			out = append(out, k)
+		}
+	}
+	return append(out, jsvOwnKeys(v)...)
 }
 
 // jsvProtoGopn is getOwnPropertyNames of the prototype view of descriptor d:
@@ -1932,11 +1940,63 @@ func jsvFnIntrinsic(v interface{}, name string) interface{} {
 	if !jsvIsFnLike(v) {
 		return nil
 	}
+	if r := jsvFnIntrRec(v, name); r != nil {
+		if _, gone := r.props["del"]; gone {
+			if name == "name" {
+				return ""
+			}
+			return float64(0)
+		}
+		return r.props["v"]
+	}
 	mi := jsvFnMeta(v)
 	if name == "name" {
 		return mi.name
 	}
 	return float64(mi.length)
+}
+
+// jsvFnIntrRec is the change a definition or a delete made to a function's `name` or
+// `length`, or nil while it is the intrinsic one. Both are configurable (ES2023
+// 10.2.9, 10.2.10): Object.defineProperty replaces either - non-writable unless the
+// descriptor says writable - and `delete` removes it, after which a read finds
+// Function.prototype's ("" and 0). The record lives in the side table under "__fn" +
+// key: {v, w} for a defined property, {del} for a deleted one. Twins: fnIntrRec in
+// both *-interpreter.abnf, jvFnIntrRec in languages/lib/js-rt.metajs.
+func jsvFnIntrRec(f interface{}, k string) *jsObject {
+	p := jsvFnPropsOf(f)
+	if p == nil {
+		return nil
+	}
+	r, _ := p.props["__fn"+k].(*jsObject)
+	return r
+}
+
+// jsvFnIntrDefine is Object.defineProperty of a function's `name` or `length` with a
+// data descriptor.
+func (rt *jsrt) jsvFnIntrDefine(f interface{}, k string, desc interface{}) {
+	cur := jsvFnIntrRec(f, k)
+	gone := false
+	if cur != nil {
+		_, gone = cur.props["del"]
+	}
+	r := newJSObject()
+	var v interface{} = jsUndef
+	if !gone {
+		v = jsvFnIntrinsic(f, k)
+	}
+	wr := cur != nil && !gone && cur.props["w"] == true
+	if d, ok := desc.(*jsObject); ok {
+		if _, has := d.props["value"]; has {
+			v = rt.jsvGetKey(desc, "value")
+		}
+		if _, has := d.props["writable"]; has {
+			wr = rt.truthy(rt.jsvGetKey(desc, "writable"))
+		}
+	}
+	r.set("v", v)
+	r.set("w", wr)
+	jsvFnPropsMake(f).set("__fn"+k, r)
 }
 
 func jsvIsFnLike(v interface{}) bool {
@@ -2051,6 +2111,10 @@ func jsvSfTrack(statics *jsObject, name string) {
 // are own properties of every function, the rest live in the side table.
 func jsvFnOwn(f interface{}, k string) bool {
 	if k == "name" || k == "length" {
+		if r := jsvFnIntrRec(f, k); r != nil {
+			_, gone := r.props["del"]
+			return !gone
+		}
 		return true
 	}
 	if jsvIsArrayGlobal(f) && jsvInNames(jsvArrayOwnNames, k) {
@@ -4584,6 +4648,14 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			}
 			return boolH(true)
 		}
+		if jsvIsFnLike(u(a[0])) {
+			if n := rt.toString(u(a[1])); n == "name" || n == "length" {
+				r := newJSObject()
+				r.set("del", true)
+				jsvFnPropsMake(u(a[0])).set("__fn"+n, r)
+				return boolH(true)
+			}
+		}
 		// A function's own properties live in the side table.
 		if p := jsvFnPropsOf(u(a[0])); p != nil {
 			name := rt.toString(u(a[1]))
@@ -5399,10 +5471,15 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			return 0
 		}
 		// `name` and `length` are NON-WRITABLE: node drops `f.name = "q"` in sloppy
-		// code and raises a TypeError in strict code. Refusing it keeps one answer for
-		// the read, for hasOwnProperty and for getOwnPropertyNames.
+		// code and raises a TypeError in strict code - unless a definition made one
+		// writable (jsvFnIntrRec). A deleted one is refused too: the write then meets
+		// Function.prototype's, which is read-only as well.
 		if jsvIsFnLike(u(a[0])) {
 			if n := rt.toString(u(a[1])); n == "name" || n == "length" {
+				if r := jsvFnIntrRec(u(a[0]), n); r != nil && r.props["w"] == true {
+					r.set("v", u(a[2]))
+					return 0
+				}
 				jsvRefused = rt.jsvFnRoText(u(a[0]), n)
 				return boolH(false)
 			}

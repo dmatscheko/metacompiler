@@ -833,6 +833,76 @@ function jvFnLenOf(f) {
     r = fnMeta(f, "length")
     return r
 }
+// A function's `name` and `length` are configurable: Object.defineProperty replaces
+// either - non-writable unless the descriptor says writable - and `delete` removes it,
+// after which a read finds Function.prototype's ("" and 0). The change is a record in
+// the function's side table under "__fn" + key: {v, w} for a defined property, {del}
+// for a deleted one; no record means the intrinsic one. Twins: jsvFnIntrRec in
+// abnf/jsrtjsprint.go, fnIntrRec in both *-interpreter.abnf.
+function jvFnIntrRec(f, k) {
+    var r = anytype
+    r = undefined
+    var fp = anytype
+    fp = jvFnPropsFind(f)
+    if (fp === undefined) { return r }
+    return fp["__fn" + k]
+}
+// The read of f.name / f.length once some function has a side table.
+function jvFnIntrRead(f, k) {
+    var r = anytype
+    r = jvFnIntrRec(f, k)
+    if (r === undefined) {
+        if (k == "name") { return jvFnNameOf(f) }
+        return jvFnLenOf(f)
+    }
+    if (r["del"] === true) {
+        if (k == "name") { return "" }
+        return 0
+    }
+    return r["v"]
+}
+// Whether `f.name = v` / `f.length = v` is a write to a writable definition, done.
+function jvFnIntrWrite(f, k, v) {
+    if (jvFnPropsN == 0) { return false }
+    var r = anytype
+    r = jvFnIntrRec(f, k)
+    if (r === undefined) { return false }
+    if (r["w"] !== true) { return false }
+    r["v"] = v
+    return true
+}
+function jvFnIntrOwn(f, k) {
+    if (jvFnPropsN == 0) { return true }
+    var r = anytype
+    r = jvFnIntrRec(f, k)
+    if (r === undefined) { return true }
+    return r["del"] !== true
+}
+function jvFnIntrDefine(f, k, desc) {
+    var cur = anytype
+    cur = undefined
+    if (jvFnPropsN > 0) { cur = jvFnIntrRec(f, k) }
+    var gone = false
+    if (cur !== undefined) { gone = cur["del"] === true }
+    var r = {}
+    r["v"] = undefined
+    if (!gone) { r["v"] = js_jsvget(f, k) }
+    r["w"] = false
+    if (cur !== undefined) {
+        if (!gone) { r["w"] = cur["w"] === true }
+    }
+    if (js_has(desc, "value")) { r["v"] = js_jsmget(desc, "value") }
+    if (js_has(desc, "writable")) {
+        r["w"] = false
+        if (js_jsmget(desc, "writable")) { r["w"] = true }
+    }
+    jvFnPropsMake(f)["__fn" + k] = r
+}
+function jvFnIntrDel(f, k) {
+    var r = {}
+    r["del"] = true
+    jvFnPropsMake(f)["__fn" + k] = r
+}
 // HOW THE READ SITES ASK. Not through a helper: both arms are written out inline in
 // js_jsvget and js_jsmget as two comparisons against interned literals, because the
 // arm sits on the path an ORDINARY member read takes (see js_jsmget's head comment).
@@ -1198,6 +1268,12 @@ function js_jsdel(o, key) {
         }
         return true
     }
+    if (jvIsCallable(o)) {
+        if (key === "name" || key === "length") {
+            jvFnIntrDel(o, key)
+            return true
+        }
+    }
     if (jvFnPropsN > 0) {
         var fp = anytype
         fp = jvFnPropsOf(o)
@@ -1417,7 +1493,7 @@ function jvFnHasOwnShim(f, enumerable) {
 // of every function, the rest live in the side table. Twin: jsvFnOwn in
 // abnf/jsrtjsprint.go.
 function jvFnOwn(f, kk) {
-    if (kk === "name" || kk === "length") { return true }
+    if (kk === "name" || kk === "length") { return jvFnIntrOwn(f, kk) }
     if (jvArrayFn !== undefined && f === jvArrayFn) {
         if (jvInNames(jvArrayOwnNames, kk)) { return true }
     }
@@ -1918,6 +1994,7 @@ function js_jsmget(o, key) {
         // `f.name` and `f.length` - see js_jsvget above.
         if (key == "name" || key == "length") {
             if (typeof o == "function") {
+                if (jvFnPropsN > 0) { return jvFnIntrRead(o, key) }
                 if (key == "name") { return jvFnNameOf(o) }
                 return jvFnLenOf(o)
             }
@@ -2200,6 +2277,7 @@ function js_jsvget(o, key) {
         // object's `length` is its own slot (jvIsArgs).
         if (key == "name" || key == "length") {
             if (typeof o == "function") {
+                if (jvFnPropsN > 0) { return jvFnIntrRead(o, key) }
                 if (key == "name") { return jvFnNameOf(o) }
                 return jvFnLenOf(o)
             }
@@ -2760,6 +2838,7 @@ function js_jsmset(o, key, v) {
         // the read, for hasOwnProperty and for getOwnPropertyNames.
         var wk = jvStr(key)
         if (wk === "name" || wk === "length") {
+            if (jvFnIntrWrite(o, wk, v)) { return undefined }
             jvRefused = jvFnRoText(o, wk)
             return false
         }
@@ -5263,8 +5342,8 @@ function jvDefineProp(o, key, desc) {
     var isAcc = g !== undefined || s !== undefined
     if (!jvIsObj(o) || jvIsClassDesc(o)) {
         if (isAcc) { return undefined }
-        // Unlike `=`, a definition replaces a class's own `name` or `length`; a
-        // function's stay as they are.
+        // Unlike `=`, a definition replaces a function's or a class's own `name` or
+        // `length`.
         var dv = anytype
         dv = js_jsmget(desc, "value")
         var dk = jvStr(key)
@@ -5274,7 +5353,12 @@ function jvDefineProp(o, key, desc) {
                 return undefined
             }
         }
-        if (jvIsCallable(o)) { if (dk == "name" || dk == "length") { return undefined } }
+        if (jvIsCallable(o)) {
+            if (dk == "name" || dk == "length") {
+                jvFnIntrDefine(o, dk, desc)
+                return undefined
+            }
+        }
         js_jsmset(o, key, dv)
         return undefined
     }
@@ -5415,8 +5499,8 @@ function jvObjectGlobalMethod(name, args) {
                     an = an + 1
                 }
             } else {
-                out.push("length")
-                out.push("name")
+                if (jvFnIntrOwn(src, "length")) { out.push("length") }
+                if (jvFnIntrOwn(src, "name")) { out.push("name") }
             }
         }
         // An Error instance's own non-enumerable `stack` and `message` come first, as

@@ -4600,6 +4600,27 @@ function s99(): void {
         0o4000000000000000001 === 72057594037927940 && 0x20000000000001 === 9007199254740992);
 }
 
+// ===== SECTION 100: a function's name and length are configurable =====
+// Object.defineProperty replaces a function's own `name` or `length` (non-writable
+// unless the descriptor says writable), and `delete` removes it: the read then finds
+// Function.prototype's ("" and 0), the property is no longer own, and a write is still
+// refused by that inherited read-only one. Values read off tsc 6.0.3's default output
+// run by node 24.
+function s100(): void {
+    const err = (f: () => void): string => { try { f(); return "ok"; } catch (e: any) { return e.constructor.name; } };
+    const put = (o: any, k: string, v: any): void => { o[k] = v; };
+    function f100(a: number, b: number): number { return a; }
+    Object.defineProperty(f100, "name", { value: "renamed" });
+    check("fc100a", f100.name === "renamed" && f100.length === 2 && err(() => put(f100, "name", "z")) === "TypeError");
+    Object.defineProperty(f100, "length", { value: 7, writable: true });
+    check("fc100b", err(() => put(f100, "length", 9)) === "ok" && f100.length === 9);
+    function g100(a: number, b: number, c: number): void { }
+    const g: any = g100;
+    check("fc100c", delete g.length && g100.length === 0 && !g100.hasOwnProperty("length") &&
+        Object.getOwnPropertyNames(g100).indexOf("length") < 0 && delete g.name && g100.name === "" &&
+        err(() => put(g100, "length", 4)) === "TypeError");
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -4702,6 +4723,7 @@ function main(): number {
     s97(); // SECTION-CALL 97
     s98(); // SECTION-CALL 98
     s99(); // SECTION-CALL 99
+    s100(); // SECTION-CALL 100
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

@@ -1,11 +1,11 @@
-// Full-syntax test: JavaScript - part 2 of 4, sections 36-43 and 101-105.
+// Full-syntax test: JavaScript - part 2 of 4, sections 36-43 and 101-106.
 //
 // THE JS RATCHET IS FOUR FILES: as one file its -frozen interpreter leg ran into
 // ./test.sh --full's time brake (peak memory grew superlinearly with the file), and
 // the fourth is a Module, the one goal symbol in which 'export' may stand.
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
-//   tests/js-test-full.2.js   sections 36-43 and 101-105, engine agreement, generators,
+//   tests/js-test-full.2.js   sections 36-43 and 101-106, engine agreement, generators,
 //                             Error, Math, builtin constructors, integrity levels
 //   tests/js-test-full.3.js   sections 44-56, 58-71 and 73-100, the call/class/
 //                             private-name model, iterators, the arguments object and
@@ -1310,6 +1310,33 @@ function s105() {
         0o4000000000000000001 === 72057594037927940 && 0x20000000000001 === 9007199254740992)
 }
 
+// ===== SECTION 106: a function's name and length are configurable =====
+// Object.defineProperty replaces a function's own `name` or `length` (non-writable
+// unless the descriptor says writable), and `delete` removes it: the read then finds
+// Function.prototype's ("" and 0), the property is no longer own, and a write is still
+// refused by that inherited read-only one.
+function s106() {
+    const err = (f) => { try { f(); return "ok" } catch (e) { return e.constructor.name } }
+    const put = (o, k, v) => { "use strict"; o[k] = v }
+    function f106(a, b) { return a }
+    Object.defineProperty(f106, "name", { value: "renamed" })
+    check("fc106a", f106.name === "renamed" && f106.length === 2 && err(() => put(f106, "name", "z")) === "TypeError" &&
+        f106.name === "renamed")
+    Object.defineProperty(f106, "length", { value: 7, writable: true })
+    check("fc106b", f106.length === 7 && err(() => put(f106, "length", 9)) === "ok" && f106.length === 9 &&
+        f106.hasOwnProperty("name") && Object.getOwnPropertyNames(f106).indexOf("length") >= 0)
+    function g106(a, b, c) { }
+    check("fc106c", delete g106.length && g106.length === 0 && !g106.hasOwnProperty("length") &&
+        Object.getOwnPropertyNames(g106).indexOf("length") < 0 && Object.getOwnPropertyNames(g106).indexOf("name") >= 0)
+    check("fc106d", delete g106.name && g106.name === "" && !g106.hasOwnProperty("name") &&
+        err(() => put(g106, "length", 4)) === "TypeError" && g106.length === 0)
+    Object.defineProperty(g106, "length", { value: 2 })
+    const h106 = (x) => x
+    Object.defineProperty(h106, "name", { value: "hh", writable: true })
+    h106.name = "h2"
+    check("fc106e", g106.length === 2 && g106.hasOwnProperty("length") && h106.name === "h2" && Object.keys(h106).length === 0)
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1326,6 +1353,7 @@ function main() {
     s103() // SECTION-CALL 103
     s104() // SECTION-CALL 104
     s105() // SECTION-CALL 105
+    s106() // SECTION-CALL 106
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }
