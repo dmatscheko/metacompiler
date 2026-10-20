@@ -116,13 +116,13 @@ not change the renderer.
 
 # GO — Go  (oracle: `go run`)
 
-### T-696 go: compiled element width by type text — float32 and defined small-int slices · P2 · GO · OPEN [V]
+### T-696 go: compiled element width by type text — float32 and defined small-int slices · P2 · GO · IN PROGRESS (GO worker, round 17) [V]
 `var b []float32; b = append(b, 0.1)` and `c := make([]float32,1); c[0] = 0.1` → `[0.10000000149011612]` in llvm.Run and native
 (go and interp `[0.1]`): goAdoptText skips an untyped float constant already boxed as float. `type MyInt int8; var n []MyInt; n =
 append(n,100); n[0] += 100` (and via make) → `[200]` compiled (go `[-56]`): goAdoptText does not resolve a defined type to its
 underlying type. Halves diverge.
 
-### T-697 go: nil slice element prints `<nil>`; interpreter cannot convert to a named interface type · P2 · GO · OPEN [V]
+### T-697 go: nil slice element prints `<nil>`; interpreter cannot convert to a named interface type · P2 · GO · IN PROGRESS (GO worker, round 17) [V]
 `ss := [][]int{{1}}; ss = append(ss, nil); fmt.Println(ss)` → `[[1] <nil>]` in all engines (go `[[1] []]`). Interpreter:
 `Shower(C(4))` → "call of a non function: Shower", `fmt.Stringer(C(3))` → "unknown method 'Stringer'" (go converts; check the
 compiler halves too).
