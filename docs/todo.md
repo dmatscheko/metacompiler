@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-621** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-622** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -137,13 +137,12 @@ non-integral floats use JS formatting, not %g.
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-616 swift: `d[f()]? += 1` evaluates the target twice; `(+)` as a value; `\.0` key paths; metatype init overloads · P2 · SW · IN PROGRESS (SW worker, round 7) [V]
-`d[f()]? += 1` → the compiler evaluates the target path twice, so a side-effecting index runs twice (swiftc once). `["+":
-(+)]` (an operator as a value in parentheses) and the tuple key path `\.0` do not parse in either half. `t.init(...)` on a
-runtime type value uses the first-declared initializer in the compiler (no static type to pick by label). An Optional or
-nil-initialised field written through a non-self path (`d.o = 4` into `var o: Double?`) adopts its type only when every type
-declaring that name agrees. A global operator function declared before its parameter's type is not attached to it in the
-compiler. (Permanent, documented: the Optional box of `as Any`, `main.` module qualification, ArraySlice/Substring/String.Index.)
+### T-621 swift: generic type arguments are not applied; static members on a generic parameter; non-ASCII operators · P1 · SW · OPEN [V]
+`struct Box<T> { var v: T }; print(Box<Double>(v: 2).v)` → both halves `2` (swiftc `2.0`); `let b: Box<Double> = Box(v: 3)` and
+`Stack<Double>().push(2)` likewise — the generic bindings need carrying on each instance (or at the construction site).
+`func fold<M: Monoid>(_ xs: [M]) -> M { xs.reduce(M.zero, +) }` aborts "unknown name: M" (a static member on an inferred generic
+parameter). `prefix operator √` (non-ASCII operator characters) does not parse. `t.init(...)` on an enum metatype value goes
+through sw_dyncall's function arm, not the enum init.
 
 ---
 
@@ -721,6 +720,7 @@ T-613 python/js interpreters: generators still run by replay — DONE e0c57419 (
 T-614 python: smaller gaps — math, object repr prefix, OSError errno subclass, `__hash__` attribute — DONE 81b61124 (exp2/erf/gamma left out: CPython's answers depend on the platform libm, manual 7.9)
 T-611 python: metaclasses, and the `enum` module on top of them — DONE 48620009 (Flag/IntFlag and the functional API not offered)
 T-612 python: set iteration order of ints differs from CPython — DONE af6e7322 for sets of ints built by adding; dummy-slot order after removal, union/copy table sizes and constant displays recorded in manual 7.9
+T-616 swift: `d[f()]? += 1` evaluates the target twice; `(+)` as a value; `\.0` key paths; metatype init overloads — DONE fb23c0a5 (plus a 16-commit swiftc-checked sweep: b32fe227..b32b114c)
 
 # Settled — do not re-open
 
