@@ -3429,6 +3429,26 @@ NotMemberKw = :script(~~
         if (name == "toString") { return {v: "Random"} }
         return null
     }
+    // java.util.Random(seed), the JVM's own generator (lib/kotlin-math.js's jrnd*):
+    // its stream is java's, value for value. With no seed it takes a fixed one, as
+    // kRndDefault does. Twin of ktJrndMethod in abnf/jsrtkotlin.go and k4JrndMethod
+    // in languages/lib/kotlin-rt.metajs.
+    hostGlobals["java.util.Random"] = function(seed) {
+        var p = szPair(seed === undefined || seed === null ? 20260808 : seed)
+        return jrndNew(p.h, p.l)
+    }
+    function kIsJrnd(v) { return v !== null && v !== undefined && typeof v == "object" && v.__jrnd === true }
+    function kJrndMethod(box, name, args) {
+        var ns = []
+        for (var i = 0; i < args.length; i++) { ns.push(kNum(args[i])) }
+        var r = jrndCall(box, name, ns)
+        if (r == null) { return null }
+        if (r.t == "err") { kThrowExc("IllegalArgumentException", r.v) }
+        if (r.t == "long") { return {v: szMake(i64Make(r.v[0], r.v[1]), 64, false)} }
+        if (r.t == "double") { return {v: kFlo(r.v)} }
+        if (r.t == "float") { return {v: kFlo32(r.v)} }
+        return {v: r.v}
+    }
     // The number of elements in a progression, arithmetically - a `random()` on
     // `1..1000000` must not materialize a million cells to pick one.
     function rangeCount(rg) {
@@ -3810,7 +3830,15 @@ NotMemberKw = :script(~~
                             MIN_VALUE: szMake(i64Make(0, 0), 8, true), SIZE_BITS: 8, SIZE_BYTES: 1}
     hostGlobals["UShort"] = {MAX_VALUE: szMake(i64Make(0, 65535), 16, true),
                              MIN_VALUE: szMake(i64Make(0, 0), 16, true), SIZE_BITS: 16, SIZE_BYTES: 2}
-    hostGlobals["Char"] = {MAX_VALUE: {__char: 65535}, MIN_VALUE: {__char: 0}, SIZE_BITS: 16, SIZE_BYTES: 2}
+    // `Char(code)` is kotlin's Char FUNCTION (CharCode.kt), the bare name `Char` the
+    // companion; the companion carries the function as its `invoke`. Twin of
+    // ktTypeObj in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    hostGlobals["Char"] = {MAX_VALUE: {__char: 65535}, MIN_VALUE: {__char: 0}, SIZE_BITS: 16, SIZE_BYTES: 2,
+                           invoke: function(code) {
+                               var n = kNum(code)
+                               if (n < 0 || n > 65535) { kThrowExc("IllegalArgumentException", "Invalid Char code: " + kstr(code)) }
+                               return kChar(n)
+                           }}
     // The float companions, boxed so that Double.NaN is a Double rather than an Int:
     // kotlin.Double declares MIN_VALUE as the smallest POSITIVE value, as
     // java.lang.Double does.
@@ -3854,14 +3882,28 @@ NotMemberKw = :script(~~
         for (var i = 0; i < arguments.length; i++) out.push(kAdoptLong(arguments[i]))
         return arrKindSet(out, 1)
     }
-    hostGlobals["setOf"] = function() {
+    hostGlobals["mutableSetOf"] = function() {
         var s = kMakeSet()
         for (var i = 0; i < arguments.length; i++) { kSetAdd(s, arguments[i]) }
         return s
     }
-    hostGlobals["mutableSetOf"] = hostGlobals["setOf"]
-    hostGlobals["hashSetOf"] = hostGlobals["setOf"]
-    hostGlobals["linkedSetOf"] = hostGlobals["setOf"]
+    hostGlobals["linkedSetOf"] = hostGlobals["mutableSetOf"]
+    // The JVM class a set or map builder answers, when it is not a LinkedHashSet /
+    // LinkedHashMap: setOf and mapOf by their argument count (emptySet(), a
+    // Collections.singleton, else a LinkedHashSet - the count of the vararg, not of
+    // the distinct elements), the hash and sorted builders a HashSet / TreeSet.
+    // Twin of ktJvmTagged in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    function kJvmTagged(o, jc) { if (jc != "") { o.__jc = jc } return o }
+    function kJvmSmall(n, kind) {
+        if (n == 0) { return "kotlin.collections.Empty" + kind }
+        return n == 1 ? "java.util.Collections$Singleton" + kind : ""
+    }
+    hostGlobals["setOf"] = function() {
+        return kJvmTagged(hostGlobals["mutableSetOf"].apply(undefined, arguments), kJvmSmall(arguments.length, "Set"))
+    }
+    hostGlobals["hashSetOf"] = function() {
+        return kJvmTagged(hostGlobals["mutableSetOf"].apply(undefined, arguments), "java.util.HashSet")
+    }
     // sortedSetOf is a java.util.TreeSet: ascending order, not insertion order.
     hostGlobals["sortedSetOf"] = function() {
         var raw = []
@@ -3869,7 +3911,7 @@ NotMemberKw = :script(~~
         var s = kMakeSet()
         var sorted = kSortBy(raw, null, false)
         for (var j = 0; j < sorted.length; j++) { kSetAdd(s, sorted[j]) }
-        return s
+        return kJvmTagged(s, "java.util.TreeSet")
     }
     // The PRIMITIVE-array builders are arrayOf. This value model cannot tell one
     // element WIDTH from another - a Byte and an Int are the same host number.
@@ -3892,7 +3934,7 @@ NotMemberKw = :script(~~
     hostGlobals["ulongArrayOf"] = hostGlobals["arrayOf"]
     hostGlobals["emptyArray"] = hostGlobals["arrayOf"]
     hostGlobals["emptyList"] = hostGlobals["listOf"]
-    hostGlobals["emptySet"] = function() { return kMakeSet() }
+    hostGlobals["emptySet"] = function() { return kJvmTagged(kMakeSet(), "kotlin.collections.EmptySet") }
     // The java.util collection constructors - ArrayList, HashSet / LinkedHashSet,
     // HashMap / LinkedHashMap: empty, with an Int capacity, or a copy of a
     // collection (of a map). A HashSet / HashMap iterates in insertion order, as
@@ -3914,16 +3956,16 @@ NotMemberKw = :script(~~
         }
     }
     hostGlobals["ArrayList"] = kJavaCollection("list")
-    hostGlobals["HashSet"] = kJavaCollection("set")
-    hostGlobals["LinkedHashSet"] = hostGlobals["HashSet"]
-    hostGlobals["HashMap"] = kJavaCollection("map")
-    hostGlobals["LinkedHashMap"] = hostGlobals["HashMap"]
+    hostGlobals["LinkedHashSet"] = kJavaCollection("set")
+    hostGlobals["HashSet"] = function(src) { return kJvmTagged(hostGlobals["LinkedHashSet"](src), "java.util.HashSet") }
+    hostGlobals["LinkedHashMap"] = kJavaCollection("map")
+    hostGlobals["HashMap"] = function(src) { return kJvmTagged(hostGlobals["LinkedHashMap"](src), "java.util.HashMap") }
     // ----- Maps, Pair/Triple, `with` and StringBuilder -----
     // A global NAME is declared by each grammar's own builtin block (js_scope_decl in
     // kotlin-to-llvm-ir.abnf, ktGlobalFn in abnf/jsrtkotlin.go), not by the runtime.
     // Everything these builders BUILD is a shared shape whose member surface lives in
     // abnf/jsrtkotlin.go (ktMapMethod / ktPairMethod) for the compiled half.
-    hostGlobals["mapOf"] = function() {
+    hostGlobals["mutableMapOf"] = function() {
         var m = kMakeMap()
         for (var i = 0; i < arguments.length; i++) {
             var p = arguments[i]
@@ -3936,11 +3978,17 @@ NotMemberKw = :script(~~
         }
         return m
     }
-    hostGlobals["mutableMapOf"] = hostGlobals["mapOf"]
-    hostGlobals["hashMapOf"] = hostGlobals["mapOf"]
-    hostGlobals["linkedMapOf"] = hostGlobals["mapOf"]
-    hostGlobals["sortedMapOf"] = hostGlobals["mapOf"]
-    hostGlobals["emptyMap"] = hostGlobals["mapOf"]
+    hostGlobals["linkedMapOf"] = hostGlobals["mutableMapOf"]
+    hostGlobals["mapOf"] = function() {
+        return kJvmTagged(hostGlobals["mutableMapOf"].apply(undefined, arguments), kJvmSmall(arguments.length, "Map"))
+    }
+    hostGlobals["hashMapOf"] = function() {
+        return kJvmTagged(hostGlobals["mutableMapOf"].apply(undefined, arguments), "java.util.HashMap")
+    }
+    hostGlobals["sortedMapOf"] = function() {
+        return kJvmTagged(hostGlobals["mutableMapOf"].apply(undefined, arguments), "java.util.TreeMap")
+    }
+    hostGlobals["emptyMap"] = function() { return kJvmTagged(kMakeMap(), "kotlin.collections.EmptyMap") }
     // buildMap { put(k, v) } - the builder lambda takes the fresh map as `it`. The
     // builders also take an optional capacity first, so the lambda is the LAST
     // argument.
@@ -4199,6 +4247,15 @@ NotMemberKw = :script(~~
         for (var i = 0; i < kNum(n); i++) { out.push(typeof init == "function" ? init(i) : false) }
         return arrKindSet(out, 1)
     }
+    // Each primitive array builder - IntArray(n), intArrayOf(...) - tags its answer
+    // with its own array kind (lib/kotlin-math.js's ktaElems), which names its JVM
+    // class. Twin of ktGlobalFn in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    function kPrimArrTagged(f, k) { return function() { return arrKindSet(f.apply(undefined, arguments), k) } }
+    for (var kpa = 0; kpa < ktaElems.length; kpa++) {
+        var kpe = ktaElems[kpa]
+        hostGlobals[kpe + "Array"] = kPrimArrTagged(hostGlobals[kpe + "Array"], 5 + kpa)
+        hostGlobals[kpe.toLowerCase() + "ArrayOf"] = kPrimArrTagged(hostGlobals[kpe.toLowerCase() + "ArrayOf"], 5 + kpa)
+    }
     hostGlobals["listOfNotNull"] = function() {
         var out = []
         for (var i = 0; i < arguments.length; i++) {
@@ -4304,7 +4361,7 @@ NotMemberKw = :script(~~
     var kPkgList = ["kotlin", "kotlin.math", "kotlin.collections", "kotlin.text",
                     "kotlin.sequences", "kotlin.comparisons", "kotlin.ranges",
                     "kotlin.system", "kotlin.io", "kotlin.random", "kotlin.jvm",
-                    "kotlin.reflect", "kotlin.time", "kotlin.concurrent"]
+                    "kotlin.reflect", "kotlin.time", "kotlin.concurrent", "java", "java.util", "java.lang"]
     for (var kp = 0; kp < kPkgList.length; kp++) { rawSet(kPkgPaths, kPkgList[kp], true) }
     function kPkg(path) { return {__pkg: path} }
     function kIsPkg(v) {
@@ -4313,12 +4370,16 @@ NotMemberKw = :script(~~
     function kPkgMember(o, name) {
         var sub = o.__pkg + "." + name
         if (hasOwn(kPkgPaths, sub)) { return kPkg(sub) }
+        // A class the JVM has under this exact path (java.util.Random) is not the
+        // global of its simple name.
+        if (hasOwn(hostGlobals, sub)) { return hostGlobals[sub] }
         if (hasOwn(hostGlobals, name)) { return hostGlobals[name] }
         var sc = scopes
         for (var i = sc.length - 1; i >= 0; i--) { if (hasOwn(sc[i], name)) { return sc[i][name] } }
         fail("unknown name: " + sub)
     }
     hostGlobals["kotlin"] = kPkg("kotlin")
+    hostGlobals["java"] = kPkg("java")
     function kLazyValue(box) {
         if (!box.done) { box.v = box.f(); box.done = true }
         return box.v
@@ -5201,7 +5262,7 @@ NotMemberKw = :script(~~
             }
             return {v: kChar(sv.charCodeAt(name == "last" ? n - 1 : 0))}
         }
-        if (name == "toCharArray") { return {v: arrKindSet(kChars(sv), 1)} }
+        if (name == "toCharArray") { return {v: arrKindSet(kChars(sv), ktaKindOf("Char"))} }
         if (name == "toList") { return {v: kChars(sv)} }
         if (name == "trim" || name == "trimStart" || name == "trimEnd") {
             var tl = name != "trimEnd"
@@ -5768,7 +5829,17 @@ NotMemberKw = :script(~~
         return {v: bits == "0" ? w : tz}
     }
     function jxkClass(v) {
-        if (Array.isArray(v)) { return kJvmListClass(arrKind(v), v.length) }
+        if (Array.isArray(v)) {
+            var ak = arrKind(v)
+            if (ak >= 5) { return ktaClasses[ak - 5] }
+            if (ak != 1) { return kJvmListClass(ak, v.length) }
+            var ecs = []
+            for (var i = 0; i < v.length; i++) { if (v[i] !== null && v[i] !== undefined) { ecs.push(jxkClass(v[i])) } }
+            return ktaRefClass(ecs)
+        }
+        // A set or map builder that is not a LinkedHashSet / LinkedHashMap records its
+        // class (kJvmTagged).
+        if ((kIsSet(v) || kIsMap(v)) && v.__jc !== undefined) { return v.__jc }
         if (kIsSet(v)) { return "java.util.LinkedHashSet" }
         if (kIsMap(v)) { return "java.util.LinkedHashMap" }
         var n = kSimpleName(v)
@@ -7275,6 +7346,10 @@ NotMemberKw = :script(~~
             var rnm = kRndMethod(target, name, args)
             if (rnm != null) { return rnm.v }
         }
+        if (kIsJrnd(target)) {
+            var jrm = kJrndMethod(target, name, args)
+            if (jrm != null) { return jrm.v }
+        }
         if (kIsJob(target)) {
             var jm = kJobMethod(target, name)
             if (jm != null) { return jm.v }
@@ -8627,6 +8702,9 @@ NotMemberKw = :script(~~
     var kNamedArgs = null
     function kSetNamed(named) { kNamedArgs = named }
     function kTakeNamed() { var n = kNamedArgs; kNamedArgs = null; return n }
+    // The same call's named VALUES in source order, parked beside kNamedArgs by a
+    // bare call (makeCallBody) for a builtin member that places them by position.
+    var kNamedVals = []
     // Bind a parameter list in the frame that is already current. A slot the call site
     // left empty is filled from the named map, then from the parameter's default -
     // evaluated HERE, after the preceding parameters are declared, so
@@ -10491,6 +10569,12 @@ NotMemberKw = :script(~~
         if (name == "Default" && typeof o == "function" && o === hostGlobals["Random"]) {
             return kRndDefault
         }
+        // String.CASE_INSENSITIVE_ORDER, the Comparator that is java's
+        // compareToIgnoreCase. Twin of js_ktfget in abnf/jsrtkotlin.go and
+        // languages/lib/kotlin-rt.metajs.
+        if (name == "CASE_INSENSITIVE_ORDER" && typeof o == "function" && o === hostGlobals["String"]) {
+            return function(a, b) { return kCmpText(a, b, true) }
+        }
         // ::topLevelFun is the function value itself, and KFunction.name is its name.
         if (typeof o == "function") {
             if (name == "name") { return fnRefName(o) }
@@ -10774,9 +10858,10 @@ NotMemberKw = :script(~~
     function kNoElemKind(kind) { kNoElem(kind + " is empty.") }
     // The kind numbers kept on a host array (arrKind / arrKindSet): 0 a List, 1 an
     // Array, 2 a Sequence, 3 a Map's values view, 4 a read-only List from listOf /
-    // emptyList (whose JVM class kJvmClass names). Twin of ktArrWords in
-    // abnf/jsrtkotlin.go.
+    // emptyList (whose JVM class kJvmClass names), 5 and up a primitive array
+    // (lib/kotlin-math.js's ktaElems). Twin of ktArrWords in abnf/jsrtkotlin.go.
     var kArrWords = ["List", "Array", "Sequence", "Collection", "List"]
+    for (var kaw = 0; kaw < ktaElems.length; kaw++) { kArrWords.push("Array") }
     // The kind of the array a member call answers: an Array's to*Array / copyOf
     // family and Array.plus answer an Array, asSequence a Sequence, and a Sequence's
     // intermediate operations another Sequence (_Sequences.kt); every other member a
@@ -10793,8 +10878,8 @@ NotMemberKw = :script(~~
         "sliceArray"]
     function kResultKind(recv, name) {
         if (name == "asSequence") { return 2 }
-        if (kArrResults.indexOf(name) >= 0) { return 1 }
-        if (recv == 1 && name == "plus") { return 1 }
+        if (kArrResults.indexOf(name) >= 0) { return ktaResultKind(recv, name) }
+        if ((recv == 1 || recv >= 5) && name == "plus") { return recv }
         if (recv == 2 && kSeqKeeps.indexOf(name) >= 0) { return 2 }
         return 0
     }
@@ -11145,9 +11230,14 @@ NotMemberKw = :script(~~
                 if (kIsRef(f)) { return kRefApply(f, spec.pos) }
                 var inv = lookupMethod(f, "invoke")
                 if (inv != null) { return inv.apply(undefined, concat2impl([f], spec.pos)) }
+                // A runtime companion whose name is also a function (hostGlobals["Char"]).
+                if (f !== null && typeof f == "object" && f.__class == undefined && typeof f.invoke == "function") {
+                    return f.invoke.apply(undefined, spec.pos)
+                }
                 fail("call of a non function: " + name)
             }
             kSetNamed(spec.named)
+            kNamedVals = spec.nvals
             if (targs == null) { return f.apply(undefined, spec.pos) }
             kTypeArgsPush(targs)
             try { return f.apply(undefined, spec.pos) } finally { kTypeArgsPop() }
@@ -11365,6 +11455,12 @@ NotMemberKw = :script(~~
     // ktRecvMember in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
     function recvLookup(start, name, iscall) {
         var cur = start
+        // A NUMBER receiver (`fun Int.f() = times(2)`) has members and no properties,
+        // so only a call binds; a runtime global keeps its name, as below. Twin of
+        // ktRecvMember in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+        if (iscall && (typeof cur == "number" || szIs(cur) || kIsFlo(cur)) && !hasOwn(hostGlobals, name)) {
+            return {v: kBoundBuiltin(cur, name)}
+        }
         while (cur != undefined && cur != null) {
             if (typeof cur != "object") {
                 // A STRING receiver is a BUILTIN receiver like any other:
@@ -11474,10 +11570,14 @@ NotMemberKw = :script(~~
     var krpn = ["size", "length", "keys", "values", "entries", "indices", "lastIndex",
                 "value", "isInitialized", "isSuccess", "isFailure", "code"]
     for (var krpi = 0; krpi < krpn.length; krpi++) { kRecvProps["$" + krpn[krpi]] = true }
+    // A bare call's named arguments reach the member as a call SPEC, so
+    // `run { split(",", limit = 2) }` binds limit as `s.split(",", limit = 2)` does.
     function kBoundBuiltin(self, name) {
         return function() {
             var args = []
             for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]) }
+            var named = kTakeNamed()
+            if (named != null) { return mcall(self, name, args, {pos: args, named: named, nvals: kNamedVals}) }
             return mcall(self, name, args)
         }
     }

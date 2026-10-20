@@ -325,3 +325,99 @@ func (rt *jsrt) ktMathProp(o interface{}, name string) interface{} {
 	}
 	return float64(0)
 }
+
+// java.util.Random, which a Kotlin/JVM program reaches as `java.util.Random(seed)`:
+// java's 48-bit linear congruential generator, seed' = seed * 0x5DEECE66D + 0xB
+// (mod 2^48), its stream value for value. The seed lives on the box as a double
+// (48 bits are exact). Twin of jrnd* in languages/lib/kotlin-math.js.
+const jrndMask = 1<<48 - 1
+
+func jrndMake(seed int64) *jsObject {
+	o := newJSObject()
+	o.set("__jrnd", true)
+	o.set("s", float64((uint64(seed)^0x5DEECE66D)&jrndMask))
+	return o
+}
+
+func jrndIs(v interface{}) (*jsObject, bool) {
+	o, isObj := v.(*jsObject)
+	if !isObj {
+		return nil, false
+	}
+	b, ok := o.props["__jrnd"].(bool)
+	return o, ok && b
+}
+
+func jrndNext(o *jsObject, bits uint) int32 {
+	f, _ := o.props["s"].(float64)
+	s := (uint64(f)*0x5DEECE66D + 0xB) & jrndMask
+	o.set("s", float64(s))
+	return int32(int64(s >> (48 - bits)))
+}
+
+func jrndBelow(o *jsObject, bound int32) int32 {
+	r := jrndNext(o, 31)
+	m := bound - 1
+	if bound&m == 0 {
+		return int32((int64(bound) * int64(r)) >> 31)
+	}
+	for u := r; ; u = jrndNext(o, 31) {
+		r = u % bound
+		if u-r+m >= 0 {
+			return r
+		}
+	}
+}
+
+// RandomSupport.boundedNextInt over nextInt(), which java.util.Random inherits.
+func jrndRange(o *jsObject, origin, bound int32) int32 {
+	r := jrndNext(o, 32)
+	n := bound - origin
+	m := n - 1
+	if n&m == 0 {
+		return (r & m) + origin
+	}
+	if n > 0 {
+		for u := int32(uint32(r) >> 1); ; u = int32(uint32(jrndNext(o, 32)) >> 1) {
+			r = u % n
+			if u+m-r >= 0 {
+				return r + origin
+			}
+		}
+	}
+	for r < origin || r >= bound {
+		r = jrndNext(o, 32)
+	}
+	return r
+}
+
+// ktJrndMethod is the java.util.Random member surface. Twin of kJrndMethod in
+// kotlin-interpreter.abnf and k4JrndMethod in languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktJrndMethod(o *jsObject, name string, args []interface{}) (interface{}, bool) {
+	arg := func(i int) int32 { return int32(giVal(rt, args[i])) }
+	switch {
+	case name == "nextInt" && len(args) == 0:
+		return float64(jrndNext(o, 32)), true
+	case name == "nextInt" && len(args) == 1:
+		if arg(0) <= 0 {
+			rt.ktRaise("IllegalArgumentException", "bound must be positive")
+		}
+		return float64(jrndBelow(o, arg(0))), true
+	case name == "nextInt" && len(args) == 2:
+		if arg(0) >= arg(1) {
+			rt.ktRaise("IllegalArgumentException", "bound must be greater than origin")
+		}
+		return float64(jrndRange(o, arg(0), arg(1))), true
+	case name == "nextLong" && len(args) == 0:
+		hi := int64(jrndNext(o, 32))
+		return jsGInt{v: hi<<32 + int64(jrndNext(o, 32)), w: 64}, true
+	case name == "nextDouble" && len(args) == 0:
+		hi := int64(jrndNext(o, 26))
+		return jvmMkFlo(float64(hi<<27+int64(jrndNext(o, 27))) * 0x1.0p-53), true
+	case name == "nextFloat" && len(args) == 0:
+		return jsJFlo{f: float64(float32(jrndNext(o, 24)) / (1 << 24)), sty: floJavaF}, true
+	case name == "nextBoolean" && len(args) == 0:
+		return jrndNext(o, 1) != 0, true
+	}
+	return nil, false
+}

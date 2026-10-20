@@ -821,10 +821,11 @@ function ktNoElemNull() { ktRaise("NoSuchElementException", null) }
 function ktNoElemKind(kind) { ktNoElem(kind + " is empty.") }
 // The kind numbers kept on a host array (arrKind / arrKindSet, host ids 99/100):
 // 0 a List, 1 an Array, 2 a Sequence, 3 a Map's values view, 4 a read-only List
-// from listOf / emptyList (whose JVM class ktJvmListClass names). Twin of
-// ktArrWords in abnf/jsrtkotlin.go.
+// from listOf / emptyList (whose JVM class ktJvmListClass names), 5 and up a
+// primitive array (lib/kotlin-math.js's ktaElems). Twin of ktArrWords in
+// abnf/jsrtkotlin.go.
 function ktArrWord(k) {
-    if (k == 1) { return "Array" }
+    if (k == 1 || k >= 5) { return "Array" }
     if (k == 2) { return "Sequence" }
     if (k == 3) { return "Collection" }
     return "List"
@@ -837,11 +838,11 @@ function ktResultKind(recv, name) {
     if (name == "asSequence") { return 2 }
     if (k3IsCopyName(name)) {
         if (name == "toList" || name == "toMutableList" || name == "asIterable" || name == "asList") { return 0 }
-        return 1
+        return ktaResultKind(recv, name)
     }
     if (name == "copyOf" || name == "copyOfRange" || name == "sortedArray" ||
-        name == "sortedArrayDescending" || name == "reversedArray" || name == "sliceArray") { return 1 }
-    if (recv == 1 && name == "plus") { return 1 }
+        name == "sortedArrayDescending" || name == "reversedArray" || name == "sliceArray") { return ktaResultKind(recv, name) }
+    if ((recv == 1 || recv >= 5) && name == "plus") { return recv }
     if (recv == 2 && ktSeqKeeps(name)) { return 2 }
     return 0
 }
@@ -2916,7 +2917,7 @@ function k2StrMethod2(s, name, args) {
         if (name == "last") { return ktChar(s.charCodeAt(n - 1)) }
         return ktChar(s.charCodeAt(0))
     }
-    if (name == "toCharArray") { return arrKindSet(ktChars(s), 1) }
+    if (name == "toCharArray") { return arrKindSet(ktChars(s), ktaKindOf("Char")) }
     if (name == "toList") { return ktChars(s) }
     if (name == "trim" || name == "trimStart" || name == "trimEnd") {
         if (args.length > 0) { return k2TrimBy(s, name != "trimEnd", name != "trimStart", args) }
@@ -3672,7 +3673,23 @@ function ktJvmListClass(kind, n) {
     return "ArrayList"
 }
 function jxkClass(v) {
-    if (Array.isArray(v)) { return ktJvmListClass(arrKind(v), v.length) }
+    if (Array.isArray(v)) {
+        var ak = arrKind(v)
+        if (ak >= 5) { return ktaClasses[ak - 5] }
+        if (ak != 1) { return ktJvmListClass(ak, v.length) }
+        var ecs = []
+        var i = 0
+        while (i < v.length) {
+            if (!rtIsNil(v[i])) { ecs.push(jxkClass(v[i])) }
+            i = i + 1
+        }
+        return ktaRefClass(ecs)
+    }
+    // A set or map builder that is not a LinkedHashSet / LinkedHashMap records its
+    // class (ktJvmTagged).
+    if (ktIsSet(v) || rtIsDictObj(v)) {
+        if (typeof v["__jc"] == "string") { return v["__jc"] }
+    }
     if (ktIsSet(v)) { return "java.util.LinkedHashSet" }
     if (rtIsDictObj(v)) { return "java.util.LinkedHashMap" }
     var n = k4bSimpleName(v)
@@ -7062,6 +7079,9 @@ function ktRecvMember(recv, name, iscall) {
             return KT_MISS
         }
     }
+    // A NUMBER receiver (`fun Int.f() = times(2)`) has members and no properties,
+    // so only a call binds.
+    if (iscall && typeof recv == "number") { return k4Bound(recv, name) }
     if (!k4IsBuiltinRecv(recv)) {
         // A PLAIN OBJECT receiver that is neither a class instance nor one of the
         // collection kinds: a Pair, a Triple, a Map.Entry, a lazy, a Result, a
@@ -7159,6 +7179,7 @@ function k4IsPkgPath(p) {
     if (p == "kotlin.jvm") { return true }
     if (p == "kotlin.reflect") { return true }
     if (p == "kotlin.time") { return true }
+    if (p == "java" || p == "java.util" || p == "java.lang") { return true }
     return p == "kotlin.concurrent"
 }
 
@@ -7181,6 +7202,10 @@ function ktIsPkg(v) {
 function ktPkgMember(pkg, name) {
     var sub = pkg + "." + name
     if (k4IsPkgPath(sub)) { return ktPkg(sub) }
+    // A class the JVM has under this exact path (java.util.Random) is not the
+    // global of its simple name.
+    var qv = ktGlobalFn(sub)
+    if (!rtIsNil(qv)) { return qv }
     var v = ktGlobalFn(name)
     if (!rtIsNil(v)) { return v }
     fail("unknown name: " + sub)
@@ -7666,6 +7691,8 @@ function k4ListKind(n) {
     if (n == "sequenceOf" || n == "emptySequence") { return 2 }
     if (n == "listOf" || n == "emptyList") { return 4 }
     if (n == "mutableListOf" || n == "arrayListOf") { return 0 }
+    var pk = ktaBuilderKind(n)
+    if (pk != 0) { return pk }
     return 1
 }
 
@@ -7746,13 +7773,37 @@ function k4Contract(name, args) {
     return undefined
 }
 
+// ktJvmTagged records on a set or map the JVM class its builder answers, when that
+// is not a LinkedHashSet / LinkedHashMap; n is setOf / mapOf's argument count. Twin
+// of ktJvmTagged in abnf/jsrtkotlin.go.
+function ktJvmTagged(o, builder, n) {
+    var jc = ""
+    if (builder == "setOf" || builder == "mapOf") {
+        var kind = builder == "setOf" ? "Set" : "Map"
+        if (n == 0) { jc = "kotlin.collections.Empty" + kind }
+        if (n == 1) { jc = "java.util.Collections$Singleton" + kind }
+    }
+    if (builder == "emptySet") { jc = "kotlin.collections.EmptySet" }
+    if (builder == "emptyMap") { jc = "kotlin.collections.EmptyMap" }
+    if (builder == "hashSetOf" || builder == "HashSet") { jc = "java.util.HashSet" }
+    if (builder == "hashMapOf" || builder == "HashMap") { jc = "java.util.HashMap" }
+    if (builder == "sortedSetOf") { jc = "java.util.TreeSet" }
+    if (builder == "sortedMapOf") { jc = "java.util.TreeMap" }
+    if (jc != "") { o["__jc"] = jc }
+    return o
+}
+
 // ktGlobalFn (jsrtkotlin.go:5095) is the VALUE of one global builder name.
 // Everything it answers is a closure, because js_ktglobal hands the value to the
 // emitted scope and the call site is an ordinary call.
 function ktGlobalFn(name) {
     if (name == "Math") { return k4JavaMath() }
     if (name == "ArrayList" || name == "HashSet" || name == "LinkedHashSet" || name == "HashMap" || name == "LinkedHashMap") {
-        return function (src) { return k4JavaCollection(name, src) }
+        return function (src) {
+            var c = k4JavaCollection(name, src)
+            if (Array.isArray(c)) { return c }
+            return ktJvmTagged(c, name, 0)
+        }
     }
     // kotlin.properties.Delegates: the three standard property delegates.
     if (name == "Delegates") {
@@ -7770,7 +7821,7 @@ function ktGlobalFn(name) {
                 as.push(arguments[i])
                 i = i + 1
             }
-            return ktMapOf(as)
+            return ktJvmTagged(ktMapOf(as), name, as.length)
         }
     }
     // The builders take an optional capacity first, so the lambda is the LAST
@@ -7845,18 +7896,9 @@ function ktGlobalFn(name) {
     }
     // String(chars) and String(chars, offset, length): java.lang.String's CharArray
     // constructors, with its range message.
-    if (name == "String") {
-        return function (cs, off, n) {
-            if (!ktIsArr(cs)) { fail("String(...) needs a CharArray") }
-            if (n === undefined) { return ktCharsText(cs, 0, cs.length) }
-            var so = k4Int(off)
-            var sn = k4Int(n)
-            if (so < 0 || sn < 0 || so + sn > cs.length) {
-                ktRaise("StringIndexOutOfBoundsException", "Range [" + so + ", " + so + " + " + sn + ") out of bounds for length " + cs.length)
-            }
-            return ktCharsText(cs, so, so + sn)
-        }
-    }
+    // One hoisted closure, as K4_RANDOM_FN is, so String.CASE_INSENSITIVE_ORDER can
+    // recognise the receiver by identity.
+    if (name == "String") { return K4_STRING_FN }
     // kotlin.random.Random(seed) - the SEEDED generator. `Random` with no argument
     // is not a Kotlin spelling (Random.Default is), so a missing seed answers the
     // default stream. The ONE closure is hoisted to a top-level var so that the
@@ -7864,6 +7906,15 @@ function ktGlobalFn(name) {
     // the receiver by identity; ktGlobalFn is consulted per lookup and a fresh
     // closure each time would make that test false.
     if (name == "Random") { return K4_RANDOM_FN }
+    // java.util.Random(seed), the JVM's own generator (lib/kotlin-math.js's jrnd*);
+    // with no seed it takes a fixed one, as k4RndDefault does. Reached by its
+    // qualified path only (ktPkgMember).
+    if (name == "java.util.Random") {
+        return function (seed) {
+            var sd = rtIsNil(seed) ? 20260808 : seed
+            return jrndNew(sintHi(sd), sintLo(sd))
+        }
+    }
     // A COMPARATOR is a plain function of two elements answering an Int, which is
     // what sortedWith drives.
     if (name == "compareBy" || name == "compareByDescending") {
@@ -7925,6 +7976,8 @@ function ktGlobalFn(name) {
             }
             var ao = k4ArrayOfN(aname, as)
             if (aname != "List" && aname != "MutableList") { arrKindSet(ao, 1) }
+            var pk = ktaBuilderKind(aname)
+            if (pk != 0) { arrKindSet(ao, pk) }
             return ao
         }
     }
@@ -7975,7 +8028,7 @@ function ktGlobalFn(name) {
                 as.push(arguments[i])
                 i = i + 1
             }
-            return k4SetFrom(as)
+            return ktJvmTagged(k4SetFrom(as), name, as.length)
         }
     }
     // A java.util.TreeSet: ascending order, not insertion order.
@@ -7987,11 +8040,11 @@ function ktGlobalFn(name) {
                 as.push(arguments[i])
                 i = i + 1
             }
-            return k4SetFrom(ktSortBy(as, undefined, false))
+            return ktJvmTagged(k4SetFrom(ktSortBy(as, undefined, false)), name, 0)
         }
     }
     if (name == "emptySet") {
-        return function () { return ktMakeSet() }
+        return function () { return ktJvmTagged(ktMakeSet(), "emptySet", 0) }
     }
     if (name == "setOfNotNull") {
         return function () {
@@ -8343,6 +8396,10 @@ function ktSmcall(recv, name, args) {
     if (k4IsRnd(rv)) {
         var rnm = k4RndMethod(rv, name, as)
         if (!ktMiss(rnm)) { return rnm }
+    }
+    if (ktIsObj(rv) && rv["__jrnd"] === true) {
+        var jrm = k4JrndMethod(rv, name, as)
+        if (!ktMiss(jrm)) { return jrm }
     }
     if (ktIsObj(rv) && rv["__grouping"] === true) {
         var grm = k3GroupingMethod(rv, name, as)
@@ -8791,6 +8848,16 @@ function k4RndDefault() {
     return K4_RND_DEFAULT
 }
 
+var K4_STRING_FN = function (cs, off, n) {
+    if (!ktIsArr(cs)) { fail("String(...) needs a CharArray") }
+    if (n === undefined) { return ktCharsText(cs, 0, cs.length) }
+    var so = k4Int(off)
+    var sn = k4Int(n)
+    if (so < 0 || sn < 0 || so + sn > cs.length) {
+        ktRaise("StringIndexOutOfBoundsException", "Range [" + so + ", " + so + " + " + sn + ") out of bounds for length " + cs.length)
+    }
+    return ktCharsText(cs, so, so + sn)
+}
 var K4_RANDOM_FN = function (seed) {
     if (rtIsNil(seed)) { return k4RndDefault() }
     return k4RndBox(seed)
@@ -8813,6 +8880,24 @@ function k4LastFn(args) {
         i = i + 1
     }
     return f
+}
+
+// k4JrndMethod is the java.util.Random member surface over lib/kotlin-math.js's
+// jrndCall. Twin of ktJrndMethod in abnf/jsrtktmath.go.
+function k4JrndMethod(box, name, args) {
+    var ns = []
+    var i = 0
+    while (i < args.length) {
+        ns.push(ktNum(args[i]))
+        i = i + 1
+    }
+    var r = jrndCall(box, name, ns)
+    if (r === null) { return KT_MISS }
+    if (r["t"] == "err") { ktRaise("IllegalArgumentException", r["v"]) }
+    if (r["t"] == "long") { return sint(r["v"][0], r["v"][1], 64, 0) }
+    if (r["t"] == "double") { return flo(r["v"], 0) }
+    if (r["t"] == "float") { return flo(rtF32Round(r["v"]), 3) }
+    return r["v"]
 }
 
 // k4RndMethod is the kotlin.random.Random member surface. The twins are the
@@ -8956,6 +9041,11 @@ function js_ktfget(o, name) {
     // read on that function value.
     if (name == "Default") {
         if (o === K4_RANDOM_FN) { return k4RndDefault() }
+    }
+    // String.CASE_INSENSITIVE_ORDER, the Comparator that is java's
+    // compareToIgnoreCase.
+    if (name == "CASE_INSENSITIVE_ORDER") {
+        if (o === K4_STRING_FN) { return function (a, b) { return k2CmpText(a, b, true) } }
     }
     // A callable reference: KCallable.name.
     var info = ktRefOf(o)
@@ -9221,8 +9311,15 @@ function js_ktglobal(name, iscall) {
     // jsrtkotlin.go answers it at the very END of js_ktget, after the receiver
     // stack. Same place here, for the same reason: only a name nothing else
     // resolves can be the package.
-    if (name == "kotlin") { return ktPkg("kotlin") }
+    if (name == "kotlin" || name == "java") { return ktPkg(name) }
     return ktGlobalFn(name)
+}
+
+// `Char(code)`, the Char companion's `invoke` (ktTypeObj in jsrtkotlin.go).
+function k4CharOf(code) {
+    var n = ktNum(code)
+    if (n < 0 || n > 65535) { ktRaise("IllegalArgumentException", "Invalid Char code: " + ktRender(code)) }
+    return ktChar(n)
 }
 
 // js_kttype (jsrtkotlin.go:901) is ktTypeObj (jsrtkotlin.go:383): the companion of
@@ -9291,6 +9388,7 @@ function js_kttype(name) {
         o["MIN_VALUE"] = ktChar(0)
         o["SIZE_BITS"] = 16
         o["SIZE_BYTES"] = 2
+        o["invoke"] = k4CharOf
         return o
     }
     // The float companions, boxed so that Double.NaN is a Double rather than an

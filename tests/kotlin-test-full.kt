@@ -4920,6 +4920,62 @@ fun sec100() {
 }
 
 
+// ===== SECTION 101: Char(code), number receivers, java.util.Random, Formatter's classes =====
+// Every row was read off kotlin-stdlib 2.2.21 driven from java (JDK 24); Char(code)
+// is CharCode.kt's range check. An unqualified member call inside an extension on a
+// number reaches the number's own member, and a bare call's named argument binds as
+// a qualified one does. java.util.Random(seed) is the JVM's 48-bit generator, value
+// for value. String.CASE_INSENSITIVE_ORDER is java's compareToIgnoreCase. A Formatter
+// mismatch names the JVM class each builder answers: a set or map by builder and
+// argument count, an array by its element type.
+fun Int.dbl101(): Int = times(2)
+fun Int.wrap101(o: Int): Int = plus(o).rem(5)
+fun Long.dec101(): Long = minus(1L)
+fun sec101() {
+    val ns = listOf(97, 0x4e2d, 65535, 70000, -1, 3, 4)
+    check("chr101a", Char(ns[0]) == 'a' && Char(ns[1]) == '中' && Char(ns[2]).code == 65535 && Char(ns[0].toUShort()) == 'a'
+                    && s95err { Char(ns[3]) } == "IllegalArgumentException: Invalid Char code: 70000"
+                    && s95err { Char(ns[4]) } == "IllegalArgumentException: Invalid Char code: -1")
+    check("rcv101b", ns[5].dbl101() == 6 && ns[6].wrap101(9) == 3 && 7L.dec101() == 6L && ns[5].run { times(3) } == 9
+                    && with(ns[5]) { coerceIn(4, 9) } == 4 && "" + "a,b;c:d".run { split(",", ";", ":", limit = 2) } == "[a, b;c:d]")
+    val r = java.util.Random(42)
+    check("jrn101c", r.nextInt() == -1170105035 && r.nextInt(10) == 3 && r.nextInt(16) == 10 && r.nextInt(1 shl 30) == 51474442
+                    && r.nextInt(Int.MAX_VALUE) == 662969970 && r.nextInt(1000000007) == 595021505 && r.nextLong() == -5391787952107853122L)
+    check("jrn101d", r.nextDouble() == 0.09132461105841794 && r.nextFloat() == 0.45125717f && !r.nextBoolean() && r.nextInt(5, 10) == 7
+                    && r.nextInt(-8, 8) == 0 && r.nextInt(Int.MIN_VALUE, Int.MAX_VALUE) == -1329611232 && r.nextInt(-3, 1000000) == 685468)
+    val r2 = java.util.Random(123456789012345L)
+    check("jrn101e", r2.nextInt() == -1421006947 && java.util.Random(Long.MIN_VALUE).nextInt() == -1155484576 && java.util.Random(-1).nextInt() == 1155099827
+                    && s95err { r2.nextInt(0) } == "IllegalArgumentException: bound must be positive"
+                    && s95err { r2.nextInt(5, 5) } == "IllegalArgumentException: bound must be greater than origin")
+    val ws = listOf("b", "A", "a", "C", "B", "Ab")
+    val ci = String.CASE_INSENSITIVE_ORDER
+    check("cio101f", ci.compare(ws[0], ws[1]) == 1 && ci.compare(ws[1], ws[2]) == 0 && "" + ws.sortedWith(ci) == "[A, a, Ab, b, B, C]"
+                    && "" + ws.sortedWith(ci.reversed()) == "[C, b, B, Ab, A, a]")
+    val fs = listOf<Any?>(mapOf(1 to 2), setOf(1), emptySet<Int>(), emptyMap<Int, Int>(), hashSetOf(1), sortedSetOf(1), hashMapOf(1 to 2),
+                          sortedMapOf(1 to 2), setOf(1, 2), mapOf<Int, Int>())
+    check("fmt101g", s95fmt("%d", fs[0]) == "IllegalFormatConversionException: d != java.util.Collections\$SingletonMap"
+                    && s95fmt("%d", fs[1]) == "IllegalFormatConversionException: d != java.util.Collections\$SingletonSet"
+                    && s95fmt("%d", fs[2]) == "IllegalFormatConversionException: d != kotlin.collections.EmptySet"
+                    && s95fmt("%d", fs[3]) == "IllegalFormatConversionException: d != kotlin.collections.EmptyMap"
+                    && s95fmt("%d", fs[4]) == "IllegalFormatConversionException: d != java.util.HashSet")
+    check("fmt101h", s95fmt("%d", fs[5]) == "IllegalFormatConversionException: d != java.util.TreeSet"
+                    && s95fmt("%d", fs[6]) == "IllegalFormatConversionException: d != java.util.HashMap"
+                    && s95fmt("%d", fs[7]) == "IllegalFormatConversionException: d != java.util.TreeMap"
+                    && s95fmt("%d", fs[8]) == "IllegalFormatConversionException: d != java.util.LinkedHashSet"
+                    && s95fmt("%d", fs[9]) == "IllegalFormatConversionException: d != kotlin.collections.EmptyMap")
+    val fa = listOf<Any?>(arrayOf(1), intArrayOf(1), longArrayOf(1), doubleArrayOf(1.0), charArrayOf('a'), booleanArrayOf(true),
+                          arrayOf("a"), byteArrayOf(1), IntArray(2), "ab".toCharArray(), listOf(1).toIntArray(), listOf(1).toTypedArray())
+    check("fmt101i", s95fmt("%d", fa[0]) == "IllegalFormatConversionException: d != [Ljava.lang.Integer;"
+                    && s95fmt("%d", fa[1]) == "IllegalFormatConversionException: d != [I" && s95fmt("%d", fa[2]) == "IllegalFormatConversionException: d != [J"
+                    && s95fmt("%d", fa[3]) == "IllegalFormatConversionException: d != [D" && s95fmt("%d", fa[4]) == "IllegalFormatConversionException: d != [C"
+                    && s95fmt("%d", fa[5]) == "IllegalFormatConversionException: d != [Z")
+    check("fmt101j", s95fmt("%d", fa[6]) == "IllegalFormatConversionException: d != [Ljava.lang.String;"
+                    && s95fmt("%d", fa[7]) == "IllegalFormatConversionException: d != [B" && s95fmt("%d", fa[8]) == "IllegalFormatConversionException: d != [I"
+                    && s95fmt("%d", fa[9]) == "IllegalFormatConversionException: d != [C" && s95fmt("%d", fa[10]) == "IllegalFormatConversionException: d != [I"
+                    && s95fmt("%d", fa[11]) == "IllegalFormatConversionException: d != [Ljava.lang.Integer;")
+}
+
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5021,6 +5077,7 @@ fun main() {
     sec98() // SECTION-CALL 98
     sec99() // SECTION-CALL 99
     sec100() // SECTION-CALL 100
+    sec101() // SECTION-CALL 101
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

@@ -5031,6 +5031,11 @@ KwContract  = "contract" KwEnd ;
             // See rtKtGetP's header for why the position, and not the receiver's
             // origin, is what decides.
             var fV = b.NewCall(rtKtGetP(), [curScopeV, emitStr(b, name), hTrue])
+            // `Char(code)` is kotlin's Char FUNCTION and the bare name the companion,
+            // which carries the function as its `invoke` (js_kttype).
+            if (name == "Char" && classNames[name] == undefined && funNames["$" + name] != true) {
+                fV = callExt(b, "js_get", [fV, emitStr(b, "invoke")])
+            }
             var ea = emitArgs(b, orderArgs(args, funParams["$" + name]))
             b = ea.b
             // `v(args)` where v holds an instance of a class declaring the invoke

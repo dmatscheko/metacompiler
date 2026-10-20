@@ -159,3 +159,157 @@ function ktmJavaAngle(name, x) {
     if (name == "toRadians") { return x * 0.017453292519943295 }
     return x * 57.29577951308232
 }
+
+// java.util.Random, which a Kotlin/JVM program reaches as `java.util.Random(seed)`:
+// java's 48-bit linear congruential generator, seed' = seed * 0x5DEECE66D + 0xB
+// (mod 2^48), kept as two 24-bit halves so every product stays exact in a double.
+// Each engine boxes the answers and raises the errors itself. Go twin: jrnd* in
+// abnf/jsrtktmath.go.
+
+// A generator over the seed's 64-bit two's complement words (each 0..2^32-1),
+// scrambled as java's constructor does: (seed ^ 0x5DEECE66D) mod 2^48.
+function jrndNew(hi32, lo32) {
+    var lo = lo32 % 16777216
+    var hi = Math.floor(lo32 / 16777216) + (hi32 % 65536) * 256
+    return {__jrnd: true, hi: hi ^ 1502, lo: lo ^ 15525485}
+}
+
+// next(bits): step the seed, answer its top `bits` bits (an Int, so 32 of them
+// read signed).
+function jrndNext(box, bits) {
+    var sl = box["lo"]
+    var sh = box["hi"]
+    var lo = sl * 15525485 + 11
+    var mid = (sh * 15525485 + sl * 1502) % 16777216
+    box["lo"] = lo % 16777216
+    box["hi"] = (mid + Math.floor(lo / 16777216)) % 16777216
+    var v = Math.floor((box["hi"] * 16777216 + box["lo"]) / Math.pow(2, 48 - bits))
+    if (bits == 32 && v >= 2147483648) { v = v - 4294967296 }
+    return v
+}
+
+// nextInt(bound): a power of two takes the top bits, anything else rejects the
+// draws whose 31-bit value would bias the remainder (u - r + m overflows an Int).
+function jrndBelow(box, bound) {
+    var r = jrndNext(box, 31)
+    var m = bound - 1
+    if ((bound & m) == 0) { return Math.floor(r / (2147483648 / bound)) }
+    var u = r
+    r = u % bound
+    while (u - r + m > 2147483647) {
+        u = jrndNext(box, 31)
+        r = u % bound
+    }
+    return r
+}
+
+// nextInt(origin, bound): RandomSupport.boundedNextInt over nextInt(), which
+// java.util.Random inherits from RandomGenerator.
+function jrndRange(box, origin, bound) {
+    var r = jrndNext(box, 32)
+    var n = bound - origin
+    var m = n - 1
+    // A width of 2^31 is a power of two too: java's n overflows to MIN_VALUE there.
+    if (n <= 2147483648 && (n & m) == 0) { return (r & m) + origin }
+    if (n <= 2147483647) {
+        var u = Math.floor((r < 0 ? r + 4294967296 : r) / 2)
+        r = u % n
+        while (u + m - r > 2147483647) {
+            var t = jrndNext(box, 32)
+            u = Math.floor((t < 0 ? t + 4294967296 : t) / 2)
+            r = u % n
+        }
+        return r + origin
+    }
+    while (r < origin || r >= bound) { r = jrndNext(box, 32) }
+    return r
+}
+
+// One member call, answered as {t, v} for the engine to box: t is "int", "long"
+// (v then [hi32, lo32], the 64-bit two's complement words), "double", "float",
+// "bool", or "err" with IllegalArgumentException's message; null for a name this
+// generator does not answer.
+function jrndCall(box, name, args) {
+    if (name == "nextInt" && args.length == 0) { return {t: "int", v: jrndNext(box, 32)} }
+    if (name == "nextInt" && args.length == 1) {
+        if (args[0] <= 0) { return {t: "err", v: "bound must be positive"} }
+        return {t: "int", v: jrndBelow(box, args[0])}
+    }
+    if (name == "nextInt" && args.length == 2) {
+        if (args[0] >= args[1]) { return {t: "err", v: "bound must be greater than origin"} }
+        return {t: "int", v: jrndRange(box, args[0], args[1])}
+    }
+    if (name == "nextLong" && args.length == 0) {
+        var a = jrndNext(box, 32)
+        var b = jrndNext(box, 32)
+        var h = b < 0 ? a - 1 : a
+        return {t: "long", v: [h < 0 ? h + 4294967296 : h, b < 0 ? b + 4294967296 : b]}
+    }
+    if (name == "nextDouble" && args.length == 0) {
+        var d = jrndNext(box, 26) * 134217728 + jrndNext(box, 27)
+        return {t: "double", v: d / 9007199254740992}
+    }
+    if (name == "nextFloat" && args.length == 0) { return {t: "float", v: jrndNext(box, 24) / 16777216} }
+    if (name == "nextBoolean" && args.length == 0) { return {t: "bool", v: jrndNext(box, 1) != 0} }
+    return null
+}
+
+// The JVM classes of Kotlin's arrays, which a Formatter mismatch names. A host
+// array carries a kind number (arrKind): 1 is an Array<T>, and the primitive
+// arrays are 5 + their element type's index here. Go twin: ktaElems in
+// abnf/jsrtkotlin.go.
+var ktaElems = ["Int", "Long", "Double", "Float", "Char", "Boolean", "Byte", "Short",
+                "UInt", "ULong", "UByte", "UShort"]
+var ktaClasses = ["[I", "[J", "[D", "[F", "[C", "[Z", "[B", "[S",
+                  "kotlin.UIntArray", "kotlin.ULongArray", "kotlin.UByteArray", "kotlin.UShortArray"]
+
+// The kind of the primitive array of element type `elem` ("Int"), 0 for none.
+function ktaKindOf(elem) {
+    var i = 0
+    while (i < ktaElems.length) {
+        if (ktaElems[i] == elem) { return 5 + i }
+        i = i + 1
+    }
+    return 0
+}
+
+// The kind a primitive array builder's answer carries - IntArray(n) and
+// intArrayOf(...) alike - 0 for any other name.
+function ktaBuilderKind(name) {
+    var i = 0
+    while (i < ktaElems.length) {
+        if (name == ktaElems[i] + "Array" || name == ktaElems[i].toLowerCase() + "ArrayOf") { return 5 + i }
+        i = i + 1
+    }
+    return 0
+}
+
+// The kind an array-making member answers on a receiver of kind `recv`: to<E>Array
+// its primitive array, toTypedArray an Array<T>, and the copying members (copyOf,
+// sortedArray, plus, ...) the receiver's own array kind.
+function ktaResultKind(recv, name) {
+    if (name == "toTypedArray") { return 1 }
+    if (name.length > 7 && name.substring(0, 2) == "to" && name.substring(name.length - 5, name.length) == "Array") {
+        var k = ktaKindOf(name.substring(2, name.length - 5))
+        if (k != 0) { return k }
+    }
+    if (recv == 1 || recv >= 5) { return recv }
+    return 1
+}
+
+// An Array<T>'s class, [L<T>; - T read off the elements' classes (a static type
+// argument is not kept): a java.lang class every non-null element shares, else
+// java.lang.Object.
+function ktaRefClass(classes) {
+    var c = ""
+    var i = 0
+    while (i < classes.length) {
+        var e = classes[i]
+        if (e.length < 11 || e.substring(0, 10) != "java.lang.") { return "[Ljava.lang.Object;" }
+        if (c != "" && c != e) { return "[Ljava.lang.Object;" }
+        c = e
+        i = i + 1
+    }
+    if (c == "") { return "[Ljava.lang.Object;" }
+    return "[L" + c + ";"
+}

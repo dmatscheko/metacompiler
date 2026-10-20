@@ -579,6 +579,20 @@ func ktTypeObj(name string) *jsObject {
 		o.set("MIN_VALUE", jsChar{code: 0})
 		o.set("SIZE_BITS", float64(16))
 		o.set("SIZE_BYTES", float64(2))
+		// `Char(code)` is kotlin's Char FUNCTION (CharCode.kt), the bare name `Char`
+		// the companion; the companion carries the function as its `invoke`. Twin
+		// of hostGlobals["Char"] in kotlin-interpreter.abnf.
+		o.set("invoke", jsHostFunc("Char", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			var c interface{} = jsUndef
+			if len(args) > 0 {
+				c = args[0]
+			}
+			n := giVal(rt, c)
+			if n < 0 || n > 65535 {
+				rt.ktRaise("IllegalArgumentException", fmt.Sprintf("Invalid Char code: %d", n))
+			}
+			return jsChar{code: int32(n)}
+		}))
 	case "Double", "Float":
 		// The float companions, boxed so that Double.NaN is a Double rather than an
 		// Int: kotlin.Double declares MIN_VALUE as the smallest POSITIVE value, the
@@ -1694,6 +1708,11 @@ func init() {
 						return rt.wrap(v)
 					}
 				}
+				if jo, isJ := jrndIs(mo); isJ {
+					if v, handled := rt.ktJrndMethod(jo, mname, arr.elems); handled {
+						return rt.wrap(v)
+					}
+				}
 				if ktIsSb(mo) {
 					if v, handled := rt.ktSbMethod(mo, mname, arr.elems); handled {
 						return rt.wrap(v)
@@ -2493,8 +2512,8 @@ func init() {
 			}
 			// `kotlin` is the head of a QUALIFIED stdlib path - kotlin.math.abs(-3),
 			// the same function the bare `abs(-3)` reaches. See ktPkgMember.
-			if name == "kotlin" {
-				return w(ktPkg("kotlin"))
+			if name == "kotlin" || name == "java" {
+				return w(ktPkg(name))
 			}
 			rt.fail("unknown name: %s", name)
 			return 0
@@ -2514,6 +2533,13 @@ func init() {
 			// function, so this is a member read on that function value.
 			if hf, isHF := o.(*hostFunc); isHF && hf.name == "Random" && name == "Default" {
 				return w(rt.ktRndDefault())
+			}
+			// String.CASE_INSENSITIVE_ORDER, the Comparator that is java's
+			// compareToIgnoreCase. Twin of kGetField in kotlin-interpreter.abnf.
+			if hf, isHF := o.(*hostFunc); isHF && hf.name == "String" && name == "CASE_INSENSITIVE_ORDER" {
+				return w(jsHostFunc("comparator", func(rt *jsrt, this uint64, ab []interface{}) interface{} {
+					return float64(ktCmpText(strUnits(rt.toString(argAt(ab, 0))), strUnits(rt.toString(argAt(ab, 1))), true))
+				}))
 			}
 			// A callable reference: KCallable.name. The twin is the __propref arm of
 			// kGetField in kotlin-interpreter.abnf.
@@ -2933,7 +2959,7 @@ func (rt *jsrt) ktStrMethod2(s, name string, args []interface{}) (interface{}, b
 		}
 		return jsChar{code: int32(rt.strCodeAt(s, 0))}, true
 	case "toCharArray":
-		return &jsArray{elems: chars(), kind: ktArrArray}, true
+		return &jsArray{elems: chars(), kind: ktaKindOf("Char")}, true
 	case "toList":
 		return &jsArray{elems: chars()}, true
 	case "trim", "trimStart", "trimEnd":
@@ -3496,16 +3522,35 @@ func ktJavaFloat(s string, f32 bool) (float64, bool, bool) {
 // primitive is boxed to its java.lang class, so a mismatch names that class.
 // Twin of the jxk* hooks in kotlin-interpreter.abnf and languages/lib/kotlin-rt.metajs.
 func ktFormat(rt *jsrt, f string, args []interface{}) string {
-	h := &jxFmtHooks{rt: rt, throw: rt.ktRaise,
+	var h *jxFmtHooks
+	h = &jxFmtHooks{rt: rt, throw: rt.ktRaise,
 		str:  func(v interface{}) string { return rt.ktpRender(v, 0) },
 		hash: func(v interface{}) int32 { return int32(ktElemHash(rt, v)) },
 		class: func(v interface{}) string {
 			switch t := v.(type) {
 			case *jsArray:
-				return ktJvmListClass(t.kind, len(t.elems))
+				if t.kind >= ktArrPrim {
+					return ktaClasses[t.kind-ktArrPrim]
+				}
+				if t.kind != ktArrArray {
+					return ktJvmListClass(t.kind, len(t.elems))
+				}
+				var ecs []string
+				for _, e := range t.elems {
+					if !isUndefOrNull(e) {
+						ecs = append(ecs, h.class(e))
+					}
+				}
+				return ktaRefClass(ecs)
 			case jsGInt:
 				if t.u {
 					return "kotlin." + ktBoxTypeName(t)
+				}
+			case *jsObject:
+				// A set or map builder that is not a LinkedHashSet / LinkedHashMap
+				// records its class (ktJvmTagged).
+				if jc, ok := t.props["__jc"].(string); ok {
+					return jc
 				}
 			}
 			if ktIsSet(v) {
@@ -7049,6 +7094,17 @@ func (rt *jsrt) ktRecvMember(recv interface{}, name string, iscall bool) (interf
 			return nil, false
 		}
 	}
+	// A NUMBER receiver (`fun Int.f() = times(2)`) has members and no properties,
+	// so only a call binds. Twin of recvLookup in kotlin-interpreter.abnf.
+	switch recv.(type) {
+	case float64, jsJFlo, jsGInt:
+		if iscall && ktMemberCall != nil {
+			self := recv
+			return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+				return ktMemberCall(self, name, args)
+			}), true
+		}
+	}
 	if !ktIsBuiltinRecv(recv) || ktMemberCall == nil {
 		// A PLAIN OBJECT receiver that is neither a class instance nor one of the
 		// collection kinds: a Pair, a Triple, a Map.Entry, a lazy, a Result, a
@@ -7375,6 +7431,7 @@ var ktPkgPaths = map[string]bool{
 	"kotlin.ranges": true, "kotlin.system": true, "kotlin.io": true,
 	"kotlin.random": true, "kotlin.jvm": true, "kotlin.reflect": true,
 	"kotlin.time": true, "kotlin.concurrent": true,
+	"java": true, "java.util": true, "java.lang": true,
 }
 
 func ktPkg(path string) *jsObject {
@@ -7397,6 +7454,11 @@ func (rt *jsrt) ktPkgMember(pkg, name string) interface{} {
 	sub := pkg + "." + name
 	if ktPkgPaths[sub] {
 		return ktPkg(sub)
+	}
+	// A class the JVM has under this exact path (java.util.Random) is not the
+	// global of its simple name.
+	if v := ktGlobalFn(rt, sub); !isUndefOrNull(v) {
+		return v
 	}
 	if v := ktGlobalFn(rt, name); !isUndefOrNull(v) {
 		return v
@@ -7434,6 +7496,44 @@ func (rt *jsrt) ktJavaCollection(name string, src interface{}) interface{} {
 	return rt.ktSetFrom(els)
 }
 
+// ktJvmTagged records on a set or map the JVM class its builder answers, when that
+// is not a LinkedHashSet / LinkedHashMap: setOf and mapOf by their argument count n
+// (emptySet(), a Collections.singleton, else a LinkedHashSet - the count of the
+// vararg, not of the distinct elements), the hash and sorted builders a HashSet /
+// TreeSet / HashMap / TreeMap. Twin of kJvmTagged in kotlin-interpreter.abnf and
+// ktJvmTagged in languages/lib/kotlin-rt.metajs.
+func ktJvmTagged(o *jsObject, builder string, n int) *jsObject {
+	jc := ""
+	switch builder {
+	case "setOf", "mapOf":
+		kind := "Set"
+		if builder == "mapOf" {
+			kind = "Map"
+		}
+		if n == 0 {
+			jc = "kotlin.collections.Empty" + kind
+		} else if n == 1 {
+			jc = "java.util.Collections$Singleton" + kind
+		}
+	case "emptySet":
+		jc = "kotlin.collections.EmptySet"
+	case "emptyMap":
+		jc = "kotlin.collections.EmptyMap"
+	case "hashSetOf", "HashSet":
+		jc = "java.util.HashSet"
+	case "hashMapOf", "HashMap":
+		jc = "java.util.HashMap"
+	case "sortedSetOf":
+		jc = "java.util.TreeSet"
+	case "sortedMapOf":
+		jc = "java.util.TreeMap"
+	}
+	if jc != "" {
+		o.set("__jc", jc)
+	}
+	return o
+}
+
 // ktGlobalFn is the VALUE of one global builder name.
 func ktGlobalFn(rt *jsrt, name string) interface{} {
 	switch name {
@@ -7455,7 +7555,7 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 		return d
 	case "mapOf", "mutableMapOf", "hashMapOf", "linkedMapOf", "sortedMapOf", "emptyMap":
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			return rt.ktMapOf(args)
+			return ktJvmTagged(rt.ktMapOf(args), name, len(args))
 		})
 	// The builders take an optional capacity first, so the lambda is the LAST
 	// argument.
@@ -7555,6 +7655,17 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 				return rt.ktRndDefault()
 			}
 			return ktRndMake(rt.toNumber(seed))
+		})
+	// java.util.Random(seed), the JVM's own generator (jrndMake); with no seed it
+	// takes a fixed one, as ktRndDefault does. Reached by its qualified path only
+	// (ktPkgMember).
+	case "java.util.Random":
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			seed := argAt(args, 0)
+			if isUndefOrNull(seed) {
+				return jrndMake(20260808)
+			}
+			return jrndMake(giVal(rt, seed))
 		})
 	// ----- kotlin stdlib top-level functions. The twins are the hostGlobals block
 	// in kotlin-interpreter.abnf.
@@ -7680,6 +7791,9 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 			if name != "List" && name != "MutableList" {
 				out.kind = ktArrArray
 			}
+			if k := ktaKindOf(strings.TrimSuffix(name, "Array")); k != 0 {
+				out.kind = k
+			}
 			return out
 		})
 	case "listOfNotNull":
@@ -7714,6 +7828,11 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 		"ubyteArrayOf", "ushortArrayOf", "uintArrayOf", "ulongArrayOf":
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			out := &jsArray{elems: append([]interface{}{}, args...), kind: ktArrArray}
+			for i, e := range ktaElems {
+				if strings.ToLower(e)+"ArrayOf" == name {
+					out.kind = ktArrPrim + i
+				}
+			}
 			if name == "longArrayOf" {
 				for i, e := range out.elems {
 					out.elems[i] = rt.ktAdoptLong(e)
@@ -7727,20 +7846,24 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 		})
 	case "setOf", "mutableSetOf", "hashSetOf", "linkedSetOf":
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			return rt.ktSetFrom(args)
+			return ktJvmTagged(rt.ktSetFrom(args), name, len(args))
 		})
 	case "ArrayList", "HashSet", "LinkedHashSet", "HashMap", "LinkedHashMap":
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			return rt.ktJavaCollection(name, argAt(args, 0))
+			c := rt.ktJavaCollection(name, argAt(args, 0))
+			if o, isObj := c.(*jsObject); isObj {
+				return ktJvmTagged(o, name, 0)
+			}
+			return c
 		})
 	case "sortedSetOf":
 		// A java.util.TreeSet: ascending order, not insertion order.
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			return rt.ktSetFrom(ktSortBy(rt, args, nil, false).elems)
+			return ktJvmTagged(rt.ktSetFrom(ktSortBy(rt, args, nil, false).elems), name, 0)
 		})
 	case "emptySet":
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			return ktMakeSet()
+			return ktJvmTagged(ktMakeSet(), name, 0)
 		})
 	case "setOfNotNull":
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
@@ -8135,9 +8258,47 @@ const (
 	ktArrSeq   = 2
 	ktArrVals  = 3
 	ktArrFixed = 4
+	ktArrPrim  = 5 // the first primitive array kind; see ktaElems
 )
 
-var ktArrWords = [...]string{ktKindList, ktKindArr, ktKindSeq, ktKindColl, ktKindList}
+var ktArrWords = [...]string{ktKindList, ktKindArr, ktKindSeq, ktKindColl, ktKindList,
+	ktKindArr, ktKindArr, ktKindArr, ktKindArr, ktKindArr, ktKindArr, ktKindArr, ktKindArr,
+	ktKindArr, ktKindArr, ktKindArr, ktKindArr}
+
+// The primitive arrays' element types, in the order of their kind numbers
+// (ktArrPrim + index), and the JVM class each array is, which a Formatter mismatch
+// names. Twin of ktaElems / ktaClasses in languages/lib/kotlin-math.js.
+var ktaElems = [...]string{"Int", "Long", "Double", "Float", "Char", "Boolean", "Byte", "Short",
+	"UInt", "ULong", "UByte", "UShort"}
+var ktaClasses = [...]string{"[I", "[J", "[D", "[F", "[C", "[Z", "[B", "[S",
+	"kotlin.UIntArray", "kotlin.ULongArray", "kotlin.UByteArray", "kotlin.UShortArray"}
+
+// ktaKindOf is the kind of the primitive array of element type elem, 0 for none.
+func ktaKindOf(elem string) int {
+	for i, e := range ktaElems {
+		if e == elem {
+			return ktArrPrim + i
+		}
+	}
+	return 0
+}
+
+// ktaRefClass is an Array<T>'s class, [L<T>; - T read off the elements' classes (a
+// static type argument is not kept): a java.lang class every non-null element
+// shares, else java.lang.Object.
+func ktaRefClass(classes []string) string {
+	c := ""
+	for _, e := range classes {
+		if !strings.HasPrefix(e, "java.lang.") || (c != "" && c != e) {
+			return "[Ljava.lang.Object;"
+		}
+		c = e
+	}
+	if c == "" {
+		return "[Ljava.lang.Object;"
+	}
+	return "[L" + c + ";"
+}
 
 // ktJvmListClass is the JVM class of a List: kotlin-stdlib's listOf answers
 // EmptyList, a Collections.singletonList or an Arrays.asList by its size; every
@@ -8173,14 +8334,22 @@ func ktResultKind(recv int, name string) int {
 	switch name {
 	case "asSequence":
 		return ktArrSeq
-	case "toTypedArray", "toIntArray", "toLongArray", "toShortArray", "toByteArray",
-		"toDoubleArray", "toFloatArray", "toBooleanArray", "toCharArray",
-		"copyOf", "copyOfRange", "sortedArray", "sortedArrayDescending", "reversedArray",
+	// to<E>Array answers its primitive array, toTypedArray an Array<T>, and the
+	// copying members the receiver's own array kind.
+	case "toTypedArray":
+		return ktArrArray
+	case "toIntArray", "toLongArray", "toShortArray", "toByteArray",
+		"toDoubleArray", "toFloatArray", "toBooleanArray", "toCharArray":
+		return ktaKindOf(name[2 : len(name)-5])
+	case "copyOf", "copyOfRange", "sortedArray", "sortedArrayDescending", "reversedArray",
 		"sliceArray":
+		if recv == ktArrArray || recv >= ktArrPrim {
+			return recv
+		}
 		return ktArrArray
 	}
-	if recv == ktArrArray && name == "plus" {
-		return ktArrArray
+	if (recv == ktArrArray || recv >= ktArrPrim) && name == "plus" {
+		return recv
 	}
 	if recv == ktArrSeq && ktSeqKeepsKind[name] {
 		return ktArrSeq
