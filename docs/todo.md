@@ -89,7 +89,7 @@ path must stay cheap for objects without a prototype chain.
 
 # JV — Java
 
-### T-656 java: `x.new Inner()` with a third same-named nested type; Matcher.hitEnd/requireEnd · P2 · JV · OPEN [V]
+### T-656 java: `x.new Inner()` with a third same-named nested type; Matcher.hitEnd/requireEnd · P2 · JV · IN PROGRESS (JV worker, round 12) [V]
 `class A { int a = 1; class Inner { int get() { return a; } } }`, `class C { static class Holder { static class Inner {...} } }`, `class B {
 int b = 2; class Inner { int get() { return b; } } static int run() { B o = new B(); Inner i = o.new Inner(); return i.get(); } }`; main
 `A x = new A(); A.Inner ai = x.new Inner(); println(ai.get() + " " + B.run())` → java `1 2`; interp "unknown class: Inner", compiled
