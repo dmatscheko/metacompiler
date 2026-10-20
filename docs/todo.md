@@ -112,7 +112,7 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-622 kotlin: `Char(97)`, `sequence {}` builder, implicit-receiver operator calls, split with a named limit, formatter class names · P2 · KT · OPEN [V spec-only]
+### T-622 kotlin: `Char(97)`, `sequence {}` builder, implicit-receiver operator calls, split with a named limit, formatter class names · P2 · KT · IN PROGRESS (KT worker, round 3) [V spec-only]
 `Char(97)` → interp "call of a non function: Char", compiled "call of a non function value" (JVM `a`). `sequence { yield(1) }`
 → "unknown name: sequence" in all engines (the floor's generators can carry it). Inside `fun Int.f()`, an unqualified `times(2)`
 → "unknown name: times". Compiled only: `"a,b;c:d".split(",", ";", ":", limit = 2)` loses a delimiter (orderArgs puts the named
