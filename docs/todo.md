@@ -185,7 +185,7 @@ _G proxy, in both halves.
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-635 bash: `$'\cX'` control escapes; `$'\?'` in the interpreter; batch native stdout/stderr order · P2 · SH · OPEN [V]
+### T-635 bash: `$'\cX'` control escapes; `$'\?'` in the interpreter; batch native stdout/stderr order · P2 · SH · IN PROGRESS (SH worker, round 8) [V]
 `v=$'\cA'; echo ${#v}` → all engines 3 (literal `\cA`; bash byte 0x01, length 1); `${v@E}` with `\cX` likewise. Interp: `$'\?'` keeps
 `\?` (bash `?`; the compiled `${v@E}` is right). `v='a\qb\zc\ux\"\?\cA'; echo "${v@E}"` → bash `a\qb\zc\ux"?^A` (13), interp 16
 characters, compiled 15. Check whether batch's native binaries have bash's former stdout-buffered-vs-stderr ordering problem.
