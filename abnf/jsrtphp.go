@@ -1361,10 +1361,28 @@ func (rt *jsrt) phpCloBind(f, nthis, scope interface{}, keep bool) interface{} {
 // phpLitRec is a closure literal's record (js_phclo), phpFakeRec that of a closure
 // made from a callable (js_phfake); nil for anything else.
 func phpLitRec(v interface{}) *jsObject {
-	if rec := jsvFnMeta(v).rec; rec != nil && rec.props["fk"] != true {
+	if rec := jsvFnMeta(v).rec; rec != nil && rec.props["fk"] != true && rec.props["fd"] == nil {
 		return rec
 	}
 	return nil
+}
+
+// phpFnRec is a named function's record (js_phfnrec), or nil.
+func phpFnRec(v interface{}) *jsObject {
+	if rec := jsvFnMeta(v).rec; rec != nil && rec.props["fd"] != nil {
+		return rec
+	}
+	return nil
+}
+
+// phpFnID is the handle of a named function's Closure, taken when first asked.
+func (rt *jsrt) phpFnID(fr *jsObject) int {
+	if n, ok := fr.props["i"].(float64); ok {
+		return int(n)
+	}
+	rt.phpStamp(nil)
+	fr.set("i", float64(phpHandles[rt]))
+	return phpHandles[rt]
 }
 
 func phpFakeRec(v interface{}) *jsObject {
@@ -2611,6 +2629,9 @@ func (rt *jsrt) phpDump(v interface{}, ind int) string {
 			out += rt.phpDump(phpDeref(vals.elems[i]), ind+2)
 		}
 		return out + pad + "}\n"
+	}
+	if fr := phpFnRec(v); fr != nil {
+		return phpCloDump(rt.phpStr(fr.props["fd"]), rt.phpFnID(fr), ind, nil, "")
 	}
 	if phpIsObj(v) || phpLitRec(v) != nil {
 		for _, d := range phpDumping[rt] {

@@ -241,6 +241,9 @@ func phpCloDump(d string, id int, ind int, statDumps []string, thisDump string) 
 	pad := strings.Repeat(" ", ind)
 	p2, p4 := pad+"  ", pad+"    "
 	n := 3
+	if f[1] == "" {
+		n = 1
+	}
 	if len(st) > 0 {
 		n++
 	}
@@ -251,9 +254,13 @@ func phpCloDump(d string, id int, ind int, statDumps []string, thisDump string) 
 		n++
 	}
 	out := pad + "object(Closure)#" + strconv.Itoa(id) + " (" + strconv.Itoa(n) + ") {\n"
-	out += p2 + "[\"name\"]=>\n" + p2 + "string(" + strconv.Itoa(len(phpRaw(f[0]))) + ") \"" + f[0] + "\"\n"
-	out += p2 + "[\"file\"]=>\n" + p2 + "string(" + strconv.Itoa(len(phpRaw(f[1]))) + ") \"" + f[1] + "\"\n"
-	out += p2 + "[\"line\"]=>\n" + p2 + "int(" + f[2] + ")\n"
+	if f[1] == "" {
+		out += p2 + "[\"function\"]=>\n" + p2 + "string(" + strconv.Itoa(len(phpRaw(f[0]))) + ") \"" + f[0] + "\"\n"
+	} else {
+		out += p2 + "[\"name\"]=>\n" + p2 + "string(" + strconv.Itoa(len(phpRaw(f[0]))) + ") \"" + f[0] + "\"\n"
+		out += p2 + "[\"file\"]=>\n" + p2 + "string(" + strconv.Itoa(len(phpRaw(f[1]))) + ") \"" + f[1] + "\"\n"
+		out += p2 + "[\"line\"]=>\n" + p2 + "int(" + f[2] + ")\n"
+	}
 	if len(st) > 0 {
 		out += p2 + "[\"static\"]=>\n" + p2 + "array(" + strconv.Itoa(len(st)) + ") {\n"
 		for i, s := range st {
@@ -525,6 +532,16 @@ func init() {
 		// js_phplace reads, the scope its captures live in and its bound $this.
 		// The emitter stores it in the closure's meta (js_jsfnmeta). Twin of
 		// js_phclo in lib/php-rt.metajs and closureBody in php-interpreter.abnf.
+		// (desc, sig) -> the record of a named function's Closure: its debug record
+		// (phsCloDesc, no file) and its signature. It takes a handle when var_dump
+		// or spl_object_id first sees it (phpFnID). Twin of js_phfnrec in
+		// lib/php-rt.metajs and fnRecs in php-interpreter.abnf.
+		m["js_phfnrec"] = func(a []uint64) uint64 {
+			rec := newJSObject()
+			rec.set("fd", u(a[0]))
+			rec.set("s", u(a[1]))
+			return w(rec)
+		}
 		m["js_phclo"] = func(a []uint64) uint64 {
 			rt.phpStamp(nil)
 			rec := newJSObject()
@@ -543,6 +560,9 @@ func init() {
 			}
 			if rec := phpLitRec(u(a[0])); rec != nil {
 				return rt.wrapNum(rec.props["i"].(float64))
+			}
+			if fr := phpFnRec(u(a[0])); fr != nil {
+				return rt.wrapNum(float64(rt.phpFnID(fr)))
 			}
 			return rt.wrapNum(0)
 		}

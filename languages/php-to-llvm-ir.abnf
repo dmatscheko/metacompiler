@@ -4972,7 +4972,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     }
     // The debug record (phsCloDesc) of the closure cloLeave answered sc for: its
     // static variables, then its parameter list.
-    function cloDesc(sc, statics, pl) {
+    function cloDesc(sc, statics, pl) { return fnDescOf(sc.name, c.file, sc.line, statics, pl) }
+    // A debug record (phsCloDesc) for parameter list pl.
+    function fnDescOf(name, file, line, statics, pl) {
         var pr = []
         var po = []
         for (var i = 0; i < pl.params.length; i++) {
@@ -4983,7 +4985,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             pr.push(ref)
             po.push(opt)
         }
-        return phsCloDesc(sc.name, c.file, sc.line, statics, pl.params, pr, po)
+        return phsCloDesc(name, file, line, statics, pl.params, pr, po)
     }
     function makeClosure(items) {
         fnLeave()
@@ -7235,7 +7237,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             stmts.push(inner)
             inner = makeBody(stmts)
         }
-        return {name: name, params: params, byref: pl.byref, rest: pl.rest, pvis: pvis, vis: vis, st: isSt,
+        return {name: name, params: params, defs: defs, byref: pl.byref, rest: pl.rest, pvis: pvis, vis: vis, st: isSt,
                 body: paramDefaults(defs, variadicPrologue(pl, inner))}
     }
     // mVisNames: the lower-cased names some class declares a non-public method
@@ -7402,7 +7404,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         return function(b) {
             var idx = emitFunc(fn.params, fn.body, false)
             var gV = globalsFrameV(b)
-            var fV = withSig(b, closureV(b, idx, gV), fn)
+            // Its record shows the function by name and parameters as a Closure
+            // (js_phfnrec), and carries the signature withSig would record.
+            var recV = callExt(b, "js_phfnrec", [emitStr(b, fnDescOf(fn.name, "", "", [], fn)), emitStr(b, plSig(fn))])
+            var fV = callExt(b, "js_jsfnmeta", [closureV(b, idx, gV), recV, emitNum(b, refMask(fn))])
             callExt(b, "js_scope_decl", [gV, emitStr(b, fn.name), fV])
             var lcFn = phsCase(fn.name, false)
             callExt(b, "js_scope_decl", [gV, emitStr(b, "\x00f" + lcFn), fV])

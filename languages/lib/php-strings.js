@@ -590,7 +590,8 @@ function phsCloStatics(d) { return phsCloSplit(phsCloSplit(d, 10)[3], 44) }
 // var_dump of a closure literal at indent ind: record d, handle id, the dumps of
 // its static variables' values (at ind + 4) and of its bound $this (at ind + 2;
 // "" for none), in zend_closure_get_debug_info's order: name, file, line,
-// static, this, parameter.
+// static, this, parameter. A record with no file is a named function's, which
+// shows its name as "function" instead of the first three.
 function phsCloDump(d, id, ind, statDumps, thisDump) {
     var f = phsCloSplit(d, 10)
     var st = phsCloSplit(f[3], 44)
@@ -605,14 +606,18 @@ function phsCloDump(d, id, ind, statDumps, thisDump) {
     while (pad.length < ind) { pad = pad + " " }
     var p2 = pad + "  "
     var p4 = p2 + "  "
-    var n = 3
+    var n = f[1] == "" ? 1 : 3
     if (st.length > 0) { n = n + 1 }
     if (thisDump != "") { n = n + 1 }
     if (ps.length > 0) { n = n + 1 }
     var out = pad + "object(Closure)#" + id + " (" + n + ") {\n"
-    out = out + p2 + "[\"name\"]=>\n" + p2 + "string(" + phsLen(f[0]) + ") \"" + f[0] + "\"\n"
-    out = out + p2 + "[\"file\"]=>\n" + p2 + "string(" + phsLen(f[1]) + ") \"" + f[1] + "\"\n"
-    out = out + p2 + "[\"line\"]=>\n" + p2 + "int(" + f[2] + ")\n"
+    if (f[1] == "") {
+        out = out + p2 + "[\"function\"]=>\n" + p2 + "string(" + phsLen(f[0]) + ") \"" + f[0] + "\"\n"
+    } else {
+        out = out + p2 + "[\"name\"]=>\n" + p2 + "string(" + phsLen(f[0]) + ") \"" + f[0] + "\"\n"
+        out = out + p2 + "[\"file\"]=>\n" + p2 + "string(" + phsLen(f[1]) + ") \"" + f[1] + "\"\n"
+        out = out + p2 + "[\"line\"]=>\n" + p2 + "int(" + f[2] + ")\n"
+    }
     if (st.length > 0) {
         out = out + p2 + "[\"static\"]=>\n" + p2 + "array(" + st.length + ") {\n"
         var i = 0

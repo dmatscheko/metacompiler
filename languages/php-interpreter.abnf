@@ -1293,7 +1293,7 @@ TplSpecial  <~~ push({s: up.in}) ~~>
 // In a single-quoted string only \' and \\ are escapes; every OTHER backslash is a
 // literal backslash ('a\nb' is four bytes), which is what SqBack accepts - after
 // SqEsc, so the two real escapes still win.
-SqStr       = "'" :whitespace() { SqEsc | SqBack | SqPlain } <~~ push(makeConst(phpLibRef(unescapeSq(up.in)))) ~~> "'" :whitespace(Whitespace) ;
+SqStr       = "'" :whitespace() { SqEsc | SqBack | SqPlain } <~~ push(makeConst(phpLibRef(unescapeSq(up.in), false))) ~~> "'" :whitespace(Whitespace) ;
 SqEsc       = "\\" ( "'" | "\\" ) ;
 SqBack      = "\\" ;
 SqPlain     = "\x20"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" | @"\t" | @"\n" | @"\r" ;
@@ -3376,7 +3376,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
 
     function makeTemplate(items) {
-        if (items.length == 1 && items[0].s != undefined) { phpLibRef(items[0].s) }
+        if (items.length == 1 && items[0].s != undefined) { phpLibRef(items[0].s, false) }
         for (var k = 0; k < items.length; k++) {
             if (items[k].sb != undefined) { items[k] = {s: phsFromBytes(items[k].sb)} }
         }
@@ -3973,7 +3973,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (typeof cur == "string" && !fnDefined(cur)) {
                 phpRaise("Error", "Call to undefined function " + cur + "()")
             }
-            return asCallable(cur)
+            return fnCallable(cur)
         }
         if (typeof cur == "function") { return cur(argset) }
         if (typeof cur == "string") {
@@ -4030,6 +4030,14 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         cv = cur
         return function(argset) { return phpInvoke(cv, argset) }
     }
+    // asCallable, showing the record of the function a name names (fnRecs).
+    function fnCallable(cur) {
+        var c2 = asCallable(cur)
+        if (typeof cur == "string" && cur.indexOf("::") < 0 && varExists(fnKey(phsCase(fnName(cur), false)))) {
+            fnMetaSet(c2, fnMeta(getVar(fnKey(phsCase(fnName(cur), false))), "name"), 0)
+        }
+        return c2
+    }
     function callNamed(cname, argset) {
         var name = fnName(cname)
         if (hasOwn(phpBuiltins, name)) { return phpBuiltins[name].apply(undefined, argset.pos) }
@@ -4046,8 +4054,29 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // No other hidden name starts "\x00f" and a lower-case letter. Twin of fnRetry
     // and makeDefStmt in php-to-llvm-ir.abnf.
     function fnKey(lc) { return "\x00f" + lc }
+    // A named function as a value is a Closure too (strlen(...), a callback),
+    // which var_dump shows by its name and parameters (zend_closure_get_debug_info
+    // of a fake closure); it takes a handle when first shown. fnMeta's name
+    // "fn:<n>" indexes its record in fnRecs. Twin of js_phfnrec in
+    // lib/php-rt.metajs and abnf/jsrtphpstr.go.
+    var fnRecs = []
+    function fnRecOf(v) {
+        if (typeof v != "function") { return null }
+        var nm = anytype
+        nm = fnMeta(v, "name")
+        if (typeof nm != "string" || nm.substring(0, 3) != "fn:") { return null }
+        return fnRecs[phpInt(nm.substring(3))]
+    }
+    function fnRecId(r) {
+        if (r.i == 0) {
+            objHandles = objHandles + 1
+            r.i = objHandles
+        }
+        return r.i
+    }
     function declFn(fn) {
-        var f = makeFunClosure(fn)
+        var f = fnMetaSet(makeFunClosure(fn), "fn:" + fnRecs.length, 0)
+        fnRecs.push({fn: fn, i: 0})
         scopePut(globalScope, fn.name, f)
         var lc = phsCase(fn.name, false)
         scopePut(globalScope, fnKey(lc), f)
@@ -4847,7 +4876,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return null
     }
     // The debug record of the closure cloLeave answered sc for.
-    function cloDesc(sc, statics, params) {
+    function cloDesc(sc, statics, params) { return fnDescOf(sc.name, c.file, sc.line, statics, params) }
+    // A debug record (phsCloDesc) for parameter records params.
+    function fnDescOf(name, file, line, statics, params) {
         var pn = []
         var pr = []
         var po = []
@@ -4856,7 +4887,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             pr.push(params[i].byref === true)
             po.push(params[i].variadic === true || params[i].def != null)
         }
-        return phsCloDesc(sc.name, c.file, sc.line, statics, pn, pr, po)
+        return phsCloDesc(name, file, line, statics, pn, pr, po)
     }
     // The closure's body as a zero-argument thunk, so a generator closure can defer it.
     function runClosureRun(params, body, captured, env, argset) {
@@ -5110,7 +5141,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (isArr(fc) && typeof arrGet(fc, 0) == "function" && phsCase(phpStr(arrGet(fc, 1)), false) == "__invoke") {
             return arrGet(fc, 0)
         }
-        return asCallable(cbResolve(fc, true))
+        return fnCallable(cbResolve(fc, true))
     }
     // An arrow function's body: its one expression, returned.
     function arrowBody(t) { return function() { return {ret: true, v: t()} } }
@@ -5921,7 +5952,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return boundStatic(resolveClassName(cn), mn, cn, false, isArr(cur) ? CB_ARR : (internal ? CB_INT : CB_STR))
     }
     function makeCall(items) {
-        var name = phpLibRef(items[0])
+        var name = phpLibRef(items[0], true)
         // A name written in another letter case: a builtin or library function is
         // called by its own name, a user function through its lower-cased key
         // (callDyn), which names the function as written on a miss.
@@ -5936,6 +5967,18 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             }
         }
         var args = items.slice(1)
+        // An engine native taken as a first-class callable is the library's
+        // declaration of it, whose parameters it shows, as the compiler's is.
+        var fccLib = false
+        if (hasOwn(phpBuiltins, name)) {
+            for (var fa = 0; fa < args.length; fa++) { if (args[fa] != null && args[fa].fcc != undefined) { fccLib = true } }
+            if (fccLib) {
+                if (phpLib == null) { phpLib = phpLibIndex(load("lib/php-stdlib.php")) }
+                var fk = phpLibKey(phpLib, name)
+                fccLib = fk != ""
+                phpLibLoad(fk)
+            }
+        }
         var resolveCb = name == "call_user_func" || name == "call_user_func_array"
         var libCb = hasOwn(libCbArg, "$" + phsCase(name, false))
         return function() {
@@ -5963,6 +6006,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             }
             // f(...) is the first-class callable form: it yields the function itself.
             if (argset.fcc === true) {
+                if (fccLib) { return getVar(name) }
                 if (hasOwn(phpBuiltins, name)) {
                     var bf = phpBuiltins[name]
                     return function(a2) { return bf.apply(undefined, a2.pos) }
@@ -5972,7 +6016,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 if (libCb) {
                     var lf = getVar(name)
                     var lname = name
-                    return function(a2) { libArgs(lname, a2); return lf(a2) }
+                    return fnMetaSet(function(a2) { libArgs(lname, a2); return lf(a2) }, fnMeta(lf, "name"), 0)
                 }
                 return anyCase ? fnGet(name) : getVar(name)
             }
@@ -6771,6 +6815,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         // Closure keeps none and answers 0.
         "__mec_oid": function(o) {
             if (isObj(o)) { return o.__vdid }
+            var fr = fnRecOf(o)
+            if (fr != null) { return fnRecId(fr) }
             var cr = cloRecOf(o)
             return cr == null ? 0 : cr.i
         },
@@ -7494,7 +7540,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             }
             return out + pad + "}\n"
         }
-        if (isObj(v) || cloRecOf(v) != null) {
+        if (isObj(v) || cloRecOf(v) != null || fnRecOf(v) != null) {
             for (var di = 0; di < dumping.length; di++) {
                 if (dumping[di] === v) { return pad + "*RECURSION*\n" }
             }
@@ -7532,6 +7578,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             }
             return o2 + pad + "}\n"
         }
+        var fr = fnRecOf(v)
+        if (fr != null) { return phsCloDump(fnDescOf(fr.fn.name, "", "", [], fr.fn.params), "" + fnRecId(fr), ind, [], "") }
         var cr = cloRecOf(v)
         var sn = phsCloStatics(cr.d)
         var sd = []
@@ -8041,8 +8089,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     var phpLib = null
     var phpLibDone = {}
     var phpLibBase = true
-    function phpLibRef(name) {
-        if (hasOwn(phpBuiltins, name)) { return name }
+    function phpLibRef(name, viaCall) {
+        if (viaCall && hasOwn(phpBuiltins, name)) { return name }
         if (phpLib == null) { phpLib = phpLibIndex(load("lib/php-stdlib.php")) }
         phpLibLoad(phpLibKey(phpLib, name))
         return name

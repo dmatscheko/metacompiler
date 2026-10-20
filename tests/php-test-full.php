@@ -3798,7 +3798,10 @@ function s73() {
 // callback must have exactly two members" (Zend/zend_API.c
 // zend_is_callable_at_frame). A library function reached through
 // call_user_func_array judges its callback at the first user frame, as through
-// call_user_func (zend_API.c get_scope skips internal frames).
+// call_user_func (zend_API.c get_scope skips internal frames). A named function
+// taken as a value is a Closure with a handle, which var_dump shows by
+// "function" and "parameter" (Zend/zend_closures.c zend_closure_get_debug_info
+// of a fake closure); s74dump puts that in the transcript.
 function S74Inc(&$x) { $x++; return $x; }
 function N() { return "n"; }
 class S74A {
@@ -3838,8 +3841,15 @@ function s74() {
         === "TypeError: call_user_func(): Argument #1 (\$callback) must be a valid callback, array callback must have exactly two members"
         && s74err(function () { array_map([1, 2, 3], [1]); })
         === "TypeError: array_map(): Argument #1 (\$callback) must be a valid callback or null, array callback must have exactly two members");
+    check("fcd1", spl_object_id(S74Inc(...)) > 0 && spl_object_id(strlen(...)) > 0 && spl_object_id(usort(...)) > 0);
     check("cfa1", (new S74A)->t() === ['-1,-2,-3', 'kept', '1,3', '1,3', '-1,-2,-3',
         'array_udiff(): Argument #3 must be a valid callback, array callback must have exactly two members']);
+}
+
+function s74dump() {
+    var_dump(usort(...), S74INC(...), N(...));
+    $f = 'StrLen';
+    var_dump($f(...));
 }
 
 // ===== END SECTIONS =====
@@ -3925,6 +3935,7 @@ function main() {
     s72(); // SECTION-CALL 72
     s73(); // SECTION-CALL 73
     s74(); // SECTION-CALL 74
+    s74dump(); // SECTION-CALL 74
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

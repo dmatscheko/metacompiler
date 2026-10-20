@@ -1654,8 +1654,25 @@ function js_phclo(d, s, e, t) {
 // A closure literal's record, or undefined.
 function phCloRec(v) {
     var r = phMetaRec(v)
-    if (r !== undefined && r["fk"] !== true) { return r }
+    if (r !== undefined && r["fk"] !== true && r["fd"] === undefined) { return r }
     return undefined
+}
+// The record of a named function's Closure: its debug record (phsCloDesc, no
+// file) and its signature. It takes a handle when var_dump or spl_object_id
+// first sees it (phFnID). Twin of m["js_phfnrec"] in abnf/jsrtphpstr.go and
+// fnRecs in php-interpreter.abnf.
+function js_phfnrec(d, s) { return {fd: d, s: s} }
+function phFnRec(v) {
+    var r = phMetaRec(v)
+    if (r !== undefined && r["fd"] !== undefined) { return r }
+    return undefined
+}
+function phFnID(r) {
+    if (r["i"] === undefined) {
+        phStamp(undefined)
+        r["i"] = phHandles
+    }
+    return r["i"]
 }
 // The record of a closure made from a callable (js_phfake), or undefined.
 function phFakeRec(v) {
@@ -1843,6 +1860,8 @@ function js_phoidof(v) {
     if (phIsObj(v)) { return phDumpID(v) }
     var r = phCloRec(v)
     if (r !== undefined) { return r["i"] }
+    var fr = phFnRec(v)
+    if (fr !== undefined) { return phFnID(fr) }
     return 0
 }
 
@@ -1878,6 +1897,8 @@ function phDump(v, ind) {
         }
         return out + pad + "}\n"
     }
+    var fr = phFnRec(v)
+    if (fr !== undefined) { return phsCloDump(fr["fd"], phStr(phFnID(fr)), ind, [], "") }
     if (phIsObj(v) || phCloRec(v) !== undefined) {
         var di = 0
         while (di < phDumping.length) {
