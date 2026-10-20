@@ -7277,6 +7277,26 @@ def s143():
               and S143m.floor(10 ** 20 + 1) == 100000000000000000001 and S143m.trunc(-(2 ** 70) - 1) == -(2 ** 70) - 1
               and S143m.floor(S143Real()) == 2)
 
+# ===== SECTION 144: statistics =====
+import statistics as S144st
+
+def s144():
+    st = S144st
+    check("stats1", st.mean([1, 2, 3, 4]) == 2.5 and type(st.mean([1, 2, 3])) is int and st.mean([0.1, 0.2, 0.3]) == 0.2
+          and st.median([3, 1, 2]) == 2 and st.median([1, 2, 3, 4]) == 2.5 and st.median_low([1, 2, 3, 4]) == 2
+          and st.median_high([1, 2, 3, 4]) == 3 and st.mode([1, 2, 2, 3]) == 2 and st.multimode("aabbc") == ["a", "b"]
+          and st.fmean([1, 2, 3], weights=[3, 2, 1]) == 1.6666666666666667)
+    check("stats2", st.variance([1, 2, 3, 4]) == 1.6666666666666667 and st.pvariance([1, 2, 3, 4]) == 1.25
+          and st.stdev([1, 2, 3, 4]) == 1.2909944487358056 and st.pstdev([1, 2, 3]) == 0.816496580927726
+          and st.quantiles(range(1, 11), n=4) == [2.75, 5.5, 8.25]
+          and st.quantiles([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], n=4, method="inclusive") == [3.25, 5.5, 7.75]
+          and st.harmonic_mean([40, 60], weights=[5, 30]) == 56.0 and st.median_grouped([1, 2, 2, 3, 4, 4, 4, 4, 4, 5]) == 3.7)
+    try:
+        st.mean([])
+        check("stats3", False)
+    except st.StatisticsError as e:
+        check("stats3", str(e) == "mean requires at least one data point" and isinstance(e, ValueError))
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -7418,5 +7438,6 @@ def main():
     s141() # SECTION-CALL 141
     s142() # SECTION-CALL 142
     s143() # SECTION-CALL 143
+    s144() # SECTION-CALL 144
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]
