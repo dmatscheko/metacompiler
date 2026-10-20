@@ -1177,6 +1177,8 @@ function pyTypeName(v) {
         if (v["__pyunion"] !== undefined) { return "typing.Union" }
         if (v["__galias"] !== undefined) { return "types.GenericAlias" }
         if (v["__pysup"] === true) { return "super" }
+        // The __class__ and __classdict__ cells a class namespace carries.
+        if (v["__pyccell"] !== undefined || v["__pydcell"] === true) { return "cell" }
         // An instance of a user class is a "'C' object" in every message.
         var ic = pyInstClassOf(v)
         if (ic !== null && ic["__name"] !== undefined) { return pyToStr(ic["__name"]) }
@@ -11499,6 +11501,12 @@ function pyTypeNew(name, bases, ns, mcs, kw) {
             else if (k == "__qualname__") { cls["__qual"] = ns["vals"][i] }
             else if (k == "__classcell__") { pyFillClassCell(ns["vals"][i], cls) }
             else if (k == "__classdictcell__") { pyCheckDictCell(ns["vals"][i]) }
+            else if (k == "__annotate_func__") {
+                // CPython calls it on the first __annotations__ read; here
+                // type.__new__ calls it once, when the class is made.
+                js_pysetattr(cls, k, ns["vals"][i])
+                cls["__annotations__"] = pyDCallPyValue(ns["vals"][i], [1], undefined)
+            }
             else { js_pysetattr(cls, k, ns["vals"][i]) }
             i = i + 1
         }
@@ -11537,10 +11545,10 @@ function pyMetaRender(v, repr) {
     return pyToStr(pyCallSelf(f, v, []))
 }
 
-// Go: js_pyclass_meta. (class the statement filled, its keyword arguments) ->
-// the class: with a metaclass, meta(name, bases, namespace, **kw) makes the
-// real one from the filled class's members; otherwise js_pysetnames.
-function js_pyclass_meta(cls, kw, cellSc, dictCell) {
+// Go: js_pyclass_meta, which lists the arguments and the namespace's keys.
+// With a metaclass, meta(name, bases, namespace, **kw) makes the real class
+// from the filled class's members; otherwise js_pysetnames.
+function js_pyclass_meta(cls, kw, cellSc, dictCell, firstLine, statics) {
     var bases = pyCCopyArr(cls["__basesl"])
     var meta = pyMetaOf(bases, kw)
     // The keywords besides metaclass= go to the metaclass, or with none to
@@ -11560,15 +11568,18 @@ function js_pyclass_meta(cls, kw, cellSc, dictCell) {
     var ns = pyNewDict()
     pyDictSet(ns, "__module__", cls["__module__"])
     pyDictSet(ns, "__qualname__", pyClsQual(cls))
+    pyDictSet(ns, "__firstlineno__", firstLine)
     if (typeof cls["__doc__"] == "string") { pyDictSet(ns, "__doc__", cls["__doc__"]) }
-    // The body's annotations ride in the namespace (Go: js_pyclass_meta).
-    if (cls["__annotations__"] !== undefined) { pyDictSet(ns, "__annotations__", cls["__annotations__"]) }
     var cd = pyClassDict(cls)
     var i = 0
     while (i < cd["keys"].length) {
         if (cd["keys"][i] != "__module__") { pyDictSet(ns, cd["keys"][i], cd["vals"][i]) }
         i = i + 1
     }
+    // The body's annotations ride in the namespace behind __annotate_func__
+    // (Go: js_pyclass_meta).
+    if (cls["__annotations__"] !== undefined) { pyDictSet(ns, "__annotate_func__", pyAnnotateFunc(cls["__annotations__"])) }
+    pyDictSet(ns, "__static_attributes__", pyTup(statics === undefined ? [] : pyCCopyArr(statics)))
     if (dictCell === true) {
         var dcell = {}
         dcell["__pydcell"] = true
@@ -11584,6 +11595,24 @@ function js_pyclass_meta(cls, kw, cellSc, dictCell) {
     made = pyDCallPyValue(meta, [cls["__name"], pyTup(bases), ns], rest)
     if (cellSc !== undefined) { pyClassCellCheck(cls["__name"], made, scopeGet(cellSc, "__pycls__")) }
     return made
+}
+
+// A class body's __annotate_func__ (PEP 649). Go: pyAnnotateFunc.
+function pyAnnotateFunc(ann) {
+    return function(format) {
+        if (typeof format != "number" || format > 2) {
+            var e = pyExcInstance("NotImplementedError", "")
+            e["args"] = pyTup([])
+            throw e
+        }
+        var d = pyNewDict()
+        var i = 0
+        while (i < ann["keys"].length) {
+            pyDictSet(d, ann["keys"][i], ann["vals"][i])
+            i = i + 1
+        }
+        return d
+    }
 }
 
 // CPython's check once a metaclass returned a class: the __classcell__ it was

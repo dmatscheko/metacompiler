@@ -16154,10 +16154,13 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			return w(jsUndef)
 		},
 		// (class the statement filled, its keyword arguments, its __class__ cell
-		// scope or undefined) -> the class. With a metaclass (pyMetaOf) the
+		// scope or undefined, whether it has a __classdictcell__, its
+		// __firstlineno__, its __static_attributes__ as an array or undefined)
+		// -> the class. With a metaclass (pyMetaOf) the
 		// filled class only carries the namespace: meta(name, bases, namespace,
-		// **kw) makes the real one, the namespace a dict of the members in
-		// definition order plus __module__, __qualname__ and the cell as
+		// **kw) makes the real one, the namespace a dict of __module__,
+		// __qualname__, __firstlineno__, the members in definition order,
+		// __annotate_func__, __static_attributes__ and the cell as
 		// __classcell__, which type.__new__ fills (pyTypeNew), after the
 		// __classdictcell__ a body with an annotation scope has (a[3], sbClassDict
 		// in python-to-llvm-ir.abnf). Otherwise the
@@ -16192,15 +16195,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			nk, nv, _ := dictParts(ns)
 			dictAppend(nk, nv, "__module__", cls.props["__module__"])
 			dictAppend(nk, nv, "__qualname__", rt.pyClsQual(cls))
+			dictAppend(nk, nv, "__firstlineno__", u(a[4]))
 			if doc, isStr := cls.props["__doc__"].(string); isStr {
 				dictAppend(nk, nv, "__doc__", doc)
-			}
-			// The body's annotations ride in the namespace, so the metaclass's
-			// type.__new__ gives the class its __annotations__. Twin of the
-			// metaclass arm of makeClass in python-interpreter.abnf and
-			// js_pyclass_meta in lib/python-rt.metajs.
-			if ann, has := cls.props["__annotations__"]; has {
-				dictAppend(nk, nv, "__annotations__", ann)
 			}
 			mk, mv, _ := dictParts(rt.pyClassDict(cls))
 			for i, k := range mk.elems {
@@ -16208,6 +16205,19 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 					dictAppend(nk, nv, k, mv.elems[i])
 				}
 			}
+			// The body's annotations ride in the namespace behind
+			// __annotate_func__ (PEP 649), so the metaclass's type.__new__ gives
+			// the class its __annotations__. Twin of the metaclass arm of
+			// makeClass in python-interpreter.abnf and js_pyclass_meta in
+			// lib/python-rt.metajs.
+			if ann, has := cls.props["__annotations__"]; has {
+				dictAppend(nk, nv, "__annotate_func__", pyAnnotateFunc(ann))
+			}
+			statics := &jsArray{}
+			if sa, ok := u(a[5]).(*jsArray); ok {
+				statics.elems = append(statics.elems, sa.elems...)
+			}
+			dictAppend(nk, nv, "__static_attributes__", pyTup(statics))
 			if u(a[3]) == true {
 				dcell := newJSObject()
 				dcell.set("__pydcell", true)
@@ -21441,6 +21451,29 @@ func (rt *jsrt) pyClassDict(cls *jsObject) interface{} {
 	return d
 }
 
+// pyAnnotateFunc is a class body's __annotate_func__ (PEP 649): annotate(format)
+// answers a fresh copy of the annotations ann for VALUE (1) and
+// VALUE_WITH_FAKE_GLOBALS (2) and raises NotImplementedError for any other
+// format, as the function CPython compiles does. Twin of pyAnnotateFunc in
+// languages/python-interpreter.abnf and lib/python-rt.metajs.
+func pyAnnotateFunc(ann interface{}) interface{} {
+	return jsHostFunc("__annotate__", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		if f, ok := argAt(args, 0).(float64); !ok || f > 2 {
+			e := rt.pyExcInstance("NotImplementedError", "").(*jsObject)
+			e.set("args", pyTup(&jsArray{}))
+			panic(&jsThrown{value: e})
+		}
+		d := pyDescTypeSample("dict")
+		dk, dv, _ := dictParts(d)
+		if keys, vals, ok := dictParts(ann); ok {
+			for i, k := range keys.elems {
+				dictAppend(dk, dv, k, vals.elems[i])
+			}
+		}
+		return d
+	})
+}
+
 // pyClassAnnotations is C.__annotations__: the class's own dict, or an empty
 // one cached on a class whose body held none - CPython does not inherit them.
 // The read is what dir() lists as __annotations_cache__ (pyDir). Twin of
@@ -24056,6 +24089,10 @@ func pyTypeName(rt *jsrt, v interface{}) string {
 		}
 		if _, isSup := pySuperObj(t); isSup {
 			return "super"
+		}
+		// The __class__ and __classdict__ cells a class namespace carries.
+		if _, isCell := t.props["__pyccell"]; isCell || t.props["__pydcell"] == true {
+			return "cell"
 		}
 		// An instance of a user class is a "'C' object" in every message.
 		if _, cls, isInst := pyInstance(t); isInst {

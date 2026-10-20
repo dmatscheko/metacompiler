@@ -7830,6 +7830,99 @@ def s160():
         errs.append(str(e))
     check("dictcellerr", errs == ["__classdictcell__ must be a nonlocal cell, not <class 'int'>"])
 
+# ===== SECTION 161: parenthesized annotated targets; a metaclass namespace's 3.14 keys =====
+# `(a): int = 1` is not a "simple" target (PEP 526): the value binds the name,
+# the annotation is not recorded, and without a value nothing binds - the name
+# stays the global one. The value may be a bare tuple. A metaclass namespace
+# in 3.14 carries __firstlineno__ (the first decorator's line for a decorated
+# class), the annotations behind __annotate_func__ (PEP 649) instead of
+# __annotations__, and __static_attributes__: the sorted names stored as
+# self.NAME by an assignment,
+# an annotated assignment with a value, a for or comprehension target - not
+# an augmented assignment or a del - in functions nested in the body but not
+# past another class. Its cells are of type cell. Values are CPython 3.14's.
+S161g = "glob"
+S161out = []
+
+class S161M(type):
+    def __new__(mcls, name, bases, ns):
+        S161out.append((name, list(ns), ns.get("__firstlineno__"), ns.get("__static_attributes__")))
+        if "__annotate_func__" in ns:
+            af = ns["__annotate_func__"]
+            errs = []
+            try:
+                af(3)
+            except NotImplementedError as e:
+                errs.append(repr(e))
+            S161out.append((list(af(1)), af(1) is not af(1), errs))
+        for k in ("__classcell__", "__classdictcell__"):
+            if k in ns:
+                S161out.append(type(ns[k]).__name__ + ":" + repr(type(ns[k])))
+        return super().__new__(mcls, name, bases, ns)
+
+def S161deco(c):
+    return c
+
+class S161A(metaclass=S161M):
+    pass
+@S161deco
+class S161B(metaclass=S161M):
+    pass
+@S161deco
+def S161f():
+    pass
+class S161C(metaclass=S161M):
+    "doc"
+    y: int = 1
+    (S161p): int = 2
+    def f(self):
+        self.b, *self.a = 1, 2
+        self.__p = 1
+        self.g += 1
+        del self.h
+        self.n: int = 1
+        self.m: int
+        for self.f2 in []:
+            pass
+        [0 for self.cmp in []]
+        print(self.r)
+        class V:
+            def v(s):
+                self.inner = 1
+        return __class__
+
+class S161P:
+    (b): int = 2
+    c: int = 3
+    (d): int
+
+def s161():
+    def bound():
+        (a): int = 1
+        ((a2)): int = 3
+        xs = [0, 0]
+        (xs[1]): int = 4
+        (t): tuple = 1, 2
+        u: tuple = 3, 4,
+        return [a, a2, xs, t, u]
+    def unbound():
+        (S161g): int
+        return S161g
+    check("annparen", bound() == [1, 3, [0, 4], (1, 2), (3, 4)] and unbound() == "glob"
+          and getattr(S161P, "b", None) == 2 and list(S161P.__annotations__) == ["c"] and not hasattr(S161P, "d"))
+    lines = [o[2] for o in S161out if type(o) is tuple and len(o) == 4]
+    check("nsfirstline", lines[1] - lines[0] == 2 and lines[2] - lines[0] == 8 and type(lines[0]) is int
+          and S161C.__firstlineno__ == lines[2])
+    check("nskeys", S161out[0] == ("S161A", ["__module__", "__qualname__", "__firstlineno__", "__static_attributes__"],
+                                   lines[0], ())
+          and S161out[2][1] == ["__module__", "__qualname__", "__firstlineno__", "__doc__", "y", "S161p", "f",
+                                "__annotate_func__", "__static_attributes__", "__classdictcell__", "__classcell__"])
+    check("nsstatic", S161out[2][3] == ("__p", "a", "b", "cmp", "f2", "n") and S161C.__static_attributes__ == S161out[2][3])
+    check("nsannotate", S161out[3] == (["y"], True, ["NotImplementedError()"]) and list(S161C.__annotations__) == ["y"]
+          and "__annotate_func__" in S161C.__dict__
+          and type("T", (), {"__annotate_func__": lambda f: {"k": 1}}).__annotations__ == {"k": 1})
+    check("nscell", S161out[4:] == ["cell:<class 'cell'>", "cell:<class 'cell'>"])
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -7976,5 +8069,6 @@ def main():
     s158() # SECTION-CALL 158
     s159() # SECTION-CALL 159
     s160() # SECTION-CALL 160
+    s161() # SECTION-CALL 161
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

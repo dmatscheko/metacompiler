@@ -537,6 +537,11 @@ func (rt *jsrt) pyTypeNew(name string, basesV, ns, mcs, kw interface{}) *jsObjec
 				if cell, _ := vals.elems[i].(*jsObject); cell == nil || (cell.props["__pydcell"] != true && cell.props["__pyccell"] == nil) {
 					rt.pyRaise("TypeError", "__classdictcell__ must be a nonlocal cell, not <class '"+pyTypeName(rt, vals.elems[i])+"'>")
 				}
+			case "__annotate_func__":
+				// CPython calls it on the first __annotations__ read; here
+				// type.__new__ calls it once, when the class is made.
+				rt.pySetAttr(cls, ks, vals.elems[i])
+				cls.set("__annotations__", rt.callPyValue(vals.elems[i], []interface{}{float64(1)}, jsUndef))
 			default:
 				rt.pySetAttr(cls, ks, vals.elems[i])
 			}

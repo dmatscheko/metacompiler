@@ -431,6 +431,15 @@ class _mec_tp_Protocol(_mec_tp_Generic, metaclass=_mec_tp_ProtocolMeta):
 _mec_tp_Protocol._is_protocol = True
 
 
+# A class namespace's annotations: a class statement's body hands them over
+# behind __annotate_func__ (PEP 649), a type() call may pass __annotations__.
+def _mec_tp_ns_annotations(ns):
+    if "__annotations__" in ns:
+        return ns["__annotations__"]
+    annotate = ns.get("__annotate_func__")
+    return annotate(1) if annotate is not None else {}
+
+
 # class P(NamedTuple): fields from the annotations, defaults from the body,
 # methods copied onto the collections.namedtuple class it becomes. The call
 # form NamedTuple("P", [("x", int)]) is the metaclass's __call__.
@@ -438,7 +447,8 @@ class _mec_tp_NamedTupleMeta(type):
     def __new__(mcls, typename, bases, ns, **kwargs):
         if ns.get("_mec_tp_root"):
             return super().__new__(mcls, typename, bases, ns)
-        fields = list(ns.get("__annotations__", {}))
+        anns = _mec_tp_ns_annotations(ns)
+        fields = list(anns)
         defaults = []
         for f in fields:
             if f in ns:
@@ -448,9 +458,9 @@ class _mec_tp_NamedTupleMeta(type):
                                 + ("s " if len(defaults) > 1 else " ")
                                 + ", ".join([g for g in fields if g in ns and fields.index(g) < fields.index(f)]))
         nt = _mec_tp_collections.namedtuple(typename, fields, defaults=defaults, module=ns.get("__module__"))
-        nt.__annotations__ = dict(ns.get("__annotations__", {}))
+        nt.__annotations__ = dict(anns)
         for key, val in ns.items():
-            if key in ("__module__", "__qualname__", "__annotations__") or key in fields:
+            if key in ("__module__", "__qualname__", "__annotations__", "__annotate_func__") or key in fields:
                 continue
             setattr(nt, key, val)
         return nt
@@ -475,7 +485,7 @@ class _mec_tp_TypedDictMeta(type):
         ann = {}
         for b in bases:
             ann.update(getattr(b, "__annotations__", {}))
-        ann.update(ns.get("__annotations__", {}))
+        ann.update(_mec_tp_ns_annotations(ns))
         cls.__annotations__ = ann
         cls.__total__ = total
         return cls

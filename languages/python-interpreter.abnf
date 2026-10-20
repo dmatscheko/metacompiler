@@ -278,13 +278,15 @@ ParamDefault <~~ push({pdefault: pop()}) ~~>
 Decorated   <~~ push(makeDecorated(takeAll())) ~~>
             = Decorator { SameLevel Decorator } SameLevel ( Def | AsyncDef | Class ) ;
 Decorator   <~~ push({deco: pop()}) ~~>
-            = "@" Expression NL ;
+            = DecoAt Expression NL ;
+// A decorated class's __firstlineno__ is its first decorator's line (sbDecoLine).
+DecoAt      <~~ sbDecoAt(up.pos) ~~> = "@" ;
 
 // class Name[[T, ...]][(bases, ...)]: SUITE. The body is a real suite run in a fresh
 // namespace scope, so plain statements (loops, conditionals) inside a class body work
 // and every name it binds - including its defs - becomes a class attribute.
 Class       <~~ push(makeClass(takeAll())) ~~>
-            = "class" KwEnd Id <~~ push(up.in); sbPush("c", up.in) ~~> [ ClassTParams ] [ ClassBases ] Suite ;
+            = "class" KwEnd Id <~~ push(up.in); sbPush("c", up.in); sbLineAt(up.pos) ~~> [ ClassTParams ] [ ClassBases ] Suite ;
 // A class's PEP 695 type parameters make it subscriptable (makeClass).
 ClassTParams <~~ sbClassDict(sbFrames.length - 2); push({generic: true}) ~~> = SkipBracket ;
 ClassBases  <~~ push({bases: takeAll()}) ~~>
@@ -371,7 +373,15 @@ YieldStmt   <~~ push(exprToStmt(pop())) ~~>
 // name: Type [= value]. The annotation is erased, but the target's NAME is recorded
 // so a class body can answer __annotations__; with a value it is a plain assignment.
 AnnAssign   <~~ push(makeAnnAssign(takeAll())) ~~>
-            = Target ":" AnnType [ "=" ExprList ] ;
+            = AnnParenTgt ":" AnnType [ "=" ExprList ]
+            | Target ":" AnnType [ "=" ExprList ] ;
+// `(a): int = 1` - a parenthesized target is not "simple" (PEP 526): the name is
+// bound by a value but its annotation is not recorded, and without a value the
+// statement binds nothing. The first alternative fails on `(a).b: int`, which
+// the second reads as an ordinary attribute target.
+AnnParenTgt <~~ push({pref: pop()}) ~~>
+            = "(" :whitespace(WhitespaceNL) AnnParenIn ")" :whitespace(Whitespace) ;
+AnnParenIn  = AnnParenTgt | Target ;
 AnnType     <~~ push({atype: stripWs(up.in)}) ~~>
             = DiscardType ;
 
@@ -609,8 +619,8 @@ NotEqSign   = :script(~~
     })()
 ~~) ;
 // obj.attr = ... : an attribute target (common in class methods: self.x = ...).
-TAttr       <~~ push({tattr: true, name: pop().taname, pos: up.pos}) ~~>
-            = "." Id <~~ push({taname: sbMangle(up.in, true)}) ~~> ;
+TAttr       <~~ var ta = pop(); push({tattr: true, name: ta.taname, raw: ta.taraw, pos: up.pos}) ~~>
+            = "." Id <~~ push({taname: sbMangle(up.in, true), taraw: up.in}) ~~> ;
 
 // An expression statement may be a bare TUPLE - `1, 2, 3` on a line of its own is legal
 // Python (and test_grammar checks exactly that), so this takes an expression LIST. Assign
@@ -791,7 +801,7 @@ CompIf      <~~ push({cif: pop()}) ~~>
 // A comprehension is a CHAIN of clauses: one or more `for` clauses, each of which
 // may be followed by any number of `if` clauses ([x for a in xs for x in a if x]).
 CompClause  = CompFor | CompIf ;
-CompFor     <~~ var it = pop(); var ct = pop(); push({cfor: ct, citer: it.cit, cifrom: it.from, cito: it.to}) ~~>
+CompFor     <~~ var it = pop(); var ct = pop(); sbAttrStore(ct.ctgt); push({cfor: ct, citer: it.cit, cifrom: it.from, cito: it.to}) ~~>
             = [ "async" KwEnd ] "for" KwEnd CompTarget "in" KwEnd CompIter ;
 // The iterable with its source span (sbComp).
 CompIter    <~~ var e = pop(); push({cit: e, from: up.start, to: up.pos}) ~~> = OrExpr ;
@@ -1321,6 +1331,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (v.__pyconst !== undefined) { return pyBuiltinTypeObj(v.__pyconst == "Ellipsis" ? "ellipsis" : v.__pyconst + "Type") }
         if (isSlice(v)) { return hostGlobals["slice"] }
         if (v.__pysup === true) { return pyBuiltinTypeObj("super") }
+        // The __class__ and __classdict__ cells a class namespace carries.
+        if (v.__pyccell !== undefined || v.__pydcell === true) { return pyBuiltinTypeObj("cell") }
         return hostGlobals["object"]
     }
     // X | Y over type objects and None is CPython's typing.Union, here
@@ -10767,8 +10779,45 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var outer = sbFrames[sbFrames.length - 1]
             q = outer.qual + (outer.kind == "d" ? ".<locals>." : ".") + name
         }
-        sbFrames.push({names: [], decl: [], kind: kind, qual: q, name: name})
+        sbFrames.push({names: [], decl: [], kind: kind, qual: q, name: name, line: -1, sattrs: []})
+        if (name != "<lambda>") {
+            sbFrames[sbFrames.length - 1].line = sbDecoLine
+            sbDecoLine = -1
+        }
         if (kind == "d" && name != "<lambda>") { sbClassDict(sbFrames.length - 2) }
+    }
+    // A class's __firstlineno__: the line of its first decorator, which DecoAt
+    // records before the def or class it decorates opens its frame, else the
+    // line of its name.
+    var sbDecoLine = -1
+    var sbFirstLine = -1
+    var sbStatic = []
+    function sbDecoAt(pos) {
+        if (sbDecoLine < 0) { sbDecoLine = c.lineOf(pos) }
+    }
+    function sbLineAt(pos) {
+        var f = sbFrames[sbFrames.length - 1]
+        if (f.line < 0) { f.line = c.lineOf(pos) }
+    }
+    // A class's __static_attributes__ (CPython 3.13+): the names a function
+    // nested in the class body, at any depth but not past another class, stores
+    // to as `self.NAME` through an assignment, an annotated assignment with a
+    // value, a for, with or comprehension target - not an augmented assignment
+    // or a del. The name is the one written, unmangled. sbPop hands the closed
+    // class frame's line and sorted names over as sbFirstLine and sbStatic.
+    // Twin of sbAttrStore in python-to-llvm-ir.abnf.
+    function sbAttrStore(t) {
+        if (t == undefined || t == null) { return }
+        if (t.tuple != undefined) {
+            for (var i = 0; i < t.tuple.length; i++) { sbAttrStore(t.tuple[i]) }
+            return
+        }
+        if (t.startgt != undefined) { sbAttrStore(t.startgt); return }
+        if (t.path == undefined || t.path.length != 1 || t.name != "self" || t.path[0].tattr !== true) { return }
+        var j = sbFrames.length - 1
+        if (j < 0 || sbFrames[j].kind == "c") { return }
+        while (j >= 0 && sbFrames[j].kind != "c") { j-- }
+        if (j >= 0) { sbFrames[j].sattrs.push(t.path[0].raw) }
     }
     // Whether the class frame sbPop just closed needs CPython's __classdict__
     // cell: its body holds a def, an annotated assignment, a type alias or a
@@ -10795,6 +10844,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         sbCell = f.cell === true
         sbDictCell = f.dcell === true
+        sbFirstLine = f.line
+        sbStatic = pydirSorted(f.sattrs)
         var out = []
         for (var i = 0; i < f.names.length; i++) {
             var n = f.names[i]
@@ -11805,7 +11856,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var heads = []
         var valT = items[items.length - 1]
         for (var i = 0; i < items.length - 1; i++) { heads.push(items[i].tlist) }
-        for (var s = 0; s < heads.length; s++) { sbTarget(heads[s]) }
+        for (var s = 0; s < heads.length; s++) {
+            sbTarget(heads[s])
+            sbAttrStore(heads[s])
+        }
         return function() {
             var v = anytype // The assigned value may be of any type.
             v = valT()
@@ -12091,6 +12145,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function makeForStmt(items) {
         var tgt = items[0]
         sbTarget(tgt)
+        sbAttrStore(tgt)
         var listT = items[1]
         var bodyT = items[2]
         var elseT = (items.length > 3 && items[3] != undefined && items[3].loopelse != undefined) ? items[3].loopelse : null
@@ -12313,17 +12368,21 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // items = [ref, {aname}, {atype}, valueThunk?]
     function makeAnnAssign(items) {
-        var ref = items[0]
-        var name = (ref.path.length == 0) ? ref.name : null
-        // A bare annotation with no value still makes the name a local in CPython.
-        sbName(name)
-        sbClassDict(sbFrames.length - 1)
+        var ref = annTargetRef(items[0])
+        var simple = items[0].pref == undefined
         var tname = null
         var valT = null
         for (var i = 1; i < items.length; i++) {
             if (typeof items[i] == "function") { valT = items[i] }
             else if (items[i].atype != undefined) { tname = items[i].atype }
         }
+        // A simple annotation with no value still makes the name a local in CPython;
+        // a parenthesized one binds only through its value and is not recorded.
+        var name = (ref.path.length == 0 && (simple || valT != null)) ? ref.name : null
+        sbName(name)
+        if (valT != null) { sbAttrStore(ref) }
+        sbClassDict(sbFrames.length - 1)
+        if (!simple) { name = null }
         return function() {
             // Inside a class body (a recording namespace scope) the annotation is kept
             // so the class can answer __annotations__.
@@ -12335,6 +12394,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             if (valT != null) { assignRef(ref, valT()) }
         }
+    }
+    // The target inside the parentheses of `((a)): int`. Twin of annTargetRef in
+    // python-to-llvm-ir.abnf.
+    function annTargetRef(t) {
+        var r = t
+        while (r.pref != undefined) { r = r.pref }
+        return r
     }
     // assert COND [, MSG]: a false condition aborts with AssertionError.
     function makeAssert(items) {
@@ -12696,6 +12762,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function makeWithItem(items) {
         var target = items.length > 1 ? items[1] : null
         sbTarget(target)
+        sbAttrStore(target)
         return {ctxitem: items[0], target: target}
     }
     // The context-manager protocol: __enter__ before the body, __exit__ after it -
@@ -12752,6 +12819,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var qual = sbQual
         var hasCell = sbCell
         var hasDictCell = sbDictCell
+        var firstLine = sbFirstLine
+        var statics = sbStatic
         sbName(name)
         var baseArgs = null
         var modName = pyCurMod
@@ -12798,12 +12867,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var nd = newDict()
                 dictSet(nd, "__module__", modName)
                 dictSet(nd, "__qualname__", qual)
+                dictSet(nd, "__firstlineno__", firstLine)
                 if (doc != null) { dictSet(nd, "__doc__", doc) }
-                // The body's annotations ride in the namespace, so the
-                // metaclass's type.__new__ gives the class its __annotations__.
-                // Twin of js_pyclass_meta in abnf/jsrt.go and lib/python-rt.metajs.
-                if (hasOwn(ns, "__annots")) { dictSet(nd, "__annotations__", pyNsAnnots(ns)) }
                 for (var nk = 0; nk < ns.__nskeys.length; nk++) { dictSet(nd, ns.__nskeys[nk], ns[ns.__nskeys[nk]]) }
+                // The body's annotations ride in the namespace behind
+                // __annotate_func__ (PEP 649), so the metaclass's type.__new__
+                // gives the class its __annotations__. Twin of js_pyclass_meta in
+                // abnf/jsrt.go and lib/python-rt.metajs.
+                if (hasOwn(ns, "__annots")) { dictSet(nd, "__annotate_func__", pyAnnotateFunc(pyNsAnnots(ns))) }
+                dictSet(nd, "__static_attributes__", pyTup(statics.slice(0)))
                 // type.__new__ fills the __class__ cell from __classcell__
                 // (pyTypeNew), so a method the metaclass calls once the class
                 // exists sees it.
@@ -12888,6 +12960,19 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return out.keys.length > 0 ? out : null
     }
+    // The __annotate_func__ of a class body (PEP 649): annotate(format) answers
+    // a fresh copy of the annotations for VALUE (1) and VALUE_WITH_FAKE_GLOBALS
+    // (2), and raises NotImplementedError for any other format, as the function
+    // CPython compiles does. Twin of pyAnnotateFunc in abnf/jsrt.go and
+    // lib/python-rt.metajs.
+    function pyAnnotateFunc(ann) {
+        return function(format) {
+            if (binOp(">", format, 2) === true) { pyRaise(pyMakeExc("NotImplementedError", [])) }
+            var d = newDict()
+            for (var i = 0; i < ann.keys.length; i++) { dictSet(d, ann.keys[i], ann.vals[i]) }
+            return d
+        }
+    }
     // The annotations a class body recorded (makeAnnAssign), as its __annotations__ dict.
     function pyNsAnnots(ns) {
         var ann = newDict()
@@ -12943,6 +13028,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (key == "__module__") { cls.__module__ = ns.vals[k] }
             else if (key == "__qualname__") { cls.__qual = ns.vals[k] }
             else if (key == "__annotations__") { cls.__annotations__ = ns.vals[k] }
+            else if (key == "__annotate_func__") {
+                // CPython calls it on the first __annotations__ read; here
+                // type.__new__ calls it once, when the class is made.
+                scopePut(cls, key, ns.vals[k])
+                attrs.push(key)
+                cls.__annotations__ = pyCall(ns.vals[k], [1], null)
+            }
             else if (key == "__classcell__") {
                 var cell = ns.vals[k]
                 if (cell === null || typeof cell != "object" || cell.__pyccell !== true) {
