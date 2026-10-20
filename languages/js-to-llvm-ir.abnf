@@ -1422,12 +1422,12 @@ NonOctalDecLit <~~ push(makeConst(parseFloat(up.in))) ~~>
 // prefix, which js_bigint reads too.
 BigIntLit   <~~ push(makeBigInt(up.in)) ~~>
             = ( HexPrefix HexDigit { HexDigit | "_" } | BinPrefix BinDigit { BinDigit | "_" }
-              | OctPrefix OctDigit { OctDigit | "_" } | Digit :whitespace() { Digit | "_" } )
+              | OctPrefix OctDigit { OctDigit | "_" } | Digit :whitespace() NotLegacyNumeric { Digit | "_" } )
               "n" KwEnd :whitespace(Whitespace) ;
 // A decimal with numeric separators (1_000, 3.141_59); requires at least one '_'.
 // Tried before JsDecLit, which would stop at the first '_' and leave it dangling.
 SepNumLit   <~~ push(makeConst(parseFloat(stripSeps(up.in)))) ~~>
-            = Digit :whitespace() { Digit } "_" { Digit | "_" } [ "." Digit { Digit | "_" } ] [ DecExp ] KwEnd :whitespace(Whitespace) ;
+            = Digit :whitespace() NotLegacyNumeric { Digit } "_" { Digit | "_" } [ "." Digit { Digit | "_" } ] [ DecExp ] KwEnd :whitespace(Whitespace) ;
 // The plain decimal. It is spelled out here rather than taken from lib/numbers.abnf
 // because JavaScript has the exponent form, which that DecLit does not: without it
 // '1e3' is the number 1 followed by the variable 'e3', which parses and then means
@@ -2853,14 +2853,17 @@ UseStrictAhead = :script(~~
     })()
 ~~) ;
 
-// Fails when the first digit of a numeric literal was a '0' and another digit follows:
-// that is a LEGACY form ('01', '08'), which LegacyOctLit and NonOctalDecLit handle - and
-// which only they may accept, because only they carry the strict-mode guard. Without this
-// the plain decimal would take '08' straight back in under 'use strict'.
+// Fails when the first digit of a numeric literal was a '0' and another digit or a '_'
+// follows. A digit makes it a LEGACY form ('01', '08'), which LegacyOctLit and
+// NonOctalDecLit handle - and which only they may accept, because only they carry the
+// strict-mode guard; without this the plain decimal would take '08' straight back in
+// under 'use strict'. The separator and BigInt forms carry it too, since no numeric
+// literal may continue a leading '0' with a separator or with more digits: '0_1' and
+// '01n' are syntax errors in node.
 NotLegacyNumeric = :script(~~
     (function() {
         var nxt = c.peek(0)
-        return (c.peek(-1) === 48 && nxt >= 48 && nxt <= 57)
+        return (c.peek(-1) === 48 && ((nxt >= 48 && nxt <= 57) || nxt === 95))
             ? abnf.newToken("\x01legacy-number", 0)
             : undefined
     })()

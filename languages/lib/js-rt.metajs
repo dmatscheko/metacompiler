@@ -2669,6 +2669,32 @@ function jvHas(o, key) {
     return js_has(o, key)
 }
 
+// A static write onto class o: a setter anywhere on the static chain wins over a
+// fresh own slot, the same rule js_jsmset follows for an ordinary object.
+function jvStaticWrite(o, sk, v) {
+    var sv = anytype
+    sv = jvStaticFind(o, sk)
+    if (jvIsAcc(sv)) {
+        jvAccSet(sv, o, v)
+        return undefined
+    }
+    var st = o["__statics"]
+    if (!jvIsObj(st)) { st = js_jsstatics(o) }
+    var had = jvSlotHas(st, sk)
+    st[sk] = v
+    // A runtime `C.zz = 1` creates an ENUMERABLE own property of the class object,
+    // exactly as it does on any other object; a write over an existing one (a static
+    // method, say) keeps its enumerability.
+    if (!had) { jvSfTrack(st, sk) }
+    return undefined
+}
+// Does class o itself (not a superclass) declare a static member sk?
+function jvClassOwnsStatic(o, sk) {
+    var st = o["__statics"]
+    if (!jvIsObj(st)) { return false }
+    return jvSlotHas(st, sk)
+}
+
 // js_jsmset has NO Go twin: it is emitted only under -exe, because the C floor's
 // set_member cannot see the accessor box js_defprop stores. js_set plus "if the
 // slot (or a slot on the __class/__super chain) holds an accessor, call its setter
@@ -2684,20 +2710,16 @@ function js_jsmset(o, key, v) {
     if (jvClsN > 0) {
         var sk = jvStr(key)
         if (jvIsStaticSide(o, sk)) {
-            var sv = anytype
-            sv = jvStaticFind(o, sk)
-            if (jvIsAcc(sv)) {
-                jvAccSet(sv, o, v)
-                return undefined
+            // A class's own `name` and `length` are non-writable, unless the class body
+            // declares a static member of that name. Twin of setMember's static arm in
+            // both *-interpreter.abnf.
+            if (sk == "name" || sk == "length") {
+                if (!jvClassOwnsStatic(o, sk)) {
+                    jvRefused = jvFnRoText(o, sk)
+                    return false
+                }
             }
-            var st = o["__statics"]
-            if (!jvIsObj(st)) { st = js_jsstatics(o) }
-            var had = jvSlotHas(st, sk)
-            st[sk] = v
-            // A runtime `C.zz = 1` creates an ENUMERABLE own property of the class
-            // object, exactly as it does on any other object; a write over an
-            // existing one (a static method, say) keeps its enumerability.
-            if (!had) { jvSfTrack(st, sk) }
+            jvStaticWrite(o, sk, v)
             return undefined
         }
     }
@@ -2733,12 +2755,14 @@ function js_jsmset(o, key, v) {
     // A write onto a FUNCTION goes to the side table: the floor's set_member has no
     // arm for a closure.
     if (jvIsCallable(o)) {
-        // `name` and `length` are NON-WRITABLE: node drops `f.name = "q"` silently in
-        // sloppy code (and raises a TypeError in strict code, which no engine here
-        // does). Dropping it keeps one answer for the read, for hasOwnProperty and for
-        // getOwnPropertyNames.
+        // `name` and `length` are NON-WRITABLE: node drops `f.name = "q"` in sloppy
+        // code and raises a TypeError in strict code. Refusing it keeps one answer for
+        // the read, for hasOwnProperty and for getOwnPropertyNames.
         var wk = jvStr(key)
-        if (wk === "name" || wk === "length") { return undefined }
+        if (wk === "name" || wk === "length") {
+            jvRefused = jvFnRoText(o, wk)
+            return false
+        }
         var fp = jvFnPropsMake(o)
         fp[jvStr(key)] = v
         return undefined
@@ -5051,6 +5075,9 @@ function jvObjText(o) {
     return "#<" + nm + ">"
 }
 function jvRoText(o, key) { return "Cannot assign to read only property '" + jvKeyUnesc(key) + "' of object '" + jvObjText(o) + "'" }
+// V8 names a function in a refused write by its String(f). Twin of jsFnRoText in
+// both *-interpreter.abnf.
+function jvFnRoText(f, key) { return "Cannot assign to read only property '" + key + "' of function '" + jvStr(f) + "'" }
 function jvAddText(key) { return "Cannot add property " + jvKeyUnesc(key) + ", object is not extensible" }
 function jvDelText(o, key) { return "Cannot delete property '" + jvKeyUnesc(key) + "' of " + jvObjText(o) }
 // The TypeError text a write of v to o[key] meets under o's marks, or "".
@@ -5235,7 +5262,20 @@ function jvDefineProp(o, key, desc) {
     s = js_jsmget(desc, "set")
     var isAcc = g !== undefined || s !== undefined
     if (!jvIsObj(o) || jvIsClassDesc(o)) {
-        if (!isAcc) { js_jsmset(o, key, js_jsmget(desc, "value")) }
+        if (isAcc) { return undefined }
+        // Unlike `=`, a definition replaces a class's own `name` or `length`; a
+        // function's stay as they are.
+        var dv = anytype
+        dv = js_jsmget(desc, "value")
+        var dk = jvStr(key)
+        if (jvIsClassDesc(o)) {
+            if (jvIsStaticSide(o, dk)) {
+                jvStaticWrite(o, dk, dv)
+                return undefined
+            }
+        }
+        if (jvIsCallable(o)) { if (dk == "name" || dk == "length") { return undefined } }
+        js_jsmset(o, key, dv)
         return undefined
     }
     var exists = jvSlotHas(o, key)

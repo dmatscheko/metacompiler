@@ -4559,6 +4559,32 @@ function s97(): void {
         [1, 2, 3].fill(0, 0, nul).join() === "1,2,3");
 }
 
+// ===== SECTION 98: a write to a function's name or length =====
+// A function's and a class's own `name` and `length` are non-writable, and TypeScript
+// code is strict, so the write throws node's TypeError. V8 renders the function's
+// source text after "of function", which is only asserted up to there. A static member
+// of that name replaces the class's own property and is writable, and
+// Object.defineProperty may replace a class's own one. Values read off tsc 6.0.3's
+// default output run by node 24.
+function s98(): void {
+    function f98(a: number, b: number): number { return a + b; }
+    class K98 { static w(): void { (K98 as any).length = 5; } }
+    class N98 { static name = "own"; }
+    const err = (f: () => void): string => { try { f(); return "ok"; } catch (e: any) { return e.constructor.name + ": " + e.message; } };
+    const ro = "TypeError: Cannot assign to read only property '";
+    const put = (o: any, k: string, v: any): void => { o[k] = v; };
+    const got = [[f98, "name"], [f98, "length"], [(x: number) => x, "name"], [Math.max, "length"], [K98, "name"],
+        [f98.bind(null), "name"]].map((p: any[]) => err(() => put(p[0], p[1], 1)));
+    check("fn98a", got.every((m: string, i: number) => m.indexOf(ro + (i == 1 || i == 3 ? "length" : "name") + "' of function '") === 0) &&
+        f98.name === "f98" && f98.length === 2 && K98.name === "K98");
+    check("fn98b", err(() => { (f98 as any).name = "z"; }).indexOf(ro + "name' of function '") === 0 &&
+        err(() => { (f98 as any).length += 1; }).indexOf(ro + "length' of function '") === 0 && f98.length === 2);
+    check("fn98c", err(() => K98.w()).indexOf(ro + "length' of function '") === 0 && K98.length === 0 &&
+        err(() => put(N98, "name", "z")) === "ok" && N98.name === "z" && err(() => put(f98, "q", 1)) === "ok" && (f98 as any).q === 1);
+    Object.defineProperty(K98, "length", { value: 7 });
+    check("fn98d", K98.length === 7);
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -4659,6 +4685,7 @@ function main(): number {
     s95(); // SECTION-CALL 95
     s96(); // SECTION-CALL 96
     s97(); // SECTION-CALL 97
+    s98(); // SECTION-CALL 98
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

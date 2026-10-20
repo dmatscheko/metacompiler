@@ -1366,14 +1366,14 @@ BigIntLit   <~~ push(makeBigInt(up.in)) ~~>
             = ( BigHexPrefix HexDigit { HexDigit | "_" }
               | BigBinPrefix BinDigit { BinDigit | "_" }
               | BigOctPrefix OctDigit { OctDigit | "_" }
-              | Digit :whitespace() { Digit | "_" } )
+              | Digit :whitespace() NotLegacyNumeric { Digit | "_" } )
               "n" KwEnd :whitespace(Whitespace) ;
 BigHexPrefix = ( "0x" | "0X" ) :whitespace() ;
 BigBinPrefix = ( "0b" | "0B" ) :whitespace() ;
 BigOctPrefix = ( "0o" | "0O" ) :whitespace() ;
 // A decimal with numeric separators (1_000, 3.141_59); requires at least one '_'.
 SepNumLit   <~~ push(makeConst(parseFloat(stripSeps(up.in)))) ~~>
-            = Digit :whitespace() { Digit } "_" { Digit | "_" } [ "." Digit { Digit | "_" } ] KwEnd :whitespace(Whitespace) ;
+            = Digit :whitespace() NotLegacyNumeric { Digit } "_" { Digit | "_" } [ "." Digit { Digit | "_" } ] KwEnd :whitespace(Whitespace) ;
 // The plain decimal. It is spelled out here rather than taken from lib/numbers.abnf
 // because JavaScript has the exponent form, which that DecLit does not: without it
 // '1e3' is the number 1 followed by the variable 'e3', which parses and then means
@@ -2909,14 +2909,17 @@ UseStrictAhead = :script(~~
     })()
 ~~) ;
 
-// Fails when the first digit of a numeric literal was a '0' and another digit follows:
-// that is a LEGACY form ('01', '08'), which LegacyOctLit and NonOctalDecLit handle - and
-// which only they may accept, because only they carry the strict-mode guard. Without this
-// the plain decimal would take '08' straight back in under 'use strict'.
+// Fails when the first digit of a numeric literal was a '0' and another digit or a '_'
+// follows. A digit makes it a LEGACY form ('01', '08'), which LegacyOctLit and
+// NonOctalDecLit handle - and which only they may accept, because only they carry the
+// strict-mode guard; without this the plain decimal would take '08' straight back in
+// under 'use strict'. The separator and BigInt forms carry it too, since no numeric
+// literal may continue a leading '0' with a separator or with more digits: '0_1' and
+// '01n' are syntax errors in node.
 NotLegacyNumeric = :script(~~
     (function() {
         var nxt = c.peek(0)
-        return (c.peek(-1) === 48 && nxt >= 48 && nxt <= 57)
+        return (c.peek(-1) === 48 && ((nxt >= 48 && nxt <= 57) || nxt === 95))
             ? abnf.newToken("\x01legacy-number", 0)
             : undefined
     })()
@@ -4862,7 +4865,14 @@ NotFuncHead = :script(~~
         var s = anytype
         s = getMember(desc, "set")
         if (typeof o != "object" || Array.isArray(o) || isClassDesc(o)) {
-            if (g === undefined && s === undefined) { setMember(o, key, getMember(desc, "value")) }
+            // Unlike `=`, a definition replaces a class's own `name` or `length`; a
+            // function's stay as they are.
+            if (g === undefined && s === undefined) {
+                var dv = anytype // The defined value.
+                dv = getMember(desc, "value")
+                if (isStaticSide(o, key)) { staticSideWrite(o, key, dv) }
+                else if (typeof o != "function" || (key !== "name" && key !== "length")) { setMember(o, key, dv) }
+            }
             return
         }
         var isAcc = g !== undefined || s !== undefined
@@ -5000,6 +5010,8 @@ NotFuncHead = :script(~~
         return "#<" + (typeof nm == "string" && nm != "" ? nm : "Object") + ">"
     }
     function jsRoText(o, key) { return "Cannot assign to read only property '" + jsStr(jsKeyUnesc(key)) + "' of object '" + jsObjText(o) + "'" }
+    // V8 names a function in a refused write by its String(f).
+    function jsFnRoText(f, key) { return "Cannot assign to read only property '" + key + "' of function '" + jsStr(f) + "'" }
     function jsAddText(key) { return "Cannot add property " + jsStr(jsKeyUnesc(key)) + ", object is not extensible" }
     function jsDelText(o, key) { return "Cannot delete property '" + jsStr(jsKeyUnesc(key)) + "' of " + jsObjText(o) }
     // The TypeError text a write of v to o[k] meets under o's marks, or "".
@@ -6285,6 +6297,14 @@ NotFuncHead = :script(~~
             trackKey(o.__statics, k)
         }
     }
+    // Does the class itself (not a superclass) declare a static member k?
+    function classOwnsStatic(o, k) {
+        var t = o.__statics
+        if (t == undefined) { return false }
+        if (hasOwn(t, k)) { return true }
+        if (!hasOwn(t, "__acc")) { return false }
+        return hasOwn(t["__acc"], "get:" + k) || hasOwn(t["__acc"], "set:" + k)
+    }
     // A static table, with the enumerable-key list makeClassValue gives the ones it
     // builds. Out of line because MetaJS is typed and the literal needs its slot.
     function newStaticsTable() {
@@ -6639,8 +6659,7 @@ NotFuncHead = :script(~~
     // What is deliberately NOT modelled, and cannot be without a prototype chain:
     // `arguments`, `caller` and `prototype`, the other three own names node reports on
     // a function declaration. `name` and `length` are non-writable in node, which IS
-    // modelled - setMember drops a write to either - but a write in STRICT mode raises
-    // a TypeError there and is silently dropped here.
+    // modelled: setMember refuses a write to either (jsFnRoText).
     // Twins: fnMeta* in typescript-interpreter.abnf, jsvFnMeta in
     // abnf/jsrtjsprint.go, js_jsfnmeta in languages/lib/runtime.c.
     function fnMetaPut(f, nm, ln) {
@@ -6817,7 +6836,13 @@ NotFuncHead = :script(~~
     function setMember(o, k, v) {
         // A member write on a class DESCRIPTOR is a write to its static namespace, for
         // the same reason the read is.
-        if (isStaticSide(o, k)) { staticSideWrite(o, k, v); return }
+        if (isStaticSide(o, k)) {
+            // A class's own `name` and `length` are non-writable, unless the class body
+            // declares a static member of that name, which replaces them.
+            if ((k == "name" || k == "length") && !classOwnsStatic(o, k)) { jsRefuse(jsFnRoText(o, k)); return }
+            staticSideWrite(o, k, v)
+            return
+        }
         if (o != undefined && o != null && typeof o == "object" && !Array.isArray(o)) {
             var s = findAccessor(o, "set", k)
             if (s != undefined) { callWithThis(s, o, [v]); return }
@@ -6825,11 +6850,10 @@ NotFuncHead = :script(~~
         // A write onto a FUNCTION goes to the side table: the host's function value
         // cannot carry an expando under -frozen.
         if (typeof o == "function") {
-            // `name` and `length` are non-writable: node drops `f.name = "q"` silently
-            // in sloppy code (and raises a TypeError in strict code, which this engine
-            // does not - see fnMetaPut's head comment). Dropping it here is what keeps
+            // `name` and `length` are non-writable: node drops `f.name = "q"` in sloppy
+            // code and raises a TypeError in strict code. Dropping it here is what keeps
             // one answer for the read, the key list and getOwnPropertyNames.
-            if (k === "name" || k === "length") { return }
+            if (k === "name" || k === "length") { jsRefuse(jsFnRoText(o, k)); return }
             var fp = fnPropsMake(o)
             if (jsAttrN > 0) {
                 var fr = jsWriteRefusal(fp, k, v)

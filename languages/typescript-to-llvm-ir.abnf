@@ -1533,21 +1533,21 @@ OctDigit    = "0"..."7" ;
 // See the twin of this comment in js-to-llvm-ir.abnf.
 BigIntLit   <~~ push(makeBigInt(up.in)) ~~>
             = ( HexPrefix HexDigit { HexDigit | "_" } | BinPrefix BinDigit { BinDigit | "_" }
-              | OctPrefix OctDigit { OctDigit | "_" } | Digit :whitespace() { Digit | "_" } )
+              | OctPrefix OctDigit { OctDigit | "_" } | Digit :whitespace() NotLegacyNumeric { Digit | "_" } )
               "n" KwEnd :whitespace(Whitespace) ;
 // A decimal with numeric separators (1_000, 3.141_59, 1e1_0); requires at least one '_'.
 // Tried before JsDecLit, which would stop at the first '_' and leave it dangling. The
 // separator may sit in the EXPONENT alone, which the first alternative cannot reach - it
 // demands a '_' before the '.', so the second one carries that shape.
 SepNumLit   <~~ push(makeConst(parseFloat(stripSeps(up.in)))) ~~>
-            = Digit :whitespace() { Digit } "_" { Digit | "_" } [ "." Digit { Digit | "_" } ] [ SepDecExp ] KwEnd :whitespace(Whitespace)
-            | Digit :whitespace() { Digit } [ "." Digit { Digit } ] SepExpOnly KwEnd :whitespace(Whitespace) ;
+            = Digit :whitespace() NotLegacyNumeric { Digit } "_" { Digit | "_" } [ "." Digit { Digit | "_" } ] [ SepDecExp ] KwEnd :whitespace(Whitespace)
+            | Digit :whitespace() NotLegacyNumeric { Digit } [ "." Digit { Digit } ] SepExpOnly KwEnd :whitespace(Whitespace) ;
 SepExpOnly  = ( "e" | "E" ) [ "+" | "-" ] Digit { Digit } "_" { Digit | "_" } ;
 // The exponent takes separators too ('1e1_0'), which the plain DecExp below must not.
 SepDecExp   = ( "e" | "E" ) [ "+" | "-" ] Digit { Digit | "_" } ;
 // See the twin of this comment in js-to-llvm-ir.abnf.
 JsDecLit    <~~ push(makeConst(parseFloat(up.in))) ~~>
-            = Digit :whitespace() { Digit } [ "." { Digit } ] [ DecExp ] KwEnd :whitespace(Whitespace) ;
+            = Digit :whitespace() NotLegacyNumeric { Digit } [ "." { Digit } ] [ DecExp ] KwEnd :whitespace(Whitespace) ;
 // The leading-dot form '.5'. It needs at least one digit behind the dot, which is what
 // keeps it out of the way of a member access: the '.' of 'a.b' is never a number.
 DotDecLit   <~~ push(makeConst(parseFloat("0" + up.in))) ~~>
@@ -1846,6 +1846,18 @@ IdEscape    = "\\" :whitespace() JsUniEsc ;
 // The keyword boundary: a keyword may not be glued to an identifier character. It is the
 // JavaScript identifier set, so it also stops at a non-ASCII letter and at the backslash
 // of a \u escape ('var\u0061' is one identifier, not 'var' plus a name).
+// TypeScript has no legacy numeric literal: a leading '0' followed by a digit is TS1121
+// ('010', octal) or TS1489 ('08', a decimal with leading zeros), and by a '_' TS6188, in
+// every numeric form. See the twin of this comment in js-to-llvm-ir.abnf.
+NotLegacyNumeric = :script(~~
+    (function() {
+        var nxt = c.peek(0)
+        return (c.peek(-1) === 48 && ((nxt >= 48 && nxt <= 57) || nxt === 95))
+            ? abnf.newToken("\x01legacy-number", 0)
+            : undefined
+    })()
+~~) ;
+
 KwEnd = :script(~~
     (function() {
         var cc = c.peek(0)

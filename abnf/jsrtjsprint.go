@@ -640,8 +640,20 @@ func (rt *jsrt) jsvDefineProp(v interface{}, key string, desc interface{}) {
 	g, s := rt.jsvGetKey(desc, "get"), rt.jsvGetKey(desc, "set")
 	o, ok := v.(*jsObject)
 	if !ok || isClassDesc(o) {
-		if isUndefOrNull(g) && isUndefOrNull(s) {
-			rt.setMember(v, key, rt.jsvGetKey(desc, "value"))
+		if !isUndefOrNull(g) || !isUndefOrNull(s) {
+			return
+		}
+		// Unlike `=`, a definition replaces a class's own `name` or `length`; a
+		// function's stay as they are.
+		dv := rt.jsvGetKey(desc, "value")
+		if cls, isStatic := jsvIsStaticSide(v, key); isStatic {
+			rt.jsvStaticWrite(cls, key, dv)
+		} else if p := jsvFnPropsMake(v); p != nil {
+			if key != "name" && key != "length" {
+				p.set(key, dv)
+			}
+		} else {
+			rt.setMember(v, key, dv)
 		}
 		return
 	}
@@ -878,6 +890,47 @@ func (rt *jsrt) jsvObjText(v interface{}) string {
 
 func (rt *jsrt) jsvRoText(o interface{}, key string) string {
 	return "Cannot assign to read only property '" + jsvKeyUnesc(key) + "' of object '" + rt.jsvObjText(o) + "'"
+}
+
+// jsvFnRoText is V8's text for a refused write to a function's `name` or `length`,
+// which names the function by its String(f). Twin of jsFnRoText in both
+// *-interpreter.abnf.
+func (rt *jsrt) jsvFnRoText(f interface{}, key string) string {
+	return "Cannot assign to read only property '" + key + "' of function '" + rt.jsvString(f) + "'"
+}
+
+// jsvOwnsStatic answers whether class cls itself (not a superclass) declares a static
+// member name.
+func jsvOwnsStatic(cls *jsObject, name string) bool {
+	t := jsStaticsOf(cls, false)
+	if t == nil {
+		return false
+	}
+	_, found := t.props[name]
+	return found
+}
+
+// jsvStaticWrite is a write onto class cls's static namespace: a setter anywhere on
+// the static chain wins over a fresh own slot, the same rule js_set follows for an
+// ordinary object. Twin of jvStaticWrite in languages/lib/js-rt.metajs.
+func (rt *jsrt) jsvStaticWrite(cls *jsObject, name string, v interface{}) {
+	if sv, _, found := jsStaticsFind(cls, name); found {
+		if acc, isAcc := sv.(*jsAccessor); isAcc {
+			if acc.set != nil {
+				rt.call(acc.set, cls, []interface{}{v})
+			}
+			return
+		}
+	}
+	t := jsStaticsOf(cls, true)
+	_, had := t.props[name]
+	t.set(name, v)
+	// A runtime `C.zz = 1` creates an ENUMERABLE own property of the class object,
+	// exactly as it does on any other object; a write over an existing one (a static
+	// method, say) keeps its enumerability.
+	if !had {
+		jsvSfTrack(t, name)
+	}
 }
 
 func jsvAddText(key string) string {
@@ -5333,34 +5386,25 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	m["js_jsmset"] = func(a []uint64) uint64 {
 		if cls, isStatic := jsvIsStaticSide(u(a[0]), rt.toString(u(a[1]))); isStatic {
 			name := rt.toString(u(a[1]))
-			// A setter anywhere on the static chain wins over a fresh own slot,
-			// the same rule js_set follows for an ordinary object.
-			if v, _, found := jsStaticsFind(cls, name); found {
-				if acc, isAcc := v.(*jsAccessor); isAcc {
-					if acc.set != nil {
-						rt.call(acc.set, cls, []interface{}{u(a[2])})
-					}
-					return 0
+			// A class's own `name` and `length` are non-writable, unless the class
+			// body declares a static member of that name. Twin of setMember's static
+			// arm in both *-interpreter.abnf.
+			if name == "name" || name == "length" {
+				if !jsvOwnsStatic(cls, name) {
+					jsvRefused = rt.jsvFnRoText(cls, name)
+					return boolH(false)
 				}
 			}
-			t := jsStaticsOf(cls, true)
-			_, had := t.props[name]
-			t.set(name, u(a[2]))
-			// A runtime `C.zz = 1` creates an ENUMERABLE own property of the class
-			// object, exactly as it does on any other object; a write over an
-			// existing one (a static method, say) keeps its enumerability.
-			if !had {
-				jsvSfTrack(t, name)
-			}
+			rt.jsvStaticWrite(cls, name, u(a[2]))
 			return 0
 		}
-		// `name` and `length` are NON-WRITABLE: node drops `f.name = "q"` silently in
-		// sloppy code (and raises a TypeError in strict code, which no engine here
-		// does). Dropping it keeps one answer for the read, for hasOwnProperty and for
-		// getOwnPropertyNames.
+		// `name` and `length` are NON-WRITABLE: node drops `f.name = "q"` in sloppy
+		// code and raises a TypeError in strict code. Refusing it keeps one answer for
+		// the read, for hasOwnProperty and for getOwnPropertyNames.
 		if jsvIsFnLike(u(a[0])) {
 			if n := rt.toString(u(a[1])); n == "name" || n == "length" {
-				return 0
+				jsvRefused = rt.jsvFnRoText(u(a[0]), n)
+				return boolH(false)
 			}
 		}
 		// A write onto a FUNCTION goes to the side table: neither *jsClosure nor

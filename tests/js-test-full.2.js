@@ -1,11 +1,11 @@
-// Full-syntax test: JavaScript - part 2 of 4, sections 36-43 and 101-103.
+// Full-syntax test: JavaScript - part 2 of 4, sections 36-43 and 101-104.
 //
 // THE JS RATCHET IS FOUR FILES: as one file its -frozen interpreter leg ran into
 // ./test.sh --full's time brake (peak memory grew superlinearly with the file), and
 // the fourth is a Module, the one goal symbol in which 'export' may stand.
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
-//   tests/js-test-full.2.js   sections 36-43 and 101-103, engine agreement, generators,
+//   tests/js-test-full.2.js   sections 36-43 and 101-104, engine agreement, generators,
 //                             Error, Math, builtin constructors, integrity levels
 //   tests/js-test-full.3.js   sections 44-56, 58-71 and 73-100, the call/class/
 //                             private-name model, iterators, the arguments object and
@@ -1269,6 +1269,31 @@ function s103() {
         [1, 2, 3].fill(0, 0, null).join() === "1,2,3")
 }
 
+// ===== SECTION 104: a write to a function's name or length =====
+// A function's and a class's own `name` and `length` are non-writable: sloppy code
+// drops the write, strict code (and a class body, which is always strict) throws
+// node's TypeError. V8 renders the function's source text after "of function", which
+// is only asserted up to there. A static member of that name replaces the class's own
+// property and is writable, and Object.defineProperty may replace a class's own one.
+function s104() {
+    function f104(a, b) { return a + b }
+    class K104 { static w() { K104.length = 5 } }
+    class N104 { static name = "own" }
+    const err = (f) => { try { f(); return "ok" } catch (e) { return e.constructor.name + ": " + e.message } }
+    const ro = "TypeError: Cannot assign to read only property '"
+    const put = (o, k, v) => { "use strict"; o[k] = v }
+    check("fn104a", err(() => { f104.name = "z"; f104.length = 9 }) === "ok" && f104.name === "f104" && f104.length === 2 &&
+        err(() => { K104.name = "z" }) === "ok" && K104.name === "K104")
+    const got = [[f104, "name"], [f104, "length"], [(x) => x, "name"], [Math.max, "length"], [K104, "name"],
+        [f104.bind(null), "name"]].map((p) => err(() => put(p[0], p[1], 1)))
+    check("fn104b", got.every((m, i) => m.indexOf(ro + (i == 1 || i == 3 ? "length" : "name") + "' of function '") === 0) &&
+        f104.name === "f104" && f104.length === 2 && K104.name === "K104")
+    check("fn104c", err(() => K104.w()).indexOf(ro + "length' of function '") === 0 && K104.length === 0 &&
+        err(() => put(N104, "name", "z")) === "ok" && N104.name === "z" && err(() => put(f104, "q", 1)) === "ok" && f104.q === 1)
+    Object.defineProperty(K104, "length", { value: 7 })
+    check("fn104d", K104.length === 7)
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1283,6 +1308,7 @@ function main() {
     s101() // SECTION-CALL 101
     s102() // SECTION-CALL 102
     s103() // SECTION-CALL 103
+    s104() // SECTION-CALL 104
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

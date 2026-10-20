@@ -1443,8 +1443,14 @@ JsCpPlane16 = "1" "0" HexDigit HexDigit HexDigit HexDigit ;
 JsCpUpTo5   = HexNonZero [ HexDigit ] [ HexDigit ] [ HexDigit ] [ HexDigit ] ;
 HexNonZero  = "1"..."9" | "a"..."f" | "A"..."F" ;
 
-// See the twin of this comment in js-interpreter.abnf.
-NumberLit   = HexLit | BinLit | OctLit | LegacyOctLit | BigIntLit | SepNumLit | JsDecLit | DotDecLit ;
+// The numeric literals: hex, binary, octal, BigInt, a decimal with numeric separators,
+// the plain decimal and the leading-dot form. Hex/binary/octal must be tried before the
+// decimal, otherwise '0x1A' would stop after the '0'; BigInt before the decimal so its
+// 'n' suffix is not orphaned. Every one of them ends in KwEnd: a literal may not be glued
+// to an identifier char, so '0b1a', '3x' and '0o9' are syntax errors instead of a
+// literal followed by a second, semicolon-less statement. A leading '0' followed by a
+// digit or a '_' is refused by NotLegacyNumeric.
+NumberLit   = HexLit | BinLit | OctLit | BigIntLit | SepNumLit | JsDecLit | DotDecLit ;
 
 // Hex must be tried before decimal, otherwise '0x1A' would stop after the '0'.
 HexLit      <~~ push(makeConst(radixVal(up.in, 2, 16))) ~~>
@@ -1456,17 +1462,12 @@ BinDigit    = "0"..."1" ;
 OctLit      <~~ push(makeConst(radixVal(up.in, 2, 8))) ~~>
             = ( "0o" | "0O" ) :whitespace() OctDigit { OctDigit | "_" } KwEnd :whitespace(Whitespace) ;
 OctDigit    = "0"..."7" ;
-// The Annex B legacy octal literal: a leading '0' directly followed by octal digits, as
-// in '01' or '0777'. It needs at least two digits, so a bare '0' and '0.5' still reach
-// JsDecLit, and it is tried before that one, which would otherwise stop after the '0'.
-LegacyOctLit <~~ push(makeConst(radixVal(up.in, 1, 8))) ~~>
-            = "0" :whitespace() OctDigit { OctDigit } KwEnd :whitespace(Whitespace) ;
 // See the twin of this comment in js-interpreter.abnf.
 BigIntLit   <~~ push(makeBigInt(up.in)) ~~>
             = ( BigHexPrefix HexDigit { HexDigit | "_" }
               | BigBinPrefix BinDigit { BinDigit | "_" }
               | BigOctPrefix OctDigit { OctDigit | "_" }
-              | Digit :whitespace() { Digit | "_" } )
+              | Digit :whitespace() NotLegacyNumeric { Digit | "_" } )
               "n" KwEnd :whitespace(Whitespace) ;
 BigHexPrefix = ( "0x" | "0X" ) :whitespace() ;
 BigBinPrefix = ( "0b" | "0B" ) :whitespace() ;
@@ -1476,12 +1477,12 @@ BigOctPrefix = ( "0o" | "0O" ) :whitespace() ;
 // JsDecLit rather than requiring a '_': one production then covers both, and the plain
 // decimal below is only still there for the shapes this one does not reach.
 SepNumLit   <~~ push(makeConst(parseFloat(stripSeps(up.in)))) ~~>
-            = Digit :whitespace() { Digit | "_" } [ "." { Digit | "_" } ] [ SepDecExp ] KwEnd :whitespace(Whitespace) ;
+            = Digit :whitespace() NotLegacyNumeric { Digit | "_" } [ "." { Digit | "_" } ] [ SepDecExp ] KwEnd :whitespace(Whitespace) ;
 // The exponent takes separators too ('1e1_0'), which the plain DecExp below must not.
 SepDecExp   = ( "e" | "E" ) [ "+" | "-" ] Digit { Digit | "_" } ;
 // See the twin of this comment in js-interpreter.abnf.
 JsDecLit    <~~ push(makeConst(parseFloat(up.in))) ~~>
-            = Digit :whitespace() { Digit } [ "." { Digit } ] [ DecExp ] KwEnd :whitespace(Whitespace) ;
+            = Digit :whitespace() NotLegacyNumeric { Digit } [ "." { Digit } ] [ DecExp ] KwEnd :whitespace(Whitespace) ;
 // The leading-dot decimal ('.5', '.5e3'). It has no integer part at all, so it cannot be
 // folded into JsDecLit, whose first token is a Digit. parseFloat(".5") is 0.5 in both
 // engines, so the text goes through unchanged.
@@ -1756,6 +1757,18 @@ IdPart      = ( IdEscape IdCpPartOk ) | "a"..."z" | "A"..."Z" | "0"..."9" | "_" 
 IdEscape    = "\\" :whitespace() JsUniEsc ;
 
 // See the twin of this comment in js-interpreter.abnf.
+// TypeScript has no legacy numeric literal: a leading '0' followed by a digit is TS1121
+// ('010', octal) or TS1489 ('08', a decimal with leading zeros), and by a '_' TS6188, in
+// every numeric form. See the twin of this comment in js-interpreter.abnf.
+NotLegacyNumeric = :script(~~
+    (function() {
+        var nxt = c.peek(0)
+        return (c.peek(-1) === 48 && ((nxt >= 48 && nxt <= 57) || nxt === 95))
+            ? abnf.newToken("\x01legacy-number", 0)
+            : undefined
+    })()
+~~) ;
+
 KwEnd = :script(~~
     (function() {
         var cc = c.peek(0)
@@ -3637,7 +3650,13 @@ NotFuncHead = :script(~~
         var s = anytype
         s = getMember(desc, "set")
         if (typeof o != "object" || Array.isArray(o) || isClassDesc(o)) {
-            if (g === undefined && s === undefined) { setMember(o, key, getMember(desc, "value")) }
+            // See the twin of this comment in js-interpreter.abnf.
+            if (g === undefined && s === undefined) {
+                var dv = anytype // The defined value.
+                dv = getMember(desc, "value")
+                if (isStaticSide(o, key)) { staticSideWrite(o, key, dv) }
+                else if (typeof o != "function" || (key !== "name" && key !== "length")) { setMember(o, key, dv) }
+            }
             return
         }
         var isAcc = g !== undefined || s !== undefined
@@ -3762,6 +3781,8 @@ NotFuncHead = :script(~~
         return "#<" + (typeof nm == "string" && nm != "" ? nm : "Object") + ">"
     }
     function jsRoText(o, key) { return "Cannot assign to read only property '" + jsStr(jsKeyUnesc(key)) + "' of object '" + jsObjText(o) + "'" }
+    // See the twin of this comment in js-interpreter.abnf.
+    function jsFnRoText(f, key) { return "Cannot assign to read only property '" + key + "' of function '" + jsStr(f) + "'" }
     function jsAddText(key) { return "Cannot add property " + jsStr(jsKeyUnesc(key)) + ", object is not extensible" }
     function jsDelText(o, key) { return "Cannot delete property '" + jsStr(jsKeyUnesc(key)) + "' of " + jsObjText(o) }
     // The TypeError text a write of v to o[k] meets under o's marks, or "".
@@ -4918,6 +4939,14 @@ NotFuncHead = :script(~~
             trackKey(o.__statics, k)
         }
     }
+    // See the twin of this comment in js-interpreter.abnf.
+    function classOwnsStatic(o, k) {
+        var t = o.__statics
+        if (t == undefined) { return false }
+        if (hasOwn(t, k)) { return true }
+        if (!hasOwn(t, "__acc")) { return false }
+        return hasOwn(t["__acc"], "get:" + k) || hasOwn(t["__acc"], "set:" + k)
+    }
     // A static table, with the enumerable-key list makeClassValue gives the ones it
     // builds. Out of line because MetaJS is typed and the literal needs its slot.
     function newStaticsTable() {
@@ -5344,7 +5373,12 @@ NotFuncHead = :script(~~
     function setMember(o, k, v) {
         // A member write on a class DESCRIPTOR is a write to its static namespace, for
         // the same reason the read is.
-        if (isStaticSide(o, k)) { staticSideWrite(o, k, v); return }
+        if (isStaticSide(o, k)) {
+            // See the twin of this comment in js-interpreter.abnf.
+            if ((k == "name" || k == "length") && !classOwnsStatic(o, k)) { jsRefuse(jsFnRoText(o, k)); return }
+            staticSideWrite(o, k, v)
+            return
+        }
         if (o != undefined && o != null && typeof o == "object" && !Array.isArray(o)) {
             var s = findAccessor(o, "set", k)
             if (s != undefined) { callWithThis(s, o, [v]); return }
@@ -5353,7 +5387,7 @@ NotFuncHead = :script(~~
         // cannot carry an expando under -frozen.
         if (typeof o == "function") {
             // See the twin of this comment in js-interpreter.abnf.
-            if (k === "name" || k === "length") { return }
+            if (k === "name" || k === "length") { jsRefuse(jsFnRoText(o, k)); return }
             var fp = fnPropsMake(o)
             if (jsAttrN > 0) {
                 var fr = jsWriteRefusal(fp, k, v)

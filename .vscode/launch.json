@@ -2620,6 +2620,42 @@
             "program": "${workspaceFolder}","args": ["languages/typescript-to-llvm-ir.abnf", "tests/typescript-abort-test.ts", "-q", "-exe", "tests/typescript-abort.out"]
         },
         {
+            "name": "TypeScript interpreter legacy octal literal SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/typescript-interpreter.abnf", "tests/typescript-fail-test-legacy-octal.ts", "-q"]
+        },
+        {
+            "name": "TypeScript compiler legacy octal literal SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/typescript-to-llvm-ir.abnf", "tests/typescript-fail-test-legacy-octal.ts", "-q"]
+        },
+        {
+            "name": "JavaScript interpreter separator after a leading 0 SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/js-interpreter.abnf", "tests/js-fail-test-leading-zero-sep.js", "-q"]
+        },
+        {
+            "name": "JavaScript compiler separator after a leading 0 SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/js-to-llvm-ir.abnf", "tests/js-fail-test-leading-zero-sep.js", "-q"]
+        },
+        {
+            "name": "JavaScript interpreter BigInt with a leading 0 SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/js-interpreter.abnf", "tests/js-fail-test-leading-zero-bigint.js", "-q"]
+        },
+        {
+            "name": "JavaScript compiler BigInt with a leading 0 SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/js-to-llvm-ir.abnf", "tests/js-fail-test-leading-zero-bigint.js", "-q"]
+        },
+        {
             "name": "Ruby abort probe, raise (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
