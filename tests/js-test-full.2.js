@@ -1,11 +1,11 @@
-// Full-syntax test: JavaScript - part 2 of 4, sections 36-43 and 101-106.
+// Full-syntax test: JavaScript - part 2 of 4, sections 36-43 and 101-107.
 //
 // THE JS RATCHET IS FOUR FILES: as one file its -frozen interpreter leg ran into
 // ./test.sh --full's time brake (peak memory grew superlinearly with the file), and
 // the fourth is a Module, the one goal symbol in which 'export' may stand.
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
-//   tests/js-test-full.2.js   sections 36-43 and 101-106, engine agreement, generators,
+//   tests/js-test-full.2.js   sections 36-43 and 101-107, engine agreement, generators,
 //                             Error, Math, builtin constructors, integrity levels
 //   tests/js-test-full.3.js   sections 44-56, 58-71 and 73-100, the call/class/
 //                             private-name model, iterators, the arguments object and
@@ -1337,6 +1337,43 @@ function s106() {
     check("fc106e", g106.length === 2 && g106.hasOwnProperty("length") && h106.name === "h2" && Object.keys(h106).length === 0)
 }
 
+// ===== SECTION 107: a function's source text =====
+// String(f), f.toString(), `${f}`, "" + f and f == "..." all read the source text of
+// f's definition as written, comments and line breaks included (ES2023 20.2.3.5): a
+// method's starts at its key (a `static` is left out), a class's is the whole class,
+// and a builtin or a bound function is V8's native code. Inside the TypeError of a
+// refused write, a text past 128 units keeps its first 111 and its last 2.
+class P107 { static make() { return new this() } }
+class K107 extends P107 {
+    async am() { await 1 }
+    *gm() { yield 1 }
+    static sm(q) { return q }
+    ["comp" + "uted"]() { }
+}
+function s107() {
+    function f107(a, b = 2) {
+        return a + b // a comment, é
+    }
+    const ar = (x) => x * 2
+    const one = x => x
+    const o = { m(a) { return a }, async *agm() { }, ["c" + "k"]() { } }
+    const err = (f) => { try { f(); return "ok" } catch (e) { return e.message } }
+    check("fs107a", String(f107) === "function f107(a, b = 2) {\n        return a + b // a comment, é\n    }" &&
+        f107.toString() === String(f107) && String(ar) === "(x) => x * 2" && "" + one === "x => x" &&
+        `${one}` === "x => x" && one == "x => x" && [one, ar].join("|") === "x => x|(x) => x * 2")
+    check("fs107b", String(P107) === "class P107 { static make() { return new this() } }" &&
+        String(P107.make) === "make() { return new this() }" && String(K107.sm) === "sm(q) { return q }" &&
+        String(new K107().am) === "async am() { await 1 }" && String(new K107().gm) === "*gm() { yield 1 }" &&
+        String(new K107().computed) === '["comp" + "uted"]() { }' && String(K107).indexOf("class K107 extends P107 {\n") === 0)
+    check("fs107c", String(o.m) === "m(a) { return a }" && String(o.agm) === "async *agm() { }" &&
+        String(o.ck) === '["c" + "k"]() { }' && String(class { }) === "class { }")
+    check("fs107d", String(Math.max) === "function max() { [native code] }" &&
+        String(one.bind(null)) === "function () { [native code] }" && String(Error) === "function Error() { [native code] }")
+    check("fs107e", err(() => { "use strict"; one.name = "z" }) === "Cannot assign to read only property 'name' of function 'x => x'" &&
+        err(() => { "use strict"; K107.name = "z" }) === "Cannot assign to read only property 'name' of function '" +
+            String(K107).substring(0, 111) + "...<omitted>...\n}'")
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1354,6 +1391,7 @@ function main() {
     s104() // SECTION-CALL 104
     s105() // SECTION-CALL 105
     s106() // SECTION-CALL 106
+    s107() // SECTION-CALL 107
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

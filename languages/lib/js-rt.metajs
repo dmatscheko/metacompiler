@@ -979,6 +979,21 @@ function jvCallMethod(o, name) {
     return jvMiss
 }
 
+// String(C) of a class: its source text, kept on its constructor, which the floor
+// renders (fn_text); a builtin class is native code under its name. undefined while
+// the program registered no source text (a typescript program), which keeps the
+// object rendering. Twin: jsvClassText in abnf/jsrtjsprint.go.
+function jvClassText(c) {
+    var r = anytype
+    r = undefined
+    var ctor = c["__ctor"]
+    var src = anytype
+    src = fnMeta(ctor, "src")
+    if (src === undefined) { return r }
+    if (src > 0) { return ctor + "" }
+    return "function " + jvStr(c["__name"]) + "() { [native code] }"
+}
+
 // jsvString: String(v) with a user toString. The BigInt and RegExp arms (jbStr /
 // jxStr) are asked FIRST, because both of their values are carried in an object box
 // that jvIsObj would otherwise claim.
@@ -988,6 +1003,11 @@ function jvStr(v) {
     if (jxIsRe(v)) { return jxStr(v) }
     if (jvIsObj(v)) {
         if (v["__symkey"] !== undefined) { return jvSymStr(v) }
+        if (v["__isclass"] === true) {
+            var ct = anytype
+            ct = jvClassText(v)
+            if (ct !== undefined) { return ct }
+        }
         if (jvSymOn) {
             var ex = anytype
             ex = jvExoticPrim(v, "string")
@@ -1132,7 +1152,11 @@ function jvLooseEqPrim(a, b) {
     if (sa == (typeof b == "string")) { return a == b }
     var o = anytype
     o = sa ? b : a
-    if (typeof o != "number" && typeof o != "boolean") { return a == b }
+    if (typeof o != "number" && typeof o != "boolean") {
+        // A function against a string: its source text (fn_text).
+        if (typeof o == "function") { return (a + "") == (b + "") }
+        return a == b
+    }
     return jvToNumber(a) === jvToNumber(b)
 }
 
@@ -2097,7 +2121,7 @@ function jvMethodValue(fn, key) {
     // `new C().meth` of `meth(x){}`. The closure's registered length already excludes
     // the prepended receiver.
     var mv = anytype
-    mv = fnMetaSet(jvMethodValueFn(fn), key, jvFnLenOf(fn))
+    mv = fnMetaSet(jvMethodValueFn(fn), key, jvFnLenOf(fn), fnMeta(fn, "src"))
     jvMvK.push(fn)
     jvMvV.push(mv)
     jvMvN = jvMvN + 1
@@ -5156,7 +5180,13 @@ function jvObjText(o) {
 function jvRoText(o, key) { return "Cannot assign to read only property '" + jvKeyUnesc(key) + "' of object '" + jvObjText(o) + "'" }
 // V8 names a function in a refused write by its String(f). Twin of jsFnRoText in
 // both *-interpreter.abnf.
-function jvFnRoText(f, key) { return "Cannot assign to read only property '" + key + "' of function '" + jvStr(f) + "'" }
+function jvFnRoText(f, key) { return "Cannot assign to read only property '" + key + "' of function '" + jvElide(jvStr(f)) + "'" }
+// A function's text inside a V8 error message: past 128 UTF-16 units, its first 111
+// and its last 2 around "...<omitted>...". Twin of fsElide in lib/js-fnsrc.js.
+function jvElide(t) {
+    if (t.length <= 128) { return t }
+    return t.substring(0, 111) + "...<omitted>..." + t.substring(t.length - 2, t.length)
+}
 function jvAddText(key) { return "Cannot add property " + jvKeyUnesc(key) + ", object is not extensible" }
 function jvDelText(o, key) { return "Cannot delete property '" + jvKeyUnesc(key) + "' of " + jvObjText(o) }
 // The TypeError text a write of v to o[key] meets under o's marks, or "".

@@ -307,7 +307,7 @@ Throw       <~~ push(makeThrow(pop())) ~~>
 
 // A function declaration: the scope it stands in instantiates it on entry, before any
 // statement runs (lib/js-hoist.js).
-FuncDecl    <~~ push(makeFuncDeclStrict(takeAll(), up.start)) ~~>
+FuncDecl    <~~ fsMark(up.start, up.pos, false); push(makeFuncDeclStrict(takeAll(), up.start)) ~~>
             = KwFunction NotBindName Id <~~ push(idName(up.in)) ~~> ParamList [ UseStrictMark ] FuncBody ;
 
 ParamList   <~~ push(takeAll()) /* Collect the parameter names into one array. */ ~~>
@@ -781,16 +781,16 @@ SuperKeyIdx <~~ push({skey: keyEscT(pop())}) ~~>
 // ordinary call. makeNew's function form goes through js_call_new, which is what arms it.
 NewTarget   <~~ push(makeNewTarget()) ~~>
             = KwNew "." "target" KwEnd ;
-AsyncArrow  <~~ push(makeAsyncArrow(takeAll(), up.in)) ~~>
+AsyncArrow  <~~ fsMark(up.start, up.pos, false); push(makeAsyncArrow(takeAll(), up.in)) ~~>
             = KwAsync ArrowAhead ArrowParams SameLine "=>" ArrowBody ;
 // An async function expression compiles its body as a generator body and wraps the
 // closure with js_jsasyncfn (see makeAsyncFn). An async GENERATOR is both at once: its
 // yields and its awaits DO share one suspension channel, and js_jsawaitmark on each
 // awaited operand is what tells them apart (see makeAsyncGenFn).
 AsyncFuncExpr = AsyncGenExpr | AsyncPlainExpr ;
-AsyncGenExpr <~~ push(makeAsyncGenExpr(takeAll(), up.in)) ~~>
+AsyncGenExpr <~~ fsMark(up.start, up.pos, false); push(makeAsyncGenExpr(takeAll(), up.in)) ~~>
             = KwAsync KwFunction "*" [ FnExprName ] ParamList [ UseStrictMark ] FuncBody ;
-AsyncPlainExpr <~~ push(makeAsyncFuncExpr(takeAll(), up.in)) ~~>
+AsyncPlainExpr <~~ fsMark(up.start, up.pos, false); push(makeAsyncFuncExpr(takeAll(), up.in)) ~~>
             = KwAsync KwFunction [ FnExprName ] ParamList [ UseStrictMark ] FuncBody ;
 // The optional name of a function expression, in every one of its three forms. It
 // pushes {fname} rather than nothing: a named function expression keeps ITS OWN name in
@@ -799,7 +799,7 @@ FnExprName  <~~ push({fname: idName(up.in)}) ~~>
             = NotExprName Id ;
 // 'function* () {}': the body is an ordinary IR function, and js_genfn turns the closure
 // into a generator function, so calling it produces a generator object.
-GenFuncExpr <~~ push(makeGenFuncExpr(takeAll(), up.in)) ~~>
+GenFuncExpr <~~ fsMark(up.start, up.pos, false); push(makeGenFuncExpr(takeAll(), up.in)) ~~>
             = KwFunction "*" [ NotYieldWord FnExprName ] ParamList [ UseStrictMark ] FuncBody ;
 // A class EXPRESSION - 'var P = class { ... }' - builds the very same descriptor as a
 // class declaration and evaluates TO it. An anonymous one still needs a name, because
@@ -807,7 +807,7 @@ GenFuncExpr <~~ push(makeGenFuncExpr(takeAll(), up.in)) ~~>
 // invents a 0-prefixed one that no source identifier can collide with, and an explicit
 // name overrides it.
 ClassExpr   = ClassExprLowered | ClassExprWidened ;
-ClassExprLowered <~~ push(makeClassExpr(takeAll(), up.in)) ~~>
+ClassExprLowered <~~ fsMark(up.start, up.pos, false); push(makeClassExpr(takeAll(), up.in)) ~~>
             = KwClass ClassAnonName [ ClassExprName ]
               [ KwExtends NotReserved Id <~~ push({ext: idName(up.in)}) ~~> ] PrivBodyOpen { ClassMember } PrivBodyClose ;
 ClassAnonName <~~ classSeq = classSeq + 1; curClassName = "0class" + classSeq; push({cname: curClassName}) ~~>
@@ -816,11 +816,11 @@ ClassExprName <~~ curClassName = idName(up.in); push({cname: idName(up.in)}) ~~>
             = NotExprName Id ;
 // A class expression with a heritage EXPRESSION ('class extends f() {}'). Same builder
 // as ClassExprLowered: the parent simply arrives as a value thunk instead of a name.
-ClassExprWidened <~~ push(makeClassExpr(takeAll(), up.in)) ~~>
+ClassExprWidened <~~ fsMark(up.start, up.pos, false); push(makeClassExpr(takeAll(), up.in)) ~~>
             = KwClass ClassAnonName [ ClassExprName ] KwExtends ClassExt PrivBodyOpen { ClassMember } PrivBodyClose ;
 
 // The optional name of a function expression is bound only inside its own body (fnSelf).
-FunctionExpr <~~ push(makeFunctionExprItems(takeAll(), up.in)) ~~>
+FunctionExpr <~~ fsMark(up.start, up.pos, false); push(makeFunctionExprItems(takeAll(), up.in)) ~~>
             = KwFunction [ FnExprName ] ParamList [ UseStrictMark ] FuncBody ;
 
 // The object literal, with the whole ES2015+ property surface: `key: value`, spread,
@@ -843,7 +843,7 @@ SpreadProp  <~~ push({spreadT: pop()}) ~~>
 // A computed KEY is an AssignExpr, not an Expression: '({[a, b]: 0})' is a syntax
 // error even though the comma operator is fine inside 'a[b, c]'. The '(' form is the
 // computed shorthand METHOD '{[k](x) {}}'.
-ComputedProp <~~ push(makeComputedProp(takeAll())) ~~>
+ComputedProp <~~ fsMark(up.start, up.pos, false); push(makeComputedProp(takeAll())) ~~>
             = "[" AssignExpr "]" ( ":" AssignExpr | ParamList FuncBody ) ;
 // A getter takes no parameter and a setter takes exactly one - that is in the grammar
 // of the accessor productions, not an early error, so it is enforced here. The pair
@@ -851,13 +851,13 @@ ComputedProp <~~ push(makeComputedProp(takeAll())) ~~>
 // object as 'this', writing it runs the setter.
 // MemberKey rather than PropKey: an accessor key may be COMPUTED as well
 // ('({get [a]() {}, set [a](b) {}})').
-GetSetProp  <~~ push(makeAccessorProp(takeAll())) ~~>
+GetSetProp  <~~ fsMark(up.start, up.pos, false); push(makeAccessorProp(takeAll())) ~~>
             = ( "get" KwEnd <~~ push("get") ~~> MemberKey GetterParams
               | "set" KwEnd <~~ push("set") ~~> MemberKey SetterParams ) [ UseStrictMark ] FuncBody ;
 GetterParams = "(" ")" ;
 SetterParams = "(" Param ")" ;
 // A shorthand method: '{ m(x) { ... } }', with the async and generator prefixes.
-MethodProp  <~~ push(makeMethodProp(takeAll())) ~~>
+MethodProp  <~~ fsMark(up.start, up.pos, false); push(makeMethodProp(takeAll())) ~~>
             = [ AsyncMod ] [ GenMod ] MemberKey ParamList [ UseStrictMark ] FuncBody ;
 AsyncMod    <~~ push({amod: true}) ~~> = "async" KwEnd ;
 GenMod      <~~ push({gmod: true}) ~~> = "*" ;
@@ -883,7 +883,7 @@ ArrHole     <~~ push({hole: true}) ~~> = Nothing ;
 // '( ... )' is parsed twice - once as a parameter list that then fails, once as the
 // expression it really was - and that doubles at every nesting level. ArrowAhead answers
 // that one question cheaply: skip the balanced parentheses and see whether '=>' follows.
-ArrowFn     <~~ push(makeArrow(takeAll(), up.in)) ~~>
+ArrowFn     <~~ fsMark(up.start, up.pos, false); push(makeArrow(takeAll(), up.in)) ~~>
             = ArrowAhead ArrowParams SameLine "=>" ArrowBody ;
 ArrowParams <~~ push({aparams: takeAll()}) ~~>
             = "(" [ ParamSeq ] ")"
@@ -1116,7 +1116,7 @@ FinallyClause <~~ push({finbody: pop()}) ~~>
 // shared __class machinery (an instance is js_obj_new carrying a __class descriptor that
 // holds the methods; a method call dispatches through js_mcall, super through
 // js_supercall). An instance is a plain object; static members live on the descriptor.
-ClassDecl   <~~ push(makeClassStmt(takeAll(), up.start)) ~~>
+ClassDecl   <~~ fsMark(up.start, up.pos, false); push(makeClassStmt(takeAll(), up.start)) ~~>
             = KwClass NotBindName Id <~~ push({cname: idName(up.in)}); curClassName = idName(up.in) ~~>
               [ KwExtends NotReserved Id <~~ push({ext: idName(up.in)}) ~~> ]
               PrivBodyOpen { ClassMember } PrivBodyClose ;
@@ -1129,7 +1129,7 @@ ClassDecl   <~~ push(makeClassStmt(takeAll(), up.start)) ~~>
 // constructor - keeps resolving the parent by name. It is a separate production rather
 // than an alternative inside ClassDecl because an inline group commits like an ordered
 // choice: 'extends a.b' would match the name 'a' and then die on the '.'.
-ClassDeclWidened <~~ push(makeClassStmt(takeAll(), up.start)) ~~>
+ClassDeclWidened <~~ fsMark(up.start, up.pos, false); push(makeClassStmt(takeAll(), up.start)) ~~>
             = KwClass NotBindName Id <~~ push({cname: idName(up.in)}); curClassName = idName(up.in) ~~>
               KwExtends ClassExt PrivBodyOpen { ClassMember } PrivBodyClose ;
 ClassExt    <~~ push({extT: pop()}) ~~>
@@ -1160,27 +1160,27 @@ ClassStaticBlock <~~ push({kind: "sblock", body: pop()}) ~~>
 // An accessor member. Reading or writing the key on an instance runs the getter/setter
 // with the instance as 'this' - the accessor lives on the class descriptor, and the
 // member lookup follows the __class/__super chain to find it.
-ClassGetSet <~~ push(makeClassAccessor(takeAll())) ~~>
+ClassGetSet <~~ fsMark(up.start, up.pos, true); push(makeClassAccessor(takeAll())) ~~>
             = MemberMods ( "get" KwEnd <~~ push("get") ~~> MemberKey GetterParams
                          | "set" KwEnd <~~ push("set") ~~> MemberKey SetterParams ) FuncBody ;
 // 'async m() {}' and the generator forms. An async method's body is compiled as a
 // generator body driven by js_jsasyncfn (see makeAsyncFn); a generator method goes
 // through the generator lowering.
-ClassSpecialMethod <~~ push(makeClassSpecial(takeAll())) ~~>
+ClassSpecialMethod <~~ fsMark(up.start, up.pos, true); push(makeClassSpecial(takeAll())) ~~>
             = MemberMods ( "async" KwEnd <~~ push({amod: true}) ~~> [ GenMod ] | GenMod ) MemberKey ParamList FuncBody ;
 // A private member '#x'. Private names are not properties in the spec, but they behave
 // exactly like non-enumerable ones, so they are stored under the mangled key
 // '__#<body>#x' (privDeclare): the
 // '__' prefix is what keeps them out of js_keys, and so out of for-in and object spread.
-ClassPrivate <~~ push(makeClassPrivate(takeAll())) ~~>
+ClassPrivate <~~ fsMark(up.start, up.pos, true); push(makeClassPrivate(takeAll())) ~~>
             = MemberMods "#" Id <~~ push(privDeclare(idName(up.in))) ~~> ( ParamList FuncBody | [ "=" AssignExpr ] [ ";" ] ) ;
 // A computed key: 'class A { ["a" + "b"]() {} }'. The key expression is evaluated once,
 // when the class is defined.
-ClassComputed <~~ push(makeClassComputed(takeAll())) ~~>
+ClassComputed <~~ fsMark(up.start, up.pos, true); push(makeClassComputed(takeAll())) ~~>
             = MemberMods "[" AssignExpr "]" ( ParamList FuncBody | [ "=" AssignExpr ] [ ";" ] ) ;
 // A member whose key is a string or number literal - class a { 'constructor'() {} },
 // class a { 1 = 2 }. Tried before MethodDef/FieldDef, which only know the bare-Id form.
-ClassLiteralMember <~~ push(makeClassComputed(takeAll())) ~~>
+ClassLiteralMember <~~ fsMark(up.start, up.pos, true); push(makeClassComputed(takeAll())) ~~>
             = MemberMods ( StringLit | NumberLit ) ( ParamList FuncBody | [ "=" AssignExpr ] [ ";" ] ) ;
 // The key of a widened member: a name, a string/number literal or a computed [expr].
 // PropKey (the object-literal key) has no computed form because ComputedProp spells that
@@ -1197,7 +1197,7 @@ CtorParams  <~~ push(takeAll()) ~~>
             = "(" [ ParamSeq ] ")" ;
 
 // A method (instance unless 'static').
-MethodDef   <~~ push(makeMethod(takeAll())) ~~>
+MethodDef   <~~ fsMark(up.start, up.pos, true); push(makeMethod(takeAll())) ~~>
             = MemberMods Id <~~ push({mname: idName(up.in)}) ~~> ParamList FuncBody ;
 
 // A field (instance unless 'static'), with an optional initializer.
@@ -1317,11 +1317,11 @@ Debugger    <~~ push(function(b) { return b }) ~~>
             = KwDebugger StmtEnd ;
 // The declaration forms of the same three: async, async generator and generator.
 AsyncFuncDecl = AsyncGenDecl | AsyncPlainDecl ;
-AsyncGenDecl <~~ push(makeAsyncGenDecl(takeAll(), up.start)) ~~>
+AsyncGenDecl <~~ fsMark(up.start, up.pos, false); push(makeAsyncGenDecl(takeAll(), up.start)) ~~>
             = KwAsync KwFunction "*" NotBindName Id <~~ push(idName(up.in)) ~~> ParamList [ UseStrictMark ] FuncBody ;
-AsyncPlainDecl <~~ push(makeAsyncFuncDecl(takeAll(), up.start)) ~~>
+AsyncPlainDecl <~~ fsMark(up.start, up.pos, false); push(makeAsyncFuncDecl(takeAll(), up.start)) ~~>
             = KwAsync KwFunction NotBindName Id <~~ push(idName(up.in)) ~~> ParamList [ UseStrictMark ] FuncBody ;
-GenFuncDecl <~~ push(makeGenFuncDecl(takeAll(), up.start)) ~~>
+GenFuncDecl <~~ fsMark(up.start, up.pos, false); push(makeGenFuncDecl(takeAll(), up.start)) ~~>
             = KwFunction "*" NotBindName Id <~~ push(idName(up.in)) ~~> ParamList [ UseStrictMark ] FuncBody ;
 
 Null        <~~ push(makeHandleConst(1)) ~~>   = "null" KwEnd ;
@@ -3347,6 +3347,8 @@ NotFuncHead = :script(~~
     include("lib/js-num.js")
     // Which scope instantiates each function declaration (makeFuncBody, makeJsBlock).
     include("lib/js-hoist.js")
+    // The source text of a function or a class (srcAt, emitSrcTable).
+    include("lib/js-fnsrc.js")
 
     // A clean compile-time abort (used by the shared notImpl helper in compile-core.js
     // for constructs that parse but cannot be lowered).
@@ -4372,6 +4374,7 @@ NotFuncHead = :script(~~
                     // scope and is registered as the get or the set half of the property.
                     // Two halves of one key merge inside js_defprop.
                     var idx = emitFunction(props[i].params, props[i].body, false, false, props[i].ustrict)
+                    srcAt(idx, props[i].sp)
                     var clo = fnMetaAt(b, callExt(b, "js_closure", [handle(idx), curScopeV]),
                                        (props[i].accName == undefined) ? "" : props[i].accName, props[i].params)
                     var gV = (props[i].acc == "get") ? clo : hUndef
@@ -4412,6 +4415,7 @@ NotFuncHead = :script(~~
     function emitThisBinder(b, strict, idx, kind) {
         funcCount++
         var bidx = funcCount
+        srcAt(bidx, srcOfIdx(idx))
         var f = m.NewFunc("jsf_" + bidx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
         var savedF = curF
         var savedScope = curScopeV
@@ -4520,7 +4524,7 @@ NotFuncHead = :script(~~
         return fnDef(function(b) {
             pendingAsyncFn = true // Consumed by the emitFunction call below.
             var idx = emitFunction(params, bodyT, false, true, ownStrict, isArrow)
-            if (isArrow) { return {b: b, v: coroOf(b, idx, "async", curScopeV)} }
+            if (isArrow) { return {b: b, v: srcLink(b, coroOf(b, idx, "async", curScopeV), idx)} }
             return emitThisBinder(b, emitStrict || ownStrict === true, idx, "async")
         }, nm, params, txt)
     }
@@ -4915,7 +4919,7 @@ NotFuncHead = :script(~~
         // node names an accessor function "get k" / "set k"; nothing in this subset can
         // read one as a value, so the name is recorded for the four engines to agree
         // rather than for a program to see.
-        return {kt: keyThunk(items[1]), acc: items[0], ustrict: st,
+        return {kt: keyThunk(items[1]), acc: items[0], ustrict: st, sp: fsTake(),
                 accName: (typeof items[1] == "string") ? (items[0] + " " + items[1]) : "",
                 params: items.slice(2, items.length - 1), body: items[items.length - 1]}
     }
@@ -4936,16 +4940,20 @@ NotFuncHead = :script(~~
         // A method's own name is its KEY - node says `n` for `{ n(){} }`. A COMPUTED key
         // is only known at run time, so those stay anonymous.
         var mnm = (typeof rest[0] == "string") ? rest[0] : ""
-        var fnT = makeFunctionExpr(rest[2], rest[1], st, mnm)
-        if (isGen) { fnT = makeGenFn(rest[1], rest[2], st, mnm) }
-        if (isAsync) { fnT = makeAsyncFn(rest[1], rest[2], false, st, mnm) }
+        var fnT = anytype // The function-value thunk of the method's kind.
         if (isGen && isAsync) { fnT = makeAsyncGenFn(rest[1], rest[2], st, mnm) }
+        else if (isGen) { fnT = makeGenFn(rest[1], rest[2], st, mnm) }
+        else if (isAsync) { fnT = makeAsyncFn(rest[1], rest[2], false, st, mnm) }
+        else { fnT = makeFunctionExpr(rest[2], rest[1], st, mnm) }
         return {kt: keyThunk(rest[0]), t: fnT}
     }
     // items = [keyThunk, valueThunk] for '{[k]: v}' or [keyThunk, params, bodyThunk] for
     // the computed shorthand method '{[k](x) {}}'.
     function makeComputedProp(items) {
-        if (items.length == 2) { return {kt: items[0], t: items[1]} }
+        if (items.length == 2) {
+            fsTake()
+            return {kt: items[0], t: items[1]}
+        }
         return {kt: items[0], t: makeFunctionExpr(items[2], items[1])}
     }
 
@@ -5527,6 +5535,10 @@ NotFuncHead = :script(~~
         if (!isCtl) { emitParams = paramNames }
         funcCount++
         var idx = funcCount
+        if (!isCtl) {
+            srcAt(idx, pendingSrc)
+            pendingSrc = 0 - 1
+        }
         var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
 
         var savedF = curF
@@ -5643,8 +5655,11 @@ NotFuncHead = :script(~~
         // reaching emitStr would put the literal text "undefined" in the module.
         var slot = [(nm == undefined) ? "" : nm]
         fnAnonNote(slot, nm, txt)
+        var sp = fsTake()
         return function(b) {
+            pendingSrc = sp
             var r = t(b)
+            pendingSrc = 0 - 1
             if (slot[0] === "" && ln == 0) { return r }
             return {b: r.b, v: callExt(r.b, "js_jsfnmeta",
                                        [r.v, emitStr(r.b, slot[0]), emitNum(r.b, ln)])}
@@ -5731,6 +5746,50 @@ NotFuncHead = :script(~~
             if (items[i] != undefined && items[i].fname != undefined) { return items[i].fname }
         }
         return ""
+    }
+    // ----- The source text of a function (String(f), ES2023 20.2.3.5) -----
+    // A definition's span (lib/js-fnsrc.js) is filed under the index of the IR function
+    // its value is a closure of, which is all the runtime needs: a closure carries its
+    // index (fa of a tag-7 cell, the jsf_N name under llvm.Run), so making one costs
+    // nothing more. fnDef hands its span to the emitFunction it runs through
+    // pendingSrc; a class's is its constructor's, a member's is filed where its body is
+    // emitted. A value that is no plain closure - an async arrow, an instance coroutine
+    // method - is linked to its body's index once, when it is made (js_jsfnsrc).
+    var srcIdxs = []
+    var srcSpans = []
+    var srcByIdx = {} // "$" + index -> span
+    var pendingSrc = 0 - 1
+    function srcAt(idx, sp) {
+        if (sp < 0) { return }
+        srcIdxs.push(idx)
+        srcSpans.push(sp)
+        srcByIdx["$" + idx] = sp
+    }
+    function srcOfIdx(idx) {
+        var sp = srcByIdx["$" + idx]
+        if (sp == undefined) { return 0 - 1 }
+        return sp
+    }
+    function srcLink(b, v, idx) {
+        if (srcOfIdx(idx) < 0) { return v }
+        return callExt(b, "js_jsfnsrc", [v, emitNum(b, idx)])
+    }
+    // js_jssrc(text, table): the text of every file a span is in, and per function
+    // index "idx,from,to;" in UTF-16 units of that text, behind the highest index and
+    // a ';'. A js module always registers it - also with no span at all, since it is
+    // what turns a builtin's String into V8's native code (fn_text).
+    function emitSrcTable(f) {
+        var bases = []
+        for (var fi = 0; fi < fsTexts.length; fi++) { bases.push(fsBase(fi)) }
+        var tab = "" + funcCount + ";"
+        for (var i = 0; i < srcIdxs.length; i++) {
+            var sp = srcSpans[i]
+            var base = bases[fsFile[sp]]
+            tab = tab + srcIdxs[i] + "," + (base + fsFrom[sp]) + "," + (base + fsTo[sp]) + ";"
+        }
+        var b = f.NewBlock("entry")
+        callExt(b, "js_jssrc", [emitStr(b, fsBlob()), emitStr(b, tab)])
+        b.NewRet(hUndef)
     }
     function makeFunctionExpr(bodyT, paramNames, ownStrict, nm, txt) {
         return fnDef(function(b) {
@@ -6667,7 +6726,7 @@ NotFuncHead = :script(~~
     }
     function makeMethod(items) {
         return {kind: "method", name: items[1].mname, statik: isStaticMods(items[0].mods),
-                params: items[2], body: items[3]}
+                params: items[2], body: items[3], sp: fsTake()}
     }
     function makeCtor(items) {
         return {kind: "ctor", params: items[0], body: items[1]}
@@ -6685,7 +6744,7 @@ NotFuncHead = :script(~~
                 priv: typeof items[2] == "string" && items[2].substring(0, 3) == "__#",
                 name: (typeof items[2] == "string") ? items[2] : undefined,
                 nameT: (typeof items[2] == "string") ? undefined : items[2],
-                params: items.slice(3, items.length - 1), body: items[items.length - 1]}
+                params: items.slice(3, items.length - 1), body: items[items.length - 1], sp: fsTake()}
     }
     // items = [mods, {amod}?, {gmod}?, key, params, bodyThunk]. An async method's body is
     // driven by js_jsasyncfn; a generator method goes through the generator lowering.
@@ -6702,15 +6761,16 @@ NotFuncHead = :script(~~
         return {kind: "method", statik: isStaticMods(mods), gen: isGen, async: isAsync,
                 name: (typeof rest[0] == "string") ? rest[0] : undefined,
                 nameT: (typeof rest[0] == "string") ? undefined : rest[0],
-                params: rest[1], body: rest[2]}
+                params: rest[1], body: rest[2], sp: fsTake()}
     }
     // items = [mods, mangledName, params, bodyThunk] for a private METHOD and
     // [mods, mangledName] / [mods, mangledName, initThunk] for a private FIELD - a method
     // is the only form that carries both a parameter list and a body, hence the length.
     function makeClassPrivate(items) {
         var statik = isStaticMods(items[0].mods)
+        var sp = fsTake()
         if (items.length > 3) {
-            return {kind: "method", name: items[1], priv: true, statik: statik, params: items[2], body: items[3]}
+            return {kind: "method", name: items[1], priv: true, statik: statik, params: items[2], body: items[3], sp: sp}
         }
         return {kind: "field", name: items[1], priv: true, statik: statik,
                 init: items.length > 2 ? items[2] : null}
@@ -6721,8 +6781,9 @@ NotFuncHead = :script(~~
     // The same shapes with a computed or literal KEY, which arrives as a value thunk.
     function makeClassComputed(items) {
         var statik = isStaticMods(items[0].mods)
+        var sp = fsTake()
         if (items.length > 3) {
-            return {kind: "method", nameT: items[1], statik: statik, params: items[2], body: items[3]}
+            return {kind: "method", nameT: items[1], statik: statik, params: items[2], body: items[3], sp: sp}
         }
         return {kind: "field", nameT: items[1], statik: statik,
                 init: items.length > 2 ? items[2] : null}
@@ -6744,7 +6805,7 @@ NotFuncHead = :script(~~
     // arguments, a static one's is taken by a binder (emitThisBinder).
     function clsCoro(b, idx, kind, statik) {
         if (statik) { return emitThisBinder(b, true, idx, kind).v }
-        return coroOf(b, idx, kind, curScopeV)
+        return srcLink(b, coroOf(b, idx, kind, curScopeV), idx)
     }
     function emitClassFunc(params, body, isInstance, initFields, implicitSuper, derived) {
         funcCount++
@@ -6899,6 +6960,7 @@ NotFuncHead = :script(~~
             else { info.fields.push(m) }
         }
         info.shown = [info.name] // The class's `name`; makeClassExpr refines it.
+        info.sp = fsTake()
         return info
     }
     // Build the descriptor object, bind it under the class name, then attach the
@@ -6934,6 +6996,8 @@ NotFuncHead = :script(~~
         } else {
             ctorIdx = emitClassFunc([], null, true, info.fields, info.superName, info.superName != null)
         }
+        // The class's source text is its constructor's (fn_text).
+        srcAt(ctorIdx, info.sp)
         // The constructor's arity is the class's `length`.
         var ctorClo = callExt(b, "js_closure", [handle(ctorIdx), curScopeV])
         if (info.ctor != null) { ctorClo = fnMetaAt(b, ctorClo, "", info.ctor.params) }
@@ -6953,6 +7017,7 @@ NotFuncHead = :script(~~
                 // way a method call does, so it is emitted as an ordinary function: `this`
                 // comes from js_this and the setter's value is args[0].
                 var aidx = emitFunction(mm.params, mm.body, false, false)
+                srcAt(aidx, mm.sp)
                 var aclo = fnMetaAt(b, callExt(b, "js_closure", [handle(aidx), curScopeV]),
                                     (memberFnName(mm) === "") ? "" : (mm.acc + " " + memberFnName(mm)), mm.params)
                 var gV = (mm.acc == "get") ? aclo : hUndef
@@ -6965,6 +7030,7 @@ NotFuncHead = :script(~~
                 // An async generator method.
                 pendingAsyncGen = true
                 idx = emitClassFunc(mm.params, mm.body, mm.statik ? null : true, null, null)
+                srcAt(idx, mm.sp)
                 // The meta goes on the OUTERMOST value - the one that lands on the
                 // descriptor and that a read of the method answers - and not on the
                 // closure inside: js_jsasyncfn / js_jsasyncgen / js_genfn each hand back
@@ -6977,6 +7043,7 @@ NotFuncHead = :script(~~
                 // generator object instead of running it.
                 pendingPlainGen = true
                 idx = emitClassFunc(mm.params, genRetBody(mm.body), mm.statik ? null : true, null, null)
+                srcAt(idx, mm.sp)
                 clsRawSet(b, mtgt, mk.v, fnMetaAt(b, clsCoro(b, idx, "gen", mm.statik), memberFnName(mm), mm.params))
                 continue
             }
@@ -6985,10 +7052,12 @@ NotFuncHead = :script(~~
                 // answering a promise (see makeAsyncFn).
                 pendingAsyncFn = true
                 idx = emitClassFunc(mm.params, mm.body, mm.statik ? null : true, null, null)
+                srcAt(idx, mm.sp)
                 clsRawSet(b, mtgt, mk.v, fnMetaAt(b, clsCoro(b, idx, "async", mm.statik), memberFnName(mm), mm.params))
                 continue
             }
             idx = emitClassFunc(mm.params, mm.body, !mm.statik, null, null)
+            srcAt(idx, mm.sp)
             clsRawSet(b, mtgt, mk.v, fnMetaAt(b, callExt(b, "js_closure", [handle(idx), curScopeV]), memberFnName(mm), mm.params))
         }
         // Static fields and static blocks run in SOURCE ORDER, after the methods and
@@ -7840,6 +7909,10 @@ NotFuncHead = :script(~~
         var b = f.NewBlock("entry")
         curScopeV = f.Params[0]
         callExt(b, "js_setret", [hUndef]) // A program without expression statements completes with undefined.
+        // The functions' source text (js_jssrc), filled in by emitSrcTable once every
+        // function of the program has been emitted.
+        var srcInit = m.NewFunc("jsfnsrc.init", i64, [])
+        b.NewCall(srcInit, [])
         // THE GLOBAL OBJECT, and with it the top level 'this'. This grammar implements
         // the SCRIPT goal symbol (see the :description), whose top level 'this' IS the
         // global object: node's `vm.runInThisContext` answers `object` for
@@ -7930,6 +8003,7 @@ NotFuncHead = :script(~~
             callExt(bm, "js_jsdrain", [])
             bm.NewRet(mainR)
         }
+        emitSrcTable(srcInit)
     }
 
     // ===== goja driver =====

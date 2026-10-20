@@ -584,7 +584,7 @@ func keysBindings(b map[string]interface{}) {
 	})
 }
 
-// fnMetaBindings adds fnMeta(f, key) and fnMetaSet(f, name, length), host ids 94/95
+// fnMetaBindings adds fnMeta(f, key) and fnMetaSet(f, name, length[, src]), host ids 94/95
 // of languages/lib/runtime.c: a function's `name` and `length`, stored on the
 // function value itself (see jsvFnMeta in jsrtjsprint.go). fnMeta answers ""/0 for
 // a function never named and undefined for a non-function or another key. The
@@ -601,12 +601,17 @@ func fnMetaBindings(b map[string]interface{}) {
 			return jsvFnMeta(v).name
 		case "length":
 			return float64(jsvFnMeta(v).length)
+		case "src":
+			return float64(jsvFnMeta(v).src)
 		}
 		return jsUndef
 	})
 	b["fnMetaSet"] = jsHostFunc("fnMetaSet", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		v := argAt(args, 0)
 		jsvFnMetaSet(v, rt.toString(argAt(args, 1)), int(rt.toNumber(argAt(args, 2))))
+		if len(args) > 3 {
+			jsvFnSrcSet(v, int(rt.toNumber(args[3])))
+		}
 		return v
 	})
 }

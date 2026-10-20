@@ -898,7 +898,18 @@ func (rt *jsrt) jsvRoText(o interface{}, key string) string {
 // which names the function by its String(f). Twin of jsFnRoText in both
 // *-interpreter.abnf.
 func (rt *jsrt) jsvFnRoText(f interface{}, key string) string {
-	return "Cannot assign to read only property '" + key + "' of function '" + rt.jsvString(f) + "'"
+	return "Cannot assign to read only property '" + key + "' of function '" + jsvElide(rt.jsvString(f)) + "'"
+}
+
+// jsvElide is a function's text inside a V8 error message: past 128 UTF-16 units, its
+// first 111 and its last 2 around "...<omitted>...". Twin of fsElide in
+// languages/lib/js-fnsrc.js.
+func jsvElide(t string) string {
+	u := strUnits(t)
+	if len(u) <= 128 {
+		return t
+	}
+	return strFromUnits(u[:111]) + "...<omitted>..." + strFromUnits(u[len(u)-2:])
 }
 
 // jsvOwnsStatic answers whether class cls itself (not a superclass) declares a static
@@ -1291,6 +1302,9 @@ func jsvInNames(names []string, k string) bool {
 func (rt *jsrt) jsvString(v interface{}) string {
 	switch t := v.(type) {
 	case *jsObject:
+		if rt.jsSrc != nil && isClassDesc(t) {
+			return rt.jsvClassText(t)
+		}
 		if d, isSym := t.props["__symdesc"]; isSym {
 			if d == jsUndef {
 				return "Symbol()"
@@ -1466,6 +1480,9 @@ func (rt *jsrt) jsvToPrimitive(v interface{}, hint string) interface{} {
 	if _, ok := v.(*jsArray); ok {
 		return rt.jsvString(v)
 	}
+	if rt.jsSrc != nil && jsvIsFnLike(v) {
+		return rt.jsvString(v)
+	}
 	return v
 }
 
@@ -1535,7 +1552,12 @@ func (rt *jsrt) jsvLooseEq(a, b interface{}) bool {
 	if isUndefOrNull(a) || isUndefOrNull(b) {
 		return isUndefOrNull(a) && isUndefOrNull(b)
 	}
+	// A function of a program that has its source text is an object here too: equal
+	// to itself alone, and its text against a primitive.
 	ao, bo := jsvIsObjLike(a), jsvIsObjLike(b)
+	if rt.jsSrc != nil {
+		ao, bo = ao || jsvIsFnLike(a), bo || jsvIsFnLike(b)
+	}
 	if ao && bo {
 		return rt.strictEq(a, b)
 	}
@@ -1846,6 +1868,10 @@ type jsvFnInfo struct {
 	// rec is an object js_jsfnmeta was handed in place of a name, as the C floor's
 	// name slot holds any handle (php's closure record, js_phclo).
 	rec *jsObject
+	// src is where the function's source text is, one above its id so that 0 is
+	// "none": a js interpreter's span (lib/js-fnsrc.js), or for a compiled js program
+	// the function index whose text a wrapper value shows (js_jsfnsrc).
+	src int
 }
 
 // jsvFnMeta answers ""/0 for a function that was never named and for a non-function.
@@ -1873,13 +1899,104 @@ func jsvFnRecSet(v interface{}, rec *jsObject) {
 	}
 }
 
-// jsvFnMetaSet records the pair on a function value; any other value is ignored.
+// jsvFnMetaSet records the pair on a function value; any other value is ignored. The
+// source a value already carries is kept.
 func jsvFnMetaSet(v interface{}, name string, length int) {
+	src := jsvFnMeta(v).src
 	switch f := v.(type) {
 	case *jsClosure:
-		f.meta = &jsvFnInfo{name: name, length: length}
+		f.meta = &jsvFnInfo{name: name, length: length, src: src}
 	case *hostFunc:
-		f.meta = &jsvFnInfo{name: name, length: length}
+		f.meta = &jsvFnInfo{name: name, length: length, src: src}
+	}
+}
+
+// jsvSrcTable is a compiled js program's function source text: the text of its files
+// and, per function index, the span of that text its definition covers, in UTF-16
+// units ("idx,from,to;" entries behind the highest index and a ';', see emitSrcTable
+// in languages/js-to-llvm-ir.abnf). Both are read on the first String(f).
+type jsvSrcTable struct {
+	text  string
+	tab   string
+	units []uint16
+	spans map[int][2]int
+}
+
+// jsvFnText is String(f) of a function: the source text of its definition, or V8's
+// native code for one that has none (a builtin, a bound function). Twins: fn_text in
+// languages/lib/runtime.c, jsFnText in js-interpreter.abnf.
+func (rt *jsrt) jsvFnText(v interface{}) string {
+	if src, ok := rt.jsvFnSource(v); ok {
+		return src
+	}
+	return jsvNativeText(jsvFnMeta(v).name)
+}
+
+// jsvClassText is String(C) of a class: its source text, kept on its constructor; a
+// builtin class is native code under its name. Twins: jvClassText in
+// languages/lib/js-rt.metajs, jsClassText in js-interpreter.abnf.
+func (rt *jsrt) jsvClassText(c *jsObject) string {
+	if src, ok := rt.jsvFnSource(c.props["__ctor"]); ok {
+		return src
+	}
+	return jsvNativeText(rt.toString(c.props["__name"]))
+}
+
+func jsvNativeText(name string) string {
+	if strings.HasPrefix(name, "bound ") {
+		name = ""
+	}
+	return "function " + name + "() { [native code] }"
+}
+
+// jsvFnSource is the source text of f's definition, if the program has one for it.
+func (rt *jsrt) jsvFnSource(v interface{}) (string, bool) {
+	t := rt.jsSrc
+	if t.spans == nil {
+		t.units = strUnits(t.text)
+		t.spans = map[int][2]int{}
+		ents := strings.Split(t.tab, ";")
+		for _, e := range ents[1:] {
+			f := strings.Split(e, ",")
+			if len(f) == 3 {
+				idx, _ := strconv.Atoi(f[0])
+				from, _ := strconv.Atoi(f[1])
+				to, _ := strconv.Atoi(f[2])
+				t.spans[idx] = [2]int{from, to}
+			}
+		}
+	}
+	if se, ok := t.spans[jsvFnSrcIdx(v)]; ok {
+		return strFromUnits(t.units[se[0]:se[1]]), true
+	}
+	return "", false
+}
+
+// jsvFnSrcIdx is the function index whose source text f shows: the one js_jsfnsrc
+// linked it to, else a closure's own; -1 for anything else.
+func jsvFnSrcIdx(v interface{}) int {
+	if s := jsvFnMeta(v).src; s > 0 {
+		return s - 1
+	}
+	if c, ok := v.(*jsClosure); ok {
+		if n := c.fn.Name(); strings.HasPrefix(n, "jsf_") {
+			if idx, err := strconv.Atoi(n[4:]); err == nil {
+				return idx
+			}
+		}
+	}
+	return -1
+}
+
+// jsvFnSrcSet records where a function value's source text is (jsvFnInfo.src).
+func jsvFnSrcSet(v interface{}, src int) {
+	mi := jsvFnMeta(v)
+	mi.src = src
+	switch f := v.(type) {
+	case *jsClosure:
+		f.meta = &mi
+	case *hostFunc:
+		f.meta = &mi
 	}
 }
 
@@ -1922,6 +2039,7 @@ func jsvMethodValue(name string, fn interface{}) *hostFunc {
 	// `new C().meth` of `meth(x){}`. The closure's registered length already excludes
 	// the prepended receiver.
 	jsvFnMetaSet(shim, name, jsvFnMeta(fn).length)
+	jsvFnSrcSet(shim, jsvFnSrcIdx(fn)+1)
 	jsvMethodVals[fn] = shim
 	return shim
 }
@@ -4132,6 +4250,18 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	// declares over the root scope's binding of the same name. Going through a
 	// binding rather than through a call-site rewrite is what keeps shadowing
 	// honest: a program that declares a println of its own simply overwrites it.
+	// js_jssrc(text, table) registers the program's function source text, which
+	// String(f) answers from then on (jsvFnText); js_jsfnsrc(f, idx) links a value
+	// that is no plain closure to the function index whose text it shows. Twins of
+	// both in languages/lib/runtime.c.
+	m["js_jssrc"] = func(a []uint64) uint64 {
+		rt.jsSrc = &jsvSrcTable{text: rt.toString(u(a[0])), tab: rt.toString(u(a[1]))}
+		return 0
+	}
+	m["js_jsfnsrc"] = func(a []uint64) uint64 {
+		jsvFnSrcSet(u(a[0]), int(rt.toNumber(u(a[1])))+1)
+		return a[0]
+	}
 	m["js_jsprintfn"] = func(a []uint64) uint64 {
 		nl := rt.toString(u(a[0])) == "println"
 		return w(jsHostFunc(rt.toString(u(a[0])), func(rt *jsrt, this uint64, args []interface{}) interface{} {

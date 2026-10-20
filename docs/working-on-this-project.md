@@ -1053,7 +1053,9 @@ json.js                   <- js-rt.metajs, js and typescript interpreters
                              (Go twin: abnf/jsrtjson.go)
 js-num.js                 <- js-rt.metajs, js and typescript interpreters
                              (StringToNumber and parseFloat; Go twin:
-                             jsStrToNum / jsParseFloatJS in abnf/jsrtjsbig.go)
+                             jsStrToNum / jsParseFloatJS in abnf/jsrtjsbig.go),
+                             and the js and typescript compilers for the value
+                             of a radix literal (jsnIntPow2)
 go-fmt.js                 <- go-rt.metajs, go interpreter (fmt.Sprintf; Go twin:
                              gopFormat in abnf/jsrtgolang.go)
 go-regexp.js              <- go-rt.metajs, go interpreter (the primitives
@@ -1146,7 +1148,8 @@ of the bare `default` literal), `swift-dotwant.js` (both swift grammars: the exp
 type of an implicit member inside an array, ternary, closure, call argument,
 == operand or collection-method argument),
 `js-callee.js` (all four
-js/ts grammars: V8's re-printing of a callee in "is not a function"). Each is ONE implementation of a feature, not a home for
+js/ts grammars: V8's re-printing of a callee in "is not a function"), `js-fnsrc.js`
+(both js grammars: the span of a function's source text, which String(f) answers). Each is ONE implementation of a feature, not a home for
 helpers that happen to be duplicated (7.12 still holds for those).
 
 `lib/js-builtins.js` is different in kind: it is JAVASCRIPT, not MetaJS - Set, Map,

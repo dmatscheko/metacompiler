@@ -271,7 +271,7 @@ Throw       <~~ push(excThrow(pop())) ~~>
 
 // A function declaration: the scope it stands in instantiates it on entry, before any
 // statement runs (lib/js-hoist.js).
-FuncDecl    <~~ push(makeFuncDecl(takeAll(), up.start)) ~~>
+FuncDecl    <~~ fsMark(up.start, up.pos, false); push(makeFuncDecl(takeAll(), up.start)) ~~>
             = KwFunction NotBindName Id <~~ push(idName(up.in)) ~~> ParamList [ UseStrictMark ] FuncBody ;
 
 ParamList   <~~ push(takeAll()) /* Collect the parameter names into one array. */ ~~>
@@ -671,11 +671,11 @@ SuperKeyIdx <~~ push({skey: jsPropKeyT(pop())}) ~~>
 // with, since it contains a '.'), so reading it is an ordinary scope lookup.
 NewTarget   <~~ push(makeVarRef("new.target")) ~~>
             = KwNew "." "target" KwEnd ;
-AsyncArrow  <~~ push(makeAsyncArrow(takeAll(), up.in)) ~~>
+AsyncArrow  <~~ fsMark(up.start, up.pos, false); push(makeAsyncArrow(takeAll(), up.in)) ~~>
             = KwAsync ArrowParams NoLineBreak "=>" ArrowBody ;
 // 'async function [*] [name](...) {}' as an expression. The optional name is recorded
 // (it is what `f.name` answers) and bound only inside the body (fnSelf).
-AsyncFuncExpr <~~ push(makeAsyncFuncExpr(takeAll(), up.in)) ~~>
+AsyncFuncExpr <~~ fsMark(up.start, up.pos, false); push(makeAsyncFuncExpr(takeAll(), up.in)) ~~>
             = KwAsync KwFunction [ GenMark ] [ FnExprName ] ParamList [ UseStrictMark ] FuncBody ;
 // The optional name of a function expression, in every one of its three forms. It
 // pushes {fname} rather than nothing: a named function expression keeps ITS OWN name
@@ -684,13 +684,13 @@ AsyncFuncExpr <~~ push(makeAsyncFuncExpr(takeAll(), up.in)) ~~>
 // `const g = function(){}` (node says "g"). Same shape as ClassExprName below.
 FnExprName  <~~ push({fname: idName(up.in)}) ~~>
             = NotExprName Id ;
-GenFuncExpr <~~ push(makeGenOrFuncExpr(takeAll(), up.in)) ~~>
+GenFuncExpr <~~ fsMark(up.start, up.pos, false); push(makeGenOrFuncExpr(takeAll(), up.in)) ~~>
             = KwFunction GenMark [ NotYieldWord FnExprName ] ParamList [ UseStrictMark ] FuncBody ;
 // 'var C = class { ... }' - a class as a VALUE, with or without a name. It builds the
 // same descriptor a declaration does; nothing is bound, the value is simply returned.
 // An anonymous class expression still supports super(), because a method finds its own
 // class through the scope the class body pushes, not through its name (see makeClassValue).
-ClassExpr   <~~ push(makeClassValue(takeAll(), up.in)) ~~>
+ClassExpr   <~~ fsMark(up.start, up.pos, false); push(makeClassValue(takeAll(), up.in)) ~~>
             = KwClass [ ClassExprName ] [ KwExtends NotReserved Id <~~ push({ext: idName(up.in)}) ~~> ]
               PrivBodyOpen { ClassMember } PrivBodyClose ;
 ClassExprName <~~ push({cname: idName(up.in)}) ~~>
@@ -699,11 +699,11 @@ ClassExprName <~~ push({cname: idName(up.in)}) ~~>
 // Same builder as ClassExpr: the only difference is that the parent arrives as a value
 // thunk, evaluated once when the class is built, instead of as a name. Tried after
 // ClassExpr, so the plain 'extends Name' shape always wins.
-ClassExprWidened <~~ push(makeClassValue(takeAll(), up.in)) ~~>
+ClassExprWidened <~~ fsMark(up.start, up.pos, false); push(makeClassValue(takeAll(), up.in)) ~~>
             = KwClass [ ClassExprName ] KwExtends ClassExt PrivBodyOpen { ClassMember } PrivBodyClose ;
 
 // The optional name is recorded (FnExprName) and bound only inside the body (fnSelf).
-FunctionExpr <~~ push(makeFunctionExprItems(takeAll(), up.in)) ~~>
+FunctionExpr <~~ fsMark(up.start, up.pos, false); push(makeFunctionExprItems(takeAll(), up.in)) ~~>
             = KwFunction [ FnExprName ] ParamList [ UseStrictMark ] FuncBody ;
 
 // The object literal, with the whole ES2022 property surface: 'key: value', spread
@@ -723,15 +723,15 @@ SpreadProp  <~~ push({spreadObj: true, t: pop()}) ~~>
             = "..." AssignExpr ;
 // A computed KEY is an AssignExpr, not an Expression: '({[a, b]: 0})' is a syntax
 // error even though the comma operator is fine inside 'a[b, c]'.
-ComputedProp <~~ push(makeComputedProp(takeAll())) ~~>
+ComputedProp <~~ fsMark(up.start, up.pos, false); push(makeComputedProp(takeAll())) ~~>
             = "[" AssignExpr "]" ( ComputedValue | ComputedMethod ) ;
 ComputedValue <~~ push({pval: pop()}) ~~> = ":" AssignExpr ;
-ComputedMethod <~~ push({pfn: makeFunctionExprItems(takeAll())}) ~~> = ParamList [ UseStrictMark ] FuncBody ;
+ComputedMethod <~~ push({pfn: takeAll()}) ~~> = ParamList [ UseStrictMark ] FuncBody ;
 // A getter takes no parameter and a setter takes exactly one - that is in the grammar
 // of the accessor productions, not an early error, so it is enforced here. The accessor
 // is stored in the object's hidden getter/setter table (see makeObject), which is what
 // getMember and setMember consult before the plain slot.
-GetSetProp  <~~ push(makeAccessorProp(takeAll())) ~~>
+GetSetProp  <~~ fsMark(up.start, up.pos, false); push(makeAccessorProp(takeAll())) ~~>
             = ( GetterHead PropKeyAny GetterParams | SetterHead PropKeyAny SetterParams ) [ UseStrictMark ] FuncBody ;
 GetterHead  <~~ push({acc: "get"}) ~~> = "get" KwEnd ;
 SetterHead  <~~ push({acc: "set"}) ~~> = "set" KwEnd ;
@@ -739,7 +739,7 @@ GetterParams <~~ push([]) ~~> = "(" ")" ;
 SetterParams <~~ push(takeAll()) ~~> = "(" Param ")" ;
 // A shorthand method. The async and generator markers are kept, so 'async m() {}' and
 // '*m() {}' build the right kind of function value (see makeMethodProp).
-MethodProp  <~~ push(makeMethodProp(takeAll())) ~~>
+MethodProp  <~~ fsMark(up.start, up.pos, false); push(makeMethodProp(takeAll())) ~~>
             = [ AsyncMark ] [ GenMark ] PropKeyAny ParamList [ UseStrictMark ] FuncBody ;
 // The key of a method or accessor may be computed ('{get [a]() {}}', '{*[b]() {}}'), which
 // the plain PropKey has no room for - there the computed form is a member alternative of
@@ -771,7 +771,7 @@ ArrayHole   <~~ push(makeConst(undefined)) ~~>
 // No line terminator is allowed between the parameters and the '=>': automatic semicolon
 // insertion ends the statement at the break, so '(a)\n=> 0' is a syntax error rather than
 // an arrow function. NoLineBreak is the same guard 'break'/'continue' use for their label.
-ArrowFn     <~~ push(makeArrow(takeAll(), up.in)) ~~>
+ArrowFn     <~~ fsMark(up.start, up.pos, false); push(makeArrow(takeAll(), up.in)) ~~>
             = ArrowParams NoLineBreak "=>" ArrowBody ;
 ArrowParams <~~ push({aparams: takeAll()}) ~~>
             = "(" [ ParamSeq ] ")"
@@ -1032,7 +1032,7 @@ FinallyClause <~~ push({finbody: pop()}) ~~>
 // holds the methods and the constructor. A method call on an instance dispatches through
 // mcall (which follows __super for inheritance); super.m() calls the parent's method on
 // 'this'.
-ClassDecl   <~~ push(makeClassStmt(takeAll(), up.start)) ~~>
+ClassDecl   <~~ fsMark(up.start, up.pos, false); push(makeClassStmt(takeAll(), up.start)) ~~>
             = KwClass NotBindName Id <~~ push({cname: idName(up.in)}) ~~>
               [ KwExtends NotReserved Id <~~ push({ext: idName(up.in)}) ~~> ]
               PrivBodyOpen { ClassMember } PrivBodyClose ;
@@ -1044,7 +1044,7 @@ ClassDecl   <~~ push(makeClassStmt(takeAll(), up.start)) ~~>
 // production rather than an alternative inside ClassDecl because an inline group commits
 // like an ordered choice - 'extends a.b' would match the name 'a' and then die on the
 // '.', never reaching the expression alternative. Tried after ClassDecl.
-ClassDeclWidened <~~ push(makeClassStmt(takeAll(), up.start)) ~~>
+ClassDeclWidened <~~ fsMark(up.start, up.pos, false); push(makeClassStmt(takeAll(), up.start)) ~~>
             = KwClass NotBindName Id <~~ push({cname: idName(up.in)}) ~~>
               KwExtends ClassExt PrivBodyOpen { ClassMember } PrivBodyClose ;
 ClassExt    <~~ push({extT: pop()}) ~~>
@@ -1079,10 +1079,10 @@ ClassStaticBlock <~~ push(makeStaticBlock(pop())) ~~>
 // of the accessor productions, not an early error, so it is enforced here. The accessor
 // lands in the class descriptor's accessor table, which findAccessor reaches from any
 // instance through its __class chain.
-ClassGetSet <~~ push(makeClassAccessor(takeAll())) ~~>
+ClassGetSet <~~ fsMark(up.start, up.pos, true); push(makeClassAccessor(takeAll())) ~~>
             = MemberMods ( GetterHead MemberKey GetterParams | SetterHead MemberKey SetterParams ) FuncBody ;
 // An async or generator method: 'async m() {}', '*m() {}', 'async *m() {}'.
-ClassSpecialMethod <~~ push(makeMethod(takeAll())) ~~>
+ClassSpecialMethod <~~ fsMark(up.start, up.pos, true); push(makeMethod(takeAll())) ~~>
             = MemberMods ( AsyncMark [ GenMark ] | GenMark ) MemberKey ParamList FuncBody ;
 // The key of a member, pushed as a descriptor so a literal name and a key that is only
 // known at run time are read the same way: {mk: "name"} or {mkT: keyThunk}.
@@ -1109,7 +1109,7 @@ CtorParams  <~~ push(takeAll()) ~~>
             = "(" [ ParamSeq ] ")" ;
 
 // A method (instance unless 'static').
-MethodDef   <~~ push(makeMethod(takeAll())) ~~>
+MethodDef   <~~ fsMark(up.start, up.pos, true); push(makeMethod(takeAll())) ~~>
             = MemberMods MemberKey ParamList FuncBody ;
 
 // A field (instance unless 'static'), with an optional initializer.
@@ -1250,9 +1250,9 @@ Debugger    <~~ push(function() {}) ~~>
 // The async and generator function DECLARATIONS. Both bind a function value under their
 // name; the markers decide whether calling it runs the body (async, answering a Promise)
 // or returns a generator object (generator and async generator).
-AsyncFuncDecl <~~ push(makeAsyncFuncDecl(takeAll(), up.start)) ~~>
+AsyncFuncDecl <~~ fsMark(up.start, up.pos, false); push(makeAsyncFuncDecl(takeAll(), up.start)) ~~>
             = KwAsync KwFunction [ GenMark ] NotBindName Id <~~ push(idName(up.in)) ~~> ParamList [ UseStrictMark ] FuncBody ;
-GenFuncDecl <~~ push(makeGenOrFuncDecl(takeAll(), up.start)) ~~>
+GenFuncDecl <~~ fsMark(up.start, up.pos, false); push(makeGenOrFuncDecl(takeAll(), up.start)) ~~>
             = KwFunction GenMark NotBindName Id <~~ push(idName(up.in)) ~~> ParamList [ UseStrictMark ] FuncBody ;
 
 Null        <~~ push(makeConst(null)) ~~>      = "null" KwEnd ;
@@ -3282,6 +3282,8 @@ NotFuncHead = :script(~~
     include("lib/js-callee.js")
     // Which scope instantiates each function declaration (makeFuncBody, makeJsBlock).
     include("lib/js-hoist.js")
+    // The source text of a function or a class (jsFnText, jsClassText).
+    include("lib/js-fnsrc.js")
     include("lib/js-norm.js")
 
 
@@ -3318,8 +3320,7 @@ NotFuncHead = :script(~~
 
     // String(v), exactly as node v24 spells it: "null", "undefined", "1,2,3" for an
     // array (a null / undefined element joining as ""), "[object Object]" for a plain
-    // object. A FUNCTION is the one value neither half can answer node's way (node
-    // prints the source text), so both print "[function]".
+    // object, the source text for a function or a class (jsFnText).
     // ----- Symbols -----
     // A symbol is an object {__symdesc, __symkey}: a new one per Symbol() call, one per
     // name for the well-known ones and per key for Symbol.for. As a property KEY it is
@@ -3508,7 +3509,7 @@ NotFuncHead = :script(~~
         if (v === undefined) { return "undefined" }
         if (v === null) { return "null" }
         if (typeof v == "string") { return v }
-        if (typeof v == "function") { return "[function]" }
+        if (typeof v == "function") { return jsFnText(v) }
         // A BigInt prints as its digits with no 'n' suffix: String(10n) is "10".
         if (isBigInt(v)) { return biToStr(v, 10) }
         if (Array.isArray(v)) {
@@ -3525,6 +3526,7 @@ NotFuncHead = :script(~~
         }
         if (typeof v == "object") {
             if (jsIsSym(v)) { return jsSymStr(v) }
+            if (v.__isclass === true) { return jsClassText(v) }
             var ex = jsExoticPrim(v, "string")
             if (ex != null) { return jsStr(ex.v) }
             var r = jsCallMethod(v, "toString")
@@ -3540,7 +3542,7 @@ NotFuncHead = :script(~~
     // ToPrimitive(v, hint) for the hints "default" and "number": [Symbol.toPrimitive]
     // first, then valueOf, then toString ('[1] == 1' is true).
     function jsToPrim(v, hint) {
-        if (Array.isArray(v)) { return jsStr(v) }
+        if (Array.isArray(v) || typeof v == "function") { return jsStr(v) }
         if (jsIsObjLike(v)) {
             var ex = jsExoticPrim(v, hint)
             if (ex != null) { return ex.v }
@@ -3586,8 +3588,10 @@ NotFuncHead = :script(~~
         if (a === undefined || a === null || b === undefined || b === null) {
             return (a === undefined || a === null) && (b === undefined || b === null)
         }
-        var ao = jsIsObjLike(a)
-        var bo = jsIsObjLike(b)
+        // A function is an object here too: equal to itself alone, and its source
+        // text against a primitive.
+        var ao = jsIsObjLike(a) || typeof a == "function"
+        var bo = jsIsObjLike(b) || typeof b == "function"
         if (ao && bo) { return a === b }
         // A symbol is a primitive equal to itself alone.
         if (jsIsSym(a) || jsIsSym(b)) { return false }
@@ -5021,7 +5025,7 @@ NotFuncHead = :script(~~
     }
     function jsRoText(o, key) { return "Cannot assign to read only property '" + jsStr(jsKeyUnesc(key)) + "' of object '" + jsObjText(o) + "'" }
     // V8 names a function in a refused write by its String(f).
-    function jsFnRoText(f, key) { return "Cannot assign to read only property '" + key + "' of function '" + jsStr(f) + "'" }
+    function jsFnRoText(f, key) { return "Cannot assign to read only property '" + key + "' of function '" + fsElide(jsStr(f)) + "'" }
     function jsAddText(key) { return "Cannot add property " + jsStr(jsKeyUnesc(key)) + ", object is not extensible" }
     function jsDelText(o, key) { return "Cannot delete property '" + jsStr(jsKeyUnesc(key)) + "' of " + jsObjText(o) }
     // The TypeError text a write of v to o[k] meets under o's marks, or "".
@@ -6649,7 +6653,7 @@ NotFuncHead = :script(~~
         // The value answers the method's own name and arity: node says `meth`/1 for
         // `new C().meth` of `meth(x){}`. The closure's registered length already
         // excludes the receiver.
-        var f = fnMetaPut(methodValueFn(m), k, fnLenOf(m))
+        var f = fnMetaSrc(methodValueFn(m), k, fnLenOf(m), fnSrcOf(m))
         mvK.push(m)
         mvV.push(f)
         return f
@@ -6687,6 +6691,29 @@ NotFuncHead = :script(~~
         if (nm === "" && ln === 0) { return f }
         return fnMetaSet(f, nm, ln)
     }
+    // fnMetaPut with the span of the function's source text (lib/js-fnsrc.js), kept as
+    // the meta's third field one above the span id, so that 0 is "none"; sp < 0 is none.
+    function fnMetaSrc(f, nm, ln, sp) {
+        if (sp < 0) { return fnMetaPut(f, nm, ln) }
+        if (typeof f != "function") { return f }
+        return fnMetaSet(f, nm, ln, sp + 1)
+    }
+    function fnSrcOf(f) { return (typeof f == "function") ? fnMeta(f, "src") - 1 : 0 - 1 }
+    // String(f): the source text of its definition; a function that has none - a
+    // builtin, a bound function - is V8's native code. Twins: fn_text in
+    // languages/lib/runtime.c, jsvFnText in abnf/jsrt.go.
+    function jsFnText(f) {
+        var sp = fnSrcOf(f)
+        if (sp >= 0) { return fsText(sp) }
+        return fsNative(fnNameOf(f))
+    }
+    // String(C) of a class: its source text, kept on its constructor; a builtin class
+    // is native code under its name.
+    function jsClassText(c) {
+        var sp = fnSrcOf(c.__ctor)
+        if (sp >= 0) { return fsText(sp) }
+        return fsNative(jsStr(c.__name))
+    }
     function fnNameOf(f) { return (typeof f == "function") ? fnMeta(f, "name") : "" }
     function fnLenOf(f) { return (typeof f == "function") ? fnMeta(f, "length") : 0 }
     // FunctionDeclarationInstantiation's `length`: the parameters BEFORE the first one
@@ -6715,7 +6742,8 @@ NotFuncHead = :script(~~
         // reaching emitStr would put the literal text "undefined" in the module.
         var slot = [(nm == undefined) ? "" : nm]
         fnAnonNote(slot, nm, txt)
-        return function() { return fnMetaPut(t(), slot[0], ln) }
+        var sp = fsTake()
+        return function() { return fnMetaSrc(t(), slot[0], ln, sp) }
     }
     // ----- A named function EXPRESSION sees its own name (ES2023 15.2.5) -----
     // `const f = function fact(n){ return n < 2 ? 1 : n * fact(n-1) }` recurses through
@@ -8711,10 +8739,15 @@ NotFuncHead = :script(~~
         return notImplExpr("update of an expression target", pos)
     }
 
-    // items = [keyThunk, {pval: valueThunk} | {pfn: functionThunk}].
+    // items = [keyThunk, {pval: valueThunk} | {pfn: methodItems}]. A method is built
+    // here rather than by its own tag, so that its source text spans the key.
     function makeComputedProp(items) {
         var v = items[1]
-        return {kt: items[0], t: (v.pval != undefined) ? v.pval : v.pfn}
+        if (v.pval != undefined) {
+            fsTake()
+            return {kt: items[0], t: v.pval}
+        }
+        return {kt: items[0], t: makeFunctionExprItems(v.pfn)}
     }
     // items = [{acc}, key, params, bodyThunk]. The key is a name string (Id) or a thunk
     // (a string/number literal key), and is kept apart the same way makeProp does it.
@@ -8746,8 +8779,9 @@ NotFuncHead = :script(~~
         // A method's own name is its KEY - node says `n` for `{ n(){} }`. A COMPUTED
         // key is only known at run time, so those stay anonymous.
         var mnm = (typeof key == "string") ? key : ""
-        var fn = isGen ? makeGenerator(params, body, st, mnm) : makeFunctionExpr(body, params, st, mnm)
+        var fn = anytype // The function-value thunk of the method's kind.
         if (isAsync) { fn = isGen ? makeAsyncGen(params, body, st, mnm) : makeAsyncFn(params, body, st, mnm) }
+        else { fn = isGen ? makeGenerator(params, body, st, mnm) : makeFunctionExpr(body, params, st, mnm) }
         if (typeof key == "string") { return {k: jsKeyEsc(key), t: fn} }
         return {kt: key, t: fn}
     }
@@ -9884,7 +9918,7 @@ NotFuncHead = :script(~~
         }
         var key = items[i]
         return {kind: "method", name: key.mk, keyT: key.mkT, statik: statik, isGen: isGen,
-                isAsync: isAsync, params: items[i + 1], body: items[i + 2]}
+                isAsync: isAsync, params: items[i + 1], body: items[i + 2], sp: fsTake()}
     }
     function makeCtor(items) {
         return {kind: "ctor", params: items[0], body: items[1]}
@@ -9899,7 +9933,7 @@ NotFuncHead = :script(~~
     function makeClassAccessor(items) {
         var key = items[2]
         return {kind: "accessor", acc: items[1].acc, name: key.mk, keyT: key.mkT,
-                statik: hasStatic(items[0].mods), params: items[3], body: items[4]}
+                statik: hasStatic(items[0].mods), params: items[3], body: items[4], sp: fsTake()}
     }
     function makeStaticBlock(body) { return {kind: "staticblock", body: body} }
 
@@ -9920,6 +9954,7 @@ NotFuncHead = :script(~~
     // binding it is assigned to (NamedEvaluation, see fnAnonNote) as its `name`, and
     // binds no name inside its body. Twin of makeClassExpr in the -to-llvm-ir.abnf.
     function makeClassValue(items, txt) {
+        var csp = fsTake()
         var name = ""
         var superName = null
         var superT = null // A heritage EXPRESSION, evaluated once per class build.
@@ -10002,8 +10037,8 @@ NotFuncHead = :script(~~
                     // An accessor is called with the receiver in the one-shot slot, never
                     // as arguments[0], so a static and an instance accessor are built the
                     // same way. node names it "get k" / "set k".
-                    addAccessor(ptgt, pm.acc, pk, fnMetaPut(makeClosure(pm.params, pm.body, mscopes, true),
-                                                            pm.acc + " " + pk, fnArity(pm.params)))
+                    addAccessor(ptgt, pm.acc, pk, fnMetaSrc(makeClosure(pm.params, pm.body, mscopes, true),
+                                                            pm.acc + " " + pk, fnArity(pm.params), pm.sp))
                 } else {
                     scopePut(ptgt, pk, classMemberFn(pm, mscopes, pk))
                 }
@@ -10012,10 +10047,10 @@ NotFuncHead = :script(~~
             }
             cls["__pnames"] = pnames
             if (ctorInfo != null) {
-                cls["__ctor"] = fnMetaPut(makeCtorClosure(ctorInfo.params, ctorInfo.body, fields, mscopes, hasOwn(cls, "__super"), false),
-                                          "", fnArity(ctorInfo.params))
+                cls["__ctor"] = fnMetaSrc(makeCtorClosure(ctorInfo.params, ctorInfo.body, fields, mscopes, hasOwn(cls, "__super"), false),
+                                          "", fnArity(ctorInfo.params), csp)
             } else {
-                cls["__ctor"] = makeCtorClosure([], null, fields, mscopes, hasOwn(cls, "__super"), true)
+                cls["__ctor"] = fnMetaSrc(makeCtorClosure([], null, fields, mscopes, hasOwn(cls, "__super"), true), "", 0, csp)
             }
             // The static initializers run now, with the methods already in place (a static
             // block may call them) and 'this' bound to the class.
@@ -10046,15 +10081,15 @@ NotFuncHead = :script(~~
         // arguments[0], which is not a declared parameter and so does not count.
         // An ACCESSOR is named "get k"/"set k" (see makeClassAccessor's caller).
         if (m.statik) {
-            if (m.isGen && m.isAsync) { return fnMetaPut(makeAsyncGen(m.params, m.body, true, mnm)(), mnm, fnArity(m.params)) }
-            if (m.isGen) { return fnMetaPut(makeGenerator(m.params, m.body, true, mnm)(), mnm, fnArity(m.params)) }
-            if (m.isAsync) { return fnMetaPut(makeAsyncFn(m.params, m.body, true, mnm)(), mnm, fnArity(m.params)) }
-            return fnMetaPut(makeClosure(m.params, m.body, mscopes, true), mnm, fnArity(m.params))
+            if (m.isGen && m.isAsync) { return fnMetaSrc(makeAsyncGen(m.params, m.body, true, mnm)(), mnm, fnArity(m.params), m.sp) }
+            if (m.isGen) { return fnMetaSrc(makeGenerator(m.params, m.body, true, mnm)(), mnm, fnArity(m.params), m.sp) }
+            if (m.isAsync) { return fnMetaSrc(makeAsyncFn(m.params, m.body, true, mnm)(), mnm, fnArity(m.params), m.sp) }
+            return fnMetaSrc(makeClosure(m.params, m.body, mscopes, true), mnm, fnArity(m.params), m.sp)
         }
-        if (m.isGen && m.isAsync) { return fnMetaPut(makeInstanceAsyncGen(m.params, m.body, mscopes), mnm, fnArity(m.params)) }
-        if (m.isGen) { return fnMetaPut(makeInstanceGenerator(m.params, m.body, mscopes), mnm, fnArity(m.params)) }
-        if (m.isAsync) { return fnMetaPut(makeInstanceAsync(m.params, m.body, mscopes), mnm, fnArity(m.params)) }
-        return fnMetaPut(makeInstanceClosure(m.params, m.body, mscopes), mnm, fnArity(m.params))
+        if (m.isGen && m.isAsync) { return fnMetaSrc(makeInstanceAsyncGen(m.params, m.body, mscopes), mnm, fnArity(m.params), m.sp) }
+        if (m.isGen) { return fnMetaSrc(makeInstanceGenerator(m.params, m.body, mscopes), mnm, fnArity(m.params), m.sp) }
+        if (m.isAsync) { return fnMetaSrc(makeInstanceAsync(m.params, m.body, mscopes), mnm, fnArity(m.params), m.sp) }
+        return fnMetaSrc(makeInstanceClosure(m.params, m.body, mscopes), mnm, fnArity(m.params), m.sp)
     }
     // A generator as an instance method: the receiver arrives as arguments[0], like for
     // every other instance method, and becomes the generator body's 'this'.
@@ -10466,7 +10501,9 @@ NotFuncHead = :script(~~
             if (br != null) { return br.v }
         }
         if (op == "+") {
-            if (jsIsObjLike(l) || jsIsObjLike(r)) { return binOp(op, jsToPrim(l, "default"), jsToPrim(r, "default")) }
+            if (jsIsObjLike(l) || jsIsObjLike(r) || typeof l == "function" || typeof r == "function") {
+                return binOp(op, jsToPrim(l, "default"), jsToPrim(r, "default"))
+            }
         }
         if (op == "+") return l + r
         // A string operand of an arithmetic, bitwise or relational operator (unless

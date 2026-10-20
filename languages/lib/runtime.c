@@ -473,6 +473,10 @@ long RT_MISS_SET;    /* closure(key, obj)  -> the value to throw, or 0 = abort *
 long RT_MISS_FN;     /* closure(callee, args) -> the call's result, or 0 = abort */
 long RT_GEN_BUSY;    /* closure()          -> the value to throw, or 0 = abort (gen_busy) */
 long RNG_STATE;      /* Math.random's xorshift64 state, 0 until the first call */
+long FN_SRC_TEXT;    /* a js program's function source text (js_jssrc), or 0 */
+long FN_SRC_TAB;     /* its span table; 0 while none is registered */
+long FN_SRC_SE;      /* the table parsed: from at 2*idx, to at 2*idx+1, -1 = none */
+long FN_SRC_N;       /* how many indexes FN_SRC_SE covers */
 
 void gc_collect(void);
 
@@ -2727,6 +2731,7 @@ long str_to_num(long h) {
 /* -------------------------------------------------- the value operations - */
 
 long to_string(long h);
+long fn_text(long h);
 long to_number(long h);
 int truthy(long h);
 long js_call(long callee, long self, long args);
@@ -2791,7 +2796,10 @@ long to_string(long h) {
 		return out;
 	}
 	if (t == 6) { return mk_cstr("[object Object]"); }
-	if (t == 7 || t == 8 || t == 9 || t == 16) { return mk_cstr("[function]"); }   /* tag 16 too: the Go twin's js_genfn result is a *hostFunc */
+	if (t == 7 || t == 8 || t == 9 || t == 16) {   /* tag 16 too: the Go twin's js_genfn result is a *hostFunc */
+		if (FN_SRC_TAB != 0) { return fn_text(h); }
+		return mk_cstr("[function]");
+	}
 	if (t == 11) { return mk_cstr("[scope]"); }
 	return mk_cstr("[value]");
 }
@@ -4177,6 +4185,8 @@ long host_call(long id, long self, long args);
 long builtin_method(long recv, long mid, long args);
 long js_jsfnmeta(long f, long nm, long ln);
 long fn_meta_get(long f, long key);
+long fn_src_idx(long f);
+int fn_kind(long h);
 
 long gen_create(long gf, long args);
 
@@ -6457,7 +6467,13 @@ long host_call(long id, long self, long args) {
 	case 93: { return mk_dnum(d_fround(arg_d(args, 0))); }
 	/* fnMeta(f, key) / fnMetaSet(f, name, length): see js_jsfnmeta. */
 	case 94: { return fn_meta_get(arg_at(args, 0), arg_str(args, 1)); }
-	case 95: { return js_jsfnmeta(arg_at(args, 0), arg_str(args, 1), mk_num(arg_num(args, 2))); }
+	case 95: {
+		/* A fourth argument is fn_meta_get's "src": where the source text is. */
+		if (arr_len(args) > 3 && tag_of(arg_at(args, 3)) == 3 && fn_kind(arg_at(args, 0))) {
+			sd(arg_at(args, 0), d_to_long(d_trunc(arg_num(args, 3))));
+		}
+		return js_jsfnmeta(arg_at(args, 0), arg_str(args, 1), mk_num(arg_num(args, 2)));
+	}
 	/* Math.random: xorshift64, seeded once from getentropy (time() if that
 	 * fails). The top 52 bits of the state become the mantissa of a double in
 	 * [1, 2), and subtracting 1 gives [0, 1). The Go twin uses math/rand. */
@@ -6761,6 +6777,8 @@ void gc_roots(void) {
 	gc_try(RT_MISS_SET, 1);
 	gc_try(RT_MISS_FN, 1);
 	gc_try(RT_GEN_BUSY, 1);
+	gc_try(FN_SRC_TEXT, 1);
+	gc_try(FN_SRC_TAB, 1);
 	gc_try(RETSLOT, 1);
 	gc_try(GEN_EXIT, 1);
 	if (NIC_YOUNG != 0) { while (i < 1281) { gc_try(NIC[i], 1); i = i + 1; } }
@@ -6906,7 +6924,78 @@ long fn_meta_get(long f, long key) {
 	if (!fn_kind(f)) { return H_UNDEF; }
 	if (str_eq_c(key, "name")) { if (fe(f) == 0) { return mk_cstr(""); } return fe(f); }
 	if (str_eq_c(key, "length")) { return mk_num(d_from_long(ff(f))); }
+	/* One above the function index whose source text f shows, 0 for none; undefined
+	 * while no program registered any (fn_src_idx). */
+	if (str_eq_c(key, "src")) { if (FN_SRC_TAB == 0) { return H_UNDEF; } return mk_num(d_from_long(fn_src_idx(f) + 1)); }
 	return H_UNDEF;
+}
+
+/* The source text of a js program's functions, which String(f) answers (ES2023
+ * 20.2.3.5). The module registers it once (js_jssrc): the text of its files and a
+ * table of "idx,from,to;" entries behind the highest index and a ';', from/to in
+ * UTF-16 units of that text, one entry per function index whose definition has a
+ * span. It is parsed on the first String(f). A closure shows its own index (fa); a
+ * value that is no plain closure was linked to one by js_jsfnsrc, which keeps it
+ * one above in the otherwise unused field d. Only a js module registers a table, so
+ * every other language keeps "[function]". Twins: jsvFnText and the two externs in
+ * abnf/jsrtjsprint.go. */
+long js_jssrc(long text, long tab) { FN_SRC_TEXT = text; FN_SRC_TAB = tab; FN_SRC_SE = 0; return H_UNDEF; }
+long js_jsfnsrc(long f, long idx) { if (fn_kind(f)) { sd(f, d_to_long(d_trunc(to_number(idx))) + 1); } return f; }
+void fn_src_parse(void) {
+	const char *p = str_ptr(FN_SRC_TAB);
+	long n = str_len(FN_SRC_TAB);
+	long i = 0;
+	long v = 0;
+	long k = 0;
+	long f[3];
+	long *se;
+	while (i < n && p[i] != 59) { v = v * 10 + ((int)p[i] & 255) - 48; i = i + 1; }
+	FN_SRC_N = v + 1;
+	FN_SRC_SE = (long)malloc(FN_SRC_N * 16);
+	se = (long *)FN_SRC_SE;
+	k = 0;
+	while (k < FN_SRC_N * 2) { se[k] = -1; k = k + 1; }
+	i = i + 1;
+	v = 0;
+	k = 0;
+	while (i < n) {
+		int c = (int)p[i] & 255;
+		if (c == 44 || c == 59) {
+			f[k] = v;
+			k = k + 1;
+			v = 0;
+			if (c == 59) {
+				if (k == 3 && f[0] >= 0 && f[0] < FN_SRC_N) { se[2 * f[0]] = f[1]; se[2 * f[0] + 1] = f[2]; }
+				k = 0;
+			}
+		} else { v = v * 10 + c - 48; }
+		i = i + 1;
+	}
+}
+/* The function index whose source text f shows, or -1. */
+long fn_src_idx(long f) {
+	long t = tag_of(f);
+	long idx = -1;
+	long *se;
+	if (fd(f) != 0) { idx = fd(f) - 1; }
+	else if (t == 7) { idx = fa(f); }
+	else if (t == 16) { return fn_src_idx(fa(f)); }
+	if (FN_SRC_SE == 0) { fn_src_parse(); }
+	se = (long *)FN_SRC_SE;
+	if (idx < 0 || idx >= FN_SRC_N) { return -1; }
+	if (se[2 * idx] < 0) { return -1; }
+	return idx;
+}
+/* String(f): the source text of its definition, or V8's native code for a function
+ * that has none - a builtin, a bound function. */
+long fn_text(long h) {
+	long idx = fn_src_idx(h);
+	long nm = fe(h);
+	long *se;
+	if (idx >= 0) { se = (long *)FN_SRC_SE; return u_slice(FN_SRC_TEXT, se[2 * idx], se[2 * idx + 1]); }
+	if (nm == 0) { nm = mk_cstr(""); }
+	if (str_len(nm) >= 6) { if (str_eq_c(str_slice(nm, 0, 6), "bound ")) { nm = mk_cstr(""); } }
+	return str_cat(str_cat(mk_cstr("function "), nm), mk_cstr("() { [native code] }"));
 }
 
 long js_scope_new(long parent) { return mk_scope(scope_of(parent)); }

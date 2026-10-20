@@ -631,6 +631,9 @@ type jsrt struct {
 	// Array, Object, ...), as the grammar declared them: `(7).constructor` answers
 	// the program's own Number (jsvBuiltinCtor).
 	jsGlobals map[string]interface{}
+	// jsSrc is a js program's function source text (js_jssrc); while it is nil a
+	// function prints as [function], as in every other language.
+	jsSrc *jsvSrcTable
 }
 
 // luOutText decodes a Lua byte string (one unit per byte) as UTF-8 host text, a
@@ -1868,6 +1871,9 @@ func (rt *jsrt) toString(v interface{}) string {
 	case *jsObject:
 		return "[object Object]"
 	case *jsClosure, *hostFunc, *boundMethod:
+		if rt.jsSrc != nil {
+			return rt.jsvFnText(v)
+		}
 		return "[function]"
 	default:
 		return fmt.Sprintf("%v", v)

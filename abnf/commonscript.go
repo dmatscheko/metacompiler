@@ -655,6 +655,8 @@ func installGojaFnMeta(vm *goja.Runtime) {
 			return vm.ToValue(mi.name)
 		case "length":
 			return vm.ToValue(mi.length)
+		case "src":
+			return vm.ToValue(mi.src)
 		}
 		return goja.Undefined()
 	})
@@ -662,6 +664,13 @@ func installGojaFnMeta(vm *goja.Runtime) {
 		f := call.Argument(0)
 		if o := fnObj(f); o != nil {
 			mi := &jsvFnInfo{name: call.Argument(1).String(), length: int(call.Argument(2).ToFloat())}
+			if len(call.Arguments) > 3 {
+				mi.src = int(call.Argument(3).ToFloat())
+			} else if v := o.GetSymbol(sym); v != nil {
+				if p, ok := v.Export().(*jsvFnInfo); ok {
+					mi.src = p.src
+				}
+			}
 			if err := o.DefineDataPropertySymbol(sym, vm.ToValue(mi), goja.FLAG_TRUE, goja.FLAG_FALSE, goja.FLAG_TRUE); err != nil {
 				panic(err)
 			}
