@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-672** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-676** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -117,14 +117,15 @@ not change the renderer.
 
 # GO — Go  (oracle: `go run`)
 
-### T-632 go: regexp (RE2 dialect), encoding/json and reflect, real stdin · P2 · GO · IN PROGRESS (GO worker, round 9) [V]
-regexp needs an RE2 dialect flag on the shared lib/regex.js / abnf/jsrtregex.go (additive, flag-gated): `^`/`$` only at text
-start/end without (?m); inline (?i)(?m)(?s)(?U); (?P<name>) and (?<name>); \pL / \p{Greek}; POSIX [[:alpha:]]; \Q..\E; reject
-backreferences and lookaround; Go's empty-match advance in FindAll/ReplaceAll; $1 / ${name} expansion. encoding/json and reflect need
-run-time struct field names, types and tags (a new builtin in three engines). Real stdin (bufio.NewScanner(os.Stdin) reads empty)
-needs a host read primitive in the C floor, the Go twin and both script hosts (shared with python's input(), T-629). Known
-non-match, not modelled: gc ≥1.25 gives a non-escaping slice's first backing array a 32-byte stack buffer (append to a nil []int
-reports cap 4 where growslice says 1) — escape analysis.
+### T-672 go: `*t = *o` through a pointer; zero embedded struct field is nil; typed package constants print as numbers · P2 · GO · OPEN [V]
+`func (t *T) set(o *T) { *t = *o }` copies nothing in any engine (go prints 5, ours 0); `*p = T{7}` works. A zero-valued embedded
+struct field is nil instead of a zero instance, so `S{}` has none of the embedded type's promoted methods. `fmt.Println(time.March,
+reflect.Map)` → `3 21` in both halves (go `March map`); `time.Month(4)` and declared vars print correctly.
+
+### T-673 go: fmt.Sscanf / Scan family; `%T` of a func and of os.Stdin/os.Stdout; `*(v.p.(*int)) = 5` does not parse · P3 · GO · OPEN [V]
+`fmt.Sscanf` / `Sscan` / `Fscan` → "unknown method 'Sscanf'" (all engines). `fmt.Printf("%T", f)` for a func → `%!T(0x…)` (go
+`func(int) int`); `%T` of os.Stdin → not `*os.File`, and `r.(io.Reader)` on it misreports. `*(v.p.(*int)) = 5` is a parse error in
+both grammars.
 
 ---
 
@@ -173,6 +174,15 @@ parameter), which no engine prints either.
 ---
 
 # CORE — MetaJS, the engines, shared runtime, tooling
+
+### T-674 go (CORE): native recursion capped at ~500 Go frames by the js_gotry jump-buffer stack · P2 · CORE · OPEN [V]
+Every Go function runs through js_gotry and runtime.c caps the setjmp stack at JB_CAP=512 (`die("try nested too deeply")`), so a
+native Go program recursing ~500 deep dies (also json.Unmarshal of a valid 10000-deep value); interp and llvm.Run are fine, go
+itself handles millions. Related to T-505 (what a too-deep recursion should raise).
+
+### T-675 regex (CORE): the shared backtracking matcher recurses per SPLIT and overflows the native stack · P3 · CORE · OPEN [V]
+`re.match(r"^.*$", "ab"*35000)` (python) and Go `regexp.MustCompile("^.*$").MatchString(70 KB)` exit 139 natively; CPython and go
+match. lib/regex.js's matcher needs an explicit backtrack stack (or loop-for-greedy-star) instead of a call per SPLIT.
 
 ### T-640 js (CORE): arguments mapped through another function; array holes · P3 · CORE · OPEN [V]
 `function h(a){ a[0] = 9 } function f(p){ h(arguments); return p }; f(1)` → all legs 1 (node 9); likewise a closure writing through
@@ -766,6 +776,7 @@ T-665 php: generator argument count checked at first resume; get_class/get_paren
 T-664 js: replacing a constructor's prototype; getPrototypeOf/setPrototypeOf/defineProperty; toLocaleString; Object.create(null) — DONE e4c56dde (PARTIAL: replaced prototypes, get/setPrototypeOf, defineProperty/ies, create(null), toLocaleString — 4 legs = node; valueOf.call boxing → T-669)
 T-667 php: ArgumentCountError unavailable unless spelled; arrow-function generators — DONE e7427422 (ArgumentCountError class without the name; arrow-fn generators; new nolib matrix pair)
 T-668 php: scalar parameter and return types are never checked — DONE 2e67e859 + e3111793 (scalar/nullable/union/class param+return types with weak coercion, strict widening, generator args at the call; spec-only from php-src)
+T-632 go: regexp (RE2 dialect), encoding/json and reflect, real stdin — DONE 36957e91 b805369c c0936e9d (regexp RE2 dialect + Go errors, os.Stdin via readIn, encoding/json incl. depth limit and checked ,string; reflect subset json needs — 4 legs = go run; reflect method sets/Call/MakeSlice, CompilePOSIX/Longest, MarshalJSON on non-struct types DECLINED: no program in scope needs them; follow-ups T-672..T-675)
 
 # Settled — do not re-open
 
