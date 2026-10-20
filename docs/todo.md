@@ -175,11 +175,6 @@ line tracking at warning sites is worth its cost.
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
 
-### T-648 lua: `tonumber("-0.0")` loses the zero's sign in the interpreter and natively · P1 · LUA · IN PROGRESS (LUA worker, round 8) [V]
-`for _, s in ipairs({"-0.0"," -0.0 ","-0e5","-0x0p0","-.0"}) do print(tonumber(s), math.type(tonumber(s))) end` → interp and native
-`0.0 float`; llvm.Run and lua 5.5 `-0.0 float` (and `-0` → `0 integer`). luaNumVal (lua-interpreter.abnf) and luParseNum
-(lib/lua-rt.metajs).
-
 ---
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
@@ -764,6 +759,7 @@ T-605 lua: the string metatable's `__index` cannot be replaced; `next(_G)` skips
 T-637 java: static field and method of one name; field hiding; lazy static init; nested type names hoisted globally — DONE 84f9d63d (all P1 parts; Cloneable, live descending views, Matcher regions; hitEnd/requireEnd are T-646)
 T-643 kotlin: `sorted()` results and deques answer `is ArrayList` true; SortedSet key views; javaClass.name — DONE 5238c524
 T-645 lua: string arithmetic ignores the strings' metatable — DONE 0ccab79f
+T-648 lua: `tonumber("-0.0")` loses the zero's sign in the interpreter and natively — DONE a735f8fd
 
 # Settled — do not re-open
 
