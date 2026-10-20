@@ -445,6 +445,61 @@ func phpClassFind(cls interface{}, name string) interface{} {
 	return nil
 }
 
+// phpArgSlots reads the argument slots of a call (args, the first off of them
+// the receiver's) against its callee's parameter list sig (sigText): n, the
+// count passed, up to the last fixed slot filled plus the positions the
+// variadic's collected tail holds (a named argument it took is not counted);
+// gap, the first of the req required slots left empty before n (-1: none); and
+// fixed, the count of non-variadic parameters.
+// Twin of phArgSlots in languages/lib/php-rt.metajs.
+func (rt *jsrt) phpArgSlots(args interface{}, off int, sig string, req int) (n, gap, fixed int) {
+	slots := args.(*jsArray).elems
+	if off < len(slots) {
+		slots = slots[off:]
+	} else {
+		slots = nil
+	}
+	fixed = strings.Count(sig, ",") + 1
+	if sig == ")" {
+		fixed = 0
+	}
+	variadic := strings.Contains(sig, "...")
+	if variadic {
+		fixed--
+	}
+	for i, v := range slots {
+		if v != jsUndef && (i < fixed || !variadic) {
+			n = i + 1
+		}
+	}
+	if variadic && len(slots) > fixed {
+		more := 0
+		if keys, _, ok := phpArrParts(slots[fixed]); ok {
+			for _, k := range keys.elems {
+				if _, isPos := k.(float64); isPos {
+					more++
+				}
+			}
+		}
+		if more > 0 {
+			n = fixed + more
+		}
+	}
+	gap = -1
+	for i := 0; i < req && i < n; i++ {
+		if i >= len(slots) || slots[i] == jsUndef {
+			gap = i
+			break
+		}
+	}
+	return n, gap, fixed
+}
+
+// phpSigName is parameter i's name in parameter list sig (sigText).
+func phpSigName(sig string, i int) string {
+	return strings.Split(sig, ",")[i]
+}
+
 // phpPlaceArgs lays a call's arguments out in the parameter positions of a callee
 // known only at run time. sig is the parameter list the emitter recorded in the
 // function's meta name (withSig in php-to-llvm-ir.abnf): the names without '$',
@@ -3825,24 +3880,40 @@ func init() {
 			rt.phpRaise(rt.phpStr(u(a[0])), rt.phpStr(u(a[1])))
 			return 0
 		}
-		// (args, name, min, max, cls): the ArgumentCountError (class cls) of a
-		// library function whose entry found its arguments outside [min, max]
-		// (max -1: variadic, its last slot the collected tail). The count is of
-		// the slots a call filled. Twin of js_pharity in
-		// languages/lib/php-rt.metajs.
+		// (args, off, name, sig, min, max, cls): the ArgumentCountError (class cls)
+		// of a library function or method whose entry found its arguments short of
+		// min or past max (-1: none): "not passed" for a required slot left empty
+		// before a later one (zend_handle_undef_args), else the internal count
+		// error. Twin of js_pharity in languages/lib/php-rt.metajs.
 		m["js_pharity"] = func(a []uint64) uint64 {
-			args := u(a[0]).(*jsArray).elems
-			min, max := int(rt.toNumber(u(a[2]))), int(rt.toNumber(u(a[3])))
-			if max < 0 && len(args) > 0 {
-				args = args[:len(args)-1]
+			name, sig := rt.phpStr(u(a[2])), rt.phpStr(u(a[3]))
+			min, max := int(rt.toNumber(u(a[4]))), int(rt.toNumber(u(a[5])))
+			n, gap, _ := rt.phpArgSlots(u(a[0]), int(rt.toNumber(u(a[1]))), sig, min)
+			msg := phpArityMsg(name, min, max, n)
+			if gap >= 0 {
+				msg = phpNotPassedMsg(name, gap+1, "$"+phpSigName(sig, gap))
 			}
-			given := 0
-			for _, v := range args {
-				if v != jsUndef {
-					given++
-				}
+			panic(&jsThrown{value: rt.phpMkErrOf(u(a[6]), msg)})
+		}
+		// (args, off, who, scope, sig, req, where, cls): the ArgumentCountError
+		// (class cls) of a user function whose entry found a required slot empty:
+		// "not passed" before a later one (zend_handle_undef_args), else the count
+		// with the call site's text where (zend_missing_arg_error). A closure's
+		// class scope, when scope is a class, prefixes its name. Twin of
+		// js_phargmiss in languages/lib/php-rt.metajs and phpMissArg in
+		// php-interpreter.abnf.
+		m["js_phargmiss"] = func(a []uint64) uint64 {
+			name, sig := rt.phpStr(u(a[2])), rt.phpStr(u(a[4]))
+			if sc, isO := u(a[3]).(*jsObject); isO && sc.props["__isclass"] == true {
+				name = rt.phpStr(sc.props["__name"]) + "::" + name
 			}
-			panic(&jsThrown{value: rt.phpMkErrOf(u(a[4]), phpArityMsg(rt.phpStr(u(a[1])), min, max, given))})
+			req := int(rt.toNumber(u(a[5])))
+			n, gap, fixed := rt.phpArgSlots(u(a[0]), int(rt.toNumber(u(a[1]))), sig, req)
+			msg := phpMissArgMsg(name, n, req, req == fixed, rt.phpStr(u(a[6])))
+			if gap >= 0 {
+				msg = phpNotPassedMsg(name, gap+1, "$"+phpSigName(sig, gap))
+			}
+			panic(&jsThrown{value: rt.phpMkErrOf(u(a[7]), msg)})
 		}
 		// The floor's js_rt_missvar hook, php half. Twin of js_phmissname in
 		// languages/lib/php-rt.metajs.

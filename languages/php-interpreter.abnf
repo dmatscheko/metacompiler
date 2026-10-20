@@ -645,7 +645,7 @@ CallHead    <~~ push({headT: pop(), headFn: callHeadName(up.in)}) ~~>
 // A field step directly before '(' is a method call, not a field.
 ChainHead   <~~ push({headT: pop(), headFn: callHeadName(up.in)}) ~~>
             = ChainExpr ;
-ChainExpr   <~~ push(foldCallMember(takeAll())) ~~>
+ChainExpr   <~~ push(foldCallMember(takeAll(), up.start)) ~~>
             = Primary ChainSeg { ChainSeg } | ChainCall0 { ChainSeg } ;
 ChainCall0  = Call | StaticExpr | "(" Expression ")" ;
 ChainSeg    = { ChainPlain } ( MethodSfx | DynMethodSfx | CallSfx | StaticSfx ) ;
@@ -978,7 +978,7 @@ IncDecOp    <~~ push(up.in) ~~> = "++" | "--" ;
 OpAssign    = AssignOp <~~ push(up.in) ~~> ExprCore ;
 
 // A primary followed by any mix of ->method(args), ->field, [index], (call), ::static.
-CallMember  <~~ push(foldCallMember(takeAll())) ~~>
+CallMember  <~~ push(foldCallMember(takeAll(), up.start)) ~~>
             = Primary { MethodSfx | DynMethodSfx | FieldSfx | DynFieldSfx | IndexSfx | CallSfx | StaticSfx } ;
 // '?->' short circuits: when the receiver is null the WHOLE remaining chain yields
 // null and the arguments are never evaluated, so the two forms cannot share a rule.
@@ -1095,7 +1095,7 @@ EmptyExpr   <~~ push(makeEmpty(pop())) ~~>
 VarVar      <~~ push(makeVarVar(pop())) ~~>
             = "$" ( VarRef | VarVar | "{" Expression "}" ) ;
 
-NewExpr     <~~ push(makeNew(takeAll())) ~~>
+NewExpr     <~~ push(makeNew(takeAll(), up.start)) ~~>
             = KwNew NewTarget [ "(" [ ArgList ] ")" ] ;
 // new C(...) / new $className(...) / new static() - the class may be computed.
 NewTarget   = NewStatic | NewDyn | NewParen | NewName ;
@@ -1114,7 +1114,7 @@ NewDyn      <~~ push({clsdyn: pop()}) ~~> = VarRef ;
 // new class (args) extends B implements I { ... }: an anonymous class. The body is a
 // real class body (Member), not a balanced skip, and the constructor arguments are
 // labelled so makeNewAnon can tell them from the members.
-NewAnon     <~~ push(makeNewAnon(takeAll())) ~~>
+NewAnon     <~~ push(makeNewAnon(takeAll(), up.start)) ~~>
             = KwNew [ AttrGrp ] KwClass <~~ push({anonAt: cloNoteAnon(up.pos)}) ~~> [ AnonArgs ] [ KwExtends ExtBase ] [ KwImplements ImplList ] "{" { Member } "}" ;
 AnonArgs    <~~ push({sargs: takeAll()}) ~~>
             = "(" [ ArgList ] ")" ;
@@ -1168,7 +1168,7 @@ QName       = [ "\\" ] [ KwNamespace "\\" ] Name { "\\" MethodName } ;
 // context names self:: (the declaring class), static:: (the class the call was made
 // through - late static binding) and parent:: (the base class, dispatched WITHOUT
 // late static binding). 'static' is a reserved word, so it cannot come through Name.
-StaticExpr  <~~ push(makeStaticExpr(takeAll(), up.pos)) ~~>
+StaticExpr  <~~ push(makeStaticExpr(takeAll(), up.pos, up.start)) ~~>
             = StaticBase "::" StaticMember [ StaticArgs ] ;
 StaticBase  <~~ push({sbase: relName(lastSeg(stripWs(up.in))), sraw: stripWs(up.in)}) ~~>
             = ( "static" KwEnd | QName ) ;
@@ -1223,7 +1223,7 @@ PlainItem   <~~ push({elem: pop()}) ~~>
             = Expression ;
 
 // f(args): a top-level function or builtin call.
-Call        <~~ push(makeCall(takeAll())) ~~>
+Call        <~~ push(makeCall(takeAll(), up.start)) ~~>
             = QName <~~ push(lastSeg(up.in)) ~~> "(" [ ArgList ] ")" ;
 
 VarRef      <~~ push(makeVarRef(pop())) ~~>
@@ -1655,7 +1655,16 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     // Twin of emitArgTmp's check in php-to-llvm-ir.abnf.
     function namedTwice(nk) { phpRaise("Error", "Named parameter " + nk + " overwrites previous argument") }
-    function evalArgs(args) {
+    // Where a call starting at pos stands, which a user function given too few
+    // arguments names (phsMissArgMsg): the caller's file and line. "" inside the
+    // library, whose calls PHP makes from internal code, which names none.
+    // Twin of callSite in php-to-llvm-ir.abnf.
+    function callSite(pos) {
+        if (pos == undefined || phpLibDepth > 0) { return "" }
+        return phsCallSite(c.curFileAbs(), c.lineOf(pos))
+    }
+    // site is where the call stands (callSite), for the callee's count check.
+    function evalArgs(args, site) {
         var pos = []
         var named = {}
         var nkeys = []
@@ -1723,7 +1732,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             pos.push(av)
             tgts.push(a.argtgt == undefined ? (a.noref === true ? NOREF : null) : mkCellMaker(a.argtgt, here, {v: av}))
         }
-        return {pos: pos, named: hasNamed ? named : null, nkeys: nkeys, tgts: tgts, ntgts: ntgts, fcc: fcc, holes: holes}
+        return {pos: pos, named: hasNamed ? named : null, nkeys: nkeys, tgts: tgts, ntgts: ntgts, fcc: fcc, holes: holes, site: site}
     }
     // A named argument that no parameter declares and no variadic collects raises,
     // and so does one naming a parameter a positional argument already filled; both
@@ -1761,8 +1770,40 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             return cell
         }
     }
-    // Binds one call's arguments into the CURRENT (already pushed) frame.
-    function bindParams(params, argset) {
+    // Parameter at, which has no default, was left unfilled: an ArgumentCountError
+    // naming the function who, cls::who for a method of class cls or a closure
+    // whose class scope (CLO_SCOPE: the running frame's) is cls. A call that
+    // fills a later parameter by name gets "not passed" (zend_handle_undef_args),
+    // any other the count (zend_missing_arg_error), where passed counts up to the
+    // last parameter filled and a default before a required parameter is not one
+    // (zend_compile_params). Twin of emitArgCheck in php-to-llvm-ir.abnf.
+    var CLO_SCOPE = {}
+    function phpMissArg(params, at, argset, who, cls) {
+        var k = anytype
+        k = cls === CLO_SCOPE ? ctxSelf() : cls
+        var name = k != null && k != undefined && k.__isclass === true ? k.__name + "::" + who : who
+        var req = 0
+        var fixed = 0
+        var passed = argset.pos.length
+        for (var i = 0; i < params.length && params[i].variadic !== true; i++) {
+            fixed = i + 1
+            if (params[i].def == null) { req = i + 1 }
+            if (argset.named != null && hasOwn(argset.named, params[i].name) && passed < i + 1) { passed = i + 1 }
+        }
+        if (passed > at) { phpRaise("ArgumentCountError", phsNotPassedMsg(name, at + 1, params[at].name)) }
+        var where = argset.site == undefined ? "" : argset.site
+        phpRaise("ArgumentCountError", phsMissArgMsg(name, passed, req, req == fixed, where))
+    }
+    // Does a required parameter follow parameter i, making its default none?
+    function phpReqAfter(params, i) {
+        for (var j = i + 1; j < params.length; j++) {
+            if (params[j].variadic !== true && params[j].def == null) { return true }
+        }
+        return false
+    }
+    // Binds one call's arguments into the CURRENT (already pushed) frame; who and
+    // cls name the function for phpMissArg.
+    function bindParams(params, argset, who, cls) {
         var pos = argset.pos
         var named = argset.named
         if (named != null) { checkNamedArgs(params, argset) }
@@ -1817,7 +1858,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             v = null
             if (i < pos.length) { v = argValue(pos[i]); have = true }
             else if (named != null && hasOwn(named, p.name)) { v = argValue(named[p.name]); have = true }
-            if (!have) { v = p.def == null ? null : p.def() }
+            if (!have && (p.def == null || (named != null && phpReqAfter(params, i)))) { phpMissArg(params, i, argset, who, cls) }
+            if (!have) { v = p.def() }
             declVar(p.name, phpCopy(v))
         }
     }
@@ -3927,10 +3969,11 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     // A chain called with coalIs is the left operand of '??' (makeCoalesce): its
     // element reads are phpIndexIs.
-    foldCallMember = function(items) {
+    foldCallMember = function(items, start) {
         if (items.length == 1) { return items[0] }
         var primary = items[0]
         var suffixes = items.slice(1)
+        var site = callSite(start)
         return function(mode) {
             var cur = anytype
             cur = primary()
@@ -3939,12 +3982,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 // '?->' on a null receiver short circuits the WHOLE remaining chain,
                 // arguments included - which is why this test sits before evalArgs.
                 if (s.ns === true && (cur === null || cur === undefined)) { return null }
-                if (s.kind == "mcall") { cur = mcall(cur, s.name, evalArgs(s.args)) }
-                else if (s.kind == "dmcall") { cur = mcall(cur, phpStr(s.name()), evalArgs(s.args)) }
+                if (s.kind == "mcall") { cur = mcall(cur, s.name, evalArgs(s.args, site)) }
+                else if (s.kind == "dmcall") { cur = mcall(cur, phpStr(s.name()), evalArgs(s.args, site)) }
                 else if (s.kind == "field") { cur = phpGetProp(cur, s.name, mode === coalIs) }
                 else if (s.kind == "dfield") { cur = phpGetProp(cur, phpStr(s.name()), mode === coalIs) }
-                else if (s.kind == "call") { cur = phpInvoke(cur, evalArgs(s.args)) }
-                else if (s.kind == "static") { cur = s.run(cur) }
+                else if (s.kind == "call") { cur = phpInvoke(cur, evalArgs(s.args, site)) }
+                else if (s.kind == "static") { cur = s.run(cur, site) }
                 else if (mode === coalIs) { cur = phpIndexIs(cur, s.idx()) }
                 else { cur = phpIndex(cur, s.idx()) }
             }
@@ -4100,13 +4143,14 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (hasOwn(phpBuiltins, lc) && !nativeRefuses(lc, argset)) { return phpBuiltins[lc].apply(undefined, argset.pos) }
         return fnGet(n)(argset)
     }
-    // Does native lc refuse this many arguments? Its library declaration is then
-    // called instead, whose entry raises the ArgumentCountError (phpLibArityBad).
-    // makeCall has compiled the declaration for a call it names; a callable
-    // reaches only a compiled one (phpLibRef).
+    // Does native lc refuse this call? Its library declaration is then called
+    // instead: a count it refuses raises there (phpLibArityBad), and named arguments
+    // are placed there, a native taking positions only. makeCall has compiled the
+    // declaration for a call it names; a callable reaches only a compiled one
+    // (phpLibRef).
     function nativeRefuses(lc, argset) {
         if (phpLib == null || !varExists(fnKey(lc))) { return false }
-        return phpLibArityBad(phpLib, lc, argset.pos.length + (argset.named == null ? 0 : argset.nkeys.length))
+        return argset.named != null || phpLibArityBad(phpLib, lc, argset.pos.length)
     }
     // The user function named n in any letter case.
     function fnGet(n) {
@@ -4513,7 +4557,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // static::who() resolve in the called class.
     // 'C::$m()' is not the static property called: the variable $m holds the
     // METHOD name (PHP's static_member call form), so the call reads the variable.
-    function staticAccess(cls, name, prop, args, baseText) {
+    function staticAccess(cls, name, prop, args, baseText, site) {
         if (prop != null) {
             if (args == null) {
                 var sc = staticCell(cls, prop)
@@ -4521,7 +4565,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 return deref(sc.v)
             }
             var dn = phpStr(getVar("$" + prop))
-            return staticCall(cls, dn, evalArgs(args), baseText, phpNsThis(cls, dn))
+            return staticCall(cls, dn, evalArgs(args, site), baseText, phpNsThis(cls, dn))
         }
         if (name == "class" && args == null) { return fullName(cls) }
         if (args == null) {
@@ -4530,7 +4574,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             fail("unknown class constant " + cls.__name + "::" + name)
         }
         var nt = phpNsThis(cls, name)
-        return staticCall(cls, name, evalArgs(args), baseText, nt)
+        return staticCall(cls, name, evalArgs(args, site), baseText, nt)
     }
     // A '::' call of a non-static method runs on $this, which must be an instance
     // of the class (zend_non_static_method_call): answers the {self, bind} that
@@ -4758,7 +4802,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // was one, else the computed thunk's value as a string.
     function stName(p) { return p.nameT == null ? p.name : phpStr(p.nameT()) }
     function stProp(p) { return p.propT == null ? p.prop : phpStr(p.propT()) }
-    function makeStaticExpr(items, pos) {
+    function makeStaticExpr(items, pos, start) {
         var p = splitStatic(items)
         var lit = classLiteralName(p.raw, p.name, p.args)
         if (lit != null) { return function() { return lit } }
@@ -4767,13 +4811,13 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (p.name != null && p.args != null && phsCase(p.raw, false) == "closure" && phsCase(p.name, false) == "fromcallable") {
             var fa = p.args
             if (phpLibDynCall("closure::fromcallable", 1000, fa, "argname", "argspread")) { phpLibAll() }
-            return function() { return cloFromCallable(evalArgs(fa).pos[0]) }
+            return function() { return cloFromCallable(evalArgs(fa, "").pos[0]) }
         }
         // Closure::bind($c, $newThis, $newScope) is $c->bindTo($newThis, $newScope).
         if (p.name != null && p.args != null && phsCase(p.raw, false) == "closure" && phsCase(p.name, false) == "bind") {
             var ba = p.args
             return function() {
-                var bp = evalArgs(ba).pos
+                var bp = evalArgs(ba, "").pos
                 var bt = anytype
                 bt = bp.length > 1 ? bp[1] : null
                 return cloRebind(bp[0], bt, bp.length > 2, bp.length > 2 ? bp[2] : null)
@@ -4781,6 +4825,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         // As the left operand of '??' (coalIs) a static property the scope may not
         // see reads null instead of raising.
+        var site = callSite(start)
         return function(mode) {
             var cls = anytype
             cls = resolveClassName(p.base)
@@ -4789,7 +4834,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 var k = phpStaticOwner(cls, sp)
                 if (k != null && !phpStaticVis(cls, k, sp, true)) { return null }
             }
-            return staticAccess(cls, stName(p), sp, p.args, p.base)
+            return staticAccess(cls, stName(p), sp, p.args, p.base, site)
         }
     }
     // A call of a value may call a library function by a name built at run time
@@ -4800,8 +4845,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     function makeStaticSfx(items) {
         var p = splitStatic(items)
-        return {kind: "static", run: function(cur) {
-            return staticAccess(classOfValue(cur), stName(p), stProp(p), p.args, "")
+        return {kind: "static", run: function(cur, site) {
+            return staticAccess(classOfValue(cur), stName(p), stProp(p), p.args, "", site)
         }}
     }
     function staticRefOf(p) { return function(quiet) { return staticCell(resolveClassName(p.base), stProp(p), quiet) } }
@@ -4839,10 +4884,11 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     function closureBody(params, body, captured, env, isGen, desc, self, st, ut) {
         objHandles = objHandles + 1
         var rec = {d: desc, i: objHandles, e: env, t: self, p: params, b: body, c: captured, g: isGen, st: st, ut: ut}
+        var who = desc.substring(0, desc.indexOf("\n"))
         return fnMetaSet(function(argset) {
             if (argset === cloProbe) { return rec }
-            if (isGen === true) { return newGen(runClosureRun(params, body, captured, env, argset)) }
-            return runClosureRun(params, body, captured, env, argset)()
+            if (isGen === true) { return newGen(runClosureRun(params, body, captured, env, argset, who)) }
+            return runClosureRun(params, body, captured, env, argset, who)()
         }, "closure", 0)
     }
     function cloRecOf(v) {
@@ -4914,7 +4960,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return phsCloDesc(name, file, line, statics, pn, pr, po)
     }
     // The closure's body as a zero-argument thunk, so a generator closure can defer it.
-    function runClosureRun(params, body, captured, env, argset) {
+    function runClosureRun(params, body, captured, env, argset, who) {
         return function() {
             var saved = scopes
             scopes = captured.slice(0)
@@ -4922,7 +4968,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             var ks = ownKeys(env)
             for (var i = 0; i < ks.length; i++) { scopePut(fr, ks[i], phpCopy(env[ks[i]])) }
             scopes.push(fr)
-            bindParams(params, argset)
+            bindParams(params, argset, who, CLO_SCOPE)
             var r = anytype
             r = body()
             scopes = saved
@@ -5272,12 +5318,13 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (isObj(v)) { return v.__class }
         return resolveClassName(phpStr(v))
     }
-    function makeNew(items) {
+    function makeNew(items, start) {
         var name = items[0].cls
         var clsT = items[0].clsdyn == undefined ? null : items[0].clsdyn
         var args = items.slice(1)
+        var site = callSite(start)
         return function() {
-            var argset = evalArgs(args)
+            var argset = evalArgs(args, site)
             var cls = anytype
             cls = clsT == null ? resolveClassName(stripWs(name)) : resolveClass(clsT())
             if (cls == undefined || cls == null || cls.__isclass !== true) { fail("new on a non-class") }
@@ -5983,7 +6030,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (isCloStatic(cn, mn, null)) { return cloStaticFn(mn) }
         return boundStatic(resolveClassName(cn), mn, cn, false, isArr(cur) ? CB_ARR : (internal ? CB_INT : CB_STR))
     }
-    function makeCall(items) {
+    function makeCall(items, start) {
         var name = phpLibRef(items[0], true)
         // A name written in another letter case: a builtin or library function is
         // called by its own name, a user function through its lower-cased key
@@ -6013,20 +6060,21 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 phpLibLoad(fk)
             }
         }
-        // A native given a count it refuses is called as its library declaration
-        // (nativeRefuses), compiled here.
+        // A native given a count it refuses, or arguments that may be named, is
+        // called as its library declaration (nativeRefuses), compiled here.
         if (hasOwn(phpBuiltins, name) && !fccLib) {
             var plain = true
             for (var pa = 0; pa < args.length; pa++) {
                 if (args[pa] == null || args[pa].argval === undefined || args[pa].argname !== undefined) { plain = false }
             }
             if (phpLib == null) { phpLib = phpLibIndex(load("lib/php-stdlib.php")) }
-            if (plain && phpLibArityBad(phpLib, name, args.length)) { phpLibLoad(phpLibKey(phpLib, name)) }
+            if (!plain || phpLibArityBad(phpLib, name, args.length)) { phpLibLoad(phpLibKey(phpLib, name)) }
         }
         var resolveCb = name == "call_user_func" || name == "call_user_func_array"
         var libCb = hasOwn(libCbArg, "$" + phsCase(name, false))
+        var site = callSite(start)
         return function() {
-            var argset = evalArgs(args)
+            var argset = evalArgs(args, site)
             if (resolveCb && argset.pos.length > 0) {
                 argset.pos[0] = callerCallable(argset.pos[0], name)
                 // call_user_func of a library function that takes a callback: that
@@ -6141,8 +6189,21 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             }
         }
         if (vis != "") { mVisNames["$" + phsCase(name, false)] = true }
-        return {name: name, params: params, body: body != null ? body : makeBody([]),
-                isStatic: isStatic, isGen: isGen, vis: vis}
+        var rec = {name: name, params: params, body: body != null ? body : makeBody([]),
+                   isStatic: isStatic, isGen: isGen, vis: vis}
+        // A library method stands for an internal one, which checks its count
+        // against [required, declared] (phpLibArgCheck); a library function's
+        // range is its index entry's (makeTopDef).
+        if (phpLibDepth > 0 && name.substring(0, 5) != "__mec") {
+            var req = 0
+            var max = params.length
+            for (var pi = 0; pi < params.length; pi++) {
+                if (params[pi].variadic === true) { max = -1 }
+                else if (params[pi].def == null) { req = pi + 1 }
+            }
+            rec.arity = [req, max]
+        }
+        return rec
     }
     // A braced namespace body: run its items where the declaration stands.
     function makeNs(items, pos) {
@@ -6222,6 +6283,28 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
     }
     function invokePhp(fn, self, argset) { return invokePhpCls(fn, self, argset, null, null) }
+    // A library function (or method of class cls) stands for an internal one. A
+    // call leaving a required parameter unfilled before one it names raises "not
+    // passed" (zend_handle_undef_args), and a count outside the declaration's
+    // [min, max] (phpLibArity) the internal count error; the count runs to the last
+    // parameter filled. Twin of emitArgCheck in php-to-llvm-ir.abnf.
+    function phpLibArgCheck(fn, argset, cls) {
+        var name = cls == null || cls == undefined ? fn.name : cls.__name + "::" + fn.name
+        var n = argset.pos.length
+        if (argset.named != null) {
+            for (var i = n; i < fn.params.length && fn.params[i].variadic !== true; i++) {
+                if (hasOwn(argset.named, fn.params[i].name)) { n = i + 1 }
+            }
+            for (var j = argset.pos.length; j < n && j < fn.arity[0]; j++) {
+                if (!hasOwn(argset.named, fn.params[j].name)) {
+                    phpRaise("ArgumentCountError", phsNotPassedMsg(name, j + 1, fn.params[j].name))
+                }
+            }
+        }
+        if (n < fn.arity[0] || (fn.arity[1] >= 0 && n > fn.arity[1])) {
+            phpRaise("ArgumentCountError", phsArityMsg(name, fn.arity[0], fn.arity[1], n))
+        }
+    }
     function invokePhpCls(fn, self, argset, defCls, staticCls) {
         var saved = scopes
         scopes = [globalScope, {}]
@@ -6231,16 +6314,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             declVar(STATIC_KEY, staticCls)
         }
         declVar(FN_KEY, fn.name)
-        // A library function stands for an internal one, which raises an
-        // ArgumentCountError for a count outside its declaration's [min, max]
-        // (phpLibArity). Twin of libArityCheck in php-to-llvm-ir.abnf.
-        if (fn.arity !== undefined) {
-            var given = argset.pos.length + (argset.named == null ? 0 : argset.nkeys.length)
-            if (given < fn.arity[0] || (fn.arity[1] >= 0 && given > fn.arity[1])) {
-                phpRaise("ArgumentCountError", phsArityMsg(fn.name, fn.arity[0], fn.arity[1], given))
-            }
-        }
-        bindParams(fn.params, argset)
+        if (fn.arity !== undefined) { phpLibArgCheck(fn, argset, defCls) }
+        bindParams(fn.params, argset, fn.name, defCls)
         // Constructor property promotion: the bound parameter is ALSO written to the
         // object, after binding, so a default value promotes exactly like a passed one.
         if (self !== undefined && self !== null && isObj(self)) {
@@ -6689,7 +6764,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // declaration site runs and kept: PHP declares it once per site, so its statics
     // persist and every instance shares one class.
     var anonCount = 0
-    function makeNewAnon(items) {
+    function makeNewAnon(items, start) {
         var args = []
         var rest = []
         var at = 0
@@ -6703,12 +6778,13 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var sfx = anonSuffix(at, anonCount)
         anonCount = anonCount + 1
         var site = {cls: null}
+        var callAt = callSite(start)
         return function() {
             if (site.cls == null) {
                 site.cls = buildClass(shown, p)
                 site.cls.__anon = sfx
             }
-            return instantiate(site.cls, evalArgs(args))
+            return instantiate(site.cls, evalArgs(args, callAt))
         }
     }
     // The name an anonymous class shows: its parent's, else its first interface's,

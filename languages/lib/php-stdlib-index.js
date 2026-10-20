@@ -249,7 +249,9 @@ function phpLibText(ix, key, base) {
 // The argument counts library function `key` accepts, from its declaration line:
 // [min, max], max -1 for a variadic one. min counts up to the last parameter
 // without a default (zend_function.required_num_args), max every parameter, as
-// an internal function's ZEND_PARSE_PARAMETERS_START(min, max) states them.
+// an internal function's ZEND_PARSE_PARAMETERS_START(min, max) states them. A
+// variadic standing for parameters whose presence the body tests (php-src's
+// "= UNKNOWN" defaults) caps max with a "/* at most N */" in the list.
 function phpLibArity(ix, key) {
     var l = ix.lines[ix.fns[key][0]]
     var open = l.indexOf("(")
@@ -272,6 +274,8 @@ function phpLibArity(ix, key) {
         if (ch == "'" || ch == "\"" || ch == "[" || ch == "(") { k = phpLibCloseAt(l, k) + 1 }
         else { k = k + 1 }
     }
+    var cap = l.indexOf("/* at most ")
+    if (rest && cap > open && cap < close) { return [min, parseInt(l.substring(cap + 11, l.indexOf(" */", cap)))] }
     return [min, rest ? -1 : n]
 }
 

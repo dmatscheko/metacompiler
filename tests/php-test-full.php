@@ -3952,6 +3952,85 @@ function s76() {
         && str_word_count("-ab- cd", 2, "-") === [0 => "-ab-", 5 => "cd"] && (new S76K)->m() === "S76K");
 }
 
+// ===== SECTION 77: user functions called with too few arguments =====
+// A user function given too few arguments raises zend_missing_arg_error's
+// ArgumentCountError: "Too few arguments to function <f>(), <n> passed in <file>
+// on line <l> and exactly|at least <r> expected" - the file and line the CALLER's,
+// <f> "Class::m" for a method (the class it is declared in), "exactly" when every
+// non-variadic parameter is required. A call an internal function makes (a
+// callback) names no site: "<n> passed and exactly <r> expected". A named argument
+// that skips a required parameter raises "<f>(): Argument #<i> ($<p>) not passed"
+// (zend_handle_undef_args) instead, for an internal function too. A library
+// method counts like an internal function (SplStack::push is
+// SplDoublyLinkedList's), and array_keys / array_walk / array_walk_recursive take
+// at most 3 arguments: their third parameter is an UNKNOWN default, no variadic.
+function s77one($a) { return $a; }
+function s77opt($a, $b = 2, ...$c) { return $a; }
+function s77two($a, $b) { return $a . $b; }
+class S77K {
+    function __construct($a = 0, $b = 0) { }
+    function m($x) { return $x; }
+    static function s($x, $y) { return $x; }
+    function clo() { return function ($q) { return $q; }; }
+}
+class S77C { function __construct($a, $b) { } }
+// The message with this file's path as F and line $l as L.
+function s77t($e, $l) {
+    return str_replace(" on line " . $l . " ", " on line L ", str_replace(__FILE__, "F", $e->getMessage()));
+}
+function s77() {
+    $m = [];
+    try { s77one(); } catch (ArgumentCountError $e) { $m[] = s77t($e, __LINE__); }
+    try { s77opt(); } catch (ArgumentCountError $e) { $m[] = s77t($e, __LINE__); }
+    try { s77two(1); } catch (ArgumentCountError $e) { $m[] = s77t($e, __LINE__); }
+    try { (new S77K)->m(); } catch (ArgumentCountError $e) { $m[] = s77t($e, __LINE__); }
+    try { S77K::s(1); } catch (ArgumentCountError $e) { $m[] = s77t($e, __LINE__); }
+    try { new S77C(1); } catch (ArgumentCountError $e) { $m[] = s77t($e, __LINE__); }
+    $f = 's77one';
+    try { $f(); } catch (ArgumentCountError $e) { $m[] = s77t($e, __LINE__); }
+    check("tfa1", $m === [
+        "Too few arguments to function s77one(), 0 passed in F on line L and exactly 1 expected",
+        "Too few arguments to function s77opt(), 0 passed in F on line L and at least 1 expected",
+        "Too few arguments to function s77two(), 1 passed in F on line L and exactly 2 expected",
+        "Too few arguments to function S77K::m(), 0 passed in F on line L and exactly 1 expected",
+        "Too few arguments to function S77K::s(), 1 passed in F on line L and exactly 2 expected",
+        "Too few arguments to function S77C::__construct(), 1 passed in F on line L and exactly 2 expected",
+        "Too few arguments to function s77one(), 0 passed in F on line L and exactly 1 expected"]);
+    $c = (new S77K)->clo();
+    $cm = "";
+    try { $c(); } catch (ArgumentCountError $e) { $cm = s77t($e, __LINE__); }
+    $tail = "}(), 0 passed in F on line L and exactly 1 expected";
+    check("tfa2", substr($cm, 0, 44) === "Too few arguments to function S77K::{closure"
+        && substr($cm, strlen($cm) - strlen($tail)) === $tail);
+    $n = [];
+    try { array_map('s77two', [1]); } catch (ArgumentCountError $e) { $n[] = $e->getMessage(); }
+    try { call_user_func('s77one'); } catch (ArgumentCountError $e) { $n[] = $e->getMessage(); }
+    try { s77two(b: 1); } catch (ArgumentCountError $e) { $n[] = $e->getMessage(); }
+    try { s77two(a: 1); } catch (ArgumentCountError $e) { $n[] = s77t($e, __LINE__); }
+    try { s77opt(x: 1); } catch (ArgumentCountError $e) { $n[] = s77t($e, __LINE__); }
+    check("tfa3", $n === ["Too few arguments to function s77two(), 1 passed and exactly 2 expected",
+        "Too few arguments to function s77one(), 0 passed and exactly 1 expected",
+        "s77two(): Argument #1 (\$a) not passed",
+        "Too few arguments to function s77two(), 1 passed in F on line L and exactly 2 expected",
+        "Too few arguments to function s77opt(), 0 passed in F on line L and at least 1 expected"]);
+    $w = [1];
+    $k = [];
+    try { (new SplStack)->push(); } catch (ArgumentCountError $e) { $k[] = $e->getMessage(); }
+    try { str_repeat(times: 3); } catch (ArgumentCountError $e) { $k[] = $e->getMessage(); }
+    try { str_pad(string: "a"); } catch (ArgumentCountError $e) { $k[] = $e->getMessage(); }
+    try { array_fill(start_index: 0, value: 1); } catch (ArgumentCountError $e) { $k[] = $e->getMessage(); }
+    try { array_keys([1], 1, true, 4); } catch (ArgumentCountError $e) { $k[] = $e->getMessage(); }
+    try { array_walk($w, 'strval', 1, 2); } catch (ArgumentCountError $e) { $k[] = $e->getMessage(); }
+    try { array_walk_recursive($w, 'strval', 1, 2); } catch (ArgumentCountError $e) { $k[] = $e->getMessage(); }
+    check("tfa4", $k === ["SplDoublyLinkedList::push() expects exactly 1 argument, 0 given",
+        "str_repeat(): Argument #1 (\$string) not passed", "str_pad() expects at least 2 arguments, 1 given",
+        "array_fill(): Argument #2 (\$count) not passed", "array_keys() expects at most 3 arguments, 4 given",
+        "array_walk() expects at most 3 arguments, 4 given", "array_walk_recursive() expects at most 3 arguments, 4 given"]);
+    check("tfa5", str_pad(length: 3, pad_string: "-", string: "a") === "a--" && strlen(string: "abc") === 3
+        && array_keys([1, 2, 1], 1) === [0, 2]
+        && str_repeat(times: 2, string: "ab") === "abab" && s77opt(1) === 1 && (new S77K(1))->m(5) === 5);
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -4039,6 +4118,7 @@ function main() {
     s75(); // SECTION-CALL 75
     s75dump(); // SECTION-CALL 75
     s76(); // SECTION-CALL 76
+    s77(); // SECTION-CALL 77
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

@@ -3163,15 +3163,56 @@ function js_phraise(cls, msg) {
     return undefined
 }
 
-// The ArgumentCountError (class cls) of a library function whose entry found its
-// arguments outside [min, max] (max -1: variadic, its last slot the collected
-// tail). Twin of m["js_pharity"] in abnf/jsrtphp.go.
-function js_pharity(args, name, min, max, cls) {
-    var n = args.length
-    if (max < 0 && n > 0) { n = n - 1 }
-    var given = 0
-    for (var i = 0; i < n; i++) { if (args[i] !== undefined) { given = given + 1 } }
-    throw phMkErrOf(cls, phsArityMsg(phStr(name), min, max, given))
+// The argument slots of a call (args, the first off of them the receiver's)
+// against its callee's parameter list sig (sigText): n, the count passed, up to
+// the last fixed slot filled plus the positions the variadic's collected tail
+// holds (a named argument it took is not counted); gap, the first of the req
+// required slots left empty before n (-1: none); and fixed, the count of
+// non-variadic parameters. Twin of phpArgSlots in abnf/jsrtphp.go.
+function phArgSlots(args, off, sig, req) {
+    var names = sig == ")" ? [] : phsCloSplit(sig, 44)
+    var variadic = sig.indexOf("...") >= 0
+    var fixed = variadic ? names.length - 1 : names.length
+    var n = 0
+    for (var i = off; i < args.length; i++) {
+        if (args[i] !== undefined && (i - off < fixed || !variadic)) { n = i - off + 1 }
+    }
+    if (variadic && args.length - off > fixed) {
+        var p = phArrParts(args[off + fixed])
+        var more = 0
+        if (p !== undefined) {
+            for (var k = 0; k < p.k.length; k++) { if (typeof p.k[k] == "number") { more = more + 1 } }
+        }
+        if (more > 0) { n = fixed + more }
+    }
+    var gap = -1
+    for (var j = 0; j < req && j < n && gap < 0; j++) {
+        if (off + j >= args.length || args[off + j] === undefined) { gap = j }
+    }
+    return {n: n, gap: gap, fixed: fixed, names: names}
+}
+// The ArgumentCountError (class cls) of a library function or method whose entry
+// found its arguments short of min or past max (-1: none): "not passed" for a
+// required slot left empty before a later one (zend_handle_undef_args), else the
+// internal count error. Twin of m["js_pharity"] in abnf/jsrtphp.go.
+function js_pharity(args, off, name, sig, min, max, cls) {
+    var s = phArgSlots(args, off, phStr(sig), min)
+    if (s.gap >= 0) { throw phMkErrOf(cls, phsNotPassedMsg(phStr(name), s.gap + 1, "$" + s.names[s.gap])) }
+    throw phMkErrOf(cls, phsArityMsg(phStr(name), min, max, s.n))
+}
+// The ArgumentCountError (class cls) of a user function whose entry found a
+// required slot empty: "not passed" before a later one (zend_handle_undef_args),
+// else the count with the call site's text where (zend_missing_arg_error). A
+// closure's class scope, when scope is a class, prefixes its name. Twin of
+// m["js_phargmiss"] in abnf/jsrtphp.go.
+function js_phargmiss(args, off, who, scope, sig, req, where, cls) {
+    var name = phStr(who)
+    if (scope !== undefined && scope !== null && typeof scope == "object" && scope["__isclass"] === true) {
+        name = phStr(scope["__name"]) + "::" + name
+    }
+    var s = phArgSlots(args, off, phStr(sig), req)
+    if (s.gap >= 0) { throw phMkErrOf(cls, phsNotPassedMsg(name, s.gap + 1, "$" + s.names[s.gap])) }
+    throw phMkErrOf(cls, phsMissArgMsg(name, s.n, req, req == s.fixed, phStr(where)))
 }
 
 // The Go range bound: an int is its own bound, otherwise the element/entry count.

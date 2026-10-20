@@ -301,6 +301,21 @@ func phpArityMsg(name string, min, max, given int) string {
 	return name + "() expects " + how + " " + strconv.Itoa(want) + " argument" + s + ", " + strconv.Itoa(given) + " given"
 }
 
+// phpMissArgMsg is phsMissArgMsg: zend_missing_arg_error's text.
+func phpMissArgMsg(name string, passed, req int, exact bool, where string) string {
+	s := "Too few arguments to function " + name + "(), " + strconv.Itoa(passed) + " passed" + where
+	how := "at least"
+	if exact {
+		how = "exactly"
+	}
+	return s + " and " + how + " " + strconv.Itoa(req) + " expected"
+}
+
+// phpNotPassedMsg is phsNotPassedMsg: zend_handle_undef_args' text.
+func phpNotPassedMsg(name string, n int, pname string) string {
+	return name + "(): Argument #" + strconv.Itoa(n) + " (" + pname + ") not passed"
+}
+
 // phpCoreClass is phsCoreClass: the lower-case name of the engine's own class n
 // denotes, or "".
 func phpCoreClass(n string) string {

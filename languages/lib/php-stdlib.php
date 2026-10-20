@@ -235,7 +235,7 @@ function uksort(&$array, $callback) {
 }
 
 // ----- keys, values, searching -----------------------------------------------
-function array_keys($array, ...$filter) {
+function array_keys($array, ...$filter /* at most 3 */) {
     $out = [];
     $search = count($filter) > 0;
     $strict = count($filter) > 1 && $filter[1];
@@ -659,7 +659,7 @@ function array_reduce($array, $callback, $initial = null) {
 // The callback's by-reference parameter writes back only where a call of a
 // callable VALUE passes a reference: the interpreter half does, the compiler
 // half's dynamic call passes the value.
-function array_walk(&$array, $callback, ...$arg) {
+function array_walk(&$array, $callback, ...$arg /* at most 3 */) {
     __mec_arrarg($array, 'array_walk', true);
     __mec_callable($callback, 'array_walk(): Argument #2 ($callback) must be a valid callback');
     foreach ($array as $k => &$v) {
@@ -668,7 +668,7 @@ function array_walk(&$array, $callback, ...$arg) {
     unset($v);
     return true;
 }
-function array_walk_recursive(&$array, $callback, ...$arg) {
+function array_walk_recursive(&$array, $callback, ...$arg /* at most 3 */) {
     __mec_arrarg($array, 'array_walk_recursive', true);
     __mec_callable($callback, 'array_walk_recursive(): Argument #2 ($callback) must be a valid callback');
     __mec_walkrec($array, $callback, $arg);

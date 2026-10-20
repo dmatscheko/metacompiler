@@ -648,3 +648,16 @@ function phsArityMsg(name, min, max, given) {
     var how = min == max ? "exactly" : (given < min ? "at least" : "at most")
     return name + "() expects " + how + " " + want + " argument" + (want == 1 ? "" : "s") + ", " + given + " given"
 }
+// The ArgumentCountError text of a user function given `passed` arguments where
+// req are required (zend_missing_arg_error): exact when every non-variadic
+// parameter is required, where the call site's phsCallSite, "" for a call made
+// by an internal function, which names none. Twin of phpMissArgMsg in
+// abnf/jsrtphpstr.go.
+function phsMissArgMsg(name, passed, req, exact, where) {
+    return "Too few arguments to function " + name + "(), " + passed + " passed" + where
+        + " and " + (exact ? "exactly" : "at least") + " " + req + " expected"
+}
+function phsCallSite(file, line) { return " in " + file + " on line " + line }
+// A named-argument call that leaves required parameter n (1-based, pname with its
+// '$') unfilled before a later one it fills (zend_handle_undef_args).
+function phsNotPassedMsg(name, n, pname) { return name + "(): Argument #" + n + " (" + pname + ") not passed" }
