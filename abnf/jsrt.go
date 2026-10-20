@@ -3606,9 +3606,10 @@ func (rt *jsrt) dictKeyEq(a, b interface{}) bool {
 }
 
 // goMapKeyIdx is the key lookup of dict m: pyDictFind (py) or dictFind, except
-// that a GO map whose key type is a pointer (mty "map[*T]V") compares keys by
-// identity, where dictKeyEq's goLang arm compares the struct it points at by
-// value. Twins: goMapFind in lib/go-rt.metajs, mapFind in go-interpreter.abnf.
+// that a GO map whose key type is a pointer (mty "map[*T]V") compares keys as
+// pointers (goPtrEq): a struct by identity, where dictKeyEq's goLang arm compares
+// it by value, and two cells by the slot they address. Twins: goMapFind in
+// lib/go-rt.metajs, mapFind in go-interpreter.abnf.
 func (rt *jsrt) goMapKeyIdx(m interface{}, keys *jsArray, k interface{}, py bool) int {
 	if rt.goLang {
 		// A map whose key type is an interface (`ik`) tells its keys apart by
@@ -3623,7 +3624,7 @@ func (rt *jsrt) goMapKeyIdx(m interface{}, keys *jsArray, k interface{}, py bool
 		}
 		if t, _ := m.(*jsObject).props["mty"].(string); strings.HasPrefix(t, "map[*") {
 			for i, e := range keys.elems {
-				if e == k {
+				if rt.goPtrEq(e, k) {
 					return i
 				}
 			}

@@ -1441,12 +1441,19 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // same fields has to hit, which indexOf's === would miss. A slice is not a
         // legal map key and stays on identity. The twins are goKeyIsVal/goMapFind in
         // languages/lib/go-rt.metajs and the goLang arm of dictKeyEq in abnf/jsrt.go.
-        // A POINTER key (`map[*T]V`) is identity: two &T{1} are two keys.
+        // A POINTER key (`map[*T]V`) is identity: two &T{1} are two keys, while two
+        // cells for one variable or field (&n built twice) are one key (goEq).
         // An INTERFACE key also compares the dynamic type: float64(1) and 1 are
         // two keys of a map[any]V (goIfEq).
         if (m.ik === true) {
             for (var ii = 0; ii < m.keys.length; ii++) {
                 if (goIfEq(m.keys[ii], k)) { return ii }
+            }
+            return 0 - 1
+        }
+        if (isPtr(k)) {
+            for (var pi = 0; pi < m.keys.length; pi++) {
+                if (isPtr(m.keys[pi]) && goEq(m.keys[pi], k)) { return pi }
             }
             return 0 - 1
         }

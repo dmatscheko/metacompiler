@@ -641,6 +641,25 @@ func s114() {
 	check("selnl114", w.cnt["a"] == 3)
 }
 
+// ===== SECTION 115: a pointer as a map key =====
+// &n taken twice is one pointer, and so is &o.x; two &T{} are two. The expected
+// values are go run's.
+type p115 struct{ x, y int }
+
+func s115() {
+	n := 1
+	var o p115
+	m := map[*int]string{}
+	m[&n] = "n"
+	m[&n] += "!"
+	m[&o.x] = "x"
+	m[&o.y] = "y"
+	delete(m, &o.y)
+	a, b := &p115{}, &p115{}
+	mp := map[*p115]int{a: 1, b: 2}
+	check("ptrkey115", len(m) == 2 && m[&n] == "n!" && m[&o.x] == "x" && len(mp) == 2 && mp[a] == 1)
+}
+
 func main() {
 	s94()   // SECTION-CALL 94
 	s95()   // SECTION-CALL 95
@@ -661,6 +680,7 @@ func main() {
 	s112()  // SECTION-CALL 112
 	s113()  // SECTION-CALL 113
 	s114()  // SECTION-CALL 114
+	s115()  // SECTION-CALL 115
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

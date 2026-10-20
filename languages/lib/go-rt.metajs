@@ -225,9 +225,9 @@ function goClassOf(v) {
 // rt.dictFind over map m: the index of a key, or -1. Keys compare with Go's ==
 // (goValueEq), which is what dictFind's strictEq plus the runtime's number
 // identity does for every key type a Go map may have - except that a POINTER key
-// (`map[*T]V`, read off the map's type text) is identity, where the struct it
-// points at would compare by value. Twins: goMapKeyIdx in abnf/jsrt.go, mapFind in
-// go-interpreter.abnf.
+// (`map[*T]V`, read off the map's type text) compares as a pointer (goPtrEq): a
+// struct by identity, where it would compare by value, and two cells by the slot
+// they address. Twins: goMapKeyIdx in abnf/jsrt.go, mapFind in go-interpreter.abnf.
 function goMapFind(m, k) {
     var keys = m.keys
     // A map whose key type is an interface (`ik`, set by the emitter) tells its
@@ -242,13 +242,23 @@ function goMapFind(m, k) {
     }
     // The typeof gate is the fast path: a string or number key - which is nearly every
     // Go map - leaves here without a call.
-    if (typeof k == "object" && k !== null && goKeyIsVal(k) && !goPtrKeyed(m)) {
-        var i = 0
-        while (i < keys.length) {
-            if (goValueEq(keys[i], k)) { return i }
-            i = i + 1
+    if (typeof k == "object" && k !== null) {
+        if (goPtrKeyed(m)) {
+            var pi = 0
+            while (pi < keys.length) {
+                if (goPtrEq(keys[pi], k)) { return pi }
+                pi = pi + 1
+            }
+            return 0 - 1
         }
-        return 0 - 1
+        if (goKeyIsVal(k)) {
+            var i = 0
+            while (i < keys.length) {
+                if (goValueEq(keys[i], k)) { return i }
+                i = i + 1
+            }
+            return 0 - 1
+        }
     }
     return rtDictFind(keys, k)
 }
