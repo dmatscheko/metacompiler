@@ -79,7 +79,7 @@ is "not supported" under the P dialect (python supports fixed-width lookbehind);
 
 # JS — JavaScript and TypeScript
 
-### T-652 js: for-in through the prototype chain; `in` on prototype methods; Object.prototype methods as class values; private static getters · P1 · JS · OPEN [V]
+### T-652 js: for-in through the prototype chain; `in` on prototype methods; Object.prototype methods as class values; private static getters · P1 · JS · IN PROGRESS (JS worker, round 11) [V]
 `class B{}; B.prototype.x = 1; for (k in new B()) println(k)` → nothing in all engines (node `x`: for-in walks inherited enumerable
 keys). `class C{ n(){} }; "n" in C.prototype` → false (node true). `typeof K.hasOwnProperty` on a class → "undefined" (node
 "function"). `class K { static get #h(){ return 1 } }` → js-to-llvm-ir.abnf "Not everything could be parsed" (interpreter accepts).
