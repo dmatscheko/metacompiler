@@ -93,9 +93,11 @@ function jxBin(c) {
 // jxGraphNext is regex.js's rxGraphNext knob, jdk.internal.util.regex's
 // Grapheme.nextBoundary: the end of the extended grapheme cluster that starts
 // at off. jxGbTab holds each code point's Grapheme.getType plus 16 times its
-// Indic_Conjunct_Break (1 Linker, 2 Consonant, 3 Extend). Twin of
+// Indic_Conjunct_Break (1 Linker, 2 Consonant, 3 Extend). An off at or past
+// limit (a previous match that ended there) is its own boundary. Twin of
 // jxGraphNext in abnf/jsrtjavaprops.go.
 function jxGraphNext(text, off, limit) {
+    if (off >= limit) { return off }
     var ch0 = jxCpAt(text, off)
     var ret = off + (ch0 > 65535 ? 2 : 1)
     var g0 = jxGb(ch0)

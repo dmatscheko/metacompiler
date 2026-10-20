@@ -4376,6 +4376,10 @@ class S77 {
         String xg = "e\u0301x\r\n\u1100\u1161\u11a8".replaceAll("\\X", "<$0>") + "|" + "\u0915\u094d\u0937a\u200db\u0600a".replaceAll("\\X", "<$0>") + "|"
             + "ae\u0301x".replaceAll("\\b{g}", "|") + "|" + String.join("/", "ae\u0301x".split("\\b{g}")) + "|" + S74.m("e\\X", "e\u0301") + "|" + S74.m("\\X\\X", "e\u0301")
             + "|" + S74.m("\\b{gx}", "") + "|" + S74.m("[\\X]", "") + "|" + S74.m("\\b{", "");
+        // At the end of the input, after a previous match that ended there.
+        String eg = "e\u0301".replaceAll("\\X|\\b{g}", "#") + "|" + "ab".replaceAll("b|\\b{g}", "#") + "|" + String.join("/", "ab".split("b\\b{g}"))
+            + "|" + "aa".replaceAll("a\\G|\\G", "#") + "|" + "x".replaceAll("x\\X?", "#") + "|" + "ab".replaceAll("\\Gb|a", "#");
+        Main.check("eg77", eg.equals("##|#a##|a|#aa|#|##"));
         Main.check("xg77", xg.equals("<e\u0301><x><\r\n><\u1100\u1161\u11a8>|<\u0915\u094d\u0937><a\u200d><b><\u0600a>||a|e\u0301|x||a/e\u0301/x|true|false"
             + "|Illegal/unsupported escape sequence near index 4|Illegal/unsupported escape sequence near index 2|Illegal repetition near index 3"));
         String pp = "abc\u00e9\u03b1\u0400".replaceAll("\\p{IsLatin}", "L") + "|" + "a\u03b1\u0400".replaceAll("\\p{InGreek}", "G") + "|" + "a\u03b1".replaceAll("\\p{sc=Grek}", "G")

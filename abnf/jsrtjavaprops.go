@@ -132,8 +132,11 @@ func jxBin(c int) int {
 
 // jxGraphNext is Grapheme.nextBoundary: the end of the extended grapheme
 // cluster that starts at off. Twin of jxGraphNext in lib/java-regex.js, which
-// describes jxGbTable.
+// describes jxGbTable. An off at or past limit is its own boundary.
 func jxGraphNext(text []rune, off, limit int) int {
+	if off >= limit {
+		return off
+	}
 	g0 := jxGb(text[off])
 	t0 := g0 % 16
 	ret := off + 1
