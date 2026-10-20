@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-676** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-678** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -78,15 +78,15 @@ astral letter may differ between engines (probe first).
 
 # JS — JavaScript and TypeScript
 
-### T-669 js: primitive wrapper objects (`new Number(7)`, `Object(7)`, `({}).valueOf.call(7)`) · P2 · JS · IN PROGRESS (JS worker, round 14) [V]
-All engines: `new Number(7)` → empty object, `Object(7)` → "Object is not a function", `({}).valueOf.call(7)` → a number (node: `object 8`
-for `typeof x, x+1` on all three). Needs a wrapper value kind in all five engines: ToPrimitive, method dispatch on the box,
-Object.prototype.toString tag, JSON, instanceof. Number.prototype.toFixed (via `Number.prototype`) → "is not a function".
+### T-676 js: Object.freeze / seal do nothing; read-only writes and non-configurable deletes are silent in strict code · P2 · JS · OPEN [V]
+`var o = Object.freeze({a:1}); o.a = 2; o.a` → 2 in all engines (node 1); `Object.isFrozen(o)` likewise. In strict code (class
+bodies, "use strict", modules) a write to a read-only property or `delete` of a non-configurable one is dropped silently; node raises
+`TypeError: Cannot assign to read only property 'x' of object '#<Object>'` / `Cannot delete property 'x' of #<Object>`.
 
-### T-670 js: defineProperty writable/configurable; getOwnPropertyNames of non-enumerables; Function/Boolean.prototype; String of a null-proto object · P3 · JS · IN PROGRESS (JS worker, round 14) [V]
-`Object.defineProperty(o,"x",{value:1}); o.x=2; o.x` → 2 (node sloppy 1). `Object.getOwnPropertyNames` omits a defineProperty'd
-non-enumerable key (node lists it). `Object.getPrototypeOf(function(){})` / `(true)` → undefined (node Function.prototype /
-Boolean.prototype). `String(Object.create(null))` → "[object Object]" (node TypeError "Cannot convert object to primitive value").
+### T-677 js: builtin globals' `.name`/`.length`; `(7).constructor === Number`; `Object(1n)`/`Object(Symbol())`; String wrapper index keys · P3 · JS · OPEN [V]
+`Number.name`, `String.name`, `Array.name`, `BigInt.name`, `Promise.name` → "" (node the name). `(7).constructor === Number`,
+`"s".constructor === String`, `Object.prototype.constructor === Object` → false (node true). `typeof Object(1n)` → bigint (node
+object). `Object.keys(new String("abc"))` → "" (node `0,1,2`); layer 2 does not check `s[1]` on a String wrapper.
 
 ---
 
@@ -773,6 +773,8 @@ T-667 php: ArgumentCountError unavailable unless spelled; arrow-function generat
 T-668 php: scalar parameter and return types are never checked — DONE 2e67e859 + e3111793 (scalar/nullable/union/class param+return types with weak coercion, strict widening, generator args at the call; spec-only from php-src)
 T-632 go: regexp (RE2 dialect), encoding/json and reflect, real stdin — DONE 36957e91 b805369c c0936e9d (regexp RE2 dialect + Go errors, os.Stdin via readIn, encoding/json incl. depth limit and checked ,string; reflect subset json needs — 4 legs = go run; reflect method sets/Call/MakeSlice, CompilePOSIX/Longest, MarshalJSON on non-struct types DECLINED: no program in scope needs them; follow-ups T-672..T-675)
 T-671 php: promoted constructor parameters declare no typed property; typed-property TypeError prints `self` — DONE b901ad9e 6b65aa72 (promoted params declare typed properties, self/parent resolved per zend_compile_single_typename, typed trait statics in the interpreter, promoted null default is the compile error; spec-only from php-src)
+T-669 js: primitive wrapper objects (`new Number(7)`, `Object(7)`, `({}).valueOf.call(7)`) — DONE 0c010f6d (wrapper objects via __bvof in all engines; Object is a real function; Boolean a builtin — 4 legs = node)
+T-670 js: defineProperty writable/configurable; getOwnPropertyNames of non-enumerables; Function/Boolean.prototype; String of a null-proto object — DONE 0c010f6d (writable/enumerable/configurable defaults, Cannot redefine property, getOwnPropertyNames order, Function/Boolean.prototype, null-proto ToPrimitive TypeError — 4 legs = node; follow-ups T-676/T-677)
 
 # Settled — do not re-open
 
@@ -806,7 +808,7 @@ named function expression's inner name immutable (needs a const flag on the floo
 scope, or a scope-walking extern on every plain-name assignment, measured at
 +21%..+43% elsewhere on that path).
 
-**DECLINED after measurement.** php per-file strict_types (the probes and suites are single-file programs; the whole-program flag equals per-file there) · php handle reuse after free (needs refcounts) · swift's module-qualified enum names in collections (`[o.Dir.up]` depends on swiftc's module name) · rbUserObj / rbIsClassObj frame elimination (no gain over 15 pairs) · a real suspension for the replay generators (impossible under the pinned goja; ~3,600 lines pure-MetaJS) · CPS coroutines in the emitter · full correct rounding of the transcendentals · a shared nominal type id on boxed values (cheap to store, but every consumer needs static types the grammars do not have; split per language) · matching Apple libm's last digit (ruby atan2: no portable algorithm reproduces it, 1.6% of pairs differ even from the correctly rounded value) · js sloppy-mode primitive `this` boxing (needs wrapper objects in every engine) · a generator's `finally` at collection (python needs refcount timing; no finalizers, manual 7.8) · `i in arr` after `delete` · iterator close on
+**DECLINED after measurement.** js `Function("src")` compiling source at run time (no engine here compiles at run time; it raises the EvalError text node gives when code generation is disallowed) · php per-file strict_types (the probes and suites are single-file programs; the whole-program flag equals per-file there) · php handle reuse after free (needs refcounts) · swift's module-qualified enum names in collections (`[o.Dir.up]` depends on swiftc's module name) · rbUserObj / rbIsClassObj frame elimination (no gain over 15 pairs) · a real suspension for the replay generators (impossible under the pinned goja; ~3,600 lines pure-MetaJS) · CPS coroutines in the emitter · full correct rounding of the transcendentals · a shared nominal type id on boxed values (cheap to store, but every consumer needs static types the grammars do not have; split per language) · matching Apple libm's last digit (ruby atan2: no portable algorithm reproduces it, 1.6% of pairs differ even from the correctly rounded value) · js sloppy-mode primitive `this` boxing (needs wrapper objects in every engine) · a generator's `finally` at collection (python needs refcount timing; no finalizers, manual 7.8) · `i in arr` after `delete` · iterator close on
 `throw` (a depth stack cannot survive `for await`) · a catchable unknown-name error
 in java/go/swift/csharp/metajs (COMPILE-time in each real toolchain) · kotlin
 `:script` → `!"token"` · `case_map` into layer 2 (135×) · retiring the Go twin
