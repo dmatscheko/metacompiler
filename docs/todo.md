@@ -122,7 +122,7 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-642 kotlin: `is ArrayList` / `is HashSet` and other concrete collection classes · P3 · KT · OPEN [V spec-only]
+### T-642 kotlin: `is ArrayList` / `is HashSet` and other concrete collection classes · P3 · KT · IN PROGRESS (KT worker, round 8) [V spec-only]
 `mutableListOf(1) is ArrayList<*>` → false in all three engines (JVM true); no concrete collection class names (ArrayList, HashSet,
 LinkedHashMap, ...) are tested by `is`. Use the `__jc` class tags the formatter already carries.
 
