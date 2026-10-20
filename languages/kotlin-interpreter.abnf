@@ -2181,7 +2181,7 @@ DiscardExpr <~~ pop() ~~> = Expression ;
 // lookup walks the parent chain (clsFind). The body is optional, so a marker interface
 // (interface State) and a `sealed interface Expr` parse too.
 Interface   = InterfaceReal | InterfaceSkip ;
-InterfaceReal <~~ ktNoteBody(up.start, up.pos); buildInterface(takeAll()) ~~>
+InterfaceReal <~~ ktNoteBody(up.start, up.pos); ktNoteTypeName(up.in, "interface"); buildInterface(takeAll()) ~~>
             = IfaceKw <~~ push({mods: takeMods()}) ~~> KId <~~ push(up.in); curClassPush(up.in) ~~> [ SkipAngle ]
               [ CtorParamsSkip ] [ ":" SuperList ] [ WhereClause ] [ "{" { Member } "}" ] ;
 InterfaceSkip <~~ takeAll(); takeMods(); notImpl("interface", up.pos); push({nname: "", nval: null, inner: false}) ~~>
@@ -2194,7 +2194,7 @@ InterfaceSkip <~~ takeAll(); takeMods(); notImpl("interface", up.pos); push({nna
 // choice never re-enters an alternative that already matched, so the wider shape has
 // to be offered before the narrow one rather than after it.
 ObjectDecl  = ObjectExotic | ObjectReal | ObjectSkip ;
-ObjectReal  <~~ ktNoteBody(up.start, up.pos); buildObject(takeAll()) ~~>
+ObjectReal  <~~ ktNoteBody(up.start, up.pos); ktNoteTypeName(up.in, "object"); buildObject(takeAll()) ~~>
             = KwObject <~~ push({mods: takeMods()}) ~~> KId <~~ push(up.in); curClassPush(up.in) ~~>
               [ ":" SuperList ] [ "{" { Member } "}" ] ;
 // An object header carrying type parameters and/or a constructor - shapes Kotlin's
@@ -2225,10 +2225,10 @@ ObjectSkip  <~~ takeAll(); takeMods(); notImpl("object declaration", up.pos); pu
 // stealing a bodied enum whose body the member grammar cannot cover: that one has to
 // reach EnumSkip, which consumes the body as a block.
 EnumClass   = EnumReal | EnumBare | EnumSkip ;
-EnumReal    <~~ ktNoteBody(up.start, up.pos); buildEnum(takeAll()) ~~>
+EnumReal    <~~ ktNoteBody(up.start, up.pos); ktNoteTypeName(up.in, "class"); buildEnum(takeAll()) ~~>
             = KwEnum KwClass <~~ push({mods: takeMods()}) ~~> KId <~~ push(up.in); curClassPush(up.in) ~~> [ SkipAngle ]
               [ PrimaryCtor ] [ ":" SuperList ] "{" [ EnumEntries ] [ ";" { Member } ] "}" ;
-EnumBare    <~~ buildEnum(takeAll()) ~~>
+EnumBare    <~~ ktNoteTypeName(up.in, "class"); buildEnum(takeAll()) ~~>
             = KwEnum KwClass <~~ push({mods: takeMods()}) ~~> KId <~~ push(up.in); curClassPush(up.in) ~~> [ SkipAngle ]
               [ PrimaryCtor ] [ ":" SuperList ] NotBrace ;
 // The fallback for an enum whose entries or members are outside the subset. It skips
@@ -4975,10 +4975,11 @@ NotMemberKw = :script(~~
         return false
     }
 
-    // ----- Extension functions: dispatch by name, the receiver becomes `this` -----
+    // ----- Extension functions: the receiver becomes `this` -----
     // Method names the runtime implements on strings/lists/dicts (the compiler
-    // grammar uses the same list): an extension function never shadows them, so
-    // both engines make the same dispatch decision for every (receiver, name).
+    // grammar uses the same list): an extension never shadows them on a builtin
+    // receiver, so both engines make the same dispatch decision for every
+    // (receiver, name).
     var extFuns = {}
     var classMethodNames = {}
     var builtinMethodNames = {}
@@ -5034,19 +5035,32 @@ NotMemberKw = :script(~~
         return true
     }
     // The extension a call recv.name(...) runs, or null for the member surface: the
-    // latest one whose TESTED receiver type (ktExtTested) the receiver has, else the
-    // latest untested one. Twin of the extension chain in emitSuffix in
-    // kotlin-to-llvm-ir.abnf.
+    // latest one whose TESTED receiver type (ktExtTested) the receiver has, when the
+    // receiver has no member of that name (a member always wins, Kotlin's rule), else
+    // the latest untested one, which still goes by name (extResolves). Twin of
+    // emitExtChain in kotlin-to-llvm-ir.abnf.
     function extFor(name, target) {
-        if (!extResolves(name)) { return null }
         var l = extTyped["$" + name]
-        for (var i = l.length - 1; i >= 0; i--) {
-            if (ktExtTested(l[i].ty) && kIsType(target, l[i].ty)) { return l[i].fn }
+        if (l == undefined) { return null }
+        if (!kExtMemberWins(target, name)) {
+            for (var i = l.length - 1; i >= 0; i--) {
+                if (ktExtTested(l[i].ty) && kIsType(target, l[i].ty)) { return l[i].fn }
+            }
         }
+        if (!extResolves(name)) { return null }
         for (var j = l.length - 1; j >= 0; j--) {
             if (!ktExtTested(l[j].ty)) { return l[j].fn }
         }
         return null
+    }
+    // Whether recv.name is a MEMBER of the receiver: a method on a class instance's
+    // supertype graph, and on any other value a name the runtime implements
+    // (builtinMethodNames). Twin of js_ktextok in abnf/jsrtkotlin.go.
+    function kExtMemberWins(target, name) {
+        if (target !== null && target !== undefined && typeof target == "object" && target.__class != undefined) {
+            return lookupMethod(target, name) != null
+        }
+        return builtinMethodNames["$" + name] == true
     }
 
     // args is the positional argument list; spec (optional) additionally carries the
@@ -5100,7 +5114,28 @@ NotMemberKw = :script(~~
     function kSetAdd(s, e) {
         if (kSetFind(s, e) >= 0) { return false }
         s.keys.push(e)
+        if (s.__jc === "java.util.TreeSet") { kSortedSink(s.keys, null) }
         return true
+    }
+    // Moves the element just appended to keys (and its value, when vals is not null)
+    // left to its ascending position: a java.util.TreeSet / TreeMap keeps its keys
+    // sorted on every insertion, not only when it is built. Twin of ktSortedSink in
+    // abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    function kSortedSink(keys, vals) {
+        var j = keys.length - 1
+        while (j > 0 && kKeyLess(keys[j], keys[j - 1])) {
+            var k = anytype
+            k = keys[j]
+            keys[j] = keys[j - 1]
+            keys[j - 1] = k
+            if (vals != null) {
+                var v = anytype
+                v = vals[j]
+                vals[j] = vals[j - 1]
+                vals[j - 1] = v
+            }
+            j--
+        }
     }
     function kSetFrom(es) {
         var s = kMakeSet()
@@ -5160,6 +5195,7 @@ NotMemberKw = :script(~~
         if (i >= 0) { m.vals[i] = v; return }
         m.keys.push(k)
         m.vals.push(v)
+        if (m.__jc === "java.util.TreeMap") { kSortedSink(m.keys, m.vals) }
     }
     // `==` for the collection operations: kEq, so setOf<Any>(1, 1L) has two elements.
     function kEqVals(a, b) { return kEq(a, b, false) }
@@ -6539,6 +6575,15 @@ NotMemberKw = :script(~~
             var pad = cak >= 5 ? hostGlobals[ktaElems[cak - 5] + "Array"](1)[0] : null
             out = []
             for (i = 0; i < cn; i++) { out.push(i < es.length ? es[i] : pad) }
+            return {v: out}
+        }
+        if (name == "copyOfRange") {
+            var rf = kNum(args[0])
+            var rt = kNum(args[1])
+            var rfault = ktaCopyRangeFault(rf, rt, es.length, arrKind(es))
+            if (rfault != null) { kRaise(rfault[0], rfault[1]) }
+            out = []
+            for (i = rf; i < rt; i++) { out.push(es[i]) }
             return {v: out}
         }
         if (name == "withIndex") {
@@ -9208,8 +9253,9 @@ NotMemberKw = :script(~~
         for (var j = 0; j < path.length; j++) { if (path.charAt(j) == ".") { dot = j } }
         if (dot >= 0) { seg = path.substring(dot + 1, path.length) }
         // Twin of ktImportBinds in kotlin-to-llvm-ir.abnf.
-        if (ktJavaClassImport(path)) { hostGlobals[alias != "" ? alias : seg] = hostGlobals[path] }
-        else { resolveImport(path, pos) }
+        var jcs = ktJavaClassImport(path)
+        for (var ji = 0; ji < jcs.length; ji++) { hostGlobals[alias != "" ? alias : jcs[ji][0]] = hostGlobals[jcs[ji][1]] }
+        if (jcs.length == 0) { resolveImport(path, pos) }
         noteImportName(seg)
         noteImportName(alias)
     }
@@ -10590,11 +10636,10 @@ NotMemberKw = :script(~~
         if (recv !== null && recv !== undefined && typeof recv == "object" && hasOwn(recv, r.pname)) {
             return kGetField(recv, r.pname)
         }
-        // An EXTENSION function - `Box::tripled`, `b::tripled`. extResolves is the same
+        // An EXTENSION function - `Box::tripled`, `b::tripled`. extFor is the same
         // resolution the call `b.tripled()` uses.
-        if (extResolves(r.pname)) {
-            return extFuns["$" + r.pname].apply(undefined, concat2impl([recv], kRefRest(r, args)))
-        }
+        var rxf = extFor(r.pname, recv)
+        if (rxf != null) { return rxf.apply(undefined, concat2impl([recv], kRefRest(r, args))) }
         if (recvFn(r.pname) != null) { return mcall(recv, r.pname, kRefRest(r, args)) }
         return kGetField(recv, r.pname)
     }
@@ -11255,8 +11300,9 @@ NotMemberKw = :script(~~
     // and the launcher's uncaught-exception line spell. Kotlin's Exception /
     // RuntimeException / IllegalStateException / ... are TYPEALIASES to the
     // java.lang classes on the JVM, so `java` is the oracle (`new RuntimeException("x")`
-    // renders "java.lang.RuntimeException: x"). Two of the nineteen live in java.util,
-    // and NotImplementedError / UninitializedPropertyAccessException are Kotlin's OWN
+    // renders "java.lang.RuntimeException: x"). The collection exceptions and
+    // Formatter's live in java.util, PatternSyntaxException in java.util.regex, and
+    // NotImplementedError / UninitializedPropertyAccessException are Kotlin's OWN
     // classes, declared by kotlin-stdlib in the `kotlin` package. The twins are
     // ktExcFqcn in abnf/jsrtkotlin.go and in languages/lib/kotlin-rt.metajs.
     function kExcFqcn(name) {

@@ -5082,6 +5082,79 @@ fun sec104() {
                     && 4.tag104() == "tag(4)" && s[1].tag104() == "tag(q)")
 }
 
+// ===== SECTION 105: a sorted collection stays sorted, copyOfRange, extension receivers =====
+// Read off kotlin-stdlib 2.2.21 driven from java (JDK 24). A TreeMap / TreeSet keeps
+// ascending order on every insertion (m[k] = v, put, putAll, getOrPut, add, addAll),
+// while `+` copies into a LinkedHashMap / LinkedHashSet and appends. copyOfRange
+// checks toIndex against the size, then from > to, then a negative from (System.arraycopy's
+// ArrayIndexOutOfBoundsException). An extension declared for a class, an interface,
+// an object, an enum or a sized number applies to that receiver whatever its name,
+// unless the receiver has a member of the name; a bare call in its body is a call on
+// `this` (no kotlinc here: the dispatch rows are the Kotlin specification's).
+interface Shape105 { fun area(): Int }
+class Sq105(val s: Int) : Shape105 { override fun area() = s * s }
+object Origin105 { val tag = "O" }
+enum class Color105 { RED, GREEN }
+class Pt105(val x: Int) { fun label() = "member" }
+class Other105 { fun label() = "other" }
+fun Pt105.map(f: (Int) -> Int): Pt105 = Pt105(f(x))
+fun Pt105.size(): Int = 99
+fun Pt105.label(): String = "ext"
+fun Other105.size(): Int = 7
+fun Shape105.describe(): String = "shape " + area()
+fun Origin105.count(): Int = tag.length + 2
+fun Color105.get(i: Int): String = name + i
+fun Long.kind105(): String = "Long"
+fun Double.kind105(): String = "Double"
+fun Float.kind105(): String = "Float"
+fun Short.kind105(): String = "Short"
+fun Byte.kind105(): String = "Byte"
+fun Int.kind105(): String = "Int"
+infix fun Long.join105(o: Long): Long = this * 10 + o
+infix fun Int.join105(o: Int): Int = this - o
+fun err105(f: () -> Any?): String {
+    try { return "" + f() } catch (e: Exception) { return e::class.simpleName + ": " + e.message }
+}
+fun sec105() {
+    val ks = listOf(0, 5, 3, -1, 4)
+    val m = sortedMapOf(2 to "b", 1 to "a")
+    m[ks[0]] = "z"
+    check("srt105a", "" + m == "{0=z, 1=a, 2=b}")
+    m.put(ks[1], "f")
+    m.putAll(mapOf(ks[2] to "c", ks[3] to "m"))
+    m.getOrPut(ks[4]) { "d" }
+    check("srt105b", "" + m == "{-1=m, 0=z, 1=a, 2=b, 3=c, 4=d, 5=f}" && "" + m.keys == "[-1, 0, 1, 2, 3, 4, 5]"
+                    && "" + (m + (-5 to "q")) == "{-1=m, 0=z, 1=a, 2=b, 3=c, 4=d, 5=f, -5=q}")
+    val s = sortedSetOf(5, 1)
+    s.add(ks[2])
+    s.add(ks[0])
+    s.addAll(listOf(9, -2, 4))
+    val t = sortedSetOf("pear", "apple")
+    t.add("banana")
+    check("srt105c", "" + s == "[-2, 0, 1, 3, 4, 5, 9]" && "" + (s + 6) == "[-2, 0, 1, 3, 4, 5, 9, 6]" && "" + t == "[apple, banana, pear]")
+    val a = arrayOf(3, 1, 2)
+    val ia = intArrayOf(5, 9, 4, 7)
+    val r = ia.copyOfRange(ks[2] - 2, 3)
+    r[0] = 100
+    check("cor105d", a.copyOfRange(1, 3).contentToString() == "[1, 2]" && ia.copyOfRange(0, 2).contentToString() == "[5, 9]"
+                    && ia.copyOfRange(2, 2).size == 0 && r.contentToString() == "[100, 4]" && ia.contentToString() == "[5, 9, 4, 7]")
+    check("cor105e", err105 { a.copyOfRange(0, 5) } == "IndexOutOfBoundsException: toIndex (5) is greater than size (3)."
+                    && err105 { a.copyOfRange(2, 1) } == "IllegalArgumentException: 2 > 1"
+                    && err105 { ia.copyOfRange(ks[3] - 1, 1) } == "IndexOutOfBoundsException: arraycopy: source index -2 out of bounds for int[4]")
+    val p = Pt105(4)
+    check("ext105f", p.map { it * 10 }.x == 40 && p.size() == 99 && p.label() == "member" && Other105().size() == 7
+                    && Other105().label() == "other" && listOf(1, 2).map { it + 1 } == listOf(2, 3) && listOf(1, 2).size == 2)
+    val sh: Shape105 = Sq105(3)
+    check("ext105g", sh.describe() == "shape 9" && Origin105.count() == 3 && Color105.GREEN.get(7) == "GREEN7")
+    check("ext105h", 5L.kind105() == "Long" && 2.5.kind105() == "Double" && 1.5f.kind105() == "Float"
+                    && 3.toShort().kind105() == "Short" && 4.toByte().kind105() == "Byte" && 6.kind105() == "Int")
+    val lab = Pt105::label
+    val sz = Pt105::size
+    val ds = Shape105::describe
+    check("ext105i", (5L join105 2L) == 52L && (5 join105 2) == 3 && lab(Pt105(1)) == "member" && sz(Pt105(1)) == 99
+                    && ds(Sq105(2)) == "shape 4")
+}
+
 
 fun main() {
     s01() // SECTION-CALL 01
@@ -5188,6 +5261,7 @@ fun main() {
     sec102() // SECTION-CALL 102
     sec103() // SECTION-CALL 103
     sec104() // SECTION-CALL 104
+    sec105() // SECTION-CALL 105
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

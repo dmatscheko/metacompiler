@@ -1308,6 +1308,21 @@ func init() {
 		ktIsType = func(v interface{}, tname string) bool {
 			return u(m["js_ktis"]([]uint64{w(v), rt.wrapStr(tname)})) == interface{}(true)
 		}
+		// js_ktextok(v, type, name, builtin) is whether the extension chain takes the
+		// extension declared for type: v has that type and no member of the name -
+		// a method on a class instance's chain, else (builtin) a name the runtime
+		// implements. Twin of kExtMemberWins in kotlin-interpreter.abnf and
+		// js_ktextok in languages/lib/kotlin-rt.metajs.
+		m["js_ktextok"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			if !ktIsType(v, rt.toString(u(a[1]))) {
+				return boolH(false)
+			}
+			if o, isObj := v.(*jsObject); isObj && o.props["__class"] != nil {
+				return boolH(!ktClassChainHas(o, rt.toString(u(a[2]))))
+			}
+			return boolH(!rt.truthy(u(a[3])))
+		}
 		m["js_ktis"] = func(a []uint64) uint64 {
 			v := u(a[0])
 			switch v.(type) {
@@ -1880,8 +1895,10 @@ func init() {
 		// first), anything else a BOUND one.
 		m["js_ktref"] = func(a []uint64) uint64 {
 			base, name := u(a[0]), rt.toString(u(a[1]))
+			// ext is the name's extensions as [type, closure, ...] (emitRefValue),
+			// or undefined.
 			var ext interface{}
-			if len(a) > 2 && isCallable(u(a[2])) {
+			if len(a) > 2 {
 				ext = u(a[2])
 			}
 			if tn, isType := base.(ktTypeName); isType {
@@ -4076,7 +4093,25 @@ func (rt *jsrt) ktSetAdd(s *jsObject, e interface{}) bool {
 	}
 	keys.dropIdx()
 	keys.elems = append(keys.elems, e)
+	if s.props["__jc"] == "java.util.TreeSet" {
+		ktSortedSink(rt, keys, nil)
+	}
 	return true
+}
+
+// ktSortedSink moves the element just appended to keys (and its value, when vals is
+// not nil) left to its ascending position: a java.util.TreeSet / TreeMap keeps its
+// keys sorted on every insertion, not only when it is built. Twin of kSortedSink in
+// kotlin-interpreter.abnf and ktSortedSink in languages/lib/kotlin-rt.metajs.
+func ktSortedSink(rt *jsrt, keys, vals *jsArray) {
+	j := len(keys.elems) - 1
+	for j > 0 && ktKeyLess(rt, keys.elems[j], keys.elems[j-1]) {
+		keys.elems[j], keys.elems[j-1] = keys.elems[j-1], keys.elems[j]
+		if vals != nil {
+			vals.elems[j], vals.elems[j-1] = vals.elems[j-1], vals.elems[j]
+		}
+		j--
+	}
 }
 
 // ktSetFrom builds a set from a slice, deduplicating in first-seen order.
@@ -4144,7 +4179,7 @@ func (rt *jsrt) ktGroupingMethod(g *jsObject, name string, args []interface{}) (
 	return m, true
 }
 
-// ktMapPut inserts or replaces, keeping insertion order.
+// ktMapPut inserts or replaces, keeping insertion order (key order for a TreeMap).
 func (rt *jsrt) ktMapPut(m *jsObject, k, v interface{}) {
 	keys, vals, _ := dictParts(m)
 	if i := rt.ktMapFind(keys, k); i >= 0 {
@@ -4154,6 +4189,9 @@ func (rt *jsrt) ktMapPut(m *jsObject, k, v interface{}) {
 	keys.dropIdx()
 	keys.elems = append(keys.elems, k)
 	vals.elems = append(vals.elems, v)
+	if m.props["__jc"] == "java.util.TreeMap" {
+		ktSortedSink(rt, keys, vals)
+	}
 }
 
 // ktMapFind compares keys the way Kotlin's Map does - by equals, which for the
@@ -5388,6 +5426,12 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 			}
 		}
 		return arr(out), true
+	case "copyOfRange":
+		from, to := jsToInt(rt.toNumber(argAt(args, 0))), jsToInt(rt.toNumber(argAt(args, 1)))
+		if cls, msg := ktaCopyRangeFault(from, to, len(es), o.kind); cls != "" {
+			rt.ktRaise(cls, msg)
+		}
+		return arr(append([]interface{}{}, es[from:to]...)), true
 	case "withIndex":
 		out := make([]interface{}, len(es))
 		for i, e := range es {
@@ -8340,6 +8384,26 @@ var ktaElems = [...]string{"Int", "Long", "Double", "Float", "Char", "Boolean", 
 var ktaClasses = [...]string{"[I", "[J", "[D", "[F", "[C", "[Z", "[B", "[S",
 	"kotlin.UIntArray", "kotlin.ULongArray", "kotlin.UByteArray", "kotlin.UShortArray"}
 
+// ktaCopyRangeFault is copyOfRange(from, to)'s bounds failure on an array of size
+// elements and kind ak, as a class and message, or "" for a valid range. Twin of
+// ktaCopyRangeFault in languages/lib/kotlin-math.js, which spells out the rules.
+func ktaCopyRangeFault(from, to, size, ak int) (string, string) {
+	if to > size {
+		return "IndexOutOfBoundsException", "toIndex (" + strconv.Itoa(to) + ") is greater than size (" + strconv.Itoa(size) + ")."
+	}
+	if from > to {
+		return "IllegalArgumentException", strconv.Itoa(from) + " > " + strconv.Itoa(to)
+	}
+	if from >= 0 {
+		return "", ""
+	}
+	jt := "object array"
+	if ak >= ktArrPrim {
+		jt = strings.ToLower(strings.TrimPrefix(ktaElems[ak-ktArrPrim], "U"))
+	}
+	return "IndexOutOfBoundsException", "arraycopy: source index " + strconv.Itoa(from) + " out of bounds for " + jt + "[" + strconv.Itoa(size) + "]"
+}
+
 // ktaKindOf is the kind of the primitive array of element type elem, 0 for none.
 func ktaKindOf(elem string) int {
 	for i, e := range ktaElems {
@@ -8629,7 +8693,7 @@ type ktRefInfo struct {
 	bound bool
 	ctor  bool        // ::Box - a constructor reference
 	tname string      // the TYPE the base named, for an unbound reference
-	ext   interface{} // the EXTENSION function of that name, resolved at compile time
+	ext   interface{} // the EXTENSIONS of that name as [type, closure, ...] (emitRefValue)
 }
 
 // ktTypeName is what js_ktrefbase answers when the base of a `::` named a type
@@ -8696,8 +8760,12 @@ func (rt *jsrt) ktRefApply(info *ktRefInfo, args []interface{}) interface{} {
 			return ktRefRead(recv, info.name)
 		}
 	}
-	if info.ext != nil {
-		return rt.call(info.ext, jsUndef, append([]interface{}{recv}, ktRefRest(info, args)...))
+	if xs, isArr := info.ext.(*jsArray); isArr {
+		for i := 0; i+1 < len(xs.elems); i += 2 {
+			if ty, _ := xs.elems[i].(string); ty == "" || ktIsType(recv, ty) {
+				return rt.call(xs.elems[i+1], jsUndef, append([]interface{}{recv}, ktRefRest(info, args)...))
+			}
+		}
 	}
 	return ktRefRead(recv, info.name)
 }

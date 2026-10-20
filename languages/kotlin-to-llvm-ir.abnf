@@ -2100,7 +2100,7 @@ InterfaceCtor <~~ push(notImplStmt("interface", up.pos)) ~~>
 // ClassDecl records `data`/`value`, so makeInterfaceStmt can tell the two apart -
 // an ordinary interface with one abstract member is NOT convertible, which is
 // Kotlin's rule. The twin of IfaceKw/buildInterface in kotlin-interpreter.abnf.
-InterfaceReal <~~ ktNoteBody(up.start, up.pos); push(makeInterfaceStmt(takeAll())) ~~>
+InterfaceReal <~~ ktNoteBody(up.start, up.pos); ktNoteTypeName(up.in, "interface"); push(makeInterfaceStmt(takeAll())) ~~>
             = [ KwFun <~~ push({samfun: true}) ~~> ] KwInterface KId <~~ push(up.in) ~~> [ SkipAngle ] [ ":" Supers ] [ WhereClause ] ( "{" { Member } "}" | !"{" ) ;
 InterfaceSkip <~~ push(notImplStmt("interface", up.pos)) ~~>
             = [ KwFun ] KwInterface KId [ SkipAngle ] [ ":" SuperList ] [ SkipBlock ] ;
@@ -2110,7 +2110,7 @@ InterfaceSkip <~~ push(notImplStmt("interface", up.pos)) ~~>
 // literal), or no body at all (a bodiless object), falls back to ObjectSkip
 // (notImplemented), so the widened surface still parses.
 ObjectDecl  = ObjectCtor | ObjectReal | ObjectNoBody | ObjectSkip ;
-ObjectReal  <~~ ktNoteBody(up.start, up.pos); push(makeObjectStmt(takeAll())) ~~>
+ObjectReal  <~~ ktNoteBody(up.start, up.pos); ktNoteTypeName(up.in, "object"); push(makeObjectStmt(takeAll())) ~~>
             = KwObject KId <~~ push(up.in) ~~> [ ":" Supers ] "{" { Member } "}" ;
 // object Foo(a: Int) / object Foo private () / object Foo<T, R>: an object declaration
 // may not HAVE a primary constructor or type parameters, but that is a semantic rule -
@@ -2127,7 +2127,7 @@ ObjectCtor  <~~ push(notImplStmt("object declaration", up.pos)) ~~>
 // A BODILESS object declaration (object Zero : Expr) is a genuine singleton too - the
 // common shape of a sealed hierarchy's "no payload" case. The !"{" lookahead keeps it
 // from stealing an object whose body does not parse; that one still falls to ObjectSkip.
-ObjectNoBody <~~ push(makeObjectStmt(takeAll())) ~~>
+ObjectNoBody <~~ ktNoteTypeName(up.in, "object"); push(makeObjectStmt(takeAll())) ~~>
             = KwObject KId <~~ push(up.in) ~~> [ ":" Supers ] !"{" ;
 // An object declaration may not DECLARE type parameters, but Kotlin parses them and
 // then reports the error semantically - psi/recovery/objects/declarations/TypeParameterss.kt
@@ -2144,7 +2144,7 @@ ObjectSkip  <~~ push(notImplStmt("object declaration", up.pos)) ~~>
 // (when (this) { A -> ... }). An entry with its own body, and a body outside the member
 // subset, fall back to EnumSkip.
 EnumClass   = EnumReal | EnumSkip ;
-EnumReal    <~~ ktNoteBody(up.start, up.pos); push(makeEnumStmt(takeAll())) ~~>
+EnumReal    <~~ ktNoteBody(up.start, up.pos); ktNoteTypeName(up.in, "class"); push(makeEnumStmt(takeAll())) ~~>
             = KwEnum KwClass KId <~~ push(up.in) ~~> [ SkipAngle ] [ CtorParams ] [ ":" Supers ]
               "{" [ EnumEntry { "," EnumEntry } [ "," ] ] [ ";" { Member } ] "}" ;
 // An entry may carry its OWN CLASS BODY - `LOW(1) { override fun label() = "low" }` -
@@ -2937,10 +2937,11 @@ KwContract  = "contract" KwEnd ;
     // is no subclass. Saved and restored in lockstep with emitSuperName.
     var emitSuperRaw = null
 
-    // ----- Extension functions: dispatch by name, the receiver becomes `this` -----
+    // ----- Extension functions: the receiver becomes `this` -----
     // Method names the runtime implements on strings/lists/dicts (the interpreter
-    // grammar uses the same list): an extension function never shadows them, so
-    // both engines make the same dispatch decision for every (receiver, name).
+    // grammar uses the same list): an extension never shadows them on a builtin
+    // receiver, so both engines make the same dispatch decision for every
+    // (receiver, name).
     var extFunNames = {}
     // Every receiver type an extension name is declared for (ktExtRecvTy), one entry
     // per type, latest last.
@@ -2983,6 +2984,38 @@ KwContract  = "contract" KwEnd ;
             callExt(b, "js_arr_push", [eargsV, emitStr(b, exr[xi])])
         }
         return {b: b, v: callExt(b, "js_call", [efV, hUndef, eargsV])}
+    }
+    // The extension chain of recv.name(...): each TESTED receiver type (ktExtTested),
+    // latest declaration first, taken when the receiver has that type and no member of
+    // the name (js_ktextok - a member always wins), then the latest untested
+    // extension when the name resolves to one (extResolves), else the member surface,
+    // which fallback(b) emits. Twin of extFor in kotlin-interpreter.abnf.
+    function emitExtChain(b, cur, s, fallback) {
+        var xl = extRecvTys["$" + s.name]
+        var xany = false
+        var xtested = 0
+        for (var xu = 0; xu < xl.length; xu++) {
+            if (ktExtTested(xl[xu])) { xtested++ } else { xany = true }
+        }
+        var untested = xany && extResolves(s.name)
+        if (xtested == 0) { return untested ? emitExtCall(b, cur, s, extKey(s.name, "")) : fallback(b) }
+        var bi = builtinMethodNames["$" + s.name] == true ? hTrue : hFalse
+        var xm = curF.NewBlock("")
+        var xin = []
+        for (var xt = xl.length - 1; xt >= 0; xt--) {
+            if (!ktExtTested(xl[xt])) { continue }
+            var xyB = curF.NewBlock("")
+            var xnB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_ktextok", [cur, emitStr(b, xl[xt]), emitStr(b, s.name), bi])), xyB, xnB)
+            var xr = emitExtCall(xyB, cur, s, extKey(s.name, xl[xt]))
+            xr.b.NewBr(xm)
+            xin.push(llvm.ir.NewIncoming(xr.v, xr.b))
+            b = xnB
+        }
+        var xf = untested ? emitExtCall(b, cur, s, extKey(s.name, "")) : fallback(b)
+        xf.b.NewBr(xm)
+        xin.push(llvm.ir.NewIncoming(xf.v, xf.b))
+        return {b: xm, v: xm.NewPhi(xin)}
     }
 
     // ----- explicit TYPE ARGUMENTS on a method call -----
@@ -3599,12 +3632,13 @@ KwContract  = "contract" KwEnd ;
         var dot = -1
         for (var j = 0; j < path.length; j++) { if (path.charAt(j) == ".") { dot = j } }
         if (dot >= 0) { seg = path.substring(dot + 1, path.length) }
-        if (ktJavaClassImport(path)) { ktImportBinds.push([alias != "" ? alias : seg, path]) }
-        else { resolveImport(path, pos) }
+        var jcs = ktJavaClassImport(path)
+        for (var ji = 0; ji < jcs.length; ji++) { ktImportBinds.push([alias != "" ? alias : jcs[ji][0], jcs[ji][1]]) }
+        if (jcs.length == 0) { resolveImport(path, pos) }
         noteImportName(seg)
         noteImportName(alias)
     }
-    // [name, qualified path] for each import of a java class the runtime provides
+    // [name, runtime global] for each import of a java class the runtime provides
     // (ktJavaClassImport), declared after the builtins so the import's binding wins.
     var ktImportBinds = []
     function externalType(name) { return importedNames["$" + name] == true }
@@ -3908,22 +3942,28 @@ KwContract  = "contract" KwEnd ;
                 var r2 = items[i + 1](b)
                 b = r2.b
                 if (items[i].user == true) {
-                    // A user infix function. An `infix fun Int.pctOf(m: Money)` is an
-                    // EXTENSION, so it lives under ext$name and takes the receiver in
-                    // its first slot, not through js_ktsmcall. The test is the same
-                    // extResolves the method-suffix emitter uses, and it runs at EMIT
-                    // time, so an extension declared further down the file counts.
-                    if (extResolves(op)) {
-                        var ifV = b.NewCall(rtKtGet(), [curScopeV, emitStr(b, "ext$" + op)])
-                        var iaV = callExt(b, "js_arr_new", [])
-                        callExt(b, "js_arr_push", [iaV, v])
-                        callExt(b, "js_arr_push", [iaV, r2.v])
-                        v = callExt(b, "js_call", [ifV, hUndef, iaV])
-                    } else {
-                        var iargsV = callExt(b, "js_arr_new", [])
-                        callExt(b, "js_arr_push", [iargsV, r2.v])
-                        v = callExt(b, "js_ktsmcall", [v, emitStr(b, op), iargsV])
+                    // A user infix function: `a dot b` is the call a.dot(b), so an
+                    // `infix fun Int.pctOf(m: Money)` EXTENSION goes through the same
+                    // extension chain as the method-suffix form, and the member
+                    // surface is js_ktsmcall. The chain is chosen at EMIT time, so an
+                    // extension declared further down the file counts.
+                    var iarg = r2.v
+                    var irecv = v
+                    var imember = function(fb) {
+                        var iargsV = callExt(fb, "js_arr_new", [])
+                        callExt(fb, "js_arr_push", [iargsV, iarg])
+                        return {b: fb, v: callExt(fb, "js_ktsmcall", [irecv, emitStr(fb, op), iargsV])}
                     }
+                    var ir = imember
+                    if (extFunNames["$" + op] == true) {
+                        ir = function(fb) {
+                            return emitExtChain(fb, irecv, {kind: "mcall", name: op,
+                                                            args: [{at: function(ab) { return {b: ab, v: iarg} }}]}, imember)
+                        }
+                    }
+                    var irr = ir(b)
+                    b = irr.b
+                    v = irr.v
                 } else if (op == "to") {
                     v = emitPair(b, v, r2.v)
                 } else if (op == "and") { v = callExt(b, "js_ktarith", [emitStr(b, "&"), v, r2.v]) }
@@ -4219,39 +4259,13 @@ KwContract  = "contract" KwEnd ;
                     return {b: mxa.b, v: mxa.b.NewCall(rtMextCall(),
                                                  [curScopeV, cur, emitStr(mxa.b, s.name), mxa.v])}
                 }
-                // The extension chain: each tested receiver type, latest declaration
-                // first, then an untested extension, else the member surface below.
-                // Twin of extFor in kotlin-interpreter.abnf.
-                if (extResolves(s.name) && s.noExt != true) {
-                    var xl = extRecvTys["$" + s.name]
-                    var xany = false
-                    var xtested = 0
-                    for (var xu = 0; xu < xl.length; xu++) {
-                        if (ktExtTested(xl[xu])) { xtested++ } else { xany = true }
-                    }
-                    if (xtested == 0) { return emitExtCall(b, cur, s, extKey(s.name, "")) }
-                    var xm = curF.NewBlock("")
-                    var xin = []
-                    for (var xt = xl.length - 1; xt >= 0; xt--) {
-                        if (!ktExtTested(xl[xt])) { continue }
-                        var xyB = curF.NewBlock("")
-                        var xnB = curF.NewBlock("")
-                        b.NewCondBr(truthy(b, callExt(b, "js_ktis", [cur, emitStr(b, xl[xt])])), xyB, xnB)
-                        var xr = emitExtCall(xyB, cur, s, extKey(s.name, xl[xt]))
-                        xr.b.NewBr(xm)
-                        xin.push(llvm.ir.NewIncoming(xr.v, xr.b))
-                        b = xnB
-                    }
-                    var xf
-                    if (xany) { xf = emitExtCall(b, cur, s, extKey(s.name, "")) }
-                    else {
+                if (extFunNames["$" + s.name] == true && s.noExt != true) {
+                    return emitExtChain(b, cur, s, function(fb) {
                         s.noExt = true
-                        xf = emitSuffix(b, cur, s)
+                        var fr = emitSuffix(fb, cur, s)
                         s.noExt = false
-                    }
-                    xf.b.NewBr(xm)
-                    xin.push(llvm.ir.NewIncoming(xf.v, xf.b))
-                    return {b: xm, v: xm.NewPhi(xin)}
+                        return fr
+                    })
                 }
                 // v.toString(): Kotlin's rendering of the value, which is what
                 // println writes. js_ktstr looks a user or synthesized toString up on
@@ -5034,9 +5048,10 @@ KwContract  = "contract" KwEnd ;
                 return {b: b, v: callExt(b, "js_ktnewexc", [emitStr(b, name), emV])}
             }
             // A BARE call to a method of the enclosing class (own or inherited):
-            // `secret()` inside a method is `this.secret()`. Decided at emission time,
-            // when the whole file has been walked: we are inside a type body (so there IS
-            // a `this`), the name is a known member method, and nothing declares a
+            // `secret()` inside a method is `this.secret()`, and so is `area()` inside
+            // `fun Shape.describe()`. Decided at emission time, when the whole file has
+            // been walked: we are inside a type body or an extension function (so there
+            // IS a `this`), the name is a known member method, and nothing declares a
             // function of that name - no other reading is possible. js_mcall then walks
             // the __super chain like any m() call. The emitClassTop test matters: some
             // OTHER class may declare a method of this name while the call sits at top
@@ -5052,7 +5067,7 @@ KwContract  = "contract" KwEnd ;
             // classOwnProps' header), so the choice is deferred to kt_barecall, which is
             // the same two-step scope probe rtKtGetP makes on its miss path and costs
             // nothing at a site with no local.
-            if (emitClassTop() != null && classNames[name] == undefined
+            if ((emitClassTop() != null || emitExtDepth > 0) && classNames[name] == undefined
                 && funNames["$" + name] != true && classMethodNames["$" + name] == true) {
                 var ma = emitArgs(b, orderArgs(args, paramsFor(name, args)))
                 return {b: ma.b, v: ma.b.NewCall(rtBareCall(), [curScopeV, emitStr(ma.b, name), ma.v])}
@@ -6036,6 +6051,10 @@ KwContract  = "contract" KwEnd ;
     // under its extKey. items = [{extRecv}, name, signature, ...].
     // The name registers at walk time, so every mcall suffix emitted later (all
     // emission happens inside buildMain) sees the complete extension table.
+    // How many extension function bodies the emitter is inside: their `this` is the
+    // receiver, so a bare call of a member method name is `this.name()` there as it is
+    // in a class body (see the bare-call arm of makeCall).
+    var emitExtDepth = 0
     function makeExtFunStmt(items, retEntry, reified) {
         var ty = ktExtRecvTy(items[0].extRecv)
         var f = makeFun(items.slice(1), retEntry, reified)
@@ -6046,7 +6065,9 @@ KwContract  = "contract" KwEnd ;
         l.push(ty)
         extRecvTys["$" + f.name] = l
         return function(b) {
+            emitExtDepth++
             var idx = emitFunc(f.params, f.body, true, false, f.sig)
+            emitExtDepth--
             defPos(b, f.pos)
             var clV = callExt(b, "js_closure", [handle(idx), curScopeV])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "ext$" + f.name), clV])
@@ -7429,14 +7450,35 @@ KwContract  = "contract" KwEnd ;
             return {b: b, v: emitRefValue(b, baseV, name)}
         }
     }
-    // js_ktref(base, name, ext). An EXTENSION function is resolved at COMPILE time here
-    // exactly as a call to it is (extResolves), because the runtime has no extension
-    // table: the closure is handed to the reference so that `Box::tripled` and
-    // `b::tripled` call it with the receiver in front. undefined otherwise, so a program
-    // that declares no extension emits no closure.
+    // js_ktref(base, name, ext). The EXTENSIONS of the name are handed to the
+    // reference, because the runtime has no extension table, so that `Box::tripled` and
+    // `b::tripled` call one with the receiver in front: ext is [type, closure, ...] in
+    // the order of the call's extension chain (emitExtChain), "" for the untested one,
+    // and the reference takes the first whose type the receiver has (ktRefApply). A
+    // tested VALUE type is left out for a name the runtime implements, since that member
+    // wins on such a receiver. undefined when the name has none, so a program that
+    // declares no extension emits no array.
     function emitRefValue(b, baseV, name) {
         var extV = hUndef
-        if (extResolves(name)) { extV = b.NewCall(rtKtGet(), [curScopeV, emitStr(b, "ext$" + name)]) }
+        if (extFunNames["$" + name] == true) {
+            var xl = extRecvTys["$" + name]
+            var bi = builtinMethodNames["$" + name] == true
+            var picks = []
+            var any = false
+            for (var xt = xl.length - 1; xt >= 0; xt--) {
+                if (!ktExtTested(xl[xt])) { any = true; continue }
+                if (bi && ktExtValueTys["$" + ktBaseName(xl[xt])] == true) { continue }
+                picks.push(xl[xt])
+            }
+            if (any && extResolves(name)) { picks.push("") }
+            if (picks.length > 0) {
+                extV = callExt(b, "js_arr_new", [])
+                for (var pi = 0; pi < picks.length; pi++) {
+                    callExt(b, "js_arr_push", [extV, emitStr(b, picks[pi])])
+                    callExt(b, "js_arr_push", [extV, b.NewCall(rtKtGet(), [curScopeV, emitStr(b, extKey(name, picks[pi]))])])
+                }
+            }
+        }
         return callExt(b, "js_ktref", [baseV, emitStr(b, name), extV])
     }
 

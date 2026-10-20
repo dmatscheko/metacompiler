@@ -263,6 +263,25 @@ var ktaElems = ["Int", "Long", "Double", "Float", "Char", "Boolean", "Byte", "Sh
 var ktaClasses = ["[I", "[J", "[D", "[F", "[C", "[Z", "[B", "[S",
                   "kotlin.UIntArray", "kotlin.ULongArray", "kotlin.UByteArray", "kotlin.UShortArray"]
 
+// copyOfRange(from, to)'s bounds failure on an array of `size` elements and kind
+// `ak`, as [class, message], or null for a valid range. Kotlin checks toIndex
+// against the size, java.util.Arrays.copyOfRange then rejects from > to, and
+// System.arraycopy a negative from. The last raises ArrayIndexOutOfBoundsException,
+// answered as its supertype IndexOutOfBoundsException like every array read here.
+// Go twin: ktaCopyRangeFault in abnf/jsrtkotlin.go.
+function ktaCopyRangeFault(from, to, size, ak) {
+    if (to > size) { return ["IndexOutOfBoundsException", "toIndex (" + to + ") is greater than size (" + size + ")."] }
+    if (from > to) { return ["IllegalArgumentException", from + " > " + to] }
+    if (from >= 0) { return null }
+    var jt = "object array"
+    if (ak >= 5) {
+        jt = ktaElems[ak - 5]
+        if (jt.charAt(0) == "U") { jt = jt.substring(1) }
+        jt = jt.toLowerCase()
+    }
+    return ["IndexOutOfBoundsException", "arraycopy: source index " + from + " out of bounds for " + jt + "[" + size + "]"]
+}
+
 // The kind of the primitive array of element type `elem` ("Int"), 0 for none.
 function ktaKindOf(elem) {
     var i = 0

@@ -296,13 +296,26 @@ function ktExtRecvTy(txt) {
     return segs[segs.length - 1] + ((t.length > 0 && t.charAt(t.length - 1) == "?") ? "?" : "")
 }
 // Whether a call tests an extension's receiver type at all: the value types whose
-// runtime test is exact, and the classes the program declares. Any other receiver
-// (a type parameter, Any, an interface, a collection) is not tested, and the
-// extension then applies to every receiver of its name. Read at the call, when every
-// class has been seen.
+// runtime test is exact, and the classes, interfaces, objects and enums the program
+// declares. Any other receiver (a type parameter, Any, a collection) is not tested,
+// and the extension then applies to every receiver of its name. Read at the call,
+// when every type has been seen.
+var ktExtValueTys = {"$String": true, "$Char": true, "$Boolean": true, "$Int": true, "$Long": true,
+                     "$Short": true, "$Byte": true, "$Double": true, "$Float": true}
 function ktExtTested(ty) {
     var b = ktBaseName(ty)
-    return b == "String" || b == "Char" || b == "Boolean" || b == "Int" || ktClassExt["$" + b] != undefined
+    return ktExtValueTys["$" + b] == true || ktClassExt["$" + b] != undefined || ktDeclTypeNames["$" + b] == true
+}
+// The interfaces, objects and enum classes the program declares (the classes are
+// ktClassExt), each noted from its declaration's text after keyword kw
+// (`interfaceShape{...}`, `objectOrigin{...}`, `enumclassColor{...}`).
+var ktDeclTypeNames = {}
+function ktNoteTypeName(txt, kw) {
+    var i = txt.indexOf(kw)
+    if (i < 0) { return }
+    var j = i + kw.length
+    while (j < txt.length && ktIdChar(txt.charAt(j))) { j++ }
+    if (j > i + kw.length) { ktDeclTypeNames["$" + txt.substring(i + kw.length, j)] = true }
 }
 // The declared type of property `name` of class `cls`; for a class not known here,
 // the name's type when every declaration of it agrees, else "".
@@ -710,9 +723,26 @@ var ktStdParamNames = {
 }
 function ktStdParams(name) { return ktStdParamNames["$" + name] }
 
-// The java.* classes an import may name that the runtime provides under their
-// qualified path (hostGlobals / js_ktglobal). Such an import binds its simple name,
-// or its alias, to that class: after `import java.util.Random`, `Random(1)` is
-// java.util.Random, not kotlin.random.Random.
-var ktJavaClassImports = {"$java.util.Random": true}
-function ktJavaClassImport(path) { return ktJavaClassImports["$" + path] == true }
+// The java.* classes an import may name that the runtime provides, each with the
+// global it is provided under (hostGlobals / js_ktglobal). Such an import binds its
+// simple name, or its alias, to that global: after `import java.util.Random`,
+// `Random(1)` is java.util.Random, not kotlin.random.Random. The collections are
+// the classes kotlin.collections already typealiases (ArrayList is
+// java.util.ArrayList), so their import binds the same constructor.
+var ktJavaClassImports = [["java.util.Random", "java.util.Random"], ["java.util.ArrayList", "ArrayList"],
+                          ["java.util.HashMap", "HashMap"], ["java.util.HashSet", "HashSet"],
+                          ["java.util.LinkedHashMap", "LinkedHashMap"], ["java.util.LinkedHashSet", "LinkedHashSet"]]
+// The [simple name, global] pairs an import binds: the one class of an exact path,
+// every provided class of the package for a `.*` import, none for anything else.
+function ktJavaClassImport(path) {
+    var star = path.length > 2 && path.substring(path.length - 2, path.length) == ".*"
+    var out = []
+    for (var i = 0; i < ktJavaClassImports.length; i++) {
+        var cp = ktJavaClassImports[i][0]
+        var dot = cp.length - 1
+        while (dot > 0 && cp.charAt(dot) != ".") { dot-- }
+        var hit = star ? cp.substring(0, dot) + ".*" == path : cp == path
+        if (hit) { out.push([cp.substring(dot + 1, cp.length), ktJavaClassImports[i][1]]) }
+    }
+    return out
+}

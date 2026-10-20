@@ -497,7 +497,8 @@ function k3GroupStep(name, sel, f, op, k, first, acc, e) {
     return ktCall2(op, acc, e)
 }
 
-// ktMapPut (jsrtkotlin.go 3035): insert or replace, keeping insertion order.
+// ktMapPut (jsrtkotlin.go 3035): insert or replace, keeping insertion order
+// (key order for a TreeMap).
 function ktMapPut(m, k, v) {
     var keys = ktMapKeys(m)
     var vals = ktMapVals(m)
@@ -509,7 +510,26 @@ function ktMapPut(m, k, v) {
     }
     keys.push(k)
     vals.push(v)
+    if (m["__jc"] === "java.util.TreeMap") { ktSortedSink(keys, vals) }
     return true
+}
+
+// ktSortedSink (jsrtkotlin.go): move the element just appended to keys (and its
+// value, when vals is not null) left to its ascending position - a TreeSet /
+// TreeMap keeps its keys sorted on every insertion, not only when it is built.
+function ktSortedSink(keys, vals) {
+    var j = keys.length - 1
+    while (j > 0 && ktKeyLess(keys[j], keys[j - 1])) {
+        var k = keys[j]
+        keys[j] = keys[j - 1]
+        keys[j - 1] = k
+        if (vals !== null) {
+            var v = vals[j]
+            vals[j] = vals[j - 1]
+            vals[j - 1] = v
+        }
+        j = j - 1
+    }
 }
 
 // ===================================================== the set handle =======
@@ -545,6 +565,7 @@ function ktSetAdd(s, e) {
     if (keys === undefined) { return false }
     if (ktMapFind(keys, e) >= 0) { return false }
     keys.push(e)
+    if (s["__jc"] === "java.util.TreeSet") { ktSortedSink(keys, null) }
     return true
 }
 
@@ -676,10 +697,11 @@ var ktExcHier = undefined
 // builtin throwable - what java.lang.Class#getName answers for it, and therefore
 // what Throwable#toString and the launcher's uncaught-exception line spell.
 // Kotlin's Exception / RuntimeException / IllegalStateException / ... are
-// TYPEALIASES to the java.lang classes on the JVM, so `java` is the oracle. Two of
-// the nineteen live in java.util, and NotImplementedError /
-// UninitializedPropertyAccessException are Kotlin's OWN classes, declared by
-// kotlin-stdlib in the `kotlin` package. Twin: kExcFqcn in kotlin-interpreter.abnf.
+// TYPEALIASES to the java.lang classes on the JVM, so `java` is the oracle. The
+// collection exceptions and Formatter's live in java.util, PatternSyntaxException
+// in java.util.regex, and NotImplementedError / UninitializedPropertyAccessException
+// are Kotlin's OWN classes, declared by kotlin-stdlib in the `kotlin` package.
+// Twin: kExcFqcn in kotlin-interpreter.abnf.
 function ktExcFqcn(name) {
     if (name === "NoSuchElementException") { return "java.util." + name }
     if (name === "ConcurrentModificationException") { return "java.util." + name }
@@ -4637,6 +4659,13 @@ function ktSeqMethodK(arr, name, args, kind) {
     // array in this value model, so every one of them is a COPY of the elements.
     if (k3IsCopyName(name)) { return k3Copy(es) }
     if (name == "copyOf") { return k3CopyOf(es, args) }
+    if (name == "copyOfRange") {
+        var rf = k3Int(args[0])
+        var rt = k3Int(args[1])
+        var rfault = ktaCopyRangeFault(rf, rt, es.length, arrKind(es))
+        if (rfault !== null) { ktRaise(rfault[0], rfault[1]) }
+        return k3Sub(es, rf, rt)
+    }
     if (name == "withIndex") {
         for (i = 0; i < es.length; i = i + 1) {
             out.push({__ktiv: true, index: i, value: es[i], first: i, second: es[i]})
@@ -6123,6 +6152,16 @@ function ktIsType(v, tname) {
 // `x is T`, as the extern.
 function js_ktis(v, tname) { return ktIsType(v, tname) }
 
+// js_ktextok (jsrtkotlin.go): whether the extension chain takes the extension
+// declared for tname - v has that type and no member of the name.
+function js_ktextok(v, tname, name, builtin) {
+    if (!ktIsType(v, tname)) { return false }
+    if (ktIsObj(v)) {
+        if (v["__class"] !== undefined && v["__class"] !== null) { return !ktClassChainHas(v, name) }
+    }
+    return builtin !== true
+}
+
 // ============================================================= exceptions ====
 
 // js_ktnewexc(name, message) constructs one of the builtin throwables. The
@@ -6217,7 +6256,7 @@ function js_ktthisat(self, want) {
 //   bound  is the receiver bound?
 //   ctor   ::Box - a constructor reference
 //   tname  the TYPE the base named, for an unbound reference
-//   ext    the EXTENSION function of that name, resolved at compile time
+//   ext    the EXTENSIONS of that name as [type, closure, ...] (emitRefValue)
 function k4bRefInfo(recv, name, bound, ctor, tname, ext) {
     var o = {}
     o["recv"] = recv
@@ -6297,8 +6336,14 @@ function ktRefApply(info, args) {
         if (recv[info["name"]] !== undefined) { return ktRefRead(recv, info["name"]) }
     }
     var ext = info["ext"]
-    if (ext !== undefined && ext !== null) {
-        return ktCall(ext, rtPrepend(recv, k4bRefRest(info, args)))
+    if (ktIsArr(ext)) {
+        var i = 0
+        while (i + 1 < ext.length) {
+            if (ext[i] == "" || ktIsType(recv, ext[i])) {
+                return ktCall(ext[i + 1], rtPrepend(recv, k4bRefRest(info, args)))
+            }
+            i = i + 2
+        }
     }
     return ktRefRead(recv, info["name"])
 }
