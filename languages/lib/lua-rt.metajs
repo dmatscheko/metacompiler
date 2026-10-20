@@ -472,7 +472,8 @@ function luParseNum(s) {
     if (!neg) { return v }
     var fb = luFloOf(v)
     if (fb === 9223372036854775808 && luIs2p63(s.substring(i, n))) { return luNorm(luMinPair()) }
-    if (fb !== undefined) { return luMkFlo(0 - fb) }
+    // A sign flip, not `0 - fb`, so "-0.0" stays -0.0.
+    if (fb !== undefined) { return luMkFlo(fb * (0 - 1)) }
     if (luIsInt(v)) { return luNorm(i64Neg(luPair(v))) }
     return 0 - luNumOf(v)
 }

@@ -1669,6 +1669,10 @@ function s36()
                        tonumber(bs[9], 16), tonumber(bs[10], 8)),
           "10:2,255,1295,-255,3,nil,nil,9223372036854775807,-1,7")
     check("bt14", math.type(tonumber(bs[1], 10)), "integer")
+    local zs = {"-0.0", " -0.0 ", "-0e5", "-0x0p0", "-.0", "-0", "-0x0"}
+    check("bt66", join(tonumber(zs[1]), tonumber(zs[2]), tonumber(zs[3]), tonumber(zs[4]), tonumber(zs[5]),
+                       tonumber(zs[6]), tonumber(zs[7]), 1 / tonumber(zs[1]), math.type(tonumber(zs[6]))),
+          "9:-0.0,-0.0,-0.0,-0.0,-0.0,0,0,-inf,integer")
     check("bt15", msg(tonumber), "bad argument #1 to 'tonumber' (value expected)")
     check("bt16", msg(tonumber, 10, 16), "bad argument #1 to 'tonumber' (string expected, got number)")
     check("bt17", msg(tonumber, "10", 37), "bad argument #2 to 'tonumber' (base out of range)")
