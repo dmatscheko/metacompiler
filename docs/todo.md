@@ -117,7 +117,7 @@ not change the renderer.
 
 # GO — Go  (oracle: `go run`)
 
-### T-688 go: append growth inside a generic function ignores the instantiation (pad zero and capacity) · P3 · GO · OPEN [V]
+### T-688 go: append growth inside a generic function ignores the instantiation (pad zero and capacity) · P3 · GO · IN PROGRESS (GO worker, round 15) [V]
 `type Bx[T any] struct{ v T; p *int }`; in `func g[T any]()`: `ws := []Bx[T]{}`, append three times, `ws = ws[:cap(ws)]`, print
 `ws[3].v` and `%T` of `ws[3]`; and `var zs []T; zs = append(zs, x); zs = zs[:cap(zs)]; len(zs)`. go g[int]: `4 0 true / main.Bx[int] 0
 / 4`, g[string]: `4  true / main.Bx[string]  / 2`; ours both halves `4 <nil> true / main.Bx[main.T] <nil> / 1` — the pad zero is
