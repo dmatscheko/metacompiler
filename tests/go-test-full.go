@@ -56,6 +56,8 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"unicode"
+	"unicode/utf8"
 )
 
 var fails = 0
@@ -4782,6 +4784,42 @@ func s87() {
 	check("nil1", fmt.Sprint(rows, rows[0].Tags == nil, sf, sn, len87("abc")) == "[{a [] map[]}] true 1.5 3 6")
 }
 
+// ===== SECTION 88: packages unicode and unicode/utf8 =====
+// Go source (languages/lib/go-unicode.go, go-utf8.go); the category tests are
+// exact through Latin-1. The expected values are go run's.
+func cats88(r rune) string {
+	s := ""
+	for _, ok := range []bool{unicode.IsUpper(r), unicode.IsLower(r), unicode.IsLetter(r), unicode.IsDigit(r),
+		unicode.IsSpace(r), unicode.IsPunct(r), unicode.IsSymbol(r), unicode.IsControl(r), unicode.IsPrint(r)} {
+		if ok {
+			s += "1"
+		} else {
+			s += "0"
+		}
+	}
+	return s
+}
+
+func s88() {
+	got := ""
+	for _, r := range []rune{'A', 'z', '5', ' ', '!', '$', '\n', 0xA0, 'é', 'ß', 0xD7, 0xBF, 'Σ', '世'} {
+		got += cats88(r) + " "
+	}
+	check("uni1", got == "101000001 011000001 000100001 000010001 000001001 000000101 000010010 000010000 011000001 011000001 000000101 000001001 101000001 001000001 ")
+	check("uni2", string([]rune{unicode.ToUpper('é'), unicode.ToLower('Σ'), unicode.ToTitle('ǆ'), unicode.ToUpper('q')}) == "ÉσǅQ")
+	s := "héllo, 世界\xff"
+	var dec []string
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		dec = append(dec, fmt.Sprint(r, ":", size))
+		i += size
+	}
+	buf := make([]byte, 4)
+	n := utf8.EncodeRune(buf, '€')
+	check("utf1", fmt.Sprint(utf8.RuneCountInString(s), utf8.ValidString(s), utf8.RuneLen('世'), dec, buf[:n],
+		string(utf8.AppendRune(nil, 'é'))) == "10 false 3 [104:1 233:2 108:1 108:1 111:1 44:1 32:1 19990:3 30028:3 65533:1] [226 130 172]é")
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -4870,6 +4908,7 @@ func main() {
 	s85() // SECTION-CALL 85
 	s86() // SECTION-CALL 86
 	s87() // SECTION-CALL 87
+	s88() // SECTION-CALL 88
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

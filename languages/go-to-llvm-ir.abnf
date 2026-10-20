@@ -5720,9 +5720,17 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             } else {
                 // An array argument is a VALUE: the parameter gets a copy ($acopy is
                 // the identity on everything else).
+                var argV = callExt(b, "js_arg", [f.Params[1], handle(i + off)])
+                // A nil argument for a slice of SIZED integers becomes that slice
+                // type's nil, whose header carries the element width an append into
+                // it, and string() of the result, read (`utf8.AppendRune(nil, r)`).
+                if (pt.length > 2 && pt.charAt(0) == "[" && pt.charAt(1) == "]" && goIntTy(pt.substring(2)) != null && pt != "[]int" && pt != "[]int64") {
+                    var an = emitRetNil(b, pt, argV)
+                    b = an.b
+                    argV = an.v
+                }
                 callExt(b, "js_scope_decl", [curScopeV, emitStr(b, params[i]),
-                                             emitAdoptTy(b, pt,
-                                                 emitStoreVal(b, callExt(b, "js_arg", [f.Params[1], handle(i + off)]), pt))])
+                                             emitAdoptTy(b, pt, emitStoreVal(b, argV, pt))])
             }
         }
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$defers"), callExt(b, "js_arr_new", [])])
@@ -6272,7 +6280,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
 
     // Go stdlib packages the runtime provides (resolveImport lives in lib/compile-core.js;
     // exact-match paths, so sub-packages like "encoding/json" are listed in full).
-    core.stdlibImports = ["fmt", "os", "errors", "bufio", "io", "time", "bytes", "unicode", "regexp", "path", "encoding/json", "context", "flag", "log", "reflect"]
+    core.stdlibImports = ["fmt", "os", "errors", "bufio", "io", "time", "bytes", "regexp", "path", "encoding/json", "context", "flag", "log", "reflect"]
     function fail(msg) { println("go compiler error: " + msg); exit(1) }
 
     // Project-file imports: import "mathbox" -> mathbox.go (a slash path like "a/b" ->
