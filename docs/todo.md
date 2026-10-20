@@ -121,7 +121,7 @@ not change the renderer.
 
 # GO — Go  (oracle: `go run`)
 
-### T-682 go: anonymous struct types as declared types; embedding a package-qualified type; fmt.Append*/os.Getenv · P2 · GO · OPEN [V]
+### T-682 go: anonymous struct types as declared types; embedding a package-qualified type; fmt.Append*/os.Getenv · P2 · GO · IN PROGRESS (GO worker, round 12) [V]
 `var r struct{a int; s string}; r.a = 5` → nil-dereference panic in both halves (go `5 {5 }`); a field typed `In struct{ V int }`
 zeroes to nil; `a := struct{x int}{1}; b := a; b.x = 2` → `2 2` (go `1 2`, no copy for anonymous literals). `type S struct{
 strings.Builder }; s.WriteString("hi")` → "unknown method 'WriteString'" (goFieldEmbedded misses `pkg.T`). `fmt.Append`,
