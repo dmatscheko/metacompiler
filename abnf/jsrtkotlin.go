@@ -2881,8 +2881,12 @@ func init() {
 				return w(es[i])
 			}
 			if mo, isObj := u(a[0]).(*jsObject); isObj {
-				if keys, _, isDict := dictParts(mo); isDict && rt.ktMapFind(keys, u(a[1])) < 0 {
-					return w(jsNull)
+				if keys, vals, isDict := dictParts(mo); isDict {
+					i := rt.ktMapFind(keys, rt.ktCanonKey(mo, keys, u(a[1])))
+					if i < 0 {
+						return w(jsNull)
+					}
+					return w(vals.elems[i])
 				}
 			}
 			// Kotlin's indexed reads are BOUNDS-CHECKED: the shared js_kindex aborts
@@ -4132,30 +4136,207 @@ func ktIsSet(v interface{}) bool {
 // the set GREW, which is what kotlin.collections.MutableSet.add answers.
 func (rt *jsrt) ktSetAdd(s *jsObject, e interface{}) bool {
 	keys, _ := ktSetParts(s)
+	if s.props["__jc"] == ktPqClass {
+		rt.ktPqOffer(s, keys, e)
+		return true
+	}
+	e = rt.ktCanonKey(s, keys, e)
 	if rt.ktMapFind(keys, e) >= 0 {
 		return false
 	}
 	keys.dropIdx()
 	keys.elems = append(keys.elems, e)
 	if s.props["__jc"] == "java.util.TreeSet" {
-		ktSortedSink(rt, keys, nil)
+		ktSortedSink(rt, s, keys, nil)
 	}
 	return true
 }
 
+// ktOrd is the order of a sorted collection: its Comparator's answer when it was
+// built with one (__cmp), else the natural order. Twin of kOrd in
+// kotlin-interpreter.abnf and ktOrd in languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktOrd(h *jsObject, a, b interface{}) float64 {
+	if c, ok := h.props["__cmp"]; ok {
+		return rt.toNumber(rt.ktCall(c, a, b))
+	}
+	if ktKeyLess(rt, a, b) {
+		return -1
+	}
+	if ktKeyLess(rt, b, a) {
+		return 1
+	}
+	return 0
+}
+
+// ktCanonKey: a TreeSet / TreeMap built with a Comparator finds its keys BY THAT
+// COMPARATOR, not by equals (java.util.TreeMap.getEntryUsingComparator), so an
+// argument the comparator ranks equal to a stored key IS that key. Every other
+// handle answers the argument unchanged. Twin of kCanonKey in
+// kotlin-interpreter.abnf and ktCanonKey in languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktCanonKey(h *jsObject, keys *jsArray, k interface{}) interface{} {
+	if _, ok := h.props["__cmp"]; !ok || h.props["__jc"] == ktPqClass {
+		return k
+	}
+	for _, e := range keys.elems {
+		if rt.ktOrd(h, e, k) == 0 {
+			return e
+		}
+	}
+	return k
+}
+
+// ktKeyMembers are the set and map members whose first argument is a key, which
+// ktKeyArg makes canonical. Twin of kKeyMembers in kotlin-interpreter.abnf.
+var ktKeyMembers = map[string]bool{"contains": true, "remove": true, "get": true, "getValue": true,
+	"getOrDefault": true, "getOrElse": true, "getOrPut": true, "put": true, "set": true, "containsKey": true}
+
+func (rt *jsrt) ktKeyArg(h *jsObject, keys *jsArray, name string, args []interface{}) interface{} {
+	f := argAt(args, 0)
+	if _, ok := h.props["__cmp"]; !ok || !ktKeyMembers[name] {
+		return f
+	}
+	return rt.ktCanonKey(h, keys, f)
+}
+
 // ktSortedSink moves the element just appended to keys (and its value, when vals is
-// not nil) left to its ascending position: a java.util.TreeSet / TreeMap keeps its
-// keys sorted on every insertion, not only when it is built. Twin of kSortedSink in
-// kotlin-interpreter.abnf and ktSortedSink in languages/lib/kotlin-rt.metajs.
-func ktSortedSink(rt *jsrt, keys, vals *jsArray) {
+// not nil) left to its position in h's order: a java.util.TreeSet / TreeMap keeps
+// its keys sorted on every insertion, not only when it is built. Twin of
+// kSortedSink in kotlin-interpreter.abnf and ktSortedSink in
+// languages/lib/kotlin-rt.metajs.
+func ktSortedSink(rt *jsrt, h *jsObject, keys, vals *jsArray) {
 	j := len(keys.elems) - 1
-	for j > 0 && ktKeyLess(rt, keys.elems[j], keys.elems[j-1]) {
+	for j > 0 && rt.ktOrd(h, keys.elems[j], keys.elems[j-1]) < 0 {
 		keys.elems[j], keys.elems[j-1] = keys.elems[j-1], keys.elems[j]
 		if vals != nil {
 			vals.elems[j], vals.elems[j-1] = vals.elems[j-1], vals.elems[j]
 		}
 		j--
 	}
+}
+
+// A java.util.PriorityQueue is the set handle tagged with its class, its keys being
+// the binary heap in java's own array layout - which is the order its iterator and
+// toString walk - and duplicates allowed. siftUp / siftDown / removeAt / heapify are
+// java.util.PriorityQueue's, step for step, so the layout after any sequence of
+// operations is the JDK's. Twin of kPq* in kotlin-interpreter.abnf and ktPq* in
+// languages/lib/kotlin-rt.metajs.
+const ktPqClass = "java.util.PriorityQueue"
+
+func (rt *jsrt) ktPqSiftUp(pq *jsObject, q []interface{}, k int, x interface{}) int {
+	for k > 0 {
+		p := (k - 1) >> 1
+		if rt.ktOrd(pq, x, q[p]) >= 0 {
+			break
+		}
+		q[k] = q[p]
+		k = p
+	}
+	q[k] = x
+	return k
+}
+
+func (rt *jsrt) ktPqSiftDown(pq *jsObject, q []interface{}, k int, x interface{}) int {
+	n := len(q)
+	for half := n >> 1; k < half; {
+		c := 2*k + 1
+		if c+1 < n && rt.ktOrd(pq, q[c], q[c+1]) > 0 {
+			c++
+		}
+		if rt.ktOrd(pq, x, q[c]) <= 0 {
+			break
+		}
+		q[k] = q[c]
+		k = c
+	}
+	q[k] = x
+	return k
+}
+
+func (rt *jsrt) ktPqOffer(pq *jsObject, keys *jsArray, e interface{}) {
+	keys.dropIdx()
+	keys.elems = append(keys.elems, e)
+	rt.ktPqSiftUp(pq, keys.elems, len(keys.elems)-1, e)
+}
+
+func (rt *jsrt) ktPqRemoveAt(pq *jsObject, keys *jsArray, i int) {
+	keys.dropIdx()
+	last := len(keys.elems) - 1
+	moved := keys.elems[last]
+	keys.elems = keys.elems[:last]
+	if i == last {
+		return
+	}
+	if rt.ktPqSiftDown(pq, keys.elems, i, moved) == i {
+		rt.ktPqSiftUp(pq, keys.elems, i, moved)
+	}
+}
+
+func (rt *jsrt) ktPqPoll(pq *jsObject, keys *jsArray) interface{} {
+	if len(keys.elems) == 0 {
+		return jsNull
+	}
+	top := keys.elems[0]
+	rt.ktPqRemoveAt(pq, keys, 0)
+	return top
+}
+
+// ktNewPq is PriorityQueue(), (capacity), (comparator), (capacity, comparator) or
+// (collection), the last heapified as java's initFromCollection does.
+func (rt *jsrt) ktNewPq(args []interface{}) *jsObject {
+	pq := ktMakeSet()
+	pq.set("__jc", ktPqClass)
+	for _, a := range args {
+		if isCallable(a) {
+			pq.set("__cmp", a)
+		}
+	}
+	keys, _ := ktSetParts(pq)
+	src := argAt(args, 0)
+	if a, ok := src.(*jsArray); ok {
+		keys.elems = append(keys.elems, a.elems...)
+	} else if sk, isSet := ktSetParts(src); isSet {
+		keys.elems = append(keys.elems, sk.elems...)
+	}
+	for j := len(keys.elems)>>1 - 1; j >= 0; j-- {
+		rt.ktPqSiftDown(pq, keys.elems, j, keys.elems[j])
+	}
+	return pq
+}
+
+// ktPqMethod is the members a PriorityQueue answers differently from a set: add /
+// offer keep duplicates (ktSetAdd), poll / remove() / peek / element take the
+// head, and remove(e) is java's removeAt. ok is false for the set's own members.
+func (rt *jsrt) ktPqMethod(pq *jsObject, keys *jsArray, name string, args []interface{}) (interface{}, bool) {
+	n := len(keys.elems)
+	switch {
+	case name == "offer":
+		rt.ktPqOffer(pq, keys, argAt(args, 0))
+		return true, true
+	case name == "poll":
+		return rt.ktPqPoll(pq, keys), true
+	case name == "peek":
+		if n == 0 {
+			return jsNull, true
+		}
+		return keys.elems[0], true
+	case name == "element" || (name == "remove" && len(args) == 0):
+		if n == 0 {
+			rt.ktNoElem(nil)
+		}
+		if name == "element" {
+			return keys.elems[0], true
+		}
+		return rt.ktPqPoll(pq, keys), true
+	case name == "remove":
+		for i, e := range keys.elems {
+			if rt.ktEqVals(e, args[0]) {
+				rt.ktPqRemoveAt(pq, keys, i)
+				return true, true
+			}
+		}
+		return false, true
+	}
+	return nil, false
 }
 
 // ktSetFrom builds a set from a slice, deduplicating in first-seen order.
@@ -4226,6 +4407,7 @@ func (rt *jsrt) ktGroupingMethod(g *jsObject, name string, args []interface{}) (
 // ktMapPut inserts or replaces, keeping insertion order (key order for a TreeMap).
 func (rt *jsrt) ktMapPut(m *jsObject, k, v interface{}) {
 	keys, vals, _ := dictParts(m)
+	k = rt.ktCanonKey(m, keys, k)
 	if i := rt.ktMapFind(keys, k); i >= 0 {
 		vals.elems[i] = v
 		return
@@ -4234,7 +4416,7 @@ func (rt *jsrt) ktMapPut(m *jsObject, k, v interface{}) {
 	keys.elems = append(keys.elems, k)
 	vals.elems = append(vals.elems, v)
 	if m.props["__jc"] == "java.util.TreeMap" {
-		ktSortedSink(rt, keys, vals)
+		ktSortedSink(rt, m, keys, vals)
 	}
 }
 
@@ -6082,21 +6264,58 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		}
 		return rt.ktSeqMethod(o, "removeAt", []interface{}{float64(ix)})
 	// java.util.List's SequencedCollection members (JDK 21), answering Unit.
-	case "addFirst":
+	case "addFirst", "push":
 		return rt.ktSeqMethod(o, "add", []interface{}{float64(0), f})
 	case "addLast":
 		o.dropIdx()
 		o.elems = append(o.elems, f)
 		return jsUndef, true
-	case "remove":
-		for i, e := range o.elems {
-			if rt.ktEqVals(e, f) {
-				o.dropIdx()
-				o.elems = append(o.elems[:i], o.elems[i+1:]...)
-				return true, true
-			}
+	// java.util.Deque's members, which a LinkedList / ArrayDeque (a list here)
+	// answers: offer* add and answer true, peek* / poll* answer null when empty, and
+	// pop / element / getFirst / getLast / remove() raise java's
+	// NoSuchElementException, whose message is null. Twin of the same branch of
+	// kSeqMethod in kotlin-interpreter.abnf and ktSeqMethod in
+	// languages/lib/kotlin-rt.metajs.
+	case "offer", "offerLast":
+		o.dropIdx()
+		o.elems = append(o.elems, f)
+		return true, true
+	case "offerFirst":
+		rt.ktSeqMethod(o, "add", []interface{}{float64(0), f})
+		return true, true
+	case "peek", "peekFirst", "peekLast":
+		if len(o.elems) == 0 {
+			return jsNull, true
 		}
-		return false, true
+		if name == "peekLast" {
+			return o.elems[len(o.elems)-1], true
+		}
+		return o.elems[0], true
+	case "poll", "pollFirst":
+		return rt.ktSeqMethod(o, "removeFirstOrNull", nil)
+	case "pollLast":
+		return rt.ktSeqMethod(o, "removeLastOrNull", nil)
+	case "pop", "element", "getFirst", "getLast", "remove":
+		if name == "remove" && len(args) > 0 {
+			for i, e := range o.elems {
+				if rt.ktEqVals(e, f) {
+					o.dropIdx()
+					o.elems = append(o.elems[:i], o.elems[i+1:]...)
+					return true, true
+				}
+			}
+			return false, true
+		}
+		if len(o.elems) == 0 {
+			rt.ktNoElem(nil)
+		}
+		switch name {
+		case "element", "getFirst":
+			return o.elems[0], true
+		case "getLast":
+			return o.elems[len(o.elems)-1], true
+		}
+		return rt.ktSeqMethod(o, "removeAt", []interface{}{float64(0)})
 	case "addAll":
 		more := ktElems(rt, f)
 		o.dropIdx()
@@ -6209,7 +6428,12 @@ func (rt *jsrt) ktSetMethod(s *jsObject, name string, args []interface{}) (inter
 	if !ok {
 		return nil, false
 	}
-	f := argAt(args, 0)
+	if s.props["__jc"] == ktPqClass {
+		if r, ok := rt.ktPqMethod(s, keys, name, args); ok {
+			return r, true
+		}
+	}
+	f := rt.ktKeyArg(s, keys, name, args)
 	switch name {
 	case "size":
 		return float64(len(keys.elems)), true
@@ -6489,7 +6713,7 @@ func ktKeyEqual(rt *jsrt, a, b interface{}) bool {
 // ktMapMethod is the kotlin.collections Map surface over the shared dict handle.
 func (rt *jsrt) ktMapMethod(m *jsObject, name string, args []interface{}) (interface{}, bool) {
 	keys, vals, _ := dictParts(m)
-	f := argAt(args, 0)
+	f := rt.ktKeyArg(m, keys, name, args)
 	switch name {
 	case "get":
 		if i := rt.ktMapFind(keys, f); i >= 0 {
@@ -7176,7 +7400,8 @@ func ktRangeIsType(rg ktRange, t string) bool {
 // Collection but not a List, and a Map is none of them. One representation serves
 // a read-only collection and its mutable counterpart, so a Mutable* name answers as
 // the read-only name. An Array, a primitive array and a Sequence are told apart by
-// the array kind and are not Iterable. Twin of kCollIsType in
+// the array kind and are not Iterable. A PriorityQueue is a Queue and not a Set,
+// though it is held in the set handle (ktNewPq). Twin of kCollIsType in
 // kotlin-interpreter.abnf and ktCollIsType in languages/lib/kotlin-rt.metajs.
 func ktCollIsType(v interface{}, t string) (is bool, ok bool) {
 	t = strings.TrimPrefix(t, "Mutable")
@@ -7185,6 +7410,9 @@ func ktCollIsType(v interface{}, t string) (is bool, ok bool) {
 	}
 	coll := t == "Collection" || t == "Iterable"
 	if ktIsSet(v) {
+		if v.(*jsObject).props["__jc"] == ktPqClass {
+			return coll || t == "Queue", true
+		}
 		return coll || t == "Set", true
 	}
 	arr, isArr := v.(*jsArray)
@@ -7665,23 +7893,16 @@ func (rt *jsrt) ktPkgMember(pkg, name string) interface{} {
 // LinkedHashSet, HashMap / LinkedHashMap, TreeSet / TreeMap: empty, with an Int
 // capacity, or a copy of a collection (of a map). A HashSet / HashMap iterates in
 // insertion order, as hashSetOf / hashMapOf do (ktMakeSet); a TreeSet / TreeMap in
-// ascending order, and its Comparator form is not provided. Twin of
-// kJavaCollection in kotlin-interpreter.abnf and k4JavaCollection in
-// languages/lib/kotlin-rt.metajs.
+// ascending order, or in its Comparator's (__cmp, ktOrd). A LinkedList and an
+// ArrayDeque (kotlin.collections' and java.util's) are lists: the deque members are
+// ktSeqMethod's. Twin of kJavaCollection in kotlin-interpreter.abnf and
+// k4JavaCollection in languages/lib/kotlin-rt.metajs.
 func (rt *jsrt) ktJavaCollection(name string, src interface{}) interface{} {
-	if name == "TreeSet" || name == "TreeMap" {
-		_, isArr := src.(*jsArray)
-		_, _, isDict := dictParts(src)
-		switch src.(type) {
-		case nil, jsUndefT, jsNullT:
-		default:
-			if !isArr && !isDict && !ktIsSet(src) {
-				rt.fail("%s(comparator) is not supported", name)
-			}
-		}
-	}
 	if name == "HashMap" || name == "LinkedHashMap" || name == "TreeMap" {
 		mp := ktJvmTagged(ktMakeMap(), name, 0)
+		if isCallable(src) {
+			mp.set("__cmp", src)
+		}
 		if keys, vals, isMap := dictParts(src); isMap {
 			if _, isSet := ktSetParts(src); !isSet {
 				for i, k := range keys.elems {
@@ -7697,11 +7918,14 @@ func (rt *jsrt) ktJavaCollection(name string, src interface{}) interface{} {
 	} else if keys, isSet := ktSetParts(src); isSet {
 		els = keys.elems
 	}
-	if name == "ArrayList" {
+	if name == "ArrayList" || name == "LinkedList" || name == "ArrayDeque" {
 		return &jsArray{elems: append([]interface{}{}, els...)}
 	}
 	// A TreeSet is tagged before it fills, so each insertion sorts.
 	s := ktJvmTagged(ktMakeSet(), name, 0)
+	if isCallable(src) {
+		s.set("__cmp", src)
+	}
 	for _, e := range els {
 		rt.ktSetAdd(s, e)
 	}
@@ -8071,7 +8295,12 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			return ktJvmTagged(rt.ktSetFrom(args), name, len(args))
 		})
-	case "ArrayList", "HashSet", "LinkedHashSet", "HashMap", "LinkedHashMap", "TreeSet", "TreeMap":
+	case "PriorityQueue":
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return rt.ktNewPq(args)
+		})
+	case "ArrayList", "LinkedList", "ArrayDeque", "HashSet", "LinkedHashSet", "HashMap", "LinkedHashMap",
+		"TreeSet", "TreeMap":
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			c := rt.ktJavaCollection(name, argAt(args, 0))
 			if o, isObj := c.(*jsObject); isObj {

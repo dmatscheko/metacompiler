@@ -503,23 +503,61 @@ function ktMapPut(m, k, v) {
     var keys = ktMapKeys(m)
     var vals = ktMapVals(m)
     if (keys === undefined) { return false }
-    var i = ktMapFind(keys, k)
+    var ck = ktCanonKey(m, keys, k)
+    var i = ktMapFind(keys, ck)
     if (i >= 0) {
         vals[i] = v
         return false
     }
-    keys.push(k)
+    keys.push(ck)
     vals.push(v)
-    if (m["__jc"] === "java.util.TreeMap") { ktSortedSink(keys, vals) }
+    if (m["__jc"] === "java.util.TreeMap") { ktSortedSink(m, keys, vals) }
     return true
 }
 
+// ktOrd (jsrtkotlin.go): the order of a sorted collection - its Comparator's
+// answer when it was built with one (__cmp), else the natural order.
+function ktOrd(h, a, b) {
+    var c = h["__cmp"]
+    if (c !== undefined) { return ktNum(ktCall2(c, a, b)) }
+    if (ktKeyLess(a, b)) { return -1 }
+    if (ktKeyLess(b, a)) { return 1 }
+    return 0
+}
+
+// ktCanonKey (jsrtkotlin.go): a TreeSet / TreeMap built with a Comparator finds
+// its keys by that comparator, so an argument it ranks equal to a stored key IS
+// that key; every other handle answers the argument unchanged.
+function ktCanonKey(h, keys, k) {
+    if (h["__cmp"] === undefined) { return k }
+    if (h["__jc"] === KT_PQ_CLASS) { return k }
+    var i = 0
+    while (i < keys.length) {
+        if (ktOrd(h, keys[i], k) == 0) { return keys[i] }
+        i = i + 1
+    }
+    return k
+}
+
+// ktKeyArg (jsrtkotlin.go): a set or map member's first argument, canonical when
+// the member takes a key.
+function ktKeyArg(h, keys, name, args) {
+    var f = ktArg(args, 0)
+    if (h["__cmp"] === undefined) { return f }
+    if (name == "contains" || name == "remove" || name == "get" || name == "getValue"
+        || name == "getOrDefault" || name == "getOrElse" || name == "getOrPut" || name == "put"
+        || name == "set" || name == "containsKey") {
+        return ktCanonKey(h, keys, f)
+    }
+    return f
+}
+
 // ktSortedSink (jsrtkotlin.go): move the element just appended to keys (and its
-// value, when vals is not null) left to its ascending position - a TreeSet /
+// value, when vals is not null) left to its position in h's order - a TreeSet /
 // TreeMap keeps its keys sorted on every insertion, not only when it is built.
-function ktSortedSink(keys, vals) {
+function ktSortedSink(h, keys, vals) {
     var j = keys.length - 1
-    while (j > 0 && ktKeyLess(keys[j], keys[j - 1])) {
+    while (j > 0 && ktOrd(h, keys[j], keys[j - 1]) < 0) {
         var k = keys[j]
         keys[j] = keys[j - 1]
         keys[j - 1] = k
@@ -563,10 +601,128 @@ function ktIsSet(v) { return ktSetElems(v) !== undefined }
 function ktSetAdd(s, e) {
     var keys = ktSetElems(s)
     if (keys === undefined) { return false }
-    if (ktMapFind(keys, e) >= 0) { return false }
-    keys.push(e)
-    if (s["__jc"] === "java.util.TreeSet") { ktSortedSink(keys, null) }
+    if (s["__jc"] === KT_PQ_CLASS) {
+        ktPqOffer(s, keys, e)
+        return true
+    }
+    var ce = ktCanonKey(s, keys, e)
+    if (ktMapFind(keys, ce) >= 0) { return false }
+    keys.push(ce)
+    if (s["__jc"] === "java.util.TreeSet") { ktSortedSink(s, keys, null) }
     return true
+}
+
+// The java.util.PriorityQueue (jsrtkotlin.go ktPq*): the set handle tagged with
+// its class, its keys the binary heap in java's own array layout, duplicates
+// allowed; siftUp / siftDown / removeAt / heapify are the JDK's step for step.
+var KT_PQ_CLASS = "java.util.PriorityQueue"
+
+function ktPqSiftUp(pq, q, k0, x) {
+    var k = k0
+    var more = true
+    while (more && k > 0) {
+        var p = (k - 1) >> 1
+        if (ktOrd(pq, x, q[p]) >= 0) { more = false } else {
+            q[k] = q[p]
+            k = p
+        }
+    }
+    q[k] = x
+    return k
+}
+
+function ktPqSiftDown(pq, q, k0, x) {
+    var k = k0
+    var n = q.length
+    var half = n >> 1
+    var more = true
+    while (more && k < half) {
+        var c = 2 * k + 1
+        if (c + 1 < n) {
+            if (ktOrd(pq, q[c], q[c + 1]) > 0) { c = c + 1 }
+        }
+        if (ktOrd(pq, x, q[c]) <= 0) { more = false } else {
+            q[k] = q[c]
+            k = c
+        }
+    }
+    q[k] = x
+    return k
+}
+
+function ktPqOffer(pq, keys, e) {
+    keys.push(e)
+    ktPqSiftUp(pq, keys, keys.length - 1, e)
+}
+
+function ktPqRemoveAt(pq, keys, i) {
+    var moved = keys.pop()
+    if (i == keys.length) { return undefined }
+    if (ktPqSiftDown(pq, keys, i, moved) == i) { ktPqSiftUp(pq, keys, i, moved) }
+    return undefined
+}
+
+function ktPqPoll(pq, keys) {
+    if (keys.length == 0) { return null }
+    var top = keys[0]
+    ktPqRemoveAt(pq, keys, 0)
+    return top
+}
+
+// ktNewPq (jsrtkotlin.go): PriorityQueue(), (capacity), (comparator),
+// (capacity, comparator) or (collection), the last heapified.
+function ktNewPq(a0, a1) {
+    var pq = ktMakeSet()
+    pq["__jc"] = KT_PQ_CLASS
+    if (ktIsFn(a1)) { pq["__cmp"] = a1 }
+    if (ktIsFn(a0)) { pq["__cmp"] = a0 }
+    var keys = ktSetElems(pq)
+    var src = []
+    if (ktIsArr(a0)) { src = a0 }
+    else if (ktIsSet(a0)) { src = ktSetElems(a0) }
+    var i = 0
+    while (i < src.length) {
+        keys.push(src[i])
+        i = i + 1
+    }
+    var j = (keys.length >> 1) - 1
+    while (j >= 0) {
+        ktPqSiftDown(pq, keys, j, keys[j])
+        j = j - 1
+    }
+    return pq
+}
+
+// ktPqMethod (jsrtkotlin.go): the members a PriorityQueue answers differently
+// from a set, or KT_MISS for the set's own.
+function ktPqMethod(pq, keys, name, args) {
+    var n = keys.length
+    if (name == "offer") {
+        ktPqOffer(pq, keys, k4At(args, 0))
+        return true
+    }
+    if (name == "poll") { return ktPqPoll(pq, keys) }
+    if (name == "peek") {
+        if (n == 0) { return null }
+        return keys[0]
+    }
+    if (name == "element" || (name == "remove" && args.length == 0)) {
+        if (n == 0) { ktNoElemNull() }
+        if (name == "element") { return keys[0] }
+        return ktPqPoll(pq, keys)
+    }
+    if (name == "remove") {
+        var i = 0
+        while (i < n) {
+            if (ktEqVals(keys[i], k4At(args, 0))) {
+                ktPqRemoveAt(pq, keys, i)
+                return true
+            }
+            i = i + 1
+        }
+        return false
+    }
+    return KT_MISS
 }
 
 // ===================================================== entries and pairs ====
@@ -5152,10 +5308,35 @@ function ktSeqMethodK(arr, name, args, kind) {
         return ktSeqMethod(arr, "removeAt", [arr.length - 1])
     }
     // java.util.List's SequencedCollection members (JDK 21), answering Unit.
-    if (name == "addFirst") { return ktSeqMethod(arr, "add", [0, f]) }
+    if (name == "addFirst" || name == "push") { return ktSeqMethod(arr, "add", [0, f]) }
     if (name == "addLast") {
         arr.push(f)
         return undefined
+    }
+    // java.util.Deque's members (jsrtkotlin.go): offer* add and answer true, peek* /
+    // poll* answer null when empty, pop / element / getFirst / getLast / remove()
+    // raise a NoSuchElementException whose message is null.
+    if (name == "offer" || name == "offerLast") {
+        arr.push(f)
+        return true
+    }
+    if (name == "offerFirst") {
+        ktSeqMethod(arr, "add", [0, f])
+        return true
+    }
+    if (name == "peek" || name == "peekFirst" || name == "peekLast") {
+        if (arr.length == 0) { return null }
+        if (name == "peekLast") { return arr[arr.length - 1] }
+        return arr[0]
+    }
+    if (name == "poll" || name == "pollFirst") { return ktSeqMethod(arr, "removeFirstOrNull", []) }
+    if (name == "pollLast") { return ktSeqMethod(arr, "removeLastOrNull", []) }
+    if (name == "pop" || name == "element" || name == "getFirst" || name == "getLast"
+        || (name == "remove" && args.length == 0)) {
+        if (arr.length == 0) { ktNoElemNull() }
+        if (name == "element" || name == "getFirst") { return arr[0] }
+        if (name == "getLast") { return arr[arr.length - 1] }
+        return ktSeqMethod(arr, "removeAt", [0])
     }
     if (name == "remove") {
         for (i = 0; i < arr.length; i = i + 1) {
@@ -5349,7 +5530,7 @@ function k3SortedWith(es, f) {
 
 function ktSetMethod(s, name, args) {
     var keys = anytype
-    var f = ktArg(args, 0)
+    var f = anytype
     var out = anytype
     var oth = []
     var kept = []
@@ -5360,6 +5541,11 @@ function ktSetMethod(s, name, args) {
     var changed = false
     if (!ktIsSet(s)) { return KT_MISS }
     keys = ktSetElems(s)
+    if (s["__jc"] === KT_PQ_CLASS) {
+        var pr = ktPqMethod(s, keys, name, args)
+        if (!ktMiss(pr)) { return pr }
+    }
+    f = ktKeyArg(s, keys, name, args)
     if (name == "size") { return keys.length }
     if (name == "isEmpty") { return keys.length == 0 }
     if (name == "isNotEmpty") { return keys.length > 0 }
@@ -5458,7 +5644,7 @@ function k3IsSetMinus(name) {
 function ktMapMethod(m, name, args) {
     var keys = anytype
     var vals = anytype
-    var f = ktArg(args, 0)
+    var f = anytype
     var out = anytype
     var drop = []
     var i = 0
@@ -5469,6 +5655,7 @@ function ktMapMethod(m, name, args) {
     if (!rtIsDictObj(m)) { return KT_MISS }
     keys = ktMapKeys(m)
     vals = ktMapVals(m)
+    f = ktKeyArg(m, keys, name, args)
     if (name == "get") {
         i = ktMapFind(keys, f)
         if (i >= 0) { return vals[i] }
@@ -7894,16 +8081,13 @@ function k4ArrayOfN(name, args) {
 }
 
 // jsrtkotlin.go ktJavaCollection: a java.util collection constructor - empty,
-// with an Int capacity, or a copy of a collection (of a map). A TreeSet / TreeMap
-// is tagged before it fills, so each insertion sorts; its Comparator form is not
-// provided.
+// with an Int capacity, with a Comparator (a TreeSet / TreeMap, __cmp), or a copy
+// of a collection (of a map). A TreeSet / TreeMap is tagged before it fills, so
+// each insertion sorts; a LinkedList and an ArrayDeque are lists.
 function k4JavaCollection(name, src) {
-    if ((name == "TreeSet" || name == "TreeMap") && src !== undefined && src !== null
-        && !ktIsArr(src) && !ktIsSet(src) && ktMapKeys(src) === undefined) {
-        fail(name + "(comparator) is not supported")
-    }
     if (name == "HashMap" || name == "LinkedHashMap" || name == "TreeMap") {
         var mp = ktJvmTagged(ktMakeMap(), name, 0)
+        if (ktIsFn(src)) { mp["__cmp"] = src }
         var ks = ktMapKeys(src)
         if (ks !== undefined) {
             var vs = ktMapVals(src)
@@ -7918,7 +8102,7 @@ function k4JavaCollection(name, src) {
     var els = []
     if (ktIsArr(src)) { els = src }
     else if (ktIsSet(src)) { els = ktSetElems(src) }
-    if (name == "ArrayList") {
+    if (name == "ArrayList" || name == "LinkedList" || name == "ArrayDeque") {
         var out = []
         var j = 0
         while (j < els.length) {
@@ -7928,6 +8112,7 @@ function k4JavaCollection(name, src) {
         return out
     }
     var s = ktJvmTagged(ktMakeSet(), name, 0)
+    if (ktIsFn(src)) { s["__cmp"] = src }
     var k = 0
     for (k = 0; k < els.length; k = k + 1) { ktSetAdd(s, els[k]) }
     return s
@@ -8079,8 +8264,9 @@ function ktJvmTagged(o, builder, n) {
 // emitted scope and the call site is an ordinary call.
 function ktGlobalFn(name) {
     if (name == "Math") { return k4JavaMath() }
+    if (name == "PriorityQueue") { return function (a0, a1) { return ktNewPq(a0, a1) } }
     if (name == "ArrayList" || name == "HashSet" || name == "LinkedHashSet" || name == "HashMap" || name == "LinkedHashMap"
-        || name == "TreeSet" || name == "TreeMap") {
+        || name == "TreeSet" || name == "TreeMap" || name == "LinkedList" || name == "ArrayDeque") {
         return function (src) {
             var c = k4JavaCollection(name, src)
             if (Array.isArray(c)) { return c }
@@ -9347,7 +9533,10 @@ function ktCollIsType(v, tname) {
     if (t.indexOf("Mutable") == 0) { t = t.substring(7, t.length) }
     if (rtIsDictObj(v)) { return t == "Map" }
     var coll = t == "Collection" || t == "Iterable"
-    if (ktIsSet(v)) { return coll || t == "Set" }
+    if (ktIsSet(v)) {
+        if (v["__jc"] === KT_PQ_CLASS) { return coll || t == "Queue" }
+        return coll || t == "Set"
+    }
     if (!ktIsArr(v)) { return undefined }
     var k = arrKind(v)
     if (k == 0 || k == 4) { return coll || t == "List" }
@@ -9565,7 +9754,8 @@ function js_ktindex(o, k) {
         // dictMemberHit arm that answers vals[i] for a key the handle holds. The C
         // floor's member read knows nothing of the {__dict, keys, vals} handle, so
         // the hit has to be answered here.
-        var mi = ktMapFind(ktMapKeys(o), k)
+        var mks = ktMapKeys(o)
+        var mi = ktMapFind(mks, ktCanonKey(o, mks, k))
         if (mi < 0) { return null }
         return ktMapVals(o)[mi]
     }

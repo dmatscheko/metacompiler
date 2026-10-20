@@ -801,7 +801,9 @@ function ktStdParams(name) { return ktStdParamNames["$" + name] }
 var ktJavaClassImports = [["java.util.Random", "java.util.Random"], ["java.util.ArrayList", "ArrayList"],
                           ["java.util.HashMap", "HashMap"], ["java.util.HashSet", "HashSet"],
                           ["java.util.LinkedHashMap", "LinkedHashMap"], ["java.util.LinkedHashSet", "LinkedHashSet"],
-                          ["java.util.TreeMap", "TreeMap"], ["java.util.TreeSet", "TreeSet"]]
+                          ["java.util.TreeMap", "TreeMap"], ["java.util.TreeSet", "TreeSet"],
+                          ["java.util.LinkedList", "LinkedList"], ["java.util.ArrayDeque", "ArrayDeque"],
+                          ["java.util.PriorityQueue", "PriorityQueue"]]
 // The [simple name, global] pairs an import binds: the one class of an exact path,
 // every provided class of the package for a `.*` import, none for anything else.
 function ktJavaClassImport(path) {

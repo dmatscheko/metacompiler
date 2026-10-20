@@ -3948,15 +3948,15 @@ NotMemberKw = :script(~~
     // HashMap / LinkedHashMap, TreeSet / TreeMap: empty, with an Int capacity, or a
     // copy of a collection (of a map). A HashSet / HashMap iterates in insertion
     // order, as hashSetOf / hashMapOf do (kMakeSet); a TreeSet / TreeMap in ascending
-    // order, and its Comparator form is not provided. Twin of ktJavaCollection in
-    // abnf/jsrtkotlin.go and k4JavaCollection in lib/kotlin-rt.metajs.
+    // order, or in its Comparator's (__cmp, kOrd). A LinkedList and an ArrayDeque
+    // (kotlin.collections' and java.util's) are lists: the deque members are
+    // kSeqMethod's. Twin of ktJavaCollection in abnf/jsrtkotlin.go and
+    // k4JavaCollection in lib/kotlin-rt.metajs.
     function kJavaCollection(kind, jc) {
         return function(src) {
-            if (jc != "" && src != null && !Array.isArray(src) && !kIsSet(src) && !kIsMap(src)) {
-                fail(jc.substring(10) + "(comparator) is not supported")
-            }
             if (kind == "map") {
                 var m = kJvmTagged(kMakeMap(), jc)
+                if (typeof src == "function") { m.__cmp = src }
                 if (kIsMap(src)) { for (var i = 0; i < src.keys.length; i++) { kMapPut(m, src.keys[i], src.vals[i]) } }
                 return m
             }
@@ -3964,6 +3964,7 @@ NotMemberKw = :script(~~
             if (Array.isArray(src)) { els = src } else if (kIsSet(src)) { els = src.keys }
             if (kind == "set") {
                 var s = kJvmTagged(kMakeSet(), jc)
+                if (typeof src == "function") { s.__cmp = src }
                 for (var k = 0; k < els.length; k++) { kSetAdd(s, els[k]) }
                 return s
             }
@@ -3979,6 +3980,9 @@ NotMemberKw = :script(~~
     hostGlobals["HashMap"] = function(src) { return kJvmTagged(hostGlobals["LinkedHashMap"](src), "java.util.HashMap") }
     hostGlobals["TreeSet"] = kJavaCollection("set", "java.util.TreeSet")
     hostGlobals["TreeMap"] = kJavaCollection("map", "java.util.TreeMap")
+    hostGlobals["LinkedList"] = hostGlobals["ArrayList"]
+    hostGlobals["ArrayDeque"] = hostGlobals["ArrayList"]
+    hostGlobals["PriorityQueue"] = function(a0, a1) { return kNewPq(a0, a1) }
     // ----- Maps, Pair/Triple, `with` and StringBuilder -----
     // A global NAME is declared by each grammar's own builtin block (js_scope_decl in
     // kotlin-to-llvm-ir.abnf, ktGlobalFn in abnf/jsrtkotlin.go), not by the runtime.
@@ -5124,18 +5128,49 @@ NotMemberKw = :script(~~
         return 0 - 1
     }
     function kSetAdd(s, e) {
-        if (kSetFind(s, e) >= 0) { return false }
-        s.keys.push(e)
-        if (s.__jc === "java.util.TreeSet") { kSortedSink(s.keys, null) }
+        if (s.__jc === "java.util.PriorityQueue") { kPqOffer(s, e); return true }
+        var ce = anytype
+        ce = kCanonKey(s, e)
+        if (kSetFind(s, ce) >= 0) { return false }
+        s.keys.push(ce)
+        if (s.__jc === "java.util.TreeSet") { kSortedSink(s, s.keys, null) }
         return true
     }
+    // The order of a sorted collection: its Comparator's answer when it was built
+    // with one (__cmp), else the natural order. Twin of ktOrd in abnf/jsrtkotlin.go
+    // and languages/lib/kotlin-rt.metajs.
+    function kOrd(h, a, b) {
+        if (h.__cmp !== undefined) { return kNum(h.__cmp(a, b)) }
+        if (kKeyLess(a, b)) { return 0 - 1 }
+        return kKeyLess(b, a) ? 1 : 0
+    }
+    // A TreeSet / TreeMap built with a Comparator finds its keys BY THAT COMPARATOR,
+    // not by equals (java.util.TreeMap.getEntryUsingComparator): an argument the
+    // comparator ranks equal to a stored key IS that key. Every other handle answers
+    // the argument unchanged. Twin of ktCanonKey in abnf/jsrtkotlin.go and
+    // languages/lib/kotlin-rt.metajs.
+    function kCanonKey(h, k) {
+        if (h.__cmp === undefined || h.__jc === "java.util.PriorityQueue") { return k }
+        var ks = h.keys
+        for (var i = 0; i < ks.length; i++) { if (kOrd(h, ks[i], k) == 0) { return ks[i] } }
+        return k
+    }
+    // A set or map member's first argument, canonical (kCanonKey) when the member
+    // takes a key; null when there is none.
+    var kKeyMembers = ["contains", "remove", "get", "getValue", "getOrDefault", "getOrElse",
+        "getOrPut", "put", "set", "containsKey"]
+    function kKeyArg(h, name, args) {
+        if (args.length == 0) { return null }
+        if (h.__cmp === undefined || kKeyMembers.indexOf(name) < 0) { return args[0] }
+        return kCanonKey(h, args[0])
+    }
     // Moves the element just appended to keys (and its value, when vals is not null)
-    // left to its ascending position: a java.util.TreeSet / TreeMap keeps its keys
+    // left to its position in h's order: a java.util.TreeSet / TreeMap keeps its keys
     // sorted on every insertion, not only when it is built. Twin of ktSortedSink in
     // abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
-    function kSortedSink(keys, vals) {
+    function kSortedSink(h, keys, vals) {
         var j = keys.length - 1
-        while (j > 0 && kKeyLess(keys[j], keys[j - 1])) {
+        while (j > 0 && kOrd(h, keys[j], keys[j - 1]) < 0) {
             var k = anytype
             k = keys[j]
             keys[j] = keys[j - 1]
@@ -5148,6 +5183,87 @@ NotMemberKw = :script(~~
             }
             j--
         }
+    }
+    // A java.util.PriorityQueue is the set handle tagged with its class, its keys
+    // being the binary heap in java's own array layout - which is the order its
+    // iterator and toString walk - and duplicates allowed. siftUp / siftDown /
+    // removeAt / heapify are java.util.PriorityQueue's, step for step, so the layout
+    // after any sequence of operations is the JDK's. Twin of ktPq* in
+    // abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    function kPqSiftUp(pq, k, x) {
+        var q = pq.keys
+        while (k > 0) {
+            var p = (k - 1) >> 1
+            if (kOrd(pq, x, q[p]) >= 0) { break }
+            q[k] = q[p]
+            k = p
+        }
+        q[k] = x
+        return k
+    }
+    function kPqSiftDown(pq, k, x) {
+        var q = pq.keys
+        var n = q.length
+        var half = n >> 1
+        while (k < half) {
+            var c = 2 * k + 1
+            if (c + 1 < n && kOrd(pq, q[c], q[c + 1]) > 0) { c = c + 1 }
+            if (kOrd(pq, x, q[c]) <= 0) { break }
+            q[k] = q[c]
+            k = c
+        }
+        q[k] = x
+        return k
+    }
+    function kPqOffer(pq, e) {
+        pq.keys.push(e)
+        kPqSiftUp(pq, pq.keys.length - 1, e)
+    }
+    function kPqRemoveAt(pq, i) {
+        var q = pq.keys
+        var moved = anytype
+        moved = q.pop()
+        if (i == q.length) { return }
+        if (kPqSiftDown(pq, i, moved) == i) { kPqSiftUp(pq, i, moved) }
+    }
+    function kPqPoll(pq) {
+        if (pq.keys.length == 0) { return null }
+        var top = anytype
+        top = pq.keys[0]
+        kPqRemoveAt(pq, 0)
+        return top
+    }
+    // PriorityQueue(), (capacity), (comparator), (capacity, comparator) or
+    // (collection), the last heapified as java's initFromCollection does.
+    function kNewPq(a0, a1) {
+        var pq = kJvmTagged(kMakeSet(), "java.util.PriorityQueue")
+        if (typeof a1 == "function") { pq.__cmp = a1 }
+        if (typeof a0 == "function") { pq.__cmp = a0 }
+        var src = anytype
+        src = Array.isArray(a0) ? a0 : (kIsSet(a0) ? a0.keys : [])
+        for (var i = 0; i < src.length; i++) { pq.keys.push(src[i]) }
+        for (var j = (pq.keys.length >> 1) - 1; j >= 0; j--) { kPqSiftDown(pq, j, pq.keys[j]) }
+        return pq
+    }
+    // The members a PriorityQueue answers differently from a set: add / offer keep
+    // duplicates (kSetAdd), poll / remove() / peek / element take the head, and
+    // remove(e) is java's removeAt. Null when the member is the set's own.
+    function kPqMethod(pq, name, args) {
+        var n = pq.keys.length
+        if (name == "offer") { kPqOffer(pq, args[0]); return {v: true} }
+        if (name == "poll") { return {v: kPqPoll(pq)} }
+        if (name == "peek") { return {v: n == 0 ? null : pq.keys[0]} }
+        if (name == "element" || (name == "remove" && args.length == 0)) {
+            if (n == 0) { kNoElem(null) }
+            return {v: name == "element" ? pq.keys[0] : kPqPoll(pq)}
+        }
+        if (name == "remove") {
+            for (var i = 0; i < n; i++) {
+                if (kEqVals(pq.keys[i], args[0])) { kPqRemoveAt(pq, i); return {v: true} }
+            }
+            return {v: false}
+        }
+        return null
     }
     function kSetFrom(es) {
         var s = kMakeSet()
@@ -5203,11 +5319,13 @@ NotMemberKw = :script(~~
         return {v: m}
     }
     function kMapPut(m, k, v) {
-        var i = kMapFind(m, k)
+        var ck = anytype
+        ck = kCanonKey(m, k)
+        var i = kMapFind(m, ck)
         if (i >= 0) { m.vals[i] = v; return }
-        m.keys.push(k)
+        m.keys.push(ck)
         m.vals.push(v)
-        if (m.__jc === "java.util.TreeMap") { kSortedSink(m.keys, m.vals) }
+        if (m.__jc === "java.util.TreeMap") { kSortedSink(m, m.keys, m.vals) }
     }
     // `==` for the collection operations: kEq, so setOf<Any>(1, 1L) has two elements.
     function kEqVals(a, b) { return kEq(a, b, false) }
@@ -6950,8 +7068,26 @@ NotMemberKw = :script(~~
             return kSeqMethod(es, "removeAt", [name == "removeFirstOrNull" ? 0 : es.length - 1])
         }
         // java.util.List's SequencedCollection members (JDK 21), answering Unit.
-        if (name == "addFirst") { return kSeqMethod(es, "add", [0, f]) }
+        if (name == "addFirst" || name == "push") { return kSeqMethod(es, "add", [0, f]) }
         if (name == "addLast") { es.push(f); return {v: undefined} }
+        // java.util.Deque's members, which a LinkedList / ArrayDeque (a list here)
+        // answers: offer* add and answer true, peek* / poll* answer null when empty,
+        // and pop / element / getFirst / getLast / remove() raise java's
+        // NoSuchElementException, whose message is null. Twin of the same branch of
+        // ktSeqMethod in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+        if (name == "offer" || name == "offerLast") { es.push(f); return {v: true} }
+        if (name == "offerFirst") { kSeqMethod(es, "add", [0, f]); return {v: true} }
+        if (name == "peek" || name == "peekFirst") { return {v: es.length == 0 ? null : es[0]} }
+        if (name == "peekLast") { return {v: es.length == 0 ? null : es[es.length - 1]} }
+        if (name == "poll" || name == "pollFirst") { return kSeqMethod(es, "removeFirstOrNull", []) }
+        if (name == "pollLast") { return kSeqMethod(es, "removeLastOrNull", []) }
+        if (name == "pop" || name == "element" || name == "getFirst" || name == "getLast" ||
+            (name == "remove" && args.length == 0)) {
+            if (es.length == 0) { kNoElem(null) }
+            if (name == "element" || name == "getFirst") { return {v: es[0]} }
+            if (name == "getLast") { return {v: es[es.length - 1]} }
+            return kSeqMethod(es, "removeAt", [0])
+        }
         if (name == "remove") {
             for (i = 0; i < es.length; i++) {
                 if (kEqVals(es[i], f)) { kSeqMethod(es, "removeAt", [i]); return {v: true} }
@@ -7019,7 +7155,8 @@ NotMemberKw = :script(~~
     }
     function kMapMethod(m, name, rawArgs) {
         var args = kNormArgs(rawArgs)
-        var f = args.length > 0 ? args[0] : null
+        var f = anytype
+        f = kKeyArg(m, name, args)
         var i
         if (name == "get" || name == "getValue" || name == "getOrDefault" || name == "getOrElse") {
             i = kMapFind(m, f)
@@ -7147,7 +7284,12 @@ NotMemberKw = :script(~~
     // LIST even for a Set receiver. The twin is ktSetMethod in abnf/jsrtkotlin.go.
     function kSetMethod(s, name, rawArgs) {
         var args = kNormArgs(rawArgs)
-        var f = args.length > 0 ? args[0] : null
+        if (s.__jc === "java.util.PriorityQueue") {
+            var pr = kPqMethod(s, name, args)
+            if (pr != null) { return pr }
+        }
+        var f = anytype
+        f = kKeyArg(s, name, args)
         var i
         if (name == "size") { return {v: s.keys.length} }
         if (name == "isEmpty") { return {v: s.keys.length == 0} }
@@ -11246,7 +11388,7 @@ NotMemberKw = :script(~~
         if (isKGroups(o)) { return krxGroupAt(o.md, i) }
         // m[k] on a Map: the missing key answers null, exactly as kotlin.Map.get does.
         if (kIsMap(o)) {
-            var mi = kMapFind(o, i)
+            var mi = kMapFind(o, kCanonKey(o, i))
             return mi < 0 ? null : o.vals[mi]
         }
         // Kotlin's indexed reads are BOUNDS-CHECKED: both are catchable throwables on
@@ -11293,7 +11435,8 @@ NotMemberKw = :script(~~
     // One representation serves a read-only collection and its mutable counterpart,
     // so a Mutable* name answers as the read-only name. An Array, a primitive array
     // and a Sequence are host arrays told apart by their kind (kArrWords) and are
-    // not Iterable. Twin of ktCollIsType in abnf/jsrtkotlin.go and
+    // not Iterable. A PriorityQueue is a Queue and not a Set, though it is held in
+    // the set handle (kNewPq). Twin of ktCollIsType in abnf/jsrtkotlin.go and
     // languages/lib/kotlin-rt.metajs.
     function kCollIsType(v, t) {
         var isArr = Array.isArray(v)
@@ -11301,7 +11444,10 @@ NotMemberKw = :script(~~
         if (t.indexOf("Mutable") == 0) { t = t.substring(7) }
         if (kIsMap(v)) { return t == "Map" }
         var coll = t == "Collection" || t == "Iterable"
-        if (kIsSet(v)) { return coll || t == "Set" }
+        if (kIsSet(v)) {
+            if (v.__jc === "java.util.PriorityQueue") { return coll || t == "Queue" }
+            return coll || t == "Set"
+        }
         var k = arrKind(v)
         if (k == 0 || k == 4) { return coll || t == "List" }
         if (k == 3) { return coll }

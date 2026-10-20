@@ -5288,6 +5288,81 @@ fun sec109() {
     check("deq109c", e.removeFirstOrNull() == null && e.removeLastOrNull() == null && msg == "List is empty.")
 }
 
+// ===== SECTION 110: TreeSet / TreeMap with a Comparator =====
+// Read off java.util.TreeSet / TreeMap (JDK 24): the comparator orders the keys AND
+// identifies them, so a key it ranks equal to a stored one is that key - an add is
+// refused, a put replaces the value under the stored key, and a lookup finds it.
+fun sec110() {
+    val words = listOf("ccc", "a", "bb", "dd", "eeee")
+    val t = java.util.TreeSet<String>(compareBy { it.length })
+    for (w in words) t.add(w)
+    check("cmp110a", "" + t == "[a, bb, ccc, eeee]" && t.contains("zz") && "zz" in t && t.first() == "a")
+    t.remove("xx")
+    val r = java.util.TreeSet<Int>(compareByDescending { it })
+    r.addAll(listOf(3, 1, 2))
+    check("cmp110b", "" + t == "[a, ccc, eeee]" && "" + r == "[3, 2, 1]")
+    val tm = java.util.TreeMap<String, Int>(compareBy { it.lowercase() })
+    tm["b"] = 1; tm["A"] = 2; tm.put("B", 3)
+    check("cmp110c", "" + tm == "{A=2, b=3}" && tm["a"] == 2 && tm.containsKey("a"))
+    val tr = java.util.TreeMap<Int, String>(Comparator { x, y -> y - x })
+    tr[1] = "x"; tr[3] = "y"; tr[2] = "z"
+    check("cmp110d", "" + tr == "{3=y, 2=z, 1=x}" && "" + tr.keys == "[3, 2, 1]")
+}
+
+// ===== SECTION 111: LinkedList and ArrayDeque =====
+// Read off java.util.LinkedList / ArrayDeque and kotlin.collections.ArrayDeque
+// (kotlin-stdlib 2.2.21, JDK 24): Deque's push / pop / peek / poll / offer
+// families, null from peek and poll on an empty deque, and a
+// NoSuchElementException with a null message from pop.
+fun sec111() {
+    val ll = java.util.LinkedList<Int>()
+    ll.add(1); ll.addFirst(0); ll.addLast(2); ll.push(-1); ll.offer(3)
+    check("dq111a", "" + ll == "[-1, 0, 1, 2, 3]" && ll.peek() == -1 && ll.peekLast() == 3)
+    check("dq111b", ll.pop() == -1 && ll.poll() == 0 && ll.pollLast() == 3 && ll.getFirst() == 1 && ll.getLast() == 2)
+    check("dq111c", ll.offerFirst(9) && ll.offerLast(8) && ll.pollFirst() == 9 && ll.element() == 1 && "" + ll == "[1, 2, 8]")
+    val e = java.util.LinkedList<Int>()
+    var msg = "none"
+    try { e.pop() } catch (x: NoSuchElementException) { msg = "" + x.message }
+    check("dq111d", e.peek() == null && e.poll() == null && e.pollLast() == null && msg == "null")
+    val dq = ArrayDeque<Int>()
+    dq.addLast(1); dq.addFirst(0); dq.add(2)
+    check("dq111e", "" + dq == "[0, 1, 2]" && dq.removeFirst() == 0 && dq.removeLastOrNull() == 2 && dq.size == 1)
+    val jd = java.util.ArrayDeque<Int>()
+    jd.push(1); jd.push(2); jd.offer(3); jd.addLast(4)
+    check("dq111f", "" + jd == "[2, 1, 3, 4]" && jd.pop() == 2 && jd.poll() == 1 && "" + jd == "[3, 4]")
+}
+
+// ===== SECTION 112: PriorityQueue =====
+// Read off java.util.PriorityQueue (JDK 24): iteration and toString walk the binary
+// heap in its array layout, so these strings pin java's siftUp / siftDown /
+// removeAt and the heapify of the collection constructor.
+fun sec112() {
+    val pq = java.util.PriorityQueue<Int>()
+    for (x in listOf(5, 1, 4, 2, 3)) pq.add(x)
+    check("pq112a", "" + pq == "[1, 2, 4, 5, 3]" && pq.peek() == 1 && pq.poll() == 1 && "" + pq == "[2, 3, 4, 5]")
+    pq.remove(4)
+    val out = mutableListOf<Int>()
+    while (!pq.isEmpty()) out.add(pq.poll())
+    var msg = "none"
+    try { pq.remove() } catch (x: NoSuchElementException) { msg = "" + x.message }
+    check("pq112b", "" + out == "[2, 3, 5]" && pq.poll() == null && pq.peek() == null && msg == "null")
+    val p2 = java.util.PriorityQueue<String>(compareBy { it.length })
+    p2.add("ccc"); p2.add("a"); p2.add("bb"); p2.offer("dddd")
+    check("pq112c", "" + p2 == "[a, ccc, bb, dddd]" && p2.poll() == "a" && p2.remove() == "bb" && "" + p2 == "[ccc, dddd]")
+    val p3 = java.util.PriorityQueue(listOf(3, 1, 2, 9, 0, 7))
+    val p4 = java.util.PriorityQueue<Int>(10, compareByDescending { it })
+    for (x in listOf(1, 5, 2, 8, 3)) p4.add(x)
+    check("pq112d", "" + p3 == "[0, 1, 2, 9, 3, 7]" && "" + p4 == "[8, 5, 2, 1, 3]" && "" + p4.sorted() == "[1, 2, 3, 5, 8]")
+    val p5 = java.util.PriorityQueue<Int>()
+    for (x in listOf(9, 8, 7, 6, 5, 4, 3, 2, 1)) p5.add(x)
+    p5.remove(6)
+    val s5 = "" + p5
+    p5.remove(1)
+    check("pq112e", s5 == "[1, 2, 4, 3, 7, 8, 5, 9]" && "" + p5 == "[2, 3, 4, 9, 7, 8, 5]")
+    val q: Any = p5
+    check("pq112f", q is Collection<*> && q !is Set<*> && p5.size == 7 && p5.contains(9))
+}
+
 
 fun main() {
     s01() // SECTION-CALL 01
@@ -5399,6 +5474,9 @@ fun main() {
     sec107() // SECTION-CALL 107
     sec108() // SECTION-CALL 108
     sec109() // SECTION-CALL 109
+    sec110() // SECTION-CALL 110
+    sec111() // SECTION-CALL 111
+    sec112() // SECTION-CALL 112
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }
