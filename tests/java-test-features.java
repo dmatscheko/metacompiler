@@ -668,6 +668,12 @@ public class Main {
         int base = 100;
         Function<Integer, Integer> addBase = n -> n + base;          // captured local
         Main.check("closure-capture", addBase.apply(23) == 123);
+        // java.util.function's defaults and statics (andThen, compose, identity, minBy).
+        Function<Integer, Integer> id = Function.identity();
+        BinaryOperator<Integer> least = BinaryOperator.minBy((a, b) -> a - b);
+        Main.check("fn-defaults", dbl.andThen(inc).apply(3) == 7 && dbl.compose(inc).apply(3) == 8
+                   && dbl.andThen(inc).andThen(dbl).apply(1) == 6 && plus.andThen(dbl).apply(2, 3) == 10
+                   && id.apply(4) == 4 && least.apply(9, 5) == 5);
         Main.check("lambda-as-arg", Main.applyOnce(y -> y + 5, 37) == 42);
         int[] nums = new int[]{1, 2, 3};
         Main.check("lambda-over-array", Main.sumOver(nums, n -> n * n) == 14);

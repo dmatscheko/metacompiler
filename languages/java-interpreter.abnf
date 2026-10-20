@@ -6680,6 +6680,8 @@ HasStatic   = :script(~~
     var jUtilLoaded = false
     var jMapLoaded = false
     var jStreamLoaded = false
+    // lib/java-function.java, loaded by an import that names one of its types.
+    var jFuncLoaded = false
     var jUtilWant = false
     var jLangWant = false
     var jPkgPrefix = ""
@@ -6728,6 +6730,10 @@ HasStatic   = :script(~~
     function jImport(path, pos) {
         var ip = stripWs(path)
         jLoadLibs(jUtilWants(ip), jMapWants(ip), jStreamWants(ip))
+        if (!jFuncLoaded && jFuncWants(ip)) {
+            jFuncLoaded = true
+            jLoadLib("lib/java-function.java", "java.util.function.")
+        }
         resolveImport(path, pos)
     }
     // A class named through its package (PkgClass) wants the library an

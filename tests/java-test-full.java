@@ -4451,9 +4451,10 @@ class S78 {
 // A local class body reads the enclosing method's effectively final locals. A
 // type pattern or instanceof may name an array type: int[] is only int[],
 // Object[] takes every reference array, an array is no List. A pattern variable
-// is a local of the pattern's type. An enum body names its constants bare, and
-// compareTo / getDeclaringClass are java.lang.Enum's. EnumMap and EnumSet keep
-// declaration order. Every expected value is java 24.0.2's.
+// is a local of the pattern's type, and a bare getClass() is this' class. An
+// enum body names its constants bare, and compareTo / getDeclaringClass are
+// java.lang.Enum's. EnumMap and EnumSet keep declaration order. Every expected
+// value is java 24.0.2's.
 class S79 {
     enum Tone { LOW, MID, HIGH, TOP;
         boolean edge() { return this == LOW || this == TOP; }
@@ -4463,7 +4464,9 @@ class S79 {
         TIMES { int on(int a, int b) { return a * b; } };
         abstract int on(int a, int b);
     }
-    record Cell(int v) {}
+    record Cell(int v) {
+        String who() { return getClass().getSimpleName() + v; }
+    }
     static String kind(Object v) {
         return switch (v) {
             case int[] a -> "ints" + a.length;
@@ -4480,6 +4483,7 @@ class S79 {
             String name() { return tag + base; }
         }
         Main.check("lc79", new Scale().by(3) == 21 && new Scale().name().equals("t7"));
+        Main.check("gc79", new Cell(5).who().equals("Cell5"));
         Object[] vs = {new int[]{1, 2}, new String[]{"a"}, new String[][]{{"b"}}, new int[][]{{1}}, new Cell[]{new Cell(1)}, "s", 4};
         String ap = "";
         for (Object v : vs) {

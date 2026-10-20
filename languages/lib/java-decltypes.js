@@ -975,6 +975,15 @@ function jStreamWants(path) {
     return path == "java.util.stream.*" || (path.length > 17 && path.substring(0, 17) == "java.util.stream.")
 }
 
+// Does this import name a type lib/java-function.java declares? Then the
+// grammar compiles it with the program, once (jImport).
+function jFuncWants(path) {
+    if (path == "java.util.function.*" || path == "java.base") { return true }
+    if (path.length < 20 || path.substring(0, 19) != "java.util.function.") { return false }
+    return ",Function,BiFunction,UnaryOperator,BinaryOperator,Predicate,BiPredicate,Consumer,BiConsumer,Supplier,"
+        .indexOf("," + path.substring(19) + ",") >= 0
+}
+
 // Does `new cls(...)` create a type lib/java-lang.java declares? Then the
 // grammar compiles that file with the program.
 function jLangWants(cls) { return cls == "StringBuilder" }

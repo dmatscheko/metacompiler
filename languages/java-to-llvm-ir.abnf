@@ -3135,6 +3135,8 @@ HasStatic   = :script(~~
             } else {
                 recvV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
             }
+            // getClass() is java.lang.Object's, and final: no class declares it.
+            if (name == "getClass" && args.length == 0) { return {b: b, v: callExt(b, "js_jvgetclass", [recvV])} }
             var ea = emitArgs(b, args)
             b = ea.b
             var sig = jOvStaticSig(cls, name, atys, null)
@@ -4696,6 +4698,8 @@ HasStatic   = :script(~~
     var jUtilLoaded = false
     var jMapLoaded = false
     var jStreamLoaded = false
+    // lib/java-function.java, loaded by an import that names one of its types.
+    var jFuncLoaded = false
     var jUtilWant = false
     var jLangWant = false
     var jPkgPrefix = ""
@@ -4733,6 +4737,10 @@ HasStatic   = :script(~~
         var ip = stripWs(path)
         if (ip == "java.lang.reflect.Array" || ip == "java.lang.reflect.*") { jUsesReflArray = true }
         jLoadLibs(jUtilWants(ip), jMapWants(ip), jStreamWants(ip))
+        if (!jFuncLoaded && jFuncWants(ip)) {
+            jFuncLoaded = true
+            jLoadLib("lib/java-function.java", "java.util.function.")
+        }
         resolveImport(path, pos)
     }
     // A class named through its package (PkgClass) wants what an import of it
@@ -5595,6 +5603,19 @@ HasStatic   = :script(~~
             for (var k = 0; k < inh.length; k++) { meths.push(inh[k]) }
         }
         interfaceMethodNames["$" + name] = meths
+        // An inherited abstract method stays abstract unless this interface
+        // gives it a body, so `interface UnaryOperator<T> extends Function<T, T>`
+        // is functional through Function's apply.
+        for (var sa = 0; sa < supers.length; sa++) {
+            var ia = interfaceAbstracts["$" + supers[sa]]
+            if (ia == undefined) { continue }
+            for (var q = 0; q < ia.length; q++) {
+                var dup = false
+                for (var r = 0; r < meths.length; r++) { if (meths[r] == ia[q].name) { dup = true } }
+                for (var r2 = 0; r2 < abstracts.length; r2++) { if (abstracts[r2].name == ia[q].name) { dup = true } }
+                if (!dup) { abstracts.push(ia[q]) }
+            }
+        }
         interfaceAbstracts["$" + name] = abstracts
         // The first super-interface takes the __super slot and the others go on
         // __ifaces; the defaults of ALL of them are copied in (buildClassStmt), so
