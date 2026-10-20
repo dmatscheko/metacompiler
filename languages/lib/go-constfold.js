@@ -2507,6 +2507,16 @@ function goAnonNote(text, rec) {
     while (k < rec.f.length) { goPreFld["$" + text + "." + rec.f[k]] = rec.t[k]; k = k + 1 }
     goPreFldOrd["$" + text] = rec.f
 }
+// Is the zero of element type et a nil or a container rather than a number - a
+// pointer, slice, array, map, func, chan or interface? A slot append's growth adds
+// past the length takes that zero (so does a struct, which each grammar asks its
+// own goCopyCode about).
+function goPadZeroTy(et) {
+    if (et == "any" || et == "error") { return true }
+    var c = et.charAt(0)
+    if (c == "*" || c == "[") { return true }
+    return et.indexOf("map[") == 0 || et.indexOf("func") == 0 || et.indexOf("chan") == 0 || et.indexOf("interface") == 0
+}
 function goAnonSt(t) {
     var r = goAnonSts["$" + t]
     return r === undefined ? null : r

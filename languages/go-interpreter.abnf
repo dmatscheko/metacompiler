@@ -1746,14 +1746,14 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var ncap = goGrowCap(cp, need, lay.s, lay.p)
             var na = []
             for (var k = 0; k < s.n; k++) { na.push(s.a[s.o + k]) }
-            while (na.length < ncap) { na.push(apAdopt(et, proto, 0)) }
+            while (na.length < ncap) { na.push(apPad(et, proto)) }
             a = na
             off = 0
             cp = ncap
         }
         for (var i = 1; i < arguments.length; i++) {
             var at = off + s.n + i - 1
-            while (a.length <= at) { a.push(apAdopt(et, proto, 0)) }
+            while (a.length <= at) { a.push(apPad(et, proto)) }
             a[at] = apAdopt(et, proto, arguments[i])
         }
         return slT(newSl(a, off, need, cp), et)
@@ -1769,6 +1769,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function apAdopt(et, proto, v) {
         if (et != undefined && et != null) { return gAdoptTy(et, v) }
         return goAdoptLike(proto, v)
+    }
+    // A slot past the length that growth adds: the element type's zero - its own
+    // instance for a struct or an array, nil for a pointer (s[:cap(s)] shows them).
+    // Twin of the $ezero table in go-to-llvm-ir.abnf.
+    function apPad(et, proto) {
+        if (typeof et == "string" && et != "" && (goPadZeroTy(et) || goCopyCode(et) != "")) { return goZeroTy(et) }
+        return apAdopt(et, proto, 0)
     }
     hostGlobals["cap"] = function(x) { return goCap(x) }
     // copy is a memmove: when dst starts later in the same backing array than src,

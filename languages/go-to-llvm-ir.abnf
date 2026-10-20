@@ -3504,6 +3504,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function declGrowCap(b) {
         var esz = callExt(b, "js_obj_new", [])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$esz"), esz])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$ezero"), callExt(b, "js_obj_new", [])])
         var cl = callExt(b, "js_arr_new", [])
         for (var ci = 0; ci < goSizeClasses.length; ci++) { callExt(b, "js_arr_push", [cl, emitNum(b, goSizeClasses[ci])]) }
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$sizecls"), cl])
@@ -3583,8 +3584,27 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // A generic's element type is one of its instantiations at run time.
         for (var ti = 0; ti < goTpCands.length; ti++) { goEtNote(goTpCands[ti]) }
         var savedF = curF
+        var savedScope = curScopeV
         curF = goEszF
         var zb = goEszF.NewBlock("entry")
+        // $ezero[et]: a function answering a fresh zero of et, for an element type
+        // whose zero is not a number (goPadZeroTy) or is a struct. Growth pads with
+        // it. Twin of apPad in go-interpreter.abnf.
+        var ez = callExt(zb, "js_scope_get", [goEszF.Params[0], emitStr(zb, "$ezero")])
+        for (var zk = 0; zk < goEts.length; zk++) {
+            var zt = goEts[zk]
+            if ((!goPadZeroTy(zt) && goCopyCodeC(zt) == "") || !goPadReach(zt, {})) { continue }
+            funcCount++
+            var zidx = funcCount
+            var zf = m.NewFunc("jsf_" + zidx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+            curF = zf
+            curScopeV = zf.Params[0]
+            var zfb = zf.NewBlock("entry")
+            zfb.NewRet(emitZeroTy(zfb, zt))
+            curF = goEszF
+            curScopeV = savedScope
+            callExt(zb, "js_set", [ez, emitStr(zb, zt), callExt(zb, "js_closure", [handle(zidx), goEszF.Params[0]])])
+        }
         var esz = callExt(zb, "js_scope_get", [goEszF.Params[0], emitStr(zb, "$esz")])
         for (var k = 0; k < goEts.length; k++) {
             var lay = goSizeOf(goEts[k], sFTypesOrNull)
@@ -3592,6 +3612,23 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
         zb.NewRet(hUndef)
         curF = savedF
+        curScopeV = savedScope
+    }
+    // Can jsmain's scope build the zero of t? Not when t needs the descriptor of a
+    // type declared inside a function (goLocalTys), which binds in that function's
+    // scope; such an element type pads as before.
+    var goLocalTys = {}
+    function goPadReach(t, seen) {
+        if (t == "" || seen["$" + t] === true) { return true }
+        seen["$" + t] = true
+        if (t.charAt(0) == "[" && t.charAt(1) != "]") { return goPadReach(elemTy(t), seen) }
+        if (goPadZeroTy(t)) { return true }
+        if (goLocalTys["$" + t] === true) { return false }
+        var an = goAnonSt(t)
+        var fts = an != null ? an.t : sFTypes(t)
+        if (fts == undefined || fts == null) { return true }
+        for (var i = 0; i < fts.length; i++) { if (!goPadReach(fts[i], seen)) { return false } }
+        return true
     }
     function sFTypesOrNull(name) {
         var ft = sFTypes(name)
@@ -3799,9 +3836,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 // A GROWING append OVER-ALLOCATES, by gc's rule ($growcap).
                 var c2 = {b: etZ.b, v: emitHelper(etZ.b, "$growcap", [hc.v, need, etZ.v])}
                 var fill = callExt(c2.b, "js_sub", [c2.v, hn.v])
+                // The slots past the new length hold the element type's zero ($ezero).
+                var zmk = callExt(c2.b, "js_get", [callExt(c2.b, "js_scope_get", [curScopeV, emitStr(c2.b, "$ezero")]), etZ.v])
                 var eb3 = emitCountLoop(c2.b, fill, function(lb, iV) {
-                    callExt(lb, "js_arr_push", [na, callExt(lb, "js_giadopt", [etZ.v, emitNum(lb, 0)])])
-                    return lb
+                    var pz = emitSelect(lb, zmk, function(tb) { return {b: tb, v: callExt(tb, "js_call", [zmk, hUndef, callExt(tb, "js_arr_new", [])])} },
+                                        function(eb) { return {b: eb, v: callExt(eb, "js_giadopt", [etZ.v, emitNum(eb, 0)])} })
+                    callExt(pz.b, "js_arr_push", [na, pz.v])
+                    return pz.b
                 })
                 var trip = callExt(eb3, "js_arr_new", [])
                 callExt(eb3, "js_arr_push", [trip, na])
@@ -6052,6 +6093,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             last = items[items.length - 1]
         }
         declaredTypes[items[0]] = true
+        if (cScopes.length != 1) { goLocalTys["$" + items[0]] = true }
         // An interface declaration binds no runtime value: the value model is dynamic,
         // so satisfaction is implicit and a method call on an interface value is the
         // ordinary method call on whatever struct is in it. A constraint interface

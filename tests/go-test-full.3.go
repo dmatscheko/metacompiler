@@ -770,6 +770,30 @@ func s119() {
 	check("getenv119", os.Getenv("MEC_UNSET_VARIABLE_119") == "" && v == "" && !ok && os.Getenv("PATH") != "")
 }
 
+// ===== SECTION 120: the capacity append grows into holds zero values =====
+// s[:cap(s)] after a growing append shows the slots past the old length: the
+// element type's zero, its own instance for a struct or an array, nil for a
+// pointer. The expected values are go run's.
+type p120 struct{ x, y int }
+
+func s120() {
+	s := append([]p120{}, p120{1, 2})
+	s = append(s, p120{3, 4})
+	s = append(s, p120{5, 6})
+	s = s[:cap(s)]
+	as := append([][2]int{}, [2]int{1, 2})
+	as = append(as, [2]int{3, 4})
+	as = append(as, [2]int{5, 6})
+	as = as[:cap(as)]
+	as[3][0] = 7
+	ps := append([]*p120{}, &p120{})
+	ps = append(ps, &p120{})
+	ps = append(ps, &p120{})
+	ps = ps[:cap(ps)]
+	out := fmt.Sprint(len(s), s, as, len(ps), ps[3] == nil)
+	check("growzero120", out == "4 [{1 2} {3 4} {5 6} {0 0}] [[1 2] [3 4] [5 6] [7 0]] 4 true")
+}
+
 func main() {
 	s94()   // SECTION-CALL 94
 	s95()   // SECTION-CALL 95
@@ -795,6 +819,7 @@ func main() {
 	s117()  // SECTION-CALL 117
 	s118f() // SECTION-CALL 118
 	s119()  // SECTION-CALL 119
+	s120()  // SECTION-CALL 120
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }
