@@ -595,10 +595,12 @@ SubscriptDecl <~~ swDotClaim(up.start, up.pos, ""); var ms = makeSubscript(takeA
             = KwSubscript [ SkipAngle ] ParamList [ "->" AnnType ] [ GenWhere ] PropAccessors ;
 MethodDecl  <~~ push({method: makeFun(takeAll(), up.start, up.pos)}) ~~>
             = KwFunc FuncName [ SkipAngle ] ParamList [ FnEffects ] [ "->" AnnType <~~ push({rtxt: stripWs(up.in)}) ~~> ] [ GenWhere ] FnBody ;
-// var w = 2, h = 3 declares two stored properties; each binding pushes its own
-// {prop} record, so the type builder sees them in declaration order.
-PropDecl    = ( "let" | "var" ) KwEnd PropBind { "," PropBind } [ ";" ] ;
-PropBind    <~~ push(makeProp(takeAll())) ~~>
+// var w = 2, h = 3 declares two stored properties; each binding becomes its own
+// {prop} record, so the type builder sees them in declaration order. In `var w,
+// h: Double` both are Double (swBindsShared in lib/swift-dotwant.js).
+PropDecl    <~~ var pbs = swBindsShared(takeAll(), makeProp); for (var pb = 0; pb < pbs.length; pb++) { push(pbs[pb]) } ~~>
+            = ( "let" | "var" ) KwEnd PropBind { "," PropBind } [ ";" ] ;
+PropBind    <~~ push({dbind: takeAll()}) ~~>
             = Id <~~ push(swBt(up.in)) ~~> [ ":" DeclAnnType ]
               [ "=" Expression <~~ push({itext: up.in, iat: up.start + ":" + up.pos}) ~~> ] ;
 // A computed property (`var scaled: Int { get { ... } set { ... } }`, or the
@@ -968,10 +970,11 @@ Decl        = DeclTuple | LocalComputed | DeclPlain ;
 LocalComputed <~~ takeAll(); push(notImplStmt("a local computed variable", up.start)) ~~>
             = "var" KwEnd Id ":" Type SkipBlock ;
 // One let/var may declare SEVERAL bindings: `let a = 1, b = 2`. Each binding builds
-// its own declaration thunk and the statement runs them in order.
-DeclPlain   <~~ push(makeSeq(takeAll())) ~~>
+// its own declaration thunk and the statement runs them in order; `var a, b:
+// Double` declares both as Double (swBindsShared).
+DeclPlain   <~~ push(makeSeq(swBindsShared(takeAll(), makeDecl))) ~~>
             = ( "let" | "var" ) KwEnd DeclBind { "," DeclBind } [ ";" ] ;
-DeclBind    <~~ push(makeDecl(takeAll())) ~~>
+DeclBind    <~~ push({dbind: takeAll()}) ~~>
             = Id <~~ push(swBt(up.in)) ~~> [ ":" DeclAnnType ] [ "=" Expression <~~ push({itext: up.in, iat: up.start + ":" + up.pos}) ~~> ] [ LocalObs ] ;
 // `var w = 0 { didSet { ... } }` on a top-level or local variable: the observers are
 // the same accessors a property's are, and only willSet/didSet are accepted here.

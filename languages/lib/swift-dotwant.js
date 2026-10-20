@@ -588,6 +588,28 @@ function swDsMarkTypeParams(params, gens) {
     }
 }
 
+// `var w, h: Double` declares BOTH as Double: a binding with neither an annotation
+// nor an initializer takes the annotation of the binding after it. items are the
+// {dbind} records of one declaration (each the item list of one binding, its name
+// first); mk builds each binding once the annotations are shared.
+function swBindsShared(items, mk) {
+    var binds = []
+    for (var i = 0; i < items.length; i++) { if (items[i] != undefined && items[i].dbind != undefined) { binds.push(items[i].dbind) } }
+    for (var j = binds.length - 2; j >= 0; j--) {
+        if (binds[j].length != 1) { continue }
+        var nx = binds[j + 1]
+        var k = 1
+        while (k < nx.length && swIsAnnRec(nx[k])) { binds[j].push(nx[k]); k++ }
+    }
+    var out = []
+    for (var b = 0; b < binds.length; b++) { out.push(mk(binds[b])) }
+    return out
+}
+function swIsAnnRec(r) {
+    return r != undefined && r != null && typeof r == "object"
+        && (r.itype != undefined || r.atype != undefined || r.otype != undefined || r.tlabels != undefined)
+}
+
 // ----- A generic TYPE's parameters -----
 // `struct Box<T> { var v: T }` binds T per INSTANCE: `Box<Double>(v: 2)` and
 // `let b: Box<Double> = Box(v: 3)` hold 2.0 and 3.0, and so does a later

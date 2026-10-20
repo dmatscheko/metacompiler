@@ -5395,6 +5395,22 @@ func s136() {
     check("136c", d.init(rawValue: 2) == .s && d.init(rawValue: 7) == nil)
 }
 
+// ===== SECTION 137: one annotation shared by several bindings =====
+// `var w, h: Double` declares both names Double - a binding with neither an
+// annotation nor an initializer takes the next one's - for stored properties and
+// locals alike, while `let c = 1, d: Double = 2` keeps c an Int. Every value read
+// off swiftc 6.1.2.
+struct R137 { var w, h: Double; let k, j: Int8 }
+final class K137 { var x, y: Float; init() { x = 1; y = 2 } }
+func s137() {
+    let r = R137(w: 2, h: 3, k: 100, j: 1)
+    var a, b: Double
+    a = 1; b = 3
+    let c = 1, d: Double = 2
+    check("137a", "\(r)" == "R137(w: 2.0, h: 3.0, k: 100, j: 1)" && r.w / 4 == 0.5 && r.k &+ 100 == -56)
+    check("137b", a / 2 == 0.5 && "\(b)" == "3.0" && "\(c) \(d)" == "1 2.0" && "\(K137().x / 3)" == "0.33333334")
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5532,6 +5548,7 @@ func main() {
     s134() // SECTION-CALL 134
     s135() // SECTION-CALL 135
     s136() // SECTION-CALL 136
+    s137() // SECTION-CALL 137
     print("full: \(checks) checks, \(fails) failures")
 }
 
