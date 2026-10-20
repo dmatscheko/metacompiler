@@ -101,7 +101,7 @@ marker). `Object.getOwnPropertySymbols` missing in all legs. Compiled `[...null]
 
 # JV — Java
 
-### T-637 java: static field and method of one name; field hiding; lazy static init; nested type names hoisted globally · P1 · JV · OPEN [V]
+### T-637 java: static field and method of one name; field hiding; lazy static init; nested type names hoisted globally · P1 · JV · IN PROGRESS (JV worker, round 8) [V]
 `static int count; static int count() {...}` collide on the class descriptor in both engines ("unknown method 'count'").
 Field hiding (subclass redeclares a field, `super.name`): compiled "variable not defined: super", the interpreter reads the subclass
 value. Static initialization is eager: a member class's static block runs right after its top-level class, not at first use
