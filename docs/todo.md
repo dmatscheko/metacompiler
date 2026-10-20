@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-659** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-660** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -139,12 +139,12 @@ reports cap 4 where growslice says 1) — escape analysis.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-657 php: first-class callable identity; var_dump of method callables; builtins without library wrappers · P3 · PHP · IN PROGRESS (PHP worker, round 8) [V spec-only]
-`Closure::fromCallable('opt') === opt(...)` → compiler true (PHP false: every f(...) / fromCallable makes a new Closure; interp right);
-`spl_object_id($f) === spl_object_id(opt(...))` → true in all engines (PHP false). `var_dump($obj->m(...))` / `A::s(...)` → NULL (fake
-method closures carry no handle or debug record). define/defined/constant/error_reporting/realpath have no library wrapper:
-`function_exists('define')` false in the compiler, true in the interpreter, and none can be called through a name; in the compiler
-`function_exists()` of a run-time-built name finds only library functions some literal already spelled.
+### T-659 php: calling a library function through a name built at run time · P1 · PHP · OPEN [V spec-only]
+`$e = 'str' . 'rev'; echo $e('abc');` → "Call to undefined function strrev()" in all engines, `is_callable($e)` false (PHP `cba`, true):
+the library is compiled only for names some literal spells. Since function_exists() now consults the library's name index, `if
+(function_exists($f)) $f();` errors at the call instead of skipping it. When a program makes a dynamic call with a non-literal name
+(or calls function_exists / is_callable / call_user_func with one), compile the library pieces such a call can reach — the whole
+library, or a lazily linked index — in both halves; measure binary size and the php bench.
 
 ### T-596 php: binding and undefined-variable warnings are never printed · P3 · PHP · BLOCKED - needs a user decision
 PHP CLI prints `Warning: Cannot unbind $this of closure using $this in <file> on line <n>` (and undefined-variable/-index
@@ -749,6 +749,7 @@ T-651 php: case-insensitive dynamic function names; `\`-prefixed names; array_ma
 T-654 java: user `super.clone()`; FQN `java.io.Serializable` without import; Matcher.hitEnd/requireEnd — PARTIAL 218ab25d (Object.clone via super.clone, Cloneable/Serializable markers without imports); hitEnd/requireEnd and the nested-name-rename defect are T-656
 T-655 php: function_exists(); direct calls in another letter case; callback message; var_dump of a first-class callable — DONE 8f44cfd4 858a0fd6 (Closure handle reuse after a temporary DECLINED: object ids are never reused by design, manual 7.8 GC model)
 T-652 js: for-in through the prototype chain; `in` on prototype methods; Object.prototype methods as class values; private static getters — DONE 6b4fd2a2
+T-657 php: first-class callable identity; var_dump of method callables; builtins without library wrappers — DONE 14fa3618
 
 # Settled — do not re-open
 
