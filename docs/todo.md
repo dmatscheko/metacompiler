@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-665** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-666** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -135,12 +135,11 @@ reports cap 4 where growslice says 1) — escape analysis.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-663 php: user functions with too few arguments; library method arity; named-argument "not passed" · P1 · PHP · IN PROGRESS (PHP worker, round 11) [V spec-only]
-`function foo($a){ return 1; } foo();` → prints 1 in all engines (PHP ArgumentCountError "Too few arguments to function foo(), 0 passed in
-%s on line %d and exactly 1 expected" — zend_missing_arg_error; the file/line is the caller's, so the engines need the call site's line).
-Library class methods have no arity check (PHP "SplStack::push() expects exactly 1 argument, 0 given"). A named-argument call skipping a
-required parameter → the count error (PHP "f(): Argument #N ($x) not passed"), and the halves count differently there. array_keys /
-array_walk / array_walk_recursive accept too many arguments (UNKNOWN third parameter kept variadic).
+### T-665 php: generator argument count checked at first resume; get_class/get_parent_class accept too many · P3 · PHP · OPEN [V spec-only]
+`function g($a){ yield $a; } $gen = g(); echo "gen made";` → we print "gen made" then raise at the first resume (PHP raises before: RECV
+precedes ZEND_GENERATOR_CREATE) — an eager check outside the deferred body (compiler: around js_genfn; interpreter: before newGen).
+`get_class(1, 2)` accepted (PHP "get_class() expects at most 1 argument, 2 given"): add the `/* at most 1 */` marker in php-stdlib.php for
+get_class and get_parent_class.
 
 ### T-596 php: binding and undefined-variable warnings are never printed · P3 · PHP · BLOCKED - needs a user decision
 PHP CLI prints `Warning: Cannot unbind $this of closure using $this in <file> on line <n>` (and undefined-variable/-index
@@ -751,6 +750,7 @@ T-656 java: `x.new Inner()` with a third same-named nested type; Matcher.hitEnd/
 T-659 php: calling a library function through a name built at run time — DONE 6a69f43e (programs without a computed call compile byte-identically; with one the module grows ~3 MB of IR, the exe ~0.7 MB)
 T-662 php: library functions called with too few arguments do not raise ArgumentCountError — DONE a9a5ac97
 T-658 js: inherited data properties read as undefined; Object.create; Object.prototype method set; shim identity — DONE 9f4ba349
+T-663 php: user functions with too few arguments; library method arity; named-argument "not passed" — DONE 4b257c30
 
 # Settled — do not re-open
 
