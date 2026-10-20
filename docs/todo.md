@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-658** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-659** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -80,10 +80,12 @@ _ in range(2)]` → python `[1, 1]`).
 
 # JS — JavaScript and TypeScript
 
-### T-652 js: for-in through the prototype chain; `in` on prototype methods; Object.prototype methods as class values; private static getters · P1 · JS · IN PROGRESS (JS worker, round 11) [V]
-`class B{}; B.prototype.x = 1; for (k in new B()) println(k)` → nothing in all engines (node `x`: for-in walks inherited enumerable
-keys). `class C{ n(){} }; "n" in C.prototype` → false (node true). `typeof K.hasOwnProperty` on a class → "undefined" (node
-"function"). `class K { static get #h(){ return 1 } }` → js-to-llvm-ir.abnf "Not everything could be parsed" (interpreter accepts).
+### T-658 js: inherited data properties read as undefined; Object.create; Object.prototype method set; shim identity · P1 · JS · OPEN [V]
+`class B{}; B.prototype.x = 1; println(new B().x)` → undefined in all engines (node 1); `function F(){}; F.prototype.v = 2; new F().v`
+likewise — the value-read miss path (getMember / js_jsvget / js_jsmget) only looks up the chain for methods (P1). `Object.create({p:1})`
+→ TypeError "Object.create is not a function" in all engines (P1). `typeof K.isPrototypeOf`, `toLocaleString` → undefined on any value
+(node "function"). `K.valueOf === K.valueOf` → false (node true: each read builds a fresh shim). Measure tests/bench.sh js: the miss
+path must stay cheap for objects without a prototype chain.
 
 ---
 
@@ -746,6 +748,7 @@ T-650 java: static field through an instance; StringBuffer; CharSequence; ArrayL
 T-651 php: case-insensitive dynamic function names; `\`-prefixed names; array_map type checks; positional after named in a spread — DONE 350c6dcd
 T-654 java: user `super.clone()`; FQN `java.io.Serializable` without import; Matcher.hitEnd/requireEnd — PARTIAL 218ab25d (Object.clone via super.clone, Cloneable/Serializable markers without imports); hitEnd/requireEnd and the nested-name-rename defect are T-656
 T-655 php: function_exists(); direct calls in another letter case; callback message; var_dump of a first-class callable — DONE 8f44cfd4 858a0fd6 (Closure handle reuse after a temporary DECLINED: object ids are never reused by design, manual 7.8 GC model)
+T-652 js: for-in through the prototype chain; `in` on prototype methods; Object.prototype methods as class values; private static getters — DONE 6b4fd2a2
 
 # Settled — do not re-open
 
