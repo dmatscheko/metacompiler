@@ -526,9 +526,13 @@ func (rt *jsrt) phpPlaceArgs(sig string, mask int, args interface{}) interface{}
 					rt.phpArrPush(rest, e)
 				}
 			}
+			// A named argument the variadic collects is by reference where it
+			// is (zend_get_arg_offset_by_name answers the variadic's position).
 			for i, k := range keys.elems {
 				if s, isName := k.(string); isName && !taken[s] {
-					rt.phpArrSet(rest, s, at(i, -1))
+					e := at(i, pi)
+					phpRefAdjust(phpCellOf(e), 1)
+					rt.phpArrSet(rest, s, e)
 				}
 			}
 			out.elems = append(out.elems, rest)
@@ -577,8 +581,9 @@ func (rt *jsrt) phpMergeArgs(dst, src interface{}, sig string, mask int) {
 			if o, isO := phpAsArr(dst); isO && isNum {
 				pi = int(phpArrNext(o))
 			}
+			// A name no parameter declares is the variadic's.
 			for j, p := range params {
-				if !isNum && p == k {
+				if !isNum && (p == k || (pi < 0 && strings.HasPrefix(p, "..."))) {
 					pi = j
 				}
 			}

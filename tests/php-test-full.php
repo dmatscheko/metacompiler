@@ -3242,7 +3242,7 @@ function s66() {
     check("cbn2", s66err(fn() => array_map(['S66A', 'foo'], [1]))
             === "TypeError: array_map(): Argument #1 (\$callback) must be a valid callback or null, non-static method S66A::foo() cannot be called statically"
         && s66err(fn() => usort($b, 'S66A::foo'))
-            === "TypeError: usort(): Argument #2 (\$callback) must be a valid callback, non-static method S66A::foo() cannot be called statically");
+            === "TypeError: usort(): Argument #1 (\$array) must be of type array, S66B given");
     $ns = "Error: Non-static method S66A::foo() cannot be called statically";
     $fs = 'S66A::foo';
     check("dyn1", s66err(fn() => ['S66A', 'foo']()) === $ns && s66err(fn() => $fs()) === $ns
@@ -3646,6 +3646,77 @@ function s71() {
         && S71QK::t() === "cs:S71Q:p" && (new S71QK)->u() === ["cs:S71QK:zz", "cs:S71QK:zz"]);
 }
 
+// ===== SECTION 72: library callbacks by name and of the u* set operations, argument order, named by-reference variadics =====
+// Every library function's callback is judged at the first user frame, also when
+// the function is called through its name or is array_walk_recursive or a u* set
+// operation (zend_API.c zend_is_callable_at_frame). zpp judges the arguments in
+// order: usort's array $array before its callback, but the u* variants'
+// trailing callback ("+f") before any of their arrays, and that position has no
+// parameter name (ext/standard/array.c php_array_diff; Zend
+// get_function_arg_name). A named argument a by-reference variadic collects is
+// by reference too (Zend/tests/named_params/variadic.phpt).
+class S72A {
+    private function cmp($a, $b) { return $a <=> $b; }
+    private static function rcmp($a, $b) { return $b <=> $a; }
+    private function walk(&$v, $k, $x = 0) { $v = $v + $x + 1; }
+    function t() {
+        $a = [3, 1, 2];
+        $out = [];
+        $c = $a; $f = 'usort'; $f($c, [$this, 'cmp']); $out[] = implode(',', $c);
+        $c = $a; $f = 'uasort'; $f($c, 'self::rcmp'); $out[] = implode(',', $c);
+        $out[] = implode(',', array_udiff($a, [2, 5], [$this, 'cmp']));
+        $out[] = implode(',', array_uintersect($a, [2, 5], 'self::rcmp'));
+        $out[] = implode(',', array_keys(array_diff_ukey(['a' => 1, 'b' => 2], ['a' => 3], [$this, 'cmp'])));
+        $u = 'array_intersect_uassoc';
+        $out[] = implode(',', array_keys($u(['a' => 1, 'b' => 2], ['a' => 1], [$this, 'cmp'])));
+        $w = [1, [2, 3]]; array_walk_recursive($w, [$this, 'walk'], 10);
+        $f = 'array_walk'; $v = [1, 2]; $f($v, [$this, 'walk']);
+        $out[] = json_encode($w) . json_encode($v);
+        return implode(' ', $out);
+    }
+    function errs() {
+        $x = 5;
+        $a = [1];
+        $out = [];
+        $calls = [function () use (&$x) { usort($x, 'self::nope'); },
+                  function () use ($a) { $f = 'array_reduce'; $f($a, [$this, 'nope']); },
+                  function () use ($x) { array_filter($x, [$this, 'nope']); },
+                  function () use (&$x) { array_walk_recursive($x, [$this, 'nope']); },
+                  function () use ($x, $a) { array_udiff($x, $a, [$this, 'nope']); },
+                  function () use ($x, $a) { $f = 'array_uintersect_assoc'; $f($a, $a, $x, [$this, 'cmp']); },
+                  function () use ($a) { array_diff_ukey($a); }];
+        foreach ($calls as $cl) {
+            try { $cl(); $out[] = "none"; } catch (TypeError | ArgumentCountError $e) { $out[] = $e->getMessage(); }
+        }
+        return $out;
+    }
+}
+function s72all(&...$refs) { foreach ($refs as $k => &$r) { $r = $r . $k; } }
+class S72M { function m(&...$v) { foreach ($v as &$w) { $w = -$w; } } }
+function s72() {
+    $cl = Closure::bind(function () { $f = 'usort'; $c = [2, 1]; $f($c, [$this, 'cmp']); return implode(',', $c); },
+                        new S72A, S72A::class);
+    check("lcb2", (new S72A)->t() === "1,2,3 3,2,1 3,1 2 b a [12,[13,14]][2,3]" && $cl() === "1,2");
+    check("lae1", (new S72A)->errs() === [
+        'usort(): Argument #1 ($array) must be of type array, int given',
+        'array_reduce(): Argument #2 ($callback) must be a valid callback, class S72A does not have a method "nope"',
+        'array_filter(): Argument #1 ($array) must be of type array, int given',
+        'array_walk_recursive(): Argument #1 ($array) must be of type array, int given',
+        'array_udiff(): Argument #3 must be a valid callback, class S72A does not have a method "nope"',
+        'array_uintersect_assoc(): Argument #3 must be of type array, int given',
+        'array_diff_ukey() expects at least 2 arguments, 1 given']);
+    $p = "p"; $q = "q"; $r = "r";
+    s72all($p, s: $q, t: $r);
+    $f = 's72all'; $d = "d"; $f(e: $d);
+    $g = function (&...$v) { foreach ($v as &$w) { $w = $w * 10; } };
+    $n = 1; $g(k: $n);
+    $o = 2; (new S72M)->m(u: $o);
+    $arr = ['a' => 'x']; s72all(a: $arr['a']);
+    $sp = ['y', 'k' => 'z']; s72all(...$sp);
+    check("nbv1", $p === "p0" && $q === "qs" && $r === "rt" && $d === "de" && $n === 10 && $o === -2
+        && $arr === ['a' => 'xa'] && $sp === ['y0', 'k' => 'zk']);
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -3726,6 +3797,7 @@ function main() {
     s69(); // SECTION-CALL 69
     s70(); // SECTION-CALL 70
     s71(); // SECTION-CALL 71
+    s72(); // SECTION-CALL 72
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

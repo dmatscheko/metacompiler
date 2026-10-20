@@ -3701,9 +3701,15 @@ function js_phplacesig(sig, args, mask) {
                 }
                 i = i + 1
             }
+            // A named argument the variadic collects is by reference where it is.
             i = 0
             while (i < p.k.length) {
-                if (typeof p.k[i] == "string" && taken["$" + p.k[i]] !== true) { phArrSet(rest, p.k[i], phPlaceAt(p, i, isList)) }
+                if (typeof p.k[i] == "string" && taken["$" + p.k[i]] !== true) {
+                    var ne = anytype
+                    ne = phPlaceAt(p, i, isList || phRefBit(mask, pi))
+                    phRefAdjust(phCellOf(ne), 1)
+                    phArrSet(rest, p.k[i], ne)
+                }
                 i = i + 1
             }
             out.push(rest)
@@ -3819,10 +3825,12 @@ function phMergeArgs(dst, src, sig, mask) {
             else if (sig != "" && sig != ")") {
                 var at = 0
                 var from = 0
+                // A name no parameter declares is the variadic's.
                 while (from <= sig.length) {
                     var to = sig.indexOf(",", from)
                     if (to < 0) { to = sig.length }
-                    if (sig.substring(from, to) == k) { pi = at }
+                    var pn = sig.substring(from, to)
+                    if (pn == k || (pi < 0 && pn.substring(0, 3) == "...")) { pi = at }
                     from = to + 1
                     at = at + 1
                 }

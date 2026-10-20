@@ -125,6 +125,14 @@ function method_exists($object_or_class, $method) { return method_exists($object
 // zend_zval_value_name, the "X given" of PHP 8.3's argument TypeErrors: a bool is
 // named by its value ("true given"), anything else as get_debug_type does.
 function __mec_vname($v) { return $v === true ? "true" : ($v === false ? "false" : get_debug_type($v)); }
+// The TypeError of an internal function's first parameter, array $array, which
+// zpp judges before the callback that follows it. $obj: an object is accepted too
+// (Z_PARAM_ARRAY_OR_OBJECT).
+function __mec_arrarg($v, $fname, $obj) {
+    if (!is_array($v) && !($obj && is_object($v))) {
+        throw new TypeError($fname . "(): Argument #1 (\$array) must be of type array, " . __mec_vname($v) . " given");
+    }
+}
 
 // ----- comparison helpers ----------------------------------------------------
 // The sort flags' orderings: SORT_REGULAR is PHP's standard comparison (<=>),
@@ -191,12 +199,14 @@ function __mec_sort(&$array, $by, $cmp, $flags, $dir, $keep) {
 function sort(&$array, $flags = SORT_REGULAR) { return __mec_sort($array, 1, null, $flags, 1, false); }
 function rsort(&$array, $flags = SORT_REGULAR) { return __mec_sort($array, 1, null, $flags, -1, false); }
 function usort(&$array, $callback) {
+    __mec_arrarg($array, 'usort', false);
     __mec_callable($callback, 'usort(): Argument #2 ($callback) must be a valid callback');
     return __mec_sort($array, 1, $callback, 0, 1, false);
 }
 function asort(&$array, $flags = SORT_REGULAR) { return __mec_sort($array, 1, null, $flags, 1, true); }
 function arsort(&$array, $flags = SORT_REGULAR) { return __mec_sort($array, 1, null, $flags, -1, true); }
 function uasort(&$array, $callback) {
+    __mec_arrarg($array, 'uasort', false);
     __mec_callable($callback, 'uasort(): Argument #2 ($callback) must be a valid callback');
     return __mec_sort($array, 1, $callback, 0, 1, true);
 }
@@ -205,6 +215,7 @@ function natcasesort(&$array) { return __mec_sort($array, 1, null, SORT_NATURAL 
 function ksort(&$array, $flags = SORT_REGULAR) { return __mec_sort($array, 0, null, $flags, 1, true); }
 function krsort(&$array, $flags = SORT_REGULAR) { return __mec_sort($array, 0, null, $flags, -1, true); }
 function uksort(&$array, $callback) {
+    __mec_arrarg($array, 'uksort', false);
     __mec_callable($callback, 'uksort(): Argument #2 ($callback) must be a valid callback');
     return __mec_sort($array, 0, $callback, 0, 1, true);
 }
@@ -542,9 +553,17 @@ function __mec_setop($array, $others, $mode, $want, $vcmp, $kcmp) {
     }
     return $out;
 }
-// The trailing callback(s) of the u* variants, split off the array list.
-function __mec_takecb(&$arrays) {
-    return array_pop($arrays);
+// The trailing callback of the u* variants, split off the array list. zpp's "+f"
+// judges it before any array, and its position has no parameter name.
+function __mec_takecb($fname, $array, &$arrays) {
+    if (count($arrays) == 0) { throw new ArgumentCountError($fname . "() expects at least 2 arguments, 1 given"); }
+    $cb = array_pop($arrays);
+    __mec_callable($cb, $fname . '(): Argument #' . (count($arrays) + 2) . ' must be a valid callback');
+    __mec_arrarg($array, $fname, false);
+    foreach ($arrays as $i => $a) {
+        if (!is_array($a)) { throw new TypeError($fname . "(): Argument #" . ($i + 2) . " must be of type array, " . __mec_vname($a) . " given"); }
+    }
+    return $cb;
 }
 function array_diff($array, ...$arrays) { return __mec_setop($array, $arrays, 0, false, null, null); }
 function array_diff_key($array, ...$arrays) { return __mec_setop($array, $arrays, 1, false, null, null); }
@@ -552,14 +571,14 @@ function array_diff_assoc($array, ...$arrays) { return __mec_setop($array, $arra
 function array_intersect($array, ...$arrays) { return __mec_setop($array, $arrays, 0, true, null, null); }
 function array_intersect_key($array, ...$arrays) { return __mec_setop($array, $arrays, 1, true, null, null); }
 function array_intersect_assoc($array, ...$arrays) { return __mec_setop($array, $arrays, 2, true, null, null); }
-function array_udiff($array, ...$rest) { $cb = __mec_takecb($rest); return __mec_setop($array, $rest, 0, false, $cb, null); }
-function array_uintersect($array, ...$rest) { $cb = __mec_takecb($rest); return __mec_setop($array, $rest, 0, true, $cb, null); }
-function array_diff_ukey($array, ...$rest) { $cb = __mec_takecb($rest); return __mec_setop($array, $rest, 1, false, null, $cb); }
-function array_intersect_ukey($array, ...$rest) { $cb = __mec_takecb($rest); return __mec_setop($array, $rest, 1, true, null, $cb); }
-function array_udiff_assoc($array, ...$rest) { $cb = __mec_takecb($rest); return __mec_setop($array, $rest, 2, false, $cb, null); }
-function array_uintersect_assoc($array, ...$rest) { $cb = __mec_takecb($rest); return __mec_setop($array, $rest, 2, true, $cb, null); }
-function array_diff_uassoc($array, ...$rest) { $cb = __mec_takecb($rest); return __mec_setop($array, $rest, 2, false, null, $cb); }
-function array_intersect_uassoc($array, ...$rest) { $cb = __mec_takecb($rest); return __mec_setop($array, $rest, 2, true, null, $cb); }
+function array_udiff($array, ...$rest) { $cb = __mec_takecb('array_udiff', $array, $rest); return __mec_setop($array, $rest, 0, false, $cb, null); }
+function array_uintersect($array, ...$rest) { $cb = __mec_takecb('array_uintersect', $array, $rest); return __mec_setop($array, $rest, 0, true, $cb, null); }
+function array_diff_ukey($array, ...$rest) { $cb = __mec_takecb('array_diff_ukey', $array, $rest); return __mec_setop($array, $rest, 1, false, null, $cb); }
+function array_intersect_ukey($array, ...$rest) { $cb = __mec_takecb('array_intersect_ukey', $array, $rest); return __mec_setop($array, $rest, 1, true, null, $cb); }
+function array_udiff_assoc($array, ...$rest) { $cb = __mec_takecb('array_udiff_assoc', $array, $rest); return __mec_setop($array, $rest, 2, false, $cb, null); }
+function array_uintersect_assoc($array, ...$rest) { $cb = __mec_takecb('array_uintersect_assoc', $array, $rest); return __mec_setop($array, $rest, 2, true, $cb, null); }
+function array_diff_uassoc($array, ...$rest) { $cb = __mec_takecb('array_diff_uassoc', $array, $rest); return __mec_setop($array, $rest, 2, false, null, $cb); }
+function array_intersect_uassoc($array, ...$rest) { $cb = __mec_takecb('array_intersect_uassoc', $array, $rest); return __mec_setop($array, $rest, 2, true, null, $cb); }
 
 // ----- callbacks -------------------------------------------------------------
 // A string key of call_user_func_array's list is a named argument, as in a spread.
@@ -590,6 +609,7 @@ function array_map($callback, $array, ...$arrays) {
     return $out;
 }
 function array_filter($array, $callback = null, $mode = 0) {
+    __mec_arrarg($array, 'array_filter', false);
     if ($callback !== null) { __mec_callable($callback, 'array_filter(): Argument #2 ($callback) must be a valid callback or null'); }
     $out = [];
     foreach ($array as $k => $v) {
@@ -602,6 +622,7 @@ function array_filter($array, $callback = null, $mode = 0) {
     return $out;
 }
 function array_reduce($array, $callback, $initial = null) {
+    __mec_arrarg($array, 'array_reduce', false);
     __mec_callable($callback, 'array_reduce(): Argument #2 ($callback) must be a valid callback');
     $acc = $initial;
     foreach ($array as $v) { $acc = $callback($acc, $v); }
@@ -611,6 +632,7 @@ function array_reduce($array, $callback, $initial = null) {
 // callable VALUE passes a reference: the interpreter half does, the compiler
 // half's dynamic call passes the value.
 function array_walk(&$array, $callback, ...$arg) {
+    __mec_arrarg($array, 'array_walk', true);
     __mec_callable($callback, 'array_walk(): Argument #2 ($callback) must be a valid callback');
     foreach ($array as $k => &$v) {
         if (count($arg) > 0) { $callback($v, $k, $arg[0]); } else { $callback($v, $k); }
@@ -619,13 +641,18 @@ function array_walk(&$array, $callback, ...$arg) {
     return true;
 }
 function array_walk_recursive(&$array, $callback, ...$arg) {
+    __mec_arrarg($array, 'array_walk_recursive', true);
+    __mec_callable($callback, 'array_walk_recursive(): Argument #2 ($callback) must be a valid callback');
+    __mec_walkrec($array, $callback, $arg);
+    return true;
+}
+function __mec_walkrec(&$array, $callback, $arg) {
     foreach ($array as $k => &$v) {
-        if (is_array($v)) { array_walk_recursive($v, $callback, ...$arg); }
+        if (is_array($v)) { __mec_walkrec($v, $callback, $arg); }
         elseif (count($arg) > 0) { $callback($v, $k, $arg[0]); }
         else { $callback($v, $k); }
     }
     unset($v);
-    return true;
 }
 function array_sum($array) {
     $sum = 0;

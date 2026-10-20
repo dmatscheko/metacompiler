@@ -1778,7 +1778,15 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                         var nk = argset.nkeys[q]
                         var took = false
                         for (var r = 0; r < i; r++) { if (params[r].name == nk) { took = true } }
-                        if (!took) { arrSet(rest, nk.substring(1), phpCopy(named[nk])) }
+                        if (took) { continue }
+                        // A by-reference variadic takes a named argument by
+                        // reference too (zend_get_arg_offset_by_name answers the
+                        // variadic's position for a name no parameter declares).
+                        if (p.byref === true && argset.ntgts != undefined && hasOwn(argset.ntgts, nk)) {
+                            var nc = argset.ntgts[nk]()
+                            rebind(undefined, nc)
+                            arrSet(rest, nk.substring(1), nc)
+                        } else { arrSet(rest, nk.substring(1), phpCopy(named[nk])) }
                     }
                 }
                 declVar(p.name, rest)
@@ -3967,6 +3975,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 var cn = relName(cur.substring(0, sep))
                 return dynStatic(cn, cur.substring(sep + 2), argset)
             }
+            libArgs(cur, argset)
             return callNamed(cur, argset)
         }
         if (isArr(cur)) {
@@ -5723,22 +5732,55 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // caller, which the library function's own frame does not have. Twin of
     // callerCallable in php-to-llvm-ir.abnf.
     // The callback argument of the library functions that take one: its position
-    // and the TypeError's wording, which says whether null is accepted.
-    var libCbArg = {"$array_map": {at: 0, w: "array_map(): Argument #1 ($callback) must be a valid callback or null"},
-                    "$array_filter": {at: 1, w: "array_filter(): Argument #2 ($callback) must be a valid callback or null"},
-                    "$array_reduce": {at: 1, w: "array_reduce(): Argument #2 ($callback) must be a valid callback"},
-                    "$array_walk": {at: 1, w: "array_walk(): Argument #2 ($callback) must be a valid callback"},
-                    "$usort": {at: 1, w: "usort(): Argument #2 ($callback) must be a valid callback"},
-                    "$uasort": {at: 1, w: "uasort(): Argument #2 ($callback) must be a valid callback"},
-                    "$uksort": {at: 1, w: "uksort(): Argument #2 ($callback) must be a valid callback"}}
+    // (-1: the last argument, which has no parameter name), whether null is
+    // accepted, and what the array $array before it takes (1: an array, 2: an
+    // array or an object; 0: no such parameter).
+    var libCbArg = {"$array_map": {at: 0, nul: true, arr: 0},
+                    "$array_filter": {at: 1, nul: true, arr: 1},
+                    "$array_reduce": {at: 1, nul: false, arr: 1},
+                    "$array_walk": {at: 1, nul: false, arr: 2},
+                    "$array_walk_recursive": {at: 1, nul: false, arr: 2},
+                    "$usort": {at: 1, nul: false, arr: 1},
+                    "$uasort": {at: 1, nul: false, arr: 1},
+                    "$uksort": {at: 1, nul: false, arr: 1},
+                    "$array_udiff": {at: -1, nul: false, arr: 0},
+                    "$array_uintersect": {at: -1, nul: false, arr: 0},
+                    "$array_diff_ukey": {at: -1, nul: false, arr: 0},
+                    "$array_intersect_ukey": {at: -1, nul: false, arr: 0},
+                    "$array_udiff_assoc": {at: -1, nul: false, arr: 0},
+                    "$array_uintersect_assoc": {at: -1, nul: false, arr: 0},
+                    "$array_diff_uassoc": {at: -1, nul: false, arr: 0},
+                    "$array_intersect_uassoc": {at: -1, nul: false, arr: 0}}
+    // The TypeError's wording for the callback at position at.
+    function libCbWhere(name, cb, at) {
+        return name + "(): Argument #" + (at + 1) + (cb.at < 0 ? "" : " ($callback)") + " must be a valid callback"
+               + (cb.nul ? " or null" : "")
+    }
     // A library function's callback is checked and bound in the CALLER's frame, as
     // call_user_func's is: an internal function judges it at the first user frame
     // (zend_is_callable_ex), whose $this and class scope the library's own frame
-    // here does not have. Twin of libCallable in php-to-llvm-ir.abnf.
-    function libCallable(cur, cb) {
-        if (cur === null && cb.w.indexOf("or null") >= 0) { return cur }
-        phpCheckCallback(cur, cb.w, true, false)
-        return cbResolve(cur, false)
+    // here does not have. zpp judges the arguments in order, so an array $array
+    // before the callback is checked first; the arguments are all evaluated by
+    // then. A direct call and a call through a function's name both come here.
+    // Twin of libCallable, libChecks and emitLibDyn in php-to-llvm-ir.abnf.
+    function libArgs(name, argset) {
+        var lc = phsCase(fnName(name), false)
+        if (!hasOwn(libCbArg, "$" + lc)) { return }
+        var cb = libCbArg["$" + lc]
+        var pos = argset.pos
+        var partial = isPartial(argset)
+        if (cb.at < 0 && (partial || pos.length < 2)) { return }
+        var at = cb.at < 0 ? pos.length - 1 : cb.at
+        if (pos.length <= at) { return }
+        for (var h = 0; h < argset.holes.length; h++) { if (argset.holes[h].ix === at) { return } }
+        var a0 = anytype
+        a0 = pos[0]
+        if (cb.arr > 0 && !partial && !isArr(a0) && !(cb.arr == 2 && isObj(a0))) {
+            phpRaise("TypeError", lc + "(): Argument #1 ($array) must be of type array, " + phpValueName(a0) + " given")
+        }
+        if (pos[at] === null && cb.nul) { return }
+        phpCheckCallback(pos[at], libCbWhere(lc, cb, at), true, false)
+        pos[at] = cbResolve(pos[at], false)
     }
     // A method callable whose method some class restricts, which the CALLER's class
     // scope may call, as a closure that calls it: the library function that calls
@@ -5830,12 +5872,11 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var name = phpLibRef(items[0])
         var args = items.slice(1)
         var resolveCb = name == "call_user_func" || name == "call_user_func_array"
-        var libCb = hasOwn(libCbArg, "$" + name) ? libCbArg["$" + name] : null
-        var cbAt = libCb == null ? 0 - 1 : libCb.at
+        var libCb = hasOwn(libCbArg, "$" + phsCase(name, false))
         return function() {
             var argset = evalArgs(args)
             if (resolveCb && argset.pos.length > 0) { argset.pos[0] = callerCallable(argset.pos[0], name) }
-            if (cbAt >= 0 && argset.pos.length > cbAt) { argset.pos[cbAt] = libCallable(argset.pos[cbAt], libCb) }
+            if (libCb) { libArgs(name, argset) }
             // f(1, ?) / f(1, ...) is a PARTIAL: bind what is there, wait for the rest.
             if (isPartial(argset)) {
                 var pname = name
