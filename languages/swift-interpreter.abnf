@@ -3716,12 +3716,18 @@ KwContinue  = "continue" KwEnd ;
             return v
         }
         scopePut(v, "__targs", args)
+        swGenFields(v)
+        return v
+    }
+    // The generic stored properties of v adopt what its type arguments make them.
+    // Twins: js_swgenfields in lib/swift-rt.metajs and abnf/jsrtswift.go.
+    function swGenFields(v) {
+        var cls = v.__class
         var fs = cls.__gfields
         var ts = cls.__gftys
         for (var i = 0; i < fs.length; i++) {
             if (hasOwn(v, fs[i])) { scopePut(v, fs[i], swAdoptDeep(v[fs[i]], swGenSub(v, ts[i]))) }
         }
-        return v
     }
     function swGenBase(n) {
         var i = n.length
@@ -6936,10 +6942,14 @@ KwContinue  = "continue" KwEnd ;
         try { return constructIn(f, argv, labels, targs) } finally { ownerStack.pop() }
     }
     // targs: the explicit type arguments of `Box<Double>(v: 2)`, set before the
-    // initializer runs (swSetTargs). Twin of emitConstruct in swift-to-llvm-ir.abnf.
+    // initializer runs (swSetTargs) - or the ones a `class DBox: Box<Double>` fixes
+    // (__ftargs). What the initializer stored then adopts them too
+    // (`data = Array(repeating: 0, ...)` into a `[T]`). Twin of emitConstruct in
+    // swift-to-llvm-ir.abnf.
     function constructIn(f, argv, labels, targs) {
         var obj = f.__struct === true ? {__class: f, __struct: true} : {__class: f}
-        if (targs != undefined && targs != "") { swSetTargs(obj, findThis(), targs) }
+        if (typeof f.__ftargs == "string") { scopePut(obj, "__targs", f.__ftargs) }
+        else if (targs != undefined && targs != "") { swSetTargs(obj, findThis(), targs) }
         if (typeof f.__ctor == "function") { f.__ctor(obj) }
         var init = classFind(f, "init")
         if (typeof init == "function") {
@@ -6948,6 +6958,7 @@ KwContinue  = "continue" KwEnd ;
             pendingLabels = null
             if (ir === null) { return null }
         }
+        if (hasOwn(obj, "__targs")) { swGenFields(obj) }
         return obj
     }
 
@@ -9699,6 +9710,7 @@ KwContinue  = "continue" KwEnd ;
             }
             scopePut(declaredClasses, "$" + name, 1)
         }
+        if (gdesc == null) { gdesc = swGenSuperDesc(mem, superName) }
         var inheritInit = !mem.hasInit && superName != null
         var mparams = []
         if (!mem.hasInit && !inheritInit) { mparams = memberwiseParams(mem.fields); regTypeSig(typeSigKey, name, mparams) }
@@ -9719,6 +9731,7 @@ KwContinue  = "continue" KwEnd ;
                 scopePut(cls, "__tgens", gdesc.tg)
                 scopePut(cls, "__gfields", gdesc.fs)
                 scopePut(cls, "__gftys", gdesc.ts)
+                if (gdesc.fixed != undefined) { scopePut(cls, "__ftargs", gdesc.fixed) }
             }
             // The inheritance clause: a name that resolves to a class is the
             // SUPERCLASS (its members are found by walking __super); a name that

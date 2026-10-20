@@ -6872,14 +6872,19 @@ KwContinue  = "continue" KwEnd ;
     // targs: the explicit type arguments of `Box<Double>(v: 2)`, set before the
     // initializer runs. A generic parameter of the enclosing instance's type among
     // them (`Stack<E>(...)` inside Stack) is that instance's argument, and one left
-    // unbound ("_") binds nothing. Twin of constructIn in swift-interpreter.abnf.
+    // unbound ("_") binds nothing. A `class DBox: Box<Double>` fixes its own
+    // (rec.ftargs). What the initializer stored then adopts them too. Twin of
+    // constructIn in swift-interpreter.abnf.
     function emitConstruct(b, tkey, clsV, args, targs) {
         var rec = typeRec(tkey)
         var objV = callExt(b, "js_obj_new", [])
         callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
-        if (targs != undefined && targs != "") {
+        var bound = rec != null && rec.ftargs != undefined && rec.ftargs != ""
+        if (bound) { callExt(b, "js_set", [objV, emitStr(b, "__targs"), emitStr(b, rec.ftargs)]) }
+        else if (targs != undefined && targs != "") {
             var selfV = b.NewCall(rtSelfOrUndef(), [curScopeV])
             callExt(b, "js_swsettargs", [objV, selfV, emitStr(b, targs)])
+            bound = true
         }
         var ctorArgs = callExt(b, "js_arr_new", [])
         callExt(b, "js_arr_push", [ctorArgs, objV])
@@ -6897,6 +6902,7 @@ KwContinue  = "continue" KwEnd ;
         var joinB = curF.NewBlock("")
         b.NewCondBr(truthy(b, callExt(b, "js_seq", [iret, hNull])), nilB, okB)
         nilB.NewBr(joinB)
+        if (bound) { callExt(okB, "js_swgenfields", [objV]) }
         okB.NewBr(joinB)
         return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(hNull, nilB), llvm.ir.NewIncoming(objV, okB)])}
     }
@@ -10635,6 +10641,8 @@ KwContinue  = "continue" KwEnd ;
             if (classNames[bn] == 1) { superName = bn }
         }
         rec.superName = superName
+        if (gdesc == null) { gdesc = swGenSuperDesc(mem, superName) }
+        rec.ftargs = gdesc != null && gdesc.fixed != undefined ? gdesc.fixed : ""
         var mparams = []
         var mwIndex = -1
         // SWIFT'S CLASS RULE IS NOT THE STRUCT RULE. A class never gets a memberwise

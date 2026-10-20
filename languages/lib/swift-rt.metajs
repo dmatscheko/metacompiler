@@ -752,6 +752,16 @@ function swAdoptGen(v, ty) {
         return v
     }
     v["__targs"] = args
+    js_swgenfields(v)
+    return v
+}
+// The generic stored properties of v adopt what its type arguments make them:
+// after a construction that bound them, and in swAdoptGen. Twins: swGenFields in
+// languages/swift-interpreter.abnf and abnf/jsrtswift.go.
+function js_swgenfields(v) {
+    var cls = swGenClass(v)
+    if (cls === undefined) { return undefined }
+    if (v["__targs"] === undefined) { return undefined }
     var fs = swStrArray(cls["__gfields"])
     var ts = swStrArray(cls["__gftys"])
     var i = 0
@@ -760,7 +770,7 @@ function swAdoptGen(v, ty) {
         if (fv !== undefined) { v[fs[i]] = js_swadoptdeep(fv, js_swgensub(v, ts[i]), undefined) }
         i = i + 1
     }
-    return v
+    return undefined
 }
 // The `<Double, Int>` a generic struct prints after its name: its type
 // arguments, else the ones its stored properties declared as a bare parameter

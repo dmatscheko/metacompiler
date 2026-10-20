@@ -322,6 +322,10 @@ func init() {
 			ty, _ := u(a[1]).(string)
 			return w(swGenSub(u(a[0]), ty))
 		}
+		m["js_swgenfields"] = func(a []uint64) uint64 {
+			swGenFields(u(a[0]), swAdoptAnn)
+			return w(jsUndef)
+		}
 		m["js_swsettargs"] = func(a []uint64) uint64 {
 			txt, _ := u(a[2]).(string)
 			swSetTargs(u(a[0]), u(a[1]), txt)
@@ -3339,6 +3343,22 @@ func swAdoptGen(v *jsObject, ty string, adopt func(interface{}, string) interfac
 		return v
 	}
 	o.set("__targs", args)
+	swGenFields(o, adopt)
+	return v
+}
+
+// swGenFields: the generic stored properties of v adopt what its type arguments
+// make them, after a construction that bound them and in swAdoptGen. Twins:
+// swGenFields in languages/swift-interpreter.abnf, js_swgenfields in
+// lib/swift-rt.metajs.
+func swGenFields(v interface{}, adopt func(interface{}, string) interface{}) {
+	o, cls, _ := swGenClass(v)
+	if o == nil {
+		return
+	}
+	if _, has := o.props["__targs"]; !has {
+		return
+	}
 	fs := swStrArray(cls.props["__gfields"])
 	ts := swStrArray(cls.props["__gftys"])
 	for i, f := range fs {
@@ -3346,7 +3366,6 @@ func swAdoptGen(v *jsObject, ty string, adopt func(interface{}, string) interfac
 			o.set(f, adopt(fv, swGenSub(o, ts[i])))
 		}
 	}
-	return v
 }
 
 // swGenArgsTxt is the `<Double, Int>` a generic struct prints after its name:

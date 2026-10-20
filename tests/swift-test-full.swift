@@ -5518,6 +5518,38 @@ func s141() {
     check("141b", xs.third141 == 7 && "xyz".third141 == "z" && [1].third141 == nil)
 }
 
+// ===== SECTION 142: a generic superclass's arguments; what an initializer stores =====
+// `class DBox142: Box142<Double>` binds T for every DBox142, so the inherited
+// `init(_ v: T)` stores 3.0; and a value an initializer stores into a `[T]`
+// property (`data = Array(repeating: 0, ...)`) is a [Double] once the instance is
+// a Matrix142<Double>. Every value read off swiftc 6.1.2.
+class Box142<T> {
+    var v: T
+    init(_ v: T) { self.v = v }
+    func get() -> T { v }
+}
+final class DBox142: Box142<Double> {
+    func half() -> Double { v / 2 }
+}
+struct Matrix142<T: Numeric> {
+    var cols: Int
+    var data: [T]
+    init(rows: Int, cols: Int) { self.cols = cols; data = Array(repeating: 0, count: rows * cols) }
+    subscript(r: Int, c: Int) -> T {
+        get { data[r * cols + c] }
+        set { data[r * cols + c] = newValue }
+    }
+}
+func s142() {
+    let db = DBox142(3)
+    var m = Matrix142<Double>(rows: 2, cols: 2)
+    m[0, 1] = 3
+    var mi = Matrix142<Int>(rows: 1, cols: 2)
+    mi[0, 0] = 7
+    check("142a", "\(db.v)" == "3.0" && db.half() == 1.5 && "\(db.get())" == "3.0")
+    check("142b", "\(m.data)" == "[0.0, 3.0, 0.0, 0.0]" && m[0, 1] / 2 == 1.5 && "\(mi.data)" == "[7, 0]")
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5660,6 +5692,7 @@ func main() {
     s139() // SECTION-CALL 139
     s140() // SECTION-CALL 140
     s141() // SECTION-CALL 141
+    s142() // SECTION-CALL 142
     print("full: \(checks) checks, \(fails) failures")
 }
 

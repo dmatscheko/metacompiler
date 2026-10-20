@@ -842,6 +842,27 @@ function swGenMark(mem, tgens) {
 function swGenSite(ty, tgens, own) {
     return swTyNames(ty, tgens) && !swTyNames(ty, own) && ty.indexOf("->") < 0
 }
+// `class DBox: Box<Double>`: a class that is not generic itself but inherits from
+// a generic one with its arguments spelled. Its descriptor records the
+// superclass's parameter names and every instance is constructed bound to those
+// arguments (fixed, __ftargs), so Box's `init(_ v: T)` adopts a Double. null
+// for any other class.
+function swGenSuperDesc(mem, superName) {
+    if (superName == null || (mem.tgens != null && mem.tgens.length > 0) || !hasOwn(swGenTypes, "$" + superName)) { return null }
+    var stg = swGenTypes["$" + superName]
+    for (var i = 0; i < mem.inherits.length; i++) {
+        var args = swDsGenArgs(mem.inherits[i], superName)
+        if (args == null || args.length != stg.length) { continue }
+        var tg = ""
+        var fixed = ""
+        for (var k = 0; k < stg.length; k++) {
+            tg = tg + (k > 0 ? "," : "") + stg[k]
+            fixed = fixed + (k > 0 ? "," : "") + args[k]
+        }
+        return {tg: tg, fs: [], ts: [], fixed: fixed}
+    }
+    return null
+}
 // What a generic ENUM's member table records: {tg: "T,U", cases: [{name, tys}]}
 // for each case whose payload names a parameter, tys its payload types ("" for
 // one that does not), or null.
