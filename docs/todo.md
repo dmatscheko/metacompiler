@@ -139,11 +139,6 @@ both grammars.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-671 php: promoted constructor parameters declare no typed property; typed-property TypeError prints `self` · P3 · PHP · IN PROGRESS (PHP worker, round 14) [V]
-`class A { function __construct(public int $x) {} }; $a = new A(1); $a->x = "z";` → no TypeError in any engine (php-src: a promoted
-parameter declares the typed property `public int $x`, so the write raises "Cannot assign string to property A::$x of type int").
-The existing typed-property TypeError writes `self` unresolved where zend_type_to_string_resolved writes the class name.
-
 ### T-666 php: the preg_* functions do not exist · P2 · PHP · IN PROGRESS (PHP worker, round 13) [V spec-only]
 `preg_replace('/a/', 'b', 'aa')` → "Call to undefined function preg_replace()" in all engines; preg_match, preg_match_all, preg_split,
 preg_quote, preg_replace_callback, preg_grep and preg_last_error likewise. Implement them on the shared regex engine under a PCRE dialect
@@ -777,6 +772,7 @@ T-664 js: replacing a constructor's prototype; getPrototypeOf/setPrototypeOf/def
 T-667 php: ArgumentCountError unavailable unless spelled; arrow-function generators — DONE e7427422 (ArgumentCountError class without the name; arrow-fn generators; new nolib matrix pair)
 T-668 php: scalar parameter and return types are never checked — DONE 2e67e859 + e3111793 (scalar/nullable/union/class param+return types with weak coercion, strict widening, generator args at the call; spec-only from php-src)
 T-632 go: regexp (RE2 dialect), encoding/json and reflect, real stdin — DONE 36957e91 b805369c c0936e9d (regexp RE2 dialect + Go errors, os.Stdin via readIn, encoding/json incl. depth limit and checked ,string; reflect subset json needs — 4 legs = go run; reflect method sets/Call/MakeSlice, CompilePOSIX/Longest, MarshalJSON on non-struct types DECLINED: no program in scope needs them; follow-ups T-672..T-675)
+T-671 php: promoted constructor parameters declare no typed property; typed-property TypeError prints `self` — DONE b901ad9e 6b65aa72 (promoted params declare typed properties, self/parent resolved per zend_compile_single_typename, typed trait statics in the interpreter, promoted null default is the compile error; spec-only from php-src)
 
 # Settled — do not re-open
 
