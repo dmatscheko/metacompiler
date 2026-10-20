@@ -185,7 +185,7 @@ _G proxy, in both halves.
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-636 batch native: capture nesting limited to 8; rt_die not ordered after stdout; bash `${v@Q}` of a non-UTF-8 byte · P2 · SH · OPEN [V]
+### T-636 batch native: capture nesting limited to 8; rt_die not ordered after stdout; bash `${v@Q}` of a non-UTF-8 byte · P2 · SH · IN PROGRESS (SH worker, round 9) [V]
 A `call :r` recursion 12 deep with `> nul` on each call: the interpreter prints "before" and "after"; native dies with
 "batch-rt: capture nesting exhausted" exit 70 (a fixed-size table in batch-rt.c; grow it as bash-rt.c's T-529 fix did). batch-rt.c's
 rt_ech does not fflush(0) before writing fd 2 (bash-rt.c does), so with `2>&1` the diagnostic precedes earlier stdout. bash:
