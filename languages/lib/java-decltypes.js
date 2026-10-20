@@ -794,6 +794,52 @@ function jFieldKeyAt(recv, name) {
     }
     return jFieldKey(recv, name)
 }
+// The class whose descriptor holds the static member `name` (a field when
+// fld, else a method) named through recv (a jFieldRecv answer, or a class
+// name): the nearest declaration in recv's class and its superclasses, as
+// a static member is inherited and a redeclaration hides it (JLS 8.3,
+// 8.4.8). "" when that is recv's class itself, when the nearest
+// declaration is an instance member, or when it is unknown - the
+// receiver's own descriptor or instance answers those.
+function jStaticHome(recv, name, fld) {
+    if (recv == undefined || recv == "") { return "" }
+    var self = recv
+    var c = recv
+    if (recv.length > 6 && recv.substring(0, 6) == "super:") {
+        self = recv.substring(6)
+        var srec = jOvCls["$" + self]
+        if (srec == undefined) { return "" }
+        c = srec.sup
+    }
+    for (var guard = 0; c != "" && guard < 64; guard++) {
+        var rec = jOvCls["$" + c]
+        if (rec == undefined) { return "" }
+        if (fld) {
+            var k = rec.fl["$" + name]
+            if (k != undefined) { return (k != "i" && c != self) ? c : "" }
+        } else {
+            for (var i = 0; i < rec.ms.length; i++) {
+                if (rec.ms[i].name == name) { return (rec.ms[i].statik && c != self) ? c : "" }
+            }
+        }
+        c = rec.sup
+    }
+    return ""
+}
+// jStaticHome of a member-chain suffix, cached on it: a field through its
+// receiver's static type, a method only through a type name (an instance
+// receiver dispatches through its own class chain).
+function jSfxHome(s) {
+    if (s.home == undefined) {
+        if (s.kind == "field") {
+            s.home = jStaticHome(s.frecv, s.name, true)
+        } else {
+            var rc = jSfxRty(s)
+            s.home = (rc.length > 7 && rc.substring(0, 7) == "static:") ? jStaticHome(jOvBare(rc.substring(7)), s.name, false) : ""
+        }
+    }
+    return s.home
+}
 // The signature `new cls(args)`, `this(args)` or `super(args)` resolves to
 // among cls' constructors of that many parameters, "" when there are fewer
 // than two of them (one needs no choosing) or an argument type is unknown.
@@ -1134,12 +1180,14 @@ function jOvBox(k) {
 // java.base`)? Then the grammar compiles that file with the program
 // (jLoadUtil); without such an import none of its names is visible, as in Java.
 function jUtilWants(path) {
-    if (path == "java.util.*" || path == "java.base") { return true }
+    // java.io.Serializable is one of the marker interfaces lib/java-util.java
+    // declares.
+    if (path == "java.util.*" || path == "java.base" || path == "java.io.Serializable") { return true }
     if (path.length < 11 || path.substring(0, 10) != "java.util.") { return false }
     var rest = path.substring(10)
     var dot = rest.indexOf(".")
     if (dot >= 0) { rest = rest.substring(0, dot) }
-    return ",ArrayList,List,ListIterator,Collection,Comparator,Iterator,NoSuchElementException,ConcurrentModificationException,AbstractList,Arrays,Optional,OptionalInt,OptionalLong,OptionalDouble,Map,HashMap,Objects,Collections,Queue,Deque,ArrayDeque,TreeMap,LinkedList,Stack,EmptyStackException,PriorityQueue,StringJoiner,Random,BitSet,".indexOf("," + rest + ",") >= 0
+    return ",ArrayList,List,ListIterator,Collection,Comparator,Iterator,NoSuchElementException,ConcurrentModificationException,AbstractList,Arrays,Optional,OptionalInt,OptionalLong,OptionalDouble,Map,HashMap,Objects,Collections,Queue,Deque,ArrayDeque,TreeMap,LinkedList,Stack,EmptyStackException,PriorityQueue,StringJoiner,Random,BitSet,RandomAccess,".indexOf("," + rest + ",") >= 0
 }
 
 // Does this import, or the class a `new` creates, name a type lib/java-map.java
@@ -1914,14 +1962,21 @@ function jChainRecvTys(sfxs, text) {
 // complete and cached on the record; "" keeps the runtime pick.
 function jSfxSig(s) {
     if (s.sig == undefined) {
-        var rty = s.rty
-        if (rty != undefined && rty.length > 8 && rty.substring(0, 8) == "static?:") {
-            var nm = rty.substring(8)
-            rty = (jFieldTys["$" + nm] == undefined && jIsClassName(nm)) ? "static:" + nm : ""
-        }
-        s.sig = (rty == undefined || rty == "") ? "" : jOvMemberSig(rty, s.name, s.atys)
+        var rty = jSfxRty(s)
+        s.sig = rty == "" ? "" : jOvMemberSig(rty, s.name, s.atys)
     }
     return s.sig
+}
+// A `.m(...)` suffix's receiver type with a "static?:" name decided: a
+// class name once the walk is complete, else unknown ("").
+function jSfxRty(s) {
+    var rty = s.rty
+    if (rty == undefined) { return "" }
+    if (rty.length > 8 && rty.substring(0, 8) == "static?:") {
+        var nm = rty.substring(8)
+        return (jFieldTys["$" + nm] == undefined && jIsClassName(nm)) ? "static:" + nm : ""
+    }
+    return rty
 }
 // A VARIABLE ARITY INVOCATION wraps the trailing arguments into an array by
 // their STATIC type (JLS 15.12.4.2): `f((Object) arr)` of `f(Object... a)`

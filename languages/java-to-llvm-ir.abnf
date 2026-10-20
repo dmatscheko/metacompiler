@@ -2313,6 +2313,10 @@ HasStatic   = :script(~~
         } else {
             o = callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)])
         }
+        // An inherited static field's descriptor (jStaticHome); twin of resolveRef
+        // in java-interpreter.abnf.
+        var home = (ref.path.length == 0 || ref.path[0].key == undefined) ? "" : jStaticHome(ref.frecv, ref.path[0].key, true)
+        if (home != "") { o = callExt(b, "js_scope_get", [curScopeV, emitStr(b, home)]) }
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
             if (s.key != undefined) {
@@ -3820,6 +3824,12 @@ HasStatic   = :script(~~
             }
             for (var i = i0; i < suffixes.length; i++) {
                 var s = suffixes[i]
+                // A static member inherited from a superclass lives on that
+                // superclass' descriptor (jStaticHome). Twin of the same test in
+                // foldCallMember / resolveRef in java-interpreter.abnf.
+                if ((s.kind == "mcall" || s.kind == "field") && jSfxHome(s) != "") {
+                    cur = callExt(b, "js_scope_get", [curScopeV, emitStr(b, jSfxHome(s))])
+                }
                 if (s.kind == "mcall") {
                     var ea = emitArgs(b, s.args)
                     b = ea.b

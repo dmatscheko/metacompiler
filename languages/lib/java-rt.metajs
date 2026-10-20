@@ -2372,7 +2372,7 @@ function js_jvis(v, t0) {
     }
     if (t.indexOf("[") >= 0) { return false }
     var bn = jvBoxName(v)
-    if (bn == "") { return js_is_type(v, t) }
+    if (bn == "") { return js_is_type(v, t) && !jxNotA(v["__class"], t) }
     if (t == bn || t == "Object" || t == "Comparable" || t == "Serializable") { return true }
     if (t == "Number") { return bn != "String" && bn != "Boolean" && bn != "Character" }
     return t == "CharSequence" && bn == "String"

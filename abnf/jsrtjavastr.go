@@ -1427,7 +1427,11 @@ func (rt *jsrt) jvIsType(v interface{}, t string) bool {
 	}
 	bn := jvBoxName(v)
 	if bn == "" {
-		return rt.isTypeName(v, t)
+		if !rt.isTypeName(v, t) {
+			return false
+		}
+		o, isObj := v.(*jsObject)
+		return !isObj || !jxNotA(o.props["__class"], t)
 	}
 	switch t {
 	case bn, "Object", "Comparable", "Serializable":
@@ -1436,6 +1440,32 @@ func (rt *jsrt) jvIsType(v interface{}, t string) bool {
 		return bn != "String" && bn != "Boolean" && bn != "Character"
 	}
 	return t == "CharSequence" && bn == "String"
+}
+
+// jxNotA: does the class chain from cls reach lib/java-util.java's LinkedList
+// or Stack, which extend its ArrayList, before ArrayList itself, for a t that
+// inheritance alone would wrongly grant? Twin of jxNotA in
+// lib/java-strings.js, which states the rule.
+func jxNotA(cls interface{}, t string) bool {
+	if t != "ArrayList" && t != "RandomAccess" {
+		return false
+	}
+	for guard := 0; guard < 64; guard++ {
+		c, ok := cls.(*jsObject)
+		if !ok {
+			return false
+		}
+		switch bn, _ := c.props["__bname"].(string); bn {
+		case "java.util.LinkedList":
+			return true
+		case "java.util.Stack":
+			return t == "ArrayList"
+		case "java.util.ArrayList":
+			return false
+		}
+		cls = c.props["__super"]
+	}
+	return false
 }
 
 // jxArrIs is `v instanceof t` for an array v of class name tag (simple name

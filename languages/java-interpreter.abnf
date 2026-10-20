@@ -3907,7 +3907,7 @@ HasStatic   = :script(~~
         }
         if (t.indexOf("[") >= 0) { return false }
         var bn = jBoxName(v)
-        if (bn == "") { return rtIsType(v, t) }
+        if (bn == "") { return rtIsType(v, t) && !jxNotA(v.__class, t) }
         if (t == bn || t == "Object" || t == "Comparable" || t == "Serializable") { return true }
         if (t == "Number") { return bn != "String" && bn != "Boolean" && bn != "Character" }
         return t == "CharSequence" && bn == "String"
@@ -6858,19 +6858,21 @@ HasStatic   = :script(~~
     var jPkgPrefix = ""
     var jLangLoaded = false
     // A library is a set of top-level types even when it is compiled from inside
-    // a class body (a static initializer creating one, see buildClassFrom).
+    // a class body (a static initializer creating one, see buildClassFrom), and
+    // one may be compiled while another is: the package prefix is restored too.
     function jLoadLib(file, prefix) {
         var text = load(file)
         var asg = c.parse(c.agrammar, text, null, file)
         var bin = jCurBin
         var cur = curClassName
+        var pfx = jPkgPrefix
         jCurBin = ""
         curClassName = ""
         jPkgPrefix = prefix
         c.pushSource(file, text)
         c.compile(asg)
         c.popSource()
-        jPkgPrefix = ""
+        jPkgPrefix = pfx
         jCurBin = bin
         curClassName = cur
     }
@@ -7060,6 +7062,10 @@ HasStatic   = :script(~~
             cur = primary()
             for (var i = 0; i < suffixes.length; i++) {
                 var s = suffixes[i]
+                // A static member inherited from a superclass lives on that
+                // superclass' descriptor (jStaticHome). Twin of foldCallMember in
+                // java-to-llvm-ir.abnf.
+                if ((s.kind == "mcall" || s.kind == "field") && jSfxHome(s) != "") { cur = jResolveClass(jSfxHome(s)) }
                 if (s.kind == "mcall") {
                     var argv = []
                     for (var j = 0; j < s.args.length; j++) { argv.push(s.args[j]()) }
@@ -7096,6 +7102,12 @@ HasStatic   = :script(~~
     resolveRef = function(ref, lateIdx) {
         var o = anytype // The containers along the path may be of mixed types.
         if (ref.base != undefined) { o = ref.base() } else { o = getVar(ref.name) }
+        // An inherited static field's descriptor (jStaticHome); twin of
+        // emitRefPath in java-to-llvm-ir.abnf.
+        if (ref.path.length > 0 && ref.path[0].key != undefined) {
+            if (ref.home == undefined) { ref.home = jStaticHome(ref.frecv, ref.path[0].key, true) }
+            if (ref.home != "") { o = jResolveClass(ref.home) }
+        }
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
             if (s.key != undefined) {

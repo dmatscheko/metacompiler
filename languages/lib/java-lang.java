@@ -15,7 +15,9 @@ package java.lang;
 // the interpreter runs this file statement by statement. A level
 // whose bit is clear may hold a stale piece that is never read. before is the
 // length of everything ahead of tail.
-final class StringBuilder {
+// Serializable is lib/java-util.java's, which a program that can name it has
+// loaded (jUtilWants); without it the clause names nothing.
+final class StringBuilder implements Serializable {
     String text;
     String tail;
     String[] parts;

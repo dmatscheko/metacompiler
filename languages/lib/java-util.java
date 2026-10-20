@@ -17,10 +17,13 @@ interface Iterator<E> {
     default void remove() { throw new UnsupportedOperationException("remove"); }
 }
 
-// java.lang.Cloneable and java.io.Serializable: the marker interfaces the
-// collections implement, so `instanceof` answers as java's does.
+// java.lang.Cloneable, java.io.Serializable and java.util.RandomAccess: the
+// marker interfaces the collections implement, so `instanceof` answers as
+// java's does (LinkedList and Stack extend ArrayList here, which jxNotA in
+// lib/java-strings.js corrects).
 interface Cloneable {}
 interface Serializable {}
+interface RandomAccess {}
 
 // java.util.Comparator: naturalOrder, reverseOrder and comparing order by
 // Comparable's compareTo, as java's do. Each comparator is built in a local of
@@ -176,7 +179,7 @@ interface List<E> extends Collection<E> {
     }
 }
 
-class ArrayList<E> implements List<E>, Cloneable, Serializable {
+class ArrayList<E> implements List<E>, Cloneable, Serializable, RandomAccess {
     Object[] elems;
     int count;
     boolean frozen;

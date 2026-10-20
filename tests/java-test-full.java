@@ -68,6 +68,7 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.PriorityQueue;
 import java.util.Random;
+import java.util.RandomAccess;
 import java.util.Set;
 import java.util.Stack;
 import java.util.StringJoiner;
@@ -184,6 +185,7 @@ class Main {
         S87.run(); // SECTION-CALL 87
         S88.run(); // SECTION-CALL 88
         S89.run(); // SECTION-CALL 89
+        S90.run(); // SECTION-CALL 90
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -4925,5 +4927,54 @@ class S89 {
         try { a.region(3, 2); } catch (IndexOutOfBoundsException e) { rg = rg + " " + e.getMessage(); }
         Main.check("rx89", rg.equals("2@2 345@4 6@8 trueb34537falsetrue true1234 [10, 23, 36]oo "
             + "java.util.regex.Matcher[pattern=^b\\d+ region=3,7 lastmatch=b345] start > end"));
+    }
+}
+
+// ===== SECTION 90: static members through a subclass, RandomAccess =====
+//
+// A static field or method is inherited (JLS 8.3, 8.4.8): named through a
+// subclass, or an instance of one, it is the declaring class's, for reads,
+// writes, compound and ++, and it initializes only that class (JLS 12.4.1);
+// a redeclaration hides it further down. ArrayList and Stack are
+// RandomAccess, neither a LinkedList nor a Stack is an ArrayList, a
+// LinkedList is no RandomAccess and a StringBuilder is Serializable; a
+// library type is named by its package even when another library is
+// compiled while its own is. Every expected value is java 24.0.2's.
+class S90 {
+    static String log = "";
+    static class Base {
+        static int k = 5;
+        static { log = log + "B"; }
+        static String name() { return "B" + k; }
+        static String pick(int x) { return "i"; }
+        static String pick(String x) { return "s"; }
+    }
+    static class Mid extends Base {
+        static { log = log + "M"; }
+        static String name() { return "M"; }
+    }
+    static class Leaf extends Mid {
+        static { log = log + "L"; }
+    }
+    static class Sub extends Base {
+        static { log = log + "S"; }
+        int sum() { return k + Sub.k; }
+    }
+    static void run() {
+        String st = Sub.k + " " + log;
+        Sub.k = 7;
+        st = st + " " + Base.k;
+        Sub.k += 2;
+        Sub.k++;
+        ++Leaf.k;
+        st = st + " " + Base.k + Sub.k + Leaf.k + " " + Sub.name() + Leaf.name() + Mid.name() + " " + Sub.pick(1) + Leaf.pick("x");
+        Sub s = new Sub();
+        st = st + " " + s.k + s.sum() + " " + log;
+        Main.check("st90", st.equals("5 B 7 111111 B11MM is 1122 BMS"));
+        Object[] os = { new ArrayList<Integer>(), new LinkedList<Integer>(), new Stack<Integer>(), new StringBuilder("x"), "y" };
+        String mk = "";
+        for (Object o : os) { mk = mk + (o instanceof RandomAccess ? "R" : "r") + (o instanceof Serializable ? "S" : "s") + (o instanceof ArrayList ? "A" : "a"); }
+        Main.check("mk90", mk.equals("RSArSaRSarSarSa"));
+        Main.check("nm90", (os[1].getClass().getName() + " " + os[2].getClass().getName()).equals("java.util.LinkedList java.util.Stack"));
     }
 }

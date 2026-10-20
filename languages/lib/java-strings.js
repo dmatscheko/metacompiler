@@ -111,6 +111,27 @@ function jxArrIs(tag, sname, t) {
     while (da < tag.length && tag.charAt(da) == "[") { da = da + 1 }
     return da > dt || (da == dt && tag.charAt(da) == "L")
 }
+// lib/java-util.java's LinkedList and Stack extend its ArrayList to share
+// its body, which java's do not: neither is an ArrayList, and a LinkedList
+// (unlike a Stack, a Vector) is no RandomAccess either. Does the class chain
+// from cls reach one of them before ArrayList, where t is a type that
+// inheritance alone would wrongly grant? Twin of jxNotA in
+// abnf/jsrtjavastr.go.
+function jxNotA(cls, t) {
+    if (t != "ArrayList" && t != "RandomAccess") { return false }
+    var c = anytype // Walks a __super chain of descriptors.
+    c = cls
+    var guard = 0
+    while (guard < 64 && c !== undefined && c !== null) {
+        guard = guard + 1
+        var bn = c["__bname"]
+        if (bn == "java.util.LinkedList") { return true }
+        if (bn == "java.util.Stack") { return t == "ArrayList" }
+        if (bn == "java.util.ArrayList") { return false }
+        c = c["__super"]
+    }
+    return false
+}
 // String.chars and codePoints as int arrays (a surrogate pair is one code
 // point), and lines' parts: split at \n, \r and \r\n, with no empty last line.
 function jxChars(s) {
