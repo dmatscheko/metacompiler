@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-623** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-625** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -128,13 +128,21 @@ sortedSetOf TreeSet); an Array argument → ours `ArrayList` (JVM `[Ljava.lang.I
 
 # GO — Go  (oracle: `go run`)
 
-### T-601 go: typed constant folding; named constant string index; float32 constant overflow; canonical error text · P3 · GO · IN PROGRESS (GO worker, round 7) [V]
-`const a uint8 = 200; const b = a + a` → both halves 144 (go "a + a (constant 400 of type uint8) overflows uint8"; typed
-constants are not folded); `float64(1) / 0` accepted (go: division by zero). `const s = "abc"; _ = s[3]` / `s[1:5]` panic at run
-time (go rejects at compile time; only literals are measured). `var f float32 = 1e40` → +Inf (go "cannot use 1e40 (untyped
-float constant 1e+40) as float32 value in variable declaration (overflows)"). Wording: we print the source as written
-(`1<<63`) where go prints its canonical form (`1 << 63`); a named float constant in "cannot convert" lacks its value;
-non-integral floats use JS formatting, not %g.
+### T-623 go: pointers through interfaces; generic zero values and %T; argument evaluation order; forward goto; late static types · P1 · GO · OPEN [V]
+`%T`/`%v` of a pointer reaching fmt through an interface lose the `*`/`&` (`*strconv.NumError` prints `strconv.NumError`, `&map{}`
+literals print without `&`); `a.(*V)` on a V value answers true; a struct's pointer field prints `{..}` (go an address). `var
+zero T` in a generic function → nil (go `""`/0); `%T` of a generic struct → `main.Pair` (go `main.Pair[string,int]`). gc evaluates
+call operands before plain operands: `fmt.Println(*ps, ps.Pop())` prints the popped state in go, not ours. Compiler: a forward
+`goto` out of a loop to a later label → "goto L has no enclosing label". A package-level typed const declared after its use prints
+by its underlying type, and the halves disagree (int vs int16). The compiler refuses `range` over a function whose static type is
+unknown (the interpreter handles it). `len("ab") << 70` is not folded as a typed constant (go: compile error).
+
+### T-624 go: missing standard packages; append capacity growth · P2 · GO · OPEN [V]
+bufio, io, time, regexp, path, encoding/json, context, flag, log, reflect are accepted at import and then every call fails;
+`len(os.Args)` is 0. Write the commonly used ones in Go under languages/lib/ as sort/strconv were (bufio.Scanner over stdin if a
+stdin exists, strings.NewReader/io.Reader, time.Duration printing, regexp on the shared engine with an RE2 dialect flag).
+`cap()` after append follows doubling from 4, not runtime.growslice size classes (go: `a[1:2:2]` then append → cap 2, ours 4;
+appending to a nil []int → 1,2,4,8,...,512,848,1280; for []byte from 8/16/32).
 
 ---
 
@@ -725,6 +733,7 @@ T-611 python: metaclasses, and the `enum` module on top of them — DONE 4862000
 T-612 python: set iteration order of ints differs from CPython — DONE af6e7322 for sets of ints built by adding; dummy-slot order after removal, union/copy table sizes and constant displays recorded in manual 7.9
 T-616 swift: `d[f()]? += 1` evaluates the target twice; `(+)` as a value; `\.0` key paths; metatype init overloads — DONE fb23c0a5 (plus a 16-commit swiftc-checked sweep: b32fe227..b32b114c)
 T-617 kotlin: `Char.isLetter` for uncased letters; UInt in format; collection class names in format errors — DONE 8af069ec (plus a stdlib sweep, ~40 fixes: text search options, split, comparators, groupingBy, Char arithmetic, Regex.split, minus, radix toString, operator-function calls)
+T-601 go: typed constant folding; named constant string index; float32 constant overflow; canonical error text — DONE fa884729 (plus a sweep: sort/slices/maps/cmp/iter/sync/atomic/strconv/unicode/utf8/bytes written in Go, range-over-func, nil-receiver methods, *T type tests, generic methods, ~15 engine defects)
 
 # Settled — do not re-open
 
