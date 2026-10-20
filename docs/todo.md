@@ -112,12 +112,12 @@ not change the renderer.
 
 # GO — Go  (oracle: `go run`)
 
-### T-689 go: native append costs ~120k instructions per call · P2 · GO · OPEN [V]
+### T-689 go: native append costs ~120k instructions per call · P2 · GO · IN PROGRESS (GO worker, round 16) [V]
 A native `-exe` append to `[]int` or `[]string` retires ~120k instructions each: 10,000 appends 1.19G, 1M appends ~140G (7.45 s);
 linear in the count, so a large constant per call (go: a few dozen). Find where the per-append cost goes (layer 2 / floor /
 emitted growth path) and bring it to a small constant; measure with a native append loop before/after.
 
-### T-690 go: `%T` of a dynamically typed int64 prints `int` · P3 · GO · OPEN [V]
+### T-690 go: `%T` of a dynamically typed int64 prints `int` · P3 · GO · IN PROGRESS (GO worker, round 16) [V]
 `func g[T any]() { var z T; fmt.Printf("%T\n", z) }; g[int64](); g[[2]int64]()` → `int` / `[2]int` in all engines (go `int64` /
 `[2]int64`): the int64 and int boxes are indistinguishable there.
 
