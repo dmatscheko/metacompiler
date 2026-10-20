@@ -89,7 +89,7 @@ recorded as a value-model limit). `K.prototype.hasOwnProperty("constructor")` / 
 
 # JV — Java
 
-### T-650 java: static field through an instance; StringBuffer; CharSequence; ArrayList.clone; superclass order; Matcher.hitEnd · P1 · JV · OPEN [V]
+### T-650 java: static field through an instance; StringBuffer; CharSequence; ArrayList.clone; superclass order; Matcher.hitEnd · P1 · JV · IN PROGRESS (JV worker, round 10) [V]
 `s.j` (j static in Sub, s a Sub), `b.k` (b typed Base), `this.j` in an instance method → null / NaN in all engines (java reads the
 static: oracle `5 1 5 6 / 8 3 11`, ours `5 null null NaN / 8 1 11`). `StringBuffer` not modelled ("unknown class"); `new
 StringBuilder() instanceof CharSequence` false (java true; no CharSequence interface declared); `new ArrayList<>(List.of(4,7)).clone()`
