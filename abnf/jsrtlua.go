@@ -458,20 +458,10 @@ func luIMod(a, b int64) int64 {
 // the others keep the integer subtype exactly when both operands are integers,
 // and the integer path is exact and wrapping at 64 bits.
 func (rt *jsrt) luArith(op int, lv, rv interface{}) interface{} {
-	l, lok := luToNum(lv)
-	r, rok := luToNum(rv)
-	if !lok || !rok {
-		// An operand that is no number asks its metamethod; unary minus has one
-		// operand, which lua passes twice.
-		rarg := rv
-		if op == 7 {
-			rarg = lv
-		}
-		if h := rt.luBinTm(luEvents[op], lv, rarg); h != nil {
-			return rt.luTmCall(h, lv, rarg)
-		}
-		rt.luArithFail(op, lv, rv, lok)
+	if !luIsNum(lv) || !luIsNum(rv) {
+		return rt.luArithTm(op, lv, rv)
 	}
+	l, r := lv, rv
 	if op == 3 {
 		return luMkFlo(luNumOf(l) / luNumOf(r))
 	}
@@ -532,25 +522,60 @@ func (rt *jsrt) luArith(op int, lv, rv interface{}) interface{} {
 // -1, so a zero keeps its sign).
 var luArithNames = []string{"add", "sub", "mul", "div", "idiv", "mod", "pow", "unm"}
 
-// luArithFail is lua's error for an operand that is no number: with a string
-// among the operands it comes from the string library's metamethod and names the
-// operator and both types; otherwise it names the first operand that is not a
-// number. Twin of luArithFail in languages/lib/lua-rt.metajs and luaArithFail in
-// lua-interpreter.abnf.
-func (rt *jsrt) luArithFail(op int, lv, rv interface{}, lok bool) {
-	_, ls := lv.(string)
-	_, rs := rv.(string)
+// luArithTm is an arithmetic operator with an operand that is no number: the
+// operands' metamethod decides (luaT_trybinTM), and unary minus passes its one
+// operand twice. A string is no number here - lua coerces it only through the
+// strings' metatable, whose __add .. __unm are luStrArith until the program
+// replaces or removes them. Without a metamethod lua names the first operand
+// that is no number. Twin of luArithTm in languages/lib/lua-rt.metajs and of
+// luaArith in lua-interpreter.abnf.
+func (rt *jsrt) luArithTm(op int, lv, rv interface{}) interface{} {
+	ra := rv
 	if op == 7 {
-		rv, rs = lv, ls
+		ra = lv
 	}
-	if ls || rs {
-		rt.luFail("attempt to %s a '%s' with a '%s'", luArithNames[op], rt.luTypeName(lv), rt.luTypeName(rv))
+	if h := rt.luBinTm(luEvents[op], lv, ra); h != nil {
+		return rt.luTmCall(h, lv, ra)
+	}
+	_, ls := lv.(string)
+	_, rs := ra.(string)
+	if luStrMeta == nil && (ls || rs) {
+		// A module that never builds the strings' metatable cannot have changed it.
+		return rt.luStrArith(op, lv, ra, 2)
 	}
 	opnd := 1
-	if lok {
+	if luIsNum(lv) {
 		lv, opnd = rv, 2
 	}
 	rt.luFailOp(opnd, "attempt to perform arithmetic on a %s value", rt.luTypeName(lv))
+	return nil
+}
+
+// luStrArith is the string library's arithmetic metamethod (lstrlib's arith):
+// the operands converted to numbers, else the second operand's own metamethod,
+// else an error naming the operator and both types. Called with one argument,
+// lstrlib's stack reads the converted first operand again as the second. Twin
+// of luStrArith in languages/lib/lua-rt.metajs and luaStrArith in
+// lua-interpreter.abnf.
+func (rt *jsrt) luStrArith(op int, lv, rv interface{}, nargs int) interface{} {
+	l, lok := luToNum(lv)
+	r, rok := l, lok
+	if nargs >= 2 {
+		r, rok = luToNum(rv)
+	}
+	if lok && rok {
+		if op == 7 {
+			r = float64(-1)
+		}
+		return rt.luArith(op, l, r)
+	}
+	if _, rs := rv.(string); !rs {
+		if h := rt.luTm(rv, luEvents[op]); h != nil {
+			return rt.luTmCall(h, lv, rv)
+		}
+	}
+	rt.luFail("attempt to %s a '%s' with a '%s'", luArithNames[op], rt.luTypeName(lv), rt.luTypeName(rv))
+	return nil
 }
 
 // luToIntOp is a bitwise operand: an integer, or a float whose value is an exact
@@ -1123,6 +1148,12 @@ func init() {
 				return arr.elems
 			}
 			return nil
+		}
+		// (args, operator index as a raw handle): the strings' metatable's
+		// __add .. __unm.
+		m["js_lustrarith"] = func(a []uint64) uint64 {
+			args := argsOf(a[0])
+			return w(rt.luStrArith(int(a[1]), luArgAt(args, 1), luArgAt(args, 2), len(args)))
 		}
 		// math.type(x): "integer", "float", or nil for anything that is not a
 		// number (a STRING is not, even one that spells a numeral).

@@ -3077,6 +3077,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function libMathF(op) {
         return function(bb, argsH) { return {b: bb, v: callExt(bb, "js_lumathf", [argsH, handle(op)])} }
     }
+    // The strings' metatable's arithmetic, by js_luarith's operator index.
+    function libStrArith(op) {
+        return function(bb, argsH) { return {b: bb, v: callExt(bb, "js_lustrarith", [argsH, handle(op)])} }
+    }
 
     // string.find and string.match share one extern.
     function libFind(find) {
@@ -3501,9 +3505,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "string"), st])
             // The strings' metatable, {__index = string}, for indexing a string
             // (emitStrIndex), getmetatable and an __index chain that reaches a
-            // string (js_lustrmeta).
+            // string (js_lustrmeta). Its __add .. __unm are the string library's
+            // arithmetic, through which alone a string operand coerces (js_luarith).
             var smt = callExt(b, "js_gc_pin", [callExt(b, "js_obj_new", [])])
             callExt(b, "js_set", [smt, emitStr(b, luaNameKey("__index")), st])
+            var arithEvs = ["__add", "__sub", "__mul", "__div", "__idiv", "__mod", "__pow", "__unm"]
+            for (var ai = 0; ai < arithEvs.length; ai++) {
+                b = libSet(b, smt, luaNameKey(arithEvs[ai]), emitLibFunc(libStrArith(ai)))
+            }
             callExt(b, "js_lustrmeta", [smt])
             b.NewStore(smt, gLuaStrMt)
             b.NewStore(callExt(b, "js_gc_pin", [st]), gLuaStrLib)

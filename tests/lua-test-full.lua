@@ -1999,6 +1999,23 @@ function s44()
     smt.__index = lib
     check("mt30", tostring(ok) .. " " .. try(error, e, 0), "false attempt to index a string value (upvalue 's')")
     check("mt31", s:len() .. ("q"):rep(2), "3qq")
+    -- A string coerces in arithmetic only through the strings' metatable, whose
+    -- __add .. __unm are the string library's: removed, the operator is an
+    -- error; replaced, the replacement answers - for a number operand too.
+    local ops = {"1", "2", "x"}
+    local add, unm = smt.__add, smt.__unm
+    check("mt32", type(add) .. type(smt.__idiv) .. type(smt.__band) .. add(ops[1]) .. unm(ops[2]) .. (ops[1] + ops[2]), "functionfunctionnil2-23")
+    check("mt33", try(add, {}, 1) .. "|" .. try(unm, ops[3]), "attempt to add a 'table' with a 'number'|attempt to unm a 'string' with a 'nil'")
+    local tadd = setmetatable({}, {__add = function(a, b) return "T" end})
+    local one, two = ops[1], ops[2]
+    smt.__add = nil
+    check("mt34", try(function() return one + two end) .. "|" .. try(function() return 1 + two end) .. "|" .. (one + tadd) .. (two - 1),
+        "attempt to perform arithmetic on a string value (upvalue 'one')|attempt to perform arithmetic on a string value (upvalue 'two')|T1")
+    smt.__add = function(a, b) return "<" .. tostring(a) .. tostring(b) .. ">" end
+    smt.__unm = function(a, b) return "-" .. a .. b end
+    check("mt35", (ops[1] + ops[2]) .. (1 + ops[2]) .. ({} + ops[3]):gsub("0x%x+", "A") .. -ops[3], "<12><12><table: Ax>-xx")
+    smt.__add, smt.__unm = add, unm
+    check("mt36", (ops[1] + ops[2]) .. -ops[2] .. try(function() return ops[3] + 1 end), "3-2attempt to add a 'string' with a 'number'")
 end
 
 -- ===== SECTION 45: a file is no table, and __name names a type =====
