@@ -603,7 +603,7 @@ function jpInherited(o, depth) {
                 out = out + comps[i] + "=" + jpRender(o[comps[i]], depth + 1)
                 i = i + 1
             }
-            var simple = cls["__name"]
+            var simple = jpSimpleName(cls)
             if (typeof simple != "string") { simple = "Object" }
             return simple + "[" + out + "]"
         }
@@ -623,6 +623,15 @@ function jpClassName(cls) {
     var n = cls["__name"]
     if (typeof n == "string") { return n }
     return "Object"
+}
+// jpSimpleName is the class' SIMPLE name, what Class#getSimpleName answers:
+// __sname when the grammars renamed a nested type apart from another of its
+// simple name (jNestRename in java-decltypes.js), else __name. Twin of
+// jvpSimpleName in abnf/jsrtjava.go.
+function jpSimpleName(cls) {
+    var s = cls["__sname"]
+    if (typeof s == "string") { return s }
+    return cls["__name"]
 }
 
 // An array created with a declared type carries that type's binary name as its
@@ -2418,7 +2427,7 @@ function js_jvclasslit(cls, name, simple, dims, iface) {
     var sm = simple
     if (cls !== undefined && cls !== null && typeof cls == "object") {
         n = jpClassName(cls)
-        sm = cls["__name"]
+        sm = jpSimpleName(cls)
     }
     if (dims == 0) {
         var c = jvClassOf(n, sm)
@@ -2449,7 +2458,7 @@ function js_jvgetclass(v) {
     if (typeof v == "object") {
         var cls = v["__class"]
         if (cls !== undefined) {
-            var gc = jvClassOf(jpClassName(cls), cls["__name"])
+            var gc = jvClassOf(jpClassName(cls), jpSimpleName(cls))
             gc["__cdesc"] = cls
             return gc
         }

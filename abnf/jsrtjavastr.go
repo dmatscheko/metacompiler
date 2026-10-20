@@ -1673,7 +1673,7 @@ func init() {
 		m["js_jvclasslit"] = func(a []uint64) uint64 {
 			name, simple := rt.toString(u(a[1])), rt.toString(u(a[2]))
 			if cls, ok := u(a[0]).(*jsObject); ok {
-				name, simple = jvpClassName(cls), rt.toString(cls.props["__name"])
+				name, simple = jvpClassName(cls), jvpSimpleName(cls)
 			}
 			dims := int(jvToLong(rt, u(a[3])))
 			if dims == 0 {
@@ -1699,7 +1699,7 @@ func init() {
 				return w(classOf(tag, jxArraySimple(tag)))
 			case *jsObject:
 				if cls, ok := t.props["__class"].(*jsObject); ok {
-					c := classOf(jvpClassName(cls), rt.toString(cls.props["__name"]))
+					c := classOf(jvpClassName(cls), jvpSimpleName(cls))
 					c.set("__cdesc", cls)
 					return w(c)
 				}

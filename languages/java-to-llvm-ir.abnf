@@ -4846,7 +4846,7 @@ HasStatic   = :script(~~
     function jEnterClass(n) {
         jClassStack.push(curClassName)
         jBinStack.push(jCurBin)
-        jCurBin = (jCurBin == "") ? jPkgPrefix + n : jCurBin + "$" + n
+        jCurBin = (jCurBin == "") ? jPkgPrefix + n : jCurBin + "$" + jNrSimple(n)
         jBinName["$" + n] = jCurBin
         curClassName = n
     }
@@ -5147,6 +5147,8 @@ HasStatic   = :script(~~
             // The binary name an instance renders with, and - for a record - the
             // component names its canonical toString walks (P[x=1, y=2]).
             callExt(b, "js_set", [clsV, emitStr(b, "__bname"), emitStr(b, jBinOf(name))])
+            // A type renamed apart (jNestRename) shows its simple name.
+            if (jNrSimple(name) != name) { callExt(b, "js_set", [clsV, emitStr(b, "__sname"), emitStr(b, jNrSimple(name))]) }
             if (recordParams != undefined) {
                 var compsV = callExt(b, "js_arr_new", [])
                 for (var rp = 0; rp < recordParams.length; rp++) {
@@ -6287,7 +6289,7 @@ HasStatic   = :script(~~
                                        hUndef]))
     }
 
-    c.compile(c.asg)
+    c.compile(jMainAsg())
 
     // ----- the native build -----
     // jsdispatch(idx, env, args) is the function table a LINKED binary needs: js_closure

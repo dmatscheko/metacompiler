@@ -178,6 +178,7 @@ class Main {
         S85.run(); // SECTION-CALL 85
         S86.run(); // SECTION-CALL 86
         S87.run(); // SECTION-CALL 87
+        S88.run(); // SECTION-CALL 88
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -4838,5 +4839,33 @@ class S87 {
         LzAnon an = new LzAnon() { int k() { return 2; } };
         log.append(an.k() + "|" + LzSelf.twice() + "|" + LzO.v + x);
         Main.check("ci87", log.toString().equals("L:|3s|Of|P|[B]b[D]d|4|xA|yW|1|c2:10c1:1111,10|InOu1|AnSe2|3|71"));
+    }
+}
+
+// ===== SECTION 88: nested types of one simple name =====
+//
+// A member or local type is in scope only in the type or block declaring it
+// (JLS 6.3), so other sections' Pt, Box, Top, Sub and Inner are different
+// types: each name here means this section's own, an inherited member type
+// included, and two local classes of one name stay apart. getSimpleName,
+// getName and a record's toString show the names javac gives. Every
+// expected value is java 24.0.2's.
+class S88 {
+    record Pt(String tag) {}
+    static class Box { String in() { return "box88"; } }
+    static class Top { String probe() { return "t88"; } }
+    static class Sub extends Top { String probe() { return "s88" + new Pt("p"); } }
+    static class Holder { static class Inner { String w() { return "hi"; } } }
+    static class Kid extends Holder { String use() { return new Inner().w(); } }
+    static String one() { class Tmp { String v() { return "a"; } } return new Tmp().v(); }
+    static String two() { class Tmp { String v() { return "b"; } } return new Tmp().v(); }
+    static void run() {
+        Pt p = new Pt("x");
+        Object o = p;
+        Top t = new Sub();
+        String r = p + " " + Pt.class.getSimpleName() + " " + p.getClass().getName() + " " + new Box().in() + " " + t.probe()
+            + " " + new Kid().use() + " " + one() + two() + " " + (o instanceof Pt q ? q.tag() : "-") + " " + new S88.Box().in()
+            + " " + new S88.Holder.Inner().getClass().getName();
+        Main.check("nt88", r.equals("Pt[tag=x] Pt S88$Pt box88 s88Pt[tag=p] hi ab x box88 S88$Holder$Inner"));
     }
 }

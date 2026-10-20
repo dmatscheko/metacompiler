@@ -3706,7 +3706,7 @@ HasStatic   = :script(~~
                 if (k > 0) { out = out + ", " }
                 out = out + comps[k] + "=" + jstrD(v[comps[k]], depth + 1)
             }
-            return v.__class.__name + "[" + out + "]"
+            return jNrSimple(v.__class.__name) + "[" + out + "]"
         }
         return jClassBin(v.__class) + "@" + jIdHash(v)
     }
@@ -3736,7 +3736,7 @@ HasStatic   = :script(~~
     // The Class of a descriptor, which remembers it (__cdesc) for
     // getEnumConstants and isEnum.
     function jClassOfDesc(cls) {
-        var c = jClassOf(jClassBin(cls), cls.__name)
+        var c = jClassOf(jClassBin(cls), jNrSimple(cls.__name))
         c.__cdesc = cls
         return c
     }
@@ -3765,7 +3765,7 @@ HasStatic   = :script(~~
             var iface = lit.iface
             if (cls != undefined && cls != null && cls.__isclass === true) {
                 n = jClassBin(cls)
-                sm = cls.__name
+                sm = jNrSimple(cls.__name)
                 iface = cls.__isiface === true
             }
             if (lit.dims == 0) {
@@ -6922,7 +6922,7 @@ HasStatic   = :script(~~
     function jEnterClass(n) {
         jClassStack.push(curClassName)
         jBinStack.push(jCurBin)
-        jCurBin = (jCurBin == "") ? jPkgPrefix + n : jCurBin + "$" + n
+        jCurBin = (jCurBin == "") ? jPkgPrefix + n : jCurBin + "$" + jNrSimple(n)
         jBinName["$" + n] = jCurBin
         curClassName = n
     }
@@ -7438,7 +7438,7 @@ HasStatic   = :script(~~
         return false
     }
 
-    c.compile(c.asg)
+    c.compile(jMainAsg())
     jLoadWanted()
     jWalkDone = true
 

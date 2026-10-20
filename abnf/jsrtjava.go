@@ -2722,10 +2722,21 @@ func (rt *jsrt) jvpInherited(o *jsObject, depth int) string {
 			name, _ := c.(string)
 			parts = append(parts, name+"="+rt.jvpRender(o.props[name], depth+1))
 		}
-		simple, _ := cls.props["__name"].(string)
-		return simple + "[" + strings.Join(parts, ", ") + "]"
+		return jvpSimpleName(cls) + "[" + strings.Join(parts, ", ") + "]"
 	}
 	return jvpClassName(cls) + "@" + jvpHash(o)
+}
+
+// jvpSimpleName is the class' SIMPLE name, what Class#getSimpleName answers:
+// __sname when the grammars renamed a nested type apart from another of its
+// simple name (jNestRename in languages/lib/java-decltypes.js), else __name.
+// Twin of jpSimpleName in languages/lib/java-rt.metajs.
+func jvpSimpleName(cls *jsObject) string {
+	if s, ok := cls.props["__sname"].(string); ok {
+		return s
+	}
+	s, _ := cls.props["__name"].(string)
+	return s
 }
 
 // jvpClassName is the class' BINARY name: a nested type is spelled Outer$Inner,

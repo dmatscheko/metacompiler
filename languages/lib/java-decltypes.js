@@ -2013,3 +2013,239 @@ function jOvMemberSig(rty, mname, atys) {
     if (rty.length > 7 && rty.substring(0, 7) == "static:") { return jOvStaticSig(rty.substring(7), mname, atys, true) }
     return jOvStaticSig(rty, mname, atys, false)
 }
+// ----- nested types of one simple name (JLS 6.3, 6.5.5) -----
+//
+// A member, local or nested type is in scope only inside the type or block
+// that declares it, so two of them may share a simple name: `S1.Pt` and
+// `S24.Pt`. Both halves key every type - the descriptor in scope, and every
+// table of the walk - by its simple name, so before the walk such a program's
+// text names each such type uniquely: a non-top-level type whose simple name
+// is declared more than once becomes "<enclosing types>$<Name>" (or
+// "<enclosing types>$<k>$<Name>" when even that repeats), at its declaration
+// and at every reference that resolves to it - the innermost enclosing block
+// that declares the name (or, for a type body, a superclass's member type),
+// and for `Outer.Name` the member of Outer. jNrSimple gives back the simple
+// name, which is what getSimpleName and a record's toString show (__sname)
+// and what the binary name is built from.
+var jNrRenamed = {}
+function jNrSimple(n) {
+    var s = jNrRenamed["$" + n]
+    return s == undefined ? n : s
+}
+// Does some type name follow two of the declaring keywords? A cheap test on
+// the raw text: a false positive only costs the full scan.
+function jNrMaybeDup(src) {
+    var seen = {}
+    var kws = ["class ", "interface ", "enum ", "record "]
+    for (var k = 0; k < kws.length; k++) {
+        var at = src.indexOf(kws[k])
+        while (at >= 0) {
+            var i = at + kws[k].length
+            while (i < src.length && (src.charAt(i) == " " || src.charAt(i) == "\t")) { i++ }
+            var e = i
+            while (e < src.length && jIsIdChar(src.charCodeAt(e))) { e++ }
+            if (e > i && jNrDeclAt(src, at)) {
+                var key = "$" + src.substring(i, e)
+                if (seen[key] == true) { return true }
+                seen[key] = true
+            }
+            at = src.indexOf(kws[k], e)
+        }
+    }
+    return false
+}
+// Can a declaring keyword at `at` begin a declaration: is it first on its
+// line, or after a brace, a semicolon, an annotation, a comment or a
+// modifier? Mentions in comments and strings mostly are not.
+function jNrDeclAt(src, at) {
+    var j = at - 1
+    while (j >= 0 && (src.charAt(j) == " " || src.charAt(j) == "\t")) { j-- }
+    if (j < 0) { return true }
+    var ch = src.charAt(j)
+    if (ch == "\n" || ch == "\r" || ch == "{" || ch == "}" || ch == ";" || ch == "@" || ch == ")" || ch == "/") { return true }
+    var e = j + 1
+    while (j >= 0 && jIsIdChar(src.charCodeAt(j))) { j-- }
+    return jNrModifier(src.substring(j + 1, e))
+}
+// The index just past a "..." or '...' literal opening at i.
+function jNrSkipLit(src, i) {
+    var q = src.charCodeAt(i)
+    var j = i + 1
+    while (j < src.length && src.charCodeAt(j) != q && src.charCodeAt(j) != 10) {
+        if (src.charCodeAt(j) == 92) { j++ }
+        j++
+    }
+    return j + 1
+}
+// The program to walk: as parsed, or - when it has nested types to rename
+// apart - parsed again from the renamed text, which positions then refer to.
+function jMainAsg() {
+    var src = c.srcSlice(0, 2147483647)
+    var ren = jNestRename(src)
+    if (ren == src) { return c.asg }
+    c.pushSource(c.file, ren)
+    return c.parse(c.agrammar, ren, null, c.file)
+}
+// The program text with every such type renamed, or src itself.
+function jNestRename(src) {
+    if (!jNrMaybeDup(src)) { return src }
+    // Tokens: identifiers (and numbers) and single punctuation characters;
+    // comments and literals are skipped.
+    var tt = []
+    var tp = []
+    var n = src.length
+    var i = 0
+    while (i < n) {
+        var c = src.charCodeAt(i)
+        if (c == 32 || c == 9 || c == 10 || c == 13 || c == 12) {
+            i++
+        } else if (c == 47 && i + 1 < n && src.charCodeAt(i + 1) == 47) {
+            while (i < n && src.charCodeAt(i) != 10) { i++ }
+        } else if (c == 47 && i + 1 < n && src.charCodeAt(i + 1) == 42) {
+            var ce = src.indexOf("*/", i + 2)
+            i = ce < 0 ? n : ce + 2
+        } else if (c == 34 && src.substring(i, i + 3) == "\"\"\"") {
+            var be = src.indexOf("\"\"\"", i + 3)
+            while (be > 0 && src.charCodeAt(be - 1) == 92) { be = src.indexOf("\"\"\"", be + 1) }
+            i = be < 0 ? n : be + 3
+        } else if (c == 34 || c == 39) {
+            i = jNrSkipLit(src, i)
+        } else if (jIsIdChar(c) || c >= 128) {
+            var s = i
+            while (i < n && (jIsIdChar(src.charCodeAt(i)) || src.charCodeAt(i) >= 128)) { i++ }
+            tt.push(src.substring(s, i))
+            tp.push(s)
+        } else {
+            tt.push(src.charAt(i))
+            tp.push(i)
+            i++
+        }
+    }
+    // Blocks (block 0 is the file), the type declaration each type body
+    // belongs to, and the type declarations made directly in each.
+    var bParent = [-1]
+    var bOwner = [-1]
+    var bDecls = [{}]
+    var dName = []
+    var dBlock = []
+    var dBody = []
+    var dSuper = []
+    var dInner = []
+    var tBlock = []
+    var stack = [0]
+    var pending = -1
+    var count = {}
+    for (var t = 0; t < tt.length; t++) {
+        var top = stack[stack.length - 1]
+        tBlock.push(top)
+        var w = tt[t]
+        if (w == "{") {
+            bParent.push(top)
+            bOwner.push(pending)
+            bDecls.push({})
+            var nb = bParent.length - 1
+            if (pending >= 0) { dBody[pending] = nb }
+            pending = -1
+            stack.push(nb)
+        } else if (w == "}") {
+            if (stack.length > 1) { stack.pop() }
+        } else if ((w == "class" || w == "interface" || w == "enum" || w == "record") && t + 1 < tt.length
+                   && (t == 0 || tt[t - 1] != ".") && tt[t + 1].length > 0 && jIdentEnd(tt[t + 1], 0) == tt[t + 1].length
+                   && (w != "record" || (t + 2 < tt.length && (tt[t + 2] == "(" || tt[t + 2] == "<")))) {
+            var d = dName.length
+            var dn = tt[t + 1]
+            dName.push(dn)
+            dBlock.push(top)
+            dBody.push(-1)
+            var sup = ""
+            for (var q = t + 2; q + 1 < tt.length && tt[q] != "{" && tt[q] != ";"; q++) {
+                if (tt[q] == "extends" && w == "class") { sup = tt[q + 1] }
+            }
+            dSuper.push(sup)
+            // An inner class: a non-static class member of a class body.
+            var inner = w == "class" && top > 0 && bOwner[top] >= 0
+            for (var mq = t - 1; mq >= 0 && jNrModifier(tt[mq]); mq--) { if (tt[mq] == "static") { inner = false } }
+            dInner.push(inner)
+            if (bDecls[top]["$" + dn] == undefined) { bDecls[top]["$" + dn] = d }
+            count["$" + dn] = (count["$" + dn] == undefined) ? 1 : count["$" + dn] + 1
+            pending = d
+        }
+    }
+    // The new names.
+    var dNew = []
+    var used = {}
+    var any = false
+    for (var u = 0; u < dName.length; u++) { used["$" + dName[u]] = true }
+    for (var r = 0; r < dName.length; r++) {
+        dNew.push(dName[r])
+        if (dBlock[r] == 0 || count["$" + dName[r]] < 2) { continue }
+        var chain = ""
+        for (var b = dBlock[r]; b > 0; b = bParent[b]) {
+            if (bOwner[b] >= 0) { chain = (chain == "") ? dName[bOwner[b]] : dName[bOwner[b]] + "$" + chain }
+        }
+        var nm = chain + "$" + dName[r]
+        for (var k2 = 2; used["$" + nm] == true; k2++) { nm = chain + "$" + k2 + "$" + dName[r] }
+        used["$" + nm] = true
+        dNew[r] = nm
+        jNrRenamed["$" + nm] = dName[r]
+        any = true
+    }
+    if (!any) { return src }
+    // Each identifier naming a renamed type, resolved as described above.
+    var nr = {bParent: bParent, bOwner: bOwner, bDecls: bDecls, dBody: dBody, dSuper: dSuper, dBlock: dBlock}
+    var out = ""
+    var last = 0
+    for (var x = 0; x < tt.length; x++) {
+        if (count["$" + tt[x]] == undefined || count["$" + tt[x]] < 2) { continue }
+        var hit = -1
+        if (x >= 2 && tt[x - 1] == "new" && tt[x - 2] == ".") {
+            // `outer.new Name(...)` names an inner class of the qualifier's
+            // type, which a text scan cannot know: the one inner class of
+            // that name, else the one in scope.
+            for (var ic = 0; ic < dName.length; ic++) {
+                if (dName[ic] == tt[x] && dInner[ic]) { hit = (hit == -1) ? ic : -2 }
+            }
+            if (hit < 0) { hit = jNrLookup(nr, tt[x], tBlock[x], 0) }
+        } else if (x >= 2 && tt[x - 1] == ".") {
+            if (tt[x - 2].length > 0 && jIdentEnd(tt[x - 2], 0) == tt[x - 2].length) {
+                var ow = jNrLookup(nr, tt[x - 2], tBlock[x - 2], 0)
+                if (ow >= 0 && dBody[ow] >= 0) { hit = jNrMember(nr, tt[x], ow, 0) }
+            }
+        } else {
+            hit = jNrLookup(nr, tt[x], tBlock[x], 0)
+        }
+        if (hit < 0 || dNew[hit] == dName[hit]) { continue }
+        out = out + src.substring(last, tp[x]) + dNew[hit]
+        last = tp[x] + tt[x].length
+    }
+    return out + src.substring(last)
+}
+function jNrModifier(w) {
+    return w == "static" || w == "final" || w == "abstract" || w == "public" || w == "private" || w == "protected"
+        || w == "sealed" || w == "strictfp"
+}
+// The declaration a simple type name resolves to from block b, or -1.
+function jNrLookup(nr, name, b, depth) {
+    if (depth > 32) { return -1 }
+    for (var blk = b; blk >= 0; blk = nr.bParent[blk]) {
+        var d = nr.bDecls[blk]["$" + name]
+        if (d != undefined) { return d }
+        if (nr.bOwner[blk] >= 0) {
+            var inh = jNrInherited(nr, name, nr.bOwner[blk], depth + 1)
+            if (inh >= 0) { return inh }
+        }
+    }
+    return -1
+}
+// Member type `name` of type declaration d: its own or a superclass's.
+function jNrMember(nr, name, d, depth) {
+    var own = nr.bDecls[nr.dBody[d]]["$" + name]
+    if (own != undefined) { return own }
+    return jNrInherited(nr, name, d, depth + 1)
+}
+function jNrInherited(nr, name, d, depth) {
+    if (nr.dSuper[d] == "" || depth > 32) { return -1 }
+    var sd = jNrLookup(nr, nr.dSuper[d], nr.dBlock[d], depth + 1)
+    if (sd < 0 || sd == d || nr.dBody[sd] < 0) { return -1 }
+    return jNrMember(nr, name, sd, depth + 1)
+}
