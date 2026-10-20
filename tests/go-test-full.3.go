@@ -660,6 +660,26 @@ func s115() {
 	check("ptrkey115", len(m) == 2 && m[&n] == "n!" && m[&o.x] == "x" && len(mp) == 2 && mp[a] == 1)
 }
 
+// ===== SECTION 116: a store through `*` of a call =====
+// `*o.xp() += 1` stores through the pointer the call answers. The expected values
+// are go run's.
+type o116 struct{ x int }
+
+func (o *o116) xp() *int { return &o.x }
+
+func id116(p *int) *int { return p }
+
+func s116() {
+	var o o116
+	n := 1
+	*o.xp() += 10
+	*o.xp()++
+	*id116(&n) = 5
+	fs := []func() *int{o.xp}
+	*fs[0]() *= 2
+	check("derefcall116", o.x == 22 && n == 5)
+}
+
 func main() {
 	s94()   // SECTION-CALL 94
 	s95()   // SECTION-CALL 95
@@ -681,6 +701,7 @@ func main() {
 	s113()  // SECTION-CALL 113
 	s114()  // SECTION-CALL 114
 	s115()  // SECTION-CALL 115
+	s116()  // SECTION-CALL 116
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

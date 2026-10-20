@@ -570,12 +570,30 @@ AssignOp    = "&^=" | "<<=" | ">>=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | 
 // through two of them. On a value that is not a pointer cell it stays transparent,
 // which is what a struct pointer needs - those are already references.
 Target      = TgtDerefX | TgtParen | TgtPlain ;
-// `*(v.p.(*int)) = 5`, `*(a).p = 5`: a store through the pointer a suffix chain that
-// starts with a parenthesis answers (goDerefTgtC). Go reads `*(a).p` as `*((a).p)`.
+// `*(v.p.(*int)) = 5`, `*(a).p = 5`, `*o.f() += 1`: a store through the pointer a
+// suffix chain answers (goDerefTgtC), when the chain opens with a parenthesis or
+// holds a call, the two shapes TgtPlain cannot spell. Go reads `*(a).p` as
+// `*((a).p)`.
 TgtDerefX   <~~ push(goDerefTgtC(pop())) ~~>
-            = "*" ParenNext PostfixExpr ;
-ParenNext   = :script(~~
-    (c.peek(0) === 40) ? undefined : abnf.newToken("\x01a-parenthesis", 0)
+            = "*" DerefXNext PostfixExpr ;
+// The chain ahead opens with '(' or has a '(' outside its brackets before the first
+// byte no selector chain contains (an operator, a space, a line break).
+DerefXNext  = :script(~~
+    (function () {
+        if (c.peek(0) === 40) { return undefined }
+        var depth = 0
+        for (var i = 0; i < 4096; i++) {
+            var cc = c.peek(i)
+            if (cc < 0) { break }
+            if (cc === 40 && depth === 0) { return undefined }
+            if (cc === 40 || cc === 91) { depth++; continue }
+            if (cc === 41 || cc === 93) { if (depth === 0) { break }; depth--; continue }
+            if (depth > 0) { continue }
+            if (cc === 46 || cc === 95 || (cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc >= 128) { continue }
+            break
+        }
+        return abnf.newToken("\x01a-call-or-parenthesis", 0)
+    })()
 ~~) ;
 TgtPlain    <~~ push(makeTargetRef(takeAll())) ~~>
             = TgtCore { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
