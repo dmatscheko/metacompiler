@@ -116,7 +116,7 @@ not change the renderer.
 
 # GO — Go  (oracle: `go run`)
 
-### T-699 go: `int / 2.0` gives a float; `z, w := nil, 5` redeclaring a slice; conversion to another package's interface · P2 · GO · OPEN [V]
+### T-699 go: `int / 2.0` gives a float; `z, w := nil, 5` redeclaring a slice; conversion to another package's interface · P2 · GO · IN PROGRESS (GO worker, round 18) [V]
 `x := 5; fmt.Println(x/2.0)` → `2.5` in all engines (go `2`: the untyped constant converts to the other operand's type); compiled
 halves also give 2.5 for `var k int8 = 5; k/2.0`. The emitter must convert the constant by the other operand's static type (a
 runtime check cannot tell int-var op float-const from int-const op float64-var). `z, w := nil, 5` with `z` already `[]int` →
