@@ -1148,6 +1148,22 @@ set cid=dep3
 set got=%s27deep%
 set want=250
 call :check
+rem a redirected call keeps its output capture open for the whole callee, so a
+rem recursion of redirected calls nests one capture per level
+set /a s27c=0
+call :s27cap 40 > nul
+set cid=dep4
+set got=%s27c%
+set want=40
+call :check
+exit /b 0
+
+:s27cap
+set /a s27c=s27c+1
+echo hidden %1
+if %1 LEQ 1 exit /b 0
+set /a s27cnext=%1-1
+call :s27cap %s27cnext% > nul
 exit /b 0
 
 :s27rec

@@ -12,9 +12,9 @@
 @EMPTY = global [1 x i8] zeroinitializer
 @args = global [2560 x i32*] zeroinitializer
 @frame = global i32 zeroinitializer
-@CAP_BUFS = global [8 x i32*] zeroinitializer
-@CAP_LENS = global [8 x i32] zeroinitializer
-@CAP_SZ = global [8 x i32] zeroinitializer
+@CAP_BUFS = global [4096 x i32*] zeroinitializer
+@CAP_LENS = global [4096 x i32] zeroinitializer
+@CAP_SZ = global [4096 x i32] zeroinitializer
 @CAP_SP = global i32 zeroinitializer
 @.str.9 = global [16 x i8] zeroinitializer
 @.str.10 = global [4 x i8] zeroinitializer
@@ -70,14 +70,19 @@ entry:
 	%11 = ashr i32 %10, 24
 	%12 = trunc i32 %11 to i8
 	store i8 %12, i8* %4
-	%13 = getelementptr [1 x i8], [1 x i8]* %2, i32 0, i32 0
-	%14 = bitcast i8* %13 to i32*
-	%15 = call i64 @write(i32 2, i32* %14, i64 1)
+	%13 = sext i32 0 to i64
+	%14 = inttoptr i64 %13 to i32*
+	%15 = call i32 @fflush(i32* %14)
+	%16 = getelementptr [1 x i8], [1 x i8]* %2, i32 0, i32 0
+	%17 = bitcast i8* %16 to i32*
+	%18 = call i64 @write(i32 2, i32* %17, i64 1)
 	ret i32 0
 
 dead1:
 	ret i32 0
 }
+
+declare i32 @fflush(i32* %0)
 
 declare i64 @write(i32 %0, i32* %1, i64 %2)
 
@@ -2004,7 +2009,7 @@ declare i32 @putchar(i32 %0)
 define i32 @rt_capstart() {
 entry:
 	%0 = load i32, i32* @CAP_SP
-	%1 = icmp sge i32 %0, 8
+	%1 = icmp sge i32 %0, u0x1000
 	%2 = zext i1 %1 to i32
 	%3 = icmp ne i32 %2, 0
 	br i1 %3, label %4, label %25
@@ -2045,20 +2050,20 @@ entry:
 	%21 = getelementptr [16 x i8], [16 x i8]* @.str.9, i32 0, i32 0
 	%22 = bitcast i8* %21 to i32*
 	%23 = load i32, i32* @CAP_SP
-	%24 = call i32 @rt_die(i32* %22, i32 1, i32 %23, i32 8)
+	%24 = call i32 @rt_die(i32* %22, i32 1, i32 %23, i32 u0x1000)
 	br label %25
 
 25:
 	%26 = load i32, i32* @CAP_SP
-	%27 = getelementptr [8 x i32*], [8 x i32*]* @CAP_BUFS, i32 0, i32 %26
+	%27 = getelementptr [4096 x i32*], [4096 x i32*]* @CAP_BUFS, i32 0, i32 %26
 	%28 = call i32* @rt_bump(i32 u0x2000)
 	%29 = bitcast i32* %28 to i32*
 	store i32* %29, i32** %27
 	%30 = load i32, i32* @CAP_SP
-	%31 = getelementptr [8 x i32], [8 x i32]* @CAP_LENS, i32 0, i32 %30
+	%31 = getelementptr [4096 x i32], [4096 x i32]* @CAP_LENS, i32 0, i32 %30
 	store i32 0, i32* %31
 	%32 = load i32, i32* @CAP_SP
-	%33 = getelementptr [8 x i32], [8 x i32]* @CAP_SZ, i32 0, i32 %32
+	%33 = getelementptr [4096 x i32], [4096 x i32]* @CAP_SZ, i32 0, i32 %32
 	store i32 u0x2000, i32* %33
 	%34 = load i32, i32* @CAP_SP
 	%35 = add i32 %34, 1
@@ -2076,12 +2081,12 @@ entry:
 	store i32 %1, i32* @CAP_SP
 	%2 = alloca i32*
 	%3 = load i32, i32* @CAP_SP
-	%4 = getelementptr [8 x i32*], [8 x i32*]* @CAP_BUFS, i32 0, i32 %3
+	%4 = getelementptr [4096 x i32*], [4096 x i32*]* @CAP_BUFS, i32 0, i32 %3
 	%5 = load i32*, i32** %4
 	%6 = bitcast i32* %5 to i32*
 	store i32* %6, i32** %2
 	%7 = load i32, i32* @CAP_SP
-	%8 = getelementptr [8 x i32], [8 x i32]* @CAP_LENS, i32 0, i32 %7
+	%8 = getelementptr [4096 x i32], [4096 x i32]* @CAP_LENS, i32 0, i32 %7
 	%9 = load i32, i32* %8
 	%10 = load i32*, i32** %2
 	%11 = getelementptr i8, i32* %10, i32 %9
@@ -2123,13 +2128,13 @@ entry:
 	store i32 %14, i32* %12
 	%15 = alloca i32*
 	%16 = load i32, i32* %12
-	%17 = getelementptr [8 x i32*], [8 x i32*]* @CAP_BUFS, i32 0, i32 %16
+	%17 = getelementptr [4096 x i32*], [4096 x i32*]* @CAP_BUFS, i32 0, i32 %16
 	%18 = load i32*, i32** %17
 	%19 = bitcast i32* %18 to i32*
 	store i32* %19, i32** %15
 	%20 = alloca i32
 	%21 = load i32, i32* %12
-	%22 = getelementptr [8 x i32], [8 x i32]* @CAP_LENS, i32 0, i32 %21
+	%22 = getelementptr [4096 x i32], [4096 x i32]* @CAP_LENS, i32 0, i32 %21
 	%23 = load i32, i32* %22
 	store i32 %23, i32* %20
 	%24 = alloca i32
@@ -2144,7 +2149,7 @@ entry:
 	store i32 0, i32* %31
 	%32 = load i32, i32* %24
 	%33 = load i32, i32* %12
-	%34 = getelementptr [8 x i32], [8 x i32]* @CAP_SZ, i32 0, i32 %33
+	%34 = getelementptr [4096 x i32], [4096 x i32]* @CAP_SZ, i32 0, i32 %33
 	%35 = load i32, i32* %34
 	%36 = icmp sgt i32 %32, %35
 	%37 = zext i1 %36 to i32
@@ -2157,7 +2162,7 @@ dead34:
 39:
 	%40 = alloca i32
 	%41 = load i32, i32* %12
-	%42 = getelementptr [8 x i32], [8 x i32]* @CAP_SZ, i32 0, i32 %41
+	%42 = getelementptr [4096 x i32], [4096 x i32]* @CAP_SZ, i32 0, i32 %41
 	%43 = load i32, i32* %42
 	store i32 %43, i32* %40
 	%44 = alloca i32*
@@ -2219,12 +2224,12 @@ dead34:
 
 82:
 	%83 = load i32, i32* %12
-	%84 = getelementptr [8 x i32*], [8 x i32*]* @CAP_BUFS, i32 0, i32 %83
+	%84 = getelementptr [4096 x i32*], [4096 x i32*]* @CAP_BUFS, i32 0, i32 %83
 	%85 = load i32*, i32** %44
 	%86 = bitcast i32* %85 to i32*
 	store i32* %86, i32** %84
 	%87 = load i32, i32* %12
-	%88 = getelementptr [8 x i32], [8 x i32]* @CAP_SZ, i32 0, i32 %87
+	%88 = getelementptr [4096 x i32], [4096 x i32]* @CAP_SZ, i32 0, i32 %87
 	%89 = load i32, i32* %40
 	store i32 %89, i32* %88
 	%90 = load i32*, i32** %44
@@ -2278,7 +2283,7 @@ dead34:
 	%129 = trunc i32 %128 to i8
 	store i8 %129, i8* %124
 	%130 = load i32, i32* %12
-	%131 = getelementptr [8 x i32], [8 x i32]* @CAP_LENS, i32 0, i32 %130
+	%131 = getelementptr [4096 x i32], [4096 x i32]* @CAP_LENS, i32 0, i32 %130
 	%132 = load i32, i32* %20
 	%133 = load i32, i32* %31
 	%134 = add i32 %132, %133

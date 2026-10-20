@@ -50,7 +50,8 @@
 # string that is not valid UTF-8 is visible only in the output bytes (php/bytes and
 # bash/bytes - the NUL bytes printf writes - likewise), and bash/stack, whose
 # failure is a native stack overflow. Their fixtures are the real toolchain's
-# output, not blessed ones of ours.
+# output, not blessed ones of ours - except batch/nest (output captures nested
+# twelve deep), whose fixture is the interpreter half's, as there is no cmd.exe.
 #
 # EXPECT_ROWS covers those by comparing what the binary actually produced
 # against a checked-in fixture, which is the only thing left when there is no
@@ -126,6 +127,7 @@ EXPECT_ROWS="brainfuck:features:tests/brainfuck-test-features.txt:tests/brainfuc
              bash:bytes:tests/bash-test-bytes.sh:tests/bash-bytes.expected
              bash:stack:tests/bash-native-stack.sh:tests/bash-stack.expected
              bash:stderr:tests/bash-native-stderr.sh:tests/bash-stderr.expected
+             batch:nest:tests/batch-native-nest.cmd:tests/batch-nest.expected
              lua:bytes:tests/lua-test-bytes.lua:tests/lua-bytes.expected
              php:bytes:tests/php-test-bytes.php:tests/php-bytes.expected"
 

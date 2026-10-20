@@ -50,12 +50,16 @@ int bat_shift(int from);
 long write(int fd, const char *buf, unsigned long n);
 void exit(int code);
 void *malloc(unsigned long n);
+int fflush(void *f);
 
 /* One byte to fd 2, out of a stack char[1] - the arena is exactly what is gone
- * when this runs. Same shape as runtime.c's o_ch. */
+ * when this runs. Same shape as runtime.c's o_ch. Standard output is putchar's
+ * stdio buffer, so it is flushed first (fflush(NULL)), and with `2>&1` the
+ * diagnostic follows the output written before it. Twin of bash-rt.c's rt_ech. */
 int rt_ech(int c) {
     char b[1];
     b[0] = (char)c;
+    fflush(0);
     write(2, b, (unsigned long)1);
     return 0;
 }
@@ -324,15 +328,17 @@ int rt_prints(char *s) {
 
 /* The capture stack for `for /f ... in ('CMD')` and output redirection. A buffer
  * starts at 8192 bytes and GROWS (rt_println) rather than truncating; twin of
- * bash-rt.c's rt_putc. */
-static char *CAP_BUFS[8];
-static int CAP_LENS[8];
-static int CAP_SZ[8];
+ * bash-rt.c's rt_putc. A redirected `call` keeps its capture open for the whole
+ * callee, so the depth reaches the call nesting (256) plus any `for /f` inside;
+ * CAPMAX = 4096, as bash-rt.c's command-substitution stack. */
+static char *CAP_BUFS[4096];
+static int CAP_LENS[4096];
+static int CAP_SZ[4096];
 static int CAP_SP;
 
 int rt_capstart(void) {
-    if (CAP_SP >= 8) {
-        rt_die("capture nesting", 1, CAP_SP, 8);
+    if (CAP_SP >= 4096) {
+        rt_die("capture nesting", 1, CAP_SP, 4096);
     }
     CAP_BUFS[CAP_SP] = rt_bump(8192);
     CAP_LENS[CAP_SP] = 0;
