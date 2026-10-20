@@ -64,7 +64,7 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-620 python: `re.error` is uncatchable; compiled class-body except bindings lost · P1 · PY · OPEN [V]
+### T-620 python: `re.error` is uncatchable; compiled class-body except bindings lost · P1 · PY · IN PROGRESS (PY worker, round 7) [V]
 `try: re.compile("(") except re.error: print("caught")` → every leg aborts "re.error: unterminated group" (python catches it;
 `re.error` is `re.PatternError`, with msg/pattern/pos). Compiled only: `class C:` with `try: 1/0` / `except ZeroDivisionError: z = 5`
 in the class body → `hasattr(C, 'z')` False (python and the interpreter True).
