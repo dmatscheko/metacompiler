@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-687** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-688** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -117,10 +117,11 @@ not change the renderer.
 
 # GO — Go  (oracle: `go run`)
 
-### T-685 go: append growth pads a function-local struct type with 0 in the compiler · P3 · GO · IN PROGRESS (GO worker, round 13) [V]
-`func f() { type L struct{ a int }; s := append([]L{}, L{1}); s = append(s, L{2}, L{3}); s = s[:cap(s)]; fmt.Println(s) }` →
-the compiler's spare slots hold 0 (the local type's descriptor is not reachable from the module-level `$ezero` table), the
-interpreter and go hold `{0}`. Same for a top-level type shadowed by a local of that name. Halves diverge.
+### T-687 go: a local type shadowing a top-level struct corrupts it; zero of a type-parameter-typed field is nil · P2 · GO · OPEN [V]
+Top-level `type T struct{ x, y string }` plus `func k() { type T struct{ z int } }` anywhere: `append([]T{}, T{"p","q"}, ...)` in
+another function prints `[{p} {r} {u}]` (interp) / `{<nil> <nil>}` then exit 2 (compiler); go `[{p q} {r t} {u v}]` — struct
+tables are keyed by name only. `func gen[T any]() { type W struct{ v T }; var w W; fmt.Println(w.v, w) }` with gen[string] /
+gen[int] → `<nil> {<nil>}` both (go ` {}` / `0 {0}`).
 
 ---
 
@@ -780,6 +781,7 @@ T-676 js: Object.freeze / seal do nothing; read-only writes and non-configurable
 T-677 js: builtin globals' `.name`/`.length`; `(7).constructor === Number`; `Object(1n)`/`Object(Symbol())`; String wrapper index keys — DONE 88ec20ec (builtin name/length, primitive .constructor identity, BigInt/Symbol wrappers, String wrapper index keys — 4 legs = node; follow-up T-684)
 T-682 go: anonymous struct types as declared types; embedding a package-qualified type; fmt.Append*/os.Getenv — DONE c904bd4d f64c6e84 (anonymous struct types via a registry, pkg.T embedding, fmt.Append*, os.Getenv/LookupEnv, per-slot struct zeros in make and append growth — 4 legs = go run; follow-up T-685)
 T-683 python: `__name__` is undefined at module level; `type(super)` / `isinstance(super(), super)`; `__classdictcell__` — DONE aebcd94c (__name__ = __main__ / dotted module names, the name super is the type, __classdictcell__ per 3.14, comprehension cell marking, super repr — 4 legs = python3; follow-up T-686)
+T-685 go: append growth pads a function-local struct type with 0 in the compiler — DONE be5b3c0f (per-declaration zero makers for local types in the compiler — 4 legs = go run; follow-up T-687)
 
 # Settled — do not re-open
 
