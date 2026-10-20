@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-639** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-640** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -126,12 +126,12 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-633 kotlin: `+=` on a `val` mutable collection reassigns instead of plusAssign · P1 · KT · IN PROGRESS (KT worker, round 6) [V spec-only]
-`val l = mutableListOf(1); val t = l; l += 2; println(t)` → `[1]` in all engines (Kotlin `[1, 2]`: for a `val` of a mutable
-collection `+=` is plusAssign, in place; for a `var` of a read-only type it is plus). Same for sets and maps; `ts += 3` on a
-sortedSetOf appends unsorted. kSetName / applyOp treat `x += y` as `x = x + y` and neither grammar records val vs var for locals.
-P3: extension resolution is by runtime type where Kotlin's is static (`val x: Any = 5L; x.kind()` picks Long.kind()); TreeMap() /
-TreeSet() constructors and LinkedList / ArrayDeque / PriorityQueue / Scanner are not provided.
+### T-639 kotlin: `is` on collections; MutableList deque methods; comparator TreeSet/TreeMap; LinkedList/ArrayDeque/PriorityQueue · P1 · KT · OPEN [V spec-only]
+`x is Set<*>`, `is Map<*,*>`, `is Iterable<*>` answer false for sets, maps and lists, and `is Collection<*>` false for sets, in every
+engine (Kotlin: setOf → Collection/Iterable/Set true; listOf → Collection/Iterable/List true; mapOf → Map true; 1..2 → Iterable true).
+`addFirst`/`addLast`/`removeFirst`/`removeLast`/`removeFirstOrNull`/`removeLastOrNull` on MutableList missing (interp "unknown list
+method: addFirst", compiled exit 1 with no output). P3: `TreeSet(comparator)`/`TreeMap(comparator)` fail loudly (need the comparator on
+the handle in ktSortedSink); LinkedList, ArrayDeque, PriorityQueue (comparator-aware heap) not provided.
 
 ---
 
@@ -749,6 +749,7 @@ T-588 bash: `$[ expr ]`; `$'\uDFFF'` length; native stdout buffering vs stderr o
 T-635 bash: `$'\cX'` control escapes; `$'\?'` in the interpreter; batch native stdout/stderr order — DONE a03ea5f4 (bash); batch has no program-visible stderr — its fatal-diagnostic ordering moved to T-636
 T-625 java/kotlin regex: supplementary characters in interp and native; PSE constructor; Kotlin Regex.options — DONE fbc1b072 (plus a java sweep: local class captures, array patterns, EnumMap/EnumSet, java.util.function defaults, Pattern/Matcher, records, BitSet ...)
 T-636 batch native: capture nesting limited to 8; rt_die not ordered after stdout; bash `${v@Q}` of a non-UTF-8 byte — DONE 8bd03604 b91f7bd2
+T-633 kotlin: `+=` on a `val` mutable collection reassigns instead of plusAssign — DONE c291b1fd a3b2e827 (plusAssign on a val, String elements, TreeSet/TreeMap constructors; kotlin bench -20.6% with identical output, from one js_is_type per +); extension resolution by static type DECLINED (the grammars compute no expression types); comparator Trees and deque classes are T-639
 
 # Settled — do not re-open
 
