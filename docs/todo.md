@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-653** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-654** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -64,12 +64,13 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-649 python: class-body names visible inside methods; compiled runtime exceptions' `__mro__`; regex lookbehind · P1 · PY · IN PROGRESS (PY worker, round 9) [V]
-`class K:` with `def max(self, o): ...` and `def f(self): return max(1, 2)` → ours calls the method (python3 2: class bodies are not
-an enclosing scope for methods); `x = 5` in a class body with a global x → a method sees 5 (python3 the global). All engines.
-Compiled only: `try: int("x") except ValueError as e: print([c.__name__ for c in type(e).__mro__])` → `['ValueError', 'object']`
-(python3 `['ValueError', 'Exception', 'BaseException', 'object']`; IndexError, KeyError likewise; interp right). Regex: lookbehind
-is "not supported" under the P dialect (python supports fixed-width lookbehind); `\k<n>` / `\N{...}` do not give CPython's error.
+### T-653 python: compiled `type(e) is ValueError`; `__class__` in methods; regex group refs, Unicode \w, findall None; class-body comprehensions · P1 · PY · OPEN [V]
+Compiled only: `try: int("x") except ValueError as e: print(type(e) is ValueError)` → False (the runtime's class is a different object
+from the program's ValueError; interp and python3 True). `__class__` inside a method → NameError in all engines (python3 the class).
+P regex, all engines: `re.compile(r"\1(a)")` and `r"(a\1)"` accepted (python "invalid group reference 1 at position 1", "cannot refer
+to an open group at position 2"); `re.findall(r"\w", "é!")` → `[]` (python `['é']`: \w is Unicode for str patterns); `re.findall(r"(a)|b",
+"ab")` → `['a', None]` (python `['a', '']`). A comprehension in a class body sees class names (`x = 5` in the class, global x = 1, `[x for
+_ in range(2)]` → python `[1, 1]`).
 
 ---
 
@@ -743,6 +744,7 @@ T-638 bash: `@Q` / `printf %q` / `declare -p` of a well-formed non-printable cha
 T-646 java: static method through a subclass name; RandomAccess / Serializable markers; Matcher.hitEnd — PARTIAL 067791a2 (statics through a subclass, RandomAccess/Serializable via instanceof exclusion at no ArrayList cost, interp binary names after nested lib loads); hitEnd/requireEnd and declaration order are T-650
 T-606 php: library callbacks outside libCbArg; argument-error order; named arg into a by-ref variadic — DONE 8653dda9 (cbn2's expected text corrected to php-src's argument order)
 T-644 js: own-property details of prototypes and functions — DONE 1456360f (a function declaration's arguments/caller/prototype own names stay a recorded value-model limit)
+T-649 python: class-body names visible inside methods; compiled runtime exceptions' `__mro__`; regex lookbehind — DONE 7e3dc3f0 (\N{name} resolves only the 14-name table — a full Unicode name table DECLINED, as for java's \N)
 
 # Settled — do not re-open
 
