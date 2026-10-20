@@ -749,6 +749,16 @@ function pynHashUnits(units) {
 // CPython's vector_norm, the algorithm behind hypot and dist, with Dekker's
 // exact product in place of its fma. Go twins in abnf/jsrtpymath.go.
 
+// log2 of a positive finite x as log(m) / log(2) + e over x = m * 2^e, with
+// the rewrite CPython's own log2 fallback makes for x >= 1 so that the sum does
+// not cancel just above 1.0 (where log(m)/log(2) + 1 loses every digit): within
+// a unit in the last place of the platform's log2. Go twin: pyMathLog2.
+function pynLog2(x) {
+    var fr = pynFrexp(x)
+    if (x >= 1) { return Math.log(2 * fr.m) / Math.log(2) + (fr.e - 1) }
+    return Math.log(fr.m) / Math.log(2) + fr.e
+}
+
 // x = m * 2^e with 0.5 <= |m| < 1; zero, an infinity and a NaN give (x, 0).
 function pynFrexp(x) {
     if (x == 0 || x !== x || x - x != 0) { return {m: x, e: 0} }

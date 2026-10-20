@@ -4913,6 +4913,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (kind == "nonneg") { pyRaise(pyMakeExc("ValueError", ["expected a nonnegative input, got " + got])) }
         if (kind == "pos") { pyRaise(pyMakeExc("ValueError", ["expected a positive input, got " + got])) }
         if (kind == "unit") { pyRaise(pyMakeExc("ValueError", ["expected a number in range from -1 up to 1, got " + got])) }
+        if (kind == "finite") { pyRaise(pyMakeExc("ValueError", ["expected a finite input, got " + got])) }
         pyRaise(pyMakeExc("ValueError", ["expected argument value > -1, got " + got]))
     }
     // floor / ceil / trunc must answer an INT, and there is no int for a
@@ -5022,7 +5023,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "log2") {
             var l2 = pyMArg(args, 0)
             if (l2 <= 0) { pyMDom("pos", l2) }
-            return pyFlo(Math.log2(l2))
+            return pyFlo(l2 - l2 != 0 ? l2 : pynLog2(l2))
         }
         if (name == "log10") {
             var l10 = pyMArg(args, 0)
@@ -5079,9 +5080,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (name == "ulp") { return pyFlo(pynUlp(pyMArg(args, 0))) }
         if (name == "nextafter") { return pyFlo(pynNextafter(pyMArg(args, 0), pyMArg(args, 1))) }
-        if (name == "sin") { return pyFlo(fdlibm().sin(pyMArg(args, 0))) }
-        if (name == "cos") { return pyFlo(fdlibm().cos(pyMArg(args, 0))) }
-        if (name == "tan") { return pyFlo(fdlibm().tan(pyMArg(args, 0))) }
+        // An infinity is CPython's domain error for the three.
+        if (name == "sin" || name == "cos" || name == "tan") {
+            var ta = pyMArg(args, 0)
+            if (ta - ta != 0 && ta === ta) { pyMDom("finite", ta) }
+            if (name == "sin") { return pyFlo(fdlibm().sin(ta)) }
+            if (name == "cos") { return pyFlo(fdlibm().cos(ta)) }
+            return pyFlo(fdlibm().tan(ta))
+        }
         if (name == "asin") {
             var as1 = pyMArg(args, 0)
             if (as1 < 0 - 1 || as1 > 1) { pyMDom("unit", as1) }

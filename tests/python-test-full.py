@@ -7191,6 +7191,15 @@ def s141():
             except ValueError as e:
                 errs += str(e) == "math domain error"
     check("fmoddom", errs == 4)
+    errs2 = []
+    for fn in (S141m.sin, S141m.cos, S141m.tan):
+        try:
+            fn(float("-inf"))
+        except ValueError as e:
+            errs2.append(str(e))
+    check("log2trig", abs(S141m.log2(1.0000000000000002) - 3.203426503814917e-16) < 1e-31 and S141m.log2(1024.0) == 10.0
+          and S141m.log2(5e-324) == -1074.0 and S141m.log2(0.75) == -0.4150374992788438
+          and errs2 == ["expected a finite input, got -inf"] * 3 and str(S141m.sin(float("nan"))) == "nan")
 
 def main():
     s01() # SECTION-CALL 01

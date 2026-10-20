@@ -12523,6 +12523,7 @@ function pyMDom(kind, v) {
     if (kind == "nonneg") { pyRaiseExc("ValueError", "expected a nonnegative input, got " + got) }
     if (kind == "pos") { pyRaiseExc("ValueError", "expected a positive input, got " + got) }
     if (kind == "unit") { pyRaiseExc("ValueError", "expected a number in range from -1 up to 1, got " + got) }
+    if (kind == "finite") { pyRaiseExc("ValueError", "expected a finite input, got " + got) }
     pyRaiseExc("ValueError", "expected argument value > -1, got " + got)
 }
 
@@ -12622,7 +12623,7 @@ function pyMathCall(name, args) {
     if (name == "log2") {
         var l2 = pyMArg(args, 0)
         if (l2 <= 0) { pyMDom("pos", l2) }
-        return pyMkFlo(Math.log2(l2))
+        return pyMkFlo(l2 - l2 != 0 ? l2 : pynLog2(l2))
     }
     if (name == "log10") {
         var l10 = pyMArg(args, 0)
@@ -12687,9 +12688,14 @@ function pyMathCall(name, args) {
     }
     if (name == "ulp") { return pyMkFlo(pynUlp(pyMArg(args, 0))) }
     if (name == "nextafter") { return pyMkFlo(pynNextafter(pyMArg(args, 0), pyMArg(args, 1))) }
-    if (name == "sin") { return pyMkFlo(fdlibm().sin(pyMArg(args, 0))) }
-    if (name == "cos") { return pyMkFlo(fdlibm().cos(pyMArg(args, 0))) }
-    if (name == "tan") { return pyMkFlo(fdlibm().tan(pyMArg(args, 0))) }
+    // An infinity is CPython's domain error for the three.
+    if (name == "sin" || name == "cos" || name == "tan") {
+        var ta = pyMArg(args, 0)
+        if (ta - ta != 0 && ta === ta) { pyMDom("finite", ta) }
+        if (name == "sin") { return pyMkFlo(fdlibm().sin(ta)) }
+        if (name == "cos") { return pyMkFlo(fdlibm().cos(ta)) }
+        return pyMkFlo(fdlibm().tan(ta))
+    }
     if (name == "asin") {
         var as1 = pyMArg(args, 0)
         if (as1 < 0 - 1 || as1 > 1) { pyMDom("unit", as1) }

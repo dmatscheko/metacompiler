@@ -118,8 +118,25 @@ func pyMathDom(rt *jsrt, kind string, v float64) {
 	case "unit":
 		panic(&jsThrown{value: rt.pyExcInstance("ValueError",
 			"expected a number in range from -1 up to 1, got "+got)})
+	case "finite":
+		panic(&jsThrown{value: rt.pyExcInstance("ValueError", "expected a finite input, got "+got)})
 	}
 	panic(&jsThrown{value: rt.pyExcInstance("ValueError", "expected argument value > -1, got "+got)})
+}
+
+// pyMathLog2 is log2 of x as log(m) / log(2) + e over x = m * 2^e, rewritten
+// for x >= 1 as CPython's own fallback does so the sum does not cancel just
+// above 1.0, where math.Log2's Log(frac)/Ln2 + exp loses every digit. An
+// infinity or a NaN is itself. Twin of pynLog2 in languages/lib/python-num.js.
+func pyMathLog2(x float64) float64 {
+	if math.IsInf(x, 0) || math.IsNaN(x) {
+		return x
+	}
+	m, e := math.Frexp(x)
+	if x >= 1 {
+		return math.Log(2*m)/math.Log(2) + float64(e-1)
+	}
+	return math.Log(m)/math.Log(2) + float64(e)
 }
 
 // pyMathGcd is Euclid on the absolute values; CPython's math.gcd(0, 0) is 0.
@@ -253,7 +270,7 @@ func (rt *jsrt) pyMathCall(name string, args []interface{}) interface{} {
 		if l2 <= 0 {
 			pyMathDom(rt, "pos", l2)
 		}
-		return pyMathFlo(math.Log2(l2))
+		return pyMathFlo(pyMathLog2(l2))
 	case "log10":
 		l10 := pyMathArg(rt, args, 0)
 		if l10 <= 0 {
@@ -329,12 +346,19 @@ func (rt *jsrt) pyMathCall(name string, args []interface{}) interface{} {
 			return pyMathFlo(y)
 		}
 		return pyMathFlo(math.Nextafter(x, y))
-	case "sin":
-		return pyMathFlo(fdSin(pyMathArg(rt, args, 0)))
-	case "cos":
-		return pyMathFlo(fdCos(pyMathArg(rt, args, 0)))
-	case "tan":
-		return pyMathFlo(fdTan(pyMathArg(rt, args, 0)))
+	case "sin", "cos", "tan":
+		// An infinity is CPython's domain error for the three.
+		ta := pyMathArg(rt, args, 0)
+		if math.IsInf(ta, 0) {
+			pyMathDom(rt, "finite", ta)
+		}
+		switch name {
+		case "sin":
+			return pyMathFlo(fdSin(ta))
+		case "cos":
+			return pyMathFlo(fdCos(ta))
+		}
+		return pyMathFlo(fdTan(ta))
 	case "asin":
 		as1 := pyMathArg(rt, args, 0)
 		if as1 < -1 || as1 > 1 {
