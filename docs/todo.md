@@ -76,7 +76,7 @@ non-ASCII class range spanning 256 or more characters only gets the text-side up
 
 # JS — JavaScript and TypeScript
 
-### T-700 js: Object.getOwnPropertyDescriptor missing; builtin methods read as values have no name; `delete K.name` on a class · P2 · JS · OPEN [V]
+### T-700 js: Object.getOwnPropertyDescriptor missing; builtin methods read as values have no name; `delete K.name` on a class · P2 · JS · IN PROGRESS (JS worker, round 19) [V]
 `Object.getOwnPropertyDescriptor(o, "x")` → "is not a function" in all legs (node returns the descriptor; also for accessors, frozen
 objects, functions' name/length). `[].push.name`, `"".slice.name` → "" so `String([].push)` → `function () { [native code] }` (node
 `push` / `function push() { [native code] }`). `delete K.name` / `delete K.length` on a class → K.name stays "K" (node "").
