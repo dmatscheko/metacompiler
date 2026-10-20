@@ -4054,6 +4054,90 @@ class S77G {
     function one($x) { yield $x; }
 }
 
+// ===== SECTION 78: scalar parameter and return types =====
+// A typed parameter checks its argument (zend_verify_arg_type), a declared return
+// type the value returned (zend_verify_return_type). Without strict_types a
+// scalar coerces as for a typed property: a numeric string or a bool to int or
+// float, a whole float to int, a number or a bool to string, a scalar to bool,
+// an int|string union keeping a string and taking a bool as int; null and arrays
+// never coerce. The TypeError reads "f(): Argument #n ($p) must be of type T, U
+// given, called in F on line L" and "f(): Return value must be of type T, U
+// returned", U being "none" for a function that ends without a return; self and
+// parent show as class names. A default spelled null makes the type nullable. A
+// generator checks its arguments at the call, and its return value is no
+// declared type's. A void function is not checked. A callable takes a closure, a
+// function's name or an object with __invoke.
+function s78int(int $a) { return $a; }
+function s78flo(float $f) { return $f; }
+function s78str(string $s) { return $s; }
+function s78bool(bool $b) { return $b; }
+function s78dn(int $x = null) { return $x; }
+function s78uni(int|string $x) { return $x; }
+function s78ret($x): int { return $x; }
+function s78none(): int { }
+function s78nret(): ?string { return null; }
+function s78void(): void { return; }
+function s78var(int ...$xs) { return $xs; }
+function s78ref(int &$r) { $r = $r + 1; }
+function s78gen(int $n): Generator { yield $n; return "r"; }
+function s78cb(callable $c) { return $c(); }
+class S78Inv { function __invoke() { return 8; } }
+class S78P {
+    function same(self $o): static { return $o; }
+}
+class S78K extends S78P {
+    function up(parent $o): int { return 1; }
+}
+// The message with this file's path as F and line $l as L.
+function s78e($f, $l) {
+    try { $f(); return "none"; } catch (TypeError $e) {
+        return str_replace(" on line " . $l, " on line L", str_replace(__FILE__, "F", $e->getMessage()));
+    }
+}
+function s78() {
+    check("sty1", s78int("5") === 5 && s78int(" 7") === 7 && s78int(5.0) === 5 && s78int(true) === 1 && s78int("1e3") === 1000
+        && s78flo(3) === 3.0 && s78flo("2.5") === 2.5 && s78str(12) === "12" && s78str(1.5) === "1.5" && s78str(false) === ""
+        && s78bool(0) === false && s78bool("a") === true && s78dn(null) === null && s78uni(1.0) === 1 && s78uni("1.5") === "1.5"
+        && s78uni(true) === 1 && s78ret("7") === 7 && s78nret() === null && s78void() === null && s78var(1, "2", 3.0) === [1, 2, 3]);
+    $m = [];
+    $m[] = s78e(fn() => s78int("x"), __LINE__);
+    $m[] = s78e(fn() => s78int(null), __LINE__);
+    $m[] = s78e(fn() => s78int([]), __LINE__);
+    $m[] = s78e(fn() => s78dn("x"), __LINE__);
+    $m[] = s78e(fn() => s78var(1, "z"), __LINE__);
+    $m[] = s78e(fn() => s78ret("q"), __LINE__);
+    $m[] = s78e(fn() => s78none(), __LINE__);
+    check("sty2", $m === [
+        "s78int(): Argument #1 (\$a) must be of type int, string given, called in F on line L",
+        "s78int(): Argument #1 (\$a) must be of type int, null given, called in F on line L",
+        "s78int(): Argument #1 (\$a) must be of type int, array given, called in F on line L",
+        "s78dn(): Argument #1 (\$x) must be of type ?int, string given, called in F on line L",
+        "s78var(): Argument #2 (\$xs) must be of type int, string given, called in F on line L",
+        "s78ret(): Return value must be of type int, string returned",
+        "s78none(): Return value must be of type int, none returned"]);
+    $n = [];
+    $n[] = s78e(fn() => (new S78P)->same(5), __LINE__);
+    $n[] = s78e(fn() => (new S78K)->up(5), __LINE__);
+    $n[] = s78e(fn() => s78gen("x"), __LINE__);
+    $n[] = s78e(fn() => s78cb(5), __LINE__);
+    $cl = __LINE__; $c = function (int $q): string { return $q; };
+    $n[] = s78e(fn() => $c("w"), __LINE__);
+    check("sty3", $n === [
+        "S78P::same(): Argument #1 (\$o) must be of type S78P, int given, called in F on line L",
+        "S78K::up(): Argument #1 (\$o) must be of type S78P, int given, called in F on line L",
+        "s78gen(): Argument #1 (\$n) must be of type int, string given, called in F on line L",
+        "s78cb(): Argument #1 (\$c) must be of type callable, int given, called in F on line L",
+        "{closure:s78():" . $cl . "}(): Argument #1 (\$q) must be of type int, string given, called in F on line L"]
+        && $c("4") === "4");
+    $r = "5";
+    s78ref($r);
+    $g = s78gen("3");
+    $gv = $g->current();
+    $g->next();
+    check("sty4", $r === 6 && $gv === 3 && $g->getReturn() === "r" && (new S78K)->same(new S78K) instanceof S78K
+        && (new S78K)->up(new S78K) === 1 && s78cb(fn() => 3) === 3 && s78cb(new S78Inv) === 8 && s78cb('s78nret') === null);
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -4142,6 +4226,7 @@ function main() {
     s75dump(); // SECTION-CALL 75
     s76(); // SECTION-CALL 76
     s77(); // SECTION-CALL 77
+    s78(); // SECTION-CALL 78
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

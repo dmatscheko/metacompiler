@@ -186,30 +186,30 @@ CloseAhead  = :script(~~
     })()
 ~~) ;
 
-// A function definition: function name($a, $b) { ... } with explicit return. An
-// optional parameter type hint and return type are accepted and ignored (dynamic).
+// A function definition: function name($a, $b) { ... } with explicit return. The
+// parameter and return types are checked at the call and at each return.
 // 'function &name()' returns by REFERENCE (DefAmp, refFnEnter).
 Def         <~~ push(makeFun(takeAll())); refFnStack.pop() ~~>
             = [ AttrGrp ] KwFunction [ DefAmp ] Name <~~ push(up.in); refFnEnter(up.in); genPush(); fnEnter(); cloEnterFn(up.in, false) ~~> ParamList [ ReturnType ] Block ;
 DefAmp      <~~ defAmp = true ~~> = "&" ;
 ParamList   = "(" [ Param { "," Param } [ "," ] ] ")" ;
 // A parameter accepts real-world surface: promotion modifiers (public/readonly...),
-// a type hint, by-reference '&', variadic '...', and a default value. All but the
-// name are accepted and dropped (dynamic, create-on-assign); the default expression
-// is parsed then popped so only {param} reaches makeFun.
+// a type, by-reference '&', variadic '...', and a default value; makeParam folds
+// them into one record. A default spelled null makes the type nullable.
 Param       <~~ push({param: makeParam(takeAll())}) ~~>
-            = [ AttrGrp ] { PropMod } [ TypeHint ] [ PByRef ] [ PVariadic ] DollarName [ ParamDefault ] ;
+            = [ AttrGrp ] { PropMod } [ ParamType ] [ PByRef ] [ PVariadic ] DollarName [ ParamDefault ] ;
+ParamType   <~~ push({ptype: propTypeText(up.in)}) ~~> = TypeHint ;
 PByRef      <~~ push({pbyref: true}) ~~> = "&" ;
 PVariadic   <~~ push({pvariadic: true}) ~~> = "..." ;
-ParamDefault <~~ push({pdefault: pop()}) ~~> = PlainEq Expression ;
+ParamDefault <~~ push({pdefault: pop(), pnull: isNullDefault(up.in)}) ~~> = PlainEq Expression ;
 TypeHint    = [ "?" ] TypeAtom { ( "|" | "&" ) [ "?" ] TypeAtom } ;
 // A DNF type (PHP 8.2) parenthesizes an INTERSECTION inside a union: '(X&Y)|Z',
 // 'X|(A&B)'. The parenthesized group is just another atom of the surrounding
 // TypeHint, so one alternative covers every position a type may stand in (parameter,
-// return, property). Type hints carry no runtime meaning in this subset.
+// return, property).
 TypeAtom    = KwArray | TypeParen | [ "\\" ] Id { "\\" Id } ;
 TypeParen   = "(" TypeHint ")" ;
-ReturnType  = ":" TypeHint ;
+ReturnType  <~~ push({rtype: propTypeText(up.in.substring(1))}) ~~> = ":" TypeHint ;
 
 // class C { public function m() {...} } -- method modifiers are accepted and ignored.
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
@@ -416,10 +416,10 @@ FinallyClause <~~ push({finbody: finBody(finLeave(pop().body))}) ~~>
 Throw       <~~ push(excThrow(pop())) ~~>
             = KwThrow Expression Semi ;
 // declare(strict_types=1); / declare(ticks=1) { ... }. strict_types=1 turns off the
-// scalar coercion of a write to a typed property (strictTypes); there is no tick
-// handler and no alternate source encoding, and the BRACED form simply runs its body
-// where it stands. Parameter types are not checked at all, so under strict_types a
-// mismatched argument is accepted where real PHP raises a TypeError.
+// scalar coercion of a write to a typed property, an argument and a return value
+// (strictTypes) for the whole program, where PHP decides per file; there is no
+// tick handler and no alternate source encoding, and the BRACED form simply runs
+// its body where it stands.
 Declare     <~~ push(makeDeclare(takeAll())) ~~>
             = KwDeclare "(" DeclDirective { "," DeclDirective } [ "," ] ")" ( Semi | Block ) ;
 DeclDirective <~~ takeAll(); if (stripWs(up.in) == "strict_types=1") { strictTypes = true } ~~> = Id "=" Expression ;
@@ -1779,9 +1779,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // (zend_compile_params). Twin of emitArgCheck in php-to-llvm-ir.abnf.
     var CLO_SCOPE = {}
     function phpMissArg(params, at, argset, who, cls) {
-        var k = anytype
-        k = cls === CLO_SCOPE ? ctxSelf() : cls
-        var name = k != null && k != undefined && k.__isclass === true ? k.__name + "::" + who : who
+        var name = phpFnShown(who, cls)
         var req = 0
         var fixed = 0
         var passed = argset.pos.length
@@ -1793,6 +1791,90 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (passed > at) { phpRaise("ArgumentCountError", phsNotPassedMsg(name, at + 1, params[at].name)) }
         var where = argset.site == undefined ? "" : argset.site
         phpRaise("ArgumentCountError", phsMissArgMsg(name, passed, req, req == fixed, where))
+    }
+    // The name a function's errors show: cls::who for a method of class cls or a
+    // closure whose class scope (CLO_SCOPE: the running frame's) is cls.
+    function phpFnShown(who, cls) {
+        var k = anytype
+        k = cls === CLO_SCOPE ? ctxSelf() : cls
+        return k != null && k != undefined && k.__isclass === true ? k.__name + "::" + who : who
+    }
+    // Argument n (1-based) v of the parameter p as its declared type takes it, or
+    // zend_verify_arg_error's TypeError, which names the caller's site when the
+    // program made the call. The coercions are a typed property's (phpTypeFit), the
+    // caller's strict_types deciding them. Twin of js_phfit / js_phargerr in
+    // abnf/jsrtphp.go and lib/php-rt.metajs.
+    function phpArgFit(p, n, v, argset, who, cls) {
+        var r = anytype
+        r = phpTypeFit(p.rel ? phpTypeResolve(p.typ, true) : p.typ, v, ctxSelf())
+        if (r !== phpTypeBad) { return r }
+        var where = argset.site == undefined || argset.site == "" ? "" : ", called" + argset.site
+        phpRaise("TypeError", phpFnShown(who, cls) + "(): Argument #" + n + " (" + p.name + ") must be of type "
+            + phpTypeText(p.rel ? phpTypeResolve(p.typ, false) : p.typ) + ", " + phpValueName(v) + " given" + where)
+    }
+    // The body of a function declaring return type rtype, checking what it returns
+    // (zend_verify_return_type): a generator's and a void function's are not; a
+    // function that ends without a return statement returns none. Twin of
+    // js_phretfit in abnf/jsrtphp.go and lib/php-rt.metajs.
+    function phpRetCheck(body, rtype, isGen, who) {
+        var lc = phsCase(rtype, false)
+        if (rtype == "" || isGen || lc == "void" || phpLibDepth > 0) { return body }
+        var rel = phpTypeRel(rtype)
+        return function() {
+            var r = anytype
+            r = body()
+            var name = phpFnShown(who, CLO_SCOPE)
+            if (lc == "never") { phpRaise("TypeError", name + "(): never-returning function must not implicitly return") }
+            var ret = isSig(r) && r.ret === true
+            var v = anytype
+            v = ret ? r.v : null
+            var fit = anytype
+            fit = ret ? phpTypeFit(rel ? phpTypeResolve(rtype, true) : rtype, v, ctxSelf()) : phpTypeBad
+            if (fit === phpTypeBad) {
+                phpRaise("TypeError", name + "(): Return value must be of type " + phpTypeText(rel ? phpTypeResolve(rtype, false) : rtype)
+                    + ", " + (ret ? phpValueName(v) : "none") + " returned")
+            }
+            return {ret: true, v: fit}
+        }
+    }
+    // Does declared type typ name self, parent or static, which phpTypeResolve reads
+    // off the running frame?
+    function phpTypeRel(typ) {
+        var lc = phsCase(typ, false)
+        return lc.indexOf("self") >= 0 || lc.indexOf("parent") >= 0 || lc.indexOf("static") >= 0
+    }
+    // typ with self and parent replaced by the names of the frame's class and its
+    // parent (zend_type_to_string_resolved), and static by the called class when
+    // lsb. Twin of phpTypeResolve in abnf/jsrtphp.go and phTypeResolve in
+    // lib/php-rt.metajs.
+    function phpTypeResolve(typ, lsb) {
+        var alts = phpTypeAlts(typ)
+        var self = anytype
+        self = ctxSelf()
+        var out = ""
+        for (var i = 0; i < alts.length; i++) {
+            var a = alts[i]
+            var lc = phsCase(a, false)
+            if (lc == "self" && self != null) { a = self.__name }
+            else if (lc == "parent" && self != null && self.__super != null && self.__super != undefined) { a = self.__super.__name }
+            else if (lc == "static" && lsb && ctxStatic() != null) { a = ctxStatic().__name }
+            else if (a.indexOf("&") >= 0 && alts.length > 1) { a = "(" + a + ")" }
+            out = out + (i > 0 ? "|" : "") + a
+        }
+        return out
+    }
+    // A parameter type made nullable by a default spelled null: T becomes ?T, a
+    // union gains null (zend_compile_params' implicit nullability). Twin of
+    // phpTypeOrNull in php-to-llvm-ir.abnf.
+    function phpTypeOrNull(typ) {
+        if (typ == "" || phsCase(typ, false) == "mixed") { return typ }
+        var low = "|" + phsCase(typ, false) + "|"
+        if (typ.charAt(0) == "?" || low.indexOf("|null|") >= 0) { return typ }
+        return typ + "|null"
+    }
+    function isNullDefault(t) {
+        var lc = phsCase(t, false)
+        return lc == "=null" || lc == "=\\null"
     }
     // Does a required parameter follow parameter i, making its default none?
     function phpReqAfter(params, i) {
@@ -1810,6 +1892,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (named != null) { checkNamedArgs(params, argset) }
         for (var i = 0; i < params.length && params[i].variadic !== true; i++) {
             var have = i < argset.pos.length || (named != null && hasOwn(named, params[i].name))
+            if (have && params[i].typ != "") {
+                phpArgFit(params[i], i + 1, deref(i < argset.pos.length ? argset.pos[i] : named[params[i].name]), argset, who, cls)
+            }
             if (!have && (params[i].def == null || (named != null && phpReqAfter(params, i)))) { phpMissArg(params, i, argset, who, cls) }
         }
     }
@@ -1832,7 +1917,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                         var vc = argset.tgts[j]()
                         rebind(undefined, vc)
                         arrPush(rest, vc)
-                    } else { arrPush(rest, phpCopy(argValue(pos[j]))) }
+                    } else if (p.typ != "") { arrPush(rest, phpArgFit(p, j + 1, phpCopy(argValue(pos[j])), argset, who, cls)) }
+                    else { arrPush(rest, phpCopy(argValue(pos[j]))) }
                 }
                 if (named != null) {
                     for (var q = 0; q < argset.nkeys.length; q++) {
@@ -1858,7 +1944,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 phpRaise("Error", fnm + "(): Argument #" + (i + 1) + " (" + p.name + ") could not be passed by reference")
             }
             if (p.byref === true && i < argset.tgts.length && argset.tgts[i] != null) {
-                scopePut(scopes[scopes.length - 1], p.name, argset.tgts[i]())
+                var bc = argset.tgts[i]()
+                if (p.typ != "") { bc.v = phpArgFit(p, i + 1, bc.v, argset, who, cls) }
+                scopePut(scopes[scopes.length - 1], p.name, bc)
                 continue
             }
             if (p.byref === true && i >= pos.length && named != null && argset.ntgts != undefined && hasOwn(argset.ntgts, p.name)) {
@@ -1872,6 +1960,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             else if (named != null && hasOwn(named, p.name)) { v = argValue(named[p.name]); have = true }
             if (!have && (p.def == null || (named != null && phpReqAfter(params, i)))) { phpMissArg(params, i, argset, who, cls) }
             if (!have) { v = p.def() }
+            else if (p.typ != "") { v = phpArgFit(p, i + 1, v, argset, who, cls) }
             declVar(p.name, phpCopy(v))
         }
     }
@@ -4997,12 +5086,13 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
     }
     function splitClosure(items) {
-        var out = {params: [], body: null, byval: [], byref: []}
+        var out = {params: [], body: null, byval: [], byref: [], rtype: ""}
         var ps = out.params
         var bv = out.byval
         var br = out.byref
         for (var i = 0; i < items.length; i++) {
             if (items[i].body != undefined) { out.body = items[i].body }
+            else if (items[i].rtype != undefined) { out.rtype = items[i].rtype }
             else if (items[i].param != undefined) { ps.push(items[i].param) }
             else if (items[i].useval != undefined) { bv.push(items[i].useval) }
             else if (items[i].useref != undefined) { br.push(items[i].useref) }
@@ -5018,7 +5108,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var sc = cloLeave()
         var d = splitClosure(items)
         var params = d.params
-        var body = d.body
+        var body = phpRetCheck(d.body, d.rtype, isGen, sc.name)
         var byval = d.byval
         var byref = d.byref
         var uses = []
@@ -5258,7 +5348,6 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var isGen = genPop()
         var d = splitClosure(items)
         var params = d.params
-        var body = d.body
         var mark = 0
         for (var i = 0; i < items.length; i++) {
             if (items[i] != undefined && items[i].vmark != undefined) { mark = items[i].vmark }
@@ -5268,6 +5357,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         for (var k = 0; k < params.length; k++) { names.push(params[k].name) }
         var captured = varsSince(mark, names)
         var sc = cloLeave()
+        var body = phpRetCheck(d.body, d.rtype, isGen, sc.name)
         var desc = cloDesc(sc, captured, params)
         var self = sc.self
         return function() {
@@ -5627,7 +5717,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             var ps = []
             if (!isGet) {
                 ps.push(h.hparam == null || h.hparam == undefined
-                        ? {name: "$value", byref: false, variadic: false, def: null, promote: false}
+                        ? {name: "$value", byref: false, variadic: false, def: null, promote: false, typ: "", rel: false}
                         : h.hparam)
             }
             out.push({name: (isGet ? "__hget_" : "__hset_") + prop.name, params: ps, body: body})
@@ -6169,13 +6259,19 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var def = null
         var promote = false
         var vis = ""
+        var typ = ""
+        var dnull = false
         for (var i = 0; i < items.length; i++) {
             var it = items[i]
             if (typeof it == "string") { nm = it }
             else if (it == null || it == undefined) { continue }
+            else if (it.ptype != undefined) { typ = it.ptype }
             else if (it.pbyref != undefined) { byref = true }
             else if (it.pvariadic != undefined) { variadic = true }
-            else if (it.pdefault != undefined) { def = it.pdefault }
+            else if (it.pdefault != undefined) {
+                def = it.pdefault
+                dnull = it.pnull
+            }
             // Any visibility modifier on a parameter is constructor property
             // PROMOTION (8.0): the parameter also becomes a property of the object.
             else if (it.mod != undefined) {
@@ -6185,7 +6281,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         if (vis != "") { visNames[nm] = true }
         if (def == null && !variadic) { phpLibArgErr() }
-        return {name: nm, byref: byref, variadic: variadic, def: def, promote: promote, vis: vis}
+        // A library parameter stands for an internal one, whose types are not checked here.
+        if (phpLibDepth > 0) { typ = "" }
+        if (dnull) { typ = phpTypeOrNull(typ) }
+        return {name: nm, byref: byref, variadic: variadic, def: def, promote: promote, vis: vis, typ: typ, rel: phpTypeRel(typ)}
     }
     // The name is not always items[0]: a method may carry captured modifiers in front
     // of it, so the string is looked for rather than indexed. 'static' is remembered
@@ -6199,11 +6298,13 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var body = null
         var isStatic = false
         var vis = ""
+        var rtype = ""
         for (var i = 0; i < items.length; i++) {
             var it = items[i]
             if (typeof it == "string") { name = it }
             else if (it == null || it == undefined) { continue }
             else if (it.body != undefined) { body = it.body }
+            else if (it.rtype != undefined) { rtype = it.rtype }
             else if (it.param != undefined) { params.push(it.param) }
             else if (it.mod != undefined) {
                 if (it.mod == "static") { isStatic = true }
@@ -6211,7 +6312,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             }
         }
         if (vis != "") { mVisNames["$" + phsCase(name, false)] = true }
-        var rec = {name: name, params: params, body: body != null ? body : makeBody([]),
+        var rec = {name: name, params: params, body: phpRetCheck(body != null ? body : makeBody([]), rtype, isGen, name),
                    isStatic: isStatic, isGen: isGen, vis: vis}
         // A library method stands for an internal one, which checks its count
         // against [required, declared] (phpLibArgCheck); a library function's
@@ -7440,6 +7541,13 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (lc == "array") { return isArr(v) }
         if (lc == "iterable") { return isArr(v) || phpIsA(v, "Traversable") }
         if (lc == "object") { return isObj(v) || typeof v == "function" || isGen(v) }
+        // callable (a parameter type only) is judged by shape: a closure, a string,
+        // a two-element array or an object with __invoke. Whether the function or
+        // method a string or an array names exists is not checked.
+        if (lc == "callable") {
+            return typeof v == "function" || typeof v == "string" || (isArr(v) && v.keys.length == 2)
+                || (isObj(v) && classFind(v.__class, "__invoke") != null)
+        }
         if (lc == "self") { return phpIsA(v, self.__name) }
         if (lc == "parent") { return self.__super != null && self.__super != undefined && phpIsA(v, self.__super.__name) }
         return phpIsA(v, a)

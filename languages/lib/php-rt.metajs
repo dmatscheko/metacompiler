@@ -2376,6 +2376,11 @@ function phTypeIs(a, v, self) {
     if (lc == "array") { return phIsArr(v) }
     if (lc == "iterable") { return phIsArr(v) || phIsA(v, "Traversable") }
     if (lc == "object") { return phIsObj(v) || typeof v == "function" || phIsGen(v) }
+    if (lc == "callable") {
+        var p = phArrParts(v)
+        if (p !== undefined) { return p.k.length == 2 }
+        return typeof v == "string" || typeof v == "function" || (phIsObj(v) && typeof phMethodOf(v, "__invoke") == "function")
+    }
     if (lc == "self") { return phIsA(v, phStr(self["__name"])) }
     if (lc == "parent") {
         var sup = self["__super"]
@@ -2499,6 +2504,123 @@ function phSlotFit(k, name, typ, v) {
         phRaise("TypeError", "Cannot assign " + phValueName(v) + " to property " + phStr(k["__name"]) + "::$" + name + " of type " + phTypeText(typ))
     }
     return r
+}
+
+// The name a function's errors show: scope::who for a closure whose class scope
+// is the class scope. Twin of phpFnShown in abnf/jsrtphp.go.
+function phFnShown(who, scope) {
+    var name = phStr(who)
+    if (scope !== undefined && scope !== null && typeof scope == "object" && scope["__isclass"] === true) {
+        name = phStr(scope["__name"]) + "::" + name
+    }
+    return name
+}
+// typ with self and parent replaced by the names of class self and its parent
+// (zend_type_to_string_resolved), and static by the name of class lsb when there
+// is one. Twin of phpTypeResolve in abnf/jsrtphp.go.
+function phTypeResolve(typ, self, lsb) {
+    var alts = phTypeAlts(typ)
+    var out = ""
+    var i = 0
+    while (i < alts.length) {
+        var a = alts[i]
+        var lc = phsCase(a, false)
+        if (lc == "self") {
+            if (!rtIsNil(self)) { a = phStr(self["__name"]) }
+        } else if (lc == "parent") {
+            if (!rtIsNil(self) && !rtIsNil(self["__super"])) { a = phStr(self["__super"]["__name"]) }
+        } else if (lc == "static") {
+            if (!rtIsNil(lsb)) { a = phStr(lsb["__name"]) }
+        } else if (a.indexOf("&") >= 0 && alts.length > 1) { a = "(" + a + ")" }
+        if (i > 0) { out = out + "|" }
+        out = out + a
+        i = i + 1
+    }
+    return out
+}
+// A parameter or return type handed over by the emitter, resolved against the
+// frame's classes self and lsb (undefined when it spells neither).
+function phSigType(typ, self, lsb) {
+    if (rtIsNil(self) && rtIsNil(lsb)) { return phStr(typ) }
+    return phTypeResolve(phStr(typ), self, lsb)
+}
+// v, an argument value or a by-reference parameter's cell, as parameter type typ
+// takes it (phTypeFit; a cell gets the value written back), or phTypeBad.
+function phArgFit(typ, v, self) {
+    var c = phCellOf(v)
+    if (c === undefined) { return phTypeFit(typ, v, self) }
+    var r = phTypeFit(typ, c["v"], self)
+    if (r === phTypeBad) { return phTypeBad }
+    c["v"] = r
+    return v
+}
+// The argument v of a parameter of declared type typ as that type takes it
+// (zend_verify_arg_type), and undefined when it does not; when rest, v is a
+// variadic parameter's array, fitted element by element. self and lsb are the
+// frame's classes when typ spells self, parent or static. Twin of
+// m["js_phfit"] in abnf/jsrtphp.go.
+function js_phfit(v, typ, self, lsb, rest) {
+    var t = phSigType(typ, self, lsb)
+    if (rest == 0) {
+        var r = phArgFit(t, v, self)
+        if (r === phTypeBad) { return undefined }
+        return r
+    }
+    var p = phArrParts(v)
+    if (p === undefined) { return v }
+    var i = 0
+    while (i < p.v.length) {
+        var x = phArgFit(t, p.v[i], self)
+        if (x === phTypeBad) { return undefined }
+        p.v[i] = x
+        i = i + 1
+    }
+    return v
+}
+// The TypeError of argument n (1-based) v that js_phfit refused
+// (zend_verify_arg_error); for a variadic one (rest) the first element of the
+// array v that does not fit, counted on from n. where is the call site's text, ""
+// for a call made by the library. Twin of m["js_phargerr"] in abnf/jsrtphp.go.
+function js_phargerr(v, typ, self, n, pname, who, scope, where, rest) {
+    var t = phSigType(typ, self, undefined)
+    var bad = anytype
+    bad = phDeref(v)
+    var at = n
+    if (rest != 0) {
+        var p = phArrParts(bad)
+        if (p !== undefined) {
+            var i = 0
+            while (i < p.v.length) {
+                if (phArgFit(t, p.v[i], self) === phTypeBad) {
+                    bad = phDeref(p.v[i])
+                    at = n + i
+                    i = p.v.length
+                }
+                i = i + 1
+            }
+        }
+    }
+    var site = phStr(where)
+    if (site != "") { site = ", called" + site }
+    phRaise("TypeError", phFnShown(who, scope) + "(): Argument #" + at + " (" + phStr(pname) + ") must be of type "
+        + phTypeText(t) + ", " + phValueName(bad) + " given" + site)
+    return undefined
+}
+// v, what a function declaring return type typ returns (undefined: it ended
+// without a return statement), as that type takes it, or
+// zend_verify_return_error's TypeError. Twin of m["js_phretfit"] in
+// abnf/jsrtphp.go.
+function js_phretfit(v, typ, self, lsb, who, scope) {
+    var name = phFnShown(who, scope)
+    if (phsCase(phStr(typ), false) == "never") { phRaise("TypeError", name + "(): never-returning function must not implicitly return") }
+    var given = "none"
+    if (v !== undefined) {
+        var r = phTypeFit(phSigType(typ, self, lsb), v, self)
+        if (r !== phTypeBad) { return r }
+        given = phValueName(v)
+    }
+    phRaise("TypeError", name + "(): Return value must be of type " + phTypeText(phSigType(typ, self, undefined)) + ", " + given + " returned")
+    return undefined
 }
 
 function js_phpropisset(o, key, scope) {
@@ -3206,10 +3328,7 @@ function js_pharity(args, off, name, sig, min, max, cls) {
 // closure's class scope, when scope is a class, prefixes its name. Twin of
 // m["js_phargmiss"] in abnf/jsrtphp.go.
 function js_phargmiss(args, off, who, scope, sig, req, where, cls) {
-    var name = phStr(who)
-    if (scope !== undefined && scope !== null && typeof scope == "object" && scope["__isclass"] === true) {
-        name = phStr(scope["__name"]) + "::" + name
-    }
+    var name = phFnShown(who, scope)
     var s = phArgSlots(args, off, phStr(sig), req)
     if (s.gap >= 0) { throw phMkErrOf(cls, phsNotPassedMsg(name, s.gap + 1, "$" + s.names[s.gap])) }
     throw phMkErrOf(cls, phsMissArgMsg(name, s.n, req, req == s.fixed, phStr(where)))

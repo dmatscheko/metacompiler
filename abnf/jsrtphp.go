@@ -2984,6 +2984,12 @@ func (rt *jsrt) phpTypeIs(a string, v interface{}, self *jsObject) bool {
 		return phpIsArr(v) || rt.phpIsA(v, "Traversable")
 	case "object":
 		return phpIsObj(v) || phpIsGenOrClosure(v)
+	case "callable":
+		if keys, _, ok := phpArrParts(v); ok {
+			return len(keys.elems) == 2
+		}
+		_, isStr := v.(string)
+		return isStr || isCallable(v) || (phpIsObj(v) && rt.phpMethodOf(v, "__invoke") != nil)
 	case "self":
 		return rt.phpIsA(v, rt.phpStr(self.props["__name"]))
 	case "parent":
@@ -3144,6 +3150,76 @@ func (rt *jsrt) phpSlotFit(k *jsObject, name, typ string, v interface{}) interfa
 		rt.phpRaise("TypeError", "Cannot assign "+rt.phpValueName(v)+" to property "+rt.phpStr(k.props["__name"])+"::$"+name+" of type "+phpTypeText(typ))
 	}
 	return r
+}
+
+// phpTypeResolve is typ with self and parent replaced by the names of class self
+// and its parent (zend_type_to_string_resolved), and static by the name of class
+// lsb when there is one. Twin of phpTypeResolve in
+// languages/php-interpreter.abnf.
+func (rt *jsrt) phpTypeResolve(typ string, self, lsb *jsObject) string {
+	alts := phpTypeAlts(typ)
+	parts := make([]string, len(alts))
+	for i, a := range alts {
+		switch phpCase(a, false) {
+		case "self":
+			if self != nil {
+				a = rt.phpStr(self.props["__name"])
+			}
+		case "parent":
+			if self != nil {
+				if sup, ok := self.props["__super"].(*jsObject); ok {
+					a = rt.phpStr(sup.props["__name"])
+				}
+			}
+		case "static":
+			if lsb != nil {
+				a = rt.phpStr(lsb.props["__name"])
+			}
+		default:
+			if strings.Contains(a, "&") && len(alts) > 1 {
+				a = "(" + a + ")"
+			}
+		}
+		parts[i] = a
+	}
+	return strings.Join(parts, "|")
+}
+
+// phpSigType is a parameter or return type handed over by the emitter, resolved
+// against the frame's classes self and lsb (undefined when it spells neither),
+// and self.
+func (rt *jsrt) phpSigType(t, s, l interface{}) (string, *jsObject) {
+	typ := rt.phpStr(t)
+	self, _ := s.(*jsObject)
+	lsb, _ := l.(*jsObject)
+	if self != nil || lsb != nil {
+		typ = rt.phpTypeResolve(typ, self, lsb)
+	}
+	return typ, self
+}
+
+// phpArgFit is v, an argument value or a by-reference parameter's cell, as
+// parameter type typ takes it (phpTypeFit; a cell gets the value written back),
+// and false when it does not fit.
+func (rt *jsrt) phpArgFit(typ string, v interface{}, self *jsObject) (interface{}, bool) {
+	if c := phpCellOf(v); c != nil {
+		r, ok := rt.phpTypeFit(typ, c.props["v"], self)
+		if ok {
+			c.set("v", r)
+		}
+		return v, ok
+	}
+	return rt.phpTypeFit(typ, v, self)
+}
+
+// phpFnShown is the name a function's errors show: scope::who for a closure
+// whose class scope is the class scope.
+func (rt *jsrt) phpFnShown(who, scope interface{}) string {
+	name := rt.phpStr(who)
+	if sc, isO := scope.(*jsObject); isO && sc.props["__isclass"] == true {
+		name = rt.phpStr(sc.props["__name"]) + "::" + name
+	}
+	return name
 }
 
 // phpMethodVisOf is a class's own entry for method lc in its __mvis
@@ -3903,10 +3979,7 @@ func init() {
 		// js_phargmiss in languages/lib/php-rt.metajs and phpMissArg in
 		// php-interpreter.abnf.
 		m["js_phargmiss"] = func(a []uint64) uint64 {
-			name, sig := rt.phpStr(u(a[2])), rt.phpStr(u(a[4]))
-			if sc, isO := u(a[3]).(*jsObject); isO && sc.props["__isclass"] == true {
-				name = rt.phpStr(sc.props["__name"]) + "::" + name
-			}
+			name, sig := rt.phpFnShown(u(a[2]), u(a[3])), rt.phpStr(u(a[4]))
 			req := int(rt.toNumber(u(a[5])))
 			n, gap, fixed := rt.phpArgSlots(u(a[0]), int(rt.toNumber(u(a[1]))), sig, req)
 			msg := phpMissArgMsg(name, n, req, req == fixed, rt.phpStr(u(a[6])))
@@ -3914,6 +3987,86 @@ func init() {
 				msg = phpNotPassedMsg(name, gap+1, "$"+phpSigName(sig, gap))
 			}
 			panic(&jsThrown{value: rt.phpMkErrOf(u(a[7]), msg)})
+		}
+		// js_phfit(v, typ, self, lsb, rest): the argument v of a parameter of
+		// declared type typ as that type takes it (zend_verify_arg_type), and
+		// undefined when it does not; when rest, v is a variadic parameter's array,
+		// fitted element by element. self and lsb are the frame's classes when typ
+		// spells self, parent or static. Twin of js_phfit in
+		// languages/lib/php-rt.metajs and phpArgFit in php-interpreter.abnf.
+		m["js_phfit"] = func(a []uint64) uint64 {
+			typ, self := rt.phpSigType(u(a[1]), u(a[2]), u(a[3]))
+			if rt.toNumber(u(a[4])) != 0 {
+				_, vals, ok := phpArrParts(u(a[0]))
+				if !ok {
+					return a[0]
+				}
+				for i, x := range vals.elems {
+					r, fit := rt.phpArgFit(typ, x, self)
+					if !fit {
+						return w(jsUndef)
+					}
+					vals.elems[i] = r
+				}
+				return a[0]
+			}
+			r, ok := rt.phpArgFit(typ, u(a[0]), self)
+			if !ok {
+				return w(jsUndef)
+			}
+			return w(r)
+		}
+		// js_phargerr(v, typ, self, n, pname, who, scope, where, rest): the
+		// TypeError of argument n (1-based) v that js_phfit refused
+		// (zend_verify_arg_error); for a variadic one (rest) the first element of
+		// the array v that does not fit, counted on from n. where is the call
+		// site's text, "" for a call made by the library. Twin of js_phargerr in
+		// languages/lib/php-rt.metajs and phpArgFit in php-interpreter.abnf.
+		m["js_phargerr"] = func(a []uint64) uint64 {
+			typ, self := rt.phpSigType(u(a[1]), u(a[2]), nil)
+			v := phpDeref(u(a[0]))
+			n := int(rt.toNumber(u(a[3])))
+			if rt.toNumber(u(a[8])) != 0 {
+				if _, vals, ok := phpArrParts(v); ok {
+					for i, x := range vals.elems {
+						if _, fit := rt.phpArgFit(typ, x, self); !fit {
+							v, n = phpDeref(x), n+i
+							break
+						}
+					}
+				}
+			}
+			where := rt.phpStr(u(a[7]))
+			if where != "" {
+				where = ", called" + where
+			}
+			rt.phpRaise("TypeError", rt.phpFnShown(u(a[5]), u(a[6]))+"(): Argument #"+strconv.Itoa(n)+" ("+rt.phpStr(u(a[4]))+
+				") must be of type "+phpTypeText(typ)+", "+rt.phpValueName(v)+" given"+where)
+			return 0
+		}
+		// js_phretfit(v, typ, self, lsb, who, scope): v, what a function declaring
+		// return type typ returns (undefined: it ended without a return
+		// statement), as that type takes it, or zend_verify_return_error's
+		// TypeError. Twin of js_phretfit in languages/lib/php-rt.metajs and
+		// phpRetCheck in php-interpreter.abnf.
+		m["js_phretfit"] = func(a []uint64) uint64 {
+			name := rt.phpFnShown(u(a[4]), u(a[5]))
+			raw := rt.phpStr(u(a[1]))
+			if phpCase(raw, false) == "never" {
+				rt.phpRaise("TypeError", name+"(): never-returning function must not implicitly return")
+			}
+			v := u(a[0])
+			given := "none"
+			if v != jsUndef {
+				typ, self := rt.phpSigType(u(a[1]), u(a[2]), u(a[3]))
+				if r, ok := rt.phpTypeFit(typ, v, self); ok {
+					return w(r)
+				}
+				given = rt.phpValueName(v)
+			}
+			shown, _ := rt.phpSigType(u(a[1]), u(a[2]), nil)
+			rt.phpRaise("TypeError", name+"(): Return value must be of type "+phpTypeText(shown)+", "+given+" returned")
+			return 0
 		}
 		// The floor's js_rt_missvar hook, php half. Twin of js_phmissname in
 		// languages/lib/php-rt.metajs.

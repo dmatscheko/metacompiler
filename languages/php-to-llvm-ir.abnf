@@ -179,22 +179,22 @@ CloseAhead  = :script(~~
     })()
 ~~) ;
 
-// A function definition: function name($a, $b) { ... } with explicit return. An
-// optional parameter type hint and return type are accepted and ignored (dynamic).
+// A function definition: function name($a, $b) { ... } with explicit return. The
+// parameter and return types are checked at the call and at each return.
 // 'function &name()' returns by REFERENCE (DefAmp, refFnEnter).
 Def         <~~ push(makeFun(takeAll())); refFnStack.pop() ~~>
-            = [ AttrGrp ] KwFunction [ DefAmp ] Name <~~ push(noteFnName(up.in)); refFnEnter(up.in); fnEnter(); cloEnterFn(up.in, false) ~~> ParamList [ ReturnType ] Block ;
+            = [ AttrGrp ] KwFunction [ DefAmp ] Name <~~ push(noteFnName(up.in)); refFnEnter(up.in); genPush(); fnEnter(); cloEnterFn(up.in, false) ~~> ParamList [ ReturnType ] Block ;
 DefAmp      <~~ defAmp = true ~~> = "&" ;
 ParamList   = "(" [ Param { "," Param } [ "," ] ] ")" ;
 // A parameter accepts real-world surface: promotion modifiers (public/readonly...),
-// a type hint, by-reference '&', variadic '...', and a default value. All but the
-// name are accepted and dropped (dynamic, create-on-assign); the default expression
-// is parsed then popped so only {param} reaches makeFun.
+// a type, by-reference '&', variadic '...', and a default value; paramList folds
+// them into the parameter list. A default spelled null makes the type nullable.
 // A modifier on a constructor parameter is PHP 8's property PROMOTION
 // ('__construct(public int $x)' declares and assigns $this->x), so it is captured
 // rather than skipped; makeFun turns each promoted parameter into one prologue
 // assignment. On any other function a modifier is meaningless and simply ignored.
-Param       = [ AttrGrp ] { ParamMod } [ TypeHint ] [ ParamRef ] [ ParamRest ] DollarName <~~ push({param: pop()}) ~~> [ ParamDefault ] ;
+Param       = [ AttrGrp ] { ParamMod } [ ParamType ] [ ParamRef ] [ ParamRest ] DollarName <~~ push({param: pop()}) ~~> [ ParamDefault ] ;
+ParamType   <~~ push({ptype: propTypeText(up.in)}) ~~> = TypeHint ;
 // 'function f(&$n)': the argument is passed by REFERENCE. The callee simply keeps the
 // cell in its parameter slot (every read dereferences, every write writes through);
 // it is the CALL SITE that has to hand a cell over, which is why makeDefStmt records
@@ -205,15 +205,15 @@ ParamRest   <~~ push({prest: true}) ~~> = "..." ;
 ParamMod    <~~ push({pmod: up.in}) ~~> = Modifier ;
 // A default value is kept: it becomes a small prologue in the emitted body that
 // substitutes the default when the argument was not passed (see paramDefaults).
-ParamDefault <~~ push({pdef: pop()}) ~~> = PlainEq Expression ;
+ParamDefault <~~ push({pdef: pop(), pnull: isNullDefault(up.in)}) ~~> = PlainEq Expression ;
 TypeHint    = [ "?" ] TypeAtom { ( "|" | "&" ) [ "?" ] TypeAtom } ;
 // A DNF type (PHP 8.2) parenthesizes an INTERSECTION inside a union: '(X&Y)|Z',
 // 'X|(A&B)'. The parenthesized group is just another atom of the surrounding
 // TypeHint, so one alternative covers every position a type may stand in (parameter,
-// return, property). Type hints carry no runtime meaning in this subset.
+// return, property).
 TypeAtom    = KwArray | TypeParen | [ "\\" ] Id { "\\" Id } ;
 TypeParen   = "(" TypeHint ")" ;
-ReturnType  = ":" TypeHint ;
+ReturnType  <~~ push({rtype: propTypeText(up.in.substring(1))}) ~~> = ":" TypeHint ;
 
 // class C { public function m() {...} } -- method modifiers are accepted and ignored.
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
@@ -233,7 +233,7 @@ Member      = MethodDecl | ClassConst | UseTrait | PropDecl ;
 // '&' is accepted and ignored; an abstract/interface method has no body (';'
 // instead of a block -> empty method).
 MethodDecl  <~~ push({method: makeFun(takeAll())}) ~~>
-            = [ AttrGrp ] { MethMod } KwFunction [ "&" ] MethodName <~~ push(noteFnName(up.in)); fnEnter(); cloEnterFn(up.in, true) ~~> ParamList [ ReturnType ] ( Block | ";" ) ;
+            = [ AttrGrp ] { MethMod } KwFunction [ "&" ] MethodName <~~ push(noteFnName(up.in)); genPush(); fnEnter(); cloEnterFn(up.in, true) ~~> ParamList [ ReturnType ] ( Block | ";" ) ;
 // Class constants: 'const A = 1, B = 2;', with PHP 8.3's typed form ('const int
 // SIZE = 4') and any modifier (final/public/...). They are published on the class
 // descriptor under a 'k:' key and resolved by walking __super, so a subclass and an
@@ -1253,7 +1253,7 @@ StaticArgs  <~~ push({sargs: takeAll()}) ~~>
 // A closure: function($a) use ($b, $c) { ... } (optionally 'static'). The use list is
 // captured lexically (this subset captures the whole defining scope).
 ClosureExpr <~~ push(makeClosure(takeAll())) ~~>
-            = [ AttrGrp ] [ CloStatic ] KwFunction <~~ cloEnter(up.pos); fnEnter() ~~> [ "&" ] ParamList [ UseClause ] [ ReturnType ] Block ;
+            = [ AttrGrp ] [ CloStatic ] KwFunction <~~ cloEnter(up.pos); genPush(); fnEnter() ~~> [ "&" ] ParamList [ UseClause ] [ ReturnType ] Block ;
 // A static closure (or arrow function) binds no $this (cloEnter).
 CloStatic   <~~ cloStatic = true ~~> = "static" KwEnd ;
 UseClause   = KwUse "(" [ UseVar { "," UseVar } ] [ "," ] ")" ;
@@ -1586,7 +1586,7 @@ KwDeclare   = CiD :whitespace() CiE CiC CiL CiA CiR CiE :whitespace(Whitespace) 
 KwMatch     = CiM :whitespace() CiA CiT CiC CiH :whitespace(Whitespace) KwEnd ;
 // The tag fires BEFORE the parameter and body tags (they are further right in the
 // sequence), so it records where this arrow function's variable references start.
-KwFn        <~~ cloEnter(up.pos); push({vmark: varMark()}) ~~> = CiF :whitespace() CiN :whitespace(Whitespace) KwEnd ;
+KwFn        <~~ cloEnter(up.pos); genPush(); push({vmark: varMark()}) ~~> = CiF :whitespace() CiN :whitespace(Whitespace) KwEnd ;
 KwClone     = CiC :whitespace() CiL CiO CiN CiE :whitespace(Whitespace) KwEnd ;
 KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace(Whitespace) KwEnd ;
 
@@ -2588,6 +2588,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         return function(b) {
             var v = hNull
             if (t != null) { var r = t(b); b = r.b; v = r.v }
+            if (curRet != null) { v = emitRetFit(b, v) }
             // In a function returning by reference: the variable's cell, or null for a
             // value that is no variable, is left in the globals frame's \x00refret for
             // a caller that writes through the result (memoRefV).
@@ -3114,12 +3115,19 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     }
     var sawYield = false
     var genClosure = false
+    // Whether each function being walked yields, known when its maker pops it:
+    // a generator's return value is not checked against its declared type.
+    // Twin of genFlags in php-interpreter.abnf.
+    var genFlags = []
+    function genPush() { genFlags.push(false) }
+    function genPop() { return genFlags.length > 0 ? genFlags.pop() : false }
     function makeYieldArg(items) {
         if (items.length == 1) { return {yval: items[0]} }
         return {ykey: items[0], yval: items[1]}
     }
     function makeYield(items) {
         usesYield = true
+        if (genFlags.length > 0) { genFlags[genFlags.length - 1] = true }
         var fromT = null
         var keyT = null
         var valT = null
@@ -5008,9 +5016,11 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         return chk
     }
     function makeClosure(items) {
+        var isGen = genPop()
         fnLeave()
         var sc = cloLeave()
         var pl = paramList(items)
+        pl.rty = retTypeOf(pl.rty, isGen)
         var body = null
         var byVal = []
         var byRef = []
@@ -5040,7 +5050,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // consists of one synthesized 'return $e' - so it inherits the closure's whole
     // capture, its parameter binding and its try-aware return in one step.
     function makeArrowFn(items) {
+        var isGen = genPop()
         var pl = paramList(items)
+        pl.rty = retTypeOf(pl.rty, isGen)
         var bodyT = null
         var mark = 0
         for (var i = 0; i < items.length; i++) {
@@ -7213,9 +7225,60 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             if (!dflt) { req = i + 1 }
         }
         var max = fn.rest >= 0 ? -1 : fn.params.length
-        if (!lib && req == 0) { return null }
+        var tys = fn.tys == undefined ? [] : fn.tys
+        var rty = fn.rty == undefined ? "" : fn.rty
+        var typed = rty != ""
+        for (var t = 0; t < tys.length; t++) { if (tys[t] != "") { typed = true } }
+        if (!lib && req == 0 && !typed) { return null }
         if (lib && req == 0 && max < 0) { return null }
-        return {req: req, max: max, rest: fn.rest, who: who, sig: sigText(fn.params, fn.rest), clo: false, lib: lib}
+        return {req: req, max: max, rest: fn.rest, who: who, sig: sigText(fn.params, fn.rest), clo: false, lib: lib,
+                tys: tys, rty: rty, names: fn.params}
+    }
+    // The declared return type a function's returns are checked against: none for
+    // a generator's and a void function's.
+    function retTypeOf(rty, isGen) { return isGen || phsCase(rty, false) == "void" ? "" : rty }
+    // Does declared type typ name self, parent or static, which the check reads off
+    // the frame?
+    function typeRel(typ) {
+        var lc = phsCase(typ, false)
+        return lc.indexOf("self") >= 0 || lc.indexOf("parent") >= 0 || lc.indexOf("static") >= 0
+    }
+    // The classes self and static name in the running frame, for a type that
+    // spells one (typeRel), else undefined.
+    function typeSelfV(b, typ, which) {
+        if (!typeRel(typ)) { return hUndef }
+        return scopeProbe(b, emitStr(b, frameClsName(which)), hNull)
+    }
+    // The class scope a closure's error names it under.
+    function chkScopeV(b, chk) { return chk.clo ? scopeProbe(b, emitStr(b, frameClsName("self")), hNull) : hNull }
+    // Typed parameter i's argument argV as its type takes it (js_phfit), the
+    // variadic one element by element, or the TypeError js_phargerr words, naming
+    // the caller's site. An argument not passed is left to the count check. Twin
+    // of phpArgFit in php-interpreter.abnf.
+    function emitArgFit(b, chk, i, argV) {
+        var typ = chk.tys[i]
+        var restV = emitNum(b, i == chk.rest ? 1 : 0)
+        var selfV = typeSelfV(b, typ, "self")
+        var fitB = curF.NewBlock("")
+        var failB = curF.NewBlock("")
+        var joinB = curF.NewBlock("")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, argV, hUndef), joinB, fitB)
+        var r = callExt(fitB, "js_phfit", [argV, emitStr(fitB, typ), selfV, hUndef, restV])
+        fitB.NewCondBr(fitB.NewICmp(llvm.enum.IPredEQ, r, hUndef), failB, joinB)
+        callExt(failB, "js_phargerr", [argV, emitStr(failB, typ), selfV, emitNum(failB, i + 1), emitStr(failB, chk.names[i]),
+                                       emitStr(failB, chk.who), chkScopeV(failB, chk), siteText(failB), restV])
+        failB.NewBr(joinB) // never taken: js_phargerr raises
+        var v = joinB.NewPhi([llvm.ir.NewIncoming(argV, b), llvm.ir.NewIncoming(r, fitB), llvm.ir.NewIncoming(argV, failB)])
+        return {b: joinB, v: v}
+    }
+    // v, what a function declaring return type rty returns (hUndef: it ended
+    // without a return statement), as that type takes it, or js_phretfit's
+    // TypeError. Twin of phpRetCheck in php-interpreter.abnf.
+    var curRet = null
+    function emitRetFit(b, v) {
+        var typ = curRet.rty
+        return callExt(b, "js_phretfit", [v, emitStr(b, typ), typeSelfV(b, typ, "self"), typeSelfV(b, typ, "static"),
+                                          emitStr(b, curRet.who), chkScopeV(b, curRet)])
     }
     // The entry's check: a required parameter whose slot is empty, or for a library
     // method a slot past max that is filled, fails into js_phargmiss (a user
@@ -7235,6 +7298,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 many = truthy(b, callExt(b, "js_phgt", [callExt(b, "js_phlen", [argVs[chk.rest]]), emitNum(b, chk.max - chk.rest)]))
             } else { many = b.NewICmp(llvm.enum.IPredNE, callExt(b, "js_arg", [argsV, handle(chk.max + off)]), hUndef) }
             bad = bad == null ? many : b.NewOr(bad, many)
+        }
+        if (bad == null) {
+            b.NewBr(bodyB)
+            return
         }
         var failB = curF.NewBlock("")
         b.NewCondBr(bad, failB, bodyB)
@@ -7302,14 +7369,22 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             curThisSure = isMethod && isStatic !== true
         }
         sawYield = false
+        var savedRet = curRet
+        if (!isCtl) { curRet = chk != undefined && chk != null && chk.rty != undefined && chk.rty != "" ? chk : null }
         var endB = bodyStmt(bodyB)
         // The parameters are bound once the body is known: a by-value array is copied
         // only where the body may modify it in place, or always in a generator, whose
         // frame outlives the call.
         var argVs = []
+        var tys = chk != undefined && chk != null && chk.tys != undefined ? chk.tys : []
         for (var i = 0; i < params.length; i++) {
             var argV = callExt(b, "js_arg", [f.Params[1], handle(i + off)])
             argVs.push(argV)
+            if (i < tys.length && tys[i] != "") {
+                var fit = emitArgFit(b, chk, i, argV)
+                b = fit.b
+                argV = fit.v
+            }
             if (sawYield || curWrites["*"] === true || curWrites[params[i]] === true) {
                 argV = callExt(b, "js_phcopy", [argV])
             }
@@ -7322,7 +7397,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         curSelfName = savedSelf
         curThisOwn = savedOwn
         curThisSure = savedSure
-        endB.NewRet(hNull)
+        if (!isCtl && curRet != null) { endB.NewRet(emitRetFit(endB, hUndef)) }
+        else { endB.NewRet(hNull) }
+        curRet = savedRet
         genClosure = sawYield
         sawYield = savedSaw
         if (isCtl) { ctlLeave() }
@@ -7349,7 +7426,11 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var b = f.NewBlock("entry")
         var bodyB = f.NewBlock("")
         var argVs = []
-        for (var i = 0; i < n; i++) { argVs.push(callExt(b, "js_arg", [f.Params[1], handle(i + off)])) }
+        for (var i = 0; i < n; i++) {
+            var argV = callExt(b, "js_arg", [f.Params[1], handle(i + off)])
+            argVs.push(argV)
+            if (chk.tys != undefined && i < chk.tys.length && chk.tys[i] != "") { b = emitArgFit(b, chk, i, argV).b }
+        }
         emitArgCheck(b, chk, argVs, off, bodyB)
         var genV = callExt(bodyB, "js_genfn", [callExt(bodyB, "js_closure", [handle(idx), f.Params[0]])])
         bodyB.NewRet(callExt(bodyB, "js_call", [genV, hUndef, f.Params[1]]))
@@ -7367,30 +7448,39 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var rest = -1
         var pendingRef = false
         var pendingRest = false
+        var tys = []
+        var pendingType = ""
+        var rty = ""
         for (var i = 0; i < items.length; i++) {
             if (items[i] == undefined) { continue }
-            if (items[i].pref != undefined) { pendingRef = true }
+            if (items[i].ptype != undefined) { pendingType = items[i].ptype }
+            else if (items[i].rtype != undefined) { rty = items[i].rtype }
+            else if (items[i].pref != undefined) { pendingRef = true }
             else if (items[i].prest != undefined) { pendingRest = true }
             else if (items[i].param != undefined) {
                 if (pendingRef) { byref.push(params.length) }
                 if (pendingRest) { rest = params.length }
                 params.push(items[i].param)
+                tys.push(phpLibDepth > 0 ? "" : pendingType)
+                pendingType = ""
                 pendingRef = false
                 pendingRest = false
             }
             else if (items[i].pdef != undefined && params.length > 0) {
                 defs.push({name: params[params.length - 1], init: items[i].pdef})
+                if (items[i].pnull) { tys[tys.length - 1] = phpTypeOrNull(tys[tys.length - 1]) }
             }
         }
         if (rest >= 0) { dynPlaceVariadic = true }
         if (defs.length < params.length - (rest >= 0 ? 1 : 0)) { phpLibArgErr() }
-        return {params: params, defs: defs, byref: byref, rest: rest}
+        return {params: params, defs: defs, byref: byref, rest: rest, tys: tys, rty: phpLibDepth > 0 ? "" : rty}
     }
     // 'function f(...$rest)': the variadic parameter arrives as one argument holding
     // the collected PHP array (emitPhArgs packs the tail), so no prologue is needed -
     // this hook stays for symmetry with paramDefaults and simply passes the body on.
     function variadicPrologue(pl, body) { return body }
     function makeFun(raw) {
+        var isGen = genPop()
         fnLeave()
         cloLeave()
         // A method's modifiers come first; only its visibility and 'static' are kept.
@@ -7443,6 +7533,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             inner = makeBody(stmts)
         }
         return {name: name, params: params, defs: defs, byref: pl.byref, rest: pl.rest, pvis: pvis, vis: vis, st: isSt,
+                tys: pl.tys, rty: retTypeOf(pl.rty, isGen),
                 lib: phpLibDepth > 0 && name.substring(0, 5) != "__mec",
                 body: paramDefaults(defs, variadicPrologue(pl, inner))}
     }
@@ -7742,6 +7833,18 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     }
     // A declared type as var_dump prints it: no leading backslash on a name.
     // Twin of propTypeText in php-interpreter.abnf.
+    // A parameter type made nullable by a default spelled null: T becomes ?T, a
+    // union gains null. Twin of phpTypeOrNull in php-interpreter.abnf.
+    function phpTypeOrNull(typ) {
+        if (typ == "" || phsCase(typ, false) == "mixed") { return typ }
+        var low = "|" + phsCase(typ, false) + "|"
+        if (typ.charAt(0) == "?" || low.indexOf("|null|") >= 0) { return typ }
+        return typ + "|null"
+    }
+    function isNullDefault(t) {
+        var lc = phsCase(t, false)
+        return lc == "=null" || lc == "=\\null"
+    }
     function propTypeText(t) {
         var out = ""
         for (var i = 0; i < t.length; i++) {
