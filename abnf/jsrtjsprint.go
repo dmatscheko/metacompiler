@@ -324,7 +324,7 @@ func jsvIsProtoName(name string) bool {
 func (rt *jsrt) jsvProtoApply(recv interface{}, name string, args []interface{}) interface{} {
 	switch name {
 	case "hasOwnProperty":
-		return rt.jsvHasOwn(recv, jsvKeyEsc(rt.toString(argAt(args, 0))))
+		return rt.jsvHasOwn(recv, rt.jsvPropKey(argAt(args, 0)))
 	case "propertyIsEnumerable":
 		return jsvPropEnum(recv, jsvKeyEsc(rt.toString(argAt(args, 0))))
 	case "toString":
@@ -394,8 +394,8 @@ func jsvObjProtoName(k string) bool {
 // Twins: stNames in both *-interpreter.abnf, jvStaticHas in
 // languages/lib/js-rt.metajs.
 var jsvStaticNames = map[string][]string{
-	"Object": {"assign", "entries", "freeze", "fromEntries", "getOwnPropertyNames", "groupBy", "hasOwn", "is", "keys",
-		"seal", "values"},
+	"Object": {"assign", "entries", "freeze", "fromEntries", "getOwnPropertyNames", "getOwnPropertySymbols", "groupBy",
+		"hasOwn", "is", "keys", "seal", "values"},
 	"String":  {"fromCharCode", "fromCodePoint", "raw"},
 	"Promise": {"resolve", "reject", "all", "allSettled", "race", "any"},
 	"Array":   {"isArray"},
@@ -1407,9 +1407,10 @@ func jsvHidesMember(target interface{}, name string) bool {
 
 // A program's own property key that starts with "__" would be one of the value
 // model's hidden slots, so it is stored behind a leading U+0001, as is one that
-// itself starts with U+0001. A symbol's "__#@" key is left alone (it travels as a
-// string between ToPropertyKey and the slot); a private name's "__#" key is escaped
-// like any other here and reaches js_jsprivin and the member externs RAW.
+// itself starts with U+0001. That includes a string of a symbol key's "__#@" shape:
+// a symbol reaches the slot as its key through jsvPropKey / js_jspropkey, never
+// through here. A private name's "__#" key is escaped like any other here and
+// reaches js_jsprivin and the member externs RAW.
 // The emitters escape a member name at compile time and pass a
 // computed key through js_jskeyesc (or js_jspropkey), so the member externs see
 // stored keys; js_jshas and hasOwnProperty escape the key a program hands them,
@@ -1422,7 +1423,7 @@ func jsvKeyNeedsEsc(k string) bool {
 	if len(k) == 0 {
 		return false
 	}
-	return k[0] == 1 || (len(k) >= 2 && k[0] == '_' && k[1] == '_' && !strings.HasPrefix(k, "__#@"))
+	return k[0] == 1 || (len(k) >= 2 && k[0] == '_' && k[1] == '_')
 }
 func jsvKeyEsc(k string) string {
 	if jsvKeyNeedsEsc(k) {
@@ -2973,10 +2974,13 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	symN := 0
 	symWK := map[string]*jsObject{}
 	symReg := map[string]*jsObject{}
+	// Every symbol by its key, for Object.getOwnPropertySymbols.
+	symByKey := map[string]*jsObject{}
 	symMake := func(desc interface{}, key string) *jsObject {
 		s := newJSObject()
 		s.set("__symdesc", desc)
 		s.set("__symkey", key)
+		symByKey[key] = s
 		return s
 	}
 	symWellKnown := func(n string) *jsObject {
@@ -4274,6 +4278,10 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 				}
 				b := append([]uint64{}, a...)
 				b[1] = rt.wrapStr(k)
+				// js_jshas escapes a program's key; a symbol's is a stored key already.
+				if name == "js_jshas" {
+					return hasRaw(b)
+				}
 				return inner(b)
 			}
 			return inner(a)
@@ -4324,6 +4332,18 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 				}
 				return jsHUndefined
 			}
+		}
+		// Object.getOwnPropertySymbols: the symbols of the own symbol keys, in the order
+		// they were first written.
+		if name == "getOwnPropertySymbols" && jsvIsObjectGlobal(u(a[0])) {
+			if isUndefOrNull(arg0) {
+				rt.bigRaise("TypeError: Cannot convert undefined or null to object")
+			}
+			out := &jsArray{}
+			for _, k := range jsvSymKeys(arg0) {
+				out.elems = append(out.elems, symByKey[k])
+			}
+			return w(out)
 		}
 		if _, isSym := symKey(u(a[0])); isSym {
 			switch name {

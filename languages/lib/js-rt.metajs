@@ -438,6 +438,8 @@ var jvPvN = 0
 var jvSymN = 0
 var jvSymWK = {}
 var jvSymReg = {}
+// Every symbol by "$" + its key, for Object.getOwnPropertySymbols.
+var jvSymByKey = {}
 var jvSymbolFn = anytype
 // jvSymN > 0 as a boolean, for the operators' symbol test. The arithmetic ones ask it
 // only once jbStrict is armed, which the first symbol also does.
@@ -446,6 +448,7 @@ function jvSymMake(desc, key) {
     var s = {}
     s["__symdesc"] = desc
     s["__symkey"] = key
+    jvSymByKey["$" + key] = s
     jvSymN = jvSymN + 1
     jvSymOn = true
     jbStrict = true
@@ -687,9 +690,10 @@ function js_jswithtypeof(scope, name) {
 
 // A program's own property key that starts with "__" is stored behind a leading
 // U+0001 (as is one that itself starts with U+0001), so it cannot reach the value
-// model's hidden slots. A symbol's "__#@" key is left alone (it travels as a string
-// between ToPropertyKey and the slot); a private name's "__#" key is escaped like any
-// other here and reaches js_jsprivin and the member externs RAW. The emitter escapes a member name at compile time and a computed key with
+// model's hidden slots - a string of a symbol key's "__#@" shape too, because a symbol
+// reaches the slot as its key through js_jspropkey and the member externs, never
+// through here. A private name's "__#" key is escaped like any other here and
+// reaches js_jsprivin and the member externs RAW. The emitter escapes a member name at compile time and a computed key with
 // js_jskeyesc / js_jspropkey, so the member externs see stored keys; js_jshas and
 // hasOwnProperty escape the key a program hands them, and js_jskeys,
 // Object.keys / entries / getOwnPropertyNames and JSON unescape what they hand back.
@@ -702,10 +706,7 @@ var jvKeyMark2 = String.fromCharCode(2)
 function js_jskeyesc(k) {
     if (typeof k != "string") { return k }
     if (k >= "_`") { return k }
-    if (k >= "__") {
-        if (k >= "__#@") { if (k < "__#A") { return k } }
-        return jvKeyMark + k
-    }
+    if (k >= "__") { return jvKeyMark + k }
     if (k >= jvKeyMark2) { return k }
     if (k >= jvKeyMark) { return jvKeyMark + k }
     return k
@@ -1309,7 +1310,7 @@ function jvFnOwn(f, kk) {
 // Object.prototype.hasOwnProperty(k) for any receiver. See jsvHasOwn in
 // abnf/jsrtjsprint.go, its twin; jsHasOwn in both *-interpreter.abnf is the third.
 function jvHasOwn(self, k) {
-    var kk = js_jskeyesc(jvStr(k))
+    var kk = jvPropKey(k)
     if (jvIsCallable(self)) { return jvFnOwn(self, kk) }
     if (Array.isArray(self) || typeof self == "string") {
         if (kk === "length") { return true }
@@ -2106,8 +2107,8 @@ var jvStaticVals = {}
 function jvStaticHas(g, key) {
     if (g == "Object") {
         return key == "assign" || key == "entries" || key == "freeze" || key == "fromEntries" ||
-            key == "getOwnPropertyNames" || key == "groupBy" || key == "hasOwn" || key == "is" || key == "keys" ||
-            key == "seal" || key == "values"
+            key == "getOwnPropertyNames" || key == "getOwnPropertySymbols" || key == "groupBy" || key == "hasOwn" ||
+            key == "is" || key == "keys" || key == "seal" || key == "values"
     }
     if (g == "String") { return key == "fromCharCode" || key == "fromCodePoint" || key == "raw" }
     if (g == "Number") {
@@ -4231,6 +4232,18 @@ function jvNumMethod(x, name, args) {
 
 function jvObjectGlobalMethod(name, args) {
     var src = jvArg(args, 0)
+    // The symbols of the own symbol keys, in the order they were first written.
+    if (name == "getOwnPropertySymbols") {
+        if (jvUndefOrNull(src)) { jbRaise("TypeError: Cannot convert undefined or null to object") }
+        var sks = jvSymKeys(src)
+        var syms = []
+        var si = 0
+        while (si < sks.length) {
+            syms.push(jvSymByKey["$" + sks[si]])
+            si = si + 1
+        }
+        return syms
+    }
     if (name == "keys" || name == "getOwnPropertyNames") {
         var out = []
         // getOwnPropertyNames is Object.keys plus the NON-ENUMERABLE own names, and a
@@ -4346,7 +4359,6 @@ function jvObjectGlobalMethod(name, args) {
         if (jvUndefOrNull(src)) { jbRaise("TypeError: Cannot convert undefined or null to object") }
         var hk = anytype
         hk = jvArg(args, 1)
-        if (jvIsSym(hk)) { hk = hk["__symkey"] }
         return jvHasOwn(src, hk)
     }
     if (name == "groupBy") {

@@ -598,7 +598,7 @@ DotSuffix   = PrivateDotSuffix | "." Id <~~ push({kind:"member", name: idName(up
 // because the plain form's Id cannot start at a '#'.
 PrivateDotSuffix <~~ push(privDotSuffix(pop())) ~~>
             = "." "#" Id <~~ push(idName(up.in)) ~~> ;
-IndexSuffix <~~ push({kind:"member", txt: cpTxt(up.in, up.pos), key: jsPropKeyT(pop())}) ~~>
+IndexSuffix <~~ push({kind:"member", txt: cpTxt(up.in, up.pos), key: jsIdxKeyT(pop(), up.in)}) ~~>
             = "[" Expression "]" ;
 // The three optional forms get their own suffix productions rather than reusing
 // CallSuffix/IndexSuffix, because the marker they push differs by the 'opt' flag.
@@ -1038,9 +1038,9 @@ MemberKey   = MemberNameKey | MemberLitKey | MemberComputedKey ;
 MemberNameKey <~~ push({mk: memberNameKey(stripWs(idName(up.in)))}) ~~>
             = PrivateName | Id ;
 PrivateName = "#" Id ;
-MemberLitKey <~~ push({mkT: pop()}) ~~>
+MemberLitKey <~~ push({mkT: jsKeyStrT(pop())}) ~~>
             = StringLit | NumberLit | TemplateLit ;
-MemberComputedKey <~~ push({mkT: pop()}) ~~>
+MemberComputedKey <~~ push({mkT: jsKeyStrT(pop())}) ~~>
             = "[" AssignExpr "]" ;
 
 // A constructor. Its parameters may be parameter PROPERTIES: an access modifier in front
@@ -2273,16 +2273,43 @@ NotFuncHead = :script(~~
     var jsSymN = 0
     var jsSymWK = {}
     var jsSymReg = {}
+    // Every symbol by "$" + its key, for Object.getOwnPropertySymbols.
+    var jsSymByKey = {}
     function jsSymMake(desc, key) {
         var s = {}
         s["__symdesc"] = desc
         s["__symkey"] = key
+        jsSymByKey["$" + key] = s
         return s
     }
     function jsIsSym(v) { return v !== null && v !== undefined && typeof v == "object" && hasOwn(v, "__symkey") }
     // ToPropertyKey's symbol case: a computed key that is a symbol becomes its key.
     function jsPropKey(k) { return jsIsSym(k) ? k.__symkey : jsKeyEsc(k) }
+    // The thunks of a computed key, built at walk time. In lib/js-builtins.js (jsKeyRaw)
+    // a key written as a string literal is the engine's own and stays raw, so its
+    // "__#@iterator" is Symbol.iterator's key; any other key there is a program's and is
+    // escaped. Every class member key of that file is a literal.
     function jsPropKeyT(t) { return function() { return jsPropKey(t()) } }
+    function jsIdxKeyT(t, txt) {
+        if (jsKeyRaw && jsLitKeyText(txt)) { return t }
+        return jsPropKeyT(t)
+    }
+    // Is txt, an index suffix's text, a bracketed string literal with no escape in it?
+    function jsLitKeyText(txt) {
+        var n = txt.length
+        if (n < 4 || txt.charCodeAt(0) != 91 || txt.charCodeAt(n - 1) != 93) { return false }
+        var q = txt.charCodeAt(1)
+        if ((q != 34 && q != 39) || txt.charCodeAt(n - 2) != q) { return false }
+        for (var i = 2; i < n - 2; i++) {
+            var ch = txt.charCodeAt(i)
+            if (ch == q || ch == 92) { return false }
+        }
+        return true
+    }
+    function jsKeyStrT(t) {
+        if (jsKeyRaw) { return t }
+        return function() { return jsKeyStr(t()) }
+    }
     function jsKeyStr(k) { return jsIsSym(k) ? k.__symkey : jsKeyEsc("" + k) }
     // See the twin of this comment in js-interpreter.abnf.
     var jsKeyMark = String.fromCharCode(1)
@@ -2290,10 +2317,9 @@ NotFuncHead = :script(~~
     function jsKeyEsc(k) {
         if (jsKeyRaw || typeof k != "string" || k.length == 0) { return k }
         var c = k.charCodeAt(0)
-        if (c == 1 || (c == 95 && k.length >= 2 && k.charCodeAt(1) == 95 && !jsSymKeyLike(k))) { return jsKeyMark + k }
+        if (c == 1 || (c == 95 && k.length >= 2 && k.charCodeAt(1) == 95)) { return jsKeyMark + k }
         return k
     }
-    function jsSymKeyLike(k) { return k.length >= 4 && k.charCodeAt(2) == 35 && k.charCodeAt(3) == 64 }
     function jsKeyUnesc(k) {
         if (typeof k == "string" && k.length > 0 && k.charCodeAt(0) == 1) { return k.substring(1) }
         return k
@@ -2738,7 +2764,7 @@ NotFuncHead = :script(~~
     }
     // See the twin of this comment in js-interpreter.abnf.
     function jsHasOwn(self, k) {
-        var kk = jsKeyEsc("" + k)
+        var kk = jsKeyStr(k)
         if (typeof self == "function") { return fnOwn(self, kk) }
         if (typeof self == "string" || Array.isArray(self)) {
             if (kk == "length") { return true }
@@ -3268,6 +3294,14 @@ NotFuncHead = :script(~~
         if (name == "keys") { return {v: jsKeysUnesc(jsOwnKeys(src))} }
         // See the twin of this comment in js-interpreter.abnf.
         if (name == "getOwnPropertyNames") { return {v: jsKeysUnesc(jsGopnKeys(src))} }
+        // The symbols of the own symbol keys, in the order they were first written.
+        if (name == "getOwnPropertySymbols") {
+            if (src === undefined || src === null) { biRaise("TypeError: Cannot convert undefined or null to object") }
+            var sks = jsSymKeysOf(src)
+            var syms = []
+            for (var si = 0; si < sks.length; si++) { syms.push(jsSymByKey["$" + sks[si]]) }
+            return {v: syms}
+        }
         if (name == "values") {
             var vs = []
             var kv = jsOwnKeys(src)
@@ -3308,7 +3342,7 @@ NotFuncHead = :script(~~
             if (src === undefined || src === null) { biRaise("TypeError: Cannot convert undefined or null to object") }
             var hk = anytype // The key: a symbol, or any value ToPropertyKey reads as a string.
             hk = args.length > 1 ? args[1] : undefined
-            return {v: jsHasOwn(src, jsIsSym(hk) ? hk.__symkey : hk)}
+            return {v: jsHasOwn(src, hk)}
         }
         if (name == "groupBy") {
             if (src === undefined || src === null) { biRaise("TypeError: Object.groupBy called on null or undefined") }
@@ -4365,8 +4399,8 @@ NotFuncHead = :script(~~
     // the rest of this project puts on a descriptor walk.
     // staticValue: see the twin in js-interpreter.abnf.
     var stVals = {}
-    var stNames = {"Object": ["assign", "entries", "freeze", "fromEntries", "getOwnPropertyNames", "groupBy", "hasOwn",
-                              "is", "keys", "seal", "values"],
+    var stNames = {"Object": ["assign", "entries", "freeze", "fromEntries", "getOwnPropertyNames", "getOwnPropertySymbols",
+                              "groupBy", "hasOwn", "is", "keys", "seal", "values"],
                    "String": ["fromCharCode", "fromCodePoint", "raw"], "Promise": ["resolve", "reject", "all", "allSettled", "race", "any"],
                    "Array": ["isArray"], "Symbol": ["for", "keyFor"],
                    "Number": ["isFinite", "isInteger", "isNaN", "isSafeInteger", "parseFloat", "parseInt"]}
@@ -7226,7 +7260,7 @@ NotFuncHead = :script(~~
     // The name a member is filed under. A computed key is only known at run time, so it
     // is a thunk and this is called from inside the class-building thunk.
     function memberKey(m) {
-        if (m.keyT != undefined && m.keyT != null) { return jsKeyStr(m.keyT()) }
+        if (m.keyT != undefined && m.keyT != null) { return m.keyT() }
         return m.name
     }
     // Every TypeScript member production pushes {decs} first and {mods} second, so the

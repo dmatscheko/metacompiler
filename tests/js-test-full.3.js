@@ -1,4 +1,4 @@
-// Full-syntax test: JavaScript - part 3 of 4, sections 44-56, 58-71 and 73-93.
+// Full-syntax test: JavaScript - part 3 of 4, sections 44-56, 58-71 and 73-94.
 //
 // THE JS RATCHET IS FOUR FILES: as one file its -frozen interpreter leg ran into
 // ./test.sh --full's time brake (peak memory grew superlinearly with the file), and
@@ -6,7 +6,7 @@
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43, engine agreement, generators, Error, Math
-//   tests/js-test-full.3.js   sections 44-56, 58-71 and 73-93, the call/class/private-name
+//   tests/js-test-full.3.js   sections 44-56, 58-71 and 73-94, the call/class/private-name
 //                             model, the Unicode identifier tables, iterators, derived
 //                             constructors, JSON, guards, Set and Map, iterator closing,
 //                             hasOwnProperty, delete, Object.prototype, extends Object,
@@ -2394,6 +2394,45 @@ function s93() {
     })
 }
 
+// ===== SECTION 94: a string key shaped like a symbol's; Object.getOwnPropertySymbols =====
+// A program's string key "__#@iterator" is an ordinary string key, not Symbol.iterator,
+// however a symbol's key is spelled inside the engine; getOwnPropertySymbols lists the
+// own symbol keys in the order they were first written; iterating null or undefined is
+// GetIterator's TypeError. Values read off node 24.
+class K94 { ["__#@iterator"]() { return [1][Symbol.iterator]() } }
+function s94() {
+    const ks = ["__#@iterator", "__#@x"]
+    const o = {}
+    o[ks[0]] = 5
+    const p = JSON.parse('{"__#@iterator":3,"a":4}')
+    const q = {"__#@x": 1}
+    q[Symbol.iterator] = 2
+    q[ks[0]] = 3
+    function te(f) { try { f(); return "-" } catch (e) { return e instanceof TypeError ? "T" : "E" } }
+    check("sk94a", Object.keys(o).join() === "__#@iterator" && typeof o[Symbol.iterator] === "undefined" &&
+        JSON.stringify(o) === '{"__#@iterator":5}' && ks[1] in q && Object.keys(p).join() === "__#@iterator,a")
+    check("sk94b", te(() => [...p]) === "T" && te(() => [...new K94()]) === "T" && q[Symbol.iterator] === 2 &&
+        q[ks[0]] === 3 && Object.keys(q).join() === "__#@x,__#@iterator" && [...new Set([1, 1, 2])].join() === "1,2")
+    const s1 = Symbol("d")
+    const so = {}
+    so[Symbol.for("f94")] = 1
+    so.a = 0
+    so[s1] = 2
+    so[Symbol.asyncIterator] = 3
+    delete so[Symbol.for("f94")]
+    const syms = Object.getOwnPropertySymbols(so)
+    const gs = Object.getOwnPropertySymbols
+    check("sy94c", syms.length === 2 && syms[0] === s1 && syms[1] === Symbol.asyncIterator &&
+        Object.getOwnPropertySymbols({x: 1}).length === 0 && gs(so).length === 2 && gs.length === 1 &&
+        te(() => Object.getOwnPropertySymbols(null)) === "T" && so.hasOwnProperty(s1) && Object.keys(structuredClone(q)).join() === "__#@x,__#@iterator")
+    const nv = [null, undefined]
+    const msg = []
+    for (let i = 0; i < nv.length; i++) {
+        try { const r = [...nv[i]] } catch (e) { msg.push(e instanceof TypeError && e.message.indexOf("is not iterable") >= 0 && e.message.indexOf("__") < 0) }
+    }
+    check("it94d", msg.join() === "true,true")
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -2445,6 +2484,7 @@ function main() {
     s91() // SECTION-CALL 91
     s92() // SECTION-CALL 92
     s93() // SECTION-CALL 93
+    s94() // SECTION-CALL 94
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

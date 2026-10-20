@@ -4201,6 +4201,45 @@ function s87(): void {
     })
 }
 
+// ===== SECTION 88: a string key shaped like a symbol's; Object.getOwnPropertySymbols =====
+// A program's string key "__#@iterator" is an ordinary string key, not Symbol.iterator,
+// however a symbol's key is spelled inside the engine; getOwnPropertySymbols lists the
+// own symbol keys in the order they were first written; iterating null or undefined is
+// GetIterator's TypeError. Values read off node 24.
+class K88 { ["__#@iterator"]() { return [1][Symbol.iterator]() } }
+function s88() {
+    const ks = ["__#@iterator", "__#@x"]
+    const o: any = {}
+    o[ks[0]] = 5
+    const p = JSON.parse('{"__#@iterator":3,"a":4}')
+    const q: any = {"__#@x": 1}
+    q[Symbol.iterator] = 2
+    q[ks[0]] = 3
+    function te(f: () => any) { try { f(); return "-" } catch (e) { return e instanceof TypeError ? "T" : "E" } }
+    check("sk88a", Object.keys(o).join() === "__#@iterator" && typeof o[Symbol.iterator] === "undefined" &&
+        JSON.stringify(o) === '{"__#@iterator":5}' && ks[1] in q && Object.keys(p).join() === "__#@iterator,a")
+    check("sk88b", te(() => [...p]) === "T" && te(() => [...(new K88() as any)]) === "T" && q[Symbol.iterator] === 2 &&
+        q[ks[0]] === 3 && Object.keys(q).join() === "__#@x,__#@iterator" && [...new Set([1, 1, 2])].join() === "1,2")
+    const s1 = Symbol("d")
+    const so: any = {}
+    so[Symbol.for("f88")] = 1
+    so.a = 0
+    so[s1] = 2
+    so[Symbol.asyncIterator] = 3
+    delete so[Symbol.for("f88")]
+    const syms = Object.getOwnPropertySymbols(so)
+    const gs = Object.getOwnPropertySymbols
+    check("sy88c", syms.length === 2 && syms[0] === s1 && syms[1] === Symbol.asyncIterator &&
+        Object.getOwnPropertySymbols({x: 1}).length === 0 && gs(so).length === 2 && gs.length === 1 &&
+        te(() => Object.getOwnPropertySymbols(null as any)) === "T" && so.hasOwnProperty(s1) && Object.keys(structuredClone(q)).join() === "__#@x,__#@iterator")
+    const nv: any[] = [null, undefined]
+    const msg: boolean[] = []
+    for (let i = 0; i < nv.length; i++) {
+        try { const r = [...nv[i]] } catch (e: any) { msg.push(e instanceof TypeError && e.message.indexOf("is not iterable") >= 0 && e.message.indexOf("__") < 0) }
+    }
+    check("it88d", msg.join() === "true,true")
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -4291,6 +4330,7 @@ function main(): number {
     s85(); // SECTION-CALL 85
     s86(); // SECTION-CALL 86
     s87(); // SECTION-CALL 87
+    s88(); // SECTION-CALL 88
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

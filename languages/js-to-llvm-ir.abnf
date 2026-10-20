@@ -718,7 +718,7 @@ DotSuffix   = "." ( PrivSuffix | Id <~~ push({kind:"member", name: idName(up.in)
 // ClassPrivate),
 // which is what keeps it out of js_keys, so out of for-in and object spread.
 PrivSuffix  = "#" Id <~~ push({kind:"member", name: "#" + idName(up.in), key: privRefConst(idName(up.in))}) ~~> ;
-IndexSuffix <~~ push({kind:"member", txt: cpTxt(up.in, up.pos), key: keyEscT(pop())}) ~~>
+IndexSuffix <~~ push({kind:"member", txt: cpTxt(up.in, up.pos), key: idxKeyT(pop(), up.in)}) ~~>
             = "[" Expression "]" ;
 // The three optional forms carry the same payload as their plain counterparts plus the
 // 'opt' kind, which is what makes foldCallMember emit the nullish guard in front of them.
@@ -3779,6 +3779,12 @@ NotFuncHead = :script(~~
     // under llvm.Run only js_jsvget finds them there.
     function emitIterOf(b, v, isAsync) {
         var fV = anytype // The iterator method: a handle, or a phi of two.
+        // undefined and null (handles 0 and 1) have no member to read: straight to the
+        // TypeError.
+        var chkB = curF.NewBlock("")
+        var getB = curF.NewBlock("")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredULE, v, handle(1)), chkB, getB)
+        b = getB
         if (isAsync) {
             var aV = callExt(b, "js_jsvget", [v, emitStr(b, "__#@asyncIterator")])
             var syncB = curF.NewBlock("")
@@ -3792,7 +3798,6 @@ NotFuncHead = :script(~~
             fV = callExt(b, "js_jsvget", [v, emitStr(b, "__#@iterator")])
         }
         var callB = curF.NewBlock("")
-        var chkB = curF.NewBlock("")
         var joinB = curF.NewBlock("")
         b.NewCondBr(truthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [fV]), emitStr(b, "function")])), callB, chkB)
         var rV = callExt(jsThisSet(callB, v), "js_call", [fV, v, callExt(callB, "js_arr_new", [])])
@@ -4031,8 +4036,27 @@ NotFuncHead = :script(~~
     function jsKeyEsc(k) {
         if (k.length == 0 || c.curFile() == "js-builtins.js") { return k }
         var k0 = k.charCodeAt(0)
-        if (k0 == 1 || (k0 == 95 && k.length >= 2 && k.charCodeAt(1) == 95 && !(k.length >= 4 && k.charCodeAt(2) == 35 && k.charCodeAt(3) == 64))) { return String.fromCharCode(1) + k }
+        if (k0 == 1 || (k0 == 95 && k.length >= 2 && k.charCodeAt(1) == 95)) { return String.fromCharCode(1) + k }
         return k
+    }
+    // In lib/js-builtins.js a key written as a string literal is the engine's own and
+    // stays raw, so its "__#@iterator" is Symbol.iterator's key; any other key there is a
+    // program's. Every class member key of that file is a literal (emitMemberKey). Twin:
+    // jsIdxKeyT / jsLitKeyText in js-interpreter.abnf.
+    function idxKeyT(t, txt) {
+        if (c.curFile() == "js-builtins.js" && jsLitKeyText(txt)) { return t }
+        return keyEscT(t)
+    }
+    function jsLitKeyText(txt) {
+        var n = txt.length
+        if (n < 4 || txt.charCodeAt(0) != 91 || txt.charCodeAt(n - 1) != 93) { return false }
+        var q = txt.charCodeAt(1)
+        if ((q != 34 && q != 39) || txt.charCodeAt(n - 2) != q) { return false }
+        for (var i = 2; i < n - 2; i++) {
+            var ch = txt.charCodeAt(i)
+            if (ch == q || ch == 92) { return false }
+        }
+        return true
     }
     function keyEscT(t) {
         return function(b) {
@@ -6577,8 +6601,10 @@ NotFuncHead = :script(~~
     // A key descriptor as a {b, v} pair in the class-definition block.
     function emitMemberKey(b, m) {
         if (m.nameT != undefined) {
-            // A computed key may be a symbol, which js_jspropkey turns into its key.
+            // A computed key may be a symbol, which js_jspropkey turns into its key;
+            // lib/js-builtins.js's are the engine's own keys, raw.
             var kr = m.nameT(b)
+            if (c.curFile() == "js-builtins.js") { return kr }
             return {b: kr.b, v: callExt(kr.b, "js_jspropkey", [kr.v])}
         }
         return {b: b, v: emitStr(b, memberNameEsc(m))}

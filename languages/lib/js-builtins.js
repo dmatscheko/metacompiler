@@ -14,8 +14,9 @@
 // method when it has one (jsIterOf / emitIterOf). This file spells that key as the
 // string Symbol.iterator stands for, "__#@iterator", so that a program which never
 // names a symbol itself has none, and the member externs skip their symbol test (see
-// jvSymN in lib/js-rt.metajs). The fields are '__'-prefixed so they stay out of
-// Object.keys and JSON.
+// jvSymN in lib/js-rt.metajs). The grammars take every key of this file raw (jsKeyRaw,
+// keyEscT), where a program's string of that shape is escaped and stays a string. The
+// fields are '__'-prefixed so they stay out of Object.keys and JSON.
 //
 // Every message and value below is node 24's.
 
