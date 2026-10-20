@@ -124,7 +124,7 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-633 kotlin: `+=` on a `val` mutable collection reassigns instead of plusAssign · P1 · KT · OPEN [V spec-only]
+### T-633 kotlin: `+=` on a `val` mutable collection reassigns instead of plusAssign · P1 · KT · IN PROGRESS (KT worker, round 6) [V spec-only]
 `val l = mutableListOf(1); val t = l; l += 2; println(t)` → `[1]` in all engines (Kotlin `[1, 2]`: for a `val` of a mutable
 collection `+=` is plusAssign, in place; for a `var` of a read-only type it is plus). Same for sets and maps; `ts += 3` on a
 sortedSetOf appends unsorted. kSetName / applyOp treat `x += y` as `x = x + y` and neither grammar records val vs var for locals.
