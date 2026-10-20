@@ -7201,6 +7201,50 @@ def s141():
           and S141m.log2(5e-324) == -1074.0 and S141m.log2(0.75) == -0.4150374992788438
           and errs2 == ["expected a finite input, got -inf"] * 3 and str(S141m.sin(float("nan"))) == "nan")
 
+# ===== SECTION 142: __index__, class keywords to __init_subclass__, slotted __dict__ =====
+class S142I:
+    def __init__(self, v):
+        self.v = v
+
+    def __index__(self):
+        return self.v
+
+class S142Base:
+    seen = []
+
+    def __init_subclass__(cls, tag=None, **kw):
+        super().__init_subclass__(**kw)
+        cls.tag = tag
+        S142Base.seen.append(cls.__name__)
+
+class S142X(S142Base, tag="x"):
+    pass
+
+class S142Slot:
+    __slots__ = ("a",)
+
+def s142():
+    check("index1", [10, 20, 30][S142I(1)] == 20 and "abc"[S142I(-1)] == "c" and hex(S142I(255)) == "0xff"
+          and bin(S142I(5)) == "0b101")
+    try:
+        class Bad(tag=1):
+            pass
+        check("initsub1", False)
+    except TypeError as e:
+        check("initsub1", S142X.tag == "x" and S142Base.seen == ["S142X"]
+              and str(e) == "s142.<locals>.Bad.__init_subclass__() takes no keyword arguments")
+    msgs = []
+    try:
+        vars(S142Slot())
+    except TypeError as e:
+        msgs.append(str(e))
+    try:
+        S142Slot().__dict__
+    except AttributeError as e:
+        msgs.append(str(e))
+    check("slotdict", not hasattr(S142Slot(), "__dict__") and hasattr(S142I(1), "__dict__")
+          and msgs == ["vars() argument must have __dict__ attribute", "'S142Slot' object has no attribute '__dict__'"])
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -7340,5 +7384,6 @@ def main():
     s139() # SECTION-CALL 139
     s140() # SECTION-CALL 140
     s141() # SECTION-CALL 141
+    s142() # SECTION-CALL 142
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

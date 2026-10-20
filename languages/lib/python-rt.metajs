@@ -2108,7 +2108,13 @@ function pyGetAttrRaw(obj, name) {
     var cls = pyInstClassOf(obj)
     if (cls != null) {
         if (name == "__class__") { return cls }
-        if (name == "__dict__") { return pyInstanceDict(obj) }
+        // A slotted instance has none (Go: pyGetAttr).
+        if (name == "__dict__") {
+            if (!pySlotsAllow(cls, name)) {
+                pyRaiseExc("AttributeError", "'" + pyToStr(cls["__name"]) + "' object has no attribute '__dict__'")
+            }
+            return pyInstanceDict(obj)
+        }
         if (obj[name] !== undefined) { return obj[name] }
         if (pyNoneBound(obj, name)) { return undefined }
         if (pyLookupHas(cls, name)) {
@@ -3072,7 +3078,10 @@ function pyDictFromKeys(ks, dv) {
 }
 
 // vars(o) IS o.__dict__ - CPython's own definition.
-function js_pyvars(o) { return pyGetAttr(o, "__dict__") }
+function js_pyvars(o) {
+    if (!js_pyhasattr(o, "__dict__")) { pyRaiseExc("TypeError", "vars() argument must have __dict__ attribute") }
+    return pyGetAttr(o, "__dict__")
+}
 
 // dir(o) of a user class or of its instance: the instance's attributes, the
 // own members of every class on the resolution order and the fixed names of
@@ -6657,6 +6666,7 @@ function js_pyhexstr(n) { return pyRadixOf(n, 16, "0x") }
 function js_pyoctstr(n) { return pyRadixOf(n, 8, "0o") }
 
 function pyRadixOf(n, base, prefix) {
+    if (pyHasIndex(n)) { return pyRadixOf(pyIndexOf(n), base, prefix) }
     if (typeof n == "boolean") {
         if (n) { return prefix + "1" }
         return prefix + "0"
@@ -6893,7 +6903,8 @@ function pyDHasAttr(obj, name) {
     }
     var cls = pyInstClassOf(obj)
     if (cls !== null && cls !== undefined) {
-        if (name == "__class__" || name == "__dict__" || name == "__new__") { return true }
+        if (name == "__dict__") { return pySlotsAllow(cls, name) }
+        if (name == "__class__" || name == "__new__") { return true }
         if (obj[name] !== undefined || pyNoneBound(obj, name)) { return true }
         // A property answers what its getter does (Go: pyHasAttrRaw).
         if (pyLookupHas(cls, name) && pyDIsProp(pyLookupVal(cls, name))) { return pyDHookHas(obj, name) }
@@ -8123,6 +8134,19 @@ function js_pyidx(c, k) {
 }
 
 
+// Go: (*jsrt).pyIndexOf. An object whose class defines __index__ is the int it
+// answers, which must be an int.
+function pyHasIndex(v) {
+    var c = pyInstClassOf(v)
+    return c !== null && pyLookupHas(c, "__index__")
+}
+function pyIndexOf(v) {
+    var r = pyCall(pyLookupVal(pyInstClassOf(v), "__index__"), [v])
+    var rtn = pyTypeName(r)
+    if (rtn != "int" && rtn != "bool") { pyRaiseExc("TypeError", "__index__ returned non-int (type " + rtn + ")") }
+    return r
+}
+
 // The position a list or str subscript names: an int (a bool is one), or
 // CPython's TypeError naming the key's type. Twin of pySeqIdx in
 // python-interpreter.abnf and abnf/jsrt.go.
@@ -8132,6 +8156,7 @@ function pySeqIdx(c, k) {
         if (k) { return 1 }
         return 0
     }
+    if (pyHasIndex(k)) { return pySeqIdx(c, pyIndexOf(k)) }
     var tn = pyTypeName(k)
     if (tn == "int") { pyRaiseExc("IndexError", "cannot fit 'int' into an index-sized integer") }
     if (typeof c == "string") { pyRaiseExc("TypeError", "string indices must be integers, not '" + tn + "'") }
@@ -10941,7 +10966,10 @@ function pyEqHashNone(cls) {
     if (cls["__eq__"] !== undefined && cls["__hash__"] === undefined) { pySetAttrRaw(cls, "__hash__", undefined) }
 }
 
-function js_pysetnames(cls) {
+// kw is the class statement's keywords (a dict, or undefined), handed to the
+// __init_subclass__ hook; with no hook, keywords are a TypeError.
+function js_pysetnames(cls) { return pySetNamesKw(cls, undefined) }
+function pySetNamesKw(cls, kw) {
     pyEqHashNone(cls)
     var ks = keysOf(cls)
     for (var i = 0; i < ks.length; i++) {
@@ -10957,11 +10985,14 @@ function js_pysetnames(cls) {
     while (j < mro.length) {
         var h = mro[j]["__init_subclass__"]
         if (mro[j]["__mro"] !== undefined && h !== undefined) {
-            if (pyDIsClsM(h)) { pyDCallPyValue(pyDDescGet(h, cls, "__init_subclass__"), [], undefined) }
-            else { pyDCallPyValue(h, [cls], undefined) }
+            if (pyDIsClsM(h)) { pyDCallPyValue(pyDDescGet(h, cls, "__init_subclass__"), [], kw) }
+            else { pyDCallPyValue(h, [cls], kw) }
             return undefined
         }
         j = j + 1
+    }
+    if (pyIsDict(kw) && kw["keys"].length > 0) {
+        pyRaiseExc("TypeError", pyClsQual(cls) + ".__init_subclass__() takes no keyword arguments")
     }
     return undefined
 }
@@ -11366,8 +11397,18 @@ function pyMetaRender(v, repr) {
 function js_pyclass_meta(cls, kw) {
     var bases = pyCCopyArr(cls["__basesl"])
     var meta = pyMetaOf(bases, kw)
+    // The keywords besides metaclass= go to the metaclass, or with none to
+    // __init_subclass__.
+    var rest = pyNewDict()
+    if (pyIsDict(kw)) {
+        var j = 0
+        while (j < kw["keys"].length) {
+            if (kw["keys"][j] != "metaclass") { pyDictSet(rest, kw["keys"][j], kw["vals"][j]) }
+            j = j + 1
+        }
+    }
     if (meta === null) {
-        js_pysetnames(cls)
+        pySetNamesKw(cls, rest)
         return cls
     }
     var ns = pyNewDict()
@@ -11381,14 +11422,6 @@ function js_pyclass_meta(cls, kw) {
     while (i < cd["keys"].length) {
         if (cd["keys"][i] != "__module__") { pyDictSet(ns, cd["keys"][i], cd["vals"][i]) }
         i = i + 1
-    }
-    var rest = pyNewDict()
-    if (pyIsDict(kw)) {
-        var j = 0
-        while (j < kw["keys"].length) {
-            if (kw["keys"][j] != "metaclass") { pyDictSet(rest, kw["keys"][j], kw["vals"][j]) }
-            j = j + 1
-        }
     }
     return pyDCallPyValue(meta, [cls["__name"], pyTup(bases), ns], rest)
 }

@@ -2502,6 +2502,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // exactly (hex(2**70) is right) with no second code path - the two compiled
     // halves use math/big and pyABigArith for the same reason.
     function pyRadixOf(n, base, prefix) {
+        if (pyHasIndex(n)) { return pyRadixOf(pyIndexOf(n), base, prefix) }
         if (typeof n == "boolean") { return prefix + (n ? "1" : "0") }
         if (typeof n != "number" && !bigIsBig(n)) {
             pyRaise(pyMakeExc("TypeError",
@@ -2657,7 +2658,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     hostGlobals["delattr"] = function(o, n) { pyDelAttr(o, n); return undefined }
     // vars(o) IS o.__dict__ - CPython's own definition - over the same pyattr
     // the `.` operator uses.
-    hostGlobals["vars"] = function(o) { return pyattr(o, "__dict__") }
+    hostGlobals["vars"] = function(o) {
+        if (!pyHasAttrOf(o, "__dict__")) { pyListErr("TypeError", "vars() argument must have __dict__ attribute") }
+        return pyattr(o, "__dict__")
+    }
     // dir(o) of a user class or of its instance. Twin of js_pydir in
     // lib/python-rt.metajs, which explains what it answers and what it refuses.
     hostGlobals["dir"] = function() {
@@ -2741,9 +2745,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return pyCall(f, args, null)
     }
     // The __set_name__ pass type.__new__ runs once a class body is a class, and
-    // then the __init_subclass__ hook. Twin of rt.pySetNames in
-    // abnf/jsrtpydesc.go, which explains it.
-    function pySetNames(cls, names) {
+    // then the __init_subclass__ hook with the class statement's keywords kw.
+    // Twin of rt.pySetNames in abnf/jsrtpydesc.go, which explains it.
+    function pySetNames(cls, names, kw) {
         for (var i = 0; i < names.length; i++) {
             var k = names[i]
             if (k.length >= 2 && k.charAt(0) == "_" && k.charAt(1) == "_") { continue }
@@ -2758,9 +2762,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (var j = 1; j < mro.length; j++) {
             if (!hasOwn(mro[j], "__mro") || !hasOwn(mro[j], "__init_subclass__")) { continue }
             var h = mro[j].__init_subclass__
-            if (pyIsClsM(h)) { pyCall(pyDescGet(h, cls, "__init_subclass__"), [], null) }
-            else { pyCall(h, [cls], null) }
+            if (pyIsClsM(h)) { pyCall(pyDescGet(h, cls, "__init_subclass__"), [], kw) }
+            else { pyCall(h, [cls], kw) }
             return
+        }
+        if (kw !== null && kw !== undefined && kw.keys.length > 0) {
+            pyListErr("TypeError", pyClsQual(cls) + ".__init_subclass__() takes no keyword arguments")
         }
     }
     // An attribute of a staticmethod / classmethod object itself: the wrapped
@@ -2916,7 +2923,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (Array.isArray(o)) { return false }
         if (typeof o == "object" && hasOwn(o, name)) { return o[name] !== pyDeleted }
         if (pyUser(o)) {
-            if (name == "__dict__" || name == "__class__" || name == "__new__") { return true }
+            if (name == "__dict__") { return pySlotsAllow(o.__class, name) }
+            if (name == "__class__" || name == "__new__") { return true }
             // A property answers what its getter does: hasattr is a getattr that
             // catches AttributeError.
             if (pyIsProp(clsFind(o.__class, name))) { return pyHookHas(o, name) }
@@ -4367,12 +4375,22 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var tn = pySeqTName(o)
         return (tn == "bytes" ? "" : tn + " ") + "index out of range"
     }
+    // An object whose class defines __index__ is the int it answers, which must
+    // be an int. Twin of pyIndexOf in abnf/jsrt.go and lib/python-rt.metajs.
+    function pyHasIndex(v) { return pyUser(v) && clsFind(v.__class, "__index__") != null }
+    function pyIndexOf(v) {
+        var r = anytype
+        r = clsFind(v.__class, "__index__")(v)
+        if (pyNumTName(r) != "int") { pyListErr("TypeError", "__index__ returned non-int (type " + pyTypeOf(r).__name + ")") }
+        return r
+    }
     // The position a list or str subscript names: an int (a bool is one), or
     // CPython's TypeError naming the key's type. Twin of pySeqIdx in
     // lib/python-rt.metajs and abnf/jsrt.go.
     function pySeqIdx(o, i) {
         if (typeof i == "number") { return i }
         if (typeof i == "boolean") { return i ? 1 : 0 }
+        if (pyHasIndex(i)) { return pySeqIdx(o, pyIndexOf(i)) }
         var tn = pyTypeOf(i).__name
         if (tn == "int") { pyListErr("IndexError", "cannot fit 'int' into an index-sized integer") }
         if (typeof o == "string") { pyListErr("TypeError", "string indices must be integers, not '" + tn + "'") }
@@ -12607,11 +12625,20 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // pyDelAttr keep from here on (pyClassDict).
             cls.__attrs = ns.__nskeys.slice(0)
             pyEqHashNone(cls)
-            pySetNames(cls, ns.__nskeys)
+            pySetNames(cls, ns.__nskeys, pyClassKw(kw))
             cls.__annotations__ = pyNsAnnots(ns)
             pySet(name, cls)
             noteBound(name)
         }
+    }
+    // A class statement's keywords without metaclass=, or null when none are left.
+    function pyClassKw(kw) {
+        if (kw === null || kw === undefined) { return null }
+        var out = newDict()
+        for (var i = 0; i < kw.keys.length; i++) {
+            if (kw.keys[i] != "metaclass") { dictSet(out, kw.keys[i], kw.vals[i]) }
+        }
+        return out.keys.length > 0 ? out : null
     }
     // The annotations a class body recorded (makeAnnAssign), as its __annotations__ dict.
     function pyNsAnnots(ns) {
@@ -12677,7 +12704,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (!hasOwn(cls, "__doc__")) { cls.__doc__ = undefined }
         cls.__attrs = attrs
         pyEqHashNone(cls)
-        pySetNames(cls, cls.__attrs)
+        pySetNames(cls, cls.__attrs, null)
         return cls
     }
     // Cls(args): a fresh instance whose __init__ runs with it as self.
@@ -12972,7 +12999,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // any, shows through again.
         if (typeof o == "object" && hasOwn(o, name) && o[name] !== pyDeleted) { return o[name] }
         if (pyUser(o)) {
-            if (name == "__dict__") { return instDict(o) }
+            // A slotted instance has none. Twin of pyGetAttr in abnf/jsrt.go.
+            if (name == "__dict__") {
+                if (!pySlotsAllow(o.__class, name)) { pyRaise(pyMakeExc("AttributeError", ["'" + o.__class.__name + "' object has no attribute '__dict__'"])) }
+                return instDict(o)
+            }
             if (name == "__class__") { return o.__class }
             var m = clsFind(o.__class, name)
             if (m != null) {

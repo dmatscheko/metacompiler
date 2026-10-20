@@ -16087,7 +16087,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_pysetnames": func(a []uint64) uint64 {
 			if cls, ok := u(a[0]).(*jsObject); ok {
 				rt.pyEqHashNone(cls)
-				rt.pySetNames(cls)
+				rt.pySetNames(cls, jsUndef)
 			}
 			return w(jsUndef)
 		},
@@ -16107,9 +16107,20 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				bases.elems = append(bases.elems, bs.elems...)
 			}
 			meta := rt.pyMetaOf(bases, kw)
+			// The keywords besides metaclass= go to the metaclass, or with none
+			// to __init_subclass__.
+			rest := pyDescTypeSample("dict")
+			rk, rv, _ := dictParts(rest)
+			if keys, vals, ok := dictParts(kw); ok {
+				for i, k := range keys.elems {
+					if rt.toString(k) != "metaclass" {
+						dictAppend(rk, rv, k, vals.elems[i])
+					}
+				}
+			}
 			if meta == nil {
 				rt.pyEqHashNone(cls)
-				rt.pySetNames(cls)
+				rt.pySetNames(cls, rest)
 				return a[0]
 			}
 			ns := pyDescTypeSample("dict")
@@ -16130,15 +16141,6 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			for i, k := range mk.elems {
 				if rt.toString(k) != "__module__" {
 					dictAppend(nk, nv, k, mv.elems[i])
-				}
-			}
-			rest := pyDescTypeSample("dict")
-			rk, rv, _ := dictParts(rest)
-			if keys, vals, ok := dictParts(kw); ok {
-				for i, k := range keys.elems {
-					if rt.toString(k) != "metaclass" {
-						dictAppend(rk, rv, k, vals.elems[i])
-					}
 				}
 			}
 			return w(rt.callPyValue(meta, []interface{}{rt.pyClsName(cls), pyTup(bases), ns}, rest))
@@ -18047,7 +18049,11 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			return boolH(rt.pyHasAttr(u(a[0]), rt.toString(u(a[1]))))
 		},
 		// vars(o) IS o.__dict__ - CPython's own definition.
+		// vars(o) is o.__dict__, and CPython's TypeError for a value without one.
 		"js_pyvars": func(a []uint64) uint64 {
+			if !rt.pyHasAttr(u(a[0]), "__dict__") {
+				panic(&jsThrown{value: rt.pyExcInstance("TypeError", "vars() argument must have __dict__ attribute")})
+			}
 			return w(rt.pyGetAttr(u(a[0]), "__dict__"))
 		},
 		"js_pydir": func(a []uint64) uint64 {
@@ -20832,7 +20838,13 @@ func (rt *jsrt) pyGetAttrRaw(obj interface{}, name string) interface{} {
 		case "__class__":
 			return cls
 		case "__dict__":
-			return rt.pyInstanceDict(inst)
+			// A slotted instance has none (pySlotsAllow: no class on the MRO
+			// gives it one).
+			if rt.pySlotsAllow(cls, "__dict__") {
+				return rt.pyInstanceDict(inst)
+			}
+			panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
+				"'"+rt.toString(cls.props["__name"])+"' object has no attribute '__dict__'")})
 		}
 		if v, found := inst.props[name]; found {
 			return v
@@ -23336,7 +23348,10 @@ func (rt *jsrt) pyHasAttrRaw(obj interface{}, name string) bool {
 		return found || rt.pyClassFallback(cls, name) != nil
 	}
 	if inst, cls, ok := pyInstance(obj); ok {
-		if name == "__class__" || name == "__dict__" || name == "__new__" {
+		if name == "__dict__" {
+			return rt.pySlotsAllow(cls, name)
+		}
+		if name == "__class__" || name == "__new__" {
 			return true
 		}
 		if _, found := inst.props[name]; found {
@@ -23447,7 +23462,11 @@ func (rt *jsrt) pySeqIdx(c, k interface{}) int {
 		return 0
 	case *jsBigInt:
 		panic(&jsThrown{value: rt.pyExcInstance("IndexError", "cannot fit 'int' into an index-sized integer")})
-	case string, jsUndefT, jsNullT, *jsPyFlo, *jsObject, *jsArray:
+	case *jsObject:
+		if r, ok := rt.pyIndexOf(x); ok {
+			return rt.pySeqIdx(c, r)
+		}
+	case string, jsUndefT, jsNullT, *jsPyFlo, *jsArray:
 	default:
 		if !isCallable(k) {
 			return int(rt.toNumber(k))
@@ -23494,10 +23513,32 @@ func (rt *jsrt) pyRangeArg(v interface{}) float64 {
 		"'"+pyTypeName(rt, v)+"' object cannot be interpreted as an integer")})
 }
 
+// pyIndexOf is the int an object whose class defines __index__ answers (which
+// must be an int); ok is false for any other value. Twin of pyIndexOf in
+// python-interpreter.abnf and lib/python-rt.metajs.
+func (rt *jsrt) pyIndexOf(v interface{}) (interface{}, bool) {
+	_, cls, ok := pyInstance(v)
+	if !ok {
+		return nil, false
+	}
+	m, found := pyLookup(cls, "__index__")
+	if !found || !isCallable(m) {
+		return nil, false
+	}
+	r := rt.call(m, jsUndef, []interface{}{v})
+	if tn := pyTypeName(rt, r); tn != "int" && tn != "bool" {
+		panic(&jsThrown{value: rt.pyExcInstance("TypeError", "__index__ returned non-int (type "+tn+")")})
+	}
+	return r, true
+}
+
 // pyRadix is bin/hex/oct: CPython puts the sign OUTSIDE the prefix (bin(-5) is
 // '-0b101') and its ints are arbitrary precision, so the digits come from
 // math/big rather than from a double.
 func (rt *jsrt) pyRadix(v interface{}, base int, prefix string) string {
+	if r, ok := rt.pyIndexOf(v); ok {
+		v = r
+	}
 	b, ok := pyBigOperand(v)
 	if !ok {
 		panic(&jsThrown{value: rt.pyExcInstance("TypeError",

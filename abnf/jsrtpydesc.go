@@ -175,9 +175,11 @@ func (rt *jsrt) pyPropDel(p *jsObject, obj interface{}, cls *jsObject) {
 // defines __set_name__ is called with (owner, name). __-prefixed members are
 // skipped, because layer 2's keysOf cannot list them. Then the nearest base
 // class's __init_subclass__ (implicitly a classmethod) is called with the new
-// class. Twin of js_pysetnames in lib/python-rt.metajs and pySetNames in
+// class and the class statement's keywords kw (a dict, or undefined); with no
+// such hook, keywords are object.__init_subclass__'s TypeError. Twin of
+// js_pysetnames in lib/python-rt.metajs and pySetNames in
 // python-interpreter.abnf.
-func (rt *jsrt) pySetNames(cls *jsObject) {
+func (rt *jsrt) pySetNames(cls *jsObject, kw interface{}) {
 	for _, k := range append([]string{}, cls.keys...) {
 		if len(k) >= 2 && k[0] == '_' && k[1] == '_' {
 			continue
@@ -198,11 +200,15 @@ func (rt *jsrt) pySetNames(cls *jsObject) {
 			continue
 		}
 		if pyDescKind(h) == "c" {
-			rt.callPyValue(rt.pyDescGet(h, cls, "__init_subclass__"), nil, jsUndef)
+			rt.callPyValue(rt.pyDescGet(h, cls, "__init_subclass__"), nil, kw)
 		} else {
-			rt.callPyValue(h, []interface{}{cls}, jsUndef)
+			rt.callPyValue(h, []interface{}{cls}, kw)
 		}
 		return
+	}
+	if keys, _, ok := dictParts(kw); ok && len(keys.elems) > 0 {
+		panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+			rt.pyClsQual(cls)+".__init_subclass__() takes no keyword arguments")})
 	}
 }
 
@@ -521,7 +527,7 @@ func (rt *jsrt) pyTypeNew(name string, basesV, ns, mcs interface{}) *jsObject {
 		}
 	}
 	rt.pyEqHashNone(cls)
-	rt.pySetNames(cls)
+	rt.pySetNames(cls, jsUndef)
 	return cls
 }
 
