@@ -185,7 +185,7 @@ _G proxy, in both halves.
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-588 bash: `$[ expr ]`; `$'\uDFFF'` length; native stdout buffering vs stderr order · P3 · SH · OPEN [V]
+### T-588 bash: `$[ expr ]`; `$'\uDFFF'` length; native stdout buffering vs stderr order · P3 · SH · IN PROGRESS (SH worker, round 7) [V]
 `echo $[ 3 + 4 ]` → both halves print `$[ 3 + 4 ]` literally (bash 7, legacy arithmetic). Interp: `v=$'\uDFFF'; echo ${#v}` → 6
 (bash 3: bytes ED BF BF; the `\u` escape is not decoded for a surrogate value). Native binaries buffer stdout until exit, so
 `cmd 2>&1` interleaves stdout and stderr differently from bash (order only, not values).
