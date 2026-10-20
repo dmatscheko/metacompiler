@@ -64,7 +64,7 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-653 python: compiled `type(e) is ValueError`; `__class__` in methods; regex group refs, Unicode \w, findall None; class-body comprehensions · P1 · PY · OPEN [V]
+### T-653 python: compiled `type(e) is ValueError`; `__class__` in methods; regex group refs, Unicode \w, findall None; class-body comprehensions · P1 · PY · IN PROGRESS (PY worker, round 10) [V]
 Compiled only: `try: int("x") except ValueError as e: print(type(e) is ValueError)` → False (the runtime's class is a different object
 from the program's ValueError; interp and python3 True). `__class__` inside a method → NameError in all engines (python3 the class).
 P regex, all engines: `re.compile(r"\1(a)")` and `r"(a\1)"` accepted (python "invalid group reference 1 at position 1", "cannot refer
