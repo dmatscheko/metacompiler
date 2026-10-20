@@ -13675,8 +13675,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // block around it (LOAD_FROM_DICT_OR_DEREF): in a method, the method's
     // class; right inside another class body, that class's cell, still empty
     // while its body runs. A comprehension right in a class body, and code
-    // outside any class, read an ordinary name. Twin of the __class__ arm of
-    // makeVarRef in python-to-llvm-ir.abnf.
+    // outside any class, read an ordinary name. A function called while its
+    // class body still runs finds that class's cell empty. Twin of the
+    // __class__ arm of makeVarRef in python-to-llvm-ir.abnf.
     function pyClassCellHere() {
         var inFn = false
         var inBody = false
@@ -13688,15 +13689,22 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 inBody = true
             } else if (!inFn && sc.__pyccell === true) {
                 if (!inBody) { return pyReadName("__class__") }
-                pyRaise(pyMakeExc("NameError", ["cannot access free variable '__class__' where it is not associated with a value in enclosing scope"]))
+                pyEmptyClassCell()
             } else {
                 if (sc.__pyfn === true) { inFn = true }
                 if (inFn && hasOwn(sc, "__pycls")) { return sc.__pycls }
+                if (inFn && sc.__pyccell === true) { pyEmptyClassCell() }
             }
             i = i - 1
         }
         return pyReadName("__class__")
     }
+    function pyEmptyClassCell() {
+        pyRaise(pyMakeExc("NameError", ["cannot access free variable '__class__' where it is not associated with a value in enclosing scope"]))
+    }
+    // The operands of a zero-argument super(): the nearest class cell and the
+    // innermost function's first argument. A cell whose class body still runs
+    // gives false, CPython's empty __class__ cell.
     function pySuperHere() {
         var cls = anytype
         cls = undefined
@@ -13711,6 +13719,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (hasOwn(sc, "__py1st")) { slf = sc.__py1st }
             }
             if (hasOwn(sc, "__pycls")) { cls = sc.__pycls; i = 0 }
+            else if (sc.__pyccell === true) { cls = false; i = 0 }
             i = i - 1
         }
         return pySuperObj(cls, slf)
@@ -13791,13 +13800,18 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         kSetNamed(kw)
         return r.v.apply(undefined, concat2impl([s.__sobj], args))
     }
-    // CPython's own two messages for a zero-argument super() that has neither.
+    // CPython's own messages for a zero-argument super() with nothing to bind,
+    // in CPython's order: the argument, then the cell (false: empty). Twin of
+    // pySuperCheck in lib/python-rt.metajs and abnf/jsrt.go.
     function pySuperCheck(s) {
+        if (s.__sobj == undefined) {
+            pyRaise(pyMakeExc("RuntimeError", ["super(): no arguments"]))
+        }
         if (s.__scls == undefined || s.__scls == null) {
             pyRaise(pyMakeExc("RuntimeError", ["super(): __class__ cell not found"]))
         }
-        if (s.__sobj == undefined) {
-            pyRaise(pyMakeExc("RuntimeError", ["super(): no arguments"]))
+        if (s.__scls === false) {
+            pyRaise(pyMakeExc("RuntimeError", ["super(): empty __class__ cell"]))
         }
     }
     // Calling the value the name `super` reads as. Zero arguments hand back the

@@ -20699,13 +20699,19 @@ func pySuperObj(v interface{}) (*jsObject, bool) {
 	return o, true
 }
 
-// CPython's own two messages for a zero-argument super() with nothing to bind.
+// CPython's own messages for a zero-argument super() with nothing to bind, in
+// CPython's order: the argument, then the cell (false: empty, its class body
+// still running - see makeClass in languages/python-to-llvm-ir.abnf).
 func (rt *jsrt) pySuperCheck(s *jsObject) {
-	if _, has := s.props["__scls"]; !has {
-		panic(&jsThrown{value: rt.pyExcInstance("RuntimeError", "super(): __class__ cell not found")})
-	}
 	if _, has := s.props["__sobj"]; !has {
 		panic(&jsThrown{value: rt.pyExcInstance("RuntimeError", "super(): no arguments")})
+	}
+	cls, has := s.props["__scls"]
+	if !has {
+		panic(&jsThrown{value: rt.pyExcInstance("RuntimeError", "super(): __class__ cell not found")})
+	}
+	if cls == false {
+		panic(&jsThrown{value: rt.pyExcInstance("RuntimeError", "super(): empty __class__ cell")})
 	}
 }
 

@@ -7624,6 +7624,66 @@ def s157():
                '0101010101010101010101010101010101010101010101011010'],
               ['Hello', 'W\xd6RLD', '\xc9t\xc9'], ['\xe9'], ['\xe9'], ['\U00010400'], ['\U00010430'], 'STRASSE X X'])
 
+# ===== SECTION 158: __class__ and super() while the class body runs =====
+# A class's __class__ cell is empty until its body has run and type.__new__ has
+# made the class, so a method called from the body cannot read __class__
+# (NameError) and its zero-argument super() raises "empty __class__ cell". The
+# cell is filled before __set_name__ and __init_subclass__ run. super() checks
+# for a first argument before it looks for the cell. Values are CPython 3.14's.
+S158out = []
+
+def s158try(f, *a):
+    try:
+        return f(*a)
+    except (NameError, RuntimeError) as e:
+        return type(e).__name__ + ": " + str(e)
+
+class S158N:
+    def __set_name__(self, owner, name):
+        S158out.append(owner.k() is owner)
+
+class S158B:
+    def __init_subclass__(cls):
+        S158out.append(cls.who() is cls)
+
+class S158F(S158B):
+    def m():
+        return __class__
+    def s(self):
+        return super()
+    def nest(self):
+        def k(y):
+            return super()
+        return k(1)
+    def noarg():
+        return super()
+    @classmethod
+    def who(cls):
+        return __class__
+    @staticmethod
+    def k():
+        return __class__
+    n = S158N()
+    S158out.append([s158try(m), s158try(s, 1), s158try(nest, 1), s158try(noarg)])
+    class G:
+        def g(self):
+            return __class__
+        S158out.append(s158try(g, 1))
+
+def s158top():
+    return super()
+
+def s158one(x):
+    return super()
+
+def s158():
+    free = "NameError: cannot access free variable '__class__' where it is not associated with a value in enclosing scope"
+    check("clsempty", S158out
+          == [[free, "RuntimeError: super(): empty __class__ cell", "RuntimeError: super(): empty __class__ cell",
+               "RuntimeError: super(): no arguments"], free, True, True])
+    check("clsfilled", [S158F.m() is S158F, S158F.G().g() is S158F.G, s158try(s158top), s158try(s158one, 1)]
+          == [True, True, "RuntimeError: super(): no arguments", "RuntimeError: super(): __class__ cell not found"])
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -7767,5 +7827,6 @@ def main():
     s155() # SECTION-CALL 155
     s156() # SECTION-CALL 156
     s157() # SECTION-CALL 157
+    s158() # SECTION-CALL 158
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

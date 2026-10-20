@@ -1313,6 +1313,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var pyGetVarF = undefined
     var pyDelVarF = undefined
     var pyClsRefF = undefined
+    var pyCellReadF = undefined
     var pyGlobalF = undefined
 
     // Open a binding boundary: the MID scope with the marks, then the scope the
@@ -1549,11 +1550,32 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return b.NewCall(pyGetVarF, [envV, nameV])
     }
 
+    // A __class__ cell read through the scope binding KEY: the class, or the
+    // NameError CPython raises for a cell still empty (false, see makeClass)
+    // because its class body is running. Twin of pyClassCellHere in
+    // python-interpreter.abnf.
+    function pyCellRead(b, envV, key) {
+        if (pyCellReadF == undefined) {
+            pyCellReadF = m.NewFunc("py_cellread", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("key", i64)])
+            var envP = pyCellReadF.Params[0]
+            var eb = pyCellReadF.NewBlock("entry")
+            var setB = pyCellReadF.NewBlock("set")
+            var emptyB = pyCellReadF.NewBlock("empty")
+            var cv = callExt(eb, "js_scope_get", [envP, pyCellReadF.Params[1]])
+            eb.NewCondBr(truthy(eb, callExt(eb, "js_seq", [cv, hFalse])), emptyB, setB)
+            setB.NewRet(cv)
+            var ar = callExt(emptyB, "js_arr_new", [])
+            callExt(emptyB, "js_arr_push", [ar, emitStr(emptyB, "cannot access free variable '__class__' where it is not associated with a value in enclosing scope")])
+            var clsV = callExt(emptyB, "js_scope_get", [envP, emitStr(emptyB, "NameError")])
+            callExt(emptyB, "js_throw", [callExt(emptyB, "js_pycall", [clsV, ar, handle(0)])])
+            emptyB.NewRet(handle(0))
+        }
+        return b.NewCall(pyCellReadF, [envV, emitStr(b, key)])
+    }
     // __class__ read right in a class body that has a cell from its enclosing
     // block (pyClsCell): the body's own binding, else the cell makeClass left in
-    // "pyoutcls*" - the enclosing method's class, or undefined for a class right
-    // inside a class body, whose own cell is still empty while that body runs.
-    // Twin of pyClassCellHere in python-interpreter.abnf.
+    // "pyoutcls*" - the enclosing method's class, or the empty cell of a class
+    // right inside a class body, whose body is still running.
     function pyClsRef(b, envV) {
         if (pyClsRefF == undefined) {
             pyClsRefF = m.NewFunc("py_clsref", i64, [llvm.ir.NewParam("env", i64)])
@@ -1561,18 +1583,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var eb = pyClsRefF.NewBlock("entry")
             var ownB = pyClsRefF.NewBlock("own")
             var cellB = pyClsRefF.NewBlock("cell")
-            var setB = pyClsRefF.NewBlock("set")
-            var emptyB = pyClsRefF.NewBlock("empty")
             eb.NewCondBr(truthy(eb, callExt(eb, "js_scope_has", [envP, emitStr(eb, "__class__")])), ownB, cellB)
             ownB.NewRet(pyGetVar(ownB, envP, emitStr(ownB, "__class__")))
-            var cv = callExt(cellB, "js_scope_get", [envP, emitStr(cellB, "pyoutcls*")])
-            cellB.NewCondBr(truthy(cellB, callExt(cellB, "js_seq", [cv, hUndef])), emptyB, setB)
-            setB.NewRet(cv)
-            var ar = callExt(emptyB, "js_arr_new", [])
-            callExt(emptyB, "js_arr_push", [ar, emitStr(emptyB, "cannot access free variable '__class__' where it is not associated with a value in enclosing scope")])
-            var clsV = callExt(emptyB, "js_scope_get", [envP, emitStr(emptyB, "NameError")])
-            callExt(emptyB, "js_throw", [callExt(emptyB, "js_pycall", [clsV, ar, handle(0)])])
-            emptyB.NewRet(handle(0))
+            cellB.NewRet(pyCellRead(cellB, envP, "pyoutcls*"))
         }
         return b.NewCall(pyClsRefF, [envV])
     }
@@ -4403,7 +4416,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var savedClsCell = pyClsCell
             pyClsCell = pySuperCls
             if (pySuperCls) {
-                var outerCls = pyInClassBody ? hUndef : callExt(b, "js_scope_get", [curScopeV, emitStr(b, "__pycls__")])
+                var outerCls = pyInClassBody ? hFalse : callExt(b, "js_scope_get", [curScopeV, emitStr(b, "__pycls__")])
                 callExt(b, "js_scope_decl", [cellV, emitStr(b, "pyoutcls*"), outerCls])
             }
             curScopeV = pyOpenBoundary(b, cellV, false)
@@ -4415,8 +4428,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             pyAnnotHere = false
             pyInnerNames = {}
             // The __class__ cell. js_scope_decl and NOT pySetVar, so the name never
-            // reaches pyBindSink and never becomes a member of the class.
-            callExt(b, "js_scope_decl", [cellV, emitStr(b, "__pycls__"), cls])
+            // reaches pyBindSink and never becomes a member of the class. It is
+            // EMPTY (false) while the body runs and is filled once the class is
+            // made: a method called from the body finds no class (pyCellRead,
+            // pySuperCheck).
+            callExt(b, "js_scope_decl", [cellV, emitStr(b, "__pycls__"), hFalse])
             pySuperCls = true
             pyInClassBody = true
             b = bodyT(b)
@@ -4425,7 +4441,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             pyClsCell = savedClsCell
             b = pyClassFill(b, cls, bodyScope, pyBindSink)
             // js_pyclass_meta finishes the class, or has its metaclass make the
-            // real one from it; the __class__ cell then names that one.
+            // real one from it; the __class__ cell then names that one. It is
+            // filled first, as type.__new__ fills it, for the __set_name__ and
+            // __init_subclass__ calls js_pyclass_meta makes.
+            callExt(b, "js_scope_set", [cellV, emitStr(b, "__pycls__"), cls])
             cls = callExt(b, "js_pyclass_meta", [cls, kwV])
             // PEP 695 type parameters make the class subscriptable (pyGenericOk
             // in abnf/jsrt.go).
@@ -5151,7 +5170,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "__class__") {
             return function(b) {
                 if (pySuperCls && !pyInClassBody && !pyInClassComp) {
-                    return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, "__pycls__")])}
+                    return {b: b, v: pyCellRead(b, curScopeV, "__pycls__")}
                 }
                 if (pyClsCell && pyInClassBody && !pyInClassComp) { return {b: b, v: pyClsRef(b, curScopeV)} }
                 return {b: b, v: pyGetVar(b, curScopeV, emitStr(b, name))}

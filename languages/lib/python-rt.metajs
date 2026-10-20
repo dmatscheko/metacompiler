@@ -8989,10 +8989,13 @@ function js_pysuper(cls, self) {
     return s
 }
 function pyIsSuper(v) { return rtTag(v, "__pysup") }
-// CPython's own two messages for a zero-argument super() with nothing to bind.
+// CPython's own messages for a zero-argument super() with nothing to bind, in
+// CPython's order: the argument, then the cell (false: empty). Twin of
+// pySuperCheck in abnf/jsrt.go.
 function pySuperCheck(s) {
-    if (s["__scls"] === undefined) { pyRaiseExc("RuntimeError", "super(): __class__ cell not found") }
     if (s["__sobj"] === undefined) { pyRaiseExc("RuntimeError", "super(): no arguments") }
+    if (s["__scls"] === undefined) { pyRaiseExc("RuntimeError", "super(): __class__ cell not found") }
+    if (s["__scls"] === false) { pyRaiseExc("RuntimeError", "super(): empty __class__ cell") }
 }
 function pySuperCall(s, args) {
     if (args.length == 0) {
