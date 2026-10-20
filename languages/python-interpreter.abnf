@@ -1102,9 +1102,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // The module tables of the import statements.
     include("lib/python-import.js")
 
-    // sin, cos, tan, atan2 and expm1 are fdlibm's (lib/fdlibm.js), which agree with the
-    // platform libm CPython calls where the host's Math does not: cos(pi/2) is
-    // 6.123233995736766e-17, the host's ...757e-17.
+    // sin, cos, tan, atan2, exp, expm1, log1p and log10 are fdlibm's
+    // (lib/fdlibm.js) in all three engines, so they agree by construction (Go's
+    // own fuse a product on arm64), and closer to the platform libm CPython calls
+    // than the host's Math: cos(pi/2) is 6.123233995736766e-17, the host's
+    // ...757e-17.
     include("lib/fdlibm.js")
 
     // The host names a program can see.
@@ -5105,7 +5107,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "cbrt") { return pyFlo(Math.cbrt(pyMArg(args, 0))) }
         if (name == "exp") {
             var ex = pyMArg(args, 0)
-            return pyMRange(Math.exp(ex), ex)
+            return pyMRange(fdlibm().exp(ex), ex)
         }
         if (name == "expm1") {
             var em = pyMArg(args, 0)
@@ -5126,7 +5128,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "log1p") {
             var l1 = pyMArg(args, 0)
             if (l1 <= 0 - 1) { pyMDom("gt", l1) }
-            return pyFlo(Math.log1p(l1))
+            return pyFlo(fdlibm().log1p(l1))
         }
         if (name == "log2") {
             var l2 = pyMArg(args, 0)
@@ -5136,7 +5138,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "log10") {
             var l10 = pyMArg(args, 0)
             if (l10 <= 0) { pyMDom("pos", l10) }
-            return pyFlo(Math.log10(l10))
+            return pyFlo(fdlibm().log10(l10))
         }
         if (name == "pow") { return pyMPow(pyMArg(args, 0), pyMArg(args, 1)) }
         if (name == "fabs") { return pyFlo(Math.abs(pyMArg(args, 0))) }
@@ -5296,8 +5298,29 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (var fi = 0; fi < fxs.length; fi++) { fds.push(pyMArg(fxs, fi)) }
             return pyFlo(pyMFsum(fds))
         }
+        if (name == "sumprod") {
+            if (args.length != 2) { pyListErr("TypeError", "sumprod expected 2 arguments, got " + args.length) }
+            var sps = iterToList(args[0])
+            var sqs = iterToList(args[1])
+            var sr = anytype
+            sr = pynSumprod(sps, sqs, pyMSpKind, pyMSpFits, function(v) { return floVal(v) },
+                            function(a, b) { return binOp("*", a, b) }, function(a, b) { return binOp("+", a, b) }, pyFlo)
+            if (sps.length != sqs.length) { pyListErr("ValueError", "Inputs are not the same length") }
+            return sr
+        }
         pyRaise(pyMakeExc("AttributeError", ["module 'math' has no attribute '" + name + "'"]))
         return undefined
+    }
+    // sumprod's value kinds and 64-bit test (pynSumprod in lib/python-num.js).
+    function pyMSpKind(v) {
+        if (isFlo(v)) { return 2 }
+        if (typeof v == "boolean") { return 3 }
+        return typeof v == "number" || bigIsBig(v) ? 1 : 0
+    }
+    function pyMSpFits(v) {
+        if (!bigIsBig(v)) { return true }
+        var b = pyIntBits(v)
+        return pynFitsI64(b.neg, b.bits)
     }
     function pyMAnyBig(args) {
         for (var i = 0; i < args.length; i++) { if (bigIsBig(args[i])) { return true } }

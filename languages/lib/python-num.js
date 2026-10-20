@@ -860,6 +860,122 @@ function pynTwoProd(a, b) {
     return {hi: p, lo: ((ah * bh - p) + ah * bl + al * bh) + al * bl}
 }
 
+// math.sumprod, mathmodule.c's three paths: pairs of ints that fit 64 bits
+// are summed exactly, pairs with a float (and a float, an int or a bool) in a
+// TripleLength of three doubles, anything else - and each path's total once it
+// leaves it - by the language's own * and +. The engine hands over the value
+// operations: kindOf(v) 1 an int, 2 a float, 3 a bool, 0 anything else;
+// fits(i) whether an int fits 64 bits; toD(v) the double of a float, int or
+// bool (an int too large is infinite); mul, add and mkFlo. Go twin:
+// rt.pyMathSumprod in abnf/jsrtpymath.go.
+function pynSumprod(ps, qs, kindOf, fits, toD, mul, add, mkFlo) {
+    var n = ps.length < qs.length ? ps.length : qs.length
+    var total = anytype
+    total = 0
+    var intOn = true
+    var intUsed = false
+    var intTotal = anytype
+    intTotal = 0
+    var fltOn = true
+    var fltUsed = false
+    var tl = {hi: 0, lo: 0, tiny: 0}
+    var i = 0
+    while (true) {
+        var finished = i >= n
+        var p = anytype
+        var q = anytype
+        if (!finished) {
+            p = ps[i]
+            q = qs[i]
+        }
+        if (intOn) {
+            if (!finished && kindOf(p) == 1 && kindOf(q) == 1 && fits(p) && fits(q)) {
+                var prod = anytype
+                prod = mul(p, q)
+                if (fits(prod)) {
+                    var it = anytype
+                    it = add(intTotal, prod)
+                    if (fits(it)) {
+                        intTotal = it
+                        intUsed = true
+                        i = i + 1
+                        continue
+                    }
+                }
+            }
+            intOn = false
+            if (intUsed) {
+                total = add(total, intTotal)
+                intUsed = false
+            }
+        }
+        if (fltOn) {
+            if (!finished) {
+                var kp = kindOf(p)
+                var kq = kindOf(q)
+                if ((kp == 2 && kq >= 1) || (kq == 2 && kp >= 1)) {
+                    var fp = toD(p)
+                    var fq = toD(q)
+                    if (fp - fp == 0 || kp == 2) {
+                        if (fq - fq == 0 || kq == 2) {
+                            var nt = pynTlFma(fp, fq, tl)
+                            if (nt.hi - nt.hi == 0) {
+                                tl = nt
+                                fltUsed = true
+                                i = i + 1
+                                continue
+                            }
+                        }
+                    }
+                }
+            }
+            fltOn = false
+            if (fltUsed) {
+                total = add(total, mkFlo(pynTlToD(tl)))
+                fltUsed = false
+            }
+        }
+        if (finished) { break }
+        total = add(total, mul(p, q))
+        i = i + 1
+    }
+    return total
+}
+
+// TwoSum: a + b == hi + lo exactly.
+function pynDlSum(a, b) {
+    var x = a + b
+    var z = x - a
+    return {hi: x, lo: (a - (x - z)) + (b - z)}
+}
+
+// x * y as hi + lo, lo being what fma(x, y, -hi) answers: Dekker's product of
+// the two mantissas in [0.5, 1), which neither over- nor underflows, rescaled.
+// Exact unless the product is subnormal, where lo may round twice.
+function pynExactProd(x, y) {
+    var p = x * y
+    if (p == 0 || p - p != 0) { return {hi: p, lo: 0} }
+    var fx = pynFrexp(x)
+    var fy = pynFrexp(y)
+    var e = fx.e + fy.e
+    var m = pynTwoProd(fx.m, fy.m)
+    return {hi: p, lo: pynScale2((m.hi - pynScale2(p, 0 - e)) + m.lo, e)}
+}
+
+// One product added to the running TripleLength t (mathmodule.c's tl_fma), and
+// the total read back as a double (tl_to_d).
+function pynTlFma(x, y, t) {
+    var pr = pynExactProd(x, y)
+    var sm = pynDlSum(t.hi, pr.hi)
+    var r1 = pynDlSum(t.lo, pr.lo)
+    var r2 = pynDlSum(r1.hi, sm.lo)
+    return {hi: sm.hi, lo: r2.hi, tiny: t.tiny + r1.lo + r2.lo}
+}
+function pynTlToD(t) {
+    var last = pynDlSum(t.lo, t.hi)
+    return t.tiny + last.lo + last.hi
+}
+
 // CPython's vector_norm over the absolute values vec, mx their maximum, both
 // finite.
 function pynVecNorm(vec, mx) {

@@ -12552,7 +12552,7 @@ function pyMHas(mod, name) {
     if (name == "isfinite" || name == "isclose" || name == "cbrt") { return true }
     if (name == "frexp" || name == "ldexp" || name == "modf" || name == "ulp") { return true }
     if (name == "nextafter" || name == "dist" || name == "remainder") { return true }
-    return name == "isqrt" || name == "comb" || name == "perm" || name == "prod" || name == "fsum"
+    return name == "isqrt" || name == "comb" || name == "perm" || name == "prod" || name == "fsum" || name == "sumprod"
 }
 
 function js_pymath_module() {
@@ -12727,7 +12727,7 @@ function pyMathCall(name, args) {
     if (name == "cbrt") { return pyMkFlo(Math.cbrt(pyMArg(args, 0))) }
     if (name == "exp") {
         var ex = pyMArg(args, 0)
-        return pyMRange(Math.exp(ex), ex)
+        return pyMRange(fdlibm().exp(ex), ex)
     }
     if (name == "expm1") {
         var em = pyMArg(args, 0)
@@ -12748,7 +12748,7 @@ function pyMathCall(name, args) {
     if (name == "log1p") {
         var l1 = pyMArg(args, 0)
         if (l1 <= 0 - 1) { pyMDom("gt", l1) }
-        return pyMkFlo(Math.log1p(l1))
+        return pyMkFlo(fdlibm().log1p(l1))
     }
     if (name == "log2") {
         var l2 = pyMArg(args, 0)
@@ -12758,7 +12758,7 @@ function pyMathCall(name, args) {
     if (name == "log10") {
         var l10 = pyMArg(args, 0)
         if (l10 <= 0) { pyMDom("pos", l10) }
-        return pyMkFlo(Math.log10(l10))
+        return pyMkFlo(fdlibm().log10(l10))
     }
     if (name == "pow") { return pyMPow(pyMArg(args, 0), pyMArg(args, 1)) }
     if (name == "fabs") { return pyMkFlo(Math.abs(pyMArg(args, 0))) }
@@ -12939,7 +12939,29 @@ function pyMathCall(name, args) {
         }
         return pyMkFlo(pyMFsum(fds))
     }
+    if (name == "sumprod") {
+        if (args.length != 2) { pyRaiseExc("TypeError", "sumprod expected 2 arguments, got " + args.length) }
+        var sps = pyElemsOf(args[0])
+        var sqs = pyElemsOf(args[1])
+        var sr = anytype
+        sr = pynSumprod(sps, sqs, pyMSpKind, pyMSpFits, pyNum, function(a, b) { return js_pybin("*", a, b) },
+                        function(a, b) { return js_pybin("+", a, b) }, pyMkFlo)
+        if (sps.length != sqs.length) { pyRaiseExc("ValueError", "Inputs are not the same length") }
+        return sr
+    }
     pyRaiseExc("AttributeError", "module 'math' has no attribute '" + name + "'")
+}
+
+// sumprod's value kinds and 64-bit test (pynSumprod in lib/python-num.js).
+function pyMSpKind(v) {
+    if (pyIsFlo(v)) { return 2 }
+    if (typeof v == "boolean") { return 3 }
+    if (typeof v == "number" || pyIsBig(v)) { return 1 }
+    return 0
+}
+function pyMSpFits(v) {
+    if (!pyIsBig(v)) { return true }
+    return pynFitsI64(pyIntNeg(v), pyIntBits(v))
 }
 
 // The integer argument of isqrt / comb / perm: an int or a bool, as an int.

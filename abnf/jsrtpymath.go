@@ -3,6 +3,7 @@ package abnf
 import (
 	"math"
 	"math/big"
+	"strconv"
 )
 
 // Python's `math` module - the GO TWIN half, i.e. what `mec
@@ -199,7 +200,7 @@ func pyModHas(mod, name string) bool {
 			"degrees", "radians", "floor", "ceil", "trunc",
 			"gcd", "lcm", "factorial", "isnan", "isinf", "isfinite", "isclose",
 			"isqrt", "comb", "perm", "prod", "fsum",
-			"frexp", "ldexp", "modf", "ulp", "nextafter", "dist", "remainder":
+			"frexp", "ldexp", "modf", "ulp", "nextafter", "dist", "remainder", "sumprod":
 			return true
 		}
 	case "re":
@@ -273,7 +274,7 @@ func (rt *jsrt) pyMathCall(name string, args []interface{}) interface{} {
 		return pyMathFlo(math.Cbrt(pyMathArg(rt, args, 0)))
 	case "exp":
 		x := pyMathArg(rt, args, 0)
-		return pyMathRange(rt, math.Exp(x), x)
+		return pyMathRange(rt, fdExp(x), x)
 	case "expm1":
 		x := pyMathArg(rt, args, 0)
 		return pyMathRange(rt, fdExpm1(x), x)
@@ -298,7 +299,7 @@ func (rt *jsrt) pyMathCall(name string, args []interface{}) interface{} {
 		if l1 <= -1 {
 			pyMathDom(rt, "gt", l1)
 		}
-		return pyMathFlo(math.Log1p(l1))
+		return pyMathFlo(fdLog1p(l1))
 	case "log2":
 		l2 := pyMathArg(rt, args, 0)
 		if l2 <= 0 {
@@ -310,7 +311,7 @@ func (rt *jsrt) pyMathCall(name string, args []interface{}) interface{} {
 		if l10 <= 0 {
 			pyMathDom(rt, "pos", l10)
 		}
-		return pyMathFlo(math.Log10(l10))
+		return pyMathFlo(fdLog10(l10))
 	case "pow":
 		return pyMathPow(rt, pyMathArg(rt, args, 0), pyMathArg(rt, args, 1))
 	case "fabs":
@@ -552,9 +553,110 @@ func (rt *jsrt) pyMathCall(name string, args []interface{}) interface{} {
 			fs = append(fs, pyMathArg(rt, []interface{}{x}, 0))
 		}
 		return pyMathFlo(rt.pyMathFsum(fs))
+	case "sumprod":
+		if len(args) != 2 {
+			rt.pyRaise("TypeError", "sumprod expected 2 arguments, got "+strconv.Itoa(len(args)))
+		}
+		ps, qs := rt.pyElemsOf(args[0]), rt.pyElemsOf(args[1])
+		r := rt.pyMathSumprod(ps, qs)
+		if len(ps) != len(qs) {
+			rt.pyRaise("ValueError", "Inputs are not the same length")
+		}
+		return r
 	}
 	panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
 		"module 'math' has no attribute '"+name+"'")})
+}
+
+// pyMathSumprod is math.sumprod. Twin of pynSumprod in lib/python-num.js,
+// which explains the three paths; the product's error term is math.FMA's here.
+func (rt *jsrt) pyMathSumprod(ps, qs []interface{}) interface{} {
+	n := len(ps)
+	if len(qs) < n {
+		n = len(qs)
+	}
+	kind := func(v interface{}) int {
+		switch v.(type) {
+		case *jsPyFlo:
+			return 2
+		case bool:
+			return 3
+		case float64, *jsBigInt:
+			return 1
+		}
+		return 0
+	}
+	fits := func(v interface{}) bool {
+		b, ok := v.(*jsBigInt)
+		return !ok || b.v.IsInt64()
+	}
+	add := func(a, b interface{}) interface{} { return rt.pyExt("js_pybin", "+", a, b) }
+	mul := func(a, b interface{}) interface{} { return rt.pyExt("js_pybin", "*", a, b) }
+	finite := func(f float64) bool { return !math.IsInf(f, 0) && !math.IsNaN(f) }
+	var total interface{} = 0.0
+	var intTotal interface{} = 0.0
+	intOn, intUsed, fltOn, fltUsed := true, false, true, false
+	var hi, lo, tiny float64
+	for i := 0; ; i++ {
+		finished := i >= n
+		var p, q interface{}
+		if !finished {
+			p, q = ps[i], qs[i]
+		}
+		if intOn {
+			if !finished && kind(p) == 1 && kind(q) == 1 && fits(p) && fits(q) {
+				if prod := mul(p, q); fits(prod) {
+					if it := add(intTotal, prod); fits(it) {
+						intTotal, intUsed = it, true
+						continue
+					}
+				}
+			}
+			intOn = false
+			if intUsed {
+				total, intUsed = add(total, intTotal), false
+			}
+		}
+		if fltOn {
+			if !finished {
+				kp, kq := kind(p), kind(q)
+				if (kp == 2 && kq >= 1) || (kq == 2 && kp >= 1) {
+					fp, fq := rt.pyMathReal(p), rt.pyMathReal(q)
+					if (kp == 2 || finite(fp)) && (kq == 2 || finite(fq)) {
+						ph := float64(fp * fq)
+						pl := 0.0
+						if ph != 0 && finite(ph) {
+							pl = math.FMA(fp, fq, -ph)
+						}
+						smh, sml := pyDlSum(hi, ph)
+						r1h, r1l := pyDlSum(lo, pl)
+						r2h, r2l := pyDlSum(r1h, sml)
+						if finite(smh) {
+							hi, lo, tiny = smh, r2h, tiny+r1l+r2l
+							fltUsed = true
+							continue
+						}
+					}
+				}
+			}
+			fltOn = false
+			if fltUsed {
+				lh, ll := pyDlSum(lo, hi)
+				total, fltUsed = add(total, pyMathFlo(tiny+ll+lh)), false
+			}
+		}
+		if finished {
+			return total
+		}
+		total = add(total, mul(p, q))
+	}
+}
+
+// pyDlSum is TwoSum: a + b == hi + lo exactly.
+func pyDlSum(a, b float64) (float64, float64) {
+	x := a + b
+	z := x - a
+	return x, (a - (x - z)) + (b - z)
 }
 
 // pyMathNorm is hypot / dist over the coordinates xs: an infinity wins over a

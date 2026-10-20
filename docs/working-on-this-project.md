@@ -820,9 +820,14 @@ a dummy slot in CPython, a copy or union merges into a table sized for both,
 and a display of three or more constants is built through a frozenset
 constant. A set holding anything else keeps insertion order: a str's hash is
 salted per run in CPython, so no order of one is reproducible.
-math has no exp2, erf, erfc, gamma or lgamma: CPython's answers depend on the
-platform libm (its exp2 differs from `2.0 ** x` in about 0.2% of doubles), so no
-spelling here is bit-exact. OSError(errno, ...) answers a subclass only for the
+math has no acosh, asinh, atanh, exp2, erf, erfc, gamma, lgamma or fma:
+CPython's answers depend on the platform libm (its exp2 differs from `2.0 ** x`
+in about 0.2% of doubles), so no spelling here is bit-exact, and an fma correct
+to the last bit needs the double's bits. exp, expm1, log1p, log10 and the
+trigonometric functions are fdlibm's in all three engines: they agree with each
+other and differ from macOS libm in the last place on some inputs (2,000 random
+arguments: exp 196, expm1 112, cos 98, log1p 30, log10 91), and with them what
+is built on them (statistics.geometric_mean, random.gauss). OSError(errno, ...) answers a subclass only for the
 errno values every platform numbers alike (EPERM, ENOENT, ESRCH, EINTR, ECHILD,
 EACCES, EEXIST, ENOTDIR, EISDIR, EPIPE).
 A Python str is indexed, sliced, iterated and searched by CODE POINT over the

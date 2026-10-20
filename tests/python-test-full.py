@@ -7182,6 +7182,31 @@ def s147():
     check("input1", callable(input) and issubclass(EOFError, Exception) and not issubclass(EOFError, OSError)
           and msgs == ["input expected at most 1 argument, got 2", "EOFError: EOF when reading a line"])
 
+# ===== SECTION 153: math.sumprod; exp, log10 =====
+# mathmodule.c's paths: 64-bit ints exactly, floats (with an int or bool) in a
+# TripleLength accumulator, everything else by * and +. exp and log10 are
+# fdlibm's in every engine, which gives macOS libm's answer here where Go's own
+# did not. Values are CPython 3.14's.
+import math as S153m
+from fractions import Fraction as S153F
+
+def s153():
+    check("sumprod1", S153m.sumprod([1, 2, 3], [4, 5, 6]) == 32 and S153m.sumprod([0.1] * 10, [0.1] * 10) == 0.1
+          and S153m.sumprod([1e20, 1.0, -1e20], [1.0, 1.0, 1.0]) == 1.0 and S153m.sumprod([], []) == 0
+          and S153m.sumprod([0.7, -0.3, 0.1], [0.3, 0.7, 2.1]) == 0.21000000000000002
+          and S153m.sumprod([True, 2.5], [3, 2]) == 8.0 and S153m.sumprod([2 ** 62, 2 ** 62], [2, 2]) == 2 ** 64
+          and S153m.sumprod([S153F(1, 3), 2], [3, S153F(1, 2)]) == 2
+          and S153m.sumprod([1e308, 1e308], [10.0, -10.0]) != S153m.sumprod([1e308, 1e308], [10.0, -10.0]))
+    check("explog", [S153m.exp(x) for x in [27.48254299918881, 23.09190676493825, -16.296219760492487]]
+          == [862018870747.3976, 10682863632.675447, 8.36838557399983e-08]
+          and [S153m.log10(x) for x in [778.5871735343246, 591.4048388820473, 519.9704370181446]]
+          == [2.8913072448623014, 2.771884873607709, 2.715978652471599])
+    try:
+        S153m.sumprod([1, 2], [1])
+        check("sumprod2", False)
+    except ValueError as e:
+        check("sumprod2", str(e) == "Inputs are not the same length")
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -7320,5 +7345,6 @@ def main():
     s142() # SECTION-CALL 142
     s146() # SECTION-CALL 146
     s147() # SECTION-CALL 147
+    s153() # SECTION-CALL 153
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

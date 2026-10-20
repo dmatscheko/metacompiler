@@ -8,8 +8,8 @@
 # data's type (an int mean that is no integer becomes a float), and stdev is
 # the correctly rounded square root of the exact variance. Offered: mean,
 # fmean, geometric_mean, harmonic_mean, median (and _low, _high, _grouped),
-# mode, multimode, quantiles, variance, pvariance, stdev, pstdev. Not offered:
-# covariance, correlation and linear_regression (they need math.sumprod),
+# mode, multimode, quantiles, variance, pvariance, stdev, pstdev, covariance,
+# correlation (linear and ranked) and linear_regression. Not offered:
 # NormalDist and kde.
 
 import math as _mec_st_math
@@ -127,6 +127,70 @@ def _mec_st_sqrt_frac(n, m):
     return _mec_st_isqrt_odd(n << (-2 * q), m) / (1 << -q)
 
 
+# The ranks of data, from start, ties averaged (Lib/statistics.py's _rank).
+def _mec_st_rank(data, start):
+    pairs = sorted([(v, i) for i, v in enumerate(data)])
+    result = [0] * len(pairs)
+    i = start - 1
+    k = 0
+    while k < len(pairs):
+        j = k
+        while j < len(pairs) and pairs[j][0] == pairs[k][0]:
+            j += 1
+        size = j - k
+        rank = i + (size + 1) / 2
+        for m in range(k, j):
+            result[pairs[m][1]] = rank
+        i += size
+        k = j
+    return result
+
+
+# sqrt(x * y) without overflow or underflow, with a differential correction.
+def _mec_st_sqrtprod(x, y):
+    m = _mec_st_math
+    h = m.sqrt(x * y)
+    if not m.isfinite(h):
+        if m.isinf(h) and not m.isinf(x) and not m.isinf(y):
+            scale = 2.0 ** -512
+            return _mec_st_sqrtprod(scale * x, scale * y) / scale
+        return h
+    if not h:
+        if x and y:
+            scale = 2.0 ** 537
+            return _mec_st_sqrtprod(scale * x, scale * y) / scale
+        return h
+    d = m.sumprod((x, h), (y, -h))
+    return h + d / (2.0 * h)
+
+
+def _mec_st_pair(x, y, what):
+    n = len(x)
+    if len(y) != n:
+        raise _mec_st_StatisticsError(what + " requires that both inputs have same number of data points")
+    if n < 2:
+        raise _mec_st_StatisticsError(what + " requires at least two data points")
+    return n
+
+
+class _mec_st_LinearRegression(tuple):
+    @property
+    def slope(self):
+        return self[0]
+
+    @property
+    def intercept(self):
+        return self[1]
+
+    def __repr__(self):
+        return "LinearRegression(slope=" + repr(self[0]) + ", intercept=" + repr(self[1]) + ")"
+
+
+_mec_st_LinearRegression.__name__ = "LinearRegression"
+_mec_st_LinearRegression.__qualname__ = "LinearRegression"
+_mec_st_LinearRegression.__module__ = "statistics"
+
+
 def _mec_st_spread_sqrt(v):
     if isinstance(v, _mec_st_Fraction):
         return _mec_st_sqrt_frac(v.numerator, v.denominator)
@@ -136,8 +200,57 @@ def _mec_st_spread_sqrt(v):
 class _mec_st_module:
     __all__ = ["StatisticsError", "fmean", "geometric_mean", "harmonic_mean", "mean", "median",
                "median_grouped", "median_high", "median_low", "mode", "multimode", "pstdev", "pvariance",
-               "quantiles", "stdev", "variance"]
+               "quantiles", "stdev", "variance", "covariance", "correlation", "linear_regression",
+               "LinearRegression"]
     StatisticsError = _mec_st_StatisticsError
+    LinearRegression = _mec_st_LinearRegression
+
+    @staticmethod
+    def covariance(x, y, /):
+        n = _mec_st_pair(x, y, "covariance")
+        xbar = _mec_st_math.fsum(x) / n
+        ybar = _mec_st_math.fsum(y) / n
+        sxy = _mec_st_math.sumprod((xi - xbar for xi in x), (yi - ybar for yi in y))
+        return sxy / (n - 1)
+
+    @staticmethod
+    def correlation(x, y, /, *, method="linear"):
+        n = _mec_st_pair(x, y, "correlation")
+        if method not in {"linear", "ranked"}:
+            raise ValueError("Unknown method: " + repr(method))
+        if method == "ranked":
+            start = (n - 1) / -2
+            x = _mec_st_rank(x, start)
+            y = _mec_st_rank(y, start)
+        else:
+            xbar = _mec_st_math.fsum(x) / n
+            ybar = _mec_st_math.fsum(y) / n
+            x = [xi - xbar for xi in x]
+            y = [yi - ybar for yi in y]
+        sxy = _mec_st_math.sumprod(x, y)
+        sxx = _mec_st_math.sumprod(x, x)
+        syy = _mec_st_math.sumprod(y, y)
+        try:
+            return sxy / _mec_st_sqrtprod(sxx, syy)
+        except ZeroDivisionError:
+            raise _mec_st_StatisticsError("at least one of the inputs is constant")
+
+    @staticmethod
+    def linear_regression(x, y, /, *, proportional=False):
+        n = _mec_st_pair(x, y, "linear regression")
+        if not proportional:
+            xbar = _mec_st_math.fsum(x) / n
+            ybar = _mec_st_math.fsum(y) / n
+            x = [xi - xbar for xi in x]
+            y = (yi - ybar for yi in y)
+        sxy = _mec_st_math.sumprod(x, y) + 0.0
+        sxx = _mec_st_math.sumprod(x, x)
+        try:
+            slope = sxy / sxx
+        except ZeroDivisionError:
+            raise _mec_st_StatisticsError("x is constant")
+        intercept = 0.0 if proportional else ybar - slope * xbar
+        return _mec_st_LinearRegression((slope, intercept))
 
     @staticmethod
     def mean(data):
