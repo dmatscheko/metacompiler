@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-632** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-633** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -137,21 +137,14 @@ Stale comment "Two of the nineteen" in kExcFqcn / ktExcFqcn.
 
 # GO — Go  (oracle: `go run`)
 
-### T-623 go: pointers through interfaces; generic zero values and %T; argument evaluation order; forward goto; late static types · P1 · GO · IN PROGRESS (GO worker, round 8) [V]
-`%T`/`%v` of a pointer reaching fmt through an interface lose the `*`/`&` (`*strconv.NumError` prints `strconv.NumError`, `&map{}`
-literals print without `&`); `a.(*V)` on a V value answers true; a struct's pointer field prints `{..}` (go an address). `var
-zero T` in a generic function → nil (go `""`/0); `%T` of a generic struct → `main.Pair` (go `main.Pair[string,int]`). gc evaluates
-call operands before plain operands: `fmt.Println(*ps, ps.Pop())` prints the popped state in go, not ours. Compiler: a forward
-`goto` out of a loop to a later label → "goto L has no enclosing label". A package-level typed const declared after its use prints
-by its underlying type, and the halves disagree (int vs int16). The compiler refuses `range` over a function whose static type is
-unknown (the interpreter handles it). `len("ab") << 70` is not folded as a typed constant (go: compile error).
-
-### T-624 go: missing standard packages; append capacity growth · P2 · GO · IN PROGRESS (GO worker, round 8) [V]
-bufio, io, time, regexp, path, encoding/json, context, flag, log, reflect are accepted at import and then every call fails;
-`len(os.Args)` is 0. Write the commonly used ones in Go under languages/lib/ as sort/strconv were (bufio.Scanner over stdin if a
-stdin exists, strings.NewReader/io.Reader, time.Duration printing, regexp on the shared engine with an RE2 dialect flag).
-`cap()` after append follows doubling from 4, not runtime.growslice size classes (go: `a[1:2:2]` then append → cap 2, ours 4;
-appending to a nil []int → 1,2,4,8,...,512,848,1280; for []byte from 8/16/32).
+### T-632 go: regexp (RE2 dialect), encoding/json and reflect, real stdin · P2 · GO · OPEN [V]
+regexp needs an RE2 dialect flag on the shared lib/regex.js / abnf/jsrtregex.go (additive, flag-gated): `^`/`$` only at text
+start/end without (?m); inline (?i)(?m)(?s)(?U); (?P<name>) and (?<name>); \pL / \p{Greek}; POSIX [[:alpha:]]; \Q..\E; reject
+backreferences and lookaround; Go's empty-match advance in FindAll/ReplaceAll; $1 / ${name} expansion. encoding/json and reflect need
+run-time struct field names, types and tags (a new builtin in three engines). Real stdin (bufio.NewScanner(os.Stdin) reads empty)
+needs a host read primitive in the C floor, the Go twin and both script hosts (shared with python's input(), T-629). Known
+non-match, not modelled: gc ≥1.25 gives a non-escaping slice's first backing array a 32-byte stack buffer (append to a nil []int
+reports cap 4 where growslice says 1) — escape analysis.
 
 ---
 
@@ -751,6 +744,8 @@ T-622 kotlin: `Char(97)`, `sequence {}` builder, implicit-receiver operator call
 T-620 python: `re.error` is uncatchable; compiled class-body except bindings lost — DONE 1119e4c9 (plus heapq/bisect/contextlib/io/types/textwrap/abc/typing/fractions/statistics modules and ~20 engine fixes)
 T-627 kotlin: sortedMapOf unsorted; Array.copyOf(); extensions not dispatched by receiver type; `import java.util.Random` — DONE 3186c9ec
 T-626 swift: generics through metatypes and nil Optionals; `Set<Double>([..])`; overflow-reporting arithmetic; utf16Offset — DONE 26488dd9 9d7706d6
+T-623 go: pointers through interfaces; generic zero values and %T; argument evaluation order; forward goto; late static types — DONE fe55e098 (a pointer field's printed address DECLINED: run-dependent hex)
+T-624 go: missing standard packages; append capacity growth — PARTIAL fe55e098..HEAD (io, bufio, strings.Reader, time without a clock, path, filepath, flag, log, context, os.Args/Stdin, gc's growslice); regexp/json/reflect/stdin are T-632
 
 # Settled — do not re-open
 
