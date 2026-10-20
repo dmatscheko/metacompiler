@@ -112,14 +112,6 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-647 kotlin: `javaClass` / `::class` names of non-collections and collections; sorted-copy class edges · P2 · KT · IN PROGRESS (KT worker, round 10) [V spec-only]
-`class Foo; val f: Any = Foo(); println(f.javaClass.name)` → interp "property .name of null", llvm.Run "member 'name' of undefined"
-(JVM `Foo`); String and Array likewise (`java.lang.String`, `[Ljava.lang.Integer;`). `mutableListOf(1)::class.java.name` and
-`::class.qualifiedName` → `ArrayList` (JVM `java.util.ArrayList`), rendered "class ArrayList"; `setOf(1)::class.simpleName` → null
-(kSimpleName / ktSimpleName lack Set and Map arms). P3 edges: `arrayOf(3).sorted()` reports SingletonList (JVM Arrays$ArrayList);
-`intArrayOf().sortedDescending()` reports ArrayList (JVM EmptyList); after `import java.util.ArrayDeque` a bare `ArrayDeque()` is
-still kotlin's; javaClass of a map's values view fails.
-
 ---
 
 # GO — Go  (oracle: `go run`)
@@ -749,6 +741,7 @@ T-648 lua: `tonumber("-0.0")` loses the zero's sign in the interpreter and nativ
 T-628 python: raising `__hash__` without `__eq__`; slots in `__dict__`; `Plain[int]`; builtin `__module__`; regex dialect errors — DONE 05033f1e
 T-629 python: stdin and input(); datetime, decimal, pprint, array, struct; remaining math — DONE 344fa727 f8b15ac9 1c48f755 (readIn host primitive + input()/sys.stdin, datetime/decimal/struct/array/pprint, str seeds, sumprod, fdlibm exp/log1p/log10); fma, __exit__ tracebacks and libm-dependent functions DECLINED (fma needs a double's bits in MetaJS; no engine has frame data for tracebacks; libm answers differ per platform — manual 7.9)
 T-634 swift: an Optional Set return does not adopt its literal — DONE c2852a7a (an `Optional<Set<E>>` spelling is not converted — unprobed, left)
+T-647 kotlin: `javaClass` / `::class` names of non-collections and collections; sorted-copy class edges — DONE d16124ba; residual class-name fidelity DECLINED as rarely printed: values views of hashMap/TreeMap/single/empty maps answer LinkedHashMap$LinkedValues (a per-map values kind would touch every kind-3 check in three engines), builtin KClass qualifiedName/toString (kotlin.String / class java.lang.String), and an exception's javaClass.name package
 
 # Settled — do not re-open
 
