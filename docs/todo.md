@@ -89,7 +89,7 @@ inputs — record in manual 7.9 unless made bit-exact. `__exit__`'s traceback ar
 
 # JS — JavaScript and TypeScript
 
-### T-619 js: `"__#@"` keys vs symbols; arguments passed on; holes; `Object.getOwnPropertySymbols` · P3 · JS · OPEN [V]
+### T-619 js: `"__#@"` keys vs symbols; arguments passed on; holes; `Object.getOwnPropertySymbols` · P3 · JS · IN PROGRESS (JS worker, round 8) [V]
 A program key `"__#@iterator"` still collides with symbol keys (escaping it breaks lib/js-builtins.js, which spells
 Symbol.iterator as that string so programs without symbols pay no symbol test: move js-builtins.js to real `[Symbol.iterator]`
 keys and measure). `h(arguments)` writing `a[0]` is not mapped to the caller (needs a scope back-pointer on the array cell in the
