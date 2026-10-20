@@ -124,7 +124,7 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-643 kotlin: `sorted()` results and deques answer `is ArrayList` true; SortedSet key views; javaClass.name · P1 · KT · OPEN [V spec-only]
+### T-643 kotlin: `sorted()` results and deques answer `is ArrayList` true; SortedSet key views; javaClass.name · P1 · KT · IN PROGRESS (KT worker, round 9) [V spec-only]
 Introduced by the concrete-class `is` (10f71e86): `val s: Any = listOf(3,1,2).sorted(); s is ArrayList<*>` → true in all engines (JVM
 false: sortedWith on a Collection/Array returns `Arrays$ArrayList`, or `toList()` for size ≤ 1; on a non-Collection Iterable an
 ArrayList) — give the sorted family's results array kind 4 when the receiver is a Collection/Array, at every sorted* site in all three
