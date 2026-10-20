@@ -64,11 +64,6 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-686 python: `(a): int = 1` binds nothing; `type(cell)`; 3.14 namespace keys `__firstlineno__` / `__static_attributes__` / `__annotate_func__` · P3 · PY · IN PROGRESS (PY worker, round 15) [V]
-`(a): int = 1; print(a)` → NameError in interp and run (CPython 1); in a class body the name binds as `''`. `type(ns["__classcell__"])`
-→ `<class 'object'>` (CPython `<class 'cell'>`). A metaclass namespace lacks `__firstlineno__` and `__static_attributes__` and
-carries `__annotations__` where 3.14 has `__annotate_func__` (PEP 649).
-
 ### T-680 python re: IGNORECASE pairs from CPython's `_ignorecase_fixes`; non-ASCII ranges of 256+ chars · P3 · PY · OPEN [V]
 `re.match("(?i)\u0390", "\u1fd3")` matches in CPython (full-fold extra pairs, sre_compile `_ignorecase_fixes`), not here. A
 non-ASCII class range spanning 256 or more characters only gets the text-side upper/lower test under (?i). Regex owner only.
@@ -783,6 +778,7 @@ T-682 go: anonymous struct types as declared types; embedding a package-qualifie
 T-683 python: `__name__` is undefined at module level; `type(super)` / `isinstance(super(), super)`; `__classdictcell__` — DONE aebcd94c (__name__ = __main__ / dotted module names, the name super is the type, __classdictcell__ per 3.14, comprehension cell marking, super repr — 4 legs = python3; follow-up T-686)
 T-685 go: append growth pads a function-local struct type with 0 in the compiler — DONE be5b3c0f (per-declaration zero makers for local types in the compiler — 4 legs = go run; follow-up T-687)
 T-687 go: a local type shadowing a top-level struct corrupts it; zero of a type-parameter-typed field is nil — DONE 1133215b (local types keyed per declaration and stripped for printing, generic-local types instantiated, generic struct elision and slice element types — 4 legs = go run; follow-up T-688)
+T-686 python: `(a): int = 1` binds nothing; `type(cell)`; 3.14 namespace keys `__firstlineno__` / `__static_attributes__` / `__annotate_func__` — DONE f133e518 (parenthesized annotated targets, type(cell), 3.14 metaclass namespace order with __firstlineno__/__static_attributes__/__annotate_func__ — 4 legs = python3)
 
 # Settled — do not re-open
 
@@ -816,7 +812,7 @@ named function expression's inner name immutable (needs a const flag on the floo
 scope, or a scope-walking extern on every plain-name assignment, measured at
 +21%..+43% elsewhere on that path).
 
-**DECLINED after measurement.** js `Function("src")` compiling source at run time (no engine here compiles at run time; it raises the EvalError text node gives when code generation is disallowed) · php per-file strict_types (the probes and suites are single-file programs; the whole-program flag equals per-file there) · php handle reuse after free (needs refcounts) · swift's module-qualified enum names in collections (`[o.Dir.up]` depends on swiftc's module name) · rbUserObj / rbIsClassObj frame elimination (no gain over 15 pairs) · a real suspension for the replay generators (impossible under the pinned goja; ~3,600 lines pure-MetaJS) · CPS coroutines in the emitter · full correct rounding of the transcendentals · a shared nominal type id on boxed values (cheap to store, but every consumer needs static types the grammars do not have; split per language) · matching Apple libm's last digit (ruby atan2: no portable algorithm reproduces it, 1.6% of pairs differ even from the correctly rounded value) · js sloppy-mode primitive `this` boxing (needs wrapper objects in every engine) · a generator's `finally` at collection (python needs refcount timing; no finalizers, manual 7.8) · `i in arr` after `delete` · iterator close on
+**DECLINED after measurement.** python `__firstlineno__` / `__static_attributes__` / `__annotate_func__` on plain (non-metaclass) classes and their `__dict__` listing (introspection only; the metaclass namespace, where programs observe them, matches 3.14) · python rejecting `(p).k: int = 7` as a SyntaxError (an invalid program we accept; no valid program changes) · js `Function("src")` compiling source at run time (no engine here compiles at run time; it raises the EvalError text node gives when code generation is disallowed) · php per-file strict_types (the probes and suites are single-file programs; the whole-program flag equals per-file there) · php handle reuse after free (needs refcounts) · swift's module-qualified enum names in collections (`[o.Dir.up]` depends on swiftc's module name) · rbUserObj / rbIsClassObj frame elimination (no gain over 15 pairs) · a real suspension for the replay generators (impossible under the pinned goja; ~3,600 lines pure-MetaJS) · CPS coroutines in the emitter · full correct rounding of the transcendentals · a shared nominal type id on boxed values (cheap to store, but every consumer needs static types the grammars do not have; split per language) · matching Apple libm's last digit (ruby atan2: no portable algorithm reproduces it, 1.6% of pairs differ even from the correctly rounded value) · js sloppy-mode primitive `this` boxing (needs wrapper objects in every engine) · a generator's `finally` at collection (python needs refcount timing; no finalizers, manual 7.8) · `i in arr` after `delete` · iterator close on
 `throw` (a depth stack cannot survive `for await`) · a catchable unknown-name error
 in java/go/swift/csharp/metajs (COMPILE-time in each real toolchain) · kotlin
 `:script` → `!"token"` · `case_map` into layer 2 (135×) · retiring the Go twin
