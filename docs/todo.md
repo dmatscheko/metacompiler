@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-650** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-651** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -89,12 +89,14 @@ recorded as a value-model limit). `K.prototype.hasOwnProperty("constructor")` / 
 
 # JV — Java
 
-### T-646 java: static method through a subclass name; RandomAccess / Serializable markers; Matcher.hitEnd · P1 · JV · IN PROGRESS (JV worker, round 9) [V]
-`class Base { static String name() { return "B"; } } class Sub extends Base {}`; `Sub.name()` → all engines "unknown method 'name'"
-(java `B`). `new ArrayList<>() instanceof RandomAccess` → false (java true; our LinkedList extends ArrayList, so mark ArrayList only);
-`new StringBuilder() instanceof Serializable` → false (java true). Matcher.hitEnd/requireEnd need a hit-the-end flag from the shared
-regex engine (lib/regex.js / abnf/jsrtregex.go, J-gated); transparent / non-anchoring bounds not modelled. Known limit: a superclass
-must be declared before its subclasses ("unknown superclass").
+### T-650 java: static field through an instance; StringBuffer; CharSequence; ArrayList.clone; superclass order; Matcher.hitEnd · P1 · JV · OPEN [V]
+`s.j` (j static in Sub, s a Sub), `b.k` (b typed Base), `this.j` in an instance method → null / NaN in all engines (java reads the
+static: oracle `5 1 5 6 / 8 3 11`, ours `5 null null NaN / 8 1 11`). `StringBuffer` not modelled ("unknown class"); `new
+StringBuilder() instanceof CharSequence` false (java true; no CharSequence interface declared); `new ArrayList<>(List.of(4,7)).clone()`
+→ "unknown method 'clone' on ArrayList" (java `[4, 7]`; a LinkedList's clone is a LinkedList). `import java.io.*` does not load the
+Serializable marker. A superclass declared after its subclass → interp "unknown superclass", compiled "variable not defined: Base"
+(oracle `Sub42 / true / B10`; needs deferred class builds in the interpreter and dependency-ordered build thunks in the compiler,
+keeping static-initializer order). Matcher.hitEnd/requireEnd need a hit-the-end flag from the shared regex engine (J-gated).
 
 ---
 
@@ -737,6 +739,7 @@ T-629 python: stdin and input(); datetime, decimal, pprint, array, struct; remai
 T-634 swift: an Optional Set return does not adopt its literal — DONE c2852a7a (an `Optional<Set<E>>` spelling is not converted — unprobed, left)
 T-647 kotlin: `javaClass` / `::class` names of non-collections and collections; sorted-copy class edges — DONE d16124ba; residual class-name fidelity DECLINED as rarely printed: values views of hashMap/TreeMap/single/empty maps answer LinkedHashMap$LinkedValues (a per-map values kind would touch every kind-3 check in three engines), builtin KClass qualifiedName/toString (kotlin.String / class java.lang.String), and an exception's javaClass.name package
 T-638 bash: `@Q` / `printf %q` / `declare -p` of a well-formed non-printable character — DONE 8a8a72b3 (iswprint table derived from bash itself and cross-checked against iswprint)
+T-646 java: static method through a subclass name; RandomAccess / Serializable markers; Matcher.hitEnd — PARTIAL 067791a2 (statics through a subclass, RandomAccess/Serializable via instanceof exclusion at no ArrayList cost, interp binary names after nested lib loads); hitEnd/requireEnd and declaration order are T-650
 
 # Settled — do not re-open
 
