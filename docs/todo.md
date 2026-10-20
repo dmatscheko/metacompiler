@@ -154,7 +154,7 @@ appending to a nil []int → 1,2,4,8,...,512,848,1280; for []byte from 8/16/32).
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-626 swift: generics through metatypes and nil Optionals; `Set<Double>([..])`; overflow-reporting arithmetic; utf16Offset · P2 · SW · OPEN [V]
+### T-626 swift: generics through metatypes and nil Optionals; `Set<Double>([..])`; overflow-reporting arithmetic; utf16Offset · P2 · SW · IN PROGRESS (SW worker, round 9) [V]
 `print(type(of: Box<Double>(v: 1)))` → all legs `Box` (swiftc `Box<Double>`). `func orDefault<T: Defaultable>(_ x: T?) -> T` with
 `orDefault(Int?.none)` → every leg aborts "type(of:) of this value is not supported" (swiftc 0). `func zero<T: Numeric>(_ t: T.Type)
 -> T { 0 }; zero(Double.self)` → 0 (swiftc 0.0). `Set<Double>([1, 2])` → `[1, 2]` (swiftc `[1.0, 2.0]`). `addingReportingOverflow`,
