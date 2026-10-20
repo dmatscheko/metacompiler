@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-645** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-647** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -99,14 +99,12 @@ recorded as a value-model limit). `K.prototype.hasOwnProperty("constructor")` / 
 
 # JV — Java
 
-### T-637 java: static field and method of one name; field hiding; lazy static init; nested type names hoisted globally · P1 · JV · IN PROGRESS (JV worker, round 8) [V]
-`static int count; static int count() {...}` collide on the class descriptor in both engines ("unknown method 'count'").
-Field hiding (subclass redeclares a field, `super.name`): compiled "variable not defined: super", the interpreter reads the subclass
-value. Static initialization is eager: a member class's static block runs right after its top-level class, not at first use
-(`static{log.append("O")}` → ours `L:Of|`, java `L:f|O`). Nested types are hoisted by simple name across the program: a `record Pt`
-in one class breaks `S24.Pt` elsewhere. P3: `new ArrayList<>() instanceof Cloneable` false (java true); descendingMap/Set/KeySet are
-copies, not live views; Matcher has no regions, hitEnd/requireEnd, usePattern, results(); Character.getName missing (declined with
-\N{name} for the same table-size reason).
+### T-646 java: static method through a subclass name; RandomAccess / Serializable markers; Matcher.hitEnd · P1 · JV · OPEN [V]
+`class Base { static String name() { return "B"; } } class Sub extends Base {}`; `Sub.name()` → all engines "unknown method 'name'"
+(java `B`). `new ArrayList<>() instanceof RandomAccess` → false (java true; our LinkedList extends ArrayList, so mark ArrayList only);
+`new StringBuilder() instanceof Serializable` → false (java true). Matcher.hitEnd/requireEnd need a hit-the-end flag from the shared
+regex engine (lib/regex.js / abnf/jsrtregex.go, J-gated); transparent / non-anchoring bounds not modelled. Known limit: a superclass
+must be declared before its subclasses ("unknown superclass").
 
 ---
 
@@ -177,10 +175,10 @@ line tracking at warning sites is worth its cost.
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
 
-### T-605 lua: the string metatable's `__index` cannot be replaced; `next(_G)` skips non-string proxy keys · P3 · LUA · IN PROGRESS (LUA worker, round 6) [V]
-`getmetatable("").__index = function(s, k) ... end` is ignored in all engines (both halves read the string library directly);
-with such an `__index`, lua's `ipairs("xy")` yields "x" and "y", ours nothing. `next(_G)` skips non-string keys stored on the
-_G proxy, in both halves.
+### T-645 lua: string arithmetic ignores the strings' metatable · P3 · LUA · OPEN [V]
+`getmetatable("").__add = nil; print(pcall(function() return "1" + "2" end))` → all legs `true 3` (lua 5.5 "attempt to perform arithmetic
+on a string value (constant '1')"); `getmetatable("").__add` is nil in ours, a function in lua (5.4+ coerces strings in arithmetic
+through the string metatable's __add/__sub/...).
 
 ---
 
@@ -762,6 +760,8 @@ T-619 js: `"__#@"` keys vs symbols; arguments passed on; holes; `Object.getOwnPr
 T-639 kotlin: `is` on collections; MutableList deque methods; comparator TreeSet/TreeMap; LinkedList/ArrayDeque/PriorityQueue — DONE c29d57f4 11f099d7 (is on collections, deque members, comparator TreeSet/TreeMap, LinkedList/ArrayDeque, JDK-heap PriorityQueue); the empty-ArrayDeque message ("ArrayDeque is empty." vs ours "List is empty.") DECLINED: an ArrayDeque is a list here and a distinct kind would touch ~26 primitive-kind sites
 T-641 js: Object.getOwnPropertyNames of a prototype — DONE 02f3aef6
 T-642 kotlin: `is ArrayList` / `is HashSet` and other concrete collection classes — DONE 10f71e86 (map views tagged with their real classes; two over-answers it introduced are T-643)
+T-605 lua: the string metatable's `__index` cannot be replaced; `next(_G)` skips non-string proxy keys — DONE 1729b70e
+T-637 java: static field and method of one name; field hiding; lazy static init; nested type names hoisted globally — DONE 84f9d63d (all P1 parts; Cloneable, live descending views, Matcher regions; hitEnd/requireEnd are T-646)
 
 # Settled — do not re-open
 
