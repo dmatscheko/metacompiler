@@ -3800,6 +3800,16 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // variable (p == &n) compare equal. new(int) gets a fresh one slot scope instead.
     // This mirrors the interpreter's makePtr/isPtr exactly; keep the two in step.
     function emitPtrClass(b) { return b.NewLoad(i64, ptrClassG()) }
+    // A pointer to a fresh variable holding t's value (go-constfold.js, goAddrC), the
+    // cell new(T) makes. Twin of goCellThunk in go-interpreter.abnf.
+    function goCellThunk(t) {
+        return function(b) {
+            var r = t(b)
+            var box = callExt(r.b, "js_scope_new", [hUndef])
+            callExt(r.b, "js_scope_decl", [box, emitStr(r.b, "v"), r.v])
+            return {b: r.b, v: emitPtrCell(r.b, box, emitStr(r.b, "v"))}
+        }
+    }
     function emitPtrCell(b, scopeV, nameV) {
         var o = callExt(b, "js_obj_new", [])
         callExt(b, "js_set", [o, emitStr(b, "__class"), emitPtrClass(b)])

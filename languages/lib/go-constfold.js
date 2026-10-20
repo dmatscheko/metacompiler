@@ -1155,10 +1155,20 @@ function goDerefC(t, pos) {
     return t
 }
 function goAddrC(t, pos) {
-    var it = stBare(stAt(pos))
+    var raw = stAt(pos)
+    var it = stBare(raw)
     regConst(pos, null)
     regSt(pos, "*" + (it == "" ? "?" : it))
+    // &T{...} of a SLICE or MAP type is a pointer to a fresh variable holding it
+    // (`s := &Stack{}; s.Push(1)` grows *s): a struct is the reference itself, but
+    // a slice header assigned through the pointer has to land somewhere.
+    if (raw.charAt(0) == "=" && goIsSlMapTy(it)) { return goCellThunk(t) }
     return t
+}
+function goIsSlMapTy(t0) {
+    var t = stNoTyArgs(t0)
+    if (goTyWord(t) == t && typeof definedUnder[t] == "string") { t = stBare(resolveDefined(t)) }
+    return t.substring(0, 2) == "[]" || t.substring(0, 4) == "map["
 }
 function goAddrNameC(t, name, pos) {
     var it = cTyLookup(name)
@@ -1887,14 +1897,21 @@ function goNilRecvOf(rc, name) {
     if (rc == null) { return "" }
     var t = stChainFrom(rc.head, rc.hty, rc.loc, rc.text)
     if (t.length < 2 || t.charAt(0) != "*") { return "" }
-    var bt = t.substring(1)
+    var bt = stNoTyArgs(t.substring(1))
     return goNilRecv["$" + goTyKey(bt) + "." + name] === true ? bt : ""
+}
+// A named type with its type arguments erased: "Stack[int]" is the type Stack, whose
+// methods are declared on `*Stack[T]`. A slice or array type is unchanged.
+function stNoTyArgs(t) {
+    var i = 0
+    while (i < t.length && (cIsIdCh(t.charCodeAt(i)) || t.charAt(i) == ".")) { i = i + 1 }
+    return (i > 0 && i < t.length && t.charAt(i) == "[") ? t.substring(0, i) : t
 }
 // The parameter types of method name on a receiver whose static type rc gives (a
 // declared type's own method or an interface's method spec), or null.
 function goMethPTysOf(rc, name) {
     var t = stChainFrom(rc.head, rc.hty, rc.loc, rc.text)
-    var bt = (t.length > 0 && t.charAt(0) == "*") ? t.substring(1) : t
+    var bt = stNoTyArgs((t.length > 0 && t.charAt(0) == "*") ? t.substring(1) : t)
     if (bt == "") { return null }
     var own = goMethPTys["$" + goTyKey(bt) + "." + name]
     return own !== undefined ? own : null
@@ -2466,7 +2483,13 @@ function goPreType(text, i) {
     while (i < text.length && cIsIdCh(text.charCodeAt(i))) { i = i + 1 }
     if (i == ns) { return }
     var name = text.substring(ns, i)
-    if (text.charAt(i) == "[") { return }
+    // A generic type's parameter list (`Stack[T any]`) is erased like every other
+    // type argument; `[N]T` after a name would be an array and is not legal Go here.
+    if (text.charAt(i) == "[") {
+        i = stClose(text, i)
+        if (i < 0) { return }
+        i = i + 1
+    }
     if (!goPreForeign) { goMainTys["$" + name] = true }
     i = stSkipWs(text, i)
     var rest = text.substring(i, i + 10)
@@ -2796,7 +2819,7 @@ function goDtPlan(rc, name) {
     while (i < rs.length) { if (goIsDefTy(rs[i]) && goDtForeign["$" + rs[i]] !== true) { cands.push(rs[i]) } i = i + 1 }
     if (cands.length == 0) { return null }
     var t = rc == null ? "" : stChainFrom(rc.head, rc.hty, rc.loc, rc.text)
-    var bt = (t.length > 0 && t.charAt(0) == "*") ? t.substring(1) : t
+    var bt = stNoTyArgs((t.length > 0 && t.charAt(0) == "*") ? t.substring(1) : t)
     var bk = goTyKey(bt)
     // A struct whose FIELD has the name holds a func value there: `l.Swap(i, j)`
     // calls it, whichever defined types declare a Swap method.
@@ -2804,7 +2827,7 @@ function goDtPlan(rc, name) {
     if (bt != "" && goMethRty["$" + bk + "." + name] !== undefined) {
         if (!goIsDefTy(bt)) { return null }
         return {fn: bt + "." + name, ty: bt, ptr: goMethPtr["$" + bk + "." + name] === true, dyn: false,
-                isPtr: bt != t}
+                isPtr: t.charAt(0) == "*"}
     }
     if (cands.length != 1) { return {fn: "", ty: "", ptr: false, dyn: true, isPtr: false} }
     return {fn: cands[0] + "." + name, ty: cands[0], ptr: goMethPtr["$" + cands[0] + "." + name] === true,

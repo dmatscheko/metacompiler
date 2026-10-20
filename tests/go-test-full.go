@@ -4559,9 +4559,11 @@ outer:
 		"[a m z] [0 1 2][1 2][3 4][5]1y0x2")
 }
 
-// ===== SECTION 85: a pointer method called on a nil receiver =====
-// Go calls it like any other; only a dereference inside would panic. The
-// expected values are go run's.
+// ===== SECTION 85: pointer methods - a nil receiver, a generic type, &T{} =====
+// Go calls a pointer method on a nil receiver like any other; only a dereference
+// inside would panic. A method of a generic type is a method of every
+// instantiation, and &T{} of a slice type points at a variable the method can
+// grow. The expected values are go run's.
 type Node85 struct {
 	V    int
 	Next *Node85
@@ -4600,6 +4602,21 @@ func (t *Tree85) InOrder(out []int) []int {
 	return out
 }
 
+type Stack85[T any] []T
+
+func (s *Stack85[T]) Push(v T) { *s = append(*s, v) }
+func (s *Stack85[T]) Pop() T {
+	old := *s
+	v := old[len(old)-1]
+	*s = old[:len(old)-1]
+	return v
+}
+func (s Stack85[T]) Peek() T { return s[len(s)-1] }
+
+type Ints85 []int
+
+func (s *Ints85) Push(v int) { *s = append(*s, v) }
+
 func s85() {
 	var e *Node85
 	l := &Node85{1, &Node85{2, nil}}
@@ -4608,6 +4625,15 @@ func s85() {
 		t = t.Insert(v)
 	}
 	check("nrc1", fmt.Sprint(e.Len(), l.Len(), t.InOrder(nil)) == "0 2 [1 3 4 5 8]")
+	var st Stack85[string]
+	st.Push("a")
+	st.Push("b")
+	top := st.Peek()
+	popped := st.Pop()
+	ps := &Ints85{}
+	ps.Push(7)
+	ps.Push(8)
+	check("gen1", fmt.Sprint(top, popped, len(st), ps, len(*ps)) == "bb1 &[7 8] 2")
 }
 
 func main() {

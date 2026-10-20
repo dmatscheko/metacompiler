@@ -4336,6 +4336,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // write through the cell is seen by the variable itself. Structs, slices and maps
     // stay references (no cell), which is why &Point{1, 2} is just the value.
     function makePtr(o, k) { return {__ptr: true, o: o, k: k} }
+    // A pointer to a fresh variable holding t's value (go-constfold.js, goAddrC).
+    // Twin of goCellThunk in go-to-llvm-ir.abnf.
+    function goCellThunk(t) { return function() { return makePtr({v: t()}, "v") } }
     function isPtr(v) { return v != undefined && v != null && typeof v == "object" && v.__ptr == true }
     function ptrGet(p) { return p.o[p.k] }
     function ptrSet(p, v) { p.o[p.k] = v }
