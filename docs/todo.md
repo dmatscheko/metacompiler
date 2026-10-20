@@ -64,7 +64,7 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-660 python: Unicode `\d` / `\s` in regex; `__class__` in a class nested in a method; astral \w across engines · P2 · PY · OPEN [V]
+### T-660 python: Unicode `\d` / `\s` in regex; `__class__` in a class nested in a method; astral \w across engines · P2 · PY · IN PROGRESS (PY worker, round 11) [V]
 `re.findall(r"[\W\d]+", "٣4")` → ours `['4']` (python `['٣4']`: a str pattern's \d is any Nd digit; \s likewise Unicode) — use the
 same knob pattern as \w. `class F: def m(self): class G: z = __class__` → NameError in all engines (CPython F; the compiler cannot reach
 the outer cell past G's own `__pycls__`). Astral characters: the Go twin matches runes, regex.js UTF-16 units — a Unicode \w on an
