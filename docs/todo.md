@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-647** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-648** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -122,13 +122,13 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-643 kotlin: `sorted()` results and deques answer `is ArrayList` true; SortedSet key views; javaClass.name · P1 · KT · IN PROGRESS (KT worker, round 9) [V spec-only]
-Introduced by the concrete-class `is` (10f71e86): `val s: Any = listOf(3,1,2).sorted(); s is ArrayList<*>` → true in all engines (JVM
-false: sortedWith on a Collection/Array returns `Arrays$ArrayList`, or `toList()` for size ≤ 1; on a non-Collection Iterable an
-ArrayList) — give the sorted family's results array kind 4 when the receiver is a Collection/Array, at every sorted* site in all three
-engines. `java.util.ArrayDeque`, `kotlin.collections.ArrayDeque` and `LinkedList` answer `is ArrayList` true (they are plain kind-0
-lists; their class name prints java.util.ArrayList). Older: `sortedMapOf(..).keys is java.util.SortedSet<*>` false (JVM true:
-TreeMap$KeySet is a NavigableSet); `x.javaClass.name` on a collection → interp "property .name of null".
+### T-647 kotlin: `javaClass` / `::class` names of non-collections and collections; sorted-copy class edges · P2 · KT · OPEN [V spec-only]
+`class Foo; val f: Any = Foo(); println(f.javaClass.name)` → interp "property .name of null", llvm.Run "member 'name' of undefined"
+(JVM `Foo`); String and Array likewise (`java.lang.String`, `[Ljava.lang.Integer;`). `mutableListOf(1)::class.java.name` and
+`::class.qualifiedName` → `ArrayList` (JVM `java.util.ArrayList`), rendered "class ArrayList"; `setOf(1)::class.simpleName` → null
+(kSimpleName / ktSimpleName lack Set and Map arms). P3 edges: `arrayOf(3).sorted()` reports SingletonList (JVM Arrays$ArrayList);
+`intArrayOf().sortedDescending()` reports ArrayList (JVM EmptyList); after `import java.util.ArrayDeque` a bare `ArrayDeque()` is
+still kotlin's; javaClass of a map's values view fails.
 
 ---
 
@@ -762,6 +762,7 @@ T-641 js: Object.getOwnPropertyNames of a prototype — DONE 02f3aef6
 T-642 kotlin: `is ArrayList` / `is HashSet` and other concrete collection classes — DONE 10f71e86 (map views tagged with their real classes; two over-answers it introduced are T-643)
 T-605 lua: the string metatable's `__index` cannot be replaced; `next(_G)` skips non-string proxy keys — DONE 1729b70e
 T-637 java: static field and method of one name; field hiding; lazy static init; nested type names hoisted globally — DONE 84f9d63d (all P1 parts; Cloneable, live descending views, Matcher regions; hitEnd/requireEnd are T-646)
+T-643 kotlin: `sorted()` results and deques answer `is ArrayList` true; SortedSet key views; javaClass.name — DONE 5238c524
 
 # Settled — do not re-open
 
