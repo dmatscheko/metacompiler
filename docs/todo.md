@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-691** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-694** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -76,12 +76,10 @@ non-ASCII class range spanning 256 or more characters only gets the text-side up
 
 # JS — JavaScript and TypeScript
 
-### T-684 js: class `.length`; Math/JSON member names; arrow-function "use strict"; TS strict default; frozen-array message index · P3 · JS · IN PROGRESS (JS worker, round 16) [V]
-`class A { constructor(a,b){} }; A.length` → undefined (node 2; 0 for `class B extends A {}`); Error/TypeError/RangeError/Map/Set
-`.length` undefined (node 1,1,1,0,0). `Math.max.name/.length`, `Math.floor`, `JSON.stringify`, `JSON.parse` → ""/0 (node max/2,
-floor/1, stringify/3, parse/2). `() => { "use strict"; frozen.a = 2 }` runs sloppy (no UseStrictMark in ArrowBlock; node throws).
-tsc 6 emits "use strict" by default: decide whether .ts runs strict (a sloppy write to a frozen object diverges from tsc+node).
-Frozen-array TypeErrors name element 0 / the splice start, not V8's exact write order (`fill(x, 1)`, `splice(2, 1)`).
+### T-691 js/ts: strict write to a function's `name`/`length` is silent; TS legacy octal `010` · P3 · JS · OPEN [V]
+In strict code (now every .ts file) `fnDecl.name = "zzz"` → silently dropped; node "TypeError: Cannot assign to read only property
+'name' of function '<source text>'" (V8 renders the function source). `010` in TS → 8 in typescript-interpreter, 10 in
+typescript-to-llvm-ir (tsc TS1121; node strict SyntaxError): SepNumLit/JsDecLit must reject a leading 0 in both TS grammars.
 
 ---
 
@@ -133,12 +131,15 @@ emitted growth path) and bring it to a small constant; measure with a native app
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-666 php: the preg_* functions do not exist · P2 · PHP · IN PROGRESS (PHP worker, round 15) [V spec-only]
-`preg_replace('/a/', 'b', 'aa')` → "Call to undefined function preg_replace()" in all engines; preg_match, preg_match_all, preg_split,
-preg_quote, preg_replace_callback, preg_grep and preg_last_error likewise. Implement them on the shared regex engine under a PCRE dialect
-flag (delimiters and modifiers i m s x u U D, named groups (?P<n>), $n / ${n} / \n replacement references, PREG_SPLIT_* and
-PREG_*_ORDER flags, the matches array shape and offsets), additive and flag-gated in lib/regex.js / abnf/jsrtregex.go (full matrix,
-native-full, gen-all for all languages). Settle from php-src ext/pcre and its phpt files.
+### T-693 php: `"a{b}"` in a double-quoted string is read as interpolation · P2 · PHP · OPEN [V spec-only]
+`echo "a{b}";` → Error: Undefined constant "b" in both php halves; PHP prints `a{b}` — `{` starts complex interpolation only when
+`$` follows it immediately (zend_language_scanner `"{$"`).
+
+### T-692 php: preg_* remainder — recursion/subroutines, conditionals, branch reset, verbs; `(?xx)`; `[:lower:]` under /iu; PREG_BACKTRACK_LIMIT_ERROR · P3 · PHP · OPEN [V]
+`(?R)`, `(?1)`, `(?&n)`, `\g<n>`, `(?(1)a|b)`, `(?|...)`, `(*VERB)`/`(*UTF)`, callouts raise "preg_*(): unsupported ..." (the J
+rewrite cannot number branch-reset groups and has no recursion). `(?xx)` and `[:lower:]`/`[:upper:]` under /iu unhandled. Step-budget
+exhaustion is fatal instead of `false` + PREG_BACKTRACK_LIMIT_ERROR. An array subject is cast to string instead of the TypeError.
+Oracle: libpcre2 10.48 + the php_pcre.c-port harness (needs the regex owner).
 
 ### T-596 php: binding and undefined-variable warnings are never printed · P3 · PHP · BLOCKED - needs a user decision
 PHP CLI prints `Warning: Cannot unbind $this of closure using $this in <file> on line <n>` (and undefined-variable/-index
@@ -783,6 +784,8 @@ T-685 go: append growth pads a function-local struct type with 0 in the compiler
 T-687 go: a local type shadowing a top-level struct corrupts it; zero of a type-parameter-typed field is nil — DONE 1133215b (local types keyed per declaration and stripped for printing, generic-local types instantiated, generic struct elision and slice element types — 4 legs = go run; follow-up T-688)
 T-686 python: `(a): int = 1` binds nothing; `type(cell)`; 3.14 namespace keys `__firstlineno__` / `__static_attributes__` / `__annotate_func__` — DONE f133e518 (parenthesized annotated targets, type(cell), 3.14 metaclass namespace order with __firstlineno__/__static_attributes__/__annotate_func__ — 4 legs = python3)
 T-688 go: append growth inside a generic function ignores the instantiation (pad zero and capacity) — DONE 1b2e4da9 (instantiated generic types copy as structs, per-instantiation $esz/$ezero, string/bool pad zeros — 4 legs = go run; the nil-slice cap 4/2 is gc's stack-buffer escape analysis, already DECLINED; follow-ups T-689/T-690)
+T-684 js: class `.length`; Math/JSON member names; arrow-function "use strict"; TS strict default; frozen-array message index — DONE bad3ffd0 (class/Error/Map/Set length, Math/JSON member names, anonymous class names, strict arrows and generator prologues, strict undeclared assignment, .ts runs strict as tsc emits it, spec-ordered frozen-array refusals — 4 legs = node / tsc 6 + node; follow-up T-691)
+T-666 php: the preg_* functions do not exist — DONE b6352924 (preg_* family on a PCRE2 dialect of the shared engine, php_pcre.c loops in php-stdlib.php; ~6,000 cases = libpcre2 10.48 via a php_pcre.c-port harness; follow-ups T-692/T-693; warnings stay with T-596)
 
 # Settled — do not re-open
 
