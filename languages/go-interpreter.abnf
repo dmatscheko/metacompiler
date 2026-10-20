@@ -4594,7 +4594,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         regCFn(pos, cIotaFn)
         return makeIota()
     }
-    // A spec keeps its names and its own initializer list (empty when it repeats).
+    // A spec keeps its names, its type ("" when none) and its own initializer list
+    // (empty when it repeats).
     function makeConstSpec(items) {
         var names = []
         var i = 0
@@ -4602,23 +4603,26 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             if (typeof items[i] != "string") { break }
             names.push(items[i])
         }
-        if (i < items.length && items[i] != undefined && items[i].ty != undefined) { i++ }
-        return {cnames: names, cinits: items.slice(i)}
+        var ty = ""
+        if (i < items.length && items[i] != undefined && items[i].ty != undefined) { ty = items[i].ty; i++ }
+        return {cnames: names, cty: ty, cinits: items.slice(i)}
     }
     // const ( a = iota; b; c ): iota counts the specs, and a spec without '=' repeats
-    // the previous one's expressions - which is what makes the repetition advance.
+    // the previous one's expressions and type - which is what makes the repetition
+    // advance. A typed spec converts its values as a typed var declaration does.
     function makeConstGroup(specs) {
         return function() {
             var last = []
+            var lastTy = ""
             var savedIota = iotaVal
             for (var i = 0; i < specs.length; i++) {
                 var sp = specs[i]
-                if (sp.cinits.length > 0) { last = sp.cinits }
+                if (sp.cinits.length > 0) { last = sp.cinits; lastTy = sp.cty }
                 iotaVal = i
                 var vals = []
                 for (var k = 0; k < last.length; k++) { vals.push(last[k]()) }
                 if (sp.cnames.length > 1 && vals.length == 1) { vals = goMvArr(vals[0]) }
-                for (var n = 0; n < sp.cnames.length; n++) { declVar(sp.cnames[n], vals[n]) }
+                for (var n = 0; n < sp.cnames.length; n++) { declVar(sp.cnames[n], gAdoptTy(lastTy, goStoreTy(vals[n], lastTy))) }
             }
             iotaVal = savedIota
         }

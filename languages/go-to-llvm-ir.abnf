@@ -1940,11 +1940,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             // Both operands are float64 by construction here, so one side is boxed
             // and js_giarith's float arm answers a float; '+' goes through binExt,
             // which has the same rule.
+            // A float32 result takes the binary32 post-fix like any other operator's.
             var boxExt = isF32Ty(ty) ? "js_gflo32" : "js_gflo"
+            var lb = callExt(b, boxExt, [l])
             if (op == "-" || op == "*" || op == "/" || op == "%") {
-                return callExt(b, "js_giarith", [emitStr(b, op), callExt(b, boxExt, [l]), r])
+                return emitF32Fix(b, op, callExt(b, "js_giarith", [emitStr(b, op), lb, r]), lb, r)
             }
-            if (typeof binExt[op] == "string"){ return callExt(b, binExt[op], [callExt(b, boxExt, [l]), r]) }
+            if (typeof binExt[op] == "string"){ return emitF32Fix(b, op, callExt(b, binExt[op], [lb, r]), lb, r) }
         }
         var v = emitBin(b, op, l, r)
         var w = uintBits(ty)
@@ -4250,7 +4252,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return {names: names, ty: ty, inits: items.slice(i)}
     }
     // const ( a = iota; b; c ): iota counts the specs, and a spec with no '=' repeats
-    // the previous expression list - re-emitted, so it reads the NEW iota.
+    // the previous expression list and type - re-emitted, so it reads the NEW iota. A
+    // typed spec converts its values as a typed var declaration does.
     function makeConstGroup(specs) {
         return function(b) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "iota"), emitNum(b, 0)])
@@ -4271,8 +4274,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 }
                 for (var n = 0; n < sp.names.length; n++) {
                     if (sp.names[n] == "_") { continue }
-                    // A constant is never an array, so it is stored as it is.
-                    var v = (n < vals.length) ? vals[n] : emitZeroDecl(b, ty)
+                    var v = (n < vals.length) ? emitAdoptTy(b, ty, emitStoreCopy(b, vals[n], ty)) : emitZeroDecl(b, ty)
                     callExt(b, "js_scope_decl", [curScopeV, emitStr(b, sp.names[n]), v])
                 }
             }

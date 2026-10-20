@@ -4359,6 +4359,10 @@ func s82() {
 	check("cke8", fmt.Sprint(T82b, T82a/2*2, -T82c, T82c-1, -(T82c-1+1), uint8(200)+55, int8(-128)/1, zf/Z82f) ==
 		"255 200 127 -128 127 255 -128 +Inf")
 	check("cke9", fmt.Sprint(T82s[5], T82t[6], T82s[6:], T82t[1:7], len(T82t)) == "111 33éllo!7")
+	// A spec of a const GROUP holds a value of its type, as a lone one does, and
+	// arithmetic on a float32 conversion is binary32 arithmetic.
+	check("cke10", fmt.Sprintf("%T %T %T %T %T", T82a, T82b, T82c, T82f, Z82f) == "uint8 uint8 main.C82 float32 float64")
+	check("cke11", fmt.Sprint(T82f, float32(1)/3, float32(2)/3+0, F82h*2) == "3.4028235e+38 0.33333334 0.6666667 1")
 }
 
 type U82 uint8
