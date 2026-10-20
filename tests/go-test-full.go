@@ -4862,6 +4862,62 @@ func s90() {
 	check("ord3", fmt.Sprint(s, p90{x, f()}) == "[7 1 7] {7 1}")
 }
 
+// ===== SECTION 91: forward goto, late typed constants, range of an untyped func =====
+// The expected values are go run's.
+func find91(xs []int, t int) int {
+	i := 0
+	for i = 0; i < len(xs); i++ {
+		if xs[i] == t {
+			goto found
+		}
+	}
+	return -1
+found:
+	return i
+}
+
+func back91() int {
+	n := 0
+again:
+	n++
+	if n < 3 {
+		goto again
+	}
+	return n
+}
+
+func show91() string {
+	return fmt.Sprintf("%v %T %v %T", Late91, Late91, Kind91(2), Late91+1)
+}
+
+type Kind91 uint8
+
+func (k Kind91) String() string { return fmt.Sprintf("K%d", uint8(k)) }
+
+const Late91 Kind91 = 9
+
+func count91(n int) func(func(int) bool) {
+	return func(yield func(int) bool) {
+		for i := 0; i < n; i++ {
+			if !yield(i) {
+				return
+			}
+		}
+	}
+}
+
+func s91() {
+	check("gto1", fmt.Sprint(find91([]int{4, 5, 6}, 5), find91(nil, 1), back91()) == "1 -1 3")
+	check("lck1", show91() == "K9 main.Kind91 K2 main.Kind91")
+	mk := count91
+	got := ""
+	for v := range mk(3) {
+		got += fmt.Sprint(v)
+	}
+	check("rfn1", got == "012")
+	check("len1", fmt.Sprintf("%v %T", len("ab")<<2, len("abc")) == "8 int")
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -4953,6 +5009,7 @@ func main() {
 	s88() // SECTION-CALL 88
 	s89() // SECTION-CALL 89
 	s90() // SECTION-CALL 90
+	s91() // SECTION-CALL 91
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

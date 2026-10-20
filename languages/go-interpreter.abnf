@@ -1089,7 +1089,7 @@ NewType     <~~ push({nty: firstType(up.in)}) ~~>
 
 // f(a, b): a function, a builtin or an identifier-named conversion (int(x)). A
 // trailing '...' spreads a slice into the variadic parameter.
-Call        <~~ var ci = goAppendC(takeAll(), up.in); push(makeCall(goCallBoxC(ci), goSplitArgs(ci.slice(1)).atys)) ~~>
+Call        <~~ var ci = goAppendC(takeAll(), up.in); push(makeCall(goCallBoxC(ci), goSplitArgs(ci.slice(1)).atys)); goLenConstC(ci, up.start, up.pos) ~~>
             = Id <~~ push(up.in) ~~> "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
 // A call argument reports its static type after it, for goSplitArgs.
 ArgExpr     <~~ var ae = pop(); push(goRuneDefC(ae, up.pos)); push({aty: stAt(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos)}) ~~> = Expression ;

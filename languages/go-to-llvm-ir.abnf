@@ -1214,7 +1214,7 @@ LitExpr     <~~ var le = pop(); push(le); push({lesty: goLitEsty(up.pos), pu: go
 
 // f(a, b): a function or a builtin. A trailing '...' spreads a slice into the
 // variadic parameter.
-Call        <~~ var ci = goAppendC(takeAll(), up.in); push(makeCall(goCallBoxC(ci), goSplitArgs(ci.slice(1)).atys)) ~~>
+Call        <~~ var ci = goAppendC(takeAll(), up.in); push(makeCall(goCallBoxC(ci), goSplitArgs(ci.slice(1)).atys)); goLenConstC(ci, up.start, up.pos) ~~>
             = Id <~~ push(up.in) ~~> "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
 // A call argument reports its static type after it, for goSplitArgs.
 ArgExpr     <~~ var ae = pop(); push(goRuneDefC(ae, up.pos)); push({aty: stAt(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos)}) ~~> = Expression ;
@@ -4581,9 +4581,26 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // arrays rather than an object, so no name can collide with Object.prototype.
     var labelNames = []
     var labelBlocks = []
+    // Every label of the functions emitted so far, {fn: its function's name, name,
+    // blk}: a goto may also jump to a label that is not around it - forward, out of
+    // a loop (the block is made at the goto and claimed by the label) or back to an
+    // earlier statement.
+    var goLabels = []
+    function goLabelRec(name) {
+        for (var i = goLabels.length - 1; i >= 0; i--) {
+            if (goLabels[i].fn == curF.Name() && goLabels[i].name == name) { return goLabels[i] }
+        }
+        return null
+    }
     function makeLabeled(stmtT, name) {
         return function(b) {
-            var lb = curF.NewBlock("")
+            var rec = goLabelRec(name)
+            if (rec == null || rec.claimed) {
+                rec = {fn: curF.Name(), name: name, blk: curF.NewBlock(""), claimed: true}
+                goLabels.push(rec)
+            }
+            rec.claimed = true
+            var lb = rec.blk
             b.NewBr(lb)
             labelNames.push(name)
             labelBlocks.push(lb)
@@ -4601,8 +4618,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 if (labelNames[i] == name) { target = labelBlocks[i]; break }
             }
             if (target == null) {
-                println("go compiler error: goto " + name + " has no enclosing label (" + c.lineOf(pos) + ")")
-                exit(1)
+                var rec = goLabelRec(name)
+                if (rec == null) {
+                    rec = {fn: curF.Name(), name: name, blk: curF.NewBlock(""), claimed: false}
+                    goLabels.push(rec)
+                }
+                target = rec.blk
             }
             b.NewBr(target)
             return deadBlock()
@@ -4878,9 +4899,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var iDecl = !rset && iName != null && iName != "_"
         var vDecl = !rset && vName != null && vName != "_"
         if (rfn) { return function(b) { return emitRangeFunc(b, listT, bodyT, iName, vName, rset, lbl) } }
-        return function(b) {
+        var tabE = function(b, lt) {
             var saved = curScopeV
-            var r = listT(b)
+            var r = lt(b)
             b = r.b
             // An ARRAY is ranged over a COPY when the value is bound; a pointer to one
             // ranges live. Twin of makeForRange in go-interpreter.abnf.
@@ -4951,6 +4972,21 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             cV.Incs = [llvm.ir.NewIncoming(zeroV, preB), llvm.ir.NewIncoming(nextV, postB)]
             postB.NewBr(headB)
             return exitB
+        }
+        if (rinfo.rknown === true) { return function(b) { return tabE(b, listT) } }
+        // A range expression of no known static type may be a function: decided at
+        // run time, with the body emitted for both loops.
+        return function(b) {
+            var r = listT(b)
+            var v = r.v
+            var held = function(hb) { return {b: hb, v: v} }
+            var fnB = curF.NewBlock("")
+            var tabB = curF.NewBlock("")
+            var endB = curF.NewBlock("")
+            r.b.NewCondBr(truthy(r.b, callExt(r.b, "js_seq", [callExt(r.b, "js_typeof", [v]), emitStr(r.b, "function")])), fnB, tabB)
+            emitRangeFunc(fnB, held, bodyT, iName, vName, rset, lbl).NewBr(endB)
+            tabE(tabB, held).NewBr(endB)
+            return endB
         }
     }
     // RANGE OVER A FUNCTION (Go 1.23): `for k, v := range seq` calls seq with a yield

@@ -1113,7 +1113,9 @@ function stStoreAt(pos) {
 }
 function cTyLookup(name) {
     var b = cFind(name)
-    return b == null ? "" : b.f.t[b.i]
+    if (b != null) { return b.f.t[b.i] }
+    var pc = goPreConstTy[goWalkPkg != "" ? "$" + goWalkPkg + "." + name : "$" + name]
+    return pc === undefined ? "" : pc
 }
 // The newest binding of name in the innermost frame takes the type ty.
 function cBindTy(name, ty) {
@@ -2432,11 +2434,62 @@ function goPkgQual(pkg, t, defOnly) {
 // ("[]Kind" -> "[]pk.Kind"), the spelling main's code uses for them. Such a value
 // carries no descriptor, so a bare name would be read as main's.
 function goWalkQual(t) { return goWalkPkg == "" ? t : goPkgQual(goWalkPkg, t, true) }
+// A top-level typed constant's type, "$name" (or "$pkg.name" in a package) -> type
+// text, so a reference that precedes the declaration is typed like one that
+// follows it (cTyLookup). A spec in a group with neither type nor value repeats the
+// previous spec's.
+var goPreConstTy = {}
+function goPreConst(text, i) {
+    i = stSkipWs(text, i)
+    var e = text.indexOf("\n", i)
+    if (e < 0) { e = text.length }
+    if (text.charAt(i) != "(") { goPreConstSpec(text.substring(i, e), ""); return }
+    var prev = ""
+    while (e < text.length) {
+        var s = e + 1
+        e = text.indexOf("\n", s)
+        if (e < 0) { e = text.length }
+        var line = stTrim(text.substring(s, e))
+        if (line.charAt(0) == ")") { return }
+        if (line != "" && line.substring(0, 2) != "//") { prev = goPreConstSpec(line, prev) }
+    }
+}
+// One `A, B T = ...` spec; answers its type ("" for an untyped one).
+function goPreConstSpec(line, prev) {
+    var names = []
+    var i = 0
+    while (true) {
+        i = stSkipWs(line, i)
+        var ns = i
+        while (i < line.length && cIsIdCh(line.charCodeAt(i))) { i = i + 1 }
+        if (i == ns) { return "" }
+        names.push(line.substring(ns, i))
+        i = stSkipWs(line, i)
+        if (line.charAt(i) != ",") { break }
+        i = i + 1
+    }
+    var rest = line.substring(i)
+    var cm = rest.indexOf("//")
+    if (cm >= 0) { rest = rest.substring(0, cm) }
+    rest = stTrim(rest)
+    var ty = prev
+    if (rest != "") {
+        var eq = rest.indexOf("=")
+        ty = stNoWs(eq < 0 ? rest : rest.substring(0, eq))
+    }
+    var k = 0
+    while (k < names.length) {
+        if (ty != "") { goPreConstTy[goPrePkg != "" ? "$" + goPrePkg + "." + names[k] : "$" + names[k]] = ty }
+        k = k + 1
+    }
+    return ty
+}
 function goPrescan(text) {
     var i = 0
     while (i < text.length) {
         if (text.substring(i, i + 5) == "func " || text.substring(i, i + 5) == "func(") { goPreFunc(text, i + 4) }
         else if (text.substring(i, i + 5) == "type ") { goPreType(text, i + 5) }
+        else if (text.substring(i, i + 6) == "const ") { goPreConst(text, i + 6) }
         var nl = text.indexOf("\n", i)
         if (nl < 0) { return }
         i = nl + 1
@@ -3086,7 +3139,7 @@ function goRangeC(pos) {
     var et = stElemTy(stAt(pos))
     if (cRangeNames.length > 1) { cBindTy(cRangeNames[1], et) }
     cRangeNames = []
-    return {rcopy: goStCopyTy(et), rfn: goIsSeqTy(stAt(pos))}
+    return {rcopy: goStCopyTy(et), rfn: goIsSeqTy(stAt(pos)), rknown: stAt(pos) != ""}
 }
 // Is t a function a range statement iterates by calling it (Go 1.23):
 // func(yield func(...) bool), directly, as iter.Seq/Seq2 or a defined type?
@@ -3269,6 +3322,17 @@ function cSpecX(sv, as, at) {
     if (tk != null && cLastTy == "") { return tk }
     var sl = at >= 0 ? goConstStrLen(c.srcSlice(as, at)) : 0 - 1
     return sl >= 0 ? {sl: sl} : null
+}
+// len of a constant string is a constant of type int, so `len("ab") << 70`
+// overflows int at compile time. ci is the Call rule's [name, thunk, {aty}] and
+// [start, pos] its source.
+function goLenConstC(ci, start, pos) {
+    if (ci[0] !== "len" || ci.length != 3 || typeof ci[1] != "function" || cFind("len") != null) { return }
+    var src = c.srcSlice(start, pos)
+    var n = goConstStrLen(src.substring(src.indexOf("(") + 1, src.length - 1))
+    if (n < 0) { return }
+    var k = cInt(1, cbFromSmall(n))
+    regTk(pos, goTkMk(k, goTkType("int")))
 }
 // The byte length of a constant string expression: string literals and string
 // constants joined by '+', else -1.
