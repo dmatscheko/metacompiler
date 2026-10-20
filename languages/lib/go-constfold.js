@@ -2859,6 +2859,7 @@ function goLibFile(path) {
     if (path == "sync") { return "lib/go-sync.go" }
     if (path == "strconv") { return "lib/go-strconv.go" }
     if (path == "unicode") { return "lib/go-unicode.go" }
+    if (path == "bytes") { return "lib/go-bytes.go" }
     if (path == "unicode/utf8") { return "lib/go-utf8.go" }
     if (path == "sync/atomic") { return "lib/go-atomic.go" }
     return ""

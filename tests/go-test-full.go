@@ -41,6 +41,7 @@
 package main
 
 import (
+	"bytes"
 	"cmp"
 	"errors"
 	"fmt"
@@ -4820,6 +4821,20 @@ func s88() {
 		string(utf8.AppendRune(nil, 'é'))) == "10 false 3 [104:1 233:2 108:1 108:1 111:1 44:1 32:1 19990:3 30028:3 65533:1] [226 130 172]é")
 }
 
+// ===== SECTION 89: package bytes =====
+// Go source (languages/lib/go-bytes.go) over package strings. The expected
+// values are go run's.
+func s89() {
+	var buf bytes.Buffer
+	buf.WriteString("hi ")
+	buf.WriteByte('w')
+	buf.WriteRune('é')
+	fmt.Fprintf(&buf, "%d", 42)
+	line, _ := bytes.NewBufferString("a,b").ReadString(',')
+	check("byt1", fmt.Sprint(buf.String(), buf.Len(), bytes.Contains([]byte("abc"), []byte("bc")), string(bytes.ToUpper([]byte("ab"))),
+		bytes.Equal([]byte("x"), []byte("x")), len(bytes.Fields([]byte(" a b "))), line) == "hi wé428 trueABtrue 2a,")
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -4909,6 +4924,7 @@ func main() {
 	s86() // SECTION-CALL 86
 	s87() // SECTION-CALL 87
 	s88() // SECTION-CALL 88
+	s89() // SECTION-CALL 89
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }
