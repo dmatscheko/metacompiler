@@ -2633,6 +2633,16 @@ KwContinue  = "continue" KwEnd ;
         var e = swTyTrim(kv[kv.length - 1])
         return swTyIsDeep(e) && swAdoptNeeded(e) ? e : ""
     }
+    // An operand thunk adopting to the structural element type of self's stored
+    // property `name`, decided at emit time (the enclosing type is known then).
+    // Twin in swift-interpreter.abnf.
+    function swSelfElemDeepThunk(t, name) {
+        return function(b) {
+            var ed = swElemDeepOf(swSelfFieldAnn(name))
+            var r = t(b)
+            return ed == "" ? r : {b: r.b, v: swEmitAdopt(r.b, r.v, ed)}
+        }
+    }
     function swElemTyOf(ty) {
         if (ty == undefined || ty == null || ty.length < 3) { return "" }
         if (ty.length > 5 && ty.substring(0, 4) == "Set<" && ty.charAt(ty.length - 1) == ">") {
@@ -4472,6 +4482,42 @@ KwContinue  = "continue" KwEnd ;
     // of a program type (an instance, or a descriptor for a static) reads its own,
     // anything else is a collection. Twin of the count/isEmpty/first/last arms of
     // swGetField in swift-interpreter.abnf.
+    // A labelled tuple element lives under its label AND its index, and a copy
+    // reads the index: after `t.qty -= 1` the twin slot is written too. Twin of
+    // swSetField in swift-interpreter.abnf.
+    function rtTupSync() {
+        return rtFunc("sw_tupsync", 3, function(b, ps) {
+            var lbV = b.NewCall(rtProbe("sw_tlabels", "__tlabels"), [ps[0]])
+            var initB = curF.NewBlock("")
+            var retB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, lbV), initB, retB)
+            var nV = callExt(initB, "js_pylen", [lbV])
+            var sc = callExt(initB, "js_scope_new", [handle(0)])
+            callExt(initB, "js_scope_decl", [sc, emitStr(initB, "i"), emitNum(initB, 0)])
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            initB.NewBr(headB)
+            var iV = callExt(headB, "js_scope_get", [sc, emitStr(headB, "i")])
+            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, nV])), bodyB, retB)
+            var lV = callExt(bodyB, "js_swidx", [lbV, iV])
+            var isV = callExt(bodyB, "js_jadd", [emitStr(bodyB, ""), iV])
+            var setIB = curF.NewBlock("")
+            var c2B = curF.NewBlock("")
+            bodyB.NewCondBr(truthy(bodyB, callExt(bodyB, "js_seq", [lV, ps[1]])), setIB, c2B)
+            callExt(setIB, "js_set", [ps[0], isV, ps[2]])
+            setIB.NewBr(c2B)
+            var c3B = curF.NewBlock("")
+            var setLB = curF.NewBlock("")
+            var nextB = curF.NewBlock("")
+            c2B.NewCondBr(truthy(c2B, callExt(c2B, "js_seq", [isV, ps[1]])), c3B, nextB)
+            c3B.NewCondBr(truthy(c3B, callExt(c3B, "js_seq", [lV, emitStr(c3B, "")])), nextB, setLB)
+            callExt(setLB, "js_set", [ps[0], lV, ps[2]])
+            setLB.NewBr(nextB)
+            callExt(nextB, "js_scope_set", [sc, emitStr(nextB, "i"), callExt(nextB, "js_jadd", [iV, emitNum(nextB, 1)])])
+            nextB.NewBr(headB)
+            retB.NewRet(hUndef)
+        })
+    }
     function rtUserProp(name) {
         return rtFunc("sw_uprop_" + name, 1, function(b, ps) {
             var ownB = curF.NewBlock("")
@@ -7581,15 +7627,17 @@ KwContinue  = "continue" KwEnd ;
         // swElemTyOf declines it, in both halves.
         var elemTy = (ref.path.length == 1 && ref.path[0].key == undefined)
                      ? swElemTyOf(declTyOf(ref.name)) : ""
+        var localAnn = hasOwn(localAnnReg, "$" + ref.name) ? localAnnReg["$" + ref.name] : "?"
+        var hasLocal = localAnn != "?"
         // `d[k] = (1, 2.5)` into a `[String: (count: Int, sum: Double)]`: a
-        // STRUCTURAL element type adopts the written value whole. Twin in
+        // STRUCTURAL element type adopts the written value whole - the local's, or
+        // for a name no local binds, self's stored property's. Twin in
         // swift-interpreter.abnf.
         if (ref.path.length == 1 && ref.path[0].key == undefined && op == "=") {
             var elemDeep = swElemDeepOf(declTyOf(ref.name))
             if (elemDeep != "") { valT = swAdoptThunk(valT, elemDeep) }
+            else if (!hasLocal) { valT = swSelfElemDeepThunk(valT, ref.name) }
         }
-        var localAnn = hasOwn(localAnnReg, "$" + ref.name) ? localAnnReg["$" + ref.name] : "?"
-        var hasLocal = localAnn != "?"
         if (hasLocal && ref.path.length == 0 && op == "=") { valT = swDotWant(valT, items[3], localAnn) }
         // A whole value written to a local declared with a STRUCTURAL type adopts its
         // numeric leaves. Twin in swift-interpreter.abnf.
@@ -7755,8 +7803,10 @@ KwContinue  = "continue" KwEnd ;
                         callExt(b, "js_set", [p.obj, emitStr(b, "__v_" + p.keyName), v])
                     } else if (isSetterName(p.keyName)) {
                         b.NewCall(rtSetProp(), [p.obj, p.key, v])
+                        if (swTupLblSeen) { b.NewCall(rtTupSync(), [p.obj, p.key, v]) }
                     } else {
                         callExt(b, "js_set", [p.obj, p.key, v])
+                        if (swTupLblSeen) { b.NewCall(rtTupSync(), [p.obj, p.key, v]) }
                     }
                 } else if (hasSubscript) {
                     if (op != "=") {

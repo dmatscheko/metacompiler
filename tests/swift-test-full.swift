@@ -5253,6 +5253,32 @@ func s132() {
     check("132b", k == 8 && Int(double132: 21) == 42 && w == "*x*")
 }
 
+// ===== SECTION 133: labelled tuples in a stored property; writing one element =====
+// `stock[k] = (item, n)` into a property declared `[String: (item: String, qty:
+// Int)]` takes the labels; `t.qty -= 1` (or `t.1 = ...`) changes the element
+// under both its label and its index, so a copy sees it. Every value read off
+// swiftc 6.1.2.
+final class Store133 {
+    private var stock: [String: (item: String, qty: Int)] = [:]
+    func add(_ name: String, _ n: Int) { stock[name] = (name.uppercased(), (stock[name]?.qty ?? 0) + n) }
+    func take(_ name: String) -> Bool {
+        guard let e = stock[name], e.qty > 0 else { return false }
+        stock[name]!.qty -= 1
+        return true
+    }
+    var left: [String] { stock.keys.sorted().map { "\(stock[$0]!.item)\(stock[$0]!.qty)" } }
+}
+func s133() {
+    let s = Store133()
+    s.add("a", 1); s.add("b", 2); s.add("a", 1)
+    let took = [s.take("a"), s.take("a"), s.take("a"), s.take("c")]
+    var t: (x: Int, y: Int) = (1, 2)
+    t.x = 10
+    t.1 = 20
+    let c = t
+    check("133a", took == [true, true, false, false] && s.left == ["A0", "B2"] && c.0 == 10 && c.y == 20)
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5386,6 +5412,7 @@ func main() {
     s130() // SECTION-CALL 130
     s131() // SECTION-CALL 131
     s132() // SECTION-CALL 132
+    s133() // SECTION-CALL 133
     print("full: \(checks) checks, \(fails) failures")
 }
 

@@ -3551,6 +3551,16 @@ KwContinue  = "continue" KwEnd ;
         var e = swTyTrim(kv[kv.length - 1])
         return swTyIsDeepText(e) && swAdoptNeeded(e) ? e : ""
     }
+    // An operand thunk adopting to the structural element type of self's stored
+    // property `name`, asked when it runs. Twin in swift-to-llvm-ir.abnf.
+    function swSelfElemDeepThunk(t, name) {
+        return function() {
+            var ed = swElemDeepOf(swSelfFieldAnn(name))
+            var v = anytype
+            v = t()
+            return ed == "" ? v : swAdoptAnn(v, ed)
+        }
+    }
     function swElemTyOf(ty) {
         if (ty == undefined || ty == null || ty.length < 3) { return "" }
         if (ty.length > 5 && ty.substring(0, 4) == "Set<" && ty.charAt(ty.length - 1) == ">") {
@@ -4047,6 +4057,16 @@ KwContinue  = "continue" KwEnd ;
             if (s != null) { s(o, v); return }
         }
         o[k] = v
+        // A labelled tuple element lives under its label AND its index, and a copy
+        // reads the index: `t.qty -= 1` writes both. Twin of sw_tupsync in
+        // swift-to-llvm-ir.abnf.
+        if (typeof o == "object" && o.__tuple != undefined && hasOwn(o, "__tlabels")) {
+            var lb = o.__tlabels
+            for (var i = 0; i < lb.length; i++) {
+                if (lb[i] == k) { o["" + i] = v }
+                if ("" + i == k && lb[i] != "") { o[lb[i]] = v }
+            }
+        }
     }
     function getElemP(o, k) {
         if (isDict(o)) { var di = dictFind(o, k); return di < 0 ? undefined : o.vals[di] }
@@ -7569,15 +7589,17 @@ KwContinue  = "continue" KwEnd ;
         // swElemTyOf declines it, in both halves.
         var elemTy = (ref.path.length == 1 && ref.path[0].key == undefined)
                      ? swElemTyOf(declTyOf(ref.name)) : ""
+        var localAnn = hasOwn(localAnnReg, "$" + ref.name) ? localAnnReg["$" + ref.name] : "?"
+        var hasLocal = localAnn != "?"
         // `d[k] = (1, 2.5)` into a `[String: (count: Int, sum: Double)]`: a
-        // STRUCTURAL element type adopts the written value whole. Twin in
+        // STRUCTURAL element type adopts the written value whole - the local's, or
+        // for a name no local binds, self's stored property's. Twin in
         // swift-to-llvm-ir.abnf.
         if (ref.path.length == 1 && ref.path[0].key == undefined && op == "=") {
             var elemDeep = swElemDeepOf(declTyOf(ref.name))
             if (elemDeep != "") { valT = swAdoptThunk(valT, elemDeep) }
+            else if (!hasLocal) { valT = swSelfElemDeepThunk(valT, ref.name) }
         }
-        var localAnn = hasOwn(localAnnReg, "$" + ref.name) ? localAnnReg["$" + ref.name] : "?"
-        var hasLocal = localAnn != "?"
         if (hasLocal && ref.path.length == 0 && op == "=") { valT = swDotWant(valT, items[3], localAnn) }
         // A whole value written to a local declared with a STRUCTURAL type adopts its
         // numeric leaves, as the declaration's initializer does: `xs =
