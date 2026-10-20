@@ -2017,6 +2017,14 @@ char *rt_ansic(char *ac) {
                 n = n + 1;
             }
             o = o + rt_utf8put(dst + o, v);
+        } else if ((c0 == 92) && (c1 == 99) && (i + 2 < len)) {
+            /* \cX: the control character of X's first byte ("?" is DEL, else
+             * toupper(X) & 0x1f); a multibyte X's other bytes follow as they are.
+             * Twin of ansiC in bash-interpreter.abnf. */
+            int x = (int)(unsigned char)ac[i + 2];
+            dst[o] = (char)((x == 63) ? 127 : (x & 31));
+            o = o + 1;
+            i = i + 3;
         } else if ((c0 == 92) && (i + 1 < len)) {
             int mapped = c1;
             if (c1 == 97) mapped = 7;

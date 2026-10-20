@@ -1103,6 +1103,19 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 else if (e == "\\") { out = out + "\\" }
                 else if (e == "'") { out = out + "'" }
                 else if (e == "\"") { out = out + "\"" }
+                else if (e == "?") { out = out + "?" }
+                // \cX: the control character of X's first byte, then a multibyte X's other
+                // bytes; $'\c\\' and $'\c\' are both 0x1c. Twin of ansiC in bash-interpreter.abnf.
+                else if (e == "c" && i < t.length) {
+                    var cb = utf8Bytes(t, i)
+                    i = i + ((cb.length == 4) ? 2 : 1)
+                    if (cb[0] == 92 && i < t.length && t.charAt(i) == "\\") { i = i + 1 }
+                    var cv = (cb[0] == 63) ? 127 : (cb[0] & 31)
+                    if (cv == 0) { return out }
+                    out = out + escByte(cv)
+                    var ck
+                    for (ck = 1; ck < cb.length; ck++) { out = out + escByte(cb[ck]) }
+                }
                 // \NNN: one to THREE octal digits in total, so $'\0101' is \b then "1" and
                 // $'\101' is "A".
                 else if (e >= "0" && e <= "7") {
@@ -1133,6 +1146,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
         }
         return out
+    }
+    // The UTF-8 bytes of the character at t[i] (a surrogate pair is one character).
+    function utf8Bytes(t, i) {
+        var cc = t.charCodeAt(i)
+        if (cc < 128) { return [cc] }
+        if (cc < 2048) { return [192 + (cc >> 6), 128 + (cc & 63)] }
+        if (cc >= 55296 && cc <= 56319 && i + 1 < t.length) {
+            var cp = 65536 + (cc - 55296) * 1024 + (t.charCodeAt(i + 1) - 56320)
+            return [240 + (cp >> 18), 128 + ((cp >> 12) & 63), 128 + ((cp >> 6) & 63), 128 + (cp & 63)]
+        }
+        return [224 + (cc >> 12), 128 + ((cc >> 6) & 63), 128 + (cc & 63)]
     }
     function hexVal(cc) {
         if (cc >= 48 && cc <= 57) { return cc - 48 }

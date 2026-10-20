@@ -383,7 +383,7 @@ LineCont    <~~ push(makeConst("")) ~~> = "\\" "\n" ;
 
 // $'...' : ANSI-C quoting. The body is taken raw and decoded by ansiC (\n \t \xHH \0NNN \uHHHH ...).
 AnsiSeg     = "$'" :whitespace() AnsiBody "'" ;
-AnsiBody    <~~ push(makeConst(ansiC(up.in))) ~~> = { AnsiEsc | AnsiLit } ;
+AnsiBody    <~~ push(makeConst(ansiC(up.in, true))) ~~> = { AnsiEsc | AnsiLit } ;
 AnsiEsc     = "\\" AnyCh ;
 AnsiLit     = !@+"'\\" ;
 
@@ -569,7 +569,7 @@ RepDq       <~~ push(mkQuotedRep(mkDqWord(takeAll()))) ~~>
             = '"' :whitespace() { ExpSeg | DqCont | DqEsc | DqLit } '"' ;
 RepEsc      <~~ push(makeConst(repEscape(escChar(up.in)))) ~~> = "\\" AnyCh ;
 RepAnsi     = "$'" :whitespace() RepAnsiBody "'" ;
-RepAnsiBody <~~ push(makeConst(repEscape(ansiC(up.in)))) ~~> = { AnsiEsc | AnsiLit } ;
+RepAnsiBody <~~ push(makeConst(repEscape(ansiC(up.in, true)))) ~~> = { AnsiEsc | AnsiLit } ;
 
 // ${v:off} and ${v:off:len} : the offsets are arithmetic, so whitespace matters again -
 // which is also what tells ${v: -1} (a substring) from ${v:-default}.
@@ -746,7 +746,7 @@ PatSq       = "'" :whitespace() { !@+"'" } <~~ push(makeConst(globEscape(up.in))
 PatDq       <~~ push(mkQuotedPat(mkDqWord(takeAll()))) ~~>
             = '"' :whitespace() { ExpSeg | DqCont | DqEsc | DqLit } '"' ;
 PatAnsi     = "$'" :whitespace() PatAnsiBody "'" ;
-PatAnsiBody <~~ push(makeConst(globEscape(ansiC(up.in)))) ~~> = { AnsiEsc | AnsiLit } ;
+PatAnsiBody <~~ push(makeConst(globEscape(ansiC(up.in, true)))) ~~> = { AnsiEsc | AnsiLit } ;
 PatEsc      <~~ push(makeConst(globEscape(escChar(up.in)))) ~~> = "\\" AnyCh ;
 CondBinOp   <~~ push({cop: up.in}) ~~> = CondBinTok ;
 CondBinTok  = "==" | "!=" | "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge" | "-nt" | "-ot" | "-ef" | "=" | "<" | ">" ;
@@ -1968,7 +1968,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (xfOp == "U") { return unicodeCase(v, 1) }
         if (xfOp == "L") { return unicodeCase(v, 0) }
         if (xfOp == "u") { return caseMap(v, "^", "") }
-        if (xfOp == "E") { return ansiC(v) }
+        if (xfOp == "E") { return ansiC(v, false) }
         if (xfOp == "P") { return promptExpand(v) }
         if (xfOp == "a") { return varAttrs(nm) }
         if (xfOp == "A") {
@@ -3335,9 +3335,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return ifsHas(seps, v.charAt(v.length - 1))
     }
 
-    // $'...' body -> the decoded string (bash's ANSI-C escapes). A NUL byte ends it, as it
-    // ends a C string: $'g\0h'x is gx.
-    function ansiC(t) {
+    // A $'...' body (quoted) or a ${v@E} value -> the decoded string (bash's ANSI-C
+    // escapes). A NUL byte ends it, as it ends a C string: $'g\0h'x is gx.
+    function ansiC(t, quoted) {
         var out = ""
         var i = 0
         while (i < t.length) {
@@ -3357,6 +3357,22 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 else if (e == "\\") { out = out + "\\" }
                 else if (e == "'") { out = out + "'" }
                 else if (e == "\"") { out = out + "\"" }
+                else if (e == "?") { out = out + "?" }
+                // \cX: the control character of X's first byte - "?" is DEL, anything else
+                // toupper(X) & 0x1f - followed by a multibyte X's other bytes. In $'...' a
+                // backslash X may be written escaped: $'\c\\' and $'\c\' are both 0x1c.
+                // Twin of ansiC in bash-to-llvm-ir.abnf and rt_ansic in lib/bash-rt.c.
+                else if (e == "c" && i < t.length) {
+                    var cx = chunkAt(t, i)
+                    var cb = strBytes(cx)
+                    i = i + cx.length
+                    if (quoted && cb[0] == 92 && i < t.length && t.charAt(i) == "\\") { i = i + 1 }
+                    var cv = (cb[0] == 63) ? 127 : (cb[0] & 31)
+                    if (cv == 0) { return normBytes(out) }
+                    out = out + escByte(cv)
+                    var ck
+                    for (ck = 1; ck < cb.length; ck++) { out = out + escByte(cb[ck]) }
+                }
                 // \NNN: one to THREE octal digits IN TOTAL, so $'\0101' is \b then "1" and
                 // $'\101' is "A".
                 else if (e >= "0" && e <= "7") {

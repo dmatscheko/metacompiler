@@ -1053,6 +1053,26 @@ s26() {
   check ansi4 "${q3@E}" "\$'${e3}'"
   e4=$'\t9'; check ansi5 "${e4@Q}" "\$'\\t9'"
 
+  # -- \cX is the control character of X's first byte: "?" is DEL, a NUL ends the
+  #    string, a multibyte X keeps its other bytes, and in $'...' (not in @E) the
+  #    X may be an escaped backslash. \? is "?".
+  c1=$'\cA'; check ctl1 "${#c1}" 1
+  check ctl2 "$c1" $'\001'
+  c2=$'a\cZb'; check ctl3 "$c2" $'a\032b'
+  c3=$'\c?'; check ctl4 "$c3" $'\177'
+  c4=$'x\c@y'; check ctl5 "$c4" x
+  c5=$'\c\\z'; check ctl6 "$c5" $'\034z'
+  c6=$'\c'; check ctl7 "$c6" '\c'
+  c7=$'\cé'; check ctl8 "$c7" $'\003\251'
+  c8=$'\?'; check ctl9 "$c8" '?'
+  c9='a\qb\zc\ux\"\?\cA'; c10="${c9@E}"
+  check ctl10 "${#c10}" 13
+  check ctl11 "$c10" 'a\qb\zc\ux"?'$'\001'
+  c11='\c\\z'; check ctl12 "${c11@E}" $'\034\\z'
+  c12='x\c@y'; check ctl13 "${c12@E}" x
+  c13='\cé'; check ctl14 "${c13@E}" $'\003\251'
+  c14=$'a\001b'; check ctl15 "${c14//$'\cA'/-}" a-b
+
   # -- ${v^^} / ${v,,} walk CODEPOINTS and map each with the simple Unicode mapping.
   u1="aéb"
   check case1 "${u1^^}" "AÉB"
