@@ -513,6 +513,119 @@ func s110() {
 	check("derefx110", out == "5 8 42 9")
 }
 
+// ===== SECTION 111: pointers to struct fields and to elements =====
+// &x.f addresses the field (the embedded struct's, when promoted) and &s[i] the
+// element in the backing array, so a store through either reaches x and s, and a
+// later append that reallocates leaves the old element behind. `*(a).p` is
+// `*((a).p)`. The expected values are go run's.
+type in111 struct {
+	x int
+	b uint8
+}
+
+type o111 struct {
+	in111
+	name string
+	arr  [3]int
+	fs   []int
+	p    *int
+}
+
+func inc111(p *int) { *p++ }
+
+func (o *o111) xp() *int { return &o.x }
+
+func s111() {
+	var o o111
+	inc111(&o.x)
+	inc111(&o.in111.x)
+	pb := &o.b
+	*pb += 200
+	*pb += 200
+	pn := &o.name
+	*pn = "n"
+	pf := &o.fs
+	*pf = append(*pf, 4)
+	inc111(&o.arr[1])
+	pa := &o.arr
+	inc111(&pa[2])
+	*(o.xp()) += 10
+	out := fmt.Sprint(o.x, " ", o.b, " ", o.name, " ", o.fs, " ", o.arr)
+	xs := []int{1, 2, 3}
+	inc111(&xs[1])
+	e := &xs[2]
+	xs = append(xs, 4)
+	xs[2] = 100
+	*e = 7
+	out += fmt.Sprint(" ", xs, " ", *e)
+	g := [][]int{{1}, {2}}
+	inc111(&g[1][0])
+	out += fmt.Sprint(" ", g)
+	var o2 o111
+	out += fmt.Sprint(" ", &o.x == &o.x, &o.x == &o2.x, &o.arr[0] == &o.arr[1])
+	check("addr111", out == "12 144 n [4] [0 1 1] [1 3 100 4] 7 [[1] [3]] true false false")
+	r := struct{ a, b int }{}
+	n, err := fmt.Sscan("5 6", &r.a, &xs[0])
+	check("scan111", n == 2 && err == nil && r.a == 5 && xs[0] == 6)
+	k := 1
+	o.p = &k
+	*(o).p = 5
+	po := &o
+	*(po).p += 2
+	*(*po).p *= 3
+	check("derefx111", k == 21)
+	func() {
+		defer func() { out = fmt.Sprint(recover()) }()
+		var np *o111
+		_ = &np.name
+	}()
+	check("nilfield111", out == "runtime error: invalid memory address or nil pointer dereference")
+	func() {
+		defer func() { out = fmt.Sprint(recover()) }()
+		i := 3
+		_ = &xs[i+2]
+	}()
+	check("oob111", out == "runtime error: index out of range [5] with length 4")
+}
+
+// ===== SECTION 112: an anonymous struct with embedded fields =====
+// An embedded field of a struct literal's own type is named after its type, and
+// promotes its fields and methods, through a pointer too; two literals of one
+// anonymous type are comparable. The expected values are go run's.
+type in112 struct{ n int }
+
+func (i in112) Get() int { return i.n }
+
+func (i *in112) Bump() { i.n++ }
+
+func s112() {
+	r := struct{ *strings.Reader }{strings.NewReader("abc")}
+	c, _ := r.ReadByte()
+	out := fmt.Sprint(string(c), r.Len(), r.Reader.Len())
+	v := struct {
+		in112
+		k int
+	}{in112{4}, 5}
+	v.Bump()
+	p := struct{ *in112 }{&in112{7}}
+	p.Bump()
+	out += fmt.Sprint(" ", v.n, v.Get(), v.in112.n, v.k, " ", p.n, p.Get())
+	out += fmt.Sprintf(" %+v", v)
+	e1 := struct{ in112 }{in112{2}}
+	e2 := struct{ in112 }{in112{2}}
+	check("anonembed112", out == "a2 2 5 5 5 5 8 8 {in112:{n:5} k:5}" && e1 == e2)
+}
+
+// ===== SECTION 113: %T of fmt's, errors' and os' functions =====
+// The expected values are go run's.
+func s113() {
+	out := fmt.Sprintf("%T|%T|%T|%T", fmt.Println, fmt.Sprintf, fmt.Fprintf, fmt.Sscan)
+	out += fmt.Sprintf("|%T|%T|%T", errors.New, errors.As, os.Exit)
+	check("hostfnty113", out == "func(...interface {}) (int, error)|func(string, ...interface {}) string|"+
+		"func(io.Writer, string, ...interface {}) (int, error)|func(string, ...interface {}) (int, error)|"+
+		"func(string) error|func(error, interface {}) bool|func(int)")
+}
+
 func main() {
 	s94()   // SECTION-CALL 94
 	s95()   // SECTION-CALL 95
@@ -529,6 +642,9 @@ func main() {
 	s108()  // SECTION-CALL 108
 	s109()  // SECTION-CALL 109
 	s110()  // SECTION-CALL 110
+	s111()  // SECTION-CALL 111
+	s112()  // SECTION-CALL 112
+	s113()  // SECTION-CALL 113
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

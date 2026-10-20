@@ -155,14 +155,7 @@ func init() {
 		m["js_gorfderef"] = func(a []uint64) uint64 {
 			p := arg(a, 0)
 			if c, ok := cellOf(p); ok {
-				key := rt.toString(c.props["k"])
-				if sc, ok := c.props["o"].(*jsScope); ok {
-					return w(rt.scopeGet(sc, key))
-				}
-				if inner, ok := c.props["o"].(*jsObject); ok {
-					return w(inner.props[key])
-				}
-				return w(jsUndef)
+				return w(rt.goCellLoad(c))
 			}
 			return w(unbox(p))
 		}
@@ -245,12 +238,7 @@ func init() {
 		m["js_gorfstore"] = func(a []uint64) uint64 {
 			p, v := arg(a, 0), unbox(arg(a, 1))
 			if c, ok := cellOf(p); ok {
-				key := rt.toString(c.props["k"])
-				if sc, ok := c.props["o"].(*jsScope); ok {
-					rt.scopeSet(sc, key, v)
-				} else if inner, ok := c.props["o"].(*jsObject); ok {
-					inner.set(key, v)
-				}
+				rt.goCellStore(c, v)
 				return w(jsUndef)
 			}
 			structSet(unbox(p), v)

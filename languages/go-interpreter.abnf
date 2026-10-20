@@ -555,9 +555,13 @@ AssignOp    = "&^=" | "<<=" | ">>=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | 
 // through two of them. On a value that is not a pointer cell it stays transparent,
 // which is what a struct pointer needs - those are already references.
 Target      = TgtDerefX | TgtParen | TgtPlain ;
-// `*(v.p.(*int)) = 5`: a store through the pointer any expression answers (goDerefTgtC).
+// `*(v.p.(*int)) = 5`, `*(a).p = 5`: a store through the pointer a suffix chain that
+// starts with a parenthesis answers (goDerefTgtC). Go reads `*(a).p` as `*((a).p)`.
 TgtDerefX   <~~ push(goDerefTgtC(pop())) ~~>
-            = "*" "(" Expression ")" ;
+            = "*" ParenNext PostfixExpr ;
+ParenNext   = :script(~~
+    (c.peek(0) === 40) ? undefined : abnf.newToken("\x01a-parenthesis", 0)
+~~) ;
 TgtPlain    <~~ push(makeTargetRef(takeAll())) ~~>
             = TgtCore { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
 // A parenthesised target: '(*pn).val = v', '(*h)[i] = v', '(q) = 1'. Go writes the
@@ -795,13 +799,17 @@ Not         <~~ push(goClearC(makeNot(pop()), up.pos)) ~~>
             = "!" UnaryExpr ;
 // &x (address of) and *p (dereference). Taking the address of a plain NAME yields a
 // pointer cell that reaches back into the variable's scope slot, which is what makes
-// *p = v, bump(&n) and **pp = v write through to the variable. Every other &-form is
-// still the identity on the value: structs, slices and maps already behave like
-// references, so &Point{1, 2} and &s[i] need no cell. Binary * (multiply) is matched
-// at MulExpr, so unary * only appears in an operand position.
-AddrOf      = AddrVar | AddrAny ;
+// *p = v, bump(&n) and **pp = v write through to the variable; &x.f and &x[i] get a
+// cell over the struct or the backing array (goAddrLocC). Every other &-form is the
+// identity on the value: structs and maps already behave like references, so
+// &Point{1, 2} needs no cell. Binary * (multiply) is matched at MulExpr, so unary *
+// only appears in an operand position.
+AddrOf      = AddrVar | AddrLoc | AddrAny ;
 AddrVar     <~~ var an = pop(); push(goAddrNameC(makeAddrVar(an), an, up.pos)) ~~>
             = "&" Id <~~ push(up.in) ~~> NotSfxStart ;
+// The operand of AddrLoc is a suffix chain, so the last CallMember built is its own.
+AddrLoc     <~~ push(goAddrC(goAddrLocC(pop(), up.pos), up.pos)) ~~>
+            = "&" PostfixExpr ;
 AddrAny     <~~ push(goAddrC(pop(), up.pos)) ~~>
             = "&" UnaryExpr ;
 // &name is only the variable form when the name is not the head of a composite
@@ -830,7 +838,8 @@ PostfixExpr = CallMember ;
 // the '(' opens a new STATEMENT, not a call of the composite literal. SameLine is that
 // rule. It does not restrict a call whose ARGUMENTS span lines, because the '(' itself is
 // still on the name's line.
-CallMember  <~~ push(goChainC(foldCallMember(goBoxArgsC(goRecvsC(goTpChainC(takeAll(), up.in), up.start))), up.in, up.pos)) ~~>
+CallMember  <~~ var cmi = goBoxArgsC(goRecvsC(goTpChainC(takeAll(), up.in), up.start))
+                push(goLocNote(goChainC(foldCallMember(cmi), up.in, up.pos), cmi, up.pos)) ~~>
             = Primary { MethodSfx | FieldSfx | SameLine SliceSfx | SameLine TypeArgsSfx
                       | SameLine IndexSfx | SameLine CallSfx | TypeAssertSfx } ;
 // f[int16, float32, string], NewMap[int, struct{}], shift[[62]byte]: a generic
@@ -918,7 +927,11 @@ CompElemT   <~~ push({cet: goWalkQual(firstType(up.in))}) ~~>
 // An anonymous struct type carries its own field list.
 CompStructT <~~ push({ckind: "anon", cfields: takeAll()}) ~~>
             = "struct" KwEnd "{" { AnonField } "}" ;
-AnonField   = Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } FType [ FieldTag ] [ ";" ] ;
+// A field of an anonymous struct: named, as in a declared struct, or embedded
+// (`struct{ *strings.Reader }`), whose name is its type's.
+AnonField   = AnonNamed | AnonEmbed ;
+AnonNamed   = Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } SameLine FType [ FieldTag ] [ ";" ] ;
+AnonEmbed   = EmbedTy [ FieldTag ] [ ";" ] ;
 
 CompBody    <~~ push({celems: goOrderEls(takeAll())}) ~~>
             = "{" [ CompElem { "," CompElem } [ "," ] ] "}" ;
@@ -2125,7 +2138,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function gfHRef(v) {
         if (isSl(v)) { return v.__nil == true ? [null, "", 0] : [v.a, "", v.o * 8] }
         if (isMap(v)) { return v.__nil == true ? [null, "", 0] : [v, "", 0] }
-        if (isPtr(v)) { return [v.o, v.k, 0] }
+        if (isPtr(v)) { return typeof v.k == "number" ? [v.o, "", v.k * 8] : [v.o, v.k, 0] }
         if (typeof v == "function") { return [v, "", 0] }
         if (typeof v == "object" && v.__chan == true) { return [v, "", 0] }
         if (gfHKind(v) == "struct") { return [v, "", 0] }
@@ -3746,7 +3759,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (l.__class != undefined && r.__class != undefined) {
             // A pointer's box against a struct of no known static type: one pointer.
             if (isPtrBox(l) != isPtrBox(r)) { return (isPtrBox(l) ? l.__dv : l) === (isPtrBox(r) ? r.__dv : r) }
-            if (l.__class !== r.__class) { return false }
+            if (l.__class !== r.__class && !goSameAnon(l.__class, r.__class)) { return false }
             if (isPtrBox(l)) { return l.__dv === r.__dv }
             var fs = l.__class.__fields
             for (var k = 0; k < fs.length; k++) { if (!goEq(l[fs[k]], r[fs[k]])) { return false } }
@@ -3774,6 +3787,16 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function goPtrEq(l, r) {
         if (goIsStructVal(l) && goIsStructVal(r)) { return l === r }
         return goEq(l, r)
+    }
+    // Two anonymous struct literals of one type: each site builds its own descriptor
+    // (anonClass), and identical field names and types are one type in Go. js_goeq
+    // compares the name and the field list the same way.
+    function goSameAnon(a, b) {
+        if (a.__name != "struct" || b.__name != "struct" || a.__fields.length != b.__fields.length) { return false }
+        for (var i = 0; i < a.__fields.length; i++) {
+            if (a.__fields[i] != b.__fields[i] || a.__ftypes[i] != b.__ftypes[i]) { return false }
+        }
+        return true
     }
     // An instance of a declared struct, not of a "$..." runtime descriptor.
     function goIsStructVal(v) {
@@ -4696,24 +4719,60 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
         fail("cannot take the address of an unknown name: " + name)
     }
-    // &name. A value that is ALREADY a reference (a struct, a map) is its own
-    // pointer, so a scalar - a sized integer's, a float's or a complex number's box
-    // included - and a pointer variable, for &p, get a cell.
+    // A value that is ALREADY a reference (a struct, a map) is its own pointer, so a
+    // scalar - a sized integer's, a float's or a complex number's box included - and
+    // a pointer, for &p, get a cell. An ARRAY is a VALUE in Go, and every assignment
+    // of one copies it (goVal), so &arr cannot be the array: `h := &arr` would hand h
+    // a copy and `h[0] = 5` would be lost. A slice's HEADER is a value too, and
+    // `*p = append(*p, 1)` must reach the variable.
+    function goIsRefV(v) {
+        return v != undefined && v != null && typeof v == "object" && !isPtr(v) && !Array.isArray(v) && !isSl(v)
+            && !szIs(v) && !isFlo(v) && !isCx(v) && !isDtBox(v)
+    }
+    // &name.
     function makeAddrVar(name) {
         var dty = hasOwn(goDeclTys, "$" + name) ? goDeclTys["$" + name] : ""
         return function() {
             var v = getVar(name)
-            // An ARRAY is a VALUE in Go, and every assignment of one copies it
-            // (goVal). So &arr cannot be the array: `h := &arr` would hand h a copy
-            // and `h[0] = 5` would be lost. It gets a real cell, like a scalar. So
-            // does a slice: its HEADER is a value, and `*p = append(*p, 1)` must
-            // reach the variable.
-            if (v != undefined && v != null && typeof v == "object" && !isPtr(v) && !Array.isArray(v) && !isSl(v)
-                && !szIs(v) && !isFlo(v) && !isCx(v) && !isDtBox(v)) { return v }
+            if (goIsRefV(v)) { return v }
             var cell = varCell(name)
             if (dty != "") { cell.ty = dty }
             return cell
         }
+    }
+    // &x.f and &x[i]: a cell over the struct that holds the field (the embedded one,
+    // for a promoted field) or over the backing array at the element's offset, so a
+    // store through it reaches x and a later append that reallocates does not. Twin
+    // of goAddrLocC in go-to-llvm-ir.abnf.
+    function goAddrLocC(t, pos) {
+        var l = goLastLoc
+        if (l === null || l.pos != pos) { return t }
+        var ty = stBare(stAt(pos))
+        var base = l.base
+        var s = l.s
+        return function() { return goAddrOf(base(), s, ty) }
+    }
+    function goAddrOf(x, s, ty) {
+        if (s.kind == "field") {
+            if (x === undefined || x === null) { goNilDeref() }
+            if (typeof x == "object" && hasOwn(x, s.name)) { return goCellOf(x, s.name, ty) }
+            var pf = typeof x == "object" ? goPromField(x, s.name, 16) : null
+            if (pf != null) { return goCellOf(pf.o, s.name, ty) }
+            return foldCallMember([function() { return x }, s])()
+        }
+        var i = s.idx()
+        var v = goIndex(x, i)
+        var a = isPtr(x) ? ptrGet(x) : x
+        var ix = szIs(i) ? szNum(i) : i
+        if (isSl(a)) { return goCellOf(a.a, a.o + ix, ty) }
+        if (Array.isArray(a)) { return goCellOf(a, ix, ty) }
+        return v
+    }
+    function goCellOf(h, k, ty) {
+        if (goIsRefV(h[k])) { return h[k] }
+        var cell = makePtr(h, k)
+        if (ty != "" && ty != "?") { cell.ty = ty }
+        return cell
     }
     function makeDeref(t) {
         return function() {

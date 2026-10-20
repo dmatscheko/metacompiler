@@ -345,16 +345,11 @@ func (rt *jsrt) gopObj(o *jsObject, depth int) (string, bool) {
 			goCxImag(goFloStr(rt.toNumber(o.props["im"]))) + "i)", true
 	}
 
-	// A pointer CELL (&n, new(int), &p): the scope that holds the variable plus
-	// its name. Printed as & followed by the pointee - see the header note.
+	// A pointer CELL (&n, new(int), &p, &s.f): printed as & followed by the
+	// pointee - see the header note.
 	if name == "$ptr" {
-		if sc, ok := o.props["o"].(*jsScope); ok {
-			key := rt.toString(o.props["k"])
-			return "&" + rt.gopRender(rt.scopeGet(sc, key), depth+1), true
-		}
-		if inner, ok := o.props["o"].(*jsObject); ok {
-			key := rt.toString(o.props["k"])
-			return "&" + rt.gopRender(inner.props[key], depth+1), true
+		if pv, ok := rt.goCellRead(o); ok {
+			return "&" + rt.gopRender(pv, depth+1), true
 		}
 		return "&<nil>", true
 	}
@@ -1202,6 +1197,12 @@ func (rt *jsrt) gopRef(v interface{}) (o interface{}, key string, off int64, ok 
 	case "$sl":
 		return ob.props["a"], "", int64(rt.toNumber(ob.props["o"])) * 8, true
 	case "$ptr":
+		if h, isArr := ob.props["h"].(*jsArray); isArr {
+			return h, "", int64(rt.toNumber(ob.props["k"])) * 8, true
+		}
+		if h, isObj := ob.props["h"].(*jsObject); isObj {
+			return h, rt.toString(ob.props["k"]), 0, true
+		}
 		return ob.props["o"], rt.toString(ob.props["k"]), 0, true
 	}
 	if gopKind(v) == "struct" {
@@ -2393,6 +2394,70 @@ func init() {
 			}
 			return w(arr.elems[int(rt.toNumber(h.props["o"]))+ui])
 		}
+		// js_goaddr(x, k, pcls, as): &x.f / &x[i]. A cell of class pcls over the
+		// struct that holds field k (the embedded one, for a promoted field) or
+		// over x's backing array at the element's offset, carrying as for
+		// errors.As; the value itself when it is a reference already, as makeAddrVar
+		// decides for a variable. A package variable gets the scope cell &name
+		// would. Twins: js_goaddr in lib/go-rt.metajs, goAddrOf in
+		// go-interpreter.abnf.
+		m["js_goaddr"] = func(a []uint64) uint64 {
+			x := u(a[0])
+			goNilDeref(rt, x)
+			if c := goClassOf(x); c != nil && c.props["__name"] == "$ptr" {
+				x = rt.goCellLoad(x.(*jsObject))
+			}
+			var h, key, v interface{}
+			if arr, ok := x.(*jsArray); ok {
+				i := int(rt.toNumber(u(a[1])))
+				if i < 0 || i >= len(arr.elems) {
+					goIdxFail(i, len(arr.elems))
+				}
+				h, key, v = arr, float64(i), arr.elems[i]
+			} else if xo, ok := x.(*jsObject); ok && goClassOf(x) != nil && goClassOf(x).props["__name"] == "$sl" {
+				v = u(m["js_gislget"](a[:2]))
+				h, key = xo.props["a"], float64(int(rt.toNumber(xo.props["o"]))+int(rt.toNumber(u(a[1]))))
+			} else if ok {
+				if sc, name, isPkg := goPkgSlot(rt, x, u(a[1])); isPkg {
+					if _, has := sc.get(name); has {
+						cell := newJSObject()
+						cell.set("__class", u(a[2]))
+						cell.set("o", sc)
+						cell.set("k", name)
+						return w(cell)
+					}
+				}
+				name := rt.toString(u(a[1]))
+				if fv, own := xo.props[name]; own {
+					h, key, v = xo, name, fv
+				} else if hh := rt.goPromField(xo, name, 16); hh != nil {
+					h, key, v = hh, name, hh.props[name]
+				}
+			}
+			if h == nil {
+				return m["js_gofield"](a[:2])
+			}
+			if vo, isObj := v.(*jsObject); isObj {
+				if vc := goClassOf(vo); vc == nil || (vc.props["__name"] != "$ptr" && vc.props["__name"] != "$sl") {
+					return w(v)
+				}
+			}
+			cell := newJSObject()
+			cell.set("__class", u(a[2]))
+			cell.set("h", h)
+			cell.set("k", key)
+			if as, ok := u(a[3]).(string); ok {
+				cell.set("as", as)
+			}
+			return w(cell)
+		}
+		// *p and *p = v for a cell js_goaddr made. Twins: js_gocellget /
+		// js_gocellset in lib/go-rt.metajs.
+		m["js_gocellget"] = func(a []uint64) uint64 { return w(rt.goCellLoad(u(a[0]).(*jsObject))) }
+		m["js_gocellset"] = func(a []uint64) uint64 {
+			rt.goCellStore(u(a[0]).(*jsObject), u(a[1]))
+			return 0
+		}
 		// THE OUTERMOST js_gotry FRAME, popped by jsmain after the entry function
 		// returns. An unrecovered panic is reported HERE rather than being let out
 		// of the module, so the floor's uncaught-throw handler never adds its own
@@ -3267,16 +3332,12 @@ func (rt *jsrt) goErrAs(err, target interface{}) bool {
 	to, _ := target.(*jsObject)
 	want := ""
 	var cls *jsObject
-	var sc *jsScope
-	key := ""
 	cell := tc != nil && tc.props["__name"] == "$ptr"
 	if cell {
-		key = rt.toString(to.props["k"])
-		sc, _ = to.props["o"].(*jsScope)
 		if as, ok := to.props["as"].(string); ok {
 			want = as
-		} else if sc != nil {
-			cls = goClassOf(rt.scopeGet(sc, key))
+		} else {
+			cls = goClassOf(rt.goCellLoad(to))
 		}
 	} else {
 		cls = tc
@@ -3292,10 +3353,8 @@ func (rt *jsrt) goErrAs(err, target interface{}) bool {
 		return true
 	}
 	if cell {
-		if sc != nil {
-			// A box goes into the variable as the value inside ("t:T", goAsWant).
-			rt.scopeSet(sc, key, goDtUnbox(rt, hit, strings.TrimPrefix(want, "t:")))
-		}
+		// A box goes into the variable as the value inside ("t:T", goAsWant).
+		rt.goCellStore(to, goDtUnbox(rt, hit, strings.TrimPrefix(want, "t:")))
 		return true
 	}
 	if fs, isArr := tc.props["__fields"].(*jsArray); isArr {
@@ -3445,6 +3504,49 @@ func goMvArr(v interface{}) (*jsArray, bool) {
 	}
 	arr, isArr := o.props["__gomv"].(*jsArray)
 	return arr, isArr
+}
+
+// goCellLoad and goCellStore read and write through a pointer cell: o and the
+// name for a variable's (o the scope, or the one-slot object of new(T)), h and the
+// field name or the element's offset for one js_goaddr made. A cell over nothing
+// reads undefined. Twins: goCellLoad / goCellStore in lib/go-rt.metajs.
+func (rt *jsrt) goCellLoad(c *jsObject) interface{} {
+	v, _ := rt.goCellRead(c)
+	return v
+}
+
+// goCellRead is goCellLoad, and whether the cell holds anything at all.
+func (rt *jsrt) goCellRead(c *jsObject) (interface{}, bool) {
+	switch o := c.props["o"].(type) {
+	case *jsScope:
+		return rt.scopeGet(o, rt.toString(c.props["k"])), true
+	case *jsObject:
+		return o.props[rt.toString(c.props["k"])], true
+	}
+	switch h := c.props["h"].(type) {
+	case *jsObject:
+		return h.props[rt.toString(c.props["k"])], true
+	case *jsArray:
+		return h.elems[int(rt.toNumber(c.props["k"]))], true
+	}
+	return jsUndef, false
+}
+
+func (rt *jsrt) goCellStore(c *jsObject, v interface{}) {
+	switch o := c.props["o"].(type) {
+	case *jsScope:
+		rt.scopeSet(o, rt.toString(c.props["k"]), v)
+		return
+	case *jsObject:
+		o.set(rt.toString(c.props["k"]), v)
+		return
+	}
+	switch h := c.props["h"].(type) {
+	case *jsObject:
+		h.set(rt.toString(c.props["k"]), v)
+	case *jsArray:
+		h.elems[int(rt.toNumber(c.props["k"]))] = v
+	}
 }
 
 // goNilDeref raises Go's nil-pointer-dereference panic when v is nil. See the

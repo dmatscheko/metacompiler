@@ -44,7 +44,9 @@
 //     a {__class: $sl}     ==  a SLICE HEADER: a (backing array), o (offset),
 //                              n (length), c (capacity), et (element type text)
 //     a {__class: $ptr}    ==  a POINTER CELL: o (the SCOPE or object that holds
-//                              the variable) and k (its name)
+//                              the variable) and k (its name), or for a field or
+//                              an element h (the struct or the backing array)
+//                              and k (the field name or the offset)
 //     a {__class: $cx}     ==  a complex: re, im
 //     any other object     ==  a struct instance; its descriptor is __class,
 //                              which carries __isclass, __name, __fields,
@@ -346,6 +348,9 @@ function goValueEq(a, b) {
     var bc = goClassOf(b)
     if (ac !== undefined && bc !== undefined) {
         if (goStrOf(ac.__name) != goStrOf(bc.__name)) { return false }
+        // Two pointer cells are equal when they address one slot: the same holder,
+        // by identity, and the same key.
+        if (goStrOf(ac.__name) == "$ptr") { return a.o === b.o && a.h === b.h && goValueEq(a.k, b.k) }
         var af = ac.__fields
         var bf = bc.__fields
         if (!Array.isArray(af) || !Array.isArray(bf) || af.length != bf.length) { return a === b }
@@ -617,11 +622,8 @@ function gopObj(o, depth) {
     // a value tree at run time, not from a fixed call site. The object-backed form
     // (new(T) over a one-slot object) IS readable and is rendered exactly. Nothing
     // in tests/go-test-full.go prints a scope-backed pointer.
-    // The holder is the SCOPE that declares the variable (emitPtrCell).
     if (name == "$ptr") {
-        var key = goStrOf(o.k)
-        var sc = goCellScope(o.o, key)
-        if (sc !== undefined) { return "&" + gopRender(scopeGet(sc, key), depth + 1) }
+        if (goCellHolds(o)) { return "&" + gopRender(goCellLoad(o), depth + 1) }
         return "&<nil>"
     }
 
@@ -1164,7 +1166,11 @@ function gfHRef(v) {
     if (cls === undefined) { return [] }
     var nm = goStrOf(cls.__name)
     if (nm == "$sl") { return [v.a, "", goIdx(v.o) * 8] }
-    if (nm == "$ptr") { return [v.o, goStrOf(v.k), 0] }
+    if (nm == "$ptr") {
+        if (Array.isArray(v.h)) { return [v.h, "", goIdx(v.k) * 8] }
+        if (v.h !== undefined) { return [v.h, goStrOf(v.k), 0] }
+        return [v.o, goStrOf(v.k), 0]
+    }
     if (gfHKind(v) == "struct") { return [v, "", 0] }
     return []
 }
@@ -1571,6 +1577,98 @@ function goCellScope(o, k) {
     return s
 }
 
+// goCellLoad and goCellStore read and write through a pointer cell: the scope o and
+// the name for a variable's, the struct or backing array h and the field name or
+// the element's offset for one js_goaddr made. Twins: goCellLoad / goCellStore in
+// abnf/jsrtgolang.go.
+function goCellHolds(c) {
+    if (c.h !== undefined) { return true }
+    return goCellScope(c.o, goStrOf(c.k)) !== undefined
+}
+function goCellLoad(c) {
+    var h = anytype
+    h = c.h
+    if (h !== undefined) {
+        if (Array.isArray(h)) { return h[goIdx(c.k)] }
+        return h[goStrOf(c.k)]
+    }
+    var key = goStrOf(c.k)
+    var sc = goCellScope(c.o, key)
+    if (sc === undefined) { return undefined }
+    return scopeGet(sc, key)
+}
+function goCellStore(c, v) {
+    var h = anytype
+    h = c.h
+    if (h !== undefined) {
+        if (Array.isArray(h)) { h[goIdx(c.k)] = v } else { h[goStrOf(c.k)] = v }
+        return undefined
+    }
+    var key = goStrOf(c.k)
+    var sc = goCellScope(c.o, key)
+    if (sc !== undefined) { scopeDecl(sc, key, v) }
+    return undefined
+}
+function js_gocellget(c) { return goCellLoad(c) }
+function js_gocellset(c, v) { return goCellStore(c, v) }
+
+// js_goaddr(x, k, pcls, as): &x.f / &x[i]. A cell of class pcls over the struct that
+// holds field k (the embedded one, for a promoted field) or over x's backing array
+// at the element's offset, carrying as for errors.As; the value itself when it is
+// a reference already, as makeAddrVar decides for a variable. A package variable
+// gets the scope cell &name would. Twins: js_goaddr in abnf/jsrtgolang.go, goAddrOf
+// in go-interpreter.abnf.
+function js_goaddr(x0, k, pcls, as) {
+    var x = anytype
+    x = x0
+    if (x === undefined || x === null) { goNilDeref() }
+    if (goRfCell(x)) { x = goCellLoad(x) }
+    var h = anytype
+    h = undefined
+    var key = anytype
+    key = undefined
+    var v = anytype
+    v = undefined
+    var xc = goClassOf(x)
+    if (Array.isArray(x)) {
+        var i = goIdx(k)
+        if (i < 0 || i >= x.length) { goIdxPanic(i, x.length) }
+        h = x
+        key = i
+        v = x[i]
+    } else if (xc !== undefined && goStrOf(xc.__name) == "$sl") {
+        v = js_gislget(x, k)
+        h = x.a
+        key = goIdx(x.o) + goIdx(k)
+    } else if (goIsObj(x)) {
+        var name = goStrOf(k)
+        var ps = x.__pkgscope
+        if (ps !== undefined && scopeHas(ps, name)) { return {__class: pcls, o: ps, k: name} }
+        if (goHas(x, name)) {
+            h = x
+            key = name
+            v = x[name]
+        } else {
+            var pf = goPromField(x, name, 16)
+            if (pf !== undefined) {
+                h = pf.o
+                key = name
+                v = pf.v
+            }
+        }
+    }
+    if (h === undefined) { return js_gofield(x0, k) }
+    if (goIsObj(v)) {
+        var vc = goClassOf(v)
+        if (vc === undefined) { return v }
+        var vn = goStrOf(vc.__name)
+        if (vn != "$ptr" && vn != "$sl") { return v }
+    }
+    var cell = {__class: pcls, h: h, k: key}
+    if (as !== undefined) { cell.as = as }
+    return cell
+}
+
 // errors.As (errors/wrap.go): the first error in err's tree, depth first, that the
 // target's element type accepts - or whose As method takes the target - is stored
 // through the target. A pointer cell carries that type as `as` (makeAddrVar in
@@ -1584,14 +1682,9 @@ function goErrAs(err, target) {
     cls = undefined
     var tc = goClassOf(target)
     var cell = tc !== undefined && goStrOf(tc.__name) == "$ptr"
-    var sc = anytype
-    sc = undefined
-    var key = ""
     if (cell) {
-        key = goStrOf(target.k)
-        sc = goCellScope(target.o, key)
         if (goHas(target, "as")) { want = goStrOf(target.as) }
-        else if (sc !== undefined) { cls = goClassOf(scopeGet(sc, key)) }
+        else if (goCellHolds(target)) { cls = goClassOf(goCellLoad(target)) }
     } else {
         cls = tc
     }
@@ -1601,7 +1694,7 @@ function goErrAs(err, target) {
     if (hit.via) { return true }
     if (cell) {
         // A box goes into the variable as the value inside ("t:T", goAsWant).
-        if (sc !== undefined) { scopeDecl(sc, key, goDtUnbox(hit.v, want.substring(2))) }
+        goCellStore(target, goDtUnbox(hit.v, want.substring(2)))
         return true
     }
     var fs = tc.__fields
@@ -3083,12 +3176,7 @@ function js_gorffields(args) {
 function js_gorfderef(args) {
     var p = anytype
     p = args[0]
-    if (goRfCell(p)) {
-        var key = goStrOf(p.k)
-        var sc = goCellScope(p.o, key)
-        if (sc === undefined) { return undefined }
-        return scopeGet(sc, key)
-    }
+    if (goRfCell(p)) { return goCellLoad(p) }
     return goRfUnbox(p)
 }
 function js_gorfelemty(args) {
@@ -3154,12 +3242,7 @@ function js_gorfstore(args) {
     p = args[0]
     var v = anytype
     v = goRfUnbox(args[1])
-    if (goRfCell(p)) {
-        var key = goStrOf(p.k)
-        var sc = goCellScope(p.o, key)
-        if (sc !== undefined) { scopeDecl(sc, key, v) }
-        return undefined
-    }
+    if (goRfCell(p)) { return goCellStore(p, v) }
     return js_gostructset(goRfUnbox(p), v)
 }
 // `*p = v` for a struct pointer p, which IS the struct x: v's fields are copied

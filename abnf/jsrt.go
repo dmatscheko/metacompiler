@@ -2131,6 +2131,11 @@ func (rt *jsrt) goValueEq(a, b interface{}) bool {
 			if an != bn {
 				return false
 			}
+			// Two pointer cells are equal when they address one slot: the same
+			// holder, by identity, and the same key (go's emitPtrCell, js_goaddr).
+			if an == "$ptr" {
+				return ao.props["o"] == bo.props["o"] && ao.props["h"] == bo.props["h"] && rt.goValueEq(ao.props["k"], bo.props["k"])
+			}
 			af, aok2 := ac.props["__fields"].(*jsArray)
 			bf, bok2 := bc.props["__fields"].(*jsArray)
 			if !aok2 || !bok2 || len(af.elems) != len(bf.elems) {

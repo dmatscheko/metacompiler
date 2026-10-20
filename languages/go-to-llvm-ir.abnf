@@ -570,9 +570,13 @@ AssignOp    = "&^=" | "<<=" | ">>=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | 
 // through two of them. On a value that is not a pointer cell it stays transparent,
 // which is what a struct pointer needs - those are already references.
 Target      = TgtDerefX | TgtParen | TgtPlain ;
-// `*(v.p.(*int)) = 5`: a store through the pointer any expression answers (goDerefTgtC).
+// `*(v.p.(*int)) = 5`, `*(a).p = 5`: a store through the pointer a suffix chain that
+// starts with a parenthesis answers (goDerefTgtC). Go reads `*(a).p` as `*((a).p)`.
 TgtDerefX   <~~ push(goDerefTgtC(pop())) ~~>
-            = "*" "(" Expression ")" ;
+            = "*" ParenNext PostfixExpr ;
+ParenNext   = :script(~~
+    (c.peek(0) === 40) ? undefined : abnf.newToken("\x01a-parenthesis", 0)
+~~) ;
 TgtPlain    <~~ push(makeTargetRef(takeAll())) ~~>
             = TgtCore { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
 // A parenthesised target: '(*pn).val = v', '(*h)[i] = v', '(q) = 1'. Go writes the
@@ -816,12 +820,16 @@ Not         <~~ push(goClearC(makeNot(pop()), up.pos)) ~~>
             = "!" UnaryExpr ;
 // &x (address of) and *p (dereference). Taking the address of a plain NAME yields a
 // pointer cell that reaches back into the variable's scope slot, which is what makes
-// *p = v, bump(&n) and **pp = v write through to the variable. Every other &-form is
-// still the identity on the value: structs, slices and maps already behave like
-// references, so &Point{1, 2} and &s[i] need no cell. Mirrors go-interpreter.abnf.
-AddrOf      = AddrVar | AddrAny ;
+// *p = v, bump(&n) and **pp = v write through to the variable; &x.f and &x[i] get a
+// cell over the struct or the backing array (goAddrLocC). Every other &-form is the
+// identity on the value: structs and maps already behave like references, so
+// &Point{1, 2} needs no cell. Mirrors go-interpreter.abnf.
+AddrOf      = AddrVar | AddrLoc | AddrAny ;
 AddrVar     <~~ var an = pop(); push(goAddrNameC(makeAddrVar(an), an, up.pos)) ~~>
             = "&" Id <~~ push(up.in) ~~> NotSfxStart ;
+// The operand of AddrLoc is a suffix chain, so the last CallMember built is its own.
+AddrLoc     <~~ push(goAddrC(goAddrLocC(pop(), up.pos), up.pos)) ~~>
+            = "&" PostfixExpr ;
 AddrAny     <~~ push(goAddrC(pop(), up.pos)) ~~>
             = "&" UnaryExpr ;
 // &name is only the variable form when the name is not the head of a composite
@@ -848,7 +856,8 @@ PostfixExpr = CallMember ;
 // the '(' opens a new STATEMENT, not a call of the composite literal. SameLine is that
 // rule. It does not restrict a call whose ARGUMENTS span lines, because the '(' itself is
 // still on the name's line.
-CallMember  <~~ push(goChainC(foldCallMember(goBoxArgsC(goRecvsC(goTpChainC(takeAll(), up.in), up.start))), up.in, up.pos)) ~~>
+CallMember  <~~ var cmi = goBoxArgsC(goRecvsC(goTpChainC(takeAll(), up.in), up.start))
+                push(goLocNote(goChainC(foldCallMember(cmi), up.in, up.pos), cmi, up.pos)) ~~>
             = Primary { MethodSfx | FieldSfx | SameLine SliceSfx | SameLine TypeArgsSfx
                       | SameLine IndexSfx | SameLine CallSfx | TypeAssertSfx } ;
 // f[int16, float32, string], NewMap[int, struct{}], shift[[62]byte]: a generic
@@ -1194,7 +1203,11 @@ QualStructLit <~~ var qi = takeAll(); goLitClaim(qi[0] + "." + qi[1], up.start, 
 AnonStructLit <~~ goLitClaim("", up.start, up.pos); push(makeAnonStructLit(takeAll())) ~~>
             = "struct" KwEnd "{" { AnonField } "}"
               "{" [ LitElem { "," LitElem } [ "," ] ] "}" ;
-AnonField   = Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } FType [ FieldTag ] [ ";" ] ;
+// A field of an anonymous struct: named, as in a declared struct, or embedded
+// (`struct{ *strings.Reader }`), whose name is its type's.
+AnonField   = AnonNamed | AnonEmbed ;
+AnonNamed   = Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } SameLine FType [ FieldTag ] [ ";" ] ;
+AnonEmbed   = EmbedTy [ FieldTag ] [ ";" ] ;
 // An element may be a bare BRACE GROUP built against the slot's declared type -
 // `type G [][]int; G{{1, 2}}`, and `Config{{1, 2}}` for a struct whose first field is
 // a composite. It cannot be confused with the other two: no Go expression starts
@@ -4005,6 +4018,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // makes the two probes work - js_goiscls answers false on a number instead of
     // aborting, and js_goeq compares the declared fields, so two cells built for the same
     // variable (p == &n) compare equal. new(int) gets a fresh one slot scope instead.
+    // A pointer to a struct field or an element (js_goaddr) has no o: it holds the
+    // struct or the backing array as h and the field name or the offset as k, and is
+    // read and written by js_gocellget / js_gocellset.
     // This mirrors the interpreter's makePtr/isPtr exactly; keep the two in step.
     function emitPtrClass(b) { return b.NewLoad(i64, ptrClassG()) }
     // A pointer to a fresh variable holding t's value (go-constfold.js, goAddrC), the
@@ -4027,11 +4043,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function emitIsPtr(b, v) { return callExt(b, "js_goiscls", [v, emitPtrClass(b)]) }
     // A value-level if/else: both arms are emitted into their own blocks and joined
     // with a phi, the same shape makeOrAnd uses for the short-circuit operators.
-    function emitSelect(b, condV, thenFn, elseFn) {
+    function emitSelect(b, condV, thenFn, elseFn) { return emitSelectI1(b, truthy(b, condV), thenFn, elseFn) }
+    // The same over a condition that is already an i1.
+    function emitSelectI1(b, cond, thenFn, elseFn) {
         var thenB = curF.NewBlock("")
         var elseB = curF.NewBlock("")
         var mergeB = curF.NewBlock("")
-        b.NewCondBr(truthy(b, condV), thenB, elseB)
+        b.NewCondBr(cond, thenB, elseB)
         var tr = thenFn(thenB)
         tr.b.NewBr(mergeB)
         var er = elseFn(elseB)
@@ -4101,20 +4119,24 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var phi = mergeB.NewPhi([llvm.ir.NewIncoming(tv, thenB), llvm.ir.NewIncoming(ev, elseB)])
         return {b: mergeB, v: phi}
     }
+    // A cell without o (a field's or an element's) is read and written by an extern.
     function emitCellGet(b, p) {
-        return callExt(b, "js_scope_get", [callExt(b, "js_get", [p, emitStr(b, "o")]),
-                                           callExt(b, "js_get", [p, emitStr(b, "k")])])
+        var o = callExt(b, "js_get", [p, emitStr(b, "o")])
+        return emitSelectI1(b, b.NewICmp(llvm.enum.IPredEQ, o, hUndef),
+                            function(hb) { return {b: hb, v: callExt(hb, "js_gocellget", [p])} },
+                            function(sb) { return {b: sb, v: callExt(sb, "js_scope_get", [o, callExt(sb, "js_get", [p, emitStr(sb, "k")])])} })
     }
     function emitCellSet(b, p, v) {
-        callExt(b, "js_scope_set", [callExt(b, "js_get", [p, emitStr(b, "o")]),
-                                    callExt(b, "js_get", [p, emitStr(b, "k")]), v])
-        return b
+        var o = callExt(b, "js_get", [p, emitStr(b, "o")])
+        return emitSelectI1(b, b.NewICmp(llvm.enum.IPredEQ, o, hUndef),
+                            function(hb) { callExt(hb, "js_gocellset", [p, v]); return {b: hb, v: v} },
+                            function(sb) { callExt(sb, "js_scope_set", [o, callExt(sb, "js_get", [p, emitStr(sb, "k")]), v]); return {b: sb, v: v} }).b
     }
     // *v: read through a cell, and stay the identity on anything else (a struct
-    // pointer is the struct).
+    // pointer is the struct). emitCellGet answers its own block.
     function emitDerefV(b, v) {
         return emitSelect(b, emitIsPtr(b, v),
-                          function(tb) { return {b: tb, v: emitCellGet(tb, v)} },
+                          function(tb) { return emitCellGet(tb, v) },
                           function(eb) { return {b: eb, v: v} })
     }
     function makeDeref(t) {
@@ -4160,6 +4182,35 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                     }, mkCell)
                 }) })
             })
+        }
+    }
+    // &x.f and &x[i] (goLocNote): js_goaddr answers a cell over the struct that holds
+    // the field or over the backing array at the element's offset, or the value
+    // itself when it is a reference already. A method value or a method expression
+    // (`&x.M` is not addressable) keeps the plain chain. Twin of goAddrLocC in
+    // go-interpreter.abnf.
+    function goAddrLocC(t, pos) {
+        var l = goLastLoc
+        if (l === null || l.pos != pos) { return t }
+        var ty = stBare(stAt(pos))
+        var want = ty == "?" ? "" : goAsWant(ty)
+        var base = l.base
+        var s = l.s
+        return function(b) {
+            if (s.kind == "field") {
+                var fp = goDtPlan(s.rc, s.name)
+                if (goDtMethExpr(s.rc, s.name) != "" || (fp != null && !fp.dyn)) { return t(b) }
+            }
+            var r = base(b)
+            b = r.b
+            var kv = hUndef
+            if (s.kind == "field") { kv = emitStr(b, s.name) }
+            else {
+                var ir = s.idx(b)
+                b = ir.b
+                kv = ir.v
+            }
+            return {b: b, v: callExt(b, "js_goaddr", [r.v, kv, emitPtrClass(b), want == "" ? hUndef : emitStr(b, want)])}
         }
     }
     // new(T): a slice or struct type is its own reference; a SCALAR needs a cell over a

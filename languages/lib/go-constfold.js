@@ -1182,6 +1182,17 @@ function goDerefC(t, pos) {
     regSt(pos, (b.length > 1 && b.charAt(0) == "*") ? b.substring(1) : "?")
     return t
 }
+// The chain CallMember built last, when it ends in .f or [i]: where it ends, the
+// chain without that suffix, and the suffix (null otherwise). goAddrLocC (one per
+// grammar) reads it for the chain that is the operand of &, the last one built.
+var goLastLoc = null
+function goLocNote(t, items, pos) {
+    var n = items.length
+    var sf = items[n - 1]
+    goLastLoc = (n > 1 && sf != null && typeof sf == "object" && (sf.kind == "field" || sf.kind == "index"))
+        ? {pos: pos, base: foldCallMember(items.slice(0, n - 1)), s: sf} : null
+    return t
+}
 function goAddrC(t, pos) {
     var raw = stAt(pos)
     var it = stBare(raw)
@@ -3078,8 +3089,25 @@ function goPreType(text, i) {
     goNoteDefTy(name)
 }
 // A top-level function's type text, whitespace taken out ("func(int)int"): what a
-// bare reference to it reports as its static type (goNameC).
-var goFnSig = {}
+// bare reference to it reports as its static type (goNameC). Seeded with the
+// functions of fmt, errors and os that are host builtins rather than Go source, so
+// `fmt.Printf("%T", fmt.Println)` names Go's signature; fmt's Scan family is bound
+// into fmt from package scan (goFmtScanPkg), whose own names are "scan.Sscan".
+var goFnSig = {
+    "$fmt.Print": "func(...any)(int,error)", "$fmt.Println": "func(...any)(int,error)",
+    "$fmt.Printf": "func(string,...any)(int,error)", "$fmt.Sprint": "func(...any)string",
+    "$fmt.Sprintln": "func(...any)string", "$fmt.Sprintf": "func(string,...any)string",
+    "$fmt.Errorf": "func(string,...any)error", "$fmt.Fprint": "func(io.Writer,...any)(int,error)",
+    "$fmt.Fprintln": "func(io.Writer,...any)(int,error)", "$fmt.Fprintf": "func(io.Writer,string,...any)(int,error)",
+    "$fmt.Scan": "func(...any)(int,error)", "$fmt.Scanln": "func(...any)(int,error)",
+    "$fmt.Scanf": "func(string,...any)(int,error)", "$fmt.Sscan": "func(string,...any)(int,error)",
+    "$fmt.Sscanln": "func(string,...any)(int,error)", "$fmt.Sscanf": "func(string,string,...any)(int,error)",
+    "$fmt.Fscan": "func(io.Reader,...any)(int,error)", "$fmt.Fscanln": "func(io.Reader,...any)(int,error)",
+    "$fmt.Fscanf": "func(io.Reader,string,...any)(int,error)",
+    "$errors.New": "func(string)error", "$errors.Is": "func(error,error)bool",
+    "$errors.As": "func(error,any)bool", "$errors.Unwrap": "func(error)error", "$errors.Join": "func(...error)error",
+    "$os.Exit": "func(int)"
+}
 // The type text of the signature whose parameter list opens at text[ps], whitespace
 // taken out, or "" when it does not parse.
 function goSigAt(text, ps) {
