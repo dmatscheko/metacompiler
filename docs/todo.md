@@ -135,7 +135,7 @@ reports cap 4 where growslice says 1) — escape analysis.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-662 php: library functions called with too few arguments do not raise ArgumentCountError · P2 · PHP · OPEN [V spec-only]
+### T-662 php: library functions called with too few arguments do not raise ArgumentCountError · P2 · PHP · IN PROGRESS (PHP worker, round 10) [V spec-only]
 `try { echo call_user_func('strrev'), "|\n"; } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }` and `$f = 'strrev';
 $f();` → all engines print `|` / nothing (PHP ArgumentCountError "strrev() expects exactly 1 argument, 0 given",
 zend_wrong_parameters_count_error); direct `strrev()` likewise if unchecked. The library's PHP wrappers skip the internal-function arity
