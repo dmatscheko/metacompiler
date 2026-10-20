@@ -3615,8 +3615,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         curScopeV = savedScope
     }
     // Can jsmain's scope build the zero of t? Not when t needs the descriptor of a
-    // type declared inside a function (goLocalTys), which binds in that function's
-    // scope; such an element type pads as before.
+    // type declared only inside functions (goLocalTys: true; false once the name is
+    // also declared at top level), which binds in that function's scope.
     var goLocalTys = {}
     function goPadReach(t, seen) {
         if (t == "" || seen["$" + t] === true) { return true }
@@ -3629,6 +3629,31 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (fts == undefined || fts == null) { return true }
         for (var i = 0; i < fts.length; i++) { if (!goPadReach(fts[i], seen)) { return false } }
         return true
+    }
+    // A type declared inside a function files its own $ezero maker when the
+    // declaration runs, closed over the scope its descriptor binds in, so growth pads
+    // with the zero of the type that declaration made. Twin of apPad in
+    // go-interpreter.abnf, which reads the name's latest declaration the same way.
+    function goEzLocal(decl, t) {
+        if (cScopes.length == 1) { return decl }
+        return function(b) {
+            b = decl(b)
+            if (!goPadZeroTy(t) && goCopyCodeC(t) == "") { return b }
+            funcCount++
+            var zidx = funcCount
+            var zf = m.NewFunc("jsf_" + zidx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+            var savedF = curF
+            var savedScope = curScopeV
+            curF = zf
+            curScopeV = zf.Params[0]
+            var zfb = zf.NewBlock("entry")
+            zfb.NewRet(emitZeroTy(zfb, t))
+            curF = savedF
+            curScopeV = savedScope
+            callExt(b, "js_set", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$ezero")]), emitStr(b, t),
+                                  callExt(b, "js_closure", [handle(zidx), curScopeV])])
+            return b
+        }
     }
     function sFTypesOrNull(name) {
         var ft = sFTypes(name)
@@ -6093,7 +6118,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             last = items[items.length - 1]
         }
         declaredTypes[items[0]] = true
-        if (cScopes.length != 1) { goLocalTys["$" + items[0]] = true }
+        goLocalTys["$" + items[0]] = cScopes.length != 1 && goLocalTys["$" + items[0]] !== false
         // An interface declaration binds no runtime value: the value model is dynamic,
         // so satisfaction is implicit and a method call on an interface value is the
         // ordinary method call on whatever struct is in it. A constraint interface
@@ -6126,9 +6151,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             // `var x pkga.L` resolve the same way the unqualified form does inside the
             // package. Both keys, so every existing flat reader is unchanged.
             if (curPkgName != null) { definedUnder[sKey(curPkgName, dName)] = dUnder }
-            return function(b) { return declConv(b, dName, dUnder) }
+            return goEzLocal(function(b) { return declConv(b, dName, dUnder) }, dName)
         }
-        return makeStructStmt(items)
+        return goEzLocal(makeStructStmt(items), items[0])
     }
 
     // ----- Functions, methods and structs -----

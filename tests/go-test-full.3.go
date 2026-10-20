@@ -792,6 +792,29 @@ func s120() {
 	ps = ps[:cap(ps)]
 	out := fmt.Sprint(len(s), s, as, len(ps), ps[3] == nil)
 	check("growzero120", out == "4 [{1 2} {3 4} {5 6} {0 0}] [[1 2] [3 4] [5 6] [7 0]] 4 true")
+	// A type declared inside a function pads with its own zero too, as does a
+	// top-level type whose name a local declaration shadows.
+	type in120 struct {
+		b []int
+		c bool
+	}
+	type loc120 struct {
+		in in120
+		n  int
+	}
+	var ls []loc120
+	for i := 0; i < 3; i++ {
+		ls = append(ls, loc120{n: i})
+		func() { ls = append(ls, loc120{n: 10 + i}) }()
+	}
+	ls = ls[:cap(ls)]
+	type p120 struct{ x, y int }
+	sh := append([]p120{}, p120{1, 2})
+	sh = append(sh, p120{3, 4})
+	sh = append(sh, p120{5, 6})
+	sh = sh[:cap(sh)]
+	out = fmt.Sprint(len(ls), ls[7].in.b == nil, ls[6:], sh)
+	check("growzeroloc120", out == "8 true [{{[] false} 0} {{[] false} 0}] [{1 2} {3 4} {5 6} {0 0}]")
 }
 
 func main() {
