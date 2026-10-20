@@ -1763,6 +1763,18 @@
             "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-test-strict.php", "-q"]
         },
         {
+            "name": "PHP program compiling no library (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-interpreter.abnf", "tests/php-test-nolib.php", "-q"]
+        },
+        {
+            "name": "PHP program compiling no library (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-test-nolib.php", "-q"]
+        },
+        {
             "name": "PHP echo writes raw bytes (interpreter)",
             "type": "go",
             "request": "launch",

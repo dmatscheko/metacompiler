@@ -1529,7 +1529,7 @@ KwMatch     = CiM :whitespace() CiA CiT CiC CiH :whitespace(Whitespace) KwEnd ;
 // The tag fires BEFORE the parameter and body tags (they are further right in the
 // sequence), so it records where this arrow function's variable references start -
 // exactly as in php-to-llvm-ir.abnf, so both engines capture the same set.
-KwFn        <~~ cloEnter(up.pos); push({vmark: varMark()}) ~~> = CiF :whitespace() CiN :whitespace(Whitespace) KwEnd ;
+KwFn        <~~ cloEnter(up.pos); genPush(); push({vmark: varMark()}) ~~> = CiF :whitespace() CiN :whitespace(Whitespace) KwEnd ;
 KwClone     = CiC :whitespace() CiL CiO CiN CiE :whitespace(Whitespace) KwEnd ;
 KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace(Whitespace) KwEnd ;
 KwIsset     = CiI :whitespace() CiS CiS CiE CiT :whitespace(Whitespace) KwEnd ;
@@ -5255,6 +5255,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // by-value binding dereferences, so `$r = &$x; $f = fn() => $x; $x = 2;` still
     // sees 1. Twin of makeArrowFn in php-to-llvm-ir.abnf.
     function makeArrowFn(items) {
+        var isGen = genPop()
         var d = splitClosure(items)
         var params = d.params
         var body = d.body
@@ -5274,7 +5275,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             for (var j = 0; j < captured.length; j++) {
                 scopePut(env, captured[j], phpCopy(deref(rawSlot(captured[j]))))
             }
-            return closureBody(params, body, cloChain(sc), env, false, desc, cloThis(self), sc.st, sc.ut === true)
+            return closureBody(params, body, cloChain(sc), env, isGen, desc, cloThis(self), sc.st, sc.ut === true)
         }
     }
     // The variable names the source mentions, in parse order, and the mark an arrow
@@ -6183,6 +6184,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             }
         }
         if (vis != "") { visNames[nm] = true }
+        if (def == null && !variadic) { phpLibArgErr() }
         return {name: nm, byref: byref, variadic: variadic, def: def, promote: promote, vis: vis}
     }
     // The name is not always items[0]: a method may carry captured modifiers in front
@@ -8281,6 +8283,13 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (phpLib == null) { phpLib = phpLibIndex(load("lib/php-stdlib.php")) }
         var ks = phpLibClassesIn(phpLib, text)
         for (var i = 0; i < ks.length; i++) { phpLibLoad(ks[i]) }
+    }
+    // A required parameter's count check (phpMissArg) raises ArgumentCountError,
+    // a library class, so the walk of one compiles it. Twin of phpLibArgErr in
+    // php-to-llvm-ir.abnf.
+    function phpLibArgErr() {
+        if (phpLib == null) { phpLib = phpLibIndex(load("lib/php-stdlib.php")) }
+        phpLibLoad("#argumentcounterror")
     }
     function phpLibLoad(key) {
         if (key == "" || phpLib.fns[key] === undefined || phpLibDone[key] === true) { return }

@@ -761,6 +761,16 @@ check("fn-dyn-built-lib", [(new FnDynBuilt())->rev('abc'), call_user_func($fdb[0
                            array_map($fdb[2], ['AB', 'Cd']), is_callable($fdb[2]), is_callable($fdb[2] . 'x')],
       ["cba", 24, "Two Words", ["aB", "cd"], true, false]);
 
+// ----- an arrow function whose expression yields is a generator function -----
+// Its body is 'return <expr>', so the value foreach sends (null) feeds the sum.
+$afGen = fn($z) => yield $z;
+$afLog = "";
+foreach ($afGen(3) as $k => $v) { $afLog .= $k . "=" . $v . ";"; }
+$afRet = fn() => (yield 1) + 10;
+$afG = $afRet();
+foreach ($afG as $v) { $afLog .= $v . ";"; }
+check("arrow-fn-generator", [$afLog, $afG->getReturn(), $afGen(1) instanceof Generator], ["0=3;1;", 10, true]);
+
 // ----- done -----
 echo "features: " . $checks . " checks, " . $fails . " failures\n";
 exit($fails);

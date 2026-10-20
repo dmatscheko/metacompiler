@@ -5060,7 +5060,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         return function(b) {
             var idx = emitFunc(pl.params, body, false, false, undefined, undefined, chk)
             var rc = emitCapture(b, captured, [])
-            return {b: rc.b, v: withClosureRec(rc.b, callExt(rc.b, "js_closure", [handle(idx), rc.v]), pl, desc, rc.v, sc, idx, captured)}
+            return {b: rc.b, v: withClosureRec(rc.b, closureV(rc.b, idx, rc.v), pl, desc, rc.v, sc, idx, captured)}
         }
     }
 
@@ -7383,6 +7383,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             }
         }
         if (rest >= 0) { dynPlaceVariadic = true }
+        if (defs.length < params.length - (rest >= 0 ? 1 : 0)) { phpLibArgErr() }
         return {params: params, defs: defs, byref: byref, rest: rest}
     }
     // 'function f(...$rest)': the variadic parameter arrives as one argument holding
@@ -8415,6 +8416,13 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (phpLib == null) { phpLib = phpLibIndex(load("lib/php-stdlib.php")) }
         var ks = phpLibClassesIn(phpLib, text)
         for (var i = 0; i < ks.length; i++) { phpLibLoad(ks[i]) }
+    }
+    // A required parameter's count check (emitArgCheck) raises ArgumentCountError,
+    // a library class, so the walk of one compiles it. Twin of phpLibArgErr in
+    // php-interpreter.abnf.
+    function phpLibArgErr() {
+        if (phpLib == null) { phpLib = phpLibIndex(load("lib/php-stdlib.php")) }
+        phpLibLoad("#argumentcounterror")
     }
     function phpLibLoad(key) {
         if (key == "" || phpLib.fns[key] === undefined || phpLibDone[key] === true) { return }
