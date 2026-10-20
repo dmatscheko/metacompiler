@@ -128,7 +128,7 @@ sortedSetOf TreeSet); an Array argument → ours `ArrayList` (JVM `[Ljava.lang.I
 
 # GO — Go  (oracle: `go run`)
 
-### T-623 go: pointers through interfaces; generic zero values and %T; argument evaluation order; forward goto; late static types · P1 · GO · OPEN [V]
+### T-623 go: pointers through interfaces; generic zero values and %T; argument evaluation order; forward goto; late static types · P1 · GO · IN PROGRESS (GO worker, round 8) [V]
 `%T`/`%v` of a pointer reaching fmt through an interface lose the `*`/`&` (`*strconv.NumError` prints `strconv.NumError`, `&map{}`
 literals print without `&`); `a.(*V)` on a V value answers true; a struct's pointer field prints `{..}` (go an address). `var
 zero T` in a generic function → nil (go `""`/0); `%T` of a generic struct → `main.Pair` (go `main.Pair[string,int]`). gc evaluates
@@ -137,7 +137,7 @@ call operands before plain operands: `fmt.Println(*ps, ps.Pop())` prints the pop
 by its underlying type, and the halves disagree (int vs int16). The compiler refuses `range` over a function whose static type is
 unknown (the interpreter handles it). `len("ab") << 70` is not folded as a typed constant (go: compile error).
 
-### T-624 go: missing standard packages; append capacity growth · P2 · GO · OPEN [V]
+### T-624 go: missing standard packages; append capacity growth · P2 · GO · IN PROGRESS (GO worker, round 8) [V]
 bufio, io, time, regexp, path, encoding/json, context, flag, log, reflect are accepted at import and then every call fails;
 `len(os.Args)` is 0. Write the commonly used ones in Go under languages/lib/ as sort/strconv were (bufio.Scanner over stdin if a
 stdin exists, strings.NewReader/io.Reader, time.Duration printing, regexp on the shared engine with an RE2 dialect flag).
