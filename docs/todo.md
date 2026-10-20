@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-643** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-645** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -89,9 +89,11 @@ inputs — record in manual 7.9 unless made bit-exact. `__exit__`'s traceback ar
 
 # JS — JavaScript and TypeScript
 
-### T-641 js: Object.getOwnPropertyNames of a prototype · P2 · JS · IN PROGRESS (JS worker, round 9) [V]
-`class K { m(){} get g(){return 1} }; Object.getOwnPropertyNames(K.prototype)` → all legs `""` (node `constructor,m,g`);
-`function F(){}; F.prototype.q = 1` → ours `q` (node `constructor,q`); a string-keyed `["__#@iterator"]` method likewise missing. js and ts.
+### T-644 js: own-property details of prototypes and functions · P3 · JS · OPEN [V]
+`class B{m(){}}; B.prototype.m = function(){}; B.prototype.x = 1` → `Object.keys(B.prototype)` includes `m` in all engines (node `x`
+only: assigning an existing non-enumerable property keeps it non-enumerable). `Object.getOwnPropertyNames(K)` with `static s(){}` →
+`""` (node `length,name,prototype,s`). A function declaration's names → `length,name` (node adds `arguments,caller,prototype`;
+recorded as a value-model limit). `K.prototype.hasOwnProperty("constructor")` / a declared method name → false (node true).
 
 ---
 
@@ -122,9 +124,13 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-642 kotlin: `is ArrayList` / `is HashSet` and other concrete collection classes · P3 · KT · IN PROGRESS (KT worker, round 8) [V spec-only]
-`mutableListOf(1) is ArrayList<*>` → false in all three engines (JVM true); no concrete collection class names (ArrayList, HashSet,
-LinkedHashMap, ...) are tested by `is`. Use the `__jc` class tags the formatter already carries.
+### T-643 kotlin: `sorted()` results and deques answer `is ArrayList` true; SortedSet key views; javaClass.name · P1 · KT · OPEN [V spec-only]
+Introduced by the concrete-class `is` (10f71e86): `val s: Any = listOf(3,1,2).sorted(); s is ArrayList<*>` → true in all engines (JVM
+false: sortedWith on a Collection/Array returns `Arrays$ArrayList`, or `toList()` for size ≤ 1; on a non-Collection Iterable an
+ArrayList) — give the sorted family's results array kind 4 when the receiver is a Collection/Array, at every sorted* site in all three
+engines. `java.util.ArrayDeque`, `kotlin.collections.ArrayDeque` and `LinkedList` answer `is ArrayList` true (they are plain kind-0
+lists; their class name prints java.util.ArrayList). Older: `sortedMapOf(..).keys is java.util.SortedSet<*>` false (JVM true:
+TreeMap$KeySet is a NavigableSet); `x.javaClass.name` on a collection → interp "property .name of null".
 
 ---
 
@@ -754,6 +760,8 @@ T-636 batch native: capture nesting limited to 8; rt_die not ordered after stdou
 T-633 kotlin: `+=` on a `val` mutable collection reassigns instead of plusAssign — DONE c291b1fd a3b2e827 (plusAssign on a val, String elements, TreeSet/TreeMap constructors; kotlin bench -20.6% with identical output, from one js_is_type per +); extension resolution by static type DECLINED (the grammars compute no expression types); comparator Trees and deque classes are T-639
 T-619 js: `"__#@"` keys vs symbols; arguments passed on; holes; `Object.getOwnPropertySymbols` — DONE f83299c1 for "__#@" keys, getOwnPropertySymbols, the [...null] message; js-builtins.js on real Symbol.iterator DECLINED (naming a symbol turns on symbol/BigInt operator checks: +45% on a native Map loop); arguments passed on and array holes moved to CORE as T-640
 T-639 kotlin: `is` on collections; MutableList deque methods; comparator TreeSet/TreeMap; LinkedList/ArrayDeque/PriorityQueue — DONE c29d57f4 11f099d7 (is on collections, deque members, comparator TreeSet/TreeMap, LinkedList/ArrayDeque, JDK-heap PriorityQueue); the empty-ArrayDeque message ("ArrayDeque is empty." vs ours "List is empty.") DECLINED: an ArrayDeque is a list here and a distinct kind would touch ~26 primitive-kind sites
+T-641 js: Object.getOwnPropertyNames of a prototype — DONE 02f3aef6
+T-642 kotlin: `is ArrayList` / `is HashSet` and other concrete collection classes — DONE 10f71e86 (map views tagged with their real classes; two over-answers it introduced are T-643)
 
 # Settled — do not re-open
 
