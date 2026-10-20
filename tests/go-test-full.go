@@ -41,12 +41,16 @@
 package main
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	f27 "fmt"
 	"io"
+	"iter"
+	"maps"
 	"math"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -4458,6 +4462,103 @@ func s83() {
 	check("srt6", fmt.Sprint(ys, nr83(3)) == "[2 1 3] 8")
 }
 
+// ===== SECTION 84: packages slices, maps, cmp and iter; range over a function =====
+// All four are Go source (languages/lib/go-*.go). A range over a function (Go
+// 1.23) runs its body once per yield; break, continue, return and defer in that
+// body mean what they mean in any loop. The expected values are go run's.
+func count84(n int) iter.Seq[int] {
+	return func(yield func(int) bool) {
+		for i := 0; i < n; i++ {
+			if !yield(i) {
+				return
+			}
+		}
+	}
+}
+
+func pairs84(xs []string) func(func(int, string) bool) {
+	return func(yield func(int, string) bool) {
+		for i, s := range xs {
+			if !yield(i, s) {
+				return
+			}
+		}
+	}
+}
+
+func first84(min int) (r int) {
+	for i := range count84(100) {
+		if i*i >= min {
+			r = i
+			return
+		}
+	}
+	return -1
+}
+
+func defers84() (out string) {
+	for i := range count84(3) {
+		defer func() { out += fmt.Sprint(i) }()
+	}
+	return "d"
+}
+
+func s84() {
+	ys := []int{3, 1, 2, 5, 4}
+	slices.Sort(ys)
+	zs := slices.Clone(ys)
+	slices.Reverse(zs)
+	at, found := slices.BinarySearch(ys, 4)
+	check("slc1", fmt.Sprint(ys, zs, slices.Contains(ys, 2), slices.Index(ys, 9), slices.Max(ys), slices.Min(zs),
+		slices.Equal(ys, zs), slices.Compare(ys, zs), at, found) == "[1 2 3 4 5] [5 4 3 2 1] true -1 5 1 false -1 3 true")
+	rs := mk83()
+	slices.SortFunc(rs, func(a, b R83) int { return cmp.Compare(a.k, b.k) })
+	ss := mk83()
+	slices.SortStableFunc(ss, func(a, b R83) int { return cmp.Compare(a.k, b.k) })
+	check("slc2", ids83(rs) == "5 18 13 9 10 14 1 7 17 3 11 2 15 16 6 4 12 0 8 19 " &&
+		ids83(ss) == "5 9 13 18 1 3 7 10 14 17 2 6 11 15 16 0 4 8 12 19 ")
+	orig := []int{1, 1, 2, 2, 3}
+	c := slices.Compact(orig)
+	s := slices.Insert([]int{1, 2, 5}, 2, 3, 4)
+	check("slc3", fmt.Sprint(c, orig, s, slices.Delete(s, 1, 3), slices.DeleteFunc([]int{1, 2, 3, 4}, func(x int) bool { return x%2 == 0 }),
+		slices.Replace([]int{0, 1, 2, 3}, 1, 3, 9), slices.Concat([]int{1}, nil, []int{2}), slices.Repeat([]string{"a"}, 3), slices.Clone([]int(nil)) == nil) ==
+		"[1 2 3] [1 2 3 0 0] [1 4 5 0 0] [1 4 5] [1 3] [0 9 3] [1 2] [a a a] true")
+	m := map[string]int{"b": 2, "a": 1}
+	m2 := maps.Clone(m)
+	m2["c"] = 3
+	maps.DeleteFunc(m2, func(k string, v int) bool { return v == 1 })
+	check("slc4", fmt.Sprint(cmp.Compare(2, 1), cmp.Less(math.NaN(), 0.0), cmp.Or("", "x", "y"), maps.Equal(m, m2), m2) ==
+		"1 truexfalse map[b:2 c:3]")
+	got := ""
+outer:
+	for i := range count84(4) {
+		for j, s := range pairs84([]string{"a", "b", "c"}) {
+			if j == 1 {
+				continue
+			}
+			if i == 1 {
+				continue outer
+			}
+			if i == 3 {
+				break outer
+			}
+			got += fmt.Sprint(i, s, " ")
+		}
+	}
+	check("itr1", fmt.Sprint(got, first84(10), defers84()) == "0a 0c 2a 2c 4d210")
+	keys := slices.Sorted(maps.Keys(map[string]bool{"z": true, "a": true, "m": false}))
+	chunks := ""
+	for ch := range slices.Chunk([]int{1, 2, 3, 4, 5}, 2) {
+		chunks += fmt.Sprint(ch)
+	}
+	back := ""
+	for i, v := range slices.Backward([]string{"x", "y"}) {
+		back += fmt.Sprint(i, v)
+	}
+	check("itr2", fmt.Sprint(keys, slices.Collect(count84(3)), chunks, back, len(maps.Collect(maps.All(m)))) ==
+		"[a m z] [0 1 2][1 2][3 4][5]1y0x2")
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -4542,6 +4643,7 @@ func main() {
 	s81() // SECTION-CALL 81
 	s82() // SECTION-CALL 82
 	s83() // SECTION-CALL 83
+	s84() // SECTION-CALL 84
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

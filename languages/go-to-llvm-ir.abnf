@@ -4778,8 +4778,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // and maps.
     function makeForRange(items) {
         var bodyT = items.pop()
-        // {rcopy}: the copy a struct ELEMENT makes on its way into the value variable.
-        var rcopy = items.pop().rcopy
+        // {rcopy}: the copy a struct ELEMENT makes on its way into the value variable;
+        // rfn: the range expression is a function (goRangeC).
+        var rinfo = items.pop()
+        var rcopy = rinfo.rcopy
+        var rfn = rinfo.rfn === true
         var listT = items.pop()
         var lbl = items[0].lbl
         // The binder group is optional, so the names arrive as {rv} markers and
@@ -4797,6 +4800,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var vName = rnames.length > 1 ? rnames[1] : null
         var iDecl = !rset && iName != null && iName != "_"
         var vDecl = !rset && vName != null && vName != "_"
+        if (rfn) { return function(b) { return emitRangeFunc(b, listT, bodyT, iName, vName, rset, lbl) } }
         return function(b) {
             var saved = curScopeV
             var r = listT(b)
@@ -4871,6 +4875,103 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             postB.NewBr(headB)
             return exitB
         }
+    }
+    // RANGE OVER A FUNCTION (Go 1.23): `for k, v := range seq` calls seq with a yield
+    // function, chosen by the range expression's static type (goRangeC), so every
+    // other range is emitted as before. The body becomes a closure of its own,
+    // called on a fresh scope per iteration; break and continue of this loop leave
+    // it as js_ctl_break or a plain return, and a return or goto as the control
+    // signal a function body leaves by (see emitFunc). The yield closure turns
+    // those into Go's answer to the iterator - true to go on, false to stop - and
+    // parks a return or goto in a hidden variable, which the loop site re-issues
+    // with excDispatch once the iterator has returned. A break or continue naming an
+    // ENCLOSING loop stops the iteration too, parking that loop's number and kind in
+    // a second hidden variable for the site to branch on. Twin of the function arm
+    // of makeForRange in go-interpreter.abnf.
+    function emitRangeFunc(b, listT, bodyT, iName, vName, rset, lbl) {
+        var r = listT(b)
+        b = r.b
+        var seqV = r.v
+        funcCount++
+        var sig = "$rfsig" + funcCount
+        var jmp = "$rfjmp" + funcCount
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, sig), hUndef])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, jmp), hUndef])
+        var savedF = curF
+        var savedScope = curScopeV
+        var savedLoops = loopStack
+        var savedFTag = curFTag
+        funcCount++
+        var bodyIdx = funcCount
+        var bf = m.NewFunc("jsf_" + bodyIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        curF = bf
+        var entryB = bf.NewBlock("entry")
+        var contB = bf.NewBlock("")
+        var brkB = bf.NewBlock("")
+        contB.NewRet(hUndef)
+        brkB.NewRet(callExt(brkB, "js_ctl_break", []))
+        var outers = []
+        for (var oi = 0; oi < savedLoops.length; oi++) {
+            var oe = savedLoops[oi]
+            if (oe.lbl == null || oe.lbl == lbl) { continue }
+            var pbB = bf.NewBlock("")
+            var pcB = bf.NewBlock("")
+            callExt(pbB, "js_scope_set", [bf.Params[0], emitStr(pbB, jmp), emitNum(pbB, 2 * oi + 1)])
+            pbB.NewRet(callExt(pbB, "js_ctl_break", []))
+            callExt(pcB, "js_scope_set", [bf.Params[0], emitStr(pcB, jmp), emitNum(pcB, 2 * oi + 2)])
+            pcB.NewRet(callExt(pcB, "js_ctl_break", []))
+            outers.push({cont: pcB, brk: pbB, lbl: oe.lbl, at: oi})
+        }
+        curScopeV = bf.Params[0]
+        curFTag = bodyIdx
+        loopStack = outers.concat([{cont: contB, brk: brkB, lbl: lbl}])
+        ctlEnter(bodyIdx)
+        bodyT(entryB).NewRet(hUndef)
+        ctlLeave()
+        funcCount++
+        var yIdx = funcCount
+        var yf = m.NewFunc("jsf_" + yIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        curF = yf
+        var yb = yf.NewBlock("entry")
+        var env = yf.Params[0]
+        // `:=` gives every iteration fresh variables; `=` assigns the enclosing ones.
+        var itS = rset ? env : callExt(yb, "js_scope_new", [env])
+        var setExt = rset ? "js_scope_set" : "js_scope_decl"
+        if (iName != null && iName != "_") { callExt(yb, setExt, [itS, emitStr(yb, iName), callExt(yb, "js_arg", [yf.Params[1], handle(0)])]) }
+        if (vName != null && vName != "_") { callExt(yb, setExt, [itS, emitStr(yb, vName), callExt(yb, "js_arg", [yf.Params[1], handle(1)])]) }
+        var res = callExt(yb, "js_call", [callExt(yb, "js_closure", [handle(bodyIdx), itS]), hUndef, callExt(yb, "js_arr_new", [])])
+        var kind = callExt(yb, "js_ctl_kind", [res])
+        var onB = yf.NewBlock("")
+        var notNormB = yf.NewBlock("")
+        var notContB = yf.NewBlock("")
+        var stopB = yf.NewBlock("")
+        var parkB = yf.NewBlock("")
+        yb.NewCondBr(yb.NewICmp(llvm.enum.IPredEQ, kind, handle(0)), onB, notNormB)
+        notNormB.NewCondBr(notNormB.NewICmp(llvm.enum.IPredEQ, kind, handle(3)), onB, notContB)
+        notContB.NewCondBr(notContB.NewICmp(llvm.enum.IPredEQ, kind, handle(2)), stopB, parkB)
+        onB.NewRet(hTrue)
+        stopB.NewRet(hFalse)
+        callExt(parkB, "js_scope_set", [env, emitStr(parkB, sig), res])
+        parkB.NewRet(hFalse)
+        curF = savedF
+        curScopeV = savedScope
+        loopStack = savedLoops
+        curFTag = savedFTag
+        var args = callExt(b, "js_arr_new", [])
+        callExt(b, "js_arr_push", [args, callExt(b, "js_closure", [handle(yIdx), curScopeV])])
+        callExt(b, "js_call", [seqV, hUndef, args])
+        b = excDispatch(b, callExt(b, "js_scope_get", [curScopeV, emitStr(b, sig)]))
+        if (outers.length == 0) { return b }
+        var jv = callExt(b, "js_scope_get", [curScopeV, emitStr(b, jmp)])
+        for (var oj = 0; oj < outers.length; oj++) {
+            var tgt = savedLoops[outers[oj].at]
+            var nb1 = curF.NewBlock("")
+            var nb2 = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [jv, emitNum(b, 2 * outers[oj].at + 1)])), tgt.brk, nb1)
+            nb1.NewCondBr(truthy(nb1, callExt(nb1, "js_seq", [jv, emitNum(nb1, 2 * outers[oj].at + 2)])), tgt.cont, nb2)
+            b = nb2
+        }
+        return b
     }
     // Multiple return values travel as an array. The return value is computed
     // first, then the collected defers run (Go order), then the function returns.

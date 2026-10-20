@@ -4781,8 +4781,36 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var iName = names.length > 0 ? names[0] : null
         var vName = names.length > 1 ? names[1] : null
         function rBind(nm, v) { if (rset) { setVar(nm, v) } else { declVar(nm, v) } }
+        // RANGE OVER A FUNCTION (Go 1.23): seq is called with a yield function, which
+        // runs the body on the loop's own scope chain with a fresh frame for the
+        // iteration - and the loop's own defer frame, since a defer in the body belongs
+        // to the function the loop is in - and answers true to go on, false once the
+        // body broke, returned or jumped out, whose signal the loop then hands on.
+        // Twin of emitRangeFunc in go-to-llvm-ir.abnf.
+        function goRangeFunc(seq) {
+            var site = scopes
+            var siteDefers = deferFrames[deferFrames.length - 1]
+            var out = undefined
+            seq(function() {
+                var saved = scopes
+                scopes = site.slice(0)
+                scopes.push({})
+                if (iName != null && arguments.length > 0) { rBind(iName, arguments[0]) }
+                if (vName != null && arguments.length > 1) { rBind(vName, arguments[1]) }
+                deferFrames.push(siteDefers)
+                var r = bodyT()
+                deferFrames.pop()
+                scopes = saved
+                var s = loopSig(r, lbl)
+                if (s == 0) { return true }
+                if (s == 2) { out = r }
+                return false
+            })
+            return out
+        }
         return function() {
             var arr = listT()
+            if (typeof arr == "function") { return goRangeFunc(arr) }
             // Ranging a CHANNEL yields one received value per iteration (bound to the
             // FIRST name, not an index) and ends when the channel is closed and drained.
             if (isChan(arr)) {

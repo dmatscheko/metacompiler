@@ -2139,6 +2139,9 @@ function goCallBoxC(items) {
     var sp = goSplitArgs(items.slice(1))
     var pts = null
     if (name == "append" && sp.atys.length > 0) { pts = ["", "..." + stElemTy(sp.atys[0])] }
+    // Inside a package its own function wins: another package (or the main file)
+    // may declare one of the same name, and the bare key holds the first seen.
+    else if (goWalkPkg != "" && goFnPTys["$" + goWalkPkg + "." + name] !== undefined && !cIsLocal(name)) { pts = goFnPTys["$" + goWalkPkg + "." + name] }
     else if (goFnPTys["$" + name] !== undefined && !cIsLocal(name)) { pts = goFnPTys["$" + name] }
     var out = [name]
     if (name == "delete" && sp.args.length == 2 && !sp.spread) {
@@ -2764,6 +2767,10 @@ function goLibFile(path) {
     if (path == "strings") { return "lib/go-strings.go" }
     if (path == "math") { return "lib/go-math.go" }
     if (path == "sort") { return "lib/go-sort.go" }
+    if (path == "slices") { return "lib/go-slices.go" }
+    if (path == "maps") { return "lib/go-maps.go" }
+    if (path == "cmp") { return "lib/go-cmp.go" }
+    if (path == "iter") { return "lib/go-iter.go" }
     return ""
 }
 // The method EXPRESSION T.M of a defined type T (`f := Color.String`): the method's
@@ -2937,7 +2944,14 @@ function goRangeC(pos) {
     var et = stElemTy(stAt(pos))
     if (cRangeNames.length > 1) { cBindTy(cRangeNames[1], et) }
     cRangeNames = []
-    return {rcopy: goStCopyTy(et)}
+    return {rcopy: goStCopyTy(et), rfn: goIsSeqTy(stAt(pos))}
+}
+// Is t a function a range statement iterates by calling it (Go 1.23):
+// func(yield func(...) bool), directly, as iter.Seq/Seq2 or a defined type?
+function goIsSeqTy(t0) {
+    var t = stBare(t0)
+    if (goTyWord(t) == t && typeof definedUnder[t] == "string") { t = stBare(resolveDefined(t)) }
+    return t.indexOf("func(func(") == 0 || t.indexOf("iter.Seq") == 0
 }
 
 // The switch body's mark: its frame DEPTH as well as its length, so a truncation
