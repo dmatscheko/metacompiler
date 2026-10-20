@@ -89,7 +89,7 @@ marker). `Object.getOwnPropertySymbols` missing in all legs. Compiled `[...null]
 
 # JV — Java
 
-### T-625 java/kotlin regex: supplementary characters in interp and native; PSE constructor; Kotlin Regex.options · P1 · JV · OPEN [V]
+### T-625 java/kotlin regex: supplementary characters in interp and native; PSE constructor; Kotlin Regex.options · P1 · JV · IN PROGRESS (JV worker, round 7) [V]
 Under the J dialect the interpreter and native legs match UTF-16 units, the Go twin (runes) and Java code points:
 `"😀".matches(".")`, `.matches("[^a]")`, `.matches("\\p{So}")` → false in interp and native, true in llvm.Run and java;
 `"a😀b".replaceAll(".", "#")` → `####` (java `###`). Make lib/regex.js step by code point under J (additive, flag-gated) and
