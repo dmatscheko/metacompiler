@@ -52,6 +52,7 @@ import (
 	"os"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -4706,6 +4707,81 @@ func s86() {
 	check("syn2", got == "7:1 7:4 7:9 ")
 }
 
+// ===== SECTION 87: package strconv; asserting a pointer type =====
+// strconv is Go source (languages/lib/go-strconv.go): Go's own parsing, fmt's
+// formats. A *T in a type assertion, a type switch or errors.As tests the struct
+// value (a pointer and the struct are one value here), another package's type
+// included. The expected values are go run's.
+type Err87 struct{ code int }
+
+func (e *Err87) Error() string { return "err87" }
+
+func fail87() error { return &Err87{7} }
+
+type Row87 struct {
+	Name string
+	Tags []string
+	M    map[string]int
+}
+
+// `n := 3` in a block shadows the named result n; `return ..., n` sets the
+// result, not the shadow.
+func shadow87() (f float64, n int) {
+	if true {
+		n := 3
+		return 1.5, n
+	}
+	return
+}
+
+func len87(s string) int {
+	i := 0
+	for ; i < len(s); i++ {
+	}
+	if i > 0 {
+		return (&Row87{Name: s}).Name2()
+	}
+	return 0
+}
+
+func (r *Row87) Name2() int { return len(r.Name) * 2 }
+
+func s87() {
+	n, err := strconv.Atoi("123")
+	_, err2 := strconv.Atoi("12a")
+	i64, err3 := strconv.ParseInt("-0x1f", 0, 64)
+	_, err4 := strconv.ParseInt("300", 10, 8)
+	u, _ := strconv.ParseUint("18446744073709551615", 10, 64)
+	check("scv1", fmt.Sprint(n, err, err2, i64, err3, err4, u) ==
+		`123 <nil> strconv.Atoi: parsing "12a": invalid syntax -31 <nil> strconv.ParseInt: parsing "300": value out of range 18446744073709551615`)
+	f1, _ := strconv.ParseFloat("0.1", 64)
+	f2, _ := strconv.ParseFloat("1e23", 64)
+	f3, _ := strconv.ParseFloat("2.2250738585072011e-308", 64)
+	f4, e4 := strconv.ParseFloat("1e400", 64)
+	f5, _ := strconv.ParseFloat("3.4028235677973366e38", 32)
+	check("scv2", fmt.Sprint(f1, f2, f3, f4, e4, f5) == `0.1 1e+23 2.225073858507201e-308 +Inf strconv.ParseFloat: parsing "1e400": value out of range 3.4028234663852886e+38`)
+	check("scv3", fmt.Sprint(strconv.Itoa(-45), strconv.FormatInt(-255, 16), strconv.FormatFloat(1234.5678, 'e', -1, 64),
+		strconv.FormatFloat(0.000012345, 'f', -1, 64), strconv.FormatFloat(2.5, 'g', 3, 32), strconv.Quote("a\"é\n"), strconv.FormatBool(true)) ==
+		`-45-ff1.2345678e+030.0000123452.5"a\"é\n"true`)
+	uq, _ := strconv.Unquote(`"é\x41\101"`)
+	b, _ := strconv.ParseBool("TRUE")
+	check("scv4", fmt.Sprint(uq, b, strings.ToTitle("ǆa")) == "éAAtrueǅA")
+	var ne *strconv.NumError
+	ok1 := errors.As(err2, &ne)
+	ne2, ok2 := err2.(*strconv.NumError)
+	e := fail87()
+	m, ok3 := e.(*Err87)
+	sw := ""
+	switch x := e.(type) {
+	case *Err87:
+		sw = fmt.Sprint("ptr ", x.code)
+	}
+	check("ast1", fmt.Sprint(ok1, ne.Func, ok2, ne2.Num, ok3, m.code, sw) == "trueAtoitrue12atrue 7ptr 7")
+	rows := []Row87{{"a", nil, nil}}
+	sf, sn := shadow87()
+	check("nil1", fmt.Sprint(rows, rows[0].Tags == nil, sf, sn, len87("abc")) == "[{a [] map[]}] true 1.5 3 6")
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -4793,6 +4869,7 @@ func main() {
 	s84() // SECTION-CALL 84
 	s85() // SECTION-CALL 85
 	s86() // SECTION-CALL 86
+	s87() // SECTION-CALL 87
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

@@ -2482,8 +2482,13 @@ function goTypeIs(v, want) {
     var w = want
     if (w == "byte") { w = "uint8" }
     if (w == "rune") { w = "int32" }
+    // *T tests as T, and another package's type by its %T name (goTypeIs in
+    // languages/go-interpreter.abnf).
+    var inst = goClassOf(v) !== undefined
+    if (w.charAt(0) == "*" && inst) { w = w.substring(1) }
     var got = goTypeNameOf(v)
     if (got == w) { return 1 }
+    if (inst && w.indexOf(".") > 0 && gfTypeName(v) == w) { return 1 }
     if (w.charAt(0) == "[" || w.substring(0, 4) == "map[") {
         if (gfTypeName(v) == gfQualTy(w)) { return 1 }
         return 0

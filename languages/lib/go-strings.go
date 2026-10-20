@@ -467,6 +467,7 @@ func Map(mapping func(rune) rune, s string) string {
 
 func ToUpper(s string) string { return Map(toUpper, s) }
 func ToLower(s string) string { return Map(toLower, s) }
+func ToTitle(s string) string { return Map(toTitle, s) }
 
 // Title maps the first letter of every word to its title case; a word starts
 // after a separator - ASCII other than a letter, digit or '_', or a space.

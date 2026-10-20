@@ -460,10 +460,10 @@ DeferPrim   = "(" Expression ")" | FuncLit | VarRef ;
 
 Block       <~~ push(makeBlockStmt(takeAll())); cScopeExit() ~~>
             = "{" CScopeOn { Statement } "}" ;
-// A function's body is the SAME block as its parameters and results, so it runs in
-// their scope rather than a new one: `i, j := 0, n` with i a named result assigns
-// that result (and declares j) instead of shadowing it.
-FuncBody    <~~ push(makeSeq(takeAll())); cScopeExit() ~~>
+// A function's body is the SAME block as its parameters and results: when a `:=`
+// at its top level names one of them (cShortName), it runs in their scope, so
+// `i, j := 0, n` with i a named result assigns that result instead of shadowing it.
+FuncBody    <~~ var fbi = takeAll(); push(cBodyShared() ? makeSeq(fbi) : makeBlockStmt(fbi)); cScopeExit() ~~>
             = "{" CScopeOn { Statement } "}" ;
 // Always-empty matches whose only purpose is their TAG, the shape NoBody uses: Go
 // source holds no NUL byte, so the optional never consumes anything. A rule's own tag
@@ -551,7 +551,7 @@ ExprOnly    <~~ clrDeclNames(); push(exprToStmt(pop())) ~~>
             = Expression ;
 
 ShortDecl   <~~ push(makeShortDecl(takeAll())) ~~>
-            = Id <~~ push(cPoisonName(up.in)) ~~> { "," Id <~~ push(cPoisonName(up.in)) ~~> } ":=" ExprList ;
+            = Id <~~ push(cShortName(up.in)) ~~> { "," Id <~~ push(cShortName(up.in)) ~~> } ":=" ExprList ;
 
 IncDecStmt  <~~ push(makeIncDec(takeAll())) ~~>
             = Target ( "++" | "--" ) <~~ push(up.in) ~~> ;
@@ -621,7 +621,10 @@ FCond       <~~ push({k:"cond", t:pop()}) ~~> = Expression ;
 FPost       <~~ push({k:"post", t:pop()}) ~~> = SimpleStmt2 ;
 SimpleStmt2 = MapOk | TypeOk | RecvOk | ShortDecl | IncDecStmt | Assign ;
 ForCond     <~~ push(makeWhileG(takeAll())) ~~>
-            = "for" KwEnd <~~ push({lbl: takeLabel()}) ~~> CondOn Expression CondOff Block ;
+            = "for" KwEnd NotSemi <~~ push({lbl: takeLabel()}) ~~> CondOn Expression CondOff Block ;
+// `for ; cond; post` is a classic header with an empty init: CondOn must not be
+// pushed for an Expression that cannot start there.
+NotSemi     = !";" ;
 
 // Go switch: no fallthrough (an implicit break ends every case), several values per
 // case, with a subject (compared ==) or without one (the first true condition wins).
@@ -2147,6 +2150,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // emitRetNil needs them to decide, statically, whether a nil result adopts a map
     // or slice zero value.
     var curRtys = []
+    // The scope the named results live in - the function body's own, whatever block
+    // a return stands in - while that body is being emitted; null where the code
+    // emitted is in a closure of its own (a range-over-function body), which then
+    // assigns them by name through its scope chain.
+    var curRetScopeV = null
 
     // ----- Project-file import state (see core.importFile near the core config) -----
     var importedFiles = {} // "$" + absolute file path -> already imported (once only)
@@ -2459,7 +2467,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var re = e.eval(b)
             var bt = (e.esty == undefined || e.esty == "") ? "" : goDtBoxTo(e.esty, cet)
             if (bt != "") { return {b: re.b, v: emitDtBox(re.b, re.v, bt)} }
-            return {b: re.b, v: emitStoreCopy(re.b, emitAdoptTy(re.b, cet, re.v), cet)}
+            // A nil element of a slice or map type is that type's nil (`[]P{{"a", nil}}`
+            // prints [{a []}]), as a returned nil is (emitRetNil).
+            var rn = emitRetNil(re.b, cet, re.v)
+            return {b: rn.b, v: emitStoreCopy(rn.b, emitAdoptTy(rn.b, cet, rn.v), cet)}
         }
         var els = e.enest.selems
         // A POINTER element type: `[]*P{nil, {7}}` builds the elided element against
@@ -2940,7 +2951,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             key = null
             var fty = ftypeOfName(fields, ftypes, name)
             var bt = (estys == undefined || estys == null || typeof args[i] != "function") ? "" : goDtBoxTo(estys[i], fty)
-            var fv = bt != "" ? emitDtBox(b, r.v, bt) : emitStoreCopy(b, emitAdoptTy(b, fty, r.v), fty)
+            var fv = r.v
+            if (bt != "") { fv = emitDtBox(b, r.v, bt) }
+            else {
+                var rn = emitRetNil(b, fty, r.v)
+                b = rn.b
+                fv = emitStoreCopy(b, emitAdoptTy(b, fty, rn.v), fty)
+            }
             callExt(b, "js_set", [objV, emitStr(b, name), fv])
         }
         return {b: b, v: objV}
@@ -4953,9 +4970,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         curScopeV = bf.Params[0]
         curFTag = bodyIdx
         loopStack = outers.concat([{cont: contB, brk: brkB, lbl: lbl}])
+        var savedRetScope = curRetScopeV
+        curRetScopeV = null
         ctlEnter(bodyIdx)
         bodyT(entryB).NewRet(hUndef)
         ctlLeave()
+        curRetScopeV = savedRetScope
         funcCount++
         var yIdx = funcCount
         var yf = m.NewFunc("jsf_" + yIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
@@ -5101,13 +5121,16 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             }
             // 'return v' in a function with named results ASSIGNS them first (Go), so
             // the defers see the returned value; a bare return leaves them as they are.
+            // A block may declare a name a result has (`n := 3` inside an if), so the
+            // results are set in the scope they were declared in.
             if (curRets.length > 0 && items.length > 0) {
+                var rsV = curRetScopeV != null ? curRetScopeV : curScopeV
                 if (curRets.length == 1) {
-                    callExt(b, "js_scope_set", [curScopeV, emitStr(b, curRets[0]), v])
+                    callExt(b, "js_scope_set", [rsV, emitStr(b, curRets[0]), v])
                 } else {
                     var mvR = emitMvArr(b, v)
                     for (var k = 0; k < curRets.length; k++) {
-                        callExt(b, "js_scope_set", [curScopeV, emitStr(b, curRets[k]),
+                        callExt(b, "js_scope_set", [rsV, emitStr(b, curRets[k]),
                                                     callExt(b, "js_get", [mvR, emitNum(b, k)])])
                     }
                 }
@@ -5738,13 +5761,16 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // Now the body itself, inside the closure. A return in it LEAVES the closure, so
         // it goes out as a control signal (retStmt) that js_gounctl unwraps again.
         var savedFTag = curFTag
+        var savedRetScope = curRetScopeV
         curF = bf
         var bb = bf.NewBlock("entry")
         curScopeV = bf.Params[0]
+        curRetScopeV = curScopeV
         curFTag = bidx
         ctlEnter(bidx)
         body(bb).NewRet(hUndef)
         ctlLeave()
+        curRetScopeV = savedRetScope
         curFTag = savedFTag
         curRets = savedRets
         curRtys = savedRtys
@@ -6246,7 +6272,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
 
     // Go stdlib packages the runtime provides (resolveImport lives in lib/compile-core.js;
     // exact-match paths, so sub-packages like "encoding/json" are listed in full).
-    core.stdlibImports = ["fmt", "os", "strconv", "errors", "bufio", "io", "time", "bytes", "unicode", "regexp", "path", "encoding/json", "context", "flag", "log", "reflect"]
+    core.stdlibImports = ["fmt", "os", "errors", "bufio", "io", "time", "bytes", "unicode", "regexp", "path", "encoding/json", "context", "flag", "log", "reflect"]
     function fail(msg) { println("go compiler error: " + msg); exit(1) }
 
     // Project-file imports: import "mathbox" -> mathbox.go (a slash path like "a/b" ->

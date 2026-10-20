@@ -1010,7 +1010,9 @@ function cFromRadixText(text) {
 // not set it leaves "", which means "not known". The x column is what the checks
 // know of a constant that does not fold: a typed constant's goTkMk record, or a
 // string constant's byte length as {sl} (cBindSpec).
-function cFrame() { return {n: [], v: [], t: [], x: []} }
+// np counts the parameter and result names a function body's frame starts with,
+// and shared records that a `:=` at the body's top level names one of them.
+function cFrame() { return {n: [], v: [], t: [], x: [], np: 0, shared: false} }
 var cScopes = [cFrame()]
 var cPend = []
 var cPendT = []
@@ -1022,6 +1024,7 @@ function cTop() { return cScopes[cScopes.length - 1] }
 function cPendName(name) { cPend.push(name); cPendT.push(""); return name }
 function cScopeEnter() {
     var f = cFrame()
+    f.np = cPend.length
     var i = 0
     while (i < cPend.length) { f.n.push(cPend[i]); f.v.push(null); f.t.push(cPendT[i]); f.x.push(null); i = i + 1 }
     cPend = []
@@ -1038,6 +1041,16 @@ function cBindConst(name, c) {
 }
 // Returns the name so it can be written inline in a tag that also pushes it.
 function cPoisonName(name) { cBindConst(name, null); return name }
+// A name a `:=` declares. In Go a function's body is the same block as its
+// parameters and results, so `i, j := 0, n` with i a named result assigns i; the
+// body frame notes it, and the body then runs in the parameters' scope (FuncBody)
+// - only then, since a scope of its own is the cheaper one to look names up in.
+function cShortName(name) {
+    var i = cTopIdx(name)
+    if (i >= 0 && i < cTop().np) { cTop().shared = true }
+    return cPoisonName(name)
+}
+function cBodyShared() { return cTop().shared }
 // The innermost binding of name as {f: its frame, i: its index}, or null.
 function cFind(name) {
     var s = cScopes.length - 1
@@ -2844,6 +2857,7 @@ function goLibFile(path) {
     if (path == "cmp") { return "lib/go-cmp.go" }
     if (path == "iter") { return "lib/go-iter.go" }
     if (path == "sync") { return "lib/go-sync.go" }
+    if (path == "strconv") { return "lib/go-strconv.go" }
     if (path == "sync/atomic") { return "lib/go-atomic.go" }
     return ""
 }

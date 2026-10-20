@@ -2918,8 +2918,20 @@ func goTypeIs(rt *jsrt, v interface{}, want string) int {
 	case "rune":
 		want = "int32"
 	}
+	// *T tests as T, and another package's type by its %T name (goTypeIs in
+	// languages/go-interpreter.abnf).
+	inst := false
+	if o, ok := v.(*jsObject); ok {
+		_, inst = o.props["__class"].(*jsObject)
+	}
+	if inst && strings.HasPrefix(want, "*") {
+		want = want[1:]
+	}
 	got := goTypeNameOf(rt, v)
 	if got == want {
+		return 1
+	}
+	if inst && strings.Contains(want, ".") && rt.gopTypeName(v) == want {
 		return 1
 	}
 	if strings.HasPrefix(want, "[") || strings.HasPrefix(want, "map[") {

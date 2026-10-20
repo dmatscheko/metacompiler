@@ -443,10 +443,10 @@ DeferPrim   = "(" Expression ")" | FuncLit | VarRef ;
 
 Block       <~~ push(makeBlockStmt(takeAll())); cScopeExit() ~~>
             = "{" CScopeOn { Statement } "}" ;
-// A function's body is the SAME block as its parameters and results, so it runs in
-// their scope rather than a new one: `i, j := 0, n` with i a named result assigns
-// that result (and declares j) instead of shadowing it.
-FuncBody    <~~ push(goStmts(takeAll(), false)); cScopeExit() ~~>
+// A function's body is the SAME block as its parameters and results: when a `:=`
+// at its top level names one of them (cShortName), it runs in their scope, so
+// `i, j := 0, n` with i a named result assigns that result instead of shadowing it.
+FuncBody    <~~ push(goStmts(takeAll(), !cBodyShared())); cScopeExit() ~~>
             = "{" CScopeOn { Statement } "}" ;
 // Always-empty matches whose only purpose is their TAG, the shape NoBody uses: Go
 // source holds no NUL byte, so the optional never consumes anything. A rule's own tag
@@ -536,7 +536,7 @@ ExprOnly    <~~ clrDeclNames(); push(exprToStmt(pop())) ~~>
             = Expression ;
 
 ShortDecl   <~~ push(makeShortDecl(takeAll())) ~~>
-            = Id <~~ push(cPoisonName(up.in)) ~~> { "," Id <~~ push(cPoisonName(up.in)) ~~> } ":=" ExprList ;
+            = Id <~~ push(cShortName(up.in)) ~~> { "," Id <~~ push(cShortName(up.in)) ~~> } ":=" ExprList ;
 
 IncDecStmt  <~~ push(makeIncDec(takeAll())) ~~>
             = Target ( "++" | "--" ) <~~ push(up.in) ~~> ;
@@ -605,7 +605,10 @@ FCond       <~~ push({k:"cond", t:pop()}) ~~> = Expression ;
 FPost       <~~ push({k:"post", t:pop()}) ~~> = SimpleStmt2 ;
 SimpleStmt2 = AssertOk | RecvOk | MapOk | ShortDecl | IncDecStmt | Assign | ExprOnly ;
 ForCond     <~~ push(makeWhileG(takeAll())) ~~>
-            = "for" KwEnd <~~ push({lbl: takeLabel()}) ~~> CondOn Expression CondOff Block ;
+            = "for" KwEnd NotSemi <~~ push({lbl: takeLabel()}) ~~> CondOn Expression CondOff Block ;
+// `for ; cond; post` is a classic header with an empty init: CondOn must not be
+// pushed for an Expression that cannot start there.
+NotSemi     = !";" ;
 
 // Go switch: no fallthrough (an implicit break ends every case), several values per
 // case, with a subject (compared ==) or without one (the first true condition wins).
@@ -3542,7 +3545,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
 
     // The block runs its statements in order and resolves a goto to one of its OWN
     // labels by jumping to that index; anything else propagates. A function body
-    // runs in its parameters' scope (ownScope false, see FuncBody).
+    // may run in its parameters' scope (ownScope false, see FuncBody).
     makeBlockStmt = function(items) { return goStmts(items, true) }
     function goStmts(items, ownScope) {
         var thunks = []
@@ -4067,7 +4070,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (e.enest == undefined) {
             var bt = e.esty == "" ? "" : goDtBoxTo(e.esty, elemType)
             if (bt != "") { return goDtBox(e.eval(), bt) }
-            return gAdoptTy(elemType, goStoreTy(e.eval(), elemType))
+            // A nil element of a slice or map type is that type's nil (goRetNil). Twin
+            // of emitElemVal and emitStructVal in go-to-llvm-ir.abnf.
+            var ev = goStoreTy(e.eval(), elemType)
+            if (ev === undefined || ev === null) { ev = goRetNil(elemType, ev) }
+            return gAdoptTy(elemType, ev)
         }
         return buildLit(descOfTypeText(elemType), e.enest)
     }
@@ -4994,8 +5001,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var w = want
         if (w == "byte") { w = "uint8" }
         if (w == "rune") { w = "int32" }
+        // A struct and a pointer to it are one value here, so *T tests as T; a type
+        // of another package is named as %T names it ("strconv.NumError").
+        if (w.charAt(0) == "*" && goIsInstance(v)) { w = w.substring(1) }
         var got = goTypeName(v)
         if (got == w) { return 1 }
+        if (w.indexOf(".") > 0 && goIsInstance(v) && gfTypeName(v) == w) { return 1 }
         if (goCompTy(w)) { return gfTypeName(v) == gfQualTy(w) ? 1 : 0 }
         if (got == "int" && (w == "int64" || w == "int32")) { return 2 }
         if (got == "uint" && (w == "uint64" || w == "uintptr")) { return 2 }
@@ -6070,7 +6081,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     core.blank = "_"
     // Go stdlib packages the runtime provides (resolveImport lives in lib/interp-core.js;
     // exact-match paths, so sub-packages like "encoding/json" are listed in full).
-    core.stdlibImports = ["fmt", "os", "strconv", "errors", "bufio", "io", "time", "bytes", "unicode", "regexp", "path", "encoding/json", "context", "flag", "log", "reflect"]
+    core.stdlibImports = ["fmt", "os", "errors", "bufio", "io", "time", "bytes", "unicode", "regexp", "path", "encoding/json", "context", "flag", "log", "reflect"]
     core.nullWord = "nil"
     // `p.In.X = 1` with a nil p.In walks resolveRef's path; in Go it is a recoverable
     // panic. The hook is additive in lib/interp-core.js - every language that leaves
