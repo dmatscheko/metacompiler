@@ -131,7 +131,7 @@ emitted growth path) and bring it to a small constant; measure with a native app
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-693 php: `"a{b}"` in a double-quoted string is read as interpolation · P2 · PHP · OPEN [V spec-only]
+### T-693 php: `"a{b}"` in a double-quoted string is read as interpolation · P2 · PHP · IN PROGRESS (PHP worker, round 16) [V spec-only]
 `echo "a{b}";` → Error: Undefined constant "b" in both php halves; PHP prints `a{b}` — `{` starts complex interpolation only when
 `$` follows it immediately (zend_language_scanner `"{$"`).
 
