@@ -4976,6 +4976,64 @@ fun sec101() {
 }
 
 
+// ===== SECTION 102: the sequence { } builder =====
+// Settled by the Kotlin specification and kotlin.sequences' documentation (no kotlinc
+// here): the block runs only when the sequence is iterated, once per iteration, and
+// each yield hands one element to the consumer before the block continues, so a for
+// loop and an iterator interleave with it. The intermediate operations are lazy, so
+// an infinite block is fine under map / filter / take; yieldAll yields a collection's
+// or another sequence's elements; an exhausted iterator throws NoSuchElementException.
+fun fib102() = sequence {
+    var a = 0
+    var b = 1
+    while (true) {
+        yield(a)
+        val t = a + b
+        a = b
+        b = t
+    }
+}
+fun logged102(log: MutableList<String>, n: Int) = sequence {
+    log.add("s")
+    for (i in 1..n) {
+        log.add("y$i")
+        yield(i * 10)
+    }
+    log.add("e")
+}
+fun sec102() {
+    val s = sequence { yield(1); yield(2) }
+    check("seq102a", "" + s.toList() == "[1, 2]" && "" + s.toList() == "[1, 2]" && s.count() == 2
+                    && "" + fib102().take(10).toList() == "[0, 1, 1, 2, 3, 5, 8, 13, 21, 34]" && fib102().first() == 0)
+    check("seq102b", "" + fib102().map { it * 2 }.filter { it % 3 != 0 }.take(4).toList() == "[2, 2, 4, 10]"
+                    && fib102().drop(5).first() == 5 && fib102().find { it > 50 } == 55
+                    && fib102().takeWhile { it < 30 }.joinToString() == "0, 1, 1, 2, 3, 5, 8, 13, 21"
+                    && "" + fib102().dropWhile { it < 10 }.mapNotNull { if (it % 2 == 0) it else null }.take(2).toList() == "[34, 144]")
+    val log = mutableListOf<String>()
+    for (v in logged102(log, 3)) { log.add("v$v") }
+    check("seq102c", "" + log == "[s, y1, v10, y2, v20, y3, v30, e]")
+    log.clear()
+    val lz = logged102(log, 2)
+    log.add("made")
+    val iter = lz.iterator()
+    log.add("got")
+    while (iter.hasNext()) { log.add("n" + iter.next()) }
+    check("seq102d", "" + log == "[made, got, s, y1, n10, y2, n20, e]"
+                    && s95err { iter.next() } == "NoSuchElementException: null")
+    val acc = StringBuilder()
+    for (x in fib102()) { if (x > 20) break; acc.append(x).append(' ') }
+    check("seq102e", acc.toString() == "0 1 1 2 3 5 8 13 "
+                    && "" + sequence { yieldAll(listOf(1, 2)); yield(3); yieldAll(sequence { yield(4) }) }.toList() == "[1, 2, 3, 4]"
+                    && sequence<Int> { }.firstOrNull() == null && s95err { sequence<Int> { }.first() } == "NoSuchElementException: Sequence is empty.")
+    val nested = sequence { for (x in sequence { yield(1); yield(2) }) { yield(x * 100) } }
+    val pairs = StringBuilder()
+    for ((i, v) in sequence { yield(Pair(1, "a")); yield(Pair(2, "b")) }) { pairs.append("$i$v ") }
+    check("seq102f", "" + nested.toList() == "[100, 200]" && pairs.toString() == "1a 2b "
+                    && s95err { sequence<Int> { yield(1); throw IllegalStateException("boom") }.toList() } == "IllegalStateException: boom"
+                    && s95err { fib102().take(-1) } == "IllegalArgumentException: Requested element count -1 is less than zero.")
+}
+
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5078,6 +5136,7 @@ fun main() {
     sec99() // SECTION-CALL 99
     sec100() // SECTION-CALL 100
     sec101() // SECTION-CALL 101
+    sec102() // SECTION-CALL 102
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

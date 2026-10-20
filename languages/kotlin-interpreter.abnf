@@ -68,7 +68,7 @@ builtin as the bare name.
 
 COROUTINES run SYNCHRONOUSLY. runBlocking, coroutineScope, supervisorScope and
 withContext are their bodies; async and launch run their block at the point it is
-written and answer a Job whose await/join are immediate; delay and yield are no-ops;
+written and answer a Job whose await/join are immediate; delay and yield() are no-ops;
 Dispatchers.IO and friends are names that carry no behaviour. So the RESULTS are right
 and the ORDERING is not: nothing suspends, so two coroutines never interleave and a
 program whose output depends on interleaving prints a different (but deterministic)
@@ -81,6 +81,12 @@ generateSequence is materialised up to a cap of 100000 elements (the cap prints 
 warning when it is reached) rather than being pulled lazily. take() on an
 infinite generator therefore still answers correctly; a generator with side effects
 runs them 100000 times, and one that needs more than 100000 elements is truncated.
+The one LAZY sequence is the sequence { } builder's: its block runs on a coroutine
+of its own and yield(v) suspends it, so a for loop or an iterator() interleaves with
+the block as in Kotlin, map / mapNotNull / filter / filterNot / take / drop /
+takeWhile / dropWhile / onEach answer another lazy sequence, and first / firstOrNull /
+find pull only what they need. Every other member materializes it, with the same
+100000-element cap. yield() with no argument is the coroutine no-op above.
 Reflection and the collections API beyond the calls above are also out of scope.
 
 REGULAR EXPRESSIONS are genuine, over the shared engine in languages/lib/regex.js.
@@ -3592,6 +3598,7 @@ NotMemberKw = :script(~~
     // string (which yields its characters, like Kotlin's CharSequence).
     function kIterable(v) {
         if (isRange(v)) { return rangeList(v) }
+        if (kIsLazySeq(v)) { return kSeqMaterialize(v) }
         if (kIsMap(v) || kIsSet(v)) { return kElems(v) }
         if (typeof v == "string") {
             var out = []
@@ -4048,6 +4055,160 @@ NotMemberKw = :script(~~
         }
         return arrKindSet(out, 2)
     }
+    // sequence { ... }: kotlin.sequences' SequenceBuilder. The block runs on a host
+    // coroutine of its own (coNew / coResume / coYield, manual 7.14) for each
+    // iteration, so yield(v) parks it at any depth of calls and the next pull
+    // continues it there: a `for` loop and an iterator() interleave with the block
+    // exactly as Kotlin's do, and an infinite block is fine as long as nothing
+    // materializes it. The intermediate operations of kLazyOps answer another lazy
+    // sequence over this one, and iterator(), first, firstOrNull and find pull only
+    // what they need; every other member runs on the materialized elements, which
+    // stop at kSeqCap as generateSequence's do. The interpreter's scope chain
+    // belongs to the side that runs: a pull installs the block's, a yield files it
+    // back. Twin of the
+    // sequence / yield / yieldAll functions of kotlin-to-llvm-ir.abnf over js_ktiter /
+    // js_ktmore / js_ktitem (abnf/jsrtkotlin.go, languages/lib/kotlin-rt.metajs).
+    hostGlobals["sequence"] = function(f) { return {__ktseq: true, f: f} }
+    function kIsLazySeq(v) { return v !== null && v !== undefined && typeof v == "object" && v.__ktseq === true }
+    function kIsCursor(v) { return v !== null && v !== undefined && typeof v == "object" && v.__ktcur === true }
+    // A cursor is one run of the sequence: `length` elements pulled, the last one in
+    // cur, pend when hasNext() pulled one next() has not handed out yet. A derived
+    // sequence's cursor pulls from a cursor over its source (src) and applies op.
+    function kCursor(seq) {
+        var src = anytype
+        src = seq.src === undefined ? null : kCursor(seq.src)
+        return {__ktcur: true, f: seq.f, co: null, sc: null, src: src, op: seq.op, fn: seq.fn, n: seq.n,
+                length: 0, cur: undefined, done: false, pend: false, skip: true}
+    }
+    var kLazyOps = ["map", "mapNotNull", "filter", "filterNot", "take", "drop", "takeWhile", "dropWhile", "onEach"]
+    // One element of a derived cursor into cur; false once it is done.
+    function kDerivedPull(c) {
+        var sc = c.src
+        if (c.op == "take") { return c.length < c.n && kCursorPull(sc) && kCursorSet(c, sc.cur) }
+        if (c.op == "drop" || c.op == "dropWhile") {
+            if (c.skip) {
+                c.skip = false
+                var k = 0
+                while (true) {
+                    if (!kCursorPull(sc)) { return false }
+                    var stop = c.op == "drop" ? k >= c.n : c.fn(sc.cur) !== true
+                    k++
+                    if (stop) { return kCursorSet(c, sc.cur) }
+                }
+            }
+            return kCursorPull(sc) && kCursorSet(c, sc.cur)
+        }
+        while (kCursorPull(sc)) {
+            var v = sc.cur
+            if (c.op == "map") { return kCursorSet(c, c.fn(v)) }
+            if (c.op == "onEach") { c.fn(v); return kCursorSet(c, v) }
+            if (c.op == "takeWhile") { return c.fn(v) === true && kCursorSet(c, v) }
+            if (c.op == "mapNotNull") {
+                var mv = anytype
+                mv = c.fn(v)
+                if (mv !== null && mv !== undefined) { return kCursorSet(c, mv) }
+            } else if ((c.fn(v) === true) == (c.op == "filter")) { return kCursorSet(c, v) }
+        }
+        return false
+    }
+    function kCursorSet(c, v) {
+        c.cur = v
+        c.length = c.length + 1
+        return true
+    }
+    var kSeqRunning = []
+    function kCursorPull(c) {
+        if (c.done) { return false }
+        if (c.src !== null) {
+            if (kDerivedPull(c)) { return true }
+            c.done = true
+            return false
+        }
+        if (c.co === null) {
+            var f = c.f
+            c.sc = scopes
+            c.co = coNew(function() { f(); return undefined })
+        }
+        var mine = scopes
+        scopes = c.sc
+        kSeqRunning.push(c)
+        var r = anytype
+        try { r = coResume(c.co, undefined) }
+        catch (e) {
+            kSeqRunning.pop()
+            scopes = mine
+            c.done = true
+            throw e
+        }
+        kSeqRunning.pop()
+        scopes = mine
+        if (r.done) { c.done = true; return false }
+        return kCursorSet(c, r.value)
+    }
+    // yield(v) inside the block; with no argument it is kotlinx.coroutines' yield(),
+    // which suspends nothing here (see :description).
+    hostGlobals["yield"] = function(v) {
+        if (arguments.length == 0) { return undefined }
+        if (kSeqRunning.length == 0) { fail("yield outside of a sequence builder") }
+        kSeqRunning[kSeqRunning.length - 1].sc = scopes
+        coYield(v)
+        return undefined
+    }
+    hostGlobals["yieldAll"] = function(xs) {
+        var src = kForSrc(xs)
+        for (var i = 0; i < src.length || kForMore(src); i++) { hostGlobals["yield"](kForAt(src, i)) }
+        return undefined
+    }
+    // What a `for` runs over: a cursor for a lazy sequence, the elements otherwise.
+    // The loop asks kForMore only once it has used up `length`, so a list pays it
+    // once, at its end.
+    function kForSrc(v) { return kIsLazySeq(v) ? kCursor(v) : kIterable(v) }
+    function kForMore(src) { return kIsCursor(src) && kCursorPull(src) }
+    function kForAt(src, i) { return kIsCursor(src) ? src.cur : src[i] }
+    function kSeqMaterialize(seq) {
+        var c = kCursor(seq)
+        var out = []
+        while (out.length < kSeqCap && kCursorPull(c)) { out.push(c.cur) }
+        if (!c.done) {
+            eprintln("warning: sequence { } is materialized here and stopped at " + kSeqCap + " elements")
+        }
+        return arrKindSet(out, 2)
+    }
+    // The members that stay lazy or pull only what they need; null for every other
+    // one. The messages are _Sequences.kt's.
+    function kLazySeqMethod(seq, name, args) {
+        if (name == "iterator" && args.length == 0) { return {v: kCursor(seq)} }
+        if (kLazyOps.indexOf(name) >= 0 && args.length == 1) {
+            if (name == "take" || name == "drop") {
+                var n = kNum(args[0])
+                if (n < 0) { kThrowExc("IllegalArgumentException", "Requested element count " + n + " is less than zero.") }
+                return {v: {__ktseq: true, src: seq, op: name, fn: null, n: n}}
+            }
+            return {v: {__ktseq: true, src: seq, op: name, fn: kCallable(args[0]), n: 0}}
+        }
+        if ((name == "first" || name == "firstOrNull" || name == "find") && args.length <= 1) {
+            var c = kCursor(seq)
+            while (kCursorPull(c)) {
+                if (args.length == 0 || kCallable(args[0])(c.cur) === true) { return {v: c.cur} }
+            }
+            if (name != "first") { return {v: null} }
+            kNoElem(args.length == 0 ? "Sequence is empty." : "Sequence contains no element matching the predicate.")
+        }
+        return null
+    }
+    // A cursor is the Iterator iterator() hands out.
+    function kCursorMethod(c, name) {
+        if (name == "hasNext") {
+            if (!c.pend) { c.pend = kCursorPull(c) }
+            return {v: c.pend}
+        }
+        if (name == "next") {
+            if (!c.pend && !kCursorPull(c)) { kThrowExc("NoSuchElementException", null) }
+            c.pend = false
+            return {v: c.cur}
+        }
+        return null
+    }
     // StringBuilder: append/toString/length/clear, on a {__sb} box whose methods are
     // answered by mcall.
     hostGlobals["StringBuilder"] = function(init) {
@@ -4331,7 +4492,6 @@ NotMemberKw = :script(~~
     hostGlobals["async"] = function() { return kJob(kCoroRun(arguments)) }
     hostGlobals["launch"] = hostGlobals["async"]
     hostGlobals["delay"] = function() { return undefined }
-    hostGlobals["yield"] = hostGlobals["delay"]
     hostGlobals["Job"] = function() { return kJob(undefined) }
     hostGlobals["CoroutineScope"] = function() { return {__coroscope: true} }
     hostGlobals["awaitAll"] = function() {
@@ -6983,6 +7143,15 @@ NotMemberKw = :script(~~
             kSetNamed(sp.named)
             return extFuns["$" + name].apply(undefined, concat2impl([target], args))
         }
+        if (kIsLazySeq(target)) {
+            var lsm = kLazySeqMethod(target, name, args)
+            if (lsm != null) { return lsm.v }
+            return mcall(kSeqMaterialize(target), name, args, spec)
+        }
+        if (kIsCursor(target)) {
+            var csm = kCursorMethod(target, name)
+            if (csm != null) { return csm.v }
+        }
         // A stdlib member filled by NAME (kotlin-decltypes.js): the named arguments go
         // to their parameter's slot. Any other builtin member - one whose receiver
         // is no class instance - takes them after the positional ones in source
@@ -8603,10 +8772,10 @@ NotMemberKw = :script(~~
     function makeForIn(bodyT, subjT, name) {
         return function() {
             var lbl = takeLabel()
-            var arr = kIterable(subjT())
+            var arr = kForSrc(subjT())
             var res = undefined
             scopes.push({})
-            for (var i = 0; i < arr.length; i++) {
+            for (var i = 0; i < arr.length || kForMore(arr); i++) {
                 // A FRESH SCOPE OBJECT per iteration, holding just the loop variable.
                 // A lambda captures scopes.slice(0), an array of REFERENCES, so one
                 // shared cell would make every closure read the last value: `for (i in
@@ -8616,7 +8785,7 @@ NotMemberKw = :script(~~
                 // iteration. The compiler half's twin is makeForRange/makeForList/
                 // makeForDestruct in kotlin-to-llvm-ir.abnf.
                 scopes.push({})
-                declVar(name, arr[i])
+                declVar(name, kForAt(arr, i))
                 var r = kLoopBody(bodyT)
                 scopes.pop()
                 if (r != undefined) {
@@ -10528,13 +10697,14 @@ NotMemberKw = :script(~~
         var bodyT = items[2]
         return function() {
             var lbl = takeLabel()
-            var arr = kIterable(collT())
+            var arr = kForSrc(collT())
             var res = undefined
             scopes.push({})
-            for (var i = 0; i < arr.length; i++) {
+            for (var i = 0; i < arr.length || kForMore(arr); i++) {
                 // Per-iteration bindings, exactly as in makeForIn above.
                 scopes.push({})
-                for (var d = 0; d < names.length; d++) { declVar(dNameOf(names[d]), dValueOf(arr[i], names[d], d)) }
+                var el = kForAt(arr, i)
+                for (var d = 0; d < names.length; d++) { declVar(dNameOf(names[d]), dValueOf(el, names[d], d)) }
                 var r = kLoopBody(bodyT)
                 scopes.pop()
                 if (r != undefined) {

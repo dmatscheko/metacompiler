@@ -1551,6 +1551,18 @@ func init() {
 			if v, handled := rt.ktScopeMethod(recv, mname, arr.elems); handled {
 				return rt.wrap(v)
 			}
+			// A lazy sequence { } (ktLazySeqMethod), and the iterator it hands out.
+			if so, isSeq := ktLazySeq(recv); isSeq {
+				if v, handled := rt.ktLazySeqMethod(so, mname, arr.elems); handled {
+					return rt.wrap(v)
+				}
+				recv = rt.ktSeqMaterialize(so)
+			}
+			if co, isCur := ktCursorOf(recv); isCur {
+				if v, handled := rt.ktCursorMethod(co, mname); handled {
+					return rt.wrap(v)
+				}
+			}
 			// A PROGRESSION. The members whose answer IS the range are answered
 			// from the bounds; everything else is a Collection/Iterable extension
 			// and runs on the materialized elements. `contains` is answered
@@ -2384,6 +2396,10 @@ func init() {
 		}
 		m["js_ktiter"] = func(a []uint64) uint64 {
 			v := u(a[0])
+			// A lazy sequence { } is run by a cursor the loop pulls (js_ktmore).
+			if so, isSeq := ktLazySeq(v); isSeq {
+				return w(ktCursorNew(so))
+			}
 			if o, isObj := v.(*jsObject); isObj {
 				// A PROGRESSION is a value, not a list: the loop runs over its
 				// elements.
@@ -2408,6 +2424,22 @@ func init() {
 				return w(&jsArray{elems: cs})
 			}
 			return a[0]
+		}
+
+		// js_ktmore(src, i): a `for` loop whose index reached src.length asks for one
+		// more element - a cursor pulls it (ktCursorPull), anything else has none.
+		m["js_ktmore"] = func(a []uint64) uint64 {
+			if c, isCur := ktCursorOf(u(a[0])); isCur {
+				return boolH(rt.ktCursorPull(c))
+			}
+			return boolH(false)
+		}
+		// js_ktitem(src, i): the loop's element - a cursor's last pull, else js_kindex.
+		m["js_ktitem"] = func(a []uint64) uint64 {
+			if c, isCur := ktCursorOf(u(a[0])); isCur {
+				return w(c.props["cur"])
+			}
+			return m["js_kindex"](a)
 		}
 
 		// js_ktget is js_kget plus the implicit receiver of with / run / apply /
@@ -8746,4 +8778,210 @@ var ktTypeNames = map[string]bool{
 	"Set": true, "MutableSet": true, "Map": true, "MutableMap": true, "Array": true,
 	"Collection": true, "Iterable": true, "Comparable": true, "IntRange": true,
 	"CharRange": true, "LongRange": true, "Regex": true, "StringBuilder": true,
+}
+
+// ----- sequence { ... }: kotlin.sequences' SequenceBuilder -----
+//
+// The emitter's `sequence` (kotlin-to-llvm-ir.abnf) answers {__ktseq, gf}: gf is a
+// generator FUNCTION (js_genfn) over the block, so every iteration runs the block
+// on a generator of its own and the emitter's `yield` (js_yield) parks it at any
+// depth of calls. A CURSOR is one run: {__ktcur, g, length, cur, done, pend} -
+// `length` elements pulled, the last in cur, pend when hasNext() pulled one next()
+// has not handed out. The intermediate operations of ktLazyOps answer a DERIVED
+// sequence {__ktseq, src, op, fn, n} whose cursor pulls from a cursor over src.
+// iterator(), first, firstOrNull and find pull only what they need; every other
+// member runs on the materialized elements, which stop at ktSeqCap. A `for` loop
+// reads a cursor through js_ktmore / js_ktitem. Twin of hostGlobals["sequence"]
+// in kotlin-interpreter.abnf and ktCursorPull in languages/lib/kotlin-rt.metajs.
+
+var ktLazyOps = map[string]bool{"map": true, "mapNotNull": true, "filter": true, "filterNot": true,
+	"take": true, "drop": true, "takeWhile": true, "dropWhile": true, "onEach": true}
+
+func ktLazySeq(v interface{}) (*jsObject, bool) {
+	o, isObj := v.(*jsObject)
+	if !isObj {
+		return nil, false
+	}
+	b, _ := o.props["__ktseq"].(bool)
+	return o, b
+}
+
+func ktCursorOf(v interface{}) (*jsObject, bool) {
+	o, isObj := v.(*jsObject)
+	if !isObj {
+		return nil, false
+	}
+	b, _ := o.props["__ktcur"].(bool)
+	return o, b
+}
+
+func ktCursorNew(seq *jsObject) *jsObject {
+	c := newJSObject()
+	c.set("__ktcur", true)
+	if src, isSeq := ktLazySeq(seq.props["src"]); isSeq {
+		c.set("src", ktCursorNew(src))
+		c.set("op", seq.props["op"])
+		c.set("fn", seq.props["fn"])
+		c.set("n", seq.props["n"])
+		c.set("skip", true)
+	} else {
+		c.set("gf", seq.props["gf"])
+	}
+	c.set("length", float64(0))
+	c.set("cur", jsUndef)
+	c.set("done", false)
+	c.set("pend", false)
+	return c
+}
+
+func ktCursorSet(c *jsObject, v interface{}) bool {
+	n, _ := c.props["length"].(float64)
+	c.set("cur", v)
+	c.set("length", n+1)
+	return true
+}
+
+func (rt *jsrt) ktCursorPull(c *jsObject) bool {
+	if d, _ := c.props["done"].(bool); d {
+		return false
+	}
+	var ok bool
+	if src, isCur := ktCursorOf(c.props["src"]); isCur {
+		ok = rt.ktDerivedPull(c, src)
+	} else {
+		g, started := c.props["g"].(*jsGenerator)
+		if !started {
+			g, _ = rt.call(c.props["gf"], jsUndef, nil).(*jsGenerator)
+			if g == nil {
+				rt.fail("sequence { } needs a generator")
+			}
+			c.set("g", g)
+		}
+		st := g.step(rt, jsUndef).(*jsObject)
+		if d, _ := st.props["done"].(bool); !d {
+			ok = ktCursorSet(c, st.props["value"])
+		}
+	}
+	if !ok {
+		c.set("done", true)
+	}
+	return ok
+}
+
+func (rt *jsrt) ktDerivedPull(c, src *jsObject) bool {
+	op, _ := c.props["op"].(string)
+	fn := c.props["fn"]
+	n, _ := c.props["n"].(float64)
+	switch op {
+	case "take":
+		have, _ := c.props["length"].(float64)
+		return have < n && rt.ktCursorPull(src) && ktCursorSet(c, src.props["cur"])
+	case "drop", "dropWhile":
+		if skip, _ := c.props["skip"].(bool); skip {
+			c.set("skip", false)
+			for k := float64(0); ; k++ {
+				if !rt.ktCursorPull(src) {
+					return false
+				}
+				if (op == "drop" && k >= n) || (op == "dropWhile" && rt.ktCall(fn, src.props["cur"]) != true) {
+					return ktCursorSet(c, src.props["cur"])
+				}
+			}
+		}
+		return rt.ktCursorPull(src) && ktCursorSet(c, src.props["cur"])
+	}
+	for rt.ktCursorPull(src) {
+		v := src.props["cur"]
+		switch op {
+		case "map":
+			return ktCursorSet(c, rt.ktCall(fn, v))
+		case "onEach":
+			rt.ktCall(fn, v)
+			return ktCursorSet(c, v)
+		case "takeWhile":
+			return rt.ktCall(fn, v) == true && ktCursorSet(c, v)
+		case "mapNotNull":
+			if mv := rt.ktCall(fn, v); !isUndefOrNull(mv) {
+				return ktCursorSet(c, mv)
+			}
+		default:
+			if (rt.ktCall(fn, v) == true) == (op == "filter") {
+				return ktCursorSet(c, v)
+			}
+		}
+	}
+	return false
+}
+
+func (rt *jsrt) ktSeqMaterialize(seq *jsObject) *jsArray {
+	c := ktCursorNew(seq)
+	out := &jsArray{kind: ktArrSeq}
+	for len(out.elems) < ktSeqCap && rt.ktCursorPull(c) {
+		out.elems = append(out.elems, c.props["cur"])
+	}
+	if d, _ := c.props["done"].(bool); !d {
+		fmt.Fprint(warnWriter, "warning: sequence { } is materialized here and stopped at "+
+			strconv.Itoa(ktSeqCap)+" elements\n")
+	}
+	return out
+}
+
+// ktLazySeqMethod answers the members that stay lazy or pull only what they need.
+// The messages are _Sequences.kt's.
+func (rt *jsrt) ktLazySeqMethod(seq *jsObject, name string, args []interface{}) (interface{}, bool) {
+	if name == "iterator" && len(args) == 0 {
+		return ktCursorNew(seq), true
+	}
+	if ktLazyOps[name] && len(args) == 1 {
+		d := newJSObject()
+		d.set("__ktseq", true)
+		d.set("src", seq)
+		d.set("op", name)
+		d.set("fn", jsNull)
+		d.set("n", float64(0))
+		if name == "take" || name == "drop" {
+			n := rt.toNumber(args[0])
+			if n < 0 {
+				rt.ktRaise("IllegalArgumentException", "Requested element count "+rt.ktpRender(args[0], 1)+" is less than zero.")
+			}
+			d.set("n", n)
+		} else {
+			d.set("fn", args[0])
+		}
+		return d, true
+	}
+	if (name == "first" || name == "firstOrNull" || name == "find") && len(args) <= 1 {
+		c := ktCursorNew(seq)
+		for rt.ktCursorPull(c) {
+			if len(args) == 0 || rt.ktCall(args[0], c.props["cur"]) == true {
+				return c.props["cur"], true
+			}
+		}
+		if name != "first" {
+			return jsNull, true
+		}
+		if len(args) == 0 {
+			rt.ktNoElem("Sequence is empty.")
+		}
+		rt.ktNoElem("Sequence contains no element matching the predicate.")
+	}
+	return nil, false
+}
+
+// ktCursorMethod is the Iterator iterator() hands out.
+func (rt *jsrt) ktCursorMethod(c *jsObject, name string) (interface{}, bool) {
+	switch name {
+	case "hasNext":
+		if p, _ := c.props["pend"].(bool); !p {
+			c.set("pend", rt.ktCursorPull(c))
+		}
+		return c.props["pend"], true
+	case "next":
+		if p, _ := c.props["pend"].(bool); !p && !rt.ktCursorPull(c) {
+			rt.ktRaiseV("NoSuchElementException", jsNull)
+		}
+		c.set("pend", false)
+		return c.props["cur"], true
+	}
+	return nil, false
 }

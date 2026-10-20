@@ -5553,9 +5553,168 @@ function js_ktiter(v) {
         if (ktIsRange(v)) { return ktRangeList(v) }
         if (rtIsDictObj(v)) { return ktElems(v) }
         if (ktIsSet(v)) { return ktSetElems(v) }
+        // A lazy sequence { } is run by a cursor the loop pulls (js_ktmore).
+        if (v["__ktseq"] === true) { return k4CursorNew(v) }
     }
     return v
 }
+// ----- sequence { ... }: kotlin.sequences' SequenceBuilder -----
+// The emitter's `sequence` answers {__ktseq, gf}, gf a generator FUNCTION over the
+// block; a cursor {__ktcur, ...} is one run of it, a derived sequence {__ktseq,
+// src, op, fn, n} one of the lazy intermediate operations. Twin of ktCursorPull and
+// ktLazySeqMethod in abnf/jsrtkotlin.go, where the shapes are described.
+function k4IsLazySeq(v) { return ktIsObj(v) && v["__ktseq"] === true }
+function k4IsCursor(v) { return ktIsObj(v) && v["__ktcur"] === true }
+function k4IsLazyOp(n) {
+    if (n == "map" || n == "mapNotNull" || n == "filter" || n == "filterNot" || n == "onEach") { return true }
+    return n == "take" || n == "drop" || n == "takeWhile" || n == "dropWhile"
+}
+function k4CursorNew(seq) {
+    var c = {}
+    c["__ktcur"] = true
+    if (seq["src"] !== undefined) {
+        c["src"] = k4CursorNew(seq["src"])
+        c["op"] = seq["op"]
+        c["fn"] = seq["fn"]
+        c["n"] = seq["n"]
+        c["skip"] = true
+    } else {
+        c["gf"] = seq["gf"]
+    }
+    c["length"] = 0
+    c["cur"] = undefined
+    c["done"] = false
+    c["pend"] = false
+    return c
+}
+function k4CursorSet(c, v) {
+    c["cur"] = v
+    c["length"] = c["length"] + 1
+    return true
+}
+function k4CursorPull(c) {
+    if (c["done"] === true) { return false }
+    var ok = false
+    if (c["src"] !== undefined) {
+        ok = k4DerivedPull(c, c["src"])
+    } else {
+        var g = c["g"]
+        if (g === undefined) {
+            var gf = c["gf"]
+            g = gf()
+            c["g"] = g
+        }
+        var st = g.next(undefined)
+        if (st["done"] !== true) { ok = k4CursorSet(c, st["value"]) }
+    }
+    if (!ok) { c["done"] = true }
+    return ok
+}
+function k4DerivedPull(c, src) {
+    var op = c["op"]
+    var fn = c["fn"]
+    if (op == "take") { return c["length"] < c["n"] && k4CursorPull(src) && k4CursorSet(c, src["cur"]) }
+    if (op == "drop" || op == "dropWhile") {
+        if (c["skip"] === true) {
+            c["skip"] = false
+            var k = 0
+            while (true) {
+                if (!k4CursorPull(src)) { return false }
+                var stop = false
+                if (op == "drop") { stop = k >= c["n"] } else { stop = fn(src["cur"]) !== true }
+                k = k + 1
+                if (stop) { return k4CursorSet(c, src["cur"]) }
+            }
+        }
+        return k4CursorPull(src) && k4CursorSet(c, src["cur"])
+    }
+    while (k4CursorPull(src)) {
+        var v = src["cur"]
+        if (op == "map") { return k4CursorSet(c, fn(v)) }
+        if (op == "onEach") {
+            fn(v)
+            return k4CursorSet(c, v)
+        }
+        if (op == "takeWhile") { return fn(v) === true && k4CursorSet(c, v) }
+        if (op == "mapNotNull") {
+            var mv = fn(v)
+            if (!rtIsNil(mv)) { return k4CursorSet(c, mv) }
+        } else {
+            if ((fn(v) === true) == (op == "filter")) { return k4CursorSet(c, v) }
+        }
+    }
+    return false
+}
+function k4SeqMaterialize(seq) {
+    var c = k4CursorNew(seq)
+    var out = []
+    while (out.length < k4SeqCap() && k4CursorPull(c)) { out.push(c["cur"]) }
+    if (c["done"] !== true) {
+        eprintln("warning: sequence { } is materialized here and stopped at " + k4SeqCap() + " elements")
+    }
+    return arrKindSet(out, 2)
+}
+// The members that stay lazy or pull only what they need; KT_MISS for every other.
+function k4LazySeqMethod(seq, name, args) {
+    if (name == "iterator" && args.length == 0) { return k4CursorNew(seq) }
+    if (k4IsLazyOp(name) && args.length == 1) {
+        var d = {}
+        d["__ktseq"] = true
+        d["src"] = seq
+        d["op"] = name
+        d["fn"] = null
+        d["n"] = 0
+        if (name == "take" || name == "drop") {
+            var n = ktNum(args[0])
+            if (n < 0) { ktRaise("IllegalArgumentException", "Requested element count " + ktRender(args[0]) + " is less than zero.") }
+            d["n"] = n
+        } else {
+            d["fn"] = args[0]
+        }
+        return d
+    }
+    if ((name == "first" || name == "firstOrNull" || name == "find") && args.length <= 1) {
+        var c = k4CursorNew(seq)
+        var pred = args.length == 0 ? null : args[0]
+        while (k4CursorPull(c)) {
+            if (pred === null) { return c["cur"] }
+            if (pred(c["cur"]) === true) { return c["cur"] }
+        }
+        if (name != "first") { return null }
+        if (pred === null) { ktNoElem("Sequence is empty.") }
+        ktNoElem("Sequence contains no element matching the predicate.")
+    }
+    return KT_MISS
+}
+// The Iterator iterator() hands out.
+function k4CursorMethod(c, name) {
+    if (name == "hasNext") {
+        if (c["pend"] !== true) { c["pend"] = k4CursorPull(c) }
+        return c["pend"]
+    }
+    if (name == "next") {
+        if (c["pend"] !== true) {
+            if (!k4CursorPull(c)) { ktNoElemNull() }
+        }
+        c["pend"] = false
+        return c["cur"]
+    }
+    return KT_MISS
+}
+// js_ktmore / js_ktitem (jsrtkotlin.go): a `for` loop's one-more pull and its element.
+function js_ktmore(a, i) {
+    if (k4IsCursor(a)) { return k4CursorPull(a) }
+    return false
+}
+function js_ktitem(a, i) {
+    if (typeof a == "string") { return js_kindex(a, i) }
+    var v = a[i]
+    if (v === undefined) {
+        if (k4IsCursor(a)) { return a["cur"] }
+    }
+    return v
+}
+
 // ===========================================================================
 // kotlin-rt.metajs - SECTION 4b: classes, `is`, callable references,
 //                    delegated properties and exceptions
@@ -8345,6 +8504,16 @@ function ktSmcall(recv, name, args) {
     // the same name still wins (ktScopeMethod declines then).
     var sv = ktScopeMethod(rv, name, as)
     if (!ktMiss(sv)) { return sv }
+    // A lazy sequence { } (k4LazySeqMethod), and the iterator it hands out.
+    if (k4IsLazySeq(rv)) {
+        var lsm = k4LazySeqMethod(rv, name, as)
+        if (!ktMiss(lsm)) { return lsm }
+        rv = k4SeqMaterialize(rv)
+    }
+    if (k4IsCursor(rv)) {
+        var csm = k4CursorMethod(rv, name)
+        if (!ktMiss(csm)) { return csm }
+    }
 
     // A PROGRESSION. The members whose answer IS the range are answered from
     // the bounds; everything else is a Collection/Iterable extension and runs on

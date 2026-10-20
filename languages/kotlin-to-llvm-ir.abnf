@@ -59,7 +59,7 @@ reflection, member-level extension functions, non-lazy property delegates.
 
 COROUTINES run SYNCHRONOUSLY. runBlocking, coroutineScope, supervisorScope and
 withContext are their bodies; async and launch run their block at the point it is
-written and answer a Job whose await/join are immediate; delay and yield are no-ops;
+written and answer a Job whose await/join are immediate; delay and yield() are no-ops;
 Dispatchers.IO and friends are names that carry no behaviour. So the RESULTS are right
 and the ORDERING is not: nothing suspends, so two coroutines never interleave and a
 program whose output depends on interleaving prints a different (but deterministic)
@@ -72,6 +72,12 @@ generateSequence is materialised up to a cap of 100000 elements (the cap prints 
 warning when it is reached) rather than being pulled lazily. take() on an
 infinite generator therefore still answers correctly; a generator with side effects
 runs them 100000 times, and one that needs more than 100000 elements is truncated.
+The one LAZY sequence is the sequence { } builder's: its block runs on a coroutine
+of its own and yield(v) suspends it, so a for loop or an iterator() interleaves with
+the block as in Kotlin, map / mapNotNull / filter / filterNot / take / drop /
+takeWhile / dropWhile / onEach answer another lazy sequence, and first / firstOrNull /
+find pull only what they need. Every other member materializes it, with the same
+100000-element cap. yield() with no argument is the coroutine no-op above.
 
 A SET is its own shape - it deduplicates, compares without regard to order and is
 never equal to a List - while an ARRAY still collapses onto a list. hashCode() is
@@ -4908,7 +4914,11 @@ KwContract  = "contract" KwEnd ;
         if (tys == null) { return }
         for (var i = 0; i < tys.length; i++) { args[i] = {at: ktAdoptThunk(args[i].at, tys[i])} }
     }
+    // Every name the program CALLS, so buildMain declares a builtin only for a program
+    // that uses it (as ktVarSeen does for the names it reads).
+    var ktCallSeen = {}
     function makeCallBody(name, args) {
+        ktCallSeen["$" + name] = true
         return function(b) {
             // Regex(pattern) / Regex(pattern, options). Kotlin has no regexp literal,
             // so this constructor call IS the literal syntax; the pattern is compiled
@@ -5649,6 +5659,14 @@ KwContract  = "contract" KwEnd ;
     function emitIterSrc(b, v) {
         return {b: b, v: callExt(b, "js_ktiter", [v])}
     }
+    // A loop's head: index iV below lenV enters the body; at the end, js_ktmore asks
+    // the source for one more element, which only a lazy sequence's cursor has (it
+    // pulls it, and js_ktitem reads it) - so a list pays the extern once, at its end.
+    function emitForMore(headB, iV, aV, lenV, bodyB, exitB) {
+        var moreB = curF.NewBlock("")
+        headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, moreB)
+        moreB.NewCondBr(truthy(moreB, callExt(moreB, "js_ktmore", [aV, iV])), bodyB, exitB)
+    }
     function makeForList(bodyT, listT, name) {
         return function(b) {
             var lbl = takeLabel()
@@ -5670,14 +5688,14 @@ KwContract  = "contract" KwEnd ;
             var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
             var aV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, aName)])
             var lenV = callExt(headB, "js_get", [aV, emitStr(headB, "length")])
-            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
+            emitForMore(headB, iV, aV, lenV, bodyB, exitB)
             var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
             var aV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, aName)])
             // A FRESH SCOPE per iteration - see the header above makeForRange.
             var loopSavedL = curScopeV
             curScopeV = callExt(bodyB, "js_scope_new", [loopSavedL])
             callExt(bodyB, "js_scope_decl", [curScopeV, emitStr(bodyB, name),
-                                             callExt(bodyB, "js_kindex", [aV2, iV2])])
+                                             callExt(bodyB, "js_ktitem", [aV2, iV2])])
             loopStack.push({cont: postB, brk: exitB, label: lbl})
             bodyT(bodyB).NewBr(postB)
             loopStack.pop()
@@ -5718,7 +5736,7 @@ KwContract  = "contract" KwEnd ;
             var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
             var aV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, aName)])
             var lenV = callExt(headB, "js_get", [aV, emitStr(headB, "length")])
-            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
+            emitForMore(headB, iV, aV, lenV, bodyB, exitB)
             // The component names are (re)declared per iteration in the loop's own scope
             // from the element's componentN() calls.
             var iVb = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
@@ -5728,7 +5746,7 @@ KwContract  = "contract" KwEnd ;
             // bindings, so `for ((k, v) in ...) { fs.add({ k + v }) }` captures each.
             var loopSavedD = curScopeV
             curScopeV = callExt(bodyB, "js_scope_new", [loopSavedD])
-            bodyB = emitComponents(bodyB, callExt(bodyB, "js_get", [aVb, iVb]), names, props)
+            bodyB = emitComponents(bodyB, callExt(bodyB, "js_ktitem", [aVb, iVb]), names, props)
             loopStack.push({cont: postB, brk: exitB, label: lbl})
             bodyT(bodyB).NewBr(postB)
             loopStack.pop()
@@ -7066,6 +7084,73 @@ KwContract  = "contract" KwEnd ;
         }
         return b
     }
+    // A runtime function emitted into the module: its own IR function over a fresh
+    // scope, a body built by bodyEmit(entryBlock, argsHandle) -> {b, v}, and a return.
+    // The declaration site wraps the index with js_closure.
+    function emitKtLib(bodyEmit) {
+        funcCount++
+        var idx = funcCount
+        var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var savedF = curF, savedScope = curScopeV, savedLoops = loopStack, savedTag = curFTag
+        curF = f
+        curFTag = idx
+        loopStack = []
+        var b = f.NewBlock("entry")
+        curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
+        var r = bodyEmit(b, f.Params[1])
+        r.b.NewRet(r.v)
+        curF = savedF
+        curScopeV = savedScope
+        loopStack = savedLoops
+        curFTag = savedTag
+        return idx
+    }
+    // ----- sequence { ... }: kotlin.sequences' SequenceBuilder -----
+    // `sequence` answers {__ktseq, gf}: gf is a generator FUNCTION (js_genfn) over the
+    // block, so each run of the sequence - a cursor, js_ktiter in abnf/jsrtkotlin.go -
+    // runs the block on a generator of its own, and `yield` (js_yield) parks it at any
+    // depth of calls until the next pull. With no argument `yield` is
+    // kotlinx.coroutines' yield(), which suspends nothing here. Twin of
+    // hostGlobals["sequence"] in kotlin-interpreter.abnf.
+    function libSeqBuild(b, argsH) {
+        var sc = callExt(b, "js_scope_new", [curScopeV])
+        callExt(b, "js_scope_decl", [sc, emitStr(b, "0blk"), callExt(b, "js_arg", [argsH, handle(0)])])
+        var gf = callExt(b, "js_genfn", [callExt(b, "js_closure", [handle(emitKtLib(libSeqBody)), sc])])
+        var seq = callExt(b, "js_obj_new", [])
+        callExt(b, "js_set", [seq, emitStr(b, "__ktseq"), hTrue])
+        callExt(b, "js_set", [seq, emitStr(b, "gf"), gf])
+        return {b: b, v: seq}
+    }
+    function libSeqBody(b, argsH) {
+        callExt(b, "js_call", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, "0blk")]), hUndef, callExt(b, "js_arr_new", [])])
+        return {b: b, v: hUndef}
+    }
+    function libSeqYield(b, argsH) {
+        var noneB = curF.NewBlock("")
+        var oneB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_seq", [callExt(b, "js_get", [argsH, emitStr(b, "length")]), emitNum(b, 0)])), noneB, oneB)
+        noneB.NewRet(hUndef)
+        callExt(oneB, "js_yield", [callExt(oneB, "js_arg", [argsH, handle(0)])])
+        return {b: oneB, v: hUndef}
+    }
+    // yieldAll(xs): yield each element, a lazy sequence's pulled one at a time.
+    function libSeqYieldAll(b, argsH) {
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$a"), callExt(b, "js_ktiter", [callExt(b, "js_arg", [argsH, handle(0)])])])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$i"), emitNum(b, 0)])
+        var headB = curF.NewBlock("")
+        var bodyB = curF.NewBlock("")
+        var exitB = curF.NewBlock("")
+        b.NewBr(headB)
+        var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, "$i")])
+        var aV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, "$a")])
+        emitForMore(headB, iV, aV, callExt(headB, "js_get", [aV, emitStr(headB, "length")]), bodyB, exitB)
+        var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "$i")])
+        var aV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "$a")])
+        callExt(bodyB, "js_yield", [callExt(bodyB, "js_ktitem", [aV2, iV2])])
+        callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, "$i"), callExt(bodyB, "js_jadd", [iV2, emitNum(bodyB, 1)])])
+        bodyB.NewBr(headB)
+        return {b: exitB, v: hUndef}
+    }
     // dropRecv: the factory is reached through an INSTANCE (a nested class of an
     // `object` declaration), so the runtime's memberCall has prepended the receiver and
     // the constructor arguments start one slot later - but there is no enclosing
@@ -7924,11 +8009,22 @@ KwContract  = "contract" KwEnd ;
                           // right and the ORDERING is not (see the :description note
                           // and ktGlobalFn in abnf/jsrtkotlin.go).
                           "runBlocking", "coroutineScope", "supervisorScope",
-                          "withContext", "async", "launch", "delay", "yield",
+                          "withContext", "async", "launch", "delay",
                           "Job", "CoroutineScope", "awaitAll", "Dispatchers"]
         for (var kb = 0; kb < ktBuilders.length; kb++) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, ktBuilders[kb]),
                                          callExt(b, "js_ktglobal", [emitStr(b, ktBuilders[kb]), hFalse])])
+        }
+        // sequence { } and its yield / yieldAll, emitted into the module (libSeqBuild),
+        // for a program that names them.
+        var ktSeqFns = [["sequence", libSeqBuild], ["yield", libSeqYield], ["yieldAll", libSeqYieldAll]]
+        for (var ksf = 0; ksf < ktSeqFns.length; ksf++) {
+            var sfn = ktSeqFns[ksf][0]
+            if ((ktVarSeen["$" + sfn] == true || ktCallSeen["$" + sfn] == true) && classNames[sfn] == undefined
+                && funNames["$" + sfn] != true) {
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, sfn),
+                                             callExt(b, "js_closure", [handle(emitKtLib(ktSeqFns[ksf][1])), curScopeV])])
+            }
         }
         // kotlin.math's abs/max/min, and exitProcess from exit. NOT JavaScript's Math:
         // that one answers a plain number, so `max(1.5, 2.0)` would print `2` instead of
