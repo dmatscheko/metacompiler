@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-654** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-655** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -89,14 +89,11 @@ keys). `class C{ n(){} }; "n" in C.prototype` → false (node true). `typeof K.h
 
 # JV — Java
 
-### T-650 java: static field through an instance; StringBuffer; CharSequence; ArrayList.clone; superclass order; Matcher.hitEnd · P1 · JV · IN PROGRESS (JV worker, round 10) [V]
-`s.j` (j static in Sub, s a Sub), `b.k` (b typed Base), `this.j` in an instance method → null / NaN in all engines (java reads the
-static: oracle `5 1 5 6 / 8 3 11`, ours `5 null null NaN / 8 1 11`). `StringBuffer` not modelled ("unknown class"); `new
-StringBuilder() instanceof CharSequence` false (java true; no CharSequence interface declared); `new ArrayList<>(List.of(4,7)).clone()`
-→ "unknown method 'clone' on ArrayList" (java `[4, 7]`; a LinkedList's clone is a LinkedList). `import java.io.*` does not load the
-Serializable marker. A superclass declared after its subclass → interp "unknown superclass", compiled "variable not defined: Base"
-(oracle `Sub42 / true / B10`; needs deferred class builds in the interpreter and dependency-ordered build thunks in the compiler,
-keeping static-initializer order). Matcher.hitEnd/requireEnd need a hit-the-end flag from the shared regex engine (J-gated).
+### T-654 java: user `super.clone()`; FQN `java.io.Serializable` without import; Matcher.hitEnd/requireEnd · P2 · JV · OPEN [V]
+`class P implements Cloneable { public P clone() { return (P) super.clone(); } }` → "unknown super method 'clone'" in all engines (java
+a shallow copy; needs Object.clone in jSuperObject / js_jvsuper / layer 2 and CloneNotSupportedException). `Object o = new
+StringBuffer(); o instanceof java.io.Serializable` with no import → false (java true). Matcher.hitEnd/requireEnd need a hit-the-end flag
+from the shared regex engine (J-gated, lib/regex.js / abnf/jsrtregex.go); transparent / non-anchoring bounds not modelled.
 
 ---
 
@@ -745,6 +742,7 @@ T-646 java: static method through a subclass name; RandomAccess / Serializable m
 T-606 php: library callbacks outside libCbArg; argument-error order; named arg into a by-ref variadic — DONE 8653dda9 (cbn2's expected text corrected to php-src's argument order)
 T-644 js: own-property details of prototypes and functions — DONE 1456360f (a function declaration's arguments/caller/prototype own names stay a recorded value-model limit)
 T-649 python: class-body names visible inside methods; compiled runtime exceptions' `__mro__`; regex lookbehind — DONE 7e3dc3f0 (\N{name} resolves only the 14-name table — a full Unicode name table DECLINED, as for java's \N)
+T-650 java: static field through an instance; StringBuffer; CharSequence; ArrayList.clone; superclass order; Matcher.hitEnd — DONE 898cfc4c b4e0e8a3 7fcc0dcb except Matcher.hitEnd/requireEnd (T-654)
 
 # Settled — do not re-open
 
