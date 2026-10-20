@@ -766,6 +766,20 @@ function swTyHasUserGen(ty) {
 }
 // A parameter that applies a program generic type to a generic parameter of its
 // own function (`func f<T>(_ b: Box<T>)`) adopts nothing: nothing binds that T.
+// The generic parameter a function's return type names, when a parameter binds
+// it (swDsMarkTypeParams), else "": the return value adopts the type that
+// parameter holds, so `func zero<T: Numeric>(_ t: T.Type) -> T { 0 }` answers 0.0
+// for zero(Double.self).
+function swDsGenRet(params, gens, rtxt) {
+    if (gens == null) { return "" }
+    var t = swDsUnopt(stripWs(rtxt))
+    if (t == "") { return "" }
+    for (var i = 0; i < params.length; i++) {
+        var p = params[i]
+        if (typeof p == "object" && (p.tmeta == t || p.tval == t || p.telem == t)) { return t }
+    }
+    return ""
+}
 function swGenUnbind(params, gens) {
     if (gens == null) { return }
     for (var i = 0; i < params.length; i++) {

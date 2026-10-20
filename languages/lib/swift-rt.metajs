@@ -2925,6 +2925,11 @@ function js_swadopt(v, ty) {
     var bits = swAdoptWidth(ty)
     if (bits == 0) {
         if ((ty == "Unicode.Scalar" || ty == "UnicodeScalar") && typeof v == "string") { return swMkScalar(v) }
+        // A Set's members adopt its element type (swAdoptTy in
+        // languages/swift-interpreter.abnf).
+        if (swIsObj(v) && v["__set"] === true && ty.substring(0, 4) == "Set<") {
+            return {__set: true, elems: swAdoptElems(v["elems"], ty.substring(4, ty.length - 1), undefined)}
+        }
         if (typeof v == "object" && ty.charAt(ty.length - 1) == ">") { return swAdoptGen(v, ty) }
         return v
     }
@@ -3464,6 +3469,61 @@ function swRangeMethod(r, name, args) {
     return undefined
 }
 
+// A two-element labeled tuple, as quotientAndRemainder and the
+// ...ReportingOverflow members answer it.
+function swLabeledPair(l0, v0, l1, v1) {
+    var t = {__tuple: 2}
+    var lbl = []
+    lbl.push(l0)
+    lbl.push(l1)
+    t["__tlabels"] = lbl
+    t["0"] = v0
+    t[l0] = v0
+    t["1"] = v1
+    t[l1] = v1
+    return t
+}
+
+// The ...ReportingOverflow members: (partialValue, overflow), the operation
+// wrapped to the receiver's width, the overflow read off the wrapped result.
+// Twin of swOverflowOp in languages/swift-interpreter.abnf, which says why each
+// test is the right one, and abnf/jsrtswift.go.
+function swOverflowOp(name, a, b, wd, uns) {
+    var neg1 = 0 - 1
+    var mn = sintConv(0, wd, uns)
+    if (!uns) { mn = swIntMin(wd) }
+    var minByNeg1 = !uns && sintCmp(b, neg1) == 0 && sintCmp(a, mn) == 0
+    if (name === "dividedReportingOverflow" || name === "remainderReportingOverflow") {
+        var div = name === "dividedReportingOverflow"
+        if (sintCmp(b, 0) == 0) { return swLabeledPair("partialValue", a, "overflow", true) }
+        if (minByNeg1) {
+            if (div) { return swLabeledPair("partialValue", a, "overflow", true) }
+            return swLabeledPair("partialValue", sintConv(0, wd, uns), "overflow", true)
+        }
+        var dc = 4
+        if (div) { dc = 3 }
+        return swLabeledPair("partialValue", sintConv(sintOp(dc, a, b), wd, uns), "overflow", false)
+    }
+    var c = 2
+    if (name === "addingReportingOverflow") { c = 0 }
+    if (name === "subtractingReportingOverflow") { c = 1 }
+    var r = sintConv(sintOp(c, a, b), wd, uns)
+    var ov = false
+    if (c == 2) {
+        if (!uns && sintCmp(a, neg1) == 0) { ov = sintCmp(b, mn) == 0 }
+        else { ov = sintCmp(a, 0) != 0 && sintCmp(sintOp(3, r, a), b) != 0 }
+    } else if (uns) {
+        if (c == 0) { ov = sintCmp(r, a) < 0 } else { ov = sintCmp(a, b) < 0 }
+    } else {
+        var an = sintCmp(a, 0) < 0
+        var bn = sintCmp(b, 0) < 0
+        var same = an == bn
+        if (c == 1) { same = !same }
+        ov = same && (sintCmp(r, 0) < 0) != an
+    }
+    return swLabeledPair("partialValue", r, "overflow", ov)
+}
+
 // The BinaryInteger members on an Int of any width; the answer keeps the
 // receiver's type, and map/flatMap are Optional's. Anything else is js_mcall's.
 // Twins: swIntMethod in languages/swift-interpreter.abnf and abnf/jsrtswift.go.
@@ -3484,19 +3544,15 @@ function swIntMethod(v, name, args) {
     }
     if (name === "quotientAndRemainder") {
         if (sintCmp(args[0], 0) == 0) { swAbort("Fatal error: Division by zero") }
-        var q = sintConv(sintOp(3, v, args[0]), wd, uns)
-        var r = sintConv(sintOp(4, v, args[0]), wd, uns)
-        var t = {__tuple: 2}
-        var lbl = []
-        lbl.push("quotient")
-        lbl.push("remainder")
-        t["__tlabels"] = lbl
-        t["0"] = q
-        t["quotient"] = q
-        t["1"] = r
-        t["remainder"] = r
-        return t
+        return swLabeledPair("quotient", sintConv(sintOp(3, v, args[0]), wd, uns), "remainder", sintConv(sintOp(4, v, args[0]), wd, uns))
     }
+    if (name === "addingReportingOverflow" || name === "subtractingReportingOverflow" || name === "multipliedReportingOverflow"
+        || name === "dividedReportingOverflow" || name === "remainderReportingOverflow") {
+        return swOverflowOp(name, v, args[0], wd, uns)
+    }
+    // A String.Index is its Character offset (swIntMethod in
+    // languages/swift-interpreter.abnf).
+    if (name === "utf16Offset" && typeof args[0] == "string") { return swcBounds(args[0])[swNum(v)] }
     if (name === "map" || name === "flatMap") { return args[0](v) }
     // `9.squareRoot()`: only a FloatingPoint value has these, so a plain integer
     // receiving one is a literal Swift typed as a Double. Twins: swIntMethod in

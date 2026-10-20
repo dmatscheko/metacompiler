@@ -2744,12 +2744,32 @@ KwContinue  = "continue" KwEnd ;
             var tyV = callExt(b, "js_swgensub", [selfV, emitStr(b, ty.substring(1))])
             return callExt(b, "js_swadoptdeep", [v, tyV, hUndef])
         }
+        // "@T": a return type naming the function's generic parameter T, which a
+        // parameter binds (swDsGenRet) - the builtin type T holds. Twin of rgen in
+        // makeFunBody, swift-interpreter.abnf.
+        if (ty.charAt(0) == "@") { return b.NewCall(rtGenAdopt(), [curScopeV, v, emitStr(b, ty.substring(1))]) }
         if (!swTyIsDeep(ty)) { return callExt(b, "js_swadopt", [v, emitStr(b, ty)]) }
         var ar = swTyArrow(ty)
         if (ar > 0 && ty.charAt(0) == "(") {
             return swEmitAdoptFn(b, v, swTyParamTys(ty, ar), swTyTrim(ty.substring(ar + 2, ty.length)), ty)
         }
         return callExt(b, "js_swadoptdeep", [v, emitStr(b, ty), swFnMapOf(b, ty)])
+    }
+    // sw_genadopt(scope, v, T): v adopted to the builtin type the generic parameter
+    // T holds; v itself when T is unbound (an empty array bound nothing) or holds a
+    // program type.
+    function rtGenAdopt() {
+        return rtFunc("sw_genadopt", 3, function(b, ps) {
+            var keepB = curF.NewBlock("")
+            var boundB = curF.NewBlock("")
+            var adoptB = curF.NewBlock("")
+            keepB.NewRet(ps[1])
+            var t = callExt(b, "js_scope_typeof", [ps[0], ps[2]])
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [t, emitStr(b, "undefined")])), keepB, boundB)
+            var tn = boundB.NewCall(rtProbe("sw_istname", "__tname"), [callExt(boundB, "js_scope_get", [ps[0], ps[2]])])
+            boundB.NewCondBr(truthy(boundB, callExt(boundB, "js_seq", [callExt(boundB, "js_typeof", [tn]), emitStr(boundB, "string")])), adoptB, keepB)
+            adoptB.NewRet(callExt(adoptB, "js_swadopt", [ps[1], tn]))
+        })
     }
     // The bounds, spelled as DIGITS: Int64.max and UInt64.max cannot travel through
     // emitNum, which would round them to 9223372036854776000 and
@@ -7032,7 +7052,7 @@ KwContinue  = "continue" KwEnd ;
         if (j < 0 || j + 1 >= txt.length || txt.charAt(j) != ">" || txt.charAt(j + 1) != "(") { return "" }
         if (swCloseAt(txt, j + 1) != txt.length - 1) { return "" }
         var g = txt.substring(lt + 1, j)
-        return nm == "Set" ? "Set<" + g + ">" : swGenAnn(nm, g)
+        return swGenAnn(nm, g)
     }
     // The index of the bracket closing the one at j0 (any of [ ( < against ] ) >),
     // or -1.
@@ -7099,6 +7119,7 @@ KwContinue  = "continue" KwEnd ;
     }
     function swGenAnn(name, g) {
         if (name == "Array") { return "[" + g + "]" }
+        if (name == "Set") { return "Set<" + g + ">" }
         if (name == "Optional") { return g }
         var kv = swTySplit(g, ",")
         if (name == "Dictionary" && kv.length == 2) { return "[" + kv[0] + ":" + kv[1] + "]" }
@@ -9289,6 +9310,8 @@ KwContinue  = "continue" KwEnd ;
         }
         swGenUnbind(items[1].params, gens)
         if (swTyHasUserGen(rty) && swTyNames(rty, gens)) { rty = "" }
+        var rgen = swDsGenRet(items[1].params, gens, rtxt)
+        if (rty == "" && rgen != "") { rty = "@" + rgen }
         return {name: items[0], params: items[1].params, body: items[k], rlabels: labels, rtype: rty, ret: ret, pos: up.start,
                 rtxt: rtxt, gens: gens}
     }

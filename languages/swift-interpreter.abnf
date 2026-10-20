@@ -3463,6 +3463,11 @@ KwContinue  = "continue" KwEnd ;
         var iw = swIntWidthOf(ty)
         if (iw == null) {
             if ((ty == "Unicode.Scalar" || ty == "UnicodeScalar") && typeof v == "string") { return swMkScalar(v) }
+            // `Set<Double>([1, 2])`: a Set's members adopt its element type. Twins:
+            // js_swadopt in lib/swift-rt.metajs and swAdopt in abnf/jsrtswift.go.
+            if (typeof v == "object" && v.__set === true && ty.substring(0, 4) == "Set<") {
+                return {__set: true, elems: swAdoptElems(v.elems, ty.substring(4, ty.length - 1))}
+            }
             if (typeof v == "object" && ty.charAt(ty.length - 1) == ">") { return swAdoptGen(v, ty) }
             return v
         }
@@ -4747,16 +4752,15 @@ KwContinue  = "continue" KwEnd ;
             return szCmp(binOp("%", target, args[0]), 0) == 0
         }
         if (name == "quotientAndRemainder") {
-            var t = {__tuple: 2}
-            var q = binOp("/", target, args[0])
-            var r = binOp("%", target, args[0])
-            scopePut(t, "__tlabels", ["quotient", "remainder"])
-            scopePut(t, "0", q)
-            scopePut(t, "quotient", q)
-            scopePut(t, "1", r)
-            scopePut(t, "remainder", r)
-            return t
+            return swLabeledPair("quotient", binOp("/", target, args[0]), "remainder", binOp("%", target, args[0]))
         }
+        if (name == "addingReportingOverflow" || name == "subtractingReportingOverflow" || name == "multipliedReportingOverflow"
+            || name == "dividedReportingOverflow" || name == "remainderReportingOverflow") {
+            return swOverflowOp(name, target, args[0], w, u)
+        }
+        // A String.Index is its Character offset, so `i.utf16Offset(in: s)` is where
+        // that Character starts among s's UTF-16 code units.
+        if (name == "utf16Offset" && typeof args[0] == "string") { return swcBounds(args[0])[szNum(target)] }
         if (name == "map" || name == "flatMap") { return args[0](target) }
         if (name == "description") { return szStr(target) }
         // `9.squareRoot()`: only a FloatingPoint value has these, so a plain integer
@@ -4764,6 +4768,50 @@ KwContinue  = "continue" KwEnd ;
         // lib/swift-rt.metajs and js_swmcall in abnf/jsrtswift.go.
         if (!szIs(target) && swFloOnlyMethod(name)) { return mcall(swFlo(target), name, args) }
         fail("unknown Int method: " + name)
+    }
+    // A two-element labeled tuple, as quotientAndRemainder and the
+    // ...ReportingOverflow members answer it.
+    function swLabeledPair(l0, v0, l1, v1) {
+        var t = {__tuple: 2}
+        scopePut(t, "__tlabels", [l0, l1])
+        scopePut(t, "0", v0)
+        scopePut(t, l0, v0)
+        scopePut(t, "1", v1)
+        scopePut(t, l1, v1)
+        return t
+    }
+    // The ...ReportingOverflow members: (partialValue, overflow), the partial value
+    // being the operation wrapped to the receiver's width. The overflow is read off
+    // the wrapped result: a signed sum overflowed when its operands share a sign
+    // the result lacks, an unsigned one when it came out below an operand, and a
+    // product when dividing it back does not give the other factor. A division by
+    // zero answers the receiver, and the signed minimum by -1 wraps to the minimum
+    // (remainder 0); both report overflow. Twins: swOverflowOp in abnf/jsrtswift.go
+    // and lib/swift-rt.metajs.
+    function swOverflowOp(name, a, b, w, u) {
+        var neg1 = 0 - 1
+        var mn = u ? 0 : swIntBounds(w, false).mn
+        var minByNeg1 = !u && szCmp(b, neg1) == 0 && szCmp(a, mn) == 0
+        if (name == "dividedReportingOverflow" || name == "remainderReportingOverflow") {
+            var div = name == "dividedReportingOverflow"
+            if (szCmp(b, 0) == 0) { return swLabeledPair("partialValue", a, "overflow", true) }
+            if (minByNeg1) { return swLabeledPair("partialValue", div ? a : szConv(0, w, u), "overflow", true) }
+            return swLabeledPair("partialValue", szArith(div ? "/" : "%", a, b), "overflow", false)
+        }
+        var op = name == "addingReportingOverflow" ? "+" : (name == "subtractingReportingOverflow" ? "-" : "*")
+        var r = szArith(op, a, b)
+        var ov = false
+        if (op == "*") {
+            if (!u && szCmp(a, neg1) == 0) { ov = szCmp(b, mn) == 0 }
+            else { ov = szCmp(a, 0) != 0 && szCmp(szArith("/", r, a), b) != 0 }
+        } else if (u) {
+            ov = op == "+" ? szCmp(r, a) < 0 : szCmp(a, b) < 0
+        } else {
+            var an = szCmp(a, 0) < 0
+            var bn = szCmp(b, 0) < 0
+            ov = (op == "+" ? an == bn : an != bn) && (szCmp(r, 0) < 0) != an
+        }
+        return swLabeledPair("partialValue", r, "overflow", ov)
     }
     function swFloOnlyMethod(n) {
         return n == "squareRoot" || n == "rounded" || n == "truncatingRemainder" || n == "remainder"
@@ -7048,7 +7096,7 @@ KwContinue  = "continue" KwEnd ;
         if (j < 0 || j + 1 >= txt.length || txt.charAt(j) != ">" || txt.charAt(j + 1) != "(") { return "" }
         if (swCloseAt(txt, j + 1) != txt.length - 1) { return "" }
         var g = txt.substring(lt + 1, j)
-        return nm == "Set" ? "Set<" + g + ">" : swGenAnn(nm, g)
+        return swGenAnn(nm, g)
     }
     // The index of the bracket closing the one at j0 (any of [ ( < against ] ) >),
     // or -1.
@@ -7116,6 +7164,7 @@ KwContinue  = "continue" KwEnd ;
     // The annotation a builtin generic type's arguments amount to, or "".
     function swGenAnn(name, g) {
         if (name == "Array") { return "[" + g + "]" }
+        if (name == "Set") { return "Set<" + g + ">" }
         if (name == "Optional") { return g }
         var kv = swTySplit(g, ",")
         if (name == "Dictionary" && kv.length == 2) { return "[" + kv[0] + ":" + kv[1] + "]" }
@@ -8802,6 +8851,10 @@ KwContinue  = "continue" KwEnd ;
     // declared NUMERIC return type adopts it: `func r() -> Double { return 3 }`
     // answers 3.0, so r() / 2 is 1.5. Split in two because MetaJS is typed and a
     // reassigned local keeps its first type.
+    // The name of a builtin type value (`Double.self`), "" for anything else.
+    function swTnameOf(tv) {
+        return tv !== null && typeof tv == "object" && typeof tv.__tname == "string" ? tv.__tname : ""
+    }
     function relabelRet(f, v, self) {
         if (f.rtype == undefined || f.rtype == null || f.rtype == "") { return relabelRetT(f, v) }
         return relabelRetT(f, swAdoptAnnS(v, f.rtype, self))
@@ -8843,7 +8896,7 @@ KwContinue  = "continue" KwEnd ;
         swGenUnbind(items[1].params, gens)
         if (swTyHasUserGen(rty) && swTyNames(rty, gens)) { rty = "" }
         return {name: items[0], params: items[1].params, body: items[k], rlabels: labels, rtype: rty, ret: ret,
-                rtxt: rtxt, gens: gens}
+                rtxt: rtxt, gens: gens, rgen: swDsGenRet(items[1].params, gens, rtxt)}
     }
     function makeInit(items) {
         return {name: "init", params: items[0].params, body: items[1]}
@@ -9131,8 +9184,15 @@ KwContinue  = "continue" KwEnd ;
         }
         var r = f.body()
         for (var k = 0; k < bnd.boxes.length; k++) { bnd.boxes[k].box.v = getVar(bnd.boxes[k].name) }
+        // A return type naming a bound generic parameter (swDsGenRet) adopts the
+        // builtin type it holds. Twin of the "@" arm of swEmitAdopt in
+        // swift-to-llvm-ir.abnf.
+        var rgT = (f.rgen == undefined || f.rgen == "" || !hasVar(f.rgen)) ? "" : swTnameOf(getVar(f.rgen))
         scopes = saved
-        return relabelRet(f, (r != undefined && r.isRet) ? r.v : undefined, self)
+        var rv = anytype
+        rv = (r != undefined && r.isRet) ? r.v : undefined
+        if (rgT != "") { rv = swAdoptTy(rv, rgT) }
+        return relabelRet(f, rv, self)
     }
     function makeFunClosure(f) {
         return function() {

@@ -5689,6 +5689,49 @@ func s149() {
     check("149b", "\(b.xs)" == "[4.0]" && "\(b.ys)" == "[3.0]")
 }
 
+// ===== SECTION 150: overflow-reporting arithmetic; a String.Index's UTF-16 offset =====
+// The ...ReportingOverflow members answer (partialValue:, overflow:): the result
+// wrapped to the receiver's width and whether it overflowed. A division by zero
+// answers the receiver and Int.min / -1 wraps to Int.min, both overflowing.
+// `i.utf16Offset(in: s)` counts the UTF-16 code units before the Character at i.
+// Every value read off swiftc 6.1.2.
+func s150() {
+    let xs = [Int.max, 5, -3, Int.min, -1, 0]
+    let i8: [Int8] = [127, -128, -1, 3]
+    let u8: [UInt8] = [250, 10, 3]
+    let a = xs[0].addingReportingOverflow(xs[1])
+    check("150a", "\(a)" == "(partialValue: -9223372036854775804, overflow: true)" && !xs[1].multipliedReportingOverflow(by: xs[2]).overflow)
+    check("150b", "\(xs[0].multipliedReportingOverflow(by: xs[1]))" == "(partialValue: 9223372036854775803, overflow: true)"
+        && "\(xs[3].subtractingReportingOverflow(xs[1]))" == "(partialValue: 9223372036854775803, overflow: true)")
+    check("150c", "\(xs[1].dividedReportingOverflow(by: xs[5]))" == "(partialValue: 5, overflow: true)"
+        && "\(xs[3].dividedReportingOverflow(by: xs[4]))" == "(partialValue: -9223372036854775808, overflow: true)"
+        && "\(xs[3].remainderReportingOverflow(dividingBy: xs[4]))" == "(partialValue: 0, overflow: true)"
+        && "\(xs[1].remainderReportingOverflow(dividingBy: xs[2]))" == "(partialValue: 2, overflow: false)")
+    check("150d", "\(i8[0].addingReportingOverflow(i8[3]))" == "(partialValue: -126, overflow: true)"
+        && "\(i8[1].multipliedReportingOverflow(by: i8[2]))" == "(partialValue: -128, overflow: true)"
+        && "\(i8[3].multipliedReportingOverflow(by: i8[0]))" == "(partialValue: 125, overflow: true)")
+    check("150e", "\(u8[0].addingReportingOverflow(u8[1]))" == "(partialValue: 4, overflow: true)"
+        && "\(u8[2].subtractingReportingOverflow(u8[1]))" == "(partialValue: 249, overflow: true)"
+        && u8[1].multipliedReportingOverflow(by: u8[2]).partialValue == 30)
+    let ss = ["hello wxrld", "a😀bxé\u{301}x"]
+    check("150f", ss[0].firstIndex(of: "x")!.utf16Offset(in: ss[0]) == 7 && ss[1].firstIndex(of: "x")!.utf16Offset(in: ss[1]) == 4
+        && ss[1].endIndex.utf16Offset(in: ss[1]) == 8)
+}
+
+// ===== SECTION 151: `Set<Double>(...)`; a return type naming a bound generic parameter =====
+// `Set<Double>([1, 2])` holds 1.0 and 2.0. A function returning its generic
+// parameter T answers a value of the type T holds, so
+// `func zero151<T: Numeric>(_ t: T.Type) -> T { 0 }` is 0.0 for Double.self. Every
+// value read off swiftc 6.1.2.
+func zero151<T: Numeric>(_ t: T.Type) -> T { 0 }
+func one151<T: Numeric>(_ t: T.Type) -> T? { return 1 }
+func s151() {
+    let s = Set<Double>([1, 2])
+    check("151a", "\(s.sorted())" == "[1.0, 2.0]" && "\(Set<Float>([3]))" == "[3.0]")
+    check("151b", "\(zero151(Double.self))" == "0.0" && "\(zero151(Int.self))" == "0" && "\(one151(Float.self)!)" == "1.0"
+        && zero151(Double.self) + one151(Double.self)! / 4 == 0.25)
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5839,6 +5882,8 @@ func main() {
     s147() // SECTION-CALL 147
     s148() // SECTION-CALL 148
     s149() // SECTION-CALL 149
+    s150() // SECTION-CALL 150
+    s151() // SECTION-CALL 151
     print("full: \(checks) checks, \(fails) failures")
 }
 

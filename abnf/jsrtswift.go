@@ -304,6 +304,16 @@ func init() {
 				if s, isStr := v.(string); isStr && (ty == "Unicode.Scalar" || ty == "UnicodeScalar") {
 					return swMkScalar(s)
 				}
+				// A Set's members adopt its element type (swAdoptTy in
+				// languages/swift-interpreter.abnf).
+				if els, isSet := swSetElems(v); isSet && strings.HasPrefix(ty, "Set<") {
+					ety := ty[4 : len(ty)-1]
+					out := make([]interface{}, len(els.elems))
+					for i, e := range els.elems {
+						out[i] = swAdoptAnn(e, ety)
+					}
+					return newSwSet(out)
+				}
 				if o, isObj := v.(*jsObject); isObj && strings.HasSuffix(ty, ">") {
 					return swAdoptGen(o, ty, swAdoptAnn)
 				}
@@ -4178,19 +4188,97 @@ func (rt *jsrt) swIntMethod(v interface{}, name string, args []interface{}) (int
 		if giVal(rt, args[0]) == 0 {
 			rt.swAbort("Fatal error: Division by zero")
 		}
-		q, r := rt.giArith("/", v, args[0]), rt.giArith("%", v, args[0])
-		t := newJSObject()
-		t.set("__tuple", float64(2))
-		t.set("__tlabels", &jsArray{elems: []interface{}{"quotient", "remainder"}})
-		t.set("0", q)
-		t.set("quotient", q)
-		t.set("1", r)
-		t.set("remainder", r)
-		return t, true
+		return swLabeledPair("quotient", rt.giArith("/", v, args[0]), "remainder", rt.giArith("%", v, args[0])), true
+	case "addingReportingOverflow", "subtractingReportingOverflow", "multipliedReportingOverflow",
+		"dividedReportingOverflow", "remainderReportingOverflow":
+		return rt.swOverflowOp(name, v, args[0], wd, uns), true
+	case "utf16Offset":
+		// A String.Index is its Character offset (swIntMethod in
+		// languages/swift-interpreter.abnf).
+		s, ok := args[0].(string)
+		if !ok {
+			return nil, false
+		}
+		n, off := giVal(rt, v), 0
+		for i, g := range swcGraphemes(s) {
+			if int64(i) >= n {
+				break
+			}
+			off += len(strUnits(g))
+		}
+		return float64(off), true
 	case "map", "flatMap":
 		return rt.call(args[0], jsUndef, []interface{}{v}), true
 	}
 	return nil, false
+}
+
+// swLabeledPair is a two-element labeled tuple, as quotientAndRemainder and the
+// ...ReportingOverflow members answer it.
+func swLabeledPair(l0 string, v0 interface{}, l1 string, v1 interface{}) *jsObject {
+	t := swTupleOf(v0, v1)
+	t.set("__tlabels", &jsArray{elems: []interface{}{l0, l1}})
+	t.set(l0, v0)
+	t.set(l1, v1)
+	return t
+}
+
+// swOverflowOp is the ...ReportingOverflow members: (partialValue, overflow),
+// the operation wrapped to the receiver's width, the overflow read off the
+// wrapped result. Twin of swOverflowOp in languages/swift-interpreter.abnf and
+// lib/swift-rt.metajs, which say why each test is the right one.
+func (rt *jsrt) swOverflowOp(name string, a, b interface{}, wd uint8, uns bool) *jsObject {
+	pair := func(p interface{}, ov bool) *jsObject { return swLabeledPair("partialValue", p, "overflow", ov) }
+	bits := wd
+	if bits > 64 {
+		bits = 64
+	}
+	var mn interface{} = 0.0
+	if !uns {
+		mn = giNorm(int64(-1)<<(bits-1), wd, false)
+	}
+	minByNeg1 := !uns && rt.giCmp(b, -1.0) == 0 && rt.giCmp(a, mn) == 0
+	switch name {
+	case "dividedReportingOverflow", "remainderReportingOverflow":
+		div := name == "dividedReportingOverflow"
+		if rt.giCmp(b, 0.0) == 0 {
+			return pair(a, true)
+		}
+		if minByNeg1 {
+			if div {
+				return pair(a, true)
+			}
+			return pair(giNorm(0, wd, uns), true)
+		}
+		op := "%"
+		if div {
+			op = "/"
+		}
+		return pair(rt.giArith(op, a, b), false)
+	}
+	op := "*"
+	switch name {
+	case "addingReportingOverflow":
+		op = "+"
+	case "subtractingReportingOverflow":
+		op = "-"
+	}
+	r := rt.giArith(op, a, b)
+	ov := false
+	switch {
+	case op == "*" && !uns && rt.giCmp(a, -1.0) == 0:
+		ov = rt.giCmp(b, mn) == 0
+	case op == "*":
+		ov = rt.giCmp(a, 0.0) != 0 && rt.giCmp(rt.giArith("/", r, a), b) != 0
+	case uns && op == "+":
+		ov = rt.giCmp(r, a) < 0
+	case uns:
+		ov = rt.giCmp(a, b) < 0
+	default:
+		an, bn := rt.giCmp(a, 0.0) < 0, rt.giCmp(b, 0.0) < 0
+		ov = (op == "+") == (an == bn) && (rt.giCmp(r, 0.0) < 0) != an
+	}
+	return pair(r, ov)
 }
 
 // swMkRange builds the {__range, lo, hi, closed} object both grammars emit.
