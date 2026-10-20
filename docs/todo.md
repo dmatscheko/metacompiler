@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-634** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-635** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -148,13 +148,9 @@ reports cap 4 where growslice says 1) — escape analysis.
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-631 swift: interp runs a metatype init twice; `is T` with a metatype-bound T; `Int?(5)`; generic enum type(of:); Set returns · P1 · SW · IN PROGRESS (SW worker, round 10) [V]
-`func build<M: Makes>(_ t: M.Type) -> M { t.init(n: 4) }` with a counter in `init(n:)` → interp 2, llvm.Run/native/swiftc 1 (the
-interpreter runs the initializer twice — P1). `func isa<T>(_ a: Any, _ t: T.Type) -> Bool { a is T }; isa(box, Box<Double>.self)` → false
-(swiftc true); `as? T` likewise, `cast(any, ...)!` traps. `Int?(5)` → interp "call of a non-function value", compiled "call of a non
-function value: [object Object]" (swiftc accepts). `print(type(of: Either<Int, String>.left(1)))` → `Either` (swiftc `Either<Int,
-String>`). `func mk() -> Set<Double> { return [1, 2] }` → `[1, 2]` (swiftc `[1.0, 2.0]`). `Set<Double>(minimumCapacity: 4)` aborts
-"Set(): not a sequence".
+### T-634 swift: an Optional Set return does not adopt its literal · P3 · SW · OPEN [V]
+`func mkOpt(_ b: Bool) -> Set<Double>? { b ? [4] : nil }; print(mkOpt(true)!.sorted())` → all legs `[4]` (swiftc `[4.0]`): the
+Set-return conversion skips Optional Set types (needs a nil branch in the emitter and the interpreter's adopt).
 
 ---
 
@@ -745,6 +741,7 @@ T-626 swift: generics through metatypes and nil Optionals; `Set<Double>([..])`; 
 T-623 go: pointers through interfaces; generic zero values and %T; argument evaluation order; forward goto; late static types — DONE fe55e098 (a pointer field's printed address DECLINED: run-dependent hex)
 T-624 go: missing standard packages; append capacity growth — PARTIAL fe55e098..HEAD (io, bufio, strings.Reader, time without a clock, path, filepath, flag, log, context, os.Args/Stdin, gc's growslice); regexp/json/reflect/stdin are T-632
 T-630 kotlin: sorted collections forget order on insert; copyOfRange; java.util imports; extension dispatch limits — DONE cd7fb3ad
+T-631 swift: interp runs a metatype init twice; `is T` with a metatype-bound T; `Int?(5)`; generic enum type(of:); Set returns — DONE d4683967 (is T / as? T with bound T, Int?(5), generic enum type(of:), Set returns, minimumCapacity); the interp double-init P1 did not reproduce in ~40 forms nor at the filing commit (4aa5b951) — closed as not reproducible, assertion 154a pins the case
 
 # Settled — do not re-open
 
