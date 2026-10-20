@@ -1894,9 +1894,66 @@ char *rt_case(char *s, int mode, char *pat) {
     return dst;
 }
 
-/* Does quoting v need the $'...' form: a control character, or a byte >= 0x80
- * that does not start a well-formed UTF-8 character (rt_cpw answers 1). Twin of
- * needsAnsi in bash-interpreter.abnf. */
+/* iswprint for a character from U+0080 up, in the macOS en_US.UTF-8 locale:
+ * bash switches ${v@Q}, printf %q and `declare -p` to the $'...' form for a
+ * character it rejects (U+0085, U+200B, an unassigned one) and writes that
+ * character's bytes in octal. wprint_runs holds the lengths of the alternating
+ * runs from U+0080 up - non-printable, printable, ... - each in base 26, leading
+ * digits a-z and the last digit A-Z; past the final run nothing is printable.
+ * Twin of wprint in languages/bash-interpreter.abnf, which holds the same string
+ * and says where it came from. */
+char *wprint_runs =
+    "bGNBbbMCGEHBBBUBpHBbMCbYCDBcDIbBEGRWBhKBbWCcHCdXOcHCbXCPBbCCBBLFbFJcWBgFBICCCWBH"
+    "BBDECJCCCEIBECBFCZCDBGECCWBHBCBCBCCBBFECCDDBHEBBHRKDBJBDBWBHBCBFCKBDBDCBPECMHHBD"
+    "BICCCWBHBCBFCJCCCDHDECBFCSKCBGDDBEDCBBBCDCDDDMEFDDBECBGBOVFNBDBXBQCJBDBEHCBDCBCE"
+    "CKHWBDBXBKBFCJBDBEHCGCBECKBDMNBDBbZBDBGEQCbABDBSDYBJBBCHDBEGBBBIGKCDMcGEbDbLCBBB"
+    "FBYBBBXCFBBBHBKCEbGcUBbKEbNBbKBPBNbLhQBBFBCoNBECHBBBECbPBECbHBECHBBBECPBcFBECcPC"
+    "bGDbAGdICGCzTDdLHWJYJUMNBDBCMdQCKGKGOBLGdLHbRFcSKbFBMEMEBDbQCFLbSEbAGLDcKCcNBbDC"
+    "LGKGOCbFbXcZDbVBeMIcIDPDcIHbRCLIbRFuOCGCbMCGCIBBBBBBBbFCcBBPBOCGBTCDBJBLFbAFbXQC"
+    "CbBBNDbHPbHPfKEzNZLVcrSCbGBnLFbTBBFBCcEHCOYJHBHBHBHBHBHBHBHBeWbIbABdLMiGbAMEcMBd"
+    "ICdZFbRBdQBdGMbVBbriRDcDJnKUhCIhVFCBBBFYcHDKGcEIcSIMGeMLbEDdABLEbHBcDJOCKCdZYbCK"
+    "GCGCGJHBHBcIEeWCKGqnSMXEbXdaYkaGCeCbMHMFFbABFBBBCBCBeVQrDCcCHBbGbQGbZBTBEEFBfFEh"
+    "IDGCGCGCDDHBHNCCMBbABTBCBPCObIeTFDEbTDdKBNDBbVbUfAbDDbXPbCEbKJbEFbRFbEBbLEObQgCC"
+    "KGbKEbKEbOIcALMBPBHBCBLBPBHBCcPlZJWKIYGBbQBJcRGCBBbSBCDBCXBcUIJbWTBCFbHDbBFBcMcE"
+    "EUCbYBCFIBDBbDCDEKHJHcMbGbNEMJcCDbDCbBFbAHEMHdCcVcDbZNbZHbUIKlIbFBbQBDCCcXbRIbQW"
+    "bAbMbCUXJdAEbKJcKBFNZHKGcBBSIbNJdSBULSBbVcKHBBBEBPBLGcHFKGEBICCCWBHBCBFBKCCCDCBG"
+    "BFHCHDFfJdOBFbEcUIKgKcCCbMbIcRLKGNTcGGKcCbBCPEXhDcIdWdFMICBCIBCBbEBCCMJKcSICbUCL"
+    "bBcUIdFNcVHKjMJBbTBOKbDDbGCWBOcVHBCBbSDBBCBJIKGGBCBbLBCBGHKlYZHRBbPDbCdIBPbYNbjN"
+    "dYeHBFLhOdxKdVNbpGQWfyGwLmuBvXHbFBKEdDBKGbECGKcSKKBHBVFTbaMdNdXcXEcFHRcMFLCOjcAI"
+    "bvQbQJnfREBHBCBlFPBbDDCBOEIpGdkUeDFNDJHKCEgyYbUCXJeMcIjMKbNCcWIeIVcSeSUMUMdJJZfF"
+    "dHBcTBCCBCCCEBMBBBHBcNBECIBHBbCBEBFBBDHBnCClGCbbAPFBPbqMbFGGiFHBRCHBCBFFcKbHBeIb"
+    "TDOCKECmIbFRcGFBrWbQbcOHBEBCBPBhPCQbPcYEKECbeFcQcYcJhMEBbBBCBBCBBKBEBBBBGBEBBBBB"
+    "BDBCBBCBBBBBBBBBBCBBCEBHBEBEBBBKBRFDBFBRcACkKbSEdWMPCPBPBbLKgScEbDNbSEJHCOGfYblW"
+    "ERDNDePEdRGMEBPMEcEIKGbOIbECCdAnCMOCNDJHbUBHIOEJHJHfRBcDbLKbnQclfCbGgdUGiOCinQOl"
+    "bLepJuWcfYhhZFgfGbonhGjGdsfOdsyOCdsyO";
+int wprint_cuts[1424];  /* one boundary per run in wprint_runs */
+int wprint_n = 0;
+int rt_wprint(int cp) {
+    int lo = 0;
+    int hi;
+    if (wprint_n == 0) {
+        int p = 128;
+        int n = 0;
+        int i = 0;
+        while (wprint_runs[i] != 0) {
+            int d = (int)(unsigned char)wprint_runs[i];
+            if (d >= 97) n = n * 26 + d - 97;
+            else { p = p + n * 26 + d - 65; wprint_cuts[wprint_n] = p; wprint_n = wprint_n + 1; n = 0; }
+            i = i + 1;
+        }
+    }
+    /* the number of run boundaries at or below cp: odd means printable */
+    hi = wprint_n;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (wprint_cuts[mid] <= cp) lo = mid + 1; else hi = mid;
+    }
+    return lo % 2;
+}
+
+/* Does quoting v need the $'...' form: a control character, a byte >= 0x80
+ * that does not start a well-formed UTF-8 character (rt_cpw answers 1), or a
+ * character rt_wprint rejects. Twin of needsAnsi in bash-interpreter.abnf. */
 int rt_needansi(char *v) {
     int i = 0;
     while (v[i] != 0) {
@@ -1906,7 +1963,7 @@ int rt_needansi(char *v) {
         w = 1;
         if (c >= 128) {
             w = rt_cpw(v + i);
-            if (w == 1) return 1;
+            if (w == 1 || rt_wprint(rt_cpat(v + i)) == 0) return 1;
         }
         i = i + w;
     }
@@ -3664,7 +3721,8 @@ char *rt_pfxnames(char *p, char *sep, int star) {
  * interpreter's declIsArr / declOnly ask the same two questions. */
 /* The $'...' form, with bash's escape table - the same one ansiQuote uses in
  * languages/bash-interpreter.abnf. A byte that does not start a well-formed
- * UTF-8 character is \NNN; a well-formed one is copied whole.
+ * UTF-8 character is \NNN, and so is each byte of a character rt_wprint
+ * rejects; any other well-formed one is copied whole.
  *
  * rt_ansiqs and rt_dqs build a string rather than print, so `declare -p` and
  * ${a[@]@A} share one renderer. */
@@ -3693,11 +3751,17 @@ char *rt_ansiqs(char *v) {
         if (e != 0) {
             d[o] = (char)92; o = o + 1;
             d[o] = (char)e; o = o + 1;
-        } else if (c < 32 || c == 127 || (c >= 128 && w == 1)) {
-            d[o] = (char)92; o = o + 1;
-            d[o] = (char)(48 + (c / 64)); o = o + 1;
-            d[o] = (char)(48 + ((c / 8) % 8)); o = o + 1;
-            d[o] = (char)(48 + (c % 8)); o = o + 1;
+        } else if (c < 32 || c == 127 || (c >= 128 && (w == 1 || rt_wprint(rt_cpat(v + i)) == 0))) {
+            /* the byte, or every byte of a character rt_wprint rejects, as \NNN */
+            int k = 0;
+            while (k < w) {
+                int b = (int)(unsigned char)v[i + k];
+                d[o] = (char)92; o = o + 1;
+                d[o] = (char)(48 + (b / 64)); o = o + 1;
+                d[o] = (char)(48 + ((b / 8) % 8)); o = o + 1;
+                d[o] = (char)(48 + (b % 8)); o = o + 1;
+                k = k + 1;
+            }
         } else {
             /* a byte, or a whole well-formed character, as itself */
             int k = 0;

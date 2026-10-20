@@ -1696,19 +1696,81 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return ansiQuote(v)
     }
-    // Does quoting v need the $'...' form: a control character, or a raw byte (one that
-    // bytesStr could not read as a character). v is already normBytes'd. Twin of
-    // rt_needansi in languages/lib/bash-rt.c.
+    // iswprint for a character from U+0080 up, in the macOS en_US.UTF-8 locale: bash
+    // switches ${v@Q}, printf %q and `declare -p` to the $'...' form for a character it
+    // rejects (U+0085, U+200B, an unassigned one) and writes that character's bytes in
+    // octal. wprintRuns holds the lengths of the alternating runs from U+0080 up -
+    // non-printable, printable, non-printable, ... - each in base 26, leading digits
+    // a-z and the last digit A-Z; past the final run nothing is printable. It was read
+    // off bash's own ${c@Q} over every code point. Twin of rt_wprint in
+    // languages/lib/bash-rt.c, which holds the same string.
+    var wprintRuns = "bGNBbbMCGEHBBBUBpHBbMCbYCDBcDIbBEGRWBhKBbWCcHCdXOcHCbXCPBbCCBBLFbFJcWBgFBICCCWBH"
+        + "BBDECJCCCEIBECBFCZCDBGECCWBHBCBCBCCBBFECCDDBHEBBHRKDBJBDBWBHBCBFCKBDBDCBPECMHHBD"
+        + "BICCCWBHBCBFCJCCCDHDECBFCSKCBGDDBEDCBBBCDCDDDMEFDDBECBGBOVFNBDBXBQCJBDBEHCBDCBCE"
+        + "CKHWBDBXBKBFCJBDBEHCGCBECKBDMNBDBbZBDBGEQCbABDBSDYBJBBCHDBEGBBBIGKCDMcGEbDbLCBBB"
+        + "FBYBBBXCFBBBHBKCEbGcUBbKEbNBbKBPBNbLhQBBFBCoNBECHBBBECbPBECbHBECHBBBECPBcFBECcPC"
+        + "bGDbAGdICGCzTDdLHWJYJUMNBDBCMdQCKGKGOBLGdLHbRFcSKbFBMEMEBDbQCFLbSEbAGLDcKCcNBbDC"
+        + "LGKGOCbFbXcZDbVBeMIcIDPDcIHbRCLIbRFuOCGCbMCGCIBBBBBBBbFCcBBPBOCGBTCDBJBLFbAFbXQC"
+        + "CbBBNDbHPbHPfKEzNZLVcrSCbGBnLFbTBBFBCcEHCOYJHBHBHBHBHBHBHBHBeWbIbABdLMiGbAMEcMBd"
+        + "ICdZFbRBdQBdGMbVBbriRDcDJnKUhCIhVFCBBBFYcHDKGcEIcSIMGeMLbEDdABLEbHBcDJOCKCdZYbCK"
+        + "GCGCGJHBHBcIEeWCKGqnSMXEbXdaYkaGCeCbMHMFFbABFBBBCBCBeVQrDCcCHBbGbQGbZBTBEEFBfFEh"
+        + "IDGCGCGCDDHBHNCCMBbABTBCBPCObIeTFDEbTDdKBNDBbVbUfAbDDbXPbCEbKJbEFbRFbEBbLEObQgCC"
+        + "KGbKEbKEbOIcALMBPBHBCBLBPBHBCcPlZJWKIYGBbQBJcRGCBBbSBCDBCXBcUIJbWTBCFbHDbBFBcMcE"
+        + "EUCbYBCFIBDBbDCDEKHJHcMbGbNEMJcCDbDCbBFbAHEMHdCcVcDbZNbZHbUIKlIbFBbQBDCCcXbRIbQW"
+        + "bAbMbCUXJdAEbKJcKBFNZHKGcBBSIbNJdSBULSBbVcKHBBBEBPBLGcHFKGEBICCCWBHBCBFBKCCCDCBG"
+        + "BFHCHDFfJdOBFbEcUIKgKcCCbMbIcRLKGNTcGGKcCbBCPEXhDcIdWdFMICBCIBCBbEBCCMJKcSICbUCL"
+        + "bBcUIdFNcVHKjMJBbTBOKbDDbGCWBOcVHBCBbSDBBCBJIKGGBCBbLBCBGHKlYZHRBbPDbCdIBPbYNbjN"
+        + "dYeHBFLhOdxKdVNbpGQWfyGwLmuBvXHbFBKEdDBKGbECGKcSKKBHBVFTbaMdNdXcXEcFHRcMFLCOjcAI"
+        + "bvQbQJnfREBHBCBlFPBbDDCBOEIpGdkUeDFNDJHKCEgyYbUCXJeMcIjMKbNCcWIeIVcSeSUMUMdJJZfF"
+        + "dHBcTBCCBCCCEBMBBBHBcNBECIBHBbCBEBFBBDHBnCClGCbbAPFBPbqMbFGGiFHBRCHBCBFFcKbHBeIb"
+        + "TDOCKECmIbFRcGFBrWbQbcOHBEBCBPBhPCQbPcYEKECbeFcQcYcJhMEBbBBCBBCBBKBEBBBBGBEBBBBB"
+        + "BDBCBBCBBBBBBBBBBCBBCEBHBEBEBBBKBRFDBFBRcACkKbSEdWMPCPBPBbLKgScEbDNbSEJHCOGfYblW"
+        + "ERDNDePEdRGMEBPMEcEIKGbOIbECCdAnCMOCNDJHbUBHIOEJHJHfRBcDbLKbnQclfCbGgdUGiOCinQOl"
+        + "bLepJuWcfYhhZFgfGbonhGjGdsfOdsyOCdsyO"
+    var wprintCuts = null
+    function wprint(cp) {
+        var i
+        if (wprintCuts == null) {
+            wprintCuts = []
+            var p = 128
+            var n = 0
+            for (i = 0; i < wprintRuns.length; i++) {
+                var d = wprintRuns.charCodeAt(i)
+                if (d >= 97) { n = n * 26 + d - 97 } else { p = p + n * 26 + d - 65; wprintCuts.push(p); n = 0 }
+            }
+        }
+        // the number of run boundaries at or below cp: odd means inside a printable run
+        var lo = 0
+        var hi = wprintCuts.length
+        while (lo < hi) {
+            var mid = (lo + hi - ((lo + hi) % 2)) / 2
+            if (wprintCuts[mid] <= cp) { lo = mid + 1 } else { hi = mid }
+        }
+        return lo % 2 == 1
+    }
+    // The code point of the character at s[i], a surrogate pair read whole.
+    function cpAtIdx(s, i) {
+        var cc = s.charCodeAt(i)
+        if (cc >= 55296 && cc <= 56319 && i + 1 < s.length) { return 65536 + (cc - 55296) * 1024 + (s.charCodeAt(i + 1) - 56320) }
+        return cc
+    }
+    // Does quoting v need the $'...' form: a control character, a raw byte (one that
+    // bytesStr could not read as a character), or a character wprint rejects. v is
+    // already normBytes'd. Twin of rt_needansi in languages/lib/bash-rt.c.
     function needsAnsi(v) {
         var i
         for (i = 0; i < v.length; i++) {
             var cc = v.charCodeAt(i)
             if (cc < 32 || cc == 127 || isRawCh(cc)) { return true }
+            if (cc >= 128 && !wprint(cpAtIdx(v, i))) { return true }
+            // the low half of a pair is not a character of its own (nor a raw byte)
+            if (cc >= 55296 && cc <= 56319) { i = i + 1 }
         }
         return false
     }
     // The $'...' form on its own: ${v@Q} reaches it through shellQuote, `declare -p`
     // through declQuote, and the escape table is bash's for both. A raw byte is \NNN.
+    // So is each byte of a character wprint rejects.
     function ansiQuote(v) {
         var o2 = "$'"
         var i
@@ -1727,6 +1789,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else if (k == 27) { o2 = o2 + "\\E" }
             else if (k < 32 || k == 127) { o2 = o2 + "\\" + octal3(k) }
             else if (isRawCh(k)) { o2 = o2 + "\\" + octal3(k - 56320) }
+            else if (k >= 128) {
+                var ch = chunkAt(v, i)
+                if (wprint(cpAtIdx(v, i))) { o2 = o2 + ch } else {
+                    var bs = strBytes(ch)
+                    var j
+                    for (j = 0; j < bs.length; j++) { o2 = o2 + "\\" + octal3(bs[j]) }
+                }
+                i = i + ch.length - 1
+            }
             else { o2 = o2 + c2 }
         }
         return o2 + "'"

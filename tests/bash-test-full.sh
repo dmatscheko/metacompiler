@@ -959,6 +959,14 @@ s25() {
   check pex25 "${qb@Q}" $'$\'\\003\\251\''
   check pex26 "${qc@Q}|${qd@Q}|${qe@Q}" $'$\'a\\377b\'|$\'\xc3\xa9\\200z\'|$\'\\355\\240\\200\''
   check pex27 "$(declare -p qc)|$(printf %q "$qc")" $'declare -- qc=$\'a\\377b\'|$\'a\\377b\''
+  # a well-formed character the locale's iswprint rejects (U+0085, U+200B, the
+  # unassigned U+0378, U+10FFFF) is written as its bytes in octal; a printable one
+  # outside the BMP stays as itself
+  local qf=$'\xc2\x85' qg=$'\xe2\x80\x8b' qh=$'\x01\xc2\x85' qi=$'a\xc3\xa9\xe2\x80\x8bb'
+  check pex28 "${qf@Q}|${qg@Q}|${qh@Q}" $'$\'\\302\\205\'|$\'\\342\\200\\213\'|$\'\\001\\302\\205\''
+  check pex29 "$(declare -p qi)|$(printf %q "$qi")" $'declare -- qi=$\'a\xc3\xa9\\342\\200\\213b\'|$\'a\xc3\xa9\\342\\200\\213b\''
+  local qj=$'\xf0\x9f\x98\x80 x' qk=$'\xf4\x8f\xbf\xbf' ql=$'\xcd\xb8'
+  check pex30 "${qj@Q}|$(printf %q "$qj")|${qk@Q}|${ql@Q}" $'\'\xf0\x9f\x98\x80 x\'|\xf0\x9f\x98\x80\\ x|$\'\\364\\217\\277\\277\'|$\'\\315\\270\''
   # an omitted offset means 0, an omitted length means "to the end", and a blank
   # between the last arithmetic token and the brace is allowed
   local y=abcdef
