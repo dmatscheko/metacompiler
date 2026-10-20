@@ -122,7 +122,7 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-647 kotlin: `javaClass` / `::class` names of non-collections and collections; sorted-copy class edges · P2 · KT · OPEN [V spec-only]
+### T-647 kotlin: `javaClass` / `::class` names of non-collections and collections; sorted-copy class edges · P2 · KT · IN PROGRESS (KT worker, round 10) [V spec-only]
 `class Foo; val f: Any = Foo(); println(f.javaClass.name)` → interp "property .name of null", llvm.Run "member 'name' of undefined"
 (JVM `Foo`); String and Array likewise (`java.lang.String`, `[Ljava.lang.Integer;`). `mutableListOf(1)::class.java.name` and
 `::class.qualifiedName` → `ArrayList` (JVM `java.util.ArrayList`), rendered "class ArrayList"; `setOf(1)::class.simpleName` → null
