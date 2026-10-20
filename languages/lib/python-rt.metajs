@@ -2137,6 +2137,7 @@ function pyGetAttrRaw(obj, name) {
                    "'" + pyToStr(cls["__name"]) + "' object has no attribute '" + name + "'")
     }
     if (pyDIsProp(obj)) { return pyDPropAttr(obj, name) }
+    if ((pyDIsStatic(obj) || pyDIsClsM(obj)) && pyDescAttrHas(name)) { return pyDescAttr(obj, name) }
     // A MODULE object. `builtins.len` resolves through the module's own slot,
     // which the emitter filled with the very binding the global name resolves to,
     // so `builtins.len is len` holds rather than answering a copy; a math, re or
@@ -6860,6 +6861,7 @@ function pyDHasAttr(obj, name) {
     // A MODULE object, mirroring pyGetAttr's module arm - hasattr(math, "sqrt")
     // has to agree with what `math.sqrt` answers.
     if (pyIsSlice(obj) && pySliceField(name) >= 0) { return true }
+    if ((pyDIsStatic(obj) || pyDIsClsM(obj)) && pyDescAttrHas(name)) { return true }
     if (pyIsObj(obj)) {
         if (obj["__pymod"] !== undefined) {
             if (obj[name] !== undefined || name == "__name__") { return true }
@@ -10970,6 +10972,17 @@ function pyDIsClsM(v) {
     return v["__pycm"] !== undefined
 }
 
+// Go: (*jsrt).pyDescAttr. An attribute of a staticmethod / classmethod object
+// itself: __func__ (and __wrapped__), and the wrapped function's
+// __isabstractmethod__.
+function pyDescAttrHas(name) { return name == "__func__" || name == "__wrapped__" || name == "__isabstractmethod__" }
+function pyDescAttr(o, name) {
+    var f = anytype
+    f = pyDIsStatic(o) ? o["__pysm"] : o["__pycm"]
+    if (name != "__isabstractmethod__") { return f }
+    return pyDHasAttr(f, name) && pyDTruthy(pyGetAttr(f, name))
+}
+
 // The member as the attribute read should hand it back. `owner` is the class a
 // classmethod binds to: the receiver's own class for an instance access, the
 // class itself for a class access.
@@ -11383,7 +11396,24 @@ function pyDIsInstance(v, target) {
     return false
 }
 
-function js_pyisinst(v, target) { return pyDIsInstance(v, target) }
+function js_pyisinst(v, target) { return pyCheckHooked(v, target, "__instancecheck__") }
+
+// Go: (*jsrt).pyCheckHooked. The isinstance / issubclass builtin: a class whose
+// metaclass defines the hook answers for itself, a tuple asks each class.
+function pyCheckHooked(v, target, hook) {
+    if (pyIsArr(target)) {
+        var i = 0
+        while (i < target.length) {
+            if (pyCheckHooked(v, target[i], hook)) { return true }
+            i = i + 1
+        }
+        return false
+    }
+    var m = pyMetaFind(target, hook)
+    if (m !== undefined) { return pyDTruthy(pyCall(m, [target, v])) }
+    if (hook == "__instancecheck__") { return pyDIsInstance(v, target) }
+    return pyDIsSubclass(v, target)
+}
 
 // pyBuiltinSub is the subclass relation over the BUILTIN type names, which is
 // the whole of Python's builtin hierarchy this subset models:
@@ -11400,7 +11430,7 @@ function pyBuiltinSub(child, base) {
 
 // issubclass(C, B). Go: rt.pyIsSubclass in abnf/jsrt.go;
 // interpreter: clsIsSub in languages/python-interpreter.abnf.
-function js_pyissubclass(c, target) { return pyDIsSubclass(c, target) }
+function js_pyissubclass(c, target) { return pyCheckHooked(c, target, "__subclasscheck__") }
 
 function pyDIsSubclass(c, target) {
     var i = 0

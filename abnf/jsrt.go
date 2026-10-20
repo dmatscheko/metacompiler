@@ -16345,11 +16345,11 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		},
 		// isinstance(v, C) / isinstance(v, (A, B)): a walk of the instance's MRO.
 		"js_pyisinst": func(a []uint64) uint64 {
-			return boolH(rt.pyIsInstance(u(a[0]), u(a[1])))
+			return boolH(rt.pyCheckHooked(u(a[0]), u(a[1]), "__instancecheck__"))
 		},
 		// issubclass(C, B).
 		"js_pyissubclass": func(a []uint64) uint64 {
-			return boolH(rt.pyIsSubclass(u(a[0]), u(a[1])))
+			return boolH(rt.pyCheckHooked(u(a[0]), u(a[1]), "__subclasscheck__"))
 		},
 		// A complex number: (real, imaginary) -> the {__cplx, real, imag} value the
 		// complex arithmetic in js_pybin / js_pyunary and the .real / .imag attribute
@@ -20772,6 +20772,11 @@ func (rt *jsrt) pyGetAttrRaw(obj interface{}, name string) interface{} {
 	if p, isProp := pyPropOf(obj); isProp {
 		return rt.pyPropAttr(p, name)
 	}
+	if pyDescKind(obj) != "" {
+		if v, ok := rt.pyDescAttr(obj.(*jsObject), name); ok {
+			return v
+		}
+	}
 	// A MODULE object. `builtins.len` resolves through the module's own slot,
 	// which the emitter filled with the very binding the global name resolves
 	// to, so `builtins.len is len` holds rather than answering a copy; a math, re
@@ -23224,6 +23229,11 @@ func (rt *jsrt) pyHasAttrRaw(obj interface{}, name string) bool {
 	if mod, isMod := pyIsModule(obj); isMod {
 		_, has := rt.pyModuleAttr(mod, name)
 		return has
+	}
+	if pyDescKind(obj) != "" {
+		if _, ok := rt.pyDescAttr(obj.(*jsObject), name); ok {
+			return true
+		}
 	}
 	// What pyGetAttr answers on a builtin TYPE OBJECT: dict.fromkeys, and the
 	// unbound methods (list.count).

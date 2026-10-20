@@ -1873,18 +1873,26 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return best
     }
-    hostGlobals["isinstance"] = function(v, cls) { return pyIsInstance(v, cls) }
+    // A class whose metaclass defines __instancecheck__ / __subclasscheck__
+    // answers for itself - abc.ABCMeta's register() rests on it - and a tuple
+    // asks each of its classes in turn. Twin of pyCheckHooked in
+    // abnf/jsrtpydesc.go and lib/python-rt.metajs.
+    function pyCheckHooked(v, target, hook) {
+        if (Array.isArray(target)) {
+            for (var i = 0; i < target.length; i++) { if (pyCheckHooked(v, target[i], hook)) { return true } }
+            return false
+        }
+        var m = pyMetaFind(target, hook)
+        if (m != null) { return pytruthy(m(target, v)) }
+        if (hook == "__instancecheck__") { return pyIsInstance(v, target) }
+        if (pyIsUnion(target)) { return pyCheckHooked(v, target.__pyunion, hook) }
+        return clsIsSub(v, target)
+    }
+    hostGlobals["isinstance"] = function(v, cls) { return pyCheckHooked(v, cls, "__instancecheck__") }
     // issubclass(C, B): B may be a TUPLE of classes, exactly as isinstance's
     // second argument may (issubclass(bool, (str, int)) is True). A tuple is a
     // list in this value model; see docs/working-on-this-project.md 7.9.
-    hostGlobals["issubclass"] = function(c1, c2) {
-        if (pyIsUnion(c2)) { return hostGlobals["issubclass"](c1, c2.__pyunion) }
-        if (Array.isArray(c2)) {
-            for (var i = 0; i < c2.length; i++) { if (clsIsSub(c1, c2[i])) { return true } }
-            return false
-        }
-        return clsIsSub(c1, c2)
-    }
+    hostGlobals["issubclass"] = function(c1, c2) { return pyCheckHooked(c1, c2, "__subclasscheck__") }
     hostGlobals["repr"] = function(v) { return prepr(v) }
     // sum(iterable, /, start=0) adds through binOp, so sum([1.0, 2]) is 3.0 -
     // except over floats. CPython 3.12+ keeps a run of floats (and ints) in a
@@ -2722,6 +2730,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return
         }
     }
+    // An attribute of a staticmethod / classmethod object itself: the wrapped
+    // function as __func__ (and __wrapped__), and its __isabstractmethod__,
+    // which abc's abstract-method scan reads through the wrapper. Twin of
+    // pyDescAttr in abnf/jsrtpydesc.go and lib/python-rt.metajs.
+    function pyDescAttrHas(name) { return name == "__func__" || name == "__wrapped__" || name == "__isabstractmethod__" }
+    function pyDescAttr(o, name) {
+        var f = anytype
+        f = pyIsStatic(o) ? o.__pysm : o.__pycm
+        if (name != "__isabstractmethod__") { return f }
+        return pyHasAttrOf(f, name) && pytruthy(pyattr(f, name))
+    }
     // An attribute of the property object itself.
     function pyPropAttr(p, name) {
         if (name == "fget" || name == "fset" || name == "fdel") { return p[name] }
@@ -2850,6 +2869,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // __class__, which EVERY value has (None.__class__ is NoneType).
         if (name == "__class__") { return true }
         if (isSlice(o) && pySliceField(name) >= 0) { return true }
+        if ((pyIsStatic(o) || pyIsClsM(o)) && pyDescAttrHas(name)) { return true }
         if (pyBuiltinAttr(o, name) || pyValDunder(o, name) != null) { return true }
         if (name == "__hash__" && pyValHashNone(o)) { return true }
         if (pyNumAttr(o, name) !== undefined) { return true }
@@ -12864,6 +12884,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "__class__") { return pyTypeOf(o) }
         if (isSet(o)) { pyAttrErr(o, name) }
         if (pyIsProp(o)) { return pyPropAttr(o, name) }
+        if ((pyIsStatic(o) || pyIsClsM(o)) && pyDescAttrHas(name)) { return pyDescAttr(o, name) }
         // A deleted attribute is absent: the class's member of that name, if
         // any, shows through again.
         if (typeof o == "object" && hasOwn(o, name) && o[name] !== pyDeleted) { return o[name] }
@@ -14346,7 +14367,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Python stdlib modules the runtime provides (resolveImport lives in
     // lib/interp-core.js; prefix match, so a submodule resolves against its
     // parent). The modules written in Python are pyLibMods.
-    core.stdlibImports = ["sys", "math", "collections.abc", "re", "typing", "time", "abc", "builtins"]
+    core.stdlibImports = ["sys", "math", "collections.abc", "re", "typing", "time", "builtins"]
     // Each top-level module of that list has a module object, bound as
     // _mec_mod_<name> like a library module's and only there, so a module name
     // is unbound until an import binds it: the host record for the modules that

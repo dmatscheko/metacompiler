@@ -79,6 +79,25 @@ func (rt *jsrt) pyDescGet(v interface{}, owner interface{}, name string) interfa
 	return rt.pyBindMethod(owner, o.props["__pycm"], name)
 }
 
+// pyDescAttr is an attribute of a staticmethod / classmethod object itself:
+// the wrapped function as __func__ (and __wrapped__), and its
+// __isabstractmethod__, which abc's abstract-method scan reads through the
+// wrapper. ok is false for any other name. Twin of pyDescAttr in
+// python-interpreter.abnf and lib/python-rt.metajs.
+func (rt *jsrt) pyDescAttr(o *jsObject, name string) (interface{}, bool) {
+	f, has := o.props["__pysm"]
+	if !has {
+		f = o.props["__pycm"]
+	}
+	switch name {
+	case "__func__", "__wrapped__":
+		return f, true
+	case "__isabstractmethod__":
+		return rt.pyHasAttr(f, name) && rt.truthy(rt.pyGetAttr(f, name)), true
+	}
+	return nil, false
+}
+
 // ---------------------------------------------------------------- property --
 
 // property(fget=None, fset=None, fdel=None, doc=None) is a data descriptor: a
@@ -402,6 +421,29 @@ func pyMetaFind(v interface{}, name string) interface{} {
 		}
 	}
 	return nil
+}
+
+// pyCheckHooked is the isinstance (hook "__instancecheck__") or issubclass
+// ("__subclasscheck__") builtin: a class whose metaclass defines the hook
+// answers for itself - abc.ABCMeta's register() rests on it - and a tuple asks
+// each of its classes in turn. Twin of pyCheckHooked in
+// python-interpreter.abnf and lib/python-rt.metajs.
+func (rt *jsrt) pyCheckHooked(v, target interface{}, hook string) bool {
+	if arr, ok := target.(*jsArray); ok {
+		for _, e := range arr.elems {
+			if rt.pyCheckHooked(v, e, hook) {
+				return true
+			}
+		}
+		return false
+	}
+	if m := pyMetaFind(target, hook); m != nil {
+		return rt.truthy(rt.call(m, jsUndef, []interface{}{target, v}))
+	}
+	if hook == "__instancecheck__" {
+		return rt.pyIsInstance(v, target)
+	}
+	return rt.pyIsSubclass(v, target)
 }
 
 // pyIsMetaclass says whether cls derives from type.

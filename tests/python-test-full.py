@@ -7009,6 +7009,57 @@ def s136():
           and S136tw.indent("a\n\nb", "> ") == "> a\n\n> b"
           and S136tw.fill("one two three", 7, initial_indent="* ") == "* one\ntwo\nthree")
 
+# ===== SECTION 137: abc, classmethod.__func__, __instancecheck__ =====
+from abc import ABC as S137ABC, ABCMeta as S137ABCMeta, abstractmethod as S137abstract
+
+class S137Shape(S137ABC):
+    @S137abstract
+    def area(self): ...
+
+    @S137abstract
+    def name(self): ...
+
+class S137Half(S137Shape):
+    def area(self):
+        return 1
+
+class S137Sq(S137Half):
+    def name(self):
+        return "sq"
+
+class S137Duck(type):
+    def __instancecheck__(cls, obj):
+        return hasattr(obj, "quack")
+
+class S137Quacker(metaclass=S137Duck):
+    pass
+
+def s137():
+    errs = []
+    for c in [S137Shape, S137Half]:
+        try:
+            c()
+        except TypeError as e:
+            errs.append(str(e))
+    check("abc1", errs == ["Can't instantiate abstract class S137Shape without an implementation for abstract methods 'area', 'name'",
+                           "Can't instantiate abstract class S137Half without an implementation for abstract method 'name'"]
+          and S137Sq().area() == 1 and S137Sq.__abstractmethods__ == frozenset() and type(S137Shape) is S137ABCMeta)
+    class Reg(S137ABC):
+        pass
+    Reg.register(int)
+    check("abc2", isinstance(3, Reg) and issubclass(bool, Reg) and not isinstance("s", Reg)
+          and isinstance(S137Sq(), (str, S137Shape)))
+    def f(cls):
+        return 1
+    f.__isabstractmethod__ = True
+    cm = classmethod(f)
+    check("descfunc", cm.__func__ is f and staticmethod(f).__func__ is f and cm.__isabstractmethod__
+          and getattr(staticmethod(len), "__isabstractmethod__", "no") is False)
+    class Q:
+        quack = 1
+    check("instcheck", isinstance(Q(), S137Quacker) and not isinstance(1, S137Quacker)
+          and isinstance(Q(), (int, S137Quacker)))
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -7143,5 +7194,6 @@ def main():
     s134() # SECTION-CALL 134
     s135() # SECTION-CALL 135
     s136() # SECTION-CALL 136
+    s137() # SECTION-CALL 137
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]
