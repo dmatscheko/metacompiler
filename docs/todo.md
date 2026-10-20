@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-633** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-634** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -124,14 +124,12 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-630 kotlin: sorted collections forget order on insert; copyOfRange; java.util imports; extension dispatch limits · P1 · KT · IN PROGRESS (KT worker, round 5) [V spec-only]
-`val m = sortedMapOf(2 to "b", 1 to "a"); m[0] = "z"; println(m)` → `{1=a, 2=b, 0=z}` in all engines (TreeMap `{0=z, 1=a, 2=b}`); a
-sortedSetOf + add likewise. `arrayOf(3,1,2).copyOfRange(1, 3)` → interp "unknown list method: copyOfRange" (check the others).
-`import java.util.ArrayList` / `HashMap` / other java.util collections → "unresolved import" (add them to ktJavaClassImports in
-lib/kotlin-decltypes.js). Extension dispatch: names in builtinMethodNames (map, filter, get, size, ...) never resolve to an extension
-(`fun Pt.map(...)`; `Pt(4).map{}` → interp "unknown method 'map' on Pt"); member extensions, extension properties, `::ext`
-references and infix extensions still go by name; receivers Long/Double/Float/Short/Byte, interfaces, objects, enums are not tested.
-Stale comment "Two of the nineteen" in kExcFqcn / ktExcFqcn.
+### T-633 kotlin: `+=` on a `val` mutable collection reassigns instead of plusAssign · P1 · KT · OPEN [V spec-only]
+`val l = mutableListOf(1); val t = l; l += 2; println(t)` → `[1]` in all engines (Kotlin `[1, 2]`: for a `val` of a mutable
+collection `+=` is plusAssign, in place; for a `var` of a read-only type it is plus). Same for sets and maps; `ts += 3` on a
+sortedSetOf appends unsorted. kSetName / applyOp treat `x += y` as `x = x + y` and neither grammar records val vs var for locals.
+P3: extension resolution is by runtime type where Kotlin's is static (`val x: Any = 5L; x.kind()` picks Long.kind()); TreeMap() /
+TreeSet() constructors and LinkedList / ArrayDeque / PriorityQueue / Scanner are not provided.
 
 ---
 
@@ -746,6 +744,7 @@ T-627 kotlin: sortedMapOf unsorted; Array.copyOf(); extensions not dispatched by
 T-626 swift: generics through metatypes and nil Optionals; `Set<Double>([..])`; overflow-reporting arithmetic; utf16Offset — DONE 26488dd9 9d7706d6
 T-623 go: pointers through interfaces; generic zero values and %T; argument evaluation order; forward goto; late static types — DONE fe55e098 (a pointer field's printed address DECLINED: run-dependent hex)
 T-624 go: missing standard packages; append capacity growth — PARTIAL fe55e098..HEAD (io, bufio, strings.Reader, time without a clock, path, filepath, flag, log, context, os.Args/Stdin, gc's growslice); regexp/json/reflect/stdin are T-632
+T-630 kotlin: sorted collections forget order on insert; copyOfRange; java.util imports; extension dispatch limits — DONE cd7fb3ad
 
 # Settled — do not re-open
 
