@@ -95,6 +95,8 @@ function s04() {
     check("itp4", "$map[key]" === "V");
     check("itp5", "{$map['key']}{$arr[1]}" === "V20");
     check("itp6", "$o->val" === "7" && "{$o->twice()}" === "14");
+    // '{' starts an interpolation only when '$' follows it immediately.
+    check("itp7", "a{b}|{ $n}|{}|{{$n}}|\{$n}" === 'a{b}|{ 6}|{}|{6}|\{6}');
 }
 class S04Obj { public $val = 7; public function twice() { return $this->val * 2; } }
 
@@ -118,6 +120,10 @@ function s05() {
     check("hd2", $w === 'raw $x\n');
     check("hd3", $i === "a\n b");
     check("hd4", $e === "");
+    $b = <<<EOT
+    {x}{ $x}{{$x}}
+    EOT;
+    check("hd5", $b === '{x}{ 8}{8}');
 }
 
 // ===== SECTION 06: array literals and spread =====
@@ -2608,11 +2614,11 @@ class S59It extends ArrayIterator {
 }
 function s59() {
     $f = s59f();
-    check("mag1", $f[0] === "s59f" && $f[1] === "{closure:s59f():2570}|{closure:s59f():2570}"
-        && $f[2] === "{closure:s59f():2571}" && $f[3] === "{closure:{closure:s59f():2572}:2572}"
+    check("mag1", $f[0] === "s59f" && $f[1] === "{closure:s59f():2576}|{closure:s59f():2576}"
+        && $f[2] === "{closure:s59f():2577}" && $f[3] === "{closure:{closure:s59f():2578}:2578}"
         && $f[4] === "s59f");
     $m = (new S59C)->m();
-    check("mag2", $m[0] === "{closure:S59C::m():2577}|{closure:S59C::m():2577}|S59C"
+    check("mag2", $m[0] === "{closure:S59C::m():2583}|{closure:S59C::m():2583}|S59C"
         && $m[1] === "m" && $m[2] === "S59C::m" && (new S59H)->p === "\$p::get|S59H::\$p::get");
     check("spl1", class_exists('ArrayIterator') && class_exists('arrayobject') && class_exists("SplStack")
         && class_exists('SplObjectStorage') && interface_exists('SeekableIterator')

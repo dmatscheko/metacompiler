@@ -1344,7 +1344,9 @@ BinAhead    = :script(~~
 DqStr       <~~ push(makeTemplate(takeAll())) ~~>
             = '"' :whitespace() { TplBraceExpr | TplVar | TplChunk | TplSpecial } '"' :whitespace(Whitespace) ;
 TplBraceExpr <~~ push({e: pop()}) ~~>
-            = "{" :whitespace(Whitespace) Expression "}" ;
+            = CurlyOpen "{" :whitespace(Whitespace) Expression "}" ;
+// Twin of CurlyOpen in php-interpreter.abnf; see there.
+CurlyOpen   = :script(~~ c.peek(1) === 36 ? undefined : abnf.newToken("\x01nocurly", 0) ~~) ;
 // The simple interpolation form: '$name', optionally followed by ONE '[key]' or
 // '->prop' step (PHP's "simple" syntax - anything richer needs the '{$...}' form).
 // The index key is an integer, a BARE word (taken as a string: "$map[key]") or

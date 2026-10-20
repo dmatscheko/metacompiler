@@ -1254,7 +1254,10 @@ BinAhead    = :script(~~
 DqStr       <~~ push(makeTemplate(takeAll())) ~~>
             = '"' :whitespace() { TplBraceExpr | TplVar | TplChunk | TplSpecial } '"' :whitespace(Whitespace) ;
 TplBraceExpr <~~ push({e: pop()}) ~~>
-            = "{" :whitespace(Whitespace) Expression "}" ;
+            = CurlyOpen "{" :whitespace(Whitespace) Expression "}" ;
+// '{' opens a complex interpolation only when '$' follows it immediately (the scanner's
+// "{$" rule); in "a{b}" and "{ $b}" the brace is a literal character.
+CurlyOpen   = :script(~~ c.peek(1) === 36 ? undefined : abnf.newToken("\x01nocurly", 0) ~~) ;
 // The simple interpolation form: '$name', optionally followed by ONE '[key]' or
 // '->prop' step (PHP's "simple" syntax - anything richer needs the '{$...}' form).
 // The index key is an integer, a BARE word (taken as a string: "$map[key]") or
