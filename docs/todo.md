@@ -118,7 +118,7 @@ not change the renderer.
 
 # GO — Go  (oracle: `go run`)
 
-### T-685 go: append growth pads a function-local struct type with 0 in the compiler · P3 · GO · OPEN [V]
+### T-685 go: append growth pads a function-local struct type with 0 in the compiler · P3 · GO · IN PROGRESS (GO worker, round 13) [V]
 `func f() { type L struct{ a int }; s := append([]L{}, L{1}); s = append(s, L{2}, L{3}); s = s[:cap(s)]; fmt.Println(s) }` →
 the compiler's spare slots hold 0 (the local type's descriptor is not reachable from the module-level `$ezero` table), the
 interpreter and go hold `{0}`. Same for a top-level type shadowed by a local of that name. Halves diverge.
