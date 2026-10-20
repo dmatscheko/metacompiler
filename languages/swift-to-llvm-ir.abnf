@@ -9435,8 +9435,9 @@ KwContinue  = "continue" KwEnd ;
         if (rty == "") {
             var rx = swAliasExpand(rtxt)
             if (swTyHasUserGen(rx) || (rx != rtxt && swAdoptNeeded(rx))) { rty = rx }
-            // "%[E]": a `-> Set<E>` result is made a Set of elements adopted to E.
-            else if (swIsSetTy(rx) && rx.charAt(rx.length - 1) != "?") { rty = "%" + swSetArrAnn(rx) }
+            // "%[E]": a `-> Set<E>` result is made a Set of elements adopted to E;
+            // "%?[E]" for `-> Set<E>?`, whose nil stays nil.
+            else if (swIsSetTy(rx)) { rty = "%" + (swTyIsOpt(rx) ? "?" : "") + swSetArrAnn(rx) }
         }
         swGenUnbind(items[1].params, gens)
         if (swTyHasUserGen(rty) && swTyNames(rty, gens)) { rty = "" }
@@ -9481,7 +9482,13 @@ KwContinue  = "continue" KwEnd ;
         var ty = retTypeStack[retTypeStack.length - 1]
         // "%[E]": a `-> Set<E>` result (makeFun). Twin in relabelRet,
         // swift-interpreter.abnf.
-        if (ty.charAt(0) == "%") { return emitSetOf(b, swEmitAdopt(b, v, ty.substring(1))) }
+        if (ty.charAt(0) == "%") {
+            if (ty.charAt(1) != "?") { return emitSetOf(b, swEmitAdopt(b, v, ty.substring(1))) }
+            // A nil result converts an empty array instead, and is answered as is.
+            var isNil = truthy(b, callExt(b, "js_seq", [v, hNull]))
+            var src = b.NewSelect(isNil, callExt(b, "js_arr_new", []), v)
+            return b.NewSelect(isNil, v, emitSetOf(b, swEmitAdopt(b, src, ty.substring(2))))
+        }
         return swEmitAdopt(b, v, ty)
     }
     function retTupleLabelled(b, v) {

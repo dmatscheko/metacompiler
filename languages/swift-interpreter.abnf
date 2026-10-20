@@ -8961,7 +8961,10 @@ KwContinue  = "continue" KwEnd ;
     function relabelRet(f, v, self) {
         if (f.rtype == undefined || f.rtype == null || f.rtype == "") { return relabelRetT(f, v) }
         // Twin of retTyped in swift-to-llvm-ir.abnf.
-        if (f.rtype.charAt(0) == "%") { return swSetOf(swAdoptAnn(v, f.rtype.substring(1))) }
+        if (f.rtype.charAt(0) == "%") {
+            if (f.rtype.charAt(1) != "?") { return swSetOf(swAdoptAnn(v, f.rtype.substring(1))) }
+            return v === null || v === undefined ? v : swSetOf(swAdoptAnn(v, f.rtype.substring(2)))
+        }
         return relabelRetT(f, swAdoptAnnS(v, f.rtype, self))
     }
     function relabelRetT(f, v) {
@@ -8997,8 +9000,9 @@ KwContinue  = "continue" KwEnd ;
         if (rty == "") {
             var rx = swAliasExpand(rtxt)
             if (swTyHasUserGen(rx) || (rx != rtxt && swAdoptNeeded(rx))) { rty = rx }
-            // "%[E]": a `-> Set<E>` result is made a Set of elements adopted to E.
-            else if (swIsSetTy(rx) && rx.charAt(rx.length - 1) != "?") { rty = "%" + swSetArrAnn(rx) }
+            // "%[E]": a `-> Set<E>` result is made a Set of elements adopted to E;
+            // "%?[E]" for `-> Set<E>?`, whose nil stays nil.
+            else if (swIsSetTy(rx)) { rty = "%" + (swTyIsOpt(rx) ? "?" : "") + swSetArrAnn(rx) }
         }
         swGenUnbind(items[1].params, gens)
         if (swTyHasUserGen(rty) && swTyNames(rty, gens)) { rty = "" }

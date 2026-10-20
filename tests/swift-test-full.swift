@@ -5677,9 +5677,12 @@ func s148() {
 // ===== SECTION 149: a Set's element type adopts its literals =====
 // `let s: Set<Double> = [1, 2]` holds 1.0 and 2.0, as `[Double]` would - through a
 // declaration, a later assignment, a parameter, a stored property's default and
-// a memberwise argument. Every value read off swiftc 6.1.2.
+// a memberwise argument, and an Optional Set result, whose nil stays nil. Every
+// value read off swiftc 6.1.2.
 struct Bag149 { var xs: Set<Double>; var ys: Set<Double> = [3] }
 func sum149(_ s: Set<Double>) -> String { "\(s.sorted())" }
+func opt149(_ b: Bool) -> Set<Double>? { b ? [4] : nil }
+func optr149(_ b: Bool) -> Set<Double>? { if b { return [1, 2] }; return nil }
 func s149() {
     let s: Set<Double> = [1, 2]
     var t: Set<Double> = []
@@ -5687,6 +5690,8 @@ func s149() {
     let b = Bag149(xs: [4])
     check("149a", "\(s.sorted())" == "[1.0, 2.0]" && "\(t)" == "[5.0]" && sum149([7]) == "[7.0]")
     check("149b", "\(b.xs)" == "[4.0]" && "\(b.ys)" == "[3.0]")
+    check("149c", "\(opt149(true)!.sorted())" == "[4.0]" && opt149(false) == nil
+        && "\(optr149(true)!.sorted())" == "[1.0, 2.0]" && optr149(false) == nil && opt149(true)!.contains(4))
 }
 
 // ===== SECTION 150: overflow-reporting arithmetic; a String.Index's UTF-16 offset =====
