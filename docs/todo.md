@@ -78,12 +78,12 @@ astral letter may differ between engines (probe first).
 
 # JS — JavaScript and TypeScript
 
-### T-676 js: Object.freeze / seal do nothing; read-only writes and non-configurable deletes are silent in strict code · P2 · JS · OPEN [V]
+### T-676 js: Object.freeze / seal do nothing; read-only writes and non-configurable deletes are silent in strict code · P2 · JS · IN PROGRESS (JS worker, round 15) [V]
 `var o = Object.freeze({a:1}); o.a = 2; o.a` → 2 in all engines (node 1); `Object.isFrozen(o)` likewise. In strict code (class
 bodies, "use strict", modules) a write to a read-only property or `delete` of a non-configurable one is dropped silently; node raises
 `TypeError: Cannot assign to read only property 'x' of object '#<Object>'` / `Cannot delete property 'x' of #<Object>`.
 
-### T-677 js: builtin globals' `.name`/`.length`; `(7).constructor === Number`; `Object(1n)`/`Object(Symbol())`; String wrapper index keys · P3 · JS · OPEN [V]
+### T-677 js: builtin globals' `.name`/`.length`; `(7).constructor === Number`; `Object(1n)`/`Object(Symbol())`; String wrapper index keys · P3 · JS · IN PROGRESS (JS worker, round 15) [V]
 `Number.name`, `String.name`, `Array.name`, `BigInt.name`, `Promise.name` → "" (node the name). `(7).constructor === Number`,
 `"s".constructor === String`, `Object.prototype.constructor === Object` → false (node true). `typeof Object(1n)` → bigint (node
 object). `Object.keys(new String("abc"))` → "" (node `0,1,2`); layer 2 does not check `s[1]` on a String wrapper.
