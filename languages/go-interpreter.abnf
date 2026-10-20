@@ -1592,7 +1592,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         for (var i = 0; i < arguments.length; i++) { out += gstr(arguments[i]) }
         gOut(out)
     }
-    hostGlobals["os"] = { Exit: function(code) { exit(code | 0) }, Stdout: goOsFile(1), Stderr: goOsFile(2) }
+    // os.Args holds the program, as the source file named it; os.Stdin is a reader at
+    // its end, as this runtime reads no input. Twin of the os object in
+    // go-to-llvm-ir.abnf.
+    var goProgName = c.file
+    hostGlobals["os"] = { Exit: function(code) { exit(code | 0) }, Stdout: goOsFile(1), Stderr: goOsFile(2),
+                          Stdin: {Read: function(p) { return goMv([0, hostGlobals["errors"].New("EOF")]) }} }
     // The correctly rounded square root lib/go-math.go's Sqrt is. Twin of js_gosqrt in
     // abnf/jsrtgolang.go and lib/go-rt.metajs.
     hostGlobals["goMathSqrt"] = function(x) { return gFlo(Math.sqrt(szNum(gNumF(x)))) }
@@ -2289,6 +2294,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function isNilSl(v) { return isSl(v) && v.__nil == true }
     // Wraps a FRESH backing array as a slice over the whole of it.
     function slOf(arr) { return newSl(arr, 0, arr.length, arr.length) }
+    hostGlobals["os"].Args = slT(slOf([goProgName]), "string")
     // A Go RUNTIME PANIC - `panic: runtime error: index out of range [7] with
     // length 3` - and it is RECOVERABLE, which is why it cannot be `fail`.
     //
@@ -4607,6 +4613,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // Each value reports its static type (StoreExpr): a struct value is copied and
         // the new name takes the type, so `b := a` copies and `q := p` aliases.
         var sp = goSplitSty(items.slice(i))
+        goTupleBind(names, sp.ts.length, sp.tys)
         var exprs = sp.ts
         if (names.length == exprs.length) {
             for (var si = 0; si < exprs.length; si++) {
@@ -4700,10 +4707,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // struct, and so does `var i any = a` (a typed struct declaration copies by its
         // type as well).
         var sp = goSplitSty(items.slice(i))
+        if (ty == "") { goTupleBind(names, sp.ts.length, sp.tys) }
         var inits = sp.ts
         if (inits.length == names.length) {
             for (var vi = 0; vi < inits.length; vi++) {
-                if (ty == "") { cBindTy(names[vi], stBare(sp.tys[vi])) }
+                if (ty == "" && stBare(sp.tys[vi]) != "") { cBindTy(names[vi], stBare(sp.tys[vi])) }
                 inits[vi] = goConstTo(inits[vi], sp.krs[vi], ty != "" ? ty : (sp.rns[vi] ? "rune" : "any"), "variable declaration")
                 inits[vi] = goDtBoxThunk(goStoreThunk(inits[vi], goStCopyTy(sp.tys[vi])), goDtBoxTo(sp.tys[vi], ty))
                 if (sp.rns[vi] && (ty == "" || goIsIfaceTy(stBare(ty)))) { inits[vi] = goI32Thunk(inits[vi]) }
@@ -6241,7 +6249,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     core.blank = "_"
     // Go stdlib packages the runtime provides (resolveImport lives in lib/interp-core.js;
     // exact-match paths, so sub-packages like "encoding/json" are listed in full).
-    core.stdlibImports = ["fmt", "os", "errors", "bufio", "io", "time", "regexp", "path", "encoding/json", "context", "flag", "log", "reflect"]
+    core.stdlibImports = ["fmt", "os", "errors", "regexp", "path", "encoding/json", "context", "flag", "log", "reflect"]
     core.nullWord = "nil"
     // `p.In.X = 1` with a nil p.In walks resolveRef's path; in Go it is a recoverable
     // panic. The hook is additive in lib/interp-core.js - every language that leaves

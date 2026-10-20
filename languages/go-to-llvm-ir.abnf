@@ -4282,6 +4282,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // Each value reports its static type (StoreExpr): a struct value is copied and
         // the new name takes the type, so `b := a` copies and `q := p` aliases.
         var sp = goSplitSty(items.slice(i))
+        goTupleBind(names, sp.ts.length, sp.tys)
         var exprs = sp.ts
         if (names.length == exprs.length) {
             for (var si = 0; si < exprs.length; si++) {
@@ -4405,10 +4406,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // Each initializer reports its static type (StoreExpr), so `var i any = a`
         // copies too. Twin of makeVarDecl in go-interpreter.abnf.
         var sp = goSplitSty(items.slice(i))
+        if (ty == "") { goTupleBind(names, sp.ts.length, sp.tys) }
         var inits = sp.ts
         if (inits.length == names.length) {
             for (var vi = 0; vi < inits.length; vi++) {
-                if (ty == "") { cBindTy(names[vi], stBare(sp.tys[vi])) }
+                if (ty == "" && stBare(sp.tys[vi]) != "") { cBindTy(names[vi], stBare(sp.tys[vi])) }
                 inits[vi] = goConstTo(inits[vi], sp.krs[vi], ty != "" ? ty : (sp.rns[vi] ? "rune" : "any"), "variable declaration")
                 inits[vi] = goDtBoxThunk(goStoreThunk(inits[vi], goStCopyTy(sp.tys[vi])), goDtBoxTo(sp.tys[vi], ty))
                 if (sp.rns[vi] && (ty == "" || goIsIfaceTy(stBare(ty)))) { inits[vi] = goI32Thunk(inits[vi]) }
@@ -6381,6 +6383,21 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         callExt(b, "js_set", [osV, emitStr(b, "Exit"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "exit")])])
         b = declOsFile(b, osV, "Stdout", 1)
         b = declOsFile(b, osV, "Stderr", 2)
+        // os.Args holds the program, as the source file named it; os.Stdin is a
+        // reader at its end, as this runtime reads no input. Twin of
+        // hostGlobals["os"] in go-interpreter.abnf.
+        var inV = callExt(b, "js_obj_new", [])
+        b = declFn(b, "$stdinRead", 1, function(fb, a) {
+            var rv = callExt(fb, "js_arr_new", [])
+            callExt(fb, "js_arr_push", [rv, emitNum(fb, 0)])
+            var newV = callExt(fb, "js_get", [callExt(fb, "js_scope_get", [curScopeV, emitStr(fb, "errors")]), emitStr(fb, "New")])
+            var eargs = callExt(fb, "js_arr_new", [])
+            callExt(fb, "js_arr_push", [eargs, emitStr(fb, "EOF")])
+            callExt(fb, "js_arr_push", [rv, callExt(fb, "js_call", [newV, hUndef, eargs])])
+            return {b: fb, v: usesMultiRet ? emitMvWrap(fb, rv) : rv}
+        })
+        callExt(b, "js_set", [inV, emitStr(b, "Read"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$stdinRead")])])
+        callExt(b, "js_set", [osV, emitStr(b, "Stdin"), inV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "os"), osV])
         // The correctly rounded square root lib/go-math.go's Sqrt is, declared when
         // the program imports math. Twin of goMathSqrt in go-interpreter.abnf.
@@ -6423,6 +6440,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // unqualified; then the package objects are assembled (buildPackages); then the
         // main file's own declarations run.
         b = declSlices(b)
+        // os.Args, once a slice header can be made.
+        var argsA = callExt(b, "js_arr_new", [])
+        callExt(b, "js_arr_push", [argsA, emitStr(b, c.file)])
+        callExt(b, "js_set", [osV, emitStr(b, "Args"), emitSlT(b, emitSlOf(b, argsA), "string")])
         if (usesComplex) { b = declComplex(b) }
         // The descriptor every pointer cell shares (see emitPtrCell). Declared before
         // the program runs, so a nested function reaches it through its scope chain.
@@ -6552,7 +6573,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
 
     // Go stdlib packages the runtime provides (resolveImport lives in lib/compile-core.js;
     // exact-match paths, so sub-packages like "encoding/json" are listed in full).
-    core.stdlibImports = ["fmt", "os", "errors", "bufio", "io", "time", "regexp", "path", "encoding/json", "context", "flag", "log", "reflect"]
+    core.stdlibImports = ["fmt", "os", "errors", "regexp", "path", "encoding/json", "context", "flag", "log", "reflect"]
     function fail(msg) { println("go compiler error: " + msg); exit(1) }
 
     // Project-file imports: import "mathbox" -> mathbox.go (a slash path like "a/b" ->

@@ -12,6 +12,8 @@
 // these blocks, map to themselves here where Go's unicode tables would map them.
 package strings
 
+import "io"
+
 // ----- searching -----
 
 func Index(s, substr string) int {
@@ -694,4 +696,74 @@ func (b *Builder) Grow(n int) {
 	if n < 0 {
 		panic("strings.Builder.Grow: negative count")
 	}
+}
+
+// ----- Reader -----
+
+// A Reader reads from a string: an io.Reader, io.ByteReader and io.RuneReader.
+type Reader struct {
+	s string
+	i int
+}
+
+func NewReader(s string) *Reader { return &Reader{s, 0} }
+
+func (r *Reader) Len() int     { return len(r.s) - r.i }
+func (r *Reader) Size() int64  { return int64(len(r.s)) }
+func (r *Reader) Reset(s string) {
+	r.s = s
+	r.i = 0
+}
+
+func (r *Reader) Read(b []byte) (n int, err error) {
+	if r.i >= len(r.s) {
+		return 0, io.EOF
+	}
+	for n < len(b) && r.i < len(r.s) {
+		b[n] = r.s[r.i]
+		n++
+		r.i++
+	}
+	return n, nil
+}
+
+func (r *Reader) ReadByte() (byte, error) {
+	if r.i >= len(r.s) {
+		return 0, io.EOF
+	}
+	c := r.s[r.i]
+	r.i++
+	return c, nil
+}
+
+func (r *Reader) UnreadByte() error {
+	if r.i <= 0 {
+		return io.EOF
+	}
+	r.i--
+	return nil
+}
+
+func (r *Reader) ReadRune() (ch rune, size int, err error) {
+	if r.i >= len(r.s) {
+		return 0, 0, io.EOF
+	}
+	if c := r.s[r.i]; c < 0x80 {
+		r.i++
+		return rune(c), 1, nil
+	}
+	size = runeLen(r.s, r.i)
+	for _, c := range r.s[r.i : r.i+size] {
+		ch = c
+		break
+	}
+	r.i += size
+	return ch, size, nil
+}
+
+func (r *Reader) WriteTo(w io.Writer) (n int64, err error) {
+	s := r.s[r.i:]
+	m, err := io.WriteString(w, s)
+	r.i += m
+	return int64(m), err
 }

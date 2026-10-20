@@ -51,10 +51,12 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"cmp"
 	"errors"
 	"fmt"
+	"io"
 	"iter"
 	"maps"
 	"math"
@@ -65,6 +67,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unicode"
 	"unicode/utf8"
 )
@@ -727,6 +730,54 @@ func s93() {
 	check("new1", fmt.Sprintf("%T %v", p, p) == "*main.P93 &{1}")
 }
 
+// ===== SECTION 94: packages io, bufio and time; strings.Reader, os.Args =====
+// Go source (languages/lib/go-io.go, go-bufio.go, go-time.go) over an io.Reader.
+// The expected values are go run's.
+type D94 int64
+
+const (
+	ns94 D94 = 1
+	us94     = 1000 * ns94
+)
+
+func (d D94) String() string { return fmt.Sprint(int64(d), "u") }
+
+func s94() {
+	sc := bufio.NewScanner(strings.NewReader("one two\nthree\n\nfour"))
+	got := ""
+	for sc.Scan() {
+		got += "[" + sc.Text() + "]"
+	}
+	ws := bufio.NewScanner(strings.NewReader("  a b\tc\n d "))
+	ws.Split(bufio.ScanWords)
+	nw := 0
+	for ws.Scan() {
+		nw++
+	}
+	r := bufio.NewReader(strings.NewReader("x,y"))
+	t1, _ := r.ReadString(',')
+	t2, e2 := r.ReadString(',')
+	all, _ := io.ReadAll(strings.NewReader("all"))
+	var buf bytes.Buffer
+	w := bufio.NewWriter(&buf)
+	fmt.Fprintf(w, "%d", 7)
+	before := buf.Len()
+	w.Flush()
+	check("bio1", fmt.Sprint(got, nw, t1, t2, e2 == io.EOF, string(all), before, buf.String(), sc.Err()) ==
+		"[one two][three][][four]4x,ytrueall07<nil>")
+	d := 90*time.Minute + 30*time.Second + 5*time.Millisecond
+	t := time.Date(2024, time.February, 29, 13, 4, 5, 123000000, time.UTC)
+	pd, _ := time.ParseDuration("1h15m30.5s")
+	check("tim1", fmt.Sprint(d, " ", time.Duration(1500)*time.Microsecond, " ", d.Truncate(time.Hour), " ", pd) == "1h30m30.005s 1.5ms 1h0m0s 1h15m30.5s")
+	check("tim2", fmt.Sprint(t, "|", t.Format(time.RFC3339), "|", t.Format(time.Kitchen), "|", t.Month(), t.Weekday(), t.YearDay(), t.Unix()) ==
+		"2024-02-29 13:04:05.123 +0000 UTC|2024-02-29T13:04:05Z|1:04PM|February Thursday 60 1709211845")
+	t2b := t.Add(36 * time.Hour)
+	check("tim3", fmt.Sprint(t2b.Format(time.DateTime), " ", t2b.Sub(t), " ", t.AddDate(0, 1, 0).Format(time.DateOnly), " ", fmt.Sprintf("%T", time.Hour)) ==
+		"2024-03-02 01:04:05 36h0m0s 2024-03-29 time.Duration")
+	check("cty1", fmt.Sprintf("%T %v %v", us94, us94, 3*us94) == "main.D94 1000u 3000u")
+	check("osa1", len(os.Args) == 1)
+}
+
 func main() {
 	s83() // SECTION-CALL 83
 	s84() // SECTION-CALL 84
@@ -739,6 +790,7 @@ func main() {
 	s91() // SECTION-CALL 91
 	s92() // SECTION-CALL 92
 	s93() // SECTION-CALL 93
+	s94() // SECTION-CALL 94
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

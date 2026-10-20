@@ -1102,6 +1102,19 @@ function stAt(pos) {
 }
 // What a store binds the expression ending at pos as: its static type, else the
 // DEFAULT type of an untyped constant (`n := 5` is an int, so &n is a *int).
+// `a, b := f()` with f of several results: each name takes its result's type, from
+// the call's static type, their tuple "(T1,T2)" (goPreFunc).
+function goTupleBind(names, n, tys) {
+    if (names.length < 2 || n != 1) { return }
+    var t = stBare(tys[0])
+    if (t.length < 2 || t.charAt(0) != "(" || t.charAt(t.length - 1) != ")") { return }
+    var ts = goTpSplit(t.substring(1, t.length - 1))
+    var i = 0
+    while (i < names.length && i < ts.length) {
+        if (stTrim(ts[i]) != "") { cBindTy(names[i], stTrim(ts[i])) }
+        i = i + 1
+    }
+}
 function stStoreAt(pos) {
     var t = stAt(pos)
     if (t != "") { return t }
@@ -1392,7 +1405,7 @@ function tkAt(pos) {
 }
 // The numeric type ty names, seen through a defined type, as goTkMk's type record.
 function goTkType(ty) {
-    var t = goTyWord(stBare(ty))
+    var t = goQualWord(stBare(ty), goTyWord(stBare(ty)))
     var w = t
     if (typeof definedUnder[w] == "string") { w = goTyWord(resolveDefined(w)) }
     if (isFloatTy(w)) { return {ty: t, u: w, f: true, w: 0, us: false} }
@@ -1687,6 +1700,8 @@ function goChainC(t, text, pos) {
     // A package function as a value (`strconv.Itoa`) has its signature's type.
     var h = stHeadLen(text)
     if (ty == "" && h > 0 && text.charAt(h) == "." && goFnSig["$" + text] !== undefined && !cIsLocal(text.substring(0, h))) { ty = goFnSig["$" + text] }
+    // ... and a package's typed constant or variable (`time.Hour`) its type.
+    if (ty == "" && h > 0 && text.charAt(h) == "." && cPkgTys["$" + text] !== undefined && !cIsLocal(text.substring(0, h))) { ty = cPkgTys["$" + text] }
     if (ty != "") { regSt(pos, ty) }
     cPkgMember(text, pos)
     var pc = cPkgConstOf(text)
@@ -1701,10 +1716,17 @@ function goChainC(t, text, pos) {
 // does not declare is Go's compile error "undefined: pkg.Name" (cPkgMember).
 var cPkgConsts = {}
 var cPkgWhole = {}
+// "$pkg.Name" -> the static type of a top-level name, as seen from outside the
+// package ("Duration" in package time is "time.Duration").
+var cPkgTys = {}
 function cNotePkgConsts(pname, lib) {
     var f = cScopes[0]
     var i = 0
-    while (i < f.n.length) { cPkgConsts["$" + pname + "." + f.n[i]] = f.v[i]; i = i + 1 }
+    while (i < f.n.length) {
+        cPkgConsts["$" + pname + "." + f.n[i]] = f.v[i]
+        if (typeof f.t[i] == "string" && f.t[i] != "") { cPkgTys["$" + pname + "." + f.n[i]] = goPkgQual(pname, f.t[i], false) }
+        i = i + 1
+    }
     if (lib) { cPkgWhole["$" + pname] = true }
 }
 // A chain that starts with pkg.Name, pkg a standard package written in Go and not a
@@ -2825,6 +2847,13 @@ function goPreFunc(text, i) {
         if (e < 0) { return }
         var inner = text.substring(i + 1, e)
         nres = 2
+        // Several results: the static type of a call is their tuple, "(T1,T2)",
+        // which a `a, b := f()` splits (goTupleTys).
+        var rl = goPreParams(inner)
+        var rk = 0
+        rty = "("
+        while (rk < rl.length) { rty = rty + (rk > 0 ? "," : "") + rl[rk]; rk = rk + 1 }
+        rty = rty + ")"
         if (inner.indexOf(",") < 0) {
             var t2 = inner
             var s2 = stSkipWs(t2, 0)
@@ -2854,9 +2883,9 @@ function goPreFunc(text, i) {
         if (!goPreShadow(recv)) { goNilRecv["$" + recv + "." + name] = true }
         if (goNotePkg() != "") { goNilRecv["$" + goNotePkg() + "." + recv + "." + name] = true }
     }
-    else {
-        if (goFnRty["$" + name] === undefined) { goFnRty["$" + name] = nres == 1 ? rty : "" }
-        if (goPrePkg != "") { goFnRty["$" + goPrePkg + "." + name] = nres == 1 ? goPkgQual(goPrePkg, rty) : "" }
+    else if (recv == "") {
+        if (goFnRty["$" + name] === undefined) { goFnRty["$" + name] = nres > 0 ? rty : "" }
+        if (goPrePkg != "") { goFnRty["$" + goPrePkg + "." + name] = nres > 0 ? goPkgQual(goPrePkg, rty) : "" }
     }
 }
 function goPreType(text, i) {
@@ -3232,6 +3261,9 @@ function goLibFile(path) {
     if (path == "strconv") { return "lib/go-strconv.go" }
     if (path == "unicode") { return "lib/go-unicode.go" }
     if (path == "bytes") { return "lib/go-bytes.go" }
+    if (path == "io") { return "lib/go-io.go" }
+    if (path == "bufio") { return "lib/go-bufio.go" }
+    if (path == "time") { return "lib/go-time.go" }
     if (path == "unicode/utf8") { return "lib/go-utf8.go" }
     if (path == "sync/atomic") { return "lib/go-atomic.go" }
     return ""
@@ -3537,6 +3569,9 @@ function cBindSpec(items, start) {
         var sv = cSpecVal(fns, n, okn, cIotaIdx)
         cBindConst(names[n], typed ? null : sv)
         if (cLastTy != "") { cBindTy(names[n], cLastTy) }
+        // A spec with no type whose expression is a typed constant takes its type:
+        // `Hour = 60 * Minute` is a Duration.
+        else if (own && tkAt(ats[n]) != null && tkAt(ats[n]).ty != "") { cBindTy(names[n], tkAt(ats[n]).ty) }
         cBindX(names[n], own ? cSpecX(sv, aks[n], ats[n]) : cSpecX(sv, -1, -1))
         n = n + 1
     }
