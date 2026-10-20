@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-657** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-658** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -137,13 +137,12 @@ reports cap 4 where growslice says 1) — escape analysis.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-655 php: function_exists(); direct calls in another letter case; callback message; var_dump of a first-class callable · P2 · PHP · IN PROGRESS (PHP worker, round 7) [V spec-only]
-`function_exists('strlen')` → "Call to undefined function function_exists()" in all engines. `function myCmp(){}; MYCMP();` and
-`STRTOUPPER("x")` → "Call to undefined function" (PHP names are case-insensitive; keep the written name in the miss message, lower-case
-the lookup — branch only at mixed-case call sites). An array callback without two members → "array must have exactly two members"
-(zend_API.c 8.2/8.3: "array callback must have exactly two members"; php-interpreter.abnf phpCheckCallback, php-rt.metajs ~3608,
-jsrtphp.go ~3842). `var_dump(usort(...))` → NULL (PHP `object(Closure)#n`). `call_user_func_array('array_map', [[$this,'priv'], $a])` is
-judged in the library frame.
+### T-657 php: first-class callable identity; var_dump of method callables; builtins without library wrappers · P3 · PHP · OPEN [V spec-only]
+`Closure::fromCallable('opt') === opt(...)` → compiler true (PHP false: every f(...) / fromCallable makes a new Closure; interp right);
+`spl_object_id($f) === spl_object_id(opt(...))` → true in all engines (PHP false). `var_dump($obj->m(...))` / `A::s(...)` → NULL (fake
+method closures carry no handle or debug record). define/defined/constant/error_reporting/realpath have no library wrapper:
+`function_exists('define')` false in the compiler, true in the interpreter, and none can be called through a name; in the compiler
+`function_exists()` of a run-time-built name finds only library functions some literal already spelled.
 
 ### T-596 php: binding and undefined-variable warnings are never printed · P3 · PHP · BLOCKED - needs a user decision
 PHP CLI prints `Warning: Cannot unbind $this of closure using $this in <file> on line <n>` (and undefined-variable/-index
@@ -746,6 +745,7 @@ T-649 python: class-body names visible inside methods; compiled runtime exceptio
 T-650 java: static field through an instance; StringBuffer; CharSequence; ArrayList.clone; superclass order; Matcher.hitEnd — DONE 898cfc4c b4e0e8a3 7fcc0dcb except Matcher.hitEnd/requireEnd (T-654)
 T-651 php: case-insensitive dynamic function names; `\`-prefixed names; array_map type checks; positional after named in a spread — DONE 350c6dcd
 T-654 java: user `super.clone()`; FQN `java.io.Serializable` without import; Matcher.hitEnd/requireEnd — PARTIAL 218ab25d (Object.clone via super.clone, Cloneable/Serializable markers without imports); hitEnd/requireEnd and the nested-name-rename defect are T-656
+T-655 php: function_exists(); direct calls in another letter case; callback message; var_dump of a first-class callable — DONE 8f44cfd4 858a0fd6 (Closure handle reuse after a temporary DECLINED: object ids are never reused by design, manual 7.8 GC model)
 
 # Settled — do not re-open
 
