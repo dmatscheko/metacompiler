@@ -137,16 +137,18 @@ func jxGraphNext(text []rune, off, limit int) int {
 	if off >= limit {
 		return off
 	}
-	g0 := jxGb(text[off])
+	c0, w0 := rxCpAt(text, off)
+	g0 := jxGb(c0)
 	t0 := g0 % 16
-	ret := off + 1
+	ret := off + w0
 	ri := 0
 	if t0 == 6 {
 		ri = 1
 	}
 	gb11 := t0 == 14
 	for ret < limit {
-		g1 := jxGb(text[ret])
+		c1, w1 := rxCpAt(text, ret)
+		g1 := jxGb(c1)
 		t1 := g1 % 16
 		// GB9c, without moving Java's notion of the previous character.
 		if g0/16 == 2 {
@@ -165,7 +167,7 @@ func jxGraphNext(text []rune, off, limit int) int {
 			ri++
 		}
 		g0, t0 = g1, t1
-		ret++
+		ret += w1
 	}
 	return ret
 }
@@ -192,8 +194,9 @@ func jxGbBreak(t0, t1 int) bool {
 func jxIncb(text []rune, index, limit int) int {
 	linker := false
 	for adv := 0; index+adv < limit; {
-		k := jxGb(text[index+adv]) / 16
-		adv++
+		c, w := rxCpAt(text, index+adv)
+		k := jxGb(c) / 16
+		adv += w
 		switch {
 		case k == 1:
 			linker = true

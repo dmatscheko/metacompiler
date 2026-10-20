@@ -2473,6 +2473,16 @@ function jxkThrowPse(pattern, err, at) {
     throw o
 }
 
+// new PatternSyntaxException(desc, regex, index) on the throwable t. Twin of
+// js_jvpse in abnf/jsrtjavastr.go and the constructor in java-interpreter.abnf.
+function js_jvpse(t, desc, pattern, index) {
+    t["__msg"] = jxPseMsg(desc, pattern, jvI(index))
+    t["__pdesc"] = desc
+    t["__pidx"] = index
+    t["__ppat"] = pattern
+    return undefined
+}
+
 // A String method's CharSequence or char argument as a string, and indexOf's
 // first argument, which may also be an int code point.
 function jvStrArg(v) {

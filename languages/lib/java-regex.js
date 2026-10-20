@@ -98,14 +98,14 @@ function jxBin(c) {
 // jxGraphNext in abnf/jsrtjavaprops.go.
 function jxGraphNext(text, off, limit) {
     if (off >= limit) { return off }
-    var ch0 = jxCpAt(text, off)
+    var ch0 = rxCpAt(text, off)
     var ret = off + (ch0 > 65535 ? 2 : 1)
     var g0 = jxGb(ch0)
     var t0 = g0 % 16
     var ri = t0 == 6 ? 1 : 0
     var gb11 = t0 == 14
     while (ret < limit) {
-        var ch1 = jxCpAt(text, ret)
+        var ch1 = rxCpAt(text, ret)
         var g1 = jxGb(ch1)
         var t1 = g1 % 16
         // GB9c: a consonant, linkers and extenders, then a consonant. Java goes
@@ -152,7 +152,7 @@ function jxIncb(text, index, limit) {
     var linker = false
     var adv = 0
     while (index + adv < limit) {
-        var ch = jxCpAt(text, index + adv)
+        var ch = rxCpAt(text, index + adv)
         adv = adv + (ch > 65535 ? 2 : 1)
         var k = Math.floor(jxGb(ch) / 16)
         if (k == 1) {
@@ -165,16 +165,6 @@ function jxIncb(text, index, limit) {
         }
     }
     return -1
-}
-
-// The code point at UTF-16 index i, a surrogate pair read as one.
-function jxCpAt(text, i) {
-    var c = text.charCodeAt(i)
-    if (c >= 55296 && c <= 56319 && i + 1 < text.length) {
-        var d = text.charCodeAt(i + 1)
-        if (d >= 56320 && d <= 57343) { return (c - 55296) * 1024 + (d - 56320) + 65536 }
-    }
-    return c
 }
 
 function jxGb(c) {
@@ -367,6 +357,22 @@ function jxBlockCls(cls, name) {
     return false
 }
 
+// jxRegexOptions is kotlin.text.Regex.options: the RegexOption entries, in
+// their declaration order, whose java.util.regex flag is set in gflags (a
+// J program's re.gflags, Pattern.flags()), and LITERAL when the pattern was
+// quoted. Twin of ktRxOptions in abnf/jsrtregexkt.go.
+function jxRegexOptions(gflags, literal) {
+    var out = []
+    if (gflags.indexOf("i") >= 0) { out.push("IGNORE_CASE") }
+    if (gflags.indexOf("m") >= 0) { out.push("MULTILINE") }
+    if (literal) { out.push("LITERAL") }
+    if (gflags.indexOf("d") >= 0) { out.push("UNIX_LINES") }
+    if (gflags.indexOf("x") >= 0) { out.push("COMMENTS") }
+    if (gflags.indexOf("s") >= 0) { out.push("DOT_MATCHES_ALL") }
+    if (gflags.indexOf("c") >= 0) { out.push("CANON_EQ") }
+    return out
+}
+
 // How often ch occurs in t before index k; s with every a replaced by b.
 function jxCount(t, k, ch) {
     var n = 0
@@ -428,6 +434,15 @@ function jxReFmt(pattern, desc, at) {
         i = i + 1
     }
     return out + "^"
+}
+
+// jxPseMsg is the message of a PatternSyntaxException a program constructs:
+// jxReFmt, with a null description or pattern read as "null" and no caret under
+// a null pattern. Twin of jxPseMsg in abnf/jsrtjavastr.go.
+function jxPseMsg(desc, pattern, at) {
+    var d = desc === null ? "null" : desc
+    if (pattern === null) { return d + (at >= 0 ? " near index " + at : "") + "\nnull" }
+    return jxReFmt(pattern, d, at)
 }
 
 // ----- java.lang.Character's tables for \p{..}, \X and \b{g} -----

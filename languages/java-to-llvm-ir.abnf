@@ -5460,8 +5460,19 @@ HasStatic   = :script(~~
         // (abnf/jsrtjavastr.go) and jxkThrowPse (lib/java-rt.metajs) set.
         var pseNames = ["getDescription", "getIndex", "getPattern"]
         var pseFns = []
+        var pseCtor = 0
         if (neededExc["$PatternSyntaxException"] == true) {
             pseFns = [slotGetter("__pdesc"), slotGetter("__pidx"), slotGetter("__ppat")]
+            // new PatternSyntaxException(desc, regex, index): js_jvpse fills the
+            // slots and the message.
+            pseCtor = emitFunc([], function(bb) {
+                var tV = callExt(bb, "js_arg", [curF.Params[1], handle(0)])
+                callExt(bb, "js_jvpse", [tV, callExt(bb, "js_arg", [curF.Params[1], handle(1)]),
+                                         callExt(bb, "js_arg", [curF.Params[1], handle(2)]),
+                                         callExt(bb, "js_arg", [curF.Params[1], handle(3)])])
+                bb.NewRet(hUndef)
+                return deadBlock()
+            }, false, null)
         }
         // getLocalizedMessage() is getMessage(), an override of it included.
         var getLoc = emitFunc([], function(bb) {
@@ -5511,8 +5522,13 @@ HasStatic   = :script(~~
             callExt(b, "js_set", [clsV, emitStr(b, "__ctor#0"), callExt(b, "js_closure", [handle(ctor0), curScopeV])])
             callExt(b, "js_set", [clsV, emitStr(b, "__ctor#1"), callExt(b, "js_closure", [handle(ctor1), curScopeV])])
             callExt(b, "js_set", [clsV, emitStr(b, "__ctor#2"), callExt(b, "js_closure", [handle(ctor2), curScopeV])])
+            var arities = [0, 1, 2]
+            if (name == "PatternSyntaxException") {
+                callExt(b, "js_set", [clsV, emitStr(b, "__ctor#3"), callExt(b, "js_closure", [handle(pseCtor), curScopeV])])
+                arities = [0, 1, 2, 3]
+            }
             callExt(b, "js_set", [clsV, emitStr(b, "__ctor"),
-                                  callExt(b, "js_closure", [handle(emitCtorDispatch(name, [0, 1, 2])), curScopeV])])
+                                  callExt(b, "js_closure", [handle(emitCtorDispatch(name, arities)), curScopeV])])
             callExt(b, "js_set", [clsV, emitStr(b, "getCause"), callExt(b, "js_closure", [handle(getCause), curScopeV])])
             callExt(b, "js_set", [clsV, emitStr(b, "initCause"), callExt(b, "js_closure", [handle(initCause), curScopeV])])
             callExt(b, "js_set", [clsV, emitStr(b, "getMessage"), callExt(b, "js_closure", [handle(getMsg), curScopeV])])

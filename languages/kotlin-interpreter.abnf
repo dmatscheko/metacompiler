@@ -4640,14 +4640,16 @@ NotMemberKw = :script(~~
     function mkKRegex(pat, opts) {
         var fo = krxFlags(opts)
         var src = fo.literal ? krxQuote(kstr2(pat)) : kstr2(pat)
-        var key = "$" + fo.flags + "\x00" + src
+        var key = "$" + fo.flags + (fo.literal ? "L" : "") + "\x00" + src
         if (hasOwn(krxCache, key)) { return krxCache[key] }
         var prog = rxCompile(src, fo.flags)
         // Pattern.compile throws PatternSyntaxException, an IllegalArgumentException.
         if (!prog.ok) { kThrowExc("PatternSyntaxException", jxReMsg(src, prog.err, prog.errAt)) }
         // matches() / matchEntire() want the WHOLE input, which is rxMatchWhole -
         // one program, no second compile and no anchoring wrapper to get wrong.
-        var v = {__krx: true, src: src, flags: fo.flags, prog: prog}
+        // pat is the pattern as given, which pattern and toString answer; it
+        // differs from src exactly when LITERAL quoted it.
+        var v = {__krx: true, src: src, pat: kstr2(pat), flags: fo.flags, prog: prog}
         krxCache[key] = v
         return v
     }
@@ -4833,7 +4835,7 @@ NotMemberKw = :script(~~
             }
             if (name == "replaceFirst") { return {v: rxReplace(target.prog, kstr2(args[0]), krxTemplate(kstr2(args[1])), false)} }
             if (name == "split") { return {v: krxSplit(target.prog, kstr2(args[0]), krxArgInt(args, 1, 0))} }
-            if (name == "toString") { return {v: target.src} }
+            if (name == "toString") { return {v: target.pat} }
             // let / run / apply / also / takeIf / takeUnless are extensions on ANY
             // receiver, and mcall tries kScopeMethod only AFTER this dispatcher, so
             // this one must decline them (`re.run { pattern }`, `re.let { it.pattern }`;
@@ -4857,8 +4859,8 @@ NotMemberKw = :script(~~
     // The property surface (Regex.pattern, MatchResult.value/range/groupValues/...).
     function krxField(o, name) {
         if (isKRegex(o)) {
-            if (name == "pattern") { return {v: o.src} }
-            if (name == "options") { return {v: []} }
+            if (name == "pattern") { return {v: o.pat} }
+            if (name == "options") { return {v: kSetOfDistinct(jxRegexOptions(o.prog.gflags, o.pat != o.src))} }
             return null
         }
         if (isKMatch(o)) {

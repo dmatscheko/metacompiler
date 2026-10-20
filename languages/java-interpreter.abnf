@@ -5194,6 +5194,15 @@ HasStatic   = :script(~~
     globalScope["PatternSyntaxException"].getDescription = function () { return arguments[0].__pdesc }
     globalScope["PatternSyntaxException"].getIndex = function () { return arguments[0].__pidx }
     globalScope["PatternSyntaxException"].getPattern = function () { return arguments[0].__ppat }
+    // new PatternSyntaxException(desc, regex, index). Twin of js_jvpse in
+    // abnf/jsrtjavastr.go and languages/lib/java-rt.metajs.
+    globalScope["PatternSyntaxException"].__ctor = function () {
+        var self = arguments[0]
+        self.message = jxPseMsg(arguments[1], arguments[2], jI(arguments[3]))
+        self.__pdesc = arguments[1]
+        self.__pidx = arguments[3]
+        self.__ppat = arguments[2]
+    }
     // THE LAUNCHER'S UNCAUGHT-EXCEPTION LINE. java 24.0.2, on stderr, exit
     // status 1:
     //

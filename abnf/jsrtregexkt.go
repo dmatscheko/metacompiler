@@ -180,7 +180,42 @@ func (rt *jsrt) ktRxNew(pat, opts interface{}) *jsObject {
 	if re := rxGet(src, flags); !re.ok {
 		rt.ktRaise("PatternSyntaxException", jxReMsg(src, re.err, re.errAt))
 	}
-	return rxNewRegexObj(src, flags)
+	o := rxNewRegexObj(src, flags)
+	if literal {
+		// The pattern as given, which pattern and toString answer.
+		o.set("__ktpat", rt.toString(pat))
+	}
+	return o
+}
+
+// ktRxPattern is Regex.pattern: the pattern as given, before LITERAL quoted it.
+func ktRxPattern(o interface{}) string {
+	if p, ok := o.(*jsObject).props["__ktpat"].(string); ok {
+		return p
+	}
+	return rxObjRe(o).src
+}
+
+// ktRxOptions is Regex.options, a set of RegexOption names; twin of
+// jxRegexOptions in lib/java-regex.js.
+func ktRxOptions(o interface{}) *jsObject {
+	_, literal := o.(*jsObject).props["__ktpat"]
+	g := rxObjRe(o).gflags
+	set := ktMakeSet()
+	keys := set.props["keys"].(*jsArray)
+	add := func(on bool, name string) {
+		if on {
+			keys.elems = append(keys.elems, name)
+		}
+	}
+	add(strings.Contains(g, "i"), "IGNORE_CASE")
+	add(strings.Contains(g, "m"), "MULTILINE")
+	add(literal, "LITERAL")
+	add(strings.Contains(g, "d"), "UNIX_LINES")
+	add(strings.Contains(g, "x"), "COMMENTS")
+	add(strings.Contains(g, "s"), "DOT_MATCHES_ALL")
+	add(strings.Contains(g, "c"), "CANON_EQ")
+	return set
 }
 
 // ===== Replacement templates =====
@@ -251,8 +286,9 @@ func ktRxEscapeRepl(s string) string {
 
 func (rt *jsrt) ktRxReplace(re *rxRe, s, repl string, all bool) string {
 	rt.ktRxCheck(re)
-	text := []rune(s)
-	var out strings.Builder
+	text := rxUnits(s)
+	// strJoin rejoins a surrogate pair that an empty match split.
+	var out []string
 	at, last, prev := 0, 0, 0
 	for at <= len(text) {
 		m := rt.ktRxSearch(re, text, at, prev)
@@ -260,11 +296,11 @@ func (rt *jsrt) ktRxReplace(re *rxRe, s, repl string, all bool) string {
 			break
 		}
 		prev = m.end
-		out.WriteString(string(text[last:m.begin]))
-		out.WriteString(re.expand(text, m, repl))
+		out = append(out, rxUnitsStr(text[last:m.begin]))
+		out = append(out, re.expand(text, m, repl))
 		if m.end == m.begin {
 			if m.end < len(text) {
-				out.WriteRune(text[m.end])
+				out = append(out, rxUnitsStr(text[m.end:m.end+1]))
 			}
 			last, at = m.end+1, m.end+1
 		} else {
@@ -275,27 +311,28 @@ func (rt *jsrt) ktRxReplace(re *rxRe, s, repl string, all bool) string {
 		}
 	}
 	if last <= len(text) {
-		out.WriteString(string(text[last:]))
+		out = append(out, rxUnitsStr(text[last:]))
 	}
-	return out.String()
+	return strJoin(out, "")
 }
 
 // Regex#replace(input) { m -> ... }: the lambda produces each replacement.
 func (rt *jsrt) ktRxReplaceFn(re *rxRe, s string, fn interface{}) string {
-	text := []rune(s)
-	var out strings.Builder
+	text := rxUnits(s)
+	// strJoin rejoins a surrogate pair that an empty match split.
+	var out []string
 	at, last := 0, 0
 	for at <= len(text) {
 		m := rt.ktRxSearch(re, text, at)
 		if m == nil {
 			break
 		}
-		out.WriteString(string(text[last:m.begin]))
+		out = append(out, rxUnitsStr(text[last:m.begin]))
 		md := ktRxNewMatch(re, re.src, s, m)
-		out.WriteString(rt.toString(rt.call(fn, jsUndef, []interface{}{md})))
+		out = append(out, rt.toString(rt.call(fn, jsUndef, []interface{}{md})))
 		if m.end == m.begin {
 			if m.end < len(text) {
-				out.WriteRune(text[m.end])
+				out = append(out, rxUnitsStr(text[m.end:m.end+1]))
 			}
 			last, at = m.end+1, m.end+1
 		} else {
@@ -303,9 +340,9 @@ func (rt *jsrt) ktRxReplaceFn(re *rxRe, s string, fn interface{}) string {
 		}
 	}
 	if last <= len(text) {
-		out.WriteString(string(text[last:]))
+		out = append(out, rxUnitsStr(text[last:]))
 	}
-	return out.String()
+	return strJoin(out, "")
 }
 
 // Regex#split, over java.util.regex.Matcher.find: every match cuts, an empty one
@@ -315,7 +352,7 @@ func (rt *jsrt) ktRxReplaceFn(re *rxRe, s string, fn interface{}) string {
 // part. Twin of krxSplit in kotlin-interpreter.abnf and k5Split in
 // languages/lib/kotlin-rt.metajs.
 func (rt *jsrt) ktRxSplit(re *rxRe, s string, limit int) *jsArray {
-	text := []rune(s)
+	text := rxUnits(s)
 	parts := &jsArray{}
 	at, last := 0, 0
 	for at <= len(text) && (limit <= 0 || len(parts.elems) < limit-1) {
@@ -323,18 +360,18 @@ func (rt *jsrt) ktRxSplit(re *rxRe, s string, limit int) *jsArray {
 		if m == nil {
 			break
 		}
-		parts.elems = append(parts.elems, string(text[last:m.begin]))
+		parts.elems = append(parts.elems, rxUnitsStr(text[last:m.begin]))
 		last, at = m.end, m.end
 		if m.end == m.begin {
 			at++
 		}
 	}
-	parts.elems = append(parts.elems, string(text[last:]))
+	parts.elems = append(parts.elems, rxUnitsStr(text[last:]))
 	return parts
 }
 
 func (rt *jsrt) ktRxFindAll(re *rxRe, s string) *jsArray {
-	text := []rune(s)
+	text := rxUnits(s)
 	out := &jsArray{}
 	for at := 0; at <= len(text); {
 		m := rt.ktRxSearch(re, text, at)
@@ -431,9 +468,9 @@ func (rt *jsrt) ktRxMethod(target interface{}, name string, args []interface{}) 
 			re := rxObjRe(args[0])
 			switch name {
 			case "matches":
-				return rt.ktRxWhole(re, []rune(s)) != nil, true
+				return rt.ktRxWhole(re, rxUnits(s)) != nil, true
 			case "contains":
-				return rt.ktRxSearch(re, []rune(s), 0) != nil, true
+				return rt.ktRxSearch(re, rxUnits(s), 0) != nil, true
 			case "split":
 				return rt.ktRxSplit(re, s, ktRxArgInt(rt, args, 1, 0)), true
 			case "replace":
@@ -451,12 +488,12 @@ func (rt *jsrt) ktRxMethod(target interface{}, name string, args []interface{}) 
 		re := rxObjRe(target)
 		switch name {
 		case "matches":
-			return rt.ktRxWhole(re, []rune(rt.toString(argAt(args, 0)))) != nil, true
+			return rt.ktRxWhole(re, rxUnits(rt.toString(argAt(args, 0)))) != nil, true
 		case "containsMatchIn":
-			return rt.ktRxSearch(re, []rune(rt.toString(argAt(args, 0))), 0) != nil, true
+			return rt.ktRxSearch(re, rxUnits(rt.toString(argAt(args, 0))), 0) != nil, true
 		case "find":
 			s := rt.toString(argAt(args, 0))
-			m := rt.ktRxSearch(re, []rune(s), ktRxArgInt(rt, args, 1, 0))
+			m := rt.ktRxSearch(re, rxUnits(s), ktRxArgInt(rt, args, 1, 0))
 			if m == nil {
 				return jsNull, true
 			}
@@ -465,7 +502,7 @@ func (rt *jsrt) ktRxMethod(target interface{}, name string, args []interface{}) 
 			return rt.ktRxFindAll(re, rt.toString(argAt(args, 0))), true
 		case "matchEntire":
 			s := rt.toString(argAt(args, 0))
-			m := rt.ktRxWhole(re, []rune(s))
+			m := rt.ktRxWhole(re, rxUnits(s))
 			if m == nil {
 				return jsNull, true
 			}
@@ -482,7 +519,7 @@ func (rt *jsrt) ktRxMethod(target interface{}, name string, args []interface{}) 
 		case "split":
 			return rt.ktRxSplit(re, rt.toString(argAt(args, 0)), ktRxArgInt(rt, args, 1, 0)), true
 		case "toString":
-			return re.src, true
+			return ktRxPattern(target), true
 		}
 		rt.fail("unknown Regex method: %s", name)
 	}
@@ -502,7 +539,7 @@ func (rt *jsrt) ktRxMethod(target interface{}, name string, args []interface{}) 
 			if nm == nil {
 				return jsNull, true
 			}
-			return ktRxNewMatch(orig, orig.src, string(text), nm), true
+			return ktRxNewMatch(orig, orig.src, rxUnitsStr(text), nm), true
 		case "toString":
 			g, _ := re.group(text, m, 0)
 			return g, true
@@ -518,9 +555,9 @@ func (rt *jsrt) ktRxField(o interface{}, name string) (interface{}, bool) {
 	if ktRxIsRegex(o) {
 		switch name {
 		case "pattern":
-			return rxObjRe(o).src, true
+			return ktRxPattern(o), true
 		case "options":
-			return &jsArray{}, true
+			return ktRxOptions(o), true
 		}
 		return nil, false
 	}

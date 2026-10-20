@@ -399,6 +399,23 @@ func jxReFmt(pattern, desc string, at int) string {
 	return out + "\n" + string(pad) + "^"
 }
 
+// jxPseMsg is the message of a PatternSyntaxException a program constructs;
+// twin of jxPseMsg in lib/java-regex.js.
+func (rt *jsrt) jxPseMsg(desc, pattern interface{}, at int) string {
+	d := "null"
+	if desc != jsNull {
+		d = rt.toString(desc)
+	}
+	if pattern == jsNull {
+		near := ""
+		if at >= 0 {
+			near = " near index " + strconv.Itoa(at)
+		}
+		return d + near + "\nnull"
+	}
+	return jxReFmt(rt.toString(pattern), d, at)
+}
+
 // jxSearch is Matcher.find from at, the previous match having ended at last.
 func (rt *jsrt) jxSearch(re *rxRe, text []rune, at, last int) *rxMatch {
 	m, ok := re.searchFrom(text, at, last, last)
@@ -417,7 +434,7 @@ func jxNext(m *rxMatch) int {
 
 func (rt *jsrt) jxSplit(s, pattern string, limit int) []string {
 	re := rt.jxRe(pattern)
-	text := []rune(s)
+	text := rxUnits(s)
 	var out []string
 	index, last := 0, 0
 	for at := 0; at <= len(text); {
@@ -428,11 +445,11 @@ func (rt *jsrt) jxSplit(s, pattern string, limit int) []string {
 		last = m.end
 		if limit <= 0 || len(out) < limit-1 {
 			if !(index == 0 && m.begin == 0 && m.end == 0) {
-				out = append(out, string(text[index:m.begin]))
+				out = append(out, rxUnitsStr(text[index:m.begin]))
 				index = m.end
 			}
 		} else {
-			out = append(out, string(text[index:]))
+			out = append(out, rxUnitsStr(text[index:]))
 			index = m.end
 			break
 		}
@@ -442,7 +459,7 @@ func (rt *jsrt) jxSplit(s, pattern string, limit int) []string {
 		return []string{s}
 	}
 	if limit <= 0 || len(out) < limit {
-		out = append(out, string(text[index:]))
+		out = append(out, rxUnitsStr(text[index:]))
 	}
 	if limit == 0 {
 		for len(out) > 0 && out[len(out)-1] == "" {
@@ -454,7 +471,7 @@ func (rt *jsrt) jxSplit(s, pattern string, limit int) []string {
 
 func (rt *jsrt) jxMatches(s, pattern string) bool {
 	re := rt.jxRe(pattern)
-	m, ok := re.matchWhole([]rune(s), 0)
+	m, ok := re.matchWhole(rxUnits(s), 0)
 	if !ok {
 		rt.fail("regexp: step limit exceeded")
 	}
@@ -463,24 +480,24 @@ func (rt *jsrt) jxMatches(s, pattern string) bool {
 
 func (rt *jsrt) jxRxReplace(s, pattern, repl string, all bool) string {
 	re := rt.jxRe(pattern)
-	text := []rune(s)
-	var out strings.Builder
+	text := rxUnits(s)
+	// strJoin rejoins a surrogate pair that an empty match split.
+	var out []string
 	tail := 0
 	for at := 0; at <= len(text); {
 		m := rt.jxSearch(re, text, at, tail)
 		if m == nil {
 			break
 		}
-		out.WriteString(string(text[tail:m.begin]))
-		out.WriteString(rt.jxExpand(re, text, m, []rune(repl)))
+		out = append(out, rxUnitsStr(text[tail:m.begin]), rt.jxExpand(re, text, m, []rune(repl)))
 		tail = m.end
 		if !all {
 			break
 		}
 		at = jxNext(m)
 	}
-	out.WriteString(string(text[tail:]))
-	return out.String()
+	out = append(out, rxUnitsStr(text[tail:]))
+	return strJoin(out, "")
 }
 
 func (rt *jsrt) jxExpand(re *rxRe, text []rune, m *rxMatch, repl []rune) string {
@@ -1622,6 +1639,16 @@ func init() {
 		// unboxing members on a boxed primitive too; any other receiver is an ordinary call of a method by
 		// that name. Twin of jStrMethod in java-interpreter.abnf and js_jvstrm in
 		// languages/lib/java-rt.metajs.
+		// new PatternSyntaxException(desc, regex, index) on the throwable a[0].
+		// Twin of js_jvpse in languages/lib/java-rt.metajs.
+		m["js_jvpse"] = func(a []uint64) uint64 {
+			o := u(a[0]).(*jsObject)
+			o.set("__msg", rt.jxPseMsg(u(a[1]), u(a[2]), int(jvI(rt, u(a[3])))))
+			o.set("__pdesc", u(a[1]))
+			o.set("__pidx", u(a[3]))
+			o.set("__ppat", u(a[2]))
+			return w(jsUndef)
+		}
 		m["js_jvstrm"] = func(a []uint64) uint64 {
 			s, isStr := u(a[0]).(string)
 			if !isStr {

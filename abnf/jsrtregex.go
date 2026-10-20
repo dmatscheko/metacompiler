@@ -28,6 +28,7 @@ package abnf
 import (
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // ----- Instruction opcodes (see lib/regex.js) -----
@@ -425,6 +426,10 @@ type rxSt struct {
 	uclass bool
 	unix   bool
 	inl    bool
+	// supp collects java.util.regex's hasSupplementary while parsing (see
+	// rxSuppJ), and canon is J's CANON_EQ, which is only reported (Pattern.flags).
+	supp  bool
+	canon bool
 }
 
 // rxIsMetaCh answers whether a character has to be backslashed to stay a literal.
@@ -716,6 +721,19 @@ func (st *rxSt) escJ(c rune, inClass bool) (res rxEscRes, handled bool) {
 			st.i++
 		}
 		res.ch = rune(uv)
+		// A high surrogate escape and a low surrogate escape after it are one
+		// code point, as Pattern.u() reads them.
+		if isHighSurr(res.ch) && st.i+5 < st.n && p[st.i] == '\\' && p[st.i+1] == 'u' {
+			lv, lk := 0, 2
+			for lk < 6 && rxHexVal(p[st.i+lk]) >= 0 {
+				lv = lv*16 + rxHexVal(p[st.i+lk])
+				lk++
+			}
+			if lk == 6 && isLowSurr(rune(lv)) {
+				res.ch = surrPair(res.ch, rune(lv))
+				st.i += 6
+			}
+		}
 		return res, true
 	case 'p', 'P': // \pX, \p{Name}, and \P for the complement
 		res.kind = 3
@@ -744,6 +762,7 @@ func (st *rxSt) escJ(c rune, inClass bool) (res rxEscRes, handled bool) {
 			pname = "\x00"
 		}
 		st.pcls = st.propCls(pname, pat)
+		st.supp = true
 		st.pcls.neg = c == 'P'
 		return res, true
 	}
@@ -1211,6 +1230,7 @@ func (st *rxSt) rangeJ(bits *rxCls) *rxCls {
 			rg.add(ch, m)
 			if st.icase {
 				st.foldJ(rg, false)
+				st.supp = true
 			}
 			return rg
 		}
@@ -1540,6 +1560,9 @@ func (st *rxSt) setFlags(letters string, v bool) {
 		st.uclass = v
 		st.ucase = v
 	}
+	if strings.Contains(letters, "c") {
+		st.canon = v
+	}
 }
 
 // getFlags and putFlags save and restore the flags in force; twins of
@@ -1549,7 +1572,7 @@ func (st *rxSt) getFlags() string {
 	for _, f := range []struct {
 		on bool
 		c  string
-	}{{st.icase, "i"}, {st.multi, "m"}, {st.dotall, "s"}, {st.ext, "x"}, {st.unix, "d"}, {st.ucase, "u"}, {st.uclass, "U"}} {
+	}{{st.icase, "i"}, {st.multi, "m"}, {st.dotall, "s"}, {st.ext, "x"}, {st.unix, "d"}, {st.ucase, "u"}, {st.uclass, "U"}, {st.canon, "c"}} {
 		if f.on {
 			s += f.c
 		}
@@ -1558,7 +1581,7 @@ func (st *rxSt) getFlags() string {
 }
 
 func (st *rxSt) putFlags(letters string) {
-	st.setFlags("imsxdU", false)
+	st.setFlags("imsxdUc", false)
 	st.setFlags(letters, true)
 }
 
@@ -2101,6 +2124,7 @@ type rxProg struct {
 	clss   []*rxCls
 	nmarks int
 	jsrep  bool
+	java   bool
 	dummy  *rxCls
 	// cmin/cmax/cgreedy describe counted loop i (rxOpCInit .. rxOpCInc), lbmin/lbmax
 	// the length range of lookbehind i (-1: unbounded).
@@ -2218,7 +2242,12 @@ func (pg *rxProg) emit(node *rxNode) {
 	case "lookb":
 		id := len(pg.lbmin)
 		pg.lbmin = append(pg.lbmin, node.items[0].minLen())
-		pg.lbmax = append(pg.lbmax, node.items[0].maxLen())
+		// Lengths count characters; a J character is up to two UTF-16 units.
+		lbm := node.items[0].maxLen()
+		if pg.java && lbm > 0 {
+			lbm = rxLenCap(2 * lbm)
+		}
+		pg.lbmax = append(pg.lbmax, lbm)
 		neg := 0
 		if node.gidx == 1 {
 			neg = 1
@@ -2426,8 +2455,11 @@ type rxRe struct {
 	// the counted-loop and lookbehind tables (rxProg).
 	java  bool
 	errAt int
+	// supp is java.util.regex's hasSupplementary (see rxSuppJ).
+	supp bool
 	// bfail is the n flag (implied by J and P): a backreference to a group that
-	// did not take part fails. gflags are P's leading inline flag letters.
+	// did not take part fails. gflags are P's leading inline flag letters, or
+	// under J the letters in force at the end (Pattern.flags()).
 	bfail               bool
 	gflags              string
 	cmin, cmax, cgreedy []int
@@ -2470,6 +2502,9 @@ func rxCompile(pattern, flags string) *rxRe {
 	// counter nor the parser needs a quoting mode. re.src keeps the ORIGINAL pattern,
 	// which is what a language's .source / inspect reports.
 	pat := []rune(pattern)
+	if java {
+		pat = wtf8Runes(pattern)
+	}
 	if quoting {
 		pat = rxExpandQuotes(pat)
 	}
@@ -2504,7 +2539,12 @@ func rxCompile(pattern, flags string) *rxRe {
 		return &rxRe{ok: false, err: st.err, errAt: st.errAt, icase: icase, dotall: dotall, multi: multi,
 			jsrep: jsrep, java: java, bfail: bfail, src: pattern, flags: flags}
 	}
-	pg := &rxProg{jsrep: jsrep, dummy: rxNewCls()}
+	// Under J gflags is Pattern.flags(): the letters in force at the end.
+	gflags := st.gflags
+	if java {
+		gflags = st.getFlags()
+	}
+	pg := &rxProg{jsrep: jsrep, java: java, dummy: rxNewCls()}
 	pg.add(rxOpSave, 0, 0, pg.dummy)
 	pg.emit(ast)
 	pg.add(rxOpSave, 1, 0, pg.dummy)
@@ -2513,10 +2553,71 @@ func rxCompile(pattern, flags string) *rxRe {
 		ok: true, ops: pg.ops, as: pg.as, bs: pg.bs, clss: pg.clss,
 		ngroups: st.ngroups, nmarks: pg.nmarks, names: st.names, nameGroups: st.nameGroups,
 		icase: icase, dotall: dotall, multi: multi, jsrep: jsrep, java: java, errAt: -1,
-		bfail: bfail, gflags: st.gflags,
+		supp: java && (st.supp || rxSuppJ(ast) || rxHasSurr(pat)), bfail: bfail, gflags: gflags,
 		cmin: pg.cmin, cmax: pg.cmax, cgreedy: pg.cgreedy, lbmin: pg.lbmin, lbmax: pg.lbmax,
 		src: pattern, flags: flags,
 	}
+}
+
+// rxSuppJ, rxClsBmpJ and rxHasSurr decide java.util.regex's hasSupplementary;
+// twins of the same names in lib/regex.js, which state the rule.
+func rxSuppJ(node *rxNode) bool {
+	if node.t == "cls" {
+		return !rxClsBmpJ(node.cls)
+	}
+	for _, it := range node.items {
+		if rxSuppJ(it) {
+			return true
+		}
+	}
+	return false
+}
+
+func rxClsBmpJ(c *rxCls) bool {
+	if c.neg || c.u || len(c.props) > 0 {
+		return false
+	}
+	for i := range c.lo {
+		if c.hi[i] >= surrHigh0 && !(c.lo[i] >= surrEnd && c.hi[i] < 0x10000) {
+			return false
+		}
+	}
+	for _, k := range c.sp {
+		if k == rxSND || k == rxSNW || k == rxSNS || k == rxSJNH || k == rxSJNV {
+			return false
+		}
+	}
+	for _, sub := range c.subs {
+		if !rxClsBmpJ(sub) {
+			return false
+		}
+	}
+	for _, a := range c.ands {
+		if !rxClsBmpJ(a) {
+			return false
+		}
+	}
+	return true
+}
+
+// rxHasSurr: does the pattern hold a character that is a surrogate in UTF-16?
+func rxHasSurr(p []rune) bool {
+	for _, c := range p {
+		if c >= surrHigh0 && (c < surrEnd || c > 0xFFFF) {
+			return true
+		}
+	}
+	return false
+}
+
+// rxCpAt is the character at index i of a J text, which holds UTF-16 units:
+// a surrogate pair is read as one (w 2). Twin of rxCpAt in lib/regex.js.
+func rxCpAt(text []rune, i int) (c rune, w int) {
+	c = text[i]
+	if isHighSurr(c) && i+1 < len(text) && isLowSurr(text[i+1]) {
+		return surrPair(c, text[i+1]), 2
+	}
+	return c, 1
 }
 
 // ===== The matcher =====
@@ -2627,18 +2728,32 @@ func rxAssertJ(text []rune, kind, sp int) bool {
 		return sp == n-1 && !crlf
 	}
 	uw := kind == rxJUWordB || kind == rxJUNWordB
-	before := sp > 0 && rxIsWordJ(text, sp-1, uw)
-	after := sp < n && rxIsWordJ(text, sp, uw)
+	before := false
+	if sp > 0 {
+		// Character.codePointBefore: a pair only when the unit before sp is its
+		// low half.
+		bc := text[sp-1]
+		if isLowSurr(bc) && sp > 1 {
+			if c, w := rxCpAt(text, sp-2); w == 2 {
+				bc = c
+			}
+		}
+		before = rxIsWordJ(text, bc, sp-1, uw)
+	}
+	after := false
+	if sp < n {
+		c, _ := rxCpAt(text, sp)
+		after = rxIsWordJ(text, c, sp, uw)
+	}
 	if kind == rxJWordB || kind == rxJUWordB {
 		return before != after
 	}
 	return before == after
 }
 
-// rxIsWordJ is Pattern.Bound's side test for text[i]; twin of rxIsWordJ in
-// lib/regex.js.
-func rxIsWordJ(text []rune, i int, uw bool) bool {
-	c := text[i]
+// rxIsWordJ is Pattern.Bound's side test for the character c at or ending at
+// unit i; twin of rxIsWordJ in lib/regex.js.
+func rxIsWordJ(text []rune, c rune, i int, uw bool) bool {
 	if (uw && rxPropHit(rxPWord, c)) || (!uw && rxIsWord(c)) {
 		return true
 	}
@@ -2646,8 +2761,8 @@ func rxIsWordJ(text []rune, i int, uw bool) bool {
 	if c < 0x300 || !rxPropHit(rxPMn, c) {
 		return false
 	}
-	for k := i - 1; k >= 0; k-- {
-		b := text[k]
+	for k := i; k >= 0; k-- {
+		b, _ := rxCpAt(text, k)
 		if rxPropHit(rxPLD, b) {
 			return true
 		}
@@ -2672,11 +2787,18 @@ func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt)
 		}
 		switch re.ops[pc] {
 		case rxOpClass:
-			if sp >= n || !re.clss[pc].match(text[sp], re.icase) {
+			if sp >= n {
+				return -1
+			}
+			c, w := text[sp], 1
+			if re.java && isHighSurr(c) {
+				c, w = rxCpAt(text, sp)
+			}
+			if !re.clss[pc].match(c, re.icase) {
 				return -1
 			}
 			pc++
-			sp++
+			sp += w
 		case rxOpJmp:
 			pc = re.as[pc]
 		case rxOpSplit:
@@ -2810,11 +2932,15 @@ func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt)
 			}
 			return sp
 		case rxOpClassX:
-			if sp >= n || !re.clss[pc].matchX(text[sp], re.icase) {
+			if sp >= n {
+				return -1
+			}
+			c, w := rxCpAt(text, sp)
+			if !re.clss[pc].matchX(c, re.icase) {
 				return -1
 			}
 			pc++
-			sp++
+			sp += w
 		case rxOpCInit:
 			// Like Mark: write, run on, and put the old count back on failure, so a
 			// loop re-entered by an enclosing one starts from zero.
@@ -2917,10 +3043,15 @@ func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt)
 			sp = jxGraphNext(text, sp, n)
 			pc++
 		case rxOpGBound:
-			// Pattern.GraphemeBound: not before the first boundary after the
-			// previous match's end (a rune never splits a surrogate pair).
-			if sp > 0 && sp < n && jxGraphNext(text, st.glast, n) > sp {
-				return -1
+			// Pattern.GraphemeBound: not between a surrogate pair, and not before
+			// the first boundary after the previous match's end.
+			if sp > 0 && sp < n {
+				if isHighSurr(text[sp-1]) && isLowSurr(text[sp]) {
+					return -1
+				}
+				if jxGraphNext(text, st.glast, n) > sp {
+					return -1
+				}
 			}
 			pc++
 		default:
@@ -2962,7 +3093,7 @@ func (re *rxRe) search(text []rune, start int) (*rxMatch, bool) {
 // read where the previous match ended (gpos, glast); search is a fresh Matcher's
 // find. Twin of rxSearchFrom in lib/regex.js.
 func (re *rxRe) searchFrom(text []rune, from, gpos, glast int) (*rxMatch, bool) {
-	for at := from; at <= len(text); at++ {
+	for at := from; at <= len(text); at = re.nextStart(text, at) {
 		m, ok := re.attempt(text, at, -1, gpos, glast)
 		if !ok {
 			return nil, false
@@ -2972,6 +3103,16 @@ func (re *rxRe) searchFrom(text []rune, from, gpos, glast int) (*rxMatch, bool) 
 		}
 	}
 	return nil, true
+}
+
+// nextStart is where a search tries next after a failed attempt at `at`; twin
+// of the step at the end of rxSearch in lib/regex.js.
+func (re *rxRe) nextStart(text []rune, at int) int {
+	if re.supp && at < len(text) {
+		_, w := rxCpAt(text, at)
+		return at + w
+	}
+	return at + 1
 }
 
 // attempt runs the program ONCE, starting at `at`. mustEnd is -1 for an ordinary
@@ -3032,7 +3173,56 @@ func (re *rxRe) group(text []rune, m *rxMatch, i int) (string, bool) {
 	if from < 0 || to < 0 {
 		return "", false
 	}
-	return string(text[from:to]), true
+	return rxUnitsStr(text[from:to]), true
+}
+
+// wtf8Runes is s as code points with each WTF-8 lone surrogate kept as the
+// surrogate itself, where []rune(s) would give three U+FFFD.
+func wtf8Runes(s string) []rune {
+	if strings.IndexByte(s, 0xED) < 0 {
+		return []rune(s)
+	}
+	out := make([]rune, 0, len(s))
+	for i := 0; i < len(s); {
+		if c := wtf8Surrogate(s[i:]); c != 0 {
+			out = append(out, c)
+			i += 3
+			continue
+		}
+		r, n := utf8.DecodeRuneInString(s[i:])
+		out = append(out, r)
+		i += n
+	}
+	return out
+}
+
+// rxUnits is a J text: s as UTF-16 units, one rune each, the way
+// java.util.regex indexes a CharSequence. rxUnitsStr is the inverse, and also
+// accepts code points: a surrogate pair is joined, a lone surrogate kept as
+// WTF-8.
+func rxUnits(s string) []rune {
+	u := strUnits(s)
+	out := make([]rune, len(u))
+	for i, c := range u {
+		out[i] = rune(c)
+	}
+	return out
+}
+
+func rxUnitsStr(r []rune) string {
+	b := make([]byte, 0, len(r))
+	for i := 0; i < len(r); i++ {
+		c := r[i]
+		if isHighSurr(c) && i+1 < len(r) && isLowSurr(r[i+1]) {
+			b = utf8.AppendRune(b, surrPair(c, r[i+1]))
+			i++
+		} else if isSurrogate(c) {
+			b = appendWTF8(b, c)
+		} else {
+			b = utf8.AppendRune(b, c)
+		}
+	}
+	return string(b)
 }
 
 func (re *rxRe) indexOfName(name string) int {
@@ -3180,6 +3370,9 @@ func rxMatchOf(v interface{}) (*rxRe, []rune, *rxMatch) {
 	m := &rxMatch{caps: caps}
 	if len(caps) >= 2 {
 		m.begin, m.end = caps[0], caps[1]
+	}
+	if re.java {
+		return re, rxUnits(text), m
 	}
 	return re, []rune(text), m
 }

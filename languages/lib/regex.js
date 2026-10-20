@@ -84,7 +84,10 @@
 //                                            the start and scoped (?imsx-imsx:...),
 //                                            $ also matches before a final newline,
 //                                            \Z is the very end; re.gflags answers
-//                                            the inline letters for .flags)
+//                                            the inline letters for .flags; under
+//                                            J it answers Pattern.flags(), the
+//                                            letters in force at the pattern's
+//                                            end, as rxFlagsGet spells them)
 //                                            re.ok is false and re.err is set on a
 //                                            bad pattern; re.errAt is the error's
 //                                            index into the pattern, or -1.
@@ -230,6 +233,25 @@ function rxIsSpaceCode(c) {
 }
 
 function rxIsDigitCode(c) { return c >= 48 && c <= 57 }
+
+// rxCpAt is the code point at UTF-16 index i of s, a surrogate pair read as one.
+// The J dialect reads both pattern and text this way, as java.util.regex reads
+// code points; a lone surrogate is a code point of its own.
+function rxCpAt(s, i) {
+    var c = s.charCodeAt(i)
+    if (c >= 55296 && c <= 56319 && i + 1 < s.length) {
+        var d = s.charCodeAt(i + 1)
+        if (d >= 56320 && d <= 57343) { return (c - 55296) * 1024 + (d - 56320) + 65536 }
+    }
+    return c
+}
+
+// rxCpStr is code point c as UTF-16 text.
+function rxCpStr(c) {
+    if (c < 65536) { return String.fromCharCode(c) }
+    var v = c - 65536
+    return String.fromCharCode(55296 + Math.floor(v / 1024)) + String.fromCharCode(56320 + v % 1024)
+}
 
 function rxIsHexCode(c) {
     if (c >= 48 && c <= 57) { return true }
@@ -408,11 +430,12 @@ function rxClsHitU(cls, c) {
     return false
 }
 
-// rxCaseU is java.lang.Character's simple case mapping of one UTF-16 unit:
-// mode 1 uppercase, 0 lowercase. A mapping that leaves the unit's plane keeps it.
+// rxCaseU is java.lang.Character's simple case mapping of code point c: mode 1
+// uppercase, 0 lowercase. A mapping to more than one code point keeps c.
 function rxCaseU(c, mode) {
-    var s = unicodeCase(String.fromCharCode(c), mode)
-    if (s.length == 1) { return s.charCodeAt(0) }
+    var s = unicodeCase(rxCpStr(c), mode)
+    var r = rxCpAt(s, 0)
+    if (s.length == (r > 65535 ? 2 : 1)) { return r }
     return c
 }
 
@@ -721,6 +744,21 @@ function rxEscJ(st, c, inClass, res) {
             uk = uk + 1
         }
         res.ch = uv
+        // A high surrogate escape and a low surrogate escape after it are one
+        // code point, as Pattern.u() reads them.
+        if (uv >= 55296 && uv <= 56319 && st.i + 5 < st.n && p.charCodeAt(st.i) == 92
+            && p.charCodeAt(st.i + 1) == 117) {
+            var lv = 0
+            var lk = 2
+            while (lk < 6 && rxHexVal(p.charCodeAt(st.i + lk)) >= 0) {
+                lv = lv * 16 + rxHexVal(p.charCodeAt(st.i + lk))
+                lk = lk + 1
+            }
+            if (lk == 6 && lv >= 56320 && lv <= 57343) {
+                res.ch = (uv - 55296) * 1024 + (lv - 56320) + 65536
+                st.i = st.i + 6
+            }
+        }
         return true
     }
     if (c == 112 || c == 80) { // \pX, \p{Name}, and \P for the complement
@@ -748,6 +786,7 @@ function rxEscJ(st, c, inClass, res) {
             pname = String.fromCharCode(0)
         }
         st.pcls = rxPropCls(st, pname, pat)
+        st.supp = true
         st.pcls.neg = c == 80
         return true
     }
@@ -901,6 +940,10 @@ function rxEsc(st, inClass) {
         }
         res.ch = oval
         return res
+    }
+    if (st.java && c >= 55296 && c <= 56319) {
+        c = rxCpAt(p, st.i - 1)
+        if (c > 65535) { st.i = st.i + 1 }
     }
     res.ch = c
     return res
@@ -1131,7 +1174,7 @@ function rxClassJ(st, consume) {
 // answer is an EMPTY class; anything else is answered as a class of its own.
 function rxRangeJ(st, bits) {
     var p = st.p
-    var ch = p.charCodeAt(st.i)
+    var ch = rxCpAt(p, st.i)
     if (ch == 92) { // backslash
         st.i = st.i + 1
         // \v as either end of a range is the one character U+000B.
@@ -1149,7 +1192,7 @@ function rxRangeJ(st, bits) {
             ch = e.ch
         }
     } else {
-        st.i = st.i + 1
+        st.i = st.i + (ch > 65535 ? 2 : 1)
     }
     rxSkipX(st)
     if (st.i < st.n && p.charCodeAt(st.i) == 45) { // -
@@ -1170,15 +1213,18 @@ function rxRangeJ(st, bits) {
                     if (e2.kind == 0) { m = e2.ch }
                 }
             } else {
-                m = p.charCodeAt(st.i)
-                st.i = st.i + 1
+                m = rxCpAt(p, st.i)
+                st.i = st.i + (m > 65535 ? 2 : 1)
             }
             if (m < ch) {
                 rxErrAt(st, "Illegal character range", st.i - 1)
             }
             var rg = rxNewCls()
             rxClsAdd(rg, ch, m)
-            if (st.icase) { rxFoldJ(st, rg, false) }
+            if (st.icase) {
+                rxFoldJ(st, rg, false)
+                st.supp = true
+            }
             return rg
         }
     }
@@ -1520,6 +1566,7 @@ function rxFlagsSet(st, letters, v) {
         st.uclass = v
         st.ucase = v
     }
+    if (letters.indexOf("c") >= 0) { st.canon = v }
 }
 
 // The flags in force, as rxFlagsSet's letters, and back.
@@ -1532,10 +1579,11 @@ function rxFlagsGet(st) {
     if (st.unix) { s = s + "d" }
     if (st.ucase) { s = s + "u" }
     if (st.uclass) { s = s + "U" }
+    if (st.canon) { s = s + "c" }
     return s
 }
 function rxFlagsPut(st, letters) {
-    rxFlagsSet(st, "imsxdU", false)
+    rxFlagsSet(st, "imsxdUc", false)
     rxFlagsSet(st, letters, true)
 }
 
@@ -1711,7 +1759,8 @@ function rxParseAtom(st) {
         st.i = st.i + 1
         return rxNode("empty")
     }
-    st.i = st.i + 1
+    if (st.java) { c = rxCpAt(p, st.i) }
+    st.i = st.i + (c > 65535 ? 2 : 1)
     var lit = rxNode("cls")
     rxClsAdd(lit.cls, c, c)
     if (st.java && st.icase) { rxFoldJ(st, lit.cls, true) }
@@ -2001,7 +2050,7 @@ function rxParseAlt(st) {
 // cmin/cmax/cgreedy describe counted loop i (RX_CINIT .. RX_CINC), lbmin/lbmax
 // the length range of lookbehind i (-1: unbounded).
 function rxNewProg() {
-    return {ops: [], as: [], bs: [], clss: [], nmarks: 0, jsrep: false, dummy: rxNewCls(),
+    return {ops: [], as: [], bs: [], clss: [], nmarks: 0, jsrep: false, java: false, dummy: rxNewCls(),
             cmin: [], cmax: [], cgreedy: [], lbmin: [], lbmax: []}
 }
 
@@ -2111,7 +2160,9 @@ function rxEmit(pg, node) {
         var id = lbs.length
         lbs.push(rxMinLen(node.items[0]))
         var lbx = pg.lbmax
-        lbx.push(rxMaxLen(node.items[0]))
+        // Lengths count characters; a J character is up to two UTF-16 units.
+        var lbm = rxMaxLen(node.items[0])
+        lbx.push(pg.java && lbm > 0 ? rxLenCap(2 * lbm) : lbm)
         var lb = rxAdd(pg, RX_LOOKB, 0, 2 * id + (node.gidx == 1 ? 1 : 0), pg.dummy)
         rxEmit(pg, node.items[0])
         rxAdd(pg, RX_LBEND, 0, 0, pg.dummy)
@@ -2310,6 +2361,64 @@ function rxEmitRep(pg, node) {
 
 // ===== Compilation =====
 
+// rxSuppJ and rxClsBmpJ decide java.util.regex's hasSupplementary for a parsed
+// pattern: does any character it matches come from a predicate that is not a
+// BmpCharPredicate? Those are a single BMP character outside the surrogates,
+// such a range, the ASCII shorthands, \h and \v, and unions and intersections
+// of those; a complement, ., \p, a case-insensitive range and Unicode case
+// folding are not. rxHasSurr adds a surrogate anywhere in the pattern text.
+function rxSuppJ(node) {
+    if (node.t == "cls") { return !rxClsBmpJ(node.cls) }
+    var items = node.items
+    var i = 0
+    while (i < items.length) {
+        if (rxSuppJ(items[i])) { return true }
+        i = i + 1
+    }
+    return false
+}
+
+function rxClsBmpJ(cls) {
+    if (cls.neg || cls.u || cls.props.length > 0) { return false }
+    var lo = cls.lo
+    var hi = cls.hi
+    var i = 0
+    while (i < lo.length) {
+        if (hi[i] >= 55296 && !(lo[i] > 57343 && hi[i] < 65536)) { return false }
+        i = i + 1
+    }
+    var sp = cls.sp
+    i = 0
+    while (i < sp.length) {
+        var k = sp[i]
+        if (k == RX_SND || k == RX_SNW || k == RX_SNS || k == RX_SJNH || k == RX_SJNV) { return false }
+        i = i + 1
+    }
+    var subs = cls.subs
+    i = 0
+    while (i < subs.length) {
+        if (!rxClsBmpJ(subs[i])) { return false }
+        i = i + 1
+    }
+    var ands = cls.ands
+    i = 0
+    while (i < ands.length) {
+        if (!rxClsBmpJ(ands[i])) { return false }
+        i = i + 1
+    }
+    return true
+}
+
+function rxHasSurr(p) {
+    var i = 0
+    while (i < p.length) {
+        var c = p.charCodeAt(i)
+        if (c >= 55296 && c <= 57343) { return true }
+        i = i + 1
+    }
+    return false
+}
+
 function rxCompile(pattern, flags) {
     var icase = false
     var dotall = false
@@ -2371,7 +2480,8 @@ function rxCompile(pattern, flags) {
         octal: octal, ntotal: ere ? 0 : rxCountGroups(pat), ere: ere, posix: posix,
         depth: 0, java: java, errAt: -1, pcls: rxNewCls(),
         py: py, icase: icase, multi: multi, gend: 0, gflags: "",
-        ucase: ucase && java, uclass: false, unix: unix && java, inl: false
+        ucase: ucase && java, uclass: false, unix: unix && java, inl: false, supp: false,
+        canon: false
     }
     // Under P and J case folding and line anchoring are decided per atom while
     // parsing.
@@ -2380,6 +2490,7 @@ function rxCompile(pattern, flags) {
         multi = false
     }
     var ast = rxParseAlt(st)
+    var supp = java && (st.supp || rxSuppJ(ast) || rxHasSurr(pat))
     // Resolve every \k<name> now that the whole name table is known.
     var pend = st.pending
     var pi = 0
@@ -2397,12 +2508,13 @@ function rxCompile(pattern, flags) {
         return {ok: false, err: st.err, errAt: st.errAt, ops: [], as: [], bs: [], clss: [],
                 ngroups: 0, nmarks: 0, names: [], nameGroups: [],
                 icase: icase, dotall: dotall, multi: multi, jsrep: jsrep, java: java,
-                bfail: bfail, gflags: "",
+                supp: false, bfail: bfail, gflags: "",
                 cmin: [], cmax: [], cgreedy: [], lbmin: [], lbmax: [],
                 src: pattern, flags: flags}
     }
     var pg = rxNewProg()
     pg.jsrep = jsrep
+    pg.java = java
     rxAdd(pg, RX_SAVE, 0, 0, pg.dummy)
     rxEmit(pg, ast)
     rxAdd(pg, RX_SAVE, 1, 0, pg.dummy)
@@ -2411,7 +2523,7 @@ function rxCompile(pattern, flags) {
         ok: true, err: "", errAt: -1, ops: pg.ops, as: pg.as, bs: pg.bs, clss: pg.clss,
         ngroups: st.ngroups, nmarks: pg.nmarks, names: st.names, nameGroups: st.nameGroups,
         icase: icase, dotall: dotall, multi: multi, jsrep: jsrep, java: java,
-        bfail: bfail, gflags: st.gflags,
+        supp: supp, bfail: bfail, gflags: java ? rxFlagsGet(st) : st.gflags,
         cmin: pg.cmin, cmax: pg.cmax, cgreedy: pg.cgreedy, lbmin: pg.lbmin, lbmax: pg.lbmax,
         src: pattern, flags: flags
     }
@@ -2477,23 +2589,32 @@ function rxAssertJ(text, kind, sp) {
         return sp == n - 1 && !(c == 10 && sp > 0 && text.charCodeAt(sp - 1) == 13)
     }
     var uw = kind == RX_JUWORDB || kind == RX_JUNWORDB
-    var before = sp > 0 && rxIsWordJ(text, sp - 1, uw)
-    var after = sp < n && rxIsWordJ(text, sp, uw)
+    var before = false
+    if (sp > 0) {
+        // Character.codePointBefore: a pair only when the unit before sp is
+        // its low half.
+        var bc = text.charCodeAt(sp - 1)
+        if (bc >= 56320 && bc <= 57343 && sp > 1 && rxCpAt(text, sp - 2) > 65535) {
+            bc = rxCpAt(text, sp - 2)
+        }
+        before = rxIsWordJ(text, bc, sp - 1, uw)
+    }
+    var after = sp < n && rxIsWordJ(text, rxCpAt(text, sp), sp, uw)
     if (kind == RX_JWORDB || kind == RX_JUWORDB) { return before != after }
     return before == after
 }
 
-// rxIsWordJ is Pattern.Bound's side test for text[i]: a word character (ASCII,
-// or Unicode's under UNICODE_CHARACTER_CLASS), or a non-spacing mark whose run
-// of non-spacing marks starts after a letter or digit.
-function rxIsWordJ(text, i, uw) {
-    var c = text.charCodeAt(i)
+// rxIsWordJ is Pattern.Bound's side test for the character c: a word
+// character (ASCII, or Unicode's under UNICODE_CHARACTER_CLASS), or a
+// non-spacing mark that hasBaseCharacter accepts, reading the code point at
+// each unit from i down to the start.
+function rxIsWordJ(text, c, i, uw) {
     if (uw ? rxPropHit(RX_PWORD, c) : rxIsWordCode(c)) { return true }
     // No non-spacing mark lies below U+0300.
     if (c < 768 || !rxPropHit(RX_PMN, c)) { return false }
-    var k = i - 1
+    var k = i
     while (k >= 0) {
-        var b = text.charCodeAt(k)
+        var b = rxCpAt(text, k)
         if (rxPropHit(RX_PLD, b)) { return true }
         if (b < 768 || !rxPropHit(RX_PMN, b)) { return false }
         k = k - 1
@@ -2521,9 +2642,12 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st) {
         var op = ops[pc]
         if (op == RX_CLASS) {
             if (sp >= n) { return -1 }
-            if (!rxClsMatch(clss[pc], text.charCodeAt(sp), re.icase)) { return -1 }
+            var cc = text.charCodeAt(sp)
+            // J reads a surrogate pair as one character.
+            if (cc >= 55296 && cc <= 56319 && re.java) { cc = rxCpAt(text, sp) }
+            if (!rxClsMatch(clss[pc], cc, re.icase)) { return -1 }
             pc = pc + 1
-            sp = sp + 1
+            sp = sp + (cc > 65535 ? 2 : 1)
         } else if (op == RX_JMP) {
             pc = as[pc]
         } else if (op == RX_SPLIT) {
@@ -2646,9 +2770,10 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st) {
             return sp
         } else if (op == RX_CLASSX) {
             if (sp >= n) { return -1 }
-            if (!rxClsMatchX(clss[pc], text.charCodeAt(sp), re.icase)) { return -1 }
+            var xc = rxCpAt(text, sp)
+            if (!rxClsMatchX(clss[pc], xc, re.icase)) { return -1 }
             pc = pc + 1
-            sp = sp + 1
+            sp = sp + (xc > 65535 ? 2 : 1)
         } else if (op == RX_CINIT) {
             // Like MARK: write, run on, and put the old count back on failure, so
             // a loop re-entered by an enclosing one starts from zero.
@@ -2814,7 +2939,10 @@ function rxSearch(re, text, start) {
     while (at <= text.length) {
         var m = rxAttempt(re, text, at, -1, from, 0)
         if (m != null) { return m }
-        at = at + 1
+        // After a failed attempt a J pattern with re.supp steps over a surrogate
+        // pair whole, as java.util.regex's StartS does; any other steps one
+        // unit, as Start does.
+        at = re.supp && at + 1 < text.length && rxCpAt(text, at) > 65535 ? at + 2 : at + 1
     }
     return null
 }
@@ -2828,7 +2956,7 @@ function rxSearchFrom(re, text, start, gpos, glast) {
     while (at <= text.length) {
         var m = rxAttempt(re, text, at, -1, gpos, glast)
         if (m != null) { return m }
-        at = at + 1
+        at = re.supp && at + 1 < text.length && rxCpAt(text, at) > 65535 ? at + 2 : at + 1
     }
     return null
 }

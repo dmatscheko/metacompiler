@@ -161,6 +161,7 @@ class Main {
         S75.run(); // SECTION-CALL 75
         S76.run(); // SECTION-CALL 76
         S77.run(); // SECTION-CALL 77
+        S78.run(); // SECTION-CALL 78
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -4402,5 +4403,42 @@ class S77 {
         try { "x".replaceAll("\t**", "b"); } catch (java.util.regex.PatternSyntaxException e) { ps = ps + "|" + e.getDescription() + "|" + e.getIndex() + "|" + e.getMessage(); }
         Main.check("ps77", ps.equals("Illegal repetition|4|a\t\t{|Illegal repetition near index 4\na\t\t{|Unclosed group|3|(ab"
             + "|Dangling meta character '*'|2|Dangling meta character '*' near index 2\n\t**\n\t ^"));
+    }
+}
+
+// ===== SECTION 78: supplementary characters in java.util.regex, a constructed PatternSyntaxException =====
+//
+// A pattern and its input are read by code point: a surrogate pair is one
+// character to . [^a] \p{..} and a class range, 😀 is one escape, and
+// \b reads the code point before and at the position. A search steps over a
+// pair whole only when the pattern can match a supplementary character (Java's
+// StartS); an empty match still advances one unit, so a* lands between the
+// halves. A program's own new PatternSyntaxException(desc, regex, index)
+// formats its message as Pattern's do. Every expected value is java 24.0.2's.
+class S78 {
+    static void run() {
+        String[] ps = {".", "[^a]", "\\p{So}", "\\uD83D\\uDE00", "[😀-😂]", "\\x{1F600}", "..", "[\\x{1F600}]+", "\\W", "\\P{L}"};
+        String ms = "";
+        for (String p : ps) { ms = ms + "😀".matches(p) + ";"; }
+        ms = ms + "𐐨".matches("(?i)𐐀") + ";" + "𐐨".matches("(?iu)𐐀") + ";" + "😀😀".matches("(.)\\1")
+            + ";" + "\uD83D".matches(".");
+        Main.check("sp78", ms.equals("true;true;true;true;true;true;false;true;true;true;false;true;true;true"));
+        String rp = "a😀b".replaceAll(".", "#") + "|" + "x😀😁y".replaceAll("[^a-z]", "#") + "|" + "😀".replaceAll("a*", "#").length()
+            + "|" + "a𝐀b".replaceAll("\\B", "#").length() + "|" + "😀😀".replaceAll("\\p{Cs}", "#") + "|" + "😀b".replaceAll("(?<=😀)b", "#")
+            + "|" + "a😀b".split("").length + "|" + String.join("/", "a😀b😁c".split("[^a-z]")) + "|" + "😀x".replaceFirst("\\X", "<$0>")
+            + "|" + "𝐀́x".replaceAll("\\b", "#") + "|" + "x😀".replaceAll("(?U)\\b", "#") + "|" + "\uDE00z".replaceAll(".", "#");
+        String pc = "";
+        for (int k = 0; k < 3; k++) {
+            try {
+                if (k == 0) { throw new java.util.regex.PatternSyntaxException("Bad", "a(\tb", 3); }
+                if (k == 1) { throw new java.util.regex.PatternSyntaxException("None", "xyz", -1); }
+                throw new java.util.regex.PatternSyntaxException(null, null, 5);
+            } catch (IllegalArgumentException e) {
+                java.util.regex.PatternSyntaxException pe = (java.util.regex.PatternSyntaxException) e;
+                pc = pc + pe.getDescription() + "|" + pe.getIndex() + "|" + pe.getPattern() + "|" + e.getMessage() + ";";
+            }
+        }
+        Main.check("pc78", pc.equals("Bad|3|a(\tb|Bad near index 3\na(\tb\n  \t^;None|-1|xyz|None\nxyz;null|5|null|null near index 5\nnull;"));
+        Main.check("sr78", rp.equals("###|x##y|5|5|😀😀|😀#|4|a/b/c|<😀>x|𝐀́#x#|#x#😀|##"));
     }
 }

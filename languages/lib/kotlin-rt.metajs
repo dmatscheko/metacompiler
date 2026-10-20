@@ -10094,7 +10094,18 @@ function ktRxNew(src, flags) {
     // Pattern.compile throws PatternSyntaxException, an IllegalArgumentException.
     var re = rxGet(pat, fl["flags"])
     if (!re["ok"]) { ktRaise("PatternSyntaxException", jxReMsg(pat, re["err"], re["errAt"])) }
-    return {__rxsrc: pat, __rxflags: fl["flags"]}
+    var o = {__rxsrc: pat, __rxflags: fl["flags"]}
+    // The pattern as given, which pattern and toString answer.
+    if (fl["literal"]) { o["__ktpat"] = ktRender(src) }
+    return o
+}
+
+// ktRxPattern is Regex.pattern: the pattern as given, before LITERAL quoted it.
+// Twin of ktRxPattern in abnf/jsrtregexkt.go.
+function ktRxPattern(o) {
+    var p = o["__ktpat"]
+    if (typeof p == "string") { return p }
+    return k5ObjRe(o)["src"]
 }
 
 // The `RegexOption` and `Regex` names used as VALUES. A RegexOption is modelled
@@ -10164,7 +10175,7 @@ function ktRxMethod(recv, name, args) {
                              k5Template(ktRender(k5Arg(args, 1))), false)
         }
         if (name == "split") { return k5Split(rre, ktRender(k5Arg(args, 0)), k5ArgInt(args, 1, 0)) }
-        if (name == "toString") { return rre["src"] }
+        if (name == "toString") { return ktRxPattern(recv) }
         fail("unknown Regex method: " + name)
     }
     if (ktRxIsMatch(recv)) {
@@ -10192,8 +10203,12 @@ function ktRxMethod(recv, name, args) {
 // ktRxFget is Regex.pattern and the MatchResult properties.
 function ktRxFget(o, name) {
     if (ktRxIsRegex(o)) {
-        if (name == "pattern") { return k5ObjRe(o)["src"] }
-        if (name == "options") { return [] }
+        if (name == "pattern") { return ktRxPattern(o) }
+        if (name == "options") {
+            var set = ktMakeSet()
+            set["keys"] = jxRegexOptions(k5ObjRe(o)["gflags"], typeof o["__ktpat"] == "string")
+            return set
+        }
         return KT_MISS
     }
     if (ktRxIsMatch(o)) {

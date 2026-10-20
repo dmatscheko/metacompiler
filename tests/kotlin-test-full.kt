@@ -712,6 +712,23 @@ fun s23() {
     check("re61", Regex("\\b{g}").replace("ae\u0301x", "|") == "|a|e\u0301|x|" && Regex("\\Ga").replace("aab", "-") == "--b"
                   && Regex("\\p{IsLatin}+").find("\u03b1ab")!!.value == "ab"
                   && rxErr23("(?q)") == "PatternSyntaxException: Unknown inline modifier near index 2|(?q)|  ^")
+    // A surrogate pair is one character to the pattern and the input, while
+    // ranges stay UTF-16 indices; an empty match advances one unit, so x? and \B
+    // land between the halves. Read off kotlin-stdlib 2.2.21 on java 24.
+    check("re62", Regex(".").replace("a\uD83D\uDE00b", "#") == "###" && Regex("\\p{So}").matches("\uD83D\uDE00")
+                  && Regex("\\uD83D\\uDE00").matches("\uD83D\uDE00") && Regex("[\uD83D\uDE00-\uD83D\uDE02]").matches("\uD83D\uDE01")
+                  && !Regex("..").matches("\uD83D\uDE00") && Regex("\uD801\uDC00", RegexOption.IGNORE_CASE).matches("\uD801\uDC28")
+                  && !Regex("(?i)\uD801\uDC00").matches("\uD801\uDC28"))
+    check("re63", Regex("\\B").replace("a\uD835\uDC00b", "#") == "a\uD835#\uDC00b" && Regex("a*").split("\uD83D\uDE00").size == 4
+                  && Regex("x?").replace("\uD801\uDC00x\uD801\uDC28") { "<" + it.value.length + ">" } == "<0>\uD801<0>\uDC00<1><0>\uD801<0>\uDC28<0>"
+                  && Regex("(.)(.)").find("a\uD83D\uDE00b\uD83D\uDE01c", 2)!!.range.first == 2
+                  && Regex("[^a-z]").findAll("a\uD83D\uDE00b\uD83D\uDE01c").map { it.range.first }.toList() == listOf(1, 4))
+    // options is Pattern.flags() read back as RegexOption entries: the inline
+    // flags still in force at the end count, a scoped (?i:..) does not.
+    check("re64", "" + Regex("a", RegexOption.IGNORE_CASE).options + Regex("(?i)a").options + Regex("(?i:a)").options + Regex("(?im)a(?-i)").options
+                  + Regex("a.b", setOf(RegexOption.MULTILINE, RegexOption.LITERAL)).options == "[IGNORE_CASE][IGNORE_CASE][][MULTILINE][MULTILINE, LITERAL]"
+                  && Regex("(?s)x").options == setOf(RegexOption.DOT_MATCHES_ALL) && Regex("a").options.isEmpty()
+                  && Regex("a.b", RegexOption.LITERAL).pattern == "a.b" && "" + Regex("a.b", RegexOption.LITERAL) == "a.b")
 }
 
 // ===== SECTION 24: floating point arithmetic =====
