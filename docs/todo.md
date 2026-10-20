@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-698** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-699** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -91,10 +91,10 @@ fn.length` keeps it (node removes it: length 0, hasOwnProperty false).
 
 # JV — Java
 
-### T-661 java: Matcher.hitEnd / requireEnd · P3 · JV · IN PROGRESS (JV worker, round 11) [V]
-`Matcher m = Pattern.compile("abc").matcher("ab"); m.find(); m.hitEnd()` → unknown method in all engines (java true); requireEnd likewise.
-Needs a hit-the-end flag from the shared regex engine (J-gated lib/regex.js / abnf/jsrtregex.go), then a small java side. Transparent
-and non-anchoring region bounds (useTransparentBounds / useAnchoringBounds) are not modelled.
+### T-698 java regex: a region end cutting a surrogate pair; `\G` in matches()/lookingAt() after an earlier match · P3 · JV · OPEN [V]
+Pattern ".", text "😀", region(0,1), lookingAt() → java false / hitEnd true, ours true / false (java reads the code point across the
+region end; we substring); `[a&&[^b]]+`, `\p{L}+`, a supplementary literal differ in hitEnd. Pattern "\\Ga" on "a": matches() true
+then lookingAt() → java false (\G is oldLast), ours true (gpos=from); needs a gpos parameter on rxMatchAt/rxMatchWhole. Regex owner.
 
 ---
 
@@ -794,6 +794,7 @@ T-693 php: `"a{b}"` in a double-quoted string is read as interpolation — DONE 
 T-691 js/ts: strict write to a function's `name`/`length` is silent; TS legacy octal `010` — DONE 43c6e0bd (strict refusal of fn/class name/length writes in all engines, no legacy octal/leading-zero literals in TS and JS separators/BigInt — node + tsc 6; follow-ups T-694/T-695)
 T-689 go: native append costs ~120k instructions per call — DONE 0b7d7180 (append path off layer-2 plumbing externs: 1M appends 243G→18.2G instructions, 21.1s→1.8s; output byte-identical)
 T-690 go: `%T` of a dynamically typed int64 prints `int` — DONE f5f57ab0 (type-parameter statics resolve to the bound type for boxing; any(x) conversions and ...T params box — 4 legs = go run; follow-ups T-696/T-697)
+T-661 java: Matcher.hitEnd / requireEnd — DONE ac76281e (hitEnd/requireEnd set at java.util.regex's own node points, Begin root and Start minLength guard, sticky across reset/region — 4 legs = java 24; follow-up T-698)
 
 # Settled — do not re-open
 
