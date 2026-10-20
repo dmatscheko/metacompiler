@@ -82,6 +82,17 @@
 import "./runtime.metajs"
 // PHP's byte-string primitives, shared with php-interpreter.abnf.
 import "./php-strings.js"
+// The preg_* natives on the shared regex engine's C dialect, its \p tables
+// java.util.regex's; shared with php-interpreter.abnf. rxFail, rxPropHit,
+// rxPropCls and rxGraphNext are regex.js's knobs, set by assignment.
+import "./regex.js"
+import "./java-chars.js"
+import "./java-regex.js"
+import "./php-preg.js"
+rxFail = function (msg) { fail("regexp: " + msg) }
+rxPropHit = function (id, c) { return jxPropHit(id, c) }
+rxPropCls = function (st, name, at) { return jxPropCls(st, name, at) }
+rxGraphNext = function (text, i, limit) { return jxGraphNext(text, i, limit) }
 
 // ----- the rtk* hooks the shared runtime calls -------------------------------
 function rtkStr(v) { return phJavaStr(v) }
@@ -4110,6 +4121,28 @@ function js_phprecision(p) {
     var old = phPrecision
     if (!rtIsNil(p)) { phPrecision = phInt(p) }
     return old
+}
+
+// preg_*'s compile and match (lib/php-preg.js). Twins of __mec_pregc and
+// __mec_pregx in php-interpreter.abnf.
+function phArrOfList(list) {
+    var a = phNewArr()
+    var i = 0
+    while (i < list.length) {
+        phArrPush(a, list[i])
+        i = i + 1
+    }
+    return a
+}
+function js_phpregc(key) {
+    var names = phpPregCompile(phStr(key))
+    if (typeof names == "string") { return names }
+    return phArrOfList(names)
+}
+function js_phpregx(key, s, pos) {
+    var r = phpPregExec(phStr(key), phStr(s), phInt(pos))
+    if (typeof r == "number") { return r }
+    return phArrOfList(r)
 }
 
 function js_phmath(op, x, y) { return phMkFlo(phsMath(phStr(op), phNumOf(phToNum(x)), phNumOf(phToNum(y)))) }

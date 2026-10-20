@@ -493,6 +493,8 @@ type rxSt struct {
 	gnodes []*rxNode
 	// re2 is the R flag: the J pattern is rxRe2's rewrite of a Go one.
 	re2 bool
+	// pcre is the C flag: the J pattern is rxPcre's rewrite of a PCRE2 one.
+	pcre bool
 }
 
 // rxIsMetaCh answers whether a character has to be backslashed to stay a literal.
@@ -835,7 +837,8 @@ func (st *rxSt) escJ(c rune, inClass bool) (res rxEscRes, handled bool) {
 			return res, true
 		}
 		g := int(c - '0')
-		for st.i < st.n && rxIsDigit(p[st.i]) && g*10+int(p[st.i]-'0') <= st.ngroups {
+		// Under C every digit is the number's (rxPcre writes (?:\n)).
+		for st.i < st.n && rxIsDigit(p[st.i]) && (st.pcre || g*10+int(p[st.i]-'0') <= st.ngroups) {
 			g = g*10 + int(p[st.i]-'0')
 			st.i++
 		}
@@ -1865,6 +1868,12 @@ func (st *rxSt) parseAtom() *rxNode {
 			st.i += 2
 			return rxLinebreakJ()
 		}
+		if st.pcre && nxt == 'K' { // \K: the match starts here, group 0's SAVE
+			st.i += 2
+			op := rxNewNode("op")
+			op.gidx = rxOpSave
+			return op
+		}
 		if st.java && (nxt == 'G' || nxt == 'X') {
 			st.i += 2
 			op := rxNewNode("op")
@@ -2501,6 +2510,22 @@ func (st *rxSt) lookbVarP(n *rxNode) bool {
 	}
 	for _, it := range n.items {
 		if st.lookbVarP(it) {
+			return true
+		}
+	}
+	return false
+}
+
+// rxLookbLongC: does a lookbehind under C pass PCRE2's 255 characters, or have
+// no limit? Twin of rxLookbLongC in lib/regex.js.
+func rxLookbLongC(n *rxNode) bool {
+	if n.t == "lookb" {
+		if m := n.items[0].maxLen(); m < 0 || m > 255 {
+			return true
+		}
+	}
+	for _, it := range n.items {
+		if rxLookbLongC(it) {
 			return true
 		}
 	}
@@ -3587,30 +3612,1177 @@ type rxRe struct {
 	lbmin, lbmax        []int
 	src                 string
 	flags               string
+	// pcre is the C flag (rxPcre): see rxRunUndo.
+	pcre bool
+}
+
+// ===== The C dialect: PCRE2, as PHP's preg_* compile it =====
+//
+// rxPcre reads a PCRE2 pattern and writes its J spelling; twin of rxPcre in
+// lib/regex.js, which states the rules.
+
+// The J items of PCRE2's UCP \w (L, N, Mn, Pc) and \s (Z, \h, \v).
+const rxPcreUW = "\\p{L}\\p{N}_\\p{Mn}\\p{Pc}"
+const rxPcreUS = "\\p{Z}\\h\\v"
+
+type rxPcreFrame struct{ i, m, s, x, U, n, J bool }
+
+type rxPcreRefRec struct {
+	part, n, at int
+	name        string
+}
+
+type rxPcreSt struct {
+	p                          []rune
+	i, n                       int
+	err                        string
+	errAt                      int
+	out                        string
+	parts                      []string
+	refs                       []rxPcreRefRec
+	frames                     []rxPcreFrame
+	ncap                       int
+	names                      []string
+	nameGroups                 []int
+	okq, utf, dup, dollarEnd   bool
+	fi, fm, fs, fx, fU, fn, fJ bool
+}
+
+type rxPcreRes struct {
+	out, err   string
+	errAt      int
+	names      []string
+	nameGroups []int
+}
+
+func (t *rxPcreSt) fail(msg string, at int) {
+	if t.err == "" {
+		t.err, t.errAt = msg, at
+	}
+}
+
+func (t *rxPcreSt) emit(s string, okq bool) {
+	t.out += s
+	t.okq = okq
+}
+
+func rxPcreLitText(c rune) string {
+	if rxIsWord(c) && c != '_' {
+		return string(c)
+	}
+	return rxRe2Hex(c)
+}
+
+func (t *rxPcreSt) frame() rxPcreFrame {
+	return rxPcreFrame{i: t.fi, m: t.fm, s: t.fs, x: t.fx, U: t.fU, n: t.fn, J: t.fJ}
+}
+
+func (t *rxPcreSt) open() { t.frames = append(t.frames, t.frame()) }
+
+func (t *rxPcreSt) close() {
+	if len(t.frames) == 0 {
+		t.fail("unmatched closing parenthesis", t.i)
+		return
+	}
+	f := t.frames[len(t.frames)-1]
+	t.frames = t.frames[:len(t.frames)-1]
+	t.fi, t.fm, t.fs, t.fx, t.fU, t.fn, t.fJ = f.i, f.m, f.s, f.x, f.U, f.n, f.J
+	t.i++
+	t.emit(")", true)
+}
+
+func (t *rxPcreSt) isXSpace(c rune) bool {
+	if c == ' ' || (c >= 9 && c <= 13) {
+		return true
+	}
+	return t.utf && (c == 0x85 || c == 0x200E || c == 0x200F || c == 0x2028 || c == 0x2029)
+}
+
+func (t *rxPcreSt) skip() {
+	p := t.p
+	for t.i < t.n {
+		c := p[t.i]
+		switch {
+		case c == '\\' && t.i+1 < t.n && p[t.i+1] == 'E':
+			t.i += 2
+		case c == '\\' && t.i+3 < t.n && p[t.i+1] == 'Q' && p[t.i+2] == '\\' && p[t.i+3] == 'E':
+			t.i += 4
+		case t.fx && t.isXSpace(c):
+			t.i++
+		case t.fx && c == '#':
+			for t.i < t.n && p[t.i] != '\n' {
+				t.i++
+			}
+		case c == '(' && t.i+2 < t.n && p[t.i+1] == '?' && p[t.i+2] == '#':
+			e := t.i + 3
+			for e < t.n && p[e] != ')' {
+				e++
+			}
+			if e >= t.n {
+				t.fail("missing ) at end of (?# comment", t.n)
+				return
+			}
+			t.i = e + 1
+		default:
+			return
+		}
+	}
+}
+
+// bound is read_repeat_counts at the "{" at t.i; ok false when it is not one.
+func (t *rxPcreSt) bound() (min, max, end int, ok bool) {
+	p := t.p
+	j := t.i + 1
+	min, max = -1, -1
+	sp := func() {
+		for j < t.n && (p[j] == ' ' || p[j] == '\t') {
+			j++
+		}
+	}
+	num := func() int {
+		v := 0
+		for j < t.n && rxIsDigit(p[j]) {
+			v = v*10 + int(p[j]-'0')
+			if v > 99999999 {
+				v = 99999999
+			}
+			j++
+		}
+		return v
+	}
+	sp()
+	if j < t.n && rxIsDigit(p[j]) {
+		min = num()
+	}
+	sp()
+	if j >= t.n {
+		return 0, 0, 0, false
+	}
+	if p[j] == '}' {
+		if min < 0 {
+			return 0, 0, 0, false
+		}
+		return min, min, j + 1, true
+	}
+	if p[j] != ',' {
+		return 0, 0, 0, false
+	}
+	j++
+	sp()
+	hasMax := false
+	if j < t.n && rxIsDigit(p[j]) {
+		hasMax = true
+		max = num()
+	}
+	if min < 0 && !hasMax {
+		return 0, 0, 0, false
+	}
+	sp()
+	if j >= t.n || p[j] != '}' {
+		return 0, 0, 0, false
+	}
+	if min < 0 {
+		min = 0
+	}
+	return min, max, j + 1, true
+}
+
+func (t *rxPcreSt) quant() {
+	p := t.p
+	c := p[t.i]
+	q := ""
+	at := t.i
+	switch c {
+	case '*', '+', '?':
+		q = string(c)
+		t.i++
+	default:
+		min, max, end, _ := t.bound()
+		if min > 65535 || max > 65535 {
+			t.fail("number too big in {} quantifier", end-1)
+			return
+		}
+		if max >= 0 && max < min {
+			t.fail("numbers out of order in {} quantifier", end-1)
+			return
+		}
+		q = "{" + strconv.Itoa(min)
+		if max < 0 {
+			q += ","
+		} else if max != min {
+			q += "," + strconv.Itoa(max)
+		}
+		q += "}"
+		t.i = end
+	}
+	if !t.okq {
+		t.fail("quantifier does not follow a repeatable item", at)
+		return
+	}
+	t.skip()
+	lazy, poss := t.fU, false
+	if t.i < t.n && p[t.i] == '?' {
+		lazy = !lazy
+		t.i++
+	} else if t.i < t.n && p[t.i] == '+' {
+		poss, lazy = true, false
+		t.i++
+	}
+	if lazy {
+		q += "?"
+	} else if poss {
+		q += "+"
+	}
+	t.emit(q, false)
+}
+
+func (t *rxPcreSt) name(term rune) string {
+	p := t.p
+	s := t.i
+	for t.i < t.n && t.i-s <= 32 {
+		c := p[t.i]
+		if !(rxIsWord(c) || (t.utf && c > 127 && rxPropHit(rxPLD, func() rune { r, _ := rxCpAt(p, t.i); return r }()))) {
+			break
+		}
+		if isHighSurr(c) {
+			t.i += 2
+		} else {
+			t.i++
+		}
+	}
+	if t.i == s {
+		t.fail("subpattern name expected", t.i)
+		return ""
+	}
+	if rxIsDigit(p[s]) {
+		t.fail("subpattern name must start with a non-digit", s)
+		return ""
+	}
+	if t.i-s > 32 {
+		t.fail("subpattern name is too long (maximum 32 code units)", t.i)
+		return ""
+	}
+	if t.i >= t.n || p[t.i] != term {
+		t.fail("syntax error in subpattern name (missing terminator?)", t.i)
+		return ""
+	}
+	nm := rxUnitsStr(p[s:t.i])
+	t.i++
+	return nm
+}
+
+func (t *rxPcreSt) ref(n int, name string, at int) {
+	t.parts = append(t.parts, t.out)
+	t.refs = append(t.refs, rxPcreRefRec{part: len(t.parts), n: n, name: name, at: at})
+	t.parts = append(t.parts, "")
+	t.out = ""
+	t.emit("", true)
+}
+
+func (t *rxPcreSt) num() int {
+	v := 0
+	for t.i < t.n && rxIsDigit(t.p[t.i]) {
+		v = v*10 + int(t.p[t.i]-'0')
+		if v > 99999999 {
+			v = 99999999
+		}
+		t.i++
+	}
+	return v
+}
+
+func (t *rxPcreSt) short(cls *rxRe2Cls, c rune) {
+	lc := c
+	if c >= 'A' && c <= 'Z' {
+		lc = c + 32
+	}
+	if !t.utf {
+		cls.group(rxRe2Spec(string(lc)), lc != c)
+		return
+	}
+	items := rxPcreUS
+	if lc == 'd' {
+		items = "\\p{Nd}"
+	} else if lc == 'w' {
+		items = rxPcreUW
+	}
+	if lc == c {
+		cls.props += items
+	} else {
+		cls.props += "[^" + items + "]"
+	}
+}
+
+func (t *rxPcreSt) prop(cls *rxRe2Cls, neg bool) {
+	p := t.p
+	name := ""
+	if t.i < t.n && p[t.i] == '{' {
+		e := t.i + 1
+		for e < t.n && p[e] != '}' {
+			e++
+		}
+		if e >= t.n {
+			t.fail("malformed \\P or \\p sequence", e)
+			return
+		}
+		name = rxUnitsStr(p[t.i+1 : e])
+		t.i = e + 1
+	} else if t.i < t.n {
+		name = rxUnitsStr(p[t.i : t.i+1])
+		t.i++
+	} else {
+		t.fail("malformed \\P or \\p sequence", t.i)
+		return
+	}
+	if len(name) > 0 && name[0] == '^' {
+		neg = !neg
+		name = name[1:]
+	}
+	key := rxRe2Canon(name)
+	items := ""
+	switch {
+	case name == "L&" || key == "Lc" || key == "L&":
+		items = "\\p{LC}"
+	case key == "Xan":
+		items = "\\p{L}\\p{N}"
+	case key == "Xwd":
+		items = rxPcreUW
+	case key == "Xsp" || key == "Xps":
+		items = rxPcreUS
+	case key == "Xuc":
+		items = "$@`\\x{A0}-\\x{D7FF}\\x{E000}-\\x{10FFFF}"
+	default:
+		items = rxRe2Prop(name, 1)
+		if key == "Any" {
+			items = "\\x{0}-\\x{10FFFF}"
+		}
+	}
+	if items == "" {
+		t.fail("unknown property after \\P or \\p", t.i)
+		return
+	}
+	if neg {
+		cls.props += "[^" + items + "]"
+	} else {
+		cls.props += items
+	}
+}
+
+// char is check_escape for a character; -1 when the escape at t.i is not one.
+func (t *rxPcreSt) char(inClass bool) rune {
+	p := t.p
+	c, w := rxCpAt(p, t.i)
+	if !(rxIsWord(c) && c != '_') {
+		t.i += w
+		return c
+	}
+	switch c {
+	case 'a':
+		t.i++
+		return 7
+	case 'e':
+		t.i++
+		return 27
+	case 'f':
+		t.i++
+		return 12
+	case 'n':
+		t.i++
+		return '\n'
+	case 'r':
+		t.i++
+		return '\r'
+	case 't':
+		t.i++
+		return '\t'
+	}
+	if c == 'b' && inClass {
+		t.i++
+		return 8
+	}
+	if c == '0' || (inClass && c >= '1' && c <= '7') {
+		v := c - '0'
+		t.i++
+		for k := 1; k < 3 && t.i < t.n && p[t.i] >= '0' && p[t.i] <= '7'; k++ {
+			v = v*8 + p[t.i] - '0'
+			t.i++
+		}
+		if !t.utf && v > 255 {
+			t.fail("octal value is greater than \\377 in 8-bit non-UTF-8 mode", t.i)
+		}
+		return v
+	}
+	if inClass && (c == '8' || c == '9') {
+		t.i++
+		return c
+	}
+	if c == 'o' {
+		if t.i+1 >= t.n || p[t.i+1] != '{' {
+			t.fail("missing opening brace after \\o", t.i+1)
+			return 0
+		}
+		return t.braced(8)
+	}
+	if c == 'x' {
+		if t.i+1 < t.n && p[t.i+1] == '{' {
+			return t.braced(16)
+		}
+		t.i++
+		v := rune(0)
+		for k := 0; k < 2 && t.i < t.n && rxIsHex(p[t.i]); k++ {
+			v = v*16 + rune(rxHexVal(p[t.i]))
+			t.i++
+		}
+		return v
+	}
+	if c == 'c' {
+		if t.i+1 >= t.n {
+			t.fail("\\c at end of pattern", t.i+1)
+			return 0
+		}
+		cc := p[t.i+1]
+		if cc >= 'a' && cc <= 'z' {
+			cc -= 32
+		}
+		if cc < 32 || cc > 126 {
+			t.fail("\\c must be followed by a printable ASCII character", t.i+1)
+			return 0
+		}
+		t.i += 2
+		return cc ^ 0x40
+	}
+	if c == 'N' && t.i+3 < t.n && p[t.i+1] == '{' && p[t.i+2] == 'U' && p[t.i+3] == '+' {
+		if !t.utf {
+			t.fail("\\N{U+dddd} is supported only in Unicode (UTF) mode", t.i+3)
+			return 0
+		}
+		t.i += 2
+		return t.braced(16)
+	}
+	return -1
+}
+
+func (t *rxPcreSt) braced(base rune) rune {
+	p := t.p
+	t.i += 2
+	for t.i < t.n && (p[t.i] == ' ' || p[t.i] == '\t') {
+		t.i++
+	}
+	if t.i >= t.n || p[t.i] == '}' {
+		t.fail("digits missing in \\x{} or \\o{} or \\N{U+}", t.i)
+		return 0
+	}
+	v := rune(0)
+	lim := rune(255)
+	if t.utf {
+		lim = 0x10FFFF
+	}
+	for t.i < t.n {
+		d := rune(-1)
+		if base == 16 && rxIsHex(p[t.i]) {
+			d = rune(rxHexVal(p[t.i]))
+		} else if base == 8 && p[t.i] >= '0' && p[t.i] <= '7' {
+			d = p[t.i] - '0'
+		}
+		if d < 0 {
+			break
+		}
+		v = v*base + d
+		if v > lim {
+			t.fail("character code point value in \\x{} or \\o{} is too large", t.i)
+			return 0
+		}
+		t.i++
+	}
+	for t.i < t.n && (p[t.i] == ' ' || p[t.i] == '\t') {
+		t.i++
+	}
+	if t.i >= t.n || p[t.i] != '}' {
+		if base == 16 {
+			t.fail("\\x{ is not followed by } (or the hex digits are invalid)", t.i)
+		} else {
+			t.fail("non-octal character in \\o{} (closing brace missing?)", t.i)
+		}
+		return 0
+	}
+	t.i++
+	if t.utf && v >= 0xD800 && v <= 0xDFFF {
+		t.fail("disallowed Unicode code point (>= 0xd800 && <= 0xdfff)", t.i-1)
+	}
+	return v
+}
+
+func (t *rxPcreSt) posix(cls *rxRe2Cls) bool {
+	p := t.p
+	if t.i+2 >= t.n || p[t.i+1] != ':' {
+		return false
+	}
+	e := -1
+	for j := t.i + 2; j+1 < t.n; j++ {
+		c := p[j]
+		if c == '\\' && (p[j+1] == ']' || p[j+1] == '\\') {
+			j++
+		} else if (c == '[' && p[j+1] == ':') || c == ']' {
+			return false
+		} else if c == ':' && p[j+1] == ']' {
+			e = j
+			break
+		}
+	}
+	if e < 0 {
+		return false
+	}
+	name := rxUnitsStr(p[t.i+2 : e])
+	neg := len(name) > 0 && name[0] == '^'
+	if neg {
+		name = name[1:]
+	}
+	spec := rxRe2Spec(name)
+	if name == "d" || name == "s" || name == "w" || spec == "" {
+		t.fail("unknown POSIX class name", t.i+2)
+		return true
+	}
+	t.i = e + 2
+	if !t.utf || name == "ascii" {
+		cls.group(spec, neg)
+		return true
+	}
+	u := ""
+	switch name {
+	case "alpha":
+		u = "\\p{L}"
+	case "lower":
+		u = "\\p{Ll}"
+	case "upper":
+		u = "\\p{Lu}"
+	case "alnum":
+		u = "\\p{L}\\p{N}"
+	case "blank":
+		u = "\\h"
+	case "cntrl":
+		u = "\\p{Cc}"
+	case "digit":
+		u = "\\p{Nd}"
+	case "space":
+		u = rxPcreUS
+	case "word":
+		u = rxPcreUW
+	case "xdigit":
+		u = "0-9A-Fa-f\\x{FF10}-\\x{FF19}\\x{FF21}-\\x{FF26}\\x{FF41}-\\x{FF46}"
+	case "punct":
+		u = "\\p{P}$+<=>\\^`|~"
+	case "print":
+		u = "[\\p{L}\\p{M}\\p{N}\\p{P}\\p{S}\\p{Cf}\\p{Zs}&&[^\\x{61C}\\x{2066}-\\x{2069}]]"
+	default:
+		u = "[\\p{L}\\p{M}\\p{N}\\p{P}\\p{S}\\p{Cf}&&[^\\x{61C}\\x{180E}\\x{2066}-\\x{2069}]]"
+	}
+	if neg {
+		cls.props += "[^" + u + "]"
+	} else {
+		cls.props += u
+	}
+	return true
+}
+
+func (t *rxPcreSt) class() {
+	p := t.p
+	t.i++
+	neg := false
+	if t.i < t.n && p[t.i] == '^' {
+		neg = true
+		t.i++
+	}
+	cls := &rxRe2Cls{}
+	first, inq, dash := true, false, false
+	pend := rune(-1)
+	for t.err == "" {
+		if t.i >= t.n {
+			t.fail("missing terminating ] for character class", t.n)
+			return
+		}
+		c := p[t.i]
+		if inq {
+			if c == '\\' && t.i+1 < t.n && p[t.i+1] == 'E' {
+				inq = false
+				t.i += 2
+				continue
+			}
+			var w int
+			c, w = rxCpAt(p, t.i)
+			t.i += w
+		} else if c == ']' && !first {
+			t.i++
+			break
+		} else if c == '[' && t.posix(cls) {
+			if dash {
+				t.fail("invalid range in character class", t.i)
+				return
+			}
+			if pend >= 0 {
+				cls.rng(pend, pend)
+			}
+			pend = -1
+			first = false
+			if t.i+1 < t.n && p[t.i] == '-' && p[t.i+1] != ']' {
+				t.fail("invalid range in character class", t.i)
+				return
+			}
+			continue
+		} else if c == '-' && pend >= 0 && !dash {
+			dash = true
+			t.i++
+			first = false
+			continue
+		} else if c == '\\' {
+			t.i++
+			if t.i >= t.n {
+				t.fail("\\ at end of pattern", t.i)
+				return
+			}
+			e := p[t.i]
+			if e == 'Q' || e == 'E' {
+				inq = e == 'Q'
+				t.i++
+				first = false
+				continue
+			}
+			if strings.ContainsRune("dDsSwWhHvVpP", e) {
+				if dash {
+					t.fail("invalid range in character class", t.i+1)
+					return
+				}
+				if pend >= 0 {
+					cls.rng(pend, pend)
+				}
+				pend = -1
+				first = false
+				t.i++
+				if e == 'p' || e == 'P' {
+					t.prop(cls, e == 'P')
+				} else if strings.ContainsRune("hHvV", e) {
+					cls.props += "\\" + string(e)
+				} else {
+					t.short(cls, e)
+				}
+				if t.i+1 < t.n && p[t.i] == '-' && p[t.i+1] != ']' {
+					t.fail("invalid range in character class", t.i)
+					return
+				}
+				continue
+			}
+			if e == 'B' || e == 'R' || e == 'X' {
+				t.fail("escape sequence is invalid in character class", t.i)
+				return
+			}
+			if e == 'N' {
+				t.fail("\\N is not supported in a class", t.i)
+				return
+			}
+			c = t.char(true)
+			if c < 0 {
+				t.fail("unrecognized character follows \\", t.i)
+				return
+			}
+		} else {
+			var w int
+			c, w = rxCpAt(p, t.i)
+			t.i += w
+		}
+		first = false
+		if dash {
+			if c < pend {
+				t.fail("range out of order in character class", t.i-1)
+				return
+			}
+			cls.rng(pend, c)
+			pend, dash = -1, false
+		} else {
+			if pend >= 0 {
+				cls.rng(pend, pend)
+			}
+			pend = c
+		}
+	}
+	if t.err != "" {
+		return
+	}
+	if pend >= 0 {
+		cls.rng(pend, pend)
+	}
+	if dash {
+		cls.rng('-', '-')
+	}
+	t.emit(cls.text(neg), true)
+}
+
+func (t *rxPcreSt) flags() {
+	p := t.p
+	on, hyph := true, true
+	saved := t.frame()
+	i0 := t.fi
+	if t.i < t.n && p[t.i] == '^' {
+		t.fi, t.fm, t.fn, t.fs, t.fx = false, false, false, false, false
+		hyph = false
+		t.i++
+	}
+	for t.i < t.n && p[t.i] != ')' && p[t.i] != ':' {
+		switch c := p[t.i]; {
+		case c == '-' && hyph:
+			on, hyph = false, false
+		case c == 'i':
+			t.fi = on
+		case c == 'm':
+			t.fm = on
+		case c == 'n':
+			t.fn = on
+		case c == 's':
+			t.fs = on
+		case c == 'x':
+			t.fx = on
+		case c == 'J':
+			t.fJ = on
+		case c == 'U':
+			t.fU = on
+		case c == '-':
+			t.fail("invalid hyphen in option setting", t.i)
+			return
+		default:
+			t.fail("unrecognized character after (? or (?-", t.i)
+			return
+		}
+		t.i++
+	}
+	if t.i >= t.n {
+		t.fail("missing closing parenthesis", t.n)
+		return
+	}
+	ifl := ""
+	if t.fi != i0 {
+		ifl = "-i"
+		if t.fi {
+			ifl = "i"
+		}
+	}
+	if p[t.i] == ')' {
+		t.i++
+		if ifl == "" {
+			t.emit("", false)
+		} else {
+			t.emit("(?"+ifl+")", false)
+		}
+		return
+	}
+	t.i++
+	t.frames = append(t.frames, saved)
+	t.emit("(?"+ifl+":", false)
+}
+
+func (t *rxPcreSt) named(term rune) {
+	nm := t.name(term)
+	if t.err != "" {
+		return
+	}
+	if !t.fJ && !t.dup {
+		for _, have := range t.names {
+			if have == nm {
+				t.fail("two named subpatterns have the same name (PCRE2_DUPNAMES not set)", t.i-1)
+				return
+			}
+		}
+	}
+	t.ncap++
+	t.names = append(t.names, nm)
+	t.nameGroups = append(t.nameGroups, t.ncap)
+	t.open()
+	t.emit("(", false)
+}
+
+func (t *rxPcreSt) paren() {
+	p := t.p
+	at := t.i
+	t.i++
+	if t.i < t.n && p[t.i] == '*' {
+		t.fail("unsupported (*VERB) or alpha assertion", at)
+		return
+	}
+	if t.i >= t.n || p[t.i] != '?' {
+		if t.fn {
+			t.open()
+			t.emit("(?:", false)
+			return
+		}
+		t.ncap++
+		t.open()
+		t.emit("(", false)
+		return
+	}
+	t.i++
+	if t.i >= t.n {
+		t.fail("missing closing parenthesis", t.n)
+		return
+	}
+	c := p[t.i]
+	c2 := rune(0)
+	if t.i+1 < t.n {
+		c2 = p[t.i+1]
+	}
+	switch {
+	case c == ':' || c == '>' || c == '=' || c == '!':
+		t.i++
+		t.open()
+		t.emit("(?"+string(c), false)
+	case c == '<' && (c2 == '=' || c2 == '!'):
+		t.i += 2
+		t.open()
+		t.emit("(?<"+string(c2), false)
+	case c == '<' || c == '\'':
+		t.i++
+		if c == '<' {
+			t.named('>')
+		} else {
+			t.named('\'')
+		}
+	case c == 'P':
+		switch c2 {
+		case '<':
+			t.i += 2
+			t.named('>')
+		case '=':
+			t.i += 2
+			rn := t.name(')')
+			if t.err == "" {
+				t.ref(0, rn, at)
+			}
+		case '>':
+			t.fail("unsupported subroutine call", at)
+		default:
+			t.fail("unrecognized character after (?P", t.i+1)
+		}
+	case c == '|' || c == '(' || c == 'R' || c == '&' || c == 'C' || c == '+' || (c == '-' && rxIsDigit(c2)) || rxIsDigit(c):
+		t.fail("unsupported branch reset, conditional, recursion or callout group", at)
+	default:
+		t.flags()
+	}
+}
+
+func (t *rxPcreSt) escape() {
+	p := t.p
+	at := t.i
+	t.i++
+	if t.i >= t.n {
+		t.fail("\\ at end of pattern", t.i)
+		return
+	}
+	c := p[t.i]
+	switch {
+	case strings.ContainsRune("dDsSwW", c):
+		t.i++
+		if !t.utf {
+			t.emit("\\"+string(c), true)
+			return
+		}
+		sc := &rxRe2Cls{}
+		t.short(sc, c)
+		t.emit(sc.text(false), true)
+	case strings.ContainsRune("hHvVX", c):
+		t.i++
+		t.emit("\\"+string(c), true)
+	case c == 'p' || c == 'P':
+		t.i++
+		pc := &rxRe2Cls{}
+		t.prop(pc, c == 'P')
+		t.emit(pc.text(false), true)
+	case c == 'R':
+		t.i++
+		t.emit("(?>\\x{D}\\x{A}|[\\x{A}-\\x{D}\\x{85}\\x{2028}\\x{2029}])", true)
+	case c == 'N' && !(t.i+3 < t.n && p[t.i+1] == '{' && p[t.i+2] == 'U' && p[t.i+3] == '+'):
+		t.i++
+		t.emit("[^\\x{A}]", true)
+	case c == 'C':
+		if t.utf {
+			t.fail("using \\C is incompatible with the 'u' modifier", t.i+1)
+			return
+		}
+		t.i++
+		t.emit("[\\x{0}-\\x{FF}]", true)
+	case strings.ContainsRune("AzZGK", c):
+		t.i++
+		t.emit("\\"+string(c), false)
+	case c == 'b' || c == 'B':
+		t.i++
+		if !t.utf {
+			t.emit("\\"+string(c), false)
+			return
+		}
+		w := "[" + rxPcreUW + "]"
+		if c == 'b' {
+			t.emit("(?:(?<="+w+")(?!"+w+")|(?<!"+w+")(?="+w+"))", false)
+		} else {
+			t.emit("(?:(?<="+w+")(?="+w+")|(?<!"+w+")(?!"+w+"))", false)
+		}
+	case c >= '1' && c <= '9':
+		s := t.i
+		n := t.num()
+		if n < 10 || c >= '8' || n <= t.ncap {
+			t.ref(n, "", at)
+			return
+		}
+		t.i = s
+		if c >= '8' {
+			t.i++
+			t.emit(rxPcreLitText(c), true)
+			return
+		}
+		ov := rune(0)
+		for k := 0; k < 3 && t.i < t.n && p[t.i] >= '0' && p[t.i] <= '7'; k++ {
+			ov = ov*8 + p[t.i] - '0'
+			t.i++
+		}
+		if !t.utf && ov > 255 {
+			t.fail("octal value is greater than \\377 in 8-bit non-UTF-8 mode", t.i)
+		}
+		t.emit(rxPcreLitText(ov), true)
+	case c == 'g':
+		t.i++
+		gc := rune(0)
+		if t.i < t.n {
+			gc = p[t.i]
+		}
+		if gc == '<' || gc == '\'' {
+			t.fail("unsupported subroutine call", at)
+			return
+		}
+		braced := gc == '{'
+		if braced {
+			t.i++
+		}
+		sign := 0
+		if t.i < t.n && (p[t.i] == '-' || p[t.i] == '+') {
+			sign = 1
+			if p[t.i] == '-' {
+				sign = -1
+			}
+			t.i++
+		}
+		const bad = "\\g is not followed by a braced, angle-bracketed, or quoted name/number or by a plain number"
+		if t.i < t.n && rxIsDigit(p[t.i]) {
+			gn := t.num()
+			if sign < 0 {
+				gn = t.ncap - gn + 1
+			} else if sign > 0 {
+				gn = t.ncap + gn
+			}
+			if braced {
+				if t.i >= t.n || p[t.i] != '}' {
+					t.fail(bad, t.i)
+					return
+				}
+				t.i++
+			}
+			if gn <= 0 {
+				t.fail("reference to non-existent subpattern", t.i-1)
+				return
+			}
+			t.ref(gn, "", at)
+			return
+		}
+		if braced && sign == 0 {
+			gname := t.name('}')
+			if t.err == "" {
+				t.ref(0, gname, at)
+			}
+			return
+		}
+		t.fail(bad, t.i)
+	case c == 'k':
+		t.i++
+		kc := rune(0)
+		if t.i < t.n {
+			kc = p[t.i]
+		}
+		if kc != '<' && kc != '\'' && kc != '{' {
+			t.fail("\\k is not followed by a braced, angle-bracketed, or quoted name", t.i)
+			return
+		}
+		t.i++
+		term := rune('}')
+		if kc == '<' {
+			term = '>'
+		} else if kc == '\'' {
+			term = '\''
+		}
+		kname := t.name(term)
+		if t.err == "" {
+			t.ref(0, kname, at)
+		}
+	default:
+		ch := t.char(false)
+		if t.err != "" {
+			return
+		}
+		if ch < 0 {
+			if strings.ContainsRune("uULlFN", c) {
+				t.fail("PCRE2 does not support \\F, \\L, \\l, \\N{name}, \\U, or \\u", t.i)
+			} else {
+				t.fail("unrecognized character follows \\", t.i)
+			}
+			return
+		}
+		t.emit(rxPcreLitText(ch), true)
+	}
+}
+
+func rxPcre(p []rune, mods string) *rxPcreRes {
+	has := func(c rune) bool { return strings.ContainsRune(mods, c) }
+	t := &rxPcreSt{p: p, n: len(p), errAt: -1, utf: has('u'), dup: has('J'), dollarEnd: has('D'),
+		fi: has('i'), fm: has('m'), fs: has('s'), fx: has('x'), fU: has('U'), fn: has('n')}
+	inq := false
+	for t.err == "" {
+		if !inq {
+			t.skip()
+		}
+		if t.err != "" || t.i >= t.n {
+			break
+		}
+		c := p[t.i]
+		if inq {
+			if c == '\\' && t.i+1 < t.n && p[t.i+1] == 'E' {
+				inq = false
+				t.i += 2
+				continue
+			}
+			qc, w := rxCpAt(p, t.i)
+			t.i += w
+			t.emit(rxPcreLitText(qc), true)
+			continue
+		}
+		if c == '\\' && t.i+1 < t.n && p[t.i+1] == 'Q' {
+			inq = true
+			t.i += 2
+			continue
+		}
+		isBound := false
+		if c == '{' {
+			_, _, _, isBound = t.bound()
+		}
+		switch {
+		case c == '*' || c == '+' || c == '?' || (c == '{' && isBound):
+			t.quant()
+		case c == '(':
+			t.paren()
+		case c == ')':
+			t.close()
+		case c == '|':
+			t.i++
+			t.emit("|", false)
+		case c == '^':
+			t.i++
+			if t.fm {
+				t.emit("(?:\\A|(?m:^))", false)
+			} else {
+				t.emit("^", false)
+			}
+		case c == '$':
+			t.i++
+			if t.fm {
+				t.emit("(?m:$)", false)
+			} else if t.dollarEnd {
+				t.emit("\\z", false)
+			} else {
+				t.emit("$", false)
+			}
+		case c == '.':
+			t.i++
+			if t.fs {
+				t.emit("(?s:.)", true)
+			} else {
+				t.emit(".", true)
+			}
+		case c == '[':
+			t.class()
+		case c == '\\':
+			t.escape()
+		default:
+			lc, w := rxCpAt(p, t.i)
+			t.i += w
+			t.emit(rxPcreLitText(lc), true)
+		}
+	}
+	if t.err == "" && len(t.frames) > 0 {
+		t.fail("missing closing parenthesis", t.n)
+	}
+	t.parts = append(t.parts, t.out)
+	for _, r := range t.refs {
+		if t.err != "" {
+			break
+		}
+		g := r.n
+		if r.name != "" {
+			g = -1
+			for k, nm := range t.names {
+				if nm == r.name {
+					g = t.nameGroups[k]
+					break
+				}
+			}
+			if g < 0 {
+				t.fail("reference to non-existent subpattern", r.at)
+			}
+		} else if g > t.ncap {
+			t.fail("reference to non-existent subpattern", r.at)
+		}
+		t.parts[r.part] = "(?:\\" + strconv.Itoa(g) + ")"
+	}
+	out := strings.Join(t.parts, "")
+	if has('i') {
+		out = "(?i)" + out
+	}
+	if has('A') {
+		out = "\\G(?:" + out + ")"
+	}
+	res := &rxPcreRes{err: t.err, errAt: t.errAt, names: t.names, nameGroups: t.nameGroups}
+	if t.err == "" {
+		res.out = out
+	}
+	return res
 }
 
 func rxCompile(pattern, flags string) *rxRe {
-	icase := strings.ContainsRune(flags, 'i')
-	dotall := strings.ContainsRune(flags, 's')
-	multi := strings.ContainsRune(flags, 'm')
-	ext := strings.ContainsRune(flags, 'x')
-	octal := strings.ContainsRune(flags, 'o')
-	quoting := strings.ContainsRune(flags, 'q')
-	ere := strings.ContainsRune(flags, 'e')
-	jsrep := strings.ContainsRune(flags, 'j')
-	posix := strings.ContainsRune(flags, 'p')
-	java := strings.ContainsRune(flags, 'J')
-	py := strings.ContainsRune(flags, 'P')
-	bfail := java || py || strings.ContainsRune(flags, 'n')
+	// C is followed by PHP's modifiers rather than these letters (rxPcre).
+	pcre := strings.HasPrefix(flags, "C")
+	letters := flags
+	if pcre {
+		letters = ""
+	}
+	icase := strings.ContainsRune(letters, 'i')
+	dotall := strings.ContainsRune(letters, 's')
+	multi := strings.ContainsRune(letters, 'm')
+	ext := strings.ContainsRune(letters, 'x')
+	octal := strings.ContainsRune(letters, 'o')
+	quoting := strings.ContainsRune(letters, 'q')
+	ere := strings.ContainsRune(letters, 'e')
+	jsrep := strings.ContainsRune(letters, 'j')
+	posix := strings.ContainsRune(letters, 'p')
+	java := strings.ContainsRune(letters, 'J')
+	py := strings.ContainsRune(letters, 'P')
+	bfail := java || py || strings.ContainsRune(letters, 'n')
 	// R reads the pattern as Go does and compiles its J spelling (rxRe2).
-	re2 := strings.ContainsRune(flags, 'R')
+	re2 := strings.ContainsRune(letters, 'R')
 	tr := rxRe2(nil)
 	if re2 {
 		tr = rxRe2(wtf8Runes(pattern))
 		java, bfail = true, true
 	}
-	ucase := java && strings.ContainsRune(flags, 'u')
-	unix := java && strings.ContainsRune(flags, 'd')
+	ucase := java && strings.ContainsRune(letters, 'u')
+	unix := java && strings.ContainsRune(letters, 'd')
+	// C reads the pattern as PCRE2 does and compiles its J spelling (rxPcre),
+	// with PHP's LF newline (UNIX_LINES) and, under u, Unicode case folding.
+	tp := &rxPcreRes{}
+	if pcre {
+		tp = rxPcre(wtf8Runes(pattern), flags[1:])
+		java, bfail, unix = true, true, true
+		ucase = strings.ContainsRune(flags[1:], 'u')
+	}
 	// The POSIX ERE dialect (bash's [[ =~ ]]). What it changes is spelled out at each
 	// site; the two whole-engine consequences are here. A "." matches a newline in an
 	// ERE, and an ERE has POSIX capture semantics, of which the visible one is that an
@@ -3636,12 +4808,15 @@ func rxCompile(pattern, flags string) *rxRe {
 	if re2 {
 		pat = wtf8Runes(tr.out)
 	}
+	if pcre {
+		pat = wtf8Runes(tp.out)
+	}
 	if quoting {
 		pat = rxExpandQuotes(pat)
 	}
 	st := &rxSt{p: pat, ext: ext, dotall: dotall, octal: octal, ere: ere, posix: posix, java: java, errAt: -1,
 		py: py, icase: icase, multi: multi, ucase: ucase, unix: unix, gnodes: []*rxNode{nil},
-		pyuni: py && !strings.ContainsRune(flags, 'a'), re2: re2}
+		pyuni: py && !strings.ContainsRune(letters, 'a'), re2: re2, pcre: pcre}
 	// Under P and J case folding and line anchoring are decided per atom while
 	// parsing.
 	if py || java {
@@ -3672,8 +4847,14 @@ func rxCompile(pattern, flags string) *rxRe {
 	if py && st.err == "" && st.lookbVarP(ast) {
 		st.fail("look-behind requires fixed-width pattern")
 	}
+	if pcre && st.err == "" && rxLookbLongC(ast) {
+		st.fail("length of lookbehind assertion is not limited")
+	}
 	if tr.err != "" {
 		st.err = tr.err
+	}
+	if tp.err != "" {
+		st.err, st.errAt = tp.err, tp.errAt
 	}
 	if st.err != "" {
 		return &rxRe{ok: false, err: st.err, errAt: st.errAt, icase: icase, dotall: dotall, multi: multi,
@@ -3693,11 +4874,15 @@ func rxCompile(pattern, flags string) *rxRe {
 	if re2 {
 		names, nameGroups = tr.names, tr.nameGroups
 	}
+	if pcre {
+		names, nameGroups = tp.names, tp.nameGroups
+	}
 	return &rxRe{
 		ok: true, ops: pg.ops, as: pg.as, bs: pg.bs, clss: pg.clss,
 		ngroups: st.ngroups, nmarks: pg.nmarks, names: names, nameGroups: nameGroups,
 		icase: icase, dotall: dotall, multi: multi, jsrep: jsrep, java: java, errAt: -1,
-		supp: java && (re2 || st.supp || rxSuppJ(ast) || rxHasSurr(pat)), bfail: bfail, gflags: gflags,
+		supp: java && (re2 || st.supp || rxSuppJ(ast) || rxHasSurr(pat)) || pcre && ucase, bfail: bfail, gflags: gflags,
+		pcre: pcre,
 		cmin: pg.cmin, cmax: pg.cmax, cgreedy: pg.cgreedy, lbmin: pg.lbmin, lbmax: pg.lbmax,
 		src: pattern, flags: flags,
 	}
@@ -3781,6 +4966,21 @@ type rxRunSt struct {
 	gpos, glast int
 	// adv is the start of an attempt that may not match empty (searchAdv), or -1.
 	adv int
+	// wrap is the lookaround or atomic group runUndo has just entered, or -1.
+	wrap int
+}
+
+// runUndo is the C dialect's lookaround or atomic group at pc with the rest of
+// the match, its captures put back when that fails. Twin of rxRunUndo in
+// lib/regex.js.
+func (re *rxRe) runUndo(text []rune, pc, sp int, caps, marks []int, st *rxRunSt) int {
+	saved := append([]int(nil), caps...)
+	st.wrap = pc
+	if r := re.run(text, pc, sp, caps, marks, st); r >= 0 {
+		return r
+	}
+	copy(caps, saved)
+	return -1
 }
 
 func (re *rxRe) assertOK(text []rune, kind, sp int) bool {
@@ -4022,6 +5222,10 @@ func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt)
 			}
 			pc++
 		case rxOpLook:
+			if re.pcre && st.wrap != pc {
+				return re.runUndo(text, pc, sp, caps, marks, st)
+			}
+			st.wrap = -1
 			r := re.run(text, pc+1, sp, caps, marks, st)
 			if st.over {
 				return -1
@@ -4150,6 +5354,10 @@ func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt)
 			st.ctr[slot] = old
 			return -1
 		case rxOpLookB:
+			if re.pcre && st.wrap != pc {
+				return re.runUndo(text, pc, sp, caps, marks, st)
+			}
+			st.wrap = -1
 			// Try the body from every start the length range allows, shortest first,
 			// each run required to end exactly here (rxOpLBEnd).
 			id, neg := re.bs[pc]/2, re.bs[pc]%2 == 1
@@ -4182,6 +5390,10 @@ func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt)
 			return sp
 		case rxOpAtom:
 			// The body's first success, and no other (see RX_ATOM in lib/regex.js).
+			if re.pcre && st.wrap != pc {
+				return re.runUndo(text, pc, sp, caps, marks, st)
+			}
+			st.wrap = -1
 			ra := re.run(text, pc+1, sp, caps, marks, st)
 			if ra < 0 {
 				return -1
@@ -4302,7 +5514,7 @@ func (re *rxRe) attempt(text []rune, at, mustEnd, gpos, glast, adv int) (*rxMatc
 	for i := range marks {
 		marks[i] = -1
 	}
-	st := &rxRunSt{mustEnd: mustEnd, lbt: -1, gpos: gpos, glast: glast, adv: adv}
+	st := &rxRunSt{mustEnd: mustEnd, lbt: -1, gpos: gpos, glast: glast, adv: adv, wrap: -1}
 	if len(re.cmin) > 0 {
 		st.ctr = make([]int, len(re.cmin))
 		st.cbeg = make([]int, len(re.cmin))

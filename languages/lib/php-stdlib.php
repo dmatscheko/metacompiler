@@ -6,13 +6,14 @@
 // all run this one text and agree by construction. It is written on the engine
 // natives - count, strlen, array_push, array_values, array_key_exists,
 // array_key_last, array_pop, substr, strpos, strrpos, strcmp, ord, chr,
-// strtolower, strtoupper (lib/php-strings.js, abnf/jsrtphpstr.go) and seven
+// strtolower, strtoupper (lib/php-strings.js, abnf/jsrtphpstr.go) and nine
 // intrinsics: __mec_fmtfloat for sprintf's float conversions ("r" is the
 // shortest digits serialize_precision=-1 lays out), __mec_math for
 // the math library's double operations, __mec_aptr for the internal array
 // pointer, __mec_precision for the precision setting, __mec_oid for an
 // object's handle, __mec_callable for the TypeError of an invalid callback
-// argument and __mec_ifaces for the interfaces a class names. A native also gets a
+// argument, __mec_ifaces for the interfaces a class names and __mec_pregc /
+// __mec_pregx for preg_* (lib/php-preg.js). A native also gets a
 // wrapper here of the same name, which is what a string callable or f(...)
 // reaches: a direct call never does, since the call is lowered to the native
 // first.
@@ -1343,6 +1344,452 @@ function wordwrap($string, $width = 75, $break = "\n", $cut_long_words = false) 
     }
     if ($laststart != $n) { $out .= substr($text, $laststart); }
     return $out;
+}
+
+// ----- regular expressions: preg_* --------------------------------------------
+// php-src ext/pcre/php_pcre.c, over two natives on lib/regex.js's C (PCRE2)
+// dialect (lib/php-preg.js): __mec_pregc(key) compiles, answering the group
+// names by number ("" for an unnamed group) or PCRE2's error text, and
+// __mec_pregx(key, subject, offset) runs one pcre2_match from a byte offset,
+// answering the 2 * (groups + 1) byte offsets (-1 for a group that did not take
+// part), [] for no match, or a PREG_*_ERROR code. An offset -o - 1 is the retry
+// after an empty match at o: PCRE2_NOTEMPTY_ATSTART | PCRE2_ANCHORED there, and
+// when that fails the search from the next character. A key is the modifiers
+// that reach PCRE2, "/", and the pattern between the delimiters. The warnings
+// PHP prints beside a false or null are not printed.
+
+const PREG_PATTERN_ORDER = 1;
+const PREG_SET_ORDER = 2;
+const PREG_OFFSET_CAPTURE = 256;
+const PREG_UNMATCHED_AS_NULL = 512;
+const PREG_SPLIT_NO_EMPTY = 1;
+const PREG_SPLIT_DELIM_CAPTURE = 2;
+const PREG_SPLIT_OFFSET_CAPTURE = 4;
+const PREG_GREP_INVERT = 1;
+const PREG_NO_ERROR = 0;
+const PREG_INTERNAL_ERROR = 1;
+const PREG_BACKTRACK_LIMIT_ERROR = 2;
+const PREG_RECURSION_LIMIT_ERROR = 3;
+const PREG_BAD_UTF8_ERROR = 4;
+const PREG_BAD_UTF8_OFFSET_ERROR = 5;
+const PREG_JIT_STACKLIMIT_ERROR = 6;
+
+// PCRE_G(error_code): answers it, and sets it first unless $code is null.
+function __mec_pregerr($code = null) {
+    static $last = 0;
+    if ($code !== null) { $last = $code; }
+    return $last;
+}
+
+// pcre_get_compiled_regex_cache_ex: [key, group names] for $regex, or false
+// (PREG_INTERNAL_ERROR) for an empty pattern, a bad delimiter, a missing end
+// delimiter, an unknown modifier or a pattern PCRE2 refuses. A construct the
+// engine does not implement (recursion, conditionals, verbs) is an Error.
+function __mec_pregkey($fn, $regex) {
+    static $cache = [];
+    $regex = (string)$regex;
+    if (array_key_exists($regex, $cache)) {
+        $got = $cache[$regex];
+        if ($got === false) { __mec_pregerr(PREG_INTERNAL_ERROR); }
+        return $got;
+    }
+    $n = strlen($regex);
+    $i = 0;
+    while ($i < $n && strpos(" \t\n\v\f\r", $regex[$i]) !== false) { $i++; }
+    $key = false;
+    if ($i < $n) {
+        $d = $regex[$i];
+        $o = ord($d);
+        $i++;
+        if (!(($o >= 48 && $o <= 57) || ($o >= 65 && $o <= 90) || ($o >= 97 && $o <= 122) || $o == 92 || $o == 0)) {
+            $bk = strpos("([{<", $d);
+            $end = $bk === false ? $d : ")]}>"[$bk];
+            $depth = 1;
+            $j = $i;
+            while ($j < $n) {
+                $c = $regex[$j];
+                if ($c === "\\" && $j + 1 < $n) { $j++; }
+                elseif ($c === $end && ($bk === false || --$depth <= 0)) { break; }
+                elseif ($bk !== false && $c === $d) { $depth++; }
+                $j++;
+            }
+            if ($j < $n) {
+                $mods = "";
+                $ok = true;
+                for ($k = $j + 1; $k < $n; $k++) {
+                    $m = $regex[$k];
+                    if (strpos("imnsxADUuJ", $m) !== false) { $mods .= $m; }
+                    elseif (strpos("SXr \n\r", $m) === false) { $ok = false; break; }
+                }
+                if ($ok) { $key = $mods . "/" . substr($regex, $i, $j - $i); }
+            }
+        }
+    }
+    $got = false;
+    if ($key !== false) {
+        $names = __mec_pregc($key);
+        if (is_array($names)) { $got = [$key, $names]; }
+        elseif (str_starts_with($names, "unsupported")) { throw new Error($fn . "(): " . $names); }
+    }
+    $cache[$regex] = $got;
+    if ($got === false) { __mec_pregerr(PREG_INTERNAL_ERROR); }
+    return $got;
+}
+
+// The start offset, negative from the end; null (PREG_INTERNAL_ERROR) past it.
+function __mec_pregoff($subject, $offset) {
+    $n = strlen($subject);
+    if ($offset < 0) { $offset = -$offset <= $n ? $n + $offset : 0; }
+    if ($offset > $n) {
+        __mec_pregerr(PREG_INTERNAL_ERROR);
+        return null;
+    }
+    return $offset;
+}
+
+// pcre2_match's count: one more than the highest group that took part.
+function __mec_pregcount($o) {
+    $count = intdiv(count($o), 2);
+    while ($count > 1 && $o[2 * $count - 2] < 0) { $count--; }
+    return $count;
+}
+
+// Group $i of a match, as populate_match_value / add_offset_pair make it.
+function __mec_pregval($s, $o, $i, $flags) {
+    $a = $o[2 * $i];
+    if ($a < 0) { $v = ($flags & PREG_UNMATCHED_AS_NULL) ? null : ""; }
+    else { $v = substr($s, $a, $o[2 * $i + 1] - $a); }
+    return ($flags & PREG_OFFSET_CAPTURE) ? [$v, $a] : $v;
+}
+
+// populate_subpat_array: the groups up to the last that took part (all of them
+// under PREG_UNMATCHED_AS_NULL), a named one under its name as well - where
+// several share a name, the one that took part.
+function __mec_pregsub($s, $o, $names, $flags) {
+    $count = __mec_pregcount($o);
+    $all = ($flags & PREG_UNMATCHED_AS_NULL) ? count($names) : $count;
+    $r = [];
+    for ($i = 0; $i < $all; $i++) {
+        $v = $i < $count ? __mec_pregval($s, $o, $i, $flags) : __mec_pregval($s, [-1, -1], 0, $flags);
+        $nm = $names[$i];
+        if ($nm !== "" && (($i < $count && $o[2 * $i] >= 0) || !array_key_exists($nm, $r))) { $r[$nm] = $v; }
+        $r[] = $v;
+    }
+    return $r;
+}
+
+function preg_match($pattern, $subject, &$matches = null, $flags = 0, $offset = 0) {
+    $c = __mec_pregkey("preg_match", $pattern);
+    if ($c === false) { return false; }
+    $matches = [];
+    if ($flags & 0xff) { throw new ValueError("preg_match(): Argument #4 (\$flags) must be a PREG_* constant"); }
+    $subject = (string)$subject;
+    $offset = __mec_pregoff($subject, $offset);
+    if ($offset === null) { return false; }
+    __mec_pregerr(PREG_NO_ERROR);
+    $o = __mec_pregx($c[0], $subject, $offset);
+    if (is_int($o)) {
+        __mec_pregerr($o);
+        return false;
+    }
+    if (count($o) == 0) { return 0; }
+    $matches = __mec_pregsub($subject, $o, $c[1], $flags);
+    return 1;
+}
+
+function preg_match_all($pattern, $subject, &$matches = null, $flags = 0, $offset = 0) {
+    $c = __mec_pregkey("preg_match_all", $pattern);
+    if ($c === false) { return false; }
+    $matches = [];
+    $order = PREG_PATTERN_ORDER;
+    if ($flags & 0xff) {
+        $order = $flags & 0xff;
+        if ($order != PREG_PATTERN_ORDER && $order != PREG_SET_ORDER) {
+            throw new ValueError("preg_match_all(): Argument #4 (\$flags) must be a PREG_* constant");
+        }
+    }
+    $subject = (string)$subject;
+    $offset = __mec_pregoff($subject, $offset);
+    if ($offset === null) { return false; }
+    __mec_pregerr(PREG_NO_ERROR);
+    $names = $c[1];
+    $sets = [];
+    foreach ($names as $nm) { $sets[] = []; }
+    $matched = 0;
+    $pos = $offset;
+    while (true) {
+        $o = __mec_pregx($c[0], $subject, $pos);
+        if (is_int($o)) {
+            __mec_pregerr($o);
+            break;
+        }
+        if (count($o) == 0) { break; }
+        if ($o[1] < $o[0]) { return false; }
+        $matched++;
+        if ($order == PREG_SET_ORDER) { $matches[] = __mec_pregsub($subject, $o, $names, $flags); }
+        else {
+            $count = __mec_pregcount($o);
+            foreach ($names as $i => $nm) {
+                $sets[$i][] = $i < $count ? __mec_pregval($subject, $o, $i, $flags) : __mec_pregval($subject, [-1, -1], 0, $flags);
+            }
+        }
+        $pos = $o[1] == $o[0] ? -$o[1] - 1 : $o[1];
+    }
+    if ($order == PREG_PATTERN_ORDER) {
+        foreach ($names as $i => $nm) {
+            if ($nm !== "") { $matches[$nm] = $sets[$i]; }
+            $matches[] = $sets[$i];
+        }
+    }
+    return __mec_pregerr() == PREG_NO_ERROR ? $matched : false;
+}
+
+// The replacement text for one match: preg_get_backref's \n, $n and ${n}
+// (n of one or two digits; a group past the last that took part is empty),
+// and a \ or $ after a backslash replaces that backslash.
+function __mec_pregexpand($repl, $s, $o) {
+    $count = __mec_pregcount($o);
+    $n = strlen($repl);
+    $out = "";
+    $from = 0;
+    $prevBs = false;
+    $i = 0;
+    while ($i < $n) {
+        $c = $repl[$i];
+        if ($c !== "\\" && $c !== "$") {
+            $prevBs = false;
+            $i++;
+            continue;
+        }
+        if ($prevBs) {
+            $out .= substr($repl, $from, $i - 1 - $from);
+            $from = $i;
+            $prevBs = false;
+            $i++;
+            continue;
+        }
+        $j = $i + 1;
+        $brace = $c === "$" && $j < $n && $repl[$j] === '{';
+        if ($brace) { $j++; }
+        $g = -1;
+        if ($i + 1 < $n && $j < $n && ord($repl[$j]) >= 48 && ord($repl[$j]) <= 57) {
+            $g = ord($repl[$j]) - 48;
+            $j++;
+            if ($j < $n && ord($repl[$j]) >= 48 && ord($repl[$j]) <= 57) {
+                $g = $g * 10 + ord($repl[$j]) - 48;
+                $j++;
+            }
+            if ($brace) {
+                if ($j < $n && $repl[$j] === '}') { $j++; } else { $g = -1; }
+            }
+        }
+        if ($g < 0) {
+            $prevBs = $c === "\\";
+            $i++;
+            continue;
+        }
+        $out .= substr($repl, $from, $i - $from);
+        if ($g < $count && $o[2 * $g] >= 0) { $out .= substr($s, $o[2 * $g], $o[2 * $g + 1] - $o[2 * $g]); }
+        $i = $j;
+        $from = $j;
+    }
+    return $out . substr($repl, $from);
+}
+
+// php_pcre_replace_impl / php_pcre_replace_func_impl on one pattern and one
+// subject: the new string, or null after an error; $count counts the
+// replacements.
+function __mec_pregrepl($fn, $regex, $repl, $callback, $subject, $limit, &$count, $flags) {
+    $c = __mec_pregkey($fn, $regex);
+    if ($c === false) { return null; }
+    __mec_pregerr(PREG_NO_ERROR);
+    $s = (string)$subject;
+    $out = "";
+    $last = 0;
+    $pos = 0;
+    while ($limit != 0) {
+        $o = __mec_pregx($c[0], $s, $pos);
+        if (is_int($o)) {
+            __mec_pregerr($o);
+            return null;
+        }
+        if (count($o) == 0) { break; }
+        if ($o[1] < $o[0]) {
+            __mec_pregerr(PREG_INTERNAL_ERROR);
+            return null;
+        }
+        $count++;
+        $out .= substr($s, $last, $o[0] - $last);
+        if ($callback === null) { $out .= __mec_pregexpand($repl, $s, $o); }
+        else { $out .= (string)$callback(__mec_pregsub($s, $o, $c[1], $flags)); }
+        $limit--;
+        $last = $o[1];
+        $pos = $o[1] == $o[0] ? -$o[1] - 1 : $o[1];
+    }
+    return $out . substr($s, $last);
+}
+
+// One subject through every pattern in turn (php_pcre_replace_array): the
+// replacements are taken in order, "" once they run out.
+function __mec_pregsubject($fn, $pattern, $replacement, $callback, $subject, $limit, &$count, $flags) {
+    if (!is_array($pattern)) { return __mec_pregrepl($fn, $pattern, $replacement, $callback, $subject, $limit, $count, $flags); }
+    $reps = is_array($replacement) ? array_values($replacement) : null;
+    $k = 0;
+    foreach ($pattern as $p) {
+        $r = $reps === null ? $replacement : ($k < count($reps) ? $reps[$k] : "");
+        $k++;
+        $subject = __mec_pregrepl($fn, $p, (string)$r, $callback, $subject, $limit, $count, $flags);
+        if ($subject === null) { return null; }
+    }
+    return $subject;
+}
+
+// _preg_replace_common: a string subject answers a string (null after an
+// error), an array one an array with the same keys, losing the entries that
+// failed - and under preg_filter the ones nothing replaced.
+function __mec_pregreplace($fn, $pattern, $replacement, $callback, $subject, $limit, &$count, $flags, $filter) {
+    $count = 0;
+    if (!is_array($subject)) {
+        $r = __mec_pregsubject($fn, $pattern, $replacement, $callback, $subject, $limit, $count, $flags);
+        return $filter && $count == 0 ? null : $r;
+    }
+    $out = [];
+    foreach ($subject as $key => $s) {
+        $before = $count;
+        $r = __mec_pregsubject($fn, $pattern, $replacement, $callback, $s, $limit, $count, $flags);
+        if ($r !== null && (!$filter || $count > $before)) { $out[$key] = $r; }
+    }
+    return $out;
+}
+
+function preg_replace($pattern, $replacement, $subject, $limit = -1, &$count = null) {
+    if (is_array($replacement) && !is_array($pattern)) {
+        throw new TypeError("preg_replace(): Argument #1 (\$pattern) must be of type array when argument #2 (\$replacement) is an array, string given");
+    }
+    return __mec_pregreplace("preg_replace", $pattern, $replacement, null, $subject, $limit, $count, 0, false);
+}
+
+function preg_filter($pattern, $replacement, $subject, $limit = -1, &$count = null) {
+    if (is_array($replacement) && !is_array($pattern)) {
+        throw new TypeError("preg_filter(): Argument #1 (\$pattern) must be of type array when argument #2 (\$replacement) is an array, string given");
+    }
+    return __mec_pregreplace("preg_filter", $pattern, $replacement, null, $subject, $limit, $count, 0, true);
+}
+
+function preg_replace_callback($pattern, $callback, $subject, $limit = -1, &$count = null, $flags = 0) {
+    __mec_callable($callback, 'preg_replace_callback(): Argument #2 ($callback) must be a valid callback');
+    return __mec_pregreplace("preg_replace_callback", $pattern, null, $callback, $subject, $limit, $count, $flags, false);
+}
+
+function preg_replace_callback_array($pattern, $subject, $limit = -1, &$count = null, $flags = 0) {
+    $count = 0;
+    foreach ($pattern as $regex => $callback) {
+        __mec_callable($callback, 'preg_replace_callback_array(): Argument #1 ($pattern) must contain only valid callbacks');
+        if (!is_string($regex)) {
+            throw new TypeError("preg_replace_callback_array(): Argument #1 (\$pattern) must contain only string patterns as keys");
+        }
+        $n = 0;
+        $subject = __mec_pregreplace("preg_replace_callback_array", $regex, null, $callback, $subject, $limit, $n, $flags, false);
+        $count += $n;
+        if ($subject === null) { return null; }
+    }
+    return $subject;
+}
+
+function preg_split($pattern, $subject, $limit = -1, $flags = 0) {
+    $c = __mec_pregkey("preg_split", $pattern);
+    if ($c === false) { return false; }
+    $s = (string)$subject;
+    $n = strlen($s);
+    $noEmpty = $flags & PREG_SPLIT_NO_EMPTY;
+    $delim = $flags & PREG_SPLIT_DELIM_CAPTURE;
+    $oflags = ($flags & PREG_SPLIT_OFFSET_CAPTURE) ? PREG_OFFSET_CAPTURE : 0;
+    $r = [];
+    $last = 0;
+    __mec_pregerr(PREG_NO_ERROR);
+    if ($limit == 0) { $limit = -1; }
+    if ($limit == -1 || $limit > 1) {
+        $pos = 0;
+        while (true) {
+            $o = __mec_pregx($c[0], $s, $pos);
+            if (is_int($o)) {
+                __mec_pregerr($o);
+                break;
+            }
+            if (count($o) == 0) { break; }
+            if ($o[1] < $o[0]) {
+                __mec_pregerr(PREG_INTERNAL_ERROR);
+                break;
+            }
+            if (!$noEmpty || $o[0] != $last) {
+                $r[] = __mec_pregval($s, [$last, $o[0]], 0, $oflags);
+                if ($limit != -1) { $limit--; }
+            }
+            if ($delim) {
+                $count = __mec_pregcount($o);
+                for ($i = 1; $i < $count; $i++) {
+                    if (!$noEmpty || $o[2 * $i] != $o[2 * $i + 1]) { $r[] = __mec_pregval($s, $o, $i, $oflags); }
+                }
+            }
+            $last = $o[1];
+            if ($limit != -1 && $limit <= 1) { break; }
+            $pos = $o[1] == $o[0] ? -$o[1] - 1 : $o[1];
+        }
+        if (__mec_pregerr() != PREG_NO_ERROR) { return false; }
+    }
+    if (!$noEmpty || $last < $n) { $r[] = __mec_pregval($s, [$last, $n], 0, $oflags); }
+    return $r;
+}
+
+// The characters preg_quote escapes, and NUL as \000.
+function preg_quote($str, $delimiter = null) {
+    $str = (string)$str;
+    $d = $delimiter === null || $delimiter === "" ? "" : $delimiter[0];
+    $n = strlen($str);
+    $out = "";
+    $from = 0;
+    for ($i = 0; $i < $n; $i++) {
+        $c = $str[$i];
+        if ($c === "\0") {
+            $out .= substr($str, $from, $i - $from) . "\\000";
+            $from = $i + 1;
+        } elseif (strpos(".\\+*?[^]$(){}=!<>|:-#", $c) !== false || ($d !== "" && $c === $d)) {
+            $out .= substr($str, $from, $i - $from) . "\\";
+            $from = $i;
+        }
+    }
+    return $out . substr($str, $from);
+}
+
+function preg_grep($pattern, $array, $flags = 0) {
+    $c = __mec_pregkey("preg_grep", $pattern);
+    if ($c === false) { return false; }
+    __mec_pregerr(PREG_NO_ERROR);
+    $invert = ($flags & PREG_GREP_INVERT) != 0;
+    $out = [];
+    foreach ($array as $key => $v) {
+        $o = __mec_pregx($c[0], (string)$v, 0);
+        if (is_int($o)) {
+            __mec_pregerr($o);
+            break;
+        }
+        if ((count($o) > 0) != $invert) { $out[$key] = $v; }
+    }
+    return $out;
+}
+
+function preg_last_error() { return __mec_pregerr(); }
+
+function preg_last_error_msg() {
+    $code = __mec_pregerr();
+    if ($code == PREG_NO_ERROR) { return "No error"; }
+    if ($code == PREG_INTERNAL_ERROR) { return "Internal error"; }
+    if ($code == PREG_BAD_UTF8_ERROR) { return "Malformed UTF-8 characters, possibly incorrectly encoded"; }
+    if ($code == PREG_BAD_UTF8_OFFSET_ERROR) { return "The offset did not correspond to the beginning of a valid UTF-8 code point"; }
+    if ($code == PREG_BACKTRACK_LIMIT_ERROR) { return "Backtrack limit exhausted"; }
+    if ($code == PREG_RECURSION_LIMIT_ERROR) { return "Recursion limit exhausted"; }
+    if ($code == PREG_JIT_STACKLIMIT_ERROR) { return "JIT stack limit exhausted"; }
+    return "Unknown error";
 }
 
 // ----- formatting ------------------------------------------------------------

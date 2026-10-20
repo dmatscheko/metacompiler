@@ -413,7 +413,7 @@ func (st *rxSt) posixU(cls *rxCls, u string) bool {
 // forProperty is CharPredicates.forProperty; twin of jxForProperty.
 func (st *rxSt) forProperty(cls *rxCls, name string) bool {
 	switch {
-	case name == "LC" || (st.icase && (name == "Lu" || name == "Ll" || name == "Lt")):
+	case name == "LC" || (st.icase && !st.pcre && (name == "Lu" || name == "Ll" || name == "Lt")):
 		return jxProps(cls, rxPGc+1, rxPGc+2, rxPGc+3)
 	case name == "LD":
 		return jxGcs(cls, "L") && jxGcs(cls, "Nd")

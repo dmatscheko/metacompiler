@@ -1040,7 +1040,7 @@ those read variable and call NAMES off the module.
 ```
 runtime.metajs            <- csharp go dart java php kotlin ruby python swift metajs-rt lua
                              (lua for the hook-free exact decimal only)
-regex.js                  <- js python ruby kotlin java dart go
+regex.js                  <- js python ruby kotlin java dart go php
 int64.js                  <- interp-core.js, bash interpreter (the exact {h, l} 64-bit
                              pair; bash's arithmetic is intmax_t)
 lua-rt.metajs             <- imports lua-strlib.js and runtime.metajs ONLY
@@ -1078,7 +1078,8 @@ python-printable.js       <- python-rt.metajs, python interpreter (Unicode
                              XID_Start/XID_Continue for str.isidentifier(); Go
                              twin: abnf/pyprintable.go)
 java-chars.js             <- java-rt.metajs, java interpreter, csharp-rt.metajs,
-                             csharp interpreter, go-rt.metajs, go interpreter
+                             csharp interpreter, go-rt.metajs, go interpreter,
+                             php-rt.metajs, php interpreter
                              (Go twin: abnf/jsrtjavachars.go)
 java-strings.js           <- java-rt.metajs, java interpreter (String's methods
                              and String.format; Go twin: abnf/jsrtjavastr.go)
@@ -1104,6 +1105,10 @@ hex-float.js              <- python-rt.metajs, swift-rt.metajs, ruby-rt.metajs,
                              metajs interpreters (a hexadecimal float numeral,
                              correctly rounded; the Go twins use
                              strconv.ParseFloat)
+php-preg.js               <- php-rt.metajs, php interpreter (the two natives
+                             preg_* in lib/php-stdlib.php is written over, on
+                             regex.js's C dialect - PCRE2 rewritten into J; Go
+                             twin: abnf/jsrtphppreg.go)
 php-strings.js            <- php-rt.metajs, both php grammars (substr, strpos and
                              the other byte-string natives, and the compiler's
                              literal check; Go twin: abnf/jsrtphpstr.go)

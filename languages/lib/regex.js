@@ -97,6 +97,10 @@
 //                                            error texts, rewritten into J by
 //                                            rxRe2, and Go's matching rules - see
 //                                            rxRe2; re.names are Go's group names)
+//                                            C (PCRE2 as PHP's preg_* compile it:
+//                                            the letters after C are PHP's
+//                                            modifiers i m s x n U D A u J, not
+//                                            these; rewritten into J by rxPcre)
 //                                            re.ok is false and re.err is set on a
 //                                            bad pattern; re.errAt is the error's
 //                                            index into the pattern, or -1.
@@ -885,9 +889,10 @@ function rxEscJ(st, c, inClass, res) {
             rxErrAt(st, "Illegal/unsupported escape sequence", st.i - 1)
             return true
         }
+        // Under C every digit is the number's (rxPcre writes (?:\n)).
         var g = c - 48
         while (st.i < st.n && rxIsDigitCode(p.charCodeAt(st.i))
-               && g * 10 + p.charCodeAt(st.i) - 48 <= st.ngroups) {
+               && (st.pcre || g * 10 + p.charCodeAt(st.i) - 48 <= st.ngroups)) {
             g = g * 10 + p.charCodeAt(st.i) - 48
             st.i = st.i + 1
         }
@@ -1833,6 +1838,12 @@ function rxParseAtom(st) {
             st.i = st.i + 2
             return rxLinebreakJ()
         }
+        if (st.pcre && nxt == 75) { // \K: the match starts here, group 0's SAVE
+            st.i = st.i + 2
+            var kn = rxNode("op")
+            kn.gidx = RX_SAVE
+            return kn
+        }
         if (st.java && (nxt == 71 || nxt == 88)) { // \G \X
             st.i = st.i + 2
             var gn = rxNode("op")
@@ -2375,6 +2386,22 @@ function rxLookbVarP(st, node) {
     var i = 0
     while (i < items.length) {
         if (rxLookbVarP(st, items[i])) { return true }
+        i = i + 1
+    }
+    return false
+}
+
+// rxLookbLongC: does a lookbehind under C reach past PCRE2's limit of 255
+// characters (MAX_VARLOOKBEHIND), or have no limit at all?
+function rxLookbLongC(node) {
+    if (node.t == "lookb") {
+        var m = rxMaxLen(node.items[0])
+        if (m < 0 || m > 255) { return true }
+    }
+    var items = node.items
+    var i = 0
+    while (i < items.length) {
+        if (rxLookbLongC(items[i])) { return true }
         i = i + 1
     }
     return false
@@ -3325,6 +3352,980 @@ function rxRe2(pattern) {
     return {out: t.err == "" ? rxRe2Body(t.frames[0]) : "", err: t.err, names: t.names, nameGroups: t.nameGroups}
 }
 
+// ===== The C dialect: PCRE2, as PHP's preg_* compile it =====
+//
+// rxPcre reads a PCRE2 pattern and writes its J spelling, which rxCompile then
+// compiles with java.util.regex's machinery and UNIX_LINES (PHP's PCRE2 is
+// built with NEWLINE_DEFAULT LF). mods are PHP's pattern modifiers: i m s x n
+// U D A u J. Without u the pattern and the subject are BYTES (each unit one
+// byte) and \d \w \s \b are ASCII; with u (PCRE2_UTF | PCRE2_UCP) they are code
+// points and the classes Unicode's. What the J spelling cannot say is spelled
+// out: every literal as \x{..}, a capture always a plain "(" (the names stay in
+// t.names), a backreference as (?:\n), ^ $ . per the m s D in force, U by
+// swapping each quantifier's greed, \K as J's \K under C. Recursion, subroutine
+// calls, conditionals, branch reset and (*VERB)s are not implemented: their
+// re.err starts with "unsupported".
+
+// The J items of PCRE2's UCP \w (L, N, Mn, Pc) and \s (Z, \h, \v).
+var RX_PCRE_UW = "\\p{L}\\p{N}_\\p{Mn}\\p{Pc}"
+var RX_PCRE_US = "\\p{Z}\\h\\v"
+
+function rxPcreFail(t, msg, at) {
+    if (t.err == "") {
+        t.err = msg
+        t.errAt = at
+    }
+}
+
+// Appends J text; okq: may a quantifier follow it?
+function rxPcreEmit(t, s, okq) {
+    t.out = t.out + s
+    t.okq = okq
+}
+
+// A literal character: an ASCII letter or digit as itself, anything else as
+// \x{..}; one atom either way.
+function rxPcreLitText(c) {
+    if (rxIsWordCode(c) && c != 95) { return rxCpStr(c) }
+    return rxRe2Hex(c)
+}
+
+// The frame of flags in force; one per open group, restored at its ")".
+function rxPcreFrame(t) { return {i: t.fi, m: t.fm, s: t.fs, x: t.fx, U: t.fU, n: t.fn, J: t.fJ} }
+
+function rxPcreOpen(t) {
+    var fr = t.frames
+    fr.push(rxPcreFrame(t))
+}
+
+function rxPcreClose(t) {
+    var fr = t.frames
+    if (fr.length == 0) {
+        rxPcreFail(t, "unmatched closing parenthesis", t.i)
+        return
+    }
+    var f = fr.pop()
+    t.fi = f.i
+    t.fm = f.m
+    t.fs = f.s
+    t.fx = f.x
+    t.fU = f.U
+    t.fn = f.n
+    t.fJ = f.J
+    t.i = t.i + 1
+    rxPcreEmit(t, ")", true)
+}
+
+// x-mode white space: what isspace() takes in the C locale, and under u
+// Unicode's Pattern_White_Space beyond it (U+0085, U+200E, U+200F, U+2028,
+// U+2029).
+function rxPcreIsXSpace(t, c) {
+    if (c == 32 || (c >= 9 && c <= 13)) { return true }
+    return t.utf && (c == 133 || c == 8206 || c == 8207 || c == 8232 || c == 8233)
+}
+
+// Steps over what changes nothing: x-mode white space and # comments, (?#..)
+// comments and \E, and \Q\E pairs.
+function rxPcreSkip(t) {
+    var p = t.p
+    while (t.i < t.n) {
+        var c = p.charCodeAt(t.i)
+        if (c == 92 && t.i + 1 < t.n && p.charCodeAt(t.i + 1) == 69) {
+            t.i = t.i + 2
+        } else if (c == 92 && t.i + 3 < t.n && p.charCodeAt(t.i + 1) == 81 && p.charCodeAt(t.i + 2) == 92
+                   && p.charCodeAt(t.i + 3) == 69) {
+            t.i = t.i + 4
+        } else if (t.fx && rxPcreIsXSpace(t, c)) {
+            t.i = t.i + 1
+        } else if (t.fx && c == 35) {
+            while (t.i < t.n && p.charCodeAt(t.i) != 10) { t.i = t.i + 1 }
+        } else if (c == 40 && t.i + 2 < t.n && p.charCodeAt(t.i + 1) == 63 && p.charCodeAt(t.i + 2) == 35) {
+            var e = t.i + 3
+            while (e < t.n && p.charCodeAt(e) != 41) { e = e + 1 }
+            if (e >= t.n) {
+                rxPcreFail(t, "missing ) at end of (?# comment", t.n)
+                return
+            }
+            t.i = e + 1
+        } else {
+            return
+        }
+    }
+}
+
+// read_repeat_counts at the "{" at t.i: {n} {n,} {n,m} {,m}, spaces and tabs
+// allowed inside; null when it is not a quantifier (the { is then a literal).
+function rxPcreBound(t) {
+    var p = t.p
+    var j = t.i + 1
+    var minV = 0 - 1
+    var maxV = 0 - 1
+    while (j < t.n && (p.charCodeAt(j) == 32 || p.charCodeAt(j) == 9)) { j = j + 1 }
+    if (j < t.n && rxIsDigitCode(p.charCodeAt(j))) {
+        minV = 0
+        while (j < t.n && rxIsDigitCode(p.charCodeAt(j))) {
+            minV = minV * 10 + p.charCodeAt(j) - 48
+            if (minV > 99999999) { minV = 99999999 }
+            j = j + 1
+        }
+    }
+    while (j < t.n && (p.charCodeAt(j) == 32 || p.charCodeAt(j) == 9)) { j = j + 1 }
+    if (j >= t.n) { return null }
+    if (p.charCodeAt(j) == 125) {
+        if (minV < 0) { return null }
+        return {min: minV, max: minV, end: j + 1}
+    }
+    if (p.charCodeAt(j) != 44) { return null }
+    j = j + 1
+    while (j < t.n && (p.charCodeAt(j) == 32 || p.charCodeAt(j) == 9)) { j = j + 1 }
+    var hasMax = false
+    if (j < t.n && rxIsDigitCode(p.charCodeAt(j))) {
+        hasMax = true
+        maxV = 0
+        while (j < t.n && rxIsDigitCode(p.charCodeAt(j))) {
+            maxV = maxV * 10 + p.charCodeAt(j) - 48
+            if (maxV > 99999999) { maxV = 99999999 }
+            j = j + 1
+        }
+    }
+    if (minV < 0 && !hasMax) { return null }
+    while (j < t.n && (p.charCodeAt(j) == 32 || p.charCodeAt(j) == 9)) { j = j + 1 }
+    if (j >= t.n || p.charCodeAt(j) != 125) { return null }
+    if (minV < 0) { minV = 0 }
+    return {min: minV, max: maxV, end: j + 1}
+}
+
+// A quantifier at t.i: its text with greed decided (U swaps it, a following ?
+// swaps it back, a following + makes it possessive).
+function rxPcreQuant(t) {
+    var p = t.p
+    var c = p.charCodeAt(t.i)
+    var q = ""
+    var at = t.i
+    if (c == 42) { q = "*"; t.i = t.i + 1 }
+    else if (c == 43) { q = "+"; t.i = t.i + 1 }
+    else if (c == 63) { q = "?"; t.i = t.i + 1 }
+    else {
+        var b = rxPcreBound(t)
+        if (b.min > 65535 || b.max > 65535) {
+            rxPcreFail(t, "number too big in {} quantifier", b.end - 1)
+            return
+        }
+        if (b.max >= 0 && b.max < b.min) {
+            rxPcreFail(t, "numbers out of order in {} quantifier", b.end - 1)
+            return
+        }
+        q = "{" + b.min + (b.max == b.min ? "" : b.max < 0 ? "," : "," + b.max) + "}"
+        t.i = b.end
+    }
+    if (!t.okq) {
+        rxPcreFail(t, "quantifier does not follow a repeatable item", at)
+        return
+    }
+    rxPcreSkip(t)
+    var lazy = t.fU
+    var poss = false
+    if (t.i < t.n && p.charCodeAt(t.i) == 63) {
+        lazy = !lazy
+        t.i = t.i + 1
+    } else if (t.i < t.n && p.charCodeAt(t.i) == 43) {
+        poss = true
+        lazy = false
+        t.i = t.i + 1
+    }
+    rxPcreEmit(t, q + (lazy ? "?" : poss ? "+" : ""), false)
+}
+
+// A group name after (?< (?' (?P< or \k< \k' \k{ \g{, up to term: a word
+// character that is not a digit, then word characters, at most 32.
+function rxPcreName(t, term) {
+    var p = t.p
+    var s = t.i
+    while (t.i < t.n && t.i - s <= 32) {
+        var c = p.charCodeAt(t.i)
+        if (!(rxIsWordCode(c) || (t.utf && c > 127 && rxPropHit(RX_PLD, rxCpAt(p, t.i))))) { break }
+        t.i = t.i + (c >= 55296 && c <= 56319 ? 2 : 1)
+    }
+    if (t.i == s) {
+        rxPcreFail(t, "subpattern name expected", t.i)
+        return ""
+    }
+    if (rxIsDigitCode(p.charCodeAt(s))) {
+        rxPcreFail(t, "subpattern name must start with a non-digit", s)
+        return ""
+    }
+    if (t.i - s > 32) {
+        rxPcreFail(t, "subpattern name is too long (maximum 32 code units)", t.i)
+        return ""
+    }
+    if (t.i >= t.n || p.charCodeAt(t.i) != term) {
+        rxPcreFail(t, "syntax error in subpattern name (missing terminator?)", t.i)
+        return ""
+    }
+    var nm = p.substring(s, t.i)
+    t.i = t.i + 1
+    return nm
+}
+
+// A backreference: group n now, or the group a name stands for, resolved when
+// the whole pattern is read (a forward reference is legal).
+function rxPcreRef(t, n, name, at) {
+    var parts = t.parts
+    parts.push(t.out)
+    var refs = t.refs
+    refs.push({part: parts.length, n: n, name: name, at: at})
+    parts.push("")
+    t.out = ""
+    rxPcreEmit(t, "", true)
+}
+
+// The digits at t.i as a number (capped).
+function rxPcreNum(t) {
+    var p = t.p
+    var v = 0
+    var j = t.i
+    while (j < t.n && rxIsDigitCode(p.charCodeAt(j))) {
+        v = v * 10 + p.charCodeAt(j) - 48
+        if (v > 99999999) { v = 99999999 }
+        j = j + 1
+    }
+    t.i = j
+    return v
+}
+
+// The class items of the shorthand \d \D \s \S \w \W (c its letter) into cls:
+// ASCII ones, or under u the UCP ones; a complement under u is a nested class.
+function rxPcreShort(t, cls, c) {
+    var lc = c >= 65 && c <= 90 ? c + 32 : c
+    if (!t.utf) {
+        rxRe2Group(cls, rxRe2Spec(String.fromCharCode(lc)), lc != c)
+        return
+    }
+    var items = lc == 100 ? "\\p{Nd}" : lc == 119 ? RX_PCRE_UW : RX_PCRE_US
+    cls.props = cls.props + (lc == c ? items : "[^" + items + "]")
+}
+
+// The \p / \P at t.i (after the letter), into cls: PCRE2's general categories,
+// scripts and its X properties; "" and an error for an unknown name.
+function rxPcreProp(t, cls, neg) {
+    var p = t.p
+    var name = ""
+    if (t.i < t.n && p.charCodeAt(t.i) == 123) {
+        var e = t.i + 1
+        while (e < t.n && p.charCodeAt(e) != 125) { e = e + 1 }
+        if (e >= t.n) {
+            rxPcreFail(t, "malformed \\P or \\p sequence", e)
+            return
+        }
+        name = p.substring(t.i + 1, e)
+        t.i = e + 1
+    } else if (t.i < t.n) {
+        name = p.substring(t.i, t.i + 1)
+        t.i = t.i + 1
+    } else {
+        rxPcreFail(t, "malformed \\P or \\p sequence", t.i)
+        return
+    }
+    if (name.length > 0 && name.charCodeAt(0) == 94) {
+        neg = !neg
+        name = name.substring(1, name.length)
+    }
+    var key = rxRe2Canon(name)
+    var items = ""
+    if (name == "L&" || key == "Lc" || key == "L&") { items = "\\p{LC}" }
+    else if (key == "Xan") { items = "\\p{L}\\p{N}" }
+    else if (key == "Xwd") { items = RX_PCRE_UW }
+    else if (key == "Xsp" || key == "Xps") { items = RX_PCRE_US }
+    else if (key == "Xuc") { items = "$@`\\x{A0}-\\x{D7FF}\\x{E000}-\\x{10FFFF}" }
+    else {
+        items = rxRe2Prop(name, 1)
+        if (key == "Any") { items = "\\x{0}-\\x{10FFFF}" }
+    }
+    if (items == "") {
+        rxPcreFail(t, "unknown property after \\P or \\p", t.i)
+        return
+    }
+    cls.props = cls.props + (neg ? "[^" + items + "]" : items)
+}
+
+// check_escape for a character: the code point an escape at t.i (after the
+// backslash) stands for, or -1 when it is not a character escape (t.i then
+// unmoved). inClass: \b is a backspace and a digit always octal.
+function rxPcreChar(t, inClass) {
+    var p = t.p
+    var c = rxCpAt(p, t.i)
+    var w = c > 65535 ? 2 : 1
+    if (!(rxIsWordCode(c) && c != 95)) {
+        t.i = t.i + w
+        return c
+    }
+    var simple = "a\u0007e\u001bf\u000cn\nr\rt\t"
+    var s = 0
+    while (s < simple.length) {
+        if (simple.charCodeAt(s) == c) {
+            t.i = t.i + 1
+            return simple.charCodeAt(s + 1)
+        }
+        s = s + 2
+    }
+    if (c == 98 && inClass) {
+        t.i = t.i + 1
+        return 8
+    }
+    if (c == 48 || (inClass && c >= 49 && c <= 55)) { // \0oo, and \ooo in a class
+        var v = c - 48
+        var k = 1
+        t.i = t.i + 1
+        while (k < 3 && t.i < t.n && p.charCodeAt(t.i) >= 48 && p.charCodeAt(t.i) <= 55) {
+            v = v * 8 + p.charCodeAt(t.i) - 48
+            t.i = t.i + 1
+            k = k + 1
+        }
+        if (!t.utf && v > 255) { rxPcreFail(t, "octal value is greater than \\377 in 8-bit non-UTF-8 mode", t.i) }
+        return v
+    }
+    if (inClass && (c == 56 || c == 57)) {
+        t.i = t.i + 1
+        return c
+    }
+    if (c == 111) { // \o{ddd}
+        if (t.i + 1 >= t.n || p.charCodeAt(t.i + 1) != 123) {
+            rxPcreFail(t, "missing opening brace after \\o", t.i + 1)
+            return 0
+        }
+        return rxPcreBraced(t, 8)
+    }
+    if (c == 120) { // \xhh, \x{hhh}
+        if (t.i + 1 < t.n && p.charCodeAt(t.i + 1) == 123) { return rxPcreBraced(t, 16) }
+        t.i = t.i + 1
+        var xv = 0
+        var xk = 0
+        while (xk < 2 && t.i < t.n && rxIsHexCode(p.charCodeAt(t.i))) {
+            xv = xv * 16 + rxHexVal(p.charCodeAt(t.i))
+            t.i = t.i + 1
+            xk = xk + 1
+        }
+        return xv
+    }
+    if (c == 99) { // \cX
+        if (t.i + 1 >= t.n) {
+            rxPcreFail(t, "\\c at end of pattern", t.i + 1)
+            return 0
+        }
+        var cc = p.charCodeAt(t.i + 1)
+        if (cc >= 97 && cc <= 122) { cc = cc - 32 }
+        if (cc < 32 || cc > 126) {
+            rxPcreFail(t, "\\c must be followed by a printable ASCII character", t.i + 1)
+            return 0
+        }
+        t.i = t.i + 2
+        return cc >= 64 ? cc - 64 : cc + 64
+    }
+    if (c == 78 && t.i + 3 < t.n && p.charCodeAt(t.i + 1) == 123 && p.charCodeAt(t.i + 2) == 85
+        && p.charCodeAt(t.i + 3) == 43) { // \N{U+hhh}
+        if (!t.utf) {
+            rxPcreFail(t, "\\N{U+dddd} is supported only in Unicode (UTF) mode", t.i + 3)
+            return 0
+        }
+        t.i = t.i + 2
+        return rxPcreBraced(t, 16)
+    }
+    return 0 - 1
+}
+
+// The {..} digits of \x{..} \o{..} \N{U+..} in base; t.i is at the character
+// before the {.
+function rxPcreBraced(t, base) {
+    var p = t.p
+    t.i = t.i + 2
+    while (t.i < t.n && (p.charCodeAt(t.i) == 32 || p.charCodeAt(t.i) == 9)) { t.i = t.i + 1 }
+    if (t.i >= t.n || p.charCodeAt(t.i) == 125) {
+        rxPcreFail(t, "digits missing in \\x{} or \\o{} or \\N{U+}", t.i)
+        return 0
+    }
+    var v = 0
+    var lim = t.utf ? 1114111 : 255
+    while (t.i < t.n) {
+        var d = base == 16 ? (rxIsHexCode(p.charCodeAt(t.i)) ? rxHexVal(p.charCodeAt(t.i)) : 0 - 1)
+                           : (p.charCodeAt(t.i) >= 48 && p.charCodeAt(t.i) <= 55 ? p.charCodeAt(t.i) - 48 : 0 - 1)
+        if (d < 0) { break }
+        v = v * base + d
+        if (v > lim) {
+            rxPcreFail(t, "character code point value in \\x{} or \\o{} is too large", t.i)
+            return 0
+        }
+        t.i = t.i + 1
+    }
+    while (t.i < t.n && (p.charCodeAt(t.i) == 32 || p.charCodeAt(t.i) == 9)) { t.i = t.i + 1 }
+    if (t.i >= t.n || p.charCodeAt(t.i) != 125) {
+        rxPcreFail(t, base == 16 ? "\\x{ is not followed by } (or the hex digits are invalid)"
+                                 : "non-octal character in \\o{} (closing brace missing?)", t.i)
+        return 0
+    }
+    t.i = t.i + 1
+    if (t.utf && v >= 55296 && v <= 57343) {
+        rxPcreFail(t, "disallowed Unicode code point (>= 0xd800 && <= 0xdfff)", t.i - 1)
+    }
+    return v
+}
+
+// A POSIX class [:name:] / [:^name:] at t.i (the "[") into cls; false when the
+// text is not one (the [ is then a literal).
+function rxPcrePosix(t, cls) {
+    var p = t.p
+    if (t.i + 2 >= t.n || p.charCodeAt(t.i + 1) != 58) { return false }
+    var j = t.i + 2
+    var e = 0 - 1
+    while (j + 1 < t.n) {
+        var c = p.charCodeAt(j)
+        if (c == 92 && (p.charCodeAt(j + 1) == 93 || p.charCodeAt(j + 1) == 92)) { j = j + 1 }
+        else if ((c == 91 && p.charCodeAt(j + 1) == 58) || c == 93) { return false }
+        else if (c == 58 && p.charCodeAt(j + 1) == 93) {
+            e = j
+            j = t.n
+        }
+        j = j + 1
+    }
+    if (e < 0) { return false }
+    var name = p.substring(t.i + 2, e)
+    var neg = name.length > 0 && name.charCodeAt(0) == 94
+    if (neg) { name = name.substring(1, name.length) }
+    var spec = rxRe2Spec(name)
+    if (name == "d" || name == "s" || name == "w" || spec == "") {
+        rxPcreFail(t, "unknown POSIX class name", t.i + 2)
+        return true
+    }
+    t.i = e + 2
+    if (!t.utf || name == "ascii") {
+        rxRe2Group(cls, spec, neg)
+        return true
+    }
+    var u = ""
+    if (name == "alpha") { u = "\\p{L}" }
+    else if (name == "lower") { u = "\\p{Ll}" }
+    else if (name == "upper") { u = "\\p{Lu}" }
+    else if (name == "alnum") { u = "\\p{L}\\p{N}" }
+    else if (name == "blank") { u = "\\h" }
+    else if (name == "cntrl") { u = "\\p{Cc}" }
+    else if (name == "digit") { u = "\\p{Nd}" }
+    else if (name == "space") { u = RX_PCRE_US }
+    else if (name == "word") { u = RX_PCRE_UW }
+    else if (name == "xdigit") { u = "0-9A-Fa-f\\x{FF10}-\\x{FF19}\\x{FF21}-\\x{FF26}\\x{FF41}-\\x{FF46}" }
+    else if (name == "punct") { u = "\\p{P}$+<=>\\^`|~" } // P, and the ASCII S characters
+    else {
+        // graph: L M N P S Cf less U+061C U+180E U+2066..U+2069; print adds
+        // Zs and gives U+180E back (PT_PXGRAPH / PT_PXPRINT in pcre2_xclass.c).
+        u = name == "print" ? "[\\p{L}\\p{M}\\p{N}\\p{P}\\p{S}\\p{Cf}\\p{Zs}&&[^\\x{61C}\\x{2066}-\\x{2069}]]"
+                            : "[\\p{L}\\p{M}\\p{N}\\p{P}\\p{S}\\p{Cf}&&[^\\x{61C}\\x{180E}\\x{2066}-\\x{2069}]]"
+    }
+    cls.props = cls.props + (neg ? "[^" + u + "]" : u)
+    return true
+}
+
+// A class at t.i (the "["): PCRE2's syntax, where [ and & are literals, a ]
+// first is one, and POSIX classes stand inside.
+function rxPcreClass(t) {
+    var p = t.p
+    t.i = t.i + 1
+    var neg = false
+    if (t.i < t.n && p.charCodeAt(t.i) == 94) {
+        neg = true
+        t.i = t.i + 1
+    }
+    var cls = rxRe2Cls()
+    var first = true
+    var inq = false
+    var pend = 0 - 1  // a single character that may still start a range
+    var dash = false  // a "-" after pend
+    while (t.err == "") {
+        if (t.i >= t.n) {
+            rxPcreFail(t, "missing terminating ] for character class", t.n)
+            return
+        }
+        var c = p.charCodeAt(t.i)
+        if (inq) {
+            if (c == 92 && t.i + 1 < t.n && p.charCodeAt(t.i + 1) == 69) {
+                inq = false
+                t.i = t.i + 2
+                continue
+            }
+            c = rxCpAt(p, t.i)
+            t.i = t.i + (c > 65535 ? 2 : 1)
+        } else if (c == 93 && !first) {
+            t.i = t.i + 1
+            break
+        } else if (c == 91 && rxPcrePosix(t, cls)) {
+            if (dash) {
+                rxPcreFail(t, "invalid range in character class", t.i)
+                return
+            }
+            if (pend >= 0) { rxRe2Range(cls, pend, pend) }
+            pend = 0 - 1
+            first = false
+            if (t.i + 1 < t.n && p.charCodeAt(t.i) == 45 && p.charCodeAt(t.i + 1) != 93) {
+                rxPcreFail(t, "invalid range in character class", t.i)
+                return
+            }
+            continue
+        } else if (c == 45 && pend >= 0 && !dash) {
+            dash = true
+            t.i = t.i + 1
+            first = false
+            continue
+        } else if (c == 92) {
+            t.i = t.i + 1
+            if (t.i >= t.n) {
+                rxPcreFail(t, "\\ at end of pattern", t.i)
+                return
+            }
+            var e = p.charCodeAt(t.i)
+            if (e == 81 || e == 69) {
+                inq = e == 81
+                t.i = t.i + 1
+                first = false
+                continue
+            }
+            if (e == 100 || e == 68 || e == 115 || e == 83 || e == 119 || e == 87 || e == 104 || e == 72
+                || e == 118 || e == 86 || e == 112 || e == 80) {
+                if (dash) {
+                    rxPcreFail(t, "invalid range in character class", t.i + 1)
+                    return
+                }
+                if (pend >= 0) { rxRe2Range(cls, pend, pend) }
+                pend = 0 - 1
+                first = false
+                t.i = t.i + 1
+                if (e == 112 || e == 80) { rxPcreProp(t, cls, e == 80) }
+                else if (e == 104 || e == 72 || e == 118 || e == 86) {
+                    cls.props = cls.props + "\\" + String.fromCharCode(e)
+                } else { rxPcreShort(t, cls, e) }
+                if (t.i + 1 < t.n && p.charCodeAt(t.i) == 45 && p.charCodeAt(t.i + 1) != 93) {
+                    rxPcreFail(t, "invalid range in character class", t.i)
+                    return
+                }
+                continue
+            }
+            if (e == 66 || e == 82 || e == 88) {
+                rxPcreFail(t, "escape sequence is invalid in character class", t.i)
+                return
+            }
+            if (e == 78) {
+                rxPcreFail(t, "\\N is not supported in a class", t.i)
+                return
+            }
+            c = rxPcreChar(t, true)
+            if (c < 0) {
+                rxPcreFail(t, "unrecognized character follows \\", t.i)
+                return
+            }
+        } else {
+            c = rxCpAt(p, t.i)
+            t.i = t.i + (c > 65535 ? 2 : 1)
+        }
+        first = false
+        if (dash) {
+            if (c < pend) {
+                rxPcreFail(t, "range out of order in character class", t.i - 1)
+                return
+            }
+            rxRe2Range(cls, pend, c)
+            pend = 0 - 1
+            dash = false
+        } else {
+            if (pend >= 0) { rxRe2Range(cls, pend, pend) }
+            pend = c
+        }
+    }
+    if (t.err != "") { return }
+    if (pend >= 0) { rxRe2Range(cls, pend, pend) }
+    if (dash) { rxRe2Range(cls, 45, 45) }
+    rxPcreEmit(t, rxRe2ClsText(cls, neg), true)
+}
+
+// The flags of (?imnsxJU-imnsxJU) / (?^..) at t.i (after "(?"), ending in ")"
+// (they hold to the end of the enclosing group) or ":" (a group of their own).
+// Only i reaches the J text.
+function rxPcreFlags(t) {
+    var p = t.p
+    var on = true
+    var hyph = true
+    var saved = rxPcreFrame(t)
+    var i0 = t.fi
+    if (t.i < t.n && p.charCodeAt(t.i) == 94) {
+        t.fi = false
+        t.fm = false
+        t.fn = false
+        t.fs = false
+        t.fx = false
+        hyph = false
+        t.i = t.i + 1
+    }
+    while (t.i < t.n && p.charCodeAt(t.i) != 41 && p.charCodeAt(t.i) != 58) {
+        var c = p.charAt(t.i)
+        if (c == "-" && hyph) {
+            on = false
+            hyph = false
+        } else if (c == "i") { t.fi = on }
+        else if (c == "m") { t.fm = on }
+        else if (c == "n") { t.fn = on }
+        else if (c == "s") { t.fs = on }
+        else if (c == "x") { t.fx = on }
+        else if (c == "J") { t.fJ = on }
+        else if (c == "U") { t.fU = on }
+        else {
+            rxPcreFail(t, c == "-" ? "invalid hyphen in option setting" : "unrecognized character after (? or (?-", t.i)
+            return
+        }
+        t.i = t.i + 1
+    }
+    if (t.i >= t.n) {
+        rxPcreFail(t, "missing closing parenthesis", t.n)
+        return
+    }
+    var ifl = t.fi == i0 ? "" : t.fi ? "i" : "-i"
+    if (p.charCodeAt(t.i) == 41) {
+        t.i = t.i + 1
+        rxPcreEmit(t, ifl == "" ? "" : "(?" + ifl + ")", false)
+        return
+    }
+    t.i = t.i + 1
+    // The group's own frame keeps what was in force before the letters.
+    var nf = t.frames
+    nf.push(saved)
+    rxPcreEmit(t, "(?" + ifl + ":", false)
+}
+
+// A named group's name, checked against the names so far, and its number.
+function rxPcreNamed(t, term) {
+    var nm = rxPcreName(t, term)
+    if (t.err != "") { return }
+    if (!t.fJ && !t.dup && rxNameIdx(t.names, t.nameGroups, nm) >= 0) {
+        rxPcreFail(t, "two named subpatterns have the same name (PCRE2_DUPNAMES not set)", t.i - 1)
+        return
+    }
+    t.ncap = t.ncap + 1
+    var names = t.names
+    names.push(nm)
+    var ng = t.nameGroups
+    ng.push(t.ncap)
+    rxPcreOpen(t)
+    rxPcreEmit(t, "(", false)
+}
+
+// "(" at t.i.
+function rxPcreParen(t) {
+    var p = t.p
+    var at = t.i
+    t.i = t.i + 1
+    if (t.i < t.n && p.charCodeAt(t.i) == 42) {
+        rxPcreFail(t, "unsupported (*VERB) or alpha assertion", at)
+        return
+    }
+    if (t.i >= t.n || p.charCodeAt(t.i) != 63) {
+        if (t.fn) {
+            rxPcreOpen(t)
+            rxPcreEmit(t, "(?:", false)
+            return
+        }
+        t.ncap = t.ncap + 1
+        rxPcreOpen(t)
+        rxPcreEmit(t, "(", false)
+        return
+    }
+    t.i = t.i + 1
+    if (t.i >= t.n) {
+        rxPcreFail(t, "missing closing parenthesis", t.n)
+        return
+    }
+    var c = p.charCodeAt(t.i)
+    var c2 = t.i + 1 < t.n ? p.charCodeAt(t.i + 1) : 0
+    if (c == 58 || c == 62 || c == 61 || c == 33) { // (?: (?> (?= (?!
+        t.i = t.i + 1
+        rxPcreOpen(t)
+        rxPcreEmit(t, "(?" + String.fromCharCode(c), false)
+        return
+    }
+    if (c == 60 && (c2 == 61 || c2 == 33)) { // (?<= (?<!
+        t.i = t.i + 2
+        rxPcreOpen(t)
+        rxPcreEmit(t, "(?<" + String.fromCharCode(c2), false)
+        return
+    }
+    if (c == 60 || c == 39) { // (?<name> (?'name'
+        t.i = t.i + 1
+        rxPcreNamed(t, c == 60 ? 62 : 39)
+        return
+    }
+    if (c == 80) { // (?P<name> (?P=name) (?P>name)
+        if (c2 == 60) {
+            t.i = t.i + 2
+            rxPcreNamed(t, 62)
+            return
+        }
+        if (c2 == 61) {
+            t.i = t.i + 2
+            var rn = rxPcreName(t, 41)
+            if (t.err == "") { rxPcreRef(t, 0, rn, at) }
+            return
+        }
+        if (c2 == 62) {
+            rxPcreFail(t, "unsupported subroutine call", at)
+            return
+        }
+        rxPcreFail(t, "unrecognized character after (?P", t.i + 1)
+        return
+    }
+    if (c == 124 || c == 40 || c == 82 || c == 38 || c == 67 || c == 43 || (c == 45 && rxIsDigitCode(c2))
+        || rxIsDigitCode(c)) {
+        rxPcreFail(t, "unsupported branch reset, conditional, recursion or callout group", at)
+        return
+    }
+    rxPcreFlags(t)
+}
+
+// An escape at t.i (the backslash), outside a class.
+function rxPcreEscape(t) {
+    var p = t.p
+    var at = t.i
+    t.i = t.i + 1
+    if (t.i >= t.n) {
+        rxPcreFail(t, "\\ at end of pattern", t.i)
+        return
+    }
+    var c = p.charCodeAt(t.i)
+    if (c == 100 || c == 68 || c == 115 || c == 83 || c == 119 || c == 87) {
+        t.i = t.i + 1
+        if (!t.utf) {
+            rxPcreEmit(t, "\\" + String.fromCharCode(c), true)
+            return
+        }
+        var sc = rxRe2Cls()
+        rxPcreShort(t, sc, c)
+        rxPcreEmit(t, rxRe2ClsText(sc, false), true)
+        return
+    }
+    if (c == 104 || c == 72 || c == 118 || c == 86 || c == 88) { // \h \H \v \V \X
+        t.i = t.i + 1
+        rxPcreEmit(t, "\\" + String.fromCharCode(c), true)
+        return
+    }
+    if (c == 112 || c == 80) {
+        t.i = t.i + 1
+        var pc = rxRe2Cls()
+        rxPcreProp(t, pc, c == 80)
+        rxPcreEmit(t, rxRe2ClsText(pc, false), true)
+        return
+    }
+    if (c == 82) {
+        t.i = t.i + 1
+        rxPcreEmit(t, "(?>\\x{D}\\x{A}|[\\x{A}-\\x{D}\\x{85}\\x{2028}\\x{2029}])", true)
+        return
+    }
+    if (c == 78 && !(t.i + 3 < t.n && p.charCodeAt(t.i + 1) == 123 && p.charCodeAt(t.i + 2) == 85
+                     && p.charCodeAt(t.i + 3) == 43)) { // \N, which a {..} may quantify
+        t.i = t.i + 1
+        rxPcreEmit(t, "[^\\x{A}]", true)
+        return
+    }
+    if (c == 67) { // \C
+        if (t.utf) {
+            rxPcreFail(t, "using \\C is incompatible with the 'u' modifier", t.i + 1)
+            return
+        }
+        t.i = t.i + 1
+        rxPcreEmit(t, "[\\x{0}-\\x{FF}]", true)
+        return
+    }
+    if (c == 65 || c == 122 || c == 90 || c == 71 || c == 75) { // \A \z \Z \G \K
+        t.i = t.i + 1
+        rxPcreEmit(t, "\\" + String.fromCharCode(c), false)
+        return
+    }
+    if (c == 98 || c == 66) { // \b \B
+        t.i = t.i + 1
+        if (!t.utf) { rxPcreEmit(t, "\\" + String.fromCharCode(c), false) }
+        else {
+            var w = "[" + RX_PCRE_UW + "]"
+            rxPcreEmit(t, c == 98 ? "(?:(?<=" + w + ")(?!" + w + ")|(?<!" + w + ")(?=" + w + "))"
+                                  : "(?:(?<=" + w + ")(?=" + w + ")|(?<!" + w + ")(?!" + w + "))", false)
+        }
+        return
+    }
+    if (c >= 49 && c <= 57) { // \1.. a backreference, or octal
+        var s = t.i
+        var n = rxPcreNum(t)
+        if (n < 10 || c >= 56 || n <= t.ncap) {
+            rxPcreRef(t, n, "", at)
+            return
+        }
+        t.i = s
+        if (c >= 56) {
+            t.i = t.i + 1
+            rxPcreEmit(t, rxPcreLitText(c), true)
+            return
+        }
+        var ov = 0
+        var ok = 0
+        while (ok < 3 && t.i < t.n && p.charCodeAt(t.i) >= 48 && p.charCodeAt(t.i) <= 55) {
+            ov = ov * 8 + p.charCodeAt(t.i) - 48
+            t.i = t.i + 1
+            ok = ok + 1
+        }
+        if (!t.utf && ov > 255) { rxPcreFail(t, "octal value is greater than \\377 in 8-bit non-UTF-8 mode", t.i) }
+        rxPcreEmit(t, rxPcreLitText(ov), true)
+        return
+    }
+    if (c == 103) { // \g
+        t.i = t.i + 1
+        var gc = t.i < t.n ? p.charCodeAt(t.i) : 0
+        if (gc == 60 || gc == 39) {
+            rxPcreFail(t, "unsupported subroutine call", at)
+            return
+        }
+        var braced = gc == 123
+        if (braced) { t.i = t.i + 1 }
+        var sign = 0
+        if (t.i < t.n && (p.charCodeAt(t.i) == 45 || p.charCodeAt(t.i) == 43)) {
+            sign = p.charCodeAt(t.i) == 45 ? 0 - 1 : 1
+            t.i = t.i + 1
+        }
+        if (t.i < t.n && rxIsDigitCode(p.charCodeAt(t.i))) {
+            var gn = rxPcreNum(t)
+            if (sign < 0) { gn = t.ncap - gn + 1 }
+            else if (sign > 0) { gn = t.ncap + gn }
+            if (braced) {
+                if (t.i >= t.n || p.charCodeAt(t.i) != 125) {
+                    rxPcreFail(t, "\\g is not followed by a braced, angle-bracketed, or quoted name/number or by a plain number", t.i)
+                    return
+                }
+                t.i = t.i + 1
+            }
+            if (gn <= 0) {
+                rxPcreFail(t, "reference to non-existent subpattern", t.i - 1)
+                return
+            }
+            rxPcreRef(t, gn, "", at)
+            return
+        }
+        if (braced && sign == 0) {
+            var gname = rxPcreName(t, 125)
+            if (t.err == "") { rxPcreRef(t, 0, gname, at) }
+            return
+        }
+        rxPcreFail(t, "\\g is not followed by a braced, angle-bracketed, or quoted name/number or by a plain number", t.i)
+        return
+    }
+    if (c == 107) { // \k<n> \k'n' \k{n}
+        t.i = t.i + 1
+        var kc = t.i < t.n ? p.charCodeAt(t.i) : 0
+        if (kc != 60 && kc != 39 && kc != 123) {
+            rxPcreFail(t, "\\k is not followed by a braced, angle-bracketed, or quoted name", t.i)
+            return
+        }
+        t.i = t.i + 1
+        var kname = rxPcreName(t, kc == 60 ? 62 : kc == 39 ? 39 : 125)
+        if (t.err == "") { rxPcreRef(t, 0, kname, at) }
+        return
+    }
+    var ch = rxPcreChar(t, false)
+    if (t.err != "") { return }
+    if (ch < 0) {
+        rxPcreFail(t, c == 117 || c == 85 || c == 76 || c == 108 || c == 70 || c == 78
+                      ? "PCRE2 does not support \\F, \\L, \\l, \\N{name}, \\U, or \\u"
+                      : "unrecognized character follows \\", t.i)
+        return
+    }
+    rxPcreEmit(t, rxPcreLitText(ch), true)
+}
+
+// rxPcre itself: {out, err, errAt, names, nameGroups} - see the head of this
+// section.
+function rxPcre(pattern, mods) {
+    var t = {p: pattern, i: 0, n: pattern.length, err: "", errAt: 0 - 1, out: "", parts: [], refs: [],
+             frames: [], ncap: 0, names: [], nameGroups: [], okq: false,
+             utf: mods.indexOf("u") >= 0, dup: mods.indexOf("J") >= 0, dollarEnd: mods.indexOf("D") >= 0,
+             fi: mods.indexOf("i") >= 0, fm: mods.indexOf("m") >= 0, fs: mods.indexOf("s") >= 0,
+             fx: mods.indexOf("x") >= 0, fU: mods.indexOf("U") >= 0, fn: mods.indexOf("n") >= 0, fJ: false}
+    var p = pattern
+    var inq = false
+    while (t.err == "") {
+        if (!inq) { rxPcreSkip(t) }
+        if (t.err != "" || t.i >= t.n) { break }
+        var c = p.charCodeAt(t.i)
+        if (inq) {
+            if (c == 92 && t.i + 1 < t.n && p.charCodeAt(t.i + 1) == 69) {
+                inq = false
+                t.i = t.i + 2
+                continue
+            }
+            var qc = rxCpAt(p, t.i)
+            t.i = t.i + (qc > 65535 ? 2 : 1)
+            rxPcreEmit(t, rxPcreLitText(qc), true)
+            continue
+        }
+        if (c == 92 && t.i + 1 < t.n && p.charCodeAt(t.i + 1) == 81) {
+            inq = true
+            t.i = t.i + 2
+            continue
+        }
+        if (c == 42 || c == 43 || c == 63 || (c == 123 && rxPcreBound(t) != null)) {
+            rxPcreQuant(t)
+        } else if (c == 40) {
+            rxPcreParen(t)
+        } else if (c == 41) {
+            rxPcreClose(t)
+        } else if (c == 124) {
+            t.i = t.i + 1
+            rxPcreEmit(t, "|", false)
+        } else if (c == 94) {
+            t.i = t.i + 1
+            rxPcreEmit(t, t.fm ? "(?:\\A|(?m:^))" : "^", false)
+        } else if (c == 36) {
+            t.i = t.i + 1
+            rxPcreEmit(t, t.fm ? "(?m:$)" : t.dollarEnd ? "\\z" : "$", false)
+        } else if (c == 46) {
+            t.i = t.i + 1
+            rxPcreEmit(t, t.fs ? "(?s:.)" : ".", true)
+        } else if (c == 91) {
+            rxPcreClass(t)
+        } else if (c == 92) {
+            rxPcreEscape(t)
+        } else {
+            var lc = rxCpAt(p, t.i)
+            t.i = t.i + (lc > 65535 ? 2 : 1)
+            rxPcreEmit(t, rxPcreLitText(lc), true)
+        }
+    }
+    if (t.err == "" && t.frames.length > 0) { rxPcreFail(t, "missing closing parenthesis", t.n) }
+    var parts = t.parts
+    parts.push(t.out)
+    var refs = t.refs
+    var ri = 0
+    while (t.err == "" && ri < refs.length) {
+        var r = refs[ri]
+        var g = r.n
+        if (r.name != "") {
+            g = rxNameIdx(t.names, t.nameGroups, r.name)
+            if (g < 0) { rxPcreFail(t, "reference to non-existent subpattern", r.at) }
+        } else if (g > t.ncap) {
+            rxPcreFail(t, "reference to non-existent subpattern", r.at)
+        }
+        parts[r.part] = "(?:\\" + g + ")"
+        ri = ri + 1
+    }
+    var out = ""
+    var pi = 0
+    while (pi < parts.length) {
+        out = out + parts[pi]
+        pi = pi + 1
+    }
+    // i from the start; A (PCRE2_ANCHORED): only at the search's start.
+    if (mods.indexOf("i") >= 0) { out = "(?i)" + out }
+    if (mods.indexOf("A") >= 0) { out = "\\G(?:" + out + ")" }
+    return {out: t.err == "" ? out : "", err: t.err, errAt: t.errAt, names: t.names, nameGroups: t.nameGroups,
+            ncap: t.ncap}
+}
+
 // ===== Compilation =====
 
 // rxSuppJ and rxClsBmpJ decide java.util.regex's hasSupplementary for a parsed
@@ -3402,7 +4403,9 @@ function rxCompile(pattern, flags) {
     var unix = false
     var pyascii = false
     var re2 = false
-    var fi = 0
+    // C is followed by PHP's modifiers rather than these letters (rxPcre).
+    var pcre = flags.length > 0 && flags.charAt(0) == "C"
+    var fi = pcre ? flags.length : 0
     while (fi < flags.length) {
         var f = flags.charAt(fi)
         if (f == "i") { icase = true }
@@ -3426,6 +4429,15 @@ function rxCompile(pattern, flags) {
     // R reads the pattern as Go does and compiles its J spelling (rxRe2).
     var tr = rxRe2(re2 ? pattern : "")
     if (re2) { java = true }
+    // C reads the pattern as PCRE2 does and compiles its J spelling (rxPcre),
+    // with PHP's LF newline (UNIX_LINES) and, under u, Unicode case folding.
+    var mods = pcre ? flags.substring(1, flags.length) : ""
+    var tp = rxPcre(pcre ? pattern : "", mods)
+    if (pcre) {
+        java = true
+        unix = true
+        ucase = mods.indexOf("u") >= 0
+    }
     if (java || py) { bfail = true }
     // The POSIX ERE dialect (bash's [[ =~ ]]). What it changes is spelled out at each
     // site; the two whole-engine consequences are here. A "." matches a newline in an
@@ -3446,7 +4458,7 @@ function rxCompile(pattern, flags) {
     // \Q...\E is expanded before anything else looks at the text, so neither the
     // group counter nor the parser needs a quoting mode. re.src keeps the ORIGINAL
     // pattern, which is what a language's .source / inspect reports.
-    var pat = re2 ? tr.out : quoting ? rxExpandQuotes(pattern) : pattern
+    var pat = re2 ? tr.out : pcre ? tp.out : quoting ? rxExpandQuotes(pattern) : pattern
     var st = {
         p: pat, i: 0, n: pat.length, err: "",
         ngroups: 0, names: [], nameGroups: [], pending: [], ext: ext, dotall: dotall,
@@ -3454,7 +4466,7 @@ function rxCompile(pattern, flags) {
         depth: 0, java: java, errAt: -1, pcls: rxNewCls(), gnodes: [rxNode("empty")],
         py: py, icase: icase, multi: multi, gend: 0, gflags: "",
         ucase: ucase && java, uclass: false, unix: unix && java, inl: false, supp: false,
-        canon: false, pyuni: py && !pyascii, re2: re2
+        canon: false, pyuni: py && !pyascii, re2: re2, pcre: pcre
     }
     // Under P and J case folding and line anchoring are decided per atom while
     // parsing.
@@ -3466,7 +4478,7 @@ function rxCompile(pattern, flags) {
     // A search steps over a surrogate pair whole: under J when the pattern has
     // a supplementary character (java.util.regex's hasSupplementary), and always
     // under P, where the text is code points.
-    var supp = py || java && (re2 || st.supp || rxSuppJ(ast) || rxHasSurr(pat))
+    var supp = py || java && (re2 || st.supp || rxSuppJ(ast) || rxHasSurr(pat)) || pcre && ucase
     // Resolve every \k<name> now that the whole name table is known.
     var pend = st.pending
     var pi = 0
@@ -3483,7 +4495,12 @@ function rxCompile(pattern, flags) {
     // CPython checks a look-behind's width when it compiles the parsed pattern,
     // so every parse error is reported first.
     if (py && st.err == "" && rxLookbVarP(st, ast)) { rxErr(st, "look-behind requires fixed-width pattern") }
+    if (pcre && st.err == "" && rxLookbLongC(ast)) { rxErr(st, "length of lookbehind assertion is not limited") }
     if (tr.err != "") { st.err = tr.err }
+    if (tp.err != "") {
+        st.err = tp.err
+        st.errAt = tp.errAt
+    }
     if (st.err != "") {
         return {ok: false, err: st.err, errAt: st.errAt, ops: [], as: [], bs: [], clss: [],
                 ngroups: 0, nmarks: 0, names: [], nameGroups: [],
@@ -3502,10 +4519,10 @@ function rxCompile(pattern, flags) {
     rxAdd(pg, RX_MATCH, 0, 0, pg.dummy)
     return {
         ok: true, err: "", errAt: -1, ops: pg.ops, as: pg.as, bs: pg.bs, clss: pg.clss,
-        ngroups: st.ngroups, nmarks: pg.nmarks, names: re2 ? tr.names : st.names,
-        nameGroups: re2 ? tr.nameGroups : st.nameGroups,
+        ngroups: st.ngroups, nmarks: pg.nmarks, names: re2 ? tr.names : pcre ? tp.names : st.names,
+        nameGroups: re2 ? tr.nameGroups : pcre ? tp.nameGroups : st.nameGroups,
         icase: icase, dotall: dotall, multi: multi, jsrep: jsrep, java: java,
-        py: py, supp: supp, bfail: bfail, gflags: java ? rxFlagsGet(st) : st.gflags,
+        py: py, supp: supp, bfail: bfail, gflags: java ? rxFlagsGet(st) : st.gflags, pcre: pcre,
         cmin: pg.cmin, cmax: pg.cmax, cgreedy: pg.cgreedy, lbmin: pg.lbmin, lbmax: pg.lbmax,
         src: pattern, flags: flags
     }
@@ -3700,6 +4717,8 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st) {
             if (!rxAssertOK(re, text, as[pc], sp)) { return -1 }
             pc = pc + 1
         } else if (op == RX_LOOK) {
+            if (re.pcre && st.wrap != pc) { return rxRunUndo(re, text, pc, sp, caps, marks, st) }
+            st.wrap = 0 - 1
             var rl = rxRun(re, text, pc + 1, sp, caps, marks, st)
             if (st.over) { return -1 }
             var hit = rl >= 0
@@ -3819,6 +4838,8 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st) {
                 return -1
             }
         } else if (op == RX_LOOKB) {
+            if (re.pcre && st.wrap != pc) { return rxRunUndo(re, text, pc, sp, caps, marks, st) }
+            st.wrap = 0 - 1
             // Try the body from every start the length range allows, shortest
             // first, each run required to end exactly here (RX_LBEND).
             var lid = Math.floor(bs[pc] / 2)
@@ -3851,7 +4872,10 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st) {
         } else if (op == RX_ATOM) {
             // The body's first success, and no other: the run below stops at
             // RX_ATOMEND, and nothing here is retried when the rest fails.
-            // Captures the body set stay set then, as in Java.
+            // Captures the body set stay set then, as in Java; under C they
+            // are taken back, as in PCRE2 (rxRunUndo).
+            if (re.pcre && st.wrap != pc) { return rxRunUndo(re, text, pc, sp, caps, marks, st) }
+            st.wrap = 0 - 1
             var ra = rxRun(re, text, pc + 1, sp, caps, marks, st)
             if (ra < 0) { return -1 }
             pc = as[pc]
@@ -3880,6 +4904,28 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st) {
         }
     }
     return -1
+}
+
+// rxRunUndo runs the lookaround or atomic group at pc and everything after it
+// (st.wrap tells the run not to come back here), and puts the captures back as
+// they were when that fails: PCRE2 forgets what such a group captured once the
+// match backtracks past it, and what a negative lookaround's body captured.
+function rxRunUndo(re, text, pc, sp, caps, marks, st) {
+    var saved = []
+    var i = 0
+    while (i < caps.length) {
+        saved.push(caps[i])
+        i = i + 1
+    }
+    st.wrap = pc
+    var r = rxRun(re, text, pc, sp, caps, marks, st)
+    if (r >= 0) { return r }
+    i = 0
+    while (i < caps.length) {
+        caps[i] = saved[i]
+        i = i + 1
+    }
+    return 0 - 1
 }
 
 // rxIterJ enters one more iteration of the counted loop whose RX_CLOOP is at pc,
@@ -3927,7 +4973,7 @@ function rxAttempt(re, text, at, mustEnd, gpos, glast, adv) {
         i = i + 1
     }
     var st = {steps: 0, over: false, mustEnd: mustEnd, lbt: -1, ctr: ctr, cbeg: cbeg,
-              gpos: gpos, glast: glast, adv: adv}
+              gpos: gpos, glast: glast, adv: adv, wrap: 0 - 1}
     var end = rxRun(re, text, 0, at, caps, marks, st)
     if (st.over) { rxFail("step limit exceeded") }
     if (end >= 0) { return {begin: caps[0], end: caps[1], caps: caps} }
@@ -4133,7 +5179,8 @@ function rxSplit(re, text) {
 // happens to spell an Object.prototype member ("toString", "valueOf") would
 // otherwise read back a function from the prototype instead of undefined. See
 // docs/abnf-dialect-gotchas.md. The neutral flag string is only ever drawn from
-// "ismxqjpeJnPud", so the space is an unambiguous separator.
+// "ismxqjpeJnPud" (or is C and PHP's modifier letters), so the space is an
+// unambiguous separator.
 var rxCache = {}
 
 function rxGet(pattern, flags) {

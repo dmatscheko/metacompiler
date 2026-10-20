@@ -4160,6 +4160,148 @@ function s78() {
         && (new S78K)->up(new S78K) === 1 && s78cb(fn() => 3) === 3 && s78cb(new S78Inv) === 8 && s78cb('s78nret') === null);
 }
 
+// ===== SECTION 79: preg_* (PCRE) =====
+// php-src ext/pcre/php_pcre.c over PCRE2 (NEWLINE LF; /u is UTF and UCP):
+// the delimiters and modifiers, the matches array (groups up to the last that
+// took part, a named group under its name too, PREG_OFFSET_CAPTURE pairs,
+// PREG_UNMATCHED_AS_NULL), the global loops' retry after an empty match,
+// $n / ${n} / \n references, PREG_SPLIT_* and the error codes. Expected values
+// from libpcre2-8 driven with php_pcre.c's options and loops.
+function s79d($v) {
+    if ($v === null) { return "N"; }
+    if ($v === false) { return "F"; }
+    if (is_int($v)) { return "i:" . $v; }
+    if (is_string($v)) {
+        $o = "";
+        $n = strlen($v);
+        for ($i = 0; $i < $n; $i++) {
+            $b = ord($v[$i]);
+            $o .= ($b < 32 || $b >= 127) ? "%" . strtoupper(dechex($b)) : chr($b);
+        }
+        return "'" . $o . "'";
+    }
+    $parts = [];
+    foreach ($v as $k => $x) { $parts[] = (is_int($k) ? $k : "'" . $k . "'") . "=>" . s79d($x); }
+    return "[" . implode(",", $parts) . "]";
+}
+function s79cb($m) { return "<" . strtoupper($m[0]) . ">"; }
+function s79() {
+    check("pg1", preg_match('/(\d+)-(\d+)/', 'ab 12-34 x', $m) === 1 && s79d($m) === "[0=>'12-34',1=>'12',2=>'34']");
+    check("pg2", preg_match('/(a)(b)?/', 'a', $m) === 1 && s79d($m) === "[0=>'a',1=>'a']");
+    check("pg3", preg_match('/(a)(b)?/', 'a', $m, PREG_UNMATCHED_AS_NULL) === 1 && s79d($m) === "[0=>'a',1=>'a',2=>N]");
+    check("pg4", preg_match('/(a)(b)?(c)/', 'ac', $m, PREG_OFFSET_CAPTURE) === 1
+        && s79d($m) === "[0=>[0=>'ac',1=>i:0],1=>[0=>'a',1=>i:0],2=>[0=>'',1=>i:-1],3=>[0=>'c',1=>i:1]]");
+    check("pg5", preg_match('/(?<y>\d{4})-(?<m>\d\d)/', 'on 2024-10-20', $m) === 1
+        && s79d($m) === "[0=>'2024-10','y'=>'2024',1=>'2024','m'=>'10',2=>'10']");
+    check("pg6", preg_match('/(?<y>\d{4})-(?<m>\d\d)?/', 'on 2024-', $m, PREG_UNMATCHED_AS_NULL) === 1
+        && s79d($m) === "[0=>'2024-','y'=>'2024',1=>'2024','m'=>N,2=>N]");
+    check("pg7", preg_match('/(?P<w>\w+)(?\'z\'!)?/', 'hi', $m) === 1 && s79d($m) === "[0=>'hi','w'=>'hi',1=>'hi']");
+    check("pg8", preg_match('/x/', 'abc', $m) === 0 && $m === []);
+    check("pg9", preg_match('/b/', 'abcb', $m, PREG_OFFSET_CAPTURE, 2) === 1 && $m[0][1] === 3
+        && preg_match('/b/', 'abcb', $m, PREG_OFFSET_CAPTURE, -1) === 1 && $m[0][1] === 3
+        && preg_match('/^b/', 'abcb', $m, 0, 1) === 0 && preg_match('/\Gb/', 'abcb', $m, 0, 1) === 1
+        && preg_match('/(?<=a)b/', 'abcb', $m, 0, 1) === 1);
+    check("pg10", preg_match('/b/', 'abcb', $m, 0, 5) === false && preg_last_error() === PREG_INTERNAL_ERROR);
+    // Without u a subject is bytes; with u it is UTF-8 characters, and offsets
+    // stay byte offsets.
+    check("pg11", preg_match('/^.$/', "\xC3\xA9") === 0 && preg_match('/^.$/u', "\xC3\xA9") === 1
+        && preg_match('/^..$/', "\xC3\xA9") === 1);
+    check("pg12", preg_match('/\w+/u', "h\xC3\xA9llo w", $m) === 1 && $m[0] === "h\xC3\xA9llo"
+        && preg_match('/\w+/', "h\xC3\xA9llo w", $m) === 1 && $m[0] === "h");
+    check("pg13", preg_match('/l+/u', "h\xC3\xA9llo", $m, PREG_OFFSET_CAPTURE) === 1 && $m[0][1] === 3);
+    check("pg14", preg_match('/./u', "a\xE9b") === false && preg_last_error() === PREG_BAD_UTF8_ERROR
+        && preg_last_error_msg() === "Malformed UTF-8 characters, possibly incorrectly encoded");
+    check("pg15", preg_match('/./u', "\xC3\xA9a", $m, 0, 1) === false && preg_last_error() === PREG_BAD_UTF8_OFFSET_ERROR
+        && preg_match('/./u', "\xC3\xA9a", $m, 0, 2) === 1 && $m[0] === "a" && preg_last_error() === PREG_NO_ERROR);
+    check("pg16", preg_match('/\p{Lu}+/u', "abC\xC3\x89Dx", $m) === 1 && $m[0] === "C\xC3\x89D"
+        && preg_match('/[[:alpha:]]+/', "12ab\xC3\xA9", $m) === 1 && $m[0] === "ab"
+        && preg_match('/[[:alpha:]]+/u', "12ab\xC3\xA9", $m) === 1 && $m[0] === "ab\xC3\xA9");
+    check("pg17", preg_match('/\x{e9}/iu', "\xC3\x89") === 1 && preg_match('/\xe9/i', "\xC9") === 0);
+    // Delimiters and modifiers; a pattern PHP refuses is false and PREG_INTERNAL_ERROR.
+    check("pg18", preg_match('{a}', 'a') === 1 && preg_match('(a(b))', 'ab') === 1 && preg_match('[a]i', 'A') === 1
+        && preg_match('<a<b>>', 'a<b>') === 1 && preg_match('#a\#b#', 'a#b') === 1 && preg_match("  /a/  ", 'a') === 1);
+    check("pg19", preg_match('abc', 'x') === false && preg_last_error() === PREG_INTERNAL_ERROR
+        && preg_last_error_msg() === "Internal error" && preg_match('/abc', 'x') === false
+        && preg_match('/abc/k', 'x') === false && preg_match('', 'x') === false && preg_match('/a/e', 'a') === false);
+    check("pg20", preg_match('/(abc/', 'x') === false && preg_match('/[a/', 'x') === false
+        && preg_match('/a**/', 'x') === false && preg_match('/a{2,1}/', 'x') === false
+        && preg_match('/(?<n>a)(?<n>b)/', 'ab') === false && preg_match('/(a)\2/', 'aa') === false
+        && preg_match('/[a-\d]/', 'x') === false && preg_match('/(?<=a+)b/', 'ab') === false);
+    check("pg21", preg_match('/a$/', "a\n") === 1 && preg_match('/a$/D', "a\n") === 0 && preg_match('/a$/m', "a\nb") === 1
+        && preg_match('/^b/m', "a\nb") === 1 && preg_match('/a.b/', "a\nb") === 0 && preg_match('/a.b/s', "a\nb") === 1
+        && preg_match('/a.b/', "a\rb") === 1 && preg_match('/a\Rb/', "a\r\nb") === 1);
+    check("pg22", preg_match('/a+/U', 'aaa', $m) === 1 && $m[0] === "a" && preg_match('/a+?/U', 'aaa', $m) === 1 && $m[0] === "aaa");
+    check("pg23", preg_match("/a b # c\n c/x", 'abc') === 1 && preg_match('/(a)(?:b)(c)/n', 'abc', $m) === 1 && $m === ["abc"]
+        && preg_match('/b/A', 'abc') === 0 && preg_match('/b/A', 'abc', $m, 0, 1) === 1);
+    check("pg24", preg_match('/(?i:a)b/', 'Ab') === 1 && preg_match('/(?i:a)b/', 'AB') === 0 && preg_match('/(?^i:A)/', 'a') === 1
+        && preg_match('/(a(?i)b)c/', 'aBc') === 1 && preg_match('/(a(?i)b)c/', 'aBC') === 0);
+    check("pg25", preg_match('/(?<n>a)|(?<n>b)/J', 'b', $m) === 1 && s79d($m) === "[0=>'b','n'=>'b',1=>'',2=>'b']");
+    check("pg26", preg_match('/(?<x>a)\k<x>\k\'x\'\k{x}(?P=x)\g{x}\g1\g{-1}/', 'aaaaaaaa') === 1
+        && preg_match('/(a)?\1/', 'b') === 0 && preg_match('/\101\x42\o{103}\cD/', "ABC\x04") === 1);
+    check("pg27", preg_match('/a{,2}b/', 'aaab', $m) === 1 && $m[0] === "aab" && preg_match('/x{2,a}/', 'x{2,a}') === 1
+        && preg_match('/[]a]+/', ']a]b', $m) === 1 && $m[0] === "]a]" && preg_match('/[[]+/', '[[a') === 1
+        && preg_match('/\Qa.b\E+/', 'a.bbb', $m) === 1 && $m[0] === "a.bbb");
+    check("pg28", preg_match('/a\Kb/', 'ab', $m, PREG_OFFSET_CAPTURE) === 1 && s79d($m) === "[0=>[0=>'b',1=>i:1]]");
+    // preg_match_all: PREG_PATTERN_ORDER pads every group, PREG_SET_ORDER
+    // is preg_match's shape per match; an empty match is retried non-empty.
+    check("pg29", preg_match_all('/(?<d>\d)(x)?/', 'a1b2x', $m) === 2
+        && s79d($m) === "[0=>[0=>'1',1=>'2x'],'d'=>[0=>'1',1=>'2'],1=>[0=>'1',1=>'2'],2=>[0=>'',1=>'x']]");
+    check("pg30", preg_match_all('/(?<d>\d)(x)?/', 'a1b2x', $m, PREG_SET_ORDER) === 2
+        && s79d($m) === "[0=>[0=>'1','d'=>'1',1=>'1'],1=>[0=>'2x','d'=>'2',1=>'2',2=>'x']]");
+    check("pg31", preg_match_all('/a*/', 'baaa', $m, PREG_OFFSET_CAPTURE) === 3
+        && s79d($m) === "[0=>[0=>[0=>'',1=>i:0],1=>[0=>'aaa',1=>i:1],2=>[0=>'',1=>i:4]]]");
+    check("pg32", preg_match_all('/a*?/', 'aa', $m) === 5 && preg_match_all('//u', "\xC3\xA9\xF0\x9F\x98\x80", $m, PREG_OFFSET_CAPTURE) === 3
+        && $m[0][2][1] === 6 && preg_match_all('//', "\xC3\xA9") === 3);
+    check("pg33", preg_match_all('/\d/', 'a1b2', $m, 0, 2) === 1 && preg_match_all('/(?<n>z)/', 'abc', $m) === 0
+        && s79d($m) === "[0=>[],'n'=>[],1=>[]]" && preg_match_all('/\Gb/', 'bbab') === 2);
+    check("pg34", preg_match_all('/(a)|(b)/', 'ab', $m, PREG_UNMATCHED_AS_NULL) === 2
+        && s79d($m) === "[0=>[0=>'a',1=>'b'],1=>[0=>'a',1=>N],2=>[0=>N,1=>'b']]");
+    // preg_replace and its references; a backslash before \ or $ replaces it.
+    check("pg35", preg_replace('/a/', 'b', 'aa') === "bb" && preg_replace('/a/', 'b', 'aa', 1) === "ba"
+        && preg_replace('/a/', 'b', 'aa', 0) === "aa");
+    check("pg36", preg_replace('/(\w+) (\w+)/', '$2 ${1}!', 'hello world') === "world hello!"
+        && preg_replace('/(\w+) (\w+)/', '\2 \1 \0 $0 ${0}', 'hello world') === "world hello hello world hello world hello world");
+    check("pg37", preg_replace('/(a)(b)?/', '[$2|\2|${2}|$3|$10|$1x]', 'a') === "[|||||ax]"
+        && preg_replace('/(a)/', '\\\\1 \\\\\1 $$1 \$1 \\\\$1 $ \ ${1 ${x}', 'a') === '\1 \a $a $1 \a $ \ ${1 ${x}');
+    check("pg38", preg_replace('/(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)(k)/', '$11-$10-${11}-$111', 'abcdefghijk') === "k-j-k-k1");
+    check("pg39", preg_replace('/x*/', '-', 'abc') === "-a-b-c-" && preg_replace('/x*/', '-', 'abc', 2) === "-a-bc"
+        && preg_replace('/a|/', 'X', 'bab') === "XbXXbX" && preg_replace('//u', '|', "\xC3\xA9") === "|\xC3\xA9|"
+        && preg_replace('//', '|', "ab") === "|a|b|");
+    check("pg40", preg_replace('/(\d)(?=(\d{3})+$)/', '$1,', '1234567') === "1,234,567"
+        && preg_replace('/^/m', '> ', "a\nb") === "> a\n> b" && preg_replace('/a\Kb/', 'X', 'abab') === "aXaX");
+    check("pg41", preg_replace(['/a/', '/b/'], ['b', 'c'], 'ab', -1, $n) === "cc" && $n === 3
+        && preg_replace(['/a/', '/b/'], 'x', ['k' => 'ab', 'cd']) === ['k' => 'xx', 0 => 'cd']
+        && preg_replace(['/a/', '/b/'], ['1'], 'ab') === "1" && preg_replace('/[/', 'x', 'abc') === null);
+    check("pg42", preg_filter('/\d/', '#', ['a1', 'b', 'c2']) === [0 => 'a#', 2 => 'c#'] && preg_filter('/\d/', '#', 'b') === null);
+    check("pg43", preg_replace_callback('/\d+/', fn($m) => $m[0] * 2, 'a1 b22', -1, $n) === "a2 b44" && $n === 2
+        && preg_replace_callback('/x*/', 's79cb', 'ab') === "<>a<>b<>" && preg_replace_callback('/\d/', 's79cb', '1234', 2) === "<1><2>34");
+    $seen = [];
+    preg_replace_callback('/(?<n>\d)(?<m>x)?/', function ($m) use (&$seen) { $seen[] = s79d($m); return ""; }, 'a1x2', -1, $n,
+        PREG_OFFSET_CAPTURE | PREG_UNMATCHED_AS_NULL);
+    check("pg44", $seen === ["[0=>[0=>'1x',1=>i:1],'n'=>[0=>'1',1=>i:1],1=>[0=>'1',1=>i:1],'m'=>[0=>'x',1=>i:2],2=>[0=>'x',1=>i:2]]",
+        "[0=>[0=>'2',1=>i:3],'n'=>[0=>'2',1=>i:3],1=>[0=>'2',1=>i:3],'m'=>[0=>N,1=>i:-1],2=>[0=>N,1=>i:-1]]"]);
+    check("pg45", preg_replace_callback_array(['/\d+/' => fn($m) => 'N', '/[a-z]+/' => fn($m) => 'w'], 'ab 12 c', -1, $n) === "w N w"
+        && $n === 3);
+    // preg_split
+    check("pg46", preg_split('/[\s,]+/', "hypertext language, programming") === ["hypertext", "language", "programming"]
+        && preg_split('//', 'abc', -1, PREG_SPLIT_NO_EMPTY) === ["a", "b", "c"] && preg_split('//', 'ab') === ["", "a", "b", ""]);
+    check("pg47", s79d(preg_split('/(-)|(\+)/', 'a-b+c', -1, PREG_SPLIT_DELIM_CAPTURE)) === "[0=>'a',1=>'-',2=>'b',3=>'',4=>'+',5=>'c']"
+        && s79d(preg_split('/(-)|(\+)/', 'a-b+c', -1, PREG_SPLIT_DELIM_CAPTURE | PREG_SPLIT_OFFSET_CAPTURE))
+            === "[0=>[0=>'a',1=>i:0],1=>[0=>'-',1=>i:1],2=>[0=>'b',1=>i:2],3=>[0=>'',1=>i:-1],4=>[0=>'+',1=>i:3],5=>[0=>'c',1=>i:4]]");
+    check("pg48", preg_split('/-/', 'a-b-c', 2) === ["a", "b-c"] && preg_split('/-/', 'a-b-c', 1) === ["a-b-c"]
+        && preg_split('/-/', 'a-b-c', 0) === ["a", "b", "c"] && preg_split('/-/', 'a-b-c', -2) === ["a-b-c"]
+        && preg_split('/-/', '-a--b-', 2, PREG_SPLIT_NO_EMPTY) === ["a", "-b-"]);
+    check("pg49", preg_split('/\d*/', 'a1b') === ["", "a", "", "b", ""] && preg_split('/\d*/', 'a1b', 2) === ["", "a1b"]
+        && preg_split('//u', "\xC3\xA9\xE2\x82\xAC", -1, PREG_SPLIT_NO_EMPTY) === ["\xC3\xA9", "\xE2\x82\xAC"]
+        && preg_split('/,/', '') === [""] && preg_split('/,/', '', -1, PREG_SPLIT_NO_EMPTY) === []
+        && preg_split('/[/', 'a') === false && preg_split('/,/u', "a,\xFF") === false);
+    // preg_quote, preg_grep
+    check("pg50", preg_quote('Hello.World?(x) {a} [b] <c> | : - # = !') === 'Hello\.World\?\(x\) \{a\} \[b\] \<c\> \| \: \- \# \= \!'
+        && preg_quote("a/b#c", "/") === "a\\/b\\#c" && preg_quote("a\0b") === "a\\000b" && preg_quote("h\xC3\xA9llo.") === "h\xC3\xA9llo\\.");
+    check("pg51", preg_grep('/^\d+$/', ['1', 'a', 'x' => '22']) === [0 => '1', 'x' => '22']
+        && preg_grep('/^\d+$/', ['1', 'a', 'x' => '22'], PREG_GREP_INVERT) === [1 => 'a']);
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -4249,6 +4391,7 @@ function main() {
     s76(); // SECTION-CALL 76
     s77(); // SECTION-CALL 77
     s78(); // SECTION-CALL 78
+    s79(); // SECTION-CALL 79
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

@@ -304,7 +304,8 @@ function jxPosixU(st, cls, u) {
 // CharPredicates.forProperty: the general categories, the US-ASCII POSIX
 // classes and the java* methods, by their exact names.
 function jxForProperty(st, cls, name) {
-    if (name == "LC" || (st.icase && (name == "Lu" || name == "Ll" || name == "Lt"))) {
+    // PCRE2 (C, PHP's 10.44) keeps \p{Lu} \p{Ll} \p{Lt} caseful.
+    if (name == "LC" || (st.icase && !st.pcre && (name == "Lu" || name == "Ll" || name == "Lt"))) {
         return jxProps(cls, RX_PGC + 1, RX_PGC + 2) && jxProps(cls, RX_PGC + 3, -1)
     }
     if (name == "LD") { return jxGcs(cls, "L") && jxGcs(cls, "Nd") }

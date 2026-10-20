@@ -1561,6 +1561,17 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // PHP's byte-string primitives, shared with layer 2 (lib/php-rt.metajs).
     include("lib/php-strings.js")
     include("lib/php-stdlib-index.js")
+    // The preg_* natives (lib/php-preg.js) on the shared regex engine's C
+    // dialect, its \p tables java.util.regex's. rxFail, rxPropHit, rxPropCls and
+    // rxGraphNext are regex.js's knobs, set by assignment.
+    include("lib/regex.js")
+    include("lib/java-chars.js")
+    include("lib/java-regex.js")
+    include("lib/php-preg.js")
+    rxFail = function (msg) { fail("regexp: " + msg) }
+    rxPropHit = function (id, c) { return jxPropHit(id, c) }
+    rxPropCls = function (st, name, at) { return jxPropCls(st, name, at) }
+    rxGraphNext = function (text, i, limit) { return jxGraphNext(text, i, limit) }
 
     // ----- Arguments and the calling convention -------------------------------
     // Every PHP callable is ONE host function taking a single "argset":
@@ -7145,6 +7156,16 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         "is_callable": function(v) { return phpIsCallable(v) },
         "__mec_ifaces": function(v) { return phpIfaceNames(v) },
         "__mec_math": function(op, x, y) { return mkFlo(phsMath(phpStr(op), numOf(toNumV(x)), numOf(toNumV(y)))) },
+        // preg_*'s compile and match (lib/php-preg.js). Twins of js_phpregc and
+        // js_phpregx in abnf/jsrtphppreg.go and lib/php-rt.metajs.
+        "__mec_pregc": function(key) {
+            var names = phpPregCompile(phpStr(key))
+            return typeof names == "string" ? names : arrOf(names)
+        },
+        "__mec_pregx": function(key, s, pos) {
+            var r = phpPregExec(phpStr(key), phpStr(s), phpInt(pos))
+            return typeof r == "number" ? r : arrOf(r)
+        },
         "array_key_exists": function(k, a) {
             if (!isArr(a)) {
                 phpRaise("TypeError", "array_key_exists(): Argument #2 ($array) must be of type array, " + phpValueName(a) + " given")

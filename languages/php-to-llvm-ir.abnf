@@ -6613,6 +6613,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (name == "__mec_aptr") { return "js_phaptr" }
         if (name == "__mec_precision") { return "js_phprecision" }
         if (name == "__mec_oid") { return "js_phoidof" }
+        if (name == "__mec_pregc") { return "js_phpregc" }
+        if (name == "__mec_pregx") { return "js_phpregx" }
         if (name == "array_key_exists") { return "js_phkeyexists" }
         if (name == "array_key_last") { return "js_phkeylast" }
         if (name == "array_pop") { return "js_phpop" }
@@ -6620,7 +6622,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     }
     function phpNativeArgc(ext) {
         if (ext == "js_phsubstr" || ext == "js_phstrpos" || ext == "js_phstrrpos" || ext == "js_phfmtfloat" ||
-            ext == "js_phmath") { return 3 }
+            ext == "js_phmath" || ext == "js_phpregx") { return 3 }
         if (ext == "js_phkeyexists" || ext == "js_phstrcmp" || ext == "js_phaptr") { return 2 }
         return 1
     }
