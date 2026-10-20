@@ -17585,6 +17585,43 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// iter(x): a generator is ITSELF an iterator in CPython and is answered
 		// unchanged - which is what keeps `for x in iter(endless())` lazy;
 		// everything else is materialized into a cursor. See pyMkIter.
+		// iter(object) is js_pyiterfn; iter(callable, sentinel) is a cursor that
+		// calls it until it answers the sentinel, then stays exhausted. Twin of
+		// hostGlobals["iter"] in python-interpreter.abnf and lib/python-rt.metajs.
+		"js_pyiterargs": func(a []uint64) uint64 {
+			args := rt.argArray(u(a[0]))
+			if len(args) != 2 {
+				if len(args) != 1 {
+					panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+						fmt.Sprintf("iter expected at most 2 arguments, got %d", len(args)))})
+				}
+				return pyExternMaps[rt]["js_pyiterfn"]([]uint64{w(args[0])})
+			}
+			f, sentinel := args[0], args[1]
+			if !isCallable(f) && !rt.truthy(u(pyExternMaps[rt]["js_pycallable"]([]uint64{w(f)}))) {
+				panic(&jsThrown{value: rt.pyExcInstance("TypeError", "iter(v, w): v must be callable")})
+			}
+			done := false
+			it := newJSObject()
+			it.set("__pyit", "callable_iterator")
+			it.set("next", jsHostFunc("pycallit.next", func(rt *jsrt, this uint64, _ []interface{}) interface{} {
+				out := newJSObject()
+				out.set("value", jsUndef)
+				out.set("done", true)
+				if done {
+					return out
+				}
+				v := rt.callPyValue(f, nil, jsUndef)
+				if rt.truthy(rt.pyExt("js_pybin", "==", v, sentinel)) {
+					done = true
+					return out
+				}
+				out.set("value", v)
+				out.set("done", false)
+				return out
+			}))
+			return w(it)
+		},
 		"js_pyiterfn": func(a []uint64) uint64 {
 			v := u(a[0])
 			if _, ok := v.(*jsGenerator); ok {
@@ -17798,8 +17835,29 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			return w(rt.pyMkIter("filter", out))
 		},
+		// reversed(seq): a class's own __reversed__ answers; otherwise the value
+		// must be a sequence (a user class needs __len__ and __getitem__) - a
+		// set, a generator or an iterator is CPython's TypeError. Twin of
+		// hostGlobals["reversed"] in python-interpreter.abnf and
+		// lib/python-rt.metajs.
 		"js_pyreversed": func(a []uint64) uint64 {
-			src := rt.pyElemsOf(u(a[0]))
+			v := u(a[0])
+			notRev := func() {
+				panic(&jsThrown{value: rt.pyExcInstance("TypeError", "'"+pyTypeName(rt, v)+"' object is not reversible")})
+			}
+			if _, cls, ok := pyInstance(v); ok {
+				if m, found := pyLookup(cls, "__reversed__"); found && isCallable(m) {
+					return w(rt.call(m, jsUndef, []interface{}{v}))
+				}
+				_, hasLen := pyLookup(cls, "__len__")
+				_, hasItem := pyLookup(cls, "__getitem__")
+				if !hasLen || !hasItem {
+					notRev()
+				}
+			} else if _, isSet := pySetElems(v); isSet || pyIsGenerator(v) || pyIterName(rt, v) != "" {
+				notRev()
+			}
+			src := rt.pyElemsOf(v)
 			out := make([]interface{}, 0, len(src))
 			for i := len(src) - 1; i >= 0; i-- {
 				out = append(out, src[i])

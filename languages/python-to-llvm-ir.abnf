@@ -4653,7 +4653,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // not have, and `hash`/`id` cannot be matched against CPython at all -
         // str/bytes/tuple hashing is randomized per process (PYTHONHASHSEED) and
         // an id is an address.
-        b = declBuiltin(b, "iter", "js_pyiterfn", 1)
+        b = declBuiltin(b, "iter", "js_pyiterargs", 0)
         b = declBuiltin(b, "next", "js_pynext", 0)
         b = declKwBuiltin(b, "enumerate", "js_pyenumerate", [])
         b = declKwBuiltin(b, "zip", "js_pyzip", [])

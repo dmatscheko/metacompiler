@@ -6311,6 +6311,30 @@ function pyIterKind(v) {
     return "iterator"
 }
 
+// Go: js_pyiterargs. iter(object) is js_pyiterfn; iter(callable, sentinel) is
+// a cursor that calls it until it answers the sentinel.
+function js_pyiterargs(args) {
+    if (args.length != 2) {
+        if (args.length != 1) { pyRaiseExc("TypeError", "iter expected at most 2 arguments, got " + args.length) }
+        return js_pyiterfn(args[0])
+    }
+    var f = args[0]
+    if (!js_pycallable(f)) { pyRaiseExc("TypeError", "iter(v, w): v must be callable") }
+    var it = {__pyit: "callable_iterator", __done: false}
+    it["next"] = function() { return pyCallItStep(it, f, args[1]) }
+    return it
+}
+
+function pyCallItStep(it, f, sentinel) {
+    if (it["__done"]) { return {value: undefined, done: true} }
+    var v = pyDCallPyValue(f, [], undefined)
+    if (pyDTruthy(js_pybin("==", v, sentinel))) {
+        it["__done"] = true
+        return {value: undefined, done: true}
+    }
+    return {value: v, done: false}
+}
+
 function js_pyiterfn(v) {
     if (pyIsGen(v) || pyIsIter(v)) { return v }
     var it = pyAUserIter(v)
@@ -6570,7 +6594,18 @@ function js_pyfilterfn(f, src) {
     return pyMkIter("filter", out)
 }
 
+// Go: js_pyreversed. A class's own __reversed__ answers; a set, a generator,
+// an iterator or a user class without __len__ and __getitem__ is not reversible.
 function js_pyreversed(v) {
+    var cls = pyInstClassOf(v)
+    if (cls !== null) {
+        if (pyLookupHas(cls, "__reversed__")) { return pyCall(pyLookupVal(cls, "__reversed__"), [v]) }
+        if (!pyLookupHas(cls, "__len__") || !pyLookupHas(cls, "__getitem__")) {
+            pyRaiseExc("TypeError", "'" + pyTypeName(v) + "' object is not reversible")
+        }
+    } else if (pySetElemsOf(v) !== null || pyIsGen(v) || pyIsIter(v)) {
+        pyRaiseExc("TypeError", "'" + pyTypeName(v) + "' object is not reversible")
+    }
     var a = pyElemsOf(v)
     var out = []
     var i = a.length - 1

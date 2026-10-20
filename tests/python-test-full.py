@@ -7142,6 +7142,35 @@ def s139():
     except TypeError as e:
         check("sys2", str(e) == "write() argument must be str, not int")
 
+# ===== SECTION 140: reversed() with __reversed__, iter(callable, sentinel) =====
+class S140Rev:
+    def __reversed__(self):
+        return iter([3, 2, 1])
+
+class S140OnlyIter:
+    def __iter__(self):
+        return iter([1])
+
+def s140():
+    errs = []
+    for v in [{1, 2}, (x for x in [1]), iter([1]), S140OnlyIter()]:
+        try:
+            reversed(v)
+        except TypeError as e:
+            errs.append(str(e))
+    check("rev1", list(reversed(S140Rev())) == [3, 2, 1] and list(reversed(range(3))) == [2, 1, 0]
+          and errs == ["'set' object is not reversible", "'generator' object is not reversible",
+                       "'list_iterator' object is not reversible", "'S140OnlyIter' object is not reversible"])
+    calls = [0]
+    def tick():
+        calls[0] += 1
+        return calls[0]
+    it = iter(tick, 4)
+    first = list(it)
+    data = iter(["a", "b", "", "c"])
+    check("iter2", first == [1, 2, 3] and list(it) == [] and calls[0] == 4
+          and list(iter(lambda: next(data), "")) == ["a", "b"] and type(it).__name__ == "callable_iterator")
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -7279,5 +7308,6 @@ def main():
     s137() # SECTION-CALL 137
     s138() # SECTION-CALL 138
     s139() # SECTION-CALL 139
+    s140() # SECTION-CALL 140
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

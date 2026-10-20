@@ -2296,7 +2296,24 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (isView(v)) { return v.__dview == "keys" ? "dict_keyiterator" : (v.__dview == "values" ? "dict_valueiterator" : "dict_itemiterator") }
         return "iterator"
     }
-    hostGlobals["iter"] = function(v) {
+    // iter(callable, sentinel): a cursor that calls it until it answers the
+    // sentinel, then stays exhausted (pySeqStep's StopIteration arm). Twin of
+    // js_pyiterargs in abnf/jsrt.go and lib/python-rt.metajs.
+    function pyCallIter(f, sentinel) {
+        if (!hostGlobals["callable"](f)) { pyListErr("TypeError", "iter(v, w): v must be callable") }
+        var it = pyMkIter("callable_iterator", [])
+        it.__s = undefined
+        it.__g = function(s, i) {
+            var v = anytype
+            v = pyCall(f, [], null)
+            if (pyEq(v, sentinel)) { pyRaise(pyStopIter(undefined)) }
+            return v
+        }
+        return it
+    }
+    hostGlobals["iter"] = function(v, sentinel) {
+        if (arguments.length == 2) { return pyCallIter(v, sentinel) }
+        if (arguments.length != 1) { pyListErr("TypeError", "iter expected at most 2 arguments, got " + arguments.length) }
         if (isGen(v) || isPyIt(v)) { return v }
         var mit = pyMetaIter(v)
         if (mit !== null) { return mit }
@@ -2426,7 +2443,20 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return pyMkIter("filter", out)
     }
+    // reversed(seq): a class's own __reversed__ answers; otherwise the value must
+    // be a sequence (a user class needs __len__ and __getitem__) - a set, a
+    // generator or an iterator is CPython's TypeError. Twin of js_pyreversed in
+    // abnf/jsrt.go and lib/python-rt.metajs.
     hostGlobals["reversed"] = function(v) {
+        if (pyUser(v)) {
+            var rv = clsFind(v.__class, "__reversed__")
+            if (rv != null) { return rv(v) }
+            if (clsFind(v.__class, "__len__") == null || clsFind(v.__class, "__getitem__") == null) {
+                pyListErr("TypeError", "'" + pyTypeOf(v).__name + "' object is not reversible")
+            }
+        } else if (isGen(v) || isPyIt(v) || isSet(v)) {
+            pyListErr("TypeError", "'" + pyTypeOf(v).__name + "' object is not reversible")
+        }
         var a = iterToList(v)
         var out = []
         for (var i = a.length - 1; i >= 0; i--) { out.push(a[i]) }
