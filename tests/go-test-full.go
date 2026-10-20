@@ -4835,6 +4835,33 @@ func s89() {
 		bytes.Equal([]byte("x"), []byte("x")), len(bytes.Fields([]byte(" a b "))), line) == "hi wé428 trueABtrue 2a,")
 }
 
+// ===== SECTION 90: order of evaluation =====
+// gc runs every call of a statement first, left to right, and reads the plain
+// operands after them. The expected values are go run's.
+func pair90(a, b int) int { return a*100 + b }
+func s90() {
+	x := 5
+	f := func() int { x = 7; return 1 }
+	got := fmt.Sprint(x, f())
+	x = 5
+	got += fmt.Sprint(" ", pair90(x, f()))
+	x = 5
+	y := x + f()
+	x = 5
+	a, b := x, f()
+	x = 5
+	r := func() (int, int) { return x, f() }
+	r1, r2 := r()
+	check("ord1", fmt.Sprint(got, " ", y, a, b, r1, r2) == "7 1 701 8 7 1 7 1")
+	x = 5
+	check("ord2", fmt.Sprint(x, x+f(), x == 7 && f() == 1) == "7 8 true")
+	type p90 struct{ a, b int }
+	x = 5
+	s := []int{x, f(), x}
+	x = 5
+	check("ord3", fmt.Sprint(s, p90{x, f()}) == "[7 1 7] {7 1}")
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -4925,6 +4952,7 @@ func main() {
 	s87() // SECTION-CALL 87
 	s88() // SECTION-CALL 88
 	s89() // SECTION-CALL 89
+	s90() // SECTION-CALL 90
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

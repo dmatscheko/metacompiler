@@ -586,7 +586,7 @@ IdxE        <~~ var ie = pop(); push(ie); push({ksty: stAt(up.pos), kr: goKRec(u
 
 ExprList    = StoreExpr { "," StoreExpr } ;
 // One value of a := / = / var, followed by the static type it reports (goSplitSty).
-StoreExpr   <~~ var se = pop(); push(se); push({sty: stStoreAt(up.pos), rn: goIsRuneC(up.pos), kr: goKRec(up.start, up.pos)}) ~~> = Expression ;
+StoreExpr   <~~ var se = pop(); push(se); push({sty: stStoreAt(up.pos), rn: goIsRuneC(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos)}) ~~> = Expression ;
 
 Empty       <~~ push(function(b) { return b }) ~~>
             = ";" ;
@@ -1060,7 +1060,7 @@ ArrayLit    <~~ var ai = takeAll()
 ArrDots     <~~ push({alen: null, altext: "..."}) ~~> = "..." ;
 ArrLen      <~~ push({alen: pop(), altext: up.in}) ~~> = Expression ;
 ElemT       <~~ push({cet: goWalkQual(firstType(up.in))}) ~~> = Type ;
-SeqBody     <~~ push({selems: takeAll()}) ~~>
+SeqBody     <~~ push({selems: goOrderEls(takeAll())}) ~~>
             = "{" [ SeqElem { "," SeqElem } [ "," ] ] "}" ;
 SeqElem     <~~ push(makeSeqElem(takeAll())) ~~>
             = [ KeyAhead SeqKey ] SeqVal ;
@@ -1075,7 +1075,7 @@ SeqKeyE     <~~ var ske = pop(); push(ske); push({ksty: goLitKeySty(stAt(up.pos)
 SeqVal      = SeqNest | SeqExpr ;
 // An element reports its static type after it, so one going into an interface
 // element is boxed (goDtBoxTo). Twin of CompExpr in go-interpreter.abnf.
-SeqExpr     <~~ var se = pop(); push(se); push({esty: stAt(up.pos)}); goLitEl(up.start, up.pos, false, "") ~~> = Expression ;
+SeqExpr     <~~ var se = pop(); push(se); push({esty: stAt(up.pos), pu: goPure(up.start, up.pos)}); goLitEl(up.start, up.pos, false, "") ~~> = Expression ;
 SeqNest     <~~ push({enest: pop()}); goLitGrp(up.start, up.pos) ~~> = SeqBody ;
 // KeyAhead answers "is this composite-literal element keyed?" - is there a ':' before
 // the element's ',' or the closing '}' at bracket depth 0. It decides before anything
@@ -1210,16 +1210,16 @@ LitKey      <~~ push({fkey: firstWord(up.in), fkeyT: pop(), ksty: goLitKeySty(st
 LitVal      = SeqNest | LitExpr ;
 // An element expression reports its static type in a {lesty} marker after it, which
 // a field of interface type boxes it by (litSplit, emitStructVal).
-LitExpr     <~~ var le = pop(); push(le); push({lesty: goLitEsty(up.pos)}); goLitEl(up.start, up.pos, false, "") ~~> = Expression ;
+LitExpr     <~~ var le = pop(); push(le); push({lesty: goLitEsty(up.pos), pu: goPure(up.start, up.pos)}); goLitEl(up.start, up.pos, false, "") ~~> = Expression ;
 
 // f(a, b): a function or a builtin. A trailing '...' spreads a slice into the
 // variadic parameter.
 Call        <~~ var ci = goAppendC(takeAll(), up.in); push(makeCall(goCallBoxC(ci), goSplitArgs(ci.slice(1)).atys)) ~~>
             = Id <~~ push(up.in) ~~> "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
 // A call argument reports its static type after it, for goSplitArgs.
-ArgExpr     <~~ var ae = pop(); push(goRuneDefC(ae, up.pos)); push({aty: stAt(up.pos), kr: goKRec(up.start, up.pos)}) ~~> = Expression ;
+ArgExpr     <~~ var ae = pop(); push(goRuneDefC(ae, up.pos)); push({aty: stAt(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos)}) ~~> = Expression ;
 // A returned value, which takes a rune constant at the RESULT's type (makeReturn).
-RetExpr     <~~ var re = pop(); push(re); push({aty: stAt(up.pos), rn: goIsRuneC(up.pos), kr: goKRec(up.start, up.pos)}) ~~> = Expression ;
+RetExpr     <~~ var re = pop(); push(re); push({aty: stAt(up.pos), rn: goIsRuneC(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos)}) ~~> = Expression ;
 
 VarRef      <~~ push(goNameC(up.in, up.pos)) ~~>
             = Id ;
@@ -2056,6 +2056,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var tk = goTkRun(items, ops)
         if (ty == null) { goFloOperands(items, ts, sty) }
         goShiftCounts(items, ops, ts)
+        ts = goRunOrder(items, ts)
         regConst(pos, null)
         regCFn(pos, cfn)
         regSt(pos, sty)
@@ -2245,6 +2246,28 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (args.length > 0 && typeof args[args.length - 1] != "function") { args.pop(); return true }
         return false
     }
+    // An operand list in gc's order (goNeedsOrder, go-constfold.js): the FIRST
+    // operand emits every impure one, in source order, and each later impure operand
+    // answers the value already emitted, which dominates it. Twin of goOrderThunks
+    // in go-interpreter.abnf.
+    function goOrderThunks(ts, pures) {
+        if (!goNeedsOrder(pures)) { return ts }
+        var held = {v: []}
+        var out = [goOrderFirst(ts, pures, held)]
+        for (var i = 1; i < ts.length; i++) { out.push(pures[i] ? ts[i] : goOrderHeld(held, i)) }
+        return out
+    }
+    function goOrderFirst(ts, pures, held) {
+        return function(b) {
+            var r = []
+            for (var j = 0; j < ts.length; j++) {
+                if (pures[j]) { r.push(hUndef) } else { var e = ts[j](b); b = e.b; r.push(e.v) }
+            }
+            held.v = r
+            return pures[0] ? ts[0](b) : {b: b, v: r[0]}
+        }
+    }
+    function goOrderHeld(held, i) { return function(b) { return {b: b, v: held.v[i]} } }
     // emitArgs plus Go's f(xs...): js_gospread flattens the last element in place.
     function emitArgs2(b, args, spread) {
         var ea = emitArgs(b, args)
@@ -2436,13 +2459,17 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // indexed, or a nested brace group built against the element type), and only the
     // result differs - a slice gets a header over the array, an array IS the array.
     function makeSeqElem(items) {
-        var e = {ekey: null, ektext: null, eksty: "", eval: null, enest: null, esty: ""}
+        var e = {ekey: null, ektext: null, eksty: "", eval: null, enest: null, esty: "", epu: false}
         for (var i = 0; i < items.length; i++) {
             var it = items[i]
             if (typeof it == "function") { e.eval = it }
             else if (it.ekey != undefined) { e.ekey = it.ekey; e.ektext = it.ektext; e.eksty = it.eksty }
             else if (it.enest != undefined) { e.enest = it.enest }
-            else if (it.esty != undefined) { e.esty = it.esty; if (goDtBoxTy(it.esty) != "") { goDtNote(goDtBoxTy(it.esty)) } }
+            else if (it.esty != undefined) {
+                e.esty = it.esty
+                e.epu = it.pu === true
+                if (goDtBoxTy(it.esty) != "") { goDtNote(goDtBoxTy(it.esty)) }
+            }
         }
         return e
     }
@@ -2793,19 +2820,24 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // Go does - so Point{} and Point{x: 0} are the same value and compare equal.
     // A struct literal's elements: the args in the shape the builders read, and each
     // arg's static type from its {lesty} marker ("" for none).
+    // An unkeyed literal's values come back in gc's order (goOrderThunks).
     function litSplit(raw) {
         var args = []
         var estys = []
+        var pures = []
+        var plain = true
         for (var i = 0; i < raw.length; i++) {
             var it = raw[i]
             if (typeof it != "function" && it != null && it.lesty !== undefined) {
-                if (estys.length > 0) { estys[estys.length - 1] = it.lesty }
+                if (estys.length > 0) { estys[estys.length - 1] = it.lesty; pures[pures.length - 1] = it.pu === true }
                 continue
             }
+            if (typeof it != "function") { plain = false }
             args.push(it)
             estys.push("")
+            pures.push(false)
         }
-        return {args: args, estys: estys}
+        return {args: plain ? goOrderThunks(args, pures) : args, estys: estys}
     }
     // An element's static type; a type a box is made for is declared up front
     // (declDtClasses runs before the program's code is emitted).

@@ -1193,22 +1193,25 @@ function goAddrNameC(t, name, pos) {
 // rns[k]: value k is a rune constant (StoreExpr), which a declaration without a
 // type binds at its default type, int32.
 // krs[k]: value k's goKRec record, or null.
+// The thunks come back in gc's order of evaluation (goOrderThunks).
 function goSplitSty(xs) {
     var ts = []
     var tys = []
     var rns = []
     var krs = []
+    var pures = []
     var i = 0
     while (i < xs.length) {
-        if (typeof xs[i] == "function") { ts.push(xs[i]); tys.push(""); rns.push(false); krs.push(null) }
+        if (typeof xs[i] == "function") { ts.push(xs[i]); tys.push(""); rns.push(false); krs.push(null); pures.push(false) }
         else if (xs[i].sty != undefined && tys.length > 0) {
             tys[tys.length - 1] = xs[i].sty
             rns[rns.length - 1] = xs[i].rn === true
             krs[krs.length - 1] = xs[i].kr == undefined ? null : xs[i].kr
+            pures[pures.length - 1] = xs[i].pu === true
         }
         i = i + 1
     }
-    return {ts: ts, tys: tys, rns: rns, krs: krs}
+    return {ts: goOrderThunks(ts, pures), tys: tys, rns: rns, krs: krs}
 }
 // ----- AN UNTYPED CONSTANT AT A TYPED LOCATION -----
 // Go converts an untyped constant to the type of the location it reaches - its
@@ -2024,28 +2027,76 @@ function goCompTy(t) { return t.charAt(0) == "[" || t.substring(0, 4) == "map[" 
 // A type switch's case label: a composite type keeps its whole text.
 function goCaseTy(ct, w) { return goCompTy(ct) ? ct : goQualWord(ct, w) }
 // A call's argument list: each argument is followed by its {aty} (ArgExpr), and a
-// trailing {spread} spreads the last one.
+// trailing {spread} spreads the last one. The arguments come back in gc's order of
+// evaluation (goOrderThunks).
 function goSplitArgs(items) {
     var args = []
     var atys = []
     var rns = []   // a returned value that is a rune constant (RetExpr)
     var krs = []   // an argument's goKRec record (ArgExpr)
+    var pures = [] // an operand with no call in it (goPure)
     var spread = false
     var i = 0
     while (i < items.length) {
         var it = items[i]
-        if (typeof it == "function") { args.push(it); atys.push(""); rns.push(false); krs.push(null) }
+        if (typeof it == "function") { args.push(it); atys.push(""); rns.push(false); krs.push(null); pures.push(false) }
         else if (it != null && it.aty !== undefined) {
             if (atys.length > 0) {
                 atys[atys.length - 1] = it.aty
                 rns[rns.length - 1] = it.rn === true
                 krs[krs.length - 1] = it.kr == undefined ? null : it.kr
+                pures[pures.length - 1] = it.pu === true
             }
         }
         else if (it != null && it.spread === true) { spread = true }
         i = i + 1
     }
-    return {args: args, atys: atys, rns: rns, krs: krs, spread: spread}
+    return {args: goOrderThunks(args, pures), atys: atys, rns: rns, krs: krs, spread: spread}
+}
+// gc's order of evaluation (cmd/compile/internal/walk/order.go): within a statement
+// every call and receive runs first, left to right, and the plain operands are read
+// after them, so `fmt.Println(x, f())` prints the x that f() left behind. An operand
+// is pure when its source has no '(' and no '<-'; a conversion or a parenthesised
+// operand counts as a call, which only keeps it in source order. Each grammar's
+// goOrderThunks runs the impure operands of a list first when goNeedsOrder says
+// that differs from source order: when a pure operand precedes an impure one.
+function goPure(start, pos) {
+    var t = c.srcSlice(start, pos)
+    return t.indexOf("(") < 0 && t.indexOf("<-") < 0
+}
+// The operands of a binary run [t, {at, as}, op, t, {at, as}, ...], in gc's order.
+function goRunOrder(items, ts) {
+    var pures = []
+    var k = 1
+    while (k < items.length) { pures.push(goPure(items[k].as, items[k].at)); k = k + 3 }
+    return goOrderThunks(ts, pures)
+}
+// The elements {ekey, enest, eval, epu} of a composite literal, in gc's order when
+// none is keyed or a nested group: a keyed element may be built out of source order.
+function goOrderEls(els) {
+    var ts = []
+    var pures = []
+    var i = 0
+    while (i < els.length) {
+        var e = els[i]
+        if (e.ekey != null || e.ekeyn != null || e.enest != null || typeof e.eval != "function") { return els }
+        ts.push(e.eval)
+        pures.push(e.epu === true)
+        i = i + 1
+    }
+    var o = goOrderThunks(ts, pures)
+    i = 0
+    while (i < els.length) { els[i].eval = o[i]; i = i + 1 }
+    return els
+}
+function goNeedsOrder(pures) {
+    var seen = false
+    var i = 0
+    while (i < pures.length) {
+        if (pures[i]) { seen = true } else if (seen) { return true }
+        i = i + 1
+    }
+    return false
 }
 // The parameter type argument j of a call meets, from goPreParams' list.
 function goParamTyAt(pts, j) {
@@ -3335,6 +3386,7 @@ function goCmpFold(items) {
     } else if (ops.length > 1) {
         regConst(items[items.length - 1].at, null)
     }
+    ts = goRunOrder(items, ts)
     var flat = [ts[0]]
     for (var j = 0; j < ops.length; j++) { flat.push(ops[j]); flat.push(ts[j + 1]) }
     return foldBinary(flat)

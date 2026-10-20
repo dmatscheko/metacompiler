@@ -571,7 +571,7 @@ IdxE        <~~ var ie = pop(); push(ie); push({ksty: stAt(up.pos), kr: goKRec(u
 
 ExprList    = StoreExpr { "," StoreExpr } ;
 // One value of a := / = / var, followed by the static type it reports (goSplitSty).
-StoreExpr   <~~ var se = pop(); push(se); push({sty: stStoreAt(up.pos), rn: goIsRuneC(up.pos), kr: goKRec(up.start, up.pos)}) ~~> = Expression ;
+StoreExpr   <~~ var se = pop(); push(se); push({sty: stStoreAt(up.pos), rn: goIsRuneC(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos)}) ~~> = Expression ;
 
 Empty       <~~ push(function() {}) ~~>
             = ";" ;
@@ -913,7 +913,7 @@ CompStructT <~~ push({ckind: "anon", cfields: takeAll()}) ~~>
             = "struct" KwEnd "{" { AnonField } "}" ;
 AnonField   = Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } FType [ FieldTag ] [ ";" ] ;
 
-CompBody    <~~ push({celems: takeAll()}) ~~>
+CompBody    <~~ push({celems: goOrderEls(takeAll())}) ~~>
             = "{" [ CompElem { "," CompElem } [ "," ] ] "}" ;
 CompElem    <~~ push(makeCompElem(takeAll())) ~~>
             = [ KeyAhead CompKey ] CompValue ;
@@ -928,7 +928,7 @@ CKeyE       <~~ var ke = pop(); push(ke); push({ksty: stAt(up.pos)}); goLitEl(up
 CompValue   = CompNested | CompExpr ;
 // An element reports its static type after it, so one going into an interface
 // element is boxed (goDtBoxTo).
-CompExpr    <~~ var ce = pop(); push(ce); push({esty: stAt(up.pos)}); goLitEl(up.start, up.pos, false, "") ~~> = Expression ;
+CompExpr    <~~ var ce = pop(); push(ce); push({esty: stAt(up.pos), pu: goPure(up.start, up.pos)}); goLitEl(up.start, up.pos, false, "") ~~> = Expression ;
 CompNested  <~~ push({cnested: pop()}); goLitGrp(up.start, up.pos) ~~>
             = CompBody ;
 
@@ -1092,9 +1092,9 @@ NewType     <~~ push({nty: firstType(up.in)}) ~~>
 Call        <~~ var ci = goAppendC(takeAll(), up.in); push(makeCall(goCallBoxC(ci), goSplitArgs(ci.slice(1)).atys)) ~~>
             = Id <~~ push(up.in) ~~> "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
 // A call argument reports its static type after it, for goSplitArgs.
-ArgExpr     <~~ var ae = pop(); push(goRuneDefC(ae, up.pos)); push({aty: stAt(up.pos), kr: goKRec(up.start, up.pos)}) ~~> = Expression ;
+ArgExpr     <~~ var ae = pop(); push(goRuneDefC(ae, up.pos)); push({aty: stAt(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos)}) ~~> = Expression ;
 // A returned value, which takes a rune constant at the RESULT's type (makeReturn).
-RetExpr     <~~ var re = pop(); push(re); push({aty: stAt(up.pos), rn: goIsRuneC(up.pos), kr: goKRec(up.start, up.pos)}) ~~> = Expression ;
+RetExpr     <~~ var re = pop(); push(re); push({aty: stAt(up.pos), rn: goIsRuneC(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos)}) ~~> = Expression ;
 
 // KeyAhead answers "is this composite-literal element keyed?" - is there a ':' before
 // the element's ',' or the closing '}' at bracket depth 0. Like InitAhead it decides
@@ -2040,6 +2040,27 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
         return {kind: "slice", lo: lo, hi: hi, mx: mx, at: at, sks: sks}
     }
+    // An operand list in gc's order (goNeedsOrder, go-constfold.js): reading the FIRST
+    // operand runs every impure one, in source order, and each later read of an
+    // impure operand takes the value held. A pure operand calls nothing, so nothing
+    // re-enters this list between its first read and its last. Twin of
+    // goOrderThunks in go-to-llvm-ir.abnf.
+    function goOrderThunks(ts, pures) {
+        if (!goNeedsOrder(pures)) { return ts }
+        var held = {v: []}
+        var out = [goOrderFirst(ts, pures, held)]
+        for (var i = 1; i < ts.length; i++) { out.push(pures[i] ? ts[i] : goOrderHeld(held, i)) }
+        return out
+    }
+    function goOrderFirst(ts, pures, held) {
+        return function() {
+            var r = []
+            for (var j = 0; j < ts.length; j++) { r.push(pures[j] ? undefined : ts[j]()) }
+            held.v = r
+            return pures[0] ? ts[0]() : r[0]
+        }
+    }
+    function goOrderHeld(held, i) { return function() { return held.v[i] } }
     // The argument list of a call, with a trailing '...' spreading its slice.
     function callArgs(s) {
         var argv = []
@@ -3081,6 +3102,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var tk = goTkRun(items, ops)
         if (ty == null) { goFloOperands(items, ts, sty) }
         goShiftCounts(items, ops, ts)
+        ts = goRunOrder(items, ts)
         regConst(pos, null)
         regCFn(pos, cfn)
         regSt(pos, sty)
@@ -3869,7 +3891,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
         var v = items[i]
         var eksty = i == 1 && items[0].ksty !== undefined ? items[0].ksty : ""
-        if (typeof v == "function") { return {ekey: key, ekeyn: keyn, ektext: ktext, eksty: eksty, eval: v, esty: items[i + 1].esty} }
+        if (typeof v == "function") { return {ekey: key, ekeyn: keyn, ektext: ktext, eksty: eksty, eval: v, esty: items[i + 1].esty, epu: items[i + 1].pu} }
         return {ekey: key, ekeyn: keyn, ektext: ktext, eksty: eksty, enest: v.cnested.celems}
     }
     // The zero value of a type text, used for the untouched slots of [5]int{0: 1}.
