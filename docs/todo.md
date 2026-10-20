@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-679** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-681** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -64,11 +64,14 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-660 python: Unicode `\d` / `\s` in regex; `__class__` in a class nested in a method; astral \w across engines · P2 · PY · IN PROGRESS (PY worker, round 11) [V]
-`re.findall(r"[\W\d]+", "٣4")` → ours `['4']` (python `['٣4']`: a str pattern's \d is any Nd digit; \s likewise Unicode) — use the
-same knob pattern as \w. `class F: def m(self): class G: z = __class__` → NameError in all engines (CPython F; the compiler cannot reach
-the outer cell past G's own `__pycls__`). Astral characters: the Go twin matches runes, regex.js UTF-16 units — a Unicode \w on an
-astral letter may differ between engines (probe first).
+### T-679 python: `__class__` / `super()` in a function called while its class body runs · P3 · PY · OPEN [V]
+`class F:\n def m(): return __class__\n z = m()` → CPython NameError "cannot access free variable '__class__' where it is not
+associated with a value in enclosing scope"; interp "name '__class__' is not defined", compiler returns F (__pycls__ set at body
+start). `super()` there: CPython "RuntimeError: super(): empty __class__ cell".
+
+### T-680 python re: IGNORECASE pairs from CPython's `_ignorecase_fixes`; non-ASCII ranges of 256+ chars · P3 · PY · OPEN [V]
+`re.match("(?i)\u0390", "\u1fd3")` matches in CPython (full-fold extra pairs, sre_compile `_ignorecase_fixes`), not here. A
+non-ASCII class range spanning 256 or more characters only gets the text-side upper/lower test under (?i). Regex owner only.
 
 ---
 
@@ -772,6 +775,7 @@ T-669 js: primitive wrapper objects (`new Number(7)`, `Object(7)`, `({}).valueOf
 T-670 js: defineProperty writable/configurable; getOwnPropertyNames of non-enumerables; Function/Boolean.prototype; String of a null-proto object — DONE 0c010f6d (writable/enumerable/configurable defaults, Cannot redefine property, getOwnPropertyNames order, Function/Boolean.prototype, null-proto ToPrimitive TypeError — 4 legs = node; follow-ups T-676/T-677)
 T-672 go: `*t = *o` through a pointer; zero embedded struct field is nil; typed package constants print as numbers — DONE 2a3ded12 (struct store through pointers, zero embedded struct instances, promoted field writes, typed package constants and folded typed constants — 4 legs = go run)
 T-673 go: fmt.Sscanf / Scan family; `%T` of a func and of os.Stdin/os.Stdout; `*(v.p.(*int)) = 5` does not parse — DONE 84120661 (fmt Scan/Sscan/Fscan families ported from fmt/scan.go, %T of funcs, *os.File std streams, qualified interface assertions, *(expr) = v — 4 legs = go run; follow-up T-678)
+T-660 python: Unicode `\d` / `\s` in regex; `__class__` in a class nested in a method; astral \w across engines — DONE f1ce9dea 8d6cb63c (Unicode \d/\s, P text read by code point for astral spans/classes, __class__ in nested class bodies; plus must_advance, pos/endpos, Unicode IGNORECASE — 4 legs = python3 3.14; follow-up T-679)
 
 # Settled — do not re-open
 
