@@ -7,7 +7,7 @@ Types: classes with instance and static fields (with initializers), instance,
 static and abstract methods, OVERLOADED constructors with explicit this(...) and
 super(...) chaining, static and instance initializer blocks (run in the order they
 are written, before the constructor body), single inheritance with dynamic dispatch
-and super.m() calls (a class must appear before its subclasses), records (canonical,
+and super.m() calls (a class may precede its superclass), records (canonical,
 compact and secondary constructors, generated accessors and equals, hand written
 accessors win), interfaces (constants, abstract methods, default and private
 instance methods, static methods, and Iface.super.m() to pick one of two inherited
@@ -5987,7 +5987,7 @@ HasStatic   = :script(~~
         for (i = 0; i < members.length; i++) {
             if (members[i].ext != undefined) {
                 sup = jResolveClass(members[i].ext)
-                if (sup == undefined) fail("unknown superclass: " + members[i].ext + " (a class must appear before its subclasses)")
+                if (sup == undefined) fail("unknown superclass: " + members[i].ext)
                 // `new Iface() { ... }` arrives as an extends too. An interface is
                 // no superclass: it has no constructor, so it joins __ifaces.
                 if (sup.__isiface === true) {
@@ -6009,6 +6009,8 @@ HasStatic   = :script(~~
                 if (iv != undefined && iv != null) {
                     if (cls.__ifaces == undefined) { cls.__ifaces = [] }
                     cls.__ifaces.push(iv)
+                } else {
+                    jNoteLateIface(cls, members[i].impl)
                 }
             }
         }
@@ -6182,15 +6184,17 @@ HasStatic   = :script(~~
             return
         }
         run()
-        if (n == 1) {
-            var keep = []
-            var mine = []
-            for (var i = 0; i < jPendingStatics.length; i++) {
-                if (jPendingStatics[i].owner == curClassName) { mine.push(jPendingStatics[i]) } else { keep.push(jPendingStatics[i]) }
-            }
-            jPendingStatics = keep
-            for (var k = 0; k < mine.length; k++) { mine[k].run() }
+        if (n == 1) { jFlushStatics(curClassName) }
+    }
+    // Runs the member types' static initialization queued for top-level class owner.
+    function jFlushStatics(owner) {
+        var keep = []
+        var mine = []
+        for (var i = 0; i < jPendingStatics.length; i++) {
+            if (jPendingStatics[i].owner == owner) { mine.push(jPendingStatics[i]) } else { keep.push(jPendingStatics[i]) }
         }
+        jPendingStatics = keep
+        for (var k = 0; k < mine.length; k++) { mine[k].run() }
     }
     // The constructor entry point of a class: pick the overload by arity, or - when
     // the class declares none - do the implicit super() plus own initialization.
@@ -6592,9 +6596,10 @@ HasStatic   = :script(~~
         var i2 = 0
         for (i2 = 0; i2 < supers.length; i2++) {
             var sp = globalScope[supers[i2]]
-            if (sp != undefined && sp != null) { inherited.push(sp) }
+            if (sp != undefined && sp != null) { inherited.push(sp) } else { jNoteLateIface(cls, supers[i2]) }
         }
         cls.__ifaces = inherited
+        jLateIfaceHit(name, cls)
         var i3 = 0
         for (i3 = 0; i3 < members.length; i3++) {
             var m = members[i3]
@@ -6944,7 +6949,7 @@ HasStatic   = :script(~~
     // Leaves the class body: restores the enclosing name and, for a NESTED type,
     // additionally registers it under its qualified name.
     function jExitClass(name, cls) {
-        jLastBuilt = cls
+        jLastBuilt = {cls: cls}
         var outer = jClassStack.pop()
         jCurBin = jBinStack.pop()
         curClassName = outer
@@ -6952,17 +6957,88 @@ HasStatic   = :script(~~
             globalScope[outer + "." + name] = cls
         }
     }
-    // The descriptor jExitClass saw last: a LocalClass statement's own class.
-    var jLastBuilt = null
+    // The descriptor jExitClass saw last, in a box: a LocalClass statement's
+    // own class, which jBuildType may only fill in later.
+    var jLastBuilt = {cls: null}
     // A local class statement: each run records the enclosing method's scope
     // chain on the class (__lscope), and makeNew hands it to every instance as
     // __cscope, which jOuterOwner searches as it does an anonymous class's.
-    function makeLocalClass(cls) {
-        return function() { cls.__lscope = scopes.slice(0) }
+    function makeLocalClass(box) {
+        return function() { box.cls.__lscope = scopes.slice(0) }
     }
     function buildClass(items) {
         jOvDeclare(items[0], items.slice(1))
-        jExitClass(items[0], buildClassFrom(items[0], items.slice(1), undefined))
+        jBuildType(items[0], items.slice(1))
+    }
+    // ----- declaration order (JLS 7.6 puts none on type declarations) -----
+    //
+    // A class whose superclass is declared further down is built right after
+    // it, in the class-stack context of its own declaration, and its
+    // queued static initialization runs then if its top-level class's already
+    // has. An interface named in an implements or extends clause before its
+    // declaration joins the type's __ifaces when it is built. Twin of
+    // jOrderTypes in java-to-llvm-ir.abnf.
+    var jDeferred = []
+    var jLateIfaces = []
+    function jBuildType(name, members) {
+        var ext = ""
+        for (var i = 0; i < members.length; i++) {
+            if (members[i].ext != undefined && jResolveClass(members[i].ext) == undefined) { ext = members[i].ext }
+        }
+        if (ext == "") {
+            jExitClass(name, buildClassFrom(name, members, undefined))
+            jRunDeferred(name)
+            return
+        }
+        var box = {cls: null}
+        jDeferred.push({ext: ext, sup: jSimpleName(ext), name: name, members: members, box: box,
+                        stack: jClassStack.slice(0), cur: curClassName, bin: jCurBin, bins: jBinStack.slice(0)})
+        jExitClass(name, null)
+        jLastBuilt = box
+    }
+    function jRunDeferred(sup) {
+        var d = null
+        var keep = []
+        for (var i = 0; i < jDeferred.length; i++) {
+            if (d == null && jDeferred[i].sup == sup) { d = jDeferred[i] } else { keep.push(jDeferred[i]) }
+        }
+        if (d != null) {
+            jDeferred = keep
+            var stack = jClassStack
+            var cur = curClassName
+            var bin = jCurBin
+            var bins = jBinStack
+            var owner = d.stack.length > 1 ? d.stack[1] : ""
+            var ran = owner != "" && owner != cur && !jStrIn(stack, owner)
+            jClassStack = d.stack
+            curClassName = d.cur
+            jCurBin = d.bin
+            jBinStack = d.bins
+            var cls = buildClassFrom(d.name, d.members, undefined)
+            jClassStack = stack
+            curClassName = cur
+            jCurBin = bin
+            jBinStack = bins
+            d.box.cls = cls
+            var outer = d.stack[d.stack.length - 1]
+            if (outer != "" && outer != undefined) { globalScope[outer + "." + d.name] = cls }
+            if (ran) { jFlushStatics(owner) }
+            jRunDeferred(d.name)
+            jRunDeferred(sup)
+        }
+    }
+    function jStrIn(xs, s) {
+        for (var i = 0; i < xs.length; i++) { if (xs[i] == s) { return true } }
+        return false
+    }
+    function jNoteLateIface(cls, nm) { jLateIfaces.push({cls: cls, name: jSimpleName(nm)}) }
+    function jLateIfaceHit(name, iface) {
+        for (var i = 0; i < jLateIfaces.length; i++) {
+            var li = jLateIfaces[i]
+            if (li.name != name) { continue }
+            if (li.cls.__ifaces == undefined) { li.cls.__ifaces = [] }
+            li.cls.__ifaces.push(iface)
+        }
     }
     // "Outer", "Nested" -> "Outer.Nested" (the type arguments are already gone).
     function jJoinDots(parts) { return parts.join(".") }
@@ -7463,6 +7539,7 @@ HasStatic   = :script(~~
     }
 
     c.compile(jMainAsg())
+    if (jDeferred.length > 0) { fail("unknown superclass: " + jDeferred[0].ext) }
     jLoadWanted()
     jWalkDone = true
 

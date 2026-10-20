@@ -5,7 +5,7 @@ IR interpreter and the MetaJS handle runtime (llvm.RunJS).
 The subset: classes with fields (instance and static, with initializers), methods
 (instance and static), constructors, single inheritance (class B extends A: inherited
 fields and methods, overriding with dynamic dispatch, the implicit no argument super
-constructor, and super.m() calls; a class must appear before its subclasses),
+constructor, and super.m() calls; a class may precede its superclass),
 method and constructor OVERLOADING (lib/java-decltypes.js) and the explicit constructor
 invocations super(args) and this(args), static and instance initializer blocks,
 records (auto generated constructor, accessors and value equality, plus the compact
@@ -2940,7 +2940,10 @@ HasStatic   = :script(~~
         }
         for (var j = 0; j < qmembers.length; j++) { mem.push(qmembers[j]) }
         jOvDeclare(aname, mem)
-        return {kind: "qnew", cname: aname, args: qargs, cls: buildClassStmt(aname, mem, undefined)}
+        jBareStmt = true
+        var qcls = buildClassStmt(aname, mem, undefined)
+        jBareStmt = false
+        return {kind: "qnew", cname: aname, args: qargs, cls: qcls}
     }
     // Emits `outerV.new Cls(args)`: a fresh object whose __class is Cls and whose
     // __outer is the qualifier, then Cls' constructor over it.
@@ -5111,6 +5114,7 @@ HasStatic   = :script(~~
 
     // rinfo is a record's jRecParams (component types, varargs).
     function buildClassStmt(name, members, recordParams, rinfo) {
+        jStmtTypes["$" + name] = true
         classNames["$" + name] = true
         userDeclared["$" + name] = true
         lastTypeName = name
@@ -5154,7 +5158,7 @@ HasStatic   = :script(~~
         // initialization (jStaticQueue); this is called right after the walk left
         // the declaration, so curClassName is the enclosing type's.
         var topLevel = curClassName == ""
-        return function(b) {
+        var body = function(b) {
             var asMember = jEmitMember
             jEmitMember = false
             // A local / anonymous class is built inside another function's emission;
@@ -5219,9 +5223,8 @@ HasStatic   = :script(~~
             for (i = 0; i < members.length; i++) {
                 if (members[i].kind != "nested") { continue }
                 jEmitMember = true
+                jNestHook = jNestStore(clsV, members[i].name)
                 b = members[i].stmt(b)
-                callExt(b, "js_set", [clsV, emitStr(b, members[i].name),
-                                      callExt(b, "js_scope_get", [curScopeV, emitStr(b, members[i].name)])])
             }
             for (i = 0; i < members.length; i++) {
                 var mm = members[i]
@@ -5450,6 +5453,103 @@ HasStatic   = :script(~~
             }
             return b
         }
+        return jBareStmt ? body : jTypeThunk(name, members, topLevel, body)
+    }
+    // ----- declaration order (JLS 7.6 puts none on type declarations) -----
+    //
+    // A class statement builds its descriptor from its superclass's and its
+    // interfaces' ones, so one emitted at the top level or as a member type
+    // before a type it extends or implements is declared waits until that
+    // type's statement has run, and then runs with the context it was reached
+    // in (jWaiting); its queued static initialization runs then if its
+    // top-level class's has. Twin of jBuildType / jLateIfaceHit in
+    // java-interpreter.abnf.
+    var jStmtTypes = {}
+    var jEmittedTypes = {}
+    var jWaiting = []
+    var jInTop = 0
+    var jNestHook = null
+    var jMainF = null
+    // Set while a statement that never waits is built: an enum's class, which
+    // the enum's own thunk wraps, an enum constant's body and an anonymous
+    // class, which are built where they are used.
+    var jBareStmt = false
+    // The statement of type name: body, run now or once the types members
+    // extend and implement have been (jWaiting).
+    function jTypeThunk(name, members, topLevel, body) {
+        var deps = jTypeDeps(name, members)
+        var thunk = function(b) {
+            var member = jEmitMember
+            var hook = jNestHook
+            jNestHook = null
+            if ((topLevel || member) && curF === jMainF && jTypeWaits(deps)) {
+                jEmitMember = false
+                jWaiting.push({deps: deps, run: function(bb) {
+                    jEmitMember = member
+                    jNestHook = hook
+                    return thunk(bb)
+                }})
+                return b
+            }
+            if (topLevel) { jInTop = jInTop + 1 }
+            b = body(b)
+            if (topLevel) { jInTop = jInTop - 1 }
+            if (hook != null) { b = hook(b) }
+            jEmittedTypes["$" + name] = true
+            return jRunWaiting(b)
+        }
+        return thunk
+    }
+    function jTypeDeps(name, members) {
+        var deps = []
+        for (var i = 0; i < members.length; i++) {
+            var m = members[i]
+            if (m.ext != undefined) { deps.push(jSimpleName(baseTypeName(m.ext))) }
+            if (m.impls != undefined) {
+                for (var k = 0; k < m.impls.length; k++) { deps.push(jSimpleName(baseTypeName(m.impls[k]))) }
+            }
+        }
+        var own = []
+        for (var j = 0; j < deps.length; j++) { if (deps[j] != name) { own.push(deps[j]) } }
+        return own
+    }
+    function jTypeWaits(deps) {
+        for (var i = 0; i < deps.length; i++) {
+            if (jStmtTypes["$" + deps[i]] == true && jEmittedTypes["$" + deps[i]] != true) { return true }
+        }
+        return false
+    }
+    function jRunWaiting(b) {
+        var at = -1
+        for (var i = 0; i < jWaiting.length && at < 0; i++) {
+            if (!jTypeWaits(jWaiting[i].deps)) { at = i }
+        }
+        if (at >= 0) {
+            var w = jWaiting[at]
+            jWaiting = jWithout(jWaiting, at)
+            b = jRunWaiting(w.run(b))
+        }
+        if (jInTop == 0 && jStaticQueue.length > 0) {
+            var q = jStaticQueue
+            jStaticQueue = []
+            for (var qi = 0; qi < q.length; qi++) { b = q[qi](b) }
+        }
+        return b
+    }
+    function jWithout(xs, at) {
+        var out = []
+        for (var i = 0; i < xs.length; i++) { if (i != at) { out.push(xs[i]) } }
+        return out
+    }
+    // A cycle, which javac rejects, runs in declaration order.
+    function jRunAllWaiting(b) {
+        while (jWaiting.length > 0) {
+            var w = jWaiting[0]
+            jWaiting = jWithout(jWaiting, 0)
+            w.deps = []
+            b = w.run(b)
+        }
+        return b
     }
     // A member type's static initialization waits for its top-level class's:
     // Java initializes a class at its first use, which is after the enclosing
@@ -5458,6 +5558,14 @@ HasStatic   = :script(~~
     // inside a function body and runs at once).
     var jStaticQueue = []
     var jEmitMember = false
+    // Stores a member type on its enclosing class's descriptor once its
+    // statement has run.
+    function jNestStore(clsV, nm) {
+        return function(b) {
+            callExt(b, "js_set", [clsV, emitStr(b, nm), callExt(b, "js_scope_get", [curScopeV, emitStr(b, nm)])])
+            return b
+        }
+    }
     // A static method body that first initializes its lazy class: invoking it
     // is a use (JLS 12.4.1), after the arguments are evaluated.
     function jClinitFirst(cls, body) {
@@ -5932,7 +6040,9 @@ HasStatic   = :script(~~
             if (consts[s].body == null) { subs.push(null); continue }
             var smem = [{ext: name}].concat(consts[s].body)
             jOvDeclare(name + "$" + consts[s].name, smem)
+            jBareStmt = true
             subs.push(buildClassStmt(name + "$" + consts[s].name, smem, undefined))
+            jBareStmt = false
         }
         jOvDeclare(name, members)
         jNoLazy["$" + name] = true
@@ -5945,9 +6055,11 @@ HasStatic   = :script(~~
         for (var t = 0; t < members.length; t++) {
             if (members[t].kind == "method" && members[t].name == "toString") { enumHasToString = true }
         }
+        jBareStmt = true
         var clsStmt = buildClassStmt(name, members, undefined)
+        jBareStmt = false
         lastTypeName = name
-        return function(b) {
+        return jTypeThunk(name, members, curClassName == "", function(b) {
             b = clsStmt(b)
             var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
             // compareTo is final in java.lang.Enum, so no enum declares its own.
@@ -5985,7 +6097,7 @@ HasStatic   = :script(~~
                 callExt(b, "js_arr_push", [valsV, objV])
             }
             return b
-        }
+        })
     }
     // ----- Patterns (pattern switch and the instanceof record form) -----
     // The component names of every record, so a deconstruction pattern knows which
@@ -6133,7 +6245,9 @@ HasStatic   = :script(~~
         }
         for (var j = 0; j < members.length; j++) { mem.push(members[j]) }
         jOvDeclare(aname, mem)
+        jBareStmt = true
         var clsStmt = buildClassStmt(aname, mem, undefined)
+        jBareStmt = false
         var newT = makeNew([aname].concat(args))
         return function(b) {
             b = clsStmt(b)
@@ -6177,6 +6291,7 @@ HasStatic   = :script(~~
         }
         var f = m.NewFunc("jsmain", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
         curF = f
+        jMainF = f
         var b = f.NewBlock("entry")
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
         // System.out.println / System.out.print / System.exit / System.arraycopy.
@@ -6259,6 +6374,7 @@ HasStatic   = :script(~~
         callExt(b, "js_rt_missset", [callExt(b, "js_closure", [handle(npeFn), curScopeV])])
         b = emitImported(b)
         b = makeSeq(items)(b)
+        b = jRunAllWaiting(b)
         // The entry defaults to Main.main but -main (c.mainName) can name another static
         // method of Main.
         var entry = c.mainName

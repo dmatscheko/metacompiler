@@ -188,6 +188,7 @@ class Main {
         S90.run(); // SECTION-CALL 90
         S91.run(); // SECTION-CALL 91
         S92.run(); // SECTION-CALL 92
+        S93.run(); // SECTION-CALL 93
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -5069,3 +5070,45 @@ class S92 {
         Main.check("cl92", cl.equals("[4, 7] [4, 7, 1] [1, 2]java.util.LinkedListtrue [5]java.util.Stack[5, 6]"));
     }
 }
+
+// ===== SECTION 93: a type declared after the types that extend it =====
+//
+// Type declarations have no order (JLS 7.6): a class may extend a class, and
+// implement or extend an interface, declared further down - at the top
+// level, as a member type, from a member type to a top-level one, and from
+// an enum - and its static initialization still runs at its first use,
+// after its superclass's (JLS 12.4.1). Every expected value is java 24.0.2's.
+class S93 {
+    static String log = "";
+    static int note(String t) { log = log + t; return t.length(); }
+    static class Sub extends Base implements Serializable {
+        static int s = note("S");
+        Sub() { super(10); }
+        String who() { return "Sub" + v; }
+    }
+    static class Leaf extends Sub { static int l = note("L"); }
+    static class Base {
+        static int b = note("B");
+        int v;
+        Base(int v) { this.v = v; }
+        String who() { return "B" + v; }
+    }
+    static class A {
+        static class In extends B93 { static int s = 4; int z() { return s + w; } }
+        static int a = 1;
+    }
+    enum E implements J { X; public String j() { return "E" + K; } }
+    interface J extends L { String j(); }
+    interface L { int K = 7; default String l() { return "L" + K; } }
+    static void run() {
+        Base x = new Sub();
+        String st = x.who() + " " + (x instanceof Serializable) + " " + new Base(10).who() + " " + log;
+        Object o = new Leaf();
+        st = st + " " + (o instanceof Base) + log + " " + new A.In().z() + A.a + A.In.s
+            + " " + E.X.j() + E.X.l() + (E.X instanceof L) + " " + new T93().t();
+        Main.check("or93", st.equals("Sub10 true B10 BS trueBSL 714 E7L7true 6"));
+    }
+}
+class T93 extends U93 { int t() { return u + 1; } }
+class B93 { static int b = 2; int w = 3; }
+class U93 { int u = 5; }
