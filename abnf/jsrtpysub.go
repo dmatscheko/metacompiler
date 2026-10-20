@@ -1488,6 +1488,10 @@ func (rt *jsrt) pyClsNew(cls *jsObject) interface{} {
 	if bt == "" {
 		bt = pyBuiltinBase(cls)
 	}
+	// type.__new__(mcs, name, bases, ns) makes a class.
+	if bt == "type" {
+		return rt.pyTypeDelegate("__new__")
+	}
 	if bt != "" && bt != "object" {
 		return rt.pyBuiltinNew(rt.pyBuiltinClass(bt))
 	}
@@ -1506,6 +1510,10 @@ func (rt *jsrt) pyClassFallback(cls *jsObject, name string) interface{} {
 			return m
 		}
 		return rt.pyBuiltinClass("type")
+	case "__module__":
+		// Every class statement sets its own, so a class without one is a
+		// builtin type or exception.
+		return "builtins"
 	}
 	return rt.pyObjectMethod(name)
 }

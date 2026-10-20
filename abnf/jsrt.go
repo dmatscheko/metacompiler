@@ -15194,6 +15194,14 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 					return w(rt.call(f, jsUndef, []interface{}{c, u(a[1])}))
 				}
 			}
+			if c, ok := pyClassObj(u(a[0])); ok {
+				switch pyGenericOk(c) {
+				case 0:
+					panic(&jsThrown{value: rt.pyExcInstance("TypeError", "type '"+pyShortName(rt.toString(c.props["__name"]))+"' is not subscriptable")})
+				case 2:
+					panic(&jsThrown{value: rt.pyExcInstance("TypeError", rt.pyString(c)+" is not a generic class")})
+				}
+			}
 			if v, ok := rt.pyGenericAlias(u(a[0]), u(a[1])); ok {
 				return w(v)
 			}
@@ -16381,7 +16389,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if args == nil || len(args.elems) != 3 {
 				panic(&jsThrown{value: rt.pyExcInstance("TypeError", "type() takes 1 or 3 arguments")})
 			}
-			return w(rt.pyTypeNew(rt.toString(args.elems[0]), args.elems[1], args.elems[2], nil))
+			return w(rt.pyTypeNew(rt.toString(args.elems[0]), args.elems[1], args.elems[2], nil, jsUndef))
 		},
 		// BaseException.add_note(self, note): appends to the instance's __notes__
 		// list, made on first use. Twin of add_note in
@@ -19433,6 +19441,31 @@ func (rt *jsrt) pyFloatToInt(f float64) interface{} {
 	return rt.pyBigNarrow(bi)
 }
 
+// pyGenericOk: may class c be subscripted into a generic alias? 1 for a class
+// with its own PEP 695 type parameters (__generic, set by the class statement)
+// or one deriving from a builtin type that defines __class_getitem__; 2 for a
+// class that only derives from a generic one (typing.Generic's "not a generic
+// class"); 0 for any other. Twin of pyGenericOk in python-interpreter.abnf and
+// lib/python-rt.metajs.
+func pyGenericOk(c *jsObject) int {
+	if _, has := c.props["__generic"]; has {
+		return 1
+	}
+	inherited := 0
+	for _, k := range pyMRO(c) {
+		if _, has := k.props["__generic"]; has {
+			inherited = 2
+		}
+		if _, user := k.props["__mro"]; !user {
+			switch k.props["__name"] {
+			case "list", "dict", "tuple", "set", "frozenset", "enumerate", "memoryview", "classmethod", "staticmethod":
+				return 1
+			}
+		}
+	}
+	return inherited
+}
+
 // pyGenericAlias answers the memoized list[int]-style alias of a type object (a
 // class, or a builtin such as list bound to a closure): CPython's
 // types.GenericAlias, {__galias: its repr, __origin__, __args__}. A tuple
@@ -19775,14 +19808,65 @@ func (rt *jsrt) pyKeyEq(a, b interface{}) bool {
 func (rt *jsrt) pyHashCheck(v interface{}, elem bool) {
 	n := rt.pyUnhashName(v)
 	if n == "" {
+		if rt.pyLang && pyHashRuns(v) {
+			rt.pyHashGuard(v, elem)
+		}
 		return
 	}
+	panic(&jsThrown{value: rt.pyExcInstance("TypeError", rt.pyHashWhere(v, elem)+" (unhashable type: '"+n+"')")})
+}
+
+func (rt *jsrt) pyHashWhere(v interface{}, elem bool) string {
 	where := "a dict key"
 	if elem {
 		where = "a set element"
 	}
-	panic(&jsThrown{value: rt.pyExcInstance("TypeError",
-		fmt.Sprintf("cannot use '%s' as %s (unhashable type: '%s')", pyTypeName(rt, v), where, n))})
+	return "cannot use '" + pyTypeName(rt, v) + "' as " + where
+}
+
+// pyHashRuns: does hashing v run a class's own __hash__ - an instance, or a
+// tuple holding one?
+func pyHashRuns(v interface{}) bool {
+	if a, ok := v.(*jsArray); ok {
+		if a.kind != pyTupKind {
+			return false
+		}
+		for _, e := range a.elems {
+			if pyHashRuns(e) {
+				return true
+			}
+		}
+		return false
+	}
+	o, cls, ok := pyInstance(v)
+	if !ok {
+		return false
+	}
+	if _, isCls := o.props["__mro"]; isCls {
+		return false
+	}
+	_, how := pyHashOwner(cls)
+	return how == pyHashByMethod
+}
+
+// pyHashGuard: CPython hashes a key at every insertion and lookup, and a
+// TypeError the hash raises (exactly that class) is reworded with the key's
+// position. Twin of pyHashGuard in languages/python-interpreter.abnf and
+// lib/python-rt.metajs.
+func (rt *jsrt) pyHashGuard(v interface{}, elem bool) {
+	defer func() {
+		if p := recover(); p != nil {
+			if th, ok := p.(*jsThrown); ok {
+				// By name: the compiled program's builtin exception classes are
+				// its own objects, not rt.pyExcClass's.
+				if _, cls, ok := pyInstance(th.value); ok && cls.props["__name"] == "TypeError" {
+					panic(&jsThrown{value: rt.pyExcInstance("TypeError", rt.pyHashWhere(v, elem)+" ("+rt.pyString(th.value)+")")})
+				}
+			}
+			panic(p)
+		}
+	}()
+	rt.pyHashW(v)
 }
 
 // pyHashCheckMember is the set LOOKUP form. CPython's set.__contains__ /
@@ -21183,11 +21267,36 @@ func pyInstDictPull(inst, d *jsObject) {
 		if len(k) >= 2 && k[0] == '_' && k[1] == '_' && !pyIsNotedDunder(inst, k) {
 			continue
 		}
-		if exc && pyExcSlot(k) {
+		if (exc && pyExcSlot(k)) || pySlotted(inst, k) {
 			continue
 		}
 		dictAppend(keys, vals, k, inst.props[k])
 	}
+}
+
+// pySlotted: does a class on inst's resolution order declare name in its own
+// __slots__? A slot's value lives outside the instance's __dict__. Twin of
+// pySlotted in python-interpreter.abnf and lib/python-rt.metajs.
+func pySlotted(inst *jsObject, name string) bool {
+	cls, ok := inst.props["__class"].(*jsObject)
+	if !ok {
+		return false
+	}
+	for _, k := range pyMRO(cls) {
+		switch s := k.props["__slots__"].(type) {
+		case *jsArray:
+			for _, e := range s.elems {
+				if e == interface{}(name) {
+					return true
+				}
+			}
+		case string:
+			if s == name {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // pyClassDict is C.__dict__: a fresh dict of the class's own members in
@@ -21365,7 +21474,7 @@ func pyInstDictPush(dv interface{}) {
 	}
 	kept := inst.keys[:0]
 	for _, k := range inst.keys {
-		if (len(k) >= 2 && k[0] == '_' && k[1] == '_' && !pyIsNotedDunder(inst, k)) || (exc && pyExcSlot(k)) {
+		if (len(k) >= 2 && k[0] == '_' && k[1] == '_' && !pyIsNotedDunder(inst, k)) || (exc && pyExcSlot(k)) || pySlotted(inst, k) {
 			kept = append(kept, k)
 		} else {
 			delete(inst.props, k)
@@ -21374,7 +21483,7 @@ func pyInstDictPush(dv interface{}) {
 	inst.keys = kept
 	keys, vals, _ := dictParts(d)
 	for i, k := range keys.elems {
-		if ks, isStr := k.(string); isStr {
+		if ks, isStr := k.(string); isStr && !pySlotted(inst, ks) {
 			pyNoteDunder(inst, ks)
 			inst.set(ks, vals.elems[i])
 		}

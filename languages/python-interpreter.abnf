@@ -284,7 +284,9 @@ Decorator   <~~ push({deco: pop()}) ~~>
 // namespace scope, so plain statements (loops, conditionals) inside a class body work
 // and every name it binds - including its defs - becomes a class attribute.
 Class       <~~ push(makeClass(takeAll())) ~~>
-            = "class" KwEnd Id <~~ push(up.in); sbPush("c", up.in) ~~> [ SkipBracket ] [ ClassBases ] Suite ;
+            = "class" KwEnd Id <~~ push(up.in); sbPush("c", up.in) ~~> [ ClassTParams ] [ ClassBases ] Suite ;
+// A class's PEP 695 type parameters make it subscriptable (makeClass).
+ClassTParams <~~ push({generic: true}) ~~> = SkipBracket ;
 ClassBases  <~~ push({bases: takeAll()}) ~~>
             = "(" :whitespace(WhitespaceNL) [ CallArg { "," CallArg } [ "," ] ] ")" :whitespace(Whitespace) ;
 // A PEP 695 type-parameter list, [T], [A, B] - parsed and dropped (types are erased).
@@ -1100,7 +1102,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // The module tables of the import statements.
     include("lib/python-import.js")
 
-    // sin, cos, tan and atan2 are fdlibm's (lib/fdlibm.js), which agree with the
+    // sin, cos, tan, atan2 and expm1 are fdlibm's (lib/fdlibm.js), which agree with the
     // platform libm CPython calls where the host's Math does not: cos(pi/2) is
     // 6.123233995736766e-17, the host's ...757e-17.
     include("lib/fdlibm.js")
@@ -1374,6 +1376,29 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (pyIsUnion(c)) { return pyUnionStr(c) }
         return prepr(c)
     }
+    // May class c be subscripted into a generic alias? 1 for a class with its
+    // own PEP 695 type parameters (__generic) or one deriving from a builtin type
+    // that defines __class_getitem__; 2 for a class that only derives from a
+    // generic one (typing.Generic's "not a generic class"); 0 for any other.
+    // Twin of pyGenericOk in abnf/jsrt.go and lib/python-rt.metajs.
+    function pyGenericOk(c) {
+        if (hasOwn(c, "__generic")) { return 1 }
+        var mro = clsMRO(c)
+        var inherited = 0
+        for (var i = 0; i < mro.length; i++) {
+            if (hasOwn(mro[i], "__generic")) { inherited = 2 }
+            if (!hasOwn(mro[i], "__mro") && pyGenericBuiltin(mro[i].__name)) { return 1 }
+        }
+        return inherited
+    }
+    function pyGenericCheck(c, ok, shown) {
+        if (ok == 0) { pyListErr("TypeError", "type '" + pyShortName(c.__name) + "' is not subscriptable") }
+        if (ok == 2) { pyListErr("TypeError", shown + " is not a generic class") }
+    }
+    function pyGenericBuiltin(n) {
+        return n == "list" || n == "dict" || n == "tuple" || n == "set" || n == "frozenset" || n == "enumerate"
+               || n == "memoryview" || n == "classmethod" || n == "staticmethod"
+    }
     // list[int]: CPython's types.GenericAlias, {__genalias, origin, targs (the
     // arguments), __galias (its repr)}, one object per repr so the same written
     // alias is the same value. Twin of rt.pyGenericAlias in abnf/jsrt.go and
@@ -1594,7 +1619,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return d
         }
         if (name == "type") {
-            if (args.length == 3) { return pyTypeNew(args[0], args[1], args[2]) }
+            if (args.length == 3) { return pyTypeNew(args[0], args[1], args[2], undefined, null) }
             if (args.length != 1) { pyListErr("TypeError", "type() takes 1 or 3 arguments") }
             return pyTypeOf(v)
         }
@@ -2886,6 +2911,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (typeof o == "object" && o.__isclass == true) {
             if (name == "__name__" || name == "__qualname__" || name == "__mro__" || name == "__bases__" || name == "mro" || name == "__dict__") { return true }
+            // Every class has a __module__: its own, or 'builtins' (pyattr).
+            if (name == "__module__") { return true }
             if (clsFind(o, name) != null || clsHas(o, name)) { return true }
             if (name == "__new__" || name == "__class__" || pyObjectMethod(name) != null) { return true }
             // What pyattr answers on a builtin TYPE OBJECT: dict.fromkeys, and the
@@ -3258,7 +3285,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return name == "difference_update" || name == "symmetric_difference_update"
     }
     function setAdd(s2, v) {
-        pyHashCheck(v, true)
+        // dictFind checks every other key; a set is exempt there as a LOOKUP only.
+        if (v !== null && v !== undefined && typeof v == "object" && v.__set === true) { pyHashCheck(v, true) }
         if (dictFind(s2, v) < 0) { s2.keys.push(v); s2.vals.push(true); s2.__idx = null }
     }
 
@@ -3311,11 +3339,40 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // differently and both spellings are asserted.
     function pyHashCheck(v, elem) {
         var n = pyHashName(v)
-        if (n == "") { return }
-        var where = "a dict key"
-        if (elem) { where = "a set element" }
-        pyRaise(pyMakeExc("TypeError", ["cannot use '" + pyTypeOf(v).__name + "' as " + where
-                                        + " (unhashable type: '" + n + "')"]))
+        if (n == "") {
+            if (pyHashRuns(v)) { pyHashGuard(v, elem) }
+            return
+        }
+        pyRaise(pyMakeExc("TypeError", [pyHashWhere(v, elem) + " (unhashable type: '" + n + "')"]))
+    }
+    function pyHashWhere(v, elem) {
+        return "cannot use '" + pyTypeOf(v).__name + "' as " + (elem ? "a set element" : "a dict key")
+    }
+    // Does hashing v run a class's own __hash__: an instance, or a tuple holding one?
+    function pyHashRuns(v) {
+        if (isTup(v)) {
+            for (var i = 0; i < v.length; i++) {
+                if (typeof v[i] == "object" && pyHashRuns(v[i])) { return true }
+            }
+            return false
+        }
+        if (!pyUser(v) || v.__isclass === true) { return false }
+        var own = pyHashOwner(v.__class)
+        return own !== undefined && own.builtin !== true && own.m !== null
+    }
+    // CPython hashes a key at every insertion and lookup, and a TypeError the
+    // hash raises (exactly that class) is reworded with the key's position.
+    // Twin of rt.pyHashGuard in abnf/jsrt.go and pyHashGuard in lib/python-rt.metajs.
+    function pyHashGuard(v, elem) {
+        var saved = scopes
+        try { pyHashW(v) }
+        catch (e) {
+            scopes = saved
+            if (e != null && e != undefined && e.__exc === true && pyUser(e.v) && e.v.__class === hostGlobals["TypeError"]) {
+                pyRaise(pyMakeExc("TypeError", [pyHashWhere(v, elem) + " (" + pstr(e.v) + ")"]))
+            }
+            throw e
+        }
     }
     // The LOOKUP form. CPython's set.__contains__ / .discard / .remove convert a
     // set argument to a frozenset rather than refusing it, so `{1} in {1}` is
@@ -4009,8 +4066,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pyTypeDelegate(name) {
         if (name == "__new__") {
             return function(mcs, name, bases, ns) {
-                kTakeNamed()
-                return pyTypeNew(name, bases, ns, mcs)
+                return pyTypeNew(name, bases, ns, mcs, kTakeNamed())
             }
         }
         if (name == "__init__") { return function() { kTakeNamed(); return undefined } }
@@ -4335,6 +4391,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var cgi = anytype
             cgi = clsFind(o, "__class_getitem__")
             if (cgi != null) { return (pyIsClsM(cgi) ? cgi.__pycm : cgi)(o, i) }
+            if (hasOwn(o, "__mro")) { pyGenericCheck(o, pyGenericOk(o), pstr(o)) }
             return pyGenAlias(o, isTup(i) ? i.slice(0) : [i])
         }
         // A subscript MISS is a catchable exception (`try: d[k] / except KeyError`),
@@ -5036,7 +5093,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (name == "expm1") {
             var em = pyMArg(args, 0)
-            return pyMRange(Math.expm1(em), em)
+            return pyMRange(fdlibm().expm1(em), em)
         }
         if (name == "log") {
             var lg = pyMArg(args, 0)
@@ -12576,8 +12633,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var modName = pyCurMod
         var bodyT = items[items.length - 1]
         var doc = walkSuiteDoc
+        var generic = false
         for (var i = 1; i < items.length - 1; i++) {
             if (items[i] != undefined && items[i] != null && items[i].bases != undefined) { baseArgs = items[i].bases }
+            if (items[i] != undefined && items[i] != null && items[i].generic === true) { generic = true }
         }
         return function() {
             var bases = []
@@ -12628,12 +12687,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 }
                 var mcls = anytype
                 mcls = pyCall(meta, [name, pyTup(bases), nd], mkw)
+                if (generic && mcls !== null && typeof mcls == "object" && mcls.__isclass === true) { mcls.__generic = true }
                 ns.__pycls = mcls
                 pySet(name, mcls)
                 noteBound(name)
                 return
             }
             var cls = {__isclass: true, __name: name, __bases: bases, __module__: modName, __qual: qual}
+            if (generic) { cls.__generic = true }
             // __doc__ is the class's OWN, None without a docstring - it is not
             // inherited.
             cls.__doc__ = doc == null ? undefined : doc
@@ -12709,9 +12770,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // that body namespace would build. Twin of js_pytypenew in abnf/jsrt.go and
     // lib/python-rt.metajs.
     // A namespace's __module__, __qualname__ and __doc__ become the class's own
-    // (the first two are no members), and mcs, unless it is type itself, is the
-    // class's metaclass.
-    function pyTypeNew(name, bases, ns, mcs) {
+    // (the first two are no members), mcs, unless it is type itself, is the
+    // class's metaclass, and the keywords kw go to __init_subclass__.
+    function pyTypeNew(name, bases, ns, mcs, kw) {
         var bl = iterToList(bases).slice(0)
         var cls = {__isclass: true, __name: name, __bases: bl, __module__: "__main__", __qual: name}
         if (mcs !== undefined && mcs !== hostGlobals["type"]) { cls.__meta = mcs }
@@ -12732,7 +12793,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (!hasOwn(cls, "__doc__")) { cls.__doc__ = undefined }
         cls.__attrs = attrs
         pyEqHashNone(cls)
-        pySetNames(cls, cls.__attrs, null)
+        pySetNames(cls, cls.__attrs, kw)
         return cls
     }
     // Cls(args): a fresh instance whose __init__ runs with it as self.
@@ -12987,6 +13048,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (name == "__new__") { return pyClsNew(o) }
             var com = pyObjectMethod(name)
             if (com != null) { return com }
+            // Every class statement sets its own __module__, so a class without
+            // one is a builtin type or exception.
+            if (name == "__module__") { return "builtins" }
             // A CATCHABLE AttributeError, as CPython raises and as the two
             // compiled halves do.
             pyRaise(pyMakeExc("AttributeError",
@@ -13281,8 +13345,21 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var ks = hasOwn(o, "__attrs") ? o.__attrs : []
         var exc = clsIsSub(o.__class, hostGlobals["BaseException"])
         for (var k = 0; k < ks.length; k++) {
-            if (o[ks[k]] !== pyDeleted && !(exc && pyExcSlot(ks[k]))) { dictSet(d, ks[k], o[ks[k]]) }
+            if (o[ks[k]] !== pyDeleted && !(exc && pyExcSlot(ks[k])) && !pySlotted(o, ks[k])) { dictSet(d, ks[k], o[ks[k]]) }
         }
+    }
+    // Does a class on o's resolution order declare name in its own __slots__?
+    // A slot's value lives outside the instance's __dict__. Twin of pySlotted
+    // in abnf/jsrt.go and lib/python-rt.metajs.
+    function pySlotted(o, name) {
+        var mro = clsMRO(o.__class)
+        for (var i = 0; i < mro.length; i++) {
+            if (!hasOwn(mro[i], "__slots__")) { continue }
+            var sl = mro[i].__slots__
+            var names = typeof sl == "string" ? [sl] : iterToList(sl)
+            for (var j = 0; j < names.length; j++) { if (names[j] === name) { return true } }
+        }
+        return false
     }
     // C.__dict__: a fresh dict of the class's own members in definition order,
     // after __module__. Twin of rt.pyClassDict in abnf/jsrt.go, which explains it.
@@ -13309,10 +13386,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pyInstDictPush(d) {
         var o = d.__owner
         var ks = hasOwn(o, "__attrs") ? o.__attrs : []
-        for (var k = 0; k < ks.length; k++) { scopePut(o, ks[k], pyDeleted) }
-        o.__attrs = []
+        var kept = []
+        for (var k = 0; k < ks.length; k++) {
+            if (pySlotted(o, ks[k])) { kept.push(ks[k]) } else { scopePut(o, ks[k], pyDeleted) }
+        }
+        o.__attrs = kept
         for (var j = 0; j < d.keys.length; j++) {
-            if (typeof d.keys[j] == "string") {
+            if (typeof d.keys[j] == "string" && !pySlotted(o, d.keys[j])) {
                 scopePut(o, d.keys[j], d.vals[j])
                 o.__attrs.push(d.keys[j])
             }

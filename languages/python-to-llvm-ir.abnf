@@ -406,7 +406,7 @@ Decorator   <~~ push({deco: pop()}) ~~>
 // (js_pyclass_new), so multiple inheritance costs nothing at lookup time.
 // Keyword arguments (metaclass=...) parse and are ignored.
 Class       <~~ push(makeClass(takeAll(), up.pos)) ~~>
-            = "class" KwEnd Id <~~ push({cname: up.in}); sbPush("c", up.in) ~~> [ TypeParams ]
+            = "class" KwEnd Id <~~ push({cname: up.in}); sbPush("c", up.in) ~~> [ TypeParams <~~ push({cgeneric: true}) ~~> ]
               [ ClassBases ] Suite ;
 // The base list may be written across lines (`class C(unittest.TestCase,` / `  Mixin):`)
 // and may carry keyword arguments and a `**kwargs` spread (`class C[T](B, a=1, **kw)`),
@@ -4242,8 +4242,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var kws = []
         var bodyT = anytype
         var modName = pyCurMod
+        var generic = false
         for (var i = 0; i < items.length; i++) {
             if (items[i].cname != undefined) { name = items[i].cname }
+            else if (items[i].cgeneric != undefined) { generic = true }
             else if (items[i].cbase != undefined) { bases.push(items[i].cbase) }
             else if (items[i].ckwname != undefined || items[i].ckwspread != undefined) { kws.push(items[i]) }
             else { bodyT = items[i] }
@@ -4312,6 +4314,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // js_pyclass_meta finishes the class, or has its metaclass make the
             // real one from it; the __class__ cell then names that one.
             cls = callExt(b, "js_pyclass_meta", [cls, kwV])
+            // PEP 695 type parameters make the class subscriptable (pyGenericOk
+            // in abnf/jsrt.go).
+            if (generic) { callExt(b, "js_set", [cls, emitStr(b, "__generic"), hTrue]) }
             callExt(b, "js_scope_set", [bodyScope, emitStr(b, "__pycls__"), cls])
             // SETUP_ANNOTATIONS: the body HELD an annotation, so the class has an
             // __annotations__ dict whether or not the annotated statement ran.

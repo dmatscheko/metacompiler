@@ -375,11 +375,38 @@ function pyHashName(v) {
 // elem: true for a set MEMBER, false for a dict KEY.
 function pyHashCheck(v, elem) {
     var n = pyHashName(v)
-    if (n == "") { return undefined }
+    if (n == "") {
+        if (pyHashRuns(v)) { pyHashGuard(v, elem) }
+        return undefined
+    }
+    pyRaiseExc("TypeError", pyHashWhere(v, elem) + " (unhashable type: '" + n + "')")
+    return undefined
+}
+function pyHashWhere(v, elem) {
     var where = "a dict key"
     if (elem) { where = "a set element" }
-    pyRaiseExc("TypeError", "cannot use '" + pyTypeName(v) + "' as " + where
-                            + " (unhashable type: '" + n + "')")
+    return "cannot use '" + pyTypeName(v) + "' as " + where
+}
+// Does hashing v run a class's own __hash__: an instance, or a tuple holding one?
+function pyHashRuns(v) {
+    if (pyIsTup(v)) {
+        for (var i = 0; i < v.length; i++) {
+            if (pyHashRuns(v[i])) { return true }
+        }
+        return false
+    }
+    var cls = pyInstClassOf(v)
+    return cls !== null && pyHashOwner(cls)["how"] == 1
+}
+// Go: rt.pyHashGuard, which explains.
+function pyHashGuard(v, elem) {
+    try {
+        pyHashW(v)
+    } catch (e) {
+        var ec = pyInstClassOf(e)
+        if (ec !== null && ec["__name"] === "TypeError") { pyRaiseExc("TypeError", pyHashWhere(v, elem) + " (" + pyStr(e) + ")") }
+        throw e
+    }
     return undefined
 }
 
@@ -1922,7 +1949,7 @@ function pyInstDictPull(inst) {
     if (ord !== undefined) {
         for (i = 0; i < ord.length; i++) {
             var ok = ord[i]
-            if (!(exc && pyExcSlot(ok)) && (pyIsDunderKey(ok) || pyStrAt(ks, ok) >= 0)) {
+            if (!(exc && pyExcSlot(ok)) && (pyIsDunderKey(ok) || pyStrAt(ks, ok) >= 0) && !pySlotted(inst, ok)) {
                 dk.push(ok)
                 dv.push(inst[ok])
             }
@@ -1930,11 +1957,26 @@ function pyInstDictPull(inst) {
     }
     for (i = 0; i < ks.length; i++) {
         var k = ks[i]
-        if ((exc && k == "args") || (ord !== undefined && pyStrAt(ord, k) >= 0)) { continue }
+        if ((exc && k == "args") || (ord !== undefined && pyStrAt(ord, k) >= 0) || pySlotted(inst, k)) { continue }
         dk.push(k)
         dv.push(inst[k])
     }
     return undefined
+}
+
+// Go: pySlotted, which explains.
+function pySlotted(inst, name) {
+    var c = pyInstClassOf(inst)
+    if (c === null) { return false }
+    var mro = c["__mro"]
+    if (!Array.isArray(mro)) { return false }
+    for (var i = 0; i < mro.length; i++) {
+        if (pyIsObj(mro[i])) {
+            var sl = mro[i]["__slots__"]
+            if (sl !== undefined && pySlotAllows(sl, name)) { return true }
+        }
+    }
+    return false
 }
 
 // C.__dict__: a fresh dict of the class's own members in definition order,
@@ -2005,7 +2047,7 @@ function pyInstDictPush(d) {
     var exc = pyIsExcClass(pyInstClassOf(inst))
     for (var i = 0; i < ks.length; i++) {
         var k = ks[i]
-        if (exc && pyExcSlot(k)) { continue }
+        if ((exc && pyExcSlot(k)) || pySlotted(inst, k)) { continue }
         delKey(inst, k)
     }
     var ord = inst["__ord"]
@@ -2019,7 +2061,7 @@ function pyInstDictPush(d) {
     var dk = d["keys"]
     var dv = d["vals"]
     for (var j = 0; j < dk.length; j++) {
-        if (typeof dk[j] == "string") {
+        if (typeof dk[j] == "string" && !pySlotted(inst, dk[j])) {
             if (inst["__ord"] !== undefined || pyIsDunderKey(dk[j])) { pyOrdNote(inst, dk[j]) }
             pyPutAttr(inst, dk[j], dv[j])
         }
@@ -2958,6 +3000,8 @@ function pyClsNew(cls) {
     if (pyIsClass(cls) && pyLookupHas(cls, "__new__")) { return pyLookupVal(cls, "__new__") }
     var bt = pyBuiltinClsName(cls)
     if (bt == "") { bt = pyBuiltinBase(cls) }
+    // type.__new__(mcs, name, bases, ns) makes a class.
+    if (bt == "type") { return pyTypeDelegate("__new__") }
     if (bt != "" && bt != "object") { return pyBuiltinNew(pyBuiltinClass(bt)) }
     return pyObjectMethod("__new__")
 }
@@ -2970,6 +3014,9 @@ function pyClassFallback(cls, name) {
         if (meta !== null) { return meta }
         return pyBuiltinClass("type")
     }
+    // Every class statement sets its own, so a class without one is a builtin
+    // type or exception.
+    if (name == "__module__") { return "builtins" }
     return pyObjectMethod(name)
 }
 // One of object's methods bound to an instance is a builtin bound method (a
@@ -8031,6 +8078,23 @@ function pyCRemoveAt(arr, i) {
     return undefined
 }
 
+// Go: pyGenericOk, which explains.
+function pyGenericOk(c) {
+    if (c["__generic"] !== undefined) { return 1 }
+    var mro = pyMRO(c)
+    var inherited = 0
+    for (var i = 0; i < mro.length; i++) {
+        var k = mro[i]
+        if (k["__generic"] !== undefined) { inherited = 2 }
+        if (k["__mro"] === undefined) {
+            var n = k["__name"]
+            if (n == "list" || n == "dict" || n == "tuple" || n == "set" || n == "frozenset" || n == "enumerate"
+                || n == "memoryview" || n == "classmethod" || n == "staticmethod") { return 1 }
+        }
+    }
+    return inherited
+}
+
 // rt.pyGenericAlias: the memoized list[int]-style alias of a type object,
 // CPython's types.GenericAlias, {__galias: its repr, __origin__, __args__}. A
 // tuple subscript is the argument list. Keyed by the repr, so the same written
@@ -8125,6 +8189,11 @@ function js_pyidx(c, k) {
         cgi = pyLookupVal(c, "__class_getitem__")
         if (pyDIsClsM(cgi)) { cgi = cgi["__pycm"] }
         return pyCallSelf(cgi, c, [k])
+    }
+    if (pyIsClass(c)) {
+        var gok = pyGenericOk(c)
+        if (gok == 0) { pyRaiseExc("TypeError", "type '" + pyShortName(pyToStr(c["__name"])) + "' is not subscriptable") }
+        if (gok == 2) { pyRaiseExc("TypeError", pyStr(c) + " is not a generic class") }
     }
     var alias = pyCGenericAlias(c, k)
     if (alias !== undefined) { return alias }
@@ -11340,10 +11409,10 @@ function pyMetaOf(bases, kw) {
     return meta
 }
 
-// type(name, bases, ns) and type.__new__(mcs, name, bases, ns): a namespace's
-// __module__ and __qualname__ become the class's own, and mcs, unless it is
-// type itself, its metaclass.
-function pyTypeNew(name, bases, ns, mcs) {
+// type(name, bases, ns) and type.__new__(mcs, name, bases, ns, **kw): a
+// namespace's __module__ and __qualname__ become the class's own, mcs, unless it
+// is type itself, its metaclass, and kw goes to __init_subclass__.
+function pyTypeNew(name, bases, ns, mcs, kw) {
     var cls = js_pyclass_new(name, pyCCopyArr(pyElemsOf(bases)))
     cls["__module__"] = "__main__"
     if (pyIsClass(mcs)) { cls["__meta"] = mcs }
@@ -11357,13 +11426,13 @@ function pyTypeNew(name, bases, ns, mcs) {
             i = i + 1
         }
     }
-    js_pysetnames(cls)
+    pySetNamesKw(cls, kw)
     return cls
 }
 
 // type's own __new__, __init__ and __call__, reachable from a metaclass.
 function pyTypeDelegate(name) {
-    if (name == "__new__") { return function(mcs, n, bases, ns) { return pyTypeNew(pyToStr(n), bases, ns, mcs) } }
+    if (name == "__new__") { return function(mcs, n, bases, ns, kw) { return pyTypeNew(pyToStr(n), bases, ns, mcs, kw) } }
     if (name == "__init__") { return function() { return undefined } }
     if (name == "__call__") {
         return function() {
@@ -11428,7 +11497,7 @@ function js_pyclass_meta(cls, kw) {
 
 function js_pytypenew(args) {
     if (!pyIsArr(args) || args.length != 3) { pyRaiseExc("TypeError", "type() takes 1 or 3 arguments") }
-    return pyTypeNew(pyToStr(args[0]), args[1], args[2], undefined)
+    return pyTypeNew(pyToStr(args[0]), args[1], args[2], undefined, undefined)
 }
 
 // isinstance(v, C) / isinstance(v, (A, B)): a walk of the instance's MRO.
@@ -12649,7 +12718,7 @@ function pyMathCall(name, args) {
     }
     if (name == "expm1") {
         var em = pyMArg(args, 0)
-        return pyMRange(Math.expm1(em), em)
+        return pyMRange(fdlibm().expm1(em), em)
     }
     if (name == "log") {
         var lg = pyMArg(args, 0)

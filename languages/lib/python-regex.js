@@ -37,6 +37,10 @@ function pyRePat(src) {
             i = i + 1
             continue
         }
+        // (?<= and (?<! are Python's only (?< forms; (?<name>...) is not its spelling.
+        if (src.substring(i, i + 3) == "(?<" && i + 3 < src.length && src.charAt(i + 3) != "=" && src.charAt(i + 3) != "!") {
+            return {out: "", err: "unknown extension ?<" + src.charAt(i + 3)}
+        }
         if (src.substring(i, i + 4) == "(?P<") {
             var j = i + 4
             while (j < src.length && src.charAt(j) != ">") { j = j + 1 }
@@ -137,6 +141,11 @@ function pyReErrInfo(pat, nf, err, at) {
     }
     if (err.indexOf("unsupported group form (?") == 0) {
         return {msg: "unknown extension ?" + pat.charAt(k - 1), pos: k - 2}
+    }
+    if (err.indexOf("unknown extension ?<") == 0) { return {msg: err, pos: k - 3} }
+    if (err.indexOf("bad escape \\") == 0) { return {msg: err, pos: k - 2} }
+    if (err.indexOf("redefinition of group name '") == 0) {
+        return {msg: err, pos: k - 1 - (err.indexOf("' as group") - 28)}
     }
     return {msg: err, pos: at}
 }

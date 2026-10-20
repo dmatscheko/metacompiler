@@ -25,6 +25,7 @@ package abnf
 import (
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // ----- CPython's re constants (sre_constants) -----
@@ -95,6 +96,10 @@ func pyRePat(src string) (string, string) {
 			out.WriteByte(ch)
 			i++
 			continue
+		}
+		if strings.HasPrefix(src[i:], "(?<") && i+3 < len(src) && src[i+3] != '=' && src[i+3] != '!' {
+			r, _ := utf8.DecodeRuneInString(src[i+3:])
+			return "", "unknown extension ?<" + string(r)
 		}
 		if strings.HasPrefix(src[i:], "(?P<") {
 			j := i + 4
@@ -230,6 +235,12 @@ func pyReErrInfo(pat, nf, err string, at int) (string, int) {
 		return err, k - len(err) + 24
 	case strings.HasPrefix(err, "unsupported group form (?"):
 		return "unknown extension ?" + string(p[k-1]), k - 2
+	case strings.HasPrefix(err, "unknown extension ?<"):
+		return err, k - 3
+	case strings.HasPrefix(err, "bad escape \\"):
+		return err, k - 2
+	case strings.HasPrefix(err, "redefinition of group name '"):
+		return err, k - 1 - len([]rune(err[28:strings.Index(err, "' as group")]))
 	}
 	return err, at
 }

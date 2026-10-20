@@ -26,6 +26,7 @@ package abnf
 // in the Basic Multilingual Plane (and therefore for every ASCII pattern).
 
 import (
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -839,6 +840,22 @@ type rxEscRes struct {
 	sp   int
 }
 
+// rxBadEscP: is \c an escape Python's re refuses ("bad escape")? Twin of
+// rxBadEscP in lib/regex.js, which explains.
+func rxBadEscP(c rune, inClass bool) bool {
+	if c >= '0' && c <= '9' {
+		return inClass && c >= '8'
+	}
+	if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+		return false
+	}
+	ok := "abdfknrstuvwxzABDNSUWZ"
+	if inClass {
+		ok = "abdfnrstuvwxDNSUW"
+	}
+	return !strings.ContainsRune(ok, c)
+}
+
 // rxEsc reads the escape whose backslash has already been consumed.
 func (st *rxSt) esc(inClass bool) rxEscRes {
 	var res rxEscRes
@@ -852,6 +869,18 @@ func (st *rxSt) esc(inClass bool) rxEscRes {
 		if r, ok := st.escJ(c, inClass); ok {
 			return r
 		}
+	}
+	if st.py && rxBadEscP(c, inClass) {
+		st.fail("bad escape \\" + string(c))
+		return res
+	}
+	if st.py && c == 'U' { // \UHHHHHHHH
+		v := 0
+		for got := 0; got < 8 && st.i < st.n && rxHexVal(st.p[st.i]) >= 0; got++ {
+			v = v*16 + rxHexVal(st.p[st.i])
+			st.i++
+		}
+		return rxEscRes{ch: rune(v)}
 	}
 	switch c {
 	case 'd':
@@ -1396,6 +1425,10 @@ func (st *rxSt) parseGroup() *rxNode {
 			nm := st.readGroupName(closer)
 			if st.java && st.nameIdx(nm) >= 0 {
 				st.failAt("Named capturing group <"+nm+"> is already defined", st.i-1)
+			}
+			if st.py && st.nameIdx(nm) >= 0 {
+				st.fail("redefinition of group name '" + nm + "' as group " + strconv.Itoa(st.ngroups+1) +
+					"; was group " + strconv.Itoa(st.nameIdx(nm)))
 			}
 			ng := rxNewNode("group")
 			st.ngroups++

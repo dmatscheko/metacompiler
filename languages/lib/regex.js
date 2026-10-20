@@ -867,6 +867,21 @@ function rxEsc(st, inClass) {
     var c = p.charCodeAt(st.i)
     st.i = st.i + 1
     if (st.java && rxEscJ(st, c, inClass, res)) { return res }
+    if (st.py && rxBadEscP(c, inClass)) {
+        rxErr(st, "bad escape \\" + String.fromCharCode(c))
+        return res
+    }
+    if (st.py && c == 85) { // \UHHHHHHHH
+        var bv = 0
+        var bgot = 0
+        while (bgot < 8 && st.i < st.n && rxHexVal(p.charCodeAt(st.i)) >= 0) {
+            bv = bv * 16 + rxHexVal(p.charCodeAt(st.i))
+            st.i = st.i + 1
+            bgot = bgot + 1
+        }
+        res.ch = bv
+        return res
+    }
     if (c == 100) { res.kind = 1; res.sp = RX_SD; return res }
     if (c == 68) { res.kind = 1; res.sp = RX_SND; return res }
     if (c == 119) { res.kind = 1; res.sp = RX_SW; return res }
@@ -947,6 +962,16 @@ function rxEsc(st, inClass) {
     }
     res.ch = c
     return res
+}
+
+// rxBadEscP: is \c an escape Python's re refuses ("bad escape")? An ASCII
+// letter it gives no meaning, and 8 or 9 in a set. \k is the named
+// backreference python-regex.js writes for (?P=name).
+function rxBadEscP(c, inClass) {
+    if (c >= 48 && c <= 57) { return inClass && c >= 56 }
+    if (!((c >= 65 && c <= 90) || (c >= 97 && c <= 122))) { return false }
+    var ok = inClass ? "abdfnrstuvwxDNSUW" : "abdfknrstuvwxzABDNSUWZ"
+    return ok.indexOf(String.fromCharCode(c)) < 0
 }
 
 // rxParseClass reads a [...] class; the [ has already been consumed.
@@ -1408,6 +1433,10 @@ function rxParseGroup(st) {
             var nm = rxReadGroupName(st, closer)
             if (st.java && rxNameIdx(st.names, st.nameGroups, nm) >= 0) {
                 rxErrAt(st, "Named capturing group <" + nm + "> is already defined", st.i - 1)
+            }
+            if (st.py && rxNameIdx(st.names, st.nameGroups, nm) >= 0) {
+                rxErr(st, "redefinition of group name '" + nm + "' as group " + (st.ngroups + 1) + "; was group "
+                          + rxNameIdx(st.names, st.nameGroups, nm))
             }
             var ng = rxNode("group")
             st.ngroups = st.ngroups + 1

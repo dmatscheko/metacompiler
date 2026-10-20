@@ -10,10 +10,11 @@
 # The behaviour is Lib/collections/__init__.py's, error texts included.
 # defaultdict, OrderedDict and Counter are dict subclasses, as there; deque
 # keeps its items in a list, so popleft and appendleft are linear rather than
-# constant time.
+# constant time. deque and ChainMap take type parameters (deque[int]) as
+# CPython's do through __class_getitem__.
 
 
-class deque:
+class deque[T]:
     def __init__(self, iterable=(), maxlen=None):
         if maxlen is not None and maxlen < 0:
             raise ValueError("maxlen must be non-negative")
@@ -218,7 +219,7 @@ class OrderedDict(dict):
 # to the first. Not a dict subclass, as in CPython. keys() / values() / items()
 # answer the views of the merged dict, whose repr is dict_keys(...) where
 # CPython's is KeysView(ChainMap(...)).
-class ChainMap:
+class ChainMap[K, V]:
     def __init__(self, *maps):
         self.maps = list(maps) or [{}]
 

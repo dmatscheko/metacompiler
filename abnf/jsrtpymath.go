@@ -276,7 +276,7 @@ func (rt *jsrt) pyMathCall(name string, args []interface{}) interface{} {
 		return pyMathRange(rt, math.Exp(x), x)
 	case "expm1":
 		x := pyMathArg(rt, args, 0)
-		return pyMathRange(rt, math.Expm1(x), x)
+		return pyMathRange(rt, fdExpm1(x), x)
 	case "log":
 		x := pyMathArg(rt, args, 0)
 		if x <= 0 {

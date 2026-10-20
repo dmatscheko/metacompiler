@@ -7042,6 +7042,122 @@ def s142():
     check("slotdict", not hasattr(S142Slot(), "__dict__") and hasattr(S142I(1), "__dict__")
           and msgs == ["vars() argument must have __dict__ attribute", "'S142Slot' object has no attribute '__dict__'"])
 
+# ===== SECTION 146: a raising __hash__, slots outside __dict__, subscripting a class, regex errors =====
+# CPython hashes a key at every insertion and lookup and rewords a TypeError the
+# hash raised with the key's position; a slot's value is not in the instance's
+# __dict__; only a class with type parameters or a generic builtin base can be
+# subscripted; a builtin type's __module__ is 'builtins'; class keywords reach
+# __init_subclass__ through a metaclass and through type.__new__.
+import re as S146re
+import math as S146m
+
+class S146Bad:
+    def __hash__(self):
+        raise TypeError("nope")
+
+class S146Val:
+    def __hash__(self):
+        raise ValueError("vv")
+
+class S146Cnt:
+    n = 0
+
+    def __hash__(self):
+        S146Cnt.n += 1
+        return 7
+
+class S146Slot:
+    __slots__ = ("a",)
+
+class S146Free(S146Slot):
+    pass
+
+class S146Plain:
+    pass
+
+class S146Gen[T]:
+    pass
+
+class S146GenSub(S146Gen):
+    pass
+
+class S146L(list):
+    pass
+
+class S146Meta(type):
+    pass
+
+class S146MB(metaclass=S146Meta):
+    seen = []
+
+    def __init_subclass__(cls, **kw):
+        S146MB.seen.append((cls.__name__, kw))
+
+class S146MS(S146MB, flag=3):
+    pass
+
+class S146Meta2(type):
+    def __new__(mcs, name, bases, ns, **kw):
+        return type.__new__(mcs, name, bases, ns, **kw)
+
+class S146MB2(metaclass=S146Meta2):
+    def __init_subclass__(cls, tag=None):
+        cls.tag = tag
+
+class S146MS2(S146MB2, tag="t"):
+    pass
+
+def s146():
+    msgs = []
+    for mk in [lambda x: {x}, lambda x: {x: 1}, lambda x: set().add(x), lambda x: x in {1}, lambda x: {1: 2}.get(x),
+               lambda x: {(1, x)}]:
+        try:
+            mk(S146Bad())
+        except TypeError as e:
+            msgs.append(str(e))
+    check("hashraise1", msgs == ["cannot use 'S146Bad' as a set element (nope)", "cannot use 'S146Bad' as a dict key (nope)",
+                                 "cannot use 'S146Bad' as a set element (nope)", "cannot use 'S146Bad' as a set element (nope)",
+                                 "cannot use 'S146Bad' as a dict key (nope)", "cannot use 'tuple' as a set element (nope)"])
+    try:
+        {S146Val()}
+        check("hashraise2", False)
+    except ValueError as e:
+        check("hashraise2", str(e) == "vv")
+    c = S146Cnt()
+    s = {c}
+    s.add(c)
+    d = {c: 1}
+    d[c] = 2
+    check("hashcount", S146Cnt.n == 4)
+    w = S146Free()
+    w.a = 1
+    w.x = 5
+    check("slotdict2", vars(w) == {"x": 5} and w.__dict__ == {"x": 5} and w.a == 1)
+    sub = []
+    for k in [S146Plain, S146GenSub, S146Meta]:
+        try:
+            k[int]
+        except TypeError as e:
+            sub.append(str(e))
+    check("subscript1", sub == ["type 'S146Plain' is not subscriptable",
+                                "<class '__main__.S146GenSub'> is not a generic class", "type 'S146Meta' is not subscriptable"]
+          and repr(S146Gen[int]) == "__main__.S146Gen[int]" and repr(S146L[int]) == "__main__.S146L[int]")
+    check("builtinmod", [t.__module__ for t in (int, str, list, dict, object, type, ValueError, KeyError)] == ["builtins"] * 8
+          and S146Plain.__module__ == "__main__" and hasattr(int, "__module__"))
+    check("metakw", S146MB.seen == [("S146MS", {"flag": 3})] and S146MS2.tag == "t")
+    errs = []
+    for p in ["\\q", "a[b\\q]", "(?P<n>a)(?P<n>b)", "x(?<yy>c)", "[\\8]", "\\h"]:
+        try:
+            S146re.compile(p)
+        except S146re.error as e:
+            errs.append(str(e))
+    check("rxerr1", errs == ["bad escape \\q at position 0", "bad escape \\q at position 3",
+                             "redefinition of group name 'n' as group 2; was group 1 at position 12",
+                             "unknown extension ?<y at position 2", "bad escape \\8 at position 1", "bad escape \\h at position 0"]
+          and S146re.findall("\\U00000041+", "xAAy") == ["AA"])
+    check("expm1", [S146m.expm1(x) for x in [0.9999999999999999, 24.02965259491316, 0.4091183970475569]]
+          == [1.7182818284590449, 27286354932.850483, 0.5054899554999596])
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -7178,5 +7294,6 @@ def main():
     s140() # SECTION-CALL 140
     s141() # SECTION-CALL 141
     s142() # SECTION-CALL 142
+    s146() # SECTION-CALL 146
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

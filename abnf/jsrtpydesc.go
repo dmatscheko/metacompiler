@@ -504,10 +504,10 @@ func pyIsSubclass(sub, sup *jsObject) bool {
 	return false
 }
 
-// pyTypeNew is type(name, bases, ns) and type.__new__(mcs, name, bases, ns): a
-// namespace's __module__ and __qualname__ become the class's own, and mcs,
-// unless it is type itself, its metaclass.
-func (rt *jsrt) pyTypeNew(name string, basesV, ns, mcs interface{}) *jsObject {
+// pyTypeNew is type(name, bases, ns) and type.__new__(mcs, name, bases, ns,
+// **kw): a namespace's __module__ and __qualname__ become the class's own, mcs,
+// unless it is type itself, its metaclass, and kw goes to __init_subclass__.
+func (rt *jsrt) pyTypeNew(name string, basesV, ns, mcs, kw interface{}) *jsObject {
 	bases := &jsArray{elems: append([]interface{}{}, rt.pyElemsOf(basesV)...)}
 	cls := rt.pyClassNew(name, bases)
 	cls.set("__module__", "__main__")
@@ -527,7 +527,7 @@ func (rt *jsrt) pyTypeNew(name string, basesV, ns, mcs interface{}) *jsObject {
 		}
 	}
 	rt.pyEqHashNone(cls)
-	rt.pySetNames(cls, jsUndef)
+	rt.pySetNames(cls, kw)
 	return cls
 }
 
@@ -538,8 +538,9 @@ func (rt *jsrt) pyTypeDelegate(name string) interface{} {
 	switch name {
 	case "__new__":
 		return jsHostFunc("type.__new__", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			args, _ = pyKwSplit(args)
-			return rt.pyTypeNew(rt.toString(argAt(args, 1)), argAt(args, 2), argAt(args, 3), argAt(args, 0))
+			// A keyword call hands the dict over as one trailing argument
+			// (pyBindCallR), with no pyKwMark before it.
+			return rt.pyTypeNew(rt.toString(argAt(args, 1)), argAt(args, 2), argAt(args, 3), argAt(args, 0), argAt(args, 4))
 		})
 	case "__init__":
 		return jsHostFunc("type.__init__", func(rt *jsrt, this uint64, args []interface{}) interface{} { return jsUndef })
