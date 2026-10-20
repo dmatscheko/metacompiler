@@ -7502,6 +7502,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var pvis = []
         var pendingMod = false
         var pendingVis = ""
+        var pendingType = ""
         var body = null
         var seen = 0
         for (var i = 1; i < items.length; i++) {
@@ -7511,13 +7512,17 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 pendingMod = true
                 if (phVisWord(items[i].pmod) != "") { pendingVis = phVisWord(items[i].pmod) }
             }
+            else if (items[i].ptype != undefined) { pendingType = items[i].ptype }
             else if (items[i].param != undefined) {
+                // A promoted parameter declares a property of its type as written:
+                // a null default does not widen it (zend_compile_params).
                 if (pendingMod) {
                     promoted.push(items[i].param)
-                    pvis.push({name: items[i].param.substring(1), vis: pendingVis})
+                    pvis.push({name: items[i].param.substring(1), vis: pendingVis, typ: phpLibDepth > 0 ? "" : pendingType})
                 }
                 pendingMod = false
                 pendingVis = ""
+                pendingType = ""
                 seen = seen + 1
             }
         }
@@ -7828,6 +7833,26 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var t = props[i].typ
             out = out + props[i].name + "=" + (vis == "protected" ? "*" : (vis == "private" ? cname : "")) + ":" +
                   (t == undefined ? "" : t) + ","
+        }
+        return out
+    }
+    // A property type with self and parent replaced by the names of the declaring
+    // class and of the parent it names, as written (zend_compile_single_typename).
+    // Twin of phpTypeSubstSelf in php-interpreter.abnf.
+    function phTypeSubstSelf(typ, self, parent) {
+        if (typ == undefined || typ == "") { return typ }
+        var out = ""
+        var from = 0
+        for (var i = 0; i <= typ.length; i++) {
+            var ch = i < typ.length ? typ.charAt(i) : ""
+            if (ch == "" || "?|&()".indexOf(ch) >= 0) {
+                var w = typ.substring(from, i)
+                var lc = phsCase(w, false)
+                if (lc == "self") { w = self }
+                else if (lc == "parent" && parent != "") { w = parent }
+                out = out + w + ch
+                from = i + 1
+            }
         }
         return out
     }
@@ -8275,7 +8300,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                     // constructor stands in the body: PHP's slot order is body order.
                     var pvs = items[i].method.pvis
                     for (var pq = 0; pq < pvs.length; pq++) {
-                        props.push({name: pvs[pq].name, init: null, isStatic: false, hooks: [], vis: pvs[pq].vis})
+                        props.push({name: pvs[pq].name, init: null, isStatic: false, hooks: [], vis: pvs[pq].vis, typ: pvs[pq].typ})
                     }
                 }
             }
@@ -8300,6 +8325,12 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 if (items[i].propdecl.isStatic === true) { statics.push(items[i].propdecl) }
                 else { props.push(items[i].propdecl) }
             }
+        }
+        if (!anon) {
+            var parent = extRaw == null ? "" : extRaw
+            if (parent.charAt(0) == "\\") { parent = parent.substring(1) }
+            for (var pt = 0; pt < props.length; pt++) { props[pt].typ = phTypeSubstSelf(props[pt].typ, name, parent) }
+            for (var stt = 0; stt < statics.length; stt++) { statics[stt].typ = phTypeSubstSelf(statics[stt].typ, name, parent) }
         }
         // Trait members are copied in where the class does not declare the name
         // itself. The copy happens at WALK time, so the emitted class carries them

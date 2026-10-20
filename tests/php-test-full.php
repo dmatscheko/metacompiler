@@ -3078,6 +3078,13 @@ class S64P {
     public static int $st;
     public static ?string $ss = null;
 }
+class S64Pro {
+    function __construct(public int $n, protected ?string $s = null) {}
+    function setS($v) { $this->s = $v; }
+}
+class S64Self extends S64P { public self $me; public static ?parent $sp = null; }
+trait S64ST { public self $ts; }
+class S64SU { use S64ST; }
 class S64Priv {
     private $x = 1;
     function getX() { return $this->x; }
@@ -3114,6 +3121,14 @@ function s64() {
         && s64err(fn() => $p->i) === "Error: Typed property S64P::\$i must not be accessed before initialization"
         && s64err(function () use ($p) { $p->self = 5; }) === "TypeError: Cannot assign int to property S64P::\$self of type ?S64P"
         && s64err(function () use ($p) { $p->si = []; }) === "TypeError: Cannot assign array to property S64P::\$si of type string|int");
+    $pro = new S64Pro(1);
+    $pro->n = "5";
+    check("tpc3", s64err(function () use ($pro) { $pro->n = "z"; }) === "TypeError: Cannot assign string to property S64Pro::\$n of type int"
+        && $pro->n === 5
+        && s64err(fn() => $pro->setS([])) === "TypeError: Cannot assign array to property S64Pro::\$s of type ?string"
+        && s64err(function () { (new S64Self)->me = 1; }) === "TypeError: Cannot assign int to property S64Self::\$me of type S64Self"
+        && s64err(function () { S64Self::$sp = 1; }) === "TypeError: Cannot assign int to property S64Self::\$sp of type ?S64P"
+        && s64err(function () { (new S64SU)->ts = 1; }) === "TypeError: Cannot assign int to property S64SU::\$ts of type self");
     $r = "9";
     $q = new S64P;
     $q->i =& $r;

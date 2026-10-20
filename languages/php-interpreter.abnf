@@ -6309,8 +6309,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (def == null && !variadic) { phpLibArgErr() }
         // A library parameter stands for an internal one, whose types are not checked here.
         if (phpLibDepth > 0) { typ = "" }
+        // A promoted parameter declares a property of its type as written: a null
+        // default does not widen it (zend_compile_params).
+        var ptyp = typ
+        if (promote && typ != "") { typedNames[nm] = true }
         if (dnull) { typ = phpTypeOrNull(typ) }
-        return {name: nm, byref: byref, variadic: variadic, def: def, promote: promote, vis: vis, typ: typ, rel: phpTypeRel(typ)}
+        return {name: nm, byref: byref, variadic: variadic, def: def, promote: promote, vis: vis, typ: typ, ptyp: ptyp, rel: phpTypeRel(typ)}
     }
     // The name is not always items[0]: a method may carry captured modifiers in front
     // of it, so the string is looked for rather than indexed. 'static' is remembered
@@ -6612,7 +6616,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                     var cps = it.method.params
                     for (var pq = 0; pq < cps.length; pq++) {
                         if (cps[pq].promote === true) {
-                            p.props.push({name: cps[pq].name.substring(1), init: null, isStatic: false, hooks: [], vis: cps[pq].vis})
+                            p.props.push({name: cps[pq].name.substring(1), init: null, isStatic: false, hooks: [], vis: cps[pq].vis, typ: cps[pq].ptyp})
                         }
                     }
                 }
@@ -6842,6 +6846,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     function makeClassStmt(items) {
         var name = items[0]
         var p = classParts(items, 1)
+        var parent = p.ext == null ? "" : p.ext
+        if (parent.charAt(0) == "\\") { parent = parent.substring(1) }
+        for (var pi = 0; pi < p.props.length; pi++) { p.props[pi].typ = phpTypeSubstSelf(p.props[pi].typ, name, parent) }
+        for (var si = 0; si < p.statics.length; si++) { p.statics[si].typ = phpTypeSubstSelf(p.statics[si].typ, name, parent) }
         lastClassDecl = {name: name, ext: p.ext, plain: p.ifaces.length == 0 && p.uses.length == 0}
         return function() { declClass(name, buildClass(name, p)); return null }
     }
@@ -7664,6 +7672,28 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (!hasNull) { return s }
         if (n == 1 && s.indexOf("&") < 0 && phsCase(s, false) != "mixed") { return "?" + s }
         return n == 0 ? "null" : s + "|null"
+    }
+    // A property type with self and parent replaced by the names of the declaring
+    // class and of the parent it names, as written: PHP substitutes them when it
+    // compiles a named class that is not a trait (zend_compile_single_typename), so
+    // its checks and messages name the class. Twin of phTypeSubstSelf in
+    // php-to-llvm-ir.abnf.
+    function phpTypeSubstSelf(typ, self, parent) {
+        if (typ == undefined || typ == "") { return typ }
+        var out = ""
+        var from = 0
+        for (var i = 0; i <= typ.length; i++) {
+            var ch = i < typ.length ? typ.charAt(i) : ""
+            if (ch == "" || "?|&()".indexOf(ch) >= 0) {
+                var w = typ.substring(from, i)
+                var lc = phsCase(w, false)
+                if (lc == "self") { w = self }
+                else if (lc == "parent" && parent != "") { w = parent }
+                out += w + ch
+                from = i + 1
+            }
+        }
+        return out
     }
     function phpTypeErr(k, pname, v, typ) {
         phpRaise("TypeError", "Cannot assign " + phpValueName(v) + " to property " + k.__name + "::$" + pname + " of type " + phpTypeText(typ))
