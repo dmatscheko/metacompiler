@@ -98,6 +98,33 @@ interface Collection<E> {
 
     // A sequential stream over the elements (lib/java-stream.java).
     default java.util.stream.Stream<E> stream() { return Stream.ofCollection(this); }
+
+    // The bulk operations over iterator, contains and remove alone, for every
+    // collection that does not answer them itself.
+    default boolean containsAll(Collection<?> c) {
+        Iterator<?> it = c.iterator();
+        while (it.hasNext()) {
+            if (!contains(it.next())) { return false; }
+        }
+        return true;
+    }
+    default boolean removeIf(java.util.function.Predicate<? super E> filter) {
+        Iterator<E> it = iterator();
+        Object[] gone = new Object[size()];
+        int n = 0;
+        while (it.hasNext()) {
+            E e = it.next();
+            if (filter.test(e)) { gone[n] = e; n++; }
+        }
+        for (int i = 0; i < n; i++) { remove(gone[i]); }
+        return n > 0;
+    }
+    default boolean removeAll(Collection<?> c) { return removeIf(e -> c.contains(e)); }
+    default boolean retainAll(Collection<?> c) { return removeIf(e -> !c.contains(e)); }
+    default void forEach(java.util.function.Consumer<? super E> action) {
+        Iterator<E> it = iterator();
+        while (it.hasNext()) { action.accept(it.next()); }
+    }
 }
 
 interface ListIterator<E> extends Iterator<E> {

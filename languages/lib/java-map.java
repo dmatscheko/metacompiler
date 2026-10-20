@@ -817,6 +817,18 @@ class TreeMap<K, V> implements Map<K, V> {
     public Collection<K> keySet() { return new TreeMapView<K>(this, null, 0); }
     public Collection<V> values() { return new TreeMapView<V>(this, null, 1); }
     public Collection<Map.Entry<K, V>> entrySet() { return new TreeMapView<Map.Entry<K, V>>(this, null, 2); }
+    // descendingMap and descendingKeySet: the entries in reverse order. They are
+    // copies, not views, so a read is java's but a write through one does not
+    // reach this map.
+    @SuppressWarnings("unchecked")
+    public TreeMap<K, V> descendingMap() {
+        Comparator<? super K> c = cmp;
+        Comparator<K> rev = (a, b) -> c == null ? ((Comparable<Object>) b).compareTo(a) : c.compare(b, a);
+        TreeMap<K, V> r = new TreeMap<K, V>(rev);
+        r.putAll(this);
+        return r;
+    }
+    public Collection<K> descendingKeySet() { return descendingMap().keySet(); }
     // headMap / tailMap / subMap: live views of a key range (TreeSubMap); a bound
     // is checked as a key is (a null one throws under the natural order).
     public TreeSubMap<K, V> headMap(K to) { return headMap(to, false); }
@@ -1053,7 +1065,8 @@ interface Set<E> extends Collection<E> {
 }
 
 // The members every Set here answers from size, iterator, contains, add and
-// remove alone.
+// remove alone (containsAll, removeIf, removeAll, retainAll and forEach are
+// Collection's defaults).
 abstract class AbstractSet<E> implements Set<E> {
     public boolean isEmpty() { return size() == 0; }
     public boolean addAll(Collection<? extends E> c) {
@@ -1063,31 +1076,6 @@ abstract class AbstractSet<E> implements Set<E> {
             if (add(it.next())) { changed = true; }
         }
         return changed;
-    }
-    public boolean containsAll(Collection<?> c) {
-        Iterator<?> it = c.iterator();
-        while (it.hasNext()) {
-            if (!contains(it.next())) { return false; }
-        }
-        return true;
-    }
-    public boolean removeIf(java.util.function.Predicate<? super E> filter) {
-        boolean any = false;
-        Iterator<E> it = iterator();
-        Object[] gone = new Object[size()];
-        int n = 0;
-        while (it.hasNext()) {
-            E e = it.next();
-            if (filter.test(e)) { gone[n] = e; n++; }
-        }
-        for (int i = 0; i < n; i++) { remove(gone[i]); any = true; }
-        return any;
-    }
-    public boolean removeAll(Collection<?> c) { return removeIf(e -> c.contains(e)); }
-    public boolean retainAll(Collection<?> c) { return removeIf(e -> !c.contains(e)); }
-    public void forEach(java.util.function.Consumer<? super E> action) {
-        Iterator<E> it = iterator();
-        while (it.hasNext()) { action.accept(it.next()); }
     }
     public Object[] toArray() {
         Object[] out = new Object[size()];
@@ -1172,6 +1160,13 @@ class TreeSet<E> extends AbstractSet<E> {
     public boolean remove(Object o) { return map.remove(o) != null; }
     public void clear() { map.clear(); }
     public Iterator<E> iterator() { return map.keySet().iterator(); }
+    // A copy in reverse order (see TreeMap.descendingMap).
+    public TreeSet<E> descendingSet() {
+        TreeSet<E> r = new TreeSet<E>();
+        r.map = map.descendingMap();
+        return r;
+    }
+    public Iterator<E> descendingIterator() { return map.descendingMap().keySet().iterator(); }
     public E first() { return map.firstKey(); }
     public E last() { return map.lastKey(); }
     public E floor(E e) { return map.floorKey(e); }

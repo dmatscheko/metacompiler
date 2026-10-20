@@ -165,6 +165,7 @@ class Main {
         S77.run(); // SECTION-CALL 77
         S78.run(); // SECTION-CALL 78
         S79.run(); // SECTION-CALL 79
+        S80.run(); // SECTION-CALL 80
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -4527,5 +4528,33 @@ class S79 {
             + (int) Character.lowSurrogate(0x1F600) + Character.isSurrogatePair('\uD83D', '\uDE00') + Character.isValidCodePoint(0x110000)
             + Character.isSupplementaryCodePoint(0x10000) + Character.isBmpCodePoint(0xFFFF) + (int) Character.reverseBytes('a');
         Main.check("ch79", ch.equals("10010000000012;10010000000012;01010000000015;01010110000015;0011110000003;0000000000000;00011100000023;00011100000026;00010110000016;00010110000016;00010001000019;00010000100019;00011100000026;0001110000105;00010000000128;21285125535756832truefalsetruetrue24832"));
+    }
+}
+
+// ===== SECTION 80: Collection's bulk operations, descending TreeMap and TreeSet =====
+//
+// removeIf, removeAll, retainAll and containsAll work on every collection,
+// a map's key, value and entry views and a deque included. descendingMap,
+// descendingKeySet, descendingSet and descendingIterator read in reverse
+// order. Every expected value is java 24.0.2's.
+class S80 {
+    static void run() {
+        List<Integer> l = new ArrayList<>(List.of(1, 2, 3, 2, 4, 5));
+        boolean b1 = l.removeAll(List.of(2, 9));
+        boolean b2 = l.retainAll(Set.of(1, 3, 5, 7));
+        boolean b3 = l.containsAll(List.of(1, 5));
+        Map<String, Integer> m = new HashMap<>(Map.of("a", 1, "b", 2, "c", 3, "d", 4));
+        m.entrySet().removeIf(e -> e.getValue() % 2 == 0);
+        Map<String, Integer> tm = new TreeMap<>(Map.of("w", 1, "x", 2, "y", 3, "z", 4));
+        tm.values().removeIf(v -> v > 3);
+        tm.keySet().retainAll(Set.of("w", "y", "z"));
+        Deque<Integer> dq = new ArrayDeque<>(List.of(5, 6, 7, 8));
+        dq.removeIf(v -> v % 2 == 1);
+        String bulk = l + " " + b1 + b2 + b3 + " " + new TreeMap<>(m) + " " + tm + " " + dq;
+        Main.check("bk80", bulk.equals("[1, 3, 5] truetruetrue {a=1, c=3} {w=1, y=3} [6, 8]"));
+        TreeMap<Integer, String> t = new TreeMap<>(Map.of(3, "c", 1, "a", 2, "b"));
+        TreeSet<String> ts = new TreeSet<>(List.of("q", "p", "r"));
+        String rev = t.descendingMap() + " " + t.descendingKeySet() + " " + ts.descendingSet() + " " + ts.descendingIterator().next() + " " + t.descendingMap().firstKey();
+        Main.check("dm80", rev.equals("{3=c, 2=b, 1=a} [3, 2, 1] [r, q, p] r 3"));
     }
 }
