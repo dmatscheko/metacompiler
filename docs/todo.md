@@ -64,7 +64,7 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-628 python: raising `__hash__` without `__eq__`; slots in `__dict__`; `Plain[int]`; builtin `__module__`; regex dialect errors · P2 · PY · OPEN [V]
+### T-628 python: raising `__hash__` without `__eq__`; slots in `__dict__`; `Plain[int]`; builtin `__module__`; regex dialect errors · P2 · PY · IN PROGRESS (PY worker, round 8) [V]
 A user `__hash__` that raises is not called on set/dict insertion when the class has no `__eq__`: `{B()}` succeeds (python
 TypeError "cannot use 'B' as a set element (nope)"). `class Z: __slots__=("a",)`; `class W(Z): pass` → `vars(w)` `{'a': 1, 'x': 5}`
 (python `{'x': 5}`). `Plain[int]` on a class without `__class_getitem__` → a generic alias (python TypeError "type 'Plain' is not
@@ -74,7 +74,7 @@ duplicate `(?P<n>)` (python "redefinition of group name 'n' as group 2; was grou
 "unknown extension ?<x at position 1") — P-gated additions in the shared lib/regex.js / abnf/jsrtregex.go. `math.expm1(0.9999999999999999)`
 differs between native and llvm.Run (our own engines must agree).
 
-### T-629 python: stdin and input(); datetime, decimal, pprint, array, struct; remaining math · P3 · PY · OPEN [V]
+### T-629 python: stdin and input(); datetime, decimal, pprint, array, struct; remaining math · P3 · PY · IN PROGRESS (PY worker, round 8) [V]
 No stdin / `input()` (needs a C floor read primitive and its twins). Missing modules: datetime, decimal, pprint, array, struct.
 math: acosh, asinh, atanh, erf, erfc, exp2, fma, gamma, lgamma, sumprod (bit-exact or left out — libm-dependent ones are recorded in
 manual 7.9); statistics covariance/correlation/linear_regression need sumprod; random rejects str/bytes seeds (needs SHA-512).
