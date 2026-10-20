@@ -4699,8 +4699,10 @@ KwContinue  = "continue" KwEnd ;
             return m.apply(undefined, concat2impl([target], args))
         }
         if (swIsLazyMember(target, name)) { return swLazyMethod(target, name, args, mcLabels) }
-        // A builtin type's own static function (`Int.random(in:)`).
-        if (target.__tname !== undefined && hasOwn(target, name) && typeof target[name] == "function") {
+        // A builtin type's own static function (`Int.random(in:)`), and a tuple
+        // element holding a closure (`ctr.inc()` on `(inc: () -> Int, ...)`), as the
+        // compiled halves' js_swmcall calls an own function slot.
+        if ((target.__tname !== undefined || isTupleVal(target)) && hasOwn(target, name) && typeof target[name] == "function") {
             return target[name].apply(undefined, args)
         }
         fail("unknown method '" + name + "'")
@@ -7158,7 +7160,7 @@ KwContinue  = "continue" KwEnd ;
             // at the CALL SITE, so `struct A { struct I {}; var x = I() }` would
             // evaluate the memberwise default `I()` in the caller's frame, where the
             // nested I is not in scope at all.
-            var fh = isSelfN ? {v: swSelfType()} : swResolve(name)
+            var fh = isSelfN ? {v: swSelfType()} : swResolveNested(name)
             var f = fh == null ? getVar(name) : fh.v
             var ownT = isTypeVal(f)
             if (ownT) { ownerStack.push(f) }
@@ -9674,7 +9676,7 @@ KwContinue  = "continue" KwEnd ;
         for (var nt = 0; nt < mem.nested.length; nt++) {
             lastType = null
             mem.nested[nt]()
-            if (lastType != null) { tput(cls, lastType.name, lastType.v); setOuter(lastType.v, cls) }
+            if (lastType != null) { tput(cls, lastType.name, lastType.v); setOuter(lastType.v, cls); swNoteNested(lastType.name, lastType.v, cls) }
         }
         for (var st = 0; st < mem.statProps.length; st++) { installStatic(mem.statProps[st], cls) }
     }
@@ -10308,7 +10310,7 @@ KwContinue  = "continue" KwEnd ;
         swDsFlush()
         var want = cell.want
         if (want != "") {
-            var th = swResolve(want)
+            var th = swResolveNested(want)
             if (th != null && isTypeVal(th.v) && (swHasStatic(dname, want) || (th.v.__isenum === true && hasOwn(th.v, dname)))) { return want }
         }
         var st = swDotStatic(dname)
@@ -10326,7 +10328,26 @@ KwContinue  = "continue" KwEnd ;
                 for (var oi = 0; oi < os.length; oi++) { if (os[oi] == ow.__name) { return os[oi] } }
             }
         }
-        return os.length == 1 && swResolve(os[0]) != null ? os[0] : ""
+        return os.length == 1 && swResolveNested(os[0]) != null ? os[0] : ""
+    }
+    // A type name as an implicit member's owner resolves it: lexically, else as the
+    // one NESTED type of that name the program declares (`place(.king)` with a
+    // `Chess.Piece` parameter, written outside Chess). Twin of swOwnerKey in
+    // swift-to-llvm-ir.abnf.
+    var swNestedTypes = {}
+    function swNoteNested(name, v, outer) {
+        if (!hasOwn(swNestedTypes, "$" + name)) { scopePut(swNestedTypes, "$" + name, []) }
+        var lst = swNestedTypes["$" + name]
+        for (var i = 0; i < lst.length; i++) {
+            if (lst[i].outer == outer.__name) { lst[i].v = v; return }
+        }
+        lst.push({outer: outer.__name, v: v})
+    }
+    function swResolveNested(name) {
+        var h = swResolve(name)
+        if (h != null || !hasOwn(swNestedTypes, "$" + name)) { return h }
+        var lst = swNestedTypes["$" + name]
+        return lst.length == 1 ? {v: lst[0].v} : null
     }
     // `2 * .pi`: a floating-point static no program type declares is Double's - the
     // type an operand context would most often give it, and the only one a
@@ -10519,7 +10540,7 @@ KwContinue  = "continue" KwEnd ;
     }
     // The owner swDotOwner named: a program type, or a builtin's type value (Double).
     function swDotOwnerVal(tn) {
-        var h = swResolve(tn)
+        var h = swResolveNested(tn)
         return h != null ? h.v : hostGlobals[tn]
     }
     // The leading-dot member the walk built last, and its source span.

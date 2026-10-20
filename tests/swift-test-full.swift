@@ -5585,6 +5585,32 @@ func s144() {
     check("144b", p(2) == 17.0 && s(5) == 15 && fs[0](2) == 6)
 }
 
+// ===== SECTION 145: a nested type as an implicit member's type; a tuple's closure =====
+// `ch.place(.king, at: .init(file: "a", rank: 2))` from outside Chess145 resolves
+// `.king` and `.init` against the parameters' nested types; and a closure held in
+// a labelled tuple is called as `ctr.inc()`. Every value read off swiftc 6.1.2.
+struct Chess145 {
+    enum Piece: Character { case king = "K", pawn = "P" }
+    struct Square { let file: Character; let rank: Int }
+    var board: [String: Piece] = [:]
+    mutating func place(_ p: Piece, at s: Square) { board["\(s.file)\(s.rank)"] = p }
+}
+func makeCounter145(step: Int) -> (inc: () -> Int, reset: () -> Void) {
+    var c = 0
+    return ({ c += step; return c }, { c = 0 })
+}
+func s145() {
+    var ch = Chess145()
+    ch.place(.king, at: .init(file: "e", rank: 1))
+    ch.place(.pawn, at: Chess145.Square(file: "a", rank: 2))
+    let ctr = makeCounter145(step: 5)
+    _ = ctr.inc()
+    let second = ctr.inc()
+    ctr.reset()
+    check("145a", ch.board["e1"]?.rawValue == "K" && ch.board["a2"]?.rawValue == "P" && ch.board.count == 2)
+    check("145b", second == 10 && ctr.inc() == 5)
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5730,6 +5756,7 @@ func main() {
     s142() // SECTION-CALL 142
     s143() // SECTION-CALL 143
     s144() // SECTION-CALL 144
+    s145() // SECTION-CALL 145
     print("full: \(checks) checks, \(fails) failures")
 }
 

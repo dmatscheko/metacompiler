@@ -7426,7 +7426,7 @@ KwContinue  = "continue" KwEnd ;
                 var sr = emitSelfType(b)
                 return withTypeCtx(sk, function() { return emitConstruct(sr.b, sk, sr.v, args) })
             }
-            var ck = isTypeName(name) ? typeKeyOf(name) : name
+            var ck = isTypeName(name) ? swOwnerKey(name) : name
             var krec = typeAt(ck)
             var isEnumT = krec == null ? enumNames[name] == 1 : krec.kind == "enum"
             var isClassT = krec == null ? classNames[name] == 1 : krec.kind == "class"
@@ -11351,8 +11351,8 @@ KwContinue  = "continue" KwEnd ;
     function swDotOwner(dname, cell) {
         swDsFlush()
         var want = cell.want
-        if (want != "" && typeAt(typeKeyOf(want)) != null
-            && (swHasStatic(dname, want) || swEnumCaseReg["$" + want + "." + dname] === true)) { return want }
+        if (want != "" && typeAt(swOwnerKey(want)) != null
+            && (swHasStatic(dname, want) || swEnumCaseReg["$" + want + "." + dname] === true)) { return swOwnerKey(want) }
         var st = swDotStatic(dname)
         if (st != "") { return st }
         // A case name exactly one enum declares is that enum's. Twin of swDotOwner
@@ -11364,7 +11364,23 @@ KwContinue  = "continue" KwEnd ;
         if (os.length > 1 && curType() != null) {
             for (var oi = 0; oi < os.length; oi++) { if (os[oi] == curType().name) { return os[oi] } }
         }
-        return os.length == 1 && typeAt(typeKeyOf(os[0])) != null ? os[0] : ""
+        return os.length == 1 && typeAt(swOwnerKey(os[0])) != null ? swOwnerKey(os[0]) : ""
+    }
+    // The key of the type an implicit member resolves against: the one the name
+    // means lexically, else the one NESTED type of that name the program declares
+    // (`place(.king)` with a `Chess.Piece` parameter, written outside Chess). Twin of
+    // swResolveNested in swift-interpreter.abnf.
+    function swOwnerKey(name) {
+        var k = typeKeyOf(name)
+        if (typeAt(k) != null) { return k }
+        var hit = ""
+        for (var i = 0; i < declRecs.length; i++) {
+            var r = declRecs[i]
+            if (r == null || r.bname != name || r.key == name || r.key == hit) { continue }
+            if (hit != "") { return k }
+            hit = r.key
+        }
+        return hit != "" ? hit : k
     }
     // `2 * .pi`: a floating-point static no program type declares is Double's.
     // Twin of swDotFloStatic in swift-interpreter.abnf.
