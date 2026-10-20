@@ -139,7 +139,7 @@ reports cap 4 where growslice says 1) — escape analysis.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-651 php: case-insensitive dynamic function names; `\`-prefixed names; array_map type checks; positional after named in a spread · P2 · PHP · OPEN [V spec-only]
+### T-651 php: case-insensitive dynamic function names; `\`-prefixed names; array_map type checks; positional after named in a spread · P2 · PHP · IN PROGRESS (PHP worker, round 6) [V spec-only]
 `$f = 'USORT'; $f($a, 'cmp')` → "Call to undefined function USORT()" in all engines (PHP function names are case-insensitive).
 `$f = '\uasort'; $f(...)` → "Call to undefined function uasort()" when nothing else names uasort (the stdlib function is not loaded
 for a backslash-prefixed string). `array_map('strlen', 5)` prints nothing (PHP TypeError "array_map(): Argument #2 ($array) must be of
