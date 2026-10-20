@@ -1474,15 +1474,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function luaIndex(o, k) {
         if (o === undefined || o === null) { fail("attempt to index a nil value") }
-        // Every Lua string shares one metatable whose __index is the string library, so
-        // s:sub(2) / s:len() / ("x").rep work without the library table being named.
-        // Only that lookup is reachable this way: s[1] finds no numeric key and is nil,
-        // exactly as in real Lua.
-        if (typeof o == "string") {
-            var lib = globalScope["string"]
-            var sk = "" + k
-            return hasOwn(lib, sk) ? lib[sk] : undefined
-        }
+        // A string has no fields of its own: every index goes through the strings'
+        // metatable, whose __index is the string library until the program
+        // replaces it (getmetatable("").__index = f).
+        if (typeof o == "string") { return luaIndexMeta(o, k) }
         if (!isTbl(o)) { fail("attempt to index a " + luaTypeName(o) + " value") }
         var kk = luaKey(k)
         return hasOwn(o, kk) ? o[kk] : undefined
@@ -2020,9 +2015,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return out
     }
-    // luaIndex with lua's naming of the indexed expression in its error.
+    // luaIndex with lua's naming of the indexed expression in its error; a string
+    // is indexable only while its metatable has an __index.
     function luaIndexAt(o, k, pd) {
-        if (o === undefined || o === null || (typeof o != "string" && !isTbl(o))) {
+        if (o === undefined || o === null || (typeof o == "string" ? luaTm(o, "__index") === undefined : !isTbl(o))) {
             fail("attempt to index a " + luaTypeName(o) + " value" + luaDescText(pd))
         }
         return luaGet(o, k)
@@ -3143,6 +3139,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function luaNext(t, k) {
         if (!isTbl(t)) { luaArgTypeErr("next", 1, "table", t, arguments.length) }
         if (t === luaG) { return luaGNext(k) }
+        return luaNextRaw(t, k)
+    }
+    function luaNextRaw(t, k) {
         var keys = hasOwn(t, "__keys") ? t.__keys : []
         var i = 0
         if (k !== undefined && k !== null) {
@@ -3846,8 +3845,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // a table, so _G is a proxy whose metatable reads and writes that scope by
     // name; a key that is no string is an ordinary field of the proxy. rawget,
     // rawset and next see the globals the same way (luaGRaw, luaGNext): next walks
-    // the names a global was ever created under, in creation order (luaGNames), and
-    // skips the nil ones - lua's own order is unspecified. Twin of libGIndex /
+    // the names a global was ever created under, in creation order (luaGNames),
+    // skipping the nil ones, and then the proxy's own fields - lua's own order is
+    // unspecified. Twin of libGIndex /
     // libGNewIndex / libGRaw / libGNext in lua-to-llvm-ir.abnf.
     var luaGNames = []
     var luaGSeen = {}
@@ -3879,6 +3879,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return luaIndex(luaG, k)
     }
     function luaGNext(k) {
+        // A key that is no string is a field of the proxy itself, walked after
+        // the names.
+        if (k !== undefined && k !== null && typeof k != "string") { return luaNextRaw(luaG, k) }
         var i = 0
         if (k !== undefined && k !== null) {
             while (i < luaGNames.length && luaGNames[i] !== k) { i = i + 1 }
@@ -3891,7 +3894,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (v !== undefined && v !== null) { return mkMulti([luaGNames[i], v]) }
             i = i + 1
         }
-        return undefined
+        return luaNextRaw(luaG, undefined)
     }
     // setmetatable(t, mt) and getmetatable(v), lbaselib's: a __metatable field
     // protects the metatable and is what getmetatable answers instead. Twins of

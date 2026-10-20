@@ -1976,6 +1976,29 @@ function s44()
     local gt = setmetatable({}, {})
     getmetatable(gt).__index = {x = 5}
     check("mt27", gt.x, 5)
+    -- Every string index goes through the strings' metatable, so replacing its
+    -- __index changes s.k, s:m() and ipairs over a string; with none, indexing a
+    -- string is an error.
+    local smt = getmetatable("")
+    local lib = smt.__index
+    local s = "xyz"
+    smt.__index = function(str, k)
+        if type(k) == "number" then
+            if k <= #str then return str:sub(k, k) end
+            return nil
+        end
+        return lib[k]
+    end
+    local seq = ""
+    for i, ch in ipairs("ab") do seq = seq .. i .. ch end
+    check("mt28", s[2] .. s:upper() .. seq, "yXYZ1a2b")
+    smt.__index = setmetatable({}, {__index = function(t, k) return k .. "!" end})
+    check("mt29", s.foo .. " " .. tostring(s.len == string.len), "foo! false")
+    smt.__index = nil
+    local ok, e = pcall(function() return s:len() end)
+    smt.__index = lib
+    check("mt30", tostring(ok) .. " " .. try(error, e, 0), "false attempt to index a string value (upvalue 's')")
+    check("mt31", s:len() .. ("q"):rep(2), "3qq")
 end
 
 -- ===== SECTION 45: a file is no table, and __name names a type =====
@@ -2023,6 +2046,15 @@ function s46()
         "number number number nil function table nil")
     local ok, e = pcall(next, _G, "s46-not-a-global")
     check("g6", tostring(ok) .. " " .. e .. " " .. type(next(_G)), "false invalid key to 'next' string")
+    -- A key that is no name is an ordinary field of _G, which next and pairs walk too.
+    _G[1] = "one"
+    _G[true] = "t"
+    local other = {}
+    for k, v in pairs(_G) do if type(k) ~= "string" then other[#other + 1] = tostring(k) .. "=" .. v end end
+    table.sort(other)
+    check("g7", table.concat(other, " "), "1=one true=t")
+    _G[1] = nil
+    _G[true] = nil
 end
 
 -- ===== SECTION 47: coroutines =====

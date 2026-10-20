@@ -1497,6 +1497,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var gLuaNone = m.NewGlobalDef("lua.none", handle(0))
     // The running side's stack of values to close ({n, 0.., n-1}), see lua_tbcpush.
     var gLuaTbc = m.NewGlobalDef("lua.tbc", handle(0))
+    // The strings' metatable and the string library it starts with as __index
+    // (emitStrIndex), both pinned.
+    var gLuaStrMt = m.NewGlobalDef("lua.strmt", handle(0))
+    var gLuaStrLib = m.NewGlobalDef("lua.strlib", handle(0))
     var luaCallNames = []
     var luaCallDescs = []
     function luaCalleeCode(nm, dtext) {
@@ -2262,16 +2266,39 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         callExt(b, "js_arr_push", [rec, args])
         return rec
     }
-    // Every Lua string shares one metatable whose __index is the string library, so
-    // s:sub(2) / s:len() resolve there instead of aborting on "attempt to index a string
-    // value". The library table is parked in jsmain's scope under the reserved name
-    // 0strlib (an ordinary Lua name cannot begin with a digit, so nothing can shadow it)
-    // and only the string arm of the branch reads it - a table access pays one js_typeof
-    // and one compare.
+    // Indexing a string goes through the strings' metatable. While its __index is
+    // still the string library, s:sub(2) is one raw read of the library; a
+    // replaced __index, or a miss, takes the whole chain (js_luindex), which is
+    // handed the key as emitMemberGet's keyName / keyV; with no __index at all
+    // it is luaIndexError naming the expression by sfx (null: js_luindex's
+    // error, which has no name). Only the string arms of
+    // emitMemberGet and libINext read it - a table access pays one js_typeof and
+    // one compare. Twin of the string arm of luaIndex in lua-interpreter.abnf.
     //
     // Any other value that is not a table is a Lua error ("attempt to index a
     // number value"), as in luaIndex; the table test comes first, so a table
     // access still pays one compare.
+    function emitStrIndex(b, v, kV, keyName, keyV, sfx) {
+        var libV = b.NewLoad(i64, gLuaStrLib)
+        var h = callExt(b, "js_get", [b.NewLoad(i64, gLuaStrMt), emitStr(b, luaNameKey("__index"))])
+        var libB = curF.NewBlock("")
+        var chainB = curF.NewBlock("")
+        var joinB = curF.NewBlock("")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, h, libV), libB, chainB)
+        var lv = callExt(libB, "js_get", [libV, kV])
+        libB.NewCondBr(libB.NewICmp(llvm.enum.IPredEQ, lv, hUndef), chainB, joinB)
+        var callB = chainB
+        if (sfx !== null) {
+            callB = curF.NewBlock("")
+            var noneB = curF.NewBlock("")
+            chainB.NewCondBr(chainB.NewICmp(llvm.enum.IPredEQ, h, hUndef), noneB, callB)
+            luaIndexError(noneB, v, sfx)
+            noneB.NewBr(callB)
+        }
+        var cv = callExt(callB, "js_luindex", [v, keyName != "" ? emitStr(callB, keyName) : keyV])
+        callB.NewBr(joinB)
+        return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(lv, libB), llvm.ir.NewIncoming(cv, callB)])}
+    }
     // A field NAME as the table key js_lukey would make of it, decided at compile
     // time: a name cannot start with a digit or '-', so only the "__" prefix and
     // Infinity / NaN take the U+0100 escape. Twin of luaStrKey in
@@ -2311,14 +2338,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var mv = callExt(metaB, "js_luindex", [v, keyName != "" ? emitStr(metaB, keyName) : keyV])
         metaB.NewBr(joinB)
         notObjB.NewCondBr(rawTruthy(notObjB, callExt(notObjB, "js_seq", [tyV, emitStr(notObjB, "string")])), strB, badB)
-        var libV = callLua(strB, "lua_getvar", [curScopeV, emitStr(strB, "0strlib")])
-        var sv = callExt(strB, "js_get", [libV, kV])
-        strB.NewBr(joinB)
+        var sr = emitStrIndex(strB, v, kV, keyName, keyV, sfx)
+        sr.b.NewBr(joinB)
         luaIndexError(badB, v, sfx)
         badB.NewBr(joinB)
         return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(ov, hitB), llvm.ir.NewIncoming(hUndef, missB),
                                            llvm.ir.NewIncoming(mv, metaB),
-                                           llvm.ir.NewIncoming(hUndef, boxB), llvm.ir.NewIncoming(sv, strB),
+                                           llvm.ir.NewIncoming(hUndef, boxB), llvm.ir.NewIncoming(sr.v, sr.b),
                                            llvm.ir.NewIncoming(hUndef, badB)])}
     }
     function luaIndexError(b, v, sfx) {
@@ -3110,12 +3136,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var mv = callExt(mtB, "js_luindex", [t, nk])
         mtB.NewBr(gotB)
         notObjB.NewCondBr(rawTruthy(notObjB, callExt(notObjB, "js_seq", [tyV, emitStr(notObjB, "string")])), strB, badB)
-        var sv = callExt(strB, "js_get", [callLua(strB, "lua_getvar", [curScopeV, emitStr(strB, "0strlib")]), nk])
-        strB.NewBr(gotB)
+        var sr = emitStrIndex(strB, t, nk, "", nk, null)
+        sr.b.NewBr(gotB)
         callExt(badB, "js_throw", [callExt(badB, "js_add", [callExt(badB, "js_add", [emitStr(badB, "attempt to index a "),
             callExt(badB, "js_lutname", [t])]), emitStr(badB, " value")])])
         badB.NewRet(hUndef)
-        var v = gotB.NewPhi([llvm.ir.NewIncoming(rawV, objB), llvm.ir.NewIncoming(mv, mtB), llvm.ir.NewIncoming(sv, strB)])
+        var v = gotB.NewPhi([llvm.ir.NewIncoming(rawV, objB), llvm.ir.NewIncoming(mv, mtB), llvm.ir.NewIncoming(sr.v, sr.b)])
         var okB = curF.NewBlock("")
         gotB.NewCondBr(rawTruthy(gotB, callExt(gotB, "js_seq", [v, hUndef])), endB, okB)
         endB.NewRet(hUndef)
@@ -3473,14 +3499,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b = libSet(b, st, "packsize", emitLibFunc(libArgsExt("js_lustrpacksize")))
             b = libSet(b, st, "unpack", emitLibFunc(libArgsExt("js_lustrunpack")))
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "string"), st])
-            // The same table under a name no Lua program can spell, so the string
-            // metatable lookup cannot be broken by `local string = 1`.
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0strlib"), st])
-            // The strings' metatable, {__index = string}, for getmetatable and an
-            // __index chain that reaches a string (js_lustrmeta).
-            var smt = callExt(b, "js_obj_new", [])
+            // The strings' metatable, {__index = string}, for indexing a string
+            // (emitStrIndex), getmetatable and an __index chain that reaches a
+            // string (js_lustrmeta).
+            var smt = callExt(b, "js_gc_pin", [callExt(b, "js_obj_new", [])])
             callExt(b, "js_set", [smt, emitStr(b, luaNameKey("__index")), st])
-            callExt(b, "js_lustrmeta", [callExt(b, "js_gc_pin", [smt])])
+            callExt(b, "js_lustrmeta", [smt])
+            b.NewStore(smt, gLuaStrMt)
+            b.NewStore(callExt(b, "js_gc_pin", [st]), gLuaStrLib)
         }
         if (libNeed.os) {
             // os: one extern each over the argument array (abnf/jsrtluaos.go, layer 2
@@ -3816,7 +3842,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         callExt(bb, "js_call", [callLua(bb, "lua_getvar", [curScopeV, emitStr(bb, "0gnewindex")]), hUndef, argsH])
         return {b: bb, v: libArg(bb, argsH, 0)}
     }
-    // next(_G, k): the name after k in 0gnames whose global is not nil.
+    // next(_G, k): the name after k in 0gnames whose global is not nil, then the
+    // proxy's own fields, which hold every key that is no string.
     function libGNext(bb, argsH) {
         var names = callLua(bb, "lua_getvar", [curScopeV, emitStr(bb, "0gnames")])
         var n = callExt(bb, "js_get", [names, emitStr(bb, "length")])
@@ -3834,7 +3861,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var hitB = curF.NewBlock("")
         var skipB = curF.NewBlock("")
         var endB = curF.NewBlock("")
-        bb.NewCondBr(rawTruthy(bb, callExt(bb, "js_seq", [k, hUndef])), walkB, findB)
+        var keyB = curF.NewBlock("")
+        var rawB = curF.NewBlock("")
+        bb.NewCondBr(rawTruthy(bb, callExt(bb, "js_seq", [k, hUndef])), walkB, keyB)
+        keyB.NewCondBr(rawTruthy(keyB, callExt(keyB, "js_seq", [callExt(keyB, "js_typeof", [k]), emitStr(keyB, "string")])), findB, rawB)
+        rawB.NewRet(callExt(rawB, "js_lunext", [argsH]))
         findB.NewBr(scanB)
         var i0 = scanB.NewLoad(i64, iP)
         scanB.NewCondBr(rawTruthy(scanB, callExt(scanB, "js_lt", [i0, n])), cmpB, badB)
@@ -3858,7 +3889,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         retB.NewRet(callLua(retB, "lua_mk", [pair]))
         skipB.NewStore(callExt(skipB, "js_add", [i1, emitNum(skipB, 1)]), iP)
         skipB.NewBr(testB)
-        endB.NewRet(hUndef)
+        var rest = callExt(endB, "js_arr_new", [])
+        callExt(endB, "js_arr_push", [rest, libArg(endB, argsH, 0)])
+        endB.NewRet(callExt(endB, "js_lunext", [rest]))
         return {b: deadBlock(), v: hUndef}
     }
     function libWrite(from) {
