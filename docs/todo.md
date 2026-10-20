@@ -112,7 +112,7 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-627 kotlin: sortedMapOf unsorted; Array.copyOf(); extensions not dispatched by receiver type; `import java.util.Random` · P1 · KT · OPEN [V spec-only]
+### T-627 kotlin: sortedMapOf unsorted; Array.copyOf(); extensions not dispatched by receiver type; `import java.util.Random` · P1 · KT · IN PROGRESS (KT worker, round 4) [V spec-only]
 `sortedMapOf(2 to "b", 1 to "a")` → `{2=b, 1=a}` in all engines (TreeMap `{1=a, 2=b}`). `arrayOf(1).copyOf()` → interp and llvm.Run
 "unknown list method: copyOf". With `fun Int.split(x: Int, y: Int, limit: Int) = x` declared, `"a,b;c:d".split(",", ";", ":", limit =
 2)` → interp and llvm.Run `,` (the Int extension captures a String call; Kotlin calls String.split → `[a, b;c:d]`). `import
