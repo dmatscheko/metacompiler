@@ -138,7 +138,7 @@ reports cap 4 where growslice says 1) — escape analysis.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-671 php: promoted constructor parameters declare no typed property; typed-property TypeError prints `self` · P3 · PHP · OPEN [V]
+### T-671 php: promoted constructor parameters declare no typed property; typed-property TypeError prints `self` · P3 · PHP · IN PROGRESS (PHP worker, round 14) [V]
 `class A { function __construct(public int $x) {} }; $a = new A(1); $a->x = "z";` → no TypeError in any engine (php-src: a promoted
 parameter declares the typed property `public int $x`, so the write raises "Cannot assign string to property A::$x of type int").
 The existing typed-property TypeError writes `self` unresolved where zend_type_to_string_resolved writes the class name.
