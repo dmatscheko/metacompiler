@@ -137,7 +137,7 @@ reports cap 4 where growslice says 1) — escape analysis.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-606 php: library callbacks outside libCbArg; argument-error order; named arg into a by-ref variadic · P3 · PHP · OPEN [V spec-only]
+### T-606 php: library callbacks outside libCbArg; argument-error order; named arg into a by-ref variadic · P3 · PHP · IN PROGRESS (PHP worker, round 5) [V spec-only]
 array_walk_recursive, the array_udiff/uintersect family (__mec_takecb) and other dynamically-named callbacks are still judged in
 the library's frame, not the caller's. The callback is checked before earlier arguments, so `usort($notArray, 'bad')` reports
 Argument #2 where PHP reports Argument #1 (all engines). A named argument collected by a by-reference variadic is not passed by
