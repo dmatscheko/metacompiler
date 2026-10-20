@@ -2774,6 +2774,8 @@ NotFuncHead = :script(~~
         }
         if (self == undefined || self == null || typeof self != "object") { return false }
         if (self === jsObjectGlobal) { return jsObjectOwnNames.indexOf(kk) >= 0 || (!isInternalKey(kk) && hasOwn(self, kk)) }
+        if (isClassDesc(self)) { return jsClassOwnNames(self).indexOf(kk) >= 0 }
+        if (hasOwn(self, "__protoof") && (kk == "constructor" || jsProtoDeclared(self.__protoof, kk))) { return true }
         var eo = anytype // true, false, or undefined for a key jsErrOwn does not judge.
         eo = jsErrOwn(self, kk)
         if (eo !== undefined) { return eo }
@@ -2783,6 +2785,22 @@ NotFuncHead = :script(~~
         if (self[kk] === undefined && hasOwn(self, "__nsobj")) { return self["__keys"].indexOf(kk) >= 0 }
         return true
     }
+    // See the twin of this comment in js-interpreter.abnf.
+    function jsClassOwnNames(c) {
+        var out = ["length", "name", "prototype"]
+        var t = anytype // The static table, absent on the Object heritage stand-in.
+        t = c.__statics
+        if (t == undefined || !hasOwn(t, "__names")) { return out }
+        var ns = t.__names
+        for (var i = 0; i < ns.length; i++) { if (out.indexOf(ns[i]) < 0) { out.push(ns[i]) } }
+        return jsIndexOrder(out)
+    }
+    // See the twin of this comment in js-interpreter.abnf.
+    function jsStaticName(t, k) {
+        if (!isInternalKey(k) && t.__names.indexOf(k) < 0) { t.__names.push(k) }
+    }
+    // See the twin of this comment in js-interpreter.abnf.
+    function jsProtoDeclared(d, k) { return hasOwn(d, "__pnames") && d.__pnames.indexOf(k) >= 0 }
     // The receiver a Function.prototype shim armed for the call now running. The shims
     // set pendingThis and callWithThis clears it again, so it is read once at entry.
     function jsThisArg() { return pendingThis }
@@ -2812,6 +2830,7 @@ NotFuncHead = :script(~~
             return ak
         }
         if (typeof v == "object" && v !== null && hasOwn(v, "__protoof")) { return jsProtoGopn(v) }
+        if (isClassDesc(v)) { return jsClassOwnNames(v) }
         if (typeof v != "function") { return jsErrGopn(v, jsOwnKeys(v)) }
         var out = ["length", "name"]
         if (v === jsArrayFn) { out = jsArrayOwnNames.slice() }
@@ -4357,16 +4376,22 @@ NotFuncHead = :script(~~
             }
         }
         if (o.__statics == undefined) { scopePut(o, "__statics", newStaticsTable()) }
+        var had = hasOwn(o.__statics, k)
         scopePut(o.__statics, k, v)
         // `C.zz = 1` at run time creates an ENUMERABLE own property of the class
-        // object, exactly as it does on any other object.
-        trackKey(o.__statics, k)
+        // object, exactly as it does on any other object; a write over an existing
+        // one (a static method, say) keeps its enumerability.
+        if (!had) {
+            jsStaticName(o.__statics, k)
+            trackKey(o.__statics, k)
+        }
     }
     // A static table, with the enumerable-key list makeClassValue gives the ones it
     // builds. Out of line because MetaJS is typed and the literal needs its slot.
     function newStaticsTable() {
         var t = {}
         t["__keys"] = []
+        t["__names"] = []
         return t
     }
     // See the twin of this comment in js-interpreter.abnf.
@@ -4773,7 +4798,11 @@ NotFuncHead = :script(~~
         }
         // See the twin of this comment in js-interpreter.abnf.
         if (o === jsMathObj && hasOwn(o, k) && o[k] !== undefined) { scopePut(o, k, v); return }
-        if (o != undefined && o != null && typeof o == "object" && hasOwn(o, "__protoof")) { protoWrite(o.__protoof, "" + k, v) }
+        if (o != undefined && o != null && typeof o == "object" && hasOwn(o, "__protoof")) {
+            protoWrite(o.__protoof, "" + k, v)
+            // A declared method or accessor stays non-enumerable when written.
+            if (jsProtoDeclared(o.__protoof, "" + k)) { scopePut(o, k, v); return }
+        }
         // An arguments object's `length` is an ordinary property, kept in its kind word
         // (jsIsArgs): the elements stay as they are...
         if (argsWant && k === "length" && jsIsArgs(o) && typeof v == "number" && v >= 0 && Math.floor(v) === v &&
@@ -7401,6 +7430,7 @@ NotFuncHead = :script(~~
             var statics = {}
             // See the twin of this comment in js-interpreter.abnf.
             statics["__keys"] = []
+            statics["__names"] = []
             cls["__statics"] = statics
             // See the twin of this comment in js-interpreter.abnf.
             var pnames = []
@@ -7414,7 +7444,8 @@ NotFuncHead = :script(~~
                 } else {
                     scopePut(ptgt, pk, classMemberFn(pm, mscopes, pk))
                 }
-                if (!pm.statik && !isInternalKey(pk) && pnames.indexOf(pk) < 0) { pnames.push(pk) }
+                if (pm.statik) { jsStaticName(statics, pk) }
+                else if (!isInternalKey(pk) && pnames.indexOf(pk) < 0) { pnames.push(pk) }
             }
             cls["__pnames"] = pnames
             if (ctorInfo != null) {
@@ -7434,6 +7465,7 @@ NotFuncHead = :script(~~
                     // A static FIELD is enumerable; see __keys above. A PRIVATE one is
                     // not: it is filed under the mangled key '__#x' here exactly as in
                     // both compiled halves, and trackKey skips every '__' name.
+                    jsStaticName(statics, itk)
                     trackKey(statics, itk)
                 }
             }

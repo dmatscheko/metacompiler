@@ -4245,6 +4245,39 @@ function s88() {
     check("it88d", msg.join() === "true,true")
 }
 
+// ===== SECTION 89: the own properties of a class object and of a prototype =====
+// A class object's own names are `length`, `name` and `prototype`, then its static
+// members in definition order (methods and accessors, then fields and what static
+// blocks write); a static method written again stays non-enumerable. A prototype owns
+// `constructor` and the class body's methods and accessors, and those stay
+// non-enumerable when written through it. Values read off node 24.
+class K89 { static a = 1; static s() {} static get g() { return 1 } m() {} get pg() { return 1 } static { (K89 as any).c = 3 } }
+class D89 extends K89 { static d() {} }
+class B89 { m() {} }
+function F89() {}
+function s89() {
+    const gp = Object.getOwnPropertyNames;
+    check("cl89a", gp(K89).join() === "length,name,prototype,s,g,a,c" && gp(D89).join() === "length,name,prototype,d" &&
+        gp(B89).join() === "length,name,prototype" && Object.keys(K89).join() === "a,c");
+    check("cl89b", K89.hasOwnProperty("s") && K89.hasOwnProperty("g") && K89.hasOwnProperty("a") &&
+        K89.hasOwnProperty("prototype") && K89.hasOwnProperty("name") && !K89.hasOwnProperty("m") &&
+        !D89.hasOwnProperty("s") && Object.hasOwn(D89, "d"));
+    (K89 as any).s = 9;
+    (K89 as any).z = 1;
+    check("cl89c", Object.keys(K89).join() === "a,c,z" && gp(K89).join() === "length,name,prototype,s,g,a,c,z" &&
+        !K89.propertyIsEnumerable("s") && K89.propertyIsEnumerable("z"));
+    check("pr89d", B89.prototype.hasOwnProperty("constructor") && B89.prototype.hasOwnProperty("m") &&
+        K89.prototype.hasOwnProperty("pg") && !D89.prototype.hasOwnProperty("m") &&
+        F89.prototype.hasOwnProperty("constructor") && !K89.prototype.hasOwnProperty("s"));
+    B89.prototype.m = function () { return 2 };
+    (B89.prototype as any).x = 1;
+    const ks: string[] = [];
+    for (const k in B89.prototype) { ks.push(k); }
+    check("pr89e", Object.keys(B89.prototype).join() === "x" && ks.join() === "x" && !B89.prototype.propertyIsEnumerable("m") &&
+        JSON.stringify(B89.prototype) === '{"x":1}' && Object.entries(B89.prototype).length === 1 && new B89().m() === 2 &&
+        gp(B89.prototype).join() === "constructor,m,x");
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -4336,6 +4369,7 @@ function main(): number {
     s86(); // SECTION-CALL 86
     s87(); // SECTION-CALL 87
     s88(); // SECTION-CALL 88
+    s89(); // SECTION-CALL 89
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

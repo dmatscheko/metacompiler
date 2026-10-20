@@ -814,9 +814,10 @@ func jsvOwnKeys(v interface{}) []string {
 		if isClassDesc(o) {
 			return jsvStaticEnumKeys(o)
 		}
+		d, isView := o.props["__protoof"].(*jsObject)
 		out := []string{}
 		for _, k := range o.keys {
-			if !jsvInternalKey(k) {
+			if !jsvInternalKey(k) && !(isView && jsvProtoDeclared(d, k)) {
 				out = append(out, k)
 			}
 		}
@@ -884,6 +885,9 @@ func jsvGopnKeys(v interface{}) []string {
 			if d, isView := o.props["__protoof"].(*jsObject); isView {
 				return jsvProtoGopn(o, d)
 			}
+			if isClassDesc(o) {
+				return jsvClassOwnNames(o)
+			}
 			return jsvErrGopn(o, jsvOwnKeys(v))
 		}
 		// An array's or a string's `length` after its indices, an arguments object's
@@ -914,15 +918,9 @@ func jsvGopnKeys(v interface{}) []string {
 // written again keeps its place, as a redefined property does. Twins: jsProtoGopn in
 // both *-interpreter.abnf, jvProtoGopn in languages/lib/js-rt.metajs.
 func jsvProtoGopn(view, d *jsObject) []string {
-	var pw []string
-	if a, ok := d.props["__pw"].(*jsArray); ok {
-		for _, e := range a.elems {
-			pw = append(pw, e.(string))
-		}
-	}
 	out := []string{"constructor"}
 	for _, k := range d.keys {
-		if !jsvInternalKey(k) && !jsvInNames(pw, k) {
+		if jsvProtoDeclared(d, k) {
 			out = append(out, k)
 		}
 	}
@@ -1187,6 +1185,12 @@ func (rt *jsrt) jsvHasOwn(v interface{}, k string) bool {
 		if jsvIsObjectGlobal(o) && jsvInNames(jsvObjectOwnNames, k) {
 			return true
 		}
+		if isClassDesc(o) {
+			return jsvInNames(jsvClassOwnNames(o), k)
+		}
+		if d, isView := o.props["__protoof"].(*jsObject); isView && (k == "constructor" || jsvProtoDeclared(d, k)) {
+			return true
+		}
 		_, has := o.props[k]
 		return has
 	case *jsArray:
@@ -1204,6 +1208,42 @@ func (rt *jsrt) jsvHasOwn(v interface{}, k string) bool {
 	}
 	i, err := strconv.Atoi(k)
 	return err == nil && strconv.Itoa(i) == k && i >= 0 && i < n
+}
+
+// jsvClassOwnNames are the own property names of a class object: `length`, `name`
+// and `prototype`, then its static members and what the program wrote onto it, in
+// the order they were defined, which is the static table's own key order. Twins:
+// jsClassOwnNames in both *-interpreter.abnf, jvClassOwnNames in
+// languages/lib/js-rt.metajs.
+func jsvClassOwnNames(c *jsObject) []string {
+	out := []string{"length", "name", "prototype"}
+	if t := jsStaticsOf(c, false); t != nil {
+		for _, k := range t.keys {
+			if !jsvInternalKey(k) && !jsvInNames(out, k) {
+				out = append(out, k)
+			}
+		}
+	}
+	return jsvIndexOrder(out)
+}
+
+// jsvProtoDeclared reports whether k is a method or accessor the class body of
+// descriptor d declared: an own key of d that protoWrite did not install (__pw).
+// Those are own properties of the prototype that are not enumerable, and a write
+// through the prototype keeps them so. Twins: jsProtoDeclared in both
+// *-interpreter.abnf, jvProtoDeclared in languages/lib/js-rt.metajs.
+func jsvProtoDeclared(d *jsObject, k string) bool {
+	if _, has := d.props[k]; !has || jsvInternalKey(k) {
+		return false
+	}
+	if pw, ok := d.props["__pw"].(*jsArray); ok {
+		for _, e := range pw.elems {
+			if e == k {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // jsvIndexKeys is the own enumerable key list of an indexed value - an array or a
@@ -3956,7 +3996,8 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 				}
 				return w(out)
 			}
-			if _, marked := v.props["__errh"]; marked {
+			_, marked := v.props["__errh"]
+			if _, isView := v.props["__protoof"]; marked || isView {
 				out := &jsArray{}
 				for _, k := range jsvOwnKeys(v) {
 					out.elems = append(out.elems, k)
@@ -4047,10 +4088,14 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 				}
 			}
 			t := jsStaticsOf(cls, true)
+			_, had := t.props[name]
 			t.set(name, u(a[2]))
 			// A runtime `C.zz = 1` creates an ENUMERABLE own property of the class
-			// object, exactly as it does on any other object.
-			jsvSfTrack(t, name)
+			// object, exactly as it does on any other object; a write over an
+			// existing one (a static method, say) keeps its enumerability.
+			if !had {
+				jsvSfTrack(t, name)
+			}
 			return 0
 		}
 		// `name` and `length` are NON-WRITABLE: node drops `f.name = "q"` silently in
@@ -4169,8 +4214,12 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		// answered every static, so reaching this line means the name is not one -
 		// and the shared js_mcall below would find the descriptor's own property of
 		// that name, which is its INSTANCE method. Answer the miss sentinel so the
-		// call site raises node's "C.m is not a function" instead.
+		// call site raises node's "C.m is not a function" instead. Object.prototype's
+		// four methods are the exception: a class object inherits them too.
 		if _, isStatic := jsvIsStaticSide(u(a[0]), rt.toString(u(a[1]))); isStatic {
+			if name := rt.toString(u(a[1])); jsvIsProtoName(name) {
+				return w(rt.jsvProtoApply(u(a[0]), name, arr.elems))
+			}
 			if v, ok := rt.mcallMiss(); ok {
 				return w(v)
 			}

@@ -1,4 +1,4 @@
-// Full-syntax test: JavaScript - part 3 of 4, sections 44-56, 58-71 and 73-94.
+// Full-syntax test: JavaScript - part 3 of 4, sections 44-56, 58-71 and 73-95.
 //
 // THE JS RATCHET IS FOUR FILES: as one file its -frozen interpreter leg ran into
 // ./test.sh --full's time brake (peak memory grew superlinearly with the file), and
@@ -6,7 +6,7 @@
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43, engine agreement, generators, Error, Math
-//   tests/js-test-full.3.js   sections 44-56, 58-71 and 73-94, the call/class/private-name
+//   tests/js-test-full.3.js   sections 44-56, 58-71 and 73-95, the call/class/private-name
 //                             model, the Unicode identifier tables, iterators, derived
 //                             constructors, JSON, guards, Set and Map, iterator closing,
 //                             hasOwnProperty, delete, Object.prototype, extends Object,
@@ -2441,6 +2441,39 @@ function s94() {
     check("it94d", msg.join() === "true,true")
 }
 
+// ===== SECTION 95: the own properties of a class object and of a prototype =====
+// A class object's own names are `length`, `name` and `prototype`, then its static
+// members in definition order (methods and accessors, then fields and what static
+// blocks write); a static method written again stays non-enumerable. A prototype owns
+// `constructor` and the class body's methods and accessors, and those stay
+// non-enumerable when written through it. Values read off node 24.
+class K95 { static a = 1; static s() {} static get g() { return 1 } m() {} get pg() { return 1 } static { K95.c = 3 } }
+class D95 extends K95 { static d() {} }
+class B95 { m() {} }
+function F95() {}
+function s95() {
+    const gp = Object.getOwnPropertyNames
+    check("cl95a", gp(K95).join() === "length,name,prototype,s,g,a,c" && gp(D95).join() === "length,name,prototype,d" &&
+        gp(B95).join() === "length,name,prototype" && Object.keys(K95).join() === "a,c")
+    check("cl95b", K95.hasOwnProperty("s") && K95.hasOwnProperty("g") && K95.hasOwnProperty("a") &&
+        K95.hasOwnProperty("prototype") && K95.hasOwnProperty("name") && !K95.hasOwnProperty("m") &&
+        !D95.hasOwnProperty("s") && Object.hasOwn(D95, "d"))
+    K95.s = 9
+    K95.z = 1
+    check("cl95c", Object.keys(K95).join() === "a,c,z" && gp(K95).join() === "length,name,prototype,s,g,a,c,z" &&
+        !K95.propertyIsEnumerable("s") && K95.propertyIsEnumerable("z"))
+    check("pr95d", B95.prototype.hasOwnProperty("constructor") && B95.prototype.hasOwnProperty("m") &&
+        K95.prototype.hasOwnProperty("pg") && !D95.prototype.hasOwnProperty("m") &&
+        F95.prototype.hasOwnProperty("constructor") && !K95.prototype.hasOwnProperty("s"))
+    B95.prototype.m = function () { return 2 }
+    B95.prototype.x = 1
+    const ks = []
+    for (const k in B95.prototype) { ks.push(k) }
+    check("pr95e", Object.keys(B95.prototype).join() === "x" && ks.join() === "x" && !B95.prototype.propertyIsEnumerable("m") &&
+        JSON.stringify(B95.prototype) === '{"x":1}' && Object.entries(B95.prototype).length === 1 && new B95().m() === 2 &&
+        gp(B95.prototype).join() === "constructor,m,x")
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -2493,6 +2526,7 @@ function main() {
     s92() // SECTION-CALL 92
     s93() // SECTION-CALL 93
     s94() // SECTION-CALL 94
+    s95() // SECTION-CALL 95
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }
