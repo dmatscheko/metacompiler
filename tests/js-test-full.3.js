@@ -1,4 +1,4 @@
-// Full-syntax test: JavaScript - part 3 of 4, sections 44-56, 58-71 and 73-96.
+// Full-syntax test: JavaScript - part 3 of 4, sections 44-56, 58-71 and 73-97.
 //
 // THE JS RATCHET IS FOUR FILES: as one file its -frozen interpreter leg ran into
 // ./test.sh --full's time brake (peak memory grew superlinearly with the file), and
@@ -6,7 +6,7 @@
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43, engine agreement, generators, Error, Math
-//   tests/js-test-full.3.js   sections 44-56, 58-71 and 73-96, the call/class/private-name
+//   tests/js-test-full.3.js   sections 44-56, 58-71 and 73-97, the call/class/private-name
 //                             model, the Unicode identifier tables, iterators, derived
 //                             constructors, JSON, guards, Set and Map, iterator closing,
 //                             hasOwnProperty, delete, Object.prototype, extends Object,
@@ -16,7 +16,8 @@
 //                             return completion, where yield and return stand,
 //                             prototypes, static methods as values, Boolean,
 //                             symbols, with, for-in and `in` through the
-//                             prototype chain
+//                             prototype chain, inherited data properties and
+//                             Object.create
 //   (section 72 is in tests/js-test-full.4.mjs, beside 57: it needs a file that
 //   names no builtin class but in a `new`)
 //   tests/js-test-full.4.mjs  section 57, export in a Module
@@ -2518,6 +2519,71 @@ function s96() {
     check("pa96d", P96.h(7) === 70 && new P96().i(3) === 3)
 }
 
+// ===== SECTION 97: inherited data properties, Object.create, Object.prototype's methods as values =====
+// A property written onto a prototype is read through every object below it, by a
+// plain read, a compound assignment and a destructuring pattern alike, until an own
+// property shadows it. Object.create(p) makes an object whose prototype is p.
+// Object.prototype's methods read as values are the very functions Object.prototype
+// holds. Values read off node 24.
+class A97 { m() { return "m" } }
+class B97 extends A97 {}
+class K97 {}
+function F97() { this.own = 1 }
+function s97() {
+    A97.prototype.x = 1
+    A97.prototype.nul = null
+    B97.prototype.y = 2
+    const a = new A97(), b = new B97()
+    check("ip97a", a.x === 1 && b.x === 1 && b.y === 2 && a.y === undefined && a.nul === null &&
+        B97.prototype.x === 1 && !b.hasOwnProperty("x") && "x" in b)
+    a.x = 5
+    A97.prototype.x = 7
+    const b2 = new B97()
+    b2.x += 10
+    const b3 = new B97()
+    b3.x++
+    const { x: dx, y: dy } = new B97()
+    check("ip97b", a.x === 5 && b.x === 7 && b2.x === 17 && new B97().x === 7 && b3.x === 8 && dx === 7 && dy === 2)
+    F97.prototype.v = 2
+    F97.prototype.greet = function () { return "hi " + this.own }
+    const f = new F97()
+    check("ip97c", f.v === 2 && f.greet() === "hi 1" && f.constructor === F97)
+    const base = { p: 1, hello() { return "hello " + this.n } }
+    const o = Object.create(base)
+    o.n = "o"
+    const o2 = Object.create(o)
+    check("oc97d", o.p === 1 && o.hello() === "hello o" && Object.keys(o).join() === "n" && !o.hasOwnProperty("p") &&
+        "p" in o && o2.p === 1 && o2.hello() === "hello o")
+    base.p = 3
+    const p3 = o.p
+    o.p = 9
+    check("oc97e", p3 === 3 && o.p === 9 && base.p === 3 && o2.p === 9)
+    const ia = Object.create(A97.prototype)
+    const ib = Object.create(b)
+    check("oc97f", ia.x === 7 && ia.m() === "m" && ia instanceof A97 && ia.constructor === A97 &&
+        ib.y === 2 && ib instanceof B97 && ib.constructor === B97)
+    const nul = Object.create(null)
+    nul.a = 3
+    const ts = Object.create({ toString() { return "TS" } })
+    check("oc97g", nul.a === 3 && typeof Object.create === "function" && Object.create.length === 2 &&
+        String(ts) === "TS" && `${ts}` === "TS")
+    let msg = ""
+    try { Object.create(5) } catch (e) { msg = e instanceof TypeError ? e.message : "" }
+    check("oc97h", msg === "Object prototype may only be an Object or null: 5")
+    check("pm97i", typeof K97.isPrototypeOf === "function" && typeof K97.toLocaleString === "function" &&
+        typeof ({}).toLocaleString === "function" && typeof a.isPrototypeOf === "function" &&
+        typeof (function () {}).isPrototypeOf === "function")
+    check("pm97j", K97.valueOf === K97.valueOf && ({}).valueOf === a.valueOf && a.toString === Object.prototype.toString &&
+        a.isPrototypeOf === Object.prototype.isPrototypeOf)
+    check("pm97k", A97.prototype.isPrototypeOf(b) && !B97.prototype.isPrototypeOf(a) &&
+        A97.prototype.isPrototypeOf(B97.prototype) && Object.prototype.isPrototypeOf(a) &&
+        Object.prototype.isPrototypeOf([]) && !Object.prototype.isPrototypeOf(5) &&
+        base.isPrototypeOf(o2) && !o.isPrototypeOf(base) && F97.prototype.isPrototypeOf(f))
+    const tl = ({}).toLocaleString
+    check("pm97l", ({}).toLocaleString() === "[object Object]" && ({ toString() { return "Q" } }).toLocaleString() === "Q" &&
+        tl.call([1, 2]) === "1,2" && "ab".toLocaleString() === "ab")
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -2572,6 +2638,7 @@ function main() {
     s94() // SECTION-CALL 94
     s95() // SECTION-CALL 95
     s96() // SECTION-CALL 96
+    s97() // SECTION-CALL 97
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

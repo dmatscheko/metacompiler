@@ -3291,10 +3291,14 @@ NotFuncHead = :script(~~
     // Runs o's own toString / valueOf, if it has one, and answers {v: result}. The two
     // places a method can live take DIFFERENT calling conventions: a CLASS method sits
     // on the __class descriptor and gets the receiver prepended, an object literal's
-    // method is an ordinary closure that reads 'this' from the receiver slot.
+    // method is an ordinary closure that reads 'this' from the receiver slot, and so is
+    // a function on a prototype view.
     function jsCallMethod(o, name) {
         for (var cl = o.__class; cl != undefined && cl != null; cl = cl.__super) {
             if (hasOwn(cl, name) && typeof cl[name] == "function") { return {v: cl[name].apply(undefined, [o])} }
+            if (hasOwn(cl, "__pview") && hasOwn(cl.__pview, name) && typeof cl.__pview[name] == "function") {
+                return {v: callWithThis(cl.__pview[name], o, [])}
+            }
         }
         if (hasOwn(o, name) && typeof o[name] == "function") { return {v: callWithThis(o[name], o, [])} }
         return null
@@ -3766,11 +3770,9 @@ NotFuncHead = :script(~~
     // The host Object differs per engine, so this one is the engine's own: Object.keys
     // and friends filter the __-prefixed internals and answer the same key ORDER the
     // compiler's js_jsmcall does, and Object.prototype.toString.call(v) (the classic
-    // type probe) is answered here as well. The three members are the ones a program in
-    // this subset can reach; each takes its receiver from the one-shot pendingThis slot
-    // the shims in getMember arm, which is why they are declared as ordinary closures
-    // reading jsThisArg(). Twins: js_jsobject in languages/lib/js-rt.metajs and in
-    // abnf/jsrtjsprint.go.
+    // type probe) is answered here as well. Object.prototype's methods take their
+    // receiver from the one-shot pendingThis slot (jsProtoShim). Twins: js_jsobject in
+    // languages/lib/js-rt.metajs and in abnf/jsrtjsprint.go.
     function jsProtoTag(v) {
         if (v === undefined) { return "[object Undefined]" }
         if (v === null) { return "[object Null]" }
@@ -3794,18 +3796,13 @@ NotFuncHead = :script(~~
         }
         return "[object Object]"
     }
-    var jsObjectProto = {
-        "toString": function() { return jsProtoTag(jsThisArg()) },
-        "valueOf": function() { return jsThisArg() },
-        "hasOwnProperty": function(k) { return jsHasOwn(jsThisArg(), k) },
-        "propertyIsEnumerable": function(k) { return jsPropEnum(jsThisArg(), k) }
-    }
-    // Object.prototype's four methods, applied to a receiver. No value here has the
+    // Object.prototype's methods, applied to a receiver. No value here has the
     // prototype chain they are inherited through, so a call or a read that finds no
     // member of one of these names lands here (jsProtoCall, jsProtoShim). Twins:
     // jsvProtoApply in abnf/jsrtjsprint.go, jvProtoApply in languages/lib/js-rt.metajs.
     function jsIsProtoName(k) {
-        return k === "toString" || k === "valueOf" || k === "hasOwnProperty" || k === "propertyIsEnumerable"
+        return k === "toString" || k === "valueOf" || k === "hasOwnProperty" || k === "propertyIsEnumerable" ||
+            k === "isPrototypeOf" || k === "toLocaleString"
     }
     function jsProtoApply(recv, name, args) {
         var k = anytype // The queried key may be any value.
@@ -3813,28 +3810,63 @@ NotFuncHead = :script(~~
         if (name == "hasOwnProperty") { return jsHasOwn(recv, k) }
         if (name == "propertyIsEnumerable") { return jsPropEnum(recv, k) }
         if (name == "toString") { return jsProtoTag(recv) }
+        if (name == "isPrototypeOf") { return jsIsProtoOf(recv, k) }
+        // Invoke(this, "toString") (ECMA-262 20.1.3.5), which ToString performs.
+        if (name == "toLocaleString") { return jsStr(recv) }
         return recv
     }
-    // A CALL of one of the four on a receiver with no member of that name; null when
-    // the call is not one.
+    // A CALL of one of them on a receiver with no member of that name; null when the
+    // call is not one. A number's and an array's toLocaleString are their own
+    // prototypes' (locale-formatted), which this engine does not have.
     function jsProtoCall(target, name, args) {
         if (!jsIsProtoName(name) || target == undefined || target == null) { return null }
+        if (name == "toLocaleString" && (typeof target == "number" || Array.isArray(target) || isBigInt(target))) { return null }
         if (getMemberRaw(target, name) !== undefined) { return null }
         return {v: jsProtoApply(target, name, args)}
     }
-    // One of the four READ AS A VALUE off a plain object or an instance. An explicit
-    // receiver wins over the read-time one, so `({}).toString.call([1])` is
-    // "[object Array]" as in node.
-    function jsProtoShim(o, name) {
+    // One of them READ AS A VALUE: one function per name, the one Object.prototype
+    // holds, so `o.valueOf === o.valueOf` and `o.valueOf === Object.prototype.valueOf`
+    // as in node. It takes its receiver from the call site.
+    var jsProtoFns = {}
+    function jsProtoShim(name) {
+        var key = "$" + name
+        if (hasOwn(jsProtoFns, key)) { return jsProtoFns[key] }
+        var f = jsProtoFn(name)
+        jsProtoFns[key] = f
+        return f
+    }
+    function jsProtoFn(name) {
         return function() {
             var recv = anytype
             recv = pendingThis
             pendingThis = undefined
-            if (recv === undefined) { recv = o }
             var a = []
             for (var i = 0; i < arguments.length; i++) { a.push(arguments[i]) }
             return jsProtoApply(recv, name, a)
         }
+    }
+    var jsObjectProto = {
+        "toString": jsProtoShim("toString"), "valueOf": jsProtoShim("valueOf"),
+        "hasOwnProperty": jsProtoShim("hasOwnProperty"), "propertyIsEnumerable": jsProtoShim("propertyIsEnumerable"),
+        "isPrototypeOf": jsProtoShim("isPrototypeOf"), "toLocaleString": jsProtoShim("toLocaleString")
+    }
+    // Object.prototype.isPrototypeOf: is p on v's prototype chain? Object.prototype is
+    // on every object's; any other prototype is a view, or an Object.create prototype
+    // object, held as __pview by a descriptor on the chain. Twins: jsvIsProtoOf in
+    // abnf/jsrtjsprint.go, jvIsProtoOf in languages/lib/js-rt.metajs.
+    function jsIsProtoOf(p, v) {
+        var vt = jsTypeofVal(v)
+        if (v === null || (vt != "object" && vt != "function")) { return false }
+        if (p === jsObjectProto) { return true }
+        if (typeof v != "object" || typeof p != "object" || p === null) { return false }
+        var cl = anytype // The descriptor whose view is v's prototype.
+        cl = hasOwn(v, "__protoof") ? v.__protoof.__super : v.__class
+        var guard = 0
+        for (; cl != undefined && cl != null && guard < 64; cl = cl.__super) {
+            if (hasOwn(cl, "__pview") && cl.__pview === p) { return true }
+            guard = guard + 1
+        }
+        return false
     }
     // propertyIsEnumerable: an own ENUMERABLE key, which is exactly Object.keys - an
     // array's `length`, an Error's `message` and a function's `name` are own and not
@@ -3908,9 +3940,6 @@ NotFuncHead = :script(~~
     // the prototype keeps them so. Twins: jsvProtoDeclared in abnf/jsrtjsprint.go,
     // jvProtoDeclared in languages/lib/js-rt.metajs.
     function jsProtoDeclared(d, k) { return hasOwn(d, "__pnames") && d.__pnames.indexOf(k) >= 0 }
-    // The receiver a Function.prototype shim armed for the call now running. The shims
-    // set pendingThis and callWithThis clears it again, so it is read once at entry.
-    function jsThisArg() { return pendingThis }
     var jsObjectGlobal = {"__jsobject": true, "prototype": jsObjectProto}
     function jsOwnKeys(v) {
         var out = []
@@ -4548,6 +4577,8 @@ NotFuncHead = :script(~~
             }
             return {v: o}
         }
+        // A second argument (property descriptors) is not supported: the call misses.
+        if (name == "create" && (args.length < 2 || args[1] === undefined)) { return {v: jsObjCreate(src)} }
         if (name == "hasOwn") {
             if (src === undefined || src === null) { biRaise("TypeError: Cannot convert undefined or null to object") }
             var hk = anytype // The key: a symbol, or any value ToPropertyKey reads as a string.
@@ -4577,6 +4608,29 @@ NotFuncHead = :script(~~
         if (name == "freeze" || name == "seal") { return {v: src} }
         if (name == "is") { return {v: sameValue(args[0], args[1])} }
         return null
+    }
+    // Object.create(p): an object whose prototype is p. A class's prototype view makes
+    // it an instance of that class whose constructor never ran. Any other object
+    // becomes the view of a descriptor of its own, whose parent is p's own class, so
+    // the read walk (protoChainRead) reaches p's properties and then p's chain. null
+    // gives a plain object, the nearest this value model has, and so do a function and
+    // an array, whose own properties no view reaches. Twins: jsvObjCreate in
+    // abnf/jsrtjsprint.go, jvObjCreate in languages/lib/js-rt.metajs.
+    function jsObjCreate(p) {
+        var o = {}
+        o["__keys"] = []
+        var t = jsTypeofVal(p)
+        if (p === null || t == "function" || Array.isArray(p)) { return o }
+        if (t != "object") { biRaise("TypeError: Object prototype may only be an Object or null: " + jsStr(p)) }
+        if (hasOwn(p, "__protoof")) {
+            o["__class"] = p.__protoof
+            return o
+        }
+        var d = {}
+        d["__pview"] = p
+        if (p.__class != undefined) { d["__super"] = p.__class }
+        o["__class"] = d
+        return o
     }
     // The values an iterable yields, for the statics that take one (Object.fromEntries,
     // Object.groupBy): an array as it is, a string's code points, anything with a
@@ -5546,6 +5600,7 @@ NotFuncHead = :script(~~
             if (k == "hasOwnProperty" || k == "propertyIsEnumerable") { return fnHasOwnShim(o, k == "propertyIsEnumerable") }
             if (k == "toString") { return fnToStringShim(o) }
             if (k == "valueOf") { return fnValueOfShim(o) }
+            if (jsIsProtoName(k)) { return jsProtoShim(k) }
         }
         // Plain objects (instances, literals) read own properties only: a bare o[k]
         // would resolve inherited Object.prototype members (toString, valueOf, ...)
@@ -5592,10 +5647,13 @@ NotFuncHead = :script(~~
     // descriptor an instance carries, or - for an instance of a constructor FUNCTION -
     // the function itself, which ctorDescriptor remembers under __ctorfn. undefined
     // for anything with no __class at all (a plain literal; node answers Object there,
-    // which needs a prototype chain this value model does not have).
+    // which needs a prototype chain this value model does not have). The descriptor
+    // Object.create files for a plain prototype object is no class, so the nearest
+    // class above it answers.
     function classCtorOf(o) {
         var cl = anytype // A class descriptor, or absent.
         cl = o.__class
+        while (cl != undefined && cl != null && cl.__isclass !== true) { cl = cl.__super }
         if (cl == undefined || cl == null) { return undefined }
         if (hasOwn(cl, "__ctorfn")) { return cl["__ctorfn"] }
         return cl
@@ -5660,8 +5718,8 @@ NotFuncHead = :script(~~
             return hit.v
         }
         if (k == "name") { return o.__name }
-        // A class object inherits Object.prototype's four methods too.
-        if (jsIsProtoName(k)) { return jsProtoShim(o, k) }
+        // A class object inherits Object.prototype's methods too.
+        if (jsIsProtoName(k)) { return jsProtoShim(k) }
         return undefined
     }
     // The write half: a setter anywhere on the static chain wins over a fresh own slot,
@@ -5705,7 +5763,7 @@ NotFuncHead = :script(~~
         if (typeof k == "string" && k !== "length" && (typeof o == "string" || typeof o == "number" || Array.isArray(o))) {
             var bf = builtinFam(o, k)
             if (bf != "") { return builtinValue(bf, k) }
-            if (hasOwn(bvArr, k) && jsIsArgs(o)) { return jsIsProtoName(k) ? jsProtoShim(o, k) : undefined }
+            if (hasOwn(bvArr, k) && jsIsArgs(o)) { return jsIsProtoName(k) ? jsProtoShim(k) : undefined }
         }
         // An arguments object's `length` is its own slot (jsIsArgs).
         if (argsWant && k === "length" && jsIsArgs(o)) { return jsArgsLen(o) }
@@ -5728,18 +5786,18 @@ NotFuncHead = :script(~~
         if (typeof o == "object" && o !== null && hasOwn(o, "__protoof")) {
             var pv = anytype // The descriptor chain's member, or undefined.
             pv = protoRead(o.__protoof, "" + k)
-            // A prototype view inherits Object.prototype's four as every object does.
-            if (pv === undefined && jsIsProtoName(k)) { return jsProtoShim(o, k) }
+            // A prototype view inherits Object.prototype's methods as every object does.
+            if (pv === undefined && jsIsProtoName(k)) { return jsProtoShim(k) }
             return pv
         }
         // isPrivateKey: a private METHOD lives on the class descriptor under '__#m', so
         // the __-name skip would hide it from the walk.
         if (typeof o == "object" && !Array.isArray(o) && typeof k == "string" &&
             (isPrivateKey(k) || !isInternalKey(k))) {
-            var cm = anytype // The method closure, or absent.
-            cm = findClassMethod(o, k)
-            if (cm != undefined) { return methodValueShim(cm, "" + k) }
-            if (jsIsProtoName(k) && !isClassDesc(o) && !isBigInt(o) && !rxIsRegexObj(o)) { return jsProtoShim(o, k) }
+            var cm = anytype // The inherited member, or absent.
+            cm = protoChainRead(o.__class, k)
+            if (cm !== undefined) { return cm }
+            if (jsIsProtoName(k) && !isClassDesc(o) && !isBigInt(o) && !rxIsRegexObj(o)) { return jsProtoShim(k) }
         }
         return v
     }
@@ -5751,12 +5809,12 @@ NotFuncHead = :script(~~
     // length is node's. Twins: staticValue in abnf/jsrtjsprint.go, jvStaticValue in
     // languages/lib/js-rt.metajs.
     var stVals = {}
-    var stNames = {"Object": ["assign", "entries", "freeze", "fromEntries", "getOwnPropertyNames", "getOwnPropertySymbols",
+    var stNames = {"Object": ["assign", "create", "entries", "freeze", "fromEntries", "getOwnPropertyNames", "getOwnPropertySymbols",
                               "groupBy", "hasOwn", "is", "keys", "seal", "values"],
                    "String": ["fromCharCode", "fromCodePoint", "raw"], "Promise": ["resolve", "reject", "all", "allSettled", "race", "any"],
                    "Array": ["isArray"], "Symbol": ["for", "keyFor"],
                    "Number": ["isFinite", "isInteger", "isNaN", "isSafeInteger", "parseFloat", "parseInt"]}
-    var stLen2 = ["assign", "is", "hasOwn", "groupBy", "parseInt"]
+    var stLen2 = ["assign", "create", "is", "hasOwn", "groupBy", "parseInt"]
     function staticValue(g, k) {
         var gn = ""
         if (g === jsObjectGlobal) { gn = "Object" }
@@ -5883,17 +5941,30 @@ NotFuncHead = :script(~~
             if (hasOwn(d, "__ctorfn")) { return d.__ctorfn }
             return d
         }
-        var guard = 0
-        for (var cl = d; cl != undefined && cl != null && guard < 64; cl = cl.__super) {
-            if (hasOwn(cl, k) && typeof cl[k] == "function") { return methodValueShim(cl[k], k) }
-            guard = guard + 1
-        }
+        var r = anytype // The inherited member, or undefined.
+        r = protoChainRead(d, k)
+        if (r !== undefined) { return r }
         if (k == "name" || k == "message") {
-            guard = 0
+            var guard = 0
             for (var ec = d; ec != undefined && ec != null && guard < 64; ec = ec.__super) {
                 if (hasOwn(ec, "__errname")) { return (k == "message") ? "" : ec.__errname }
                 guard = guard + 1
             }
+        }
+        return undefined
+    }
+    // A read that missed an object's own slots, along the prototype chain from
+    // descriptor cl up: at each level the class body's method, as its value, else an
+    // own property of that level's prototype view - which is how `B.prototype.x = 1`
+    // and Object.create's prototype object reach the objects below them. undefined
+    // when no level has one. Twins: jsvChainRead in abnf/jsrtjsprint.go, jvChainRead
+    // in languages/lib/js-rt.metajs.
+    function protoChainRead(cl, k) {
+        var guard = 0
+        for (; cl != undefined && cl != null && guard < 64; cl = cl.__super) {
+            if (hasOwn(cl, k) && typeof cl[k] == "function") { return methodValueShim(cl[k], k) }
+            if (hasOwn(cl, "__pview") && hasOwn(cl.__pview, k)) { return cl.__pview[k] }
+            guard = guard + 1
         }
         return undefined
     }
@@ -9079,7 +9150,13 @@ NotFuncHead = :script(~~
         }
         if (target != undefined && target != null && target.__class != undefined) {
             var m = undefined
-            for (var cl = target.__class; cl != undefined && m == undefined; cl = cl.__super) { if (hasOwn(cl, name)) m = cl[name] }
+            var pm = anytype // A function on a prototype view, which reads `this`.
+            pm = undefined
+            for (var cl = target.__class; cl != undefined && m == undefined && pm === undefined; cl = cl.__super) {
+                if (hasOwn(cl, name)) { m = cl[name] }
+                else if (hasOwn(cl, "__pview") && hasOwn(cl.__pview, name)) { pm = cl.__pview[name] }
+            }
+            if (typeof pm == "function") { return callWithThis(pm, target, args) }
             if (m == undefined) {
                 var pc = anytype // {v} or null.
                 pc = jsProtoCall(target, name, args)
@@ -9420,7 +9497,7 @@ NotFuncHead = :script(~~
     function superClass() {
         var cls = getVar("__class__")
         if (cls == undefined || cls == null) fail("super outside a class")
-        // A class with no heritage still has one: Object.prototype, whose four methods
+        // A class with no heritage still has one: Object.prototype, whose methods
         // superGet and makeSuperCall answer at the end of the chain.
         return cls.__super
     }
@@ -9459,7 +9536,7 @@ NotFuncHead = :script(~~
         // The chain ends at Object.prototype: `typeof super.toString` is "function"
         // in a class with no toString above it. Twins: js_jssupget in
         // abnf/jsrtjsprint.go and languages/lib/js-rt.metajs.
-        if (typeof self == "object" && !isClassDesc(self) && jsIsProtoName(k)) { return jsProtoShim(self, k) }
+        if (typeof self == "object" && !isClassDesc(self) && jsIsProtoName(k)) { return jsProtoShim(k) }
         // Nothing on the class chain is UNDEFINED, and deliberately not a read of the
         // receiver: node prints NaN for 'super.zz += 4' after 'super.zz = 3' (the store
         // lands on the receiver, the read does not see it).
@@ -9594,7 +9671,7 @@ NotFuncHead = :script(~~
             for (var cl = sup; cl != undefined && m == undefined; cl = cl.__super) { if (hasOwn(cl, name)) { m = cl[name] } }
             // node's wording: it has no source text for a super receiver either,
               // and prints "(intermediate value).<name>".
-            // ...and the chain ends at Object.prototype, whose four methods run on the
+            // ...and the chain ends at Object.prototype, whose methods run on the
             // receiver (`super.toString()` is "[object Object]"). Twin of
             // js_jssupproto in abnf/jsrtjsprint.go and languages/lib/js-rt.metajs.
             if (typeof m != "function" && !isClassDesc(self) && jsIsProtoName(name)) { return jsProtoApply(self, name, evalArgs(argThunks)) }

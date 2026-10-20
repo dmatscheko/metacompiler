@@ -2337,6 +2337,16 @@ NotFuncHead = :script(~~
         return "js_get"
     }
     // See the twin of this comment in js-to-llvm-ir.abnf.
+    function emitOldGet(b, objV, keyV) {
+        var v = callExt(b, memGetExt(), [objV, keyV])
+        var missB = curF.NewBlock("")
+        var joinB = curF.NewBlock("")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, v, handle(0)), missB, joinB)
+        var mv = callExt(missB, "js_jsvget", [objV, keyV])
+        missB.NewBr(joinB)
+        return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(mv, missB), llvm.ir.NewIncoming(v, b)])}
+    }
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function memSetExt() { return "js_jsmset" }
 
     if (nativeBuild) { core.indexExt = "js_jsmget" }
@@ -3715,7 +3725,11 @@ NotFuncHead = :script(~~
             } else {
                 p = emitRefPath(b, ref)
                 b = p.b
-                if (op != "=") { oldV = callExt(b, memGetExt(), [p.obj, p.key]) }
+                if (op != "=") {
+                    var og = emitOldGet(b, p.obj, p.key)
+                    b = og.b
+                    oldV = og.v
+                }
             }
             var r = valT(b)
             b = r.b
@@ -3747,7 +3761,9 @@ NotFuncHead = :script(~~
                 b = p.b
                 objV = p.obj
                 keyV = p.key
-                oldV = callExt(b, memGetExt(), [objV, keyV])
+                var og = emitOldGet(b, objV, keyV)
+                b = og.b
+                oldV = og.v
             }
             var assignB = curF.NewBlock("")
             var mergeB = curF.NewBlock("")
@@ -3790,8 +3806,9 @@ NotFuncHead = :script(~~
                 return {b: b, v: oldV}
             }
             var p = emitRefPath(b, ref)
-            b = p.b
-            var oldM = callExt(b, "js_jstonumeric", [callExt(b, memGetExt(), [p.obj, p.key])])
+            var og = emitOldGet(p.b, p.obj, p.key)
+            b = og.b
+            var oldM = callExt(b, "js_jstonumeric", [og.v])
             refMemberSet(b, ref, p.obj, p.key, callExt(b, "js_jsstep", [oldM, oneV]))
             return {b: b, v: oldM}
         }
@@ -3812,8 +3829,9 @@ NotFuncHead = :script(~~
                 return {b: b, v: newV}
             }
             var p = emitRefPath(b, ref)
-            b = p.b
-            var oldM = callExt(b, "js_jstonumeric", [callExt(b, memGetExt(), [p.obj, p.key])])
+            var og = emitOldGet(p.b, p.obj, p.key)
+            b = og.b
+            var oldM = callExt(b, "js_jstonumeric", [og.v])
             var newM = callExt(b, "js_jsstep", [oldM, oneV])
             refMemberSet(b, ref, p.obj, p.key, newM)
             return {b: b, v: newM}
@@ -4414,7 +4432,8 @@ NotFuncHead = :script(~~
                 keyV = emitStr(b, jsKeyEsc(f.dkey))
                 taken.push(jsKeyEsc(f.dkey))
             }
-            b = bindPattern(b, f.pat, callExt(b, memGetExt(), [valueH, keyV]), declExt)
+            var fg = emitOldGet(b, valueH, keyV)
+            b = bindPattern(fg.b, f.pat, fg.v, declExt)
         }
         return b
     }
@@ -5276,7 +5295,8 @@ NotFuncHead = :script(~~
             var scBadB = curF.NewBlock("")
             b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, scV, b.NewLoad(i64, mcallMissGlob())), scBadB, scOkB)
             // See the twin of this arm in js-to-llvm-ir.abnf.
-            if (name == "toString" || name == "valueOf" || name == "hasOwnProperty" || name == "propertyIsEnumerable") {
+            if (name == "toString" || name == "valueOf" || name == "hasOwnProperty" || name == "propertyIsEnumerable" ||
+                name == "isPrototypeOf" || name == "toLocaleString") {
                 var pV = callExt(scBadB, "js_jssupproto", [thisV, emitStr(scBadB, name), argsV])
                 var scEndB = curF.NewBlock("")
                 scBadB.NewBr(scEndB)

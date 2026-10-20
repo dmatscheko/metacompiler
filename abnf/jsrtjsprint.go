@@ -66,6 +66,12 @@ func (rt *jsrt) jsvCallMethod(o *jsObject, name string) (interface{}, bool) {
 		if m, ok := clsObj.props[name]; ok && isCallable(m) {
 			return rt.call(m, jsUndef, []interface{}{o}), true
 		}
+		// A function on a prototype view reads `this`, as an object literal's does.
+		if v, hasView := clsObj.props["__pview"].(*jsObject); hasView {
+			if m, ok := v.props[name]; ok && isCallable(m) {
+				return rt.call(m, o, nil), true
+			}
+		}
 		cls = clsObj.props["__super"]
 	}
 	if m, ok := o.props[name]; ok && isCallable(m) {
@@ -99,6 +105,54 @@ func jsvFindMethodFrom(cls interface{}, name string) (interface{}, bool) {
 	return nil, false
 }
 
+// jsvChainRead is a read that missed an object's own slots, along the prototype
+// chain from descriptor cls up: at each level the class body's method, as its value,
+// else an own property of that level's prototype view - which is how
+// `B.prototype.x = 1` and Object.create's prototype object reach the objects below
+// them. Twins: protoChainRead in both *-interpreter.abnf, jvChainRead in
+// languages/lib/js-rt.metajs.
+func jsvChainRead(cls interface{}, name string) (interface{}, bool) {
+	for guard := 0; cls != nil && guard < 64; guard++ {
+		d, ok := cls.(*jsObject)
+		if !ok {
+			break
+		}
+		if m, has := d.props[name]; has && isCallable(m) {
+			return jsvMethodValue(name, m), true
+		}
+		if v, hasView := d.props["__pview"].(*jsObject); hasView {
+			if pv, has := v.props[name]; has {
+				return pv, true
+			}
+		}
+		cls = d.props["__super"]
+	}
+	return nil, false
+}
+
+// jsvViewFn is the function a method CALL finds on a prototype view before any class
+// method of that name - a function on Object.create's prototype object - which is
+// called with `this` rather than with the receiver prepended. Twins: mcall in both
+// *-interpreter.abnf, jvFallbackCall in languages/lib/js-rt.metajs.
+func jsvViewFn(o *jsObject, name string) (interface{}, bool) {
+	for cls, guard := o.props["__class"], 0; cls != nil && guard < 64; guard++ {
+		d, ok := cls.(*jsObject)
+		if !ok {
+			break
+		}
+		if _, has := d.props[name]; has {
+			return nil, false
+		}
+		if v, hasView := d.props["__pview"].(*jsObject); hasView {
+			if pv, has := v.props[name]; has {
+				return pv, isCallable(pv)
+			}
+		}
+		cls = d.props["__super"]
+	}
+	return nil, false
+}
+
 // jsvIsStaticSide reports that a member read on this receiver must be answered from
 // the STATIC namespace and from nowhere else. A class descriptor's own property map
 // holds its INSTANCE methods, so falling back to it after a static miss is exactly
@@ -127,7 +181,7 @@ func jsvPrivateKey(k string) bool {
 // unwrapped against the receiver the read started from (node runs `static get g()`
 // with `this` bound to the SUBCLASS), and `name` last - every class object has one,
 // and it is the descriptor's __name unless a `static name` member shadows it.
-// Object.prototype's four methods are inherited by a class object too, so they read
+// Object.prototype's methods are inherited by a class object too, so they read
 // as the same shim js_jsmcall's class arm applies. Anything else is undefined, as
 // node says. Twins: jvStaticSideRead in languages/lib/js-rt.metajs, getMember's
 // static arm in both *-interpreter.abnf.
@@ -147,7 +201,7 @@ func (rt *jsrt) jsvStaticSideRead(o *jsObject, name string) uint64 {
 		}
 	}
 	if jsvIsProtoName(name) {
-		return rt.wrap(jsvProtoShim(o, name))
+		return rt.wrap(jsvProtoShim(name))
 	}
 	return jsHUndefined
 }
@@ -315,17 +369,16 @@ func (rt *jsrt) jsvStringRaw(args []interface{}) string {
 	return b.String()
 }
 
-// jsvIsProtoName names Object.prototype's four methods. No value here has the
-// prototype chain they are inherited through, so a call or a value read that finds no
-// member of one of these names is answered by jsvProtoApply. Twins: jsProtoApply in
-// both *-interpreter.abnf, jvProtoApply in languages/lib/js-rt.metajs.
+// jsvIsProtoName names Object.prototype's methods. No value here has the prototype
+// chain they are inherited through, so a call or a value read that finds no member of
+// one of these names is answered by jsvProtoApply. Twins: jsProtoApply in both
+// *-interpreter.abnf, jvProtoApply in languages/lib/js-rt.metajs.
 func jsvIsProtoName(name string) bool {
-	switch name {
-	case "toString", "valueOf", "hasOwnProperty", "propertyIsEnumerable":
-		return true
-	}
-	return false
+	_, ok := jsvProtoFns[name]
+	return ok
 }
+
+var jsvProtoNames = []string{"toString", "valueOf", "hasOwnProperty", "propertyIsEnumerable", "isPrototypeOf", "toLocaleString"}
 
 func (rt *jsrt) jsvProtoApply(recv interface{}, name string, args []interface{}) interface{} {
 	switch name {
@@ -335,22 +388,117 @@ func (rt *jsrt) jsvProtoApply(recv interface{}, name string, args []interface{})
 		return jsvPropEnum(recv, jsvKeyEsc(rt.toString(argAt(args, 0))))
 	case "toString":
 		return rt.jsvProtoTag(recv)
+	case "isPrototypeOf":
+		return jsvIsProtoOf(recv, argAt(args, 0))
+	case "toLocaleString":
+		// Invoke(this, "toString") (ECMA-262 20.1.3.5), which ToString performs.
+		return rt.jsvString(recv)
 	}
 	return recv
 }
 
-// jsvProtoShim is one of the four READ AS A VALUE off a plain object or an instance.
-// An explicit receiver wins over the read-time one, so `({}).toString.call([1])` is
-// "[object Array]" as in node.
-func jsvProtoShim(o *jsObject, name string) *hostFunc {
-	return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
-		var recv interface{} = o
-		if t := rt.unwrap(this); t != jsUndef {
-			recv = t
-		}
-		return rt.jsvProtoApply(recv, name, args)
-	})
+// jsvProtoLocaleOwn: a number's and an array's toLocaleString are their own
+// prototypes' (locale-formatted), which this engine does not have, so a call of one
+// is not answered by jsvProtoApply. Twins: jsProtoCall in both *-interpreter.abnf,
+// jvFallbackCall in languages/lib/js-rt.metajs.
+func jsvProtoLocaleOwn(recv interface{}, name string) bool {
+	if name != "toLocaleString" {
+		return false
+	}
+	switch recv.(type) {
+	case float64, *jsArray, *jsBigInt:
+		return true
+	}
+	return false
 }
+
+// jsvIsProtoOf is Object.prototype.isPrototypeOf: is p on v's prototype chain?
+// Object.prototype (marked __objproto) is on every object's; any other prototype is a
+// view, or an Object.create prototype object, held as __pview by a descriptor on the
+// chain. Twins: jsIsProtoOf in both *-interpreter.abnf, jvIsProtoOf in
+// languages/lib/js-rt.metajs.
+func jsvIsProtoOf(p, v interface{}) bool {
+	if !jsvIsObjLike(v) && !isCallable(v) {
+		return false
+	}
+	po, ok := p.(*jsObject)
+	if !ok {
+		return false
+	}
+	if _, isRoot := po.props["__objproto"]; isRoot {
+		return true
+	}
+	vo, ok := v.(*jsObject)
+	if !ok {
+		return false
+	}
+	cls := vo.props["__class"]
+	if d, isView := vo.props["__protoof"].(*jsObject); isView {
+		cls = d.props["__super"]
+	}
+	for guard := 0; cls != nil && guard < 64; guard++ {
+		d, ok := cls.(*jsObject)
+		if !ok {
+			break
+		}
+		if d.props["__pview"] == interface{}(po) {
+			return true
+		}
+		cls = d.props["__super"]
+	}
+	return false
+}
+
+// jsvObjCreate is Object.create(p): an object whose prototype is p. A class's
+// prototype view makes it an instance of that class whose constructor never ran. Any
+// other object becomes the view of a descriptor of its own, whose parent is p's own
+// class, so the read walk (jsvChainRead) reaches p's properties and then p's chain.
+// null gives a plain object, the nearest this value model has, and so do a function
+// and an array, whose own properties no view reaches. Twins: jsObjCreate in both
+// *-interpreter.abnf, jvObjCreate in languages/lib/js-rt.metajs.
+func (rt *jsrt) jsvObjCreate(p interface{}) *jsObject {
+	o := newJSObject()
+	po, isObj := p.(*jsObject)
+	switch {
+	case p == nil || p == interface{}(jsNull) || isCallable(p) || isClassDesc(p) || jsvIsObjectGlobal(p):
+		return o
+	case !isObj:
+		if _, isArr := p.(*jsArray); isArr {
+			return o
+		}
+		fallthrough
+	case jsvIsSym(p):
+		rt.bigRaise("TypeError: Object prototype may only be an Object or null: %s", rt.jsvString(p))
+	}
+	if d, isView := po.props["__protoof"].(*jsObject); isView {
+		o.set("__class", d)
+		return o
+	}
+	d := newJSObject()
+	d.set("__pview", po)
+	if c, has := po.props["__class"]; has {
+		d.set("__super", c)
+	}
+	o.set("__class", d)
+	return o
+}
+
+// jsvProtoFns are Object.prototype's methods READ AS A VALUE: one function per name,
+// the one Object.prototype holds, so `o.valueOf === o.valueOf` and
+// `o.valueOf === Object.prototype.valueOf` as in node. Each takes its receiver from
+// the call site.
+var jsvProtoFns = func() map[string]*hostFunc {
+	out := map[string]*hostFunc{}
+	for _, n := range jsvProtoNames {
+		name := n
+		out[name] = jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return rt.jsvProtoApply(rt.unwrap(this), name, args)
+		})
+	}
+	return out
+}()
+
+func jsvProtoShim(name string) *hostFunc { return jsvProtoFns[name] }
 
 // jsvPropEnum is propertyIsEnumerable: an own ENUMERABLE key, which is exactly
 // Object.keys - an array's `length`, an Error's `message` and a function's `name` are
@@ -400,7 +548,7 @@ func jsvObjProtoName(k string) bool {
 // Twins: stNames in both *-interpreter.abnf, jvStaticHas in
 // languages/lib/js-rt.metajs.
 var jsvStaticNames = map[string][]string{
-	"Object": {"assign", "entries", "freeze", "fromEntries", "getOwnPropertyNames", "getOwnPropertySymbols", "groupBy",
+	"Object": {"assign", "create", "entries", "freeze", "fromEntries", "getOwnPropertyNames", "getOwnPropertySymbols", "groupBy",
 		"hasOwn", "is", "keys", "seal", "values"},
 	"String":  {"fromCharCode", "fromCodePoint", "raw"},
 	"Promise": {"resolve", "reject", "all", "allSettled", "race", "any"},
@@ -410,7 +558,7 @@ var jsvStaticNames = map[string][]string{
 }
 
 // jsvStaticLen2: the statics whose node length is 2; every other one's is 1.
-var jsvStaticLen2 = []string{"assign", "is", "hasOwn", "groupBy", "parseInt"}
+var jsvStaticLen2 = []string{"assign", "create", "is", "hasOwn", "groupBy", "parseInt"}
 
 // jsvNumberConst: Number's constant members. Twins: jsNumberConst in both
 // *-interpreter.abnf, jvNumberConst in languages/lib/js-rt.metajs.
@@ -1395,6 +1543,11 @@ func jsvStaticEnumKeys(cls *jsObject) []string {
 // *-interpreter.abnf start scripts.
 func jsvConstructorOf(o *jsObject) (interface{}, bool) {
 	cls, ok := o.props["__class"].(*jsObject)
+	// The descriptor Object.create files for a plain prototype object is no class, so
+	// the nearest class above it answers.
+	for ok && !isClassDesc(cls) {
+		cls, ok = cls.props["__super"].(*jsObject)
+	}
 	if !ok {
 		return nil, false
 	}
@@ -2064,6 +2217,11 @@ func (rt *jsrt) jsvMethod(target interface{}, name string, args []interface{}) (
 				out.set(rt.jsvPropKey(rt.jsvGetKey(e, "0")), rt.jsvGetKey(e, "1"))
 			}
 			return out, true
+		case "create":
+			// A second argument (property descriptors) is not supported: the call misses.
+			if len(args) < 2 || args[1] == interface{}(jsUndef) {
+				return rt.jsvObjCreate(argAt(args, 0)), true
+			}
 		case "hasOwn":
 			if isUndefOrNull(argAt(args, 0)) {
 				rt.bigRaise("TypeError: Cannot convert undefined or null to object")
@@ -3202,8 +3360,8 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			}
 			return d
 		}
-		if fn, found := jsvFindMethodFrom(d, name); found {
-			return jsvMethodValue(name, fn)
+		if v, found := jsvChainRead(d, name); found {
+			return v
 		}
 		if name == "name" || name == "message" {
 			guard := 0
@@ -3420,24 +3578,15 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		o := newJSObject()
 		o.set("__jsobject", true)
 		// Object.prototype.toString.call(v) is the classic type probe. The root
-		// binding's `prototype` carries no methods, so this one does. The three members
-		// are the ones a program in this subset can reach; each reads its receiver from
-		// the call's `this`, which is what Function.prototype.call passes. Twins:
-		// js_jsobject in languages/lib/js-rt.metajs and jsObjectProto in both
-		// *-interpreter.abnf start scripts.
+		// binding's `prototype` carries no methods, so this one does: the jsvProtoFns,
+		// which read their receiver from the call's `this`. __objproto marks it for
+		// isPrototypeOf. Twins: js_jsobject in languages/lib/js-rt.metajs and
+		// jsObjectProto in both *-interpreter.abnf start scripts.
 		proto := newJSObject()
-		proto.set("toString", jsHostFunc("toString", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			return rt.jsvProtoTag(u(this))
-		}))
-		proto.set("valueOf", jsHostFunc("valueOf", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			return u(this)
-		}))
-		proto.set("hasOwnProperty", jsHostFunc("hasOwnProperty", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			return rt.jsvHasOwn(u(this), rt.toString(argAt(args, 0)))
-		}))
-		proto.set("propertyIsEnumerable", jsHostFunc("propertyIsEnumerable", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			return jsvPropEnum(u(this), rt.toString(argAt(args, 0)))
-		}))
+		proto.props["__objproto"] = true
+		for _, n := range jsvProtoNames {
+			proto.set(n, jsvProtoFns[n])
+		}
 		// Unlisted, so Object.keys(Object) is [] as in node (jsvGopnKeys lists it).
 		o.props["prototype"] = proto
 		return w(o)
@@ -3739,6 +3888,9 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			if f := staticValue(u(a[0]), rt.toString(u(a[1]))); f != nil {
 				return w(f)
 			}
+			if name := rt.toString(u(a[1])); isCallable(u(a[0])) && jsvIsProtoName(name) {
+				return w(jsvProtoShim(name))
+			}
 			if rt.toString(u(a[1])) == "prototype" {
 				if p := builtinProto(u(a[0])); p != nil {
 					return w(p)
@@ -3777,8 +3929,8 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 				return w(c)
 			}
 		}
-		if fn, found := jsvFindClassMethod(recv, name); found {
-			return w(jsvMethodValue(name, fn))
+		if v, found := jsvChainRead(recv.props["__class"], name); found {
+			return w(v)
 		}
 		return r
 	}
@@ -3802,10 +3954,10 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		if f := jsvArgsIterFn(u(a[0]), rt.toString(u(a[1]))); f != nil {
 			return w(f)
 		}
-		// Object.prototype's four methods, off a plain object or an instance.
+		// Object.prototype's methods, off a plain object or an instance.
 		if recv, isObj := u(a[0]).(*jsObject); isObj && !isClassDesc(recv) && !rxIsRegexObj(recv) {
 			if name := rt.toString(u(a[1])); jsvIsProtoName(name) {
-				return w(jsvProtoShim(recv, name))
+				return w(jsvProtoShim(name))
 			}
 		}
 		return r
@@ -4021,7 +4173,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		// it. Twins: js_jssupget in languages/lib/js-rt.metajs, superGet in both
 		// *-interpreter.abnf.
 		if o, isObj := self.(*jsObject); isObj && !isClassDesc(o) && jsvIsProtoName(name) {
-			return w(jsvProtoShim(o, name))
+			return w(jsvProtoShim(name))
 		}
 		return jsHUndefined
 	}
@@ -4309,7 +4461,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		// and the shared js_mcall below would find the descriptor's own property of
 		// that name, which is its INSTANCE method. Answer the miss sentinel so the
 		// call site raises node's "C.m is not a function" instead. Object.prototype's
-		// four methods are the exception: a class object inherits them too.
+		// methods are the exception: a class object inherits them too.
 		if _, isStatic := jsvIsStaticSide(u(a[0]), rt.toString(u(a[1]))); isStatic {
 			if name := rt.toString(u(a[1])); jsvIsProtoName(name) {
 				return w(rt.jsvProtoApply(u(a[0]), name, arr.elems))
@@ -4318,13 +4470,19 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 				return w(v)
 			}
 		}
-		// Object.prototype's four methods on a receiver with no member of that name
+		if o, isObj := u(a[0]).(*jsObject); isObj {
+			if fn, found := jsvViewFn(o, rt.toString(u(a[1]))); found {
+				return w(rt.call(fn, o, arr.elems))
+			}
+		}
+		// Object.prototype's methods on a receiver with no member of that name
 		// (jsvProtoApply). A RegExp is left to js_jsxmcall below, which answers its
 		// toString. Twins: jvFallbackCall in languages/lib/js-rt.metajs, mcall in both
 		// *-interpreter.abnf.
 		// (An Array's valueOf reads as a builtin value - jsvBuiltinFam - and is still
 		// Object.prototype's here.)
 		if name := rt.toString(u(a[1])); jsvIsProtoName(name) && !isUndefOrNull(u(a[0])) && !rxIsRegexObj(u(a[0])) &&
+			!jsvProtoLocaleOwn(u(a[0]), name) &&
 			(jsvBuiltinFam(u(a[0]), name) != 0 || isUndefOrNull(u(vget([]uint64{a[0], a[1]})))) {
 			return w(rt.jsvProtoApply(u(a[0]), name, arr.elems))
 		}

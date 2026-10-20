@@ -4317,6 +4317,43 @@ function s90() {
     check("pa90d", P90.h(7) === 70 && new P90().i(3) === 3);
 }
 
+// ===== SECTION 91: inherited data properties, Object.create, Object.prototype's methods as values =====
+// A property written onto a prototype is read through every object below it, by a
+// plain read, a compound assignment and a destructuring pattern alike, until an own
+// property shadows it. Object.create(p) makes an object whose prototype is p.
+// Object.prototype's methods read as values are the very functions Object.prototype
+// holds. Values read off node 24.
+class A91 { m(): string { return "m" } }
+class B91 extends A91 {}
+class K91 {}
+function s91() {
+    (A91.prototype as any).x = 1;
+    (B91.prototype as any).y = 2;
+    const a: any = new A91(), b: any = new B91();
+    check("ip91a", a.x === 1 && b.x === 1 && b.y === 2 && a.y === undefined && !b.hasOwnProperty("x") && "x" in b);
+    a.x = 5;
+    (A91.prototype as any).x = 7;
+    const b2: any = new B91();
+    b2.x += 10;
+    const b3: any = new B91();
+    b3.x++;
+    const { x: dx, y: dy }: any = new B91();
+    check("ip91b", a.x === 5 && b.x === 7 && b2.x === 17 && b3.x === 8 && dx === 7 && dy === 2);
+    const base: any = { p: 1, hello() { return "hello " + this.n } };
+    const o: any = Object.create(base);
+    o.n = "o";
+    const o2: any = Object.create(o);
+    check("oc91c", o.p === 1 && o.hello() === "hello o" && Object.keys(o).join() === "n" && !o.hasOwnProperty("p") &&
+        o2.p === 1 && o2.hello() === "hello o");
+    const ia: any = Object.create(A91.prototype);
+    check("oc91d", ia.x === 7 && ia.m() === "m" && ia instanceof A91 && ia.constructor === A91 &&
+        typeof Object.create === "function" && Object.create.length === 2);
+    check("pm91e", typeof K91.isPrototypeOf === "function" && typeof K91.toLocaleString === "function" &&
+        K91.valueOf === K91.valueOf && a.toString === Object.prototype.toString &&
+        A91.prototype.isPrototypeOf(b) && !B91.prototype.isPrototypeOf(a) && base.isPrototypeOf(o2) &&
+        ({}).toLocaleString() === "[object Object]");
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -4410,6 +4447,7 @@ function main(): number {
     s88(); // SECTION-CALL 88
     s89(); // SECTION-CALL 89
     s90(); // SECTION-CALL 90
+    s91(); // SECTION-CALL 91
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

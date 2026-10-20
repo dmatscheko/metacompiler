@@ -881,14 +881,24 @@ function jvUndefOrNull(v) {
 // jsvCallMethod (abnf/jsrtjsprint.go): run o's own `name` method if it has one.
 // The two places a method can live take DIFFERENT calling conventions - a class
 // method sits on the __class descriptor and gets the receiver PREPENDED, an
-// object-literal method is an ordinary closure that reads `this`. Answers jvMiss
-// when there is no such method, so the "handled" flag needs no global.
+// object-literal method is an ordinary closure that reads `this`, and so is a function
+// on a prototype view. Answers jvMiss when there is no such method, so the "handled"
+// flag needs no global.
 
 function jvCallMethod(o, name) {
     var cls = o["__class"]
     while (jvIsObj(cls)) {
         var m = cls[name]
         if (jvIsCallable(m)) { return jvCallT(m, undefined, [o]) }
+        if (jvPvN > 0) {
+            var pv = anytype
+            pv = cls["__pview"]
+            if (pv !== undefined) {
+                var vm = anytype
+                vm = pv[name]
+                if (jvIsCallable(vm)) { return jvCallT(vm, o, []) }
+            }
+        }
         cls = cls["__super"]
     }
     var own = o[name]
@@ -1555,6 +1565,9 @@ function jvStaticEnumKeys(cls) {
 function jvConstructorOf(o) {
     var cls = anytype
     cls = o["__class"]
+    // The descriptor Object.create files for a plain prototype object is no class, so
+    // the nearest class above it answers.
+    while (jvIsObj(cls) && cls["__isclass"] !== true) { cls = cls["__super"] }
     if (!jvIsObj(cls)) { return undefined }
     var fn = anytype
     fn = cls["__ctorfn"]
@@ -1619,8 +1632,8 @@ function jvStaticSideRead(o, k) {
     if (jvIsAcc(v)) { return jvAccGet(v, o) }
     if (v !== undefined) { return v }
     if (k == "name") { return o["__name"] }
-    // A class object inherits Object.prototype's four methods too.
-    if (jvIsProtoName(k)) { return jvProtoShim(o, k) }
+    // A class object inherits Object.prototype's methods too.
+    if (jvIsProtoName(k)) { return jvProtoShim(k) }
     return undefined
 }
 
@@ -2200,20 +2213,28 @@ function jvValueMiss(o, key) {
         if (jvPvN > 0) {
             var pd = anytype
             pd = o["__protoof"]
-            if (pd !== undefined) { return jvViewRead(o, pd, key) }
+            if (pd !== undefined) { return jvViewRead(pd, key) }
         }
         if (jvIsObjectGlobal(o)) { return jvStaticValue(o, key) }
         if (key == "description") {
             if (o["__symkey"] !== undefined) { return o["__symdesc"] }
         }
         if (key.length < 2 || key.substring(0, 2) != "__" || jvIsPrivateKey(key)) {
-            var fn = jvFindClassMethod(o, key)
-            if (fn !== undefined) { return jvMethodValue(fn, key) }
-            // Object.prototype's four methods.
+            // With no prototype view in the program no level can hold a property, and
+            // the walk is for a method alone.
+            if (jvPvN > 0) {
+                var cv = anytype
+                cv = jvChainRead(o["__class"], key)
+                if (cv !== undefined) { return cv }
+            } else {
+                var fn = jvFindClassMethod(o, key)
+                if (fn !== undefined) { return jvMethodValue(fn, key) }
+            }
+            // Object.prototype's methods.
             if (jvIsProtoName(key)) {
                 if (!jvIsClassDesc(o)) {
                     if (!jbIsBig(o)) {
-                        if (!jxIsRe(o)) { return jvProtoShim(o, key) }
+                        if (!jxIsRe(o)) { return jvProtoShim(key) }
                     }
                 }
             }
@@ -2232,6 +2253,10 @@ function jvValueMiss(o, key) {
             if (jvIsArgs(o)) { return jvSeqIterFn(o) }
         }
     }
+    // A function's other two Object.prototype methods (jvFnMethod answers four).
+    if (key == "isPrototypeOf" || key == "toLocaleString") {
+        if (jvIsCallable(o)) { return jvProtoShim(key) }
+    }
     return jvStaticValue(o, key)
 }
 
@@ -2243,7 +2268,7 @@ function jvValueMiss(o, key) {
 var jvStaticVals = {}
 function jvStaticHas(g, key) {
     if (g == "Object") {
-        return key == "assign" || key == "entries" || key == "freeze" || key == "fromEntries" ||
+        return key == "assign" || key == "create" || key == "entries" || key == "freeze" || key == "fromEntries" ||
             key == "getOwnPropertyNames" || key == "getOwnPropertySymbols" || key == "groupBy" || key == "hasOwn" ||
             key == "is" || key == "keys" || key == "seal" || key == "values"
     }
@@ -2284,7 +2309,7 @@ function jvStaticValue(g, key) {
     got = jvStaticVals[k]
     if (got !== undefined) { return got }
     var len = 1
-    if (key == "assign" || key == "is" || key == "hasOwn" || key == "groupBy" || key == "parseInt") { len = 2 }
+    if (key == "assign" || key == "create" || key == "is" || key == "hasOwn" || key == "groupBy" || key == "parseInt") { len = 2 }
     var f = anytype
     f = fnMetaSet(jvStaticValueFn(g, key), key, len)
     jvStaticVals[k] = f
@@ -2387,12 +2412,35 @@ function jvProtoGopn(view, d) {
     return out
 }
 // A value read that missed a prototype view's own slots: the descriptor chain's
-// member, else Object.prototype's four, which the view inherits as every object does.
-function jvViewRead(view, d, key) {
+// member, else Object.prototype's methods, which the view inherits as every object does.
+function jvViewRead(d, key) {
     var r = anytype
     r = jvProtoRead(d, key)
-    if (r === undefined) { if (jvIsProtoName(key)) { return jvProtoShim(view, key) } }
+    if (r === undefined) { if (jvIsProtoName(key)) { return jvProtoShim(key) } }
     return r
+}
+// A read that missed an object's own slots, along the prototype chain from descriptor
+// cls up: at each level the class body's method, as its value, else an own property
+// of that level's prototype view - which is how `B.prototype.x = 1` and
+// Object.create's prototype object reach the objects below them. Twins: jsvChainRead
+// in abnf/jsrtjsprint.go, protoChainRead in both *-interpreter.abnf.
+function jvChainRead(cls, key) {
+    var guard = 0
+    while (jvIsObj(cls) && guard < 64) {
+        var m = anytype
+        m = cls[key]
+        if (jvIsCallable(m)) { return jvMethodValue(m, key) }
+        var pv = anytype
+        pv = cls["__pview"]
+        if (pv !== undefined) {
+            var dv = anytype
+            dv = pv[key]
+            if (dv !== undefined) { return dv }
+        }
+        cls = cls["__super"]
+        guard = guard + 1
+    }
+    return undefined
 }
 function jvProtoRead(d, key) {
     if (key == "constructor") {
@@ -2401,19 +2449,13 @@ function jvProtoRead(d, key) {
         if (cf !== undefined) { return cf }
         return d
     }
-    var cls = anytype
-    cls = d
-    var guard = 0
-    while (jvIsObj(cls) && guard < 64) {
-        var m = anytype
-        m = cls[key]
-        if (jvIsCallable(m)) { return jvMethodValue(m, key) }
-        cls = cls["__super"]
-        guard = guard + 1
-    }
+    var r = anytype
+    r = jvChainRead(d, key)
+    if (r !== undefined) { return r }
     if (key == "name" || key == "message") {
+        var cls = anytype
         cls = d
-        guard = 0
+        var guard = 0
         while (jvIsObj(cls) && guard < 64) {
             var en = anytype
             en = cls["__errname"]
@@ -2801,7 +2843,7 @@ function js_jssupget(sup, self, key) {
     if (v === undefined) {
         if (jvIsObj(self)) {
             if (!jvIsClassDesc(self)) {
-                if (jvIsProtoName(jvStr(key))) { return jvProtoShim(self, jvStr(key)) }
+                if (jvIsProtoName(jvStr(key))) { return jvProtoShim(jvStr(key)) }
             }
         }
     }
@@ -3242,16 +3284,18 @@ function js_jsspreadkeys(o) {
 function js_jsobject() {
     var o = {}
     o["__jsobject"] = true
-    // Object.prototype.toString.call(v) is the classic type probe. The three members
-    // are the ones a program in this subset can reach; each takes its receiver from
-    // js_this(), which jvCallShim arms - and that is why they can be ordinary MetaJS
-    // closures. Twins: js_jsobject in abnf/jsrtjsprint.go and jsObjectProto in both
-    // *-interpreter.abnf start scripts.
+    // Object.prototype.toString.call(v) is the classic type probe. Its members are the
+    // jvProtoShim functions, which take their receiver from js_this(). Twins:
+    // js_jsobject in abnf/jsrtjsprint.go and jsObjectProto in both *-interpreter.abnf
+    // start scripts.
     var proto = {}
-    proto["toString"] = function () { return jvProtoTag(js_this()) }
-    proto["valueOf"] = function () { return js_this() }
-    proto["hasOwnProperty"] = function (k) { return jvHasOwn(js_this(), k) }
-    proto["propertyIsEnumerable"] = function (k) { return jvPropEnum(js_this(), k) }
+    proto["toString"] = jvProtoShim("toString")
+    proto["valueOf"] = jvProtoShim("valueOf")
+    proto["hasOwnProperty"] = jvProtoShim("hasOwnProperty")
+    proto["propertyIsEnumerable"] = jvProtoShim("propertyIsEnumerable")
+    proto["isPrototypeOf"] = jvProtoShim("isPrototypeOf")
+    proto["toLocaleString"] = jvProtoShim("toLocaleString")
+    jvObjProto = proto
     o["prototype"] = proto
     return o
 }
@@ -3348,37 +3392,88 @@ function js_jsheritage(v) {
     return jvObjectRoot
 }
 
-// Object.prototype's four methods, applied to a receiver. No value here has the
-// prototype chain they are inherited through, so a call or a value read that finds
-// no member of one of these names lands here. Twins: jsvProtoApply in
-// abnf/jsrtjsprint.go, jsProtoApply in both *-interpreter.abnf.
-function jvIsProtoName(k) {
-    if (k == "toString") { return true }
-    if (k == "valueOf") { return true }
-    if (k == "hasOwnProperty") { return true }
-    return k == "propertyIsEnumerable"
+// Object.prototype's methods, applied to a receiver. No value here has the prototype
+// chain they are inherited through, so a call or a value read that finds no member of
+// one of these names lands here. Twins: jsvProtoApply in abnf/jsrtjsprint.go,
+// jsProtoApply in both *-interpreter.abnf.
+// One table lookup: the miss path of every member read asks this, and six string
+// comparisons cost it more than the lookup does.
+function jvProtoNameTable() {
+    var t = {}
+    t["toString"] = true
+    t["valueOf"] = true
+    t["hasOwnProperty"] = true
+    t["propertyIsEnumerable"] = true
+    t["isPrototypeOf"] = true
+    t["toLocaleString"] = true
+    return t
 }
+var jvProtoNames = jvProtoNameTable()
+function jvIsProtoName(k) { return jvProtoNames[k] === true }
 function jvProtoApply(recv, name, args) {
     if (name == "hasOwnProperty") { return jvHasOwn(recv, jvArg(args, 0)) }
     if (name == "propertyIsEnumerable") { return jvPropEnum(recv, jvArg(args, 0)) }
     if (name == "toString") { return jvProtoTag(recv) }
+    if (name == "isPrototypeOf") { return jvIsProtoOf(recv, jvArg(args, 0)) }
+    // Invoke(this, "toString") (ECMA-262 20.1.3.5), which ToString performs.
+    if (name == "toLocaleString") { return jvStr(recv) }
     return recv
 }
-// One of the four READ AS A VALUE off a plain object or an instance. An explicit
-// receiver wins over the read-time one, so `({}).toString.call([1])` is
-// "[object Array]" as in node.
-function jvProtoShim(o, name) {
+// A number's and an array's toLocaleString are their own prototypes'
+// (locale-formatted), which this engine does not have, so a call of one is not
+// answered by jvProtoApply. Twin: jsvProtoLocaleOwn in abnf/jsrtjsprint.go.
+function jvProtoLocaleOwn(recv, name) {
+    if (name != "toLocaleString") { return false }
+    if (typeof recv == "number") { return true }
+    if (Array.isArray(recv)) { return true }
+    return jbIsBig(recv)
+}
+// The Object.prototype object js_jsobject built, for isPrototypeOf.
+var jvObjProto = anytype
+// Object.prototype.isPrototypeOf: is p on v's prototype chain? Object.prototype is on
+// every object's; any other prototype is a view, or an Object.create prototype
+// object, held as __pview by a descriptor on the chain. Twins: jsvIsProtoOf in
+// abnf/jsrtjsprint.go, jsIsProtoOf in both *-interpreter.abnf.
+function jvIsProtoOf(p, v) {
+    if (jbIsBig(v)) { return false }
+    if (!jvIsObj(v)) { return (jvIsCallable(v) || Array.isArray(v)) && p === jvObjProto }
+    if (p === jvObjProto) { return true }
+    if (!jvIsObj(p)) { return false }
+    var cls = anytype
+    cls = v["__class"]
+    var pd = anytype
+    pd = v["__protoof"]
+    if (pd !== undefined) { cls = pd["__super"] }
+    var guard = 0
+    while (jvIsObj(cls) && guard < 64) {
+        if (cls["__pview"] === p) { return true }
+        cls = cls["__super"]
+        guard = guard + 1
+    }
+    return false
+}
+// One of them READ AS A VALUE: one function per name, the one Object.prototype holds,
+// so `o.valueOf === o.valueOf` and `o.valueOf === Object.prototype.valueOf` as in
+// node. It takes its receiver from the call site.
+var jvProtoFns = {}
+function jvProtoShim(name) {
+    var k = "$" + name
+    var f = anytype
+    f = jvProtoFns[k]
+    if (f !== undefined) { return f }
+    f = jvProtoFn(name)
+    jvProtoFns[k] = f
+    return f
+}
+function jvProtoFn(name) {
     return function () {
-        var recv = anytype
-        recv = js_this()
-        if (recv === undefined) { recv = o }
         var a = []
         var i = 0
         while (i < arguments.length) {
             a.push(arguments[i])
             i = i + 1
         }
-        return jvProtoApply(recv, name, a)
+        return jvProtoApply(js_this(), name, a)
     }
 }
 // propertyIsEnumerable: an own ENUMERABLE key, which is exactly Object.keys - an
@@ -4427,8 +4522,42 @@ function jvNumMethod(x, name, args) {
 
 // ===================================================== the Object statics ==
 
+// Object.create(p): an object whose prototype is p. A class's prototype view makes it
+// an instance of that class whose constructor never ran. Any other object becomes the
+// view of a descriptor of its own, whose parent is p's own class, so the read walk
+// (jvChainRead) reaches p's properties and then p's chain. null gives a plain object,
+// the nearest this value model has, and so do a function and an array, whose own
+// properties no view reaches. Twins: jsvObjCreate in abnf/jsrtjsprint.go, jsObjCreate
+// in both *-interpreter.abnf.
+function jvObjCreate(p) {
+    var o = {}
+    if (p === null) { return o }
+    if (jvIsCallable(p) || Array.isArray(p) || jvIsClassDesc(p) || jvIsObjectGlobal(p)) { return o }
+    var bad = !jvIsObj(p) || jbIsBig(p)
+    if (!bad) { bad = p["__symkey"] !== undefined }
+    if (bad) { jbRaise("TypeError: Object prototype may only be an Object or null: " + jvStr(p)) }
+    var pd = anytype
+    pd = p["__protoof"]
+    if (pd !== undefined) {
+        o["__class"] = pd
+        return o
+    }
+    var d = {}
+    d["__pview"] = p
+    var pc = anytype
+    pc = p["__class"]
+    if (pc !== undefined) { d["__super"] = pc }
+    jvPvN = jvPvN + 1
+    o["__class"] = d
+    return o
+}
+
 function jvObjectGlobalMethod(name, args) {
     var src = jvArg(args, 0)
+    // A second argument (property descriptors) is not supported: the call misses.
+    if (name == "create") {
+        if (jvArg(args, 1) === undefined) { return jvObjCreate(src) }
+    }
     // The symbols of the own symbol keys, in the order they were first written.
     if (name == "getOwnPropertySymbols") {
         if (jvUndefOrNull(src)) { jbRaise("TypeError: Cannot convert undefined or null to object") }
@@ -4745,6 +4874,17 @@ function jvFallbackCall(recv, name, args) {
             while (jvIsObj(cls)) {
                 var m = cls[name]
                 if (jvIsCallable(m)) { return jvCallT(m, recv, jvPrepend(recv, args)) }
+                // A function on a prototype view (Object.create's prototype object)
+                // reads `this`, as an object literal's method does.
+                if (jvPvN > 0) {
+                    var pv = anytype
+                    pv = cls["__pview"]
+                    if (pv !== undefined) {
+                        var vm = anytype
+                        vm = pv[name]
+                        if (jvIsCallable(vm)) { return jvCallT(vm, recv, args) }
+                    }
+                }
                 cls = cls["__super"]
             }
             // An accessor whose value is callable is still reachable as a method.
@@ -4753,8 +4893,8 @@ function jvFallbackCall(recv, name, args) {
                 var av = jvAccGet(acc, recv)
                 if (jvIsCallable(av)) { return jvCallT(av, recv, args) }
             }
-            // Object.prototype's four methods (jvProtoApply). Twin of the js_jsmcall
-            // arm in abnf/jsrtjsprint.go.
+            // Object.prototype's methods (jvProtoApply). Twin of the js_jsmcall arm in
+            // abnf/jsrtjsprint.go.
             if (jvIsProtoName(name)) {
                 if (recv[name] === undefined) { return jvProtoApply(recv, name, args) }
             }
@@ -4768,7 +4908,9 @@ function jvFallbackCall(recv, name, args) {
     if (jvIsCallable(own)) { return jvCallT(own, recv, args) }
     if (jvIsProtoName(name)) {
         if (own === undefined) {
-            if (!jvUndefOrNull(recv)) { return jvProtoApply(recv, name, args) }
+            if (!jvUndefOrNull(recv)) {
+                if (!jvProtoLocaleOwn(recv, name)) { return jvProtoApply(recv, name, args) }
+            }
         }
     }
     if (jvMissCallSet) { return jvMissCall }
@@ -4813,7 +4955,7 @@ function js_jsmcall(recv, key, args) {
     // reaching this line means the name is not one - and jvFallbackCall below would
     // find the descriptor's own property of that name, which is its INSTANCE method.
     // The sentinel makes the call site raise node's "C.m is not a function" instead.
-    // Object.prototype's four methods are the exception: a class object inherits
+    // Object.prototype's methods are the exception: a class object inherits
     // them too.
     if (jvClsN > 0) {
         if (jvIsStaticSide(recv, name)) {
