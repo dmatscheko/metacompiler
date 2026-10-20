@@ -78,12 +78,12 @@ astral letter may differ between engines (probe first).
 
 # JS — JavaScript and TypeScript
 
-### T-669 js: primitive wrapper objects (`new Number(7)`, `Object(7)`, `({}).valueOf.call(7)`) · P2 · JS · OPEN [V]
+### T-669 js: primitive wrapper objects (`new Number(7)`, `Object(7)`, `({}).valueOf.call(7)`) · P2 · JS · IN PROGRESS (JS worker, round 14) [V]
 All engines: `new Number(7)` → empty object, `Object(7)` → "Object is not a function", `({}).valueOf.call(7)` → a number (node: `object 8`
 for `typeof x, x+1` on all three). Needs a wrapper value kind in all five engines: ToPrimitive, method dispatch on the box,
 Object.prototype.toString tag, JSON, instanceof. Number.prototype.toFixed (via `Number.prototype`) → "is not a function".
 
-### T-670 js: defineProperty writable/configurable; getOwnPropertyNames of non-enumerables; Function/Boolean.prototype; String of a null-proto object · P3 · JS · OPEN [V]
+### T-670 js: defineProperty writable/configurable; getOwnPropertyNames of non-enumerables; Function/Boolean.prototype; String of a null-proto object · P3 · JS · IN PROGRESS (JS worker, round 14) [V]
 `Object.defineProperty(o,"x",{value:1}); o.x=2; o.x` → 2 (node sloppy 1). `Object.getOwnPropertyNames` omits a defineProperty'd
 non-enumerable key (node lists it). `Object.getPrototypeOf(function(){})` / `(true)` → undefined (node Function.prototype /
 Boolean.prototype). `String(Object.create(null))` → "[object Object]" (node TypeError "Cannot convert object to primitive value").
