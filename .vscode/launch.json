@@ -2656,6 +2656,30 @@
             "program": "${workspaceFolder}","args": ["languages/js-to-llvm-ir.abnf", "tests/js-fail-test-leading-zero-bigint.js", "-q"]
         },
         {
+            "name": "JavaScript interpreter doubled or trailing numeric separator SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/js-interpreter.abnf", "tests/js-fail-test-numeric-separator.js", "-q"]
+        },
+        {
+            "name": "JavaScript compiler doubled or trailing numeric separator SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/js-to-llvm-ir.abnf", "tests/js-fail-test-numeric-separator.js", "-q"]
+        },
+        {
+            "name": "TypeScript interpreter doubled or trailing numeric separator SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/typescript-interpreter.abnf", "tests/typescript-fail-test-numeric-separator.ts", "-q"]
+        },
+        {
+            "name": "TypeScript compiler doubled or trailing numeric separator SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/typescript-to-llvm-ir.abnf", "tests/typescript-fail-test-numeric-separator.ts", "-q"]
+        },
+        {
             "name": "Ruby abort probe, raise (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",

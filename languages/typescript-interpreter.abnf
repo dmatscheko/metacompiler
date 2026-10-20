@@ -1406,8 +1406,14 @@ TplTypeDollar = "$" ;
 LitType     = TypeStrLit | TypeNumLit | "true" KwEnd | "false" KwEnd | "null" KwEnd | "undefined" KwEnd ;
 TypeStrLit  = '"' :whitespace() { JsStrEsc | JsDqPlain } '"' :whitespace(Whitespace)
             | "'" :whitespace() { JsStrEsc | JsSqPlain } "'" :whitespace(Whitespace) ;
-TypeNumLit  = [ "-" | "+" ] ( "0x" | "0X" ) :whitespace() HexDigit { HexDigit } KwEnd :whitespace(Whitespace)
-            | [ "-" | "+" ] Digit :whitespace() { Digit | "_" } [ "." { Digit } ] [ DecExp ] [ "n" ] KwEnd :whitespace(Whitespace) ;
+TypeNumLit  = [ "-" | "+" ] TypeNumTok ;
+// The numeric literal forms of NumberLit, matched without a value.
+TypeNumTok  = ( "0x" | "0X" ) :whitespace() HexDigit { SepHexDigit } [ "n" ] KwEnd :whitespace(Whitespace)
+            | ( "0b" | "0B" ) :whitespace() BinDigit { SepBinDigit } [ "n" ] KwEnd :whitespace(Whitespace)
+            | ( "0o" | "0O" ) :whitespace() OctDigit { SepOctDigit } [ "n" ] KwEnd :whitespace(Whitespace)
+            | Digit :whitespace() NotLegacyNumeric { SepDigit } "n" KwEnd :whitespace(Whitespace)
+            | Digit :whitespace() NotLegacyNumeric { SepDigit } [ "." [ DecDigits ] ] [ DecExp ] KwEnd :whitespace(Whitespace)
+            | "." :whitespace() DecDigits [ DecExp ] KwEnd :whitespace(Whitespace) ;
 
 Null        <~~ push(makeConst(null)) ~~>      = "null" KwEnd ;
 Undefined   <~~ push(makeConst(undefined)) ~~> = "undefined" KwEnd ;
@@ -1443,52 +1449,50 @@ JsCpPlane16 = "1" "0" HexDigit HexDigit HexDigit HexDigit ;
 JsCpUpTo5   = HexNonZero [ HexDigit ] [ HexDigit ] [ HexDigit ] [ HexDigit ] ;
 HexNonZero  = "1"..."9" | "a"..."f" | "A"..."F" ;
 
-// The numeric literals: hex, binary, octal, BigInt, a decimal with numeric separators,
-// the plain decimal and the leading-dot form. Hex/binary/octal must be tried before the
-// decimal, otherwise '0x1A' would stop after the '0'; BigInt before the decimal so its
-// 'n' suffix is not orphaned. Every one of them ends in KwEnd: a literal may not be glued
-// to an identifier char, so '0b1a', '3x' and '0o9' are syntax errors instead of a
-// literal followed by a second, semicolon-less statement. A leading '0' followed by a
-// digit or a '_' is refused by NotLegacyNumeric.
-NumberLit   = HexLit | BinLit | OctLit | BigIntLit | SepNumLit | JsDecLit | DotDecLit ;
+// The numeric literals: hex, binary, octal, BigInt, the decimal and the leading-dot
+// form. Hex/binary/octal must be tried before the decimal, otherwise '0x1A' would stop
+// after the '0'; BigInt before the decimal so its 'n' suffix is not orphaned. Every one
+// of them ends in KwEnd: a literal may not be glued to an identifier char, so '0b1a',
+// '3x' and '0o9' are syntax errors instead of a literal followed by a second,
+// semicolon-less statement. A leading '0' followed by a digit or a '_' is refused by
+// NotLegacyNumeric: tsc rejects JavaScript's legacy '01' and '08' forms (TS1121,
+// TS1489). A numeric separator '_' may only stand between two digits of one run
+// (SepDigit); see the twin of this comment in js-interpreter.abnf.
+NumberLit   = HexLit | BinLit | OctLit | BigIntLit | JsDecLit | DotDecLit ;
 
-// Hex must be tried before decimal, otherwise '0x1A' would stop after the '0'.
 HexLit      <~~ push(makeConst(radixVal(up.in, 2, 16))) ~~>
-            = ( "0x" | "0X" ) :whitespace() HexDigit { HexDigit | "_" } KwEnd :whitespace(Whitespace) ;
+            = ( "0x" | "0X" ) :whitespace() HexDigit { SepHexDigit } KwEnd :whitespace(Whitespace) ;
+SepHexDigit = "_" HexDigit | HexDigit ;
 HexDigit    = "0"..."9" | "a"..."f" | "A"..."F" ;
 BinLit      <~~ push(makeConst(radixVal(up.in, 2, 2))) ~~>
-            = ( "0b" | "0B" ) :whitespace() BinDigit { BinDigit | "_" } KwEnd :whitespace(Whitespace) ;
+            = ( "0b" | "0B" ) :whitespace() BinDigit { SepBinDigit } KwEnd :whitespace(Whitespace) ;
+SepBinDigit = "_" BinDigit | BinDigit ;
 BinDigit    = "0"..."1" ;
 OctLit      <~~ push(makeConst(radixVal(up.in, 2, 8))) ~~>
-            = ( "0o" | "0O" ) :whitespace() OctDigit { OctDigit | "_" } KwEnd :whitespace(Whitespace) ;
+            = ( "0o" | "0O" ) :whitespace() OctDigit { SepOctDigit } KwEnd :whitespace(Whitespace) ;
+SepOctDigit = "_" OctDigit | OctDigit ;
 OctDigit    = "0"..."7" ;
 // See the twin of this comment in js-interpreter.abnf.
 BigIntLit   <~~ push(makeBigInt(up.in)) ~~>
-            = ( BigHexPrefix HexDigit { HexDigit | "_" }
-              | BigBinPrefix BinDigit { BinDigit | "_" }
-              | BigOctPrefix OctDigit { OctDigit | "_" }
-              | Digit :whitespace() NotLegacyNumeric { Digit | "_" } )
+            = ( BigHexPrefix HexDigit { SepHexDigit }
+              | BigBinPrefix BinDigit { SepBinDigit }
+              | BigOctPrefix OctDigit { SepOctDigit }
+              | Digit :whitespace() NotLegacyNumeric { SepDigit } )
               "n" KwEnd :whitespace(Whitespace) ;
 BigHexPrefix = ( "0x" | "0X" ) :whitespace() ;
 BigBinPrefix = ( "0b" | "0B" ) :whitespace() ;
 BigOctPrefix = ( "0o" | "0O" ) :whitespace() ;
-// A decimal with numeric separators (1_000, 3.141_59, 1.1_00_01). Since stripSeps makes
-// the separator-free text the ordinary decimal, this form is deliberately a SUPERSET of
-// JsDecLit rather than requiring a '_': one production then covers both, and the plain
-// decimal below is only still there for the shapes this one does not reach.
-SepNumLit   <~~ push(makeConst(parseFloat(stripSeps(up.in)))) ~~>
-            = Digit :whitespace() NotLegacyNumeric { Digit | "_" } [ "." { Digit | "_" } ] [ SepDecExp ] KwEnd :whitespace(Whitespace) ;
-// The exponent takes separators too ('1e1_0'), which the plain DecExp below must not.
-SepDecExp   = ( "e" | "E" ) [ "+" | "-" ] Digit { Digit | "_" } ;
 // See the twin of this comment in js-interpreter.abnf.
-JsDecLit    <~~ push(makeConst(parseFloat(up.in))) ~~>
-            = Digit :whitespace() NotLegacyNumeric { Digit } [ "." { Digit } ] [ DecExp ] KwEnd :whitespace(Whitespace) ;
+JsDecLit    <~~ push(makeConst(parseFloat(stripSeps(up.in)))) ~~>
+            = Digit :whitespace() NotLegacyNumeric { SepDigit } [ "." [ DecDigits ] ] [ DecExp ] KwEnd :whitespace(Whitespace) ;
 // The leading-dot decimal ('.5', '.5e3'). It has no integer part at all, so it cannot be
 // folded into JsDecLit, whose first token is a Digit. parseFloat(".5") is 0.5 in both
 // engines, so the text goes through unchanged.
-DotDecLit   <~~ push(makeConst(parseFloat(up.in))) ~~>
-            = "." :whitespace() Digit { Digit } [ DecExp ] KwEnd :whitespace(Whitespace) ;
-DecExp      = ( "e" | "E" ) [ "+" | "-" ] Digit { Digit } ;
+DotDecLit   <~~ push(makeConst(parseFloat(stripSeps(up.in)))) ~~>
+            = "." :whitespace() DecDigits [ DecExp ] KwEnd :whitespace(Whitespace) ;
+DecExp      = ( "e" | "E" ) [ "+" | "-" ] DecDigits ;
+DecDigits   = Digit { SepDigit } ;
+SepDigit    = "_" Digit | Digit ;
 Digit       = "0"..."9" ;
 
 // See the twin of this comment in js-interpreter.abnf.
@@ -5674,22 +5678,18 @@ NotFuncHead = :script(~~
 
     // ----- Literals -----
 
-    // The digits of a radix literal ('0b1010', '0o17', the decimal part of '10n'),
-    // skipping the '_' separators and stopping at the first character that is not a
-    // digit of the base (the trailing 'n' of a BigInt, or whatever KwEnd left behind).
+    // The value of a radix literal, rounded once to the nearest double. Twin of radixVal
+    // in js-interpreter.abnf.
     function radixVal(s, start, radix) {
-        var v = 0
+        var digits = ""
         for (var i = start; i < s.length; i++) {
             var cc = s.charCodeAt(i)
-            if (cc == 95) { continue }
-            var d = 99
-            if (cc >= 48 && cc <= 57) { d = cc - 48 }
-            else if (cc >= 97 && cc <= 102) { d = cc - 87 }
-            else if (cc >= 65 && cc <= 70) { d = cc - 55 }
-            if (d >= radix) { break }
-            v = v * radix + d
+            if (cc != 95) {
+                if (jsnDigitVal(cc) >= radix) { break }
+                digits = digits + s.charAt(i)
+            }
         }
-        return v
+        return jsnIntPow2(digits, 0, digits.length, radix)
     }
     // Drops the numeric separators of '1_000_000' / '3.141_59' so parseFloat sees the
     // plain decimal it understands.

@@ -1376,69 +1376,67 @@ JsCpPlane16 = "1" "0" HexDigit HexDigit HexDigit HexDigit ;
 JsCpUpTo5   = HexNonZero [ HexDigit ] [ HexDigit ] [ HexDigit ] [ HexDigit ] ;
 HexNonZero  = "1"..."9" | "a"..."f" | "A"..."F" ;
 
-// The numeric literals: hex, binary, octal, BigInt, a decimal with numeric separators,
-// the plain decimal and the leading-dot form. Every one of them ends in KwEnd: a literal
-// may not be glued to an identifier char, so '0b1a', '3x', '0o9' and '3in[]' are the
-// syntax errors they are in JavaScript instead of a literal followed by a second,
-// semicolon-less statement. All but BigInt are lowered to the double they denote; a
-// BigInt is a value type of its own (see BigIntLit).
+// The numeric literals: hex, binary, octal, the two legacy forms, BigInt, the decimal
+// and the leading-dot form. Every one of them ends in KwEnd: a literal may not be glued
+// to an identifier char, so '0b1a', '3x', '0o9' and '3in[]' are the syntax errors they
+// are in JavaScript instead of a literal followed by a second, semicolon-less statement.
+// All but BigInt are lowered to the double they denote; a BigInt is a value type of its
+// own (see BigIntLit). A numeric separator '_' may only stand between two digits of one
+// run (SepDigit); see the twin of this comment in js-interpreter.abnf.
 NumberLit   = HexLit | BinLit | OctLit | LegacyOctLit | NonOctalDecLit
-            | BigIntLit | SepNumLit | JsDecLit | DotDecLit ;
+            | BigIntLit | JsDecLit | DotDecLit ;
 
 // Hex must be tried before decimal, otherwise '0x1A' would stop after the '0'.
 HexLit      <~~ push(makeConst(radixVal(up.in, 2, 16))) ~~>
-            = HexPrefix HexDigit { HexDigit | "_" } KwEnd :whitespace(Whitespace) ;
+            = HexPrefix HexDigit { SepHexDigit } KwEnd :whitespace(Whitespace) ;
 HexPrefix   = ( "0x" | "0X" ) :whitespace() ;
+SepHexDigit = "_" HexDigit | HexDigit ;
 HexDigit    = "0"..."9" | "a"..."f" | "A"..."F" ;
 BinLit      <~~ push(makeConst(radixVal(up.in, 2, 2))) ~~>
-            = BinPrefix BinDigit { BinDigit | "_" } KwEnd :whitespace(Whitespace) ;
+            = BinPrefix BinDigit { SepBinDigit } KwEnd :whitespace(Whitespace) ;
 BinPrefix   = ( "0b" | "0B" ) :whitespace() ;
+SepBinDigit = "_" BinDigit | BinDigit ;
 BinDigit    = "0"..."1" ;
 OctLit      <~~ push(makeConst(radixVal(up.in, 2, 8))) ~~>
-            = OctPrefix OctDigit { OctDigit | "_" } KwEnd :whitespace(Whitespace) ;
+            = OctPrefix OctDigit { SepOctDigit } KwEnd :whitespace(Whitespace) ;
 OctPrefix   = ( "0o" | "0O" ) :whitespace() ;
+SepOctDigit = "_" OctDigit | OctDigit ;
 OctDigit    = "0"..."7" ;
 // The two Annex B legacy numeric forms, both of which a 'use strict' directive turns into
 // syntax errors (hence NotStrict on each):
 //   LegacyOctLit    a leading '0' followed by OCTAL digits - '01', '0777' - read base 8
-//   NonOctalDecLit  a leading '0' followed by digits that are not all octal - '08', '019'
-//                   - read base 10, which is what sloppy mode does with them
-// Both need at least two digits, so a bare '0' and '0.5' still reach JsDecLit, and both
-// are tried before it, since it would otherwise stop after the '0'. The octal form comes
-// first: '019' fails it at the '9' (KwEnd refuses a trailing digit) and falls through.
+//   NonOctalDecLit  a leading '0' followed by digits of which one is an '8' or a '9' -
+//                   '08', '019' - read base 10, which is what sloppy mode does with them
+// See the twin of this comment in js-interpreter.abnf.
 LegacyOctLit <~~ push(makeConst(radixVal(up.in, 1, 8))) ~~>
             = "0" :whitespace() OctDigit { OctDigit } NotStrict NotModule KwEnd :whitespace(Whitespace) ;
-// A NonOctalDecimalIntegerLiteral may carry a FRACTION ('09.0', '09.5'): the leading zero
-// only decides how the integer part is read. Spelling the fraction out here is what makes
-// '09.x' the syntax error it is - the '.' belongs to the number, so the name after it is
-// a second token on the same line with no operator between them.
-NonOctalDecLit <~~ push(makeConst(parseFloat(up.in))) ~~>
-            = "0" :whitespace() Digit { Digit } [ "." { Digit } ] NotStrict NotModule KwEnd :whitespace(Whitespace) ;
+NonOctalDecLit <~~ push(makeConst(parseFloat(stripSeps(up.in)))) ~~>
+            = "0" :whitespace() NonOctInt [ "." [ DecDigits ] ] [ DecExp ] NotStrict NotModule KwEnd :whitespace(Whitespace) ;
+NonOctInt   = { OctDigit } NonOctDigit { Digit } ;
+NonOctDigit = "8" | "9" ;
 // A BigInt literal ends in 'n'; tried before the plain decimal so the 'n' is not
-// orphaned (a non-BigInt number fails the 'n' and rolls back to DecLit). BigInt is a
+// orphaned (a non-BigInt number fails the 'n' and rolls back to JsDecLit). BigInt is a
 // value type of its own (typeof 10n is "bigint"), so it cannot go through makeConst,
 // which only knows the double numbers: js_bigint parses the digits into an arbitrary
 // precision integer at run time. The hex/binary/octal BigInt forms ('0xffn') keep their
 // prefix, which js_bigint reads too.
 BigIntLit   <~~ push(makeBigInt(up.in)) ~~>
-            = ( HexPrefix HexDigit { HexDigit | "_" } | BinPrefix BinDigit { BinDigit | "_" }
-              | OctPrefix OctDigit { OctDigit | "_" } | Digit :whitespace() NotLegacyNumeric { Digit | "_" } )
+            = ( HexPrefix HexDigit { SepHexDigit } | BinPrefix BinDigit { SepBinDigit }
+              | OctPrefix OctDigit { SepOctDigit } | Digit :whitespace() NotLegacyNumeric { SepDigit } )
               "n" KwEnd :whitespace(Whitespace) ;
-// A decimal with numeric separators (1_000, 3.141_59); requires at least one '_'.
-// Tried before JsDecLit, which would stop at the first '_' and leave it dangling.
-SepNumLit   <~~ push(makeConst(parseFloat(stripSeps(up.in)))) ~~>
-            = Digit :whitespace() NotLegacyNumeric { Digit } "_" { Digit | "_" } [ "." Digit { Digit | "_" } ] [ DecExp ] KwEnd :whitespace(Whitespace) ;
-// The plain decimal. It is spelled out here rather than taken from lib/numbers.abnf
-// because JavaScript has the exponent form, which that DecLit does not: without it
-// '1e3' is the number 1 followed by the variable 'e3', which parses and then means
-// something else entirely.
-JsDecLit    <~~ push(makeConst(parseFloat(up.in))) ~~>
-            = Digit :whitespace() NotLegacyNumeric { Digit } [ "." { Digit } ] [ DecExp ] KwEnd :whitespace(Whitespace) ;
+// The decimal ('12', '1.5', '1.', '1e3', '1_000.000_1e1_0'). It is spelled out here
+// rather than taken from lib/numbers.abnf because JavaScript has the exponent form,
+// which that DecLit does not: without it '1e3' is the number 1 followed by the variable
+// 'e3', which parses and then means something else entirely.
+JsDecLit    <~~ push(makeConst(parseFloat(stripSeps(up.in)))) ~~>
+            = Digit :whitespace() NotLegacyNumeric { SepDigit } [ "." [ DecDigits ] ] [ DecExp ] KwEnd :whitespace(Whitespace) ;
 // The leading-dot form '.5'. It needs at least one digit behind the dot, which is what
 // keeps it out of the way of a member access: the '.' of 'a.b' is never a number.
-DotDecLit   <~~ push(makeConst(parseFloat("0" + up.in))) ~~>
-            = "." :whitespace() Digit { Digit } [ DecExp ] KwEnd :whitespace(Whitespace) ;
-DecExp      = ( "e" | "E" ) [ "+" | "-" ] Digit { Digit } ;
+DotDecLit   <~~ push(makeConst(parseFloat("0" + stripSeps(up.in)))) ~~>
+            = "." :whitespace() DecDigits [ DecExp ] KwEnd :whitespace(Whitespace) ;
+DecExp      = ( "e" | "E" ) [ "+" | "-" ] DecDigits ;
+DecDigits   = Digit { SepDigit } ;
+SepDigit    = "_" Digit | Digit ;
 Digit       = "0"..."9" ;
 
 // A regular-expression literal in a primary position: /pattern/flags. A leading '/' at
@@ -2857,7 +2855,7 @@ UseStrictAhead = :script(~~
 // follows. A digit makes it a LEGACY form ('01', '08'), which LegacyOctLit and
 // NonOctalDecLit handle - and which only they may accept, because only they carry the
 // strict-mode guard; without this the plain decimal would take '08' straight back in
-// under 'use strict'. The separator and BigInt forms carry it too, since no numeric
+// under 'use strict'. The BigInt form carries it too, since no numeric
 // literal may continue a leading '0' with a separator or with more digits: '0_1' and
 // '01n' are syntax errors in node.
 NotLegacyNumeric = :script(~~
@@ -3345,6 +3343,8 @@ NotFuncHead = :script(~~
     include("lib/compile-core.js")
     // The callee text of "X is not a function" (sitePrimaryText / siteIndexText).
     include("lib/js-callee.js")
+    // The value of a radix literal (radixVal, jsnIntPow2).
+    include("lib/js-num.js")
     // Which scope instantiates each function declaration (makeFuncBody, makeJsBlock).
     include("lib/js-hoist.js")
 
@@ -3499,22 +3499,18 @@ NotFuncHead = :script(~~
 
     // ----- Numeric literal values -----
 
-    // The value of a radix-prefixed literal (0x.., 0b.., 0o..). Numeric separators are
-    // skipped and the scan stops at the first character that is not a digit of the radix,
-    // so a trailing KwEnd or whitespace in the matched text cannot corrupt the value.
+    // The value of a radix literal, rounded once to the nearest double. Twin of radixVal
+    // in js-interpreter.abnf.
     function radixVal(s, start, radix) {
-        var v = 0
+        var digits = ""
         for (var i = start; i < s.length; i++) {
             var cc = s.charCodeAt(i)
-            if (cc == 95) { continue } // '_'
-            var d = -1
-            if (cc >= 48 && cc <= 57) { d = cc - 48 }
-            else if (cc >= 97 && cc <= 102) { d = cc - 87 }
-            else if (cc >= 65 && cc <= 70) { d = cc - 55 }
-            if (d < 0 || d >= radix) { break }
-            v = v * radix + d
+            if (cc != 95) {
+                if (jsnDigitVal(cc) >= radix) { break }
+                digits = digits + s.charAt(i)
+            }
         }
-        return v
+        return jsnIntPow2(digits, 0, digits.length, radix)
     }
     // A BigInt literal: strip the separators and the trailing 'n' and let the runtime parse
     // the remaining digits (js_bigint understands the 0x/0b/0o prefixes as well).

@@ -1,11 +1,11 @@
-// Full-syntax test: JavaScript - part 2 of 4, sections 36-43 and 101-104.
+// Full-syntax test: JavaScript - part 2 of 4, sections 36-43 and 101-105.
 //
 // THE JS RATCHET IS FOUR FILES: as one file its -frozen interpreter leg ran into
 // ./test.sh --full's time brake (peak memory grew superlinearly with the file), and
 // the fourth is a Module, the one goal symbol in which 'export' may stand.
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
-//   tests/js-test-full.2.js   sections 36-43 and 101-104, engine agreement, generators,
+//   tests/js-test-full.2.js   sections 36-43 and 101-105, engine agreement, generators,
 //                             Error, Math, builtin constructors, integrity levels
 //   tests/js-test-full.3.js   sections 44-56, 58-71 and 73-100, the call/class/
 //                             private-name model, iterators, the arguments object and
@@ -1294,6 +1294,22 @@ function s104() {
     check("fn104d", K104.length === 7)
 }
 
+// ===== SECTION 105: numeric literal forms =====
+// A numeric separator stands between two digits of any run: the integer part, the
+// fraction, the exponent and every radix ('0x1_0', '0.0_1', '1e1_0'). A legacy
+// NonOctalDecimalIntegerLiteral ('08', '09') takes a fraction and an exponent like any
+// decimal integer part, in sloppy code. A radix literal past 2^53 is rounded once, half
+// to even: 0x200000000000011 is 2^57 + 17, nearer to 2^57 + 32 than to 2^57.
+function s105() {
+    check("nl105a", 0x1_0 === 16 && 0X1_F === 31 && 0xA_b_C === 2748 && 0b1_0 === 2 && 0o1_7 === 15 && 0x1_fn === 31n)
+    check("nl105b", 0.0_1 === 0.01 && .0_1 === 0.01 && 0.1_2_3 === 0.123 && 1_0.0_1 === 10.01 && 1e1_0 === 1e10 &&
+        1E+1_0 === 1e10 && 1e-1_0 === 1e-10 && .5e1_0 === 5e9 && 1.0_1e1_0 === 101e8 && 1_1.1_1e1_1 === 1111e9)
+    check("nl105c", 08e1 === 80 && 09.5e1 === 95 && 09e-1 === 0.9 && 08.e1 === 80 && 08.1_2 === 8.12 && 08e1_0 === 8e10 &&
+        0787 === 787 && 08. === 8)
+    check("nl105d", 0x200000000000011 === 144115188075855900 && 0x200000000000019 === 144115188075855900 &&
+        0o4000000000000000001 === 72057594037927940 && 0x20000000000001 === 9007199254740992)
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1309,6 +1325,7 @@ function main() {
     s102() // SECTION-CALL 102
     s103() // SECTION-CALL 103
     s104() // SECTION-CALL 104
+    s105() // SECTION-CALL 105
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

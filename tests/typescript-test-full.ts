@@ -4585,6 +4585,21 @@ function s98(): void {
     check("fn98d", K98.length === 7);
 }
 
+// ===== SECTION 99: numeric literal forms =====
+// A numeric separator stands between two digits of any run: the integer part, the
+// fraction, the exponent and every radix, in a value and in a literal type. A radix
+// literal past 2^53 is rounded once, half to even: 0x200000000000011 is 2^57 + 17,
+// nearer to 2^57 + 32 than to 2^57. Accepted by tsc 6.0.3, values read off node 24.
+type Nl99 = 0x1_0 | 0.0_1 | 1e1_0 | 0b1_1 | 1_0n | .5;
+function s99(): void {
+    const t: Nl99 = 0.0_1;
+    check("nl99a", 0x1_0 === 16 && 0X1_F === 31 && 0xA_b_C === 2748 && 0b1_0 === 2 && 0o1_7 === 15 && 0x1_fn === 31n && t === 0.01);
+    check("nl99b", 0.0_1 === 0.01 && .0_1 === 0.01 && 0.1_2_3 === 0.123 && 1_0.0_1 === 10.01 && 1e1_0 === 1e10 &&
+        1E+1_0 === 1e10 && 1e-1_0 === 1e-10 && .5e1_0 === 5e9 && 1.0_1e1_0 === 101e8 && 1_1.1_1e1_1 === 1111e9);
+    check("nl99c", 0x200000000000011 === 144115188075855900 && 0x200000000000019 === 144115188075855900 &&
+        0o4000000000000000001 === 72057594037927940 && 0x20000000000001 === 9007199254740992);
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -4686,6 +4701,7 @@ function main(): number {
     s96(); // SECTION-CALL 96
     s97(); // SECTION-CALL 97
     s98(); // SECTION-CALL 98
+    s99(); // SECTION-CALL 99
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }
