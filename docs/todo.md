@@ -79,7 +79,7 @@ is "not supported" under the P dialect (python supports fixed-width lookbehind);
 
 # JS — JavaScript and TypeScript
 
-### T-644 js: own-property details of prototypes and functions · P3 · JS · OPEN [V]
+### T-644 js: own-property details of prototypes and functions · P3 · JS · IN PROGRESS (JS worker, round 10) [V]
 `class B{m(){}}; B.prototype.m = function(){}; B.prototype.x = 1` → `Object.keys(B.prototype)` includes `m` in all engines (node `x`
 only: assigning an existing non-enumerable property keeps it non-enumerable). `Object.getOwnPropertyNames(K)` with `static s(){}` →
 `""` (node `length,name,prototype,s`). A function declaration's names → `length,name` (node adds `arguments,caller,prototype`;
