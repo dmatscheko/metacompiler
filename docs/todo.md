@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-699** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-700** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -116,16 +116,11 @@ not change the renderer.
 
 # GO — Go  (oracle: `go run`)
 
-### T-696 go: compiled element width by type text — float32 and defined small-int slices · P2 · GO · IN PROGRESS (GO worker, round 17) [V]
-`var b []float32; b = append(b, 0.1)` and `c := make([]float32,1); c[0] = 0.1` → `[0.10000000149011612]` in llvm.Run and native
-(go and interp `[0.1]`): goAdoptText skips an untyped float constant already boxed as float. `type MyInt int8; var n []MyInt; n =
-append(n,100); n[0] += 100` (and via make) → `[200]` compiled (go `[-56]`): goAdoptText does not resolve a defined type to its
-underlying type. Halves diverge.
-
-### T-697 go: nil slice element prints `<nil>`; interpreter cannot convert to a named interface type · P2 · GO · IN PROGRESS (GO worker, round 17) [V]
-`ss := [][]int{{1}}; ss = append(ss, nil); fmt.Println(ss)` → `[[1] <nil>]` in all engines (go `[[1] []]`). Interpreter:
-`Shower(C(4))` → "call of a non function: Shower", `fmt.Stringer(C(3))` → "unknown method 'Stringer'" (go converts; check the
-compiler halves too).
+### T-699 go: `int / 2.0` gives a float; `z, w := nil, 5` redeclaring a slice; conversion to another package's interface · P2 · GO · OPEN [V]
+`x := 5; fmt.Println(x/2.0)` → `2.5` in all engines (go `2`: the untyped constant converts to the other operand's type); compiled
+halves also give 2.5 for `var k int8 = 5; k/2.0`. The emitter must convert the constant by the other operand's static type (a
+runtime check cannot tell int-var op float-const from int-const op float64-var). `z, w := nil, 5` with `z` already `[]int` →
+`<nil>` (go `[]`; cTyLookup finds the new untyped binding). `pkga.Iface(x)` conversion unhandled.
 
 ---
 
@@ -795,6 +790,8 @@ T-691 js/ts: strict write to a function's `name`/`length` is silent; TS legacy o
 T-689 go: native append costs ~120k instructions per call — DONE 0b7d7180 (append path off layer-2 plumbing externs: 1M appends 243G→18.2G instructions, 21.1s→1.8s; output byte-identical)
 T-690 go: `%T` of a dynamically typed int64 prints `int` — DONE f5f57ab0 (type-parameter statics resolve to the bound type for boxing; any(x) conversions and ...T params box — 4 legs = go run; follow-ups T-696/T-697)
 T-661 java: Matcher.hitEnd / requireEnd — DONE ac76281e (hitEnd/requireEnd set at java.util.regex's own node points, Begin root and Start minLength guard, sticky across reset/region — 4 legs = java 24; follow-up T-698)
+T-696 go: compiled element width by type text — float32 and defined small-int slices — DONE 60860073 (defined number types registered for typed slots, float constants rounded/truncated in float32/int slots incl. arrays and maps, interpreter sized-int vs float constant arithmetic — 4 legs = go run)
+T-697 go: nil slice element prints `<nil>`; interpreter cannot convert to a named interface type — DONE 3e8c2cd6 (untyped nil in slice/map slots becomes the typed nil, conversion to a declared interface boxes like any(x), fmt.Stringer — 4 legs = go run; follow-up T-699)
 
 # Settled — do not re-open
 
