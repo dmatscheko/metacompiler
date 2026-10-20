@@ -2606,6 +2606,12 @@ function js_jvstrm(s, name, args) {
     if (name == "replaceFirst") { return jxRxReplace(s, jvStrArg(a0), jvStrArg(args[1]), false) }
     if (name == "matches") { return jxMatches(s, jvStrArg(a0)) }
     if (name == "split") { return jxSplit(s, jvStrArg(a0), jvArgInt(args, 1, 0)) }
+    // lib/java-pattern.java's primitives (lib/java-strings.js).
+    if (name == "__rxfind") { return jxRxFind(s, jvI(a0), jvStrArg(args[1]), jvI(args[2]), jvI(args[3]), jvI(args[4])) }
+    if (name == "__rxcount") { return rxGroupCount(jxReF(s, jvI(a0))) }
+    if (name == "__rxname") { return rxIndexOfName(jxReF(s, jvI(a0)), jvStrArg(args[1])) }
+    if (name == "__rxexpand") { return jxRxExpand(s, jvI(a0), jvStrArg(args[1]), args[2], jvStrArg(args[3])) }
+    if (name == "__rxflags") { return jxRxGflags(s, jvI(a0)) }
     if (name == "trim") { return jxTrim(s) }
     if (name == "strip") { return jxStrip(s, true, true) }
     if (name == "stripLeading") { return jxStrip(s, true, false) }

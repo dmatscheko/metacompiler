@@ -4006,6 +4006,12 @@ HasStatic   = :script(~~
         if (name == "replaceFirst") { return jxRxReplace(s, jStrArg(a0), jStrArg(args[1]), false) }
         if (name == "matches") { return jxMatches(s, jStrArg(a0)) }
         if (name == "split") { return jxSplit(s, jStrArg(a0), n1 ? jI(args[1]) : 0) }
+        // lib/java-pattern.java's primitives (lib/java-strings.js).
+        if (name == "__rxfind") { return jxRxFind(s, jI(a0), jStrArg(args[1]), jI(args[2]), jI(args[3]), jI(args[4])) }
+        if (name == "__rxcount") { return rxGroupCount(jxReF(s, jI(a0))) }
+        if (name == "__rxname") { return rxIndexOfName(jxReF(s, jI(a0)), jStrArg(args[1])) }
+        if (name == "__rxexpand") { return jxRxExpand(s, jI(a0), jStrArg(args[1]), args[2], jStrArg(args[3])) }
+        if (name == "__rxflags") { return jxRxGflags(s, jI(a0)) }
         if (name == "trim") { return jxTrim(s) }
         if (name == "strip") { return jxStrip(s, true, true) }
         if (name == "stripLeading") { return jxStrip(s, true, false) }
@@ -6769,6 +6775,8 @@ HasStatic   = :script(~~
     var jStreamLoaded = false
     // lib/java-function.java, loaded by an import that names one of its types.
     var jFuncLoaded = false
+    // lib/java-pattern.java, likewise.
+    var jPatternLoaded = false
     var jUtilWant = false
     var jLangWant = false
     var jPkgPrefix = ""
@@ -6820,6 +6828,10 @@ HasStatic   = :script(~~
         if (!jFuncLoaded && jFuncWants(ip)) {
             jFuncLoaded = true
             jLoadLib("lib/java-function.java", "java.util.function.")
+        }
+        if (!jPatternLoaded && jPatternWants(ip)) {
+            jPatternLoaded = true
+            jLoadLib("lib/java-pattern.java", "java.util.regex.")
         }
         resolveImport(path, pos)
     }

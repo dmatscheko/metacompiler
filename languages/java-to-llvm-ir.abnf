@@ -3716,7 +3716,8 @@ HasStatic   = :script(~~
                           "equalsIgnoreCase", "compareTo", "compareToIgnoreCase", "concat", "replace", "replaceAll",
                           "replaceFirst", "matches", "split", "trim", "strip", "stripLeading", "stripTrailing", "indent", "stripIndent",
                           "toUpperCase", "toLowerCase", "repeat", "codePointAt", "subSequence", "intern",
-                          "formatted", "regionMatches", "codePointCount"]
+                          "formatted", "regionMatches", "codePointCount",
+                          "__rxfind", "__rxcount", "__rxname", "__rxexpand", "__rxflags"]
     for (var jsm = 0; jsm < jStrMethodList.length; jsm++) { jStrMethods["$" + jStrMethodList[jsm]] = true }
     var jUnboxNames = {"$intValue": true, "$longValue": true, "$doubleValue": true, "$floatValue": true,
                        "$shortValue": true, "$byteValue": true, "$charValue": true, "$booleanValue": true}
@@ -4729,6 +4730,8 @@ HasStatic   = :script(~~
     var jStreamLoaded = false
     // lib/java-function.java, loaded by an import that names one of its types.
     var jFuncLoaded = false
+    // lib/java-pattern.java, likewise.
+    var jPatternLoaded = false
     var jUtilWant = false
     var jLangWant = false
     var jPkgPrefix = ""
@@ -4769,6 +4772,10 @@ HasStatic   = :script(~~
         if (!jFuncLoaded && jFuncWants(ip)) {
             jFuncLoaded = true
             jLoadLib("lib/java-function.java", "java.util.function.")
+        }
+        if (!jPatternLoaded && jPatternWants(ip)) {
+            jPatternLoaded = true
+            jLoadLib("lib/java-pattern.java", "java.util.regex.")
         }
         resolveImport(path, pos)
     }

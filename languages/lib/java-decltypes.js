@@ -965,6 +965,13 @@ function jMapWants(path) {
         || path == "java.util.EnumMap" || path == "java.util.EnumSet" || path == "EnumMap" || path == "EnumSet"
 }
 
+// Does this import name a type lib/java-pattern.java declares? Then the
+// grammar compiles it with the program, once (jImport).
+function jPatternWants(path) {
+    return path == "java.util.regex.*" || path == "java.base" || path == "java.util.regex.Pattern"
+        || path == "java.util.regex.Matcher" || path == "java.util.regex.MatchResult"
+}
+
 // Does a member chain start at one of lib/java-map.java's types by its simple
 // name (`Map.of(..)`, `Set.copyOf(..)`, `EnumSet.noneOf(..)`)? Under a
 // java.util.* import that is the first the walk hears of the library.

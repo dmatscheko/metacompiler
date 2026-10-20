@@ -1111,6 +1111,8 @@ iteration order), `java-stream.java` (the same for java.util.stream, compiled at
 a java.util.stream import or a call of a method named stream),
 `java-function.java` (the same for java.util.function's generic interfaces and
 their default methods, compiled at an import of one of them),
+`java-pattern.java` (the same for java.util.regex's Pattern and Matcher, over
+String primitives of the shared regex engine, compiled at an import of one),
 `php-stdlib.php` (both php grammars: PHP's array and string library and SPL WRITTEN IN
 PHP, compiled with a program that names one of its functions or classes),
 `python-copy.py` and `python-dataclasses.py` (both python grammars: the copy and

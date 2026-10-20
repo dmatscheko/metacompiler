@@ -72,6 +72,8 @@ import java.util.stream.DoubleStream;
 import java.util.stream.IntStream;
 import java.util.stream.LongStream;
 import java.util.stream.Stream;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 class Main {
     static int failures = 0;
@@ -168,6 +170,7 @@ class Main {
         S80.run(); // SECTION-CALL 80
         S81.run(); // SECTION-CALL 81
         S82.run(); // SECTION-CALL 82
+        S83.run(); // SECTION-CALL 83
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -4630,5 +4633,44 @@ class S82 {
         String rc = p + " " + (p.x() / 4) + " " + new Half(3) + " " + new Bag("b", 1, 2, 3).total() + " " + new Bag("e").items().length
             + " " + new Bag("w", new int[]{4, 5}).total() + " " + new Inc(5);
         Main.check("rc82", rc.equals("Comp[x=1.0, y=2] 0.25 Half[v=1.5] 6 0 9 Inc[a=6]"));
+    }
+}
+
+// ===== SECTION 83: java.util.regex.Pattern and Matcher =====
+//
+// find / matches / lookingAt, groups by number and name with their bounds,
+// the flags, split, replaceAll with a template or a function,
+// appendReplacement / appendTail, find(int), \G across finds, and the
+// exceptions a Matcher throws. Every expected value is java 24.0.2's.
+class S83 {
+    static void run() {
+        Matcher m = Pattern.compile("(\\w+)@(\\w+)\\.com").matcher("ann@foo.com, bob@bar.com");
+        String fd = "";
+        while (m.find()) { fd = fd + m.group(1) + "/" + m.group(2) + "@" + m.start() + "-" + m.end(2) + ";"; }
+        Matcher d = Pattern.compile("(?<y>\\d{4})-(?<m>\\d\\d)").matcher("on 2024-03!");
+        fd = fd + d.find() + d.group("y") + d.group("m") + d.start("m") + d.groupCount();
+        Main.check("pm83", fd.equals("ann/foo@0-7;bob/bar@13-20;true20240382"));
+        Pattern ci = Pattern.compile("hello", Pattern.CASE_INSENSITIVE);
+        String fl = ci.matcher("HeLLo you").lookingAt() + " " + ci.matcher("HeLLo you").matches() + " " + ci.flags() + " " + Pattern.compile("(?im)x").flags()
+            + " " + Pattern.compile("a.c", Pattern.DOTALL).matcher("a\nc").matches() + " " + Pattern.compile("a.c", Pattern.LITERAL).matcher("abc a.c").find()
+            + " " + Pattern.matches("a+b", "aab") + " " + Pattern.quote("x.y");
+        Main.check("pf83", fl.equals("true false 2 10 true true true \\Qx.y\\E"));
+        Matcher am = Pattern.compile("cat").matcher("one cat two cats");
+        StringBuilder sb = new StringBuilder();
+        while (am.find()) { am.appendReplacement(sb, "dog"); }
+        am.appendTail(sb);
+        String rp = sb + "|" + Pattern.compile("(\\d+)").matcher("x1y22").replaceAll("<$1>") + "|" + Pattern.compile("\\d+").matcher("a1b22").replaceAll(r -> "" + r.group().length())
+            + "|" + Arrays.toString(Pattern.compile(",").split("a,b,,c,,")) + "|" + Arrays.toString(Pattern.compile(",").split("a,b,c", 2));
+        Main.check("pr83", rp.equals("one dog two dogs|x<1>y<22>|a1b2|[a, b, , c]|[a, b,c]"));
+        Matcher fm = Pattern.compile("\\d").matcher("a1b2c3");
+        Matcher gm = Pattern.compile("\\Ga").matcher("aab");
+        int ga = 0;
+        while (gm.find()) { ga++; }
+        Matcher g = Pattern.compile("(a)|(b)").matcher("b");
+        String ex = fm.find(3) + fm.group() + ga + g.matches() + g.group(1) + g.group(2) + g.start(1);
+        try { Pattern.compile("z").matcher("abc").group(); } catch (IllegalStateException e) { ex = ex + "|" + e.getMessage(); }
+        try { g.group(3); } catch (IndexOutOfBoundsException e) { ex = ex + "|" + e.getMessage(); }
+        try { g.group("q"); } catch (IllegalArgumentException e) { ex = ex + "|" + e.getMessage(); }
+        Main.check("px83", ex.equals("true22truenullb-1|No match found|No group 3|No group with name <q>"));
     }
 }

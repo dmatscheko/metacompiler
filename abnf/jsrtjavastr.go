@@ -316,6 +316,81 @@ func (rt *jsrt) jxRe(pattern string) *rxRe {
 	return re
 }
 
+// jxReF is jxRe with Pattern's flag bits; jxRxFlagLetters maps them. Twins of
+// jxReF and jxRxFlags in lib/java-strings.js.
+func (rt *jsrt) jxReF(pattern string, bits int) *rxRe {
+	re := rxGet(pattern, jxRxFlagLetters(bits))
+	if !re.ok {
+		rt.jvThrowPse(pattern, re.err, re.errAt)
+	}
+	return re
+}
+
+func jxRxFlagLetters(bits int) string {
+	f := "qJ"
+	for _, fl := range []struct {
+		bit int
+		c   string
+	}{{2, "i"}, {64, "u"}, {8, "m"}, {32, "s"}, {4, "x"}, {1, "d"}} {
+		if bits&fl.bit != 0 {
+			f += fl.c
+		}
+	}
+	return f
+}
+
+// jxRxPrim answers lib/java-pattern.java's String primitives on the pattern
+// text s; twins of jxRxFind, rxGroupCount, rxIndexOfName, jxRxExpand and
+// jxRxGflags as the java String methods of lib/java-strings.js call them.
+func (rt *jsrt) jxRxPrim(s, name string, num func(int) int, arg func(int) interface{}) interface{} {
+	re := rt.jxReF(s, num(0))
+	switch name {
+	case "__rxcount":
+		return float64(re.ngroups)
+	case "__rxname":
+		return float64(re.indexOfName(rt.jxArgStr(arg(1))))
+	case "__rxflags":
+		out := num(0)
+		for i, c := range "dixmsucU" {
+			if strings.ContainsRune(re.gflags, c) {
+				out |= []int{1, 2, 4, 8, 32, 64, 128, 320}[i]
+			}
+		}
+		return float64(out)
+	}
+	text := rxUnits(rt.jxArgStr(arg(1)))
+	if name == "__rxexpand" {
+		ca, _ := arg(2).(*jsArray)
+		caps := make([]int, len(ca.elems))
+		for i, e := range ca.elems {
+			caps[i] = int(jvToLong(rt, e))
+		}
+		return rt.jxExpand(re, text, &rxMatch{begin: caps[0], end: caps[1], caps: caps}, []rune(rt.jxArgStr(arg(3))))
+	}
+	from, gpos := num(2), num(3)
+	var mt *rxMatch
+	ok := true
+	switch num(4) {
+	case 1:
+		mt, ok = re.matchWhole(text, from)
+	case 2:
+		mt, ok = re.matchAt(text, from)
+	default:
+		mt, ok = re.searchFrom(text, from, gpos, gpos)
+	}
+	if !ok {
+		rt.fail("regexp: step limit exceeded")
+	}
+	if mt == nil {
+		return jsNull
+	}
+	out := &jsArray{elems: make([]interface{}, len(mt.caps)), kind: jvArrTagKind("[I")}
+	for i, c := range mt.caps {
+		out.elems[i] = float64(c)
+	}
+	return out
+}
+
 // jvThrowPse throws a PatternSyntaxException for a regex.js error, with the
 // description, index and pattern its getters answer (the emitter's
 // getDescription / getIndex / getPattern read the slots). Twin of jxkThrowPse
@@ -1800,6 +1875,8 @@ func init() {
 					limit = num(1)
 				}
 				r = jxStrArr(rt.jxSplit(s, rt.jxArgStr(arg(0)), limit))
+			case "__rxfind", "__rxcount", "__rxname", "__rxexpand", "__rxflags":
+				r = rt.jxRxPrim(s, name, num, arg)
 			case "trim":
 				r = jxTrim(s)
 			case "strip":

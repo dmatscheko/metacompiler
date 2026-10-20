@@ -490,6 +490,55 @@ function jxRe(pattern) {
     if (!re.ok) { jxkThrowPse(pattern, re.err, re.errAt) }
     return re
 }
+// ----- the primitives lib/java-pattern.java's Pattern and Matcher call -----
+//
+// They are String methods of the pattern's text (__rxfind, __rxcount, __rxname,
+// __rxexpand, __rxflags) taking Pattern's flag bits. jxRxFlags maps those bits
+// onto regex.js's letters (LITERAL and UNICODE_CHARACTER_CLASS are applied to
+// the text by Pattern itself). Twins in abnf/jsrtjavastr.go.
+function jxRxFlags(bits) {
+    var f = "qJ"
+    if ((bits & 2) != 0) { f = f + "i" }
+    if ((bits & 64) != 0) { f = f + "u" }
+    if ((bits & 8) != 0) { f = f + "m" }
+    if ((bits & 32) != 0) { f = f + "s" }
+    if ((bits & 4) != 0) { f = f + "x" }
+    if ((bits & 1) != 0) { f = f + "d" }
+    return f
+}
+function jxReF(pattern, bits) {
+    var re = rxGet(pattern, jxRxFlags(bits))
+    if (!re.ok) { jxkThrowPse(pattern, re.err, re.errAt) }
+    return re
+}
+// One match attempt: mode 0 is Matcher.find from `from` (gpos, the previous
+// match's end, for \G), 1 matches() and 2 lookingAt() of the text from `from`.
+// The group bounds (rxSearch's caps), or null.
+function jxRxFind(pattern, bits, text, from, gpos, mode) {
+    var re = jxReF(pattern, bits)
+    var m = null
+    if (mode == 1) { m = rxMatchWhole(re, text, from) }
+    else if (mode == 2) { m = rxMatchAt(re, text, from) }
+    else { m = rxSearchFrom(re, text, from, gpos, gpos) }
+    if (m == null) { return null }
+    return m.caps
+}
+// appendReplacement's template for the match whose bounds are caps.
+function jxRxExpand(pattern, bits, text, caps, repl) {
+    return jxExpand(jxReF(pattern, bits), text, {begin: caps[0], end: caps[1], caps: caps}, repl)
+}
+// Pattern.flags(): the bits given plus the inline flags in force at the end
+// (re.gflags).
+function jxRxGflags(pattern, bits) {
+    var g = jxReF(pattern, bits).gflags
+    var out = bits
+    var names = "dixmsucU"
+    var vals = [1, 2, 4, 8, 32, 64, 128, 320]
+    for (var i = 0; i < names.length; i++) {
+        if (g.indexOf(names.charAt(i)) >= 0) { out = out | vals[i] }
+    }
+    return out
+}
 // Matcher.find's next start: after an empty match the search moves one on. Its
 // \G and \b{g} read where the previous match ended (rxSearchFrom).
 function jxNext(m) {
