@@ -129,8 +129,8 @@ ImportPath  <~~ push(up.in.slice(1, up.in.length - 1)) ~~>
 // so the alias is bound to whatever B is already bound to (a struct descriptor stays a
 // struct descriptor, which a defined type's conversion wrapper would have destroyed).
 // The trailing ';' is the pre-1.0 spelling the corpus is full of.
-TypeDecl    <~~ buildTypeDecl(takeAll(), up.pos); goTpEnd() ~~>
-            = "type" KwEnd Id <~~ push(cPoisonName(up.in)) ~~> [ TypeParams ] [ AliasEq ] ( StructBody | IfaceBody | DefinedType ) [ ";" ] ;
+TypeDecl    <~~ buildTypeDecl(takeAll(), up.pos); goTpEndTy() ~~>
+            = "type" KwEnd Id <~~ push(goLtyDecl(cPoisonName(up.in))) ~~> [ TypeParams ] [ AliasEq ] ( StructBody | IfaceBody | DefinedType ) [ ";" ] ;
 AliasEq     <~~ push({alias: true}) ~~> = "=" ;
 // type myInt int / type Celsius float64: a defined type over an existing one. The
 // value model has no distinct type for it, so the name becomes the CONVERSION to its
@@ -375,8 +375,8 @@ Statement   = Block | If | For | Switch | Return | Break | Continue | Goto | Def
             | TypeStmt | ConstGroup | ConstSingle | VarGroup | VarDecl | Labeled | SimpleStmt | Empty ;
 
 // A type declaration in STATEMENT position (`func f() { type S []T; ... }`). Go scopes
-// a local type to its block; the value model has one namespace for type names, so the
-// declaration is built exactly as a top-level one, and the statement itself is a no-op
+// a local type to its block; it is built under a key of its own (goLtyDecl in
+// go-constfold.js) exactly as a top-level type, and the statement itself is a no-op
 // (TypeDecl's own tag has already registered the descriptor by the time this runs).
 TypeStmt    <~~ push(function() {}) ~~>
             = TypeDecl | TypeGroup ;
@@ -658,7 +658,7 @@ TypeSwitch  <~~ push(makeTypeSwitch(takeAll())); cSwExit() ~~>
 TypeCase    <~~ push(makeTypeCase(cTsCase(takeAll()))) ~~>
             = CCaseOn ( "case" KwEnd CaseType { "," CaseType }
               | "default" KwEnd ) ":" ;
-CaseType    <~~ push({ct: goAssertTyC(goWalkQual(up.in))}) ~~>
+CaseType    <~~ push({ct: goAssertTyC(goWalkQual(goLtyRw(up.in)))}) ~~>
             = Type ;
 // The subjectless body is tried before the subject so a bare 'switch {' never enters
 // SwitchSubj: that would push the composite-literal gate marker (CondOn) and then fail
@@ -944,7 +944,7 @@ CompMapT    <~~ push({ckind: "map", czero: pop().mzero, ckeyt: pop().mkey}) ~~>
             = MapTypeZ ;
 // compTypeName and not typeBaseName: the name KEEPS a package qualifier, because
 // `pkga.Item{...}` is that package's type, not a type called `pkga`.
-CompNamed   <~~ push({ckind: "struct", cname: compTypeName(up.in), ctargs: goTpArgsOf(up.in)}) ~~>
+CompNamed   <~~ var cnt = goLtyRw(up.in); push({ckind: "struct", cname: compTypeName(cnt), ctargs: goTpArgsOf(cnt)}) ~~>
             = NotTypeKw NamedType ;
 CompElemT   <~~ push({cet: goWalkQual(firstType(up.in))}) ~~>
             = Type ;
@@ -1120,7 +1120,7 @@ MapTypeZ    = "map" KwEnd "[" KType "]" ZType ;
 // The KEY type text, which an elided struct key is built against (see CompKey).
 KType       <~~ push({mkey: goWalkQual(firstType(up.in))}) ~~>
             = Type ;
-ZType       <~~ push({mzero: goWalkQual(up.in)}) ~~>
+ZType       <~~ push({mzero: goWalkQual(goLtyRw(up.in))}) ~~>
             = Type ;
 
 // new(T): a zero value of T (a pointer to it in Go; our structs are references).
@@ -1135,7 +1135,7 @@ NewType     <~~ push({nty: firstType(up.in)}) ~~>
 // trailing '...' spreads a slice into the variadic parameter.
 Call        <~~ var ci = goAppendC(takeAll(), up.in); var csp = goSplitArgs(ci.slice(1))
                 push(makeCall(goCallBoxC(ci), csp.atys, goTpInfer(ci[0], csp, []))); goLenConstC(ci, up.start, up.pos) ~~>
-            = Id <~~ push(up.in) ~~> "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
+            = Id <~~ push(goLtyName(up.in)) ~~> "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
 // A call argument reports its static type after it, for goSplitArgs.
 ArgExpr     <~~ var ae = pop(); push(goRuneDefC(ae, up.pos)); push({aty: stAt(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos)}) ~~> = Expression ;
 // A returned value, which takes a rune constant at the RESULT's type (makeReturn).
@@ -4159,8 +4159,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     // Integer values of TYPED constants, for goArrConstLen only - see cBindSpec.
     var cArrLenTbl = {}
-    function goArrConstLen(t) {
-        if (t == undefined || t == null || t.indexOf("[") < 0) { return t }
+    // Also respells a local type's name (goLtyRw): every type text the walk reads
+    // comes through here.
+    function goArrConstLen(t0) {
+        if (t0 == undefined || t0 == null) { return t0 }
+        var t = goLtyRw(t0)
+        if (t.indexOf("[") < 0) { return t }
         var out = ""
         var i = 0
         while (i < t.length) {
@@ -4539,6 +4543,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // (`type Named map[Pair]string; Named{{1, 2}: "p"}`), and an elided key is
         // built against the map's declared KEY type. See litKeyOf.
         if (t.indexOf("map[") == 0) { return {ckind: "map", czero: mapValText(t), ckeyt: mapKeyText(t)} }
+        // An instantiated generic struct (Box[int]) is the struct with those type
+        // arguments, as a literal that writes them out builds it.
+        var lb = t.indexOf("[")
+        if (lb > 0 && t.charCodeAt(t.length - 1) == 93) { return {ckind: "struct", cname: t.substring(0, lb), rtargs: t.substring(lb + 1, t.length - 1)} }
         return {ckind: "struct", cname: t}
     }
     // The descriptor of an anonymous struct type, from its goAnonStReg record and
@@ -4576,6 +4584,16 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 var rt = goTpRes(ta, taUsed)
                 if (rt == "") { return buildLit(desc, elems) }
                 return buildLit({ckind: desc.ckind, cname: desc.cname, rtargs: rt}, elems)
+            }
+        }
+        // []V{...} inside a generic function: the element type is the instantiated
+        // one, which %T and the elements' zero values read. Twin of the slice
+        // literal's emitTpResOr in go-to-llvm-ir.abnf.
+        var etUsed = desc.ckind == "slice" ? goTpUsed(desc.cet) : []
+        if (etUsed.length > 0) {
+            return function() {
+                var ret = goTpRes(desc.cet, etUsed)
+                return buildLit(ret == "" ? desc : {ckind: "slice", cet: ret}, elems)
             }
         }
         return function() { return buildLit(desc, elems) }

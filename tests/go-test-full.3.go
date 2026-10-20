@@ -817,6 +817,65 @@ func s120() {
 	check("growzeroloc120", out == "8 true [{{[] false} 0} {{[] false} 0}] [{1 2} {3 4} {5 6} {0 0}]")
 }
 
+// ===== SECTION 121: a local type is its own type; a generic function's local type =====
+// A type declared inside a function is scoped to its block: a top-level type of the
+// same name, and another function's local type of that name, are different types
+// with their own fields, zero values and conversions. Inside a generic function a
+// local type depends on the type parameters, so its zero value and %T follow the
+// instantiation (main.W121[string]). A type argument that shares its name with a
+// type parameter elsewhere is still the type. The expected values are go run's.
+type T121 struct{ x, y string }
+type n121 string
+
+func s121loc() string {
+	type T121 struct{ z int }
+	type n121 int
+	var t T121
+	t.z = 3
+	ts := []T121{t, {4}}
+	m := map[string]T121{"a": {5}}
+	var i interface{} = t
+	kind := "other"
+	switch i.(type) {
+	case T121:
+		kind = "local"
+	}
+	x := n121(5)
+	return fmt.Sprintf("%v %v %v %T %T %#v %s %v %T", t, ts, m, ts, &t, t, kind, x+2, x)
+}
+
+func s121other() string {
+	type T121 struct{ q float64 }
+	return fmt.Sprint(T121{1.5}, T121{})
+}
+
+func s121gen[T any]() string {
+	type W121 struct {
+		v T
+		n int
+	}
+	var w W121
+	ws := []W121{w, {n: 2}}
+	var z T
+	return fmt.Sprintf("%v|%v|%T|%v|%T|%v", w.v, w, w, ws, ws, z)
+}
+
+// A type parameter named like the top-level type it is instantiated with.
+func s121z[T121 any]() string {
+	var z T121
+	return fmt.Sprint(z)
+}
+
+func s121() {
+	xs := append([]T121{}, T121{"p", "q"}, T121{"r", "t"})
+	out := fmt.Sprint(xs, s121loc(), s121other(), T121{"a", "b"}, n121("s"))
+	check("ltyshadow121", out == "[{p q} {r t}]{3} [{3} {4}] map[a:{5}] []main.T121 *main.T121 main.T121{z:3} local 7 main.n121{1.5} {0}{a b}s")
+	check("ltygen121", s121gen[string]() == "|{ 0}|main.W121[string]|[{ 0} { 2}]|[]main.W121[string]|")
+	check("ltygen121b", s121gen[int]() == "0|{0 0}|main.W121[int]|[{0 0} {0 2}]|[]main.W121[int]|0")
+	check("ltytp121", s121z[T121]() == "{ }")
+	check("ltygen121c", s121gen[T121]() == "{ }|{{ } 0}|main.W121[main.T121]|[{{ } 0} {{ } 2}]|[]main.W121[main.T121]|{ }")
+}
+
 func main() {
 	s94()   // SECTION-CALL 94
 	s95()   // SECTION-CALL 95
@@ -843,6 +902,7 @@ func main() {
 	s118f() // SECTION-CALL 118
 	s119()  // SECTION-CALL 119
 	s120()  // SECTION-CALL 120
+	s121()  // SECTION-CALL 121
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

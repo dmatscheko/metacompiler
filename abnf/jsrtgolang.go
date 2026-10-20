@@ -1323,7 +1323,31 @@ func gopQualTy(t string) string {
 		b.WriteString(id)
 		i = j
 	}
-	return b.String()
+	return gopLtyStrip(b.String())
+}
+
+// gopLtyStrip is gfLtyStrip in languages/lib/go-fmt.js: each local type's key
+// (name + "__L" + n) back to its name.
+func gopLtyStrip(t string) string {
+	if !strings.Contains(t, "__L") {
+		return t
+	}
+	var b strings.Builder
+	i := 0
+	for k := strings.Index(t, "__L"); k >= 0; k = strings.Index(t[i:], "__L") {
+		k += i
+		e := k + 3
+		for e < len(t) && t[e] >= '0' && t[e] <= '9' {
+			e++
+		}
+		if k > 0 && e > k+3 && (e == len(t) || !(t[e] == '_' || t[e] >= 'a' && t[e] <= 'z' || t[e] >= 'A' && t[e] <= 'Z' || t[e] > 127)) {
+			b.WriteString(t[i:k])
+		} else {
+			b.WriteString(t[i:e])
+		}
+		i = e
+	}
+	return b.String() + t[i:]
 }
 
 const gopPredecl = " bool string int int8 int16 int32 int64 uint uint8 uint16 uint32 uint64 uintptr float32 float64 complex64 complex128 error map chan func struct interface "
@@ -1371,7 +1395,7 @@ func (rt *jsrt) gopTypeName(v interface{}) string {
 			return gopQualTy(name)
 		}
 		if pkg, ok := cls.props["__pkg"].(string); ok {
-			return pkg + "." + rt.toString(cls.props["__name"]) + gopTargs(v)
+			return gopLtyStrip(pkg + "." + rt.toString(cls.props["__name"]) + gopTargs(v))
 		}
 		if name := rt.toString(cls.props["__name"]); name != "struct" {
 			return name + gopTargs(v)

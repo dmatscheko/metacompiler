@@ -2447,7 +2447,7 @@ function goMakeTy(text) {
         if (d == 0 && ch == ",") { break }
         i = i + 1
     }
-    return text.substring(s + 1, i)
+    return goLtyRw(text.substring(s + 1, i))
 }
 // Is name bound inside a function (a frame below the package one)?
 function cIsLocal(name) {
@@ -2594,7 +2594,8 @@ function goWalkQual(t) { return goWalkPkg == "" ? t : goPkgQual(goWalkPkg, t, tr
 // interface keeps its name, so a literal boxes the value put there; an embedded
 // value type is the field's type, so its zero value is a zero T; an embedded
 // pointer is "" (nil).
-function goEmbedTyC(text) {
+function goEmbedTyC(text0) {
+    var text = goLtyRw(text0)
     var dot = text.indexOf(".")
     var name = dot < 0 ? text : text.substring(dot + 1)
     if (goIsIfaceTy(name)) { return {fty: name} }
@@ -2733,28 +2734,79 @@ function goTpSplit(t) {
 // The function name's tag: the receiver's parameters (`func (s *Stack[T]) Pop()`)
 // come into scope, and TypeParamGrp adds a function's own.
 function goTpFnC(name) { goTpCur = goTpRecv; goTpRecv = []; return name }
-function goTpAdd(n) { goTpCur = goTpCur.concat([n]); goTpAll["$" + n] = true }
+function goTpAdd(n) { goTpCur = goTpCur.concat([n]) }
 // Every concrete type text a generic is instantiated with, in order: the compiler
 // makes the zero value of each ahead of time ($zeros in go-to-llvm-ir.abnf). A text
-// naming any type parameter is not concrete.
+// naming a type parameter in scope where it is written is not concrete; the same
+// name anywhere else is a type (gen[T]() with a top-level type T).
 var goTpCands = []
 var goTpCandSeen = {}
-var goTpAll = {}      // "$T" -> true: a name a type parameter list declares
 function goTpNote(t) {
-    if (t == "" || goTpCandSeen["$" + t] === true) { return }
-    var i = 0
-    while (i < t.length) {
-        if (cIsIdCh(t.charCodeAt(i))) {
-            var e = i
-            while (e < t.length && cIsIdCh(t.charCodeAt(e))) { e = e + 1 }
-            if (goTpAll["$" + t.substring(i, e)] === true) { return }
-            i = e
-        } else { i = i + 1 }
-    }
+    if (t == "" || goTpCandSeen["$" + t] === true || goTpUsed(t).length > 0) { return }
     goTpCandSeen["$" + t] = true
     goTpCands.push(t)
 }
 function goTpEnd() { goTpCur = []; goTpRecv = [] }
+// A type declared inside a function ends no type parameter list: the enclosing
+// generic function's stay in scope (a local type cannot have its own).
+function goTpEndTy() { if (cScopes.length == 1) { goTpEnd() } }
+
+// ----- LOCAL TYPES -----
+// A type declared inside a function is scoped to its block, while every type
+// table here and in the grammars is keyed by name. So a local type gets a KEY of
+// its own, name + "__L" + n, and every type text and name the walk reads in its
+// scope is respelled to it (goLtyRw, goLtyName): a top-level T and the T of
+// `func k() { type T struct{...} }` are then two entries. Inside a generic
+// function the local type depends on the function's type parameters (Go makes a
+// distinct W per instantiation), so it is declared generic over them and read as
+// key[P1,...]: `var w W` then zeroes W[string]'s fields as a string's. fmt strips
+// the suffix again (gfLtyBase in go-fmt.js).
+var goLtyN = 0
+// The type name TypeDecl's Id binds, already poisoned in the current frame: the
+// name itself at top level, else its key.
+function goLtyDecl(name) {
+    if (cScopes.length == 1) { return name }
+    goLtyN = goLtyN + 1
+    var key = name + "__L" + goLtyN
+    var ref = key
+    if (goTpCur.length > 0) {
+        goGenTys["$" + key] = goTpCur
+        ref = key + "["
+        var i = 0
+        while (i < goTpCur.length) { ref = ref + (i > 0 ? "," : "") + goTpCur[i]; i = i + 1 }
+        ref = ref + "]"
+    }
+    cBindX(name, {ltk: key, lty: ref})
+    return key
+}
+// The local type binding name resolves to in the walk's scope, or null.
+function goLtyAt(name) {
+    if (goLtyN == 0) { return null }
+    var x = cXLookup(name)
+    return (x != null && x.ltk != undefined) ? x : null
+}
+// A name in expression position (a conversion T(x), a type argument): the key.
+function goLtyName(name) {
+    var x = goLtyAt(name)
+    return x == null ? name : x.ltk
+}
+// Type text t with each name of a local type in scope respelled as its reference.
+function goLtyRw(t) {
+    if (goLtyN == 0 || typeof t != "string") { return t }
+    var out = ""
+    var i = 0
+    while (i < t.length) {
+        if (cIsIdCh(t.charCodeAt(i)) && (i == 0 || t.charAt(i - 1) != ".")) {
+            var e = i
+            while (e < t.length && cIsIdCh(t.charCodeAt(e))) { e = e + 1 }
+            var id = t.substring(i, e)
+            var x = (e < t.length && t.charAt(e) == ".") ? null : goLtyAt(id)
+            out = out + (x == null ? id : x.lty)
+            i = e
+        } else { out = out + t.charAt(i); i = i + 1 }
+    }
+    return out
+}
 // A receiver, from its text with the whitespace out ("(s*Stack[T])").
 function goTpRecvC(text) {
     var a = text.indexOf("[")
@@ -3772,6 +3824,7 @@ function goNameC(name, pos) {
     regSt(pos, ty)
     var x = cXLookup(name)
     if (x != null && x.k != undefined) { regTk(pos, x) }
+    if (x != null && x.ltk != undefined) { return makeVarRef(x.ltk) }
     return makeVarRef(name)
 }
 // A const spec binds its names and hands the item list on with the position markers

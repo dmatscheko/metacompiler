@@ -143,8 +143,8 @@ ImportPath  <~~ push(up.in.slice(1, up.in.length - 1)) ~~>
 // so the alias is declared as a second name for whatever B is bound to (a struct
 // descriptor stays a struct descriptor, which a conversion wrapper would have
 // destroyed). The trailing ';' is the pre-1.0 spelling the corpus is full of.
-TypeDecl    <~~ push(makeTypeDecl(takeAll(), up.pos)); goTpEnd() ~~>
-            = "type" KwEnd Id <~~ push(cPoisonName(up.in)) ~~> [ TypeParams ] [ AliasEq ] ( StructBody | IfaceBody | DefinedType ) [ ";" ] ;
+TypeDecl    <~~ push(makeTypeDecl(takeAll(), up.pos)); goTpEndTy() ~~>
+            = "type" KwEnd Id <~~ push(goLtyDecl(cPoisonName(up.in))) ~~> [ TypeParams ] [ AliasEq ] ( StructBody | IfaceBody | DefinedType ) [ ";" ] ;
 AliasEq     <~~ push({alias: true}) ~~> = "=" ;
 // type myInt int / type Celsius float64: a defined type over an existing one. The value
 // model has no distinct type for it, so the name becomes the CONVERSION to its
@@ -675,7 +675,7 @@ TSSubject   <~~ push(foldCallMember(goBoxArgsC(goRecvsC(takeAll(), up.start)))) 
 TypeCase    <~~ push(makeTypeCase(cTsCase(takeAll()))) ~~>
             = CCaseOn ( "case" KwEnd CaseType { "," CaseType }
               | "default" KwEnd ) ":" ;
-CaseType    <~~ push({ct: goAssertTyC(goWalkQual(up.in))}) ~~>
+CaseType    <~~ push({ct: goAssertTyC(goWalkQual(goLtyRw(up.in)))}) ~~>
             = Type ;
 // The subjectless body is tried before the subject so a bare 'switch {' never enters
 // SwitchSubj: that would push the composite-literal gate marker (CondOn) and then fail
@@ -1197,14 +1197,14 @@ MapTypeZ    = "map" KwEnd "[" KType "]" ZType ;
 // The KEY type text, which an elided struct key is built against (see MapKey).
 KType       <~~ push({mkey: goWalkQual(firstType(up.in))}) ~~>
             = Type ;
-ZType       <~~ push({mzero: goWalkQual(up.in)}) ~~>
+ZType       <~~ push({mzero: goWalkQual(goLtyRw(up.in))}) ~~>
             = Type ;
 
 // Point{3, 4} positional, Point{y: 4, x: 3} keyed, Point{} empty. A keyed element is
 // tried first: its 'name:' would otherwise parse as a bare expression.
 StructLit   <~~ var si = takeAll(); goLitClaim(si[0], up.start, up.pos)
-                push(goLitC(makeStructLit(si, goTpArgsOf(up.in.substring(0, up.in.indexOf("{")))), si[0], up.pos)) ~~>
-            = StructGate NotTypeKw Id <~~ push(up.in) ~~> [ TypeArgs ]
+                push(goLitC(makeStructLit(si, goTpArgsOf(goLtyRw(up.in.substring(0, up.in.indexOf("{"))))), si[0], up.pos)) ~~>
+            = StructGate NotTypeKw Id <~~ push(goLtyName(up.in)) ~~> [ TypeArgs ]
               "{" [ LitElem { "," LitElem } [ "," ] ] "}" ;
 // pkga.Item{N: 3}: a composite literal of ANOTHER PACKAGE'S type. It has to be tried
 // before CompLitNI, whose CompName is `Id { "." Id }` and whose SkipBlock would eat
@@ -1261,7 +1261,7 @@ LitExpr     <~~ var le = pop(); push(le); push({lesty: goLitEsty(up.pos), pu: go
 // variadic parameter.
 Call        <~~ var ci = goAppendC(takeAll(), up.in); var csp = goSplitArgs(ci.slice(1))
                 push(makeCall(goCallBoxC(ci), csp.atys, goTpInfer(ci[0], csp, []))); goLenConstC(ci, up.start, up.pos) ~~>
-            = Id <~~ push(up.in) ~~> "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
+            = Id <~~ push(goLtyName(up.in)) ~~> "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
 // A call argument reports its static type after it, for goSplitArgs.
 ArgExpr     <~~ var ae = pop(); push(goRuneDefC(ae, up.pos)); push({aty: stAt(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos)}) ~~> = Expression ;
 // A returned value, which takes a rune constant at the RESULT's type (makeReturn).
@@ -1816,8 +1816,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     // Integer values of TYPED constants, for goArrConstLen only - see cBindSpec.
     var cArrLenTbl = {}
-    function goArrConstLen(t) {
-        if (t == undefined || t == null || t.indexOf("[") < 0) { return t }
+    // Also respells a local type's name (goLtyRw): every type text the walk reads
+    // comes through here.
+    function goArrConstLen(t0) {
+        if (t0 == undefined || t0 == null) { return t0 }
+        var t = goLtyRw(t0)
+        if (t.indexOf("[") < 0) { return t }
         var out = ""
         var i = 0
         while (i < t.length) {
@@ -2575,6 +2579,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                                      seqElemsAsStructArgs(els))
             }
         }
+        // An instantiated generic struct: []Box[int]{{1}}.
+        var glb = cet.indexOf("[")
+        if (glb > 0 && goGenTys["$" + cet.substring(0, glb)] !== undefined) {
+            var gname = cet.substring(0, glb)
+            return emitGenStructVal(b, gname, goGenTys["$" + gname], goTpSplit(cet.substring(glb + 1, stClose(cet, glb))),
+                                    seqElemsAsStructArgs(els), null)
+        }
         var flds = sFields(cet)
         if (flds == undefined) { fail("composite literal element of unsupported type " + cet) }
         return emitStructVal(b, callExt(b, "js_scope_get", [curScopeV, emitStr(b, cet)]),
@@ -2910,6 +2921,20 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (goDtBoxTy(t) != "") { goDtNote(goDtBoxTy(t)) }
         return t
     }
+    // A literal of generic struct tyName (type parameters tps) instantiated with the
+    // type texts vals: the field types substituted, the arguments recorded (__targs).
+    function emitGenStructVal(b, tyName, tps, vals, args, estys) {
+        var fts = []
+        var f0 = sFTypes(tyName)
+        for (var z = 0; z < f0.length; z++) {
+            var fs = goTpSubst(f0[z], tps, vals)
+            fts.push(fs != "" ? fs : f0[z])
+        }
+        var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, tyName)])
+        var r = emitStructVal(b, clsV, sFields(tyName), fts, args, estys)
+        callExt(r.b, "js_set", [r.v, emitStr(r.b, "__targs"), emitTargs(r.b, vals)])
+        return r
+    }
     // ta: a generic struct's type arguments as written (goTpArgsOf), else "".
     function makeStructLit(items, ta) {
         var tyName = items[0]
@@ -2919,18 +2944,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var tps = goGenTys["$" + tyName]
         if (ta != "" && tps !== undefined) {
             var vals = goTpSplit(ta)
-            return function(b) {
-                var fts = []
-                var f0 = sFTypes(tyName)
-                for (var z = 0; z < f0.length; z++) {
-                    var fs = goTpSubst(f0[z], tps, vals)
-                    fts.push(fs != "" ? fs : f0[z])
-                }
-                var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, tyName)])
-                var r = emitStructVal(b, clsV, sFields(tyName), fts, args, estys)
-                callExt(r.b, "js_set", [r.v, emitStr(r.b, "__targs"), emitTargs(r.b, vals)])
-                return r
-            }
+            return function(b) { return emitGenStructVal(b, tyName, tps, vals, args, estys) }
         }
         return function(b) {
             // A DEFINED type: `type L []int; L{1, 2, 3}` is the []int literal and
@@ -3615,8 +3629,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         curScopeV = savedScope
     }
     // Can jsmain's scope build the zero of t? Not when t needs the descriptor of a
-    // type declared only inside functions (goLocalTys: true; false once the name is
-    // also declared at top level), which binds in that function's scope.
+    // type declared inside a function (goLocalTys, by its key: goLtyDecl), which
+    // binds in that function's scope.
     var goLocalTys = {}
     function goPadReach(t, seen) {
         if (t == "" || seen["$" + t] === true) { return true }
@@ -6118,7 +6132,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             last = items[items.length - 1]
         }
         declaredTypes[items[0]] = true
-        goLocalTys["$" + items[0]] = cScopes.length != 1 && goLocalTys["$" + items[0]] !== false
+        goLocalTys["$" + items[0]] = cScopes.length != 1
         // An interface declaration binds no runtime value: the value model is dynamic,
         // so satisfaction is implicit and a method call on an interface value is the
         // ordinary method call on whatever struct is in it. A constraint interface

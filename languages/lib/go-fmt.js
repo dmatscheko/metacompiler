@@ -441,6 +441,25 @@ function gfTargs(ts) {
     }
     return gfQualTy("[" + s + "]")
 }
+// Type text t with each local type's key (name + "__L" + n, goLtyDecl in
+// go-constfold.js) back to the name Go spells it with. Twin of gopLtyStrip in
+// abnf/jsrtgolang.go.
+function gfLtyStrip(t) {
+    var k = t.indexOf("__L")
+    if (k < 0) { return t }
+    var out = ""
+    var i = 0
+    while (k >= 0) {
+        var e = k + 3
+        while (e < t.length && t.charCodeAt(e) >= 48 && t.charCodeAt(e) <= 57) { e = e + 1 }
+        if (k > 0 && e > k + 3 && (e == t.length || !gfIdChar(t.charCodeAt(e)))) {
+            out = out + t.substring(i, k)
+        } else { out = out + t.substring(i, e) }
+        i = e
+        k = t.indexOf("__L", i)
+    }
+    return out + t.substring(i)
+}
 function gfQualTy(t) {
     var out = ""
     var i = 0
@@ -464,7 +483,7 @@ function gfQualTy(t) {
         out = out + id
         i = j
     }
-    return out
+    return gfLtyStrip(out)
 }
 
 // reflect.Type.String of v's dynamic type, which is fmt's %T. A 64 bit integer
@@ -479,7 +498,7 @@ function gfTypeName(v) {
     if (k == "int" || k == "float" || k == "complex") { return gfHTy(v) }
     if (k == "struct") {
         var nm = gfHStructName(v)
-        if (nm != "") { return nm }
+        if (nm != "") { return gfLtyStrip(nm) }
         return gfAnonTy(v)
     }
     if (k == "list") {
