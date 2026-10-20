@@ -9259,6 +9259,17 @@ KwContinue  = "continue" KwEnd ;
     // The default is written at the dictionary's value type (ety, "" when the walk
     // does not know it), as a literal there is: `[]` for a `Set<Int>` value is a Set.
     function swIdxDflt(o, k, dflt, store, ety) {
+        // A program subscript with a `default:` parameter takes the default as its
+        // last argument (`p[5, default: -1]`). Twin of swEmitIdxDflt in
+        // swift-to-llvm-ir.abnf.
+        if (!isDict(o)) {
+            var sg = subAccessor(o, "__sub_get")
+            if (sg != null) {
+                var ks = idxArgs(k).slice(0)
+                ks.push(dflt())
+                return sg.apply(undefined, concat2impl([o], ks))
+            }
+        }
         if (isDict(o) && dictFind(o, k) < 0) {
             var dv = anytype
             dv = dflt()
@@ -9617,9 +9628,12 @@ KwContinue  = "continue" KwEnd ;
     function memberwiseParams(fields) {
         var mparams = []
         for (var s = 0; s < fields.length; s++) {
+            // A `Set<T>` property makes its argument a Set, as a `Set<T>` parameter does.
+            var fa = fields[s].ann == undefined ? "" : fields[s].ann
             mparams.push({name: fields[s].store, label: fields[s].name, type: "",
                           adopt: fields[s].ty, variadic: false, auto: false, inout: false,
-                          hasDefault: fields[s].hasInit, dflt: fields[s].init, ann: fields[s].ann})
+                          hasDefault: fields[s].hasInit, dflt: fields[s].init, ann: fields[s].ann,
+                          isSet: swIsSetTy(fa) && fa.charAt(fa.length - 1) != "?"})
         }
         return mparams
     }
@@ -9853,7 +9867,7 @@ KwContinue  = "continue" KwEnd ;
                     for (var a = 1; a < arguments.length; a++) { args.push(arguments[a]) }
                     var bnd = swBindArgs(mparams, args, self)
                     for (var p2 = 0; p2 < mparams.length; p2++) {
-                        scopePut(self, mparams[p2].name, bnd.vals[p2])
+                        scopePut(self, mparams[p2].name, mparams[p2].isSet ? swSetOf(bnd.vals[p2]) : bnd.vals[p2])
                     }
                 })
             }

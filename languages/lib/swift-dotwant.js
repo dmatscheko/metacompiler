@@ -1077,6 +1077,8 @@ function swDsHasFloElem(s) {
 // operand among its elements (`[Any]`'s usual shape) is left alone.
 function swLitTy(t) {
     if (t == "") { return "" }
+    var ar = swArithTy(t)
+    if (ar != null) { return ar }
     if (t.indexOf("..") >= 0) { return swExprAnn(t) }
     var a = t.charAt(0) == "-" ? 1 : 0
     if (a < t.length && t.charAt(a) >= "0" && t.charAt(a) <= "9") {
@@ -1122,6 +1124,53 @@ function swLitTy(t) {
     return dict ? "[" + kt + ":" + vt + "]" : "[" + vt + "]"
 }
 function swLitIsNum(t) { return t == "Double" || t == "Float" || t == "CGFloat" || swIntWidthOf(t) != null }
+// The type of an arithmetic expression's text from its operands'
+// (`Double(s) / Double(n)` is a Double, so `c ? 0 : Double(s) / Double(n)` makes
+// the 0 a Double): floating point when an operand is, "#" when every operand is
+// an integer literal, "" otherwise - and null when t is not a + - * / chain at
+// its top level (a comparison, a ternary, a range, a generic name all decline).
+function swArithTy(t) {
+    var ops = []
+    var depth = 0
+    var last = ""
+    var j = 0
+    while (j < t.length) {
+        var sk = swDsSkip(t, j)
+        if (sk < 0) { return null }
+        if (sk != j) { j = sk; last = "\""; continue }
+        var ch = t.charAt(j)
+        if (ch == "(" || ch == "[" || ch == "{") { depth++ }
+        else if (ch == ")" || ch == "]" || ch == "}") { depth-- }
+        else if (depth == 0) {
+            if (ch == "<" || ch == ">" || ch == "=" || ch == "!" || ch == "&" || ch == "|" || ch == "?"
+                || ch == ":" || ch == "." || ch == "%" || ch == "^" || ch == "~") { return null }
+            var bin = swDsIdCh(last) || last == ")" || last == "]" || last == "\""
+            if ((ch == "+" || ch == "-" || ch == "*" || ch == "/") && bin && !swNumExpSign(t, j)) { ops.push(j) }
+        }
+        if (ch != " " && ch != "\t") { last = ch }
+        j++
+    }
+    if (ops.length == 0) { return null }
+    var out = "#"
+    var from = 0
+    for (var k = 0; k <= ops.length; k++) {
+        var to = k < ops.length ? ops[k] : t.length
+        var pt = swLitCoalTy(stripWs(t.substring(from, to)))
+        if (pt == "") { pt = swLitTy(stripWs(t.substring(from, to))) }
+        if (pt == "Double" || pt == "Float") { return pt }
+        if (pt != "#") { out = "" }
+        from = to + 1
+    }
+    return out
+}
+// Whether the sign at t[j] belongs to a numeral's exponent (`1e-5`).
+function swNumExpSign(t, j) {
+    if (j < 2 || (t.charAt(j - 1) != "e" && t.charAt(j - 1) != "E")) { return false }
+    var s = j - 1
+    while (s > 0 && (swDsIdCh(t.charAt(s - 1)) || t.charAt(s - 1) == ".")) { s-- }
+    var c0 = t.charAt(s)
+    return c0 >= "0" && c0 <= "9" && t.substring(s, s + 2) != "0x"
+}
 function swLitJoin(a, b) {
     if (a == "?") { return b }
     if (a == "" || b == "") { return "" }

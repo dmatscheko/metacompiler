@@ -5611,6 +5611,26 @@ func s145() {
     check("145b", second == 10 && ctr.inc() == 5)
 }
 
+// ===== SECTION 146: a Set property's argument; a ternary's literal; a defaulted subscript =====
+// The memberwise argument of a `Set<String>` property is a Set, so `remove("b")`
+// removes that member; `c ? 0 : Double(s) / Double(n)` makes the 0 a Double, as
+// the other arm's arithmetic is; and a subscript whose `default:` parameter has a
+// default is read with and without it. Every value read off swiftc 6.1.2.
+struct Bag146 { var items: Set<String> }
+struct Grid146 {
+    var c: [Double]
+    subscript(i: Int, default d: Double = 0) -> Double { i < c.count ? c[i] : d }
+}
+func s146() {
+    var b = Bag146(items: ["a", "b", "c"])
+    let gone = b.items.remove("b")
+    let e: [Int] = []
+    let avg = e.isEmpty ? 0 : Double(e.reduce(0, +)) / Double(e.count)
+    let g = Grid146(c: [1])
+    check("146a", gone == "b" && b.items.sorted() == ["a", "c"] && "\(avg)" == "0.0")
+    check("146b", g[0] == 1.0 && "\(g[3])" == "0.0" && g[3, default: -1] == -1.0)
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5757,6 +5777,7 @@ func main() {
     s143() // SECTION-CALL 143
     s144() // SECTION-CALL 144
     s145() // SECTION-CALL 145
+    s146() // SECTION-CALL 146
     print("full: \(checks) checks, \(fails) failures")
 }
 

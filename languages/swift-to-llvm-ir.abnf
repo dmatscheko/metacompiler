@@ -9647,6 +9647,29 @@ KwContinue  = "continue" KwEnd ;
     // The default is written at the dictionary's value type (ety, "" when the walk
     // does not know it), as a literal there is: `[]` for a `Set<Int>` value is a Set.
     function swEmitIdxDflt(b, o, k, dflt, store, ety) {
+        if (!hasSubscript) { return swEmitIdxDfltDict(b, o, k, dflt, store, ety) }
+        // A program subscript with a `default:` parameter takes the default as its
+        // last argument (`p[5, default: -1]`). Twin of swIdxDflt in
+        // swift-interpreter.abnf.
+        var arV = callExt(b, "js_jadd", [b.NewCall(rtIdxArity(), [k]), emitNum(b, 1)])
+        var g = b.NewCall(rtSubLookup(), [o, callExt(b, "js_jadd", [emitStr(b, "__sub_get"), arV])])
+        var userB = curF.NewBlock("")
+        var dictB = curF.NewBlock("")
+        var outB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, g), userB, dictB)
+        var args = callExt(userB, "js_arr_new", [])
+        callExt(userB, "js_arr_push", [args, o])
+        userB = emitSpreadIdx(userB, args, k)
+        var ud = dflt(userB)
+        userB = ud.b
+        callExt(userB, "js_arr_push", [args, ud.v])
+        var uv = callExt(userB, "js_call", [g, hUndef, args])
+        userB.NewBr(outB)
+        var r = swEmitIdxDfltDict(dictB, o, k, dflt, store, ety)
+        r.b.NewBr(outB)
+        return {b: outB, v: outB.NewPhi([llvm.ir.NewIncoming(uv, userB), llvm.ir.NewIncoming(r.v, r.b)])}
+    }
+    function swEmitIdxDfltDict(b, o, k, dflt, store, ety) {
         var v0 = emitIndexRead(b, o, k)
         var missB = curF.NewBlock("")
         var hitB = curF.NewBlock("")
@@ -9759,7 +9782,14 @@ KwContinue  = "continue" KwEnd ;
             else if (a.kind == "set" || a.kind == "_modify") { set = a.body; if (a.param != null) { setP = a.param } }
         }
         var out = []
-        if (get != null) { out.push({method: {name: "__sub_get" + params.length, params: params, body: get, rtype: rty}}) }
+        // A getter whose trailing index parameters have defaults answers every
+        // arity it accepts (`p[3]` beside `p[3, default: -1]`); the interpreter's
+        // overload dispatcher picks the same one.
+        var req = params.length
+        while (req > 0 && params[req - 1].hasDefault) { req-- }
+        for (var ar = req; get != null && ar <= params.length; ar++) {
+            out.push({method: {name: "__sub_get" + ar, params: params, body: get, rtype: rty}})
+        }
         if (set != null) {
             var sp = []
             for (var k = 0; k < params.length; k++) { sp.push(params[k]) }
@@ -9908,9 +9938,12 @@ KwContinue  = "continue" KwEnd ;
     function memberwiseParams(fields) {
         var mparams = []
         for (var s = 0; s < fields.length; s++) {
+            // A `Set<T>` property makes its argument a Set, as a `Set<T>` parameter does.
+            var fa = fields[s].ann == undefined ? "" : fields[s].ann
             mparams.push({name: fields[s].store, label: fields[s].name, type: "",
                           adopt: fields[s].ty, variadic: false, auto: false, inout: false,
-                          hasDefault: fields[s].hasInit, dflt: fields[s].init, ann: fields[s].ann})
+                          hasDefault: fields[s].hasInit, dflt: fields[s].init, ann: fields[s].ann,
+                          isSet: swIsSetTy(fa) && fa.charAt(fa.length - 1) != "?"})
         }
         return mparams
     }
