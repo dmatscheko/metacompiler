@@ -1485,6 +1485,14 @@ function goTkRun(items, ops) {
     }
     return acc
 }
+// A folded run with a typed operand is a typed constant (`Green + 1` is a Color,
+// tk from goTkRun): its static type and typed value replace the untyped ones.
+function goTkFolded(folded, tk, pos, sty) {
+    if (tk == null) { return folded }
+    regSt(pos, sty)
+    regTk(pos, tk)
+    return cMaterialize(tk.k)
+}
 // -x of a typed constant x ending at pos, the whole starting at s.
 function goTkNeg(pos, s) {
     var t = tkAt(pos)
@@ -1702,10 +1710,13 @@ function goChainC(t, text, pos) {
     if (ty == "" && h > 0 && text.charAt(h) == "." && goFnSig["$" + text] !== undefined && !cIsLocal(text.substring(0, h))) { ty = goFnSig["$" + text] }
     // ... and a package's typed constant or variable (`time.Hour`) its type.
     if (ty == "" && h > 0 && text.charAt(h) == "." && cPkgTys["$" + text] !== undefined && !cIsLocal(text.substring(0, h))) { ty = cPkgTys["$" + text] }
-    if (ty != "") { regSt(pos, ty) }
+    // The constant first: registering one clears the position's static type.
     cPkgMember(text, pos)
     var pc = cPkgConstOf(text)
     if (pc != null) { regConst(pos, pc) }
+    if (ty != "") { regSt(pos, ty) }
+    var px = pc != null ? cPkgXs["$" + text] : undefined
+    if (px !== undefined && px != null && px.k != undefined) { regTk(pos, px) }
     return t
 }
 // An imported package's top-level names ("$pkg.Name" -> the folded constant, null for
@@ -1719,11 +1730,15 @@ var cPkgWhole = {}
 // "$pkg.Name" -> the static type of a top-level name, as seen from outside the
 // package ("Duration" in package time is "time.Duration").
 var cPkgTys = {}
+// "$pkg.Name" -> the x column of a top-level name (cSpecX): a typed constant's
+// value and type, so `time.March` folds as a time.Month and not as an untyped 3.
+var cPkgXs = {}
 function cNotePkgConsts(pname, lib) {
     var f = cScopes[0]
     var i = 0
     while (i < f.n.length) {
         cPkgConsts["$" + pname + "." + f.n[i]] = f.v[i]
+        cPkgXs["$" + pname + "." + f.n[i]] = f.x[i]
         if (typeof f.t[i] == "string" && f.t[i] != "") { cPkgTys["$" + pname + "." + f.n[i]] = goPkgQual(pname, f.t[i], false) }
         i = i + 1
     }
@@ -2294,9 +2309,22 @@ function goKeyBoxTy(mty, ksty) {
     return goDtBoxTo(ksty, stMapKeyTy(t))
 }
 function goKeyBoxC(t, mty, ksty) { return goDtBoxThunk(t, goKeyBoxTy(mty, ksty)) }
+// Whether `*...*name` (stars deep) is a struct: a struct pointer IS the struct, so
+// `*p = v` copies v's fields into it in place (sto) instead of rebinding p.
+function goStarStructC(name, stars) {
+    var t = stBare(cTyLookup(name))
+    for (var i = 0; i < stars; i++) {
+        if (t.length < 2 || t.charAt(0) != "*") { return false }
+        t = t.substring(1)
+    }
+    return goStructTyName(t) != ""
+}
 // The index steps of an assignment target, each typed through the steps before it.
 function goRefKeysC(ref) {
-    if (ref.stars > 0) { return ref }
+    if (ref.stars > 0) {
+        ref.sto = ref.path.length == 0 && goStarStructC(ref.name, ref.stars)
+        return ref
+    }
     var k = 0
     while (k < ref.path.length) {
         var p = ref.path[k]
@@ -2493,6 +2521,17 @@ function goPkgQual(pkg, t, defOnly) {
 // ("[]Kind" -> "[]pk.Kind"), the spelling main's code uses for them. Such a value
 // carries no descriptor, so a bare name would be read as main's.
 function goWalkQual(t) { return goWalkPkg == "" ? t : goPkgQual(goWalkPkg, t, true) }
+// The {fty} of an embedded field spelled text (`T`, `*T`, `pkg.T`): an embedded
+// interface keeps its name, so a literal boxes the value put there; an embedded
+// value type is the field's type, so its zero value is a zero T; an embedded
+// pointer is "" (nil).
+function goEmbedTyC(text) {
+    var dot = text.indexOf(".")
+    var name = dot < 0 ? text : text.substring(dot + 1)
+    if (goIsIfaceTy(name)) { return {fty: name} }
+    if (text.charAt(0) == "*") { return {fty: ""} }
+    return {fty: goWalkQual(text)}
+}
 // ----- APPEND'S GROWTH -----
 // The capacity append grows a full slice to is gc's runtime.growslice: the next
 // capacity (doubling below 256 elements, then +(n+768)/4 until it holds the new

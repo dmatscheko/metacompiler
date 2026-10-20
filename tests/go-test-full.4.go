@@ -200,8 +200,14 @@ func s101str() string {
 	return out
 }
 
+// The Kind constants are reflect.Kind values, and print by Kind's String.
+func s101kinds() string {
+	return fmt.Sprint(reflect.Map, " ", reflect.Slice, " ", reflect.Bool, " ", reflect.Ptr == reflect.Pointer)
+}
+
 func s101() {
 	check("refl1", s101str() == "main.T101 struct T101 6|Name string string name n true;Tags []string slice tags  true;M map[string]int map m  true;In main.In101 struct   true;F float64 float64   true;small int8 int8   false;struct 6a1 x 1.5 5|42 true false false int string false")
+	check("refl2", s101kinds() == "map slice bool true")
 }
 
 func main() {

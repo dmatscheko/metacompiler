@@ -2000,7 +2000,8 @@ function js_gofield(o, kv) {
     return goGetMember(o, key)
 }
 
-// The field `name` PROMOTED from an embedded struct of o, searched BREADTH FIRST,
+// The field `name` PROMOTED from an embedded struct of o, as {v: its value, o: the
+// embedded struct holding it}, searched BREADTH FIRST,
 // which is Go's own rule: the shallowest depth wins. The depth cap matches the
 // __class walks (manual 7.9): a pointer cycle here would otherwise not terminate.
 // Answers undefined when nothing is found.
@@ -2020,7 +2021,7 @@ function goPromField(o, key, maxd) {
         i1 = i1 + 1
         if (!goIsObj(in1)) { continue }
         if (in1.__class === undefined) { continue }
-        if (goHas(in1, key)) { return {v: in1[key]} }
+        if (goHas(in1, key)) { return {v: in1[key], o: in1} }
         hasEmb = true
     }
     if (!hasEmb) { return undefined }
@@ -2048,7 +2049,7 @@ function goPromDeep(o, key, maxd) {
                 k = k + 1
                 if (!goIsObj(inner)) { continue }
                 if (inner.__class === undefined) { continue }
-                if (goHas(inner, key)) { return {v: inner[key]} }
+                if (goHas(inner, key)) { return {v: inner[key], o: inner} }
                 next.push(inner)
             }
         }
@@ -3159,8 +3160,12 @@ function js_gorfstore(args) {
         if (sc !== undefined) { scopeDecl(sc, key, v) }
         return undefined
     }
-    var x = anytype
-    x = goRfUnbox(p)
+    return js_gostructset(goRfUnbox(p), v)
+}
+// `*p = v` for a struct pointer p, which IS the struct x: v's fields are copied
+// into x in place. Twin of js_gostructset in abnf/jsrtgoreflect.go.
+function js_gostructset(x, v) {
+    if (x === undefined || x === null) { goNilDeref() }
     var fs = goClassOf(x).__fields
     var i = 0
     while (i < fs.length) {
@@ -3370,6 +3375,11 @@ function js_gosetfield(o, namev, v) {
     if (pw !== undefined && scopeHas(pw, name)) { scopeDecl(pw, name, v); return undefined }
     var ty = goFieldTy(o, name)
     if (ty == "") {
+        // A promoted field is written in the embedded struct that holds it.
+        if (goIsObj(o) && !goHas(o, name)) {
+            var pf = goPromField(o, name, 16)
+            if (pf !== undefined) { return js_gosetfield(pf.o, namev, v) }
+        }
         o[name] = v
         return undefined
     }

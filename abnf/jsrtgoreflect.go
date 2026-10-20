@@ -224,6 +224,24 @@ func init() {
 			ext("js_gosetfield", o, fs.elems[int(rt.toNumber(arg(a, 1)))], unbox(arg(a, 2)))
 			return w(jsUndef)
 		}
+		// js_gostructset(x, v): `*p = v` for a struct pointer p, which IS the struct
+		// x: v's fields are copied into x in place. Twins: goStructSet in
+		// languages/go-interpreter.abnf, js_gostructset in lib/go-rt.metajs.
+		structSet := func(x, v interface{}) {
+			goNilDeref(rt, x)
+			o := x.(*jsObject)
+			src, _ := v.(*jsObject)
+			if fs, ok := goClassOf(o).props["__fields"].(*jsArray); ok && src != nil {
+				for _, f := range fs.elems {
+					name := rt.toString(f)
+					o.set(name, src.props[name])
+				}
+			}
+		}
+		m["js_gostructset"] = func(a []uint64) uint64 {
+			structSet(u(a[0]), u(a[1]))
+			return w(jsUndef)
+		}
 		m["js_gorfstore"] = func(a []uint64) uint64 {
 			p, v := arg(a, 0), unbox(arg(a, 1))
 			if c, ok := cellOf(p); ok {
@@ -235,14 +253,7 @@ func init() {
 				}
 				return w(jsUndef)
 			}
-			o := unbox(p).(*jsObject)
-			src, _ := v.(*jsObject)
-			if fs, ok := goClassOf(o).props["__fields"].(*jsArray); ok && src != nil {
-				for _, f := range fs.elems {
-					name := rt.toString(f)
-					o.set(name, src.props[name])
-				}
-			}
+			structSet(unbox(p), v)
 			return w(jsUndef)
 		}
 		m["js_gorfconv"] = func(a []uint64) uint64 {

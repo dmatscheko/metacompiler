@@ -310,16 +310,99 @@ func s104() {
 	check("embed104", !okA && okB && mb.MJ() == "p")
 }
 
+// ===== SECTION 105: `*p = v` through a pointer to a struct =====
+// The store copies v into the struct p points at, so every other pointer to it
+// sees the new value, and a store through a nil pointer panics. The expected
+// values are go run's.
+type in105 struct{ v int }
+
+type t105 struct {
+	x  int
+	in in105
+}
+
+func (t *t105) set(o *t105) { *t = *o }
+
+func s105() {
+	a := &t105{1, in105{1}}
+	alias := a
+	b := &t105{5, in105{6}}
+	a.set(b)
+	b.in.v = 99
+	out := fmt.Sprint(alias.x, alias.in.v)
+	*alias = t105{7, in105{8}}
+	out += fmt.Sprint(" ", a.x, a.in.v)
+	pp := &a
+	**pp = t105{3, in105{4}}
+	out += fmt.Sprint(" ", alias.x, alias.in.v)
+	func() {
+		defer func() { out += fmt.Sprint(" ", recover()) }()
+		var np *t105
+		*np = t105{}
+	}()
+	check("pstore105", out == "5 6 7 8 3 4 runtime error: invalid memory address or nil pointer dereference")
+}
+
+// ===== SECTION 106: a zero embedded struct; a promoted field written =====
+// S{} holds a zero Base, so Base's methods and fields are S's; a write to a
+// promoted field writes the embedded struct's. The expected values are go run's.
+type base106 struct{ n int }
+
+func (b base106) Hello() string { return fmt.Sprint("hi", b.n) }
+
+type s106 struct {
+	base106
+	k int
+}
+
+func s106f() {
+	s := s106{}
+	out := s.Hello() + fmt.Sprint(" ", s.n, " ")
+	s.n = 4
+	s.n++
+	s.n += 2
+	out += fmt.Sprint(s.n, s.base106.n, s.Hello())
+	p := &s106{k: 1}
+	p.n = 6
+	u := s
+	u.n = 100
+	out += fmt.Sprint(" ", p.base106.n, p.Hello(), s.n, u.n)
+	check("embed106", out == "hi0 0 7 7hi7 6hi67 100")
+	check("embed106v", fmt.Sprintf("%+v", s106{}) == "{base106:{n:0} k:0}")
+}
+
+// ===== SECTION 107: a package's typed constants =====
+// time.March is a time.Month however it is spelled, and so is a constant
+// expression over one, or over a typed constant of the program's own. The
+// expected values are go run's.
+type color107 int
+
+const (
+	red107 color107 = iota + 1
+	green107
+)
+
+func (c color107) String() string { return [...]string{"?", "R", "G", "B"}[c] }
+
+func s107() {
+	check("pkgconst107", fmt.Sprint(time.March, " ", time.February*2, " ", time.Saturday-1, " ", time.Monday) == "March April Friday Monday")
+	check("pkgconst107f", fmt.Sprintf("%v %d %s %T", time.March, time.March, time.March, time.March) == "March 3 March time.Month")
+	check("pkgconst107c", fmt.Sprint(green107+1, red107*2) == "B G")
+}
+
 func main() {
-	s94()  // SECTION-CALL 94
-	s95()  // SECTION-CALL 95
-	s96()  // SECTION-CALL 96
-	s97()  // SECTION-CALL 97
-	s98()  // SECTION-CALL 98
-	s99()  // SECTION-CALL 99
-	s102() // SECTION-CALL 102
-	s103() // SECTION-CALL 103
-	s104() // SECTION-CALL 104
+	s94()   // SECTION-CALL 94
+	s95()   // SECTION-CALL 95
+	s96()   // SECTION-CALL 96
+	s97()   // SECTION-CALL 97
+	s98()   // SECTION-CALL 98
+	s99()   // SECTION-CALL 99
+	s102()  // SECTION-CALL 102
+	s103()  // SECTION-CALL 103
+	s104()  // SECTION-CALL 104
+	s105()  // SECTION-CALL 105
+	s106f() // SECTION-CALL 106
+	s107()  // SECTION-CALL 107
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

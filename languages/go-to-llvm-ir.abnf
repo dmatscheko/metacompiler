@@ -160,8 +160,9 @@ NamedField  = Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } SameLine FTy
 // leaves it out (Go zero-fills; an absent property would read back as undefined).
 FType       <~~ push({fty: goWalkQual(firstType(up.in))}) ~~> = Type ;
 // An embedded field's NAME is its type name (w.base09, plus the promoted w.id); an
-// embedded INTERFACE keeps its type, so a literal boxes the value put there.
-EmbedField  = [ "*" ] [ Id "." ] Id <~~ push(up.in); push({fty: goIsIfaceTy(up.in) ? up.in : ""}) ~~> [ TypeTag ] [ ";" ] ;
+// embedded field's type (goEmbedTyC) gives it its zero value.
+EmbedField  = EmbedTy [ TypeTag ] [ ";" ] ;
+EmbedTy     <~~ push(goEmbedTyC(up.in)) ~~> = [ "*" ] [ Id "." ] Id <~~ push(up.in) ~~> ;
 FieldTag    = RawString <~~ pop() ~~> ;
 // A named struct type's field tag is kept, for reflect and encoding/json (the
 // descriptor's __ftags); an anonymous struct's is dropped (FieldTag).
@@ -2056,9 +2057,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var cfn = goFoldCFn(items, ops, ty)
         var sty = goRunSty(items, ops)
         goRunCheck(items, ops, sty)
-        var folded = goFoldConst(items, ops, pos, ty)
-        if (folded != null) { return folded }
         var tk = goTkRun(items, ops)
+        var folded = goFoldConst(items, ops, pos, ty)
+        if (folded != null) { return goTkFolded(folded, tk, pos, sty) }
         if (ty == null) { goFloOperands(items, ts, sty) }
         goShiftCounts(items, ops, ts)
         ts = goRunOrder(items, ts)
@@ -4251,6 +4252,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     function emitLocWrite(b, ref, loc, v) {
         if (ref.path.length == 0) {
+            if (ref.sto) {
+                callExt(b, "js_gostructset", [loc, v])
+                return b
+            }
             if (ref.stars > 0) {
                 var nm = ref.name
                 var r = emitSelect(b, emitIsPtr(b, loc),

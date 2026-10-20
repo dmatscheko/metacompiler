@@ -2306,6 +2306,15 @@ func init() {
 		m["js_gosetfield"] = func(a []uint64) uint64 {
 			ty := giFieldTy(u(a[0]), rt.toString(u(a[1])))
 			if ty == "" {
+				// A promoted field is written in the embedded struct that holds it.
+				if o, ok := u(a[0]).(*jsObject); ok {
+					key := rt.toString(u(a[1]))
+					if _, own := o.props[key]; !own {
+						if h := rt.goPromField(o, key, 16); h != nil {
+							return m["js_gosetfield"]([]uint64{w(h), a[1], a[2]})
+						}
+					}
+				}
 				return baseSet(a)
 			}
 			return baseSet([]uint64{a[0], a[1], w(giAdoptText(rt, ty, u(a[2])))})

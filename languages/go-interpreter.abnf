@@ -144,8 +144,9 @@ FieldDecl   = NamedField | EmbedField ;
 NamedField  = Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } SameLine FType [ TypeTag ] [ ";" ] ;
 FType       <~~ push({fty: goWalkQual(firstType(up.in))}) ~~> = Type ;
 // An embedded field's NAME is its type name (w.base09 as well as the promoted w.id);
-// an embedded INTERFACE keeps its type, so a literal boxes the value put there.
-EmbedField  = [ "*" ] [ Id "." ] Id <~~ push(up.in); push({fty: goIsIfaceTy(up.in) ? up.in : ""}) ~~> [ TypeTag ] [ ";" ] ;
+// its type (goEmbedTyC) gives it its zero value, so S{} holds a zero Base.
+EmbedField  = EmbedTy [ TypeTag ] [ ";" ] ;
+EmbedTy     <~~ push(goEmbedTyC(up.in)) ~~> = [ "*" ] [ Id "." ] Id <~~ push(up.in) ~~> ;
 FieldTag    = RawString <~~ pop() ~~> ;
 // A named struct type's field tag is kept, for reflect and encoding/json (the
 // descriptor's __ftags); an anonymous struct's is dropped (FieldTag).
@@ -1941,8 +1942,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     function goRfStore(p, v) {
         if (isPtr(p)) { ptrSet(p, goRfUnbox(v)); return }
-        var x = anytype
-        x = goRfUnbox(p)
+        goStructSet(goRfUnbox(p), v)
+    }
+    // `*p = v` for a struct pointer p, which IS the struct x: v's fields are copied
+    // into x in place. Twins: js_gostructset in abnf/jsrtgoreflect.go and
+    // lib/go-rt.metajs.
+    function goStructSet(x, v) {
+        if (x === undefined || x === null) { goNilDeref() }
         var fs = x.__class.__fields
         for (var i = 0; i < fs.length; i++) { x[fs[i]] = v[fs[i]] }
     }
@@ -2376,7 +2382,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
         return core.getField(o, name)
     }
-    // The field `name` PROMOTED from an embedded struct of o, searched BREADTH FIRST,
+    // The field `name` PROMOTED from an embedded struct of o, as {v: its value, o: the
+    // embedded struct holding it}, searched BREADTH FIRST,
     // which is Go's own rule: the shallowest depth wins and only a tie at that depth
     // is ambiguous. The depth cap is the one manual chapter 7.9 records for the
     // __class walks: a pointer cycle in this value model would otherwise not
@@ -2396,7 +2403,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var in1 = o[fs1[i1]]
             if (in1 == undefined || in1 == null || typeof in1 != "object") { continue }
             if (in1.__class == undefined || in1.__class == null) { continue }
-            if (hasOwn(in1, name)) { return {v: in1[name]} }
+            if (hasOwn(in1, name)) { return {v: in1[name], o: in1} }
             hasEmb = true
         }
         if (!hasEmb) { return null }
@@ -2418,7 +2425,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                     var inner = cur[fs[k]]
                     if (inner == undefined || inner == null || typeof inner != "object") { continue }
                     if (inner.__class == undefined || inner.__class == null) { continue }
-                    if (hasOwn(inner, name)) { return {v: inner[name]} }
+                    if (hasOwn(inner, name)) { return {v: inner[name], o: inner} }
                     next.push(inner)
                 }
             }
@@ -2758,7 +2765,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             if (ix < 0 || ix >= o.length) { goIdxPanic(ix, o.length) }
             return o[ix]
         }
-        return hasOwn(o, ix) ? o[ix] : undefined
+        if (hasOwn(o, ix)) { return o[ix] }
+        // A promoted field (the read of `s.n += 1`), as goField reads it.
+        if (typeof o == "object" && o.__class != undefined) {
+            var pf = goPromField(o, ix, 16)
+            if (pf != null) { return pf.v }
+        }
+        return undefined
     }
     // Every write into a container or a struct goes through here, which makes it the
     // one place the DECLARED width of the slot can be reapplied: a struct field takes
@@ -2776,6 +2789,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // `struct { ... }`, see goZeroTy). Both are recoverable runtime panics in Go.
         if (o == undefined || o == null) { goNilDeref() }
         if (typeof o == "object" && o.__class != undefined) {
+            // A promoted field is written in the embedded struct that holds it.
+            if (!hasOwn(o, ix)) {
+                var pf = goPromField(o, ix, 16)
+                if (pf != null) { o = pf.o }
+            }
             o[ix] = gAdoptTy(fieldTypeOf(o.__class, ix), v)
             return
         }
@@ -3334,9 +3352,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var cfn = goFoldCFn(items, ops, ty)
         var sty = goRunSty(items, ops)
         goRunCheck(items, ops, sty)
-        var folded = goFoldConst(items, ops, pos, ty)
-        if (folded != null) { return folded }
         var tk = goTkRun(items, ops)
+        var folded = goFoldConst(items, ops, pos, ty)
+        if (folded != null) { return goTkFolded(folded, tk, pos, sty) }
         if (ty == null) { goFloOperands(items, ts, sty) }
         goShiftCounts(items, ops, ts)
         ts = goRunOrder(items, ts)
@@ -4685,14 +4703,18 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
     }
     // The target of '*p = v' / '**pp = v': follow stars - 1 cells and write through the
-    // last one. A star over a value that is not a cell stays transparent (a struct
-    // pointer is the struct).
+    // last one. A star over a value that is not a cell stays transparent; a struct
+    // pointer is the struct, and its target (sto) is the struct itself.
     function derefTarget(ref) {
         var cur = getVar(ref.name)
         for (var i = 1; i < ref.stars; i++) {
-            if (!isPtr(cur)) { return null }
+            if (!isPtr(cur)) {
+                if (ref.sto) { break }
+                return null
+            }
             cur = ptrGet(cur)
         }
+        if (ref.sto) { return {inst: cur} }
         return isPtr(cur) ? cur : null
     }
     // A target's leading stars are pushed before the name, so the name is the first
@@ -4721,7 +4743,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     function locWrite(ref, loc, v) {
         if (ref.path.length == 0) {
-            if (loc != null) { ptrSet(loc, v); return }
+            if (loc != null) {
+                if (ref.sto) { goStructSet(loc.inst, v) } else { ptrSet(loc, v) }
+                return
+            }
             setVar(ref.name, goVal(v))
             return
         }
