@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-682** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-684** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -64,10 +64,11 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-681 python: `__classcell__` through a metaclass `__new__`; `super()` object's own type · P3 · PY · IN PROGRESS (PY worker, round 13) [V]
-A metaclass `__new__` calling a method that reads `__class__` after `super().__new__` → CPython `meta H` (type.__new__ fills the cell
-from `__classcell__`); interp NameError, compiler the provisional pre-metaclass class. `super().__class__.__name__` → CPython
-`super`, ours AttributeError; `type(super()).__name__` → CPython `super`, interp `object`.
+### T-683 python: `__name__` is undefined at module level; `type(super)` / `isinstance(super(), super)`; `__classdictcell__` · P1 · PY · OPEN [V]
+`print(__name__)` → NameError in all engines (CPython `__main__`), so `if __name__ == "__main__":` fails — P1. `type(super)` →
+`super` (CPython `type`); `type(super()) is super`, `isinstance(super(), super)` → False (CPython True): the name `super` reads as a
+bound proxy, not the type. CPython 3.14 puts `__classdictcell__` in a metaclass namespace for a class body defining a function; we
+never do. A comprehension in a nested class body reading `__class__` over-marks the outer class's `__classcell__`.
 
 ### T-680 python re: IGNORECASE pairs from CPython's `_ignorecase_fixes`; non-ASCII ranges of 256+ chars · P3 · PY · OPEN [V]
 `re.match("(?i)\u0390", "\u1fd3")` matches in CPython (full-fold extra pairs, sre_compile `_ignorecase_fixes`), not here. A
@@ -120,10 +121,11 @@ not change the renderer.
 
 # GO — Go  (oracle: `go run`)
 
-### T-678 go: `&r.i` / `&xs[1]` give the value, not a pointer; anonymous struct with embedded pointer; `%T` of a host func · P2 · GO · IN PROGRESS (GO worker, round 11) [V]
-`func set(p *int){*p=7}; set(&r.i)` leaves `r.i` 0 in both grammars (go 7), and `fmt.Sscan("5", &r.i)` → "type not a pointer: int";
-`&xs[1]` likewise. `struct{ *strings.Reader }{...}` → interpreter "unknown name: struct". `fmt.Printf("%T", fmt.Println)` →
-`%!T(...)` (go `func(...interface {}) (int, error)`). Check that `*(a).b = v` parses (the `*(expr)` target rule may shadow it).
+### T-682 go: anonymous struct types as declared types; embedding a package-qualified type; fmt.Append*/os.Getenv · P2 · GO · OPEN [V]
+`var r struct{a int; s string}; r.a = 5` → nil-dereference panic in both halves (go `5 {5 }`); a field typed `In struct{ V int }`
+zeroes to nil; `a := struct{x int}{1}; b := a; b.x = 2` → `2 2` (go `1 2`, no copy for anonymous literals). `type S struct{
+strings.Builder }; s.WriteString("hi")` → "unknown method 'WriteString'" (goFieldEmbedded misses `pkg.T`). `fmt.Append`,
+`fmt.Appendf`, `fmt.Appendln`, `os.Getenv` evaluate to nil (all engines).
 
 ---
 
@@ -777,6 +779,8 @@ T-672 go: `*t = *o` through a pointer; zero embedded struct field is nil; typed 
 T-673 go: fmt.Sscanf / Scan family; `%T` of a func and of os.Stdin/os.Stdout; `*(v.p.(*int)) = 5` does not parse — DONE 84120661 (fmt Scan/Sscan/Fscan families ported from fmt/scan.go, %T of funcs, *os.File std streams, qualified interface assertions, *(expr) = v — 4 legs = go run; follow-up T-678)
 T-660 python: Unicode `\d` / `\s` in regex; `__class__` in a class nested in a method; astral \w across engines — DONE f1ce9dea 8d6cb63c (Unicode \d/\s, P text read by code point for astral spans/classes, __class__ in nested class bodies; plus must_advance, pos/endpos, Unicode IGNORECASE — 4 legs = python3 3.14; follow-up T-679)
 T-679 python: `__class__` / `super()` in a function called while its class body runs — DONE 75ee1c30 (empty __class__ cell while the body runs, CPython's super() check order, cell filled before the metaclass hooks — 4 legs = python3; follow-up T-681)
+T-678 go: `&r.i` / `&xs[1]` give the value, not a pointer; anonymous struct with embedded pointer; `%T` of a host func — DONE ae70ca39 1719a6bf 5042a693 aee854d2 (pointer cells over fields/elements, slot equality and pointer map keys, anonymous embedded fields, %T of host funcs, *(a).b, MethodSfx SameLine, *f() += — 4 legs = go run; follow-up T-682)
+T-681 python: `__classcell__` through a metaclass `__new__`; `super()` object's own type — DONE 96f1a30b (CPython symtable cell rule, __classcell__ via type.__new__ with its RuntimeError/TypeError, super's own type — 4 legs = python3; follow-up T-683)
 
 # Settled — do not re-open
 
