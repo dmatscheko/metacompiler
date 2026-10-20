@@ -4891,6 +4891,21 @@ fun sec99() {
                     && emptyList<Int>().maxWithOrNull(compareBy { it }) == null && "" + fl == "[7, 7, 7]")
 }
 
+// ===== SECTION 100: integer radix strings, bit counts, operator calls =====
+// Every row was read off java.lang.Integer / Long (JDK 24), which kotlin-stdlib's
+// toString(radix), countOneBits, countLeadingZeroBits and countTrailingZeroBits
+// are on the JVM: a sign and the magnitude's digits, an unsigned type read
+// unsigned, the counts over the value's own width. 7.rem(3) is the operator.
+fun sec100() {
+    val ns = listOf(-7, 13, Int.MIN_VALUE, 0)
+    check("rad100a", ns[0].toString(2) == "-111" && ns[1].toString(16) == "d" && ns[2].toString(36) == "-zik0zk"
+                    && Long.MIN_VALUE.toString(16) == "-8000000000000000" && (-1).toUInt().toString(16) == "ffffffff"
+                    && ULong.MAX_VALUE.toString(36) == "3w5e11264sgsf" && s95err { ns[1].toString(37) } == "IllegalArgumentException: radix 37 was not in valid range 2..36")
+    check("bit100b", ns[0].countOneBits() == 30 && ns[1].countLeadingZeroBits() == 28 && ns[2].countTrailingZeroBits() == 31
+                    && ns[3].countTrailingZeroBits() == 32 && (1L shl 40).countLeadingZeroBits() == 23 && (-7L).countOneBits() == 62)
+    check("opf100c", ns[0].rem(3) == -1 && ns[1].plus(2) == 15 && 7L.times(3) == 21L && 7.5.div(2) == 3.75 && ns[1].minus(ns[0]) == 20)
+}
+
 
 fun main() {
     s01() // SECTION-CALL 01
@@ -4992,6 +5007,7 @@ fun main() {
     sec97() // SECTION-CALL 97
     sec98() // SECTION-CALL 98
     sec99() // SECTION-CALL 99
+    sec100() // SECTION-CALL 100
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

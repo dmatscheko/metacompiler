@@ -124,6 +124,46 @@ func ktIntKind(v interface{}) (uint8, bool, bool) {
 	return 0, false, false
 }
 
+// ktIntBits is an integer's toString(radix) - java's Integer/Long.toString(v,
+// radix): a sign and the magnitude's digits, an unsigned type reading its bits
+// unsigned - and its bit counts, over the two's complement at the value's own
+// width. Twin of kIntBits in kotlin-interpreter.abnf and k1IntBits in
+// languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktIntBits(v interface{}, name string, args []interface{}) (interface{}, bool) {
+	w, uns, ok := ktIntKind(v)
+	if !ok {
+		return nil, false
+	}
+	switch name {
+	case "toString":
+		if len(args) != 1 {
+			return nil, false
+		}
+		r := jsToInt(rt.toNumber(args[0]))
+		if r < 2 || r > 36 {
+			rt.ktRaise("IllegalArgumentException", fmt.Sprintf("radix %d was not in valid range 2..36", r))
+		}
+		n := giVal(rt, v)
+		if uns && w == 64 {
+			return strconv.FormatUint(uint64(n), r), true
+		}
+		return strconv.FormatInt(n, r), true
+	case "countOneBits", "countLeadingZeroBits", "countTrailingZeroBits":
+		bits := jxRadix(rt, v, 2)
+		if bits == "0" && name != "countOneBits" {
+			return float64(w), true
+		}
+		switch name {
+		case "countOneBits":
+			return float64(strings.Count(bits, "1")), true
+		case "countLeadingZeroBits":
+			return float64(int(w) - len(bits)), true
+		}
+		return float64(len(bits) - 1 - strings.LastIndex(bits, "1")), true
+	}
+	return nil, false
+}
+
 // ktKindDiffers says whether a and b are integers of two different types.
 func ktKindDiffers(a, b interface{}) bool {
 	aw, au, aok := ktIntKind(a)
@@ -618,7 +658,20 @@ func (rt *jsrt) ktNumMethod(target interface{}, name string, args []interface{})
 	if !giIsNumeric(target) {
 		return nil, false
 	}
+	if v, ok := rt.ktIntBits(target, name, args); ok {
+		return v, true
+	}
 	switch name {
+	// The operator functions spelled as calls - 7.rem(3), x.times(y) - are the
+	// operators.
+	case "plus", "minus", "times", "div", "rem":
+		if len(args) == 1 {
+			op := map[string]string{"plus": "+", "minus": "-", "times": "*", "div": "/", "rem": "%"}[name]
+			if jvmIsFlo(target) || jvmIsFlo(args[0]) {
+				return rt.jvmArith(op[0], target, args[0]), true
+			}
+			return rt.ktArith(op, target, args[0]), true
+		}
 	case "pow", "roundToInt", "roundToLong":
 		return rt.ktMathMethod(target, name, args)
 	// rangeTo / until / downTo in their FUNCTION spelling. `..`, `until` and

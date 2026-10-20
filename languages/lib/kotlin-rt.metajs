@@ -1622,6 +1622,19 @@ function k1NumLess(l, r) {
 // receiver or the name.
 function ktNumMethod(recv, name, args) {
     if (!k1Numeric(recv)) { return KT_MISS }
+    // The operator functions spelled as calls - 7.rem(3), x.times(y) - are the
+    // operators.
+    if (args.length == 1) {
+        if (name == "plus") { return js_ktadd(recv, args[0]) }
+        if (name == "minus") { return js_ktarith("-", recv, args[0]) }
+        if (name == "times") { return js_ktarith("*", recv, args[0]) }
+        if (name == "div") { return js_ktarith("/", recv, args[0]) }
+        if (name == "rem") { return js_ktarith("%", recv, args[0]) }
+    }
+    if ((name == "toString" && args.length == 1) || name == "countOneBits" ||
+        name == "countLeadingZeroBits" || name == "countTrailingZeroBits") {
+        if (k4IsIntKind(recv)) { return k1IntBits(recv, name, args) }
+    }
     if (name == "pow" || name == "roundToInt" || name == "roundToLong") {
         if (floIs(recv)) { return k4MathMethod(recv, name, args) }
     }
@@ -1702,6 +1715,37 @@ function ktNumMethod(recv, name, args) {
     }
     if (name == "hashCode") { return ktElemHash(recv) }
     return KT_MISS
+}
+
+// k1IntBits is ktIntBits (jsrtkotlin.go): toString(radix) as java's
+// Integer/Long.toString(v, radix), and the bit counts over the two's complement
+// at the value's own width (jxkRadix's digits).
+function k1IntBits(v, name, args) {
+    if (name == "toString") {
+        var r = k2Int(ktArg(args, 0))
+        if (r < 2 || r > 36) { ktRaise("IllegalArgumentException", "radix " + r + " was not in valid range 2..36") }
+        var uns = false
+        if (sintIs(v)) { uns = sintUns(v) }
+        if (!uns && k1Cmp("<", v, 0)) { return "-" + jxkRadix(k1Arith("-", 0, v), r) }
+        return jxkRadix(v, r)
+    }
+    var bits = jxkRadix(v, 2)
+    var w = 32
+    if (sintIs(v)) { w = sintWidth(v) }
+    if (bits == "0" && name != "countOneBits") { return w }
+    if (name == "countLeadingZeroBits") { return w - bits.length }
+    var ones = 0
+    var tz = 0
+    var i = 0
+    while (i < bits.length) {
+        if (bits.charAt(i) == "1") {
+            ones = ones + 1
+            tz = 0
+        } else { tz = tz + 1 }
+        i = i + 1
+    }
+    if (name == "countOneBits") { return ones }
+    return tz
 }
 
 // coerceIn(range): an empty range is an IllegalArgumentException.

@@ -5742,6 +5742,27 @@ NotMemberKw = :script(~~
         }
         return kind == 0 ? "java.util.ArrayList" : "ArrayList"
     }
+    var kOpNames = {plus: "+", minus: "-", times: "*", div: "/", rem: "%"}
+    // toString(radix) is java's Integer/Long.toString(v, radix) - a sign and the
+    // magnitude's digits, an unsigned type reading its bits unsigned; the bit counts
+    // read the two's complement at the value's own width (jxkRadix's digits).
+    function kIntBits(v, name, args) {
+        if (name == "toString" && args.length == 1) {
+            var r = kNum(args[0])
+            if (r < 2 || r > 36) { kThrowExc("IllegalArgumentException", "radix " + r + " was not in valid range 2..36") }
+            if (!(szIs(v) && v.u) && kCmpI("<", v, 0)) { return {v: "-" + jxkRadix(kArith("-", 0, v), r)} }
+            return {v: jxkRadix(v, r)}
+        }
+        if (name != "countOneBits" && name != "countLeadingZeroBits" && name != "countTrailingZeroBits") { return null }
+        var bits = jxkRadix(v, 2)
+        var w = szIs(v) ? v.w : 32
+        if (name == "countLeadingZeroBits") { return {v: bits == "0" ? w : w - bits.length} }
+        var ones = 0
+        var tz = 0
+        for (var i = 0; i < bits.length; i++) { if (bits.charAt(i) == "1") { ones++; tz = 0 } else { tz++ } }
+        if (name == "countOneBits") { return {v: ones} }
+        return {v: bits == "0" ? w : tz}
+    }
     function jxkClass(v) {
         if (Array.isArray(v)) { return kJvmListClass(arrKind(v), v.length) }
         if (kIsSet(v)) { return "java.util.LinkedHashSet" }
@@ -7017,6 +7038,12 @@ NotMemberKw = :script(~~
             if (hiB !== null && hiB !== undefined && kKeyLess(hiB, target)) { return hiB }
             return target
         }
+        // The operator functions spelled as calls - 7.rem(3), x.times(y) - are the
+        // operators. Twin of the same arm of ktNumMethod in abnf/jsrtkotlin.go and
+        // languages/lib/kotlin-rt.metajs.
+        if (args.length == 1 && hasOwn(kOpNames, name) && (kIsFlo(target) || szIs(target) || typeof target == "number")) {
+            return binOp(kOpNames[name], target, args[0])
+        }
         if (kIsFlo(target)) {
             var tf = target.__flo
             if (name == "toString") return kIsF32(target) ? coreJvmF32Str(tf) : kFloStr(tf)
@@ -7034,6 +7061,12 @@ NotMemberKw = :script(~~
                 return kConv(kFlo(ktmRoundHalfUp(tf)), name == "roundToInt" ? 32 : 64, false)
             }
             return mfallback(target, name, args, "Double")
+        }
+        // An integer's toString(radix) and bit counts. Twin of ktIntBits in
+        // abnf/jsrtkotlin.go and k1IntBits in languages/lib/kotlin-rt.metajs.
+        if (szIs(target) || typeof target == "number") {
+            var kib = kIntBits(target, name, args)
+            if (kib != null) { return kib.v }
         }
         // A sized-integer receiver: the same surface as an Int, at its own width.
         if (szIs(target)) {
