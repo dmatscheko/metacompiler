@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-694** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-696** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -76,10 +76,16 @@ non-ASCII class range spanning 256 or more characters only gets the text-side up
 
 # JS — JavaScript and TypeScript
 
-### T-691 js/ts: strict write to a function's `name`/`length` is silent; TS legacy octal `010` · P3 · JS · IN PROGRESS (JS worker, round 17) [V]
-In strict code (now every .ts file) `fnDecl.name = "zzz"` → silently dropped; node "TypeError: Cannot assign to read only property
-'name' of function '<source text>'" (V8 renders the function source). `010` in TS → 8 in typescript-interpreter, 10 in
-typescript-to-llvm-ir (tsc TS1121; node strict SyntaxError): SepNumLit/JsDecLit must reject a leading 0 in both TS grammars.
+### T-694 js/ts: valid numeric literals rejected — `0x1_0`, `0.0_1`, `08e1` / `09.5e1` · P2 · JS · OPEN [V]
+node: `0x1_0` 16 (js-interpreter's HexLit takes no `_`); `0.0_1` 0.01 (js-interpreter, js-to-llvm-ir and typescript-to-llvm-ir
+SepNumLit need a `_` before the `.`; typescript-interpreter right); sloppy `08e1` / `09.5e1` 80 / 95 (js NonOctalDecLit has no
+exponent; unverified in our grammars). Sweep all literal forms through the four grammars against node / tsc.
+
+### T-695 js: no function source text; defineProperty / delete of a function's `name` / `length` · P3 · JS · OPEN [V]
+`String(f)` / `f.toString()` → `[function]` (interp via jsStr; `"" + f` gives the host closure source), a class → `[object Object]`;
+node prints the source text (also inside V8's "read only property 'name' of function '<source>'"). `Object.defineProperty(fn,
+"name"|"length", {...})` is ignored in all engines (node replaces it; `writable: true` makes later writes succeed); `delete
+fn.length` keeps it (node removes it: length 0, hasOwnProperty false).
 
 ---
 
@@ -783,6 +789,7 @@ T-688 go: append growth inside a generic function ignores the instantiation (pad
 T-684 js: class `.length`; Math/JSON member names; arrow-function "use strict"; TS strict default; frozen-array message index — DONE bad3ffd0 (class/Error/Map/Set length, Math/JSON member names, anonymous class names, strict arrows and generator prologues, strict undeclared assignment, .ts runs strict as tsc emits it, spec-ordered frozen-array refusals — 4 legs = node / tsc 6 + node; follow-up T-691)
 T-666 php: the preg_* functions do not exist — DONE b6352924 (preg_* family on a PCRE2 dialect of the shared engine, php_pcre.c loops in php-stdlib.php; ~6,000 cases = libpcre2 10.48 via a php_pcre.c-port harness; follow-ups T-692/T-693; warnings stay with T-596)
 T-693 php: `"a{b}"` in a double-quoted string is read as interpolation — DONE a0eeb482 d6c593dd (`{` interpolates only before `$`; the `${name}` / `${name[expr]}` / `${expr}` forms per zend_language_parser.y, strings and heredocs; spec-only)
+T-691 js/ts: strict write to a function's `name`/`length` is silent; TS legacy octal `010` — DONE 43c6e0bd (strict refusal of fn/class name/length writes in all engines, no legacy octal/leading-zero literals in TS and JS separators/BigInt — node + tsc 6; follow-ups T-694/T-695)
 
 # Settled — do not re-open
 
