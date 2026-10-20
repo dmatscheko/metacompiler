@@ -15169,6 +15169,15 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if m := pyMetaFind(u(a[0]), "__getitem__"); m != nil {
 				return w(rt.call(m, jsUndef, []interface{}{u(a[0]), u(a[1])}))
 			}
+			// A class's own __class_getitem__, an implicit classmethod.
+			if c, ok := pyClassObj(u(a[0])); ok {
+				if f, found := pyLookup(c, "__class_getitem__"); found {
+					if pyDescKind(f) == "c" {
+						f = f.(*jsObject).props["__pycm"]
+					}
+					return w(rt.call(f, jsUndef, []interface{}{c, u(a[1])}))
+				}
+			}
 			if v, ok := rt.pyGenericAlias(u(a[0]), u(a[1])); ok {
 				return w(v)
 			}
@@ -16038,6 +16047,30 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// exactly the receiver-prepending convention rt.memberCall implements.
 		// Multiple inheritance is resolved ONCE, here, so every later lookup is a
 		// flat walk of "__mro".
+		// The bases of a class statement with PEP 560's __mro_entries__ applied:
+		// a base that is no class but whose class defines it is replaced by the
+		// tuple it answers for the original bases. Twin of pyMroEntries in
+		// python-interpreter.abnf and lib/python-rt.metajs.
+		"js_pymroentries": func(a []uint64) uint64 {
+			bases, _ := u(a[0]).(*jsArray)
+			out := &jsArray{}
+			for _, b := range bases.elems {
+				if _, isCls := pyClassObj(b); !isCls {
+					if _, cls, ok := pyInstance(b); ok {
+						if m, found := pyLookup(cls, "__mro_entries__"); found && isCallable(m) {
+							r := rt.call(m, jsUndef, []interface{}{b, pyTup(&jsArray{elems: bases.elems})})
+							if arr, isArr := r.(*jsArray); isArr {
+								out.elems = append(out.elems, arr.elems...)
+								continue
+							}
+							panic(&jsThrown{value: rt.pyExcInstance("TypeError", "__mro_entries__ must return a tuple")})
+						}
+					}
+				}
+				out.elems = append(out.elems, b)
+			}
+			return w(out)
+		},
 		"js_pyclass_new": func(a []uint64) uint64 { // (name, bases array) -> class
 			bases, _ := u(a[1]).(*jsArray)
 			return w(rt.pyClassNew(rt.toString(u(a[0])), bases))
@@ -16085,6 +16118,13 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			dictAppend(nk, nv, "__qualname__", rt.pyClsQual(cls))
 			if doc, isStr := cls.props["__doc__"].(string); isStr {
 				dictAppend(nk, nv, "__doc__", doc)
+			}
+			// The body's annotations ride in the namespace, so the metaclass's
+			// type.__new__ gives the class its __annotations__. Twin of the
+			// metaclass arm of makeClass in python-interpreter.abnf and
+			// js_pyclass_meta in lib/python-rt.metajs.
+			if ann, has := cls.props["__annotations__"]; has {
+				dictAppend(nk, nv, "__annotations__", ann)
 			}
 			mk, mv, _ := dictParts(rt.pyClassDict(cls))
 			for i, k := range mk.elems {
@@ -21541,6 +21581,8 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 			return rt.pyGenValue(g.throwInto(rt, tv))
 		case "close":
 			return rt.pyGenClose(g)
+		case "__iter__":
+			return target
 		}
 	}
 	// A method the builtin TYPE OBJECT itself carries - dict.fromkeys.
@@ -22507,7 +22549,26 @@ func (rt *jsrt) pyBuiltinAttr(target interface{}, name string) bool {
 	if name == "conjugate" && isPyComplex(target) {
 		return true
 	}
+	if pyIterName(rt, target) != "" {
+		return pyIsIterMethod(name, false)
+	}
+	if pyIsGenerator(target) {
+		return pyIsIterMethod(name, true)
+	}
 	return pyIsNumMethod(target, name)
+}
+
+// pyIsIterMethod: a cursor's methods (__next__, __iter__), and a generator's
+// (also send, throw, close). Twin of pyIsIterMethod in python-interpreter.abnf
+// and lib/python-rt.metajs.
+func pyIsIterMethod(name string, gen bool) bool {
+	switch name {
+	case "__next__", "__iter__":
+		return true
+	case "send", "throw", "close":
+		return gen
+	}
+	return false
 }
 
 // pyBoundBuiltin is what getattr() hands back for one of those names: CPython's
@@ -23234,6 +23295,9 @@ func (rt *jsrt) pyHasAttrRaw(obj interface{}, name string) bool {
 		if _, ok := rt.pyDescAttr(obj.(*jsObject), name); ok {
 			return true
 		}
+	}
+	if _, ok := pyUnionOf(obj); ok && name == "__args__" {
+		return true
 	}
 	// What pyGetAttr answers on a builtin TYPE OBJECT: dict.fromkeys, and the
 	// unbound methods (list.count).

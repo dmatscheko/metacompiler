@@ -4263,6 +4263,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 b = rb.b
                 callExt(b, "js_arr_push", [basesV, rb.v])
             }
+            // PEP 560: a base that is no class answers its __mro_entries__.
+            if (bases.length > 0) { basesV = callExt(b, "js_pymroentries", [basesV]) }
             // The keyword arguments, evaluated with the bases, before the body.
             var kwV = hUndef
             if (kws.length > 0) {
@@ -5008,7 +5010,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // Python stdlib modules the runtime provides (prefix match, so a submodule
     // resolves against its parent). The modules written in Python are pyLibMods.
-    core.stdlibImports = ["sys", "math", "collections.abc", "re", "typing", "time", "builtins"]
+    core.stdlibImports = ["sys", "math", "collections.abc", "re", "time", "builtins"]
     // Project-file imports: 'import mypkg.helper' / 'from mypkg.helper import x'
     // look for mypkg/helper.py, then mypkg.py under the program's directory and
     // the -i roots (c.findImport). The file is parsed with this grammar and

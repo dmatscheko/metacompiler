@@ -6862,6 +6862,7 @@ function pyDHasAttr(obj, name) {
     // has to agree with what `math.sqrt` answers.
     if (pyIsSlice(obj) && pySliceField(name) >= 0) { return true }
     if ((pyDIsStatic(obj) || pyDIsClsM(obj)) && pyDescAttrHas(name)) { return true }
+    if (name == "__args__" && pyUnionOf(obj) !== null) { return true }
     if (pyIsObj(obj)) {
         if (obj["__pymod"] !== undefined) {
             if (obj[name] !== undefined || name == "__name__") { return true }
@@ -8066,6 +8067,13 @@ function js_pyidx(c, k) {
     // (origin, parameter) pair, so 'list[int] == list[int]' holds.
     var mgi = pyMetaFind(c, "__getitem__")
     if (mgi !== undefined) { return pyCallSelf(mgi, c, [k]) }
+    // A class's own __class_getitem__, an implicit classmethod.
+    if (pyIsClass(c) && pyLookupHas(c, "__class_getitem__")) {
+        var cgi = anytype
+        cgi = pyLookupVal(c, "__class_getitem__")
+        if (pyDIsClsM(cgi)) { cgi = cgi["__pycm"] }
+        return pyCallSelf(cgi, c, [k])
+    }
     var alias = pyCGenericAlias(c, k)
     if (alias !== undefined) { return alias }
     // CPython's TypeError, and CATCHABLE, so `None[0]` runs the except clause.
@@ -9966,6 +9974,7 @@ function pyDMethodCall(target, name, args, kw) {
     // end, where JavaScript's next() answers a {value, done} record. There is no
     // tag test in layer 2, so "is this a generator" is pyIsGen's structural one.
     if (pyIsGen(target)) {
+        if (name == "__iter__") { return target }
         if (name == "send" || name == "next" || name == "__next__") {
             var sent = anytype
             sent = undefined
@@ -10816,7 +10825,15 @@ function pyDBuiltinAttr(obj, name) {
     if (name == "conjugate") {
         if (pyIsCplx(obj)) { return true }
     }
+    if (pyIsIter(obj)) { return pyIsIterMethod(name, false) }
+    if (pyIsGen(obj)) { return pyIsIterMethod(name, true) }
     return pyIsNumMethod(obj, name)
+}
+
+// Go: pyIsIterMethod. A cursor's methods, and a generator's.
+function pyIsIterMethod(name, gen) {
+    if (name == "__next__" || name == "__iter__") { return true }
+    return gen && (name == "send" || name == "throw" || name == "close")
 }
 
 // What getattr() hands back for one of those names: CPython's `<built-in method
@@ -11316,6 +11333,8 @@ function js_pyclass_meta(cls, kw) {
     pyDictSet(ns, "__module__", cls["__module__"])
     pyDictSet(ns, "__qualname__", pyClsQual(cls))
     if (typeof cls["__doc__"] == "string") { pyDictSet(ns, "__doc__", cls["__doc__"]) }
+    // The body's annotations ride in the namespace (Go: js_pyclass_meta).
+    if (cls["__annotations__"] !== undefined) { pyDictSet(ns, "__annotations__", cls["__annotations__"]) }
     var cd = pyClassDict(cls)
     var i = 0
     while (i < cd["keys"].length) {
@@ -11398,8 +11417,33 @@ function pyDIsInstance(v, target) {
 
 function js_pyisinst(v, target) { return pyCheckHooked(v, target, "__instancecheck__") }
 
-// Go: (*jsrt).pyCheckHooked. The isinstance / issubclass builtin: a class whose
-// metaclass defines the hook answers for itself, a tuple asks each class.
+// Go: (*jsrt).pyCheckHooked. The isinstance / issubclass builtin: a target whose
+// type (metaclass, or an instance's class) defines the hook answers for itself,
+// a tuple asks each class.
+
+// Go: js_pymroentries. PEP 560: a base that is no class answers its
+// __mro_entries__ for the original bases.
+function js_pymroentries(bases) {
+    var out = []
+    var i = 0
+    while (i < bases.length) {
+        var b = bases[i]
+        var cls = pyInstClassOf(b)
+        if (cls !== null && pyLookupHas(cls, "__mro_entries__")) {
+            var r = pyCall(pyLookupVal(cls, "__mro_entries__"), [b, pyTup(bases.slice(0))])
+            if (!pyIsArr(r)) { pyRaiseExc("TypeError", "__mro_entries__ must return a tuple") }
+            var k = 0
+            while (k < r.length) {
+                out.push(r[k])
+                k = k + 1
+            }
+        } else {
+            out.push(b)
+        }
+        i = i + 1
+    }
+    return out
+}
 function pyCheckHooked(v, target, hook) {
     if (pyIsArr(target)) {
         var i = 0
@@ -11411,6 +11455,8 @@ function pyCheckHooked(v, target, hook) {
     }
     var m = pyMetaFind(target, hook)
     if (m !== undefined) { return pyDTruthy(pyCall(m, [target, v])) }
+    var tcls = pyInstClassOf(target)
+    if (tcls !== null && pyLookupHas(tcls, hook)) { return pyDTruthy(pyCall(pyLookupVal(tcls, hook), [target, v])) }
     if (hook == "__instancecheck__") { return pyDIsInstance(v, target) }
     return pyDIsSubclass(v, target)
 }

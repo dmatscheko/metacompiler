@@ -7060,6 +7060,72 @@ def s137():
     check("instcheck", isinstance(Q(), S137Quacker) and not isinstance(1, S137Quacker)
           and isinstance(Q(), (int, S137Quacker)))
 
+# ===== SECTION 138: typing at run time; __class_getitem__, __mro_entries__ =====
+import typing as S138t
+
+S138T = S138t.TypeVar("S138T")
+
+class S138Box(S138t.Generic[S138T]):
+    def __init__(self, v):
+        self.v = v
+
+@S138t.runtime_checkable
+class S138Closer(S138t.Protocol):
+    def close(self): ...
+
+class S138Pt(S138t.NamedTuple):
+    x: int
+    y: int = 0
+
+    def norm(self):
+        return self.x + self.y
+
+class S138Movie(S138t.TypedDict):
+    name: str
+
+class S138Entry:
+    def __init__(self, origin):
+        self.origin = origin
+
+    def __mro_entries__(self, bases):
+        return (self.origin,)
+
+class S138Rows(S138Entry(list)):
+    pass
+
+class S138G:
+    def __class_getitem__(cls, item):
+        return (cls.__name__, item)
+
+def s138():
+    t = S138t
+    check("typing1", [repr(x) for x in [t.List[int], t.Optional[int], t.Union[int, str], t.Callable[[int], str],
+                                       t.Tuple[int, ...], t.Literal["a", 1], S138T, S138Box[int], t.Dict[str, None]]]
+          == ["typing.List[int]", "int | None", "int | str", "typing.Callable[[int], str]", "typing.Tuple[int, ...]",
+              "typing.Literal['a', 1]", "~S138T", "__main__.S138Box[int]", "typing.Dict[str, NoneType]"]
+          and t.Union[int] is int and t.Optional[int] == (int | None))
+    check("typing2", t.get_origin(t.List[int]) is list and t.get_args(t.Dict[str, int]) == (str, int)
+          and t.get_args(t.Callable[[int], str]) == ([int], str) and t.get_origin(int) is None
+          and isinstance([], t.List) and isinstance(iter([]), t.Iterator) and not isinstance(5, t.Iterable)
+          and t.cast(int, "s") == "s" and not t.TYPE_CHECKING and S138Box[int](4).v == 4)
+    class F:
+        def close(self):
+            pass
+    check("typing3", isinstance(F(), S138Closer) and not isinstance(1, S138Closer)
+          and S138Pt(1) == (1, 0) and S138Pt(2, 3).norm() == 5 and S138Pt._fields == ("x", "y")
+          and S138Movie(name="m") == {"name": "m"} and type(S138Movie(name="m")) is dict)
+    try:
+        t.List()
+        check("typing4", False)
+    except TypeError as e:
+        check("typing4", str(e) == "Type List cannot be instantiated; use list() instead")
+    r = S138Rows([3, 1])
+    r.sort()
+    g = (x for x in [1])
+    check("pep560", r == [1, 3] and S138Rows.__bases__ == (list,) and S138G[int] == ("S138G", int)
+          and g.__iter__() is g and hasattr(g, "send") and hasattr(iter([]), "__next__")
+          and hasattr(int | None, "__args__"))
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -7195,5 +7261,6 @@ def main():
     s135() # SECTION-CALL 135
     s136() # SECTION-CALL 136
     s137() # SECTION-CALL 137
+    s138() # SECTION-CALL 138
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

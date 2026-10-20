@@ -424,9 +424,10 @@ func pyMetaFind(v interface{}, name string) interface{} {
 }
 
 // pyCheckHooked is the isinstance (hook "__instancecheck__") or issubclass
-// ("__subclasscheck__") builtin: a class whose metaclass defines the hook
-// answers for itself - abc.ABCMeta's register() rests on it - and a tuple asks
-// each of its classes in turn. Twin of pyCheckHooked in
+// ("__subclasscheck__") builtin: a target whose type defines the hook - a
+// class's metaclass, or an instance's class - answers for itself (abc.ABCMeta's
+// register() and typing's aliases rest on it), and a tuple asks each of its
+// classes in turn. Twin of pyCheckHooked in
 // python-interpreter.abnf and lib/python-rt.metajs.
 func (rt *jsrt) pyCheckHooked(v, target interface{}, hook string) bool {
 	if arr, ok := target.(*jsArray); ok {
@@ -439,6 +440,11 @@ func (rt *jsrt) pyCheckHooked(v, target interface{}, hook string) bool {
 	}
 	if m := pyMetaFind(target, hook); m != nil {
 		return rt.truthy(rt.call(m, jsUndef, []interface{}{target, v}))
+	}
+	if _, cls, ok := pyInstance(target); ok {
+		if m, found := pyLookup(cls, hook); found && isCallable(m) {
+			return rt.truthy(rt.call(m, jsUndef, []interface{}{target, v}))
+		}
 	}
 	if hook == "__instancecheck__" {
 		return rt.pyIsInstance(v, target)

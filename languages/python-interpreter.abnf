@@ -1873,9 +1873,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return best
     }
-    // A class whose metaclass defines __instancecheck__ / __subclasscheck__
-    // answers for itself - abc.ABCMeta's register() rests on it - and a tuple
-    // asks each of its classes in turn. Twin of pyCheckHooked in
+    // A target whose type defines __instancecheck__ / __subclasscheck__ - a
+    // class's metaclass, or an instance's class - answers for itself (abc's
+    // register() and typing's aliases rest on it), and a tuple asks each of its
+    // classes in turn. Twin of pyCheckHooked in
     // abnf/jsrtpydesc.go and lib/python-rt.metajs.
     function pyCheckHooked(v, target, hook) {
         if (Array.isArray(target)) {
@@ -1884,6 +1885,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         var m = pyMetaFind(target, hook)
         if (m != null) { return pytruthy(m(target, v)) }
+        var ih = pyUser(target) ? clsFind(target.__class, hook) : null
+        if (ih != null) { return pytruthy(ih(target, v)) }
         if (hook == "__instancecheck__") { return pyIsInstance(v, target) }
         if (pyIsUnion(target)) { return pyCheckHooked(v, target.__pyunion, hook) }
         return clsIsSub(v, target)
@@ -2870,6 +2873,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "__class__") { return true }
         if (isSlice(o) && pySliceField(name) >= 0) { return true }
         if ((pyIsStatic(o) || pyIsClsM(o)) && pyDescAttrHas(name)) { return true }
+        if (pyIsUnion(o) && name == "__args__") { return true }
         if (pyBuiltinAttr(o, name) || pyValDunder(o, name) != null) { return true }
         if (name == "__hash__" && pyValHashNone(o)) { return true }
         if (pyNumAttr(o, name) !== undefined) { return true }
@@ -2921,7 +2925,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (isSet(o)) { return pyIsSetMethod(name) && !(o.__frozen === true && pySetMutator(name)) }
         if (isDict(o)) { return pyIsDictMethod(name) }
         if (name == "conjugate" && isCplx(o)) { return true }
+        if (isPyIt(o)) { return pyIsIterMethod(name, false) }
+        if (isGen(o)) { return pyIsIterMethod(name, true) }
         return pyIsNumMethod(o, name)
+    }
+    // A cursor's methods (__next__, __iter__), and a generator's (also send,
+    // throw, close). Twin of pyIsIterMethod in abnf/jsrt.go and
+    // lib/python-rt.metajs.
+    function pyIsIterMethod(name, gen) {
+        if (name == "__next__" || name == "__iter__") { return true }
+        return gen && (name == "send" || name == "throw" || name == "close")
     }
     // A dunder a builtin VALUE answers through its type's delegate - (5).__add__,
     // "s".__add__, [].__len__ - for the receiver sites only: a type object's own
@@ -4277,9 +4290,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         var mgi = pyMetaFind(o, "__getitem__")
         if (mgi != null) { return mgi(o, i) }
-        // A subscripted TYPE is a generic alias (list[int]); types are erased, so the
+        // A subscripted TYPE is its own __class_getitem__ (an implicit
+        // classmethod), else a generic alias (list[int]); types are erased, so the
         // alias is only a value to compare and inspect.
         if (o != null && o != undefined && typeof o == "object" && o.__isclass == true) {
+            var cgi = anytype
+            cgi = clsFind(o, "__class_getitem__")
+            if (cgi != null) { return (pyIsClsM(cgi) ? cgi.__pycm : cgi)(o, i) }
             return pyGenAlias(o, isTup(i) ? i.slice(0) : [i])
         }
         // A subscript MISS is a catchable exception (`try: d[k] / except KeyError`),
@@ -6646,6 +6663,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             pyAttrErr(target, name)
         }
         if (isGen(target)) {
+            if (name == "__iter__") { return target }
             if (name == "send") { return genSend(target, args.length > 0 ? args[0] : undefined) }
             if (name == "__next__") { return genSend(target, undefined) }
             if (name == "close") { return genClose(target) }
@@ -12474,7 +12492,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (baseArgs != null) {
                 var spec = kevalArgs(baseArgs, function() { return hostGlobals["type"] })
                 for (var b = 0; b < spec.pos.length; b++) {
-                    if (spec.pos[b] != null && spec.pos[b] != undefined && spec.pos[b].__isclass) { bases.push(spec.pos[b]) }
+                    var bv = spec.pos[b]
+                    // PEP 560: a base that is no class answers its __mro_entries__
+                    // for the original bases. Twin of js_pymroentries in
+                    // abnf/jsrt.go and lib/python-rt.metajs.
+                    var me = pyUser(bv) ? clsFind(bv.__class, "__mro_entries__") : null
+                    if (me != null) {
+                        var ents = me(bv, pyTup(spec.pos.slice(0)))
+                        if (!Array.isArray(ents)) { pyRaise(pyMakeExc("TypeError", ["__mro_entries__ must return a tuple"])) }
+                        for (var be = 0; be < ents.length; be++) { if (ents[be] != null && ents[be].__isclass) { bases.push(ents[be]) } }
+                    } else if (bv != null && bv != undefined && bv.__isclass) { bases.push(bv) }
                 }
                 kw = spec.named
             }
@@ -12495,6 +12522,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 dictSet(nd, "__module__", modName)
                 dictSet(nd, "__qualname__", qual)
                 if (doc != null) { dictSet(nd, "__doc__", doc) }
+                // The body's annotations ride in the namespace, so the
+                // metaclass's type.__new__ gives the class its __annotations__.
+                // Twin of js_pyclass_meta in abnf/jsrt.go and lib/python-rt.metajs.
+                if (hasOwn(ns, "__annots")) { dictSet(nd, "__annotations__", pyNsAnnots(ns)) }
                 for (var nk = 0; nk < ns.__nskeys.length; nk++) { dictSet(nd, ns.__nskeys[nk], ns[ns.__nskeys[nk]]) }
                 var mkw = newDict()
                 if (kw !== null) {
@@ -12530,16 +12561,20 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             cls.__attrs = ns.__nskeys.slice(0)
             pyEqHashNone(cls)
             pySetNames(cls, ns.__nskeys)
-            var ann = newDict()
-            if (hasOwn(ns, "__annots")) {
-                for (var a2 = 0; a2 < ns.__annots.names.length; a2++) {
-                    dictSet(ann, ns.__annots.names[a2], ns.__annots.types[a2])
-                }
-            }
-            cls.__annotations__ = ann
+            cls.__annotations__ = pyNsAnnots(ns)
             pySet(name, cls)
             noteBound(name)
         }
+    }
+    // The annotations a class body recorded (makeAnnAssign), as its __annotations__ dict.
+    function pyNsAnnots(ns) {
+        var ann = newDict()
+        if (hasOwn(ns, "__annots")) {
+            for (var a2 = 0; a2 < ns.__annots.names.length; a2++) {
+                dictSet(ann, ns.__annots.names[a2], ns.__annots.types[a2])
+            }
+        }
+        return ann
     }
     // The metaclass a class statement uses: the metaclass= keyword, else the most derived metaclass among the bases; null for type.
     // Twin of rt.pyMetaOf in abnf/jsrtpydesc.go and pyMetaOf in
@@ -12580,10 +12615,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (mcs !== undefined && mcs !== hostGlobals["type"]) { cls.__meta = mcs }
         clsSetMRO(cls, bl)
         var attrs = []
+        cls.__annotations__ = newDict()
         for (var k = 0; k < ns.keys.length; k++) {
             var key = ns.keys[k]
             if (key == "__module__") { cls.__module__ = ns.vals[k] }
             else if (key == "__qualname__") { cls.__qual = ns.vals[k] }
+            else if (key == "__annotations__") { cls.__annotations__ = ns.vals[k] }
             else {
                 scopePut(cls, key, ns.vals[k])
                 pyNoteHook(key)
@@ -12594,7 +12631,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         cls.__attrs = attrs
         pyEqHashNone(cls)
         pySetNames(cls, cls.__attrs)
-        cls.__annotations__ = newDict()
         return cls
     }
     // Cls(args): a fresh instance whose __init__ runs with it as self.
@@ -14367,7 +14403,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Python stdlib modules the runtime provides (resolveImport lives in
     // lib/interp-core.js; prefix match, so a submodule resolves against its
     // parent). The modules written in Python are pyLibMods.
-    core.stdlibImports = ["sys", "math", "collections.abc", "re", "typing", "time", "builtins"]
+    core.stdlibImports = ["sys", "math", "collections.abc", "re", "time", "builtins"]
     // Each top-level module of that list has a module object, bound as
     // _mec_mod_<name> like a library module's and only there, so a module name
     // is unbound until an import binds it: the host record for the modules that
