@@ -4157,7 +4157,6 @@ KwContinue  = "continue" KwEnd ;
     function swStrMutRef(txt, suffixes) {
         var n = suffixes.length
         if (suffixes[n - 1].kind != "mcall") { return null }
-        if (!swStrMutName(suffixes[n - 1].name) && swValMutOf(suffixes[n - 1].name) == "") { return null }
         var j = 0
         while (j < txt.length) {
             var k = txt.charCodeAt(j)
@@ -4190,6 +4189,62 @@ KwContinue  = "continue" KwEnd ;
     // value is stored through assign and the call answers Void; anything else
     // takes the ordinary call. Twin of swValMutFits / swValMutate in
     // swift-interpreter.abnf.
+    // A mutating method of an enum: the case value cannot change in place, so the
+    // method runs with a HOLDER as self (emitFunc reads self out of it) and what it
+    // assigned to self is written back to the receiver. Any other receiver takes the
+    // ordinary call. Twin of the mutating-enum arm of the member chain in
+    // swift-interpreter.abnf.
+    // Inside a member of an enum or of an extended builtin, whose self is a VALUE.
+    function swInValMember() {
+        return curType() != null && (enumNames[curType().name] == 1 || isBuiltinTypeName(curType().name))
+    }
+    // `self = v` there: self takes v, and so does the holder the member runs with
+    // (an initializer's, a mutating method's), which is how the caller sees it.
+    function swEmitSelfStore(b, v) {
+        var hThis = b.NewCall(rtKGet(), [curScopeV, emitStr(b, "this")])
+        var hSetB = curF.NewBlock("")
+        var hJoinB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, b.NewCall(rtProbe("sw_isholder", "__eholder"), [hThis])), hSetB, hJoinB)
+        callExt(hSetB, "js_set", [hThis, emitStr(hSetB, "__eself"), v])
+        hSetB.NewBr(hJoinB)
+        hJoinB.NewCall(rtKSet(), [curScopeV, emitStr(hJoinB, "self"), v])
+        return hJoinB
+    }
+    function swEmitEnumMut(b, curV, s, nameV, argsV, assign, other) {
+        var caseB = curF.NewBlock("")
+        var omB = curF.NewBlock("")
+        var jmB = curF.NewBlock("")
+        var hB = curF.NewBlock("")
+        var notCaseB = omB
+        // A builtin an extension gave the method: a receiver that is no object
+        // (a number, a String, a Bool) takes it from the $ext$ table.
+        var bases = builtinMethOf(s.name)
+        var extB = null
+        if (bases != null) {
+            notCaseB = curF.NewBlock("")
+            extB = curF.NewBlock("")
+            notCaseB.NewCondBr(truthy(notCaseB, callExt(notCaseB, "js_seq", [callExt(notCaseB, "js_typeof", [curV]), emitStr(notCaseB, "object")])), omB, extB)
+        }
+        b.NewCondBr(truthy(b, b.NewCall(rtProbe("sw_iscase", "__ecase"), [curV])), caseB, notCaseB)
+        var fCase = caseB.NewCall(rtFindM(), [curV, nameV])
+        caseB.NewBr(hB)
+        var inc = [llvm.ir.NewIncoming(fCase, caseB)]
+        if (extB != null) {
+            var fExt = callExt(extB, "js_get", [swEmitExtTbl(extB, bases, curV), nameV])
+            extB.NewBr(hB)
+            inc.push(llvm.ir.NewIncoming(fExt, extB))
+        }
+        var fV = hB.NewPhi(inc)
+        var hV = callExt(hB, "js_obj_new", [])
+        callExt(hB, "js_set", [hV, emitStr(hB, "__eholder"), hTrue])
+        callExt(hB, "js_set", [hV, emitStr(hB, "__eself"), curV])
+        var rV = hB.NewCall(rtPrependCall(), [hV, fV, argsV])
+        var sa = assign(hB, callExt(hB, "js_get", [hV, emitStr(hB, "__eself")]))
+        sa.b.NewBr(jmB)
+        var r2 = other == undefined ? swEmitLMCall(omB, curV, s, nameV, argsV) : other(omB)
+        omB.NewBr(jmB)
+        return {b: jmB, v: jmB.NewPhi([llvm.ir.NewIncoming(rV, sa.b), llvm.ir.NewIncoming(r2, omB)])}
+    }
     function swEmitValMut(b, curV, s, nameV, argsV, assign) {
         var fitB = curF.NewBlock("")
         var omB = curF.NewBlock("")
@@ -5898,7 +5953,13 @@ KwContinue  = "continue" KwEnd ;
                     var eab = emitArgRecsInto(b, s.args, eb)
                     b = eab.b
                     var btbl = swEmitExtTbl(b, builtinMethOf(s.name), cur)
-                    cur = callExt(b, "js_swextcall", [cur, emitStr(b, s.name), eb, btbl])
+                    var xcur = cur
+                    var xcall = function(xb) { return callExt(xb, "js_swextcall", [xcur, emitStr(xb, s.name), eb, btbl]) }
+                    if (smAssign != null && i + 1 == suffixes.length && hasOwn(swMutNames, "$" + s.name)) {
+                        var xm = swEmitEnumMut(b, cur, s, emitStr(b, s.name), eb, function(b2, v2) { smVal = v2; return smAssign(b2) }, xcall)
+                        b = xm.b
+                        cur = xm.v
+                    } else { cur = xcall(b) }
                     emitWriteBacks(b, eab.boxes)
                 } else if (s.kind == "mcall" && (s.name == "map" || s.name == "flatMap") && swTyIsOpt(anns[i])) {
                     var oea = emitArgRecs(b, s.args)
@@ -5954,11 +6015,16 @@ KwContinue  = "continue" KwEnd ;
                     if (s.name == "init" && curType() != null) {
                         mnameV = emitOverloadKey(b, "init", typeRec(curType().key).inits, s.args, ea.v, 0)
                     }
-                    if (smAssign != null && i + 1 == suffixes.length && !swStrMutName(s.name)) {
+                    if (smAssign != null && i + 1 == suffixes.length && swValMutOf(s.name) != "") {
                         var vm = swEmitValMut(b, cur, s, mnameV, ea.v, function(b2, v2) { smVal = v2; return smAssign(b2) })
                         b = vm.b
                         cur = vm.v
-                    } else if (smAssign != null && i + 1 == suffixes.length) {
+                    } else if (smAssign != null && i + 1 == suffixes.length && hasOwn(swMutNames, "$" + s.name)
+                               && (hasRichEnum || builtinMethOf(s.name) != null)) {
+                        var em = swEmitEnumMut(b, cur, s, mnameV, ea.v, function(b2, v2) { smVal = v2; return smAssign(b2) })
+                        b = em.b
+                        cur = em.v
+                    } else if (smAssign != null && i + 1 == suffixes.length && swStrMutName(s.name)) {
                         // A String receiver takes rtStrMut and the write-back;
                         // anything else (an Array's append) the ordinary call.
                         var smB = curF.NewBlock("")
@@ -6612,11 +6678,53 @@ KwContinue  = "continue" KwEnd ;
     // the raw-value one. It runs with a HOLDER as self, and `self = .case` inside it
     // stores the case there (makeAssign); a failable one's nil answers nil. Twin of
     // swEnumCall in swift-interpreter.abnf.
+    // Whether a call's labels name exactly this parameter list: every argument by
+    // its own label ("" for none), and only defaulted parameters left out. Stricter
+    // than overload fitting, which lets an unlabelled argument through: `Int("12")`
+    // must stay the builtin conversion beside an `init(fromHex:)`. Twin in swift-interpreter.abnf.
+    function swInitLabelsExact(params, labels) {
+        if (labels.length > params.length) { return false }
+        for (var i = 0; i < params.length; i++) {
+            if (i >= labels.length) {
+                if (params[i].hasDefault !== true) { return false }
+                continue
+            }
+            var a = labels[i] == null ? "" : labels[i]
+            if (a != params[i].label) { return false }
+        }
+        return true
+    }
+    // `Int(fromHex: s)`: an initializer an extension of a builtin declares, picked
+    // by the call's exact labels and run as an enum's is, from the builtin's $ext$
+    // table; null when none takes these labels. Decided at emit time, when every
+    // extension has been walked. Twin of swBuiltinExtInit in swift-interpreter.abnf.
+    function swBuiltinExtInitCall(b, name, args) {
+        var rec = typeAt(name)
+        if (rec == null || rec.inits.length == 0) { return null }
+        var labels = []
+        for (var i = 0; i < args.length; i++) { labels.push(args[i].lbl) }
+        for (var k = 0; k < rec.inits.length; k++) {
+            if (!swInitLabelsExact(rec.inits[k], labels)) { continue }
+            var holder = callExt(b, "js_obj_new", [])
+            callExt(b, "js_set", [holder, emitStr(b, "__eholder"), hTrue])
+            var iargs = callExt(b, "js_arr_new", [])
+            callExt(b, "js_arr_push", [iargs, holder])
+            var eai = emitArgRecsInto(b, args, iargs)
+            b = eai.b
+            var tblV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, "$ext$" + name)])
+            var iret = callExt(b, "js_call", [callExt(b, "js_get", [tblV, emitStr(b, memberKey("init", k))]), hUndef, iargs])
+            emitWriteBacks(b, eai.boxes)
+            var esV = callExt(b, "js_get", [holder, emitStr(b, "__eself")])
+            return {b: b, v: b.NewSelect(truthy(b, callExt(b, "js_seq", [iret, hNull])), hNull, esV)}
+        }
+        return null
+    }
     function swEnumHasInit(krec, args) {
         return krec != null && krec.inits.length > 0 && !(args.length == 1 && args[0].lbl == "rawValue")
     }
     function swEnumInitCall(b, krec, ck, eV, args) {
         var holder = callExt(b, "js_obj_new", [])
+        callExt(b, "js_set", [holder, emitStr(b, "__eholder"), hTrue])
         var iargs = callExt(b, "js_arr_new", [])
         callExt(b, "js_arr_push", [iargs, holder])
         var eai = withTypeCtx(ck, function() { return emitArgRecsInto(b, args, iargs) })
@@ -6906,6 +7014,16 @@ KwContinue  = "continue" KwEnd ;
     }
     function makeCall(items) {
         var name = items[0]
+        if (!isBuiltinTypeName(name)) { return makeCallPlain(items) }
+        var plain = makeCallPlain(items)
+        var bargs = items.slice(1)
+        return function(b) {
+            var bx = swBuiltinExtInitCall(b, name, bargs)
+            return bx != null ? bx : plain(b)
+        }
+    }
+    function makeCallPlain(items) {
+        var name = items[0]
         var args = planArgs(name, items.slice(1))
         if (name.charCodeAt(0) >= 65 && name.charCodeAt(0) <= 90 && lookupSig(name) == null && classNames[name] != 1) { swNoteDynInit(args) }
         // Swift's print(_:separator:terminator:), not the shared `println` host
@@ -7190,7 +7308,20 @@ KwContinue  = "continue" KwEnd ;
                 // the receiver, so an instance receiver still takes the member call.
                 var selfRV = selfB.NewCall(rtKGet(), [curScopeV, emitStr(selfB, "self")])
                 var sv
-                if (builtinMethOf(name) != null) {
+                var selfEnd = selfB
+                if (hasOwn(swMutNames, "$" + name) && swInValMember()) {
+                    // `turn()` inside a mutating member of an enum (or an extended
+                    // builtin) is `self.turn()`: through a holder, and self takes
+                    // what the call assigned (swEmitEnumMut).
+                    var mfV = builtinMethOf(name) != null
+                        ? callExt(selfB, "js_get", [swEmitExtTbl(selfB, builtinMethOf(name), selfRV), emitStr(selfB, name)])
+                        : selfB.NewCall(rtFindM(), [selfRV, emitStr(selfB, name)])
+                    var mhV = callExt(selfB, "js_obj_new", [])
+                    callExt(selfB, "js_set", [mhV, emitStr(selfB, "__eholder"), hTrue])
+                    callExt(selfB, "js_set", [mhV, emitStr(selfB, "__eself"), selfRV])
+                    sv = selfB.NewCall(rtPrependCall(), [mhV, mfV, ea.v])
+                    selfEnd = swEmitSelfStore(selfB, callExt(selfB, "js_get", [mhV, emitStr(selfB, "__eself")]))
+                } else if (builtinMethOf(name) != null) {
                     var sbt = swEmitExtTbl(selfB, builtinMethOf(name), selfRV)
                     sv = callExt(selfB, "js_swextcall", [selfRV, emitStr(selfB, name), ea.v, sbt])
                 } else {
@@ -7198,9 +7329,9 @@ KwContinue  = "continue" KwEnd ;
                     // js_swmcall's static arm finds.
                     sv = callExt(selfB, swStatCtx ? "js_swmcall" : "js_mcall", [selfRV, emitStr(selfB, name), ea.v])
                 }
-                selfB.NewBr(joinB)
+                selfEnd.NewBr(joinB)
                 // The phi first: a block's phis must lead it, and the write-backs emit calls.
-                var jv = joinB.NewPhi([llvm.ir.NewIncoming(lv, localB), llvm.ir.NewIncoming(sv, selfB)])
+                var jv = joinB.NewPhi([llvm.ir.NewIncoming(lv, localB), llvm.ir.NewIncoming(sv, selfEnd)])
                 emitWriteBacks(joinB, ea.boxes)
                 return {b: joinB, v: jv}
             }
@@ -7577,11 +7708,7 @@ KwContinue  = "continue" KwEnd ;
                 }
                 // `self = .case` in an enum initializer: the case is the answer
                 // (the enum arm of makeCall reads it off the holder).
-                if (ref.name == "self" && curType() != null && enumNames[curType().name] == 1) {
-                    callExt(b, "js_set", [b.NewCall(rtKGet(), [curScopeV, emitStr(b, "this")]), emitStr(b, "__eself"), v])
-                    b.NewCall(rtKSet(), [curScopeV, nameV, v])
-                    return {b: b, v: v}
-                }
+                if (ref.name == "self" && swInValMember()) { return {b: swEmitSelfStore(b, v), v: v} }
                 if (ref.name == "self" && hasStructs) {
                     b.NewCall(rtAssignSelf(), [b.NewCall(rtKGet(), [curScopeV, emitStr(b, "this")]), v])
                     return {b: b, v: v}
@@ -8689,7 +8816,14 @@ KwContinue  = "continue" KwEnd ;
         if (isInstance) {
             var thisV = callExt(b, "js_arg", [f.Params[1], handle(0)])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), thisV])
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "self"), thisV])
+            var selfV0 = thisV
+            // A holder (an enum initializer, a mutating enum method) stands in for an
+            // enum value: self is the value it holds.
+            if (curType() != null && (enumNames[curType().name] == 1 || isBuiltinTypeName(curType().name))) {
+                var isH = truthy(b, b.NewCall(rtProbe("sw_isholder", "__eholder"), [thisV]))
+                selfV0 = b.NewSelect(isH, b.NewCall(rtSafeGet(), [thisV, emitStr(b, "__eself")]), thisV)
+            }
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "self"), selfV0])
             var shadowed = swShadowedTops(params)
             for (var si = 0; si < shadowed.length; si++) {
                 callExt(b, "js_scope_decl", [curScopeV, emitStr(b, shadowed[si]), hUndef])
@@ -10790,7 +10924,8 @@ KwContinue  = "continue" KwEnd ;
             var stdProto = swIsStdSeqProto(base)
             if (!isBuiltinTypeName(base) && !stdProto) { return notImplStmt("extension of an unknown type", up.pos) }
             for (var ci = 0; ci < mem.comps.length; ci++) { swNoteBuiltinMember(builtinComp, mem.comps[ci].name, base) }
-            for (var mi = 0; mi < mem.methods.length; mi++) { swNoteBuiltinMember(builtinMeth, mem.methods[mi].name, base) }
+            // An initializer is not a member call (swBuiltinExtInitCall picks it).
+            for (var mi = 0; mi < mem.methods.length; mi++) { if (mem.methods[mi].name != "init") { swNoteBuiltinMember(builtinMeth, mem.methods[mi].name, base) } }
             // `extension Int: P { ... }` conforms a BUILTIN. There is no descriptor
             // to hang a __conf_ marker on, so the conformers are recorded here and
             // emitIsType passes the list to js_swconf statically. The protocol's own
@@ -10960,6 +11095,11 @@ KwContinue  = "continue" KwEnd ;
         // in swift-interpreter.abnf.
         if (!hasOwn(swCaseOwners, "$" + dname)) { return swDotFloStatic(dname) }
         var os = swCaseOwners["$" + dname]
+        // Several enums declare it: inside a member of one of them (`self = .e`,
+        // `case .e:` over self), that one.
+        if (os.length > 1 && curType() != null) {
+            for (var oi = 0; oi < os.length; oi++) { if (os[oi] == curType().name) { return os[oi] } }
+        }
         return os.length == 1 && typeAt(typeKeyOf(os[0])) != null ? os[0] : ""
     }
     // `2 * .pi`: a floating-point static no program type declares is Double's.

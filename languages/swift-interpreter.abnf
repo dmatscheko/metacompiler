@@ -6926,6 +6926,15 @@ KwContinue  = "continue" KwEnd ;
                 writeBacks(ea.boxes)
                 return obj
             }
+            // An initializer an `extension Int { init(...) }` declares, when the
+            // call's labels name it exactly.
+            if (f != undefined && f !== null && typeof f == "object" && f.__tname !== undefined) {
+                var bxi = swBuiltinExtInit(f.__tname, argv, recLabels(recs))
+                if (bxi !== null) {
+                    writeBacks(ea.boxes)
+                    return bxi.v
+                }
+            }
             // Int(x) / UInt8(x) / ...: the integer types are descriptors rather than
             // functions, so that Int.max stays an ordinary property read; __conv is
             // the conversion behind the call form.
@@ -7211,7 +7220,6 @@ KwContinue  = "continue" KwEnd ;
     function swStrMutRef(txt, suffixes) {
         var n = suffixes.length
         if (suffixes[n - 1].kind != "mcall") { return null }
-        if (!swStrMutName(suffixes[n - 1].name) && swValMutOf(suffixes[n - 1].name) == "") { return null }
         var j = 0
         while (j < txt.length && swIdCh(txt.charCodeAt(j))) { j++ }
         if (j == 0 || j >= txt.length || (txt.charAt(j) != "." && txt.charAt(j) != "[")) { return null }
@@ -7361,6 +7369,21 @@ KwContinue  = "continue" KwEnd ;
                         smVal = swValMutate(cur, s.name, ea.argv)
                         smAssign()
                         cur = undefined
+                    } else if (smAssign != null && i + 1 == suffixes.length && hasOwn(swMutNames, "$" + s.name)
+                               && typeof swValMethod(cur, s.name) == "function") {
+                        // A mutating method of an enum or of an extended builtin: the
+                        // value cannot change in place, so the method runs with a
+                        // HOLDER as self and what it assigned to self is written back
+                        // to the receiver. Twin of swEmitEnumMut in
+                        // swift-to-llvm-ir.abnf.
+                        var mfn = swValMethod(cur, s.name)
+                        var mh = {__eholder: true, __eself: cur}
+                        pendingLabels = recLabels(s.args)
+                        var mr = mfn.apply(undefined, concat2impl([mh], ea.argv))
+                        pendingLabels = null
+                        smVal = mh.__eself
+                        smAssign()
+                        cur = mr
                     } else {
                         pendingLabels = recLabels(s.args)
                         cur = mcall(cur, s.name, ea.argv)
@@ -7618,7 +7641,7 @@ KwContinue  = "continue" KwEnd ;
                 // `self = .case` in an enum initializer: the case is the answer
                 // (swEnumCall's holder).
                 if (ref.name == "self") {
-                    var eh = findThis()
+                    var eh = swFindHolder()
                     if (eh !== null && eh !== undefined && typeof eh == "object" && eh.__eholder === true) { eh.__eself = v }
                 }
                 // `self = X` inside a mutating method rewrites the value in place, so
@@ -8769,7 +8792,10 @@ KwContinue  = "continue" KwEnd ;
         else { scopes = chain.slice(0); scopes.push({}) }
         if (self !== undefined) {
             declVar("this", self)
-            declVar("self", self)
+            // A holder (swEnumCall, a mutating enum method) stands in for an enum
+            // value: self is the value it holds.
+            if (self !== null && typeof self == "object" && self.__eholder === true) { declVar("self", self.__eself) }
+            else { declVar("self", self) }
         }
         for (var j = 0; j < f.params.length; j++) {
             var pj = f.params[j]
@@ -9974,6 +10000,14 @@ KwContinue  = "continue" KwEnd ;
         // declares is that enum's, so the value carries its methods.
         if (!hasOwn(swCaseOwners, "$" + dname)) { return swDotFloStatic(dname) }
         var os = swCaseOwners["$" + dname]
+        // Several enums declare it: inside a member of one of them (`self = .e`,
+        // `case .e:` over self), that one. Twin in swift-to-llvm-ir.abnf.
+        if (os.length > 1 && ownerStack.length > 0) {
+            var ow = ownerStack[ownerStack.length - 1]
+            if (ow != null && typeof ow == "object" && ow.__name != undefined) {
+                for (var oi = 0; oi < os.length; oi++) { if (os[oi] == ow.__name) { return os[oi] } }
+            }
+        }
         return os.length == 1 && swResolve(os[0]) != null ? os[0] : ""
     }
     // `2 * .pi`: a floating-point static no program type declares is Double's - the
@@ -10247,6 +10281,38 @@ KwContinue  = "continue" KwEnd ;
     // HOLDER as self; `self = .case` inside it stores the case there (makeAssign),
     // and that is the answer - nil when a failable one returned nil. Twin of the
     // enum arm of makeCall in swift-to-llvm-ir.abnf.
+    // Whether a call's labels name exactly this parameter list: every argument by
+    // its own label ("" for none), and only defaulted parameters left out. Stricter
+    // than overload fitting, which lets an unlabelled argument through: `Int("12")`
+    // must stay the builtin conversion beside an `init(fromHex:)`. Twin in swift-to-llvm-ir.abnf.
+    function swInitLabelsExact(params, labels) {
+        if (labels.length > params.length) { return false }
+        for (var i = 0; i < params.length; i++) {
+            if (i >= labels.length) {
+                if (params[i].hasDefault !== true) { return false }
+                continue
+            }
+            var a = labels[i] == null ? "" : labels[i]
+            if (a != params[i].label) { return false }
+        }
+        return true
+    }
+    // `Int(fromHex: s)`: an initializer an extension of a builtin declares, run as
+    // an enum's is (swEnumCall's holder), as {v}; null when none takes these labels.
+    // Twin of swBuiltinExtInitCall in swift-to-llvm-ir.abnf.
+    function swBuiltinExtInit(name, argv, labels) {
+        var tbl = builtinTable(name, false)
+        if (tbl == null || !hasOwn(tbl, "__ov_init")) { return null }
+        var lst = tbl.__ov_init
+        for (var i = 0; i < lst.length; i++) {
+            if (!swInitLabelsExact(lst[i].params, labels)) { continue }
+            var holder = {__eholder: true}
+            var r = lst[i].fn.apply(undefined, concat2impl([holder], argv))
+            if (r === null || holder.__eself === undefined) { return {v: null} }
+            return {v: holder.__eself}
+        }
+        return null
+    }
     function swEnumCall(e, argv, labels) {
         var tbl = e.__members
         var init = tbl == undefined || tbl === null || !hasOwn(tbl, "init") ? null : tbl["init"]
@@ -10436,6 +10502,41 @@ KwContinue  = "continue" KwEnd ;
             if (hasOwn(scopes[i], "self")) { return scopes[i]["self"] }
         }
         return undefined
+    }
+    // The holder an enum initializer or a mutating enum method runs with, which is
+    // `this` while `self` is the value it holds (makeFunBody); null outside one.
+    // The method `name` of a receiver that is a VALUE rather than an object a
+    // method can change in place: an enum case, or a builtin an extension added
+    // the method to. null for anything else.
+    function swValMethod(v, name) {
+        if (isCaseVal(v)) { return classFind(v.__class, name) }
+        if (v === null || v === undefined) { return null }
+        if (typeof v == "object" && !isFlo(v) && !szIs(v)) { return null }
+        var bt = builtinTableFor(v)
+        return bt == null ? null : classFind(bt, name)
+    }
+    // A mutating method called on the implicit self of a value member: run through
+    // a holder, then self (and the member's own holder) take what it assigned.
+    function swSelfMutFn(fn, self) {
+        return function() {
+            var h = {__eholder: true, __eself: self}
+            var av = [h]
+            for (var i = 0; i < arguments.length; i++) { av.push(arguments[i]) }
+            var r = fn.apply(undefined, av)
+            swSetName("self", h.__eself)
+            var oh = swFindHolder()
+            if (oh !== null) { oh.__eself = h.__eself }
+            return r
+        }
+    }
+    function swFindHolder() {
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            if (hasOwn(scopes[i], "this")) {
+                var t = scopes[i]["this"]
+                return t !== null && t !== undefined && typeof t == "object" && t.__eholder === true ? t : null
+            }
+        }
+        return null
     }
 
     // ----- Core library config (see lib/interp-core.js) -----
@@ -11065,6 +11166,10 @@ KwContinue  = "continue" KwEnd ;
                 if (sfn != null) { return {v: bindSelf(sfn, self)} }
             }
             var mm = self.__class == undefined ? null : classFind(self.__class, name)
+            // `turn()` inside a mutating member of an enum is `self.turn()`: through a
+            // holder, and self takes what the call assigned. Twin in makeCall of
+            // swift-to-llvm-ir.abnf.
+            if (typeof mm == "function" && isCaseVal(self) && hasOwn(swMutNames, "$" + name)) { return {v: swSelfMutFn(mm, self)} }
             if (typeof mm == "function") { return {v: bindSelf(mm, self)} }
             // `extension Int: P { ... }` conforms a BUILTIN, so the receiver of a
             // protocol default's own body can be a number or a string, whose members
@@ -11072,6 +11177,7 @@ KwContinue  = "continue" KwEnd ;
             var bt0 = builtinTableFor(self)
             if (bt0 != null) {
                 var bm0 = classFind(bt0, name)
+                if (typeof bm0 == "function" && hasOwn(swMutNames, "$" + name)) { return {v: swSelfMutFn(bm0, self)} }
                 if (typeof bm0 == "function") { return {v: bindSelf(bm0, self)} }
                 // An unqualified PROPERTY of the builtin itself, `count` inside
                 // `extension String`, is `self.count`.

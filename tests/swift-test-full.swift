@@ -5219,6 +5219,40 @@ func s131() {
     check("131a", [c.r, c.g, c.b] == [17, 17, 17] && c.name == "gray17" && [d.r, d.g, d.b] == [255, 0, 0] && d.name == "red")
 }
 
+// ===== SECTION 132: mutating members of value types that are not structs =====
+// `self = ...` in a mutating method of an enum, or of a builtin an extension
+// extends, changes the variable the method was called on - through a name, an
+// array element, a struct field, and the implicit self of another mutating
+// member; an extension's initializer of a builtin assigns self too. Every value
+// read off swiftc 6.1.2.
+enum Dir132 {
+    case n, e, s, w
+    mutating func turn() { switch self { case .n: self = .e; case .e: self = .s; case .s: self = .w; case .w: self = .n } }
+    mutating func back() -> Dir132 { let old = self; turn(); turn(); self.turn(); return old }
+}
+struct Bot132 { var dir = Dir132.n; mutating func step() { dir.turn() } }
+extension Int {
+    mutating func inc132() { self += 1 }
+    mutating func inc132x2() { inc132(); inc132() }
+    init(double132 n: Int) { self = n * 2 }
+}
+extension String { mutating func wrap132(_ c: Character) { self = String(c) + self + String(c) } }
+func s132() {
+    var d = Dir132.n
+    d.turn()
+    let was = d.back()
+    var ds = [Dir132.n, Dir132.s]
+    ds[1].turn()
+    var bot = Bot132()
+    bot.step(); bot.step()
+    check("132a", d == .n && was == .e && ds == [.n, .w] && bot.dir == .s)
+    var k = 5
+    k.inc132(); k.inc132x2()
+    var w = "x"
+    w.wrap132("*")
+    check("132b", k == 8 && Int(double132: 21) == 42 && w == "*x*")
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5351,6 +5385,7 @@ func main() {
     s129() // SECTION-CALL 129
     s130() // SECTION-CALL 130
     s131() // SECTION-CALL 131
+    s132() // SECTION-CALL 132
     print("full: \(checks) checks, \(fails) failures")
 }
 
