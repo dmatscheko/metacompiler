@@ -2873,7 +2873,22 @@ func s44() {
 	var ma interface{} = map[string]P44{}
 	check("ta11", rec44(func() { _ = sa.(int) }) == "error interface conversion: interface {} is []string, not int")
 	check("ta12", rec44(func() { _ = ma.(byte) }) == "error interface conversion: interface {} is map[string]main.P44, not uint8")
+	// A conversion to a declared interface type, and to fmt.Stringer, keeps the
+	// value's dynamic type and its methods.
+	sh := Sh44(C44(4))
+	st := fmt.Stringer(C44(3))
+	_, isC := sh.(C44)
+	check("ic1", sh.Show() == "C4" && fmt.Sprint(sh, st) == "S4 S3" && st.String() == "S3" && isC)
+	sp := Sh44(P44{7})
+	check("ic2", sp.Show() == "P7" && fmt.Sprintf("%T %T", sh, sp) == "main.C44 main.P44")
 }
+
+type Sh44 interface{ Show() string }
+type C44 int
+
+func (c C44) Show() string   { return fmt.Sprint("C", int(c)) }
+func (c C44) String() string { return fmt.Sprint("S", int(c)) }
+func (p P44) Show() string   { return fmt.Sprint("P", p.x) }
 
 // ===== SECTION 45: fmt's verbs, flags, width and precision =====
 // Every expected string was read off `go run`. The operands come out of slices so
@@ -4050,7 +4065,36 @@ func s70() {
 	b := []byte(nil)
 	l := l70(nil)
 	check("nsl2", fmt.Sprint(b == nil, len(b), l == nil, l) == "true 0 true []")
+	// An untyped nil reaching a slot of slice or map type is that type's nil, which
+	// prints [] or map[] rather than <nil>: an appended element, an index or field
+	// store, a declaration, an argument, a channel send and a map literal value.
+	ss := [][]int{{1}}
+	ss = append(ss, nil)
+	var mm []map[string]int
+	mm = append(mm, nil)
+	var ls []l70
+	ls = append(ls, nil)
+	check("nsl3", fmt.Sprint(ss, mm, ls, ss[1] == nil, len(ss[1])) == "[[1] []] [map[]] [[]] true 0")
+	ss[0] = nil
+	var st n70
+	st.xs = []int{1}
+	st.xs = nil
+	st.m = nil
+	var y []int = nil
+	mp := map[string][]int{"a": nil}
+	mp["b"] = nil
+	check("nsl4", fmt.Sprint(ss, st, y, mp, st.xs == nil) == "[[] []] {[] map[]} [] map[a:[] b:[]] true")
+	ch := make(chan []int, 1)
+	ch <- nil
+	check("nsl5", f70(nil, nil) == "[] map[] true true" && fmt.Sprint(<-ch) == "[]")
 }
+
+type n70 struct {
+	xs []int
+	m  map[string]int
+}
+
+func f70(p []int, q map[int]int) string { return fmt.Sprint(p, q, p == nil, q == nil) }
 
 // ===== SECTION 71: string of an invalid code point =====
 func s71() {

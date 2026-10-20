@@ -1226,18 +1226,20 @@ function goSplitSty(xs) {
     var rns = []
     var krs = []
     var pures = []
+    var nls = []
     var i = 0
     while (i < xs.length) {
-        if (typeof xs[i] == "function") { ts.push(xs[i]); tys.push(""); rns.push(false); krs.push(null); pures.push(false) }
+        if (typeof xs[i] == "function") { ts.push(xs[i]); tys.push(""); rns.push(false); krs.push(null); pures.push(false); nls.push(false) }
         else if (xs[i].sty != undefined && tys.length > 0) {
             tys[tys.length - 1] = xs[i].sty
             rns[rns.length - 1] = xs[i].rn === true
             krs[krs.length - 1] = xs[i].kr == undefined ? null : xs[i].kr
             pures[pures.length - 1] = xs[i].pu === true
+            nls[nls.length - 1] = xs[i].nl === true
         }
         i = i + 1
     }
-    return {ts: goOrderThunks(ts, pures), tys: tys, rns: rns, krs: krs}
+    return {ts: goOrderThunks(ts, pures), tys: tys, rns: rns, krs: krs, nls: nls}
 }
 // ----- AN UNTYPED CONSTANT AT A TYPED LOCATION -----
 // Go converts an untyped constant to the type of the location it reaches - its
@@ -2141,23 +2143,25 @@ function goSplitArgs(items) {
     var rns = []   // a returned value that is a rune constant (RetExpr)
     var krs = []   // an argument's goKRec record (ArgExpr)
     var pures = [] // an operand with no call in it (goPure)
+    var nls = []   // an operand that is the literal nil (goNilSrc)
     var spread = false
     var i = 0
     while (i < items.length) {
         var it = items[i]
-        if (typeof it == "function") { args.push(it); atys.push(""); rns.push(false); krs.push(null); pures.push(false) }
+        if (typeof it == "function") { args.push(it); atys.push(""); rns.push(false); krs.push(null); pures.push(false); nls.push(false) }
         else if (it != null && it.aty !== undefined) {
             if (atys.length > 0) {
                 atys[atys.length - 1] = it.aty
                 rns[rns.length - 1] = it.rn === true
                 krs[krs.length - 1] = it.kr == undefined ? null : it.kr
                 pures[pures.length - 1] = it.pu === true
+                nls[nls.length - 1] = it.nl === true
             }
         }
         else if (it != null && it.spread === true) { spread = true }
         i = i + 1
     }
-    return {args: goOrderThunks(args, pures), atys: atys, rns: rns, krs: krs, spread: spread}
+    return {args: goOrderThunks(args, pures), atys: atys, rns: rns, krs: krs, nls: nls, spread: spread}
 }
 // gc's order of evaluation (cmd/compile/internal/walk/order.go): within a statement
 // every call and receive runs first, left to right, and the plain operands are read
@@ -2169,6 +2173,29 @@ function goSplitArgs(items) {
 function goPure(start, pos) {
     var t = c.srcSlice(start, pos)
     return t.indexOf("(") < 0 && t.indexOf("<-") < 0
+}
+// Is the operand from start to pos the literal nil?
+function goNilSrc(start, pos) { return c.srcSlice(start, pos).trim() == "nil" && !cIsLocal("nil") }
+// AN UNTYPED NIL ADOPTS THE TYPE OF WHERE IT LANDS when that is a slice or map
+// type, whose nil is a marked empty container here (goZeroTy / emitZeroTy), not
+// the null a pointer, channel, func or interface nil is: `s = append(s, nil)` on
+// a [][]int prints [[]]. goNilAdoptTy is the type text to make that nil of, ""
+// for a type whose nil is the null; goNilTo replaces the operand t (nl: it is the
+// literal nil) with goNilThunk's, the grammar's.
+function goNilAdoptTy(t) {
+    if (t == undefined || t == null || t.length == 0) { return "" }
+    if (t.charCodeAt(0) == 91) { return (t.length > 1 && t.charCodeAt(1) == 93) ? t : "" }
+    var wd = goTyWord(t)
+    if (wd == "map") { return t }
+    var rn = resolveDefined(wd)
+    if (rn != wd) { return goNilAdoptTy(rn) }
+    return ""
+}
+function goNilTo(t, nl, ty) {
+    if (!nl) { return t }
+    var at = goNilAdoptTy(stBare(ty))
+    if (at == "") { return t }
+    return goNilThunk(at)
 }
 // The operands of a binary run [t, {at, as}, op, t, {at, as}, ...], in gc's order.
 function goRunOrder(items, ts) {
@@ -2212,11 +2239,13 @@ function goParamTyAt(pts, j) {
     if (t.indexOf("...") == 0) { return t.substring(3) }
     return j < pts.length ? t : ""
 }
-// The operands of fmt's printing functions are interfaces, and so are the
-// arguments a top-level function declares as one, and the elements append adds to
-// a slice of them: each is boxed by its static type (goDtBoxThunk is the grammar's).
+// The operands of fmt's printing functions are interfaces, as are the operand of
+// the conversion fmt.Stringer(x), the arguments a top-level function declares as
+// one, and the elements append adds to a slice of them: each is boxed by its
+// static type (goDtBoxThunk is the grammar's).
 var goFmtBoxes = {"$fmt.Println": true, "$fmt.Print": true, "$fmt.Printf": true, "$fmt.Sprint": true,
-                  "$fmt.Sprintf": true, "$fmt.Errorf": true, "$errors.Is": true, "$errors.Join": true}
+                  "$fmt.Sprintf": true, "$fmt.Errorf": true, "$errors.Is": true, "$errors.Join": true,
+                  "$fmt.Stringer": true}
 // The operands fmt only PRINTS also carry a pointer's, a channel's or a func's
 // static type, so %T names it (a nil one too) and a pointer to a struct prints as
 // &{...}; nothing else ever sees that box.
@@ -2399,6 +2428,7 @@ function goCallBoxC(items) {
         var t = sp.args[j]
         if (pts != null && !(sp.spread && j == sp.args.length - 1)) {
             t = goConstTo(t, sp.krs[j], goParamTyAt(pts, j), "argument to " + name)
+            t = goNilTo(t, sp.nls[j], goParamTyAt(pts, j))
             t = goDtBoxThunk(t, goDtBoxTo(sp.atys[j], goParamTyAt(pts, j)))
         }
         out.push(t)
@@ -2427,6 +2457,7 @@ function goChanSendBoxC(items3, text, pos) {
     else if (ct.indexOf("chan") == 0) { ct = ct.substring(4) }
     else { return items }
     items[1] = goConstTo(items[1], kr, ct, "send")
+    items[1] = goNilTo(items[1], items3[2].nl === true, ct)
     items[1] = goDtBoxThunk(items[1], goDtBoxTo(stAt(pos), ct))
     if (goIsRuneC(pos) && goRuneSlotTy(ct)) { items[1] = goI32Thunk(items[1]) }
     return items
@@ -4051,6 +4082,14 @@ function cSpecX(sv, as, at) {
     if (tk != null && cLastTy == "") { return tk }
     var sl = at >= 0 ? goConstStrLen(c.srcSlice(as, at)) : 0 - 1
     return sl >= 0 ? {sl: sl} : null
+}
+// I(x) with I a declared interface type: x put in an interface, boxed by its static
+// type, as any(x) is (goConvC). ci is the Call rule's [name, thunk, {aty}]; null
+// for any other call.
+function goIfaceConvC(ci) {
+    if (ci.length != 3 || typeof ci[1] != "function" || typeof ci[0] != "string") { return null }
+    if (goIfaceTys["$" + ci[0]] !== true || cIsLocal(ci[0])) { return null }
+    return goDtBoxThunk(ci[1], goDtBoxTyP(ci[2].aty))
 }
 // len of a constant string is a constant of type int, so `len("ab") << 70`
 // overflows int at compile time. ci is the Call rule's [name, thunk, {aty}] and

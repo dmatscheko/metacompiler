@@ -512,7 +512,7 @@ RecvOk      <~~ push(makeRecvOk(takeAll())) ~~>
 ChanSend    <~~ push(makeChanSend(goChanSendBoxC(takeAll(), up.in, up.pos), up.pos)) ~~>
             = PostfixExpr SameLine "<-" SendVal ;
 // The sent value, followed by its goKRec record (goChanSendBoxC).
-SendVal     <~~ var sv = pop(); push(sv); push({kr: goKRec(up.start, up.pos)}) ~~> = Expression ;
+SendVal     <~~ var sv = pop(); push(sv); push({kr: goKRec(up.start, up.pos), nl: goNilSrc(up.start, up.pos)}) ~~> = Expression ;
 
 // Every two-name comma-ok form ends here: NOTHING may follow but the end of the
 // statement, or MapOk would match the FIRST element of an ordinary two-name
@@ -619,7 +619,7 @@ IdxE        <~~ var ie = pop(); push(ie); push({ksty: stAt(up.pos), kr: goKRec(u
 
 ExprList    = StoreExpr { "," StoreExpr } ;
 // One value of a := / = / var, followed by the static type it reports (goSplitSty).
-StoreExpr   <~~ var se = pop(); push(se); push({sty: stStoreAt(up.pos), rn: goIsRuneC(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos)}) ~~> = Expression ;
+StoreExpr   <~~ var se = pop(); push(se); push({sty: stStoreAt(up.pos), rn: goIsRuneC(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos), nl: goNilSrc(up.start, up.pos)}) ~~> = Expression ;
 
 Empty       <~~ push(function(b) { return b }) ~~>
             = ";" ;
@@ -1260,10 +1260,11 @@ LitExpr     <~~ var le = pop(); push(le); push({lesty: goLitEsty(up.pos), pu: go
 // f(a, b): a function or a builtin. A trailing '...' spreads a slice into the
 // variadic parameter.
 Call        <~~ var ci = goAppendC(takeAll(), up.in); var csp = goSplitArgs(ci.slice(1))
-                push(makeCall(goCallBoxC(ci), csp.atys, goTpInfer(ci[0], csp, []))); goLenConstC(ci, up.start, up.pos) ~~>
+                var icv = goIfaceConvC(ci)
+                push(icv != null ? icv : makeCall(goCallBoxC(ci), csp.atys, goTpInfer(ci[0], csp, []))); goLenConstC(ci, up.start, up.pos) ~~>
             = Id <~~ push(goLtyName(up.in)) ~~> "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
 // A call argument reports its static type after it, for goSplitArgs.
-ArgExpr     <~~ var ae = pop(); push(goRuneDefC(ae, up.pos)); push({aty: stAt(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos)}) ~~> = Expression ;
+ArgExpr     <~~ var ae = pop(); push(goRuneDefC(ae, up.pos)); push({aty: stAt(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos), nl: goNilSrc(up.start, up.pos)}) ~~> = Expression ;
 // A returned value, which takes a rune constant at the RESULT's type (makeReturn).
 RetExpr     <~~ var re = pop(); push(re); push({aty: stAt(up.pos), rn: goIsRuneC(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos)}) ~~> = Expression ;
 
@@ -1933,6 +1934,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     // goAssignAdopt's conversion (go-constfold.js). Twin of goAdoptThunk in
     // go-interpreter.abnf.
+    // The nil of slice or map type text ty, for goNilTo (go-constfold.js). Twin of
+    // goNilThunk in go-interpreter.abnf.
+    function goNilThunk(ty) { return function(b) { return {b: b, v: emitZeroTy(b, ty)} } }
     function goAdoptThunk(t, ty) {
         return function(b) {
             var r = t(b)
@@ -2740,6 +2744,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 var rv = (typeof mv == "function")
                        ? mv(b)
                        : emitElemVal(b, {ekey: null, eval: null, enest: mv.enest}, zero)
+                // A nil value of a slice or map value type is that type's nil, as in
+                // emitElemVal.
+                if (typeof mv == "function") { rv = emitRetNil(rv.b, zero, rv.v) }
                 b = rv.b
                 // The map's VALUE TYPE is declared here, so the entry adopts its
                 // width: map[string]uint8{"k": 255} holds a uint8.
@@ -4055,6 +4062,19 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return b
     }
 
+    // A member that answers its one argument: fmt.Stringer(x), a conversion to the
+    // interface, whose argument goBoxArgsC has boxed by its static type
+    // (goFmtBoxes). Twin of hostGlobals["fmt"].Stringer in go-interpreter.abnf.
+    function declIdent(b, target, name) {
+        funcCount++
+        var idx = funcCount
+        var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var fb = f.NewBlock("entry")
+        fb.NewRet(callExt(fb, "js_arg", [f.Params[1], handle(0)]))
+        callExt(b, "js_set", [target, emitStr(b, name), callExt(b, "js_closure", [handle(idx), curScopeV])])
+        return b
+    }
+
     // fmt.Fprint / Fprintln / Fprintf(w, ...): the text Sprint / Sprintln / Sprintf
     // make of the other arguments, handed to w.Write as a []byte - Go's io.Writer
     // contract - and the answer is Write's. Twin of the Fprint arms of
@@ -4558,6 +4578,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 if (cty == "" && lref.path.length == 0 && lref.stars == 0) { cty = goStCopyTy(cTyLookup(lref.name)) }
                 exprs[ai] = goAssignConstTo(exprs[ai], sp.krs[ai], lref, refs.length)
                 if (lref.path.length == 0) { exprs[ai] = goAssignAdopt(exprs[ai], sp.tys[ai], goRefTy(lref)) }
+                exprs[ai] = goNilTo(exprs[ai], sp.nls[ai], goRefTy(lref))
                 exprs[ai] = goStoreThunk(exprs[ai], cty)
                 exprs[ai] = goDtBoxThunk(exprs[ai], goDtBoxTo(sp.tys[ai], goRefTy(lref)))
                 if (sp.rns[ai] && goIsIfaceTy(stBare(goRefTy(lref)))) { exprs[ai] = goI32Thunk(exprs[ai]) }
@@ -4791,6 +4812,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             for (var vi = 0; vi < inits.length; vi++) {
                 if (ty == "" && stBare(sp.tys[vi]) != "") { cBindTy(names[vi], stBare(sp.tys[vi])) }
                 inits[vi] = goConstTo(inits[vi], sp.krs[vi], ty != "" ? ty : (sp.rns[vi] ? "rune" : "any"), "variable declaration")
+                inits[vi] = goNilTo(inits[vi], sp.nls[vi], ty)
                 inits[vi] = goDtBoxThunk(goStoreThunk(inits[vi], goStCopyTy(sp.tys[vi])), goDtBoxTo(sp.tys[vi], ty))
                 if (sp.rns[vi] && (ty == "" || goIsIfaceTy(stBare(ty)))) { inits[vi] = goI32Thunk(inits[vi]) }
             }
@@ -5541,19 +5563,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     // A RESULT VALUE ADOPTS ITS DECLARED TYPE when it is an untyped nil (`return nil`
     // from a `map[string]int` result prints `map[]`). Only MAP and SLICE types adopt -
-    // see the twin goRetNil in languages/go-interpreter.abnf - and the test is STATIC,
-    // so a function returning anything else emits not one extra instruction. js_not is
-    // exactly "null or undefined" for a slot that can only hold one of those or a
-    // container.
-    function goNilAdoptTy(t) {
-        if (t == undefined || t == null || t.length == 0) { return "" }
-        if (t.charCodeAt(0) == 91) { return (t.length > 1 && t.charCodeAt(1) == 93) ? t : "" }
-        var wd = goTyWord(t)
-        if (wd == "map") { return t }
-        var rn = resolveDefined(wd)
-        if (rn != wd) { return goNilAdoptTy(rn) }
-        return ""
-    }
+    // see goNilAdoptTy in go-constfold.js and the twin goRetNil in
+    // languages/go-interpreter.abnf - and the test is STATIC, so a function returning
+    // anything else emits not one extra instruction. js_not is exactly "null or
+    // undefined" for a slot that can only hold one of those or a container.
     // A MULTI-VALUE RESULT IS MARKED, and the mark is what makes `fmt.Println(f())`
     // print `3 3 3` rather than `[3 3 3]` and `add(two(x))` answer 7 rather than 0:
     // Go EXPANDS a multi-value call that is the sole argument of a call, and a bare
@@ -6901,6 +6914,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // 0 errors.New, 1 fmt.Errorf, 2 errors.Is, 3 errors.Unwrap, 4 errors.As,
         // 5 errors.Join.
         b = declPrint(b, fmtV, "Errorf", "js_goerrors", 1)
+        b = declIdent(b, fmtV, "Stringer")
         b = declFprint(b, fmtV, "Fprint", 1)
         b = declFprint(b, fmtV, "Fprintln", 0)
         b = declFprint(b, fmtV, "Fprintf", 4)

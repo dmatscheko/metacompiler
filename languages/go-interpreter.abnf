@@ -496,7 +496,7 @@ RecvOk      <~~ push(makeRecvOk(takeAll())) ~~>
 ChanSend    <~~ push(makeChanSend(goChanSendBoxC(takeAll(), up.in, up.pos), up.pos)) ~~>
             = PostfixExpr SameLine "<-" SendVal ;
 // The sent value, followed by its goKRec record (goChanSendBoxC).
-SendVal     <~~ var sv = pop(); push(sv); push({kr: goKRec(up.start, up.pos)}) ~~> = Expression ;
+SendVal     <~~ var sv = pop(); push(sv); push({kr: goKRec(up.start, up.pos), nl: goNilSrc(up.start, up.pos)}) ~~> = Expression ;
 
 // Every two-name comma-ok form ends here: NOTHING may follow but the end of the
 // statement. Otherwise each of them matches the FIRST element of an ordinary
@@ -605,7 +605,7 @@ IdxE        <~~ var ie = pop(); push(ie); push({ksty: stAt(up.pos), kr: goKRec(u
 
 ExprList    = StoreExpr { "," StoreExpr } ;
 // One value of a := / = / var, followed by the static type it reports (goSplitSty).
-StoreExpr   <~~ var se = pop(); push(se); push({sty: stStoreAt(up.pos), rn: goIsRuneC(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos)}) ~~> = Expression ;
+StoreExpr   <~~ var se = pop(); push(se); push({sty: stStoreAt(up.pos), rn: goIsRuneC(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos), nl: goNilSrc(up.start, up.pos)}) ~~> = Expression ;
 
 Empty       <~~ push(function() {}) ~~>
             = ";" ;
@@ -1134,10 +1134,11 @@ NewType     <~~ push({nty: firstType(up.in)}) ~~>
 // f(a, b): a function, a builtin or an identifier-named conversion (int(x)). A
 // trailing '...' spreads a slice into the variadic parameter.
 Call        <~~ var ci = goAppendC(takeAll(), up.in); var csp = goSplitArgs(ci.slice(1))
-                push(makeCall(goCallBoxC(ci), csp.atys, goTpInfer(ci[0], csp, []))); goLenConstC(ci, up.start, up.pos) ~~>
+                var icv = goIfaceConvC(ci)
+                push(icv != null ? icv : makeCall(goCallBoxC(ci), csp.atys, goTpInfer(ci[0], csp, []))); goLenConstC(ci, up.start, up.pos) ~~>
             = Id <~~ push(goLtyName(up.in)) ~~> "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
 // A call argument reports its static type after it, for goSplitArgs.
-ArgExpr     <~~ var ae = pop(); push(goRuneDefC(ae, up.pos)); push({aty: stAt(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos)}) ~~> = Expression ;
+ArgExpr     <~~ var ae = pop(); push(goRuneDefC(ae, up.pos)); push({aty: stAt(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos), nl: goNilSrc(up.start, up.pos)}) ~~> = Expression ;
 // A returned value, which takes a rune constant at the RESULT's type (makeReturn).
 RetExpr     <~~ var re = pop(); push(re); push({aty: stAt(up.pos), rn: goIsRuneC(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos)}) ~~> = Expression ;
 
@@ -1605,6 +1606,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         Print: function() { gOut(gPrText(arguments)) },
         // fmt.Sprint: Print's text, returned instead of printed.
         Sprint: function() { return goCanon(gPrText(arguments)) },
+        // fmt.Stringer(x), a conversion to the interface: x itself, which goBoxArgsC
+        // has boxed by its static type (goFmtBoxes). Twin of declIdent's use in
+        // go-to-llvm-ir.abnf.
+        Stringer: function(x) { return x },
         // fmt.Printf / fmt.Sprintf: gfFormat in lib/go-fmt.js, over the gfH* hooks
         // below. The twin is gopFormat in abnf/jsrtgolang.go.
         Printf: function() {
@@ -4957,6 +4962,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 if (cty == "" && lref.path.length == 0 && lref.stars == 0) { cty = goStCopyTy(cTyLookup(lref.name)) }
                 exprs[ai] = goAssignConstTo(exprs[ai], sp.krs[ai], lref, refs.length)
                 if (lref.path.length == 0) { exprs[ai] = goAssignAdopt(exprs[ai], sp.tys[ai], goRefTy(lref)) }
+                exprs[ai] = goNilTo(exprs[ai], sp.nls[ai], goRefTy(lref))
                 exprs[ai] = goStoreThunk(exprs[ai], cty)
                 exprs[ai] = goDtBoxThunk(exprs[ai], goDtBoxTo(sp.tys[ai], goRefTy(lref)))
                 if (sp.rns[ai] && goIsIfaceTy(stBare(goRefTy(lref)))) { exprs[ai] = goI32Thunk(exprs[ai]) }
@@ -5093,6 +5099,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // goAssignAdopt's conversion (go-constfold.js). Twin of goAdoptThunk in
     // go-to-llvm-ir.abnf.
     function goAdoptThunk(t, ty) { return function() { return gAdoptTy(ty, t()) } }
+    // The nil of slice or map type text ty, for goNilTo (go-constfold.js). Twin of
+    // goNilThunk in go-to-llvm-ir.abnf.
+    function goNilThunk(ty) { return function() { return goZeroTy(ty) } }
     // The type a `var x T` declaration wrote for each name, at walk time and by name
     // (the latest declaration in the source wins). &x carries it for errors.As, which
     // needs the static type of a nil pointer. Twin of goDeclTys in go-to-llvm-ir.abnf.
@@ -5117,6 +5126,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             for (var vi = 0; vi < inits.length; vi++) {
                 if (ty == "" && stBare(sp.tys[vi]) != "") { cBindTy(names[vi], stBare(sp.tys[vi])) }
                 inits[vi] = goConstTo(inits[vi], sp.krs[vi], ty != "" ? ty : (sp.rns[vi] ? "rune" : "any"), "variable declaration")
+                inits[vi] = goNilTo(inits[vi], sp.nls[vi], ty)
                 inits[vi] = goDtBoxThunk(goStoreThunk(inits[vi], goStCopyTy(sp.tys[vi])), goDtBoxTo(sp.tys[vi], ty))
                 if (sp.rns[vi] && (ty == "" || goIsIfaceTy(stBare(ty)))) { inits[vi] = goI32Thunk(inits[vi]) }
             }
