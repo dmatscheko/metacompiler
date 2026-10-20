@@ -157,12 +157,6 @@ line tracking at warning sites is worth its cost.
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-638 bash: `@Q` / `printf %q` / `declare -p` of a well-formed non-printable character · P3 · SH · IN PROGRESS (SH worker, round 10) [V]
-bash decides with iswprint: `v=$'\xc2\x85'` (U+0085) → bash `$'\302\205'`, ours keeps it raw in single quotes; U+200B
-(`$'\xe2\x80\x8b'`) → bash `$'\342\200\213'`; `$'\x01\xc2\x85'` → bash `$'\001\302\205'`. All legs. Needs the locale's
-iswprint table (macOS en_US.UTF-8): derive it from the oracle over every code point, as the swift/java tables were, or record the
-divergence in manual 7.9.
-
 ---
 
 # C — C subset
@@ -742,6 +736,7 @@ T-628 python: raising `__hash__` without `__eq__`; slots in `__dict__`; `Plain[i
 T-629 python: stdin and input(); datetime, decimal, pprint, array, struct; remaining math — DONE 344fa727 f8b15ac9 1c48f755 (readIn host primitive + input()/sys.stdin, datetime/decimal/struct/array/pprint, str seeds, sumprod, fdlibm exp/log1p/log10); fma, __exit__ tracebacks and libm-dependent functions DECLINED (fma needs a double's bits in MetaJS; no engine has frame data for tracebacks; libm answers differ per platform — manual 7.9)
 T-634 swift: an Optional Set return does not adopt its literal — DONE c2852a7a (an `Optional<Set<E>>` spelling is not converted — unprobed, left)
 T-647 kotlin: `javaClass` / `::class` names of non-collections and collections; sorted-copy class edges — DONE d16124ba; residual class-name fidelity DECLINED as rarely printed: values views of hashMap/TreeMap/single/empty maps answer LinkedHashMap$LinkedValues (a per-map values kind would touch every kind-3 check in three engines), builtin KClass qualifiedName/toString (kotlin.String / class java.lang.String), and an exception's javaClass.name package
+T-638 bash: `@Q` / `printf %q` / `declare -p` of a well-formed non-printable character — DONE 8a8a72b3 (iswprint table derived from bash itself and cross-checked against iswprint)
 
 # Settled — do not re-open
 
