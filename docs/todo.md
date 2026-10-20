@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-649** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-650** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -64,22 +64,12 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-628 python: raising `__hash__` without `__eq__`; slots in `__dict__`; `Plain[int]`; builtin `__module__`; regex dialect errors · P2 · PY · IN PROGRESS (PY worker, round 8) [V]
-A user `__hash__` that raises is not called on set/dict insertion when the class has no `__eq__`: `{B()}` succeeds (python
-TypeError "cannot use 'B' as a set element (nope)"). `class Z: __slots__=("a",)`; `class W(Z): pass` → `vars(w)` `{'a': 1, 'x': 5}`
-(python `{'x': 5}`). `Plain[int]` on a class without `__class_getitem__` → a generic alias (python TypeError "type 'Plain' is not
-subscriptable"). `int.__module__` → AttributeError (python 'builtins'). Class keywords are not forwarded to `__init_subclass__` when a
-metaclass makes the class (type.__new__ path). Regex under the P dialect accepts `"\q"` (python "bad escape \q at position 0"), a
-duplicate `(?P<n>)` (python "redefinition of group name 'n' as group 2; was group 1 at position ..."), and `(?<x>a)` (python
-"unknown extension ?<x at position 1") — P-gated additions in the shared lib/regex.js / abnf/jsrtregex.go. `math.expm1(0.9999999999999999)`
-differs between native and llvm.Run (our own engines must agree).
-
-### T-629 python: stdin and input(); datetime, decimal, pprint, array, struct; remaining math · P3 · PY · IN PROGRESS (PY worker, round 8) [V]
-No stdin / `input()` (needs a C floor read primitive and its twins). Missing modules: datetime, decimal, pprint, array, struct.
-math: acosh, asinh, atanh, erf, erfc, exp2, fma, gamma, lgamma, sumprod (bit-exact or left out — libm-dependent ones are recorded in
-manual 7.9); statistics covariance/correlation/linear_regression need sumprod; random rejects str/bytes seeds (needs SHA-512).
-Transcendentals (exp, expm1, log1p, log10, cos, geometric_mean, random.gauss) differ from macOS libm in the last place on boundary
-inputs — record in manual 7.9 unless made bit-exact. `__exit__`'s traceback argument is always None.
+### T-649 python: class-body names visible inside methods; compiled runtime exceptions' `__mro__`; regex lookbehind · P1 · PY · OPEN [V]
+`class K:` with `def max(self, o): ...` and `def f(self): return max(1, 2)` → ours calls the method (python3 2: class bodies are not
+an enclosing scope for methods); `x = 5` in a class body with a global x → a method sees 5 (python3 the global). All engines.
+Compiled only: `try: int("x") except ValueError as e: print([c.__name__ for c in type(e).__mro__])` → `['ValueError', 'object']`
+(python3 `['ValueError', 'Exception', 'BaseException', 'object']`; IndexError, KeyError likewise; interp right). Regex: lookbehind
+is "not supported" under the P dialect (python supports fixed-width lookbehind); `\k<n>` / `\N{...}` do not give CPython's error.
 
 ---
 
@@ -760,6 +750,8 @@ T-637 java: static field and method of one name; field hiding; lazy static init;
 T-643 kotlin: `sorted()` results and deques answer `is ArrayList` true; SortedSet key views; javaClass.name — DONE 5238c524
 T-645 lua: string arithmetic ignores the strings' metatable — DONE 0ccab79f
 T-648 lua: `tonumber("-0.0")` loses the zero's sign in the interpreter and natively — DONE a735f8fd
+T-628 python: raising `__hash__` without `__eq__`; slots in `__dict__`; `Plain[int]`; builtin `__module__`; regex dialect errors — DONE 05033f1e
+T-629 python: stdin and input(); datetime, decimal, pprint, array, struct; remaining math — DONE 344fa727 f8b15ac9 1c48f755 (readIn host primitive + input()/sys.stdin, datetime/decimal/struct/array/pprint, str seeds, sumprod, fdlibm exp/log1p/log10); fma, __exit__ tracebacks and libm-dependent functions DECLINED (fma needs a double's bits in MetaJS; no engine has frame data for tracebacks; libm answers differ per platform — manual 7.9)
 
 # Settled — do not re-open
 
