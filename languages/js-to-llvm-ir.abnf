@@ -7054,12 +7054,12 @@ NotFuncHead = :script(~~
             var mergeB = curF.NewBlock("")
             b.NewCondBr(isFn, fnB, clsB)
             // The function form: 'this' is the new object, the arguments are unchanged.
-            // js_jsctordesc files the synthetic class descriptor the instance needs to
-            // answer 'new F() instanceof F' with (the interpreter half's ctorDescriptor
-            // is the same table), and js_jsnewres implements [[Construct]]'s last step:
+            // js_jsnewclass files the class descriptor the instance needs to answer
+            // 'new F() instanceof F' with, or the one F's own written prototype gives
+            // (the interpreter half's newClassOf), and js_jsnewres implements [[Construct]]'s last step:
             // an OBJECT the constructor returns wins over the fresh receiver.
             var oF0 = callExt(fnB, "js_obj_new", [])
-            callExt(fnB, memSetExt(), [oF0, emitStr(fnB, "__class"), callExt(fnB, "js_jsctordesc", [clsV])])
+            callExt(fnB, "js_jsnewclass", [oF0, clsV])
             var retF = callExt(fnB, "js_call_new", [clsV, oF0, argsV])
             var oF = callExt(fnB, "js_jsnewres", [retF, oF0])
             fnB.NewBr(mergeB)

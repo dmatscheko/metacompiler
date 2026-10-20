@@ -4354,6 +4354,58 @@ function s91() {
         ({}).toLocaleString() === "[object Object]");
 }
 
+// ===== SECTION 92: replacing a constructor's prototype =====
+// `F.prototype = p` makes p the prototype of every instance `new F()` builds from
+// then on, and `instanceof F` asks whether p is on the chain. Values read off node 24.
+function s92() {
+    const F: any = function (this: any) {};
+    F.prototype = { q: 4, m() { return this.q + 1 } };
+    const f: any = new F();
+    check("rp92a", f.q === 4 && f.m() === 5 && f instanceof F && !f.hasOwnProperty("q"));
+    const G: any = function (this: any, n: number) { this.n = n };
+    G.prototype.hi = function () { return "G" + this.n };
+    const H: any = function (this: any, n: number) { G.call(this, n) };
+    H.prototype = Object.create(G.prototype);
+    H.prototype.constructor = H;
+    const h: any = new H(3);
+    check("rp92b", h.hi() === "G3" && h instanceof H && h instanceof G && h.constructor === H);
+    const old: any = new F();
+    F.prototype = { q: 7 };
+    const nw: any = new F();
+    check("rp92c", old.q === 4 && nw.q === 7 && !(old instanceof F) && nw instanceof F);
+    F.prototype = 5;
+    let msg = "";
+    try { (new F()) instanceof F } catch (e: any) { msg = e.message }
+    check("rp92d", msg === "Function has non-object prototype '5' in instanceof check");
+}
+
+// ===== SECTION 93: getPrototypeOf, setPrototypeOf, defineProperty, a null prototype, toLocaleString =====
+// See SECTION 99 of tests/js-test-full.3.js. Values read off node 24.
+class A93 { m(): string { return "m" } }
+class B93 extends A93 {}
+function s93() {
+    const gp: any = Object.getPrototypeOf;
+    const base: any = { p: 1 };
+    const b: any = new B93();
+    check("gp93a", gp(Object.create(base)) === base && gp(base) === Object.prototype && gp(Object.prototype) === null &&
+        gp(b) === B93.prototype && gp(B93.prototype) === A93.prototype && gp(B93) === A93 && gp([]) === Array.prototype);
+    const n: any = Object.create(null);
+    n.a = 3;
+    check("np93b", typeof n.toString === "undefined" && !("toString" in n) && gp(n) === null && n.a === 3);
+    const s: any = {};
+    Object.setPrototypeOf(s, A93.prototype);
+    check("sp93c", s.m() === "m" && s instanceof A93);
+    const d: any = {};
+    Object.defineProperty(d, "x", { value: 5 });
+    Object.defineProperty(d, "y", { value: 6, enumerable: true });
+    const c: any = Object.create({ base: 1 }, { a: { value: 1, enumerable: true }, h: { value: 2 } });
+    check("dp93d", d.x === 5 && Object.keys(d).join() === "y" && JSON.stringify(d) === '{"y":6}' &&
+        c.a === 1 && c.h === 2 && c.base === 1 && Object.keys(c).join() === "a");
+    check("tl93e", (1234.5).toLocaleString() === "1,234.5" && (-1234.5678).toLocaleString() === "-1,234.568" &&
+        (1.0005).toLocaleString() === "1.001" && [1234.5, "a", null, [1000]].toLocaleString() === "1,234.5,a,,1,000" &&
+        (123456789n).toLocaleString() === "123,456,789");
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -4448,6 +4500,8 @@ function main(): number {
     s89(); // SECTION-CALL 89
     s90(); // SECTION-CALL 90
     s91(); // SECTION-CALL 91
+    s92(); // SECTION-CALL 92
+    s93(); // SECTION-CALL 93
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

@@ -569,8 +569,8 @@ func (rt *jsrt) addJSBigIntExterns(m map[string]func(args []uint64) uint64) {
 	}
 }
 
-// jsvBigIntMethod is BigInt.prototype: toString([radix]) and valueOf, the two that
-// make sense without a wrapper object. Reached from jsvMethod in jsrtjsprint.go.
+// jsvBigIntMethod is BigInt.prototype: toString([radix]), valueOf and
+// toLocaleString, the ones that make sense without a wrapper object. Reached from jsvMethod in jsrtjsprint.go.
 func (rt *jsrt) jsvBigIntMethod(x *big.Int, name string, args []interface{}) (interface{}, bool) {
 	switch name {
 	case "toString":
@@ -586,6 +586,8 @@ func (rt *jsrt) jsvBigIntMethod(x *big.Int, name string, args []interface{}) (in
 		return x.Text(radix), true
 	case "valueOf":
 		return bigWrap(x), true
+	case "toLocaleString":
+		return jsGroupDigits(x.Text(10)), true
 	}
 	return nil, false
 }

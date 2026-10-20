@@ -1558,7 +1558,7 @@ function jvStaticEnumKeys(cls) {
 
 // What `x.constructor` answers for an object this engine built: the class descriptor
 // the instance carries, or - for an instance of a constructor FUNCTION - the function
-// itself, which js_jsctordesc remembers under __ctorfn. undefined for a value with no
+// itself, which jvCtorDesc remembers under __ctorfn. undefined for a value with no
 // __class at all (a plain object literal; node answers Object there, which needs a
 // prototype chain this value model does not have). Twins: jsvConstructorOf in
 // abnf/jsrtjsprint.go and classCtorOf in the two *-interpreter.abnf start scripts.
@@ -1567,7 +1567,12 @@ function jvConstructorOf(o) {
     cls = o["__class"]
     // The descriptor Object.create files for a plain prototype object is no class, so
     // the nearest class above it answers.
-    while (jvIsObj(cls) && cls["__isclass"] !== true) { cls = cls["__super"] }
+    while (jvIsObj(cls) && cls["__isclass"] !== true) {
+        var pv = anytype
+        pv = cls["__pview"]
+        if (pv !== undefined && js_has(pv, "constructor")) { return pv["constructor"] }
+        cls = cls["__super"]
+    }
     if (!jvIsObj(cls)) { return undefined }
     var fn = anytype
     fn = cls["__ctorfn"]
@@ -2011,7 +2016,7 @@ function jvBuiltinFam(o, key) {
         return ""
     }
     if (typeof o == "number") {
-        if (key == "toFixed" || key == "toExponential" || key == "toPrecision" || key == "toString" || key == "valueOf") { return "n" }
+        if (key == "toFixed" || key == "toExponential" || key == "toPrecision" || key == "toString" || key == "valueOf" || key == "toLocaleString") { return "n" }
         return ""
     }
     if (Array.isArray(o)) {
@@ -2234,7 +2239,7 @@ function jvValueMiss(o, key) {
             if (jvIsProtoName(key)) {
                 if (!jvIsClassDesc(o)) {
                     if (!jbIsBig(o)) {
-                        if (!jxIsRe(o)) { return jvProtoShim(key) }
+                        if (!jxIsRe(o) && !jvNoObjProto(o)) { return jvProtoShim(key) }
                     }
                 }
             }
@@ -2270,7 +2275,8 @@ function jvStaticHas(g, key) {
     if (g == "Object") {
         return key == "assign" || key == "create" || key == "entries" || key == "freeze" || key == "fromEntries" ||
             key == "getOwnPropertyNames" || key == "getOwnPropertySymbols" || key == "groupBy" || key == "hasOwn" ||
-            key == "is" || key == "keys" || key == "seal" || key == "values"
+            key == "is" || key == "keys" || key == "seal" || key == "values" || key == "defineProperties" ||
+            key == "defineProperty" || key == "getPrototypeOf" || key == "setPrototypeOf"
     }
     if (g == "String") { return key == "fromCharCode" || key == "fromCodePoint" || key == "raw" }
     if (g == "Number") {
@@ -2310,6 +2316,8 @@ function jvStaticValue(g, key) {
     if (got !== undefined) { return got }
     var len = 1
     if (key == "assign" || key == "create" || key == "is" || key == "hasOwn" || key == "groupBy" || key == "parseInt") { len = 2 }
+    if (key == "defineProperties" || key == "setPrototypeOf") { len = 2 }
+    if (key == "defineProperty") { len = 3 }
     var f = anytype
     f = fnMetaSet(jvStaticValueFn(g, key), key, len)
     jvStaticVals[k] = f
@@ -2357,9 +2365,13 @@ function jvBuiltinProto(f) {
     if (jpFn !== undefined && f === jpFn) { at = 4 }
     if (jvBigIntFn !== undefined && f === jvBigIntFn) { at = 5 }
     if (at < 0) {
-        if (jvIsCallable(f)) { return jvProtoView(js_jsctordesc(f)) }
+        if (jvIsCallable(f)) { return jvProtoView(jvCtorDesc(f)) }
         return undefined
     }
+    return jvBuiltinProtoAt(at)
+}
+// The builtin prototype jvBuiltinProto's index `at` names, made at the first ask.
+function jvBuiltinProtoAt(at) {
     if (jvBuiltinProtos.length == 0) {
         var ps = {}
         ps["__bvof"] = ""
@@ -2535,7 +2547,7 @@ function jvHas(o, key) {
     // js_jshas in abnf/jsrtjsprint.go.
     if (typeof key == "string") {
         if (jvIsObj(o) || Array.isArray(o) || jvIsCallable(o)) {
-            if (jvObjProtoHas(jvKeyUnesc(key))) { return true }
+            if (jvObjProtoHas(jvKeyUnesc(key)) && !jvNoObjProto(o)) { return true }
         }
         if (Array.isArray(o)) {
             if (key == "length" || jvArrM[key] === 1) { return true }
@@ -2895,7 +2907,7 @@ function js_supset(sup, self, key, v) {
 var jvCtorFn = []
 var jvCtorD = []
 
-function js_jsctordesc(fn) {
+function jvCtorDesc(fn) {
     var i = 0
     while (i < jvCtorFn.length) {
         if (jvCtorFn[i] === fn) { return jvCtorD[i] }
@@ -2913,6 +2925,51 @@ function js_jsctordesc(fn) {
 // lib/runtime.metajs shares as rtPairGet. It is not imported from there: this file
 // does not import lib/runtime.metajs (it defines a js_supercall of its own, a
 // straight name collision with that file's).
+// js_jsnewclass(o, F) files on `new F()`'s fresh object o the descriptor its chain
+// starts at. A prototype the program wrote onto F starts it at that object, as
+// Object.create's does, and every instance made while it is F's prototype shares one
+// descriptor, kept on F's own. A prototype that is no object leaves o with no class:
+// Object.prototype (ECMA-262 GetPrototypeFromConstructor). Twins: js_jsnewclass in
+// abnf/jsrtjsprint.go, newClassOf in both *-interpreter.abnf.
+function js_jsnewclass(o, fn) {
+    var cd = jvCtorDesc(fn)
+    if (jvFnPropsN == 0 || !jvFnOwn(fn, "prototype")) {
+        o["__class"] = cd
+        return o
+    }
+    var p = anytype
+    p = jvFnPropsFind(fn)["prototype"]
+    if (!jvIsObj(p) || jbIsBig(p) || jvIsClassDesc(p) || jvIsObjectGlobal(p)) { return o }
+    if (p["__symkey"] !== undefined) { return o }
+    if (cd["__rpview"] !== p) {
+        cd["__rpview"] = p
+        cd["__rpdesc"] = jvProtoDesc(p)
+    }
+    o["__class"] = cd["__rpdesc"]
+    return o
+}
+
+// `v instanceof F` once the program wrote F.prototype = p: is p on v's chain, as a
+// level's own view or as the class view it is? Twins: js_jsinstanceof in
+// abnf/jsrtjsprint.go, protoOnChain in both *-interpreter.abnf.
+function jvProtoOnChain(v, p) {
+    if (!jvIsObj(v)) { return false }
+    if ((!jvIsObjLike(p) && !jvIsCallable(p)) || jbIsBig(p)) {
+        jbRaise("TypeError: Function has non-object prototype '" + jvStr(p) + "' in instanceof check")
+    }
+    var pd = anytype
+    pd = undefined
+    if (jvIsObj(p)) { pd = p["__protoof"] }
+    var cls = anytype
+    cls = v["__class"]
+    while (jvIsObj(cls)) {
+        if (pd !== undefined && cls === pd) { return true }
+        if (cls["__pview"] === p) { return true }
+        cls = cls["__super"]
+    }
+    return false
+}
+
 function jvCtorDescOf(fn) {
     var i = 0
     while (i < jvCtorFn.length) {
@@ -2972,6 +3029,7 @@ function js_jsinstanceof(v, c) {
         if (!jvIsClassDesc(c)) { jbRaise("TypeError: Right-hand side of 'instanceof' is not callable") }
     }
     if (jvIsCallable(c)) {
+        if (jvFnPropsN > 0 && jvFnOwn(c, "prototype")) { return jvProtoOnChain(v, jvFnPropsFind(c)["prototype"]) }
         var d = jvCtorDescOf(c)
         if (d === undefined) { return false }
         return jvChainHas(v, d)
@@ -3163,6 +3221,20 @@ function jvIndexOrder(ks) {
 // object's without its builtin members (jvMathHid). Gated on jvErrN, so a program
 // that never built an error pays one identity and one integer compare.
 function jvErrHide(o, ks) {
+    // A property defineProperty made non-enumerable (jvDefineProp).
+    if (jvNeN > 0) {
+        var ne = anytype
+        ne = o["__nonenum"]
+        if (ne !== undefined) {
+            var shown = []
+            var ni = 0
+            while (ni < ks.length) {
+                if (ne[ks[ni]] !== true) { shown.push(ks[ni]) }
+                ni = ni + 1
+            }
+            ks = shown
+        }
+    }
     // ...and the JSON object's two members and the Object global's prototype, which
     // are not enumerable in node either.
     if (o === jvJsonObj || jvIsObjectGlobal(o)) {
@@ -3297,8 +3369,11 @@ function js_jsobject() {
     proto["toLocaleString"] = jvProtoShim("toLocaleString")
     jvObjProto = proto
     o["prototype"] = proto
+    jvObjGlobal = o
     return o
 }
+// The `Object` global js_jsobject built, for Object.getPrototypeOf.
+var jvObjGlobal = anytype
 
 // Object.prototype.toString's answer for a value.
 function jvProtoTag(v) {
@@ -3419,9 +3494,8 @@ function jvProtoApply(recv, name, args) {
     if (name == "toLocaleString") { return jvStr(recv) }
     return recv
 }
-// A number's and an array's toLocaleString are their own prototypes'
-// (locale-formatted), which this engine does not have, so a call of one is not
-// answered by jvProtoApply. Twin: jsvProtoLocaleOwn in abnf/jsrtjsprint.go.
+// A number's, a BigInt's and an array's toLocaleString are their own prototypes'
+// (jsnToLocale, jvArrLocale), so a call of one is not answered by jvProtoApply. Twin: jsvProtoLocaleOwn in abnf/jsrtjsprint.go.
 function jvProtoLocaleOwn(recv, name) {
     if (name != "toLocaleString") { return false }
     if (typeof recv == "number") { return true }
@@ -4107,10 +4181,30 @@ function jvReplaceAll(a, next) {
     return undefined
 }
 
+// Array#toLocaleString: each element's own toLocaleString, "" for undefined and null,
+// joined by ",". A number, a BigInt and an array answer theirs directly. Twins:
+// jsvArrayLocale in abnf/jsrtjsprint.go, jsArrLocale in both *-interpreter.abnf.
+function jvArrLocale(a) {
+    var out = ""
+    var i = 0
+    while (i < a.length) {
+        if (i > 0) { out = out + "," }
+        var e = anytype
+        e = a[i]
+        if (typeof e == "number") { out = out + jsnToLocale(e) }
+        else if (jbIsBig(e)) { out = out + jsnGroup(jbStr(e)) }
+        else if (Array.isArray(e)) { out = out + jvArrLocale(e) }
+        else if (e !== undefined && e !== null) { out = out + jvStr(js_jsmcall(e, "toLocaleString", [])) }
+        i = i + 1
+    }
+    return out
+}
+
 function jvArrMethod(a, name, args) {
     var n = a.length
     var cb = jvArg(args, 0)
     if (name == "toString") { return jvStr(a) }
+    if (name == "toLocaleString") { return jvArrLocale(a) }
     // ES2023's copying methods: reverse, sort and splice on a copy, and with.
     // copyWithin moves a run in place. Twin: jsArrayMethod in js-interpreter.abnf.
     if (name == "toReversed" || name == "toSorted" || name == "toSpliced") {
@@ -4517,6 +4611,7 @@ function jvNumMethod(x, name, args) {
         return jsnRadixStr(x, radix)
     }
     if (name == "valueOf") { return x }
+    if (name == "toLocaleString") { return jsnToLocale(x) }
     return jvMiss
 }
 
@@ -4525,38 +4620,205 @@ function jvNumMethod(x, name, args) {
 // Object.create(p): an object whose prototype is p. A class's prototype view makes it
 // an instance of that class whose constructor never ran. Any other object becomes the
 // view of a descriptor of its own, whose parent is p's own class, so the read walk
-// (jvChainRead) reaches p's properties and then p's chain. null gives a plain object,
-// the nearest this value model has, and so do a function and an array, whose own
-// properties no view reaches. Twins: jsvObjCreate in abnf/jsrtjsprint.go, jsObjCreate
+// (jvChainRead) reaches p's properties and then p's chain. null gives an object marked
+// as inheriting nothing (jvNoObjProto); a function and an array give a plain object,
+// as no view reaches their own properties. Twins: jsvObjCreate in abnf/jsrtjsprint.go, jsObjCreate
 // in both *-interpreter.abnf.
 function jvObjCreate(p) {
     var o = {}
-    if (p === null) { return o }
+    if (p === null) {
+        o["__nullproto"] = true
+        jvNullN = jvNullN + 1
+        return o
+    }
     if (jvIsCallable(p) || Array.isArray(p) || jvIsClassDesc(p) || jvIsObjectGlobal(p)) { return o }
     var bad = !jvIsObj(p) || jbIsBig(p)
     if (!bad) { bad = p["__symkey"] !== undefined }
     if (bad) { jbRaise("TypeError: Object prototype may only be an Object or null: " + jvStr(p)) }
+    o["__class"] = jvProtoDesc(p)
+    return o
+}
+
+// The descriptor whose view is the object p, for an object whose prototype is p: a
+// class's prototype view is its class's, any other object becomes the view of a
+// descriptor of its own, whose parent is p's own class. Twins: jsvProtoDesc in
+// abnf/jsrtjsprint.go, protoDescFor in both *-interpreter.abnf.
+function jvProtoDesc(p) {
     var pd = anytype
     pd = p["__protoof"]
-    if (pd !== undefined) {
-        o["__class"] = pd
-        return o
-    }
+    if (pd !== undefined) { return pd }
     var d = {}
     d["__pview"] = p
     var pc = anytype
     pc = p["__class"]
     if (pc !== undefined) { d["__super"] = pc }
+    if (p["__nullproto"] === true) { d["__nullproto"] = true }
     jvPvN = jvPvN + 1
-    o["__class"] = d
+    return d
+}
+
+// The count of null-prototype marks made (Object.create(null), setPrototypeOf(o,
+// null)): while it is 0 jvNoObjProto answers without a walk.
+var jvNullN = 0
+
+// Does v inherit nothing from Object.prototype - no toString, no hasOwnProperty,
+// `"toString" in v` false - because its chain ends at a null prototype? The mark is
+// __nullproto, on the object or on a descriptor of its chain. Twins: jsvNoObjProto in
+// abnf/jsrtjsprint.go, jsNoObjProto in both *-interpreter.abnf.
+function jvNoObjProto(v) {
+    if (jvNullN == 0) { return false }
+    if (!jvIsObj(v)) { return false }
+    if (v["__nullproto"] === true) { return true }
+    var cls = anytype
+    cls = v["__class"]
+    var guard = 0
+    while (jvIsObj(cls) && guard < 64) {
+        if (cls["__nullproto"] === true) { return true }
+        cls = cls["__super"]
+        guard = guard + 1
+    }
+    return false
+}
+
+// Object.getPrototypeOf(v). An object's prototype is the view of its __class
+// descriptor, and a prototype view's is its parent class's view; without either it
+// is Object.prototype, and null for a null-prototype object and for Object.prototype
+// itself. A primitive answers its builtin's prototype, a class the class it extends.
+// Function.prototype and Boolean.prototype are not modelled: a plain function and a
+// boolean answer undefined. Twins: getProto in abnf/jsrtjsprint.go, jsGetProto in
+// both *-interpreter.abnf.
+function jvGetProto(v) {
+    if (jvUndefOrNull(v)) { jbRaise("TypeError: Cannot convert undefined or null to object") }
+    var none = anytype
+    none = undefined
+    if (typeof v == "string") { return jvBuiltinProtoAt(1) }
+    if (typeof v == "number") { return jvBuiltinProtoAt(2) }
+    if (jbIsBig(v)) { return jvBuiltinProtoAt(5) }
+    if (Array.isArray(v)) {
+        if (jvIsArgs(v) || v === jvBuiltinProtoAt(0)) { return jvObjProto }
+        return jvBuiltinProtoAt(0)
+    }
+    if (!jvIsObj(v)) { return none }
+    var sup = anytype
+    if (jvIsClassDesc(v)) {
+        sup = v["__super"]
+        if (jvObjectRoot !== undefined && sup === jvObjectRoot) { return jvObjGlobal }
+        if (jvIsObj(sup)) { return sup }
+        return none
+    }
+    if (v === jvObjProto || v["__nullproto"] === true) { return null }
+    var pd = anytype
+    pd = v["__protoof"]
+    if (pd !== undefined) {
+        sup = pd["__super"]
+        if (!jvIsObj(sup) || sup === jvObjectRoot) { return jvObjProto }
+        return jvProtoView(sup)
+    }
+    var cls = anytype
+    cls = v["__class"]
+    if (jvIsObj(cls)) { return jvProtoView(cls) }
+    return jvObjProto
+}
+
+// Object.setPrototypeOf(o, p) on an ordinary object: its descriptor becomes the one
+// whose view is p (jvProtoDesc), none for Object.prototype, and the null-prototype
+// mark for null. A primitive comes back unchanged, and so do an array, a function and
+// a prototype view, whose prototypes this value model keeps elsewhere. Twins:
+// jsvSetProto in abnf/jsrtjsprint.go, jsSetProto in both *-interpreter.abnf.
+function jvSetProto(o, p) {
+    if (jvUndefOrNull(o)) { jbRaise("TypeError: Object.setPrototypeOf called on null or undefined") }
+    var pobj = jvIsObjLike(p)
+    if (pobj) { pobj = !jbIsBig(p) }
+    if (p !== null && !pobj && !jvIsCallable(p)) {
+        jbRaise("TypeError: Object prototype may only be an Object or null: " + jvStr(p))
+    }
+    if (!jvIsObj(o) || jbIsBig(o) || jvIsClassDesc(o)) { return o }
+    if (o["__protoof"] !== undefined) { return o }
+    var none = anytype
+    none = undefined
+    o["__class"] = none
+    if (o["__nullproto"] === true) { o["__nullproto"] = false }
+    if (p === null) {
+        o["__nullproto"] = true
+        jvNullN = jvNullN + 1
+        return o
+    }
+    if (!jvIsObj(p) || p === jvObjProto || jvIsClassDesc(p) || jvIsObjectGlobal(p)) { return o }
+    if (p["__symkey"] !== undefined) { return o }
+    o["__class"] = jvProtoDesc(p)
+    return o
+}
+
+// The count of objects holding a non-enumerable property (jvDefineProp): while it is
+// 0 a key listing skips the __nonenum test.
+var jvNeN = 0
+
+// Object.defineProperty(o, key, desc) for a key already in the object's own spelling:
+// a data property from desc.value, or an accessor from desc.get / desc.set. A new
+// property is enumerable only when desc says so - its name goes into the object's
+// __nonenum table, which every key listing (jvErrHide) drops - and an existing one
+// keeps its enumerability unless desc names it. `writable` and `configurable` are
+// not modelled: a later write replaces the value. Twins: jsvDefineProp in
+// abnf/jsrtjsprint.go, jsDefineKey in both *-interpreter.abnf.
+function jvDefineProp(o, key, desc) {
+    var bad = !jvIsObjLike(desc) && !jvIsCallable(desc)
+    if (!bad) { bad = jbIsBig(desc) }
+    if (bad) { jbRaise("TypeError: Property description must be an object: " + jvStr(desc)) }
+    var g = anytype
+    g = js_jsmget(desc, "get")
+    var s = anytype
+    s = js_jsmget(desc, "set")
+    var isAcc = g !== undefined || s !== undefined
+    if (!jvIsObj(o) || jvIsClassDesc(o)) {
+        if (!isAcc) { js_jsmset(o, key, js_jsmget(desc, "value")) }
+        return undefined
+    }
+    var ne = anytype
+    ne = o["__nonenum"]
+    var listed = js_has(o, key)
+    if (listed && ne !== undefined) { listed = ne[key] !== true }
+    if (js_has(desc, "enumerable")) { listed = !js_jsnot(js_jsmget(desc, "enumerable")) }
+    if (isAcc) { js_defprop(o, key, g, s) } else { o[key] = js_jsmget(desc, "value") }
+    if (!listed) {
+        if (ne === undefined) {
+            ne = {}
+            o["__nonenum"] = ne
+            jvNeN = jvNeN + 1
+        }
+        ne[key] = true
+    } else if (ne !== undefined) {
+        ne[key] = false
+    }
+    return undefined
+}
+
+// Object.defineProperties(o, props), and Object.create's second argument: one
+// jvDefineProp per own enumerable key of props.
+function jvDefineProps(o, props) {
+    if (jvUndefOrNull(props)) { jbRaise("TypeError: Cannot convert undefined or null to object") }
+    var ks = jvOwnKeys(props)
+    var i = 0
+    while (i < ks.length) {
+        jvDefineProp(o, ks[i], js_jsmget(props, ks[i]))
+        i = i + 1
+    }
     return o
 }
 
 function jvObjectGlobalMethod(name, args) {
     var src = jvArg(args, 0)
-    // A second argument (property descriptors) is not supported: the call misses.
     if (name == "create") {
-        if (jvArg(args, 1) === undefined) { return jvObjCreate(src) }
+        var co = jvObjCreate(src)
+        if (jvArg(args, 1) !== undefined) { jvDefineProps(co, jvArg(args, 1)) }
+        return co
+    }
+    if (name == "getPrototypeOf") { return jvGetProto(src) }
+    if (name == "setPrototypeOf") { return jvSetProto(src, jvArg(args, 1)) }
+    if (name == "defineProperty" || name == "defineProperties") {
+        if ((!jvIsObjLike(src) && !jvIsCallable(src)) || jbIsBig(src)) { jbRaise("TypeError: Object." + name + " called on non-object") }
+        if (name == "defineProperties") { return jvDefineProps(src, jvArg(args, 1)) }
+        jvDefineProp(src, jvPropKey(jvArg(args, 1)), jvArg(args, 2))
+        return src
     }
     // The symbols of the own symbol keys, in the order they were first written.
     if (name == "getOwnPropertySymbols") {
@@ -4895,7 +5157,7 @@ function jvFallbackCall(recv, name, args) {
             }
             // Object.prototype's methods (jvProtoApply). Twin of the js_jsmcall arm in
             // abnf/jsrtjsprint.go.
-            if (jvIsProtoName(name)) {
+            if (jvIsProtoName(name) && !jvNoObjProto(recv)) {
                 if (recv[name] === undefined) { return jvProtoApply(recv, name, args) }
             }
             // Nothing on the __class chain: the call site turns the sentinel into
@@ -4908,7 +5170,7 @@ function jvFallbackCall(recv, name, args) {
     if (jvIsCallable(own)) { return jvCallT(own, recv, args) }
     if (jvIsProtoName(name)) {
         if (own === undefined) {
-            if (!jvUndefOrNull(recv)) {
+            if (!jvUndefOrNull(recv) && !jvNoObjProto(recv)) {
                 if (!jvProtoLocaleOwn(recv, name)) { return jvProtoApply(recv, name, args) }
             }
         }
@@ -4998,9 +5260,10 @@ function js_jsmcall(recv, key, args) {
     }
     var r = jxMcall(recv, name, args)
     if (r !== jxMiss) { return r }
-    // BigInt.prototype: (255n).toString(16), (1n).valueOf().
+    // BigInt.prototype: (255n).toString(16), (1n).valueOf(), toLocaleString().
     if (jbIsBig(recv)) {
         if (name == "valueOf") { return recv }
+        if (name == "toLocaleString") { return jsnGroup(jbStr(recv)) }
         if (name == "toString") {
             var radix = jvToInt(jvNumArg(args, 0, 10))
             // The RANGE CHECK is abnf/jsrtjsbig.go's jsvBigIntMethod. An unknown

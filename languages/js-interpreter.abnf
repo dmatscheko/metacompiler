@@ -3816,10 +3816,10 @@ NotFuncHead = :script(~~
         return recv
     }
     // A CALL of one of them on a receiver with no member of that name; null when the
-    // call is not one. A number's and an array's toLocaleString are their own
-    // prototypes' (locale-formatted), which this engine does not have.
+    // call is not one. A number's, a BigInt's and an array's toLocaleString are their
+    // own prototypes' (jsNumberMethod, mcall, jsArrLocale), never Object.prototype's.
     function jsProtoCall(target, name, args) {
-        if (!jsIsProtoName(name) || target == undefined || target == null) { return null }
+        if (!jsIsProtoName(name) || target == undefined || target == null || jsNoObjProto(target)) { return null }
         if (name == "toLocaleString" && (typeof target == "number" || Array.isArray(target) || isBigInt(target))) { return null }
         if (getMemberRaw(target, name) !== undefined) { return null }
         return {v: jsProtoApply(target, name, args)}
@@ -4577,8 +4577,21 @@ NotFuncHead = :script(~~
             }
             return {v: o}
         }
-        // A second argument (property descriptors) is not supported: the call misses.
-        if (name == "create" && (args.length < 2 || args[1] === undefined)) { return {v: jsObjCreate(src)} }
+        if (name == "create") {
+            var co = jsObjCreate(src)
+            if (args.length > 1 && args[1] !== undefined) { jsDefineProps(co, args[1]) }
+            return {v: co}
+        }
+        if (name == "getPrototypeOf") { return {v: jsGetProto(src)} }
+        if (name == "setPrototypeOf") { return {v: jsSetProto(src, args.length > 1 ? args[1] : undefined)} }
+        if (name == "defineProperty") {
+            return {v: jsDefineProp(src, args.length > 1 ? args[1] : undefined, args.length > 2 ? args[2] : undefined)}
+        }
+        if (name == "defineProperties") {
+            var dpt = jsTypeofVal(src)
+            if (src === null || (dpt != "object" && dpt != "function")) { biRaise("TypeError: Object.defineProperties called on non-object") }
+            return {v: jsDefineProps(src, args.length > 1 ? args[1] : undefined)}
+        }
         if (name == "hasOwn") {
             if (src === undefined || src === null) { biRaise("TypeError: Cannot convert undefined or null to object") }
             var hk = anytype // The key: a symbol, or any value ToPropertyKey reads as a string.
@@ -4613,23 +4626,168 @@ NotFuncHead = :script(~~
     // it an instance of that class whose constructor never ran. Any other object
     // becomes the view of a descriptor of its own, whose parent is p's own class, so
     // the read walk (protoChainRead) reaches p's properties and then p's chain. null
-    // gives a plain object, the nearest this value model has, and so do a function and
-    // an array, whose own properties no view reaches. Twins: jsvObjCreate in
+    // gives an object marked as inheriting nothing (jsNoObjProto); a function and an
+    // array give a plain object, as no view reaches their own properties. Twins: jsvObjCreate in
     // abnf/jsrtjsprint.go, jvObjCreate in languages/lib/js-rt.metajs.
     function jsObjCreate(p) {
         var o = {}
         o["__keys"] = []
         var t = jsTypeofVal(p)
-        if (p === null || t == "function" || Array.isArray(p)) { return o }
-        if (t != "object") { biRaise("TypeError: Object prototype may only be an Object or null: " + jsStr(p)) }
-        if (hasOwn(p, "__protoof")) {
-            o["__class"] = p.__protoof
+        if (p === null) {
+            o["__nullproto"] = true
+            nullProtoN = nullProtoN + 1
             return o
         }
+        if (t == "function" || Array.isArray(p)) { return o }
+        if (t != "object") { biRaise("TypeError: Object prototype may only be an Object or null: " + jsStr(p)) }
+        o["__class"] = protoDescFor(p)
+        return o
+    }
+    // The descriptor whose view is the object p, for an object whose prototype is p:
+    // a class's prototype view is its class's, any other object becomes the view of a
+    // descriptor of its own, whose parent is p's own class. Twins: jsvProtoDesc in
+    // abnf/jsrtjsprint.go, jvProtoDesc in languages/lib/js-rt.metajs.
+    function protoDescFor(p) {
+        if (hasOwn(p, "__protoof")) { return p.__protoof }
         var d = {}
         d["__pview"] = p
         if (p.__class != undefined) { d["__super"] = p.__class }
-        o["__class"] = d
+        if (p.__nullproto === true) { d["__nullproto"] = true }
+        return d
+    }
+    // Object.create(null)'s objects, and every object whose chain ends at one, inherit
+    // nothing from Object.prototype: no toString, no hasOwnProperty, and `"toString" in
+    // o` is false. The mark is __nullproto, on the object or on a descriptor of its
+    // chain; nullProtoN counts the marks made, so a program that made none never
+    // walks. Twins: jsvNoObjProto in abnf/jsrtjsprint.go, jvNoObjProto in
+    // languages/lib/js-rt.metajs.
+    var nullProtoN = 0
+    function jsNoObjProto(o) {
+        if (nullProtoN == 0 || typeof o != "object" || o === null || Array.isArray(o)) { return false }
+        if (o.__nullproto === true) { return true }
+        var guard = 0
+        for (var cl = o.__class; cl != undefined && cl != null && guard < 64; cl = cl.__super) {
+            if (cl.__nullproto === true) { return true }
+            guard = guard + 1
+        }
+        return false
+    }
+    // Object.getPrototypeOf(v). An object's prototype is the view of its __class
+    // descriptor - a class's (or a constructor function's) prototype, or the object
+    // Object.create, setPrototypeOf or `F.prototype = p` gave it - and a prototype
+    // view's is its parent class's view; without either it is Object.prototype, and
+    // null for a null-prototype object and for Object.prototype itself. A primitive
+    // answers its builtin's prototype, a class the class it extends. There is no
+    // Function.prototype or Boolean.prototype in this value model: a plain function
+    // and a boolean answer undefined. Twins: getPrototypeOf in js_jsmcall in
+    // abnf/jsrtjsprint.go, jvGetProto in languages/lib/js-rt.metajs.
+    function jsGetProto(v) {
+        if (v === undefined || v === null) { biRaise("TypeError: Cannot convert undefined or null to object") }
+        var none = anytype // No modelled prototype.
+        none = undefined
+        if (typeof v == "string") { return builtinProto(jsStringFn) }
+        if (typeof v == "number") { return builtinProto(jsNumberFn) }
+        if (isBigInt(v)) { return builtinProto(jsBigIntFn) }
+        if (Array.isArray(v)) {
+            if (jsIsArr(v) && v !== builtinProto(jsArrayFn)) { return builtinProto(jsArrayFn) }
+            return jsObjectProto
+        }
+        if (isClassDesc(v)) {
+            if (v.__super === jsObjectRootClass) { return jsObjectGlobal }
+            if (v.__super != undefined && v.__super != null) { return v.__super }
+            return none
+        }
+        if (typeof v != "object") { return none }
+        if (v === jsObjectProto || v.__nullproto === true) { return null }
+        if (hasOwn(v, "__protoof")) {
+            var sd = anytype // The parent class, if any.
+            sd = v.__protoof.__super
+            if (sd == undefined || sd == null || sd === jsObjectRootClass) { return jsObjectProto }
+            return protoView(sd)
+        }
+        if (v.__class != undefined) { return protoView(v.__class) }
+        return jsObjectProto
+    }
+    // Object.setPrototypeOf(o, p) on an ordinary object: its descriptor becomes the one
+    // whose view is p (protoDescFor), none for Object.prototype, and the null-prototype
+    // mark for null. A primitive comes back unchanged, and so do an array, a function
+    // and a prototype view, whose prototypes this value model keeps elsewhere. Twins:
+    // jsvSetProto in abnf/jsrtjsprint.go, jvSetProto in languages/lib/js-rt.metajs.
+    function jsSetProto(o, p) {
+        if (o === undefined || o === null) { biRaise("TypeError: Object.setPrototypeOf called on null or undefined") }
+        var pt = jsTypeofVal(p)
+        if (p !== null && pt != "object" && pt != "function") { biRaise("TypeError: Object prototype may only be an Object or null: " + jsStr(p)) }
+        if (typeof o != "object" || Array.isArray(o) || isClassDesc(o) || hasOwn(o, "__protoof")) { return o }
+        var none = anytype
+        none = undefined
+        o["__class"] = none
+        if (o.__nullproto === true) { o["__nullproto"] = false }
+        if (p === null) {
+            o["__nullproto"] = true
+            nullProtoN = nullProtoN + 1
+        } else if (p !== jsObjectProto && pt == "object" && !Array.isArray(p)) {
+            o["__class"] = protoDescFor(p)
+        }
+        return o
+    }
+    // Object.defineProperty(o, k, desc): a data property from desc.value, or an
+    // accessor from desc.get / desc.set. A new property is enumerable only when desc
+    // says so - it stays off the tracked key list - and an existing one keeps its
+    // enumerability unless desc names it. `writable` and `configurable` are not
+    // modelled: a later write replaces the value. Twins: jsvDefineProp in
+    // abnf/jsrtjsprint.go, jvDefineProp in languages/lib/js-rt.metajs.
+    function jsDefineProp(o, k, desc) {
+        var ot = jsTypeofVal(o)
+        if (o === null || (ot != "object" && ot != "function")) { biRaise("TypeError: Object.defineProperty called on non-object") }
+        var key = anytype // The property key, as the object stores it.
+        key = jsPropKey(k)
+        if (typeof key != "string") { key = jsStr(key) }
+        jsDefineKey(o, key, desc)
+        return o
+    }
+    function jsDefineKey(o, key, desc) {
+        var dt = jsTypeofVal(desc)
+        if (desc === null || (dt != "object" && dt != "function")) { biRaise("TypeError: Property description must be an object: " + jsStr(desc)) }
+        var g = anytype // The getter, the setter: a function or undefined.
+        g = getMember(desc, "get")
+        var s = anytype
+        s = getMember(desc, "set")
+        if (typeof o != "object" || Array.isArray(o) || isClassDesc(o)) {
+            if (g === undefined && s === undefined) { setMember(o, key, getMember(desc, "value")) }
+            return
+        }
+        if (g !== undefined || s !== undefined) {
+            if (g !== undefined) { addAccessor(o, "get", key, g) }
+            if (s !== undefined) { addAccessor(o, "set", key, s) }
+        } else {
+            scopePut(o, key, getMember(desc, "value"))
+        }
+        if (!hasOwn(o, "__keys")) { return }
+        var at = o.__keys.indexOf(key)
+        var listed = at >= 0
+        if (propIn("enumerable", desc)) { listed = jsTruthy(getMember(desc, "enumerable")) }
+        if (listed && at < 0) { trackKey(o, key) }
+        if (!listed && at >= 0) { scopePut(o, "__keys", jsListDrop(o.__keys, at)) }
+        // A property kept off __keys is still own: `in` asks __hidden for it.
+        if (!listed) {
+            if (!hasOwn(o, "__hidden")) { scopePut(o, "__hidden", []) }
+            if (o.__hidden.indexOf(key) < 0) { o.__hidden.push(key) }
+        }
+    }
+    // The list ks without its entry at index at, as a fresh list: the frozen engine's
+    // arrays have only the handful of methods the runtime implements, and splice is
+    // not one.
+    function jsListDrop(ks, at) {
+        var keep = []
+        for (var i = 0; i < ks.length; i++) { if (i != at) { keep.push(ks[i]) } }
+        return keep
+    }
+    // Object.defineProperties(o, props) and Object.create's second argument: one
+    // jsDefineKey per own enumerable key of props.
+    function jsDefineProps(o, props) {
+        if (props === undefined || props === null) { biRaise("TypeError: Cannot convert undefined or null to object") }
+        var ks = jsOwnKeys(props)
+        for (var i = 0; i < ks.length; i++) { jsDefineKey(o, ks[i], getMember(props, ks[i])) }
         return o
     }
     // The values an iterable yields, for the statics that take one (Object.fromEntries,
@@ -4830,10 +4988,33 @@ NotFuncHead = :script(~~
         }
         return null
     }
+    // Array#toLocaleString: each element's own toLocaleString, "" for undefined and
+    // null, joined by ",". A number, a BigInt and an array answer theirs directly.
+    // Twins: jsvArrayLocale in abnf/jsrtjsprint.go, jvArrLocale in
+    // languages/lib/js-rt.metajs.
+    function jsArrLocale(a) {
+        var out = ""
+        for (var i = 0; i < a.length; i++) {
+            if (i > 0) { out = out + "," }
+            var e = anytype // The element: any value.
+            e = a[i]
+            if (typeof e == "number") { out = out + jsnToLocale(e) }
+            else if (isBigInt(e)) { out = out + jsnGroup(biToStr(e, 10)) }
+            else if (Array.isArray(e)) { out = out + jsArrLocale(e) }
+            else if (e !== null && typeof e == "object") {
+                var f = anytype // The element's toLocaleString.
+                f = getMember(e, "toLocaleString")
+                if (typeof f != "function") { biRaise("TypeError: " + jsNotFnText(f) + " is not a function") }
+                out = out + jsStr(callWithThis(f, e, []))
+            } else if (e !== undefined && e !== null) { out = out + jsStr(e) }
+        }
+        return out
+    }
     function jsArrayMethod(a, name, args) {
         var n = a.length
         var cb = args[0]
         if (name == "toString") { return {v: jsJoin(a, ",")} }
+        if (name == "toLocaleString") { return {v: jsArrLocale(a)} }
         // ES2023's copying methods: reverse, sort and splice on a copy, and with.
         // copyWithin moves a run in place. Twins: jsvArrayMethod in
         // abnf/jsrtjsprint.go, jvArrMethod in languages/lib/js-rt.metajs.
@@ -5035,6 +5216,7 @@ NotFuncHead = :script(~~
             return {v: jsnToPrecision(x, dn)}
         }
         if (name == "valueOf") { return {v: x} }
+        if (name == "toLocaleString") { return {v: jsnToLocale(x)} }
         if (name == "toString") {
             var radix = jsnToInt(jsArgNum(args, 0, 10))
             if (radix == 10) { return {v: "" + x} }
@@ -5649,11 +5831,15 @@ NotFuncHead = :script(~~
     // for anything with no __class at all (a plain literal; node answers Object there,
     // which needs a prototype chain this value model does not have). The descriptor
     // Object.create files for a plain prototype object is no class, so the nearest
-    // class above it answers.
+    // class above it answers - unless that object, or one below the class, holds an
+    // own `constructor` (`H.prototype.constructor = H`).
     function classCtorOf(o) {
         var cl = anytype // A class descriptor, or absent.
         cl = o.__class
-        while (cl != undefined && cl != null && cl.__isclass !== true) { cl = cl.__super }
+        while (cl != undefined && cl != null && cl.__isclass !== true) {
+            if (hasOwn(cl, "__pview") && hasOwn(cl.__pview, "constructor")) { return cl.__pview.constructor }
+            cl = cl.__super
+        }
         if (cl == undefined || cl == null) { return undefined }
         if (hasOwn(cl, "__ctorfn")) { return cl["__ctorfn"] }
         return cl
@@ -5797,7 +5983,7 @@ NotFuncHead = :script(~~
             var cm = anytype // The inherited member, or absent.
             cm = protoChainRead(o.__class, k)
             if (cm !== undefined) { return cm }
-            if (jsIsProtoName(k) && !isClassDesc(o) && !isBigInt(o) && !rxIsRegexObj(o)) { return jsProtoShim(k) }
+            if (jsIsProtoName(k) && !isClassDesc(o) && !isBigInt(o) && !rxIsRegexObj(o) && !jsNoObjProto(o)) { return jsProtoShim(k) }
         }
         return v
     }
@@ -5810,11 +5996,12 @@ NotFuncHead = :script(~~
     // languages/lib/js-rt.metajs.
     var stVals = {}
     var stNames = {"Object": ["assign", "create", "entries", "freeze", "fromEntries", "getOwnPropertyNames", "getOwnPropertySymbols",
-                              "groupBy", "hasOwn", "is", "keys", "seal", "values"],
+                              "groupBy", "hasOwn", "is", "keys", "seal", "values", "defineProperties", "defineProperty",
+                              "getPrototypeOf", "setPrototypeOf"],
                    "String": ["fromCharCode", "fromCodePoint", "raw"], "Promise": ["resolve", "reject", "all", "allSettled", "race", "any"],
                    "Array": ["isArray"], "Symbol": ["for", "keyFor"],
                    "Number": ["isFinite", "isInteger", "isNaN", "isSafeInteger", "parseFloat", "parseInt"]}
-    var stLen2 = ["assign", "create", "is", "hasOwn", "groupBy", "parseInt"]
+    var stLen2 = ["assign", "create", "is", "hasOwn", "groupBy", "parseInt", "defineProperties", "setPrototypeOf"]
     function staticValue(g, k) {
         var gn = ""
         if (g === jsObjectGlobal) { gn = "Object" }
@@ -5836,7 +6023,7 @@ NotFuncHead = :script(~~
         if (gn == "" || typeof k != "string" || stNames[gn].indexOf(k) < 0) { return undefined }
         var key = "$" + gn + "." + k
         if (hasOwn(stVals, key)) { return stVals[key] }
-        var f = fnMetaPut(staticValueFn(g, k), k, stLen2.indexOf(k) >= 0 ? 2 : 1)
+        var f = fnMetaPut(staticValueFn(g, k), k, stLen2.indexOf(k) >= 0 ? 2 : (k == "defineProperty" ? 3 : 1))
         stVals[key] = f
         return f
     }
@@ -5883,7 +6070,7 @@ NotFuncHead = :script(~~
                    "reduce", "reduceRight", "some", "every", "find", "findIndex", "findLast",
                    "findLastIndex", "flat", "flatMap", "fill", "at", "toString", "valueOf",
                    "keys", "values", "entries", "toReversed", "toSorted", "toSpliced", "with", "copyWithin"])
-    bvSeed(bvNum, ["toFixed", "toExponential", "toPrecision", "toString", "valueOf"])
+    bvSeed(bvNum, ["toFixed", "toExponential", "toPrecision", "toString", "valueOf", "toLocaleString"])
     // "s" / "a" / "n" when `k` is a builtin method of the receiver's kind, else "".
     function builtinFam(o, k) {
         if (typeof o == "string") { return hasOwn(bvStr, k) ? "s" : "" }
@@ -7820,7 +8007,7 @@ NotFuncHead = :script(~~
         // length.
         // Twins: js_jshas in abnf/jsrtjsprint.go and languages/lib/js-rt.metajs.
         if (typeof k == "string") {
-            if (objProtoHas(jsKeyUnesc(k))) { return true }
+            if (objProtoHas(jsKeyUnesc(k)) && !jsNoObjProto(o)) { return true }
             if (Array.isArray(o) && (k == "length" || hasOwn(bvArr, k))) { return true }
             if ((typeof o == "function" || isClassDesc(o)) && (k == "call" || k == "apply" || k == "bind" || k == "name" || k == "length")) { return true }
         }
@@ -7854,6 +8041,7 @@ NotFuncHead = :script(~~
         if (o === jsMathObj && hasOwn(o, "" + k) && o["" + k] !== undefined) { return true }
         if (hasOwn(o, "__keys")) { if (o["__keys"].indexOf("" + k) >= 0) { return true } }
         else if (hasOwn(o, "" + k)) { return true }
+        if (hasOwn(o, "__hidden") && o.__hidden.indexOf("" + k) >= 0) { return true }
         // A METHOD is not an own property here - it lives on the __class descriptor -
         // but `"m" in instance` is true in node. Same walk getMember's method arm
         // makes; js_jshas is the compiled halves' twin. `"constructor" in e` is true
@@ -7902,6 +8090,7 @@ NotFuncHead = :script(~~
         var want = anytype
         want = cls
         if (typeof cls == "function") {
+            if (fnPropsN > 0 && fnOwn(cls, "prototype")) { return protoOnChain(v, fnPropsFind(cls)["prototype"]) }
             want = undefined
             for (var i = 0; i < ctorDescriptorFns.length; i++) {
                 if (ctorDescriptorFns[i] === cls) { want = ctorDescriptors[i] }
@@ -7962,12 +8151,10 @@ NotFuncHead = :script(~~
             if (tgt != undefined && tgt != null && typeof tgt != "function" && hasOwn(tgt, "__keys")) {
                 var ks = tgt["__keys"]
                 var at = ks.indexOf("" + p.key)
-                // A fresh list rather than a splice: the frozen engine's arrays have only
-                // the handful of methods the runtime implements, and splice is not one.
-                if (at >= 0) {
-                    var keep = []
-                    for (var i = 0; i < ks.length; i++) { if (i != at) { keep.push(ks[i]) } }
-                    scopePut(tgt, "__keys", keep)
+                if (at >= 0) { scopePut(tgt, "__keys", jsListDrop(ks, at)) }
+                if (hasOwn(tgt, "__hidden")) {
+                    var hat = tgt.__hidden.indexOf("" + p.key)
+                    if (hat >= 0) { scopePut(tgt, "__hidden", jsListDrop(tgt.__hidden, hat)) }
                 }
             }
             return true
@@ -9136,8 +9323,8 @@ NotFuncHead = :script(~~
     // closure was built - node's message names the expression, not the value, and no
     // runtime value can supply it.
     function mcall(target, name, args, site) {
-        // BigInt.prototype: toString([radix]) and valueOf, the two that make sense
-        // without a wrapper object.
+        // BigInt.prototype: toString([radix]), valueOf and toLocaleString, the ones
+        // that make sense without a wrapper object.
         if (isBigInt(target)) {
             if (name == "toString") {
                 var radix = 10
@@ -9146,6 +9333,7 @@ NotFuncHead = :script(~~
                 return biToStr(target, radix)
             }
             if (name == "valueOf") { return target }
+            if (name == "toLocaleString") { return jsnGroup(biToStr(target, 10)) }
             biRaise("TypeError: " + site + " is not a function")
         }
         if (target != undefined && target != null && target.__class != undefined) {
@@ -9443,7 +9631,9 @@ NotFuncHead = :script(~~
             if (typeof cls == "function") {
                 var self = {}
                 self["__keys"] = []
-                self["__class"] = ctorDescriptor(clsName, cls)
+                var nd = anytype // The instance's descriptor; none for a non-object prototype.
+                nd = newClassOf(clsName, cls)
+                if (nd !== undefined) { self["__class"] = nd }
                 pendingNewTarget = cls
                 var r = anytype // The function may return a replacement object.
                 r = callWithThis(cls, self, argv)
@@ -9473,6 +9663,40 @@ NotFuncHead = :script(~~
     // function's own identity list, so two instances of the same constructor share it.
     var ctorDescriptors = []
     var ctorDescriptorFns = []
+    // The descriptor `new F()` files on its instance. A prototype the program wrote
+    // onto F (`F.prototype = p`) starts the instance's chain at p, as Object.create(p)
+    // does, and every instance made while p is F's prototype shares one descriptor,
+    // kept on F's own. A prototype that is no object leaves the instance with no class:
+    // Object.prototype (ECMA-262 GetPrototypeFromConstructor). Twins: js_jsnewclass in
+    // abnf/jsrtjsprint.go and languages/lib/js-rt.metajs.
+    function newClassOf(name, fn) {
+        var cd = ctorDescriptor(name, fn)
+        if (fnPropsN == 0 || !fnOwn(fn, "prototype")) { return cd }
+        var p = anytype // The prototype the program wrote.
+        p = fnPropsFind(fn)["prototype"]
+        var none = anytype
+        none = undefined
+        if (jsTypeofVal(p) != "object" || p === null || Array.isArray(p)) { return none }
+        if (cd.__rpview !== p) {
+            cd["__rpview"] = p
+            cd["__rpdesc"] = protoDescFor(p)
+        }
+        return cd.__rpdesc
+    }
+    // `v instanceof F` once the program wrote F.prototype = p: is p on v's chain, as a
+    // level's own view or as the class view it is? Twins: js_jsinstanceof in
+    // abnf/jsrtjsprint.go and languages/lib/js-rt.metajs.
+    function protoOnChain(v, p) {
+        if (p === null || (typeof p != "object" && typeof p != "function")) {
+            biRaise("TypeError: Function has non-object prototype '" + jsStr(p) + "' in instanceof check")
+        }
+        var pd = anytype // The class p is the view of, if it is one.
+        pd = typeof p == "object" && hasOwn(p, "__protoof") ? p.__protoof : undefined
+        for (var cl = v.__class; cl != undefined && cl != null; cl = cl.__super) {
+            if (cl === pd || cl.__pview === p) { return true }
+        }
+        return false
+    }
     function ctorDescriptor(name, fn) {
         for (var i = 0; i < ctorDescriptorFns.length; i++) {
             if (ctorDescriptorFns[i] === fn) { return ctorDescriptors[i] }

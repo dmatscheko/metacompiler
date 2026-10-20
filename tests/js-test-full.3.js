@@ -1,4 +1,4 @@
-// Full-syntax test: JavaScript - part 3 of 4, sections 44-56, 58-71 and 73-97.
+// Full-syntax test: JavaScript - part 3 of 4, sections 44-56, 58-71 and 73-99.
 //
 // THE JS RATCHET IS FOUR FILES: as one file its -frozen interpreter leg ran into
 // ./test.sh --full's time brake (peak memory grew superlinearly with the file), and
@@ -6,7 +6,7 @@
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43, engine agreement, generators, Error, Math
-//   tests/js-test-full.3.js   sections 44-56, 58-71 and 73-97, the call/class/private-name
+//   tests/js-test-full.3.js   sections 44-56, 58-71 and 73-99, the call/class/private-name
 //                             model, the Unicode identifier tables, iterators, derived
 //                             constructors, JSON, guards, Set and Map, iterator closing,
 //                             hasOwnProperty, delete, Object.prototype, extends Object,
@@ -17,7 +17,9 @@
 //                             prototypes, static methods as values, Boolean,
 //                             symbols, with, for-in and `in` through the
 //                             prototype chain, inherited data properties and
-//                             Object.create
+//                             Object.create, a replaced constructor prototype,
+//                             getPrototypeOf / setPrototypeOf / defineProperty and
+//                             toLocaleString
 //   (section 72 is in tests/js-test-full.4.mjs, beside 57: it needs a file that
 //   names no builtin class but in a `new`)
 //   tests/js-test-full.4.mjs  section 57, export in a Module
@@ -2584,6 +2586,119 @@ function s97() {
         tl.call([1, 2]) === "1,2" && "ab".toLocaleString() === "ab")
 }
 
+// ===== SECTION 98: replacing a constructor's prototype =====
+// `F.prototype = p` makes p the prototype of every instance `new F()` builds from
+// then on (an instance built before keeps the old one), and `instanceof F` asks
+// whether p is on the chain; a prototype that is no object gives Object.prototype.
+// The classic `H.prototype = Object.create(G.prototype)` inheritance rides on it.
+// Values read off node 24.
+function s98() {
+    function F() {}
+    F.prototype = { q: 4, m() { return this.q + 1 } }
+    const f = new F()
+    check("rp98a", f.q === 4 && f.m() === 5 && f instanceof F && !f.hasOwnProperty("q"))
+    function G(n) { this.n = n }
+    G.prototype.hi = function () { return "G" + this.n }
+    function H(n) { G.call(this, n) }
+    H.prototype = Object.create(G.prototype)
+    H.prototype.constructor = H
+    H.prototype.ho = function () { return "H" + this.n }
+    const h = new H(3)
+    check("rp98b", h.hi() === "G3" && h.ho() === "H3" && h instanceof H && h instanceof G && h.constructor === H)
+    const old = new F()
+    F.prototype = { q: 7 }
+    const nw = new F()
+    check("rp98c", old.q === 4 && nw.q === 7 && !(old instanceof F) && nw instanceof F)
+    F.prototype = G.prototype
+    const g2 = new F()
+    check("rp98d", g2 instanceof G && g2 instanceof F && typeof g2.hi === "function")
+    F.prototype = 5
+    const z = new F()
+    let msg = ""
+    try { z instanceof F } catch (e) { msg = e.message }
+    check("rp98e", typeof z === "object" && z.q === undefined && !(1 instanceof F) &&
+        msg === "Function has non-object prototype '5' in instanceof check")
+    F.prototype = { a: 1 }
+    const w = new F()
+    w.b = 2
+    const ks = []
+    for (const k in w) ks.push(k)
+    check("rp98f", ks.join() === "b,a" && Object.keys(w).join() === "b" && "a" in w)
+}
+
+// ===== SECTION 99: getPrototypeOf, setPrototypeOf, defineProperty, a null prototype, toLocaleString =====
+// Object.getPrototypeOf answers the object an instance, a prototype or a primitive
+// inherits from; setPrototypeOf replaces it; defineProperty makes a property that is
+// not enumerable unless asked, or an accessor; Object.create(null) inherits nothing,
+// not even Object.prototype's methods. Number#toLocaleString is node's en-US format:
+// grouped, at most three fraction digits rounded half up. Values read off node 24.
+class A99 { m() { return "m" } }
+class B99 extends A99 {}
+class R99 extends Object {}
+function s99() {
+    const gp = Object.getPrototypeOf
+    const base = { p: 1 }
+    const o = Object.create(base)
+    const b = new B99()
+    check("gp99a", gp(o) === base && gp(base) === Object.prototype && gp(Object.prototype) === null &&
+        gp(b) === B99.prototype && gp(B99.prototype) === A99.prototype && gp(A99.prototype) === Object.prototype &&
+        gp(B99) === A99 && gp(R99) === Object && gp(R99.prototype) === Object.prototype)
+    check("gp99b", gp([]) === Array.prototype && gp("s") === String.prototype && gp(5) === Number.prototype &&
+        gp(Array.prototype) === Object.prototype && typeof gp === "function" && gp.length === 1)
+    let msg = ""
+    try { gp(null) } catch (e) { msg = e.message }
+    check("gp99c", msg === "Cannot convert undefined or null to object")
+    const n = Object.create(null)
+    n.a = 3
+    let nmsg = ""
+    try { n.toString() } catch (e) { nmsg = e instanceof TypeError ? e.message : "" }
+    const n2 = Object.create(n)
+    check("np99d", typeof n.toString === "undefined" && !("toString" in n) && gp(n) === null && n.a === 3 &&
+        Object.keys(n).join() === "a" && JSON.stringify(n) === '{"a":3}' && nmsg === "n.toString is not a function" &&
+        n2.a === 3 && typeof n2.hasOwnProperty === "undefined" && gp(n2) === n)
+    const s = {}
+    const r1 = Object.setPrototypeOf(s, { z: 9 })
+    const z1 = s.z, zin = "z" in s, zk = Object.keys(s).length
+    Object.setPrototypeOf(s, A99.prototype)
+    const sm = s.m(), sa = s instanceof A99
+    Object.setPrototypeOf(s, null)
+    const st = typeof s.toString, sg = gp(s)
+    Object.setPrototypeOf(s, Object.prototype)
+    check("sp99e", r1 === s && z1 === 9 && zin && zk === 0 && sm === "m" && sa && st === "undefined" && sg === null &&
+        typeof s.toString === "function" && s.z === undefined && Object.setPrototypeOf(5, null) === 5 &&
+        Object.setPrototypeOf.length === 2)
+    let spmsg = ""
+    try { Object.setPrototypeOf({}, 5) } catch (e) { spmsg = e.message }
+    check("sp99f", spmsg === "Object prototype may only be an Object or null: 5")
+    const d = {}
+    Object.defineProperty(d, "x", { value: 5 })
+    const dx = d.x, dk = Object.keys(d).length, dj = JSON.stringify(d)
+    Object.defineProperty(d, "y", { value: 6, enumerable: true })
+    let hidden = 1
+    Object.defineProperty(d, "g", { get() { return hidden * 10 }, set(v) { hidden = v }, enumerable: true })
+    d.g = 4
+    check("dp99g", dx === 5 && dk === 0 && dj === "{}" && d.hasOwnProperty("x") && "x" in d && !d.propertyIsEnumerable("x") &&
+        Object.keys(d).join() === "y,g" && JSON.stringify(d) === '{"y":6,"g":40}' && hidden === 4 && d.g === 40)
+    const q = Object.defineProperty({ q: 1 }, "q", { value: 2 })
+    const c = Object.create({ base: 1 }, { a: { value: 1, enumerable: true }, h: { value: 2 } })
+    const dp = Object.defineProperties({}, { u: { value: 7, enumerable: true }, v: { get() { return 8 } } })
+    check("dp99h", q.q === 2 && Object.keys(q).join() === "q" && c.a === 1 && c.h === 2 && c.base === 1 &&
+        Object.keys(c).join() === "a" && dp.u === 7 && dp.v === 8 && Object.keys(dp).join() === "u" &&
+        Object.defineProperty.length === 3 && Object.defineProperties.length === 2)
+    let dmsg = "", dmsg2 = ""
+    try { Object.defineProperty(1, "x", {}) } catch (e) { dmsg = e.message }
+    try { Object.defineProperty({}, "x", 1) } catch (e) { dmsg2 = e.message }
+    check("dp99i", dmsg === "Object.defineProperty called on non-object" && dmsg2 === "Property description must be an object: 1")
+    const ls = [1234.5, 0, -0, 1e21, 123456789.123456, 1.0005, -1234.5678, NaN, -Infinity, 0.0001, -0.0001, 999.9995, 0.9995]
+    const lo = []
+    for (const x of ls) lo.push(x.toLocaleString())
+    check("tl99j", lo.join("|") === "1,234.5|0|-0|1,000,000,000,000,000,000,000|123,456,789.123|1.001|-1,234.568|NaN|-\u221e|0|-0|1,000|1")
+    check("tl99k", [1234.5, "a", null, undefined, [1000, 2], -0, true].toLocaleString() === "1,234.5,a,,,1,000,2,-0,true" &&
+        (123456789n).toLocaleString() === "123,456,789" && (-5n).toLocaleString() === "-5" &&
+        [{ toLocaleString() { return "L" } }, { toString() { return "S" } }].toLocaleString() === "L,S" &&
+        typeof (5).toLocaleString === "function")
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -2639,6 +2754,8 @@ function main() {
     s95() // SECTION-CALL 95
     s96() // SECTION-CALL 96
     s97() // SECTION-CALL 97
+    s98() // SECTION-CALL 98
+    s99() // SECTION-CALL 99
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

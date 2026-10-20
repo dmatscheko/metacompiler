@@ -1,13 +1,14 @@
 // js-num.js -- JavaScript's reading of a STRING as a number: StringToNumber (the
 // ToNumber of a string, ES2023 7.1.4.1.1) and the globals parseFloat and parseInt
-// (19.2.4, 19.2.5); the writing of one by Number#toFixed, toExponential and
-// toPrecision; and the code-unit order of two strings, which relations and the
+// (19.2.4, 19.2.5); the writing of one by Number#toFixed, toExponential,
+// toPrecision and toLocaleString; and the code-unit order of two strings, which relations and the
 // default sort use.
 //
 // Included by both js and typescript interpreters (include("lib/js-num.js")) and
 // imported by languages/lib/js-rt.metajs, so the interpreters and layer 2 run one
 // implementation; the Go twins are jsStrToNum / jsParseFloatJS in abnf/jsrtjsbig.go
-// and jsToFixedJS / jsToExponentialJS / jsToPrecisionJS in abnf/jsrtjsprint.go.
+// and jsToFixedJS / jsToExponentialJS / jsToPrecisionJS / jsToLocaleJS in
+// abnf/jsrtjsprint.go.
 // Written in the restricted subset of regex.js's head comment. Every name is
 // prefixed jsn.
 //
@@ -536,4 +537,52 @@ function jsnToPrecision(x, p) {
     if (e == p - 1) { return sign + d }
     if (e >= 0) { return sign + d.substring(0, e + 1) + "." + d.substring(e + 1) }
     return sign + "0." + jsnZeros(-(e + 1)) + d
+}
+
+// An integer's digit run, signed or not, grouped by threes with ",", as en-US
+// writes it - also BigInt#toLocaleString.
+function jsnGroup(ip) {
+    var sign = ""
+    if (ip.charAt(0) == "-") {
+        sign = "-"
+        ip = ip.substring(1)
+    }
+    var out = ""
+    var i = ip.length
+    while (i > 3) {
+        out = "," + ip.substring(i - 3, i) + out
+        i = i - 3
+    }
+    return sign + ip.substring(0, i) + out
+}
+
+// Number#toLocaleString() in node's default locale (en-US, ECMA-402
+// Intl.NumberFormat): the shortest digits rounded half away from zero to at most
+// three fraction digits, trailing zeros dropped, the integer part grouped. The sign
+// of a negative value survives a rounding to zero ("-0"); an infinity is the sign
+// and U+221E. A value below 1 is written from a leading "0" digit, which also
+// absorbs a carry (0.9995 is "1").
+function jsnToLocale(x) {
+    if (x !== x) { return "NaN" }
+    var sign = ""
+    var a = x
+    if (x < 0 || 1 / x < 0) {
+        sign = "-"
+        a = -x
+    }
+    if (a - a !== 0) { return sign + String.fromCharCode(8734) }
+    if (a == 0) { return sign + "0" }
+    var r = jsnShortest(a)
+    var digits = r.d
+    var il = r.e + 1
+    if (r.e < 0) {
+        digits = jsnZeros(-r.e) + r.d
+        il = 1
+    }
+    var rd = jsnRoundUp(digits, il + 3)
+    if (rd.length > il + 3) { il = il + 1 }
+    var fp = rd.substring(il)
+    while (fp.length > 0 && fp.charAt(fp.length - 1) == "0") { fp = fp.substring(0, fp.length - 1) }
+    if (fp.length > 0) { return sign + jsnGroup(rd.substring(0, il)) + "." + fp }
+    return sign + jsnGroup(rd.substring(0, il))
 }
