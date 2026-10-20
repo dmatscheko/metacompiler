@@ -64,7 +64,7 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-679 python: `__class__` / `super()` in a function called while its class body runs · P3 · PY · OPEN [V]
+### T-679 python: `__class__` / `super()` in a function called while its class body runs · P3 · PY · IN PROGRESS (PY worker, round 12) [V]
 `class F:\n def m(): return __class__\n z = m()` → CPython NameError "cannot access free variable '__class__' where it is not
 associated with a value in enclosing scope"; interp "name '__class__' is not defined", compiler returns F (__pycls__ set at body
 start). `super()` there: CPython "RuntimeError: super(): empty __class__ cell".
@@ -137,7 +137,7 @@ not change the renderer.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-666 php: the preg_* functions do not exist · P2 · PHP · IN PROGRESS (PHP worker, round 13) [V spec-only]
+### T-666 php: the preg_* functions do not exist · P2 · PHP · IN PROGRESS (PHP worker, round 15) [V spec-only]
 `preg_replace('/a/', 'b', 'aa')` → "Call to undefined function preg_replace()" in all engines; preg_match, preg_match_all, preg_split,
 preg_quote, preg_replace_callback, preg_grep and preg_last_error likewise. Implement them on the shared regex engine under a PCRE dialect
 flag (delimiters and modifiers i m s x u U D, named groups (?P<n>), $n / ${n} / \n replacement references, PREG_SPLIT_* and
