@@ -6410,14 +6410,24 @@ function pyStopIter(args, val) {
     throw exc
 }
 
-function js_pyenumerate(args) {
-    var start = 0
-    if (args.length > 1) { start = pyNum(args[1]) }
-    var a = pyElemsOf(pyEArgAt(args, 0))
+// Go: js_pyenumerate. Bound as [positionals, keywords].
+function js_pyenumerate(bound) {
+    var args = bound[0]
+    var kw = bound[1]
+    pyKwOnly(kw, "enumerate", "iterable", "start")
+    var src = pyEArgAt(args, 0)
+    if (pyKwArg(kw, "iterable") !== undefined) { src = pyKwArg(kw, "iterable") }
+    var start = anytype
+    start = 0
+    if (args.length > 1) { start = args[1] }
+    if (pyKwArg(kw, "start") !== undefined) { start = pyKwArg(kw, "start") }
+    var a = pyElemsOf(src)
     var out = []
     var i = 0
+    // A start that is no plain number (a big int, a bool) counts by Python's +.
+    var plain = typeof start == "number"
     while (i < a.length) {
-        out.push(pyTup([start + i, a[i]]))
+        out.push(pyTup([plain ? start + i : js_pybin("+", start, i), a[i]]))
         i = i + 1
     }
     return pyMkIter("enumerate", out)

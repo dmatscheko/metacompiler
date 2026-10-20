@@ -17642,15 +17642,33 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			panic(&jsThrown{value: rt.pyExcInstance("TypeError",
 				"'"+pyTypeName(rt, it)+"' object is not an iterator")})
 		},
+		// enumerate(iterable, start=0), bound as [positionals, keywords]; both
+		// may be passed by keyword.
 		"js_pyenumerate": func(a []uint64) uint64 {
-			args := rt.argArray(u(a[0]))
-			start := 0.0
-			if len(args) > 1 {
-				start = rt.toNumber(args[1])
+			el := u(a[0]).(*jsArray).elems
+			args := el[0].(*jsArray).elems
+			rt.pyKwOnly(el[1], "enumerate", "iterable", "start")
+			src := argAt(args, 0)
+			if !isUndefOrNull(rt.pyKwArg(el[1], "iterable")) {
+				src = rt.pyKwArg(el[1], "iterable")
 			}
+			var start interface{} = 0.0
+			if len(args) > 1 {
+				start = args[1]
+			}
+			if !isUndefOrNull(rt.pyKwArg(el[1], "start")) {
+				start = rt.pyKwArg(el[1], "start")
+			}
+			// A start that is no plain number (a big int, a bool) counts by
+			// Python's +.
+			s, plain := start.(float64)
 			var out []interface{}
-			for i, e := range rt.pyElemsOf(argAt(args, 0)) {
-				out = append(out, pyTup(&jsArray{elems: []interface{}{start + float64(i), e}}))
+			for i, e := range rt.pyElemsOf(src) {
+				var n interface{} = s + float64(i)
+				if !plain {
+					n = rt.pyExt("js_pybin", "+", start, float64(i))
+				}
+				out = append(out, pyTup(&jsArray{elems: []interface{}{n, e}}))
 			}
 			return w(rt.pyMkIter("enumerate", out))
 		},

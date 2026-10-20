@@ -6867,6 +6867,14 @@ def s132():
     check("ucls3", "½".isnumeric() and "Ⅻ".isnumeric() and "一二三".isnumeric() and "〇".isnumeric()
           and not "中".isnumeric() and "x²".isalnum() and "Ⅻ".isalnum() and not "-1".isnumeric())
 
+# ===== SECTION 133: enumerate's keywords and a big start =====
+def s133():
+    check("enum1", list(enumerate("xy", start=5)) == [(5, "x"), (6, "y")]
+          and list(enumerate(iterable="ab", start=2)) == [(2, "a"), (3, "b")]
+          and list(enumerate("a", 2 ** 70)) == [(1180591620717411303424, "a")]
+          and list(enumerate("ab", True)) == [(1, "a"), (2, "b")]
+          and [i for i, _ in enumerate(range(3), start=-1)] == [-1, 0, 1])
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -6997,5 +7005,6 @@ def main():
     s130() # SECTION-CALL 130
     s131() # SECTION-CALL 131
     s132() # SECTION-CALL 132
+    s133() # SECTION-CALL 133
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

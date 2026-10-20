@@ -4628,7 +4628,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // an id is an address.
         b = declBuiltin(b, "iter", "js_pyiterfn", 1)
         b = declBuiltin(b, "next", "js_pynext", 0)
-        b = declBuiltin(b, "enumerate", "js_pyenumerate", 0)
+        b = declKwBuiltin(b, "enumerate", "js_pyenumerate", [])
         b = declKwBuiltin(b, "zip", "js_pyzip", [])
         b = declBuiltin(b, "map", "js_pymapfn", 0)
         b = declBuiltin(b, "filter", "js_pyfilterfn", 2)

@@ -2328,9 +2328,18 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         pyRaise(pyMakeExc("TypeError", ["'" + pyTypeOf(g).__name + "' object is not an iterator"]))
     }
+    // enumerate(iterable, start=0); both may be passed by keyword. Twin of
+    // js_pyenumerate in abnf/jsrt.go and lib/python-rt.metajs.
     hostGlobals["enumerate"] = function(v, start) {
-        var s = (start === undefined) ? 0 : start
-        var a = iterToList(v)
+        var kw = kTakeNamed()
+        pyKwOnly(kw, "enumerate", "iterable", "start")
+        var src = anytype
+        src = v
+        if (pyKwArg(kw, "iterable") !== undefined) { src = pyKwArg(kw, "iterable") }
+        var s = anytype
+        s = (start === undefined) ? 0 : start
+        if (pyKwArg(kw, "start") !== undefined) { s = pyKwArg(kw, "start") }
+        var a = iterToList(src)
         var out = []
         for (var i = 0; i < a.length; i++) { out.push(pyTup([binOp("+", s, i), a[i]])) }
         return pyMkIter("enumerate", out)
