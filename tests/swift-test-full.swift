@@ -5732,6 +5732,39 @@ func s151() {
         && zero151(Double.self) + one151(Double.self)! / 4 == 0.25)
 }
 
+// ===== SECTION 152: a generic type's metatype names its arguments =====
+// type(of:) of a Box<Double> is Box<Double>, not Box<Int>, and is
+// Box<Double>.self; it reaches the statics and its init builds a Box<Double>. A
+// class fixing its superclass's arguments is no generic type itself. Every value
+// read off swiftc 6.1.2.
+struct Box152<T> { var v: T; static func who() -> String { "B" } }
+class K152<T> { var x: T; init(x: T) { self.x = x } }
+class KS152: K152<Int> { }
+func name152<T>(_ v: T) -> String { "\(T.self)" }
+func s152() {
+    let b = Box152<Double>(v: 1)
+    check("152a", "\(type(of: b))" == "Box152<Double>" && "\(type(of: Box152(v: "s")))" == "Box152<String>" && "\(type(of: K152(x: [1])))" == "K152<Array<Int>>")
+    check("152b", type(of: b) == Box152<Double>.self && type(of: b) != Box152<Int>.self && type(of: b) != type(of: Box152<Int>(v: 2)) && type(of: b).who() == "B")
+    let c = type(of: b).init(v: 3)
+    check("152c", "\(c)" == "Box152<Double>(v: 3.0)" && "\(type(of: KS152(x: 2)))" == "KS152" && name152(b) == "Box152<Double>")
+}
+
+// ===== SECTION 153: a generic parameter bound by a nil argument =====
+// `func orDefault<T: Dflt153>(_ x: T?) -> T` called with `Int?.none` binds T to
+// Int, as the argument's type says, though the value is nil; a T the body never
+// reads binds nothing. Every value read off swiftc 6.1.2.
+protocol Dflt153 { static var dflt: Self { get } }
+extension Int: Dflt153 { static var dflt: Int { return 7 } }
+extension String: Dflt153 { static var dflt: String { return "-" } }
+func orDefault153<T: Dflt153>(_ x: T?) -> T { if let y = x { return y }; return T.dflt }
+func isNil153<T>(_ x: T?) -> Bool { return x == nil }
+func s153() {
+    let n: String? = nil
+    let five: Int? = 5
+    check("153a", orDefault153(Int?.none) == 7 && orDefault153(Optional<String>.none) == "-" && orDefault153(nil as Int?) == 7)
+    check("153b", orDefault153(n) == "-" && orDefault153(five) == 5 && isNil153(Int?.none) && !isNil153(five))
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5884,6 +5917,8 @@ func main() {
     s149() // SECTION-CALL 149
     s150() // SECTION-CALL 150
     s151() // SECTION-CALL 151
+    s152() // SECTION-CALL 152
+    s153() // SECTION-CALL 153
     print("full: \(checks) checks, \(fails) failures")
 }
 

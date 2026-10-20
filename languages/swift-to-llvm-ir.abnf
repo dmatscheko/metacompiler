@@ -2755,6 +2755,51 @@ KwContinue  = "continue" KwEnd ;
         }
         return callExt(b, "js_swadoptdeep", [v, emitStr(b, ty), swFnMapOf(b, ty)])
     }
+    // sw_bindtval(scope, v, T): binds the generic parameter T from the argument v
+    // and answers the value the parameter holds. A nil binds nothing, unless the
+    // call site tagged it with the type its text spells ({__nilty}, swNilTagT):
+    // then T is that type and the parameter nil. Twin of the tval arm of
+    // makeFunBody in swift-interpreter.abnf.
+    function rtBindTval() {
+        return rtFunc("sw_bindtval", 3, function(b, ps) {
+            var tagB = curF.NewBlock("")
+            var valB = curF.NewBlock("")
+            var nn1 = curF.NewBlock("")
+            var bindB = curF.NewBlock("")
+            var nilB = curF.NewBlock("")
+            var ty = b.NewCall(rtProbe("sw_nilty", "__nilty"), [ps[1]])
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [ty]), emitStr(b, "string")])), tagB, valB)
+            callExt(tagB, "js_scope_decl", [ps[0], ps[2], tagB.NewCall(rtKGet(), [ps[0], ty])])
+            tagB.NewRet(hNull)
+            valB.NewCondBr(truthy(valB, callExt(valB, "js_seq", [ps[1], hNull])), nilB, nn1)
+            nn1.NewCondBr(truthy(nn1, callExt(nn1, "js_seq", [ps[1], hUndef])), nilB, bindB)
+            nilB.NewRet(ps[1])
+            callExt(bindB, "js_scope_decl", [ps[0], ps[2], bindB.NewCall(rtTypeValue(), [ps[0], ps[1]])])
+            bindB.NewRet(ps[1])
+        })
+    }
+    // A nil argument for a parameter that binds a generic parameter from its value
+    // (tval), tagged with the type its text spells (swDsNilTy). Twin in
+    // swift-interpreter.abnf.
+    function swNilTagT(t, ty) {
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: r.b.NewCall(rtNilTag(), [r.v, emitStr(r.b, ty)])}
+        }
+    }
+    function rtNilTag() {
+        return rtFunc("sw_niltag", 2, function(b, ps) {
+            var keepB = curF.NewBlock("")
+            var nn1 = curF.NewBlock("")
+            var tagB = curF.NewBlock("")
+            keepB.NewRet(ps[0])
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [ps[0], hNull])), tagB, nn1)
+            nn1.NewCondBr(truthy(nn1, callExt(nn1, "js_seq", [ps[0], hUndef])), tagB, keepB)
+            var o = callExt(tagB, "js_obj_new", [])
+            callExt(tagB, "js_set", [o, emitStr(tagB, "__nilty"), ps[1]])
+            tagB.NewRet(o)
+        })
+    }
     // sw_genadopt(scope, v, T): v adopted to the builtin type the generic parameter
     // T holds; v itself when T is unbound (an empty array bound nothing) or holds a
     // program type.
@@ -5634,7 +5679,8 @@ KwContinue  = "continue" KwEnd ;
     }
     // A value of a program type answers its type DESCRIPTOR (an enum case's member
     // table leads back to it through __desc), which prints as the name and answers
-    // the type's static members; a builtin answers its name.
+    // the type's static members - for a generic struct or class, specialized to its
+    // arguments (js_swtypespec); a builtin answers its name.
     function rtTypeOfVal() {
         return rtFunc("sw_typeofval", 1, function(b, ps) {
             var cls = b.NewCall(rtClassOf(), [ps[0]])
@@ -5646,7 +5692,7 @@ KwContinue  = "continue" KwEnd ;
             var ownB = curF.NewBlock("")
             instB.NewCondBr(truthy(instB, dsc), enumB, ownB)
             enumB.NewRet(dsc)
-            ownB.NewRet(cls)
+            ownB.NewRet(callExt(ownB, "js_swtypespec", [cls, callExt(ownB, "js_swgenargs", [ps[0]])]))
             nameB.NewRet(callExt(nameB, "js_swtypeof", [ps[0]]))
         })
     }
@@ -6811,6 +6857,10 @@ KwContinue  = "continue" KwEnd ;
             if (take) {
                 var rec = recs[ai]
                 if (prm.auto && rec.t != null) { rec = {lbl: rec.lbl, t: autoWrap(rec.t), ref: null, dflt: null} }
+                if (prm.tval != undefined && rec.t != null && rec.txt != undefined) {
+                    var nty = swDsNilTy(rec.txt, swInferAnn(stripWs(rec.txt)))
+                    if (nty != "") { rec = {lbl: rec.lbl, t: swNilTagT(rec.t, nty), ref: null, dflt: null} }
+                }
                 out.push(rec)
                 ai++
             }
@@ -7022,6 +7072,15 @@ KwContinue  = "continue" KwEnd ;
         var g = items[1].gargs
         if (swGenAnn(items[0], g) != "" || swGenInScope(g)) { return call }
         var ann = items[0] + "<" + g + ">"
+        // `Box<Double>.self` is the specialization type(of:) answers for a
+        // Box<Double> (js_swtypespec). Twin in swift-interpreter.abnf.
+        if (txt.length > 5 && txt.substring(txt.length - 5) == ".self") {
+            var gd = swTyCanon(ann).substring(items[0].length)
+            return function(b) {
+                var rs = call(b)
+                return {b: rs.b, v: callExt(rs.b, "js_swtypespec", [rs.v, emitStr(rs.b, gd)])}
+            }
+        }
         return function(b) {
             var r = call(b)
             return {b: r.b, v: swEmitAdopt(r.b, r.v, ann)}
@@ -7658,15 +7717,33 @@ KwContinue  = "continue" KwEnd ;
             notEnB.NewCondBr(truthy(notEnB, notEnB.NewCall(rtProbe("sw_istname", "__tname"), [ps[0]])), btB, fnB)
             btB.NewRet(callExt(btB, "js_call", [callExt(btB, "js_get", [ps[0], emitStr(btB, "init")]), hUndef, ps[1]]))
             fnB.NewRet(callExt(fnB, "js_call", [ps[0], hUndef, ps[1]]))
+            // A specialization (js_swtypespec) constructs as its descriptor with its
+            // arguments bound, as constructInstance does in swift-interpreter.abnf.
+            var isSpec = truthy(tyB, callExt(tyB, "js_seq", [callExt(tyB, "js_typeof", [tyB.NewCall(rtProbe("sw_tspec", "__tspec"), [ps[0]])]), emitStr(tyB, "string")]))
+            var clsV = tyB.NewSelect(isSpec, callExt(tyB, "js_get", [ps[0], emitStr(tyB, "__super")]), ps[0])
             var objV = callExt(tyB, "js_obj_new", [])
-            callExt(tyB, "js_set", [objV, emitStr(tyB, "__class"), ps[0]])
-            var ctorArgs = callExt(tyB, "js_arr_new", [])
-            callExt(tyB, "js_arr_push", [ctorArgs, objV])
-            callExt(tyB, "js_call", [callExt(tyB, "js_get", [ps[0], emitStr(tyB, "__ctor")]), hUndef, ctorArgs])
-            var ikv = callExt(tyB, "js_get", [ps[0], ps[2]])
-            var ik = tyB.NewSelect(truthy(tyB, callExt(tyB, "js_seq", [ikv, hUndef])), emitStr(tyB, "init"), ikv)
-            var iret = tyB.NewCall(rtPrependCall(), [objV, callExt(tyB, "js_get", [ps[0], ik]), ps[1]])
-            tyB.NewRet(tyB.NewSelect(truthy(tyB, callExt(tyB, "js_seq", [iret, hNull])), hNull, objV))
+            callExt(tyB, "js_set", [objV, emitStr(tyB, "__class"), clsV])
+            var targsB = curF.NewBlock("")
+            var ctorB = curF.NewBlock("")
+            tyB.NewCondBr(isSpec, targsB, ctorB)
+            callExt(targsB, "js_set", [objV, emitStr(targsB, "__targs"), callExt(targsB, "js_get", [ps[0], emitStr(targsB, "__ftargs")])])
+            targsB.NewBr(ctorB)
+            var ctorArgs = callExt(ctorB, "js_arr_new", [])
+            callExt(ctorB, "js_arr_push", [ctorArgs, objV])
+            callExt(ctorB, "js_call", [callExt(ctorB, "js_get", [clsV, emitStr(ctorB, "__ctor")]), hUndef, ctorArgs])
+            var ikv = callExt(ctorB, "js_get", [clsV, ps[2]])
+            var ik = ctorB.NewSelect(truthy(ctorB, callExt(ctorB, "js_seq", [ikv, hUndef])), emitStr(ctorB, "init"), ikv)
+            var iret = ctorB.NewCall(rtPrependCall(), [objV, callExt(ctorB, "js_get", [clsV, ik]), ps[1]])
+            var nilRB = curF.NewBlock("")
+            var okRB = curF.NewBlock("")
+            var gfB = curF.NewBlock("")
+            var doneB = curF.NewBlock("")
+            ctorB.NewCondBr(truthy(ctorB, callExt(ctorB, "js_seq", [iret, hNull])), nilRB, okRB)
+            nilRB.NewRet(hNull)
+            okRB.NewCondBr(isSpec, gfB, doneB)
+            callExt(gfB, "js_swgenfields", [objV])
+            gfB.NewBr(doneB)
+            doneB.NewRet(objV)
         })
     }
     // The argument labels of every call that may construct a type known only at
@@ -9202,11 +9279,11 @@ KwContinue  = "continue" KwEnd ;
             // how `T(a: 3)` fills a `var a: Double` field.
             var pv = swEmitAdopt(b, av, prm.adopt)
             if (prm.isSet) { pv = emitSetOf(b, swEmitAdopt(b, pv, prm.setAdopt)) }
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, prm.name), pv])
             // A generic parameter this one binds (swDsMarkTypeParams): the type it
-            // holds, or the type of its value.
+            // holds, or the type of its value (sw_bindtval).
+            if (prm.tval != undefined) { pv = b.NewCall(rtBindTval(), [curScopeV, pv, emitStr(b, prm.tval)]) }
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, prm.name), pv])
             if (prm.tmeta != undefined) { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, prm.tmeta), pv]) }
-            if (prm.tval != undefined) { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, prm.tval), b.NewCall(rtTypeValue(), [curScopeV, pv])]) }
             if (prm.telem != undefined) { b = swEmitElemTypeParam(b, prm.telem, pv) }
         }
         inoutStack.push(inouts)
@@ -10876,6 +10953,9 @@ KwContinue  = "continue" KwEnd ;
                 }
                 callExt(b, "js_set", [clsV, emitStr(b, "__gfields"), gfa])
                 callExt(b, "js_set", [clsV, emitStr(b, "__gftys"), gta])
+                // `class DBox: Box<Double>` fixes its superclass's arguments and is
+                // no generic type itself, so js_swtypespec leaves it alone.
+                if (gdesc.fixed != undefined) { callExt(b, "js_set", [clsV, emitStr(b, "__ftargs"), emitStr(b, gdesc.fixed)]) }
             }
             // An existential stored property is marked on the type; see swKeepMode.
             var exf = swTypeExFields(name)

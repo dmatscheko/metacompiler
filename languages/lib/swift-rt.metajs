@@ -772,6 +772,25 @@ function js_swgenfields(v) {
     }
     return undefined
 }
+// type(of:) of a generic struct or class instance, and `Box<Double>.self`: the
+// descriptor specialized to the arguments js_swgenargs spells. Twins: swTypeSpec
+// in languages/swift-interpreter.abnf, which says why, and abnf/jsrtswift.go.
+function js_swgenargs(v) { return swGenArgsTxt(v) }
+function js_swtypespec(tv, g) {
+    if (g == "" || !swIsObj(tv)) { return tv }
+    if (tv["__isclass"] !== true || tv["__ftargs"] !== undefined) { return tv }
+    var key = "__spec" + g
+    if (tv[key] !== undefined) { return tv[key] }
+    var targs = ""
+    var i = 1
+    while (i < g.length - 1) {
+        if (g.charAt(i) != " ") { targs = targs + g.charAt(i) }
+        i = i + 1
+    }
+    var s = {__isclass: true, __name: tv["__name"], __super: tv, __tspec: g, __ftargs: targs}
+    tv[key] = s
+    return s
+}
 // The `<Double, Int>` a generic struct prints after its name: its type
 // arguments, else the ones its stored properties declared as a bare parameter
 // infer from their values; "" when one is unknown. Twins: swGenArgsTxt in
@@ -1280,7 +1299,10 @@ function swObjDesc(o, depth) {
 
     // The type descriptor itself (`print(P.self)`) is its name.
     if (o["__isclass"] !== undefined) {
-        if (typeof o["__name"] == "string") { return o["__name"] }
+        if (typeof o["__name"] == "string") {
+            if (typeof o["__tspec"] == "string") { return o["__name"] + o["__tspec"] }
+            return o["__name"]
+        }
     }
     if (o["__isenum"] !== undefined) {
         if (typeof o["__name"] == "string") { return o["__name"] }

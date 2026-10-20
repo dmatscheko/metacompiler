@@ -2761,7 +2761,7 @@ KwContinue  = "continue" KwEnd ;
             return eout + ")"
         }
         if (v.__isclass === true || v.__isenum === true) {
-            return v.__name == undefined ? "" + v : v.__name
+            return v.__name == undefined ? "" + v : v.__name + (typeof v.__tspec == "string" ? v.__tspec : "")
         }
         var cls = v.__class
         if (cls == undefined || cls === null || cls.__name == undefined) { return "" + v }
@@ -4344,16 +4344,37 @@ KwContinue  = "continue" KwEnd ;
     hostGlobals["exit"] = function(code) { exit(code | 0) }
     // type(of: v): a value of a program type answers its type DESCRIPTOR, which
     // prints as the name and answers the type's static members
-    // (`type(of: x).make()`); a builtin answers its own type value (Int, String,
+    // (`type(of: x).make()`) - for a generic struct or class, specialized to its
+    // arguments (swTypeSpec); a builtin answers its own type value (Int, String,
     // Bool, ...), so `type(of: "x") == String.self`, and a generic builtin
     // (Array<Int>) its name. Twin of rtTypeValue in swift-to-llvm-ir.abnf.
     hostGlobals["type"] = function(v) {
         if (v !== null && typeof v == "object" && v.__class != undefined && v.__class !== null && !Array.isArray(v)) {
-            return v.__class.__desc != undefined ? v.__class.__desc : v.__class
+            if (v.__class.__desc != undefined) { return v.__class.__desc }
+            return v.__class.__isclass === true ? swTypeSpec(v.__class, swGenArgsTxt(v)) : v.__class
         }
         var n = swTypeOf(v)
         if (hasOwn(hostGlobals, n) && hostGlobals[n].__tname !== undefined) { return hostGlobals[n] }
         return n
+    }
+    // `type(of: b)` of a generic struct or class instance, and `Box<Double>.self`,
+    // name the type WITH its arguments: they print as `Box<Double>` and Box<Double>
+    // is not Box<Int>. Such a specialization is made once per descriptor and
+    // argument list, so identity stays equality; it reaches the descriptor's
+    // members through __super and constructs as the descriptor with the arguments
+    // bound (constructInstance). g is the `<Double, Int>` swGenArgsTxt spells.
+    // Twins: js_swtypespec in abnf/jsrtswift.go and lib/swift-rt.metajs.
+    function swTypeSpec(tv, g) {
+        // A specialization, or a `class DBox: Box<Double>` (which fixes its
+        // superclass's arguments and is no generic type itself), stays as it is.
+        if (g == "" || tv.__ftargs !== undefined) { return tv }
+        var key = "__spec" + g
+        if (hasOwn(tv, key)) { return tv[key] }
+        var targs = ""
+        for (var i = 1; i < g.length - 1; i++) { if (g.charAt(i) != " ") { targs = targs + g.charAt(i) } }
+        var s = {__isclass: true, __name: tv.__name, __super: tv, __tspec: g, __ftargs: targs}
+        scopePut(tv, key, s)
+        return s
     }
     // abs/max/min are Double-aware: a boxed operand keeps its box (abs(-1.5) is 1.5,
     // not the 1 a |0 truncation gives) and compares by its VALUE (two boxes are two
@@ -6926,6 +6947,10 @@ KwContinue  = "continue" KwEnd ;
             if (take) {
                 var rec = recs[ai]
                 if (prm.auto && rec.t != null) { rec = {lbl: rec.lbl, t: autoWrap(rec.t), ref: null, dflt: null} }
+                if (prm.tval != undefined && rec.t != null && rec.txt != undefined) {
+                    var nty = swDsNilTy(rec.txt, swInferAnn(stripWs(rec.txt)))
+                    if (nty != "") { rec = {lbl: rec.lbl, t: swNilTagT(rec.t, nty), ref: null, dflt: null} }
+                }
                 out.push(rec)
                 ai++
             }
@@ -6933,6 +6958,16 @@ KwContinue  = "continue" KwEnd ;
         }
         while (ai < recs.length) { out.push(recs[ai]); ai++ }
         return out
+    }
+    // A nil argument for a parameter that binds a generic parameter from its value
+    // (tval) comes tagged with the type its text spells (swDsNilTy) as {__nilty},
+    // which makeFunBody unwraps back to nil. Twin in swift-to-llvm-ir.abnf.
+    function swNilTagT(t, ty) {
+        return function() {
+            var v = anytype
+            v = t()
+            return v === null || v === undefined ? {__nilty: ty} : v
+        }
     }
     // Evaluates a planned argument list. An &x argument becomes a one-slot box the
     // callee writes back into; writeBacks copies the boxes home after the call.
@@ -7022,6 +7057,8 @@ KwContinue  = "continue" KwEnd ;
     // nested Inner would lose to a same-named top-level one. A user-declared init pushes the
     // same owner again through makeMethodClosure, which is harmless.
     function constructInstance(f, argv, labels, targs) {
+        // A specialization (swTypeSpec) constructs as its descriptor, its arguments bound.
+        if (f.__tspec !== undefined) { return constructInstance(f.__super, argv, labels, f.__ftargs) }
         ownerStack.push(f)
         try { return constructIn(f, argv, labels, targs) } finally { ownerStack.pop() }
     }
@@ -7069,6 +7106,16 @@ KwContinue  = "continue" KwEnd ;
         var g = items[1].gargs
         if (swGenAnn(items[0], g) != "" || swGenInScope(g)) { return call }
         var ann = items[0] + "<" + g + ">"
+        // `Box<Double>.self` is the specialization type(of:) answers for a
+        // Box<Double> (swTypeSpec). Twin in swift-to-llvm-ir.abnf.
+        if (txt.length > 5 && txt.substring(txt.length - 5) == ".self") {
+            var gd = swTyCanon(ann).substring(items[0].length)
+            return function() {
+                var tv = anytype
+                tv = call()
+                return tv !== null && typeof tv == "object" && tv.__isclass === true ? swTypeSpec(tv, gd) : tv
+            }
+        }
         return function() { return swAdoptAnn(call(), ann) }
     }
     // The type of `[T](...)` / `[K: V](...)` from its text: the bracketed part,
@@ -9175,11 +9222,15 @@ KwContinue  = "continue" KwEnd ;
             var pj = f.params[j]
             var pv = anytype
             pv = pj.isSet ? swSetOf(swAdoptAnn(bnd.vals[j], pj.setAdopt)) : bnd.vals[j]
+            var nilTy = pj.tval != undefined && pv !== null && typeof pv == "object" && typeof pv.__nilty == "string" ? pv.__nilty : ""
+            if (nilTy != "") { pv = null }
             declVar(pj.name, pv)
             // A generic parameter this one binds (swDsMarkTypeParams): the type it
-            // holds, or the type of its value.
+            // holds, or the type of its value - for a nil, the type its argument's
+            // text spells (swNilTagT), else none.
             if (pj.tmeta != undefined) { declVar(pj.tmeta, pv) }
-            if (pj.tval != undefined) { declVar(pj.tval, hostGlobals["type"](pv)) }
+            if (nilTy != "") { declVar(pj.tval, swGetName(nilTy)) }
+            else if (pj.tval != undefined && pv !== null && pv !== undefined) { declVar(pj.tval, hostGlobals["type"](pv)) }
             if (pj.telem != undefined && Array.isArray(pv) && pv.length > 0) { declVar(pj.telem, hostGlobals["type"](pv[0])) }
         }
         var r = f.body()

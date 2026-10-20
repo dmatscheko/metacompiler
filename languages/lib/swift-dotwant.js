@@ -780,6 +780,23 @@ function swDsGenRet(params, gens, rtxt) {
     }
     return ""
 }
+// The type an argument that may be nil is written at, when its text spells one
+// (`Int?.none`, `Optional<Int>.none`, `nil as Int?`) or ann, the annotation of
+// the local it names, is an Optional (`Int?`); "" otherwise. A generic parameter
+// such an argument binds (tval) is that type, which a nil value cannot say.
+function swDsNilTy(txt, ann) {
+    var t = stripWs(txt)
+    var n = t.length
+    var x = ""
+    if (n > 6 && t.substring(n - 6, n) == "?.none") { x = t.substring(0, n - 6) }
+    else if (n > 15 && t.substring(0, 9) == "Optional<" && t.substring(n - 6, n) == ">.none") { x = t.substring(9, n - 6) }
+    else if (n > 6 && t.substring(0, 5) == "nilas" && t.charAt(n - 1) == "?") { x = t.substring(5, n - 1) }
+    else if (n > 8 && t.substring(0, 7) == ".noneas" && t.charAt(n - 1) == "?") { x = t.substring(7, n - 1) }
+    else if (ann.length > 1 && ann.charAt(ann.length - 1) == "?") { x = ann.substring(0, ann.length - 1) }
+    if (x == "") { return "" }
+    for (var i = 0; i < x.length; i++) { if (!swDsIdCh(x.charAt(i)) && x.charAt(i) != ".") { return "" } }
+    return x
+}
 function swGenUnbind(params, gens) {
     if (gens == null) { return }
     for (var i = 0; i < params.length; i++) {

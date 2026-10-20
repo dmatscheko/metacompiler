@@ -1542,6 +1542,14 @@ func init() {
 		// type(of: v). Twins: swTypeOf in swift-interpreter.abnf, js_swtypeof in
 		// lib/swift-rt.metajs.
 		m["js_swtypeof"] = func(a []uint64) uint64 { return rt.wrapStr(rt.swTypeOf(u(a[0]))) }
+		// type(of:) of a generic struct or class instance, and `Box<Double>.self`:
+		// the descriptor specialized to the arguments js_swgenargs spells. Twins:
+		// swTypeSpec in languages/swift-interpreter.abnf and lib/swift-rt.metajs.
+		m["js_swgenargs"] = func(a []uint64) uint64 { return rt.wrapStr(rt.swGenArgsTxt(u(a[0]))) }
+		m["js_swtypespec"] = func(a []uint64) uint64 {
+			g, _ := u(a[1]).(string)
+			return w(swTypeSpec(u(a[0]), g))
+		}
 		// -x and ~x, both at the operand's own width. A fractional Double keeps
 		// the floating point negation.
 		m["js_swneg"] = func(a []uint64) uint64 {
@@ -3184,7 +3192,8 @@ func (rt *jsrt) swObjDesc(o *jsObject, depth int) (string, bool) {
 	// The type descriptor itself (`print(P.self)`) is its name.
 	if _, ok := o.props["__isclass"]; ok {
 		if n, ok := o.props["__name"].(string); ok {
-			return n, true
+			g, _ := o.props["__tspec"].(string)
+			return n + g, true
 		}
 	}
 	if _, ok := o.props["__isenum"]; ok {
@@ -3385,6 +3394,33 @@ func swGenFields(v interface{}, adopt func(interface{}, string) interface{}) {
 			o.set(f, adopt(fv, swGenSub(o, ts[i])))
 		}
 	}
+}
+
+// swTypeSpec is the descriptor tv specialized to the type arguments g
+// (`<Double, Int>`): made once per descriptor and argument list, so identity
+// stays equality, reaching tv's members through __super and constructing as tv
+// with the arguments bound (__ftargs, sw_dyncall). Twin of swTypeSpec in
+// languages/swift-interpreter.abnf, which says why.
+func swTypeSpec(tv interface{}, g string) interface{} {
+	o, ok := tv.(*jsObject)
+	if !ok || g == "" || o.props["__isclass"] != true {
+		return tv
+	}
+	if _, has := o.props["__ftargs"]; has {
+		return tv
+	}
+	key := "__spec" + g
+	if s, has := o.props[key]; has {
+		return s
+	}
+	s := newJSObject()
+	s.set("__isclass", true)
+	s.set("__name", o.props["__name"])
+	s.set("__super", o)
+	s.set("__tspec", g)
+	s.set("__ftargs", strings.ReplaceAll(g[1:len(g)-1], " ", ""))
+	o.set(key, s)
+	return s
 }
 
 // swGenArgsTxt is the `<Double, Int>` a generic struct prints after its name:
