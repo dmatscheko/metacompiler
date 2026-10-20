@@ -186,6 +186,7 @@ class Main {
         S88.run(); // SECTION-CALL 88
         S89.run(); // SECTION-CALL 89
         S90.run(); // SECTION-CALL 90
+        S91.run(); // SECTION-CALL 91
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -4976,5 +4977,40 @@ class S90 {
         for (Object o : os) { mk = mk + (o instanceof RandomAccess ? "R" : "r") + (o instanceof Serializable ? "S" : "s") + (o instanceof ArrayList ? "A" : "a"); }
         Main.check("mk90", mk.equals("RSArSaRSarSarSa"));
         Main.check("nm90", (os[1].getClass().getName() + " " + os[2].getClass().getName()).equals("java.util.LinkedList java.util.Stack"));
+    }
+}
+
+// ===== SECTION 91: a static field named through an instance =====
+//
+// A static field named through an expression is the field of the class the
+// expression's static type finds it in (JLS 15.11.1): `this.j`, `s.j` and
+// `b.k` with b typed as the superclass read and write the class's one copy,
+// a hiding redeclaration is chosen by the static type, and the expression
+// is evaluated and its value discarded, even when it is null. Every
+// expected value is java 24.0.2's.
+class S91 {
+    static String log = "";
+    static class Base { static int k = 1; int inst = 2; }
+    static class Sub extends Base {
+        static int j = 5;
+        int m() { return this.j + 1; }
+        int n() { this.j = 7; return j; }
+    }
+    static class Hide extends Base { static int k = 20; }
+    static Sub mk() { log = log + "mk"; return new Sub(); }
+    static void run() {
+        Sub s = new Sub();
+        Base b = s;
+        String st = s.j + " " + b.k + " " + s.k + " " + s.m();
+        s.j = 8;
+        b.k = 3;
+        st = st + " " + Sub.j + Base.k + (s.j + b.k);
+        s.j += 2; s.k++; ++b.k;
+        st = st + " " + Sub.j + Base.k + s.n() + Sub.j;
+        Hide h = new Hide();
+        Base hb = h;
+        Sub nul = null;
+        st = st + " " + h.k + hb.k + ((Base) h).k + " " + mk().j + nul.j + log;
+        Main.check("sf91", st.equals("5 1 1 6 8311 10577 2055 77mk"));
     }
 }

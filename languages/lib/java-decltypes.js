@@ -757,6 +757,21 @@ function jFieldRecv(t) {
     if (r.length > 8 && r.substring(0, 8) == "static?:") { return jOvBare(r.substring(8)) }
     return jOvBare(r)
 }
+// Whether the receiver text t of a field access is an expression rather than
+// a type name: a static field named through an instance is still the field
+// of the class that declares it (JLS 15.11.1), whose descriptor holds it.
+function jFieldViaInst(t) {
+    if (t == "this") { return true }
+    if (t == "super") { return false }
+    var r = jRecvTy(t)
+    return r != "" && !(r.length > 7 && r.substring(0, 7) == "static:") && !(r.length > 8 && r.substring(0, 8) == "static?:")
+}
+// Records on a field access or target rec its receiver's class (frecv) and
+// whether it is reached through an instance (finst), from the receiver's text.
+function jFieldRecvOn(rec, t) {
+    rec.frecv = jFieldRecv(t)
+    rec.finst = jFieldViaInst(t)
+}
 // The text of a chain target before its last suffix, or "" when it cannot
 // be told off the end of t.
 function jChainHeadText(t, last) {
@@ -777,13 +792,13 @@ function jChainHeadText(t, last) {
     return ""
 }
 // A chain target's head suffixes learn their receivers' static types as an
-// expression's do (jChainRecvTys), from the text before the place; the
-// answer is jFieldRecv for a last suffix that is a field, else "".
-function jChainTargetRecv(head, last, text) {
+// expression's do (jChainRecvTys), from the text before the place; a target
+// rec whose last suffix is a field gets its receiver recorded (jFieldRecvOn).
+function jChainTargetRecv(head, last, text, rec) {
     var ht = jChainHeadText(stripWs(text), last)
-    if (ht == "") { return "" }
+    if (ht == "") { return }
     if (head.length > 1) { jChainRecvTys(head.slice(1), ht) }
-    return last.kind == "field" ? jFieldRecv(ht) : ""
+    if (last.kind == "field") { jFieldRecvOn(rec, ht) }
 }
 // The slot of field `name` through a jFieldRecv answer.
 function jFieldKeyAt(recv, name) {
@@ -798,10 +813,10 @@ function jFieldKeyAt(recv, name) {
 // fld, else a method) named through recv (a jFieldRecv answer, or a class
 // name): the nearest declaration in recv's class and its superclasses, as
 // a static member is inherited and a redeclaration hides it (JLS 8.3,
-// 8.4.8). "" when that is recv's class itself, when the nearest
-// declaration is an instance member, or when it is unknown - the
-// receiver's own descriptor or instance answers those.
-function jStaticHome(recv, name, fld) {
+// 8.4.8). "" when that is recv's class itself named as a type (inst not
+// true), when the nearest declaration is an instance member, or when it is
+// unknown - the receiver's own descriptor or instance answers those.
+function jStaticHome(recv, name, fld, inst) {
     if (recv == undefined || recv == "") { return "" }
     var self = recv
     var c = recv
@@ -816,7 +831,7 @@ function jStaticHome(recv, name, fld) {
         if (rec == undefined) { return "" }
         if (fld) {
             var k = rec.fl["$" + name]
-            if (k != undefined) { return (k != "i" && c != self) ? c : "" }
+            if (k != undefined) { return (k != "i" && (c != self || inst === true)) ? c : "" }
         } else {
             for (var i = 0; i < rec.ms.length; i++) {
                 if (rec.ms[i].name == name) { return (rec.ms[i].statik && c != self) ? c : "" }
@@ -832,7 +847,7 @@ function jStaticHome(recv, name, fld) {
 function jSfxHome(s) {
     if (s.home == undefined) {
         if (s.kind == "field") {
-            s.home = jStaticHome(s.frecv, s.name, true)
+            s.home = jStaticHome(s.frecv, s.name, true, s.finst)
         } else {
             var rc = jSfxRty(s)
             s.home = (rc.length > 7 && rc.substring(0, 7) == "static:") ? jStaticHome(jOvBare(rc.substring(7)), s.name, false) : ""
@@ -1955,7 +1970,7 @@ function jChainRecvTys(sfxs, text) {
     }
     for (var j = 0; j < sfxs.length; j++) {
         if (sfxs[j].kind == "mcall") { sfxs[j].rty = starts[j] > 0 ? jRecvTy(text.substring(0, starts[j])) : "" }
-        if (sfxs[j].kind == "field" && starts[j] > 0) { sfxs[j].frecv = jFieldRecv(text.substring(0, starts[j])) }
+        if (sfxs[j].kind == "field" && starts[j] > 0) { jFieldRecvOn(sfxs[j], text.substring(0, starts[j])) }
     }
 }
 // The static signature of a `.m(...)` suffix, resolved once the walk is

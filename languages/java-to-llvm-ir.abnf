@@ -2267,12 +2267,15 @@ HasStatic   = :script(~~
         var head = []
         for (var i = 0; i < items.length - 1; i++) { head.push(items[i]) }
         var last = items[items.length - 1]
-        var frecv = jChainTargetRecv(head, last, text)
         // Three separate returns rather than one reassigned local: under the
         // frozen engine a variable keeps the shape it was first given.
         if (last.kind == "field") {
-            return {name: "", path: [{key: last.name}], base: foldCallMember(head), frecv: frecv, fctx: curClassName}
+            var fr = {name: "", path: [{key: last.name}], frecv: "", finst: false, fctx: curClassName}
+            jChainTargetRecv(head, last, text, fr)
+            fr.base = foldCallMember(head)
+            return fr
         }
+        jChainTargetRecv(head, last, text, {})
         if (last.kind == "index") {
             var tr = jChainTyRef(text)
             return {name: "", path: [{idx: last.idx}], base: foldCallMember(head),
@@ -2287,7 +2290,7 @@ HasStatic   = :script(~~
     // (jFieldKey). `super.f` is a field of `this`.
     function jTargetRef(items) {
         var r = makeTargetRef(items)
-        if (r.path.length > 0) { r.frecv = jFieldRecv(r.name) }
+        if (r.path.length > 0) { jFieldRecvOn(r, r.name) }
         if (r.name == "super") { r.name = "this" }
         r.fctx = curClassName
         return r
@@ -2315,7 +2318,7 @@ HasStatic   = :script(~~
         }
         // An inherited static field's descriptor (jStaticHome); twin of resolveRef
         // in java-interpreter.abnf.
-        var home = (ref.path.length == 0 || ref.path[0].key == undefined) ? "" : jStaticHome(ref.frecv, ref.path[0].key, true)
+        var home = (ref.path.length == 0 || ref.path[0].key == undefined) ? "" : jStaticHome(ref.frecv, ref.path[0].key, true, ref.finst)
         if (home != "") { o = callExt(b, "js_scope_get", [curScopeV, emitStr(b, home)]) }
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]

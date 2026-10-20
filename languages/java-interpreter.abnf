@@ -6995,10 +6995,15 @@ HasStatic   = :script(~~
         var head = []
         for (var i = 0; i < items.length - 1; i++) { head.push(items[i]) }
         var last = items[items.length - 1]
-        var frecv = jChainTargetRecv(head, last, text)
         // Three separate returns rather than one reassigned local: under the
         // frozen engine a variable keeps the shape it was first given.
-        if (last.kind == "field") { return {name: "", path: [{key: last.name}], base: foldCallMember(head), frecv: frecv} }
+        if (last.kind == "field") {
+            var fr = {name: "", path: [{key: last.name}], frecv: "", finst: false}
+            jChainTargetRecv(head, last, text, fr)
+            fr.base = foldCallMember(head)
+            return fr
+        }
+        jChainTargetRecv(head, last, text, {})
         if (last.kind == "index") {
             var tr = jChainTyRef(text)
             return {name: "", path: [{idx: last.idx}], base: foldCallMember(head),
@@ -7105,7 +7110,7 @@ HasStatic   = :script(~~
         // An inherited static field's descriptor (jStaticHome); twin of
         // emitRefPath in java-to-llvm-ir.abnf.
         if (ref.path.length > 0 && ref.path[0].key != undefined) {
-            if (ref.home == undefined) { ref.home = jStaticHome(ref.frecv, ref.path[0].key, true) }
+            if (ref.home == undefined) { ref.home = jStaticHome(ref.frecv, ref.path[0].key, true, ref.finst) }
             if (ref.home != "") { o = jResolveClass(ref.home) }
         }
         for (var i = 0; i < ref.path.length - 1; i++) {
@@ -7371,7 +7376,7 @@ HasStatic   = :script(~~
     }
     function jTargetRef(items) {
         var r = makeTargetRef(items)
-        if (r.path.length > 0) { r.frecv = jFieldRecv(r.name) }
+        if (r.path.length > 0) { jFieldRecvOn(r, r.name) }
         if (r.name == "super") { r.name = "this" }
         r.hcls = curClassName
         return r
