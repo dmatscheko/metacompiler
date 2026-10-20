@@ -1633,9 +1633,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var off = s.o
         var cp = s.c
         if (need > cp) {
-            var ncap = cp * 2
-            if (ncap < need) { ncap = need }
-            if (ncap < 4) { ncap = 4 }
+            // gc's growth (goGrowCap, go-constfold.js), by the element type's layout.
+            var lay = goSizeOf(typeof et == "string" ? et : "", goFtOfI)
+            var ncap = goGrowCap(cp, need, lay.s, lay.p)
             var na = []
             for (var k = 0; k < s.n; k++) { na.push(s.a[s.o + k]) }
             while (na.length < ncap) { na.push(apAdopt(et, proto, 0)) }
@@ -1649,6 +1649,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             a[at] = apAdopt(et, proto, arguments[i])
         }
         return slT(newSl(a, off, need, cp), et)
+    }
+    // A struct type's field type texts, for goSizeOf (null for anything else).
+    function goFtOfI(name) {
+        var cls = structAt(null, name)
+        if (cls == undefined || cls == null || !Array.isArray(cls.__ftypes)) { return null }
+        return cls.__ftypes
     }
     // The width one appended element takes: the header's declared element type first,
     // an existing element's box second.

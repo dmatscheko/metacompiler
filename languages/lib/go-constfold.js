@@ -2481,6 +2481,90 @@ function goPkgQual(pkg, t, defOnly) {
 // ("[]Kind" -> "[]pk.Kind"), the spelling main's code uses for them. Such a value
 // carries no descriptor, so a bare name would be read as main's.
 function goWalkQual(t) { return goWalkPkg == "" ? t : goPkgQual(goWalkPkg, t, true) }
+// ----- APPEND'S GROWTH -----
+// The capacity append grows a full slice to is gc's runtime.growslice: the next
+// capacity (doubling below 256 elements, then +(n+768)/4 until it holds the new
+// length) rounded up to the malloc size class of its bytes, a pointer-holding block
+// over 512 bytes paying an 8-byte malloc header first. Appending to a nil []int
+// gives 1, 2, 4, ..., 512, 848, 1280; to a []byte 8, 16, 32. (gc 1.25 on puts the
+// first small backing array of a slice that does not escape on the stack instead,
+// which this models as it does a heap one.)
+var goSizeClasses = [0, 8, 16, 24, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240, 256, 288,
+    320, 352, 384, 416, 448, 480, 512, 576, 640, 704, 768, 896, 1024, 1152, 1280, 1408, 1536, 1792, 2048, 2304,
+    2688, 3072, 3200, 3456, 4096, 4864, 5376, 6144, 6528, 6784, 6912, 8192, 9472, 9728, 10240, 10880, 12288,
+    13568, 14336, 16384, 18432, 19072, 20480, 21760, 24576, 27264, 28672, 32768]
+// es: the element's size in bytes; ptr: it holds a pointer.
+function goGrowCap(oldCap, newLen, es, ptr) {
+    var nc = oldCap
+    if (newLen > oldCap + oldCap) { nc = newLen }
+    else if (oldCap < 256) { nc = oldCap + oldCap }
+    else {
+        while (nc > 0 && nc < newLen) { nc = nc + Math.floor((nc + 768) / 4) }
+        if (nc <= 0) { nc = newLen }
+    }
+    if (es == 0) { return newLen }
+    var mem = nc * es
+    var req = mem
+    if (req <= 32760) {
+        if (ptr && req > 512) { req = req + 8 }
+        var i = 0
+        while (goSizeClasses[i] < req) { i = i + 1 }
+        mem = goSizeClasses[i] - (req - mem)
+    } else { mem = Math.ceil(req / 8192) * 8192 }
+    return Math.floor(mem / es)
+}
+// The layout of a value of type text t on a 64-bit target, as gc lays it out:
+// {s: size, a: alignment, p: holds a pointer}. ftOf(name) answers a struct type's
+// field type texts (null for none); a type it cannot read counts as one word.
+function goSizeOf(t0, ftOf) {
+    var t = stBare(t0)
+    var w = goQualWord(t, goTyWord(t))
+    if (t == "" || t == "?") { return {s: 8, a: 8, p: false} }
+    var c0 = t.charAt(0)
+    if (c0 == "*" || t.indexOf("map[") == 0 || t.indexOf("chan") == 0 || t.indexOf("func(") == 0) { return {s: 8, a: 8, p: true} }
+    if (t.substring(0, 2) == "[]") { return {s: 24, a: 8, p: true} }
+    var et = goArrElemTy(t)
+    if (et != "") {
+        var n = 0
+        var k = 1
+        while (k < t.length && t.charAt(k) != "]") { n = n * 10 + (t.charCodeAt(k) - 48); k = k + 1 }
+        var e = goSizeOf(et, ftOf)
+        return {s: n * e.s, a: e.a, p: e.p && n > 0}
+    }
+    if (w == "bool" || w == "int8" || w == "uint8" || w == "byte") { return {s: 1, a: 1, p: false} }
+    if (w == "int16" || w == "uint16") { return {s: 2, a: 2, p: false} }
+    if (w == "int32" || w == "uint32" || w == "rune" || w == "float32") { return {s: 4, a: 4, p: false} }
+    if (w == "complex64") { return {s: 8, a: 4, p: false} }
+    if (w == "complex128") { return {s: 16, a: 8, p: false} }
+    if (w == "string") { return {s: 16, a: 8, p: true} }
+    if (goIsIfaceTy(w)) { return {s: 16, a: 8, p: true} }
+    var base = stNoTyArgs(w)
+    var fts = ftOf(base)
+    if (fts != null) {
+        var ta = goTpArgsOf(t)
+        var tps = goGenTys["$" + base]
+        var off = 0
+        var al = 1
+        var p = false
+        var i = 0
+        while (i < fts.length) {
+            var ft = fts[i]
+            if (ta != "" && tps !== undefined) {
+                var sub = goTpSubst(ft, tps, goTpSplit(ta))
+                if (sub != "") { ft = sub }
+            }
+            var f = goSizeOf(ft, ftOf)
+            off = Math.ceil(off / f.a) * f.a + f.s
+            if (f.a > al) { al = f.a }
+            p = p || f.p
+            i = i + 1
+        }
+        return {s: Math.ceil(off / al) * al, a: al, p: p}
+    }
+    if (typeof definedUnder[w] == "string" && resolveDefined(w) != w) { return goSizeOf(resolveDefined(w), ftOf) }
+    return {s: 8, a: 8, p: false}
+}
+
 // ----- GENERIC INSTANTIATION -----
 // A generic function binds each of its type parameters, at run time, to the type
 // text it was instantiated with - the hidden local "$tp$T", "" when it is not known
@@ -2562,15 +2646,17 @@ function goTpIn(names, n) {
     return false
 }
 // The type parameters in scope that type text t names.
-function goTpUsed(t) {
+function goTpUsed(t) { return goTpUsedOf(t, goTpCur) }
+// ... of the parameters names.
+function goTpUsedOf(t, names) {
     var out = []
     var i = 0
-    while (goTpCur.length > 0 && i < t.length) {
+    while (names.length > 0 && i < t.length) {
         if (cIsIdCh(t.charCodeAt(i)) && (i == 0 || t.charAt(i - 1) != ".")) {
             var e = i
             while (e < t.length && cIsIdCh(t.charCodeAt(e))) { e = e + 1 }
             var id = t.substring(i, e)
-            if (goTpIn(goTpCur, id) && !goTpIn(out, id)) { out.push(id) }
+            if (goTpIn(names, id) && !goTpIn(out, id)) { out.push(id) }
             i = e
         } else { i = i + 1 }
     }

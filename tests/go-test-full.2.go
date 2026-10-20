@@ -778,6 +778,42 @@ func s94() {
 	check("osa1", len(os.Args) == 1)
 }
 
+// ===== SECTION 95: the capacity append grows a slice to =====
+// gc's runtime.growslice: doubling, then +(n+768)/4, rounded up to the malloc size
+// class of the bytes. The slices escape (sink95), so gc puts no first backing array
+// on the stack. The expected values are go run's.
+var sink95 []interface{}
+
+type pt95 struct{ a, b, c int }
+
+func caps95[T any](n int) string {
+	var s []T
+	var z T
+	out := ""
+	last := -1
+	for i := 0; i < n; i++ {
+		s = append(s, z)
+		sink95 = append(sink95[:0], s)
+		if cap(s) != last {
+			last = cap(s)
+			out += fmt.Sprint(last, " ")
+		}
+	}
+	return out
+}
+
+func s95() {
+	check("cap1", caps95[int](1300) == "1 2 4 8 16 32 64 128 256 512 848 1280 1792 ")
+	check("cap2", caps95[byte](600) == "8 16 32 64 128 256 512 896 ")
+	check("cap3", caps95[string](300) == "1 2 4 8 16 32 71 143 303 ")
+	check("cap4", caps95[pt95](100) == "1 2 4 8 16 32 64 128 ")
+	a := []int{1, 2, 3, 4}
+	b := a[1:2:2]
+	b = append(b, 9)
+	sink95 = append(sink95[:0], b)
+	check("cap5", cap(b) == 2)
+}
+
 func main() {
 	s83() // SECTION-CALL 83
 	s84() // SECTION-CALL 84
@@ -791,6 +827,7 @@ func main() {
 	s92() // SECTION-CALL 92
 	s93() // SECTION-CALL 93
 	s94() // SECTION-CALL 94
+	s95() // SECTION-CALL 95
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

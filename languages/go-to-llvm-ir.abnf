@@ -2644,6 +2644,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             }
             // js_gomakesl panics on a negative length or a capacity below it.
             callExt(b, "js_gomakesl", [rl.v, cp])
+            goEtNote(cet)
             return {b: b, v: emitHelper(b, "$smake", [rl.v, cp, emitZeroDecl(b, cet), emitTpResOr(b, cet)])}
         }
     }
@@ -3434,8 +3435,117 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // from, and without this an append onto it would land a plain number in it.
     function emitSlT(b, h, et) {
         if (et == undefined || et == null || et.length == 0) { return h }
-        callExt(b, "js_set", [h, emitStr(b, "et"), emitStr(b, et)])
+        goEtNote(et)
+        callExt(b, "js_set", [h, emitStr(b, "et"), emitTpResOr(b, et)])
         return h
+    }
+    // ----- append's growth (goGrowCap, go-constfold.js) -----
+    // $growcap(oldCap, newLen, et) is goGrowCap with the element type's layout read
+    // from $esz: every element type text a header is made with, as size * 2 + 1 for
+    // one that holds no pointer (goSizeOf), filled by goEszFill once the whole
+    // program is emitted. A type it does not list is one plain word. Twin of
+    // hostGlobals["append"] in go-interpreter.abnf.
+    var goEts = []
+    var goEtSeen = {}
+    function goEtNote(et) {
+        if (goEtSeen["$" + et] !== true) { goEtSeen["$" + et] = true; goEts.push(et) }
+    }
+    var goEszF = null
+    function declGrowCap(b) {
+        var esz = callExt(b, "js_obj_new", [])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$esz"), esz])
+        var cl = callExt(b, "js_arr_new", [])
+        for (var ci = 0; ci < goSizeClasses.length; ci++) { callExt(b, "js_arr_push", [cl, emitNum(b, goSizeClasses[ci])]) }
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$sizecls"), cl])
+        funcCount++
+        var zidx = funcCount
+        goEszF = m.NewFunc("jsf_" + zidx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        callExt(b, "js_call", [callExt(b, "js_closure", [handle(zidx), curScopeV]), hUndef, callExt(b, "js_arr_new", [])])
+        return declFn(b, "$growcap", 3, function(fb, a) {
+            var sc = curScopeV
+            var oc = a[0]
+            var nl = a[1]
+            callExt(fb, "js_scope_decl", [sc, emitStr(fb, "$nc"), oc])
+            var dbl = callExt(fb, "js_jadd", [oc, oc])
+            var bigB = curF.NewBlock("")
+            var notBigB = curF.NewBlock("")
+            var smallB = curF.NewBlock("")
+            var headB = curF.NewBlock("")
+            var stepB = curF.NewBlock("")
+            var joinB = curF.NewBlock("")
+            fb.NewCondBr(truthy(fb, callExt(fb, "js_gt", [nl, dbl])), bigB, notBigB)
+            callExt(bigB, "js_scope_set", [sc, emitStr(bigB, "$nc"), nl])
+            bigB.NewBr(joinB)
+            notBigB.NewCondBr(truthy(notBigB, callExt(notBigB, "js_lt", [oc, emitNum(notBigB, 256)])), smallB, headB)
+            callExt(smallB, "js_scope_set", [sc, emitStr(smallB, "$nc"), dbl])
+            smallB.NewBr(joinB)
+            var hn = callExt(headB, "js_scope_get", [sc, emitStr(headB, "$nc")])
+            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [hn, nl])), stepB, joinB)
+            var sn = callExt(stepB, "js_scope_get", [sc, emitStr(stepB, "$nc")])
+            var q = callExt(stepB, "js_jadd", [sn, emitNum(stepB, 768)])
+            var inc = callExt(stepB, "js_div", [callExt(stepB, "js_sub", [q, callExt(stepB, "js_mod", [q, emitNum(stepB, 4)])]), emitNum(stepB, 4)])
+            callExt(stepB, "js_scope_set", [sc, emitStr(stepB, "$nc"), callExt(stepB, "js_jadd", [sn, inc])])
+            stepB.NewBr(headB)
+            var nc = callExt(joinB, "js_scope_get", [sc, emitStr(joinB, "$nc")])
+            var codeR = emitSelect(joinB, callExt(joinB, "js_get", [callExt(joinB, "js_scope_get", [sc, emitStr(joinB, "$esz")]), a[2]]),
+                                   function(tb) { return {b: tb, v: callExt(tb, "js_get", [callExt(tb, "js_scope_get", [sc, emitStr(tb, "$esz")]), a[2]])} },
+                                   function(eb) { return {b: eb, v: emitNum(eb, 17)} })
+            var cb = codeR.b
+            var bit = callExt(cb, "js_mod", [codeR.v, emitNum(cb, 2)])
+            var es = callExt(cb, "js_div", [callExt(cb, "js_sub", [codeR.v, bit]), emitNum(cb, 2)])
+            return emitSelect(cb, callExt(cb, "js_seq", [es, emitNum(cb, 0)]), function(zb) { return {b: zb, v: nl} }, function(gb) {
+                var mem = callExt(gb, "js_mul", [nc, es])
+                // A pointer-holding block over 512 bytes carries an 8 byte header.
+                var hdr = emitSelect(gb, callExt(gb, "js_seq", [bit, emitNum(gb, 0)]), function(pb) {
+                    return emitSelect(pb, callExt(pb, "js_gt", [mem, emitNum(pb, 512)]),
+                                      function(yb) { return {b: yb, v: emitNum(yb, 8)} }, function(nb) { return {b: nb, v: emitNum(nb, 0)} })
+                }, function(nb) { return {b: nb, v: emitNum(nb, 0)} })
+                var hb = hdr.b
+                var req = callExt(hb, "js_jadd", [mem, hdr.v])
+                var memR = emitSelect(hb, callExt(hb, "js_gt", [mem, emitNum(hb, 32760)]), function(lb) {
+                    var r8 = callExt(lb, "js_jadd", [mem, emitNum(lb, 8191)])
+                    return {b: lb, v: callExt(lb, "js_sub", [r8, callExt(lb, "js_mod", [r8, emitNum(lb, 8192)])])}
+                }, function(sb) {
+                    var cls = callExt(sb, "js_scope_get", [sc, emitStr(sb, "$sizecls")])
+                    callExt(sb, "js_scope_decl", [sc, emitStr(sb, "$ci"), emitNum(sb, 0)])
+                    var ch = curF.NewBlock("")
+                    var cs = curF.NewBlock("")
+                    var ce = curF.NewBlock("")
+                    sb.NewBr(ch)
+                    var ci = callExt(ch, "js_scope_get", [sc, emitStr(ch, "$ci")])
+                    ch.NewCondBr(truthy(ch, callExt(ch, "js_lt", [callExt(ch, "js_get", [cls, ci]), req])), cs, ce)
+                    callExt(cs, "js_scope_set", [sc, emitStr(cs, "$ci"), callExt(cs, "js_jadd", [callExt(cs, "js_scope_get", [sc, emitStr(cs, "$ci")]), emitNum(cs, 1)])])
+                    cs.NewBr(ch)
+                    var cv = callExt(ce, "js_get", [cls, callExt(ce, "js_scope_get", [sc, emitStr(ce, "$ci")])])
+                    return {b: ce, v: callExt(ce, "js_sub", [cv, hdr.v])}
+                })
+                var mb = memR.b
+                return {b: mb, v: callExt(mb, "js_div", [callExt(mb, "js_sub", [memR.v, callExt(mb, "js_mod", [memR.v, es])]), es])}
+            })
+        })
+    }
+    // goEszF's body: $esz[et] for every element type noted (goEtNote), and the
+    // predeclared ones a conversion may make a header with.
+    function goEszFill() {
+        var pre = ["bool", "int8", "uint8", "byte", "int16", "uint16", "int32", "uint32", "rune", "float32", "int", "uint",
+                   "int64", "uint64", "uintptr", "float64", "complex128", "string"]
+        for (var pi = 0; pi < pre.length; pi++) { goEtNote(pre[pi]) }
+        // A generic's element type is one of its instantiations at run time.
+        for (var ti = 0; ti < goTpCands.length; ti++) { goEtNote(goTpCands[ti]) }
+        var savedF = curF
+        curF = goEszF
+        var zb = goEszF.NewBlock("entry")
+        var esz = callExt(zb, "js_scope_get", [goEszF.Params[0], emitStr(zb, "$esz")])
+        for (var k = 0; k < goEts.length; k++) {
+            var lay = goSizeOf(goEts[k], sFTypesOrNull)
+            callExt(zb, "js_set", [esz, emitStr(zb, goEts[k]), emitNum(zb, lay.s * 2 + (lay.p ? 0 : 1))])
+        }
+        zb.NewRet(hUndef)
+        curF = savedF
+    }
+    function sFTypesOrNull(name) {
+        var ft = sFTypes(name)
+        return ft == undefined ? null : ft
     }
     // THE ZERO VALUE OF A SLICE TYPE IS A MARKED EMPTY HEADER: it READS like an empty
     // slice, and __nil keeps `s == nil` true. The twins are newNilSl in
@@ -3615,6 +3725,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         })
         // append(s, v...): writes into the backing array when the capacity allows (so
         // another slice over it sees the new element, like Go) and reallocates when not.
+        b = declGrowCap(b)
         b = declFn(b, "append", 0, function(fb, a, f) {
             var argsV = f.Params[1]
             var s0 = callExt(fb, "js_arg", [argsV, handle(0)])
@@ -3645,19 +3756,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 })
                 var etZ = emitSelect(eb2, isSlV, function(tb) { return {b: tb, v: slF(tb, s0, "et")} },
                                                  function(eb) { return {b: eb, v: hUndef} })
-                // A GROWING append OVER-ALLOCATES: the new capacity is
-                // max(2 * old cap, need, 4), the rule hostGlobals["append"] in
-                // languages/go-interpreter.abnf uses. Growing to exactly the new
-                // length would make cap(s) == len(s) after every append, so two
-                // appends onto one base would never share a backing array as they
-                // do in Go, and an append loop would copy on every element.
-                var dbl = callExt(etZ.b, "js_jadd", [hc.v, hc.v])
-                var c1 = emitSelect(etZ.b, callExt(etZ.b, "js_lt", [dbl, need]),
-                                    function(tb) { return {b: tb, v: need} },
-                                    function(fb2) { return {b: fb2, v: dbl} })
-                var c2 = emitSelect(c1.b, callExt(c1.b, "js_lt", [c1.v, emitNum(c1.b, 4)]),
-                                    function(tb) { return {b: tb, v: emitNum(tb, 4)} },
-                                    function(fb2) { return {b: fb2, v: c1.v} })
+                // A GROWING append OVER-ALLOCATES, by gc's rule ($growcap).
+                var c2 = {b: etZ.b, v: emitHelper(etZ.b, "$growcap", [hc.v, need, etZ.v])}
                 var fill = callExt(c2.b, "js_sub", [c2.v, hn.v])
                 var eb3 = emitCountLoop(c2.b, fill, function(lb, iV) {
                     callExt(lb, "js_arr_push", [na, callExt(lb, "js_giadopt", [etZ.v, emitNum(lb, 0)])])
@@ -5962,9 +6062,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     // emitTpRes, or t as written when that is not known.
     function emitTpResOr(b, t) {
-        var r = emitTpRes(b, t)
-        if (curTps.length == 0) { return r }
-        return emitHelper(b, "$tpor", [r, emitStr(b, t)])
+        if (goTpUsedOf(t, curTps).length == 0) { return emitStr(b, t) }
+        return emitHelper(b, "$tpor", [emitTpRes(b, t), emitStr(b, t)])
     }
     // The zero value of type parameter name: the zero of the type it is bound to,
     // from the table of every instantiation the program makes ($tpzero).
@@ -6460,6 +6559,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         b = buildPackages(b)
         b = makeSeq(items)(b)
         if (goTpZeroF != null) { goTpZeroFill() }
+        goEszFill()
         // The entry defaults to main(); -main (c.mainName) can name another function or,
         // with a '(', a Go snippet parsed and emitted into jsmain (see emitMainSnippet).
         var entry = c.mainName
