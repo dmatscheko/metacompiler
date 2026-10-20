@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-620** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-621** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -64,45 +64,10 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-610 python: name mangling; legacy `__getitem__` iteration; duplicate keyword via `**`; compiled implicit `__context__` · P1 · PY · IN PROGRESS (PY worker, round 6) [V]
-`class A: def __init__(self): self.__x = 1` → stored as `__x` (python `_A__x`; base and subclass privates collide, `__dict__`
-shows the wrong name). `class Seq: def __getitem__(self, i): if i < 3: return i; raise IndexError` → `list(Seq())` "'Seq' object
-is not iterable" in all legs (python `[0, 1, 2]`: the legacy sequence protocol, at every iteration entry point).
-`f(1, 2, c=1, **{"c": 2})` accepted (python "TypeError: f() got multiple values for keyword argument 'c'"; wording per callee,
-`dict()` for builtins). Compiled only: a raise inside a function called from an except block, or an implicit error (`1/0`) in an
-except body, has `__context__` None (interp and python chain it) — needs a runtime "currently handled exception" stack around
-js_try.
-
-### T-611 python: metaclasses, and the `enum` module on top of them · P2 · PY · IN PROGRESS (PY worker, round 6) [V]
-`class M(type): def __iter__(cls): ...` + `class C(metaclass=M)` → "'type' object is not iterable"; `__call__`/`__getitem__` on a
-metaclass are ignored; `import enum` is unresolved. Implement metaclass dispatch (class creation via M.__new__/__init__, attribute
-lookup and operators on the class through M) in all engines, then write enum (Enum, IntEnum, auto, members, iteration, value/
-name, `__members__`) as lib/python-enum.py.
-
-### T-612 python: set iteration order of ints differs from CPython · P2 · PY · IN PROGRESS (PY worker, round 6) [V]
-`print({x % 3 for x in [5, 4, 3]})` → ours `{2, 1, 0}` (insertion order), python `{0, 1, 2}`; CPython's order for int
-elements is deterministic (hash(i) = i, table size 8/32/...), so programs printing int sets disagree with the oracle. Model
-CPython's open-addressing slot order for sets whose elements all hash deterministically (ints, and tuples of ints); strings are
-salted per run, so leave those in insertion order and record it in manual 7.9.
-
-### T-613 python/js interpreters: generators still run by replay · P2 · CORE · IN PROGRESS (PY worker, round 6) [V]
-Both tag hosts now have a real suspension primitive (coNew/coResume/coYield: goja coroutine.go and frozen jsGenerator.suspend,
-manual 7.14), used by lua's interpreter. The python and js/ts interpreter halves still replay generator bodies, so side effects
-before a yield repeat after `throw()`, `send`, `yield from` (python: an extra "caught in gen" / "got ret" line) — and the
-js interpreter's description still says no primitive exists. Move both onto the primitive; measure interpreter speed. (The js/ts half is DONE in e0c57419; python remains.)
-
-### T-614 python: smaller gaps — math, object repr prefix, OSError errno subclass, `__hash__` attribute · P3 · PY · IN PROGRESS (PY worker, round 6) [V]
-math lacks dist, exp2, frexp, ldexp, modf, nextafter, ulp, erf, gamma, ... (bit-exact against CPython or left out). Plain object
-repr prints `<Grid object>` (CPython `<__main__.Grid object at 0x...>`; the address cannot match, the module prefix can).
-`OSError(2, 'nf')` repr → `OSError(2, 'nf')` (CPython maps errno 2 to `FileNotFoundError(2, 'nf')`). A class defining `__eq__`
-without `__hash__` should have `X.__hash__` None (hashing already raises correctly).
-
-### T-607 python regex: inline flags `(?i)` `(?s)` `(?x)` `(?i:..)`; a backreference to an unset group matches empty · P1 · PY · IN PROGRESS (PY worker, round 6) [V]
-`re.match(r"(?i)A", "a")` → every leg "unsupported group form" (python3 matches; also `(?s)`, `(?x)`, `(?m)`, scoped `(?i:..)`).
-`re.fullmatch(r"(b)?a\1", "a")` → ours a match (JS semantics: an unset group's backreference matches empty), python3 None.
-Both live in the shared lib/regex.js / abnf/jsrtregex.go: add them under python's own dialect flag (as java's J), additive,
-full matrix + native-full + gen-all; ruby has the same backreference rule (`"a" =~ /\A(b)?a\1\z/` → nil in ruby 2.6) — enable
-it for ruby's flag too and add a ruby assertion.
+### T-620 python: `re.error` is uncatchable; compiled class-body except bindings lost · P1 · PY · OPEN [V]
+`try: re.compile("(") except re.error: print("caught")` → every leg aborts "re.error: unterminated group" (python catches it;
+`re.error` is `re.PatternError`, with msg/pattern/pos). Compiled only: `class C:` with `try: 1/0` / `except ZeroDivisionError: z = 5`
+in the class body → `hasattr(C, 'z')` False (python and the interpreter True).
 
 ---
 
@@ -750,6 +715,12 @@ T-603 js compiler: a method call inside an assignment target; arguments edges; `
 T-587 swift: ClosedRange.Index; an element as an expression pattern — DONE f96819ea (plus a 16-commit swiftc-checked sweep: 34b3fd80..f2327f9e)
 T-609 kotlin: Regex should use the Java dialect (flag J) — DONE 3992ef1c (plus radix parsing, groupBy/associateBy valueTransform, joinToString limit/named args, java's Formatter for String.format, signed narrow hashCode, stdlib IAE messages)
 T-615 js: spreading a non-iterable object; arguments passed to another function; holes; `"__#@"` keys — PARTIAL 6cac2349 (non-iterable spread/for-of/yield* TypeError, symbol methods on prototypes, Symbol.asyncIterator); rest is T-619
+T-607 python regex: inline flags `(?i)` `(?s)` `(?x)` `(?i:..)`; a backreference to an unset group matches empty — DONE 0a3a158e (python dialect flag P, unset-group backreference flag n, used by ruby too)
+T-610 python: name mangling; legacy `__getitem__` iteration; duplicate keyword via `**`; compiled implicit `__context__` — DONE 35e0414c
+T-613 python/js interpreters: generators still run by replay — DONE e0c57419 (js/ts) f0393acb (python): every interpreter generator runs on the host coroutine primitive
+T-614 python: smaller gaps — math, object repr prefix, OSError errno subclass, `__hash__` attribute — DONE 81b61124 (exp2/erf/gamma left out: CPython's answers depend on the platform libm, manual 7.9)
+T-611 python: metaclasses, and the `enum` module on top of them — DONE 48620009 (Flag/IntFlag and the functional API not offered)
+T-612 python: set iteration order of ints differs from CPython — DONE af6e7322 for sets of ints built by adding; dummy-slot order after removal, union/copy table sizes and constant displays recorded in manual 7.9
 
 # Settled — do not re-open
 
