@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-681** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-682** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -64,10 +64,10 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-679 python: `__class__` / `super()` in a function called while its class body runs · P3 · PY · IN PROGRESS (PY worker, round 12) [V]
-`class F:\n def m(): return __class__\n z = m()` → CPython NameError "cannot access free variable '__class__' where it is not
-associated with a value in enclosing scope"; interp "name '__class__' is not defined", compiler returns F (__pycls__ set at body
-start). `super()` there: CPython "RuntimeError: super(): empty __class__ cell".
+### T-681 python: `__classcell__` through a metaclass `__new__`; `super()` object's own type · P3 · PY · OPEN [V]
+A metaclass `__new__` calling a method that reads `__class__` after `super().__new__` → CPython `meta H` (type.__new__ fills the cell
+from `__classcell__`); interp NameError, compiler the provisional pre-metaclass class. `super().__class__.__name__` → CPython
+`super`, ours AttributeError; `type(super()).__name__` → CPython `super`, interp `object`.
 
 ### T-680 python re: IGNORECASE pairs from CPython's `_ignorecase_fixes`; non-ASCII ranges of 256+ chars · P3 · PY · OPEN [V]
 `re.match("(?i)\u0390", "\u1fd3")` matches in CPython (full-fold extra pairs, sre_compile `_ignorecase_fixes`), not here. A
@@ -776,6 +776,7 @@ T-670 js: defineProperty writable/configurable; getOwnPropertyNames of non-enume
 T-672 go: `*t = *o` through a pointer; zero embedded struct field is nil; typed package constants print as numbers — DONE 2a3ded12 (struct store through pointers, zero embedded struct instances, promoted field writes, typed package constants and folded typed constants — 4 legs = go run)
 T-673 go: fmt.Sscanf / Scan family; `%T` of a func and of os.Stdin/os.Stdout; `*(v.p.(*int)) = 5` does not parse — DONE 84120661 (fmt Scan/Sscan/Fscan families ported from fmt/scan.go, %T of funcs, *os.File std streams, qualified interface assertions, *(expr) = v — 4 legs = go run; follow-up T-678)
 T-660 python: Unicode `\d` / `\s` in regex; `__class__` in a class nested in a method; astral \w across engines — DONE f1ce9dea 8d6cb63c (Unicode \d/\s, P text read by code point for astral spans/classes, __class__ in nested class bodies; plus must_advance, pos/endpos, Unicode IGNORECASE — 4 legs = python3 3.14; follow-up T-679)
+T-679 python: `__class__` / `super()` in a function called while its class body runs — DONE 75ee1c30 (empty __class__ cell while the body runs, CPython's super() check order, cell filled before the metaclass hooks — 4 legs = python3; follow-up T-681)
 
 # Settled — do not re-open
 
