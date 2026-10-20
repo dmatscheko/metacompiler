@@ -117,7 +117,7 @@ not change the renderer.
 
 # GO — Go  (oracle: `go run`)
 
-### T-687 go: a local type shadowing a top-level struct corrupts it; zero of a type-parameter-typed field is nil · P2 · GO · OPEN [V]
+### T-687 go: a local type shadowing a top-level struct corrupts it; zero of a type-parameter-typed field is nil · P2 · GO · IN PROGRESS (GO worker, round 14) [V]
 Top-level `type T struct{ x, y string }` plus `func k() { type T struct{ z int } }` anywhere: `append([]T{}, T{"p","q"}, ...)` in
 another function prints `[{p} {r} {u}]` (interp) / `{<nil> <nil>}` then exit 2 (compiler); go `[{p q} {r t} {u v}]` — struct
 tables are keyed by name only. `func gen[T any]() { type W struct{ v T }; var w W; fmt.Println(w.v, w) }` with gen[string] /
