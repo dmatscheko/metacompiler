@@ -6903,6 +6903,56 @@ def s134():
     except TypeError as e:
         check("jsoncls2", str(e) == "Object of type object is not JSON serializable")
 
+# ===== SECTION 135: with: __exit__ on return/break/continue, its arguments =====
+class S135CM:
+    def __init__(self, log, n, swallow=False):
+        self.log, self.n, self.swallow = log, n, swallow
+
+    def __enter__(self):
+        self.log.append("in" + str(self.n))
+        return self.n
+
+    def __exit__(self, t, v, tb):
+        self.log.append("out" + str(self.n) + ":" + (t.__name__ if t is not None else "-") + ":" + str(v))
+        return self.swallow
+
+class S135Bad:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        raise RuntimeError("from exit")
+
+def s135():
+    log = []
+    def ret():
+        with S135CM(log, 1) as a:
+            return a + 10
+    def loop():
+        for i in range(3):
+            with S135CM(log, i):
+                if i == 0:
+                    continue
+                if i == 1:
+                    break
+    r = ret()
+    loop()
+    check("with1", r == 11 and log == ["in1", "out1:-:None", "in0", "out0:-:None", "in1", "out1:-:None"])
+    log2 = []
+    with S135CM(log2, "s", True):
+        raise KeyError("k")
+    try:
+        with S135CM(log2, "p"):
+            raise ValueError("v")
+    except ValueError:
+        log2.append("caught")
+    check("with2", log2 == ["ins", "outs:KeyError:'k'", "inp", "outp:ValueError:v", "caught"])
+    try:
+        with S135Bad():
+            raise KeyError(1)
+    except RuntimeError as e:
+        check("with3", repr(e.__context__) == "KeyError(1)")
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -7035,5 +7085,6 @@ def main():
     s132() # SECTION-CALL 132
     s133() # SECTION-CALL 133
     s134() # SECTION-CALL 134
+    s135() # SECTION-CALL 135
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

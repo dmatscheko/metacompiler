@@ -17034,11 +17034,16 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			return a[0]
 		},
 		// __exit__(type, value, traceback) -> truthy swallows the exception.
+		// (manager, exception or undefined): __exit__(type, value, None).
 		"js_pyexit": func(a []uint64) uint64 {
 			if _, cls, ok := pyInstance(u(a[0])); ok {
 				if m, found := pyLookup(cls, "__exit__"); found && isCallable(m) {
 					e := u(a[1])
-					return w(rt.call(m, jsUndef, []interface{}{u(a[0]), e, e, jsUndef}))
+					var t interface{} = jsUndef
+					if e != jsUndef {
+						t = u(pyExternMaps[rt]["js_pytype"]([]uint64{a[1]}))
+					}
+					return w(rt.call(m, jsUndef, []interface{}{u(a[0]), t, e, jsUndef}))
 				}
 			}
 			return jsHFalse

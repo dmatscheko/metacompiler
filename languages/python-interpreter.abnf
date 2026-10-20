@@ -12415,7 +12415,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         } catch (e) {
             if (ex != null && excIsUser(e)) {
                 var cls = pyUser(e.v) ? e.v.__class : undefined
-                if (pytruthy(ex(mgr, cls, e.v, undefined))) { return undefined }
+                // __exit__ runs while the exception is being handled, so one it
+                // raises takes that as its __context__.
+                pyCurExc.push(e.v)
+                var swallow = false
+                try { swallow = pytruthy(ex(mgr, cls, e.v, undefined)) } finally { pyCurExc.pop() }
+                if (swallow) { return undefined }
             } else if (ex != null) { ex(mgr, undefined, undefined, undefined) }
             throw e
         }

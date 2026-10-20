@@ -11608,12 +11608,13 @@ function js_pyenter(v) {
 // __exit__(type, value, traceback) -> truthy swallows the exception. Go passes
 // the caught value as BOTH the type and the value argument, and undefined as
 // the traceback; kept exactly.
+// Go: js_pyexit. (manager, exception or undefined): __exit__(type, value, None).
 function js_pyexit(mgr, e) {
     var cls = pyInstClassOf(mgr)
     if (cls !== null) {
         if (pyLookupHas(cls, "__exit__")) {
             var m = pyLookupVal(cls, "__exit__")
-            if (pyIsCallable(m)) { return pyCall(m, [mgr, e, e, undefined]) }
+            if (pyIsCallable(m)) { return pyCall(m, [mgr, e === undefined ? undefined : js_pytype(e), e, undefined]) }
         }
     }
     return false

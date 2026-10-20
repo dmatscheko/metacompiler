@@ -3863,10 +3863,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // with EXPR [as T]: the real context-manager protocol. __enter__ runs before
     // the body and its value is what `as` binds; __exit__ runs after it, and on
     // the exception path it is handed the exception and may SWALLOW it by
-    // returning true. That is exactly a try/except, so it is lowered as one
-    // (js_try + ctl closures) with the normal-completion __exit__ call appended
-    // to the try body. Several items nest, innermost last, so they unwind in
-    // reverse order. Deviation: a return leaving the body skips __exit__.
+    // returning true. That is a try/except/finally, so it is lowered as one
+    // (js_try + ctl closures): the handler calls __exit__ with the exception and
+    // marks the manager exited, and the finally calls __exit__(None, None, None)
+    // for an unmarked one - so a return, break or continue leaving the body runs
+    // it too. Twin of runWith in python-interpreter.abnf. Several items nest, innermost last, so they unwind in reverse order.
     function makeWith(items, pos) {
         var body = null
         var mgrs = []
@@ -3888,23 +3889,25 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             hidCount++
             var wName = "$wm" + hidCount
             var eName = "$we" + hidCount
+            var xName = "$wx" + hidCount
             var r = mgr.ctxitem(b)
             b = r.b
             pyDeclInner(wName)
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, wName), r.v])
+            pyDeclInner(xName)
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, xName), hFalse])
             var entV = callExt(b, "js_pyenter", [r.v])
             // writeTarget, not emitRefWrite: `as` takes a full target item, so
             // `with cm() as (a, b):` unpacks exactly like an assignment does.
             if (mgr.target != null) { b = writeTarget(b, mgr.target, entV) }
-            var bodyT = function(bb) {
-                bb = inner(bb)
-                var mv = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, wName)])
-                emitExit(bb, mv, hUndef)
-                return bb
-            }
             var catchT = function(bb) {
                 var ev = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, eName)])
                 var mv = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, wName)])
+                // Marked exited by the handled-exception stack's depth, which the
+                // finally cuts back to: __exit__ runs with the exception being
+                // handled, so one it raises takes that as its __context__.
+                callExt(bb, "js_scope_set", [curScopeV, emitStr(bb, xName), callExt(bb, "js_pyexcdepth", [])])
+                callExt(bb, "js_pyexcenter", [ev])
                 var handled = emitExit(bb, mv, ev)
                 var swB = curF.NewBlock("")
                 var reB = curF.NewBlock("")
@@ -3913,9 +3916,22 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 reB.NewRet(hUndef) // Never reached: js_throw unwinds on the host side.
                 return swB
             }
-            var tryClo = callExt(b, "js_closure", [handle(emitClosure([], bodyT, true)), curScopeV])
+            var finT = function(bb) {
+                var doneB = curF.NewBlock("")
+                var exitB = curF.NewBlock("")
+                var leaveB = curF.NewBlock("")
+                var xv = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, xName)])
+                bb.NewCondBr(truthy(bb, callExt(bb, "js_seq", [xv, hFalse])), exitB, leaveB)
+                emitExit(exitB, callExt(exitB, "js_scope_get", [curScopeV, emitStr(exitB, wName)]), hUndef)
+                exitB.NewBr(doneB)
+                callExt(leaveB, "js_pyexcleave", [xv])
+                leaveB.NewBr(doneB)
+                return doneB
+            }
+            var tryClo = callExt(b, "js_closure", [handle(emitClosure([], inner, true)), curScopeV])
             var catchClo = callExt(b, "js_closure", [handle(emitClosure([eName], catchT, true)), curScopeV])
-            var ctl = callExt(b, "js_try", [tryClo, catchClo, hUndef])
+            var finClo = callExt(b, "js_closure", [handle(emitClosure([], finT, true)), curScopeV])
+            var ctl = callExt(b, "js_try", [tryClo, catchClo, finClo])
             return excDispatch(b, ctl)
         }
     }
