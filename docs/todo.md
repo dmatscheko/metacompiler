@@ -85,7 +85,7 @@ typescript-to-llvm-ir (tsc TS1121; node strict SyntaxError): SepNumLit/JsDecLit 
 
 # JV — Java
 
-### T-661 java: Matcher.hitEnd / requireEnd · P3 · JV · OPEN [V]
+### T-661 java: Matcher.hitEnd / requireEnd · P3 · JV · IN PROGRESS (JV worker, round 11) [V]
 `Matcher m = Pattern.compile("abc").matcher("ab"); m.find(); m.hitEnd()` → unknown method in all engines (java true); requireEnd likewise.
 Needs a hit-the-end flag from the shared regex engine (J-gated lib/regex.js / abnf/jsrtregex.go), then a small java side. Transparent
 and non-anchoring region bounds (useTransparentBounds / useAnchoringBounds) are not modelled.
