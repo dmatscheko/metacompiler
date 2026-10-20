@@ -137,10 +137,6 @@ reports cap 4 where growslice says 1) — escape analysis.
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-634 swift: an Optional Set return does not adopt its literal · P3 · SW · IN PROGRESS (SW worker, round 11) [V]
-`func mkOpt(_ b: Bool) -> Set<Double>? { b ? [4] : nil }; print(mkOpt(true)!.sorted())` → all legs `[4]` (swiftc `[4.0]`): the
-Set-return conversion skips Optional Set types (needs a nil branch in the emitter and the interpreter's adopt).
-
 ---
 
 # DA — Dart  (no dart here: spec-only)
@@ -752,6 +748,7 @@ T-645 lua: string arithmetic ignores the strings' metatable — DONE 0ccab79f
 T-648 lua: `tonumber("-0.0")` loses the zero's sign in the interpreter and natively — DONE a735f8fd
 T-628 python: raising `__hash__` without `__eq__`; slots in `__dict__`; `Plain[int]`; builtin `__module__`; regex dialect errors — DONE 05033f1e
 T-629 python: stdin and input(); datetime, decimal, pprint, array, struct; remaining math — DONE 344fa727 f8b15ac9 1c48f755 (readIn host primitive + input()/sys.stdin, datetime/decimal/struct/array/pprint, str seeds, sumprod, fdlibm exp/log1p/log10); fma, __exit__ tracebacks and libm-dependent functions DECLINED (fma needs a double's bits in MetaJS; no engine has frame data for tracebacks; libm answers differ per platform — manual 7.9)
+T-634 swift: an Optional Set return does not adopt its literal — DONE c2852a7a (an `Optional<Set<E>>` spelling is not converted — unprobed, left)
 
 # Settled — do not re-open
 
