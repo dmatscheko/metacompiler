@@ -1660,12 +1660,16 @@ function goLitWalk(ty0, els) {
         i = i + 1
     }
 }
-// `x op= v`: v is an operand of x's type ty (a shift's count is not).
-function goAssignOpCheck(op, kr, ty) {
-    if (kr == null) { return }
-    if (op == "<<=" || op == ">>=") { goShiftCountOk(kr); return }
+// `x op= v`: v is an operand of x's type ty (a shift's count is not), so a float
+// constant beside an integer x is converted to it as in goKOperands. Answers the
+// thunk t of v, converted where it has to be.
+function goAssignOpOperand(t, op, kr, ty) {
+    if (kr == null) { return t }
+    if (op == "<<=" || op == ">>=") { goShiftCountOk(kr); return t }
     if ((op == "/=" || op == "%=") && kr.k.s === 0 && goIntUnder(ty) != null) { goDivZeroFail(kr.ks) }
     goOperandFits(kr, ty)
+    if (kr.k.f && !cIsCx(kr.k) && goIntUnder(ty) != null) { return cMaterialize(goKInt(kr.k)) }
+    return t
 }
 function stTrim(t) {
     var a = 0
@@ -2197,6 +2201,18 @@ function goNilTo(t, nl, ty) {
     if (at == "") { return t }
     return goNilThunk(at)
 }
+// `z, w := nil, 5` ASSIGNS z when z is already declared in the same block (a new
+// name cannot be an untyped nil), so the nil takes z's type and z keeps it.
+// cShortName has pushed the new binding already: the type is the earlier one's.
+function goShortNil(t, name, nl) {
+    if (!nl || name == "_") { return t }
+    var f = cTop()
+    var i = cTopIdx(name) - 1
+    while (i >= 0 && f.n[i] !== name) { i = i - 1 }
+    if (i < 0 || f.t[i] == "") { return t }
+    cBindTy(name, f.t[i])
+    return goNilTo(t, true, f.t[i])
+}
 // The operands of a binary run [t, {at, as}, op, t, {at, as}, ...], in gc's order.
 function goRunOrder(items, ts) {
     var pures = []
@@ -2271,7 +2287,19 @@ function goFmtVvTy(sty) {
     var k = goTyKey(t)
     return (goMethPtr["$" + k + ".Error"] === true || goMethPtr["$" + k + ".String"] === true) ? t : ""
 }
-function goBoxArgsC(items) {
+// pkg.I(x) with I an interface type package pkg declares: x put in it, as I(x)
+// is (goIfaceConvC). items is a call chain whose first suffix is the .I(x).
+function goPkgIfaceConvC(items) {
+    var s = items.length > 1 ? items[1] : null
+    if (s == null || typeof s != "object" || s.kind != "mcall" || s.rc == null || s.rc.loc || s.args.length != 1 || s.spread) { return items }
+    if (goPkgNames["$" + s.rc.text] !== true || goIfaceTys["$" + s.rc.text + "." + s.name] !== true) { return items }
+    var out = [goDtBoxThunk(s.args[0], goDtBoxTyP(s.atys[0]))]
+    var i = 2
+    while (i < items.length) { out.push(items[i]); i = i + 1 }
+    return out
+}
+function goBoxArgsC(items0) {
+    var items = goPkgIfaceConvC(items0)
     var i = 1
     while (i < items.length) {
         var s = items[i]
@@ -4162,19 +4190,25 @@ function goRuneLitC(v, pos) {
 // folds: a chain would need the untyped BOOL constant Go's spec has and this front
 // end does not model (and Go rejects `a < b < c` anyway).
 // items = [t0, {at}, op, t1, {at}, ...] - the same shape goFold reads.
-// An integer constant a double cannot hold exactly, as an operand beside one of
-// FLOAT static type sty: Go converts the constant to that float type, and the
-// 64-bit integer box it would otherwise materialize as is no float operand.
+// An untyped constant operand beside one of static type sty is converted to sty,
+// which the value model only sees where the two differ in kind: an integer
+// constant a double cannot hold exactly beside a FLOAT (the 64-bit integer box is
+// no float operand), and a float constant beside an INTEGER (`x / 2.0` with x an
+// int is integer division; goOperandFits has rejected one with a fraction).
 // Operand k of items is ts[k], its end position items[3k + 1].
 var cbTwo53 = cbShl(cbOne(), 53)
-function goFloOperands(items, ts, sty) {
+function goKOperands(items, ts, sty) {
     var w = goTyWord(stBare(sty))
     if (typeof definedUnder[w] == "string") { w = goTyWord(resolveDefined(w)) }
-    if (!isFloatTy(w)) { return }
+    var fl = isFloatTy(w)
+    if (!fl && goIntTy(w) == null) { return }
     var k = 0
     while (k < ts.length) {
         var c = constAt(items[3 * k + 1].at)
-        if (c != null && !cIsCx(c) && !c.f && cbCmp(c.n, cbTwo53) >= 0) { ts[k] = cMaterialize(cAsF(c)) }
+        if (c != null && !cIsCx(c)) {
+            if (fl && !c.f && cbCmp(c.n, cbTwo53) >= 0) { ts[k] = cMaterialize(cAsF(c)) }
+            if (!fl && c.f && goKInt(c) != null) { ts[k] = cMaterialize(goKInt(c)) }
+        }
         k = k + 1
     }
 }
@@ -4203,7 +4237,7 @@ function goCmpFold(items) {
             // too, so float64(1) and int(1) differ: "==i" / "!=i".
             if (goIsIfaceTy(lt) || goIsIfaceTy(rt)) { ops[0] = ops[0] + "i" }
         }
-        goFloOperands(items, ts, lt != "" ? lt : rt)
+        goKOperands(items, ts, lt != "" ? lt : rt)
         var l = constAt(items[1].at)
         var r = constAt(items[4].at)
         if (l != null && r == null) { goOperandFits(goKRecOf(l, items[1].as, items[1].at), rt) }

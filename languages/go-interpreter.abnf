@@ -3463,7 +3463,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var tk = goTkRun(items, ops)
         var folded = goFoldConst(items, ops, pos, ty)
         if (folded != null) { return goTkFolded(folded, tk, pos, sty) }
-        if (ty == null) { goFloOperands(items, ts, sty) }
+        if (ty == null) { goKOperands(items, ts, sty) }
         goShiftCounts(items, ops, ts)
         ts = goRunOrder(items, ts)
         regConst(pos, null)
@@ -4969,7 +4969,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             }
         }
         if (op != "=") {
-            goAssignOpCheck(op, sp.krs[0], goRefTy(refs[0]))
+            exprs[0] = goAssignOpOperand(exprs[0], op, sp.krs[0], goRefTy(refs[0]))
             return function() {
                 var loc = refLoc(refs[0])
                 var cur = locRead(refs[0], loc)
@@ -5025,6 +5025,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (names.length == exprs.length) {
             for (var si = 0; si < exprs.length; si++) {
                 cBindTy(names[si], stBare(sp.tys[si]))
+                exprs[si] = goShortNil(exprs[si], names[si], sp.nls[si])
                 exprs[si] = goConstTo(exprs[si], sp.krs[si], sp.rns[si] ? "rune" : "any", names.length > 1 ? "multiple assignment" : "assignment")
                 exprs[si] = goStoreThunk(exprs[si], goStCopyTy(sp.tys[si]))
                 if (sp.rns[si]) { exprs[si] = goI32Thunk(exprs[si]) }

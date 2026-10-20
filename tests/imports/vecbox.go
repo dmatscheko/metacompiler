@@ -78,3 +78,8 @@ func Unbox(v any) Kind {
 	k, _ := v.(Kind)
 	return k
 }
+
+// An interface the main file converts to: vecbox.Shape(x).
+type Shape interface{ Area() int }
+
+func (v Vec) Area() int { return v.a * v.b }

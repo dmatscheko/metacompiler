@@ -4087,6 +4087,12 @@ func s70() {
 	ch := make(chan []int, 1)
 	ch <- nil
 	check("nsl5", f70(nil, nil) == "[] map[] true true" && fmt.Sprint(<-ch) == "[]")
+	// `:=` naming a variable of the same block assigns it, so the nil is its type's.
+	zs := []int{1}
+	zs, w := nil, 5
+	zm := map[string]int{"a": 1}
+	zm, w2 := nil, 6
+	check("nsl6", fmt.Sprint(zs, w, len(zs), zs == nil, zm, w2) == "[] 5 0 true map[] 6")
 }
 
 type n70 struct {
@@ -4358,6 +4364,14 @@ func s81() {
 	js[0] = 6.0
 	var n int = 2.0
 	check("ucv6", is[0]/4 == 0 && js[0]/4 == 1 && n/4 == 0 && fmt.Sprint(is, js) == "[2] [6]")
+	// A float constant beside an integer operand is converted to that integer type,
+	// so the operator is integer arithmetic, a sized one wrapping at its width.
+	m := 5
+	var k8 int8 = 5
+	var b8 uint8 = 200
+	q := m
+	q /= 2.0
+	check("ucv7", fmt.Sprint(m/2.0, k8/2.0, 7.0/m, 2.0*m, b8+100.0, q, m%2.0) == "2 2 1 10 44 2 1")
 }
 
 type P81 struct{ F float64 }

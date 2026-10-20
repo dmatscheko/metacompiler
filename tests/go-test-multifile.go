@@ -36,6 +36,10 @@ type Lvl int
 
 type Tag int
 
+type Circ struct{ r int }
+
+func (c Circ) Area() int { return 3 * c.r * c.r }
+
 func kindOf(v any) string {
 	switch x := v.(type) {
 	case vecbox.Kind:
@@ -164,6 +168,10 @@ func main() {
 	ab := aa.([2]vecbox.Kind)
 	_, abOk := aa.([2]Kind)
 	checkS("assertion to an array of a defined type", fmt.Sprint(int(ab[0])*10+int(ab[1]), abOk, aa), "31 false [kind3 kind1]")
+	// A CONVERSION TO AN IMPORTED INTERFACE puts the value in it.
+	sh := vecbox.Shape(Circ{2})
+	checkS("conversion to an imported interface", fmt.Sprintf("%d %T %v %d %v", sh.Area(), sh, sh,
+		vecbox.Shape(vecbox.NewVec(2, 3, 4)).Area(), vecbox.Shape(nil) == nil), "12 main.Circ {2} 6 true")
 
 	if fails == 0 {
 		fmt.Println("go multifile test passed")
