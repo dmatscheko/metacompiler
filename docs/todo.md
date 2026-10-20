@@ -89,13 +89,13 @@ marker). `Object.getOwnPropertySymbols` missing in all legs. Compiled `[...null]
 
 # JV — Java
 
-### T-618 java/kotlin regex: inline flags `(?i)` and atomic groups `(?>..)` under the J dialect · P1 · JV · OPEN [V]
+### T-618 java/kotlin regex: inline flags `(?i)` and atomic groups `(?>..)` under the J dialect · P1 · JV · IN PROGRESS (JV worker, round 6) [V]
 `"ABC".matches("(?i)abc")`, `Regex("(?i)abc")`, `"aab".matches("(?>a+)b")` → "Unknown inline modifier near index 2" in all legs
 (java and the kotlin-stdlib jar match). The python worker is adding inline flags under python's dialect flag in the shared
 lib/regex.js / abnf/jsrtregex.go (T-607): reuse that for J (Java's flag set: i, d, m, s, u, x, U, and scoped `(?i:..)`), add
 atomic groups and possessive quantifiers (`a*+`), additive and flag-gated, full matrix + native-full + gen-all.
 
-### T-608 java regex: forward `\k<name>`; `\X \G \N{..} \b{g}` and \p scripts/blocks; PatternSyntaxException getters · P3 · JV · OPEN [V]
+### T-608 java regex: forward `\k<name>`; `\X \G \N{..} \b{g}` and \p scripts/blocks; PatternSyntaxException getters · P3 · JV · IN PROGRESS (JV worker, round 6) [V]
 A `\k<name>` referring forward is accepted (java PSE). `\X`, `\G`, `\N{..}`, `\b{g}`, `\p{IsLatin}`, `\p{N}` etc. report
 "unsupported" (java supports them). `PatternSyntaxException.getDescription/getIndex/getPattern` missing.
 
