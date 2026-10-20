@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-651** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-652** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -139,11 +139,13 @@ reports cap 4 where growslice says 1) — escape analysis.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-606 php: library callbacks outside libCbArg; argument-error order; named arg into a by-ref variadic · P3 · PHP · IN PROGRESS (PHP worker, round 5) [V spec-only]
-array_walk_recursive, the array_udiff/uintersect family (__mec_takecb) and other dynamically-named callbacks are still judged in
-the library's frame, not the caller's. The callback is checked before earlier arguments, so `usort($notArray, 'bad')` reports
-Argument #2 where PHP reports Argument #1 (all engines). A named argument collected by a by-reference variadic is not passed by
-reference (all engines). (PHP 8.2's "Deprecated: Use of "self" in callables" needs T-596's warning channel.)
+### T-651 php: case-insensitive dynamic function names; `\`-prefixed names; array_map type checks; positional after named in a spread · P2 · PHP · OPEN [V spec-only]
+`$f = 'USORT'; $f($a, 'cmp')` → "Call to undefined function USORT()" in all engines (PHP function names are case-insensitive).
+`$f = '\uasort'; $f(...)` → "Call to undefined function uasort()" when nothing else names uasort (the stdlib function is not loaded
+for a backslash-prefixed string). `array_map('strlen', 5)` prints nothing (PHP TypeError "array_map(): Argument #2 ($array) must be of
+type array, int given", array.c). `$sp = ['k' => 5, 6]; f(...$sp)` accepted (ZEND_SEND_UNPACK: Error "Cannot use positional argument
+after named argument during unpacking"). Callback binding in the caller's frame is still missing for `call_user_func('usort', $a,
+[$this, 'priv'])`, a first-class `usort(...)` value, and named callback arguments; array_udiff_uassoc / array_uintersect_uassoc missing.
 
 ### T-596 php: binding and undefined-variable warnings are never printed · P3 · PHP · BLOCKED - needs a user decision
 PHP CLI prints `Warning: Cannot unbind $this of closure using $this in <file> on line <n>` (and undefined-variable/-index
@@ -740,6 +742,7 @@ T-634 swift: an Optional Set return does not adopt its literal — DONE c2852a7a
 T-647 kotlin: `javaClass` / `::class` names of non-collections and collections; sorted-copy class edges — DONE d16124ba; residual class-name fidelity DECLINED as rarely printed: values views of hashMap/TreeMap/single/empty maps answer LinkedHashMap$LinkedValues (a per-map values kind would touch every kind-3 check in three engines), builtin KClass qualifiedName/toString (kotlin.String / class java.lang.String), and an exception's javaClass.name package
 T-638 bash: `@Q` / `printf %q` / `declare -p` of a well-formed non-printable character — DONE 8a8a72b3 (iswprint table derived from bash itself and cross-checked against iswprint)
 T-646 java: static method through a subclass name; RandomAccess / Serializable markers; Matcher.hitEnd — PARTIAL 067791a2 (statics through a subclass, RandomAccess/Serializable via instanceof exclusion at no ArrayList cost, interp binary names after nested lib loads); hitEnd/requireEnd and declaration order are T-650
+T-606 php: library callbacks outside libCbArg; argument-error order; named arg into a by-ref variadic — DONE 8653dda9 (cbn2's expected text corrected to php-src's argument order)
 
 # Settled — do not re-open
 
