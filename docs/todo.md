@@ -80,7 +80,7 @@ _ in range(2)]` → python `[1, 1]`).
 
 # JS — JavaScript and TypeScript
 
-### T-658 js: inherited data properties read as undefined; Object.create; Object.prototype method set; shim identity · P1 · JS · OPEN [V]
+### T-658 js: inherited data properties read as undefined; Object.create; Object.prototype method set; shim identity · P1 · JS · IN PROGRESS (JS worker, round 12) [V]
 `class B{}; B.prototype.x = 1; println(new B().x)` → undefined in all engines (node 1); `function F(){}; F.prototype.v = 2; new F().v`
 likewise — the value-read miss path (getMember / js_jsvget / js_jsmget) only looks up the chain for methods (P1). `Object.create({p:1})`
 → TypeError "Object.create is not a function" in all engines (P1). `typeof K.isPrototypeOf`, `toLocaleString` → undefined on any value
