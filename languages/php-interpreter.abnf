@@ -1681,6 +1681,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 var sv = anytype
                 sv = a.argspread()
                 if (isArr(sv)) {
+                    // An integer key after a string key of the same spread is an
+                    // Error (ZEND_SEND_UNPACK). Twin of phpMergeArgs in
+                    // abnf/jsrtphp.go.
+                    var spNamed = false
                     for (var j = 0; j < sv.keys.length; j++) {
                         // An element that is a reference reaches a by-reference
                         // parameter as that reference; one of a variable's array
@@ -1688,8 +1692,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                         var mk = null
                         if (isRef(sv.vals[j])) { mk = cellOf(sv.vals[j]) }
                         else if (a.argcv === true) { mk = elemCellOf(sv, sv.keys[j]) }
-                        if (typeof sv.keys[j] == "number") { pos.push(deref(sv.vals[j])); tgts.push(mk) }
-                        else {
+                        if (typeof sv.keys[j] == "number") {
+                            if (spNamed) { phpRaise("Error", "Cannot use positional argument after named argument during unpacking") }
+                            pos.push(deref(sv.vals[j]))
+                            tgts.push(mk)
+                        } else {
+                            spNamed = true
                             if (hasOwn(named, "$" + sv.keys[j])) { namedTwice("$" + sv.keys[j]) }
                             nkeys.push("$" + sv.keys[j])
                             scopePut(named, "$" + sv.keys[j], deref(sv.vals[j]))
@@ -3962,8 +3970,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 var fcn = relName(cur.substring(0, cur.indexOf("::")))
                 return dynStatic(fcn, cur.substring(cur.indexOf("::") + 2), argset)
             }
-            if (typeof cur == "string" && !hasOwn(phpBuiltins, fnName(cur))
-                && !(varExists(fnName(cur)) && typeof getVar(fnName(cur)) == "function")) {
+            if (typeof cur == "string" && !fnDefined(cur)) {
                 phpRaise("Error", "Call to undefined function " + cur + "()")
             }
             return asCallable(cur)
@@ -3976,7 +3983,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 return dynStatic(cn, cur.substring(sep + 2), argset)
             }
             libArgs(cur, argset)
-            return callNamed(cur, argset)
+            return callDyn(cur, argset)
         }
         if (isArr(cur)) {
             if (cur.keys.length != 2) { phpRaise("Error", "Array callback must have exactly two elements") }
@@ -4030,9 +4037,28 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (typeof f != "function") { fail("call of an undefined function: " + name) }
         return f(argset)
     }
-    // A function named at run time may be fully qualified: one leading "\" is
-    // dropped (zend_is_callable_check_func). Twin of fnRetry in php-to-llvm-ir.abnf.
     function fnName(n) { return n.charCodeAt(0) == 92 ? n.substring(1) : n }
+    // PHP function names are case-insensitive: a function is also declared under a
+    // hidden lower-cased key (declFn). A name given at run time is looked up
+    // lower-cased with one leading "\" dropped (zend_init_dynamic_call_string), and
+    // a miss is worded with the name as given. Twin of fnRetry in
+    // php-to-llvm-ir.abnf.
+    function fnKey(lc) { return "\x00f" + lc }
+    function declFn(fn) {
+        var f = makeFunClosure(fn)
+        scopePut(globalScope, fn.name, f)
+        scopePut(globalScope, fnKey(phsCase(fn.name, false)), f)
+    }
+    function fnDefined(n) {
+        var lc = phsCase(fnName(n), false)
+        return hasOwn(phpBuiltins, lc) || varExists(fnKey(lc))
+    }
+    function callDyn(n, argset) {
+        var lc = phsCase(fnName(n), false)
+        if (hasOwn(phpBuiltins, lc)) { return phpBuiltins[lc].apply(undefined, argset.pos) }
+        if (!varExists(fnKey(lc))) { phpRaise("Error", "Call to undefined function " + n + "()") }
+        return getVar(fnKey(lc))(argset)
+    }
     // ----- statics: class constants, static properties and '::' -------------------
     // A class descriptor carries three more ordered maps beside its methods:
     //   __constT   the DECLARED constants as {name, init} records. The initializer is
@@ -4253,8 +4279,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 cbMethod(where, resolveClassName(scn, where), cur.substring(sep + 2), scn, ns, internal ? CB_INT : CB_STR)
                 return cur
             }
-            var fnm = fnName(cur)
-            if (hasOwn(phpBuiltins, fnm) || (varExists(fnm) && typeof getVar(fnm) == "function")) { return cur }
+            if (fnDefined(cur)) { return cur }
             cbFail(where, "function \"" + cur + "\" not found or invalid function name")
         }
         if (isArr(cur)) {
@@ -5732,9 +5757,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // caller, which the library function's own frame does not have. Twin of
     // callerCallable in php-to-llvm-ir.abnf.
     // The callback argument of the library functions that take one: its position
-    // (-1: the last argument, which has no parameter name), whether null is
-    // accepted, and what the array $array before it takes (1: an array, 2: an
-    // array or an object; 0: no such parameter).
+    // (-1: the last argument, -2: each of the last two, which have no parameter
+    // name), whether null is accepted, and what the array $array before it takes
+    // (1: an array, 2: an array or an object; 0: no such parameter).
     var libCbArg = {"$array_map": {at: 0, nul: true, arr: 0},
                     "$array_filter": {at: 1, nul: true, arr: 1},
                     "$array_reduce": {at: 1, nul: false, arr: 1},
@@ -5750,7 +5775,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                     "$array_udiff_assoc": {at: -1, nul: false, arr: 0},
                     "$array_uintersect_assoc": {at: -1, nul: false, arr: 0},
                     "$array_diff_uassoc": {at: -1, nul: false, arr: 0},
-                    "$array_intersect_uassoc": {at: -1, nul: false, arr: 0}}
+                    "$array_intersect_uassoc": {at: -1, nul: false, arr: 0},
+                    "$array_udiff_uassoc": {at: -2, nul: false, arr: 0},
+                    "$array_uintersect_uassoc": {at: -2, nul: false, arr: 0}}
     // The TypeError's wording for the callback at position at.
     function libCbWhere(name, cb, at) {
         return name + "(): Argument #" + (at + 1) + (cb.at < 0 ? "" : " ($callback)") + " must be a valid callback"
@@ -5761,7 +5788,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // (zend_is_callable_ex), whose $this and class scope the library's own frame
     // here does not have. zpp judges the arguments in order, so an array $array
     // before the callback is checked first; the arguments are all evaluated by
-    // then. A direct call and a call through a function's name both come here.
+    // then. A direct call and a call through a function's name both come here, and
+    // so do a callback and an array passed by name.
     // Twin of libCallable, libChecks and emitLibDyn in php-to-llvm-ir.abnf.
     function libArgs(name, argset) {
         var lc = phsCase(fnName(name), false)
@@ -5769,18 +5797,33 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var cb = libCbArg["$" + lc]
         var pos = argset.pos
         var partial = isPartial(argset)
-        if (cb.at < 0 && (partial || pos.length < 2)) { return }
-        var at = cb.at < 0 ? pos.length - 1 : cb.at
-        if (pos.length <= at) { return }
+        var n = cb.at == -2 ? 2 : 1
+        if (cb.at < 0 && (partial || pos.length < n + 1)) { return }
+        var at = cb.at < 0 ? pos.length - n : cb.at
+        var nm = argset.named
+        var byName = pos.length <= at && cb.at >= 0 && nm != null && hasOwn(nm, "$callback")
+        if (pos.length <= at && !byName) { return }
         for (var h = 0; h < argset.holes.length; h++) { if (argset.holes[h].ix === at) { return } }
         var a0 = anytype
-        a0 = pos[0]
+        a0 = pos.length > 0 ? pos[0] : (nm != null && hasOwn(nm, "$array") ? nm["$array"] : undefined)
+        // A missing array is the library's own ArgumentCountError, raised first.
+        if (cb.arr > 0 && a0 === undefined) { return }
         if (cb.arr > 0 && !partial && !isArr(a0) && !(cb.arr == 2 && isObj(a0))) {
             phpRaise("TypeError", lc + "(): Argument #1 ($array) must be of type array, " + phpValueName(a0) + " given")
         }
-        if (pos[at] === null && cb.nul) { return }
-        phpCheckCallback(pos[at], libCbWhere(lc, cb, at), true, false)
-        pos[at] = cbResolve(pos[at], false)
+        if (byName) {
+            var cv = anytype
+            cv = nm["$callback"]
+            if (cv === null && cb.nul) { return }
+            phpCheckCallback(cv, libCbWhere(lc, cb, at), true, false)
+            scopePut(nm, "$callback", cbResolve(cv, false))
+            return
+        }
+        for (var k = at; k < at + n; k++) {
+            if (pos[k] === null && cb.nul) { continue }
+            phpCheckCallback(pos[k], libCbWhere(lc, cb, k), true, false)
+            pos[k] = cbResolve(pos[k], false)
+        }
     }
     // A method callable whose method some class restricts, which the CALLER's class
     // scope may call, as a closure that calls it: the library function that calls
@@ -5875,7 +5918,17 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var libCb = hasOwn(libCbArg, "$" + phsCase(name, false))
         return function() {
             var argset = evalArgs(args)
-            if (resolveCb && argset.pos.length > 0) { argset.pos[0] = callerCallable(argset.pos[0], name) }
+            if (resolveCb && argset.pos.length > 0) {
+                argset.pos[0] = callerCallable(argset.pos[0], name)
+                // call_user_func of a library function that takes a callback: that
+                // callback is judged here too, the first user frame. Twin of cufLib
+                // in php-to-llvm-ir.abnf.
+                if (name == "call_user_func" && typeof argset.pos[0] == "string") {
+                    var inner = {pos: argset.pos.slice(1), named: argset.named, holes: [], fcc: false}
+                    libArgs(argset.pos[0], inner)
+                    for (var ii = 0; ii < inner.pos.length; ii++) { argset.pos[ii + 1] = inner.pos[ii] }
+                }
+            }
             if (libCb) { libArgs(name, argset) }
             // f(1, ?) / f(1, ...) is a PARTIAL: bind what is there, wait for the rest.
             if (isPartial(argset)) {
@@ -5887,6 +5940,13 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 if (hasOwn(phpBuiltins, name)) {
                     var bf = phpBuiltins[name]
                     return function(a2) { return bf.apply(undefined, a2.pos) }
+                }
+                // A library function's callback is judged in the frame that calls
+                // the closure, as libArgs does for a call by name.
+                if (libCb) {
+                    var lf = getVar(name)
+                    var lname = name
+                    return function(a2) { libArgs(lname, a2); return lf(a2) }
                 }
                 return getVar(name)
             }
@@ -6008,7 +6068,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var early = topClasses
         topClasses = []
         hoisted = {}
-        for (var di = 0; di < defs.length; di++) { scopePut(globalScope, defs[di].name, makeFunClosure(defs[di])) }
+        for (var di = 0; di < defs.length; di++) { declFn(defs[di]) }
         for (var ci = 0; ci < early.length; ci++) { early[ci]() }
         // A user exception (throw) that escapes the whole program is reported like any
         // other runtime error. The wrap sits here, not around c.compile, because the
@@ -6081,7 +6141,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // a function body is registered in the global table when control reaches it.
     // Twin of makeDefStmt in php-to-llvm-ir.abnf.
     function makeDefStmt(fn) {
-        return function() { scopePut(globalScope, fn.name, makeFunClosure(fn)); return null }
+        return function() { declFn(fn); return null }
     }
     // A function declared at a file's top level is bound before any of the file's
     // statements run (PHP's early binding), so a call may stand above it. The

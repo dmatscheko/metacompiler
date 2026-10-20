@@ -3798,7 +3798,10 @@ function js_phmerge(dst, src) { return phMergeArgs(dst, src, "", 0) }
 // The spread of a variable into a call's arguments, for a callee whose signature
 // text and by-reference mask are known. Twin of phpMergeArgs in abnf/jsrtphp.go,
 // which states the rule.
-function js_phmergeref(dst, src, sig, mask) { return phMergeArgs(dst, src, sig, mask) }
+function js_phmergeref(dst, src, sig, mask) {
+    phUnpackCheck(src)
+    return phMergeArgs(dst, src, sig, mask)
+}
 // The same for a callee known only at run time. Twin of m["js_phmergefn"] in
 // abnf/jsrtphp.go.
 function js_phmergefn(dst, src, f, name) {
@@ -3808,7 +3811,25 @@ function js_phmergefn(dst, src, f, name) {
     else if (typeof fn == "object" && fn !== null) { fn = phMethodOf(fn, "__invoke") }
     var mask = 0
     if (typeof fn == "function") { mask = fnMeta(fn, "length") }
+    phUnpackCheck(src)
     return phMergeArgs(dst, src, phSigOf(fn), mask)
+}
+// A spread into a call takes no integer key after a string key
+// (ZEND_SEND_UNPACK). Only a dict has string keys. Twin of phpUnpackCheck in
+// abnf/jsrtphp.go.
+function phUnpackCheck(src) {
+    if (!phIsDict(src)) { return undefined }
+    var ks = src["keys"]
+    var named = false
+    var i = 0
+    while (i < ks.length) {
+        var k = anytype
+        k = ks[i]
+        if (typeof k != "number") { named = true }
+        else if (named) { phRaise("Error", "Cannot use positional argument after named argument during unpacking") }
+        i = i + 1
+    }
+    return undefined
 }
 function phMergeArgs(dst, src, sig, mask) {
     var p = phArrParts(src)

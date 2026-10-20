@@ -553,17 +553,23 @@ function __mec_setop($array, $others, $mode, $want, $vcmp, $kcmp) {
     }
     return $out;
 }
-// The trailing callback of the u* variants, split off the array list. zpp's "+f"
-// judges it before any array, and its position has no parameter name.
-function __mec_takecb($fname, $array, &$arrays) {
-    if (count($arrays) == 0) { throw new ArgumentCountError($fname . "() expects at least 2 arguments, 1 given"); }
-    $cb = array_pop($arrays);
-    __mec_callable($cb, $fname . '(): Argument #' . (count($arrays) + 2) . ' must be a valid callback');
+// The $n trailing callbacks of the u* variants, split off the array list, in
+// argument order. zpp's "+f" / "+ff" judges them before any array, and their
+// positions have no parameter name.
+function __mec_takecb($fname, $array, &$arrays, $n) {
+    if (count($arrays) < $n) {
+        throw new ArgumentCountError($fname . "() expects at least " . ($n + 1) . " arguments, " . (count($arrays) + 1) . " given");
+    }
+    $cbs = array_slice($arrays, count($arrays) - $n);
+    $arrays = array_slice($arrays, 0, count($arrays) - $n);
+    foreach ($cbs as $i => $cb) {
+        __mec_callable($cb, $fname . '(): Argument #' . (count($arrays) + 2 + $i) . ' must be a valid callback');
+    }
     __mec_arrarg($array, $fname, false);
     foreach ($arrays as $i => $a) {
         if (!is_array($a)) { throw new TypeError($fname . "(): Argument #" . ($i + 2) . " must be of type array, " . __mec_vname($a) . " given"); }
     }
-    return $cb;
+    return $cbs;
 }
 function array_diff($array, ...$arrays) { return __mec_setop($array, $arrays, 0, false, null, null); }
 function array_diff_key($array, ...$arrays) { return __mec_setop($array, $arrays, 1, false, null, null); }
@@ -571,14 +577,16 @@ function array_diff_assoc($array, ...$arrays) { return __mec_setop($array, $arra
 function array_intersect($array, ...$arrays) { return __mec_setop($array, $arrays, 0, true, null, null); }
 function array_intersect_key($array, ...$arrays) { return __mec_setop($array, $arrays, 1, true, null, null); }
 function array_intersect_assoc($array, ...$arrays) { return __mec_setop($array, $arrays, 2, true, null, null); }
-function array_udiff($array, ...$rest) { $cb = __mec_takecb('array_udiff', $array, $rest); return __mec_setop($array, $rest, 0, false, $cb, null); }
-function array_uintersect($array, ...$rest) { $cb = __mec_takecb('array_uintersect', $array, $rest); return __mec_setop($array, $rest, 0, true, $cb, null); }
-function array_diff_ukey($array, ...$rest) { $cb = __mec_takecb('array_diff_ukey', $array, $rest); return __mec_setop($array, $rest, 1, false, null, $cb); }
-function array_intersect_ukey($array, ...$rest) { $cb = __mec_takecb('array_intersect_ukey', $array, $rest); return __mec_setop($array, $rest, 1, true, null, $cb); }
-function array_udiff_assoc($array, ...$rest) { $cb = __mec_takecb('array_udiff_assoc', $array, $rest); return __mec_setop($array, $rest, 2, false, $cb, null); }
-function array_uintersect_assoc($array, ...$rest) { $cb = __mec_takecb('array_uintersect_assoc', $array, $rest); return __mec_setop($array, $rest, 2, true, $cb, null); }
-function array_diff_uassoc($array, ...$rest) { $cb = __mec_takecb('array_diff_uassoc', $array, $rest); return __mec_setop($array, $rest, 2, false, null, $cb); }
-function array_intersect_uassoc($array, ...$rest) { $cb = __mec_takecb('array_intersect_uassoc', $array, $rest); return __mec_setop($array, $rest, 2, true, null, $cb); }
+function array_udiff($array, ...$rest) { [$cb] = __mec_takecb('array_udiff', $array, $rest, 1); return __mec_setop($array, $rest, 0, false, $cb, null); }
+function array_uintersect($array, ...$rest) { [$cb] = __mec_takecb('array_uintersect', $array, $rest, 1); return __mec_setop($array, $rest, 0, true, $cb, null); }
+function array_diff_ukey($array, ...$rest) { [$cb] = __mec_takecb('array_diff_ukey', $array, $rest, 1); return __mec_setop($array, $rest, 1, false, null, $cb); }
+function array_intersect_ukey($array, ...$rest) { [$cb] = __mec_takecb('array_intersect_ukey', $array, $rest, 1); return __mec_setop($array, $rest, 1, true, null, $cb); }
+function array_udiff_assoc($array, ...$rest) { [$cb] = __mec_takecb('array_udiff_assoc', $array, $rest, 1); return __mec_setop($array, $rest, 2, false, $cb, null); }
+function array_uintersect_assoc($array, ...$rest) { [$cb] = __mec_takecb('array_uintersect_assoc', $array, $rest, 1); return __mec_setop($array, $rest, 2, true, $cb, null); }
+function array_diff_uassoc($array, ...$rest) { [$cb] = __mec_takecb('array_diff_uassoc', $array, $rest, 1); return __mec_setop($array, $rest, 2, false, null, $cb); }
+function array_intersect_uassoc($array, ...$rest) { [$cb] = __mec_takecb('array_intersect_uassoc', $array, $rest, 1); return __mec_setop($array, $rest, 2, true, null, $cb); }
+function array_udiff_uassoc($array, ...$rest) { [$cb, $kcb] = __mec_takecb('array_udiff_uassoc', $array, $rest, 2); return __mec_setop($array, $rest, 2, false, $cb, $kcb); }
+function array_uintersect_uassoc($array, ...$rest) { [$cb, $kcb] = __mec_takecb('array_uintersect_uassoc', $array, $rest, 2); return __mec_setop($array, $rest, 2, true, $cb, $kcb); }
 
 // ----- callbacks -------------------------------------------------------------
 // A string key of call_user_func_array's list is a named argument, as in a spread.
@@ -589,6 +597,12 @@ function call_user_func($callback, ...$args) { return $callback(...$args); }
 function call_user_func_array($callback, $args) { return $callback(...($args)); }
 function array_map($callback, $array, ...$arrays) {
     if ($callback !== null) { __mec_callable($callback, 'array_map(): Argument #1 ($callback) must be a valid callback or null'); }
+    if (!is_array($array)) {
+        throw new TypeError('array_map(): Argument #2 ($array) must be of type array, ' . __mec_vname($array) . ' given');
+    }
+    foreach ($arrays as $i => $a) {
+        if (!is_array($a)) { throw new TypeError('array_map(): Argument #' . ($i + 3) . ' must be of type array, ' . __mec_vname($a) . ' given'); }
+    }
     $out = [];
     if (count($arrays) == 0) {
         if ($callback === null) { return $array; }

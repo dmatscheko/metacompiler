@@ -3717,6 +3717,78 @@ function s72() {
         && $arr === ['a' => 'xa'] && $sp === ['y0', 'k' => 'zk']);
 }
 
+// ===== SECTION 73: function names in any case, array_map's arrays, unpacking order, callbacks judged by the caller =====
+// A function name given at run time is looked up lower-cased with one leading
+// "\" dropped, and a miss names it as given (Zend/zend_execute.c
+// zend_init_dynamic_call_string). array_map's arrays are TypeErrors, only #2
+// having a parameter name (ext/standard/array.c; Zend get_function_arg_name).
+// A spread's integer key after one of its string keys is an Error
+// (Zend/tests/named_params/unpack.phpt). A library function judges its callback
+// at the first user frame, also when it is reached through call_user_func, as a
+// first-class callable, or with the callback passed by name; the "+ff" pair of
+// array_udiff_uassoc / array_uintersect_uassoc is judged in argument order
+// before any array.
+function S73Cmp($a, $b) { return $a <=> $b; }
+function s73f($x, $k = 0) { return "$x/$k"; }
+class S73A {
+    private function cmp($a, $b) { return $b <=> $a; }
+    private function kcmp($a, $b) { return strcmp($a, $b); }
+    private function neg($x) { return -$x; }
+    function t() {
+        $a = [3, 1, 2];
+        $out = [];
+        $c = $a; usort($c, callback: [$this, 'cmp']); $out[] = implode(',', $c);
+        $out[] = implode(',', array_map(array: [1, 2], callback: [$this, 'neg']));
+        $out[] = implode(',', call_user_func('array_map', [$this, 'neg'], $a));
+        $u = usort(...); $c = $a; $u($c, [$this, 'cmp']); $out[] = implode(',', $c);
+        $f = 'USORT'; $c = $a; $f($c, [$this, 'cmp']); $out[] = implode(',', $c);
+        $x = ['a' => 1, 'b' => 2, 'c' => 3];
+        $y = ['a' => 1, 'b' => 5];
+        $out[] = json_encode(array_udiff_uassoc($x, $y, [$this, 'cmp'], [$this, 'kcmp']));
+        $out[] = json_encode(array_uintersect_uassoc($x, $y, [$this, 'cmp'], [$this, 'kcmp']));
+        return implode(' ', $out);
+    }
+    function errs() {
+        $out = [];
+        foreach ([function () { array_udiff_uassoc([1], [$this, 'cmp']); },
+                  function () { array_udiff_uassoc([1], [1], [$this, 'nope'], [$this, 'nope2']); },
+                  function () { array_uintersect_uassoc([1], 5, [$this, 'cmp'], [$this, 'nope2']); },
+                  function () { array_uintersect_uassoc([1], 5, [$this, 'cmp'], [$this, 'kcmp']); }] as $cl) {
+            try { $cl(); $out[] = "none"; } catch (TypeError | ArgumentCountError $e) { $out[] = $e->getMessage(); }
+        }
+        return $out;
+    }
+}
+function s73err($f) {
+    try { $f(); return "none"; } catch (Error $e) { return get_class($e) . ": " . $e->getMessage(); }
+}
+function s73() {
+    $a = [3, 1, 2];
+    $f = 'USORT'; $f($a, 'S73CMP');
+    $g = 'StrToUpper';
+    $h = '\UKSORT'; $b = ['y' => 1, 'x' => 3]; $h($b, '\s73cmp');
+    $k = '\S73CMP';
+    check("fnc1", implode(',', $a) === "1,2,3" && $g("abc") === "ABC" && implode(',', array_keys($b)) === "x,y"
+        && $k(1, 2) === -1 && implode(',', array_map('STRTOUPPER', ['q'])) === "Q");
+    check("fnc2", s73err(function () { $f = '\S73None'; $f(); }) === "Error: Call to undefined function \\S73None()"
+        && s73err(function () { $f = 'S73None'; $f(); }) === "Error: Call to undefined function S73None()");
+    check("amt1", s73err(function () { array_map('strlen', 5); }) === "TypeError: array_map(): Argument #2 (\$array) must be of type array, int given"
+        && s73err(function () { array_map(null, true); }) === "TypeError: array_map(): Argument #2 (\$array) must be of type array, true given"
+        && s73err(function () { array_map('strlen', ['a'], 'x'); }) === "TypeError: array_map(): Argument #3 must be of type array, string given");
+    $sp = ['k' => 5, 6];
+    check("upk1", s73err(function () use ($sp) { s73f(1, ...$sp); }) === "Error: Cannot use positional argument after named argument during unpacking"
+        && s73err(function () { $f = 's73f'; $f(...['k' => 1, 2]); }) === "Error: Cannot use positional argument after named argument during unpacking"
+        && s73f(...[1, 'k' => 2]) === "1/2");
+    check("ccb1", (new S73A)->t() === '3,2,1 -1,-2 -3,-1,-2 3,2,1 3,2,1 {"b":2,"c":3} {"a":1}'
+        && s73err(function () { $u = usort(...); $c = [1, 2]; $u($c, [new S73A, 'cmp']); })
+        === "TypeError: usort(): Argument #2 (\$callback) must be a valid callback, cannot access private method S73A::cmp()");
+    check("ccb2", (new S73A)->errs() === [
+        'array_udiff_uassoc() expects at least 3 arguments, 2 given',
+        'array_udiff_uassoc(): Argument #3 must be a valid callback, class S73A does not have a method "nope"',
+        'array_uintersect_uassoc(): Argument #4 must be a valid callback, class S73A does not have a method "nope2"',
+        'array_uintersect_uassoc(): Argument #2 must be of type array, int given']);
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -3798,6 +3870,7 @@ function main() {
     s70(); // SECTION-CALL 70
     s71(); // SECTION-CALL 71
     s72(); // SECTION-CALL 72
+    s73(); // SECTION-CALL 73
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

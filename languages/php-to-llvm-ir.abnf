@@ -5946,7 +5946,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 } else if (a.acv != null && refs != null && refs.fV != undefined) {
                     curWrites[a.acv] = true
                     callExt(b, "js_phmergefn", [tmp, rs.v, refs.fV, refs.nameV == undefined ? hUndef : refs.nameV])
-                } else { callExt(b, "js_phmerge", [tmp, rs.v]) }
+                } else { callExt(b, "js_phmergeref", [tmp, rs.v, emitStr(b, ""), emitNum(b, 0)]) }
                 spread = true
                 pk = -1
             } else if (a.aname != undefined) {
@@ -6206,18 +6206,21 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (callableF == undefined) { callableF = emitCallableFn() }
         return {b: b, v: b.NewCall(callableF, [curScopeV, v, cb ? hTrue : hFalse, emitNum(b, internal ? 2 : 0)])}
     }
-    // A function named at run time may be fully qualified: on a miss, one leading
-    // "\" is dropped and the name looked up again (zend_is_callable_check_func).
-    // onHit(block, function) handles a hit; answers the block a second miss
-    // continues in. Twin of fnName in php-interpreter.abnf.
+    // PHP function names are case-insensitive: a function is also declared under a
+    // hidden lower-cased key (makeDefStmt). On an exact miss, a name given at run
+    // time is looked up again lower-cased with one leading "\" dropped
+    // (zend_init_dynamic_call_string). onHit(block, function) handles a hit;
+    // answers the block a second miss continues in. Twin of fnDefined in
+    // php-interpreter.abnf.
     function fnRetry(f, b, env, v, onHit) {
-        var bsB = f.NewBlock("")
-        var missB = f.NewBlock("")
         var firstV = callExt(b, "js_phsubstr", [v, emitNum(b, 0), emitNum(b, 1)])
-        b.NewCondBr(truthy(b, callExt(b, "js_seq", [firstV, emitStr(b, "\\")])), bsB, missB)
-        var again = bsB.NewCall(fnProbeFn(), [env, callExt(bsB, "js_phsubstr", [v, emitNum(bsB, 1), hNull]), hNull])
+        var bsV = callExt(b, "js_seq", [firstV, emitStr(b, "\\")])
+        var bareV = b.NewSelect(truthy(b, bsV), callExt(b, "js_phsubstr", [v, emitNum(b, 1), hNull]), v)
+        var keyV = callExt(b, "js_phcat", [emitStr(b, "\x00f"), callExt(b, "js_phcase", [bareV, hFalse])])
+        var again = b.NewCall(fnProbeFn(), [env, keyV, hNull])
+        var missB = f.NewBlock("")
         var hitB = f.NewBlock("")
-        bsB.NewCondBr(bsB.NewICmp(llvm.enum.IPredEQ, again, hNull), missB, hitB)
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, again, hNull), missB, hitB)
         onHit(hitB, again)
         return missB
     }
@@ -6683,9 +6686,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // relative callable ('parent::m', ['self', 'm']) in the class scope of the
     // caller, which the library function's own frame does not have. Twin of
     // callerCallable in php-interpreter.abnf.
-    function callerCallable(a, name) {
+    function callerCallable(a, name, raw) {
         return {pos: function(b) {
             var r = a.pos(b)
+            if (raw != null) { raw.v = r.v }
             var where = emitStr(r.b, name + "(): Argument #1 ($callback) must be a valid callback")
             return callableV(r.b, cbCheckV(r.b, r.v, where, true, false), true, false)
         }}
@@ -6715,9 +6719,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         }
     }
     // The callback argument of the library functions that take one: its position
-    // (-1: the last argument, which has no parameter name), whether null is
-    // accepted, and what the array $array before it takes (1: an array, 2: an
-    // array or an object; 0: no such parameter).
+    // (-1: the last argument, -2: each of the last two, which have no parameter
+    // name), whether null is accepted, and what the array $array before it takes
+    // (1: an array, 2: an array or an object; 0: no such parameter).
     var libCbList = [{n: "array_map", at: 0, nul: true, arr: 0},
                      {n: "array_filter", at: 1, nul: true, arr: 1},
                      {n: "array_reduce", at: 1, nul: false, arr: 1},
@@ -6733,7 +6737,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                      {n: "array_udiff_assoc", at: -1, nul: false, arr: 0},
                      {n: "array_uintersect_assoc", at: -1, nul: false, arr: 0},
                      {n: "array_diff_uassoc", at: -1, nul: false, arr: 0},
-                     {n: "array_intersect_uassoc", at: -1, nul: false, arr: 0}]
+                     {n: "array_intersect_uassoc", at: -1, nul: false, arr: 0},
+                     {n: "array_udiff_uassoc", at: -2, nul: false, arr: 0},
+                     {n: "array_uintersect_uassoc", at: -2, nul: false, arr: 0}]
     var libCbArg = {}
     for (var lci = 0; lci < libCbList.length; lci++) { libCbArg["$" + libCbList[lci].n] = libCbList[lci] }
     // The TypeError's wording for the callback at position at.
@@ -6754,6 +6760,32 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var r = a.pos(b)
             return callableV(r.b, cbCheckV(r.b, r.v, emitStr(r.b, where), true, false), true, false)
         }}
+    }
+    // call_user_func(f, ...): when f names a library function that takes a
+    // callback, its n arguments - the PHP array call_user_func's '...$args'
+    // gathers, at position 1 of argsV - are checked in place as a call of f
+    // through its name in this frame would be (emitLibDyn).
+    function cufLib(b, fV, argsV, n) {
+        var restV = callExt(b, "js_get", [argsV, emitNum(b, 1)])
+        var subV = callExt(b, "js_arr_new", [])
+        for (var i = 0; i < n; i++) { callExt(b, "js_arr_push", [subV, callExt(b, "js_phget", [restV, emitNum(b, i)])]) }
+        b = emitLibDyn(b, fV, subV, n)
+        for (var j = 0; j < n; j++) { callExt(b, "js_phset", [restV, emitNum(b, j), callExt(b, "js_get", [subV, emitNum(b, j)])]) }
+        return b
+    }
+    // A callback at a fixed position passed by name: it is judged on the argument
+    // list once that is placed, as a positional one is, when the array $array
+    // before it is there too (else the library's ArgumentCountError comes first).
+    function libNamedCb(args, cb) {
+        var named = false
+        var arr = cb.arr == 0 || (args.length > 0 && args[0].pos != undefined && args[0].aname == undefined)
+        for (var i = 0; i < args.length; i++) {
+            var a = args[i]
+            if (a == undefined || a.pos == undefined) { return false }
+            if (a.aname == "callback") { named = true }
+            if (a.aname == "array") { arr = true }
+        }
+        return named && arr
     }
     function libChecks(b, argsV, name, cb, at) {
         if (cb.arr > 0) {
@@ -6782,6 +6814,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // class scope (libDynSite): php_libcb_<n>(env, f, args) checks the n
     // arguments of a call of f in place when f names one of these functions.
     var libDynFs = {}
+    // The library functions with a callback the program takes as a first-class
+    // callable, which emitLibDyn then recognises by identity.
+    var libFccSeen = {}
     function libDynSite() {
         if (cloScopes.length == 0) { return false }
         var top = cloScopes[cloScopes.length - 1]
@@ -6802,17 +6837,36 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var strB = f.NewBlock("str")
             var doneB = f.NewBlock("done")
             doneB.NewRet(hNull)
-            eb.NewCondBr(truthy(eb, callExt(eb, "js_phis", [emitStr(eb, "string"), nm])), strB, doneB)
+            var fccB = f.NewBlock("fcc")
+            eb.NewCondBr(truthy(eb, callExt(eb, "js_phis", [emitStr(eb, "string"), nm])), strB, fccB)
+            // A library function taken as a first-class callable (usort(...)) is that
+            // function's own closure.
+            var fcur = fccB
+            for (var fi = 0; fi < libCbList.length; fi++) {
+                var fcb = libCbList[fi]
+                var fN = fcb.at == -2 ? 2 : 1
+                if (libFccSeen["$" + fcb.n] !== true || fcb.at >= n || (fcb.at < 0 && n <= fN)) { continue }
+                var fhitB = f.NewBlock("")
+                var fnextB = f.NewBlock("")
+                var libV = callExt(fcur, "js_scope_get", [curScopeV, emitStr(fcur, fcb.n)])
+                fcur.NewCondBr(fcur.NewICmp(llvm.enum.IPredEQ, nm, libV), fhitB, fnextB)
+                if (fN == 2) { fhitB = libChecks(fhitB, f.Params[2], fcb.n, fcb, n - 2) }
+                libChecks(fhitB, f.Params[2], fcb.n, fcb, fcb.at < 0 ? n - 1 : fcb.at).NewBr(doneB)
+                fcur = fnextB
+            }
+            fcur.NewBr(doneB)
             var bsV = callExt(strB, "js_seq", [callExt(strB, "js_phord", [nm]), emitNum(strB, 92)])
             var bareV = strB.NewSelect(truthy(strB, bsV), callExt(strB, "js_phsubstr", [nm, emitNum(strB, 1), hNull]), nm)
             var lcV = callExt(strB, "js_phcase", [bareV, hFalse])
             var cur = strB
             for (var i = 0; i < libCbList.length; i++) {
                 var cb = libCbList[i]
-                if (cb.at >= n || (cb.at < 0 && n < 2)) { continue }
+                var cbN = cb.at == -2 ? 2 : 1
+                if (cb.at >= n || (cb.at < 0 && n <= cbN)) { continue }
                 var hitB = f.NewBlock("")
                 var nextB = f.NewBlock("")
                 cur.NewCondBr(truthy(cur, callExt(cur, "js_seq", [lcV, emitStr(cur, cb.n)])), hitB, nextB)
+                if (cbN == 2) { hitB = libChecks(hitB, f.Params[2], cb.n, cb, n - 2) }
                 libChecks(hitB, f.Params[2], cb.n, cb, cb.at < 0 ? n - 1 : cb.at).NewBr(doneB)
                 cur = nextB
             }
@@ -6826,10 +6880,14 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     function makeCall(items) {
         var args = items.slice(1)
         var name = phpLibRef(items[0], !hasFcc(args) && !hasPlace(args))
+        // call_user_func of a library function that takes a callback: that callback
+        // is judged here too, the first user frame (cufLib).
+        var cufRaw = null
         if ((name == "call_user_func" || name == "call_user_func_array") && args.length > 0
             && args[0].pos != undefined && args[0].aname == undefined) {
             nsUsed = true
-            args[0] = callerCallable(args[0], name)
+            if (name == "call_user_func" && args.length > 1 && argsArePlain(args) && libDynSite()) { cufRaw = {v: hUndef} }
+            args[0] = callerCallable(args[0], name, cufRaw)
         }
         if (name == "is_callable" && args.length > 0 && args[0].pos != undefined && args[0].aname == undefined) {
             nsUsed = true
@@ -6838,14 +6896,22 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var lcName = phsCase(name, false)
         var libCb = libCbArg["$" + lcName] == undefined ? null : libCbArg["$" + lcName]
         var libFixed = false
-        if (libCb != null && libCb.at < 0 && args.length >= 2 && argsArePlain(args)) {
+        var libN = libCb != null && libCb.at == -2 ? 2 : 1
+        if (libCb != null && libCb.at < 0 && args.length > libN && argsArePlain(args)) {
             nsUsed = true
-            args[args.length - 1] = libCallable(args[args.length - 1], libCbWhere(lcName, libCb, args.length - 1))
-        } else if (libCb != null && libCb.at >= 0 && args.length > libCb.at && argsArePlain(args.slice(0, libCb.at + 1))) {
+            for (var lk = args.length - libN; lk < args.length; lk++) {
+                args[lk] = libCallable(args[lk], libCbWhere(lcName, libCb, lk))
+            }
+        } else if (libCb != null && libCb.at >= 0
+                   && ((args.length > libCb.at && argsArePlain(args.slice(0, libCb.at + 1))) || libNamedCb(args, libCb))) {
             nsUsed = true
             libFixed = true
         }
         if (name == "__mec_callable") { nsUsed = true }
+        if (libCb != null && hasFcc(args)) {
+            nsUsed = true
+            libFccSeen["$" + lcName] = true
+        }
         return function(b) {
             // strlen(...): PHP 8.1's first-class callable syntax. The value of the
             // expression IS the function, so there is nothing to call here.
@@ -6861,6 +6927,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var ea = emitPhArgs(b, args, sigOf(name))
             b = ea.b
             if (libFixed) { b = libChecks(b, ea.v, lcName, libCb, libCb.at) }
+            if (cufRaw != null) { b = cufLib(b, cufRaw.v, ea.v, args.length - 1) }
             return {b: b, v: callExt(b, "js_call", [fV, hUndef, ea.v])}
         }
     }
@@ -7209,7 +7276,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         return function(b) {
             var idx = emitFunc(fn.params, fn.body, false)
             var gV = globalsFrameV(b)
-            callExt(b, "js_scope_decl", [gV, emitStr(b, fn.name), withSig(b, closureV(b, idx, gV), fn)])
+            var fV = withSig(b, closureV(b, idx, gV), fn)
+            callExt(b, "js_scope_decl", [gV, emitStr(b, fn.name), fV])
+            callExt(b, "js_scope_decl", [gV, emitStr(b, "\x00f" + phsCase(fn.name, false)), fV])
             return b
         }
     }

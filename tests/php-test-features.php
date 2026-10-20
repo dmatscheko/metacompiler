@@ -739,6 +739,13 @@ enum EnSelf: string implements EnSelfI {
 }
 check("enum-case-self", [EnSelf::C->value, EnSelf::D->value], ["b", "a"]);
 
+// A library function named only by a fully qualified string in another letter
+// case is still compiled in, and found (zend_init_dynamic_call_string).
+$fqk = ['y' => 1, 'x' => 3];
+$fqf = '\UKSORT';
+$fqf($fqk, 'strcmp');
+check("fn-dyn-qualified-lib", array_keys($fqk), ["x", "y"]);
+
 // ----- done -----
 echo "features: " . $checks . " checks, " . $fails . " failures\n";
 exit($fails);

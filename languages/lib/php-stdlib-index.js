@@ -68,8 +68,12 @@ function phpLibExtends(l) {
     return "#" + l.substring(at + 9, j).toLowerCase()
 }
 
-// The key of library function `name`, or "".
-function phpLibKey(ix, name) { return ix.fns["$" + name] !== undefined ? "$" + name : "" }
+// The key of library function `name`, or "": a function name matches in any
+// letter case, with one leading "\" of a fully qualified name dropped.
+function phpLibKey(ix, name) {
+    var k = "$" + phsCase(name.charCodeAt(0) == 92 ? name.substring(1) : name, false)
+    return ix.fns[k] !== undefined ? k : ""
+}
 
 // The keys of the library classes text spells as a whole word, in any case.
 function phpLibClassesIn(ix, text) {

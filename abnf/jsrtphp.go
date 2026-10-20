@@ -599,6 +599,24 @@ func (rt *jsrt) phpMergeArgs(dst, src interface{}, sig string, mask int) {
 	}
 }
 
+// phpUnpackCheck raises PHP's Error for a spread into a call that has an integer
+// key after a string key (ZEND_SEND_UNPACK). Twin of phUnpackCheck in
+// languages/lib/php-rt.metajs and of evalArgs's spread arm in php-interpreter.abnf.
+func (rt *jsrt) phpUnpackCheck(src interface{}) {
+	keys, _, ok := dictParts(src)
+	if !ok {
+		return
+	}
+	named := false
+	for _, k := range keys.elems {
+		if _, isNum := k.(float64); !isNum {
+			named = true
+		} else if named {
+			rt.phpRaise("Error", "Cannot use positional argument after named argument during unpacking")
+		}
+	}
+}
+
 // ----- numeric strings and arithmetic coercion -------------------------------
 
 func phpIsSpace(c byte) bool {
@@ -4106,6 +4124,7 @@ func init() {
 		}
 		// The spread of a variable, for a callee of known signature text and mask.
 		m["js_phmergeref"] = func(a []uint64) uint64 {
+			rt.phpUnpackCheck(u(a[1]))
 			rt.phpMergeArgs(u(a[0]), u(a[1]), rt.phpStr(u(a[2])), int(rt.toNumber(u(a[3]))))
 			return 0
 		}
@@ -4118,6 +4137,7 @@ func init() {
 			} else if _, isObj := f.(*jsObject); isObj {
 				f = rt.phpMethodOf(f, "__invoke")
 			}
+			rt.phpUnpackCheck(u(a[1]))
 			rt.phpMergeArgs(u(a[0]), u(a[1]), rt.phpSigOf(f), jsvFnMeta(f).length)
 			return 0
 		}
