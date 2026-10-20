@@ -2291,13 +2291,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 var s = suffixes[i]
                 if (s.kind == "mcall") {
                     var ea = emitArgs2(b, s.args, s.spread)
-                    b = ea.b
-                    var dp = goDtPlan(s.rc, s.name)
-                    if (dp != null) {
-                        var dc = emitDtCall(b, cur, s, dp, ea.v)
-                        b = dc.b
-                        cur = dc.v
-                    } else { cur = callExt(b, "js_gomcall", [cur, emitStr(b, s.name), ea.v]) }
+                    var nilc = goNilRecvOf(s.rc, s.name)
+                    var mc = nilc == "" ? emitMcall(ea.b, cur, s, ea.v) : emitNilRecvCall(ea.b, cur, s, ea.v, nilc)
+                    b = mc.b
+                    cur = mc.v
                 } else if (s.kind == "field") {
                     var fp = goDtPlan(s.rc, s.name)
                     var fme = goDtMethExpr(s.rc, s.name)
@@ -2335,6 +2332,27 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             }
             return {b: b, v: cur}
         }
+    }
+    // recv.M(args), args already evaluated.
+    function emitMcall(b, cur, s, argsV) {
+        var dp = goDtPlan(s.rc, s.name)
+        if (dp != null) { return emitDtCall(b, cur, s, dp, argsV) }
+        return {b: b, v: callExt(b, "js_gomcall", [cur, emitStr(b, s.name), argsV])}
+    }
+    // ... where a nil receiver calls struct nilc's method M with the nil
+    // (go-constfold.js, goNilRecvOf). Twin of goNilRecvCall in go-interpreter.abnf.
+    function emitNilRecvCall(b, cur, s, argsV, nilc) {
+        var nm = s.name
+        var scV = curScopeV
+        return emitSelect(b, callExt(b, "js_not", [cur]),
+            function(nb) {
+                var d = nilc.indexOf(".")
+                var clsV = d > 0 ? callExt(nb, "js_gofield", [callExt(nb, "js_scope_get", [scV, emitStr(nb, nilc.substring(0, d))]), emitStr(nb, nilc.substring(d + 1))])
+                                 : callExt(nb, "js_scope_get", [scV, emitStr(nb, nilc)])
+                var fV = callExt(nb, "js_get", [clsV, emitStr(nb, nm)])
+                return {b: nb, v: callExt(nb, "js_godtcall", [hNull, emitStr(nb, nm), argsV, fV, hFalse])}
+            },
+            function(eb) { return emitMcall(eb, cur, s, argsV) })
     }
     // atys: the arguments' static types, when the call site reported them.
     function makeCall(items, atys) {

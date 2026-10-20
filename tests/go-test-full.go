@@ -4559,6 +4559,57 @@ outer:
 		"[a m z] [0 1 2][1 2][3 4][5]1y0x2")
 }
 
+// ===== SECTION 85: a pointer method called on a nil receiver =====
+// Go calls it like any other; only a dereference inside would panic. The
+// expected values are go run's.
+type Node85 struct {
+	V    int
+	Next *Node85
+}
+
+func (n *Node85) Len() int {
+	if n == nil {
+		return 0
+	}
+	return 1 + n.Next.Len()
+}
+
+type Tree85 struct {
+	L, R *Tree85
+	V    int
+}
+
+func (t *Tree85) Insert(v int) *Tree85 {
+	if t == nil {
+		return &Tree85{V: v}
+	}
+	if v < t.V {
+		t.L = t.L.Insert(v)
+	} else {
+		t.R = t.R.Insert(v)
+	}
+	return t
+}
+
+func (t *Tree85) InOrder(out []int) []int {
+	if nil != t {
+		out = t.L.InOrder(out)
+		out = append(out, t.V)
+		out = t.R.InOrder(out)
+	}
+	return out
+}
+
+func s85() {
+	var e *Node85
+	l := &Node85{1, &Node85{2, nil}}
+	var t *Tree85
+	for _, v := range []int{5, 3, 8, 1, 4} {
+		t = t.Insert(v)
+	}
+	check("nrc1", fmt.Sprint(e.Len(), l.Len(), t.InOrder(nil)) == "0 2 [1 3 4 5 8]")
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -4644,6 +4695,7 @@ func main() {
 	s82() // SECTION-CALL 82
 	s83() // SECTION-CALL 83
 	s84() // SECTION-CALL 84
+	s85() // SECTION-CALL 85
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

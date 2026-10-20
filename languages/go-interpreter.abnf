@@ -2055,8 +2055,17 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         goWalkPkg = s.pkg == null ? "" : s.pkg
         s.dt = goDtPlan(s.rc, s.name)
         if (s.kind == "field") { s.me = goDtMethExpr(s.rc, s.name) }
+        if (s.kind == "mcall") { s.nilc = goNilRecvOf(s.rc, s.name) }
         s.dtk = true
         goWalkPkg = sw
+    }
+    // A pointer method called on a nil receiver (go-constfold.js, goNilRecvOf): the
+    // method of struct s.nilc, "pkg.T" when another package declares it. Twin of
+    // emitNilRecvCall in go-to-llvm-ir.abnf.
+    function goNilRecvCall(s, args) {
+        var d = s.nilc.indexOf(".")
+        var cls = d > 0 ? goField(getVar(s.nilc.substring(0, d)), s.nilc.substring(d + 1)) : getVar(s.nilc)
+        return cls[s.name].apply(undefined, concat2impl([null], args))
     }
     // Go's suffix chain: the shared core knows .m(), .field and [i]; the plain call
     // and the slice expression are added here.
@@ -2071,7 +2080,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 var s = suffixes[i]
                 if (s.kind == "mcall") {
                     if (!s.dtk) { goSfxPlan(s) }
-                    cur = s.dt === null ? mcall(cur, s.name, callArgs(s)) : goDtCall(cur, s, callArgs(s))
+                    if (s.nilc != "" && (cur === undefined || cur === null)) { cur = goNilRecvCall(s, callArgs(s)) }
+                    else { cur = s.dt === null ? mcall(cur, s.name, callArgs(s)) : goDtCall(cur, s, callArgs(s)) }
                 }
                 else if (s.kind == "field") {
                     // A NIL POINTER DEREFERENCE IS A RECOVERABLE RUNTIME PANIC, not an
@@ -5953,7 +5963,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var saved = scopes
         scopes = (env == null) ? [globalScope, {}] : env.slice(0)
         if (env != null) { scopes.push({}) }
-        if (self != undefined) { declVar(recvName, self) }
+        if (recvName != "") { declVar(recvName, self) }   // a nil pointer receiver too
         var np = params.length
         for (var i = 0; i < np; i++) {
             // A parameter is a slot with a DECLARED type, so it adopts it exactly as a

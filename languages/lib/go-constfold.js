@@ -1850,6 +1850,46 @@ function goNoteMeth1(rt, name, byPtr, rtys) {
 var goFnRty = {}      // "$f" -> top-level function f's single result type ("" otherwise)
 var goFnPTys = {}     // "$f" -> top-level function f's parameter types (goPreParams)
 var goMethPTys = {}   // "$T.M" -> method M of T's parameter types (goPreParams)
+// ----- A POINTER METHOD CALLED ON A NIL RECEIVER -----
+// Go calls a pointer method on a nil pointer like any other (`func (t *Tree) Sum()
+// int { if t == nil { return 0 } ...}`); only a dereference inside panics. A nil
+// value has no descriptor to find the method on, so where the receiver's static
+// type is *S and S's method M compares its receiver with nil, the call site plans
+// the method by name (goNilRecvOf) and calls it with the nil. A method that does
+// not test its receiver would panic on its first use of it, as the call site's own
+// nil dereference does, so only these sites pay for the test.
+var goNilRecv = {}    // "$S.M" -> true: M has a pointer receiver it compares with nil
+function goNilTests(body, v) {
+    return goWordCmp(body, v, "nil") || goWordCmp(body, "nil", v)
+}
+// Does text compare word a with word b (`a == b` or `a != b`, any spacing)?
+function goWordCmp(text, a, b) {
+    var at = text.indexOf(a)
+    while (at >= 0) {
+        var pre = at > 0 ? text.charCodeAt(at - 1) : 32
+        var i = at + a.length
+        if (!cIsIdCh(pre) && pre != 46 && !(i < text.length && cIsIdCh(text.charCodeAt(i)))) {
+            i = stSkipWs(text, i)
+            var op = text.substring(i, i + 2)
+            if (op == "==" || op == "!=") {
+                i = stSkipWs(text, i + 2)
+                var e = i + b.length
+                if (text.substring(i, e) == b && !(e < text.length && cIsIdCh(text.charCodeAt(e)))) { return true }
+            }
+        }
+        at = text.indexOf(a, at + 1)
+    }
+    return false
+}
+// The struct type, as seen at the call site, whose method name a call on rc's
+// receiver plans for a nil receiver, or "".
+function goNilRecvOf(rc, name) {
+    if (rc == null) { return "" }
+    var t = stChainFrom(rc.head, rc.hty, rc.loc, rc.text)
+    if (t.length < 2 || t.charAt(0) != "*") { return "" }
+    var bt = t.substring(1)
+    return goNilRecv["$" + goTyKey(bt) + "." + name] === true ? bt : ""
+}
 // The parameter types of method name on a receiver whose static type rc gives (a
 // declared type's own method or an interface's method spec), or null.
 function goMethPTysOf(rc, name) {
@@ -2338,11 +2378,16 @@ function stNoWs(t) {
 function goPreFunc(text, i) {
     i = stSkipWs(text, i)
     var recv = ""
+    var recvVar = ""
     var ptr = false
     if (text.charAt(i) == "(") {
         var rc = stClose(text, i)
         if (rc < 0) { return }
         var r = text.substring(i + 1, rc)
+        var rv = stTrim(r)
+        var rve = 0
+        while (rve < rv.length && cIsIdCh(rv.charCodeAt(rve))) { rve = rve + 1 }
+        if (rve < rv.length && stSkipWs(rv, rve) > rve) { recvVar = rv.substring(0, rve) }
         var sp = r.length
         while (sp > 0 && r.charAt(sp - 1) != " " && r.charAt(sp - 1) != "\t") { sp = sp - 1 }
         recv = stNoWs(r.substring(sp))
@@ -2406,6 +2451,10 @@ function goPreFunc(text, i) {
     var cb = ob < 0 ? -1 : stClose(text, ob)
     if (cb > 0) { goNoteFnText(recv != "" ? "." + name : name, text.substring(ob, cb + 1)) }
     if (recv != "") { goNoteMeth(recv, name, ptr, rtys) }
+    if (recv != "" && ptr && recvVar != "" && cb > 0 && goNilTests(text.substring(ob, cb + 1), recvVar)) {
+        if (!goPreShadow(recv)) { goNilRecv["$" + recv + "." + name] = true }
+        if (goNotePkg() != "") { goNilRecv["$" + goNotePkg() + "." + recv + "." + name] = true }
+    }
     else {
         if (goFnRty["$" + name] === undefined) { goFnRty["$" + name] = nres == 1 ? rty : "" }
         if (goPrePkg != "") { goFnRty["$" + goPrePkg + "." + name] = nres == 1 ? goPkgQual(goPrePkg, rty) : "" }
