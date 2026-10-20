@@ -155,14 +155,17 @@ DefinedType <~~ push({under: firstType(up.in)}) ~~>
 // tag, and embedded fields (a bare type name, whose field name is the type).
 StructBody  = "struct" KwEnd "{" { FieldDecl } "}" ;
 FieldDecl   = NamedField | EmbedField ;
-NamedField  = Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } SameLine FType [ FieldTag ] [ ";" ] ;
+NamedField  = Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } SameLine FType [ TypeTag ] [ ";" ] ;
 // The field's type TEXT, which gives the field its zero value in a literal that
 // leaves it out (Go zero-fills; an absent property would read back as undefined).
 FType       <~~ push({fty: goWalkQual(firstType(up.in))}) ~~> = Type ;
 // An embedded field's NAME is its type name (w.base09, plus the promoted w.id); an
 // embedded INTERFACE keeps its type, so a literal boxes the value put there.
-EmbedField  = [ "*" ] [ Id "." ] Id <~~ push(up.in); push({fty: goIsIfaceTy(up.in) ? up.in : ""}) ~~> [ FieldTag ] [ ";" ] ;
+EmbedField  = [ "*" ] [ Id "." ] Id <~~ push(up.in); push({fty: goIsIfaceTy(up.in) ? up.in : ""}) ~~> [ TypeTag ] [ ";" ] ;
 FieldTag    = RawString <~~ pop() ~~> ;
+// A named struct type's field tag is kept, for reflect and encoding/json (the
+// descriptor's __ftags); an anonymous struct's is dropped (FieldTag).
+TypeTag     = "`" :whitespace() { "\x00"..."\x5f" | "\x61"..."\U0010ffff" } <~~ push({ftag: up.in}) ~~> "`" :whitespace(Whitespace) ;
 // The method set is parsed when the body is an ordinary method list; any other body
 // falls through to SkipBlock with NO method names ("satisfied by anything"). Twin of
 // IfaceBody in go-interpreter.abnf; see there.
@@ -4580,6 +4583,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // that width, a NAMED STRUCT type to a zero INSTANCE.
     function emitZeroTy(b, t) {
         if (t == undefined || t == null || t.length == 0) { return hNull }
+        goRfNote(t)
         if (curTps.length > 0 && goTpIn(curTps, t)) { return emitTpZero(b, t) }
         var c0 = t.charCodeAt(0)
         if (c0 == 42) { return hNull }  // *T: a nil pointer
@@ -6151,6 +6155,88 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         callExt(b, "js_call", [callExt(b, "js_closure", [handle(zidx), curScopeV]), hUndef, callExt(b, "js_arr_new", [])])
         return b
     }
+    // ----- goRfZero: a type text's zero value at run time -----
+    // lib/go-json.go and lib/go-reflect.go build values of types they read off the
+    // program's values (a struct's field types, a slice's element type). $rfz maps
+    // each type text the program can produce to a function making its zero value:
+    // every struct type, every text emitZeroTy saw, and their element, key, value and
+    // pointee types; goRfZeroFill emits them once the whole program has been. Twin of
+    // goRfZero (goZeroTy) in go-interpreter.abnf.
+    var goRfStructs = []
+    var goRfSeen = {}
+    var goRfTexts = []
+    function goRfNote(t) {
+        if (goRfSeen["$" + t] === true) { return }
+        goRfSeen["$" + t] = true
+        goRfTexts.push(t)
+    }
+    var goRfZeroF = null
+    function declRfZero(b) {
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$rfz"), callExt(b, "js_obj_new", [])])
+        b = declFn(b, "goRfZero", 1, function(fb, a) {
+            var zf = callExt(fb, "js_get", [callExt(fb, "js_scope_get", [curScopeV, emitStr(fb, "$rfz")]), a[0]])
+            return emitSelect(fb, zf, function(tb) { return {b: tb, v: callExt(tb, "js_call", [zf, hUndef, callExt(tb, "js_arr_new", [])])} },
+                              function(eb) { return {b: eb, v: hNull} })
+        })
+        funcCount++
+        var zidx = funcCount
+        goRfZeroF = m.NewFunc("jsf_" + zidx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        callExt(b, "js_call", [callExt(b, "js_closure", [handle(zidx), curScopeV]), hUndef, callExt(b, "js_arr_new", [])])
+        return b
+    }
+    // The type texts $rfz answers: t, and what t is made of.
+    function goRfClose(t, out, seen) {
+        if (t == "" || seen["$" + t] === true || t.indexOf("func") == 0 || t.indexOf("chan") == 0) { return }
+        seen["$" + t] = true
+        out.push(t)
+        if (t.charAt(0) == "*") { goRfClose(t.substring(1), out, seen); return }
+        if (t.charAt(0) == "[") { goRfClose(t.substring(t.indexOf("]") + 1), out, seen); return }
+        if (t.indexOf("map[") == 0) {
+            goRfClose(mapValTy(t), out, seen)
+            goRfClose(t.substring(4, t.length - mapValTy(t).length - 1), out, seen)
+            return
+        }
+        var fts = structFTypes[t]
+        if (fts !== undefined) {
+            for (var i = 0; i < fts.length; i++) { goRfClose(fts[i], out, seen) }
+        }
+    }
+    function goRfZeroFill() {
+        var savedF = curF
+        var savedScope = curScopeV
+        var cands = []
+        var cseen = {}
+        var basics = ["bool", "string", "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32",
+                      "uint64", "uintptr", "float32", "float64", "byte", "rune"]
+        var k = 0
+        while (k < basics.length) { goRfClose(basics[k], cands, cseen); k = k + 1 }
+        k = 0
+        while (k < goRfStructs.length) { goRfClose(goRfStructs[k], cands, cseen); k = k + 1 }
+        k = 0
+        while (k < goRfTexts.length) { goRfClose(goRfTexts[k], cands, cseen); k = k + 1 }
+        curF = goRfZeroF
+        var zb = goRfZeroF.NewBlock("entry")
+        var env = goRfZeroF.Params[0]
+        var zs = callExt(zb, "js_scope_get", [env, emitStr(zb, "$rfz")])
+        k = 0
+        while (k < cands.length) {
+            var ct = cands[k]
+            funcCount++
+            var idx = funcCount
+            var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+            curF = f
+            var fb = f.NewBlock("entry")
+            curScopeV = f.Params[0]
+            fb.NewRet(emitZeroTy(fb, ct))
+            curF = goRfZeroF
+            curScopeV = env
+            callExt(zb, "js_set", [zs, emitStr(zb, ct), callExt(zb, "js_closure", [handle(idx), env])])
+            k = k + 1
+        }
+        zb.NewRet(hUndef)
+        curF = savedF
+        curScopeV = savedScope
+    }
     // goTpZeroF's body: $zeros[c] for every instantiation c (goTpCands), each a
     // function making c's zero value.
     function goTpZeroFill() {
@@ -6183,19 +6269,32 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // group share the {fty} that follows them, which gives every field its zero value.
     // The lists are ALSO emitted onto the descriptor, where js_goeq (struct value
     // equality) and js_gofield (promotion through an embedded field) read them.
+    // A {ftag} after a group's {fty} is the tag of every name in the group; the
+    // tags go on the descriptor (__ftags) when the type has any. Twin of
+    // buildStruct in go-interpreter.abnf.
     function makeStructStmt(items) {
         var name = items[0]
         var fields = []
         var ftypes = []
+        var ftags = []
+        var tagged = false
         var pending = []
+        var group = 0
         for (var i = 1; i < items.length; i++) {
             if (typeof items[i] == "string") { pending.push(items[i]); continue }
-            for (var k = 0; k < pending.length; k++) { fields.push(pending[k]); ftypes.push(items[i].fty) }
+            if (items[i].ftag !== undefined) {
+                for (var g = group; g < fields.length; g++) { ftags[g] = items[i].ftag }
+                tagged = true
+                continue
+            }
+            group = fields.length
+            for (var k = 0; k < pending.length; k++) { fields.push(pending[k]); ftypes.push(items[i].fty); ftags.push("") }
             pending = []
         }
-        for (var p = 0; p < pending.length; p++) { fields.push(pending[p]); ftypes.push("") }
+        for (var p = 0; p < pending.length; p++) { fields.push(pending[p]); ftypes.push(""); ftags.push("") }
         structFields[sKey(curPkgName, name)] = fields
         structFTypes[sKey(curPkgName, name)] = ftypes
+        goRfStructs.push(sKey(curPkgName, name))
         var pkg = curPkgName == null ? "main" : curPkgName
         return function(b) {
             var clsV = callExt(b, "js_obj_new", [])
@@ -6205,6 +6304,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             callExt(b, "js_set", [clsV, emitStr(b, "__pkg"), emitStr(b, pkg)])
             emitNameList(b, clsV, "__fields", fields)
             emitNameList(b, clsV, "__ftypes", ftypes)
+            if (tagged) { emitNameList(b, clsV, "__ftags", ftags) }
             emitFCopy(b, clsV, ftypes)
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
             return b
@@ -6543,6 +6643,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             b = declBuiltin(b, "goRxNames", "js_gorxnames", null)
             b = declBuiltin(b, "goRxExec", "js_gorxexec", null)
         }
+        // The run-time type primitives lib/go-json.go and lib/go-reflect.go are
+        // written over, declared when the program imports either. Twins of the
+        // goRf* host globals in go-interpreter.abnf.
+        if (importedFiles["$" + goLibFile("encoding/json")] == true || importedFiles["$" + goLibFile("reflect")] == true) {
+            var rfs = ["Kind", "Unbox", "IsNil", "Elems", "IsBytes", "MapKV", "Fields", "Deref", "ElemTy", "MapTy",
+                       "MakeSlice", "MakeMap", "MapSet", "SetField", "Store", "Conv"]
+            for (var rfi = 0; rfi < rfs.length; rfi++) { b = declBuiltin(b, "goRf" + rfs[rfi], "js_gorf" + rfs[rfi].toLowerCase(), null) }
+            b = declRfZero(b)
+        }
         // len/cap/copy/append/clear come from declSlices (they have to reach through a
         // slice header); delete(m, k) is still a one-liner.
         funcCount++
@@ -6601,6 +6710,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         b = buildPackages(b)
         b = makeSeq(items)(b)
         if (goTpZeroF != null) { goTpZeroFill() }
+        if (goRfZeroF != null) { goRfZeroFill() }
         goEszFill()
         // The entry defaults to main(); -main (c.mainName) can name another function or,
         // with a '(', a Go snippet parsed and emitted into jsmain (see emitMainSnippet).
@@ -6715,7 +6825,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
 
     // Go stdlib packages the runtime provides (resolveImport lives in lib/compile-core.js;
     // exact-match paths, so sub-packages like "encoding/json" are listed in full).
-    core.stdlibImports = ["fmt", "os", "errors", "encoding/json", "reflect"]
+    core.stdlibImports = ["fmt", "os", "errors"]
     function fail(msg) { println("go compiler error: " + msg); exit(1) }
 
     // Project-file imports: import "mathbox" -> mathbox.go (a slash path like "a/b" ->

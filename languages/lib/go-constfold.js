@@ -1814,6 +1814,9 @@ function stChainFrom(head, hty, loc, text) {
                 ty = goFieldTyHook(sn, nm)
                 var fk = "$" + goTyKey(sn) + "." + nm
                 if (ty == "" && goPreFld[fk] !== undefined) { ty = goPreFld[fk] }
+                // A field of a package's struct is typed in that package's names.
+                var sq = sn.indexOf(".")
+                if (ty != "" && sq > 0) { ty = goPkgQual(sn.substring(0, sq), ty, false) }
             }
             i = j
         } else if (ch == "[") {
@@ -3330,6 +3333,8 @@ function goRecvC(start, at) {
 function goDtPlan(rc, name) {
     var rs = goMethRecv["$" + name]
     if (rs === undefined) { return null }
+    // pkg.F(x) calls the package's function F, whatever types declare a method F.
+    if (rc != null && rc.text == rc.head && !rc.loc && rc.hty == "" && goPkgNames["$" + rc.head] === true) { return null }
     var cands = []
     var i = 0
     while (i < rs.length) { if (goIsDefTy(rs[i]) && goDtForeign["$" + rs[i]] !== true) { cands.push(rs[i]) } i = i + 1 }
@@ -3374,6 +3379,8 @@ function goLibFile(path) {
     if (path == "unicode/utf8") { return "lib/go-utf8.go" }
     if (path == "sync/atomic") { return "lib/go-atomic.go" }
     if (path == "regexp") { return "lib/go-regexp.go" }
+    if (path == "encoding/json") { return "lib/go-json.go" }
+    if (path == "reflect") { return "lib/go-reflect.go" }
     return ""
 }
 // The method EXPRESSION T.M of a defined type T (`f := Color.String`): the method's

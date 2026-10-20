@@ -2997,6 +2997,176 @@ function js_gorxerror(args) { return goRxError(args[0]) }
 function js_gorxnames(args) { return goRxNames(args[0]) }
 function js_gorxexec(args) { return goRxExec(args[0], args[1], goNum(args[2])) }
 
+// ===================================================== run-time types =======
+
+// The goRf* builtins lib/go-json.go and lib/go-reflect.go are written over, over
+// this value model: a value is read through its defined type's box, a struct
+// descriptor carries field names, declared types and tags (__ftags), a pointer
+// cell names the scope that holds the variable. goRfZero is emitted into the
+// module (declRfZero in go-to-llvm-ir.abnf). Twins of js_gorf* in
+// abnf/jsrtgoreflect.go and of the goRf* host globals in go-interpreter.abnf.
+function goRfUnbox(v) {
+    if (goIsDt(v)) { return v.__dv }
+    return v
+}
+function goRfCell(v) {
+    var cls = goClassOf(v)
+    return cls !== undefined && goStrOf(cls.__name) == "$ptr"
+}
+function goRfKind(v) {
+    var x = anytype
+    x = goRfUnbox(v)
+    if (x === undefined || x === null) { return "nil" }
+    if (goIsFn(x)) { return "func" }
+    if (goRfCell(x)) { return "ptr" }
+    if (goIsChan(x)) { return "chan" }
+    var ty = gopFmtTy(x)
+    if (ty != "") { return ty }
+    var k = gfHKind(x)
+    if (k == "list") {
+        if (Array.isArray(x)) { return "array" }
+        return "slice"
+    }
+    if (k == "map" || k == "struct") { return k }
+    return "other"
+}
+function js_gorfkind(args) { return goRfKind(args[0]) }
+function js_gorfunbox(args) { return goRfUnbox(args[0]) }
+function js_gorfisnil(args) {
+    var x = anytype
+    x = goRfUnbox(args[0])
+    if (x === undefined || x === null) { return true }
+    var k = gfHKind(x)
+    return (k == "map" || k == "list") && !Array.isArray(x) && x.__nil === true
+}
+function js_gorfelems(args) { return gfHElems(goRfUnbox(args[0])) }
+function js_gorfisbytes(args) { return gfHIsBytes(goRfUnbox(args[0])) }
+function js_gorfmapkv(args) { return gfHMapKV(goRfUnbox(args[0])) }
+function js_gorffields(args) {
+    var x = anytype
+    x = goRfUnbox(args[0])
+    var cls = goClassOf(x)
+    var fs = cls.__fields
+    var tgs = anytype
+    tgs = []
+    if (goHas(cls, "__ftags") && Array.isArray(cls.__ftags)) { tgs = cls.__ftags }
+    var names = []
+    var types = []
+    var tags = []
+    var vals = []
+    var i = 0
+    while (i < fs.length) {
+        var fn = goStrOf(fs[i])
+        var ty = goFieldTyAt(cls, i)
+        names.push(fn)
+        types.push(ty)
+        tags.push(i < tgs.length ? goStrOf(tgs[i]) : "")
+        var fv = anytype
+        fv = undefined
+        if (goHas(x, fn)) { fv = x[fn] }
+        vals.push(goSlotBox(fv, ty))
+        i = i + 1
+    }
+    return [names, types, tags, vals]
+}
+function js_gorfderef(args) {
+    var p = anytype
+    p = args[0]
+    if (goRfCell(p)) {
+        var key = goStrOf(p.k)
+        var sc = goCellScope(p.o, key)
+        if (sc === undefined) { return undefined }
+        return scopeGet(sc, key)
+    }
+    return goRfUnbox(p)
+}
+function js_gorfelemty(args) {
+    var x = anytype
+    x = goRfUnbox(args[0])
+    if (gfHKind(x) != "list") { return "" }
+    return gfHElemTy(x)
+}
+function js_gorfmapty(args) {
+    var x = anytype
+    x = goRfUnbox(args[0])
+    if (!goIsDict(x)) { return "" }
+    return gfHMapTy(x)
+}
+// goRfMakeSlice(t, elems): a slice of type text t ("[]E") over the elements of the
+// Go slice elems, each adopted to E, with elems' own slice class; an array
+// ("[N]E") is the plain array.
+function js_gorfmakeslice(args) {
+    var t = goStrOf(args[0])
+    var src = anytype
+    src = args[1]
+    var et = t.substring(t.indexOf("]") + 1)
+    var es = gfHElems(src)
+    var arr = []
+    var i = 0
+    while (i < es.length) {
+        arr.push(goAdoptText(et, goRfUnbox(es[i])))
+        i = i + 1
+    }
+    if (t.charAt(1) != "]") { return arr }
+    var h = {}
+    h.__class = src.__class
+    h.a = arr
+    h.o = 0
+    h.n = arr.length
+    h.c = arr.length
+    h.et = et
+    return h
+}
+function js_gorfmakemap(args) {
+    var mo = js_dict_new()
+    mo.zero = args[1]
+    mo.mty = goStrOf(args[0])
+    return mo
+}
+// A store makes a nil map non-nil: a pointer to a map is the map itself.
+function js_gorfmapset(args) {
+    var mo = anytype
+    mo = args[0]
+    var mts = goMapTys(mo)
+    mo.__nil = false
+    js_gisetat(mo, goAdoptText(mts[0], goRfUnbox(args[1])), goAdoptText(mts[1], goRfUnbox(args[2])))
+    return undefined
+}
+function js_gorfsetfield(args) {
+    var x = anytype
+    x = goRfUnbox(args[0])
+    js_gosetfield(x, goClassOf(x).__fields[goNum(args[1])], goRfUnbox(args[2]))
+    return undefined
+}
+function js_gorfstore(args) {
+    var p = anytype
+    p = args[0]
+    var v = anytype
+    v = goRfUnbox(args[1])
+    if (goRfCell(p)) {
+        var key = goStrOf(p.k)
+        var sc = goCellScope(p.o, key)
+        if (sc !== undefined) { scopeDecl(sc, key, v) }
+        return undefined
+    }
+    var x = anytype
+    x = goRfUnbox(p)
+    var fs = goClassOf(x).__fields
+    var i = 0
+    while (i < fs.length) {
+        x[goStrOf(fs[i])] = v[goStrOf(fs[i])]
+        i = i + 1
+    }
+    return undefined
+}
+function js_gorfconv(args) {
+    var t = goStrOf(args[0])
+    var x = anytype
+    x = goRfUnbox(args[1])
+    if (t == "bool" || t == "string") { return x }
+    return js_goconv(t, x)
+}
+
 // js_gostdin(room, eof): os.Stdin's Read - standard input a line at a time
 // (readIn), as [the next bytes of it that fit in room, nil], or ["", eof] at its
 // end. Twin of js_gostdin in abnf/jsrtgolang.go, goStdinRead in

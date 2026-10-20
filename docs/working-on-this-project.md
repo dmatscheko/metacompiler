@@ -1040,7 +1040,7 @@ those read variable and call NAMES off the module.
 ```
 runtime.metajs            <- csharp go dart java php kotlin ruby python swift metajs-rt lua
                              (lua for the hook-free exact decimal only)
-regex.js                  <- js python ruby kotlin java dart
+regex.js                  <- js python ruby kotlin java dart go
 int64.js                  <- interp-core.js, bash interpreter (the exact {h, l} 64-bit
                              pair; bash's arithmetic is intmax_t)
 lua-rt.metajs             <- imports lua-strlib.js and runtime.metajs ONLY
@@ -1056,6 +1056,9 @@ js-num.js                 <- js-rt.metajs, js and typescript interpreters
                              jsStrToNum / jsParseFloatJS in abnf/jsrtjsbig.go)
 go-fmt.js                 <- go-rt.metajs, go interpreter (fmt.Sprintf; Go twin:
                              gopFormat in abnf/jsrtgolang.go)
+go-regexp.js              <- go-rt.metajs, go interpreter (the primitives
+                             lib/go-regexp.go is written over, on regex.js's R
+                             dialect; Go twin: abnf/jsrtgoregexp.go)
 fdlibm.js                 <- java-rt.metajs, java interpreter, kotlin-rt.metajs,
                              kotlin interpreter (Go twin: abnf/jsrtfdlibm.go)
 kotlin-math.js            <- kotlin-rt.metajs, kotlin interpreter (kotlin.math
@@ -1075,7 +1078,8 @@ python-printable.js       <- python-rt.metajs, python interpreter (Unicode
                              XID_Start/XID_Continue for str.isidentifier(); Go
                              twin: abnf/pyprintable.go)
 java-chars.js             <- java-rt.metajs, java interpreter, csharp-rt.metajs,
-                             csharp interpreter (Go twin: abnf/jsrtjavachars.go)
+                             csharp interpreter, go-rt.metajs, go interpreter
+                             (Go twin: abnf/jsrtjavachars.go)
 java-strings.js           <- java-rt.metajs, java interpreter (String's methods
                              and String.format; Go twin: abnf/jsrtjavastr.go)
 csharp-strings.js         <- csharp-rt.metajs, csharp interpreter (System.String
@@ -1128,7 +1132,9 @@ adopts - type arguments, declared and inferred names, class properties - read at
 walk time, and which `==` has an integer literal operand and so compares across
 the integer types),
 `go-strings.go` (both go grammars: the strings package WRITTEN IN GO, compiled with
-a program that imports "strings"; goLibFile in `go-constfold.js` names it),
+a program that imports "strings"; goLibFile in `go-constfold.js` names it, and the
+other go-*.go packages likewise; `go-regexp.go`, `go-json.go` and `go-reflect.go`
+are written over host primitives every engine binds, goRx* and goRf*),
 `csharp-overload.js` (both csharp grammars: the better function member among
 applicable overloads), `csharp-default.js` (both csharp grammars: the target type
 of the bare `default` literal), `swift-dotwant.js` (both swift grammars: the expected

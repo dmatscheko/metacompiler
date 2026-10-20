@@ -141,12 +141,15 @@ DefinedType <~~ push({under: firstType(up.in)}) ~~>
 // string tag, and embedded fields (a bare type name, whose field name is the type).
 StructBody  = "struct" KwEnd "{" { FieldDecl } "}" ;
 FieldDecl   = NamedField | EmbedField ;
-NamedField  = Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } SameLine FType [ FieldTag ] [ ";" ] ;
+NamedField  = Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } SameLine FType [ TypeTag ] [ ";" ] ;
 FType       <~~ push({fty: goWalkQual(firstType(up.in))}) ~~> = Type ;
 // An embedded field's NAME is its type name (w.base09 as well as the promoted w.id);
 // an embedded INTERFACE keeps its type, so a literal boxes the value put there.
-EmbedField  = [ "*" ] [ Id "." ] Id <~~ push(up.in); push({fty: goIsIfaceTy(up.in) ? up.in : ""}) ~~> [ FieldTag ] [ ";" ] ;
+EmbedField  = [ "*" ] [ Id "." ] Id <~~ push(up.in); push({fty: goIsIfaceTy(up.in) ? up.in : ""}) ~~> [ TypeTag ] [ ";" ] ;
 FieldTag    = RawString <~~ pop() ~~> ;
+// A named struct type's field tag is kept, for reflect and encoding/json (the
+// descriptor's __ftags); an anonymous struct's is dropped (FieldTag).
+TypeTag     = "`" :whitespace() { "\x00"..."\x5f" | "\x61"..."\U0010ffff" } <~~ push({ftag: up.in}) ~~> "`" :whitespace(Whitespace) ;
 // The method set is parsed when the body is an ordinary method list. The SkipBlock
 // alternative behind it accepts every other interface body - a constraint interface
 // (~int | ~string), an embedded interface name, a commented body - with NO method
@@ -1867,6 +1870,105 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
         goRxOff = off
     }
+    // ----- run-time types: the goRf* builtins lib/go-json.go and lib/go-reflect.go
+    // are written over. A value is read through its defined type's box (goRfUnbox);
+    // a struct descriptor carries field names, declared types and tags (__ftags).
+    // Twins: js_gorf* in abnf/jsrtgoreflect.go and lib/go-rt.metajs, goRfZero in
+    // go-to-llvm-ir.abnf.
+    function goRfUnbox(v) { return isDtBox(v) ? v.__dv : v }
+    // The kind of v's dynamic type: a predeclared type's name for a scalar (an
+    // int64 or uint64 reads int or uint, see gFmtTy), else nil, ptr, func, chan,
+    // slice, array, map, struct or other.
+    function goRfKind(v) {
+        var x = anytype
+        x = goRfUnbox(v)
+        if (x === undefined || x === null) { return "nil" }
+        if (isPtr(x)) { return "ptr" }
+        if (typeof x == "function") { return "func" }
+        if (isChan(x)) { return "chan" }
+        var ty = gFmtTy(x)
+        if (ty != "") { return ty }
+        if (isSl(x)) { return "slice" }
+        if (Array.isArray(x)) { return "array" }
+        if (isMap(x)) { return "map" }
+        if (gfHKind(x) == "struct") { return "struct" }
+        return "other"
+    }
+    function goRfIsNil(v) {
+        var x = anytype
+        x = goRfUnbox(v)
+        if (x === undefined || x === null) { return true }
+        return (isSl(x) || isMap(x)) && x.__nil == true
+    }
+    function goRfFields(v) {
+        var x = anytype
+        x = goRfUnbox(v)
+        var cls = x.__class
+        var fs = cls.__fields
+        var fts = gfHFTypes(x)
+        var tgs = Array.isArray(cls.__ftags) ? cls.__ftags : []
+        var types = []
+        var tags = []
+        var vals = []
+        for (var i = 0; i < fs.length; i++) {
+            types.push(i < fts.length ? fts[i] : "")
+            tags.push(i < tgs.length ? tgs[i] : "")
+            vals.push(i < fts.length ? goSlotBox(x[fs[i]], fts[i]) : x[fs[i]])
+        }
+        return [fs, types, tags, vals]
+    }
+    function goRfDeref(p) {
+        if (isPtr(p)) { return ptrGet(p) }
+        return goRfUnbox(p)
+    }
+    // A type text's zero value, a slice or array built over elements (each
+    // adopted to the element type), a map, a store into a map, a field or the
+    // variable a pointer names, and a conversion.
+    function goRfMakeSlice(t, elems) {
+        var close = t.indexOf("]")
+        var et = t.substring(close + 1)
+        var src = isSl(elems) ? slElems(elems) : elems
+        var a = []
+        for (var i = 0; i < src.length; i++) { a.push(gAdoptTy(et, goRfUnbox(src[i]))) }
+        if (close == 1) { return slT(slOf(a), et) }
+        return a
+    }
+    // A store makes a nil map non-nil: a pointer to a map is the map itself.
+    function goRfMapSet(m, k, v) {
+        var mts = goMapTys(m)
+        m.__nil = false
+        mapSet(m, gAdoptTy(mts[0], goRfUnbox(k)), gAdoptTy(mts[1], goRfUnbox(v)))
+    }
+    function goRfStore(p, v) {
+        if (isPtr(p)) { ptrSet(p, goRfUnbox(v)); return }
+        var x = anytype
+        x = goRfUnbox(p)
+        var fs = x.__class.__fields
+        for (var i = 0; i < fs.length; i++) { x[fs[i]] = v[fs[i]] }
+    }
+    function goRfConv(t, v) {
+        var x = anytype
+        x = goRfUnbox(v)
+        if (t == "bool" || t == "string") { return x }
+        return goConvert(t, x)
+    }
+    hostGlobals["goRfKind"] = function(v) { return goRfKind(v) }
+    hostGlobals["goRfUnbox"] = function(v) { return goRfUnbox(v) }
+    hostGlobals["goRfIsNil"] = function(v) { return goRfIsNil(v) }
+    hostGlobals["goRfElems"] = function(v) { return gfHElems(goRfUnbox(v)) }
+    hostGlobals["goRfIsBytes"] = function(v) { return gfHIsBytes(goRfUnbox(v)) }
+    hostGlobals["goRfMapKV"] = function(v) { return gfHMapKV(goRfUnbox(v)) }
+    hostGlobals["goRfFields"] = function(v) { return goRfFields(v) }
+    hostGlobals["goRfDeref"] = function(p) { return goRfDeref(p) }
+    hostGlobals["goRfElemTy"] = function(v) { return gfHElemTy(goRfUnbox(v)) }
+    hostGlobals["goRfMapTy"] = function(v) { return gfHMapTy(goRfUnbox(v)) }
+    hostGlobals["goRfZero"] = function(t) { return goZeroTy(t) }
+    hostGlobals["goRfMakeSlice"] = function(t, elems) { return goRfMakeSlice(t, elems) }
+    hostGlobals["goRfMakeMap"] = function(t, zero) { return newMap(zero, t) }
+    hostGlobals["goRfMapSet"] = function(m, k, v) { goRfMapSet(m, k, v) }
+    hostGlobals["goRfSetField"] = function(s, i, v) { var x = anytype; x = goRfUnbox(s); goSetAt(x, x.__class.__fields[szNum(i)], goRfUnbox(v)) }
+    hostGlobals["goRfStore"] = function(p, v) { goRfStore(p, v) }
+    hostGlobals["goRfConv"] = function(t, v) { return goRfConv(t, v) }
     hostGlobals["goRxError"] = function(expr) { return goRxError(expr) }
     hostGlobals["goRxNames"] = function(expr) { return goRxNames(expr) }
     hostGlobals["goRxExec"] = function(expr, s, pos) { return goRxExec(expr, s, szNum(pos)) }
@@ -4546,8 +4648,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
         fail("cannot take the address of an unknown name: " + name)
     }
-    // &name. A value that is ALREADY a reference (a struct, a slice, a map) is its own
-    // pointer, so only a scalar - and a pointer variable, for &p - gets a cell.
+    // &name. A value that is ALREADY a reference (a struct, a map) is its own
+    // pointer, so a scalar - a sized integer's, a float's or a complex number's box
+    // included - and a pointer variable, for &p, get a cell.
     function makeAddrVar(name) {
         var dty = hasOwn(goDeclTys, "$" + name) ? goDeclTys["$" + name] : ""
         return function() {
@@ -4557,7 +4660,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             // and `h[0] = 5` would be lost. It gets a real cell, like a scalar. So
             // does a slice: its HEADER is a value, and `*p = append(*p, 1)` must
             // reach the variable.
-            if (v != undefined && v != null && typeof v == "object" && !isPtr(v) && !Array.isArray(v) && !isSl(v)) { return v }
+            if (v != undefined && v != null && typeof v == "object" && !isPtr(v) && !Array.isArray(v) && !isSl(v)
+                && !szIs(v) && !isFlo(v) && !isCx(v) && !isDtBox(v)) { return v }
             var cell = varCell(name)
             if (dty != "") { cell.ty = dty }
             return cell
@@ -5925,20 +6029,28 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     // items = [name, fieldName..., {fty}, fieldName..., {fty}, ...]: the names of one
     // group share the {fty} that follows them, which gives every field its zero value.
+    // A {ftag} after a group's {fty} is the tag of every name in the group.
     function buildStruct(items) {
         var fields = []
         var ftypes = []
+        var ftags = []
         var pending = []
+        var group = 0
         for (var i = 1; i < items.length; i++) {
             if (typeof items[i] == "string") { pending.push(items[i]); continue }
-            for (var k = 0; k < pending.length; k++) { fields.push(pending[k]); ftypes.push(items[i].fty) }
+            if (items[i].ftag !== undefined) {
+                for (var g = group; g < fields.length; g++) { ftags[g] = items[i].ftag }
+                continue
+            }
+            group = fields.length
+            for (var k = 0; k < pending.length; k++) { fields.push(pending[k]); ftypes.push(items[i].fty); ftags.push("") }
             pending = []
         }
         // An embedded field leaves its name without a following type.
-        for (var p = 0; p < pending.length; p++) { fields.push(pending[p]); ftypes.push("") }
+        for (var p = 0; p < pending.length; p++) { fields.push(pending[p]); ftypes.push(""); ftags.push("") }
         // __pkg qualifies the name where fmt and a panic spell the type (main.T).
         var cls = {__isclass: true, __name: items[0], __pkg: curPkgName == null ? "main" : curPkgName,
-                   __fields: fields, __ftypes: ftypes}
+                   __fields: fields, __ftypes: ftypes, __ftags: ftags}
         structs[sKeyI(curPkgName, items[0])] = cls
         globalScope[items[0]] = cls
         notePkgType(items[0])
@@ -6335,7 +6447,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     core.blank = "_"
     // Go stdlib packages the runtime provides (resolveImport lives in lib/interp-core.js;
     // exact-match paths, so sub-packages like "encoding/json" are listed in full).
-    core.stdlibImports = ["fmt", "os", "errors", "encoding/json", "reflect"]
+    core.stdlibImports = ["fmt", "os", "errors"]
     core.nullWord = "nil"
     // `p.In.X = 1` with a nil p.In walks resolveRef's path; in Go it is a recoverable
     // panic. The hook is additive in lib/interp-core.js - every language that leaves

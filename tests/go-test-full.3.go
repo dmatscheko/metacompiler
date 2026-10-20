@@ -46,14 +46,17 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"time"
@@ -261,13 +264,162 @@ func s99() {
 	check("stdin1", k == 0 && err == nil)
 }
 
+// ===== SECTION 100: package encoding/json =====
+// Go source (languages/lib/go-json.go) over the run-time type primitives (goRf*):
+// field names, json tags (a name, omitempty, string, -), maps with sorted keys,
+// []byte as base64, the float format, decoding into structs, maps, slices and
+// interface{}, type errors, and go1.27's syntax errors with their offsets. The
+// expected values are go run's.
+type Addr100 struct {
+	Street string `json:"street"`
+	City   string `json:"city,omitempty"`
+}
+
+type Person100 struct {
+	Name   string         `json:"name"`
+	Age    int            `json:"age"`
+	Email  string         `json:"email,omitempty"`
+	Tags   []string       `json:"tags"`
+	Addr   *Addr100       `json:"addr,omitempty"`
+	Home   Addr100        `json:"home"`
+	Scores map[string]int `json:"scores"`
+	Ratio  float64        `json:"ratio"`
+	secret string
+	Skip   string `json:"-"`
+	Count  int64  `json:",string"`
+	Small  int8
+	Raw    []byte
+}
+
+type Temp100 float64
+
+type Reading100 struct {
+	T    Temp100 `json:"t"`
+	Unit string  `json:"unit"`
+}
+
+func s100str() string {
+	p := Person100{Name: "Ann <&>", Age: 30, Tags: []string{"a", "b"}, Home: Addr100{Street: "Main"},
+		Scores: map[string]int{"z": 1, "a": 2}, Ratio: 0.5, secret: "x", Skip: "s", Count: 42, Small: -3, Raw: []byte("hi!")}
+	b, err := json.Marshal(p)
+	out := fmt.Sprint(string(b), err, "|")
+	b, _ = json.Marshal([]interface{}{nil, 1, "two", 3.5, true, []string(nil), map[int]string{10: "x", 9: "y"}, " \x01\t", 1e21, 1e-7})
+	out += string(b) + "|"
+	b, _ = json.MarshalIndent(Reading100{T: 21.5, Unit: "C"}, "", " ")
+	out += string(b) + "|"
+	var q Person100
+	err = json.Unmarshal([]byte(`{"name":"Bob","AGE":41,"tags":["x","y"],"addr":{"street":"S"},"home":{"street":"H"},"scores":{"q":7},"Count":"17","zz":[1,{}],"Small":5,"Raw":"aGkh"}`), &q)
+	out += fmt.Sprint(err, q.Name, q.Age, q.Tags, q.Addr.Street, q.Home, q.Scores, q.Count, q.Small, string(q.Raw), "|")
+	var anyv interface{}
+	err = json.Unmarshal([]byte(` [1, 2.5, "s", {"b":false,"a":[]}, null] `), &anyv)
+	out += fmt.Sprint(err, anyv, "|")
+	var m map[string][]int
+	err = json.Unmarshal([]byte(`{"a":[1,2],"b":[]}`), &m)
+	var rs []Reading100
+	err2 := json.Unmarshal([]byte(`[{"t":1.5,"unit":"F"},{"t":-2}]`), &rs)
+	out += fmt.Sprint(err, m, err2, rs, "|")
+	var f float64
+	var i8 int8
+	out += fmt.Sprint(json.Unmarshal([]byte(`"s"`), &f), json.Unmarshal([]byte(`300`), &i8), json.Unmarshal([]byte(`{"age":"old"}`), &q), json.Unmarshal([]byte(`2.5`), &f), f, "|")
+	for _, bad := range []string{`{"a":1,}`, `[1 2]`, `tru`, `1.`, `"\x"`, `{1:2}`, `[1]x`, "\"a\x01\"", `[-]`} {
+		var v interface{}
+		err := json.Unmarshal([]byte(bad), &v)
+		se, _ := err.(*json.SyntaxError)
+		out += fmt.Sprint(err, se.Offset, ";")
+	}
+	var sb strings.Builder
+	enc := json.NewEncoder(&sb)
+	enc.Encode(map[string]interface{}{"x": []int{1}})
+	dec := json.NewDecoder(strings.NewReader(`{"street":"a"} {"street":"b"}`))
+	for dec.More() {
+		var a Addr100
+		dec.Decode(&a)
+		sb.WriteString(a.Street)
+	}
+	out += sb.String() + fmt.Sprint(json.Valid([]byte(`{"a":[]}`)), json.Valid([]byte(`{`)))
+	return out
+}
+
+func s100() {
+	check("json1", s100str() == "{\"name\":\"Ann \\u003c\\u0026\\u003e\",\"age\":30,\"tags\":[\"a\",\"b\"],\"home\":{\"street\":\"Main\"},\"scores\":{\"a\":2,\"z\":1},\"ratio\":0.5,\"Count\":\"42\",\"Small\":-3,\"Raw\":\"aGkh\"}<nil>|[null,1,\"two\",3.5,true,null,{\"10\":\"x\",\"9\":\"y\"},\"\\u2028\\u0001\\t\",1e+21,1e-7]|{\n \"t\": 21.5,\n \"unit\": \"C\"\n}|<nil>Bob41 [x y]S{H } map[q:7] 17 5hi!|<nil> [1 2.5 s map[a:[] b:false] <nil>]|<nil> map[a:[1 2] b:[]] <nil> [{1.5 F} {-2 }]|json: cannot unmarshal string into Go value of type float64 json: cannot unmarshal number 300 into Go value of type int8 json: cannot unmarshal string into Go struct field Person100.age of type int <nil> 2.5|invalid character '}' looking for beginning of object key string 8;invalid character '2' after array element 4;unexpected end of JSON input 3;unexpected end of JSON input 0;invalid escape sequence `\\x` in string 3;invalid character '1' looking for beginning of object key string 2;invalid character 'x' after top-level value 4;invalid character '\\x01' in string 3;invalid character ']' in numeric literal 3;{\"x\":[1]}\nabtrue false")
+}
+
+// ===== SECTION 101: package reflect =====
+// Go source (languages/lib/go-reflect.go): TypeOf, a struct's fields, their types
+// and tags, ValueOf and its getters, a Set through a pointer, DeepEqual. The
+// expected values are go run's.
+type In101 struct {
+	X int `json:"x"`
+}
+
+type T101 struct {
+	Name  string         `json:"name" db:"n"`
+	Tags  []string       `json:"tags"`
+	M     map[string]int `json:"m"`
+	In    In101
+	F     float64
+	small int8
+}
+
+func s101str() string {
+	t := T101{Name: "a", Tags: []string{"x"}, M: map[string]int{"k": 1}, In: In101{5}, F: 1.5, small: 2}
+	ty := reflect.TypeOf(t)
+	out := fmt.Sprint(ty, " ", ty.Kind(), " ", ty.Name(), " ", ty.NumField(), "|")
+	for i := 0; i < ty.NumField(); i++ {
+		f := ty.Field(i)
+		out += fmt.Sprint(f.Name, " ", f.Type, " ", f.Type.Kind(), " ", f.Tag.Get("json"), " ", f.Tag.Get("db"), " ", f.IsExported(), ";")
+	}
+	v := reflect.ValueOf(t)
+	out += fmt.Sprint(v.Kind(), v.NumField(), v.Field(0).String(), v.Field(1).Len(), v.Field(1).Index(0), v.Field(4).Float(), v.FieldByName("In").Field(0).Int(), "|")
+	x := 10
+	reflect.ValueOf(&x).Elem().SetInt(42)
+	out += fmt.Sprint(x, reflect.DeepEqual(map[string][]int{"a": {1}}, map[string][]int{"a": {1}}), reflect.DeepEqual([]int{1}, []int{2}),
+		reflect.DeepEqual([]int(nil), []int{}), reflect.TypeOf([]int{}).Elem(), reflect.TypeOf(map[string]bool{}).Key(), reflect.ValueOf(nil).IsValid())
+	return out
+}
+
+func s101() {
+	check("refl1", s101str() == "main.T101 struct T101 6|Name string string name n true;Tags []string slice tags  true;M map[string]int map m  true;In main.In101 struct   true;F float64 float64   true;small int8 int8   false;struct 6a1 x 1.5 5|42 true false false int string false")
+}
+
+// ===== SECTION 102: a pointer to a sized integer, a float or a complex variable =====
+// &x of such a variable is a cell, so a write through it reaches x. The expected
+// values are go run's.
+func set102(p *float64, q *int8, r *uint64) {
+	*p = 2.5
+	*q = 7
+	*r = 9
+}
+
+func s102() {
+	var f float64
+	var i int8
+	var u uint64
+	var c complex128
+	set102(&f, &i, &u)
+	pc := &c
+	*pc = 1 + 2i
+	check("ptr102", fmt.Sprint(f, i, u, c) == "2.5 7 9 (1+2i)")
+}
+
+// ===== SECTION 103: a package function named like another package's method =====
+// math.Abs and math.Round are the package's functions, though time.Duration
+// declares methods Abs and Round. The expected values are go run's.
+func s103() {
+	check("pkgfn103", fmt.Sprint(math.Abs(-2.5), math.Round(2.5), math.Abs(1e21) >= 1e21, time.Duration(-90).Abs()) == "2.5 3 true 90ns")
+}
+
 func main() {
-	s94() // SECTION-CALL 94
-	s95() // SECTION-CALL 95
-	s96() // SECTION-CALL 96
-	s97() // SECTION-CALL 97
-	s98() // SECTION-CALL 98
-	s99() // SECTION-CALL 99
+	s94()  // SECTION-CALL 94
+	s95()  // SECTION-CALL 95
+	s96()  // SECTION-CALL 96
+	s97()  // SECTION-CALL 97
+	s98()  // SECTION-CALL 98
+	s99()  // SECTION-CALL 99
+	s100() // SECTION-CALL 100
+	s101() // SECTION-CALL 101
+	s102() // SECTION-CALL 102
+	s103() // SECTION-CALL 103
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }
