@@ -5714,9 +5714,9 @@ function ktMapMethod(m, name, args) {
         // Map.keys is a SET in Kotlin (java.util.Map.keySet), Map.values a
         // Collection, Map.entries a SET of entries - and Map.toList is a LIST of
         // PAIRS, which is why they do not share one branch.
-        if (name == "keys") { return k3SetOfDistinct(keys) }
+        if (name == "keys") { return ktMapView(k3SetOfDistinct(keys), m, "Key") }
         if (name == "values") { return arrKindSet(k3Copy(vals), 3) }
-        if (name == "entries") { return k3SetOfDistinct(ktElems(m)) }
+        if (name == "entries") { return ktMapView(k3SetOfDistinct(ktElems(m)), m, "Entry") }
         out = []
         for (i = 0; i < keys.length; i = i + 1) {
             out.push({first: keys[i], second: vals[i]})
@@ -9525,21 +9525,69 @@ function k4RangeIsType(rg, tname) {
     return false
 }
 
+// The JVM class a set or map records (ktJvmTagged), else def.
+function ktJvmTag(v, def) {
+    if (typeof v["__jc"] == "string") { return v["__jc"] }
+    return def
+}
+// A map's keys / entries view tagged with its JVM class; twin of ktMapView in
+// abnf/jsrtkotlin.go, which has the rules.
+function ktMapView(set, m, view) {
+    var jc = ktJvmTag(m, "java.util.LinkedHashMap")
+    if (jc == "kotlin.collections.EmptyMap") {
+        jc = "kotlin.collections.EmptySet"
+    } else if (jc == "java.util.Collections$SingletonMap") {
+        jc = "java.util.Collections$SingletonSet"
+    } else if (jc == "java.util.LinkedHashMap") {
+        jc = jc + "$Linked" + view + "Set"
+    } else {
+        jc = jc + "$" + view + "Set"
+    }
+    set["__jc"] = jc
+    return set
+}
+// `is C` for a concrete java.util collection class C, or undefined when t names
+// none. Twin of ktJvmIsA in abnf/jsrtkotlin.go, which has the rules.
+function ktJvmIsA(jc, tname) {
+    var t = tname
+    if (t.indexOf("java.util.") == 0) {
+        t = t.substring(10, t.length)
+    } else if (t.indexOf("kotlin.collections.") == 0) {
+        t = t.substring(19, t.length)
+    }
+    if (t == "SortedSet" || t == "NavigableSet") { t = "TreeSet" }
+    if (t == "SortedMap" || t == "NavigableMap") { t = "TreeMap" }
+    if (t == "HashSet" || t == "HashMap") { return jc == "java.util." + t || jc == "java.util.Linked" + t }
+    if (t == "ArrayList" || t == "LinkedHashSet" || t == "LinkedHashMap" || t == "TreeSet" ||
+        t == "TreeMap" || t == "PriorityQueue") { return jc == "java.util." + t }
+    return undefined
+}
+
 // `c is T` for a builtin collection, or undefined when v is not one; `t` arrives
 // with its type arguments and `?` stripped. Twin of ktCollIsType in
 // abnf/jsrtkotlin.go, which has the rules.
 function ktCollIsType(v, tname) {
     var t = tname
     if (t.indexOf("Mutable") == 0) { t = t.substring(7, t.length) }
-    if (rtIsDictObj(v)) { return t == "Map" }
+    if (rtIsDictObj(v)) {
+        var mc = ktJvmIsA(ktJvmTag(v, "java.util.LinkedHashMap"), t)
+        if (mc !== undefined) { return mc }
+        return t == "Map"
+    }
     var coll = t == "Collection" || t == "Iterable"
     if (ktIsSet(v)) {
+        var sc = ktJvmIsA(ktJvmTag(v, "java.util.LinkedHashSet"), t)
+        if (sc !== undefined) { return sc }
         if (v["__jc"] === KT_PQ_CLASS) { return coll || t == "Queue" }
         return coll || t == "Set"
     }
     if (!ktIsArr(v)) { return undefined }
     var k = arrKind(v)
-    if (k == 0 || k == 4) { return coll || t == "List" }
+    if (k == 0 || k == 4) {
+        var lc = ktJvmIsA(ktJvmListClass(k, v.length), t)
+        if (lc !== undefined) { return lc }
+        return coll || t == "List"
+    }
     if (k == 3) { return coll }
     if (k == 2) { return t == "Sequence" }
     if (k == 1) { return t == "Array" }

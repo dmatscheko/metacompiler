@@ -5363,6 +5363,29 @@ fun sec112() {
     check("pq112f", q is Collection<*> && q !is Set<*> && p5.size == 7 && p5.contains(9))
 }
 
+// ===== SECTION 113: `is` on the concrete java.util collection classes =====
+// Read off kotlin-stdlib 2.2.21 under JDK 24 (instanceof java.util.ArrayList /
+// HashSet / LinkedHashSet / HashMap / LinkedHashMap / TreeSet / TreeMap / SortedSet /
+// PriorityQueue): mutableListOf is an ArrayList, listOf is not (EmptyList,
+// SingletonList, Arrays$ArrayList); mutableSetOf / setOf of two are LinkedHashSets and
+// so HashSets, setOf of one is a SingletonSet; hashSetOf is a HashSet only.
+fun cls113(v: Any): String =
+    "${v is ArrayList<*>}${v is HashSet<*>}${v is LinkedHashSet<*>}${v is HashMap<*, *>}${v is LinkedHashMap<*, *>}" +
+    "${v is java.util.TreeSet<*>}${v is java.util.TreeMap<*, *>}${v is java.util.SortedSet<*>}${v is java.util.PriorityQueue<*>}"
+fun sec113() {
+    val f = "falsefalsefalsefalsefalsefalsefalsefalsefalse"
+    check("jis113a", mutableListOf(1) is ArrayList<*> && arrayListOf(1, 2) is ArrayList<*> && listOf(1, 2).toMutableList() is ArrayList<*>)
+    check("jis113b", cls113(listOf<Int>()) == f && cls113(listOf(1)) == f && cls113(listOf(1, 2)) == f && cls113(setOf(1)) == f && cls113(mapOf(1 to 2)) == f)
+    check("jis113c", cls113(mutableSetOf(1)) == "falsetruetruefalsefalsefalsefalsefalsefalse" && cls113(hashSetOf(1)) == "falsetruefalsefalsefalsefalsefalsefalsefalse")
+    check("jis113d", cls113(mapOf(1 to 2, 3 to 4)) == "falsefalsefalsetruetruefalsefalsefalsefalse" && cls113(hashMapOf(1 to 2)) == "falsefalsefalsetruefalsefalsefalsefalsefalse")
+    check("jis113e", cls113(sortedSetOf(1)) == "falsefalsefalsefalsefalsetruefalsetruefalse" && cls113(sortedMapOf(1 to 2)) == "falsefalsefalsefalsefalsefalsetruefalsefalse")
+    check("jis113f", cls113(java.util.PriorityQueue<Int>()) == "falsefalsefalsefalsefalsefalsefalsefalsetrue" && HashSet<Int>() !is LinkedHashSet<*>)
+    // A map's keys and entries are views (LinkedHashMap$LinkedKeySet, HashMap$EntrySet,
+    // ...): Sets, never HashSets.
+    val m = mutableMapOf(1 to 2, 3 to 4)
+    check("jis113g", cls113(m.keys) == f && cls113(m.entries) == f && cls113(hashMapOf(1 to 2).keys) == f && cls113(sortedMapOf(1 to 2).entries) == f && m.keys is Set<*>)
+}
+
 
 fun main() {
     s01() // SECTION-CALL 01
@@ -5477,6 +5500,7 @@ fun main() {
     sec110() // SECTION-CALL 110
     sec111() // SECTION-CALL 111
     sec112() // SECTION-CALL 112
+    sec113() // SECTION-CALL 113
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

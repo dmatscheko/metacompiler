@@ -6784,13 +6784,13 @@ func (rt *jsrt) ktMapMethod(m *jsObject, name string, args []interface{}) (inter
 		case "keys":
 			// Map.keys is a SET in Kotlin (java.util.Map.keySet), Map.values a
 			// Collection.
-			return ktSetOfDistinct(keys.elems), true
+			return ktMapView(ktSetOfDistinct(keys.elems), m, "Key"), true
 		case "values":
 			return &jsArray{elems: append([]interface{}{}, vals.elems...), kind: ktArrVals}, true
 		case "entries":
 			// Map.entries is a SET of entries; Map.toList is a LIST of PAIRS:
 			// `m.toList()` prints [(a, 1)] and `m.entries` prints [a=1].
-			return ktSetOfDistinct(ktElems(rt, m)), true
+			return ktMapView(ktSetOfDistinct(ktElems(rt, m)), m, "Entry"), true
 		}
 		out := make([]interface{}, len(keys.elems))
 		for i := range keys.elems {
@@ -7406,10 +7406,16 @@ func ktRangeIsType(rg ktRange, t string) bool {
 func ktCollIsType(v interface{}, t string) (is bool, ok bool) {
 	t = strings.TrimPrefix(t, "Mutable")
 	if _, _, isDict := dictParts(v); isDict {
+		if is, ok := ktJvmIsA(ktJvmTag(v, "java.util.LinkedHashMap"), t); ok {
+			return is, true
+		}
 		return t == "Map", true
 	}
 	coll := t == "Collection" || t == "Iterable"
 	if ktIsSet(v) {
+		if is, ok := ktJvmIsA(ktJvmTag(v, "java.util.LinkedHashSet"), t); ok {
+			return is, true
+		}
 		if v.(*jsObject).props["__jc"] == ktPqClass {
 			return coll || t == "Queue", true
 		}
@@ -7421,6 +7427,9 @@ func ktCollIsType(v interface{}, t string) (is bool, ok bool) {
 	}
 	switch k := arr.kind; {
 	case k == 0 || k == ktArrFixed:
+		if is, ok := ktJvmIsA(ktJvmListClass(k, len(arr.elems)), t); ok {
+			return is, true
+		}
 		return coll || t == "List", true
 	case k == ktArrVals:
 		return coll, true
@@ -7431,6 +7440,66 @@ func ktCollIsType(v interface{}, t string) (is bool, ok bool) {
 	default:
 		return t == ktaElems[k-ktArrPrim]+"Array", true
 	}
+}
+
+// ktJvmTag is the JVM class a set or map records (ktJvmTagged), else def.
+func ktJvmTag(v interface{}, def string) string {
+	if o, isObj := v.(*jsObject); isObj {
+		if jc, has := o.props["__jc"].(string); has {
+			return jc
+		}
+	}
+	return def
+}
+
+// ktMapView tags a map's keys / entries view (view "Key" / "Entry") with its JVM
+// class: a nested class of the map's own (LinkedHashMap$LinkedKeySet,
+// HashMap$EntrySet, TreeMap$KeySet), a SingletonSet or an EmptySet - never a
+// HashSet. Twin of kMapViewClass in kotlin-interpreter.abnf and ktMapView in
+// languages/lib/kotlin-rt.metajs.
+func ktMapView(set interface{}, m interface{}, view string) interface{} {
+	jc := ktJvmTag(m, "java.util.LinkedHashMap")
+	switch jc {
+	case "kotlin.collections.EmptyMap":
+		jc = "kotlin.collections.EmptySet"
+	case "java.util.Collections$SingletonMap":
+		jc = "java.util.Collections$SingletonSet"
+	case "java.util.LinkedHashMap":
+		jc += "$Linked" + view + "Set"
+	default:
+		jc += "$" + view + "Set"
+	}
+	if o, isObj := set.(*jsObject); isObj {
+		o.set("__jc", jc)
+	}
+	return set
+}
+
+// ktJvmIsA is `is C` for a concrete java.util collection class C (kotlin.collections'
+// ArrayList / HashSet / LinkedHashSet / HashMap / LinkedHashMap are typealiases to
+// them), given the value's JVM class jc; ok is false when t names none. A
+// LinkedHashSet / LinkedHashMap extends HashSet / HashMap, a TreeSet / TreeMap is the
+// only SortedSet / NavigableSet / SortedMap / NavigableMap here. Twin of kJvmIsA in
+// kotlin-interpreter.abnf and ktJvmIsA in languages/lib/kotlin-rt.metajs.
+func ktJvmIsA(jc, t string) (is bool, ok bool) {
+	if s, cut := strings.CutPrefix(t, "java.util."); cut {
+		t = s
+	} else {
+		t = strings.TrimPrefix(t, "kotlin.collections.")
+	}
+	switch t {
+	case "SortedSet", "NavigableSet":
+		t = "TreeSet"
+	case "SortedMap", "NavigableMap":
+		t = "TreeMap"
+	}
+	switch t {
+	case "HashSet", "HashMap":
+		return jc == "java.util."+t || jc == "java.util.Linked"+t, true
+	case "ArrayList", "LinkedHashSet", "LinkedHashMap", "TreeSet", "TreeMap", "PriorityQueue":
+		return jc == "java.util."+t, true
+	}
+	return false, false
 }
 
 // ktIsBuiltinRecv reports a receiver whose members come from the runtime rather

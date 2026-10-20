@@ -3903,6 +3903,17 @@ NotMemberKw = :script(~~
     // the distinct elements), the hash and sorted builders a HashSet / TreeSet.
     // Twin of ktJvmTagged in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
     function kJvmTagged(o, jc) { if (jc != "") { o.__jc = jc } return o }
+    // The JVM class of a map's keys / entries view (view "Key" / "Entry"): a nested
+    // class of the map's own (LinkedHashMap$LinkedKeySet, HashMap$EntrySet,
+    // TreeMap$KeySet), a SingletonSet or an EmptySet - never a HashSet. Twin of
+    // ktMapView in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    function kMapViewClass(m, view) {
+        var jc = m.__jc !== undefined ? m.__jc : "java.util.LinkedHashMap"
+        if (jc == "kotlin.collections.EmptyMap") { return "kotlin.collections.EmptySet" }
+        if (jc == "java.util.Collections$SingletonMap") { return "java.util.Collections$SingletonSet" }
+        if (jc == "java.util.LinkedHashMap") { return jc + "$Linked" + view + "Set" }
+        return jc + "$" + view + "Set"
+    }
     function kJvmSmall(n, kind) {
         if (n == 0) { return "kotlin.collections.Empty" + kind }
         return n == 1 ? "java.util.Collections$Singleton" + kind : ""
@@ -7211,11 +7222,11 @@ NotMemberKw = :script(~~
         if (name == "isEmpty") { return {v: m.keys.length == 0} }
         if (name == "isNotEmpty") { return {v: m.keys.length > 0} }
         // Map.keys is a SET in Kotlin (java.util.Map.keySet), Map.values a Collection.
-        if (name == "keys") { return {v: kSetFrom(m.keys)} }
+        if (name == "keys") { return {v: kJvmTagged(kSetFrom(m.keys), kMapViewClass(m, "Key"))} }
         if (name == "values") { return {v: arrKindSet(kSeqMethod(m.vals, "toList", []).v, 3)} }
         // Map.entries is a SET of entries; Map.toList is a LIST of PAIRS:
         // `m.toList()` prints [(a, 1)] and `m.entries` prints [a=1].
-        if (name == "entries") { return {v: kSetOfDistinct(kElems(m))} }
+        if (name == "entries") { return {v: kJvmTagged(kSetOfDistinct(kElems(m)), kMapViewClass(m, "Entry"))} }
         if (name == "toList") {
             var pl = []
             for (i = 0; i < m.keys.length; i++) { pl.push(kPair(m.keys[i], m.vals[i])) }
@@ -11075,9 +11086,9 @@ NotMemberKw = :script(~~
         }
         if (kIsMap(o)) {
             if (name == "size") { return o.keys.length }
-            if (name == "keys") { return kSetFrom(o.keys) }
+            if (name == "keys") { return kJvmTagged(kSetFrom(o.keys), kMapViewClass(o, "Key")) }
             if (name == "values") { return arrKindSet(kSeqMethod(o.vals, "toList", []).v, 3) }
-            if (name == "entries") { return kSetOfDistinct(kElems(o)) }
+            if (name == "entries") { return kJvmTagged(kSetOfDistinct(kElems(o)), kMapViewClass(o, "Entry")) }
             return extPropGet(o, name)
         }
         if (kIsSet(o)) {
@@ -11442,18 +11453,42 @@ NotMemberKw = :script(~~
         var isArr = Array.isArray(v)
         if (!isArr && !kIsSet(v) && !kIsMap(v)) { return undefined }
         if (t.indexOf("Mutable") == 0) { t = t.substring(7) }
-        if (kIsMap(v)) { return t == "Map" }
+        if (kIsMap(v)) {
+            var mc = kJvmIsA(v.__jc !== undefined ? v.__jc : "java.util.LinkedHashMap", t)
+            return mc !== undefined ? mc : t == "Map"
+        }
         var coll = t == "Collection" || t == "Iterable"
         if (kIsSet(v)) {
+            var sc = kJvmIsA(v.__jc !== undefined ? v.__jc : "java.util.LinkedHashSet", t)
+            if (sc !== undefined) { return sc }
             if (v.__jc === "java.util.PriorityQueue") { return coll || t == "Queue" }
             return coll || t == "Set"
         }
         var k = arrKind(v)
-        if (k == 0 || k == 4) { return coll || t == "List" }
+        if (k == 0 || k == 4) {
+            var lc = kJvmIsA(kJvmListClass(k, v.length), t)
+            return lc !== undefined ? lc : coll || t == "List"
+        }
         if (k == 3) { return coll }
         if (k == 2) { return t == "Sequence" }
         if (k == 1) { return t == "Array" }
         return t == ktaElems[k - 5] + "Array"
+    }
+    // `is C` for a concrete java.util collection class C (kotlin.collections'
+    // ArrayList / HashSet / LinkedHashSet / HashMap / LinkedHashMap are typealiases to
+    // them), given the value's JVM class jc (kJvmTagged, kJvmListClass); undefined
+    // when t names none. A LinkedHashSet / LinkedHashMap extends HashSet / HashMap, a
+    // TreeSet / TreeMap is the only SortedSet / NavigableSet / SortedMap /
+    // NavigableMap here. Twin of ktJvmIsA in abnf/jsrtkotlin.go and
+    // languages/lib/kotlin-rt.metajs.
+    function kJvmIsA(jc, t) {
+        if (t.indexOf("java.util.") == 0) { t = t.substring(10) } else if (t.indexOf("kotlin.collections.") == 0) { t = t.substring(19) }
+        if (t == "SortedSet" || t == "NavigableSet") { t = "TreeSet" }
+        if (t == "SortedMap" || t == "NavigableMap") { t = "TreeMap" }
+        if (t == "HashSet" || t == "HashMap") { return jc == "java.util." + t || jc == "java.util.Linked" + t }
+        if (t == "ArrayList" || t == "LinkedHashSet" || t == "LinkedHashMap" || t == "TreeSet" ||
+            t == "TreeMap" || t == "PriorityQueue") { return jc == "java.util." + t }
+        return undefined
     }
     // Extends the shared rtIsType with the parent chain (so an interface matches), type
     // ALIASES, Char/range boxes, and the reified type parameters of the running call.
