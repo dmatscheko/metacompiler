@@ -7880,10 +7880,16 @@ function k4ArrayOfN(name, args) {
 }
 
 // jsrtkotlin.go ktJavaCollection: a java.util collection constructor - empty,
-// with an Int capacity, or a copy of a collection (of a map).
+// with an Int capacity, or a copy of a collection (of a map). A TreeSet / TreeMap
+// is tagged before it fills, so each insertion sorts; its Comparator form is not
+// provided.
 function k4JavaCollection(name, src) {
-    if (name == "HashMap" || name == "LinkedHashMap") {
-        var mp = ktMakeMap()
+    if ((name == "TreeSet" || name == "TreeMap") && src !== undefined && src !== null
+        && !ktIsArr(src) && !ktIsSet(src) && ktMapKeys(src) === undefined) {
+        fail(name + "(comparator) is not supported")
+    }
+    if (name == "HashMap" || name == "LinkedHashMap" || name == "TreeMap") {
+        var mp = ktJvmTagged(ktMakeMap(), name, 0)
         var ks = ktMapKeys(src)
         if (ks !== undefined) {
             var vs = ktMapVals(src)
@@ -7907,7 +7913,10 @@ function k4JavaCollection(name, src) {
         }
         return out
     }
-    return k3SetFrom(els)
+    var s = ktJvmTagged(ktMakeSet(), name, 0)
+    var k = 0
+    for (k = 0; k < els.length; k = k + 1) { ktSetAdd(s, els[k]) }
+    return s
 }
 
 // The name groups of ktGlobalFn, hoisted out so the big if-chain reads as the Go
@@ -8045,8 +8054,8 @@ function ktJvmTagged(o, builder, n) {
     if (builder == "emptyMap") { jc = "kotlin.collections.EmptyMap" }
     if (builder == "hashSetOf" || builder == "HashSet") { jc = "java.util.HashSet" }
     if (builder == "hashMapOf" || builder == "HashMap") { jc = "java.util.HashMap" }
-    if (builder == "sortedSetOf") { jc = "java.util.TreeSet" }
-    if (builder == "sortedMapOf") { jc = "java.util.TreeMap" }
+    if (builder == "sortedSetOf" || builder == "TreeSet") { jc = "java.util.TreeSet" }
+    if (builder == "sortedMapOf" || builder == "TreeMap") { jc = "java.util.TreeMap" }
     if (jc != "") { o["__jc"] = jc }
     return o
 }
@@ -8056,7 +8065,8 @@ function ktJvmTagged(o, builder, n) {
 // emitted scope and the call site is an ordinary call.
 function ktGlobalFn(name) {
     if (name == "Math") { return k4JavaMath() }
-    if (name == "ArrayList" || name == "HashSet" || name == "LinkedHashSet" || name == "HashMap" || name == "LinkedHashMap") {
+    if (name == "ArrayList" || name == "HashSet" || name == "LinkedHashSet" || name == "HashMap" || name == "LinkedHashMap"
+        || name == "TreeSet" || name == "TreeMap") {
         return function (src) {
             var c = k4JavaCollection(name, src)
             if (Array.isArray(c)) { return c }

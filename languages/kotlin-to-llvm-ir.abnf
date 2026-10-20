@@ -8171,7 +8171,7 @@ KwContract  = "contract" KwEnd ;
         // declare it (js_ktglobal's ktJavaMath in abnf/jsrtktmath.go); without it the
         // name would reach the host's own Math.
         // The java.util collection constructors (ktJavaCollection) the same way.
-        var ktOnDemand = ["Math", "ArrayList", "HashSet", "LinkedHashSet", "HashMap", "LinkedHashMap"]
+        var ktOnDemand = ["Math", "ArrayList", "HashSet", "LinkedHashSet", "HashMap", "LinkedHashMap", "TreeSet", "TreeMap"]
         for (var kd = 0; kd < ktOnDemand.length; kd++) {
             var odn = ktOnDemand[kd]
             if (ktVarSeen["$" + odn] == true && classNames[odn] == undefined) {

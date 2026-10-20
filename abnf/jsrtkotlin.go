@@ -7605,13 +7605,26 @@ func (rt *jsrt) ktPkgMember(pkg, name string) interface{} {
 }
 
 // ktJavaCollection is a java.util collection constructor - ArrayList, HashSet /
-// LinkedHashSet, HashMap / LinkedHashMap: empty, with an Int capacity, or a copy
-// of a collection (of a map). A HashSet / HashMap iterates in insertion order, as
-// hashSetOf / hashMapOf do (ktMakeSet). Twin of kJavaCollection in
-// kotlin-interpreter.abnf and k4JavaCollection in languages/lib/kotlin-rt.metajs.
+// LinkedHashSet, HashMap / LinkedHashMap, TreeSet / TreeMap: empty, with an Int
+// capacity, or a copy of a collection (of a map). A HashSet / HashMap iterates in
+// insertion order, as hashSetOf / hashMapOf do (ktMakeSet); a TreeSet / TreeMap in
+// ascending order, and its Comparator form is not provided. Twin of
+// kJavaCollection in kotlin-interpreter.abnf and k4JavaCollection in
+// languages/lib/kotlin-rt.metajs.
 func (rt *jsrt) ktJavaCollection(name string, src interface{}) interface{} {
-	if name == "HashMap" || name == "LinkedHashMap" {
-		mp := ktMakeMap()
+	if name == "TreeSet" || name == "TreeMap" {
+		_, isArr := src.(*jsArray)
+		_, _, isDict := dictParts(src)
+		switch src.(type) {
+		case nil, jsUndefT, jsNullT:
+		default:
+			if !isArr && !isDict && !ktIsSet(src) {
+				rt.fail("%s(comparator) is not supported", name)
+			}
+		}
+	}
+	if name == "HashMap" || name == "LinkedHashMap" || name == "TreeMap" {
+		mp := ktJvmTagged(ktMakeMap(), name, 0)
 		if keys, vals, isMap := dictParts(src); isMap {
 			if _, isSet := ktSetParts(src); !isSet {
 				for i, k := range keys.elems {
@@ -7630,7 +7643,12 @@ func (rt *jsrt) ktJavaCollection(name string, src interface{}) interface{} {
 	if name == "ArrayList" {
 		return &jsArray{elems: append([]interface{}{}, els...)}
 	}
-	return rt.ktSetFrom(els)
+	// A TreeSet is tagged before it fills, so each insertion sorts.
+	s := ktJvmTagged(ktMakeSet(), name, 0)
+	for _, e := range els {
+		rt.ktSetAdd(s, e)
+	}
+	return s
 }
 
 // ktJvmTagged records on a set or map the JVM class its builder answers, when that
@@ -7660,9 +7678,9 @@ func ktJvmTagged(o *jsObject, builder string, n int) *jsObject {
 		jc = "java.util.HashSet"
 	case "hashMapOf", "HashMap":
 		jc = "java.util.HashMap"
-	case "sortedSetOf":
+	case "sortedSetOf", "TreeSet":
 		jc = "java.util.TreeSet"
-	case "sortedMapOf":
+	case "sortedMapOf", "TreeMap":
 		jc = "java.util.TreeMap"
 	}
 	if jc != "" {
@@ -7996,7 +8014,7 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			return ktJvmTagged(rt.ktSetFrom(args), name, len(args))
 		})
-	case "ArrayList", "HashSet", "LinkedHashSet", "HashMap", "LinkedHashMap":
+	case "ArrayList", "HashSet", "LinkedHashSet", "HashMap", "LinkedHashMap", "TreeSet", "TreeMap":
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			c := rt.ktJavaCollection(name, argAt(args, 0))
 			if o, isObj := c.(*jsObject); isObj {

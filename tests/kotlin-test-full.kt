@@ -5232,6 +5232,24 @@ fun sec106() {
 val registry106 = mutableListOf<String>()
 val shared106 = mutableListOf(0)
 
+// ===== SECTION 107: java.util.TreeSet / TreeMap constructors =====
+// Read off java.util.TreeSet / TreeMap (JDK 24) with kotlin-stdlib 2.2.21: empty or
+// a copy of a collection (a map), ascending on every insertion, `+=` on a val one
+// more add.
+fun sec107() {
+    val ks = listOf(5, 1, 3, 1)
+    val t = java.util.TreeSet<Int>()
+    for (k in ks) { t.add(k) }
+    val t2 = java.util.TreeSet(listOf("pear", "apple", "fig", "apple"))
+    t2 += "banana"
+    check("tre107a", "" + t == "[1, 3, 5]" && "" + t2 == "[apple, banana, fig, pear]" && t2.first() == "apple" && t2.size == 4)
+    val m = java.util.TreeMap<String, Int>()
+    m["b"] = ks[0]; m["a"] = ks[1]; m.put("c", ks[2])
+    val m2 = java.util.TreeMap(mapOf(3 to "c", 1 to "a"))
+    m2[2] = "b"
+    check("tre107b", "" + m == "{a=1, b=5, c=3}" && "" + m2 == "{1=a, 2=b, 3=c}" && "" + m2.keys == "[1, 2, 3]")
+}
+
 
 fun main() {
     s01() // SECTION-CALL 01
@@ -5340,6 +5358,7 @@ fun main() {
     sec104() // SECTION-CALL 104
     sec105() // SECTION-CALL 105
     sec106() // SECTION-CALL 106
+    sec107() // SECTION-CALL 107
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

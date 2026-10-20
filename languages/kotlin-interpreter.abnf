@@ -3945,30 +3945,40 @@ NotMemberKw = :script(~~
     hostGlobals["emptyList"] = hostGlobals["listOf"]
     hostGlobals["emptySet"] = function() { return kJvmTagged(kMakeSet(), "kotlin.collections.EmptySet") }
     // The java.util collection constructors - ArrayList, HashSet / LinkedHashSet,
-    // HashMap / LinkedHashMap: empty, with an Int capacity, or a copy of a
-    // collection (of a map). A HashSet / HashMap iterates in insertion order, as
-    // hashSetOf / hashMapOf do (kMakeSet). Twin of ktJavaCollection in
+    // HashMap / LinkedHashMap, TreeSet / TreeMap: empty, with an Int capacity, or a
+    // copy of a collection (of a map). A HashSet / HashMap iterates in insertion
+    // order, as hashSetOf / hashMapOf do (kMakeSet); a TreeSet / TreeMap in ascending
+    // order, and its Comparator form is not provided. Twin of ktJavaCollection in
     // abnf/jsrtkotlin.go and k4JavaCollection in lib/kotlin-rt.metajs.
-    function kJavaCollection(kind) {
+    function kJavaCollection(kind, jc) {
         return function(src) {
+            if (jc != "" && src != null && !Array.isArray(src) && !kIsSet(src) && !kIsMap(src)) {
+                fail(jc.substring(10) + "(comparator) is not supported")
+            }
             if (kind == "map") {
-                var m = kMakeMap()
+                var m = kJvmTagged(kMakeMap(), jc)
                 if (kIsMap(src)) { for (var i = 0; i < src.keys.length; i++) { kMapPut(m, src.keys[i], src.vals[i]) } }
                 return m
             }
             var els = []
             if (Array.isArray(src)) { els = src } else if (kIsSet(src)) { els = src.keys }
-            if (kind == "set") { return kSetFrom(els) }
+            if (kind == "set") {
+                var s = kJvmTagged(kMakeSet(), jc)
+                for (var k = 0; k < els.length; k++) { kSetAdd(s, els[k]) }
+                return s
+            }
             var out = []
             for (var j = 0; j < els.length; j++) { out.push(els[j]) }
             return out
         }
     }
-    hostGlobals["ArrayList"] = kJavaCollection("list")
-    hostGlobals["LinkedHashSet"] = kJavaCollection("set")
+    hostGlobals["ArrayList"] = kJavaCollection("list", "")
+    hostGlobals["LinkedHashSet"] = kJavaCollection("set", "")
     hostGlobals["HashSet"] = function(src) { return kJvmTagged(hostGlobals["LinkedHashSet"](src), "java.util.HashSet") }
-    hostGlobals["LinkedHashMap"] = kJavaCollection("map")
+    hostGlobals["LinkedHashMap"] = kJavaCollection("map", "")
     hostGlobals["HashMap"] = function(src) { return kJvmTagged(hostGlobals["LinkedHashMap"](src), "java.util.HashMap") }
+    hostGlobals["TreeSet"] = kJavaCollection("set", "java.util.TreeSet")
+    hostGlobals["TreeMap"] = kJavaCollection("map", "java.util.TreeMap")
     // ----- Maps, Pair/Triple, `with` and StringBuilder -----
     // A global NAME is declared by each grammar's own builtin block (js_scope_decl in
     // kotlin-to-llvm-ir.abnf, ktGlobalFn in abnf/jsrtkotlin.go), not by the runtime.
