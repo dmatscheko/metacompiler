@@ -417,11 +417,13 @@ func (rt *jsrt) addJSBigIntExterns(m map[string]func(args []uint64) uint64) {
 		for k, v := range o.props {
 			if f, ok := v.(*hostFunc); ok {
 				o.props[k] = rt.jsvNumArgs(f)
+				jsvFnMetaSet(o.props[k], k, jsvMathLen(k))
 			}
 		}
 		o.props["pow"] = jsHostFunc("pow", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			return jsPowD(rt.jsvToNum(argAt(args, 0)), rt.jsvToNum(argAt(args, 1)))
 		})
+		jsvFnMetaSet(o.props["pow"], "pow", 2)
 		return w(o)
 	}
 
@@ -875,4 +877,16 @@ func jsParseFloatJS(s string) float64 {
 		return math.NaN()
 	}
 	return jsDecValJS(string(utf16.Decode(u[i : at+n])))
+}
+
+// jsvMathLen is node's Math.<k>.length: 2 for the binary members and for max, min and
+// hypot, 0 for random. Twin of jsMathLen in both *-interpreter.abnf.
+func jsvMathLen(k string) int {
+	switch k {
+	case "random":
+		return 0
+	case "atan2", "hypot", "imul", "max", "min", "pow":
+		return 2
+	}
+	return 1
 }

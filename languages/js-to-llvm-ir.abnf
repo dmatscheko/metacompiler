@@ -807,7 +807,7 @@ GenFuncExpr <~~ push(makeGenFuncExpr(takeAll(), up.in)) ~~>
 // invents a 0-prefixed one that no source identifier can collide with, and an explicit
 // name overrides it.
 ClassExpr   = ClassExprLowered | ClassExprWidened ;
-ClassExprLowered <~~ push(makeClassExpr(takeAll())) ~~>
+ClassExprLowered <~~ push(makeClassExpr(takeAll(), up.in)) ~~>
             = KwClass ClassAnonName [ ClassExprName ]
               [ KwExtends NotReserved Id <~~ push({ext: idName(up.in)}) ~~> ] PrivBodyOpen { ClassMember } PrivBodyClose ;
 ClassAnonName <~~ classSeq = classSeq + 1; curClassName = "0class" + classSeq; push({cname: curClassName}) ~~>
@@ -816,7 +816,7 @@ ClassExprName <~~ curClassName = idName(up.in); push({cname: idName(up.in)}) ~~>
             = NotExprName Id ;
 // A class expression with a heritage EXPRESSION ('class extends f() {}'). Same builder
 // as ClassExprLowered: the parent simply arrives as a value thunk instead of a name.
-ClassExprWidened <~~ push(makeClassExpr(takeAll())) ~~>
+ClassExprWidened <~~ push(makeClassExpr(takeAll(), up.in)) ~~>
             = KwClass ClassAnonName [ ClassExprName ] KwExtends ClassExt PrivBodyOpen { ClassMember } PrivBodyClose ;
 
 // The optional name of a function expression is bound only inside its own body (fnSelf).
@@ -889,7 +889,9 @@ ArrowParams <~~ push({aparams: takeAll()}) ~~>
             = "(" [ ParamSeq ] ")"
             | NotBindName Id <~~ push(idName(up.in)) ~~> ;
 ArrowBody   = ArrowBlock | ArrowExpr ;
-ArrowBlock  <~~ push({body: pop()}) ~~>  = FuncBody NotArrowTail ;
+// A block body's own "use strict" prologue makes the arrow strict (bstrict).
+ArrowBlock  <~~ var ab = takeAll(); push({body: ab[ab.length - 1], bstrict: ab.length > 1}) ~~>
+            = [ UseStrictMark ] FuncBody NotArrowTail ;
 ArrowExpr   <~~ push({ebody: pop()}) ~~> = !"{" AssignExpr ;
 
 // Template literals: `text ${expr} more`. Each ${...} is evaluated and coerced to
@@ -4032,11 +4034,15 @@ NotFuncHead = :script(~~
         if (ref.tdz != undefined && hoistRefAll[ref.tdz].chk) { v = tdzChk(b, v, nmV) }
         return v
     }
+    // The store of a plain `=` to a bare name: sloppy code's implicit global, which in
+    // strict code is the ReferenceError of a name no scope binds (js_scope_set_strict).
+    // Twin of setVar in js-interpreter.abnf.
+    function nameStoreExt(ext) { return (emitStrict && ext == "js_scope_set_or_create") ? "js_scope_set_strict" : ext }
     function refNameSet(b, ref, ext, v) {
         constChk(b, ref.name)
         var nmV = emitStr(b, ref.name)
         if (ref.tdz != undefined && hoistRefAll[ref.tdz].chk) { tdzChk(b, callExt(b, "js_scope_get", [curScopeV, nmV]), nmV) }
-        callExt(b, (ref.w === true) ? "js_jswithset" : ext, [curScopeV, nmV, v])
+        callExt(b, (ref.w === true) ? "js_jswithset" : nameStoreExt(ext), [curScopeV, nmV, v])
         emitArgSync(b, ref.name, v)
     }
     // String.prototype.normalize needs the tables of lib/unicode-norm.txt, which a
@@ -4582,7 +4588,7 @@ NotFuncHead = :script(~~
     // is built through arrowBody so that an expression body is still an implicit
     // 'return <expr>' - `async x => x + 1` has to answer a promise for x + 1.
     function makeAsyncArrow(items, txt) {
-        return makeAsyncFn(items[0].aparams, arrowBody(items[1]), true, false, "", txt)
+        return makeAsyncFn(items[0].aparams, arrowBody(items[1]), true, items[1].bstrict === true, "", txt)
     }
     // items = [name, params, bodyThunk]: bind the async function under its name.
     function makeAsyncFuncDecl(itemsIn, pos) {
@@ -5754,8 +5760,9 @@ NotFuncHead = :script(~~
     function makeArrow(items, txt) {
         var params = items[0].aparams
         var bodyT = arrowBody(items[1])
+        var own = items[1].bstrict === true
         return fnDef(function(b) {
-            var idx = emitFunction(params, bodyT, false, true, false, true)
+            var idx = emitFunction(params, bodyT, false, true, own, true)
             return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
         }, "", params, txt)
     }
@@ -6136,7 +6143,7 @@ NotFuncHead = :script(~~
         valueH = d.v
         if (pat.dtype == "id") {
             if (isAssignExt(declExt)) { constChk(b, pat.name) }
-            callExt(b, declExt, [curScopeV, emitStr(b, pat.name), valueH])
+            callExt(b, nameStoreExt(declExt), [curScopeV, emitStr(b, pat.name), valueH])
             if (declExt != "js_scope_decl") { emitArgSync(b, pat.name, valueH) }
             return b
         }
@@ -6892,6 +6899,7 @@ NotFuncHead = :script(~~
             else if (m.statik) { info.sinits.push(m) }
             else { info.fields.push(m) }
         }
+        info.shown = [info.name] // The class's `name`; makeClassExpr refines it.
         return info
     }
     // Build the descriptor object, bind it under the class name, then attach the
@@ -6909,7 +6917,7 @@ NotFuncHead = :script(~~
         }
         var clsV = callExt(b, "js_obj_new", [])
         clsRawSet(b, clsV, emitStr(b, "__isclass"), hTrue)
-        clsRawSet(b, clsV, emitStr(b, "__name"), emitStr(b, info.name))
+        clsRawSet(b, clsV, emitStr(b, "__name"), emitStr(b, info.shown[0]))
         // js_jsstatics builds the static table, hangs it on the descriptor and answers
         // it. It is one extern rather than js_obj_new plus a set because layer 2 counts
         // the classes: while no class exists, every member read in the program skips the
@@ -6927,7 +6935,10 @@ NotFuncHead = :script(~~
         } else {
             ctorIdx = emitClassFunc([], null, true, info.fields, info.superName, info.superName != null)
         }
-        clsRawSet(b, clsV, emitStr(b, "__ctor"), callExt(b, "js_closure", [handle(ctorIdx), curScopeV]))
+        // The constructor's arity is the class's `length`.
+        var ctorClo = callExt(b, "js_closure", [handle(ctorIdx), curScopeV])
+        if (info.ctor != null) { ctorClo = fnMetaAt(b, ctorClo, "", info.ctor.params) }
+        clsRawSet(b, clsV, emitStr(b, "__ctor"), ctorClo)
         // ClassDefinitionEvaluation defines the methods and accessors in SOURCE
         // order: the order of their computed keys' side effects and of the
         // descriptor's own keys, which getOwnPropertyNames of the prototype lists.
@@ -7016,8 +7027,14 @@ NotFuncHead = :script(~~
         var info = makeClassInfo(items)
         return function(b) { return emitClass(b, info).b }
     }
-    function makeClassExpr(items) {
+    // An anonymous class expression's `name` is "" - not ClassAnonName's synthetic one -
+    // or the name of the binding it is assigned to (NamedEvaluation, see fnAnonNote).
+    // Twin of makeClassValue in the -interpreter.abnf.
+    function makeClassExpr(items, txt) {
         var info = makeClassInfo(items)
+        var anon = info.name.substring(0, 6) == "0class"
+        info.shown = [anon ? "" : info.name]
+        fnAnonNote(info.shown, info.shown[0], txt)
         return function(b) { return emitClass(b, info) }
     }
     // 'new.target'.
@@ -7669,7 +7686,8 @@ NotFuncHead = :script(~~
         var tb = tf.NewBlock("entry")
         tb.NewRet(tb.NewCall(getExtern("js_jserrstr", 1),
                              [tb.NewCall(getExtern("js_arg", 2), [tf.Params[1], handle(0)])]))
-        var ctorV = callExt(b, "js_closure", [handle(ciIdx), curScopeV])
+        // Every builtin Error constructor has length 1.
+        var ctorV = callExt(b, "js_jsfnmeta", [callExt(b, "js_closure", [handle(ciIdx), curScopeV]), emitStr(b, ""), emitNum(b, 1)])
         var tsV = callExt(b, "js_closure", [handle(tsIdx), curScopeV])
         // The descriptors are built by js_jserrcls rather than by six memSets
         // each, because the memSet form put a large fixed amount of IR into every

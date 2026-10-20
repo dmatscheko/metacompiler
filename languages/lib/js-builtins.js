@@ -148,8 +148,10 @@ class __CollIter {
     ["__#@iterator"]() { return this }
 }
 
+// The iterable argument of Set and Map is optional, so it has a default: that is
+// what makes the constructor's length, and so Set.length / Map.length, 0.
 class Set extends __Coll {
-    constructor(items) {
+    constructor(items = undefined) {
         super()
         if (items !== undefined && items !== null) {
             for (var v of __iterCheck(items)) { this.add(v) }
@@ -170,7 +172,7 @@ class Set extends __Coll {
 }
 
 class Map extends __Coll {
-    constructor(entries) {
+    constructor(entries = undefined) {
         super()
         if (entries !== undefined && entries !== null) {
             for (var e of __iterCheck(entries)) {

@@ -6992,6 +6992,24 @@ long js_scope_set_or_create(long s, long name, long v) {
 	return 0;
 }
 
+/* js_scope_set_strict: the same store in STRICT JavaScript, where a name that no
+ * scope binds is not created but is the ReferenceError a read of it raises - the
+ * language's missing-variable hook answers it, as for scope_get. The twin is
+ * abnf/jsrt.go's scopeSetStrict. */
+long js_scope_set_strict(long s, long name, long v) {
+	long cur = scope_of(s);
+	long exc;
+	while (cur != 0) {
+		long i = scope_find(cur, name);
+		if (i >= 0) { long *vals = (long *)fb(cur); vals[i] = v; return 0; }
+		cur = ff(cur);
+	}
+	exc = rt_miss_var(name);
+	if (exc != 0) { js_throw(exc); }
+	die2("assignment to undeclared variable: ", name);
+	return 0;
+}
+
 /* Is `name` bound in THIS scope - no chain walk. It is the EXTERN twin of the
  * scopeHas BUILTIN (host 67 below, and jsrtint.go's scBindings): a builtin is
  * callable from MetaJS, an extern from emitted IR.

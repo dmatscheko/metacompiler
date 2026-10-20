@@ -25,6 +25,8 @@ func (rt *jsrt) addJSONExterns(m map[string]func(args []uint64) uint64) {
 		o.props["parse"] = jsHostFunc("parse", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			return rt.jsonParse(argAt(args, 0), argAt(args, 1))
 		})
+		jsvFnMetaSet(o.props["stringify"], "stringify", 3)
+		jsvFnMetaSet(o.props["parse"], "parse", 2)
 		o.props["__strtag"] = "JSON" // Object.prototype.toString's tag; see jsvProtoTag.
 		return rt.wrap(o)
 	}

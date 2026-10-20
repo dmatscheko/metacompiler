@@ -1,11 +1,11 @@
-// Full-syntax test: JavaScript - part 2 of 4, sections 36-43, 101 and 102.
+// Full-syntax test: JavaScript - part 2 of 4, sections 36-43 and 101-103.
 //
 // THE JS RATCHET IS FOUR FILES: as one file its -frozen interpreter leg ran into
 // ./test.sh --full's time brake (peak memory grew superlinearly with the file), and
 // the fourth is a Module, the one goal symbol in which 'export' may stand.
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
-//   tests/js-test-full.2.js   sections 36-43, 101 and 102, engine agreement, generators,
+//   tests/js-test-full.2.js   sections 36-43 and 101-103, engine agreement, generators,
 //                             Error, Math, builtin constructors, integrity levels
 //   tests/js-test-full.3.js   sections 44-56, 58-71 and 73-100, the call/class/
 //                             private-name model, iterators, the arguments object and
@@ -1211,6 +1211,64 @@ function s102() {
     check("fn102i", fn.x === undefined && Object.isFrozen(fn) && !Object.isFrozen(function () {}))
 }
 
+// ===== SECTION 103: a class's length, builtin function values' name and length, strict arrows, the first refused write =====
+// A class's `length` is its constructor's (0 for an implicit one) and every builtin
+// Error constructor's is 1, Map's and Set's 0; an anonymous class expression is named
+// after the binding it is assigned to, or "". Math and JSON members and the Object
+// statics read as values carry node's name and length. An arrow or a generator whose
+// own body opens with "use strict" is strict code: a refused write throws, and a plain
+// `=` to a name no scope binds is a ReferenceError instead of an implicit global. A
+// method on a frozen, sealed or non-extensible array fails at the spec's FIRST refused
+// Set or delete, after the writes the level allows. Values read off node 24.
+function s103() {
+    class A103 { constructor(a, b) {} }
+    class B103 extends A103 {}
+    class D103 extends A103 { constructor(x, ...r) { super(x, 1) } }
+    class E103 { constructor(a, b = 1, c) {} }
+    check("cl103a", [A103, B103, D103, E103, class {}].map((c) => c.length).join() === "2,0,1,1,0" &&
+        [Error, TypeError, RangeError, SyntaxError, ReferenceError, Map, Set].map((c) => c.length).join() === "1,1,1,1,1,0,0")
+    const G103 = class {}
+    let H103
+    H103 = class extends G103 {}
+    const o103 = { k: class {} }
+    check("cl103g", G103.name === "G103" && H103.name === "H103" && o103.k.name === "k" && (class {}).name === "" &&
+        (class N103 {}).name === "N103" && [class {}][0].name === "")
+    const mk = ["max", "min", "floor", "atan2", "random", "hypot", "pow"]
+    check("bi103b", mk.map((k) => Math[k].name + "/" + Math[k].length).join() === "max/2,min/2,floor/1,atan2/2,random/0,hypot/2,pow/2" &&
+        JSON.stringify.name + "/" + JSON.stringify.length + " " + JSON.parse.name + "/" + JSON.parse.length === "stringify/3 parse/2")
+    const ok = ["preventExtensions", "isFrozen", "isSealed", "isExtensible", "getOwnPropertyDescriptor"]
+    const pe = Object.preventExtensions
+    check("bi103c", ok.map((k) => typeof Object[k] + "/" + Object[k].name + "/" + Object[k].length).join() ===
+        "function/preventExtensions/1,function/isFrozen/1,function/isSealed/1,function/isExtensible/1,function/getOwnPropertyDescriptor/2" &&
+        !Object.isExtensible(pe({})))
+    const fr = Object.freeze({ a: 1 })
+    const err = (f) => { try { f(); return "ok" } catch (e) { return e.constructor.name + ": " + e.message } }
+    check("st103d", err(() => { "use strict"; fr.a = 2 }) === "TypeError: Cannot assign to read only property 'a' of object '#<Object>'" &&
+        err(() => { fr.a = 2 }) === "ok" && err(() => { "use strict"; strictGlobal103 = 1 }) === "ReferenceError: strictGlobal103 is not defined" &&
+        typeof strictGlobal103 === "undefined" && err(() => { const g = function* () { "use strict"; fr.a = 3; yield 1 }; g().next() }) ===
+        "TypeError: Cannot assign to read only property 'a' of object '#<Object>'")
+    const ops = [(a) => a.fill(9, 1), (a) => a.fill(9, 4), (a) => a.copyWithin(1, 0), (a) => a.copyWithin(2, 0),
+        (a) => a.splice(1, 0, 7), (a) => a.splice(0, 2, 9), (a) => a.splice(2, 2, 7), (a) => a.splice(1, 0),
+        (a) => a.unshift(7, 8), (a) => a.push(), (a) => a.sort()]
+    check("ar103e", ops.map((f) => err(() => f(Object.freeze([4, 3, 2, 1])))).join("|") ===
+        "TypeError: Cannot assign to read only property '1' of object '[object Array]'|ok|" +
+        "TypeError: Cannot assign to read only property '3' of object '[object Array]'|" +
+        "TypeError: Cannot assign to read only property '2' of object '[object Array]'|" +
+        "TypeError: Cannot add property 4, object is not extensible|" +
+        "TypeError: Cannot assign to read only property '1' of object '[object Array]'|" +
+        "TypeError: Cannot delete property '3' of [object Array]|" +
+        "TypeError: Cannot assign to read only property 'length' of object '[object Array]'|" +
+        "TypeError: Cannot add property 5, object is not extensible|" +
+        "TypeError: Cannot assign to read only property 'length' of object '[object Array]'|" +
+        "TypeError: Cannot assign to read only property '0' of object '[object Array]'")
+    const sa = Object.seal([4, 3, 2, 1]), sb = Object.seal([4, 3, 2, 1]), na = Object.preventExtensions([4, 3, 2, 1])
+    check("ar103f", err(() => sa.splice(0, 2, 9)) === "TypeError: Cannot delete property '3' of [object Array]" && sa.join() === "4,2,1,1" &&
+        err(() => sb.splice(2, 2, 7, 8, 9)) === "TypeError: Cannot add property 4, object is not extensible" && sb.join() === "4,3,7,8" &&
+        err(() => na.splice(1, 1, 7, 8)) === "TypeError: Cannot add property 4, object is not extensible" &&
+        err(() => Object.freeze([5]).sort()) === "ok" && err(() => Object.freeze([5]).reverse()) === "ok" &&
+        [1, 2, 3].fill(0, 0, null).join() === "1,2,3")
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1224,6 +1282,7 @@ function main() {
     s43() // SECTION-CALL 43
     s101() // SECTION-CALL 101
     s102() // SECTION-CALL 102
+    s103() // SECTION-CALL 103
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

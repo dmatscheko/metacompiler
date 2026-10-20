@@ -621,19 +621,20 @@ check("class-static-inherited", (function() {
     return D.m(a[0]) === 2 && E.f === 2 && D.g === "g2" && E.callsWho() === "D"
         && D.viaSuper(a[2]) === 4 && typeof E.m === "function";
 })());
-// A sloppy function's `this` is the global object; a strict one's is undefined,
-// and a function declared inside a strict one inherits the flag.
-check("this-plain-call-sloppy", (function() { return this; })() === globalThis);
+// TypeScript code is strict (tsc's default output opens with "use strict"), so a
+// function called with no receiver has an undefined `this` whether or not it says
+// "use strict" itself, and a function declared inside one inherits the flag.
+check("this-plain-call-ts-strict", (function() { return this; })() === undefined);
 check("this-plain-call-strict", (function() { "use strict"; return this; })() === undefined);
-check("this-call-null-sloppy", (function() { return this; }).call(null) === globalThis);
+check("this-call-null-ts-strict", (function() { return this; }).call(null) === null);
 check("this-call-null-strict", (function() { "use strict"; return this; }).call(null) === null);
 check("this-strict-inherited", (function() { "use strict"; function inner() { return this; } return inner(); })() === undefined);
 check("this-class-body-strict", (function() { class K { m() { function inner() { return this; } return inner(); } } return (new K()).m(); })() === undefined);
 
 // ----- parentheses do not drop the receiver -----
 // `(o.m)()` is a call THROUGH A REFERENCE: the parentheses are transparent, so `this`
-// is o - while `(0, o.m)()` is the idiom for calling WITHOUT a receiver and must stay
-// the global object. The wide version of this is SECTION 43 of
+// is o - while `(0, o.m)()` is the idiom for calling WITHOUT a receiver, which in
+// strict code leaves `this` undefined. The wide version of this is SECTION 43 of
 // tests/typescript-test-full.ts.
 check("paren-receiver", (function(): boolean {
     var a: any[] = ["m", 1, 2];
@@ -644,7 +645,7 @@ check("paren-receiver", (function(): boolean {
     class D extends B { static viaParen(): any { return (super.s)() } }
     return (o.m)() === o && (o?.m)() === o && (o[a[0]])() === o && (o.m)`t` === o
         && arr.length === 2 && D.viaParen() === D
-        && (0, o.m)() === globalThis && (a[0] === "m" ? o.m : o.n)() === globalThis;
+        && (0, o.m)() === undefined && (a[0] === "m" ? o.m : o.n)() === undefined;
 })());
 
 // ----- a class's STATIC and INSTANCE namespaces -----

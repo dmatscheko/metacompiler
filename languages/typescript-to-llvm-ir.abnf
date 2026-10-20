@@ -12,9 +12,9 @@ completely.
 
 
 THE GOAL SYMBOL IS Script, as in js-to-llvm-ir.abnf (see the description of
-js-interpreter.abnf): sloppy unless 'use strict', no top level 'return', and the top
-level 'this' is the global object ('globalThis' names it; a plain object). A sloppy
-function called with no receiver gets the global object as its 'this'.
+js-interpreter.abnf): no top level 'return', and the top level 'this' is the global
+object ('globalThis' names it; a plain object). The whole program is STRICT code, as
+tsc's default output is (see typescript-interpreter.abnf's description).
 
 THE JAVASCRIPT LAYER is the practical ECMAScript 2022 syntax: the numeric literal forms
 (hex/binary/octal/separators/leading dot/BigInt - and BigInt is REAL: arbitrary precision,
@@ -142,10 +142,9 @@ The exit code of the metacompiler run is the value that main() returns, so the t
 programs are self checking: they return 0 on success.
 The same language is interpreted directly by typescript-interpreter.abnf.
 
-A plain `=` assignment to a name that was never declared becomes an implicit global
-(created in the root scope) through js_scope_set_or_create, matching the non-strict
-JavaScript semantics of typescript-interpreter.abnf. A compound assignment (+=, ++, ...)
-reads the old value first and so still requires a prior var/let/const declaration.") ;
+A plain `=` assignment to a name that was never declared is the ReferenceError of
+strict code (js_scope_set_strict), as in typescript-interpreter.abnf; there is no
+implicit global.") ;
 
 
 // --- main rules
@@ -962,7 +961,7 @@ ClassExpr   = DecoratedClassExpr | ClassExprLowered | ClassExprWidened ;
 // decorated value simply IS the value of the expression.
 DecoratedClassExpr <~~ push(makeDecoratedClassExpr(takeAll())) ~~>
             = Decorator { Decorator } ClassExprLowered ;
-ClassExprLowered <~~ push(makeClassExpr(takeAll())) ~~>
+ClassExprLowered <~~ push(makeClassExpr(takeAll(), up.in)) ~~>
             = [ "abstract" KwEnd ] KwClass ClassAnonName [ ClassExprName ] [ TypeParams ]
               [ KwExtends NotReserved Id <~~ push({ext: idName(up.in)}) ~~> [ TypeArgs ] ]
               [ KwImplements TypeList ] PrivBodyOpen { ClassMember } PrivBodyClose ;
@@ -972,7 +971,7 @@ ClassExprName <~~ curClassName = idName(up.in); push({cname: idName(up.in)}) ~~>
             = NotBindName Id ;
 // A class expression with a heritage EXPRESSION ('class extends f() {}'): the parent
 // arrives as a value thunk (ClassExt) instead of a name.
-ClassExprWidened <~~ push(makeClassExpr(takeAll())) ~~>
+ClassExprWidened <~~ push(makeClassExpr(takeAll(), up.in)) ~~>
             = [ "abstract" KwEnd ] KwClass ClassAnonName [ ClassExprName ] [ TypeParams ] KwExtends ClassExt
               [ KwImplements TypeList ] PrivBodyOpen { ClassMember } PrivBodyClose ;
 
@@ -1032,7 +1031,9 @@ ArrowParams <~~ push({aparams: takeAll()}) ~~>
             = [ TypeParams ] "(" [ ParamSeq ] ")" [ TypeAnnot ]
             | NotBindName Id <~~ push(idName(up.in)) ~~> ;
 ArrowBody   = ArrowBlock | ArrowExpr ;
-ArrowBlock  <~~ push({body: pop()}) ~~>  = FuncBody ;
+// A block body's own "use strict" prologue makes the arrow strict (bstrict).
+ArrowBlock  <~~ var ab = takeAll(); push({body: ab[ab.length - 1], bstrict: ab.length > 1}) ~~>
+            = [ UseStrictMark ] FuncBody ;
 ArrowExpr   <~~ push({ebody: pop()}) ~~> = AssignExpr ;
 
 // Template literals: `text ${expr} more`. Each ${...} is evaluated and coerced to
@@ -1493,7 +1494,10 @@ JsSqString  = "'" :whitespace() { JsStrEsc | SqPlain } <~~ push(makeConst(unesca
 // characters and would leave the break unconsumed.
 JsStrEsc    = "\\" ( JsHexEsc | JsUniEsc | JsLineCont | JsEscChar ) ;
 JsLineCont  = "\r\n" | "\n" | "\r" | "\u2028" | "\u2029" ;
-JsEscChar   = !"x" !"u" !"8" !"9" "\x20"..b"\x7e" ;
+// TypeScript code is strict, so unlike JavaScript's the legacy OCTAL escapes ('\1',
+// '\101', and '\0' with a digit behind it) are syntax errors here, as tsc's TS1487 says.
+JsEscChar   = "0" !"0" !"1" !"2" !"3" !"4" !"5" !"6" !"7" !"8" !"9"
+            | !"x" !"u" !"0" !"1" !"2" !"3" !"4" !"5" !"6" !"7" !"8" !"9" "\x20"..b"\x7e" ;
 
 // See the twin of this comment in js-to-llvm-ir.abnf.
 JsHexEsc    = "x" HexDigit HexDigit ;
@@ -3061,7 +3065,6 @@ NotFuncHead = :script(~~
     // ----- Strict mode, per FUNCTION -----
     // See the twin of this comment in js-to-llvm-ir.abnf.
     var emitStrict = false
-    var fileStrict = false // The Script's own directive prologue; set by buildMain.
     // See the twin of this comment in js-to-llvm-ir.abnf.
     function itemsStrict(items) {
         for (var i = 0; i < items.length; i++) {
@@ -3150,7 +3153,7 @@ NotFuncHead = :script(~~
     }
     // An async arrow: the same items as makeArrow, wrapped by js_jsasyncfn.
     function makeAsyncArrow(items, txt) {
-        return makeAsyncFn(items[0].aparams, arrowBody(items[1]), true, false, "", txt)
+        return makeAsyncFn(items[0].aparams, arrowBody(items[1]), true, items[1].bstrict === true, "", txt)
     }
     // items = [name?, params, bodyThunk] - the optional name of a function EXPRESSION is
     // recorded and bound only inside its body, so the last two items are what matters.
@@ -4081,8 +4084,9 @@ NotFuncHead = :script(~~
     function makeArrow(items, txt) {
         var params = items[0].aparams
         var bodyT = arrowBody(items[1])
+        var own = items[1].bstrict === true
         return fnDef(function(b) {
-            var idx = emitFunction(params, bodyT, false, true, false, true)
+            var idx = emitFunction(params, bodyT, false, true, own, true)
             return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
         }, "", params, txt)
     }
@@ -5079,6 +5083,7 @@ NotFuncHead = :script(~~
             else if (m.statik) { info.sinits.push(m) }
             else { info.fields.push(m) }
         }
+        info.shown = [info.name] // The class's `name`; makeClassExpr refines it.
         return info
     }
     // Build the descriptor object, bind it under the class name, then attach the
@@ -5095,7 +5100,7 @@ NotFuncHead = :script(~~
         }
         var clsV = callExt(b, "js_obj_new", [])
         clsRawSet(b, clsV, emitStr(b, "__isclass"), hTrue)
-        clsRawSet(b, clsV, emitStr(b, "__name"), emitStr(b, info.name))
+        clsRawSet(b, clsV, emitStr(b, "__name"), emitStr(b, info.shown[0]))
         // See the twin of this comment in js-to-llvm-ir.abnf.
         var statsV = callExt(b, "js_jsstatics", [clsV])
         if (info.superName != null) {
@@ -5109,7 +5114,10 @@ NotFuncHead = :script(~~
         } else {
             ctorIdx = emitClassFunc([], null, true, info.fields, info.superName, null, info.superName != null)
         }
-        clsRawSet(b, clsV, emitStr(b, "__ctor"), callExt(b, "js_closure", [handle(ctorIdx), curScopeV]))
+        // The constructor's arity is the class's `length`.
+        var ctorClo = callExt(b, "js_closure", [handle(ctorIdx), curScopeV])
+        if (info.ctor != null) { ctorClo = fnMetaAt(b, ctorClo, "", info.ctor.params) }
+        clsRawSet(b, clsV, emitStr(b, "__ctor"), ctorClo)
         // See the twin of this comment in js-to-llvm-ir.abnf.
         for (var mi = 0; mi < info.protos.length; mi++) {
             var mm = info.protos[mi]
@@ -5189,8 +5197,14 @@ NotFuncHead = :script(~~
         exportNames = [info.name]
         return function(b) { return emitClass(b, info).b }
     }
-    function makeClassExpr(items) {
+    // An anonymous class expression's `name` is "" - not ClassAnonName's synthetic one -
+    // or the name of the binding it is assigned to (NamedEvaluation, see fnAnonNote).
+    // Twin of makeClassValue in the -interpreter.abnf.
+    function makeClassExpr(items, txt) {
         var info = makeClassInfo(items)
+        var anon = info.name.substring(0, 6) == "0class"
+        info.shown = [anon ? "" : info.name]
+        fnAnonNote(info.shown, info.shown[0], txt)
         return function(b) { return emitClass(b, info) }
     }
     // 'new.target'.
@@ -5604,7 +5618,13 @@ NotFuncHead = :script(~~
         return false
     }
     function nsGetExt(name) { return nsIsVar(name) ? "js_jswithget" : "js_scope_get" }
-    function nsSetExt(name, ext) { return nsIsVar(name) ? "js_jswithset" : ext }
+    // Every store to a bare name goes through here. TypeScript code is strict, so the
+    // implicit global of a plain `=` is the ReferenceError of a name no scope binds
+    // (js_scope_set_strict). Twin of setVar in typescript-interpreter.abnf.
+    function nsSetExt(name, ext) {
+        if (nsIsVar(name)) { return "js_jswithset" }
+        return (ext == "js_scope_set_or_create") ? "js_scope_set_strict" : ext
+    }
     // A declarator's store: onto the namespace object when it is an exported variable's
     // (and only with an initializer - 'export let x;' creates no property, as in tsc),
     // else the declaration `ext` makes.
@@ -6462,7 +6482,8 @@ NotFuncHead = :script(~~
         var tb = tf.NewBlock("entry")
         tb.NewRet(tb.NewCall(getExtern("js_jserrstr", 1),
                              [tb.NewCall(getExtern("js_arg", 2), [tf.Params[1], handle(0)])]))
-        var ctorV = callExt(b, "js_closure", [handle(ciIdx), curScopeV])
+        // Every builtin Error constructor has length 1.
+        var ctorV = callExt(b, "js_jsfnmeta", [callExt(b, "js_closure", [handle(ciIdx), curScopeV]), emitStr(b, ""), emitNum(b, 1)])
         var tsV = callExt(b, "js_closure", [handle(tsIdx), curScopeV])
         // See the twin of this comment in js-to-llvm-ir.abnf.
         for (var ei = 0; ei < jsErrClassNames.length; ei++) {
@@ -6545,10 +6566,12 @@ NotFuncHead = :script(~~
         // See the twin of this comment in js-to-llvm-ir.abnf.
         var items = []
         for (var bi = 0; bi < itemsIn.length; bi++) {
-            if (itemsIn[bi] != undefined && itemsIn[bi].ustrict == true) { fileStrict = true; continue }
+            if (itemsIn[bi] != undefined && itemsIn[bi].ustrict == true) { continue }
             items.push(itemsIn[bi])
         }
-        emitStrict = fileStrict
+        // A TypeScript program is strict from its first line, because tsc's default
+        // output opens with "use strict". Twin of strictAt in typescript-interpreter.abnf.
+        emitStrict = true
         // Every var and function no function body claimed is the program's own, hoisted
         // in front of its statements.
         var topFns = hoistClaimFns(0, 2147483647)

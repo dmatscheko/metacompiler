@@ -1444,7 +1444,7 @@ var jsReclaimable = map[string]bool{"js_scope_new": true, "js_arr_new": true}
 // never correctness.
 var jsThroughArgs = map[string]uint32{
 	"js_scope_new": 1 << 0, "js_scope_decl": 1 << 0, "js_scope_get": 1 << 0, "js_scope_cget": 1 << 1,
-	"js_scope_set": 1 << 0, "js_scope_set_or_create": 1 << 0, "js_scope_own": 1 << 0,
+	"js_scope_set": 1 << 0, "js_scope_set_or_create": 1 << 0, "js_scope_set_strict": 1 << 0, "js_scope_own": 1 << 0,
 	"js_kget": 1 << 0, "js_kset": 1 << 0, "js_tdecl": 1 << 0, "js_tset": 1 << 0,
 	"js_pyset_var": 1 << 0, "js_pyglobal": 1 << 0, "js_pynonlocal": 1 << 0,
 
@@ -2626,6 +2626,26 @@ func (rt *jsrt) scopeSetOrCreate(sc *jsScope, name string, v interface{}) {
 	if rt.traced {
 		rt.trVar("decl", name, v)
 	}
+}
+
+// scopeSetStrict is the same store in STRICT JavaScript: a name that is nowhere in
+// the chain is not created but is the ReferenceError a read of it raises, which the
+// language's missVar hook answers. Twin of js_scope_set_strict in
+// languages/lib/runtime.c.
+func (rt *jsrt) scopeSetStrict(sc *jsScope, name string, v interface{}) {
+	for s := sc; s != nil; s = s.parent {
+		if s.has(name) {
+			s.put(name, v)
+			if rt.traced {
+				rt.trVar("write", name, v)
+			}
+			return
+		}
+	}
+	if exc, ok := rt.runMissHook(&rt.missVar, name); ok {
+		panic(&jsThrown{value: exc})
+	}
+	rt.fail("assignment to undeclared variable: %s", name)
 }
 
 // typeClass returns the fixed type class of a value for MetaJS type pinning.
@@ -13147,6 +13167,11 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// plain `=` assignment; see scopeSetOrCreate.
 		"js_scope_set_or_create": func(a []uint64) uint64 {
 			rt.scopeSetOrCreate(rt.scopeOf(a[0]), rt.toString(u(a[1])), u(a[2]))
+			return 0
+		},
+		// Strict JavaScript's plain `=` to a name: see scopeSetStrict.
+		"js_scope_set_strict": func(a []uint64) uint64 {
+			rt.scopeSetStrict(rt.scopeOf(a[0]), rt.toString(u(a[1])), u(a[2]))
 			return 0
 		},
 

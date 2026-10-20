@@ -179,8 +179,9 @@ func jsvPrivateKey(k string) bool {
 
 // The value of a member read on a class descriptor: the static chain, an accessor
 // unwrapped against the receiver the read started from (node runs `static get g()`
-// with `this` bound to the SUBCLASS), and `name` last - every class object has one,
-// and it is the descriptor's __name unless a `static name` member shadows it.
+// with `this` bound to the SUBCLASS), and `name` and `length` last - every class
+// object has both, the descriptor's __name and its constructor's arity, unless a
+// static member shadows them.
 // Object.prototype's methods are inherited by a class object too, so they read
 // as the same shim js_jsmcall's class arm applies. Anything else is undefined, as
 // node says. Twins: jvStaticSideRead in languages/lib/js-rt.metajs, getMember's
@@ -199,6 +200,9 @@ func (rt *jsrt) jsvStaticSideRead(o *jsObject, name string) uint64 {
 		if n, has := o.props["__name"]; has {
 			return rt.wrap(n)
 		}
+	}
+	if name == "length" {
+		return rt.wrap(float64(jsvFnMeta(o.props["__ctor"]).length))
 	}
 	if jsvIsProtoName(name) {
 		return rt.wrap(jsvProtoShim(name))
@@ -938,17 +942,69 @@ func (rt *jsrt) jsvDeleteRefusal(o interface{}, key string) string {
 var jsvRefused = ""
 
 // jsvArrMethodRefusal is the TypeError an Array method meets on an array of
-// integrity level lv, or "" when it runs; a sealed array's shift or shrinking splice
-// first moves the elements down.
+// integrity level lv, or "" when it runs: the spec's first refused Set or
+// DeletePropertyOrThrow, after making the writes the level allows before it. Twin of
+// jsArrMethodRefusal in both *-interpreter.abnf.
 func (rt *jsrt) jsvArrMethodRefusal(a *jsArray, name string, args []interface{}, lv int) string {
 	n := len(a.elems)
 	switch name {
 	case "push", "unshift":
-		if len(args) > 0 {
-			return jsvAddText(strconv.Itoa(n))
+		if len(args) == 0 {
+			if lv == 3 {
+				return rt.jsvRoText(a, "length")
+			}
+			return ""
 		}
-		return ""
-	case "pop", "shift", "splice", "sort", "reverse", "fill", "copyWithin":
+		if name == "unshift" && n > 0 {
+			return jsvAddText(strconv.Itoa(n + len(args) - 1))
+		}
+		return jsvAddText(strconv.Itoa(n))
+	case "splice":
+		st := n
+		if len(args) > 0 {
+			st = jsvRelIndex(rt.toNumber(args[0]), n)
+		}
+		dc := n - st
+		if len(args) > 1 {
+			dc = jsToInt(rt.toNumber(args[1]))
+		}
+		if dc < 0 {
+			dc = 0
+		}
+		if dc > n-st {
+			dc = n - st
+		}
+		ins := 0
+		if len(args) > 2 {
+			ins = len(args) - 2
+		}
+		tail := st+dc < n
+		switch {
+		case ins > dc && tail:
+			return jsvAddText(strconv.Itoa(n - dc + ins - 1))
+		case ins > dc && lv == 3 && dc > 0:
+			return rt.jsvRoText(a, strconv.Itoa(st))
+		case ins > dc:
+			a.dropIdx()
+			copy(a.elems[st:], args[2:2+dc])
+			return jsvAddText(strconv.Itoa(n))
+		case lv == 1:
+			return ""
+		case ins < dc && lv == 3 && tail:
+			return rt.jsvRoText(a, strconv.Itoa(st+ins))
+		case ins < dc:
+			if lv < 3 {
+				a.dropIdx()
+				copy(a.elems[st+ins:], a.elems[st+dc:])
+			}
+			return rt.jsvDelText(a, strconv.Itoa(n-1))
+		case lv < 3:
+			return ""
+		case ins > 0:
+			return rt.jsvRoText(a, strconv.Itoa(st))
+		}
+		return rt.jsvRoText(a, "length")
+	case "pop", "shift", "sort", "reverse", "fill", "copyWithin":
 	default:
 		return ""
 	}
@@ -970,42 +1026,49 @@ func (rt *jsrt) jsvArrMethodRefusal(a *jsArray, name string, args []interface{},
 			rt.jsvArrMoveDown(a, name, args)
 		}
 		return rt.jsvDelText(a, strconv.Itoa(n-1))
-	case "splice":
-		st := n
-		if len(args) > 0 {
-			st = jsvRelIndex(rt.toNumber(args[0]), n)
-		}
-		dc := n - st
-		if len(args) > 1 {
-			dc = jsToInt(rt.toNumber(args[1]))
-		}
-		if dc < 0 {
-			dc = 0
-		}
-		if dc > n-st {
-			dc = n - st
-		}
-		ins := 0
-		if len(args) > 2 {
-			ins = len(args) - 2
-		}
-		switch {
-		case lv == 3 && dc == 0 && ins == 0:
-			return rt.jsvRoText(a, "length")
-		case lv == 3:
-			return rt.jsvRoText(a, strconv.Itoa(st))
-		case ins > dc:
-			return jsvAddText(strconv.Itoa(n))
-		case ins < dc:
-			rt.jsvArrMoveDown(a, name, args)
-			return rt.jsvDelText(a, strconv.Itoa(n-1))
-		}
+	}
+	if lv < 3 {
 		return ""
 	}
-	if lv == 3 && n > 0 {
-		return rt.jsvRoText(a, "0")
+	first := -1
+	switch name {
+	case "fill":
+		begin := jsvRelIndex(rt.jsvNumArg(args, 1, 0), n)
+		end := n
+		if len(args) > 2 && args[2] != jsUndef {
+			end = jsvRelIndex(rt.jsvToNum(args[2]), n)
+		}
+		if begin < end {
+			first = begin
+		}
+	case "copyWithin":
+		to := jsvRelIndex(rt.jsvNumArg(args, 0, 0), n)
+		from := jsvRelIndex(rt.jsvNumArg(args, 1, 0), n)
+		end := n
+		if len(args) > 2 && args[2] != jsUndef {
+			end = jsvRelIndex(rt.jsvToNum(args[2]), n)
+		}
+		count := end - from
+		if n-to < count {
+			count = n - to
+		}
+		// An overlapping copy to a higher index runs backwards from its last slot.
+		if count > 0 && from < to && to < from+count {
+			first = to + count - 1
+		} else if count > 0 {
+			first = to
+		}
+	case "reverse", "sort":
+		// V8's sort, unlike the spec's, writes nothing back for fewer than two
+		// elements.
+		if n > 1 {
+			first = 0
+		}
 	}
-	return ""
+	if first < 0 {
+		return ""
+	}
+	return rt.jsvRoText(a, strconv.Itoa(first))
 }
 
 // jsvArrMoveDown writes the elements a shrinking method leaves over a, keeping its
@@ -1121,7 +1184,8 @@ func jsvObjProtoName(k string) bool {
 // languages/lib/js-rt.metajs.
 var jsvStaticNames = map[string][]string{
 	"Object": {"assign", "create", "entries", "freeze", "fromEntries", "getOwnPropertyNames", "getOwnPropertySymbols", "groupBy",
-		"hasOwn", "is", "keys", "seal", "values", "defineProperties", "defineProperty", "getPrototypeOf", "setPrototypeOf"},
+		"hasOwn", "is", "keys", "seal", "values", "defineProperties", "defineProperty", "getPrototypeOf", "setPrototypeOf",
+		"preventExtensions", "isExtensible", "isFrozen", "isSealed", "getOwnPropertyDescriptor", "getOwnPropertyDescriptors"},
 	"String":  {"fromCharCode", "fromCodePoint", "raw"},
 	"Promise": {"resolve", "reject", "all", "allSettled", "race", "any"},
 	"Array":   {"isArray"},
@@ -1131,7 +1195,8 @@ var jsvStaticNames = map[string][]string{
 
 // jsvStaticLen2: the statics whose node length is 2; every other one's is 1 but
 // Object.defineProperty's, which is 3.
-var jsvStaticLen2 = []string{"assign", "create", "is", "hasOwn", "groupBy", "parseInt", "defineProperties", "setPrototypeOf"}
+var jsvStaticLen2 = []string{"assign", "create", "is", "hasOwn", "groupBy", "parseInt", "defineProperties", "setPrototypeOf",
+	"getOwnPropertyDescriptor"}
 
 // jsvNumberConst: Number's constant members. Twins: jsNumberConst in both
 // *-interpreter.abnf, jvNumberConst in languages/lib/js-rt.metajs.
@@ -3795,7 +3860,7 @@ func (rt *jsrt) jsvArrayMethod(a *jsArray, name string, args []interface{}) (int
 		if len(args) > 1 && !isUndefOrNull(args[1]) {
 			begin = jsvRelIndex(rt.toNumber(args[1]), n)
 		}
-		if len(args) > 2 && !isUndefOrNull(args[2]) {
+		if len(args) > 2 && args[2] != jsUndef {
 			end = jsvRelIndex(rt.toNumber(args[2]), n)
 		}
 		for i := begin; i < end; i++ {

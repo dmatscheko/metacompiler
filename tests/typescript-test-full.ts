@@ -952,11 +952,9 @@ function s28(): void {
     debugger;
     check("dbg1", n === 1);
 
-    // The Annex B legacy OCTAL string escape. The one-digit form is octal on its own -
-    // '"\1"' is U+0001, not the character '1' - and only '\0' with nothing after it is the
-    // NUL escape.
-    check("oct1", "\1".charCodeAt(0) === 1 && "\1".length === 1);
-    check("oct2", "\101" === "A" && "\0".charCodeAt(0) === 0 && "\0".length === 1);
+    // '\0' with no digit behind it is the NUL escape; the legacy octal escapes are
+    // syntax errors in strict code, which TypeScript is.
+    check("oct2", "\0".charCodeAt(0) === 0 && "\0".length === 1);
 }
 
 // ===== SECTION 29: shapes TypeScript parses and then refuses =====
@@ -1174,15 +1172,16 @@ function s33(): void {
     const t: any = { toString: function (): string { return "T"; } };
     check("tpl8", `a${t}b${t}c` === "aTbTc");
 
-    // The implicit global. A plain `=` to a name that is on NO scope of the chain
-    // creates the binding in the ROOT scope (js_scope_set_or_create), so it outlives
-    // the function that wrote it. js_scope_typeof cannot be used to build this in an
-    // emitter - it answers "undefined" for an absent name and for a slot HOLDING
-    // undefined alike - which is why the C floor carries the walk itself.
-    check("ig1", mkGlobal33() === 100);
-    check("ig2", implicitGlobal33 === 100);
-    implicitGlobal33 = implicitGlobal33 + 1;
-    check("ig3", bumpGlobal33() === 102 && implicitGlobal33 === 102);
+    // No implicit global: TypeScript code is strict, so a plain `=` to a name that is
+    // on NO scope of the chain is node's ReferenceError (js_scope_set_strict), and the
+    // name stays unbound. tsc reports the name too (TS2304) and emits the store as it is.
+    let ige: string = "";
+    try { mkGlobal33(); } catch (e: any) { ige = e.constructor.name + ": " + e.message; }
+    check("ig1", ige === "ReferenceError: implicitGlobal33 is not defined");
+    check("ig2", typeof implicitGlobal33 === "undefined");
+    let ige2: string = "";
+    try { [implicitGlobal33] = [1]; } catch (e: any) { ige2 = e.constructor.name; }
+    check("ig3", ige2 === "ReferenceError" && typeof implicitGlobal33 === "undefined");
     // An assignment that DOES find the name on the chain must not shadow it in the
     // root: this is the arm js_pyset_var and js_scope_set_or_create agree on.
     let outer: number = 1;
@@ -1192,10 +1191,6 @@ function s33(): void {
 }
 function mkGlobal33(): number {
     implicitGlobal33 = 100;
-    return implicitGlobal33;
-}
-function bumpGlobal33(): number {
-    implicitGlobal33 = implicitGlobal33 + 1;
     return implicitGlobal33;
 }
 function keyStr33(o: any): string {
@@ -2303,11 +2298,12 @@ function s41() {
 
 // ===== SECTION 42: the top-level 'this' is the global object (the Script goal) =====
 // These grammars parse the SCRIPT goal symbol - the Annex B HTML-like comments are
-// accepted (B.1.3 admits them in a Script only), the code is sloppy unless a
-// "use strict" directive says otherwise, and top-level `return` is a syntax error,
+// accepted (B.1.3 admits them in a Script only), the code is strict as tsc's default
+// output ("use strict" first) is, and top-level `return` is a syntax error,
 // which rules out the CommonJS wrapper node's `--check` puts around a file. So the
 // top-level `this` is the GLOBAL OBJECT, and every value below is
-// `node -e 'vm.runInThisContext(src)'`'s, except where a comment says otherwise.
+// `node -e 'vm.runInThisContext(src)'`'s for tsc 6.0.3's default output, except where a
+// comment says otherwise.
 var s42this = this
 var s42arrow = () => this
 var s42nested = () => (() => this)()
@@ -2357,15 +2353,13 @@ function s42() {
     var lit = {t: "L", m: function () { return this.t }}
     check("gthis15", lit.m() === "L")
 
-    // OrdinaryCallBindThis (ES2023 10.2.1.2), the per-function STRICT-MODE flag.
-    // Every value below is `new vm.Script(src)`'s.
-    check("gthis16", s42plain() === globalThis)
-    check("gthis18", s42plain.call(null) === globalThis)
-    check("gthis19", s42plain.call(undefined) === globalThis)
-    check("gthis20", s42plain.apply(null, []) === globalThis)
-    // A STRICT function keeps whatever the call site handed over, undefined and
-    // null included - which is what a flag that is per FUNCTION and not per file
-    // is for: this one sits in the same sloppy Script as the row above it.
+    // OrdinaryCallBindThis (ES2023 10.2.1.2) in strict code: a function keeps whatever
+    // the call site handed over, undefined and null included, whether or not its own
+    // body says "use strict". Every value below is `new vm.Script(src)`'s.
+    check("gthis16", s42plain() === undefined)
+    check("gthis18", s42plain.call(null) === null)
+    check("gthis19", s42plain.call(undefined) === undefined)
+    check("gthis20", s42plain.apply(null, []) === null)
     check("gthis21", s42strict() === undefined)
     check("gthis22", s42strict.call(null) === null)
     check("gthis23", s42strict.call(7) === 7)
@@ -2374,16 +2368,15 @@ function s42() {
     // BODY is strict too (class code always is).
     check("gthis24", s42outer() === undefined)
     check("gthis25", (new s42K()).mk() === undefined)
-    // ...while a function nested in an ordinary sloppy one stays sloppy.
-    check("gthis26", s42sloppyOuter() === globalThis)
-    // An ARROW binds no `this` of its own, so it reports the enclosing FUNCTION's -
-    // which is the global object when that function is sloppy and undefined when
-    // it is strict.
-    check("gthis27", s42arrowIn() === globalThis)
+    // ...and so is one nested in a function without a directive of its own.
+    check("gthis26", s42sloppyOuter() === undefined)
+    // An ARROW binds no `this` of its own, so it reports the enclosing FUNCTION's,
+    // undefined for a plain call.
+    check("gthis27", s42arrowIn() === undefined)
     check("gthis28", s42arrowInStrict() === undefined)
     // An object-literal method, and a getter, are functions of the enclosing code's
     // strictness like any other.
-    check("gthis29", s42litm.q.call(null) === globalThis)
+    check("gthis29", s42litm.q.call(null) === null)
     // A sloppy GENERATOR binds `this` the same way in the interpreter half and
     // under llvm.Run - and NOT in the native build, which is why there is no
     // assertion here. `js_this` is one global slot in layer 2, and the emitter arms
@@ -2463,16 +2456,16 @@ function s43(): void {
     // The type-layer suffixes are erased, so they change nothing about the receiver.
     check("paren21", (o.m as any)() === "o");
     check("paren22", (o.m!)() === "o");
-    // ...and the NEGATIVE side: a value, not a Reference, so `this` is the global object
-    // in this sloppy Script.
+    // ...and the NEGATIVE side: a value, not a Reference, so `this` is undefined in
+    // strict code.
     var f: any = o.m;
-    check("paren23", f() === "GLOBAL");
-    check("paren24", (f)() === "GLOBAL");
-    check("paren25", (0, o.m)() === "GLOBAL");
-    check("paren26", (s43a[0] === "m" ? o.m : o.n)() === "GLOBAL");
-    check("paren27", (o.m, o.n)() === "GLOBAL");
-    check("paren28", (o.m || o.n)() === "GLOBAL");
-    check("paren29", (o.m = o.n, o.n)() === "GLOBAL");
+    check("paren23", f() === "undefined");
+    check("paren24", (f)() === "undefined");
+    check("paren25", (0, o.m)() === "undefined");
+    check("paren26", (s43a[0] === "m" ? o.m : o.n)() === "undefined");
+    check("paren27", (o.m, o.n)() === "undefined");
+    check("paren28", (o.m || o.n)() === "undefined");
+    check("paren29", (o.m = o.n, o.n)() === "undefined");
     // V8 prints the callee's source text without the parentheses; so does siteTexts.
     check("paren30", (function (): string {
         try { (o.nope)(); return "no" } catch (e: any) { return e.message }
@@ -2958,9 +2951,10 @@ function s48() {
     var fnKeys = [];
     for (var fk in fnDecl) { fnKeys.push(fk) }
     check("fnm30", fnKeys.length === 0);
-    // Both are NON-WRITABLE: the write is dropped, silently, as it is in sloppy node.
-    fnDecl.name = "zzz";
-    fnDecl.length = 99;
+    // Both are NON-WRITABLE, so the write does not land. node raises a TypeError for it
+    // in strict code, which these engines do not: they drop it.
+    try { fnDecl.name = "zzz"; } catch (e) { }
+    try { fnDecl.length = 99; } catch (e) { }
     check("fnm31", fnDecl.name === "fnDecl" && fnDecl.length === 1);
     // ...and a function can still carry own properties of its own beside them.
     fnZero.tag = 7;
@@ -3581,7 +3575,8 @@ function s71() {
 // ===== SECTION 72: an exported namespace variable as a callee, and before it is set =====
 // tsc compiles a call of an exported variable by bare name inside its namespace to
 // 'N72.f()', so the function runs with the namespace object as `this` - unlike an
-// exported FUNCTION, which keeps its bare call, or a parameter of the same name. And an
+// exported FUNCTION, which keeps its bare call, or a parameter of the same name, whose
+// `this` is undefined (strict code). And an
 // exported variable declared without an initializer is not a property until something
 // is stored in it ('N72.later = v'). Values read off node 24 (through tsc 6.0.3's
 // output).
@@ -3600,7 +3595,7 @@ namespace N72 {
 }
 namespace N72 { export function late(): void { hoisted = "h"; } }
 function s72() {
-    check("ns72a", N72.calls() === "NNNNNobject" && N72.shadow(N72.f) === "object" && N72.In.calls() === "InN");
+    check("ns72a", N72.calls() === "NNNNNundefined" && N72.shadow(N72.f) === "undefined" && N72.In.calls() === "InN");
     const vars = (): string => Object.keys(N72).filter(k => typeof (N72 as any)[k] != "function" && k != "In").join();
     check("ns72b", vars() === "" && !("later" in N72) && !N72.hasOwnProperty("hoisted") && JSON.stringify(N72) === '{"In":{}}');
     N72.fill();
@@ -3650,13 +3645,11 @@ function s73() {
 // A function declaration is instantiated when its scope is entered, before any
 // statement runs: callable above it in a function body, at the top level and in a
 // namespace body (where an exported one reaches the object only where it stands, as
-// tsc's 'N.f = f' does), and in a block from the block's first statement. Sloppy code
-// also gives a plain function declared in a block a var of the function, undefined
-// until the declaration is evaluated in place - not when a let of the name encloses
-// it, a parameter has the name, or the code is strict. A type assertion inside a
+// tsc's 'N.f = f' does), and in a block from the block's first statement. A function
+// declared in a block is the block's own: TypeScript code is strict, so Annex B's var
+// of the function outside the block does not exist. A type assertion inside a
 // parenthesized assignment target is erased: '(f as any) = g' stores to f. Values read
-// off node 24 (through tsc 6.0.3's output, alwaysStrict off as this grammar's Script
-// goal is sloppy).
+// off node 24 (through tsc 6.0.3's default output).
 var s74top: string = typeof s74tf + s74tf();
 function s74tf(): number { return 4; }
 namespace N74 {
@@ -3672,12 +3665,12 @@ function s74() {
     const f3 = function (): any { let h: any = 1; { function h() {} } return h; };
     const f4 = function (h: any): any { { function h() {} } return h; };
     const f5 = function (): string { "use strict"; { function h() {} } return typeof h; };
-    check("fh74a", f1() === "function1" && f2() === "undefinedfunction2function" && f3() === 1 && f4(7) === 7 &&
-        f5() === "undefined" && s74top === "function4" && N74.early === "functionundefinedk" && N74.late === "function");
+    check("fh74a", f1() === "function1" && f2() === "undefinedfunction2undefined" && f3() === 1 && f4(7) === 7 &&
+        f5() === "undefined" && s74top === "function4" && N74.early === "functionundefinedk" && N74.late === "undefined");
     const f6 = function (k: number): string { switch (k) { case 1: return typeof q; case 2: function q() {} } return typeof q; };
     const f7 = function (): string { var r: string; try { throw 1; } catch (h) { { function h() {} } r = typeof h; } return r + typeof h; };
     const f8 = (): string => { return af(); function af(): string { return "arrow"; } };
-    check("fh74b", f6(1) === "function" && f6(2) === "function" && f6(3) === "undefined" && f7() === "numberfunction" &&
+    check("fh74b", f6(1) === "function" && f6(2) === "undefined" && f6(3) === "undefined" && f7() === "numberundefined" &&
         f8() === "arrow");
     let fa: any = 1;
     (fa as any) = (): number => 7;
@@ -4016,13 +4009,11 @@ function s82() {
         err(() => structuredClone(s)) === "DataCloneError:Symbol(q) could not be cloned.");
 }
 
-// ===== SECTION 83: the arguments object's length, and the mapped arguments of a sloppy function =====
-// `length` is the argument count whatever is written to the elements; in a sloppy
-// function with plain parameters, parameter i and arguments[i] are one value below
-// that count, in both directions. Strict code, defaults, rest parameters and methods
-// are unmapped. Values read off node 24's type stripping, which keeps the file sloppy as
-// these grammars do; tsc 6 output starts with "use strict" (alwaysStrict), where none of
-// it is mapped.
+// ===== SECTION 83: the arguments object's length, and unmapped arguments =====
+// `length` is the argument count whatever is written to the elements. TypeScript code is
+// strict (tsc 6's output starts with "use strict"), so no arguments object is MAPPED:
+// a parameter and arguments[i] are two values that a write to either leaves apart.
+// Values read off node 24 running tsc 6.0.3's default output.
 function s83() {
     const v: any[] = [1, 2, 3];
     function l1(...xs: any[]): string { return ""; }
@@ -4037,8 +4028,8 @@ function s83() {
     function m6(p: any): any { (function () { p = 4; })(); return arguments[0]; }
     function m7(p: any): any { const g = () => { arguments[0] = 6; }; g(); return p; }
     function m9(p: any): any { [p] = [3]; return arguments[0]; }
-    check("ar83b", m1(v[0]) === 5 && m2(v[0]) === 9 && m3(v[0]) === "1:undefined" && m3(v[0], v[1]) === "2:7" &&
-        m4(v[0]) === 12 && m5(v[0]) === "8:8" && m6(v[0]) === 4 && m7(v[0]) === 6 && m9(v[0]) === 3 &&
+    check("ar83b", m1(v[0]) === 1 && m2(v[0]) === 1 && m3(v[0]) === "1:undefined" && m3(v[0], v[1]) === "2:2" &&
+        m4(v[0]) === 1 && m5(v[0]) === "1:8" && m6(v[0]) === 1 && m7(v[0]) === 1 && m9(v[0]) === 1 &&
         m1() === undefined && m2() === undefined);
     function u1(p: any): any { "use strict"; p = 5; return arguments[0]; }
     function u2(p: any = 0): any { p = 5; return arguments[0]; }
@@ -4091,9 +4082,9 @@ function s84(): void {
 }
 
 // ===== SECTION 85: the arguments object through other references, past its length; "__#" keys =====
-// A store through another reference to a mapped arguments object reaches the parameter,
-// a generator's and an async function's arguments are mapped too, and `delete` ends an
-// element's mapping. `length` is an ordinary property: writing it leaves the elements
+// A store through another reference to the arguments object does not reach the
+// parameter, a generator's included: strict code has no mapped arguments. `length` is
+// an ordinary property: writing it leaves the elements
 // alone, and an iteration, a spread, apply and an Array method read up to it, while the
 // own keys are the elements that hold a value. Number.parseInt and parseFloat are the
 // globals. A program's own "__#" key is a key like any other. Values read off node 24.
@@ -4107,8 +4098,8 @@ function s85(): void {
     function d1(p?: any): any { delete arguments[0]; p = 3; return arguments[0] + ":" + p }
     function d2(p?: any): any { delete arguments[0]; arguments[0] = 9; return p }
     const it2 = g2(v[0])
-    check("ag85a", a1(v[0]) === 2 && a2(v[0]) === 4 && a3(v[0]) === 6 && g1(v[0]).next().value === 5 &&
-        it2.next().value === 6 && it2.next().value === 6 && d1(v[0]) === "undefined:3" && d2(v[0]) === 1)
+    check("ag85a", a1(v[0]) === 1 && a2(v[0]) === 1 && a3(v[0]) === 1 && g1(v[0]).next().value === 1 &&
+        it2.next().value === 1 && it2.next().value === 1 && d1(v[0]) === "undefined:3" && d2(v[0]) === 1)
     function sum(...xs: any[]): any { let s = 0; for (let i = 0; i < arguments.length; i++) { s += arguments[i] } return s }
     function k1(...xs: any[]): string {
         arguments[2] = 1
@@ -4123,7 +4114,7 @@ function s85(): void {
     function t2(p?: any): string { arguments.length = 3; return [...arguments].join("|") + ":" + Object.keys(arguments).length + ":" + Array.from(arguments).length }
     function t3(p?: any, q?: any): string { arguments.length = 1; q = 9; return arguments[1] + ":" + [...arguments].length }
     function t4(...xs: any[]): string { return Object.getOwnPropertyNames(arguments).join() }
-    check("ag85c", t1(v[0], 7) === "0:1:0:01" && t2(v[0]) === "1||:1:3" && t3(v[0], v[1]) === "9:1" &&
+    check("ag85c", t1(v[0], 7) === "0:1:0:01" && t2(v[0]) === "1||:1:3" && t3(v[0], v[1]) === "2:1" &&
         t4(v[0], v[1]) === "0,1,length,callee" && Object.getOwnPropertyNames(v).join() === "0,1,2,length")
     check("ag85d", Number.parseInt === parseInt && Number.parseFloat === parseFloat && parseInt.length === 2 &&
         parseFloat.length === 1 && parseInt.name === "parseInt" && Number.parseFloat.name === "parseFloat")
@@ -4433,14 +4424,16 @@ function s94() {
     const vals: number[] = [1, 2, 3];
     const d: any = {};
     Object.defineProperty(d, "x", { value: vals[0] });
-    d.x = vals[1];
-    const delx = delete d.x;
+    let wmsg = "", dmsg = "";
+    try { d.x = vals[1]; } catch (e: any) { wmsg = e.message; }
+    try { delete d.x; } catch (e: any) { dmsg = e.message; }
     let msg = "";
     try { Object.defineProperty(d, "x", { value: vals[2] }); } catch (e: any) { msg = e.message; }
     const h: any = { a: 1 };
     Object.defineProperty(h, "h", { value: vals[0] });
     h.b = 2;
-    check("dp94e", d.x === 1 && !delx && msg === "Cannot redefine property: x" &&
+    check("dp94e", d.x === 1 && wmsg === "Cannot assign to read only property 'x' of object '#<Object>'" &&
+        dmsg === "Cannot delete property 'x' of #<Object>" && msg === "Cannot redefine property: x" &&
         Object.getOwnPropertyNames(h).join() === "a,h,b" && Object.keys(h).join() === "a,b");
     let pmsg = "";
     try { String(Object.create(null)); } catch (e: any) { pmsg = e.message; }
@@ -4500,6 +4493,70 @@ function s96() {
         err(() => sa.reverse()) === "ok" && sa.join() === "2,1,3" && fa.join() === "3,1,2" &&
         err(function () { "use strict"; sa[3] = 9; }) === "Cannot add property 3, object is not extensible" &&
         err(function () { "use strict"; fa[0] = 1; }) === "Cannot assign to read only property '0' of object '[object Array]'");
+}
+
+// ===== SECTION 97: a class's length, builtin function values' name and length, strict code, the first refused write =====
+// A class's `length` is its constructor's (0 for an implicit one) and every builtin
+// Error constructor's is 1, Map's and Set's 0; an anonymous class expression is named
+// after the binding it is assigned to, or "". Math and JSON members and the Object
+// statics read as values carry node's name and length. TypeScript code is strict (tsc's
+// default output opens with "use strict"), so a refused write throws in any function,
+// arrow or generator. A method on a frozen, sealed or non-extensible array fails at the
+// spec's FIRST refused Set or delete, after the writes the level allows. Values read off
+// tsc 6.0.3's default output run by node 24.
+function s97(): void {
+    class A97 { constructor(a: number, b: number) {} }
+    class B97 extends A97 {}
+    class D97 extends A97 { constructor(x: number, ...r: number[]) { super(x, 1); } }
+    class E97 { constructor(public a: number, b: number = 1, c?: number) {} }
+    const cs: any[] = [A97, B97, D97, E97, class {}];
+    check("cl97a", cs.map((c: any) => c.length).join() === "2,0,1,1,0" &&
+        [Error, TypeError, RangeError, SyntaxError, ReferenceError, Map, Set].map((c: any) => c.length).join() === "1,1,1,1,1,0,0");
+    const G97 = class {};
+    let H97: any;
+    H97 = class extends G97 {};
+    const o97: any = { k: class {} };
+    check("cl97g", G97.name === "G97" && H97.name === "H97" && o97.k.name === "k" && (class {}).name === "" &&
+        (class N97 {}).name === "N97" && [class {}][0].name === "");
+    const mk: string[] = ["max", "min", "floor", "atan2", "random", "hypot", "pow"];
+    const mo: any = Math;
+    check("bi97b", mk.map((k: string) => mo[k].name + "/" + mo[k].length).join() === "max/2,min/2,floor/1,atan2/2,random/0,hypot/2,pow/2" &&
+        JSON.stringify.name + "/" + JSON.stringify.length + " " + JSON.parse.name + "/" + JSON.parse.length === "stringify/3 parse/2");
+    const ok: string[] = ["preventExtensions", "isFrozen", "isSealed", "isExtensible", "getOwnPropertyDescriptor"];
+    const oo: any = Object;
+    const pe: any = Object.preventExtensions;
+    check("bi97c", ok.map((k: string) => typeof oo[k] + "/" + oo[k].name + "/" + oo[k].length).join() ===
+        "function/preventExtensions/1,function/isFrozen/1,function/isSealed/1,function/isExtensible/1,function/getOwnPropertyDescriptor/2" &&
+        !Object.isExtensible(pe({})));
+    const fr: any = Object.freeze({ a: 1 });
+    const err = (f: () => any): string => { try { f(); return "ok"; } catch (e: any) { return e.constructor.name + ": " + e.message; } };
+    const ro: string = "TypeError: Cannot assign to read only property 'a' of object '#<Object>'";
+    check("st97d", err(() => { fr.a = 2; }) === ro && err(function () { fr.a = 2; }) === ro &&
+        err(() => { const g = function* () { fr.a = 3; yield 1; }; g().next(); }) === ro &&
+        err(() => { delete fr.a; }) === "TypeError: Cannot delete property 'a' of #<Object>" &&
+        (function (this: any) { return this; })() === undefined);
+    const ops: ((a: any) => any)[] = [(a) => a.fill(9, 1), (a) => a.fill(9, 4), (a) => a.copyWithin(1, 0), (a) => a.copyWithin(2, 0),
+        (a) => a.splice(1, 0, 7), (a) => a.splice(0, 2, 9), (a) => a.splice(2, 2, 7), (a) => a.splice(1, 0),
+        (a) => a.unshift(7, 8), (a) => a.push(), (a) => a.sort()];
+    check("ar97e", ops.map((f) => err(() => f(Object.freeze([4, 3, 2, 1])))).join("|") ===
+        "TypeError: Cannot assign to read only property '1' of object '[object Array]'|ok|" +
+        "TypeError: Cannot assign to read only property '3' of object '[object Array]'|" +
+        "TypeError: Cannot assign to read only property '2' of object '[object Array]'|" +
+        "TypeError: Cannot add property 4, object is not extensible|" +
+        "TypeError: Cannot assign to read only property '1' of object '[object Array]'|" +
+        "TypeError: Cannot delete property '3' of [object Array]|" +
+        "TypeError: Cannot assign to read only property 'length' of object '[object Array]'|" +
+        "TypeError: Cannot add property 5, object is not extensible|" +
+        "TypeError: Cannot assign to read only property 'length' of object '[object Array]'|" +
+        "TypeError: Cannot assign to read only property '0' of object '[object Array]'");
+    const sa: number[] = Object.seal([4, 3, 2, 1]), sb: number[] = Object.seal([4, 3, 2, 1]);
+    const na: number[] = Object.preventExtensions([4, 3, 2, 1]);
+    const nul: any = null;
+    check("ar97f", err(() => sa.splice(0, 2, 9)) === "TypeError: Cannot delete property '3' of [object Array]" && sa.join() === "4,2,1,1" &&
+        err(() => sb.splice(2, 2, 7, 8, 9)) === "TypeError: Cannot add property 4, object is not extensible" && sb.join() === "4,3,7,8" &&
+        err(() => na.splice(1, 1, 7, 8)) === "TypeError: Cannot add property 4, object is not extensible" &&
+        err(() => Object.freeze([5]).sort()) === "ok" && err(() => (Object.freeze([5]) as any).reverse()) === "ok" &&
+        [1, 2, 3].fill(0, 0, nul).join() === "1,2,3");
 }
 
 // ===== END SECTIONS =====
@@ -4601,6 +4658,7 @@ function main(): number {
     s94(); // SECTION-CALL 94
     s95(); // SECTION-CALL 95
     s96(); // SECTION-CALL 96
+    s97(); // SECTION-CALL 97
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

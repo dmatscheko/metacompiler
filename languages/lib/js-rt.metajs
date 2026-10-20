@@ -1655,16 +1655,21 @@ function jvStaticFind(o, k) {
 
 // The VALUE of a member read on a class descriptor: the static chain, an accessor
 // unwrapped against the receiver the read started from (node runs `static get g()`
-// with `this` bound to the SUBCLASS), then `name` - every class object has one, and
-// it is the descriptor's __name unless a `static name` member shadows it. Anything
-// else is undefined, which is what node says for a class's INSTANCE method read off
-// the constructor.
+// with `this` bound to the SUBCLASS), then `name` and `length` - every class object
+// has both, the descriptor's __name and its constructor's arity, unless a static
+// member shadows them. Anything else is undefined, which is what node says for a
+// class's INSTANCE method read off the constructor.
 function jvStaticSideRead(o, k) {
     var v = anytype
     v = jvStaticFind(o, k)
     if (jvIsAcc(v)) { return jvAccGet(v, o) }
     if (v !== undefined) { return v }
     if (k == "name") { return o["__name"] }
+    if (k == "length") {
+        var c = o["__ctor"]
+        if (typeof c == "function") { return jvFnLenOf(c) }
+        return 0
+    }
     // A class object inherits Object.prototype's methods too.
     if (jvIsProtoName(k)) { return jvProtoShim(k) }
     return undefined
@@ -2322,7 +2327,9 @@ function jvStaticHas(g, key) {
         return key == "assign" || key == "create" || key == "entries" || key == "freeze" || key == "fromEntries" ||
             key == "getOwnPropertyNames" || key == "getOwnPropertySymbols" || key == "groupBy" || key == "hasOwn" ||
             key == "is" || key == "keys" || key == "seal" || key == "values" || key == "defineProperties" ||
-            key == "defineProperty" || key == "getPrototypeOf" || key == "setPrototypeOf"
+            key == "defineProperty" || key == "getPrototypeOf" || key == "setPrototypeOf" || key == "preventExtensions" ||
+            key == "isExtensible" || key == "isFrozen" || key == "isSealed" || key == "getOwnPropertyDescriptor" ||
+            key == "getOwnPropertyDescriptors"
     }
     if (g == "String") { return key == "fromCharCode" || key == "fromCodePoint" || key == "raw" }
     if (g == "Number") {
@@ -2362,7 +2369,7 @@ function jvStaticValue(g, key) {
     if (got !== undefined) { return got }
     var len = 1
     if (key == "assign" || key == "create" || key == "is" || key == "hasOwn" || key == "groupBy" || key == "parseInt") { len = 2 }
-    if (key == "defineProperties" || key == "setPrototypeOf") { len = 2 }
+    if (key == "defineProperties" || key == "setPrototypeOf" || key == "getOwnPropertyDescriptor") { len = 2 }
     if (key == "defineProperty") { len = 3 }
     var f = anytype
     f = fnMetaSet(jvStaticValueFn(g, key), key, len)
@@ -4736,7 +4743,7 @@ function jvArrMethod(a, name, args) {
             if (!jvUndefOrNull(args[1])) { fb = jvRelIndex(jvToNumber(args[1]), n) }
         }
         if (args.length > 2) {
-            if (!jvUndefOrNull(args[2])) { fe = jvRelIndex(jvToNumber(args[2]), n) }
+            if (args[2] !== undefined) { fe = jvRelIndex(jvToNumber(args[2]), n) }
         }
         while (fb < fe) {
             a[fb] = fv
@@ -5093,47 +5100,100 @@ function js_jsrefuse() {
     return undefined
 }
 // The TypeError an Array method meets on an array of integrity level lv, or "" when
-// it runs; a sealed array's shift or shrinking splice first moves the elements down.
+// it runs: the spec's first refused Set or DeletePropertyOrThrow, after making the
+// writes the level allows before it. Twin of jsArrMethodRefusal in both
+// *-interpreter.abnf.
 function jvArrMethodRefusal(a, name, args, lv) {
     var n = a.length
     if (name == "push" || name == "unshift") {
-        if (args.length > 0) { return jvAddText("" + n) }
-        return ""
+        if (args.length == 0) {
+            if (lv == 3) { return jvRoText(a, "length") }
+            return ""
+        }
+        if (name == "unshift" && n > 0) { return jvAddText("" + (n + args.length - 1)) }
+        return jvAddText("" + n)
     }
+    if (name == "splice") { return jvSpliceRefusal(a, args, lv, n) }
     if (lv == 1) { return "" }
     if (name == "pop" || name == "shift") {
         if (n == 0) {
             if (lv == 3) { return jvRoText(a, "length") }
             return ""
         }
-        if (lv == 3) { if (name == "shift") { if (n > 1) { return jvRoText(a, "0") } } }
+        if (lv == 3 && name == "shift" && n > 1) { return jvRoText(a, "0") }
         if (name == "shift") { jvArrMoveDown(a, name, args) }
         return jvDelText(a, "" + (n - 1))
     }
-    if (name == "splice") {
-        var st = n
-        if (args.length > 0) { st = jvRelIndex(jvToNumber(args[0]), n) }
-        var dc = n - st
-        if (args.length > 1) { dc = jvToInt(jvToNumber(args[1])) }
-        if (dc < 0) { dc = 0 }
-        if (st + dc > n) { dc = n - st }
-        var ins = 0
-        if (args.length > 2) { ins = args.length - 2 }
-        if (lv == 3) {
-            if (dc == 0) { if (ins == 0) { return jvRoText(a, "length") } }
-            return jvRoText(a, "" + st)
+    if (lv < 3) { return "" }
+    var first = -1
+    if (name == "fill") {
+        var fb = jvRelIndex(jvNumArg(args, 1, 0), n)
+        var fe = n
+        if (args.length > 2) {
+            if (args[2] !== undefined) { fe = jvRelIndex(jvToNumber(args[2]), n) }
         }
-        if (ins > dc) { return jvAddText("" + n) }
-        if (ins < dc) {
-            jvArrMoveDown(a, name, args)
+        if (fb < fe) { first = fb }
+    }
+    if (name == "copyWithin") {
+        var to = jvRelIndex(jvNumArg(args, 0, 0), n)
+        var fr = jvRelIndex(jvNumArg(args, 1, 0), n)
+        var ce = n
+        if (args.length > 2) {
+            if (args[2] !== undefined) { ce = jvRelIndex(jvToNumber(args[2]), n) }
+        }
+        var cnt = Math.min(ce - fr, n - to)
+        // An overlapping copy to a higher index runs backwards from its last slot.
+        if (cnt > 0) {
+            first = to
+            if (fr < to && to < fr + cnt) { first = to + cnt - 1 }
+        }
+    }
+    // V8's sort, unlike the spec's, writes nothing back for fewer than two elements.
+    if (name == "reverse" || name == "sort") {
+        if (n > 1) { first = 0 }
+    }
+    if (first < 0) { return "" }
+    return jvRoText(a, "" + first)
+}
+// splice's first refusal: a growing splice moves the tail up from the top, so its
+// first write lands past the end; a shrinking one moves the tail down and then
+// deletes the vacated top; with no tail the items are written over start.. first.
+function jvSpliceRefusal(a, args, lv, n) {
+    var st = n
+    if (args.length > 0) { st = jvRelIndex(jvToNumber(args[0]), n) }
+    var dc = n - st
+    if (args.length > 1) { dc = jvToInt(jvToNumber(args[1])) }
+    if (dc < 0) { dc = 0 }
+    if (st + dc > n) { dc = n - st }
+    var ins = 0
+    if (args.length > 2) { ins = args.length - 2 }
+    var tail = st + dc < n
+    if (ins > dc) {
+        if (tail) { return jvAddText("" + (n - dc + ins - 1)) }
+        if (lv == 3 && dc > 0) { return jvRoText(a, "" + st) }
+        var si = 0
+        while (si < dc) {
+            a[st + si] = args[2 + si]
+            si = si + 1
+        }
+        return jvAddText("" + n)
+    }
+    if (lv == 1) { return "" }
+    if (ins < dc) {
+        if (lv == 3) {
+            if (tail) { return jvRoText(a, "" + (st + ins)) }
             return jvDelText(a, "" + (n - 1))
         }
-        return ""
+        var sk = st
+        while (sk < n - dc) {
+            a[sk + ins] = a[sk + dc]
+            sk = sk + 1
+        }
+        return jvDelText(a, "" + (n - 1))
     }
-    if (name == "sort" || name == "reverse" || name == "fill" || name == "copyWithin") {
-        if (lv == 3) { if (n > 0) { return jvRoText(a, "0") } }
-    }
-    return ""
+    if (lv < 3) { return "" }
+    if (ins > 0) { return jvRoText(a, "" + st) }
+    return jvRoText(a, "length")
 }
 // The elements a shrinking method leaves, written over a without changing its length.
 function jvArrMoveDown(a, name, args) {
@@ -6877,6 +6937,14 @@ function jvMathArgs(f) {
     }
 }
 
+// node's Math.<k>.length: 2 for the binary members and for max, min and hypot, 0 for
+// random. Twin of jsvMathLen in abnf/jsrtjsbig.go.
+function jvMathLen(k) {
+    if (k == "random") { return 0 }
+    if (k == "atan2" || k == "hypot" || k == "imul" || k == "max" || k == "min" || k == "pow") { return 2 }
+    return 1
+}
+
 function js_jsmath(src) {
     var o = {}
     var h = {}
@@ -6884,11 +6952,11 @@ function js_jsmath(src) {
     for (var i = 0; i < ks.length; i++) {
         var mv = anytype
         mv = src[ks[i]]
-        if (jvIsCallable(mv)) { mv = jvMathArgs(mv) }
+        if (jvIsCallable(mv)) { mv = fnMetaSet(jvMathArgs(mv), ks[i], jvMathLen(ks[i])) }
         o[ks[i]] = mv
         h[ks[i]] = true
     }
-    o["pow"] = function (x, y) { return jvPow(jvToNumber(x), jvToNumber(y)) }
+    o["pow"] = fnMetaSet(function (x, y) { return jvPow(jvToNumber(x), jvToNumber(y)) }, "pow", 2)
     o["__strtag"] = "Math"
     h["pow"] = true
     jvMathObj = o
@@ -6928,8 +6996,8 @@ import "./json.js"
 
 function js_jsjson() {
     var o = {}
-    o["stringify"] = function (v, r, s) { return jsonStringify(v, r, s) }
-    o["parse"] = function (t, r) { return jsonParse(t, r) }
+    o["stringify"] = fnMetaSet(function (v, r, s) { return jsonStringify(v, r, s) }, "stringify", 3)
+    o["parse"] = fnMetaSet(function (t, r) { return jsonParse(t, r) }, "parse", 2)
     o["__strtag"] = "JSON" // Object.prototype.toString's tag; see jvProtoTag.
     jvJsonObj = o
     return o
