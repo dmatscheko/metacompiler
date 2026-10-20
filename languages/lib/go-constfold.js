@@ -1533,6 +1533,8 @@ function goConvC(items, pos) {
     // float32(c) rounds the exact constant once (goConstTo's float32 rule).
     var tt = goTkType(items[0].conv)
     if (k != null && !cIsCx(k) && tt != null && tt.u == "float32") { return [items[0], cMaterialize(cRoundFlo(cAsF(k), true))] }
+    // any(x) and interface{}(x) put x in an interface: boxed by its static type.
+    if (goIsIfaceTy(stBare(items[0].conv))) { return [items[0], goDtBoxThunk(items[1], goDtBoxTyP(stAt(items[2].cke)))] }
     return [items[0], items[1]]
 }
 // `=` storing value kr into target lref, one of n targets: the blank identifier
@@ -2102,10 +2104,20 @@ function goDtPrints(ty) {
     }
     return false
 }
+// goDtBoxTy, and for a static type that names the type parameters in scope "?"
+// and its text: generics are erased, so an int64, a defined type or a struct
+// bound to T is only known at run time, where the grammar's goDtBox / emitDtBox
+// resolves the text and boxes by goDtBoxTy of the result.
+function goDtBoxTyP(sty) {
+    var t = goDtBoxTy(sty)
+    if (t != "") { return t }
+    var b = stBare(sty)
+    return (b != "" && b.indexOf("?") < 0 && goTpUsed(b).length > 0) ? "?" + b : ""
+}
 // The box type for a value of static type sty stored where type dty is declared.
 function goDtBoxTo(sty, dty) {
     if (dty == "" || !goIsIfaceTy(stBare(dty))) { return "" }
-    return goDtBoxTy(sty)
+    return goDtBoxTyP(sty)
 }
 // A type text's leading word w, with the name after a package qualifier kept
 // (`case fmt.Stringer:`).
@@ -2210,7 +2222,7 @@ var goFmtBoxes = {"$fmt.Println": true, "$fmt.Print": true, "$fmt.Printf": true,
 // &{...}; nothing else ever sees that box.
 var goFmtPrints = {"$Println": true, "$Print": true, "$Printf": true, "$Sprint": true, "$Sprintf": true}
 function goFmtBoxTy(sty, name) {
-    var t = goDtBoxTy(sty)
+    var t = goDtBoxTyP(sty)
     if (t != "" || goFmtPrints["$" + name] !== true) { return t }
     var b = stBare(sty)
     if (b.indexOf("?") >= 0) { return "" }
@@ -2242,7 +2254,7 @@ function goBoxArgsC(items) {
                     var vt = s.rc.text == "fmt" ? goFmtVvTy(s.atys[j]) : ""
                     s.args[j] = goConstTo(s.args[j], s.krs[j], "any", "argument to " + s.rc.text + "." + s.name)
                     if (vt != "") { s.args[j] = goVvThunk(s.args[j], vt) }
-                    else { s.args[j] = goDtBoxThunk(s.args[j], s.rc.text == "fmt" ? goFmtBoxTy(s.atys[j], s.name) : goDtBoxTy(s.atys[j])) }
+                    else { s.args[j] = goDtBoxThunk(s.args[j], s.rc.text == "fmt" ? goFmtBoxTy(s.atys[j], s.name) : goDtBoxTyP(s.atys[j])) }
                 }
                 j = j + 1
             }
@@ -2921,14 +2933,19 @@ function goTpIn(names, n) {
 function goTpUsed(t) { return goTpUsedOf(t, goTpCur) }
 // ... of the parameters names.
 function goTpUsedOf(t, names) {
+    if (names.length == 0) { return [] }
+    return goTpNamesWhere(t, function(id) { return goTpIn(names, id) })
+}
+// The unqualified names type text t mentions that keep(name) accepts, each once.
+function goTpNamesWhere(t, keep) {
     var out = []
     var i = 0
-    while (names.length > 0 && i < t.length) {
+    while (i < t.length) {
         if (cIsIdCh(t.charCodeAt(i)) && (i == 0 || t.charAt(i - 1) != ".")) {
             var e = i
             while (e < t.length && cIsIdCh(t.charCodeAt(e))) { e = e + 1 }
             var id = t.substring(i, e)
-            if (goTpIn(names, id) && !goTpIn(out, id)) { out.push(id) }
+            if (keep(id) && !goTpIn(out, id)) { out.push(id) }
             i = e
         } else { i = i + 1 }
     }

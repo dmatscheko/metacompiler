@@ -2352,7 +2352,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
         for (var z = 0; z < pend; z++) { ptypes.push("") }
         for (var pn = 0; pn < names.length; pn++) {
-            cPendTy(names[pn], (variadic && pn == names.length - 1) ? "[]" : ptypes[pn])
+            cPendTy(names[pn], (variadic && pn == names.length - 1) ? "[]" + ptypes[pn] : ptypes[pn])
         }
         return {params: names, variadic: variadic, ptypes: ptypes}
     }
@@ -6388,6 +6388,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             return emitSelect(fb, callExt(fb, "js_seq", [a[0], emitStr(fb, "")]), function(tb) { return {b: tb, v: a[1]} },
                               function(eb) { return {b: eb, v: a[0]} })
         })
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$dttab"), callExt(b, "js_obj_new", [])])
+        b = declFn(b, "$dtbound", 2, function(fb, a) {
+            var cls = callExt(fb, "js_get", [callExt(fb, "js_scope_get", [curScopeV, emitStr(fb, "$dttab")]), a[1]])
+            return emitSelect(fb, cls, function(tb) { return {b: tb, v: callExt(tb, "js_godtbox", [a[0], cls])} },
+                              function(eb) { return {b: eb, v: a[0]} })
+        })
         b = declFn(b, "$tpzero", 1, function(fb, a) {
             var zf = callExt(fb, "js_get", [callExt(fb, "js_scope_get", [curScopeV, emitStr(fb, "$zeros")]), a[0]])
             return emitSelect(fb, zf, function(tb) { return {b: tb, v: callExt(tb, "js_call", [zf, hUndef, callExt(tb, "js_arr_new", [])])} },
@@ -6501,6 +6507,28 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         curF = savedF
         curScopeV = savedScope
     }
+    // $dttab["$" + s] for every instantiation s of a type emitDtBoxBound boxes by,
+    // the descriptor of goDtBoxTy(s), declared here when the walk declared none.
+    function goDtBoundFill(zb, env) {
+        curScopeV = env
+        var tab = callExt(zb, "js_scope_get", [env, emitStr(zb, "$dttab")])
+        var done = {}
+        for (var gi = 0; gi < goDtGens.length; gi++) {
+            var g = goDtGens[gi]
+            var ins = goTpInstsOf(g.own, g.names, [g.t])
+            for (var ii = 0; ii < ins.length; ii++) {
+                var it = ins[ii][0]
+                var bt = goDtBoxTy(it)
+                if (bt == "" || done["$" + it] === true) { continue }
+                done["$" + it] = true
+                if (goDtSeen["$" + bt] !== true) {
+                    goDtNote(bt)
+                    declDtClass(zb, bt)
+                }
+                callExt(zb, "js_set", [tab, emitStr(zb, "$" + it), callExt(zb, "js_scope_get", [env, emitStr(zb, "$dt$" + bt)])])
+            }
+        }
+    }
     // goTpZeroF's body: $zeros[c] for every instantiation c (goTpCands), each a
     // function making c's zero value.
     function goTpZeroFill() {
@@ -6525,6 +6553,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             callExt(zb, "js_set", [zs, emitStr(zb, ct), callExt(zb, "js_closure", [handle(idx), env])])
             k = k + 1
         }
+        goDtBoundFill(zb, env)
         zb.NewRet(hUndef)
         curF = savedF
         curScopeV = savedScope
@@ -6728,6 +6757,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     var goDtUsed = []
     var goDtSeen = {}
     function goDtNote(ty) {
+        if (ty.charAt(0) == "?") { return }
         if (goDtSeen["$" + ty] !== true) { goDtSeen["$" + ty] = true; goDtUsed.push(ty) }
     }
     // The int32 a rune constant becomes at its default type (goRuneDefC).
@@ -6757,7 +6787,17 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
     }
     function emitDtBox(b, v, ty) {
+        if (ty.charAt(0) == "?") { return emitDtBoxBound(b, v, ty.substring(1)) }
         return callExt(b, "js_godtbox", [v, callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$dt$" + ty)])])
+    }
+    // A value whose static type t names type parameters (goDtBoxTyP): t as bound at
+    // run time is looked up in $dttab, which maps every instantiation of t the
+    // program makes to the descriptor of the box it takes (goDtBoundFill). Twin of
+    // goDtBoxBound in go-interpreter.abnf.
+    var goDtGens = []
+    function emitDtBoxBound(b, v, t) {
+        goDtGens.push({t: t, own: goTpOwn, names: curTps})
+        return emitHelper(b, "$dtbound", [v, callExt(b, "js_add", [emitStr(b, "$"), emitTpRes(b, t)])])
     }
     // v as type ty once a type test has matched: the value inside ty's box.
     function emitDtUnbox(b, v, ty) {
@@ -6772,26 +6812,26 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var rs = goMethRecv[pm[p]]
             for (var r = 0; rs !== undefined && r < rs.length; r++) { if (goDtPrints(rs[r])) { goDtNote(rs[r]) } }
         }
-        for (var i = 0; i < goDtUsed.length; i++) {
-            var ty = goDtUsed[i]
-            var clsV = callExt(b, "js_obj_new", [])
-            callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
-            callExt(b, "js_set", [clsV, emitStr(b, "__dt"), hTrue])
-            callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, ty)])
-            if (goIsDefTy(ty)) { callExt(b, "js_set", [clsV, emitStr(b, "__pkg"), emitStr(b, "main")]) }
-            emitNameList(b, clsV, "__fields", ["__dv"])
-            // A struct value's "box" is a marked copy (js_godtbox): no methods.
-            if (goIsValBoxTy(ty)) { callExt(b, "js_set", [clsV, emitStr(b, "__sv"), hTrue]) }
-            var ms = goIsValBoxTy(ty) ? undefined : goTyMeths["$" + ty]
-            if (ms !== undefined) {
-                for (var k = 0; k < ms.length; k++) {
-                    callExt(b, "js_set", [clsV, emitStr(b, ms[k]), callExt(b, "js_closure", [handle(dtWrapper(ty + "." + ms[k])), curScopeV])])
-                }
-            }
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$dt$" + ty), clsV])
-            if (goDtPrints(ty)) { callExt(b, "js_godtreg", [clsV]) }
-        }
+        for (var i = 0; i < goDtUsed.length; i++) { declDtClass(b, goDtUsed[i]) }
         return b
+    }
+    function declDtClass(b, ty) {
+        var clsV = callExt(b, "js_obj_new", [])
+        callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
+        callExt(b, "js_set", [clsV, emitStr(b, "__dt"), hTrue])
+        callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, ty)])
+        if (goIsDefTy(ty)) { callExt(b, "js_set", [clsV, emitStr(b, "__pkg"), emitStr(b, "main")]) }
+        emitNameList(b, clsV, "__fields", ["__dv"])
+        // A struct value's "box" is a marked copy (js_godtbox): no methods.
+        if (goIsValBoxTy(ty)) { callExt(b, "js_set", [clsV, emitStr(b, "__sv"), hTrue]) }
+        var ms = goIsValBoxTy(ty) ? undefined : goTyMeths["$" + ty]
+        if (ms !== undefined) {
+            for (var k = 0; k < ms.length; k++) {
+                callExt(b, "js_set", [clsV, emitStr(b, ms[k]), callExt(b, "js_closure", [handle(dtWrapper(ty + "." + ms[k])), curScopeV])])
+            }
+        }
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$dt$" + ty), clsV])
+        if (goDtPrints(ty)) { callExt(b, "js_godtreg", [clsV]) }
     }
     // A box's method: "T.M" called with the value inside as its receiver.
     function dtWrapper(fn) {

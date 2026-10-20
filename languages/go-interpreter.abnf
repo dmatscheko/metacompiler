@@ -3178,8 +3178,21 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // type is what boxes it (a value of `type Q Point` is a Point already).
     function goDtBox(v, ty) {
         if (isDtBox(v)) { return v }
+        if (ty.charAt(0) == "?") { return goDtBoxBound(v, ty.substring(1)) }
         if (ty.charAt(0) != "*" && goIsStructVal(v)) { return goIsValBoxTy(ty) ? goVvBox(v) : v }
         return {__class: goDtClass(ty), __dv: v}
+    }
+    // A value whose static type t names type parameters (goDtBoxTyP): boxed by what
+    // t is with them as bound here (goTpBind). Twin of emitDtBoxBound in
+    // go-to-llvm-ir.abnf.
+    var goDtBoundTys = {}
+    function goDtBoxBound(v, t) {
+        var r = goTpRes(t, goTpNamesWhere(t, function(id) { return hasVar("$tp$" + id) }))
+        if (r == "") { return v }
+        var k = "$" + r
+        if (!hasOwn(goDtBoundTys, k)) { goDtBoundTys[k] = goDtBoxTy(r) }
+        var bt = goDtBoundTys[k]
+        return bt == "" ? v : goDtBox(v, bt)
     }
     // A struct VALUE in an interface: a copy marked __vv, which no type test reads
     // as a pointer. Twins: js_godtbox in abnf/jsrtgolang.go and lib/go-rt.metajs.
@@ -4022,7 +4035,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
         for (var z = 0; z < pend; z++) { ptypes.push("") }
         for (var pn = 0; pn < names.length; pn++) {
-            cPendTy(names[pn], (variadic && pn == names.length - 1) ? "[]" : ptypes[pn])
+            cPendTy(names[pn], (variadic && pn == names.length - 1) ? "[]" + ptypes[pn] : ptypes[pn])
         }
         return {params: names, variadic: variadic, ptypes: ptypes}
     }
@@ -5684,7 +5697,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var bx = null
         for (var b = 0; b < items.length; b++) {
             // "$r": a rune constant, an int32 where the result type takes one.
-            var bt = sp.rns[b] ? "$r" : goDtBoxTy(sp.atys[b])
+            var bt = sp.rns[b] ? "$r" : goDtBoxTyP(sp.atys[b])
             if (bt != "") {
                 if (bx == null) { bx = []; for (var z = 0; z < items.length; z++) { bx.push("") } }
                 bx[b] = bt

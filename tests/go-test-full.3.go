@@ -1015,6 +1015,60 @@ func s123() {
 		"[1 2 3 4 9 0] [0 0 7 0 0] [5 7 8 9 10 11] [97 98 44 100] [1 0] 7 8")
 }
 
+// ===== SECTION 124: a value whose type is a type parameter, in an interface =====
+// An int64, a uint64, an array of them, a defined type or a pointer bound to T
+// reaches fmt, an interface result or a type switch as the type T is bound to:
+// %T, String() and the case taken follow the instantiation - also through a
+// variadic ...T and an any(x) conversion, which boxes like any other interface
+// store. The expected values are go run's.
+type c124 float64
+
+func (c c124) String() string { return fmt.Sprintf("%.1fC", float64(c)) }
+
+type p124 struct{ x int }
+
+func z124[T any]() string {
+	var z T
+	return fmt.Sprintf("%T", z)
+}
+
+func v124[T any](v T) string { return fmt.Sprintf("%T %v", v, v) }
+
+func a124[T any](v T) any { return v }
+
+func k124(x any) string {
+	switch x.(type) {
+	case int:
+		return "int"
+	case int64:
+		return "int64"
+	case uint64:
+		return "uint64"
+	}
+	return "other"
+}
+
+func l124[T any](xs ...T) []any {
+	out := []any{}
+	for _, x := range xs {
+		out = append(out, x)
+	}
+	return append(out, any(xs[0]))
+}
+
+func s124() {
+	var w int64 = 5
+	ls := l124(uint64(1), 2)
+	check("tpconv124", fmt.Sprintf("%T %T %v %v %T %T %T", any(w), interface{}(c124(1)), any(w) == any(5), any(w) == any(int64(5)),
+		ls[0], ls[1], ls[2]) == "int64 main.c124 false true uint64 uint64 uint64")
+	check("tpwide124", z124[int64]()+" "+z124[[2]int64]()+" "+z124[uint64]()+" "+z124[uintptr]()+" "+z124[int]() ==
+		"int64 [2]int64 uint64 uintptr int")
+	check("tpval124", v124(int64(5))+"|"+v124(c124(2))+"|"+v124([2]uint64{1, 2})+"|"+v124(&p124{3}) ==
+		"int64 5|main.c124 2.0C|[2]uint64 [1 2]|*main.p124 &{3}")
+	check("tpret124", k124(a124(int64(1)))+" "+k124(a124[uint64](2))+" "+k124(a124(3))+" "+fmt.Sprintf("%T", a124(c124(1))) ==
+		"int64 uint64 int main.c124")
+}
+
 func main() {
 	s94()   // SECTION-CALL 94
 	s95()   // SECTION-CALL 95
@@ -1044,6 +1098,7 @@ func main() {
 	s121()  // SECTION-CALL 121
 	s122()  // SECTION-CALL 122
 	s123()  // SECTION-CALL 123
+	s124()  // SECTION-CALL 124
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }
