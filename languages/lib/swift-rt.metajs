@@ -778,16 +778,12 @@ function js_swgenfields(v) {
 function js_swgenargs(v) { return swGenArgsTxt(v) }
 function js_swtypespec(tv, g) {
     if (g == "" || !swIsObj(tv)) { return tv }
-    if (tv["__isclass"] !== true || tv["__ftargs"] !== undefined) { return tv }
+    if ((tv["__isclass"] !== true && tv["__isenum"] !== true) || tv["__ftargs"] !== undefined) { return tv }
     var key = "__spec" + g
     if (tv[key] !== undefined) { return tv[key] }
-    var targs = ""
-    var i = 1
-    while (i < g.length - 1) {
-        if (g.charAt(i) != " ") { targs = targs + g.charAt(i) }
-        i = i + 1
-    }
+    var targs = swDropSpaces(g.substring(1, g.length - 1))
     var s = {__isclass: true, __name: tv["__name"], __super: tv, __tspec: g, __ftargs: targs}
+    if (tv["__isenum"] === true) { s = {__isenum: true, __enum: true, __name: tv["__name"], __super: tv, __tspec: g} }
     tv[key] = s
     return s
 }
@@ -1305,7 +1301,10 @@ function swObjDesc(o, depth) {
         }
     }
     if (o["__isenum"] !== undefined) {
-        if (typeof o["__name"] == "string") { return o["__name"] }
+        if (typeof o["__name"] == "string") {
+            if (typeof o["__tspec"] == "string") { return o["__name"] + o["__tspec"] }
+            return o["__name"]
+        }
     }
 
     // An instance. A STRUCT prints memberwise - P(x: 1, y: 2) - because Swift
@@ -1824,6 +1823,24 @@ function swStripAngleTy(s) {
     }
     return s
 }
+// A program generic type named with its arguments (`is Box<Int>`) matches an
+// instance only with those arguments, when the instance can say them. Twins:
+// swGenArgsFit in swift-interpreter.abnf and abnf/jsrtswift.go.
+function swGenArgsFit(v, tname) {
+    if (tname.indexOf("<") < 0) { return true }
+    var g = swGenArgsTxt(v)
+    var tn = swDropSpaces(swStripTyOpt(tname))
+    return g == "" || g == swTyCanon(tn).substring(tn.indexOf("<"))
+}
+function swDropSpaces(s) {
+    var out = ""
+    var i = 0
+    while (i < s.length) {
+        if (s.charAt(i) != " ") { out = out + s.charAt(i) }
+        i = i + 1
+    }
+    return out
+}
 function js_swis(v, tname) {
     var t0 = swStripAngleTy(tname)
     var opt = swIsTyOpt(t0)
@@ -1832,7 +1849,12 @@ function js_swis(v, tname) {
     var isD = t == "Double"
     var isF = t == "Float"
     var isB = t == "Bool"
-    if (bits == 0 && !isD && !isF && !isB) { return js_is_type(v, tname) }
+    if (bits == 0 && !isD && !isF && !isB) {
+        // A case of a generic enum named with its arguments (`Either<Int,
+        // String>`); the emitter tests a bare enum name itself.
+        if (t != tname && swIsObj(v) && v["__etype"] === t) { return swGenArgsFit(v, tname) }
+        return js_is_type(v, tname) && swGenArgsFit(v, tname)
+    }
     if (v === undefined || v === null) { return opt }
     if (isB) { return typeof v == "boolean" }
     // BOTH BOXES ANSWER `typeof v == "number"` in this half - they are floor tags

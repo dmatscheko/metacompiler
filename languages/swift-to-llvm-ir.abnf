@@ -1579,7 +1579,7 @@ InoutArg    <~~ var ir = makeTargetRef(takeAll()); push(ir.path.length == 0 ? {a
 
 Primary     = Paren | OpParen | MultiStr | RawStrN | RawStr3 | RawStr2 | RawStr1 | Template | NumberLit
             | True | False | Nil
-            | PoundExpr | SuperRef | DotMember | Closure | SugarSelf | SugarCall | ArrayTypeLit | DictLit | ArrayLit
+            | PoundExpr | SuperRef | DotMember | Closure | SugarSelf | SugarCall | OptSugarCall | ArrayTypeLit | DictLit | ArrayLit
             | Shorthand | ProjRef | OptNone | KeyPath | GenCall | GenMember | GenRef | TrailCall | Call | VarRef ;
 // `\T.a.b` / `\.a.b`: a key path, read-only. Its value is the function from a
 // root to that member chain, which is what `.map(\.a)` and `x[keyPath: kp]` apply.
@@ -1724,6 +1724,20 @@ SugarCall   <~~ push(swSugarCall(takeAll())) ~~>
             = "[" SugarTy [ ":" SugarTy ] "]" NoSpaceParen "(" CallArg { "," CallArg } ")"
               [ NoTrailCtx TrailArg { LabTrail } ] ;
 SugarTy     <~~ push({sty: up.in}) ~~> = Type ;
+// `Int?(5)`: the Optional type written with the `?` sugar, called - the explicit
+// generic call `Optional<Int>(5)`. Only a capitalized name is read as a type, so
+// `f?(x)` stays the optional call of a closure.
+OptSugarCall <~~ push(swOptSugarCall(takeAll())) ~~>
+            = CapPeek Id <~~ push({sty: up.in}) ~~> NoSpace "?" NoSpaceParen "(" CallArg { "," CallArg } ")" ;
+// A :script guard sees the input before whitespace is skipped.
+CapPeek     = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(0)
+        while (cc === 32 || cc === 9 || cc === 10 || cc === 13) { i++; cc = c.peek(i) }
+        return (cc >= 65 && cc <= 90) ? undefined : abnf.newToken("\x01not-a-type-name", 0)
+    })()
+~~) ;
 // `[Int]()`, `[String: Int]()`, `[() async -> ()]()` - a collection TYPE written as
 // a literal and immediately constructed EMPTY. It is ordered BEFORE ArrayLit and
 // DictLit: those two would match `[Int]` and `[String: Int]` as a one-element array /
@@ -3283,16 +3297,43 @@ KwContinue  = "continue" KwEnd ;
             for (var z = 0; z < bl.length; z++) { callExt(b, "js_arr_push", [ba, emitStr(b, bl[z])]) }
             return {b: b, v: callExt(b, "js_swconf", [v, emitStr(b, pt), ba])}
         }
-        var isB = callExt(b, "js_swis", [v, emitStr(b, tname)])
+        return swEmitIsName(b, v, emitStr(b, tname))
+    }
+    // The test against the type name the handle nameV holds.
+    function swEmitIsName(b, v, nameV) {
+        var isB = callExt(b, "js_swis", [v, nameV])
         var elseB = curF.NewBlock("")
         var joinB = curF.NewBlock("")
         var fromB = b
         b.NewCondBr(truthy(b, isB), joinB, elseB)
         // A case value's type is its enum, which js_is_type does not know about.
         var nm = elseB.NewCall(rtProbe("sw_etype", "__etype"), [v])
-        var alt = callExt(elseB, "js_seq", [nm, emitStr(elseB, tname)])
+        var alt = callExt(elseB, "js_seq", [nm, nameV])
         elseB.NewBr(joinB)
         return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(hTrue, fromB), llvm.ir.NewIncoming(alt, elseB)])}
+    }
+    // `a is T` / `a as? T` with T a generic parameter of the enclosing function
+    // tests against the type T holds at run time, spelled as it prints
+    // (sw_castname); an unbound T keeps the written name. Twin of swCastGenT in
+    // swift-interpreter.abnf.
+    function swCastGenT(tname) {
+        var tb = swTyStripOptText(tname)
+        if (tb == "" || !swGenInScope(tb)) { return "" }
+        for (var i = 0; i < tb.length; i++) { if (!swDsIdCh(tb.charAt(i))) { return "" } }
+        return tb
+    }
+    // sw_castname(scope, T, written, suffix): the name of the type T holds plus the
+    // Optional suffix the cast wrote, or the written name when T is unbound.
+    function rtCastName() {
+        return rtFunc("sw_castname", 4, function(b, ps) {
+            var boundB = curF.NewBlock("")
+            var unB = curF.NewBlock("")
+            var t = callExt(b, "js_scope_typeof", [ps[0], ps[1]])
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [t, emitStr(b, "undefined")])), unB, boundB)
+            unB.NewRet(ps[2])
+            var nm = callExt(boundB, "js_swdesc", [callExt(boundB, "js_scope_get", [ps[0], ps[1]])])
+            boundB.NewRet(callExt(boundB, "js_jadd", [nm, ps[3]]))
+        })
     }
     function makeCastOne(t, op, tname) {
         // `3 as Int8` is a COERCION, not a no-op - see swift-interpreter.abnf's
@@ -3315,11 +3356,13 @@ KwContinue  = "continue" KwEnd ;
                 return {b: ra.b, v: swEmitAdopt(ra.b, av, tname)}
             }
         }
+        var gT = swCastGenT(tname)
         return function(b) {
             var r = t(b)
             b = r.b
             r = {b: b, v: swEmitOptOpen(b, r.v)}
-            var ri = emitIsType(r.b, r.v, tname)
+            var ri = gT == "" ? emitIsType(r.b, r.v, tname) : swEmitIsName(b, r.v, b.NewCall(rtCastName(),
+                [curScopeV, emitStr(b, gT), emitStr(b, tname), emitStr(b, tname.substring(gT.length))]))
             var joinB = ri.b
             var hit = ri.v
             if (op == "is") { return {b: joinB, v: hit} }
@@ -5691,7 +5734,7 @@ KwContinue  = "continue" KwEnd ;
             var enumB = curF.NewBlock("")
             var ownB = curF.NewBlock("")
             instB.NewCondBr(truthy(instB, dsc), enumB, ownB)
-            enumB.NewRet(dsc)
+            enumB.NewRet(callExt(enumB, "js_swtypespec", [dsc, callExt(enumB, "js_swgenargs", [ps[0]])]))
             ownB.NewRet(callExt(ownB, "js_swtypespec", [cls, callExt(ownB, "js_swgenargs", [ps[0]])]))
             nameB.NewRet(callExt(nameB, "js_swtypeof", [ps[0]]))
         })
@@ -7142,6 +7185,12 @@ KwContinue  = "continue" KwEnd ;
         if (t.charAt(0) == "S") { return "Set<Any>" }
         return "Dictionary<Any, Any>"
     }
+    // T?(args) as Optional<T>(args). Twin in swift-interpreter.abnf.
+    function swOptSugarCall(items) {
+        var gi = ["Optional", {gargs: items[0].sty}]
+        for (var i = 1; i < items.length; i++) { gi.push(items[i]) }
+        return swGenCall(gi)
+    }
     // [T](...) / [K: V](...) as the explicit generic call it abbreviates. Twin in
     // swift-interpreter.abnf.
     function swSugarCall(items) {
@@ -7438,13 +7487,15 @@ KwContinue  = "continue" KwEnd ;
                 return {b: b, v: b.NewCall(rtArrayOf(), [a0])}
             }
         }
-        // Set() / Set(seq). Twin: hostGlobals in swift-interpreter.abnf.
+        // Set() / Set(seq) / Set(minimumCapacity: n), which is empty. Twin:
+        // hostGlobals in swift-interpreter.abnf.
         if (name == "Set" && args.length < 2 && lookupSig(name) == null
             && classNames[name] != 1 && enumNames[name] != 1) {
             hasSets = true
             return function(b) {
                 if (args.length == 0) { return {b: b, v: emitSetOf(b, hUndef)} }
                 var es = emitArgRecs(b, args)
+                if (args[0].lbl == "minimumCapacity") { return {b: es.b, v: emitSetOf(es.b, hUndef)} }
                 return {b: es.b, v: emitSetOf(es.b, callExt(es.b, "js_swidx", [es.v, emitNum(es.b, 0)]))}
             }
         }
@@ -9384,6 +9435,8 @@ KwContinue  = "continue" KwEnd ;
         if (rty == "") {
             var rx = swAliasExpand(rtxt)
             if (swTyHasUserGen(rx) || (rx != rtxt && swAdoptNeeded(rx))) { rty = rx }
+            // "%[E]": a `-> Set<E>` result is made a Set of elements adopted to E.
+            else if (swIsSetTy(rx) && rx.charAt(rx.length - 1) != "?") { rty = "%" + swSetArrAnn(rx) }
         }
         swGenUnbind(items[1].params, gens)
         if (swTyHasUserGen(rty) && swTyNames(rty, gens)) { rty = "" }
@@ -9425,7 +9478,11 @@ KwContinue  = "continue" KwEnd ;
     }
     function retTyped(b, v) {
         if (retTypeStack.length == 0) { return v }
-        return swEmitAdopt(b, v, retTypeStack[retTypeStack.length - 1])
+        var ty = retTypeStack[retTypeStack.length - 1]
+        // "%[E]": a `-> Set<E>` result (makeFun). Twin in relabelRet,
+        // swift-interpreter.abnf.
+        if (ty.charAt(0) == "%") { return emitSetOf(b, swEmitAdopt(b, v, ty.substring(1))) }
+        return swEmitAdopt(b, v, ty)
     }
     function retTupleLabelled(b, v) {
         if (retLabelStack.length == 0) { return v }

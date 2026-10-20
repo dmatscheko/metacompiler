@@ -5765,6 +5765,45 @@ func s153() {
     check("153b", orDefault153(n) == "-" && orDefault153(five) == 5 && isNil153(Int?.none) && !isNil153(five))
 }
 
+// ===== SECTION 154: a metatype's init runs once; `is T` against a bound T =====
+// `t.init(n:)` on a metatype parameter runs the initializer once. `a is T` and
+// `a as? T` with T bound by a metatype test against the type T holds, generic
+// arguments included (`Box<Double>` is not `Box<Int>`). `Int?(5)` is the
+// Optional type called. type(of:) of a generic enum's case names its arguments;
+// a `-> Set<Double>` result holds Doubles; `Set(minimumCapacity:)` is empty.
+// Every value read off swiftc 6.1.2.
+var made154 = 0
+protocol Makes154 { init(n: Int) }
+struct Mk154: Makes154 { var n: Int; init(n: Int) { made154 += 1; self.n = n } }
+final class Ck154: Makes154 { var n: Int; init(n: Int) { made154 += 1; self.n = n } }
+struct Box154<T> { var v: T }
+enum Either154<A, B> { case left(A), right(B) }
+class K154 {}
+class KS154: K154 {}
+func build154<M: Makes154>(_ t: M.Type) -> M { t.init(n: 4) }
+func isa154<T>(_ a: Any, _ t: T.Type) -> Bool { a is T }
+func cast154<T>(_ a: Any, _ t: T.Type) -> T? { a as? T }
+func mk154() -> Set<Double> { return [1, 2] }
+func s154() {
+    let m = build154(Mk154.self)
+    let c = build154(Ck154.self)
+    check("154a", m.n == 4 && c.n == 4 && made154 == 2)
+    let box: Any = Box154<Double>(v: 1)
+    let e: Any = Either154<Int, String>.left(1)
+    check("154b", isa154(box, Box154<Double>.self) && !isa154(box, Box154<Int>.self) && isa154(3, Int.self) && !isa154("s", Int.self)
+        && isa154(KS154(), K154.self) && !isa154(K154(), KS154.self) && isa154(e, Either154<Int, String>.self)
+        && !isa154(e, Either154<String, String>.self) && !(box is Box154<Int>))
+    check("154c", cast154(box, Box154<Double>.self)!.v == 1.0 && cast154(box, Box154<Int>.self) == nil && cast154(3, String.self) == nil)
+    let o = Int?(5)
+    check("154d", o! == 5 && Int?(nil) == nil && "\(Double?(5)!)" == "5.0" && String?("a")! == "a")
+    let r: Either154<Double, Int> = .right(2)
+    check("154e", "\(type(of: Either154<Int, String>.left(1)))" == "Either154<Int, String>" && "\(type(of: r))" == "Either154<Double, Int>"
+        && type(of: r) == Either154<Double, Int>.self && type(of: r) != Either154<Int, Int>.self)
+    var sc = Set<Double>(minimumCapacity: 4)
+    sc.insert(3)
+    check("154f", "\(mk154().sorted())" == "[1.0, 2.0]" && "\(sc)" == "[3.0]" && sc.count == 1)
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5919,6 +5958,7 @@ func main() {
     s151() // SECTION-CALL 151
     s152() // SECTION-CALL 152
     s153() // SECTION-CALL 153
+    s154() // SECTION-CALL 154
     print("full: \(checks) checks, \(fails) failures")
 }
 

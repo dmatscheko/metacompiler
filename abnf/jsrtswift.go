@@ -965,7 +965,18 @@ func init() {
 			isF := t == "Float"
 			isB := t == "Bool"
 			if !isInt && !isD && !isF && !isB {
-				return baseIs(a)
+				// A case of a generic enum named with its arguments (`Either<Int,
+				// String>`); the emitter tests a bare enum name itself.
+				if o, ok := u(a[0]).(*jsObject); ok && t != tname {
+					if et, ok := o.props["__etype"].(string); ok && et == t {
+						return boolH(rt.swGenArgsFit(o, tname))
+					}
+				}
+				r := baseIs(a)
+				if r != boolH(true) {
+					return r
+				}
+				return boolH(rt.swGenArgsFit(u(a[0]), tname))
 			}
 			v := u(a[0])
 			if isNullish(v) {
@@ -3198,7 +3209,8 @@ func (rt *jsrt) swObjDesc(o *jsObject, depth int) (string, bool) {
 	}
 	if _, ok := o.props["__isenum"]; ok {
 		if n, ok := o.props["__name"].(string); ok {
-			return n, true
+			g, _ := o.props["__tspec"].(string)
+			return n + g, true
 		}
 	}
 
@@ -3403,7 +3415,7 @@ func swGenFields(v interface{}, adopt func(interface{}, string) interface{}) {
 // languages/swift-interpreter.abnf, which says why.
 func swTypeSpec(tv interface{}, g string) interface{} {
 	o, ok := tv.(*jsObject)
-	if !ok || g == "" || o.props["__isclass"] != true {
+	if !ok || g == "" || (o.props["__isclass"] != true && o.props["__isenum"] != true) {
 		return tv
 	}
 	if _, has := o.props["__ftargs"]; has {
@@ -3414,13 +3426,30 @@ func swTypeSpec(tv interface{}, g string) interface{} {
 		return s
 	}
 	s := newJSObject()
-	s.set("__isclass", true)
+	if o.props["__isenum"] == true {
+		s.set("__isenum", true)
+		s.set("__enum", true)
+	} else {
+		s.set("__isclass", true)
+		s.set("__ftargs", strings.ReplaceAll(g[1:len(g)-1], " ", ""))
+	}
 	s.set("__name", o.props["__name"])
 	s.set("__super", o)
 	s.set("__tspec", g)
-	s.set("__ftargs", strings.ReplaceAll(g[1:len(g)-1], " ", ""))
 	o.set(key, s)
 	return s
+}
+
+// A program generic type named with its arguments (`is Box<Int>`) matches an
+// instance only with those arguments, when the instance can say them. Twins:
+// swGenArgsFit in swift-interpreter.abnf and js_swis in lib/swift-rt.metajs.
+func (rt *jsrt) swGenArgsFit(v interface{}, tname string) bool {
+	if strings.IndexByte(tname, '<') < 0 {
+		return true
+	}
+	g := rt.swGenArgsTxt(v)
+	tn := strings.ReplaceAll(strings.TrimRight(tname, "?!"), " ", "")
+	return g == "" || g == swTyCanon(tn)[strings.IndexByte(tn, '<'):]
 }
 
 // swGenArgsTxt is the `<Double, Int>` a generic struct prints after its name:
