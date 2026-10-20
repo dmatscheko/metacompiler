@@ -999,8 +999,9 @@ function ktNoElemNull() { ktRaise("NoSuchElementException", null) }
 function ktNoElemKind(kind) { ktNoElem(kind + " is empty.") }
 // The kind numbers kept on a host array (arrKind / arrKindSet, host ids 99/100):
 // 0 a List, 1 an Array, 2 a Sequence, 3 a Map's values view, 4 a read-only List
-// from listOf / emptyList (whose JVM class ktJvmListClass names), 5 and up a
-// primitive array (lib/kotlin-math.js's ktaElems). Twin of ktArrWords in
+// from listOf / emptyList or a sorted copy of a Collection or an Array (whose JVM
+// class ktJvmListClass names), 5 and up a primitive array (lib/kotlin-math.js's
+// ktaElems), -1..-3 a deque or a LinkedList. Twin of ktArrWords in
 // abnf/jsrtkotlin.go.
 function ktArrWord(k) {
     if (k == 1 || k >= 5) { return "Array" }
@@ -1022,7 +1023,15 @@ function ktResultKind(recv, name) {
         name == "sortedArrayDescending" || name == "reversedArray" || name == "sliceArray") { return ktaResultKind(recv, name) }
     if ((recv == 1 || recv >= 5) && name == "plus") { return recv }
     if (recv == 2 && ktSeqKeeps(name)) { return 2 }
+    // The sorted family on a Collection or an Array: an Arrays.asList or a toList(),
+    // except a primitive array's sortedDescending. Twin of ktResultKind in
+    // abnf/jsrtkotlin.go, which has the rule.
+    if (recv != 2 && ktSortedName(name) && !(recv >= 5 && name == "sortedDescending")) { return 4 }
     return 0
+}
+function ktSortedName(name) {
+    if (name == "sorted" || name == "sortedDescending" || name == "sortedBy") { return true }
+    return name == "sortedByDescending" || name == "sortedWith"
 }
 // The Sequence members whose answer is again a Sequence.
 function ktSeqKeeps(name) {
@@ -2403,7 +2412,10 @@ function k2Obj(o, depth) {
     if (o["__range"] === true) { return ktRangeStr(o) }
     // A KClass. java.lang.Class.toString() is "class Box" too, which is why
     // .java answers the same handle. The twin is the __kclass arm of kstr.
-    if (o["__kclass"] === true) { return "class " + k2Render(o["kname"], depth + 1) }
+    if (o["__kclass"] === true) {
+        if (o["jname"] !== undefined) { return "class " + o["jname"] }
+        return "class " + k2Render(o["kname"], depth + 1)
+    }
     // A Regex renders as its pattern and a MatchResult as the matched text,
     // which is what their toString answers (abnf/jsrtregexkt.go); neither
     // carries a __class.
@@ -3880,6 +3892,9 @@ function ktJvmListClass(kind, n) {
         return "java.util.Arrays$ArrayList"
     }
     if (kind == 0) { return "java.util.ArrayList" }
+    if (kind == -1) { return "java.util.ArrayDeque" }
+    if (kind == -2) { return "kotlin.collections.ArrayDeque" }
+    if (kind == -3) { return "java.util.LinkedList" }
     return "ArrayList"
 }
 function jxkClass(v) {
@@ -5615,7 +5630,13 @@ function ktSetMethod(s, name, args) {
     if (name == "toMutableSet") { return k3SetFrom(keys) }
     if (name == "toHashSet") { return k3SetFrom(keys) }
     if (name == "toSortedSet") { return k3SetFrom(ktSortBy(keys, null, false)) }
-    return ktSeqMethodK(keys, name, args, "Collection")
+    // A set is a Collection: the same answer kinds as a values view's (kind 3).
+    var sq = ktSeqMethodK(keys, name, args, "Collection")
+    if (ktIsArr(sq) && sq !== keys) {
+        var sk = ktResultKind(3, name)
+        if (sk != 0) { arrKindSet(sq, sk) }
+    }
+    return sq
 }
 
 function k3IsSetRemove(name) {
@@ -6641,6 +6662,34 @@ function ktClassLit(name) {
     return o
 }
 
+// A collection's `javaClass`: a class literal that also carries the JVM binary name
+// (jname). Twin of ktJavaClass in abnf/jsrtkotlin.go, which has the rules.
+function ktJavaClass(jc) {
+    var cut = -1
+    var i = 0
+    while (i < jc.length) {
+        var ch = jc.charAt(i)
+        if (ch == "." || ch == "$") { cut = i }
+        i = i + 1
+    }
+    var o = ktClassLit(jc.substring(cut + 1, jc.length))
+    o["jname"] = jc
+    return o
+}
+
+// The JVM class of a List, a Set or a Map, "" for any other value. Twin of
+// ktCollJvmClass in abnf/jsrtkotlin.go.
+function ktCollJvmClass(v) {
+    if (ktIsArr(v)) {
+        var ak = arrKind(v)
+        if (ak <= 0 || ak == 4) { return ktJvmListClass(ak, v.length) }
+        return ""
+    }
+    if (ktIsSet(v)) { return ktJvmTag(v, "java.util.LinkedHashSet") }
+    if (rtIsDictObj(v)) { return ktJvmTag(v, "java.util.LinkedHashMap") }
+    return ""
+}
+
 // ktIsClassLit (jsrtkotlin.go:5889)
 function ktIsClassLit(v) {
     if (!ktIsObj(v)) { return false }
@@ -6669,7 +6718,7 @@ function ktRefEq(l, r) {
     var rc = ktIsClassLit(r)
     if (lc || rc) {
         if (!lc || !rc) { return false }
-        return l["kname"] === r["kname"]
+        return l["kname"] === r["kname"] && l["jname"] === r["jname"]
     }
     return KT_MISS
 }
@@ -8102,13 +8151,18 @@ function k4JavaCollection(name, src) {
     var els = []
     if (ktIsArr(src)) { els = src }
     else if (ktIsSet(src)) { els = ktSetElems(src) }
-    if (name == "ArrayList" || name == "LinkedList" || name == "ArrayDeque") {
+    if (name == "ArrayList" || name == "LinkedList" || name == "ArrayDeque" || name == "java.util.ArrayDeque") {
         var out = []
         var j = 0
         while (j < els.length) {
             out.push(els[j])
             j = j + 1
         }
+        // A deque or a LinkedList is a list of its own kind; a bare ArrayDeque is
+        // kotlin.collections'.
+        if (name == "java.util.ArrayDeque") { arrKindSet(out, -1) }
+        if (name == "ArrayDeque") { arrKindSet(out, -2) }
+        if (name == "LinkedList") { arrKindSet(out, -3) }
         return out
     }
     var s = ktJvmTagged(ktMakeSet(), name, 0)
@@ -8266,7 +8320,8 @@ function ktGlobalFn(name) {
     if (name == "Math") { return k4JavaMath() }
     if (name == "PriorityQueue") { return function (a0, a1) { return ktNewPq(a0, a1) } }
     if (name == "ArrayList" || name == "HashSet" || name == "LinkedHashSet" || name == "HashMap" || name == "LinkedHashMap"
-        || name == "TreeSet" || name == "TreeMap" || name == "LinkedList" || name == "ArrayDeque") {
+        || name == "TreeSet" || name == "TreeMap" || name == "LinkedList" || name == "ArrayDeque"
+        || name == "java.util.ArrayDeque") {
         return function (src) {
             var c = k4JavaCollection(name, src)
             if (Array.isArray(c)) { return c }
@@ -8962,6 +9017,9 @@ function ktSmcall(recv, name, args) {
         if (!ktMiss(lv)) {
             if (ktIsArr(lv) && lv !== rv) {
                 var lk = ktResultKind(arrKind(rv), name)
+                // A range (rvKind Collection) is no Collection: its sorted copy
+                // stays an ArrayList.
+                if (lk == 4 && rvKind == "Collection") { lk = 0 }
                 if (lk != 0) { arrKindSet(lv, lk) }
             }
             return lv
@@ -9101,7 +9159,7 @@ function k4RefEq(l, r) {
     if (lIsCls || rIsCls) {
         if (!lIsCls) { return false }
         if (!rIsCls) { return false }
-        return l["kname"] === r["kname"]
+        return l["kname"] === r["kname"] && l["jname"] === r["jname"]
     }
     return false
 }
@@ -9550,16 +9608,21 @@ function ktMapView(set, m, view) {
 // none. Twin of ktJvmIsA in abnf/jsrtkotlin.go, which has the rules.
 function ktJvmIsA(jc, tname) {
     var t = tname
-    if (t.indexOf("java.util.") == 0) {
+    var qual = t.indexOf("java.util.") == 0
+    if (qual) {
         t = t.substring(10, t.length)
     } else if (t.indexOf("kotlin.collections.") == 0) {
         t = t.substring(19, t.length)
     }
-    if (t == "SortedSet" || t == "NavigableSet") { t = "TreeSet" }
+    if (t == "SortedSet" || t == "NavigableSet") { return jc == "java.util.TreeSet" || jc == "java.util.TreeMap$KeySet" }
+    if (t == "ArrayDeque") {
+        if (qual) { return jc == "java.util.ArrayDeque" }
+        return jc == "kotlin.collections.ArrayDeque"
+    }
     if (t == "SortedMap" || t == "NavigableMap") { t = "TreeMap" }
     if (t == "HashSet" || t == "HashMap") { return jc == "java.util." + t || jc == "java.util.Linked" + t }
     if (t == "ArrayList" || t == "LinkedHashSet" || t == "LinkedHashMap" || t == "TreeSet" ||
-        t == "TreeMap" || t == "PriorityQueue") { return jc == "java.util." + t }
+        t == "TreeMap" || t == "PriorityQueue" || t == "LinkedList") { return jc == "java.util." + t }
     return undefined
 }
 
@@ -9583,10 +9646,11 @@ function ktCollIsType(v, tname) {
     }
     if (!ktIsArr(v)) { return undefined }
     var k = arrKind(v)
-    if (k == 0 || k == 4) {
+    if (k <= 0 || k == 4) {
         var lc = ktJvmIsA(ktJvmListClass(k, v.length), t)
         if (lc !== undefined) { return lc }
-        return coll || t == "List"
+        if ((k == -1 || k == -3) && (t == "Deque" || t == "Queue")) { return true }
+        return coll || (t == "List" && k != -1)
     }
     if (k == 3) { return coll }
     if (k == 2) { return t == "Sequence" }
@@ -9637,12 +9701,19 @@ function js_ktfget(o, name) {
     if (ktIsClassLit(o)) {
         if (name == "simpleName") { return o["kname"] }
         if (name == "qualifiedName") { return o["kname"] }
-        if (name == "name") { return o["kname"] }
+        if (name == "name") {
+            if (o["jname"] !== undefined) { return o["jname"] }
+            return o["kname"]
+        }
         if (name == "java") { return o }
         if (name == "javaClass") { return o }
         if (name == "javaObjectType") { return o }
         fail("member ." + name + " of a class literal")
         return undefined
+    }
+    if (name == "javaClass") {
+        var cjc = ktCollJvmClass(o)
+        if (cjc != "") { return ktJavaClass(cjc) }
     }
     // `Col.entries` is a PROPERTY (an EnumEntries, which is a List) where values()
     // is a function, so it is read here too.

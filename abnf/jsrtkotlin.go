@@ -1750,7 +1750,9 @@ func init() {
 			if lst, isArr := recv.(*jsArray); isArr {
 				if v, handled := rt.ktSeqMethodK(lst, mname, arr.elems, recvKind); handled {
 					if out, isOut := v.(*jsArray); isOut && out != lst {
-						if k := ktResultKind(lst.kind, mname); k != 0 {
+						// A range (recvKind Collection) is an Iterable but no
+						// Collection, so its sorted copy stays an ArrayList.
+						if k := ktResultKind(lst.kind, mname); k != 0 && !(k == ktArrFixed && recvKind == ktKindColl) {
 							out.kind = k
 						}
 					}
@@ -2657,12 +2659,22 @@ func init() {
 			// the default package, and .java is the same handle again.
 			if co, isCls := ktIsClassLit(o); isCls {
 				switch name {
-				case "simpleName", "qualifiedName", "name":
+				case "name":
+					if jn, has := co.props["jname"]; has {
+						return w(jn)
+					}
+					return w(co.props["kname"])
+				case "simpleName", "qualifiedName":
 					return w(co.props["kname"])
 				case "java", "javaClass", "javaObjectType":
 					return w(co)
 				}
 				rt.fail("member .%s of a class literal", name)
+			}
+			if name == "javaClass" {
+				if jc := ktCollJvmClass(o); jc != "" {
+					return w(ktJavaClass(jc))
+				}
 			}
 			// `Col.entries` is a PROPERTY (an EnumEntries, which is a List) where
 			// values() is a function, so it is read here too.
@@ -3752,6 +3764,9 @@ func (rt *jsrt) ktpObj(o *jsObject, depth int) (string, bool) {
 	// A KClass. java.lang.Class.toString() is "class Box" too, which is why .java
 	// answers the same handle. The twin is the __kclass arm of kstr.
 	if co, isCls := ktIsClassLit(o); isCls {
+		if jn, has := co.props["jname"]; has {
+			return "class " + rt.ktpRender(jn, depth+1), true
+		}
 		return "class " + rt.ktpRender(co.props["kname"], depth+1), true
 	}
 	// A Regex renders as its pattern and a MatchResult as the matched text, which is
@@ -5124,7 +5139,7 @@ func (rt *jsrt) ktValueOf(args []interface{}, e interface{}) interface{} {
 }
 
 func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind string) (interface{}, bool) {
-	if kind == ktKindList && o.kind != 0 {
+	if kind == ktKindList && o.kind > 0 {
 		kind = ktArrWords[o.kind]
 	}
 	es := o.elems
@@ -6529,7 +6544,14 @@ func (rt *jsrt) ktSetMethod(s *jsObject, name string, args []interface{}) (inter
 	case "toSortedSet":
 		return rt.ktSetFrom(ktSortBy(rt, keys.elems, nil, false).elems), true
 	}
-	return rt.ktSeqMethodK(keys, name, args, ktKindColl)
+	v, handled := rt.ktSeqMethodK(keys, name, args, ktKindColl)
+	// A set is a Collection: the same answer kinds as a values view's.
+	if out, isOut := v.(*jsArray); isOut && out != keys {
+		if k := ktResultKind(ktArrVals, name); k != 0 {
+			out.kind = k
+		}
+	}
+	return v, handled
 }
 
 // ktIsCollection reports the shapes kotlin.collections.plus/minus treat as a
@@ -7426,11 +7448,13 @@ func ktCollIsType(v interface{}, t string) (is bool, ok bool) {
 		return false, false
 	}
 	switch k := arr.kind; {
-	case k == 0 || k == ktArrFixed:
+	case k <= 0 || k == ktArrFixed:
 		if is, ok := ktJvmIsA(ktJvmListClass(k, len(arr.elems)), t); ok {
 			return is, true
 		}
-		return coll || t == "List", true
+		// A java.util.ArrayDeque is a Deque and not a List, a LinkedList both.
+		deque := (k == ktArrJDeque || k == ktArrLinked) && (t == "Deque" || t == "Queue")
+		return coll || deque || (t == "List" && k != ktArrJDeque), true
 	case k == ktArrVals:
 		return coll, true
 	case k == ktArrSeq:
@@ -7478,25 +7502,33 @@ func ktMapView(set interface{}, m interface{}, view string) interface{} {
 // ktJvmIsA is `is C` for a concrete java.util collection class C (kotlin.collections'
 // ArrayList / HashSet / LinkedHashSet / HashMap / LinkedHashMap are typealiases to
 // them), given the value's JVM class jc; ok is false when t names none. A
-// LinkedHashSet / LinkedHashMap extends HashSet / HashMap, a TreeSet / TreeMap is the
-// only SortedSet / NavigableSet / SortedMap / NavigableMap here. Twin of kJvmIsA in
-// kotlin-interpreter.abnf and ktJvmIsA in languages/lib/kotlin-rt.metajs.
+// LinkedHashSet / LinkedHashMap extends HashSet / HashMap; a TreeSet and a TreeMap's
+// key set are the only SortedSet / NavigableSet here, a TreeMap the only SortedMap /
+// NavigableMap. A bare ArrayDeque is kotlin.collections', the qualified one java's.
+// Twin of kJvmIsA in kotlin-interpreter.abnf and ktJvmIsA in
+// languages/lib/kotlin-rt.metajs.
 func ktJvmIsA(jc, t string) (is bool, ok bool) {
-	if s, cut := strings.CutPrefix(t, "java.util."); cut {
+	s, qualified := strings.CutPrefix(t, "java.util.")
+	if qualified {
 		t = s
 	} else {
 		t = strings.TrimPrefix(t, "kotlin.collections.")
 	}
 	switch t {
 	case "SortedSet", "NavigableSet":
-		t = "TreeSet"
+		return jc == "java.util.TreeSet" || jc == "java.util.TreeMap$KeySet", true
 	case "SortedMap", "NavigableMap":
 		t = "TreeMap"
+	case "ArrayDeque":
+		if qualified {
+			return jc == "java.util.ArrayDeque", true
+		}
+		return jc == "kotlin.collections.ArrayDeque", true
 	}
 	switch t {
 	case "HashSet", "HashMap":
 		return jc == "java.util."+t || jc == "java.util.Linked"+t, true
-	case "ArrayList", "LinkedHashSet", "LinkedHashMap", "TreeSet", "TreeMap", "PriorityQueue":
+	case "ArrayList", "LinkedHashSet", "LinkedHashMap", "TreeSet", "TreeMap", "PriorityQueue", "LinkedList":
 		return jc == "java.util."+t, true
 	}
 	return false, false
@@ -7987,8 +8019,8 @@ func (rt *jsrt) ktJavaCollection(name string, src interface{}) interface{} {
 	} else if keys, isSet := ktSetParts(src); isSet {
 		els = keys.elems
 	}
-	if name == "ArrayList" || name == "LinkedList" || name == "ArrayDeque" {
-		return &jsArray{elems: append([]interface{}{}, els...)}
+	if k, isList := ktListCtorKinds[name]; isList {
+		return &jsArray{elems: append([]interface{}{}, els...), kind: k}
 	}
 	// A TreeSet is tagged before it fills, so each insertion sorts.
 	s := ktJvmTagged(ktMakeSet(), name, 0)
@@ -8000,6 +8032,11 @@ func (rt *jsrt) ktJavaCollection(name string, src interface{}) interface{} {
 	}
 	return s
 }
+
+// The array kind of each List (and deque) constructor; a bare ArrayDeque is
+// kotlin.collections'.
+var ktListCtorKinds = map[string]int{"ArrayList": 0, "LinkedList": ktArrLinked,
+	"ArrayDeque": ktArrKDeque, "java.util.ArrayDeque": ktArrJDeque}
 
 // ktJvmTagged records on a set or map the JVM class its builder answers, when that
 // is not a LinkedHashSet / LinkedHashMap: setOf and mapOf by their argument count n
@@ -8368,8 +8405,8 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			return rt.ktNewPq(args)
 		})
-	case "ArrayList", "LinkedList", "ArrayDeque", "HashSet", "LinkedHashSet", "HashMap", "LinkedHashMap",
-		"TreeSet", "TreeMap":
+	case "ArrayList", "LinkedList", "ArrayDeque", "java.util.ArrayDeque", "HashSet", "LinkedHashSet",
+		"HashMap", "LinkedHashMap", "TreeSet", "TreeMap":
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			c := rt.ktJavaCollection(name, argAt(args, 0))
 			if o, isObj := c.(*jsObject); isObj {
@@ -8771,7 +8808,8 @@ const (
 
 // The kind numbers kept on a host array (jsArray.kind; arrKind / arrKindSet in the
 // other two engines): 0 a List, 1 an Array, 2 a Sequence, 3 a Map's values view, 4
-// a read-only List from listOf / emptyList (whose JVM class ktJvmListClass names).
+// a read-only List from listOf / emptyList or a sorted copy of a Collection or an
+// Array (whose JVM class ktJvmListClass names), -1..-3 a deque or a LinkedList.
 // Twin of kArrWords in kotlin-interpreter.abnf and ktArrWord in
 // languages/lib/kotlin-rt.metajs.
 const (
@@ -8780,6 +8818,10 @@ const (
 	ktArrVals  = 3
 	ktArrFixed = 4
 	ktArrPrim  = 5 // the first primitive array kind; see ktaElems
+	// The Lists (and the Deque) whose class is not java.util.ArrayList are below 0.
+	ktArrJDeque = -1 // java.util.ArrayDeque
+	ktArrKDeque = -2 // kotlin.collections.ArrayDeque
+	ktArrLinked = -3 // java.util.LinkedList
 )
 
 var ktArrWords = [...]string{ktKindList, ktKindArr, ktKindSeq, ktKindColl, ktKindList,
@@ -8842,8 +8884,9 @@ func ktaRefClass(classes []string) string {
 }
 
 // ktJvmListClass is the JVM class of a List: kotlin-stdlib's listOf answers
-// EmptyList, a Collections.singletonList or an Arrays.asList by its size; every
-// other List here is a java.util.ArrayList. An Array or a Sequence keeps its simple
+// EmptyList, a Collections.singletonList or an Arrays.asList by its size; a deque
+// or a LinkedList its own class (the negative kinds); every other List here is a
+// java.util.ArrayList. An Array or a Sequence keeps its simple
 // name. Twin of kJvmListClass in kotlin-interpreter.abnf and ktJvmListClass in
 // languages/lib/kotlin-rt.metajs.
 func ktJvmListClass(kind, n int) string {
@@ -8856,6 +8899,12 @@ func ktJvmListClass(kind, n int) string {
 		return "java.util.Arrays$ArrayList"
 	case kind == 0:
 		return "java.util.ArrayList"
+	case kind == ktArrJDeque:
+		return "java.util.ArrayDeque"
+	case kind == ktArrKDeque:
+		return "kotlin.collections.ArrayDeque"
+	case kind == ktArrLinked:
+		return "java.util.LinkedList"
 	}
 	return "ArrayList"
 }
@@ -8895,8 +8944,19 @@ func ktResultKind(recv int, name string) int {
 	if recv == ktArrSeq && ktSeqKeepsKind[name] {
 		return ktArrSeq
 	}
+	// The sorted family on a Collection or an Array answers an Arrays.asList of the
+	// sorted copy, or toList() at size 0 or 1 (_Collections.kt, _Arrays.kt) - not an
+	// ArrayList - except a primitive array's sortedDescending, which reverses into a
+	// fresh one.
+	if ktSortedNames[name] && recv != ktArrSeq && !(recv >= ktArrPrim && name == "sortedDescending") {
+		return ktArrFixed
+	}
 	return 0
 }
+
+// The sorted family, whose answer on a Collection or an Array is not an ArrayList.
+var ktSortedNames = map[string]bool{"sorted": true, "sortedDescending": true,
+	"sortedBy": true, "sortedByDescending": true, "sortedWith": true}
 
 // The Sequence members whose answer is again a Sequence.
 var ktSeqKeepsKind = map[string]bool{
@@ -9246,6 +9306,35 @@ func ktClassLit(name interface{}) *jsObject {
 	return o
 }
 
+// ktJavaClass is a collection's `javaClass`: a class literal that also carries the
+// JVM binary name jc (jname), which .name and toString answer; simpleName is the
+// part after the package and the enclosing class. Twin of kJavaClass in
+// kotlin-interpreter.abnf and ktJavaClass in languages/lib/kotlin-rt.metajs.
+func ktJavaClass(jc string) *jsObject {
+	o := ktClassLit(jc[strings.LastIndexAny(jc, ".$")+1:])
+	o.set("jname", jc)
+	return o
+}
+
+// ktCollJvmClass is the JVM class of a List, a Set or a Map, "" for any other value
+// (a values view, an Array or a Sequence records no class). Twin of kCollJvmClass in
+// kotlin-interpreter.abnf and ktCollJvmClass in languages/lib/kotlin-rt.metajs.
+func ktCollJvmClass(v interface{}) string {
+	if a, isArr := v.(*jsArray); isArr {
+		if a.kind <= 0 || a.kind == ktArrFixed {
+			return ktJvmListClass(a.kind, len(a.elems))
+		}
+		return ""
+	}
+	if ktIsSet(v) {
+		return ktJvmTag(v, "java.util.LinkedHashSet")
+	}
+	if _, _, isDict := dictParts(v); isDict {
+		return ktJvmTag(v, "java.util.LinkedHashMap")
+	}
+	return ""
+}
+
 func ktIsClassLit(v interface{}) (*jsObject, bool) {
 	o, ok := v.(*jsObject)
 	if !ok {
@@ -9275,7 +9364,8 @@ func ktRefEq(l, r interface{}) (bool, bool) {
 		if !lIsCls || !rIsCls {
 			return false, true
 		}
-		return lc.props["kname"] == rc.props["kname"], true
+		// A javaClass also compares its JVM name (Arrays$ArrayList is no ArrayList).
+		return lc.props["kname"] == rc.props["kname"] && lc.props["jname"] == rc.props["jname"], true
 	}
 	return false, false
 }

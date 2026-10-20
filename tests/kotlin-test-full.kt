@@ -5386,6 +5386,40 @@ fun sec113() {
     check("jis113g", cls113(m.keys) == f && cls113(m.entries) == f && cls113(hashMapOf(1 to 2).keys) == f && cls113(sortedMapOf(1 to 2).entries) == f && m.keys is Set<*>)
 }
 
+// ===== SECTION 114: the JVM class of sorted copies, deques and map views =====
+// Read off kotlin-stdlib 2.2.21 under JDK 24 (getClass().getName() / getSimpleName(),
+// instanceof): sorted* of a Collection or an Array is an Arrays$ArrayList, or
+// toList() (EmptyList, SingletonList) at size 0 or 1; of a range (an Iterable only)
+// an ArrayList; IntArray.sortedDescending() reverses into an ArrayList. The two
+// ArrayDeques and LinkedList are their own classes, and java's ArrayDeque is no
+// List. A TreeMap's keys are a TreeMap$KeySet, which is a NavigableSet.
+fun jcn114(v: Any): String = v.javaClass.name
+fun sec114() {
+    val a: Any = listOf(3, 1, 2).sorted()
+    val b: Any = setOf(3, 1).sortedBy { it }
+    val c: Any = mutableListOf(3, 1).sortedWith(compareBy { it })
+    val d: Any = listOf(3, 1).sortedDescending()
+    val e: Any = mapOf(1 to 3, 2 to 1).values.sortedByDescending { it }
+    check("jsrt114a", a !is ArrayList<*> && b !is ArrayList<*> && c !is ArrayList<*> && d !is ArrayList<*> && e !is ArrayList<*>)
+    check("jsrt114b", jcn114(a) == "java.util.Arrays\$ArrayList" && jcn114(listOf(3).sorted()) == "java.util.Collections\$SingletonList" && jcn114(listOf<Int>().sorted()) == "kotlin.collections.EmptyList")
+    val g: Any = arrayOf(3, 1).sorted()
+    val h: Any = intArrayOf(3, 1).sortedBy { it }
+    val i: Any = intArrayOf(3, 1).sortedDescending()
+    val j: Any = (1..3).sortedDescending()
+    check("jsrt114c", g !is ArrayList<*> && h !is ArrayList<*> && i is ArrayList<*> && j is ArrayList<*> && "" + j == "[3, 2, 1]")
+    val jd: Any = java.util.ArrayDeque<Int>()
+    val kd: Any = ArrayDeque<Int>()
+    val ll: Any = java.util.LinkedList<Int>()
+    check("jsrt114d", jd !is ArrayList<*> && kd !is ArrayList<*> && ll !is ArrayList<*> && jd !is List<*> && kd is List<*> && ll is List<*> && jd is Collection<*>)
+    check("jsrt114e", jcn114(jd) == "java.util.ArrayDeque" && jcn114(kd) == "kotlin.collections.ArrayDeque" && jcn114(ll) == "java.util.LinkedList" && kd is ArrayDeque<*> && jd !is ArrayDeque<*> && jd is java.util.ArrayDeque<*>)
+    val sk: Any = sortedMapOf(1 to 2).keys
+    val se: Any = sortedMapOf(1 to 2).entries
+    check("jsrt114f", sk is java.util.SortedSet<*> && sk is java.util.NavigableSet<*> && se !is java.util.SortedSet<*> && jcn114(sk) == "java.util.TreeMap\$KeySet")
+    check("jsrt114g", jcn114(mutableMapOf(1 to 2).keys) == "java.util.LinkedHashMap\$LinkedKeySet" && jcn114(setOf(1)) == "java.util.Collections\$SingletonSet" && jcn114(mapOf(1 to 2)) == "java.util.Collections\$SingletonMap")
+    check("jsrt114h", listOf(1, 2).javaClass.simpleName == "ArrayList" && mutableMapOf(1 to 2).keys.javaClass.simpleName == "LinkedKeySet" && "" + mutableListOf(1).javaClass == "class java.util.ArrayList")
+    check("jsrt114i", listOf(1, 2).javaClass != mutableListOf(1).javaClass && arrayListOf(2).javaClass == mutableListOf(1).javaClass)
+}
+
 
 fun main() {
     s01() // SECTION-CALL 01
@@ -5501,6 +5535,7 @@ fun main() {
     sec111() // SECTION-CALL 111
     sec112() // SECTION-CALL 112
     sec113() // SECTION-CALL 113
+    sec114() // SECTION-CALL 114
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }
