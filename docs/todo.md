@@ -136,7 +136,7 @@ reports cap 4 where growslice says 1) — escape analysis.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-655 php: function_exists(); direct calls in another letter case; callback message; var_dump of a first-class callable · P2 · PHP · OPEN [V spec-only]
+### T-655 php: function_exists(); direct calls in another letter case; callback message; var_dump of a first-class callable · P2 · PHP · IN PROGRESS (PHP worker, round 7) [V spec-only]
 `function_exists('strlen')` → "Call to undefined function function_exists()" in all engines. `function myCmp(){}; MYCMP();` and
 `STRTOUPPER("x")` → "Call to undefined function" (PHP names are case-insensitive; keep the written name in the miss message, lower-case
 the lookup — branch only at mixed-case call sites). An array callback without two members → "array must have exactly two members"
