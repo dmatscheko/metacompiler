@@ -3120,8 +3120,24 @@ HasStatic   = :script(~~
         var cls = curClassName
         var atys = jCallArgTys(text, items.length - 1)
         var args = jVaWrap(items.slice(1), atys, name, function() { return cls })
+        var chain = jEnclChain()
         return function(b) {
             var kind = lookupMethodKind(cls, name)
+            // A static method of a lexically enclosing class, named unqualified
+            // in a nested one (JLS 15.12.1). Twin of jStaticOwner's enclosing hop
+            // in java-interpreter.abnf.
+            var owner = cls
+            var outerInst = ""
+            for (var ci = 1; kind == null && ci < chain.names.length; ci++) {
+                var ok = lookupMethodKind(chain.names[ci], name)
+                if (ok == "static") {
+                    kind = "static"
+                    owner = chain.names[ci]
+                } else if (ok != null) {
+                    kind = ok
+                    outerInst = chain.names[ci]
+                }
+            }
             var recvV
             if (cls == "") {
                 // Outside every class body: the only sensible reading is a callable
@@ -3131,15 +3147,24 @@ HasStatic   = :script(~~
                 return {b: ea0.b, v: callExt(ea0.b, "js_call", [fnV, hUndef, ea0.v])}
             }
             if (kind != "instance" && (kind == "static" || !curHasThis)) {
-                recvV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, cls)])
+                recvV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, owner)])
             } else {
                 recvV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
+            }
+            // An anonymous body's own methods are not in the walk's tables, so
+            // which of this and its enclosing instances answers is decided at run
+            // time there.
+            if (chain.anon && kind == "instance") { recvV = callExt(b, "js_jvbarerecv", [recvV, emitStr(b, name)]) }
+            if (outerInst != "") {
+                recvV = callExt(b, "js_jouterthis", [recvV, emitStr(b, outerInst)])
+                var oea = emitArgs(b, args)
+                return {b: oea.b, v: callExt(oea.b, "js_mcall", [recvV, emitStr(oea.b, name), oea.v])}
             }
             // getClass() is java.lang.Object's, and final: no class declares it.
             if (name == "getClass" && args.length == 0) { return {b: b, v: callExt(b, "js_jvgetclass", [recvV])} }
             var ea = emitArgs(b, args)
             b = ea.b
-            var sig = jOvStaticSig(cls, name, atys, null)
+            var sig = jOvStaticSig(owner, name, atys, null)
             if (sig != "") {
                 return {b: b, v: callExt(b, "js_jvsigcall", [recvV, emitStr(b, name), emitStr(b, sig), ea.v])}
             }
@@ -3699,6 +3724,7 @@ HasStatic   = :script(~~
         // String.CASE_INSENSITIVE_ORDER is a java.util.Comparator, so it wants
         // lib/java-util.java loaded as an import of Comparator would.
         if (suffixes[0].kind == "field" && suffixes[0].name == "CASE_INSENSITIVE_ORDER") { jUtilWant = true }
+        if (text != undefined && jMapStaticRecv(text)) { jMapWant = true }
         if (text != undefined) {
             jChainRecvTys(suffixes, text)
             for (var vi = 0; vi < suffixes.length; vi++) { if (suffixes[vi].kind == "mcall") { jVaWrapSfx(suffixes[vi]) } }
@@ -4812,6 +4838,19 @@ HasStatic   = :script(~~
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, params[i]),
                                          declConvert(b, callExt(b, "js_arg", [f.Params[1], handle(i + off)]), pty)])
         }
+        // A superclass constructor may call a method this class overrides, which
+        // then reads this class's fields before their initializers ran: they hold
+        // their type's zero (JLS 12.5). Twin of the __fzero loop in
+        // java-interpreter.abnf's makeCtorDispatch.
+        var hasSuper = (superName != undefined && superName != null) || (preBody != undefined && preBody != null)
+        if (fields != null && hasSuper) {
+            var zThisV = callExt(b, "js_arg", [f.Params[1], handle(0)])
+            for (var z = 0; z < fields.length; z++) {
+                var zt = fields[z].fty
+                if (fields[z].initblock != undefined || !(jIsPrimTy(zt) || zt == "boolean")) { continue }
+                callExt(b, "js_set", [zThisV, emitStr(b, fields[z].name), fieldDefault(b, fields[z])])
+            }
+        }
         if (superName != undefined && superName != null) {
             // The implicit super(): run the whole parent constructor without arguments.
             var supClsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, superName)])
@@ -5025,7 +5064,13 @@ HasStatic   = :script(~~
                 fieldNames["$" + recordParams[rc]] = true
             }
         }
+        // Only a top-level type runs the member types' queued static
+        // initialization (jStaticQueue); this is called right after the walk left
+        // the declaration, so curClassName is the enclosing type's.
+        var topLevel = curClassName == ""
         return function(b) {
+            var asMember = jEmitMember
+            jEmitMember = false
             // A local / anonymous class is built inside another function's emission;
             // its own members decide `this` availability, so it is restored on the way
             // out (see curHasThis).
@@ -5085,6 +5130,7 @@ HasStatic   = :script(~~
             // on the descriptor, so the enclosing class's own members can use them.
             for (i = 0; i < members.length; i++) {
                 if (members[i].kind != "nested") { continue }
+                jEmitMember = true
                 b = members[i].stmt(b)
                 callExt(b, "js_set", [clsV, emitStr(b, members[i].name),
                                       callExt(b, "js_scope_get", [curScopeV, emitStr(b, members[i].name)])])
@@ -5231,26 +5277,50 @@ HasStatic   = :script(~~
             }
             // Static fields and static initializer blocks run in textual order once
             // the constructors and methods are installed, so an initializer can
-            // construct its own class or call its static methods. Twin of the
-            // statics loop in buildClassFrom in java-interpreter.abnf.
+            // construct its own class or call its static methods. A member type's
+            // run after its top-level class's (jStaticQueue). Twin of the statics
+            // loop and jRunStatics in java-interpreter.abnf.
             curHasThis = savedHasThis
-            for (i = 0; i < members.length; i++) {
-                var sm = members[i]
-                if (sm.kind == "staticinit") { b = sm.body(b) }
-                if (sm.kind != "field" || !sm.statik) { continue }
-                var sv
-                if (sm.init != null && sm.init != undefined) {
-                    var r = sm.init(b)
-                    b = r.b
-                    sv = r.v
-                } else {
-                    sv = fieldDefault(b, sm)
+            var emitStatics = function(b) {
+                var hadThis = curHasThis
+                curHasThis = savedHasThis
+                for (var si = 0; si < members.length; si++) {
+                    var sm = members[si]
+                    if (sm.kind == "staticinit") { b = sm.body(b) }
+                    if (sm.kind != "field" || !sm.statik) { continue }
+                    var sv
+                    if (sm.init != null && sm.init != undefined) {
+                        var r = sm.init(b)
+                        b = r.b
+                        sv = r.v
+                    } else {
+                        sv = fieldDefault(b, sm)
+                    }
+                    callExt(b, "js_set", [clsV, emitStr(b, sm.name), sv])
                 }
-                callExt(b, "js_set", [clsV, emitStr(b, sm.name), sv])
+                curHasThis = hadThis
+                return b
+            }
+            if (asMember) {
+                jStaticQueue.push(emitStatics)
+                return b
+            }
+            b = emitStatics(b)
+            if (topLevel) {
+                var q = jStaticQueue
+                jStaticQueue = []
+                for (var qi = 0; qi < q.length; qi++) { b = q[qi](b) }
             }
             return b
         }
     }
+    // A member type's static initialization waits for its top-level class's:
+    // Java initializes a class at its first use, which is after the enclosing
+    // class it names unqualified. jEmitMember tells the class statement about to
+    // be emitted that it is a member type (a local or anonymous class is emitted
+    // inside a function body and runs at once).
+    var jStaticQueue = []
+    var jEmitMember = false
     function makeClassStmt(items) {
         jExitClass()
         jOvDeclare(items[0], items.slice(1))

@@ -5936,6 +5936,9 @@ HasStatic   = :script(~~
     // which members they hand in and in the extra pieces bolted on afterwards.
     function buildClassFrom(name, members, recordParams) {
         var cls = {__isclass: true, __name: name, __bname: jBinOf(name)}
+        // The class this one is declared in, if any (jStaticOwner).
+        var lexo = jClassStack.length > 1 ? jClassStack[jClassStack.length - 1] : ""
+        if (lexo != "" && lexo != undefined) { cls.__lexouter = lexo }
         var fields = []
         var ctors = []
         var compact = null
@@ -5997,6 +6000,14 @@ HasStatic   = :script(~~
         // ownInit is THIS class' share of construction: its field initializers and
         // its instance initializer blocks, in the order they were written. The super
         // constructor is not part of it - the explicit head decides when that runs.
+        // The primitive instance fields and their zeros, which a superclass
+        // constructor calling an override can read before ownInit ran (JLS 12.5).
+        var fzero = []
+        for (i = 0; i < fields.length; i++) {
+            var fz = fields[i]
+            if (fz.kind == "field" && fz.dflt !== null && fz.dflt !== undefined) { fzero.push(fz) }
+        }
+        cls.__fzero = fzero
         function ownInit(self) {
             for (var k = 0; k < fields.length; k++) {
                 var fk = fields[k]
@@ -6047,18 +6058,44 @@ HasStatic   = :script(~~
         // run in a scope carrying __jcls, so `static int a = 1; static int b = a+1;`
         // and a `static { c = a; }` block can name the class' own statics
         // unqualified - the same reading jSelfWith gives a static method body.
-        // They run now, during the walk, so the library types they create must
-        // exist first.
-        if (statics.length > 0) { jLoadWanted() }
-        scopes.push({__jcls: cls})
-        for (i = 0; i < statics.length; i++) {
-            var st = statics[i]
-            if (st.kind == "sinit") { invokeBody([], st.body, cls, "__jcls", []); continue }
-            cls[st.name] = (st.init != null) ? st.init() : st.dflt
+        // They run during the walk, so the library types they create must exist
+        // first. A nested or local class's run after its top-level class's
+        // (jRunStatics): Java initializes a class at its first use, which is
+        // after the enclosing class it names unqualified has been initialized.
+        var runStatics = function() {
+            if (statics.length > 0) { jLoadWanted() }
+            scopes.push({__jcls: cls})
+            for (var si = 0; si < statics.length; si++) {
+                var st = statics[si]
+                if (st.kind == "sinit") { invokeBody([], st.body, cls, "__jcls", []); continue }
+                cls[st.name] = (st.init != null) ? st.init() : st.dflt
+            }
+            scopes.pop()
         }
-        scopes.pop()
+        jRunStatics(runStatics)
         globalScope[name] = cls
         return cls
+    }
+    // Runs a class's static initialization now, or - for a type declared inside
+    // another class - queues it until its top-level class's own has run.
+    // Twin of jStaticQueue in java-to-llvm-ir.abnf.
+    var jPendingStatics = []
+    function jRunStatics(run) {
+        var n = jClassStack.length
+        if (n > 1 && jClassStack[n - 1] != "") {
+            jPendingStatics.push({owner: jClassStack[1], run: run})
+            return
+        }
+        run()
+        if (n == 1) {
+            var keep = []
+            var mine = []
+            for (var i = 0; i < jPendingStatics.length; i++) {
+                if (jPendingStatics[i].owner == curClassName) { mine.push(jPendingStatics[i]) } else { keep.push(jPendingStatics[i]) }
+            }
+            jPendingStatics = keep
+            for (var k = 0; k < mine.length; k++) { mine[k].run() }
+        }
     }
     // The constructor entry point of a class: pick the overload by arity, or - when
     // the class declares none - do the implicit super() plus own initialization.
@@ -6072,6 +6109,7 @@ HasStatic   = :script(~~
                 // No constructor of this class fits. That is what an anonymous
                 // subclass (and an enum constant with a body) looks like: it
                 // declares none of its own, so the arguments belong to super.
+                if (refs.sup != null) { jZeroFields(self, refs.self) }
                 if (refs.sup != null) { jCallCtorSig(refs.sup, self, args, hasOwn(refs.self, "__supsig") ? refs.self.__supsig : "") }
                 ownInit(self)
                 return undefined
@@ -6291,6 +6329,14 @@ HasStatic   = :script(~~
     //   (none)    - the implicit no-argument super(), then this class' own fields
     // The head's arguments may name the constructor's parameters, so they are
     // evaluated INSIDE the body scope, not before it.
+    // A subclass instance's primitive fields hold their zeros from the start
+    // (cls.__fzero). Twin of the zeroing in emitFunc in java-to-llvm-ir.abnf.
+    function jZeroFields(self, cls) {
+        var fz = cls.__fzero
+        for (var i = 0; i < fz.length; i++) {
+            if (!hasOwn(self, fz[i].name)) { self[fz[i].name] = fz[i].dflt }
+        }
+    }
     function makeCtorClosure(info, ownInit, refs) {
         var head = info.head
         var body = info.body
@@ -6299,6 +6345,7 @@ HasStatic   = :script(~~
             var args = []
             for (var i = 1; i < arguments.length; i++) args.push(arguments[i])
             var full = function() {
+                if (refs.sup != null) { jZeroFields(self, refs.self) }
                 if (head != undefined && head != null) {
                     var av = []
                     for (var k = 0; k < head.args.length; k++) { av.push(head.args[k]()) }
@@ -6633,13 +6680,42 @@ HasStatic   = :script(~~
         var atys = jCallArgTys(text, items.length - 1)
         var args = jVaWrap(items.slice(1), atys, name, function() { return cls })
         var sig = anytype // the static signature, resolved at the first call (jOvStaticSig)
+        var outers = jClassStack.slice(0)
         return function() {
             var argv = []
             for (var i = 0; i < args.length; i++) { argv.push(args[i]()) }
-            if (sig == undefined) { sig = (cls == "" || cls == undefined) ? "" : jOvStaticSig(cls, name, atys, null) }
             var kind = jLookupKind(cls, name)
+            // A method of a lexically enclosing class, named unqualified in a
+            // nested one (JLS 15.12.1): a static one on that class, an instance
+            // one on the enclosing instance of that class. Twin of makeBareCall
+            // in java-to-llvm-ir.abnf.
+            var outerInst = ""
+            for (var oi = outers.length - 1; kind == null && oi >= 0; oi--) {
+                if (outers[oi] == "") { continue }
+                var ok = jLookupKind(outers[oi], name)
+                if (ok == "static") {
+                    kind = "static"
+                    cls = outers[oi]
+                } else if (ok != null) {
+                    kind = ok
+                    outerInst = outers[oi]
+                }
+            }
+            if (outerInst != "") {
+                var ov = jThisOrNull()
+                while (ov != undefined && ov != null && !(ov.__class != undefined && jClassIs(ov.__class, outerInst))) { ov = ov.__outer }
+                if (ov != undefined && ov != null) { return mcall(ov, name, argv) }
+            }
+            if (sig == undefined) { sig = (cls == "" || cls == undefined) ? "" : jOvStaticSig(cls, name, atys, null) }
             if (kind != "static") {
                 var self = jThisOrNull()
+                // An anonymous body names its enclosing instance's methods
+                // unqualified too: out along __outer to the nearest instance that
+                // has one. Twin of js_jvbarerecv.
+                while (self != null && self != undefined && self.__outer != undefined && self.__outer != null
+                       && self.__class != undefined && typeof jFindMember(self.__class, name) != "function") {
+                    self = self.__outer
+                }
                 if (self != null && self != undefined) { return sig == "" ? mcall(self, name, argv) : jSigCall(self, name, sig, argv) }
             }
             if (cls != "" && cls != undefined) {
@@ -6872,6 +6948,7 @@ HasStatic   = :script(~~
         // String.CASE_INSENSITIVE_ORDER is a java.util.Comparator, so it wants
         // lib/java-util.java loaded as an import of Comparator would.
         if (suffixes[0].kind == "field" && suffixes[0].name == "CASE_INSENSITIVE_ORDER") { jUtilWant = true }
+        if (text != undefined && jMapStaticRecv(text)) { jMapWant = true }
         if (text != undefined) {
             jChainRecvTys(suffixes, text)
             for (var vi = 0; vi < suffixes.length; vi++) { if (suffixes[vi].kind == "mcall") { jVaWrapSfx(suffixes[vi]) } }
@@ -6981,14 +7058,27 @@ HasStatic   = :script(~~
     // fields, recorded in __sfld by buildClassFrom / buildInterface. A bare
     // hasOwn(cls, name) would also find every METHOD closure - and, worse, it would
     // shadow a host global, because getVar consults varMiss BEFORE hostGlobals.
+    // After the class's own chain come the statics of its lexically enclosing
+    // classes (__lexouter, JLS 6.5.6.1), which a nested class names unqualified.
+    // Twin of the enclosing-chain lookups in makeVarRef / makeBareCall in
+    // java-to-llvm-ir.abnf.
     function jStaticOwner(cls, name) {
+        var own = jStaticOwnerIn(cls, name)
+        if (own != null || cls == undefined || cls == null) { return own }
+        var lo = cls.__lexouter
+        if (lo == undefined || lo == null) { return null }
+        var oc = jResolveClass(lo)
+        if (oc == undefined || oc == null || oc === cls) { return null }
+        return jStaticOwner(oc, name)
+    }
+    function jStaticOwnerIn(cls, name) {
         for (var c = cls; c != undefined && c != null; c = c.__super) {
             var t = c.__sfld
             if (t != undefined && t != null && t[name] === true) { return c }
             var ifs = c.__ifaces
             if (ifs != undefined && ifs != null) {
                 for (var i = 0; i < ifs.length; i++) {
-                    var w = jStaticOwner(ifs[i], name)
+                    var w = jStaticOwnerIn(ifs[i], name)
                     if (w != null) { return w }
                 }
             }

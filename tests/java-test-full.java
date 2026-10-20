@@ -166,6 +166,7 @@ class Main {
         S78.run(); // SECTION-CALL 78
         S79.run(); // SECTION-CALL 79
         S80.run(); // SECTION-CALL 80
+        S81.run(); // SECTION-CALL 81
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -4556,5 +4557,52 @@ class S80 {
         TreeSet<String> ts = new TreeSet<>(List.of("q", "p", "r"));
         String rev = t.descendingMap() + " " + t.descendingKeySet() + " " + ts.descendingSet() + " " + ts.descendingIterator().next() + " " + t.descendingMap().firstKey();
         Main.check("dm80", rev.equals("{3=c, 2=b, 1=a} [3, 2, 1] [r, q, p] r 3"));
+    }
+}
+
+// ===== SECTION 81: enclosing classes' members named unqualified, fields before their initializers =====
+//
+// A nested class names its enclosing class's statics unqualified, its static
+// initializers run after the enclosing class's, an inner or anonymous class
+// calls the enclosing instance's methods unqualified, and a field a superclass
+// constructor reads through an override still holds its type's zero. Every
+// expected value is java 24.0.2's.
+class S81 {
+    static int base = 40;
+    static String tag(int n) { return "t" + n; }
+    private int hits = 0;
+    private void hit() { hits++; }
+    static class Nest {
+        static int derived = base + 2;
+        String show() { return tag(base) + derived; }
+        static String twice() { return tag(base * 2); }
+    }
+    class In {
+        String go() { hit(); hit(); return "in" + hits; }
+    }
+    Runnable anon() {
+        return new Runnable() {
+            public void run() { hit(); }
+        };
+    }
+    static class Top {
+        String seen = "";
+        Top() { seen = probe(); }
+        String probe() { return "top"; }
+    }
+    static class Sub extends Top {
+        int n = 5;
+        boolean on = true;
+        double d = 1.5;
+        String probe() { return n + " " + on + " " + d; }
+    }
+    static void run() {
+        Main.check("ns81", (new Nest().show() + " " + Nest.twice()).equals("t4042 t80"));
+        S81 o = new S81();
+        String ia = o.new In().go();
+        o.anon().run();
+        Main.check("ia81", (ia + " " + o.hits).equals("in2 3"));
+        Sub s = new Sub();
+        Main.check("fz81", (s.seen + " | " + s.probe()).equals("0 false 0.0 | 5 true 1.5"));
     }
 }

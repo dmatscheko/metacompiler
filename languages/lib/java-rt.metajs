@@ -2512,6 +2512,21 @@ function js_jvpse(t, desc, pattern, index) {
     return undefined
 }
 
+// The receiver of a bare call m(..) inside an anonymous class body: self when
+// its class chain has m, else the nearest enclosing instance whose does. Twin
+// of js_jvbarerecv in abnf/jsrtjava.go.
+function js_jvbarerecv(self, name) {
+    var v = anytype // Walks from an instance out along __outer.
+    v = self
+    var guard = 0
+    while (guard < 64 && rtIsObj(v)) {
+        guard = guard + 1
+        if (rtFindMethod(v["__class"], name) !== undefined) { return v }
+        v = v["__outer"]
+    }
+    return self
+}
+
 // A String method's CharSequence or char argument as a string, and indexOf's
 // first argument, which may also be an int code point.
 function jvStrArg(v) {

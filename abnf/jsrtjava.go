@@ -2287,6 +2287,29 @@ func init() {
 			rt.fail("unknown name: " + name)
 			return jsHUndefined
 		}
+		// The receiver of a bare call m(..) inside an anonymous class body: this
+		// when its class chain has m, else the nearest enclosing instance whose
+		// does. Twin of js_jvbarerecv in languages/lib/java-rt.metajs and of
+		// makeBareCall in java-interpreter.abnf.
+		m["js_jvbarerecv"] = func(a []uint64) uint64 {
+			name := rt.toString(u(a[1]))
+			v := u(a[0])
+			for guard := 0; guard < 64; guard++ {
+				o, ok := v.(*jsObject)
+				if !ok {
+					break
+				}
+				c, _ := o.props["__class"].(*jsObject)
+				for cg := 0; cg < 64 && c != nil; cg++ {
+					if isCallable(c.props[name]) {
+						return w(o)
+					}
+					c, _ = c.props["__super"].(*jsObject)
+				}
+				v = o.props["__outer"]
+			}
+			return a[0]
+		}
 		// Outer.this: out along __outer until an instance whose class chain carries
 		// that name. One unconditional __outer hop is wrong at two levels of
 		// nesting; the twin is makeOuterThis in java-interpreter.abnf.

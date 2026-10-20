@@ -965,6 +965,16 @@ function jMapWants(path) {
         || path == "java.util.EnumMap" || path == "java.util.EnumSet" || path == "EnumMap" || path == "EnumSet"
 }
 
+// Does a member chain start at one of lib/java-map.java's types by its simple
+// name (`Map.of(..)`, `Set.copyOf(..)`, `EnumSet.noneOf(..)`)? Under a
+// java.util.* import that is the first the walk hears of the library.
+function jMapStaticRecv(text) {
+    var e = jIdentEnd(text, 0)
+    if (e == 0 || e >= text.length || text.charAt(e) != ".") { return false }
+    var n = text.substring(0, e)
+    return n == "Map" || n == "Set" || jMapWants(n)
+}
+
 // Does this import name a java.util.stream type? Then the grammar compiles
 // lib/java-stream.java, and lib/java-util.java and lib/java-map.java it builds
 // on, with the program. A call of a method named stream (Arrays.stream, a
