@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-661** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-662** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -89,12 +89,10 @@ path must stay cheap for objects without a prototype chain.
 
 # JV — Java
 
-### T-656 java: `x.new Inner()` with a third same-named nested type; Matcher.hitEnd/requireEnd · P2 · JV · IN PROGRESS (JV worker, round 12) [V]
-`class A { int a = 1; class Inner { int get() { return a; } } }`, `class C { static class Holder { static class Inner {...} } }`, `class B {
-int b = 2; class Inner { int get() { return b; } } static int run() { B o = new B(); Inner i = o.new Inner(); return i.get(); } }`; main
-`A x = new A(); A.Inner ai = x.new Inner(); println(ai.get() + " " + B.run())` → java `1 2`; interp "unknown class: Inner", compiled
-"variable not defined: Inner" (jNestRename; with only A and B all legs agree). Matcher.hitEnd/requireEnd need a hit-the-end flag from
-the shared regex engine (J-gated lib/regex.js / abnf/jsrtregex.go), then a small java side.
+### T-661 java: Matcher.hitEnd / requireEnd · P3 · JV · OPEN [V]
+`Matcher m = Pattern.compile("abc").matcher("ab"); m.find(); m.hitEnd()` → unknown method in all engines (java true); requireEnd likewise.
+Needs a hit-the-end flag from the shared regex engine (J-gated lib/regex.js / abnf/jsrtregex.go), then a small java side. Transparent
+and non-anchoring region bounds (useTransparentBounds / useAnchoringBounds) are not modelled.
 
 ---
 
@@ -749,6 +747,7 @@ T-655 php: function_exists(); direct calls in another letter case; callback mess
 T-652 js: for-in through the prototype chain; `in` on prototype methods; Object.prototype methods as class values; private static getters — DONE 6b4fd2a2
 T-657 php: first-class callable identity; var_dump of method callables; builtins without library wrappers — DONE 14fa3618
 T-653 python: compiled `type(e) is ValueError`; `__class__` in methods; regex group refs, Unicode \w, findall None; class-body comprehensions — DONE b7d3736a
+T-656 java: `x.new Inner()` with a third same-named nested type; Matcher.hitEnd/requireEnd — PARTIAL 429af651 (q.new Inner() by the qualifier's declared type; multi-level qualified nested names); hitEnd/requireEnd are T-661
 
 # Settled — do not re-open
 
