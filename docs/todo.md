@@ -64,7 +64,7 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-649 python: class-body names visible inside methods; compiled runtime exceptions' `__mro__`; regex lookbehind · P1 · PY · OPEN [V]
+### T-649 python: class-body names visible inside methods; compiled runtime exceptions' `__mro__`; regex lookbehind · P1 · PY · IN PROGRESS (PY worker, round 9) [V]
 `class K:` with `def max(self, o): ...` and `def f(self): return max(1, 2)` → ours calls the method (python3 2: class bodies are not
 an enclosing scope for methods); `x = 5` in a class body with a global x → a method sees 5 (python3 the global). All engines.
 Compiled only: `try: int("x") except ValueError as e: print([c.__name__ for c in type(e).__mro__])` → `['ValueError', 'object']`
