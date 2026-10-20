@@ -647,7 +647,7 @@ ImplicitGetter <~~ push(makeImplicitGetter(pop())) ~~> = FnBody ;
 // SAME Member list a struct has plus CaseDecl, so an enum method is built by the
 // very machinery a struct method is.
 EnumDecl    <~~ push(makeEnumStmt(takeAll())) ~~>
-            = KwEnum Id <~~ push(swBt(up.in)) ~~> [ SkipAngle ] [ ":" EnumConform ] [ GenWhere ] "{" { Member } "}" ;
+            = KwEnum Id <~~ push(swBt(up.in)) ~~> [ TypeGenParams ] [ ":" EnumConform ] [ GenWhere ] "{" { Member } "}" ;
 // The FIRST entry of an enum's inheritance clause may be its raw-value type
 // (`: Int`, `: String`); every entry there may equally be a PROTOCOL.
 // The first entry is recorded BOTH ways: rawKind decides whether it is really a
@@ -1598,7 +1598,7 @@ InoutArg    <~~ var ir = makeTargetRef(takeAll()); push(ir.path.length == 0 ? {a
 Primary     = Paren | OpParen | MultiStr | RawStrN | RawStr3 | RawStr2 | RawStr1 | Template | NumberLit
             | True | False | Nil
             | PoundExpr | SuperRef | DotMember | Closure | SugarSelf | SugarCall | ArrayTypeLit | DictLit | ArrayLit
-            | Shorthand | ProjRef | OptNone | KeyPath | GenCall | GenRef | TrailCall | Call | VarRef ;
+            | Shorthand | ProjRef | OptNone | KeyPath | GenCall | GenMember | GenRef | TrailCall | Call | VarRef ;
 // `\T.a.b` / `\.a.b`: a key path, read-only. Its value is the function from a
 // root to that member chain, which is what `.map(\.a)` and `x[keyPath: kp]` apply.
 // `$x` inside a member body: the projected value of the wrapped property x of
@@ -1779,6 +1779,9 @@ TypeLitDict <~~ push({dictty: 1}) ~~> = ":" Type ;
 OptNone     <~~ takeAll(); push(makeConst(null)) ~~> = "Optional" [ NoSpace GenArgs ] "." "none" KwEnd ;
 GenCall     <~~ push(swGenCall(takeAll())) ~~>
             = GenName "(" [ CallArg { "," CallArg } ] ")" [ NoTrailCtx TrailArg { LabTrail } ] ;
+// `Either<Double, String>.left(2)`, `Wrapper<Double>.of(4)`: the first member of a
+// type named with its generic arguments, whose result adopts them (swGenMember).
+GenMember   <~~ push(swGenMember(takeAll(), up.in)) ~~> = GenName ( MethodSfx | FieldSfx ) ;
 GenRef      <~~ push(swVarRef(takeAll()[0])) ~~> = GenName ;
 GenName     = Id <~~ push(swBt(up.in)) ~~> NoSpace GenArgs GenFollow ;
 GenArgs     = "<" GenArgList ">" ;
@@ -3700,6 +3703,18 @@ KwContinue  = "continue" KwEnd ;
         if (lt < 0 || swGenBase(ty.substring(0, lt)) != swGenBase(cls.__name)) { return v }
         var args = ty.substring(lt + 1, ty.length - 1)
         if (swTyNames(args, ["_"])) { return v }
+        // An enum case: its payload adopts. A case without one is a shared value
+        // and has nothing to adopt.
+        if (v.__ecase === true) {
+            var vals = v.__vals
+            if (vals == undefined || vals === null || vals.length == 0) { return v }
+            scopePut(v, "__targs", args)
+            var cts = hasOwn(cls, "__gcase_" + v.__ename) ? cls["__gcase_" + v.__ename] : []
+            for (var j = 0; j < vals.length && j < cts.length; j++) {
+                if (cts[j] != "") { vals[j] = swAdoptDeep(vals[j], swGenSub(v, cts[j])) }
+            }
+            return v
+        }
         scopePut(v, "__targs", args)
         var fs = cls.__gfields
         var ts = cls.__gftys
@@ -6950,6 +6965,17 @@ KwContinue  = "continue" KwEnd ;
         if (ann == "") { return call }
         return function() { return swAdoptAnn(call(), ann) }
     }
+    // `Either<Double, String>.left(2)`: a member of a program generic type named with
+    // its arguments. Its result adopts them, as a value of that type reaching a slot
+    // that spells them does - a case's payload, a static factory's instance. Twin in
+    // swift-to-llvm-ir.abnf.
+    function swGenMember(items, txt) {
+        var call = foldCallMember([swVarRef(items[0]), items[2]], txt)
+        var g = items[1].gargs
+        if (swGenAnn(items[0], g) != "" || swGenInScope(g)) { return call }
+        var ann = items[0] + "<" + g + ">"
+        return function() { return swAdoptAnn(call(), ann) }
+    }
     // The type of `[T](...)` / `[K: V](...)` from its text: the bracketed part,
     // when one parenthesised argument list follows it and nothing else does.
     // Twin in swift-to-llvm-ir.abnf.
@@ -10172,11 +10198,13 @@ KwContinue  = "continue" KwEnd ;
     function makeECaseParam(items) {
         var lbl = ""
         var ty = ""
+        var txt = ""
         for (var i = 0; i < items.length; i++) {
             if (items[i] != undefined && items[i].clabel != undefined) { lbl = items[i].clabel }
-            if (items[i] != undefined && items[i].cty != undefined && swAdoptNeeded(swAliasExpand(items[i].cty))) { ty = swAliasExpand(items[i].cty) }
+            if (items[i] != undefined && items[i].cty != undefined) { txt = swAliasExpand(items[i].cty) }
         }
-        return {clabel: lbl, cty: ty}
+        if (swAdoptNeeded(txt)) { ty = txt }
+        return {clabel: lbl, cty: ty, ctxt: txt}
     }
     function makeECase(items) {
         var cname = ""
@@ -10329,11 +10357,18 @@ KwContinue  = "continue" KwEnd ;
         swNoteStatics(name, mem)
         swNoteCaseOwner(name, mem)
         markNestedAll(mem)
+        swGenMark(mem, mem.tgens)
+        if (mem.tgens != null) { swGenTypes["$" + name] = mem.tgens }
+        var gdesc = swGenEnumDesc(mem)
         var myIdx = noteDeclIdx(name)
         var kind = rawKind(mem.raw)
         return function() {
             var e = {__isenum: true, __enum: true, __name: name}
             var tbl = {__name: name}
+            if (gdesc != null) {
+                scopePut(tbl, "__tgens", gdesc.tg)
+                for (var gc = 0; gc < gdesc.cases.length; gc++) { scopePut(tbl, "__gcase_" + gdesc.cases[gc].name, gdesc.cases[gc].tys) }
+            }
             tbl.__desc = e
             installMembers(tbl, mem)
             // An enum conforms to the protocols in its clause exactly as a struct

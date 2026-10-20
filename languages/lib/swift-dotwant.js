@@ -804,15 +804,20 @@ function swGenInScope(ty) {
 // The generic parameter names of each declared type, for its extensions.
 var swGenTypes = {}
 // Marks the adoption sites of a generic type's members (mem is splitMembers'
-// answer, tgens the parameter names): an instance method's or initializer's
-// parameter and result, and a stored property. A site that also names a generic
+// answer, tgens the parameter names): a method's or initializer's parameter and
+// result, and a stored property. A site that also names a generic
 // parameter of the METHOD (`func map<U>(_ x: U) -> Box<U>`) adopts nothing, as
 // nothing on the instance binds U. A function type is left alone too: its
 // adopting wrapper is built from the annotation at walk time.
 function swGenMark(mem, tgens) {
     if (tgens == null || tgens.length == 0) { return }
-    for (var m = 0; m < mem.methods.length; m++) {
-        var f = mem.methods[m]
+    // A static member has no instance to resolve through, so its marked sites
+    // adopt nothing - rather than bind the parameter's NAME.
+    var fns = []
+    for (var m0 = 0; m0 < mem.methods.length; m0++) { fns.push(mem.methods[m0]) }
+    for (var m1 = 0; m1 < mem.statMethods.length; m1++) { fns.push(mem.statMethods[m1]) }
+    for (var m = 0; m < fns.length; m++) {
+        var f = fns[m]
         var own = f.gens == undefined ? null : f.gens
         for (var i = 0; i < f.params.length; i++) {
             var p = f.params[i]
@@ -826,9 +831,38 @@ function swGenMark(mem, tgens) {
         var fd = mem.fields[k]
         if (swGenSite(fd.ann, tgens, null)) { fd.ty = "=" + fd.ann }
     }
+    // An enum payload naming a parameter adopts when the case value meets its
+    // type arguments (swAdoptGen), not at construction.
+    for (var c = 0; c < mem.cases.length; c++) {
+        var ca = mem.cases[c].cassoc
+        if (ca == null) { continue }
+        for (var j = 0; j < ca.length; j++) { if (swTyNames(ca[j].cty, tgens)) { ca[j].cty = "" } }
+    }
 }
 function swGenSite(ty, tgens, own) {
     return swTyNames(ty, tgens) && !swTyNames(ty, own) && ty.indexOf("->") < 0
+}
+// What a generic ENUM's member table records: {tg: "T,U", cases: [{name, tys}]}
+// for each case whose payload names a parameter, tys its payload types ("" for
+// one that does not), or null.
+function swGenEnumDesc(mem) {
+    if (mem.tgens == null || mem.tgens.length == 0) { return null }
+    var tg = ""
+    for (var i = 0; i < mem.tgens.length; i++) { tg = tg + (i > 0 ? "," : "") + mem.tgens[i] }
+    var cases = []
+    for (var k = 0; k < mem.cases.length; k++) {
+        var ca = mem.cases[k].cassoc
+        if (ca == null) { continue }
+        var tys = []
+        var any = false
+        for (var j = 0; j < ca.length; j++) {
+            var t = swGenSite(ca[j].ctxt, mem.tgens, null) ? ca[j].ctxt : ""
+            if (t != "") { any = true }
+            tys.push(t)
+        }
+        if (any) { cases.push({name: mem.cases[k].cname, tys: tys}) }
+    }
+    return {tg: tg, cases: cases}
 }
 // What a generic type's descriptor records (after swGenMark): {tg: "T,U", fs: the
 // generic stored properties' storage names, ts: their declared types}, or null.

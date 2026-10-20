@@ -5446,6 +5446,39 @@ func s138() {
     check("138c", area == 1.5 && "\(w)" == "Wrapper138<String>(value: \"1.5\")")
 }
 
+// ===== SECTION 139: generic enums; members of a type named with its arguments =====
+// A generic enum's payload adopts the type arguments its value meets:
+// `let r: Result<Double, E> = .success(2)` holds 2.0, as do `Opt139<Double>`
+// and `Either139<Double, String>.left(2)`. A static factory called on
+// `Wrapper139<Double>` answers a Wrapper139<Double>. Every value read off swiftc
+// 6.1.2.
+enum Err139: Error { case bad }
+enum Opt139<W> { case nothing, just(W) }
+enum Either139<L, R> {
+    case left(L), right(R)
+    var isLeft: Bool { if case .left = self { return true }; return false }
+}
+struct Wrapper139<T> {
+    var value: T
+    static func of(_ v: T) -> Wrapper139<T> { Wrapper139(value: v) }
+}
+func parse139(_ s: String) -> Result<Double, Err139> {
+    if let n = Int(s) { return .success(Double(n)) }
+    return .failure(.bad)
+}
+func s139() {
+    let r: Result<Double, Err139> = .success(2)
+    var rv = 0.0
+    if case .success(let v) = r { rv = v / 4 }
+    let o: Opt139<Double> = .just(3)
+    let e = Either139<Double, String>.left(2)
+    var ev = ""
+    if case .left(let x) = e { ev = "\(x)" }
+    check("139a", rv == 0.5 && "\(o)" == "just(3.0)" && ev == "2.0" && e.isLeft)
+    check("139b", "\(Wrapper139<Double>.of(4).value)" == "4.0" && "\(Wrapper139<Double>.of(4))" == "Wrapper139<Double>(value: 4.0)"
+        && (try? parse139("5").get()) == 5.0)
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5585,6 +5618,7 @@ func main() {
     s136() // SECTION-CALL 136
     s137() // SECTION-CALL 137
     s138() // SECTION-CALL 138
+    s139() // SECTION-CALL 139
     print("full: \(checks) checks, \(fails) failures")
 }
 

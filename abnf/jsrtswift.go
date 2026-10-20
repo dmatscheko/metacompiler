@@ -3321,6 +3321,23 @@ func swAdoptGen(v *jsObject, ty string, adopt func(interface{}, string) interfac
 	if swTyHasHole(args) {
 		return v
 	}
+	// An enum case: its payload adopts. A case without one is a shared value and
+	// has nothing to adopt.
+	if ec, _ := o.props["__ecase"].(bool); ec {
+		vals, ok := o.props["__vals"].(*jsArray)
+		if !ok || len(vals.elems) == 0 {
+			return v
+		}
+		o.set("__targs", args)
+		ename, _ := o.props["__ename"].(string)
+		cts := swStrArray(cls.props["__gcase_"+ename])
+		for j := 0; j < len(vals.elems) && j < len(cts); j++ {
+			if cts[j] != "" {
+				vals.elems[j] = adopt(vals.elems[j], swGenSub(o, cts[j]))
+			}
+		}
+		return v
+	}
 	o.set("__targs", args)
 	fs := swStrArray(cls.props["__gfields"])
 	ts := swStrArray(cls.props["__gftys"])

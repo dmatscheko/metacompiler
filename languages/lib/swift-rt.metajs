@@ -736,6 +736,21 @@ function swAdoptGen(v, ty) {
     if (swGenBase(ty.substring(0, lt)) != swGenBase(name)) { return v }
     var args = ty.substring(lt + 1, ty.length - 1)
     if (swTyHasHole(args)) { return v }
+    // An enum case: its payload adopts. A case without one is a shared value and
+    // has nothing to adopt.
+    if (v["__ecase"] === true) {
+        var vals = v["__vals"]
+        if (!rtIsArr(vals)) { return v }
+        if (vals.length == 0) { return v }
+        v["__targs"] = args
+        var cts = swStrArray(cls["__gcase_" + v["__ename"]])
+        var j = 0
+        while (j < vals.length && j < cts.length) {
+            if (cts[j] != "") { vals[j] = js_swadoptdeep(vals[j], js_swgensub(v, cts[j]), undefined) }
+            j = j + 1
+        }
+        return v
+    }
     v["__targs"] = args
     var fs = swStrArray(cls["__gfields"])
     var ts = swStrArray(cls["__gftys"])
