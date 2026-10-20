@@ -169,7 +169,7 @@ line tracking at warning sites is worth its cost.
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-638 bash: `@Q` / `printf %q` / `declare -p` of a well-formed non-printable character · P3 · SH · OPEN [V]
+### T-638 bash: `@Q` / `printf %q` / `declare -p` of a well-formed non-printable character · P3 · SH · IN PROGRESS (SH worker, round 10) [V]
 bash decides with iswprint: `v=$'\xc2\x85'` (U+0085) → bash `$'\302\205'`, ours keeps it raw in single quotes; U+200B
 (`$'\xe2\x80\x8b'`) → bash `$'\342\200\213'`; `$'\x01\xc2\x85'` → bash `$'\001\302\205'`. All legs. Needs the locale's
 iswprint table (macOS en_US.UTF-8): derive it from the oracle over every code point, as the swift/java tables were, or record the
