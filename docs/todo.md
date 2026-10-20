@@ -64,7 +64,7 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-686 python: `(a): int = 1` binds nothing; `type(cell)`; 3.14 namespace keys `__firstlineno__` / `__static_attributes__` / `__annotate_func__` · P3 · PY · OPEN [V]
+### T-686 python: `(a): int = 1` binds nothing; `type(cell)`; 3.14 namespace keys `__firstlineno__` / `__static_attributes__` / `__annotate_func__` · P3 · PY · IN PROGRESS (PY worker, round 15) [V]
 `(a): int = 1; print(a)` → NameError in interp and run (CPython 1); in a class body the name binds as `''`. `type(ns["__classcell__"])`
 → `<class 'object'>` (CPython `<class 'cell'>`). A metaclass namespace lacks `__firstlineno__` and `__static_attributes__` and
 carries `__annotations__` where 3.14 has `__annotate_func__` (PEP 649).
