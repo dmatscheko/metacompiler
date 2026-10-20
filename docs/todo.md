@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-628** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-630** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -64,10 +64,22 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-620 python: `re.error` is uncatchable; compiled class-body except bindings lost · P1 · PY · IN PROGRESS (PY worker, round 7) [V]
-`try: re.compile("(") except re.error: print("caught")` → every leg aborts "re.error: unterminated group" (python catches it;
-`re.error` is `re.PatternError`, with msg/pattern/pos). Compiled only: `class C:` with `try: 1/0` / `except ZeroDivisionError: z = 5`
-in the class body → `hasattr(C, 'z')` False (python and the interpreter True).
+### T-628 python: raising `__hash__` without `__eq__`; slots in `__dict__`; `Plain[int]`; builtin `__module__`; regex dialect errors · P2 · PY · OPEN [V]
+A user `__hash__` that raises is not called on set/dict insertion when the class has no `__eq__`: `{B()}` succeeds (python
+TypeError "cannot use 'B' as a set element (nope)"). `class Z: __slots__=("a",)`; `class W(Z): pass` → `vars(w)` `{'a': 1, 'x': 5}`
+(python `{'x': 5}`). `Plain[int]` on a class without `__class_getitem__` → a generic alias (python TypeError "type 'Plain' is not
+subscriptable"). `int.__module__` → AttributeError (python 'builtins'). Class keywords are not forwarded to `__init_subclass__` when a
+metaclass makes the class (type.__new__ path). Regex under the P dialect accepts `"\q"` (python "bad escape \q at position 0"), a
+duplicate `(?P<n>)` (python "redefinition of group name 'n' as group 2; was group 1 at position ..."), and `(?<x>a)` (python
+"unknown extension ?<x at position 1") — P-gated additions in the shared lib/regex.js / abnf/jsrtregex.go. `math.expm1(0.9999999999999999)`
+differs between native and llvm.Run (our own engines must agree).
+
+### T-629 python: stdin and input(); datetime, decimal, pprint, array, struct; remaining math · P3 · PY · OPEN [V]
+No stdin / `input()` (needs a C floor read primitive and its twins). Missing modules: datetime, decimal, pprint, array, struct.
+math: acosh, asinh, atanh, erf, erfc, exp2, fma, gamma, lgamma, sumprod (bit-exact or left out — libm-dependent ones are recorded in
+manual 7.9); statistics covariance/correlation/linear_regression need sumprod; random rejects str/bytes seeds (needs SHA-512).
+Transcendentals (exp, expm1, log1p, log10, cos, geometric_mean, random.gauss) differ from macOS libm in the last place on boundary
+inputs — record in manual 7.9 unless made bit-exact. `__exit__`'s traceback argument is always None.
 
 ---
 
@@ -732,6 +744,7 @@ T-618 java/kotlin regex: inline flags `(?i)` and atomic groups `(?>..)` under th
 T-608 java regex: forward `\k<name>`; `\X \G \N{..} \b{g}` and \p scripts/blocks; PatternSyntaxException getters — DONE 9a2177eb 60e91955 (forward \k error, \G, \X, \b{g}, every \p family from java's own tables, PSE getters; the jxGraphNext bound from the security review fixed); \N{name} DECLINED: needs Unicode's ~35,000-name table (hundreds of KB) in every java/kotlin native binary for a rarely used escape
 T-621 swift: generic type arguments are not applied; static members on a generic parameter; non-ASCII operators — DONE 6d5d390a (generic arguments per instance incl. inference from context, M.zero, non-ASCII operators, enum metatype init; plus 13 swiftc-checked fixes)
 T-622 kotlin: `Char(97)`, `sequence {}` builder, implicit-receiver operator calls, split with a named limit, formatter class names — DONE b75ef2dd fc105dae (the compiled split-with-named-limit item did not reproduce; an interp-only variant was fixed)
+T-620 python: `re.error` is uncatchable; compiled class-body except bindings lost — DONE 1119e4c9 (plus heapq/bisect/contextlib/io/types/textwrap/abc/typing/fractions/statistics modules and ~20 engine fixes)
 
 # Settled — do not re-open
 
