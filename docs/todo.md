@@ -82,7 +82,7 @@ non-ASCII class range spanning 256 or more characters only gets the text-side up
 
 # JS — JavaScript and TypeScript
 
-### T-684 js: class `.length`; Math/JSON member names; arrow-function "use strict"; TS strict default; frozen-array message index · P3 · JS · OPEN [V]
+### T-684 js: class `.length`; Math/JSON member names; arrow-function "use strict"; TS strict default; frozen-array message index · P3 · JS · IN PROGRESS (JS worker, round 16) [V]
 `class A { constructor(a,b){} }; A.length` → undefined (node 2; 0 for `class B extends A {}`); Error/TypeError/RangeError/Map/Set
 `.length` undefined (node 1,1,1,0,0). `Math.max.name/.length`, `Math.floor`, `JSON.stringify`, `JSON.parse` → ""/0 (node max/2,
 floor/1, stringify/3, parse/2). `() => { "use strict"; frozen.a = 2 }` runs sloppy (no UseStrictMark in ArrowBlock; node throws).
