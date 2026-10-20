@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-642** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-643** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -122,12 +122,9 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-639 kotlin: `is` on collections; MutableList deque methods; comparator TreeSet/TreeMap; LinkedList/ArrayDeque/PriorityQueue · P1 · KT · IN PROGRESS (KT worker, round 7) [V spec-only]
-`x is Set<*>`, `is Map<*,*>`, `is Iterable<*>` answer false for sets, maps and lists, and `is Collection<*>` false for sets, in every
-engine (Kotlin: setOf → Collection/Iterable/Set true; listOf → Collection/Iterable/List true; mapOf → Map true; 1..2 → Iterable true).
-`addFirst`/`addLast`/`removeFirst`/`removeLast`/`removeFirstOrNull`/`removeLastOrNull` on MutableList missing (interp "unknown list
-method: addFirst", compiled exit 1 with no output). P3: `TreeSet(comparator)`/`TreeMap(comparator)` fail loudly (need the comparator on
-the handle in ktSortedSink); LinkedList, ArrayDeque, PriorityQueue (comparator-aware heap) not provided.
+### T-642 kotlin: `is ArrayList` / `is HashSet` and other concrete collection classes · P3 · KT · OPEN [V spec-only]
+`mutableListOf(1) is ArrayList<*>` → false in all three engines (JVM true); no concrete collection class names (ArrayList, HashSet,
+LinkedHashMap, ...) are tested by `is`. Use the `__jc` class tags the formatter already carries.
 
 ---
 
@@ -756,6 +753,7 @@ T-625 java/kotlin regex: supplementary characters in interp and native; PSE cons
 T-636 batch native: capture nesting limited to 8; rt_die not ordered after stdout; bash `${v@Q}` of a non-UTF-8 byte — DONE 8bd03604 b91f7bd2
 T-633 kotlin: `+=` on a `val` mutable collection reassigns instead of plusAssign — DONE c291b1fd a3b2e827 (plusAssign on a val, String elements, TreeSet/TreeMap constructors; kotlin bench -20.6% with identical output, from one js_is_type per +); extension resolution by static type DECLINED (the grammars compute no expression types); comparator Trees and deque classes are T-639
 T-619 js: `"__#@"` keys vs symbols; arguments passed on; holes; `Object.getOwnPropertySymbols` — DONE f83299c1 for "__#@" keys, getOwnPropertySymbols, the [...null] message; js-builtins.js on real Symbol.iterator DECLINED (naming a symbol turns on symbol/BigInt operator checks: +45% on a native Map loop); arguments passed on and array holes moved to CORE as T-640
+T-639 kotlin: `is` on collections; MutableList deque methods; comparator TreeSet/TreeMap; LinkedList/ArrayDeque/PriorityQueue — DONE c29d57f4 11f099d7 (is on collections, deque members, comparator TreeSet/TreeMap, LinkedList/ArrayDeque, JDK-heap PriorityQueue); the empty-ArrayDeque message ("ArrayDeque is empty." vs ours "List is empty.") DECLINED: an ArrayDeque is a list here and a distinct kind would touch ~26 primitive-kind sites
 
 # Settled — do not re-open
 
