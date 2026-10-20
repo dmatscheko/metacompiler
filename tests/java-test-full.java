@@ -40,6 +40,9 @@ import java.util.AbstractList;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.BitSet;
+import java.util.DoubleSummaryStatistics;
+import java.util.LongSummaryStatistics;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.ConcurrentModificationException;
@@ -171,6 +174,7 @@ class Main {
         S81.run(); // SECTION-CALL 81
         S82.run(); // SECTION-CALL 82
         S83.run(); // SECTION-CALL 83
+        S84.run(); // SECTION-CALL 84
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -4672,5 +4676,35 @@ class S83 {
         try { g.group(3); } catch (IndexOutOfBoundsException e) { ex = ex + "|" + e.getMessage(); }
         try { g.group("q"); } catch (IllegalArgumentException e) { ex = ex + "|" + e.getMessage(); }
         Main.check("px83", ex.equals("true22truenullb-1|No match found|No group 3|No group with name <q>"));
+    }
+}
+
+// ===== SECTION 84: summary statistics, compensated double collectors, BitSet =====
+//
+// Collectors.summingDouble / averagingDouble and DoubleSummaryStatistics sum
+// with Kahan compensation, as DoubleStream.sum does; the summarizing
+// collectors and Double/LongStream.summaryStatistics answer the statistics
+// objects; BitSet's set algebra and rendering. Every expected value is java
+// 24.0.2's.
+class S84 {
+    static void run() {
+        List<Double> ds = new ArrayList<>();
+        for (int i = 0; i < 10; i++) { ds.add(0.1); }
+        ds.add(0.7);
+        String sm = ds.stream().collect(Collectors.summingDouble(d -> d)) + " " + ds.stream().collect(Collectors.averagingDouble(d -> d));
+        DoubleSummaryStatistics dst = ds.stream().collect(Collectors.summarizingDouble(d -> d));
+        LongSummaryStatistics lst = LongStream.of(4, 9, 1).summaryStatistics();
+        sm = sm + " " + dst.getSum() + " " + dst.getMax() + " " + lst + " " + DoubleStream.of().summaryStatistics();
+        Main.check("st84", sm.equals("1.7 0.15454545454545454 1.7 0.7 LongSummaryStatistics{count=3, sum=14, min=1, average=4.666667, max=9} DoubleSummaryStatistics{count=0, sum=0.000000, min=Infinity, average=0.000000, max=-Infinity}"));
+        BitSet a = new BitSet();
+        a.set(0, 5);
+        a.clear(2);
+        BitSet b = new BitSet();
+        b.set(3);
+        b.set(64);
+        BitSet c = (BitSet) a.clone();
+        c.or(b);
+        String bs = a + " " + c + " " + c.cardinality() + " " + c.length() + " " + a.nextClearBit(0) + " " + c.nextSetBit(5) + " " + a.intersects(b) + " " + c.hashCode();
+        Main.check("bs84", bs.equals("{0, 1, 3, 4} {0, 1, 3, 4, 64} 5 65 2 64 true 1227"));
     }
 }

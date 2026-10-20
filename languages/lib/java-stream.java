@@ -642,6 +642,52 @@ class IntSummaryStatistics {
     }
 }
 
+// java.util.LongSummaryStatistics, IntSummaryStatistics' long twin.
+class LongSummaryStatistics {
+    long count;
+    long sum;
+    long min = Long.MAX_VALUE;
+    long max = Long.MIN_VALUE;
+
+    public void accept(long x) {
+        count++;
+        sum += x;
+        min = Math.min(min, x);
+        max = Math.max(max, x);
+    }
+    public long getCount() { return count; }
+    public long getSum() { return sum; }
+    public long getMin() { return min; }
+    public long getMax() { return max; }
+    public double getAverage() { return count > 0 ? (double) sum / count : 0.0; }
+    public String toString() {
+        return String.format("LongSummaryStatistics{count=%d, sum=%d, min=%d, average=%f, max=%d}", count, sum, min, getAverage(), max);
+    }
+}
+
+// java.util.DoubleSummaryStatistics: count, the compensated sum DoubleStream.sum
+// answers, min and max (Math.min / max: NaN wins); with none, min is +Infinity
+// and max -Infinity.
+class DoubleSummaryStatistics {
+    double[] acc = new double[4];
+    double min = Double.POSITIVE_INFINITY;
+    double max = Double.NEGATIVE_INFINITY;
+
+    public void accept(double x) {
+        StreamPipes.addCompensated(acc, x);
+        min = Math.min(min, x);
+        max = Math.max(max, x);
+    }
+    public long getCount() { return (long) acc[2]; }
+    public double getSum() { return StreamPipes.finalSum(acc); }
+    public double getMin() { return min; }
+    public double getMax() { return max; }
+    public double getAverage() { return acc[2] > 0 ? getSum() / acc[2] : 0.0; }
+    public String toString() {
+        return String.format("DoubleSummaryStatistics{count=%d, sum=%f, min=%f, average=%f, max=%f}", getCount(), getSum(), min, getAverage(), max);
+    }
+}
+
 class LongStream extends BaseStream {
     LongStream(Iterator<Object> it) { this.it = it; }
 
@@ -704,6 +750,12 @@ class LongStream extends BaseStream {
         long r = (long) i.next();
         while (i.hasNext()) { r = op.applyAsLong(r, (long) i.next()); }
         return OptionalLong.of(r);
+    }
+    public LongSummaryStatistics summaryStatistics() {
+        LongSummaryStatistics st = new LongSummaryStatistics();
+        Iterator<Object> i = take();
+        while (i.hasNext()) { st.accept((long) i.next()); }
+        return st;
     }
     public long[] toArray() {
         Object[] all = StreamPipes.drain(take());
@@ -787,6 +839,12 @@ class DoubleStream extends BaseStream {
         while (i.hasNext()) { r = op.applyAsDouble(r, (double) i.next()); }
         return OptionalDouble.of(r);
     }
+    public DoubleSummaryStatistics summaryStatistics() {
+        DoubleSummaryStatistics st = new DoubleSummaryStatistics();
+        Iterator<Object> i = take();
+        while (i.hasNext()) { st.accept((double) i.next()); }
+        return st;
+    }
     public double[] toArray() {
         Object[] all = StreamPipes.drain(take());
         double[] out = new double[all.length];
@@ -837,11 +895,12 @@ class StreamJoiner {
 }
 
 // The container of counting, the summing and averaging collectors, minBy,
-// maxBy and reducing: a count, an integral and a floating sum, and a value.
+// maxBy and reducing: a count, an integral sum, a floating one compensated as
+// DoubleStream.sum's (StreamPipes.addCompensated), and a value.
 class StreamAcc {
     long n;
     long sum;
-    double dsum;
+    double[] dacc = new double[4];
     Object v;
 }
 
@@ -972,13 +1031,14 @@ final class Collectors {
     }
     @SuppressWarnings("unchecked")
     public static <T> Collector<T, ?, Double> summingDouble(java.util.function.ToDoubleFunction<? super T> f) {
-        return new Collector<T, Object, Double>(() -> new StreamAcc(), (a, x) -> ((StreamAcc) a).dsum += f.applyAsDouble((T) x),
-                                                a -> ((StreamAcc) a).dsum);
+        return new Collector<T, Object, Double>(() -> new StreamAcc(),
+                                                (a, x) -> StreamPipes.addCompensated(((StreamAcc) a).dacc, f.applyAsDouble((T) x)),
+                                                a -> StreamPipes.finalSum(((StreamAcc) a).dacc));
     }
     // The averages: the sum over the count, 0.0 for no element.
     static double mean(StreamAcc a, boolean integral) {
         if (a.n == 0) { return 0.0; }
-        return (integral ? (double) a.sum : a.dsum) / a.n;
+        return (integral ? (double) a.sum : StreamPipes.finalSum(a.dacc)) / a.n;
     }
     @SuppressWarnings("unchecked")
     public static <T> Collector<T, ?, Double> averagingInt(java.util.function.ToIntFunction<? super T> f) {
@@ -997,9 +1057,25 @@ final class Collectors {
     @SuppressWarnings("unchecked")
     public static <T> Collector<T, ?, Double> averagingDouble(java.util.function.ToDoubleFunction<? super T> f) {
         return new Collector<T, Object, Double>(() -> new StreamAcc(), (a, x) -> {
-            ((StreamAcc) a).dsum += f.applyAsDouble((T) x);
+            StreamPipes.addCompensated(((StreamAcc) a).dacc, f.applyAsDouble((T) x));
             ((StreamAcc) a).n++;
         }, a -> mean((StreamAcc) a, false));
+    }
+    // summarizingInt / Long / Double: the element's statistics object.
+    @SuppressWarnings("unchecked")
+    public static <T> Collector<T, ?, IntSummaryStatistics> summarizingInt(java.util.function.ToIntFunction<? super T> f) {
+        return new Collector<T, Object, IntSummaryStatistics>(() -> new IntSummaryStatistics(),
+            (a, x) -> ((IntSummaryStatistics) a).accept(f.applyAsInt((T) x)), a -> (IntSummaryStatistics) a);
+    }
+    @SuppressWarnings("unchecked")
+    public static <T> Collector<T, ?, LongSummaryStatistics> summarizingLong(java.util.function.ToLongFunction<? super T> f) {
+        return new Collector<T, Object, LongSummaryStatistics>(() -> new LongSummaryStatistics(),
+            (a, x) -> ((LongSummaryStatistics) a).accept(f.applyAsLong((T) x)), a -> (LongSummaryStatistics) a);
+    }
+    @SuppressWarnings("unchecked")
+    public static <T> Collector<T, ?, DoubleSummaryStatistics> summarizingDouble(java.util.function.ToDoubleFunction<? super T> f) {
+        return new Collector<T, Object, DoubleSummaryStatistics>(() -> new DoubleSummaryStatistics(),
+            (a, x) -> ((DoubleSummaryStatistics) a).accept(f.applyAsDouble((T) x)), a -> (DoubleSummaryStatistics) a);
     }
     // minBy / maxBy: the first of equal extremes, as an Optional.
     @SuppressWarnings("unchecked")

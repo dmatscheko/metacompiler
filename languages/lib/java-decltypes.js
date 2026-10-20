@@ -947,7 +947,7 @@ function jUtilWants(path) {
     var rest = path.substring(10)
     var dot = rest.indexOf(".")
     if (dot >= 0) { rest = rest.substring(0, dot) }
-    return ",ArrayList,List,ListIterator,Collection,Comparator,Iterator,NoSuchElementException,ConcurrentModificationException,AbstractList,Arrays,Optional,OptionalInt,OptionalLong,OptionalDouble,Map,HashMap,Objects,Collections,Queue,Deque,ArrayDeque,TreeMap,LinkedList,Stack,EmptyStackException,PriorityQueue,StringJoiner,Random,".indexOf("," + rest + ",") >= 0
+    return ",ArrayList,List,ListIterator,Collection,Comparator,Iterator,NoSuchElementException,ConcurrentModificationException,AbstractList,Arrays,Optional,OptionalInt,OptionalLong,OptionalDouble,Map,HashMap,Objects,Collections,Queue,Deque,ArrayDeque,TreeMap,LinkedList,Stack,EmptyStackException,PriorityQueue,StringJoiner,Random,BitSet,".indexOf("," + rest + ",") >= 0
 }
 
 // Does this import, or the class a `new` creates, name a type lib/java-map.java
@@ -990,6 +990,8 @@ function jMapStaticRecv(text) {
 var jStreamWant = false
 function jStreamWants(path) {
     return path == "java.util.stream.*" || (path.length > 17 && path.substring(0, 17) == "java.util.stream.")
+        || path == "java.util.IntSummaryStatistics" || path == "java.util.LongSummaryStatistics"
+        || path == "java.util.DoubleSummaryStatistics"
 }
 
 // Does this import name a type lib/java-function.java declares? Then the

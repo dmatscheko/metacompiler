@@ -1624,3 +1624,116 @@ class Random {
     public double nextDouble() { return (((long) next(26) << 27) + next(27)) * 0x1.0p-53; }
     public float nextFloat() { return next(24) / ((float) (1 << 24)); }
 }
+
+// java.util.BitSet: the bits in 64-bit words, growing as a bit past the end is
+// set. size() is the words' capacity, which java grows by doubling.
+class BitSet {
+    long[] words;
+
+    public BitSet() { words = new long[1]; }
+    public BitSet(int nbits) {
+        if (nbits < 0) { throw new NegativeArraySizeException("nbits < 0: " + nbits); }
+        words = new long[Math.max(1, (nbits + 63) >> 6)];
+    }
+    void need(int w) {
+        if (w < words.length) { return; }
+        long[] n = new long[Math.max(2 * words.length, w + 1)];
+        System.arraycopy(words, 0, n, 0, words.length);
+        words = n;
+    }
+    static void check(int i) { if (i < 0) { throw new IndexOutOfBoundsException("bitIndex < 0: " + i); } }
+    public void set(int i) {
+        check(i);
+        need(i >> 6);
+        words[i >> 6] |= 1L << (i & 63);
+    }
+    public void set(int i, boolean v) { if (v) { set(i); } else { clear(i); } }
+    public void set(int from, int to) { for (int i = from; i < to; i++) { set(i); } }
+    public void clear(int i) {
+        check(i);
+        if ((i >> 6) < words.length) { words[i >> 6] &= ~(1L << (i & 63)); }
+    }
+    public void clear(int from, int to) { for (int i = from; i < to; i++) { clear(i); } }
+    public void clear() { for (int i = 0; i < words.length; i++) { words[i] = 0; } }
+    public boolean get(int i) {
+        check(i);
+        return (i >> 6) < words.length && (words[i >> 6] & (1L << (i & 63))) != 0;
+    }
+    public void flip(int i) { set(i, !get(i)); }
+    public void flip(int from, int to) { for (int i = from; i < to; i++) { flip(i); } }
+    public int cardinality() {
+        int n = 0;
+        for (int i = 0; i < words.length; i++) { n += Long.bitCount(words[i]); }
+        return n;
+    }
+    public int length() {
+        for (int w = words.length - 1; w >= 0; w--) {
+            if (words[w] != 0) { return 64 * w + 64 - Long.numberOfLeadingZeros(words[w]); }
+        }
+        return 0;
+    }
+    public int size() { return 64 * words.length; }
+    public boolean isEmpty() { return length() == 0; }
+    public int nextSetBit(int from) {
+        check(from);
+        for (int i = from; i < 64 * words.length; i++) { if (get(i)) { return i; } }
+        return -1;
+    }
+    public int nextClearBit(int from) {
+        check(from);
+        int i = from;
+        while (get(i)) { i++; }
+        return i;
+    }
+    public int previousSetBit(int from) {
+        for (int i = from; i >= 0; i--) { if (get(i)) { return i; } }
+        return -1;
+    }
+    public void and(BitSet o) {
+        for (int w = 0; w < words.length; w++) { words[w] &= w < o.words.length ? o.words[w] : 0; }
+    }
+    public void or(BitSet o) {
+        need(o.words.length - 1);
+        for (int w = 0; w < o.words.length; w++) { words[w] |= o.words[w]; }
+    }
+    public void xor(BitSet o) {
+        need(o.words.length - 1);
+        for (int w = 0; w < o.words.length; w++) { words[w] ^= o.words[w]; }
+    }
+    public void andNot(BitSet o) {
+        for (int w = 0; w < words.length && w < o.words.length; w++) { words[w] &= ~o.words[w]; }
+    }
+    public boolean intersects(BitSet o) {
+        for (int w = 0; w < words.length && w < o.words.length; w++) { if ((words[w] & o.words[w]) != 0) { return true; } }
+        return false;
+    }
+    public boolean equals(Object o) {
+        if (!(o instanceof BitSet)) { return false; }
+        BitSet b = (BitSet) o;
+        int n = Math.max(words.length, b.words.length);
+        for (int w = 0; w < n; w++) {
+            long x = w < words.length ? words[w] : 0;
+            long y = w < b.words.length ? b.words[w] : 0;
+            if (x != y) { return false; }
+        }
+        return true;
+    }
+    public int hashCode() {
+        long h = 1234;
+        for (int i = words.length; --i >= 0; ) { h ^= words[i] * (i + 1); }
+        return (int) ((h >> 32) ^ h);
+    }
+    public Object clone() {
+        BitSet b = new BitSet();
+        b.words = Arrays.copyOf(words, words.length);
+        return b;
+    }
+    public String toString() {
+        StringBuilder sb = new StringBuilder("{");
+        for (int i = nextSetBit(0); i >= 0; i = nextSetBit(i + 1)) {
+            if (sb.length() > 1) { sb.append(", "); }
+            sb.append(i);
+        }
+        return sb.append("}").toString();
+    }
+}
