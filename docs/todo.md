@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-696** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-698** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -116,14 +116,16 @@ not change the renderer.
 
 # GO — Go  (oracle: `go run`)
 
-### T-689 go: native append costs ~120k instructions per call · P2 · GO · IN PROGRESS (GO worker, round 16) [V]
-A native `-exe` append to `[]int` or `[]string` retires ~120k instructions each: 10,000 appends 1.19G, 1M appends ~140G (7.45 s);
-linear in the count, so a large constant per call (go: a few dozen). Find where the per-append cost goes (layer 2 / floor /
-emitted growth path) and bring it to a small constant; measure with a native append loop before/after.
+### T-696 go: compiled element width by type text — float32 and defined small-int slices · P2 · GO · OPEN [V]
+`var b []float32; b = append(b, 0.1)` and `c := make([]float32,1); c[0] = 0.1` → `[0.10000000149011612]` in llvm.Run and native
+(go and interp `[0.1]`): goAdoptText skips an untyped float constant already boxed as float. `type MyInt int8; var n []MyInt; n =
+append(n,100); n[0] += 100` (and via make) → `[200]` compiled (go `[-56]`): goAdoptText does not resolve a defined type to its
+underlying type. Halves diverge.
 
-### T-690 go: `%T` of a dynamically typed int64 prints `int` · P3 · GO · IN PROGRESS (GO worker, round 16) [V]
-`func g[T any]() { var z T; fmt.Printf("%T\n", z) }; g[int64](); g[[2]int64]()` → `int` / `[2]int` in all engines (go `int64` /
-`[2]int64`): the int64 and int boxes are indistinguishable there.
+### T-697 go: nil slice element prints `<nil>`; interpreter cannot convert to a named interface type · P2 · GO · OPEN [V]
+`ss := [][]int{{1}}; ss = append(ss, nil); fmt.Println(ss)` → `[[1] <nil>]` in all engines (go `[[1] []]`). Interpreter:
+`Shower(C(4))` → "call of a non function: Shower", `fmt.Stringer(C(3))` → "unknown method 'Stringer'" (go converts; check the
+compiler halves too).
 
 ---
 
@@ -790,6 +792,8 @@ T-684 js: class `.length`; Math/JSON member names; arrow-function "use strict"; 
 T-666 php: the preg_* functions do not exist — DONE b6352924 (preg_* family on a PCRE2 dialect of the shared engine, php_pcre.c loops in php-stdlib.php; ~6,000 cases = libpcre2 10.48 via a php_pcre.c-port harness; follow-ups T-692/T-693; warnings stay with T-596)
 T-693 php: `"a{b}"` in a double-quoted string is read as interpolation — DONE a0eeb482 d6c593dd (`{` interpolates only before `$`; the `${name}` / `${name[expr]}` / `${expr}` forms per zend_language_parser.y, strings and heredocs; spec-only)
 T-691 js/ts: strict write to a function's `name`/`length` is silent; TS legacy octal `010` — DONE 43c6e0bd (strict refusal of fn/class name/length writes in all engines, no legacy octal/leading-zero literals in TS and JS separators/BigInt — node + tsc 6; follow-ups T-694/T-695)
+T-689 go: native append costs ~120k instructions per call — DONE 0b7d7180 (append path off layer-2 plumbing externs: 1M appends 243G→18.2G instructions, 21.1s→1.8s; output byte-identical)
+T-690 go: `%T` of a dynamically typed int64 prints `int` — DONE f5f57ab0 (type-parameter statics resolve to the bound type for boxing; any(x) conversions and ...T params box — 4 legs = go run; follow-ups T-696/T-697)
 
 # Settled — do not re-open
 
