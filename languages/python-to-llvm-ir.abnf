@@ -4621,6 +4621,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var epb = epf.NewBlock("entry")
         epb.NewRet(epb.NewCall(getExtern("js_pyeprintln", 1), [epb.NewCall(getExtern("js_arg", 2), [epf.Params[1], handle(0)])]))
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "_mec_eprintln"), callExt(b, "js_closure", [handle(epIdx), curScopeV])])
+        // _mec_readin(kind): standard input, for lib/python-sys.py's sys.stdin.
+        funcCount++
+        var riIdx = funcCount
+        var rif = m.NewFunc("jsf_" + riIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var rib = rif.NewBlock("entry")
+        rib.NewRet(rib.NewCall(getExtern("js_pyreadin", 1), [rib.NewCall(getExtern("js_arg", 2), [rif.Params[1], handle(0)])]))
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "_mec_readin"), callExt(b, "js_closure", [handle(riIdx), curScopeV])])
+        b = declBuiltin(b, "input", "js_pyinput", 0)
         b = declKwBuiltin(b, "str", "js_pystrnew", [])
         b = declKwBuiltin(b, "int", "js_pyint", [])
         b = declBuiltin(b, "isinstance", "js_pyisinst", 2)
@@ -4753,7 +4761,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         "ZeroDivisionError", "IndexError", "KeyError", "UnboundLocalError",
                         "NotImplementedError", "OverflowError", "UnicodeError", "UnicodeDecodeError",
                         "UnicodeEncodeError", "GeneratorExit", "MemoryError", "SystemExit", "ImportError", "ModuleNotFoundError",
-                        "BlockingIOError", "ChildProcessError", "ConnectionError", "BrokenPipeError", "ConnectionAbortedError", "ConnectionRefusedError", "ConnectionResetError", "FileExistsError", "FileNotFoundError", "InterruptedError", "IsADirectoryError", "NotADirectoryError", "PermissionError", "ProcessLookupError", "TimeoutError"]
+                        "BlockingIOError", "ChildProcessError", "ConnectionError", "BrokenPipeError", "ConnectionAbortedError", "ConnectionRefusedError", "ConnectionResetError", "FileExistsError", "FileNotFoundError", "InterruptedError", "IsADirectoryError", "NotADirectoryError", "PermissionError", "ProcessLookupError", "TimeoutError", "EOFError"]
         var excParent = {}
         excParent["ZeroDivisionError"] = "ArithmeticError"
         excParent["IndexError"] = "LookupError"

@@ -17763,6 +17763,29 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			fmt.Fprintln(warnWriter, rt.toString(u(a[0])))
 			return w(jsUndef)
 		},
+		// _mec_readin(kind): standard input (readIn), for lib/python-sys.py's
+		// sys.stdin. Twin of js_pyreadin in lib/python-rt.metajs and _mec_readin
+		// in python-interpreter.abnf.
+		"js_pyreadin": func(a []uint64) uint64 {
+			return rt.wrapStr(readIn(int(rt.toNumber(u(a[0])))))
+		},
+		// input([prompt]): the prompt without a newline, then one line of standard
+		// input without its "\n"; EOFError at the end of the input. Twin of
+		// js_pyinput in lib/python-rt.metajs and input in python-interpreter.abnf.
+		"js_pyinput": func(a []uint64) uint64 {
+			args, _ := u(a[0]).(*jsArray)
+			if args != nil && len(args.elems) > 1 {
+				panic(&jsThrown{value: rt.pyExcInstance("TypeError", "input expected at most 1 argument, got "+strconv.Itoa(len(args.elems)))})
+			}
+			if args != nil && len(args.elems) == 1 {
+				fmt.Fprint(outWriter, wtf8Clean(rt.pyString(args.elems[0])))
+			}
+			line := readIn(0)
+			if line == "" {
+				panic(&jsThrown{value: rt.pyExcInstance("EOFError", "EOF when reading a line")})
+			}
+			return rt.wrapStr(strings.TrimSuffix(line, "\n"))
+		},
 		"js_pyenumerate": func(a []uint64) uint64 {
 			el := u(a[0]).(*jsArray).elems
 			args := el[0].(*jsArray).elems

@@ -4925,6 +4925,22 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         eprintln(pstr(s))
         return undefined
     }
+    // _mec_readin(kind): standard input for lib/python-sys.py's sys.stdin - the
+    // next line (0) or everything left (1), "" at the end. Twin of js_pyreadin
+    // in abnf/jsrt.go and lib/python-rt.metajs.
+    hostGlobals["_mec_readin"] = function(kind) { return readIn(kind) }
+    // input([prompt]): the prompt written without a newline, then one line of
+    // standard input without its "\n"; EOFError at the end of the input. Twin
+    // of js_pyinput in abnf/jsrt.go and lib/python-rt.metajs.
+    hostGlobals["input"] = function() {
+        kTakeNamed()
+        if (arguments.length > 1) { pyListErr("TypeError", "input expected at most 1 argument, got " + arguments.length) }
+        if (arguments.length == 1) { print(pstr(arguments[0])) }
+        var line = readIn(0)
+        if (line == "") { pyRaise(pyMakeExc("EOFError", ["EOF when reading a line"])) }
+        if (line.charAt(line.length - 1) == "\n") { return line.substring(0, line.length - 1) }
+        return line
+    }
     hostGlobals["_mec_mod_math"] = {__pymod: "math",
                            pi: {__flo: 3.141592653589793},
                            e: {__flo: 2.718281828459045},
@@ -12236,7 +12252,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                       "StopIteration", "NotImplementedError", "AssertionError",
                       "OSError", "ExceptionGroup", "OverflowError", "UnicodeError", "UnicodeDecodeError",
                       "UnicodeEncodeError", "GeneratorExit", "MemoryError", "SystemExit", "ImportError", "ModuleNotFoundError",
-                      "BlockingIOError", "ChildProcessError", "ConnectionError", "BrokenPipeError", "ConnectionAbortedError", "ConnectionRefusedError", "ConnectionResetError", "FileExistsError", "FileNotFoundError", "InterruptedError", "IsADirectoryError", "NotADirectoryError", "PermissionError", "ProcessLookupError", "TimeoutError"]
+                      "BlockingIOError", "ChildProcessError", "ConnectionError", "BrokenPipeError", "ConnectionAbortedError", "ConnectionRefusedError", "ConnectionResetError", "FileExistsError", "FileNotFoundError", "InterruptedError", "IsADirectoryError", "NotADirectoryError", "PermissionError", "ProcessLookupError", "TimeoutError", "EOFError"]
     var pyExcParent = {}
     pyExcParent["Exception"] = "BaseException"
     pyExcParent["ArithmeticError"] = "Exception"
@@ -12281,6 +12297,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     pyExcParent["PermissionError"] = "OSError"
     pyExcParent["ProcessLookupError"] = "OSError"
     pyExcParent["TimeoutError"] = "OSError"
+    pyExcParent["EOFError"] = "Exception"
     function installExceptions() {
         for (var i = 0; i < pyExcNames.length; i++) {
             var n = pyExcNames[i]

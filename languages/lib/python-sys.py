@@ -6,8 +6,8 @@
 # int-digits limit); this file adds its data and the text streams to it.
 # Helpers carry the _mec_sys prefix. stdout writes through print; stderr is
 # line buffered onto the runtime's diagnostic channel (_mec_eprintln), so a
-# trailing fragment without a newline is not written. There is no stdin, and
-# argv holds only an empty script name.
+# trailing fragment without a newline is not written. stdin reads standard
+# input a line at a time (_mec_readin). argv holds only an empty script name.
 
 
 class _mec_sys_Stream:
@@ -58,6 +58,100 @@ class _mec_sys_Stream:
         return "<_io.TextIOWrapper name='" + self.name + "' mode='w' encoding='utf-8'>"
 
 
+# sys.stdin: what was read past a size limit waits in _mec_sys_buf.
+class _mec_sys_In:
+    def __init__(self):
+        self.name = "<stdin>"
+        self._mec_sys_buf = ""
+
+    def _mec_sys_line(self):
+        if "\n" in self._mec_sys_buf:
+            cut = self._mec_sys_buf.index("\n") + 1
+            line = self._mec_sys_buf[:cut]
+            self._mec_sys_buf = self._mec_sys_buf[cut:]
+            return line
+        line = self._mec_sys_buf + _mec_readin(0)
+        self._mec_sys_buf = ""
+        return line
+
+    def readline(self, size=-1):
+        line = self._mec_sys_line()
+        if size is not None and 0 <= size < len(line):
+            self._mec_sys_buf = line[size:] + self._mec_sys_buf
+            line = line[:size]
+        return line
+
+    def read(self, size=-1):
+        if size is None or size < 0:
+            out = self._mec_sys_buf + _mec_readin(1)
+            self._mec_sys_buf = ""
+            return out
+        out = ""
+        while len(out) < size:
+            line = self._mec_sys_line()
+            if line == "":
+                break
+            out += line
+        self._mec_sys_buf = out[size:] + self._mec_sys_buf
+        return out[:size]
+
+    def readlines(self, hint=-1):
+        out = []
+        total = 0
+        while hint is None or hint <= 0 or total < hint:
+            line = self._mec_sys_line()
+            if line == "":
+                break
+            out.append(line)
+            total += len(line)
+        return out
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        line = self._mec_sys_line()
+        if line == "":
+            raise StopIteration
+        return line
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return None
+
+    def isatty(self):
+        return False
+
+    def fileno(self):
+        return 0
+
+    def readable(self):
+        return True
+
+    def writable(self):
+        return False
+
+    def close(self):
+        pass
+
+    @property
+    def closed(self):
+        return False
+
+    @property
+    def mode(self):
+        return "r"
+
+    @property
+    def encoding(self):
+        return "utf-8"
+
+    def __repr__(self):
+        return "<_io.TextIOWrapper name='<stdin>' mode='r' encoding='utf-8'>"
+
+
 class _mec_sys_VersionInfo(tuple):
     @property
     def major(self):
@@ -105,6 +199,8 @@ _mec_sys_setrecursionlimit.__name__ = "setrecursionlimit"
 _mec_mod_sys.stdout = _mec_sys_Stream("stdout", False)
 _mec_mod_sys.stderr = _mec_sys_Stream("stderr", True)
 _mec_mod_sys.__stdout__ = _mec_mod_sys.stdout
+_mec_mod_sys.stdin = _mec_sys_In()
+_mec_mod_sys.__stdin__ = _mec_mod_sys.stdin
 _mec_mod_sys.__stderr__ = _mec_mod_sys.stderr
 _mec_mod_sys.maxsize = 9223372036854775807
 _mec_mod_sys.byteorder = "little"

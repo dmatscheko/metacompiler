@@ -45,6 +45,8 @@ package abnf
 // runs unless a program calls one of the js_gi* externs.
 
 import (
+	"bufio"
+	"io"
 	"math"
 	"os"
 	"strconv"
@@ -636,8 +638,12 @@ func arrKindBindings(b map[string]interface{}) {
 // the time in seconds, 1 the processor time in seconds, 2 the local zone's
 // offset east of UTC in seconds at time arg, 3 its abbreviation, 4 whether
 // daylight saving time is in effect then, 5 the environment variable named arg,
-// undefined when unset. commonscript.go binds the goja twin over osQuery.
+// undefined when unset. It also adds readIn(kind), host id 105, standard input
+// (readIn). commonscript.go binds the goja twins over osQuery and readIn.
 func osBindings(b map[string]interface{}) {
+	b["readIn"] = jsHostFunc("readIn", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return readIn(int(jsToInt(rt.toNumber(argAt(args, 0)))))
+	})
 	b["osQuery"] = jsHostFunc("osQuery", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		kind := int(jsToInt(rt.toNumber(argAt(args, 0))))
 		if kind == 5 {
@@ -648,6 +654,21 @@ func osBindings(b map[string]interface{}) {
 		}
 		return osQuery(kind, rt.toNumber(argAt(args, 1)))
 	})
+}
+
+// stdinReader is standard input, buffered once for every host that reads it.
+var stdinReader = bufio.NewReader(os.Stdin)
+
+// readIn answers the readIn builtin: kind 0 the next line of standard input with
+// its "\n" ("" at the end of the input), 1 everything left. Twin of host id 105
+// in languages/lib/runtime.c.
+func readIn(kind int) string {
+	if kind == 1 {
+		b, _ := io.ReadAll(stdinReader)
+		return string(b)
+	}
+	s, _ := stdinReader.ReadString('\n')
+	return s
 }
 
 // osQuery answers kinds 0..4 of the osQuery builtin.

@@ -382,7 +382,8 @@ func frozenBaseBindings(preventDefaultOutput bool) map[string]interface{} {
 	arrKindBindings(b)
 	// byteAt / byteSub / bytesStr - a string's bytes (byteBindings).
 	byteBindings(b)
-	// osQuery - the clock, time zone and environment (osBindings).
+	// osQuery and readIn - the clock, time zone, environment and standard
+	// input (osBindings).
 	osBindings(b)
 	coroutineBindings(b)
 	return b

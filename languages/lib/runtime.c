@@ -50,6 +50,8 @@
 int putchar(int c);
 int puts(const char *s);
 long write(int fd, const char *buf, unsigned long n);
+long read(int fd, char *buf, unsigned long n);
+int fflush(void *stream);
 void *malloc(unsigned long n);
 char *getenv(const char *name);
 int getentropy(void *buf, unsigned long n);
@@ -394,6 +396,9 @@ long RES_JBD;
 long RES_N;
 long RES_CAP;
 long CUR_GEN;        /* the generator whose body is running, for js_yield */
+long IN_BUF;         /* char *: standard input's buffer, for readIn */
+long IN_POS;
+long IN_LEN;
 
 /* GEN_EXIT is the sentinel gen_close() throws INTO a suspended body so that the
  * `finally` clauses wrapping its yield run before the generator is abandoned -
@@ -6577,6 +6582,42 @@ long host_call(long id, long self, long args) {
 		if (kind == 3) { return mk_cstr((const char *)tm[6]); }
 		return mk_bool((tm[4] & 4294967295) != 0);
 	}
+	/* readIn(kind): standard input, read through one buffer for the whole run -
+	 * kind 0 the next line with its "\n" ("" at the end of the input), 1
+	 * everything left. Standard output is flushed first, so a prompt shows
+	 * before the read waits. Twin of readIn in abnf/jsrtint.go. */
+	case 105: {
+		long kind = d_to_long(arg_num(args, 0));
+		long cap = 64;
+		long done = 0;
+		char *out = ar_alloc(cap);
+		char *buf;
+		fflush(0);
+		if (IN_BUF == 0) { IN_BUF = (long)malloc(4096); }
+		buf = (char *)IN_BUF;
+		while (done == 0) {
+			if (IN_POS >= IN_LEN) {
+				IN_LEN = read(0, buf, 4096);
+				IN_POS = 0;
+				if (IN_LEN <= 0) { IN_LEN = 0; done = 1; }
+			}
+			while (done == 0 && IN_POS < IN_LEN) {
+				char c = buf[IN_POS];
+				IN_POS = IN_POS + 1;
+				if (i == cap) {
+					char *grown = ar_alloc(cap * 2);
+					long k = 0;
+					while (k < i) { grown[k] = out[k]; k = k + 1; }
+					out = grown;
+					cap = cap * 2;
+				}
+				out[i] = c;
+				i = i + 1;
+				if (kind == 0 && c == 10) { done = 1; }
+			}
+		}
+		return mk_str(out, i);
+	}
 	}
 	die("unknown host function");
 	return H_UNDEF;
@@ -7435,6 +7476,7 @@ void boot(void) {
 	seed_root("byteSub", mk_host(102));
 	seed_root("bytesStr", mk_host(103));
 	seed_root("osQuery", mk_host(104));
+	seed_root("readIn", mk_host(105));
 	seed_root("Infinity", mk_num(DINF));
 	seed_root("NaN", mk_num(DNAN));
 	seed_root("anytype", cell_new(12));

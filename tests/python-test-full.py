@@ -7158,6 +7158,28 @@ def s146():
     check("expm1", [S146m.expm1(x) for x in [0.9999999999999999, 24.02965259491316, 0.4091183970475569]]
           == [1.7182818284590449, 27286354932.850483, 0.5054899554999596])
 
+# ===== SECTION 147: sys.stdin, input() and EOFError =====
+# Nothing here reads standard input, which the harness leaves to its caller:
+# reading it is probed with input fed through a pipe.
+import sys as S147sys
+
+def s147():
+    st = S147sys.stdin
+    check("stdin1", st.name == "<stdin>" and st.fileno() == 0 and st.readable() and not st.writable()
+          and st.mode == "r" and st is S147sys.__stdin__ and not st.closed
+          and repr(st) == "<_io.TextIOWrapper name='<stdin>' mode='r' encoding='utf-8'>")
+    msgs = []
+    try:
+        input("a", "b")
+    except TypeError as e:
+        msgs.append(str(e))
+    try:
+        raise EOFError("EOF when reading a line")
+    except Exception as e:
+        msgs.append(type(e).__name__ + ": " + str(e))
+    check("input1", callable(input) and issubclass(EOFError, Exception) and not issubclass(EOFError, OSError)
+          and msgs == ["input expected at most 1 argument, got 2", "EOFError: EOF when reading a line"])
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -7295,5 +7317,6 @@ def main():
     s141() # SECTION-CALL 141
     s142() # SECTION-CALL 142
     s146() # SECTION-CALL 146
+    s147() # SECTION-CALL 147
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

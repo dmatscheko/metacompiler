@@ -253,6 +253,10 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 		}
 		return vm.ToValue(osQuery(kind, call.Argument(1).ToFloat()))
 	})
+	// readIn(kind): standard input (readIn in jsrtint.go).
+	vm.Set("readIn", func(call goja.FunctionCall) goja.Value {
+		return vm.ToValue(readIn(int(call.Argument(0).ToInteger())))
+	})
 
 	// The WTF-8 byte length of a string. JS .length counts UTF-16 code units,
 	// but the emitters need the byte count of the char arrays they emit

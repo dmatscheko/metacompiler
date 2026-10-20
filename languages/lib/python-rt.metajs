@@ -6497,6 +6497,19 @@ function js_pyeprintln(s) {
     return undefined
 }
 
+// Go: js_pyreadin. Standard input, for sys.stdin.
+function js_pyreadin(kind) { return readIn(kind) }
+
+// Go: js_pyinput, which explains.
+function js_pyinput(args) {
+    if (args.length > 1) { pyRaiseExc("TypeError", "input expected at most 1 argument, got " + args.length) }
+    if (args.length == 1) { print(pyStr(args[0])) }
+    var line = readIn(0)
+    if (line == "") { pyRaiseExc("EOFError", "EOF when reading a line") }
+    if (line.charAt(line.length - 1) == "\n") { return line.substring(0, line.length - 1) }
+    return line
+}
+
 // Go: js_pyenumerate. Bound as [positionals, keywords].
 function js_pyenumerate(bound) {
     var args = bound[0]
