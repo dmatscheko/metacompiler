@@ -4912,8 +4912,10 @@ class S88G<T> { T v; S88G(T v) { this.v = v; } class Inner { String get() { retu
 // descendingKeySet and descendingSet are live views in reverse order (their
 // first is the last, their floor the ceiling, their head the keys above);
 // a Matcher's region bounds what it sees (opaque, anchoring), usePattern
-// keeps its position and results() streams the further matches. Every
-// expected value is java 24.0.2's.
+// keeps its position and results() streams the further matches; hitEnd and
+// requireEnd tell whether the last match operation read the end of the region
+// and whether more text could break its match (neither cleared by reset).
+// Every expected value is java 24.0.2's.
 class S89 {
     static void run() {
         Object[] os = { new ArrayList<Integer>(), new LinkedList<Integer>(), new HashMap<String, Integer>(), new TreeSet<Integer>(),
@@ -4956,6 +4958,22 @@ class S89 {
         try { a.region(3, 2); } catch (IndexOutOfBoundsException e) { rg = rg + " " + e.getMessage(); }
         Main.check("rx89", rg.equals("2@2 345@4 6@8 trueb34537falsetrue true1234 [10, 23, 36]oo "
             + "java.util.regex.Matcher[pattern=^b\\d+ region=3,7 lastmatch=b345] start > end"));
+        String[] hp = {"abc", "abc", "a*", "^abc", "(?:^abc)", "abc$", "\\bab\\b", "a(?!b)", "(a)\\1", "ab|a", "\\ba", "(?m)$"};
+        String[] ht = {"ab", "abcd", "aaa", "xyz", "xyz", "abc", "ab c", "a", "a", "a", "ba", "a"};
+        String he = "";
+        for (int i = 0; i < hp.length; i++) {
+            Matcher h = Pattern.compile(hp[i]).matcher(ht[i]);
+            while (h.find()) { he = he + h.start(); }
+            he = he + (h.hitEnd() ? "H" : "h") + (h.requireEnd() ? "R" : "r") + (h.matches() ? "M" : "m") + (h.hitEnd() ? "H" : "h")
+                + (h.requireEnd() ? "R" : "r") + " ";
+        }
+        Matcher hr = Pattern.compile("abc").matcher("xxabcxx");
+        hr.region(2, 4);
+        he = he + hr.hitEnd() + hr.find() + hr.hitEnd();
+        hr.reset();
+        he = he + hr.hitEnd() + hr.find() + hr.hitEnd() + hr.lookingAt() + hr.hitEnd();
+        Main.check("he89", he.equals("HrmHr 0Hrmhr 03HrMHr hrmhr Hrmhr 0HrMHR 0Hrmhr 0HrMHR HrmHr 0HrMHr Hrmhr 1HRmhr "
+            + "falsefalsetruetruetruefalsefalsefalse"));
     }
 }
 

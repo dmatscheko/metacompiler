@@ -367,10 +367,11 @@ func (rt *jsrt) jxRxPrim(s, name string, num func(int) int, arg func(int) interf
 		}
 		return rt.jxExpand(re, text, &rxMatch{begin: caps[0], end: caps[1], caps: caps}, []rune(rt.jxArgStr(arg(3))))
 	}
-	from, gpos := num(2), num(3)
+	from, gpos, mode := num(2), num(3), num(4)
 	var mt *rxMatch
 	ok := true
-	switch num(4) {
+	re.hitEnd, re.reqEnd = false, false
+	switch mode {
 	case 1:
 		mt, ok = re.matchWhole(text, from)
 	case 2:
@@ -381,13 +382,25 @@ func (rt *jsrt) jxRxPrim(s, name string, num func(int) int, arg func(int) interf
 	if !ok {
 		rt.fail("regexp: step limit exceeded")
 	}
-	if mt == nil {
-		return jsNull
+	if mt == nil && mode == 0 && !re.jbegin {
+		re.hitEnd = true
 	}
-	out := &jsArray{elems: make([]interface{}, len(mt.caps)), kind: jvArrTagKind("[I")}
-	for i, c := range mt.caps {
+	ends := 0
+	if re.hitEnd {
+		ends = 1
+	}
+	if re.reqEnd {
+		ends += 2
+	}
+	var caps []int
+	if mt != nil {
+		caps = mt.caps
+	}
+	out := &jsArray{elems: make([]interface{}, len(caps)+1), kind: jvArrTagKind("[I")}
+	for i, c := range caps {
 		out.elems[i] = float64(c)
 	}
+	out.elems[len(caps)] = float64(ends)
 	return out
 }
 

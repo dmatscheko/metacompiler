@@ -119,6 +119,16 @@
 //                                            NOT a search plus a length check: an
 //                                            alternation has to backtrack into its
 //                                            longer branch.
+//   re.hitEnd, re.reqEnd                      java.util.regex's Matcher.hitEnd
+//                                            and requireEnd, accumulated by
+//                                            every run until the caller clears
+//                                            them: a run read at the end of the
+//                                            text, or an anchor matched there that
+//                                            more text could break. Meaningful
+//                                            under J only; re.jbegin says a failed
+//                                            search does not set hitEnd by itself
+//                                            (rxBeginJ), re.jmin is Start's
+//                                            shortest match (rxSearchFrom).
 //   rxTest(re, text) -> bool
 //   rxGroup(re, text, m, i) -> string|null   i is 0 for the whole match
 //   rxGroupNamed(re, text, m, name)
@@ -4507,7 +4517,7 @@ function rxCompile(pattern, flags) {
                 icase: icase, dotall: dotall, multi: multi, jsrep: jsrep, java: java,
                 py: false, supp: false, bfail: bfail, gflags: "",
                 cmin: [], cmax: [], cgreedy: [], lbmin: [], lbmax: [],
-                src: pattern, flags: flags}
+                src: pattern, flags: flags, hitEnd: false, reqEnd: false, jbegin: false, jmin: 0}
     }
     var pg = rxNewProg()
     pg.jsrep = jsrep
@@ -4517,6 +4527,9 @@ function rxCompile(pattern, flags) {
     rxEmit(pg, ast)
     rxAdd(pg, RX_SAVE, 1, 0, pg.dummy)
     rxAdd(pg, RX_MATCH, 0, 0, pg.dummy)
+    var jbegin = java && rxBeginJ(ast)
+    // Go's and PCRE2's searches have no Start node to model (R, C).
+    var jmin = java && !re2 && !pcre && !jbegin ? rxMinLen(ast) : 0
     return {
         ok: true, err: "", errAt: -1, ops: pg.ops, as: pg.as, bs: pg.bs, clss: pg.clss,
         ngroups: st.ngroups, nmarks: pg.nmarks, names: re2 ? tr.names : pcre ? tp.names : st.names,
@@ -4524,8 +4537,21 @@ function rxCompile(pattern, flags) {
         icase: icase, dotall: dotall, multi: multi, jsrep: jsrep, java: java,
         py: py, supp: supp, bfail: bfail, gflags: java ? rxFlagsGet(st) : st.gflags, pcre: pcre,
         cmin: pg.cmin, cmax: pg.cmax, cgreedy: pg.cgreedy, lbmin: pg.lbmin, lbmax: pg.lbmax,
-        src: pattern, flags: flags
+        src: pattern, flags: flags, hitEnd: false, reqEnd: false, jbegin: jbegin, jmin: jmin
     }
+}
+
+// rxBeginJ: does the pattern start with java.util.regex's Begin node (\A, or
+// ^ without MULTILINE, first in the top-level sequence, inline flags aside)?
+// Pattern then searches from that node itself rather than through Start, whose
+// failure always sets hitEnd and which tries no start that leaves fewer than
+// the pattern's shortest match (re.jmin, rxSearchFrom).
+function rxBeginJ(ast) {
+    if (ast.t != "cat") { return false }
+    var items = ast.items
+    var i = 0
+    while (i < items.length && items[i].t == "empty") { i = i + 1 }
+    return i < items.length && items[i].t == "assert" && items[i].gidx == RX_BOS
 }
 
 
@@ -4534,7 +4560,12 @@ function rxCompile(pattern, flags) {
 function rxAssertOK(re, text, kind, sp) {
     var n = text.length
     if (kind == RX_BOS) { return sp == 0 }
-    if (kind == RX_EOS) { return sp == n }
+    if (kind == RX_EOS) {
+        if (sp != n) { return false }
+        // Pattern.End.
+        re.hitEnd = true
+        return true
+    }
     if (kind == RX_EOSNL) {
         if (sp == n) { return true }
         return sp == n - 1 && text.charCodeAt(sp) == 10
@@ -4555,7 +4586,7 @@ function rxAssertOK(re, text, kind, sp) {
         if (kind == RX_PUWORDB) { return pb != pa }
         return pb == pa
     }
-    if (kind >= RX_JBOL) { return rxAssertJ(text, kind, sp) }
+    if (kind >= RX_JBOL) { return rxAssertJ(re, text, kind, sp) }
     var before = false
     var after = false
     if (sp > 0) { before = rxIsWordCode(text.charCodeAt(sp - 1)) }
@@ -4571,12 +4602,17 @@ function rxIsLineSepJ(c, unix) {
     return c == 13 || c == 133 || c == 8232 || c == 8233
 }
 
-// rxAssertJ decides the RX_J* anchors (see their definitions).
-function rxAssertJ(text, kind, sp) {
+// rxAssertJ decides the RX_J* anchors (see their definitions), and sets
+// re.hitEnd and re.reqEnd where Pattern's Caret, Dollar, UnixDollar and Bound
+// do.
+function rxAssertJ(re, text, kind, sp) {
     var n = text.length
     if (kind == RX_JBOL || kind == RX_JUBOL) {
         // Not at the very end, even after a terminator; not inside \r\n.
-        if (sp == n) { return false }
+        if (sp == n) {
+            re.hitEnd = true
+            return false
+        }
         if (sp == 0) { return true }
         var pc = text.charCodeAt(sp - 1)
         if (!rxIsLineSepJ(pc, kind == RX_JUBOL)) { return false }
@@ -4585,13 +4621,24 @@ function rxAssertJ(text, kind, sp) {
     if (kind <= RX_JUMEOL) {
         var unix = kind == RX_JUEOL || kind == RX_JUMEOL
         var multi = kind == RX_JMEOL || kind == RX_JUMEOL
-        if (sp == n) { return true }
-        var c = text.charCodeAt(sp)
-        if (!rxIsLineSepJ(c, unix)) { return false }
-        if (multi) { return !(c == 10 && !unix && sp > 0 && text.charCodeAt(sp - 1) == 13) }
-        if (unix) { return sp == n - 1 }
-        if (sp == n - 2) { return c == 13 && text.charCodeAt(sp + 1) == 10 }
-        return sp == n - 1 && !(c == 10 && sp > 0 && text.charCodeAt(sp - 1) == 13)
+        if (sp < n) {
+            var c = text.charCodeAt(sp)
+            if (!rxIsLineSepJ(c, unix)) { return false }
+            if (multi) { return !(c == 10 && !unix && sp > 0 && text.charCodeAt(sp - 1) == 13) }
+            if (unix && sp != n - 1) { return false }
+            if (!unix && sp == n - 2 && !(c == 13 && text.charCodeAt(sp + 1) == 10)) { return false }
+            if (!unix && sp != n - 2 && (sp != n - 1 || (c == 10 && sp > 0 && text.charCodeAt(sp - 1) == 13))) { return false }
+        }
+        // At the end, or (without MULTILINE) before the final terminator:
+        // more text could move the end.
+        re.hitEnd = true
+        re.reqEnd = true
+        return true
+    }
+    if (sp >= n) {
+        // Pattern.Bound read past the end: more text could break the boundary.
+        re.hitEnd = true
+        re.reqEnd = true
     }
     var uw = kind == RX_JUWORDB || kind == RX_JUNWORDB
     var before = false
@@ -4646,7 +4693,10 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st) {
         }
         var op = ops[pc]
         if (op == RX_CLASS) {
-            if (sp >= n) { return -1 }
+            if (sp >= n) {
+                re.hitEnd = true
+                return -1
+            }
             var cc = text.charCodeAt(sp)
             // J and P read a surrogate pair as one character.
             if (cc >= 55296 && cc <= 56319 && (re.java || re.py)) { cc = rxCpAt(text, sp) }
@@ -4719,6 +4769,8 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st) {
         } else if (op == RX_LOOK) {
             if (re.pcre && st.wrap != pc) { return rxRunUndo(re, text, pc, sp, caps, marks, st) }
             st.wrap = 0 - 1
+            // Pattern.Neg: more text could make the body match.
+            if (sp >= n && bs[pc] != 0) { re.reqEnd = true }
             var rl = rxRun(re, text, pc + 1, sp, caps, marks, st)
             if (st.over) { return -1 }
             var hit = rl >= 0
@@ -4747,7 +4799,10 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st) {
                 pc = pc + 1
             } else {
                 var len = to - from
-                if (sp + len > n) { return -1 }
+                if (sp + len > n) {
+                    re.hitEnd = true
+                    return -1
+                }
                 var bi = 0
                 while (bi < len) {
                     var lc = text.charCodeAt(from + bi)
@@ -4785,7 +4840,10 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st) {
             if (sp == st.adv) { return -1 }
             return sp
         } else if (op == RX_CLASSX) {
-            if (sp >= n) { return -1 }
+            if (sp >= n) {
+                re.hitEnd = true
+                return -1
+            }
             var xc = rxCpAt(text, sp)
             if (!rxClsMatchX(clss[pc], xc, re.icase)) { return -1 }
             pc = pc + 1
@@ -4886,7 +4944,10 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st) {
             if (sp != st.gpos) { return -1 }
             pc = pc + 1
         } else if (op == RX_XGRAPH) {
-            if (sp >= n) { return -1 }
+            if (sp >= n) {
+                re.hitEnd = true
+                return -1
+            }
             sp = rxGraphNext(text, sp, n)
             pc = pc + 1
         } else if (op == RX_GBOUND) {
@@ -4897,6 +4958,9 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st) {
                 var ls = text.charCodeAt(sp)
                 if (hs >= 55296 && hs <= 56319 && ls >= 56320 && ls <= 57343) { return -1 }
                 if (rxGraphNext(text, st.glast, n) > sp) { return -1 }
+            } else if (sp > 0) {
+                re.hitEnd = true
+                re.reqEnd = true
             }
             pc = pc + 1
         } else {
@@ -5007,12 +5071,15 @@ function rxSearchAdv(re, text, start, adv) {
 }
 
 // rxSearchFrom is rxSearch for java.util.regex's Matcher.find, whose \G and
-// \b{g} read where the previous match ended (gpos, glast; see the API). Not
+// \b{g} read where the previous match ended (gpos, glast; see the API). Like
+// Pattern's Start it tries no start that leaves fewer than re.jmin units,
+// where no match can begin and an anchor's re.reqEnd must not be set. Not
 // folded into rxSearch, which every language calls once per match.
 function rxSearchFrom(re, text, start, gpos, glast) {
     if (!re.ok) { rxFail("invalid regexp: " + re.err) }
     var at = start
-    while (at <= text.length) {
+    var last = text.length - re.jmin
+    while (at <= last) {
         var m = rxAttempt(re, text, at, -1, gpos, glast, -1)
         if (m != null) { return m }
         at = re.supp && at + 1 < text.length && rxCpAt(text, at) > 65535 ? at + 2 : at + 1

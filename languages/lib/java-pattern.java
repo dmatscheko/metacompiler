@@ -117,6 +117,9 @@ final class Matcher implements MatchResult {
     // lookaround cannot see past it and ^ and $ match at its ends.
     int from;
     int to;
+    // The last match operation's hitEnd (1) and requireEnd (2) bits; reset,
+    // region and usePattern keep them.
+    int ends;
 
     Matcher(Pattern pat, String text) {
         this.pat = pat;
@@ -157,16 +160,23 @@ final class Matcher implements MatchResult {
         caps = null;
         return this;
     }
-    // The engine over the region: positions in and out are the text's.
+    // The engine over the region: positions in and out are the text's. The
+    // primitive's last element is the ends bits, and alone when nothing matched.
     int[] run(int start, int lastEnd, int mode) {
-        if (from == 0 && to == text.length()) { return pat.text.__rxfind(pat.given, text, start, lastEnd, mode); }
-        int[] c = pat.text.__rxfind(pat.given, text.substring(from, to), start - from, lastEnd - from, mode);
-        if (c == null) { return null; }
-        for (int i = 0; i < c.length; i++) {
-            if (c[i] >= 0) { c[i] = c[i] + from; }
+        boolean whole = from == 0 && to == text.length();
+        int[] c = pat.text.__rxfind(pat.given, whole ? text : text.substring(from, to), start - from, lastEnd - from, mode);
+        int k = c.length - 1;
+        ends = c[k];
+        if (k == 0) { return null; }
+        if (!whole) {
+            for (int i = 0; i < k; i++) {
+                if (c[i] >= 0) { c[i] = c[i] + from; }
+            }
         }
         return c;
     }
+    public boolean hitEnd() { return (ends & 1) != 0; }
+    public boolean requireEnd() { return (ends & 2) != 0; }
     public boolean matches() {
         caps = run(from, from, 1);
         if (caps != null) { next = caps[1] == caps[0] ? caps[1] + 1 : caps[1]; last = caps[1]; }

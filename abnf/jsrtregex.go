@@ -3614,6 +3614,12 @@ type rxRe struct {
 	flags               string
 	// pcre is the C flag (rxPcre): see rxRunUndo.
 	pcre bool
+	// hitEnd and reqEnd are java.util.regex's Matcher.hitEnd and requireEnd,
+	// accumulated by every run until the caller clears them; jbegin says the
+	// pattern starts with Pattern's Begin node (rxBeginJ), and jmin is Start's
+	// shortest match (searchFrom). Twins of the fields in lib/regex.js.
+	hitEnd, reqEnd, jbegin bool
+	jmin                   int
 }
 
 // ===== The C dialect: PCRE2, as PHP's preg_* compile it =====
@@ -4877,6 +4883,11 @@ func rxCompile(pattern, flags string) *rxRe {
 	if pcre {
 		names, nameGroups = tp.names, tp.nameGroups
 	}
+	jbegin, jmin := java && rxBeginJ(ast), 0
+	// Go's and PCRE2's searches have no Start node to model (R, C).
+	if java && !re2 && !pcre && !jbegin {
+		jmin = ast.minLen()
+	}
 	return &rxRe{
 		ok: true, ops: pg.ops, as: pg.as, bs: pg.bs, clss: pg.clss,
 		ngroups: st.ngroups, nmarks: pg.nmarks, names: names, nameGroups: nameGroups,
@@ -4884,8 +4895,22 @@ func rxCompile(pattern, flags string) *rxRe {
 		supp: java && (re2 || st.supp || rxSuppJ(ast) || rxHasSurr(pat)) || pcre && ucase, bfail: bfail, gflags: gflags,
 		pcre: pcre,
 		cmin: pg.cmin, cmax: pg.cmax, cgreedy: pg.cgreedy, lbmin: pg.lbmin, lbmax: pg.lbmax,
-		src: pattern, flags: flags,
+		src: pattern, flags: flags, jbegin: jbegin, jmin: jmin,
 	}
+}
+
+// rxBeginJ: does the pattern start with java.util.regex's Begin node? Twin of
+// rxBeginJ in lib/regex.js, which states the rule.
+func rxBeginJ(ast *rxNode) bool {
+	if ast.t != "cat" {
+		return false
+	}
+	for _, it := range ast.items {
+		if it.t != "empty" {
+			return it.t == "assert" && it.gidx == rxBOS
+		}
+	}
+	return false
 }
 
 // rxSuppJ, rxClsBmpJ and rxHasSurr decide java.util.regex's hasSupplementary;
@@ -4989,7 +5014,12 @@ func (re *rxRe) assertOK(text []rune, kind, sp int) bool {
 	case rxBOS:
 		return sp == 0
 	case rxEOS:
-		return sp == n
+		if sp != n {
+			return false
+		}
+		// Pattern.End.
+		re.hitEnd = true
+		return true
 	case rxEOSNL:
 		if sp == n {
 			return true
@@ -5021,7 +5051,7 @@ func (re *rxRe) assertOK(text []rune, kind, sp int) bool {
 		return pb == pa
 	}
 	if kind >= rxJBOL {
-		return rxAssertJ(text, kind, sp)
+		return re.assertJ(text, kind, sp)
 	}
 	before, after := false, false
 	if sp > 0 {
@@ -5044,12 +5074,15 @@ func rxIsLineSepJ(c rune, unix bool) bool {
 	return !unix && (c == '\r' || c == 0x85 || c == 0x2028 || c == 0x2029)
 }
 
-// rxAssertJ decides the rxJ* anchors; twin of rxAssertJ in lib/regex.js.
-func rxAssertJ(text []rune, kind, sp int) bool {
+// assertJ decides the rxJ* anchors, and sets re.hitEnd and re.reqEnd where
+// Pattern's Caret, Dollar, UnixDollar and Bound do; twin of rxAssertJ in
+// lib/regex.js.
+func (re *rxRe) assertJ(text []rune, kind, sp int) bool {
 	n := len(text)
 	switch kind {
 	case rxJBOL, rxJUBOL:
 		if sp == n {
+			re.hitEnd = true
 			return false
 		}
 		if sp == 0 {
@@ -5063,23 +5096,35 @@ func rxAssertJ(text []rune, kind, sp int) bool {
 	case rxJEOL, rxJUEOL, rxJMEOL, rxJUMEOL:
 		unix := kind == rxJUEOL || kind == rxJUMEOL
 		multi := kind == rxJMEOL || kind == rxJUMEOL
-		if sp == n {
-			return true
+		if sp < n {
+			c := text[sp]
+			if !rxIsLineSepJ(c, unix) {
+				return false
+			}
+			crlf := c == '\n' && sp > 0 && text[sp-1] == '\r'
+			switch {
+			case multi:
+				return !(crlf && !unix)
+			case unix:
+				if sp != n-1 {
+					return false
+				}
+			case sp == n-2:
+				if !(c == '\r' && text[sp+1] == '\n') {
+					return false
+				}
+			case sp != n-1 || crlf:
+				return false
+			}
 		}
-		c := text[sp]
-		if !rxIsLineSepJ(c, unix) {
-			return false
-		}
-		crlf := c == '\n' && sp > 0 && text[sp-1] == '\r'
-		switch {
-		case multi:
-			return !(crlf && !unix)
-		case unix:
-			return sp == n-1
-		case sp == n-2:
-			return c == '\r' && text[sp+1] == '\n'
-		}
-		return sp == n-1 && !crlf
+		// At the end, or (without MULTILINE) before the final terminator:
+		// more text could move the end.
+		re.hitEnd, re.reqEnd = true, true
+		return true
+	}
+	if sp >= n {
+		// Pattern.Bound read past the end: more text could break the boundary.
+		re.hitEnd, re.reqEnd = true, true
 	}
 	uw := kind == rxJUWordB || kind == rxJUNWordB
 	before := false
@@ -5142,6 +5187,7 @@ func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt)
 		switch re.ops[pc] {
 		case rxOpClass:
 			if sp >= n {
+				re.hitEnd = true
 				return -1
 			}
 			c, w := text[sp], 1
@@ -5226,6 +5272,10 @@ func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt)
 				return re.runUndo(text, pc, sp, caps, marks, st)
 			}
 			st.wrap = -1
+			// Pattern.Neg: more text could make the body match.
+			if sp >= n && re.bs[pc] != 0 {
+				re.reqEnd = true
+			}
 			r := re.run(text, pc+1, sp, caps, marks, st)
 			if st.over {
 				return -1
@@ -5258,6 +5308,7 @@ func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt)
 			}
 			length := to - from
 			if sp+length > n {
+				re.hitEnd = true
 				return -1
 			}
 			for bi := 0; bi < length; bi++ {
@@ -5296,6 +5347,7 @@ func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt)
 			return sp
 		case rxOpClassX:
 			if sp >= n {
+				re.hitEnd = true
 				return -1
 			}
 			c, w := rxCpAt(text, sp)
@@ -5409,6 +5461,7 @@ func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt)
 			pc++
 		case rxOpXGraph:
 			if sp >= n {
+				re.hitEnd = true
 				return -1
 			}
 			sp = jxGraphNext(text, sp, n)
@@ -5423,6 +5476,8 @@ func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt)
 				if jxGraphNext(text, st.glast, n) > sp {
 					return -1
 				}
+			} else if sp > 0 {
+				re.hitEnd, re.reqEnd = true, true
 			}
 			pc++
 		default:
@@ -5476,9 +5531,11 @@ func (re *rxRe) searchAdv(text []rune, start int, adv bool) (*rxMatch, bool) {
 
 // searchFrom is search for java.util.regex's Matcher.find, whose \G and \b{g}
 // read where the previous match ended (gpos, glast); search is a fresh Matcher's
-// find. Twin of rxSearchFrom in lib/regex.js.
+// find. It tries no start that leaves fewer than re.jmin units. Twin of
+// rxSearchFrom in lib/regex.js.
 func (re *rxRe) searchFrom(text []rune, from, gpos, glast int) (*rxMatch, bool) {
-	for at := from; at <= len(text); at = re.nextStart(text, at) {
+	last := len(text) - re.jmin
+	for at := from; at <= last; at = re.nextStart(text, at) {
 		m, ok := re.attempt(text, at, -1, gpos, glast, -1)
 		if !ok {
 			return nil, false

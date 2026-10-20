@@ -536,15 +536,23 @@ function jxReF(pattern, bits) {
 }
 // One match attempt: mode 0 is Matcher.find from `from` (gpos, the previous
 // match's end, for \G), 1 matches() and 2 lookingAt() of the text from `from`.
-// The group bounds (rxSearch's caps), or null.
+// The group bounds (rxSearch's caps) followed by one more element, the
+// attempt's hitEnd (1) and requireEnd (2) bits; no match answers that element
+// alone. A find that fails through Pattern's Start node has hit the end.
 function jxRxFind(pattern, bits, text, from, gpos, mode) {
     var re = jxReF(pattern, bits)
+    re.hitEnd = false
+    re.reqEnd = false
     var m = null
     if (mode == 1) { m = rxMatchWhole(re, text, from) }
     else if (mode == 2) { m = rxMatchAt(re, text, from) }
     else { m = rxSearchFrom(re, text, from, gpos, gpos) }
-    if (m == null) { return null }
-    return m.caps
+    if (m == null && mode == 0 && !re.jbegin) { re.hitEnd = true }
+    var ends = (re.hitEnd ? 1 : 0) + (re.reqEnd ? 2 : 0)
+    if (m == null) { return [ends] }
+    var caps = m.caps
+    caps.push(ends)
+    return caps
 }
 // appendReplacement's template for the match whose bounds are caps.
 function jxRxExpand(pattern, bits, text, caps, repl) {
