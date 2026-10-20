@@ -139,7 +139,7 @@ reports cap 4 where growslice says 1) — escape analysis.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-659 php: calling a library function through a name built at run time · P1 · PHP · OPEN [V spec-only]
+### T-659 php: calling a library function through a name built at run time · P1 · PHP · IN PROGRESS (PHP worker, round 9) [V spec-only]
 `$e = 'str' . 'rev'; echo $e('abc');` → "Call to undefined function strrev()" in all engines, `is_callable($e)` false (PHP `cba`, true):
 the library is compiled only for names some literal spells. Since function_exists() now consults the library's name index, `if
 (function_exists($f)) $f();` errors at the call instead of skipping it. When a program makes a dynamic call with a non-literal name
