@@ -7524,6 +7524,106 @@ def s156():
     check("clscell3", [f.m() is S156F, f.own(), f.deep() is S156F, f.meth(), s156err(f.incls), s156err(f.comp)]
           == [True, 5, True, "G", free, "name '__class__' is not defined"])
 
+# ===== SECTION 157: re's empty-match stepping, pos and endpos, Unicode IGNORECASE =====
+# sub, split, findall and finditer step through a str as CPython's sre does:
+# each search starts where the last match ended, and right after an EMPTY match
+# it may not match empty there again (must_advance), though a longer match at
+# that place is taken - so an empty match at the very end splits too. A pattern
+# method's pos and endpos are clamped to the string; endpos ends the text the
+# search sees. IGNORECASE of a str pattern is Unicode case folding: two
+# characters match when their lowercases or their uppercases agree. Values are
+# CPython 3.14's.
+import re as S157re
+
+def s157adv():
+    out = []
+    for p, s in [("|a", "aba"), ("(?=a)|a", "aa"), ("x*|b", "ab"), (r"\b", "ab c"), ("x*", "xax"), ("$", "ab"), ("(x*)", "a")]:
+        out.append([S157re.split(p, s), S157re.sub(p, "-", s), S157re.findall(p, s),
+                    [m.span() for m in S157re.finditer(p, s)], S157re.subn(p, "-", s, count=2), S157re.split(p, s, maxsplit=1)])
+    return out
+
+def s157pos():
+    p = S157re.compile(r"a|$")
+    q = S157re.compile(r"\w+$")
+    out = []
+    for s in ["aba", "\U0001F600ab\U0001F600a"]:
+        for pos, end in [(0, 99), (-3, 2), (1, 1), (2, 1), (5, 9), (1, -1)]:
+            m1 = p.search(s, pos, end)
+            m2 = q.fullmatch(s, pos, end)
+            out.append([m1 and m1.span(), m2 and m2.span(), p.match(s, pos, end) is None,
+                        p.findall(s, pos, end), [m.span() for m in p.finditer(s, pos, end)]])
+    m = S157re.compile(r"(b)(.)?").search("abc\U0001F600", 0, 3)
+    out.append([p.search("ab", 7).span(), p.match("ab", -2).span(), m.span(2), m.string, m.groups()])
+    return out
+
+def s157case():
+    cs = ["k", "K", "K", "s", "ſ", "ß", "ẞ", "å", "Å", "Å", "µ", "μ",
+          "σ", "ς", "Σ", "i", "ı", "İ", "Ǆ", "ǅ", "é", "É",
+          "ж", "Ж", "\U00010400", "\U00010428"]
+    rows = []
+    for a in cs:
+        row = ""
+        for b in cs:
+            row += "1" if S157re.fullmatch("(?i)" + a, b) else "0"
+            row += "1" if S157re.fullmatch("(?i)[^" + a + "]", b) else "0"
+        rows.append(row)
+    return [rows, S157re.findall("(?i)[a-zà-þ]+", "Hello WÖRLD ÉtÉ"),
+            S157re.findall("(?ai)é", "Éé"), S157re.findall("(?i)(é)\\1", "éÉ"),
+            S157re.findall("(?i)(.)\\1", "\U00010400\U00010428"), S157re.findall("(?i)[\U00010400-\U00010410]", "\U00010430"),
+            S157re.sub("(?i)straße", "X", "STRASSE Straße STRAẞE")]
+
+def s157():
+    check("readv", s157adv()
+          == [[['', '', '', 'b', '', '', ''], '---b---', ['', 'a', '', '', 'a', ''],
+               [(0, 0), (0, 1), (1, 1), (2, 2), (2, 3), (3, 3)], ('--ba', 2), ['', 'aba']],
+              [['', '', '', '', ''], '----', ['', 'a', '', 'a'], [(0, 0), (0, 1), (1, 1), (1, 2)],
+               ('--a', 2), ['', 'aa']],
+              [['', 'a', '', '', ''], '-a---', ['', '', 'b', ''], [(0, 0), (1, 1), (1, 2), (2, 2)],
+               ('-a-b', 2), ['', 'ab']],
+              [['', 'ab', ' ', 'c', ''], '-ab- -c-', ['', '', '', ''], [(0, 0), (2, 2), (3, 3), (4, 4)],
+               ('-ab- c', 2), ['', 'ab c']],
+              [['', '', 'a', '', ''], '--a--', ['x', '', 'x', ''], [(0, 1), (1, 1), (2, 3), (3, 3)],
+               ('--ax', 2), ['', 'ax']],
+              [['ab', ''], 'ab-', [''], [(2, 2)], ('ab-', 1), ['ab', '']],
+              [['', '', 'a', '', ''], '-a-', ['', ''], [(0, 0), (1, 1)], ('-a-', 2), ['', '', 'a']]])
+    check("reposend", s157pos()
+          == [[(0, 1), (0, 3), False, ['a', 'a', ''], [(0, 1), (2, 3), (3, 3)]],
+              [(0, 1), (0, 2), False, ['a', ''], [(0, 1), (2, 2)]],
+              [(1, 1), None, False, [''], [(1, 1)]], [None, None, True, [], []],
+              [(3, 3), None, False, [''], [(3, 3)]], [None, None, True, [], []],
+              [(1, 2), None, True, ['a', 'a', ''], [(1, 2), (4, 5), (5, 5)]],
+              [(1, 2), None, True, ['a', ''], [(1, 2), (2, 2)]], [(1, 1), None, False, [''], [(1, 1)]],
+              [None, None, True, [], []], [(5, 5), None, False, [''], [(5, 5)]],
+              [None, None, True, [], []], [(2, 2), (0, 1), (2, 3), 'abc\U0001f600', ('b', 'c')]])
+    check("reicase", s157case()
+          == [['1010100101010101010101010101010101010101010101010101',
+               '1010100101010101010101010101010101010101010101010101',
+               '1010100101010101010101010101010101010101010101010101',
+               '0101011010010101010101010101010101010101010101010101',
+               '0101011010010101010101010101010101010101010101010101',
+               '0101010101101001010101010101010101010101010101010101',
+               '0101010101101001010101010101010101010101010101010101',
+               '0101010101010110101001010101010101010101010101010101',
+               '0101010101010110101001010101010101010101010101010101',
+               '0101010101010110101001010101010101010101010101010101',
+               '0101010101010101010110100101010101010101010101010101',
+               '0101010101010101010110100101010101010101010101010101',
+               '0101010101010101010101011010100101010101010101010101',
+               '0101010101010101010101011010100101010101010101010101',
+               '0101010101010101010101011010100101010101010101010101',
+               '0101010101010101010101010101011010100101010101010101',
+               '0101010101010101010101010101011010100101010101010101',
+               '0101010101010101010101010101011010100101010101010101',
+               '0101010101010101010101010101010101011010010101010101',
+               '0101010101010101010101010101010101011010010101010101',
+               '0101010101010101010101010101010101010101101001010101',
+               '0101010101010101010101010101010101010101101001010101',
+               '0101010101010101010101010101010101010101010110100101',
+               '0101010101010101010101010101010101010101010110100101',
+               '0101010101010101010101010101010101010101010101011010',
+               '0101010101010101010101010101010101010101010101011010'],
+              ['Hello', 'W\xd6RLD', '\xc9t\xc9'], ['\xe9'], ['\xe9'], ['\U00010400'], ['\U00010430'], 'STRASSE X X'])
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -7666,5 +7766,6 @@ def main():
     s154() # SECTION-CALL 154
     s155() # SECTION-CALL 155
     s156() # SECTION-CALL 156
+    s157() # SECTION-CALL 157
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

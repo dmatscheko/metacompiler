@@ -231,10 +231,11 @@ function pyReErrCol(pattern, pos) {
 
 // The engine indexes a str by UTF-16 unit and Python by code point, so a
 // position crosses that boundary through these: pyReCpIdx is the code-point
-// index of unit index u, pyReUnitIdx the unit index of code-point index k (the
-// end of s past it), and pyReNext the unit index of the code point after the
-// one at u (u + 1 at the end). byteLen equal to the unit count means ASCII, where the indices
-// coincide without a scan. Go twin: none (abnf/jsrtregexpy.go matches []rune).
+// index of unit index u, pyReUnitIdx the unit index of code-point index k
+// clamped to s (as CPython clamps a pattern method's pos and endpos), and
+// pyReNext the unit index of the code point after the one at u (u + 1 at the
+// end). byteLen equal to the unit count means ASCII, where the indices coincide
+// without a scan. Go twin: none (abnf/jsrtregexpy.go matches []rune).
 function pyReCpIdx(s, u) {
     if (byteLen(s) == s.length) { return u }
     var n = 0
@@ -247,7 +248,8 @@ function pyReCpIdx(s, u) {
 }
 
 function pyReUnitIdx(s, k) {
-    if (byteLen(s) == s.length) { return k }
+    if (k <= 0) { return 0 }
+    if (byteLen(s) == s.length) { return k < s.length ? k : s.length }
     var i = 0
     var n = 0
     while (n < k && i < s.length) {

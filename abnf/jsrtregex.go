@@ -129,8 +129,9 @@ type rxCls struct {
 	ands  []*rxCls
 	props []int
 	x     bool
-	// u marks ranges read under Java's (?iu) (see lib/regex.js).
-	u bool
+	// u marks ranges read under Java's (?iu) (see lib/regex.js); pu additionally
+	// under P, whose ASCII letters are folded already (fold).
+	u, pu bool
 }
 
 func rxNewCls() *rxCls { return &rxCls{} }
@@ -335,6 +336,28 @@ func (c *rxCls) fold() {
 	}
 }
 
+// foldP is Python's Unicode IGNORECASE of a class. Twin of rxClsFoldP in
+// lib/regex.js.
+func (c *rxCls) foldP() {
+	n := len(c.lo)
+	for i := 0; i < n; i++ {
+		a := c.lo[i]
+		if a < 128 {
+			a = 128
+		}
+		if c.hi[i]-a >= 256 {
+			continue
+		}
+		for r := a; r <= c.hi[i]; r++ {
+			l, u := unicode.ToLower(r), unicode.ToUpper(r)
+			for _, v := range [4]rune{l, u, unicode.ToUpper(l), unicode.ToLower(u)} {
+				c.add(v, v)
+			}
+		}
+	}
+	c.u, c.pu = true, true
+}
+
 // rxSwapCase answers the other-case code point of an ASCII letter, or -1.
 func rxSwapCase(c rune) rune {
 	if c >= 'A' && c <= 'Z' {
@@ -357,7 +380,7 @@ func (c *rxCls) hit(ch rune) bool {
 			return true
 		}
 	}
-	if c.u {
+	if c.u && !(c.pu && ch < 128) {
 		return c.hitU(ch)
 	}
 	return false
@@ -2069,12 +2092,20 @@ func (st *rxSt) parseBound() (int, int, bool) {
 
 func (st *rxSt) parsePiece() *rxNode {
 	atom := st.parseAtom()
+	// Python's IGNORECASE of a str pattern folds case by Unicode (foldP), by
+	// ASCII under re.ASCII / (?a). Twin of rxParsePiece in lib/regex.js.
 	if st.py && st.icase {
 		if atom.t == "cls" {
 			atom.cls.fold()
+			if st.pyuni {
+				atom.cls.foldP()
+			}
 		}
 		if atom.t == "bref" {
 			atom.min = 1
+			if st.pyuni {
+				atom.min = 2
+			}
 		}
 	}
 	if st.java && st.icase && atom.t == "bref" {
@@ -3748,6 +3779,8 @@ type rxRunSt struct {
 	// gpos and glast are java.util.regex's Matcher.oldLast (\G) and last
 	// (\b{g}); see searchFrom.
 	gpos, glast int
+	// adv is the start of an attempt that may not match empty (searchAdv), or -1.
+	adv int
 }
 
 func (re *rxRe) assertOK(text []rune, kind, sp int) bool {
@@ -4052,6 +4085,10 @@ func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt)
 			if st.mustEnd >= 0 && sp != st.mustEnd {
 				return -1
 			}
+			// adv is the start of an attempt that may not match empty (searchAdv).
+			if sp == st.adv {
+				return -1
+			}
 			return sp
 		case rxOpClassX:
 			if sp >= n {
@@ -4211,12 +4248,26 @@ func (re *rxRe) search(text []rune, start int) (*rxMatch, bool) {
 	return re.searchFrom(text, start, start, 0)
 }
 
+// searchAdv is search with CPython's must_advance: when adv, a match that is
+// empty at start itself is refused, though a longer one there is not. Twin of
+// rxSearchAdv in lib/regex.js.
+func (re *rxRe) searchAdv(text []rune, start int, adv bool) (*rxMatch, bool) {
+	if !adv || start < 0 || start > len(text) {
+		return re.search(text, start)
+	}
+	m, ok := re.attempt(text, start, -1, start, 0, start)
+	if !ok || m != nil {
+		return m, ok
+	}
+	return re.search(text, re.nextStart(text, start))
+}
+
 // searchFrom is search for java.util.regex's Matcher.find, whose \G and \b{g}
 // read where the previous match ended (gpos, glast); search is a fresh Matcher's
 // find. Twin of rxSearchFrom in lib/regex.js.
 func (re *rxRe) searchFrom(text []rune, from, gpos, glast int) (*rxMatch, bool) {
 	for at := from; at <= len(text); at = re.nextStart(text, at) {
-		m, ok := re.attempt(text, at, -1, gpos, glast)
+		m, ok := re.attempt(text, at, -1, gpos, glast, -1)
 		if !ok {
 			return nil, false
 		}
@@ -4239,8 +4290,9 @@ func (re *rxRe) nextStart(text []rune, at int) int {
 
 // attempt runs the program ONCE, starting at `at`. mustEnd is -1 for an ordinary
 // match and the required end position for a whole-input match; it is the one knob
-// search, matchAt and matchWhole differ by.
-func (re *rxRe) attempt(text []rune, at, mustEnd, gpos, glast int) (*rxMatch, bool) {
+// search, matchAt and matchWhole differ by. adv is -1, or `at` when an empty match
+// there is refused (searchAdv).
+func (re *rxRe) attempt(text []rune, at, mustEnd, gpos, glast, adv int) (*rxMatch, bool) {
 	nslots := 2 * (re.ngroups + 1)
 	caps := make([]int, nslots)
 	for i := range caps {
@@ -4250,7 +4302,7 @@ func (re *rxRe) attempt(text []rune, at, mustEnd, gpos, glast int) (*rxMatch, bo
 	for i := range marks {
 		marks[i] = -1
 	}
-	st := &rxRunSt{mustEnd: mustEnd, lbt: -1, gpos: gpos, glast: glast}
+	st := &rxRunSt{mustEnd: mustEnd, lbt: -1, gpos: gpos, glast: glast, adv: adv}
 	if len(re.cmin) > 0 {
 		st.ctr = make([]int, len(re.cmin))
 		st.cbeg = make([]int, len(re.cmin))
@@ -4274,7 +4326,7 @@ func (re *rxRe) matchAt(text []rune, at int) (*rxMatch, bool) {
 	if at < 0 || at > len(text) {
 		return nil, true
 	}
-	return re.attempt(text, at, -1, at, 0)
+	return re.attempt(text, at, -1, at, 0, -1)
 }
 
 // matchWhole: the match must cover the WHOLE input. This cannot be a search plus a
@@ -4284,7 +4336,7 @@ func (re *rxRe) matchWhole(text []rune, at int) (*rxMatch, bool) {
 	if at < 0 || at > len(text) {
 		return nil, true
 	}
-	return re.attempt(text, at, len(text), at, 0)
+	return re.attempt(text, at, len(text), at, 0, -1)
 }
 
 func (re *rxRe) group(text []rune, m *rxMatch, i int) (string, bool) {

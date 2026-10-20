@@ -510,10 +510,31 @@ func rxPyMkMatch(rv *jsObject, re *rxRe, anchoredSrc, s string, m *rxMatch) *jsO
 	return o
 }
 
-func (rt *jsrt) rxPySearch(rv *jsObject, s string, from int) interface{} {
+// rxPyWindow is what a pattern method (string, pos=0, endpos=sys.maxsize)
+// runs on: the runes of s up to endpos and the start pos, both clamped to the
+// string as CPython clamps them. The match it makes is on the whole of s.
+func rxPyWindow(s string, a []interface{}) ([]rune, int) {
+	text := []rune(s)
+	clamp := func(v int) int {
+		if v < 0 {
+			return 0
+		}
+		if v > len(text) {
+			return len(text)
+		}
+		return v
+	}
+	pos := clamp(rxPyIntArg(a, 1))
+	if len(a) > 2 {
+		text = text[:clamp(rxPyIntArg(a, 2))]
+	}
+	return text, pos
+}
+
+func (rt *jsrt) rxPySearch(rv *jsObject, s string, text []rune, from int) interface{} {
 	re := rxPyReOf(rv)
 	src, _ := rv.props["__src"].(string)
-	m, ok := re.search([]rune(s), from)
+	m, ok := re.search(text, from)
 	if !ok {
 		rt.fail("regexp: step limit exceeded")
 	}
@@ -528,15 +549,15 @@ func (rt *jsrt) rxPySearch(rv *jsObject, s string, from int) interface{} {
 // re.fullmatch("a|ab", "ab") is "ab" and not None. The engine's own anchored entry
 // points express both, including Python's `pos` argument - and unlike a
 // \A(?:...)\z wrapper, they have no quarrel with the x flag's trailing comments.
-func (rt *jsrt) rxPyAnchoredMatch(rv *jsObject, s string, from int, whole bool) interface{} {
+func (rt *jsrt) rxPyAnchoredMatch(rv *jsObject, s string, text []rune, from int, whole bool) interface{} {
 	re := rxPyReOf(rv)
 	src, _ := rv.props["__src"].(string)
 	var m *rxMatch
 	var ok bool
 	if whole {
-		m, ok = re.matchWhole([]rune(s), from)
+		m, ok = re.matchWhole(text, from)
 	} else {
-		m, ok = re.matchAt([]rune(s), from)
+		m, ok = re.matchAt(text, from)
 	}
 	if !ok {
 		rt.fail("regexp: step limit exceeded")
@@ -667,19 +688,16 @@ func (rt *jsrt) rxPySub(rv *jsObject, repl interface{}, s string, count int) (st
 	if !isFn {
 		tpl = rxPyTemplate(rt.toString(repl))
 	}
-	at, last, n := 0, 0, 0
-	for at <= len(text) {
-		if count > 0 && n >= count {
-			break
-		}
-		m, ok := re.search(text, at)
+	at, n, adv := 0, 0, false
+	for count <= 0 || n < count {
+		m, ok := re.searchAdv(text, at, adv)
 		if !ok {
 			rt.fail("regexp: step limit exceeded")
 		}
 		if m == nil {
 			break
 		}
-		out.WriteString(string(text[last:m.begin]))
+		out.WriteString(string(text[at:m.begin]))
 		if isFn {
 			md := rxPyMkMatch(rv, re, src, s, m)
 			out.WriteString(rt.toString(rt.call(repl, jsUndef, []interface{}{md})))
@@ -687,17 +705,9 @@ func (rt *jsrt) rxPySub(rv *jsObject, repl interface{}, s string, count int) (st
 			out.WriteString(re.expand(text, m, tpl))
 		}
 		n++
-		last, at = m.end, m.end
-		if m.end == m.begin {
-			if m.end < len(text) {
-				out.WriteString(string(text[m.end]))
-			}
-			last, at = m.end+1, m.end+1
-		}
+		adv, at = m.end == m.begin, m.end
 	}
-	if last <= len(text) {
-		out.WriteString(string(text[last:]))
-	}
+	out.WriteString(string(text[at:]))
 	return out.String(), n
 }
 
@@ -708,35 +718,21 @@ func (rt *jsrt) rxPySplit(rv *jsObject, s string, maxsplit int) *jsArray {
 	re := rxPyReOf(rv)
 	text := []rune(s)
 	parts := &jsArray{}
-	at, last, n := 0, 0, 0
-	for at <= len(text) {
-		if maxsplit > 0 && n >= maxsplit {
-			break
-		}
-		m, ok := re.search(text, at)
+	at, n, adv := 0, 0, false
+	for maxsplit <= 0 || n < maxsplit {
+		m, ok := re.searchAdv(text, at, adv)
 		if !ok {
 			rt.fail("regexp: step limit exceeded")
 		}
 		if m == nil {
 			break
 		}
-		if m.end == m.begin {
-			if m.begin >= len(text) {
-				break
-			}
-			parts.elems = append(parts.elems, string(text[last:m.begin]))
-			rxPyAppendGroups(parts, re, text, m)
-			last = m.begin
-			at = m.begin + 1
-			n++
-			continue
-		}
-		parts.elems = append(parts.elems, string(text[last:m.begin]))
+		parts.elems = append(parts.elems, string(text[at:m.begin]))
 		rxPyAppendGroups(parts, re, text, m)
-		last, at = m.end, m.end
 		n++
+		adv, at = m.end == m.begin, m.end
 	}
-	parts.elems = append(parts.elems, string(text[last:]))
+	parts.elems = append(parts.elems, string(text[at:]))
 	return parts
 }
 
@@ -752,13 +748,12 @@ func rxPyAppendGroups(parts *jsArray, re *rxRe, text []rune, m *rxMatch) {
 
 // rxPyFindAll is re.findall / re.finditer: no group -> the whole matches, one
 // group -> that group, more -> the capture tuple of each match.
-func (rt *jsrt) rxPyFindAll(rv *jsObject, s string, asMatch bool) *jsArray {
+func (rt *jsrt) rxPyFindAll(rv *jsObject, s string, text []rune, from int, asMatch bool) *jsArray {
 	re := rxPyReOf(rv)
 	src, _ := rv.props["__src"].(string)
-	text := []rune(s)
 	out := &jsArray{}
-	for at := 0; at <= len(text); {
-		m, ok := re.search(text, at)
+	for at, adv := from, false; ; {
+		m, ok := re.searchAdv(text, at, adv)
 		if !ok {
 			rt.fail("regexp: step limit exceeded")
 		}
@@ -783,11 +778,7 @@ func (rt *jsrt) rxPyFindAll(rv *jsObject, s string, asMatch bool) *jsArray {
 			}
 			out.elems = append(out.elems, t)
 		}
-		if m.end == m.begin {
-			at = m.end + 1
-		} else {
-			at = m.end
-		}
+		adv, at = m.end == m.begin, m.end
 	}
 	return out
 }
@@ -893,16 +884,16 @@ func (rt *jsrt) rxPyModCall(name string, args []interface{}) interface{} {
 
 func (rt *jsrt) rxPyReMethod(rv *jsObject, name string, a []interface{}) interface{} {
 	switch name {
-	case "search":
-		return rt.rxPySearch(rv, rt.toString(argAt(a, 0)), rxPyIntArg(a, 1))
-	case "match":
-		return rt.rxPyAnchoredMatch(rv, rt.toString(argAt(a, 0)), rxPyIntArg(a, 1), false)
-	case "fullmatch":
-		return rt.rxPyAnchoredMatch(rv, rt.toString(argAt(a, 0)), rxPyIntArg(a, 1), true)
-	case "findall":
-		return rt.rxPyFindAll(rv, rt.toString(argAt(a, 0)), false)
-	case "finditer":
-		return rt.rxPyFindAll(rv, rt.toString(argAt(a, 0)), true)
+	case "search", "match", "fullmatch", "findall", "finditer":
+		s := rt.toString(argAt(a, 0))
+		text, at := rxPyWindow(s, a)
+		switch name {
+		case "search":
+			return rt.rxPySearch(rv, s, text, at)
+		case "match", "fullmatch":
+			return rt.rxPyAnchoredMatch(rv, s, text, at, name == "fullmatch")
+		}
+		return rt.rxPyFindAll(rv, s, text, at, name == "finditer")
 	case "sub", "subn":
 		text, n := rt.rxPySub(rv, argAt(a, 0), rt.toString(argAt(a, 1)), rxPyIntArg(a, 2))
 		if name == "sub" {

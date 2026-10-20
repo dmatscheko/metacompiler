@@ -4648,8 +4648,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // every non-participating group has to answer undefined, not null.
     function pyReNone(v) { return v === null ? undefined : v }
     function pyReEmpty(v) { return v === null ? "" : v }
-    function pyReSearch(rv, s, from) {
-        var m = rxSearch(rv.prog, s, pyReUnitIdx(s, from))
+    // A pattern method searches t, the string up to endpos, from unit index at;
+    // the match it makes is on the whole string s.
+    function pyReSearch(rv, s, t, at) {
+        var m = rxSearch(rv.prog, t, at)
         if (m == null) { return undefined }
         return pyMkMatch(rv, rv.prog, s, m)
     }
@@ -4658,9 +4660,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // is "ab" and not None. The engine's own anchored entry points express both,
     // including Python's `pos` argument - and unlike an \A(?:...)\z wrapper, they
     // have no quarrel with the x flag's trailing comments.
-    function pyReAnchoredMatch(rv, s, from, whole) {
-        var at = pyReUnitIdx(s, from)
-        var m = whole ? rxMatchWhole(rv.prog, s, at) : rxMatchAt(rv.prog, s, at)
+    function pyReAnchoredMatch(rv, s, t, at, whole) {
+        var m = whole ? rxMatchWhole(rv.prog, t, at) : rxMatchAt(rv.prog, t, at)
         if (m == null) { return undefined }
         return pyMkMatch(rv, rv.prog, s, m)
     }
@@ -4719,31 +4720,28 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return out
     }
     // re.sub / re.subn. `repl` may be a callable, which is the interpreter's job
-    // (the template form goes through the engine's own expander).
+    // (the template form goes through the engine's own expander). This and
+    // split and findall walk the matches as CPython's sre does: each search
+    // starts where the last match ended, and after an EMPTY match it may not
+    // match empty there again (must_advance, rxSearchAdv).
     function pyReSub(rv, repl, s, count) {
         var out = ""
         var at = 0
-        var last = 0
         var n = 0
+        var adv = false
         var isFn = typeof repl == "function"
         var tpl = isFn ? "" : pyReTemplate("" + repl)
-        while (at <= s.length) {
-            if (count > 0 && n >= count) { break }
-            var m = rxSearch(rv.prog, s, at)
+        while (count <= 0 || n < count) {
+            var m = rxSearchAdv(rv.prog, s, at, adv)
             if (m == null) { break }
             var md = pyMkMatch(rv, rv.prog, s, m)
-            out += s.substring(last, m.begin)
+            out += s.substring(at, m.begin)
             out += isFn ? "" + repl(md) : rxExpand(rv.prog, s, m, tpl)
             n = n + 1
-            last = m.end
+            adv = m.end == m.begin
             at = m.end
-            if (m.end == m.begin) {
-                last = pyReNext(s, m.end)
-                at = last
-                if (m.end < s.length) { out += s.substring(m.end, last) }
-            }
         }
-        if (last <= s.length) { out += s.substring(last, s.length) }
+        out += s.substring(at, s.length)
         return {text: out, n: n}
     }
     // re.split. Unlike the engine's neutral rxSplit, Python SPLICES the capture
@@ -4751,50 +4749,40 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pyReSplit(rv, s, maxsplit) {
         var parts = []
         var at = 0
-        var last = 0
         var n = 0
-        while (at <= s.length) {
-            if (maxsplit > 0 && n >= maxsplit) { break }
-            var m = rxSearch(rv.prog, s, at)
+        var adv = false
+        while (maxsplit <= 0 || n < maxsplit) {
+            var m = rxSearchAdv(rv.prog, s, at, adv)
             if (m == null) { break }
-            if (m.end == m.begin) {
-                // A zero-width separator: Python 3.7+ splits there too, but never
-                // twice at the same place and never at the very end.
-                if (m.begin >= s.length) { break }
-                parts.push(s.substring(last, m.begin))
-                for (var g2 = 1; g2 <= rv.prog.ngroups; g2++) { parts.push(pyReNone(rxGroup(rv.prog, s, m, g2))) }
-                last = m.begin
-                at = pyReNext(s, m.begin)
-                n = n + 1
-                continue
-            }
-            parts.push(s.substring(last, m.begin))
+            parts.push(s.substring(at, m.begin))
             for (var g = 1; g <= rv.prog.ngroups; g++) { parts.push(pyReNone(rxGroup(rv.prog, s, m, g))) }
-            last = m.end
-            at = m.end
             n = n + 1
+            adv = m.end == m.begin
+            at = m.end
         }
-        parts.push(s.substring(last, s.length))
+        parts.push(s.substring(at, s.length))
         return parts
     }
     // re.findall: no group -> the whole matches, one group -> that group, more ->
     // the capture tuple of each match.
-    function pyReFindAll(rv, s, asMatch) {
+    function pyReFindAll(rv, s, t, from, asMatch) {
         var out = []
-        var at = 0
-        while (at <= s.length) {
-            var m = rxSearch(rv.prog, s, at)
+        var at = from
+        var adv = false
+        while (true) {
+            var m = rxSearchAdv(rv.prog, t, at, adv)
             if (m == null) { break }
             // A group that did not take part is "" here, not None.
             if (asMatch) { out.push(pyMkMatch(rv, rv.prog, s, m)) }
             else if (rv.prog.ngroups == 0) { out.push(rxGroup(rv.prog, s, m, 0)) }
             else if (rv.prog.ngroups == 1) { out.push(pyReEmpty(rxGroup(rv.prog, s, m, 1))) }
             else {
-                var t = []
-                for (var g = 1; g <= rv.prog.ngroups; g++) { t.push(pyReEmpty(rxGroup(rv.prog, s, m, g))) }
-                out.push(pyTup(t))
+                var tup = []
+                for (var g = 1; g <= rv.prog.ngroups; g++) { tup.push(pyReEmpty(rxGroup(rv.prog, s, m, g))) }
+                out.push(pyTup(tup))
             }
-            at = m.end == m.begin ? pyReNext(s, m.end) : m.end
+            adv = m.end == m.begin
+            at = m.end
         }
         return out
     }
@@ -4847,14 +4835,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return pyReMethod(rv, name, rest)
     }
     function pyReMethod(rv, name, a) {
-        if (name == "search") {
-            return pyReSearch(rv, "" + a[0], a.length > 1 ? a[1] | 0 : 0)
+        if (name == "search" || name == "match" || name == "fullmatch" || name == "findall" || name == "finditer") {
+            // (string, pos=0, endpos=sys.maxsize)
+            var s = "" + a[0]
+            var t = a.length > 2 ? s.substring(0, pyReUnitIdx(s, a[2] | 0)) : s
+            var at = a.length > 1 ? pyReUnitIdx(s, a[1] | 0) : 0
+            if (name == "search") { return pyReSearch(rv, s, t, at) }
+            if (name == "findall" || name == "finditer") { return pyReFindAll(rv, s, t, at, name == "finditer") }
+            return pyReAnchoredMatch(rv, s, t, at, name == "fullmatch")
         }
-        if (name == "match" || name == "fullmatch") {
-            return pyReAnchoredMatch(rv, "" + a[0], a.length > 1 ? a[1] | 0 : 0, name == "fullmatch")
-        }
-        if (name == "findall") { return pyReFindAll(rv, "" + a[0], false) }
-        if (name == "finditer") { return pyReFindAll(rv, "" + a[0], true) }
         if (name == "sub" || name == "subn") {
             var r = pyReSub(rv, a[0], "" + a[1], a.length > 2 ? a[2] | 0 : 0)
             return name == "sub" ? r.text : pyTup([r.text, r.n])

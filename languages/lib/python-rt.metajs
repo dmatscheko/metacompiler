@@ -12053,9 +12053,9 @@ function pyERxMatchOf(v) { return rxMatchOf(v) }
 // return and fails with "regexp: step limit exceeded"; regex.js raises that
 // itself out of rxAttempt (via the rxFail knob), so there is no second return to
 // test here and the failure text is the engine's own.
-function pyERxSearch(rv, s, from) {
+function pyERxSearch(rv, s, t, at) {
     var re = pyERxReOf(rv)
-    var m = rxSearch(re, s, pyReUnitIdx(s, from))
+    var m = rxSearch(re, t, at)
     if (m === null) { return undefined }
     return pyERxMkMatch(rv, rv["__src"], re["flags"], s, m)
 }
@@ -12066,18 +12066,17 @@ function pyERxSearch(rv, s, from) {
 // own anchored entry points express both, including Python's `pos` argument,
 // and unlike a \A(?:...)\z wrapper they have no quarrel with the x flag's
 // trailing comments.
-function pyERxAnchored(rv, s, from, whole) {
+function pyERxAnchored(rv, s, t, at, whole) {
     // The two arms are spelled out rather than assigning into one local: a local
     // keeps the TYPE CLASS it is first assigned, so `var m = null` followed by a
     // match object is the dialect's classic trap.
     var re = pyERxReOf(rv)
-    var at = pyReUnitIdx(s, from)
     if (whole) {
-        var mw = rxMatchWhole(re, s, at)
+        var mw = rxMatchWhole(re, t, at)
         if (mw === null) { return undefined }
         return pyERxMkMatch(rv, rv["__src"], re["flags"], s, mw)
     }
-    var ma = rxMatchAt(re, s, at)
+    var ma = rxMatchAt(re, t, at)
     if (ma === null) { return undefined }
     return pyERxMkMatch(rv, rv["__src"], re["flags"], s, ma)
 }
@@ -12212,13 +12211,12 @@ function pyERxSub(rv, repl, s, count) {
     var tpl = ""
     if (!isFn) { tpl = pyERxTemplate(pyToStr(repl)) }
     var at = 0
-    var last = 0
     var n = 0
-    while (at <= s.length) {
-        if (count > 0 && n >= count) { break }
-        var m = rxSearch(re, s, at)
+    var adv = false
+    while (count <= 0 || n < count) {
+        var m = rxSearchAdv(re, s, at, adv)
         if (m === null) { break }
-        out = out + s.substring(last, m["begin"])
+        out = out + s.substring(at, m["begin"])
         if (isFn) {
             var md = pyERxMkMatch(rv, src, re["flags"], s, m)
             out = out + pyToStr(pyCall(repl, [md]))
@@ -12226,16 +12224,10 @@ function pyERxSub(rv, repl, s, count) {
             out = out + rxExpand(re, s, m, tpl)
         }
         n = n + 1
-        last = m["end"]
+        adv = m["end"] == m["begin"]
         at = m["end"]
-        if (m["end"] == m["begin"]) {
-            // An empty match must still make progress or this loop never ends.
-            last = pyReNext(s, m["end"])
-            at = last
-            if (m["end"] < s.length) { out = out + s.substring(m["end"], last) }
-        }
     }
-    if (last <= s.length) { out = out + s.substring(last, s.length) }
+    out = out + s.substring(at, s.length)
     return {text: out, n: n}
 }
 
@@ -12246,42 +12238,32 @@ function pyERxSplit(rv, s, maxsplit) {
     var re = pyERxReOf(rv)
     var parts = []
     var at = 0
-    var last = 0
     var n = 0
-    while (at <= s.length) {
-        if (maxsplit > 0 && n >= maxsplit) { break }
-        var m = rxSearch(re, s, at)
+    var adv = false
+    while (maxsplit <= 0 || n < maxsplit) {
+        var m = rxSearchAdv(re, s, at, adv)
         if (m === null) { break }
-        if (m["end"] == m["begin"]) {
-            if (m["begin"] >= s.length) { break }
-            parts.push(s.substring(last, m["begin"]))
-            pyERxAppendGroups(parts, re, s, m)
-            // Go leaves `last` at the match's own begin here, NOT begin+1.
-            last = m["begin"]
-            at = pyReNext(s, m["begin"])
-            n = n + 1
-            continue
-        }
-        parts.push(s.substring(last, m["begin"]))
+        parts.push(s.substring(at, m["begin"]))
         pyERxAppendGroups(parts, re, s, m)
-        last = m["end"]
-        at = m["end"]
         n = n + 1
+        adv = m["end"] == m["begin"]
+        at = m["end"]
     }
-    parts.push(s.substring(last, s.length))
+    parts.push(s.substring(at, s.length))
     return parts
 }
 
 // pyERxFindAll is Go (*jsrt).rxPyFindAll - re.findall / re.finditer: no group ->
 // the whole matches, one group -> that group, more -> the capture tuple of each
 // match.
-function pyERxFindAll(rv, s, asMatch) {
+function pyERxFindAll(rv, s, t, from, asMatch) {
     var re = pyERxReOf(rv)
     var src = rv["__src"]
     var out = []
-    var at = 0
-    while (at <= s.length) {
-        var m = rxSearch(re, s, at)
+    var at = from
+    var adv = false
+    while (true) {
+        var m = rxSearchAdv(re, t, at, adv)
         if (m === null) { break }
         if (asMatch) {
             out.push(pyERxMkMatch(rv, src, re["flags"], s, m))
@@ -12296,16 +12278,17 @@ function pyERxFindAll(rv, s, asMatch) {
             var g1 = rxGroup(re, s, m, 1)
             if (g1 === null) { out.push("") } else { out.push(g1) }
         } else {
-            var t = pyTup([])
+            var tup = pyTup([])
             var gi = 1
             while (gi <= re["ngroups"]) {
                 var gv = rxGroup(re, s, m, gi)
-                if (gv === null) { t.push("") } else { t.push(gv) }
+                if (gv === null) { tup.push("") } else { tup.push(gv) }
                 gi = gi + 1
             }
-            out.push(t)
+            out.push(tup)
         }
-        if (m["end"] == m["begin"]) { at = pyReNext(s, m["end"]) } else { at = m["end"] }
+        adv = m["end"] == m["begin"]
+        at = m["end"]
     }
     return out
 }
@@ -12420,11 +12403,18 @@ function pyERxKwArgs(name, args, kw, mod) {
 
 // pyERxReMethod is Go (*jsrt).rxPyReMethod.
 function pyERxReMethod(rv, name, a) {
-    if (name == "search") { return pyERxSearch(rv, pyToStr(pyEArgAt(a, 0)), pyERxIntArg(a, 1)) }
-    if (name == "match") { return pyERxAnchored(rv, pyToStr(pyEArgAt(a, 0)), pyERxIntArg(a, 1), false) }
-    if (name == "fullmatch") { return pyERxAnchored(rv, pyToStr(pyEArgAt(a, 0)), pyERxIntArg(a, 1), true) }
-    if (name == "findall") { return pyERxFindAll(rv, pyToStr(pyEArgAt(a, 0)), false) }
-    if (name == "finditer") { return pyERxFindAll(rv, pyToStr(pyEArgAt(a, 0)), true) }
+    if (name == "search" || name == "match" || name == "fullmatch" || name == "findall" || name == "finditer") {
+        // (string, pos=0, endpos=sys.maxsize): the text up to endpos, searched
+        // from pos; the match is on the whole string.
+        var s = pyToStr(pyEArgAt(a, 0))
+        var t = s
+        if (a.length > 2) { t = s.substring(0, pyReUnitIdx(s, pyERxIntArg(a, 2))) }
+        var at = pyReUnitIdx(s, pyERxIntArg(a, 1))
+        if (name == "search") { return pyERxSearch(rv, s, t, at) }
+        if (name == "match") { return pyERxAnchored(rv, s, t, at, false) }
+        if (name == "fullmatch") { return pyERxAnchored(rv, s, t, at, true) }
+        return pyERxFindAll(rv, s, t, at, name == "finditer")
+    }
     if (name == "sub" || name == "subn") {
         var r = pyERxSub(rv, pyEArgAt(a, 0), pyToStr(pyEArgAt(a, 1)), pyERxIntArg(a, 2))
         if (name == "sub") { return r["text"] }

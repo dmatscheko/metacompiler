@@ -222,7 +222,7 @@ var RX_STEPS = 400000
 // range (Pattern.java's CIRangeU and SingleU).
 
 function rxNewCls() {
-    return {neg: false, lo: [], hi: [], sp: [], subs: [], ands: [], props: [], x: false, u: false}
+    return {neg: false, lo: [], hi: [], sp: [], subs: [], ands: [], props: [], x: false, u: false, pu: false}
 }
 
 function rxClsAdd(cls, from, to) {
@@ -447,6 +447,38 @@ function rxClsFold(cls) {
     }
 }
 
+// rxClsFoldP is Python's Unicode IGNORECASE of a class: CPython folds every
+// character of a set, and two characters fold together when their lowercase or
+// their uppercase agree (_ignorecase_fixes). A short non-ASCII range gets its
+// characters' other cases here; the matcher (pu, rxClsHitU) tries the text
+// character's uppercase and its lowercase.
+function rxClsFoldP(cls) {
+    var lo = cls.lo
+    var hi = cls.hi
+    var n = lo.length
+    var i = 0
+    while (i < n) {
+        var a = lo[i] < 128 ? 128 : lo[i]
+        if (hi[i] - a < 256) {
+            var c = a
+            while (c <= hi[i]) {
+                var l = rxCaseU(c, 0)
+                var u = rxCaseU(c, 1)
+                rxClsAdd(cls, l, l)
+                rxClsAdd(cls, u, u)
+                var ul = rxCaseU(l, 1)
+                var lu = rxCaseU(u, 0)
+                rxClsAdd(cls, ul, ul)
+                rxClsAdd(cls, lu, lu)
+                c = c + 1
+            }
+        }
+        i = i + 1
+    }
+    cls.u = true
+    cls.pu = true
+}
+
 // rxClsHit is the raw membership test, BEFORE negation.
 function rxClsHit(cls, c) {
     var lo = cls.lo
@@ -462,7 +494,9 @@ function rxClsHit(cls, c) {
         if (rxSpHas(sp[i], c)) { return true }
         i = i + 1
     }
-    if (cls.u) { return rxClsHitU(cls, c) }
+    // A pu class (P's Unicode case folding) already holds the other case of its
+    // ASCII letters (rxClsFold), and no other character's case is ASCII.
+    if (cls.u && !(cls.pu && c < 128)) { return rxClsHitU(cls, c) }
     return false
 }
 
@@ -2024,9 +2058,14 @@ function rxParseBoundJ(st) {
 
 function rxParsePiece(st) {
     var atom = rxParseAtom(st)
+    // Python's IGNORECASE of a str pattern folds case by Unicode (rxClsFoldP),
+    // by ASCII under re.ASCII / (?a).
     if (st.py && st.icase) {
-        if (atom.t == "cls") { rxClsFold(atom.cls) }
-        if (atom.t == "bref") { atom.min = 1 }
+        if (atom.t == "cls") {
+            rxClsFold(atom.cls)
+            if (st.pyuni) { rxClsFoldP(atom.cls) }
+        }
+        if (atom.t == "bref") { atom.min = st.pyuni ? 2 : 1 }
     }
     if (st.java && st.icase && atom.t == "bref") { atom.min = st.ucase ? 2 : 1 }
     rxSkipX(st)
@@ -3694,6 +3733,12 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st) {
                 while (bi < len) {
                     var lc = text.charCodeAt(from + bi)
                     var rc = text.charCodeAt(sp + bi)
+                    // P compares an astral character whole.
+                    if (re.py && lc >= 55296 && lc <= 56319) {
+                        lc = rxCpAt(text, from + bi)
+                        rc = rxCpAt(text, sp + bi)
+                        if (lc > 65535) { bi = bi + 1 }
+                    }
                     if (lc != rc) {
                         if (!re.icase && bs[pc] == 0) { return -1 }
                         if (bs[pc] == 2) {
@@ -3717,6 +3762,8 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st) {
             // \A(?:...)\z instead breaks under the x flag, where a trailing #
             // comment swallows the wrapper's own closing paren.
             if (st.mustEnd >= 0 && sp != st.mustEnd) { return -1 }
+            // adv is the start of an attempt that may not match empty (rxSearchAdv).
+            if (sp == st.adv) { return -1 }
             return sp
         } else if (op == RX_CLASSX) {
             if (sp >= n) { return -1 }
@@ -3854,8 +3901,9 @@ function rxIterJ(re, text, pc, sp, caps, marks, st) {
 // group i, and are -1 when the group did not take part.
 // rxAttempt runs the program ONCE, starting at `at`. mustEnd is -1 for an
 // ordinary match and the required end position for a whole-input match; it is the
-// one knob rxSearch, rxMatchAt and rxMatchWhole differ by.
-function rxAttempt(re, text, at, mustEnd, gpos, glast) {
+// one knob rxSearch, rxMatchAt and rxMatchWhole differ by. adv is -1, or `at`
+// when an empty match there is refused (rxSearchAdv).
+function rxAttempt(re, text, at, mustEnd, gpos, glast, adv) {
     var nslots = 2 * (re.ngroups + 1)
     var caps = []
     var i = 0
@@ -3879,7 +3927,7 @@ function rxAttempt(re, text, at, mustEnd, gpos, glast) {
         i = i + 1
     }
     var st = {steps: 0, over: false, mustEnd: mustEnd, lbt: -1, ctr: ctr, cbeg: cbeg,
-              gpos: gpos, glast: glast}
+              gpos: gpos, glast: glast, adv: adv}
     var end = rxRun(re, text, 0, at, caps, marks, st)
     if (st.over) { rxFail("step limit exceeded") }
     if (end >= 0) { return {begin: caps[0], end: caps[1], caps: caps} }
@@ -3892,7 +3940,7 @@ function rxSearch(re, text, start) {
     if (from < 0) { from = 0 }
     var at = from
     while (at <= text.length) {
-        var m = rxAttempt(re, text, at, -1, from, 0)
+        var m = rxAttempt(re, text, at, -1, from, 0, -1)
         if (m != null) { return m }
         // After a failed attempt a J pattern with re.supp steps over a surrogate
         // pair whole, as java.util.regex's StartS does; any other steps one
@@ -3902,6 +3950,16 @@ function rxSearch(re, text, start) {
     return null
 }
 
+// rxSearchAdv is rxSearch with CPython's must_advance: when adv, a match that
+// is empty at start itself is refused, though a longer one there is not. The
+// search after an empty match asks for this, so that it moves on.
+function rxSearchAdv(re, text, start, adv) {
+    if (!adv || start < 0 || start > text.length) { return rxSearch(re, text, start) }
+    var m = rxAttempt(re, text, start, -1, start, 0, start)
+    if (m != null) { return m }
+    return rxSearch(re, text, start + (re.supp && start + 1 < text.length && rxCpAt(text, start) > 65535 ? 2 : 1))
+}
+
 // rxSearchFrom is rxSearch for java.util.regex's Matcher.find, whose \G and
 // \b{g} read where the previous match ended (gpos, glast; see the API). Not
 // folded into rxSearch, which every language calls once per match.
@@ -3909,7 +3967,7 @@ function rxSearchFrom(re, text, start, gpos, glast) {
     if (!re.ok) { rxFail("invalid regexp: " + re.err) }
     var at = start
     while (at <= text.length) {
-        var m = rxAttempt(re, text, at, -1, gpos, glast)
+        var m = rxAttempt(re, text, at, -1, gpos, glast, -1)
         if (m != null) { return m }
         at = re.supp && at + 1 < text.length && rxCpAt(text, at) > 65535 ? at + 2 : at + 1
     }
@@ -3922,7 +3980,7 @@ function rxSearchFrom(re, text, start, gpos, glast) {
 function rxMatchAt(re, text, at) {
     if (!re.ok) { rxFail("invalid regexp: " + re.err) }
     if (at < 0 || at > text.length) { return null }
-    return rxAttempt(re, text, at, -1, at, 0)
+    return rxAttempt(re, text, at, -1, at, 0, -1)
 }
 
 // rxMatchWhole: the match must cover the WHOLE input. This cannot be a search plus
@@ -3933,7 +3991,7 @@ function rxMatchAt(re, text, at) {
 function rxMatchWhole(re, text, at) {
     if (!re.ok) { rxFail("invalid regexp: " + re.err) }
     if (at < 0 || at > text.length) { return null }
-    return rxAttempt(re, text, at, text.length, at, 0)
+    return rxAttempt(re, text, at, text.length, at, 0, -1)
 }
 
 function rxTest(re, text) {
