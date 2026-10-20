@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-664** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-665** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -78,12 +78,12 @@ astral letter may differ between engines (probe first).
 
 # JS — JavaScript and TypeScript
 
-### T-658 js: inherited data properties read as undefined; Object.create; Object.prototype method set; shim identity · P1 · JS · IN PROGRESS (JS worker, round 12) [V]
-`class B{}; B.prototype.x = 1; println(new B().x)` → undefined in all engines (node 1); `function F(){}; F.prototype.v = 2; new F().v`
-likewise — the value-read miss path (getMember / js_jsvget / js_jsmget) only looks up the chain for methods (P1). `Object.create({p:1})`
-→ TypeError "Object.create is not a function" in all engines (P1). `typeof K.isPrototypeOf`, `toLocaleString` → undefined on any value
-(node "function"). `K.valueOf === K.valueOf` → false (node true: each read builds a fresh shim). Measure tests/bench.sh js: the miss
-path must stay cheap for objects without a prototype chain.
+### T-664 js: replacing a constructor's prototype; getPrototypeOf/setPrototypeOf/defineProperty; toLocaleString; Object.create(null) · P1 · JS · OPEN [V]
+`function F(){}; F.prototype = {q: 4}; new F().q` → undefined in all engines (node 4) — P1. `Object.getPrototypeOf`, `Object.setPrototypeOf`,
+`Object.defineProperty` and Object.create's second argument → "not a function" / ignored (node: `Object.getPrototypeOf(Object.create({p:1})).p`
+1; `Object.create({}, {a:{value:1}}).a` 1). `(1234.5).toLocaleString()` → interp `1234.5`, compiled "is not a function" (node `1,234.5`; the
+halves disagree); Array toLocaleString likewise. `Object.create(null)` still has Object.prototype's methods (`typeof n.toString` → function,
+node undefined). `({}).valueOf.call(7)` → a number (node boxes it, typeof "object").
 
 ---
 
@@ -750,6 +750,7 @@ T-653 python: compiled `type(e) is ValueError`; `__class__` in methods; regex gr
 T-656 java: `x.new Inner()` with a third same-named nested type; Matcher.hitEnd/requireEnd — PARTIAL 429af651 (q.new Inner() by the qualifier's declared type; multi-level qualified nested names); hitEnd/requireEnd are T-661
 T-659 php: calling a library function through a name built at run time — DONE 6a69f43e (programs without a computed call compile byte-identically; with one the module grows ~3 MB of IR, the exe ~0.7 MB)
 T-662 php: library functions called with too few arguments do not raise ArgumentCountError — DONE a9a5ac97
+T-658 js: inherited data properties read as undefined; Object.create; Object.prototype method set; shim identity — DONE 9f4ba349
 
 # Settled — do not re-open
 
