@@ -427,6 +427,20 @@ function gfIdChar(c) { return (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || c
 // as does a channel of a predeclared type (a type text arrives with its blanks
 // stripped, "chanint").
 // A name already qualified ("pkga.T") is kept.
+// An instantiated generic type's arguments as %T writes them after its name
+// ("[string,main.V]"), from the texts a struct instance records (__targs); "" when
+// one is not known. Twin of gopTargs in abnf/jsrtgolang.go.
+function gfTargs(ts) {
+    var s = ""
+    var i = 0
+    while (i < ts.length) {
+        if (typeof ts[i] != "string" || ts[i] == "") { return "" }
+        if (i > 0) { s = s + "," }
+        s = s + ts[i]
+        i = i + 1
+    }
+    return gfQualTy("[" + s + "]")
+}
 function gfQualTy(t) {
     var out = ""
     var i = 0

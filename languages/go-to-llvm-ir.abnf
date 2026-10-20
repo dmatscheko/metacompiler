@@ -143,7 +143,7 @@ ImportPath  <~~ push(up.in.slice(1, up.in.length - 1)) ~~>
 // so the alias is declared as a second name for whatever B is bound to (a struct
 // descriptor stays a struct descriptor, which a conversion wrapper would have
 // destroyed). The trailing ';' is the pre-1.0 spelling the corpus is full of.
-TypeDecl    <~~ push(makeTypeDecl(takeAll(), up.pos)) ~~>
+TypeDecl    <~~ push(makeTypeDecl(takeAll(), up.pos)); goTpEnd() ~~>
             = "type" KwEnd Id <~~ push(cPoisonName(up.in)) ~~> [ TypeParams ] [ AliasEq ] ( StructBody | IfaceBody | DefinedType ) [ ";" ] ;
 AliasEq     <~~ push({alias: true}) ~~> = "=" ;
 // type myInt int / type Celsius float64: a defined type over an existing one. The value
@@ -215,9 +215,9 @@ CExprItem   <~~ push({cat: up.pos, cks: up.start}) ~~> = Expression ;
 // is tried first, so `func f() {` never reaches here.
 FuncDecl    = FuncBodied | FuncNoBody ;
 FuncBodied  <~~ push(makeFuncStmt(takeAll())) ~~>
-            = "func" KwEnd [ Receiver ] Id <~~ push(cPoisonName(up.in)) ~~> [ TypeParams ] ParamList [ SameLine RetTypes ] FuncBody [ ";" ] ;
+            = "func" KwEnd [ Receiver ] Id <~~ push(cPoisonName(goTpFnC(up.in))) ~~> [ TypeParams ] ParamList [ SameLine RetTypes ] FuncBody [ ";" ] ;
 FuncNoBody  <~~ push(makeFuncStmt(takeAll())) ~~>
-            = "func" KwEnd [ Receiver ] Id <~~ push(cPoisonName(up.in)) ~~> [ TypeParams ] ParamList [ SameLine RetTypes ] NoBody [ ";" ] ;
+            = "func" KwEnd [ Receiver ] Id <~~ push(cPoisonName(goTpFnC(up.in))) ~~> [ TypeParams ] ParamList [ SameLine RetTypes ] NoBody [ ";" ] ;
 // An always-empty match: Go source holds no NUL byte, so the optional never consumes
 // anything and the production stands purely for its tag.
 NoBody      <~~ push(notImplStmt("function without a body", up.pos)) ~~> = [ "\x00" ] ;
@@ -227,7 +227,7 @@ NoBody      <~~ push(notImplStmt("function without a body", up.pos)) ~~> = [ "\x
 // instantiated one - only compile-time type CHECKING is lost, which a syntax-driven
 // front end does not do anyway.
 TypeParams  = "[" TypeParamGrp { "," TypeParamGrp } "]" ;
-TypeParamGrp = Id <~~ goNoteTParam(up.in) ~~> { "," Id <~~ goNoteTParam(up.in) ~~> } Constraint ;
+TypeParamGrp = Id <~~ goNoteTParam(up.in); goTpAdd(up.in) ~~> { "," Id <~~ goNoteTParam(up.in); goTpAdd(up.in) ~~> } Constraint ;
 Constraint  = ConstrTerm { "|" ConstrTerm } ;
 ConstrTerm  = [ "~" ] Type ;
 // A POINTER receiver is marked: its method sees the caller's struct, while a value
@@ -239,7 +239,7 @@ ConstrTerm  = [ "~" ] Type ;
 // pushes an {anon} marker LAST (a tag runs after its children), and normRecv turns that
 // into the canonical [name, {byptr}?, type] the method lowering expects, with an empty
 // name.
-Receiver    <~~ push({recv: normRecv(takeAll())}) ~~>
+Receiver    <~~ push({recv: normRecv(takeAll())}); goTpRecvC(up.in) ~~>
             = "(" ( RecvNamed | RecvAnon ) ")" ;
 RecvNamed   = RecvNamedAhead Id <~~ push(cPendName(up.in)) ~~> [ "*" <~~ push({byptr: true}) ~~> ] Id <~~ push(cPendName(up.in)) ~~> [ TypeArgs ] ;
 RecvAnon    <~~ push({anon: true}) ~~>
@@ -841,7 +841,7 @@ PostfixExpr = CallMember ;
 // the '(' opens a new STATEMENT, not a call of the composite literal. SameLine is that
 // rule. It does not restrict a call whose ARGUMENTS span lines, because the '(' itself is
 // still on the name's line.
-CallMember  <~~ push(goChainC(foldCallMember(goBoxArgsC(goRecvsC(takeAll(), up.start))), up.in, up.pos)) ~~>
+CallMember  <~~ push(goChainC(foldCallMember(goBoxArgsC(goRecvsC(goTpChainC(takeAll(), up.in), up.start))), up.in, up.pos)) ~~>
             = Primary { MethodSfx | FieldSfx | SameLine SliceSfx | SameLine TypeArgsSfx
                       | SameLine IndexSfx | SameLine CallSfx | TypeAssertSfx } ;
 // f[int16, float32, string], NewMap[int, struct{}], shift[[62]byte]: a generic
@@ -1142,7 +1142,7 @@ MakeMap     <~~ push(makeMakeMap(takeAll())); regSt(up.pos, goMakeTy(up.in)) ~~>
 
 // new(T): a zero value of T - a POINTER to it for a scalar type (a fresh one slot
 // cell), the value itself for a struct or slice, which are references already.
-NewCall     <~~ push(makeNew(pop().nty)) ~~>
+NewCall     <~~ var nty = pop().nty; push(makeNew(nty)); regSt(up.pos, "*" + goWalkQual(nty)) ~~>
             = "new" KwEnd "(" NewType ")" ;
 NewType     <~~ push({nty: firstType(up.in)}) ~~>
             = Type ;
@@ -1163,7 +1163,8 @@ ZType       <~~ push({mzero: goWalkQual(up.in)}) ~~>
 
 // Point{3, 4} positional, Point{y: 4, x: 3} keyed, Point{} empty. A keyed element is
 // tried first: its 'name:' would otherwise parse as a bare expression.
-StructLit   <~~ var si = takeAll(); goLitClaim(si[0], up.start, up.pos); push(goLitC(makeStructLit(si), si[0], up.pos)) ~~>
+StructLit   <~~ var si = takeAll(); goLitClaim(si[0], up.start, up.pos)
+                push(goLitC(makeStructLit(si, goTpArgsOf(up.in.substring(0, up.in.indexOf("{")))), si[0], up.pos)) ~~>
             = StructGate NotTypeKw Id <~~ push(up.in) ~~> [ TypeArgs ]
               "{" [ LitElem { "," LitElem } [ "," ] ] "}" ;
 // pkga.Item{N: 3}: a composite literal of ANOTHER PACKAGE'S type. It has to be tried
@@ -1214,7 +1215,8 @@ LitExpr     <~~ var le = pop(); push(le); push({lesty: goLitEsty(up.pos), pu: go
 
 // f(a, b): a function or a builtin. A trailing '...' spreads a slice into the
 // variadic parameter.
-Call        <~~ var ci = goAppendC(takeAll(), up.in); push(makeCall(goCallBoxC(ci), goSplitArgs(ci.slice(1)).atys)); goLenConstC(ci, up.start, up.pos) ~~>
+Call        <~~ var ci = goAppendC(takeAll(), up.in); var csp = goSplitArgs(ci.slice(1))
+                push(makeCall(goCallBoxC(ci), csp.atys, goTpInfer(ci[0], csp, []))); goLenConstC(ci, up.start, up.pos) ~~>
             = Id <~~ push(up.in) ~~> "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
 // A call argument reports its static type after it, for goSplitArgs.
 ArgExpr     <~~ var ae = pop(); push(goRuneDefC(ae, up.pos)); push({aty: stAt(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos)}) ~~> = Expression ;
@@ -2353,6 +2355,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 } else if (s.kind == "call") {
                     var ec = emitArgs2(b, s.args, s.spread)
                     b = ec.b
+                    if (s.tpc != undefined && s.tpc != null) { emitTpCall(b, s.tpc) }
                     cur = callExt(b, "js_call", [cur, hUndef, ec.v])
                 } else {
                     var ir2 = s.idx(b)
@@ -2386,7 +2389,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             function(eb) { return emitMcall(eb, cur, s, argsV) })
     }
     // atys: the arguments' static types, when the call site reported them.
-    function makeCall(items, atys) {
+    function makeCall(items, atys, tpc) {
         var name = items[0]
         var args = items.slice(1)
         var spread = takeSpread(args)
@@ -2430,6 +2433,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var fV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
             var ea = emitArgs2(b, args, spread)
             b = ea.b
+            if (tpc != undefined && tpc != null) { emitTpCall(b, tpc) }
             return {b: b, v: callExt(b, "js_call", [fV, hUndef, ea.v])}
         }
     }
@@ -2640,7 +2644,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             }
             // js_gomakesl panics on a negative length or a capacity below it.
             callExt(b, "js_gomakesl", [rl.v, cp])
-            return {b: b, v: emitHelper(b, "$smake", [rl.v, cp, emitZeroDecl(b, cet), emitStr(b, cet)])}
+            return {b: b, v: emitHelper(b, "$smake", [rl.v, cp, emitZeroDecl(b, cet), emitTpResOr(b, cet)])}
         }
     }
     // items = [{mkey}, {mzero}, {mk, mv}...] -> a map built in source order. The zero
@@ -2846,11 +2850,28 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (goDtBoxTy(t) != "") { goDtNote(goDtBoxTy(t)) }
         return t
     }
-    function makeStructLit(items) {
+    // ta: a generic struct's type arguments as written (goTpArgsOf), else "".
+    function makeStructLit(items, ta) {
         var tyName = items[0]
         var ls = litSplit(items.slice(1))
         var args = ls.args
         var estys = ls.estys
+        var tps = goGenTys["$" + tyName]
+        if (ta != "" && tps !== undefined) {
+            var vals = goTpSplit(ta)
+            return function(b) {
+                var fts = []
+                var f0 = sFTypes(tyName)
+                for (var z = 0; z < f0.length; z++) {
+                    var fs = goTpSubst(f0[z], tps, vals)
+                    fts.push(fs != "" ? fs : f0[z])
+                }
+                var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, tyName)])
+                var r = emitStructVal(b, clsV, sFields(tyName), fts, args, estys)
+                callExt(r.b, "js_set", [r.v, emitStr(r.b, "__targs"), emitTargs(r.b, vals)])
+                return r
+            }
+        }
         return function(b) {
             // A DEFINED type: `type L []int; L{1, 2, 3}` is the []int literal and
             // `type Q Point; Q{1, 2}` is the Point literal. Resolved HERE, at emit
@@ -3967,11 +3988,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     // The cell of &x carries, as `as`, what errors.As accepts through it when x was
     // declared `var x T`: "i:" and the method set for an interface T, else "t:" and
-    // the type name (*E and E alike: one object in this value model).
+    // the type name, which js_gotypeis matches as a type test does.
     function goAsWant(ty) {
         if (ty == "") { return "" }
         if (isIface(ty)) { return "i:" + ifaceMethodCsv(ty) }
-        if (ty.charAt(0) == "*") { return "t:" + ty.substring(1) }
         return "t:" + ty
     }
     // &name. A value that is ALREADY a reference (a struct, a slice, a map) is its own
@@ -4017,6 +4037,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var d = ty
         return function(b) {
             if (d.length > 0 && d.charCodeAt(0) == 91) { return {b: b, v: callExt(b, "js_arr_new", [])} }
+            // new(S) of a struct is its zero value, which is already a reference.
+            if (goCopyCodeC(stNoTyArgs(d)) == "S") { return {b: b, v: emitZeroTy(b, d)} }
             if (!isScalarTy(d)) { return {b: b, v: callExt(b, "js_obj_new", [])} }
             var box = callExt(b, "js_scope_new", [hUndef])
             callExt(b, "js_scope_decl", [box, emitStr(b, "v"), emitZero(b, d)])
@@ -4430,6 +4452,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // that width, a NAMED STRUCT type to a zero INSTANCE.
     function emitZeroTy(b, t) {
         if (t == undefined || t == null || t.length == 0) { return hNull }
+        if (curTps.length > 0 && goTpIn(curTps, t)) { return emitTpZero(b, t) }
         var c0 = t.charCodeAt(0)
         if (c0 == 42) { return hNull }  // *T: a nil pointer
         if (c0 == 91) {                 // []T (empty slice) or [N]T (N zero elements)
@@ -4473,8 +4496,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (wd == "chan" || wd == "func" || wd == "interface" || wd == "struct") { return hNull }
         var flds = sFields(wd)
         if (flds != undefined && flds != null) {
-            return emitStructZero(b, callExt(b, "js_scope_get", [curScopeV, emitStr(b, wd)]),
-                                  flds, sFTypes(wd))
+            var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, wd)])
+            var ta = goTpArgsOf(t)
+            if (ta != "" && goGenTys["$" + wd] !== undefined) { return emitGenZero(b, clsV, flds, sFTypes(wd), goGenTys["$" + wd], goTpSplit(ta)) }
+            return emitStructZero(b, clsV, flds, sFTypes(wd))
         }
         // A defined type zeroes to the zero of what it is defined over, so `var l L`
         // over `type L []int` is an empty SLICE (append/len/range all work).
@@ -4491,6 +4516,25 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             callExt(b, "js_set", [objV, emitStr(b, fields[z]), emitZeroTy(b, ftypes[z])])
         }
         return objV
+    }
+    // The zero of an instantiated generic struct: its fields at the type arguments
+    // vals (for the struct's parameters tps), and the arguments recorded as __targs.
+    // Twin of goZeroStructOf in go-interpreter.abnf.
+    function emitGenZero(b, clsV, fields, ftypes, tps, vals) {
+        var fts = []
+        for (var z = 0; z < ftypes.length; z++) {
+            var fs = goTpSubst(ftypes[z], tps, vals)
+            fts.push(fs != "" ? fs : ftypes[z])
+        }
+        var objV = emitStructZero(b, clsV, fields, fts)
+        callExt(b, "js_set", [objV, emitStr(b, "__targs"), emitTargs(b, vals)])
+        return objV
+    }
+    // The type arguments texts as a run-time array, each resolved (emitTpRes).
+    function emitTargs(b, vals) {
+        var arr = callExt(b, "js_arr_new", [])
+        for (var i = 0; i < vals.length; i++) { callExt(b, "js_arr_push", [arr, emitTpRes(b, stNoWs(vals[i]))]) }
+        return arr
     }
     // "[3]int" -> 3, "[]int" -> -1 (a slice), "[N]int" with a non-literal N -> -1.
     function arrLen(t) {
@@ -5675,7 +5719,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function assertTyWant(t) {
         if (t.charAt(0) == "*") {
             var pt = t.substring(1)
-            return sFields(pt) != undefined ? pt : ""
+            return sFields(pt) != undefined ? t : ""
         }
         if (goScalarTys[t] == 1 || sFields(t) != undefined) { return t }
         return ""
@@ -5759,7 +5803,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
 
     // ----- Functions, methods and structs -----
 
-    function emitFunc(plist, body, recvName, rets, rtys) {
+    function emitFunc(plist, body, recvName, rets, rtys, tps) {
         var params = plist.params
         var variadic = plist.variadic == true
         var ptypes = plist.ptypes
@@ -5802,6 +5846,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             }
         }
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$defers"), callExt(b, "js_arr_new", [])])
+        // A generic function's type parameters (emitTpBind); a function literal keeps
+        // the ones of the function around it.
+        var savedTps = curTps
+        if (tps != undefined && tps != null) {
+            curTps = tps.names
+            emitTpBind(b, tps, f.Params[1])
+        }
         // Named results are zero-valued locals of the function; a bare return yields
         // them, and a deferred function still sees (and may change) them.
         //
@@ -5850,10 +5901,156 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         curFTag = savedFTag
         curRets = savedRets
         curRtys = savedRtys
+        curTps = savedTps
         curF = savedF
         curScopeV = savedScope
         loopStack = savedLoops
         return idx
+    }
+    // ----- Generic instantiation (go-constfold.js, goTpInfer) -----
+    // The type parameters of the function being emitted. Each is the hidden local
+    // "$tp$T" holding the type text it was instantiated with ("" when not known): a
+    // function takes them from "$targs", which a call by name sets after its
+    // arguments; a method from its receiver's __targs. Twin of goTpBind / goTpRes in
+    // go-interpreter.abnf.
+    var curTps = []
+    function emitTpBind(b, tps, argsV) {
+        var vals = hUndef
+        if (tps.recv) { vals = emitHelper(b, "$tpof", [callExt(b, "js_arg", [argsV, handle(0)])]) }
+        else {
+            vals = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$targs")])
+            callExt(b, "js_scope_set", [curScopeV, emitStr(b, "$targs"), hUndef])
+        }
+        for (var i = 0; i < tps.names.length; i++) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$tp$" + tps.names[i]), emitHelper(b, "$tpat", [vals, emitNum(b, i)])])
+        }
+    }
+    // A call's instantiation handed over in "$targs" (goTpInfer's {ts}).
+    function emitTpCall(b, tpc) {
+        var arr = callExt(b, "js_arr_new", [])
+        for (var i = 0; i < tpc.ts.length; i++) { callExt(b, "js_arr_push", [arr, emitTpRes(b, tpc.ts[i])]) }
+        callExt(b, "js_scope_set", [curScopeV, emitStr(b, "$targs"), arr])
+    }
+    // Type text t with the type parameters in scope it names as bound here: the
+    // literal text when it names none, else $tpres over its pieces ("" when one of
+    // them is not known).
+    function emitTpRes(b, t) {
+        var lits = callExt(b, "js_arr_new", [])
+        var ps = callExt(b, "js_arr_new", [])
+        var lit = ""
+        var n = 0
+        var i = 0
+        while (i < t.length) {
+            if (cIsIdCh(t.charCodeAt(i)) && (i == 0 || t.charAt(i - 1) != ".")) {
+                var e = i
+                while (e < t.length && cIsIdCh(t.charCodeAt(e))) { e = e + 1 }
+                var id = t.substring(i, e)
+                if (goTpIn(curTps, id)) {
+                    callExt(b, "js_arr_push", [lits, emitStr(b, lit)])
+                    callExt(b, "js_arr_push", [ps, callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$tp$" + id)])])
+                    lit = ""
+                    n = n + 1
+                } else { lit = lit + id }
+                i = e
+            } else { lit = lit + t.charAt(i); i = i + 1 }
+        }
+        if (n == 0) { return emitStr(b, t) }
+        callExt(b, "js_arr_push", [lits, emitStr(b, lit)])
+        return emitHelper(b, "$tpres", [lits, ps])
+    }
+    // emitTpRes, or t as written when that is not known.
+    function emitTpResOr(b, t) {
+        var r = emitTpRes(b, t)
+        if (curTps.length == 0) { return r }
+        return emitHelper(b, "$tpor", [r, emitStr(b, t)])
+    }
+    // The zero value of type parameter name: the zero of the type it is bound to,
+    // from the table of every instantiation the program makes ($tpzero).
+    function emitTpZero(b, name) {
+        return emitHelper(b, "$tpzero", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$tp$" + name)])])
+    }
+    // The run-time half, declared in jsmain when the program declares a generic
+    // function or type. $zeros maps a type text to a function making its zero; it is
+    // filled by goTpZeroFn, whose body is emitted once the whole program has been and
+    // every instantiation is known (goTpCands).
+    var goTpZeroF = null
+    function declGenerics(b) {
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$targs"), hUndef])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$zeros"), callExt(b, "js_obj_new", [])])
+        b = declFn(b, "$tpof", 1, function(fb, a) {
+            return emitSelect(fb, a[0], function(tb) { return {b: tb, v: callExt(tb, "js_get", [a[0], emitStr(tb, "__targs")])} },
+                              function(eb) { return {b: eb, v: hUndef} })
+        })
+        b = declFn(b, "$tpat", 2, function(fb, a) {
+            var ok = callExt(fb, "js_is_type", [a[0], emitStr(fb, "Array")])
+            return emitSelect(fb, ok, function(tb) {
+                return emitSelect(tb, callExt(tb, "js_lt", [a[1], callExt(tb, "js_golen", [a[0]])]),
+                                  function(gb) { return {b: gb, v: callExt(gb, "js_get", [a[0], a[1]])} },
+                                  function(nb) { return {b: nb, v: emitStr(nb, "")} })
+            }, function(eb) { return {b: eb, v: emitStr(eb, "")} })
+        })
+        b = declFn(b, "$tpor", 2, function(fb, a) {
+            return emitSelect(fb, callExt(fb, "js_seq", [a[0], emitStr(fb, "")]), function(tb) { return {b: tb, v: a[1]} },
+                              function(eb) { return {b: eb, v: a[0]} })
+        })
+        b = declFn(b, "$tpzero", 1, function(fb, a) {
+            var zf = callExt(fb, "js_get", [callExt(fb, "js_scope_get", [curScopeV, emitStr(fb, "$zeros")]), a[0]])
+            return emitSelect(fb, zf, function(tb) { return {b: tb, v: callExt(tb, "js_call", [zf, hUndef, callExt(tb, "js_arr_new", [])])} },
+                              function(eb) { return {b: eb, v: hNull} })
+        })
+        // $tpres(lits, ps): lits[0] + ps[0] + lits[1] + ..., or "" when a ps[i] is.
+        b = declFn(b, "$tpres", 2, function(fb, a) {
+            var sc = curScopeV
+            callExt(fb, "js_scope_decl", [sc, emitStr(fb, "$s"), callExt(fb, "js_get", [a[0], emitNum(fb, 0)])])
+            callExt(fb, "js_scope_decl", [sc, emitStr(fb, "$bad"), hFalse])
+            var eb = emitCountLoop(fb, callExt(fb, "js_golen", [a[1]]), function(lb, iV) {
+                var p = callExt(lb, "js_get", [a[1], iV])
+                var s1 = callExt(lb, "js_add", [callExt(lb, "js_scope_get", [sc, emitStr(lb, "$s")]), p])
+                var s2 = callExt(lb, "js_add", [s1, callExt(lb, "js_get", [a[0], callExt(lb, "js_jadd", [iV, emitNum(lb, 1)])])])
+                callExt(lb, "js_scope_set", [sc, emitStr(lb, "$s"), s2])
+                var bad = emitSelect(lb, callExt(lb, "js_seq", [p, emitStr(lb, "")]),
+                                     function(tb) { return {b: tb, v: hTrue} },
+                                     function(nb) { return {b: nb, v: callExt(nb, "js_scope_get", [sc, emitStr(nb, "$bad")])} })
+                callExt(bad.b, "js_scope_set", [sc, emitStr(bad.b, "$bad"), bad.v])
+                return bad.b
+            })
+            return emitSelect(eb, callExt(eb, "js_scope_get", [sc, emitStr(eb, "$bad")]),
+                              function(tb) { return {b: tb, v: emitStr(tb, "")} },
+                              function(nb) { return {b: nb, v: callExt(nb, "js_scope_get", [sc, emitStr(nb, "$s")])} })
+        })
+        funcCount++
+        var zidx = funcCount
+        goTpZeroF = m.NewFunc("jsf_" + zidx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        callExt(b, "js_call", [callExt(b, "js_closure", [handle(zidx), curScopeV]), hUndef, callExt(b, "js_arr_new", [])])
+        return b
+    }
+    // goTpZeroF's body: $zeros[c] for every instantiation c (goTpCands), each a
+    // function making c's zero value.
+    function goTpZeroFill() {
+        var savedF = curF
+        var savedScope = curScopeV
+        curF = goTpZeroF
+        var zb = goTpZeroF.NewBlock("entry")
+        var env = goTpZeroF.Params[0]
+        var zs = callExt(zb, "js_scope_get", [env, emitStr(zb, "$zeros")])
+        var k = 0
+        while (k < goTpCands.length) {
+            var ct = goTpCands[k]
+            funcCount++
+            var idx = funcCount
+            var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+            curF = f
+            var fb = f.NewBlock("entry")
+            curScopeV = f.Params[0]
+            fb.NewRet(emitZeroTy(fb, ct))
+            curF = goTpZeroF
+            curScopeV = env
+            callExt(zb, "js_set", [zs, emitStr(zb, ct), callExt(zb, "js_closure", [handle(idx), env])])
+            k = k + 1
+        }
+        zb.NewRet(hUndef)
+        curF = savedF
+        curScopeV = savedScope
     }
     // items = [name, fieldName..., {fty}, fieldName..., {fty}, ...]: the names of one
     // group share the {fty} that follows them, which gives every field its zero value.
@@ -5944,6 +6141,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         goRetFlush(rtys)
         var body = items[i]
         var at = up.start
+        var tps = anytype
+        tps = goTpCur.length > 0 ? {names: goTpCur, recv: recv != null} : null
+        goTpEnd()
         if (recv != null) {
             // recv = [name, {byptr}?, typeName]
             var byPtr = recv.length > 2
@@ -5951,7 +6151,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var rType = recv[recv.length - 1]
             goNoteMeth(rType, name, byPtr, rtys)
             return function(b) {
-                var idx = emitFunc(params, body, rName, rets, rtys)
+                var idx = emitFunc(params, body, rName, rets, rtys, tps)
                 defPos(b, at)
                 // A defined type's value has no descriptor: its method is the name "T.M".
                 if (goIsDefTy(rType)) {
@@ -5969,7 +6169,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // the package object (pkg.Fn); record it for buildPackages (see core.importFile).
         notePkgName(name)
         return function(b) {
-            var idx = emitFunc(params, body, null, rets, rtys)
+            var idx = emitFunc(params, body, null, rets, rtys, tps)
             defPos(b, at)
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name),
                                          callExt(b, "js_closure", [handle(idx), curScopeV])])
@@ -6089,7 +6289,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, ty)])
             if (goIsDefTy(ty)) { callExt(b, "js_set", [clsV, emitStr(b, "__pkg"), emitStr(b, "main")]) }
             emitNameList(b, clsV, "__fields", ["__dv"])
-            var ms = goTyMeths["$" + ty]
+            // A struct value's "box" is a marked copy (js_godtbox): no methods.
+            if (goIsValBoxTy(ty)) { callExt(b, "js_set", [clsV, emitStr(b, "__sv"), hTrue]) }
+            var ms = goIsValBoxTy(ty) ? undefined : goTyMeths["$" + ty]
             if (ms !== undefined) {
                 for (var k = 0; k < ms.length; k++) {
                     callExt(b, "js_set", [clsV, emitStr(b, ms[k]), callExt(b, "js_closure", [handle(dtWrapper(ty + "." + ms[k])), curScopeV])])
@@ -6232,9 +6434,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         callExt(b, "js_set", [pcls, emitStr(b, "__fields"), pf])
         b.NewStore(callExt(b, "js_gc_pin", [pcls]), ptrClassG())
         b = declDtClasses(b)
+        if (goGenAny) { b = declGenerics(b) }
         b = goEmitImportedPkgs(b) // imported declarations, each in ITS PACKAGE'S scope
         b = buildPackages(b)
         b = makeSeq(items)(b)
+        if (goTpZeroF != null) { goTpZeroFill() }
         // The entry defaults to main(); -main (c.mainName) can name another function or,
         // with a '(', a Go snippet parsed and emitted into jsmain (see emitMainSnippet).
         var entry = c.mainName

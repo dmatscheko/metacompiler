@@ -333,6 +333,15 @@ function goValueEq(a, b) {
         return true
     }
     if (Array.isArray(b)) { return false }
+    // A pointer's box holds its struct by identity, and against a struct whose
+    // static type was not known the two are one pointer (goPtrBoxed).
+    if (goPtrBoxed(a) || goPtrBoxed(b)) {
+        var pa = anytype
+        var pb = anytype
+        pa = goPtrBoxed(a) ? a.__dv : a
+        pb = goPtrBoxed(b) ? b.__dv : b
+        return pa === pb
+    }
     var ac = goClassOf(a)
     var bc = goClassOf(b)
     if (ac !== undefined && bc !== undefined) {
@@ -417,6 +426,7 @@ function goCopyCoded(v, code) {
     // slice or map type is a MARKED empty container.
     o.__class = cls
     if (v.__nil === true) { o.__nil = true }
+    if (Array.isArray(v.__targs)) { o.__targs = v.__targs }
     var ks = keysOf(v)
     var j = 0
     while (j < ks.length) {
@@ -564,7 +574,7 @@ function gopObj(o, depth) {
     if (goIsDt(o)) {
         var dv = anytype
         dv = goDtShown(o)
-        if (goStrOf(cls.__name).charAt(0) == "*" && goIsStructVal(dv) && goMeth(dv, "Error") === undefined && goMeth(dv, "String") === undefined) { return "&" + gopRender(dv, depth) }
+        if (goStrOf(cls.__name).charAt(0) == "*" && goPtrShowsAmp(dv)) { return "&" + gopRender(dv, depth) }
         return gopRender(dv, depth)
     }
     var name = goStrOf(cls.__name)
@@ -1111,11 +1121,19 @@ function gfHDtVal(v) { return goDtShown(v) }
 function gfHStr(v) { return gopStr(v) }
 function gfHStructName(v) {
     var c = goClassOf(v)
-    if (c.__dt === true) { return gfQualTy(goStrOf(c.__name)) }
+    // A generic struct records its type arguments (__targs), a pointer's box too
+    // when its static type did not spell them. Twins: gfHStructName in
+    // go-interpreter.abnf, gopTypeName in abnf/jsrtgolang.go.
+    if (c.__dt === true) {
+        var dn = goStrOf(c.__name)
+        if (goPtrBoxed(v) && dn.indexOf("[") < 0 && goIsStructVal(v.__dv) && Array.isArray(v.__dv.__targs)) { return gfQualTy(dn) + gfTargs(v.__dv.__targs) }
+        return gfQualTy(dn)
+    }
     var nm = goStrOf(c.__name)
-    if (goHas(c, "__pkg")) { return goStrOf(c.__pkg) + "." + nm }
+    var ta = Array.isArray(v.__targs) ? gfTargs(v.__targs) : ""
+    if (goHas(c, "__pkg")) { return goStrOf(c.__pkg) + "." + nm + ta }
     if (nm == "struct") { return "" }
-    return nm
+    return nm + ta
 }
 function gfHFTypes(v) {
     var c = goClassOf(v)
@@ -1479,6 +1497,11 @@ function goErrNew(name, o) {
 function goMeth(v, name) {
     var r = anytype
     r = undefined
+    if (goPtrBoxed(v)) {
+        var f = goMeth(v.__dv, name)
+        if (f !== undefined) { r = goPtrFwd(f) }
+        return r
+    }
     var cls = goClassOf(v)
     if (cls === undefined) { return r }
     if (goHas(cls, name) && goIsFn(cls[name])) { r = cls[name] }
@@ -2039,6 +2062,7 @@ function goPromDeep(o, key, maxd) {
 // semantics (a value receiver gets a COPY), or undefined. Promotion: a method of
 // an embedded struct is a method of the outer one.
 function goMethod(v, name) {
+    if (goPtrBoxed(v)) { return goMethod(v.__dv, name) }
     var cls = goClassOf(v)
     if (cls === undefined) { return undefined }
     var fn = cls[name]
@@ -2080,6 +2104,7 @@ function goPrepend(v, args) {
 // slice builtin - falls through to the ordinary member call.
 function js_gomcall(recv, namev, args) {
     if (!Array.isArray(args)) { fail("js_gomcall args must be an array") }
+    if (goPtrBoxed(recv)) { return js_gomcall(recv.__dv, namev, args) }
     if (recv === undefined || recv === null) { goNilDeref() }   // see goNilDeref
     var name = goStrOf(namev)
     var mv = goMethod(recv, name)
@@ -2485,7 +2510,7 @@ function goTypeIs(v, want) {
     // *T tests as T, and another package's type by its %T name (goTypeIs in
     // languages/go-interpreter.abnf).
     var inst = goClassOf(v) !== undefined
-    if (w.charAt(0) == "*" && inst) { w = w.substring(1) }
+    if (w.charAt(0) == "*" && inst && !goIsDt(v) && v.__vv !== true) { w = w.substring(1) }
     var got = goTypeNameOf(v)
     if (got == w) { return 1 }
     if (inst && w.indexOf(".") > 0 && gfTypeName(v) == w) { return 1 }
@@ -2523,6 +2548,27 @@ function goIsDt(v) {
     if (cls === undefined) { return false }
     return cls.__dt === true
 }
+// A pointer's box (goPtrBoxTy in go-constfold.js): its methods are the struct's,
+// called on the struct inside, and two are equal when they hold the same one.
+// goPtrFwd is such a method called with the box as receiver. Twins: goPtrBoxed in
+// abnf/jsrtgolang.go, isPtrBox / goPtrFwd in languages/go-interpreter.abnf.
+// goPtrShowsAmp: a pointer's box prints a struct, a map or a slice behind a '&',
+// unless it has Error() or String(). Twins: goPtrShowsAmp in abnf/jsrtgolang.go and
+// languages/go-interpreter.abnf.
+function goPtrShowsAmp(dv) {
+    var k = gfHKind(dv)
+    if (k == "list" || k == "map") { return true }
+    return goIsStructVal(dv) && goMeth(dv, "Error") === undefined && goMeth(dv, "String") === undefined
+}
+function goPtrBoxed(v) { return goIsDt(v) && goStrOf(goClassOf(v).__name).charAt(0) == "*" }
+function goPtrFwd(f) {
+    return function() {
+        var args = goPrepend(arguments[0].__dv, [])
+        var i = 1
+        while (i < arguments.length) { args.push(arguments[i]); i = i + 1 }
+        return f.apply(undefined, args)
+    }
+}
 // The value box v shows fmt: an array type's box shows its elements boxed as
 // their element type prints them. Twins: goDtShown in abnf/jsrtgolang.go and
 // languages/go-interpreter.abnf.
@@ -2547,7 +2593,17 @@ function goDtUnbox(v, want) {
 }
 function js_godtbox(v, cls) {
     if (goIsDt(v)) { return v }
-    if (goIsStructVal(v) && goStrOf(cls.__name).charAt(0) != "*") { return v }
+    if (goIsStructVal(v) && goStrOf(cls.__name).charAt(0) != "*") {
+        // A struct VALUE in an interface is a copy marked __vv, which no type test
+        // reads as a pointer (goVvBox in go-interpreter.abnf).
+        if (cls.__sv === true && v.__vv !== true) {
+            var c = anytype
+            c = goCopyCoded(v, "S")
+            c.__vv = true
+            return c
+        }
+        return v
+    }
     var o = {}
     o.__class = cls
     o.__dv = v

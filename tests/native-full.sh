@@ -114,7 +114,9 @@ trap 'rm -rf "$OUT"' EXIT
 #            under the IR interpreter's step brake): tests/python-test-full.py,
 #            tests/python-test-full.2.py and tests/python-test-full.3.py, the kinds
 #            `full`, `full.2` and `full.3`.
-ROWS="bash:sh batch:cmd c:c csharp:cs dart:dart go:go java:java kotlin:kt
+#   go       has two, for the same reason: tests/go-test-full.go and
+#            tests/go-test-full.2.go, the kinds `full` and `full.2`.
+ROWS="bash:sh batch:cmd c:c csharp:cs dart:dart go:go:full,features,full.2 java:java kotlin:kt
       js:js:full,features,full.2,full.3,full.4.mjs
       lua:lua metajs:js php:php python:py:full,features,full.2,full.3 ruby:rb swift:swift typescript:ts
       lisp:txt:features tinyc:txt:features"

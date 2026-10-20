@@ -2109,6 +2109,19 @@ func (rt *jsrt) goValueEq(a, b interface{}) bool {
 	}
 	ao, aok := a.(*jsObject)
 	bo, bok := b.(*jsObject)
+	// A pointer's box holds its struct by identity, and against a struct whose
+	// static type was not known the two are one pointer (goPtrBoxed).
+	da, ap := goPtrBoxed(a)
+	db, bp := goPtrBoxed(b)
+	if ap || bp {
+		if !ap {
+			da = a
+		}
+		if !bp {
+			db = b
+		}
+		return da == db
+	}
 	if aok && bok {
 		ac, ahas := ao.props["__class"].(*jsObject)
 		bc, bhas := bo.props["__class"].(*jsObject)
@@ -2305,6 +2318,9 @@ func (rt *jsrt) goPromDeep(o *jsObject, key string, maxd int) (interface{}, bool
 // with (a COPY for a value receiver, the struct itself for a pointer receiver) and
 // whether anything was found at all.
 func (rt *jsrt) goMethod(v interface{}, name string) (interface{}, interface{}, bool) {
+	if dv, isPtr := goPtrBoxed(v); isPtr {
+		return rt.goMethod(dv, name)
+	}
 	cls := goClassOf(v)
 	if cls == nil {
 		return nil, nil, false

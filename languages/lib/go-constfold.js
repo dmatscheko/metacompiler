@@ -1684,6 +1684,9 @@ function stElemTy(t) {
 // unknown.
 function goChainC(t, text, pos) {
     var ty = stChainTy(text)
+    // A package function as a value (`strconv.Itoa`) has its signature's type.
+    var h = stHeadLen(text)
+    if (ty == "" && h > 0 && text.charAt(h) == "." && goFnSig["$" + text] !== undefined && !cIsLocal(text.substring(0, h))) { ty = goFnSig["$" + text] }
     if (ty != "") { regSt(pos, ty) }
     cPkgMember(text, pos)
     var pc = cPkgConstOf(text)
@@ -1963,9 +1966,31 @@ function goDtBoxTy(sty) {
     // type, and %v, %T and a type test need it.
     var et = goArrElemTy(t)
     if (et != "") { return goDtBoxTy(et) != "" ? t : "" }
+    if (t.length > 1 && t.charAt(0) == "*") {
+        var pt = goStructTyName(t.substring(1))
+        return pt != "" ? "*" + pt : ""
+    }
+    var vt = goStructTyName(t)
+    if (vt != "") { return vt }
     if (goDtForeign["$" + t] === true || goTyKey(t) != t) { return "" }
     return (goIsDefTy(t) || goDtWide["$" + t] === true) ? t : ""
 }
+// A STRUCT and a pointer to it are one object here, so an interface keeps which
+// one it holds: a pointer goes in a box of type "*T" (its methods are the
+// struct's, called on the struct, and == compares the struct's identity), a
+// value as a copy marked __vv (goVvBox) - %T and a type test read either. The name
+// is qualified as %T spells it ("strconv.NumError"), or "" when st names no struct
+// type.
+var goStructTys = {}  // "$T" (main) or "$pkg.T" -> true: a struct type
+function goStructTyName(st) {
+    var base = stNoTyArgs(st)
+    if (goWalkPkg != "" && base.indexOf(".") < 0) {
+        return goStructTys["$" + goWalkPkg + "." + base] === true ? goWalkPkg + "." + st : ""
+    }
+    return goStructTys["$" + base] === true ? st : ""
+}
+// Is box type ty a struct value's (goStructTyName)?
+function goIsValBoxTy(ty) { return ty.charAt(0) != "*" && goStructTys["$" + stNoTyArgs(ty)] === true }
 // "[N]T" -> "T" for an array type of literal length N, else "".
 function goArrElemTy(t) {
     if (t.length < 4 || t.charAt(0) != "[") { return "" }
@@ -2434,6 +2459,239 @@ function goPkgQual(pkg, t, defOnly) {
 // ("[]Kind" -> "[]pk.Kind"), the spelling main's code uses for them. Such a value
 // carries no descriptor, so a bare name would be read as main's.
 function goWalkQual(t) { return goWalkPkg == "" ? t : goPkgQual(goWalkPkg, t, true) }
+// ----- GENERIC INSTANTIATION -----
+// A generic function binds each of its type parameters, at run time, to the type
+// text it was instantiated with - the hidden local "$tp$T", "" when it is not known
+// (a call through a function value) - so `var zero T`, a named result of type T and
+// a composite literal of Pair[K, V] build the instantiated type: 0 rather than nil,
+// and %T's main.Pair[string,int]. A call by name hands the texts over (goTpInfer:
+// written out, or unified from the arguments' static types); a method reads its
+// receiver type's from the instance, which carries them as __targs from the
+// literal or zero value that made it. The grammars' halves: goTpBind / goTpRes in
+// go-interpreter.abnf, emitTpBind / emitTpRes in go-to-llvm-ir.abnf.
+var goGenFns = {}   // "$F" -> generic function F's type parameter names
+var goGenTys = {}   // "$T" (or "$pkg.T") -> generic type T's type parameter names
+var goGenAny = false // the program declares a generic function or type
+var goTpCur = []    // the type parameters in scope where the walk is
+var goTpRecv = []   // a method receiver's, until the method's name is reached
+// The names of a type parameter list: "K comparable, V any", "S ~[]E, E any".
+function goTpNames(t) {
+    var out = []
+    var parts = goTpSplit(t)
+    var i = 0
+    while (i < parts.length) {
+        var p = stTrim(parts[i])
+        var e = 0
+        while (e < p.length && cIsIdCh(p.charCodeAt(e))) { e = e + 1 }
+        if (e > 0) { out.push(p.substring(0, e)) }
+        i = i + 1
+    }
+    return out
+}
+// A list text split at its top-level commas.
+function goTpSplit(t) {
+    var out = []
+    var d = 0
+    var s = 0
+    var i = 0
+    while (i < t.length) {
+        var ch = t.charAt(i)
+        if (ch == "[" || ch == "(" || ch == "{") { d = d + 1 }
+        else if (ch == "]" || ch == ")" || ch == "}") { d = d - 1 }
+        else if (ch == "," && d == 0) { out.push(t.substring(s, i)); s = i + 1 }
+        i = i + 1
+    }
+    if (stTrim(t.substring(s)) != "") { out.push(t.substring(s)) }
+    return out
+}
+// The function name's tag: the receiver's parameters (`func (s *Stack[T]) Pop()`)
+// come into scope, and TypeParamGrp adds a function's own.
+function goTpFnC(name) { goTpCur = goTpRecv; goTpRecv = []; return name }
+function goTpAdd(n) { goTpCur = goTpCur.concat([n]); goTpAll["$" + n] = true }
+// Every concrete type text a generic is instantiated with, in order: the compiler
+// makes the zero value of each ahead of time ($zeros in go-to-llvm-ir.abnf). A text
+// naming any type parameter is not concrete.
+var goTpCands = []
+var goTpCandSeen = {}
+var goTpAll = {}      // "$T" -> true: a name a type parameter list declares
+function goTpNote(t) {
+    if (t == "" || goTpCandSeen["$" + t] === true) { return }
+    var i = 0
+    while (i < t.length) {
+        if (cIsIdCh(t.charCodeAt(i))) {
+            var e = i
+            while (e < t.length && cIsIdCh(t.charCodeAt(e))) { e = e + 1 }
+            if (goTpAll["$" + t.substring(i, e)] === true) { return }
+            i = e
+        } else { i = i + 1 }
+    }
+    goTpCandSeen["$" + t] = true
+    goTpCands.push(t)
+}
+function goTpEnd() { goTpCur = []; goTpRecv = [] }
+// A receiver, from its text with the whitespace out ("(s*Stack[T])").
+function goTpRecvC(text) {
+    var a = text.indexOf("[")
+    goTpRecv = a < 0 ? [] : goTpNames(text.substring(a + 1, stClose(text, a)))
+}
+function goTpIn(names, n) {
+    var i = 0
+    while (i < names.length) { if (names[i] == n) { return true } i = i + 1 }
+    return false
+}
+// The type parameters in scope that type text t names.
+function goTpUsed(t) {
+    var out = []
+    var i = 0
+    while (goTpCur.length > 0 && i < t.length) {
+        if (cIsIdCh(t.charCodeAt(i)) && (i == 0 || t.charAt(i - 1) != ".")) {
+            var e = i
+            while (e < t.length && cIsIdCh(t.charCodeAt(e))) { e = e + 1 }
+            var id = t.substring(i, e)
+            if (goTpIn(goTpCur, id) && !goTpIn(out, id)) { out.push(id) }
+            i = e
+        } else { i = i + 1 }
+    }
+    return out
+}
+// t with each name of names replaced by the text at the same index of vals; "" when
+// one it names is "" (not known).
+function goTpSubst(t, names, vals) {
+    var out = ""
+    var i = 0
+    while (i < t.length) {
+        if (cIsIdCh(t.charCodeAt(i)) && (i == 0 || t.charAt(i - 1) != ".")) {
+            var e = i
+            while (e < t.length && cIsIdCh(t.charCodeAt(e))) { e = e + 1 }
+            var id = t.substring(i, e)
+            var k = 0
+            while (k < names.length && names[k] != id) { k = k + 1 }
+            if (k < names.length) {
+                if (k >= vals.length || vals[k] == "") { return "" }
+                out = out + vals[k]
+            } else { out = out + id }
+            i = e
+        } else { out = out + t.charAt(i); i = i + 1 }
+    }
+    return out
+}
+// The type arguments of an instantiated type text ("Pair[string,int]" ->
+// "string,int"), or "" for a type that is not one of a generic type.
+function goTpArgsOf(t) {
+    var b = t.indexOf("[")
+    if (b <= 0 || goGenTys["$" + t.substring(0, b)] === undefined) { return "" }
+    var e = stClose(t, b)
+    if (e < 0) { return "" }
+    var ta = t.substring(b + 1, e)
+    var ps = goTpSplit(ta)
+    var i = 0
+    while (i < ps.length) { goTpNote(stNoWs(ps[i])); i = i + 1 }
+    return ta
+}
+// The type texts a call of name instantiates it with, when name is a generic
+// top-level function: those written out (`F[int, string]`), then the rest unified
+// from the arguments' static types (sp is goSplitArgs's), an untyped constant
+// argument taking its default type. "" for a parameter left unknown; null when
+// name is not generic. A text may name the caller's own type parameters, which
+// the caller resolves at run time (used: their names).
+function goTpInfer(name, sp, explicit) {
+    var tps = goGenFns["$" + name]
+    if (tps === undefined || cIsLocal(name)) { return null }
+    var pts = goFnPTys["$" + name]
+    var b = {}
+    var i = 0
+    while (i < explicit.length && i < tps.length) { b["$" + tps[i]] = stNoWs(explicit[i]); i = i + 1 }
+    var pass = 0
+    while (pass < 2) {
+        var j = 0
+        while (j < sp.atys.length) {
+            var pt = pts === undefined ? "" : goParamTyAt(pts, j)
+            var at = stNoWs(stBare(sp.atys[j]))
+            if (pass == 0 && at != "") { goTpUnify(pt, at, tps, b) }
+            if (pass == 1 && at == "" && sp.krs[j] != null && goTpIn(tps, pt)) {
+                var dt = sp.krs[j].k.f ? "float64" : "int"
+                if (b["$" + pt] === undefined || b["$" + pt] == "" || (b["$" + pt] == "int" && dt == "float64")) { b["$" + pt] = dt }
+            }
+            j = j + 1
+        }
+        pass = pass + 1
+    }
+    var ts = []
+    var k = 0
+    while (k < tps.length) {
+        ts.push(b["$" + tps[k]] === undefined ? "" : b["$" + tps[k]])
+        goTpNote(ts[k])
+        k = k + 1
+    }
+    var all = ""
+    k = 0
+    while (k < ts.length) { all = all + "," + ts[k]; k = k + 1 }
+    return {ts: ts, used: goTpUsed(all)}
+}
+function goTpUnify(p, a, tps, b) {
+    if (p == "" || a == "") { return }
+    if (goTpIn(tps, p)) {
+        if (b["$" + p] === undefined || b["$" + p] == "") { b["$" + p] = a }
+        return
+    }
+    if (p.substring(0, 2) == "[]" && a.substring(0, 2) == "[]") { goTpUnify(p.substring(2), a.substring(2), tps, b); return }
+    if (p.charAt(0) == "*" && a.charAt(0) == "*") { goTpUnify(p.substring(1), a.substring(1), tps, b); return }
+    if (p.substring(0, 4) == "map[" && a.substring(0, 4) == "map[") {
+        var pk = stClose(p, 3)
+        var ak = stClose(a, 3)
+        if (pk > 0 && ak > 0) {
+            goTpUnify(p.substring(4, pk), a.substring(4, ak), tps, b)
+            goTpUnify(p.substring(pk + 1), a.substring(ak + 1), tps, b)
+        }
+        return
+    }
+    if (p.substring(0, 5) == "func(" && a.substring(0, 5) == "func(") {
+        var pc = stClose(p, 4)
+        var ac = stClose(a, 4)
+        if (pc < 0 || ac < 0) { return }
+        goTpUnifyList(p.substring(5, pc), a.substring(5, ac), tps, b)
+        var pr = p.substring(pc + 1)
+        var ar = a.substring(ac + 1)
+        if (pr.charAt(0) == "(" && ar.charAt(0) == "(") { goTpUnifyList(pr.substring(1, pr.length - 1), ar.substring(1, ar.length - 1), tps, b) }
+        else { goTpUnify(pr, ar, tps, b) }
+        return
+    }
+    var pb = p.indexOf("[")
+    var ab = a.indexOf("[")
+    if (pb > 0 && ab > 0 && p.substring(0, pb) == a.substring(0, ab)) {
+        var ps = goTpSplit(p.substring(pb + 1, stClose(p, pb)))
+        var asl = goTpSplit(a.substring(ab + 1, stClose(a, ab)))
+        var k = 0
+        while (k < ps.length && k < asl.length) { goTpUnify(ps[k], asl[k], tps, b); k = k + 1 }
+    }
+}
+function goTpUnifyList(p, a, tps, b) {
+    var ps = goTpSplit(p)
+    var asl = goTpSplit(a)
+    var k = 0
+    while (k < ps.length && k < asl.length) { goTpUnify(stTrim(ps[k]), stTrim(asl[k]), tps, b); k = k + 1 }
+}
+// A call chain `G[T1, T2](args)` of a generic top-level function G, with the type
+// arguments written out: its call suffix carries the instantiation (tpc). items are
+// the chain's [primary, suffix...], text its source with the whitespace out.
+function goTpChainC(items, text) {
+    var h = stHeadLen(text)
+    if (h == 0 || h >= text.length || text.charAt(h) != "[" || goGenFns["$" + text.substring(0, h)] === undefined) { return items }
+    var e = stClose(text, h)
+    if (e < 0 || e + 1 >= text.length || text.charAt(e + 1) != "(") { return items }
+    // One type argument reads as an index, which would evaluate it: dropped.
+    if (items.length > 1 && items[1] != null && typeof items[1] == "object" && items[1].kind == "index") { items = [items[0]].concat(items.slice(2)) }
+    var i = 1
+    while (i < items.length) {
+        var s = items[i]
+        if (s != null && typeof s == "object" && s.kind == "call") {
+            s.tpc = goTpInfer(text.substring(0, h), s, goTpSplit(text.substring(h + 1, e)))
+            return items
+        }
+        i = i + 1
+    }
+    return items
+}
 // A top-level typed constant's type, "$name" (or "$pkg.name" in a package) -> type
 // text, so a reference that precedes the declaration is typed like one that
 // follows it (cTyLookup). A spec in a group with neither type nor value repeats the
@@ -2534,7 +2792,13 @@ function goPreFunc(text, i) {
     while (i < text.length && cIsIdCh(text.charCodeAt(i))) { i = i + 1 }
     if (i == ns) { return }
     var name = text.substring(ns, i)
-    if (text.charAt(i) == "[") { i = stClose(text, i); if (i < 0) { return } i = i + 1 }
+    if (text.charAt(i) == "[") {
+        var tpe = stClose(text, i)
+        if (tpe < 0) { return }
+        goGenAny = true
+        if (recv == "" && goPrePkg == "") { goGenFns["$" + name] = goTpNames(text.substring(i + 1, tpe)) }
+        i = tpe + 1
+    }
     if (text.charAt(i) != "(") { return }
     var ps = i
     i = stClose(text, i)
@@ -2551,6 +2815,7 @@ function goPreFunc(text, i) {
         var qi = 0
         while (qi < qps.length) { qps[qi] = goPkgQual(goPrePkg, qps[qi]); qi = qi + 1 }
         goFnPTys["$" + goPrePkg + "." + name] = qps
+        goFnSig["$" + goPrePkg + "." + name] = goPkgQual(goPrePkg, goSigAt(text, ps))
     }
     i = stSkipWs(text, i + 1)
     var rty = ""
@@ -2600,12 +2865,14 @@ function goPreType(text, i) {
     while (i < text.length && cIsIdCh(text.charCodeAt(i))) { i = i + 1 }
     if (i == ns) { return }
     var name = text.substring(ns, i)
-    // A generic type's parameter list (`Stack[T any]`) is erased like every other
-    // type argument; `[N]T` after a name would be an array and is not legal Go here.
+    // A generic type's parameter list (`Stack[T any]`); `[N]T` after a name would be
+    // an array and is not legal Go here.
     if (text.charAt(i) == "[") {
-        i = stClose(text, i)
-        if (i < 0) { return }
-        i = i + 1
+        var tpe = stClose(text, i)
+        if (tpe < 0) { return }
+        goGenTys[goPrePkg != "" ? "$" + goPrePkg + "." + name : "$" + name] = goTpNames(text.substring(i + 1, tpe))
+        goGenAny = true
+        i = tpe + 1
     }
     if (!goPreForeign) { goMainTys["$" + name] = true }
     i = stSkipWs(text, i)
@@ -2615,6 +2882,7 @@ function goPreType(text, i) {
         if (ob < 0) { return }
         var cb = stClose(text, ob)
         if (cb < 0) { return }
+        goStructTys[goPrePkg != "" ? "$" + goPrePkg + "." + name : "$" + name] = true
         goPreFields(name, text.substring(ob + 1, cb))
         return
     }
@@ -3424,7 +3692,7 @@ function goCmpFold(items) {
         // compares the structs. "==p" / "!=p" are the grammars' pointer operators.
         var lt = stBare(stAt(items[1].at))
         var rt = stBare(stAt(items[4].at))
-        if ((ops[0] == "==" || ops[0] == "!=") && (lt.charAt(0) == "*" || rt.charAt(0) == "*")) {
+        if ((ops[0] == "==" || ops[0] == "!=") && (lt.charAt(0) == "*" || rt.charAt(0) == "*") && !goIsIfaceTy(lt) && !goIsIfaceTy(rt)) {
             ops[0] = ops[0] + "p"
         }
         // An operand compared with an interface is converted to it (goDtBoxTo).

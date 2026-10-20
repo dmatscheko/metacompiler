@@ -129,7 +129,7 @@ ImportPath  <~~ push(up.in.slice(1, up.in.length - 1)) ~~>
 // so the alias is bound to whatever B is already bound to (a struct descriptor stays a
 // struct descriptor, which a defined type's conversion wrapper would have destroyed).
 // The trailing ';' is the pre-1.0 spelling the corpus is full of.
-TypeDecl    <~~ buildTypeDecl(takeAll(), up.pos) ~~>
+TypeDecl    <~~ buildTypeDecl(takeAll(), up.pos); goTpEnd() ~~>
             = "type" KwEnd Id <~~ push(cPoisonName(up.in)) ~~> [ TypeParams ] [ AliasEq ] ( StructBody | IfaceBody | DefinedType ) [ ";" ] ;
 AliasEq     <~~ push({alias: true}) ~~> = "=" ;
 // type myInt int / type Celsius float64: a defined type over an existing one. The
@@ -196,9 +196,9 @@ CExprItem   <~~ push({cat: up.pos, cks: up.start}) ~~> = Expression ;
 // is tried first, so `func f() {` never reaches here.
 FuncDecl    = FuncBodied | FuncNoBody ;
 FuncBodied  <~~ buildFunc(takeAll()) ~~>
-            = "func" KwEnd [ Receiver ] Id <~~ push(cPoisonName(up.in)) ~~> [ TypeParams ] ParamList [ SameLine RetTypes ] FuncBody [ ";" ] ;
+            = "func" KwEnd [ Receiver ] Id <~~ push(cPoisonName(goTpFnC(up.in))) ~~> [ TypeParams ] ParamList [ SameLine RetTypes ] FuncBody [ ";" ] ;
 FuncNoBody  <~~ buildFunc(takeAll()) ~~>
-            = "func" KwEnd [ Receiver ] Id <~~ push(cPoisonName(up.in)) ~~> [ TypeParams ] ParamList [ SameLine RetTypes ] NoBody [ ";" ] ;
+            = "func" KwEnd [ Receiver ] Id <~~ push(cPoisonName(goTpFnC(up.in))) ~~> [ TypeParams ] ParamList [ SameLine RetTypes ] NoBody [ ";" ] ;
 // An always-empty match: Go source holds no NUL byte, so the optional never consumes
 // anything and the production stands purely for its tag.
 NoBody      <~~ push(notImplStmt("function without a body", up.pos)) ~~> = [ "\x00" ] ;
@@ -208,7 +208,7 @@ NoBody      <~~ push(notImplStmt("function without a body", up.pos)) ~~> = [ "\x
 // instantiated one - only compile-time type CHECKING is lost, which a syntax-driven
 // front end does not do anyway.
 TypeParams  = "[" TypeParamGrp { "," TypeParamGrp } "]" ;
-TypeParamGrp = Id { "," Id } Constraint ;
+TypeParamGrp = Id <~~ goTpAdd(up.in) ~~> { "," Id <~~ goTpAdd(up.in) ~~> } Constraint ;
 Constraint  = ConstrTerm { "|" ConstrTerm } ;
 ConstrTerm  = [ "~" ] Type ;
 // A POINTER receiver (func (c *T) m()) sees the caller's struct; a VALUE receiver
@@ -219,7 +219,7 @@ ConstrTerm  = [ "~" ] Type ;
 // `(T)` matches the named form's first Id and only dies at the second one. RecvAnon
 // pushes an {anon} marker LAST (a tag runs after its children), and normRecv turns that
 // into the canonical [name, {ptr}?, type] the method table expects, with an empty name.
-Receiver    <~~ push({recv: normRecv(takeAll())}) ~~>
+Receiver    <~~ push({recv: normRecv(takeAll())}); goTpRecvC(up.in) ~~>
             = "(" ( RecvNamed | RecvAnon ) ")" ;
 RecvNamed   = RecvNamedAhead Id <~~ push(cPendName(up.in)) ~~> [ "*" <~~ push({ptr: true}) ~~> ] Id <~~ push(cPendName(up.in)) ~~> [ TypeArgs ] ;
 RecvAnon    <~~ push({anon: true}) ~~>
@@ -823,7 +823,7 @@ PostfixExpr = CallMember ;
 // the '(' opens a new STATEMENT, not a call of the composite literal. SameLine is that
 // rule. It does not restrict a call whose ARGUMENTS span lines, because the '(' itself is
 // still on the name's line.
-CallMember  <~~ push(goChainC(foldCallMember(goBoxArgsC(goRecvsC(takeAll(), up.start))), up.in, up.pos)) ~~>
+CallMember  <~~ push(goChainC(foldCallMember(goBoxArgsC(goRecvsC(goTpChainC(takeAll(), up.in), up.start))), up.in, up.pos)) ~~>
             = Primary { MethodSfx | FieldSfx | SameLine SliceSfx | SameLine TypeArgsSfx
                       | SameLine IndexSfx | SameLine CallSfx | TypeAssertSfx } ;
 // f[int16, float32, string], NewMap[int, struct{}], shift[[62]byte]: a generic
@@ -904,7 +904,7 @@ CompMapT    <~~ push({ckind: "map", czero: pop().mzero, ckeyt: pop().mkey}) ~~>
             = MapTypeZ ;
 // compTypeName and not typeBaseName: the name KEEPS a package qualifier, because
 // `pkga.Item{...}` is that package's type, not a type called `pkga`.
-CompNamed   <~~ push({ckind: "struct", cname: compTypeName(up.in)}) ~~>
+CompNamed   <~~ push({ckind: "struct", cname: compTypeName(up.in), ctargs: goTpArgsOf(up.in)}) ~~>
             = NotTypeKw NamedType ;
 CompElemT   <~~ push({cet: goWalkQual(firstType(up.in))}) ~~>
             = Type ;
@@ -1080,7 +1080,7 @@ ZType       <~~ push({mzero: goWalkQual(up.in)}) ~~>
             = Type ;
 
 // new(T): a zero value of T (a pointer to it in Go; our structs are references).
-NewCall     <~~ push(makeNew(pop().nty)) ~~>
+NewCall     <~~ var nty = pop().nty; push(makeNew(nty)); regSt(up.pos, "*" + goWalkQual(nty)) ~~>
             = "new" KwEnd "(" NewType ")" ;
 // The type has to be captured on its own: up.in of the whole production is
 // "new(int)", whose leading word is not a type name.
@@ -1089,7 +1089,8 @@ NewType     <~~ push({nty: firstType(up.in)}) ~~>
 
 // f(a, b): a function, a builtin or an identifier-named conversion (int(x)). A
 // trailing '...' spreads a slice into the variadic parameter.
-Call        <~~ var ci = goAppendC(takeAll(), up.in); push(makeCall(goCallBoxC(ci), goSplitArgs(ci.slice(1)).atys)); goLenConstC(ci, up.start, up.pos) ~~>
+Call        <~~ var ci = goAppendC(takeAll(), up.in); var csp = goSplitArgs(ci.slice(1))
+                push(makeCall(goCallBoxC(ci), csp.atys, goTpInfer(ci[0], csp, []))); goLenConstC(ci, up.start, up.pos) ~~>
             = Id <~~ push(up.in) ~~> "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
 // A call argument reports its static type after it, for goSplitArgs.
 ArgExpr     <~~ var ae = pop(); push(goRuneDefC(ae, up.pos)); push({aty: stAt(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos)}) ~~> = Expression ;
@@ -1902,9 +1903,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function gfHStr(v) { return gstr(v) }
     function gfHStructName(v) {
         var c = v.__class
-        if (c.__dt === true) { return gfQualTy(c.__name) }
-        if (typeof c.__pkg == "string") { return c.__pkg + "." + c.__name }
-        return c.__name == "struct" ? "" : c.__name
+        // A generic struct records its type arguments (goTpArgsOf), a pointer's box
+        // too when its static type did not spell them.
+        if (c.__dt === true) {
+            if (isPtrBox(v) && c.__name.indexOf("[") < 0 && goIsStructVal(v.__dv) && Array.isArray(v.__dv.__targs)) { return gfQualTy(c.__name) + gfTargs(v.__dv.__targs) }
+            return gfQualTy(c.__name)
+        }
+        var ta = Array.isArray(v.__targs) ? gfTargs(v.__targs) : ""
+        if (typeof c.__pkg == "string") { return c.__pkg + "." + c.__name + ta }
+        return c.__name == "struct" ? "" : c.__name + ta
     }
     function gfHFTypes(v) { return Array.isArray(v.__class.__ftypes) ? v.__class.__ftypes : [] }
     function gfHElemTy(v) { return (isSl(v) && typeof v.et == "string") ? v.et : "" }
@@ -2118,7 +2125,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 }
                 else if (s.kind == "call") {
                     if (typeof cur != "function") { fail("call of a non function value") }
-                    cur = cur.apply(undefined, callArgs(s))
+                    var cav = callArgs(s)
+                    if (s.tpc != undefined && s.tpc != null) { goTargsReg = goTpResAll(s.tpc) }
+                    cur = cur.apply(undefined, cav)
                 }
                 else if (s.kind == "assert") { cur = goAssertType(cur, s.at) }
                 else if (s.kind == "slice") { cur = goSlice(cur, s) }
@@ -2350,8 +2359,21 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var r = anytype
         r = undefined
         if (v === undefined || v === null || typeof v != "object" || v.__class == undefined) { return r }
+        if (isPtrBox(v)) {
+            var f = goMeth(v.__dv, name)
+            if (f !== undefined) { r = goPtrFwd(f) }
+            return r
+        }
         if (typeof v.__class[name] == "function") { r = v.__class[name] }
         return r
+    }
+    // A method found on a pointer box's struct, called with the box as receiver.
+    function goPtrFwd(f) {
+        return function() {
+            var args = [arguments[0].__dv]
+            for (var i = 1; i < arguments.length; i++) { args.push(arguments[i]) }
+            return f.apply(undefined, args)
+        }
     }
     // What errors.Is follows from err: its Unwrap() result (a slice for an Unwrap()
     // []error), a wrapErrors' list, or null.
@@ -2418,7 +2440,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         while (cur !== undefined && cur !== null) {
             var ok = false
             if (cls != null) { ok = goIsInstance(cur) && cur.__class === cls }
-            else if (want.charAt(0) == "*") { ok = goTypeIs(cur, want.substring(1)) == 1 }
+            else if (want.charAt(0) == "*") { ok = goTypeIs(cur, want) == 1 }
             else { ok = typeMatches(want, cur) }
             if (ok) { return {v: cur, via: false} }
             var am = goMeth(cur, "As")
@@ -2819,13 +2841,19 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             return goDtFns["$" + fn].apply(undefined, args)
         }
     }
-    // A box prints the value inside; a pointer's box prints a struct as &{...},
-    // unless the struct has Error() or String().
+    // A box prints the value inside; a pointer's box prints a struct, a map or a
+    // slice as &{...}, &map[...], &[...], unless it has Error() or String().
     function goDtStr(v) {
         var dv = anytype
         dv = goDtShown(v)
-        if (v.__class.__name.charAt(0) == "*" && goIsStructVal(dv) && goMeth(dv, "Error") === undefined && goMeth(dv, "String") === undefined) { return "&" + gstr(dv) }
+        if (v.__class.__name.charAt(0) == "*" && goPtrShowsAmp(dv)) { return "&" + gstr(dv) }
         return gstr(dv)
+    }
+    // Twins: goPtrShowsAmp in abnf/jsrtgolang.go and lib/go-rt.metajs.
+    function goPtrShowsAmp(dv) {
+        var k = gfHKind(dv)
+        if (k == "list" || k == "map") { return true }
+        return goIsStructVal(dv) && goMeth(dv, "Error") === undefined && goMeth(dv, "String") === undefined
     }
     // The value a box shows fmt: an array type's box shows its elements boxed as
     // their element type prints them. Twins: goDtShown in abnf/jsrtgolang.go and
@@ -2840,11 +2868,25 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // string type's box counts.
     function goKindStr(v) { return typeof v == "string" || (isDtBox(v) && typeof v.__dv == "string") }
     function isDtBox(v) { return v !== undefined && v !== null && typeof v == "object" && v.__class != undefined && v.__class.__dt === true }
+    // A pointer's box (goPtrBoxTy, go-constfold.js): its methods are the struct's,
+    // called on the struct inside. Twins: goPtrBoxed in abnf/jsrtgolang.go and
+    // lib/go-rt.metajs.
+    function isPtrBox(v) { return isDtBox(v) && v.__class.__name.charAt(0) == "*" }
     // A box stays itself, and so does a struct instance unless a pointer's static
     // type is what boxes it (a value of `type Q Point` is a Point already).
     function goDtBox(v, ty) {
-        if (isDtBox(v) || (ty.charAt(0) != "*" && goIsStructVal(v))) { return v }
+        if (isDtBox(v)) { return v }
+        if (ty.charAt(0) != "*" && goIsStructVal(v)) { return goIsValBoxTy(ty) ? goVvBox(v) : v }
         return {__class: goDtClass(ty), __dv: v}
+    }
+    // A struct VALUE in an interface: a copy marked __vv, which no type test reads
+    // as a pointer. Twins: js_godtbox in abnf/jsrtgolang.go and lib/go-rt.metajs.
+    function goVvBox(v) {
+        if (v.__vv === true) { return v }
+        var c = anytype
+        c = goCopyBy(v, "S")
+        c.__vv = true
+        return c
     }
     // The int32 a rune constant becomes at its default type (goRuneDefC).
     function goI32Thunk(t) { return function() { return szConv(t(), 32, false) } }
@@ -2892,6 +2934,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // abnf/jsrtgolang.go and lib/go-rt.metajs.
     function goDtBind(recv, s) { return bindMethod(goDtRecv(recv, s), goDtFns[goDtKey(s.pkg, s.dt.fn)]) }
     function mcall(target, name, args) {
+        if (isPtrBox(target)) { return mcall(target.__dv, name, args) }
         if (target === undefined || target === null) { goNilDeref() }   // recoverable; see goNilDeref
         if (typeof target == "object" && target.__class != undefined) {
             // Own-property read: a bare [name] resolved inherited Object.prototype
@@ -3470,7 +3513,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // built twice for the same name (p == &n) compares equal.
         if (l.__ptr == true || r.__ptr == true) { return l.__ptr == true && r.__ptr == true && l.o === r.o && l.k === r.k }
         if (l.__class != undefined && r.__class != undefined) {
+            // A pointer's box against a struct of no known static type: one pointer.
+            if (isPtrBox(l) != isPtrBox(r)) { return (isPtrBox(l) ? l.__dv : l) === (isPtrBox(r) ? r.__dv : r) }
             if (l.__class !== r.__class) { return false }
+            if (isPtrBox(l)) { return l.__dv === r.__dv }
             var fs = l.__class.__fields
             for (var k = 0; k < fs.length; k++) { if (!goEq(l[fs[k]], r[fs[k]])) { return false } }
             return true
@@ -3611,7 +3657,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (typeof l == "string" || typeof r == "string") return l + r
         return (l + r) | 0
     }
-    function makeCall(items, atys) {
+    function makeCall(items, atys, tpc) {
         var name = items[0]
         var sfx = makeCallSfx(items.slice(1))
         // clear(s) of a slice whose static type is known stores the zero value of
@@ -3629,6 +3675,14 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                     for (var i = 0; i < n; i++) { goSetAt(x, i, goZeroTy(cet)) }
                     return undefined
                 }
+            }
+        }
+        if (tpc != null) {
+            return function() {
+                var gf = getVar(name)
+                var av = callArgs(sfx)
+                goTargsReg = goTpResAll(tpc)
+                return gf.apply(undefined, av)
             }
         }
         return function() {
@@ -3969,10 +4023,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // chain does not hold.
         if (hasVar(w)) {
             var bv = getVar(w)
-            if (bv != undefined && bv != null && bv.__isclass == true) { return goZeroStruct(bv) }
+            if (bv != undefined && bv != null && bv.__isclass == true) { return goZeroStructOf(bv, t) }
         }
         var cls = structAt(curPkgName, w)
-        if (cls != undefined && cls != null && cls.__isclass == true) { return goZeroStruct(cls) }
+        if (cls != undefined && cls != null && cls.__isclass == true) { return goZeroStructOf(cls, t) }
         // A defined type zeroes to the zero of what it is defined over, so `var l L`
         // over `type L []int` is an empty SLICE (append/len/range all work).
         var rn = resolveDefined(w)
@@ -3986,6 +4040,23 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var fs = cls.__fields
         var ft = cls.__ftypes
         for (var i = 0; i < fs.length; i++) { scopePut(obj, fs[i], goZeroTy(ft != undefined ? ft[i] : "")) }
+        return obj
+    }
+    // The zero value of t, an instance of struct cls: an instantiated generic type
+    // (`Stack[string]`) records its type arguments and zeroes its fields at them.
+    function goZeroStructOf(cls, t) {
+        var ta = goTpArgsOf(t)
+        var tps = goGenTys["$" + cls.__name]
+        if (ta == "" || tps === undefined) { return goZeroStruct(cls) }
+        var vals = goTpSplit(ta)
+        var obj = {__class: cls, __targs: vals}
+        var fs = cls.__fields
+        var ft = cls.__ftypes
+        for (var i = 0; i < fs.length; i++) {
+            var f0 = ft != undefined ? ft[i] : ""
+            var fi = goTpSubst(f0, tps, vals)
+            scopePut(obj, fs[i], goZeroTy(fi != "" ? fi : f0))
+        }
         return obj
     }
     // goAdoptLike gives `v` the width the slot ALREADY carries. An array element, a
@@ -4056,10 +4127,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 if (cls == undefined || cls == null || cls.__isclass != true) { fail("unknown struct type: " + desc.cname) }
             }
         }
-        var obj = {__class: cls}
+        var obj = anytype
+        obj = typeof desc.rtargs == "string" ? goZeroStructOf(cls, cls.__name + "[" + desc.rtargs + "]") : goZeroStruct(cls)
         var fs = cls.__fields
-        var ftypes = cls.__ftypes
-        for (var f = 0; f < fs.length; f++) { scopePut(obj, fs[f], zeroOfType2(ftypes != undefined ? ftypes[f] : "")) }
         var pos = 0
         for (var e = 0; e < elems.length; e++) {
             var name = elems[e].ektext
@@ -4197,6 +4267,16 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function makeCompositeLit(items) {
         var desc = items[0]
         var elems = items[1].celems
+        // A generic struct's literal records its type arguments (goTpArgsOf).
+        var ta = typeof desc.ctargs == "string" ? desc.ctargs : ""
+        if (ta != "") {
+            var taUsed = goTpUsed(ta)
+            return function() {
+                var rt = goTpRes(ta, taUsed)
+                if (rt == "") { return buildLit(desc, elems) }
+                return buildLit({ckind: desc.ckind, cname: desc.cname, rtargs: rt}, elems)
+            }
+        }
         return function() { return buildLit(desc, elems) }
     }
     // items = [{mkind,...}, lenThunk?, capThunk?]
@@ -4221,10 +4301,16 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 return newChan(cn, cz)
             }
         }
-        var ez = d.cet
+        var ez0 = d.cet
+        var ezUsed = goTpUsed(ez0)
         // A negative length, or a capacity below the length, is a run-time panic.
         // Twin of js_gomakesl in lib/go-rt.metajs and abnf/jsrtgolang.go.
         return function() {
+            var ez = ez0
+            if (ezUsed.length > 0) {
+                var er = goTpRes(ez0, ezUsed)
+                if (er != "") { ez = er }
+            }
             var n = lenT != null ? szNum(lenT()) : 0
             var cp = capT != null ? szNum(capT()) : n
             if (n < 0) { goRTPanic("makeslice: len out of range") }
@@ -4241,6 +4327,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var z = zeroOfType2(d)
             // new(int) is a POINTER to a zeroed int, so it needs a cell of its own;
             // new(SomeStruct) is the struct, which is already a reference.
+            if (goIsStructVal(z)) { return z }
             if (z != null) { return makePtr({v: z}, "v") }
             return buildLit({ckind: "struct", cname: d}, [])
         }
@@ -4338,7 +4425,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             return function() {
                 var args = []
                 for (var a = 0; a < arguments.length; a++) { args.push(arguments[a]) }
-                return invokeBodyG(params, bodyT, undefined, "", args, rets, rtys, env, variadic, ptypes)
+                return invokeBodyG(params, bodyT, undefined, "", args, rets, rtys, env, variadic, ptypes, null)
             }
         }
     }
@@ -4622,9 +4709,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 if (sp.rns[vi] && (ty == "" || goIsIfaceTy(stBare(ty)))) { inits[vi] = goI32Thunk(inits[vi]) }
             }
         }
+        // A type naming a generic function's type parameters is resolved at run time.
+        var tyUsed = goTpUsed(ty)
         return function() {
             if (inits.length == 0) {
-                for (var z = 0; z < names.length; z++) { declVar(names[z], zeroOfDeclType(ty)) }
+                var zt = goTpRes(ty, tyUsed)
+                for (var z = 0; z < names.length; z++) { declVar(names[z], zeroOfDeclType(zt != "" ? zt : ty)) }
                 return
             }
             var vals = []
@@ -5023,9 +5113,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var w = want
         if (w == "byte") { w = "uint8" }
         if (w == "rune") { w = "int32" }
-        // A struct and a pointer to it are one value here, so *T tests as T; a type
-        // of another package is named as %T names it ("strconv.NumError").
-        if (w.charAt(0) == "*" && goIsInstance(v)) { w = w.substring(1) }
+        // A struct and a pointer to it are one value here, so *T tests as T unless
+        // the value is a pointer's box (goPtrBoxTy); a type of another package is
+        // named as %T names it ("strconv.NumError").
+        if (w.charAt(0) == "*" && goIsInstance(v) && !isDtBox(v) && v.__vv !== true) { w = w.substring(1) }
         var got = goTypeName(v)
         if (got == w) { return 1 }
         if (w.indexOf(".") > 0 && goIsInstance(v) && gfTypeName(v) == w) { return 1 }
@@ -5136,6 +5227,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             goConvPanic("interface {} is " + goTypeText(v) + ", not " + gfQualTy(want))
         }
         var w = want
+        if (w.charAt(0) == "*" && isDtBox(v)) {
+            if (v.__class.__name == w) { return v.__dv }
+            goConvPanic("interface {} is " + goTypeText(v) + ", not " + gfQualTy(want))
+        }
         if (w.charAt(0) == "*") {
             w = w.substring(1)
             if (structAt(curPkgName, w) == undefined) { return v }
@@ -5793,12 +5888,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
         goRetFlush(rtys)
         var body = items[i]
+        var tps = anytype
+        tps = goTpCur.length > 0 ? {names: goTpCur, recv: recv != null} : null
+        goTpEnd()
         if (recv != null) {
             // A method: attached to its struct descriptor after the whole compile.
             goNoteMeth(recv[recv.length - 1], name, recv.length > 2, rtys)
-            methodTodo.push({recvName: recv, name: name, params: params, body: body, rets: rets, rtys: rtys, variadic: variadic, ptypes: ptypes, env: pkgEnv(), pkg: curPkgName})
+            methodTodo.push({recvName: recv, name: name, params: params, body: body, rets: rets, rtys: rtys, variadic: variadic, ptypes: ptypes, env: pkgEnv(), pkg: curPkgName, tps: tps})
         } else {
-            curGlobals()[name] = makeFunClosure(params, body, rets, rtys, variadic, ptypes)
+            curGlobals()[name] = makeFunClosure(params, body, rets, rtys, variadic, ptypes, tps)
             // In an imported package, an exported (capitalized) function is ALSO reached
             // through the package object (pkg.Fn), the way fmt.Println is (see importFile).
             if (curPkgName != null && isExported(name)) { pkgExports["$" + curPkgName].push(name) }
@@ -5815,13 +5913,43 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         for (i = 0; i < ord.length; i++) { goTopPend[ord[i]].t() }
         goTopPend = []
     }
-    function makeFunClosure(params, body, rets, rtys, variadic, ptypes) {
+    function makeFunClosure(params, body, rets, rtys, variadic, ptypes, tps) {
         var env = pkgEnv()
         return function() {
             var args = []
             for (var i = 0; i < arguments.length; i++) args.push(arguments[i])
-            return invokeBodyG(params, body, undefined, "", args, rets, rtys, env, variadic, ptypes)
+            return invokeBodyG(params, body, undefined, "", args, rets, rtys, env, variadic, ptypes, tps)
         }
+    }
+    // ----- Generic instantiation (go-constfold.js, goTpInfer) -----
+    // The type texts a call by name hands the generic function it calls; the callee
+    // takes them at entry. Twin of the "$targs" variable in go-to-llvm-ir.abnf.
+    var goTargsReg = anytype
+    goTargsReg = null
+    // A generic function's entry: each type parameter of tps {names, recv} bound as
+    // "$tp$T" - a method's from its receiver's __targs, a function's from the call.
+    function goTpBind(tps, self) {
+        var vals = anytype
+        vals = null
+        if (tps.recv) {
+            if (self !== undefined && self !== null && typeof self == "object" && Array.isArray(self.__targs)) { vals = self.__targs }
+        } else { vals = goTargsReg }
+        goTargsReg = null
+        for (var i = 0; i < tps.names.length; i++) { declVar("$tp$" + tps.names[i], (vals != null && i < vals.length) ? vals[i] : "") }
+    }
+    // Type text t with the type parameters it names (used) as bound here; "" when
+    // one is not known.
+    function goTpRes(t, used) {
+        if (used.length == 0) { return t }
+        var vals = []
+        for (var i = 0; i < used.length; i++) { vals.push(hasVar("$tp$" + used[i]) ? getVar("$tp$" + used[i]) : "") }
+        return goTpSubst(t, used, vals)
+    }
+    // A call's instantiation (goTpInfer's {ts, used}) as the texts it hands over.
+    function goTpResAll(tpc) {
+        var out = []
+        for (var i = 0; i < tpc.ts.length; i++) { out.push(goTpRes(tpc.ts[i], tpc.used)) }
+        return out
     }
     // A STRUCT IS A VALUE: storing one where its type is declared - a parameter, a
     // result, a composite-literal element, a typed `var` - copies it, and so does an
@@ -5864,6 +5992,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             cls.__fcopy = codes
         }
         var o = {__class: cls}
+        if (Array.isArray(v.__targs)) { o.__targs = v.__targs }
         var fs = cls.__fields
         for (var k = 0; k < fs.length; k++) { scopePut(o, fs[k], goCopyBy(v[fs[k]], cls.__fcopy[k])) }
         return o
@@ -5880,7 +6009,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var self = mm.byPtr ? arguments[0] : goCopyBy(arguments[0], "S")
             var args = []
             for (var i = 1; i < arguments.length; i++) args.push(arguments[i])
-            return invokeBodyG(mm.params, mm.body, self, mm.recvName, args, mm.rets, mm.rtys, mm.env, mm.variadic, mm.ptypes)
+            return invokeBodyG(mm.params, mm.body, self, mm.recvName, args, mm.rets, mm.rtys, mm.env, mm.variadic, mm.ptypes, mm.tps)
         }
     }
 
@@ -6005,13 +6134,22 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return vs
     }
     // env == null: a top-level function (a fresh chain); otherwise a closure's chain.
-    function invokeBodyG(params, body, self, recvName, args, rets, rtys, env, variadic, ptypes) {
+    function invokeBodyG(params, body, self, recvName, args, rets, rtys, env, variadic, ptypes, tps) {
         var rl = (rets == undefined || rets == null) ? [] : rets
         var rtl = (rtys == undefined || rtys == null) ? [] : rtys
         var saved = scopes
         scopes = (env == null) ? [globalScope, {}] : env.slice(0)
         if (env != null) { scopes.push({}) }
         if (recvName != "") { declVar(recvName, self) }   // a nil pointer receiver too
+        if (tps != null) {
+            goTpBind(tps, self)
+            var rtr = []
+            for (var q = 0; q < rtl.length; q++) {
+                var rq = goTpRes(rtl[q], tps.names)
+                rtr.push(rq != "" ? rq : rtl[q])
+            }
+            rtl = rtr
+        }
         var np = params.length
         for (var i = 0; i < np; i++) {
             // A parameter is a slot with a DECLARED type, so it adopts it exactly as a
@@ -6255,7 +6393,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var cls = structAt(mm.pkg, recvType)
         var mfn = makeMethodClosure({recvName: recvVar, name: mm.name, params: mm.params,
                                      body: mm.body, rets: mm.rets, rtys: mm.rtys, variadic: mm.variadic, byPtr: byPtr,
-                                     ptypes: mm.ptypes, env: mm.env})
+                                     ptypes: mm.ptypes, env: mm.env, tps: mm.tps})
         if (cls == undefined && goIsDefTy(recvType)) {
             goDtFns[goDtKey(mm.pkg, recvType + "." + mm.name)] = mfn
             continue

@@ -304,7 +304,7 @@ func (rt *jsrt) gopObj(o *jsObject, depth int) (string, bool) {
 	}
 	if dv, ok := goDtVal(o); ok {
 		dv = rt.goDtShown(o, dv)
-		if strings.HasPrefix(rt.toString(cls.props["__name"]), "*") && goIsStructVal(dv) && goMeth(dv, "Error") == nil && goMeth(dv, "String") == nil {
+		if strings.HasPrefix(rt.toString(cls.props["__name"]), "*") && goPtrShowsAmp(dv) {
 			return "&" + rt.gopRender(dv, depth), true
 		}
 		return rt.gopRender(dv, depth), true
@@ -995,6 +995,30 @@ func goDtVal(v interface{}) (interface{}, bool) {
 	return jsUndef, true
 }
 
+// goPtrShowsAmp: a pointer's box prints a struct, a map or a slice behind a '&',
+// unless it has Error() or String(). Twin of goPtrShowsAmp in
+// languages/go-interpreter.abnf and lib/go-rt.metajs.
+func goPtrShowsAmp(dv interface{}) bool {
+	if k := gopKind(dv); k == "list" || k == "map" {
+		return true
+	}
+	return goIsStructVal(dv) && goMeth(dv, "Error") == nil && goMeth(dv, "String") == nil
+}
+
+// goPtrBoxed is the struct inside a pointer's box (goPtrBoxTy in
+// languages/lib/go-constfold.js), and false for anything else: the box's methods
+// are the struct's, called on the struct, and two boxes are equal when they hold
+// the same one. Twins: isPtrBox in languages/go-interpreter.abnf, goPtrBoxed in
+// lib/go-rt.metajs.
+func goPtrBoxed(v interface{}) (interface{}, bool) {
+	dv, ok := goDtVal(v)
+	if !ok {
+		return nil, false
+	}
+	nm, _ := goClassOf(v).props["__name"].(string)
+	return dv, strings.HasPrefix(nm, "*")
+}
+
 // goDtShown is the value box v (holding dv) shows fmt: an array type's box shows
 // its elements boxed as their element type prints them. Twins: goDtShown in
 // languages/go-interpreter.abnf and lib/go-rt.metajs.
@@ -1303,6 +1327,29 @@ func gopQualTy(t string) string {
 
 const gopPredecl = " bool string int int8 int16 int32 int64 uint uint8 uint16 uint32 uint64 uintptr float32 float64 complex64 complex128 error map chan func struct interface "
 
+// gopTargs is gfTargs: an instantiated generic struct's type arguments as %T
+// writes them after its name ("[string,main.V]"), "" when it records none or one
+// is not known.
+func gopTargs(v interface{}) string {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return ""
+	}
+	arr, ok := o.props["__targs"].(*jsArray)
+	if !ok {
+		return ""
+	}
+	parts := make([]string, 0, len(arr.elems))
+	for _, e := range arr.elems {
+		s, isStr := e.(string)
+		if !isStr || s == "" {
+			return ""
+		}
+		parts = append(parts, s)
+	}
+	return gopQualTy("[" + strings.Join(parts, ",") + "]")
+}
+
 // gopTypeName is gfTypeName: fmt's %T, "" where the value model cannot tell.
 func (rt *jsrt) gopTypeName(v interface{}) string {
 	switch k := gopKind(v); k {
@@ -1315,13 +1362,18 @@ func (rt *jsrt) gopTypeName(v interface{}) string {
 	case "struct":
 		cls := goClassOf(v)
 		if cls.props["__dt"] == true {
-			return gopQualTy(rt.toString(cls.props["__name"]))
+			name := rt.toString(cls.props["__name"])
+			// A pointer's box whose static type did not spell the type arguments.
+			if dv, isPtr := goPtrBoxed(v); isPtr && !strings.Contains(name, "[") && goIsStructVal(dv) {
+				return gopQualTy(name) + gopTargs(dv)
+			}
+			return gopQualTy(name)
 		}
 		if pkg, ok := cls.props["__pkg"].(string); ok {
-			return pkg + "." + rt.toString(cls.props["__name"])
+			return pkg + "." + rt.toString(cls.props["__name"]) + gopTargs(v)
 		}
 		if name := rt.toString(cls.props["__name"]); name != "struct" {
-			return name
+			return name + gopTargs(v)
 		}
 		return rt.gopAnonTy(v)
 	case "list":
@@ -2555,6 +2607,13 @@ func init() {
 			}
 			cls, _ := u(a[1]).(*jsObject)
 			if goIsStructVal(v) && (cls == nil || !strings.HasPrefix(rt.toString(cls.props["__name"]), "*")) {
+				// A struct VALUE in an interface is a copy marked __vv, which no
+				// type test reads as a pointer (goVvBox in go-interpreter.abnf).
+				if o, _ := v.(*jsObject); cls != nil && cls.props["__sv"] == true && o.props["__vv"] != true {
+					c := rt.goCopyCoded(v, "S").(*jsObject)
+					c.set("__vv", true)
+					return w(c)
+				}
 				return a[0]
 			}
 			o := newJSObject()
@@ -2745,6 +2804,9 @@ func init() {
 			}))
 		}
 		m["js_gomcall"] = func(a []uint64) uint64 {
+			if dv, isPtr := goPtrBoxed(u(a[0])); isPtr {
+				a = []uint64{w(dv), a[1], a[2]}
+			}
 			goNilDeref(rt, u(a[0]))
 			// A FUNC-TYPED FIELD IS CALLABLE: `type H struct { f func(int) int }`
 			// makes h.f(4) a call of the field's value, with NO receiver - it is a
@@ -2924,7 +2986,7 @@ func goTypeIs(rt *jsrt, v interface{}, want string) int {
 	if o, ok := v.(*jsObject); ok {
 		_, inst = o.props["__class"].(*jsObject)
 	}
-	if inst && strings.HasPrefix(want, "*") {
+	if _, isBox := goDtVal(v); inst && !isBox && strings.HasPrefix(want, "*") && v.(*jsObject).props["__vv"] != true {
 		want = want[1:]
 	}
 	got := goTypeNameOf(rt, v)
@@ -3070,8 +3132,23 @@ func goErrorf(msg string, args []interface{}, idx []int) *jsObject {
 	return goErrNew("*fmt.wrapErrors", msg, errs)
 }
 
-// goMeth is a method of v's dynamic type, or nil.
+// goMeth is a method of v's dynamic type, or nil. A pointer's box answers its
+// struct's, called with the box as receiver.
 func goMeth(v interface{}, name string) interface{} {
+	if dv, isPtr := goPtrBoxed(v); isPtr {
+		m := goMeth(dv, name)
+		if m == nil {
+			return nil
+		}
+		return jsHostFunc("", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			if len(args) > 0 {
+				if d, ok := goPtrBoxed(args[0]); ok {
+					args = append([]interface{}{d}, args[1:]...)
+				}
+			}
+			return rt.call(m, jsUndef, args)
+		})
+	}
 	o, ok := v.(*jsObject)
 	if !ok {
 		return nil
