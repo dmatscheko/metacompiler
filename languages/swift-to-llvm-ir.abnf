@@ -601,7 +601,7 @@ MethodDecl  <~~ push({method: makeFun(takeAll(), up.start, up.pos)}) ~~>
 // var w = 2, h = 3 declares two stored properties; each binding becomes its own
 // {prop} record, so the type builder sees them in declaration order. In `var w,
 // h: Double` both are Double (swBindsShared in lib/swift-dotwant.js).
-PropDecl    <~~ var pbs = swBindsShared(takeAll(), makeProp); for (var pb = 0; pb < pbs.length; pb++) { push(pbs[pb]) } ~~>
+PropDecl    <~~ var pvar = up.in.substring(0, 3) == "var"; var pbs = swBindsShared(takeAll(), function(bi) { return makeProp(bi, pvar) }); for (var pb = 0; pb < pbs.length; pb++) { push(pbs[pb]) } ~~>
             = ( "let" | "var" ) KwEnd PropBind { "," PropBind } [ ";" ] ;
 PropBind    <~~ push({dbind: takeAll()}) ~~>
             = Id <~~ push(swBt(up.in)) ~~> [ ":" DeclAnnType ]
@@ -9596,7 +9596,7 @@ KwContinue  = "continue" KwEnd ;
         }
         return frac ? "Double" : ""
     }
-    function makeProp(items) {
+    function makeProp(items, isVar) {
         var k = 1
         var ty = ""
         if (items[k] != undefined && items[k].tlabels != undefined) {
@@ -9617,6 +9617,12 @@ KwContinue  = "continue" KwEnd ;
             return {prop: items[0], ty: ty, ann: annTxt, hasInit: true, init: swSetInit(pinit)}
         }
         if (pinit != undefined) { return {prop: items[0], ty: ty, ann: annTxt, hasInit: true, init: pinit} }
+        // A `var` of an Optional type with no initial value starts as nil (Swift's
+        // implicit initializer), so the memberwise initializer may omit it.
+        var ol = annTxt.charAt(annTxt.length - 1)
+        if (isVar == true && (ol == "?" || ol == "!")) {
+            return {prop: items[0], ty: ty, ann: annTxt, hasInit: true, init: function(b) { return {b: b, v: hNull} }}
+        }
         return {prop: items[0], ty: ty, ann: annTxt, hasInit: false, init: null}
     }
     function plainParam(n) {

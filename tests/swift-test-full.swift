@@ -5631,6 +5631,28 @@ func s146() {
     check("146b", g[0] == 1.0 && "\(g[3])" == "0.0" && g[3, default: -1] == -1.0)
 }
 
+// ===== SECTION 147: an Optional `var` property starts as nil =====
+// `var head: Node?` with no initial value is nil, so the memberwise initializer
+// may omit it: `LL147()` binds the defaulted `count` to count, not to head, and a
+// node pushed onto the empty list has no successor. Every value read off swiftc
+// 6.1.2.
+struct LL147 {
+    final class Node { var v: Int; var next: Node?; init(_ v: Int) { self.v = v } }
+    var head: Node?
+    var count = 5
+    mutating func push(_ v: Int) { let n = Node(v); n.next = head; head = n; count += 1 }
+    var values: [Int] { var out: [Int] = []; var c = head; while let n = c { out.append(n.v); c = n.next }; return out }
+}
+struct Opt147 { var a: Int?; var b = 2 }
+func s147() {
+    var l = LL147()
+    l.push(1)
+    l.push(2)
+    let o = Opt147(b: 3)
+    check("147a", l.values == [2, 1] && l.count == 7 && l.head!.next!.next == nil)
+    check("147b", o.a == nil && o.b == 3 && Opt147().b == 2 && Opt147(a: 1).a == 1)
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5778,6 +5800,7 @@ func main() {
     s144() // SECTION-CALL 144
     s145() // SECTION-CALL 145
     s146() // SECTION-CALL 146
+    s147() // SECTION-CALL 147
     print("full: \(checks) checks, \(fails) failures")
 }
 
