@@ -1829,6 +1829,8 @@ function stChainFrom(head, hty, loc, text) {
                 ty = goFieldTyHook(sn, nm)
                 var fk = "$" + goTyKey(sn) + "." + nm
                 if (ty == "" && goPreFld[fk] !== undefined) { ty = goPreFld[fk] }
+                // A method value (`t.M` as the chain's last step) has M's signature.
+                if (ty == "" && j == text.length && goMethSig[fk] !== undefined) { ty = goMethSig[fk] }
                 // A field of a package's struct is typed in that package's names.
                 var sq = sn.indexOf(".")
                 if (ty != "" && sq > 0) { ty = goPkgQual(sn.substring(0, sq), ty, false) }
@@ -1921,6 +1923,7 @@ function goNoteMeth1(rt, name, byPtr, rtys) {
 var goFnRty = {}      // "$f" -> top-level function f's single result type ("" otherwise)
 var goFnPTys = {}     // "$f" -> top-level function f's parameter types (goPreParams)
 var goMethPTys = {}   // "$T.M" -> method M of T's parameter types (goPreParams)
+var goMethSig = {}    // "$T.M" -> method M of T's type text as a method value (goSigAt)
 // ----- A POINTER METHOD CALLED ON A NIL RECEIVER -----
 // Go calls a pointer method on a nil pointer like any other (`func (t *Tree) Sum()
 // int { if t == nil { return 0 } ...}`); only a dereference inside panics. A nil
@@ -2012,6 +2015,8 @@ function goDtBoxTy(sty) {
     }
     var vt = goStructTyName(t)
     if (vt != "") { return vt }
+    // A func value is boxed too, so %T and a type test know its signature.
+    if (t.indexOf("func(") == 0) { return goFuncTyText(t) }
     if (goDtForeign["$" + t] === true || goTyKey(t) != t) { return "" }
     return (goIsDefTy(t) || goDtWide["$" + t] === true) ? t : ""
 }
@@ -2030,8 +2035,10 @@ function goStructTyName(st) {
     return goStructTys["$" + base] === true ? st : ""
 }
 // A type test's type as a pointer's box names it: in a package, "*cancelCtx" is
-// "*context.cancelCtx" (goStructTyName); anything else as written.
+// "*context.cancelCtx" (goStructTyName); a func type as its box does
+// (goFuncTyText); anything else as written.
 function goAssertTyC(t) {
+    if (t.indexOf("func(") == 0) { return goFuncTyText(t) }
     if (t.length > 1 && t.charAt(0) == "*") {
         var q = goStructTyName(t.substring(1))
         if (q != "") { return "*" + q }
@@ -2100,8 +2107,8 @@ function goQualWord(t, w) {
 // A slice, array or map type: a type test decides it by fmt's %T of the value,
 // which reads the element and key types a slice header or map records.
 function goCompTy(t) { return t.charAt(0) == "[" || t.substring(0, 4) == "map[" }
-// A type switch's case label: a composite type keeps its whole text.
-function goCaseTy(ct, w) { return goCompTy(ct) ? ct : goQualWord(ct, w) }
+// A type switch's case label: a composite or func type keeps its whole text.
+function goCaseTy(ct, w) { return (goCompTy(ct) || ct.indexOf("func(") == 0) ? ct : goQualWord(ct, w) }
 // A call's argument list: each argument is followed by its {aty} (ArgExpr), and a
 // trailing {spread} spreads the last one. The arguments come back in gc's order of
 // evaluation (goOrderThunks).
@@ -2319,6 +2326,9 @@ function goStarStructC(name, stars) {
     }
     return goStructTyName(t) != ""
 }
+// The target `*(x)`: ex evaluates x, and the store goes through the cell it answers,
+// or into the struct it is (a struct pointer is the struct).
+function goDerefTgtC(t) { return {name: "", path: [], stars: 1, ex: t, sto: false, tys: [""]} }
 // The index steps of an assignment target, each typed through the steps before it.
 function goRefKeysC(ref) {
     if (ref.stars > 0) {
@@ -2962,7 +2972,11 @@ function goPreFunc(text, i) {
     var ps = i
     i = stClose(text, i)
     if (i < 0) { return }
-    if (recv != "") { goMethPTys["$" + (goPreShadow(recv) ? goNotePkg() + "." : "") + recv + "." + name] = goPreParams(text.substring(ps + 1, i)) }
+    if (recv != "") {
+        var mkey = "$" + (goPreShadow(recv) ? goNotePkg() + "." : "") + recv + "." + name
+        goMethPTys[mkey] = goPreParams(text.substring(ps + 1, i))
+        goMethSig[mkey] = goPrePkg != "" ? goPkgQual(goPrePkg, goSigAt(text, ps)) : goSigAt(text, ps)
+    }
     if (recv == "" && goFnPTys["$" + name] === undefined) {
         goFnPTys["$" + name] = goPreParams(text.substring(ps + 1, i))
         goFnSig["$" + name] = goSigAt(text, ps)
@@ -3393,6 +3407,14 @@ function goDtPlan(rc, name) {
     return {fn: cands[0] + "." + name, ty: cands[0], ptr: goMethPtr["$" + cands[0] + "." + name] === true,
             dyn: true, isPtr: false}
 }
+// fmt's scanning functions are a package of their own (lib/go-fmtscan.go), compiled
+// when the program's text calls one (goUsesFmtScan) and bound into the fmt object;
+// its import path is no Go identifier, so it can name nothing of the program's.
+var goFmtScanPkg = "fmt$scan"
+var goFmtScanFns = ["Scan", "Scanln", "Scanf", "Sscan", "Sscanln", "Sscanf", "Fscan", "Fscanln", "Fscanf"]
+function goUsesFmtScan(text) {
+    return text.indexOf(".Sscan") >= 0 || text.indexOf(".Fscan") >= 0 || text.indexOf("fmt.Scan") >= 0
+}
 // The standard packages WRITTEN IN GO (lib/go-<name>.go), compiled with a program that
 // imports one and has no file of that name of its own: the grammar-relative path, or "".
 function goLibFile(path) {
@@ -3420,6 +3442,7 @@ function goLibFile(path) {
     if (path == "regexp") { return "lib/go-regexp.go" }
     if (path == "encoding/json") { return "lib/go-json.go" }
     if (path == "reflect") { return "lib/go-reflect.go" }
+    if (path == goFmtScanPkg) { return "lib/go-fmtscan.go" }
     return ""
 }
 // The method EXPRESSION T.M of a defined type T (`f := Color.String`): the method's

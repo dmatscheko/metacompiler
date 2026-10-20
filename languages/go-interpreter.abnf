@@ -554,7 +554,10 @@ AssignOp    = "&^=" | "<<=" | ">>=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | 
 // A leading '*' is a pointer store: '*p = v' writes through p's cell, '**pp = v'
 // through two of them. On a value that is not a pointer cell it stays transparent,
 // which is what a struct pointer needs - those are already references.
-Target      = TgtParen | TgtPlain ;
+Target      = TgtDerefX | TgtParen | TgtPlain ;
+// `*(v.p.(*int)) = 5`: a store through the pointer any expression answers (goDerefTgtC).
+TgtDerefX   <~~ push(goDerefTgtC(pop())) ~~>
+            = "*" "(" Expression ")" ;
 TgtPlain    <~~ push(makeTargetRef(takeAll())) ~~>
             = TgtCore { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
 // A parenthesised target: '(*pn).val = v', '(*h)[i] = v', '(q) = 1'. Go writes the
@@ -1501,15 +1504,31 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return out
     }
     function goFprint(w, s) { return mcall(w, "Write", [goConvert("[]byte", s)]) }
-    // os.Stdout and os.Stderr: writers whose Write prints. Standard error is reached
-    // through eprintln, which ends every write with its own newline, so a write's
-    // trailing newline is dropped first. Twin of js_gofdwrite in abnf/jsrtgolang.go and
-    // lib/go-rt.metajs.
-    function goOsFile(fd) {
-        return {
-            Write: function(p) { goFdWrite(fd, goConvert("string", p)); return goMv([goLen(p), null]) },
-            WriteString: function(s) { goFdWrite(fd, s); return goMv([byteLen(s), null]) }
-        }
+    // os.Stdin, os.Stdout and os.Stderr are *os.File values, each with Read, Write and
+    // WriteString; reading an output or writing standard input answers the error go
+    // gets on a pipe. A write prints; standard error is reached through eprintln,
+    // which ends every write with its own newline, so a write's trailing newline is
+    // dropped first. Twin of declOsFile in go-to-llvm-ir.abnf; the write is
+    // js_gofdwrite in abnf/jsrtgolang.go and lib/go-rt.metajs.
+    var goOsFileCls = {__isclass: true, __name: "*os.File", __fields: ["fd"], __ftypes: ["int"],
+        Read: function(f, p) {
+            if (f.fd == 0) { return goStdinRead(p) }
+            return goMv([0, goOsBadFd("read", f.fd)])
+        },
+        Write: function(f, p) {
+            if (f.fd == 0) { return goMv([0, goOsBadFd("write", 0)]) }
+            goFdWrite(f.fd, goConvert("string", p))
+            return goMv([goLen(p), null])
+        },
+        WriteString: function(f, s) {
+            if (f.fd == 0) { return goMv([0, goOsBadFd("write", 0)]) }
+            goFdWrite(f.fd, s)
+            return goMv([byteLen(s), null])
+        }}
+    function goOsFile(fd) { return {__class: goOsFileCls, fd: fd} }
+    function goOsBadFd(op, fd) {
+        var names = ["/dev/stdin", "/dev/stdout", "/dev/stderr"]
+        return hostGlobals["errors"].New(op + " " + names[fd] + ": bad file descriptor")
     }
     function goFdWrite(fd, s) {
         if (fd == 1) { gOut(s); return }
@@ -1600,7 +1619,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // in go-to-llvm-ir.abnf.
     var goProgName = c.file
     hostGlobals["os"] = { Exit: function(code) { exit(code | 0) }, Stdout: goOsFile(1), Stderr: goOsFile(2),
-                          Stdin: {Read: function(p) { return goStdinRead(p) }} }
+                          Stdin: goOsFile(0) }
     // os.Stdin's Read: standard input (readIn), taken a line at a time, so what the
     // program printed before the read shows first; p gets as much of the line as it
     // holds, and the rest waits for the next Read. At the end of the input it
@@ -4209,7 +4228,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var w = goTyWord(t)
         var it = goIntTy(w)
         if (it != null) { return szConv(0, it.w, it.u) }
-        if (isFloatTy(w)) { return gFlo(0) }
+        if (isFloatTy(w)) { return w == "float32" ? gFlo32(0) : gFlo(0) }
         if (w == "string") { return "" }
         if (w == "bool") { return false }
         // A bare `struct` is an INLINE struct type, and its zero value is not
@@ -4704,8 +4723,14 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     // The target of '*p = v' / '**pp = v': follow stars - 1 cells and write through the
     // last one. A star over a value that is not a cell stays transparent; a struct
-    // pointer is the struct, and its target (sto) is the struct itself.
+    // pointer is the struct, and its target (sto) is the struct itself. The target
+    // `*(x)` (goDerefTgtC) is the cell x answers, or the struct it is.
     function derefTarget(ref) {
+        if (ref.ex !== undefined) {
+            var xv = anytype
+            xv = ref.ex()
+            return isPtr(xv) ? xv : {inst: xv}
+        }
         var cur = getVar(ref.name)
         for (var i = 1; i < ref.stars; i++) {
             if (!isPtr(cur)) {
@@ -4744,7 +4769,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function locWrite(ref, loc, v) {
         if (ref.path.length == 0) {
             if (loc != null) {
-                if (ref.sto) { goStructSet(loc.inst, v) } else { ptrSet(loc, v) }
+                if (isPtr(loc)) { ptrSet(loc, v) } else { goStructSet(loc.inst, v) }
                 return
             }
             setVar(ref.name, goVal(v))
@@ -5454,9 +5479,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                        byte: 1, rune: 1, float32: 1, float64: 1, complex128: 1}
     function goAssertType(v, want) {
         if (hasOwn(ifaceMeths, want)) { return goAssertIface(v, want) }
-        // A DEFINED non-struct type (or an array of one) is decided when the value
-        // is its box, and the value inside is the answer.
-        if ((goIsDefTy(want) || goArrElemTy(want) != "") && isDtBox(v)) {
+        // A DEFINED non-struct type (or an array of one), and a func type, is
+        // decided when the value is its box, and the value inside is the answer.
+        if ((goIsDefTy(want) || goArrElemTy(want) != "" || want.indexOf("func(") == 0) && isDtBox(v)) {
             if (v.__class.__name == want) { return v.__dv }
             goConvPanic("interface {} is " + goTypeText(v) + ", not " + gfQualTy(want))
         }
@@ -6007,6 +6032,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             // `v.(Sp)` false for a value that satisfies Sp, `case Sp:` never fire, and
             // the single-result form never panic for one that does not.
             ifaceMeths[items[0]] = last.imeth
+            // A package's interface is also named as the program spells it, io.Reader.
+            if (curPkgName != null) { ifaceMeths[curPkgName + "." + items[0]] = last.imeth }
             return
         }
         if (typeof last == "object" && last != null && last.under != undefined) {
@@ -6623,6 +6650,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
 
     goPrescan(c.srcSlice(0, 1073741824))
+    // fmt's Scan family (goFmtScanPkg). Twin of buildMain's in go-to-llvm-ir.abnf.
+    if (goUsesFmtScan(c.srcSlice(0, 1073741824))) {
+        core.importFile(goFmtScanPkg, 0)
+        var fsPkg = globalScope[goFmtScanPkg]
+        for (var fsi = 0; fsi < goFmtScanFns.length; fsi++) { hostGlobals["fmt"][goFmtScanFns[fsi]] = fsPkg[goFmtScanFns[fsi]] }
+    }
     c.compile(c.asg)
 
     // Attach the collected methods to their struct descriptors. The receiver type is

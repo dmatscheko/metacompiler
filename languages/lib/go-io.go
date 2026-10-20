@@ -38,6 +38,12 @@ type RuneReader interface {
 	ReadRune() (r rune, size int, err error)
 }
 
+// The methods are spelled out: an embedded interface name is not resolved here.
+type RuneScanner interface {
+	ReadRune() (r rune, size int, err error)
+	UnreadRune() error
+}
+
 func WriteString(w Writer, s string) (n int, err error) {
 	if sw, ok := w.(StringWriter); ok {
 		return sw.WriteString(s)

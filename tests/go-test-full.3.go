@@ -390,6 +390,129 @@ func s107() {
 	check("pkgconst107c", fmt.Sprint(green107+1, red107*2) == "B G")
 }
 
+// ===== SECTION 108: fmt's Scan family =====
+// Sscan treats a newline as space, Sscanln stops at one, Sscanf matches its
+// format; an operand is stored by its pointer's type, and a failure answers the
+// count stored so far and the error. Fscan reads only what it needs, so two
+// calls over one reader see consecutive tokens. The expected values are go run's.
+type onlyReader108 struct{ r io.Reader }
+
+func (o onlyReader108) Read(p []byte) (int, error) { return o.r.Read(p) }
+
+func s108() {
+	var a, b int
+	var s string
+	var f float64
+	var f32 float32
+	var u8 uint8
+	var r rune
+	var t bool
+	out := ""
+	n, err := fmt.Sscanf("12 34 hello", "%d %d %s", &a, &b, &s)
+	out += fmt.Sprint(n, err, a, b, s, ";")
+	n, err = fmt.Sscan("0x1F\n-2.5e1 true", &a, &f, &t)
+	out += fmt.Sprint(n, err, a, f, t, ";")
+	n, err = fmt.Sscanln("aa bb\ncc", &s, &s)
+	out += fmt.Sprint(n, err, s, ";")
+	n, err = fmt.Sscanf("7", "%d %d", &a, &b)
+	out += fmt.Sprint(n, err, ";")
+	n, err = fmt.Sscan("abc", &a)
+	out += fmt.Sprint(n, err, ";")
+	n, err = fmt.Sscan("256", &u8)
+	out += fmt.Sprint(n, err, ";")
+	n, err = fmt.Sscan("3.4e39", &f32)
+	out += fmt.Sprint(n, err, ";")
+	n, err = fmt.Sscanf("x:9 5%", "%c:%d %d%%", &r, &a, &b)
+	out += fmt.Sprint(n, err, string(r), a, b, ";")
+	n, err = fmt.Sscanf("12345", "%3d%d", &a, &b)
+	out += fmt.Sprint(n, err, a, b, ";")
+	n, err = fmt.Sscan("5", a)
+	out += fmt.Sprint(n, err, ";")
+	check("scan108", out == "3 <nil> 12 34hello;3 <nil> 31 -25 true;2 <nil>bb;1 EOF;0 expected integer;0 unsigned integer overflow on token 256;0 strconv.ParseFloat: parsing \"3.4e39\": value out of range;3 <nil>x9 5;2 <nil> 123 45;0 type not a pointer: int;")
+	rd := onlyReader108{strings.NewReader("1 2\n3 4\n")}
+	out = ""
+	for {
+		n, err := fmt.Fscan(rd, &a, &b)
+		out += fmt.Sprint(n, err, a, b, ";")
+		if err != nil {
+			break
+		}
+	}
+	sr := strings.NewReader("5 6\n7\n")
+	for {
+		n, err := fmt.Fscanln(sr, &a, &b)
+		out += fmt.Sprint(n, err, a, b, ";")
+		if err != nil {
+			break
+		}
+	}
+	check("fscan108", out == "2 <nil> 1 2;2 <nil> 3 4;0 EOF 3 4;2 <nil> 5 6;1 unexpected newline 7 6;")
+}
+
+// ===== SECTION 109: a func and os.Stdin in an interface; a package's interface =====
+// A func value keeps its signature in an interface, for %T, an assertion and a
+// type switch; os.Stdin, os.Stdout and os.Stderr are *os.File, which is both an
+// io.Reader and an io.Writer; io.Reader is satisfied by any type with Read. The
+// expected values are go run's.
+func sq109(x int) int { return x * x }
+
+type t109 struct{}
+
+func (t109) M(s string) bool { return s != "" }
+
+func (t109) Read(p []byte) (int, error) { return 0, nil }
+
+func show109(v any) string { return fmt.Sprintf("%T", v) }
+
+func s109() {
+	var f any = sq109
+	var t t109
+	out := show109(f) + " " + show109(t.M) + " " + show109(func(a string, b ...int) (int, error) { return 0, nil })
+	g := f.(func(int) int)
+	out += fmt.Sprint(" ", g(3))
+	switch h := f.(type) {
+	case func(int) int:
+		out += fmt.Sprint(" sw", h(4))
+	}
+	_, isStr := f.(func(string) string)
+	out += fmt.Sprint(" ", isStr)
+	check("functy109", out == "func(int) int func(string) bool func(string, ...int) (int, error) 9 sw16 false")
+	var in, o, e any = os.Stdin, os.Stdout, os.Stderr
+	_, r1 := in.(io.Reader)
+	_, w1 := in.(io.Writer)
+	_, w2 := o.(io.Writer)
+	_, s2 := o.(io.StringWriter)
+	var tr any = t
+	_, r3 := tr.(io.Reader)
+	check("osfile109", fmt.Sprintf("%T %T %T", in, o, e) == "*os.File *os.File *os.File" && r1 && w1 && w2 && s2 && r3)
+}
+
+// ===== SECTION 110: a store through `*(x)` =====
+// x is any expression answering a pointer: an assertion, a call, an index. The
+// expected values are go run's.
+type v110 struct{ p any }
+
+type p110 struct{ x int }
+
+func id110(p *int) *int { return p }
+
+func s110() {
+	k := 1
+	v := v110{&k}
+	*(v.p.(*int)) = 5
+	out := fmt.Sprint(k)
+	*(id110(&k)) += 2
+	*(v.p.(*int))++
+	ps := []*int{&k}
+	out += fmt.Sprint(" ", k)
+	*(ps[0]) = 42
+	s := &p110{1}
+	w := v110{s}
+	*(w.p.(*p110)) = p110{9}
+	out += fmt.Sprint(" ", k, " ", s.x)
+	check("derefx110", out == "5 8 42 9")
+}
+
 func main() {
 	s94()   // SECTION-CALL 94
 	s95()   // SECTION-CALL 95
@@ -403,6 +526,9 @@ func main() {
 	s105()  // SECTION-CALL 105
 	s106f() // SECTION-CALL 106
 	s107()  // SECTION-CALL 107
+	s108()  // SECTION-CALL 108
+	s109()  // SECTION-CALL 109
+	s110()  // SECTION-CALL 110
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

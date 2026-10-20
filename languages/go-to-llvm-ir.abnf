@@ -569,7 +569,10 @@ AssignOp    = "&^=" | "<<=" | ">>=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | 
 // A leading '*' is a pointer store: '*p = v' writes through p's cell, '**pp = v'
 // through two of them. On a value that is not a pointer cell it stays transparent,
 // which is what a struct pointer needs - those are already references.
-Target      = TgtParen | TgtPlain ;
+Target      = TgtDerefX | TgtParen | TgtPlain ;
+// `*(v.p.(*int)) = 5`: a store through the pointer any expression answers (goDerefTgtC).
+TgtDerefX   <~~ push(goDerefTgtC(pop())) ~~>
+            = "*" "(" Expression ")" ;
 TgtPlain    <~~ push(makeTargetRef(takeAll())) ~~>
             = TgtCore { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
 // A parenthesised target: '(*pn).val = v', '(*h)[i] = v', '(q) = 1'. Go writes the
@@ -2354,7 +2357,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                     } else {
                         var aw = assertTyWant(s.at)
                         if (aw != "") { cur = callExt(b, "js_goassert", [cur, emitStr(b, aw), emitStr(b, s.at)]) }
-                        else if (goIsDefTy(s.at) || goArrElemTy(s.at) != "") { cur = callExt(b, "js_godtas", [cur, emitStr(b, s.at), emitStr(b, s.at)]) }
+                        else if (goIsDefTy(s.at) || goArrElemTy(s.at) != "" || s.at.indexOf("func(") == 0) { cur = callExt(b, "js_godtas", [cur, emitStr(b, s.at), emitStr(b, s.at)]) }
                     }
                 } else if (s.kind == "call") {
                     var ec = emitArgs2(b, s.args, s.spread)
@@ -3937,33 +3940,63 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         callExt(b, "js_set", [target, emitStr(b, name), callExt(b, "js_closure", [handle(idx), curScopeV])])
         return b
     }
-    // os.Stdout / os.Stderr: writers whose Write and WriteString print through
-    // js_gofdwrite and answer (bytes written, nil). Twin of goOsFile in
-    // go-interpreter.abnf.
+    // os.Stdin, os.Stdout and os.Stderr: *os.File values (fd 0, 1, 2), each with
+    // Read, Write and WriteString, every method taking its receiver first. An output
+    // writes through js_gofdwrite and answers (bytes written, nil); standard input
+    // reads through js_gostdin, which answers [chunk, err] - the next bytes of
+    // standard input that fit in p, and at its end io.EOF (an error reading "EOF"
+    // when no package imported io) - and copies the chunk into p. Reading an output
+    // or writing standard input answers the error go gets on a pipe. Twin of
+    // goOsFileCls and goStdinRead in go-interpreter.abnf.
     function declOsFile(b, osV, name, fd) {
-        var fo = callExt(b, "js_obj_new", [])
-        var wn = "$" + name + ".Write"
-        var sn = "$" + name + ".WriteString"
-        b = declFn(b, wn, 1, function(fb, a) {
-            var s = callExt(fb, "js_goconv", [emitStr(fb, "string"), emitHelper(fb, "$sels", [a[0]])])
+        var dev = ["/dev/stdin", "/dev/stdout", "/dev/stderr"][fd]
+        var cls = callExt(b, "js_obj_new", [])
+        callExt(b, "js_set", [cls, emitStr(b, "__isclass"), hTrue])
+        callExt(b, "js_set", [cls, emitStr(b, "__name"), emitStr(b, "*os.File")])
+        emitNameList(b, cls, "__fields", ["fd"])
+        emitNameList(b, cls, "__ftypes", ["int"])
+        var haveIo = importedFiles["$" + goLibFile("io")] == true
+        var ms = ["Read", "Write", "WriteString"]
+        b = declFn(b, "$" + name + ".Read", 2, function(fb, a) {
+            if (fd != 0) { return {b: fb, v: emitNErr(fb, emitNum(fb, 0), emitErrNew(fb, "read " + dev + ": bad file descriptor"))} }
+            var eofV = haveIo ? emitPkgMember(fb, "io", "EOF") : emitErrNew(fb, "EOF")
+            var got = callExt(fb, "js_gostdin", [emitHelper(fb, "len", [a[1]]), eofV])
+            var n = emitHelper(fb, "copy", [a[1], callExt(fb, "js_get", [got, emitNum(fb, 0)])])
+            return {b: fb, v: emitNErr(fb, n, callExt(fb, "js_get", [got, emitNum(fb, 1)]))}
+        })
+        b = declFn(b, "$" + name + ".Write", 2, function(fb, a) {
+            if (fd == 0) { return {b: fb, v: emitNErr(fb, emitNum(fb, 0), emitErrNew(fb, "write " + dev + ": bad file descriptor"))} }
+            var s = callExt(fb, "js_goconv", [emitStr(fb, "string"), emitHelper(fb, "$sels", [a[1]])])
             callExt(fb, "js_gofdwrite", [emitNum(fb, fd), s])
-            return {b: fb, v: emitWrote(fb, emitHelper(fb, "len", [a[0]]))}
+            return {b: fb, v: emitNErr(fb, emitHelper(fb, "len", [a[1]]), hNull)}
         })
-        b = declFn(b, sn, 1, function(fb, a) {
-            callExt(fb, "js_gofdwrite", [emitNum(fb, fd), a[0]])
-            return {b: fb, v: emitWrote(fb, callExt(fb, "js_golen", [a[0]]))}
+        b = declFn(b, "$" + name + ".WriteString", 2, function(fb, a) {
+            if (fd == 0) { return {b: fb, v: emitNErr(fb, emitNum(fb, 0), emitErrNew(fb, "write " + dev + ": bad file descriptor"))} }
+            callExt(fb, "js_gofdwrite", [emitNum(fb, fd), a[1]])
+            return {b: fb, v: emitNErr(fb, callExt(fb, "js_golen", [a[1]]), hNull)}
         })
-        callExt(b, "js_set", [fo, emitStr(b, "Write"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, wn)])])
-        callExt(b, "js_set", [fo, emitStr(b, "WriteString"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, sn)])])
+        for (var i = 0; i < ms.length; i++) {
+            callExt(b, "js_set", [cls, emitStr(b, ms[i]), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$" + name + "." + ms[i])])])
+        }
+        var fo = callExt(b, "js_obj_new", [])
+        callExt(b, "js_set", [fo, emitStr(b, "__class"), cls])
+        callExt(b, "js_set", [fo, emitStr(b, "fd"), emitNum(b, fd)])
         callExt(b, "js_set", [osV, emitStr(b, name), fo])
         return b
     }
-    // (n, nil): a two-result answer, marked the way every multi-value result is.
-    function emitWrote(b, n) {
+    // (n, err): a two-result answer, marked the way every multi-value result is.
+    function emitNErr(b, n, err) {
         var arr = callExt(b, "js_arr_new", [])
         callExt(b, "js_arr_push", [arr, n])
-        callExt(b, "js_arr_push", [arr, hNull])
+        callExt(b, "js_arr_push", [arr, err])
         return usesMultiRet ? emitMvWrap(b, arr) : arr
+    }
+    // errors.New(text).
+    function emitErrNew(b, text) {
+        var newV = callExt(b, "js_get", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, "errors")]), emitStr(b, "New")])
+        var eargs = callExt(b, "js_arr_new", [])
+        callExt(b, "js_arr_push", [eargs, emitStr(b, text)])
+        return callExt(b, "js_call", [newV, hUndef, eargs])
     }
 
     // ----- Pointers -----
@@ -4196,10 +4229,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // Go assigns in two phases: the index operands and pointer indirections of
     // every target are evaluated first (emitRefLoc), then the values are stored
     // left to right (emitLocWrite). Twin of refLoc in go-interpreter.abnf.
-    // loc: the star base for `*p`, null for a plain name, else {o, k}: the
-    // container and the last step's key (a field name or an emitted index).
+    // loc: the star base for `*p` (the value x answers for `*(x)`), null for a plain
+    // name, else {o, k}: the container and the last step's key (a field name or an
+    // emitted index).
     function emitRefLoc(b, ref) {
         if (ref.path.length == 0) {
+            if (ref.ex !== undefined) {
+                var xr = ref.ex(b)
+                return {b: xr.b, loc: xr.v}
+            }
             if (ref.stars > 0) {
                 var sb = emitStarBase(b, ref)
                 return {b: sb.b, loc: sb.v}
@@ -4258,10 +4296,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             }
             if (ref.stars > 0) {
                 var nm = ref.name
+                var isEx = ref.ex !== undefined
                 var r = emitSelect(b, emitIsPtr(b, loc),
                                    function(tb) { return {b: emitCellSet(tb, loc, v), v: v} },
                                    function(eb) {
-                                       if (nm != "_") { callExt(eb, "js_scope_set", [curScopeV, emitStr(eb, nm), v]) }
+                                       if (isEx) { callExt(eb, "js_gostructset", [loc, v]) }
+                                       else if (nm != "_") { callExt(eb, "js_scope_set", [curScopeV, emitStr(eb, nm), v]) }
                                        return {b: eb, v: v}
                                    })
                 return r.b
@@ -5909,6 +5949,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (typeof last == "object" && last != null && last.iface == true) {
             // THE METHOD SET IS RECORDED - see the twin in go-interpreter.abnf.
             ifaceMeths["$" + items[0]] = last.imeth
+            if (curPkgName != null) { ifaceMeths["$" + curPkgName + "." + items[0]] = last.imeth }
             return function(b) { return b }
         }
         // Only a type that BINDS a runtime value may go on the package object: an
@@ -6611,31 +6652,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         b = declPrint(b, null, "print", "js_gowrite", 3)
         var osV = callExt(b, "js_obj_new", [])
         callExt(b, "js_set", [osV, emitStr(b, "Exit"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "exit")])])
+        b = declOsFile(b, osV, "Stdin", 0)
         b = declOsFile(b, osV, "Stdout", 1)
         b = declOsFile(b, osV, "Stderr", 2)
-        // os.Args holds the program, as the source file named it. os.Stdin's Read
-        // takes [chunk, err] from js_gostdin - the next bytes of standard input that
-        // fit in p, and at its end io.EOF (an error reading "EOF" when no package
-        // imported io) - and copies the chunk into p. Twin of hostGlobals["os"] and
-        // goStdinRead in go-interpreter.abnf.
-        var inV = callExt(b, "js_obj_new", [])
-        var haveIo = importedFiles["$" + goLibFile("io")] == true
-        b = declFn(b, "$stdinRead", 1, function(fb, a) {
-            var eofV = haveIo ? emitPkgMember(fb, "io", "EOF") : hUndef
-            if (!haveIo) {
-                var newV = callExt(fb, "js_get", [callExt(fb, "js_scope_get", [curScopeV, emitStr(fb, "errors")]), emitStr(fb, "New")])
-                var eargs = callExt(fb, "js_arr_new", [])
-                callExt(fb, "js_arr_push", [eargs, emitStr(fb, "EOF")])
-                eofV = callExt(fb, "js_call", [newV, hUndef, eargs])
-            }
-            var got = callExt(fb, "js_gostdin", [emitHelper(fb, "len", [a[0]]), eofV])
-            var rv = callExt(fb, "js_arr_new", [])
-            callExt(fb, "js_arr_push", [rv, emitHelper(fb, "copy", [a[0], callExt(fb, "js_get", [got, emitNum(fb, 0)])])])
-            callExt(fb, "js_arr_push", [rv, callExt(fb, "js_get", [got, emitNum(fb, 1)])])
-            return {b: fb, v: usesMultiRet ? emitMvWrap(fb, rv) : rv}
-        })
-        callExt(b, "js_set", [inV, emitStr(b, "Read"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$stdinRead")])])
-        callExt(b, "js_set", [osV, emitStr(b, "Stdin"), inV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "os"), osV])
         // The correctly rounded square root lib/go-math.go's Sqrt is, declared when
         // the program imports math. Twin of goMathSqrt in go-interpreter.abnf.
@@ -6649,9 +6668,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             b = declBuiltin(b, "goRxExec", "js_gorxexec", null)
         }
         // The run-time type primitives lib/go-json.go and lib/go-reflect.go are
-        // written over, declared when the program imports either. Twins of the
+        // written over, declared when the program imports either (or calls fmt's Scan
+        // family, lib/go-fmtscan.go). Twins of the
         // goRf* host globals in go-interpreter.abnf.
-        if (importedFiles["$" + goLibFile("encoding/json")] == true || importedFiles["$" + goLibFile("reflect")] == true) {
+        if (importedFiles["$" + goLibFile("encoding/json")] == true || importedFiles["$" + goLibFile("reflect")] == true
+            || importedFiles["$" + goLibFile(goFmtScanPkg)] == true) {
             var rfs = ["Kind", "Unbox", "IsNil", "Elems", "IsBytes", "MapKV", "Fields", "Deref", "ElemTy", "MapTy",
                        "MakeSlice", "MakeMap", "MapSet", "SetField", "Store", "Conv"]
             for (var rfi = 0; rfi < rfs.length; rfi++) { b = declBuiltin(b, "goRf" + rfs[rfi], "js_gorf" + rfs[rfi].toLowerCase(), null) }
@@ -6713,6 +6734,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (goGenAny) { b = declGenerics(b) }
         b = goEmitImportedPkgs(b) // imported declarations, each in ITS PACKAGE'S scope
         b = buildPackages(b)
+        if (importedFiles["$" + goLibFile(goFmtScanPkg)] == true) {
+            for (var fsi = 0; fsi < goFmtScanFns.length; fsi++) {
+                callExt(b, "js_set", [fmtV, emitStr(b, goFmtScanFns[fsi]), emitPkgMember(b, goFmtScanPkg, goFmtScanFns[fsi])])
+            }
+        }
         b = makeSeq(items)(b)
         if (goTpZeroF != null) { goTpZeroFill() }
         if (goRfZeroF != null) { goRfZeroFill() }
@@ -6898,6 +6924,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
 
     goPrescan(c.srcSlice(0, 1073741824))
+    // fmt's Scan family (goFmtScanPkg), bound into fmt by buildMain. Twin of the
+    // interpreter's in go-interpreter.abnf.
+    if (goUsesFmtScan(c.srcSlice(0, 1073741824))) { core.importFile(goFmtScanPkg, 0) }
     c.compile(c.asg)
 
     // ----- the native build -----
