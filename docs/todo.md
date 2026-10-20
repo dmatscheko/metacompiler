@@ -64,7 +64,7 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-680 python re: IGNORECASE pairs from CPython's `_ignorecase_fixes`; non-ASCII ranges of 256+ chars · P3 · PY · OPEN [V]
+### T-680 python re: IGNORECASE pairs from CPython's `_ignorecase_fixes`; non-ASCII ranges of 256+ chars · P3 · PY · IN PROGRESS (RX worker, round 1) [V]
 `re.match("(?i)\u0390", "\u1fd3")` matches in CPython (full-fold extra pairs, sre_compile `_ignorecase_fixes`), not here. A
 non-ASCII class range spanning 256 or more characters only gets the text-side upper/lower test under (?i). Regex owner only.
 
@@ -91,7 +91,7 @@ fn.length` keeps it (node removes it: length 0, hasOwnProperty false).
 
 # JV — Java
 
-### T-698 java regex: a region end cutting a surrogate pair; `\G` in matches()/lookingAt() after an earlier match · P3 · JV · OPEN [V]
+### T-698 java regex: a region end cutting a surrogate pair; `\G` in matches()/lookingAt() after an earlier match · P3 · JV · IN PROGRESS (RX worker, round 1) [V]
 Pattern ".", text "😀", region(0,1), lookingAt() → java false / hitEnd true, ours true / false (java reads the code point across the
 region end; we substring); `[a&&[^b]]+`, `\p{L}+`, a supplementary literal differ in hitEnd. Pattern "\\Ga" on "a": matches() true
 then lookingAt() → java false (\G is oldLast), ours true (gpos=from); needs a gpos parameter on rxMatchAt/rxMatchWhole. Regex owner.
@@ -139,7 +139,7 @@ compiler halves too).
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-692 php: preg_* remainder — recursion/subroutines, conditionals, branch reset, verbs; `(?xx)`; `[:lower:]` under /iu; PREG_BACKTRACK_LIMIT_ERROR · P3 · PHP · OPEN [V]
+### T-692 php: preg_* remainder — recursion/subroutines, conditionals, branch reset, verbs; `(?xx)`; `[:lower:]` under /iu; PREG_BACKTRACK_LIMIT_ERROR · P3 · PHP · IN PROGRESS (RX worker, round 1) [V]
 `(?R)`, `(?1)`, `(?&n)`, `\g<n>`, `(?(1)a|b)`, `(?|...)`, `(*VERB)`/`(*UTF)`, callouts raise "preg_*(): unsupported ..." (the J
 rewrite cannot number branch-reset groups and has no recursion). `(?xx)` and `[:lower:]`/`[:upper:]` under /iu unhandled. Step-budget
 exhaustion is fatal instead of `false` + PREG_BACKTRACK_LIMIT_ERROR. An array subject is cast to string instead of the TypeError.
@@ -174,7 +174,7 @@ Every Go function runs through js_gotry and runtime.c caps the setjmp stack at J
 native Go program recursing ~500 deep dies (also json.Unmarshal of a valid 10000-deep value); interp and llvm.Run are fine, go
 itself handles millions. Related to T-505 (what a too-deep recursion should raise).
 
-### T-675 regex (CORE): the shared backtracking matcher recurses per SPLIT and overflows the native stack · P3 · CORE · OPEN [V]
+### T-675 regex (CORE): the shared backtracking matcher recurses per SPLIT and overflows the native stack · P3 · CORE · IN PROGRESS (RX worker, round 1) [V]
 `re.match(r"^.*$", "ab"*35000)` (python) and Go `regexp.MustCompile("^.*$").MatchString(70 KB)` exit 139 natively; CPython and go
 match. lib/regex.js's matcher needs an explicit backtrack stack (or loop-for-greedy-star) instead of a call per SPLIT.
 
