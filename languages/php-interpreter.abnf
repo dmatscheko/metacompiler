@@ -4039,15 +4039,19 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     function fnName(n) { return n.charCodeAt(0) == 92 ? n.substring(1) : n }
     // PHP function names are case-insensitive: a function is also declared under a
-    // hidden lower-cased key (declFn). A name given at run time is looked up
-    // lower-cased with one leading "\" dropped (zend_init_dynamic_call_string), and
-    // a miss is worded with the name as given. Twin of fnRetry in
-    // php-to-llvm-ir.abnf.
+    // hidden lower-cased key (declFn), and under its lower-cased name, which a call
+    // written in lower case finds. A name given at run time, or a call written with
+    // capitals, is looked up lower-cased with one leading "\" dropped
+    // (zend_init_dynamic_call_string), and a miss is worded with the name as given.
+    // No other hidden name starts "\x00f" and a lower-case letter. Twin of fnRetry
+    // and makeDefStmt in php-to-llvm-ir.abnf.
     function fnKey(lc) { return "\x00f" + lc }
     function declFn(fn) {
         var f = makeFunClosure(fn)
         scopePut(globalScope, fn.name, f)
-        scopePut(globalScope, fnKey(phsCase(fn.name, false)), f)
+        var lc = phsCase(fn.name, false)
+        scopePut(globalScope, fnKey(lc), f)
+        if (lc != fn.name) { scopePut(globalScope, lc, f) }
     }
     function fnDefined(n) {
         var lc = phsCase(fnName(n), false)
@@ -4056,8 +4060,13 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     function callDyn(n, argset) {
         var lc = phsCase(fnName(n), false)
         if (hasOwn(phpBuiltins, lc)) { return phpBuiltins[lc].apply(undefined, argset.pos) }
+        return fnGet(n)(argset)
+    }
+    // The user function named n in any letter case.
+    function fnGet(n) {
+        var lc = phsCase(fnName(n), false)
         if (!varExists(fnKey(lc))) { phpRaise("Error", "Call to undefined function " + n + "()") }
-        return getVar(fnKey(lc))(argset)
+        return getVar(fnKey(lc))
     }
     // ----- statics: class constants, static properties and '::' -------------------
     // A class descriptor carries three more ordered maps beside its methods:
@@ -4283,7 +4292,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             cbFail(where, "function \"" + cur + "\" not found or invalid function name")
         }
         if (isArr(cur)) {
-            if (cur.keys.length != 2) { cbFail(where, "array must have exactly two members") }
+            if (cur.keys.length != 2) { cbFail(where, "array callback must have exactly two members") }
             var recv = anytype
             recv = arrGet(cur, 0)
             if (!isObj(recv) && typeof recv != "string" && typeof recv != "function") { cbFail(where, "first array member is not a valid class name or object") }
@@ -4578,7 +4587,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // variable of the same name are unrelated. Only true/false/null are
     // case-INsensitive in PHP; every other constant is matched exactly.
     var phpConsts = {}
-    var FN_KEY = "\x00fn"
+    var FN_KEY = "\x00Fn"
     function makeConstDecl(items) {
         var recs = []
         collectConsts(items, recs)
@@ -5913,6 +5922,19 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     function makeCall(items) {
         var name = phpLibRef(items[0])
+        // A name written in another letter case: a builtin or library function is
+        // called by its own name, a user function through its lower-cased key
+        // (callDyn), which names the function as written on a miss.
+        var bare = fnName(name)
+        var anyCase = false
+        if (phsCase(bare, false) != bare) {
+            var lcb = phsCase(bare, false)
+            if (hasOwn(phpBuiltins, lcb) || (phpLib != null && phpLibKey(phpLib, lcb) != "")) { name = lcb }
+            else {
+                anyCase = true
+                name = bare
+            }
+        }
         var args = items.slice(1)
         var resolveCb = name == "call_user_func" || name == "call_user_func_array"
         var libCb = hasOwn(libCbArg, "$" + phsCase(name, false))
@@ -5928,12 +5950,16 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                     libArgs(argset.pos[0], inner)
                     for (var ii = 0; ii < inner.pos.length; ii++) { argset.pos[ii + 1] = inner.pos[ii] }
                 }
+                if (name == "call_user_func_array" && typeof argset.pos[0] == "string" && argset.pos.length > 1
+                    && isArr(argset.pos[1])) {
+                    argset.pos[1] = cufaLib(argset.pos[0], argset.pos[1])
+                }
             }
             if (libCb) { libArgs(name, argset) }
             // f(1, ?) / f(1, ...) is a PARTIAL: bind what is there, wait for the rest.
             if (isPartial(argset)) {
                 var pname = name
-                return makePartial(function(a2) { return callNamed(pname, a2) }, argset)
+                return makePartial(function(a2) { return anyCase ? callDyn(pname, a2) : callNamed(pname, a2) }, argset)
             }
             // f(...) is the first-class callable form: it yields the function itself.
             if (argset.fcc === true) {
@@ -5948,10 +5974,34 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                     var lname = name
                     return function(a2) { libArgs(lname, a2); return lf(a2) }
                 }
-                return getVar(name)
+                return anyCase ? fnGet(name) : getVar(name)
             }
-            return callNamed(name, argset)
+            return anyCase ? callDyn(name, argset) : callNamed(name, argset)
         }
+    }
+    // call_user_func_array(f, $args) of a library function that takes a callback:
+    // that callback is judged in this frame too, on a copy of $args whose
+    // positional elements and named keys are f's arguments. Twin of cufaLib in
+    // php-to-llvm-ir.abnf.
+    function cufaLib(f, arr) {
+        if (!hasOwn(libCbArg, "$" + phsCase(fnName(f), false))) { return arr }
+        var inner = {pos: [], named: {}, holes: [], fcc: false}
+        for (var i = 0; i < arr.keys.length; i++) {
+            if (typeof arr.keys[i] == "number") { inner.pos.push(deref(arr.vals[i])) }
+            else { scopePut(inner.named, "$" + arr.keys[i], deref(arr.vals[i])) }
+        }
+        libArgs(f, inner)
+        var out = arrCopy(arr)
+        var p = 0
+        for (var j = 0; j < arr.keys.length; j++) {
+            var nv = anytype
+            if (typeof arr.keys[j] == "number") {
+                nv = inner.pos[p]
+                p++
+            } else { nv = inner.named["$" + arr.keys[j]] }
+            if (nv !== deref(arr.vals[j])) { arrSet(out, arr.keys[j], nv) }
+        }
+        return out
     }
     // A parameter record: name, by-reference flag, variadic flag, default thunk.
     function makeParam(items) {
@@ -6817,6 +6867,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         // With no argument, the class scope of the caller (deprecated since 8.3).
         "get_parent_class": function(v) { return arguments.length == 0 ? phpParentOf(ctxSelf()) : phpParentClass(v) },
         "class_exists": function(n) { return phpClassExists(n, false) },
+        // function_exists: a function of that name in any letter case, one leading
+        // "\" dropped (ZEND_FUNCTION(function_exists)). Twin of emitBuiltin's in
+        // php-to-llvm-ir.abnf.
+        "function_exists": function(n) { return fnDefined(phpStr(n)) },
         // realpath(3) through the host; false when the path does not resolve. Twin
         // of js_realpath (languages/lib/runtime.c, abnf/jsrtphp.go).
         "realpath": function(p) {

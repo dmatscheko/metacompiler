@@ -3605,7 +3605,7 @@ function js_phcbarr(v, where) {
             if (phLen(v) != 2) { phRaise("Error", "Array callback must have exactly two elements") }
             return true
         }
-        if (phLen(v) != 2) { phCbFail(where, "array must have exactly two members") }
+        if (phLen(v) != 2) { phCbFail(where, "array callback must have exactly two members") }
         var recv = phArrGet(v, 0)
         var isCls = typeof recv == "string"
         var isClo = typeof recv == "function"

@@ -121,6 +121,12 @@ function is_subclass_of($object_or_class, $class, $allow_string = true) { return
 function class_exists($class, $autoload = true) { return class_exists($class); }
 function interface_exists($interface, $autoload = true) { return interface_exists($interface); }
 function method_exists($object_or_class, $method) { return method_exists($object_or_class, $method); }
+function property_exists($object_or_class, $property) { return property_exists($object_or_class, $property); }
+function var_dump($value, ...$values) {
+    var_dump($value);
+    foreach ($values as $v) { var_dump($v); }
+}
+function function_exists($function) { return function_exists($function); }
 
 // zend_zval_value_name, the "X given" of PHP 8.3's argument TypeErrors: a bool is
 // named by its value ("true given"), anything else as get_debug_type does.

@@ -3789,6 +3789,59 @@ function s73() {
         'array_uintersect_uassoc(): Argument #2 must be of type array, int given']);
 }
 
+// ===== SECTION 74: function_exists, direct calls in any case, call_user_func_array's library callbacks =====
+// Function names are case-insensitive in a direct call as in a dynamic one, and
+// a miss names the function as written (Zend/zend_compile.c lower-cases the
+// lookup key, zend_execute.c ZEND_INIT_FCALL_BY_NAME words the miss).
+// function_exists looks the name up lower-cased with one leading "\" dropped
+// (Zend/zend_builtin_functions.c). An array callback of another size is "array
+// callback must have exactly two members" (Zend/zend_API.c
+// zend_is_callable_at_frame). A library function reached through
+// call_user_func_array judges its callback at the first user frame, as through
+// call_user_func (zend_API.c get_scope skips internal frames).
+function S74Inc(&$x) { $x++; return $x; }
+function N() { return "n"; }
+class S74A {
+    private function neg($x) { return -$x; }
+    private function odd($x) { return $x % 2 == 1; }
+    private function cmp($a, $b) { return $a <=> $b; }
+    function t() {
+        $a = [1, 2, 3];
+        $args = [[$this, 'neg'], $a];
+        $out = [implode(',', call_user_func_array('array_map', $args)), is_array($args[0]) ? "kept" : "changed"];
+        $out[] = implode(',', call_user_func_array('Array_Filter', ['array' => $a, 'callback' => [$this, 'odd']]));
+        $out[] = implode(',', call_user_func_array('array_udiff', [$a, [2], [$this, 'cmp']]));
+        $f = function () use ($a) { return call_user_func_array('array_map', [[$this, 'neg'], $a]); };
+        $out[] = implode(',', $f());
+        try { call_user_func_array('array_udiff', [$a, [2], [$this]]); } catch (TypeError $e) { $out[] = $e->getMessage(); }
+        return $out;
+    }
+}
+function s74err($f) {
+    try { $f(); return "none"; } catch (Error $e) { return get_class($e) . ": " . $e->getMessage(); }
+}
+function s74() {
+    check("fex1", function_exists('strlen') && function_exists('S74Inc') && function_exists('s74inc')
+        && function_exists('\S74INC') && !function_exists('s74none') && function_exists('USORT')
+        && Function_Exists('array_map'));
+    $v = 1;
+    S74INC($v);
+    s74inc($v);
+    $g = S74INC(...);
+    $g($v);
+    check("fnc3", $v === 4 && STRTOUPPER("x") === "X" && StrLen("abc") === 3 && n() === "n"
+        && implode(',', Array_Map(fn($x) => $x * 3, [1, 2])) === "3,6" && \StrToLower("Q") === "q");
+    check("fnc4", s74err(function () { S74Missing(1); }) === "Error: Call to undefined function S74Missing()"
+        && s74err(function () { \S74Missing2(); }) === "Error: Call to undefined function S74Missing2()");
+    check("fnc5", (function () { $f = 'N'; return $f(); })() === "n");
+    check("cbm1", s74err(function () { call_user_func([1], 2); })
+        === "TypeError: call_user_func(): Argument #1 (\$callback) must be a valid callback, array callback must have exactly two members"
+        && s74err(function () { array_map([1, 2, 3], [1]); })
+        === "TypeError: array_map(): Argument #1 (\$callback) must be a valid callback or null, array callback must have exactly two members");
+    check("cfa1", (new S74A)->t() === ['-1,-2,-3', 'kept', '1,3', '1,3', '-1,-2,-3',
+        'array_udiff(): Argument #3 must be a valid callback, array callback must have exactly two members']);
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -3871,6 +3924,7 @@ function main() {
     s71(); // SECTION-CALL 71
     s72(); // SECTION-CALL 72
     s73(); // SECTION-CALL 73
+    s74(); // SECTION-CALL 74
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

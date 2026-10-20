@@ -3839,7 +3839,7 @@ func init() {
 					return jsHTrue
 				}
 				if rt.phpLen(v) != 2 {
-					rt.phpCbFail(where, "array must have exactly two members")
+					rt.phpCbFail(where, "array callback must have exactly two members")
 				}
 				recv := rt.phpArrGet(v, float64(0))
 				_, isCls := recv.(string)

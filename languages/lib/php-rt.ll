@@ -1962,7 +1962,7 @@
 @jsfde.1000364 = global i64 0
 @jsgc.1000288 = global [4 x i64] zeroinitializer
 @str.1000906 = global [45 x i8] c"Array callback must have exactly two elements"
-@str.1000907 = global [35 x i8] c"array must have exactly two members"
+@str.1000907 = global [44 x i8] c"array callback must have exactly two members"
 @str.1000908 = global [54 x i8] c"first array member is not a valid class name or object"
 @str.1000909 = global [41 x i8] c"second array member is not a valid method"
 @jsgc.1000289 = global [4 x i64] zeroinitializer
@@ -80277,7 +80277,7 @@ dead1155:
 90:
 	%91 = phi i64 [ %34, %89 ]
 	%92 = call i64 @js_scope_cget(i64* getelementptr ([4 x i64], [4 x i64]* @jsgc.1000206, i64 0, i64 0), i64 %env, i8* getelementptr ([8 x i8], [8 x i8]* @str.1000601, i64 0, i64 0), i64 8)
-	%93 = call i64 @js_str_mem(i8* getelementptr ([35 x i8], [35 x i8]* @str.1000907, i64 0, i64 0), i64 35)
+	%93 = call i64 @js_str_mem(i8* getelementptr ([44 x i8], [44 x i8]* @str.1000907, i64 0, i64 0), i64 44)
 	%94 = load i64, i64* @jsfdc.1000409
 	%95 = icmp eq i64 %92, %94
 	br i1 %95, label %96, label %99
