@@ -999,10 +999,10 @@ function ktNoElemNull() { ktRaise("NoSuchElementException", null) }
 function ktNoElemKind(kind) { ktNoElem(kind + " is empty.") }
 // The kind numbers kept on a host array (arrKind / arrKindSet, host ids 99/100):
 // 0 a List, 1 an Array, 2 a Sequence, 3 a Map's values view, 4 a read-only List
-// from listOf / emptyList or a sorted copy of a Collection or an Array (whose JVM
-// class ktJvmListClass names), 5 and up a primitive array (lib/kotlin-math.js's
-// ktaElems), -1..-3 a deque or a LinkedList. Twin of ktArrWords in
-// abnf/jsrtkotlin.go.
+// from listOf / emptyList or a sorted copy of a Collection (whose JVM class
+// ktJvmListClass names), 5 and up a primitive array (lib/kotlin-math.js's
+// ktaElems), -1..-4 a deque, a LinkedList or an Array's sorted copy. Twin of
+// ktArrWords in abnf/jsrtkotlin.go.
 function ktArrWord(k) {
     if (k == 1 || k >= 5) { return "Array" }
     if (k == 2) { return "Sequence" }
@@ -1023,11 +1023,13 @@ function ktResultKind(recv, name) {
         name == "sortedArrayDescending" || name == "reversedArray" || name == "sliceArray") { return ktaResultKind(recv, name) }
     if ((recv == 1 || recv >= 5) && name == "plus") { return recv }
     if (recv == 2 && ktSeqKeeps(name)) { return 2 }
-    // The sorted family on a Collection or an Array: an Arrays.asList or a toList(),
-    // except a primitive array's sortedDescending. Twin of ktResultKind in
-    // abnf/jsrtkotlin.go, which has the rule.
-    if (recv != 2 && ktSortedName(name) && !(recv >= 5 && name == "sortedDescending")) { return 4 }
-    return 0
+    // The sorted family: an Arrays.asList at every size on an Array (-4), a toList()
+    // at size 0 or 1 on a Collection (4); a primitive array's sortedDescending is an
+    // ArrayList. Twin of ktResultKind in abnf/jsrtkotlin.go, which has the rule.
+    if (recv == 2 || !ktSortedName(name)) { return 0 }
+    if (recv >= 5 && name == "sortedDescending") { return 0 }
+    if (recv == 1 || recv >= 5) { return -4 }
+    return 4
 }
 function ktSortedName(name) {
     if (name == "sorted" || name == "sortedDescending" || name == "sortedBy") { return true }
@@ -3884,7 +3886,8 @@ function jxkRadix(v, r) {
 function jxkDbl(v) { return ktNum(v) }
 function jxkDblStr(a) { return ktRender(flo(a, 0)) }
 function jxkFail(msg) { fail(msg) }
-// The JVM class of a List; twin of ktJvmListClass in abnf/jsrtkotlin.go.
+// The JVM class of a List or a values view; twin of ktJvmListClass in
+// abnf/jsrtkotlin.go, which has the rules.
 function ktJvmListClass(kind, n) {
     if (kind == 4) {
         if (n == 0) { return "kotlin.collections.EmptyList" }
@@ -3895,6 +3898,8 @@ function ktJvmListClass(kind, n) {
     if (kind == -1) { return "java.util.ArrayDeque" }
     if (kind == -2) { return "kotlin.collections.ArrayDeque" }
     if (kind == -3) { return "java.util.LinkedList" }
+    if (kind == -4) { return "java.util.Arrays$ArrayList" }
+    if (kind == 3) { return "java.util.LinkedHashMap$LinkedValues" }
     return "ArrayList"
 }
 function jxkClass(v) {
@@ -6643,7 +6648,12 @@ function k4bSimpleName(v) {
     }
     if (typeof v == "string") { return "String" }
     if (typeof v == "boolean") { return "Boolean" }
-    if (Array.isArray(v)) { return "ArrayList" }
+    if (Array.isArray(v)) {
+        var ak = arrKind(v)
+        if (ak >= 5) { return ktaElems[ak - 5] + "Array" }
+        if (ak == 1) { return "Array" }
+        return "ArrayList"
+    }
     if (ktIsObj(v)) {
         if (v["__isclass"] === true) { return v["__name"] }
         var cls = v["__class"]
@@ -6662,8 +6672,9 @@ function ktClassLit(name) {
     return o
 }
 
-// A collection's `javaClass`: a class literal that also carries the JVM binary name
-// (jname). Twin of ktJavaClass in abnf/jsrtkotlin.go, which has the rules.
+// `javaClass`, and a collection's KClass: a class literal that also carries the JVM
+// binary name (jname). Twin of ktJavaClass in abnf/jsrtkotlin.go, which has the
+// rules.
 function ktJavaClass(jc) {
     var cut = -1
     var i = 0
@@ -6672,17 +6683,27 @@ function ktJavaClass(jc) {
         if (ch == "." || ch == "$") { cut = i }
         i = i + 1
     }
-    var o = ktClassLit(jc.substring(cut + 1, jc.length))
+    var sn = jc.substring(cut + 1, jc.length)
+    if (jc.charAt(0) == "[") {
+        if (jc.length == 2) { sn = ktJvmPrimName(jc.charAt(1)) } else { sn = jc.substring(cut + 1, jc.length - 1) }
+        sn = sn + "[]"
+    }
+    var o = ktClassLit(sn)
     o["jname"] = jc
     return o
 }
+// The java primitive a one-letter array descriptor names (`[I` is int[]).
+function ktJvmPrimName(c) {
+    var names = ["int", "long", "double", "float", "char", "boolean", "byte", "short"]
+    return names["IJDFCZBS".indexOf(c)]
+}
 
-// The JVM class of a List, a Set or a Map, "" for any other value. Twin of
-// ktCollJvmClass in abnf/jsrtkotlin.go.
+// The JVM class of a List, a Set, a Map or a values view, "" for any other value.
+// Twin of ktCollJvmClass in abnf/jsrtkotlin.go.
 function ktCollJvmClass(v) {
     if (ktIsArr(v)) {
         var ak = arrKind(v)
-        if (ak <= 0 || ak == 4) { return ktJvmListClass(ak, v.length) }
+        if (ak <= 0 || ak == 3 || ak == 4) { return ktJvmListClass(ak, v.length) }
         return ""
     }
     if (ktIsSet(v)) { return ktJvmTag(v, "java.util.LinkedHashSet") }
@@ -6730,14 +6751,13 @@ function ktRefEq(l, r) {
 // (KProperty1 / KFunction1, whose get/set/invoke take the receiver first),
 // anything else a BOUND one.
 //
-// The Go twin also recognizes a ktTypeName marker, which only js_ktrebase - a
-// SCOPE-taking extern lowered in the emitter - can produce; the emitter passes
-// the type NAME as a string in its place, which is the arm below.
+// A base that named a type arrives as js_ktrefbase's marker (ktTypeMarker), the
+// twin of the Go ktTypeName.
 function js_ktref(base, name, ext) {
-    if (typeof base == "string") {
-        return ktMakeRef(k4bRefInfo(null, name, false, false, base, ext))
-    }
     if (ktIsObj(base)) {
+        if (typeof base["__kttype"] == "string") {
+            return ktMakeRef(k4bRefInfo(null, name, false, false, base["__kttype"], ext))
+        }
         if (base["__isclass"] === true) {
             return ktMakeRef(k4bRefInfo(null, name, false, false, base["__name"], ext))
         }
@@ -6759,10 +6779,14 @@ function js_ktctorref(v) {
 
 // js_ktclasslit(base) is `base::class`.
 function js_ktclasslit(base) {
-    if (typeof base == "string") { return ktClassLit(base) }
     if (ktIsObj(base)) {
+        if (typeof base["__kttype"] == "string") { return ktClassLit(base["__kttype"]) }
         if (base["__isclass"] === true) { return ktClassLit(base["__name"]) }
     }
+    // A collection's KClass is its JVM class. Twin of ktClassOf in
+    // abnf/jsrtkotlin.go.
+    var jc = ktCollJvmClass(base)
+    if (jc != "") { return ktJavaClass(jc) }
     return ktClassLit(k4bSimpleName(base))
 }
 
@@ -7255,7 +7279,7 @@ function js_ktset(o, key, val) {
 //     js_ktvarset, js_ktmextget/set/call, js_ktouter, js_ktrefbase, js_ktdthis,
 //     js_ktbareref) is lowered in the EMITTER: a scope is the C floor's private
 //     storage and layer 2 cannot open one. js_ktrefbase is the only producer of
-//     the `ktTypeName` marker, so nothing here builds one.
+//     the type marker (ktTypeMarker).
 //   * `js_mcall` stays the floor's for everyone else; the hub cannot CALL an
 //     extern, so k4BaseMcall below reimplements the arms of rt.memberCall
 //     (abnf/jsrt.go:2761) that a Kotlin receiver can still reach after the whole
@@ -9016,10 +9040,13 @@ function ktSmcall(recv, name, args) {
         var lv = ktSeqMethodK(rv, name, as, rvKind)
         if (!ktMiss(lv)) {
             if (ktIsArr(lv) && lv !== rv) {
-                var lk = ktResultKind(arrKind(rv), name)
+                var rk = arrKind(rv)
+                var lk = ktResultKind(rk, name)
                 // A range (rvKind Collection) is no Collection: its sorted copy
-                // stays an ArrayList.
+                // stays an ArrayList. A primitive array's empty sortedDescending is
+                // emptyList().
                 if (lk == 4 && rvKind == "Collection") { lk = 0 }
+                if (rk >= 5 && name == "sortedDescending" && lv.length == 0) { lk = 4 }
                 if (lk != 0) { arrKindSet(lv, lk) }
             }
             return lv
@@ -9697,10 +9724,24 @@ function js_ktfget(o, name) {
         }
     }
     // A KClass. simpleName and qualifiedName agree for a top-level class in the
-    // default package, and .java is the same handle again.
+    // default package (a java class's qualifiedName is its binary name with "." for
+    // "$"), and .java is the same handle again.
     if (ktIsClassLit(o)) {
         if (name == "simpleName") { return o["kname"] }
-        if (name == "qualifiedName") { return o["kname"] }
+        if (name == "qualifiedName") {
+            if (o["jname"] !== undefined) {
+                var jn = o["jname"]
+                var qn = ""
+                var qi = 0
+                while (qi < jn.length) {
+                    var qc = jn.charAt(qi)
+                    if (qc == "$") { qn = qn + "." } else { qn = qn + qc }
+                    qi = qi + 1
+                }
+                return qn
+            }
+            return o["kname"]
+        }
         if (name == "name") {
             if (o["jname"] !== undefined) { return o["jname"] }
             return o["kname"]
@@ -9712,8 +9753,8 @@ function js_ktfget(o, name) {
         return undefined
     }
     if (name == "javaClass") {
-        var cjc = ktCollJvmClass(o)
-        if (cjc != "") { return ktJavaClass(cjc) }
+        var cjc = jxkClass(o)
+        if (typeof cjc == "string") { return ktJavaClass(cjc) }
     }
     // `Col.entries` is a PROPERTY (an EnumEntries, which is a List) where values()
     // is a function, so it is read here too.
@@ -10957,9 +10998,8 @@ function js_ktouter(env, name) {
 // decided at EMIT time (makeQualRef in kotlin-to-llvm-ir.abnf), because the
 // extern's ktTypeNames test runs before its scope walk and so cannot be lowered
 // under it. What is left is the binding walk, the `this` walk, and "nothing
-// carries this name, so it names a type". Layer 2 cannot make a Go ktTypeName
-// marker, so the marker is the NAME ITSELF as a string - which is exactly the
-// shape js_ktref reads as "the base named a type".
+// carries this name, so it names a type" - answered as ktTypeMarker, never as the
+// bare name, which a String-valued binding would be indistinguishable from.
 function js_ktrefbase(env, name, istype) {
     // The ktTypeNames arm, and why it arrives as a FLAG rather than a fourth copy
     // of the list. The Go twin tests `ktTypeNames[name]` BEFORE its scope walk, so
@@ -10971,7 +11011,7 @@ function js_ktrefbase(env, name, istype) {
 // kotlin-interpreter.abnf and the emitter must already keep in step. The Go
 // twin ignores the extra argument and re-decides from its own table, which is
 // the same table, so the two engines agree by construction.
-    if (istype === true) { return name }
+    if (istype === true) { return ktTypeMarker(name) }
     var v = anytype
     v = k6Find(env, name)
     if (!ktMiss(v)) { return v }
@@ -10987,7 +11027,13 @@ function js_ktrefbase(env, name, istype) {
         }
         s = scopeParent(s)
     }
-    return name
+    return ktTypeMarker(name)
+}
+// The twin of the Go ktTypeName: a `::` base that named a type.
+function ktTypeMarker(name) {
+    var o = {}
+    o["__kttype"] = name
+    return o
 }
 
 // jsrtkotlin.go:1619's js_ktbareref: a bare `::name`. A scope binding is the

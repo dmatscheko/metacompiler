@@ -5,7 +5,8 @@
  * Random to the JVM generator (java: new Random(1).nextInt(100) is 85, then 88).
  * The java.util collections kotlin.collections typealiases (ArrayList, HashMap,
  * HashSet, LinkedHashMap, LinkedHashSet) import as the same constructors, by name,
- * under an alias, or through `java.util.*`.
+ * under an alias, or through `java.util.*`; that star import also binds ArrayDeque
+ * to java.util.ArrayDeque (no List), not kotlin.collections.ArrayDeque.
  * main() ends with exitProcess, so the run exits 0 exactly when every check
  * passes. **/
 
@@ -50,5 +51,7 @@ fun main() {
     val lm = LinkedHashMap<Int, Int>()
     lm[1] = 5
     check("jstarimport", lm.getValue(1) + HashSet<Int>(listOf(1, 1)).size, 6)
+    val dq: Any = ArrayDeque<Int>()
+    check("jarraydeque", if (dq is java.util.ArrayDeque<*> && dq !is List<*>) 1 else 0, 1)
     exitProcess(fails)
 }

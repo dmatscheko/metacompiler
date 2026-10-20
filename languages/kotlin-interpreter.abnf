@@ -3991,7 +3991,7 @@ NotMemberKw = :script(~~
     hostGlobals["HashMap"] = function(src) { return kJvmTagged(hostGlobals["LinkedHashMap"](src), "java.util.HashMap") }
     hostGlobals["TreeSet"] = kJavaCollection("set", "java.util.TreeSet")
     hostGlobals["TreeMap"] = kJavaCollection("map", "java.util.TreeMap")
-    // A deque or a LinkedList is a list of its own kind (kDequeClasses); a bare
+    // A deque or a LinkedList is a list of its own kind (kListKindClasses); a bare
     // ArrayDeque is kotlin.collections'.
     function kListCtor(k) { return function(src) { return arrKindSet(hostGlobals["ArrayList"](src), k) } }
     hostGlobals["java.util.ArrayDeque"] = kListCtor(-1)
@@ -6170,21 +6170,26 @@ NotMemberKw = :script(~~
     function jxkDblStr(a) { return kFloStr(a) }
     function jxkFail(msg) { fail(msg) }
     // The JVM class of a List: kotlin-stdlib's listOf answers EmptyList, a
-    // Collections.singletonList or an Arrays.asList by its size; a deque or a
-    // LinkedList its own class (the negative kinds); every other List here is a
-    // java.util.ArrayList. An Array or a Sequence keeps its simple name.
-    // Twin of ktJvmListClass in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    // Collections.singletonList or an Arrays.asList by its size; a deque, a LinkedList
+    // or an Array's sorted copy its own class (the negative kinds); every other List
+    // here is a java.util.ArrayList. A values view is a LinkedHashMap's (the view
+    // keeps no record of its map's class); an Array or a Sequence keeps its simple
+    // name. Twin of ktJvmListClass in abnf/jsrtkotlin.go and
+    // languages/lib/kotlin-rt.metajs.
     function kJvmListClass(kind, n) {
         if (kind == 4) {
             if (n == 0) { return "kotlin.collections.EmptyList" }
             return n == 1 ? "java.util.Collections$SingletonList" : "java.util.Arrays$ArrayList"
         }
-        if (kind < 0) { return kDequeClasses[0 - kind] }
+        if (kind < 0) { return kListKindClasses[0 - kind] }
+        if (kind == 3) { return "java.util.LinkedHashMap$LinkedValues" }
         return kind == 0 ? "java.util.ArrayList" : "ArrayList"
     }
     // The classes of the negative kinds: -1 java.util.ArrayDeque, -2
-    // kotlin.collections.ArrayDeque, -3 java.util.LinkedList.
-    var kDequeClasses = ["", "java.util.ArrayDeque", "kotlin.collections.ArrayDeque", "java.util.LinkedList"]
+    // kotlin.collections.ArrayDeque, -3 java.util.LinkedList, -4 an Arrays.asList at
+    // every size (an Array's sorted copy).
+    var kListKindClasses = ["", "java.util.ArrayDeque", "kotlin.collections.ArrayDeque", "java.util.LinkedList",
+        "java.util.Arrays$ArrayList"]
     var kOpNames = {plus: "+", minus: "-", times: "*", div: "/", rem: "%"}
     // toString(radix) is java's Integer/Long.toString(v, radix) - a sign and the
     // magnitude's digits, an unsigned type reading its bits unsigned; the bit counts
@@ -10908,23 +10913,36 @@ NotMemberKw = :script(~~
     // too, which is why .java answers the same value here), and for a top-level class in
     // the default package qualifiedName IS the simple name.
     function kClassLitNamed(n) { return {__kclass: true, kname: n} }
-    function kClassOf(v) { return {__kclass: true, kname: kSimpleName(v)} }
-    // A collection's `javaClass`: a class literal that also carries the JVM binary
-    // name jc (jname), which .name and toString answer; simpleName is the part after
-    // the package and the enclosing class. Twin of ktJavaClass in abnf/jsrtkotlin.go
-    // and languages/lib/kotlin-rt.metajs.
+    // A collection's KClass is its JVM class (kJavaClass): kotlin-stdlib's
+    // ClassReference names a java class by the class itself. Twin of ktClassOf in
+    // abnf/jsrtkotlin.go and js_ktclasslit in languages/lib/kotlin-rt.metajs.
+    function kClassOf(v) {
+        var jc = kCollJvmClass(v)
+        if (jc != "") { return kJavaClass(jc) }
+        return {__kclass: true, kname: kSimpleName(v)}
+    }
+    // `javaClass`, and a collection's KClass: a class literal that also carries the
+    // JVM binary name jc (jname), which .name and toString answer. simpleName is the
+    // part after the package and the enclosing class, an array's its element's with
+    // "[]" (`[I` is int[]). Twin of ktJavaClass in abnf/jsrtkotlin.go and
+    // languages/lib/kotlin-rt.metajs.
     function kJavaClass(jc) {
         var cut = -1
         for (var i = 0; i < jc.length; i++) { if (jc.charAt(i) == "." || jc.charAt(i) == "$") { cut = i } }
-        return {__kclass: true, kname: jc.substring(cut + 1), jname: jc}
+        var sn = jc.substring(cut + 1)
+        if (jc.charAt(0) == "[") {
+            sn = jc.length == 2 ? kJvmPrimNames["IJDFCZBS".indexOf(jc.charAt(1))] : jc.substring(cut + 1, jc.length - 1)
+            sn = sn + "[]"
+        }
+        return {__kclass: true, kname: sn, jname: jc}
     }
-    // The JVM class of a List, a Set or a Map, "" for any other value (a values view,
-    // an Array or a Sequence records no class). Twin of ktCollJvmClass in
-    // abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    var kJvmPrimNames = ["int", "long", "double", "float", "char", "boolean", "byte", "short"]
+    // The JVM class of a List, a Set, a Map or a values view, "" for any other value.
+    // Twin of ktCollJvmClass in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
     function kCollJvmClass(v) {
         if (Array.isArray(v)) {
             var ak = arrKind(v)
-            return ak <= 0 || ak == 4 ? kJvmListClass(ak, v.length) : ""
+            return ak <= 0 || ak == 3 || ak == 4 ? kJvmListClass(ak, v.length) : ""
         }
         if (kIsSet(v)) { return v.__jc !== undefined ? v.__jc : "java.util.LinkedHashSet" }
         if (kIsMap(v)) { return v.__jc !== undefined ? v.__jc : "java.util.LinkedHashMap" }
@@ -10943,7 +10961,11 @@ NotMemberKw = :script(~~
         if (typeof v == "boolean") { return "Boolean" }
         if (typeof v == "object" && v.__isclass === true) { return v.__name }
         if (typeof v == "object" && v.__class != undefined && v.__class != null) { return v.__class.__name }
-        if (Array.isArray(v)) { return "ArrayList" }
+        if (Array.isArray(v)) {
+            var ak = arrKind(v)
+            if (ak >= 5) { return ktaElems[ak - 5] + "Array" }
+            return ak == 1 ? "Array" : "ArrayList"
+        }
         return null
     }
     function kIsClassLit(v) { return v !== null && v !== undefined && typeof v == "object" && v.__kclass === true }
@@ -11094,8 +11116,9 @@ NotMemberKw = :script(~~
         }
         if (kIsPkg(o)) { return kPkgMember(o, name) }
         if (name == "javaClass") {
-            var cjc = kCollJvmClass(o)
-            if (cjc != "") { return kJavaClass(cjc) }
+            var cjc = anytype
+            cjc = jxkClass(o)
+            if (typeof cjc == "string") { return kJavaClass(cjc) }
         }
         var krxf = krxField(o, name)
         if (krxf != null) { return krxf.v }
@@ -11226,10 +11249,12 @@ NotMemberKw = :script(~~
             return kGetField(o.obj, o.pname)
         }
         // KClass: simpleName / qualifiedName (a top-level class in the default package
-        // has no package prefix, so the two agree) and .java, which is the same handle
-        // again - java.lang.Class renders "class Box" exactly as KClass does.
+        // has no package prefix, so the two agree; a java class's is its binary name
+        // with "." for "$") and .java, which is the same handle again - java.lang.Class
+        // renders "class Box" exactly as KClass does.
         if (o.__kclass === true) {
             if (name == "name" && o.jname !== undefined) { return o.jname }
+            if (name == "qualifiedName" && o.jname !== undefined) { return o.jname.split("$").join(".") }
             if (name == "simpleName" || name == "qualifiedName" || name == "name") { return o.kname }
             if (name == "java" || name == "javaClass" || name == "javaObjectType") { return o }
             fail("member ." + name + " of a class literal")
@@ -11375,10 +11400,10 @@ NotMemberKw = :script(~~
     function kNoElemKind(kind) { kNoElem(kind + " is empty.") }
     // The kind numbers kept on a host array (arrKind / arrKindSet): 0 a List, 1 an
     // Array, 2 a Sequence, 3 a Map's values view, 4 a read-only List from listOf /
-    // emptyList or a sorted copy of a Collection or an Array (whose JVM class
+    // emptyList or a sorted copy of a Collection (whose JVM class
     // kJvmListClass names), 5 and up a primitive array (lib/kotlin-math.js's
-    // ktaElems), -1..-3 a deque or a LinkedList (kDequeClasses). Twin of ktArrWords in
-    // abnf/jsrtkotlin.go.
+    // ktaElems), -1..-4 a deque, a LinkedList or an Array's sorted copy
+    // (kListKindClasses). Twin of ktArrWords in abnf/jsrtkotlin.go.
     var kArrWords = ["List", "Array", "Sequence", "Collection", "List"]
     for (var kaw = 0; kaw < ktaElems.length; kaw++) { kArrWords.push("Array") }
     // The kind of the array a member call answers: an Array's to*Array / copyOf
@@ -11400,12 +11425,12 @@ NotMemberKw = :script(~~
         if (kArrResults.indexOf(name) >= 0) { return ktaResultKind(recv, name) }
         if ((recv == 1 || recv >= 5) && name == "plus") { return recv }
         if (recv == 2 && kSeqKeeps.indexOf(name) >= 0) { return 2 }
-        // The sorted family on a Collection or an Array answers an Arrays.asList of
-        // the sorted copy, or toList() at size 0 or 1 (_Collections.kt, _Arrays.kt) -
-        // not an ArrayList - except a primitive array's sortedDescending, which
-        // reverses into a fresh one.
-        if (recv != 2 && kSortedNames.indexOf(name) >= 0 && !(recv >= 5 && name == "sortedDescending")) { return 4 }
-        return 0
+        // The sorted family answers an Arrays.asList of the sorted copy - not an
+        // ArrayList - which on a Collection is toList() at size 0 or 1 instead
+        // (_Collections.kt, _Arrays.kt). A primitive array's sortedDescending reverses
+        // into a fresh ArrayList, or emptyList() (kKindOut).
+        if (recv == 2 || kSortedNames.indexOf(name) < 0 || (recv >= 5 && name == "sortedDescending")) { return 0 }
+        return recv == 1 || recv >= 5 ? -4 : 4
     }
     var kSortedNames = ["sorted", "sortedDescending", "sortedBy", "sortedByDescending", "sortedWith"]
     // Tags a member call's fresh array answer with the kind kResultKind gives it. A
@@ -11413,8 +11438,10 @@ NotMemberKw = :script(~~
     // stays an ArrayList.
     function kKindOut(recv, name, out, rkind) {
         if (Array.isArray(out) && out !== recv) {
-            var rk = kResultKind(arrKind(recv), name)
+            var ak = arrKind(recv)
+            var rk = kResultKind(ak, name)
             if (rk == 4 && rkind == "Collection") { rk = 0 }
+            if (ak >= 5 && name == "sortedDescending" && out.length == 0) { rk = 4 }
             if (rk != 0) { arrKindSet(out, rk) }
         }
         return out

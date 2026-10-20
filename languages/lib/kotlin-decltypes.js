@@ -795,14 +795,15 @@ function ktStdParams(name) { return ktStdParamNames["$" + name] }
 // The java.* classes an import may name that the runtime provides, each with the
 // global it is provided under (hostGlobals / js_ktglobal). Such an import binds its
 // simple name, or its alias, to that global: after `import java.util.Random`,
-// `Random(1)` is java.util.Random, not kotlin.random.Random. The collections are
-// the classes kotlin.collections already typealiases (ArrayList is
-// java.util.ArrayList), so their import binds the same constructor.
+// `Random(1)` is java.util.Random, not kotlin.random.Random, and `ArrayDeque()`
+// java.util.ArrayDeque. The other collections are the classes kotlin.collections
+// already typealiases (ArrayList is java.util.ArrayList), so their import binds the
+// same constructor.
 var ktJavaClassImports = [["java.util.Random", "java.util.Random"], ["java.util.ArrayList", "ArrayList"],
                           ["java.util.HashMap", "HashMap"], ["java.util.HashSet", "HashSet"],
                           ["java.util.LinkedHashMap", "LinkedHashMap"], ["java.util.LinkedHashSet", "LinkedHashSet"],
                           ["java.util.TreeMap", "TreeMap"], ["java.util.TreeSet", "TreeSet"],
-                          ["java.util.LinkedList", "LinkedList"], ["java.util.ArrayDeque", "ArrayDeque"],
+                          ["java.util.LinkedList", "LinkedList"], ["java.util.ArrayDeque", "java.util.ArrayDeque"],
                           ["java.util.PriorityQueue", "PriorityQueue"]]
 // The [simple name, global] pairs an import binds: the one class of an exact path,
 // every provided class of the package for a `.*` import, none for anything else.

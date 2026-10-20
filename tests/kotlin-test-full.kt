@@ -5420,6 +5420,31 @@ fun sec114() {
     check("jsrt114i", listOf(1, 2).javaClass != mutableListOf(1).javaClass && arrayListOf(2).javaClass == mutableListOf(1).javaClass)
 }
 
+// ===== SECTION 115: javaClass of any value, and a collection's KClass =====
+// Read off kotlin-stdlib 2.2.21 under JDK 24 (getClass().getName() / getSimpleName(),
+// Reflection.getOrCreateKotlinClass(c).getSimpleName() / getQualifiedName()): every
+// value has a javaClass - a primitive boxed to its java.lang class, an Array its JVM
+// array class - and a collection's KClass is its JVM class, qualifiedName spelling
+// "$" as ".". An Array's sorted copy is an Arrays$ArrayList at every size; an empty
+// IntArray's sortedDescending() is emptyList().
+class Foo115
+fun jn115(v: Any): String = v.javaClass.name + " " + v.javaClass.simpleName + " " + v.javaClass
+fun kn115(v: Any): String = "" + v::class.simpleName + " " + v::class.qualifiedName + " " + v::class.java.name
+fun sec115() {
+    check("jcls115a", jn115(Foo115()) == "Foo115 Foo115 class Foo115" && jn115("x") == "java.lang.String String class java.lang.String")
+    check("jcls115b", jn115(3) == "java.lang.Integer Integer class java.lang.Integer" && jn115('c') == "java.lang.Character Character class java.lang.Character")
+    check("jcls115c", jn115(arrayOf(1)) == "[Ljava.lang.Integer; Integer[] class [Ljava.lang.Integer;" && jn115(intArrayOf(1)) == "[I int[] class [I")
+    check("jcls115d", kn115(mutableListOf(1)) == "ArrayList java.util.ArrayList java.util.ArrayList" && kn115(Foo115()) == "Foo115 Foo115 Foo115")
+    check("jcls115e", kn115(setOf(1)) == "SingletonSet java.util.Collections.SingletonSet java.util.Collections\$SingletonSet" && kn115(mutableMapOf(1 to 2)) == "LinkedHashMap java.util.LinkedHashMap java.util.LinkedHashMap")
+    val s: Any = "abcd"
+    val a: Any = arrayOf(1)
+    val t = "abcd"
+    check("jcls115f", s::class.simpleName == "String" && a::class.simpleName == "Array" && intArrayOf(1)::class.simpleName == "IntArray" && t::length.get() == 4)
+    check("jcls115g", jn115(arrayOf(3).sorted()) == "java.util.Arrays\$ArrayList ArrayList class java.util.Arrays\$ArrayList" && jn115(arrayOf<Int>().sortedBy { it }).startsWith("java.util.Arrays\$ArrayList "))
+    check("jcls115h", jn115(intArrayOf().sortedDescending()).startsWith("kotlin.collections.EmptyList ") && jn115(intArrayOf(3).sortedDescending()).startsWith("java.util.ArrayList ") && jn115(intArrayOf(3).sorted()).startsWith("java.util.Arrays\$ArrayList "))
+    check("jcls115i", jn115(mutableMapOf(1 to 2).values) == "java.util.LinkedHashMap\$LinkedValues LinkedValues class java.util.LinkedHashMap\$LinkedValues")
+}
+
 
 fun main() {
     s01() // SECTION-CALL 01
@@ -5536,6 +5561,7 @@ fun main() {
     sec112() // SECTION-CALL 112
     sec113() // SECTION-CALL 113
     sec114() // SECTION-CALL 114
+    sec115() // SECTION-CALL 115
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }
