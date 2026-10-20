@@ -5279,6 +5279,122 @@ func s133() {
     check("133a", took == [true, true, false, false] && s.left == ["A0", "B2"] && c.0 == 10 && c.y == 20)
 }
 
+// ===== SECTION 134: generic type arguments bind per instance =====
+// `Box134<Double>(v: 2)` holds 2.0: the explicit arguments, an annotation
+// (`let b: Box134<Double> = Box134(v: 3)`), an argument or result type and an
+// array element type each bind T, and a member whose parameter or result is a T
+// adopts through the instance's own binding. A generic struct prints its
+// arguments - the bound ones, else the ones its properties' values infer.
+// Every value read off swiftc 6.1.2.
+struct Box134<T> { var v: T }
+struct Stack134<E> {
+    var items: [E] = []
+    mutating func push(_ x: E) { items.append(x) }
+    func peekOr(_ d: E) -> E { return items.isEmpty ? d : items[items.count - 1] }
+}
+extension Stack134 {
+    mutating func pushTwice(_ x: E) { push(x); push(x) }
+}
+final class Cell134<T> {
+    var v: T
+    init(_ v: T) { self.v = v }
+    func set(_ n: T) { v = n }
+}
+struct Pair134<A, B> { var a: A; var b: B }
+struct Holder134 { var b: Box134<Double> }
+func half134(_ b: Box134<Double>) -> Double { return b.v / 2 }
+func make134() -> Box134<Double> { return Box134(v: 7) }
+func s134() {
+    let b1 = Box134<Double>(v: 2)
+    let b2: Box134<Double> = Box134(v: 3)
+    check("134a", "\(b1.v)" == "2.0" && b2.v / 2 == 1.5 && "\(b1)" == "Box134<Double>(v: 2.0)")
+    var s = Stack134<Double>()
+    s.push(2)
+    s.pushTwice(5)
+    var s2 = s
+    s2.push(9)
+    check("134b", "\(s.items)" == "[2.0, 5.0, 5.0]" && "\(s2.peekOr(1))" == "9.0" && "\(Stack134<Double>().peekOr(1))" == "1.0")
+    let c = Cell134<Double>(4)
+    c.set(1)
+    let p: Pair134<Int, Double> = Pair134(a: 1, b: 2)
+    check("134c", c.v / 2 == 0.5 && "\(p)" == "Pair134<Int, Double>(a: 1, b: 2.0)" && "\(Pair134<Double, Int>(a: 1, b: 2).a)" == "1.0")
+    let arr: [Box134<Double>] = [Box134(v: 1), Box134(v: 2)]
+    let nested = Box134<Box134<Double>>(v: Box134(v: 2))
+    check("134d", half134(Box134(v: 3)) == 1.5 && "\(make134().v)" == "7.0" && "\(arr[1].v)" == "2.0"
+        && "\(nested.v.v)" == "2.0")
+    check("134e", "\(Box134(v: 5))" == "Box134<Int>(v: 5)" && "\(Box134(v: "x"))" == "Box134<String>(v: \"x\")"
+        && "\(Box134(v: [1, 2]))" == "Box134<Array<Int>>(v: [1, 2])" && "\(Stack134<Int>(items: [3]))" == "Stack134<Int>(items: [3])")
+    // A later write to a slot of the type binds as the declaration did.
+    var w: Box134<Double> = Box134(v: 1)
+    w = Box134(v: 4)
+    var h = Holder134(b: Box134(v: 5))
+    h.b = Box134(v: 6)
+    var xs: [Box134<Double>] = []
+    xs.append(Box134(v: 7))
+    check("134f", "\(w.v)" == "4.0" && "\(h.b.v)" == "6.0" && "\(xs[0].v)" == "7.0")
+}
+
+// ===== SECTION 135: operators spelled outside ASCII =====
+// Swift reserves ranges of Unicode for operator characters (√, ⊕, °, ≠, ×, «),
+// so `√x` is a prefix operator applied to x and not one identifier, while π and
+// café stay names. Every value read off swiftc 6.1.2.
+prefix operator √
+prefix func √ (x: Double) -> Double { return x * 0.5 }
+infix operator ⊕ : AdditionPrecedence
+func ⊕ (a: Int, b: Int) -> Int { return a * 10 + b }
+postfix operator °
+postfix func ° (x: Double) -> Double { return x * 2 }
+infix operator ×× : MultiplicationPrecedence
+func ×× (a: Int, b: Int) -> Int { return a * b }
+infix operator ≠≠ : ComparisonPrecedence
+func ≠≠ (a: Int, b: Int) -> Bool { return a != b }
+func s135() {
+    let v = [16.0, 2.0]
+    let π = 3
+    let café = 4
+    check("135a", √v[0] == 8.0 && 1 ⊕ 2 ⊕ 3 == 123 && v[1]° == 4.0)
+    check("135b", 2 ×× 3 ⊕ 1 == 61 && √(v[0] + 4) == 10.0 && π ≠≠ café && !(π ≠≠ 3))
+}
+
+// ===== SECTION 136: a generic parameter bound by an array; init through a metatype =====
+// `M.zero` in `func f<M: P>(_ xs: [M])` (or `_ xs: M...`) is the static member
+// of the first element's type. `t.init(...)` on an enum's metatype runs the
+// enum's own initializer picked by its labels, or the raw-value lookup. Every
+// value read off swiftc 6.1.2.
+protocol Monoid136 {
+    static var zero: Self { get }
+    static func + (a: Self, b: Self) -> Self
+}
+struct Sum136: Monoid136 {
+    var n: Int
+    static var zero: Sum136 { return Sum136(n: 100) }
+    static func + (a: Sum136, b: Sum136) -> Sum136 { return Sum136(n: a.n + b.n) }
+}
+func fold136<M: Monoid136>(_ xs: [M]) -> M { xs.reduce(M.zero, +) }
+func foldV136<M: Monoid136>(_ xs: M...) -> M {
+    var acc = M.zero
+    for x in xs { acc = acc + x }
+    return acc
+}
+enum Dir136: Int { case n = 1, s = 2 }
+enum Mode136 {
+    case on, off, dim
+    init(flag: Bool) { self = flag ? .on : .off }
+    init?(level: Int) {
+        if level < 0 { return nil }
+        self = level == 0 ? .off : .dim
+    }
+}
+func s136() {
+    check("136a", fold136([Sum136(n: 1), Sum136(n: 2)]).n == 103 && foldV136(Sum136(n: 7), Sum136(n: 8)).n == 115)
+    let t = Mode136.self
+    let d = Dir136.self
+    let ms: [Mode136.Type] = [Mode136.self]
+    check("136b", t.init(flag: true) == .on && t.init(level: 3) == .dim && t.init(level: -1) == nil
+        && ms[0].init(flag: false) == .off)
+    check("136c", d.init(rawValue: 2) == .s && d.init(rawValue: 7) == nil)
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5413,6 +5529,9 @@ func main() {
     s131() // SECTION-CALL 131
     s132() // SECTION-CALL 132
     s133() // SECTION-CALL 133
+    s134() // SECTION-CALL 134
+    s135() // SECTION-CALL 135
+    s136() // SECTION-CALL 136
     print("full: \(checks) checks, \(fails) failures")
 }
 

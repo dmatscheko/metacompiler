@@ -636,6 +636,199 @@ function swStrArray(v) {
     return v
 }
 
+// ===================================================== generic arguments ====
+//
+// See swGenMark in languages/lib/swift-dotwant.js: an instance of a generic type
+// carries its type arguments as text (__targs), its descriptor the parameter
+// names (__tgens) and the generic stored properties (__gfields, declared types in
+// __gftys).
+
+function swGenIdCh(ch) {
+    return ch == "_" || (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || (ch >= "0" && ch <= "9")
+}
+// The descriptor of v when v is an instance of a generic type, else undefined.
+function swGenClass(v) {
+    if (typeof v != "object" || v === null) { return undefined }
+    var cls = v["__class"]
+    if (!swIsObj(cls)) { return undefined }
+    if (typeof cls["__tgens"] != "string") { return undefined }
+    return cls
+}
+// ty with each generic parameter of self's type replaced by self's type
+// argument, or by "_" (which adopts nothing) when self carries none; "" when self
+// is not an instance of a generic type. Twins: swGenSub in
+// languages/swift-interpreter.abnf and abnf/jsrtswift.go.
+function js_swgensub(self, ty) {
+    var cls = swGenClass(self)
+    if (cls === undefined) { return "" }
+    var names = swTySplit(cls["__tgens"], ",")
+    var bound = typeof self["__targs"] == "string"
+    var args = []
+    if (bound) { args = swTySplit(self["__targs"], ",") }
+    if (args.length != names.length) { bound = false }
+    var out = ""
+    var i = 0
+    while (i < ty.length) {
+        if (!swGenIdCh(ty.charAt(i))) {
+            out = out + ty.charAt(i)
+            i = i + 1
+        } else {
+            var s = i
+            while (i < ty.length && swGenIdCh(ty.charAt(i))) { i = i + 1 }
+            var tok = ty.substring(s, i)
+            if (s == 0 || ty.charAt(s - 1) != ".") {
+                var k = 0
+                while (k < names.length) {
+                    if (names[k] == tok) {
+                        tok = "_"
+                        if (bound) { tok = args[k] }
+                        k = names.length
+                    }
+                    k = k + 1
+                }
+            }
+            out = out + tok
+        }
+    }
+    return out
+}
+// Whether type text names the placeholder `_`.
+function swTyHasHole(s) {
+    var i = 0
+    while (i < s.length) {
+        if (s.charAt(i) == "_") {
+            var lo = i == 0 || !swGenIdCh(s.charAt(i - 1))
+            var hi = i + 1 == s.length || !swGenIdCh(s.charAt(i + 1))
+            if (lo && hi) { return true }
+        }
+        i = i + 1
+    }
+    return false
+}
+function swGenBase(n) {
+    var i = n.length
+    while (i > 0 && n.charAt(i - 1) != ".") { i = i - 1 }
+    return n.substring(i, n.length)
+}
+// The written type arguments txt onto obj, a new instance of a generic type. A
+// generic parameter of the enclosing instance's type among them is that
+// instance's argument, and one left unbound binds nothing. Twins: swSetTargs in
+// languages/swift-interpreter.abnf and abnf/jsrtswift.go.
+function js_swsettargs(obj, self, txt) {
+    if (swGenClass(obj) === undefined) { return undefined }
+    var s = js_swgensub(self, txt)
+    if (s == "") { s = txt }
+    if (!swTyHasHole(s)) { obj["__targs"] = s }
+    return undefined
+}
+// An instance of a generic type reaching a slot that spells its type arguments
+// takes them, and its generic stored properties adopt what they now declare; one
+// that carries arguments already keeps them. Twins: swAdoptGen in
+// languages/swift-interpreter.abnf and abnf/jsrtswift.go.
+function swAdoptGen(v, ty) {
+    var cls = swGenClass(v)
+    if (cls === undefined) { return v }
+    if (v["__targs"] !== undefined) { return v }
+    var lt = ty.indexOf("<")
+    if (lt < 0) { return v }
+    var name = cls["__name"]
+    if (typeof name != "string") { return v }
+    if (swGenBase(ty.substring(0, lt)) != swGenBase(name)) { return v }
+    var args = ty.substring(lt + 1, ty.length - 1)
+    if (swTyHasHole(args)) { return v }
+    v["__targs"] = args
+    var fs = swStrArray(cls["__gfields"])
+    var ts = swStrArray(cls["__gftys"])
+    var i = 0
+    while (i < fs.length && i < ts.length) {
+        var fv = v[fs[i]]
+        if (fv !== undefined) { v[fs[i]] = js_swadoptdeep(fv, js_swgensub(v, ts[i]), undefined) }
+        i = i + 1
+    }
+    return v
+}
+// The `<Double, Int>` a generic struct prints after its name: its type
+// arguments, else the ones its stored properties declared as a bare parameter
+// infer from their values; "" when one is unknown. Twins: swGenArgsTxt in
+// languages/swift-interpreter.abnf and abnf/jsrtswift.go.
+function swGenArgsTxt(v) {
+    var cls = swGenClass(v)
+    if (cls === undefined) { return "" }
+    var names = swTySplit(cls["__tgens"], ",")
+    var given = typeof v["__targs"] == "string"
+    var gs = []
+    if (given) { gs = swTySplit(v["__targs"], ",") }
+    var fs = swStrArray(cls["__gfields"])
+    var ts = swStrArray(cls["__gftys"])
+    var out = ""
+    var k = 0
+    while (k < names.length) {
+        var a = ""
+        if (given) {
+            if (k < gs.length) { a = swTyCanon(gs[k]) }
+        } else {
+            var i = 0
+            while (i < fs.length && i < ts.length && a == "") {
+                if (ts[i] == names[k] && v[fs[i]] !== undefined) { a = swValTyName(v[fs[i]]) }
+                i = i + 1
+            }
+        }
+        if (a == "") { return "" }
+        if (k > 0) { out = out + ", " }
+        out = out + a
+        k = k + 1
+    }
+    return "<" + out + ">"
+}
+// The type name of a value as a generic argument, "" when the value cannot say.
+function swValTyName(x) {
+    if (x === undefined || x === null) { return "" }
+    if (typeof x == "boolean" || typeof x == "string" || typeof x == "number") { return js_swtypeof(x) }
+    if (floIs(x) || sintIs(x)) { return js_swtypeof(x) }
+    if (typeof x != "object") { return "" }
+    var c = x["__class"]
+    if (swIsObj(c)) {
+        var nm = c["__name"]
+        if (typeof nm != "string") { return "" }
+        if (typeof c["__tgens"] != "string") { return nm }
+        var g = swGenArgsTxt(x)
+        if (g == "") { return "" }
+        return nm + g
+    }
+    if (rtIsArr(x)) {
+        if (x.length == 0) { return "" }
+        var e = swValTyName(x[0])
+        if (e == "") { return "" }
+        return "Array<" + e + ">"
+    }
+    return ""
+}
+// A type written with the sugar spelled as type(of:) and print name it: [T] is
+// Array<T>, [K: V] Dictionary<K, V> and T? Optional<T>, all the way down. Twins:
+// swTyCanon in both swift grammars and abnf/jsrtswift.go.
+function swTyCanon(t) {
+    var n = t.length
+    if (n > 1 && t.charAt(n - 1) == "?") { return "Optional<" + swTyCanon(t.substring(0, n - 1)) + ">" }
+    if (n > 1 && t.charAt(0) == "[" && t.charAt(n - 1) == "]") {
+        var kv = swTySplit(t.substring(1, n - 1), ":")
+        if (kv.length == 2) { return "Dictionary<" + swTyCanon(kv[0]) + ", " + swTyCanon(kv[1]) + ">" }
+        return "Array<" + swTyCanon(t.substring(1, n - 1)) + ">"
+    }
+    var lt = t.indexOf("<")
+    if (lt > 0 && t.charAt(n - 1) == ">") {
+        var parts = swTySplit(t.substring(lt + 1, n - 1), ",")
+        var out = t.substring(0, lt + 1)
+        var i = 0
+        while (i < parts.length) {
+            if (i > 0) { out = out + ", " }
+            out = out + swTyCanon(parts[i])
+            i = i + 1
+        }
+        return out + ">"
+    }
+    return t
+}
+
 // ===================================================== value semantics ======
 //
 // js_swcopy is Swift's defining property: EVERY value type is copied whenever it
@@ -694,6 +887,8 @@ function swCopyStruct(v, cls) {
     var ks = cls["__fields"]
     if (!rtIsArr(ks)) { return v }
     var out = {__class: cls}
+    var ta = v["__targs"]
+    if (ta !== undefined) { out["__targs"] = ta }
     var i = 0
     while (i < ks.length) {
         out[ks[i]] = js_swcopy(v[ks[i]])
@@ -1058,7 +1253,7 @@ function swObjDesc(o, depth) {
     if (name === "") { return undefined }
     if (cls["__struct"] !== true) { return name }
     var flds = swStrArray(cls["__fields"])
-    var fout = name + "("
+    var fout = name + swGenArgsTxt(o) + "("
     var k = 0
     while (k < flds.length) {
         if (k > 0) { fout = fout + ", " }
@@ -2686,6 +2881,7 @@ function js_swadopt(v, ty) {
     var bits = swAdoptWidth(ty)
     if (bits == 0) {
         if ((ty == "Unicode.Scalar" || ty == "UnicodeScalar") && typeof v == "string") { return swMkScalar(v) }
+        if (typeof v == "object" && ty.charAt(ty.length - 1) == ">") { return swAdoptGen(v, ty) }
         return v
     }
     if (floIs(v)) { return v }
@@ -2717,8 +2913,17 @@ function js_swadoptlike(old, v, ty) {
         return swAdoptNum(v) ? sintConv(v, sintWidth(old), sintUns(old)) : v
     }
     // Inline, as this runs at every write to an adopting slot.
-    if (typeof old == "object" && old["__usc"] !== undefined) { return js_swadopt(v, "Unicode.Scalar") }
+    if (typeof old == "object") {
+        if (old["__usc"] !== undefined) { return js_swadopt(v, "Unicode.Scalar") }
+        // An instance of a generic type carries its type arguments, and the slot's
+        // next value is of that same type: `b = Box(v: 4)` into a Box<Double>.
+        if (old["__targs"] !== undefined) { return swAdoptLikeGen(old, v) }
+    }
     return v
+}
+function swAdoptLikeGen(old, v) {
+    if (typeof v != "object") { return v }
+    return swAdoptGen(v, old["__class"]["__name"] + "<" + old["__targs"] + ">")
 }
 
 // The STRUCTURAL declared type. `let a: [Double] = [3, 4]`

@@ -124,9 +124,14 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
 Id          = IdBacktick | IdPlain ;
 IdPlain     = ( "a"..."z" | "A"..."Z" | "_" | IdUni ) :whitespace()
               { "a"..."z" | "A"..."Z" | "0"..."9" | "_" | IdUni } :whitespace(Whitespace) ;
-IdUni       = "\u00a1"..."\u167f" | "\u1681"..."\u1fff" | "\u200b"..."\u2027"
-            | "\u202a"..."\u202e" | "\u2030"..."\u205e" | "\u2060"..."\u2fff"
-            | "\u3001"..."\ufefe" | "\uff00"..."\U0010ffff" ;
+// The scalars Swift reserves for OPERATORS (OpUni) are cut out as well, so the
+// square root sign before a name is a prefix operator applied to it.
+IdUni       = "\u00a8" | "\u00aa" | "\u00ad" | "\u00af" | "\u00b2"..."\u00b5" | "\u00b7"..."\u00ba"
+            | "\u00bc"..."\u00be" | "\u00c0"..."\u00d6" | "\u00d8"..."\u00f6" | "\u00f8"..."\u167f"
+            | "\u1681"..."\u1fff" | "\u200b"..."\u2015" | "\u2018"..."\u201f" | "\u202a"..."\u202e"
+            | "\u203f"..."\u2040" | "\u2054" | "\u2060"..."\u218f" | "\u2400"..."\u24ff"
+            | "\u2776"..."\u2793" | "\u2c00"..."\u2dff" | "\u2e80"..."\u2fff" | "\u3004"..."\u3007"
+            | "\u3021"..."\u302f" | "\u3031"..."\ufefe" | "\uff00"..."\U0010ffff" ;
 KwEnd = :script(~~
     (function() {
         var cc = c.peek(0)
@@ -549,9 +554,12 @@ ArgAttrName = ( "convention" | "differentiable" | "_opaqueReturnTypeOf" ) KwEnd 
 
 // class / struct with stored properties, methods and an explicit init.
 StructDecl  <~~ push(makeStructStmt(takeAll())) ~~>
-            = KwStruct Id <~~ push(swBt(up.in)) ~~> [ SkipAngle ] [ ":" InheritList ] [ GenWhere ] "{" { Member } "}" ;
+            = KwStruct Id <~~ push(swBt(up.in)) ~~> [ TypeGenParams ] [ ":" InheritList ] [ GenWhere ] "{" { Member } "}" ;
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
-            = KwClass Id <~~ push(swBt(up.in)) ~~> [ SkipAngle ] [ ":" InheritList ] [ GenWhere ] "{" { Member } "}" ;
+            = KwClass Id <~~ push(swBt(up.in)) ~~> [ TypeGenParams ] [ ":" InheritList ] [ GenWhere ] "{" { Member } "}" ;
+// A generic type's parameter NAMES (constraints dropped): swGenMark in
+// lib/swift-dotwant.js binds them per instance.
+TypeGenParams <~~ push({tgens: swGenParamNames(stripWs(up.in))}) ~~> = SkipAngle ;
 // The inheritance clause: for a class its first entry may be the SUPERCLASS, and
 // every entry may be a protocol whose default implementations are mixed in. Each
 // name is kept as text and resolved when the type is created.
@@ -562,7 +570,7 @@ InheritName <~~ push({inherit: stripWs(up.in)}) ~~> = [ "~" ] Type ;
 // An actor is a class with an isolation domain. There is no executor in this
 // runtime (async functions are defined, never awaited), so it lowers like a class.
 ActorDecl   <~~ push(makeClassStmt(takeAll())) ~~>
-            = KwActor Id <~~ push(swBt(up.in)) ~~> [ SkipAngle ] [ ":" InheritList ] [ GenWhere ] "{" { Member } "}" ;
+            = KwActor Id <~~ push(swBt(up.in)) ~~> [ TypeGenParams ] [ ":" InheritList ] [ GenWhere ] "{" { Member } "}" ;
 KwActor     = "actor" KwEnd ;
 TypeList    = Type { "," Type } ;
 
@@ -997,8 +1005,9 @@ DeclAnnType = FnAnnType | LabelledTupleType | IntAnnType | OptNumAnnType | DeepA
 // Any other annotation is captured as TEXT only for the write-site check that an
 // EXISTENTIAL slot (`Any`, a protocol, ...) does not adopt; see swKeepMode.
 // Each annotation form keeps only its TEXT: a type attribute inside it
-// (`(@escaping (Int) -> Int) -> Int`) pushes a marker that is dropped here.
-OtherAnnType <~~ takeAll(); push({otype: stripWs(up.in)}) ~~> = Type ;
+// (`(@escaping (Int) -> Int) -> Int`) pushes a marker that is dropped here. One
+// applying a generic type of the program (`Box<Double>`) adopts: swGenAnnRec.
+OtherAnnType <~~ takeAll(); push(swGenAnnRec(stripWs(up.in))) ~~> = Type ;
 // A FUNCTION-TYPED SLOT. Every other adoption site in this front end reads the type
 // off the VALUE (see chapter 7.15 of the manual) - floatness and integer width live
 // on the value and a write adopts what the slot already holds. That argument runs
@@ -1321,17 +1330,37 @@ NotChar61b  = :script(~~
 // returns a token covering only the run.
 CustomOp    = :script(~~
     (function() {
+        // The operator-head scalar starting at byte i of the UTF-8 source - the ASCII
+        // set and OpUni's ranges, in decimal - or -1.
+        function opcp(i) {
+            var b = c.peek(i)
+            var ch = b
+            if (b >= 224 && b < 240) { ch = (b - 224) * 4096 + (c.peek(i + 1) - 128) * 64 + (c.peek(i + 2) - 128) }
+            else if (b >= 192 && b < 224) { ch = (b - 192) * 64 + (c.peek(i + 1) - 128) }
+            else if (b >= 128) { return -1 }
+            if (ch === 47 || ch === 61 || ch === 45 || ch === 43 || ch === 33 || ch === 42
+                || ch === 37 || ch === 60 || ch === 62 || ch === 38 || ch === 124
+                || ch === 94 || ch === 126 || ch === 63) { return ch }
+            if (ch < 161) { return -1 }
+            var op = ch <= 167 || ch === 169 || ch === 171 || ch === 172 || ch === 174 || ch === 176
+                || ch === 177 || ch === 182 || ch === 187 || ch === 191 || ch === 215 || ch === 247
+                || (ch >= 8214 && ch <= 8215) || (ch >= 8224 && ch <= 8231) || (ch >= 8240 && ch <= 8254)
+                || (ch >= 8257 && ch <= 8275) || (ch >= 8277 && ch <= 8286) || (ch >= 8592 && ch <= 9215)
+                || (ch >= 9472 && ch <= 10101) || (ch >= 10132 && ch <= 11263) || (ch >= 11776 && ch <= 11903)
+                || (ch >= 12289 && ch <= 12291) || (ch >= 12296 && ch <= 12320) || ch === 12336
+            return op ? ch : -1
+        }
         var i = 0
         var ch = c.peek(i)
         while (ch === 32 || ch === 9 || ch === 10 || ch === 13) { i++; ch = c.peek(i) }
         var s = ""
-        while (ch === 47 || ch === 61 || ch === 45 || ch === 43 || ch === 33 || ch === 42
-               || ch === 37 || ch === 60 || ch === 62 || ch === 38 || ch === 124
-               || ch === 94 || ch === 126 || ch === 63) {
-            s = s + String.fromCharCode(ch)
-            i++
-            ch = c.peek(i)
+        var cp = opcp(i)
+        while (cp >= 0) {
+            s = s + String.fromCharCode(cp)
+            i = i + (cp < 128 ? 1 : (cp < 2048 ? 2 : 3))
+            cp = opcp(i)
         }
+        ch = c.peek(i)
         if (s.length === 0) { return abnf.newToken("\x01no-operator", 0) }
         var builtin = "|=|==|!=|===|!==|<|>|<=|>=|+|-|*|/|%|&&|null||||??|?|!|&|^|~|<<|>>|&+|&-|&*|~=|->|&=|+=|-=|*=|/=|%=|"
         if (builtin.indexOf("|" + s + "|") >= 0) { return abnf.newToken("\x01builtin-operator", 0) }
@@ -1358,16 +1387,36 @@ CallMember  <~~ push(foldCallMember(takeAll(), up.in)) ~~>
 PostOpSfx   <~~ push({kind: "postop", op: up.in}) ~~> = NoSpace PostOp ;
 PostOp      = :script(~~
     (function() {
+        // The operator-head scalar starting at byte i of the UTF-8 source - the ASCII
+        // set and OpUni's ranges, in decimal - or -1.
+        function opcp(i) {
+            var b = c.peek(i)
+            var ch = b
+            if (b >= 224 && b < 240) { ch = (b - 224) * 4096 + (c.peek(i + 1) - 128) * 64 + (c.peek(i + 2) - 128) }
+            else if (b >= 192 && b < 224) { ch = (b - 192) * 64 + (c.peek(i + 1) - 128) }
+            else if (b >= 128) { return -1 }
+            if (ch === 47 || ch === 61 || ch === 45 || ch === 43 || ch === 33 || ch === 42
+                || ch === 37 || ch === 60 || ch === 62 || ch === 38 || ch === 124
+                || ch === 94 || ch === 126 || ch === 63) { return ch }
+            if (ch < 161) { return -1 }
+            var op = ch <= 167 || ch === 169 || ch === 171 || ch === 172 || ch === 174 || ch === 176
+                || ch === 177 || ch === 182 || ch === 187 || ch === 191 || ch === 215 || ch === 247
+                || (ch >= 8214 && ch <= 8215) || (ch >= 8224 && ch <= 8231) || (ch >= 8240 && ch <= 8254)
+                || (ch >= 8257 && ch <= 8275) || (ch >= 8277 && ch <= 8286) || (ch >= 8592 && ch <= 9215)
+                || (ch >= 9472 && ch <= 10101) || (ch >= 10132 && ch <= 11263) || (ch >= 11776 && ch <= 11903)
+                || (ch >= 12289 && ch <= 12291) || (ch >= 12296 && ch <= 12320) || ch === 12336
+            return op ? ch : -1
+        }
         var i = 0
         var ch = c.peek(i)
         var s = ""
-        while (ch === 47 || ch === 61 || ch === 45 || ch === 43 || ch === 33 || ch === 42
-               || ch === 37 || ch === 60 || ch === 62 || ch === 38 || ch === 124
-               || ch === 94 || ch === 126 || ch === 63) {
-            s = s + String.fromCharCode(ch)
-            i++
-            ch = c.peek(i)
+        var cp = opcp(i)
+        while (cp >= 0) {
+            s = s + String.fromCharCode(cp)
+            i = i + (cp < 128 ? 1 : (cp < 2048 ? 2 : 3))
+            cp = opcp(i)
         }
+        ch = c.peek(i)
         if (s.length === 0 || s.indexOf("//") >= 0 || s.indexOf("/*") >= 0) { return abnf.newToken("\x01no-operator", 0) }
         var free = ch < 0 || ch === 32 || ch === 9 || ch === 10 || ch === 13 || ch === 41 || ch === 93
                    || ch === 125 || ch === 44 || ch === 59 || ch === 58 || ch === 46
@@ -1924,7 +1973,14 @@ OpName      = OpChar :whitespace() { OpChar } :whitespace(Whitespace) ;
 // A `<` directly followed by a name opens the generic parameter list instead:
 // `func %%%%<T, U>(x: T, y: U)` declares the operator %%%%, which swiftc splits the
 // same way.
-OpChar      = "/" | "=" | "-" | "+" | "!" | "*" | "%" | "<" NotGenOpen | ">" | "&" | "|" | "^" | "~" | "?" ;
+OpChar      = "/" | "=" | "-" | "+" | "!" | "*" | "%" | "<" NotGenOpen | ">" | "&" | "|" | "^" | "~" | "?" | OpUni ;
+// The operator-head scalars outside ASCII (The Swift Programming Language,
+// "Operators"); the operator scans in CustomOp and PostOp spell the same set.
+OpUni       = "\u00a1"..."\u00a7" | "\u00a9" | "\u00ab"..."\u00ac" | "\u00ae" | "\u00b0"..."\u00b1"
+            | "\u00b6" | "\u00bb" | "\u00bf" | "\u00d7" | "\u00f7" | "\u2016"..."\u2017"
+            | "\u2020"..."\u2027" | "\u2030"..."\u203e" | "\u2041"..."\u2053" | "\u2055"..."\u205e"
+            | "\u2190"..."\u23ff" | "\u2500"..."\u2775" | "\u2794"..."\u2bff" | "\u2e00"..."\u2e7f"
+            | "\u3001"..."\u3003" | "\u3008"..."\u3020" | "\u3030" ;
 NotGenOpen  = :script(~~
     (function() {
         var ch = c.peek(0)
@@ -2699,7 +2755,7 @@ KwContinue  = "continue" KwEnd ;
         // An observed property's storage, __v_<name>, prints under the property's
         // own name. Twins: swObjDesc in abnf/jsrtswift.go and lib/swift-rt.metajs.
         var fs = cls.__fields
-        var sout = cls.__name + "("
+        var sout = cls.__name + swGenArgsTxt(v) + "("
         for (var f = 0; f < fs.length; f++) {
             if (f > 0) { sout += ", " }
             var fl = fs[f].substring(0, 4) == "__v_" ? fs[f].substring(4) : fs[f]
@@ -3371,7 +3427,7 @@ KwContinue  = "continue" KwEnd ;
     }
     function swAdoptNeeded(ty) {
         if (ty == undefined || ty == null || ty == "") { return false }
-        if (swAdoptable(ty)) { return true }
+        if (swAdoptable(ty) || swTyHasUserGen(ty)) { return true }
         if (!swTyIsDeepText(ty)) { return false }
         return swTyHasAdoptLeaf(ty) || swTyHasTupLabel(ty)
     }
@@ -3391,6 +3447,7 @@ KwContinue  = "continue" KwEnd ;
         var iw = swIntWidthOf(ty)
         if (iw == null) {
             if ((ty == "Unicode.Scalar" || ty == "UnicodeScalar") && typeof v == "string") { return swMkScalar(v) }
+            if (typeof v == "object" && ty.charAt(ty.length - 1) == ">") { return swAdoptGen(v, ty) }
             return v
         }
         if (isFlo(v)) { return v }
@@ -3426,6 +3483,11 @@ KwContinue  = "continue" KwEnd ;
             return swAdoptNum(v) ? szConv(v, old.w, old.u) : v
         }
         if (typeof old == "object" && old.__usc !== undefined) { return swAdoptTy(v, "Unicode.Scalar") }
+        // An instance of a generic type carries its type arguments, and the slot's
+        // next value is of that same type: `b = Box(v: 4)` into a Box<Double>.
+        if (typeof old == "object" && typeof old.__targs == "string" && typeof v == "object") {
+            return swAdoptGen(v, old.__class.__name + "<" + old.__targs + ">")
+        }
         return v
     }
     // ----- The STRUCTURAL declared type -----
@@ -3570,7 +3632,7 @@ KwContinue  = "continue" KwEnd ;
         if (ty.charAt(0) != "[" || ty.charAt(ty.length - 1) != "]") { return "" }
         var kv = swTySplit(ty.substring(1, ty.length - 1), ":")
         var e = swTyTrim(kv[kv.length - 1])
-        return swAdoptable(e) ? e : ""
+        return swAdoptable(e) || swGenLeafTy(e) ? e : ""
     }
     // A declared type as WRITTEN, which is where a function type is recognised.
     // The recursion is INSIDE the walk in both halves (the compiler's emitter
@@ -3583,6 +3645,116 @@ KwContinue  = "continue" KwEnd ;
     // An operand thunk that adopts its value to ty (swFoldAdd in
     // lib/swift-dotwant.js). Twin in swift-to-llvm-ir.abnf.
     function swAdoptThunk(t, ty) { return function() { return swAdoptAnn(t(), ty) } }
+    // A declared type behind swGenMark's "=" names a generic parameter of the type
+    // declaring the member: self's type arguments resolve it first. Twin of the
+    // "=" arm of swEmitAdopt in swift-to-llvm-ir.abnf.
+    function swAdoptAnnS(v, ty, self) {
+        if (typeof ty == "string" && ty.charAt(0) == "=") { return swAdoptDeep(v, swGenSub(self, ty.substring(1))) }
+        return swAdoptDeep(v, ty)
+    }
+    // ty with each generic parameter of self's type replaced by self's type
+    // argument, or by "_" (which adopts nothing) when self carries none; "" when
+    // self is not an instance of a generic type. Twins: js_swgensub in
+    // lib/swift-rt.metajs and abnf/jsrtswift.go.
+    function swGenSub(self, ty) {
+        if (self === null || self === undefined || typeof self != "object") { return "" }
+        var cls = self.__class
+        if (cls == undefined || cls === null || typeof cls.__tgens != "string") { return "" }
+        var names = swTySplit(cls.__tgens, ",")
+        var args = hasOwn(self, "__targs") ? swTySplit(self.__targs, ",") : null
+        if (args != null && args.length != names.length) { args = null }
+        var out = ""
+        var i = 0
+        while (i < ty.length) {
+            if (!swDsIdCh(ty.charAt(i))) { out = out + ty.charAt(i); i++; continue }
+            var s = i
+            while (i < ty.length && swDsIdCh(ty.charAt(i))) { i++ }
+            var tok = ty.substring(s, i)
+            if (s == 0 || ty.charAt(s - 1) != ".") {
+                for (var k = 0; k < names.length; k++) {
+                    if (names[k] == tok) { tok = args == null ? "_" : args[k]; break }
+                }
+            }
+            out = out + tok
+        }
+        return out
+    }
+    // `let b: Box<Double> = Box(v: 3)`: an instance of a generic type reaching a
+    // slot that spells its type arguments takes them, as Swift infers T from that
+    // context, and its generic stored properties adopt what they now declare. An
+    // instance that carries arguments already keeps them, and a `_` binds nothing.
+    // Twins: swAdoptGen in lib/swift-rt.metajs and abnf/jsrtswift.go.
+    function swAdoptGen(v, ty) {
+        var cls = v.__class
+        if (cls == undefined || cls === null || typeof cls.__tgens != "string" || hasOwn(v, "__targs")) { return v }
+        var lt = ty.indexOf("<")
+        if (lt < 0 || swGenBase(ty.substring(0, lt)) != swGenBase(cls.__name)) { return v }
+        var args = ty.substring(lt + 1, ty.length - 1)
+        if (swTyNames(args, ["_"])) { return v }
+        scopePut(v, "__targs", args)
+        var fs = cls.__gfields
+        var ts = cls.__gftys
+        for (var i = 0; i < fs.length; i++) {
+            if (hasOwn(v, fs[i])) { scopePut(v, fs[i], swAdoptDeep(v[fs[i]], swGenSub(v, ts[i]))) }
+        }
+        return v
+    }
+    function swGenBase(n) {
+        var i = n.length
+        while (i > 0 && n.charAt(i - 1) != ".") { i-- }
+        return n.substring(i)
+    }
+    // Puts the written type arguments txt on obj, a new instance of a generic type.
+    // A generic parameter of the enclosing instance's type among them
+    // (`Stack<E>(...)` inside Stack) is that instance's argument, and one left
+    // unbound ("_") binds nothing. Twins: js_swsettargs in lib/swift-rt.metajs and
+    // abnf/jsrtswift.go.
+    function swSetTargs(obj, self, txt) {
+        if (typeof obj.__class.__tgens != "string") { return }
+        var s = swGenSub(self, txt)
+        if (s == "") { s = txt }
+        if (!swTyNames(s, ["_"])) { scopePut(obj, "__targs", s) }
+    }
+    // The `<Double, Int>` a generic struct prints after its name: its type
+    // arguments, else the ones its stored properties declared as a bare parameter
+    // infer from their values; "" when one is unknown. Twins: swGenArgsTxt in
+    // lib/swift-rt.metajs and abnf/jsrtswift.go.
+    function swGenArgsTxt(v) {
+        var cls = v.__class
+        if (typeof cls.__tgens != "string") { return "" }
+        var names = swTySplit(cls.__tgens, ",")
+        var out = ""
+        var given = hasOwn(v, "__targs") ? swTySplit(v.__targs, ",") : null
+        for (var k = 0; k < names.length; k++) {
+            var a = ""
+            if (given != null) { a = k < given.length ? swTyCanon(given[k]) : "" }
+            else {
+                var fs = cls.__gfields
+                var ts = cls.__gftys
+                for (var i = 0; i < fs.length && a == ""; i++) {
+                    if (ts[i] == names[k] && hasOwn(v, fs[i])) { a = swValTyName(v[fs[i]]) }
+                }
+            }
+            if (a == "") { return "" }
+            out = out + (k > 0 ? ", " : "") + a
+        }
+        return "<" + out + ">"
+    }
+    // The type name of a value as a generic argument, "" when the value cannot say.
+    function swValTyName(x) {
+        if (x === null || x === undefined) { return "" }
+        if (typeof x != "object" || isFlo(x) || szIs(x)) { return typeof x == "function" ? "" : swTypeOf(x) }
+        if (Array.isArray(x)) {
+            if (x.length == 0) { return "" }
+            var e = swValTyName(x[0])
+            return e == "" ? "" : "Array<" + e + ">"
+        }
+        var c = x.__class
+        if (c == undefined || c === null || typeof c.__name != "string") { return "" }
+        if (typeof c.__tgens != "string") { return c.__name }
+        var g = swGenArgsTxt(x)
+        return g == "" ? "" : c.__name + g
+    }
     function swAdoptDeep(v, ty0) {
         if (ty0 == undefined || ty0 == null || ty0 == "") { return v }
         if (v === null || v === undefined) { return v }
@@ -5464,6 +5636,7 @@ KwContinue  = "continue" KwEnd ;
         var ks = cls.__fields
         if (ks == undefined || ks == null) { return v }
         var out = {__struct: true, __class: cls}
+        if (hasOwn(v, "__targs")) { scopePut(out, "__targs", v.__targs) }
         for (var i = 0; i < ks.length; i++) {
             if (hasOwn(v, ks[i])) { scopePut(out, ks[i], swCopy(v[ks[i]])) }
         }
@@ -6688,7 +6861,7 @@ KwContinue  = "continue" KwEnd ;
     // The callee side: bind the positional arguments to the parameters, collecting a
     // variadic tail into an array, filling in the defaults of the parameters no
     // argument reached, and unwrapping an inout box (remembered for the write-back).
-    function swBindArgs(params, args) {
+    function swBindArgs(params, args, self) {
         var vals = []
         var boxes = []
         var ai = 0
@@ -6719,7 +6892,7 @@ KwContinue  = "continue" KwEnd ;
             // called `g(3)` binds 3.0, so `x / 2` is 1.5, not an Int division's 1.
             // The memberwise initializer runs through here too, which
             // is how `T(a: 3)` fills a `var a: Double` field.
-            if (prm.adopt != undefined && prm.adopt != "") { vals.push(swAdoptAnn(v, prm.adopt)) }
+            if (prm.adopt != undefined && prm.adopt != "") { vals.push(swAdoptAnnS(v, prm.adopt, self)) }
             else { vals.push(v) }
         }
         return {vals: vals, boxes: boxes}
@@ -6734,12 +6907,15 @@ KwContinue  = "continue" KwEnd ;
     // construction runs from whatever frame asked for the value, and without this the
     // nested Inner would lose to a same-named top-level one. A user-declared init pushes the
     // same owner again through makeMethodClosure, which is harmless.
-    function constructInstance(f, argv, labels) {
+    function constructInstance(f, argv, labels, targs) {
         ownerStack.push(f)
-        try { return constructIn(f, argv, labels) } finally { ownerStack.pop() }
+        try { return constructIn(f, argv, labels, targs) } finally { ownerStack.pop() }
     }
-    function constructIn(f, argv, labels) {
+    // targs: the explicit type arguments of `Box<Double>(v: 2)`, set before the
+    // initializer runs (swSetTargs). Twin of emitConstruct in swift-to-llvm-ir.abnf.
+    function constructIn(f, argv, labels, targs) {
         var obj = f.__struct === true ? {__class: f, __struct: true} : {__class: f}
+        if (targs != undefined && targs != "") { swSetTargs(obj, findThis(), targs) }
         if (typeof f.__ctor == "function") { f.__ctor(obj) }
         var init = classFind(f, "init")
         if (typeof init == "function") {
@@ -6755,11 +6931,13 @@ KwContinue  = "continue" KwEnd ;
     // `Array<Double>([1, 2])`: the call without its generic arguments, whose result
     // then adopts the type they spell, as a declared `[Double]` would make it.
     // Twin of swGenCall in swift-to-llvm-ir.abnf.
+    // A program type's arguments go on the instance before its initializer runs
+    // (constructIn), so an `init(_ x: T)` already adopts.
     function swGenCall(items) {
         var rest = [items[0]]
         for (var i = 2; i < items.length; i++) { rest.push(items[i]) }
-        var call = makeCall(rest)
         var ann = swGenAnn(items[0], items[1].gargs)
+        var call = makeCall(rest, ann == "" ? items[1].gargs : "")
         if (ann == "") { return call }
         return function() { return swAdoptAnn(call(), ann) }
     }
@@ -6861,7 +7039,7 @@ KwContinue  = "continue" KwEnd ;
         if (name == "Dictionary" && kv.length == 2) { return "[" + kv[0] + ":" + kv[1] + "]" }
         return ""
     }
-    function makeCall(items) {
+    function makeCall(items, targs) {
         var name = items[0]
         var recs = planArgs(name, items.slice(1))
         // print(_:separator:terminator:) - the labels have to be split out here,
@@ -6942,7 +7120,7 @@ KwContinue  = "continue" KwEnd ;
                 return ev
             }
             if (f != undefined && f !== null && f.__isclass === true) {
-                var obj = constructInstance(f, argv, recLabels(recs))
+                var obj = constructInstance(f, argv, recLabels(recs), targs)
                 writeBacks(ea.boxes)
                 return obj
             }
@@ -8512,9 +8690,9 @@ KwContinue  = "continue" KwEnd ;
     // declared NUMERIC return type adopts it: `func r() -> Double { return 3 }`
     // answers 3.0, so r() / 2 is 1.5. Split in two because MetaJS is typed and a
     // reassigned local keeps its first type.
-    function relabelRet(f, v) {
+    function relabelRet(f, v, self) {
         if (f.rtype == undefined || f.rtype == null || f.rtype == "") { return relabelRetT(f, v) }
-        return relabelRetT(f, swAdoptAnn(v, f.rtype))
+        return relabelRetT(f, swAdoptAnnS(v, f.rtype, self))
     }
     function relabelRetT(f, v) {
         if (f.rlabels == undefined || f.rlabels == null) { return v }
@@ -8543,8 +8721,13 @@ KwContinue  = "continue" KwEnd ;
         swDotClaim(from, to, rtxt)
         swDsNoteSig(items[0], items[1].params)
         swDsNoteGenRet(items[0], from, to, rtxt)
-        swDsMarkTypeParams(items[1].params, from, to)
-        return {name: items[0], params: items[1].params, body: items[k], rlabels: labels, rtype: rty, ret: ret}
+        var gens = swDsGenNames(from, to)
+        swDsMarkTypeParams(items[1].params, gens)
+        if (rty == "" && swTyHasUserGen(rtxt)) { rty = rtxt }
+        swGenUnbind(items[1].params, gens)
+        if (swTyHasUserGen(rty) && swTyNames(rty, gens)) { rty = "" }
+        return {name: items[0], params: items[1].params, body: items[k], rlabels: labels, rtype: rty, ret: ret,
+                rtxt: rtxt, gens: gens}
     }
     function makeInit(items) {
         return {name: "init", params: items[0].params, body: items[1]}
@@ -8808,7 +8991,7 @@ KwContinue  = "continue" KwEnd ;
         var args = []
         var raw = arguments
         for (var i = 3; i < raw.length; i++) { args.push(raw[i]) }
-        var bnd = swBindArgs(f.params, args)
+        var bnd = swBindArgs(f.params, args, self)
         var saved = scopes
         if (chain == null) { scopes = [globalScope, {}] }
         else { scopes = chain.slice(0); scopes.push({}) }
@@ -8828,11 +9011,12 @@ KwContinue  = "continue" KwEnd ;
             // holds, or the type of its value.
             if (pj.tmeta != undefined) { declVar(pj.tmeta, pv) }
             if (pj.tval != undefined) { declVar(pj.tval, hostGlobals["type"](pv)) }
+            if (pj.telem != undefined && Array.isArray(pv) && pv.length > 0) { declVar(pj.telem, hostGlobals["type"](pv[0])) }
         }
         var r = f.body()
         for (var k = 0; k < bnd.boxes.length; k++) { bnd.boxes[k].box.v = getVar(bnd.boxes[k].name) }
         scopes = saved
-        return relabelRet(f, (r != undefined && r.isRet) ? r.v : undefined)
+        return relabelRet(f, (r != undefined && r.isRet) ? r.v : undefined, self)
     }
     function makeFunClosure(f) {
         return function() {
@@ -9239,7 +9423,7 @@ KwContinue  = "continue" KwEnd ;
     function splitMembers(items, from) {
         var mem = {raw: "", inherits: [], cases: [], nested: [], nestedIdx: [], fields: [], initProps: [],
                    methods: [], comps: [], statProps: [], statMethods: [], statComps: [],
-                   lazies: [], wrapped: [], hasInit: false, reqs: []}
+                   lazies: [], wrapped: [], hasInit: false, reqs: [], tgens: null}
         var isStatic = false
         var isLazy = false
         var isMut = false
@@ -9254,6 +9438,7 @@ KwContinue  = "continue" KwEnd ;
             if (it.mattr != undefined) { attr = it.mattr; attrArgs = []; continue }
             if (it.mattrArgs != undefined) { attrArgs = it.mattrArgs; continue }
             if (it.nested != undefined) { mem.nested.push(it.nested); mem.nestedIdx.push(it.nidx); continue }
+            if (it.tgens != undefined) { mem.tgens = it.tgens; continue }
             if (it.inherit != undefined) { mem.inherits.push(it.inherit); continue }
             if (it.eraw != undefined) { mem.raw = it.eraw; continue }
             // A protocol REQUIREMENT: the name only, which is what decides whether a
@@ -9432,6 +9617,9 @@ KwContinue  = "continue" KwEnd ;
         var mem = splitMembers(items, 1)
         swNoteStatics(name, mem)
         markNestedAll(mem)
+        swGenMark(mem, mem.tgens)
+        if (mem.tgens != null) { swGenTypes["$" + name] = mem.tgens }
+        var gdesc = swGenDesc(mem)
         var myIdx = noteDeclIdx(name)
         typeDeclSeq = typeDeclSeq + 1
         var typeSigKey = typeDeclSeq
@@ -9476,6 +9664,11 @@ KwContinue  = "continue" KwEnd ;
         for (var pc = 0; pc < mem.comps.length; pc++) { scopePut(swPropNames, "$" + mem.comps[pc].name, true) }
         return function() {
             var cls = {__isclass: true, __name: name, __struct: isStruct, __fields: fieldNames}
+            if (gdesc != null) {
+                scopePut(cls, "__tgens", gdesc.tg)
+                scopePut(cls, "__gfields", gdesc.fs)
+                scopePut(cls, "__gftys", gdesc.ts)
+            }
             // The inheritance clause: a name that resolves to a class is the
             // SUPERCLASS (its members are found by walking __super); a name that
             // resolves to a protocol contributes its default implementations.
@@ -9526,7 +9719,7 @@ KwContinue  = "continue" KwEnd ;
                 }
                 for (var p = 0; p < mem.initProps.length; p++) {
                     scopePut(self, mem.initProps[p].store,
-                             swAdoptAnn(mem.initProps[p].init(), mem.initProps[p].ty))
+                             swAdoptAnnS(mem.initProps[p].init(), mem.initProps[p].ty, self))
                 }
                 scopes = saved
             }
@@ -9556,7 +9749,7 @@ KwContinue  = "continue" KwEnd ;
                     var self = arguments[0]
                     var args = []
                     for (var a = 1; a < arguments.length; a++) { args.push(arguments[a]) }
-                    var bnd = swBindArgs(mparams, args)
+                    var bnd = swBindArgs(mparams, args, self)
                     for (var p2 = 0; p2 < mparams.length; p2++) {
                         scopePut(self, mparams[p2].name, bnd.vals[p2])
                     }
@@ -9744,6 +9937,7 @@ KwContinue  = "continue" KwEnd ;
         var mem = splitMembers(items, k)
         swNoteStatics(base, mem)
         markNestedAll(mem)
+        if (hasOwn(swGenTypes, "$" + base)) { swGenMark(mem, swGenTypes["$" + base]) }
         clearDeclIdx()
         return function() {
             var h = null

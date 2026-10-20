@@ -137,9 +137,14 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
 Id          = IdBacktick | IdPlain ;
 IdPlain     = ( "a"..."z" | "A"..."Z" | "_" | IdUni ) :whitespace()
               { "a"..."z" | "A"..."Z" | "0"..."9" | "_" | IdUni } :whitespace(Whitespace) ;
-IdUni       = "\u00a1"..."\u167f" | "\u1681"..."\u1fff" | "\u200b"..."\u2027"
-            | "\u202a"..."\u202e" | "\u2030"..."\u205e" | "\u2060"..."\u2fff"
-            | "\u3001"..."\ufefe" | "\uff00"..."\U0010ffff" ;
+// The scalars Swift reserves for OPERATORS (OpUni) are cut out as well, so the
+// square root sign before a name is a prefix operator applied to it.
+IdUni       = "\u00a8" | "\u00aa" | "\u00ad" | "\u00af" | "\u00b2"..."\u00b5" | "\u00b7"..."\u00ba"
+            | "\u00bc"..."\u00be" | "\u00c0"..."\u00d6" | "\u00d8"..."\u00f6" | "\u00f8"..."\u167f"
+            | "\u1681"..."\u1fff" | "\u200b"..."\u2015" | "\u2018"..."\u201f" | "\u202a"..."\u202e"
+            | "\u203f"..."\u2040" | "\u2054" | "\u2060"..."\u218f" | "\u2400"..."\u24ff"
+            | "\u2776"..."\u2793" | "\u2c00"..."\u2dff" | "\u2e80"..."\u2fff" | "\u3004"..."\u3007"
+            | "\u3021"..."\u302f" | "\u3031"..."\ufefe" | "\uff00"..."\U0010ffff" ;
 KwEnd = :script(~~
     (function() {
         var cc = c.peek(0)
@@ -546,9 +551,12 @@ ArgAttrName = ( "convention" | "differentiable" | "_opaqueReturnTypeOf" ) KwEnd 
 
 // class / struct with stored properties, methods and an explicit init.
 StructDecl  <~~ push(makeStructStmt(takeAll())) ~~>
-            = KwStruct Id <~~ push(swBt(up.in)) ~~> [ SkipAngle ] [ ":" InheritList ] [ GenWhere ] "{" { Member } "}" ;
+            = KwStruct Id <~~ push(swBt(up.in)) ~~> [ TypeGenParams ] [ ":" InheritList ] [ GenWhere ] "{" { Member } "}" ;
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
-            = KwClass Id <~~ push(swBt(up.in)) ~~> [ SkipAngle ] [ ":" InheritList ] [ GenWhere ] "{" { Member } "}" ;
+            = KwClass Id <~~ push(swBt(up.in)) ~~> [ TypeGenParams ] [ ":" InheritList ] [ GenWhere ] "{" { Member } "}" ;
+// A generic type's parameter NAMES (constraints dropped): swGenMark in
+// lib/swift-dotwant.js binds them per instance.
+TypeGenParams <~~ push({tgens: swGenParamNames(stripWs(up.in))}) ~~> = SkipAngle ;
 // The inheritance clause: for a class its first entry may be the SUPERCLASS, and
 // every entry may be a protocol whose default implementations are mixed in. Each
 // name is kept as text and resolved when the type is created.
@@ -559,7 +567,7 @@ InheritName <~~ push({inherit: swNoteInherit(stripWs(up.in))}) ~~> = [ "~" ] Typ
 // An actor is a class with an isolation domain. There is no executor in this
 // runtime (async functions are defined, never awaited), so it lowers like a class.
 ActorDecl   <~~ push(makeClassStmt(takeAll())) ~~>
-            = KwActor Id <~~ push(swBt(up.in)) ~~> [ SkipAngle ] [ ":" InheritList ] [ GenWhere ] "{" { Member } "}" ;
+            = KwActor Id <~~ push(swBt(up.in)) ~~> [ TypeGenParams ] [ ":" InheritList ] [ GenWhere ] "{" { Member } "}" ;
 KwActor     = "actor" KwEnd ;
 TypeList    = Type { "," Type } ;
 
@@ -983,8 +991,9 @@ DeclAnnType = FnAnnType | LabelledTupleType | IntAnnType | OptNumAnnType | DeepA
 // Any other annotation is captured as TEXT only for the write-site check that an
 // EXISTENTIAL slot (`Any`, a protocol, ...) does not adopt; see swKeepMode.
 // Each annotation form keeps only its TEXT: a type attribute inside it
-// (`(@escaping (Int) -> Int) -> Int`) pushes a marker that is dropped here.
-OtherAnnType <~~ takeAll(); push({otype: stripWs(up.in)}) ~~> = Type ;
+// (`(@escaping (Int) -> Int) -> Int`) pushes a marker that is dropped here. One
+// applying a generic type of the program (`Box<Double>`) adopts: swGenAnnRec.
+OtherAnnType <~~ takeAll(); push(swGenAnnRec(stripWs(up.in))) ~~> = Type ;
 // A FUNCTION-TYPED SLOT. Every other adoption site in this front end reads the type
 // off the VALUE (see chapter 7.15 of the manual) - floatness and integer width live
 // on the value and a write adopts what the slot already holds. That argument runs
@@ -1301,17 +1310,37 @@ NotChar61b  = :script(~~
 // returns a token covering only the run.
 CustomOp    = :script(~~
     (function() {
+        // The operator-head scalar starting at byte i of the UTF-8 source - the ASCII
+        // set and OpUni's ranges, in decimal - or -1.
+        function opcp(i) {
+            var b = c.peek(i)
+            var ch = b
+            if (b >= 224 && b < 240) { ch = (b - 224) * 4096 + (c.peek(i + 1) - 128) * 64 + (c.peek(i + 2) - 128) }
+            else if (b >= 192 && b < 224) { ch = (b - 192) * 64 + (c.peek(i + 1) - 128) }
+            else if (b >= 128) { return -1 }
+            if (ch === 47 || ch === 61 || ch === 45 || ch === 43 || ch === 33 || ch === 42
+                || ch === 37 || ch === 60 || ch === 62 || ch === 38 || ch === 124
+                || ch === 94 || ch === 126 || ch === 63) { return ch }
+            if (ch < 161) { return -1 }
+            var op = ch <= 167 || ch === 169 || ch === 171 || ch === 172 || ch === 174 || ch === 176
+                || ch === 177 || ch === 182 || ch === 187 || ch === 191 || ch === 215 || ch === 247
+                || (ch >= 8214 && ch <= 8215) || (ch >= 8224 && ch <= 8231) || (ch >= 8240 && ch <= 8254)
+                || (ch >= 8257 && ch <= 8275) || (ch >= 8277 && ch <= 8286) || (ch >= 8592 && ch <= 9215)
+                || (ch >= 9472 && ch <= 10101) || (ch >= 10132 && ch <= 11263) || (ch >= 11776 && ch <= 11903)
+                || (ch >= 12289 && ch <= 12291) || (ch >= 12296 && ch <= 12320) || ch === 12336
+            return op ? ch : -1
+        }
         var i = 0
         var ch = c.peek(i)
         while (ch === 32 || ch === 9 || ch === 10 || ch === 13) { i++; ch = c.peek(i) }
         var s = ""
-        while (ch === 47 || ch === 61 || ch === 45 || ch === 43 || ch === 33 || ch === 42
-               || ch === 37 || ch === 60 || ch === 62 || ch === 38 || ch === 124
-               || ch === 94 || ch === 126 || ch === 63) {
-            s = s + String.fromCharCode(ch)
-            i++
-            ch = c.peek(i)
+        var cp = opcp(i)
+        while (cp >= 0) {
+            s = s + String.fromCharCode(cp)
+            i = i + (cp < 128 ? 1 : (cp < 2048 ? 2 : 3))
+            cp = opcp(i)
         }
+        ch = c.peek(i)
         if (s.length === 0) { return abnf.newToken("\x01no-operator", 0) }
         var builtin = "|=|==|!=|===|!==|<|>|<=|>=|+|-|*|/|%|&&|null||||??|?|!|&|^|~|<<|>>|&+|&-|&*|~=|->|&=|+=|-=|*=|/=|%=|"
         if (builtin.indexOf("|" + s + "|") >= 0) { return abnf.newToken("\x01builtin-operator", 0) }
@@ -1336,16 +1365,36 @@ CallMember  <~~ push(foldCallMember(takeAll(), up.in)) ~~>
 PostOpSfx   <~~ push({kind: "postop", op: up.in}) ~~> = NoSpace PostOp ;
 PostOp      = :script(~~
     (function() {
+        // The operator-head scalar starting at byte i of the UTF-8 source - the ASCII
+        // set and OpUni's ranges, in decimal - or -1.
+        function opcp(i) {
+            var b = c.peek(i)
+            var ch = b
+            if (b >= 224 && b < 240) { ch = (b - 224) * 4096 + (c.peek(i + 1) - 128) * 64 + (c.peek(i + 2) - 128) }
+            else if (b >= 192 && b < 224) { ch = (b - 192) * 64 + (c.peek(i + 1) - 128) }
+            else if (b >= 128) { return -1 }
+            if (ch === 47 || ch === 61 || ch === 45 || ch === 43 || ch === 33 || ch === 42
+                || ch === 37 || ch === 60 || ch === 62 || ch === 38 || ch === 124
+                || ch === 94 || ch === 126 || ch === 63) { return ch }
+            if (ch < 161) { return -1 }
+            var op = ch <= 167 || ch === 169 || ch === 171 || ch === 172 || ch === 174 || ch === 176
+                || ch === 177 || ch === 182 || ch === 187 || ch === 191 || ch === 215 || ch === 247
+                || (ch >= 8214 && ch <= 8215) || (ch >= 8224 && ch <= 8231) || (ch >= 8240 && ch <= 8254)
+                || (ch >= 8257 && ch <= 8275) || (ch >= 8277 && ch <= 8286) || (ch >= 8592 && ch <= 9215)
+                || (ch >= 9472 && ch <= 10101) || (ch >= 10132 && ch <= 11263) || (ch >= 11776 && ch <= 11903)
+                || (ch >= 12289 && ch <= 12291) || (ch >= 12296 && ch <= 12320) || ch === 12336
+            return op ? ch : -1
+        }
         var i = 0
         var ch = c.peek(i)
         var s = ""
-        while (ch === 47 || ch === 61 || ch === 45 || ch === 43 || ch === 33 || ch === 42
-               || ch === 37 || ch === 60 || ch === 62 || ch === 38 || ch === 124
-               || ch === 94 || ch === 126 || ch === 63) {
-            s = s + String.fromCharCode(ch)
-            i++
-            ch = c.peek(i)
+        var cp = opcp(i)
+        while (cp >= 0) {
+            s = s + String.fromCharCode(cp)
+            i = i + (cp < 128 ? 1 : (cp < 2048 ? 2 : 3))
+            cp = opcp(i)
         }
+        ch = c.peek(i)
         if (s.length === 0 || s.indexOf("//") >= 0 || s.indexOf("/*") >= 0) { return abnf.newToken("\x01no-operator", 0) }
         var free = ch < 0 || ch === 32 || ch === 9 || ch === 10 || ch === 13 || ch === 41 || ch === 93
                    || ch === 125 || ch === 44 || ch === 59 || ch === 58 || ch === 46
@@ -1884,7 +1933,14 @@ OpName      = OpChar :whitespace() { OpChar } :whitespace(Whitespace) ;
 // A `<` directly followed by a name opens the generic parameter list instead:
 // `func %%%%<T, U>(x: T, y: U)` declares the operator %%%%, which swiftc splits the
 // same way.
-OpChar      = "/" | "=" | "-" | "+" | "!" | "*" | "%" | "<" NotGenOpen | ">" | "&" | "|" | "^" | "~" | "?" ;
+OpChar      = "/" | "=" | "-" | "+" | "!" | "*" | "%" | "<" NotGenOpen | ">" | "&" | "|" | "^" | "~" | "?" | OpUni ;
+// The operator-head scalars outside ASCII (The Swift Programming Language,
+// "Operators"); the operator scans in CustomOp and PostOp spell the same set.
+OpUni       = "\u00a1"..."\u00a7" | "\u00a9" | "\u00ab"..."\u00ac" | "\u00ae" | "\u00b0"..."\u00b1"
+            | "\u00b6" | "\u00bb" | "\u00bf" | "\u00d7" | "\u00f7" | "\u2016"..."\u2017"
+            | "\u2020"..."\u2027" | "\u2030"..."\u203e" | "\u2041"..."\u2053" | "\u2055"..."\u205e"
+            | "\u2190"..."\u23ff" | "\u2500"..."\u2775" | "\u2794"..."\u2bff" | "\u2e00"..."\u2e7f"
+            | "\u3001"..."\u3003" | "\u3008"..."\u3020" | "\u3030" ;
 NotGenOpen  = :script(~~
     (function() {
         var ch = c.peek(0)
@@ -2404,7 +2460,7 @@ KwContinue  = "continue" KwEnd ;
     }
     function swAdoptNeeded(ty) {
         if (ty == undefined || ty == null || ty == "") { return false }
-        if (swAdoptable(ty)) { return true }
+        if (swAdoptable(ty) || swTyHasUserGen(ty)) { return true }
         if (!swTyIsDeep(ty)) { return false }
         return swTyHasAdoptLeaf(ty) || swTyHasTupLabel(ty)
     }
@@ -2652,7 +2708,7 @@ KwContinue  = "continue" KwEnd ;
         if (ty.charAt(0) != "[" || ty.charAt(ty.length - 1) != "]") { return "" }
         var kv = swTySplit(ty.substring(1, ty.length - 1), ":")
         var e = swTyTrim(kv[kv.length - 1])
-        return swAdoptable(e) ? e : ""
+        return swAdoptable(e) || swGenLeafTy(e) ? e : ""
     }
     // An operand thunk that adopts its value to ty (swFoldAdd in
     // lib/swift-dotwant.js). Twin in swift-interpreter.abnf.
@@ -2662,8 +2718,16 @@ KwContinue  = "continue" KwEnd ;
             return {b: r.b, v: swEmitAdopt(r.b, r.v, ty)}
         }
     }
+    // A declared type behind swGenMark's "=" names a generic parameter of the type
+    // declaring the member, resolved through self's type arguments at run time.
+    // Twin of swAdoptAnnS in swift-interpreter.abnf.
     function swEmitAdopt(b, v, ty) {
         if (ty == undefined || ty == null || ty == "") { return v }
+        if (ty.charAt(0) == "=") {
+            var selfV = b.NewCall(rtSelfOrUndef(), [curScopeV])
+            var tyV = callExt(b, "js_swgensub", [selfV, emitStr(b, ty.substring(1))])
+            return callExt(b, "js_swadoptdeep", [v, tyV, hUndef])
+        }
         if (!swTyIsDeep(ty)) { return callExt(b, "js_swadopt", [v, emitStr(b, ty)]) }
         var ar = swTyArrow(ty)
         if (ar > 0 && ty.charAt(0) == "(") {
@@ -4571,6 +4635,17 @@ KwContinue  = "continue" KwEnd ;
             c2.NewCondBr(truthy(c2, callExt(c2, "js_seq", [callExt(c2, "js_typeof", [v]), emitStr(c2, "object")])), okB, noB)
             okB.NewRet(callExt(okB, "js_get", [v, ps[1]]))
             noB.NewRet(hUndef)
+        })
+    }
+    // The `self` in scope, undefined where there is none (top-level code).
+    function rtSelfOrUndef() {
+        return rtFunc("sw_selfor", 1, function(b, ps) {
+            var hasB = curF.NewBlock("")
+            var noB = curF.NewBlock("")
+            var t = callExt(b, "js_scope_typeof", [ps[0], emitStr(b, "self")])
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [t, emitStr(b, "undefined")])), noB, hasB)
+            noB.NewRet(hUndef)
+            hasB.NewRet(callExt(hasB, "js_scope_get", [ps[0], emitStr(hasB, "self")]))
         })
     }
     // ----- the scope probe, lowered here rather than left as an extern -----
@@ -6782,10 +6857,18 @@ KwContinue  = "continue" KwEnd ;
         var esV = callExt(b, "js_get", [holder, emitStr(b, "__eself")])
         return {b: b, v: b.NewSelect(truthy(b, callExt(b, "js_seq", [iret, hNull])), hNull, esV)}
     }
-    function emitConstruct(b, tkey, clsV, args) {
+    // targs: the explicit type arguments of `Box<Double>(v: 2)`, set before the
+    // initializer runs. A generic parameter of the enclosing instance's type among
+    // them (`Stack<E>(...)` inside Stack) is that instance's argument, and one left
+    // unbound ("_") binds nothing. Twin of constructIn in swift-interpreter.abnf.
+    function emitConstruct(b, tkey, clsV, args, targs) {
         var rec = typeRec(tkey)
         var objV = callExt(b, "js_obj_new", [])
         callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
+        if (targs != undefined && targs != "") {
+            var selfV = b.NewCall(rtSelfOrUndef(), [curScopeV])
+            callExt(b, "js_swsettargs", [objV, selfV, emitStr(b, targs)])
+        }
         var ctorArgs = callExt(b, "js_arr_new", [])
         callExt(b, "js_arr_push", [ctorArgs, objV])
         callExt(b, "js_call", [callExt(b, "js_get", [clsV, emitStr(b, "__ctor")]), hUndef, ctorArgs])
@@ -6808,11 +6891,13 @@ KwContinue  = "continue" KwEnd ;
     // `Array<Double>([1, 2])`: the call without its generic arguments, whose result
     // then adopts the type they spell, as a declared `[Double]` would make it.
     // Twin of swGenCall in swift-interpreter.abnf.
+    // A program type's arguments go on the instance before its initializer runs
+    // (emitConstruct), so an `init(_ x: T)` already adopts.
     function swGenCall(items) {
         var rest = [items[0]]
         for (var i = 2; i < items.length; i++) { rest.push(items[i]) }
-        var call = makeCall(rest)
         var ann = swGenAnn(items[0], items[1].gargs)
+        var call = makeCall(rest, ann == "" ? items[1].gargs : "")
         if (ann == "") { return call }
         return function(b) {
             var r = call(b)
@@ -7058,9 +7143,9 @@ KwContinue  = "continue" KwEnd ;
             arrB.NewRet(arrB.NewCall(rtArrayOf(), [ps[0]]))
         })
     }
-    function makeCall(items) {
+    function makeCall(items, targs) {
         var name = items[0]
-        if (!isBuiltinTypeName(name)) { return makeCallPlain(items) }
+        if (!isBuiltinTypeName(name)) { return makeCallPlain(items, targs) }
         var plain = makeCallPlain(items)
         var bargs = items.slice(1)
         return function(b) {
@@ -7068,7 +7153,7 @@ KwContinue  = "continue" KwEnd ;
             return bx != null ? bx : plain(b)
         }
     }
-    function makeCallPlain(items) {
+    function makeCallPlain(items, targs) {
         var name = items[0]
         var args = planArgs(name, items.slice(1))
         if (name.charCodeAt(0) >= 65 && name.charCodeAt(0) <= 90 && lookupSig(name) == null && classNames[name] != 1) { swNoteDynInit(args) }
@@ -7310,7 +7395,7 @@ KwContinue  = "continue" KwEnd ;
                 // one, which is what typeKeyOf answered above: the descriptor is read
                 // under its qualified key, the only name it is bound to.
                 var clsV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, ck)])
-                return withTypeCtx(ck, function() { return emitConstruct(b, ck, clsV, args) })
+                return withTypeCtx(ck, function() { return emitConstruct(b, ck, clsV, args, targs) })
             }
             var pstat = protoStaticName(name)
             var ea = emitArgRecs(b, args)
@@ -7420,9 +7505,29 @@ KwContinue  = "continue" KwEnd ;
             var notB = curF.NewBlock("")
             var btB = curF.NewBlock("")
             var fnB = curF.NewBlock("")
+            var enB = curF.NewBlock("")
+            var notEnB = curF.NewBlock("")
             b.NewCondBr(truthy(b, b.NewCall(rtProbe("sw_isclass", "__isclass"), [ps[0]])), tyB, notB)
+            // An enum's runs as swEnumInitCall's does, on a holder; its free
+            // `init(rawValue:)` (and every init of an enum that declares none) is
+            // the raw-value lookup.
+            notB.NewCondBr(truthy(notB, notB.NewCall(rtProbe("sw_isenum", "__isenum"), [ps[0]])), enB, notEnB)
+            var tblV = callExt(enB, "js_get", [ps[0], emitStr(enB, "__members")])
+            var rawB = curF.NewBlock("")
+            var hasB = curF.NewBlock("")
+            var initB = curF.NewBlock("")
+            enB.NewCondBr(truthy(enB, callExt(enB, "js_seq", [ps[2], emitStr(enB, "__dinitrawValue:")])), rawB, hasB)
+            hasB.NewCondBr(truthy(hasB, callExt(hasB, "js_seq", [callExt(hasB, "js_get", [tblV, emitStr(hasB, "init")]), hUndef])), rawB, initB)
+            rawB.NewRet(rawB.NewCall(rtRawCase(), [ps[0], callExt(rawB, "js_swidx", [ps[1], emitNum(rawB, 0)])]))
+            var holder = callExt(initB, "js_obj_new", [])
+            callExt(initB, "js_set", [holder, emitStr(initB, "__eholder"), hTrue])
+            var eikv = callExt(initB, "js_get", [tblV, ps[2]])
+            var eik = initB.NewSelect(truthy(initB, callExt(initB, "js_seq", [eikv, hUndef])), emitStr(initB, "init"), eikv)
+            var eret = initB.NewCall(rtPrependCall(), [holder, callExt(initB, "js_get", [tblV, eik]), ps[1]])
+            var esV = callExt(initB, "js_get", [holder, emitStr(initB, "__eself")])
+            initB.NewRet(initB.NewSelect(truthy(initB, callExt(initB, "js_seq", [eret, hNull])), hNull, esV))
             // A builtin's type value (String, Int8, ...) converts through its init.
-            notB.NewCondBr(truthy(notB, notB.NewCall(rtProbe("sw_istname", "__tname"), [ps[0]])), btB, fnB)
+            notEnB.NewCondBr(truthy(notEnB, notEnB.NewCall(rtProbe("sw_istname", "__tname"), [ps[0]])), btB, fnB)
             btB.NewRet(callExt(btB, "js_call", [callExt(btB, "js_get", [ps[0], emitStr(btB, "init")]), hUndef, ps[1]]))
             fnB.NewRet(callExt(fnB, "js_call", [ps[0], hUndef, ps[1]]))
             var objV = callExt(tyB, "js_obj_new", [])
@@ -8934,6 +9039,7 @@ KwContinue  = "continue" KwEnd ;
                     b.NewBr(vAfter)
                     b = vAfter
                 }
+                if (prm.telem != undefined) { b = swEmitElemTypeParam(b, prm.telem, b.NewCall(rtKGet(), [curScopeV, emitStr(b, prm.name)])) }
                 continue
             }
             var av = callExt(b, "js_arg", [argsP, handle(i + off)])
@@ -8973,6 +9079,7 @@ KwContinue  = "continue" KwEnd ;
             // holds, or the type of its value.
             if (prm.tmeta != undefined) { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, prm.tmeta), pv]) }
             if (prm.tval != undefined) { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, prm.tval), b.NewCall(rtTypeValue(), [curScopeV, pv])]) }
+            if (prm.telem != undefined) { b = swEmitElemTypeParam(b, prm.telem, pv) }
         }
         inoutStack.push(inouts)
         var endB = body(b)
@@ -8988,6 +9095,18 @@ KwContinue  = "continue" KwEnd ;
         curFTag = savedTag
         swStatCtx = savedStat
         return idx
+    }
+    // The generic parameter an array or variadic parameter binds (telem, see
+    // swDsMarkTypeParams): the type of its first element, unbound for an empty one.
+    // Twin of the telem arm of makeFunBody in swift-interpreter.abnf.
+    function swEmitElemTypeParam(b, name, arrV) {
+        var setB = curF.NewBlock("")
+        var outB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_lt", [emitNum(b, 0), callExt(b, "js_pylen", [arrV])])), setB, outB)
+        var e0 = callExt(setB, "js_kindex", [arrV, emitNum(setB, 0)])
+        callExt(setB, "js_scope_decl", [curScopeV, emitStr(setB, name), setB.NewCall(rtTypeValue(), [curScopeV, e0])])
+        setB.NewBr(outB)
+        return outB
     }
     // The default-property initializer: sets the properties that have a default
     // value on this, before init runs.
@@ -9054,8 +9173,13 @@ KwContinue  = "continue" KwEnd ;
         swDotClaim(from, to, rtxt)
         swDsNoteSig(items[0], items[1].params)
         swDsNoteGenRet(items[0], from, to, rtxt)
-        swDsMarkTypeParams(items[1].params, from, to)
-        return {name: items[0], params: items[1].params, body: items[k], rlabels: labels, rtype: rty, ret: ret, pos: up.start}
+        var gens = swDsGenNames(from, to)
+        swDsMarkTypeParams(items[1].params, gens)
+        if (rty == "" && swTyHasUserGen(rtxt)) { rty = rtxt }
+        swGenUnbind(items[1].params, gens)
+        if (swTyHasUserGen(rty) && swTyNames(rty, gens)) { rty = "" }
+        return {name: items[0], params: items[1].params, body: items[k], rlabels: labels, rtype: rty, ret: ret, pos: up.start,
+                rtxt: rtxt, gens: gens}
     }
     // The inout parameters of the function whose body is currently being emitted:
     // their final values are copied back into their caller's boxes before every ret.
@@ -9612,7 +9736,7 @@ KwContinue  = "continue" KwEnd ;
     function splitMembers(items, from) {
         var mem = {raw: "", inherits: [], cases: [], nested: [], nestedRecs: [], fields: [], initProps: [],
                    methods: [], comps: [], statProps: [], statMethods: [], statComps: [],
-                   lazies: [], wrapped: [], hasInit: false, reqs: []}
+                   lazies: [], wrapped: [], hasInit: false, reqs: [], tgens: null}
         var isStatic = false
         var isLazy = false
         var isMut = false
@@ -9627,6 +9751,7 @@ KwContinue  = "continue" KwEnd ;
             if (it.mattr != undefined) { attr = it.mattr; attrArgs = []; continue }
             if (it.mattrArgs != undefined) { attrArgs = it.mattrArgs; continue }
             if (it.nested != undefined) { mem.nested.push(it.nested); mem.nestedRecs.push(it.nrec); continue }
+            if (it.tgens != undefined) { mem.tgens = it.tgens; continue }
             if (it.inherit != undefined) { mem.inherits.push(it.inherit); continue }
             if (it.eraw != undefined) { mem.raw = it.eraw; continue }
             // A protocol REQUIREMENT: the name only, which is what decides whether a
@@ -10459,6 +10584,9 @@ KwContinue  = "continue" KwEnd ;
         var name = items[0]
         var mem = splitMembers(items, 1)
         swNoteStatics(name, mem)
+        swGenMark(mem, mem.tgens)
+        if (mem.tgens != null) { swGenTypes["$" + name] = mem.tgens }
+        var gdesc = swGenDesc(mem)
         if (declaresWrappedValue(mem)) { wrapperNames["$" + name] = 1 }
         if (isStruct) { hasStructs = true }
         var rec = newTypeRec(name)
@@ -10525,6 +10653,17 @@ KwContinue  = "continue" KwEnd ;
                 var fa = callExt(b, "js_arr_new", [])
                 for (var z = 0; z < fieldNames.length; z++) { callExt(b, "js_arr_push", [fa, emitStr(b, fieldNames[z])]) }
                 callExt(b, "js_set", [clsV, emitStr(b, "__fields"), fa])
+            }
+            if (gdesc != null) {
+                callExt(b, "js_set", [clsV, emitStr(b, "__tgens"), emitStr(b, gdesc.tg)])
+                var gfa = callExt(b, "js_arr_new", [])
+                var gta = callExt(b, "js_arr_new", [])
+                for (var gz = 0; gz < gdesc.fs.length; gz++) {
+                    callExt(b, "js_arr_push", [gfa, emitStr(b, gdesc.fs[gz])])
+                    callExt(b, "js_arr_push", [gta, emitStr(b, gdesc.ts[gz])])
+                }
+                callExt(b, "js_set", [clsV, emitStr(b, "__gfields"), gfa])
+                callExt(b, "js_set", [clsV, emitStr(b, "__gftys"), gta])
             }
             // An existential stored property is marked on the type; see swKeepMode.
             var exf = swTypeExFields(name)
@@ -10941,6 +11080,7 @@ KwContinue  = "continue" KwEnd ;
         var base = parts[parts.length - 1]
         var mem = splitMembers(items, k)
         swNoteStatics(base, mem)
+        if (hasOwn(swGenTypes, "$" + base)) { swGenMark(mem, swGenTypes["$" + base]) }
         if (protoNames[base] == 1) {
             noteProtoKeys(base, mem)
             // A builtin that conformed before this extension reaches its members too.
@@ -11257,6 +11397,7 @@ KwContinue  = "continue" KwEnd ;
                 emitConfMark(b, tblV, pn)
             }
             b = emitInstallMembers(b, tblV, eV, mem, rec.key, true)
+            b = swEmitDynInits(b, tblV, rec.inits)
             var namesArr = callExt(b, "js_arr_new", [])
             var nrName = "$nr$" + rec.key
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, nrName), emitNum(b, 0)])

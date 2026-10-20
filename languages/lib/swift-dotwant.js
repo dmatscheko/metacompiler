@@ -559,24 +559,150 @@ function swDsGenNames(from, to) {
     return gens
 }
 // A generic parameter is also a VALUE in the body: X in `func f<X: P>(_ t: X.Type)`
-// is the type t holds (`X.zz` reads its static zz), and in `func f<X: P>(_ v: X)`
-// the type of v. The parameter that binds each one is marked for the prologue -
-// tmeta for a metatype, tval for a value, a metatype preferred.
-function swDsMarkTypeParams(params, from, to) {
-    var gens = swDsGenNames(from, to)
+// is the type t holds (`X.zz` reads its static zz), in `func f<X: P>(_ v: X)`
+// the type of v, and in `func f<X: P>(_ xs: [X])` or `(_ xs: X...)` the type of
+// the first element (an empty array leaves X unbound). The parameter that binds each
+// one is marked for the prologue - tmeta for a metatype, tval for a value, telem
+// for an element, in that order of preference. gens is swDsGenNames' answer.
+function swDsMarkTypeParams(params, gens) {
     if (gens == null) { return }
     for (var g = 0; g < gens.length; g++) {
         var meta = null
         var val = null
+        var elem = null
         for (var i = 0; i < params.length; i++) {
             var p = params[i]
-            if (typeof p != "object" || p.variadic || p.inout || p.type == undefined) { continue }
+            if (typeof p != "object" || p.inout || p.type == undefined) { continue }
             var t = swDsUnopt(p.type)
+            if (p.variadic) {
+                if (elem == null && t == gens[g]) { elem = p }
+                continue
+            }
             if (meta == null && t == gens[g] + ".Type") { meta = p }
             if (val == null && t == gens[g]) { val = p }
+            if (elem == null && p.type == "[" + gens[g] + "]") { elem = p }
         }
-        if (meta != null) { meta.tmeta = gens[g] } else if (val != null) { val.tval = gens[g] }
+        if (meta != null) { meta.tmeta = gens[g] }
+        else if (val != null) { val.tval = gens[g] }
+        else if (elem != null) { elem.telem = gens[g] }
     }
+}
+
+// ----- A generic TYPE's parameters -----
+// `struct Box<T> { var v: T }` binds T per INSTANCE: `Box<Double>(v: 2)` and
+// `let b: Box<Double> = Box(v: 3)` hold 2.0 and 3.0, and so does a later
+// `b.put(4)` whose parameter is a T. The instance carries its type arguments as
+// text (__targs, "Double"), its descriptor the parameter names (__tgens, "T") and
+// the generic stored properties (__gfields, their declared types in __gftys).
+// Every adoption site inside the type whose declared type names one of its
+// parameters carries that text behind a leading "=", which no type text starts
+// with, and the adoption resolves it through self at run time: swGenSub in the
+// interpreter, js_swgensub in the compiled halves.
+
+// "<T:Equatable,U>" (whitespace already stripped) -> ["T", "U"].
+function swGenParamNames(txt) {
+    var parts = swDsGenArgs("G" + txt, "G")
+    var out = []
+    if (parts == null) { return out }
+    for (var i = 0; i < parts.length; i++) {
+        var col = parts[i].indexOf(":")
+        out.push(col < 0 ? parts[i] : parts[i].substring(0, col))
+    }
+    return out
+}
+// Whether type text ty names one of names as a whole identifier - not as the
+// member of a qualified name (`Outer.T`).
+function swTyNames(ty, names) {
+    if (names == null || names.length == 0 || ty == undefined || ty == null) { return false }
+    var i = 0
+    while (i < ty.length) {
+        if (!swDsIdCh(ty.charAt(i))) { i++; continue }
+        var s = i
+        while (i < ty.length && swDsIdCh(ty.charAt(i))) { i++ }
+        if (s > 0 && ty.charAt(s - 1) == ".") { continue }
+        var tok = ty.substring(s, i)
+        for (var k = 0; k < names.length; k++) { if (names[k] == tok) { return true } }
+    }
+    return false
+}
+// Whether ty applies a generic type of the program anywhere (`Box<Double>`,
+// `[Pair<Int, Double>]`). The standard library's collections adopt through their
+// own arms.
+function swTyHasUserGen(ty) {
+    if (ty == undefined || ty == null) { return false }
+    var lt = ty.indexOf("<")
+    while (lt > 0) {
+        var s = lt
+        while (s > 0 && swDsIdCh(ty.charAt(s - 1))) { s-- }
+        var nm = ty.substring(s, lt)
+        if (nm != "" && nm != "Array" && nm != "Set" && nm != "Dictionary" && nm != "Optional") { return true }
+        lt = ty.indexOf("<", lt + 1)
+    }
+    return false
+}
+// A parameter that applies a program generic type to a generic parameter of its
+// own function (`func f<T>(_ b: Box<T>)`) adopts nothing: nothing binds that T.
+function swGenUnbind(params, gens) {
+    if (gens == null) { return }
+    for (var i = 0; i < params.length; i++) {
+        var p = params[i]
+        if (typeof p != "object" || p.adopt == undefined) { continue }
+        if (swTyHasUserGen(p.adopt) && swTyNames(p.adopt, gens)) { p.adopt = "" }
+    }
+}
+// The record an annotation that no numeric or structural form claimed pushes: one
+// APPLYING a generic type of the program (`Box<Double>`, `Box<Double>?`) is an
+// adopting {atype}, as `[Double]` is; anything else is only text, {otype}.
+function swGenAnnRec(t) {
+    var c0 = t.charAt(0)
+    if (swDsIdCh(c0) && swTyHasUserGen(t)) { return {atype: t} }
+    return {otype: t}
+}
+// Whether an element type is one applied generic type (`Box<Double>`), which
+// adopts as a plain leaf does.
+function swGenLeafTy(e) { return swDsIdCh(e.charAt(0)) && e.charAt(e.length - 1) == ">" && swTyHasUserGen(e) }
+// The generic parameter names of each declared type, for its extensions.
+var swGenTypes = {}
+// Marks the adoption sites of a generic type's members (mem is splitMembers'
+// answer, tgens the parameter names): an instance method's or initializer's
+// parameter and result, and a stored property. A site that also names a generic
+// parameter of the METHOD (`func map<U>(_ x: U) -> Box<U>`) adopts nothing, as
+// nothing on the instance binds U. A function type is left alone too: its
+// adopting wrapper is built from the annotation at walk time.
+function swGenMark(mem, tgens) {
+    if (tgens == null || tgens.length == 0) { return }
+    for (var m = 0; m < mem.methods.length; m++) {
+        var f = mem.methods[m]
+        var own = f.gens == undefined ? null : f.gens
+        for (var i = 0; i < f.params.length; i++) {
+            var p = f.params[i]
+            if (typeof p != "object" || p.variadic || p.type == undefined) { continue }
+            if (swGenSite(p.type, tgens, own)) { p.adopt = "=" + p.type }
+        }
+        var rt = f.rtxt == undefined ? "" : f.rtxt
+        if (swGenSite(rt, tgens, own)) { f.rtype = "=" + rt }
+    }
+    for (var k = 0; k < mem.fields.length; k++) {
+        var fd = mem.fields[k]
+        if (swGenSite(fd.ann, tgens, null)) { fd.ty = "=" + fd.ann }
+    }
+}
+function swGenSite(ty, tgens, own) {
+    return swTyNames(ty, tgens) && !swTyNames(ty, own) && ty.indexOf("->") < 0
+}
+// What a generic type's descriptor records (after swGenMark): {tg: "T,U", fs: the
+// generic stored properties' storage names, ts: their declared types}, or null.
+function swGenDesc(mem) {
+    if (mem.tgens == null || mem.tgens.length == 0) { return null }
+    var tg = ""
+    for (var i = 0; i < mem.tgens.length; i++) { tg = tg + (i > 0 ? "," : "") + mem.tgens[i] }
+    var fs = []
+    var ts = []
+    for (var k = 0; k < mem.fields.length; k++) {
+        var t = mem.fields[k].ty
+        if (t != undefined && t.length > 0 && t.charAt(0) == "=") { fs.push(mem.fields[k].store); ts.push(t.substring(1)) }
+    }
+    return {tg: tg, fs: fs, ts: ts}
 }
 // file@offset of a call -> the type its value is expected to have.
 var swDsCallWant = {}

@@ -268,6 +268,8 @@ func init() {
 		// site is a deliberate conversion). The twin of swAdoptTy in
 		// languages/swift-interpreter.abnf and of js_swadopt in
 		// languages/lib/swift-rt.metajs.
+		var swAdoptDeep func(v interface{}, ty string, fmap *jsObject) interface{}
+		swAdoptAnn := func(v interface{}, ty string) interface{} { return swAdoptDeep(v, ty, nil) }
 		swAdopt := func(v interface{}, ty string) interface{} {
 			if isNullish(v) {
 				return v
@@ -302,6 +304,9 @@ func init() {
 				if s, isStr := v.(string); isStr && (ty == "Unicode.Scalar" || ty == "UnicodeScalar") {
 					return swMkScalar(s)
 				}
+				if o, isObj := v.(*jsObject); isObj && strings.HasSuffix(ty, ">") {
+					return swAdoptGen(o, ty, swAdoptAnn)
+				}
 				return v
 			}
 			if swIsFlo(v) || !isNum {
@@ -312,6 +317,15 @@ func init() {
 		m["js_swadopt"] = func(a []uint64) uint64 {
 			ty, _ := u(a[1]).(string)
 			return w(swAdopt(u(a[0]), ty))
+		}
+		m["js_swgensub"] = func(a []uint64) uint64 {
+			ty, _ := u(a[1]).(string)
+			return w(swGenSub(u(a[0]), ty))
+		}
+		m["js_swsettargs"] = func(a []uint64) uint64 {
+			txt, _ := u(a[2]).(string)
+			swSetTargs(u(a[0]), u(a[1]), txt)
+			return w(jsUndef)
 		}
 		// The WRITE half of the same rule: `var d: Double = 0; d = 3` must hold
 		// 3.0, yet the declaration knows the annotation and the assignment three
@@ -359,6 +373,16 @@ func init() {
 				if _, isSc := o.props["__usc"]; isSc {
 					return swAdopt(v, "Unicode.Scalar")
 				}
+				// An instance of a generic type carries its type arguments, and
+				// the slot's next value is of that same type.
+				if ta, has := o.props["__targs"].(string); has {
+					if nv, isObj := v.(*jsObject); isObj {
+						if _, cls, _ := swGenClass(o); cls != nil {
+							name, _ := cls.props["__name"].(string)
+							return swAdoptGen(nv, name+"<"+ta+">", swAdoptAnn)
+						}
+					}
+				}
 			}
 			return v
 		}
@@ -385,7 +409,6 @@ func init() {
 		// leaf at compile time) hands the makers down. It is
 		// nil for every annotation with no function-type leaf, which is nearly
 		// all of them.
-		var swAdoptDeep func(v interface{}, ty string, fmap *jsObject) interface{}
 		swAdoptDeep = func(v interface{}, ty0 string, fmap *jsObject) interface{} {
 			if ty0 == "" || isNullish(v) {
 				return v
@@ -637,6 +660,9 @@ func init() {
 				}
 				out := newJSObject()
 				out.set("__class", cls)
+				if ta, has := o.props["__targs"]; has {
+					out.set("__targs", ta)
+				}
 				for _, k := range flds.elems {
 					name, ok := k.(string)
 					if !ok {
@@ -3169,7 +3195,233 @@ func (rt *jsrt) swObjDesc(o *jsObject, depth int) (string, bool) {
 		// An observed property's storage prints under the property's own name.
 		parts = append(parts, strings.TrimPrefix(f, "__v_")+": "+rt.swRender(val, true, depth+1))
 	}
-	return name + "(" + strings.Join(parts, ", ") + ")", true
+	return name + rt.swGenArgsTxt(o) + "(" + strings.Join(parts, ", ") + ")", true
+}
+
+// ----- A generic type's arguments, per instance -----
+// See swGenMark in languages/lib/swift-dotwant.js: an instance carries its type
+// arguments as text (__targs), its descriptor the parameter names (__tgens) and
+// the generic stored properties (__gfields, declared types in __gftys).
+
+func swGenIdCh(c byte) bool {
+	return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}
+
+// swGenClass is the descriptor of o when it is an instance of a generic type.
+func swGenClass(v interface{}) (*jsObject, *jsObject, string) {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return nil, nil, ""
+	}
+	cls, ok := o.props["__class"].(*jsObject)
+	if !ok {
+		return nil, nil, ""
+	}
+	tg, ok := cls.props["__tgens"].(string)
+	if !ok {
+		return nil, nil, ""
+	}
+	return o, cls, tg
+}
+
+// swGenSub answers ty with each generic parameter of self's type replaced by
+// self's type argument, or by "_" (which adopts nothing) when self carries none;
+// "" when self is not an instance of a generic type. Twins: swGenSub in
+// languages/swift-interpreter.abnf and js_swgensub in lib/swift-rt.metajs.
+func swGenSub(self interface{}, ty string) string {
+	o, _, tg := swGenClass(self)
+	if o == nil {
+		return ""
+	}
+	names := swTySplit(tg, ',')
+	var args []string
+	if ta, has := o.props["__targs"].(string); has {
+		if args = swTySplit(ta, ','); len(args) != len(names) {
+			args = nil
+		}
+	}
+	var sb strings.Builder
+	i := 0
+	for i < len(ty) {
+		if !swGenIdCh(ty[i]) {
+			sb.WriteByte(ty[i])
+			i++
+			continue
+		}
+		s := i
+		for i < len(ty) && swGenIdCh(ty[i]) {
+			i++
+		}
+		tok := ty[s:i]
+		if s == 0 || ty[s-1] != '.' {
+			for k, n := range names {
+				if n == tok {
+					tok = "_"
+					if args != nil {
+						tok = args[k]
+					}
+					break
+				}
+			}
+		}
+		sb.WriteString(tok)
+	}
+	return sb.String()
+}
+
+// swTyHasHole reports whether type text names the placeholder `_`.
+func swTyHasHole(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] == '_' && (i == 0 || !swGenIdCh(s[i-1])) && (i+1 == len(s) || !swGenIdCh(s[i+1])) {
+			return true
+		}
+	}
+	return false
+}
+
+func swGenBase(n string) string { return n[strings.LastIndexByte(n, '.')+1:] }
+
+// swSetTargs puts the written type arguments txt on obj, a new instance of a
+// generic type. A generic parameter of the enclosing instance's type among them
+// is that instance's argument, and one left unbound binds nothing. Twins:
+// swSetTargs in languages/swift-interpreter.abnf, js_swsettargs in
+// lib/swift-rt.metajs.
+func swSetTargs(obj, self interface{}, txt string) {
+	o, _, _ := swGenClass(obj)
+	if o == nil {
+		return
+	}
+	s := swGenSub(self, txt)
+	if s == "" {
+		s = txt
+	}
+	if !swTyHasHole(s) {
+		o.set("__targs", s)
+	}
+}
+
+// swAdoptGen: an instance of a generic type reaching a slot that spells its type
+// arguments takes them, and its generic stored properties adopt what they now
+// declare; one that carries arguments already keeps them. Twins: swAdoptGen in
+// languages/swift-interpreter.abnf and lib/swift-rt.metajs.
+func swAdoptGen(v *jsObject, ty string, adopt func(interface{}, string) interface{}) interface{} {
+	o, cls, _ := swGenClass(v)
+	if o == nil {
+		return v
+	}
+	if _, has := o.props["__targs"]; has {
+		return v
+	}
+	name, _ := cls.props["__name"].(string)
+	lt := strings.IndexByte(ty, '<')
+	if lt < 0 || swGenBase(ty[:lt]) != swGenBase(name) {
+		return v
+	}
+	args := ty[lt+1 : len(ty)-1]
+	if swTyHasHole(args) {
+		return v
+	}
+	o.set("__targs", args)
+	fs := swStrArray(cls.props["__gfields"])
+	ts := swStrArray(cls.props["__gftys"])
+	for i, f := range fs {
+		if fv, has := o.props[f]; has && i < len(ts) {
+			o.set(f, adopt(fv, swGenSub(o, ts[i])))
+		}
+	}
+	return v
+}
+
+// swGenArgsTxt is the `<Double, Int>` a generic struct prints after its name:
+// its type arguments, else the ones its stored properties declared as a bare
+// parameter infer from their values; "" when one is unknown. Twins: swGenArgsTxt
+// in languages/swift-interpreter.abnf and lib/swift-rt.metajs.
+func (rt *jsrt) swGenArgsTxt(v interface{}) string {
+	o, cls, tg := swGenClass(v)
+	if o == nil {
+		return ""
+	}
+	names := swTySplit(tg, ',')
+	var given []string
+	if ta, has := o.props["__targs"].(string); has {
+		given = swTySplit(ta, ',')
+	}
+	fs := swStrArray(cls.props["__gfields"])
+	ts := swStrArray(cls.props["__gftys"])
+	out := make([]string, len(names))
+	for k, n := range names {
+		a := ""
+		if given != nil {
+			if k < len(given) {
+				a = swTyCanon(given[k])
+			}
+		} else {
+			for i := 0; i < len(fs) && i < len(ts) && a == ""; i++ {
+				if fv, has := o.props[fs[i]]; has && ts[i] == n {
+					a = rt.swValTyName(fv)
+				}
+			}
+		}
+		if a == "" {
+			return ""
+		}
+		out[k] = a
+	}
+	return "<" + strings.Join(out, ", ") + ">"
+}
+
+// swValTyName is the type name of a value as a generic argument, "" when the
+// value cannot say.
+func (rt *jsrt) swValTyName(x interface{}) string {
+	switch t := x.(type) {
+	case bool, string, float64, jsGInt, jsJFlo:
+		return rt.swTypeOf(x)
+	case *jsArray:
+		if len(t.elems) == 0 {
+			return ""
+		}
+		if e := rt.swValTyName(t.elems[0]); e != "" {
+			return "Array<" + e + ">"
+		}
+		return ""
+	case *jsObject:
+		cls, ok := t.props["__class"].(*jsObject)
+		if !ok {
+			return ""
+		}
+		name, _ := cls.props["__name"].(string)
+		if _, gen := cls.props["__tgens"].(string); !gen {
+			return name
+		}
+		if g := rt.swGenArgsTxt(t); g != "" {
+			return name + g
+		}
+	}
+	return ""
+}
+
+// swTyCanon spells a type written with the sugar as type(of:) and print name it:
+// [T] is Array<T>, [K: V] Dictionary<K, V> and T? Optional<T>, all the way down.
+// Twins: swTyCanon in both swift grammars and lib/swift-rt.metajs.
+func swTyCanon(t string) string {
+	n := len(t)
+	if n > 1 && t[n-1] == '?' {
+		return "Optional<" + swTyCanon(t[:n-1]) + ">"
+	}
+	if n > 1 && t[0] == '[' && t[n-1] == ']' {
+		if kv := swTySplit(t[1:n-1], ':'); len(kv) == 2 {
+			return "Dictionary<" + swTyCanon(kv[0]) + ", " + swTyCanon(kv[1]) + ">"
+		}
+		return "Array<" + swTyCanon(t[1:n-1]) + ">"
+	}
+	if lt := strings.IndexByte(t, '<'); lt > 0 && t[n-1] == '>' {
+		parts := swTySplit(t[lt+1:n-1], ',')
+		for i := range parts {
+			parts[i] = swTyCanon(parts[i])
+		}
+		return t[:lt+1] + strings.Join(parts, ", ") + ">"
+	}
+	return t
 }
 
 // swFindMember walks the __class / __super chain for a callable member, the same
