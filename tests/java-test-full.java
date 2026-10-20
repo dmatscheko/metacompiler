@@ -175,6 +175,8 @@ class Main {
         S82.run(); // SECTION-CALL 82
         S83.run(); // SECTION-CALL 83
         S84.run(); // SECTION-CALL 84
+        S85.run(); // SECTION-CALL 85
+        S86.run(); // SECTION-CALL 86
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -4706,5 +4708,85 @@ class S84 {
         c.or(b);
         String bs = a + " " + c + " " + c.cardinality() + " " + c.length() + " " + a.nextClearBit(0) + " " + c.nextSetBit(5) + " " + a.intersects(b) + " " + c.hashCode();
         Main.check("bs84", bs.equals("{0, 1, 3, 4} {0, 1, 3, 4, 64} 5 65 2 64 true 1227"));
+    }
+}
+
+// ===== SECTION 85: a static field and a method of one name =====
+//
+// Fields and methods are separate namespaces (JLS 8.2): `static int count`
+// and `static int count()` coexist, read and written unqualified, qualified,
+// compound and through an array element, and a subclass's static field may
+// share an inherited method's name. Every expected value is java 24.0.2's.
+class S85 {
+    static int count;
+    static int count() { return count + 100; }
+    static int[] arr = {1, 2};
+    static int arr() { return arr[0] + arr[1]; }
+    static String tag = "t";
+    String tag() { return "m" + tag; }
+    static class NmBase { int val() { return 1; } }
+    static class NmSub extends NmBase { static int val = 40; int both() { return val() + val; } }
+    static class Peek { int peek() { return count + count() + arr(); } }
+    static void run() {
+        count = 5;
+        String nm = count() + " " + count + " " + S85.count() + " " + S85.count;
+        S85.count = 7;
+        S85.count++;
+        S85.count += 2;
+        ++count;
+        count *= 2;
+        nm = nm + " " + count + " " + count();
+        S85.arr[0] = 10;
+        arr[1] += 5;
+        nm = nm + " " + arr() + " " + S85.arr[0] + " " + new S85().tag() + tag + S85.tag + " " + new NmSub().both() + " " + NmSub.val
+            + " " + new Peek().peek();
+        Main.check("nm85", nm.equals("105 5 105 5 22 122 17 10 mttt 41 40 161"));
+    }
+}
+
+// ===== SECTION 86: a field that hides a superclass's =====
+//
+// A subclass field of an inherited field's name hides it (JLS 8.3) and the
+// object holds both: the class the code is written in picks one for an
+// unqualified name, the static type for a qualified one, and super.f and a
+// cast reach the hidden one, for reads, writes, compound and ++/--. Every
+// expected value is java 24.0.2's.
+class S86 {
+    static class HA {
+        String name = "A";
+        int n = 1;
+        HA() { n += 10; }
+        String who() { return name + n; }
+        void bumpA() { n++; this.n += 2; }
+    }
+    static class HB extends HA {
+        String name = "B";
+        int n = 2;
+        HB() { super(); n += 20; this.name = "B2"; super.name = "A2"; }
+        String both() { return name + super.name + ((HA) this).name + who() + n + super.n + this.n; }
+        void bumpB() { n++; ++n; super.n++; n *= 3; super.n -= 1; }
+    }
+    static class HC extends HB {
+        String all() { return name + n + super.name + super.n + ((HA) this).name + ((HA) this).n; }
+    }
+    static class HD extends HA {
+        int n = 5;
+        int get(int n) { return n + this.n + super.n; }
+    }
+    static void run() {
+        HB b = new HB();
+        HA a = b;
+        String hd = b.both() + " " + a.name + b.name + a.n + b.n;
+        b.bumpA();
+        b.bumpB();
+        hd = hd + " " + b.both();
+        b.name = "BB";
+        a.name = "AA";
+        b.n = 100;
+        a.n = 200;
+        b.n++;
+        a.n += 5;
+        hd = hd + " " + b.both() + a.n + b.n + " " + new HC().all() + " " + new HD().get(1000);
+        Main.check("hd86", hd.equals("B2A2A2A211221122 A2B21122 B2A2A2A214721472 BBAAAAAA205101205101205101 B222B222A211 1016"));
     }
 }

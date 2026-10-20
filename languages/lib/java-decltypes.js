@@ -582,6 +582,7 @@ function jOvIsVar(m) {
 function jOvDeclare(name, members) {
     var sup = ""
     var ms = []
+    var fl = {}
     var ctors = []
     for (var i = 0; i < members.length; i++) {
         var m = members[i]
@@ -596,11 +597,106 @@ function jOvDeclare(name, members) {
             ms.push({name: m.name, raw: jOvRawOf(m.ptys, v), ptys: m.ptys, isVar: v, statik: m.statik})
         }
         if (m.kind == "ctor" && m.ptys != undefined) { ctors.push(m) }
+        if (m.kind == "field") { fl["$" + m.name] = m.statik ? "s" : "i" }
     }
     var cts = jOvCtorCands(ctors)
     for (var k = 0; k < cts.length; k++) { cts[k].n = ctors[k].params.length }
     if (jOvCls["$" + name] == undefined) { jOvNames.push(name) }
-    jOvCls["$" + name] = {sup: sup, ms: ms, cts: cts}
+    jOvCls["$" + name] = {sup: sup, ms: ms, cts: cts, fl: fl}
+}
+// The slot a field `name` named through class cls (its static type, or the
+// class the access is written in) lives in. A field is found from cls
+// upwards, the nearest declaration winning (JLS 8.3: a field HIDES every one
+// of that name further up). Two declarations on one object or descriptor
+// need two slots:
+//   - an instance field that hides a superclass's instance field is
+//     "name#^Decl", so the instance holds both (super.name, ((A) b).name);
+//   - a static field lives on the class descriptor beside the methods, and a
+//     field and a method may share a name (JLS 8.2), so a static field whose
+//     class or a superclass has a method of that name is "name#=".
+// Neither can be spelled by a method signature slot ("name#sig").
+function jFieldKey(cls, name) {
+    var c = cls
+    var kind = ""
+    var guard = 0
+    while (c != "" && guard < 64) {
+        guard++
+        var rec = jOvCls["$" + c]
+        if (rec == undefined) { return name }
+        var k = rec.fl["$" + name]
+        if (k != undefined) {
+            kind = k
+            break
+        }
+        c = rec.sup
+    }
+    if (kind == "") { return name }
+    var decl = c
+    var up = kind == "s" ? c : jOvCls["$" + c].sup
+    while (up != "" && guard < 128) {
+        guard++
+        var urec = jOvCls["$" + up]
+        if (urec == undefined) { return name }
+        if (kind == "s") {
+            for (var i = 0; i < urec.ms.length; i++) {
+                if (urec.ms[i].name == name) { return name + "#=" }
+            }
+        } else if (urec.fl["$" + name] == "i") {
+            return name + "#^" + decl
+        }
+        up = urec.sup
+    }
+    return name
+}
+// The class a field access names its field through, recorded at walk time
+// from the receiver's text t: the enclosing class for `this`, "super:" and
+// it for `super` (its superclass is only known once the class is declared),
+// the static type otherwise (a type name for a static access); "" when
+// unknown.
+function jFieldRecv(t) {
+    if (t == "this") { return curClassName }
+    if (t == "super") { return "super:" + curClassName }
+    var r = jRecvTy(t)
+    if (r.length > 7 && r.substring(0, 7) == "static:") { return jOvBare(r.substring(7)) }
+    if (r.length > 8 && r.substring(0, 8) == "static?:") { return jOvBare(r.substring(8)) }
+    return jOvBare(r)
+}
+// The text of a chain target before its last suffix, or "" when it cannot
+// be told off the end of t.
+function jChainHeadText(t, last) {
+    if (last.kind == "field") {
+        var fp = t.length - last.name.length - 1
+        return (fp > 0 && t.substring(fp) == "." + last.name) ? t.substring(0, fp) : ""
+    }
+    if (last.kind != "index" || t.charAt(t.length - 1) != "]") { return "" }
+    var depth = 0
+    for (var i = t.length - 1; i > 0; i--) {
+        var ch = t.charAt(i)
+        if (ch == "]" || ch == ")") { depth++ }
+        if (ch == "[" || ch == "(") {
+            depth--
+            if (depth == 0) { return t.substring(0, i) }
+        }
+    }
+    return ""
+}
+// A chain target's head suffixes learn their receivers' static types as an
+// expression's do (jChainRecvTys), from the text before the place; the
+// answer is jFieldRecv for a last suffix that is a field, else "".
+function jChainTargetRecv(head, last, text) {
+    var ht = jChainHeadText(stripWs(text), last)
+    if (ht == "") { return "" }
+    if (head.length > 1) { jChainRecvTys(head.slice(1), ht) }
+    return last.kind == "field" ? jFieldRecv(ht) : ""
+}
+// The slot of field `name` through a jFieldRecv answer.
+function jFieldKeyAt(recv, name) {
+    if (recv == undefined || recv == "") { return name }
+    if (recv.length > 6 && recv.substring(0, 6) == "super:") {
+        var rec = jOvCls["$" + recv.substring(6)]
+        return rec == undefined ? name : jFieldKey(rec.sup, name)
+    }
+    return jFieldKey(recv, name)
 }
 // The signature `new cls(args)`, `this(args)` or `super(args)` resolves to
 // among cls' constructors of that many parameters, "" when there are fewer
@@ -1714,6 +1810,7 @@ function jChainRecvTys(sfxs, text) {
     }
     for (var j = 0; j < sfxs.length; j++) {
         if (sfxs[j].kind == "mcall") { sfxs[j].rty = starts[j] > 0 ? jRecvTy(text.substring(0, starts[j])) : "" }
+        if (sfxs[j].kind == "field" && starts[j] > 0) { sfxs[j].frecv = jFieldRecv(text.substring(0, starts[j])) }
     }
 }
 // The static signature of a `.m(...)` suffix, resolved once the walk is

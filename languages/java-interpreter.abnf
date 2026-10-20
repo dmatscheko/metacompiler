@@ -845,7 +845,7 @@ PlaceAhead  = :script(~~
         return found ? undefined : abnf.newToken("\x01no-place", 0)
     })()
 ~~) ;
-PlainTarget <~~ push(makeTargetRef(takeAll())) ~~>
+PlainTarget <~~ push(jTargetRef(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
 TIndex      <~~ push({idx: pop()}) ~~>
             = "[" Expression "]" ;
@@ -4258,7 +4258,17 @@ HasStatic   = :script(~~
         // Twin: makeAssign in java-to-llvm-ir.abnf.
         return function() {
             var v = anytype // The assigned value may be a number, a string, a double box, ...
-            if (ref.path.length == 0) {
+            var ho = (ref.path.length == 0 && jBareKey(ref) != "") ? jHiddenOwner(ref.name, ref.hk) : null
+            if (ho != null) {
+                if (op != "=") {
+                    v = applyOp(op, ho[ref.hk], valT())
+                } else {
+                    v = valT()
+                    var hty = jFieldTyOf(ref.name)
+                    if (hty != vty) { v = jConvTo(v, hty) }
+                }
+                ho[ref.hk] = v
+            } else if (ref.path.length == 0) {
                 if (op != "=") {
                     v = jGetVar(ref.name)
                     v = applyOp(op, v, valT())
@@ -4300,6 +4310,12 @@ HasStatic   = :script(~~
         var ref = items[0]
         var d = (items[1] == "++") ? 1 : -1
         return function() {
+            var ho = (ref.path.length == 0 && jBareKey(ref) != "") ? jHiddenOwner(ref.name, ref.hk) : null
+            if (ho != null) {
+                var hn = ho[ref.hk]
+                ho[ref.hk] = jStep(hn, d)
+                return hn
+            }
             if (ref.path.length == 0) {
                 var n = jGetVar(ref.name)
                 jSetVar(ref.name, jStep(n, d))
@@ -4315,6 +4331,12 @@ HasStatic   = :script(~~
     function makePreIncDec(ref, op) {
         var d = (op == "++") ? 1 : -1
         return function() {
+            var ho = (ref.path.length == 0 && jBareKey(ref) != "") ? jHiddenOwner(ref.name, ref.hk) : null
+            if (ho != null) {
+                var hn = jStep(ho[ref.hk], d)
+                ho[ref.hk] = hn
+                return hn
+            }
             if (ref.path.length == 0) {
                 var n = jStep(jGetVar(ref.name), d)
                 jSetVar(ref.name, n)
@@ -5460,7 +5482,7 @@ HasStatic   = :script(~~
         var fty = jFieldTyOf(name)
         var fv = fty == vty ? value : jConvTo(value, fty)
         var o = jSelfWith(name)
-        if (o != null) { o[name] = fv } else { setVar(name, fv) }
+        if (o != null) { o[jSlot(o, name)] = fv } else { setVar(name, fv) }
         return fv
     }
     // An initializer thunk that runs with jArrCtx set to its declared type ty.
@@ -5979,7 +6001,7 @@ HasStatic   = :script(~~
         }
         if (recordParams != undefined) {
             for (i = 0; i < recordParams.length; i++) {
-                fields.push({name: recordParams[i], init: null, dflt: 0, kind: "field"})
+                fields.push({name: recordParams[i], fkey: recordParams[i], init: null, dflt: 0, kind: "field"})
             }
         }
         // The class descriptor is published BEFORE the static initializers run, so a
@@ -5990,7 +6012,10 @@ HasStatic   = :script(~~
             var mm = members[i]
             if (mm.kind == "field") {
                 if (mm.statik) { statics.push(mm) }
-                else { fields.push(mm) }
+                else {
+                    mm.fkey = jFieldKey(name, mm.name)
+                    fields.push(mm)
+                }
             }
             if (mm.kind == "iinit") { fields.push(mm) }
             if (mm.kind == "sinit") { statics.push(mm) }
@@ -6000,6 +6025,11 @@ HasStatic   = :script(~~
             if (mm.kind == "field" && mm.statik) {
                 if (cls.__sfld == undefined) { cls.__sfld = {} }
                 cls.__sfld[mm.name] = true
+                var sk = jFieldKey(name, mm.name)
+                if (sk != mm.name) {
+                    if (cls.__sfk == undefined) { cls.__sfk = {} }
+                    cls.__sfk[mm.name] = sk
+                }
             }
             if (mm.kind == "compact") { compact = mm }
             if (mm.kind == "ctor") {
@@ -6022,7 +6052,7 @@ HasStatic   = :script(~~
             for (var k = 0; k < fields.length; k++) {
                 var fk = fields[k]
                 if (fk.kind == "iinit") { invokeBody([], fk.body, self, "this", []); continue }
-                self[fk.name] = (fk.init != null && fk.init != undefined) ? fk.init() : fk.dflt
+                self[fk.fkey] = (fk.init != null && fk.init != undefined) ? fk.init() : fk.dflt
             }
         }
         // refs is late-bound on purpose: makeCtorClosure captures the box, not the
@@ -6083,7 +6113,7 @@ HasStatic   = :script(~~
             for (var si = 0; si < statics.length; si++) {
                 var st = statics[si]
                 if (st.kind == "sinit") { invokeBody([], st.body, cls, "__jcls", []); continue }
-                cls[st.name] = (st.init != null) ? st.init() : st.dflt
+                cls[jSlot(cls, st.name)] = (st.init != null) ? st.init() : st.dflt
             }
             scopes.pop()
         }
@@ -6351,7 +6381,7 @@ HasStatic   = :script(~~
     function jZeroFields(self, cls) {
         var fz = cls.__fzero
         for (var i = 0; i < fz.length; i++) {
-            if (!hasOwn(self, fz[i].name)) { self[fz[i].name] = fz[i].dflt }
+            if (!hasOwn(self, fz[i].fkey)) { self[fz[i].fkey] = fz[i].dflt }
         }
     }
     function makeCtorClosure(info, ownInit, refs) {
@@ -6917,9 +6947,10 @@ HasStatic   = :script(~~
         var head = []
         for (var i = 0; i < items.length - 1; i++) { head.push(items[i]) }
         var last = items[items.length - 1]
+        var frecv = jChainTargetRecv(head, last, text)
         // Three separate returns rather than one reassigned local: under the
         // frozen engine a variable keeps the shape it was first given.
-        if (last.kind == "field") { return {name: "", path: [{key: last.name}], base: foldCallMember(head)} }
+        if (last.kind == "field") { return {name: "", path: [{key: last.name}], base: foldCallMember(head), frecv: frecv} }
         if (last.kind == "index") {
             var tr = jChainTyRef(text)
             return {name: "", path: [{idx: last.idx}], base: foldCallMember(head),
@@ -6988,7 +7019,8 @@ HasStatic   = :script(~~
                     cur = ssig == "" ? mcall(cur, s.name, argv) : jSigCall(cur, s.name, ssig, argv)
                 } else if (s.kind == "field") {
                     if (cur === undefined || cur === null) { jNpe() }
-                    cur = cur === jStrNS ? jStrField(s.name) : core.getField(cur, s.name)
+                    if (s.hk == undefined) { s.hk = jHideKey(jFieldKeyAt(s.frecv, s.name)) }
+                    cur = cur === jStrNS ? jStrField(s.name) : ((s.hk != "" && hasOwn(cur, s.hk)) ? cur[s.hk] : core.getField(cur, s.name))
                 } else if (s.kind == "mref") {
                     cur = jBindMethodRef(cur, s.name)
                 } else if (s.kind == "qnew") {
@@ -7018,13 +7050,16 @@ HasStatic   = :script(~~
         if (ref.base != undefined) { o = ref.base() } else { o = getVar(ref.name) }
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
-            if (s.key != undefined) { o = hasOwn(o, s.key) ? o[s.key] : undefined }
+            if (s.key != undefined) {
+                var pk = jPathKey(ref, i, o)
+                o = hasOwn(o, pk) ? o[pk] : undefined
+            }
             else { o = core.getIndex(o, s.idx()) }
             if (o === undefined || o === null) { jNpe() }
         }
         var last = ref.path[ref.path.length - 1]
         if (o === undefined || o === null) { jNpe() }
-        if (last.key != undefined) { return {obj: o, key: last.key} }
+        if (last.key != undefined) { return {obj: o, key: jPathKey(ref, ref.path.length - 1, o)} }
         // The WRITE half of the bounds check: `a[3] = 5` on an int[3] throws
         // rather than growing the array. Every writer - makeAssign, makeIncDec,
         // makePreIncDec - goes through this one place.
@@ -7043,6 +7078,10 @@ HasStatic   = :script(~~
     // The compiler half stores it on the descriptor instead.
     core.getField = function(o, name) {
         if (name == "length" && Array.isArray(o)) { return o.length }
+        if (typeof o == "object" && o !== null && o.__sfk !== undefined) {
+            var fk = jSlot(o, name)
+            if (hasOwn(o, fk)) { return o[fk] }
+        }
         if (hasOwn(o, name)) { return o[name] }
         if (typeof o == "object" && o.__isclass === true) {
             var q = o.__name + "." + name
@@ -7205,7 +7244,7 @@ HasStatic   = :script(~~
         // jIsClassVal, inlined: this is every variable read.
         if (v !== undefined && v !== null && typeof v == "object" && v.__isclass === true) {
             var o = jSelfWith(name)
-            if (o != null) { return o[name] }
+            if (o != null) { return o[jSlot(o, name)] }
         }
         return v
     }
@@ -7222,22 +7261,86 @@ HasStatic   = :script(~~
     function jSetVar(name, value) {
         if (jClassBound(name)) {
             var o = jSelfWith(name)
-            if (o != null) { o[name] = value; return }
+            if (o != null) { o[jSlot(o, name)] = value; return }
         }
         setVar(name, value)
     }
     makeVarRef = function(name) {
-        return function() { return jGetVar(name) }
+        // `super.f` reads a field of `this` (jFieldRecv picks its slot).
+        if (name == "super") { name = "this" }
+        var ref = {name: name, path: [], hcls: curClassName}
+        return function() {
+            if (ref.hk == undefined) { jBareKey(ref) }
+            return ref.hk == "" ? jGetVar(name) : jGetHidden(name, ref.hk)
+        }
     }
     core.varMiss = function(name) {
         var o = jSelfWith(name)
-        return (o == null) ? null : {v: o[name]}
+        return (o == null) ? null : {v: o[jSlot(o, name)]}
     }
     core.setMiss = function(name, value) {
         var o = jSelfWith(name)
         if (o == null) { return false }
-        o[name] = value
+        o[jSlot(o, name)] = value
         return true
+    }
+    // ----- a field that hides a superclass's (JLS 8.3) -----
+    //
+    // Both live on the instance, the hiding one under "name#^Decl" (jFieldKey
+    // in lib/java-decltypes.js). Which one a name means is decided by the
+    // class it is written in (an unqualified name, makeVarRef / jTargetRef) or
+    // by the receiver's static type (a qualified one, jFieldRecv) - the key
+    // is worked out on first use, when every class is declared, and cached on
+    // the reference. Twin of jFieldSlot / jRefKey in java-to-llvm-ir.abnf.
+    function jHideKey(k) { return k.indexOf("#^") >= 0 ? k : "" }
+    function jBareKey(ref) {
+        if (ref.hk == undefined) { ref.hk = jHideKey(jFieldKey(ref.hcls, ref.name)) }
+        return ref.hk
+    }
+    function jTargetRef(items) {
+        var r = makeTargetRef(items)
+        if (r.path.length > 0) { r.frecv = jFieldRecv(r.name) }
+        if (r.name == "super") { r.name = "this" }
+        r.hcls = curClassName
+        return r
+    }
+    // The slot of path step i of ref on o: a hidden field's for the first
+    // step, else the descriptor slot jSlot names.
+    function jPathKey(ref, i, o) {
+        var k = ref.path[i].key
+        if (i == 0 && ref.frecv != undefined) {
+            if (ref.hk0 == undefined) { ref.hk0 = jHideKey(jFieldKeyAt(ref.frecv, k)) }
+            if (ref.hk0 != "") { return ref.hk0 }
+        }
+        return jSlot(o, k)
+    }
+    // A local of the same name shadows the field; otherwise the instance
+    // jSelfWith finds holds the hidden slot.
+    function jHasLocal(name) {
+        var sc = scopes
+        for (var i = sc.length - 1; i >= 0; i--) {
+            if (hasOwn(sc[i], name)) { return true }
+        }
+        return false
+    }
+    function jHiddenOwner(name, hk) {
+        if (jHasLocal(name)) { return null }
+        var o = jSelfWith(name)
+        return (o != null && hasOwn(o, hk)) ? o : null
+    }
+    function jGetHidden(name, hk) {
+        var o = jHiddenOwner(name, hk)
+        return o == null ? jGetVar(name) : o[hk]
+    }
+    // The slot `name` is stored under on o: its own name, except for a static
+    // field a class descriptor moved off a method's name (jFieldKey, __sfk).
+    // Twin of jFieldSlot in java-to-llvm-ir.abnf.
+    function jSlot(o, name) {
+        if (typeof o != "object" || o === null) { return name }
+        var t = o.__sfk
+        if (t === undefined || t === null) { return name }
+        var k = t[name]
+        return typeof k == "string" ? k : name
     }
 
     // Import roots the runtime already provides (their symbols are builtins:

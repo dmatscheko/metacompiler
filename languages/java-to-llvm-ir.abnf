@@ -818,7 +818,7 @@ PlaceAhead  = :script(~~
         return found ? undefined : abnf.newToken("\x01no-place", 0)
     })()
 ~~) ;
-PlainTarget <~~ push(makeTargetRef(takeAll())) ~~>
+PlainTarget <~~ push(jTargetRef(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
 TIndex      <~~ push(jNoteIdx({idx: pop()})) ~~>
             = "[" Expression "]" ;
@@ -2267,9 +2267,10 @@ HasStatic   = :script(~~
         var head = []
         for (var i = 0; i < items.length - 1; i++) { head.push(items[i]) }
         var last = items[items.length - 1]
+        var frecv = jChainTargetRecv(head, last, text)
         // Three separate returns rather than one reassigned local: under the
         // frozen engine a variable keeps the shape it was first given.
-        if (last.kind == "field") { return {name: "", path: [{key: last.name}], base: foldCallMember(head)} }
+        if (last.kind == "field") { return {name: "", path: [{key: last.name}], base: foldCallMember(head), frecv: frecv} }
         if (last.kind == "index") {
             var tr = jChainTyRef(text)
             return {name: "", path: [{idx: last.idx}], base: foldCallMember(head),
@@ -2278,6 +2279,19 @@ HasStatic   = :script(~~
         // A run that ends in a call is not an assignable place; the parse still
         // succeeds and the enclosing Assignment fails on the missing operator.
         return {name: "", path: [{key: "\x01not-a-place"}], base: foldCallMember(head)}
+    }
+    // A `Name.f...` target records the class its first field is named
+    // through (jFieldRecv), so emitRefPath can address that field's slot
+    // (jFieldKey). `super.f` is a field of `this`.
+    function jTargetRef(items) {
+        var r = makeTargetRef(items)
+        if (r.path.length > 0) { r.frecv = jFieldRecv(r.name) }
+        if (r.name == "super") { r.name = "this" }
+        return r
+    }
+    function jRefKey(ref, i) {
+        var k = ref.path[i].key
+        return i == 0 ? jFieldKeyAt(ref.frecv, k) : k
     }
     // With lateIdx a final array index is left unchecked, marked {idx: true}, for a
     // plain `=` that checks it after its right-hand side (JLS 15.26.1).
@@ -2293,7 +2307,7 @@ HasStatic   = :script(~~
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
             if (s.key != undefined) {
-                o = callExt(b, "js_get", [o, emitStr(b, s.key)])
+                o = callExt(b, "js_get", [o, emitStr(b, jRefKey(ref, i))])
             } else {
                 var r = s.idx(b)
                 b = r.b
@@ -2301,7 +2315,7 @@ HasStatic   = :script(~~
             }
         }
         var last = ref.path[ref.path.length - 1]
-        if (last.key != undefined) return {b: b, obj: o, key: emitStr(b, last.key)}
+        if (last.key != undefined) return {b: b, obj: o, key: emitStr(b, jRefKey(ref, ref.path.length - 1))}
         var kr = last.idx(b)
         if (lateIdx === true) { return {b: kr.b, obj: o, key: kr.v, idx: true} }
         // The WRITE half of the bounds check, here rather than at the three js_set
@@ -2350,7 +2364,7 @@ HasStatic   = :script(~~
         callExt(localB, "js_scope_set", [curScopeV, nameL, newL])
         localB.NewBr(mergeB)
         var ownV = jFieldOwner(fieldB, fi, name)
-        var keyF = emitStr(fieldB, name)
+        var keyF = emitStr(fieldB, jFieldSlot(fi, name))
         var oldF = (mkNew == null) ? v : callExt(fieldB, "js_get", [ownV, keyF])
         var newF = (mkNew == null) ? jConvUnless(fieldB, v, jFieldTyOf(name), vty) : mkNew(fieldB, oldF)
         callExt(fieldB, "js_set", [ownV, keyF, newF])
@@ -3058,6 +3072,12 @@ HasStatic   = :script(~~
         }
         return null
     }
+    // The slot of the field an unqualified `name` resolved to (jFieldKey); an
+    // instance field reached through js_jouter is looked up by its name. Twin
+    // of jBareKey and jSlot in java-interpreter.abnf.
+    function jFieldSlot(fi, name) {
+        return (fi.kind != "static" && (fi.own == true || fi.hop)) ? name : jFieldKey(fi.cls, name)
+    }
     // The object an unqualified field access reads/writes through: the instance
     // for an instance field, the DECLARING class' descriptor for a static one (a
     // static inherited from a superclass lives on that superclass' descriptor,
@@ -3090,6 +3110,8 @@ HasStatic   = :script(~~
     // in exactly the region javac obscures it in, i.e. inside Ctr's own instance
     // methods, where javac rejects the program.
     makeVarRef = function(name) {
+        // `super.f` reads a field of `this` (jFieldRecv picks its slot).
+        if (name == "super") { name = "this" }
         var chain = jEnclChain()
         return function(b) {
             var fi = jLookupField(chain, name)
@@ -3113,7 +3135,7 @@ HasStatic   = :script(~~
             probeB.NewCondBr(truthy(probeB, callExt(probeB, "js_jisclass", [lv])), fieldB, localB)
             localB.NewBr(mergeB)
             var ownV = jFieldOwner(fieldB, fi, name)
-            var fv = callExt(fieldB, "js_get", [ownV, emitStr(fieldB, name)])
+            var fv = callExt(fieldB, "js_get", [ownV, emitStr(fieldB, jFieldSlot(fi, name))])
             fieldB.NewBr(mergeB)
             return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(lv, localB), llvm.ir.NewIncoming(fv, fieldB)])}
         }
@@ -3783,7 +3805,7 @@ HasStatic   = :script(~~
                     cur = mergeB.NewPhi([llvm.ir.NewIncoming(cv, callB), llvm.ir.NewIncoming(mv, okB)])
                     b = mergeB
                 } else if (s.kind == "field") {
-                    cur = callExt(b, "js_get", [cur, emitStr(b, s.name)])
+                    cur = callExt(b, "js_get", [cur, emitStr(b, jFieldKeyAt(s.frecv, s.name))])
                 } else if (s.kind == "mref") {
                     cur = jEmitBoundMRef(b, cur, s.name)
                 } else if (s.kind == "qnew") {
@@ -4858,7 +4880,7 @@ HasStatic   = :script(~~
             for (var z = 0; z < fields.length; z++) {
                 var zt = fields[z].fty
                 if (fields[z].initblock != undefined || !(jIsPrimTy(zt) || zt == "boolean")) { continue }
-                callExt(b, "js_set", [zThisV, emitStr(b, fields[z].name), fieldDefault(b, fields[z])])
+                callExt(b, "js_set", [zThisV, emitStr(b, fields[z].fkey), fieldDefault(b, fields[z])])
             }
         }
         if (superName != undefined && superName != null) {
@@ -4890,7 +4912,7 @@ HasStatic   = :script(~~
                     fv = fieldDefault(b, fields[k])
                 }
                 if (fields[k].initblock == undefined) {
-                    callExt(b, "js_set", [thisV, emitStr(b, fields[k].name), fv])
+                    callExt(b, "js_set", [thisV, emitStr(b, fields[k].fkey), fv])
                 }
             }
             if (recordParams != undefined) {
@@ -5148,7 +5170,10 @@ HasStatic   = :script(~~
             }
             for (i = 0; i < members.length; i++) {
                 var mm = members[i]
-                if (mm.kind == "field" && !mm.statik) { fields.push(mm) }
+                if (mm.kind == "field" && !mm.statik) {
+                    mm.fkey = jFieldKey(name, mm.name)
+                    fields.push(mm)
+                }
                 if (mm.kind == "initblock") { fields.push({initblock: mm.body}) }
                 if (mm.kind == "ctor") { ctors.push(mm) }
             }
@@ -5326,7 +5351,7 @@ HasStatic   = :script(~~
                     } else {
                         sv = fieldDefault(b, sm)
                     }
-                    callExt(b, "js_set", [clsV, emitStr(b, sm.name), sv])
+                    callExt(b, "js_set", [clsV, emitStr(b, jFieldKey(name, sm.name)), sv])
                 }
                 curHasThis = hadThis
                 return b
