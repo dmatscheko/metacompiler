@@ -156,9 +156,26 @@ function ktNoteDecl(name, ty) {
     if (name == null || name == undefined) { return }
     var l = ktDecls["$" + name]
     if (l == undefined) { l = []; ktDecls["$" + name] = l }
-    var d = {ty: ty, at: ktAt, from: -1, to: -1}
+    var d = {ty: ty, at: ktAt, from: -1, to: -1, vr: ktIsVarAt(ktAt)}
     l.push(d)
     ktOpen.push(d)
+}
+// Whether the declaration at source offset `at` is spelled `var`: a word `var`
+// before its name ends (modifiers may precede it, `private var x: T`). A `val`, a
+// function parameter, a loop or lambda variable cannot be reassigned.
+function ktIsVarAt(at) {
+    var s = c.srcSlice(at, at + 200)
+    var i = 0
+    while (i < s.length) {
+        var ch = s.charAt(i)
+        if (ch == ":" || ch == "=" || ch == "(" || ch == ")" || ch == "," || ch == "{" || ch == ";") { return false }
+        if (!ktIdChar(ch)) { i++; continue }
+        var j = i
+        while (j < s.length && ktIdChar(s.charAt(j))) { j++ }
+        if (s.substring(i, j) == "var") { return true }
+        i = j
+    }
+    return false
 }
 function ktNoteBody(from, to) {
     var still = []
@@ -169,18 +186,65 @@ function ktNoteBody(from, to) {
     ktOpen = still
 }
 function ktDeclTypeOf(name) {
+    var d = ktDeclAt(name)
+    return d == null ? "" : d.ty
+}
+// The declaration of `name` a use at ktAt sees, or null.
+function ktDeclAt(name) {
     var l = ktDecls["$" + name]
-    if (l == undefined) { return "" }
+    if (l == undefined) { return null }
     var best = -1
-    var ty = ""
+    var hit = null
     for (var i = 0; i < l.length; i++) {
         var d = l[i]
         if (d.at > ktAt || d.at < best) { continue }
         if (d.from >= 0 && !(d.from <= ktAt && ktAt <= d.to)) { continue }
         best = d.at
-        ty = d.ty
+        hit = d
     }
-    return ty
+    return hit
+}
+// Whether the target of a compound assignment `ref op= v` at offset `at` is a
+// `val`: a local or parameter, a top-level property, or a property of the class the
+// path's owner has (by name alone when that owner is not known here). Kotlin
+// resolves `a += b` on a val as a.plusAssign(b), in place on a mutable collection,
+// and on a var whose type has no plusAssign as a = a + b (a var of a MUTABLE
+// collection type is ambiguous and rejected, so only a read-only type reaches the
+// plus form). Read when every declaration has been seen: a member or a top-level
+// property may be declared after its use.
+function ktAssignIsVal(ref, at) {
+    var n = ref.path.length
+    if (n == 0) {
+        var saved = ktAt
+        ktAt = at
+        var d = ktDeclAt(ref.name)
+        ktAt = saved
+        if (d != null) { return !d.vr }
+        var l = ktDecls["$" + ref.name]
+        if (l != undefined) { for (var t = 0; t < l.length; t++) { if (l[t].from < 0) { return !l[t].vr } } }
+        var cls = ktClassAt(at)
+        return cls != "" && ktMemberIsVal(cls, ref.name)
+    }
+    var key = ref.path[n - 1].key
+    if (key == undefined) { return false }
+    var names = []
+    for (var i = 0; i < n - 1; i++) {
+        if (ref.path[i].key == undefined) { return ktMemberIsVal("", key) }
+        names.push(ref.path[i].key)
+    }
+    return ktMemberIsVal(ktBaseName(ktFieldChainType(ref.name, at, names)), key)
+}
+// Whether property `name` of class `cls` is a val; for a class not known here, or
+// one that inherits the property, whether every property of that name is.
+function ktMemberIsVal(cls, name) {
+    var l = ktMemberVars["$" + name]
+    if (l == undefined) { return false }
+    var e = cls == "" ? undefined : ktClassExt["$" + cls]
+    if (e != undefined) {
+        for (var i = 0; i < l.length; i++) { if (e.from <= l[i].at && l[i].at <= e.to) { return !l[i].vr } }
+    }
+    for (var j = 0; j < l.length; j++) { if (l[j].vr) { return false } }
+    return true
 }
 
 // An equality chain's operators, renamed "==." / "!=." (equality that tells the
@@ -250,10 +314,15 @@ function ktIsIntLitText(t) {
 // class with its extent, so a property is found in the class a chain step names.
 // Read lazily (at emit / first run), when every class has been seen.
 var ktMemberTys = {}
+var ktMemberVars = {}
 var ktClassExt = {}
 var ktClassNames = []
 function ktNoteMember(name, ty) {
-    if (name == null || name == undefined || ty == "") { return }
+    if (name == null || name == undefined) { return }
+    var kl = ktMemberVars["$" + name]
+    if (kl == undefined) { kl = []; ktMemberVars["$" + name] = kl }
+    kl.push({vr: ktIsVarAt(ktAt), at: ktAt})
+    if (ty == "") { return }
     var l = ktMemberTys["$" + name]
     if (l == undefined) { l = []; ktMemberTys["$" + name] = l }
     l.push({ty: ty, at: ktAt})

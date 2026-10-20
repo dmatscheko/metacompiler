@@ -7169,7 +7169,7 @@ NotMemberKw = :script(~~
         // list versions answer a List.
         if (name == "plus" || name == "union") {
             var pu = kSetFrom(s.keys)
-            var add = (kIsSet(f) || Array.isArray(f) || isRange(f) || kIsMap(f) || typeof f == "string") ? kElems(f) : [f]
+            var add = (kIsSet(f) || Array.isArray(f) || isRange(f) || kIsMap(f)) ? kElems(f) : [f]
             for (i = 0; i < add.length; i++) { kSetAdd(pu, add[i]) }
             return {v: pu}
         }
@@ -7983,14 +7983,16 @@ NotMemberKw = :script(~~
 
     function kadd(l, r) {
         if (typeof l == "number" && typeof r == "number") { return (l + r) | 0 }
-        if (typeof l == "string" || typeof r == "string") return kstr2(l) + kstr2(r)
+        if (typeof l == "string") return kstr2(l) + kstr2(r)
         // `+` on a COLLECTION is kotlin.collections.plus: a list gains the elements of
-        // another collection, or the single element (`listOf(1, 2) + listOf(3)`).
+        // another collection, or the single element (`listOf(1, 2) + listOf(3)`, and
+        // `names + "x"`, where the String is an element, not a concatenation).
         if (Array.isArray(l)) { return kSeqMethod(l, "plus", [r]).v }
         if (kIsMap(l)) { return kMapMethod(l, "plus", [r]).v }
         // A SET gains elements as a Set, not as a List (kotlin.collections.plus is
         // declared on Set separately from Iterable and keeps the receiver's shape).
         if (kIsSet(l)) { return kSetMethod(l, "plus", [r]).v }
+        if (typeof r == "string") return kstr2(l) + kstr2(r)
         if (kIsFlo(l) || kIsFlo(r)) { return kFloOp2("+", kNumD(l), kNumD(r), kF32Res(l, r)) }
         if (kIsChar(l)) { return kCharArith("+", l, r) }
         // Two integral operands: Int + Int wraps at 32 bits, anything with a Long in
@@ -8538,19 +8540,21 @@ NotMemberKw = :script(~~
         var last = chain[chain.length - 1]
         if (chain.length > 1 && last != undefined && last != null && (last.kind == "field" || last.kind == "index")) {
             var baseT = foldCallMember(chain.slice(0, chain.length - 1))
+            var valSt = (op == "=" || last.kind != "field") ? 0 : 0 - 1
             return function() {
+                if (valSt < 0) { valSt = ktMemberIsVal("", last.name) ? 1 : 0 }
                 // Kotlin evaluates the receiver before the right-hand side.
                 var obj = anytype
                 obj = baseT()
                 var v = anytype
                 v = rhsT()
                 if (last.kind == "field") {
-                    if (op != "=") { v = applyOp(op, kGetField(obj, last.name), v) }
+                    if (op != "=") { v = kCompoundOp(op, kGetField(obj, last.name), v, valSt == 1) }
                     kSetField(obj, last.name, v)
                 } else {
                     var ix = anytype
                     ix = last.idx()
-                    if (op != "=") { v = applyOp(op, kIndex(obj, ix), v) }
+                    if (op != "=") { v = kCompoundOp(op, kIndex(obj, ix), v, false) }
                     kSetIndex(obj, ix, v)
                 }
                 return v
@@ -10285,8 +10289,46 @@ NotMemberKw = :script(~~
             return v
         }
     }
+    // `cur op= v`, op a compound operator: the value's own plusAssign / minusAssign /...
+    // when it declares one (Kotlin takes it; declaring plus as well is an ambiguity on
+    // a var), and on a val target a mutable collection updated IN PLACE, so every alias
+    // sees it; otherwise cur op v. Twin of emitCompound in kotlin-to-llvm-ir.abnf.
+    function kCompoundOp(op, cur, v, isVal) {
+        if (cur === null || typeof cur != "object") { return applyOp(op, cur, v) }
+        var m = lookupMethod(cur, assignConv(op))
+        if (m != null) { m.apply(undefined, [cur, v]); return cur }
+        var nv = anytype
+        nv = applyOp(op, cur, v)
+        return isVal ? kFill(cur, nv) : nv
+    }
+    // A mutable collection's contents replaced by another's (a TreeSet / TreeMap
+    // re-sorts as it fills), answering dst; any other dst answers src. Twin of
+    // js_ktfill in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    function kFill(dst, src) {
+        if (Array.isArray(dst) && Array.isArray(src)) {
+            var es = src.slice(0)
+            while (dst.length > 0) { dst.pop() }
+            for (var i = 0; i < es.length; i++) { dst.push(es[i]) }
+            return dst
+        }
+        if (kIsSet(dst) && kIsSet(src)) {
+            var ks = src.keys
+            dst.keys = []
+            for (var j = 0; j < ks.length; j++) { kSetAdd(dst, ks[j]) }
+            return dst
+        }
+        if (kIsMap(dst) && kIsMap(src)) {
+            var mk = src.keys
+            var mv = src.vals
+            dst.keys = []
+            dst.vals = []
+            for (var k = 0; k < mk.length; k++) { kMapPut(dst, mk[k], mv[k]) }
+            return dst
+        }
+        return src
+    }
     // Write a plain (path-less) assignment target, delegate-aware, in one scope walk.
-    function kSetName(name, op, v) {
+    function kSetName(name, op, v, isVal) {
         // The compound result goes into a fresh anytype local: a PARAMETER keeps the
         // type it was first called with under the frozen engine, and += may turn a
         // number into a string.
@@ -10299,16 +10341,16 @@ NotMemberKw = :script(~~
                 var cur = anytype
                 cur = sc[i][name]
                 if (cur !== null && typeof cur == "object" && cur.__pdeleg === true) {
-                    if (op != "=") { nv = applyOp(op, pdelegGet(cur), nv) }
+                    if (op != "=") { nv = kCompoundOp(op, pdelegGet(cur), nv, isVal) }
                     pdelegSet(cur, nv)
                     return nv
                 }
-                if (op != "=") { nv = applyOp(op, cur, nv) }
+                if (op != "=") { nv = kCompoundOp(op, cur, nv, isVal) }
                 scopePut(sc[i], name, nv)
                 return nv
             }
         }
-        if (op != "=") { nv = applyOp(op, getVar(name), nv) }
+        if (op != "=") { nv = kCompoundOp(op, getVar(name), nv, isVal) }
         setVar(name, nv)
         return nv
     }
@@ -11532,7 +11574,9 @@ NotMemberKw = :script(~~
         // member's declared type, read when it first runs.
         var memAt = (op == "=") ? kAssignMemberAt(ref) : 0 - 1
         var memPos = ktAt
+        var valSt = (op == "=") ? 0 : 0 - 1
         return function() {
+            if (valSt < 0) { valSt = ktAssignIsVal(ref, memPos) ? 1 : 0 }
             if (memAt >= 0) {
                 var mty = ktFieldChainType(ref.name, memPos, kPathKeys(ref.path, memAt))
                 if (memAt == ref.path.length - 1) { valT = kAdoptThunk(valT, mty) }
@@ -11548,10 +11592,10 @@ NotMemberKw = :script(~~
             var v = anytype // An assignment moves a value of any type.
             v = valT()
             if (ref.path.length == 0) {
-                return kSetName(ref.name, op, v)
+                return kSetName(ref.name, op, v, valSt == 1)
             } else {
                 var p = resolveRef(ref)
-                if (op != "=") v = applyOp(op, kReadSlot(p), v)
+                if (op != "=") v = kCompoundOp(op, kReadSlot(p), v, valSt == 1)
                 if (p.isIndex) { kSetIndex(p.obj, p.key, v) } else { kSetField(p.obj, p.key, v) }
             }
             return v

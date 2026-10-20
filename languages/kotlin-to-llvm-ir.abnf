@@ -3117,7 +3117,8 @@ KwContract  = "contract" KwEnd ;
                          "$rem": true, "$mod": true, "$unaryMinus": true, "$unaryPlus": true,
                          "$get": true, "$set": true, "$invoke": true, "$contains": true,
                          "$compareTo": true, "$equals": true, "$rangeTo": true,
-                         "$inc": true, "$dec": true}
+                         "$inc": true, "$dec": true, "$plusAssign": true, "$minusAssign": true,
+                         "$timesAssign": true, "$divAssign": true, "$remAssign": true}
     function declOp(mname, clsName) {
         var l = opClasses["$" + mname]
         if (l == undefined) { l = []; opClasses["$" + mname] = l }
@@ -3128,8 +3129,7 @@ KwContract  = "contract" KwEnd ;
         if (opConventions["$" + mname] == true) { declOp(mname, clsName) }
     }
     // The convention method behind an operator token. A compound assignment reuses the
-    // plain operator's method (Kotlin falls back to plus when plusAssign is absent, and
-    // the subset has no plusAssign).
+    // plain operator's method when the value has no plusAssign (emitCompound).
     var opMethodOf = {"+": "plus", "-": "minus", "*": "times", "/": "div", "%": "rem",
                       "+=": "plus", "-=": "minus", "*=": "times", "/=": "div", "%=": "rem",
                       "==": "equals", "!=": "equals", "==.": "equals", "!=.": "equals"}
@@ -3142,22 +3142,22 @@ KwContract  = "contract" KwEnd ;
         return hit
     }
     // The PRIMITIVE binary operator. Everything but `+` is emitted straight; `+` is
-    // string concatenation as soon as one operand is a String (Kotlin's rule, and
-    // exactly what kotlin-interpreter.abnf's kadd tests), and then both operands are
+    // string concatenation when the left operand is a String (String.plus(Any?), the
+    // only concatenating plus), and then both operands are
     // rendered by js_ktstr first (the runtime's own ToString would spell a list "1,2" and
     // an instance "[object Object]" where Kotlin spells them "[1, 2]" and through
-    // toString()). The test has to be a RUNTIME
-    // probe because this front end does not type its expressions; it costs two
-    // js_is_type calls and a branch, and only on a `+` written in the source (a loop
-    // increment emits js_jadd directly).
+    // toString()). A right String with any other left operand is js_ktadd's: an
+    // element added to a collection (`names + "x"`), or a null String? rendered
+    // "null". The test has to be a RUNTIME
+    // probe because this front end does not type its expressions; it costs one
+    // js_is_type call and a branch, and only on a `+` written in the source (a loop
+    // increment emits js_jadd directly). Twin of kadd in kotlin-interpreter.abnf.
     function emitPrimBin(b, op, l, r) {
         if (op != "+" && op != "+=") { return {b: b, v: emitBin(b, op, l, r)} }
         var strB = curF.NewBlock("")
         var numB = curF.NewBlock("")
         var mrgB = curF.NewBlock("")
-        var isStr = b.NewOr(truthy(b, callExt(b, "js_is_type", [l, emitStr(b, "String")])),
-                            truthy(b, callExt(b, "js_is_type", [r, emitStr(b, "String")])))
-        b.NewCondBr(isStr, strB, numB)
+        b.NewCondBr(truthy(b, callExt(b, "js_is_type", [l, emitStr(b, "String")])), strB, numB)
         var sv = callExt(strB, "js_jadd", [callExt(strB, "js_ktstr", [l]), callExt(strB, "js_ktstr", [r])])
         strB.NewBr(mrgB)
         var nv = emitBin(numB, op, l, r)
@@ -3182,6 +3182,32 @@ KwContract  = "contract" KwEnd ;
         var pr = emitPrimBin(primB, op, l, r)
         pr.b.NewBr(mergeB)
         return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(ov, objB), llvm.ir.NewIncoming(pr.v, pr.b)])}
+    }
+    // The value `l op= r` writes back, op a compound operator: l itself after its
+    // class's plusAssign / minusAssign /... when it declares one (Kotlin takes it;
+    // declaring plus as well is an ambiguity on a var), and on a val target the
+    // js_ktfill of l, which updates a mutable collection IN PLACE so every alias sees
+    // it; otherwise l op r. Twin of kCompoundOp in kotlin-interpreter.abnf.
+    var opAssignOf = {"+=": "plusAssign", "-=": "minusAssign", "*=": "timesAssign", "/=": "divAssign", "%=": "remAssign"}
+    function emitCompound(b, op, l, r, isVal) {
+        var cls = opClasses["$" + opAssignOf[op]]
+        if (cls == undefined) { return emitCompoundOp(b, op, l, r, isVal) }
+        var objB = curF.NewBlock("")
+        var primB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        b.NewCondBr(emitClassProbe(b, l, cls), objB, primB)
+        var argsV = callExt(objB, "js_arr_new", [])
+        callExt(objB, "js_arr_push", [argsV, r])
+        callExt(objB, "js_ktsmcall", [l, emitStr(objB, opAssignOf[op]), argsV])
+        objB.NewBr(mergeB)
+        var pr = emitCompoundOp(primB, op, l, r, isVal)
+        pr.b.NewBr(mergeB)
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(l, objB), llvm.ir.NewIncoming(pr.v, pr.b)])}
+    }
+    function emitCompoundOp(b, op, l, r, isVal) {
+        var ro = emitOpBin(b, op, l, r)
+        if (!isVal) { return ro }
+        return {b: ro.b, v: callExt(ro.b, "js_ktfill", [l, ro.v])}
     }
     // Every binary operator of the subset goes through the convention check.
     foldBinary = function(items) {
@@ -5187,6 +5213,7 @@ KwContract  = "contract" KwEnd ;
         var memAt = (op == "=") ? ktAssignMemberAt(ref) : 0 - 1
         var memPos = ktAt
         return function(b) {
+            var isVal = op != "=" && ktAssignIsVal(ref, memPos)
             if (memAt >= 0) {
                 var mty = ktFieldChainType(ref.name, memPos, ktPathKeys(ref.path, memAt))
                 if (memAt == ref.path.length - 1) { valT = ktAdoptThunk(valT, mty) }
@@ -5216,7 +5243,7 @@ KwContract  = "contract" KwEnd ;
                 var fNameV = emitStr(b, emitBackingField)
                 if (op != "=") {
                     var oldF = callExt(b, "js_get", [fThisV, fNameV])
-                    var rf = emitOpBin(b, op, oldF, v)
+                    var rf = emitCompound(b, op, oldF, v, false)
                     b = rf.b
                     v = rf.v
                 }
@@ -5225,7 +5252,7 @@ KwContract  = "contract" KwEnd ;
                 var nameV = emitStr(b, ref.name)
                 if (op != "=") {
                     var old = b.NewCall(rtKtGet(), [curScopeV, nameV])
-                    var ro = emitOpBin(b, op, old, v)
+                    var ro = emitCompound(b, op, old, v, isVal)
                     b = ro.b
                     v = ro.v
                 }
@@ -5238,7 +5265,7 @@ KwContract  = "contract" KwEnd ;
                 if (mxWrite != null) {
                     if (op != "=") {
                         var oldX = b.NewCall(rtMextGet(), [curScopeV, p.obj, p.key])
-                        var rx = emitOpBin(b, op, oldX, v)
+                        var rx = emitCompound(b, op, oldX, v, false)
                         b = rx.b
                         v = rx.v
                     }
@@ -5250,7 +5277,7 @@ KwContract  = "contract" KwEnd ;
                         var gEV = b.NewCall(rtKtGet(), [curScopeV, emitStr(b, "extp$" + epWrite)])
                         var gEA = callExt(b, "js_arr_new", [])
                         callExt(b, "js_arr_push", [gEA, p.obj])
-                        var rE = emitOpBin(b, op, callExt(b, "js_call", [gEV, hUndef, gEA]), v)
+                        var rE = emitCompound(b, op, callExt(b, "js_call", [gEV, hUndef, gEA]), v, false)
                         b = rE.b
                         v = rE.v
                     }
@@ -5262,7 +5289,7 @@ KwContract  = "contract" KwEnd ;
                 } else {
                     if (op != "=") {
                         var oldM = callExt(b, "js_ktfget", [p.obj, p.key])
-                        var rm = emitOpBin(b, op, oldM, v)
+                        var rm = emitCompound(b, op, oldM, v, isVal)
                         b = rm.b
                         v = rm.v
                     }
@@ -5302,7 +5329,7 @@ KwContract  = "contract" KwEnd ;
                 }
                 if (isField && memberExtPropResolves(fname)) {
                     if (op != "=") {
-                        var rx2 = emitOpBin(bb, op, bb.NewCall(rtMextGet(), [curScopeV, objV, keyV]), v)
+                        var rx2 = emitCompound(bb, op, bb.NewCall(rtMextGet(), [curScopeV, objV, keyV]), v, false)
                         bb = rx2.b
                         v = rx2.v
                     }
@@ -5318,7 +5345,7 @@ KwContract  = "contract" KwEnd ;
                         var gV0 = bb.NewCall(rtKtGet(), [curScopeV, emitStr(bb, "extp$" + fname)])
                         var ga0 = callExt(bb, "js_arr_new", [])
                         callExt(bb, "js_arr_push", [ga0, objV])
-                        var rx3 = emitOpBin(bb, op, callExt(bb, "js_call", [gV0, hUndef, ga0]), v)
+                        var rx3 = emitCompound(bb, op, callExt(bb, "js_call", [gV0, hUndef, ga0]), v, false)
                         bb = rx3.b
                         v = rx3.v
                     }
@@ -5330,7 +5357,7 @@ KwContract  = "contract" KwEnd ;
                     return {b: bb, v: v}
                 }
                 if (op != "=") {
-                    var ro = emitOpBin(bb, op, callExt(bb, "js_ktfget", [objV, keyV]), v)
+                    var ro = emitCompound(bb, op, callExt(bb, "js_ktfget", [objV, keyV]), v, isField && ktMemberIsVal("", fname))
                     bb = ro.b
                     v = ro.v
                 }

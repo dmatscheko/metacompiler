@@ -1200,6 +1200,43 @@ func init() {
 			}
 			return rt.wrapNum(float64(^int32(giVal(rt, v))))
 		}
+		// js_ktfill(dst, src): a val's `xs += x` (plusAssign) - the mutable collection
+		// dst takes src's contents IN PLACE, so every alias sees them (a TreeSet /
+		// TreeMap re-sorts as it fills), and answers dst; any other dst answers src.
+		// Twin of kFill in kotlin-interpreter.abnf and languages/lib/kotlin-rt.metajs.
+		m["js_ktfill"] = func(a []uint64) uint64 {
+			dst, src := u(a[0]), u(a[1])
+			if da, ok := dst.(*jsArray); ok {
+				if sa, ok := src.(*jsArray); ok {
+					da.elems = append([]interface{}{}, sa.elems...)
+					da.dropIdx()
+					return a[0]
+				}
+			}
+			if dk, ok := ktSetParts(dst); ok {
+				if sk, ok := ktSetParts(src); ok {
+					es := append([]interface{}{}, sk.elems...)
+					dk.elems = nil
+					dk.dropIdx()
+					for _, e := range es {
+						rt.ktSetAdd(dst.(*jsObject), e)
+					}
+					return a[0]
+				}
+			}
+			if dk, dv, ok := dictParts(dst); ok {
+				if sk, sv, ok := dictParts(src); ok {
+					ks, vs := append([]interface{}{}, sk.elems...), append([]interface{}{}, sv.elems...)
+					dk.elems, dv.elems = nil, nil
+					dk.dropIdx()
+					for i := range ks {
+						rt.ktMapPut(dst.(*jsObject), ks[i], vs[i])
+					}
+					return a[0]
+				}
+			}
+			return a[1]
+		}
 		// ++ / -- keep the type of what they step, which is what makes
 		// `var b: Byte = 127; b++` answer -128.
 		m["js_ktstep"] = func(a []uint64) uint64 {

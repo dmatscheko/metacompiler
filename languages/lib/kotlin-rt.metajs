@@ -2062,6 +2062,38 @@ function js_ktinv(v) {
     return ktNorm(0 - k1I32(v) - 1, 32, 0)
 }
 
+// jsrtkotlin.go js_ktfill: a val's `xs += x` (plusAssign) - the mutable
+// collection dst takes src's contents IN PLACE, so every alias sees them (a
+// TreeSet / TreeMap re-sorts as it fills), and answers dst; any other dst
+// answers src.
+function js_ktfill(dst, src) {
+    if (ktIsArr(dst) && ktIsArr(src)) {
+        k3Replace(dst, src)
+        return dst
+    }
+    var dk = ktSetElems(dst)
+    var sk = ktSetElems(src)
+    if (dk !== undefined && sk !== undefined) {
+        var es = k3Copy(sk)
+        k3Clear(dk)
+        var i = 0
+        for (i = 0; i < es.length; i = i + 1) { ktSetAdd(dst, es[i]) }
+        return dst
+    }
+    var mk = ktMapKeys(dst)
+    var sks = ktMapKeys(src)
+    if (mk !== undefined && sks !== undefined) {
+        var ks = k3Copy(sks)
+        var vs = k3Copy(ktMapVals(src))
+        k3Clear(mk)
+        k3Clear(ktMapVals(dst))
+        var j = 0
+        for (j = 0; j < ks.length; j = j + 1) { ktMapPut(dst, ks[j], vs[j]) }
+        return dst
+    }
+    return src
+}
+
 // jsrtkotlin.go js_ktstep (880). ++ / -- keep the type of what they step, which
 // is what makes `var b: Byte = 127; b++` answer -128.
 function js_ktstep(v, delta) {

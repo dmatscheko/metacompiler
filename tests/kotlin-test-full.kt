@@ -5172,6 +5172,66 @@ fun sec105() {
                     && ds(Sq105(2)) == "shape 4")
 }
 
+// ===== SECTION 106: += on a val is plusAssign, on a var plus =====
+// The Kotlin specification's operator resolution for `a += b`: a.plusAssign(b) when
+// a is a val (or plus is unavailable), a = a.plus(b) for a var of a read-only type.
+// The stdlib's plusAssign / minusAssign (kotlin-stdlib 2.2.21 MutableCollections.kt,
+// Maps.kt) are add / addAll / remove / removeAll / put / putAll on the receiver
+// itself, so every alias sees the change and a TreeSet / TreeMap stays sorted; the
+// rows below were reproduced through those calls from java (JDK 24). A String on
+// the right of a collection's + is an element, never a concatenation.
+fun addTo106(l: MutableList<Int>) { l += 4 }
+fun reg106(s: String) { registry106 += s }
+class Coll106 {
+    fun add(i: Int) { items += i; this.items += i * 10 }
+    fun dump() = "" + items + " " + alias
+    private val items = mutableListOf<Int>()
+    private val alias = items
+}
+class Holder106(private val xs0: MutableList<Int>) {
+    val xs = xs0
+    fun push(i: Int) { xs0 += i }
+}
+class Vec106(var n: Int) { operator fun plusAssign(o: Vec106) { n += o.n } }
+class Both106(var n: Int) {
+    operator fun plus(k: Int): Both106 = Both106(n + k)
+    operator fun plusAssign(k: Int) { n += k * 100 }
+}
+class Box106 { val items = shared106; var ro: List<Int> = listOf(1) }
+fun mk106() = Box106()
+fun sec106() {
+    val ks = listOf(1, 2, 3, 4, 5)
+    val l = mutableListOf(ks[0]); val la = l
+    l += ks[1]; l += listOf(ks[2], ks[3]); l -= ks[0]
+    addTo106(l)
+    check("pa106a", "" + la == "[2, 3, 4, 4]")
+    val s = mutableSetOf(ks[0]); val sa = s
+    s += ks[1]; s += ks[0]; s -= listOf(ks[1])
+    val ts = sortedSetOf(ks[4], ks[0]); ts += ks[2]
+    val ss = mutableSetOf("a"); ss += "b"; ss += "a"
+    check("pa106b", "" + sa == "[1]" && "" + ts == "[1, 3, 5]" && "" + ss == "[a, b]")
+    val m = mutableMapOf("a" to ks[0]); val ma = m
+    m += "b" to ks[1]; m += mapOf("c" to ks[2]); m -= "a"
+    val sm = sortedMapOf(3 to "c", 1 to "a"); sm += 2 to "b"
+    check("pa106c", "" + ma == "{b=2, c=3}" && "" + sm == "{1=a, 2=b, 3=c}")
+    var r: List<Int> = mutableListOf(ks[0]); val ra = r
+    r += ks[1]
+    val b = mk106(); b.ro += ks[1]; b.items += ks[4]; mk106().items += ks[3]
+    check("pa106d", "" + r == "[1, 2]" && "" + ra == "[1]" && "" + b.ro == "[1, 2]" && "" + shared106 == "[0, 5, 4]")
+    val c = Coll106(); c.add(ks[2]); c.add(ks[0])
+    val h = Holder106(mutableListOf(9)); h.push(8)
+    reg106("x"); reg106("y")
+    check("pa106e", c.dump() == "[3, 30, 1, 10] [3, 30, 1, 10]" && "" + h.xs == "[9, 8]" && "" + registry106 == "[x, y]")
+    val v = Vec106(1); val va = v; v += Vec106(2)
+    var w = Vec106(1); val wa = w; w += Vec106(5)
+    val p = Both106(1); val pa = p; p += 4
+    check("pa106f", va.n == 3 && wa.n == 6 && pa.n == 401)
+    val names = mutableListOf<String>(); names += "bob"
+    check("pa106g", "" + names == "[bob]" && "" + (listOf("a") + "b") == "[a, b]" && "" + (setOf("a", "b") + "a") == "[a, b]")
+}
+val registry106 = mutableListOf<String>()
+val shared106 = mutableListOf(0)
+
 
 fun main() {
     s01() // SECTION-CALL 01
@@ -5279,6 +5339,7 @@ fun main() {
     sec103() // SECTION-CALL 103
     sec104() // SECTION-CALL 104
     sec105() // SECTION-CALL 105
+    sec106() // SECTION-CALL 106
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }
