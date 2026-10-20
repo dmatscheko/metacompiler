@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-640** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-642** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -89,13 +89,9 @@ inputs — record in manual 7.9 unless made bit-exact. `__exit__`'s traceback ar
 
 # JS — JavaScript and TypeScript
 
-### T-619 js: `"__#@"` keys vs symbols; arguments passed on; holes; `Object.getOwnPropertySymbols` · P3 · JS · IN PROGRESS (JS worker, round 8) [V]
-A program key `"__#@iterator"` still collides with symbol keys (escaping it breaks lib/js-builtins.js, which spells
-Symbol.iterator as that string so programs without symbols pay no symbol test: move js-builtins.js to real `[Symbol.iterator]`
-keys and measure). `h(arguments)` writing `a[0]` is not mapped to the caller (needs a scope back-pointer on the array cell in the
-C floor and Go twin); a deleted index below `length` is an own key and an explicit `undefined` past `length` is not (needs a hole
-marker). `Object.getOwnPropertySymbols` missing in all legs. Compiled `[...null]` message says "Cannot read properties of null
-(reading '__#@iterator')" (interp "object null is not iterable"; both TypeErrors).
+### T-641 js: Object.getOwnPropertyNames of a prototype · P2 · JS · OPEN [V]
+`class K { m(){} get g(){return 1} }; Object.getOwnPropertyNames(K.prototype)` → all legs `""` (node `constructor,m,g`);
+`function F(){}; F.prototype.q = 1` → ours `q` (node `constructor,q`); a string-keyed `["__#@iterator"]` method likewise missing. js and ts.
 
 ---
 
@@ -200,6 +196,15 @@ divergence in manual 7.9.
 ---
 
 # CORE — MetaJS, the engines, shared runtime, tooling
+
+### T-640 js (CORE): arguments mapped through another function; array holes · P3 · CORE · OPEN [V]
+`function h(a){ a[0] = 9 } function f(p){ h(arguments); return p }; f(1)` → all legs 1 (node 9); likewise a closure writing through
+`var a = arguments`. Needs a back-pointer from the arguments array to its call scope: a traced field on the floor's array cell
+(gc_trace_cell's tag-5 arm pays a gc_try per array per collection, every language), get/set host ids in three engines, a jsArray field
+in abnf/jsrt.go, and the goja/frozen hosts. A floor-free alternative: in a mapped function that names `arguments`, read each mapped
+parameter through arguments[i] (cost on every such read). Holes: `delete arr[1]` and `b[3] = undefined` past length → node `h1 0,2
+false false 3`, `h2 0,3 false true 4`; needs a hole marker distinct from undefined that every array read maps back (arr_get/js_get
+shared by all languages). Measure with tests/bench.sh for all languages.
 
 ### T-594 go (CORE): UTF-8-encoded surrogate bytes are rejoined by the shared string floor · P3 · CORE · OPEN [V]
 `s := "\xed\xa0\x80" + "\xed\xb0\x80"; fmt.Println(len(s), []byte(s))` → go `6 [237 160 128 237 176 128]` and raw output;
@@ -750,6 +755,7 @@ T-635 bash: `$'\cX'` control escapes; `$'\?'` in the interpreter; batch native s
 T-625 java/kotlin regex: supplementary characters in interp and native; PSE constructor; Kotlin Regex.options — DONE fbc1b072 (plus a java sweep: local class captures, array patterns, EnumMap/EnumSet, java.util.function defaults, Pattern/Matcher, records, BitSet ...)
 T-636 batch native: capture nesting limited to 8; rt_die not ordered after stdout; bash `${v@Q}` of a non-UTF-8 byte — DONE 8bd03604 b91f7bd2
 T-633 kotlin: `+=` on a `val` mutable collection reassigns instead of plusAssign — DONE c291b1fd a3b2e827 (plusAssign on a val, String elements, TreeSet/TreeMap constructors; kotlin bench -20.6% with identical output, from one js_is_type per +); extension resolution by static type DECLINED (the grammars compute no expression types); comparator Trees and deque classes are T-639
+T-619 js: `"__#@"` keys vs symbols; arguments passed on; holes; `Object.getOwnPropertySymbols` — DONE f83299c1 for "__#@" keys, getOwnPropertySymbols, the [...null] message; js-builtins.js on real Symbol.iterator DECLINED (naming a symbol turns on symbol/BigInt operator checks: +45% on a native Map loop); arguments passed on and array holes moved to CORE as T-640
 
 # Settled — do not re-open
 
