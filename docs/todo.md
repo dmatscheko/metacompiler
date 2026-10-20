@@ -76,7 +76,7 @@ non-ASCII class range spanning 256 or more characters only gets the text-side up
 
 # JS — JavaScript and TypeScript
 
-### T-691 js/ts: strict write to a function's `name`/`length` is silent; TS legacy octal `010` · P3 · JS · OPEN [V]
+### T-691 js/ts: strict write to a function's `name`/`length` is silent; TS legacy octal `010` · P3 · JS · IN PROGRESS (JS worker, round 17) [V]
 In strict code (now every .ts file) `fnDecl.name = "zzz"` → silently dropped; node "TypeError: Cannot assign to read only property
 'name' of function '<source text>'" (V8 renders the function source). `010` in TS → 8 in typescript-interpreter, 10 in
 typescript-to-llvm-ir (tsc TS1121; node strict SyntaxError): SepNumLit/JsDecLit must reject a leading 0 in both TS grammars.
