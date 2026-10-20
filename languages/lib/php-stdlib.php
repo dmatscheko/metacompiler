@@ -114,8 +114,11 @@ function is_null($value) { return is_null($value); }
 function is_numeric($value) { return is_numeric($value); }
 function gettype($value) { return gettype($value); }
 function get_debug_type($value) { return get_debug_type($value); }
-function get_class($object) { return get_class($object); }
-function get_parent_class($object_or_class) { return get_parent_class($object_or_class); }
+// get_class() and get_parent_class() may be called without their argument.
+function get_class(...$object) { return count($object) == 0 ? get_class() : get_class($object[0]); }
+function get_parent_class(...$object_or_class) {
+    return count($object_or_class) == 0 ? get_parent_class() : get_parent_class($object_or_class[0]);
+}
 function is_a($object_or_class, $class, $allow_string = false) { return is_a($object_or_class, $class, $allow_string); }
 function is_subclass_of($object_or_class, $class, $allow_string = true) { return is_subclass_of($object_or_class, $class, $allow_string); }
 function class_exists($class, $autoload = true) { return class_exists($class); }
@@ -854,10 +857,10 @@ function stristr($haystack, $needle, $before_needle = false) {
     if ($p === false) { return false; }
     return $before_needle ? substr($haystack, 0, $p) : substr($haystack, $p);
 }
-function strrchr($haystack, $needle) {
+function strrchr($haystack, $needle, $before_needle = false) {
     $p = strrpos($haystack, substr((string)$needle, 0, 1));
     if ($p === false) { return false; }
-    return substr($haystack, $p);
+    return $before_needle ? substr($haystack, 0, $p) : substr($haystack, $p);
 }
 function substr_count($haystack, $needle, $offset = 0, $length = null) {
     if ((string)$needle === "") { throw new ValueError("substr_count(): Argument #2 (\$needle) cannot be empty"); }
@@ -1174,14 +1177,14 @@ function substr_replace($string, $replace, $offset, $length = null) {
     if ($length < 0) { $length = $n - $offset + $length < 0 ? 0 : $n - $offset + $length; }
     return substr($string, 0, $offset) . $replace . substr($string, $offset + $length);
 }
-function strtr($string, ...$args) {
+function strtr($string, $from, $to = null) {
     $string = (string)$string;
     $n = strlen($string);
     $out = "";
     $at = 0;
-    if (count($args) == 2) {
-        $from = (string)$args[0];
-        $to = (string)$args[1];
+    if ($to !== null) {
+        $from = (string)$from;
+        $to = (string)$to;
         $m = strlen($from) < strlen($to) ? strlen($from) : strlen($to);
         $map = [];
         for ($i = 0; $i < $m; $i++) { $map[substr($from, $i, 1)] = substr($to, $i, 1); }
@@ -1196,7 +1199,7 @@ function strtr($string, ...$args) {
         return $out . substr($string, $at);
     }
     $pairs = [];
-    foreach ($args[0] as $k => $v) { if ((string)$k !== "") { $pairs[(string)$k] = (string)$v; } }
+    foreach ($from as $k => $v) { if ((string)$k !== "") { $pairs[(string)$k] = (string)$v; } }
     $i = 0;
     while ($i < $n) {
         $best = null;
@@ -1260,20 +1263,23 @@ function stripslashes($string) {
     }
     return $out . substr($string, $at);
 }
-// A word is a run of ASCII letters, ' and -; the string's first byte cannot open
-// one with ' or -, nor its last byte end one with - (php_str_word_count).
-function str_word_count($string, $format = 0) {
+// A word is a run of ASCII letters, ' and - and the bytes $characters lists; the
+// string's first byte cannot open one with ' or -, nor its last byte end one with
+// -, unless $characters lists it (php_str_word_count).
+function str_word_count($string, $format = 0, $characters = null) {
     $words = [];
     $p = 0;
     $e = strlen($string);
+    $set = $characters === null ? [] : __mec_charset($characters);
     $first = substr($string, 0, 1);
-    if ($first == "'" || $first == "-") { $p = 1; }
-    if ($e > 0 && substr($string, $e - 1, 1) == "-") { $e--; }
+    if (($first == "'" || $first == "-") && !isset($set[$first])) { $p = 1; }
+    if ($e > 0 && substr($string, $e - 1, 1) == "-" && !isset($set["-"])) { $e--; }
     while ($p < $e) {
         $s = $p;
         while ($p < $e) {
-            $o = ord(substr($string, $p, 1));
-            if (($o >= 65 && $o <= 90) || ($o >= 97 && $o <= 122) || $o == 39 || $o == 45) { $p++; } else { break; }
+            $c = substr($string, $p, 1);
+            $o = ord($c);
+            if (($o >= 65 && $o <= 90) || ($o >= 97 && $o <= 122) || $o == 39 || $o == 45 || isset($set[$c])) { $p++; } else { break; }
         }
         if ($p > $s) { $words[$s] = substr($string, $s, $p - $s); }
         $p++;

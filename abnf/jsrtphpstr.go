@@ -285,6 +285,22 @@ func phpCloDump(d string, id int, ind int, statDumps []string, thisDump string) 
 	return out + pad + "}\n"
 }
 
+// phpArityMsg is phsArityMsg: zend_wrong_parameters_count_error's text.
+func phpArityMsg(name string, min, max, given int) string {
+	want, how := max, "at most"
+	if given < min {
+		want, how = min, "at least"
+	}
+	if min == max {
+		how = "exactly"
+	}
+	s := "s"
+	if want == 1 {
+		s = ""
+	}
+	return name + "() expects " + how + " " + strconv.Itoa(want) + " argument" + s + ", " + strconv.Itoa(given) + " given"
+}
+
 // phpCoreClass is phsCoreClass: the lower-case name of the engine's own class n
 // denotes, or "".
 func phpCoreClass(n string) string {

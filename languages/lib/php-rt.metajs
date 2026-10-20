@@ -700,6 +700,10 @@ function phMkErr(clsName, msg) {
     var cls = phRtClasses[clsName]
     if (cls === undefined) { return undefined }
     if (cls === null) { return undefined }
+    return phMkErrOf(cls, msg)
+}
+// phMkErr of a class descriptor in hand. Twin of phpMkErrOf in abnf/jsrtphp.go.
+function phMkErrOf(cls, msg) {
     var o = {}
     o["__class"] = cls
     o["message"] = msg
@@ -3157,6 +3161,17 @@ function js_phmissname(name) {
 function js_phraise(cls, msg) {
     phRaise(phStr(cls), phStr(msg))
     return undefined
+}
+
+// The ArgumentCountError (class cls) of a library function whose entry found its
+// arguments outside [min, max] (max -1: variadic, its last slot the collected
+// tail). Twin of m["js_pharity"] in abnf/jsrtphp.go.
+function js_pharity(args, name, min, max, cls) {
+    var n = args.length
+    if (max < 0 && n > 0) { n = n - 1 }
+    var given = 0
+    for (var i = 0; i < n; i++) { if (args[i] !== undefined) { given = given + 1 } }
+    throw phMkErrOf(cls, phsArityMsg(phStr(name), min, max, given))
 }
 
 // The Go range bound: an int is its own bound, otherwise the element/entry count.

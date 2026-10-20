@@ -245,3 +245,42 @@ function phpLibText(ix, key, base) {
     }
     return out.join("\n")
 }
+
+// The argument counts library function `key` accepts, from its declaration line:
+// [min, max], max -1 for a variadic one. min counts up to the last parameter
+// without a default (zend_function.required_num_args), max every parameter, as
+// an internal function's ZEND_PARSE_PARAMETERS_START(min, max) states them.
+function phpLibArity(ix, key) {
+    var l = ix.lines[ix.fns[key][0]]
+    var open = l.indexOf("(")
+    var close = phpLibCloseAt(l, open)
+    var min = 0
+    var n = 0
+    var opt = false
+    var rest = false
+    var k = open + 1
+    while (k <= close) {
+        var ch = l.charAt(k)
+        if (ch == "," || k == close) {
+            if (k > open + 1) {
+                n = n + 1
+                if (!opt && !rest) { min = n }
+            }
+            opt = false
+        } else if (ch == "=") { opt = true }
+        else if (l.substring(k, k + 3) == "...") { rest = true }
+        if (ch == "'" || ch == "\"" || ch == "[" || ch == "(") { k = phpLibCloseAt(l, k) + 1 }
+        else { k = k + 1 }
+    }
+    return [min, rest ? -1 : n]
+}
+
+// Is n arguments a count library function `name` refuses? A direct call of an
+// engine native that is goes to the library's declaration instead, whose arity
+// check raises the error.
+function phpLibArityBad(ix, name, n) {
+    var key = phpLibKey(ix, name)
+    if (key == "") { return false }
+    var ar = phpLibArity(ix, key)
+    return n < ar[0] || (ar[1] >= 0 && n > ar[1])
+}

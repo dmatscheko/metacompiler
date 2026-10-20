@@ -1090,6 +1090,12 @@ func (rt *jsrt) phpMkErr(clsName, msg string) *jsObject {
 	if cls == nil {
 		return nil
 	}
+	return rt.phpMkErrOf(cls, msg)
+}
+
+// phpMkErrOf is phpMkErr of a class descriptor in hand. Twin of phMkErrOf in
+// languages/lib/php-rt.metajs.
+func (rt *jsrt) phpMkErrOf(cls interface{}, msg string) *jsObject {
 	o := newJSObject()
 	o.set("__class", cls)
 	o.set("message", msg)
@@ -3818,6 +3824,25 @@ func init() {
 		m["js_phraise"] = func(a []uint64) uint64 {
 			rt.phpRaise(rt.phpStr(u(a[0])), rt.phpStr(u(a[1])))
 			return 0
+		}
+		// (args, name, min, max, cls): the ArgumentCountError (class cls) of a
+		// library function whose entry found its arguments outside [min, max]
+		// (max -1: variadic, its last slot the collected tail). The count is of
+		// the slots a call filled. Twin of js_pharity in
+		// languages/lib/php-rt.metajs.
+		m["js_pharity"] = func(a []uint64) uint64 {
+			args := u(a[0]).(*jsArray).elems
+			min, max := int(rt.toNumber(u(a[2]))), int(rt.toNumber(u(a[3])))
+			if max < 0 && len(args) > 0 {
+				args = args[:len(args)-1]
+			}
+			given := 0
+			for _, v := range args {
+				if v != jsUndef {
+					given++
+				}
+			}
+			panic(&jsThrown{value: rt.phpMkErrOf(u(a[4]), phpArityMsg(rt.phpStr(u(a[1])), min, max, given))})
 		}
 		// The floor's js_rt_missvar hook, php half. Twin of js_phmissname in
 		// languages/lib/php-rt.metajs.

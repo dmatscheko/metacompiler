@@ -639,3 +639,12 @@ function phsCloDump(d, id, ind, statDumps, thisDump) {
     }
     return out + pad + "}\n"
 }
+
+// The ArgumentCountError text of an internal function given `given` arguments
+// outside [min, max] (max -1: variadic), zend_wrong_parameters_count_error's
+// wording. Twin of phsArityMsg in abnf/jsrtphpstr.go.
+function phsArityMsg(name, min, max, given) {
+    var want = given < min ? min : max
+    var how = min == max ? "exactly" : (given < min ? "at least" : "at most")
+    return name + "() expects " + how + " " + want + " argument" + (want == 1 ? "" : "s") + ", " + given + " given"
+}

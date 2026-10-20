@@ -7072,6 +7072,16 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             libFixed = true
         }
         if (name == "__mec_callable") { nsUsed = true }
+        // A native given a count it refuses is called as its library declaration,
+        // whose entry raises the ArgumentCountError (phpLibArityBad).
+        var lowered = hasBuiltin(name)
+        if (lowered && argsArePlain(args)) {
+            if (phpLib == null) { phpLib = phpLibIndex(load("lib/php-stdlib.php")) }
+            if (phpLibArityBad(phpLib, name, args.length)) {
+                phpLibLoad(phpLibKey(phpLib, name))
+                lowered = false
+            }
+        }
         if (libCb != null && hasFcc(args)) {
             nsUsed = true
             libFccSeen["$" + lcName] = true
@@ -7092,7 +7102,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 var pfV = anyCase ? fk.v : callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
                 return emitPartialFor(b, pfV, name, "call", "\x00pfafn", args, sigOf(name))
             }
-            if (hasBuiltin(name)) { return emitBuiltin(b, name, args) }
+            if (lowered) { return emitBuiltin(b, name, args) }
             var fV = anyCase ? fk.v : callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
             var ea = emitPhArgs(b, args, sigOf(name))
             b = ea.b
@@ -7466,8 +7476,35 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // stands. Twin of makeTopDef in php-interpreter.abnf.
     var topDefs = []
     function makeTopDef(fn) {
+        if (phpLibDepth > 0 && fn.name.substring(0, 5) != "__mec") { fn.body = libArityCheck(fn.name, fn.body) }
         topDefs.push(makeDefStmt(fn))
         return function(b) { return b }
+    }
+    // A library function stands for an internal one, which raises an
+    // ArgumentCountError for a count outside its declaration's [min, max]
+    // (phpLibArity) before it runs. The slot past the last required one is empty
+    // exactly when too few came, and slot max is filled exactly when too many came,
+    // so only a call that fails reaches js_pharity. Twin of the check in
+    // invokePhpCls in php-interpreter.abnf.
+    function libArityCheck(name, body) {
+        var ar = phpLibArity(phpLib, phpLibKey(phpLib, name))
+        if (ar[0] == 0 && ar[1] < 0) { return body }
+        return function(b) {
+            var argsV = curF.Params[1]
+            var bad = null
+            if (ar[0] > 0) { bad = b.NewICmp(llvm.enum.IPredEQ, callExt(b, "js_arg", [argsV, handle(ar[0] - 1)]), hUndef) }
+            if (ar[1] >= 0) {
+                var many = b.NewICmp(llvm.enum.IPredNE, callExt(b, "js_arg", [argsV, handle(ar[1])]), hUndef)
+                bad = bad == null ? many : b.NewOr(bad, many)
+            }
+            var badB = curF.NewBlock("")
+            var okB = curF.NewBlock("")
+            b.NewCondBr(bad, badB, okB)
+            var clsV = callExt(badB, "js_scope_get", [curScopeV, emitStr(badB, "ArgumentCountError")])
+            callExt(badB, "js_pharity", [argsV, emitStr(badB, name), emitNum(badB, ar[0]), emitNum(badB, ar[1]), clsV])
+            badB.NewBr(okB) // never taken: js_pharity throws
+            return body(okB)
+        }
     }
     // A class, interface or trait declared at a file's top level is bound before the
     // file's statements run too, when PHP can link it at compile time
@@ -8275,6 +8312,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         importDepth = importDepth - 1
         c.popSource()
         phpLibClasses(phpLibText(phpLib, key, false))
+        // The class a library function's arity check raises (libArityCheck).
+        if (key.charAt(0) == "$") { phpLibLoad("#argumentcounterror") }
     }
     // ----- the built-in exception hierarchy -----
     // A namespace-qualified name (\RuntimeException, App\Boom) resolves on its last

@@ -3909,6 +3909,49 @@ function s75dump() {
     var_dump($o);
 }
 
+// ===== SECTION 76: internal functions called with a wrong argument count =====
+// An internal function checks its argument count against its declaration before
+// it runs, whether it is called directly, by name or as a callback, and raises
+// the ArgumentCountError zend_wrong_parameters_count_error words:
+// "<f>() expects exactly|at least|at most <n> argument(s), <given> given".
+// "exactly" when min == max, else "at least" for too few and "at most" for too
+// many; a variadic function has no maximum. The counts are the stubs' (strtr
+// takes 2-3, strrchr 2-3, str_word_count 1-3, pi none).
+class S76K { function m() { return get_class(); } }
+function s76ace($f, $args) {
+    try { call_user_func_array($f, $args); return "none"; } catch (ArgumentCountError $e) { return $e->getMessage(); }
+}
+function s76() {
+    $m = [];
+    try { strrev(); } catch (ArgumentCountError $e) { $m[] = $e->getMessage(); }
+    $f = 'strrev';
+    try { $f(); } catch (ArgumentCountError $e) { $m[] = $e->getMessage(); }
+    try { call_user_func('strrev'); } catch (ArgumentCountError $e) { $m[] = get_class($e) . ": " . $e->getMessage(); }
+    check("aca1", $m === ["strrev() expects exactly 1 argument, 0 given", "strrev() expects exactly 1 argument, 0 given",
+        "ArgumentCountError: strrev() expects exactly 1 argument, 0 given"]);
+    check("aca2", s76ace('str_pad', ['a']) === "str_pad() expects at least 2 arguments, 1 given"
+        && s76ace('str_pad', ['a', 3, '-', 0, 9]) === "str_pad() expects at most 4 arguments, 5 given"
+        && s76ace('implode', [',', [1], 3]) === "implode() expects at most 2 arguments, 3 given"
+        && s76ace('max', []) === "max() expects at least 1 argument, 0 given"
+        && s76ace('pi', [1]) === "pi() expects exactly 0 arguments, 1 given"
+        && s76ace('array_key_exists', [1]) === "array_key_exists() expects exactly 2 arguments, 1 given"
+        && s76ace('array_merge', []) === "none" && s76ace('str_pad', ['a', 3]) === "none");
+    $n = [];
+    try { strlen(); } catch (ArgumentCountError $e) { $n[] = $e->getMessage(); }
+    try { strlen("a", "b"); } catch (ArgumentCountError $e) { $n[] = $e->getMessage(); }
+    $o = 'ord';
+    try { $o("a", "b"); } catch (ArgumentCountError $e) { $n[] = $e->getMessage(); }
+    $w = ['x', 'y'];
+    try { array_walk($w, 'strtoupper'); } catch (ArgumentCountError $e) { $n[] = $e->getMessage(); }
+    check("aca3", $n === ["strlen() expects exactly 1 argument, 0 given", "strlen() expects exactly 1 argument, 2 given",
+        "ord() expects exactly 1 argument, 2 given", "strtoupper() expects exactly 1 argument, 2 given"]);
+    check("aca4", s76ace('strtr', ['abc']) === "strtr() expects at least 2 arguments, 1 given"
+        && s76ace('strtr', ['abc', 'a', 'b', 'c']) === "strtr() expects at most 3 arguments, 4 given"
+        && strtr("abc", "ab", "xy") === "xyc" && strrchr("a/b/c", "/", true) === "a/b" && strrchr("a/b/c", "/") === "/c"
+        && str_word_count("it's a-b x1y", 1, "1") === ["it's", "a-b", "x1y"]
+        && str_word_count("-ab- cd", 2, "-") === [0 => "-ab-", 5 => "cd"] && (new S76K)->m() === "S76K");
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -3995,6 +4038,7 @@ function main() {
     s74dump(); // SECTION-CALL 74
     s75(); // SECTION-CALL 75
     s75dump(); // SECTION-CALL 75
+    s76(); // SECTION-CALL 76
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

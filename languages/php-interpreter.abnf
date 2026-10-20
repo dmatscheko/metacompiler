@@ -4040,7 +4040,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     function callNamed(cname, argset) {
         var name = fnName(cname)
-        if (hasOwn(phpBuiltins, name)) { return phpBuiltins[name].apply(undefined, argset.pos) }
+        if (hasOwn(phpBuiltins, name) && !nativeRefuses(name, argset)) { return phpBuiltins[name].apply(undefined, argset.pos) }
         var f = getVar(name)
         if (typeof f != "function") { fail("call of an undefined function: " + name) }
         return f(argset)
@@ -4097,8 +4097,16 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     function callDyn(n, argset) {
         var lc = phsCase(fnName(n), false)
-        if (hasOwn(phpBuiltins, lc)) { return phpBuiltins[lc].apply(undefined, argset.pos) }
+        if (hasOwn(phpBuiltins, lc) && !nativeRefuses(lc, argset)) { return phpBuiltins[lc].apply(undefined, argset.pos) }
         return fnGet(n)(argset)
+    }
+    // Does native lc refuse this many arguments? Its library declaration is then
+    // called instead, whose entry raises the ArgumentCountError (phpLibArityBad).
+    // makeCall has compiled the declaration for a call it names; a callable
+    // reaches only a compiled one (phpLibRef).
+    function nativeRefuses(lc, argset) {
+        if (phpLib == null || !varExists(fnKey(lc))) { return false }
+        return phpLibArityBad(phpLib, lc, argset.pos.length + (argset.named == null ? 0 : argset.nkeys.length))
     }
     // The user function named n in any letter case.
     function fnGet(n) {
@@ -6005,6 +6013,16 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 phpLibLoad(fk)
             }
         }
+        // A native given a count it refuses is called as its library declaration
+        // (nativeRefuses), compiled here.
+        if (hasOwn(phpBuiltins, name) && !fccLib) {
+            var plain = true
+            for (var pa = 0; pa < args.length; pa++) {
+                if (args[pa] == null || args[pa].argval === undefined || args[pa].argname !== undefined) { plain = false }
+            }
+            if (phpLib == null) { phpLib = phpLibIndex(load("lib/php-stdlib.php")) }
+            if (plain && phpLibArityBad(phpLib, name, args.length)) { phpLibLoad(phpLibKey(phpLib, name)) }
+        }
         var resolveCb = name == "call_user_func" || name == "call_user_func_array"
         var libCb = hasOwn(libCbArg, "$" + phsCase(name, false))
         return function() {
@@ -6213,6 +6231,15 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             declVar(STATIC_KEY, staticCls)
         }
         declVar(FN_KEY, fn.name)
+        // A library function stands for an internal one, which raises an
+        // ArgumentCountError for a count outside its declaration's [min, max]
+        // (phpLibArity). Twin of libArityCheck in php-to-llvm-ir.abnf.
+        if (fn.arity !== undefined) {
+            var given = argset.pos.length + (argset.named == null ? 0 : argset.nkeys.length)
+            if (given < fn.arity[0] || (fn.arity[1] >= 0 && given > fn.arity[1])) {
+                phpRaise("ArgumentCountError", phsArityMsg(fn.name, fn.arity[0], fn.arity[1], given))
+            }
+        }
         bindParams(fn.params, argset)
         // Constructor property promotion: the bound parameter is ALSO written to the
         // object, after binding, so a default value promotes exactly like a passed one.
@@ -6274,6 +6301,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // php-to-llvm-ir.abnf.
     var topDefs = []
     function makeTopDef(fn) {
+        if (phpLibDepth > 0 && fn.name.substring(0, 5) != "__mec") { fn.arity = phpLibArity(phpLib, phpLibKey(phpLib, fn.name)) }
         topDefs.push(fn)
         return function() { return null }
     }
@@ -8182,6 +8210,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         cloClass = outerClass
         c.popSource()
         phpLibClasses(phpLibText(phpLib, key, false))
+        // The class a library function's arity check raises (invokePhpCls).
+        if (key.charAt(0) == "$") { phpLibLoad("#argumentcounterror") }
     }
 
     phpLibClasses(c.srcSlice(0, 2147483647))
