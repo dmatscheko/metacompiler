@@ -105,6 +105,9 @@ import "./python-suggest.js"
 import "./python-dir.js"
 // Unicode printability: repr() of a str and str.isprintable().
 import "./python-printable.js"
+// str.isalpha / isdecimal / isdigit / isnumeric, over java.lang.Character's table.
+import "./java-chars.js"
+import "./python-chars.js"
 
 // sin, cos, tan and atan2 (math and the complex power), as the interpreter's.
 import "./fdlibm.js"
@@ -13211,17 +13214,6 @@ function pySIsLoCh(ch) {
     return pySUpCh(ch) != l && ch == l
 }
 
-function pySIsAlphaCh(ch) {
-    var c = ch.charCodeAt(0)
-    if (c < 128) { return (c >= 65 && c <= 90) || (c >= 97 && c <= 122) }
-    return pySIsCased(ch)
-}
-
-function pySIsDigitCh(ch) {
-    var c = ch.charCodeAt(0)
-    return c >= 48 && c <= 57
-}
-
 // Py_UNICODE_ISSPACE: the ASCII set, the C1 and separator code points, and the
 // three Unicode space blocks.
 function pySIsSpaceCh(ch) {
@@ -13888,9 +13880,12 @@ function pySAllCh(s, kind) {
     while (i < cs.length) {
         var ch = cs[i]
         var ok = false
-        if (kind == 1) { ok = pySIsDigitCh(ch) }
-        else if (kind == 2) { ok = pySIsAlphaCh(ch) }
-        else if (kind == 3) { ok = pySIsAlphaCh(ch) || pySIsDigitCh(ch) }
+        var cp = pyCpOf(ch)
+        if (kind == 1) { ok = pyCpDecimal(cp) }
+        else if (kind == 2) { ok = pyCpAlpha(cp) }
+        else if (kind == 3) { ok = pyCpAlpha(cp) || pyCpNumeric(cp) }
+        else if (kind == 5) { ok = pyCpDigit(cp) }
+        else if (kind == 6) { ok = pyCpNumeric(cp) }
         else { ok = pySIsSpaceCh(ch) }
         if (!ok) { return false }
         i = i + 1
@@ -14327,7 +14322,9 @@ function pyStrMethod(s, name, args, kw) {
         return pySEnds(s, pw, st2, en2)
     }
 
-    if (name == "isdigit" || name == "isdecimal" || name == "isnumeric") { return pySAllCh(s, 1) }
+    if (name == "isdecimal") { return pySAllCh(s, 1) }
+    if (name == "isdigit") { return pySAllCh(s, 5) }
+    if (name == "isnumeric") { return pySAllCh(s, 6) }
     if (name == "isalpha") { return pySAllCh(s, 2) }
     if (name == "isalnum") { return pySAllCh(s, 3) }
     if (name == "isspace") { return pySAllCh(s, 4) }

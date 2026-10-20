@@ -265,17 +265,74 @@ func (e *pyStrEnv) isLoCh(ch string) bool {
 	return e.upCh(ch) != l && ch == l
 }
 
-func (e *pyStrEnv) isAlphaCh(ch string) bool {
+// The code point of a one-character string (one unit, or a surrogate pair).
+func (e *pyStrEnv) cpOf(ch string) int {
 	c := e.sCode(ch, 0)
+	if e.sLen(ch) < 2 {
+		return c
+	}
+	return (c-55296)*1024 + e.sCode(ch, 1) - 56320 + 65536
+}
+
+// str.isalpha / isdecimal / isdigit / isnumeric of one code point. Twins of
+// languages/lib/python-chars.js, which states the rule and the two lists.
+var pyDigitRuns = []int{178, 179, 185, 185, 4969, 4977, 6618, 6618, 8304, 8304, 8308, 8313, 8320, 8329,
+	9312, 9320, 9332, 9340, 9352, 9360, 9450, 9450, 9461, 9469, 9471, 9471,
+	10102, 10110, 10112, 10120, 10122, 10130, 68160, 68163, 69216, 69224,
+	69714, 69722, 127232, 127242}
+
+var pyHanNumerals = map[int]bool{13317: true, 13443: true, 14378: true, 15181: true, 19968: true,
+	19971: true, 19975: true, 19977: true, 20004: true, 20061: true, 20108: true, 20116: true,
+	20118: true, 20140: true, 20159: true, 20160: true, 20191: true, 20200: true, 20237: true,
+	20336: true, 20457: true, 20486: true, 20740: true, 20806: true, 20841: true, 20843: true,
+	20845: true, 21313: true, 21315: true, 21316: true, 21317: true, 21324: true, 21441: true,
+	21442: true, 21443: true, 21444: true, 22235: true, 22769: true, 22777: true, 24186: true,
+	24318: true, 24319: true, 24332: true, 24333: true, 24334: true, 24336: true, 25296: true,
+	25342: true, 25420: true, 26578: true, 27934: true, 28422: true, 29590: true, 30334: true,
+	30357: true, 31213: true, 32902: true, 33836: true, 36014: true, 36019: true, 36144: true,
+	37390: true, 38057: true, 38433: true, 38470: true, 38476: true, 38520: true, 38646: true,
+	63851: true, 63859: true, 63864: true, 63922: true, 63953: true, 63955: true, 63997: true,
+	131073: true, 131172: true, 131298: true, 131361: true, 133418: true, 133507: true,
+	133516: true, 133532: true, 133866: true, 133885: true, 133913: true, 140176: true,
+	141720: true, 146203: true, 156269: true, 194704: true}
+
+func pyCpAlpha(c int) bool {
 	if c < 128 {
 		return (c >= 65 && c <= 90) || (c >= 97 && c <= 122)
 	}
-	return e.isCased(ch)
+	return jcIsLetter(c)
 }
 
-func (e *pyStrEnv) isDigitCh(ch string) bool {
-	c := e.sCode(ch, 0)
-	return c >= 48 && c <= 57
+func pyCpDecimal(c int) bool {
+	if c < 128 {
+		return c >= 48 && c <= 57
+	}
+	return jcIsDigit(c)
+}
+
+func pyCpDigit(c int) bool {
+	if pyCpDecimal(c) {
+		return true
+	}
+	for i := 0; i < len(pyDigitRuns); i += 2 {
+		if c < pyDigitRuns[i] {
+			return false
+		}
+		if c <= pyDigitRuns[i+1] {
+			return true
+		}
+	}
+	return false
+}
+
+func pyCpNumeric(c int) bool {
+	if c < 128 {
+		return c >= 48 && c <= 57
+	}
+	if jcIsLetter(c) {
+		return pyHanNumerals[c]
+	}
+	return jcClass(c)%8 == 6 || jcNumericValue(c) != -1
 }
 
 // Py_UNICODE_ISSPACE.
@@ -999,13 +1056,18 @@ func (e *pyStrEnv) allCh(s string, kind int) bool {
 	}
 	for _, ch := range cs {
 		ok := false
+		cp := e.cpOf(ch)
 		switch kind {
 		case 1:
-			ok = e.isDigitCh(ch)
+			ok = pyCpDecimal(cp)
 		case 2:
-			ok = e.isAlphaCh(ch)
+			ok = pyCpAlpha(cp)
 		case 3:
-			ok = e.isAlphaCh(ch) || e.isDigitCh(ch)
+			ok = pyCpAlpha(cp) || pyCpNumeric(cp)
+		case 5:
+			ok = pyCpDigit(cp)
+		case 6:
+			ok = pyCpNumeric(cp)
 		default:
 			ok = e.isSpaceCh(ch)
 		}
@@ -1549,8 +1611,12 @@ func (e *pyStrEnv) call(s, name string, args []interface{}, kw interface{}) inte
 		}
 		return hit(e.strArg(pysArgAt(args, 0), name+" first arg must be str or a tuple of str", false))
 
-	case "isdigit", "isdecimal", "isnumeric":
+	case "isdecimal":
 		return e.allCh(s, 1)
+	case "isdigit":
+		return e.allCh(s, 5)
+	case "isnumeric":
+		return e.allCh(s, 6)
 	case "isalpha":
 		return e.allCh(s, 2)
 	case "isalnum":

@@ -6855,6 +6855,18 @@ def s131():
     except KeyError as e:
         check("chainmap2", str(e) == "\"Key not found in the first mapping: 'b'\"")
 
+# ===== SECTION 132: str.isalpha / isdecimal / isdigit / isnumeric beyond ASCII =====
+# isalpha is the L* categories (uncased CJK and Arabic letters included, the
+# letter-like Roman numerals not); isdecimal is Nd; isdigit adds superscripts and
+# circled digits; isnumeric adds fractions, Nl and the Han numerals.
+def s132():
+    check("ucls1", "中文".isalpha() and "مرحبا".isalpha() and "é".isalpha() and not "Ⅻ".isalpha()
+          and not "²".isalpha() and "abc中".isalnum())
+    check("ucls2", "١٢".isdecimal() and "١٢".isdigit() and not "²".isdecimal() and "²³".isdigit()
+          and "①".isdigit() and not "½".isdigit() and not "Ⅻ".isdigit() and "𝟘".isdecimal())
+    check("ucls3", "½".isnumeric() and "Ⅻ".isnumeric() and "一二三".isnumeric() and "〇".isnumeric()
+          and not "中".isnumeric() and "x²".isalnum() and "Ⅻ".isalnum() and not "-1".isnumeric())
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -6984,5 +6996,6 @@ def main():
     s129() # SECTION-CALL 129
     s130() # SECTION-CALL 130
     s131() # SECTION-CALL 131
+    s132() # SECTION-CALL 132
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

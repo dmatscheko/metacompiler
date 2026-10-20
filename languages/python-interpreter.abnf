@@ -1094,6 +1094,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     include("lib/python-dir.js")
     // Unicode printability: repr() of a str and str.isprintable().
     include("lib/python-printable.js")
+    // str.isalpha / isdecimal / isdigit / isnumeric, over java.lang.Character's table.
+    include("lib/java-chars.js")
+    include("lib/python-chars.js")
     // The module tables of the import statements.
     include("lib/python-import.js")
 
@@ -5435,17 +5438,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return pySUpCh(ch) != l && ch == l
     }
 
-    function pySIsAlphaCh(ch) {
-        var c = ch.charCodeAt(0)
-        if (c < 128) { return (c >= 65 && c <= 90) || (c >= 97 && c <= 122) }
-        return pySIsCased(ch)
-    }
-
-    function pySIsDigitCh(ch) {
-        var c = ch.charCodeAt(0)
-        return c >= 48 && c <= 57
-    }
-
     // Py_UNICODE_ISSPACE: the ASCII set, the C1 and separator code points, and the
     // three Unicode space blocks.
     function pySIsSpaceCh(ch) {
@@ -6213,9 +6205,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         while (i < cs.length) {
             var ch = cs[i]
             var ok = false
-            if (kind == 1) { ok = pySIsDigitCh(ch) }
-            else if (kind == 2) { ok = pySIsAlphaCh(ch) }
-            else if (kind == 3) { ok = pySIsAlphaCh(ch) || pySIsDigitCh(ch) }
+            var cp = pyCpOf(ch)
+            if (kind == 1) { ok = pyCpDecimal(cp) }
+            else if (kind == 2) { ok = pyCpAlpha(cp) }
+            else if (kind == 3) { ok = pyCpAlpha(cp) || pyCpNumeric(cp) }
+            else if (kind == 5) { ok = pyCpDigit(cp) }
+            else if (kind == 6) { ok = pyCpNumeric(cp) }
             else { ok = pySIsSpaceCh(ch) }
             if (!ok) { return false }
             i = i + 1
@@ -6520,7 +6515,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return pySEnds(s, pw, st2, en2)
         }
 
-        if (name == "isdigit" || name == "isdecimal" || name == "isnumeric") { return pySAllCh(s, 1) }
+        if (name == "isdecimal") { return pySAllCh(s, 1) }
+        if (name == "isdigit") { return pySAllCh(s, 5) }
+        if (name == "isnumeric") { return pySAllCh(s, 6) }
         if (name == "isalpha") { return pySAllCh(s, 2) }
         if (name == "isalnum") { return pySAllCh(s, 3) }
         if (name == "isspace") { return pySAllCh(s, 4) }
