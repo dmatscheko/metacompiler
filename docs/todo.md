@@ -89,7 +89,7 @@ keys). `class C{ n(){} }; "n" in C.prototype` → false (node true). `typeof K.h
 
 # JV — Java
 
-### T-654 java: user `super.clone()`; FQN `java.io.Serializable` without import; Matcher.hitEnd/requireEnd · P2 · JV · OPEN [V]
+### T-654 java: user `super.clone()`; FQN `java.io.Serializable` without import; Matcher.hitEnd/requireEnd · P2 · JV · IN PROGRESS (JV worker, round 11) [V]
 `class P implements Cloneable { public P clone() { return (P) super.clone(); } }` → "unknown super method 'clone'" in all engines (java
 a shallow copy; needs Object.clone in jSuperObject / js_jvsuper / layer 2 and CloneNotSupportedException). `Object o = new
 StringBuffer(); o instanceof java.io.Serializable` with no import → false (java true). Matcher.hitEnd/requireEnd need a hit-the-end flag
