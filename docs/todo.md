@@ -135,7 +135,7 @@ reports cap 4 where growslice says 1) — escape analysis.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-663 php: user functions with too few arguments; library method arity; named-argument "not passed" · P1 · PHP · OPEN [V spec-only]
+### T-663 php: user functions with too few arguments; library method arity; named-argument "not passed" · P1 · PHP · IN PROGRESS (PHP worker, round 11) [V spec-only]
 `function foo($a){ return 1; } foo();` → prints 1 in all engines (PHP ArgumentCountError "Too few arguments to function foo(), 0 passed in
 %s on line %d and exactly 1 expected" — zend_missing_arg_error; the file/line is the caller's, so the engines need the call site's line).
 Library class methods have no arity check (PHP "SplStack::push() expects exactly 1 argument, 0 given"). A named-argument call skipping a
