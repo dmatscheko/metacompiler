@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-684** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-685** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -82,15 +82,12 @@ non-ASCII class range spanning 256 or more characters only gets the text-side up
 
 # JS — JavaScript and TypeScript
 
-### T-676 js: Object.freeze / seal do nothing; read-only writes and non-configurable deletes are silent in strict code · P2 · JS · IN PROGRESS (JS worker, round 15) [V]
-`var o = Object.freeze({a:1}); o.a = 2; o.a` → 2 in all engines (node 1); `Object.isFrozen(o)` likewise. In strict code (class
-bodies, "use strict", modules) a write to a read-only property or `delete` of a non-configurable one is dropped silently; node raises
-`TypeError: Cannot assign to read only property 'x' of object '#<Object>'` / `Cannot delete property 'x' of #<Object>`.
-
-### T-677 js: builtin globals' `.name`/`.length`; `(7).constructor === Number`; `Object(1n)`/`Object(Symbol())`; String wrapper index keys · P3 · JS · IN PROGRESS (JS worker, round 15) [V]
-`Number.name`, `String.name`, `Array.name`, `BigInt.name`, `Promise.name` → "" (node the name). `(7).constructor === Number`,
-`"s".constructor === String`, `Object.prototype.constructor === Object` → false (node true). `typeof Object(1n)` → bigint (node
-object). `Object.keys(new String("abc"))` → "" (node `0,1,2`); layer 2 does not check `s[1]` on a String wrapper.
+### T-684 js: class `.length`; Math/JSON member names; arrow-function "use strict"; TS strict default; frozen-array message index · P3 · JS · OPEN [V]
+`class A { constructor(a,b){} }; A.length` → undefined (node 2; 0 for `class B extends A {}`); Error/TypeError/RangeError/Map/Set
+`.length` undefined (node 1,1,1,0,0). `Math.max.name/.length`, `Math.floor`, `JSON.stringify`, `JSON.parse` → ""/0 (node max/2,
+floor/1, stringify/3, parse/2). `() => { "use strict"; frozen.a = 2 }` runs sloppy (no UseStrictMark in ArrowBlock; node throws).
+tsc 6 emits "use strict" by default: decide whether .ts runs strict (a sloppy write to a frozen object diverges from tsc+node).
+Frozen-array TypeErrors name element 0 / the splice start, not V8's exact write order (`fill(x, 1)`, `splice(2, 1)`).
 
 ---
 
@@ -781,6 +778,8 @@ T-660 python: Unicode `\d` / `\s` in regex; `__class__` in a class nested in a m
 T-679 python: `__class__` / `super()` in a function called while its class body runs — DONE 75ee1c30 (empty __class__ cell while the body runs, CPython's super() check order, cell filled before the metaclass hooks — 4 legs = python3; follow-up T-681)
 T-678 go: `&r.i` / `&xs[1]` give the value, not a pointer; anonymous struct with embedded pointer; `%T` of a host func — DONE ae70ca39 1719a6bf 5042a693 aee854d2 (pointer cells over fields/elements, slot equality and pointer map keys, anonymous embedded fields, %T of host funcs, *(a).b, MethodSfx SameLine, *f() += — 4 legs = go run; follow-up T-682)
 T-681 python: `__classcell__` through a metaclass `__new__`; `super()` object's own type — DONE 96f1a30b (CPython symtable cell rule, __classcell__ via type.__new__ with its RuntimeError/TypeError, super's own type — 4 legs = python3; follow-up T-683)
+T-676 js: Object.freeze / seal do nothing; read-only writes and non-configurable deletes are silent in strict code — DONE 88ec20ec (freeze/seal/preventExtensions + is*, sloppy drops and strict TypeErrors with node's texts, counter-gated — 4 legs = node, TS via tsc 6)
+T-677 js: builtin globals' `.name`/`.length`; `(7).constructor === Number`; `Object(1n)`/`Object(Symbol())`; String wrapper index keys — DONE 88ec20ec (builtin name/length, primitive .constructor identity, BigInt/Symbol wrappers, String wrapper index keys — 4 legs = node; follow-up T-684)
 
 # Settled — do not re-open
 
