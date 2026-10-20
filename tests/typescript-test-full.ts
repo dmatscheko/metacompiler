@@ -3340,6 +3340,7 @@ function s62() {
 function F63(this: any, x: number) { this.x = x; }
 class C63 { v: number; m(): string { return "m" + this.v; } constructor() { this.v = 1; } }
 class D63 extends C63 {}
+class G63 { get b(): number { return 1; } a(): void {} set b(v: number) {} static st(): void {} #q(): void {} ["__#@iterator"](): void {} *g(): any {} }
 function s63() {
     const fp: any = (F63 as any).prototype;
     fp.get = function (this: any) { return this.x; };
@@ -3355,6 +3356,10 @@ function s63() {
     check("st63c", typeof Object.keys === "function" && k({x: 1, y: 2}).join() === "x,y" && Object.keys === Object.keys &&
         [[1], 2].filter(Array.isArray).length === 1 && typeof Boolean === "function" &&
         [0, 1, "", "a"].filter(Boolean).length === 2 && Object.is(NaN, 0 / 0) && !Object.is(0, -0));
+    // See the twin of this check (pr70h) in js-test-full.3.js.
+    const gp = Object.getOwnPropertyNames;
+    check("pr63d", gp(G63.prototype).join() === "constructor,b,a,__#@iterator,g" && gp(D63.prototype).join() === "constructor" &&
+        gp(fp).join() === "constructor,get" && gp(cp).join() === "constructor,m,n" && Object.keys(G63.prototype).length === 0);
 }
 
 // ===== SECTION 64: symbols and Symbol.iterator =====

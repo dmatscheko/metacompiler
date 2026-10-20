@@ -3916,11 +3916,29 @@ NotFuncHead = :script(~~
             if (jsIsArgs(v)) { ak.push("callee") }
             return ak
         }
+        if (typeof v == "object" && v !== null && hasOwn(v, "__protoof")) { return jsProtoGopn(v) }
         if (typeof v != "function") { return jsErrGopn(v, jsOwnKeys(v)) }
         var out = ["length", "name"]
         if (v === jsArrayFn) { out = jsArrayOwnNames.slice() }
         var ks = jsOwnKeys(v)
         for (var i = 0; i < ks.length; i++) { out.push(ks[i]) }
+        return out
+    }
+    // The own names of a class's (or a constructor function's) prototype view:
+    // `constructor`, then the methods and accessors the class body declared, in source
+    // order, then what the program wrote onto the prototype. A declared name the
+    // program wrote again through the view keeps its place, as a redefined property
+    // does. Twins:
+    // jsvProtoGopn in abnf/jsrtjsprint.go, jvProtoGopn in languages/lib/js-rt.metajs.
+    function jsProtoGopn(v) {
+        var out = ["constructor"]
+        var vk = jsOwnKeys(v)
+        var d = v.__protoof
+        if (hasOwn(d, "__pnames")) {
+            var pn = d.__pnames
+            for (var i = 0; i < pn.length; i++) { out.push(pn[i]) }
+        }
+        for (var j = 0; j < vk.length; j++) { if (out.indexOf(vk[j]) < 0) { out.push(vk[j]) } }
         return out
     }
 
@@ -9054,15 +9072,13 @@ NotFuncHead = :script(~~
             else { members.push(items[i]) }
         }
         var fields = []      // Instance fields: the constructor initializes them.
-        var methods = []
-        var accessors = []
+        var protos = []      // Methods and accessors, static or not, in source order.
         var inits = []       // Static fields AND static blocks, kept in source order.
         var ctorInfo = null
         for (var j = 0; j < members.length; j++) {
             var mm = members[j]
             if (mm.kind == "field") { if (mm.statik) { inits.push(mm) } else { fields.push(mm) } }
-            else if (mm.kind == "method") { methods.push(mm) }
-            else if (mm.kind == "accessor") { accessors.push(mm) }
+            else if (mm.kind == "method" || mm.kind == "accessor") { protos.push(mm) }
             else if (mm.kind == "staticblock") { inits.push(mm) }
             else if (mm.kind == "ctor") { ctorInfo = mm }
         }
@@ -9108,23 +9124,28 @@ NotFuncHead = :script(~~
             // lets ownKeys answer Object.keys(C) with node's list.
             statics["__keys"] = []
             cls["__statics"] = statics
-            for (var mi = 0; mi < methods.length; mi++) {
-                var mm2 = methods[mi]
-                var mk2 = memberKey(mm2)
-                scopePut(mm2.statik ? statics : cls, mk2, classMemberFn(mm2, mscopes, mk2))
+            // ClassDefinitionEvaluation defines the methods and accessors in SOURCE
+            // order, which is the order of their computed keys' side effects and of
+            // getOwnPropertyNames on the prototype. An accessor lives in the __acc table,
+            // not among the descriptor's own keys, so the instance-side names are also
+            // listed in __pnames for jsProtoGopn.
+            var pnames = []
+            for (var mi = 0; mi < protos.length; mi++) {
+                var pm = protos[mi]
+                var pk = memberKey(pm)
+                var ptgt = pm.statik ? statics : cls
+                if (pm.kind == "accessor") {
+                    // An accessor is called with the receiver in the one-shot slot, never
+                    // as arguments[0], so a static and an instance accessor are built the
+                    // same way. node names it "get k" / "set k".
+                    addAccessor(ptgt, pm.acc, pk, fnMetaPut(makeClosure(pm.params, pm.body, mscopes, true),
+                                                            pm.acc + " " + pk, fnArity(pm.params)))
+                } else {
+                    scopePut(ptgt, pk, classMemberFn(pm, mscopes, pk))
+                }
+                if (!pm.statik && !isInternalKey(pk) && pnames.indexOf(pk) < 0) { pnames.push(pk) }
             }
-            // An accessor is called with the receiver in the one-shot slot, never as
-            // arguments[0], so a static and an instance accessor are built the same way.
-            for (var ai = 0; ai < accessors.length; ai++) {
-                var aa = accessors[ai]
-                var ak = memberKey(aa)
-                // node names an accessor function "get k" / "set k"; nothing in this
-                // subset can read one as a value, so the name is recorded for the
-                // engines to agree rather than for a program to see.
-                addAccessor(aa.statik ? statics : cls, aa.acc, ak,
-                            fnMetaPut(makeClosure(aa.params, aa.body, mscopes, true),
-                                      aa.acc + " " + ak, fnArity(aa.params)))
-            }
+            cls["__pnames"] = pnames
             if (ctorInfo != null) {
                 cls["__ctor"] = makeCtorClosure(ctorInfo.params, ctorInfo.body, fields, mscopes, hasOwn(cls, "__super"), false)
             } else {

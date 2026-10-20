@@ -1510,6 +1510,7 @@ function F70(x) { this.x = x }
 class C70 { m() { return "m" + this.v } constructor() { this.v = 1 } }
 class D70 extends C70 {}
 class E70 extends Error {}
+class G70 { get b() { return 1 } a() {} set b(v) {} static st() {} #q() {} [Symbol.iterator]() {} ["__#@iterator"]() {} *g() {} }
 function s70() {
     F70.prototype.get = function () { return this.x }
     const f = new F70(7)
@@ -1541,6 +1542,13 @@ function s70() {
         Boolean() === false)
     check("is70g", Object.is(NaN, 0 / 0) && !Object.is(0, -0) && Object.is(-0, -1 / Infinity) && !Object.is(NaN, "NaN") &&
         Object.is(10n, 10n) && !Object.is({}, {}) && Object.is("a", "a"))
+    // getOwnPropertyNames of a prototype: `constructor`, the class body's methods and
+    // accessors in source order (no static, private or symbol-keyed one), then what was
+    // written onto it; a declared method written again keeps its place.
+    const gp = Object.getOwnPropertyNames
+    check("pr70h", gp(G70.prototype).join() === "constructor,b,a,__#@iterator,g" && gp(D70.prototype).join() === "constructor" &&
+        gp(F70.prototype).join() === "constructor,get,twice" && gp(C70.prototype).join() === "constructor,m,n" &&
+        Object.keys(G70.prototype).length === 0)
 }
 
 // ===== SECTION 71: symbols, Symbol.iterator, a private method read as a value =====

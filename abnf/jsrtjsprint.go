@@ -881,6 +881,9 @@ func jsvGopnKeys(v interface{}) []string {
 	}
 	if !jsvIsFnLike(v) {
 		if o, isObj := v.(*jsObject); isObj {
+			if d, isView := o.props["__protoof"].(*jsObject); isView {
+				return jsvProtoGopn(o, d)
+			}
 			return jsvErrGopn(o, jsvOwnKeys(v))
 		}
 		// An array's or a string's `length` after its indices, an arguments object's
@@ -901,6 +904,34 @@ func jsvGopnKeys(v interface{}) []string {
 		return append(append([]string{}, jsvArrayOwnNames...), jsvOwnKeys(v)...)
 	}
 	return append([]string{"length", "name"}, jsvOwnKeys(v)...)
+}
+
+// jsvProtoGopn is getOwnPropertyNames of the prototype view of descriptor d:
+// `constructor`, then the methods and accessors the class body declared, which are
+// d's own keys in source order, then what the program wrote onto the view. A
+// FUNCTION written through the view is installed on d as well; protoWrite lists the
+// names that installed in __pw, which this skips among d's keys, so a declared name
+// written again keeps its place, as a redefined property does. Twins: jsProtoGopn in
+// both *-interpreter.abnf, jvProtoGopn in languages/lib/js-rt.metajs.
+func jsvProtoGopn(view, d *jsObject) []string {
+	var pw []string
+	if a, ok := d.props["__pw"].(*jsArray); ok {
+		for _, e := range a.elems {
+			pw = append(pw, e.(string))
+		}
+	}
+	out := []string{"constructor"}
+	for _, k := range d.keys {
+		if !jsvInternalKey(k) && !jsvInNames(pw, k) {
+			out = append(out, k)
+		}
+	}
+	for _, k := range jsvOwnKeys(view) {
+		if !jsvInNames(out, k) {
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 // jsvFnProps -- `f.p = 1` on a FUNCTION. A function value here is a *jsClosure or
@@ -3084,6 +3115,14 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	protoWrite := func(d *jsObject, name string, v interface{}) {
 		if !isCallable(v) || (jsvInternalKey(name) && !strings.HasPrefix(name, "__#@")) {
 			return
+		}
+		if _, had := d.props[name]; !had && !jsvInternalKey(name) {
+			pw, _ := d.props["__pw"].(*jsArray)
+			if pw == nil {
+				pw = &jsArray{}
+				d.set("__pw", pw)
+			}
+			pw.elems = append(pw.elems, name)
 		}
 		d.set(name, jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			if len(args) == 0 {

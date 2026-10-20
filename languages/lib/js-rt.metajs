@@ -2225,6 +2225,33 @@ function jvProtoView(d) {
     jvPvN = jvPvN + 1
     return v
 }
+// getOwnPropertyNames of the view of descriptor d, unescaped: `constructor`, then d's
+// own keys (the declared methods and accessors, in source order) less the ones
+// jvProtoWrite installed, then the view's. Twin: jsvProtoGopn in abnf/jsrtjsprint.go.
+function jvProtoGopn(view, d) {
+    var pw = anytype
+    pw = d["__pw"]
+    if (pw === undefined) { pw = [] }
+    var dk = keysOf(d)
+    var out = ["constructor"]
+    var i = 0
+    while (i < dk.length) {
+        if (pw.indexOf(dk[i]) < 0) { out.push(dk[i]) }
+        i = i + 1
+    }
+    var vk = jvOwnKeys(view)
+    var j = 0
+    while (j < vk.length) {
+        if (out.indexOf(vk[j]) < 0) { out.push(vk[j]) }
+        j = j + 1
+    }
+    var u = 0
+    while (u < out.length) {
+        out[u] = jvKeyUnesc(out[u])
+        u = u + 1
+    }
+    return out
+}
 function jvProtoRead(d, key) {
     if (key == "constructor") {
         var cf = anytype
@@ -2262,6 +2289,16 @@ function jvProtoWrite(d, key, v) {
     if (!jvIsCallable(v)) { return undefined }
     var k = jvStr(key)
     if (k.length >= 2 && !jvIsSymKey(k)) { if (k.substring(0, 2) == "__") { return undefined } }
+    // The names this installs, for jvProtoGopn.
+    if (d[k] === undefined && !jvIsSymKey(k)) {
+        var pw = anytype
+        pw = d["__pw"]
+        if (pw === undefined) {
+            pw = []
+            d["__pw"] = pw
+        }
+        pw.push(k)
+    }
     d[k] = function () {
         var a = []
         var i = 1
@@ -4255,6 +4292,11 @@ function jvObjectGlobalMethod(name, args) {
         // `for (k in f)`. Twins: jsvGopnKeys in abnf/jsrtjsprint.go and jsGopnKeys in
         // both *-interpreter.abnf.
         if (name == "getOwnPropertyNames" && jvIsObjectGlobal(src)) { return jvObjectOwnNames.slice(0) }
+        if (name == "getOwnPropertyNames" && jvPvN > 0 && jvIsObj(src)) {
+            var pd = anytype
+            pd = src["__protoof"]
+            if (pd !== undefined) { return jvProtoGopn(src, pd) }
+        }
         if (name == "getOwnPropertyNames" && jvIsObj(src)) {
             var tag = src["__strtag"]
             if (tag === "Math") { out = jvMathOwnNames.slice(0) }

@@ -5038,8 +5038,8 @@ NotFuncHead = :script(~~
     // Sort the parsed members and remember the name and the parent. Shared by the
     // declaration and the expression form.
     function makeClassInfo(items) {
-        var info = {name: "", superName: null, extT: null, fields: [], statics: [], methods: [],
-                    accessors: [], sinits: [], ctor: null}
+        var info = {name: "", superName: null, extT: null, fields: [], statics: [], protos: [],
+                    sinits: [], ctor: null}
         for (var i = 0; i < items.length; i++) {
             var m = items[i]
             if (m == undefined || m.skip != undefined) { continue }
@@ -5056,8 +5056,7 @@ NotFuncHead = :script(~~
             }
             if (m.kind == "ctor") { info.ctor = m }
             else if (m.kind == "sblock") { info.sinits.push(m) }
-            else if (m.kind == "accessor") { info.accessors.push(m) }
-            else if (m.kind == "method") { info.methods.push(m) }
+            else if (m.kind == "accessor" || m.kind == "method") { info.protos.push(m) }
             else if (m.statik) { info.sinits.push(m) }
             else { info.fields.push(m) }
         }
@@ -5092,12 +5091,23 @@ NotFuncHead = :script(~~
             ctorIdx = emitClassFunc([], null, true, info.fields, info.superName, null, info.superName != null)
         }
         clsRawSet(b, clsV, emitStr(b, "__ctor"), callExt(b, "js_closure", [handle(ctorIdx), curScopeV]))
-        for (var mi = 0; mi < info.methods.length; mi++) {
-            var mm = info.methods[mi]
+        // See the twin of this comment in js-to-llvm-ir.abnf.
+        for (var mi = 0; mi < info.protos.length; mi++) {
+            var mm = info.protos[mi]
             var mk = emitMemberKey(b, mm)
             b = mk.b
             // The one line that separates the two namespaces.
             var mtgt = mm.statik ? statsV : clsV
+            if (mm.kind == "accessor") {
+                // See the twin of this comment in js-to-llvm-ir.abnf.
+                var aidx = emitFunction(mm.params, mm.body, false, false)
+                var aclo = fnMetaAt(b, callExt(b, "js_closure", [handle(aidx), curScopeV]),
+                                    (memberFnName(mm) === "") ? "" : (mm.acc + " " + memberFnName(mm)), mm.params)
+                var gV = (mm.acc == "get") ? aclo : hUndef
+                var sV = (mm.acc == "set") ? aclo : hUndef
+                callExt(b, "js_defprop", [mtgt, mk.v, gV, sV])
+                continue
+            }
             var idx = anytype
             if (mm.decos != undefined) {
                 b = emitDecoratedMethod(b, mtgt, mk.v, mm)
@@ -5129,18 +5139,6 @@ NotFuncHead = :script(~~
             }
             idx = emitClassFunc(mm.params, mm.body, !mm.statik, null, null)
             clsRawSet(b, mtgt, mk.v, fnMetaAt(b, callExt(b, "js_closure", [handle(idx), curScopeV]), memberFnName(mm), mm.params))
-        }
-        for (var ai = 0; ai < info.accessors.length; ai++) {
-            var aa = info.accessors[ai]
-            var ak = emitMemberKey(b, aa)
-            b = ak.b
-            // See the twin of this comment in js-to-llvm-ir.abnf.
-            var aidx = emitFunction(aa.params, aa.body, false, false)
-            var aclo = fnMetaAt(b, callExt(b, "js_closure", [handle(aidx), curScopeV]),
-                                (memberFnName(aa) === "") ? "" : (aa.acc + " " + memberFnName(aa)), aa.params)
-            var gV = (aa.acc == "get") ? aclo : hUndef
-            var sV = (aa.acc == "set") ? aclo : hUndef
-            callExt(b, "js_defprop", [aa.statik ? statsV : clsV, ak.v, gV, sV])
         }
         // Static fields and static blocks run in SOURCE ORDER, after the methods and
         // accessors exist, each as a function with 'this' bound to the class
