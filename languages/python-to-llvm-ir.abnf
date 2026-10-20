@@ -1816,6 +1816,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (sbFrames.length == 0) { return [] }
         var f = sbFrames.pop()
         sbQual = f.qual
+        sbCell = f.cell === true
         var out = []
         for (var i = 0; i < f.names.length; i++) {
             var n = f.names[i]
@@ -1846,6 +1847,23 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (!anyDepth) { return n }
         }
         return n
+    }
+    // Whether the class frame sbPop just closed has a __class__ cell: CPython
+    // makes one when a function nested in the class body reads __class__ or
+    // super, or a class body nested in it reads __class__ (the class's own body
+    // reading it uses the cell around it instead). The metaclass namespace then
+    // carries the cell as __classcell__. Twin of sbCellUse in python-interpreter.abnf.
+    var sbCell = false
+    function sbCellUse(isSuper) {
+        var inFn = false
+        for (var i = sbFrames.length - 1; i >= 0; i--) {
+            var f = sbFrames[i]
+            if (f.kind == "d") { inFn = true }
+            else if (inFn || (!isSuper && i < sbFrames.length - 1)) {
+                f.cell = true
+                return
+            }
+        }
     }
     function sbName(n) {
         if (sbFrames.length == 0) { return }
@@ -4365,6 +4383,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // own name binds in the scope around it.
         sbPop()
         var qual = sbQual
+        var hasCell = sbCell
         sbName(name)
         var doc = walkSuiteDoc
         return {dname: name, dstmt: function(b) {
@@ -4441,15 +4460,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             pyClsCell = savedClsCell
             b = pyClassFill(b, cls, bodyScope, pyBindSink)
             // js_pyclass_meta finishes the class, or has its metaclass make the
-            // real one from it; the __class__ cell then names that one. It is
-            // filled first, as type.__new__ fills it, for the __set_name__ and
-            // __init_subclass__ calls js_pyclass_meta makes.
+            // real one from it. The __class__ cell is filled first, as
+            // type.__new__ fills it, for the __set_name__ and __init_subclass__
+            // calls js_pyclass_meta makes; a metaclass gets the cell as
+            // __classcell__ and its type.__new__ fills it with the real class.
             callExt(b, "js_scope_set", [cellV, emitStr(b, "__pycls__"), cls])
-            cls = callExt(b, "js_pyclass_meta", [cls, kwV])
+            cls = callExt(b, "js_pyclass_meta", [cls, kwV, hasCell ? cellV : hUndef])
             // PEP 695 type parameters make the class subscriptable (pyGenericOk
             // in abnf/jsrt.go).
             if (generic) { callExt(b, "js_set", [cls, emitStr(b, "__generic"), hTrue]) }
-            callExt(b, "js_scope_set", [cellV, emitStr(b, "__pycls__"), cls])
             // SETUP_ANNOTATIONS: the body HELD an annotation, so the class has an
             // __annotations__ dict whether or not the annotated statement ran.
             if (pyAnnotHere) { b = pyEnsureAnnot(b, cls) }
@@ -5154,6 +5173,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // same special case, and both halves therefore resolve `super` as the
         // builtin even if the program binds the name itself.
         if (name == "super") {
+            sbCellUse(true)
             return function(b) {
                 var clsV = hUndef
                 if (pySuperCls) { clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "__pycls__")]) }
@@ -5168,6 +5188,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // class it is an ordinary (unbound) name. Twin of pyClassCellHere in
         // python-interpreter.abnf.
         if (name == "__class__") {
+            sbCellUse(false)
             return function(b) {
                 if (pySuperCls && !pyInClassBody && !pyInClassComp) {
                     return {b: b, v: pyCellRead(b, curScopeV, "__pycls__")}

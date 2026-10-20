@@ -1318,6 +1318,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (v.__genalias === true) { return pyBuiltinTypeObj("types.GenericAlias") }
         if (v.__pyconst !== undefined) { return pyBuiltinTypeObj(v.__pyconst == "Ellipsis" ? "ellipsis" : v.__pyconst + "Type") }
         if (isSlice(v)) { return hostGlobals["slice"] }
+        if (v.__pysup === true) { return pyBuiltinTypeObj("super") }
         return hostGlobals["object"]
     }
     // X | Y over type objects and None is CPython's typing.Union, here
@@ -8000,8 +8001,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // argument form needs the defining class and the current frame's first
         // argument - neither of which a value can carry. See pySuperHere.
         // languages/python-to-llvm-ir.abnf's makeVarRef does the same thing.
-        if (name == "super") { return function() { return pySuperHere() } }
-        if (name == "__class__") { return function() { return pyClassCellHere() } }
+        if (name == "super") {
+            sbCellUse(true)
+            return function() { return pySuperHere() }
+        }
+        if (name == "__class__") {
+            sbCellUse(false)
+            return function() { return pyClassCellHere() }
+        }
         // __import__ is lib/python-importlib.py's, compiled in at its first
         // mention. Twin of the same line in python-to-llvm-ir.abnf's makeVarRef.
         if (name == "__import__") { core.importFile("importlib", null) }
@@ -10759,6 +10766,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (sbFrames.length == 0) { return [] }
         var f = sbFrames.pop()
         sbQual = f.qual
+        sbCell = f.cell === true
         var out = []
         for (var i = 0; i < f.names.length; i++) {
             var n = f.names[i]
@@ -10789,6 +10797,23 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (!anyDepth) { return n }
         }
         return n
+    }
+    // Whether the class frame sbPop just closed has a __class__ cell: CPython
+    // makes one when a function nested in the class body reads __class__ or
+    // super, or a class body nested in it reads __class__ (the class's own body
+    // reading it uses the cell around it instead). The metaclass namespace then
+    // carries the cell as __classcell__. Twin of sbCellUse in python-to-llvm-ir.abnf.
+    var sbCell = false
+    function sbCellUse(isSuper) {
+        var inFn = false
+        for (var i = sbFrames.length - 1; i >= 0; i--) {
+            var f = sbFrames[i]
+            if (f.kind == "d") { inFn = true }
+            else if (inFn || (!isSuper && i < sbFrames.length - 1)) {
+                f.cell = true
+                return
+            }
+        }
     }
     function sbName(n) {
         if (sbFrames.length == 0) { return }
@@ -12656,6 +12681,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // the class's own name binds in the scope around it.
         sbPop()
         var qual = sbQual
+        var hasCell = sbCell
         sbName(name)
         var baseArgs = null
         var modName = pyCurMod
@@ -12708,6 +12734,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 // Twin of js_pyclass_meta in abnf/jsrt.go and lib/python-rt.metajs.
                 if (hasOwn(ns, "__annots")) { dictSet(nd, "__annotations__", pyNsAnnots(ns)) }
                 for (var nk = 0; nk < ns.__nskeys.length; nk++) { dictSet(nd, ns.__nskeys[nk], ns[ns.__nskeys[nk]]) }
+                // type.__new__ fills the __class__ cell from __classcell__
+                // (pyTypeNew), so a method the metaclass calls once the class
+                // exists sees it.
+                if (hasCell) { dictSet(nd, "__classcell__", ns.__pycell) }
                 var mkw = newDict()
                 if (kw !== null) {
                     for (var ki = 0; ki < kw.keys.length; ki++) {
@@ -12718,7 +12748,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 mcls = pyCall(meta, [name, pyTup(bases), nd], mkw)
                 if (generic && mcls !== null && typeof mcls == "object" && mcls.__isclass === true) { mcls.__generic = true }
                 ns.__pycls = mcls
-                ns.__pycell.__pycls = mcls
+                if (hasCell) { pyClassCellCheck(name, mcls, ns.__pycell) }
                 pySet(name, mcls)
                 noteBound(name)
                 return
@@ -12763,6 +12793,20 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (sc[i].__pycell !== undefined) { sc[i] = sc[i].__pycell }
         }
         return sc
+    }
+    // CPython's check once a metaclass returned a class: the __classcell__ it
+    // was handed must name that class (builtin___build_class__). Twin of
+    // rt.pyClassCellCheck in abnf/jsrtpydesc.go and pyClassCellCheck in
+    // lib/python-rt.metajs.
+    function pyClassCellCheck(name, cls, cell) {
+        if (cls === null || typeof cls != "object" || cls.__isclass !== true) { return }
+        if (!hasOwn(cell, "__pycls")) {
+            pyListErr("RuntimeError", "__class__ not set defining " + prepr(name) + " as " + prepr(cls) +
+                      ". Was __classcell__ propagated to type.__new__?")
+        }
+        if (cell.__pycls !== cls) {
+            pyListErr("TypeError", "__class__ set to " + prepr(cell.__pycls) + " defining " + prepr(name) + " as " + prepr(cls))
+        }
     }
     // A class statement's keywords without metaclass=, or null when none are left.
     function pyClassKw(kw) {
@@ -12828,7 +12872,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (key == "__module__") { cls.__module__ = ns.vals[k] }
             else if (key == "__qualname__") { cls.__qual = ns.vals[k] }
             else if (key == "__annotations__") { cls.__annotations__ = ns.vals[k] }
-            else {
+            else if (key == "__classcell__") {
+                var cell = ns.vals[k]
+                if (cell === null || typeof cell != "object" || cell.__pyccell !== true) {
+                    pyListErr("TypeError", "__classcell__ must be a nonlocal cell, not <class '" + pyTypeOf(cell).__name + "'>")
+                }
+                cell.__pycls = cls
+            } else {
                 scopePut(cls, key, ns.vals[k])
                 pyNoteHook(key)
                 attrs.push(key)
@@ -13747,6 +13797,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (at < 0) {
             pyRaise(pyMakeExc("TypeError", ["super(type, obj): obj must be an instance or subtype of type"]))
         }
+        // super's own attribute lookup skips the MRO for __class__: it is the
+        // super object's own type. Twin of rt.pySuperFind in abnf/jsrt.go and
+        // pySuperFind in lib/python-rt.metajs.
+        if (name == "__class__") { return {v: pyTypeOf(s)} }
         for (var j = at + 1; j < mro.length; j++) {
             if (hasOwn(mro[j], name)) { return {v: mro[j][name]} }
             if (mro[j].__builtin === true) {

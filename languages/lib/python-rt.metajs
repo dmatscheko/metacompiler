@@ -1175,6 +1175,7 @@ function pyTypeName(v) {
         if (v["__pyslice"] !== undefined) { return "slice" }
         if (v["__pyunion"] !== undefined) { return "typing.Union" }
         if (v["__galias"] !== undefined) { return "types.GenericAlias" }
+        if (v["__pysup"] === true) { return "super" }
         // An instance of a user class is a "'C' object" in every message.
         var ic = pyInstClassOf(v)
         if (ic !== null && ic["__name"] !== undefined) { return pyToStr(ic["__name"]) }
@@ -9035,6 +9036,9 @@ function pySuperFind(s, name) {
     if (at < 0) {
         pyRaiseExc("TypeError", "super(type, obj): obj must be an instance or subtype of type")
     }
+    // super's own attribute lookup skips the MRO for __class__: it is the super
+    // object's own type. Go: rt.pySuperFind.
+    if (name == "__class__") { return pyBuiltinClass("super") }
     i = at + 1
     while (i < mro.length) {
         var v = pyClassMember(mro[i], name)
@@ -11447,6 +11451,15 @@ function pyMetaOf(bases, kw) {
 // type(name, bases, ns) and type.__new__(mcs, name, bases, ns, **kw): a
 // namespace's __module__ and __qualname__ become the class's own, mcs, unless it
 // is type itself, its metaclass, and kw goes to __init_subclass__.
+// type.__new__ fills the __class__ cell a class statement handed it as
+// __classcell__ (js_pyclass_meta). Go: the __classcell__ arm of rt.pyTypeNew.
+function pyFillClassCell(cell, cls) {
+    if (!pyIsObj(cell) || cell["__pyccell"] === undefined) {
+        pyRaiseExc("TypeError", "__classcell__ must be a nonlocal cell, not <class '" + pyTypeName(cell) + "'>")
+    }
+    scopeDecl(cell["__pyccell"], "__pycls__", cls)
+}
+
 function pyTypeNew(name, bases, ns, mcs, kw) {
     var cls = js_pyclass_new(name, pyCCopyArr(pyElemsOf(bases)))
     cls["__module__"] = "__main__"
@@ -11457,6 +11470,7 @@ function pyTypeNew(name, bases, ns, mcs, kw) {
             var k = pyToStr(ns["keys"][i])
             if (k == "__module__") { cls["__module__"] = ns["vals"][i] }
             else if (k == "__qualname__") { cls["__qual"] = ns["vals"][i] }
+            else if (k == "__classcell__") { pyFillClassCell(ns["vals"][i], cls) }
             else { js_pysetattr(cls, k, ns["vals"][i]) }
             i = i + 1
         }
@@ -11498,7 +11512,7 @@ function pyMetaRender(v, repr) {
 // Go: js_pyclass_meta. (class the statement filled, its keyword arguments) ->
 // the class: with a metaclass, meta(name, bases, namespace, **kw) makes the
 // real one from the filled class's members; otherwise js_pysetnames.
-function js_pyclass_meta(cls, kw) {
+function js_pyclass_meta(cls, kw, cellSc) {
     var bases = pyCCopyArr(cls["__basesl"])
     var meta = pyMetaOf(bases, kw)
     // The keywords besides metaclass= go to the metaclass, or with none to
@@ -11527,7 +11541,30 @@ function js_pyclass_meta(cls, kw) {
         if (cd["keys"][i] != "__module__") { pyDictSet(ns, cd["keys"][i], cd["vals"][i]) }
         i = i + 1
     }
-    return pyDCallPyValue(meta, [cls["__name"], pyTup(bases), ns], rest)
+    if (cellSc !== undefined) {
+        scopeDecl(cellSc, "__pycls__", false)
+        var cell = {}
+        cell["__pyccell"] = cellSc
+        pyDictSet(ns, "__classcell__", cell)
+    }
+    var made = anytype
+    made = pyDCallPyValue(meta, [cls["__name"], pyTup(bases), ns], rest)
+    if (cellSc !== undefined) { pyClassCellCheck(cls["__name"], made, scopeGet(cellSc, "__pycls__")) }
+    return made
+}
+
+// CPython's check once a metaclass returned a class: the __classcell__ it was
+// handed (now holding cell, false while empty) must name that class
+// (builtin___build_class__). Go: rt.pyClassCellCheck.
+function pyClassCellCheck(name, cls, cell) {
+    if (!pyIsClass(cls)) { return }
+    if (cell === false) {
+        pyRaiseExc("RuntimeError", "__class__ not set defining " + pyRepr(name) + " as " + pyRepr(cls) +
+                   ". Was __classcell__ propagated to type.__new__?")
+    }
+    if (cell !== cls) {
+        pyRaiseExc("TypeError", "__class__ set to " + pyRepr(cell) + " defining " + pyRepr(name) + " as " + pyRepr(cls))
+    }
 }
 
 function js_pytypenew(args) {

@@ -7684,6 +7684,78 @@ def s158():
     check("clsfilled", [S158F.m() is S158F, S158F.G().g() is S158F.G, s158try(s158top), s158try(s158one, 1)]
           == [True, True, "RuntimeError: super(): no arguments", "RuntimeError: super(): __class__ cell not found"])
 
+# ===== SECTION 159: __classcell__ through a metaclass; the super object's own type =====
+# A class whose functions read __class__ or super hands a metaclass its cell
+# as __classcell__, and type.__new__ fills it - so a method the metaclass calls
+# after super().__new__ already sees the class - and drops it from the class
+# dict. Build-class then checks the cell names the class it got back. super's
+# attribute lookup answers __class__ with super's own type. Values are CPython
+# 3.14's.
+S159out = []
+
+class S159R(type):
+    def __new__(mcls, name, bases, ns):
+        S159out.append(sorted(k for k in ns if k == "__classcell__"))
+        try:
+            ns["me"](None)
+        except NameError as e:
+            S159out.append(str(e))
+        cls = super().__new__(mcls, name, bases, ns)
+        S159out.append([ns["me"](None) is cls, "__classcell__" in cls.__dict__])
+        return cls
+
+class S159H(metaclass=S159R):
+    def me(self):
+        return __class__
+
+class S159Plain(metaclass=S159R):
+    def me(self):
+        return 1
+
+class S159Sw(type):
+    def __new__(mcls, name, bases, ns):
+        type.__new__(mcls, "Other", (), dict(ns))
+        return super().__new__(mcls, name, bases, {"__module__": ns["__module__"]})
+
+def s159drop(name, bases, ns):
+    del ns["__classcell__"]
+    return type(name, bases, ns)
+
+class S159B:
+    def f(self):
+        return "B.f"
+
+class S159S(S159B):
+    def f(self):
+        s = super()
+        return [s.__class__.__name__, type(s).__name__, repr(type(s)), type(super(S159S, self)).__name__,
+                super().__class__ is type(s), s.f()]
+
+def s159():
+    free = "cannot access free variable '__class__' where it is not associated with a value in enclosing scope"
+    check("ccmeta", S159out == [["__classcell__"], free, [True, False], [], [False, False]] and S159H().me() is S159H)
+    errs = []
+    try:
+        class T(metaclass=S159Sw):
+            def f(self):
+                return super()
+    except TypeError as e:
+        errs.append(str(e))
+    try:
+        class U(metaclass=s159drop):
+            def f(self):
+                return __class__
+    except RuntimeError as e:
+        errs.append(str(e))
+    try:
+        type("V", (), {"__classcell__": 3})
+    except TypeError as e:
+        errs.append(str(e))
+    check("ccerr", errs == ["__class__ set to <class '__main__.s159.<locals>.T'> defining 'T' as <class '__main__.T'>",
+                            "__class__ not set defining 'U' as <class '__main__.s159.<locals>.U'>. Was __classcell__ propagated to type.__new__?",
+                            "__classcell__ must be a nonlocal cell, not <class 'int'>"])
+    check("suptype", S159S().f() == ["super", "super", "<class 'super'>", "super", True, "B.f"])
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -7828,5 +7900,6 @@ def main():
     s156() # SECTION-CALL 156
     s157() # SECTION-CALL 157
     s158() # SECTION-CALL 158
+    s159() # SECTION-CALL 159
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

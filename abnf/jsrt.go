@@ -16139,12 +16139,13 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			return w(jsUndef)
 		},
-		// (class the statement filled, its keyword arguments) -> the class. With
-		// a metaclass (pyMetaOf) the filled class only carries the namespace:
-		// meta(name, bases, namespace, **kw) makes the real one, the namespace a
-		// dict of the members in definition order plus __module__ and
-		// __qualname__. Otherwise the class is finished in place
-		// (js_pysetnames). Twin of makeClass's metaclass arm in
+		// (class the statement filled, its keyword arguments, its __class__ cell
+		// scope or undefined) -> the class. With a metaclass (pyMetaOf) the
+		// filled class only carries the namespace: meta(name, bases, namespace,
+		// **kw) makes the real one, the namespace a dict of the members in
+		// definition order plus __module__, __qualname__ and the cell as
+		// __classcell__, which type.__new__ fills (pyTypeNew). Otherwise the
+		// class is finished in place (js_pysetnames). Twin of makeClass's metaclass arm in
 		// languages/python-interpreter.abnf and js_pyclass_meta in
 		// lib/python-rt.metajs.
 		"js_pyclass_meta": func(a []uint64) uint64 {
@@ -16191,7 +16192,18 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 					dictAppend(nk, nv, k, mv.elems[i])
 				}
 			}
-			return w(rt.callPyValue(meta, []interface{}{rt.pyClsName(cls), pyTup(bases), ns}, rest))
+			sc, hasCell := u(a[2]).(*jsScope)
+			if hasCell {
+				sc.put("__pycls__", false)
+				cell := newJSObject()
+				cell.set("__pyccell", sc)
+				dictAppend(nk, nv, "__classcell__", cell)
+			}
+			made := rt.callPyValue(meta, []interface{}{rt.pyClsName(cls), pyTup(bases), ns}, rest)
+			if hasCell {
+				rt.pyClassCellCheck(rt.pyClsName(cls), made, sc.vals[sc.find("__pycls__")])
+			}
+			return w(made)
 		},
 		// The class body is a suite: it runs in a scope of its own and every name
 		// it bound (methods, class attributes, __slots__) becomes a class member.
@@ -20757,6 +20769,11 @@ func (rt *jsrt) pySuperFind(s *jsObject, name string) (interface{}, bool) {
 		panic(&jsThrown{value: rt.pyExcInstance("TypeError",
 			"super(type, obj): obj must be an instance or subtype of type")})
 	}
+	// super's own attribute lookup skips the MRO for __class__: it is the super
+	// object's own type. Twin of pySuperFind in python-interpreter.abnf.
+	if name == "__class__" {
+		return rt.pyBuiltinClass("super"), true
+	}
 	for _, k := range mro[at+1:] {
 		if v, ok := pyClassMember(k, name); ok {
 			return v, true
@@ -24001,6 +24018,9 @@ func pyTypeName(rt *jsrt, v interface{}) string {
 		}
 		if _, isA := t.props["__galias"]; isA {
 			return "types.GenericAlias"
+		}
+		if _, isSup := pySuperObj(t); isSup {
+			return "super"
 		}
 		// An instance of a user class is a "'C' object" in every message.
 		if _, cls, isInst := pyInstance(t); isInst {

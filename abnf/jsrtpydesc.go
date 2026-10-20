@@ -521,6 +521,16 @@ func (rt *jsrt) pyTypeNew(name string, basesV, ns, mcs, kw interface{}) *jsObjec
 				cls.set("__module__", vals.elems[i])
 			case "__qualname__":
 				cls.set("__qual", vals.elems[i])
+			case "__classcell__":
+				cell, _ := vals.elems[i].(*jsObject)
+				var sc *jsScope
+				if cell != nil {
+					sc, _ = cell.props["__pyccell"].(*jsScope)
+				}
+				if sc == nil {
+					rt.pyRaise("TypeError", "__classcell__ must be a nonlocal cell, not <class '"+pyTypeName(rt, vals.elems[i])+"'>")
+				}
+				sc.put("__pycls__", cls)
 			default:
 				rt.pySetAttr(cls, ks, vals.elems[i])
 			}
@@ -529,6 +539,23 @@ func (rt *jsrt) pyTypeNew(name string, basesV, ns, mcs, kw interface{}) *jsObjec
 	rt.pyEqHashNone(cls)
 	rt.pySetNames(cls, kw)
 	return cls
+}
+
+// pyClassCellCheck is CPython's check once a metaclass returned a class: the
+// __classcell__ it was handed (now holding cell, false while empty) must name
+// that class (builtin___build_class__). Twin of pyClassCellCheck in
+// languages/python-interpreter.abnf and lib/python-rt.metajs.
+func (rt *jsrt) pyClassCellCheck(name string, cls, cell interface{}) {
+	if _, isCls := pyClassObj(cls); !isCls {
+		return
+	}
+	if cell == false {
+		rt.pyRaise("RuntimeError", "__class__ not set defining "+rt.pyRepr(name)+" as "+rt.pyRepr(cls)+
+			". Was __classcell__ propagated to type.__new__?")
+	}
+	if cell != cls {
+		rt.pyRaise("TypeError", "__class__ set to "+rt.pyRepr(cell)+" defining "+rt.pyRepr(name)+" as "+rt.pyRepr(cls))
+	}
 }
 
 // pyTypeDelegate is type's own __new__, __init__ or __call__, reachable from a
