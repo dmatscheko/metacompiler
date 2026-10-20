@@ -4878,8 +4878,33 @@ class S88 {
             + " " + new Kid().use() + " " + one() + two() + " " + (o instanceof Pt q ? q.tag() : "-") + " " + new S88.Box().in()
             + " " + new S88.Holder.Inner().getClass().getName();
         Main.check("nt88", r.equals("Pt[tag=x] Pt S88$Pt box88 s88Pt[tag=p] hi ab x box88 S88$Holder$Inner"));
+        // `q.new Inner()` names the Inner member of q's declared type.
+        S88A a = new S88A();
+        S88A.Inner ai = a.new Inner();
+        S88A.Mid md = a.new Mid();
+        S88A.Mid.Inner mi = md.new Inner();
+        String s = ai.get() + " " + S88B.run() + " " + new S88B().new Inner().get() + " " + a.viaThis() + " "
+            + new S88B().viaField() + " " + mi.get() + " " + md.viaOuterThis() + " " + S88B.deep();
+        S88G<Integer> g = new S88G<>(7);
+        s = s + " " + g.new Inner().get();
+        Main.check("nt88b", s.equals("1 2 2 1 1 6 1 hi g7"));
     }
 }
+class S88A {
+    int a = 1;
+    class Inner { int get() { return a; } }
+    int viaThis() { return this.new Inner().get(); }
+    class Mid { int m = 5; class Inner { int get() { return m + a; } } int viaOuterThis() { return S88A.this.new Inner().get(); } }
+}
+class S88B {
+    int b = 2;
+    class Inner { int get() { return b; } }
+    static int run() { S88B o = new S88B(); Inner i = o.new Inner(); return i.get(); }
+    int viaField() { return f.new Inner().get(); }
+    S88A f = new S88A();
+    static String deep() { return new S88.Holder.Inner().w(); }
+}
+class S88G<T> { T v; S88G(T v) { this.v = v; } class Inner { String get() { return "g" + v; } } }
 
 // ===== SECTION 89: collections' marker interfaces, descending views, Matcher regions =====
 //

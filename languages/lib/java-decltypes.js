@@ -2306,18 +2306,20 @@ function jNestRename(src) {
         if (count["$" + tt[x]] == undefined || count["$" + tt[x]] < 2) { continue }
         var hit = -1
         if (x >= 2 && tt[x - 1] == "new" && tt[x - 2] == ".") {
-            // `outer.new Name(...)` names an inner class of the qualifier's
-            // type, which a text scan cannot know: the one inner class of
+            // `outer.new Name(...)` names a member of the qualifier's type:
+            // the declared type of a `this`, `new T(...)` or variable
+            // qualifier when the text shows it, else the one inner class of
             // that name, else the one in scope.
-            for (var ic = 0; ic < dName.length; ic++) {
-                if (dName[ic] == tt[x] && dInner[ic]) { hit = (hit == -1) ? ic : -2 }
+            var qd = jNrQualType(nr, tt, tBlock, x - 3)
+            if (qd >= 0 && dBody[qd] >= 0) { hit = jNrMember(nr, tt[x], qd, 0) }
+            if (hit < 0) {
+                for (var ic = 0; ic < dName.length; ic++) {
+                    if (dName[ic] == tt[x] && dInner[ic]) { hit = (hit == -1) ? ic : -2 }
+                }
             }
             if (hit < 0) { hit = jNrLookup(nr, tt[x], tBlock[x], 0) }
         } else if (x >= 2 && tt[x - 1] == ".") {
-            if (tt[x - 2].length > 0 && jIdentEnd(tt[x - 2], 0) == tt[x - 2].length) {
-                var ow = jNrLookup(nr, tt[x - 2], tBlock[x - 2], 0)
-                if (ow >= 0 && dBody[ow] >= 0) { hit = jNrMember(nr, tt[x], ow, 0) }
-            }
+            hit = jNrTypeAt(nr, tt, tBlock, x)
         } else {
             hit = jNrLookup(nr, tt[x], tBlock[x], 0)
         }
@@ -2326,6 +2328,71 @@ function jNestRename(src) {
         last = tp[x] + tt[x].length
     }
     return out + src.substring(last)
+}
+// The declaration the type name ending at token p resolves to, or -1:
+// `Name`, `Outer.Name` or either with type arguments.
+function jNrTypeAt(nr, tt, tBlock, p) {
+    p = jNrSkipBack(tt, p, "<", ">")
+    if (p < 0 || tt[p].length == 0 || jIdentEnd(tt[p], 0) != tt[p].length) { return -1 }
+    if (p >= 2 && tt[p - 1] == ".") {
+        // A qualifier the chain cannot resolve (a package name) leaves its
+        // last name to resolve alone.
+        var ow = jNrTypeAt(nr, tt, tBlock, p - 2)
+        if (ow < 0) { ow = jNrLookup(nr, tt[p - 2], tBlock[p - 2], 0) }
+        return (ow >= 0 && nr.dBody[ow] >= 0) ? jNrMember(nr, tt[p], ow, 0) : -1
+    }
+    return jNrLookup(nr, tt[p], tBlock[p], 0)
+}
+// The token before the op...cl group closing at p, or p if tt[p] is not cl.
+function jNrSkipBack(tt, p, op, cl) {
+    if (p < 0 || tt[p] != cl) { return p }
+    var dep = 0
+    for (; p >= 0; p--) {
+        if (tt[p] == cl) { dep++ } else if (tt[p] == op) { dep--; if (dep == 0) { break } }
+    }
+    return p - 1
+}
+// The declared type of the `outer.new` qualifier ending at token q, when the
+// text shows it: `this`, `Outer.this`, `new T(...)`, or a variable whose
+// declaration `T v` (with v followed by = ; , ) or :) is in an enclosing
+// block - the nearest one before q, else the first after it (a field). -1
+// otherwise.
+function jNrQualType(nr, tt, tBlock, q) {
+    if (q < 0) { return -1 }
+    var w = tt[q]
+    if (w == "this") {
+        if (q >= 2 && tt[q - 1] == ".") { return jNrTypeAt(nr, tt, tBlock, q - 2) }
+        for (var b = tBlock[q]; b > 0; b = nr.bParent[b]) { if (nr.bOwner[b] >= 0) { return nr.bOwner[b] } }
+        return -1
+    }
+    if (w == ")") {
+        var o = jNrSkipBack(tt, q, "(", ")") + 1
+        var s = jNrSkipBack(tt, o - 1, "<", ">")
+        var te = s
+        while (s >= 2 && tt[s - 1] == ".") { s -= 2 }
+        if (s < 1 || tt[s - 1] != "new") { return -1 }
+        if (s >= 3 && tt[s - 2] == ".") {
+            var od = jNrQualType(nr, tt, tBlock, s - 3)
+            return (od >= 0 && nr.dBody[od] >= 0) ? jNrMember(nr, tt[te], od, 0) : -1
+        }
+        return jNrTypeAt(nr, tt, tBlock, o - 1)
+    }
+    if (w.length == 0 || jIdentEnd(w, 0) != w.length || (q >= 1 && tt[q - 1] == ".")) { return -1 }
+    var fwd = false
+    for (var k = q - 1; k != q; k = fwd ? k + 1 : k - 1) {
+        if (k < 1) { fwd = true; k = q; continue }
+        if (k >= tt.length - 1) { return -1 }
+        var f = tt[k + 1]
+        if (tt[k] != w || !(f == "=" || f == ";" || f == "," || f == ")" || f == ":")) { continue }
+        var pv = tt[k - 1]
+        if (pv == "return" || pv == "throw" || pv == "case" || pv == "else" || pv == "yield" || pv == "assert") { continue }
+        var anc = false
+        for (var ab = tBlock[q]; ab >= 0 && !anc; ab = nr.bParent[ab]) { anc = ab == tBlock[k] }
+        if (!anc) { continue }
+        var td = jNrTypeAt(nr, tt, tBlock, k - 1)
+        if (td >= 0) { return td }
+    }
+    return -1
 }
 function jNrModifier(w) {
     return w == "static" || w == "final" || w == "abstract" || w == "public" || w == "private" || w == "protected"
