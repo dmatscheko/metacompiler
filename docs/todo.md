@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-666** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-667** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -134,6 +134,13 @@ reports cap 4 where growslice says 1) — escape analysis.
 ---
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
+
+### T-666 php: the preg_* functions do not exist · P2 · PHP · OPEN [V spec-only]
+`preg_replace('/a/', 'b', 'aa')` → "Call to undefined function preg_replace()" in all engines; preg_match, preg_match_all, preg_split,
+preg_quote, preg_replace_callback, preg_grep and preg_last_error likewise. Implement them on the shared regex engine under a PCRE dialect
+flag (delimiters and modifiers i m s x u U D, named groups (?P<n>), $n / ${n} / \n replacement references, PREG_SPLIT_* and
+PREG_*_ORDER flags, the matches array shape and offsets), additive and flag-gated in lib/regex.js / abnf/jsrtregex.go (full matrix,
+native-full, gen-all for all languages). Settle from php-src ext/pcre and its phpt files.
 
 ### T-665 php: generator argument count checked at first resume; get_class/get_parent_class accept too many · P3 · PHP · IN PROGRESS (PHP worker, round 12) [V spec-only]
 `function g($a){ yield $a; } $gen = g(); echo "gen made";` → we print "gen made" then raise at the first resume (PHP raises before: RECV
