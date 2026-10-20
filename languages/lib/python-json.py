@@ -11,7 +11,8 @@
 # included: dumps with indent, separators, sort_keys, ensure_ascii, allow_nan,
 # skipkeys and default; loads with object_hook, object_pairs_hook, parse_float,
 # parse_int and parse_constant. dump and load take a file object's write and
-# read methods. The cls= hook (a JSONEncoder subclass) is not offered.
+# read methods. JSONEncoder and JSONDecoder are the classes cls= names, so a
+# subclass overriding default() (or decode()) is how a program extends them.
 
 _mec_js_escapes = {"\\": "\\\\", '"': '\\"', "\b": "\\b", "\f": "\\f", "\n": "\\n", "\r": "\\r", "\t": "\\t"}
 
@@ -358,7 +359,54 @@ class _mec_js_Decoder:
 
 
 class _mec_js_module:
-    __all__ = ["dump", "dumps", "load", "loads", "JSONDecodeError"]
+    __all__ = ["dump", "dumps", "load", "loads", "JSONDecoder", "JSONDecodeError", "JSONEncoder"]
+
+    class JSONEncoder:
+        item_separator = ", "
+        key_separator = ": "
+
+        def __init__(self, *, skipkeys=False, ensure_ascii=True, check_circular=True, allow_nan=True,
+                     sort_keys=False, indent=None, separators=None, default=None):
+            self.skipkeys = skipkeys
+            self.ensure_ascii = ensure_ascii
+            self.check_circular = check_circular
+            self.allow_nan = allow_nan
+            self.sort_keys = sort_keys
+            self.indent = indent
+            if separators is not None:
+                self.item_separator, self.key_separator = separators
+            elif indent is not None:
+                self.item_separator = ","
+            if default is not None:
+                self.default = default
+
+        def default(self, o):
+            raise TypeError("Object of type " + type(o).__name__ + " is not JSON serializable")
+
+        def encode(self, o):
+            out = []
+            enc = _mec_js_Encoder(self.skipkeys, self.ensure_ascii, self.allow_nan, self.indent,
+                                  (self.item_separator, self.key_separator), self.default, self.sort_keys)
+            enc.encode(o, out, 0)
+            return "".join(out)
+
+        def iterencode(self, o, _one_shot=False):
+            return iter([self.encode(o)])
+
+    class JSONDecoder:
+        def __init__(self, *, object_hook=None, parse_float=None, parse_int=None, parse_constant=None,
+                     strict=True, object_pairs_hook=None):
+            self.object_hook = object_hook
+            self.parse_float = parse_float
+            self.parse_int = parse_int
+            self.parse_constant = parse_constant
+            self.strict = strict
+            self.object_pairs_hook = object_pairs_hook
+
+        def decode(self, s):
+            return _mec_js_module.loads(s, object_hook=self.object_hook, parse_float=self.parse_float,
+                                        parse_int=self.parse_int, parse_constant=self.parse_constant,
+                                        object_pairs_hook=self.object_pairs_hook)
 
     class JSONDecodeError(ValueError):
         def __init__(self, msg, doc, pos):
@@ -373,7 +421,11 @@ class _mec_js_module:
 
     @staticmethod
     def dumps(obj, *, skipkeys=False, ensure_ascii=True, check_circular=True, allow_nan=True, cls=None,
-              indent=None, separators=None, default=None, sort_keys=False):
+              indent=None, separators=None, default=None, sort_keys=False, **kw):
+        if cls is not None:
+            return cls(skipkeys=skipkeys, ensure_ascii=ensure_ascii, check_circular=check_circular,
+                       allow_nan=allow_nan, indent=indent, separators=separators, default=default,
+                       sort_keys=sort_keys, **kw).encode(obj)
         out = []
         enc = _mec_js_Encoder(skipkeys, ensure_ascii, allow_nan, indent, separators, default, sort_keys)
         enc.encode(obj, out, 0)
@@ -381,13 +433,22 @@ class _mec_js_module:
 
     @staticmethod
     def dump(obj, fp, *, skipkeys=False, ensure_ascii=True, check_circular=True, allow_nan=True, cls=None,
-             indent=None, separators=None, default=None, sort_keys=False):
+             indent=None, separators=None, default=None, sort_keys=False, **kw):
         fp.write(_mec_js_module.dumps(obj, skipkeys=skipkeys, ensure_ascii=ensure_ascii, allow_nan=allow_nan,
-                                      indent=indent, separators=separators, default=default, sort_keys=sort_keys))
+                                      cls=cls, indent=indent, separators=separators, default=default,
+                                      sort_keys=sort_keys, **kw))
 
     @staticmethod
     def loads(s, *, cls=None, object_hook=None, parse_float=None, parse_int=None, parse_constant=None,
-              object_pairs_hook=None):
+              object_pairs_hook=None, **kw):
+        if cls is not None:
+            # Only the hooks that were given, as decoder.py's loads passes them.
+            hooks = {"object_hook": object_hook, "parse_float": parse_float, "parse_int": parse_int,
+                     "parse_constant": parse_constant, "object_pairs_hook": object_pairs_hook}
+            for k, v in hooks.items():
+                if v is not None:
+                    kw[k] = v
+            return cls(**kw).decode(s)
         if not isinstance(s, str):
             raise TypeError("the JSON object must be str, bytes or bytearray, not " + type(s).__name__)
         if s.startswith("﻿"):
@@ -401,10 +462,10 @@ class _mec_js_module:
 
     @staticmethod
     def load(fp, *, cls=None, object_hook=None, parse_float=None, parse_int=None, parse_constant=None,
-             object_pairs_hook=None):
-        return _mec_js_module.loads(fp.read(), object_hook=object_hook, parse_float=parse_float,
+             object_pairs_hook=None, **kw):
+        return _mec_js_module.loads(fp.read(), cls=cls, object_hook=object_hook, parse_float=parse_float,
                                     parse_int=parse_int, parse_constant=parse_constant,
-                                    object_pairs_hook=object_pairs_hook)
+                                    object_pairs_hook=object_pairs_hook, **kw)
 
     def __repr__(self):
         return "<module 'json'>"

@@ -6875,6 +6875,34 @@ def s133():
           and list(enumerate("ab", True)) == [(1, "a"), (2, "b")]
           and [i for i, _ in enumerate(range(3), start=-1)] == [-1, 0, 1])
 
+# ===== SECTION 134: json.JSONEncoder / JSONDecoder and cls= =====
+import json as S134json
+
+class S134Enc(S134json.JSONEncoder):
+    def default(self, o):
+        if isinstance(o, complex):
+            return [o.real, o.imag]
+        return S134json.JSONEncoder.default(self, o)
+
+class S134Dec(S134json.JSONDecoder):
+    def __init__(self, **kw):
+        super().__init__(object_hook=self.hook, **kw)
+
+    def hook(self, d):
+        return {k.upper(): v for k, v in d.items()}
+
+def s134():
+    check("jsoncls1", S134json.dumps({"z": 1 + 2j}, cls=S134Enc, sort_keys=True) == '{"z": [1.0, 2.0]}'
+          and S134Enc(indent=1).encode([1j]) == "[\n [\n  0.0,\n  1.0\n ]\n]"
+          and S134json.JSONEncoder(separators=(",", ":")).encode([1, 2]) == "[1,2]"
+          and S134json.loads('{"a": {"b": 1}}', cls=S134Dec) == {"A": {"B": 1}}
+          and S134json.JSONDecoder().decode("[1, 2]") == [1, 2])
+    try:
+        S134json.dumps(object(), cls=S134Enc)
+        check("jsoncls2", False)
+    except TypeError as e:
+        check("jsoncls2", str(e) == "Object of type object is not JSON serializable")
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -7006,5 +7034,6 @@ def main():
     s131() # SECTION-CALL 131
     s132() # SECTION-CALL 132
     s133() # SECTION-CALL 133
+    s134() # SECTION-CALL 134
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]
