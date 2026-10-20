@@ -35,6 +35,7 @@
 // code), organized after the Java Language Specification (SE 21) with the
 // ANTLR grammars-v4 java grammar as a coverage checklist.
 
+import java.io.Serializable;
 import java.lang.reflect.Array;
 import java.util.AbstractList;
 import java.util.ArrayDeque;
@@ -59,6 +60,8 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.ListIterator;
 import java.util.Map;
+import java.util.NavigableMap;
+import java.util.NavigableSet;
 import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.Optional;
@@ -75,6 +78,7 @@ import java.util.stream.DoubleStream;
 import java.util.stream.IntStream;
 import java.util.stream.LongStream;
 import java.util.stream.Stream;
+import java.util.regex.MatchResult;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -179,6 +183,7 @@ class Main {
         S86.run(); // SECTION-CALL 86
         S87.run(); // SECTION-CALL 87
         S88.run(); // SECTION-CALL 88
+        S89.run(); // SECTION-CALL 89
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -4867,5 +4872,58 @@ class S88 {
             + " " + new Kid().use() + " " + one() + two() + " " + (o instanceof Pt q ? q.tag() : "-") + " " + new S88.Box().in()
             + " " + new S88.Holder.Inner().getClass().getName();
         Main.check("nt88", r.equals("Pt[tag=x] Pt S88$Pt box88 s88Pt[tag=p] hi ab x box88 S88$Holder$Inner"));
+    }
+}
+
+// ===== SECTION 89: collections' marker interfaces, descending views, Matcher regions =====
+//
+// The collections are Cloneable and Serializable; descendingMap,
+// descendingKeySet and descendingSet are live views in reverse order (their
+// first is the last, their floor the ceiling, their head the keys above);
+// a Matcher's region bounds what it sees (opaque, anchoring), usePattern
+// keeps its position and results() streams the further matches. Every
+// expected value is java 24.0.2's.
+class S89 {
+    static void run() {
+        Object[] os = { new ArrayList<Integer>(), new LinkedList<Integer>(), new HashMap<String, Integer>(), new TreeSet<Integer>(),
+                        new ArrayDeque<Integer>(), new PriorityQueue<Integer>(), "s", new Object() };
+        String mk = "";
+        for (Object o : os) { mk = mk + (o instanceof Cloneable ? "C" : "c") + (o instanceof Serializable ? "S" : "s"); }
+        Main.check("mk89", mk.equals("CSCSCSCSCScScScs"));
+        TreeMap<Integer, String> tm = new TreeMap<>();
+        for (int i = 1; i <= 6; i++) { tm.put(i * 10, "v" + i); }
+        NavigableMap<Integer, String> d = tm.descendingMap();
+        String dm = d + " " + d.firstKey() + d.lastKey();
+        d.put(35, "x");
+        tm.remove(60);
+        d.remove(10);
+        dm = dm + " " + tm + d + d.keySet() + d.floorKey(36) + d.ceilingKey(36) + d.floorKey(5) + d.headMap(30) + d.tailMap(30, false)
+            + d.subMap(50, 20) + d.pollFirstEntry() + tm.descendingKeySet() + d.descendingMap();
+        TreeSet<String> ts = new TreeSet<>(List.of("b", "a", "d", "c"));
+        NavigableSet<String> ds = ts.descendingSet();
+        ds.add("e");
+        ts.remove("a");
+        dm = dm + " " + ts + ds + ds.first() + ds.floor("bb");
+        Main.check("dv89", dm.equals("{60=v6, 50=v5, 40=v4, 30=v3, 20=v2, 10=v1} 6010 {20=v2, 30=v3, 35=x, 40=v4, 50=v5}"
+            + "{50=v5, 40=v4, 35=x, 30=v3, 20=v2}[50, 40, 35, 30, 20]403520{50=v5, 40=v4, 35=x}{20=v2}{50=v5, 40=v4, 35=x, 30=v3}"
+            + "50=v5[40, 35, 30, 20]{20=v2, 30=v3, 35=x, 40=v4} [b, c, d, e][e, d, c, b]ec"));
+        Matcher m = Pattern.compile("\\d+").matcher("a12b345c6d78");
+        m.region(2, 9);
+        String rg = "";
+        while (m.find()) { rg = rg + m.group() + "@" + m.start() + " "; }
+        Matcher a = Pattern.compile("^b\\d+").matcher("a12b345c6d78");
+        a.region(3, 7);
+        rg = rg + a.lookingAt() + a.group() + a.regionStart() + a.regionEnd() + Pattern.compile("(?<=2)b").matcher("a12b").region(3, 4).find()
+            + Pattern.compile("b$").matcher("abc").region(0, 2).find();
+        Matcher u = Pattern.compile("[a-z]+").matcher("abc 123 def");
+        u.find();
+        u.usePattern(Pattern.compile("\\d+"));
+        rg = rg + " " + u.find() + u.group() + u.start();
+        List<String> r = Pattern.compile("(\\w)(\\d)").matcher("a1 b2 c3").results().map(x -> x.group(2) + x.start()).collect(Collectors.toList());
+        MatchResult first = Pattern.compile("o+").matcher("foo").results().findFirst().get();
+        rg = rg + " " + r + first.group() + " " + a;
+        try { a.region(3, 2); } catch (IndexOutOfBoundsException e) { rg = rg + " " + e.getMessage(); }
+        Main.check("rx89", rg.equals("2@2 345@4 6@8 trueb34537falsetrue true1234 [10, 23, 36]oo "
+            + "java.util.regex.Matcher[pattern=^b\\d+ region=3,7 lastmatch=b345] start > end"));
     }
 }

@@ -17,6 +17,11 @@ interface Iterator<E> {
     default void remove() { throw new UnsupportedOperationException("remove"); }
 }
 
+// java.lang.Cloneable and java.io.Serializable: the marker interfaces the
+// collections implement, so `instanceof` answers as java's does.
+interface Cloneable {}
+interface Serializable {}
+
 // java.util.Comparator: naturalOrder, reverseOrder and comparing order by
 // Comparable's compareTo, as java's do. Each comparator is built in a local of
 // type Comparator, which makes the lambda an instance of this interface, so a
@@ -171,7 +176,7 @@ interface List<E> extends Collection<E> {
     }
 }
 
-class ArrayList<E> implements List<E> {
+class ArrayList<E> implements List<E>, Cloneable, Serializable {
     Object[] elems;
     int count;
     boolean frozen;
@@ -809,7 +814,7 @@ interface Deque<E> extends Queue<E> {
     void push(E e);
     E pop();
 }
-class ArrayDeque<E> implements Deque<E> {
+class ArrayDeque<E> implements Deque<E>, Cloneable, Serializable {
     Object[] elems;
     int head;
     int count;
@@ -1396,7 +1401,7 @@ class EmptyStackException extends RuntimeException {
 // java.util.PriorityQueue: java's binary heap - the same sift up and down and
 // the same heapify of a copied collection, so peek, poll and the iteration
 // (array) order are java's.
-class PriorityQueue<E> implements Queue<E> {
+class PriorityQueue<E> implements Queue<E>, Serializable {
     Object[] queue;
     int size;
     Comparator<? super E> cmp;
@@ -1587,7 +1592,7 @@ final class StringJoiner {
 
 // java.util.Random: java's 48 bit linear congruential generator, so a seeded
 // one answers java's sequence. Unseeded, the seed comes from Math.random().
-class Random {
+class Random implements Serializable {
     long seed;
     public Random() { this((long) (Math.random() * 281474976710656.0)); }
     public Random(long seed) { setSeed(seed); }
@@ -1627,7 +1632,7 @@ class Random {
 
 // java.util.BitSet: the bits in 64-bit words, growing as a bit past the end is
 // set. size() is the words' capacity, which java grows by doubling.
-class BitSet {
+class BitSet implements Cloneable, Serializable {
     long[] words;
 
     public BitSet() { words = new long[1]; }

@@ -5,7 +5,7 @@
 // String primitives of the pattern's text (__rxfind, __rxcount, __rxname,
 // __rxexpand, __rxflags; lib/java-strings.js and abnf/jsrtjavastr.go), which
 // answer a match's group bounds as an int[] and throw PatternSyntaxException.
-// Not modelled: regions, hitEnd/requireEnd, usePattern and results().
+// Not modelled: hitEnd/requireEnd, and transparent or non-anchoring bounds.
 package java.util.regex;
 
 interface MatchResult {
@@ -112,10 +112,16 @@ final class Matcher implements MatchResult {
     int next;
     int last;
     int appendPos;
+    // The region [from, to) the matching sees, with java's default opaque
+    // and anchoring bounds: the engine is handed that part of the text, so a
+    // lookaround cannot see past it and ^ and $ match at its ends.
+    int from;
+    int to;
 
     Matcher(Pattern pat, String text) {
         this.pat = pat;
         this.text = text;
+        to = text.length();
     }
     public Pattern pattern() { return pat; }
     public Matcher reset() {
@@ -123,35 +129,74 @@ final class Matcher implements MatchResult {
         next = 0;
         last = 0;
         appendPos = 0;
+        from = 0;
+        to = text.length();
         return this;
     }
     public Matcher reset(CharSequence input) {
         text = input.toString();
         return reset();
     }
+    public Matcher region(int start, int end) {
+        if (start < 0 || start > text.length()) { throw new IndexOutOfBoundsException("start"); }
+        if (end < 0 || end > text.length()) { throw new IndexOutOfBoundsException("end"); }
+        if (start > end) { throw new IndexOutOfBoundsException("start > end"); }
+        reset();
+        from = start;
+        to = end;
+        return this;
+    }
+    public int regionStart() { return from; }
+    public int regionEnd() { return to; }
+    public boolean hasTransparentBounds() { return false; }
+    public boolean hasAnchoringBounds() { return true; }
+    // A new pattern from the same position on; the last match's groups are lost.
+    public Matcher usePattern(Pattern newPattern) {
+        if (newPattern == null) { throw new IllegalArgumentException("Pattern cannot be null"); }
+        pat = newPattern;
+        caps = null;
+        return this;
+    }
+    // The engine over the region: positions in and out are the text's.
+    int[] run(int start, int lastEnd, int mode) {
+        if (from == 0 && to == text.length()) { return pat.text.__rxfind(pat.given, text, start, lastEnd, mode); }
+        int[] c = pat.text.__rxfind(pat.given, text.substring(from, to), start - from, lastEnd - from, mode);
+        if (c == null) { return null; }
+        for (int i = 0; i < c.length; i++) {
+            if (c[i] >= 0) { c[i] = c[i] + from; }
+        }
+        return c;
+    }
     public boolean matches() {
-        caps = pat.text.__rxfind(pat.given, text, 0, 0, 1);
+        caps = run(from, from, 1);
         if (caps != null) { next = caps[1] == caps[0] ? caps[1] + 1 : caps[1]; last = caps[1]; }
         return caps != null;
     }
     public boolean lookingAt() {
-        caps = pat.text.__rxfind(pat.given, text, 0, 0, 2);
+        caps = run(from, from, 2);
         if (caps != null) { next = caps[1] == caps[0] ? caps[1] + 1 : caps[1]; last = caps[1]; }
         return caps != null;
     }
     public boolean find() {
-        if (next > text.length()) {
+        int start = next < from ? from : next;
+        if (start > to) {
             caps = null;
             return false;
         }
-        caps = pat.text.__rxfind(pat.given, text, next, last, 0);
+        caps = run(start, last < from ? from : last, 0);
         if (caps == null) {
-            next = text.length() + 1;
+            next = to + 1;
             return false;
         }
         next = caps[1] == caps[0] ? caps[1] + 1 : caps[1];
         last = caps[1];
         return true;
+    }
+    // Every further match, as find() would answer them.
+    public java.util.stream.Stream<MatchResult> results() {
+        java.util.ArrayList<MatchResult> out = new java.util.ArrayList<>();
+        while (find()) { out.add(toMatchResult()); }
+        return Stream.ofCollection(out);
     }
     public boolean find(int start) {
         if (start < 0 || start > text.length()) { throw new IndexOutOfBoundsException("Illegal start index"); }
@@ -236,7 +281,7 @@ final class Matcher implements MatchResult {
         return sb.toString();
     }
     public String toString() {
-        return "java.util.regex.Matcher[pattern=" + pat.source + " region=0," + text.length() + " lastmatch="
+        return "java.util.regex.Matcher[pattern=" + pat.source + " region=" + from + "," + to + " lastmatch="
             + (caps == null ? "" : text.substring(caps[0], caps[1])) + "]";
     }
 }

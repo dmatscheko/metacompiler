@@ -1882,7 +1882,8 @@ function jRecvTy(t) {
 function jStrStreamName(name, n) { return n == 0 && (name == "chars" || name == "codePoints" || name == "lines") }
 // A `.name(args)` suffix record, with its text and its arguments' static types.
 function jMcallSfx(name, args, text) {
-    if (name == "stream" || jStrStreamName(name, args.length)) { jStreamWant = true }
+    // Matcher.results() answers a stream too.
+    if (name == "stream" || jStrStreamName(name, args.length) || (name == "results" && args.length == 0)) { jStreamWant = true }
     // Collections' Map and Set members are lib/java-map.java's types.
     if (name == "emptyMap" || name == "singletonMap" || name == "unmodifiableMap" || name == "emptySet"
         || name == "singleton" || name == "unmodifiableSet") { jMapWant = true }

@@ -108,7 +108,7 @@ class LinkedNode<K, V> extends HashMapNode<K, V> {
     LinkedNode(int hash, K key, V value, HashMapNode<K, V> next) { super(hash, key, value, next); }
 }
 
-class HashMap<K, V> implements Map<K, V> {
+class HashMap<K, V> implements Map<K, V>, Cloneable, Serializable {
     HashMapNode<K, V>[] table;
     int size;
     int threshold;
@@ -640,10 +640,14 @@ class HashMapView<E> implements Collection<E> {
     }
 }
 
+// java.util.NavigableMap: a TreeMap and its views (TreeSubMap), which a
+// TreeSet's elements may live in.
+interface NavigableMap<K, V> extends Map<K, V> {}
+
 // java.util.TreeMap: the entries in key order (the comparator's, else the keys'
 // compareTo) in one sorted array, found by binary search. keySet, values and
 // entrySet are live views in that order.
-class TreeMap<K, V> implements Map<K, V> {
+class TreeMap<K, V> implements NavigableMap<K, V>, Cloneable, Serializable {
     Comparator<? super K> cmp;
     Object[] keys;
     Object[] vals;
@@ -817,34 +821,25 @@ class TreeMap<K, V> implements Map<K, V> {
     public Collection<K> keySet() { return new TreeMapView<K>(this, null, 0); }
     public Collection<V> values() { return new TreeMapView<V>(this, null, 1); }
     public Collection<Map.Entry<K, V>> entrySet() { return new TreeMapView<Map.Entry<K, V>>(this, null, 2); }
-    // descendingMap and descendingKeySet: the entries in reverse order. They are
-    // copies, not views, so a read is java's but a write through one does not
-    // reach this map.
-    @SuppressWarnings("unchecked")
-    public TreeMap<K, V> descendingMap() {
-        Comparator<? super K> c = cmp;
-        Comparator<K> rev = (a, b) -> c == null ? ((Comparable<Object>) b).compareTo(a) : c.compare(b, a);
-        TreeMap<K, V> r = new TreeMap<K, V>(rev);
-        r.putAll(this);
-        return r;
-    }
+    // descendingMap and descendingKeySet: live views in reverse order.
+    public TreeSubMap<K, V> descendingMap() { return new TreeSubMap<K, V>(this, false, null, false, false, null, false, true); }
     public Collection<K> descendingKeySet() { return descendingMap().keySet(); }
     // headMap / tailMap / subMap: live views of a key range (TreeSubMap); a bound
     // is checked as a key is (a null one throws under the natural order).
     public TreeSubMap<K, V> headMap(K to) { return headMap(to, false); }
     public TreeSubMap<K, V> headMap(K to, boolean inclusive) {
         order(to, to);
-        return new TreeSubMap<K, V>(this, false, null, false, true, to, inclusive);
+        return new TreeSubMap<K, V>(this, false, null, false, true, to, inclusive, false);
     }
     public TreeSubMap<K, V> tailMap(K from) { return tailMap(from, true); }
     public TreeSubMap<K, V> tailMap(K from, boolean inclusive) {
         order(from, from);
-        return new TreeSubMap<K, V>(this, true, from, inclusive, false, null, false);
+        return new TreeSubMap<K, V>(this, true, from, inclusive, false, null, false, false);
     }
     public TreeSubMap<K, V> subMap(K from, K to) { return subMap(from, true, to, false); }
     public TreeSubMap<K, V> subMap(K from, boolean fromInclusive, K to, boolean toInclusive) {
         if (order(from, to) > 0) { throw new IllegalArgumentException("fromKey > toKey"); }
-        return new TreeSubMap<K, V>(this, true, from, fromInclusive, true, to, toInclusive);
+        return new TreeSubMap<K, V>(this, true, from, fromInclusive, true, to, toInclusive, false);
     }
     public boolean equals(Object o) {
         if (o == this) { return true; }
@@ -872,8 +867,10 @@ class TreeMap<K, V> implements Map<K, V> {
 }
 // A view of the TreeMap's entries from index from() up to (not including)
 // to(), the keys between the bounds, read afresh at every call so it follows
-// the map's changes either way. A key outside the bounds cannot be put.
-class TreeSubMap<K, V> implements Map<K, V> {
+// the map's changes either way. A key outside the bounds cannot be put. A
+// rev view (descendingMap) answers them in reverse order: its first key is
+// the last, its floor the ceiling, and its head the keys above a bound.
+class TreeSubMap<K, V> implements NavigableMap<K, V> {
     TreeMap<K, V> m;
     boolean hasLo;
     K lo;
@@ -881,7 +878,8 @@ class TreeSubMap<K, V> implements Map<K, V> {
     boolean hasHi;
     K hi;
     boolean hiInc;
-    TreeSubMap(TreeMap<K, V> m, boolean hasLo, K lo, boolean loInc, boolean hasHi, K hi, boolean hiInc) {
+    boolean rev;
+    TreeSubMap(TreeMap<K, V> m, boolean hasLo, K lo, boolean loInc, boolean hasHi, K hi, boolean hiInc, boolean rev) {
         this.m = m;
         this.hasLo = hasLo;
         this.lo = lo;
@@ -889,6 +887,7 @@ class TreeSubMap<K, V> implements Map<K, V> {
         this.hasHi = hasHi;
         this.hi = hi;
         this.hiInc = hiInc;
+        this.rev = rev;
     }
     int from() { return hasLo ? m.above(lo, loInc) : 0; }
     int to() {
@@ -931,17 +930,48 @@ class TreeSubMap<K, V> implements Map<K, V> {
     public Collection<V> values() { return new TreeMapView<V>(m, this, 1); }
     public Collection<Map.Entry<K, V>> entrySet() { return new TreeMapView<Map.Entry<K, V>>(m, this, 2); }
     public void forEach(java.util.function.BiConsumer<? super K, ? super V> f) {
-        int t = to();
-        for (int i = from(); i < t; i++) { f.accept(m.keyAt(i), m.valAt(i)); }
+        int n = size();
+        for (int i = 0; i < n; i++) { f.accept(m.keyAt(idx(i)), m.valAt(idx(i))); }
     }
+    // The map index of this view's i-th entry in its own order.
+    int idx(int i) { return rev ? to() - 1 - i : from() + i; }
     K keyOrThrow(int i) {
         if (isEmpty()) { throw new NoSuchElementException(); }
         return m.keyAt(i);
     }
-    public K firstKey() { return keyOrThrow(from()); }
-    public K lastKey() { return keyOrThrow(to() - 1); }
-    public Map.Entry<K, V> firstEntry() { return isEmpty() ? null : m.entryAt(from()); }
-    public Map.Entry<K, V> lastEntry() { return isEmpty() ? null : m.entryAt(to() - 1); }
+    public K firstKey() { return keyOrThrow(idx(0)); }
+    public K lastKey() { return keyOrThrow(idx(size() - 1)); }
+    public Map.Entry<K, V> firstEntry() { return isEmpty() ? null : m.entryAt(idx(0)); }
+    public Map.Entry<K, V> lastEntry() { return isEmpty() ? null : m.entryAt(idx(size() - 1)); }
+    Map.Entry<K, V> pollAt(int i) {
+        if (isEmpty()) { return null; }
+        Map.Entry<K, V> e = m.entryAt(i);
+        m.removeAt(i);
+        return e;
+    }
+    public Map.Entry<K, V> pollFirstEntry() { return pollAt(idx(0)); }
+    public Map.Entry<K, V> pollLastEntry() { return pollAt(idx(size() - 1)); }
+    // The map index of the greatest key in range below (or at) key, of the
+    // least above (or at) it; -1 when there is none.
+    int floorIdx(K key, boolean inclusive) {
+        int i = m.below(key, inclusive);
+        if (i > to() - 1) { i = to() - 1; }
+        return i >= from() ? i : -1;
+    }
+    int ceilIdx(K key, boolean inclusive) {
+        int i = m.above(key, inclusive);
+        if (i < from()) { i = from(); }
+        return i < to() ? i : -1;
+    }
+    K keyIdx(int i) { return i < 0 ? null : m.keyAt(i); }
+    public K floorKey(K key) { return keyIdx(rev ? ceilIdx(key, true) : floorIdx(key, true)); }
+    public K lowerKey(K key) { return keyIdx(rev ? ceilIdx(key, false) : floorIdx(key, false)); }
+    public K ceilingKey(K key) { return keyIdx(rev ? floorIdx(key, true) : ceilIdx(key, true)); }
+    public K higherKey(K key) { return keyIdx(rev ? floorIdx(key, false) : ceilIdx(key, false)); }
+    public Map.Entry<K, V> floorEntry(K key) { return m.entryAt(rev ? ceilIdx(key, true) : floorIdx(key, true)); }
+    public Map.Entry<K, V> ceilingEntry(K key) { return m.entryAt(rev ? floorIdx(key, true) : ceilIdx(key, true)); }
+    public TreeSubMap<K, V> descendingMap() { return new TreeSubMap<K, V>(m, hasLo, lo, loInc, hasHi, hi, hiInc, !rev); }
+    public Collection<K> descendingKeySet() { return descendingMap().keySet(); }
     // Whether a new bound fits this view: an inclusive one must be in range, an
     // exclusive one may also sit on this view's own exclusive bound.
     boolean fits(Object key, boolean inclusive) {
@@ -950,19 +980,24 @@ class TreeSubMap<K, V> implements Map<K, V> {
     }
     // A view of a view: the narrower bounds, a bound that does not fit this
     // view being IllegalArgumentException.
+    // The bounds are in the map's order: a rev view's fromKey is the upper one.
     TreeSubMap<K, V> range(boolean hasL, K l, boolean lInc, boolean hasH, K h, boolean hInc) {
-        if (hasL && !fits(l, lInc)) { throw new IllegalArgumentException("fromKey out of range"); }
-        if (hasH && !fits(h, hInc)) { throw new IllegalArgumentException("toKey out of range"); }
+        if (hasL && !fits(l, lInc)) { throw new IllegalArgumentException(rev ? "toKey out of range" : "fromKey out of range"); }
+        if (hasH && !fits(h, hInc)) { throw new IllegalArgumentException(rev ? "fromKey out of range" : "toKey out of range"); }
         if (hasL && hasH && m.order(l, h) > 0) { throw new IllegalArgumentException("fromKey > toKey"); }
-        return new TreeSubMap<K, V>(m, hasL || hasLo, hasL ? l : lo, hasL ? lInc : loInc, hasH || hasHi, hasH ? h : hi, hasH ? hInc : hiInc);
+        return new TreeSubMap<K, V>(m, hasL || hasLo, hasL ? l : lo, hasL ? lInc : loInc, hasH || hasHi, hasH ? h : hi, hasH ? hInc : hiInc, rev);
     }
-    public TreeSubMap<K, V> headMap(K to) { return range(false, null, false, true, to, false); }
-    public TreeSubMap<K, V> headMap(K to, boolean inclusive) { return range(false, null, false, true, to, inclusive); }
-    public TreeSubMap<K, V> tailMap(K from) { return range(true, from, true, false, null, false); }
-    public TreeSubMap<K, V> tailMap(K from, boolean inclusive) { return range(true, from, inclusive, false, null, false); }
-    public TreeSubMap<K, V> subMap(K from, K to) { return range(true, from, true, true, to, false); }
+    public TreeSubMap<K, V> headMap(K to) { return headMap(to, false); }
+    public TreeSubMap<K, V> headMap(K to, boolean inclusive) {
+        return rev ? range(true, to, inclusive, false, null, false) : range(false, null, false, true, to, inclusive);
+    }
+    public TreeSubMap<K, V> tailMap(K from) { return tailMap(from, true); }
+    public TreeSubMap<K, V> tailMap(K from, boolean inclusive) {
+        return rev ? range(false, null, false, true, from, inclusive) : range(true, from, inclusive, false, null, false);
+    }
+    public TreeSubMap<K, V> subMap(K from, K to) { return subMap(from, true, to, false); }
     public TreeSubMap<K, V> subMap(K from, boolean fromInclusive, K to, boolean toInclusive) {
-        return range(true, from, fromInclusive, true, to, toInclusive);
+        return rev ? range(true, to, toInclusive, true, from, fromInclusive) : range(true, from, fromInclusive, true, to, toInclusive);
     }
     public boolean equals(Object o) {
         if (o == this) { return true; }
@@ -983,10 +1018,10 @@ class TreeSubMap<K, V> implements Map<K, V> {
     }
     public String toString() {
         String s = "{";
-        int t = to();
-        for (int i = from(); i < t; i++) {
-            if (i > from()) { s = s + ", "; }
-            s = s + m.keys[i] + "=" + m.vals[i];
+        int n = size();
+        for (int i = 0; i < n; i++) {
+            if (i > 0) { s = s + ", "; }
+            s = s + m.keys[idx(i)] + "=" + m.vals[idx(i)];
         }
         return s + "}";
     }
@@ -1002,12 +1037,13 @@ class TreeMapView<E> implements Collection<E> {
         this.sub = sub;
         this.kind = kind;
     }
-    int base() { return sub == null ? 0 : sub.from(); }
+    // The map index of the i-th element, in the sub-map's order.
+    int idx(int i) { return sub == null ? i : sub.idx(i); }
     public int size() { return sub == null ? map.size : sub.size(); }
     public boolean isEmpty() { return size() == 0; }
     @SuppressWarnings("unchecked")
     E at(int i) {
-        int j = base() + i;
+        int j = idx(i);
         return (E) (kind == 0 ? map.keys[j] : (kind == 1 ? map.vals[j] : map.entryAt(j)));
     }
     public Iterator<E> iterator() { return new TreeMapItr<E>(this); }
@@ -1020,7 +1056,7 @@ class TreeMapView<E> implements Collection<E> {
         int n = size();
         for (int i = 0; i < n; i++) {
             if (HashMap.same(o, at(i))) {
-                map.removeAt(base() + i);
+                map.removeAt(idx(i));
                 return true;
             }
         }
@@ -1049,7 +1085,7 @@ class TreeMapItr<E> implements Iterator<E> {
     }
     public void remove() {
         cursor--;
-        view.map.removeAt(view.base() + cursor);
+        view.map.removeAt(view.idx(cursor));
     }
 }
 
@@ -1115,7 +1151,7 @@ abstract class AbstractSet<E> implements Set<E> {
 // java.util.HashSet: the keys of a HashMap, as java's is, so it iterates in
 // java's order. A collection's copy starts at the capacity java 24 picks,
 // HashMap.newHashMap(max(size, 12)).
-class HashSet<E> extends AbstractSet<E> {
+class HashSet<E> extends AbstractSet<E> implements Cloneable, Serializable {
     HashMap<E, Object> map;
 
     public HashSet() { map = new HashMap<E, Object>(); }
@@ -1144,8 +1180,8 @@ class LinkedHashSet<E> extends HashSet<E> {
 }
 
 // java.util.TreeSet: the keys of a TreeMap, in their order.
-class TreeSet<E> extends AbstractSet<E> {
-    TreeMap<E, Object> map;
+class TreeSet<E> extends AbstractSet<E> implements Cloneable, Serializable {
+    NavigableMap<E, Object> map;
 
     public TreeSet() { map = new TreeMap<E, Object>(); }
     public TreeSet(Comparator<? super E> cmp) { map = new TreeMap<E, Object>(cmp); }
@@ -1160,7 +1196,7 @@ class TreeSet<E> extends AbstractSet<E> {
     public boolean remove(Object o) { return map.remove(o) != null; }
     public void clear() { map.clear(); }
     public Iterator<E> iterator() { return map.keySet().iterator(); }
-    // A copy in reverse order (see TreeMap.descendingMap).
+    // A live view in reverse order (see TreeMap.descendingMap).
     public TreeSet<E> descendingSet() {
         TreeSet<E> r = new TreeSet<E>();
         r.map = map.descendingMap();
