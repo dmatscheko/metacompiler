@@ -783,6 +783,10 @@ def s22():
     ten = r"(?P<a>x)(?P<b>y)(?P<c>z)(?P<d>1)(?P<e>2)(?P<f>3)(?P<g>4)(?P<h>5)(?P<i>6)(?P<j>7)(?P=j)"
     check("re39", re.search(ten, "xyz123456777").group(0) == "xyz12345677")
     check("re40", re.search(ten, "xyz1234567 7") == None)
+    # 70,000 iterations of a loop: the matcher's backtrack choices live on a
+    # stack of its own, not the native one.
+    long = "ab" * 35000
+    check("re41", re.match(r"^.*$", long).end() == 70000 and re.fullmatch(r"(ab)*", long).span(1) == (69998, 70000))
 
 # ===== SECTION 23: interpreter/compiler agreement ratchet =====
 # Every check here is a place where python-interpreter.abnf and

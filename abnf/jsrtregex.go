@@ -2638,15 +2638,24 @@ func (pg *rxProg) emitRep(node *rxNode) {
 	if node.max < 0 {
 		// Unbounded tail. The MARK/PROG pair is the empty-body guard: a body that
 		// consumed nothing leaves the loop instead of spinning ((a*)* is a real
-		// pattern, and without this it never terminates).
+		// pattern, and without this it never terminates). A body that always
+		// consumes something needs none.
+		guard := body.minLen() == 0
 		mk := pg.nmarks
-		pg.nmarks++
+		if guard {
+			pg.nmarks++
+		}
 		l1 := pg.here()
 		sp := pg.add(rxOpSplit, 0, 0, pg.dummy)
-		pg.add(rxOpMark, mk, 0, pg.dummy)
+		if guard {
+			pg.add(rxOpMark, mk, 0, pg.dummy)
+		}
 		pg.emitClear(body)
 		pg.emit(body)
-		pgi := pg.add(rxOpProg, mk, 0, pg.dummy)
+		if guard {
+			pgi := pg.add(rxOpProg, mk, 0, pg.dummy)
+			pg.bs[pgi] = pg.here() + 1
+		}
 		pg.add(rxOpJmp, l1, 0, pg.dummy)
 		out := pg.here()
 		if node.greedy {
@@ -2656,7 +2665,6 @@ func (pg *rxProg) emitRep(node *rxNode) {
 			pg.as[sp] = out
 			pg.bs[sp] = l1 + 1
 		}
-		pg.bs[pgi] = out
 		return
 	}
 	var splits []int
@@ -3581,8 +3589,10 @@ func (pg *rxProg) splitTo(at, body, out int, greedy bool) {
 // ===== Compilation =====
 
 type rxRe struct {
-	ok         bool
-	err        string
+	ok  bool
+	err string
+	// bt is the backtrack stack's storage, kept from one attempt to the next.
+	bt         []int
 	ops        []int
 	as         []int
 	bs         []int
@@ -4991,21 +5001,11 @@ type rxRunSt struct {
 	gpos, glast int
 	// adv is the start of an attempt that may not match empty (searchAdv), or -1.
 	adv int
-	// wrap is the lookaround or atomic group runUndo has just entered, or -1.
+	// wrap is the C dialect's lookaround or atomic group whose captures run has
+	// just pushed for undoing, or -1.
 	wrap int
-}
-
-// runUndo is the C dialect's lookaround or atomic group at pc with the rest of
-// the match, its captures put back when that fails. Twin of rxRunUndo in
-// lib/regex.js.
-func (re *rxRe) runUndo(text []rune, pc, sp int, caps, marks []int, st *rxRunSt) int {
-	saved := append([]int(nil), caps...)
-	st.wrap = pc
-	if r := re.run(text, pc, sp, caps, marks, st); r >= 0 {
-		return r
-	}
-	copy(caps, saved)
-	return -1
+	// bt is the backtrack stack (see run).
+	bt []int
 }
 
 func (re *rxRe) assertOK(text []rune, kind, sp int) bool {
@@ -5175,329 +5175,334 @@ func rxIsWordJ(text []rune, c rune, i int, uw bool) bool {
 // run is the backtracking VM: the end position of a match from pc/sp, or -1.
 // Recursion happens only where the machine has a choice (SPLIT) or has to be able
 // to undo a write (SAVE / MARK / LOOK).
-func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt) int {
-	n := len(text)
-	pc, sp := pcIn, spIn
-	for {
-		st.steps++
-		if st.steps > rxSteps {
-			st.over = true
-			return -1
-		}
-		switch re.ops[pc] {
-		case rxOpClass:
-			if sp >= n {
-				re.hitEnd = true
-				return -1
-			}
-			c, w := text[sp], 1
-			if re.java && isHighSurr(c) {
-				c, w = rxCpAt(text, sp)
-			}
-			if !re.clss[pc].match(c, re.icase) {
-				return -1
-			}
-			pc++
-			sp += w
-		case rxOpJmp:
-			pc = re.as[pc]
-		case rxOpSplit:
-			if r := re.run(text, re.as[pc], sp, caps, marks, st); r >= 0 {
-				return r
-			}
-			if st.over {
-				return -1
-			}
-			pc = re.bs[pc]
-		case rxOpSave:
-			slot := re.as[pc]
-			old := caps[slot]
-			caps[slot] = sp
-			if r := re.run(text, pc+1, sp, caps, marks, st); r >= 0 {
-				return r
-			}
-			caps[slot] = old
-			return -1
-		case rxOpClear:
-			// Same shape as Save: write, recurse, and put back what was there when
-			// the run fails, so a backtrack out of the iteration restores them.
-			from, to := 2*re.as[pc], 2*re.bs[pc]+1
-			saved := make([]int, to-from+1)
-			copy(saved, caps[from:to+1])
-			for i := from; i <= to; i++ {
-				caps[i] = -1
-			}
-			if r := re.run(text, pc+1, sp, caps, marks, st); r >= 0 {
-				return r
-			}
-			copy(caps[from:to+1], saved)
-			return -1
-		case rxOpMark:
-			slot := re.as[pc]
-			old := marks[slot]
-			marks[slot] = sp
-			if r := re.run(text, pc+1, sp, caps, marks, st); r >= 0 {
-				return r
-			}
-			marks[slot] = old
-			return -1
-		case rxOpProg:
-			if marks[re.as[pc]] == sp {
-				// The iteration consumed nothing. Two readings, and they differ ONLY in
-				// what the captures inside the body are left holding:
-				//   jsrep off - leave the loop from here, KEEPING whatever that empty
-				//     iteration saved. /^(a*)*$/ on "aaa" then reports "" for group 1,
-				//     which is what Perl, Python, Ruby and Java print.
-				//   jsrep on  - FAIL the iteration, so the run unwinds through the
-				//     enclosing MARK/SAVE frames (which restore what they wrote) and the
-				//     SPLIT leaves the loop as if the body had never been entered. Group
-				//     1 keeps "aaa", which is what node and bash print.
-				// Failing here always terminates: the SPLIT above has exactly one
-				// alternative left, and it is the loop exit.
-				// Under R a PROG whose b is -1 always fails (emitRepRe2).
-				if re.jsrep || re.bs[pc] < 0 {
-					return -1
-				}
-				pc = re.bs[pc]
-			} else {
-				pc++
-			}
-		case rxOpAssert:
-			if !re.assertOK(text, re.as[pc], sp) {
-				return -1
-			}
-			pc++
-		case rxOpLook:
-			if re.pcre && st.wrap != pc {
-				return re.runUndo(text, pc, sp, caps, marks, st)
-			}
-			st.wrap = -1
-			// Pattern.Neg: more text could make the body match.
-			if sp >= n && re.bs[pc] != 0 {
-				re.reqEnd = true
-			}
-			r := re.run(text, pc+1, sp, caps, marks, st)
-			if st.over {
-				return -1
-			}
-			if (r >= 0) != (re.bs[pc] == 0) {
-				return -1
-			}
-			pc = re.as[pc]
-		case rxOpLookEnd:
-			return sp
-		case rxOpBref:
-			g := re.as[pc]
-			// A reference to a group NUMBER the pattern never defined (\1 in a
-			// pattern with no groups) is out of range in caps. Treated exactly like
-			// a group that did not take part. Without
-			// the length test this panics with an index-out-of-range, and the JS
-			// twin reads undefined and lets sp go NaN.
-			from, to := -1, -1
-			if 2*g+1 < len(caps) {
-				from, to = caps[2*g], caps[2*g+1]
-			}
-			if from < 0 || to < 0 {
-				// A group that did not take part matches the empty string - except
-				// under n (Java, Python, Ruby), where the backreference fails.
-				if re.bfail {
-					return -1
-				}
-				pc++
-				break
-			}
-			length := to - from
-			if sp+length > n {
-				re.hitEnd = true
-				return -1
-			}
-			for bi := 0; bi < length; bi++ {
-				lc, rc := text[from+bi], text[sp+bi]
-				if lc != rc {
-					if !re.icase && re.bs[pc] == 0 {
-						return -1
-					}
-					if re.bs[pc] == 2 {
-						// Java's CIBackRef under UNICODE_CASE.
-						lu, ru := unicode.ToUpper(lc), unicode.ToUpper(rc)
-						if lu != ru && unicode.ToLower(lu) != unicode.ToLower(ru) {
-							return -1
-						}
-					} else if rxSwapCase(rc) != lc {
-						return -1
-					}
-				}
-			}
-			pc++
-			sp += length
-		case rxOpMatch:
-			// matchWhole CONSTRAINS THE RUN rather than rewriting the pattern: a
-			// match that stops short of mustEnd is refused right here, so the VM
-			// keeps backtracking for a longer one. Rewriting the pattern to
-			// \A(?:...)\z would work too, but every caller that tried it had to
-			// rediscover that under the x flag a trailing # comment swallows the
-			// wrapper's own closing paren. Constraining the run has no such edge.
-			if st.mustEnd >= 0 && sp != st.mustEnd {
-				return -1
-			}
-			// adv is the start of an attempt that may not match empty (searchAdv).
-			if sp == st.adv {
-				return -1
-			}
-			return sp
-		case rxOpClassX:
-			if sp >= n {
-				re.hitEnd = true
-				return -1
-			}
-			c, w := rxCpAt(text, sp)
-			if !re.clss[pc].matchX(c, re.icase) {
-				return -1
-			}
-			pc++
-			sp += w
-		case rxOpCInit:
-			// Like Mark: write, run on, and put the old count back on failure, so a
-			// loop re-entered by an enclosing one starts from zero.
-			slot := re.as[pc]
-			old := st.ctr[slot]
-			st.ctr[slot] = 0
-			if r := re.run(text, pc+1, sp, caps, marks, st); r >= 0 {
-				return r
-			}
-			st.ctr[slot] = old
-			return -1
-		case rxOpCLoop:
-			slot := re.as[pc]
-			cnt := st.ctr[slot]
-			switch {
-			case re.cmax[slot] >= 0 && cnt >= re.cmax[slot]:
-				pc = re.bs[pc]
-			case cnt < re.cmin[slot]:
-				return re.iterJ(text, pc, sp, caps, marks, st)
-			case re.cgreedy[slot] == 1:
-				if r := re.iterJ(text, pc, sp, caps, marks, st); r >= 0 {
-					return r
-				}
-				if st.over {
-					return -1
-				}
-				pc = re.bs[pc]
-			default:
-				if r := re.run(text, re.bs[pc], sp, caps, marks, st); r >= 0 {
-					return r
-				}
-				if st.over {
-					return -1
-				}
-				return re.iterJ(text, pc, sp, caps, marks, st)
-			}
-		case rxOpCInc:
-			slot := re.as[pc]
-			if st.cbeg[slot] == sp {
-				pc++
-				break
-			}
-			old := st.ctr[slot]
-			st.ctr[slot] = old + 1
-			if r := re.run(text, re.bs[pc], sp, caps, marks, st); r >= 0 {
-				return r
-			}
-			st.ctr[slot] = old
-			return -1
-		case rxOpLookB:
-			if re.pcre && st.wrap != pc {
-				return re.runUndo(text, pc, sp, caps, marks, st)
-			}
-			st.wrap = -1
-			// Try the body from every start the length range allows, shortest first,
-			// each run required to end exactly here (rxOpLBEnd).
-			id, neg := re.bs[pc]/2, re.bs[pc]%2 == 1
-			from := sp - re.lbmin[id]
-			to := 0
-			if re.lbmax[id] >= 0 {
-				to = sp - re.lbmax[id]
-			}
-			if to < 0 {
-				to = 0
-			}
-			saved := st.lbt
-			st.lbt = sp
-			hit := false
-			for ; !hit && from >= to; from-- {
-				hit = re.run(text, pc+1, from, caps, marks, st) >= 0
-				if st.over {
-					return -1
-				}
-			}
-			st.lbt = saved
-			if hit == neg {
-				return -1
-			}
-			pc = re.as[pc]
-		case rxOpLBEnd:
-			if sp != st.lbt {
-				return -1
-			}
-			return sp
-		case rxOpAtom:
-			// The body's first success, and no other (see RX_ATOM in lib/regex.js).
-			if re.pcre && st.wrap != pc {
-				return re.runUndo(text, pc, sp, caps, marks, st)
-			}
-			st.wrap = -1
-			ra := re.run(text, pc+1, sp, caps, marks, st)
-			if ra < 0 {
-				return -1
-			}
-			pc = re.as[pc]
-			sp = ra
-		case rxOpAtomEnd:
-			return sp
-		case rxOpGPos:
-			if sp != st.gpos {
-				return -1
-			}
-			pc++
-		case rxOpXGraph:
-			if sp >= n {
-				re.hitEnd = true
-				return -1
-			}
-			sp = jxGraphNext(text, sp, n)
-			pc++
-		case rxOpGBound:
-			// Pattern.GraphemeBound: not between a surrogate pair, and not before
-			// the first boundary after the previous match's end.
-			if sp > 0 && sp < n {
-				if isHighSurr(text[sp-1]) && isLowSurr(text[sp]) {
-					return -1
-				}
-				if jxGraphNext(text, st.glast, n) > sp {
-					return -1
-				}
-			} else if sp > 0 {
-				re.hitEnd, re.reqEnd = true, true
-			}
-			pc++
-		default:
-			return -1
-		}
+// The backtrack stack's entries, three ints each: kind, x, y. Twin of RX_BT_ALT
+// and the rest in lib/regex.js.
+const (
+	rxBtAlt  = iota // resume at pc x, sp y
+	rxBtCap         // caps[x] = y
+	rxBtMark        // marks[x] = y
+	rxBtCtr         // st.ctr[x] = y
+	rxBtCBeg        // st.cbeg[x] = y
+	rxBtIter        // another iteration of the counted loop at pc x, from sp y
+)
+
+// undo pushes the old value v of slot x of the register set kind, when a write
+// above lim has to be undone (see run). Twin of the undo pushes in rxRun in
+// lib/regex.js.
+func (st *rxRunSt) undo(lim, kind, x, v int) {
+	if len(st.bt) > lim {
+		st.bt = append(st.bt, kind, x, v)
 	}
 }
 
-// iterJ enters one more iteration of the counted loop whose rxOpCLoop is at pc,
-// recording where it began so rxOpCInc can tell an empty one. Twin of rxIterJ in
-// lib/regex.js.
-func (re *rxRe) iterJ(text []rune, pc, sp int, caps, marks []int, st *rxRunSt) int {
-	slot := re.as[pc]
-	old := st.cbeg[slot]
-	st.cbeg[slot] = sp
-	if r := re.run(text, pc+1, sp, caps, marks, st); r >= 0 {
-		return r
+// undoAll pushes every capture's current value: PCRE2 forgets what a lookaround
+// or atomic group captured once the match backtracks past it. Twin of rxUndoAll
+// in lib/regex.js.
+func (st *rxRunSt) undoAll(lim int, caps []int) {
+	for i, v := range caps {
+		st.undo(lim, rxBtCap, i, v)
 	}
-	st.cbeg[slot] = old
-	return -1
+}
+
+// run is the backtracking VM over the explicit backtrack stack st.bt, from its
+// length on entry (base) up; see rxRun in lib/regex.js, of which it is the twin.
+// A write is undone only above lim (base, or base-1 when keep); a lookaround or
+// atomic group's body is a nested run, whose entries are dropped when it returns.
+func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt, keep bool) int {
+	n := len(text)
+	pc, sp := pcIn, spIn
+	base := len(st.bt)
+	defer func() { st.bt = st.bt[:base] }()
+	lim := base
+	if keep {
+		lim = base - 1
+	}
+	for {
+	fwd:
+		for {
+			st.steps++
+			if st.steps > rxSteps {
+				st.over = true
+				return -1
+			}
+			switch re.ops[pc] {
+			case rxOpClass:
+				if sp >= n {
+					re.hitEnd = true
+					break fwd
+				}
+				c, w := text[sp], 1
+				if re.java && isHighSurr(c) {
+					c, w = rxCpAt(text, sp)
+				}
+				if !re.clss[pc].match(c, re.icase) {
+					break fwd
+				}
+				pc++
+				sp += w
+			case rxOpJmp:
+				pc = re.as[pc]
+			case rxOpSplit:
+				st.bt = append(st.bt, rxBtAlt, re.bs[pc], sp)
+				pc = re.as[pc]
+			case rxOpSave:
+				slot := re.as[pc]
+				st.undo(lim, rxBtCap, slot, caps[slot])
+				caps[slot] = sp
+				pc++
+			case rxOpClear:
+				for i := 2 * re.as[pc]; i <= 2*re.bs[pc]+1; i++ {
+					st.undo(lim, rxBtCap, i, caps[i])
+					caps[i] = -1
+				}
+				pc++
+			case rxOpMark:
+				slot := re.as[pc]
+				st.undo(lim, rxBtMark, slot, marks[slot])
+				marks[slot] = sp
+				pc++
+			case rxOpProg:
+				if marks[re.as[pc]] == sp {
+					// The iteration consumed nothing: see RX_PROG in lib/regex.js.
+					if re.jsrep || re.bs[pc] < 0 {
+						break fwd
+					}
+					pc = re.bs[pc]
+				} else {
+					pc++
+				}
+			case rxOpAssert:
+				if !re.assertOK(text, re.as[pc], sp) {
+					break fwd
+				}
+				pc++
+			case rxOpLook:
+				if re.pcre && st.wrap != pc {
+					st.undoAll(lim, caps)
+					st.wrap = pc
+					continue
+				}
+				st.wrap = -1
+				// Pattern.Neg: more text could make the body match.
+				if sp >= n && re.bs[pc] != 0 {
+					re.reqEnd = true
+				}
+				r := re.run(text, pc+1, sp, caps, marks, st, true)
+				if st.over {
+					return -1
+				}
+				if (r >= 0) != (re.bs[pc] == 0) {
+					break fwd
+				}
+				pc = re.as[pc]
+			case rxOpLookEnd:
+				return sp
+			case rxOpBref:
+				g := re.as[pc]
+				// A reference to a group NUMBER the pattern never defined (\1 in a
+				// pattern with no groups) is out of range in caps. Treated exactly like
+				// a group that did not take part. Without
+				// the length test this panics with an index-out-of-range, and the JS
+				// twin reads undefined and lets sp go NaN.
+				from, to := -1, -1
+				if 2*g+1 < len(caps) {
+					from, to = caps[2*g], caps[2*g+1]
+				}
+				if from < 0 || to < 0 {
+					// A group that did not take part matches the empty string - except
+					// under n (Java, Python, Ruby), where the backreference fails.
+					if re.bfail {
+						break fwd
+					}
+					pc++
+					break
+				}
+				length := to - from
+				mis := false
+				if sp+length > n {
+					re.hitEnd = true
+					break fwd
+				}
+				for bi := 0; bi < length && !mis; bi++ {
+					lc, rc := text[from+bi], text[sp+bi]
+					if lc != rc {
+						if !re.icase && re.bs[pc] == 0 {
+							mis = true
+						} else if re.bs[pc] == 2 {
+							// Java's CIBackRef under UNICODE_CASE.
+							lu, ru := unicode.ToUpper(lc), unicode.ToUpper(rc)
+							if lu != ru && unicode.ToLower(lu) != unicode.ToLower(ru) {
+								mis = true
+							}
+						} else if rxSwapCase(rc) != lc {
+							mis = true
+						}
+					}
+				}
+				if mis {
+					break fwd
+				}
+				pc++
+				sp += length
+			case rxOpMatch:
+				// See RX_MATCH in lib/regex.js: mustEnd constrains the run, and adv
+				// is the start of an attempt that may not match empty (searchAdv).
+				if (st.mustEnd >= 0 && sp != st.mustEnd) || sp == st.adv {
+					break fwd
+				}
+				return sp
+			case rxOpClassX:
+				if sp >= n {
+					re.hitEnd = true
+					break fwd
+				}
+				c, w := rxCpAt(text, sp)
+				if !re.clss[pc].matchX(c, re.icase) {
+					break fwd
+				}
+				pc++
+				sp += w
+			case rxOpCInit:
+				slot := re.as[pc]
+				st.undo(lim, rxBtCtr, slot, st.ctr[slot])
+				st.ctr[slot] = 0
+				pc++
+			case rxOpCLoop:
+				slot := re.as[pc]
+				cnt := st.ctr[slot]
+				switch {
+				case re.cmax[slot] >= 0 && cnt >= re.cmax[slot]:
+					pc = re.bs[pc]
+				case cnt >= re.cmin[slot] && re.cgreedy[slot] != 1:
+					st.bt = append(st.bt, rxBtIter, pc, sp)
+					pc = re.bs[pc]
+				default:
+					if cnt >= re.cmin[slot] {
+						st.bt = append(st.bt, rxBtAlt, re.bs[pc], sp)
+					}
+					st.undo(lim, rxBtCBeg, slot, st.cbeg[slot])
+					st.cbeg[slot] = sp
+					pc++
+				}
+			case rxOpCInc:
+				slot := re.as[pc]
+				if st.cbeg[slot] == sp {
+					pc++
+					break
+				}
+				st.undo(lim, rxBtCtr, slot, st.ctr[slot])
+				st.ctr[slot]++
+				pc = re.bs[pc]
+			case rxOpLookB:
+				if re.pcre && st.wrap != pc {
+					st.undoAll(lim, caps)
+					st.wrap = pc
+					continue
+				}
+				st.wrap = -1
+				// Try the body from every start the length range allows, shortest first,
+				// each run required to end exactly here (rxOpLBEnd).
+				id, neg := re.bs[pc]/2, re.bs[pc]%2 == 1
+				from := sp - re.lbmin[id]
+				to := 0
+				if re.lbmax[id] >= 0 {
+					to = sp - re.lbmax[id]
+				}
+				if to < 0 {
+					to = 0
+				}
+				saved := st.lbt
+				st.lbt = sp
+				hit := false
+				for ; !hit && from >= to; from-- {
+					hit = re.run(text, pc+1, from, caps, marks, st, true) >= 0
+					if st.over {
+						return -1
+					}
+				}
+				st.lbt = saved
+				if hit == neg {
+					break fwd
+				}
+				pc = re.as[pc]
+			case rxOpLBEnd:
+				if sp != st.lbt {
+					break fwd
+				}
+				return sp
+			case rxOpAtom:
+				// The body's first success, and no other (see RX_ATOM in lib/regex.js).
+				if re.pcre && st.wrap != pc {
+					st.undoAll(lim, caps)
+					st.wrap = pc
+					continue
+				}
+				st.wrap = -1
+				ra := re.run(text, pc+1, sp, caps, marks, st, true)
+				if st.over {
+					return -1
+				}
+				if ra < 0 {
+					break fwd
+				}
+				pc = re.as[pc]
+				sp = ra
+			case rxOpAtomEnd:
+				return sp
+			case rxOpGPos:
+				if sp != st.gpos {
+					break fwd
+				}
+				pc++
+			case rxOpXGraph:
+				if sp >= n {
+					re.hitEnd = true
+					break fwd
+				}
+				sp = jxGraphNext(text, sp, n)
+				pc++
+			case rxOpGBound:
+				// Pattern.GraphemeBound: not between a surrogate pair, and not before
+				// the first boundary after the previous match's end.
+				if sp > 0 && sp < n {
+					if (isHighSurr(text[sp-1]) && isLowSurr(text[sp])) || jxGraphNext(text, st.glast, n) > sp {
+						break fwd
+					}
+				} else if sp > 0 {
+					re.hitEnd, re.reqEnd = true, true
+				}
+				pc++
+			default:
+				break fwd
+			}
+		}
+		// The forward run failed: pop entries until one resumes it.
+		for resumed := false; !resumed; {
+			top := len(st.bt)
+			if top == base {
+				return -1
+			}
+			k, x, y := st.bt[top-3], st.bt[top-2], st.bt[top-1]
+			st.bt = st.bt[:top-3]
+			switch k {
+			case rxBtAlt:
+				pc, sp, resumed = x, y, true
+			case rxBtCap:
+				caps[x] = y
+			case rxBtIter:
+				slot := re.as[x]
+				st.undo(lim, rxBtCBeg, slot, st.cbeg[slot])
+				st.cbeg[slot] = y
+				pc, sp, resumed = x+1, y, true
+			case rxBtMark:
+				marks[x] = y
+			case rxBtCtr:
+				st.ctr[x] = y
+			default:
+				st.cbeg[x] = y
+			}
+		}
+	}
 }
 
 type rxMatch struct {
@@ -5571,7 +5576,8 @@ func (re *rxRe) attempt(text []rune, at, mustEnd, gpos, glast, adv int) (*rxMatc
 	for i := range marks {
 		marks[i] = -1
 	}
-	st := &rxRunSt{mustEnd: mustEnd, lbt: -1, gpos: gpos, glast: glast, adv: adv, wrap: -1}
+	st := &rxRunSt{mustEnd: mustEnd, lbt: -1, gpos: gpos, glast: glast, adv: adv, wrap: -1, bt: re.bt[:0]}
+	defer func() { re.bt = st.bt[:0] }()
 	if len(re.cmin) > 0 {
 		st.ctr = make([]int, len(re.cmin))
 		st.cbeg = make([]int, len(re.cmin))
@@ -5579,7 +5585,7 @@ func (re *rxRe) attempt(text []rune, at, mustEnd, gpos, glast, adv int) (*rxMatc
 			st.cbeg[i] = -1
 		}
 	}
-	if end := re.run(text, 0, at, caps, marks, st); end >= 0 {
+	if end := re.run(text, 0, at, caps, marks, st, false); end >= 0 {
 		return &rxMatch{begin: caps[0], end: caps[1], caps: caps}, true
 	}
 	if st.over {

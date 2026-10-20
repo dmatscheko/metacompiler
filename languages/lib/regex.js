@@ -12,8 +12,8 @@
 // from its startScript, exactly like lib/interp-core.js, and everything lands in the
 // same global scope. Every name here is prefixed rx / RX_ so nothing collides.
 //
-// The engine is a backtracking VM over a small instruction program (the classic
-// "recursive backtracking implementation" shape). A backtracking matcher, not a DFA,
+// The engine is a backtracking VM over a small instruction program, with an
+// explicit backtrack stack (rxRun). A backtracking matcher, not a DFA,
 // is the right call here: it gives lazy quantifiers, capture groups, lookahead and
 // BACKREFERENCES, all of which the target languages have and none of which a
 // Thompson/RE2 construction can do. The cost - exponential blowup on a pathological
@@ -2556,15 +2556,20 @@ function rxEmitRep(pg, node) {
     if (node.max < 0) {
         // Unbounded tail. The MARK/PROG pair is the empty-body guard: a body that
         // consumed nothing leaves the loop instead of spinning ((a*)* is a real
-        // pattern, and without this it never terminates).
+        // pattern, and without this it never terminates). A body that always
+        // consumes something needs none.
+        var guard = rxMinLen(body) == 0
         var mk = pg.nmarks
-        pg.nmarks = pg.nmarks + 1
+        if (guard) { pg.nmarks = pg.nmarks + 1 }
         var l1 = rxHere(pg)
         var sp = rxAdd(pg, RX_SPLIT, 0, 0, pg.dummy)
-        rxAdd(pg, RX_MARK, mk, 0, pg.dummy)
+        if (guard) { rxAdd(pg, RX_MARK, mk, 0, pg.dummy) }
         rxEmitClear(pg, body)
         rxEmit(pg, body)
-        var pgi = rxAdd(pg, RX_PROG, mk, 0, pg.dummy)
+        if (guard) {
+            var pgi = rxAdd(pg, RX_PROG, mk, 0, pg.dummy)
+            rxSetB(pg, pgi, rxHere(pg) + 1)
+        }
         rxAdd(pg, RX_JMP, l1, 0, pg.dummy)
         var out = rxHere(pg)
         if (node.greedy) {
@@ -2574,7 +2579,6 @@ function rxEmitRep(pg, node) {
             rxSetA(pg, sp, out)
             rxSetB(pg, sp, l1 + 1)
         }
-        rxSetB(pg, pgi, out)
         return
     }
     var extra = node.max - node.min
@@ -4674,336 +4678,484 @@ function rxIsWordJ(text, c, i, uw) {
     return false
 }
 
+// The backtrack stack: entry i is rxBk[i] (its kind), rxBx[i] and rxBy[i].
+// RX_BT_ALT resumes at pc x, sp y; the four undo kinds put y back into slot x of
+// caps, marks, st.ctr or st.cbeg; RX_BT_ITER enters another iteration of the
+// counted loop whose RX_CLOOP is at x, from sp y (the lazy loop's second choice).
+// One stack serves every run, as no run starts while another is in progress
+// except a nested one, which works above it (rxRun's base); it only grows.
+var rxBk = []
+var rxBx = []
+var rxBy = []
+var RX_BT_ALT = 0
+var RX_BT_CAP = 1
+var RX_BT_MARK = 2
+var RX_BT_CTR = 3
+var RX_BT_CBEG = 4
+var RX_BT_ITER = 5
+
 // rxRun is the backtracking VM. It answers the end position of a match starting at
-// the given pc/sp, or -1. Recursion happens only where the machine has a choice
-// (SPLIT) or has to be able to undo a write (SAVE / MARK / LOOK).
-function rxRun(re, text, pcIn, spIn, caps, marks, st) {
+// the given pc/sp, or -1. A choice (SPLIT, a counted loop's CLOOP) pushes the
+// alternative not taken onto the backtrack stack, from entry base up, and a write
+// that has to be undone (SAVE, MARK, CLEAR, the counted-loop registers) pushes the
+// old value. A failure leaves the forward loop, pops back to the latest choice,
+// undoing the writes on the way, and runs forward again from it - so a long
+// subject cannot exhaust the native stack. A write is undone only above lim:
+// unless keep (the nested run of a lookaround or atomic group body, whose failure
+// must leave everything as it found it), that is only when a choice lies below
+// it, as a failed attempt's registers are thrown away. A nested run works above
+// this one's top, and a body that succeeds leaves its entries there, never
+// revisited.
+function rxRun(re, text, pcIn, spIn, caps, marks, st, base, keep) {
+    var lim = keep ? base - 1 : base
     var ops = re.ops
     var as = re.as
     var bs = re.bs
     var clss = re.clss
+    var bk = rxBk
+    var bx = rxBx
+    var by = rxBy
+    var btn = bk.length
     var n = text.length
     var pc = pcIn
     var sp = spIn
+    var top = base
     while (true) {
-        st.steps = st.steps + 1
-        if (st.steps > RX_STEPS) {
-            st.over = true
-            return -1
-        }
-        var op = ops[pc]
-        if (op == RX_CLASS) {
-            if (sp >= n) {
-                re.hitEnd = true
+        while (true) {
+            st.steps = st.steps + 1
+            if (st.steps > RX_STEPS) {
+                st.over = true
                 return -1
             }
-            var cc = text.charCodeAt(sp)
-            // J and P read a surrogate pair as one character.
-            if (cc >= 55296 && cc <= 56319 && (re.java || re.py)) { cc = rxCpAt(text, sp) }
-            if (!rxClsMatch(clss[pc], cc, re.icase)) { return -1 }
-            pc = pc + 1
-            sp = sp + (cc > 65535 ? 2 : 1)
-        } else if (op == RX_JMP) {
-            pc = as[pc]
-        } else if (op == RX_SPLIT) {
-            var r = rxRun(re, text, as[pc], sp, caps, marks, st)
-            if (r >= 0) { return r }
-            if (st.over) { return -1 }
-            pc = bs[pc]
-        } else if (op == RX_SAVE) {
-            var slot = as[pc]
-            var old = caps[slot]
-            caps[slot] = sp
-            var rs = rxRun(re, text, pc + 1, sp, caps, marks, st)
-            if (rs >= 0) { return rs }
-            caps[slot] = old
-            return -1
-        } else if (op == RX_CLEAR) {
-            // Same shape as SAVE: write, recurse, and put back what was there when the
-            // run fails, so a backtrack out of the iteration restores the old captures.
-            var cFrom = 2 * as[pc]
-            var cTo = 2 * bs[pc] + 1
-            var cSaved = []
-            var ci = cFrom
-            while (ci <= cTo) {
-                cSaved.push(caps[ci])
-                caps[ci] = -1
-                ci = ci + 1
-            }
-            var rcl = rxRun(re, text, pc + 1, sp, caps, marks, st)
-            if (rcl >= 0) { return rcl }
-            ci = cFrom
-            while (ci <= cTo) {
-                caps[ci] = cSaved[ci - cFrom]
-                ci = ci + 1
-            }
-            return -1
-        } else if (op == RX_MARK) {
-            var mslot = as[pc]
-            var mold = marks[mslot]
-            marks[mslot] = sp
-            var rm = rxRun(re, text, pc + 1, sp, caps, marks, st)
-            if (rm >= 0) { return rm }
-            marks[mslot] = mold
-            return -1
-        } else if (op == RX_PROG) {
-            if (marks[as[pc]] == sp) {
-                // The iteration consumed nothing. Two readings, and they differ ONLY in
-                // what the captures inside the body are left holding:
-                //   jsrep off - leave the loop from here, KEEPING whatever that empty
-                //     iteration saved. /^(a*)*$/ on "aaa" then reports "" for group 1,
-                //     which is what Perl, Python, Ruby and Java print.
-                //   jsrep on  - FAIL the iteration, so the run unwinds through the
-                //     enclosing MARK/SAVE frames (which restore what they wrote) and
-                //     the SPLIT leaves the loop as if the body had never been entered.
-                //     Group 1 keeps "aaa", which is what node and bash print.
-                // Failing here always terminates: the SPLIT above has exactly one
-                // alternative left, and it is the loop exit.
-                // Under R a PROG whose b is -1 always fails (rxEmitRepRe2).
-                if (re.jsrep || bs[pc] < 0) { return -1 }
-                pc = bs[pc]
-            } else { pc = pc + 1 }
-        } else if (op == RX_ASSERT) {
-            if (!rxAssertOK(re, text, as[pc], sp)) { return -1 }
-            pc = pc + 1
-        } else if (op == RX_LOOK) {
-            if (re.pcre && st.wrap != pc) { return rxRunUndo(re, text, pc, sp, caps, marks, st) }
-            st.wrap = 0 - 1
-            // Pattern.Neg: more text could make the body match.
-            if (sp >= n && bs[pc] != 0) { re.reqEnd = true }
-            var rl = rxRun(re, text, pc + 1, sp, caps, marks, st)
-            if (st.over) { return -1 }
-            var hit = rl >= 0
-            var want = bs[pc] == 0
-            if (hit != want) { return -1 }
-            pc = as[pc]
-        } else if (op == RX_LOOKEND) {
-            return sp
-        } else if (op == RX_BREF) {
-            var g = as[pc]
-            // A reference to a group NUMBER the pattern never defined (\1 in a
-            // pattern with no groups) is out of range in caps. Treated exactly like
-            // a group that did not take part. Without
-            // the length test the JS read is undefined and sp silently goes NaN,
-            // and the Go twin panics with an index-out-of-range.
-            var from = -1
-            var to = -1
-            if (2 * g + 1 < caps.length) {
-                from = caps[2 * g]
-                to = caps[2 * g + 1]
-            }
-            if (from < 0 || to < 0) {
-                // A group that did not take part matches the empty string - except
-                // under n (Java, Python, Ruby), where the backreference fails.
-                if (re.bfail) { return -1 }
-                pc = pc + 1
-            } else {
-                var len = to - from
-                if (sp + len > n) {
+            var op = ops[pc]
+            if (op == RX_CLASS) {
+                if (sp >= n) {
                     re.hitEnd = true
-                    return -1
+                    break
                 }
-                var bi = 0
-                while (bi < len) {
-                    var lc = text.charCodeAt(from + bi)
-                    var rc = text.charCodeAt(sp + bi)
-                    // P compares an astral character whole.
-                    if (re.py && lc >= 55296 && lc <= 56319) {
-                        lc = rxCpAt(text, from + bi)
-                        rc = rxCpAt(text, sp + bi)
-                        if (lc > 65535) { bi = bi + 1 }
+                var cc = text.charCodeAt(sp)
+                // J and P read a surrogate pair as one character.
+                if (cc >= 55296 && cc <= 56319 && (re.java || re.py)) { cc = rxCpAt(text, sp) }
+                if (!rxClsMatch(clss[pc], cc, re.icase)) {
+                    break
+                }
+                pc = pc + 1
+                sp = sp + (cc > 65535 ? 2 : 1)
+            } else if (op == RX_JMP) {
+                pc = as[pc]
+            } else if (op == RX_SPLIT) {
+                var ta = top
+                if (ta == btn) { btn = rxBtGrow() }
+                bk[ta] = RX_BT_ALT
+                bx[ta] = bs[pc]
+                by[ta] = sp
+                top = ta + 1
+                pc = as[pc]
+            } else if (op == RX_SAVE) {
+                var slot = as[pc]
+                var tb = top
+                if (tb > lim) {
+                    if (tb == btn) { btn = rxBtGrow() }
+                    bk[tb] = RX_BT_CAP
+                    bx[tb] = slot
+                    by[tb] = caps[slot]
+                    top = tb + 1
+                }
+                caps[slot] = sp
+                pc = pc + 1
+            } else if (op == RX_CLEAR) {
+                var ci = 2 * as[pc]
+                var cTo = 2 * bs[pc] + 1
+                while (ci <= cTo) {
+                    var tc = top
+                    if (tc > lim) {
+                        if (tc == btn) { btn = rxBtGrow() }
+                        bk[tc] = RX_BT_CAP
+                        bx[tc] = ci
+                        by[tc] = caps[ci]
+                        top = tc + 1
                     }
-                    if (lc != rc) {
-                        if (!re.icase && bs[pc] == 0) { return -1 }
-                        if (bs[pc] == 2) {
-                            // Java's CIBackRef under UNICODE_CASE.
-                            var lu = rxCaseU(lc, 1)
-                            var ru = rxCaseU(rc, 1)
-                            if (lu != ru && rxCaseU(lu, 0) != rxCaseU(ru, 0)) { return -1 }
-                        } else if (rxSwapCase(rc) != lc) {
-                            return -1
+                    caps[ci] = -1
+                    ci = ci + 1
+                }
+                pc = pc + 1
+            } else if (op == RX_MARK) {
+                var mslot = as[pc]
+                var td = top
+                if (td > lim) {
+                    if (td == btn) { btn = rxBtGrow() }
+                    bk[td] = RX_BT_MARK
+                    bx[td] = mslot
+                    by[td] = marks[mslot]
+                    top = td + 1
+                }
+                marks[mslot] = sp
+                pc = pc + 1
+            } else if (op == RX_PROG) {
+                if (marks[as[pc]] == sp) {
+                    // The iteration consumed nothing. Two readings, and they differ ONLY in
+                    // what the captures inside the body are left holding:
+                    //   jsrep off - leave the loop from here, KEEPING whatever that empty
+                    //     iteration saved. /^(a*)*$/ on "aaa" then reports "" for group 1,
+                    //     which is what Perl, Python, Ruby and Java print.
+                    //   jsrep on  - FAIL the iteration, so the run backtracks through the
+                    //     MARK/SAVE writes (restoring them) and the SPLIT leaves the
+                    //     loop as if the body had never been entered. Group 1 keeps
+                    //     "aaa", which is what node and bash print.
+                    // Failing here always terminates: the SPLIT above has exactly one
+                    // alternative left, and it is the loop exit.
+                    // Under R a PROG whose b is -1 always fails (rxEmitRepRe2).
+                    if (re.jsrep || bs[pc] < 0) {
+                        break
+                    }
+                    pc = bs[pc]
+                } else { pc = pc + 1 }
+            } else if (op == RX_ASSERT) {
+                if (!rxAssertOK(re, text, as[pc], sp)) {
+                    break
+                }
+                pc = pc + 1
+            } else if (op == RX_LOOK) {
+                // Under C the captures are put back when the rest of the match fails
+                // past here (rxUndoAll); the op then runs again, st.wrap saying so.
+                if (re.pcre && st.wrap != pc) {
+                    if (top > lim) { top = rxUndoAll(top, caps) }
+                    btn = bk.length
+                    st.wrap = pc
+                    continue
+                }
+                st.wrap = 0 - 1
+                // Pattern.Neg: more text could make the body match.
+                if (sp >= n && bs[pc] != 0) { re.reqEnd = true }
+                var rl = rxRun(re, text, pc + 1, sp, caps, marks, st, top, true)
+                btn = bk.length
+                if (st.over) { return -1 }
+                var hit = rl >= 0
+                var want = bs[pc] == 0
+                if (hit != want) {
+                    break
+                }
+                pc = as[pc]
+            } else if (op == RX_LOOKEND) {
+                return sp
+            } else if (op == RX_BREF) {
+                var g = as[pc]
+                // A reference to a group NUMBER the pattern never defined (\1 in a
+                // pattern with no groups) is out of range in caps. Treated exactly like
+                // a group that did not take part. Without
+                // the length test the JS read is undefined and sp silently goes NaN,
+                // and the Go twin panics with an index-out-of-range.
+                var from = -1
+                var to = -1
+                if (2 * g + 1 < caps.length) {
+                    from = caps[2 * g]
+                    to = caps[2 * g + 1]
+                }
+                if (from < 0 || to < 0) {
+                    // A group that did not take part matches the empty string - except
+                    // under n (Java, Python, Ruby), where the backreference fails.
+                    if (re.bfail) {
+                        break
+                    }
+                    pc = pc + 1
+                } else {
+                    var len = to - from
+                    if (sp + len > n) {
+                        re.hitEnd = true
+                        break
+                    }
+                    var bi = 0
+                    var bmis = false
+                    while (bi < len && !bmis) {
+                        var lc = text.charCodeAt(from + bi)
+                        var rc = text.charCodeAt(sp + bi)
+                        // P compares an astral character whole.
+                        if (re.py && lc >= 55296 && lc <= 56319) {
+                            lc = rxCpAt(text, from + bi)
+                            rc = rxCpAt(text, sp + bi)
+                            if (lc > 65535) { bi = bi + 1 }
                         }
+                        if (lc != rc) {
+                            if (!re.icase && bs[pc] == 0) {
+                                bmis = true
+                            } else if (bs[pc] == 2) {
+                                // Java's CIBackRef under UNICODE_CASE.
+                                var lu = rxCaseU(lc, 1)
+                                var ru = rxCaseU(rc, 1)
+                                if (lu != ru && rxCaseU(lu, 0) != rxCaseU(ru, 0)) { bmis = true }
+                            } else if (rxSwapCase(rc) != lc) {
+                                bmis = true
+                            }
+                        }
+                        bi = bi + 1
                     }
-                    bi = bi + 1
+                    if (bmis) {
+                        break
+                    }
+                    pc = pc + 1
+                    sp = sp + len
+                }
+            } else if (op == RX_MATCH) {
+                // rxMatchWhole CONSTRAINS THE RUN rather than rewriting the pattern: a
+                // match that stops short of mustEnd is refused right here, so the VM
+                // keeps backtracking for a longer one. Rewriting the pattern to
+                // \A(?:...)\z instead breaks under the x flag, where a trailing #
+                // comment swallows the wrapper's own closing paren.
+                // adv is the start of an attempt that may not match empty (rxSearchAdv).
+                if ((st.mustEnd >= 0 && sp != st.mustEnd) || sp == st.adv) {
+                    break
+                }
+                return sp
+            } else if (op == RX_CLASSX) {
+                if (sp >= n) {
+                    re.hitEnd = true
+                    break
+                }
+                var xc = rxCpAt(text, sp)
+                if (!rxClsMatchX(clss[pc], xc, re.icase)) {
+                    break
                 }
                 pc = pc + 1
-                sp = sp + len
-            }
-        } else if (op == RX_MATCH) {
-            // rxMatchWhole CONSTRAINS THE RUN rather than rewriting the pattern: a
-            // match that stops short of mustEnd is refused right here, so the VM
-            // keeps backtracking for a longer one. Rewriting the pattern to
-            // \A(?:...)\z instead breaks under the x flag, where a trailing #
-            // comment swallows the wrapper's own closing paren.
-            if (st.mustEnd >= 0 && sp != st.mustEnd) { return -1 }
-            // adv is the start of an attempt that may not match empty (rxSearchAdv).
-            if (sp == st.adv) { return -1 }
-            return sp
-        } else if (op == RX_CLASSX) {
-            if (sp >= n) {
-                re.hitEnd = true
-                return -1
-            }
-            var xc = rxCpAt(text, sp)
-            if (!rxClsMatchX(clss[pc], xc, re.icase)) { return -1 }
-            pc = pc + 1
-            sp = sp + (xc > 65535 ? 2 : 1)
-        } else if (op == RX_CINIT) {
-            // Like MARK: write, run on, and put the old count back on failure, so
-            // a loop re-entered by an enclosing one starts from zero.
-            var cslot = as[pc]
-            var ctr = st.ctr
-            var cold = ctr[cslot]
-            ctr[cslot] = 0
-            var rci = rxRun(re, text, pc + 1, sp, caps, marks, st)
-            if (rci >= 0) { return rci }
-            ctr[cslot] = cold
-            return -1
-        } else if (op == RX_CLOOP) {
-            var lslot = as[pc]
-            var lctr = st.ctr
-            var cnt = lctr[lslot]
-            var lmaxs = re.cmax
-            var lmins = re.cmin
-            var lgreedy = re.cgreedy
-            if (lmaxs[lslot] >= 0 && cnt >= lmaxs[lslot]) {
-                pc = bs[pc]
-            } else if (cnt < lmins[lslot]) {
-                return rxIterJ(re, text, pc, sp, caps, marks, st)
-            } else if (lgreedy[lslot] == 1) {
-                var rg = rxIterJ(re, text, pc, sp, caps, marks, st)
-                if (rg >= 0) { return rg }
+                sp = sp + (xc > 65535 ? 2 : 1)
+            } else if (op == RX_CINIT) {
+                // The count goes back to its old value on backtracking, so a loop
+                // re-entered by an enclosing one starts from zero.
+                var cslot = as[pc]
+                var ctr = st.ctr
+                var tm = top
+                if (tm > lim) {
+                    if (tm == btn) { btn = rxBtGrow() }
+                    bk[tm] = RX_BT_CTR
+                    bx[tm] = cslot
+                    by[tm] = ctr[cslot]
+                    top = tm + 1
+                }
+                ctr[cslot] = 0
+                pc = pc + 1
+            } else if (op == RX_CLOOP) {
+                // Another iteration records where it began (cbeg), so RX_CINC can tell
+                // an empty one.
+                var lslot = as[pc]
+                var lctr = st.ctr
+                var cnt = lctr[lslot]
+                var lmaxs = re.cmax
+                var lmins = re.cmin
+                var lgreedy = re.cgreedy
+                if (lmaxs[lslot] >= 0 && cnt >= lmaxs[lslot]) {
+                    pc = bs[pc]
+                } else if (cnt >= lmins[lslot] && lgreedy[lslot] != 1) {
+                    var te = top
+                    if (te == btn) { btn = rxBtGrow() }
+                    bk[te] = RX_BT_ITER
+                    bx[te] = pc
+                    by[te] = sp
+                    top = te + 1
+                    pc = bs[pc]
+                } else {
+                    if (cnt >= lmins[lslot]) {
+                        var tf = top
+                        if (tf == btn) { btn = rxBtGrow() }
+                        bk[tf] = RX_BT_ALT
+                        bx[tf] = bs[pc]
+                        by[tf] = sp
+                        top = tf + 1
+                    }
+                    var tg = top
+                    if (tg == btn) { btn = rxBtGrow() }
+                    var lbeg = st.cbeg
+                    bk[tg] = RX_BT_CBEG
+                    bx[tg] = lslot
+                    by[tg] = lbeg[lslot]
+                    top = tg + 1
+                    lbeg[lslot] = sp
+                    pc = pc + 1
+                }
+            } else if (op == RX_CINC) {
+                var islot = as[pc]
+                var ibeg = st.cbeg
+                if (ibeg[islot] == sp) {
+                    pc = pc + 1
+                } else {
+                    var ictr = st.ctr
+                    var tn = top
+                    if (tn > lim) {
+                        if (tn == btn) { btn = rxBtGrow() }
+                        bk[tn] = RX_BT_CTR
+                        bx[tn] = islot
+                        by[tn] = ictr[islot]
+                        top = tn + 1
+                    }
+                    ictr[islot] = ictr[islot] + 1
+                    pc = bs[pc]
+                }
+            } else if (op == RX_LOOKB) {
+                if (re.pcre && st.wrap != pc) {
+                    if (top > lim) { top = rxUndoAll(top, caps) }
+                    btn = bk.length
+                    st.wrap = pc
+                    continue
+                }
+                st.wrap = 0 - 1
+                // Try the body from every start the length range allows, shortest
+                // first, each run required to end exactly here (RX_LBEND).
+                var lid = Math.floor(bs[pc] / 2)
+                var lneg = bs[pc] % 2 == 1
+                var lbmaxs = re.lbmax
+                var lbmins = re.lbmin
+                var lmax = lbmaxs[lid]
+                var lfrom = sp - lbmins[lid]
+                var lto = lmax < 0 ? 0 : sp - lmax
+                // The range counts characters; under P one may be a surrogate pair.
+                if (re.py) {
+                    lfrom = rxCpBackN(text, sp, lbmins[lid])
+                    lto = lmax < 0 ? 0 : rxCpBackN(text, sp, lmax)
+                }
+                if (lto < 0) { lto = 0 }
+                var lsaved = st.lbt
+                st.lbt = sp
+                var lhit = false
+                while (!lhit && lfrom >= lto) {
+                    if (rxRun(re, text, pc + 1, lfrom, caps, marks, st, top, true) >= 0) { lhit = true }
+                    if (st.over) { return -1 }
+                    lfrom = re.py ? rxCpBack(text, lfrom) : lfrom - 1
+                }
+                btn = bk.length
+                st.lbt = lsaved
+                if (lhit == lneg) {
+                    break
+                }
+                pc = as[pc]
+            } else if (op == RX_LBEND) {
+                if (sp != st.lbt) {
+                    break
+                }
+                return sp
+            } else if (op == RX_ATOM) {
+                // The body's first success, and no other: the run below stops at
+                // RX_ATOMEND, and nothing here is retried when the rest fails.
+                // Captures the body set stay set then, as in Java; under C they
+                // are taken back, as in PCRE2.
+                if (re.pcre && st.wrap != pc) {
+                    if (top > lim) { top = rxUndoAll(top, caps) }
+                    btn = bk.length
+                    st.wrap = pc
+                    continue
+                }
+                st.wrap = 0 - 1
+                var ra = rxRun(re, text, pc + 1, sp, caps, marks, st, top, true)
+                btn = bk.length
                 if (st.over) { return -1 }
-                pc = bs[pc]
-            } else {
-                var rz = rxRun(re, text, bs[pc], sp, caps, marks, st)
-                if (rz >= 0) { return rz }
-                if (st.over) { return -1 }
-                return rxIterJ(re, text, pc, sp, caps, marks, st)
-            }
-        } else if (op == RX_CINC) {
-            var islot = as[pc]
-            var ibeg = st.cbeg
-            if (ibeg[islot] == sp) {
+                if (ra < 0) {
+                    break
+                }
+                pc = as[pc]
+                sp = ra
+            } else if (op == RX_ATOMEND) {
+                return sp
+            } else if (op == RX_GPOS) {
+                if (sp != st.gpos) {
+                    break
+                }
+                pc = pc + 1
+            } else if (op == RX_XGRAPH) {
+                if (sp >= n) {
+                    re.hitEnd = true
+                    break
+                }
+                sp = rxGraphNext(text, sp, n)
+                pc = pc + 1
+            } else if (op == RX_GBOUND) {
+                // Pattern.GraphemeBound: not between a surrogate pair, and not before
+                // the first boundary after the previous match's end.
+                if (sp > 0 && sp < n) {
+                    var hs = text.charCodeAt(sp - 1)
+                    var ls = text.charCodeAt(sp)
+                    if ((hs >= 55296 && hs <= 56319 && ls >= 56320 && ls <= 57343) || rxGraphNext(text, st.glast, n) > sp) {
+                        break
+                    }
+                } else if (sp > 0) {
+                    re.hitEnd = true
+                    re.reqEnd = true
+                }
                 pc = pc + 1
             } else {
-                var ictr = st.ctr
-                var iold = ictr[islot]
-                ictr[islot] = iold + 1
-                var rin = rxRun(re, text, bs[pc], sp, caps, marks, st)
-                if (rin >= 0) { return rin }
-                ictr[islot] = iold
-                return -1
+                break
             }
-        } else if (op == RX_LOOKB) {
-            if (re.pcre && st.wrap != pc) { return rxRunUndo(re, text, pc, sp, caps, marks, st) }
-            st.wrap = 0 - 1
-            // Try the body from every start the length range allows, shortest
-            // first, each run required to end exactly here (RX_LBEND).
-            var lid = Math.floor(bs[pc] / 2)
-            var lneg = bs[pc] % 2 == 1
-            var lbmaxs = re.lbmax
-            var lbmins = re.lbmin
-            var lmax = lbmaxs[lid]
-            var lfrom = sp - lbmins[lid]
-            var lto = lmax < 0 ? 0 : sp - lmax
-            // The range counts characters; under P one may be a surrogate pair.
-            if (re.py) {
-                lfrom = rxCpBackN(text, sp, lbmins[lid])
-                lto = lmax < 0 ? 0 : rxCpBackN(text, sp, lmax)
+        }
+        // The forward run failed: pop entries until one resumes it.
+        while (true) {
+            if (top == base) { return -1 }
+            top = top - 1
+            var uk = bk[top]
+            var ux = bx[top]
+            var uy = by[top]
+            if (uk == RX_BT_ALT) {
+                pc = ux
+                sp = uy
+                break
+            } else if (uk == RX_BT_CAP) {
+                caps[ux] = uy
+            } else if (uk == RX_BT_ITER) {
+                // The entry just popped is the room for the iteration's own.
+                var uslot = as[ux]
+                var ucb = st.cbeg
+                if (top > lim) {
+                    bk[top] = RX_BT_CBEG
+                    bx[top] = uslot
+                    by[top] = ucb[uslot]
+                    top = top + 1
+                }
+                ucb[uslot] = uy
+                pc = ux + 1
+                sp = uy
+                break
+            } else if (uk == RX_BT_MARK) {
+                marks[ux] = uy
+            } else if (uk == RX_BT_CTR) {
+                st.ctr[ux] = uy
+            } else {
+                st.cbeg[ux] = uy
             }
-            if (lto < 0) { lto = 0 }
-            var lsaved = st.lbt
-            st.lbt = sp
-            var lhit = false
-            while (!lhit && lfrom >= lto) {
-                if (rxRun(re, text, pc + 1, lfrom, caps, marks, st) >= 0) { lhit = true }
-                if (st.over) { return -1 }
-                lfrom = re.py ? rxCpBack(text, lfrom) : lfrom - 1
-            }
-            st.lbt = lsaved
-            if (lhit == lneg) { return -1 }
-            pc = as[pc]
-        } else if (op == RX_LBEND) {
-            if (sp != st.lbt) { return -1 }
-            return sp
-        } else if (op == RX_ATOM) {
-            // The body's first success, and no other: the run below stops at
-            // RX_ATOMEND, and nothing here is retried when the rest fails.
-            // Captures the body set stay set then, as in Java; under C they
-            // are taken back, as in PCRE2 (rxRunUndo).
-            if (re.pcre && st.wrap != pc) { return rxRunUndo(re, text, pc, sp, caps, marks, st) }
-            st.wrap = 0 - 1
-            var ra = rxRun(re, text, pc + 1, sp, caps, marks, st)
-            if (ra < 0) { return -1 }
-            pc = as[pc]
-            sp = ra
-        } else if (op == RX_ATOMEND) {
-            return sp
-        } else if (op == RX_GPOS) {
-            if (sp != st.gpos) { return -1 }
-            pc = pc + 1
-        } else if (op == RX_XGRAPH) {
-            if (sp >= n) {
-                re.hitEnd = true
-                return -1
-            }
-            sp = rxGraphNext(text, sp, n)
-            pc = pc + 1
-        } else if (op == RX_GBOUND) {
-            // Pattern.GraphemeBound: not between a surrogate pair, and not before
-            // the first boundary after the previous match's end.
-            if (sp > 0 && sp < n) {
-                var hs = text.charCodeAt(sp - 1)
-                var ls = text.charCodeAt(sp)
-                if (hs >= 55296 && hs <= 56319 && ls >= 56320 && ls <= 57343) { return -1 }
-                if (rxGraphNext(text, st.glast, n) > sp) { return -1 }
-            } else if (sp > 0) {
-                re.hitEnd = true
-                re.reqEnd = true
-            }
-            pc = pc + 1
-        } else {
-            return -1
         }
     }
     return -1
 }
 
-// rxRunUndo runs the lookaround or atomic group at pc and everything after it
-// (st.wrap tells the run not to come back here), and puts the captures back as
-// they were when that fails: PCRE2 forgets what such a group captured once the
-// match backtracks past it, and what a negative lookaround's body captured.
-function rxRunUndo(re, text, pc, sp, caps, marks, st) {
-    var saved = []
+// rxUndoAll pushes every capture's current value onto the backtrack stack
+// above top, and answers the new top: PCRE2 forgets what a lookaround or atomic
+// group captured once the match backtracks past it, and what a negative
+// lookaround's body captured.
+function rxUndoAll(top, caps) {
+    var bk = rxBk
+    var bx = rxBx
+    var by = rxBy
+    var t = top
     var i = 0
     while (i < caps.length) {
-        saved.push(caps[i])
+        if (t == bk.length) { rxBtGrow() }
+        bk[t] = RX_BT_CAP
+        bx[t] = i
+        by[t] = caps[i]
+        t = t + 1
         i = i + 1
     }
-    st.wrap = pc
-    var r = rxRun(re, text, pc, sp, caps, marks, st)
-    if (r >= 0) { return r }
-    i = 0
-    while (i < caps.length) {
-        caps[i] = saved[i]
-        i = i + 1
-    }
-    return 0 - 1
+    return t
 }
 
-// rxIterJ enters one more iteration of the counted loop whose RX_CLOOP is at pc,
-// recording where it began so RX_CINC can tell an empty one.
-function rxIterJ(re, text, pc, sp, caps, marks, st) {
-    var as = re.as
-    var slot = as[pc]
-    var cbeg = st.cbeg
-    var old = cbeg[slot]
-    cbeg[slot] = sp
-    var r = rxRun(re, text, pc + 1, sp, caps, marks, st)
-    if (r >= 0) { return r }
-    cbeg[slot] = old
-    return -1
+// rxBtGrow makes room for 64 more backtrack-stack entries and answers the
+// stack's new size.
+function rxBtGrow() {
+    var bk = rxBk
+    var bx = rxBx
+    var by = rxBy
+    var i = 0
+    while (i < 64) {
+        bk.push(0)
+        bx.push(0)
+        by.push(0)
+        i = i + 1
+    }
+    return bk.length
 }
 
 // rxSearch finds the leftmost match at or after `start`. It answers null for no
@@ -5038,7 +5190,7 @@ function rxAttempt(re, text, at, mustEnd, gpos, glast, adv) {
     }
     var st = {steps: 0, over: false, mustEnd: mustEnd, lbt: -1, ctr: ctr, cbeg: cbeg,
               gpos: gpos, glast: glast, adv: adv, wrap: 0 - 1}
-    var end = rxRun(re, text, 0, at, caps, marks, st)
+    var end = rxRun(re, text, 0, at, caps, marks, st, 0, false)
     if (st.over) { rxFail("step limit exceeded") }
     if (end >= 0) { return {begin: caps[0], end: caps[1], caps: caps} }
     return null
