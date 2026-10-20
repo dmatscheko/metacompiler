@@ -4214,15 +4214,34 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             }
         }
         var last = ref.path[ref.path.length - 1]
-        if (last.key != undefined) { return {b: b, loc: {o: o, k: last.key}} }
-        var kr = last.idx(b)
-        return {b: kr.b, loc: {o: o, k: kr.v}}
+        var loc = {o: o, k: hUndef, cell: null}
+        if (last.key != undefined) { loc.k = last.key }
+        else {
+            var kr = last.idx(b)
+            b = kr.b
+            loc.k = kr.v
+        }
+        // `*p.f = v` writes through the pointer the path holds. Twin of refLoc in
+        // go-interpreter.abnf.
+        if (ref.stars > 0) {
+            var pr = emitLocRead(b, {name: ref.name, path: ref.path, stars: 0, tys: ref.tys}, loc)
+            b = pr.b
+            var cell = pr.v
+            for (var st = 1; st < ref.stars; st++) {
+                var dr = emitDerefV(b, cell)
+                b = dr.b
+                cell = dr.v
+            }
+            loc.cell = cell
+        }
+        return {b: b, loc: loc}
     }
     function emitLocRead(b, ref, loc) {
         if (ref.path.length == 0) {
             if (ref.stars > 0) { return emitDerefV(b, loc) }
             return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)])}
         }
+        if (loc.cell != null) { return emitDerefV(b, loc.cell) }
         var n = ref.path.length - 1
         if (ref.path[n].key != undefined) { return {b: b, v: callExt(b, "js_gofield", [loc.o, emitStr(b, loc.k)])} }
         return {b: b, v: emitIdxGet(b, loc.o, loc.k, ref.tys[n])}
@@ -4243,6 +4262,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 callExt(b, "js_scope_set", [curScopeV, emitStr(b, ref.name), emitArrCopy(b, v, ref.tys[0])])
             }
             return b
+        }
+        if (loc.cell != null) {
+            var cl = loc.cell
+            var plain = {name: ref.name, path: ref.path, stars: 0, tys: ref.tys}
+            var wr = emitSelect(b, emitIsPtr(b, cl), function(tb) { return {b: emitCellSet(tb, cl, v), v: v} },
+                                function(eb) { return {b: emitLocWrite(eb, plain, {o: loc.o, k: loc.k, cell: null}, v), v: v} })
+            return wr.b
         }
         var n = ref.path.length - 1
         if (ref.path[n].key != undefined) {
@@ -6673,7 +6699,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
 
     // Go stdlib packages the runtime provides (resolveImport lives in lib/compile-core.js;
     // exact-match paths, so sub-packages like "encoding/json" are listed in full).
-    core.stdlibImports = ["fmt", "os", "errors", "regexp", "path", "encoding/json", "context", "flag", "log", "reflect"]
+    core.stdlibImports = ["fmt", "os", "errors", "regexp", "encoding/json", "context", "reflect"]
     function fail(msg) { println("go compiler error: " + msg); exit(1) }
 
     // Project-file imports: import "mathbox" -> mathbox.go (a slash path like "a/b" ->

@@ -6,17 +6,18 @@
 // toolchain recovers panic(nil) as nil; this file asserts the Go 1.21+ answer
 // (a *runtime.PanicNilError), as the grammars implement it.
 
-// Full-syntax test: Go (Go 1.22 core language) - part 2 of 2, sections 83 on.
+// Full-syntax test: Go (Go 1.22 core language) - part 2 of 3, sections 83 to 93.
 //
-// THE GO RATCHET IS TWO FILES, so that neither -frozen interpreter leg comes near
-// the IR interpreter's step brake (-max-steps, 100M per call):
+// THE GO RATCHET IS THREE FILES, so that no -frozen interpreter leg comes near the
+// IR interpreter's step brake (-max-steps, 100M per call): compiling a standard
+// package written in Go costs the leg that imports it.
 //
 //   tests/go-test-full.go     sections 01 to 82
-//   tests/go-test-full.2.go   sections 83 on: the standard packages written in Go,
-//                             and every newer section
+//   tests/go-test-full.2.go   sections 83 to 93
+//   tests/go-test-full.3.go   sections 94 on, and every newer section
 //
-// The section NUMBERS are global, and ./test.sh --full reports the two files as
-// the units go and go2. Add a new section to this file.
+// The section NUMBERS are global, and ./test.sh --full reports the files as the
+// units go, go2 and go3.
 //
 // This file belongs to the SECOND test group (./test.sh --full): it is NOT part
 // of the default matrix. The goal of the metacompiler is to support the full
@@ -51,12 +52,10 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"cmp"
 	"errors"
 	"fmt"
-	"io"
 	"iter"
 	"maps"
 	"math"
@@ -67,7 +66,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 	"unicode"
 	"unicode/utf8"
 )
@@ -730,90 +728,6 @@ func s93() {
 	check("new1", fmt.Sprintf("%T %v", p, p) == "*main.P93 &{1}")
 }
 
-// ===== SECTION 94: packages io, bufio and time; strings.Reader, os.Args =====
-// Go source (languages/lib/go-io.go, go-bufio.go, go-time.go) over an io.Reader.
-// The expected values are go run's.
-type D94 int64
-
-const (
-	ns94 D94 = 1
-	us94     = 1000 * ns94
-)
-
-func (d D94) String() string { return fmt.Sprint(int64(d), "u") }
-
-func s94() {
-	sc := bufio.NewScanner(strings.NewReader("one two\nthree\n\nfour"))
-	got := ""
-	for sc.Scan() {
-		got += "[" + sc.Text() + "]"
-	}
-	ws := bufio.NewScanner(strings.NewReader("  a b\tc\n d "))
-	ws.Split(bufio.ScanWords)
-	nw := 0
-	for ws.Scan() {
-		nw++
-	}
-	r := bufio.NewReader(strings.NewReader("x,y"))
-	t1, _ := r.ReadString(',')
-	t2, e2 := r.ReadString(',')
-	all, _ := io.ReadAll(strings.NewReader("all"))
-	var buf bytes.Buffer
-	w := bufio.NewWriter(&buf)
-	fmt.Fprintf(w, "%d", 7)
-	before := buf.Len()
-	w.Flush()
-	check("bio1", fmt.Sprint(got, nw, t1, t2, e2 == io.EOF, string(all), before, buf.String(), sc.Err()) ==
-		"[one two][three][][four]4x,ytrueall07<nil>")
-	d := 90*time.Minute + 30*time.Second + 5*time.Millisecond
-	t := time.Date(2024, time.February, 29, 13, 4, 5, 123000000, time.UTC)
-	pd, _ := time.ParseDuration("1h15m30.5s")
-	check("tim1", fmt.Sprint(d, " ", time.Duration(1500)*time.Microsecond, " ", d.Truncate(time.Hour), " ", pd) == "1h30m30.005s 1.5ms 1h0m0s 1h15m30.5s")
-	check("tim2", fmt.Sprint(t, "|", t.Format(time.RFC3339), "|", t.Format(time.Kitchen), "|", t.Month(), t.Weekday(), t.YearDay(), t.Unix()) ==
-		"2024-02-29 13:04:05.123 +0000 UTC|2024-02-29T13:04:05Z|1:04PM|February Thursday 60 1709211845")
-	t2b := t.Add(36 * time.Hour)
-	check("tim3", fmt.Sprint(t2b.Format(time.DateTime), " ", t2b.Sub(t), " ", t.AddDate(0, 1, 0).Format(time.DateOnly), " ", fmt.Sprintf("%T", time.Hour)) ==
-		"2024-03-02 01:04:05 36h0m0s 2024-03-29 time.Duration")
-	check("cty1", fmt.Sprintf("%T %v %v", us94, us94, 3*us94) == "main.D94 1000u 3000u")
-	check("osa1", len(os.Args) == 1)
-}
-
-// ===== SECTION 95: the capacity append grows a slice to =====
-// gc's runtime.growslice: doubling, then +(n+768)/4, rounded up to the malloc size
-// class of the bytes. The slices escape (sink95), so gc puts no first backing array
-// on the stack. The expected values are go run's.
-var sink95 []interface{}
-
-type pt95 struct{ a, b, c int }
-
-func caps95[T any](n int) string {
-	var s []T
-	var z T
-	out := ""
-	last := -1
-	for i := 0; i < n; i++ {
-		s = append(s, z)
-		sink95 = append(sink95[:0], s)
-		if cap(s) != last {
-			last = cap(s)
-			out += fmt.Sprint(last, " ")
-		}
-	}
-	return out
-}
-
-func s95() {
-	check("cap1", caps95[int](1300) == "1 2 4 8 16 32 64 128 256 512 848 1280 1792 ")
-	check("cap2", caps95[byte](600) == "8 16 32 64 128 256 512 896 ")
-	check("cap3", caps95[string](300) == "1 2 4 8 16 32 71 143 303 ")
-	check("cap4", caps95[pt95](100) == "1 2 4 8 16 32 64 128 ")
-	a := []int{1, 2, 3, 4}
-	b := a[1:2:2]
-	b = append(b, 9)
-	sink95 = append(sink95[:0], b)
-	check("cap5", cap(b) == 2)
-}
-
 func main() {
 	s83() // SECTION-CALL 83
 	s84() // SECTION-CALL 84
@@ -826,8 +740,6 @@ func main() {
 	s91() // SECTION-CALL 91
 	s92() // SECTION-CALL 92
 	s93() // SECTION-CALL 93
-	s94() // SECTION-CALL 94
-	s95() // SECTION-CALL 95
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

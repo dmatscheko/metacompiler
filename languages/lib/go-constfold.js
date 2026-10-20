@@ -3350,6 +3350,10 @@ function goLibFile(path) {
     if (path == "io") { return "lib/go-io.go" }
     if (path == "bufio") { return "lib/go-bufio.go" }
     if (path == "time") { return "lib/go-time.go" }
+    if (path == "path") { return "lib/go-path.go" }
+    if (path == "path/filepath") { return "lib/go-filepath.go" }
+    if (path == "log") { return "lib/go-log.go" }
+    if (path == "flag") { return "lib/go-flag.go" }
     if (path == "unicode/utf8") { return "lib/go-utf8.go" }
     if (path == "sync/atomic") { return "lib/go-atomic.go" }
     return ""

@@ -4522,9 +4522,18 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // every target are evaluated first (refLoc), then the values are stored left
     // to right (locWrite). So `i, a[i] = 1, 9` writes a[0], and `s, s[0] = t, 1`
     // writes the OLD s. Twin of emitRefLoc in go-to-llvm-ir.abnf.
+    // `*p.f = v` writes through the pointer the path holds (cell), a pointer to a
+    // struct being the struct itself. Twin of emitRefLoc in go-to-llvm-ir.abnf.
     function refLoc(ref) {
         if (ref.path.length == 0) { return ref.stars > 0 ? derefTarget(ref) : null }
-        return resolveRef(ref)
+        var loc = resolveRef(ref)
+        if (ref.stars > 0) {
+            var p = anytype
+            p = goIndex(loc.obj, loc.key)
+            for (var s = 1; s < ref.stars && isPtr(p); s++) { p = ptrGet(p) }
+            if (isPtr(p)) { return {obj: loc.obj, key: loc.key, cell: p} }
+        }
+        return loc
     }
     function locWrite(ref, loc, v) {
         if (ref.path.length == 0) {
@@ -4532,10 +4541,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             setVar(ref.name, goVal(v))
             return
         }
+        if (loc.cell !== undefined) { ptrSet(loc.cell, goVal(v)); return }
         goSetAt(loc.obj, loc.key, goVal(v))
     }
     function locRead(ref, loc) {
         if (ref.path.length == 0) { return loc != null ? ptrGet(loc) : getVar(ref.name) }
+        if (loc.cell !== undefined) { return ptrGet(loc.cell) }
         return goIndex(loc.obj, loc.key)
     }
     // items = [ref..., {op}, exprThunks...]: parallel assignment, or unpacking of a
@@ -6255,7 +6266,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     core.blank = "_"
     // Go stdlib packages the runtime provides (resolveImport lives in lib/interp-core.js;
     // exact-match paths, so sub-packages like "encoding/json" are listed in full).
-    core.stdlibImports = ["fmt", "os", "errors", "regexp", "path", "encoding/json", "context", "flag", "log", "reflect"]
+    core.stdlibImports = ["fmt", "os", "errors", "regexp", "encoding/json", "context", "reflect"]
     core.nullWord = "nil"
     // `p.In.X = 1` with a nil p.In walks resolveRef's path; in Go it is a recoverable
     // panic. The hook is additive in lib/interp-core.js - every language that leaves
