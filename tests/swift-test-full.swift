@@ -5560,6 +5560,31 @@ func s143() {
     check("143b", st.min == 1 && st.max == 7 && "\(st)" == "(min: 1, max: 7)")
 }
 
+// ===== SECTION 144: a subscript's declared element type; callAsFunction =====
+// A subscript declared `-> Double` answers 0.0 for a literal 0, as a function's
+// result does, and its setter's newValue adopts the same type. An instance whose
+// type declares `callAsFunction` is called like a function (SE-0253). Every value
+// read off swiftc 6.1.2.
+func pw144(_ x: Double, _ n: Int) -> Double { n == 0 ? 1 : x * pw144(x, n - 1) }
+struct Poly144 {
+    var c: [Double]
+    var last: Double = 0
+    subscript(i: Int) -> Double {
+        get { i < c.count ? c[i] : 0 }
+        set { last = newValue }
+    }
+    func callAsFunction(_ x: Double) -> Double { c.enumerated().reduce(0) { $0 + $1.element * pw144(x, $1.offset) } }
+}
+final class Scale144 { let k: Int; init(_ k: Int) { self.k = k }; func callAsFunction(_ x: Int) -> Int { x * k } }
+func s144() {
+    var p = Poly144(c: [1, 2, 3])
+    p[9] = 4
+    let s = Scale144(3)
+    let fs = [s]
+    check("144a", "\(p[5])" == "0.0" && "\(p.last)" == "4.0" && p[1] == 2.0)
+    check("144b", p(2) == 17.0 && s(5) == 15 && fs[0](2) == 6)
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5704,6 +5729,7 @@ func main() {
     s141() // SECTION-CALL 141
     s142() // SECTION-CALL 142
     s143() // SECTION-CALL 143
+    s144() // SECTION-CALL 144
     print("full: \(checks) checks, \(fails) failures")
 }
 

@@ -7202,13 +7202,27 @@ KwContinue  = "continue" KwEnd ;
                 writeBacks(ea.boxes)
                 return cv
             }
-            if (typeof f != "function") { fail("call of a non function: " + name) }
+            if (typeof f != "function") {
+                var cav = swCallValue(f, argv, recLabels(recs), "call of a non function: " + name)
+                writeBacks(ea.boxes)
+                return cav
+            }
             swSelfCallLabels = recLabels(recs)
             var r = f.apply(undefined, argv)
             swSelfCallLabels = null
             writeBacks(ea.boxes)
             return r
         }
+    }
+    // A call of a value: a function, or an instance whose type declares
+    // `callAsFunction` (SE-0253), which the call runs. Twin of sw_callval in
+    // swift-to-llvm-ir.abnf.
+    function swCallValue(f, argv, labels, msg) {
+        if (typeof f == "function") { return f.apply(undefined, argv) }
+        var t = f !== null && f !== undefined && typeof f == "object" && f.__class != undefined ? accTable(f) : null
+        if (t == null || typeof classFind(t, "callAsFunction") != "function") { fail(msg) }
+        pendingLabels = labels
+        return mcall(f, "callAsFunction", argv)
     }
     // The member-chain fold, with argument records instead of bare thunks.
     // The name a chain STARTS with, when it starts with a bare one: the matched text
@@ -7645,8 +7659,7 @@ KwContinue  = "continue" KwEnd ;
                     writeBacks(ea.boxes)
                 } else if (s.kind == "call") {
                     var eac = evalArgs(s.args)
-                    if (typeof cur != "function") { fail("call of a non-function value") }
-                    cur = cur.apply(undefined, eac.argv)
+                    cur = swCallValue(cur, eac.argv, recLabels(s.args), "call of a non-function value")
                     writeBacks(eac.boxes)
                 } else if (s.kind == "postop") {
                     var pv = anytype
@@ -9281,19 +9294,26 @@ KwContinue  = "continue" KwEnd ;
         var get = null
         var set = null
         var setP = "newValue"
+        // The declared element type adopts what the getter answers and what the
+        // setter is handed, as a function's result and parameter do.
+        var rty = ""
         for (var i = 1; i < items.length; i++) {
             var it = items[i]
+            if (it != undefined && it.itype != undefined) { rty = it.itype }
+            else if (it != undefined && it.atype != undefined && it.tlabels == undefined) { rty = it.atype }
             if (it == undefined || it.acc == undefined) { continue }
             var a = it.acc
             if (a.kind == "get" || a.kind == "_read") { get = a.body }
             else if (a.kind == "set" || a.kind == "_modify") { set = a.body; if (a.param != null) { setP = a.param } }
         }
         var out = []
-        if (get != null) { out.push({method: {name: "__sub_get", params: params, body: get}}) }
+        if (get != null) { out.push({method: {name: "__sub_get", params: params, body: get, rtype: rty}}) }
         if (set != null) {
             var sp = []
             for (var k = 0; k < params.length; k++) { sp.push(params[k]) }
-            sp.push(plainParam(setP))
+            var np = plainParam(setP)
+            np.adopt = rty
+            sp.push(np)
             out.push({method: {name: "__sub_set", params: sp, body: set}})
         }
         return out

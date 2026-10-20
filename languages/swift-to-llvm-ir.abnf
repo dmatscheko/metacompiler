@@ -4649,6 +4649,24 @@ KwContinue  = "continue" KwEnd ;
             noB.NewRet(hUndef)
         })
     }
+    // A call of a value: a function, or an instance whose type declares
+    // `callAsFunction` (SE-0253), which the call runs. Only a program declaring a
+    // callAsFunction anywhere routes its value calls here (swEmitCallValue). Twin
+    // of swCallValue in swift-interpreter.abnf.
+    function rtCallVal() {
+        return rtFunc("sw_callval", 2, function(b, ps) {
+            var fnB = curF.NewBlock("")
+            var objB = curF.NewBlock("")
+            var noInst = callExt(b, "js_seq", [b.NewCall(rtSafeGet(), [ps[0], emitStr(b, "__class")]), hUndef])
+            b.NewCondBr(truthy(b, noInst), fnB, objB)
+            fnB.NewRet(callExt(fnB, "js_call", [ps[0], hUndef, ps[1]]))
+            objB.NewRet(callExt(objB, "js_swmcall", [ps[0], emitStr(objB, "callAsFunction"), ps[1]]))
+        })
+    }
+    function swEmitCallValue(b, fV, argsV) {
+        if (!isMemberMethod("callAsFunction")) { return callExt(b, "js_call", [fV, hUndef, argsV]) }
+        return b.NewCall(rtCallVal(), [fV, argsV])
+    }
     // The `self` in scope, undefined where there is none (top-level code).
     function rtSelfOrUndef() {
         return rtFunc("sw_selfor", 1, function(b, ps) {
@@ -5989,7 +6007,7 @@ KwContinue  = "continue" KwEnd ;
                     else if (s.kind == "call") {
                         var eac = emitArgRecs(b, s.args)
                         b = eac.b
-                        cur = callExt(b, "js_call", [cur, hUndef, eac.v])
+                        cur = swEmitCallValue(b, cur, eac.v)
                     } else if (s.kind == "index") {
                         var ri = s.idx(b)
                         b = ri.b
@@ -6183,7 +6201,7 @@ KwContinue  = "continue" KwEnd ;
                 } else if (s.kind == "call") {
                     var eac = emitArgRecs(b, s.args)
                     b = eac.b
-                    cur = callExt(b, "js_call", [cur, hUndef, eac.v])
+                    cur = swEmitCallValue(b, cur, eac.v)
                     emitWriteBacks(b, eac.boxes)
                     pathKey = null
                 } else if (s.kind == "postop") {
@@ -7442,7 +7460,7 @@ KwContinue  = "continue" KwEnd ;
                 var ppB = curF.NewBlock("")
                 var pjB = curF.NewBlock("")
                 b.NewCondBr(truthy(b, callExt(b, "js_seq", [pv2, emitStr(b, "undefined")])), ppB, plB)
-                var plv = callExt(plB, "js_call", [plB.NewCall(rtKGet(), [curScopeV, emitStr(plB, name)]), hUndef, ea.v])
+                var plv = swEmitCallValue(plB, plB.NewCall(rtKGet(), [curScopeV, emitStr(plB, name)]), ea.v)
                 plB.NewBr(pjB)
                 var ppV = ppB.NewCall(rtKGet(), [curScopeV, emitStr(ppB, typeKeyOf(pstat))])
                 var ppv = ppB.NewCall(rtPrependCall(),
@@ -7462,7 +7480,7 @@ KwContinue  = "continue" KwEnd ;
                 var selfB = curF.NewBlock("")
                 var joinB = curF.NewBlock("")
                 b.NewCondBr(truthy(b, callExt(b, "js_seq", [tv, emitStr(b, "undefined")])), selfB, localB)
-                var lv = callExt(localB, "js_call", [localB.NewCall(rtKGet(), [curScopeV, emitStr(localB, name)]), hUndef, ea.v])
+                var lv = swEmitCallValue(localB, localB.NewCall(rtKGet(), [curScopeV, emitStr(localB, name)]), ea.v)
                 localB.NewBr(joinB)
                 // js_swextcall when an `extension Int { ... }` also declares the
                 // name: `extension Int: P` conforms a BUILTIN, so the receiver of a
@@ -7510,7 +7528,7 @@ KwContinue  = "continue" KwEnd ;
                 var xSelfB = curF.NewBlock("")
                 var xJoinB = curF.NewBlock("")
                 b.NewCondBr(truthy(b, callExt(b, "js_seq", [xtv, emitStr(b, "undefined")])), xSelfB, xLocB)
-                var xlv = callExt(xLocB, "js_call", [xLocB.NewCall(rtKGet(), [curScopeV, emitStr(xLocB, name)]), hUndef, ea.v])
+                var xlv = swEmitCallValue(xLocB, xLocB.NewCall(rtKGet(), [curScopeV, emitStr(xLocB, name)]), ea.v)
                 xLocB.NewBr(xJoinB)
                 // The labels pick among the builtin's members, as on `self.index(after: i)`.
                 var xsv = swEmitLMCall(xSelfB, xSelfB.NewCall(rtKGet(), [curScopeV, emitStr(xSelfB, "self")]),
@@ -7524,7 +7542,7 @@ KwContinue  = "continue" KwEnd ;
             // A capitalised name no function declares may be a generic parameter
             // bound to a type at run time (`T()` in `func make<T: P>(_: T.Type)`).
             var cap = name.charCodeAt(0) >= 65 && name.charCodeAt(0) <= 90 && lookupSig(name) == null
-            var rv = cap ? b.NewCall(rtDynCall(), [fV, ea.v, emitStr(b, swDynInitSlot(args))]) : callExt(b, "js_call", [fV, hUndef, ea.v])
+            var rv = cap ? b.NewCall(rtDynCall(), [fV, ea.v, emitStr(b, swDynInitSlot(args))]) : swEmitCallValue(b, fV, ea.v)
             emitWriteBacks(b, ea.boxes)
             return {b: b, v: rv}
         }
@@ -9728,19 +9746,26 @@ KwContinue  = "continue" KwEnd ;
         var get = null
         var set = null
         var setP = "newValue"
+        // The declared element type adopts what the getter answers and what the
+        // setter is handed, as a function's result and parameter do.
+        var rty = ""
         for (var i = 1; i < items.length; i++) {
             var it = items[i]
+            if (it != undefined && it.itype != undefined) { rty = it.itype }
+            else if (it != undefined && it.atype != undefined && it.tlabels == undefined) { rty = it.atype }
             if (it == undefined || it.acc == undefined) { continue }
             var a = it.acc
             if (a.kind == "get" || a.kind == "_read") { get = a.body }
             else if (a.kind == "set" || a.kind == "_modify") { set = a.body; if (a.param != null) { setP = a.param } }
         }
         var out = []
-        if (get != null) { out.push({method: {name: "__sub_get" + params.length, params: params, body: get}}) }
+        if (get != null) { out.push({method: {name: "__sub_get" + params.length, params: params, body: get, rtype: rty}}) }
         if (set != null) {
             var sp = []
             for (var k = 0; k < params.length; k++) { sp.push(params[k]) }
-            sp.push(plainParam(setP))
+            var np = plainParam(setP)
+            np.adopt = rty
+            sp.push(np)
             out.push({method: {name: "__sub_set" + params.length, params: sp, body: set}})
         }
         return out
