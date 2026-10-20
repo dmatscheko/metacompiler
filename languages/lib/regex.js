@@ -69,7 +69,13 @@
 //                                            backreference to a group that did
 //                                            not take part FAILS; the errors are
 //                                            Java's descriptions, positioned in
-//                                            re.errAt)
+//                                            re.errAt; inline flags (?idmsuxU-..)
+//                                            anywhere and scoped (?..:X), atomic
+//                                            groups and possessive quantifiers,
+//                                            Java's line terminators for . ^ $ \Z)
+//                                            u, d (J only: UNICODE_CASE and
+//                                            UNIX_LINES from the start, as the
+//                                            inline u and d)
 //                                            n (a backreference to a group that did
 //                                            not take part FAILS, as in Python and
 //                                            Ruby, instead of matching empty; J and
@@ -84,6 +90,13 @@
 //                                            index into the pattern, or -1.
 //   rxSearch(re, text, start) -> m | null    m.begin, m.end, m.caps (2*(n+1) ints,
 //                                            -1 when the group did not take part)
+//   rxSearchFrom(re, text, start, gpos, glast)   rxSearch with java.util.regex's
+//                                            Matcher state for \G (gpos, its
+//                                            oldLast) and \b{g} (glast, its last):
+//                                            the previous match's end, for a
+//                                            Matcher's next find. rxSearch,
+//                                            rxMatchAt and rxMatchWhole are a fresh
+//                                            Matcher's: gpos the start, glast 0
 //   rxMatchAt(re, text, at) -> m | null       the match must BEGIN at `at` (sticky)
 //   rxMatchWhole(re, text, at) -> m | null    the match must run from `at` (0 for
 //                                            the ordinary case) to the very END.
@@ -125,6 +138,11 @@ var RX_CLOOP = 15  // counted loop a: another iteration, or leave at b
 var RX_CINC = 16   // counted loop a: one iteration done, back to b
 var RX_LOOKB = 17  // lookbehind: a = address after the body, b = 2 * id + negative
 var RX_LBEND = 18  // the lookbehind body must end where the lookbehind stands
+var RX_ATOM = 19   // atomic group: a = address after the body (J only)
+var RX_ATOMEND = 20
+var RX_GPOS = 21   // \G: where the previous match ended (J only)
+var RX_XGRAPH = 22 // \X: one extended grapheme cluster (J only)
+var RX_GBOUND = 23 // \b{g}: a grapheme cluster boundary, as Java finds one (J only)
 
 // ----- Assertion kinds -----
 var RX_BOL = 1     // ^
@@ -136,6 +154,19 @@ var RX_EOS = 6     // \z
 var RX_EOSNL = 7   // \Z (end, or just before a final newline)
 var RX_MBOL = 8    // ^ under P with m in force: a line start whatever re.multi says
 var RX_MEOL = 9    // $ under P with m in force
+// java.util.regex's anchors (J), chosen as each is read: a line terminator is
+// \n, \r\n, \r, U+0085, U+2028 or U+2029, or under UNIX_LINES (the U kinds) \n
+// alone. Twins of Caret, UnixCaret, Dollar, UnixDollar and Bound in Pattern.java.
+var RX_JBOL = 10    // ^ under MULTILINE
+var RX_JUBOL = 11
+var RX_JEOL = 12    // $ and \Z: the end, or before a final line terminator
+var RX_JUEOL = 13
+var RX_JMEOL = 14   // $ under MULTILINE: before any line terminator, or the end
+var RX_JUMEOL = 15
+var RX_JWORDB = 16  // \b: ASCII \w, and a non-spacing mark after a letter or digit
+var RX_JNWORDB = 17
+var RX_JUWORDB = 18 // \b under UNICODE_CHARACTER_CLASS: Unicode \w
+var RX_JUNWORDB = 19
 
 // ----- Character-class shorthands -----
 var RX_SD = 1      // \d
@@ -166,10 +197,12 @@ var RX_STEPS = 400000
 // nested classes in the union (each with its own neg), ands[] the operands of
 // &&, and props[] the \p{..} properties rxPropHit decides. x marks a class that
 // uses any of the three; it compiles to RX_CLASSX, so a flat class keeps the
-// plain RX_CLASS path.
+// plain RX_CLASS path. u marks ranges read under Java's (?iu): they also take
+// a character whose simple uppercase, or that uppercase's lowercase, is in
+// range (Pattern.java's CIRangeU and SingleU).
 
 function rxNewCls() {
-    return {neg: false, lo: [], hi: [], sp: [], subs: [], ands: [], props: [], x: false}
+    return {neg: false, lo: [], hi: [], sp: [], subs: [], ands: [], props: [], x: false, u: false}
 }
 
 function rxClsAdd(cls, from, to) {
@@ -275,9 +308,10 @@ function rxIsVSpaceJ(c) {
     return c == 133 || c == 8232 || c == 8233
 }
 
-// rxPropHit answers whether code point c has the \p{..} property id (rxPropId).
+// rxPropHit answers whether code point c has the \p{..} property id (RX_P*).
 // It is a KNOB like rxFail: the Unicode tables live with the language (Java's in
-// lib/java-chars.js), so a grammar that passes J assigns its own after the include.
+// lib/java-chars.js and lib/java-regex.js), so a grammar that passes J assigns
+// its own after the include.
 var rxPropHit = function (id, c) { return false }
 
 // rxClsHitX is rxClsHit for a class TREE: the union of the class's own ranges,
@@ -351,7 +385,35 @@ function rxClsHit(cls, c) {
         if (rxSpHas(sp[i], c)) { return true }
         i = i + 1
     }
+    if (cls.u) { return rxClsHitU(cls, c) }
     return false
+}
+
+// rxClsHitU is the rest of a u class's range test: the simple uppercase of c,
+// then that uppercase's lowercase.
+function rxClsHitU(cls, c) {
+    var lo = cls.lo
+    var hi = cls.hi
+    var k = 0
+    var v = rxCaseU(c, 1)
+    while (k < 2) {
+        var i = 0
+        while (i < lo.length) {
+            if (v >= lo[i] && v <= hi[i]) { return true }
+            i = i + 1
+        }
+        v = rxCaseU(v, 0)
+        k = k + 1
+    }
+    return false
+}
+
+// rxCaseU is java.lang.Character's simple case mapping of one UTF-16 unit:
+// mode 1 uppercase, 0 lowercase. A mapping that leaves the unit's plane keeps it.
+function rxCaseU(c, mode) {
+    var s = unicodeCase(String.fromCharCode(c), mode)
+    if (s.length == 1) { return s.charCodeAt(0) }
+    return c
 }
 
 // rxClsMatch applies case folding first and negation LAST - a negated class under /i/
@@ -379,10 +441,12 @@ function rxClsMatchX(cls, c, icase) {
 // ===== The pattern parser =====
 //
 // A node carries every field with a default, so the shape is uniform:
-//   t     "cat" | "alt" | "rep" | "cls" | "assert" | "group" | "look" | "bref" | "empty"
+//   t     "cat" | "alt" | "rep" | "cls" | "assert" | "group" | "look" | "lookb" | "bref"
+//         | "atom" (an atomic group, J) | "op" (one J instruction, gidx) | "empty"
 //   items child nodes (always an array)
 //   cls   character class (always an object)
-//   min/max/greedy   for "rep" (max < 0 means unbounded)
+//   min/max/greedy   for "rep" (max < 0 means unbounded); min of a "bref" is 1
+//         for a case-insensitive one, 2 under Java's UNICODE_CASE
 //   gidx  capture index for "group" (-1: non-capturing), assertion kind for "assert",
 //         group index for "bref", 1 for a negative "look"
 
@@ -504,74 +568,55 @@ function rxOctAt(st, i) {
     return d
 }
 
-// The \p{..} property ids rxPropHit answers for, and the POSIX names that are
-// plain ASCII ranges (java.util.regex's US-ASCII \p{Lower} .. \p{Space}).
-var RX_PL = 1      // L, IsL, IsLetter, javaLetter
-var RX_PLU = 2     // Lu, IsLu
-var RX_PLL = 3     // Ll, IsLl
-var RX_PLT = 4     // Lt, IsLt
-var RX_PND = 5     // Nd, IsNd, IsDigit, javaDigit
-var RX_PNL = 6     // Nl, IsNl
-var RX_PALPHA = 7  // IsAlphabetic, javaAlphabetic
-var RX_PUPPER = 8  // IsUppercase, javaUpperCase
-var RX_PLOWER = 9  // IsLowercase, javaLowerCase
-var RX_PLD = 10    // LD, javaLetterOrDigit
+// The \p{..} property ids rxPropHit answers for (the names that read them are
+// lib/java-regex.js's jxPropCls). RX_PGC + t is general category t, in
+// java.lang.Character.getType's numbering; RX_PSC + n is the script of ordinal
+// n, RX_PBLK + n the n-th block and RX_PBIN + b bit b of the emoji /
+// ideographic / mirrored table.
+var RX_PL = 1        // isLetter
+var RX_PLU = 2       // gc Lu
+var RX_PLL = 3       // gc Ll
+var RX_PLT = 4       // gc Lt
+var RX_PND = 5       // isDigit (gc Nd)
+var RX_PNL = 6       // gc Nl
+var RX_PALPHA = 7    // isAlphabetic
+var RX_PUPPER = 8    // isUpperCase
+var RX_PLOWER = 9    // isLowerCase
+var RX_PLD = 10      // isLetterOrDigit
+var RX_PWORD = 11    // Unicode \w: Alphabetic, marks, Nd, Pc, Join_Control
+var RX_PWHITE = 12   // White_Space
+var RX_PHEX = 13     // Hex_Digit
+var RX_PJOIN = 14    // Join_Control
+var RX_PNONCH = 15   // Noncharacter_Code_Point
+var RX_PASSIGNED = 16 // gc is not Cn (also isDefined)
+var RX_PGRAPH = 17   // Unicode \p{Graph}
+var RX_PPRINT = 18   // Unicode \p{Print}
+var RX_PBLANK = 19   // Unicode \p{Blank}
+var RX_PCASED = 20   // upper, lower or title case: the CASE_INSENSITIVE reading of each
+var RX_PALNUM = 21   // Unicode \p{Alnum}
+var RX_PJSTART = 22  // isJavaIdentifierStart
+var RX_PJPART = 23   // isJavaIdentifierPart
+var RX_PUSTART = 24  // isUnicodeIdentifierStart
+var RX_PUPART = 25   // isUnicodeIdentifierPart
+var RX_PIGNORE = 26  // isIdentifierIgnorable
+var RX_PJWHITE = 27  // isWhitespace
+var RX_PBIN = 32
+var RX_PGC = 64
+var RX_PMN = 70      // gc Mn
+var RX_PSC = 128
+var RX_PBLK = 512
 
-function rxPropId(name) {
-    if (name == "L" || name == "IsL" || name == "javaLetter") { return RX_PL }
-    if (name == "Lu" || name == "IsLu") { return RX_PLU }
-    if (name == "Ll" || name == "IsLl") { return RX_PLL }
-    if (name == "Lt" || name == "IsLt") { return RX_PLT }
-    if (name == "Nd" || name == "IsNd" || name == "javaDigit") { return RX_PND }
-    if (name == "Nl" || name == "IsNl") { return RX_PNL }
-    if (name == "javaAlphabetic") { return RX_PALPHA }
-    if (name == "javaUpperCase") { return RX_PUPPER }
-    if (name == "javaLowerCase") { return RX_PLOWER }
-    if (name == "LD" || name == "javaLetterOrDigit") { return RX_PLD }
-    if (name.indexOf("Is") != 0) { return 0 }
-    // A binary property after Is ignores case: \p{IsAlphabetic}, \p{isletter}.
-    var u = name.substring(2).toUpperCase()
-    if (u == "LETTER") { return RX_PL }
-    if (u == "DIGIT") { return RX_PND }
-    if (u == "ALPHABETIC") { return RX_PALPHA }
-    if (u == "UPPERCASE") { return RX_PUPPER }
-    if (u == "LOWERCASE") { return RX_PLOWER }
-    return 0
-}
+// rxGraphNext answers where the extended grapheme cluster that starts at i
+// ends (limit at most): Java's Grapheme.nextBoundary. A KNOB like rxPropHit
+// (lib/java-regex.js's jxGraphNext).
+var rxGraphNext = function (text, i, limit) { return i + 1 }
 
-// rxPropCls is the class of \p{name}. A name Java has but this engine does not
-// (another general category, a script, a block) is reported as unsupported;
-// only a name of none of Java's shapes is Java's "Unknown character property".
-function rxPropCls(st, name, at) {
-    var cls = rxNewCls()
-    var posix = " Lower:lower Upper:upper ASCII:ascii Alpha:alpha Digit:digit Alnum:alnum Punct:punct"
-        + " Graph:graph Print:print Blank:blank Cntrl:cntrl XDigit:xdigit Space:space "
-    var k = posix.indexOf(" " + name + ":")
-    if (k >= 0) {
-        var rest = posix.substring(k + name.length + 2)
-        rxPosixAdd(cls, rest.substring(0, rest.indexOf(" ")))
-        return cls
-    }
-    if (name == "all") {
-        rxClsAdd(cls, 0, 1114111)
-        return cls
-    }
-    var id = rxPropId(name)
-    if (id > 0) {
-        var props = cls.props
-        props.push(id)
-        cls.x = true
-        return cls
-    }
-    var gc = " C Cc Cf Cn Co Cs L LC Ll Lm Lo Lt Lu L1 M Mc Me Mn N Nd Nl No P Pc Pd Pe Pf Pi Po Ps"
-        + " S Sc Sk Sm So Z Zl Zp Zs "
-    if (gc.indexOf(" " + name + " ") >= 0 || name.indexOf("Is") == 0 || name.indexOf("In") == 0
-        || name.indexOf("java") == 0 || name.indexOf("=") >= 0) {
-        rxErr(st, "unsupported character property \\p{" + name + "}")
-        return cls
-    }
-    rxErrAt(st, "Unknown character property name {" + name + "}", at)
-    return cls
+// rxPropCls answers the class of \p{name}, or reports Java's error at index at.
+// A KNOB like rxPropHit: the names are java.util.regex's, resolved over its
+// tables (lib/java-regex.js's jxPropCls).
+var rxPropCls = function (st, name, at) {
+    rxErr(st, "unsupported character property \\p{" + name + "}")
+    return rxNewCls()
 }
 
 // rxEscJ reads the escapes java.util.regex spells differently, for rxEsc under J:
@@ -580,6 +625,17 @@ function rxPropCls(st, name, at) {
 // character it could not use, or the end of the pattern.
 function rxEscJ(st, c, inClass, res) {
     var p = st.p
+    // UNICODE_CHARACTER_CLASS: \d \w \s and their complements are Unicode's.
+    if (st.uclass && (c == 100 || c == 68 || c == 119 || c == 87 || c == 115 || c == 83)) {
+        res.kind = 3
+        var uc = rxNewCls()
+        var uprops = uc.props
+        uprops.push(c == 100 || c == 68 ? RX_PND : c == 119 || c == 87 ? RX_PWORD : RX_PWHITE)
+        uc.x = true
+        uc.neg = c == 68 || c == 87 || c == 83
+        st.pcls = uc
+        return true
+    }
     if (c == 104 || c == 72 || c == 118 || c == 86) { // \h \H \v \V
         res.kind = 1
         if (c == 104) { res.sp = RX_SJH }
@@ -712,10 +768,10 @@ function rxEscJ(st, c, inClass, res) {
     }
     // The letters java.util.regex gives no meaning (in a class, also the
     // assertions and \k, \R, \X, which only stand outside one) are errors;
-    // \G, \X and \N{name} are Java's but not this engine's.
+    // \N{name} is Java's but not this engine's: it has no character name table.
     if ((c >= 65 && c <= 90) || (c >= 97 && c <= 122)) {
         if ("dDwWsSntrfae".indexOf(String.fromCharCode(c)) >= 0) { return false }
-        if (!inClass && "GXN".indexOf(String.fromCharCode(c)) >= 0) {
+        if (!inClass && c == 78) {
             rxErr(st, "unsupported escape \\" + String.fromCharCode(c))
             return true
         }
@@ -733,12 +789,22 @@ function rxSkipX(st) {
         var c = p.charCodeAt(st.i)
         if (rxIsSpaceCode(c)) {
             st.i = st.i + 1
-        } else if (c == 35) { // #
-            while (st.i < st.n && p.charCodeAt(st.i) != 10) { st.i = st.i + 1 }
+        } else if (c == 35) { // # (under J up to any line terminator)
+            while (st.i < st.n && p.charCodeAt(st.i) != 10
+                   && !(st.java && rxIsLineSepJ(p.charCodeAt(st.i), st.unix))) {
+                st.i = st.i + 1
+            }
         } else {
             return
         }
     }
+}
+
+// rxSkipXAt is rxSkipX from index j: where the next significant character is.
+function rxSkipXAt(st, j) {
+    st.i = j
+    rxSkipX(st)
+    return st.i
 }
 
 function rxHexVal(c) {
@@ -978,6 +1044,7 @@ function rxClassJ(st, consume) {
         st.i = st.i + 1
     }
     while (st.err == "") {
+        rxSkipX(st)
         if (st.i >= st.n) {
             rxErr(st, "unterminated character class")
             return prev
@@ -995,6 +1062,7 @@ function rxClassJ(st, consume) {
             st.i = st.i + 2
             var right = rxNewCls()
             var hasRight = false
+            rxSkipX(st)
             while (st.err == "" && st.i < st.n && p.charCodeAt(st.i) != 93
                    && p.charCodeAt(st.i) != 38) {
                 var r = rxNewCls()
@@ -1006,6 +1074,7 @@ function rxClassJ(st, consume) {
                 }
                 if (hasRight) { right = rxClsOr(right, r) } else { right = r }
                 hasRight = true
+                rxSkipX(st)
             }
             if (st.err != "") { return prev }
             if (hasBits) {
@@ -1082,10 +1151,12 @@ function rxRangeJ(st, bits) {
     } else {
         st.i = st.i + 1
     }
+    rxSkipX(st)
     if (st.i < st.n && p.charCodeAt(st.i) == 45) { // -
         var end = st.i + 1 < st.n ? p.charCodeAt(st.i + 1) : 0
         if (end != 91 && end != 93) {
             st.i = st.i + 1
+            rxSkipX(st)
             var m = -1
             if (st.i >= st.n) {
                 st.i = st.i + 1
@@ -1107,15 +1178,28 @@ function rxRangeJ(st, bits) {
             }
             var rg = rxNewCls()
             rxClsAdd(rg, ch, m)
+            if (st.icase) { rxFoldJ(st, rg, false) }
             return rg
         }
     }
-    if (ch < 256) {
+    // Pattern.bitsOrSingle: a character below U+0100 joins bits with its other
+    // cases, except under (?iu) the ones whose case partners are not all in
+    // Latin-1, which are single predicates like any other character.
+    var excl = st.icase && st.ucase && "\u00ff\u00b5IiSsKk\u00c5\u00e5".indexOf(String.fromCharCode(ch)) >= 0
+    if (ch < 256 && !excl) {
         rxClsAdd(bits, ch, ch)
+        if (st.icase && ch < 128) {
+            var sw = rxSwapCase(ch)
+            if (sw >= 0) { rxClsAdd(bits, sw, sw) }
+        } else if (st.icase && st.ucase) {
+            rxClsAdd(bits, rxCaseU(ch, 0), rxCaseU(ch, 0))
+            rxClsAdd(bits, rxCaseU(ch, 1), rxCaseU(ch, 1))
+        }
         return rxNewCls()
     }
     var one = rxNewCls()
     rxClsAdd(one, ch, ch)
+    if (st.icase) { rxFoldJ(st, one, true) }
     return one
 }
 
@@ -1149,7 +1233,8 @@ function rxClsNot(a) {
 
 // rxClsSimplify folds every positive flat member of a union into its parent's
 // own ranges, so that a class without &&, \p{..} or a negated member ends up
-// flat and runs as a plain RX_CLASS.
+// flat and runs as a plain RX_CLASS. A u member stays a member: its ranges
+// fold, the parent's do not.
 function rxClsSimplify(cls) {
     if (!cls.x) { return }
     var subs = cls.subs
@@ -1158,7 +1243,7 @@ function rxClsSimplify(cls) {
     while (i < subs.length) {
         var s = subs[i]
         rxClsSimplify(s)
-        if (!s.x && !s.neg) {
+        if (!s.x && !s.neg && !s.u) {
             var lo = s.lo
             var hi = s.hi
             var k = 0
@@ -1231,7 +1316,7 @@ function rxParseGroup(st) {
     if (st.i < st.n && p.charCodeAt(st.i) == 63 && !st.ere) { // ?
         st.i = st.i + 1
         if (st.i >= st.n) {
-            rxErr(st, "unterminated group")
+            if (st.java) { rxErrAt(st, "Unknown inline modifier", st.i) } else { rxErr(st, "unterminated group") }
             return rxNode("empty")
         }
         var k = p.charCodeAt(st.i)
@@ -1242,7 +1327,7 @@ function rxParseGroup(st) {
             rxExpect(st, 41, "unterminated group")
             return g
         }
-        if (k == 35) { // (?# comment
+        if (k == 35 && !st.java) { // (?# comment; java.util.regex has none
             while (st.i < st.n && p.charCodeAt(st.i) != 41) { st.i = st.i + 1 }
             rxExpect(st, 41, "unterminated comment group")
             return rxNode("empty")
@@ -1290,6 +1375,20 @@ function rxParseGroup(st) {
             return ng
         }
         if (st.py && "aiLmsux-".indexOf(p.charAt(st.i)) >= 0) { return rxParseFlagsP(st) }
+        if (st.java) {
+            if (k == 62) { // (?>X): X matched once, never backtracked into
+                st.i = st.i + 1
+                var at = rxNode("atom")
+                at.items.push(rxParseAlt(st))
+                rxExpect(st, 41, "unterminated group")
+                return at
+            }
+            if (k == 36 || k == 64) { // (?$ (?@
+                rxErrAt(st, "Unknown group type", st.i)
+                return rxNode("empty")
+            }
+            return rxParseFlagsJ(st)
+        }
         rxErr(st, "unsupported group form (?" + p.charAt(st.i) + ")")
         return rxNode("empty")
     }
@@ -1347,7 +1446,7 @@ function rxParseFlagsP(st) {
         }
         st.gend = st.i
         st.gflags = st.gflags + on
-        rxFlagsSetP(st, on, true)
+        rxFlagsSet(st, on, true)
         return rxNode("empty")
     }
     if (k != 58) {
@@ -1359,8 +1458,8 @@ function rxParseFlagsP(st) {
     var multi = st.multi
     var dotall = st.dotall
     var ext = st.ext
-    rxFlagsSetP(st, on, true)
-    rxFlagsSetP(st, off, false)
+    rxFlagsSet(st, on, true)
+    rxFlagsSet(st, off, false)
     var g = rxNode("group")
     g.items.push(rxParseAlt(st))
     rxExpect(st, 41, "missing ), unterminated subpattern")
@@ -1371,11 +1470,73 @@ function rxParseFlagsP(st) {
     return g
 }
 
-function rxFlagsSetP(st, letters, v) {
+// rxParseFlagsJ reads java.util.regex's (?idmsuxU-idmsuxU) and (?..:X); st.i is
+// at the first character after "(?" (Pattern.addFlag / subFlag). Like P, the
+// flags are decided per atom as the parser reads it. The inline form changes
+// them up to the end of the enclosing group, the scoped one only for X: every
+// group puts back what was in force when it opened (rxParseAtom), except an
+// inline one, which sets st.inl. c (CANON_EQ) is accepted and changes nothing.
+function rxParseFlagsJ(st) {
+    var p = st.p
+    var on = true
+    while (st.i < st.n) {
+        var c = p.charAt(st.i)
+        if (c == "-" && on) {
+            on = false
+        } else if ("idmsuxcU".indexOf(c) >= 0) {
+            rxFlagsSet(st, c, on)
+        } else {
+            break
+        }
+        st.i = st.i + 1
+    }
+    var k = st.i < st.n ? p.charCodeAt(st.i) : 0
+    if (k == 41) {
+        st.i = st.i + 1
+        st.inl = true
+        return rxNode("empty")
+    }
+    if (k != 58) {
+        rxErrAt(st, "Unknown inline modifier", st.i)
+        return rxNode("empty")
+    }
+    st.i = st.i + 1
+    var g = rxNode("group")
+    g.items.push(rxParseAlt(st))
+    rxExpect(st, 41, "unterminated group")
+    return g
+}
+
+// rxFlagsSet switches the parse-time flags named by letters on or off. U is
+// Java's UNICODE_CHARACTER_CLASS, which implies UNICODE_CASE both ways.
+function rxFlagsSet(st, letters, v) {
     if (letters.indexOf("i") >= 0) { st.icase = v }
     if (letters.indexOf("m") >= 0) { st.multi = v }
     if (letters.indexOf("s") >= 0) { st.dotall = v }
     if (letters.indexOf("x") >= 0) { st.ext = v }
+    if (letters.indexOf("d") >= 0) { st.unix = v }
+    if (letters.indexOf("u") >= 0) { st.ucase = v }
+    if (letters.indexOf("U") >= 0) {
+        st.uclass = v
+        st.ucase = v
+    }
+}
+
+// The flags in force, as rxFlagsSet's letters, and back.
+function rxFlagsGet(st) {
+    var s = ""
+    if (st.icase) { s = s + "i" }
+    if (st.multi) { s = s + "m" }
+    if (st.dotall) { s = s + "s" }
+    if (st.ext) { s = s + "x" }
+    if (st.unix) { s = s + "d" }
+    if (st.ucase) { s = s + "u" }
+    if (st.uclass) { s = s + "U" }
+    return s
+}
+function rxFlagsPut(st, letters) {
+    rxFlagsSet(st, "imsxdU", false)
+    rxFlagsSet(st, letters, true)
 }
 
 function rxExpect(st, code, msg) {
@@ -1390,7 +1551,15 @@ function rxExpect(st, code, msg) {
 function rxParseAtom(st) {
     var p = st.p
     var c = p.charCodeAt(st.i)
-    if (c == 40) { st.i = st.i + 1; return rxParseGroup(st) }
+    if (c == 40) {
+        st.i = st.i + 1
+        if (!st.java) { return rxParseGroup(st) }
+        var fl = rxFlagsGet(st)
+        var g = rxParseGroup(st)
+        if (!st.inl) { rxFlagsPut(st, fl) }
+        st.inl = false
+        return g
+    }
     if (c == 91) {
         st.i = st.i + 1
         if (st.java) { return rxParseClassJ(st) }
@@ -1404,6 +1573,7 @@ function rxParseAtom(st) {
         var dot = rxNode("cls")
         dot.cls.neg = true
         if (!st.dotall) { rxClsAdd(dot.cls, 10, 10) }
+        if (st.java && !st.dotall && !st.unix) { rxAddLineSepJ(dot.cls) }
         return dot
     }
     if (c == 94) { // ^
@@ -1411,6 +1581,7 @@ function rxParseAtom(st) {
         var b = rxNode("assert")
         b.gidx = RX_BOL
         if (st.py) { b.gidx = st.multi ? RX_MBOL : RX_BOS }
+        if (st.java) { b.gidx = !st.multi ? RX_BOS : st.unix ? RX_JUBOL : RX_JBOL }
         return b
     }
     if (c == 36) { // $
@@ -1418,6 +1589,7 @@ function rxParseAtom(st) {
         var d = rxNode("assert")
         d.gidx = RX_EOL
         if (st.py) { d.gidx = st.multi ? RX_MEOL : RX_EOSNL }
+        if (st.java) { d.gidx = rxEolJ(st, st.multi) }
         return d
     }
     if (c == 92 && st.ere) {
@@ -1445,6 +1617,15 @@ function rxParseAtom(st) {
             var knm = rxReadGroupName(st, 62)
             var kb = rxNode("bref")
             kb.bname = knm
+            if (st.java) {
+                // Java resolves the name as it reads it: the group must already
+                // be open.
+                kb.gidx = rxNameIdx(st.names, st.nameGroups, knm)
+                if (kb.gidx < 0 && st.err == "") {
+                    rxErrAt(st, "named capturing group <" + knm + "> does not exist", st.i - 1)
+                }
+                return kb
+            }
             st.pending.push(kb)
             return kb
         }
@@ -1456,6 +1637,23 @@ function rxParseAtom(st) {
             st.i = st.i + 2
             return rxLinebreakJ()
         }
+        if (st.java && (nxt == 71 || nxt == 88)) { // \G \X
+            st.i = st.i + 2
+            var gn = rxNode("op")
+            gn.gidx = nxt == 71 ? RX_GPOS : RX_XGRAPH
+            return gn
+        }
+        if (st.java && nxt == 98 && st.i + 3 < st.n && p.charCodeAt(st.i + 2) == 123
+            && p.charCodeAt(st.i + 3) == 103) { // \b{g}; any other \b{ is \b and a bound
+            if (st.i + 4 >= st.n || p.charCodeAt(st.i + 4) != 125) {
+                rxErrAt(st, "Illegal/unsupported escape sequence", st.i + 4)
+                return rxNode("empty")
+            }
+            st.i = st.i + 5
+            var gb = rxNode("op")
+            gb.gidx = RX_GBOUND
+            return gb
+        }
         if (nxt == 98 || nxt == 66 || nxt == 65 || nxt == 122 || nxt == 90) {
             st.i = st.i + 2
             var a = rxNode("assert")
@@ -1464,6 +1662,11 @@ function rxParseAtom(st) {
             if (nxt == 65) { a.gidx = RX_BOS }
             if (nxt == 122) { a.gidx = RX_EOS }
             if (nxt == 90) { a.gidx = st.py ? RX_EOS : RX_EOSNL }
+            if (st.java) {
+                if (nxt == 98) { a.gidx = st.uclass ? RX_JUWORDB : RX_JWORDB }
+                if (nxt == 66) { a.gidx = st.uclass ? RX_JUNWORDB : RX_JNWORDB }
+                if (nxt == 90) { a.gidx = rxEolJ(st, false) }
+            }
             return a
         }
         st.i = st.i + 1
@@ -1485,6 +1688,7 @@ function rxParseAtom(st) {
         }
         var ln = rxNode("cls")
         rxClsAdd(ln.cls, e.ch, e.ch)
+        if (st.java && st.icase) { rxFoldJ(st, ln.cls, true) }
         return ln
     }
     // A ) only closes a group when one is OPEN. At the top level of a POSIX ERE it is
@@ -1510,7 +1714,47 @@ function rxParseAtom(st) {
     st.i = st.i + 1
     var lit = rxNode("cls")
     rxClsAdd(lit.cls, c, c)
+    if (st.java && st.icase) { rxFoldJ(st, lit.cls, true) }
     return lit
+}
+
+// rxEolJ is the kind of a J $ (multi true) or \Z (multi false).
+function rxEolJ(st, multi) {
+    if (st.unix) { return multi ? RX_JUMEOL : RX_JUEOL }
+    return multi ? RX_JMEOL : RX_JEOL
+}
+
+// rxAddLineSepJ adds Java's line terminators besides \n: \r, U+0085, U+2028
+// and U+2029.
+function rxAddLineSepJ(cls) {
+    rxClsAdd(cls, 13, 13)
+    rxClsAdd(cls, 133, 133)
+    rxClsAdd(cls, 8232, 8233)
+}
+
+// rxFoldJ makes a J class read under CASE_INSENSITIVE match either case: its
+// ranges get their ASCII letters' other case, or under UNICODE_CASE are marked
+// u (rxClsHitU). A single character (single) is turned into the lowercase of
+// its uppercase, which is what Java's SingleU compares; an unmarked one keeps
+// only itself, because it has no other case. \p{..} classes and shorthands are
+// never folded: Java decides their case-insensitive reading by name
+// (jxPropCls in lib/java-regex.js).
+function rxFoldJ(st, cls, single) {
+    if (!st.ucase) {
+        rxClsFold(cls)
+        return
+    }
+    if (single) {
+        var c = cls.lo[0]
+        var up = rxCaseU(c, 1)
+        var low = rxCaseU(up, 0)
+        if (up == low) { return }
+        var lo = cls.lo
+        var hi = cls.hi
+        lo[0] = low
+        hi[0] = low
+    }
+    cls.u = true
 }
 
 // rxLinebreakJ is the node of Java's \R: CR LF, or one character of \v.
@@ -1568,7 +1812,8 @@ function rxParseBound(st) {
 
 // rxParseBoundJ reads a java.util.regex bound at st.i, where a { is always one:
 // it answers null, with Java's error, for anything that does not read as
-// {n}, {n,} or {n,m} with n and m ints.
+// {n}, {n,} or {n,m} with n and m ints. Under x whitespace and comments may
+// follow each digit and the comma (Pattern.read skips them).
 function rxParseBoundJ(st) {
     var p = st.p
     var j = st.i + 1
@@ -1583,11 +1828,11 @@ function rxParseBoundJ(st) {
             rxErrAt(st, "Illegal repetition range", j)
             return null
         }
-        j = j + 1
+        j = rxSkipXAt(st, j + 1)
     }
     var maxV = minV
     if (j < st.n && p.charCodeAt(j) == 44) { // ,
-        j = j + 1
+        j = rxSkipXAt(st, j + 1)
         maxV = -1
         if (j < st.n && rxIsDigitCode(p.charCodeAt(j))) { maxV = 0 }
         while (j < st.n && rxIsDigitCode(p.charCodeAt(j))) {
@@ -1596,7 +1841,7 @@ function rxParseBoundJ(st) {
                 rxErrAt(st, "Illegal repetition range", j)
                 return null
             }
-            j = j + 1
+            j = rxSkipXAt(st, j + 1)
         }
     }
     if (j >= st.n || p.charCodeAt(j) != 125) { // }
@@ -1617,6 +1862,7 @@ function rxParsePiece(st) {
         if (atom.t == "cls") { rxClsFold(atom.cls) }
         if (atom.t == "bref") { atom.min = 1 }
     }
+    if (st.java && st.icase && atom.t == "bref") { atom.min = st.ucase ? 2 : 1 }
     rxSkipX(st)
     var seen = 0
     while (st.i < st.n) {
@@ -1674,13 +1920,28 @@ function rxParsePiece(st) {
         rep.cnt = counted
         // A POSIX ERE has no lazy or possessive form, so the ? of "a*?" is a SECOND
         // quantifier there rather than a modifier of the first.
+        if (st.java) { rxSkipX(st) }
+        var poss = false
         if (st.i < st.n && !st.ere) {
             var q = st.p.charCodeAt(st.i)
             if (q == 63) { rep.greedy = false; st.i = st.i + 1 }
-            else if (q == 43) { st.i = st.i + 1 } // possessive: treated as greedy
+            else if (q == 43) { st.i = st.i + 1; poss = st.java }
+        }
+        // Outside J a possessive quantifier is read as greedy. Under J, X*+ is
+        // Pattern.java's possessive Curly: every iteration of X is its first
+        // success, and the loop never gives one back - (?>(?>X)*).
+        if (poss && atom.t != "cls") {
+            var inner = rxNode("atom")
+            inner.items.push(atom)
+            atom = inner
         }
         rep.items.push(atom)
         atom = rep
+        if (poss) {
+            var outer = rxNode("atom")
+            outer.items.push(rep)
+            atom = outer
+        }
         rxSkipX(st)
     }
     return atom
@@ -1834,6 +2095,17 @@ function rxEmit(pg, node) {
         rxSetA(pg, lk, rxHere(pg))
         return
     }
+    if (t == "op") {
+        rxAdd(pg, node.gidx, 0, 0, pg.dummy)
+        return
+    }
+    if (t == "atom") {
+        var am = rxAdd(pg, RX_ATOM, 0, 0, pg.dummy)
+        rxEmit(pg, node.items[0])
+        rxAdd(pg, RX_ATOMEND, 0, 0, pg.dummy)
+        rxSetA(pg, am, rxHere(pg))
+        return
+    }
     if (t == "lookb") {
         var lbs = pg.lbmin
         var id = lbs.length
@@ -1861,6 +2133,9 @@ function rxEmit(pg, node) {
 function rxMinLen(node) {
     var t = node.t
     if (t == "cls") { return 1 }
+    // \X counts one toward the shortest, and nothing toward the longest, as
+    // Java's XGrapheme.study does.
+    if (t == "op") { return node.gidx == RX_XGRAPH ? 1 : 0 }
     var items = node.items
     if (t == "cat") {
         var sum = 0
@@ -1881,7 +2156,7 @@ function rxMinLen(node) {
         }
         return best < 0 ? 0 : best
     }
-    if (t == "group") { return items.length > 0 ? rxMinLen(items[0]) : 0 }
+    if (t == "group" || t == "atom") { return items.length > 0 ? rxMinLen(items[0]) : 0 }
     if (t == "rep") { return rxLenCap(node.min * rxMinLen(items[0])) }
     return 0
 }
@@ -1906,7 +2181,7 @@ function rxMaxLen(node) {
         }
         return acc
     }
-    if (t == "group") { return items.length > 0 ? rxMaxLen(items[0]) : 0 }
+    if (t == "group" || t == "atom") { return items.length > 0 ? rxMaxLen(items[0]) : 0 }
     if (t == "rep") {
         var b = rxMaxLen(items[0])
         if (b == 0) { return 0 }
@@ -2048,6 +2323,8 @@ function rxCompile(pattern, flags) {
     var java = false
     var py = false
     var bfail = false
+    var ucase = false
+    var unix = false
     var fi = 0
     while (fi < flags.length) {
         var f = flags.charAt(fi)
@@ -2063,6 +2340,8 @@ function rxCompile(pattern, flags) {
         else if (f == "J") { java = true }
         else if (f == "P") { py = true }
         else if (f == "n") { bfail = true }
+        else if (f == "u") { ucase = true }
+        else if (f == "d") { unix = true }
         fi = fi + 1
     }
     if (java || py) { bfail = true }
@@ -2091,10 +2370,12 @@ function rxCompile(pattern, flags) {
         ngroups: 0, names: [], nameGroups: [], pending: [], ext: ext, dotall: dotall,
         octal: octal, ntotal: ere ? 0 : rxCountGroups(pat), ere: ere, posix: posix,
         depth: 0, java: java, errAt: -1, pcls: rxNewCls(),
-        py: py, icase: icase, multi: multi, gend: 0, gflags: ""
+        py: py, icase: icase, multi: multi, gend: 0, gflags: "",
+        ucase: ucase && java, uclass: false, unix: unix && java, inl: false
     }
-    // Under P case folding and line anchoring were decided per atom while parsing.
-    if (py) {
+    // Under P and J case folding and line anchoring are decided per atom while
+    // parsing.
+    if (py || java) {
         icase = false
         multi = false
     }
@@ -2157,12 +2438,67 @@ function rxAssertOK(re, text, kind, sp) {
         if (!re.multi && kind == RX_EOL) { return false }
         return text.charCodeAt(sp) == 10
     }
+    if (kind >= RX_JBOL) { return rxAssertJ(text, kind, sp) }
     var before = false
     var after = false
     if (sp > 0) { before = rxIsWordCode(text.charCodeAt(sp - 1)) }
     if (sp < n) { after = rxIsWordCode(text.charCodeAt(sp)) }
     if (kind == RX_WORDB) { return before != after }
     return before == after
+}
+
+// rxIsLineSepJ: is c one of Java's line terminators (unix: \n alone)?
+function rxIsLineSepJ(c, unix) {
+    if (c == 10) { return true }
+    if (unix) { return false }
+    return c == 13 || c == 133 || c == 8232 || c == 8233
+}
+
+// rxAssertJ decides the RX_J* anchors (see their definitions).
+function rxAssertJ(text, kind, sp) {
+    var n = text.length
+    if (kind == RX_JBOL || kind == RX_JUBOL) {
+        // Not at the very end, even after a terminator; not inside \r\n.
+        if (sp == n) { return false }
+        if (sp == 0) { return true }
+        var pc = text.charCodeAt(sp - 1)
+        if (!rxIsLineSepJ(pc, kind == RX_JUBOL)) { return false }
+        return !(pc == 13 && kind == RX_JBOL && text.charCodeAt(sp) == 10)
+    }
+    if (kind <= RX_JUMEOL) {
+        var unix = kind == RX_JUEOL || kind == RX_JUMEOL
+        var multi = kind == RX_JMEOL || kind == RX_JUMEOL
+        if (sp == n) { return true }
+        var c = text.charCodeAt(sp)
+        if (!rxIsLineSepJ(c, unix)) { return false }
+        if (multi) { return !(c == 10 && !unix && sp > 0 && text.charCodeAt(sp - 1) == 13) }
+        if (unix) { return sp == n - 1 }
+        if (sp == n - 2) { return c == 13 && text.charCodeAt(sp + 1) == 10 }
+        return sp == n - 1 && !(c == 10 && sp > 0 && text.charCodeAt(sp - 1) == 13)
+    }
+    var uw = kind == RX_JUWORDB || kind == RX_JUNWORDB
+    var before = sp > 0 && rxIsWordJ(text, sp - 1, uw)
+    var after = sp < n && rxIsWordJ(text, sp, uw)
+    if (kind == RX_JWORDB || kind == RX_JUWORDB) { return before != after }
+    return before == after
+}
+
+// rxIsWordJ is Pattern.Bound's side test for text[i]: a word character (ASCII,
+// or Unicode's under UNICODE_CHARACTER_CLASS), or a non-spacing mark whose run
+// of non-spacing marks starts after a letter or digit.
+function rxIsWordJ(text, i, uw) {
+    var c = text.charCodeAt(i)
+    if (uw ? rxPropHit(RX_PWORD, c) : rxIsWordCode(c)) { return true }
+    // No non-spacing mark lies below U+0300.
+    if (c < 768 || !rxPropHit(RX_PMN, c)) { return false }
+    var k = i - 1
+    while (k >= 0) {
+        var b = text.charCodeAt(k)
+        if (rxPropHit(RX_PLD, b)) { return true }
+        if (b < 768 || !rxPropHit(RX_PMN, b)) { return false }
+        k = k - 1
+    }
+    return false
 }
 
 // rxRun is the backtracking VM. It answers the end position of a match starting at
@@ -2286,8 +2622,14 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st) {
                     var rc = text.charCodeAt(sp + bi)
                     if (lc != rc) {
                         if (!re.icase && bs[pc] == 0) { return -1 }
-                        var alt = rxSwapCase(rc)
-                        if (alt != lc) { return -1 }
+                        if (bs[pc] == 2) {
+                            // Java's CIBackRef under UNICODE_CASE.
+                            var lu = rxCaseU(lc, 1)
+                            var ru = rxCaseU(rc, 1)
+                            if (lu != ru && rxCaseU(lu, 0) != rxCaseU(ru, 0)) { return -1 }
+                        } else if (rxSwapCase(rc) != lc) {
+                            return -1
+                        }
                     }
                     bi = bi + 1
                 }
@@ -2379,6 +2721,33 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st) {
         } else if (op == RX_LBEND) {
             if (sp != st.lbt) { return -1 }
             return sp
+        } else if (op == RX_ATOM) {
+            // The body's first success, and no other: the run below stops at
+            // RX_ATOMEND, and nothing here is retried when the rest fails.
+            // Captures the body set stay set then, as in Java.
+            var ra = rxRun(re, text, pc + 1, sp, caps, marks, st)
+            if (ra < 0) { return -1 }
+            pc = as[pc]
+            sp = ra
+        } else if (op == RX_ATOMEND) {
+            return sp
+        } else if (op == RX_GPOS) {
+            if (sp != st.gpos) { return -1 }
+            pc = pc + 1
+        } else if (op == RX_XGRAPH) {
+            if (sp >= n) { return -1 }
+            sp = rxGraphNext(text, sp, n)
+            pc = pc + 1
+        } else if (op == RX_GBOUND) {
+            // Pattern.GraphemeBound: not between a surrogate pair, and not before
+            // the first boundary after the previous match's end.
+            if (sp > 0 && sp < n) {
+                var hs = text.charCodeAt(sp - 1)
+                var ls = text.charCodeAt(sp)
+                if (hs >= 55296 && hs <= 56319 && ls >= 56320 && ls <= 57343) { return -1 }
+                if (rxGraphNext(text, st.glast, n) > sp) { return -1 }
+            }
+            pc = pc + 1
         } else {
             return -1
         }
@@ -2406,7 +2775,7 @@ function rxIterJ(re, text, pc, sp, caps, marks, st) {
 // rxAttempt runs the program ONCE, starting at `at`. mustEnd is -1 for an
 // ordinary match and the required end position for a whole-input match; it is the
 // one knob rxSearch, rxMatchAt and rxMatchWhole differ by.
-function rxAttempt(re, text, at, mustEnd) {
+function rxAttempt(re, text, at, mustEnd, gpos, glast) {
     var nslots = 2 * (re.ngroups + 1)
     var caps = []
     var i = 0
@@ -2429,7 +2798,8 @@ function rxAttempt(re, text, at, mustEnd) {
         cbeg.push(-1)
         i = i + 1
     }
-    var st = {steps: 0, over: false, mustEnd: mustEnd, lbt: -1, ctr: ctr, cbeg: cbeg}
+    var st = {steps: 0, over: false, mustEnd: mustEnd, lbt: -1, ctr: ctr, cbeg: cbeg,
+              gpos: gpos, glast: glast}
     var end = rxRun(re, text, 0, at, caps, marks, st)
     if (st.over) { rxFail("step limit exceeded") }
     if (end >= 0) { return {begin: caps[0], end: caps[1], caps: caps} }
@@ -2442,7 +2812,21 @@ function rxSearch(re, text, start) {
     if (from < 0) { from = 0 }
     var at = from
     while (at <= text.length) {
-        var m = rxAttempt(re, text, at, -1)
+        var m = rxAttempt(re, text, at, -1, from, 0)
+        if (m != null) { return m }
+        at = at + 1
+    }
+    return null
+}
+
+// rxSearchFrom is rxSearch for java.util.regex's Matcher.find, whose \G and
+// \b{g} read where the previous match ended (gpos, glast; see the API). Not
+// folded into rxSearch, which every language calls once per match.
+function rxSearchFrom(re, text, start, gpos, glast) {
+    if (!re.ok) { rxFail("invalid regexp: " + re.err) }
+    var at = start
+    while (at <= text.length) {
+        var m = rxAttempt(re, text, at, -1, gpos, glast)
         if (m != null) { return m }
         at = at + 1
     }
@@ -2455,7 +2839,7 @@ function rxSearch(re, text, start) {
 function rxMatchAt(re, text, at) {
     if (!re.ok) { rxFail("invalid regexp: " + re.err) }
     if (at < 0 || at > text.length) { return null }
-    return rxAttempt(re, text, at, -1)
+    return rxAttempt(re, text, at, -1, at, 0)
 }
 
 // rxMatchWhole: the match must cover the WHOLE input. This cannot be a search plus
@@ -2466,7 +2850,7 @@ function rxMatchAt(re, text, at) {
 function rxMatchWhole(re, text, at) {
     if (!re.ok) { rxFail("invalid regexp: " + re.err) }
     if (at < 0 || at > text.length) { return null }
-    return rxAttempt(re, text, at, text.length)
+    return rxAttempt(re, text, at, text.length, at, 0)
 }
 
 function rxTest(re, text) {
@@ -2512,7 +2896,8 @@ function rxGroupNamed(re, text, m, name) {
     return rxGroup(re, text, m, i)
 }
 
-// rxReplace substitutes every match (or only the first when `all` is false).
+// rxReplace substitutes every match (or only the first when `all` is false),
+// each search a Matcher's next find (rxSearchFrom).
 // The replacement is expanded: \0 / \1 .. \9 and \k<name> stand for a group,
 // and a doubled backslash for one backslash. Languages spell their template
 // differently ($1 in JS, \1 in Ruby); a grammar that wants another spelling
@@ -2520,9 +2905,11 @@ function rxGroupNamed(re, text, m, name) {
 function rxReplace(re, text, repl, all) {
     var out = ""
     var at = 0
+    var prev = 0
     while (at <= text.length) {
-        var m = rxSearch(re, text, at)
+        var m = rxSearchFrom(re, text, at, prev, prev)
         if (m == null) { break }
+        prev = m.end
         out = out + text.substring(at, m.begin) + rxExpand(re, text, m, repl)
         if (m.end == m.begin) {
             // An empty match must still make progress or this loop never ends.
@@ -2605,7 +2992,7 @@ function rxSplit(re, text) {
 // happens to spell an Object.prototype member ("toString", "valueOf") would
 // otherwise read back a function from the prototype instead of undefined. See
 // docs/abnf-dialect-gotchas.md. The neutral flag string is only ever drawn from
-// "ismxqjpeJnP", so the space is an unambiguous separator.
+// "ismxqjpeJnPud", so the space is an unambiguous separator.
 var rxCache = {}
 
 function rxGet(pattern, flags) {

@@ -311,62 +311,97 @@ func jxForDigit(d, r int) int {
 func (rt *jsrt) jxRe(pattern string) *rxRe {
 	re := rxGet(pattern, "qJ")
 	if !re.ok {
-		rt.jvThrowNamed("PatternSyntaxException", jxReMsg(pattern, re.err, re.errAt))
+		rt.jvThrowPse(pattern, re.err, re.errAt)
 	}
 	return re
 }
 
-// jxReMsg is Java's PatternSyntaxException message for a regex error: a J error
-// is Java's own description at its own index (at); for the shared kinds the index
-// is read off the shortest failing prefix of the \Q-expanded pattern. Twin of
-// jxReMsg in languages/lib/java-regex.js.
-func jxReMsg(pattern, err string, at int) string {
+// jvThrowPse throws a PatternSyntaxException for a regex.js error, with the
+// description, index and pattern its getters answer (the emitter's
+// getDescription / getIndex / getPattern read the slots). Twin of jxkThrowPse
+// in java-interpreter.abnf and languages/lib/java-rt.metajs.
+func (rt *jsrt) jvThrowPse(pattern, err string, at int) {
+	desc, idx := jxReErr(pattern, err, at)
+	msg := desc
+	if idx != -2 {
+		msg = jxReFmt(pattern, desc, idx)
+	}
+	if idx < 0 {
+		idx = -1
+	}
+	o := newJSObject()
+	o.set("__class", jvExcNamed["PatternSyntaxException"])
+	o.set("__msg", msg)
+	o.set("__pdesc", desc)
+	o.set("__pidx", float64(idx))
+	o.set("__ppat", pattern)
+	panic(&jsThrown{value: o})
+}
+
+// jxReErr is Java's PatternSyntaxException description and index for a regex
+// error, -2 for an unmapped kind; twin of jxReErr in
+// languages/lib/java-regex.js, which states the rules.
+func jxReErr(pattern, err string, at int) (string, int) {
 	if at >= 0 {
-		return jxReFmt(pattern, err, at)
+		return err, at
 	}
 	p := rxExpandQuotes([]rune(pattern))
 	n := len(p)
 	switch err {
 	case "unterminated group":
-		return jxReFmt(pattern, "Unclosed group", n)
+		return "Unclosed group", n
 	case "unterminated character class":
-		return jxReFmt(pattern, "Unclosed character class", n-1)
+		return "Unclosed character class", n - 1
 	case "trailing backslash in pattern":
-		return jxReFmt(pattern, "Unescaped trailing backslash", n)
+		return "Unescaped trailing backslash", n
 	}
 	k := 1
 	for k < n && rxCompile(string(p[:k]), "J").err != err {
 		k++
 	}
-	switch {
-	case err == "unmatched ) in pattern":
-		return jxReFmt(pattern, "Unmatched closing ')'", k-2)
-	case err == "quantifier with nothing to repeat" || err == "multiple repeat":
-		return jxReFmt(pattern, "Dangling meta character '"+string(p[k-1])+"'", k-1)
-	case strings.HasPrefix(err, "unsupported group form"):
-		return jxReFmt(pattern, "Unknown inline modifier", k-1)
-	case strings.HasPrefix(err, "unknown group name '"):
-		name := err[len("unknown group name '") : len(err)-1]
-		return jxReFmt(pattern, "named capturing group <"+name+"> does not exist", k-1)
+	switch err {
+	case "unmatched ) in pattern":
+		return "Unmatched closing ')'", k - 2
+	case "quantifier with nothing to repeat", "multiple repeat":
+		return "Dangling meta character '" + string(p[k-1]) + "'", k - 1
 	}
-	return err
+	return err, -2
+}
+
+// jxReMsg is the PatternSyntaxException message of a regex error.
+func jxReMsg(pattern, err string, at int) string {
+	desc, idx := jxReErr(pattern, err, at)
+	if idx == -2 {
+		return desc
+	}
+	return jxReFmt(pattern, desc, idx)
 }
 
 // jxReFmt is PatternSyntaxException.getMessage: the description, " near index N"
-// when N >= 0, the pattern, and a caret under N when N is inside it.
+// when N >= 0, the pattern, and a caret under N when N is inside it, below a tab
+// a tab.
 func jxReFmt(pattern, desc string, at int) string {
 	if at < 0 {
 		return desc + "\n" + pattern
 	}
 	out := desc + " near index " + strconv.Itoa(at) + "\n" + pattern
-	if at >= len([]rune(pattern)) {
+	p := []rune(pattern)
+	if at >= len(p) {
 		return out
 	}
-	return out + "\n" + strings.Repeat(" ", at) + "^"
+	pad := make([]rune, at)
+	for i := range pad {
+		pad[i] = ' '
+		if p[i] == '\t' {
+			pad[i] = '\t'
+		}
+	}
+	return out + "\n" + string(pad) + "^"
 }
 
-func (rt *jsrt) jxSearch(re *rxRe, text []rune, at int) *rxMatch {
-	m, ok := re.search(text, at)
+// jxSearch is Matcher.find from at, the previous match having ended at last.
+func (rt *jsrt) jxSearch(re *rxRe, text []rune, at, last int) *rxMatch {
+	m, ok := re.searchFrom(text, at, last, last)
 	if !ok {
 		rt.fail("regexp: step limit exceeded")
 	}
@@ -384,12 +419,13 @@ func (rt *jsrt) jxSplit(s, pattern string, limit int) []string {
 	re := rt.jxRe(pattern)
 	text := []rune(s)
 	var out []string
-	index := 0
+	index, last := 0, 0
 	for at := 0; at <= len(text); {
-		m := rt.jxSearch(re, text, at)
+		m := rt.jxSearch(re, text, at, last)
 		if m == nil {
 			break
 		}
+		last = m.end
 		if limit <= 0 || len(out) < limit-1 {
 			if !(index == 0 && m.begin == 0 && m.end == 0) {
 				out = append(out, string(text[index:m.begin]))
@@ -431,7 +467,7 @@ func (rt *jsrt) jxRxReplace(s, pattern, repl string, all bool) string {
 	var out strings.Builder
 	tail := 0
 	for at := 0; at <= len(text); {
-		m := rt.jxSearch(re, text, at)
+		m := rt.jxSearch(re, text, at, tail)
 		if m == nil {
 			break
 		}

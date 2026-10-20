@@ -2496,14 +2496,16 @@ NotMemberKw = :script(~~
     // is language neutral, so the RegexOption enum is translated to its own flag
     // letters in krxFlags below. Kotlin/JVM's Regex is java.util.regex, so it runs the
     // J dialect with java's \p{..} table and PatternSyntaxException text
-    // (lib/java-regex.js). rxFail and rxPropHit are KNOBS, overridden by ASSIGNMENT
-    // (not by declaration, see docs/abnf-dialect-gotchas.md).
+    // (lib/java-regex.js). rxFail, rxPropHit, rxPropCls and rxGraphNext are KNOBS,
+    // overridden by ASSIGNMENT (not by declaration, see docs/abnf-dialect-gotchas.md).
     include("lib/java-chars.js")
     include("lib/regex.js")
     include("lib/java-regex.js")
     include("lib/java-format.js")
     rxFail = function (msg) { fail(msg) }
     rxPropHit = function (id, c) { return jxPropHit(id, c) }
+    rxPropCls = function (st, name, at) { return jxPropCls(st, name, at) }
+    rxGraphNext = function (text, i, limit) { return jxGraphNext(text, i, limit) }
 
     // kotlin.math on doubles (lib/kotlin-math.js), over StrictMath's fdlibm.
     include("lib/fdlibm.js")
@@ -4377,12 +4379,14 @@ NotMemberKw = :script(~~
         var literal = false
         for (var k = 0; k < list.length; k++) {
             var o = list[k]
-            if (o == "IGNORE_CASE") { flags += "i" }
+            // Kotlin's Regex adds UNICODE_CASE to CASE_INSENSITIVE.
+            if (o == "IGNORE_CASE") { flags += "iu" }
             else if (o == "DOT_MATCHES_ALL") { flags += "s" }
             else if (o == "MULTILINE") { flags += "m" }
             else if (o == "COMMENTS") { flags += "x" }
+            else if (o == "UNIX_LINES") { flags += "d" }
             else if (o == "LITERAL") { literal = true }
-            else if (o == "CANON_EQ" || o == "UNIX_LINES") { fail("RegexOption." + o + " is not supported") }
+            else if (o == "CANON_EQ") { fail("RegexOption." + o + " is not supported") }
             else { fail("unknown RegexOption: " + o) }
         }
         return {flags: flags, literal: literal}
@@ -4529,14 +4533,14 @@ NotMemberKw = :script(~~
     // Regex#split. limit 0 (Kotlin's default) means no limit; a positive limit stops
     // after limit-1 cuts and keeps the rest of the input as the last part.
     // Regex#split over Matcher.find: every match cuts, an empty one too, and the
-    // next search starts one past an empty match. Twin of ktRxSplit in
-    // abnf/jsrtregexkt.go.
+    // next search starts one past an empty match; each search is the Matcher's
+    // next find (rxSearchFrom). Twin of ktRxSplit in abnf/jsrtregexkt.go.
     function krxSplit(prog, s, limit) {
         var parts = []
         var at = 0
         var last = 0
         while (at <= s.length && (limit <= 0 || parts.length < limit - 1)) {
-            var m = rxSearch(prog, s, at)
+            var m = rxSearchFrom(prog, s, at, last, last)
             if (m == null) { break }
             parts.push(s.substring(last, m.begin))
             last = m.end

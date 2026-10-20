@@ -589,7 +589,7 @@ fun s22() {
 // interpreter, abnf/jsrtregex.go + abnf/jsrtregexkt.go for the compiler). Kotlin
 // has no regexp literal, so every pattern arrives as Regex("...") or
 // "...".toRegex(). Regex.escape is Pattern.quote and answers the same \Q...\E TEXT
-// the JVM does; RegexOption.CANON_EQ and UNIX_LINES are reported as unsupported
+// the JVM does; RegexOption.CANON_EQ is reported as unsupported
 // instead of being silently ignored. The dialect is java.util.regex's, and a bad
 // pattern throws its PatternSyntaxException; both checked against kotlin-stdlib
 // 2.2.21's Regex driven from java.
@@ -699,6 +699,19 @@ fun s23() {
                   && rxErr23("*a") == "PatternSyntaxException: Dangling meta character '*' near index 0|*a|^")
     check("re57", rxErr23("\\k<nope>") == "PatternSyntaxException: named capturing group <nope> does not exist near index 7|\\k<nope>|       ^"
                   && rxErr23("[]a]") == "ok")
+    // Inline flags, atomic groups and possessive quantifiers. IGNORE_CASE folds
+    // case the Unicode way (Kotlin adds UNICODE_CASE to it), an inline (?i) only
+    // ASCII; . and $ know \r as a line terminator unless UNIX_LINES. replace with
+    // a template runs one Matcher's successive finds, which \G and \b{g} read.
+    check("re58", Regex("(?i)abc").matches("ABC") && Regex("a(?i:b)c").matches("aBc") && !Regex("(?i:a(?-i:b)c)").matches("aBc")
+                  && Regex("(?>a+)b").matches("aab") && !Regex("(?>a+)a").matches("aaa") && !Regex("a*+a").matches("aaa"))
+    check("re59", Regex("\u00e9", RegexOption.IGNORE_CASE).matches("\u00c9") && !Regex("(?i)\u00e9").matches("\u00c9")
+                  && Regex("(?iu)\u00e9").matches("\u00c9") && Regex("k", RegexOption.IGNORE_CASE).matches("\u212a"))
+    check("re60", !Regex(".").matches("\r") && Regex(".", RegexOption.UNIX_LINES).matches("\r")
+                  && Regex("a\$", setOf(RegexOption.UNIX_LINES, RegexOption.MULTILINE)).replace("a\r\na\n", "#") == "a\r\n#\n")
+    check("re61", Regex("\\b{g}").replace("ae\u0301x", "|") == "|a|e\u0301|x|" && Regex("\\Ga").replace("aab", "-") == "--b"
+                  && Regex("\\p{IsLatin}+").find("\u03b1ab")!!.value == "ab"
+                  && rxErr23("(?q)") == "PatternSyntaxException: Unknown inline modifier near index 2|(?q)|  ^")
 }
 
 // ===== SECTION 24: floating point arithmetic =====

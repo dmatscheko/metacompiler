@@ -92,9 +92,18 @@ func (rt *jsrt) ktRxCheck(re *rxRe) *rxRe {
 	return re
 }
 
-func (rt *jsrt) ktRxSearch(re *rxRe, text []rune, at int) *rxMatch {
+// ktRxSearch is a fresh Matcher's find from at; with prev >= 0 it is instead
+// one Matcher's next find, the previous match having ended at prev (replace
+// with a template and split run those).
+func (rt *jsrt) ktRxSearch(re *rxRe, text []rune, at int, prev ...int) *rxMatch {
 	rt.ktRxCheck(re)
-	m, ok := re.search(text, at)
+	var m *rxMatch
+	var ok bool
+	if len(prev) > 0 {
+		m, ok = re.searchFrom(text, at, prev[0], prev[0])
+	} else {
+		m, ok = re.search(text, at)
+	}
 	if !ok {
 		rt.fail("regexp: step limit exceeded")
 	}
@@ -106,9 +115,9 @@ func (rt *jsrt) ktRxSearch(re *rxRe, text []rune, at int) *rxMatch {
 // The engine's neutral letters are i (fold case), s (dot matches newline), m (^/$
 // are LINE anchors) and x (extended). Kotlin's RegexOption maps onto them one for
 // one; note that Kotlin, like Java and unlike Ruby, anchors ^/$ to the whole input
-// UNLESS MULTILINE is given, so "m" is NOT forced on. LITERAL is not a match mode -
-// it quotes the pattern. CANON_EQ and UNIX_LINES have no equivalent and are
-// reported rather than silently ignored.
+// UNLESS MULTILINE is given, so "m" is NOT forced on. IGNORE_CASE is "iu" and
+// UNIX_LINES J's "d"; LITERAL is not a match mode - it quotes the pattern. CANON_EQ
+// has no equivalent and is reported rather than silently ignored.
 func (rt *jsrt) ktRxFlags(opts interface{}) (string, bool) {
 	var names []string
 	if !isUndefOrNull(opts) {
@@ -132,16 +141,19 @@ func (rt *jsrt) ktRxFlags(opts interface{}) (string, bool) {
 	for _, o := range names {
 		switch o {
 		case "IGNORE_CASE":
-			flags += "i"
+			// Kotlin's Regex adds UNICODE_CASE to CASE_INSENSITIVE.
+			flags += "iu"
 		case "DOT_MATCHES_ALL":
 			flags += "s"
 		case "MULTILINE":
 			flags += "m"
 		case "COMMENTS":
 			flags += "x"
+		case "UNIX_LINES":
+			flags += "d"
 		case "LITERAL":
 			literal = true
-		case "CANON_EQ", "UNIX_LINES":
+		case "CANON_EQ":
 			rt.fail("RegexOption.%s is not supported", o)
 		default:
 			rt.fail("unknown RegexOption: %s", o)
@@ -241,12 +253,13 @@ func (rt *jsrt) ktRxReplace(re *rxRe, s, repl string, all bool) string {
 	rt.ktRxCheck(re)
 	text := []rune(s)
 	var out strings.Builder
-	at, last := 0, 0
+	at, last, prev := 0, 0, 0
 	for at <= len(text) {
-		m := rt.ktRxSearch(re, text, at)
+		m := rt.ktRxSearch(re, text, at, prev)
 		if m == nil {
 			break
 		}
+		prev = m.end
 		out.WriteString(string(text[last:m.begin]))
 		out.WriteString(re.expand(text, m, repl))
 		if m.end == m.begin {
@@ -306,7 +319,7 @@ func (rt *jsrt) ktRxSplit(re *rxRe, s string, limit int) *jsArray {
 	parts := &jsArray{}
 	at, last := 0, 0
 	for at <= len(text) && (limit <= 0 || len(parts.elems) < limit-1) {
-		m := rt.ktRxSearch(re, text, at)
+		m := rt.ktRxSearch(re, text, at, last)
 		if m == nil {
 			break
 		}

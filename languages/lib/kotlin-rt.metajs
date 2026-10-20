@@ -9389,6 +9389,8 @@ import "./java-format.js"
 // reports the pattern the way ktRxCheck does.
 rxFail = function (msg) { fail("regexp: " + msg) }
 rxPropHit = function (id, c) { return jxPropHit(id, c) }
+rxPropCls = function (st, name, at) { return jxPropCls(st, name, at) }
+rxGraphNext = function (text, i, limit) { return jxGraphNext(text, i, limit) }
 
 // The compile cache is shared as rxCache / rxGet (lib/regex.js): ONE cache for
 // js, kotlin, python and ruby, as in abnf/jsrtregex.go.
@@ -9465,8 +9467,9 @@ function k5MatchOf(v) { return rxMatchOf(v) }
 // The engine's neutral letters are i (fold case), s (dot matches newline), m
 // (^/$ are LINE anchors) and x (extended). Kotlin's RegexOption maps onto them
 // one for one; Kotlin, like Java and unlike Ruby, anchors ^/$ to the whole input
-// UNLESS MULTILINE is given, so "m" is NOT forced on. LITERAL is not a match
-// mode - it quotes the pattern. CANON_EQ and UNIX_LINES are reported rather than
+// UNLESS MULTILINE is given, so "m" is NOT forced on. IGNORE_CASE is "iu":
+// Kotlin's Regex adds UNICODE_CASE to it; UNIX_LINES is J's "d". LITERAL is not
+// a match mode - it quotes the pattern. CANON_EQ is reported rather than
 // silently ignored. "qJ" is unconditional: Kotlin/JVM's Regex is java.util.regex,
 // \Q...\E quote regions (what Pattern.quote emits) and the J dialect.
 function k5Flags(opts) {
@@ -9495,12 +9498,13 @@ function k5Flags(opts) {
     var k = 0
     while (k < names.length) {
         var o = names[k]
-        if (o == "IGNORE_CASE") { flags = flags + "i" }
+        if (o == "IGNORE_CASE") { flags = flags + "iu" }
         else if (o == "DOT_MATCHES_ALL") { flags = flags + "s" }
         else if (o == "MULTILINE") { flags = flags + "m" }
         else if (o == "COMMENTS") { flags = flags + "x" }
+        else if (o == "UNIX_LINES") { flags = flags + "d" }
         else if (o == "LITERAL") { literal = true }
-        else if (o == "CANON_EQ" || o == "UNIX_LINES") {
+        else if (o == "CANON_EQ") {
             fail("RegexOption." + o + " is not supported")
         } else {
             fail("unknown RegexOption: " + o)
@@ -9596,9 +9600,11 @@ function k5Replace(re, s, repl, all) {
     var out = ""
     var at = 0
     var last = 0
+    var prev = 0
     while (at <= s.length) {
-        var m = k5Search(re, s, at)
+        var m = rxSearchFrom(re, s, at, prev, prev)
         if (m === null) { break }
+        prev = m["end"]
         out = out + s.substring(last, m["begin"]) + rxExpand(re, s, m, repl)
         if (m["end"] == m["begin"]) {
             if (m["end"] < s.length) { out = out + s.charAt(m["end"]) }
@@ -9638,9 +9644,10 @@ function k5ReplaceFn(re, s, fn) {
 }
 
 // Regex#split over Matcher.find: every match cuts, an empty one too, and the next
-// search starts one past an empty match. limit 0 (Kotlin's default) means no
-// limit; a positive limit stops after limit-1 cuts and keeps the rest of the input
-// as the last part. Twin of ktRxSplit in abnf/jsrtregexkt.go.
+// search starts one past an empty match; each search is the Matcher's next find
+// (rxSearchFrom), as replace with a template's are. limit 0 (Kotlin's default)
+// means no limit; a positive limit stops after limit-1 cuts and keeps the rest of
+// the input as the last part. Twin of ktRxSplit in abnf/jsrtregexkt.go.
 function k5Split(re, s, limit) {
     k5Check(re)
     var parts = []
@@ -9648,7 +9655,7 @@ function k5Split(re, s, limit) {
     var last = 0
     var go = true
     while (go && at <= s.length && (limit <= 0 || parts.length < limit - 1)) {
-        var m = k5Search(re, s, at)
+        var m = rxSearchFrom(re, s, at, last, last)
         if (m === null) {
             go = false
         } else {

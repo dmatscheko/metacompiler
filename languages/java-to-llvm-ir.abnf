@@ -5447,11 +5447,22 @@ HasStatic   = :script(~~
             bb.NewRet(tV)
             return deadBlock()
         }, false, null)
-        var getMsg = emitFunc([], function(bb) {
-            var tV = callExt(bb, "js_arg", [curF.Params[1], handle(0)])
-            bb.NewRet(callExt(bb, "js_get", [tV, emitStr(bb, "__msg")]))
-            return deadBlock()
-        }, false, null)
+        // A method answering one hidden slot of the throwable.
+        function slotGetter(slot) {
+            return emitFunc([], function(bb) {
+                var tV = callExt(bb, "js_arg", [curF.Params[1], handle(0)])
+                bb.NewRet(callExt(bb, "js_get", [tV, emitStr(bb, slot)]))
+                return deadBlock()
+            }, false, null)
+        }
+        var getMsg = slotGetter("__msg")
+        // PatternSyntaxException's getters, over the slots jvThrowPse
+        // (abnf/jsrtjavastr.go) and jxkThrowPse (lib/java-rt.metajs) set.
+        var pseNames = ["getDescription", "getIndex", "getPattern"]
+        var pseFns = []
+        if (neededExc["$PatternSyntaxException"] == true) {
+            pseFns = [slotGetter("__pdesc"), slotGetter("__pidx"), slotGetter("__ppat")]
+        }
         // getLocalizedMessage() is getMessage(), an override of it included.
         var getLoc = emitFunc([], function(bb) {
             var tV = callExt(bb, "js_arg", [curF.Params[1], handle(0)])
@@ -5508,6 +5519,10 @@ HasStatic   = :script(~~
             callExt(b, "js_set", [clsV, emitStr(b, "getLocalizedMessage"), callExt(b, "js_closure", [handle(getLoc), curScopeV])])
             callExt(b, "js_set", [clsV, emitStr(b, "addSuppressed"), callExt(b, "js_closure", [handle(addSupp), curScopeV])])
             callExt(b, "js_set", [clsV, emitStr(b, "getSuppressed"), callExt(b, "js_closure", [handle(getSupp), curScopeV])])
+            for (var pg = 0; name == "PatternSyntaxException" && pg < pseFns.length; pg = pg + 1) {
+                callExt(b, "js_set", [clsV, emitStr(b, pseNames[pg]),
+                                      callExt(b, "js_closure", [handle(pseFns[pg]), curScopeV])])
+            }
             // Hand the four runtime-raised descriptors over once each, BY NAME, so
             // that a divide by zero, an out-of-range index and a negative array
             // length can THROW a catchable exception from inside js_jvarith /

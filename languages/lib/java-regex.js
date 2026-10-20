@@ -1,52 +1,420 @@
 // java-regex.js -- the java.util.regex half that sits over lib/regex.js's J
-// dialect: the \p{..} property knob and PatternSyntaxException's message. Kotlin/JVM's
+// dialect: the \p{..} knobs (names and tables) and PatternSyntaxException's
+// message. Kotlin/JVM's
 // Regex IS java.util.regex, so this serves java-interpreter.abnf and
 // kotlin-interpreter.abnf (include) and lib/java-rt.metajs and lib/kotlin-rt.metajs
 // (import), each after lib/java-chars.js and lib/regex.js.
 
-// jxPropHit is regex.js's rxPropHit knob over java.lang.Character's table
-// (lib/java-chars.js). Twin of the rxPropHit switch in abnf/jsrtregex.go.
+// jxPropHit is regex.js's rxPropHit knob over java.lang.Character's tables
+// (lib/java-chars.js and the ones below). Twin of the rxPropHit switch in
+// abnf/jsrtregex.go.
 function jxPropHit(id, c) {
+    if (id >= RX_PBLK) { return jxBlock(c) == id - RX_PBLK }
+    if (id >= RX_PSC) { return jxScript(c) == id - RX_PSC }
+    if (id >= RX_PGC) { return jxGc(c) == id - RX_PGC }
+    if (id >= RX_PBIN) { return Math.floor(jxBin(c) / Math.pow(2, id - RX_PBIN)) % 2 == 1 }
     if (id == RX_PL) { return jcIsLetter(c) }
     if (id == RX_PND) { return jcIsDigit(c) }
     if (id == RX_PALPHA) { return jcIsAlphabetic(c) }
     if (id == RX_PUPPER) { return jcIsUpper(c) }
     if (id == RX_PLOWER) { return jcIsLower(c) }
     if (id == RX_PLD) { return jcIsLetter(c) || jcIsDigit(c) }
-    var k = jcClass(c) % 8
-    if (id == RX_PLU) { return k == 1 }
-    if (id == RX_PLL) { return k == 2 }
-    if (id == RX_PLT) { return k == 3 }
-    return id == RX_PNL && k == 6
+    if (id == RX_PJOIN) { return c == 8204 || c == 8205 }
+    if (id == RX_PNONCH) { return c % 65536 >= 65534 || (c >= 64976 && c <= 65007) }
+    if (id == RX_PHEX) {
+        return jcIsDigit(c) || rxIsHexCode(c) || (c >= 65296 && c <= 65305) || (c >= 65313 && c <= 65318)
+            || (c >= 65345 && c <= 65350)
+    }
+    if (id == RX_PIGNORE) {
+        return c <= 8 || (c >= 14 && c <= 27) || (c >= 127 && c <= 159) || jxGc(c) == 16
+    }
+    var g = jxGc(c)
+    if (id == RX_PLU) { return g == 1 }
+    if (id == RX_PLL) { return g == 2 }
+    if (id == RX_PLT) { return g == 3 }
+    if (id == RX_PNL) { return g == 10 }
+    if (id == RX_PCASED) { return g == 3 || jcIsUpper(c) || jcIsLower(c) }
+    if (id == RX_PASSIGNED) { return g != 0 }
+    if (id == RX_PALNUM) { return jcIsAlphabetic(c) || g == 9 }
+    if (id == RX_PWORD) {
+        return jcIsAlphabetic(c) || (g >= 6 && g <= 9) || g == 23 || c == 8204 || c == 8205
+    }
+    var sep = g >= 12 && g <= 14
+    if (id == RX_PWHITE) { return sep || (c >= 9 && c <= 13) || c == 133 }
+    if (id == RX_PBLANK) { return g == 12 || c == 9 }
+    if (id == RX_PJWHITE) {
+        return (sep && c != 160 && c != 8199 && c != 8239) || (c >= 9 && c <= 13) || (c >= 28 && c <= 31)
+    }
+    var graph = !sep && g != 15 && g != 19 && g != 0
+    if (id == RX_PGRAPH) { return graph }
+    if (id == RX_PPRINT) { return (graph || g == 12 || c == 9) && g != 15 }
+    var start = jcIsLetter(c) || g == 10
+    if (id == RX_PUSTART) { return start || jxIdExtra(c) == 1 }
+    var part = start || g == 9 || g == 6 || g == 8 || jxPropHit(RX_PIGNORE, c)
+    if (id == RX_PUPART) { return part || g == 23 || jxIdExtra(c) > 0 }
+    start = start || g == 26 || g == 23
+    if (id == RX_PJSTART) { return start }
+    return id == RX_PJPART && (start || part)
 }
-// jxReMsg renders a regex.js error as Java's PatternSyntaxException message. A J
-// error is Java's own description at its own index (at). For the shared kinds the
-// index is read off k, the length of the shortest prefix of the \Q-expanded
-// pattern that fails with the same kind (Java indexes the expanded pattern too);
-// an end-of-input kind uses the full length. Unmapped kinds keep regex.js's text.
-// Twin of jxReMsg in abnf/jsrtjavastr.go.
-function jxReMsg(pattern, err, at) {
-    if (at >= 0) { return jxReFmt(pattern, err, at) }
+
+// jxIdExtra: 1 for the Other_ID_Start characters, 2 for the Other_ID_Continue
+// ones that no general category covers, which isUnicodeIdentifierStart /
+// isUnicodeIdentifierPart add.
+function jxIdExtra(c) {
+    if (c == 6277 || c == 6278 || c == 8472 || c == 8494 || c == 12443 || c == 12444) { return 1 }
+    if (c == 183 || c == 903 || (c >= 4969 && c <= 4977) || c == 6618 || c == 12539 || c == 65381) { return 2 }
+    return 0
+}
+
+// The general category (Character.getType), script ordinal, block number (0:
+// none), emoji / ideographic / mirrored bits and grapheme record of code point
+// c, read out of the tables at the end of this file.
+function jxGc(c) {
+    if (c < 0 || c > 1114111) { return 0 }
+    var t = jxGcTab()
+    return jcDig(t, jcRun(t, c, 5) * 5 + 4)
+}
+function jxScript(c) {
+    if (c < 0 || c > 1114111) { return -1 }
+    var t = jxScTab()
+    return jcNum(t, jcRun(t, c, 6) * 6 + 4, 2)
+}
+function jxBlock(c) {
+    if (c < 0 || c > 1114111) { return 0 }
+    var t = jxBlkTab()
+    return jcNum(t, jcRun(t, c, 6) * 6 + 4, 2)
+}
+function jxBin(c) {
+    if (c < 0 || c > 1114111) { return 0 }
+    var t = jxBinTab()
+    return jcNum(t, jcRun(t, c, 6) * 6 + 4, 2)
+}
+
+// jxGraphNext is regex.js's rxGraphNext knob, jdk.internal.util.regex's
+// Grapheme.nextBoundary: the end of the extended grapheme cluster that starts
+// at off. jxGbTab holds each code point's Grapheme.getType plus 16 times its
+// Indic_Conjunct_Break (1 Linker, 2 Consonant, 3 Extend). Twin of
+// jxGraphNext in abnf/jsrtjavaprops.go.
+function jxGraphNext(text, off, limit) {
+    var ch0 = jxCpAt(text, off)
+    var ret = off + (ch0 > 65535 ? 2 : 1)
+    var g0 = jxGb(ch0)
+    var t0 = g0 % 16
+    var ri = t0 == 6 ? 1 : 0
+    var gb11 = t0 == 14
+    while (ret < limit) {
+        var ch1 = jxCpAt(text, ret)
+        var g1 = jxGb(ch1)
+        var t1 = g1 % 16
+        // GB9c: a consonant, linkers and extenders, then a consonant. Java goes
+        // on without moving its notion of the previous character.
+        if (Math.floor(g0 / 16) == 2) {
+            var adv = jxIncb(text, ret, limit)
+            if (adv >= 0) {
+                ret = ret + adv
+                continue
+            }
+        }
+        if (gb11 && t0 == 5 && t1 == 14) {
+            // GB11
+        } else if (ri % 2 == 1 && t0 == 6 && t1 == 6) {
+            // GB12, GB13
+        } else if (jxGbBreak(t0, t1)) {
+            break
+        }
+        if (t1 == 6) { ri = ri + 1 }
+        g0 = g1
+        t0 = t1
+        ret = ret + (ch1 > 65535 ? 2 : 1)
+    }
+    return ret
+}
+
+// Grapheme's rules table: does a cluster break between types t0 and t1
+// (0 Other, 1 CR, 2 LF, 3 Control, 4 Extend, 5 ZWJ, 6 Regional_Indicator,
+// 7 Prepend, 8 SpacingMark, 9 L, 10 V, 11 T, 12 LV, 13 LVT,
+// 14 Extended_Pictographic)?
+function jxGbBreak(t0, t1) {
+    if (t0 == 1 && t1 == 2) { return false }
+    if ((t0 >= 1 && t0 <= 3) || (t1 >= 1 && t1 <= 3)) { return true }
+    if (t0 == 9 && (t1 == 9 || t1 == 10 || t1 == 12 || t1 == 13)) { return false }
+    if ((t0 == 12 || t0 == 10) && (t1 == 10 || t1 == 11)) { return false }
+    if ((t0 == 13 || t0 == 11) && t1 == 11) { return false }
+    return !(t1 == 4 || t1 == 5 || t1 == 8 || t0 == 7)
+}
+
+// Grapheme.checkIndicConjunctBreak: how far a run of linkers and extenders
+// with at least one linker, ending in a consonant, reaches from index; -1 if
+// there is none.
+function jxIncb(text, index, limit) {
+    var linker = false
+    var adv = 0
+    while (index + adv < limit) {
+        var ch = jxCpAt(text, index + adv)
+        adv = adv + (ch > 65535 ? 2 : 1)
+        var k = Math.floor(jxGb(ch) / 16)
+        if (k == 1) {
+            linker = true
+        } else if (k == 2) {
+            if (linker) { return adv }
+            return -1
+        } else if (k != 3) {
+            return -1
+        }
+    }
+    return -1
+}
+
+// The code point at UTF-16 index i, a surrogate pair read as one.
+function jxCpAt(text, i) {
+    var c = text.charCodeAt(i)
+    if (c >= 55296 && c <= 56319 && i + 1 < text.length) {
+        var d = text.charCodeAt(i + 1)
+        if (d >= 56320 && d <= 57343) { return (c - 55296) * 1024 + (d - 56320) + 65536 }
+    }
+    return c
+}
+
+function jxGb(c) {
+    var t = jxGbTab()
+    return jcDig(t, jcRun(t, c, 5) * 5 + 4)
+}
+
+// jxPropCls is regex.js's rxPropCls knob: Pattern.family's reading of the
+// name in \p{name}, \pX and their \P complements, case-insensitive (st.icase)
+// where Java's CharPredicates make it so. Twin of rxPropCls in
+// abnf/jsrtjavaprops.go.
+function jxPropCls(st, name, at) {
+    var cls = rxNewCls()
+    var ok = false
+    var eq = name.indexOf("=")
+    if (eq >= 0) {
+        var key = name.substring(0, eq).toLowerCase()
+        var val = name.substring(eq + 1)
+        if (key == "sc" || key == "script") { ok = jxScriptCls(cls, val) }
+        else if (key == "blk" || key == "block") { ok = jxBlockCls(cls, val) }
+        else if (key == "gc" || key == "general_category") { ok = jxForProperty(st, cls, val) }
+        if (!ok) { rxErrAt(st, "Unknown Unicode property {name=<" + key + ">, value=<" + val + ">}", at) }
+        return cls
+    }
+    if (name.indexOf("In") == 0) {
+        ok = jxBlockCls(cls, name.substring(2))
+    } else if (name.indexOf("Is") == 0) {
+        var sh = name.substring(2)
+        ok = jxUnicodeProp(st, cls, sh.toUpperCase()) || jxForProperty(st, cls, sh) || jxScriptCls(cls, sh)
+    } else {
+        if (st.uclass) { ok = jxPosixU(st, cls, name.toUpperCase()) }
+        if (!ok) { ok = jxForProperty(st, cls, name) }
+    }
+    if (!ok) { rxErrAt(st, "Unknown character property name {" + name + "}", at) }
+    return cls
+}
+
+// jxProps adds the property ids to cls; jxGcs adds the general categories
+// whose names (Character.getType's order, below) start with prefix.
+function jxProps(cls, a, b) {
+    var props = cls.props
+    props.push(a)
+    if (b >= 0) { props.push(b) }
+    cls.x = true
+    return true
+}
+var JX_GC_NAMES = "Cn Lu Ll Lt Lm Lo Mn Me Mc Nd Nl No Zs Zl Zp Cc Cf -- Co Cs Pd Ps Pe Pc Po Sm Sc Sk So Pi Pf "
+function jxGcs(cls, prefix) {
+    var t = 0
+    while (t < 31) {
+        if (JX_GC_NAMES.substring(3 * t, 3 * t + prefix.length) == prefix) { jxProps(cls, RX_PGC + t, -1) }
+        t = t + 1
+    }
+    return true
+}
+
+// CharPredicates.forUnicodeProperty (an upper-cased binary property, or a
+// POSIX name read the Unicode way).
+function jxUnicodeProp(st, cls, u) {
+    if (u == "ALPHABETIC") { return jxProps(cls, RX_PALPHA, -1) }
+    if (u == "ASSIGNED") { return jxProps(cls, RX_PASSIGNED, -1) }
+    if (u == "CONTROL") { return jxGcs(cls, "Cc") }
+    if (u == "EMOJI") { return jxProps(cls, RX_PBIN + 2, -1) }
+    if (u == "EMOJI_PRESENTATION") { return jxProps(cls, RX_PBIN + 3, -1) }
+    if (u == "EMOJI_MODIFIER") { return jxProps(cls, RX_PBIN + 4, -1) }
+    if (u == "EMOJI_MODIFIER_BASE") { return jxProps(cls, RX_PBIN + 5, -1) }
+    if (u == "EMOJI_COMPONENT") { return jxProps(cls, RX_PBIN + 6, -1) }
+    if (u == "EXTENDED_PICTOGRAPHIC") { return jxProps(cls, RX_PBIN + 7, -1) }
+    if (u == "HEXDIGIT" || u == "HEX_DIGIT") { return jxProps(cls, RX_PHEX, -1) }
+    if (u == "IDEOGRAPHIC") { return jxProps(cls, RX_PBIN, -1) }
+    if (u == "JOINCONTROL" || u == "JOIN_CONTROL") { return jxProps(cls, RX_PJOIN, -1) }
+    if (u == "LETTER") { return jxProps(cls, RX_PL, -1) }
+    if (u == "LOWERCASE") { return jxProps(cls, st.icase ? RX_PCASED : RX_PLOWER, -1) }
+    if (u == "NONCHARACTERCODEPOINT" || u == "NONCHARACTER_CODE_POINT") { return jxProps(cls, RX_PNONCH, -1) }
+    if (u == "TITLECASE") { return jxProps(cls, st.icase ? RX_PCASED : RX_PLT, -1) }
+    if (u == "PUNCTUATION") { return jxGcs(cls, "P") }
+    if (u == "UPPERCASE") { return jxProps(cls, st.icase ? RX_PCASED : RX_PUPPER, -1) }
+    if (u == "WHITESPACE" || u == "WHITE_SPACE") { return jxProps(cls, RX_PWHITE, -1) }
+    if (u == "WORD") { return jxProps(cls, RX_PWORD, -1) }
+    return jxPosixU(st, cls, u)
+}
+
+// CharPredicates.getPosixPredicate: the POSIX names under
+// UNICODE_CHARACTER_CLASS (and after Is).
+function jxPosixU(st, cls, u) {
+    if (u == "ALPHA") { return jxProps(cls, RX_PALPHA, -1) }
+    if (u == "LOWER") { return jxProps(cls, st.icase ? RX_PCASED : RX_PLOWER, -1) }
+    if (u == "UPPER") { return jxProps(cls, st.icase ? RX_PCASED : RX_PUPPER, -1) }
+    if (u == "SPACE") { return jxProps(cls, RX_PWHITE, -1) }
+    if (u == "PUNCT") { return jxGcs(cls, "P") }
+    if (u == "XDIGIT") { return jxProps(cls, RX_PHEX, -1) }
+    if (u == "ALNUM") { return jxProps(cls, RX_PALNUM, -1) }
+    if (u == "CNTRL") { return jxGcs(cls, "Cc") }
+    if (u == "DIGIT") { return jxProps(cls, RX_PND, -1) }
+    if (u == "BLANK") { return jxProps(cls, RX_PBLANK, -1) }
+    if (u == "GRAPH") { return jxProps(cls, RX_PGRAPH, -1) }
+    if (u == "PRINT") { return jxProps(cls, RX_PPRINT, -1) }
+    return false
+}
+
+// CharPredicates.forProperty: the general categories, the US-ASCII POSIX
+// classes and the java* methods, by their exact names.
+function jxForProperty(st, cls, name) {
+    if (name == "LC" || (st.icase && (name == "Lu" || name == "Ll" || name == "Lt"))) {
+        return jxProps(cls, RX_PGC + 1, RX_PGC + 2) && jxProps(cls, RX_PGC + 3, -1)
+    }
+    if (name == "LD") { return jxGcs(cls, "L") && jxGcs(cls, "Nd") }
+    if (name.length == 2 && JX_GC_NAMES.indexOf(name + " ") >= 0 && name != "--") { return jxGcs(cls, name) }
+    if (name.length == 1 && "LMNZCPS".indexOf(name) >= 0) { return jxGcs(cls, name) }
+    if (name == "L1") {
+        rxClsAdd(cls, 0, 255)
+        return true
+    }
+    if (name == "all") {
+        rxClsAdd(cls, 0, 1114111)
+        return true
+    }
+    var posix = " ASCII:ascii Alnum:alnum Alpha:alpha Blank:blank Cntrl:cntrl Digit:digit Graph:graph"
+        + " Lower:lower Print:print Punct:punct Space:space Upper:upper XDigit:xdigit "
+    var k = posix.indexOf(" " + name + ":")
+    if (k >= 0) {
+        var rest = posix.substring(k + name.length + 2)
+        var pn = rest.substring(0, rest.indexOf(" "))
+        if (st.icase && (pn == "lower" || pn == "upper")) { pn = "alpha" }
+        return rxPosixAdd(cls, pn)
+    }
+    if (name == "javaLowerCase") { return jxProps(cls, st.icase ? RX_PCASED : RX_PLOWER, -1) }
+    if (name == "javaUpperCase") { return jxProps(cls, st.icase ? RX_PCASED : RX_PUPPER, -1) }
+    if (name == "javaTitleCase") { return jxProps(cls, st.icase ? RX_PCASED : RX_PLT, -1) }
+    if (name == "javaAlphabetic") { return jxProps(cls, RX_PALPHA, -1) }
+    if (name == "javaIdeographic") { return jxProps(cls, RX_PBIN, -1) }
+    if (name == "javaDigit") { return jxProps(cls, RX_PND, -1) }
+    if (name == "javaDefined") { return jxProps(cls, RX_PASSIGNED, -1) }
+    if (name == "javaLetter") { return jxProps(cls, RX_PL, -1) }
+    if (name == "javaLetterOrDigit") { return jxProps(cls, RX_PLD, -1) }
+    if (name == "javaJavaIdentifierStart") { return jxProps(cls, RX_PJSTART, -1) }
+    if (name == "javaJavaIdentifierPart") { return jxProps(cls, RX_PJPART, -1) }
+    if (name == "javaUnicodeIdentifierStart") { return jxProps(cls, RX_PUSTART, -1) }
+    if (name == "javaUnicodeIdentifierPart") { return jxProps(cls, RX_PUPART, -1) }
+    if (name == "javaIdentifierIgnorable") { return jxProps(cls, RX_PIGNORE, -1) }
+    if (name == "javaSpaceChar") { return jxGcs(cls, "Z") }
+    if (name == "javaWhitespace") { return jxProps(cls, RX_PJWHITE, -1) }
+    if (name == "javaMirrored") { return jxProps(cls, RX_PBIN + 1, -1) }
+    if (name == "javaISOControl") {
+        rxClsAdd(cls, 0, 31)
+        rxClsAdd(cls, 127, 159)
+        return true
+    }
+    return false
+}
+
+// Character.UnicodeScript.forName: the upper-cased name is a four-letter alias
+// or an enum constant (jxScNameTab is ";ALIAS NAME" in ordinal order).
+function jxScriptCls(cls, name) {
+    var u = name.toUpperCase()
+    if (u == "" || u.indexOf(" ") >= 0 || u.indexOf(";") >= 0) { return false }
+    var t = jxScNameTab()
+    var k = t.indexOf(";" + u + " ")
+    if (k >= 0) { return jxProps(cls, RX_PSC + jxCount(t, k, ";"), -1) }
+    k = t.indexOf(" " + u + ";")
+    if (k < 0) { return false }
+    return jxProps(cls, RX_PSC + jxCount(t, k, ";") - 1, -1)
+}
+
+// Character.UnicodeBlock.forName: the US upper-cased name is one of a block's
+// keys. jxBlkNameTab is ";ID/A1/A2.." in block order: the keys are ID, each
+// alias, and each alias without its spaces; an alias * is ID with each _ a
+// space.
+function jxBlockCls(cls, name) {
+    var u = name.toUpperCase()
+    if (u == "" || u.indexOf(";") >= 0 || u.indexOf("/") >= 0) { return false }
+    var t = jxBlkNameTab()
+    var n = 0
+    var i = 0
+    var id = ""
+    while (i < t.length) {
+        var e = i + 1
+        while (e < t.length && t.charAt(e) != ";" && t.charAt(e) != "/") { e = e + 1 }
+        var key = t.substring(i + 1, e)
+        if (t.charAt(i) == ";") {
+            n = n + 1
+            id = key
+            if (key == u) { return jxProps(cls, RX_PBLK + n, -1) }
+        } else {
+            if (key == "*") { key = jxSwap(id, "_", " ") }
+            if (key == u || jxSwap(key, " ", "") == u) { return jxProps(cls, RX_PBLK + n, -1) }
+        }
+        i = e
+    }
+    return false
+}
+
+// How often ch occurs in t before index k; s with every a replaced by b.
+function jxCount(t, k, ch) {
+    var n = 0
+    var i = 0
+    while (i < k) {
+        if (t.charAt(i) == ch) { n = n + 1 }
+        i = i + 1
+    }
+    return n
+}
+function jxSwap(s, a, b) {
+    var out = ""
+    var i = 0
+    while (i < s.length) {
+        var c = s.charAt(i)
+        out = out + (c == a ? b : c)
+        i = i + 1
+    }
+    return out
+}
+// jxReErr turns a regex.js error into Java's PatternSyntaxException description
+// (d) and index (i). A J error is Java's own description at its own index (at).
+// For the shared kinds the index is read off k, the length of the shortest
+// prefix of the \Q-expanded pattern that fails with the same kind (Java indexes
+// the expanded pattern too); an end-of-input kind uses the full length. An
+// unmapped kind keeps regex.js's text, with i -2. Twin of jxReErr in
+// abnf/jsrtjavastr.go.
+function jxReErr(pattern, err, at) {
+    if (at >= 0) { return {d: err, i: at} }
     var p = rxExpandQuotes(pattern)
     var n = p.length
-    if (err == "unterminated group") { return jxReFmt(pattern, "Unclosed group", n) }
-    if (err == "unterminated character class") { return jxReFmt(pattern, "Unclosed character class", n - 1) }
-    if (err == "trailing backslash in pattern") { return jxReFmt(pattern, "Unescaped trailing backslash", n) }
+    if (err == "unterminated group") { return {d: "Unclosed group", i: n} }
+    if (err == "unterminated character class") { return {d: "Unclosed character class", i: n - 1} }
+    if (err == "trailing backslash in pattern") { return {d: "Unescaped trailing backslash", i: n} }
     var k = 1
     while (k < n && rxCompile(p.substring(0, k), "J").err != err) { k = k + 1 }
-    if (err == "unmatched ) in pattern") { return jxReFmt(pattern, "Unmatched closing ')'", k - 2) }
+    if (err == "unmatched ) in pattern") { return {d: "Unmatched closing ')'", i: k - 2} }
     if (err == "quantifier with nothing to repeat" || err == "multiple repeat") {
-        return jxReFmt(pattern, "Dangling meta character '" + p.charAt(k - 1) + "'", k - 1)
+        return {d: "Dangling meta character '" + p.charAt(k - 1) + "'", i: k - 1}
     }
-    if (err.indexOf("unsupported group form") == 0) { return jxReFmt(pattern, "Unknown inline modifier", k - 1) }
-    if (err.indexOf("unknown group name '") == 0) {
-        var name = err.substring(20, err.length - 1)
-        return jxReFmt(pattern, "named capturing group <" + name + "> does not exist", k - 1)
-    }
-    return err
+    return {d: err, i: -2}
+}
+// jxReMsg is the PatternSyntaxException message of a regex.js error.
+function jxReMsg(pattern, err, at) {
+    var e = jxReErr(pattern, err, at)
+    if (e.i == -2) { return e.d }
+    return jxReFmt(pattern, e.d, e.i)
 }
 // PatternSyntaxException.getMessage: the description, " near index N" when N >= 0,
-// the pattern, and a caret under N when N is inside it.
+// the pattern, and a caret under N when N is inside it, below a tab a tab.
 function jxReFmt(pattern, desc, at) {
     if (at < 0) { return desc + "\n" + pattern }
     var out = desc + " near index " + at + "\n" + pattern
@@ -54,8 +422,694 @@ function jxReFmt(pattern, desc, at) {
     out = out + "\n"
     var i = 0
     while (i < at) {
-        out = out + " "
+        out = out + (pattern.charAt(i) == "\t" ? "\t" : " ")
         i = i + 1
     }
     return out + "^"
+}
+
+// ----- java.lang.Character's tables for \p{..}, \X and \b{g} -----
+//
+// Read from java 24.0.2 (Unicode 16.0) over every code point U+0000..U+10FFFF
+// and encoded as lib/java-chars.js's tables are: one record per run of code
+// points with one value, the run's first code point in four base-64 digits and
+// the value in one (jxGcTab: Character.getType) or two (jxScTab: the
+// UnicodeScript ordinal; jxBlkTab: the UnicodeBlock, numbered from 1 in code
+// point order, 0 for none; jxBinTab: isIdeographic 1, isMirrored 2, isEmoji 4,
+// isEmojiPresentation 8, isEmojiModifier 16, isEmojiModifierBase 32,
+// isEmojiComponent 64, isExtendedPictographic 128; jxGbTab: see jxGraphNext).
+// jxScNameTab and jxBlkNameTab are the names UnicodeScript.forName and
+// UnicodeBlock.forName accept (jxScriptCls, jxBlockCls).
+// abnf/jsrtjavaprops.go holds the same tables.
+
+var jxGcTable = ""
+function jxGcTab() {
+    if (jxGcTable == "") {
+        jxGcTable = ""
+        + "0000?000P<000QH000TJ000UH000XE000YF000ZH000[I000]H000^D000_H000a9000kH000mI000pH00111001KE001LH001MF"
+        + "001NK001OG001PK001Q2001lE001mI001nF001oI001p?002P<002QH002RJ002VL002WH002XK002YL002Z5002[M002]I002^@"
+        + "002_L002`K002aL002bI002c;002eK002f2002gH002iK002j;002k5002lN002m;002pH00301003GI003H1003O2003hI003i2"
+        + "00401004120042100432004410045200461004720048100492004:1004;2004<1004=2004>1004?2004@1004A2004B1004C2"
+        + "004D1004E2004F1004G2004H1004I2004J1004K2004L1004M2004N1004O2004P1004Q2004R1004S2004T1004U2004V1004W2"
+        + "004X1004Y2004Z1004[2004]1004^2004_1004`2004a1004b2004c1004d2004e1004f2004g1004h2004j1004k2004l1004m2"
+        + "004n1004o2004p1005020051100522005310054200551005620057100582005:1005;2005<1005=2005>1005?2005@1005A2"
+        + "005B1005C2005D1005E2005F1005G2005H1005I2005J1005K2005L1005M2005N1005O2005P1005Q2005R1005S2005T1005U2"
+        + "005V1005W2005X1005Y2005Z1005[2005]1005^2005_1005`2005a1005b2005c1005d2005e1005f2005g1005h2005i1005k2"
+        + "005l1005m2005n1005o200611006320064100652006610068200691006<2006>1006B2006C1006E2006F1006I2006L1006N2"
+        + "006O1006Q2006R1006S2006T1006U2006V1006X2006Y1006Z2006]1006^2006_1006a2006b1006e2006f1006g2006h1006j2"
+        + "006l5006m1006n200705007410075300762007710078300792007:1007;3007<2007=1007>2007?1007@2007A1007B2007C1"
+        + "007D2007E1007F2007G1007H2007I1007J2007K1007L2007N1007O2007P1007Q2007R1007S2007T1007U2007V1007W2007X1"
+        + "007Y2007Z1007[2007]1007^2007_1007`2007b1007c3007d2007e1007f2007g1007j2007k1007l2007m1007n2007o1007p2"
+        + "00801008120082100832008410085200861008720088100892008:1008;2008<1008=2008>1008?2008@1008A2008B1008C2"
+        + "008D1008E2008F1008G2008H1008I2008J1008K2008L1008M2008N1008O2008P1008Q2008R1008S2008T1008U2008V1008W2"
+        + "008X1008Y2008Z1008[2008]1008^2008_1008`2008a1008b2008c1008d2008k1008m2008n1008p200911009220093100972"
+        + "0098100992009:1009;2009<1009=2009>1009?200:D500:E200:a400;2K00;6400;BK00;P400;UK00;]400;^K00;_400;`K"
+        + "00<0600=a100=b200=c100=d200=e400=fK00=g100=h200=i000=k400=l200=oH00=p100>0000>4K00>6100>7H00>8100>;0"
+        + "00><100>=000>>100>@200>A100>R000>S100>]200??100?@200?B100?E200?H100?I200?J100?K200?L100?M200?N100?O2"
+        + "00?P100?Q200?R100?S200?T100?U200?V100?W200?X100?Y200?Z100?[200?]100?^200?_100?`200?e100?f200?gI00?h1"
+        + "00?i200?j100?l200?n100@a200AP100AQ200AR100AS200AT100AU200AV100AW200AX100AY200AZ100A[200A]100A^200A_1"
+        + "00A`200Aa100Ab200Ac100Ad200Ae100Af200Ag100Ah200Ai100Aj200Ak100Al200Am100An200Ao100Ap200B0100B1200B2L"
+        + "00B3600B8700B:100B;200B<100B=200B>100B?200B@100BA200BB100BC200BD100BE200BF100BG200BH100BI200BJ100BK2"
+        + "00BL100BM200BN100BO200BP100BQ200BR100BS200BT100BU200BV100BW200BX100BY200BZ100B[200B]100B^200B_100B`2"
+        + "00Ba100Bb200Bc100Bd200Be100Bf200Bg100Bh200Bi100Bj200Bk100Bl200Bm100Bn200Bo100Bp200C0100C2200C3100C42"
+        + "00C5100C6200C7100C8200C9100C:200C;100C<200C=100C>200C@100CA200CB100CC200CD100CE200CF100CG200CH100CI2"
+        + "00CJ100CK200CL100CM200CN100CO200CP100CQ200CR100CS200CT100CU200CV100CW200CX100CY200CZ100C[200C]100C^2"
+        + "00C_100C`200Ca100Cb200Cc100Cd200Ce100Cf200Cg100Ch200Ci100Cj200Ck100Cl200Cm100Cn200Co100Cp200D0100D12"
+        + "00D2100D3200D4100D5200D6100D7200D8100D9200D:100D;200D<100D=200D>100D?200D@100DA200DB100DC200DD100DE2"
+        + "00DF100DG200DH100DI200DJ100DK200DL100DM200DN100DO200DP100DQ200DR100DS200DT100DU200DV100DW200DX100DY2"
+        + "00DZ100D[200D]100D^200D_100D`200Da000Db100EG000EI400EJH00EP200F9H00F:D00F;000F=L00F?J00F@000FA600FoD"
+        + "00Fp600G0H00G1600G3H00G4600G6H00G7600G8000G@500G[000G`500GdH00Gf000H0@00H6I00H9H00H;J00H<H00H>L00H@6"
+        + "00HKH00HL@00HMH00HP500I0400I1500I;600IP900IZH00I_500Ia600Ib500KDH00KE500KF600KM@00KNL00KO600KU400KW6"
+        + "00KYL00KZ600K_500Ka900Kk500KnL00Kp500L0H00L>000L?@00L@500LA600LB500La600M;000M=500NV600Nb500Nc000O09"
+        + "00O:500O[600Oe400OgL00OhH00Ok400Ol000On600OoJ00P0500PF600PJ400PK600PT400PU600PX400PY600P_000PaH00Pp0"
+        + "00Q0500QI600QL000QNH00QO000QP500Q[000Qa500R8K00R9500R?000R@@00RB000RG600RP500S9400S:600SR@00SS600T38"
+        + "00T4500Tk600Tl800Tm600Tn500To800U1600U9800U=600U>800U@500UA600UH500UR600UTH00UV900UaH00Ub400Uc500V16"
+        + "00V2800V4000V5500V=000V?500VA000VC500VY000VZ500Vb000Vc500Vd000Vg500Vk000Vm600Vn500Vo800W1600W5000W78"
+        + "00W9000W;800W=600W>500W?000WG800WH000WL500WN000WO500WR600WT000WV900Wa500WcJ00We;00WkL00WlJ00Wm500WnH"
+        + "00Wo600Wp000X1600X3800X4000X5500X;000X?500XA000XC500XY000XZ500Xb000Xc500Xe000Xf500Xh000Xi500Xk000Xm6"
+        + "00Xn000Xo800Y1600Y3000Y7600Y9000Y;600Y>000YA600YB000YI500YM000YN500YO000YV900Ya600Yc500Yf600YgH00Yh0"
+        + "00Z1600Z3800Z4000Z5500Z>000Z?500ZB000ZC500ZY000ZZ500Zb000Zc500Ze000Zf500Zk000Zm600Zn500Zo800[1600[60"
+        + "00[7600[9800[:000[;800[=600[>000[@500[A000[P500[R600[T000[V900[aH00[bJ00[c000[j500[k600]0000]1600]28"
+        + "00]4000]5500]=000]?500]A000]C500]Y000]Z500]b000]c500]e000]f500]k000]m600]n500]o800]p600^0800^1600^50"
+        + "00^7800^9000^;800^=600^>000^E600^G800^H000^L500^N000^O500^R600^T000^V900^aL00^b500^c;00^i000_2600_35"
+        + "00_4000_5500_;000_>500_A000_B500_F000_I500_K000_L500_M000_N500_P000_S500_U000_X500_[000__500_k000_o8"
+        + "00`0600`1800`3000`6800`9000`:800`=600`>000`@500`A000`G800`H000`V900`a;00`dL00`jJ00`kL00`l000a0600a18"
+        + "00a4600a5500a=000a>500aA000aB500aY000aZ500ak000am600an500ao600b1800b5000b6600b9000b:600b>000bE600bG0"
+        + "00bH500bK000bM500bN000bP500bR600bT000bV900ba000bhH00bi;00bpL00c0500c1600c2800c4H00c5500c=000c>500cA0"
+        + "00cB500cY000cZ500ce000cf500ck000cm600cn500co800cp600d0800d5000d6600d7800d9000d:800d<600d>000dE800dG0"
+        + "00dM500dO000dP500dR600dT000dV900da000db500dd800de000e0600e2800e4500e=000e>500eA000eB500el600en500eo8"
+        + "00f1600f5000f6800f9000f:800f=600f>500f?L00f@000fD500fG800fH;00fO500fR600fT000fV900fa;00fjL00fk500g00"
+        + "00g1600g2800g4000g5500gG000gJ500gc000gd500gm000gn500go000h0500h7000h:600h;000h?800hB600hE000hF600hG0"
+        + "00hH800hP000hV900ha000hc800heH00hf000i1500ib600ic500ie600il000ipJ00j0500j6400j7600j?H00j@900jJH00jL0"
+        + "00k1500k3000k4500k5000k6500k;000k<500kT000kU500kV000kW500kb600kc500ke600kn500ko000l0500l5000l6400l70"
+        + "00l8600l?000l@900lJ000lL500lP000m0500m1L00m4H00mCL00mDH00mEL00mH600mJL00mP900mZ;00meL00mf600mgL00mh6"
+        + "00miL00mj600mkE00mlF00mmE00mnF00mo800n0500n8000n9500n^000nb600np800o0600o5H00o6600o8500o=600oH000oI6"
+        + "00on000ooL00p6600p7L00p=000p>L00p@H00pEL00pIH00pK001005010[8010^6010b8010c6010i8010j6010l8010n6010p5"
+        + "01109011:H011@5011F8011H6011J5011N6011Q5011R8011U5011W8011_5011b6011f501226012380125601278012=6012>5"
+        + "012?8012@9012J8012M6012NL012P1013600137101380013=1013>0013@2013lH013m4013n20140501990019:5019>0019@5"
+        + "019G0019H5019I0019J5019N0019P501:9001::501:>001:@501:b001:c501:g001:i501:p001;0501;1001;2501;6001;85"
+        + "01;G001;H501<A001<B501<F001<H501=K001=M601=PH01=Y;01=n001>0501>@L01>J001>P101?g001?i201?o001@0D01@15"
+        + "01I^L01I_H01I`501J0<01J1501JKE01JLF01JM001JP501K[H01K_:01Kb501Kj001L0501LB601LE801LF001LO501Lc601Le8"
+        + "01LfH01Lh001M0501MB601MD001MP501M^001M_501Mb001Mc601Me001N0501Ne601Ng801Nh601No801O6601O7801O9601ODH"
+        + "01OG401OHH01OKJ01OL501OM601ON001OP901OZ001Oa;01Ok001P0H01P6D01P7H01P;601P>@01P?601P@901PJ001PP501Q34"
+        + "01Q4501Qj001R0501R5601R7501RY601RZ501R[001Ra501Sg001T0501TO001TP601TS801TW601TY801T]001Ta801Tc601Td8"
+        + "01Tj601Tm001U0L01U1001U4H01U6901U@501U_001Ua501Uf001V0501V]001Va501W:001W@901WJ;01WK001WNL01X0501XG6"
+        + "01XI801XK601XL001XNH01XP501YE801YF601YG801YH601YO001YP601YQ801YR601YS801YU601Y^801Yd601Yn001Yp601Z09"
+        + "01Z:001Z@901ZJ001ZPH01ZW401ZXH01Z_001Za601Zo701Zp601[?001]0601]4801]5501]e601]f801]g601]l801]m601]n8"
+        + "01^2601^3801^5501^=001^>H01^@901^JH01^QL01^[601^eL01^nH01_0601_2801_3501_Q801_R601_V801_X601_Z801_[6"
+        + "01__501_a901_k501`V601`W801`X601`Z801`^601`_801``601`c801`e001`mH01a0501aT801a]601ae801ag601ai001alH"
+        + "01b0901b:001b=501b@901bJ501bi401boH01c0201c9101c:201c;001c@101cl001cn101d0H01d8001d@601dCH01dD601dQ8"
+        + "01dR601dY501d^601d_501de601df501dh801di601dk501dl001e0201e]401f[201fi401fj201gK401h0601i0101i1201i21"
+        + "01i3201i4101i5201i6101i7201i8101i9201i:101i;201i<101i=201i>101i?201i@101iA201iB101iC201iD101iE201iF1"
+        + "01iG201iH101iI201iJ101iK201iL101iM201iN101iO201iP101iQ201iR101iS201iT101iU201iV101iW201iX101iY201iZ1"
+        + "01i[201i]101i^201i_101i`201ia101ib201ic101id201ie101if201ig101ih201ii101ij201ik101il201im101in201io1"
+        + "01ip201j0101j1201j2101j3201j4101j5201j6101j7201j8101j9201j:101j;201j<101j=201j>101j?201j@101jA201jB1"
+        + "01jC201jD101jE201jF101jG201jH101jI201jJ101jK201jL101jM201jN101jO201jP101jQ201jR101jS201jT101jU201jV1"
+        + "01jW201jX101jY201jZ101j[201j]101j^201j_101j`201ja101jb201jc101jd201je101jf201jg101jh201ji101jj201jk1"
+        + "01jl201jm101jn201jo101jp201k0101k1201k2101k3201k4101k5201k6101k7201k8101k9201k:101k;201k<101k=201k>1"
+        + "01k?201k@101kA201kB101kC201kD101kE201kN101kO201kP101kQ201kR101kS201kT101kU201kV101kW201kX101kY201kZ1"
+        + "01k[201k]101k^201k_101k`201ka101kb201kc101kd201ke101kf201kg101kh201ki101kj201kk101kl201km101kn201ko1"
+        + "01kp201l0101l1201l2101l3201l4101l5201l6101l7201l8101l9201l:101l;201l<101l=201l>101l?201l@101lA201lB1"
+        + "01lC201lD101lE201lF101lG201lH101lI201lJ101lK201lL101lM201lN101lO201lP101lQ201lR101lS201lT101lU201lV1"
+        + "01lW201lX101lY201lZ101l[201l]101l^201l_101l`201la101lb201lc101ld201le101lf201lg101lh201li101lj201lk1"
+        + "01ll201lm101ln201lo101lp201m8101m@201mF001mH101mN001mP201mX101ma201mi101n0201n6001n8101n>001n@201nH0"
+        + "01nI101nJ001nK101nL001nM101nN001nO101nP201nX101na201no001o0201o8301o@201oH301oP201oX301oa201of001og2"
+        + "01oi101om301onK01oo201opK01p2201p5001p6201p8101p<301p=K01p@201pD001pF201pH101pL001pMK01pP201pX101p^K"
+        + "01pa001pc201pf001pg201pi101pm301pnK01pp00200<020;@020@D020FH020HM020IN020JE020KM020MN020NE020OM020PH"
+        + "020X=020Y>020Z@020`<020aH020jM020kN020lH020pG0211H0214I0215E0216F0217H021BI021CH021DG021EH021O<021P@"
+        + "021U0021V@021a;021b4021c0021e;021kI021nE021oF021p40220;022:I022=E022>F022?0022@4022M0022PJ02310023@6"
+        + "023M7023Q6023R7023U6023b00240L024210243L024710248L024:2024;1024>2024@1024C2024DL024E1024FL024HI024I1"
+        + "024NL024T1024UL024V1024WL024X1024YL024Z1024_L024`2024a1024e2024f5024j2024kL024m2024o10250I0255102562"
+        + "025:L025;I025<L025>2025?L025@;025P:02631026420265:0269;026:L026<0026@I026EL026JI026LL026PI026QL026SI"
+        + "026TL026VI026WL026_I026`L027>I027@L027BI027CL027DI027EL027eI02<0L02<8E02<9F02<:E02<;F02<<L02<PI02<RL"
+        + "02<YE02<ZF02<[L02=mI02=nL02>KI02>eL02?LI02?RL02@Z002A0L02A;002AP;02BLL02CZ;02D0L02FhI02FiL02G1I02G2L"
+        + "02GiI02H0L02I`I02IaL02MXE02MYF02MZE02M[F02M]E02M^F02M_E02M`F02MaE02MbF02McE02MdF02MeE02MfF02Mg;02NDL"
+        + "02O0I02O5E02O6F02O7I02OVE02OWF02OXE02OYF02OZE02O[F02O]E02O^F02O_E02O`F02OaI02P0L02T0I02V3E02V4F02V5E"
+        + "02V6F02V7E02V8F02V9E02V:F02V;E02V<F02V=E02V>F02V?E02V@F02VAE02VBF02VCE02VDF02VEE02VFF02VGE02VHF02VII"
+        + "02WHE02WIF02WJE02WKF02WLI02WmE02WnF02WoI02]0L02]aI02^5L02^7I02^=L02^e002^gL02_F002_GL02a0102aa202bP1"
+        + "02bQ202bR102bU202bW102bX202bY102bZ202b[102b]202b^102bb202bc102bd202bf102bg202bm402bo102c1202c2102c32"
+        + "02c4102c5202c6102c7202c8102c9202c:102c;202c<102c=202c>102c?202c@102cA202cB102cC202cD102cE202cF102cG2"
+        + "02cH102cI202cJ102cK202cL102cM202cN102cO202cP102cQ202cR102cS202cT102cU202cV102cW202cX102cY202cZ102c[2"
+        + "02c]102c^202c_102c`202ca102cb202cc102cd202ce102cf202cg102ch202ci102cj202ck102cl202cm102cn202co102cp2"
+        + "02d0102d1202d2102d3202d4102d5202d6102d7202d8102d9202d:102d;202d<102d=202d>102d?202d@102dA202dB102dC2"
+        + "02dD102dE202dF102dG202dH102dI202dJ102dK202dL102dM202dN102dO202dP102dQ202dR102dS202dUL02d[102d]202d^1"
+        + "02d_202d`602dc102dd202de002djH02dn;02doH02e0202eV002eW202eX002e^202e_002ea502fX002f`402faH02fb002fp6"
+        + "02g0502gG002gP502gW002gX502g`002ga502gh002gi502gp002h0502h7002h8502h?002h@502hG002hH502hO002hP602i0H"
+        + "02i2M02i3N02i4M02i5N02i6H02i9M02i:N02i;H02i<M02i=N02i>H02iGD02iHH02iJD02iKH02iLM02iMN02iNH02iPM02iQN"
+        + "02iRE02iSF02iTE02iUF02iVE02iWF02iXE02iYF02iZH02i`402iaH02ikD02imH02j0D02j1H02j2E02j3H02j@L02jBH02jEE"
+        + "02jFF02jGE02jHF02jIE02jJF02jKE02jLF02jMD02jN002k0L02kJ002kKL02le002m0L02pF002paL0300<0301H0304L03054"
+        + "030650307:0308E0309F030:E030;F030<E030=F030>E030?F030@E030AF030BL030DE030EF030FE030GF030HE030IF030JE"
+        + "030KF030LD030ME030NF030PL030Q:030Z6030_8030aD030b4030gL030i:030l4030m5030nH030oL0310003115032G0032I6"
+        + "032KK032M4032O5032PD032Q5033lH033m4033p50340003455034a0034b5036?0036@L036B;036FL036P50370L037V0037`L"
+        + "037a50380L038O0038P;038ZL0398;039@L039A;039PL03:0;03::L03:b;03;0L03@0504h0L04i050:0E40:0F50:B=00:B@L"
+        + "0:C700:C@50:Ci40:CoH0:D050:H<40:H=H0:H@50:HP90:HZ50:H]00:I010:I120:I210:I320:I410:I520:I610:I720:I81"
+        + "0:I920:I:10:I;20:I<10:I=20:I>10:I?20:I@10:IA20:IB10:IC20:ID10:IE20:IF10:IG20:IH10:II20:IJ10:IK20:IL1"
+        + "0:IM20:IN10:IO20:IP10:IQ20:IR10:IS20:IT10:IU20:IV10:IW20:IX10:IY20:IZ10:I[20:I]10:I^20:I_50:I`60:Ia7"
+        + "0:IdH0:Ie60:IoH0:Ip40:J010:J120:J210:J320:J410:J520:J610:J720:J810:J920:J:10:J;20:J<10:J=20:J>10:J?2"
+        + "0:J@10:JA20:JB10:JC20:JD10:JE20:JF10:JG20:JH10:JI20:JJ10:JK20:JL40:JN60:JP50:KV:0:Ka60:KcH0:Ki00:L0K"
+        + "0:LG40:LPK0:LR10:LS20:LT10:LU20:LV10:LW20:LX10:LY20:LZ10:L[20:L]10:L^20:L_10:L`20:Lc10:Ld20:Le10:Lf2"
+        + "0:Lg10:Lh20:Li10:Lj20:Lk10:Ll20:Lm10:Ln20:Lo10:Lp20:M010:M120:M210:M320:M410:M520:M610:M720:M810:M92"
+        + "0:M:10:M;20:M<10:M=20:M>10:M?20:M@10:MA20:MB10:MC20:MD10:ME20:MF10:MG20:MH10:MI20:MJ10:MK20:ML10:MM2"
+        + "0:MN10:MO20:MP10:MQ20:MR10:MS20:MT10:MU20:MV10:MW20:MX10:MY20:MZ10:M[20:M]10:M^20:M_10:M`20:Ma40:Mb2"
+        + "0:Mj10:Mk20:Ml10:Mm20:Mn10:Mp20:N010:N120:N210:N320:N410:N520:N610:N720:N840:N9K0:N;10:N<20:N=10:N>2"
+        + "0:N?50:N@10:NA20:NB10:NC20:NF10:NG20:NH10:NI20:NJ10:NK20:NL10:NM20:NN10:NO20:NP10:NQ20:NR10:NS20:NT1"
+        + "0:NU20:NV10:NW20:NX10:NY20:NZ10:N`20:Na10:Nf20:Ng10:Nh20:Ni10:Nj20:Nk10:Nl20:Nm10:Nn20:No10:Np20:O01"
+        + "0:O120:O210:O320:O410:O820:O910:O:20:O;10:O=20:O>00:O@10:OA20:OB00:OC20:OD00:OE20:OF10:OG20:OH10:OI2"
+        + "0:OJ10:OK20:OL10:OM00:Oc40:Of10:Og20:Oh50:Oi40:Ok20:Ol50:P260:P350:P660:P750:P;60:P<50:PS80:PU60:PW8"
+        + "0:PXL0:P]60:P^00:Pa;0:PgL0:PiJ0:PjL0:Pk00:Q050:QeH0:Qi00:R080:R250:Re80:S460:S600:S>H0:S@90:SJ00:SP6"
+        + "0:Sc50:SiH0:Sl50:SmH0:Sn50:Sp60:T090:T:50:TV60:T_H0:Ta50:U760:UB80:UD00:UOH0:UP50:Un00:V060:V380:V45"
+        + "0:Vd60:Ve80:Vg60:Vk80:Vm60:Vo80:W1H0:W>00:W?40:W@90:WJ00:WNH0:WP50:WU60:WV40:WW50:Wa90:Wk50:Wp00:X05"
+        + "0:XY60:X`80:Xb60:Xd80:Xf60:Xh00:Y050:Y360:Y450:Y<60:Y=80:Y>00:Y@90:YJ00:YLH0:YP50:Ya40:Yb50:YhL0:Yk5"
+        + "0:Yl80:Ym60:Yn80:Yo50:Za60:Zb50:Zc60:Zf50:Zh60:Zj50:Zo60:[050:[160:[250:[300:[K50:[M40:[NH0:[P50:[[8"
+        + "0:[]60:[_80:[aH0:[c50:[d40:[f80:[g60:[h00:]150:]700:]950:]?00:]A50:]G00:]P50:]W00:]X50:]`00:]a20:^KK"
+        + "0:^L40:^P20:^Y40:^ZK0:^]00:^a20:`050:`S80:`U60:`V80:`X60:`Y80:`[H0:`]80:`^60:`_00:`a90:`k00:a050=NT0"
+        + "0=Na50=O700=O;50=Om00=P0C0>00B0?T050?Y_00?Ya50?[J00?]020?]700?]C20?]H00?]M50?]N60?]O50?]YI0?]Z50?]h0"
+        + "0?]i50?]n00?]o50?]p00?^050?^200?^350?^500?^650?_cK0?`300?`C50?eoF0?epE0?f0L0?f@50?g@00?gB50?h800?h?L"
+        + "0?h@00?ha50?hmJ0?hnL0?i060?i@H0?iGE0?iHF0?iIH0?iJ00?iP60?iaH0?ibD0?idG0?ifE0?igF0?ihE0?iiF0?ijE0?ikF"
+        + "0?ilE0?imF0?inE0?ioF0?ipE0?j0F0?j1E0?j2F0?j3E0?j4F0?j5H0?j7E0?j8F0?j9H0?j=G0?j@H0?jC00?jDH0?jHD0?jIE"
+        + "0?jJF0?jKE0?jLF0?jME0?jNF0?jOH0?jRI0?jSD0?jTI0?jW00?jXH0?jYJ0?jZH0?j]00?ja50?jf00?jg50?ln00?lp@0?m00"
+        + "0?m1H0?m4J0?m5H0?m8E0?m9F0?m:H0?m;I0?m<H0?m=D0?m>H0?m@90?mJH0?mLI0?mOH0?mQ10?mlE0?mmH0?mnF0?moK0?mpG"
+        + "0?n0K0?n120?nKE0?nLI0?nMF0?nNI0?nOE0?nPF0?nQH0?nRE0?nSF0?nTH0?nV50?na40?nb50?oN40?oP50?op00?p250?p80"
+        + "0?p:50?p@00?pB50?pH00?pJ50?pM00?pPJ0?pRI0?pSK0?pTL0?pUJ0?pW00?pXL0?pYI0?p^L0?p`00?pj@0?pmL0?po00@005"
+        + "0@0<00@0=50@0W00@0X50@0l00@0m50@0o00@0p50@1>00@1@50@1N00@2050@3l00@40H0@4300@47;0@4e00@4hL0@50:0@5f;"
+        + "0@5jL0@6:;0@6<L0@6?00@6@L0@6M00@6PL0@6Q00@7@L0@7n60@7o00@:050@:M00@:P50@;A00@;P60@;Q;0@;m00@<050@<P;"
+        + "0@<T00@<^50@=1:0@=250@=::0@=;00@=@50@=g60@=l00@>050@>N00@>OH0@>P50@?400@?850@?@H0@?A:0@?F00@@010@@X2"
+        + "0@A@50@BN00@BP90@BZ00@Ba10@CD00@CH20@Cm00@D050@DX00@Da50@ET00@E`H0@Ea10@El00@Em10@F;00@F<10@FC00@FD1"
+        + "0@FF00@FG20@FR00@FS20@Fc00@Fd20@Fk00@Fl20@Fn00@G050@Ge00@H050@Lh00@M050@MF00@MP50@MX00@N040@N600@N74"
+        + "0@Nb00@Nc40@Nl00@P050@P600@P850@P900@P:50@Pg00@Ph50@Pj00@Pm50@Pn00@Pp50@QF00@QGH0@QH;0@QP50@QhL0@Qj;"
+        + "0@R050@RO00@RW;0@Ra00@SP50@Sd00@Se50@Sg00@Sl;0@T050@TF;0@TL00@TOH0@TP50@Tk00@TpH0@U000@V050@Vi00@Vm;"
+        + "0@Vo50@W0;0@W@00@WB;0@X050@X160@X400@X560@X700@X<60@X@50@XD00@XE50@XH00@XI50@Xg00@Xi60@Xl00@Xp60@Y0;"
+        + "0@Y900@Y@H0@YI00@YP50@Yn;0@YpH0@Z050@ZM;0@ZP00@[050@[8L0@[950@[U60@[W00@[[;0@[aH0@[h00@]050@]g00@]jH"
+        + "0@^050@^F00@^H;0@^P50@^d00@^i;0@_050@_B00@_IH0@_M00@_Y;0@_a00@a050@b900@c010@cd00@d020@dd00@dk;0@e05"
+        + "0@eT60@eX00@ea90@ek00@f090@f:50@f>40@f?50@f@10@fV00@fY60@f_D0@f`40@fa20@g600@g>I0@g@00@jP;0@jp00@k05"
+        + "0@kZ00@k[60@k^D0@k_00@ka50@kc00@l250@l500@lm60@m050@mM;0@mW50@mX00@ma50@n660@nA;0@nEH0@nJ00@na50@o26"
+        + "0@o6H0@o:00@oa50@p5;0@p<00@pP50@ph00A0080A0160A0280A0350A0i60A17H0A1>00A1B;0A1V90A1a60A1b50A1d60A1f5"
+        + "0A1g00A1p60A2280A2350A2a80A2d60A2h80A2j60A2lH0A2n@0A2oH0A3260A3300A3=@0A3>00A3@50A3Y00A3a90A3k00A406"
+        + "0A4350A4W60A4]80A4^60A4f00A4g90A50H0A5450A5580A5750A5800A5@50A5d60A5eH0A5g50A5h00A6060A6280A6350A6d8"
+        + "0A6g60A6p80A7150A75H0A7960A7=H0A7>80A7?60A7@90A7J50A7KH0A7L50A7MH0A7P00A7Q;0A7f00A8050A8B00A8C50A8]8"
+        + "0A8`60A8c80A8e60A8f80A8g60A8iH0A8o60A8p50A9160A9200A:050A:700A:850A:900A::50A:>00A:?50A:N00A:O50A:YH"
+        + "0A:Z00A:a50A;O60A;P80A;S60A;[00A;a90A;k00A<060A<280A<400A<550A<=00A<?50A<A00A<C50A<Y00A<Z50A<b00A<c5"
+        + "0A<e00A<f50A<k00A<l60A<n50A<o80A=060A=180A=500A=780A=900A=;80A=>00A=@50A=A00A=G80A=H00A=M50A=R80A=T0"
+        + "0A=V60A=^00A=a60A=f00A>050A>:00A>;50A><00A>>50A>?00A>@50A>g00A>h50A>i80A>l60A?100A?280A?300A?580A?60"
+        + "0A?780A?;00A?<80A?>60A??80A?@60A?A50A?B60A?C50A?DH0A?F00A?GH0A?I00A?Q60A?S00A@050A@f80A@i60AA080AA26"
+        + "0AA580AA660AA750AA;H0AA@90AAJH0AAL00AAMH0AAN60AAO50AAR00AB050ABa80ABd60ABj80ABk60ABl80ABp60AC180AC26"
+        + "0AC450AC6H0AC750AC800AC@90ACJ00AF050AF`80AFc60AFg00AFi80AFm60AFo80AFp60AG1H0AGH50AGL60AGN00AH050AHa8"
+        + "0AHd60AHl80AHn60AHo80AHp60AI1H0AI450AI500AI@90AIJ00AIPH0AI^00AJ050AJ[60AJ]80AJ^60AJ_80AJa60AJg80AJh6"
+        + "0AJi50AJjH0AJk00AK090AK:00AK@90AKT00AL050ALK00ALM60ALN80ALO60ALP80ALR60ALV80ALW60AL]00ALa90ALk;0ALmH"
+        + "0ALpL0AM050AM700AP050AP]80AP`60APi80APj60APlH0APm00ARP10AS020ASP90ASZ;0ASd00ASp50AT700AT950AT:00AT<5"
+        + "0ATD00ATE50ATG00ATH50ATa80ATg00ATh80ATj00ATl60ATn80ATo60ATp50AU080AU150AU280AU360AU4H0AU700AU@90AUJ0"
+        + "0AVP50AVX00AVZ50AWA80AWD60AWH00AWJ60AWL80AWP60AWQ50AWRH0AWS50AWT80AWU00AX050AX160AX;50AXd60AXj80AXk5"
+        + "0AXl60AXpH0AY760AY800AY@50AYA60AYG80AYI60AYL50AZ:60AZG80AZH60AZJH0AZM50AZNH0AZS00AZa50A[j00A]0H0A]:0"
+        + "0A`050A`QH0A`R00A`a90A`k00Aa050Aa900Aa:50Aa`80Aaa60Aah00Aai60Aao80Aap60Ab050Ab1H0Ab600Ab@90AbJ;0Ab^0"
+        + "0AbaH0Abc50Ac@00AcB60AcX00AcY80AcZ60Acb80Acc60Ace80Acf60Ach00Ae050Ae700Ae850Ae:00Ae;50Aeb60Aeh00Aek6"
+        + "0Ael00Aem60Aeo00Aep60Af650Af760Af800Af@90AfJ00AfP50AfV00AfW50AfY00AfZ50Ag:80Ag?00Ag@60AgB00AgC80AgE6"
+        + "0AgF80AgG60AgH50AgI00AgP90AgZ00AlP50Ald60Alf80AlhH0Alj00Am060Am250Am380Am450AmA00AmB50Ame80Amg60Aml0"
+        + "0Amo80An060An180An260An3H0An@90AnJ60AnK00Aoa50Aob00Ap0;0ApEL0ApMJ0ApQL0Apc00AppH0B0050B>J00B@0:0BA`0"
+        + "0BAaH0BAf00BB050BE400Bo@50BpbH0Bpd00C0050C@a@0CA060CA150CA760CAF00CAP50D?l00D@050DI700F4050F4N60F4Z8"
+        + "0F4^60F4a90F4k00FP050FXj00FY050FYO00FYP90FYZ00FY_H0FYa50FZp00F[090F[:00F[@50F[_00F[a60F[fH0F[g00F]05"
+        + "0F]a60F]hH0F]mL0F^040F^4H0F^5L0F^600F^@90F^J00F^K;0F^R00F^S50F^i00F^n50F_@00Ff040Ff350Ff[40Ff^H0Ffa9"
+        + "0Ffk00Fj010FjP20Fk0;0FkGH0FkK00Fm050Fn;00Fn?60Fn@50FnA80Fo800Fo?60FoC40FoP00FpP40FpRH0FpS40FpT60FpU0"
+        + "0Fpa80Fpc00G0050HOi00HP050HdF00Hdp50He900Jpa40Jpe00Jpf40Jpm00Jpn40Jpp00K0050K4S00K4c50K4d00K5@50K5C0"
+        + "0K5E50K5F00K5T50K5X00K5a50K;m00Ka050Kb[00Kba50Kbn00Kc050Kc900Kc@50KcJ00KcLL0KcM60KcOH0KcP@0KcT00La0L"
+        + "0Lda90Ldk00Le0L0Lke00Lm060Lm_00Lma60Ln700Ln@L0Lp400M00L0M3g00M40L0M4W00M4YL0M5U80M5W60M5ZL0M5^80M5d@"
+        + "0M5l60M63L0M6560M6<L0M6Z60M6_L0M7[00M80L0M9260M95L0M9600M;0;0M;D00M;P;0M;e00M<0L0M=G00M=P;0M=j00M@01"
+        + "0M@J20M@e10MA>20MAE00MAF20MAX10MB220MBL10MBM00MBN10MBP00MBR10MBS00MBU10MBW00MBY10MB^00MB_10MBg20MBk0"
+        + "0MBl20MBm00MBn20MC400MC520MC@10MCZ20MD410MD600MD710MD;00MD=10MDE00MDF10MDM00MDN20MDi10MDk00MDl10MDp0"
+        + "0ME010ME500ME610ME700ME:10MEA00MEB20ME]10MF620MFP10MFk20MGD10MG_20MH810MHR20MHm10MIF20MIa10MJ:20MJV0"
+        + "0MJX10MK1I0MK220MKKI0MKL20MKR10MKlI0MKm20MLEI0MLF20MLL10MLfI0MLg20MM?I0MM@20MMF10MM`I0MMa20MN9I0MN:2"
+        + "0MN@10MNYI0MNZ20MO3I0MO420MO:10MO;20MO<00MO>90MP0L0MX060MXhL0MXl60MY^L0MYf60MYgL0MZ460MZ5L0MZ7H0MZ<0"
+        + "0MZK60MZP00MZQ60MZa00Mm020Mm:50Mm;20MmO00MmU20Mm[00N0060N0700N0860N0I00N0K60N0R00N0S60N0U00N0V60N0[0"
+        + "0N0a40N1_00N2?60N2@00N4050N4^00N4a60N4h40N4o00N5090N5:00N5>50N5?L0N5@00N:@50N:_60N:`00N;050N;]60N;a9"
+        + "0N;k00N;pJ0N<000NC@50NC[40NC]60NCa90NCk00NG@50NG_60NGa50NGb90NGl00NGpH0NH000NOP50NOW00NOX50NO]00NO^5"
+        + "0NO`00NOa50NOp00NP050NS500NS7;0NS@60NSG00NT010NTR20NU460NU;40NU<00NU@90NUJ00NUNH0NUP00Nbb;0Nc]L0Nc^;"
+        + "0NcaJ0Ncb;0Ncf00Ne1;0Ne_L0Ne`;0Neo00Ni050Ni400Ni550NiP00NiQ50NiS00NiT50NiU00NiW50NiX00NiY50Nid00Nie5"
+        + "0Nii00Nij50Nik00Nil50Nim00Nj250Nj300Nj750Nj800Nj950Nj:00Nj;50Nj<00Nj=50Nj@00NjA50NjC00NjD50NjE00NjG5"
+        + "0NjH00NjI50NjJ00NjK50NjL00NjM50NjN00NjO50NjP00NjQ50NjS00NjT50NjU00NjW50Nj[00Nj]50Njd00Nje50Nji00Njj5"
+        + "0Njn00Njo50Njp00Nk050Nk:00Nk;50NkL00NkQ50NkT00NkU50NkZ00Nk[50Nkm00NlaI0Nlc00O00L0O0]00O0aL0O2D00O2PL"
+        + "0O2`00O2bL0O3000O31L0O3@00O3AL0O3g00O40;0O4=L0O6_00O7VL0O8300O8@L0O8m00O90L0O9900O9@L0O9B00O9PL0O9V0"
+        + "0O<0L0O?lK0O@0L0OKH00OKLL0OK^00OKaL0OKn00OL0L0OMh00OMlL0OOJ00OOPL0OO]00OOaL0OOb00OP0L0OP<00OP@L0OQ80"
+        + "0OQ@L0OQJ00OQPL0OR800OR@L0OR_00ORaL0ORm00OS0L0OS200OT0L0OYD00OYPL0OY_00OYaL0OYn00OZ0L0OZ:00OZ?L0O[70"
+        + "0O[>L0O[M00O[OL0O[Z00O[aL0O[j00O]0L0O_C00O_DL0O`a90O`k00P0050ZKP00ZL050[Lk00[M050[PN00[PP50]kR00]ka5"
+        + "0_`Q00_`a50_jN00`P050`XN00a0050b=;00b=@50c>a03P01@3P0203P0P@3P2003P4063P7a03a00B3ppo04000B4?po0"
+    }
+    return jxGcTable
+}
+var jxScTable = ""
+function jxScTab() {
+    if (jxScTable == "") {
+        jxScTable = ""
+        + "000000001101001K00001Q01001l00002Z01002[00002k01002l00003001003G00003H01003h00003i0100:j0000;P0100;U"
+        + "0000;Z0R00;]0000<00X00=a0200=e0000=f0200=i2Z00=k0200=o0000=p0200>02Z00>40200>50000>60200>70000>80200"
+        + ">;2Z00><0200>=2Z00>>0200>R2Z00>S0200?R0g00?a0200@00300B50X00B70300Da2Z00Db0400EG2Z00EI0400F;2Z00F=04"
+        + "00F@2Z00FA0500G82Z00G@0500G[2Z00G`0500Gf2Z00H00600H50000H60600H<0000H=0600HK0000HL0600HO0000HP0600I0"
+        + "0000I10600I;0X00IF0600Ia0X00Ib0600KM0000KN0600L00700L>2Z00L?0700M;2Z00M=0700M@0600N00800Nc2Z00O01100"
+        + "Ol2Z00On1100P01B00P_2Z00Pa1B00Pp2Z00Q01C00QL2Z00QN1C00QO2Z00QP0700Q[2Z00Qa0600R?2Z00R@0600RB2Z00RG06"
+        + "00SR0000SS0600T00900UA0X00UE0900UT0000UV0900V00:00V42Z00V50:00V=2Z00V?0:00VA2Z00VC0:00VY2Z00VZ0:00Vb"
+        + "2Z00Vc0:00Vd2Z00Vg0:00Vk2Z00Vm0:00W52Z00W70:00W92Z00W;0:00W?2Z00WG0:00WH2Z00WL0:00WN2Z00WO0:00WT2Z00"
+        + "WV0:00Wp2Z00X10;00X42Z00X50;00X;2Z00X?0;00XA2Z00XC0;00XY2Z00XZ0;00Xb2Z00Xc0;00Xe2Z00Xf0;00Xh2Z00Xi0;"
+        + "00Xk2Z00Xm0;00Xn2Z00Xo0;00Y32Z00Y70;00Y92Z00Y;0;00Y>2Z00YA0;00YB2Z00YI0;00YM2Z00YN0;00YO2Z00YV0;00Yh"
+        + "2Z00Z10<00Z42Z00Z50<00Z>2Z00Z?0<00ZB2Z00ZC0<00ZY2Z00ZZ0<00Zb2Z00Zc0<00Ze2Z00Zf0<00Zk2Z00Zm0<00[62Z00"
+        + "[70<00[:2Z00[;0<00[>2Z00[@0<00[A2Z00[P0<00[T2Z00[V0<00[c2Z00[j0<00]02Z00]10=00]42Z00]50=00]=2Z00]?0="
+        + "00]A2Z00]C0=00]Y2Z00]Z0=00]b2Z00]c0=00]e2Z00]f0=00]k2Z00]m0=00^52Z00^70=00^92Z00^;0=00^>2Z00^E0=00^H"
+        + "2Z00^L0=00^N2Z00^O0=00^T2Z00^V0=00^i2Z00_20>00_42Z00_50>00_;2Z00_>0>00_A2Z00_B0>00_F2Z00_I0>00_K2Z00"
+        + "_L0>00_M2Z00_N0>00_P2Z00_S0>00_U2Z00_X0>00_[2Z00__0>00_k2Z00_o0>00`32Z00`60>00`92Z00`:0>00`>2Z00`@0>"
+        + "00`A2Z00`G0>00`H2Z00`V0>00`l2Z00a00?00a=2Z00a>0?00aA2Z00aB0?00aY2Z00aZ0?00ak2Z00am0?00b52Z00b60?00b9"
+        + "2Z00b:0?00b>2Z00bE0?00bG2Z00bH0?00bK2Z00bM0?00bN2Z00bP0?00bT2Z00bV0?00ba2Z00bh0?00c00@00c=2Z00c>0@00"
+        + "cA2Z00cB0@00cY2Z00cZ0@00ce2Z00cf0@00ck2Z00cm0@00d52Z00d60@00d92Z00d:0@00d>2Z00dE0@00dG2Z00dM0@00dO2Z"
+        + "00dP0@00dT2Z00dV0@00da2Z00db0@00de2Z00e00A00e=2Z00e>0A00eA2Z00eB0A00f52Z00f60A00f92Z00f:0A00f@2Z00fD"
+        + "0A00fT2Z00fV0A00g02Z00g10B00g42Z00g50B00gG2Z00gJ0B00gc2Z00gd0B00gm2Z00gn0B00go2Z00h00B00h72Z00h:0B00"
+        + "h;2Z00h?0B00hE2Z00hF0B00hG2Z00hH0B00hP2Z00hV0B00ha2Z00hc0B00hf2Z00i10C00il2Z00ip0000j00C00jL2Z00k10D"
+        + "00k32Z00k40D00k52Z00k60D00k;2Z00k<0D00kT2Z00kU0D00kV2Z00kW0D00ko2Z00l00D00l52Z00l60D00l72Z00l80D00l?"
+        + "2Z00l@0D00lJ2Z00lL0D00lP2Z00m00E00n82Z00n90E00n^2Z00nb0E00oH2Z00oI0E00on2Z00oo0E00p=2Z00p>0E00pE0000"
+        + "pI0E00pK2Z01000F012P0G01362Z01370G01382Z013=0G013>2Z013@0G013l00013m0G01400H01800I01992Z019:0I019>2Z"
+        + "019@0I019G2Z019H0I019I2Z019J0I019N2Z019P0I01:92Z01::0I01:>2Z01:@0I01:b2Z01:c0I01:g2Z01:i0I01:p2Z01;0"
+        + "0I01;12Z01;20I01;62Z01;80I01;G2Z01;H0I01<A2Z01<B0I01<F2Z01<H0I01=K2Z01=M0I01=n2Z01>00I01>J2Z01>P0J01"
+        + "?g2Z01?i0J01?o2Z01@00K01J00L01JM2Z01JP0M01K[0001K_0M01Kj2Z01L00Y01LF2Z01LO0Y01LP0Z01Lf0001Lh2Z01M00["
+        + "01MD2Z01MP0]01M^2Z01M_0]01Mb2Z01Mc0]01Me2Z01N00N01ON2Z01OP0N01OZ2Z01Oa0N01Ok2Z01P00O01P20001P40O01P5"
+        + "0001P60O01PJ2Z01PP0O01Qj2Z01R00O01R[2Z01Ra0K01Sg2Z01T00^01TO2Z01TP0^01T]2Z01Ta0^01Tm2Z01U00^01U12Z01"
+        + "U40^01U@0_01U_2Z01Ua0_01Uf2Z01V00h01V]2Z01Va0h01W:2Z01W@0h01WK2Z01WN0h01WP0N01X00f01XL2Z01XN0f01XP1>"
+        + "01YO2Z01YP1>01Yn2Z01Yp1>01Z:2Z01Z@1>01ZJ2Z01ZP1>01Z_2Z01Za0X01[?2Z01]00n01^=2Z01^>0n01_01201`01301`e"
+        + "2Z01`m1301a01401ai2Z01al1401b:2Z01b=1401b@1501c00301c;2Z01c@0G01cl2Z01cn0G01d01201d82Z01d@0X01dC0001"
+        + "dD0X01dQ0001dR0X01dY0001d^0X01d_0001de0X01df0001di0X01dk0001dl2Z01e00101eV0201e[0301e]0101fM0201fR01"
+        + "01fV0201f[0101fi0301fj0101gp0201h00X01i00101m00201mF2Z01mH0201mN2Z01mP0201n62Z01n80201n>2Z01n@0201nH"
+        + "2Z01nI0201nJ2Z01nK0201nL2Z01nM0201nN2Z01nO0201no2Z01o00201of2Z01og0201p52Z01p60201pD2Z01pF0201pL2Z01"
+        + "pM0201pa2Z01pc0201pf2Z01pg0201pp2Z020000020<0X020>00021U2Z021V00021b01021c2Z021e00021p01022000022?2Z"
+        + "022@01022M2Z022P0002312Z023@0X023b2Z024000024V02024W00024Z01024]00024c01024d00025>01025?00025P010269"
+        + "00026<2Z026@0002@Z2Z02A00002A;2Z02AP0002P00e02T00002^e2Z02^g0002_F2Z02_G0002a00i02bP0102c00g02de2Z02"
+        + "dj0g02e00G02eV2Z02eW0G02eX2Z02e^0G02e_2Z02ea0j02fX2Z02f`0j02fb2Z02fp0j02g00I02gG2Z02gP0I02gW2Z02gX0I"
+        + "02g`2Z02ga0I02gh2Z02gi0I02gp2Z02h00I02h72Z02h80I02h?2Z02h@0I02hG2Z02hH0I02hO2Z02hP0302i00002jN2Z02k0"
+        + "0S02kJ2Z02kK0S02le2Z02m00S02pF2Z02pa0003050S03060003070S030800030Q0S030Z0X030_0H030a00030i0S030m0003"
+        + "102Z03110P032G2Z032I0X032K00032M0P032P00032Q0Q033l00033n0Q03402Z03450R034a2Z034b0H036?2Z036@00036P0R"
+        + "037000037V2Z037`00037a0Q03800H038O2Z038P00039P0H039p0003;@0Q03;p0003<00Q03=H0003@00S04h00004i00S0:00"
+        + "0T0:B=2Z0:B@0T0:C72Z0:C@1D0:D0160:H]2Z0:I0030:JP1E0:Ki2Z0:L0000:LR010:N8000:N;010:O>2Z0:O@010:OB2Z0:"
+        + "OC010:OD2Z0:OE010:OM2Z0:Oc010:P00k0:P^2Z0:Pa000:Pk2Z0:Q0100:Qi2Z0:R0170:S62Z0:S>170:SJ2Z0:SP090:T018"
+        + "0:T_000:T`180:Ta190:UD2Z0:UO190:UP0H0:Un2Z0:V01F0:W>2Z0:W?000:W@1F0:WJ2Z0:WN1F0:WP0F0:Wp2Z0:X01=0:Xh"
+        + "2Z0:Y01=0:Y>2Z0:Y@1=0:YJ2Z0:YL1=0:YP0F0:Z01?0:[32Z0:[K1?0:[P1G0:[h2Z0:]10I0:]72Z0:]90I0:]?2Z0:]A0I0:"
+        + "]G2Z0:]P0I0:]W2Z0:]X0I0:]`2Z0:]a010:^K000:^L010:^U020:^V010:^Z000:^]2Z0:^a0J0:`01G0:`_2Z0:`a1G0:`k2Z"
+        + "0:a00H0=NT2Z0=Na0H0=O72Z0=O;0H0=Om2Z0?T00S0?Y_2Z0?Ya0S0?[J2Z0?]0010?]72Z0?]C040?]H2Z0?]M050?]h2Z0?]i"
+        + "050?]n2Z0?]o050?]p2Z0?^0050?^22Z0?^3050?^52Z0?^6050?^@060?`32Z0?`C060?eo000?f0060?g@2Z0?gB060?h82Z0?"
+        + "h?060?h@2Z0?ha060?i00X0?i@000?iJ2Z0?iP0X0?i_030?ia000?jC2Z0?jD000?jW2Z0?jX000?j]2Z0?ja060?jf2Z0?jg06"
+        + "0?ln2Z0?lp000?m02Z0?m1000?mQ010?ml000?n1010?nK000?nV0Q0?na000?nb0Q0?oN000?oP0H0?op2Z0?p20H0?p82Z0?p:"
+        + "0H0?p@2Z0?pB0H0?pH2Z0?pJ0H0?pM2Z0?pP000?pW2Z0?pX000?p`2Z0?pj000?po2Z0@000`0@0<2Z0@0=0`0@0W2Z0@0X0`0@"
+        + "0l2Z0@0m0`0@0o2Z0@0p0`0@1>2Z0@1@0`0@1N2Z0@200`0@3l2Z0@40000@432Z0@47000@4e2Z0@4h000@50020@6?2Z0@6@00"
+        + "0@6M2Z0@6P020@6Q2Z0@7@000@7n0X0@7o2Z0@:01:0@:M2Z0@:P1;0@;A2Z0@;P0X0@;Q000@;m2Z0@<00U0@<T2Z0@<^0U0@<a"
+        + "0V0@=;2Z0@=@1h0@=l2Z0@>00a0@>N2Z0@>O0a0@>P0l0@?42Z0@?80l0@?F2Z0@@00W0@A@0b0@B00c0@BN2Z0@BP0c0@BZ2Z0@"
+        + "Ba270@CD2Z0@CH270@Cm2Z0@D01Y0@DX2Z0@Da1V0@ET2Z0@E`1V0@Ea2L0@El2Z0@Em2L0@F;2Z0@F<2L0@FC2Z0@FD2L0@FF2Z"
+        + "0@FG2L0@FR2Z0@FS2L0@Fc2Z0@Fd2L0@Fk2Z0@Fl2L0@Fn2Z0@G02S0@Ge2Z0@H01^0@Lh2Z0@M01^0@MF2Z0@MP1^0@MX2Z0@N0"
+        + "010@N62Z0@N7010@Nb2Z0@Nc010@Nl2Z0@P00d0@P62Z0@P80d0@P92Z0@P:0d0@Pg2Z0@Ph0d0@Pj2Z0@Pm0d0@Pn2Z0@Pp0d0@"
+        + "Q01H0@QF2Z0@QG1H0@QP1f0@R01e0@RO2Z0@RW1e0@Ra2Z0@SP1p0@Sd2Z0@Se1p0@Sg2Z0@Sl1p0@T00p0@TL2Z0@TO0p0@TP1<"
+        + "0@Tk2Z0@Tp1<0@U02Z0@V01O0@VP1P0@Vi2Z0@Vm1P0@W@2Z0@WB1P0@X00m0@X42Z0@X50m0@X72Z0@X<0m0@XD2Z0@XE0m0@XH"
+        + "2Z0@XI0m0@Xg2Z0@Xi0m0@Xl2Z0@Xp0m0@Y92Z0@Y@0m0@YI2Z0@YP1I0@Z01d0@ZP2Z0@[01`0@[W2Z0@[[1`0@[h2Z0@]01@0@"
+        + "]g2Z0@]j1@0@^01J0@^F2Z0@^H1J0@^P1K0@^d2Z0@^i1K0@_01i0@_B2Z0@_I1i0@_M2Z0@_Y1i0@_a2Z0@a01L0@b92Z0@c021"
+        + "0@cd2Z0@d0210@dd2Z0@dk210@e02=0@eX2Z0@ea2=0@ek2Z0@f02T0@fV2Z0@fY2T0@g62Z0@g>2T0@g@2Z0@jP060@jp2Z0@k0"
+        + "2H0@kZ2Z0@k[2H0@k_2Z0@ka2H0@kc2Z0@l2060@l52Z0@lm060@m02>0@mX2Z0@ma2?0@nJ2Z0@na2M0@o:2Z0@oa2I0@p<2Z0@"
+        + "pP2D0@ph2Z0A001M0A1>2Z0A1B1M0A1g2Z0A1p1M0A201N0A332Z0A3=1N0A3>2Z0A3@1Q0A3Y2Z0A3a1Q0A3k2Z0A401R0A4f2Z"
+        + "0A4g1R0A582Z0A5@1_0A5h2Z0A601S0A7P2Z0A7Q0B0A7f2Z0A801]0A8B2Z0A8C1]0A922Z0A:0200A:72Z0A:8200A:92Z0A::"
+        + "200A:>2Z0A:?200A:N2Z0A:O200A:Z2Z0A:a1k0A;[2Z0A;a1k0A;k2Z0A<01Z0A<42Z0A<51Z0A<=2Z0A<?1Z0A<A2Z0A<C1Z0A"
+        + "<Y2Z0A<Z1Z0A<b2Z0A<c1Z0A<e2Z0A<f1Z0A<k2Z0A<l0X0A<m1Z0A=52Z0A=71Z0A=92Z0A=;1Z0A=>2Z0A=@1Z0A=A2Z0A=G1Z"
+        + "0A=H2Z0A=M1Z0A=T2Z0A=V1Z0A=^2Z0A=a1Z0A=f2Z0A>02U0A>:2Z0A>;2U0A><2Z0A>>2U0A>?2Z0A>@2U0A>g2Z0A>h2U0A?1"
+        + "2Z0A?22U0A?32Z0A?52U0A?62Z0A?72U0A?;2Z0A?<2U0A?F2Z0A?G2U0A?I2Z0A?Q2U0A?S2Z0A@0260AAL2Z0AAM260AAR2Z0A"
+        + "B01l0AC82Z0AC@1l0ACJ2Z0AF01j0AFg2Z0AFi1j0AGN2Z0AH01b0AI52Z0AI@1b0AIJ2Z0AIP0O0AI^2Z0AJ01T0AJk2Z0AK01T"
+        + "0AK:2Z0AK@0F0AKT2Z0AL01n0ALK2Z0ALM1n0AL]2Z0ALa1n0AM72Z0AP02@0APm2Z0ARP1m0ASd2Z0ASp1m0AT02J0AT72Z0AT9"
+        + "2J0AT:2Z0AT<2J0ATD2Z0ATE2J0ATG2Z0ATH2J0ATg2Z0ATh2J0ATj2Z0ATl2J0AU72Z0AU@2J0AUJ2Z0AVP2E0AVX2Z0AVZ2E0A"
+        + "WH2Z0AWJ2E0AWU2Z0AX02<0AY82Z0AY@2;0AZS2Z0AZa0K0A[01g0A[j2Z0A]0090A]:2Z0A`02V0A`R2Z0A`a2V0A`k2Z0Aa024"
+        + "0Aa92Z0Aa:240Aah2Z0Aai240Ab62Z0Ab@240Ab^2Z0Aba250Ac@2Z0AcB250AcX2Z0AcY250Ach2Z0Ae0290Ae72Z0Ae8290Ae:"
+        + "2Z0Ae;290Aeh2Z0Aek290Ael2Z0Aem290Aeo2Z0Aep290Af82Z0Af@290AfJ2Z0AfP2A0AfV2Z0AfW2A0AfY2Z0AfZ2A0Ag?2Z0A"
+        + "g@2A0AgB2Z0AgC2A0AgI2Z0AgP2A0AgZ2Z0AlP2B0Alj2Z0Am02Q0AmA2Z0AmB2Q0Aml2Z0Amo2Q0AnK2Z0Aoa1D0Aob2Z0Ap00>"
+        + "0Apc2Z0App0>0B000o0B>J2Z0B@00o0BA`2Z0BAa0o0BAf2Z0BB00o0BE42Z0Bo@2N0Bpd2Z0C001A0CAF2Z0CAP1A0D?l2Z0D@0"
+        + "1o0DI72Z0F402W0F4k2Z0FP01E0FXj2Z0FY01c0FYO2Z0FYP1c0FYZ2Z0FY_1c0FYa2O0FZp2Z0F[02O0F[:2Z0F[@1W0F[_2Z0F"
+        + "[a1W0F[g2Z0F]01[0F^62Z0F^@1[0F^J2Z0F^K1[0F^R2Z0F^S1[0F^i2Z0F^n1[0F_@2Z0Ff02X0Ffk2Z0Fj02C0FkK2Z0Fm01U"
+        + "0Fn;2Z0Fn?1U0Fo82Z0Fo?1U0FoP2Z0FpP280FpQ2:0FpR0S0FpT2K0FpU2Z0Fpa0S0Fpc2Z0G00280HOi2Z0HP0280H]02K0HdF"
+        + "2Z0Hdp2K0He0280He92Z0Jpa0Q0Jpe2Z0Jpf0Q0Jpm2Z0Jpn0Q0Jpp2Z0K000Q0K010P0K4P0Q0K4S2Z0K4c0P0K4d2Z0K5@0P0K"
+        + "5C2Z0K5E0Q0K5F2Z0K5T0Q0K5X2Z0K5a2:0K;m2Z0Ka01X0Kb[2Z0Kba1X0Kbn2Z0Kc01X0Kc92Z0Kc@1X0KcJ2Z0KcL1X0KcP00"
+        + "0KcT2Z0La0000Ldk2Z0Le0000Lke2Z0Lm00X0Lm_2Z0Lma0X0Ln72Z0Ln@000Lp42Z0M00000M3g2Z0M40000M4W2Z0M4Y000M5W"
+        + "0X0M5Z000M5l0X0M63000M650X0M6<000M6Z0X0M6_000M7[2Z0M80020M962Z0M;0000M;D2Z0M;P000M;e2Z0M<0000M=G2Z0M"
+        + "=P000M=j2Z0M@0000MAE2Z0MAF000MBM2Z0MBN000MBP2Z0MBR000MBS2Z0MBU000MBW2Z0MBY000MB^2Z0MB_000MBk2Z0MBl00"
+        + "0MBm2Z0MBn000MC42Z0MC5000MD62Z0MD7000MD;2Z0MD=000MDE2Z0MDF000MDM2Z0MDN000MDk2Z0MDl000MDp2Z0ME0000ME5"
+        + "2Z0ME6000ME72Z0ME:000MEA2Z0MEB000MJV2Z0MJX000MO<2Z0MO>000MP0220MZ<2Z0MZK220MZP2Z0MZQ220MZa2Z0Mm0010M"
+        + "mO2Z0MmU010Mm[2Z0N000i0N072Z0N080i0N0I2Z0N0K0i0N0R2Z0N0S0i0N0U2Z0N0V0i0N0[2Z0N0a030N1_2Z0N2?030N2@2Z"
+        + "0N402F0N4^2Z0N4a2F0N4o2Z0N502F0N5:2Z0N5>2F0N5@2Z0N:@2P0N:`2Z0N;02G0N;k2Z0N;p2G0N<02Z0NC@2R0NCk2Z0NG@"
+        + "2Y0NGl2Z0NGp2Y0NH02Z0NOP0I0NOW2Z0NOX0I0NO]2Z0NO^0I0NO`2Z0NOa0I0NOp2Z0NP01a0NS52Z0NS71a0NSG2Z0NT0230N"
+        + "U<2Z0NU@230NUJ2Z0NUN230NUP2Z0Nbb000Ncf2Z0Ne1000Neo2Z0Ni0060Ni42Z0Ni5060NiP2Z0NiQ060NiS2Z0NiT060NiU2Z"
+        + "0NiW060NiX2Z0NiY060Nid2Z0Nie060Nii2Z0Nij060Nik2Z0Nil060Nim2Z0Nj2060Nj32Z0Nj7060Nj82Z0Nj9060Nj:2Z0Nj;"
+        + "060Nj<2Z0Nj=060Nj@2Z0NjA060NjC2Z0NjD060NjE2Z0NjG060NjH2Z0NjI060NjJ2Z0NjK060NjL2Z0NjM060NjN2Z0NjO060N"
+        + "jP2Z0NjQ060NjS2Z0NjT060NjU2Z0NjW060Nj[2Z0Nj]060Njd2Z0Nje060Nji2Z0Njj060Njn2Z0Njo060Njp2Z0Nk0060Nk:2Z"
+        + "0Nk;060NkL2Z0NkQ060NkT2Z0NkU060NkZ2Z0Nk[060Nkm2Z0Nla060Nlc2Z0O00000O0]2Z0O0a000O2D2Z0O2P000O2`2Z0O2b"
+        + "000O302Z0O31000O3@2Z0O3A000O3g2Z0O40000O6_2Z0O7V000O800P0O81000O832Z0O8@000O8m2Z0O90000O992Z0O9@000O"
+        + "9B2Z0O9P000O9V2Z0O<0000OKH2Z0OKL000OK^2Z0OKa000OKn2Z0OL0000OMh2Z0OMl000OOJ2Z0OOP000OO]2Z0OOa000OOb2Z"
+        + "0OP0000OP<2Z0OP@000OQ82Z0OQ@000OQJ2Z0OQP000OR82Z0OR@000OR_2Z0ORa000ORm2Z0OS0000OS22Z0OT0000OYD2Z0OYP"
+        + "000OY_2Z0OYa000OYn2Z0OZ0000OZ:2Z0OZ?000O[72Z0O[>000O[M2Z0O[O000O[Z2Z0O[a000O[j2Z0O]0000O_C2Z0O_D000O"
+        + "`k2Z0P000S0ZKP2Z0ZL00S0[Lk2Z0[M00S0[PN2Z0[PP0S0]kR2Z0]ka0S0_`Q2Z0_`a0S0_jN2Z0`P00S0`XN2Z0a000S0b=;2Z"
+        + "0b=@0S0c>a2Z3P01003P022Z3P0P003P202Z3P400X3P7a2Z"
+    }
+    return jxScTable
+}
+var jxScNameTable = ""
+function jxScNameTab() {
+    if (jxScNameTable == "") {
+        jxScNameTable = ""
+        + ";ZYYY COMMON;LATN LATIN;GREK GREEK;CYRL CYRILLIC;ARMN ARMENIAN;HEBR HEBREW;ARAB ARABIC;SYRC SYRIAC;T"
+        + "HAA THAANA;DEVA DEVANAGARI;BENG BENGALI;GURU GURMUKHI;GUJR GUJARATI;ORYA ORIYA;TAML TAMIL;TELU TELUG"
+        + "U;KNDA KANNADA;MLYM MALAYALAM;SINH SINHALA;THAI THAI;LAOO LAO;TIBT TIBETAN;MYMR MYANMAR;GEOR GEORGIA"
+        + "N;HANG HANGUL;ETHI ETHIOPIC;CHER CHEROKEE;CANS CANADIAN_ABORIGINAL;OGAM OGHAM;RUNR RUNIC;KHMR KHMER;"
+        + "MONG MONGOLIAN;HIRA HIRAGANA;KANA KATAKANA;BOPO BOPOMOFO;HANI HAN;YIII YI;ITAL OLD_ITALIC;GOTH GOTHI"
+        + "C;DSRT DESERET;ZINH INHERITED;TGLG TAGALOG;HANO HANUNOO;BUHD BUHID;TAGB TAGBANWA;LIMB LIMBU;TALE TAI"
+        + "_LE;LINB LINEAR_B;UGAR UGARITIC;SHAW SHAVIAN;OSMA OSMANYA;CPRT CYPRIOT;BRAI BRAILLE;BUGI BUGINESE;CO"
+        + "PT COPTIC;TALU NEW_TAI_LUE;GLAG GLAGOLITIC;TFNG TIFINAGH;SYLO SYLOTI_NAGRI;XPEO OLD_PERSIAN;KHAR KHA"
+        + "ROSHTHI;BALI BALINESE;XSUX CUNEIFORM;PHNX PHOENICIAN;PHAG PHAGS_PA;NKOO NKO;SUND SUNDANESE;BATK BATA"
+        + "K;LEPC LEPCHA;OLCK OL_CHIKI;VAII VAI;SAUR SAURASHTRA;KALI KAYAH_LI;RJNG REJANG;LYCI LYCIAN;CARI CARI"
+        + "AN;LYDI LYDIAN;CHAM CHAM;LANA TAI_THAM;TAVT TAI_VIET;AVST AVESTAN;EGYP EGYPTIAN_HIEROGLYPHS;SAMR SAM"
+        + "ARITAN;MAND MANDAIC;LISU LISU;BAMU BAMUM;JAVA JAVANESE;MTEI MEETEI_MAYEK;ARMI IMPERIAL_ARAMAIC;SARB "
+        + "OLD_SOUTH_ARABIAN;PRTI INSCRIPTIONAL_PARTHIAN;PHLI INSCRIPTIONAL_PAHLAVI;ORKH OLD_TURKIC;BRAH BRAHMI"
+        + ";KTHI KAITHI;MERO MEROITIC_HIEROGLYPHS;MERC MEROITIC_CURSIVE;SORA SORA_SOMPENG;CAKM CHAKMA;SHRD SHAR"
+        + "ADA;TAKR TAKRI;PLRD MIAO;AGHB CAUCASIAN_ALBANIAN;BASS BASSA_VAH;DUPL DUPLOYAN;ELBA ELBASAN;GRAN GRAN"
+        + "THA;HMNG PAHAWH_HMONG;KHOJ KHOJKI;LINA LINEAR_A;MAHJ MAHAJANI;MANI MANICHAEAN;MEND MENDE_KIKAKUI;MOD"
+        + "I MODI;MROO MRO;NARB OLD_NORTH_ARABIAN;NBAT NABATAEAN;PALM PALMYRENE;PAUC PAU_CIN_HAU;PERM OLD_PERMI"
+        + "C;PHLP PSALTER_PAHLAVI;SIDD SIDDHAM;SIND KHUDAWADI;TIRH TIRHUTA;WARA WARANG_CITI;AHOM AHOM;HLUW ANAT"
+        + "OLIAN_HIEROGLYPHS;HATR HATRAN;MULT MULTANI;HUNG OLD_HUNGARIAN;SGNW SIGNWRITING;ADLM ADLAM;BHKS BHAIK"
+        + "SUKI;MARC MARCHEN;NEWA NEWA;OSGE OSAGE;TANG TANGUT;GONM MASARAM_GONDI;NSHU NUSHU;SOYO SOYOMBO;ZANB Z"
+        + "ANABAZAR_SQUARE;ROHG HANIFI_ROHINGYA;SOGO OLD_SOGDIAN;SOGD SOGDIAN;DOGR DOGRA;GONG GUNJALA_GONDI;MAK"
+        + "A MAKASAR;MEDF MEDEFAIDRIN;ELYM ELYMAIC;NAND NANDINAGARI;HMNP NYIAKENG_PUACHUE_HMONG;WCHO WANCHO;YEZ"
+        + "I YEZIDI;CHRS CHORASMIAN;DIAK DIVES_AKURU;KITS KHITAN_SMALL_SCRIPT;VITH VITHKUQI;OUGR OLD_UYGHUR;CPM"
+        + "N CYPRO_MINOAN;TNSA TANGSA;TOTO TOTO;KAWI KAWI;NAGM NAG_MUNDARI;TODR TODHRI;GARA GARAY;TUTG TULU_TIG"
+        + "ALARI;SUNU SUNUWAR;GUKH GURUNG_KHEMA;KRAI KIRAT_RAI;ONAO OL_ONAL;ZZZZ UNKNOWN;"
+    }
+    return jxScNameTable
+}
+var jxBlkTable = ""
+function jxBlkTab() {
+    if (jxBlkTable == "") {
+        jxBlkTable = ""
+        + "000001002002004003006004009@0500:a0600<00700=a0800@00900D00:00Da0;00F@0<00H00=00L00>00M@0?00N00@00O0"
+        + "0A00P00B00Q00C00QP0D00Qa0E00RP0F00T00G00V00H00X00I00Z00J00]00K00_00L00a00M00c00N00e00O00g00P00i00Q00"
+        + "k00R00m00S01000T012P0U01400V01800W01>00X01>P0Y01@00Z01J00[01JP0]01L00^01LP0_01M00`01MP0a01N00b01P00c"
+        + "01Ra0d01T00e01U@0f01V00g01WP0h01X00i01XP0j01Za0k01]00l01_00m01`00n01a00o01b@0p01c01001c@1101d01201d@"
+        + "1301e01401g01501h01601i01701m018020019021a1:022P1;023@1<02401=025@1>026@1?02801@02<01A02@01B02A01C02"
+        + "AP1D02D01E02F01F02FP1G02H01H02L01I02O01J02Oa1K02P01L02T01M02V01N02X01O02]01P02a01Q02bP1R02c01S02e01T"
+        + "02ea1U02g01V02hP1W02i01X02k01Y02m01Z02pP0002pa1[03001]03101^032P1_03401`034a1a036@1b036P1c03701d037a"
+        + "1e03801f03<01g03@01h04h01i04i01j0:001k0:B@1l0:C@1m0:D01n0:I01o0:JP1p0:L0200:LP210:P0220:Pa230:Q0240:"
+        + "R0250:SP260:T0270:Ta280:UP290:V02:0:WP2;0:X02<0:YP2=0:Z02>0:[P2?0:]02@0:]a2A0:^a2B0:`02C0:a02D0=Na2E"
+        + "0=P02F0=_02G0=a02H0>002I0?T02J0?]02K0?^@2L0?i02M0?i@2N0?iP2O0?ia2P0?j@2Q0?ja2R0?m02S0?pa2T0@002U0@20"
+        + "2V0@402W0@502X0@6@2Y0@7@2Z0@80000@:02[0@:P2]0@;P2^0@<02_0@<a2`0@=@2a0@>02b0@>P2c0@?P000@@02d0@A@2e0@"
+        + "B02f0@Ba2g0@D02h0@Da2i0@Ea2j0@G02k0@H02l0@N02m0@O0000@P02n0@Q02o0@QP2p0@R0300@Ra000@SP310@T0320@TP33"
+        + "0@U0000@V0340@VP350@X0360@YP370@Z0380@ZP000@[0390@]03:0@^03;0@^P3<0@_03=0@_a000@a03>0@b@000@c03?0@e0"
+        + "3@0@f03A0@g@000@jP3B0@k03C0@l03D0@m03E0@ma3F0@na3G0@oa3H0@pP3I0A003J0A203K0A3@3L0A403M0A5@3N0A603O0A"
+        + "7P3P0A803Q0A9@000A:03R0A:a3S0A<03T0A>03U0A@03V0AB03W0ACP000AF03X0AH03Y0AIP3Z0AJ03[0AK@3]0AL03^0AM@00"
+        + "0AP03_0AQ@000ARP3`0AT03a0AUP000AVP3b0AX03c0AY@3d0AZa3e0A[03f0A]03g0A^P000A`03h0Aa03i0Aba3j0Ad0000Ae0"
+        + "3k0AfP3l0Aga000AlP3m0Am03n0AnP000Aoa3o0Ap03p0B00400B@0410BB0420BE@000Bo@430C00440C@a450CAP460D@0470D"
+        + "J0000F40480F50000FP0490FY04:0FYa4;0F[@4<0F]04=0F_@000Ff04>0Fg0000Fj04?0FkP000Fm04@0FoP000FpP4A0G004B"
+        + "0HP04C0H]04D0He04E0Hg0000Jpa4F0K004G0K404H0K4a4I0K5a4J0K<0000Ka04K0KcP4L0Kca000La04M0Ll0000Lm04N0Lp@"
+        + "000M004O0M404P0M804Q0M9@000M;04R0M;P4S0M<04T0M=P4U0M>0000M@04V0MP04W0MZa000Mm04X0N004Y0N0a4Z0N2@000N"
+        + "404[0N5@000N:@4]0N;04^0N<0000NC@4_0ND0000NG@4`0NH0000NOP4a0NP04b0NSP000NT04c0NUP000Nba4d0Nd0000Ne04e"
+        + "0Nf@000Ni04f0Nm0000O004g0O0a4h0O2P4i0O404j0O804k0O<04l0OH04m0OI@4n0OJ04o0OL04p0ON0500OP0510OT0520OX0"
+        + "530OYa540O]0550Oa0000P00560ZKP000ZL0570[M0580[PP590]ka5:0_`a5;0_jP000`P05<0`XP000a005=0b=@5>0c>a003P"
+        + "005?3P20003P405@3P7a003a005A40005B"
+    }
+    return jxBlkTable
+}
+var jxBlkNameTable = ""
+function jxBlkNameTab() {
+    if (jxBlkNameTable == "") {
+        jxBlkNameTable = ""
+        + ";BASIC_LATIN/*;LATIN_1_SUPPLEMENT/LATIN-1 SUPPLEMENT;LATIN_EXTENDED_A/LATIN EXTENDED-A;LATIN_EXTENDE"
+        + "D_B/LATIN EXTENDED-B;IPA_EXTENSIONS/*;SPACING_MODIFIER_LETTERS/*;COMBINING_DIACRITICAL_MARKS/*;GREEK"
+        + "/GREEK AND COPTIC;CYRILLIC;CYRILLIC_SUPPLEMENTARY/CYRILLIC SUPPLEMENT/*;ARMENIAN;HEBREW;ARABIC;SYRIA"
+        + "C;ARABIC_SUPPLEMENT/*;THAANA;NKO;SAMARITAN;MANDAIC;SYRIAC_SUPPLEMENT/*;ARABIC_EXTENDED_B/ARABIC EXTE"
+        + "NDED-B;ARABIC_EXTENDED_A/ARABIC EXTENDED-A;DEVANAGARI;BENGALI;GURMUKHI;GUJARATI;ORIYA;TAMIL;TELUGU;K"
+        + "ANNADA;MALAYALAM;SINHALA;THAI;LAO;TIBETAN;MYANMAR;GEORGIAN;HANGUL_JAMO/*;ETHIOPIC;ETHIOPIC_SUPPLEMEN"
+        + "T/*;CHEROKEE;UNIFIED_CANADIAN_ABORIGINAL_SYLLABICS/*;OGHAM;RUNIC;TAGALOG;HANUNOO;BUHID;TAGBANWA;KHME"
+        + "R;MONGOLIAN;UNIFIED_CANADIAN_ABORIGINAL_SYLLABICS_EXTENDED/*;LIMBU;TAI_LE/*;NEW_TAI_LUE/*;KHMER_SYMB"
+        + "OLS/*;BUGINESE;TAI_THAM/*;COMBINING_DIACRITICAL_MARKS_EXTENDED/*;BALINESE;SUNDANESE;BATAK;LEPCHA;OL_"
+        + "CHIKI/*;CYRILLIC_EXTENDED_C/CYRILLIC EXTENDED-C;GEORGIAN_EXTENDED/*;SUNDANESE_SUPPLEMENT/*;VEDIC_EXT"
+        + "ENSIONS/*;PHONETIC_EXTENSIONS/*;PHONETIC_EXTENSIONS_SUPPLEMENT/*;COMBINING_DIACRITICAL_MARKS_SUPPLEM"
+        + "ENT/*;LATIN_EXTENDED_ADDITIONAL/*;GREEK_EXTENDED/*;GENERAL_PUNCTUATION/*;SUPERSCRIPTS_AND_SUBSCRIPTS"
+        + "/*;CURRENCY_SYMBOLS/*;COMBINING_MARKS_FOR_SYMBOLS/COMBINING DIACRITICAL MARKS FOR SYMBOLS/*;LETTERLI"
+        + "KE_SYMBOLS/*;NUMBER_FORMS/*;ARROWS;MATHEMATICAL_OPERATORS/*;MISCELLANEOUS_TECHNICAL/*;CONTROL_PICTUR"
+        + "ES/*;OPTICAL_CHARACTER_RECOGNITION/*;ENCLOSED_ALPHANUMERICS/*;BOX_DRAWING/*;BLOCK_ELEMENTS/*;GEOMETR"
+        + "IC_SHAPES/*;MISCELLANEOUS_SYMBOLS/*;DINGBATS;MISCELLANEOUS_MATHEMATICAL_SYMBOLS_A/MISCELLANEOUS MATH"
+        + "EMATICAL SYMBOLS-A;SUPPLEMENTAL_ARROWS_A/SUPPLEMENTAL ARROWS-A;BRAILLE_PATTERNS/*;SUPPLEMENTAL_ARROW"
+        + "S_B/SUPPLEMENTAL ARROWS-B;MISCELLANEOUS_MATHEMATICAL_SYMBOLS_B/MISCELLANEOUS MATHEMATICAL SYMBOLS-B;"
+        + "SUPPLEMENTAL_MATHEMATICAL_OPERATORS/*;MISCELLANEOUS_SYMBOLS_AND_ARROWS/*;GLAGOLITIC;LATIN_EXTENDED_C"
+        + "/LATIN EXTENDED-C;COPTIC;GEORGIAN_SUPPLEMENT/*;TIFINAGH;ETHIOPIC_EXTENDED/*;CYRILLIC_EXTENDED_A/CYRI"
+        + "LLIC EXTENDED-A;SUPPLEMENTAL_PUNCTUATION/*;CJK_RADICALS_SUPPLEMENT/*;KANGXI_RADICALS/*;IDEOGRAPHIC_D"
+        + "ESCRIPTION_CHARACTERS/*;CJK_SYMBOLS_AND_PUNCTUATION/*;HIRAGANA;KATAKANA;BOPOMOFO;HANGUL_COMPATIBILIT"
+        + "Y_JAMO/*;KANBUN;BOPOMOFO_EXTENDED/*;CJK_STROKES/*;KATAKANA_PHONETIC_EXTENSIONS/*;ENCLOSED_CJK_LETTER"
+        + "S_AND_MONTHS/*;CJK_COMPATIBILITY/*;CJK_UNIFIED_IDEOGRAPHS_EXTENSION_A/*;YIJING_HEXAGRAM_SYMBOLS/*;CJ"
+        + "K_UNIFIED_IDEOGRAPHS/*;YI_SYLLABLES/*;YI_RADICALS/*;LISU;VAI;CYRILLIC_EXTENDED_B/CYRILLIC EXTENDED-B"
+        + ";BAMUM;MODIFIER_TONE_LETTERS/*;LATIN_EXTENDED_D/LATIN EXTENDED-D;SYLOTI_NAGRI/*;COMMON_INDIC_NUMBER_"
+        + "FORMS/*;PHAGS_PA/PHAGS-PA;SAURASHTRA;DEVANAGARI_EXTENDED/*;KAYAH_LI/*;REJANG;HANGUL_JAMO_EXTENDED_A/"
+        + "HANGUL JAMO EXTENDED-A;JAVANESE;MYANMAR_EXTENDED_B/MYANMAR EXTENDED-B;CHAM;MYANMAR_EXTENDED_A/MYANMA"
+        + "R EXTENDED-A;TAI_VIET/*;MEETEI_MAYEK_EXTENSIONS/*;ETHIOPIC_EXTENDED_A/ETHIOPIC EXTENDED-A;LATIN_EXTE"
+        + "NDED_E/LATIN EXTENDED-E;CHEROKEE_SUPPLEMENT/*;MEETEI_MAYEK/*;HANGUL_SYLLABLES/*;HANGUL_JAMO_EXTENDED"
+        + "_B/HANGUL JAMO EXTENDED-B;HIGH_SURROGATES/*;HIGH_PRIVATE_USE_SURROGATES/*;LOW_SURROGATES/*;PRIVATE_U"
+        + "SE_AREA/*;CJK_COMPATIBILITY_IDEOGRAPHS/*;ALPHABETIC_PRESENTATION_FORMS/*;ARABIC_PRESENTATION_FORMS_A"
+        + "/ARABIC PRESENTATION FORMS-A;VARIATION_SELECTORS/*;VERTICAL_FORMS/*;COMBINING_HALF_MARKS/*;CJK_COMPA"
+        + "TIBILITY_FORMS/*;SMALL_FORM_VARIANTS/*;ARABIC_PRESENTATION_FORMS_B/ARABIC PRESENTATION FORMS-B;HALFW"
+        + "IDTH_AND_FULLWIDTH_FORMS/*;SPECIALS;LINEAR_B_SYLLABARY/*;LINEAR_B_IDEOGRAMS/*;AEGEAN_NUMBERS/*;ANCIE"
+        + "NT_GREEK_NUMBERS/*;ANCIENT_SYMBOLS/*;PHAISTOS_DISC/*;LYCIAN;CARIAN;COPTIC_EPACT_NUMBERS/*;OLD_ITALIC"
+        + "/*;GOTHIC;OLD_PERMIC/*;UGARITIC;OLD_PERSIAN/*;DESERET;SHAVIAN;OSMANYA;OSAGE;ELBASAN;CAUCASIAN_ALBANI"
+        + "AN/*;VITHKUQI;TODHRI;LINEAR_A/*;LATIN_EXTENDED_F/LATIN EXTENDED-F;CYPRIOT_SYLLABARY/*;IMPERIAL_ARAMA"
+        + "IC/*;PALMYRENE;NABATAEAN;HATRAN;PHOENICIAN;LYDIAN;MEROITIC_HIEROGLYPHS/*;MEROITIC_CURSIVE/*;KHAROSHT"
+        + "HI;OLD_SOUTH_ARABIAN/*;OLD_NORTH_ARABIAN/*;MANICHAEAN;AVESTAN;INSCRIPTIONAL_PARTHIAN/*;INSCRIPTIONAL"
+        + "_PAHLAVI/*;PSALTER_PAHLAVI/*;OLD_TURKIC/*;OLD_HUNGARIAN/*;HANIFI_ROHINGYA/*;GARAY;RUMI_NUMERAL_SYMBO"
+        + "LS/*;YEZIDI;ARABIC_EXTENDED_C/ARABIC EXTENDED-C;OLD_SOGDIAN/*;SOGDIAN;OLD_UYGHUR/*;CHORASMIAN;ELYMAI"
+        + "C;BRAHMI;KAITHI;SORA_SOMPENG/*;CHAKMA;MAHAJANI;SHARADA;SINHALA_ARCHAIC_NUMBERS/*;KHOJKI;MULTANI;KHUD"
+        + "AWADI;GRANTHA;TULU_TIGALARI/TULU-TIGALARI;NEWA;TIRHUTA;SIDDHAM;MODI;MONGOLIAN_SUPPLEMENT/*;TAKRI;MYA"
+        + "NMAR_EXTENDED_C/MYANMAR EXTENDED-C;AHOM;DOGRA;WARANG_CITI/*;DIVES_AKURU/*;NANDINAGARI;ZANABAZAR_SQUA"
+        + "RE/*;SOYOMBO;UNIFIED_CANADIAN_ABORIGINAL_SYLLABICS_EXTENDED_A/UNIFIED CANADIAN ABORIGINAL SYLLABICS "
+        + "EXTENDED-A;PAU_CIN_HAU/*;DEVANAGARI_EXTENDED_A/DEVANAGARI EXTENDED-A;SUNUWAR;BHAIKSUKI;MARCHEN;MASAR"
+        + "AM_GONDI/*;GUNJALA_GONDI/*;MAKASAR;KAWI;LISU_SUPPLEMENT/*;TAMIL_SUPPLEMENT/*;CUNEIFORM;CUNEIFORM_NUM"
+        + "BERS_AND_PUNCTUATION/*;EARLY_DYNASTIC_CUNEIFORM/*;CYPRO_MINOAN/CYPRO-MINOAN;EGYPTIAN_HIEROGLYPHS/*;E"
+        + "GYPTIAN_HIEROGLYPH_FORMAT_CONTROLS/*;EGYPTIAN_HIEROGLYPHS_EXTENDED_A/EGYPTIAN HIEROGLYPHS EXTENDED-A"
+        + ";ANATOLIAN_HIEROGLYPHS/*;GURUNG_KHEMA/*;BAMUM_SUPPLEMENT/*;MRO;TANGSA;BASSA_VAH/*;PAHAWH_HMONG/*;KIR"
+        + "AT_RAI/*;MEDEFAIDRIN;MIAO;IDEOGRAPHIC_SYMBOLS_AND_PUNCTUATION/*;TANGUT;TANGUT_COMPONENTS/*;KHITAN_SM"
+        + "ALL_SCRIPT/*;TANGUT_SUPPLEMENT/*;KANA_EXTENDED_B/KANA EXTENDED-B;KANA_SUPPLEMENT/*;KANA_EXTENDED_A/K"
+        + "ANA EXTENDED-A;SMALL_KANA_EXTENSION/*;NUSHU;DUPLOYAN;SHORTHAND_FORMAT_CONTROLS/*;SYMBOLS_FOR_LEGACY_"
+        + "COMPUTING_SUPPLEMENT/*;ZNAMENNY_MUSICAL_NOTATION/*;BYZANTINE_MUSICAL_SYMBOLS/*;MUSICAL_SYMBOLS/*;ANC"
+        + "IENT_GREEK_MUSICAL_NOTATION/*;KAKTOVIK_NUMERALS/*;MAYAN_NUMERALS/*;TAI_XUAN_JING_SYMBOLS/*;COUNTING_"
+        + "ROD_NUMERALS/*;MATHEMATICAL_ALPHANUMERIC_SYMBOLS/*;SUTTON_SIGNWRITING/*;LATIN_EXTENDED_G/LATIN EXTEN"
+        + "DED-G;GLAGOLITIC_SUPPLEMENT/*;CYRILLIC_EXTENDED_D/CYRILLIC EXTENDED-D;NYIAKENG_PUACHUE_HMONG/*;TOTO;"
+        + "WANCHO;NAG_MUNDARI/*;OL_ONAL/*;ETHIOPIC_EXTENDED_B/ETHIOPIC EXTENDED-B;MENDE_KIKAKUI/*;ADLAM;INDIC_S"
+        + "IYAQ_NUMBERS/*;OTTOMAN_SIYAQ_NUMBERS/*;ARABIC_MATHEMATICAL_ALPHABETIC_SYMBOLS/*;MAHJONG_TILES/*;DOMI"
+        + "NO_TILES/*;PLAYING_CARDS/*;ENCLOSED_ALPHANUMERIC_SUPPLEMENT/*;ENCLOSED_IDEOGRAPHIC_SUPPLEMENT/*;MISC"
+        + "ELLANEOUS_SYMBOLS_AND_PICTOGRAPHS/*;EMOTICONS;ORNAMENTAL_DINGBATS/*;TRANSPORT_AND_MAP_SYMBOLS/*;ALCH"
+        + "EMICAL_SYMBOLS/*;GEOMETRIC_SHAPES_EXTENDED/*;SUPPLEMENTAL_ARROWS_C/SUPPLEMENTAL ARROWS-C;SUPPLEMENTA"
+        + "L_SYMBOLS_AND_PICTOGRAPHS/*;CHESS_SYMBOLS/*;SYMBOLS_AND_PICTOGRAPHS_EXTENDED_A/SYMBOLS AND PICTOGRAP"
+        + "HS EXTENDED-A;SYMBOLS_FOR_LEGACY_COMPUTING/*;CJK_UNIFIED_IDEOGRAPHS_EXTENSION_B/*;CJK_UNIFIED_IDEOGR"
+        + "APHS_EXTENSION_C/*;CJK_UNIFIED_IDEOGRAPHS_EXTENSION_D/*;CJK_UNIFIED_IDEOGRAPHS_EXTENSION_E/*;CJK_UNI"
+        + "FIED_IDEOGRAPHS_EXTENSION_F/*;CJK_UNIFIED_IDEOGRAPHS_EXTENSION_I/*;CJK_COMPATIBILITY_IDEOGRAPHS_SUPP"
+        + "LEMENT/*;CJK_UNIFIED_IDEOGRAPHS_EXTENSION_G/*;CJK_UNIFIED_IDEOGRAPHS_EXTENSION_H/*;TAGS;VARIATION_SE"
+        + "LECTORS_SUPPLEMENT/*;SUPPLEMENTARY_PRIVATE_USE_AREA_A/SUPPLEMENTARY PRIVATE USE AREA-A;SUPPLEMENTARY"
+        + "_PRIVATE_USE_AREA_B/SUPPLEMENTARY PRIVATE USE AREA-B;"
+    }
+    return jxBlkNameTable
+}
+var jxBinTable = ""
+function jxBinTab() {
+    if (jxBinTable == "") {
+        jxBinTable = ""
+        + "000000000S14000T00000X02000Z14000[00000a14000k00000m02000n00000o02000p00001K02001L00001M02001N00001l"
+        + "02001m00001n02001o00002Y24002Z00002[02002]00002_24002`00002l02002m0000mk0200mo0001JK0201JM00020=1002"
+        + "0>00020j02020l00020m24020n00021502021700021924021:00021n02021p00022=02022?00023S10023T00024R24024S00"
+        + "024j24024k00025002025100026D24026J00026Y24026[00028102028500028802028>00028A02028B00028E02028G00028J"
+        + "02028N00028O02028S00028T02028U00028V02028W00028[02028e00028j02028k00028l02029=00029B02029F00029O0202"
+        + "9Q00029R02029S00029T02029]00029^0202:=0002:?0202:C0002:H0202:I0002:R0202:T0002:V0202:j0002:o0202;000"
+        + "02;90202;>0002;@0202;B0002;F0202;_0002;a0202<00002<80202<<0002<J2<02<L0002<P0202<R0002<X2402<Y0202<["
+        + "0002>82002>90002??2402?@0002?Y2<02?^2402?a2<02?b2402?d2<02?e0002?i2402?l0002C22402C30002FZ2402F]0002"
+        + "Fg2402Fh0002G02402G10002Gl2402Gn2<02Gp0002H02402H52002H60002H72002H>2402H?2002HA2402HB2002HC0002HD2<"
+        + "02HF2002HH2402HI2002HM2T02HN2002HP2402HQ2002HR2402HT2002HV2402HW2002HZ2402H[2002H_2402Ha2002Hi2402Hl"
+        + "2002I02402I12002I22402I32002I82<02ID2002IO2402IQ2002IS2402IT2002IU2402IW2002IX2402IY2002Il2402Im2002"
+        + "Io2402Ip2<02J02002J60002J@2002JB2402JC2<02JD2402JH2002JI2402JJ2002JK2402JM2002JP2402JQ2<02JR2002JW24"
+        + "02JX2002JZ2<02J]2002Ja2402Jc2002Jn2<02Jp2002K42<02K62002K82402K92002K>2<02K?2402K@2002KA2402KB2002KC"
+        + "2402KD2<02KE2002KY2402KZ2<02K[2002Ka2402Kc2<02Ke2402Kf2<02Kg2002Kh2402Kj2T02Kk2<02Kl2002Kn2<02Ko2002"
+        + "L22402L32002L52<02L60002L82402L:2]02L<2T02L>2002L?2402L@2002LB2402LC0002LD2402LE0002LF2402LG0002LM24"
+        + "02LN0002LQ2402LR0002LX2<02LY0002Ld2402Lf0002M42402M50002M72402M80002M<2<02M=0002M>2<02M?0002MC2<02MF"
+        + "0002MG2<02MH0002MS2402MU2002MX0202Mg0002NE2<02NH0002NQ2402NR0002Na2<02Nb0002Np2<02O00202O10002O30202"
+        + "O70002O80202O:0002O;0202O>0002OC0202OG0002OL0202OO0002OR0202Oa0002Te2402Tg0002V30202VI0002VK0202VQ00"
+        + "02VR0202Va0002Vi0202Vj0002W00202W60002W90202W:0002W>0202WC0002WD0202WF0002WH0202WM0002WQ0202WR0002WS"
+        + "0202WV0002WX0202WZ0002We0202Wk0002Wm0202Wo0002X:0202XM0002XN0202XR0002XT0202XU0002XV0202XW0002XY0202"
+        + "XZ0002X[0202X`0002Xe0202Xg0002Xm0202Xp0002YG0202YI0002YT0202YV0002YZ0202Y_0002Y`0202Yb0002Yd0202Yf00"
+        + "02Yj0202ZT0002ZV0202Z_0002Z`0202[G0002[L0202[M0002[N0202[O0002[R0202[W0002[]0202[`0002[d0202[e0002[h"
+        + "0202[m0002[n0202[o0002]52402]80002]K2<02]M0002^@2<02^A0002^E2<02^F0002`o0202`p0002i20202i60002i90202"
+        + "i;0002i<0202i>0002iL0202iN0002iP0202iZ0002jE0202jM00030601030802030B00030D02030L00030Q01030Z00030a24"
+        + "030b00030i01030l00030n24030o0003:G2403:H0003:I2403:J0003@00104h00004i0010:00000?T0010?Y_000?Ya010?[J"
+        + "000?i?100?i@000?jI020?jO000?jT020?jV000?m8020?m:000?mL020?mM000?mN020?mO000?ml020?mm000?mn020?mo000?"
+        + "nK020?nL000?nM020?nN000?nO020?nQ000?nR020?nT000FpT010FpU000G00010HOi000HP0010HdF000Hdp010He9000K5a01"
+        + "0K;m000MKK020MKL000MLE020MLF000MM?020MM@000MN9020MN:000MO3020MO4000O00200O042<0O05200O3?2<0O3@200O40"
+        + "000O4=200O4@000O4`200O4a000O5]200O5a240O5c000O5o240O60000O6>2<0O6?000O6A2<0O6K000O6^200O7V1<0O80000O"
+        + "812<0O82240O83200O8@000O8J2<0O8K000O8`2<0O8a000O8c2<0O8h240O8i2<0O8l000O8m200O90000O99200O9@2<0O9B20"
+        + "0O<02<0O<Q240O<R200O<T240O<^2<0O<g240O<h2<0O=n240O=o2<0O>52]0O>62<0O>D200O>F240O>H200O>I240O>L200O>N"
+        + "240O>P2<0O?22]0O?52<0O?72]0O?82<0O?:2]0O?;2T0O?=240O??2<0O?D240O?P2<0O?b200O?d240O?e2<0O?f240O?g200O"
+        + "?h240O?i2<0O?l1L0O@02<0O@p240OA02<0OA1240OA22]0OA42<0OA62]0OAA2<0OAV2]0OAj2<0OAm2]0OAn2<0OB12]0OB42<"
+        + "0OB52]0OB82<0OB?2]0OB@2<0OBA2]0OBB2<0OBZ2]0OB[2<0OCn240OCo200OCp2<0ODo000OE6200OE9240OE;2<0OE?200OE@"
+        + "2<0OEX200OE`240OEb200OEd240OEe2T0OEg240OEk2]0OEl200OF7240OF8200OF:240OF>200OF@2T0OFA200OFE2]0OFG200O"
+        + "FT2<0OFU240OFV200OFX240OFY200OFb240OFd200OFm240OFn200OG2240OG5200OGA240OGD200OGL240OGO200OGQ240OGR20"
+        + "0OGS240OGT200OGX240OGY200OG`240OGa200OGd240OGe200OGk240OGl2<0OI52]0OI82<0OI;2]0OI@000OJ02<0OJS2]0OJT"
+        + "2<0OJe2]0OJh2<0OK02]0OK12<0OK6200OK;240OK<2]0OK=240OK@2<0OKC200OKE2<0OKH200OKL2<0OKP240OKV200OKY240O"
+        + "KZ200OK[2<0OK^200OKa240OKb200OKd240OKe2<0OKn200OL0000OMe200ON0000OOE200OOP2<0OO]200OOa2<0OOb200OP000"
+        + "0OP<200OP@000OQ8200OQ@000OQJ200OQP000OR8200OR@000OR_200OT0000OT<2]0OT=2<0OT?2]0OT@2<0OTH2]0OTP2<0OTV"
+        + "2]0OTW2<0OTa2]0OTk2<0OTl000OTm2]0OTp2<0OU6000OU72<0OUh2]0OUi2<0OVa3<0OVe2<0OVf2]0OVh2<0OVi2]0OVk2<0O"
+        + "Vl2]0OVm2<0OW=2]0OW@2<0OWA2]0OWN2<0OX0200OYa2<0OYn200OZ02<0OZ:200OZ?2<0O[32]0O[62<0O[7200O[>2<0O[M20"
+        + "0O[O2<0O[Z200O[a2]0O[j200O]0000Oa0200Opo000P00010ZKP000ZL0010[Lk000[M0010[PN000[PP010]kR000]ka010_`Q"
+        + "000_`a010_jN000`P0010`XN000a00010b=;000b=@010c>a003P0P103P2000"
+    }
+    return jxBinTable
+}
+var jxGbTable = ""
+function jxGbTab() {
+    if (jxGbTable == "") {
+        jxGbTable = ""
+        + "00003000:2000;3000=1000>3000P0001p3002P0002Y>002Z0002^3002_>002`000<0e00=a000=j300=k000>0300>4000>;3"
+        + "00><000>=300>>000>R300>S000B3e00B:000Da300Db000EG300EI000F;300F=000F@300FAe00Fo000Fpe00G0000G1e00G30"
+        + "00G4e00G6000G7e00G8300G@000G[300G`000Gf300H0700H6000H@e00HK000HL300HM000I;e00IP000Iae00Ib000KFe00KM7"
+        + "00KN000KOe00KU000KWe00KY000KZe00K_000L>300L?700L@000LAe00LB000Lae00M;300M=000NVe00Nb000Nc300O0000O[e"
+        + "00Oe000Ol300One00Oo000PFe00PJ000PKe00PT000PUe00PX000PYe00P_300Pa000Pp300Q0000QIe00QL300QN000QO300QP0"
+        + "00Q[300Qa000R?300R@700RB300RGe00RP000S:e00SR700SSe00T3800T4000TEP00Tke00Tl800Tme00Tn000To800U1e00U98"
+        + "00U=D00U>800U@000UAe00UHP00UP000URe00UT000UiP00V0000V1e00V2800V4300V5000V=300V?000VA300VC000VEP00VY3"
+        + "00VZP00Vb300VcP00Vd300VgP00Vk300Vme00Vn000Voi00Vp800W1e00W5300W7800W9300W;800W=D00W>000W?300WGi00WH3"
+        + "00WLP00WN300WOP00WP000WRe00WT300WV000WaP00Wc000Woe00Wp300X1e00X3800X4300X5000X;300X?000XA300XC000XY3"
+        + "00XZ000Xb300Xc000Xe300Xf000Xh300Xi000Xk300Xme00Xn300Xo800Y1e00Y3300Y7e00Y9300Y;e00Y>300YAe00YB300YI0"
+        + "00YM300YN000YO300YV000Yae00Yc000Yfe00Yg000Yh300Z1e00Z3800Z4300Z5000Z>300Z?000ZB300ZC000ZEP00ZY300ZZP"
+        + "00Zb300ZcP00Ze300ZfP00Zk300Zme00Zn000Zo800[1e00[6300[7e00[9800[:300[;800[=D00[>300[@000[A300[P000[Re"
+        + "00[T300[V000[c300[jP00[ke00]0300]1e00]2800]4300]5000]=300]?000]A300]C000]EP00]Y300]ZP00]b300]cP00]e3"
+        + "00]fP00]k300]me00]n000]oi00]pe00^0800^1e00^5300^7800^9300^;800^=D00^>300^Ee00^Gi00^H300^LP00^N300^OP"
+        + "00^P000^Re00^T300^V000^bP00^c000^i300_2e00_3000_4300_5000_;300_>000_A300_B000_F300_I000_K300_L000_M3"
+        + "00_N000_P300_S000_U300_X000_[300__000_k300_oi00_p800`0e00`1800`3300`6800`9300`:800`=e00`>300`@000`A3"
+        + "00`Gi00`H300`V000`l300a0e00a1800a4e00a5000a=300a>000aA300aB000aEP00aY300aZP00ak300ame00an000aoe00b18"
+        + "00b5300b6e00b9300b:e00b=D00b>300bEe00bG300bHP00bK300bM000bN300bP000bRe00bT300bV000ba300bh000c1e00c28"
+        + "00c4000c=300c>000cA300cB000cY300cZ000ce300cf000ck300cme00cn000co800cpe00d0i00d1800d2i00d3800d5300d6e"
+        + "00d7i00d9300d:i00d<e00d>300dEi00dG300dM000dO300dP000dRe00dT300dV000da300db000dd800de300e0e00e2800e40"
+        + "00e=300e>000eA300eB000eEP00ele00en000eoi00ep800f1e00f5300f6800f9300f:800f=D00f>700f?000f@300fD000fGi"
+        + "00fH000fRe00fT300fV000g0300g1e00g2800g4300g5000gG300gJ000gc300gd000gm300gn000go300h0000h7300h:e00h;3"
+        + "00h?i00h@800hBe00hE300hFe00hG300hH800hOi00hP300hV000ha300hc800he000hf300i1000ibe00ic000id800iee00il3"
+        + "00ip000j7e00j?000jL300k1000k3300k4000k5300k6000k;300k<000kT300kU000kV300kW000kbe00kc000kd800kee00kn0"
+        + "00ko300l0000l5300l6000l7300l8e00l?300l@000lJ300lL000lP300m0000mHe00mJ000mfe00mg000mhe00mi000mje00mk0"
+        + "00mo800n0000n8300n9000n^300nbe00np800o0e00o5000o6e00o8000o=e00oH300oIe00on300oo000p6e00p7000p=300p>0"
+        + "00pK301000010^e010b8010ce010i0010je010l8010ne010p0011F8011He011J0011Ne011Q0011be011f00122e0123001248"
+        + "0125e01270012=e012>0012Me012N0013630137001383013=0013>3013@001409015P:016X;0180001993019:0019>3019@0"
+        + "019G3019H0019I3019J0019N3019P001:9301::001:>301:@001:b301:c001:g301:i001:p301;0001;1301;2001;6301;80"
+        + "01;G301;H001<A301<B001<F301<H001=K301=Me01=P001=n301>0001>J301>P001?g301?i001?o301@0001JM301JP001Kj3"
+        + "01L0001LBe01LEi01LF301LO001Lce01Lei01Lf001Lh301M0001MBe01MD301MP001M^301M_001Mb301Mce01Me301N0001Nee"
+        + "01Ng801Nhe01No801O6e01O7801O9e01OD001OMe01ON301OP001OZ301Oa001Ok301P0001P;e01P>301P?e01P@001PJ301PP0"
+        + "01Qj301R0001R5e01R7001RYe01RZ001R[301Ra001Sg301T0001TO301TPe01TS801TWe01TY801T]301Ta801Tce01Td801Tje"
+        + "01Tm301U0001U1301U4001U_301Ua001Uf301V0001V]301Va001W:301W@001WK301WN001XGe01XI801XKe01XL301XN001YE8"
+        + "01YFe01YG801YHe01YO301YPe01YQ001YRe01YS001YUe01Y^801Yde01Yn301Ype01Z0001Z:301Z@001ZJ301ZP001Z_301Zae"
+        + "01[?301]0e01]4801]5001]ee01]fi01]ge01]li01]me01]ni01]o801^2e01^3i01^5001^=301^>001^[e01^e001_0e01_28"
+        + "01_3001_Q801_Re01_V801_Xe01_Zi01_[e01__001`Ve01`W801`Xe01`Z801`^e01`_801``e01`ci01`e301`m001aT801a]e"
+        + "01ae801age01ai301al001b:301b=001c;301c@001cl301cn001d8301d@e01dC001dDe01dQ801dRe01dY001d^e01d_001dee"
+        + "01df001dh801die01dk001dl301e0001h0e01i0001mF301mH001mN301mP001n6301n8001n>301n@001nH301nI001nJ301nK0"
+        + "01nL301nM001nN301nO001no301o0001of301og001p5301p6001pD301pF001pL301pM001pa301pc001pf301pg001pp302000"
+        + "020;3020<4020=f020>3020@0020X3020`0020m>020n00219>021:0021P3021a0021c3021e0022?3022@0022M3022P002313"
+        + "023@e023b302400024R>024S0024j>024k0026<3026@0026D>026J0026Y>026[002<J>02<L002<X>02<Y002>8>02>9002??>"
+        + "02?@002?Y>02?e002?i>02?l002@Z302A0002A;302AP002C2>02C3002FZ>02F]002Fg>02Fh002G0>02G1002Gl>02Gp002H0>"
+        + "02H6002H7>02HC002HD>02J6002J@>02L6002L8>02LC002LD>02LE002LF>02LG002LM>02LN002LQ>02LR002LX>02LY002Ld>"
+        + "02Lf002M4>02M5002M7>02M8002M<>02M=002M>>02M?002MC>02MF002MG>02MH002MS>02MX002NE>02NH002NQ>02NR002Na>"
+        + "02Nb002Np>02O0002Te>02Tg002]5>02]8002]K>02]M002^@>02^A002^E>02^F002^e302^g002_F302_G002d`e02dc002de3"
+        + "02dj002eV302eW002eX302e^002e_302ea002fX302f`002fb302fpe02g0002gG302gP002gW302gX002g`302ga002gh302gi0"
+        + "02gp302h0002h7302h8002h?302h@002hG302hH002hO302hPe02i0002jN302k0002kJ302kK002le302m0002pF302pa0030Ze"
+        + "030_i030a>030b0030n>030o00310303110032G3032Ie032K00340303450034a3034b0036?3036@0037V3037`0038O3038P0"
+        + "03:G>03:H003:I>03:J00:B=30:B@00:C730:C@00:H]30:I000:I`e0:Id00:Iee0:Io00:JNe0:JP00:Kae0:Kc00:Ki30:L00"
+        + "0:O>30:O@00:OB30:OC00:OD30:OE00:OM30:Oc00:P2e0:P300:P6e0:P700:P;e0:P<00:PS80:PUe0:PW80:PX00:P]e0:P^3"
+        + "0:Pa00:Pk30:Q000:Qi30:R080:R200:Re80:S4e0:S630:S>00:SJ30:SPe0:Sc00:Spe0:T000:TVe0:T_00:U7e0:UB80:UCi"
+        + "0:UD30:UO00:UP90:Un30:V0e0:V380:V400:Vde0:Ve80:Vge0:Vk80:Vme0:Vo80:W0i0:W100:W>30:W?00:WJ30:WN00:WUe"
+        + "0:WV00:Wp30:X000:XYe0:X`80:Xbe0:Xd80:Xfe0:Xh30:Y000:Y3e0:Y400:Y<e0:Y=80:Y>30:Y@00:YJ30:YL00:Yme0:Yn0"
+        + "0:Zae0:Zb00:Zce0:Zf00:Zhe0:Zj00:Zoe0:[000:[1e0:[200:[330:[K00:[[80:[]e0:[_80:[a00:[f80:[ge0:[h30:]10"
+        + "0:]730:]900:]?30:]A00:]G30:]P00:]W30:]X00:]`30:]a00:^]30:^a00:`S80:`Ue0:`V80:`Xe0:`Y80:`[00:`]80:`^e"
+        + "0:`_30:`a00:`k30:a0<0:a1=0:aL<0:aM=0:ai<0:aj=0:bD<0:bE=0:ba<0:bb=0:c<<0:c==0:cX<0:cY=0:d4<0:d5=0:dP<"
+        + "0:dQ=0:dm<0:dn=0:eH<0:eI=0:ee<0:ef=0:f@<0:fA=0:f]<0:f^=0:g8<0:g9=0:gT<0:gU=0:h0<0:h1=0:hL<0:hM=0:hi<"
+        + "0:hj=0:iD<0:iE=0:ia<0:ib=0:j<<0:j==0:jX<0:jY=0:k4<0:k5=0:kP<0:kQ=0:km<0:kn=0:lH<0:lI=0:le<0:lf=0:m@<"
+        + "0:mA=0:m]<0:m^=0:n8<0:n9=0:nT<0:nU=0:o0<0:o1=0:oL<0:oM=0:oi<0:oj=0:pD<0:pE=0:pa<0:pb=0;0<<0;0==0;0X<"
+        + "0;0Y=0;14<0;15=0;1P<0;1Q=0;1m<0;1n=0;2H<0;2I=0;2e<0;2f=0;3@<0;3A=0;3]<0;3^=0;48<0;49=0;4T<0;4U=0;50<"
+        + "0;51=0;5L<0;5M=0;5i<0;5j=0;6D<0;6E=0;6a<0;6b=0;7<<0;7==0;7X<0;7Y=0;84<0;85=0;8P<0;8Q=0;8m<0;8n=0;9H<"
+        + "0;9I=0;9e<0;9f=0;:@<0;:A=0;:]<0;:^=0;;8<0;;9=0;;T<0;;U=0;<0<0;<1=0;<L<0;<M=0;<i<0;<j=0;=D<0;=E=0;=a<"
+        + "0;=b=0;><<0;>==0;>X<0;>Y=0;?4<0;?5=0;?P<0;?Q=0;?m<0;?n=0;@H<0;@I=0;@e<0;@f=0;A@<0;AA=0;A]<0;A^=0;B8<"
+        + "0;B9=0;BT<0;BU=0;C0<0;C1=0;CL<0;CM=0;Ci<0;Cj=0;DD<0;DE=0;Da<0;Db=0;E<<0;E==0;EX<0;EY=0;F4<0;F5=0;FP<"
+        + "0;FQ=0;Fm<0;Fn=0;GH<0;GI=0;Ge<0;Gf=0;H@<0;HA=0;H]<0;H^=0;I8<0;I9=0;IT<0;IU=0;J0<0;J1=0;JL<0;JM=0;Ji<"
+        + "0;Jj=0;KD<0;KE=0;Ka<0;Kb=0;L<<0;L==0;LX<0;LY=0;M4<0;M5=0;MP<0;MQ=0;Mm<0;Mn=0;NH<0;NI=0;Ne<0;Nf=0;O@<"
+        + "0;OA=0;O]<0;O^=0;P8<0;P9=0;PT<0;PU=0;Q0<0;Q1=0;QL<0;QM=0;Qi<0;Qj=0;RD<0;RE=0;Ra<0;Rb=0;S<<0;S==0;SX<"
+        + "0;SY=0;T4<0;T5=0;TP<0;TQ=0;Tm<0;Tn=0;UH<0;UI=0;Ue<0;Uf=0;V@<0;VA=0;V]<0;V^=0;W8<0;W9=0;WT<0;WU=0;X0<"
+        + "0;X1=0;XL<0;XM=0;Xi<0;Xj=0;YD<0;YE=0;Ya<0;Yb=0;Z<<0;Z==0;ZX<0;ZY=0;[4<0;[5=0;[P<0;[Q=0;[m<0;[n=0;]H<"
+        + "0;]I=0;]e<0;]f=0;^@<0;^A=0;^]<0;^^=0;_8<0;_9=0;_T<0;_U=0;`0<0;`1=0;`L<0;`M=0;`i<0;`j=0;aD<0;aE=0;aa<"
+        + "0;ab=0;b<<0;b==0;bX<0;bY=0;c4<0;c5=0;cP<0;cQ=0;cm<0;cn=0;dH<0;dI=0;de<0;df=0;e@<0;eA=0;e]<0;e^=0;f8<"
+        + "0;f9=0;fT<0;fU=0;g0<0;g1=0;gL<0;gM=0;gi<0;gj=0;hD<0;hE=0;ha<0;hb=0;i<<0;i==0;iX<0;iY=0;j4<0;j5=0;jP<"
+        + "0;jQ=0;jm<0;jn=0;kH<0;kI=0;ke<0;kf=0;l@<0;lA=0;l]<0;l^=0;m8<0;m9=0;mT<0;mU=0;n0<0;n1=0;nL<0;nM=0;ni<"
+        + "0;nj=0;oD<0;oE=0;oa<0;ob=0;p<<0;p==0;pX<0;pY=0<04<0<05=0<0P<0<0Q=0<0m<0<0n=0<1H<0<1I=0<1e<0<1f=0<2@<"
+        + "0<2A=0<2]<0<2^=0<38<0<39=0<3T<0<3U=0<40<0<41=0<4L<0<4M=0<4i<0<4j=0<5D<0<5E=0<5a<0<5b=0<6<<0<6==0<6X<"
+        + "0<6Y=0<74<0<75=0<7P<0<7Q=0<7m<0<7n=0<8H<0<8I=0<8e<0<8f=0<9@<0<9A=0<9]<0<9^=0<:8<0<:9=0<:T<0<:U=0<;0<"
+        + "0<;1=0<;L<0<;M=0<;i<0<;j=0<<D<0<<E=0<<a<0<<b=0<=<<0<===0<=X<0<=Y=0<>4<0<>5=0<>P<0<>Q=0<>m<0<>n=0<?H<"
+        + "0<?I=0<?e<0<?f=0<@@<0<@A=0<@]<0<@^=0<A8<0<A9=0<AT<0<AU=0<B0<0<B1=0<BL<0<BM=0<Bi<0<Bj=0<CD<0<CE=0<Ca<"
+        + "0<Cb=0<D<<0<D==0<DX<0<DY=0<E4<0<E5=0<EP<0<EQ=0<Em<0<En=0<FH<0<FI=0<Fe<0<Ff=0<G@<0<GA=0<G]<0<G^=0<H8<"
+        + "0<H9=0<HT<0<HU=0<I0<0<I1=0<IL<0<IM=0<Ii<0<Ij=0<JD<0<JE=0<Ja<0<Jb=0<K<<0<K==0<KX<0<KY=0<L4<0<L5=0<LP<"
+        + "0<LQ=0<Lm<0<Ln=0<MH<0<MI=0<Me<0<Mf=0<N@<0<NA=0<N]<0<N^=0<O8<0<O9=0<OT<0<OU=0<P0<0<P1=0<PL<0<PM=0<Pi<"
+        + "0<Pj=0<QD<0<QE=0<Qa<0<Qb=0<R<<0<R==0<RX<0<RY=0<S4<0<S5=0<SP<0<SQ=0<Sm<0<Sn=0<TH<0<TI=0<Te<0<Tf=0<U@<"
+        + "0<UA=0<U]<0<U^=0<V8<0<V9=0<VT<0<VU=0<W0<0<W1=0<WL<0<WM=0<Wi<0<Wj=0<XD<0<XE=0<Xa<0<Xb=0<Y<<0<Y==0<YX<"
+        + "0<YY=0<Z4<0<Z5=0<ZP<0<ZQ=0<Zm<0<Zn=0<[H<0<[I=0<[e<0<[f=0<]@<0<]A=0<]]<0<]^=0<^8<0<^9=0<^T<0<^U=0<_0<"
+        + "0<_1=0<_L<0<_M=0<_i<0<_j=0<`D<0<`E=0<`a<0<`b=0<a<<0<a==0<aX<0<aY=0<b4<0<b5=0<bP<0<bQ=0<bm<0<bn=0<cH<"
+        + "0<cI=0<ce<0<cf=0<d@<0<dA=0<d]<0<d^=0<e8<0<e9=0<eT<0<eU=0<f0<0<f1=0<fL<0<fM=0<fi<0<fj=0<gD<0<gE=0<ga<"
+        + "0<gb=0<h<<0<h==0<hX<0<hY=0<i4<0<i5=0<iP<0<iQ=0<im<0<in=0<jH<0<jI=0<je<0<jf=0<k@<0<kA=0<k]<0<k^=0<l8<"
+        + "0<l9=0<lT<0<lU=0<m0<0<m1=0<mL<0<mM=0<mi<0<mj=0<nD<0<nE=0<na<0<nb=0<o<<0<o==0<oX<0<oY=0<p4<0<p5=0<pP<"
+        + "0<pQ=0<pm<0<pn=0=0H<0=0I=0=0e<0=0f=0=1@<0=1A=0=1]<0=1^=0=28<0=29=0=2T<0=2U=0=30<0=31=0=3L<0=3M=0=3i<"
+        + "0=3j=0=4D<0=4E=0=4a<0=4b=0=5<<0=5==0=5X<0=5Y=0=64<0=65=0=6P<0=6Q=0=6m<0=6n=0=7H<0=7I=0=7e<0=7f=0=8@<"
+        + "0=8A=0=8]<0=8^=0=98<0=99=0=9T<0=9U=0=:0<0=:1=0=:L<0=:M=0=:i<0=:j=0=;D<0=;E=0=;a<0=;b=0=<<<0=<==0=<X<"
+        + "0=<Y=0==4<0==5=0==P<0==Q=0==m<0==n=0=>H<0=>I=0=>e<0=>f=0=?@<0=?A=0=?]<0=?^=0=@8<0=@9=0=@T<0=@U=0=A0<"
+        + "0=A1=0=AL<0=AM=0=Ai<0=Aj=0=BD<0=BE=0=Ba<0=Bb=0=C<<0=C==0=CX<0=CY=0=D4<0=D5=0=DP<0=DQ=0=Dm<0=Dn=0=EH<"
+        + "0=EI=0=Ee<0=Ef=0=F@<0=FA=0=F]<0=F^=0=G8<0=G9=0=GT<0=GU=0=H0<0=H1=0=HL<0=HM=0=Hi<0=Hj=0=ID<0=IE=0=Ia<"
+        + "0=Ib=0=J<<0=J==0=JX<0=JY=0=K4<0=K5=0=KP<0=KQ=0=Km<0=Kn=0=LH<0=LI=0=Le<0=Lf=0=M@<0=MA=0=M]<0=M^=0=N8<"
+        + "0=N9=0=NT30=Na:0=O730=O;;0=Om30>0000?Y_30?Ya00?[J30?]000?]730?]C00?]H30?]M00?]Ne0?]O00?]h30?]i00?]n3"
+        + "0?]o00?]p30?^000?^230?^300?^530?^600?`330?`C00?g@30?gB00?h830?h?00?h@30?ha00?i0e0?i@00?iJ30?iPe0?ia0"
+        + "0?jC30?jD00?jW30?jX00?j]30?ja00?jf30?jg00?ln30?m100?oNe0?oP00?op30?p200?p830?p:00?p@30?pB00?pH30?pJ0"
+        + "0?pM30?pP00?pW30?pX00?p`30?pm00?po30@0000@0<30@0=00@0W30@0X00@0l30@0m00@0o30@0p00@1>30@1@00@1N30@200"
+        + "0@3l30@4000@4330@4700@4e30@4h00@6?30@6@00@6M30@6P00@6Q30@7@00@7ne0@7o30@:000@:M30@:P00@;A30@;Pe0@;Q0"
+        + "0@;m30@<000@<T30@<^00@=;30@=@00@=ge0@=l30@>000@>N30@>O00@?430@?800@?F30@@000@BN30@BP00@BZ30@Ba00@CD3"
+        + "0@CH00@Cm30@D000@DX30@Da00@ET30@E`00@El30@Em00@F;30@F<00@FC30@FD00@FF30@FG00@FR30@FS00@Fc30@Fd00@Fk3"
+        + "0@Fl00@Fn30@G000@Ge30@H000@Lh30@M000@MF30@MP00@MX30@N000@N630@N700@Nb30@Nc00@Nl30@P000@P630@P800@P93"
+        + "0@P:00@Pg30@Ph00@Pj30@Pm00@Pn30@Pp00@QF30@QG00@RO30@RW00@Ra30@SP00@Sd30@Se00@Sg30@Sl00@TL30@TO00@Tk3"
+        + "0@Tp00@U030@V000@Vi30@Vm00@W@30@WB00@X1e0@X430@X5e0@X730@X<e0@X@00@XD30@XE00@XH30@XI00@Xg30@Xie0@Xl3"
+        + "0@Xpe0@Y000@Y930@Y@00@YI30@YP00@ZP30@[000@[Ue0@[W30@[[00@[h30@]000@]g30@]j00@^F30@^H00@^d30@^i00@_B3"
+        + "0@_I00@_M30@_Y00@_a30@a000@b930@c000@cd30@d000@dd30@dk00@eTe0@eX30@ea00@ek30@f000@fV30@fYe0@f_00@g63"
+        + "0@g>00@g@30@jP00@jp30@k000@kZ30@k[e0@k^00@k_30@ka00@kc30@l200@l530@lme0@m000@mX30@ma00@n6e0@nA00@nJ3"
+        + "0@na00@o2e0@o600@o:30@oa00@p<30@pP00@ph30A0080A01e0A0280A0300A0ie0A1700A1>30A1B00A1ae0A1b00A1de0A1f0"
+        + "0A1g30A1pe0A2280A2300A2a80A2de0A2h80A2je0A2l00A2n70A2o00A32e0A3330A3=70A3>30A3@00A3Y30A3a00A3k30A40e"
+        + "0A4300A4We0A4]80A4^e0A4f30A4g00A5580A5700A5830A5@00A5de0A5e00A5h30A60e0A6280A6300A6d80A6ge0A6p80A70i"
+        + "0A7100A7270A7400A79e0A7=00A7>80A7?e0A7@00A7P30A7Q00A7f30A8000A8B30A8C00A8]80A8`e0A8c80A8ee0A8fi0A8ge"
+        + "0A8i00A8oe0A8p00A91e0A9230A:000A:730A:800A:930A::00A:>30A:?00A:N30A:O00A:Z30A:a00A;Oe0A;P80A;Se0A;[3"
+        + "0A;a00A;k30A<0e0A<280A<430A<500A<=30A<?00A<A30A<C00A<Y30A<Z00A<b30A<c00A<e30A<f00A<k30A<le0A<n00A<oi"
+        + "0A<p80A=0e0A=180A=530A=780A=930A=;80A==i0A=>30A=@00A=A30A=Gi0A=H30A=M00A=R80A=T30A=Ve0A=^30A=ae0A=f3"
+        + "0A>000A>:30A>;00A><30A>>00A>?30A>@00A>g30A>h00A>ii0A>j80A>le0A?130A?2i0A?330A?5i0A?630A?7i0A?:80A?;3"
+        + "0A?<80A?>e0A??i0A?@e0A?A70A?Be0A?C00A?F30A?G00A?I30A?Qe0A?S30A@000A@f80A@ie0AA080AA2e0AA580AA6e0AA70"
+        + "0AAL30AAM00AANe0AAO00AAR30AB000ABai0ABb80ABde0ABj80ABke0ABl80ABni0ABo80ABpe0AC180AC2e0AC400AC830AC@0"
+        + "0ACJ30AF000AF`i0AFa80AFce0AFg30AFi80AFme0AFo80AFpe0AG100AGLe0AGN30AH000AHa80AHde0AHl80AHne0AHo80AHpe"
+        + "0AI100AI530AI@00AIJ30AIP00AI^30AJ000AJ[e0AJ]80AJ^e0AJ_80AJae0AJgi0AJhe0AJi00AJk30AK000AK:30AK@00AKT3"
+        + "0AL000ALK30ALMe0ALN80ALOe0ALP80ALRe0ALV80ALWe0AL]30ALa00AM730AP000AP]80AP`e0APi80APje0APl00APm30ARP0"
+        + "0ASd30ASp00AT730AT900AT:30AT<00ATD30ATE00ATG30ATH00ATai0ATb80ATg30ATh80ATj30ATle0ATni0AToe0ATp70AU08"
+        + "0AU170AU280AU3e0AU400AU730AU@00AUJ30AVP00AVX30AVZ00AWA80AWDe0AWH30AWJe0AWL80AWPe0AWQ00AWT80AWU30AX00"
+        + "0AX1e0AX;00AXde0AXj80AXk70AXle0AXp00AY7e0AY830AY@00AYAe0AYG80AYIe0AYL00AZ470AZ:e0AZG80AZHe0AZJ00AZS3"
+        + "0AZa00A[j30A]000A]:30A`000A`R30A`a00A`k30Aa000Aa930Aa:00Aa`80Aaae0Aah30Aaie0Aao80Aape0Ab000Ab630Ab@0"
+        + "0Ab^30Aba00Ac@30AcBe0AcX30AcY80AcZe0Acb80Acce0Ace80Acfe0Ach30Ae000Ae730Ae800Ae:30Ae;00Aebe0Aeh30Aeke"
+        + "0Ael30Aeme0Aeo30Aepe0Af670Af7e0Af830Af@00AfJ30AfP00AfV30AfW00AfY30AfZ00Ag:80Ag?30Ag@e0AgB30AgC80AgEe"
+        + "0AgF80AgGe0AgH00AgI30AgP00AgZ30AlP00Alde0Alf80Alh00Alj30Am0e0Am270Am380Am400AmA30AmB00Ame80Amge0Aml3"
+        + "0Amo80An0e0An1i0An2e0An300AnJe0AnK30Aoa00Aob30Ap000Apc30App00B>J30B@000BA`30BAa00BAf30BB000BE430Bo@0"
+        + "0Bpd30C0000C@a30CA0e0CA100CA7e0CAF30CAP00D?l30D@000DI730F4000F4Ne0F4Z80F4^e0F4a00F4k30FP000FXj30FY00"
+        + "0FYO30FYP00FYZ30FY_00FZp30F[000F[:30F[@00F[_30F[ae0F[f00F[g30F]000F]ae0F]h00F^630F^@00F^J30F^K00F^R3"
+        + "0F^S00F^i30F^n00F_@30Ff000FfS:0FfT00FfW:0Ff[00Ffk30Fj000FkK30Fm000Fn;30Fn?e0Fn@00FnA80Fo830Fo?e0FoC0"
+        + "0FoP30FpP00FpTe0FpU30Fpai0Fpc30G0000HOi30HP000HdF30Hdp00He930Jpa00Jpe30Jpf00Jpm30Jpn00Jpp30K0000K4S3"
+        + "0K4c00K4d30K5@00K5C30K5E00K5F30K5T00K5X30K5a00K;m30Ka000Kb[30Kba00Kbn30Kc000Kc930Kc@00KcJ30KcL00KcMe"
+        + "0KcO00KcP30La000Ldk30Le000Lke30Lm0e0Lm_30Lmae0Ln730Ln@00Lp430M0000M3g30M4000M4W30M4Y00M5Ui0M5We0M5Z0"
+        + "0M5^i0M5d30M5le0M6300M65e0M6<00M6Ze0M6_00M7[30M8000M92e0M9500M9630M;000M;D30M;P00M;e30M<000M=G30M=P0"
+        + "0M=j30M@000MAE30MAF00MBM30MBN00MBP30MBR00MBS30MBU00MBW30MBY00MB^30MB_00MBk30MBl00MBm30MBn00MC430MC50"
+        + "0MD630MD700MD;30MD=00MDE30MDF00MDM30MDN00MDk30MDl00MDp30ME000ME530ME600ME730ME:00MEA30MEB00MJV30MJX0"
+        + "0MO<30MO>00MX0e0MXh00MXle0MY^00MYfe0MYg00MZ4e0MZ500MZ<30MZKe0MZP30MZQe0MZa30Mm000MmO30MmU00Mm[30N00e"
+        + "0N0730N08e0N0I30N0Ke0N0R30N0Se0N0U30N0Ve0N0[30N0a00N1_30N2?e0N2@30N4000N4^30N4ae0N4h00N4o30N5000N5:3"
+        + "0N5>00N5@30N:@00N:_e0N:`30N;000N;]e0N;a00N;k30N;p00N<030NC@00NC]e0NCa00NCk30NG@00NG_e0NGa00NGl30NGp0"
+        + "0NH030NOP00NOW30NOX00NO]30NO^00NO`30NOa00NOp30NP000NS530NS700NS@e0NSG30NT000NU4e0NU;00NU<30NU@00NUJ3"
+        + "0NUN00NUP30Nbb00Ncf30Ne100Neo30Ni000Ni430Ni500NiP30NiQ00NiS30NiT00NiU30NiW00NiX30NiY00Nid30Nie00Nii3"
+        + "0Nij00Nik30Nil00Nim30Nj200Nj330Nj700Nj830Nj900Nj:30Nj;00Nj<30Nj=00Nj@30NjA00NjC30NjD00NjE30NjG00NjH3"
+        + "0NjI00NjJ30NjK00NjL30NjM00NjN30NjO00NjP30NjQ00NjS30NjT00NjU30NjW00Nj[30Nj]00Njd30Nje00Nji30Njj00Njn3"
+        + "0Njo00Njp30Nk000Nk:30Nk;00NkL30NkQ00NkT30NkU00NkZ30Nk[00Nkm30Nla00Nlc30O00>0O4000O4=>0O4@00O4`>0O4a0"
+        + "0O5]>0O5c00O5o>0O6000O6>>0O6?00O6A>0O6K00O6^>0O7V60O8000O81>0O8@00O8J>0O8K00O8`>0O8a00O8c>0O8l00O8m>"
+        + "0O9000O99>0O?le0O@0>0ODo00OE6>0OI@00OJ0>0OL000OMe>0ON000OOE>0OP000OP<>0OP@00OQ8>0OQ@00OQJ>0OQP00OR8>"
+        + "0OR@00OR_>0OT000OT<>0OTl00OTm>0OU600OU7>0O]000O_C30O_D00O`k30Oa0>0Opo30P0000ZKP30ZL000[Lk30[M000[PN3"
+        + "0[PP00]kR30]ka00_`Q30_`a00_jN30`P000`XN30a0000b=;30b=@00c>a33P0Pe3P2033P40e3P7a33a0003ppo3400004?po3"
+    }
+    return jxGbTable
 }

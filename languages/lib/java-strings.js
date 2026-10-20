@@ -469,10 +469,11 @@ function jxForDigit(d, r) {
 // Java's pattern flags in regex.js's terms: \Q...\E quoting and the J dialect.
 function jxRe(pattern) {
     var re = rxGet(pattern, "qJ")
-    if (!re.ok) { jxkThrow("PatternSyntaxException", jxReMsg(pattern, re.err, re.errAt)) }
+    if (!re.ok) { jxkThrowPse(pattern, re.err, re.errAt) }
     return re
 }
-// Matcher.find's next start: after an empty match the search moves one on.
+// Matcher.find's next start: after an empty match the search moves one on. Its
+// \G and \b{g} read where the previous match ended (rxSearchFrom).
 function jxNext(m) {
     if (m.end == m.begin) { return m.end + 1 }
     return m.end
@@ -484,9 +485,11 @@ function jxSplit(s, pattern, limit) {
     var out = []
     var index = 0
     var at = 0
+    var last = 0
     while (at <= s.length) {
-        var m = rxSearch(re, s, at)
+        var m = rxSearchFrom(re, s, at, last, last)
         if (m == null) { break }
+        last = m.end
         if (limit <= 0 || out.length < limit - 1) {
             if (!(index == 0 && m.begin == 0 && m.end == 0)) {
                 out.push(s.substring(index, m.begin))
@@ -522,7 +525,7 @@ function jxRxReplace(s, pattern, repl, all) {
     var tail = 0
     var at = 0
     while (at <= s.length) {
-        var m = rxSearch(re, s, at)
+        var m = rxSearchFrom(re, s, at, tail, tail)
         if (m == null) { break }
         out = out + s.substring(tail, m.begin) + jxExpand(re, s, m, repl)
         tail = m.end

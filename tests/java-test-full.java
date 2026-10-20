@@ -159,6 +159,8 @@ class Main {
         S73.run(); // SECTION-CALL 73
         S74.run(); // SECTION-CALL 74
         S75.run(); // SECTION-CALL 75
+        S76.run(); // SECTION-CALL 76
+        S77.run(); // SECTION-CALL 77
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -4312,5 +4314,89 @@ class S75 {
         hm.put(1L, "l");
         Main.check("ro75", (ro + " " + um + " " + one.equals(oneL) + hm.size() + hm.get(1) + hm.get(1L) + " "
             + String.CASE_INSENSITIVE_ORDER.reversed().compare("a", "B")).equals("KVISM {a=1, b=2} false2il 1"));
+    }
+}
+
+// ===== SECTION 76: inline flags, atomic groups, possessive quantifiers, line terminators =====
+//
+// (?idmsuxU-idmsuxU) switches flags up to the end of the enclosing group, a
+// scoped (?..:X) only for X; (?>X) and X*+ never give back what X matched; .
+// ^ $ \Z know \r, \r\n, U+0085, U+2028 and U+2029 unless (?d); (?iu) folds
+// case the Unicode way, (?U) makes \w \d \s \b and the POSIX names Unicode's,
+// and \b counts a non-spacing mark after a letter as part of the word.
+// Every expected value is java 24.0.2's.
+class S76 {
+    static String all(String[] ps, String[] ss) {
+        String out = "";
+        for (int i = 0; i < ps.length; i++) { out = out + S74.m(ps[i], ss[i]) + ";"; }
+        return out;
+    }
+    static void run() {
+        String[] fp = {"(?i)abc", "a(?i)bc", "a(?i:b)c", "(?i:a(?-i:b)c)", "(?i)[^a]", "(?s).", "(?x) a b # c", "(?x)[a b]", "(a(?i)b)C", "a(?i)b|c",
+            "(?)a", "(?-)a", "(?i-i)a", "(?q)a", "(?--i)a", "(?", "(?$)", "(?i", "(?i:a"};
+        String[] fs = {"ABC", "aBC", "aBc", "aBc", "A", "\n", "ab", " ", "aBc", "C", "a", "a", "A", "a", "a", "a", "a", "a", "a"};
+        Main.check("if76", all(fp, fs).equals("true;true;true;false;false;true;true;false;false;true;true;true;false;Unknown inline modifier near index 2;"
+            + "Unknown inline modifier near index 3;Unknown inline modifier near index 2;Unknown group type near index 2;Unknown inline modifier near index 3;"
+            + "Unclosed group near index 5;"));
+        String[] ap = {"(?>a+)b", "(?>a+)a", "(?>a|ab)c", "a*+a", "a++b", "a?+a", "a{1,3}+a", "(a|ab)++c", "(?>(a|ab){2})", "(a|ab){2}+", "a+++", "a*+?", "[a-z]*+[0-9]"};
+        String[] as = {"aab", "aaa", "abc", "aaa", "aab", "a", "aaa", "ababc", "aba", "abab", "a", "a", "abc1"};
+        Main.check("at76", (all(ap, as) + " " + "aab".replaceAll("(?>(a))x|ab", "[$1]")).equals("true;false;false;false;true;false;false;false;true;false;"
+            + "Dangling meta character '+' near index 3;Dangling meta character '?' near index 3;true; a[a]"));
+        String lt = "a\rb\u0085c".replaceAll(".", "#") + "|" + "a\rb\u0085c".replaceAll("(?d).", "#") + "|" + "ab\r\n".replaceAll("$", "!")
+            + "|" + "a\rb\r\nc".replaceAll("(?m)$", "!") + "|" + "a\r\nb\n".replaceAll("(?m)^", "!") + "|" + "a\nb\n".replaceAll("(?md)$", "!")
+            + "|" + "ab\u2028".replaceAll("\\Z", "!") + "|" + "ab\u2028".replaceAll("(?d)\\Z", "!") + "|" + "a\u2028b".replaceAll("(?ms)^.", "#");
+        Main.check("lt76", lt.equals("#\r#\u0085#|#####|ab!\r\n!|a!\rb!\r\nc!|!a\r\n!b\n|a!\nb!\n!|ab!\u2028!|ab\u2028!|#\u2028#"));
+        String[] up = {"(?i)\u00e9", "(?iu)\u00e9", "(?u)(?i)\u00e9", "(?iu)k", "(?i)k", "(?iu)[k]", "(?iu)[\u00e0-\u00fe]", "(?i)[\u00e0-\u00fe]", "(?iu)(\u00e9)\\1",
+            "(?i)(\u00e9)\\1", "(?iU)\u00e9", "(?i)\\p{Lu}", "(?i)\\p{Lower}", "(?i)[A-Z&&[^B]]", "(?i)\\P{Ll}", "(?iu)\u0131", "(?iu)[\u00b5]"};
+        String[] us = {"\u00c9", "\u00c9", "\u00c9", "\u212a", "\u212a", "\u212a", "\u00c9", "\u00c9", "\u00e9\u00c9", "\u00e9\u00c9", "\u00c9", "a", "B", "b", "A", "I", "\u039c"};
+        Main.check("uc76", all(up, us).equals("false;true;true;true;false;true;true;false;true;false;true;true;true;false;false;true;true;"));
+        String uw = "x\u00e9y\u0301z".replaceAll("\\b", "|") + " " + "x\u00e9y\u0301z".replaceAll("(?U)\\b", "|") + " " + "a\u00e9\u0663_\u203f-".replaceAll("(?U)\\w", "#")
+            + " " + "1\u0663\u00a0 \u2003".replaceAll("(?U)[\\d\\s]", "#") + " " + "aB\u00e9".replaceAll("(?U)\\p{Lower}", "#") + " " + "aB\u00e9".replaceAll("\\p{Lower}", "#")
+            + " " + "a\u00e9\u0301".replaceAll("(?U)\\W", "#");
+        Main.check("cx76", (S74.m("a(?#x)b", "ab") + ";" + S74.m("(?x)a{1, 2}", "a") + ";" + S74.m("(?x)a{1 2}", "a")).equals(
+            "Unknown inline modifier near index 3;true;false"));
+        Main.check("uw76", uw.equals("|x|\u00e9|y\u0301z| |x\u00e9y\u0301z| #####- ##### #B# #B\u00e9 a\u00e9\u0301"));
+    }
+}
+
+// ===== SECTION 77: \k<name>, \G, \X, \b{g}, the \p families, PatternSyntaxException's getters =====
+//
+// \k<name> wants a group already open. \G is where the previous find ended.
+// \X is one extended grapheme cluster and \b{g} Java's grapheme boundary,
+// which checks against the first boundary after the previous match. \p reads
+// general categories, scripts (Is.., sc=), blocks (In.., blk=), the binary
+// properties and the java* methods. Every expected value is java 24.0.2's.
+class S77 {
+    static void run() {
+        String kn = S74.m("\\k<x>(?<x>a)", "aa") + ";" + S74.m("(?<x>a)\\k<x>", "aa") + ";" + S74.m("(?i)(?<x>a)\\k<x>", "aA") + ";" + S74.m("\\k<y>", "");
+        Main.check("kn77", kn.equals("named capturing group <x> does not exist near index 4;true;true;named capturing group <y> does not exist near index 4"));
+        String ge = "aaa".replaceAll("\\G", "-") + "|" + "aab".replaceAll("\\Ga", "-") + "|" + "a,b,,c".replaceAll("\\G[^,]*,?", "<$0>") + "|"
+            + String.join("/", "aXbX".split("\\GX|a")) + "|" + S74.m("a\\G", "a") + "|" + "xx".replaceFirst("\\Gx", "y");
+        Main.check("ge77", ge.equals("-aaa|--b|<a,><b,><,><c><>|//bX|false|yx"));
+        String xg = "e\u0301x\r\n\u1100\u1161\u11a8".replaceAll("\\X", "<$0>") + "|" + "\u0915\u094d\u0937a\u200db\u0600a".replaceAll("\\X", "<$0>") + "|"
+            + "ae\u0301x".replaceAll("\\b{g}", "|") + "|" + String.join("/", "ae\u0301x".split("\\b{g}")) + "|" + S74.m("e\\X", "e\u0301") + "|" + S74.m("\\X\\X", "e\u0301")
+            + "|" + S74.m("\\b{gx}", "") + "|" + S74.m("[\\X]", "") + "|" + S74.m("\\b{", "");
+        Main.check("xg77", xg.equals("<e\u0301><x><\r\n><\u1100\u1161\u11a8>|<\u0915\u094d\u0937><a\u200d><b><\u0600a>||a|e\u0301|x||a/e\u0301/x|true|false"
+            + "|Illegal/unsupported escape sequence near index 4|Illegal/unsupported escape sequence near index 2|Illegal repetition near index 3"));
+        String pp = "abc\u00e9\u03b1\u0400".replaceAll("\\p{IsLatin}", "L") + "|" + "a\u03b1\u0400".replaceAll("\\p{InGreek}", "G") + "|" + "a\u03b1".replaceAll("\\p{sc=Grek}", "G")
+            + "|" + "1\u0663\u00bd\u2167x".replaceAll("\\p{N}", "#") + "|" + "$\u20ac(".replaceAll("\\p{Sc}", "S") + "|" + "(a)".replaceAll("\\p{javaMirrored}", "M")
+            + "|" + "a\u2764".replaceAll("\\p{IsEmoji}", "E") + "|" + "\u00e9a".replaceAll("\\p{InLatin-1 Supplement}", "S") + "|" + "\u00e9a".replaceAll("\\p{blk=latin_1_supplement}", "S")
+            + "|" + "aA".replaceAll("\\p{IsLATIN}", "L") + "|" + "a\u4e00".replaceAll("\\p{IsIdeographic}", "I") + "|" + "\u01c5a".replaceAll("\\p{javaTitleCase}", "T")
+            + "|" + "a b\u00a0".replaceAll("\\p{javaSpaceChar}", "_") + "|" + "a b\u00a0".replaceAll("\\p{javaWhitespace}", "_");
+        Main.check("pp77", pp.equals("LLLL\u03b1\u0400|aG\u0400|aG|####x|SS(|MaM|aE|Sa|Sa|LL|aI|Ta|a_b_|a_b\u00a0"));
+        String[] ep = {"\\p{Foo=bar}", "\\p{sc=Foo}", "\\p{IsFoo}", "\\p{isLatin}", "\\p{IsGreek_And_Coptic}", "\\p{InNoSuchBlock}"};
+        String pe = "";
+        for (String p : ep) { pe = pe + S74.m(p, "a") + ";"; }
+        Main.check("pe77", pe.equals("Unknown Unicode property {name=<foo>, value=<bar>} near index 10;Unknown Unicode property {name=<sc>, value=<Foo>} near index 9;"
+            + "Unknown character property name {IsFoo} near index 8;Unknown character property name {isLatin} near index 10;"
+            + "Unknown character property name {IsGreek_And_Coptic} near index 21;Unknown character property name {InNoSuchBlock} near index 16;"));
+        String ps = "";
+        try { "x".matches("a\t\t{"); } catch (java.util.regex.PatternSyntaxException e) {
+            ps = e.getDescription() + "|" + e.getIndex() + "|" + e.getPattern() + "|" + e.getMessage();
+        }
+        try { "x".split("(ab"); } catch (java.util.regex.PatternSyntaxException e) { ps = ps + "|" + e.getDescription() + "|" + e.getIndex() + "|" + e.getPattern(); }
+        try { "x".replaceAll("\t**", "b"); } catch (java.util.regex.PatternSyntaxException e) { ps = ps + "|" + e.getDescription() + "|" + e.getIndex() + "|" + e.getMessage(); }
+        Main.check("ps77", ps.equals("Illegal repetition|4|a\t\t{|Illegal repetition near index 4\na\t\t{|Unclosed group|3|(ab"
+            + "|Dangling meta character '*'|2|Dangling meta character '*' near index 2\n\t**\n\t ^"));
     }
 }

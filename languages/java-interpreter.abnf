@@ -2242,9 +2242,11 @@ HasStatic   = :script(~~
     include("lib/utf16-strings.js")
     include("lib/java-strings.js")
     include("lib/java-format.js")
-    // rxFail (the error) and rxPropHit (\p{..}) are regex.js's KNOBS, set by assignment.
+    // rxFail, rxPropHit, rxPropCls and rxGraphNext are regex.js's KNOBS, set by assignment.
     rxFail = function (msg) { fail("regexp: " + msg) }
     rxPropHit = function (id, c) { return jxPropHit(id, c) }
+    rxPropCls = function (st, name, at) { return jxPropCls(st, name, at) }
+    rxGraphNext = function (text, i, limit) { return jxGraphNext(text, i, limit) }
 
     function jArgList(args) {
         var out = []
@@ -3899,6 +3901,15 @@ HasStatic   = :script(~~
     function jxkClass(v) { return jGetClass(v).__cname }
     function jxkHash(v) { return jHash(v) }
     function jxkThrow(cls, msg) { jThrowExc(cls, msg) }
+    // A PatternSyntaxException for a regex.js error, with the description, index
+    // and pattern its getters answer. Twin of jxkThrowPse in
+    // languages/lib/java-rt.metajs and jvThrowPse in abnf/jsrtjavastr.go.
+    function jxkThrowPse(pattern, err, at) {
+        var e = jxReErr(pattern, err, at)
+        var msg = e.i == -2 ? e.d : jxReFmt(pattern, e.d, e.i)
+        throw {__exc: true, v: {__class: globalScope["PatternSyntaxException"], message: msg,
+                                __pdesc: e.d, __pidx: e.i < 0 ? -1 : e.i, __ppat: pattern}}
+    }
     // A String method's CharSequence or char argument as a string, and indexOf's
     // first argument, which may also be an int code point.
     function jStrArg(v) {
@@ -5179,6 +5190,10 @@ HasStatic   = :script(~~
     for (var jei = 0; jei < jExcTree.length; jei = jei + 2) {
         jDefExc(jExcTree[jei], jExcTree[jei + 1] == "" ? null : jExcTree[jei + 1])
     }
+    // PatternSyntaxException's own getters (jxkThrowPse sets the slots).
+    globalScope["PatternSyntaxException"].getDescription = function () { return arguments[0].__pdesc }
+    globalScope["PatternSyntaxException"].getIndex = function () { return arguments[0].__pidx }
+    globalScope["PatternSyntaxException"].getPattern = function () { return arguments[0].__ppat }
     // THE LAUNCHER'S UNCAUGHT-EXCEPTION LINE. java 24.0.2, on stderr, exit
     // status 1:
     //

@@ -25,7 +25,10 @@ package abnf
 // Positions are RUNE indices, matching the JS side's UTF-16 indices for everything
 // in the Basic Multilingual Plane (and therefore for every ASCII pattern).
 
-import "strings"
+import (
+	"strings"
+	"unicode"
+)
 
 // ----- Instruction opcodes (see lib/regex.js) -----
 const (
@@ -47,6 +50,11 @@ const (
 	rxOpCInc    = 16 // counted loop a: one iteration done, back to b
 	rxOpLookB   = 17 // lookbehind: a = address after the body, b = 2 * id + negative
 	rxOpLBEnd   = 18 // the lookbehind body must end where the lookbehind stands
+	rxOpAtom    = 19 // atomic group: a = address after the body (J only)
+	rxOpAtomEnd = 20 //
+	rxOpGPos    = 21 // \G: where the previous match ended (J only)
+	rxOpXGraph  = 22 // \X: one extended grapheme cluster (J only)
+	rxOpGBound  = 23 // \b{g}: a grapheme cluster boundary, as Java finds one (J only)
 )
 
 // ----- Assertion kinds -----
@@ -60,6 +68,17 @@ const (
 	rxEOSNL  = 7 // \Z
 	rxMBOL   = 8 // ^ under P with m in force
 	rxMEOL   = 9 // $ under P with m in force
+	// java.util.regex's anchors (J); see RX_JBOL .. RX_JUNWORDB in lib/regex.js.
+	rxJBOL     = 10
+	rxJUBOL    = 11
+	rxJEOL     = 12
+	rxJUEOL    = 13
+	rxJMEOL    = 14
+	rxJUMEOL   = 15
+	rxJWordB   = 16
+	rxJNWordB  = 17
+	rxJUWordB  = 18
+	rxJUNWordB = 19
 )
 
 // ----- Character-class shorthands -----
@@ -97,6 +116,8 @@ type rxCls struct {
 	ands  []*rxCls
 	props []int
 	x     bool
+	// u marks ranges read under Java's (?iu) (see lib/regex.js).
+	u bool
 }
 
 func rxNewCls() *rxCls { return &rxCls{} }
@@ -233,35 +254,6 @@ func rxIsVSpaceJ(c rune) bool {
 	return (c >= '\n' && c <= '\r') || c == 0x85 || c == 0x2028 || c == 0x2029
 }
 
-// rxPropHit answers whether c has the \p{..} property id, over java.lang.Character's
-// table (jsrtjavachars.go). Twin of jxPropHit in lib/java-regex.js.
-func rxPropHit(id int, c rune) bool {
-	switch id {
-	case rxPL:
-		return jcIsLetter(int(c))
-	case rxPND:
-		return jcIsDigit(int(c))
-	case rxPAlpha:
-		return jcIsAlphabetic(int(c))
-	case rxPUpper:
-		return jcIsUpper(int(c))
-	case rxPLower:
-		return jcIsLower(int(c))
-	case rxPLD:
-		return jcIsLetter(int(c)) || jcIsDigit(int(c))
-	}
-	k := jcClass(int(c)) % 8
-	switch id {
-	case rxPLu:
-		return k == 1
-	case rxPLl:
-		return k == 2
-	case rxPLt:
-		return k == 3
-	}
-	return id == rxPNl && k == 6
-}
-
 // hitX is hit for a class TREE: the union of the class's own ranges, its
 // properties and its nested classes, intersected with every && operand.
 func (c *rxCls) hitX(ch rune) bool {
@@ -333,6 +325,24 @@ func (c *rxCls) hit(ch rune) bool {
 		if rxSpHas(s, ch) {
 			return true
 		}
+	}
+	if c.u {
+		return c.hitU(ch)
+	}
+	return false
+}
+
+// hitU is the rest of a u class's range test: the simple uppercase of ch, then
+// that uppercase's lowercase. Twin of rxClsHitU in lib/regex.js.
+func (c *rxCls) hitU(ch rune) bool {
+	v := unicode.ToUpper(ch)
+	for k := 0; k < 2; k++ {
+		for i := range c.lo {
+			if v >= c.lo[i] && v <= c.hi[i] {
+				return true
+			}
+		}
+		v = unicode.ToLower(v)
 	}
 	return false
 }
@@ -408,6 +418,13 @@ type rxSt struct {
 	multi  bool
 	gend   int
 	gflags string
+	// ucase, uclass and unix are J's UNICODE_CASE, UNICODE_CHARACTER_CLASS and
+	// UNIX_LINES where the parser stands; inl marks an inline (?flags) group,
+	// whose flags outlive it.
+	ucase  bool
+	uclass bool
+	unix   bool
+	inl    bool
 }
 
 // rxIsMetaCh answers whether a character has to be backslashed to stay a literal.
@@ -553,98 +570,59 @@ func (st *rxSt) octAt(i int) int {
 	return int(st.p[i] - '0')
 }
 
-// The \p{..} property ids rxPropHit answers for. Twins of RX_PL .. RX_PLD in
-// lib/regex.js.
+// The \p{..} property ids rxPropHit answers for. Twins of RX_PL .. RX_PBLK in
+// lib/regex.js, which says what each is.
 const (
-	rxPL     = 1  // L, IsL, IsLetter, javaLetter
-	rxPLu    = 2  // Lu, IsLu
-	rxPLl    = 3  // Ll, IsLl
-	rxPLt    = 4  // Lt, IsLt
-	rxPND    = 5  // Nd, IsNd, IsDigit, javaDigit
-	rxPNl    = 6  // Nl, IsNl
-	rxPAlpha = 7  // IsAlphabetic, javaAlphabetic
-	rxPUpper = 8  // IsUppercase, javaUpperCase
-	rxPLower = 9  // IsLowercase, javaLowerCase
-	rxPLD    = 10 // LD, javaLetterOrDigit
+	rxPL        = 1
+	rxPLu       = 2
+	rxPLl       = 3
+	rxPLt       = 4
+	rxPND       = 5
+	rxPNl       = 6
+	rxPAlpha    = 7
+	rxPUpper    = 8
+	rxPLower    = 9
+	rxPLD       = 10
+	rxPWord     = 11
+	rxPWhite    = 12
+	rxPHex      = 13
+	rxPJoin     = 14
+	rxPNonCh    = 15
+	rxPAssigned = 16
+	rxPGraph    = 17
+	rxPPrint    = 18
+	rxPBlank    = 19
+	rxPCased    = 20
+	rxPAlnum    = 21
+	rxPJStart   = 22
+	rxPJPart    = 23
+	rxPUStart   = 24
+	rxPUPart    = 25
+	rxPIgnore   = 26
+	rxPJWhite   = 27
+	rxPBin      = 32
+	rxPGc       = 64
+	rxPMn       = 70
+	rxPSc       = 128
+	rxPBlk      = 512
 )
-
-func rxPropId(name string) int {
-	switch name {
-	case "L", "IsL", "javaLetter":
-		return rxPL
-	case "Lu", "IsLu":
-		return rxPLu
-	case "Ll", "IsLl":
-		return rxPLl
-	case "Lt", "IsLt":
-		return rxPLt
-	case "Nd", "IsNd", "javaDigit":
-		return rxPND
-	case "Nl", "IsNl":
-		return rxPNl
-	case "javaAlphabetic":
-		return rxPAlpha
-	case "javaUpperCase":
-		return rxPUpper
-	case "javaLowerCase":
-		return rxPLower
-	case "LD", "javaLetterOrDigit":
-		return rxPLD
-	}
-	if !strings.HasPrefix(name, "Is") {
-		return 0
-	}
-	// A binary property after Is ignores case: \p{IsAlphabetic}, \p{isletter}.
-	switch strings.ToUpper(name[2:]) {
-	case "LETTER":
-		return rxPL
-	case "DIGIT":
-		return rxPND
-	case "ALPHABETIC":
-		return rxPAlpha
-	case "UPPERCASE":
-		return rxPUpper
-	case "LOWERCASE":
-		return rxPLower
-	}
-	return 0
-}
-
-// propCls is the class of \p{name}; twin of rxPropCls in lib/regex.js.
-func (st *rxSt) propCls(name string, at int) *rxCls {
-	cls := rxNewCls()
-	posix := map[string]string{"Lower": "lower", "Upper": "upper", "ASCII": "ascii", "Alpha": "alpha",
-		"Digit": "digit", "Alnum": "alnum", "Punct": "punct", "Graph": "graph", "Print": "print",
-		"Blank": "blank", "Cntrl": "cntrl", "XDigit": "xdigit", "Space": "space"}
-	if pn, ok := posix[name]; ok {
-		rxPosixAdd(cls, pn)
-		return cls
-	}
-	if name == "all" {
-		cls.add(0, 0x10FFFF)
-		return cls
-	}
-	if id := rxPropId(name); id > 0 {
-		cls.props = append(cls.props, id)
-		cls.x = true
-		return cls
-	}
-	gc := " C Cc Cf Cn Co Cs L LC Ll Lm Lo Lt Lu L1 M Mc Me Mn N Nd Nl No P Pc Pd Pe Pf Pi Po Ps" +
-		" S Sc Sk Sm So Z Zl Zp Zs "
-	if strings.Contains(gc, " "+name+" ") || strings.HasPrefix(name, "Is") || strings.HasPrefix(name, "In") ||
-		strings.HasPrefix(name, "java") || strings.Contains(name, "=") {
-		st.fail("unsupported character property \\p{" + name + "}")
-		return cls
-	}
-	st.failAt("Unknown character property name {"+name+"}", at)
-	return cls
-}
 
 // escJ reads the escapes java.util.regex spells differently; twin of rxEscJ in
 // lib/regex.js. c (already consumed) is the character after the backslash, and
 // handled is false for the escapes every dialect shares.
 func (st *rxSt) escJ(c rune, inClass bool) (res rxEscRes, handled bool) {
 	p := st.p
+	// UNICODE_CHARACTER_CLASS: \d \w \s and their complements are Unicode's.
+	if st.uclass && strings.ContainsRune("dDwWsS", c) {
+		id := rxPWhite
+		if c == 'd' || c == 'D' {
+			id = rxPND
+		} else if c == 'w' || c == 'W' {
+			id = rxPWord
+		}
+		st.pcls = &rxCls{props: []int{id}, x: true, neg: c == 'D' || c == 'W' || c == 'S'}
+		return rxEscRes{kind: 3}, true
+	}
 	switch c {
 	case 'h':
 		return rxEscRes{kind: 1, sp: rxSJH}, true
@@ -783,12 +761,12 @@ func (st *rxSt) escJ(c rune, inClass bool) (res rxEscRes, handled bool) {
 	}
 	// The letters java.util.regex gives no meaning (in a class, also the
 	// assertions and \k, \R, \X, which only stand outside one) are errors;
-	// \G, \X and \N{name} are Java's but not this engine's.
+	// \N{name} is Java's but not this engine's: it has no character name table.
 	if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') {
 		if strings.ContainsRune("dDwWsSntrfae", c) {
 			return res, false
 		}
-		if !inClass && strings.ContainsRune("GXN", c) {
+		if !inClass && c == 'N' {
 			st.fail("unsupported escape \\" + string(c))
 			return res, true
 		}
@@ -807,14 +785,21 @@ func (st *rxSt) skipX() {
 		c := st.p[st.i]
 		if rxIsSpace(c) {
 			st.i++
-		} else if c == '#' {
-			for st.i < st.n && st.p[st.i] != '\n' {
+		} else if c == '#' { // (under J up to any line terminator)
+			for st.i < st.n && st.p[st.i] != '\n' && !(st.java && rxIsLineSepJ(st.p[st.i], st.unix)) {
 				st.i++
 			}
 		} else {
 			return
 		}
 	}
+}
+
+// skipXAt is skipX from index j; twin of rxSkipXAt in lib/regex.js.
+func (st *rxSt) skipXAt(j int) int {
+	st.i = j
+	st.skipX()
+	return st.i
 }
 
 func rxHexVal(c rune) int {
@@ -1074,6 +1059,7 @@ func (st *rxSt) classJ(consume bool) *rxCls {
 		st.i++
 	}
 	for st.err == "" {
+		st.skipX()
 		if st.i >= st.n {
 			st.fail("unterminated character class")
 			return rxNewCls()
@@ -1092,6 +1078,7 @@ func (st *rxSt) classJ(consume bool) *rxCls {
 		if c == '&' && st.i+1 < st.n && p[st.i+1] == '&' {
 			st.i += 2
 			var right *rxCls
+			st.skipX()
 			for st.err == "" && st.i < st.n && p[st.i] != ']' && p[st.i] != '&' {
 				var r *rxCls
 				if p[st.i] == '[' {
@@ -1105,6 +1092,7 @@ func (st *rxSt) classJ(consume bool) *rxCls {
 				} else {
 					right = r
 				}
+				st.skipX()
 			}
 			if st.err != "" {
 				return rxNewCls()
@@ -1192,6 +1180,7 @@ func (st *rxSt) rangeJ(bits *rxCls) *rxCls {
 	} else {
 		st.i++
 	}
+	st.skipX()
 	if st.i < st.n && p[st.i] == '-' {
 		var end rune
 		if st.i+1 < st.n {
@@ -1199,6 +1188,7 @@ func (st *rxSt) rangeJ(bits *rxCls) *rxCls {
 		}
 		if end != '[' && end != ']' {
 			st.i++
+			st.skipX()
 			m := rune(-1)
 			if st.i >= st.n {
 				st.i++
@@ -1219,15 +1209,31 @@ func (st *rxSt) rangeJ(bits *rxCls) *rxCls {
 			}
 			rg := rxNewCls()
 			rg.add(ch, m)
+			if st.icase {
+				st.foldJ(rg, false)
+			}
 			return rg
 		}
 	}
-	if ch < 256 {
+	// Pattern.bitsOrSingle; see rxRangeJ in lib/regex.js.
+	excl := st.icase && st.ucase && strings.ContainsRune("\u00ff\u00b5IiSsKk\u00c5\u00e5", ch)
+	if ch < 256 && !excl {
 		bits.add(ch, ch)
+		if st.icase && ch < 128 {
+			if sw := rxSwapCase(ch); sw >= 0 {
+				bits.add(sw, sw)
+			}
+		} else if st.icase && st.ucase {
+			bits.add(unicode.ToLower(ch), unicode.ToLower(ch))
+			bits.add(unicode.ToUpper(ch), unicode.ToUpper(ch))
+		}
 		return nil
 	}
 	one := rxNewCls()
 	one.add(ch, ch)
+	if st.icase {
+		st.foldJ(one, true)
+	}
 	return one
 }
 
@@ -1245,7 +1251,7 @@ func (c *rxCls) simplify() {
 	var keep []*rxCls
 	for _, s := range c.subs {
 		s.simplify()
-		if !s.x && !s.neg {
+		if !s.x && !s.neg && !s.u {
 			for k := range s.lo {
 				c.add(s.lo[k], s.hi[k])
 			}
@@ -1314,7 +1320,11 @@ func (st *rxSt) parseGroup() *rxNode {
 	if st.i < st.n && st.p[st.i] == '?' && !st.ere {
 		st.i++
 		if st.i >= st.n {
-			st.fail("unterminated group")
+			if st.java {
+				st.failAt("Unknown inline modifier", st.i)
+			} else {
+				st.fail("unterminated group")
+			}
 			return rxNewNode("empty")
 		}
 		k := st.p[st.i]
@@ -1325,7 +1335,7 @@ func (st *rxSt) parseGroup() *rxNode {
 			g.items = append(g.items, st.parseAlt())
 			st.expect(')', "unterminated group")
 			return g
-		case k == '#':
+		case k == '#' && !st.java: // java.util.regex has no (?# comment
 			for st.i < st.n && st.p[st.i] != ')' {
 				st.i++
 			}
@@ -1378,6 +1388,20 @@ func (st *rxSt) parseGroup() *rxNode {
 		}
 		if st.py && strings.ContainsRune("aiLmsux-", k) {
 			return st.parseFlagsP()
+		}
+		if st.java {
+			if k == '>' { // (?>X): X matched once, never backtracked into
+				st.i++
+				at := rxNewNode("atom")
+				at.items = append(at.items, st.parseAlt())
+				st.expect(')', "unterminated group")
+				return at
+			}
+			if k == '$' || k == '@' {
+				st.failAt("Unknown group type", st.i)
+				return rxNewNode("empty")
+			}
+			return st.parseFlagsJ()
 		}
 		st.fail("unsupported group form (?" + string(st.p[st.i]) + ")")
 		return rxNewNode("empty")
@@ -1436,7 +1460,7 @@ func (st *rxSt) parseFlagsP() *rxNode {
 		}
 		st.gend = st.i
 		st.gflags += on
-		st.setFlagsP(on, true)
+		st.setFlags(on, true)
 		return rxNewNode("empty")
 	}
 	if k != ':' {
@@ -1449,8 +1473,8 @@ func (st *rxSt) parseFlagsP() *rxNode {
 	}
 	st.i++
 	icase, multi, dotall, ext := st.icase, st.multi, st.dotall, st.ext
-	st.setFlagsP(on, true)
-	st.setFlagsP(off, false)
+	st.setFlags(on, true)
+	st.setFlags(off, false)
 	g := rxNewNode("group")
 	g.items = append(g.items, st.parseAlt())
 	st.expect(')', "missing ), unterminated subpattern")
@@ -1458,7 +1482,42 @@ func (st *rxSt) parseFlagsP() *rxNode {
 	return g
 }
 
-func (st *rxSt) setFlagsP(letters string, v bool) {
+// parseFlagsJ reads java.util.regex's (?idmsuxU-idmsuxU) and (?..:X). Twin of
+// rxParseFlagsJ in lib/regex.js, which states the rules.
+func (st *rxSt) parseFlagsJ() *rxNode {
+	on := true
+	for ; st.i < st.n; st.i++ {
+		c := st.p[st.i]
+		if c == '-' && on {
+			on = false
+		} else if strings.ContainsRune("idmsuxcU", c) {
+			st.setFlags(string(c), on)
+		} else {
+			break
+		}
+	}
+	k := rune(0)
+	if st.i < st.n {
+		k = st.p[st.i]
+	}
+	if k == ')' {
+		st.i++
+		st.inl = true
+		return rxNewNode("empty")
+	}
+	if k != ':' {
+		st.failAt("Unknown inline modifier", st.i)
+		return rxNewNode("empty")
+	}
+	st.i++
+	g := rxNewNode("group")
+	g.items = append(g.items, st.parseAlt())
+	st.expect(')', "unterminated group")
+	return g
+}
+
+// setFlags switches the parse-time flags named by letters; twin of rxFlagsSet.
+func (st *rxSt) setFlags(letters string, v bool) {
 	if strings.Contains(letters, "i") {
 		st.icase = v
 	}
@@ -1471,6 +1530,66 @@ func (st *rxSt) setFlagsP(letters string, v bool) {
 	if strings.Contains(letters, "x") {
 		st.ext = v
 	}
+	if strings.Contains(letters, "d") {
+		st.unix = v
+	}
+	if strings.Contains(letters, "u") {
+		st.ucase = v
+	}
+	if strings.Contains(letters, "U") {
+		st.uclass = v
+		st.ucase = v
+	}
+}
+
+// getFlags and putFlags save and restore the flags in force; twins of
+// rxFlagsGet and rxFlagsPut.
+func (st *rxSt) getFlags() string {
+	s := ""
+	for _, f := range []struct {
+		on bool
+		c  string
+	}{{st.icase, "i"}, {st.multi, "m"}, {st.dotall, "s"}, {st.ext, "x"}, {st.unix, "d"}, {st.ucase, "u"}, {st.uclass, "U"}} {
+		if f.on {
+			s += f.c
+		}
+	}
+	return s
+}
+
+func (st *rxSt) putFlags(letters string) {
+	st.setFlags("imsxdU", false)
+	st.setFlags(letters, true)
+}
+
+// eolJ is the kind of a J $ (multi true) or \Z (multi false).
+func (st *rxSt) eolJ(multi bool) int {
+	switch {
+	case st.unix && multi:
+		return rxJUMEOL
+	case st.unix:
+		return rxJUEOL
+	case multi:
+		return rxJMEOL
+	}
+	return rxJEOL
+}
+
+// foldJ is rxFoldJ: CASE_INSENSITIVE for a J class's ranges.
+func (st *rxSt) foldJ(cls *rxCls, single bool) {
+	if !st.ucase {
+		cls.fold()
+		return
+	}
+	if single {
+		up := unicode.ToUpper(cls.lo[0])
+		low := unicode.ToLower(up)
+		if up == low {
+			return
+		}
+		cls.lo[0], cls.hi[0] = low, low
+	}
+	cls.u = true
 }
 
 func (st *rxSt) parseAtom() *rxNode {
@@ -1478,7 +1597,16 @@ func (st *rxSt) parseAtom() *rxNode {
 	switch c {
 	case '(':
 		st.i++
-		return st.parseGroup()
+		if !st.java {
+			return st.parseGroup()
+		}
+		fl := st.getFlags()
+		g := st.parseGroup()
+		if !st.inl {
+			st.putFlags(fl)
+		}
+		st.inl = false
+		return g
 	case '[':
 		st.i++
 		if st.java {
@@ -1492,6 +1620,11 @@ func (st *rxSt) parseAtom() *rxNode {
 		if !st.dotall {
 			dot.cls.add('\n', '\n')
 		}
+		if st.java && !st.dotall && !st.unix {
+			dot.cls.add('\r', '\r')
+			dot.cls.add(0x85, 0x85)
+			dot.cls.add(0x2028, 0x2029)
+		}
 		return dot
 	case '^':
 		st.i++
@@ -1501,6 +1634,14 @@ func (st *rxSt) parseAtom() *rxNode {
 			b.gidx = rxBOS
 			if st.multi {
 				b.gidx = rxMBOL
+			}
+		}
+		if st.java {
+			b.gidx = rxBOS
+			if st.multi && st.unix {
+				b.gidx = rxJUBOL
+			} else if st.multi {
+				b.gidx = rxJBOL
 			}
 		}
 		return b
@@ -1513,6 +1654,9 @@ func (st *rxSt) parseAtom() *rxNode {
 			if st.multi {
 				d.gidx = rxMEOL
 			}
+		}
+		if st.java {
+			d.gidx = st.eolJ(st.multi)
 		}
 		return d
 	case '\\':
@@ -1541,6 +1685,14 @@ func (st *rxSt) parseAtom() *rxNode {
 			st.i += 3
 			kb := rxNewNode("bref")
 			kb.bname = st.readGroupName('>')
+			if st.java {
+				// Java resolves the name as it reads it: the group must already be open.
+				kb.gidx = st.nameIdx(kb.bname)
+				if kb.gidx < 0 && st.err == "" {
+					st.failAt("named capturing group <"+kb.bname+"> does not exist", st.i-1)
+				}
+				return kb
+			}
 			st.pending = append(st.pending, kb)
 			return kb
 		}
@@ -1551,6 +1703,26 @@ func (st *rxSt) parseAtom() *rxNode {
 		if nxt == 'R' && st.java { // Java's \R: \r\n or one vertical-whitespace character
 			st.i += 2
 			return rxLinebreakJ()
+		}
+		if st.java && (nxt == 'G' || nxt == 'X') {
+			st.i += 2
+			op := rxNewNode("op")
+			op.gidx = rxOpXGraph
+			if nxt == 'G' {
+				op.gidx = rxOpGPos
+			}
+			return op
+		}
+		if st.java && nxt == 'b' && st.i+3 < st.n && st.p[st.i+2] == '{' && st.p[st.i+3] == 'g' {
+			// \b{g}; any other \b{ is \b and a bound.
+			if st.i+4 >= st.n || st.p[st.i+4] != '}' {
+				st.failAt("Illegal/unsupported escape sequence", st.i+4)
+				return rxNewNode("empty")
+			}
+			st.i += 5
+			op := rxNewNode("op")
+			op.gidx = rxOpGBound
+			return op
 		}
 		if nxt == 'b' || nxt == 'B' || nxt == 'A' || nxt == 'z' || nxt == 'Z' {
 			st.i += 2
@@ -1568,6 +1740,22 @@ func (st *rxSt) parseAtom() *rxNode {
 				a.gidx = rxEOSNL
 				if st.py {
 					a.gidx = rxEOS
+				}
+			}
+			if st.java {
+				switch nxt {
+				case 'b':
+					a.gidx = rxJWordB
+					if st.uclass {
+						a.gidx = rxJUWordB
+					}
+				case 'B':
+					a.gidx = rxJNWordB
+					if st.uclass {
+						a.gidx = rxJUNWordB
+					}
+				case 'Z':
+					a.gidx = st.eolJ(false)
 				}
 			}
 			return a
@@ -1591,6 +1779,9 @@ func (st *rxSt) parseAtom() *rxNode {
 		}
 		ln := rxNewNode("cls")
 		ln.cls.add(e.ch, e.ch)
+		if st.java && st.icase {
+			st.foldJ(ln.cls, true)
+		}
 		return ln
 	case ')':
 		// A ) only closes a group when one is OPEN. At the top level of a POSIX ERE it
@@ -1626,6 +1817,9 @@ func (st *rxSt) parseAtom() *rxNode {
 	st.i++
 	lit := rxNewNode("cls")
 	lit.cls.add(c, c)
+	if st.java && st.icase {
+		st.foldJ(lit.cls, true)
+	}
 	return lit
 }
 
@@ -1663,11 +1857,11 @@ func (st *rxSt) parseBoundJ() (int, int, bool) {
 			st.failAt("Illegal repetition range", j)
 			return 0, 0, false
 		}
-		j++
+		j = st.skipXAt(j + 1)
 	}
 	maxV := minV
 	if j < st.n && p[j] == ',' {
-		j++
+		j = st.skipXAt(j + 1)
 		maxV = -1
 		if j < st.n && rxIsDigit(p[j]) {
 			maxV = 0
@@ -1678,7 +1872,7 @@ func (st *rxSt) parseBoundJ() (int, int, bool) {
 				st.failAt("Illegal repetition range", j)
 				return 0, 0, false
 			}
-			j++
+			j = st.skipXAt(j + 1)
 		}
 	}
 	if j >= st.n || p[j] != '}' {
@@ -1736,6 +1930,12 @@ func (st *rxSt) parsePiece() *rxNode {
 		}
 		if atom.t == "bref" {
 			atom.min = 1
+		}
+	}
+	if st.java && st.icase && atom.t == "bref" {
+		atom.min = 1
+		if st.ucase {
+			atom.min = 2
 		}
 	}
 	st.skipX()
@@ -1806,17 +2006,34 @@ func (st *rxSt) parsePiece() *rxNode {
 		rep.cnt = counted
 		// A POSIX ERE has no lazy or possessive form, so the ? of "a*?" is a SECOND
 		// quantifier there rather than a modifier of the first.
+		if st.java {
+			st.skipX()
+		}
+		poss := false
 		if st.i < st.n && !st.ere {
 			q := st.p[st.i]
 			if q == '?' {
 				rep.greedy = false
 				st.i++
 			} else if q == '+' {
-				st.i++ // possessive: treated as greedy
+				st.i++
+				poss = st.java
 			}
+		}
+		// Outside J a possessive quantifier is read as greedy; under J it is
+		// (?>(?>X)*), as in lib/regex.js.
+		if poss && atom.t != "cls" {
+			inner := rxNewNode("atom")
+			inner.items = append(inner.items, atom)
+			atom = inner
 		}
 		rep.items = append(rep.items, atom)
 		atom = rep
+		if poss {
+			outer := rxNewNode("atom")
+			outer.items = append(outer.items, rep)
+			atom = outer
+		}
 		st.skipX()
 	}
 	return atom
@@ -1991,6 +2208,13 @@ func (pg *rxProg) emit(node *rxNode) {
 		}
 		pg.add(rxOpLookEnd, 0, 0, pg.dummy)
 		pg.as[lk] = pg.here()
+	case "op":
+		pg.add(node.gidx, 0, 0, pg.dummy)
+	case "atom":
+		am := pg.add(rxOpAtom, 0, 0, pg.dummy)
+		pg.emit(node.items[0])
+		pg.add(rxOpAtomEnd, 0, 0, pg.dummy)
+		pg.as[am] = pg.here()
 	case "lookb":
 		id := len(pg.lbmin)
 		pg.lbmin = append(pg.lbmin, node.items[0].minLen())
@@ -2018,6 +2242,10 @@ func (n *rxNode) minLen() int {
 	switch n.t {
 	case "cls":
 		return 1
+	case "op":
+		if n.gidx == rxOpXGraph {
+			return 1
+		}
 	case "cat":
 		sum := 0
 		for _, it := range n.items {
@@ -2035,7 +2263,7 @@ func (n *rxNode) minLen() int {
 			return 0
 		}
 		return best
-	case "group":
+	case "group", "atom":
 		if len(n.items) > 0 {
 			return n.items[0].minLen()
 		}
@@ -2065,7 +2293,7 @@ func (n *rxNode) maxLen() int {
 			}
 		}
 		return acc
-	case "group":
+	case "group", "atom":
 		if len(n.items) > 0 {
 			return n.items[0].maxLen()
 		}
@@ -2221,6 +2449,8 @@ func rxCompile(pattern, flags string) *rxRe {
 	java := strings.ContainsRune(flags, 'J')
 	py := strings.ContainsRune(flags, 'P')
 	bfail := java || py || strings.ContainsRune(flags, 'n')
+	ucase := java && strings.ContainsRune(flags, 'u')
+	unix := java && strings.ContainsRune(flags, 'd')
 	// The POSIX ERE dialect (bash's [[ =~ ]]). What it changes is spelled out at each
 	// site; the two whole-engine consequences are here. A "." matches a newline in an
 	// ERE, and an ERE has POSIX capture semantics, of which the visible one is that an
@@ -2244,9 +2474,10 @@ func rxCompile(pattern, flags string) *rxRe {
 		pat = rxExpandQuotes(pat)
 	}
 	st := &rxSt{p: pat, ext: ext, dotall: dotall, octal: octal, ere: ere, posix: posix, java: java, errAt: -1,
-		py: py, icase: icase, multi: multi}
-	// Under P case folding and line anchoring are decided per atom while parsing.
-	if py {
+		py: py, icase: icase, multi: multi, ucase: ucase, unix: unix}
+	// Under P and J case folding and line anchoring are decided per atom while
+	// parsing.
+	if py || java {
 		icase, multi = false, false
 	}
 	st.n = len(st.p)
@@ -2300,6 +2531,9 @@ type rxRunSt struct {
 	// counted loop's iteration count and the position its iteration began at.
 	lbt       int
 	ctr, cbeg []int
+	// gpos and glast are java.util.regex's Matcher.oldLast (\G) and last
+	// (\b{g}); see searchFrom.
+	gpos, glast int
 }
 
 func (re *rxRe) assertOK(text []rune, kind, sp int) bool {
@@ -2331,6 +2565,9 @@ func (re *rxRe) assertOK(text []rune, kind, sp int) bool {
 		}
 		return text[sp] == '\n'
 	}
+	if kind >= rxJBOL {
+		return rxAssertJ(text, kind, sp)
+	}
 	before, after := false, false
 	if sp > 0 {
 		before = rxIsWord(text[sp-1])
@@ -2342,6 +2579,83 @@ func (re *rxRe) assertOK(text []rune, kind, sp int) bool {
 		return before != after
 	}
 	return before == after
+}
+
+// rxIsLineSepJ: is c one of Java's line terminators (unix: \n alone)?
+func rxIsLineSepJ(c rune, unix bool) bool {
+	if c == '\n' {
+		return true
+	}
+	return !unix && (c == '\r' || c == 0x85 || c == 0x2028 || c == 0x2029)
+}
+
+// rxAssertJ decides the rxJ* anchors; twin of rxAssertJ in lib/regex.js.
+func rxAssertJ(text []rune, kind, sp int) bool {
+	n := len(text)
+	switch kind {
+	case rxJBOL, rxJUBOL:
+		if sp == n {
+			return false
+		}
+		if sp == 0 {
+			return true
+		}
+		pc := text[sp-1]
+		if !rxIsLineSepJ(pc, kind == rxJUBOL) {
+			return false
+		}
+		return !(pc == '\r' && kind == rxJBOL && text[sp] == '\n')
+	case rxJEOL, rxJUEOL, rxJMEOL, rxJUMEOL:
+		unix := kind == rxJUEOL || kind == rxJUMEOL
+		multi := kind == rxJMEOL || kind == rxJUMEOL
+		if sp == n {
+			return true
+		}
+		c := text[sp]
+		if !rxIsLineSepJ(c, unix) {
+			return false
+		}
+		crlf := c == '\n' && sp > 0 && text[sp-1] == '\r'
+		switch {
+		case multi:
+			return !(crlf && !unix)
+		case unix:
+			return sp == n-1
+		case sp == n-2:
+			return c == '\r' && text[sp+1] == '\n'
+		}
+		return sp == n-1 && !crlf
+	}
+	uw := kind == rxJUWordB || kind == rxJUNWordB
+	before := sp > 0 && rxIsWordJ(text, sp-1, uw)
+	after := sp < n && rxIsWordJ(text, sp, uw)
+	if kind == rxJWordB || kind == rxJUWordB {
+		return before != after
+	}
+	return before == after
+}
+
+// rxIsWordJ is Pattern.Bound's side test for text[i]; twin of rxIsWordJ in
+// lib/regex.js.
+func rxIsWordJ(text []rune, i int, uw bool) bool {
+	c := text[i]
+	if (uw && rxPropHit(rxPWord, c)) || (!uw && rxIsWord(c)) {
+		return true
+	}
+	// No non-spacing mark lies below U+0300.
+	if c < 0x300 || !rxPropHit(rxPMn, c) {
+		return false
+	}
+	for k := i - 1; k >= 0; k-- {
+		b := text[k]
+		if rxPropHit(rxPLD, b) {
+			return true
+		}
+		if b < 0x300 || !rxPropHit(rxPMn, b) {
+			return false
+		}
+	}
+	return false
 }
 
 // run is the backtracking VM: the end position of a match from pc/sp, or -1.
@@ -2468,7 +2782,16 @@ func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt)
 			for bi := 0; bi < length; bi++ {
 				lc, rc := text[from+bi], text[sp+bi]
 				if lc != rc {
-					if (!re.icase && re.bs[pc] == 0) || rxSwapCase(rc) != lc {
+					if !re.icase && re.bs[pc] == 0 {
+						return -1
+					}
+					if re.bs[pc] == 2 {
+						// Java's CIBackRef under UNICODE_CASE.
+						lu, ru := unicode.ToUpper(lc), unicode.ToUpper(rc)
+						if lu != ru && unicode.ToLower(lu) != unicode.ToLower(ru) {
+							return -1
+						}
+					} else if rxSwapCase(rc) != lc {
 						return -1
 					}
 				}
@@ -2572,6 +2895,34 @@ func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt)
 				return -1
 			}
 			return sp
+		case rxOpAtom:
+			// The body's first success, and no other (see RX_ATOM in lib/regex.js).
+			ra := re.run(text, pc+1, sp, caps, marks, st)
+			if ra < 0 {
+				return -1
+			}
+			pc = re.as[pc]
+			sp = ra
+		case rxOpAtomEnd:
+			return sp
+		case rxOpGPos:
+			if sp != st.gpos {
+				return -1
+			}
+			pc++
+		case rxOpXGraph:
+			if sp >= n {
+				return -1
+			}
+			sp = jxGraphNext(text, sp, n)
+			pc++
+		case rxOpGBound:
+			// Pattern.GraphemeBound: not before the first boundary after the
+			// previous match's end (a rune never splits a surrogate pair).
+			if sp > 0 && sp < n && jxGraphNext(text, st.glast, n) > sp {
+				return -1
+			}
+			pc++
 		default:
 			return -1
 		}
@@ -2601,12 +2952,18 @@ type rxMatch struct {
 // search finds the leftmost match at or after start. ok=false means the step cap
 // was hit, which the caller turns into a clean runtime error.
 func (re *rxRe) search(text []rune, start int) (*rxMatch, bool) {
-	from := start
-	if from < 0 {
-		from = 0
+	if start < 0 {
+		start = 0
 	}
+	return re.searchFrom(text, start, start, 0)
+}
+
+// searchFrom is search for java.util.regex's Matcher.find, whose \G and \b{g}
+// read where the previous match ended (gpos, glast); search is a fresh Matcher's
+// find. Twin of rxSearchFrom in lib/regex.js.
+func (re *rxRe) searchFrom(text []rune, from, gpos, glast int) (*rxMatch, bool) {
 	for at := from; at <= len(text); at++ {
-		m, ok := re.attempt(text, at, -1)
+		m, ok := re.attempt(text, at, -1, gpos, glast)
 		if !ok {
 			return nil, false
 		}
@@ -2620,7 +2977,7 @@ func (re *rxRe) search(text []rune, start int) (*rxMatch, bool) {
 // attempt runs the program ONCE, starting at `at`. mustEnd is -1 for an ordinary
 // match and the required end position for a whole-input match; it is the one knob
 // search, matchAt and matchWhole differ by.
-func (re *rxRe) attempt(text []rune, at, mustEnd int) (*rxMatch, bool) {
+func (re *rxRe) attempt(text []rune, at, mustEnd, gpos, glast int) (*rxMatch, bool) {
 	nslots := 2 * (re.ngroups + 1)
 	caps := make([]int, nslots)
 	for i := range caps {
@@ -2630,7 +2987,7 @@ func (re *rxRe) attempt(text []rune, at, mustEnd int) (*rxMatch, bool) {
 	for i := range marks {
 		marks[i] = -1
 	}
-	st := &rxRunSt{mustEnd: mustEnd, lbt: -1}
+	st := &rxRunSt{mustEnd: mustEnd, lbt: -1, gpos: gpos, glast: glast}
 	if len(re.cmin) > 0 {
 		st.ctr = make([]int, len(re.cmin))
 		st.cbeg = make([]int, len(re.cmin))
@@ -2654,7 +3011,7 @@ func (re *rxRe) matchAt(text []rune, at int) (*rxMatch, bool) {
 	if at < 0 || at > len(text) {
 		return nil, true
 	}
-	return re.attempt(text, at, -1)
+	return re.attempt(text, at, -1, at, 0)
 }
 
 // matchWhole: the match must cover the WHOLE input. This cannot be a search plus a
@@ -2664,7 +3021,7 @@ func (re *rxRe) matchWhole(text []rune, at int) (*rxMatch, bool) {
 	if at < 0 || at > len(text) {
 		return nil, true
 	}
-	return re.attempt(text, at, len(text))
+	return re.attempt(text, at, len(text), at, 0)
 }
 
 func (re *rxRe) group(text []rune, m *rxMatch, i int) (string, bool) {

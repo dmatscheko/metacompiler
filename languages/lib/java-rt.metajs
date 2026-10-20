@@ -85,9 +85,11 @@ import "./utf16-strings.js"
 import "./java-strings.js"
 import "./java-format.js"
 
-// rxFail (the error) and rxPropHit (\p{..}) are regex.js's knobs, set by assignment.
+// rxFail, rxPropHit, rxPropCls and rxGraphNext are regex.js's knobs, set by assignment.
 rxFail = function (msg) { fail("regexp: " + msg) }
 rxPropHit = function (id, c) { return jxPropHit(id, c) }
+rxPropCls = function (st, name, at) { return jxPropCls(st, name, at) }
+rxGraphNext = function (text, i, limit) { return jxGraphNext(text, i, limit) }
 
 // ----- the JVM-family section's two knobs (lib/runtime.metajs) ---------------
 function rtjkCmp(op, l, r) { return jvCmp(op, l, r) }
@@ -2457,6 +2459,19 @@ function jxkFail(msg) { fail(msg) }
 function jxkClass(v) { return js_jvgetclass(v)["__cname"] }
 function jxkHash(v) { return js_jhash(v) }
 function jxkThrow(cls, msg) { return jvThrowCls(jvExcNamed["$" + cls], msg) }
+// A PatternSyntaxException for a regex.js error, with the description, index
+// and pattern its getters answer. Twin of jxkThrowPse in java-interpreter.abnf
+// and jvThrowPse in abnf/jsrtjavastr.go.
+function jxkThrowPse(pattern, err, at) {
+    var e = jxReErr(pattern, err, at)
+    var o = {}
+    o["__class"] = jvExcNamed["$PatternSyntaxException"]
+    o["__msg"] = e.i == -2 ? e.d : jxReFmt(pattern, e.d, e.i)
+    o["__pdesc"] = e.d
+    o["__pidx"] = e.i < 0 ? -1 : e.i
+    o["__ppat"] = pattern
+    throw o
+}
 
 // A String method's CharSequence or char argument as a string, and indexOf's
 // first argument, which may also be an int code point.
