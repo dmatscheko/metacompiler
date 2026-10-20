@@ -448,7 +448,10 @@ PType       <~~ push({pty: stripWs(up.in)}) ~~>
 // A TYPE ANNOTATION may sit in front of the type, in front of any segment of a
 // qualified one, and in front of each array bracket pair (`@A String @A []`,
 // `Outer.@A Inner`) - JLS 9.7.4. They are dropped like every other annotation.
-Type        = { Annotation } ( PrimName KwEnd | "String" KwEnd | "void" KwEnd | "var" KwEnd NoBracket
+// A type lib/java-util.java declares is loaded as an import of it would be
+// (jNoteUtilType).
+Type        <~~ jNoteUtilType(up.in) ~~>
+            = { Annotation } ( PrimName KwEnd | "String" KwEnd | "void" KwEnd | "var" KwEnd NoBracket
               | NotResvKw NotVarArr Id [ SkipAngle ] { "." { Annotation } Id [ SkipAngle ] } ) { { Annotation } "[" "]" } ;
 PrimName    = "int" | "boolean" | "char" | "long" | "double" | "float" | "short" | "byte" ;
 
@@ -2890,9 +2893,12 @@ HasStatic   = :script(~~
     // new C(args): set __class, then run the constructor with [obj, args...].
     // super.m(args): resolved through js_jvsuper, starting at the superclass of the
     // class the call appears in (captured at build time); past the last user class
-    // it reaches java.lang.Object's toString, equals and hashCode.
+    // it reaches java.lang.Object's toString, equals, hashCode and clone, which
+    // can throw CloneNotSupportedException (jUsesClone).
+    var jUsesClone = false
     function makeSuperCall(name, argThunks) {
         var defName = curClassName
+        if (name == "clone") { jUsesClone = true }
         return function(b) {
             var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, defName)])
             var supV = callExt(b, "js_get", [clsV, emitStr(b, "__super")])
@@ -4866,6 +4872,13 @@ HasStatic   = :script(~~
         if (jMapWants(ip)) { jMapWant = true }
         if (jStreamWants(ip)) { jStreamWant = true }
     }
+    // A type named without an import that lib/java-util.java declares
+    // (jTypeWantsUtil) wants it loaded after the walk. Twin of jNoteUtilType in
+    // java-interpreter.abnf.
+    function jNoteUtilType(t) {
+        if (jTypeWantsUtil(t)) { jUtilWant = true }
+        return t
+    }
     function jEnterClass(n) {
         jClassStack.push(curClassName)
         jBinStack.push(jCurBin)
@@ -5610,7 +5623,7 @@ HasStatic   = :script(~~
                            "IndexOutOfBoundsException", "ArrayIndexOutOfBoundsException",
                            "StringIndexOutOfBoundsException", "NegativeArraySizeException",
                            "ClassCastException", "UnsupportedOperationException",
-                           "NumberFormatException", "InterruptedException", "IOException",
+                           "NumberFormatException", "InterruptedException", "CloneNotSupportedException", "IOException",
                            "StackOverflowError", "AssertionError", "IllegalFormatException",
                            "PatternSyntaxException"]
     // java.util.Formatter's exceptions, which String.format throws: each an
@@ -5653,6 +5666,7 @@ HasStatic   = :script(~~
                             "$NumberFormatException": "IllegalArgumentException",
                             "$PatternSyntaxException": "IllegalArgumentException",
                             "$InterruptedException": "Exception", "$IOException": "Exception",
+                            "$CloneNotSupportedException": "Exception",
                             "$IllegalFormatException": "IllegalArgumentException"}
     for (var jfp = 2; jfp < jFmtExcs.length - 1; jfp = jfp + 1) { builtinExcParent["$" + jFmtExcs[jfp]] = "IllegalFormatException" }
     // ----- what the RUNTIME can raise, decided at WALK time -----
@@ -5739,6 +5753,10 @@ HasStatic   = :script(~~
         if (jUsesCast) {
             runtimeExc["$ClassCastException"] = true
             noteTypeUse("ClassCastException")
+        }
+        if (jUsesClone) {
+            runtimeExc["$CloneNotSupportedException"] = true
+            noteTypeUse("CloneNotSupportedException")
         }
         if (jUsesRange) {
             runtimeExc["$IndexOutOfBoundsException"] = true

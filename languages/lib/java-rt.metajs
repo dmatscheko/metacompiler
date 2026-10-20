@@ -3275,8 +3275,8 @@ function jpFirst(args) {
 function js_jvstr(v) { return jpStr(v) }
 
 // super.m(args). A call no user class answers reaches java.lang.Object: toString
-// (or the one Throwable, Enum or Record put in its place), equals (identity) and
-// hashCode (the identity hash). Twin of jSuperObject in
+// (or the one Throwable, Enum or Record put in its place), equals (identity),
+// hashCode (the identity hash) and clone (jvObjClone). Twin of jSuperObject in
 // languages/java-interpreter.abnf and js_jvsuper in abnf/jsrtjava.go.
 function js_jvsuper(sup, self, name, args) {
     var m = rtFindMethod(sup, name)
@@ -3285,8 +3285,39 @@ function js_jvsuper(sup, self, name, args) {
         if (name == "toString" && args.length == 0) { return jpInherited(self, 0) }
         if (name == "equals" && args.length == 1) { return self === args[0] }
         if (name == "hashCode" && args.length == 0) { return jpIdNum(self) }
+        if (name == "clone" && args.length == 0) { return jvObjClone(self) }
     }
     return js_supercall(sup, self, name, args)
+}
+
+// Object.clone: a Cloneable instance copied slot by slot, the copy sharing every
+// object the slots refer to; any other throws CloneNotSupportedException with
+// the class' binary name as the message. keysOf skips the hidden slots, so the
+// ones an instance carries are copied by name: its class, the enclosing
+// instance and a Throwable's message, cause and suppressed list. Twin of
+// jvObjClone in abnf/jsrtjava.go and jObjClone in java-interpreter.abnf.
+function jvObjClone(self) {
+    var cls = self["__class"]
+    if (js_jvis(self, "Cloneable") !== true) {
+        var cn = "java.lang.Object"
+        if (typeof cls == "object" && cls !== null) { cn = jpClassName(cls) }
+        return jxkThrow("CloneNotSupportedException", cn)
+    }
+    var out = {}
+    out["__class"] = cls
+    var hid = ["__outer", "__msg", "__cause", "__supp"]
+    var i = 0
+    while (i < hid.length) {
+        if (self[hid[i]] !== undefined) { out[hid[i]] = self[hid[i]] }
+        i = i + 1
+    }
+    var ks = keysOf(self)
+    i = 0
+    while (i < ks.length) {
+        out[ks[i]] = self[ks[i]]
+        i = i + 1
+    }
+    return out
 }
 
 // Java's `+`. Identical to js_jadd except that the string case renders through

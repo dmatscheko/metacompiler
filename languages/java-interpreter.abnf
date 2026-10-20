@@ -457,7 +457,10 @@ CDims       = { Annotation } "[" "]" { { Annotation } "[" "]" } ;
 // A TYPE ANNOTATION may sit in front of the type, in front of any segment of a
 // qualified one, and in front of each array bracket pair (`@A String @A []`,
 // `Outer.@A Inner`) - JLS 9.7.4. They are dropped like every other annotation.
-Type        = { Annotation } ( PrimName KwEnd | "String" KwEnd | "void" KwEnd | "var" KwEnd NoBracket
+// A type lib/java-util.java declares is loaded as an import of it would be
+// (jNoteUtilType).
+Type        <~~ jNoteUtilType(up.in) ~~>
+            = { Annotation } ( PrimName KwEnd | "String" KwEnd | "void" KwEnd | "var" KwEnd NoBracket
               | NotResvKw NotVarArr Id [ SkipAngle ] { "." { Annotation } Id [ SkipAngle ] } ) { { Annotation } "[" "]" } ;
 PrimName    = "int" | "boolean" | "char" | "long" | "double" | "float" | "short" | "byte" ;
 
@@ -1346,7 +1349,7 @@ ModKw       = ( "public" | "private" | "protected" | "static" | "final" | "abstr
               | "non-sealed" | "sealed" | "default" ) KwEnd ;
 LeadMods    = { Annotation | ModKw } ;
 ImplementsSkip = KwImplements ImplRef { "," ImplRef } ;
-ImplRef     <~~ push({impl: jJoinDots(takeAll())}) ~~>
+ImplRef     <~~ push({impl: jNoteUtilType(jJoinDots(takeAll()))}) ~~>
             = { Annotation } Id <~~ push(stripWs(up.in)) ~~> [ SkipAngle ] { "." { Annotation } Id <~~ push(stripWs(up.in)) ~~> [ SkipAngle ] } ;
 Throws      = KwThrows Type { "," Type } ;
 CatchType   = Type { "|" Type } ;
@@ -1358,7 +1361,7 @@ UnsupType   = AnnotationDecl | Interface | EnumDecl ;
 // and `private` instance methods and `static` methods. `sealed ... permits` is
 // accepted and dropped - the hierarchy is not checked, only parsed.
 Permits     = "permits" KwEnd Type { "," Type } ;
-IfaceExt    <~~ push({iext: jJoinDots(takeAll())}) ~~>
+IfaceExt    <~~ push({iext: jNoteUtilType(jJoinDots(takeAll()))}) ~~>
             = { Annotation } Id <~~ push(stripWs(up.in)) ~~> [ SkipAngle ] { "." { Annotation } Id <~~ push(stripWs(up.in)) ~~> [ SkipAngle ] } ;
 // An annotation TYPE is pure metadata - nothing in this model reads it at run
 // time - so the declaration is parsed and dropped, like the annotations themselves.
@@ -4681,14 +4684,35 @@ HasStatic   = :script(~~
 
     // A super call no user class answers reaches the library: java.lang.Object's
     // toString, equals (identity) and hashCode (the identity hash), or the
-    // toString Throwable, Enum and Record put in their place. argv[0] is the
-    // receiver. Twin of js_jvsuper in abnf/jsrtjava.go and lib/java-rt.metajs.
+    // toString Throwable, Enum and Record put in their place, and clone. argv[0]
+    // is the receiver. Twin of js_jvsuper in abnf/jsrtjava.go and
+    // lib/java-rt.metajs.
     function jSuperObject(self, name, argv) {
         if (name == "toString" && argv.length == 1) { return jInheritedStr(self, 0) }
         if (name == "equals" && argv.length == 2) { return self === argv[1] }
         if (name == "hashCode" && argv.length == 1) { return jIdNum(self) }
+        if (name == "clone" && argv.length == 1 && self !== null && typeof self == "object" && self.__class != undefined) { return jObjClone(self) }
         fail("unknown super method '" + name + "'")
         return undefined
+    }
+    // Object.clone: a Cloneable instance is copied slot by slot, the copy
+    // sharing every object the fields refer to; any other throws
+    // CloneNotSupportedException with the class' binary name as the message.
+    // The hidden slots are the enclosing instance, a local class' scope and a
+    // Throwable's message, cause and suppressed list. Twin of jvObjClone in
+    // abnf/jsrtjava.go and lib/java-rt.metajs.
+    function jObjClone(self) {
+        if (!jIsType(self, "Cloneable")) { jThrowExc("CloneNotSupportedException", jClassBin(self.__class)) }
+        var o = {__class: self.__class, __outer: self.__outer}
+        if (self.__cscope != undefined) { o.__cscope = self.__cscope }
+        if (self.message !== undefined) { o.message = self.message }
+        if (self.__cause !== undefined) { o.__cause = self.__cause }
+        if (self.__supp !== undefined) { o.__supp = self.__supp }
+        for (var c = self.__class; c != undefined && c != null; c = c.__super) {
+            var ks = c.__fkeys
+            for (var i = 0; ks != undefined && i < ks.length; i++) { o[ks[i]] = self[ks[i]] }
+        }
+        return o
     }
 
     // new C(args): the constructor closure always exists and does the field inits.
@@ -5242,6 +5266,7 @@ HasStatic   = :script(~~
                     "RuntimeException", "Exception",
                     "IOException", "Exception",
                     "InterruptedException", "Exception",
+                    "CloneNotSupportedException", "Exception",
                     "IllegalArgumentException", "RuntimeException",
                     "IllegalStateException", "RuntimeException",
                     "ArithmeticException", "RuntimeException",
@@ -6057,12 +6082,16 @@ HasStatic   = :script(~~
         // constructor is not part of it - the explicit head decides when that runs.
         // The primitive instance fields and their zeros, which a superclass
         // constructor calling an override can read before ownInit ran (JLS 12.5).
+        // __fkeys: the instance field slots, which Object.clone copies (jObjClone).
         var fzero = []
+        var fkeys = []
         for (i = 0; i < fields.length; i++) {
             var fz = fields[i]
             if (fz.kind == "field" && fz.dflt !== null && fz.dflt !== undefined) { fzero.push(fz) }
+            if (fz.kind == "field") { fkeys.push(fz.fkey) }
         }
         cls.__fzero = fzero
+        cls.__fkeys = fkeys
         function ownInit(self) {
             for (var k = 0; k < fields.length; k++) {
                 var fk = fields[k]
@@ -6932,6 +6961,13 @@ HasStatic   = :script(~~
         if (jUtilWants(ip)) { jUtilWant = true }
         if (jMapWants(ip)) { jMapWant = true }
         if (jStreamWants(ip)) { jStreamWant = true }
+    }
+    // A type named without an import that lib/java-util.java declares
+    // (jTypeWantsUtil) wants it loaded after the walk. Twin of jNoteUtilType in
+    // java-to-llvm-ir.abnf.
+    function jNoteUtilType(t) {
+        if (jTypeWantsUtil(t)) { jUtilWant = true }
+        return t
     }
     function jEnterClass(n) {
         jClassStack.push(curClassName)

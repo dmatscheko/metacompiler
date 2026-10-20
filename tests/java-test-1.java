@@ -79,6 +79,16 @@ class Bird extends Animal {
 
 record Pair(int first, int second) { }
 
+// java.lang.Cloneable needs no import, and Object.clone copies a Cloneable
+// instance field by field.
+class Sheep implements Cloneable {
+    int age = 3;
+
+    public Sheep clone() {
+        try { return (Sheep) super.clone(); } catch (CloneNotSupportedException e) { return null; }
+    }
+}
+
 public class Main {
     static int fails = 0;
     static int calls = 0;
@@ -267,6 +277,15 @@ public class Main {
 
         // statics and recursion
         Main.check("fib", Main.fib(10), 55);
+
+        // marker interfaces named without an import: java.lang.Cloneable, and a
+        // fully qualified java.io.Serializable
+        Sheep dolly = new Sheep();
+        dolly.age = 5;
+        Object twin = dolly.clone();
+        Object buf = new StringBuffer();
+        Main.checkS("clone", (twin != dolly) + " " + ((Sheep) twin).age + " " + (twin instanceof Cloneable)
+            + " " + (buf instanceof java.io.Serializable) + (buf instanceof Cloneable), "true 5 true truefalse");
 
         if (Main.fails == 0) {
             System.out.println("Java subset self test passed");

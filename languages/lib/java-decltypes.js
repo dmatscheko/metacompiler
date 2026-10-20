@@ -1230,6 +1230,16 @@ function jUtilWants(path) {
     return ",ArrayList,List,ListIterator,Collection,Comparator,Iterator,NoSuchElementException,ConcurrentModificationException,AbstractList,Arrays,Optional,OptionalInt,OptionalLong,OptionalDouble,Map,HashMap,Objects,Collections,Queue,Deque,ArrayDeque,TreeMap,LinkedList,Stack,EmptyStackException,PriorityQueue,StringJoiner,Random,BitSet,RandomAccess,".indexOf("," + rest + ",") >= 0
 }
 
+// Does a type the program NAMES (an implements or extends clause, instanceof,
+// a cast, a declaration) want lib/java-util.java? Cloneable is java.lang's,
+// which needs no import (JLS 7.3), and neither does a fully qualified
+// java.util or java.io.Serializable name (JLS 6.5.5.2).
+function jTypeWantsUtil(t) {
+    if (t.indexOf("Cloneable") < 0 && t.substring(0, 5) != "java.") { return false }
+    var b = t.split("<")[0]
+    return b == "Cloneable" || b == "java.lang.Cloneable" || jUtilWants(b)
+}
+
 // Does this import, or the class a `new` creates, name a type lib/java-map.java
 // declares? Then the grammar compiles it, after lib/java-util.java, with the
 // program. A java.util.* import alone does not: the program then creates a

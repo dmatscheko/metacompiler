@@ -189,6 +189,7 @@ class Main {
         S91.run(); // SECTION-CALL 91
         S92.run(); // SECTION-CALL 92
         S93.run(); // SECTION-CALL 93
+        S94.run(); // SECTION-CALL 94
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -5112,3 +5113,47 @@ class S93 {
 class T93 extends U93 { int t() { return u + 1; } }
 class B93 { static int b = 2; int w = 3; }
 class U93 { int u = 5; }
+
+// ===== SECTION 94: Object.clone through super.clone() =====
+//
+// Object.clone copies a Cloneable instance field by field - the copy is of the
+// same class, and shares every object its fields refer to - and throws
+// CloneNotSupportedException, whose message is the binary class name, for an
+// instance that is not Cloneable (JLS 4.3.2, java.lang.Object). Every expected
+// value is java 24.0.2's.
+class S94 {
+    int base = 40;
+    class Lamb implements Cloneable {
+        int k = 2;
+        int sum() { return base + k; }
+        Lamb dup() throws CloneNotSupportedException { return (Lamb) super.clone(); }
+    }
+    interface Copyable extends Cloneable { }
+    static class Base { int b = 1; }
+    static class Mid extends Base implements Copyable {
+        long l = 5L; double d = 2.5; char ch = 'z'; int[] arr = {1, 2};
+        public Mid clone() {
+            try { return (Mid) super.clone(); } catch (CloneNotSupportedException e) { throw new AssertionError(e); }
+        }
+    }
+    static class NotC { Object c() throws CloneNotSupportedException { return super.clone(); } }
+    static void run() {
+        S94 o = new S94();
+        Lamb in = o.new Lamb();
+        String st = "";
+        try {
+            Lamb c = in.dup();
+            o.base = 50;
+            st = c.sum() + " " + (c == in) + " " + c.getClass().getName();
+        } catch (CloneNotSupportedException e) { st = "no"; }
+        Mid m = new Mid();
+        m.b = 9;
+        Mid mc = m.clone();
+        mc.arr[0] = 7;
+        mc.b = 3;
+        st = st + " " + m.b + mc.b + " " + (mc.l + 1L) + mc.d + mc.ch + m.arr[0] + " " + (mc instanceof Cloneable);
+        try { new NotC().c(); st = st + " cloned"; }
+        catch (CloneNotSupportedException e) { st = st + " " + e; }
+        Main.check("cl94", st.equals("52 false S94$Lamb 93 62.5z7 true java.lang.CloneNotSupportedException: S94$NotC"));
+    }
+}

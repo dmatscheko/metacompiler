@@ -126,6 +126,26 @@ var jvExcNamed = map[string]*jsObject{}
 
 func (rt *jsrt) jvThrowNamed(cls, msg string) { rt.jvThrowCls(jvExcNamed[cls], msg) }
 
+// jvObjClone is Object.clone: a Cloneable instance copied slot by slot, the copy
+// sharing every object the slots refer to; any other throws
+// CloneNotSupportedException with the class' binary name as the message. Twin
+// of jObjClone in java-interpreter.abnf and jvObjClone in
+// languages/lib/java-rt.metajs.
+func (rt *jsrt) jvObjClone(self *jsObject) interface{} {
+	if !rt.jvIsType(self, "Cloneable") {
+		name := "java.lang.Object"
+		if cls, ok := self.props["__class"].(*jsObject); ok {
+			name = jvpClassName(cls)
+		}
+		rt.jvThrowNamed("CloneNotSupportedException", name)
+	}
+	out := newJSObject()
+	for _, k := range self.keys {
+		out.set(k, self.props[k])
+	}
+	return out
+}
+
 func (rt *jsrt) jvThrowCls(cls *jsObject, msg interface{}) {
 	if cls == nil {
 		rt.fail("java: %v", msg)
@@ -2333,8 +2353,8 @@ func init() {
 		m["js_jvstr"] = func(a []uint64) uint64 { return rt.wrapStr(rt.jvpStr(u(a[0]))) }
 		// super.m(args) - (super class, this, name, args). A call no user class
 		// answers reaches java.lang.Object: toString (or the one Throwable, Enum
-		// or Record put in its place), equals (identity) and hashCode (the
-		// identity hash). Twin of jSuperObject in languages/java-interpreter.abnf
+		// or Record put in its place), equals (identity), hashCode (the
+		// identity hash) and clone (jvObjClone). Twin of jSuperObject in languages/java-interpreter.abnf
 		// and js_jvsuper in languages/lib/java-rt.metajs.
 		baseSuper := m["js_supercall"]
 		m["js_jvsuper"] = func(a []uint64) uint64 {
@@ -2362,6 +2382,8 @@ func init() {
 				return w(same && other == self)
 			case name == "hashCode" && n == 0:
 				return w(jvpIdentNum(self))
+			case name == "clone" && n == 0:
+				return w(rt.jvObjClone(self))
 			}
 			return baseSuper(a)
 		}
