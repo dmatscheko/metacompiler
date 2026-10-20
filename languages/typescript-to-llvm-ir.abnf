@@ -4163,7 +4163,7 @@ NotFuncHead = :script(~~
             srcV = hUndef
             if (isIn) {
                 srcV = callExt(b, "js_iterable", [seqV])
-                seqV = callExt(b, "js_jskeys", [srcV])
+                seqV = callExt(b, "js_jsforinkeys", [srcV])
             }
             // See the twin of this comment in js-to-llvm-ir.abnf.
             var lazy = !isIn
@@ -4228,8 +4228,8 @@ NotFuncHead = :script(~~
             // the specification's async-from-sync iterator does and what makes
             // 'for await (x of [p1, p2])' see the resolved values.
             if (isAwait) { idxElemV = emitAwait(elemB, idxElemV) }
-            // for-in's per-iteration LIVENESS GUARD. js_jskeys is a snapshot, so a key
-            // the body deletes before its turn came must be skipped:
+            // for-in's per-iteration LIVENESS GUARD. js_jsforinkeys is a snapshot, so a
+            // key the body deletes before its turn came must be skipped:
             // `for (k in o) { s += k; delete o.c }` prints "ab" in node. js_jshas is
             // total over every value for-in enumerates - an object, a class descriptor's
             // statics, an array's and a string's index keys - so a key that is still
@@ -4859,9 +4859,10 @@ NotFuncHead = :script(~~
     }
     // items = [mods, "get"|"set", key, param..., bodyThunk]: the kind is always second and
     // the body always last, so the parameters are whatever lies between (none for a getter,
-    // exactly one for a setter).
+    // exactly one for a setter). See the twin of this comment in js-to-llvm-ir.abnf.
     function makeClassAccessor(items) {
         return {kind: "accessor", acc: items[1], statik: isStaticMods(items[0].mods),
+                priv: typeof items[2] == "string" && items[2].substring(0, 3) == "__#",
                 name: (typeof items[2] == "string") ? items[2] : undefined,
                 nameT: (typeof items[2] == "string") ? undefined : items[2],
                 params: items.slice(3, items.length - 1), body: items[items.length - 1]}

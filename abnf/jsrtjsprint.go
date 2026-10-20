@@ -127,7 +127,10 @@ func jsvPrivateKey(k string) bool {
 // unwrapped against the receiver the read started from (node runs `static get g()`
 // with `this` bound to the SUBCLASS), and `name` last - every class object has one,
 // and it is the descriptor's __name unless a `static name` member shadows it.
-// Anything else is undefined, as node says.
+// Object.prototype's four methods are inherited by a class object too, so they read
+// as the same shim js_jsmcall's class arm applies. Anything else is undefined, as
+// node says. Twins: jvStaticSideRead in languages/lib/js-rt.metajs, getMember's
+// static arm in both *-interpreter.abnf.
 func (rt *jsrt) jsvStaticSideRead(o *jsObject, name string) uint64 {
 	if v, _, found := jsStaticsFind(o, name); found {
 		if acc, isAcc := v.(*jsAccessor); isAcc {
@@ -142,6 +145,9 @@ func (rt *jsrt) jsvStaticSideRead(o *jsObject, name string) uint64 {
 		if n, has := o.props["__name"]; has {
 			return rt.wrap(n)
 		}
+	}
+	if jsvIsProtoName(name) {
+		return rt.wrap(jsvProtoShim(o, name))
 	}
 	return jsHUndefined
 }
@@ -1244,6 +1250,67 @@ func jsvProtoDeclared(d *jsObject, k string) bool {
 		}
 	}
 	return true
+}
+
+// jsvInheritedKeys appends to the own key list ks the enumerable keys of the
+// prototype chain from descriptor cls up: each level's prototype view's keys
+// (jsvOwnKeys). A name the object or a lower level already has - its declared methods
+// and accessors included, which are not enumerable - shadows it, so it is visited once
+// at most. Twins: jvInheritedKeys in languages/lib/js-rt.metajs, jsInheritedKeys in
+// both *-interpreter.abnf.
+func jsvInheritedKeys(cls interface{}, ks []interface{}) []interface{} {
+	seen := map[string]bool{}
+	for _, k := range ks {
+		if s, isStr := k.(string); isStr {
+			seen[s] = true
+		}
+	}
+	for guard := 0; cls != nil && guard < 64; guard++ {
+		d, ok := cls.(*jsObject)
+		if !ok {
+			break
+		}
+		var vk []string
+		if v, hasView := d.props["__pview"].(*jsObject); hasView {
+			vk = jsvOwnKeys(v)
+			for _, k := range vk {
+				if !seen[k] {
+					ks = append(ks, k)
+				}
+			}
+		}
+		for _, k := range append(vk, d.keys...) {
+			seen[k] = true
+		}
+		cls = d.props["__super"]
+	}
+	return ks
+}
+
+// jsvProtoChainHas reports whether k is a property of the prototype chain from
+// descriptor cls up: a method or accessor a class body declared, or a key written
+// onto a prototype view. Twins: jvProtoChainHas in languages/lib/js-rt.metajs,
+// jsProtoChainHas in both *-interpreter.abnf.
+func jsvProtoChainHas(cls interface{}, k string) bool {
+	if jsvInternalKey(k) {
+		return false
+	}
+	for guard := 0; cls != nil && guard < 64; guard++ {
+		d, ok := cls.(*jsObject)
+		if !ok {
+			break
+		}
+		if _, has := d.props[k]; has {
+			return true
+		}
+		if v, hasView := d.props["__pview"].(*jsObject); hasView {
+			if _, has := v.props[k]; has {
+				return true
+			}
+		}
+		cls = d.props["__super"]
+	}
+	return false
 }
 
 // jsvIndexKeys is the own enumerable key list of an indexed value - an array or a
@@ -3800,11 +3867,12 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		// `"m" in C` asks the STATIC namespace and nothing else, and it is asked
 		// BEFORE js_has: the descriptor's own property map holds C's INSTANCE
 		// methods, which node does not report as properties of the constructor.
+		// `name` and `prototype` are own properties of every class object.
 		if isObj && isClassDesc(recv) {
 			if _, _, found := jsStaticsFind(recv, name); found {
 				return w(true)
 			}
-			return w(name == "name")
+			return w(name == "name" || name == "prototype")
 		}
 		// `"constructor" in e` is true in node for every instance.
 		if isObj && name == "constructor" {
@@ -3832,6 +3900,13 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			if _, found := jsvFindClassMethod(recv, name); found {
 				return w(true)
 			}
+			// An inherited property: an instance's chain starts at its class, a
+			// prototype view's at the descriptor whose declared members are its own.
+			from := recv.props["__class"]
+			if d, isView := recv.props["__protoof"].(*jsObject); isView {
+				from = d
+			}
+			return w(jsvProtoChainHas(from, name))
 		}
 		return w(false)
 	}
@@ -3975,8 +4050,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	// null/undefined/a number/a boolean enumerate NOTHING rather than raising.
 	baseKeys := m["js_keys"]
 	var jsKeysAll func(a []uint64) uint64
-	m["js_jskeys"] = func(a []uint64) uint64 {
-		r := jsKeysAll(a)
+	unescKeys := func(r uint64) uint64 {
 		if arr, ok := u(r).(*jsArray); ok {
 			for i, k := range arr.elems {
 				if ks, isStr := k.(string); isStr && len(ks) > 0 && ks[0] == 1 {
@@ -3985,6 +4059,26 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			}
 		}
 		return r
+	}
+	m["js_jskeys"] = func(a []uint64) uint64 { return unescKeys(jsKeysAll(a)) }
+	// for-in's key list: js_jskeys, then the enumerable keys inherited through the
+	// prototype chain (EnumerateObjectProperties, ECMA-262 14.7.5.9). The walk starts at
+	// an instance's class, or at a prototype view's own descriptor, whose declared
+	// methods shadow what its parent's view holds.
+	// Twins: js_jsforinkeys in languages/lib/js-rt.metajs, jsForInKeys in both
+	// *-interpreter.abnf.
+	m["js_jsforinkeys"] = func(a []uint64) uint64 {
+		r := jsKeysAll(a)
+		if o, isObj := u(a[0]).(*jsObject); isObj {
+			from := o.props["__class"]
+			if d, isView := o.props["__protoof"].(*jsObject); isView {
+				from = d
+			}
+			if arr, ok := u(r).(*jsArray); ok && from != nil {
+				arr.elems = jsvInheritedKeys(from, arr.elems)
+			}
+		}
+		return unescKeys(r)
 	}
 	jsKeysAll = func(a []uint64) uint64 {
 		switch v := u(a[0]).(type) {

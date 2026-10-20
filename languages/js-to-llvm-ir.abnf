@@ -1184,7 +1184,9 @@ ClassLiteralMember <~~ push(makeClassComputed(takeAll())) ~~>
 // PropKey (the object-literal key) has no computed form because ComputedProp spells that
 // case out separately; here the computed form has to be part of the key itself, because
 // 'static *[b]() {}' carries a modifier and a '*' in front of it.
-MemberKey   = Id <~~ push(idName(up.in)) ~~> | StringLit | NumberLit | "[" AssignExpr "]" ;
+// A private accessor's key, `get #x()`, is mangled by privDeclare as ClassPrivate's is.
+MemberKey   = "#" Id <~~ push(privDeclare(idName(up.in))) ~~>
+            | Id <~~ push(idName(up.in)) ~~> | StringLit | NumberLit | "[" AssignExpr "]" ;
 
 // A constructor.
 CtorDef     <~~ push(makeCtor(takeAll())) ~~>
@@ -5808,9 +5810,10 @@ NotFuncHead = :script(~~
     //     opens its own scope holding the iterable and the index (hidden
     //     0-prefixed names that no JS identifier can collide with) and runs
     //     name = iter[i] while i < length.
-    // for-in iterates the object's own keys: js_jskeys yields them (insertion order,
-    // deterministic, __-prefixed slots skipped, a class descriptor's static FIELDS), and
-    // the same index loop walks that key array, binding name to each key string.
+    // for-in iterates the object's enumerable keys: js_jsforinkeys yields them
+    // (insertion order, deterministic, __-prefixed slots skipped, a class descriptor's
+    // static FIELDS, then the keys inherited through the prototype chain), and the same
+    // index loop walks that key array, binding name to each key string.
     function makeForOf(items, pos, constNames) {
         // 'for await (x of xs)' pushes a {fawait} marker from its header; strip it so
         // every index below is the one the plain form has.
@@ -5848,7 +5851,7 @@ NotFuncHead = :script(~~
             srcV = hUndef
             if (isIn) {
                 srcV = callExt(b, "js_iterable", [seqV])
-                seqV = callExt(b, "js_jskeys", [srcV])
+                seqV = callExt(b, "js_jsforinkeys", [srcV])
             }
             // for-of does NOT: draining would make 'for (const x of endless()) { ...;
             // break }' hang and put every one of the producer's side effects before the
@@ -5932,8 +5935,8 @@ NotFuncHead = :script(~~
             // the specification's async-from-sync iterator does and what makes
             // 'for await (x of [p1, p2])' see the resolved values.
             if (isAwait) { idxElemV = emitAwait(elemB, idxElemV) }
-            // for-in's per-iteration LIVENESS GUARD. js_jskeys is a snapshot, so a key
-            // the body deletes before its turn came must be skipped:
+            // for-in's per-iteration LIVENESS GUARD. js_jsforinkeys is a snapshot, so a
+            // key the body deletes before its turn came must be skipped:
             // `for (k in o) { s += k; delete o.c }` prints "ab" in node. js_jshas is
             // total over every value for-in enumerates - an object, a class descriptor's
             // statics, an array's and a string's index keys - so a key that is still
@@ -6635,9 +6638,11 @@ NotFuncHead = :script(~~
     }
     // items = [mods, "get"|"set", key, param..., bodyThunk]: the kind is always second and
     // the body always last, so the parameters are whatever lies between (none for a getter,
-    // exactly one for a setter).
+    // exactly one for a setter). A private key arrives mangled (privDeclare) and is
+    // filed raw, as makeClassPrivate's is.
     function makeClassAccessor(items) {
         return {kind: "accessor", acc: items[1], statik: isStaticMods(items[0].mods),
+                priv: typeof items[2] == "string" && items[2].substring(0, 3) == "__#",
                 name: (typeof items[2] == "string") ? items[2] : undefined,
                 nameT: (typeof items[2] == "string") ? undefined : items[2],
                 params: items.slice(3, items.length - 1), body: items[items.length - 1]}

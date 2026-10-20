@@ -4278,6 +4278,45 @@ function s89() {
         gp(B89.prototype).join() === "constructor,m,x");
 }
 
+// ===== SECTION 90: for-in and `in` through the prototype chain =====
+// for-in visits the own enumerable keys, then each prototype's up the chain, a name
+// met lower down shadowing one above - a declared method included, which is not
+// enumerable (EnumerateObjectProperties, ECMA-262 14.7.5.9). `in` finds a declared
+// method or accessor and a key written onto a prototype. A class object inherits
+// Object.prototype's methods as values, and a private accessor may be static. Values
+// read off node 24.
+class A90 {}
+(A90.prototype as any).k1 = 1;
+(A90.prototype as any).m = 2;
+class B90 extends A90 { m() {} get g() { return 1 } }
+(B90.prototype as any).k2 = 3;
+class P90 {
+    static #w = 2;
+    static get #h(): number { return P90.#w * 10 }
+    static set #h(x: number) { P90.#w = x }
+    static h(x: number): number { P90.#h = x; return P90.#h }
+    #n = 1;
+    get #i(): number { return this.#n }
+    set #i(x: number) { this.#n = x }
+    i(x: number): number { this.#i = x; return this.#i }
+}
+function s90() {
+    const b: any = new B90();
+    b.own = 4;
+    const ks: string[] = [];
+    for (const k in b) { ks.push(k); }
+    const ps: string[] = [];
+    for (const k in B90.prototype) { ps.push(k); }
+    check("fi90a", ks.join() === "own,k2,k1" && ps.join() === "k2,k1" && Object.keys(b).join() === "own" &&
+        JSON.stringify(b) === '{"own":4}');
+    check("in90b", "k1" in b && "m" in b && "g" in b && "m" in B90.prototype && "g" in B90.prototype &&
+        "k1" in B90.prototype && !("zz" in b) && "prototype" in B90 && !("prototype" in b));
+    check("cv90c", typeof B90.hasOwnProperty === "function" && typeof B90.valueOf === "function" &&
+        typeof B90.toString === "function" && typeof B90.propertyIsEnumerable === "function" &&
+        B90.hasOwnProperty.call(B90, "prototype") && typeof B90.prototype.hasOwnProperty === "function");
+    check("pa90d", P90.h(7) === 70 && new P90().i(3) === 3);
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -4370,6 +4409,7 @@ function main(): number {
     s87(); // SECTION-CALL 87
     s88(); // SECTION-CALL 88
     s89(); // SECTION-CALL 89
+    s90(); // SECTION-CALL 90
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

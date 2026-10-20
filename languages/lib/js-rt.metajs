@@ -1234,8 +1234,28 @@ function js_jsstatics(cls) {
 // class descriptor's own key map, which is its INSTANCE methods, so `{...C}` would
 // copy the methods and `for (k in C)` enumerate them. Twin: m["js_jskeys"] in
 // abnf/jsrtjsprint.go.
-function js_jskeys(o) {
+function js_jskeys(o) { return jvKeysUnesc(jvStoredKeys(o)) }
+// for-in's key list: js_jskeys, then the enumerable keys inherited through the
+// prototype chain (EnumerateObjectProperties, ECMA-262 14.7.5.9). The walk starts at an
+// instance's class, or at a prototype view's own descriptor, whose declared methods
+// shadow what its parent's view holds. Only a prototype view holds an enumerable
+// inherited key, so a program that never made one skips the walk. Twins:
+// m["js_jsforinkeys"] in abnf/jsrtjsprint.go, jsForInKeys in both *-interpreter.abnf.
+function js_jsforinkeys(o) {
     var ks = jvStoredKeys(o)
+    if (jvPvN > 0) {
+        if (jvIsObj(o)) {
+            var cl = anytype
+            cl = o["__class"]
+            var pd = anytype
+            pd = o["__protoof"]
+            if (pd !== undefined) { cl = pd }
+            if (cl !== undefined) { ks = jvInheritedKeys(cl, ks) }
+        }
+    }
+    return jvKeysUnesc(ks)
+}
+function jvKeysUnesc(ks) {
     var out = []
     var i = 0
     while (i < ks.length) {
@@ -1243,6 +1263,59 @@ function js_jskeys(o) {
         i = i + 1
     }
     return out
+}
+// The own key list ks followed by the enumerable keys of the prototype chain from
+// descriptor cls up: each level's prototype view's keys (jvViewKeys). A name the
+// object or a lower level already has - its declared methods and accessors included,
+// which are not enumerable - shadows it, so it is visited once at most. Twins:
+// jsvInheritedKeys in abnf/jsrtjsprint.go, jsInheritedKeys in both *-interpreter.abnf.
+function jvInheritedKeys(cls, ks) {
+    var out = ks.slice(0)
+    var seen = ks.slice(0)
+    var guard = 0
+    while (jvIsObj(cls) && guard < 64) {
+        var vk = []
+        var v = anytype
+        v = cls["__pview"]
+        if (v !== undefined) { vk = jvViewKeys(v, cls) }
+        var i = 0
+        while (i < vk.length) {
+            if (seen.indexOf(vk[i]) < 0) { out.push(vk[i]) }
+            i = i + 1
+        }
+        jvPushAll(seen, vk)
+        jvPushAll(seen, keysOf(cls))
+        cls = cls["__super"]
+        guard = guard + 1
+    }
+    return out
+}
+function jvPushAll(dst, src) {
+    var i = 0
+    while (i < src.length) {
+        dst.push(src[i])
+        i = i + 1
+    }
+    return undefined
+}
+// Is k a property of the prototype chain from descriptor cls up: a method or accessor
+// a class body declared, or a key written onto a prototype view? Twins:
+// jsvProtoChainHas in abnf/jsrtjsprint.go, jsProtoChainHas in both *-interpreter.abnf.
+function jvProtoChainHas(cls, k) {
+    if (k.length >= 2) { if (k.substring(0, 2) == "__") { return false } }
+    var guard = 0
+    while (jvIsObj(cls) && guard < 64) {
+        // A declared member is a method or an accessor box, never undefined.
+        if (cls[k] !== undefined) { return true }
+        if (jvPvN > 0) {
+            var v = anytype
+            v = cls["__pview"]
+            if (v !== undefined) { if (jvSlotHas(v, k)) { return true } }
+        }
+        cls = cls["__super"]
+        guard = guard + 1
+    }
+    return false
 }
 // The own enumerable string keys as they are stored (escaped).
 function jvStoredKeys(o) {
@@ -1546,6 +1619,8 @@ function jvStaticSideRead(o, k) {
     if (jvIsAcc(v)) { return jvAccGet(v, o) }
     if (v !== undefined) { return v }
     if (k == "name") { return o["__name"] }
+    // A class object inherits Object.prototype's four methods too.
+    if (jvIsProtoName(k)) { return jvProtoShim(o, k) }
     return undefined
 }
 
@@ -2125,7 +2200,7 @@ function jvValueMiss(o, key) {
         if (jvPvN > 0) {
             var pd = anytype
             pd = o["__protoof"]
-            if (pd !== undefined) { return jvProtoRead(pd, key) }
+            if (pd !== undefined) { return jvViewRead(o, pd, key) }
         }
         if (jvIsObjectGlobal(o)) { return jvStaticValue(o, key) }
         if (key == "description") {
@@ -2311,6 +2386,14 @@ function jvProtoGopn(view, d) {
     }
     return out
 }
+// A value read that missed a prototype view's own slots: the descriptor chain's
+// member, else Object.prototype's four, which the view inherits as every object does.
+function jvViewRead(view, d, key) {
+    var r = anytype
+    r = jvProtoRead(d, key)
+    if (r === undefined) { if (jvIsProtoName(key)) { return jvProtoShim(view, key) } }
+    return r
+}
 function jvProtoRead(d, key) {
     if (key == "constructor") {
         var cf = anytype
@@ -2434,7 +2517,7 @@ function jvHas(o, key) {
         if (jvClsN > 0) {
             if (jvIsClassDesc(o)) {
                 if (jvStaticFind(o, k) !== undefined) { return true }
-                return k == "name"
+                return k == "name" || k == "prototype"
             }
         }
         if (js_has(o, key)) { return true }
@@ -2443,7 +2526,16 @@ function jvHas(o, key) {
             if (jvConstructorOf(o) !== undefined) { return true }
         }
         if (jvFindClassMethod(o, k) !== undefined) { return true }
-        return false
+        // An inherited property: an instance's chain starts at its class, a prototype
+        // view's at the descriptor whose declared members are its own.
+        var from = anytype
+        from = o["__class"]
+        if (jvPvN > 0) {
+            var pd = anytype
+            pd = o["__protoof"]
+            if (pd !== undefined) { from = pd }
+        }
+        return jvProtoChainHas(from, k)
     }
     if (jvArgsN > 0) {
         if (jvIsArgs(o)) {

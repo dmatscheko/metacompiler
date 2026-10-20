@@ -5660,6 +5660,8 @@ NotFuncHead = :script(~~
             return hit.v
         }
         if (k == "name") { return o.__name }
+        // A class object inherits Object.prototype's four methods too.
+        if (jsIsProtoName(k)) { return jsProtoShim(o, k) }
         return undefined
     }
     // The write half: a setter anywhere on the static chain wins over a fresh own slot,
@@ -5723,7 +5725,13 @@ NotFuncHead = :script(~~
             var pf = builtinFam(o.__bvof, k)
             if (pf != "") { return builtinValue(pf, k) }
         }
-        if (typeof o == "object" && o !== null && hasOwn(o, "__protoof")) { return protoRead(o.__protoof, "" + k) }
+        if (typeof o == "object" && o !== null && hasOwn(o, "__protoof")) {
+            var pv = anytype // The descriptor chain's member, or undefined.
+            pv = protoRead(o.__protoof, "" + k)
+            // A prototype view inherits Object.prototype's four as every object does.
+            if (pv === undefined && jsIsProtoName(k)) { return jsProtoShim(o, k) }
+            return pv
+        }
         // isPrivateKey: a private METHOD lives on the class descriptor under '__#m', so
         // the __-name skip would hide it from the walk.
         if (typeof o == "object" && !Array.isArray(o) && typeof k == "string" &&
@@ -7762,7 +7770,7 @@ NotFuncHead = :script(~~
         // the constructor.
         if (isStaticSide(o, "" + k)) {
             if (classStaticFind(o, "" + k) != undefined) { return true }
-            return ("" + k) == "name"
+            return ("" + k) == "name" || ("" + k) == "prototype"
         }
         // A symbol key is listed in __symkeys (see jsSymTrack).
         if (hasOwn(o, "__keys") && jsIsSymKey("" + k)) { return jsSymKeysOf(o).indexOf("" + k) >= 0 }
@@ -7784,6 +7792,9 @@ NotFuncHead = :script(~~
         }
         if (typeof o == "object") {
             if (findClassMethod(o, "" + k) != undefined) { return true }
+            // An inherited property: an instance's chain starts at its class, a
+            // prototype view's at the descriptor whose declared members are its own.
+            if (jsProtoChainHas(hasOwn(o, "__protoof") ? o.__protoof : o.__class, "" + k)) { return true }
         }
         return false
     }
@@ -8026,6 +8037,55 @@ NotFuncHead = :script(~~
         if (argsWant && jsIsArgs(o)) { return jsArgsKeys(o, ownKeys(o)) }
         return ownKeys(o)
     }
+    // for-in's key list: jsKeys, then the enumerable keys inherited through the
+    // prototype chain (EnumerateObjectProperties, ECMA-262 14.7.5.9). The walk starts at
+    // an instance's class, or at a prototype view's own descriptor, whose declared
+    // methods shadow what its parent's view holds.
+    // Twins: js_jsforinkeys in abnf/jsrtjsprint.go and languages/lib/js-rt.metajs.
+    function jsForInKeys(o) {
+        var ks = jsKeys(o)
+        if (o == undefined || o == null || typeof o != "object" || Array.isArray(o)) { return ks }
+        var cl = anytype // The descriptor the chain starts at, or undefined.
+        cl = hasOwn(o, "__protoof") ? o.__protoof : o.__class
+        if (cl == undefined || cl == null) { return ks }
+        return jsInheritedKeys(cl, ks)
+    }
+    // Appends to the own key list ks the enumerable keys of the prototype chain from
+    // descriptor cl up: each level's prototype view's keys. A name the object or a
+    // lower level already has - its declared methods and accessors included, which are
+    // not enumerable - shadows it, so it is visited once at most. Twins:
+    // jsvInheritedKeys in abnf/jsrtjsprint.go, jvInheritedKeys in
+    // languages/lib/js-rt.metajs.
+    function jsInheritedKeys(cl, ks) {
+        var out = ks.slice()
+        var seen = ks.slice()
+        var guard = 0
+        for (; cl != undefined && cl != null && guard < 64; cl = cl.__super) {
+            var vk = []
+            if (hasOwn(cl, "__pview")) { vk = jsKeys(cl.__pview) }
+            for (var i = 0; i < vk.length; i++) {
+                if (seen.indexOf(vk[i]) < 0) { out.push(vk[i]) }
+            }
+            seen = seen.concat(vk)
+            if (hasOwn(cl, "__pnames")) { seen = seen.concat(cl.__pnames) }
+            guard = guard + 1
+        }
+        return out
+    }
+    // Is k a property of the prototype chain from descriptor cl up: a method or
+    // accessor a class body declared, or a key written onto a prototype view? Twins:
+    // jsvProtoChainHas in abnf/jsrtjsprint.go, jvProtoChainHas in
+    // languages/lib/js-rt.metajs.
+    function jsProtoChainHas(cl, k) {
+        if (isInternalKey(k)) { return false }
+        var guard = 0
+        for (; cl != undefined && cl != null && guard < 64; cl = cl.__super) {
+            if (jsProtoDeclared(cl, k)) { return true }
+            if (hasOwn(cl, "__pview")) { if (cl.__pview.__keys.indexOf(k) >= 0) { return true } }
+            guard = guard + 1
+        }
+        return false
+    }
 
     // nm is the name the function was DEFINED under - "" for an anonymous form, which
     // fnDef then lets a binder name (see fnAnonNote). Every function-value builder in
@@ -8208,7 +8268,7 @@ NotFuncHead = :script(~~
             return function() {
                 var obj = anytype // The object whose keys are enumerated.
                 obj = iterT()
-                var ks = jsKeys(obj)
+                var ks = jsForInKeys(obj)
                 scopes.push({})
                 var res = undefined
                 for (var i = 0; i < ks.length; i++) {

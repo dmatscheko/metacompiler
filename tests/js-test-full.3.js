@@ -1,4 +1,4 @@
-// Full-syntax test: JavaScript - part 3 of 4, sections 44-56, 58-71 and 73-95.
+// Full-syntax test: JavaScript - part 3 of 4, sections 44-56, 58-71 and 73-96.
 //
 // THE JS RATCHET IS FOUR FILES: as one file its -frozen interpreter leg ran into
 // ./test.sh --full's time brake (peak memory grew superlinearly with the file), and
@@ -6,7 +6,7 @@
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43, engine agreement, generators, Error, Math
-//   tests/js-test-full.3.js   sections 44-56, 58-71 and 73-95, the call/class/private-name
+//   tests/js-test-full.3.js   sections 44-56, 58-71 and 73-96, the call/class/private-name
 //                             model, the Unicode identifier tables, iterators, derived
 //                             constructors, JSON, guards, Set and Map, iterator closing,
 //                             hasOwnProperty, delete, Object.prototype, extends Object,
@@ -15,7 +15,8 @@
 //                             super reaching Object.prototype, g.return(v) as a
 //                             return completion, where yield and return stand,
 //                             prototypes, static methods as values, Boolean,
-//                             symbols, with
+//                             symbols, with, for-in and `in` through the
+//                             prototype chain
 //   (section 72 is in tests/js-test-full.4.mjs, beside 57: it needs a file that
 //   names no builtin class but in a `new`)
 //   tests/js-test-full.4.mjs  section 57, export in a Module
@@ -2474,6 +2475,49 @@ function s95() {
         gp(B95.prototype).join() === "constructor,m,x")
 }
 
+// ===== SECTION 96: for-in and `in` through the prototype chain =====
+// for-in visits the own enumerable keys, then each prototype's up the chain, a name
+// met lower down shadowing one above - a declared method included, which is not
+// enumerable (EnumerateObjectProperties, ECMA-262 14.7.5.9). `in` finds a declared
+// method or accessor and a key written onto a prototype. A class object inherits
+// Object.prototype's methods as values, and a private accessor may be static. Values
+// read off node 24.
+class A96 {}
+A96.prototype.k1 = 1
+A96.prototype.m = 2
+class B96 extends A96 { m() {} get g() { return 1 } }
+B96.prototype.k2 = 3
+function F96() { this.a = 1 }
+F96.prototype.v = 5
+class P96 {
+    static #w = 2
+    static get #h() { return P96.#w * 10 }
+    static set #h(x) { P96.#w = x }
+    static h(x) { P96.#h = x; return P96.#h }
+    #n = 1
+    get #i() { return this.#n }
+    set #i(x) { this.#n = x }
+    i(x) { this.#i = x; return this.#i }
+}
+function s96() {
+    const b = new B96()
+    b.own = 4
+    const ks = []
+    for (const k in b) { ks.push(k) }
+    const ps = []
+    for (const k in B96.prototype) { ps.push(k) }
+    const fs = []
+    for (const k in new F96()) { fs.push(k) }
+    check("fi96a", ks.join() === "own,k2,k1" && ps.join() === "k2,k1" && fs.join() === "a,v" &&
+        Object.keys(b).join() === "own" && JSON.stringify(b) === '{"own":4}')
+    check("in96b", "k1" in b && "m" in b && "g" in b && "m" in B96.prototype && "g" in B96.prototype &&
+        "k1" in B96.prototype && !("zz" in b) && "v" in new F96() && "prototype" in B96 && !("prototype" in b))
+    check("cv96c", typeof B96.hasOwnProperty === "function" && typeof B96.valueOf === "function" &&
+        typeof B96.toString === "function" && typeof B96.propertyIsEnumerable === "function" &&
+        B96.hasOwnProperty.call(B96, "prototype") && typeof B96.prototype.hasOwnProperty === "function")
+    check("pa96d", P96.h(7) === 70 && new P96().i(3) === 3)
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -2527,6 +2571,7 @@ function main() {
     s93() // SECTION-CALL 93
     s94() // SECTION-CALL 94
     s95() // SECTION-CALL 95
+    s96() // SECTION-CALL 96
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }
