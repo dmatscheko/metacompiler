@@ -5250,6 +5250,44 @@ fun sec107() {
     check("tre107b", "" + m == "{a=1, b=5, c=3}" && "" + m2 == "{1=a, 2=b, 3=c}" && "" + m2.keys == "[1, 2, 3]")
 }
 
+// ===== SECTION 108: `is` on the builtin collections =====
+// Read off kotlin-stdlib 2.2.21 under JDK 24 (instanceof java.util.Set /
+// Collection / List / Map and java.lang.Iterable, TypeIntrinsics.isMutable*): a
+// Set and a List are Collections and Iterables, a Map is neither, a range is an
+// Iterable only, and an Array, a String and a Sequence are not Iterable.
+fun isRow108(v: Any): String =
+    "${v is Set<*>} ${v is Collection<*>} ${v is Iterable<*>} ${v is List<*>} ${v is Map<*, *>}"
+fun sec108() {
+    val vs: List<Any> = listOf(setOf(1, 2), listOf(1, 2), mapOf(1 to 2), 1..2, arrayOf(1), "ab",
+        mutableMapOf(1 to 2).values, sequenceOf(1))
+    check("isc108a", isRow108(vs[0]) == "true true true false false" && isRow108(vs[1]) == "false true true true false")
+    check("isc108b", isRow108(vs[2]) == "false false false false true" && isRow108(vs[3]) == "false false true false false")
+    check("isc108c", isRow108(vs[4]) == "false false false false false" && isRow108(vs[5]) == "false false false false false")
+    check("isc108d", isRow108(vs[6]) == "false true true false false" && isRow108(vs[7]) == "false false false false false")
+    val ms: List<Any> = listOf(mutableListOf(1), mutableSetOf(1), mutableMapOf(1 to 2))
+    check("isc108e", ms[0] is MutableList<*> && ms[0] is MutableCollection<*> && ms[1] is MutableSet<*> && ms[2] is MutableMap<*, *>)
+    val s = vs[0]
+    val k = when (s) { is List<*> -> "list"; is Set<*> -> "set"; else -> "other" }
+    check("isc108f", k == "set" && !(vs[2] !is Map<*, *>) && vs[0] !is List<*>)
+}
+
+// ===== SECTION 109: MutableList's deque members =====
+// Read off kotlin-stdlib 2.2.21 under JDK 24: removeFirst / removeLast and their
+// OrNull forms are kotlin.collections extensions ("List is empty." when there is
+// nothing to remove), addFirst / addLast java.util.List's SequencedCollection
+// members.
+fun sec109() {
+    val l = mutableListOf(1, 2, 3)
+    l.addFirst(0)
+    l.addLast(4)
+    check("deq109a", "" + l == "[0, 1, 2, 3, 4]" && l.removeFirst() == 0 && l.removeLast() == 4 && "" + l == "[1, 2, 3]")
+    check("deq109b", l.removeFirstOrNull() == 1 && l.removeLastOrNull() == 3 && "" + l == "[2]")
+    val e = mutableListOf<Int>()
+    var msg = ""
+    try { e.removeLast() } catch (x: NoSuchElementException) { msg = "" + x.message }
+    check("deq109c", e.removeFirstOrNull() == null && e.removeLastOrNull() == null && msg == "List is empty.")
+}
+
 
 fun main() {
     s01() // SECTION-CALL 01
@@ -5359,6 +5397,8 @@ fun main() {
     sec105() // SECTION-CALL 105
     sec106() // SECTION-CALL 106
     sec107() // SECTION-CALL 107
+    sec108() // SECTION-CALL 108
+    sec109() // SECTION-CALL 109
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

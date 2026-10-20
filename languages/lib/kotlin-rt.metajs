@@ -5143,6 +5143,20 @@ function ktSeqMethodK(arr, name, args, kind) {
         if (arr.length == 0) { ktNoElem("List is empty.") }
         return ktSeqMethod(arr, "removeAt", [arr.length - 1])
     }
+    if (name == "removeFirstOrNull") {
+        if (arr.length == 0) { return null }
+        return ktSeqMethod(arr, "removeAt", [0])
+    }
+    if (name == "removeLastOrNull") {
+        if (arr.length == 0) { return null }
+        return ktSeqMethod(arr, "removeAt", [arr.length - 1])
+    }
+    // java.util.List's SequencedCollection members (JDK 21), answering Unit.
+    if (name == "addFirst") { return ktSeqMethod(arr, "add", [0, f]) }
+    if (name == "addLast") {
+        arr.push(f)
+        return undefined
+    }
     if (name == "remove") {
         for (i = 0; i < arr.length; i = i + 1) {
             if (ktEqVals(arr[i], f)) {
@@ -6142,6 +6156,8 @@ function ktIsType(v, tname) {
         // A PROGRESSION is an IntRange / CharRange / IntProgression and NOT a
         // List - the shared js_is_type has no arm for it.
         if (ktIsRange(v)) { return k4RangeIsType(v, tname) }
+        var ci = ktCollIsType(v, k4bStripQ(k4bStripAngle(tname)))
+        if (ci !== undefined) { return ci }
         if (js_is_type(v, tname) === true) { return true }
         // A QUALIFIED type name - `is Shape.Circle`, which is how a NESTED class
         // is spelled from outside its owner. A descriptor is registered under
@@ -7658,10 +7674,8 @@ function k4IsTypeName(v, t, opt) {
     if (t == "String") { return typeof v == "string" }
     if (t == "CharSequence") { return typeof v == "string" }
     if (t == "Boolean") { return typeof v == "boolean" }
-    if (t == "List") { return ktIsArr(v) }
-    if (t == "MutableList") { return ktIsArr(v) }
-    if (t == "Collection") { return ktIsArr(v) }
-    if (t == "Array") { return ktIsArr(v) }
+    var ci = ktCollIsType(v, t)
+    if (ci !== undefined) { return ci }
     if (ktIsObj(v)) {
         var cls = v["__class"]
         var guard = 0
@@ -9323,6 +9337,24 @@ function k4RangeIsType(rg, tname) {
     // its numeric value, so `1L..5L` and `1..5` are the same value. Both halves
     // answer the Int names.
     return false
+}
+
+// `c is T` for a builtin collection, or undefined when v is not one; `t` arrives
+// with its type arguments and `?` stripped. Twin of ktCollIsType in
+// abnf/jsrtkotlin.go, which has the rules.
+function ktCollIsType(v, tname) {
+    var t = tname
+    if (t.indexOf("Mutable") == 0) { t = t.substring(7, t.length) }
+    if (rtIsDictObj(v)) { return t == "Map" }
+    var coll = t == "Collection" || t == "Iterable"
+    if (ktIsSet(v)) { return coll || t == "Set" }
+    if (!ktIsArr(v)) { return undefined }
+    var k = arrKind(v)
+    if (k == 0 || k == 4) { return coll || t == "List" }
+    if (k == 3) { return coll }
+    if (k == 2) { return t == "Sequence" }
+    if (k == 1) { return t == "Array" }
+    return t == ktaElems[k - 5] + "Array"
 }
 
 // k4Indices is the IntRange 0..n-1 that `.indices` answers.

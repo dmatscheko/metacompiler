@@ -6945,6 +6945,13 @@ NotMemberKw = :script(~~
             if (es.length == 0) { kNoElem("List is empty.") }
             return kSeqMethod(es, "removeAt", [name == "removeFirst" ? 0 : es.length - 1])
         }
+        if (name == "removeFirstOrNull" || name == "removeLastOrNull") {
+            if (es.length == 0) { return {v: null} }
+            return kSeqMethod(es, "removeAt", [name == "removeFirstOrNull" ? 0 : es.length - 1])
+        }
+        // java.util.List's SequencedCollection members (JDK 21), answering Unit.
+        if (name == "addFirst") { return kSeqMethod(es, "add", [0, f]) }
+        if (name == "addLast") { es.push(f); return {v: undefined} }
         if (name == "remove") {
             for (i = 0; i < es.length; i++) {
                 if (kEqVals(es[i], f)) { kSeqMethod(es, "removeAt", [i]); return {v: true} }
@@ -11280,6 +11287,28 @@ NotMemberKw = :script(~~
     }
 
     // ----- Dynamic type tests -----
+    // `c is T` for a builtin collection, or undefined when v is not one. A Set and a
+    // List are Collections and Iterables, a Map's values view is a Collection but not
+    // a List, and a Map is none of them (kotlin.collections' interface hierarchy).
+    // One representation serves a read-only collection and its mutable counterpart,
+    // so a Mutable* name answers as the read-only name. An Array, a primitive array
+    // and a Sequence are host arrays told apart by their kind (kArrWords) and are
+    // not Iterable. Twin of ktCollIsType in abnf/jsrtkotlin.go and
+    // languages/lib/kotlin-rt.metajs.
+    function kCollIsType(v, t) {
+        var isArr = Array.isArray(v)
+        if (!isArr && !kIsSet(v) && !kIsMap(v)) { return undefined }
+        if (t.indexOf("Mutable") == 0) { t = t.substring(7) }
+        if (kIsMap(v)) { return t == "Map" }
+        var coll = t == "Collection" || t == "Iterable"
+        if (kIsSet(v)) { return coll || t == "Set" }
+        var k = arrKind(v)
+        if (k == 0 || k == 4) { return coll || t == "List" }
+        if (k == 3) { return coll }
+        if (k == 2) { return t == "Sequence" }
+        if (k == 1) { return t == "Array" }
+        return t == ktaElems[k - 5] + "Array"
+    }
     // Extends the shared rtIsType with the parent chain (so an interface matches), type
     // ALIASES, Char/range boxes, and the reified type parameters of the running call.
     function kIsType(v, tname) {
@@ -11333,6 +11362,8 @@ NotMemberKw = :script(~~
             if (t == "IntProgression") { return true }
             return t == "IntRange" && plain
         }
+        var ci = kCollIsType(v, t)
+        if (ci !== undefined) { return ci }
         if (typeof v == "object" && v.__class != undefined && v.__class != null) {
             if (clsNamed(v.__class, t)) { return true }
             // A QUALIFIED type name - `is Shape.Circle`, which is how a NESTED class is

@@ -1374,6 +1374,13 @@ func init() {
 					}
 					return boolH(ktRangeIsType(rg, strings.TrimSuffix(t, "?")))
 				}
+				ct := rt.toString(u(a[1]))
+				if i := strings.IndexByte(ct, '<'); i >= 0 {
+					ct = ct[:i]
+				}
+				if is, ok := ktCollIsType(v, strings.TrimSuffix(ct, "?")); ok {
+					return boolH(is)
+				}
 				if r := baseIs(a); u(r) == interface{}(true) {
 					return r
 				}
@@ -6065,6 +6072,22 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 			ix = len(o.elems) - 1
 		}
 		return rt.ktSeqMethod(o, "removeAt", []interface{}{float64(ix)})
+	case "removeFirstOrNull", "removeLastOrNull":
+		if len(o.elems) == 0 {
+			return jsNull, true
+		}
+		ix := 0
+		if name == "removeLastOrNull" {
+			ix = len(o.elems) - 1
+		}
+		return rt.ktSeqMethod(o, "removeAt", []interface{}{float64(ix)})
+	// java.util.List's SequencedCollection members (JDK 21), answering Unit.
+	case "addFirst":
+		return rt.ktSeqMethod(o, "add", []interface{}{float64(0), f})
+	case "addLast":
+		o.dropIdx()
+		o.elems = append(o.elems, f)
+		return jsUndef, true
 	case "remove":
 		for i, e := range o.elems {
 			if rt.ktEqVals(e, f) {
@@ -7146,6 +7169,40 @@ func ktRangeIsType(rg ktRange, t string) bool {
 		return true
 	}
 	return t == "IntRange" && plain
+}
+
+// ktCollIsType is `c is T` for a builtin collection; ok is false when v is not one.
+// A Set and a List are Collections and Iterables, a Map's values view is a
+// Collection but not a List, and a Map is none of them. One representation serves
+// a read-only collection and its mutable counterpart, so a Mutable* name answers as
+// the read-only name. An Array, a primitive array and a Sequence are told apart by
+// the array kind and are not Iterable. Twin of kCollIsType in
+// kotlin-interpreter.abnf and ktCollIsType in languages/lib/kotlin-rt.metajs.
+func ktCollIsType(v interface{}, t string) (is bool, ok bool) {
+	t = strings.TrimPrefix(t, "Mutable")
+	if _, _, isDict := dictParts(v); isDict {
+		return t == "Map", true
+	}
+	coll := t == "Collection" || t == "Iterable"
+	if ktIsSet(v) {
+		return coll || t == "Set", true
+	}
+	arr, isArr := v.(*jsArray)
+	if !isArr {
+		return false, false
+	}
+	switch k := arr.kind; {
+	case k == 0 || k == ktArrFixed:
+		return coll || t == "List", true
+	case k == ktArrVals:
+		return coll, true
+	case k == ktArrSeq:
+		return t == "Sequence", true
+	case k == ktArrArray:
+		return t == "Array", true
+	default:
+		return t == ktaElems[k-ktArrPrim]+"Array", true
+	}
 }
 
 // ktIsBuiltinRecv reports a receiver whose members come from the runtime rather
