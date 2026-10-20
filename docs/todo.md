@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-662** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-663** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -135,12 +135,11 @@ reports cap 4 where growslice says 1) — escape analysis.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-659 php: calling a library function through a name built at run time · P1 · PHP · IN PROGRESS (PHP worker, round 9) [V spec-only]
-`$e = 'str' . 'rev'; echo $e('abc');` → "Call to undefined function strrev()" in all engines, `is_callable($e)` false (PHP `cba`, true):
-the library is compiled only for names some literal spells. Since function_exists() now consults the library's name index, `if
-(function_exists($f)) $f();` errors at the call instead of skipping it. When a program makes a dynamic call with a non-literal name
-(or calls function_exists / is_callable / call_user_func with one), compile the library pieces such a call can reach — the whole
-library, or a lazily linked index — in both halves; measure binary size and the php bench.
+### T-662 php: library functions called with too few arguments do not raise ArgumentCountError · P2 · PHP · OPEN [V spec-only]
+`try { echo call_user_func('strrev'), "|\n"; } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }` and `$f = 'strrev';
+$f();` → all engines print `|` / nothing (PHP ArgumentCountError "strrev() expects exactly 1 argument, 0 given",
+zend_wrong_parameters_count_error); direct `strrev()` likewise if unchecked. The library's PHP wrappers skip the internal-function arity
+check; add it (min/max arity per library function from its declaration) at the wrapper entry, all engines.
 
 ### T-596 php: binding and undefined-variable warnings are never printed · P3 · PHP · BLOCKED - needs a user decision
 PHP CLI prints `Warning: Cannot unbind $this of closure using $this in <file> on line <n>` (and undefined-variable/-index
@@ -748,6 +747,7 @@ T-652 js: for-in through the prototype chain; `in` on prototype methods; Object.
 T-657 php: first-class callable identity; var_dump of method callables; builtins without library wrappers — DONE 14fa3618
 T-653 python: compiled `type(e) is ValueError`; `__class__` in methods; regex group refs, Unicode \w, findall None; class-body comprehensions — DONE b7d3736a
 T-656 java: `x.new Inner()` with a third same-named nested type; Matcher.hitEnd/requireEnd — PARTIAL 429af651 (q.new Inner() by the qualifier's declared type; multi-level qualified nested names); hitEnd/requireEnd are T-661
+T-659 php: calling a library function through a name built at run time — DONE 6a69f43e (programs without a computed call compile byte-identically; with one the module grows ~3 MB of IR, the exe ~0.7 MB)
 
 # Settled — do not re-open
 
