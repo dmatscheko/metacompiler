@@ -2843,6 +2843,8 @@ function goLibFile(path) {
     if (path == "maps") { return "lib/go-maps.go" }
     if (path == "cmp") { return "lib/go-cmp.go" }
     if (path == "iter") { return "lib/go-iter.go" }
+    if (path == "sync") { return "lib/go-sync.go" }
+    if (path == "sync/atomic") { return "lib/go-atomic.go" }
     return ""
 }
 // The method EXPRESSION T.M of a defined type T (`f := Color.String`): the method's

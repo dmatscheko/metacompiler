@@ -6246,7 +6246,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
 
     // Go stdlib packages the runtime provides (resolveImport lives in lib/compile-core.js;
     // exact-match paths, so sub-packages like "encoding/json" are listed in full).
-    core.stdlibImports = ["fmt", "os", "strconv", "errors", "bufio", "io", "time", "sync", "bytes", "unicode", "regexp", "path", "encoding/json", "context", "flag", "log", "reflect"]
+    core.stdlibImports = ["fmt", "os", "strconv", "errors", "bufio", "io", "time", "bytes", "unicode", "regexp", "path", "encoding/json", "context", "flag", "log", "reflect"]
     function fail(msg) { println("go compiler error: " + msg); exit(1) }
 
     // Project-file imports: import "mathbox" -> mathbox.go (a slash path like "a/b" ->

@@ -53,6 +53,8 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 )
 
 var fails = 0
@@ -4636,6 +4638,74 @@ func s85() {
 	check("gen1", fmt.Sprint(top, popped, len(st), ps, len(*ps)) == "bb1 &[7 8] 2")
 }
 
+// ===== SECTION 86: packages sync and sync/atomic =====
+// Go source (languages/lib/go-sync.go, go-atomic.go) over the cooperative
+// goroutines: WaitGroup.Wait runs the queued goroutines, each in the scope of its
+// `go` statement. The expected values are go run's.
+type Ctr86 struct {
+	mu sync.Mutex
+	m  map[string]int
+}
+
+func (c *Ctr86) Inc(k string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.m[k]++
+}
+
+func work86(id int, jobs <-chan int, out chan<- string, wg *sync.WaitGroup) {
+	defer wg.Done()
+	for j := range jobs {
+		out <- fmt.Sprint(id, ":", j*j)
+	}
+}
+
+func s86() {
+	var n int64
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			atomic.AddInt64(&n, int64(i))
+		}()
+	}
+	wg.Wait()
+	c := Ctr86{m: map[string]int{}}
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c.Inc("k")
+		}()
+	}
+	wg.Wait()
+	var a atomic.Int64
+	a.Add(5)
+	var once sync.Once
+	inits := 0
+	for i := 0; i < 3; i++ {
+		once.Do(func() { inits++ })
+	}
+	check("syn1", fmt.Sprint(atomic.LoadInt64(&n), c.m, a.Load(), a.CompareAndSwap(5, 1), a.Load(), inits) == "45 map[k:3] 5 true 1 1")
+	jobs := make(chan int, 4)
+	out := make(chan string, 4)
+	wg2 := &sync.WaitGroup{}
+	wg2.Add(1)
+	go work86(7, jobs, out, wg2)
+	for j := 1; j <= 3; j++ {
+		jobs <- j
+	}
+	close(jobs)
+	wg2.Wait()
+	close(out)
+	got := ""
+	for s := range out {
+		got += s + " "
+	}
+	check("syn2", got == "7:1 7:4 7:9 ")
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -4722,6 +4792,7 @@ func main() {
 	s83() // SECTION-CALL 83
 	s84() // SECTION-CALL 84
 	s85() // SECTION-CALL 85
+	s86() // SECTION-CALL 86
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }
