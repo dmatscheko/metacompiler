@@ -78,7 +78,7 @@ astral letter may differ between engines (probe first).
 
 # JS — JavaScript and TypeScript
 
-### T-664 js: replacing a constructor's prototype; getPrototypeOf/setPrototypeOf/defineProperty; toLocaleString; Object.create(null) · P1 · JS · OPEN [V]
+### T-664 js: replacing a constructor's prototype; getPrototypeOf/setPrototypeOf/defineProperty; toLocaleString; Object.create(null) · P1 · JS · IN PROGRESS (JS worker, round 13) [V]
 `function F(){}; F.prototype = {q: 4}; new F().q` → undefined in all engines (node 4) — P1. `Object.getPrototypeOf`, `Object.setPrototypeOf`,
 `Object.defineProperty` and Object.create's second argument → "not a function" / ignored (node: `Object.getPrototypeOf(Object.create({p:1})).p`
 1; `Object.create({}, {a:{value:1}}).a` 1). `(1234.5).toLocaleString()` → interp `1234.5`, compiled "is not a function" (node `1,234.5`; the
