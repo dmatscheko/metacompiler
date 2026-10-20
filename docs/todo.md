@@ -117,12 +117,12 @@ not change the renderer.
 
 # GO — Go  (oracle: `go run`)
 
-### T-672 go: `*t = *o` through a pointer; zero embedded struct field is nil; typed package constants print as numbers · P2 · GO · OPEN [V]
+### T-672 go: `*t = *o` through a pointer; zero embedded struct field is nil; typed package constants print as numbers · P2 · GO · IN PROGRESS (GO worker, round 10) [V]
 `func (t *T) set(o *T) { *t = *o }` copies nothing in any engine (go prints 5, ours 0); `*p = T{7}` works. A zero-valued embedded
 struct field is nil instead of a zero instance, so `S{}` has none of the embedded type's promoted methods. `fmt.Println(time.March,
 reflect.Map)` → `3 21` in both halves (go `March map`); `time.Month(4)` and declared vars print correctly.
 
-### T-673 go: fmt.Sscanf / Scan family; `%T` of a func and of os.Stdin/os.Stdout; `*(v.p.(*int)) = 5` does not parse · P3 · GO · OPEN [V]
+### T-673 go: fmt.Sscanf / Scan family; `%T` of a func and of os.Stdin/os.Stdout; `*(v.p.(*int)) = 5` does not parse · P3 · GO · IN PROGRESS (GO worker, round 10) [V]
 `fmt.Sscanf` / `Sscan` / `Fscan` → "unknown method 'Sscanf'" (all engines). `fmt.Printf("%T", f)` for a func → `%!T(0x…)` (go
 `func(int) int`); `%T` of os.Stdin → not `*os.File`, and `r.(io.Reader)` on it misreports. `*(v.p.(*int)) = 5` is a parse error in
 both grammars.
