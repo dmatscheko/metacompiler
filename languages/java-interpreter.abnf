@@ -420,7 +420,7 @@ RetType     <~~ jRetPush(stripWs(up.in)) ~~>
 // and type but not their initializer - so each declarator becomes its own member.
 Field       <~~ pushFields(takeAll()) ~~>
             = Mods FType FieldVar { "," FieldVar } ";" ;
-FieldVar    <~~ push(makeFieldVar(takeAll())) ~~>
+FieldVar    <~~ push(makeFieldVar(takeAll(), up.in)) ~~>
             = NotResvKw NotUscore Id <~~ push(up.in) ~~> [ DeclDims ] [ "=" VarInit ] ;
 
 // Modifiers before a member: annotations (with or without arguments) are parsed and
@@ -4289,6 +4289,7 @@ HasStatic   = :script(~~
                         if (pty == vty) { pty = "" }
                     }
                     v = jConvTo(v, pty)
+                    jTouch(p.obj, "")
                 }
                 p.obj[p.key] = v
             }
@@ -4745,6 +4746,9 @@ HasStatic   = :script(~~
                 return jNewString(sargs)
             }
             if (cls == undefined || cls == null || !cls.__isclass) fail("unknown class: " + clsName)
+            // Creating an instance initializes the class, before the arguments
+            // are evaluated (JLS 12.4.1, 15.9.4).
+            jTouch(cls, "")
             // A NESTED type created without a qualifier (`new Inner()` inside an
             // instance method of Outer) captures the enclosing instance exactly as
             // `o.new Inner()` does - javac passes it implicitly. Only a nested
@@ -4858,6 +4862,7 @@ HasStatic   = :script(~~
             // local or parameter of the ENCLOSING METHOD, which no field walk
             // can reach. jOuterOwner reads it, and its comment has the
             // precedence rule.
+            jTouch(built, "")
             var obj = {__class: built, __outer: jEnclSelf(), __cscope: scopes.slice(0)}
             var argv = []
             for (var a = 0; a < args.length; a++) { argv.push(args[a]()) }
@@ -5928,11 +5933,11 @@ HasStatic   = :script(~~
         var args = items.slice(1)
         return {ctorhead: true, which: which, args: args, atys: jCallArgTys(text, args.length)}
     }
-    function makeFieldVar(items) {
+    function makeFieldVar(items, text) {
         var dims = ""
         var rest = items.slice(1)
         if (rest.length > 0 && rest[0].cdims != undefined) { dims = rest[0].cdims; rest = rest.slice(1) }
-        return {fname: items[0], finit: rest.length > 0 ? rest[0] : null, fdims: dims}
+        return {fname: items[0], finit: rest.length > 0 ? rest[0] : null, fdims: dims, ftext: jInitText(stripWs(text))}
     }
     // Pushes one member per declarator; they share the modifiers and the type.
     function pushFields(items) {
@@ -5951,7 +5956,8 @@ HasStatic   = :script(~~
             var fty = ty + items[i].fdims
             jNoteFieldTy(items[i].fname, fty)
             push({kind: "field", name: items[i].fname, statik: isStatic, init: jFieldInit(items[i].finit, fty),
-                  dflt: items[i].fdims == "" ? dflt : null})
+                  dflt: items[i].fdims == "" ? dflt : null, pure: jInitPure(items[i].ftext),
+                  sconst: isStatic && jIsConstField(mods, fty, items[i].ftext)})
         }
     }
     // A field's initializer gets the same assignment conversion as a local
@@ -6117,9 +6123,46 @@ HasStatic   = :script(~~
             }
             scopes.pop()
         }
-        jRunStatics(runStatics)
+        if (jClassLazy(name)) {
+            // Until it is initialized a lazy class's static fields hold their
+            // defaults - an initialization cycle reads them - and its constant
+            // variables their values (JLS 12.4.2).
+            for (var di = 0; di < statics.length; di++) {
+                var ds = statics[di]
+                if (ds.kind == "field") { cls[jSlot(cls, ds.name)] = ds.sconst ? ds.init() : ds.dflt }
+            }
+            cls.__clinit = runStatics
+        } else {
+            jRunStatics(runStatics)
+        }
         globalScope[name] = cls
         return cls
+    }
+    // ----- class initialization (JLS 12.4, jClassLazy) -----
+    //
+    // A lazy class keeps its static initialization as __clinit, which runs -
+    // after its superclass's - at the class's first use: instance creation
+    // (makeNew and the anonymous / qualified forms), a static method's entry
+    // (makeStaticClosure), and a static field that is no constant variable,
+    // read or written (jSelfWith, core.getField, resolveRef, makeAssign).
+    // Twin of jEmitClinit in java-to-llvm-ir.abnf.
+    function jClinit(c) {
+        var f = anytype // The class's static initialization, a closure.
+        f = c.__clinit
+        if (f === undefined || f === null) { return }
+        c.__clinit = null
+        var sup = c.__super
+        if (sup !== undefined && sup !== null) { jClinit(sup) }
+        f()
+    }
+    // A use of o, a class descriptor or any other object, through static
+    // field `name` ("" for any other use).
+    function jTouch(o, name) {
+        if (typeof o != "object" || o === null || Array.isArray(o)) { return }
+        var f = o.__clinit
+        if (f === undefined || f === null) { return }
+        if (name != "" && jIsConstIn(o.__name, name)) { return }
+        jClinit(o)
     }
     // Runs a class's static initialization now, or - for a type declared inside
     // another class - queues it until its top-level class's own has run.
@@ -6514,6 +6557,8 @@ HasStatic   = :script(~~
     // its `this` already leads to the descriptor through __class.
     function makeStaticClosure(m, cls) {
         return function() {
+            // Invoking a static method initializes its class (JLS 12.4.1).
+            if (cls.__clinit !== undefined && cls.__clinit !== null) { jClinit(cls) }
             var args = []
             for (var i = 0; i < arguments.length; i++) args.push(arguments[i])
             return invokeBody(m.params, m.body, cls, "__jcls", jCallArgs(m, args))
@@ -6613,6 +6658,7 @@ HasStatic   = :script(~~
             else { members.push(it) }
         }
         jOvDeclare(name, members)
+        jNoLazy["$" + name] = true
         // A constant is a static field of the enum's own type (JLS 8.9.1).
         for (i = 0; i < consts.length; i++) { jNoteFieldTy(consts[i].econst, name) }
         var cls = buildClassFrom(name, members, undefined)
@@ -6982,6 +7028,7 @@ HasStatic   = :script(~~
         jOvDeclare("$anon" + jAnonSeq + "$" + cname, ms)
         var built = buildClassFrom("$anon" + jAnonSeq + "$" + cname, ms, undefined)
         built.__name = cname
+        jTouch(built, "")
         var obj = {__class: built, __outer: outer, __cscope: scopes.slice(0)}
         jCallCtor(built, obj, argv)
         return obj
@@ -6989,6 +7036,7 @@ HasStatic   = :script(~~
     function jNewInner(cname, outer, argv) {
         var cls = jResolveClass(cname)
         if (cls == undefined || cls == null || !cls.__isclass) fail("unknown class: " + cname)
+        jTouch(cls, "")
         var obj = {__class: cls, __outer: outer}
         jCallCtor(cls, obj, argv)
         return obj
@@ -7051,6 +7099,7 @@ HasStatic   = :script(~~
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
             if (s.key != undefined) {
+                jTouch(o, s.key)
                 var pk = jPathKey(ref, i, o)
                 o = hasOwn(o, pk) ? o[pk] : undefined
             }
@@ -7059,7 +7108,12 @@ HasStatic   = :script(~~
         }
         var last = ref.path[ref.path.length - 1]
         if (o === undefined || o === null) { jNpe() }
-        if (last.key != undefined) { return {obj: o, key: jPathKey(ref, ref.path.length - 1, o)} }
+        if (last.key != undefined) {
+            // A plain `=` to a static field initializes its class after the
+            // right-hand side (makeAssign); a compound one reads it first.
+            if (lateIdx !== true) { jTouch(o, last.key) }
+            return {obj: o, key: jPathKey(ref, ref.path.length - 1, o)}
+        }
         // The WRITE half of the bounds check: `a[3] = 5` on an int[3] throws
         // rather than growing the array. Every writer - makeAssign, makeIncDec,
         // makePreIncDec - goes through this one place.
@@ -7078,6 +7132,7 @@ HasStatic   = :script(~~
     // The compiler half stores it on the descriptor instead.
     core.getField = function(o, name) {
         if (name == "length" && Array.isArray(o)) { return o.length }
+        if (typeof o == "object" && o !== null && o.__clinit !== undefined && o.__clinit !== null) { jTouch(o, name) }
         if (typeof o == "object" && o !== null && o.__sfk !== undefined) {
             var fk = jSlot(o, name)
             if (hasOwn(o, fk)) { return o[fk] }
@@ -7206,6 +7261,11 @@ HasStatic   = :script(~~
     // is not a field of the enclosing type at all (getVar then goes on to
     // hostGlobals and its own error).
     function jSelfWith(name) {
+        var o = jSelfWithIn(name)
+        jTouch(o, name)
+        return o
+    }
+    function jSelfWithIn(name) {
         var sc = scopes
         for (var i = sc.length - 1; i >= 0; i--) {
             if (hasOwn(sc[i], "this")) {

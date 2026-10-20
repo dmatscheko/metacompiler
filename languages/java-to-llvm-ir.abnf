@@ -409,7 +409,7 @@ RetType     <~~ jRetPush(stripWs(up.in)) ~~>
 // and type but not their initializer - so each declarator becomes its own member.
 Field       <~~ pushFields(takeAll()) ~~>
             = Mods FType FieldVar { "," FieldVar } ";" ;
-FieldVar    <~~ push(makeFieldVar(takeAll())) ~~>
+FieldVar    <~~ push(makeFieldVar(takeAll(), up.in)) ~~>
             = NotResvKw NotUscore Id <~~ push(up.in) ~~> [ DeclDims ] [ "=" Expression ] ;
 // `int a[] = {1}` declares an int[]: the brackets after the NAME join the type.
 DeclDims    <~~ push({cdims: jDimsOf(stripWs(up.in))}) ~~>
@@ -2270,7 +2270,9 @@ HasStatic   = :script(~~
         var frecv = jChainTargetRecv(head, last, text)
         // Three separate returns rather than one reassigned local: under the
         // frozen engine a variable keeps the shape it was first given.
-        if (last.kind == "field") { return {name: "", path: [{key: last.name}], base: foldCallMember(head), frecv: frecv} }
+        if (last.kind == "field") {
+            return {name: "", path: [{key: last.name}], base: foldCallMember(head), frecv: frecv, fctx: curClassName}
+        }
         if (last.kind == "index") {
             var tr = jChainTyRef(text)
             return {name: "", path: [{idx: last.idx}], base: foldCallMember(head),
@@ -2287,11 +2289,18 @@ HasStatic   = :script(~~
         var r = makeTargetRef(items)
         if (r.path.length > 0) { r.frecv = jFieldRecv(r.name) }
         if (r.name == "super") { r.name = "this" }
+        r.fctx = curClassName
         return r
     }
     function jRefKey(ref, i) {
         var k = ref.path[i].key
         return i == 0 ? jFieldKeyAt(ref.frecv, k) : k
+    }
+    // The class a target's first field, if static, initializes (jStaticInitOf).
+    function jRefInit(ref) {
+        if (ref.frecv == undefined || ref.frecv == "") { return "" }
+        if (ref.rinit == undefined) { ref.rinit = jStaticInitOf(ref.frecv, ref.path[0].key, ref.fctx) }
+        return ref.rinit
     }
     // With lateIdx a final array index is left unchecked, marked {idx: true}, for a
     // plain `=` that checks it after its right-hand side (JLS 15.26.1).
@@ -2307,6 +2316,7 @@ HasStatic   = :script(~~
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
             if (s.key != undefined) {
+                if (i == 0 && jRefInit(ref) != "") { b = jEmitClinit(b, jRefInit(ref)) }
                 o = callExt(b, "js_get", [o, emitStr(b, jRefKey(ref, i))])
             } else {
                 var r = s.idx(b)
@@ -2315,7 +2325,16 @@ HasStatic   = :script(~~
             }
         }
         var last = ref.path[ref.path.length - 1]
-        if (last.key != undefined) return {b: b, obj: o, key: emitStr(b, jRefKey(ref, ref.path.length - 1))}
+        if (last.key != undefined) {
+            // A plain `=` to a static field initializes its class after the
+            // right-hand side (makeAssign); a compound one reads it first.
+            var icl = ref.path.length == 1 ? jRefInit(ref) : ""
+            if (icl != "" && lateIdx !== true) {
+                b = jEmitClinit(b, icl)
+                icl = ""
+            }
+            return {b: b, obj: o, key: emitStr(b, jRefKey(ref, ref.path.length - 1)), clinit: icl}
+        }
         var kr = last.idx(b)
         if (lateIdx === true) { return {b: kr.b, obj: o, key: kr.v, idx: true} }
         // The WRITE half of the bounds check, here rather than at the three js_set
@@ -2363,15 +2382,17 @@ HasStatic   = :script(~~
         var newL = (mkNew == null) ? jConvUnless(localB, v, lty == undefined ? "" : lty, vty) : mkNew(localB, oldL)
         callExt(localB, "js_scope_set", [curScopeV, nameL, newL])
         localB.NewBr(mergeB)
-        var ownV = jFieldOwner(fieldB, fi, name)
-        var keyF = emitStr(fieldB, jFieldSlot(fi, name))
-        var oldF = (mkNew == null) ? v : callExt(fieldB, "js_get", [ownV, keyF])
-        var newF = (mkNew == null) ? jConvUnless(fieldB, v, jFieldTyOf(name), vty) : mkNew(fieldB, oldF)
-        callExt(fieldB, "js_set", [ownV, keyF, newF])
-        fieldB.NewBr(mergeB)
+        var initW = fi.kind == "static" ? jStaticInitOf(fi.cls, name, fi.ctx) : ""
+        var writeB = initW == "" ? fieldB : jEmitClinit(fieldB, initW)
+        var ownV = jFieldOwner(writeB, fi, name)
+        var keyF = emitStr(writeB, jFieldSlot(fi, name))
+        var oldF = (mkNew == null) ? v : callExt(writeB, "js_get", [ownV, keyF])
+        var newF = (mkNew == null) ? jConvUnless(writeB, v, jFieldTyOf(name), vty) : mkNew(writeB, oldF)
+        callExt(writeB, "js_set", [ownV, keyF, newF])
+        writeB.NewBr(mergeB)
         var rl = retOld ? oldL : newL
         var rf = retOld ? oldF : newF
-        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(rl, localB), llvm.ir.NewIncoming(rf, fieldB)])}
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(rl, localB), llvm.ir.NewIncoming(rf, writeB)])}
     }
     function jConvUnless(b, v, ty, vty) {
         if (ty == vty) { return v }
@@ -2431,6 +2452,7 @@ HasStatic   = :script(~~
                     if (p.idx === true) { callExt(b, "js_jvidx", [p.obj, p.key]) }
                     var pty = (tyRef == null || tyRef == undefined) ? jFieldTyOfPlace(ref) : jPlaceTy(tyRef, lty)
                     if (pty != vty) { v = declConvert(b, v, pty) }
+                    if (p.clinit != undefined && p.clinit != "") { b = jEmitClinit(b, p.clinit) }
                 }
                 callExt(b, "js_set", [p.obj, p.key, v])
             }
@@ -3048,14 +3070,16 @@ HasStatic   = :script(~~
         // The anonymous class' OWN field wins over everything lexically outside it,
         // including the enclosing method's locals - so it is read straight off
         // `this`, with no runtime scope probe at all (`own`).
+        // ctx is the class the access is written in (jStaticInitOf).
+        var ctx = chain.names.length > 0 ? chain.names[0] : ""
         if (chain.aid != "" && jAnonOwns(chain.aid, name)) {
-            return {kind: "instance", cls: "", hop: false, own: true}
+            return {kind: "instance", cls: "", hop: false, own: true, ctx: ctx}
         }
         for (var i = 0; i < chain.names.length; i++) {
             var fi = lookupFieldKind(chain.names[i], name)
-            if (fi != null) { return {kind: fi.kind, cls: fi.cls, hop: (i > 0) || chain.anon, own: false} }
+            if (fi != null) { return {kind: fi.kind, cls: fi.cls, hop: (i > 0) || chain.anon, own: false, ctx: ctx} }
         }
-        if (chain.anon && jAnyFieldNamed(name)) { return {kind: "instance", cls: "", hop: true, own: false} }
+        if (chain.anon && jAnyFieldNamed(name)) { return {kind: "instance", cls: "", hop: true, own: false, ctx: ctx} }
         return null
     }
     // The class in cls' own chain that declares `name` as a field, with its kind,
@@ -3134,10 +3158,12 @@ HasStatic   = :script(~~
             var lv = callExt(probeB, "js_scope_get", [curScopeV, emitStr(probeB, name)])
             probeB.NewCondBr(truthy(probeB, callExt(probeB, "js_jisclass", [lv])), fieldB, localB)
             localB.NewBr(mergeB)
-            var ownV = jFieldOwner(fieldB, fi, name)
-            var fv = callExt(fieldB, "js_get", [ownV, emitStr(fieldB, jFieldSlot(fi, name))])
-            fieldB.NewBr(mergeB)
-            return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(lv, localB), llvm.ir.NewIncoming(fv, fieldB)])}
+            var initR = fi.kind == "static" ? jStaticInitOf(fi.cls, name, fi.ctx) : ""
+            var readB = initR == "" ? fieldB : jEmitClinit(fieldB, initR)
+            var ownV = jFieldOwner(readB, fi, name)
+            var fv = callExt(readB, "js_get", [ownV, emitStr(readB, jFieldSlot(fi, name))])
+            readB.NewBr(mergeB)
+            return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(lv, localB), llvm.ir.NewIncoming(fv, readB)])}
         }
     }
     function makeBareCall(items, text) {
@@ -3245,7 +3271,11 @@ HasStatic   = :script(~~
         var atys = text == undefined ? null : jCallArgTys(text, args.length)
         // new String(...) can throw StringIndexOutOfBoundsException (js_jvnewstr).
         if (clsName == "String") { jUsesStrIdx = true }
+        var ctx = curClassName
         return function(b) {
+            // Creating an instance initializes the class, before the arguments
+            // are evaluated (JLS 12.4.1, 15.9.4).
+            if (jClassLazy(clsName) && !jInChain(ctx, clsName)) { b = jEmitClinit(b, clsName) }
             if (clsName == "String" && classNames["$String"] != true) {
                 var sargsV = callExt(b, "js_arr_new", [])
                 for (var si = 0; si < args.length; si++) {
@@ -3755,6 +3785,7 @@ HasStatic   = :script(~~
             jChainRecvTys(suffixes, text)
             for (var vi = 0; vi < suffixes.length; vi++) { if (suffixes[vi].kind == "mcall") { jVaWrapSfx(suffixes[vi]) } }
         }
+        var fctx = curClassName
         return function(b) {
             var cur = hUndef
             var i0 = 0
@@ -3805,6 +3836,8 @@ HasStatic   = :script(~~
                     cur = mergeB.NewPhi([llvm.ir.NewIncoming(cv, callB), llvm.ir.NewIncoming(mv, okB)])
                     b = mergeB
                 } else if (s.kind == "field") {
+                    var finit = (s.frecv == undefined || s.frecv == "") ? "" : jStaticInitOf(s.frecv, s.name, fctx)
+                    if (finit != "") { b = jEmitClinit(b, finit) }
                     cur = callExt(b, "js_get", [cur, emitStr(b, jFieldKeyAt(s.frecv, s.name))])
                 } else if (s.kind == "mref") {
                     cur = jEmitBoundMRef(b, cur, s.name)
@@ -4614,11 +4647,11 @@ HasStatic   = :script(~~
             return b
         }
     }
-    function makeFieldVar(items) {
+    function makeFieldVar(items, text) {
         var dims = ""
         var rest = items.slice(1)
         if (rest.length > 0 && rest[0].cdims != undefined) { dims = rest[0].cdims; rest = rest.slice(1) }
-        return {fname: items[0], finit: rest.length > 0 ? rest[0] : null, fdims: dims}
+        return {fname: items[0], finit: rest.length > 0 ? rest[0] : null, fdims: dims, ftext: jInitText(stripWs(text))}
     }
     // Pushes one member per declarator; they share the modifiers and the type.
     function pushFields(items) {
@@ -4631,7 +4664,7 @@ HasStatic   = :script(~~
             var fty = ty + items[i].fdims
             jNoteFieldTy(items[i].fname, fty)
             push({kind: "field", name: items[i].fname, statik: isStatic, init: fieldInitOf(items[i].finit, fty),
-                  fty: fty})
+                  fty: fty, pure: jInitPure(items[i].ftext), sconst: isStatic && jIsConstField(mods, fty, items[i].ftext)})
         }
     }
     // A field initializer gets the same assignment conversion as a local
@@ -5284,7 +5317,8 @@ HasStatic   = :script(~~
                     declared["$" + m2.name] = true
                     curHasThis = !m2.statik
                     var m2Var = m2.params.length > 0 && typeof m2.params[m2.params.length - 1] != "string"
-                    var idx = emitFunc(m2.params, m2.body, !m2.statik, null, undefined, null, false, null,
+                    var mbody = (m2.statik && m2.body != null && jClassLazy(name)) ? jClinitFirst(name, m2.body) : m2.body
+                    var idx = emitFunc(m2.params, mbody, !m2.statik, null, undefined, null, false, null,
                                        jBoundTys(m2.name, m2.ptys, m2Var))
                     defPos(b, m2.pos)
                     var mclo = callExt(b, "js_closure", [handle(idx), curScopeV])
@@ -5333,10 +5367,12 @@ HasStatic   = :script(~~
             // Static fields and static initializer blocks run in textual order once
             // the constructors and methods are installed, so an initializer can
             // construct its own class or call its static methods. A member type's
-            // run after its top-level class's (jStaticQueue). Twin of the statics
-            // loop and jRunStatics in java-interpreter.abnf.
+            // run after its top-level class's (jStaticQueue). A lazy class's
+            // (jClassLazy) are its "__clinit" closure instead, which runs - after
+            // its superclass's - at the first use (jEmitClinit). Twin of the
+            // statics loop, jRunStatics and jClinit in java-interpreter.abnf.
             curHasThis = savedHasThis
-            var emitStatics = function(b) {
+            var emitStatics = function(b, cV) {
                 var hadThis = curHasThis
                 curHasThis = savedHasThis
                 for (var si = 0; si < members.length; si++) {
@@ -5351,16 +5387,40 @@ HasStatic   = :script(~~
                     } else {
                         sv = fieldDefault(b, sm)
                     }
-                    callExt(b, "js_set", [clsV, emitStr(b, jFieldKey(name, sm.name)), sv])
+                    callExt(b, "js_set", [cV, emitStr(b, jFieldKey(name, sm.name)), sv])
                 }
                 curHasThis = hadThis
                 return b
             }
-            if (asMember) {
-                jStaticQueue.push(emitStatics)
+            if (jClassLazy(name)) {
+                // Until it is initialized a lazy class's static fields hold their
+                // defaults - an initialization cycle reads them - and its constant
+                // variables their values (JLS 12.4.2).
+                for (var di = 0; di < members.length; di++) {
+                    var dm = members[di]
+                    if (dm.kind != "field" || !dm.statik) { continue }
+                    var dv = fieldDefault(b, dm)
+                    if (dm.sconst) {
+                        var dr = dm.init(b)
+                        b = dr.b
+                        dv = dr.v
+                    }
+                    callExt(b, "js_set", [clsV, emitStr(b, jFieldKey(name, dm.name)), dv])
+                }
+                var supInit = (superName != null && jClassLazy(superName)) ? superName : ""
+                var cidx = emitFunc([], function(bb) {
+                    var cV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, name)])
+                    callExt(bb, "js_set", [cV, emitStr(bb, "__clinit"), hUndef])
+                    if (supInit != "") { bb = jEmitClinit(bb, supInit) }
+                    return emitStatics(bb, cV)
+                }, false, null)
+                callExt(b, "js_set", [clsV, emitStr(b, "__clinit"), callExt(b, "js_closure", [handle(cidx), curScopeV])])
+            } else if (asMember) {
+                jStaticQueue.push(function(qb) { return emitStatics(qb, clsV) })
                 return b
+            } else {
+                b = emitStatics(b, clsV)
             }
-            b = emitStatics(b)
             if (topLevel) {
                 var q = jStaticQueue
                 jStaticQueue = []
@@ -5376,6 +5436,24 @@ HasStatic   = :script(~~
     // inside a function body and runs at once).
     var jStaticQueue = []
     var jEmitMember = false
+    // A static method body that first initializes its lazy class: invoking it
+    // is a use (JLS 12.4.1), after the arguments are evaluated.
+    function jClinitFirst(cls, body) {
+        return function(b) { return body(jEmitClinit(b, cls)) }
+    }
+    // Runs lazy class cls's initialization unless it has run or is running:
+    // its "__clinit" closure clears itself first. Twin of jClinit in
+    // java-interpreter.abnf.
+    function jEmitClinit(b, cls) {
+        var cV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, cls)])
+        var fV = callExt(b, "js_get", [cV, emitStr(b, "__clinit")])
+        var runB = curF.NewBlock("")
+        var doneB = curF.NewBlock("")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, fV, hUndef), doneB, runB)
+        callExt(runB, "js_call", [fV, hUndef, callExt(runB, "js_arr_new", [])])
+        runB.NewBr(doneB)
+        return doneB
+    }
     function makeClassStmt(items) {
         jExitClass()
         jOvDeclare(items[0], items.slice(1))
@@ -5835,6 +5913,7 @@ HasStatic   = :script(~~
             subs.push(buildClassStmt(name + "$" + consts[s].name, smem, undefined))
         }
         jOvDeclare(name, members)
+        jNoLazy["$" + name] = true
         // A constant is a static field of the enum's own type (JLS 8.9.1).
         for (var fc = 0; fc < consts.length; fc++) { jNoteFieldTy(consts[fc].name, name) }
         // java.lang.Enum#toString answers the constant's name unless the enum

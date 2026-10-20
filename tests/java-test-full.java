@@ -177,6 +177,7 @@ class Main {
         S84.run(); // SECTION-CALL 84
         S85.run(); // SECTION-CALL 85
         S86.run(); // SECTION-CALL 86
+        S87.run(); // SECTION-CALL 87
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -4788,5 +4789,54 @@ class S86 {
         a.n += 5;
         hd = hd + " " + b.both() + a.n + b.n + " " + new HC().all() + " " + new HD().get(1000);
         Main.check("hd86", hd.equals("B2A2A2A211221122 A2B21122 B2A2A2A214721472 BBAAAAAA205101205101205101 B222B222A211 1016"));
+    }
+}
+
+// ===== SECTION 87: a class is initialized at its first use =====
+//
+// JLS 12.4.1: a static block and the static field initializers run when an
+// instance is created, a static method is invoked (after its arguments) or
+// a static field that is no constant variable is used (a plain assignment
+// after its right-hand side) - a superclass first, a member class not with
+// its enclosing one. Until then a field holds its default, which an
+// initialization cycle reads. Every expected value is java 24.0.2's.
+class S87 {
+    static StringBuilder log = new StringBuilder();
+    static int note(String s) { log.append(s); return s.length(); }
+    static class LzO { static { log.append("O"); } static int v = 7; static final int K = 3; static final String S = "s"; static void f() { log.append("f"); } }
+    static class LzP { static int w = mk(); static int mk() { log.append("P"); return 1; } }
+    static class LzBase { static { log.append("[B]"); } static int bv = note("b"); }
+    static class LzDerived extends LzBase { static { log.append("[D]"); } LzDerived() { log.append("d"); } static int dv = 4; }
+    static class LzArg { static { log.append("A"); } static int g(int x) { return x; } }
+    static class LzWr { static int x; static { log.append("W"); } }
+    static class LzCyc1 { static int a = LzCyc2.b + 1; static { log.append("c1:" + a); } }
+    static class LzCyc2 { static int b = LzCyc1.a + 10; static { log.append("c2:" + b); } }
+    static class LzOuter {
+        static List<String> items = new ArrayList<>();
+        static { items.add("o"); log.append("Ou"); }
+        static class LzIn { static { log.append("In"); } int size() { return items.size(); } }
+    }
+    static class LzAnon { static { log.append("An"); } int k() { return 1; } }
+    static class LzSelf { static int n; static { log.append("Se"); } static int bump() { return ++n; } static int twice() { return bump() + bump(); } }
+    static void run() {
+        log.append("L:");
+        int k = LzO.K;
+        String s = LzO.S;
+        log.append("|" + k + s + "|");
+        LzO.f();
+        log.append("|");
+        int x = LzP.w;
+        log.append("|");
+        new LzDerived();
+        log.append("|" + LzDerived.dv + "|");
+        LzArg.g(note("x"));
+        log.append("|");
+        LzWr.x = note("y");
+        log.append("|" + LzWr.x + "|");
+        log.append(LzCyc1.a + "," + LzCyc2.b + "|");
+        log.append(new LzOuter.LzIn().size() + "|");
+        LzAnon an = new LzAnon() { int k() { return 2; } };
+        log.append(an.k() + "|" + LzSelf.twice() + "|" + LzO.v + x);
+        Main.check("ci87", log.toString().equals("L:|3s|Of|P|[B]b[D]d|4|xA|yW|1|c2:10c1:1111,10|InOu1|AnSe2|3|71"));
     }
 }

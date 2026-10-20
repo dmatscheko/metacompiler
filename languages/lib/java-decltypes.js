@@ -583,6 +583,7 @@ function jOvDeclare(name, members) {
     var sup = ""
     var ms = []
     var fl = {}
+    var eff = false
     var ctors = []
     for (var i = 0; i < members.length; i++) {
         var m = members[i]
@@ -597,12 +598,107 @@ function jOvDeclare(name, members) {
             ms.push({name: m.name, raw: jOvRawOf(m.ptys, v), ptys: m.ptys, isVar: v, statik: m.statik})
         }
         if (m.kind == "ctor" && m.ptys != undefined) { ctors.push(m) }
-        if (m.kind == "field") { fl["$" + m.name] = m.statik ? "s" : "i" }
+        if (m.kind == "field") { fl["$" + m.name] = !m.statik ? "i" : (m.sconst === true ? "k" : "s") }
+        if (m.kind == "sinit" || m.kind == "staticinit" || (m.kind == "field" && m.statik && m.pure === false)) { eff = true }
     }
     var cts = jOvCtorCands(ctors)
     for (var k = 0; k < cts.length; k++) { cts[k].n = ctors[k].params.length }
     if (jOvCls["$" + name] == undefined) { jOvNames.push(name) }
-    jOvCls["$" + name] = {sup: sup, ms: ms, cts: cts, fl: fl}
+    jOvCls["$" + name] = {sup: sup, ms: ms, cts: cts, fl: fl, eff: eff}
+}
+// ----- class initialization (JLS 12.4) -----
+//
+// A class is initialized at its first active use - an instance created, a
+// static method invoked, a static field that is no constant variable read or
+// assigned - after its superclass, and the entry class before main. Running
+// a class's static initialization early is only observable when it can have
+// an effect, so a class is LAZY when it or a superclass has a static block
+// or a static field initializer that is not pure (jInitPure); every other
+// class keeps running its statics where it is declared. An enum and an
+// interface are never lazy (jNoLazy).
+var jNoLazy = {}
+function jClassLazy(cls) {
+    if (cls == "Main" || jOvIfaces["$" + cls] == true) { return false }
+    var lazy = false
+    var c = cls
+    for (var guard = 0; c != "" && guard < 64; guard++) {
+        if (jNoLazy["$" + c] == true) { return false }
+        var rec = jOvCls["$" + c]
+        if (rec == undefined) { return lazy }
+        if (rec.eff) { lazy = true }
+        c = rec.sup
+    }
+    return lazy
+}
+// Is ancestor `cls` itself or a superclass of ctx? Code written in ctx runs
+// only once ctx - and so every superclass - is being initialized.
+function jInChain(ctx, cls) {
+    var c = ctx
+    for (var guard = 0; c != "" && c != undefined && guard < 64; guard++) {
+        if (c == cls) { return true }
+        var rec = jOvCls["$" + c]
+        if (rec == undefined) { return false }
+        c = rec.sup
+    }
+    return false
+}
+// The class whose initialization a use of static field `name`, named
+// through class cls from code in class ctx, triggers - "" when none must be
+// (no such static, a constant variable, a class that is not lazy, or one ctx
+// already implies).
+function jStaticInitOf(cls, name, ctx) {
+    var c = cls
+    for (var guard = 0; c != "" && c != undefined && guard < 64; guard++) {
+        var rec = jOvCls["$" + c]
+        if (rec == undefined) { return "" }
+        var k = rec.fl["$" + name]
+        if (k != undefined) { return (k == "s" && jClassLazy(c) && !jInChain(ctx, c)) ? c : "" }
+        c = rec.sup
+    }
+    return ""
+}
+// Is static field `name` of class cls a constant variable (jIsConstField)?
+function jIsConstIn(cls, name) {
+    var rec = jOvCls["$" + cls]
+    return rec != undefined && rec.fl["$" + name] == "k"
+}
+// Is a field initializer's text (whitespace-free) PURE: literals,
+// operators and array creation of a primitive type only? A name, a call or
+// a member access may reach another class or have an effect.
+function jInitPure(t) {
+    var n = t.length
+    var i = 0
+    while (i < n) {
+        var ch = t.charAt(i)
+        if (ch == "\"" || ch == "'") {
+            i = jSkipQuote(t, i)
+        } else if (ch >= "0" && ch <= "9") {
+            while (i < n && (jIsIdChar(t.charCodeAt(i)) || t.charAt(i) == ".")) { i++ }
+        } else if (jIsIdChar(t.charCodeAt(i))) {
+            var e = jIdentEnd(t, i)
+            var w = t.substring(i, e)
+            if (w != "true" && w != "false" && w != "null"
+                && !(w.length > 3 && w.substring(0, 3) == "new" && (jIsPrimTy(w.substring(3)) || w.substring(3) == "boolean"))) { return false }
+            i = e
+        } else if (ch == "(") {
+            return false
+        } else {
+            i++
+        }
+    }
+    return true
+}
+// A static field is a CONSTANT VARIABLE (JLS 4.12.4), whose use initializes
+// nothing, when it is final, of a primitive type or String, and pure.
+function jIsConstField(mods, ty, initText) {
+    var fin = false
+    for (var i = 0; i < mods.length; i++) { if (mods[i] == "final") { fin = true } }
+    return fin && initText != "" && (jIsPrimTy(ty) || ty == "boolean" || ty == "String") && jInitPure(initText)
+}
+// The text after a field declarator's `=`, "" when it has none.
+function jInitText(dtext) {
+    var e = dtext.indexOf("=")
+    return e < 0 ? "" : dtext.substring(e + 1)
 }
 // The slot a field `name` named through class cls (its static type, or the
 // class the access is written in) lives in. A field is found from cls
@@ -625,7 +721,7 @@ function jFieldKey(cls, name) {
         if (rec == undefined) { return name }
         var k = rec.fl["$" + name]
         if (k != undefined) {
-            kind = k
+            kind = k == "i" ? "i" : "s"
             break
         }
         c = rec.sup
