@@ -5034,6 +5034,55 @@ fun sec102() {
 }
 
 
+// ===== SECTION 103: sortedMapOf order, Array.copyOf =====
+// Read off kotlin-stdlib 2.2.21 driven from java (JDK 24). sortedMapOf is a
+// java.util.TreeMap, so it iterates in ascending key order whatever order the pairs
+// come in, a repeated key keeping its last value. copyOf() is an independent copy;
+// copyOf(n) truncates or pads with the element type's default (null in an Array<T>,
+// 0 / 0.0 / false / '\u0000' in a primitive array), and a negative size throws.
+fun err103(f: () -> Any?): String {
+    try { return "" + f() } catch (e: Exception) { return e::class.simpleName + ": " + e.message }
+}
+fun sec103() {
+    val ks = listOf(2, 1, 3)
+    check("smo103a", "" + sortedMapOf(ks[0] to "b", ks[1] to "a", ks[2] to "c") == "{1=a, 2=b, 3=c}"
+                    && "" + sortedMapOf("b" to 1, "a" to 2, "b" to 3) == "{a=2, b=3}"
+                    && sortedMapOf(ks[0] to 0, ks[1] to 0).keys.first() == 1)
+    val a = arrayOf(1, 2, 3)
+    val b = a.copyOf()
+    b[0] = 9
+    check("cpy103b", a.joinToString() == "1, 2, 3" && b.joinToString() == "9, 2, 3"
+                    && a.copyOf(5).contentToString() == "[1, 2, 3, null, null]" && a.copyOf(ks[0]).contentToString() == "[1, 2]")
+    val ia = intArrayOf(1, 2, 3)
+    check("cpy103c", ia.copyOf(5).contentToString() == "[1, 2, 3, 0, 0]" && ia.copyOf().sum() == 6
+                    && longArrayOf(1L, 2L).copyOf(3).contentToString() == "[1, 2, 0]"
+                    && doubleArrayOf(1.5).copyOf(2).contentToString() == "[1.5, 0.0]"
+                    && booleanArrayOf(true).copyOf(2).contentToString() == "[true, false]"
+                    && charArrayOf('x').copyOf(2)[1].code == 0)
+    check("cpy103d", err103 { ia.copyOf(-1) } == "NegativeArraySizeException: -1")
+}
+
+// ===== SECTION 104: an extension applies to its receiver type =====
+// Kotlin resolves a call by the receiver's type: an extension declared for Int, for a
+// class or for String is not a candidate on another receiver, so a String call reaches
+// String's own member (kotlin.text.split with limit 2 answers [a, b;c:d] under
+// kotlin-stdlib 2.2.21) and one name may be declared for several receivers.
+class Box104(val v: Int)
+fun Int.split(x: Int, y: Int, limit: Int) = x + y + limit
+fun Box104.first() = v * 10
+fun Int.kind104() = "int " + this
+fun String.kind104() = "str " + this
+fun Box104.kind104() = "box " + v
+fun <T> T.tag104(): String = "tag(" + this + ")"
+fun sec104() {
+    val s = listOf("a,b;c:d", "q")
+    check("ext104a", "" + s[0].split(",", ";", ":", limit = 2) == "[a, b;c:d]" && 5.split(1, 2, 3) == 6
+                    && listOf(7, 8).first() == 7 && Box104(2).first() == 20)
+    check("ext104b", 5.kind104() == "int 5" && s[1].kind104() == "str q" && Box104(3).kind104() == "box 3"
+                    && 4.tag104() == "tag(4)" && s[1].tag104() == "tag(q)")
+}
+
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5137,6 +5186,8 @@ fun main() {
     sec100() // SECTION-CALL 100
     sec101() // SECTION-CALL 101
     sec102() // SECTION-CALL 102
+    sec103() // SECTION-CALL 103
+    sec104() // SECTION-CALL 104
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

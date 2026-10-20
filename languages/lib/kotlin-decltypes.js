@@ -286,6 +286,24 @@ function ktBaseName(ty) {
     var lt = t.indexOf("<")
     return lt < 0 ? t : t.substring(0, lt)
 }
+// The type an extension call tests its receiver against, from the receiver's text
+// (`String?.`, `a.Box<T>.`): the simple base name, keeping a `?` so a null receiver
+// still matches, or "" for an annotated or parenthesized receiver.
+function ktExtRecvTy(txt) {
+    if (txt.indexOf("@") >= 0 || txt.indexOf("(") >= 0) { return "" }
+    var t = txt.substring(0, txt.length - 1)
+    var segs = ktBaseName(t).split(".")
+    return segs[segs.length - 1] + ((t.length > 0 && t.charAt(t.length - 1) == "?") ? "?" : "")
+}
+// Whether a call tests an extension's receiver type at all: the value types whose
+// runtime test is exact, and the classes the program declares. Any other receiver
+// (a type parameter, Any, an interface, a collection) is not tested, and the
+// extension then applies to every receiver of its name. Read at the call, when every
+// class has been seen.
+function ktExtTested(ty) {
+    var b = ktBaseName(ty)
+    return b == "String" || b == "Char" || b == "Boolean" || b == "Int" || ktClassExt["$" + b] != undefined
+}
 // The declared type of property `name` of class `cls`; for a class not known here,
 // the name's type when every declaration of it agrees, else "".
 function ktMemberTypeIn(cls, name) {
@@ -691,3 +709,10 @@ var ktStdParamNames = {
     "$padEnd": ["length", "padChar"]
 }
 function ktStdParams(name) { return ktStdParamNames["$" + name] }
+
+// The java.* classes an import may name that the runtime provides under their
+// qualified path (hostGlobals / js_ktglobal). Such an import binds its simple name,
+// or its alias, to that class: after `import java.util.Random`, `Random(1)` is
+// java.util.Random, not kotlin.random.Random.
+var ktJavaClassImports = {"$java.util.Random": true}
+function ktJavaClassImport(path) { return ktJavaClassImports["$" + path] == true }

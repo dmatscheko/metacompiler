@@ -710,7 +710,7 @@ function ktExcHierarchy() {
     var under = ["IllegalStateException", "IllegalArgumentException",
         "IndexOutOfBoundsException", "NullPointerException",
         "UnsupportedOperationException", "ArithmeticException", "NoSuchElementException",
-        "ConcurrentModificationException", "ClassCastException"]
+        "ConcurrentModificationException", "ClassCastException", "NegativeArraySizeException"]
     var i = 0
     while (i < under.length) {
         h[under[i]] = k0MkExc(under[i], h["RuntimeException"])
@@ -3978,6 +3978,28 @@ function k3Copy(a) {
     return out
 }
 
+// k3CopyOf is Array.copyOf([newSize]): a truncated copy, or one padded with the
+// element type's default - null in an Array<T>, the zero its primitive array's
+// constructor fills with. Twin of the copyOf arm of ktSeqMethodK in abnf/jsrtkotlin.go.
+function k3CopyOf(a, args) {
+    var n = a.length
+    if (args.length > 0) { n = k3Int(args[0]) }
+    if (n < 0) { ktRaise("NegativeArraySizeException", "" + n) }
+    var pad = k3ArrPad(arrKind(a))
+    var out = []
+    var i = 0
+    for (i = 0; i < n; i = i + 1) {
+        if (i < a.length) { out.push(a[i]) } else { out.push(pad) }
+    }
+    return out
+}
+
+// The default element of an array of kind ak (ktaElems).
+function k3ArrPad(ak) {
+    if (ak < 5) { return null }
+    return ktGlobalFn(ktaElems[ak - 5] + "Array")(1)[0]
+}
+
 // k3Sub is the Go slice expression es[lo:hi].
 function k3Sub(a, lo, hi) {
     var out = []
@@ -4614,6 +4636,7 @@ function ktSeqMethodK(arr, name, args, kind) {
     // The ARRAY-to-collection conversions. An Array and a List are the same host
     // array in this value model, so every one of them is a COPY of the elements.
     if (k3IsCopyName(name)) { return k3Copy(es) }
+    if (name == "copyOf") { return k3CopyOf(es, args) }
     if (name == "withIndex") {
         for (i = 0; i < es.length; i = i + 1) {
             out.push({__ktiv: true, index: i, value: es[i], first: i, second: es[i]})
@@ -7817,7 +7840,6 @@ function k4IsMapName(n) {
     if (n == "mutableMapOf") { return true }
     if (n == "hashMapOf") { return true }
     if (n == "linkedMapOf") { return true }
-    if (n == "sortedMapOf") { return true }
     return n == "emptyMap"
 }
 
@@ -8188,6 +8210,26 @@ function ktGlobalFn(name) {
                 i = i + 1
             }
             return ktJvmTagged(k4SetFrom(as), name, as.length)
+        }
+    }
+    // A java.util.TreeMap: ascending key order, not insertion order.
+    if (name == "sortedMapOf") {
+        return function () {
+            var as = []
+            var i = 0
+            while (i < arguments.length) {
+                as.push(arguments[i])
+                i = i + 1
+            }
+            var m = ktMapOf(as)
+            var out = ktMakeMap()
+            var ks = ktSortBy(ktMapKeys(m), undefined, false)
+            i = 0
+            while (i < ks.length) {
+                ktMapPut(out, ks[i], ktMapVals(m)[ktMapFind(ktMapKeys(m), ks[i])])
+                i = i + 1
+            }
+            return ktJvmTagged(out, name, 0)
         }
     }
     // A java.util.TreeSet: ascending order, not insertion order.

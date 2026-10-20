@@ -231,7 +231,7 @@ func ktExcHierarchy() map[string]*jsObject {
 	for _, n := range []string{"IllegalStateException", "IllegalArgumentException",
 		"IndexOutOfBoundsException", "NullPointerException",
 		"UnsupportedOperationException", "ArithmeticException", "NoSuchElementException",
-		"ConcurrentModificationException", "ClassCastException"} {
+		"ConcurrentModificationException", "ClassCastException", "NegativeArraySizeException"} {
 		h[n] = mk(n, h["RuntimeException"])
 	}
 	// NumberFormatException is under IllegalArgumentException, not directly under
@@ -5364,6 +5364,30 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		"toDoubleArray", "toFloatArray", "toBooleanArray", "toCharArray",
 		"toTypedArray":
 		return arr(append([]interface{}{}, es...)), true
+	// copyOf(newSize) truncates, or pads with the element type's default: null in an
+	// Array<T>, the zero its primitive array's constructor fills with. Twin of the
+	// copyOf arm in kotlin-interpreter.abnf and k3CopyOf in languages/lib/kotlin-rt.metajs.
+	case "copyOf":
+		n := len(es)
+		if len(args) > 0 {
+			n = jsToInt(rt.toNumber(args[0]))
+		}
+		if n < 0 {
+			rt.ktRaise("NegativeArraySizeException", strconv.Itoa(n))
+		}
+		var pad interface{} = jsNull
+		if o.kind >= ktArrPrim {
+			pad = rt.call(ktGlobalFn(rt, ktaElems[o.kind-ktArrPrim]+"Array"), jsUndef, []interface{}{float64(1)}).(*jsArray).elems[0]
+		}
+		out := make([]interface{}, n)
+		for i := range out {
+			if i < len(es) {
+				out[i] = es[i]
+			} else {
+				out[i] = pad
+			}
+		}
+		return arr(out), true
 	case "withIndex":
 		out := make([]interface{}, len(es))
 		for i, e := range es {
@@ -7585,9 +7609,20 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 			return ktDelegBox("notNull", jsNull, nil)
 		}))
 		return d
-	case "mapOf", "mutableMapOf", "hashMapOf", "linkedMapOf", "sortedMapOf", "emptyMap":
+	case "mapOf", "mutableMapOf", "hashMapOf", "linkedMapOf", "emptyMap":
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			return ktJvmTagged(rt.ktMapOf(args), name, len(args))
+		})
+	case "sortedMapOf":
+		// A java.util.TreeMap: ascending key order, not insertion order.
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			m := rt.ktMapOf(args)
+			keys, vals, _ := dictParts(m)
+			out := ktMakeMap()
+			for _, k := range ktSortBy(rt, keys.elems, nil, false).elems {
+				rt.ktMapPut(out, k, vals.elems[rt.ktMapFind(keys, k)])
+			}
+			return ktJvmTagged(out, name, 0)
 		})
 	// The builders take an optional capacity first, so the lambda is the LAST
 	// argument.

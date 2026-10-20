@@ -585,16 +585,18 @@ ExprBody    <~~ push(makeExprBody(pop())) ~~>
 // A top-level extension function WITH a body - fun Receiver.name(params): T { ... } -
 // is genuine: it registers under its bare name, and a method call recv.name(args)
 // dispatches to it with the receiver bound to `this` (a nullable-receiver extension
-// may see null). The receiver type (dotted, generic, nullable) is parsed and DROPPED:
-// dispatch is by NAME, so an extension must not reuse a builtin or class method name
-// (those always win; see extResolves). The tag-less RecvSeg pushes nothing.
+// may see null). A builtin or class method of the name always wins (extResolves), and
+// a call tests the receiver against the type ExtRecv records where that test is exact
+// (extFor). The tag-less RecvSeg pushes nothing.
 // The leading angle run is the function's own TYPE PARAMETERS, not a skippable
 // decoration: `inline fun <reified T> Any.isA(): Boolean = this is T` resolves `is T`
 // against the call site, exactly as the non-extension form does. Recording them here is
 // what makes that work; TypeParams is item-neutral (it only calls tpSet), so
 // registerExtFun's positional item list is unchanged.
 ExtFun      <~~ ktNoteBody(up.start, up.pos); registerExtFun(takeAll()); retLblPop() ~~>
-            = KwFun <~~ tpBegin() ~~> [ TypeParams ] AnnoRecv { RecvSeg } KId <~~ push(up.in); retLblPush(up.in, "fun") ~~> [ SkipAngle ] ParamList [ ":" Type ] [ WhereClause ] [ ContractClause ] [ WhereClause ] FunBody ;
+            = KwFun <~~ tpBegin() ~~> [ TypeParams ] ExtRecv KId <~~ push(up.in); retLblPush(up.in, "fun") ~~> [ SkipAngle ] ParamList [ ":" Type ] [ WhereClause ] [ ContractClause ] [ WhereClause ] FunBody ;
+ExtRecv     <~~ push({extRecv: up.in}) ~~>
+            = AnnoRecv { RecvSeg } ;
 RecvSeg     = NameRecvSeg | "(" Type ")" [ "?" ] "." ;
 NameRecvSeg = KId [ SkipAngle ] [ "?" ] "." ;
 // An annotation between `fun` and the receiver belongs to the RECEIVER TYPE, and
@@ -948,7 +950,7 @@ LocalFun    <~~ push(makeLocalFunStmt(pop())) ~~>
 // same dispatch-by-name registration a top-level extension gets, performed when the
 // declaration statement runs.
 LocalExtFun <~~ push(makeLocalExtFun(takeAll())); retLblPop() ~~>
-            = KwFun [ SkipAngle ] AnnoRecv { RecvSeg } KId <~~ push(up.in); retLblPush(up.in, "fun") ~~> [ SkipAngle ] ParamList [ ":" Type ] [ WhereClause ] [ ContractClause ] [ WhereClause ] FunBody ;
+            = KwFun [ SkipAngle ] ExtRecv KId <~~ push(up.in); retLblPush(up.in, "fun") ~~> [ SkipAngle ] ParamList [ ":" Type ] [ WhereClause ] [ ContractClause ] [ WhereClause ] FunBody ;
 
 // try/catch/finally and throw are implemented (excThrow/excTryTyped, languages/lib):
 // throw raises the value, catch binds it (the first clause whose declared type accepts
@@ -3992,8 +3994,13 @@ NotMemberKw = :script(~~
     hostGlobals["hashMapOf"] = function() {
         return kJvmTagged(hostGlobals["mutableMapOf"].apply(undefined, arguments), "java.util.HashMap")
     }
+    // sortedMapOf is a java.util.TreeMap: ascending key order, not insertion order.
     hostGlobals["sortedMapOf"] = function() {
-        return kJvmTagged(hostGlobals["mutableMapOf"].apply(undefined, arguments), "java.util.TreeMap")
+        var m = hostGlobals["mutableMapOf"].apply(undefined, arguments)
+        var out = kMakeMap()
+        var ks = kSortBy(m.keys, null, false)
+        for (var i = 0; i < ks.length; i++) { kMapPut(out, ks[i], m.vals[kMapFind(m, ks[i])]) }
+        return kJvmTagged(out, "java.util.TreeMap")
     }
     hostGlobals["emptyMap"] = function() { return kJvmTagged(kMakeMap(), "kotlin.collections.EmptyMap") }
     // buildMap { put(k, v) } - the builder lambda takes the fresh map as `it`. The
@@ -4998,23 +5005,48 @@ NotMemberKw = :script(~~
         }
         return (r != undefined && r.isRet) ? r.v : undefined
     }
-    // items = [name, {params}, body]: the receiver type was dropped by RecvSeg. `this`
-    // is bound UNCONDITIONALLY (even to null: a nullable-receiver extension runs with
-    // this = null, and the compiled twin binds args[0] unconditionally). Global-rooted
-    // like a top-level function; the receiver is args[0], so params start at argOff 1.
+    // items = [{extRecv}, name, {params}, body]. `this` is bound UNCONDITIONALLY (even
+    // to null: a nullable-receiver extension runs with this = null, and the compiled
+    // twin binds args[0] unconditionally). Global-rooted like a top-level function; the
+    // receiver is args[0], so params start at argOff 1. extFuns holds the latest
+    // declaration of a name (what a reference or an infix call reaches); extTyped every
+    // receiver type the name is declared for, one entry per type, latest last.
+    var extTyped = {}
     function registerExtFun(items) {
         tpEnd()
-        var params = items[1].params
-        var body = items[2]
-        extFuns["$" + items[0]] = function() {
+        var ty = ktExtRecvTy(items[0].extRecv)
+        var params = items[2].params
+        var body = items[3]
+        var fn = function() {
             return runFrame([globalScope, {}], arguments[0], true, params, arguments, 1, body)
         }
+        extFuns["$" + items[1]] = fn
+        var old = extTyped["$" + items[1]]
+        var l = []
+        if (old != undefined) { for (var i = 0; i < old.length; i++) { if (old[i].ty != ty) { l.push(old[i]) } } }
+        l.push({ty: ty, fn: fn})
+        extTyped["$" + items[1]] = l
     }
     function extResolves(name) {
         if (extFuns["$" + name] == undefined) { return false }
         if (builtinMethodNames["$" + name] == true) { return false }
         if (classMethodNames["$" + name] == true) { return false }
         return true
+    }
+    // The extension a call recv.name(...) runs, or null for the member surface: the
+    // latest one whose TESTED receiver type (ktExtTested) the receiver has, else the
+    // latest untested one. Twin of the extension chain in emitSuffix in
+    // kotlin-to-llvm-ir.abnf.
+    function extFor(name, target) {
+        if (!extResolves(name)) { return null }
+        var l = extTyped["$" + name]
+        for (var i = l.length - 1; i >= 0; i--) {
+            if (ktExtTested(l[i].ty) && kIsType(target, l[i].ty)) { return l[i].fn }
+        }
+        for (var j = l.length - 1; j >= 0; j--) {
+            if (!ktExtTested(l[j].ty)) { return l[j].fn }
+        }
+        return null
     }
 
     // args is the positional argument list; spec (optional) additionally carries the
@@ -6497,6 +6529,18 @@ NotMemberKw = :script(~~
             for (i = 0; i < es.length; i++) { out.push(es[i]) }
             return {v: out}
         }
+        // copyOf(newSize) truncates, or pads with the element type's default: null in
+        // an Array<T>, the zero its primitive array's constructor fills with. Twin of
+        // the copyOf arm of ktSeqMethodK in abnf/jsrtkotlin.go.
+        if (name == "copyOf") {
+            var cn = args.length == 0 ? es.length : kNum(args[0])
+            if (cn < 0) { kThrowExc("NegativeArraySizeException", "" + cn) }
+            var cak = arrKind(es)
+            var pad = cak >= 5 ? hostGlobals[ktaElems[cak - 5] + "Array"](1)[0] : null
+            out = []
+            for (i = 0; i < cn; i++) { out.push(i < es.length ? es[i] : pad) }
+            return {v: out}
+        }
         if (name == "withIndex") {
             out = []
             for (i = 0; i < es.length; i++) {
@@ -7139,9 +7183,10 @@ NotMemberKw = :script(~~
             kSetNamed(sp.named)
             return mx.fn.apply(undefined, concat2impl([mx.self, target], args))
         }
-        if (extResolves(name)) {
+        var xf = extFor(name, target)
+        if (xf != null) {
             kSetNamed(sp.named)
-            return extFuns["$" + name].apply(undefined, concat2impl([target], args))
+            return xf.apply(undefined, concat2impl([target], args))
         }
         if (kIsLazySeq(target)) {
             var lsm = kLazySeqMethod(target, name, args)
@@ -9158,11 +9203,13 @@ NotMemberKw = :script(~~
             if (items[i].ialias != undefined) { alias = stripWs(items[i].ialias) }
             else { path = stripWs(items[i]) }
         }
-        resolveImport(path, pos)
         var seg = path
         var dot = -1
         for (var j = 0; j < path.length; j++) { if (path.charAt(j) == ".") { dot = j } }
         if (dot >= 0) { seg = path.substring(dot + 1, path.length) }
+        // Twin of ktImportBinds in kotlin-to-llvm-ir.abnf.
+        if (ktJavaClassImport(path)) { hostGlobals[alias != "" ? alias : seg] = hostGlobals[path] }
+        else { resolveImport(path, pos) }
         noteImportName(seg)
         noteImportName(alias)
     }
@@ -11234,7 +11281,7 @@ NotMemberKw = :script(~~
                      "IndexOutOfBoundsException", "NullPointerException",
                      "UnsupportedOperationException", "ArithmeticException",
                      "NoSuchElementException", "ConcurrentModificationException",
-                     "ClassCastException", "NumberFormatException",
+                     "ClassCastException", "NegativeArraySizeException", "NumberFormatException",
                      "IllegalAccessException", "StackOverflowError", "OutOfMemoryError",
                      "NotImplementedError", "UninitializedPropertyAccessException",
                      // Under IndexOutOfBoundsException, not RuntimeException (java
@@ -11255,7 +11302,7 @@ NotMemberKw = :script(~~
                       "RuntimeException", "RuntimeException",
                       "RuntimeException", "RuntimeException",
                       "RuntimeException", "RuntimeException",
-                      "RuntimeException", "IllegalArgumentException",
+                      "RuntimeException", "RuntimeException", "IllegalArgumentException",
                       "Exception", "Error", "Error",
                       "Error", "RuntimeException",
                       "IndexOutOfBoundsException", "IllegalArgumentException",
