@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-626** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-627** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -145,12 +145,12 @@ appending to a nil []int → 1,2,4,8,...,512,848,1280; for []byte from 8/16/32).
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-621 swift: generic type arguments are not applied; static members on a generic parameter; non-ASCII operators · P1 · SW · IN PROGRESS (SW worker, round 8) [V]
-`struct Box<T> { var v: T }; print(Box<Double>(v: 2).v)` → both halves `2` (swiftc `2.0`); `let b: Box<Double> = Box(v: 3)` and
-`Stack<Double>().push(2)` likewise — the generic bindings need carrying on each instance (or at the construction site).
-`func fold<M: Monoid>(_ xs: [M]) -> M { xs.reduce(M.zero, +) }` aborts "unknown name: M" (a static member on an inferred generic
-parameter). `prefix operator √` (non-ASCII operator characters) does not parse. `t.init(...)` on an enum metatype value goes
-through sw_dyncall's function arm, not the enum init.
+### T-626 swift: generics through metatypes and nil Optionals; `Set<Double>([..])`; overflow-reporting arithmetic; utf16Offset · P2 · SW · OPEN [V]
+`print(type(of: Box<Double>(v: 1)))` → all legs `Box` (swiftc `Box<Double>`). `func orDefault<T: Defaultable>(_ x: T?) -> T` with
+`orDefault(Int?.none)` → every leg aborts "type(of:) of this value is not supported" (swiftc 0). `func zero<T: Numeric>(_ t: T.Type)
+-> T { 0 }; zero(Double.self)` → 0 (swiftc 0.0). `Set<Double>([1, 2])` → `[1, 2]` (swiftc `[1.0, 2.0]`). `addingReportingOverflow`,
+`multipliedReportingOverflow`, ... abort as unknown Int methods. `str.firstIndex(of: "x")!.utf16Offset(in: str)` aborts (String.Index
+is an Int here).
 
 ---
 
@@ -733,6 +733,7 @@ T-617 kotlin: `Char.isLetter` for uncased letters; UInt in format; collection cl
 T-601 go: typed constant folding; named constant string index; float32 constant overflow; canonical error text — DONE fa884729 (plus a sweep: sort/slices/maps/cmp/iter/sync/atomic/strconv/unicode/utf8/bytes written in Go, range-over-func, nil-receiver methods, *T type tests, generic methods, ~15 engine defects)
 T-618 java/kotlin regex: inline flags `(?i)` and atomic groups `(?>..)` under the J dialect — DONE 9a2177eb (java and kotlin; plus line terminators, Unicode case folding, (?U), comments mode)
 T-608 java regex: forward `\k<name>`; `\X \G \N{..} \b{g}` and \p scripts/blocks; PatternSyntaxException getters — DONE 9a2177eb 60e91955 (forward \k error, \G, \X, \b{g}, every \p family from java's own tables, PSE getters; the jxGraphNext bound from the security review fixed); \N{name} DECLINED: needs Unicode's ~35,000-name table (hundreds of KB) in every java/kotlin native binary for a rarely used escape
+T-621 swift: generic type arguments are not applied; static members on a generic parameter; non-ASCII operators — DONE 6d5d390a (generic arguments per instance incl. inference from context, M.zero, non-ASCII operators, enum metatype init; plus 13 swiftc-checked fixes)
 
 # Settled — do not re-open
 
