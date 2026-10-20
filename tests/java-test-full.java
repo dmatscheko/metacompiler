@@ -167,6 +167,7 @@ class Main {
         S79.run(); // SECTION-CALL 79
         S80.run(); // SECTION-CALL 80
         S81.run(); // SECTION-CALL 81
+        S82.run(); // SECTION-CALL 82
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -4604,5 +4605,30 @@ class S81 {
         Main.check("ia81", (ia + " " + o.hits).equals("in2 3"));
         Sub s = new Sub();
         Main.check("fz81", (s.seen + " | " + s.probe()).equals("0 false 0.0 | 5 true 1.5"));
+    }
+}
+
+// ===== SECTION 82: record components' declared types and a varargs component =====
+//
+// The canonical constructor converts each argument to its component's type
+// (an int passed for a double component is 1.0) and collects a varargs last
+// component into an array, or takes one given whole; a declared canonical
+// constructor replaces the generated one. Every expected value is java 24.0.2's.
+class S82 {
+    record Comp(double x, long y) {}
+    record Half(double v) {
+        Half { v = v / 2; }
+    }
+    record Bag(String label, int... items) {
+        int total() { int t = 0; for (int i : items) { t += i; } return t; }
+    }
+    record Inc(long a) {
+        Inc(long a) { this.a = a + 1; }
+    }
+    static void run() {
+        Comp p = new Comp(1, 2);
+        String rc = p + " " + (p.x() / 4) + " " + new Half(3) + " " + new Bag("b", 1, 2, 3).total() + " " + new Bag("e").items().length
+            + " " + new Bag("w", new int[]{4, 5}).total() + " " + new Inc(5);
+        Main.check("rc82", rc.equals("Comp[x=1.0, y=2] 0.25 Half[v=1.5] 6 0 9 Inc[a=6]"));
     }
 }

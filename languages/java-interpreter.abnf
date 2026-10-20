@@ -373,12 +373,15 @@ RMember     = StaticInit | NestedType | Ctor | AbstractMethod | Method
             | CompactCtor | RField | StraySemi ;
 RField      <~~ pushFields(takeAll()) ~~>
             = HasStatic Mods FType FieldVar { "," FieldVar } ";" ;
-RParams     <~~ push({rparams: takeAll()}) ~~>
+RParams     <~~ push(jRecParams(takeAll())) ~~>
             = "(" [ RParam { "," RParam } ] ")" ;
 // A record component may carry annotations and may be VARARGS
-// (`record R(String name, String... rest) {}`, JLS 8.10.1). The `...` is parsed
-// and dropped - the component is bound to whatever single argument arrives.
-RParam      = { Annotation } Type { Annotation } [ "..." ] Id <~~ push(up.in) ~~> ;
+// (`record R(String name, String... rest) {}`, JLS 8.10.1). Its type and the
+// `...` reach jRecParams, by which the canonical constructor converts and
+// collects its arguments.
+RParam      = { Annotation } RPType { Annotation } [ RVa ] Id <~~ push(up.in) ~~> ;
+RPType      <~~ push({rpty: stripWs(up.in)}) ~~> = Type ;
+RVa         <~~ push({rva: true}) ~~> = "..." ;
 
 // A member starting with '{' (or 'static {') can only be an initializer block, so
 // both come first and no other member alternative is disturbed.
@@ -5934,7 +5937,8 @@ HasStatic   = :script(~~
     // Builds one class descriptor from its members. Shared by class, record,
     // interface, enum, nested/local/anonymous declarations - they differ only in
     // which members they hand in and in the extra pieces bolted on afterwards.
-    function buildClassFrom(name, members, recordParams) {
+    // rinfo is a record's jRecParams (component types, varargs).
+    function buildClassFrom(name, members, recordParams, rinfo) {
         var cls = {__isclass: true, __name: name, __bname: jBinOf(name)}
         // The class this one is declared in, if any (jStaticOwner).
         var lexo = jClassStack.length > 1 ? jClassStack[jClassStack.length - 1] : ""
@@ -6026,8 +6030,13 @@ HasStatic   = :script(~~
         if (recordParams != undefined) {
             // A record's canonical constructor: run the compact body (which may
             // reassign the components) over the parameters, then store them.
-            var canon = makeRecordCtor(recordParams, compact, ownInit, sup)
-            closures.push({info: {params: recordParams}, fn: canon})
+            var cinfo = {kind: "ctor", params: recordParams, ptys: rinfo != undefined ? rinfo.rptys : undefined,
+                         vararg: rinfo != undefined && rinfo.rvar}
+            var canon = makeRecordCtor(cinfo, compact, ownInit, sup)
+            // A declared canonical constructor replaces the generated one.
+            var declared = false
+            for (i = 0; i < ctors.length; i++) { if (ctors[i].params.length == recordParams.length) { declared = true } }
+            if (!declared) { closures.push({info: cinfo, fn: canon}) }
             for (i = 0; i < recordParams.length; i++) {
                 if (!hasOwn(cls, recordParams[i])) { cls[recordParams[i]] = makeRecordAccessor(recordParams[i]) }
             }
@@ -6122,11 +6131,13 @@ HasStatic   = :script(~~
     // A record's canonical constructor. The compact body sees the components as
     // ordinary local variables and may reassign them; whatever they hold afterwards
     // is what gets stored on the instance.
-    function makeRecordCtor(params, compact, ownInit, sup) {
+    function makeRecordCtor(info, compact, ownInit, sup) {
+        var params = info.params
         return function() {
             var self = arguments[0]
-            var args = []
-            for (var i = 1; i < arguments.length; i++) { args.push(args.length < params.length ? arguments[i] : arguments[i]) }
+            var raw = []
+            for (var i = 1; i < arguments.length; i++) { raw.push(arguments[i]) }
+            var args = jCallArgs(info, raw)
             if (sup != null) { jCallCtor(sup, self, []) }
             ownInit(self)
             if (compact != null) {
@@ -6983,7 +6994,7 @@ HasStatic   = :script(~~
     function buildRecord(items) {
         jNoteRecComps(items[0], items[1].rparams)
         jOvDeclare(items[0], items.slice(2))
-        jExitClass(items[0], buildClassFrom(items[0], items.slice(2), items[1].rparams))
+        jExitClass(items[0], buildClassFrom(items[0], items.slice(2), items[1].rparams, items[1]))
     }
 
     // A target record may carry a `base` thunk instead of a variable name (see

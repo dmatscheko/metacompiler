@@ -350,11 +350,14 @@ RMember     = EmptyMember | NestedType | StaticInit | Ctor | AbstractMethod
             | CompactCtor | Method | RField ;
 RField      <~~ pushFields(takeAll()) ~~>
             = HasStatic Mods FType FieldVar { "," FieldVar } ";" ;
-RParams     <~~ push({rparams: takeAll()}) ~~>
+RParams     <~~ push(jRecParams(takeAll())) ~~>
             = "(" [ RParam { "," RParam } ] ")" ;
 // A record component may carry annotations and may be VARARGS (JLS 8.10.1);
-// the `...` is parsed and dropped - the component binds the single argument.
-RParam      = { Annotation } Type { Annotation } [ "..." ] Id <~~ push(up.in) ~~> ;
+// its type and the `...` reach jRecParams, which the canonical constructor's
+// parameters are made from.
+RParam      = { Annotation } RPType { Annotation } [ RVa ] Id <~~ push(up.in) ~~> ;
+RPType      <~~ push({rpty: stripWs(up.in)}) ~~> = Type ;
+RVa         <~~ push({rva: true}) ~~> = "..." ;
 
 // A stray ';' between members is legal Java (an empty declaration) and pushes nothing.
 Member      = EmptyMember | NestedType | StaticInit | InitBlock | Ctor | AbstractMethod
@@ -5024,7 +5027,8 @@ HasStatic   = :script(~~
     // The name of the type declaration whose walk just finished (see makeNestedMember).
     var lastTypeName = ""
 
-    function buildClassStmt(name, members, recordParams) {
+    // rinfo is a record's jRecParams (component types, varargs).
+    function buildClassStmt(name, members, recordParams, rinfo) {
         classNames["$" + name] = true
         userDeclared["$" + name] = true
         lastTypeName = name
@@ -5147,23 +5151,42 @@ HasStatic   = :script(~~
             // constructor. A record without one gets the same shape with no body.
             var canon = null
             if (recordParams != undefined) {
-                for (i = 0; i < ctors.length; i++) {
-                    if (ctors[i].compact) { canon = ctors[i]; ctors[i].params = recordParams }
+                // The components as parameters: converted to their declared types,
+                // a varargs last one collected ({rest}, see emitFunc).
+                var cparams = recordParams.slice(0)
+                if (rinfo != undefined && rinfo.rvar && cparams.length > 0) {
+                    cparams[cparams.length - 1] = {rest: cparams[cparams.length - 1]}
                 }
-                if (canon == null) {
-                    canon = {kind: "ctor", compact: true, name: name, params: recordParams, body: null, deleg: null}
+                var cptys = rinfo != undefined ? rinfo.rptys : undefined
+                for (i = 0; i < ctors.length; i++) {
+                    if (ctors[i].compact) {
+                        canon = ctors[i]
+                        ctors[i].params = cparams
+                        ctors[i].ptys = cptys
+                    }
+                }
+                // A declared canonical constructor replaces the generated one, and
+                // assigns the fields itself.
+                var explicit = false
+                for (i = 0; canon == null && i < ctors.length; i++) {
+                    if (ctors[i].params.length == recordParams.length) { explicit = true }
+                }
+                if (canon == null && !explicit) {
+                    canon = {kind: "ctor", compact: true, name: name, params: cparams, ptys: cptys, body: null, deleg: null}
                     ctors.push(canon)
                 }
-                var comps = recordParams
-                var canonBody = canon.body
-                canon.body = function(bb) {
-                    if (canonBody != null) { bb = canonBody(bb) }
-                    var tV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "this")])
-                    for (var q = 0; q < comps.length; q++) {
-                        callExt(bb, "js_set", [tV, emitStr(bb, comps[q]),
-                                               callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, comps[q])])])
+                if (canon != null) {
+                    var comps = recordParams
+                    var canonBody = canon.body
+                    canon.body = function(bb) {
+                        if (canonBody != null) { bb = canonBody(bb) }
+                        var tV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "this")])
+                        for (var q = 0; q < comps.length; q++) {
+                            callExt(bb, "js_set", [tV, emitStr(bb, comps[q]),
+                                                   callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, comps[q])])])
+                        }
+                        return bb
                     }
-                    return bb
                 }
             }
             if (ctors.length == 0) {
@@ -5331,7 +5354,7 @@ HasStatic   = :script(~~
         recordComponents["$" + items[0]] = items[1].rparams
         jNoteRecComps(items[0], items[1].rparams)
         jOvDeclare(items[0], items.slice(2))
-        return buildClassStmt(items[0], items.slice(2), items[1].rparams)
+        return buildClassStmt(items[0], items.slice(2), items[1].rparams, items[1])
     }
 
     // ----- The java.lang throwable hierarchy -----

@@ -1118,6 +1118,29 @@ var jLibMrefArity = {"$String.length": 1, "$String.toLowerCase": 1, "$String.toU
                      "$Long.compare": 2, "$Double.compare": 2, "$Object.toString": 1}
 var jRecComps = {}
 function jNoteRecComps(name, comps) { jRecComps["$" + name] = comps }
+// A record header's components from its RParams items (each component's
+// {rpty}, an optional {rva} and its name, in order): the names (rparams), the
+// declared types (rptys, a varargs one as its element type, as a parameter
+// list keeps it) and whether the last is varargs (rvar). The canonical
+// constructor converts and collects its arguments by them (JLS 8.10.4).
+function jRecParams(items) {
+    var names = []
+    var tys = []
+    var ty = ""
+    var isVar = false
+    for (var i = 0; i < items.length; i++) {
+        var it = items[i]
+        if (typeof it == "string") {
+            names.push(it)
+            tys.push(ty)
+        } else if (it.rpty != undefined) {
+            ty = it.rpty
+        } else if (it.rva == true) {
+            isVar = true
+        }
+    }
+    return {rparams: names, rptys: tys, rvar: isVar}
+}
 function jFnArity(t) {
     var ar = jTopFind(t, "->")
     if (ar >= 0) {
