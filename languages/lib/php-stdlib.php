@@ -115,8 +115,8 @@ function is_numeric($value) { return is_numeric($value); }
 function gettype($value) { return gettype($value); }
 function get_debug_type($value) { return get_debug_type($value); }
 // get_class() and get_parent_class() may be called without their argument.
-function get_class(...$object) { return count($object) == 0 ? get_class() : get_class($object[0]); }
-function get_parent_class(...$object_or_class) {
+function get_class(...$object /* at most 1 */) { return count($object) == 0 ? get_class() : get_class($object[0]); }
+function get_parent_class(...$object_or_class /* at most 1 */) {
     return count($object_or_class) == 0 ? get_parent_class() : get_parent_class($object_or_class[0]);
 }
 function is_a($object_or_class, $class, $allow_string = false) { return is_a($object_or_class, $class, $allow_string); }

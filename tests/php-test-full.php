@@ -4029,6 +4029,29 @@ function s77() {
     check("tfa5", str_pad(length: 3, pad_string: "-", string: "a") === "a--" && strlen(string: "abc") === 3
         && array_keys([1, 2, 1], 1) === [0, 2]
         && str_repeat(times: 2, string: "ab") === "abab" && s77opt(1) === 1 && (new S77K(1))->m(5) === 5);
+    // A generator function checks its arguments at the CALL, before the generator
+    // exists: php-src compiles the ZEND_RECV ops ahead of ZEND_GENERATOR_CREATE.
+    $g = [];
+    try { s77gen(); $g[] = "made"; } catch (ArgumentCountError $e) { $g[] = s77t($e, __LINE__); }
+    try { S77G::pair(1); $g[] = "made"; } catch (ArgumentCountError $e) { $g[] = s77t($e, __LINE__); }
+    try { (new S77G)->one(); $g[] = "made"; } catch (ArgumentCountError $e) { $g[] = s77t($e, __LINE__); }
+    try { s77gen(c: 1); $g[] = "made"; } catch (Error $e) { $g[] = $e->getMessage(); }
+    check("tfa6", $g === ["Too few arguments to function s77gen(), 0 passed in F on line L and exactly 1 expected",
+        "Too few arguments to function S77G::pair(), 1 passed in F on line L and exactly 2 expected",
+        "Too few arguments to function S77G::one(), 0 passed in F on line L and exactly 1 expected",
+        "Unknown named parameter \$c"]);
+    // get_class and get_parent_class take at most one argument (ZEND_PARSE_PARAMETERS_START(0, 1)).
+    $o = [new S77G, 2];
+    $x = [];
+    try { get_class($o[0], $o[1]); } catch (ArgumentCountError $e) { $x[] = $e->getMessage(); }
+    try { get_parent_class($o[0], $o[1]); } catch (ArgumentCountError $e) { $x[] = $e->getMessage(); }
+    check("tfa7", $x === ["get_class() expects at most 1 argument, 2 given",
+        "get_parent_class() expects at most 1 argument, 2 given"]);
+}
+function s77gen($a) { yield $a; }
+class S77G {
+    static function pair($a, $b) { yield $a => $b; }
+    function one($x) { yield $x; }
 }
 
 // ===== END SECTIONS =====

@@ -7315,6 +7315,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, params[i]), argV])
         }
+        var genChk = sawYield && chk != undefined && chk != null
         if (chk != undefined && chk != null) { emitArgCheck(b, chk, argVs, off, bodyB) }
         else { b.NewBr(bodyB) }
         curWrites = savedWrites
@@ -7329,7 +7330,32 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         curScopeV = savedScope
         loopStack = savedLoops
         curFTag = savedTag
+        if (genChk) { genEntries["$" + idx] = emitGenEntry(idx, chk, params.length, off) }
         return idx
+    }
+    // A generator function's arguments are counted at the CALL, before the generator
+    // exists (php-src emits the ZEND_RECV ops ahead of ZEND_GENERATOR_CREATE). Its
+    // closure is therefore an entry function over the same frame that checks, then
+    // hands the arguments on to a generator over the body (closureV). Twin of
+    // genArgCheck in php-interpreter.abnf.
+    var genEntries = {}
+    function emitGenEntry(idx, chk, n, off) {
+        funcCount++
+        var f = m.NewFunc("jsf_" + funcCount, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var savedF = curF
+        var savedScope = curScopeV
+        curF = f
+        curScopeV = f.Params[0]
+        var b = f.NewBlock("entry")
+        var bodyB = f.NewBlock("")
+        var argVs = []
+        for (var i = 0; i < n; i++) { argVs.push(callExt(b, "js_arg", [f.Params[1], handle(i + off)])) }
+        emitArgCheck(b, chk, argVs, off, bodyB)
+        var genV = callExt(bodyB, "js_genfn", [callExt(bodyB, "js_closure", [handle(idx), f.Params[0]])])
+        bodyB.NewRet(callExt(bodyB, "js_call", [genV, hUndef, f.Params[1]]))
+        curF = savedF
+        curScopeV = savedScope
+        return funcCount
     }
     // The parameter list of a function, closure or arrow function, reduced to the
     // names, the defaults, the BY-REFERENCE positions (a call site has to hand a cell
@@ -7530,8 +7556,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         return cs == undefined ? null : cs
     }
     // A closure value, wrapped in js_genfn when the body it came from yields: calling
-    // a generator function makes a generator instead of running the body.
+    // a generator function makes a generator instead of running the body. One with
+    // an argument check is its entry function instead (emitGenEntry).
     function closureV(b, idx, envV) {
+        if (genClosure && genEntries["$" + idx] != undefined) { return callExt(b, "js_closure", [handle(genEntries["$" + idx]), envV]) }
         var clo = callExt(b, "js_closure", [handle(idx), envV])
         if (genClosure) { clo = callExt(b, "js_genfn", [clo]) }
         return clo

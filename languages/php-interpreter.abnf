@@ -1801,6 +1801,18 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         return false
     }
+    // A generator function's arguments are checked at the CALL, before the generator
+    // exists (named ones as they are sent, the count by the ZEND_RECV ops php-src
+    // emits ahead of ZEND_GENERATOR_CREATE); the binding itself waits for the body.
+    // The tests are bindParams'. Twin of emitGenEntry in php-to-llvm-ir.abnf.
+    function genArgCheck(params, argset, who, cls) {
+        var named = argset.named
+        if (named != null) { checkNamedArgs(params, argset) }
+        for (var i = 0; i < params.length && params[i].variadic !== true; i++) {
+            var have = i < argset.pos.length || (named != null && hasOwn(named, params[i].name))
+            if (!have && (params[i].def == null || (named != null && phpReqAfter(params, i)))) { phpMissArg(params, i, argset, who, cls) }
+        }
+    }
     // Binds one call's arguments into the CURRENT (already pushed) frame; who and
     // cls name the function for phpMissArg.
     function bindParams(params, argset, who, cls) {
@@ -4887,7 +4899,15 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var who = desc.substring(0, desc.indexOf("\n"))
         return fnMetaSet(function(argset) {
             if (argset === cloProbe) { return rec }
-            if (isGen === true) { return newGen(runClosureRun(params, body, captured, env, argset, who)) }
+            if (isGen === true) {
+                var saved = scopes
+                scopes = captured
+                var k = anytype
+                k = ctxSelf()
+                scopes = saved
+                genArgCheck(params, argset, who, k)
+                return newGen(runClosureRun(params, body, captured, env, argset, who))
+            }
             return runClosureRun(params, body, captured, env, argset, who)()
         }, "closure", 0)
     }
@@ -6333,7 +6353,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // Calling a generator function yields a generator OBJECT; the body is deferred.
     function makeFunClosure(fn) {
         return function(argset) {
-            if (fn.isGen === true) { return newGen(function() { return invokePhp(fn, null, argset) }) }
+            if (fn.isGen === true) {
+                genArgCheck(fn.params, argset, fn.name, null)
+                return newGen(function() { return invokePhp(fn, null, argset) })
+            }
             return invokePhp(fn, null, argset)
         }
     }
@@ -6359,6 +6382,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             me = stat ? null : self
             if (fn.isGen === true) {
                 var gst = st
+                genArgCheck(fn.params, argset, fn.name, defCls)
                 return newGen(function() { return invokePhpCls(fn, me, argset, defCls, gst) })
             }
             return invokePhpCls(fn, me, argset, defCls, st)
