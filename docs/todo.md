@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-689** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-691** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -112,11 +112,14 @@ not change the renderer.
 
 # GO — Go  (oracle: `go run`)
 
-### T-688 go: append growth inside a generic function ignores the instantiation (pad zero and capacity) · P3 · GO · IN PROGRESS (GO worker, round 15) [V]
-`type Bx[T any] struct{ v T; p *int }`; in `func g[T any]()`: `ws := []Bx[T]{}`, append three times, `ws = ws[:cap(ws)]`, print
-`ws[3].v` and `%T` of `ws[3]`; and `var zs []T; zs = append(zs, x); zs = zs[:cap(zs)]; len(zs)`. go g[int]: `4 0 true / main.Bx[int] 0
-/ 4`, g[string]: `4  true / main.Bx[string]  / 2`; ours both halves `4 <nil> true / main.Bx[main.T] <nil> / 1` — the pad zero is
-built from the static text Bx[T] and the capacity uses an unknown element size for T.
+### T-689 go: native append costs ~120k instructions per call · P2 · GO · OPEN [V]
+A native `-exe` append to `[]int` or `[]string` retires ~120k instructions each: 10,000 appends 1.19G, 1M appends ~140G (7.45 s);
+linear in the count, so a large constant per call (go: a few dozen). Find where the per-append cost goes (layer 2 / floor /
+emitted growth path) and bring it to a small constant; measure with a native append loop before/after.
+
+### T-690 go: `%T` of a dynamically typed int64 prints `int` · P3 · GO · OPEN [V]
+`func g[T any]() { var z T; fmt.Printf("%T\n", z) }; g[int64](); g[[2]int64]()` → `int` / `[2]int` in all engines (go `int64` /
+`[2]int64`): the int64 and int boxes are indistinguishable there.
 
 ---
 
@@ -779,6 +782,7 @@ T-683 python: `__name__` is undefined at module level; `type(super)` / `isinstan
 T-685 go: append growth pads a function-local struct type with 0 in the compiler — DONE be5b3c0f (per-declaration zero makers for local types in the compiler — 4 legs = go run; follow-up T-687)
 T-687 go: a local type shadowing a top-level struct corrupts it; zero of a type-parameter-typed field is nil — DONE 1133215b (local types keyed per declaration and stripped for printing, generic-local types instantiated, generic struct elision and slice element types — 4 legs = go run; follow-up T-688)
 T-686 python: `(a): int = 1` binds nothing; `type(cell)`; 3.14 namespace keys `__firstlineno__` / `__static_attributes__` / `__annotate_func__` — DONE f133e518 (parenthesized annotated targets, type(cell), 3.14 metaclass namespace order with __firstlineno__/__static_attributes__/__annotate_func__ — 4 legs = python3)
+T-688 go: append growth inside a generic function ignores the instantiation (pad zero and capacity) — DONE 1b2e4da9 (instantiated generic types copy as structs, per-instantiation $esz/$ezero, string/bool pad zeros — 4 legs = go run; the nil-slice cap 4/2 is gc's stack-buffer escape analysis, already DECLINED; follow-ups T-689/T-690)
 
 # Settled — do not re-open
 
