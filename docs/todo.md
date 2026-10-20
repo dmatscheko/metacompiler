@@ -177,7 +177,7 @@ line tracking at warning sites is worth its cost.
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
 
-### T-605 lua: the string metatable's `__index` cannot be replaced; `next(_G)` skips non-string proxy keys · P3 · LUA · OPEN [V]
+### T-605 lua: the string metatable's `__index` cannot be replaced; `next(_G)` skips non-string proxy keys · P3 · LUA · IN PROGRESS (LUA worker, round 6) [V]
 `getmetatable("").__index = function(s, k) ... end` is ignored in all engines (both halves read the string library directly);
 with such an `__index`, lua's `ipairs("xy")` yields "x" and "y", ours nothing. `next(_G)` skips non-string keys stored on the
 _G proxy, in both halves.
