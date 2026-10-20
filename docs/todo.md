@@ -117,7 +117,7 @@ not change the renderer.
 
 # GO — Go  (oracle: `go run`)
 
-### T-678 go: `&r.i` / `&xs[1]` give the value, not a pointer; anonymous struct with embedded pointer; `%T` of a host func · P2 · GO · OPEN [V]
+### T-678 go: `&r.i` / `&xs[1]` give the value, not a pointer; anonymous struct with embedded pointer; `%T` of a host func · P2 · GO · IN PROGRESS (GO worker, round 11) [V]
 `func set(p *int){*p=7}; set(&r.i)` leaves `r.i` 0 in both grammars (go 7), and `fmt.Sscan("5", &r.i)` → "type not a pointer: int";
 `&xs[1]` likewise. `struct{ *strings.Reader }{...}` → interpreter "unknown name: struct". `fmt.Printf("%T", fmt.Println)` →
 `%!T(...)` (go `func(...interface {}) (int, error)`). Check that `*(a).b = v` parses (the `*(expr)` target rule may shadow it).
