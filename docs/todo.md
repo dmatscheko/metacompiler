@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-630** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-631** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -124,11 +124,14 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-627 kotlin: sortedMapOf unsorted; Array.copyOf(); extensions not dispatched by receiver type; `import java.util.Random` · P1 · KT · IN PROGRESS (KT worker, round 4) [V spec-only]
-`sortedMapOf(2 to "b", 1 to "a")` → `{2=b, 1=a}` in all engines (TreeMap `{1=a, 2=b}`). `arrayOf(1).copyOf()` → interp and llvm.Run
-"unknown list method: copyOf". With `fun Int.split(x: Int, y: Int, limit: Int) = x` declared, `"a,b;c:d".split(",", ";", ":", limit =
-2)` → interp and llvm.Run `,` (the Int extension captures a String call; Kotlin calls String.split → `[a, b;c:d]`). `import
-java.util.Random` then `Random(1)` → "unresolved import" (the qualified spelling works).
+### T-630 kotlin: sorted collections forget order on insert; copyOfRange; java.util imports; extension dispatch limits · P1 · KT · OPEN [V spec-only]
+`val m = sortedMapOf(2 to "b", 1 to "a"); m[0] = "z"; println(m)` → `{1=a, 2=b, 0=z}` in all engines (TreeMap `{0=z, 1=a, 2=b}`); a
+sortedSetOf + add likewise. `arrayOf(3,1,2).copyOfRange(1, 3)` → interp "unknown list method: copyOfRange" (check the others).
+`import java.util.ArrayList` / `HashMap` / other java.util collections → "unresolved import" (add them to ktJavaClassImports in
+lib/kotlin-decltypes.js). Extension dispatch: names in builtinMethodNames (map, filter, get, size, ...) never resolve to an extension
+(`fun Pt.map(...)`; `Pt(4).map{}` → interp "unknown method 'map' on Pt"); member extensions, extension properties, `::ext`
+references and infix extensions still go by name; receivers Long/Double/Float/Short/Byte, interfaces, objects, enums are not tested.
+Stale comment "Two of the nineteen" in kExcFqcn / ktExcFqcn.
 
 ---
 
@@ -745,6 +748,7 @@ T-608 java regex: forward `\k<name>`; `\X \G \N{..} \b{g}` and \p scripts/blocks
 T-621 swift: generic type arguments are not applied; static members on a generic parameter; non-ASCII operators — DONE 6d5d390a (generic arguments per instance incl. inference from context, M.zero, non-ASCII operators, enum metatype init; plus 13 swiftc-checked fixes)
 T-622 kotlin: `Char(97)`, `sequence {}` builder, implicit-receiver operator calls, split with a named limit, formatter class names — DONE b75ef2dd fc105dae (the compiled split-with-named-limit item did not reproduce; an interp-only variant was fixed)
 T-620 python: `re.error` is uncatchable; compiled class-body except bindings lost — DONE 1119e4c9 (plus heapq/bisect/contextlib/io/types/textwrap/abc/typing/fractions/statistics modules and ~20 engine fixes)
+T-627 kotlin: sortedMapOf unsorted; Array.copyOf(); extensions not dispatched by receiver type; `import java.util.Random` — DONE 3186c9ec
 
 # Settled — do not re-open
 
