@@ -7756,6 +7756,80 @@ def s159():
                             "__classcell__ must be a nonlocal cell, not <class 'int'>"])
     check("suptype", S159S().f() == ["super", "super", "<class 'super'>", "super", True, "B.f"])
 
+# ===== SECTION 160: __name__; the type super; __classdictcell__ =====
+# The main program's __name__ is "__main__". The name super is the builtin
+# type: a zero-argument call binds the calling method's class and first
+# argument, also through another name, and the proxy's repr names the class and
+# the type it searches. A class body holding a def, an annotated assignment, a
+# type alias or a generic class hands a metaclass __classdictcell__ ahead of any
+# __classcell__, and type.__new__ drops it; a lambda or a comprehension adds
+# none. A comprehension right in a nested class body reading __class__ gives no
+# cell to the class around it, while a generator expression is a function and
+# gives one to its own class. Values are CPython 3.14's.
+S160mod = __name__
+S160out = []
+
+class S160M(type):
+    def __new__(mcls, name, bases, ns):
+        S160out.append(name + ":" + ",".join(k for k in ns if k.startswith("__class")))
+        return super().__new__(mcls, name, bases, ns)
+
+class S160Def(metaclass=S160M):
+    def f(self):
+        return __class__
+
+class S160Ann(metaclass=S160M):
+    x: int = 1
+
+class S160Alias(metaclass=S160M):
+    type T = int
+
+class S160Gen(metaclass=S160M):
+    class K[T]:
+        pass
+
+class S160Lam(metaclass=S160M):
+    g = lambda self: 1
+    y = [i for i in range(2)]
+
+class S160Out(metaclass=S160M):
+    class In(metaclass=S160M):
+        z = [__class__ for _ in range(0)]
+
+class S160Ge(metaclass=S160M):
+    u = (__class__ for _ in range(1))
+
+class S160B:
+    def f(self):
+        return "B.f"
+
+class S160S(S160B):
+    def f(self):
+        s = super
+        return [type(super()) is super, isinstance(super(), super), s().f(), repr(super())]
+
+    @classmethod
+    def g(cls):
+        return repr(super())
+
+def s160():
+    def inner():
+        return __name__
+    check("modname", S160mod == "__main__" and inner() == "__main__")
+    check("supvalue", type(super) is type and repr(super) == "<class 'super'>" and super.__name__ == "super")
+    check("supcall", S160S().f() == [True, True, "B.f", "<super: <class 'S160S'>, <S160S object>>"]
+          and S160S.g() == "<super: <class 'S160S'>, <S160S object>>")
+    check("dictcell", S160out == ["S160Def:__classdictcell__,__classcell__", "S160Ann:__classdictcell__",
+                                  "S160Alias:__classdictcell__", "S160Gen:__classdictcell__", "S160Lam:",
+                                  "In:", "S160Out:", "S160Ge:__classcell__"]
+          and next(S160Ge.u) is S160Ge and "__classdictcell__" not in S160Def.__dict__)
+    errs = []
+    try:
+        type("V", (), {"__classdictcell__": 3})
+    except TypeError as e:
+        errs.append(str(e))
+    check("dictcellerr", errs == ["__classdictcell__ must be a nonlocal cell, not <class 'int'>"])
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -7901,5 +7975,6 @@ def main():
     s157() # SECTION-CALL 157
     s158() # SECTION-CALL 158
     s159() # SECTION-CALL 159
+    s160() # SECTION-CALL 160
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

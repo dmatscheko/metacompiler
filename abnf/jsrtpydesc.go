@@ -531,6 +531,12 @@ func (rt *jsrt) pyTypeNew(name string, basesV, ns, mcs, kw interface{}) *jsObjec
 					rt.pyRaise("TypeError", "__classcell__ must be a nonlocal cell, not <class '"+pyTypeName(rt, vals.elems[i])+"'>")
 				}
 				sc.put("__pycls__", cls)
+			case "__classdictcell__":
+				// CPython fills it with the class's namespace, which nothing here
+				// reads back; only the cell check is observable.
+				if cell, _ := vals.elems[i].(*jsObject); cell == nil || (cell.props["__pydcell"] != true && cell.props["__pyccell"] == nil) {
+					rt.pyRaise("TypeError", "__classdictcell__ must be a nonlocal cell, not <class '"+pyTypeName(rt, vals.elems[i])+"'>")
+				}
 			default:
 				rt.pySetAttr(cls, ks, vals.elems[i])
 			}

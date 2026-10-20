@@ -406,7 +406,7 @@ Decorator   <~~ push({deco: pop()}) ~~>
 // (js_pyclass_new), so multiple inheritance costs nothing at lookup time.
 // Keyword arguments (metaclass=...) parse and are ignored.
 Class       <~~ push(makeClass(takeAll(), up.pos)) ~~>
-            = "class" KwEnd Id <~~ push({cname: up.in}); sbPush("c", up.in) ~~> [ TypeParams <~~ push({cgeneric: true}) ~~> ]
+            = "class" KwEnd Id <~~ push({cname: up.in}); sbPush("c", up.in) ~~> [ TypeParams <~~ sbClassDict(sbFrames.length - 2); push({cgeneric: true}) ~~> ]
               [ ClassBases ] Suite ;
 // The base list may be written across lines (`class C(unittest.TestCase,` / `  Mixin):`)
 // and may carry keyword arguments and a `**kwargs` spread (`class C[T](B, a=1, **kw)`),
@@ -423,7 +423,7 @@ ClassBase   <~~ push({cbase: pop()}) ~~> = Expression ;
 // async def: compiled as a plain def (the body runs synchronously). Only the
 // SYNTAX is in scope here - there is no event loop, so nothing awaits.
 AsyncDef    <~~ push(makeDef(pop(), pop(), pop(), up.pos)) ~~>
-            = "async" KwEnd "def" KwEnd Id <~~ push(up.in) ~~> [ TypeParams ] ParamList
+            = "async" KwEnd "def" KwEnd Id <~~ push(up.in); sbClassDict(sbFrames.length - 1) ~~> [ TypeParams ] ParamList
               [ "->" DiscardType ] Suite ;
 
 // try/except/else/finally: genuinely implemented. EVERY except clause is kept and
@@ -870,7 +870,7 @@ AttrSfx     <~~ push({kind: "attr", name: pop().aname, pos: up.pos}) ~~>
 CallArg     = CallKw | CallDblStar | CallStar | CallGenExp | CallPos ;
 // f(expr for x in it): a generator expression needs no parentheses of its own
 // when it is the only argument of a call.
-CallGenExp  <~~ push(makeGenExp(takeAll())) ~~>
+CallGenExp  <~~ push(makeGenExp(sbComp(takeAll(), up.start, up.pos, true))) ~~>
             = Expression CompFor { CompClause } ;
 CallKw      <~~ var kv = pop(); push({ckwname: pop().kwn, ckwval: kv}) ~~>
             = Id <~~ push({kwn: up.in}) ~~> "=" Expression ;
@@ -968,7 +968,7 @@ PyJ         = "j" | "J" ;
 EmptyTuple  <~~ push(makeTupleLit([])) ~~>
             = "(" :whitespace(WhitespaceNL) ")" :whitespace(Whitespace) ;
 // ( expr for x in it [if c] ): a generator expression (makeGenExp).
-GenExpParen <~~ push(makeGenExp(takeAll())) ~~>
+GenExpParen <~~ push(makeGenExp(sbComp(takeAll(), up.start, up.pos, true))) ~~>
             = "(" :whitespace(WhitespaceNL) Expression CompFor { CompClause } ")" :whitespace(Whitespace) ;
 Grouped     <~~ push(makeParen(takeAll(), up.pos)) ~~>
             = "(" :whitespace(WhitespaceNL) ListItem { "," <~~ push({tcomma: true}) ~~> [ ListItem ] } ")" :whitespace(Whitespace) ;
@@ -977,7 +977,7 @@ Grouped     <~~ push(makeParen(takeAll(), up.pos)) ~~>
 // set value - the elements are collected into a list and js_pyset_new deduplicates
 // it with Python's ==. Tried after the dict forms so { k: v } and { k: v for ... }
 // still parse as dicts; { } alone stays the empty DICT, as in Python.
-SetComp     <~~ push(makeSetOf(makeListComp(takeAll()))) ~~>
+SetComp     <~~ push(makeSetOf(makeListComp(sbComp(takeAll(), up.start, up.pos, false)))) ~~>
             = "{" :whitespace(WhitespaceNL) Expression CompFor { CompClause } "}" :whitespace(Whitespace) ;
 SetLit      <~~ push(makeSetLit(takeAll())) ~~>
             = "{" SetItem { "," SetItem } [ "," ] "}" ;
@@ -987,15 +987,17 @@ SetSpread   <~~ push({sspread: pop()}) ~~> = "*" Expression ;
 SetElem     <~~ push({selem: pop()}) ~~>   = Expression ;
 
 // [expr for x in iterable if cond] builds a list; the variable is comprehension local.
-ListComp    <~~ push(makeListComp(takeAll())) ~~>
+ListComp    <~~ push(makeListComp(sbComp(takeAll(), up.start, up.pos, false))) ~~>
             = "[" :whitespace(WhitespaceNL) Expression CompFor { CompClause } "]" :whitespace(Whitespace) ;
 // A comprehension is a CHAIN of clauses: one or more `for` clauses, each of which may be
 // followed by any number of `if` clauses ([x for a in xs for x in a if x]), and the loop
 // target is a full target LIST, not a bare name - `for _, _, line in co.co_lines()` and
 // `for (kind, string, *_) in ...` are what CPython's own suite writes.
 CompClause  = CompFor | CompIf ;
-CompFor     <~~ var it = pop(); push({cfor: pop(), citer: it}) ~~>
-            = [ "async" KwEnd ] "for" KwEnd CompTarget "in" KwEnd Expression ;
+CompFor     <~~ var it = pop(); push({cfor: pop(), citer: it.cit, cifrom: it.from, cito: it.to}) ~~>
+            = [ "async" KwEnd ] "for" KwEnd CompTarget "in" KwEnd CompIter ;
+// The iterable with its source span (sbComp).
+CompIter    <~~ var e = pop(); push({cit: e, from: up.start, to: up.pos}) ~~> = Expression ;
 CompTarget  <~~ push(makeTargetList(takeAll())) ~~>
             = TargetItem { "," TargetItem } [ "," ] ;
 CompIf      <~~ push({cif: pop()}) ~~>
@@ -1003,7 +1005,7 @@ CompIf      <~~ push({cif: pop()}) ~~>
 
 // {k: v for x in iterable if cond} builds a dict; tried before DictLit ('for' after
 // the first entry is what tells them apart) and the variable is comprehension local.
-DictComp    <~~ push(makeDictComp(takeAll())) ~~>
+DictComp    <~~ push(makeDictComp(sbComp(takeAll(), up.start, up.pos, false))) ~~>
             = "{" :whitespace(WhitespaceNL) Expression ":" Expression CompFor { CompClause } "}" :whitespace(Whitespace) ;
 
 // {k: v, ...}: keys and values are expressions; entries keep their insertion order.
@@ -1157,7 +1159,7 @@ True        <~~ push(makeConst(true)) ~~>      = "True" KwEnd ;
 False       <~~ push(makeConst(false)) ~~>     = "False" KwEnd ;
 None        <~~ push(makeConst(undefined)) ~~> = "None" KwEnd ;
 
-VarRef      <~~ push(makeVarRef(sbMangle(up.in, false))) ~~>
+VarRef      <~~ sbRefAt = up.pos; push(makeVarRef(sbMangle(up.in, false))) ~~>
             = Id ;
 
 // A logical line break: one or more newlines (blank and comment lines collapse,
@@ -1809,6 +1811,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             q = outer.qual + (outer.kind == "d" ? ".<locals>." : ".") + name
         }
         sbFrames.push({names: [], decl: [], kind: kind, qual: q, name: name})
+        if (kind == "d" && name != "<lambda>") { sbClassDict(sbFrames.length - 2) }
+    }
+    // Whether the class frame sbPop just closed needs CPython's __classdict__
+    // cell: its body holds a def, an annotated assignment, a type alias or a
+    // generic class - each has an annotation scope of its own. The metaclass
+    // namespace then carries the cell as __classdictcell__.
+    var sbDictCell = false
+    function sbClassDict(i) {
+        if (i >= 0 && sbFrames[i].kind == "c") { sbFrames[i].dcell = true }
     }
     // The names of the frame just closed, de-duplicated, minus anything a `global`
     // or `nonlocal` declaration in the same body claimed for another scope.
@@ -1816,7 +1827,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (sbFrames.length == 0) { return [] }
         var f = sbFrames.pop()
         sbQual = f.qual
+        if (sbCellCands.length > 0) {
+            var stay = []
+            for (var ci = 0; ci < sbCellCands.length; ci++) {
+                var cd = sbCellCands[ci]
+                if (cd.top !== f) { stay.push(cd) }
+                else if (!cd.comp) { sbCellMark(sbFrames.length - 1, cd.sup) }
+            }
+            sbCellCands = stay
+        }
         sbCell = f.cell === true
+        sbDictCell = f.dcell === true
         var out = []
         for (var i = 0; i < f.names.length; i++) {
             var n = f.names[i]
@@ -1853,17 +1874,56 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // super, or a class body nested in it reads __class__ (the class's own body
     // reading it uses the cell around it instead). The metaclass namespace then
     // carries the cell as __classcell__. Twin of sbCellUse in python-interpreter.abnf.
+    //
+    // A read right in a class body is only a candidate until the body closes:
+    // the comprehension it may sit in is tagged after the read (sbComp). In a
+    // list, set or dict comprehension it reads an ordinary name and marks
+    // nothing; a generator expression is a function nested in the body, so it
+    // marks the body's own class. sbRefAt is the end offset of the latest VarRef.
     var sbCell = false
+    var sbCellCands = []
+    var sbRefAt = 0
     function sbCellUse(isSuper) {
+        var top = sbFrames.length - 1
+        if (top >= 0 && sbFrames[top].kind == "c") {
+            sbCellCands.push({top: sbFrames[top], at: sbRefAt, sup: isSuper, comp: false})
+            return
+        }
+        sbCellMark(top, isSuper)
+    }
+    // Mark the class whose cell a read in frame i (or a class body right above
+    // it) uses: the nearest one through a function frame, and for __class__ also
+    // the nearest one without.
+    function sbCellMark(i, isSuper) {
         var inFn = false
-        for (var i = sbFrames.length - 1; i >= 0; i--) {
-            var f = sbFrames[i]
+        for (var j = i; j >= 0; j--) {
+            var f = sbFrames[j]
             if (f.kind == "d") { inFn = true }
-            else if (inFn || (!isSuper && i < sbFrames.length - 1)) {
+            else if (inFn || !isSuper) {
                 f.cell = true
                 return
             }
         }
+    }
+    // A comprehension spanning (from, to] right in the current frame settles the
+    // candidates read in it, except in its first iterable, which CPython
+    // evaluates in the enclosing body.
+    function sbComp(items, from, to, isGen) {
+        var top = sbFrames.length - 1
+        if (top < 0 || sbCellCands.length == 0) { return items }
+        var first = anytype
+        first = null
+        for (var i = 0; i < items.length && first == null; i++) {
+            if (items[i] != undefined && items[i] != null && items[i].cfor != undefined) { first = items[i] }
+        }
+        for (var k = 0; k < sbCellCands.length; k++) {
+            var cd = sbCellCands[k]
+            var inIter = first != null && cd.at > first.cifrom && cd.at <= first.cito
+            if (cd.top !== sbFrames[top] || cd.at <= from || cd.at > to || inIter) { continue }
+            if (isGen) { cd.top.cell = true }
+            cd.comp = true
+        }
+        return items
     }
     function sbName(n) {
         if (sbFrames.length == 0) { return }
@@ -3710,6 +3770,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var ref = items[0]
         // A bare annotation with no value still makes the name a local in CPython.
         if (ref.path.length == 0) { sbName(ref.name) }
+        sbClassDict(sbFrames.length - 1)
         var ann = null
         var valT = null
         for (var i = 1; i < items.length; i++) {
@@ -3736,6 +3797,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else if (items[i].tname != undefined) { name = items[i].tname }
         }
         sbName(name)
+        sbClassDict(sbFrames.length - 1)
         return function(b) {
             var alias = callExt(b, "js_pyclass_new", [emitStr(b, name), callExt(b, "js_arr_new", [])])
             var r = valT(b)
@@ -4384,6 +4446,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         sbPop()
         var qual = sbQual
         var hasCell = sbCell
+        var hasDictCell = sbDictCell
         sbName(name)
         var doc = walkSuiteDoc
         return {dname: name, dstmt: function(b) {
@@ -4465,7 +4528,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // calls js_pyclass_meta makes; a metaclass gets the cell as
             // __classcell__ and its type.__new__ fills it with the real class.
             callExt(b, "js_scope_set", [cellV, emitStr(b, "__pycls__"), cls])
-            cls = callExt(b, "js_pyclass_meta", [cls, kwV, hasCell ? cellV : hUndef])
+            cls = callExt(b, "js_pyclass_meta", [cls, kwV, hasCell ? cellV : hUndef, hasDictCell ? hTrue : hFalse])
             // PEP 695 type parameters make the class subscriptable (pyGenericOk
             // in abnf/jsrt.go).
             if (generic) { callExt(b, "js_set", [cls, emitStr(b, "__generic"), hTrue]) }
@@ -4996,6 +5059,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "IOError"), osErr])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "EnvironmentError"), osErr])
+        // The main program's global __name__.
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "__name__"), emitStr(b, "__main__")])
         // ----- the `builtins` module ------------------------------------------
         //
         // CPython's len.__self__ IS the builtins module, and `builtins.len is
@@ -5160,12 +5225,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // method in that body closes over - CPython's __class__ cell), and the
         // INSTANCE is the enclosing function's FIRST parameter (CPython reads
         // f_localsplus[0]). Both are known statically here, so the read of the
-        // name `super` lowers to js_pysuper(class, self) - already bound, and
-        // calling it with no arguments hands the same object back.
+        // name `super` lowers to js_pysuper(class, self): it answers the type
+        // `super` and leaves the bound proxy for the zero-argument call, which
+        // follows the read with nothing evaluated in between.
         //
-        // super(C, obj) works because js_pysuper's result is callable with two
-        // arguments. super(C) - the UNBOUND form - raises TypeError; it is a
-        // descriptor and the value model has no protocol for one.
+        // super(C, obj) calls the type with two arguments. super(C) - the
+        // UNBOUND form - raises TypeError; it is a descriptor and the value model
+        // has no protocol for one.
         //
         // Outside a class (or in a function with no parameters) the two operands
         // are undefined and the zero-argument call raises the RuntimeError
@@ -5200,6 +5266,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // __import__ is lib/python-importlib.py's, compiled in at its first
         // mention. Twin of the same line in python-interpreter.abnf's makeVarRef.
         if (name == "__import__") { core.importFile("importlib", null) }
+        // An imported module reads its own name. Twin of the same arm in
+        // python-interpreter.abnf's makeVarRef.
+        if (name == "__name__" && pyCurMod != "__main__") {
+            var modName = pyCurMod
+            return function(b) { return {b: b, v: emitStr(b, modName)} }
+        }
         return function(b) {
             return {b: b, v: pyGetVar(b, curScopeV, emitStr(b, name))}
         }

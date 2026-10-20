@@ -578,6 +578,9 @@ type jsrt struct {
 	pyFuncNames map[interface{}]string
 	// pyFuncDocs is the docstring of each def that has one (js_pyfndoc).
 	pyFuncDocs map[interface{}]string
+	// pySuperT is the builtin type `super`; pySupPending is the zero-argument
+	// proxy the latest read of the name `super` left for its call (js_pysuper).
+	pySuperT, pySupPending *jsObject
 	// pyFuncAttrTab holds a user function's own attributes (f.k = 4) as the
 	// Python dict f.__dict__ answers, keyed by the closure value.
 	pyFuncAttrTab map[interface{}]*jsObject
@@ -4086,6 +4089,9 @@ func (rt *jsrt) pyString(v interface{}) string {
 		// here takes the built-in spelling.
 		if mod, isMod := pyIsModule(t); isMod {
 			return "<module '" + rt.toString(mod.props["__pymod"]) + "' (built-in)>"
+		}
+		if sup, isSup := pySuperObj(t); isSup {
+			return rt.pySuperRepr(sup)
 		}
 		if sl, isSl := pySliceParts(t); isSl {
 			return "slice(" + rt.pyRepr(sl[0]) + ", " + rt.pyRepr(sl[1]) + ", " + rt.pyRepr(sl[2]) + ")"
@@ -16127,13 +16133,17 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			bases, _ := u(a[1]).(*jsArray)
 			return w(rt.pyClassNew(rt.toString(u(a[0])), bases))
 		},
-		// super(): what a READ of the name `super` lowers to - see makeVarRef in
+		// What a READ of the name `super` lowers to - see makeVarRef in
 		// languages/python-to-llvm-ir.abnf for why the magic is in the emitter and
-		// what the two operands are. The result is both the callable (super() with
-		// no arguments answers itself, super(C, o) builds a new one) and the proxy
-		// an attribute read or a method call goes through.
+		// what the two operands are. The value is the type `super`; the operands
+		// wait in pySupPending for its zero-argument call (pySuperCall), which
+		// follows the read with nothing evaluated in between.
 		"js_pysuper": func(a []uint64) uint64 { // (defining class|undef, instance|undef)
-			return w(pySuperNew(u(a[0]), u(a[1])))
+			rt.pySupPending = pySuperNew(u(a[0]), u(a[1]))
+			if rt.pySuperT == nil {
+				rt.pySuperT = rt.pyBuiltinClass("super")
+			}
+			return w(rt.pySuperT)
 		},
 		// The __set_name__ pass over a filled class body (pySetNames).
 		"js_pysetnames": func(a []uint64) uint64 {
@@ -16148,7 +16158,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// filled class only carries the namespace: meta(name, bases, namespace,
 		// **kw) makes the real one, the namespace a dict of the members in
 		// definition order plus __module__, __qualname__ and the cell as
-		// __classcell__, which type.__new__ fills (pyTypeNew). Otherwise the
+		// __classcell__, which type.__new__ fills (pyTypeNew), after the
+		// __classdictcell__ a body with an annotation scope has (a[3], sbClassDict
+		// in python-to-llvm-ir.abnf). Otherwise the
 		// class is finished in place (js_pysetnames). Twin of makeClass's metaclass arm in
 		// languages/python-interpreter.abnf and js_pyclass_meta in
 		// lib/python-rt.metajs.
@@ -16195,6 +16207,11 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				if rt.toString(k) != "__module__" {
 					dictAppend(nk, nv, k, mv.elems[i])
 				}
+			}
+			if u(a[3]) == true {
+				dcell := newJSObject()
+				dcell.set("__pydcell", true)
+				dictAppend(nk, nv, "__classdictcell__", dcell)
 			}
 			sc, hasCell := u(a[2]).(*jsScope)
 			if hasCell {
@@ -16254,8 +16271,8 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				rt.fail("js_pycall args must be an array")
 			}
 			callee, kw := u(a[0]), u(a[2])
-			if sup, isSup := pySuperObj(callee); isSup {
-				return w(rt.pySuperCall(sup, args.elems))
+			if o, isObj := callee.(*jsObject); isObj && o == rt.pySuperT {
+				return w(rt.pySuperCall(args.elems))
 			}
 			// A BUILTIN TYPE OBJECT is callable: `int` is the class, and calling it
 			// converts. The emitter binds int/str/float/bool/list/dict/set/tuple to
@@ -20710,6 +20727,18 @@ func pySuperNew(cls, self interface{}) *jsObject {
 	return s
 }
 
+// CPython's super repr names the start class and the type the lookup runs
+// over: the second operand itself when it is a class, else its type. Twin of
+// pySuperRepr in languages/python-interpreter.abnf and lib/python-rt.metajs.
+func (rt *jsrt) pySuperRepr(s *jsObject) string {
+	start, _ := s.props["__scls"].(*jsObject)
+	on := pyTypeName(rt, s.props["__sobj"])
+	if c, isCls := s.props["__sobj"].(*jsObject); isCls && c.props["__name"] != nil {
+		on = rt.pyClsName(c)
+	}
+	return "<super: <class '" + rt.pyClsName(start) + "'>, <" + on + " object>>"
+}
+
 func pySuperObj(v interface{}) (*jsObject, bool) {
 	o, ok := v.(*jsObject)
 	if !ok {
@@ -20737,11 +20766,13 @@ func (rt *jsrt) pySuperCheck(s *jsObject) {
 	}
 }
 
-func (rt *jsrt) pySuperCall(s *jsObject, args []interface{}) interface{} {
+// Calling the type `super`: zero arguments take the operands js_pysuper left,
+// two build an explicit proxy.
+func (rt *jsrt) pySuperCall(args []interface{}) interface{} {
 	switch len(args) {
 	case 0:
-		rt.pySuperCheck(s)
-		return s
+		rt.pySuperCheck(rt.pySupPending)
+		return rt.pySupPending
 	case 2:
 		return pySuperNew(args[0], args[1])
 	}
@@ -22961,8 +22992,8 @@ func (rt *jsrt) pyConvArgs(cls *jsObject, conv interface{}, args []interface{}, 
 }
 
 func (rt *jsrt) callPyValue(v interface{}, args []interface{}, kw interface{}) interface{} {
-	if sup, isSup := pySuperObj(v); isSup {
-		return rt.pySuperCall(sup, args)
+	if o, isObj := v.(*jsObject); isObj && o == rt.pySuperT {
+		return rt.pySuperCall(args)
 	}
 	// A BUILTIN TYPE OBJECT is callable and CONVERTS: the emitter binds int/str/
 	// float/... to js_pybuiltincls's stable class object with the conversion
