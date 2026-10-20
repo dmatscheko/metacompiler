@@ -6,8 +6,8 @@
 // toolchain recovers panic(nil) as nil; this file asserts the Go 1.21+ answer
 // (a *runtime.PanicNilError), as the grammars implement it.
 
-// Full-syntax test: Go (Go 1.22 core language) - part 1 of 3, sections 01 to 82;
-// tests/go-test-full.2.go says why the ratchet is three files.
+// Full-syntax test: Go (Go 1.22 core language) - part 1 of 4, sections 01 to 82;
+// tests/go-test-full.2.go says why the ratchet is four files.
 //
 // This file belongs to the SECOND test group (./test.sh --full): it is NOT part
 // of the default matrix. The goal of the metacompiler is to support the full

@@ -2335,9 +2335,9 @@ func (rt *jsrt) goMethod(v interface{}, name string) (interface{}, interface{}, 
 	// Promotion: a method of an embedded struct is a method of the outer one.
 	o := v.(*jsObject)
 	if fs, okf := cls.props["__fields"].(*jsArray); okf {
-		for _, f := range fs.elems {
+		for i, f := range fs.elems {
 			inner := o.props[rt.toString(f)]
-			if goClassOf(inner) == nil {
+			if goClassOf(inner) == nil || !goFieldEmbedded(cls, i, rt.toString(f)) {
 				continue
 			}
 			if fn, recv, found := rt.goMethod(inner, name); found {
@@ -2346,6 +2346,20 @@ func (rt *jsrt) goMethod(v interface{}, name string) (interface{}, interface{}, 
 		}
 	}
 	return nil, nil, false
+}
+
+// goFieldEmbedded: is field i (named name) of struct descriptor cls an embedded
+// one, whose methods the struct has too? Its declared type is "" (an embedded
+// struct) or its own name (an embedded interface); a descriptor that records no
+// types counts every field. Twins: goFieldEmbedded in go-interpreter.abnf and
+// lib/go-rt.metajs.
+func goFieldEmbedded(cls *jsObject, i int, name string) bool {
+	ft, ok := cls.props["__ftypes"].(*jsArray)
+	if !ok || i >= len(ft.elems) {
+		return true
+	}
+	t, _ := ft.elems[i].(string)
+	return t == "" || t == name || t == "*"+name
 }
 
 // identityEq compares two reference values without panicking on uncomparable types.

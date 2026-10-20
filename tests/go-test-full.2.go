@@ -6,18 +6,19 @@
 // toolchain recovers panic(nil) as nil; this file asserts the Go 1.21+ answer
 // (a *runtime.PanicNilError), as the grammars implement it.
 
-// Full-syntax test: Go (Go 1.22 core language) - part 2 of 3, sections 83 to 93.
+// Full-syntax test: Go (Go 1.22 core language) - part 2 of 4, sections 83 to 93.
 //
-// THE GO RATCHET IS THREE FILES, so that no -frozen interpreter leg comes near the
+// THE GO RATCHET IS FOUR FILES, so that no -frozen interpreter leg comes near the
 // IR interpreter's step brake (-max-steps, 100M per call): compiling a standard
 // package written in Go costs the leg that imports it.
 //
 //   tests/go-test-full.go     sections 01 to 82
 //   tests/go-test-full.2.go   sections 83 to 93
-//   tests/go-test-full.3.go   sections 94 on, and every newer section
+//   tests/go-test-full.3.go   sections 94 on, and every newer section, but
+//   tests/go-test-full.4.go   sections 100 and 101 (encoding/json, reflect)
 //
 // The section NUMBERS are global, and ./test.sh --full reports the files as the
-// units go, go2 and go3.
+// units go, go2, go3 and go4.
 //
 // This file belongs to the SECOND test group (./test.sh --full): it is NOT part
 // of the default matrix. The goal of the metacompiler is to support the full

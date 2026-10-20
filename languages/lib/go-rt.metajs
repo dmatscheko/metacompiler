@@ -2076,7 +2076,7 @@ function goMethod(v, name) {
         var i = 0
         while (i < fs.length) {
             var inner = v[goStrOf(fs[i])]
-            if (goClassOf(inner) !== undefined) {
+            if (goClassOf(inner) !== undefined && goFieldEmbedded(cls, i)) {
                 var got = goMethod(inner, name)
                 if (got !== undefined) { return got }
             }
@@ -2380,6 +2380,16 @@ function js_gorepanic() {
 // languages/go-interpreter.abnf.
 
 // A method of v's own descriptor, or one PROMOTED from an embedded struct.
+// Is field i of descriptor cls embedded, so that its methods are the struct's?
+// Its declared type is "" (an embedded struct) or its own name (an embedded
+// interface); a descriptor that records no types counts every field. Twins:
+// goFieldEmbedded in abnf/jsrt.go and go-interpreter.abnf.
+function goFieldEmbedded(cls, i) {
+    if (!goHas(cls, "__ftypes") || !Array.isArray(cls.__ftypes) || i >= cls.__ftypes.length) { return true }
+    var t = goStrOf(cls.__ftypes[i])
+    var n = goStrOf(cls.__fields[i])
+    return t == "" || t == n || t == "*" + n
+}
 function goHasMethod(v, name) {
     var cls = goClassOf(v)
     if (cls === undefined) { return false }
@@ -2389,7 +2399,7 @@ function goHasMethod(v, name) {
     var i = 0
     while (i < fs.length) {
         var inner = v[goStrOf(fs[i])]
-        if (goClassOf(inner) !== undefined) {
+        if (goClassOf(inner) !== undefined && goFieldEmbedded(cls, i)) {
             if (goHasMethod(inner, name)) { return true }
         }
         i = i + 1

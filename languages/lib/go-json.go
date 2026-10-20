@@ -76,14 +76,21 @@ type UnmarshalTypeError struct {
 	Offset int64
 	Struct string
 	Field  string
+	Err    error
 }
 
 func (e *UnmarshalTypeError) Error() string {
+	s := "json: cannot unmarshal " + e.Value + " into Go value of type " + e.Type
 	if e.Struct != "" || e.Field != "" {
-		return "json: cannot unmarshal " + e.Value + " into Go struct field " + e.Struct + "." + e.Field + " of type " + e.Type
+		s = "json: cannot unmarshal " + e.Value + " into Go struct field " + e.Struct + "." + e.Field + " of type " + e.Type
 	}
-	return "json: cannot unmarshal " + e.Value + " into Go value of type " + e.Type
+	if e.Err != nil {
+		s += ": " + e.Err.Error()
+	}
+	return s
 }
+
+func (e *UnmarshalTypeError) Unwrap() error { return e.Err }
 
 type InvalidUnmarshalError struct {
 	Type string
@@ -752,6 +759,10 @@ type checker struct {
 	err  *SyntaxError
 }
 
+// maxDepth is how deeply objects and arrays may nest, encoding/json's limit;
+// the decode that follows a check recurses no deeper than this either.
+const maxDepth = 10000
+
 func (c *checker) fail(msg string, off int) {
 	if c.err == nil {
 		c.err = &SyntaxError{msg: msg, Offset: int64(off)}
@@ -794,110 +805,128 @@ func isHex(c byte) bool {
 }
 
 // value checks the value at p and answers where it ends; -1 after an error.
+// It walks nested objects and arrays with a stack of its own, not by
+// recursion, so any depth is checked (and past maxDepth refused) in every
+// engine.
 func (c *checker) value(p int) int {
-	p = c.ws(p)
-	if p >= len(c.data) {
-		c.eof(len(c.data))
-		return -1
-	}
-	switch b := c.data[p]; {
-	case b == '{':
-		return c.object(p + 1)
-	case b == '[':
-		return c.array(p + 1)
-	case b == '"':
-		return c.str(p)
-	case b == '-' || isDigit(b):
-		return c.number(p)
-	case b == 't':
-		return c.literal(p, "true")
-	case b == 'f':
-		return c.literal(p, "false")
-	case b == 'n':
-		return c.literal(p, "null")
-	}
-	c.badChar(p, "looking for beginning of value")
-	return -1
-}
-
-func (c *checker) object(p int) int {
-	p = c.ws(p)
-	if p >= len(c.data) {
-		c.eof(p)
-		return -1
-	}
-	if c.data[p] == '}' {
-		return p + 1
-	}
+	var stack []byte
 	for {
+		if p < len(c.data) && c.data[p] <= ' ' {
+			p = c.ws(p)
+		}
 		if p >= len(c.data) {
-			c.eof(p)
+			c.eof(len(c.data))
 			return -1
 		}
-		if c.data[p] != '"' {
-			c.badChar(p, "looking for beginning of object key string")
-			return -1
-		}
-		if p = c.str(p); p < 0 {
-			return -1
-		}
-		p = c.ws(p)
-		if p >= len(c.data) {
-			c.eof(p)
-			return -1
-		}
-		if c.data[p] != ':' {
-			c.badChar(p, "after object key")
-			return -1
-		}
-		if p = c.value(p + 1); p < 0 {
-			return -1
-		}
-		p = c.ws(p)
-		if p >= len(c.data) {
-			c.eof(p)
-			return -1
-		}
-		switch c.data[p] {
-		case '}':
-			return p + 1
-		case ',':
-			p = c.ws(p + 1)
-		default:
-			c.badChar(p, "after object key:value pair")
-			return -1
-		}
-	}
-}
-
-func (c *checker) array(p int) int {
-	p = c.ws(p)
-	if p >= len(c.data) {
-		c.eof(p)
-		return -1
-	}
-	if c.data[p] == ']' {
-		return p + 1
-	}
-	for {
-		if p = c.value(p); p < 0 {
-			return -1
-		}
-		p = c.ws(p)
-		if p >= len(c.data) {
-			c.eof(p)
-			return -1
-		}
-		switch c.data[p] {
-		case ']':
-			return p + 1
-		case ',':
+		done := false
+		switch b := c.data[p]; {
+		case b == '{' || b == '[':
+			if len(stack)+1 > maxDepth {
+				c.fail("exceeded max depth", p+1)
+				return -1
+			}
 			p++
+			if p < len(c.data) && c.data[p] <= ' ' {
+				p = c.ws(p)
+			}
+			if p >= len(c.data) {
+				c.eof(p)
+				return -1
+			}
+			if b == '{' && c.data[p] == '}' || b == '[' && c.data[p] == ']' {
+				p++
+				done = true
+				break
+			}
+			stack = append(stack, b)
+			if b == '{' {
+				if p = c.key(p); p < 0 {
+					return -1
+				}
+			}
+		case b == '"':
+			p = c.str(p)
+			done = true
+		case b == '-' || isDigit(b):
+			p = c.number(p)
+			done = true
+		case b == 't':
+			p = c.literal(p, "true")
+			done = true
+		case b == 'f':
+			p = c.literal(p, "false")
+			done = true
+		case b == 'n':
+			p = c.literal(p, "null")
+			done = true
 		default:
-			c.badChar(p, "after array element")
+			c.badChar(p, "looking for beginning of value")
 			return -1
 		}
+		if p < 0 {
+			return -1
+		}
+		// After a value: a separator or the end of the containers it closes.
+		for done {
+			if len(stack) == 0 {
+				return p
+			}
+			if p < len(c.data) && c.data[p] <= ' ' {
+				p = c.ws(p)
+			}
+			if p >= len(c.data) {
+				c.eof(p)
+				return -1
+			}
+			top, ch := stack[len(stack)-1], c.data[p]
+			switch {
+			case ch == ',':
+				done = false
+				if top == '{' {
+					if p = c.key(c.ws(p + 1)); p < 0 {
+						return -1
+					}
+				} else {
+					p++
+				}
+			case top == '[' && ch == ']' || top == '{' && ch == '}':
+				stack = stack[:len(stack)-1]
+				p++
+			case top == '[':
+				c.badChar(p, "after array element")
+				return -1
+			default:
+				c.badChar(p, "after object key:value pair")
+				return -1
+			}
+		}
 	}
+}
+
+// key checks an object key at p and the ':' after it, and answers where the
+// value may start.
+func (c *checker) key(p int) int {
+	if p >= len(c.data) {
+		c.eof(p)
+		return -1
+	}
+	if c.data[p] != '"' {
+		c.badChar(p, "looking for beginning of object key string")
+		return -1
+	}
+	if p = c.str(p); p < 0 {
+		return -1
+	}
+	p = c.ws(p)
+	if p >= len(c.data) {
+		c.eof(p)
+		return -1
+	}
+	if c.data[p] != ':' {
+		c.badChar(p, "after object key")
+		return -1
+	}
+	return p + 1
 }
 
 func (c *checker) str(p int) int {
@@ -1256,8 +1285,10 @@ func (d *decodeState) saveError(err error) {
 	}
 }
 
-func (d *decodeState) typeError(what, t string) {
-	e := &UnmarshalTypeError{Value: what, Type: typeName(t), Offset: int64(d.off)}
+func (d *decodeState) typeError(what, t string) { d.typeErrorWith(what, t, nil) }
+
+func (d *decodeState) typeErrorWith(what, t string, err error) {
+	e := &UnmarshalTypeError{Value: what, Type: typeName(t), Offset: int64(d.off), Err: err}
 	if len(d.errField) > 0 {
 		e.Struct = d.errStruct
 		e.Field = strings.Join(d.errField, ".")
@@ -1275,6 +1306,9 @@ func (d *decodeState) skipSpace() {
 func (d *decodeState) skipValue() int {
 	d.skipSpace()
 	start := d.off
+	if d.off >= len(d.data) {
+		return start
+	}
 	switch c := d.data[d.off]; c {
 	case '{', '[':
 		depth := 0
@@ -1304,7 +1338,7 @@ func (d *decodeState) skipValue() int {
 		}
 	case '"':
 		d.off++
-		for d.data[d.off] != '"' {
+		for d.off < len(d.data) && d.data[d.off] != '"' {
 			if d.data[d.off] == '\\' {
 				d.off++
 			}
@@ -1341,6 +1375,9 @@ func (d *decodeState) literalKind() string {
 // value the destination holds, which an object or array decodes into.
 func (d *decodeState) value(t string, cur interface{}) interface{} {
 	d.skipSpace()
+	if d.off >= len(d.data) {
+		return cur
+	}
 	if t == "" || t == "interface{}" || t == "any" || strings.HasPrefix(t, "interface{") {
 		if d.data[d.off] == 'n' {
 			d.off += 4
@@ -1457,7 +1494,7 @@ func (d *decodeState) str() string {
 	start := d.off
 	d.off++
 	var out []byte
-	for d.data[d.off] != '"' {
+	for d.off < len(d.data) && d.data[d.off] != '"' {
 		c := d.data[d.off]
 		if c != '\\' {
 			out = append(out, c)
@@ -1465,6 +1502,9 @@ func (d *decodeState) str() string {
 			continue
 		}
 		d.off++
+		if d.off >= len(d.data) {
+			break
+		}
 		switch e := d.data[d.off]; e {
 		case 'b':
 			out = append(out, '\b')
@@ -1477,6 +1517,10 @@ func (d *decodeState) str() string {
 		case 't':
 			out = append(out, '\t')
 		case 'u':
+			if d.off+5 > len(d.data) {
+				d.off = len(d.data)
+				continue
+			}
 			r := hex4(d.data[d.off+1 : d.off+5])
 			d.off += 4
 			if r >= 0xD800 && r < 0xDC00 && d.off+6 < len(d.data) && d.data[d.off+1] == '\\' && d.data[d.off+2] == 'u' {
@@ -1582,6 +1626,9 @@ func intBits(t string) int {
 // float64 (or Number), string, bool or nil.
 func (d *decodeState) generic() interface{} {
 	d.skipSpace()
+	if d.off >= len(d.data) {
+		return nil
+	}
 	switch c := d.data[d.off]; c {
 	case '{':
 		m := make(map[string]interface{})
@@ -1865,22 +1912,8 @@ func (d *decodeState) intoStruct(s interface{}, t string) {
 			d.errField = append(append([]string{}, d.errField...), f.name)
 			cur := goRfFields(owner)[3][idx]
 			var v interface{}
-			if f.quoted && d.data[d.off] == '"' && f.typ != "string" {
-				q := d.str()
-				sub := &decodeState{data: []byte(q), errStruct: d.errStruct, errField: d.errField}
-				v = sub.value(f.typ, cur)
-				if sub.savedError != nil {
-					d.saveError(sub.savedError)
-				}
-			} else if f.quoted && f.typ == "string" && d.data[d.off] == '"' {
-				q := d.str()
-				uq, err := strconv.Unquote(q)
-				if err != nil {
-					d.saveError(fmt.Errorf("json: invalid use of ,string struct tag, trying to unmarshal %q into %s", q, f.typ))
-					v = cur
-				} else {
-					v = uq
-				}
+			if f.quoted && isScalarKind(goRfKind(cur)) {
+				v = d.quoted(f.typ, cur)
 			} else {
 				v = d.value(f.typ, cur)
 			}
@@ -1892,6 +1925,71 @@ func (d *decodeState) intoStruct(s interface{}, t string) {
 			d.off++
 		}
 	}
+}
+
+func isScalarKind(k string) bool {
+	switch k {
+	case "bool", "string", "float32", "float64", "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr":
+		return true
+	}
+	return false
+}
+
+// quoted decodes a ,string field of scalar type t: a JSON string holding the
+// field's literal (for a string field, a quoted JSON string), or null. The
+// inner literal is checked before it is read; what does not fit is a type
+// error, as encoding/json reports it.
+func (d *decodeState) quoted(t string, cur interface{}) interface{} {
+	c := d.data[d.off]
+	if c == 'n' {
+		d.skipValue()
+		return cur
+	}
+	if c != '"' {
+		d.typeError(d.literalKind(), t)
+		d.skipValue()
+		return cur
+	}
+	q := d.str()
+	if q == "null" {
+		return cur
+	}
+	switch k := goRfKind(cur); k {
+	case "string":
+		if q == "" || q[0] != '"' {
+			bad := q
+			if bad == "" {
+				bad = " "
+			}
+			c := &checker{data: []byte(bad)}
+			c.badChar(0, "looking for beginning of object key string")
+			d.typeErrorWith("string", t, c.err)
+			return cur
+		}
+		if err := checkValid([]byte(q)); err != nil {
+			d.typeErrorWith("string", t, err)
+			return cur
+		}
+		sub := &decodeState{data: []byte(q)}
+		return sub.str()
+	case "bool":
+		if q != "true" && q != "false" {
+			d.typeErrorWith("string "+strconv.Quote(q), t, strconv.ErrSyntax)
+			return cur
+		}
+		return q == "true"
+	}
+	nc := &checker{data: []byte(q)}
+	if q == "" || (q[0] != '-' && !isDigit(q[0])) || nc.number(0) != len(q) {
+		d.typeError("number "+q, t)
+		return cur
+	}
+	sub := &decodeState{data: []byte(q), errStruct: d.errStruct, errField: d.errField}
+	v := sub.number(t, cur)
+	if sub.savedError != nil {
+		d.saveError(sub.savedError)
+	}
+	return v
 }
 
 // ----- streams -----

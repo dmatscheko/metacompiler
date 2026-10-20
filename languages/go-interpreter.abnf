@@ -2964,6 +2964,17 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return String.fromCharCode(0xd800 + gtrunc(x / 1024)) + String.fromCharCode(0xdc00 + (x % 1024))
     }
 
+    // Is field i of descriptor cls embedded, so that its methods are the struct's?
+    // Its declared type is "" (an embedded struct) or its own name (an embedded
+    // interface); a descriptor that records no types counts every field. Twins:
+    // goFieldEmbedded in abnf/jsrt.go and lib/go-rt.metajs.
+    function goFieldEmbedded(cls, i) {
+        var fts = cls.__ftypes
+        if (!Array.isArray(fts) || i >= fts.length) { return true }
+        var t = fts[i]
+        var n = cls.__fields[i]
+        return t == "" || t == n || t == "*" + n
+    }
     // The method `name` promoted from an embedded struct field of v, with its
     // receiver, or null. The twin is goMethod in languages/lib/go-rt.metajs.
     function goPromoted(v, name) {
@@ -2974,7 +2985,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (!Array.isArray(fs)) { return null }
         for (var i = 0; i < fs.length; i++) {
             var inner = v[fs[i]]
-            if (inner == undefined || inner == null || typeof inner != "object") { continue }
+            if (inner == undefined || inner == null || typeof inner != "object" || !goFieldEmbedded(cls, i)) { continue }
             var icls = inner.__class
             if (icls == undefined || icls == null) { continue }
             if (hasOwn(icls, name) && typeof icls[name] == "function") {
@@ -5381,7 +5392,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (!Array.isArray(fs)) { return false }
         for (var i = 0; i < fs.length; i++) {
             var inner = v[fs[i]]
-            if (inner != undefined && inner != null && typeof inner == "object" && inner.__class != undefined) {
+            if (inner != undefined && inner != null && typeof inner == "object" && inner.__class != undefined && goFieldEmbedded(cls, i)) {
                 if (goHasMethod(inner, name)) { return true }
             }
         }
