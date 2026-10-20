@@ -17689,6 +17689,13 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		},
 		// enumerate(iterable, start=0), bound as [positionals, keywords]; both
 		// may be passed by keyword.
+		// _mec_eprintln(s): one line on the diagnostic channel, standard error
+		// (lib/python-sys.py's sys.stderr). Twin of js_pyeprintln in
+		// lib/python-rt.metajs and _mec_eprintln in python-interpreter.abnf.
+		"js_pyeprintln": func(a []uint64) uint64 {
+			fmt.Fprintln(warnWriter, rt.toString(u(a[0])))
+			return w(jsUndef)
+		},
 		"js_pyenumerate": func(a []uint64) uint64 {
 			el := u(a[0]).(*jsArray).elems
 			args := el[0].(*jsArray).elems

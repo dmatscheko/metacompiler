@@ -7126,6 +7126,22 @@ def s138():
           and g.__iter__() is g and hasattr(g, "send") and hasattr(iter([]), "__next__")
           and hasattr(int | None, "__args__"))
 
+# ===== SECTION 139: sys.stdout / stderr, maxsize, version_info, recursion limit =====
+import sys as S139sys
+
+def s139():
+    n = S139sys.stdout.write("")
+    S139sys.setrecursionlimit(5000)
+    check("sys1", n == 0 and S139sys.maxsize == 2 ** 63 - 1 and S139sys.version_info >= (3, 8)
+          and S139sys.version_info.major == 3 and S139sys.getrecursionlimit() == 5000
+          and S139sys.byteorder == "little" and S139sys.stdout.fileno() == 1 and S139sys.stderr.fileno() == 2
+          and not S139sys.stdout.isatty() and S139sys.argv[1:] == [])
+    try:
+        S139sys.stdout.write(5)
+        check("sys2", False)
+    except TypeError as e:
+        check("sys2", str(e) == "write() argument must be str, not int")
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -7262,5 +7278,6 @@ def main():
     s136() # SECTION-CALL 136
     s137() # SECTION-CALL 137
     s138() # SECTION-CALL 138
+    s139() # SECTION-CALL 139
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

@@ -4607,6 +4607,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // `sys`, as far as sys.get_int_max_str_digits / set_int_max_str_digits
         // (pySysCall in abnf/jsrtpynum.go and lib/python-rt.metajs).
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "_mec_mod_sys"), callExt(b, "js_pysys_module", [])])
+        // _mec_eprintln(s): one line on standard error, for lib/python-sys.py's
+        // sys.stderr. No builtin name, so it is declared here and not bound
+        // through declBind (which would make it a member of `builtins`).
+        funcCount++
+        var epIdx = funcCount
+        var epf = m.NewFunc("jsf_" + epIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var epb = epf.NewBlock("entry")
+        epb.NewRet(epb.NewCall(getExtern("js_pyeprintln", 1), [epb.NewCall(getExtern("js_arg", 2), [epf.Params[1], handle(0)])]))
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "_mec_eprintln"), callExt(b, "js_closure", [handle(epIdx), curScopeV])])
         b = declKwBuiltin(b, "str", "js_pystrnew", [])
         b = declKwBuiltin(b, "int", "js_pyint", [])
         b = declBuiltin(b, "isinstance", "js_pyisinst", 2)
@@ -5010,7 +5019,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // Python stdlib modules the runtime provides (prefix match, so a submodule
     // resolves against its parent). The modules written in Python are pyLibMods.
-    core.stdlibImports = ["sys", "math", "collections.abc", "re", "time", "builtins"]
+    core.stdlibImports = ["math", "collections.abc", "re", "time", "builtins"]
     // Project-file imports: 'import mypkg.helper' / 'from mypkg.helper import x'
     // look for mypkg/helper.py, then mypkg.py under the program's directory and
     // the -i roots (c.findImport). The file is parsed with this grammar and

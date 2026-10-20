@@ -6411,6 +6411,12 @@ function pyStopIter(args, val) {
     throw exc
 }
 
+// Go: js_pyeprintln. One line on standard error, for sys.stderr.
+function js_pyeprintln(s) {
+    eprintln(pyToStr(s))
+    return undefined
+}
+
 // Go: js_pyenumerate. Bound as [positionals, keywords].
 function js_pyenumerate(bound) {
     var args = bound[0]
@@ -12318,7 +12324,7 @@ function js_pyrxmcall(target, name, args, kw) {
             var mn = pyToStr(name)
             return pyMathCall(mn, pyMathKwArgs(mn, args, kw))
         }
-        if (pm === "sys") { return pySysCall(pyToStr(name), args, kw) }
+        if (pm === "sys" && target[pyToStr(name)] === undefined) { return pySysCall(pyToStr(name), args, kw) }
     }
     if (pyERxIsMod(target) || pyERxIsRe(target) || pyERxIsMatch(target)) {
         if (!pyIsArr(args)) { fail("js_pyrxmcall args must be an array") }

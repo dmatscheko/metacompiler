@@ -4814,6 +4814,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // by construction: they run at program time, long after the whole script has
     // been evaluated.
     hostGlobals["_mec_mod_sys"] = {__pymod: "sys"}
+    // _mec_eprintln(s): one line on standard error, for lib/python-sys.py's
+    // sys.stderr. Twin of js_pyeprintln in abnf/jsrt.go and lib/python-rt.metajs.
+    hostGlobals["_mec_eprintln"] = function(s) {
+        eprintln(pstr(s))
+        return undefined
+    }
     hostGlobals["_mec_mod_math"] = {__pymod: "math",
                            pi: {__flo: 3.141592653589793},
                            e: {__flo: 2.718281828459045},
@@ -6632,7 +6638,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return pyReModCall(name, pyReKwArgs(name, args, kw, true))
             }
             if (target.__pymod == "math") { return pyMathCall(name, pyMathKwArgs(name, args, kw)) }
-            if (target.__pymod == "sys") { return pySysCall(name, args, kw) }
+            if (target.__pymod == "sys" && !hasOwn(target, name)) { return pySysCall(name, args, kw) }
             // Any other module object - `builtins.len(xs)`. A method call does
             // not go through pyattr in this half, so the module's own member is
             // read here and called, which keeps `builtins.len(xs)` and
@@ -14403,7 +14409,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Python stdlib modules the runtime provides (resolveImport lives in
     // lib/interp-core.js; prefix match, so a submodule resolves against its
     // parent). The modules written in Python are pyLibMods.
-    core.stdlibImports = ["sys", "math", "collections.abc", "re", "time", "builtins"]
+    core.stdlibImports = ["math", "collections.abc", "re", "time", "builtins"]
     // Each top-level module of that list has a module object, bound as
     // _mec_mod_<name> like a library module's and only there, so a module name
     // is unbound until an import binds it: the host record for the modules that

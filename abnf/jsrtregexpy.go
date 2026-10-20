@@ -909,7 +909,7 @@ func init() {
 				name := rt.toString(u(a[1]))
 				return w(rt.pyMathCall(name, rt.pyMathKwArgs(name, arr.elems, u(a[3]))))
 			}
-			if o, ok := target.(*jsObject); ok && o.props["__pymod"] == "sys" {
+			if o, ok := target.(*jsObject); ok && o.props["__pymod"] == "sys" && !hasKey(o, rt.toString(u(a[1]))) {
 				return w(rt.pySysCall(rt.toString(u(a[1])), rt.argArray(u(a[2])), u(a[3])))
 			}
 			if rxPyIsMod(target) || rxPyIsRe(target) || rxPyIsMatch(target) {
