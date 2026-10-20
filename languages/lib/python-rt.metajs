@@ -88,6 +88,8 @@
 // not arise here.
 
 import "./regex.js"
+// (?P...) translation and re.error's message, position and fields.
+import "./python-regex.js"
 
 // The shared layer-2 runtime: the externs every language implements identically,
 // parameterised by the rtk* hooks below.
@@ -11650,68 +11652,6 @@ function pyEReFlagStr(n) {
     return s
 }
 
-// pyERePat is Go pyRePat: Python's P-spellings onto the neutral engine's.
-// (?P<name>...) is (?<name>...) and (?P=name) is the named backreference
-// \k<name>. Escapes and character classes are stepped over, so `[(?P<]` is left
-// alone. An unknown name is the ENGINE's error to report, which is why nothing
-// is counted here.
-//
-// Go returns (string, string); MetaJS has one return, so the pair travels in a
-// record {out, err}.
-function pyERePat(src) {
-    var out = ""
-    var inCls = false
-    var i = 0
-    while (i < src.length) {
-        var ch = src.charAt(i)
-        if (ch == "\\") {
-            var end = i + 2
-            if (end > src.length) { end = src.length }
-            out = out + src.substring(i, end)
-            i = end
-            continue
-        }
-        if (inCls) {
-            if (ch == "]") { inCls = false }
-            out = out + ch
-            i = i + 1
-            continue
-        }
-        if (ch == "[") {
-            inCls = true
-            out = out + ch
-            i = i + 1
-            continue
-        }
-        if (ch != "(") {
-            out = out + ch
-            i = i + 1
-            continue
-        }
-        // Go's strings.HasPrefix(src[i:], "(?P<"); substring clamps at the end
-        // of the string, so a short tail simply fails to compare equal.
-        if (src.substring(i, i + 4) == "(?P<") {
-            var j = i + 4
-            while (j < src.length && src.charAt(j) != ">") { j = j + 1 }
-            if (j >= src.length) { return {out: "", err: "unterminated group name"} }
-            out = out + "(?<" + src.substring(i + 4, j) + ">"
-            i = j + 1
-            continue
-        }
-        if (src.substring(i, i + 4) == "(?P=") {
-            var k = i + 4
-            while (k < src.length && src.charAt(k) != ")") { k = k + 1 }
-            if (k >= src.length) { return {out: "", err: "unterminated group name"} }
-            out = out + "\\k<" + src.substring(i + 4, k) + ">"
-            i = k + 1
-            continue
-        }
-        out = out + ch
-        i = i + 1
-    }
-    return {out: out, err: ""}
-}
-
 // ----- The compile cache -----
 //
 // SHARED as rxCache / rxGet - lib/regex.js, imported at the top of this file,
@@ -11742,9 +11682,11 @@ function pyERxIsMatch(v) {
 
 // js_pyre_module is Go rxPyModule. `import re` binds no module object in this
 // flat import model, so the grammar declares this one into the global scope; it
-// is a plain object, which js_pygetattr reads re.I / re.DOTALL out of.
+// is a plain object, which js_pygetattr reads re.I / re.DOTALL out of. It is
+// kept in pyEReMod (Go rt.pyReMod) for pyERxRaise.
+var pyEReMod = []
 function js_pyre_module() {
-    return {
+    var mod = {
         __pymod: "re",
         NOFLAG: 0,
         A: 256, ASCII: 256,
@@ -11755,16 +11697,52 @@ function js_pyre_module() {
         U: 32, UNICODE: 32,
         X: 64, VERBOSE: 64
     }
+    pyEReMod.push(mod)
+    return mod
+}
+
+// js_pyreerrinit is Go js_pyreerrinit: re.error's __init__ hook over the
+// closure's call arguments [self, msg, pattern, pos].
+function js_pyreerrinit(argv, sc) {
+    pyEReErrInit(argv[0], argv.length > 1 ? argv[1] : undefined, argv.length > 2 ? argv[2] : undefined,
+                 argv.length > 3 ? argv[3] : undefined)
+    return undefined
+}
+
+// pyEReErrInit is Go (*jsrt).pyReErrInit: re.error.__init__(msg, pattern=None,
+// pos=None).
+function pyEReErrInit(self, msg, pattern, pos) {
+    var located = typeof pattern == "string" && typeof pos == "number"
+    pySetAttrRaw(self, "args", pyTup([located ? pyReErrText(pyStr(msg), pattern, pos) : msg]))
+    pySetAttrRaw(self, "msg", msg)
+    pySetAttrRaw(self, "pattern", pattern)
+    pySetAttrRaw(self, "pos", pos)
+    pySetAttrRaw(self, "lineno", located ? pyReErrLine(pattern, pos) : undefined)
+    pySetAttrRaw(self, "colno", located ? pyReErrCol(pattern, pos) : undefined)
+}
+
+// pyERxRaise is Go (*jsrt).rxPyRaise: re.error for a pattern the engine
+// rejects, as the class the emitter put on the module.
+function pyERxRaise(pat, nf, err, at) {
+    var info = pyReErrInfo(pat, nf, err, at)
+    var cls = anytype
+    cls = pyExcClass("PatternError")
+    if (pyEReMod.length > 0 && pyIsObj(pyEReMod[0]["error"])) { cls = pyEReMod[0]["error"] }
+    var inst = {}
+    inst["__class"] = cls
+    pyEReErrInit(inst, info["msg"], pat, info["pos"] < 0 ? undefined : info["pos"])
+    js_pyexcchain(inst)
+    throw inst
 }
 
 // pyERxCompile is Go (*jsrt).rxPyCompile.
 function pyERxCompile(pat, flags) {
-    var tr = pyERePat(pat)
-    if (tr["err"] != "") { fail("re.error: " + tr["err"]) }
-    var src = tr["out"]
     var neutral = pyEReFlagStr(flags)
+    var tr = pyRePat(pat)
+    if (tr["err"] != "") { pyERxRaise(pat, neutral, tr["err"], -1) }
+    var src = tr["out"]
     var re = rxGet(src, neutral)
-    if (!re["ok"]) { fail("re.error: " + re["err"]) }
+    if (!re["ok"]) { pyERxRaise(pat, neutral, re["err"], src == pat ? re["errAt"] : -1) }
     // Python's own .flags always reports re.UNICODE for a str pattern.
     return {__pyre: true, pattern: pat, flags: flags | pyEReU | rxGFlagBits(re["gflags"]), __src: src, __nf: neutral}
 }
@@ -12255,7 +12233,11 @@ function js_pyrxmcall(target, name, args, kw) {
     if (pyERxIsMod(target) || pyERxIsRe(target) || pyERxIsMatch(target)) {
         if (!pyIsArr(args)) { fail("js_pyrxmcall args must be an array") }
         var nm = pyToStr(name)
-        if (pyERxIsMod(target)) { return pyERxModCall(nm, pyERxKwArgs(nm, args, kw, true)) }
+        if (pyERxIsMod(target)) {
+            // re.error(...) / re.PatternError(...) construct the class.
+            if (nm == "error" || nm == "PatternError") { return pyDCallPyValue(target[nm], args, kw) }
+            return pyERxModCall(nm, pyERxKwArgs(nm, args, kw, true))
+        }
         if (pyERxIsRe(target)) { return pyERxReMethod(target, nm, pyERxKwArgs(nm, args, kw, false)) }
         return pyERxMatchMethod(target, nm, args)
     }

@@ -6748,6 +6748,59 @@ def s129():
     check("sord2", s.pop() == 3 and len(s) == 2
           and [v for v in set([2**40 + 3, 2**33 + 5, 1, -2**35, 9, 7])] == [-34359738368, 1, 1099511627779, 8589934597, 7, 9])
 
+# ===== SECTION 130: re.error, and a class body's try/except bindings =====
+# re.error is re.PatternError, an Exception subclass carrying msg, pattern, pos,
+# lineno and colno; str() appends the position. Every value is CPython 3.14's.
+def s130():
+    got = []
+    for p in ["(", "(a)(", "a)", "a[b", "a**", "\\", "(?P<n>a)(?P=m)", "(?P<x", "a{2,1}", "(?Q)", "[b-a]", "(a)\\2"]:
+        try:
+            re.compile(p)
+            got.append("ok")
+        except re.error as e:
+            got.append(str(e))
+    check("reerr1", got == ["missing ), unterminated subpattern at position 0",
+                            "missing ), unterminated subpattern at position 3",
+                            "unbalanced parenthesis at position 1", "unterminated character set at position 1",
+                            "multiple repeat at position 2", "bad escape (end of pattern) at position 0",
+                            "unknown group name 'm' at position 12", "missing >, unterminated name at position 4",
+                            "min repeat greater than max repeat at position 2", "unknown extension ?Q at position 1",
+                            "bad character range b-a at position 1", "invalid group reference 2 at position 4"])
+    try:
+        re.search("ab\n(c", "x")
+        check("reerr2", False)
+    except Exception as e:
+        check("reerr2", type(e).__name__ == "PatternError" and e.msg == "missing ), unterminated subpattern"
+              and e.pattern == "ab\n(c" and e.pos == 3 and e.lineno == 2 and e.colno == 1
+              and str(e) == "missing ), unterminated subpattern at position 3 (line 2, column 1)")
+    e2 = re.error("hi", "pat", 1)
+    e3 = re.error("bare")
+    check("reerr3", re.error is re.PatternError and str(re.error) == "<class 're.PatternError'>"
+          and issubclass(re.error, Exception) and not issubclass(re.error, ValueError)
+          and str(e2) == "hi at position 1" and e2.args == ("hi at position 1",) and e2.colno == 2
+          and str(e3) == "bare" and e3.pos is None and e3.lineno is None)
+    class K:
+        try:
+            1 / 0
+        except ZeroDivisionError as err:
+            z = 5
+        try:
+            pass
+        except ZeroDivisionError:
+            q = 1
+        else:
+            w = 2
+        finally:
+            f = 3
+        try:
+            a: int = 1
+        finally:
+            pass
+        gone = 0
+        del gone
+    check("clstry", K.z == 5 and K.w == 2 and K.f == 3 and not hasattr(K, "q") and not hasattr(K, "err")
+          and not hasattr(K, "gone") and list(K.__annotations__) == ["a"])
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -6875,5 +6928,6 @@ def main():
     s127() # SECTION-CALL 127
     s128() # SECTION-CALL 128
     s129() # SECTION-CALL 129
+    s130() # SECTION-CALL 130
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

@@ -1640,9 +1640,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // source TEXT, so there is nothing left to evaluate once it is not recorded.
         if (pyBindSink == null) { return b }
         pyBindSink.push("__annotations__")
-        pyAnnotDecl(b, envV)
+        // The class body's own scope ("pyfn*"), not a try/with body closure's.
+        var bodyV = callExt(b, "js_scope_get", [envV, emitStr(b, "pyfn*")])
+        pyAnnotDecl(b, bodyV)
         pyAnnotHere = true
-        var d = callExt(b, "js_scope_get", [envV, emitStr(b, "__annotations__")])
+        var d = callExt(b, "js_scope_get", [bodyV, emitStr(b, "__annotations__")])
         callExt(b, "js_arr_push", [callExt(b, "js_get", [d, emitStr(b, "keys")]), emitStr(b, nameStr)])
         callExt(b, "js_arr_push", [callExt(b, "js_get", [d, emitStr(b, "vals")]), emitStr(b, annStr)])
         return b
@@ -1677,10 +1679,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var nP = pyFill1F.Params[2]
             var eb = pyFill1F.NewBlock("entry")
             var missB = pyFill1F.NewBlock("absent")
+            var hasB = pyFill1F.NewBlock("has")
             var hitB = pyFill1F.NewBlock("present")
-            eb.NewCondBr(truthy(eb, callExt(eb, "js_scope_has", [sP, nP])), hitB, missB)
+            eb.NewCondBr(truthy(eb, callExt(eb, "js_scope_has", [sP, nP])), hasB, missB)
             missB.NewRet(handle(0))
-            callExt(hitB, "js_pysetattr", [cP, nP, callExt(hitB, "js_scope_get", [sP, nP])])
+            // A slot holding the "pydel*" sentinel was unbound again (`del x`, or
+            // the end of an `except ... as x` handler), so it is no member either.
+            var fv = callExt(hasB, "js_scope_get", [sP, nP])
+            var fdd = callExt(hasB, "js_scope_get", [sP, emitStr(hasB, "pydel*")])
+            hasB.NewCondBr(truthy(hasB, callExt(hasB, "js_seq", [fv, fdd])), missB, hitB)
+            callExt(hitB, "js_pysetattr", [cP, nP, fv])
             hitB.NewRet(handle(0))
         }
         var seen = {}
@@ -4011,7 +4019,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // A def or lambda body is a Python BINDING BOUNDARY: an assignment in it
         // makes a local, even when an enclosing function binds the same name. A
         // try/except/with body closure (isCtl) is NOT one - its assignments belong
-        // to the function around it - so only the real functions open one.
+        // to the function (or class body) around it - so only the real functions
+        // open one, and only they start a fresh class-body sink.
         var savedSink = pyBindSink
         var savedAnnot = pyAnnotHere
         var savedInner = pyInnerNames
@@ -4020,9 +4029,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // keeps the one around it. See makeVarRef.
         var savedSelf = pySuperSelf
         if (!isCtl) { pySuperSelf = params.length > 0 ? params[0] : null }
-        pyBindSink = null
-        pyAnnotHere = false
-        if (!isCtl) { pyInnerNames = {} }
+        if (!isCtl) {
+            pyBindSink = null
+            pyAnnotHere = false
+            pyInnerNames = {}
+        }
         if (isCtl) {
             curScopeV = callExt(fb, "js_scope_new", [f.Params[0]])
         } else {
@@ -4084,7 +4095,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         genClosure = sawYield
         if (!isCtl) { sawYield = savedYield }
         pyBindSink = savedSink
-        pyAnnotHere = savedAnnot
+        if (!isCtl) { pyAnnotHere = savedAnnot }
         pyInnerNames = savedInner
         pySuperSelf = savedSelf
         if (isCtl) { ctlLeave() }
@@ -4765,6 +4776,25 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var ohb = ohf.NewBlock("entry")
             ohb.NewRet(ohb.NewCall(getExtern(osHooks[oh + 1], 2), [ohf.Params[1], ohf.Params[0]]))
             callExt(b, "js_set", [osErr, emitStr(b, osHooks[oh]), callExt(b, "js_closure", [handle(ohIdx), curScopeV])])
+        }
+        // re.error, which the `re` module also names PatternError: an Exception
+        // subclass of the module's own, with the __init__ hook js_pyreerrinit
+        // (abnf/jsrtregexpy.go). The runtime raises a rejected pattern as the class
+        // it finds here on the module. Built only for a program that imports `re`.
+        if (pyRtModsUsed.indexOf("re") >= 0) {
+            var reBases = callExt(b, "js_arr_new", [])
+            callExt(b, "js_arr_push", [reBases, excBase])
+            var reErr = callExt(b, "js_pyclass_new", [emitStr(b, "PatternError"), reBases])
+            callExt(b, "js_set", [reErr, emitStr(b, "__module__"), emitStr(b, "re")])
+            funcCount++
+            var reIdx = funcCount
+            var ref = m.NewFunc("jsf_" + reIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+            var reb = ref.NewBlock("entry")
+            reb.NewRet(reb.NewCall(getExtern("js_pyreerrinit", 2), [ref.Params[1], ref.Params[0]]))
+            callExt(b, "js_set", [reErr, emitStr(b, "__init__"), callExt(b, "js_closure", [handle(reIdx), curScopeV])])
+            var reMod = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "_mec_mod_re")])
+            callExt(b, "js_set", [reMod, emitStr(b, "error"), reErr])
+            callExt(b, "js_set", [reMod, emitStr(b, "PatternError"), reErr])
         }
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "IOError"), osErr])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "EnvironmentError"), osErr])

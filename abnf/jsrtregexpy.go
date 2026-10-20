@@ -62,6 +62,7 @@ func pyReFlagStr(n int) string {
 // (?P<name>...) is (?<name>...) and (?P=name) is the named backreference \k<name>.
 // Escapes and character classes are stepped over, so `[(?P<]` is left alone. An
 // unknown name is the ENGINE's error to report, which is why nothing is counted here.
+// Twin of pyRePat in languages/lib/python-regex.js.
 func pyRePat(src string) (string, string) {
 	var out strings.Builder
 	inCls := false
@@ -125,6 +126,191 @@ func pyRePat(src string) (string, string) {
 	return out.String(), ""
 }
 
+// ----- re.error -----
+//
+// Twins of languages/lib/python-regex.js, which states the rules. Positions
+// count code points, as CPython's do.
+
+// pyReCompileErr is the error the whole pipeline reports for p; "" when it compiles.
+func pyReCompileErr(p, nf string) string {
+	src, err := pyRePat(p)
+	if err != "" {
+		return err
+	}
+	return rxCompile(src, nf).err
+}
+
+// pyReOpenAt is where an end-of-pattern error points: the innermost '(' or the
+// '[' still open; -1 when there is none.
+func pyReOpenAt(p []rune, group bool) int {
+	var opens []int
+	cls := -1
+	for i := 0; i < len(p); i++ {
+		ch := p[i]
+		if ch == '\\' {
+			i++
+			continue
+		}
+		switch {
+		case cls >= 0:
+			first := cls + 1
+			if first < len(p) && p[first] == '^' {
+				first++
+			}
+			if ch == ']' && i > first {
+				cls = -1
+			}
+		case ch == '[':
+			cls = i
+		case ch == '(':
+			opens = append(opens, i)
+		case ch == ')' && len(opens) > 0:
+			opens = opens[:len(opens)-1]
+		}
+	}
+	if !group {
+		return cls
+	}
+	if len(opens) == 0 {
+		return -1
+	}
+	return opens[len(opens)-1]
+}
+
+// pyReLastAt is the index of the last ch in p before index k, or -1.
+func pyReLastAt(p []rune, ch rune, k int) int {
+	i := k - 1
+	for i >= 0 && p[i] != ch {
+		i--
+	}
+	return i
+}
+
+// pyReErrInfo is CPython's message and position (-1 for None) for the engine
+// error err on pattern pat, at the engine's own index at for an unmapped kind.
+func pyReErrInfo(pat, nf, err string, at int) (string, int) {
+	p := []rune(pat)
+	n := len(p)
+	switch err {
+	case "unterminated group":
+		return "missing ), unterminated subpattern", pyReOpenAt(p, true)
+	case "unterminated character class":
+		return "unterminated character set", pyReOpenAt(p, false)
+	case "trailing backslash in pattern":
+		return "bad escape (end of pattern)", n - 1
+	}
+	k := 1
+	for k < n && pyReCompileErr(string(p[:k]), nf) != err {
+		k++
+	}
+	switch {
+	case err == "unmatched ) in pattern":
+		return "unbalanced parenthesis", k - 1
+	case err == "quantifier with nothing to repeat":
+		return "nothing to repeat", k - 1
+	case err == "multiple repeat":
+		return err, k - 1
+	case err == "quantifier bounds are out of order":
+		return "min repeat greater than max repeat", pyReLastAt(p, '{', k) + 1
+	case err == "character class range is out of order":
+		lo := pyReLastAt(p, '-', k) - 1
+		if lo > 0 && p[lo-1] == '\\' {
+			lo--
+		}
+		return "bad character range " + string(p[lo:k]), lo
+	case err == "unterminated group name":
+		close := ")"
+		if k >= 4 && string(p[k-4:k]) == "(?P<" {
+			close = ">"
+		}
+		return "missing " + close + ", unterminated name", k
+	case strings.HasPrefix(err, "unknown group name '"):
+		return err, k - 1 - len([]rune(err[20:len(err)-1]))
+	case strings.HasPrefix(err, "invalid group reference "):
+		return err, k - len(err) + 24
+	case strings.HasPrefix(err, "unsupported group form (?"):
+		return "unknown extension ?" + string(p[k-1]), k - 2
+	}
+	return err, at
+}
+
+// pyReErrText is str() of a re.error built from msg, pattern and pos.
+func pyReErrText(msg string, pattern []rune, pos int) string {
+	out := msg + " at position " + strconv.Itoa(pos)
+	for _, c := range pattern {
+		if c == '\n' {
+			return out + " (line " + strconv.Itoa(pyReErrLine(pattern, pos)) + ", column " +
+				strconv.Itoa(pyReErrCol(pattern, pos)) + ")"
+		}
+	}
+	return out
+}
+
+// pyReErrLine and pyReErrCol are re.error's lineno and colno, counted up to pos.
+func pyReErrLine(pattern []rune, pos int) int {
+	line := 1
+	for i := 0; i < pos && i < len(pattern); i++ {
+		if pattern[i] == '\n' {
+			line++
+		}
+	}
+	return line
+}
+
+func pyReErrCol(pattern []rune, pos int) int {
+	i := pos - 1
+	if i >= len(pattern) {
+		i = len(pattern) - 1
+	}
+	for i >= 0 && pattern[i] != '\n' {
+		i--
+	}
+	return pos - i
+}
+
+// pyReErrInit is re.error.__init__(msg, pattern=None, pos=None).
+func (rt *jsrt) pyReErrInit(self, msg, pattern, pos interface{}) {
+	ps, isStr := pattern.(string)
+	pf, isNum := pos.(float64)
+	text := msg
+	var lineno, colno interface{} = jsUndef, jsUndef
+	if isStr && isNum {
+		pr := []rune(ps)
+		text = pyReErrText(rt.pyString(msg), pr, int(pf))
+		lineno = float64(pyReErrLine(pr, int(pf)))
+		colno = float64(pyReErrCol(pr, int(pf)))
+	}
+	rt.pySetAttrRaw(self, "args", pyTup(&jsArray{elems: []interface{}{text}}))
+	rt.pySetAttrRaw(self, "msg", msg)
+	rt.pySetAttrRaw(self, "pattern", pattern)
+	rt.pySetAttrRaw(self, "pos", pos)
+	rt.pySetAttrRaw(self, "lineno", lineno)
+	rt.pySetAttrRaw(self, "colno", colno)
+}
+
+// rxPyRaise raises re.error for a pattern the engine rejects. The class is the
+// one the emitter put on the module; a run that never imported `re` has none.
+// Twin of pyReRaise in languages/python-interpreter.abnf and pyERxRaise in
+// lib/python-rt.metajs.
+func (rt *jsrt) rxPyRaise(pat, nf, err string, at int) {
+	msg, pos := pyReErrInfo(pat, nf, err, at)
+	var cls interface{} = rt.pyExcClass("PatternError")
+	if rt.pyReMod != nil {
+		if c, ok := rt.pyReMod.props["error"].(*jsObject); ok {
+			cls = c
+		}
+	}
+	inst := newJSObject()
+	inst.set("__class", cls)
+	var posV interface{} = jsUndef
+	if pos >= 0 {
+		posV = float64(pos)
+	}
+	rt.pyReErrInit(inst, msg, pat, posV)
+	rt.pyExcChain(inst)
+	panic(&jsThrown{value: inst})
+}
+
 // ----- The three value shapes -----
 //
 // All three are plain *jsObject, so js_pygetattr already answers re.I, p.pattern,
@@ -179,14 +365,18 @@ func rxPyModule() *jsObject {
 }
 
 func (rt *jsrt) rxPyCompile(pat string, flags int) *jsObject {
+	neutral := pyReFlagStr(flags)
 	src, errMsg := pyRePat(pat)
 	if errMsg != "" {
-		rt.fail("re.error: %s", errMsg)
+		rt.rxPyRaise(pat, neutral, errMsg, -1)
 	}
-	neutral := pyReFlagStr(flags)
 	re := rxGet(src, neutral)
 	if !re.ok {
-		rt.fail("re.error: %s", re.err)
+		at := -1
+		if src == pat {
+			at = re.errAt
+		}
+		rt.rxPyRaise(pat, neutral, re.err, at)
 	}
 	o := newJSObject()
 	o.set("__pyre", true)
@@ -684,7 +874,23 @@ func init() {
 		// import model, so the grammar declares this one into the global scope; it
 		// is a plain object, which js_pygetattr already reads re.I / re.DOTALL out
 		// of without a wrapper of its own.
-		m["js_pyre_module"] = func(a []uint64) uint64 { return w(rxPyModule()) }
+		m["js_pyre_module"] = func(a []uint64) uint64 {
+			rt.pyReMod = rxPyModule()
+			return w(rt.pyReMod)
+		}
+		// re.error's __init__ hook, over the closure's call arguments
+		// [self, msg, pattern, pos].
+		m["js_pyreerrinit"] = func(a []uint64) uint64 {
+			argv, _ := u(a[0]).(*jsArray)
+			at := func(i int) interface{} {
+				if i < len(argv.elems) {
+					return argv.elems[i]
+				}
+				return jsUndef
+			}
+			rt.pyReErrInit(at(0), at(1), at(2), at(3))
+			return w(jsUndef)
+		}
 
 		// The method-call wrapper: the re module, a compiled pattern and a match
 		// dispatch here, everything else goes straight on to js_pymcall.
@@ -713,6 +919,10 @@ func init() {
 				}
 				name := rt.toString(u(a[1]))
 				if rxPyIsMod(target) {
+					// re.error(...) / re.PatternError(...) construct the class.
+					if name == "error" || name == "PatternError" {
+						return w(rt.callPyValue(target.(*jsObject).props[name], arr.elems, u(a[3])))
+					}
 					return w(rt.rxPyModCall(name, rt.pyReKwArgs(name, arr.elems, u(a[3]), true)))
 				}
 				if rxPyIsRe(target) {

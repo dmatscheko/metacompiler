@@ -584,6 +584,9 @@ type jsrt struct {
 	// pyBuiltinsMod is the ONE `builtins` module object of a run (len.__self__
 	// is it, so it cannot be minted afresh). abnf/jsrtpydesc.go.
 	pyBuiltinsMod *jsObject
+	// pyReMod is the `re` module object of a run (js_pyre_module), whose
+	// `error` class a rejected pattern raises. abnf/jsrtregexpy.go.
+	pyReMod *jsObject
 	// pyBuiltinRender is how a BUILTIN prints, keyed by the closure the emitter
 	// bound the name to and filled by js_pybfn. Separate from pyFuncNames on
 	// purpose: that one answers f.__name__ and holds only what a def recorded.
