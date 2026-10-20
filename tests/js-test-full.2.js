@@ -6,7 +6,7 @@
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43, engine agreement, generators, Error, Math
-//   tests/js-test-full.3.js   sections 44-56, 58-71 and 73-93, the call/class/
+//   tests/js-test-full.3.js   sections 44-56, 58-71 and 73-100, the call/class/
 //                             private-name model, iterators, the arguments object and
 //                             the rest of the builtin surface (see its header)
 //   tests/js-test-full.4.mjs  sections 57 and 72, the Module goal

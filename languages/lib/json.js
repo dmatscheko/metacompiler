@@ -18,6 +18,8 @@
 //   jsonHIsBig(v)           v is a BigInt
 //   jsonHIsObj(v)           v is an object that serializes by its keys (no Array,
 //                           BigInt, function or symbol; an arguments object is one)
+//   jsonHUnbox(o)           for a Number, String or Boolean wrapper object its
+//                           ToNumber, ToString or primitive, and o itself otherwise
 //   jsonHStr(v)             ToString(v); a finite number gives Number::toString
 //   jsonHParseNum(s)        the double a JSON number lexeme denotes
 //   jsonHRaise(text)        throw the Error the text names ("TypeError: ...")
@@ -91,6 +93,7 @@ function jsonSer(st, holder, key, v0) {
         if (tj !== jsonMiss) { v = tj }
     }
     if (st["fn"] !== undefined) { v = jsonHCall(st["fn"], holder, [key, v]) }
+    if (jsonHIsObj(v)) { v = jsonHUnbox(v) }
     if (v === null) { return "null" }
     if (v === true) { return "true" }
     if (v === false) { return "false" }

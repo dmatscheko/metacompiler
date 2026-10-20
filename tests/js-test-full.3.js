@@ -1,4 +1,4 @@
-// Full-syntax test: JavaScript - part 3 of 4, sections 44-56, 58-71 and 73-99.
+// Full-syntax test: JavaScript - part 3 of 4, sections 44-56, 58-71 and 73-100.
 //
 // THE JS RATCHET IS FOUR FILES: as one file its -frozen interpreter leg ran into
 // ./test.sh --full's time brake (peak memory grew superlinearly with the file), and
@@ -6,7 +6,7 @@
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43, engine agreement, generators, Error, Math
-//   tests/js-test-full.3.js   sections 44-56, 58-71 and 73-99, the call/class/private-name
+//   tests/js-test-full.3.js   sections 44-56, 58-71 and 73-100, the call/class/private-name
 //                             model, the Unicode identifier tables, iterators, derived
 //                             constructors, JSON, guards, Set and Map, iterator closing,
 //                             hasOwnProperty, delete, Object.prototype, extends Object,
@@ -18,8 +18,9 @@
 //                             symbols, with, for-in and `in` through the
 //                             prototype chain, inherited data properties and
 //                             Object.create, a replaced constructor prototype,
-//                             getPrototypeOf / setPrototypeOf / defineProperty and
-//                             toLocaleString
+//                             getPrototypeOf / setPrototypeOf / defineProperty,
+//                             toLocaleString, primitive wrapper objects and property
+//                             attributes
 //   (section 72 is in tests/js-test-full.4.mjs, beside 57: it needs a file that
 //   names no builtin class but in a `new`)
 //   tests/js-test-full.4.mjs  section 57, export in a Module
@@ -2699,6 +2700,127 @@ function s99() {
         typeof (5).toLocaleString === "function")
 }
 
+// ===== SECTION 100: primitive wrapper objects, property attributes, Function and Boolean prototypes =====
+// new Number(7), Object("s") and Object.prototype.valueOf.call(true) are objects
+// holding a primitive: typeof says "object", ToPrimitive and ToString answer the
+// primitive, the methods are the primitive's, and the class tag, JSON, instanceof and
+// getPrototypeOf follow its type. Object is a function (ToObject), Boolean and
+// Function are globals with their prototypes. defineProperty's writable,
+// configurable and enumerable default to false on a new property: a write to a
+// read-only one is dropped (sloppy code), a non-configurable one survives delete and
+// refuses a redefinition, and getOwnPropertyNames lists a non-enumerable one where it
+// was defined. A null-prototype object has no ToPrimitive. Values read off node 24.
+function s100() {
+    const ns = [7, 2.5, -0, 255]
+    const a = new Number(ns[0]), b = Object(ns[0]), c = ({}).valueOf.call(ns[0])
+    check("wr100a", typeof a === "object" && a + 1 === 8 && typeof b === "object" && b + 1 === 8 &&
+        typeof c === "object" && c + 1 === 8 && a !== b && a == 7 && !(a === 7) && a.valueOf() === 7 &&
+        String(a) === "7" && "" + a === "7" && `${a}` === "7")
+    check("wr100b", new Number(ns[1]).toFixed(2) === "2.50" && Number.prototype.toFixed(2) === "0.00" &&
+        new Number(ns[3]).toString(16) === "ff" && Object(ns[0]).toExponential(1) === "7.0e+0" &&
+        Number.prototype.toFixed.call(new Number(3), 1) === "3.0" && String(new Number(ns[2])) === "0")
+    const tag = (v) => Object.prototype.toString.call(v)
+    check("wr100c", tag(a) === "[object Number]" && tag(new String("x")) === "[object String]" &&
+        tag(new Boolean(false)) === "[object Boolean]" && tag(Number.prototype) === "[object Number]" &&
+        tag(Boolean.prototype) === "[object Boolean]")
+    check("wr100d", JSON.stringify([a, new String("abc"), new Boolean(true), { k: Object(false) }]) === '[7,"abc",true,{"k":false}]' &&
+        JSON.stringify({ a: new Number(ns[1]), b: [new String("q")] }) === '{"a":2.5,"b":["q"]}' &&
+        JSON.stringify(new Boolean(false)) === "false")
+    check("wr100e", a instanceof Number && !(ns[0] instanceof Number) && new String("ab") instanceof String &&
+        new Boolean(true) instanceof Boolean && Object(true) instanceof Boolean && !(a instanceof String) &&
+        a instanceof Object && !(Number.prototype instanceof Number) && Object.prototype.valueOf.call("s") instanceof String)
+    const s = new String("abc")
+    check("wr100f", typeof s === "object" && s.length === 3 && s + "!" === "abc!" && s.toUpperCase() === "ABC" &&
+        String(s) === "abc" && s.charAt(1) === "b" && s.valueOf() === "abc" && s.slice(1) === "bc" &&
+        s.indexOf("c") === 2 && s.at(-1) === "c" && String.prototype.valueOf.call(new String("q")) === "q")
+    const f = new Boolean(false)
+    let bmsg = ""
+    try { Boolean.prototype.toString.call(1) } catch (e) { bmsg = e.message }
+    check("wr100g", typeof f === "object" && !!f && f.valueOf() === false && String(f) === "false" && f == false &&
+        (f ? "y" : "n") === "y" && true.toString() === "true" && false.valueOf() === false &&
+        typeof true.toString === "function" && Boolean.prototype.valueOf() === false &&
+        Boolean.prototype.valueOf.call(new Boolean(true)) === true && bmsg === "Boolean.prototype.toString requires that 'this' be a Boolean")
+    check("wr100h", new Number(3) < new Number(4) && new Number(2) * new Number(5) === 10 && -new Number(4) === -4 &&
+        new String("2") * 3 === 6 && typeof Number(new Number(5)) === "number" && Number(new Number(5)) === 5 &&
+        new Number(1) !== new Number(1) && !(new Number(1) == new Number(1)) && typeof new Number() === "object" &&
+        [String(new Number()), String(new String()), String(new Boolean())].join() === "0,,false")
+    const o = {}, fn = function () {}
+    const no = new Object()
+    no.a = 1
+    check("wr100i", typeof Object("s") === "object" && typeof Object(true) === "object" && typeof Object(null) === "object" &&
+        typeof Object(undefined) === "object" && typeof Object() === "object" && Object(o) === o && Object(fn) === fn &&
+        new Object(o) === o && JSON.stringify(no) === '{"a":1}' && typeof Object === "function" && Object.name === "Object" &&
+        Object.length === 1 && [1, "a"].map(Object).map((x) => typeof x).join() === "object,object" &&
+        "prototype" in Object && "keys" in Object && "isArray" in Array)
+    const gp = Object.getPrototypeOf
+    const w = new Number(ns[0])
+    w.tag = "x"
+    check("wr100j", gp(new Number(1)) === Number.prototype && gp(Object("s")) === String.prototype &&
+        gp(new Boolean(true)) === Boolean.prototype && gp(true) === Boolean.prototype && gp(Number.prototype) === Object.prototype &&
+        Number.prototype + 1 === 1 && String(Number.prototype) === "0" && String.prototype.length === 0 &&
+        typeof Boolean.prototype === "object" && w.tag === "x" && Object.keys(w).join() === "tag" && w + 1 === 8)
+    const vals = [1, 2, 3]
+    const d1 = {}
+    Object.defineProperty(d1, "x", { value: vals[0] })
+    d1.x = vals[1]
+    d1["x"] += 5
+    d1.x++
+    const d2 = {}
+    Object.defineProperty(d2, "x", { value: vals[0], writable: true })
+    d2.x = vals[1]
+    const d3 = { x: vals[0] }
+    Object.defineProperty(d3, "x", { writable: false })
+    d3.x = vals[2]
+    check("dp100k", d1.x === 1 && d2.x === 2 && d3.x === 1 && Object.keys(d3).join() === "x" &&
+        !delete d1.x && d1.x === 1 && "x" in d1)
+    const d4 = {}
+    Object.defineProperty(d4, "x", { value: vals[0], configurable: true })
+    const del4 = delete d4.x
+    const d5 = {}
+    Object.defineProperty(d5, "x", { value: vals[0] })
+    Object.defineProperty(d5, "x", { value: vals[0] })
+    const redef = (obj, desc) => { try { Object.defineProperty(obj, "x", desc); return "ok" } catch (e) { return e.message } }
+    const d6 = {}
+    Object.defineProperty(d6, "x", { get: () => vals[0] })
+    const d7 = {}
+    Object.defineProperty(d7, "x", { value: vals[0], writable: true })
+    Object.defineProperty(d7, "x", { value: vals[2] })
+    const re7 = redef(d7, { value: vals[1] })
+    Object.defineProperty(d7, "x", { writable: false })
+    d7.x = vals[0]
+    check("dp100l", del4 && d4.x === undefined && !("x" in d4) && d5.x === 1 &&
+        redef(d5, { value: vals[1] }) === "Cannot redefine property: x" && redef(d5, { enumerable: true }) === "Cannot redefine property: x" &&
+        redef(d6, { get: () => vals[1] }) === "Cannot redefine property: x" && re7 === "ok" && d7.x === 2 &&
+        redef(d7, { writable: true }) === "Cannot redefine property: x")
+    const h = { a: 1 }
+    Object.defineProperty(h, "h", { value: vals[0] })
+    h.b = 2
+    const dps = Object.defineProperties({}, { p: { value: 1 }, q: { value: 2, enumerable: true } })
+    const cr = Object.create({}, { z: { value: vals[0] } })
+    cr.z = 9
+    const en = {}
+    Object.defineProperty(en, "x", { value: vals[0], enumerable: true })
+    const cp = Object.assign({}, en)
+    cp.x = 4
+    check("dp100m", Object.getOwnPropertyNames(h).join() === "a,h,b" && Object.keys(h).join() === "a,b" &&
+        Object.getOwnPropertyNames(dps).join() === "p,q" && cr.z === 1 && Object.getOwnPropertyNames(cr).join() === "z" &&
+        cp.x === 4 && JSON.stringify(h) === '{"a":1,"b":2}')
+    class C100 {}
+    check("fn100n", gp(function () {}) === Function.prototype && gp(() => 1) === Function.prototype &&
+        typeof Function === "function" && Function.name === "Function" && (function () {}) instanceof Function &&
+        (() => 1) instanceof Function && !({} instanceof Function) && gp(C100) === Function.prototype &&
+        C100 instanceof Function && C100 instanceof Object && typeof Function.prototype === "function" &&
+        gp(Function.prototype) === Object.prototype)
+    const prim = (f) => { try { return f() } catch (e) { return e instanceof TypeError ? e.message : "?" } }
+    const nul = Object.create(null)
+    const own = Object.create(null)
+    own.toString = () => "ok"
+    check("np100o", prim(() => String(nul)) === "Cannot convert object to primitive value" &&
+        prim(() => "" + nul) === "Cannot convert object to primitive value" &&
+        prim(() => nul + 1) === "Cannot convert object to primitive value" &&
+        prim(() => `${nul}`) === "Cannot convert object to primitive value" && String(own) === "ok")
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -2756,6 +2878,7 @@ function main() {
     s97() // SECTION-CALL 97
     s98() // SECTION-CALL 98
     s99() // SECTION-CALL 99
+    s100() // SECTION-CALL 100
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

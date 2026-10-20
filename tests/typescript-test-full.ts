@@ -4406,6 +4406,47 @@ function s93() {
         (123456789n).toLocaleString() === "123,456,789");
 }
 
+// ===== SECTION 94: primitive wrapper objects, property attributes, Function and Boolean prototypes =====
+// See SECTION 100 of tests/js-test-full.3.js. Values read off node 24.
+class C94 {}
+function s94() {
+    const ns: number[] = [7, 2.5];
+    const a: any = new Number(ns[0]);
+    const b: any = Object(ns[0]);
+    const c: any = ({}).valueOf.call(ns[0]);
+    check("wr94a", typeof a === "object" && a + 1 === 8 && typeof b === "object" && b + 1 === 8 &&
+        typeof c === "object" && c + 1 === 8 && a == 7 && a.valueOf() === 7 && String(a) === "7");
+    const tag = (v: any): string => Object.prototype.toString.call(v);
+    check("wr94b", new Number(ns[1]).toFixed(2) === "2.50" && Number.prototype.toFixed(2) === "0.00" &&
+        tag(a) === "[object Number]" && tag(new String("x")) === "[object String]" && tag(new Boolean(false)) === "[object Boolean]" &&
+        JSON.stringify([a, new String("abc"), new Boolean(true)]) === '[7,"abc",true]');
+    const s: any = new String("abc");
+    const f: any = new Boolean(false);
+    check("wr94c", a instanceof Number && new String("ab") instanceof String && Object(true) instanceof Boolean &&
+        !(Number.prototype instanceof Number) && s.length === 3 && s.toUpperCase() === "ABC" && s + "!" === "abc!" &&
+        !!f && f.valueOf() === false && String(f) === "false" && true.toString() === "true" &&
+        typeof Object(null) === "object" && typeof Object === "function" && new Object(a) === a);
+    const gp: any = Object.getPrototypeOf;
+    check("wr94d", gp(a) === Number.prototype && gp(true) === Boolean.prototype && gp(Number.prototype) === Object.prototype &&
+        gp(function () {}) === Function.prototype && gp(C94) === Function.prototype && (() => 1) instanceof Function &&
+        typeof Function.prototype === "function" && Boolean.name === "Boolean");
+    const vals: number[] = [1, 2, 3];
+    const d: any = {};
+    Object.defineProperty(d, "x", { value: vals[0] });
+    d.x = vals[1];
+    const delx = delete d.x;
+    let msg = "";
+    try { Object.defineProperty(d, "x", { value: vals[2] }); } catch (e: any) { msg = e.message; }
+    const h: any = { a: 1 };
+    Object.defineProperty(h, "h", { value: vals[0] });
+    h.b = 2;
+    check("dp94e", d.x === 1 && !delx && msg === "Cannot redefine property: x" &&
+        Object.getOwnPropertyNames(h).join() === "a,h,b" && Object.keys(h).join() === "a,b");
+    let pmsg = "";
+    try { String(Object.create(null)); } catch (e: any) { pmsg = e.message; }
+    check("np94f", pmsg === "Cannot convert object to primitive value");
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -4502,6 +4543,7 @@ function main(): number {
     s91(); // SECTION-CALL 91
     s92(); // SECTION-CALL 92
     s93(); // SECTION-CALL 93
+    s94(); // SECTION-CALL 94
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

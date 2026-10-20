@@ -2452,6 +2452,9 @@ NotFuncHead = :script(~~
             if (ex != null) { return jsStr(ex.v) }
             var r = jsCallMethod(v, "toString")
             if (r != null) { return "" + r.v }
+            if (jsIsWrap(v)) { return jsStr(v.__bvof) }
+            // OrdinaryToPrimitive finds no toString and no valueOf to call.
+            if (jsNoObjProto(v)) { biRaise("TypeError: Cannot convert object to primitive value") }
             return jsProtoTag(v)
         }
         return "" + v
@@ -2465,6 +2468,7 @@ NotFuncHead = :script(~~
             if (ex != null) { return ex.v }
             var r = jsCallMethod(v, "valueOf")
             if (r != null && !jsIsObjLike(r.v)) { return r.v }
+            if (jsIsWrap(v)) { return v.__bvof }
             return jsStr(v)
         }
         return v
@@ -2698,7 +2702,7 @@ NotFuncHead = :script(~~
         if (typeof v == "number") { return "[object Number]" }
         if (typeof v == "string") { return "[object String]" }
         if (typeof v == "boolean") { return "[object Boolean]" }
-        if (typeof v == "function" || v === jsObjectGlobal) { return "[object Function]" }
+        if (typeof v == "function") { return "[object Function]" }
         // See the twin of this comment in js-interpreter.abnf.
         if (typeof v == "object") {
             // A string [Symbol.toStringTag], own or inherited, names the object.
@@ -2709,6 +2713,7 @@ NotFuncHead = :script(~~
             }
             if (hasOwn(v, "__errh")) { return "[object Error]" }
             if (hasOwn(v, "__strtag")) { return "[object " + v.__strtag + "]" }
+            if (jsIsWrap(v)) { return jsProtoTag(v.__bvof) }
             if (jpIs(v)) { return "[object Promise]" }
         }
         return "[object Object]"
@@ -2726,7 +2731,9 @@ NotFuncHead = :script(~~
         if (name == "toString") { return jsProtoTag(recv) }
         if (name == "isPrototypeOf") { return jsIsProtoOf(recv, k) }
         if (name == "toLocaleString") { return jsStr(recv) }
-        return recv
+        // valueOf is ToObject(this): a primitive receiver comes back wrapped.
+        if (recv === undefined || recv === null) { biRaise("TypeError: Cannot convert undefined or null to object") }
+        return jsToObject(recv)
     }
     function jsProtoCall(target, name, args) {
         if (!jsIsProtoName(name) || target == undefined || target == null || jsNoObjProto(target)) { return null }
@@ -2800,7 +2807,6 @@ NotFuncHead = :script(~~
             return ("" + n) === kk && n >= 0 && n < self.length && Math.floor(n) === n
         }
         if (self == undefined || self == null || typeof self != "object") { return false }
-        if (self === jsObjectGlobal) { return jsObjectOwnNames.indexOf(kk) >= 0 || (!isInternalKey(kk) && hasOwn(self, kk)) }
         if (isClassDesc(self)) { return jsClassOwnNames(self).indexOf(kk) >= 0 }
         if (hasOwn(self, "__protoof") && (kk == "constructor" || jsProtoDeclared(self.__protoof, kk))) { return true }
         var eo = anytype // true, false, or undefined for a key jsErrOwn does not judge.
@@ -2828,7 +2834,33 @@ NotFuncHead = :script(~~
     }
     // See the twin of this comment in js-interpreter.abnf.
     function jsProtoDeclared(d, k) { return hasOwn(d, "__pnames") && d.__pnames.indexOf(k) >= 0 }
-    var jsObjectGlobal = {"__jsobject": true, "prototype": jsObjectProto}
+    // See the twin of this comment in js-interpreter.abnf.
+    function jsObjectGlobal(v) { return jsToObject(v) }
+    // ----- Primitive wrapper objects -----
+    // See the twin of this comment in js-interpreter.abnf.
+    function jsWrap(p) {
+        var o = {}
+        o["__bvof"] = p
+        o["__keys"] = []
+        return o
+    }
+    function jsIsWrap(v) { return typeof v == "object" && v !== null && !Array.isArray(v) && hasOwn(v, "__bvof") }
+    function jsToObject(v) {
+        if (v === undefined || v === null) {
+            var o = {}
+            o["__keys"] = []
+            return o
+        }
+        var t = typeof v
+        if (t == "number" || t == "string" || t == "boolean") { return jsWrap(v) }
+        return v
+    }
+    // The global whose prototype a wrapper of primitive p inherits from.
+    function jsWrapCtor(p) {
+        if (typeof p == "number") { return jsNumberFn }
+        if (typeof p == "string") { return jsStringFn }
+        return jsBooleanFn
+    }
     function jsOwnKeys(v) {
         var out = []
         var ks = ownKeys(v)
@@ -2855,6 +2887,8 @@ NotFuncHead = :script(~~
         }
         if (typeof v == "object" && v !== null && hasOwn(v, "__protoof")) { return jsProtoGopn(v) }
         if (isClassDesc(v)) { return jsClassOwnNames(v) }
+        // A non-enumerable property is in __keys too, where it was defined.
+        if (typeof v == "object" && v !== null && hasOwn(v, "__hidden")) { return jsErrGopn(v, jsIndexOrder(v.__keys)) }
         if (typeof v != "function") { return jsErrGopn(v, jsOwnKeys(v)) }
         var out = ["length", "name"]
         if (v === jsArrayFn) { out = jsArrayOwnNames.slice() }
@@ -3343,6 +3377,11 @@ NotFuncHead = :script(~~
         if (typeof target == "string") { return jsStringMethod(target, name, args) }
         if (Array.isArray(target)) { return jsArrayMethod(target, name, args) }
         if (typeof target == "number") { return jsNumberMethod(target, name, args) }
+        // Boolean.prototype's own two (ECMA-262 20.3.3).
+        if (typeof target == "boolean") {
+            if (name == "toString") { return {v: target ? "true" : "false"} }
+            if (name == "valueOf") { return {v: target} }
+        }
         return null
     }
     function jsObjectStatic(name, args) {
@@ -3478,10 +3517,9 @@ NotFuncHead = :script(~~
     // See the twin of this comment in js-interpreter.abnf.
     function jsGetProto(v) {
         if (v === undefined || v === null) { biRaise("TypeError: Cannot convert undefined or null to object") }
-        var none = anytype // No modelled prototype.
-        none = undefined
         if (typeof v == "string") { return builtinProto(jsStringFn) }
         if (typeof v == "number") { return builtinProto(jsNumberFn) }
+        if (typeof v == "boolean") { return builtinProto(jsBooleanFn) }
         if (isBigInt(v)) { return builtinProto(jsBigIntFn) }
         if (Array.isArray(v)) {
             if (jsIsArr(v) && v !== builtinProto(jsArrayFn)) { return builtinProto(jsArrayFn) }
@@ -3490,10 +3528,15 @@ NotFuncHead = :script(~~
         if (isClassDesc(v)) {
             if (v.__super === jsObjectRootClass) { return jsObjectGlobal }
             if (v.__super != undefined && v.__super != null) { return v.__super }
-            return none
+            return builtinProto(jsFunctionFn)
         }
-        if (typeof v != "object") { return none }
+        if (typeof v == "function") { return v === builtinProto(jsFunctionFn) ? jsObjectProto : builtinProto(jsFunctionFn) }
         if (v === jsObjectProto || v.__nullproto === true) { return null }
+        if (jsIsWrap(v)) {
+            var wp = anytype // The wrapper's builtin prototype.
+            wp = builtinProto(jsWrapCtor(v.__bvof))
+            return v === wp ? jsObjectProto : wp
+        }
         if (hasOwn(v, "__protoof")) {
             var sd = anytype // The parent class, if any.
             sd = v.__protoof.__super
@@ -3542,26 +3585,52 @@ NotFuncHead = :script(~~
             if (g === undefined && s === undefined) { setMember(o, key, getMember(desc, "value")) }
             return
         }
-        if (g !== undefined || s !== undefined) {
+        var isAcc = g !== undefined || s !== undefined
+        var exists = hasOwn(o, "__keys") && o.__keys.indexOf(key) >= 0
+        var hasVal = propIn("value", desc)
+        var hasW = propIn("writable", desc)
+        var hasE = propIn("enumerable", desc)
+        var hasC = propIn("configurable", desc)
+        var curAcc = hasOwn(o, "__acc") && (hasOwn(o.__acc, "get:" + key) || hasOwn(o.__acc, "set:" + key))
+        if (exists && jsAttrHas(o, "__nc", key)) {
+            var bad = hasC && jsTruthy(getMember(desc, "configurable"))
+            if (hasE && jsTruthy(getMember(desc, "enumerable")) == jsAttrHas(o, "__hidden", key)) { bad = true }
+            if (curAcc) {
+                if (hasVal || hasW) { bad = true }
+                if (g !== undefined && g !== findAccessor(o, "get", key)) { bad = true }
+                if (s !== undefined && s !== findAccessor(o, "set", key)) { bad = true }
+            } else if (isAcc) {
+                bad = true
+            } else if (jsAttrHas(o, "__ro", key)) {
+                if (hasW && jsTruthy(getMember(desc, "writable"))) { bad = true }
+                if (hasVal && !sameValue(getMember(desc, "value"), getMember(o, key))) { bad = true }
+            }
+            if (bad) { biRaise("TypeError: Cannot redefine property: " + jsStr(jsKeyUnesc(key))) }
+        }
+        if (isAcc) {
             if (g !== undefined) { addAccessor(o, "get", key, g) }
             if (s !== undefined) { addAccessor(o, "set", key, s) }
-        } else {
+        } else if (hasVal || !exists) {
             scopePut(o, key, getMember(desc, "value"))
         }
         if (!hasOwn(o, "__keys")) { return }
-        var at = o.__keys.indexOf(key)
-        var listed = at >= 0
-        if (propIn("enumerable", desc)) { listed = jsTruthy(getMember(desc, "enumerable")) }
-        if (listed && at < 0) { trackKey(o, key) }
-        if (!listed && at >= 0) {
-            scopePut(o, "__keys", jsListDrop(o.__keys, at))
-            nsKeyEpoch = nsKeyEpoch + 1
+        trackKey(o, key)
+        jsAttrSet(o, "__hidden", key, hasE ? !jsTruthy(getMember(desc, "enumerable")) : (!exists || jsAttrHas(o, "__hidden", key)))
+        jsAttrSet(o, "__ro", key, !isAcc && !curAcc && (hasW ? !jsTruthy(getMember(desc, "writable")) : (!exists || jsAttrHas(o, "__ro", key))))
+        jsAttrSet(o, "__nc", key, hasC ? !jsTruthy(getMember(desc, "configurable")) : (!exists || jsAttrHas(o, "__nc", key)))
+    }
+    // See the twin of this comment in js-interpreter.abnf.
+    var jsAttrN = 0
+    function jsAttrHas(o, list, key) { return hasOwn(o, list) && o[list].indexOf(key) >= 0 }
+    function jsAttrSet(o, list, key, on) {
+        if (!hasOwn(o, list)) {
+            if (!on) { return }
+            scopePut(o, list, [])
+            if (list != "__hidden") { jsAttrN = jsAttrN + 1 }
         }
-        // A property kept off __keys is still own: `in` asks __hidden for it.
-        if (!listed) {
-            if (!hasOwn(o, "__hidden")) { scopePut(o, "__hidden", []) }
-            if (o.__hidden.indexOf(key) < 0) { o.__hidden.push(key) }
-        }
+        var at = o[list].indexOf(key)
+        if (on && at < 0) { o[list].push(key) }
+        if (!on && at >= 0) { scopePut(o, list, jsListDrop(o[list], at)) }
     }
     // See the twin of this comment in js-interpreter.abnf.
     function jsListDrop(ks, at) {
@@ -4044,6 +4113,10 @@ NotFuncHead = :script(~~
         if (isBigInt(v)) { return biToNum(v) }
         return jsToNum(v)
     }
+    // See the twin of this comment in js-interpreter.abnf.
+    function jsBooleanFn(v) { return jsTruthy(v) }
+    // See the twin of this comment in js-interpreter.abnf.
+    function jsFunctionFn() { biRaise("EvalError: Code generation from strings disallowed for this context") }
 
     // See the twin of this comment in js-interpreter.abnf.
     var jsGlobalObj = {"__keys": []}
@@ -4209,6 +4282,12 @@ NotFuncHead = :script(~~
         return v !== null && v !== undefined && typeof v == "object" && !jsIsArr(v) && !isBigInt(v) && !isClassDesc(v) &&
             !jsIsSym(v)
     }
+    function jsonHUnbox(o) {
+        if (!jsIsWrap(o)) { return o }
+        if (typeof o.__bvof == "number") { return jsToNum(o) }
+        if (typeof o.__bvof == "string") { return jsStr(o) }
+        return o.__bvof
+    }
     function jsonHStr(v) { return jsStr(v) }
     function jsonHParseNum(s) { return parseFloat(s) }
     function jsonHRaise(t) { biRaise(t) }
@@ -4222,9 +4301,10 @@ NotFuncHead = :script(~~
         "parseFloat": fnMetaSet(function(v) { return jsnParseFloat(jsStr(v)) }, "parseFloat", 1), "Math": jsMathObj, "String": jsStringFn,
         // BigInt(v) is ToBigInt and Number(v) is ToNumber; the latter is the only way
         // back out of a BigInt, since unary '+' refuses it.
-        "BigInt": jsBigIntFn, "Number": jsNumberFn,
+        "BigInt": jsBigIntFn, "Number": jsNumberFn, "Boolean": fnMetaSet(jsBooleanFn, "Boolean", 1),
+        "Function": fnMetaSet(jsFunctionFn, "Function", 1),
         // Object is OURS, not the host's (see jsObjectGlobal).
-        "Object": jsObjectGlobal, "Array": jsArrayFn, "JSON": jsJsonObj,
+        "Object": fnMetaSet(jsObjectGlobal, "Object", 1), "Array": jsArrayFn, "JSON": jsJsonObj,
         // The Promise global: a function value, so `new Promise(exec)` constructs one
         // and `typeof Promise` is "function". The statics resolve through jsBuiltin.
         "Promise": jsPromiseFn, "Symbol": jsSymbolFn,
@@ -4491,6 +4571,8 @@ NotFuncHead = :script(~~
                 // ... - which is what an array-LIKE object (a tagged template's chunk
                 // list) is built out of.
                 if (typeof k == "number" && hasOwn(o, "" + k)) { return o["" + k] }
+                // A String wrapper's length and indices are its string's.
+                if (typeof o.__bvof == "string" && (k === "length" || jsArrayIndex("" + k) >= 0)) { return getMemberRaw(o.__bvof, k) }
                 return undefined
             }
         }
@@ -4603,7 +4685,7 @@ NotFuncHead = :script(~~
     function getMember(o, k) {
         // A String / Array / Number builtin method as a value (see builtinValue).
         // `length` is the one hot read on those kinds, so it skips the table.
-        if (typeof k == "string" && k !== "length" && (typeof o == "string" || typeof o == "number" || Array.isArray(o))) {
+        if (typeof k == "string" && k !== "length" && (typeof o == "string" || typeof o == "number" || typeof o == "boolean" || Array.isArray(o))) {
             var bf = builtinFam(o, k)
             if (bf != "") { return builtinValue(bf, k) }
             if (hasOwn(bvArr, k) && jsIsArgs(o)) { return jsIsProtoName(k) ? jsProtoShim(k) : undefined }
@@ -4622,10 +4704,7 @@ NotFuncHead = :script(~~
         var sv = anytype // A static method of a builtin global, or undefined.
         sv = staticValue(o, k)
         if (sv !== undefined) { return sv }
-        if (typeof o == "object" && o !== null && hasOwn(o, "__bvof")) {
-            var pf = builtinFam(o.__bvof, k)
-            if (pf != "") { return builtinValue(pf, k) }
-        }
+        if (jsIsWrap(o)) { return getMember(o.__bvof, k) }
         if (typeof o == "object" && o !== null && hasOwn(o, "__protoof")) {
             var pv = anytype // The descriptor chain's member, or undefined.
             pv = protoRead(o.__protoof, "" + k)
@@ -4701,6 +4780,7 @@ NotFuncHead = :script(~~
     var bvStr = {}
     var bvArr = {}
     var bvNum = {}
+    var bvBool = {}
     var bvFns = {}
     function bvSeed(t, names) {
         for (var i = 0; i < names.length; i++) { t[names[i]] = 1 }
@@ -4717,22 +4797,27 @@ NotFuncHead = :script(~~
                    "findLastIndex", "flat", "flatMap", "fill", "at", "toString", "valueOf",
                    "keys", "values", "entries", "toReversed", "toSorted", "toSpliced", "with", "copyWithin"])
     bvSeed(bvNum, ["toFixed", "toExponential", "toPrecision", "toString", "valueOf", "toLocaleString"])
-    // "s" / "a" / "n" when `k` is a builtin method of the receiver's kind, else "".
+    bvSeed(bvBool, ["toString", "valueOf"])
+    // "s" / "a" / "n" / "b" when `k` is a builtin method of the receiver's kind, else "".
     function builtinFam(o, k) {
         if (typeof o == "string") { return hasOwn(bvStr, k) ? "s" : "" }
         if (typeof o == "number") { return hasOwn(bvNum, k) ? "n" : "" }
+        if (typeof o == "boolean") { return hasOwn(bvBool, k) ? "b" : "" }
         if (Array.isArray(o)) { return (hasOwn(bvArr, k) && jsIsArr(o)) ? "a" : "" }
         return ""
     }
     // See the twin of this comment in js-interpreter.abnf.
     var bvProtos = []
     function builtinProto(f) {
+        if (f === jsObjectGlobal) { return jsObjectProto }
         var at = f === jsArrayFn ? 0 : (f === jsStringFn ? 1 : (f === jsNumberFn ? 2 : -1))
         if (f === hostGlobals["RegExp"]) { at = 3 }
         if (f === jsPromiseFn) { at = 4 }
         if (f === jsBigIntFn) { at = 5 }
+        if (f === jsBooleanFn) { at = 6 }
+        if (f === jsFunctionFn) { at = 7 }
         if (at < 0) { return undefined }
-        if (bvProtos.length == 0) { bvProtos = [[], {"__bvof": ""}, {"__bvof": 0}, {}, {}, {}] }
+        if (bvProtos.length == 0) { bvProtos = [[], jsWrap(""), jsWrap(0), {}, {}, {}, jsWrap(false), function() { return undefined }] }
         return bvProtos[at]
     }
     // protoOf / protoView / protoRead / protoWrite: see the twins in
@@ -4813,12 +4898,18 @@ NotFuncHead = :script(~~
             return recv
         }
     }
-    // The receiver a builtin method value runs on, with node's TypeErrors: a Number
-    // method and String's toString/valueOf demand their own kind, every other method
-    // refuses only null and undefined, and a String method coerces what it is given.
+    // The receiver a builtin method value runs on, with node's TypeErrors: a Number or
+    // a Boolean method and String's toString/valueOf demand their own kind, a primitive
+    // or its wrapper, every other method refuses only null and undefined, and a String
+    // method coerces what it is given.
     function builtinRecv(fam, k, recv) {
+        if (jsIsWrap(recv) && (fam == "n" || fam == "b" || (fam == "s" && (k == "toString" || k == "valueOf")))) { return builtinRecv(fam, k, recv.__bvof) }
         if (fam == "n") {
             if (typeof recv != "number") { biRaise("TypeError: Number.prototype." + k + " requires that 'this' be a Number") }
+            return recv
+        }
+        if (fam == "b") {
+            if (typeof recv != "boolean") { biRaise("TypeError: Boolean.prototype." + k + " requires that 'this' be a Boolean") }
             return recv
         }
         if (recv === undefined || recv === null) {
@@ -5027,6 +5118,8 @@ NotFuncHead = :script(~~
         // (jsIsArgs): the elements stay as they are...
         if (argsWant && k === "length" && jsIsArgs(o) && typeof v == "number" && v >= 0 && Math.floor(v) === v &&
             v < 67108864) { arrKindSet(o, 19 + 32 * v); return }
+        // A write to a non-writable property is dropped (jsDefineKey).
+        if (jsAttrN > 0 && typeof o == "object" && o !== null && jsAttrHas(o, "__ro", "" + k)) { return }
         scopePut(o, k, v)
         trackKey(o, k) // Keep the object's for-in key list up to date.
         // ...and a value that is no array length resizes it as an array write does.
@@ -5046,6 +5139,7 @@ NotFuncHead = :script(~~
     function fnOwn(fn, kk) {
         if (kk === "name" || kk === "length") { return true }
         if (fn === jsArrayFn && jsArrayOwnNames.indexOf(kk) >= 0) { return true }
+        if (fn === jsObjectGlobal && jsObjectOwnNames.indexOf(kk) >= 0) { return true }
         if (fnPropsN == 0) { return false }
         var fp = anytype
         fp = fnPropsFind(fn)
@@ -5139,7 +5233,15 @@ NotFuncHead = :script(~~
             for (var j = 0; j < v.length; j++) { a.push("" + j) }
             return a
         }
-        if (hasOwn(v, "__keys")) { return jsIndexOrder(v["__keys"]) }
+        if (hasOwn(v, "__keys")) {
+            if (hasOwn(v, "__hidden")) {
+                var shown = []
+                var ks = v["__keys"]
+                for (var h = 0; h < ks.length; h++) { if (v.__hidden.indexOf(ks[h]) < 0) { shown.push(ks[h]) } }
+                return jsIndexOrder(shown)
+            }
+            return jsIndexOrder(v["__keys"])
+        }
         // A FUNCTION enumerates the own properties written onto it, which node reports
         // and this engine keeps in a side table.
         if (fnPropsN > 0) {
@@ -5247,7 +5349,6 @@ NotFuncHead = :script(~~
     function jsTypeofVal(v) {
         if (isBigInt(v)) { return "bigint" }
         if (v != undefined && v != null && typeof v == "object" && v.__isclass === true) { return "function" }
-        if (v === jsObjectGlobal) { return "function" }
         if (jsIsSym(v)) { return "symbol" }
         return typeof v
     }
@@ -6349,16 +6450,8 @@ NotFuncHead = :script(~~
             if (Array.isArray(o) && (k == "length" || hasOwn(bvArr, k))) { return true }
             if ((typeof o == "function" || isClassDesc(o)) && (k == "call" || k == "apply" || k == "bind" || k == "name" || k == "length")) { return true }
         }
-        // A FUNCTION's own properties live in the side table, and a function that has
-        // none answers false rather than falling through to the object arms.
-        if (typeof o == "function") {
-            if (fnPropsN > 0) {
-                var fp = anytype
-                fp = fnPropsFind(o)
-                if (fp !== undefined) { return fp["__keys"].indexOf("" + k) >= 0 }
-            }
-            return false
-        }
+        // A FUNCTION's own properties (fnOwn), and nothing else.
+        if (typeof o == "function") { return fnOwn(o, "" + k) }
         if (argsWant && jsIsArgs(o)) { return jsArgsHas(o, k) }
         if (Array.isArray(o)) { var n = k - 0; return n >= 0 && n < o.length }
         // `"m" in C` asks the STATIC namespace and nothing else: the descriptor's own
@@ -6379,7 +6472,6 @@ NotFuncHead = :script(~~
         if (o === jsMathObj && hasOwn(o, "" + k) && o["" + k] !== undefined) { return true }
         if (hasOwn(o, "__keys")) { if (o["__keys"].indexOf("" + k) >= 0) { return true } }
         else if (hasOwn(o, "" + k)) { return true }
-        if (hasOwn(o, "__hidden") && o.__hidden.indexOf("" + k) >= 0) { return true }
         // See the twin of this comment in js-interpreter.abnf.
         if (typeof o == "object" && ("" + k) == "constructor") {
             if (classCtorOf(o) != undefined) { return true }
@@ -6412,7 +6504,13 @@ NotFuncHead = :script(~~
         // prototype chain here, so they are answered from the value's own shape.
         if (cls === hostGlobals["Object"]) { return typeof v == "object" || typeof v == "function" }
         if (cls === hostGlobals["Array"]) { return jsIsArr(v) }
+        if (cls === jsFunctionFn) { return typeof v == "function" || isClassDesc(v) }
         if (typeof v != "object") { return false }
+        // A wrapper is an instance of its primitive's global; the prototype object it
+        // may itself be is not.
+        if (jsIsWrap(v) && (cls === jsNumberFn || cls === jsStringFn || cls === jsBooleanFn)) {
+            return jsWrapCtor(v.__bvof) === cls && v !== builtinProto(cls)
+        }
         // See the twin of this comment in js-interpreter.abnf.
         var want = anytype
         want = cls
@@ -6460,6 +6558,8 @@ NotFuncHead = :script(~~
         return function() {
             if (ref.path.length == 0) { return true } // 'delete x' on a variable: a sloppy-mode no-op.
             var p = resolveRef(ref)
+            // A non-configurable property stays (jsDefineKey).
+            if (jsAttrN > 0 && typeof p.obj == "object" && p.obj !== null && jsAttrHas(p.obj, "__nc", "" + p.key)) { return false }
             // A FUNCTION's own properties live in the side table; the map there takes
             // the delete in the object's place.
             var tgt = anytype // The object the key is dropped from.
@@ -7552,6 +7652,12 @@ NotFuncHead = :script(~~
             if (typeof m != "function") { biRaise("TypeError: " + site + " is not a function") }
             return m.apply(undefined, concat2impl([target], args))
         }
+        // A wrapper's methods are its primitive's.
+        if (jsIsWrap(target)) {
+            var wb = anytype // {v} or null.
+            wb = jsBuiltin(target.__bvof, name, args)
+            if (wb != null) { return wb.v }
+        }
         var pc2 = anytype // {v} or null.
         pc2 = jsProtoCall(target, name, args)
         if (pc2 != null) { return pc2.v }
@@ -7867,6 +7973,9 @@ NotFuncHead = :script(~~
             var argv = evalArgs(argThunks)
             // See the twin of this comment in js-interpreter.abnf.
             if (typeof cls == "function") {
+                // A wrapper of the primitive the call answers, and ToObject for Object.
+                if (cls === jsNumberFn || cls === jsStringFn || cls === jsBooleanFn) { return jsWrap(cls.apply(undefined, argv)) }
+                if (cls === jsObjectGlobal) { return jsToObject(argv.length > 0 ? argv[0] : undefined) }
                 var self = {}
                 self["__keys"] = []
                 var nd = anytype // The instance's descriptor; none for a non-object prototype.
@@ -9535,7 +9644,7 @@ NotFuncHead = :script(~~
     var jsbWant = false
     var jsbDone = false
     function jsbRef(name) {
-        if (name == "Set" || name == "Map" || name == "Array" || name == "Boolean" || name == "isNaN" || name == "isFinite" ||
+        if (name == "Set" || name == "Map" || name == "Array" || name == "isNaN" || name == "isFinite" ||
             name == "structuredClone") { jsbWant = true }
         if (name == "arguments") { argsWant = true }
         return name

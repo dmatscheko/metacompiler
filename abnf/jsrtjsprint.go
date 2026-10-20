@@ -225,7 +225,7 @@ func (rt *jsrt) jsvProtoTag(v interface{}) string {
 	case bool:
 		return "[object Boolean]"
 	}
-	if isCallable(v) || jsvIsObjectGlobal(v) {
+	if isCallable(v) {
 		return "[object Function]"
 	}
 	// The objects node gives a @@toStringTag: an Error instance (its __errh mark), a
@@ -240,6 +240,9 @@ func (rt *jsrt) jsvProtoTag(v interface{}) string {
 		}
 		if t, has := o.props["__strtag"].(string); has {
 			return "[object " + t + "]"
+		}
+		if p, isWrap := jsvWrapped(o); isWrap {
+			return rt.jsvProtoTag(p)
 		}
 		if promIs(o) {
 			return "[object Promise]"
@@ -394,7 +397,52 @@ func (rt *jsrt) jsvProtoApply(recv interface{}, name string, args []interface{})
 		// Invoke(this, "toString") (ECMA-262 20.1.3.5), which ToString performs.
 		return rt.jsvString(recv)
 	}
-	return recv
+	// valueOf is ToObject(this): a primitive receiver comes back wrapped.
+	if isUndefOrNull(recv) {
+		rt.bigRaise("TypeError: Cannot convert undefined or null to object")
+	}
+	return jsvToObject(recv)
+}
+
+// jsvWrap, jsvWrapped and jsvToObject are the primitive wrapper objects: an object
+// whose hidden __bvof slot holds a number, a string or a boolean. Twin of jsWrap /
+// jsIsWrap / jsToObject in js-interpreter.abnf, which states the rule; jvWrap /
+// jvToObject in languages/lib/js-rt.metajs.
+func jsvWrap(p interface{}) *jsObject {
+	o := newJSObject()
+	o.props["__bvof"] = p
+	return o
+}
+
+// jsvWrapped is the primitive a wrapper object holds.
+func jsvWrapped(v interface{}) (interface{}, bool) {
+	o, isObj := v.(*jsObject)
+	if !isObj {
+		return nil, false
+	}
+	p, has := o.props["__bvof"]
+	return p, has
+}
+
+func jsvToObject(v interface{}) interface{} {
+	switch v.(type) {
+	case nil, jsUndefT, jsNullT:
+		return newJSObject()
+	case float64, string, bool:
+		return jsvWrap(v)
+	}
+	return v
+}
+
+// jsvWrapCtor is the name of the global whose prototype a wrapper of p inherits from.
+func jsvWrapCtor(p interface{}) string {
+	switch p.(type) {
+	case float64:
+		return "Number"
+	case string:
+		return "String"
+	}
+	return "Boolean"
 }
 
 // jsvProtoLocaleOwn: a number's, a BigInt's and an array's toLocaleString are their
@@ -565,10 +613,10 @@ func (rt *jsrt) jsvSetProto(v, p interface{}) interface{} {
 
 // jsvDefineProp is Object.defineProperty(o, key, desc) for a key already in the
 // object's own spelling: a data property from desc.value, or an accessor from
-// desc.get / desc.set. A new property is enumerable only when desc says so - it is
-// kept off the key order - and an existing one keeps its enumerability unless desc
-// names it. `writable` and `configurable` are not modelled: a later write replaces
-// the value. Twins: jsDefineKey in both *-interpreter.abnf, jvDefineProp in
+// desc.get / desc.set. An attribute desc does not name keeps its value on an existing
+// property and is false on a new one; a false one is the key's entry in the object's
+// __hidden, __ro or __nc set (jsvAttrHas). Twin of jsDefineKey in
+// js-interpreter.abnf, which states the rule; jvDefineProp in
 // languages/lib/js-rt.metajs.
 func (rt *jsrt) jsvDefineProp(v interface{}, key string, desc interface{}) {
 	if _, isObj := desc.(*jsObject); !isObj && !isCallable(desc) {
@@ -584,23 +632,40 @@ func (rt *jsrt) jsvDefineProp(v interface{}, key string, desc interface{}) {
 		}
 		return
 	}
-	at := -1
-	for i, k := range o.keys {
-		if k == key {
-			at = i
+	eo, _ := desc.(*jsObject)
+	has := func(k string) bool {
+		if eo == nil {
+			return false
+		}
+		_, found := eo.props[k]
+		return found
+	}
+	flag := func(k string) bool { return rt.truthy(rt.jsvGetKey(desc, k)) }
+	isAcc := !isUndefOrNull(g) || !isUndefOrNull(s)
+	cur, exists := o.props[key]
+	curAcc, _ := cur.(*jsAccessor)
+	if exists && jsvAttrHas(o, "__nc", key) {
+		bad := has("configurable") && flag("configurable")
+		if has("enumerable") && flag("enumerable") == jsvAttrHas(o, "__hidden", key) {
+			bad = true
+		}
+		switch {
+		case curAcc != nil:
+			bad = bad || has("value") || has("writable") ||
+				(isCallable(g) && g != curAcc.get) || (isCallable(s) && s != curAcc.set)
+		case isAcc:
+			bad = true
+		case jsvAttrHas(o, "__ro", key):
+			bad = bad || (has("writable") && flag("writable")) ||
+				(has("value") && !rt.jsvSameValue(rt.jsvGetKey(desc, "value"), cur))
+		}
+		if bad {
+			rt.bigRaise("TypeError: Cannot redefine property: %s", jsvKeyUnesc(key))
 		}
 	}
-	listed := at >= 0
-	if eo, isObj := desc.(*jsObject); isObj {
-		if _, has := eo.props["enumerable"]; has {
-			listed = rt.truthy(eo.props["enumerable"])
-		}
-	}
-	var val interface{}
-	if isUndefOrNull(g) && isUndefOrNull(s) {
-		val = rt.jsvGetKey(desc, "value")
-	} else {
-		acc, _ := o.props[key].(*jsAccessor)
+	switch {
+	case isAcc:
+		acc := curAcc
 		if acc == nil {
 			acc = &jsAccessor{}
 		}
@@ -610,16 +675,72 @@ func (rt *jsrt) jsvDefineProp(v interface{}, key string, desc interface{}) {
 		if isCallable(s) {
 			acc.set = s
 		}
-		val = acc
+		o.set(key, acc)
 		rt.accessorCount++
+	case has("value") || !exists:
+		o.set(key, rt.jsvGetKey(desc, "value"))
 	}
-	o.props[key] = val
-	switch {
-	case listed && at < 0:
-		o.keys = append(o.keys, key)
-	case !listed && at >= 0:
-		o.keys = append(o.keys[:at:at], o.keys[at+1:]...)
+	attr := func(set, name string, keep bool) {
+		on := keep
+		if has(name) {
+			on = !flag(name)
+		} else if !exists {
+			on = true
+		}
+		jsvAttrSet(o, set, key, on)
 	}
+	attr("__hidden", "enumerable", jsvAttrHas(o, "__hidden", key))
+	if isAcc || curAcc != nil {
+		jsvAttrSet(o, "__ro", key, false)
+	} else {
+		attr("__ro", "writable", jsvAttrHas(o, "__ro", key))
+	}
+	attr("__nc", "configurable", jsvAttrHas(o, "__nc", key))
+}
+
+// jsvAttrN counts the objects holding an __ro or an __nc set, so a program that made
+// none pays one compare per write and delete.
+var jsvAttrN = 0
+
+// jsvAttrHas: is key in o's attribute set (__hidden, __ro or __nc)?
+func jsvAttrHas(o *jsObject, set, key string) bool {
+	t, ok := o.props[set].(*jsObject)
+	return ok && t.props[key] == true
+}
+
+func jsvAttrSet(o *jsObject, set, key string, on bool) {
+	t, ok := o.props[set].(*jsObject)
+	if !ok {
+		if !on {
+			return
+		}
+		t = newJSObject()
+		o.props[set] = t
+		if set != "__hidden" {
+			jsvAttrN++
+		}
+	}
+	if on {
+		t.props[key] = true
+	} else {
+		delete(t.props, key)
+	}
+}
+
+// jsvSameValue is SameValue: === except that NaN is itself and +0 is not -0. Twins:
+// jvSameValue in languages/lib/js-rt.metajs, sameValue in both *-interpreter.abnf.
+func (rt *jsrt) jsvSameValue(a, b interface{}) bool {
+	x, xNum := a.(float64)
+	y, yNum := b.(float64)
+	if xNum && yNum {
+		if x != x {
+			return y != y
+		}
+		if x == 0 && y == 0 {
+			return math.Signbit(x) == math.Signbit(y)
+		}
+	}
+	return rt.strictEq(a, b)
 }
 
 // jsvDefineProps is Object.defineProperties(o, props), and Object.create's second
@@ -773,6 +894,13 @@ func (rt *jsrt) jsvString(v interface{}) string {
 		if r, ok := rt.jsvCallMethod(t, "toString"); ok {
 			return rt.toString(r)
 		}
+		if p, isWrap := jsvWrapped(t); isWrap {
+			return rt.jsvString(p)
+		}
+		// OrdinaryToPrimitive finds no toString and no valueOf to call.
+		if jsvNoObjProto(t) {
+			rt.bigRaise("TypeError: Cannot convert object to primitive value")
+		}
 		return rt.jsvProtoTag(t)
 	case *jsArray:
 		if jsvIsArgs(t) {
@@ -920,6 +1048,9 @@ func (rt *jsrt) jsvToPrimitive(v interface{}, hint string) interface{} {
 		}
 		if r, ok := rt.jsvCallMethod(o, "valueOf"); ok && !jsvIsObjLike(r) {
 			return r
+		}
+		if p, isWrap := jsvWrapped(o); isWrap {
+			return p
 		}
 		return rt.jsvString(o)
 	}
@@ -1096,12 +1227,11 @@ func (rt *jsrt) jsvCompare(a, b interface{}) int {
 // The Object global
 //
 // The root scope's `Object` is a bare host object carrying only `prototype`, so the
-// grammar declares the marked object below in the PROGRAM's own scope (the way it
-// already declares RegExp), and nothing outside the JS/TS pair sees it.
-
+// grammar declares the host function js_jsobject makes in the PROGRAM's own scope (the
+// way it already declares RegExp), and nothing outside the JS/TS pair sees it.
 func jsvIsObjectGlobal(v interface{}) bool {
-	o, ok := v.(*jsObject)
-	return ok && o.props["__jsobject"] != nil
+	hf, ok := v.(*hostFunc)
+	return ok && hf.name == "Object"
 }
 
 // jsvIsArrayGlobal recognizes the `Array` global: a js program's own (js_jsarrayfn)
@@ -1132,9 +1262,11 @@ func jsvOwnKeys(v interface{}) []string {
 			return jsvStaticEnumKeys(o)
 		}
 		d, isView := o.props["__protoof"].(*jsObject)
+		// A property defineProperty made non-enumerable (jsvDefineProp).
+		hid, _ := o.props["__hidden"].(*jsObject)
 		out := []string{}
 		for _, k := range o.keys {
-			if !jsvInternalKey(k) && !(isView && jsvProtoDeclared(d, k)) {
+			if !jsvInternalKey(k) && !(isView && jsvProtoDeclared(d, k)) && (hid == nil || hid.props[k] != true) {
 				out = append(out, k)
 			}
 		}
@@ -1204,6 +1336,16 @@ func jsvGopnKeys(v interface{}) []string {
 			}
 			if isClassDesc(o) {
 				return jsvClassOwnNames(o)
+			}
+			// A non-enumerable property is in the key order too, where it was defined.
+			if _, hid := o.props["__hidden"]; hid {
+				ks := []string{}
+				for _, k := range o.keys {
+					if !jsvInternalKey(k) {
+						ks = append(ks, k)
+					}
+				}
+				return jsvErrGopn(o, jsvIndexOrder(ks))
 			}
 			return jsvErrGopn(o, jsvOwnKeys(v))
 		}
@@ -1475,6 +1617,9 @@ func jsvFnOwn(f interface{}, k string) bool {
 	if jsvIsArrayGlobal(f) && jsvInNames(jsvArrayOwnNames, k) {
 		return true
 	}
+	if jsvIsObjectGlobal(f) && jsvInNames(jsvObjectOwnNames, k) {
+		return true
+	}
 	p := jsvFnPropsOf(f)
 	if p == nil {
 		return false
@@ -1498,9 +1643,6 @@ func (rt *jsrt) jsvHasOwn(v interface{}, k string) bool {
 	case *jsObject:
 		if own, ok := jsvErrOwn(o, k); ok {
 			return own
-		}
-		if jsvIsObjectGlobal(o) && jsvInNames(jsvObjectOwnNames, k) {
-			return true
 		}
 		if isClassDesc(o) {
 			return jsvInNames(jsvClassOwnNames(o), k)
@@ -1784,9 +1926,9 @@ var jsvArrayMethods = map[string]bool{
 // jsvNumberMethods are a Number's methods read as a value (jsvBuiltinFam).
 var jsvNumberMethods = map[string]bool{"toFixed": true, "toExponential": true, "toPrecision": true, "toString": true, "valueOf": true, "toLocaleString": true}
 
-// jsvBuiltinFam is 's' / 'a' / 'n' when name is a builtin method of a String, an
-// Array or a Number receiver READ AS A VALUE (js_jsvget), else 0: the names
-// js_jsmcall answers, plus an Array's valueOf. Twins: builtinFam in both
+// jsvBuiltinFam is 's' / 'a' / 'n' / 'b' when name is a builtin method of a String,
+// an Array, a Number or a Boolean receiver READ AS A VALUE (js_jsvget), else 0: the
+// names js_jsmcall answers, plus an Array's valueOf. Twins: builtinFam in both
 // *-interpreter.abnf, jvBuiltinFam in languages/lib/js-rt.metajs.
 func jsvBuiltinFam(target interface{}, name string) byte {
 	switch target.(type) {
@@ -1798,6 +1940,10 @@ func jsvBuiltinFam(target interface{}, name string) byte {
 		if jsvNumberMethods[name] {
 			return 'n'
 		}
+	case bool:
+		if name == "toString" || name == "valueOf" {
+			return 'b'
+		}
 	case *jsArray:
 		if (jsvArrayMethods[name] || name == "valueOf") && !jsvIsArgs(target) {
 			return 'a'
@@ -1807,15 +1953,24 @@ func jsvBuiltinFam(target interface{}, name string) byte {
 }
 
 // jsvBuiltinRecv is the receiver a builtin method value runs on, with node's
-// TypeErrors: a Number method and String's toString/valueOf demand their own kind,
-// every other method refuses only null and undefined, and a String method coerces
-// what it is given. Twins: builtinRecv in both *-interpreter.abnf, jvBuiltinRecv in
-// languages/lib/js-rt.metajs.
+// TypeErrors: a Number or a Boolean method and String's toString/valueOf demand their
+// own kind, a primitive or its wrapper, every other method refuses only null and
+// undefined, and a String method coerces what it is given. Twins: builtinRecv in both
+// *-interpreter.abnf, jvBuiltinRecv in languages/lib/js-rt.metajs.
 func (rt *jsrt) jsvBuiltinRecv(fam byte, name string, recv interface{}) interface{} {
 	raise := func(msg string) { panic(&jsThrown{value: rt.jsErrFromText("TypeError: " + msg)}) }
+	if p, isWrap := jsvWrapped(recv); isWrap && (fam == 'n' || fam == 'b' || (fam == 's' && (name == "toString" || name == "valueOf"))) {
+		recv = p
+	}
 	if fam == 'n' {
 		if _, isNum := recv.(float64); !isNum {
 			raise("Number.prototype." + name + " requires that 'this' be a Number")
+		}
+		return recv
+	}
+	if fam == 'b' {
+		if _, isBool := recv.(bool); !isBool {
+			raise("Boolean.prototype." + name + " requires that 'this' be a Boolean")
 		}
 		return recv
 	}
@@ -2514,20 +2669,7 @@ func (rt *jsrt) jsvMethod(target interface{}, name string, args []interface{}) (
 		case "freeze", "seal":
 			return argAt(args, 0), true
 		case "is":
-			// SameValue: === except that NaN is itself and +0 is not -0. Twins:
-			// jvSameValue in languages/lib/js-rt.metajs, sameValue in both
-			// *-interpreter.abnf.
-			x, xNum := argAt(args, 0).(float64)
-			y, yNum := argAt(args, 1).(float64)
-			if xNum && yNum {
-				if x != x {
-					return y != y, true
-				}
-				if x == 0 && y == 0 {
-					return math.Signbit(x) == math.Signbit(y), true
-				}
-			}
-			return rt.strictEq(argAt(args, 0), argAt(args, 1)), true
+			return rt.jsvSameValue(argAt(args, 0), argAt(args, 1)), true
 		}
 		return nil, false
 	}
@@ -2607,6 +2749,19 @@ func (rt *jsrt) jsvMethod(target interface{}, name string, args []interface{}) (
 		return rt.jsvArrayMethod(recv, name, args)
 	case float64:
 		return rt.jsvNumberMethod(recv, name, args)
+	case bool:
+		// Boolean.prototype's own two (ECMA-262 20.3.3).
+		switch name {
+		case "toString":
+			return strconv.FormatBool(recv), true
+		case "valueOf":
+			return recv, true
+		}
+	case *jsObject:
+		// A wrapper's methods are its primitive's.
+		if p, isWrap := recv.props["__bvof"]; isWrap {
+			return rt.jsvMethod(p, name, args)
+		}
 	}
 	return nil, false
 }
@@ -3305,6 +3460,10 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		}
 		return jsHFalse
 	}
+	// Object.prototype, made with the Object global (js_jsobject), and the builtin
+	// prototypes by their global's name (defined beside builtinProto below).
+	var objProto *jsObject
+	var builtinProtoNamed func(name string) interface{}
 
 	// println with JAVASCRIPT's ToString. The shared println host function hands the
 	// raw value to Go's %v. Multiple arguments stay space-joined, each stringified on
@@ -3376,9 +3535,6 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		v := u(a[0])
 		if o, ok := v.(*jsObject); ok {
 			if c, has := o.props["__isclass"]; has && c == interface{}(true) {
-				return rt.wrapStr("function")
-			}
-			if o.props["__jsobject"] != nil {
 				return rt.wrapStr("function")
 			}
 			if _, isSym := o.props["__symkey"]; isSym {
@@ -3524,6 +3680,12 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	// in both *-interpreter.abnf, js_jsnewclass in languages/lib/js-rt.metajs.
 	m["js_jsnewclass"] = func(a []uint64) uint64 {
 		o, fn := u(a[0]).(*jsObject), u(a[1])
+		// `new Number(v)`, `new String(v)`, `new Boolean(v)`: a wrapper, which
+		// js_jsnewres fills with the primitive the call answers.
+		if hf, isHost := fn.(*hostFunc); isHost && (hf.name == "Number" || hf.name == "String" || hf.name == "Boolean") {
+			o.props["__bvof"] = jsUndef
+			return a[0]
+		}
 		cd := descOf(fn)
 		p, has := jsvOwnProto(fn)
 		if !has {
@@ -3692,11 +3854,20 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			return rt.call(v, args[0], args[1:])
 		}))
 	}
-	// [[Construct]]: an object the constructor RETURNS wins over the fresh receiver.
+	// [[Construct]]: an object the constructor RETURNS wins over the fresh receiver,
+	// and a wrapper js_jsnewclass made holds the primitive.
 	m["js_jsnewres"] = func(a []uint64) uint64 {
 		r := u(a[0])
+		if r == jsUndef {
+			return a[1]
+		}
 		if jsvIsObjLike(r) || isCallable(r) {
 			return a[0]
+		}
+		if o, isObj := u(a[1]).(*jsObject); isObj {
+			if _, isWrap := o.props["__bvof"]; isWrap {
+				o.props["__bvof"] = r
+			}
 		}
 		return a[1]
 	}
@@ -3804,6 +3975,17 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		if jsvIsObjectGlobal(target) {
 			return boolH(jsvIsObjLike(v) || isCallable(v))
 		}
+		if hf, isHost := target.(*hostFunc); isHost {
+			switch hf.name {
+			case "Function":
+				return boolH(isCallable(v) || isClassDesc(v))
+			case "Number", "String", "Boolean":
+				// A wrapper is an instance of its primitive's global; the prototype
+				// object it may itself be is not.
+				p, isWrap := jsvWrapped(v)
+				return boolH(isWrap && jsvWrapCtor(p) == hf.name && v != builtinProtoNamed(hf.name))
+			}
+		}
 		// An object that is no constructor (and has no Symbol.hasInstance, above).
 		if o, isObj := target.(*jsObject); (isObj && !isClassDesc(o) && !jsvIsArrayGlobal(target)) || !(isObj || isCallable(target)) {
 			rt.bigRaise("TypeError: Right-hand side of 'instanceof' is not callable")
@@ -3885,28 +4067,53 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			}
 			return boolH(true)
 		}
+		// A non-configurable property stays (jsvDefineProp).
+		if o, isObj := u(a[0]).(*jsObject); isObj && jsvAttrN > 0 && jsvAttrHas(o, "__nc", rt.toString(u(a[1]))) {
+			return boolH(false)
+		}
 		return baseDel(a)
 	}
 
 	// The `Object` global, declared by the grammar in the PROGRAM's own scope so no
 	// other language sees it. It keeps the root binding's prototype, so the
 	// Object.prototype.hasOwnProperty idiom still resolves.
+	// Object(v) and new Object(v) are ToObject, with a fresh object for undefined and
+	// null; its `prototype` is objProto (builtinProtoNamed).
 	m["js_jsobject"] = func(a []uint64) uint64 {
-		o := newJSObject()
-		o.set("__jsobject", true)
+		f := jsHostFunc("Object", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return jsvToObject(argAt(args, 0))
+		})
+		jsvFnMetaSet(f, "Object", 1)
 		// Object.prototype.toString.call(v) is the classic type probe. The root
 		// binding's `prototype` carries no methods, so this one does: the jsvProtoFns,
 		// which read their receiver from the call's `this`. __objproto marks it for
 		// isPrototypeOf. Twins: js_jsobject in languages/lib/js-rt.metajs and
 		// jsObjectProto in both *-interpreter.abnf start scripts.
-		proto := newJSObject()
-		proto.props["__objproto"] = true
+		objProto = newJSObject()
+		objProto.props["__objproto"] = true
 		for _, n := range jsvProtoNames {
-			proto.set(n, jsvProtoFns[n])
+			objProto.set(n, jsvProtoFns[n])
 		}
-		// Unlisted, so Object.keys(Object) is [] as in node (jsvGopnKeys lists it).
-		o.props["prototype"] = proto
-		return w(o)
+		return w(f)
+	}
+	// Boolean(v) is ToBoolean; `new Boolean(v)` is a wrapper (js_jsnewclass).
+	m["js_jsbooleanfn"] = func(a []uint64) uint64 {
+		f := jsHostFunc("Boolean", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return rt.truthy(argAt(args, 0))
+		})
+		jsvFnMetaSet(f, "Boolean", 1)
+		return w(f)
+	}
+	// The Function global, for `f instanceof Function` and Function.prototype. No
+	// engine here compiles source text at run time, so a call is the EvalError node
+	// raises where code generation from strings is disallowed.
+	m["js_jsfunctionfn"] = func(a []uint64) uint64 {
+		f := jsHostFunc("Function", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			rt.bigRaise("EvalError: Code generation from strings disallowed for this context")
+			return jsUndef
+		})
+		jsvFnMetaSet(f, "Function", 1)
+		return w(f)
 	}
 
 	// `class A extends Object`: the Object global is not a class descriptor here, so
@@ -3923,7 +4130,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			objectRoot = newJSObject()
 			objectRoot.set("__isclass", true)
 			objectRoot.set("__name", "Object")
-			objectRoot.set("__ctor", jsHostFunc("Object", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			objectRoot.set("__ctor", jsHostFunc("", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 				return jsUndef
 			}))
 		}
@@ -4115,13 +4322,12 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		return f
 	}
 	// Array.prototype is an empty array (Array.isArray answers true, as in node), and
-	// String.prototype and Number.prototype an object carrying a receiver of its kind
-	// in __bvof, which jsvBuiltinFam asks; either way its members are the builtin
-	// method values. RegExp, Promise and BigInt answer a bare object. Twins:
-	// builtinProto in both *-interpreter.abnf, jvBuiltinProto in
-	// languages/lib/js-rt.metajs.
+	// String.prototype, Number.prototype and Boolean.prototype the wrapper objects of
+	// "", 0 and false (jsvWrap), whose __bvof jsvBuiltinFam asks; either way its members
+	// are the builtin method values. Function.prototype is a function that answers
+	// undefined; RegExp, Promise and BigInt answer a bare object. Twins: builtinProto in
+	// both *-interpreter.abnf, jvBuiltinProto in languages/lib/js-rt.metajs.
 	builtinProtos := map[string]interface{}{}
-	var builtinProtoNamed func(name string) interface{}
 	builtinProto := func(fn interface{}) interface{} {
 		hf, isHost := fn.(*hostFunc)
 		if !isHost {
@@ -4130,28 +4336,30 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		return builtinProtoNamed(hf.name)
 	}
 	builtinProtoNamed = func(name string) interface{} {
-		var of interface{}
-		switch name {
-		case "Array":
-			of = &jsArray{}
-		case "String":
-			of = ""
-		case "Number":
-			of = float64(0)
-		case "RegExp", "Promise", "BigInt":
-		default:
-			return nil
-		}
 		if p, found := builtinProtos[name]; found {
 			return p
 		}
-		var p interface{} = of
-		if name != "Array" {
-			o := newJSObject()
-			if of != nil {
-				o.set("__bvof", of)
+		var p interface{}
+		switch name {
+		case "Object":
+			if objProto == nil {
+				return nil
 			}
-			p = o
+			return objProto
+		case "Array":
+			p = &jsArray{}
+		case "String":
+			p = jsvWrap("")
+		case "Number":
+			p = jsvWrap(float64(0))
+		case "Boolean":
+			p = jsvWrap(false)
+		case "Function":
+			p = jsHostFunc("", func(rt *jsrt, this uint64, args []interface{}) interface{} { return jsUndef })
+		case "RegExp", "Promise", "BigInt":
+			p = newJSObject()
+		default:
+			return nil
 		}
 		builtinProtos[name] = p
 		return p
@@ -4164,7 +4372,8 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	// "function". The answer is jsvMethodValue: one unbound function per method, which
 	// takes `this` from its call site. The layer-2 twin is js_jsvget in
 	// languages/lib/js-rt.metajs and the interpreters' is getMember's class-method arm.
-	vget := func(a []uint64) uint64 {
+	var vget func(a []uint64) uint64
+	vget = func(a []uint64) uint64 {
 		if fam := jsvBuiltinFam(u(a[0]), rt.toString(u(a[1]))); fam != 0 {
 			return w(builtinValue(fam, rt.toString(u(a[1]))))
 		}
@@ -4229,10 +4438,8 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		if d, isSym := recv.props["__symdesc"]; isSym && name == "description" {
 			return w(d)
 		}
-		if of, isProto := recv.props["__bvof"]; isProto {
-			if fam := jsvBuiltinFam(of, name); fam != 0 {
-				return w(builtinValue(fam, name))
-			}
+		if p, isWrap := recv.props["__bvof"]; isWrap {
+			return vget([]uint64{w(p), a[1]})
 		}
 		if d, isView := recv.props["__protoof"].(*jsObject); isView {
 			if v := protoRead(d, name); v != nil {
@@ -4353,18 +4560,11 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 				return w(true)
 			}
 		}
-		// The side table holds a function's own properties; the key map is asked, so
-		// a property holding undefined is still reported. A function that is not IN
-		// the table answers false rather than falling through, because the shared
+		// A function's own properties (jsvFnOwn), and nothing else: the shared
 		// js_has aborts with "'in' needs an object on the right side" for any
 		// receiver that is not an object.
 		if jsvIsFnLike(u(a[0])) {
-			if p := jsvFnPropsOf(u(a[0])); p != nil {
-				if _, found := p.props[name]; found {
-					return w(true)
-				}
-			}
-			return w(false)
+			return w(jsvFnOwn(u(a[0]), name))
 		}
 		if r := baseHas(a); u(r) == true {
 			return r
@@ -4564,7 +4764,8 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 				return w(out)
 			}
 			_, marked := v.props["__errh"]
-			if _, isView := v.props["__protoof"]; marked || isView {
+			_, hid := v.props["__hidden"]
+			if _, isView := v.props["__protoof"]; marked || isView || hid {
 				out := &jsArray{}
 				for _, k := range jsvOwnKeys(v) {
 					out.elems = append(out.elems, k)
@@ -4681,6 +4882,10 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			return 0
 		}
 		if o, isObj := u(a[0]).(*jsObject); isObj {
+			// A write to a non-writable property is dropped (jsvDefineProp).
+			if jsvAttrN > 0 && jsvAttrHas(o, "__ro", rt.toString(u(a[1]))) {
+				return 0
+			}
 			if rt.toString(u(a[1])) == "name" {
 				jsvErrNameWrite(o)
 			}
@@ -4772,17 +4977,18 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	// Object.getPrototypeOf(v). An object's prototype is the view of its __class
 	// descriptor, and a prototype view's is its parent class's view; without either
 	// it is Object.prototype, and null for a null-prototype object and for
-	// Object.prototype itself. A primitive answers its builtin's prototype, a class
-	// the class it extends. Function.prototype and Boolean.prototype are not
-	// modelled: a plain function and a boolean answer undefined. Twins: jsGetProto in
-	// both *-interpreter.abnf, jvGetProto in languages/lib/js-rt.metajs.
-	getProto := func(objGlobal *jsObject, v interface{}) interface{} {
-		objProto := objGlobal.props["prototype"]
+	// Object.prototype itself. A primitive answers its builtin's prototype, a wrapper
+	// its primitive's, a function and a base class Function.prototype, and a derived
+	// class the class it extends. Twins: jsGetProto in both *-interpreter.abnf,
+	// jvGetProto in languages/lib/js-rt.metajs.
+	getProto := func(objGlobal interface{}, v interface{}) interface{} {
 		switch x := v.(type) {
 		case string:
 			return builtinProtoNamed("String")
 		case float64:
 			return builtinProtoNamed("Number")
+		case bool:
+			return builtinProtoNamed("Boolean")
 		case *jsBigInt:
 			return builtinProtoNamed("BigInt")
 		case *jsArray:
@@ -4799,10 +5005,16 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 				if _, ok := sup.(*jsObject); ok {
 					return sup
 				}
-				return jsUndef
+				return builtinProtoNamed("Function")
 			}
 			if x.props["__objproto"] != nil || x.props["__nullproto"] == true {
 				return jsNull
+			}
+			if p, isWrap := x.props["__bvof"]; isWrap {
+				if wp := builtinProtoNamed(jsvWrapCtor(p)); wp != interface{}(x) {
+					return wp
+				}
+				return objProto
 			}
 			if d, isView := x.props["__protoof"].(*jsObject); isView {
 				sd, ok := d.props["__super"].(*jsObject)
@@ -4819,6 +5031,12 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		if isUndefOrNull(v) {
 			rt.bigRaise("TypeError: Cannot convert undefined or null to object")
 		}
+		if isCallable(v) {
+			if fp := builtinProtoNamed("Function"); fp != v {
+				return fp
+			}
+			return objProto
+		}
 		return jsUndef
 	}
 	m["js_jsmcall"] = func(a []uint64) uint64 {
@@ -4826,8 +5044,8 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		if !ok {
 			rt.fail("js_jsmcall args must be an array")
 		}
-		if g, isObj := u(a[0]).(*jsObject); isObj && jsvIsObjectGlobal(g) && rt.toString(u(a[1])) == "getPrototypeOf" {
-			return w(getProto(g, argAt(arr.elems, 0)))
+		if jsvIsObjectGlobal(u(a[0])) && rt.toString(u(a[1])) == "getPrototypeOf" {
+			return w(getProto(u(a[0]), argAt(arr.elems, 0)))
 		}
 		if v, handled := rt.jsvMethod(u(a[0]), rt.toString(u(a[1])), arr.elems); handled {
 			return w(v)

@@ -122,6 +122,18 @@ func (rt *jsrt) jsonSer(st *jsonState, holder interface{}, key string, v interfa
 	if st.fn != nil {
 		v = rt.call(st.fn, holder, []interface{}{key, v})
 	}
+	// A Number, String or Boolean wrapper object serializes as its ToNumber, its
+	// ToString or its primitive.
+	if p, isWrap := jsvWrapped(v); isWrap {
+		switch p.(type) {
+		case float64:
+			v = rt.jsvToNum(v)
+		case string:
+			v = rt.jsvString(v)
+		default:
+			v = p
+		}
+	}
 	switch x := v.(type) {
 	case jsNullT:
 		return "null", true

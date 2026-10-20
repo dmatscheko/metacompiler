@@ -2546,7 +2546,7 @@ NotFuncHead = :script(~~
     var jsbWant = false
     var jsbDone = false
     function jsbRef(name) {
-        if (name == "Set" || name == "Map" || name == "Array" || name == "Boolean" || name == "isNaN" || name == "isFinite" ||
+        if (name == "Set" || name == "Map" || name == "Array" || name == "isNaN" || name == "isFinite" ||
             name == "structuredClone") { jsbWant = true }
         return name
     }
@@ -6593,6 +6593,10 @@ NotFuncHead = :script(~~
         // back out of a BigInt, since unary '+' refuses it.
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "BigInt"), callExt(b, "js_jsbigintfn", [])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Number"), callExt(b, "js_jsnumberfn", [])])
+        // Boolean(v) is ToBoolean and `new Boolean(v)` a wrapper; Function is there for
+        // instanceof and Function.prototype.
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Boolean"), callExt(b, "js_jsbooleanfn", [])])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Function"), callExt(b, "js_jsfunctionfn", [])])
         // parseFloat and parseInt are JavaScript's (lib/js-num.js), not the runtime root's.
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "parseFloat"), callExt(b, "js_jsparsefloatfn", [])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "parseInt"), callExt(b, "js_jsparseintfn", [])])

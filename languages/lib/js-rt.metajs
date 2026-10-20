@@ -261,7 +261,6 @@ function js_jstypeof(v) {
     if (jbIsBig(v)) { return "bigint" }
     if (jvIsObj(v)) {
         if (v["__isclass"] === true) { return "function" }
-        if (v["__jsobject"] !== undefined) { return "function" }
         if (v["__symkey"] !== undefined) { return "symbol" }
     }
     return typeof v
@@ -423,6 +422,10 @@ var jvNumberFn = anytype
 
 // The `BigInt` global js_jsbigintfn handed out, for BigInt.prototype.
 var jvBigIntFn = anytype
+
+// The `Boolean` and `Function` globals js_jsbooleanfn and js_jsfunctionfn handed out.
+var jvBooleanFn = anytype
+var jvFunctionFn = anytype
 
 // The count of prototype views (jvProtoView): while it is 0 no member write can
 // meet one, and js_jsmset skips the test.
@@ -925,6 +928,11 @@ function jvStr(v) {
             if (typeof r == "string") { return r }
             return jvStr(r)
         }
+        var wp = anytype
+        wp = v["__bvof"]
+        if (wp !== undefined) { return jvStr(wp) }
+        // OrdinaryToPrimitive finds no toString and no valueOf to call.
+        if (jvNoObjProto(v)) { jbRaise("TypeError: Cannot convert object to primitive value") }
         return jvProtoTag(v)
     }
     if (Array.isArray(v)) {
@@ -977,6 +985,9 @@ function jvToPrimitive(v, hint) {
         if (r !== jvMiss) {
             if (!jvIsObjLike(r)) { return r }
         }
+        var wp = anytype
+        wp = v["__bvof"]
+        if (wp !== undefined) { return wp }
         return jvStr(v)
     }
     if (Array.isArray(v)) { return jvStr(v) }
@@ -1184,6 +1195,10 @@ function js_jsdel(o, key) {
         if (fp !== undefined) { delKey(fp, jvStr(key)) }
     }
     if (jvIsObj(o)) {
+        // A non-configurable property stays (jvDefineProp).
+        if (jvAttrN > 0) {
+            if (jvAttrHas(o, "__nc", jvStr(key))) { return false }
+        }
         if (o === jvMathObj) { delKey(jvMathHid, jvStr(key)) }
         delKey(o, jvStr(key))
     }
@@ -1360,7 +1375,7 @@ function jvStoredKeys(o) {
         pd = o["__protoof"]
         if (pd !== undefined) { return jvViewKeys(o, pd) }
     }
-    return jvErrHide(o, jvIndexOrder(keysOf(o)))
+    return jvEnumKeys(o, jvIndexOrder(keysOf(o)))
 }
 // The own enumerable keys of the prototype view of descriptor d: its declared
 // methods and accessors are not enumerable (jvProtoDeclared).
@@ -1401,6 +1416,9 @@ function jvFnOwn(f, kk) {
     if (jvArrayFn !== undefined && f === jvArrayFn) {
         if (jvInNames(jvArrayOwnNames, kk)) { return true }
     }
+    if (jvIsObjectGlobal(f)) {
+        if (jvInNames(jvObjectOwnNames, kk)) { return true }
+    }
     if (jvFnPropsN == 0) { return false }
     var fp = anytype
     fp = jvFnPropsFind(f)
@@ -1421,9 +1439,6 @@ function jvHasOwn(self, k) {
         return jvIndexIn(kk, self.length)
     }
     if (!jvIsObj(self)) { return false }
-    if (jvIsObjectGlobal(self)) {
-        if (jvInNames(jvObjectOwnNames, kk)) { return true }
-    }
     if (jvClsN > 0) {
         if (jvIsClassDesc(self)) { return jvInNames(jvClassOwnNames(self), kk) }
     }
@@ -2056,8 +2071,22 @@ function jvBuiltinValue(fam, name) {
 // The receiver a builtin method value runs on, with node's TypeErrors. Twin of
 // jsvBuiltinRecv in abnf/jsrtjsprint.go, which states the rule.
 function jvBuiltinRecv(fam, name, recv) {
+    if (jvIsObj(recv)) {
+        var wp = anytype
+        wp = recv["__bvof"]
+        if (wp !== undefined) {
+            if (fam == "n" || fam == "b") { return jvBuiltinRecv(fam, name, wp) }
+            if (fam == "s") {
+                if (name == "toString" || name == "valueOf") { return jvBuiltinRecv(fam, name, wp) }
+            }
+        }
+    }
     if (fam == "n") {
         if (typeof recv != "number") { throw jvErrFromText("TypeError: Number.prototype." + name + " requires that 'this' be a Number") }
+        return recv
+    }
+    if (fam == "b") {
+        if (typeof recv != "boolean") { throw jvErrFromText("TypeError: Boolean.prototype." + name + " requires that 'this' be a Boolean") }
         return recv
     }
     if (recv === undefined || recv === null) {
@@ -2211,16 +2240,12 @@ function jvValueMiss(o, key) {
         }
         var bof = anytype
         bof = o["__bvof"]
-        if (bof !== undefined) {
-            var pf = jvBuiltinFam(bof, key)
-            if (pf != "") { return jvBuiltinValue(pf, key) }
-        }
+        if (bof !== undefined) { return js_jsvget(bof, key) }
         if (jvPvN > 0) {
             var pd = anytype
             pd = o["__protoof"]
             if (pd !== undefined) { return jvViewRead(pd, key) }
         }
-        if (jvIsObjectGlobal(o)) { return jvStaticValue(o, key) }
         if (key == "description") {
             if (o["__symkey"] !== undefined) { return o["__symdesc"] }
         }
@@ -2247,6 +2272,9 @@ function jvValueMiss(o, key) {
         }
     }
     if (key == "prototype") { return jvBuiltinProto(o) }
+    if (typeof o == "boolean") {
+        if (key == "toString" || key == "valueOf") { return jvBuiltinValue("b", key) }
+    }
     // A string's [Symbol.iterator], which the iteration sites probe under the key it
     // stands for (emitIterOf): code points, not UTF-16 units. An arguments object's
     // walks it up to its `length` (jvSeqIter).
@@ -2350,13 +2378,15 @@ function jvStaticValueFn(g, key) {
 }
 
 // Array.prototype is an empty array (Array.isArray answers true, as in node), and
-// String.prototype and Number.prototype an object carrying a receiver of its kind in
-// __bvof, which jvBuiltinFam asks; either way its members are the builtin method
-// values. RegExp, Promise and BigInt answer a bare object, and any other callable its
-// constructor descriptor's view (jvProtoView). Twins: builtinProto in
+// String.prototype, Number.prototype and Boolean.prototype the wrapper objects of "",
+// 0 and false (jvWrap), whose __bvof jvBuiltinFam asks; either way its members are
+// the builtin method values. Function.prototype is a function that answers
+// undefined; RegExp, Promise and BigInt answer a bare object, and any other callable
+// its constructor descriptor's view (jvProtoView). Twins: builtinProto in
 // abnf/jsrtjsprint.go and in both *-interpreter.abnf.
 var jvBuiltinProtos = []
 function jvBuiltinProto(f) {
+    if (jvIsObjectGlobal(f)) { return jvObjProto }
     var at = -1
     if (jvArrayFn !== undefined && f === jvArrayFn) { at = 0 }
     if (jvStringFn !== undefined && f === jvStringFn) { at = 1 }
@@ -2364,6 +2394,8 @@ function jvBuiltinProto(f) {
     if (f === jxRegExpFn) { at = 3 }
     if (jpFn !== undefined && f === jpFn) { at = 4 }
     if (jvBigIntFn !== undefined && f === jvBigIntFn) { at = 5 }
+    if (jvBooleanFn !== undefined && f === jvBooleanFn) { at = 6 }
+    if (jvFunctionFn !== undefined && f === jvFunctionFn) { at = 7 }
     if (at < 0) {
         if (jvIsCallable(f)) { return jvProtoView(jvCtorDesc(f)) }
         return undefined
@@ -2373,13 +2405,15 @@ function jvBuiltinProto(f) {
 // The builtin prototype jvBuiltinProto's index `at` names, made at the first ask.
 function jvBuiltinProtoAt(at) {
     if (jvBuiltinProtos.length == 0) {
-        var ps = {}
-        ps["__bvof"] = ""
-        var pn = {}
-        pn["__bvof"] = 0
-        jvBuiltinProtos = [[], ps, pn, {}, {}, {}]
+        jvBuiltinProtos = [[], jvWrap(""), jvWrap(0), {}, {}, {}, jvWrap(false), function () { return undefined }]
     }
     return jvBuiltinProtos[at]
+}
+// The index of the builtin prototype a wrapper of p inherits from.
+function jvWrapProtoAt(p) {
+    if (typeof p == "number") { return 2 }
+    if (typeof p == "string") { return 1 }
+    return 6
 }
 
 // THE PROTOTYPE of a class or a constructor function: one VIEW object per class
@@ -2596,20 +2630,9 @@ function jvHas(o, key) {
             if (jvStr(jvToNumber(key)) === jvStr(key)) { return jvArgsHas(o, key) }
         }
     }
-    // js_has and not `fp[k] !== undefined`, so a property holding undefined is still
-    // reported, exactly as it is on an ordinary object. A function that is not in the
-    // table answers false rather than falling through, because the floor's js_has
+    // A function's own properties (jvFnOwn), and nothing else: the floor's js_has
     // aborts with "'in' needs an object on the right side" for a non-object.
-    if (jvIsCallable(o)) {
-        if (jvFnPropsN > 0) {
-            var fp = anytype
-            fp = jvFnPropsOf(o)
-            if (fp !== undefined) {
-                if (js_has(fp, key)) { return true }
-            }
-        }
-        return false
-    }
+    if (jvIsCallable(o)) { return jvFnOwn(o, jvStr(key)) }
     return js_has(o, key)
 }
 
@@ -2698,6 +2721,12 @@ function js_jsmset(o, key, v) {
             }
         }
     }
+    // A write to a non-writable property is dropped (jvDefineProp).
+    if (jvAttrN > 0) {
+        if (jvIsObj(o)) {
+            if (jvAttrHas(o, "__ro", jvStr(key))) { return undefined }
+        }
+    }
     o[key] = v
     return undefined
 }
@@ -2773,10 +2802,12 @@ function js_call_new(callee, self, args) {
 }
 
 // [[Construct]]'s last step: an OBJECT the constructor RETURNS wins over the fresh
-// receiver.
+// receiver, and a wrapper js_jsnewclass made holds the primitive.
 function js_jsnewres(res, obj) {
+    if (res === undefined) { return obj }
     if (jvIsObjLike(res)) { return res }
     if (jvIsCallable(res)) { return res }
+    if (obj["__bvof"] !== undefined) { obj["__bvof"] = res }
     return obj
 }
 
@@ -2932,6 +2963,14 @@ function jvCtorDesc(fn) {
 // Object.prototype (ECMA-262 GetPrototypeFromConstructor). Twins: js_jsnewclass in
 // abnf/jsrtjsprint.go, newClassOf in both *-interpreter.abnf.
 function js_jsnewclass(o, fn) {
+    // `new Number(v)`, `new String(v)`, `new Boolean(v)`: a wrapper, which
+    // js_jsnewres fills with the primitive the call answers.
+    if (fn === jvNumberFn || fn === jvStringFn || fn === jvBooleanFn) {
+        o["__bvof"] = 0
+        return o
+    }
+    // `new Object(v)` answers ToObject(v), which replaces o.
+    if (jvIsObjectGlobal(fn)) { return o }
     var cd = jvCtorDesc(fn)
     if (jvFnPropsN == 0 || !jvFnOwn(fn, "prototype")) {
         o["__class"] = cd
@@ -2939,7 +2978,7 @@ function js_jsnewclass(o, fn) {
     }
     var p = anytype
     p = jvFnPropsFind(fn)["prototype"]
-    if (!jvIsObj(p) || jbIsBig(p) || jvIsClassDesc(p) || jvIsObjectGlobal(p)) { return o }
+    if (!jvIsObj(p) || jbIsBig(p) || jvIsClassDesc(p)) { return o }
     if (p["__symkey"] !== undefined) { return o }
     if (cd["__rpview"] !== p) {
         cd["__rpview"] = p
@@ -2979,11 +3018,11 @@ function jvCtorDescOf(fn) {
     return undefined
 }
 
-// The `Object` global is a bare marked object; the `Array` global is js_jsarrayfn's
-// function, or the root binding, recognized by its ONE member.
+// The `Object` global is js_jsobject's function; the `Array` global is
+// js_jsarrayfn's function, or the root binding, recognized by its ONE member.
 function jvIsObjectGlobal(v) {
-    if (!jvIsObj(v)) { return false }
-    return v["__jsobject"] !== undefined
+    if (jvObjGlobal === undefined) { return false }
+    return v === jvObjGlobal
 }
 
 function jvIsArrayGlobal(v) {
@@ -3024,6 +3063,19 @@ function js_jsinstanceof(v, c) {
         return jvIsCallable(v)
     }
     if (jvIsArrayGlobal(c)) { return Array.isArray(v) && !jvIsArgs(v) }
+    if (jvFunctionFn !== undefined && c === jvFunctionFn) { return jvIsCallable(v) || jvIsClassDesc(v) }
+    // A wrapper is an instance of its primitive's global; the prototype object it may
+    // itself be is not.
+    if (c === jvNumberFn || c === jvStringFn || c === jvBooleanFn) {
+        if (jvIsObj(v)) {
+            var wp = anytype
+            wp = v["__bvof"]
+            if (wp !== undefined) {
+                var at = jvWrapProtoAt(wp)
+                return jvBuiltinProto(c) === jvBuiltinProtoAt(at) && v !== jvBuiltinProtoAt(at)
+            }
+        }
+    }
     // An object that is no constructor (and has no Symbol.hasInstance, above).
     if (!jvIsCallable(c)) {
         if (!jvIsClassDesc(c)) { jbRaise("TypeError: Right-hand side of 'instanceof' is not callable") }
@@ -3217,11 +3269,9 @@ function jvIndexOrder(ks) {
     return idx
 }
 
-// An Error instance's own key list without the non-enumerable three, and the Math
-// object's without its builtin members (jvMathHid). Gated on jvErrN, so a program
-// that never built an error pays one identity and one integer compare.
-function jvErrHide(o, ks) {
-    // A property defineProperty made non-enumerable (jvDefineProp).
+// An object's own enumerable keys out of its key list ks: without a property
+// defineProperty made non-enumerable (jvDefineProp), then as jvErrHide leaves them.
+function jvEnumKeys(o, ks) {
     if (jvNeN > 0) {
         var ne = anytype
         ne = o["__nonenum"]
@@ -3235,13 +3285,19 @@ function jvErrHide(o, ks) {
             ks = shown
         }
     }
-    // ...and the JSON object's two members and the Object global's prototype, which
-    // are not enumerable in node either.
-    if (o === jvJsonObj || jvIsObjectGlobal(o)) {
+    return jvErrHide(o, ks)
+}
+
+// An Error instance's own key list without the non-enumerable three, the Math
+// object's without its builtin members (jvMathHid) and the JSON object's without its
+// two. Gated on jvErrN, so a program that never built an error pays one identity and
+// one integer compare.
+function jvErrHide(o, ks) {
+    if (o === jvJsonObj) {
         var jk = []
         var ji = 0
         while (ji < ks.length) {
-            if (ks[ji] != "stringify" && ks[ji] != "parse" && ks[ji] != "prototype") { jk.push(ks[ji]) }
+            if (ks[ji] != "stringify" && ks[ji] != "parse") { jk.push(ks[ji]) }
             ji = ji + 1
         }
         return jk
@@ -3352,10 +3408,10 @@ function js_jsspreadkeys(o) {
 // interpolated part through it.
 
 // The `Object` global, declared by the grammar in the PROGRAM's own scope so no
-// other language sees it.
+// other language sees it: Object(v) and new Object(v) are ToObject, with a fresh
+// object for undefined and null, and its `prototype` is jvObjProto (jvBuiltinProto).
 function js_jsobject() {
-    var o = {}
-    o["__jsobject"] = true
+    var o = fnMetaSet(function (v) { return jvToObject(v) }, "Object", 1)
     // Object.prototype.toString.call(v) is the classic type probe. Its members are the
     // jvProtoShim functions, which take their receiver from js_this(). Twins:
     // js_jsobject in abnf/jsrtjsprint.go and jsObjectProto in both *-interpreter.abnf
@@ -3368,9 +3424,22 @@ function js_jsobject() {
     proto["isPrototypeOf"] = jvProtoShim("isPrototypeOf")
     proto["toLocaleString"] = jvProtoShim("toLocaleString")
     jvObjProto = proto
-    o["prototype"] = proto
     jvObjGlobal = o
     return o
+}
+
+// The primitive wrapper objects: an object whose hidden __bvof slot holds a number, a
+// string or a boolean. Twin of jsWrap / jsToObject in js-interpreter.abnf, which
+// states the rule; jsvWrap / jsvToObject in abnf/jsrtjsprint.go.
+function jvWrap(p) {
+    var o = {}
+    o["__bvof"] = p
+    return o
+}
+function jvToObject(v) {
+    if (jvUndefOrNull(v)) { return {} }
+    if (typeof v == "number" || typeof v == "string" || typeof v == "boolean") { return jvWrap(v) }
+    return v
 }
 // The `Object` global js_jsobject built, for Object.getPrototypeOf.
 var jvObjGlobal = anytype
@@ -3383,7 +3452,7 @@ function jvProtoTag(v) {
     if (typeof v == "number") { return "[object Number]" }
     if (typeof v == "string") { return "[object String]" }
     if (typeof v == "boolean") { return "[object Boolean]" }
-    if (jvIsCallable(v) || jvIsObjectGlobal(v)) { return "[object Function]" }
+    if (jvIsCallable(v)) { return "[object Function]" }
     // The objects node gives a @@toStringTag: an Error instance (its __errh mark), a
     // promise, and Math / JSON, which carry their tag in a hidden __strtag slot.
     if (jvIsObj(v)) {
@@ -3397,6 +3466,9 @@ function jvProtoTag(v) {
         var tag = anytype
         tag = v["__strtag"]
         if (tag !== undefined) { return "[object " + tag + "]" }
+        var wp = anytype
+        wp = v["__bvof"]
+        if (wp !== undefined) { return jvProtoTag(wp) }
         if (jpIs(v)) { return "[object Promise]" }
     }
     return "[object Object]"
@@ -3492,7 +3564,9 @@ function jvProtoApply(recv, name, args) {
     if (name == "isPrototypeOf") { return jvIsProtoOf(recv, jvArg(args, 0)) }
     // Invoke(this, "toString") (ECMA-262 20.1.3.5), which ToString performs.
     if (name == "toLocaleString") { return jvStr(recv) }
-    return recv
+    // valueOf is ToObject(this): a primitive receiver comes back wrapped.
+    if (jvUndefOrNull(recv)) { jbRaise("TypeError: Cannot convert undefined or null to object") }
+    return jvToObject(recv)
 }
 // A number's, a BigInt's and an array's toLocaleString are their own prototypes'
 // (jsnToLocale, jvArrLocale), so a call of one is not answered by jvProtoApply. Twin: jsvProtoLocaleOwn in abnf/jsrtjsprint.go.
@@ -3678,7 +3752,7 @@ function jvOwnKeys(v) {
             pd = v["__protoof"]
             if (pd !== undefined) { return jvViewKeys(v, pd) }
         }
-        return jvErrHide(v, jvIndexOrder(keysOf(v)))
+        return jvEnumKeys(v, jvIndexOrder(keysOf(v)))
     }
     // A FUNCTION's own properties live in the side table.
     if (jvFnPropsN > 0) {
@@ -4631,7 +4705,7 @@ function jvObjCreate(p) {
         jvNullN = jvNullN + 1
         return o
     }
-    if (jvIsCallable(p) || Array.isArray(p) || jvIsClassDesc(p) || jvIsObjectGlobal(p)) { return o }
+    if (jvIsCallable(p) || Array.isArray(p) || jvIsClassDesc(p)) { return o }
     var bad = !jvIsObj(p) || jbIsBig(p)
     if (!bad) { bad = p["__symkey"] !== undefined }
     if (bad) { jbRaise("TypeError: Object prototype may only be an Object or null: " + jvStr(p)) }
@@ -4683,30 +4757,39 @@ function jvNoObjProto(v) {
 // Object.getPrototypeOf(v). An object's prototype is the view of its __class
 // descriptor, and a prototype view's is its parent class's view; without either it
 // is Object.prototype, and null for a null-prototype object and for Object.prototype
-// itself. A primitive answers its builtin's prototype, a class the class it extends.
-// Function.prototype and Boolean.prototype are not modelled: a plain function and a
-// boolean answer undefined. Twins: getProto in abnf/jsrtjsprint.go, jsGetProto in
-// both *-interpreter.abnf.
+// itself. A primitive answers its builtin's prototype, a wrapper its primitive's, a
+// function and a base class Function.prototype, and a derived class the class it
+// extends. Twins: getProto in abnf/jsrtjsprint.go, jsGetProto in both
+// *-interpreter.abnf.
 function jvGetProto(v) {
     if (jvUndefOrNull(v)) { jbRaise("TypeError: Cannot convert undefined or null to object") }
-    var none = anytype
-    none = undefined
     if (typeof v == "string") { return jvBuiltinProtoAt(1) }
     if (typeof v == "number") { return jvBuiltinProtoAt(2) }
+    if (typeof v == "boolean") { return jvBuiltinProtoAt(6) }
     if (jbIsBig(v)) { return jvBuiltinProtoAt(5) }
     if (Array.isArray(v)) {
         if (jvIsArgs(v) || v === jvBuiltinProtoAt(0)) { return jvObjProto }
         return jvBuiltinProtoAt(0)
     }
-    if (!jvIsObj(v)) { return none }
+    if (!jvIsObj(v)) {
+        if (v === jvBuiltinProtoAt(7)) { return jvObjProto }
+        return jvBuiltinProtoAt(7)
+    }
     var sup = anytype
     if (jvIsClassDesc(v)) {
         sup = v["__super"]
         if (jvObjectRoot !== undefined && sup === jvObjectRoot) { return jvObjGlobal }
         if (jvIsObj(sup)) { return sup }
-        return none
+        return jvBuiltinProtoAt(7)
     }
     if (v === jvObjProto || v["__nullproto"] === true) { return null }
+    var wp = anytype
+    wp = v["__bvof"]
+    if (wp !== undefined) {
+        var wpr = jvBuiltinProtoAt(jvWrapProtoAt(wp))
+        if (v === wpr) { return jvObjProto }
+        return wpr
+    }
     var pd = anytype
     pd = v["__protoof"]
     if (pd !== undefined) {
@@ -4743,7 +4826,7 @@ function jvSetProto(o, p) {
         jvNullN = jvNullN + 1
         return o
     }
-    if (!jvIsObj(p) || p === jvObjProto || jvIsClassDesc(p) || jvIsObjectGlobal(p)) { return o }
+    if (!jvIsObj(p) || p === jvObjProto || jvIsClassDesc(p)) { return o }
     if (p["__symkey"] !== undefined) { return o }
     o["__class"] = jvProtoDesc(p)
     return o
@@ -4752,14 +4835,16 @@ function jvSetProto(o, p) {
 // The count of objects holding a non-enumerable property (jvDefineProp): while it is
 // 0 a key listing skips the __nonenum test.
 var jvNeN = 0
+// The count of objects holding an __ro or an __nc table: while it is 0 a write and a
+// delete skip the test.
+var jvAttrN = 0
 
 // Object.defineProperty(o, key, desc) for a key already in the object's own spelling:
-// a data property from desc.value, or an accessor from desc.get / desc.set. A new
-// property is enumerable only when desc says so - its name goes into the object's
-// __nonenum table, which every key listing (jvErrHide) drops - and an existing one
-// keeps its enumerability unless desc names it. `writable` and `configurable` are
-// not modelled: a later write replaces the value. Twins: jsvDefineProp in
-// abnf/jsrtjsprint.go, jsDefineKey in both *-interpreter.abnf.
+// a data property from desc.value, or an accessor from desc.get / desc.set. An
+// attribute desc does not name keeps its value on an existing property and is false
+// on a new one; a false one is the key's `true` in the object's __nonenum, __ro or
+// __nc table (jvAttrHas). Twin of jsDefineKey in js-interpreter.abnf, which states
+// the rule; jsvDefineProp in abnf/jsrtjsprint.go.
 function jvDefineProp(o, key, desc) {
     var bad = !jvIsObjLike(desc) && !jvIsCallable(desc)
     if (!bad) { bad = jbIsBig(desc) }
@@ -4773,22 +4858,52 @@ function jvDefineProp(o, key, desc) {
         if (!isAcc) { js_jsmset(o, key, js_jsmget(desc, "value")) }
         return undefined
     }
-    var ne = anytype
-    ne = o["__nonenum"]
-    var listed = js_has(o, key)
-    if (listed && ne !== undefined) { listed = ne[key] !== true }
-    if (js_has(desc, "enumerable")) { listed = !js_jsnot(js_jsmget(desc, "enumerable")) }
-    if (isAcc) { js_defprop(o, key, g, s) } else { o[key] = js_jsmget(desc, "value") }
-    if (!listed) {
-        if (ne === undefined) {
-            ne = {}
-            o["__nonenum"] = ne
-            jvNeN = jvNeN + 1
+    var exists = jvSlotHas(o, key)
+    var cur = anytype
+    cur = o[key]
+    var curAcc = jvIsAcc(cur)
+    var hasVal = js_has(desc, "value")
+    var hasW = js_has(desc, "writable")
+    var hasE = js_has(desc, "enumerable")
+    var hasC = js_has(desc, "configurable")
+    if (exists && jvAttrHas(o, "__nc", key)) {
+        var no = hasC && !js_jsnot(js_jsmget(desc, "configurable"))
+        if (hasE && !js_jsnot(js_jsmget(desc, "enumerable")) == jvAttrHas(o, "__nonenum", key)) { no = true }
+        if (curAcc) {
+            if (hasVal || hasW) { no = true }
+            if (g !== undefined && g !== cur["g"]) { no = true }
+            if (s !== undefined && s !== cur["s"]) { no = true }
+        } else if (isAcc) {
+            no = true
+        } else if (jvAttrHas(o, "__ro", key)) {
+            if (hasW && !js_jsnot(js_jsmget(desc, "writable"))) { no = true }
+            if (hasVal && !jvSameValue(js_jsmget(desc, "value"), cur)) { no = true }
         }
-        ne[key] = true
-    } else if (ne !== undefined) {
-        ne[key] = false
+        if (no) { jbRaise("TypeError: Cannot redefine property: " + jvKeyUnesc(key)) }
     }
+    if (isAcc) { js_defprop(o, key, g, s) } else if (hasVal || !exists) { o[key] = js_jsmget(desc, "value") }
+    if (hasE) { jvAttrSet(o, "__nonenum", key, js_jsnot(js_jsmget(desc, "enumerable"))) } else if (!exists) { jvAttrSet(o, "__nonenum", key, true) }
+    if (isAcc || curAcc) { jvAttrSet(o, "__ro", key, false) }
+    else if (hasW) { jvAttrSet(o, "__ro", key, js_jsnot(js_jsmget(desc, "writable"))) } else if (!exists) { jvAttrSet(o, "__ro", key, true) }
+    if (hasC) { jvAttrSet(o, "__nc", key, js_jsnot(js_jsmget(desc, "configurable"))) } else if (!exists) { jvAttrSet(o, "__nc", key, true) }
+    return undefined
+}
+function jvAttrHas(o, table, key) {
+    var t = anytype
+    t = o[table]
+    if (t === undefined) { return false }
+    return t[key] === true
+}
+function jvAttrSet(o, table, key, on) {
+    var t = anytype
+    t = o[table]
+    if (t === undefined) {
+        if (!on) { return undefined }
+        t = {}
+        o[table] = t
+        if (table == "__nonenum") { jvNeN = jvNeN + 1 } else { jvAttrN = jvAttrN + 1 }
+    }
+    t[key] = on
     return undefined
 }
 
@@ -4881,6 +4996,10 @@ function jvObjectGlobalMethod(name, args) {
             if (jvErrOwn(src, "message") === true) { out.push("message") }
         }
         var ks = jvOwnKeys(src)
+        // A non-enumerable property is in the key order too, where it was defined.
+        if (name == "getOwnPropertyNames" && jvNeN > 0 && jvIsObj(src)) {
+            if (src["__nonenum"] !== undefined) { ks = jvErrHide(src, jvIndexOrder(keysOf(src))) }
+        }
         var i = 0
         while (i < ks.length) {
             out.push(jvKeyUnesc(ks[i]))
@@ -5166,8 +5285,21 @@ function jvFallbackCall(recv, name, args) {
             fail("unknown method '" + name + "' on an instance")
         }
     }
+    // Boolean.prototype's own two (ECMA-262 20.3.3).
+    if (typeof recv == "boolean") {
+        if (name == "toString") { return recv ? "true" : "false" }
+        if (name == "valueOf") { return recv }
+    }
     var own = js_jsmget(recv, name)
     if (jvIsCallable(own)) { return jvCallT(own, recv, args) }
+    // A wrapper's methods are its primitive's.
+    if (own === undefined) {
+        if (jvIsObj(recv)) {
+            var wp = anytype
+            wp = recv["__bvof"]
+            if (wp !== undefined) { return js_jsmcall(wp, name, args) }
+        }
+    }
     if (jvIsProtoName(name)) {
         if (own === undefined) {
             if (!jvUndefOrNull(recv) && !jvNoObjProto(recv)) {
@@ -6146,12 +6278,27 @@ function js_jsbigintfn() {
     return jvBigIntFn
 }
 
+// Boolean(v) is ToBoolean; `new Boolean(v)` is a wrapper (js_jsnewclass).
+function js_jsbooleanfn() {
+    if (jvBooleanFn === undefined) { jvBooleanFn = fnMetaSet(function (v) { return !js_jsnot(v) }, "Boolean", 1) }
+    return jvBooleanFn
+}
+// The Function global, for `f instanceof Function` and Function.prototype. No engine
+// here compiles source text at run time, so a call is the EvalError node raises
+// where code generation from strings is disallowed.
+function js_jsfunctionfn() {
+    if (jvFunctionFn === undefined) {
+        jvFunctionFn = fnMetaSet(function () { jbRaise("EvalError: Code generation from strings disallowed for this context") }, "Function", 1)
+    }
+    return jvFunctionFn
+}
+
 // Number(v): the only way back OUT of a BigInt, since unary '+' refuses it.
 function js_jsnumberfn() {
     if (jvNumberFn === undefined) {
         jvNumberFn = function(v) {
             if (jbIsBig(v)) { return jbToNum(v) }
-            if (v === undefined) { return NaN }
+            if (v === undefined) { return arguments.length == 0 ? 0 : NaN }
             return jvToNumber(v)
         }
     }
@@ -6464,6 +6611,14 @@ function jsonHIsObj(v) {
     if (jbIsBig(v)) { return false }
     if (v["__symkey"] !== undefined) { return false }
     return v["__isclass"] !== true
+}
+function jsonHUnbox(o) {
+    var wp = anytype
+    wp = o["__bvof"]
+    if (wp === undefined) { return o }
+    if (typeof wp == "number") { return jvToNumber(o) }
+    if (typeof wp == "string") { return jvStr(o) }
+    return wp
 }
 function jsonHStr(v) { return jvStr(v) }
 function jsonHParseNum(s) { return parseFloat(s) }
