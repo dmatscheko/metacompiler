@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-627** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-628** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -112,14 +112,11 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-622 kotlin: `Char(97)`, `sequence {}` builder, implicit-receiver operator calls, split with a named limit, formatter class names · P2 · KT · IN PROGRESS (KT worker, round 3) [V spec-only]
-`Char(97)` → interp "call of a non function: Char", compiled "call of a non function value" (JVM `a`). `sequence { yield(1) }`
-→ "unknown name: sequence" in all engines (the floor's generators can carry it). Inside `fun Int.f()`, an unqualified `times(2)`
-→ "unknown name: times". Compiled only: `"a,b;c:d".split(",", ";", ":", limit = 2)` loses a delimiter (orderArgs puts the named
-value over a positional slot). Formatter mismatch names: `mapOf(1 to 2)` → ours `java.util.LinkedHashMap` (JVM
-`java.util.Collections$SingletonMap`; likewise setOf(x) SingletonSet, emptySet()/emptyMap() EmptySet/EmptyMap, hashSetOf HashSet,
-sortedSetOf TreeSet); an Array argument → ours `ArrayList` (JVM `[Ljava.lang.Integer;`, `[I`). `String.CASE_INSENSITIVE_ORDER` and
-`java.util.Random(1)` unknown. Oracle: the kotlin-stdlib jar driven from java.
+### T-627 kotlin: sortedMapOf unsorted; Array.copyOf(); extensions not dispatched by receiver type; `import java.util.Random` · P1 · KT · OPEN [V spec-only]
+`sortedMapOf(2 to "b", 1 to "a")` → `{2=b, 1=a}` in all engines (TreeMap `{1=a, 2=b}`). `arrayOf(1).copyOf()` → interp and llvm.Run
+"unknown list method: copyOf". With `fun Int.split(x: Int, y: Int, limit: Int) = x` declared, `"a,b;c:d".split(",", ";", ":", limit =
+2)` → interp and llvm.Run `,` (the Int extension captures a String call; Kotlin calls String.split → `[a, b;c:d]`). `import
+java.util.Random` then `Random(1)` → "unresolved import" (the qualified spelling works).
 
 ---
 
@@ -734,6 +731,7 @@ T-601 go: typed constant folding; named constant string index; float32 constant 
 T-618 java/kotlin regex: inline flags `(?i)` and atomic groups `(?>..)` under the J dialect — DONE 9a2177eb (java and kotlin; plus line terminators, Unicode case folding, (?U), comments mode)
 T-608 java regex: forward `\k<name>`; `\X \G \N{..} \b{g}` and \p scripts/blocks; PatternSyntaxException getters — DONE 9a2177eb 60e91955 (forward \k error, \G, \X, \b{g}, every \p family from java's own tables, PSE getters; the jxGraphNext bound from the security review fixed); \N{name} DECLINED: needs Unicode's ~35,000-name table (hundreds of KB) in every java/kotlin native binary for a rarely used escape
 T-621 swift: generic type arguments are not applied; static members on a generic parameter; non-ASCII operators — DONE 6d5d390a (generic arguments per instance incl. inference from context, M.zero, non-ASCII operators, enum metatype init; plus 13 swiftc-checked fixes)
+T-622 kotlin: `Char(97)`, `sequence {}` builder, implicit-receiver operator calls, split with a named limit, formatter class names — DONE b75ef2dd fc105dae (the compiled split-with-named-limit item did not reproduce; an interp-only variant was fixed)
 
 # Settled — do not re-open
 
