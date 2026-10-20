@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-678** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-679** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -117,15 +117,10 @@ not change the renderer.
 
 # GO — Go  (oracle: `go run`)
 
-### T-672 go: `*t = *o` through a pointer; zero embedded struct field is nil; typed package constants print as numbers · P2 · GO · IN PROGRESS (GO worker, round 10) [V]
-`func (t *T) set(o *T) { *t = *o }` copies nothing in any engine (go prints 5, ours 0); `*p = T{7}` works. A zero-valued embedded
-struct field is nil instead of a zero instance, so `S{}` has none of the embedded type's promoted methods. `fmt.Println(time.March,
-reflect.Map)` → `3 21` in both halves (go `March map`); `time.Month(4)` and declared vars print correctly.
-
-### T-673 go: fmt.Sscanf / Scan family; `%T` of a func and of os.Stdin/os.Stdout; `*(v.p.(*int)) = 5` does not parse · P3 · GO · IN PROGRESS (GO worker, round 10) [V]
-`fmt.Sscanf` / `Sscan` / `Fscan` → "unknown method 'Sscanf'" (all engines). `fmt.Printf("%T", f)` for a func → `%!T(0x…)` (go
-`func(int) int`); `%T` of os.Stdin → not `*os.File`, and `r.(io.Reader)` on it misreports. `*(v.p.(*int)) = 5` is a parse error in
-both grammars.
+### T-678 go: `&r.i` / `&xs[1]` give the value, not a pointer; anonymous struct with embedded pointer; `%T` of a host func · P2 · GO · OPEN [V]
+`func set(p *int){*p=7}; set(&r.i)` leaves `r.i` 0 in both grammars (go 7), and `fmt.Sscan("5", &r.i)` → "type not a pointer: int";
+`&xs[1]` likewise. `struct{ *strings.Reader }{...}` → interpreter "unknown name: struct". `fmt.Printf("%T", fmt.Println)` →
+`%!T(...)` (go `func(...interface {}) (int, error)`). Check that `*(a).b = v` parses (the `*(expr)` target rule may shadow it).
 
 ---
 
@@ -775,6 +770,8 @@ T-632 go: regexp (RE2 dialect), encoding/json and reflect, real stdin — DONE 3
 T-671 php: promoted constructor parameters declare no typed property; typed-property TypeError prints `self` — DONE b901ad9e 6b65aa72 (promoted params declare typed properties, self/parent resolved per zend_compile_single_typename, typed trait statics in the interpreter, promoted null default is the compile error; spec-only from php-src)
 T-669 js: primitive wrapper objects (`new Number(7)`, `Object(7)`, `({}).valueOf.call(7)`) — DONE 0c010f6d (wrapper objects via __bvof in all engines; Object is a real function; Boolean a builtin — 4 legs = node)
 T-670 js: defineProperty writable/configurable; getOwnPropertyNames of non-enumerables; Function/Boolean.prototype; String of a null-proto object — DONE 0c010f6d (writable/enumerable/configurable defaults, Cannot redefine property, getOwnPropertyNames order, Function/Boolean.prototype, null-proto ToPrimitive TypeError — 4 legs = node; follow-ups T-676/T-677)
+T-672 go: `*t = *o` through a pointer; zero embedded struct field is nil; typed package constants print as numbers — DONE 2a3ded12 (struct store through pointers, zero embedded struct instances, promoted field writes, typed package constants and folded typed constants — 4 legs = go run)
+T-673 go: fmt.Sscanf / Scan family; `%T` of a func and of os.Stdin/os.Stdout; `*(v.p.(*int)) = 5` does not parse — DONE 84120661 (fmt Scan/Sscan/Fscan families ported from fmt/scan.go, %T of funcs, *os.File std streams, qualified interface assertions, *(expr) = v — 4 legs = go run; follow-up T-678)
 
 # Settled — do not re-open
 
