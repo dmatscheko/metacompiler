@@ -3435,7 +3435,8 @@ function goTyWord(ty) {
 // BOXES, exactly as a `var d float64 = 1` declaration does - without it a
 // float64 struct field assigned a plain 1 divides as an integer.
 function goAdoptText(ty, v) {
-    if (!goNumeric(v)) { return v }
+    if (typeof v != "number") { return v }
+    var isF = floIs(v)
     var k = "$" + ty
     var b = anytype
     b = GO_ADOPT_BITS[k]
@@ -3444,6 +3445,14 @@ function goAdoptText(ty, v) {
         GO_ADOPT_BITS[k] = b
     }
     if (b === null) { return v }
+    // A float box here is an untyped float constant (go rejects any other float
+    // in a slot that is not float64): a float32 slot rounds it, an integer slot
+    // takes its integral value.
+    if (isF) {
+        if (b.w < 0) { return js_gflo32(v) }
+        if (b.w == 0) { return v }
+        return sintConv(floNum(v), b.w, b.u)
+    }
     if (b.w > 0) { return sintConv(v, b.w, b.u) }
     if (b.w == 0) { return flo(goNum(v), 1) }
     // A float32 SLOT rounds what is put in it - a struct field, a []float32
@@ -3454,9 +3463,12 @@ function goAdoptText(ty, v) {
 // What goAdoptText does with a type text, memoized per text in GO_ADOPT_BITS
 // because every appended element and every typed store asks it: an integer
 // type's goTyBits, w 0 for float64 and -1 for float32, null for anything else.
+// A defined type answers for the number type it is defined over (GO_DEFNUM).
 var GO_ADOPT_BITS = {}
+var GO_DEFNUM = {}
 function goAdoptBits(ty) {
     var word = goTyWord(ty)
+    if (goHas(GO_DEFNUM, "$" + word)) { word = GO_DEFNUM["$" + word] }
     if (word == "float64") { return {w: 0, u: false} }
     if (word == "float32") { return {w: 0 - 1, u: false} }
     var b = goTyBits(word)
@@ -3464,9 +3476,23 @@ function goAdoptBits(ty) {
     return b
 }
 
+// js_godefnum(name, under): `type name under` with under a number type, emitted
+// where the declaration runs. The memo is dropped because a same-named type of
+// another scope may have answered for the name first.
+// Twin of js_godefnum in abnf/jsrtgolang.go.
+function js_godefnum(name, under) {
+    GO_DEFNUM["$" + goStrOf(name)] = goStrOf(under)
+    GO_ADOPT_BITS = {}
+    return undefined
+}
+
 // giAdoptLike applies the width the slot ALREADY carries.
 function goAdoptLike(cur, v) {
-    if (!sintIs(cur)) { return v }
+    if (!sintIs(cur)) {
+        // A float32 slot rounds what is put in it.
+        if (typeof v == "number" && goIsF32(cur)) { return js_gflo32(v) }
+        return v
+    }
     if (!goNumeric(v)) { return v }
     return sintConv(v, sintWidth(cur), sintUns(cur))
 }

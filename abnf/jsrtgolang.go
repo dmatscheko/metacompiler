@@ -1050,6 +1050,14 @@ var goDtReg = struct {
 	m map[*jsrt]map[string]*jsObject
 }{m: map[*jsrt]map[string]*jsObject{}}
 
+// goDefNum is, per runtime, the number type each defined type over one is defined
+// over (js_godefnum), by type name: giAdoptText applies it to a slot whose type
+// text names the defined type.
+var goDefNum = struct {
+	sync.Mutex
+	m map[*jsrt]map[string]string
+}{m: map[*jsrt]map[string]string{}}
+
 // goSlotBox is an element of a composite as fmt reaches it: boxed when its slot's
 // type ty is registered, so fmt calls ty's method on it. goSlotCls answers the
 // registered descriptor (nil for none) and goSlotIn boxes in it. Twins: goSlotBox
@@ -2147,19 +2155,30 @@ func goCxImag(s string) string {
 // BOXES (jsJFlo), exactly as a `var d float64 = 1` declaration does - without it
 // a float64 struct field assigned a plain 1 divides as an integer.
 func giAdoptText(rt *jsrt, ty string, v interface{}) interface{} {
-	if !giNumeric(v) {
+	_, isF := v.(jsJFlo)
+	if !isF && !giNumeric(v) {
 		return v
 	}
-	switch giTyWord(ty) {
+	word := giTyWord(ty)
+	goDefNum.Lock()
+	if un, ok := goDefNum.m[rt][word]; ok {
+		word = un
+	}
+	goDefNum.Unlock()
+	switch word {
 	case "float64":
+		if isF {
+			return v
+		}
 		return jsJFlo{f: giFloat(rt, v), sty: floGo}
 	case "float32":
 		// A float32 SLOT rounds what is put in it, which is what makes
 		// `var f float32 = 0.1; f == float32(0.1)` hold and what a struct
-		// field, a []float32 element and a float32 parameter all need.
+		// field, a []float32 element and a float32 parameter all need - and
+		// that includes the float box of an untyped float constant.
 		return jsJFlo{f: jvmFround(giFloat(rt, v)), sty: floGoF}
 	}
-	wd, un, ok := giTyBits(ty)
+	wd, un, ok := giTyBits(word)
 	if !ok {
 		return v
 	}
@@ -2182,6 +2201,11 @@ func giTyWord(ty string) string {
 
 // giAdoptLike applies the width the slot ALREADY carries.
 func giAdoptLike(rt *jsrt, cur, v interface{}) interface{} {
+	_, isF := v.(jsJFlo)
+	if f, ok := cur.(jsJFlo); ok && f.sty == floGoF && (isF || giNumeric(v)) {
+		// A float32 slot rounds what is put in it.
+		return jsJFlo{f: jvmFround(giFloat(rt, v)), sty: floGoF}
+	}
 	g, ok := cur.(jsGInt)
 	if !ok || !giNumeric(v) {
 		return v
@@ -2763,6 +2787,17 @@ func init() {
 			}
 			goDtReg.m[rt][rt.toString(cls.props["__name"])] = cls
 			goDtReg.Unlock()
+			return 0
+		}
+		// js_godefnum(name, under): `type name under` with under a number type.
+		// Twin of js_godefnum in lib/go-rt.metajs.
+		m["js_godefnum"] = func(a []uint64) uint64 {
+			goDefNum.Lock()
+			if goDefNum.m[rt] == nil {
+				goDefNum.m[rt] = map[string]string{}
+			}
+			goDefNum.m[rt][rt.toString(u(a[0]))] = rt.toString(u(a[1]))
+			goDefNum.Unlock()
 			return 0
 		}
 		m["js_godtas"] = func(a []uint64) uint64 {

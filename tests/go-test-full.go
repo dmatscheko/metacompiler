@@ -1250,6 +1250,37 @@ func s26() {
 	o.f = 1
 	check("slt24", o.f/2 == 0.5)
 	check("slt25", fmt.Sprintf("%d %v %d", xs[0], ys, m["a"]) == "0 [0 0] -128")
+
+	// A DEFINED type over a sized integer wraps at its underlying width, in a
+	// slice element (appended or made), a field and a map value, and through a
+	// chain of definitions.
+	var dn []my26
+	dn = append(dn, 100)
+	dn[0] += 100
+	dm := make([]my26, 1)
+	dm[0] = 100
+	dm[0] += 100
+	check("slt26", fmt.Sprint(dn, dm) == "[-56] [-56]")
+	var dh dhold26
+	dh.a = 100
+	dh.a += 100
+	dh.o = 250
+	dh.o += 10
+	dmp := map[string]my26{}
+	dmp["k"] = 100
+	dmp["k"] += 100
+	var do []out26
+	do = append(do, 250)
+	do[0] += 10
+	check("slt27", fmt.Sprint(dh.a, dh.o, dmp, do) == "-56 4 map[k:-56] [4]")
+}
+
+type my26 int8
+type in26 uint8
+type out26 in26
+type dhold26 struct {
+	a my26
+	o out26
 }
 
 // ===== SECTION 27: unnamed receivers, type aliases, named func types =====
@@ -1829,7 +1860,26 @@ func s35() {
 	// fmt's %v for a float32 is the same 'g' window as a float64, read at 24
 	// bits: scientific below 1e-4 and from 1e6.
 	check("f32m", fs35(fs[4]) == "1e+20" && fs35(fs[2]/1000000) == "1e-07")
+	// An untyped float constant stored into a float32 slot rounds to 24 bits:
+	// an appended or indexed slice element, a field, an array element, a map
+	// value, and an element of a defined type over float32.
+	var ap []float32
+	ap = append(ap, 0.1, 0.2)
+	mk := make([]float32, 1)
+	mk[0] = 0.1
+	check("f32n", fmt.Sprint(ap, mk) == "[0.1 0.2] [0.1]" && fs35(ap[0]+ap[1]) == "0.3" && mk[0] == 0.1)
+	pt.a = 0.1
+	var ar [2]float32
+	ar[0] = 0.1
+	mp := map[string]float32{}
+	mp["x"] = 0.1
+	check("f32o", fmt.Sprint(pt.a, ar, mp) == "0.1 [0.1 0] map[x:0.1]" && ar[0] == 0.1 && mp["x"] == 0.1)
+	var df []f35
+	df = append(df, 0.1)
+	check("f32p", fmt.Sprint(df) == "[0.1]" && float64(df[0]) == 0.10000000149011612)
 }
+
+type f35 float32
 
 type pt35 struct {
 	a float32
@@ -4256,6 +4306,14 @@ func s81() {
 	ch := make(chan float64, 1)
 	ch <- 1 << 65
 	check("ucv5", fmt.Sprint(r81(), p, ys, <-ch) == "1.8446744073709552e+19 {1.8446744073709552e+19} [-1.8446744073709552e+19] 3.6893488147419103e+19")
+	// A float constant of integral value lands in an integer slot as an integer,
+	// so the division after it is an integer division.
+	var is []int
+	is = append(is, 2.0)
+	js := []int{0}
+	js[0] = 6.0
+	var n int = 2.0
+	check("ucv6", is[0]/4 == 0 && js[0]/4 == 1 && n/4 == 0 && fmt.Sprint(is, js) == "[2] [6]")
 }
 
 type P81 struct{ F float64 }

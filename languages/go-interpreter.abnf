@@ -3539,6 +3539,14 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // why abnf/jsrtjvm.go asks jvmWidens32 rather than testing one constant.
     function gF32Res(l, r) { return isF32(l) || isF32(r) }
     function gFloRes(f, f32) { return f32 ? gFlo32(f) : gFlo(f) }
+    // An arithmetic operator with a float box on one side. Next to a sized integer
+    // the box is an untyped float constant, which go converts to that integer type
+    // (`var k int8 = 5; k / 2.0` is 2), so the operator is integer arithmetic.
+    function gFloBin(op, l, r) {
+        if (szIs(l)) { return (op == "/" || op == "%") ? gIntDivZ(op, l, r.__flo) : szArith(op, l, r.__flo) }
+        if (szIs(r)) { return (op == "/" || op == "%") ? gIntDivZ(op, l.__flo, r) : szArith(op, l.__flo, r) }
+        return gFloOp2(op, gNumF(l), gNumF(r), gF32Res(l, r))
+    }
     function gFloOp2(op, a0, b0, f32) {
         // BOTH OPERANDS CONVERT FIRST: rounding only the result is not the same
         // answer.
@@ -3553,7 +3561,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // A comparison rounds the same way, so `var f float32 = 0.1; f == 0.1` holds:
     // Go converts the untyped constant to float32 at compile time and the two are
     // then the same value.
-    function gCmpNum(v, f32) { return f32 ? coreF32Round(gNumF(v)) : gNumF(v) }
+    function gCmpNum(v, f32) {
+        var n = szIs(v) ? szNum(v) : gNumF(v)
+        return f32 ? coreF32Round(n) : n
+    }
     function gNegZeroF() { return 0 / gNegOne }
     // fmt's %v for a float32: the SAME 'g' rule as a float64, read at 24 bits.
     function gF32Str(x) {
@@ -3740,13 +3751,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // since Go concatenates with it.
     binOps["+"] = function(l, r) {
         if (isCx(l) || isCx(r)) { return cxAdd(l, r) }
-        if (isFlo(l) || isFlo(r)) { return gFloOp2("+", gNumF(l), gNumF(r), gF32Res(l, r)) }
+        if (isFlo(l) || isFlo(r)) { return gFloBin("+", l, r) }
         if (typeof l == "string" && typeof r == "string") { return goJoin(l, r) }
         if (typeof l == "string" || typeof r == "string") { return coreAddOp(l, r) }
         return szArith("+", l, r)
     }
-    binOps["-"] = function(l, r) { return (isCx(l) || isCx(r)) ? cxSub(l, r) : ((isFlo(l) || isFlo(r)) ? gFloOp2("-", gNumF(l), gNumF(r), gF32Res(l, r)) : szArith("-", l, r)) }
-    binOps["*"] = function(l, r) { return (isCx(l) || isCx(r)) ? cxMul(l, r) : ((isFlo(l) || isFlo(r)) ? gFloOp2("*", gNumF(l), gNumF(r), gF32Res(l, r)) : szArith("*", l, r)) }
+    binOps["-"] = function(l, r) { return (isCx(l) || isCx(r)) ? cxSub(l, r) : ((isFlo(l) || isFlo(r)) ? gFloBin("-", l, r) : szArith("-", l, r)) }
+    binOps["*"] = function(l, r) { return (isCx(l) || isCx(r)) ? cxMul(l, r) : ((isFlo(l) || isFlo(r)) ? gFloBin("*", l, r) : szArith("*", l, r)) }
     // INTEGER DIVISION BY ZERO IS A RECOVERABLE PANIC IN GO. szArith in
     // lib/interp-core.js raises it with `fail`, which prints and exits, so no deferred
     // recover() could catch it. The fix is deliberately GO-LOCAL rather than a change
@@ -3761,8 +3772,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (szNum(r) === 0) { goRTPanic("integer divide by zero") }
         return szArith(op, l, r)
     }
-    binOps["/"] = function(l, r) { return (isCx(l) || isCx(r)) ? cxDiv(l, r) : ((isFlo(l) || isFlo(r)) ? gFloOp2("/", gNumF(l), gNumF(r), gF32Res(l, r)) : gIntDivZ("/", l, r)) }
-    binOps["%"] = function(l, r) { return (isFlo(l) || isFlo(r)) ? gFloOp2("%", gNumF(l), gNumF(r), gF32Res(l, r)) : gIntDivZ("%", l, r) }
+    binOps["/"] = function(l, r) { return (isCx(l) || isCx(r)) ? cxDiv(l, r) : ((isFlo(l) || isFlo(r)) ? gFloBin("/", l, r) : gIntDivZ("/", l, r)) }
+    binOps["%"] = function(l, r) { return (isFlo(l) || isFlo(r)) ? gFloBin("%", l, r) : gIntDivZ("%", l, r) }
     // The four comparisons unbox a float64 so it can be compared against an untyped
     // constant (x > 2 with x a float64), and go through szCmp when either side is a
     // sized integer - an unsigned one has to compare UNSIGNED, so uint64max > 0.
@@ -4393,6 +4404,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // the declared element type, and every write preserves it.
     function goAdoptLike(cur, v) {
         if (szIs(cur) && (typeof v == "number" || szIs(v))) { return szConv(v, cur.w, cur.u) }
+        // A float32 slot rounds what is put in it.
+        if (isF32(cur) && (typeof v == "number" || szIs(v) || isFlo(v))) { return gFlo32(szIs(v) ? szNum(v) : gNumF(v)) }
         return v
     }
     // One map-literal KEY: the ordinary key thunk, or an elided brace group built
@@ -5072,6 +5085,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (isFloatTy(ty) && (typeof v == "number" || szIs(v))) { return gFlo(szNum(v)) }
         var it = goIntTy(w)
         if (it != null && (typeof v == "number" || szIs(v))) { return szConv(v, it.w, it.u) }
+        // A float box in an integer slot is an untyped float constant of integral
+        // value (go rejects any other float there): `var n int = 2.0` holds 2.
+        if (it != null && isFlo(v)) { return szConv(v.__flo, it.w, it.u) }
         return v
     }
     // goAssignAdopt's conversion (go-constfold.js). Twin of goAdoptThunk in

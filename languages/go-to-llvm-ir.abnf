@@ -6185,7 +6185,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             // `var x pkga.L` resolve the same way the unqualified form does inside the
             // package. Both keys, so every existing flat reader is unchanged.
             if (curPkgName != null) { definedUnder[sKey(curPkgName, dName)] = dUnder }
-            return goEzLocal(function(b) { return declConv(b, dName, dUnder) }, dName)
+            return goEzLocal(function(b) { return declConv(declDefNum(b, dName), dName, dUnder) }, dName)
         }
         return goEzLocal(makeStructStmt(items), items[0])
     }
@@ -6697,6 +6697,16 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
     }
 
+    // A defined type over a number type tells the runtime what it is defined over
+    // (js_godefnum): a slice header, struct field or map records the element type by
+    // its NAME, and a value stored there must take the underlying width.
+    function declDefNum(b, name) {
+        var ut = resolveDefined(name)
+        if (isFloatTy(goTyWord(ut)) || goIntTy(goTyWord(ut)) != null) {
+            callExt(b, "js_godefnum", [emitStr(b, name), emitStr(b, goTyWord(ut))])
+        }
+        return b
+    }
     // Binds `name` to the one-argument CONVERSION to type text `ty` (js_goconv, the
     // runtime mirror of the interpreter's goConvert). Used both for the predeclared
     // spellings - int(x), string(r), ... - and for a defined type (type Celsius float64),
