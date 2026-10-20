@@ -157,7 +157,7 @@ appending to a nil []int → 1,2,4,8,...,512,848,1280; for []byte from 8/16/32).
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-631 swift: interp runs a metatype init twice; `is T` with a metatype-bound T; `Int?(5)`; generic enum type(of:); Set returns · P1 · SW · OPEN [V]
+### T-631 swift: interp runs a metatype init twice; `is T` with a metatype-bound T; `Int?(5)`; generic enum type(of:); Set returns · P1 · SW · IN PROGRESS (SW worker, round 10) [V]
 `func build<M: Makes>(_ t: M.Type) -> M { t.init(n: 4) }` with a counter in `init(n:)` → interp 2, llvm.Run/native/swiftc 1 (the
 interpreter runs the initializer twice — P1). `func isa<T>(_ a: Any, _ t: T.Type) -> Bool { a is T }; isa(box, Box<Double>.self)` → false
 (swiftc true); `as? T` likewise, `cast(any, ...)!` traps. `Int?(5)` → interp "call of a non-function value", compiled "call of a non
