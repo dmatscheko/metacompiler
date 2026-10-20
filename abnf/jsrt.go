@@ -624,6 +624,10 @@ type jsrt struct {
 	// promFn is the one `Promise` global value, interned so that `Promise ===
 	// Promise` holds and the statics can be recognized by identity.
 	promFn *hostFunc
+	// jsGlobals are a js program's builtin global functions by name (Number,
+	// Array, Object, ...), as the grammar declared them: `(7).constructor` answers
+	// the program's own Number (jsvBuiltinCtor).
+	jsGlobals map[string]interface{}
 }
 
 // luOutText decodes a Lua byte string (one unit per byte) as UTF-8 host text, a

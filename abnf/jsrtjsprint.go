@@ -405,7 +405,8 @@ func (rt *jsrt) jsvProtoApply(recv interface{}, name string, args []interface{})
 }
 
 // jsvWrap, jsvWrapped and jsvToObject are the primitive wrapper objects: an object
-// whose hidden __bvof slot holds a number, a string or a boolean. Twin of jsWrap /
+// whose hidden __bvof slot holds a number, a string, a boolean, a BigInt or a
+// symbol. Twin of jsWrap /
 // jsIsWrap / jsToObject in js-interpreter.abnf, which states the rule; jvWrap /
 // jvToObject in languages/lib/js-rt.metajs.
 func jsvWrap(p interface{}) *jsObject {
@@ -428,7 +429,10 @@ func jsvToObject(v interface{}) interface{} {
 	switch v.(type) {
 	case nil, jsUndefT, jsNullT:
 		return newJSObject()
-	case float64, string, bool:
+	case float64, string, bool, *jsBigInt:
+		return jsvWrap(v)
+	}
+	if jsvIsSym(v) {
 		return jsvWrap(v)
 	}
 	return v
@@ -441,6 +445,11 @@ func jsvWrapCtor(p interface{}) string {
 		return "Number"
 	case string:
 		return "String"
+	case *jsBigInt:
+		return "BigInt"
+	}
+	if jsvIsSym(p) {
+		return "Symbol"
 	}
 	return "Boolean"
 }
@@ -644,6 +653,9 @@ func (rt *jsrt) jsvDefineProp(v interface{}, key string, desc interface{}) {
 	isAcc := !isUndefOrNull(g) || !isUndefOrNull(s)
 	cur, exists := o.props[key]
 	curAcc, _ := cur.(*jsAccessor)
+	if !exists && o.props["__noext"] == true {
+		rt.bigRaise("TypeError: Cannot define property %s, object is not extensible", jsvKeyUnesc(key))
+	}
 	if exists && jsvAttrHas(o, "__nc", key) {
 		bad := has("configurable") && flag("configurable")
 		if has("enumerable") && flag("enumerable") == jsvAttrHas(o, "__hidden", key) {
@@ -698,8 +710,9 @@ func (rt *jsrt) jsvDefineProp(v interface{}, key string, desc interface{}) {
 	attr("__nc", "configurable", jsvAttrHas(o, "__nc", key))
 }
 
-// jsvAttrN counts the objects holding an __ro or an __nc set, so a program that made
-// none pays one compare per write and delete.
+// jsvAttrN counts the objects holding an __ro or an __nc set or an integrity mark
+// (jsvSetIntegrity), so a program that made none pays one compare per write and
+// delete.
 var jsvAttrN = 0
 
 // jsvAttrHas: is key in o's attribute set (__hidden, __ro or __nc)?
@@ -725,6 +738,282 @@ func jsvAttrSet(o *jsObject, set, key string, on bool) {
 	} else {
 		delete(t.props, key)
 	}
+}
+
+// Integrity levels, Object.preventExtensions / seal / freeze: __noext on an object,
+// with __nc and __ro on every own property, and the kind word of an array (20
+// frozen, 21 sealed, 22 not extensible). Every mark counts in jsvAttrN. Twin of the
+// integrity block of js-interpreter.abnf (jsSetIntegrity), which states the rule;
+// jvSetIntegrity in languages/lib/js-rt.metajs.
+func (rt *jsrt) jsvSetIntegrity(v interface{}, lv int) interface{} {
+	if jsvIsFnLike(v) {
+		rt.jsvSetIntegrity(jsvFnPropsMake(v), lv)
+		return v
+	}
+	switch o := v.(type) {
+	case *jsArray:
+		if jsvIsArgs(o) {
+			return v
+		}
+		jsvAttrN++
+		if lv > jsvArrLevel(o) {
+			o.kind = 23 - lv
+		}
+	case *jsObject:
+		if isClassDesc(o) || jsvIsSym(o) {
+			return v
+		}
+		jsvAttrN++
+		o.props["__noext"] = true
+		if lv == 1 {
+			return v
+		}
+		for _, k := range jsvErrGopn(o, jsvOwnSlotKeys(o)) {
+			jsvAttrSet(o, "__nc", k, true)
+			if _, isAcc := o.props[k].(*jsAccessor); lv == 3 && !isAcc {
+				jsvAttrSet(o, "__ro", k, true)
+			}
+		}
+	}
+	return v
+}
+
+// jsvOwnSlotKeys are o's own property keys, the non-enumerable ones included.
+func jsvOwnSlotKeys(o *jsObject) []string {
+	out := []string{}
+	for _, k := range o.keys {
+		if !jsvInternalKey(k) {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// jsvArrLevel is an array's integrity level: 3 frozen, 2 sealed, 1 not extensible.
+func jsvArrLevel(a *jsArray) int {
+	if k := a.kind & 31; k >= 20 && k <= 22 {
+		return 23 - k
+	}
+	return 0
+}
+
+// jsvIntegrity is TestIntegrityLevel as a number: 3 frozen, 2 sealed, 1 not
+// extensible, 0 none.
+func jsvIntegrity(v interface{}) int {
+	if jsvIsFnLike(v) {
+		if p := jsvFnPropsOf(v); p != nil {
+			return jsvIntegrity(p)
+		}
+		return 0
+	}
+	switch o := v.(type) {
+	case *jsArray:
+		if lv := jsvArrLevel(o); lv != 1 || len(o.elems) > 0 {
+			return lv
+		}
+		return 2
+	case *jsObject:
+		if isClassDesc(o) {
+			return 0
+		}
+		if jsvIsSym(o) {
+			return 3
+		}
+		if o.props["__noext"] != true {
+			return 0
+		}
+		lv := 3
+		for _, k := range jsvErrGopn(o, jsvOwnSlotKeys(o)) {
+			if !jsvAttrHas(o, "__nc", k) {
+				return 1
+			}
+			if _, isAcc := o.props[k].(*jsAccessor); !isAcc && !jsvAttrHas(o, "__ro", k) {
+				lv = 2
+			}
+		}
+		return lv
+	}
+	return 3
+}
+
+// jsvIsExtensible is Object.isExtensible.
+func jsvIsExtensible(v interface{}) bool {
+	switch o := v.(type) {
+	case *jsArray, *jsObject:
+		if s, isObj := o.(*jsObject); isObj && jsvIsSym(s) {
+			return false
+		}
+		return jsvIntegrity(v) == 0
+	}
+	return jsvIsFnLike(v) && jsvIntegrity(v) == 0
+}
+
+// jsvObjText is V8's rendering of the object in a refused write's message.
+func (rt *jsrt) jsvObjText(v interface{}) string {
+	o, isObj := v.(*jsObject)
+	switch {
+	case !isObj:
+		return "[object Array]"
+	case o.props["__errh"] != nil:
+		return rt.jsvString(o)
+	case jsvNoObjProto(o):
+		return "[object Object]"
+	}
+	name := ""
+	switch c := rt.jsvBuiltinCtor(o).(type) {
+	case *jsObject:
+		name, _ = c.props["__name"].(string)
+	default:
+		name = jsvFnMeta(c).name
+	}
+	if name == "" {
+		name = "Object"
+	}
+	return "#<" + name + ">"
+}
+
+func (rt *jsrt) jsvRoText(o interface{}, key string) string {
+	return "Cannot assign to read only property '" + jsvKeyUnesc(key) + "' of object '" + rt.jsvObjText(o) + "'"
+}
+
+func jsvAddText(key string) string {
+	return "Cannot add property " + jsvKeyUnesc(key) + ", object is not extensible"
+}
+
+func (rt *jsrt) jsvDelText(o interface{}, key string) string {
+	return "Cannot delete property '" + jsvKeyUnesc(key) + "' of " + rt.jsvObjText(o)
+}
+
+// jsvWriteRefusal is the TypeError text a write of v to o[key] meets under o's
+// marks, or "".
+func (rt *jsrt) jsvWriteRefusal(o interface{}, key string, v interface{}) string {
+	switch t := o.(type) {
+	case *jsArray:
+		lv := jsvArrLevel(t)
+		n := len(t.elems)
+		switch {
+		case lv == 0:
+			return ""
+		case key == "length" && lv == 3:
+			return rt.jsvRoText(o, key)
+		case key == "length" && lv == 2 && rt.toNumber(v) < float64(n):
+			return rt.jsvDelText(o, strconv.Itoa(n-1))
+		case key == "length":
+			return ""
+		}
+		if ix, isIdx := jsvArrayIndex(key); !isIdx || ix >= uint64(n) {
+			return jsvAddText(key)
+		}
+		if lv == 3 {
+			return rt.jsvRoText(o, key)
+		}
+	case *jsObject:
+		if jsvAttrHas(t, "__ro", key) {
+			return rt.jsvRoText(o, key)
+		}
+		if _, own := t.props[key]; !own && t.props["__noext"] == true && rt.findClassAccessor(t, key) == nil {
+			return jsvAddText(key)
+		}
+	}
+	return ""
+}
+
+// jsvDeleteRefusal is the TypeError text a delete of o[key] meets, or "".
+func (rt *jsrt) jsvDeleteRefusal(o interface{}, key string) string {
+	switch t := o.(type) {
+	case *jsArray:
+		if ix, isIdx := jsvArrayIndex(key); isIdx && ix < uint64(len(t.elems)) && jsvArrLevel(t) >= 2 {
+			return rt.jsvDelText(o, key)
+		}
+	case *jsObject:
+		if jsvAttrHas(t, "__nc", key) {
+			return rt.jsvDelText(o, key)
+		}
+	}
+	return ""
+}
+
+// jsvRefused is the text of the last write or delete the marks refused, which
+// js_jsrefuse raises in strict code.
+var jsvRefused = ""
+
+// jsvArrMethodRefusal is the TypeError an Array method meets on an array of
+// integrity level lv, or "" when it runs; a sealed array's shift or shrinking splice
+// first moves the elements down.
+func (rt *jsrt) jsvArrMethodRefusal(a *jsArray, name string, args []interface{}, lv int) string {
+	n := len(a.elems)
+	switch name {
+	case "push", "unshift":
+		if len(args) > 0 {
+			return jsvAddText(strconv.Itoa(n))
+		}
+		return ""
+	case "pop", "shift", "splice", "sort", "reverse", "fill", "copyWithin":
+	default:
+		return ""
+	}
+	if lv == 1 {
+		return ""
+	}
+	switch name {
+	case "pop", "shift":
+		if n == 0 {
+			if lv == 3 {
+				return rt.jsvRoText(a, "length")
+			}
+			return ""
+		}
+		if lv == 3 && name == "shift" && n > 1 {
+			return rt.jsvRoText(a, "0")
+		}
+		if name == "shift" {
+			rt.jsvArrMoveDown(a, name, args)
+		}
+		return rt.jsvDelText(a, strconv.Itoa(n-1))
+	case "splice":
+		st := n
+		if len(args) > 0 {
+			st = jsvRelIndex(rt.toNumber(args[0]), n)
+		}
+		dc := n - st
+		if len(args) > 1 {
+			dc = jsToInt(rt.toNumber(args[1]))
+		}
+		if dc < 0 {
+			dc = 0
+		}
+		if dc > n-st {
+			dc = n - st
+		}
+		ins := 0
+		if len(args) > 2 {
+			ins = len(args) - 2
+		}
+		switch {
+		case lv == 3 && dc == 0 && ins == 0:
+			return rt.jsvRoText(a, "length")
+		case lv == 3:
+			return rt.jsvRoText(a, strconv.Itoa(st))
+		case ins > dc:
+			return jsvAddText(strconv.Itoa(n))
+		case ins < dc:
+			rt.jsvArrMoveDown(a, name, args)
+			return rt.jsvDelText(a, strconv.Itoa(n-1))
+		}
+		return ""
+	}
+	if lv == 3 && n > 0 {
+		return rt.jsvRoText(a, "0")
+	}
+	return ""
+}
+
+// jsvArrMoveDown writes the elements a shrinking method leaves over a, keeping its
+// length.
+func (rt *jsrt) jsvArrMoveDown(a *jsArray, name string, args []interface{}) {
+	cp := &jsArray{elems: append([]interface{}{}, a.elems...)}
+	rt.jsvArrayMethod(cp, name, args)
+	copy(a.elems, cp.elems)
 }
 
 // jsvSameValue is SameValue: === except that NaN is itself and +0 is not -0. Twins:
@@ -1265,6 +1554,10 @@ func jsvOwnKeys(v interface{}) []string {
 		// A property defineProperty made non-enumerable (jsvDefineProp).
 		hid, _ := o.props["__hidden"].(*jsObject)
 		out := []string{}
+		// A String wrapper's own keys begin with its string's indices.
+		if p, isStr := o.props["__bvof"].(string); isStr {
+			out = jsvOwnKeys(p)
+		}
 		for _, k := range o.keys {
 			if !jsvInternalKey(k) && !(isView && jsvProtoDeclared(d, k)) && (hid == nil || hid.props[k] != true) {
 				out = append(out, k)
@@ -1336,6 +1629,17 @@ func jsvGopnKeys(v interface{}) []string {
 			}
 			if isClassDesc(o) {
 				return jsvClassOwnNames(o)
+			}
+			// A String wrapper's indices and `length`, then its own properties.
+			if p, isStr := o.props["__bvof"].(string); isStr {
+				ks := append(jsvOwnKeys(p), "length")
+				own := []string{}
+				for _, k := range o.keys {
+					if !jsvInternalKey(k) {
+						own = append(own, k)
+					}
+				}
+				return append(ks, jsvIndexOrder(own)...)
 			}
 			// A non-enumerable property is in the key order too, where it was defined.
 			if _, hid := o.props["__hidden"]; hid {
@@ -1451,6 +1755,23 @@ func jsvFnMetaSet(v interface{}, name string, length int) {
 	case *hostFunc:
 		f.meta = &jsvFnInfo{name: name, length: length}
 	}
+}
+
+// jsvNamedHost is a builtin global's host function carrying node's own `name` and
+// `length` (Number/1, RegExp/2), recorded as the program's global of that name.
+func (rt *jsrt) jsvNamedHost(name string, length int, fn func(rt *jsrt, this uint64, args []interface{}) interface{}) *hostFunc {
+	f := jsHostFunc(name, fn)
+	jsvFnMetaSet(f, name, length)
+	rt.jsvGlobalSet(name, f)
+	return f
+}
+
+// jsvGlobalSet records f as the program's builtin global of that name (jsGlobals).
+func (rt *jsrt) jsvGlobalSet(name string, f interface{}) {
+	if rt.jsGlobals == nil {
+		rt.jsGlobals = map[string]interface{}{}
+	}
+	rt.jsGlobals[name] = f
 }
 
 // jsvMethodVals -- a __class method READ AS A VALUE, one per method closure, so that
@@ -1647,6 +1968,10 @@ func (rt *jsrt) jsvHasOwn(v interface{}, k string) bool {
 		if isClassDesc(o) {
 			return jsvInNames(jsvClassOwnNames(o), k)
 		}
+		// A String wrapper owns its string's indices and length.
+		if p, isStr := o.props["__bvof"].(string); isStr && rt.jsvHasOwn(p, k) {
+			return true
+		}
 		if d, isView := o.props["__protoof"].(*jsObject); isView && (k == "constructor" || jsvProtoDeclared(d, k)) {
 			return true
 		}
@@ -1842,9 +2167,8 @@ func jsvStaticEnumKeys(cls *jsObject) []string {
 // jsvConstructorOf is what `x.constructor` answers for an object this engine built:
 // the class descriptor the instance carries, or - for an instance of a constructor
 // FUNCTION - the function itself, which js_jsnewclass's descriptor keeps under
-// __ctorfn. nil for a value with no __class at all (a plain object literal; node
-// answers Object there, which needs a prototype chain this value model does not
-// have). Twins: jvConstructorOf in languages/lib/js-rt.metajs and classCtorOf in the
+// __ctorfn. nil for a value with no __class at all (a plain object literal, which
+// jsvBuiltinCtor answers with Object). Twins: jvConstructorOf in languages/lib/js-rt.metajs and classCtorOf in the
 // two *-interpreter.abnf start scripts.
 func jsvConstructorOf(o *jsObject) (interface{}, bool) {
 	cls, ok := o.props["__class"].(*jsObject)
@@ -1867,6 +2191,50 @@ func jsvConstructorOf(o *jsObject) (interface{}, bool) {
 	return cls, true
 }
 
+// jsvBuiltinCtor is `x.constructor` where no class answers it: the program's builtin
+// global whose prototype x inherits - Number for 7, Array for [], Object for a plain
+// object - and nil where the ordinary read decides. Twin of jsBuiltinCtor in
+// js-interpreter.abnf, which states the rule; jvBuiltinCtor in
+// languages/lib/js-rt.metajs.
+func (rt *jsrt) jsvBuiltinCtor(v interface{}) interface{} {
+	name := "Object"
+	switch x := v.(type) {
+	case float64:
+		name = "Number"
+	case string:
+		name = "String"
+	case bool:
+		name = "Boolean"
+	case *jsBigInt:
+		name = "BigInt"
+	case *jsArray:
+		if !jsvIsArgs(x) {
+			name = "Array"
+		}
+	case *jsObject:
+		switch {
+		case isClassDesc(x) || jsvNoObjProto(x):
+			return nil
+		case jsvIsSym(x):
+			name = "Symbol"
+		case x.props["__class"] != nil:
+			if c, found := jsvConstructorOf(x); found {
+				return c
+			}
+		case promIs(x):
+			name = "Promise"
+		case rxIsRegexObj(x):
+			name = "RegExp"
+		}
+	default:
+		if !isCallable(v) {
+			return nil
+		}
+		name = "Function"
+	}
+	return rt.jsGlobals[name]
+}
+
 func (rt *jsrt) jsvGetKey(v interface{}, k string) interface{} {
 	// A CLASS DESCRIPTOR reads from its static namespace, exactly as js_jsvget does:
 	// rt.getMember would answer the descriptor's own slot, which is where the
@@ -1884,6 +2252,14 @@ func (rt *jsrt) jsvGetKey(v interface{}, k string) interface{} {
 	if p := jsvFnPropsOf(v); p != nil {
 		if val, found := p.props[k]; found {
 			return val
+		}
+	}
+	// A String wrapper's indices are its string's.
+	if p, isWrap := jsvWrapped(v); isWrap {
+		if ps, isStr := p.(string); isStr {
+			if _, isIdx := jsvArrayIndex(k); isIdx {
+				return rt.getMember(ps, k)
+			}
 		}
 	}
 	return rt.getMember(v, k)
@@ -2602,7 +2978,14 @@ func (rt *jsrt) jsvMethod(target interface{}, name string, args []interface{}) (
 					continue
 				}
 				for _, k := range jsvOwnKeys(src) {
-					dst.set(k, rt.jsvGetKey(src, k))
+					v := rt.jsvGetKey(src, k)
+					// Object.assign is a builtin, and so strict code: a refused write raises.
+					if jsvAttrN > 0 {
+						if msg := rt.jsvWriteRefusal(dst, k, v); msg != "" {
+							rt.bigRaise("TypeError: %s", msg)
+						}
+					}
+					dst.set(k, v)
 				}
 				for _, k := range jsvSymKeys(src) {
 					dst.set(k, rt.jsvGetKey(src, k))
@@ -2666,8 +3049,18 @@ func (rt *jsrt) jsvMethod(target interface{}, name string, args []interface{}) (
 				grp.elems = append(grp.elems, v)
 			}
 			return out, true
-		case "freeze", "seal":
-			return argAt(args, 0), true
+		case "freeze":
+			return rt.jsvSetIntegrity(argAt(args, 0), 3), true
+		case "seal":
+			return rt.jsvSetIntegrity(argAt(args, 0), 2), true
+		case "preventExtensions":
+			return rt.jsvSetIntegrity(argAt(args, 0), 1), true
+		case "isFrozen":
+			return jsvIntegrity(argAt(args, 0)) == 3, true
+		case "isSealed":
+			return jsvIntegrity(argAt(args, 0)) >= 2, true
+		case "isExtensible":
+			return jsvIsExtensible(argAt(args, 0)), true
 		case "is":
 			return rt.jsvSameValue(argAt(args, 0), argAt(args, 1)), true
 		}
@@ -2761,6 +3154,15 @@ func (rt *jsrt) jsvMethod(target interface{}, name string, args []interface{}) (
 		// A wrapper's methods are its primitive's.
 		if p, isWrap := recv.props["__bvof"]; isWrap {
 			return rt.jsvMethod(p, name, args)
+		}
+		// Symbol.prototype's toString and valueOf, which a wrapped symbol reaches.
+		if jsvIsSym(recv) {
+			switch name {
+			case "toString":
+				return rt.jsvString(recv), true
+			case "valueOf":
+				return recv, true
+			}
 		}
 	}
 	return nil, false
@@ -3613,7 +4015,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	// by js_jsmcall below - which is reached because js_get has no member of that name
 	// on a function value.
 	m["js_jsstringfn"] = func(a []uint64) uint64 {
-		return w(jsHostFunc("String", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return w(rt.jsvNamedHost("String", 1, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			if len(args) == 0 {
 				return ""
 			}
@@ -3626,7 +4028,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	// is the array of the arguments. Twins: js_jsarrayfn in languages/lib/js-rt.metajs
 	// and jsArrayFn in js-interpreter.abnf.
 	m["js_jsarrayfn"] = func(a []uint64) uint64 {
-		return w(jsHostFunc("Array", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return w(rt.jsvNamedHost("Array", 1, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			if len(args) == 1 {
 				if n, isNum := args[0].(float64); isNum {
 					if !(n >= 0 && n <= 4294967295 && n == math.Trunc(n)) {
@@ -3751,7 +4153,10 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		return symMake(desc, "__#@"+strconv.Itoa(symN)+"@")
 	})
 	jsvFnMetaSet(symbolFn, "Symbol", 0)
-	m["js_jssymbolfn"] = func(a []uint64) uint64 { return w(symbolFn) }
+	m["js_jssymbolfn"] = func(a []uint64) uint64 {
+		rt.jsvGlobalSet("Symbol", symbolFn)
+		return w(symbolFn)
+	}
 	// A STATIC METHOD of a builtin global read as a value - `typeof Object.keys`,
 	// `const k = Object.keys` - one interned function per global and name, which
 	// re-enters js_jsmcall on the global. The names are the ones js_jsmcall answers;
@@ -3979,7 +4384,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			switch hf.name {
 			case "Function":
 				return boolH(isCallable(v) || isClassDesc(v))
-			case "Number", "String", "Boolean":
+			case "Number", "String", "Boolean", "BigInt", "Symbol":
 				// A wrapper is an instance of its primitive's global; the prototype
 				// object it may itself be is not.
 				p, isWrap := jsvWrapped(v)
@@ -4044,6 +4449,14 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	// arrays are host arrays that carry no side data, so both halves blank the slot.)
 	baseDel := m["js_del"]
 	m["js_jsdel"] = func(a []uint64) uint64 {
+		// A delete the marks refuse (jsvDeleteRefusal) answers false; js_jsrefuse
+		// raises it in strict code.
+		if jsvAttrN > 0 {
+			if msg := rt.jsvDeleteRefusal(u(a[0]), rt.toString(u(a[1]))); msg != "" {
+				jsvRefused = msg
+				return boolH(false)
+			}
+		}
 		if arr, ok := u(a[0]).(*jsArray); ok {
 			if maybeNumeric(u(a[1])) {
 				idx := rt.toNumber(u(a[1]))
@@ -4067,10 +4480,6 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			}
 			return boolH(true)
 		}
-		// A non-configurable property stays (jsvDefineProp).
-		if o, isObj := u(a[0]).(*jsObject); isObj && jsvAttrN > 0 && jsvAttrHas(o, "__nc", rt.toString(u(a[1]))) {
-			return boolH(false)
-		}
 		return baseDel(a)
 	}
 
@@ -4084,6 +4493,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			return jsvToObject(argAt(args, 0))
 		})
 		jsvFnMetaSet(f, "Object", 1)
+		rt.jsvGlobalSet("Object", f)
 		// Object.prototype.toString.call(v) is the classic type probe. The root
 		// binding's `prototype` carries no methods, so this one does: the jsvProtoFns,
 		// which read their receiver from the call's `this`. __objproto marks it for
@@ -4102,6 +4512,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			return rt.truthy(argAt(args, 0))
 		})
 		jsvFnMetaSet(f, "Boolean", 1)
+		rt.jsvGlobalSet("Boolean", f)
 		return w(f)
 	}
 	// The Function global, for `f instanceof Function` and Function.prototype. No
@@ -4113,6 +4524,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			return jsUndef
 		})
 		jsvFnMetaSet(f, "Function", 1)
+		rt.jsvGlobalSet("Function", f)
 		return w(f)
 	}
 
@@ -4415,6 +4827,11 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			if m := rt.jsvFnMethod(u(a[0]), rt.toString(u(a[1]))); m != nil {
 				return w(m)
 			}
+			if rt.toString(u(a[1])) == "constructor" {
+				if c := rt.jsvBuiltinCtor(u(a[0])); c != nil {
+					return w(c)
+				}
+			}
 			if f := staticValue(u(a[0]), rt.toString(u(a[1]))); f != nil {
 				return w(f)
 			}
@@ -4453,7 +4870,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		// `e.constructor` is the CLASS an instance was built from (and, for
 		// `new F()`, the function F itself).
 		if name == "constructor" {
-			if c, found := jsvConstructorOf(recv); found {
+			if c := rt.jsvBuiltinCtor(recv); c != nil {
 				return w(c)
 			}
 		}
@@ -4532,6 +4949,11 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		}
 		if _, isArr := u(a[0]).(*jsArray); isArr && (name == "length" || jsvArrayMethods[name] || jsvObjProtoName(jsvKeyUnesc(name))) {
 			return w(true)
+		}
+		if p, isWrap := jsvWrapped(u(a[0])); isWrap {
+			if ps, isStr := p.(string); isStr && rt.jsvHasOwn(ps, name) {
+				return w(true)
+			}
 		}
 		if (jsvIsFnLike(u(a[0])) || (isObj && isClassDesc(recv))) &&
 			(name == "call" || name == "apply" || name == "bind" || name == "name" || name == "length") {
@@ -4765,7 +5187,8 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			}
 			_, marked := v.props["__errh"]
 			_, hid := v.props["__hidden"]
-			if _, isView := v.props["__protoof"]; marked || isView || hid {
+			_, strWrap := v.props["__bvof"].(string)
+			if _, isView := v.props["__protoof"]; marked || isView || hid || strWrap {
 				out := &jsArray{}
 				for _, k := range jsvOwnKeys(v) {
 					out.elems = append(out.elems, k)
@@ -4877,15 +5300,23 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		}
 		// A write onto a FUNCTION goes to the side table: neither *jsClosure nor
 		// *hostFunc has a property map.
+		// A write the attributes or the integrity level refuse answers false, and
+		// js_jsrefuse raises it in strict code (jsvWriteRefusal).
+		if jsvAttrN > 0 {
+			t := u(a[0])
+			if p := jsvFnPropsOf(t); p != nil {
+				t = p
+			}
+			if msg := rt.jsvWriteRefusal(t, rt.toString(u(a[1])), u(a[2])); msg != "" {
+				jsvRefused = msg
+				return boolH(false)
+			}
+		}
 		if p := jsvFnPropsMake(u(a[0])); p != nil {
 			p.set(rt.toString(u(a[1])), u(a[2]))
 			return 0
 		}
 		if o, isObj := u(a[0]).(*jsObject); isObj {
-			// A write to a non-writable property is dropped (jsvDefineProp).
-			if jsvAttrN > 0 && jsvAttrHas(o, "__ro", rt.toString(u(a[1]))) {
-				return 0
-			}
 			if rt.toString(u(a[1])) == "name" {
 				jsvErrNameWrite(o)
 			}
@@ -4959,7 +5390,22 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	// The `Promise` global: a function value, so `new Promise(exec)` constructs and
 	// `typeof Promise` is "function"; Promise.resolve / reject / all / race are
 	// answered by js_jsmcall (memberCall's hostFunc arm).
-	m["js_jspromfn"] = func(a []uint64) uint64 { return w(rt.promiseGlobal()) }
+	// The TypeError of the write or delete the integrity marks last refused, which
+	// the emitter raises after a refused js_jsmset / js_jsdel in strict code. Twin:
+	// js_jsrefuse in languages/lib/js-rt.metajs.
+	m["js_jsrefuse"] = func(a []uint64) uint64 {
+		if msg := jsvRefused; msg != "" {
+			jsvRefused = ""
+			rt.bigRaise("TypeError: %s", msg)
+		}
+		return 0
+	}
+	m["js_jspromfn"] = func(a []uint64) uint64 {
+		p := rt.promiseGlobal()
+		jsvFnMetaSet(p, "Promise", 1)
+		rt.jsvGlobalSet("Promise", p)
+		return w(p)
+	}
 	// Run the microtask queue to exhaustion. The emitter calls this once, after the
 	// whole script has run, which is this runtime's single event-loop turn.
 	m["js_jsdrain"] = func(a []uint64) uint64 {
@@ -5043,6 +5489,20 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		arr, ok := u(a[2]).(*jsArray)
 		if !ok {
 			rt.fail("js_jsmcall args must be an array")
+		}
+		if jsvAttrN > 0 {
+			name := rt.toString(u(a[1]))
+			if t, isArr := u(a[0]).(*jsArray); isArr {
+				if lv := jsvArrLevel(t); lv > 0 {
+					if msg := rt.jsvArrMethodRefusal(t, name, arr.elems, lv); msg != "" {
+						rt.bigRaise("TypeError: %s", msg)
+					}
+				}
+			}
+			if o, isObj := argAt(arr.elems, 0).(*jsObject); isObj && name == "setPrototypeOf" && jsvIsObjectGlobal(u(a[0])) &&
+				o.props["__noext"] == true && getProto(u(a[0]), o) != argAt(arr.elems, 1) {
+				rt.bigRaise("TypeError: %s is not extensible", rt.jsvObjText(o))
+			}
 		}
 		if jsvIsObjectGlobal(u(a[0])) && rt.toString(u(a[1])) == "getPrototypeOf" {
 			return w(getProto(u(a[0]), argAt(arr.elems, 0)))

@@ -3972,7 +3972,7 @@ NotFuncHead = :script(~~
             // slot is blanked and the length left alone, as in the interpreter half.
             var dv = callExt(p.b, "js_jsdel", [p.obj, p.key])
             emitArgPut(p.b, ref, p.obj, p.key, hUndef, hTrue)
-            return {b: p.b, v: dv}
+            return {b: emitRefused(p.b, dv), v: dv}
         }
     }
     // 'void e': evaluate and discard.
@@ -4114,8 +4114,21 @@ NotFuncHead = :script(~~
     // A store through a member reference, and the copy into the mapped parameter when
     // the reference is `arguments[k]`.
     function refMemberSet(b, ref, objV, keyV, v) {
-        callExt(b, memSetExt(), [objV, keyV, v])
+        var r = callExt(b, memSetExt(), [objV, keyV, v])
         emitArgPut(b, ref, objV, keyV, v, hFalse)
+        return emitRefused(b, r)
+    }
+    // In strict code a member write or delete the integrity marks refused - js_jsmset
+    // or js_jsdel answered false - is node's TypeError, which js_jsrefuse raises; sloppy
+    // code drops it. A strict write pays one compare.
+    function emitRefused(b, r) {
+        if (!emitStrict) { return b }
+        var failB = curF.NewBlock("")
+        var okB = curF.NewBlock("")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, r, hFalse), failB, okB)
+        callExt(failB, "js_jsrefuse", [])
+        failB.NewBr(okB)
+        return okB
     }
     var argsAliasOn = false
     // After a store of v to objV[keyV] (unmapV true: a delete of it), the copy into the
@@ -5341,7 +5354,7 @@ NotFuncHead = :script(~~
             var v = r.v
             if (op != "=") { v = emitBinOp(b, op, oldV, v) }
             if (ref.path.length == 0) { refNameSet(b, ref, setExt, v) }
-            else { refMemberSet(b, ref, p.obj, p.key, v) }
+            else { b = refMemberSet(b, ref, p.obj, p.key, v) }
             return {b: b, v: v}
         }
     }
@@ -5380,7 +5393,7 @@ NotFuncHead = :script(~~
             var r = valT(assignB)
             var ab = r.b
             if (nameV != null) { refNameSet(ab, ref, "js_scope_set", r.v) }
-            else { refMemberSet(ab, ref, objV, keyV, r.v) }
+            else { ab = refMemberSet(ab, ref, objV, keyV, r.v) }
             ab.NewBr(mergeB)
             var phi = mergeB.NewPhi([llvm.ir.NewIncoming(r.v, ab), llvm.ir.NewIncoming(oldV, fromB)])
             return {b: mergeB, v: phi}
@@ -5405,7 +5418,7 @@ NotFuncHead = :script(~~
             var og = emitOldGet(p.b, p.obj, p.key)
             b = og.b
             var oldM = callExt(b, "js_jstonumeric", [og.v])
-            refMemberSet(b, ref, p.obj, p.key, callExt(b, "js_jsstep", [oldM, oneV]))
+            b = refMemberSet(b, ref, p.obj, p.key, callExt(b, "js_jsstep", [oldM, oneV]))
             return {b: b, v: oldM}
         }
     }
@@ -5425,7 +5438,7 @@ NotFuncHead = :script(~~
             b = og.b
             var oldM = callExt(b, "js_jstonumeric", [og.v])
             var newM = callExt(b, "js_jsstep", [oldM, oneV])
-            refMemberSet(b, ref, p.obj, p.key, newM)
+            b = refMemberSet(b, ref, p.obj, p.key, newM)
             return {b: b, v: newM}
         }
     }
@@ -6090,8 +6103,7 @@ NotFuncHead = :script(~~
             return b
         }
         var p = emitRefPath(b, ref)
-        callExt(p.b, memSetExt(), [p.obj, p.key, valueH])
-        return p.b
+        return emitRefused(p.b, callExt(p.b, memSetExt(), [p.obj, p.key, valueH]))
     }
     // The store of an ASSIGNMENT pattern's name leaf: the implicit-global write, or the
     // with walk's inside a with body.

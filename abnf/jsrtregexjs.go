@@ -533,7 +533,7 @@ func init() {
 		// The global binding, so a bare RegExp(...) call and `typeof RegExp` work. The
 		// grammar declares it in the program's own scope, so no other language sees it.
 		m["js_jsxctor"] = func(a []uint64) uint64 {
-			return w(jsHostFunc("RegExp", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return w(rt.jsvNamedHost("RegExp", 2, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 				return rt.jsxCtorArgs(args)
 			}))
 		}

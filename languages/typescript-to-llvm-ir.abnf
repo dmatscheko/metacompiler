@@ -2804,7 +2804,7 @@ NotFuncHead = :script(~~
             // slot is blanked and the key dropped, so `1 in a` is false afterwards.
             var dv = callExt(p.b, "js_jsdel", [p.obj, p.key])
             emitArgPut(p.b, ref, p.obj, p.key, hUndef, hTrue)
-            return {b: p.b, v: dv}
+            return {b: emitRefused(p.b, dv), v: dv}
         }
     }
     // 'void e': evaluate and discard.
@@ -3742,7 +3742,7 @@ NotFuncHead = :script(~~
                 callExt(b, nsSetExt(ref.name, setExt), [curScopeV, nmV, v])
                 emitArgSync(b, ref.name, v)
             }
-            else { refMemberSet(b, ref, p.obj, p.key, v) }
+            else { b = refMemberSet(b, ref, p.obj, p.key, v) }
             return {b: b, v: v}
         }
     }
@@ -3782,7 +3782,7 @@ NotFuncHead = :script(~~
                 callExt(ab, nsSetExt(ref.name, "js_scope_set"), [curScopeV, anV, r.v])
                 emitArgSync(ab, ref.name, r.v)
             }
-            else { refMemberSet(ab, ref, objV, keyV, r.v) }
+            else { ab = refMemberSet(ab, ref, objV, keyV, r.v) }
             ab.NewBr(mergeB)
             var phi = mergeB.NewPhi([llvm.ir.NewIncoming(r.v, ab), llvm.ir.NewIncoming(oldV, fromB)])
             return {b: mergeB, v: phi}
@@ -3809,7 +3809,7 @@ NotFuncHead = :script(~~
             var og = emitOldGet(p.b, p.obj, p.key)
             b = og.b
             var oldM = callExt(b, "js_jstonumeric", [og.v])
-            refMemberSet(b, ref, p.obj, p.key, callExt(b, "js_jsstep", [oldM, oneV]))
+            b = refMemberSet(b, ref, p.obj, p.key, callExt(b, "js_jsstep", [oldM, oneV]))
             return {b: b, v: oldM}
         }
     }
@@ -3833,7 +3833,7 @@ NotFuncHead = :script(~~
             b = og.b
             var oldM = callExt(b, "js_jstonumeric", [og.v])
             var newM = callExt(b, "js_jsstep", [oldM, oneV])
-            refMemberSet(b, ref, p.obj, p.key, newM)
+            b = refMemberSet(b, ref, p.obj, p.key, newM)
             return {b: b, v: newM}
         }
     }
@@ -4366,8 +4366,7 @@ NotFuncHead = :script(~~
             return b
         }
         var p = emitRefPath(b, ref)
-        callExt(p.b, memSetExt(), [p.obj, p.key, valueH])
-        return p.b
+        return emitRefused(p.b, callExt(p.b, memSetExt(), [p.obj, p.key, valueH]))
     }
     function bindPattern(b, pat, valueH, declExt) {
         if (pat.dtype == "hole") { return b }
@@ -5698,8 +5697,19 @@ NotFuncHead = :script(~~
         if (argsWant && paramSeen["$" + name] === true) { callExt(b, "js_jsargsync", [curScopeV, emitStr(b, name), v]) }
     }
     function refMemberSet(b, ref, objV, keyV, v) {
-        callExt(b, memSetExt(), [objV, keyV, v])
+        var r = callExt(b, memSetExt(), [objV, keyV, v])
         emitArgPut(b, ref, objV, keyV, v, hFalse)
+        return emitRefused(b, r)
+    }
+    // See the twin of this comment in js-to-llvm-ir.abnf.
+    function emitRefused(b, r) {
+        if (!emitStrict) { return b }
+        var failB = curF.NewBlock("")
+        var okB = curF.NewBlock("")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, r, hFalse), failB, okB)
+        callExt(failB, "js_jsrefuse", [])
+        failB.NewBr(okB)
+        return okB
     }
     var argsAliasOn = false
     // After a store of v to objV[keyV] (unmapV true: a delete of it), the copy into the

@@ -5,7 +5,8 @@
 // the fourth is a Module, the one goal symbol in which 'export' may stand.
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
-//   tests/js-test-full.2.js   sections 36-43, engine agreement, generators, Error, Math
+//   tests/js-test-full.2.js   sections 36-43, 101 and 102, engine agreement, generators,
+//                             Error, Math, builtin constructors, integrity levels
 //   tests/js-test-full.3.js   sections 44-56, 58-71 and 73-100, the call/class/
 //                             private-name model, iterators, the arguments object and
 //                             the rest of the builtin surface (see its header)

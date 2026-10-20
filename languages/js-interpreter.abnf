@@ -3915,6 +3915,8 @@ NotFuncHead = :script(~~
             return ("" + n) === kk && n >= 0 && n < self.length && Math.floor(n) === n
         }
         if (self == undefined || self == null || typeof self != "object") { return false }
+        // A String wrapper owns its string's indices and length.
+        if (jsIsWrap(self) && typeof self.__bvof == "string" && jsHasOwn(self.__bvof, kk)) { return true }
         if (isClassDesc(self)) { return jsClassOwnNames(self).indexOf(kk) >= 0 }
         if (hasOwn(self, "__protoof") && (kk == "constructor" || jsProtoDeclared(self.__protoof, kk))) { return true }
         var eo = anytype // true, false, or undefined for a key jsErrOwn does not judge.
@@ -3955,8 +3957,8 @@ NotFuncHead = :script(~~
     // and Boolean.prototype are such objects too, holding 0, "" and false (ECMA-262
     // 21.1.3, 22.1.3, 20.3.3). ToPrimitive and ToString answer the primitive, a member
     // the object has no own slot for is the primitive's, and the class tag, JSON,
-    // instanceof and getPrototypeOf follow the primitive's type. A BigInt or a symbol
-    // stays unwrapped. Twins: jsvWrap / jsvToObject in abnf/jsrtjsprint.go, jvWrap /
+    // instanceof and getPrototypeOf follow the primitive's type; a BigInt and a symbol
+    // are wrapped the same way. Twins: jsvWrap / jsvToObject in abnf/jsrtjsprint.go, jvWrap /
     // jvToObject in languages/lib/js-rt.metajs.
     function jsWrap(p) {
         var o = {}
@@ -3972,14 +3974,42 @@ NotFuncHead = :script(~~
             return o
         }
         var t = typeof v
-        if (t == "number" || t == "string" || t == "boolean") { return jsWrap(v) }
+        if (t == "number" || t == "string" || t == "boolean" || isBigInt(v) || jsIsSym(v)) { return jsWrap(v) }
         return v
     }
     // The global whose prototype a wrapper of primitive p inherits from.
     function jsWrapCtor(p) {
         if (typeof p == "number") { return jsNumberFn }
         if (typeof p == "string") { return jsStringFn }
+        if (isBigInt(p)) { return jsBigIntFn }
+        if (jsIsSym(p)) { return jsSymbolFn }
         return jsBooleanFn
+    }
+    // `x.constructor` where no class answers it: the builtin global whose prototype x
+    // inherits - Number for 7, Array for [], Object for a plain literal and for
+    // Object.prototype. undefined leaves the read to the ordinary path: an own
+    // `constructor`, a class instance, a prototype view, a null-prototype object.
+    // Twins: jsvBuiltinCtor in abnf/jsrtjsprint.go, jvBuiltinCtor in
+    // languages/lib/js-rt.metajs.
+    function jsBuiltinCtor(o) {
+        if (typeof o == "string") { return jsStringFn }
+        if (typeof o == "number") { return jsNumberFn }
+        if (typeof o == "boolean") { return jsBooleanFn }
+        if (o === undefined || o === null) { return undefined }
+        if (Array.isArray(o)) { return jsIsArr(o) ? jsArrayFn : jsObjectGlobal }
+        if (typeof o == "function") { return fnOwn(o, "constructor") ? undefined : jsFunctionFn }
+        if (typeof o != "object" || isClassDesc(o) || hasOwn(o, "constructor") || hasOwn(o, "__protoof") || jsNoObjProto(o)) { return undefined }
+        if (isBigInt(o)) { return jsBigIntFn }
+        if (jsIsSym(o)) { return jsSymbolFn }
+        if (jsIsWrap(o)) { return jsWrapCtor(o.__bvof) }
+        if (o.__class != undefined) {
+            var cf = anytype // The class an instance was built from, if any.
+            cf = classCtorOf(o)
+            return cf !== undefined ? cf : jsObjectGlobal
+        }
+        if (jpIs(o)) { return jsPromiseFn }
+        if (rxIsRegexObj(o)) { return hostGlobals["RegExp"] }
+        return jsObjectGlobal
     }
     function jsOwnKeys(v) {
         var out = []
@@ -4013,6 +4043,14 @@ NotFuncHead = :script(~~
         }
         if (typeof v == "object" && v !== null && hasOwn(v, "__protoof")) { return jsProtoGopn(v) }
         if (isClassDesc(v)) { return jsClassOwnNames(v) }
+        // A String wrapper's indices and `length`, then its own properties.
+        if (jsIsWrap(v) && typeof v.__bvof == "string") {
+            var wk = ownKeys(v.__bvof)
+            wk.push("length")
+            var wo = jsIndexOrder(v.__keys)
+            for (var wi = 0; wi < wo.length; wi++) { wk.push(wo[wi]) }
+            return wk
+        }
         // A non-enumerable property is in __keys too, where it was defined.
         if (typeof v == "object" && v !== null && hasOwn(v, "__hidden")) { return jsErrGopn(v, jsIndexOrder(v.__keys)) }
         if (typeof v != "function") { return jsErrGopn(v, jsOwnKeys(v)) }
@@ -4604,7 +4642,16 @@ NotFuncHead = :script(~~
             for (var a = 1; a < args.length; a++) {
                 if (args[a] === undefined || args[a] === null) { continue }
                 var ka = jsOwnKeys(args[a])
-                for (var b = 0; b < ka.length; b++) { setMember(src, ka[b], getMember(args[a], ka[b])) }
+                for (var b = 0; b < ka.length; b++) {
+                    var av = anytype // The value copied.
+                    av = getMember(args[a], ka[b])
+                    // Object.assign is a builtin, and so strict code: a refused write raises.
+                    if (jsAttrN > 0 && typeof src == "object" && src !== null) {
+                        var ar = jsWriteRefusal(src, ka[b], av)
+                        if (ar != "") { biRaise("TypeError: " + ar) }
+                    }
+                    setMember(src, ka[b], av)
+                }
                 var sa = jsSymKeysOf(args[a])
                 for (var c = 0; c < sa.length; c++) { setMember(src, sa[c], getMember(args[a], sa[c])) }
             }
@@ -4665,7 +4712,12 @@ NotFuncHead = :script(~~
             }
             return {v: g}
         }
-        if (name == "freeze" || name == "seal") { return {v: src} }
+        if (name == "freeze") { return {v: jsSetIntegrity(src, 3)} }
+        if (name == "seal") { return {v: jsSetIntegrity(src, 2)} }
+        if (name == "preventExtensions") { return {v: jsSetIntegrity(src, 1)} }
+        if (name == "isFrozen") { return {v: jsIntegrity(src) == 3} }
+        if (name == "isSealed") { return {v: jsIntegrity(src) >= 2} }
+        if (name == "isExtensible") { return {v: jsIntegrity(src) == 0 && src !== undefined && src !== null && (typeof src == "object" || typeof src == "function") && !isBigInt(src) && !jsIsSym(src)} }
         if (name == "is") { return {v: sameValue(args[0], args[1])} }
         return null
     }
@@ -4769,6 +4821,7 @@ NotFuncHead = :script(~~
         var pt = jsTypeofVal(p)
         if (p !== null && pt != "object" && pt != "function") { biRaise("TypeError: Object prototype may only be an Object or null: " + jsStr(p)) }
         if (typeof o != "object" || Array.isArray(o) || isClassDesc(o) || hasOwn(o, "__protoof")) { return o }
+        if (o.__noext === true && p !== jsGetProto(o)) { biRaise("TypeError: " + jsObjText(o) + " is not extensible") }
         var none = anytype
         none = undefined
         o["__class"] = none
@@ -4787,8 +4840,8 @@ NotFuncHead = :script(~~
     // property and is false on a new one. The three attributes are three lists of
     // keys on the object, kept only for the false ones: __hidden (not enumerable: the
     // key stays in __keys, and ownKeys drops it), __ro (not writable: setMember drops
-    // the write, as sloppy code does) and __nc (not configurable: delete answers
-    // false, and a change other than lowering writable is node's TypeError). Twins:
+    // the write, or raises in strict code) and __nc (not configurable: delete answers
+    // false, or raises in strict code, and a change other than lowering writable is node's TypeError). Twins:
     // jsvDefineProp in abnf/jsrtjsprint.go, jvDefineProp in languages/lib/js-rt.metajs.
     function jsDefineProp(o, k, desc) {
         var ot = jsTypeofVal(o)
@@ -4817,6 +4870,7 @@ NotFuncHead = :script(~~
         var hasE = propIn("enumerable", desc)
         var hasC = propIn("configurable", desc)
         var curAcc = hasOwn(o, "__acc") && (hasOwn(o.__acc, "get:" + key) || hasOwn(o.__acc, "set:" + key))
+        if (!exists && o.__noext === true) { biRaise("TypeError: Cannot define property " + jsStr(jsKeyUnesc(key)) + ", object is not extensible") }
         if (exists && jsAttrHas(o, "__nc", key)) {
             var bad = hasC && jsTruthy(getMember(desc, "configurable"))
             if (hasE && jsTruthy(getMember(desc, "enumerable")) == jsAttrHas(o, "__hidden", key)) { bad = true }
@@ -4845,7 +4899,8 @@ NotFuncHead = :script(~~
         jsAttrSet(o, "__nc", key, hasC ? !jsTruthy(getMember(desc, "configurable")) : (!exists || jsAttrHas(o, "__nc", key)))
     }
     // The attribute lists of jsDefineKey. jsAttrN counts the objects holding an __ro or
-    // an __nc list, so a program that made none pays one compare per write and delete.
+    // an __nc list or an integrity mark (jsSetIntegrity), so a program that made none
+    // pays one compare per write and delete.
     var jsAttrN = 0
     function jsAttrHas(o, list, key) { return hasOwn(o, list) && o[list].indexOf(key) >= 0 }
     function jsAttrSet(o, list, key, on) {
@@ -4865,6 +4920,155 @@ NotFuncHead = :script(~~
         var keep = []
         for (var i = 0; i < ks.length; i++) { if (i != at) { keep.push(ks[i]) } }
         return keep
+    }
+    // ----- Integrity levels: Object.preventExtensions, seal and freeze -----
+    // preventExtensions marks an object __noext; seal also makes every own property
+    // non-configurable (__nc), and freeze every own data property read-only (__ro) too
+    // (ECMA-262 7.3.15 SetIntegrityLevel, 7.3.16 TestIntegrityLevel). An array keeps
+    // its level in its kind word instead, 20 frozen, 21 sealed and 22 not extensible,
+    // since its elements carry no attribute lists. Every mark counts in jsAttrN, so the
+    // write and delete gates stay one compare until a program makes one. A write or a
+    // delete the marks refuse is dropped in sloppy code and is node's TypeError in
+    // strict code (jsRefuse); an Array method that would break them always raises.
+    // Twins: jsvSetIntegrity and the functions below it in abnf/jsrtjsprint.go,
+    // jvSetIntegrity and the functions below it in languages/lib/js-rt.metajs.
+    function jsSetIntegrity(o, lv) {
+        // A function's own properties are its side table's (fnPropsMake).
+        if (typeof o == "function") {
+            jsSetIntegrity(fnPropsMake(o), lv)
+            return o
+        }
+        if (o === null || typeof o != "object" || isBigInt(o) || jsIsSym(o) || isClassDesc(o) || jsIsArgs(o)) { return o }
+        jsAttrN = jsAttrN + 1
+        if (Array.isArray(o)) {
+            if (lv > jsArrLevel(o)) { arrKindSet(o, 23 - lv) }
+            return o
+        }
+        scopePut(o, "__noext", true)
+        if (lv == 1 || !hasOwn(o, "__keys")) { return o }
+        var ks = jsErrGopn(o, o.__keys)
+        for (var i = 0; i < ks.length; i++) {
+            jsAttrSet(o, "__nc", ks[i], true)
+            if (lv == 3 && !jsIsAccKey(o, ks[i])) { jsAttrSet(o, "__ro", ks[i], true) }
+        }
+        return o
+    }
+    // An array's integrity level: 3 frozen, 2 sealed, 1 not extensible, 0 none.
+    function jsArrLevel(a) {
+        var k = arrKind(a) % 32
+        return (k >= 20 && k <= 22) ? 23 - k : 0
+    }
+    function jsIsAccKey(o, k) { return hasOwn(o, "__acc") && (hasOwn(o.__acc, "get:" + k) || hasOwn(o.__acc, "set:" + k)) }
+    // TestIntegrityLevel as a number: 3 frozen, 2 sealed, 1 not extensible, 0 none. A
+    // primitive is all three; an array's `length` is a writable, non-configurable
+    // property, so an empty array that is not extensible is sealed, not frozen.
+    function jsIntegrity(o) {
+        if (typeof o == "function") {
+            if (fnPropsN == 0) { return 0 }
+            var fp = anytype // The function's own properties, if any were made.
+            fp = fnPropsOf(o)
+            return (fp === undefined) ? 0 : jsIntegrity(fp)
+        }
+        if (isClassDesc(o)) { return 0 }
+        if (o === undefined || o === null || typeof o != "object" || isBigInt(o) || jsIsSym(o)) { return 3 }
+        if (Array.isArray(o)) {
+            var al = jsArrLevel(o)
+            return (al == 1 && o.length == 0) ? 2 : al
+        }
+        if (o.__noext !== true) { return 0 }
+        var lv = 3
+        if (!hasOwn(o, "__keys")) { return lv }
+        var ks = jsErrGopn(o, o.__keys)
+        for (var i = 0; i < ks.length; i++) {
+            if (!jsAttrHas(o, "__nc", ks[i])) { return 1 }
+            if (!jsIsAccKey(o, ks[i]) && !jsAttrHas(o, "__ro", ks[i])) { lv = 2 }
+        }
+        return lv
+    }
+    // V8's rendering of the object in a refused write's message: '#<Object>', '#<Pt>'
+    // for a class instance, '[object Array]', an Error's own text.
+    function jsObjText(o) {
+        if (Array.isArray(o)) { return "[object Array]" }
+        if (hasOwn(o, "__errh")) { return jsStr(o) }
+        if (jsNoObjProto(o)) { return "[object Object]" }
+        var c = anytype // The constructor whose name V8 prints.
+        c = getMember(o, "constructor")
+        var nm = anytype
+        nm = (c === undefined || c === null) ? "" : getMember(c, "name")
+        return "#<" + (typeof nm == "string" && nm != "" ? nm : "Object") + ">"
+    }
+    function jsRoText(o, key) { return "Cannot assign to read only property '" + jsStr(jsKeyUnesc(key)) + "' of object '" + jsObjText(o) + "'" }
+    function jsAddText(key) { return "Cannot add property " + jsStr(jsKeyUnesc(key)) + ", object is not extensible" }
+    function jsDelText(o, key) { return "Cannot delete property '" + jsStr(jsKeyUnesc(key)) + "' of " + jsObjText(o) }
+    // The TypeError text a write of v to o[k] meets under o's marks, or "".
+    function jsWriteRefusal(o, k, v) {
+        var key = "" + k
+        if (Array.isArray(o)) {
+            var lv = jsArrLevel(o)
+            if (lv == 0) { return "" }
+            if (key === "length") {
+                if (lv == 3) { return jsRoText(o, key) }
+                if (lv == 2 && jsToNum(v) < o.length) { return jsDelText(o, "" + (o.length - 1)) }
+                return ""
+            }
+            var ix = jsArrayIndex(key)
+            if (ix < 0 || ix >= o.length) { return jsAddText(key) }
+            return (lv == 3) ? jsRoText(o, key) : ""
+        }
+        if (jsAttrHas(o, "__ro", key)) { return jsRoText(o, key) }
+        if (o.__noext === true && !hasOwn(o, k) && !jsIsAccKey(o, key)) { return jsAddText(key) }
+        return ""
+    }
+    // The TypeError text a delete of o[k] meets under o's marks, or "".
+    function jsDeleteRefusal(o, k) {
+        var key = "" + k
+        if (Array.isArray(o)) {
+            var ix = jsArrayIndex(key)
+            if (jsArrLevel(o) >= 2 && ix >= 0 && ix < o.length) { return jsDelText(o, key) }
+            return ""
+        }
+        if (jsAttrHas(o, "__nc", key)) { return jsDelText(o, key) }
+        return ""
+    }
+    // A refused write or delete: node's TypeError in strict code, nothing in sloppy.
+    function jsRefuse(text) {
+        if (strictAt(scopes)) { biRaise("TypeError: " + text) }
+    }
+    // The TypeError an Array method meets on an array of integrity level lv, or "" when
+    // it runs. A sealed array's shift or shrinking splice first moves the elements
+    // down, as the method's own writes do, and fails at the delete of the last one.
+    function jsArrMethodRefusal(a, name, args, lv) {
+        var n = a.length
+        if (name == "push" || name == "unshift") { return args.length > 0 ? jsAddText("" + n) : "" }
+        if (lv == 1 || (name != "pop" && name != "shift" && name != "splice" && name != "sort" && name != "reverse" &&
+            name != "fill" && name != "copyWithin")) { return "" }
+        if (name == "pop" || name == "shift") {
+            if (n == 0) { return (lv == 3) ? jsRoText(a, "length") : "" }
+            if (lv == 3 && name == "shift" && n > 1) { return jsRoText(a, "0") }
+            if (name == "shift") { jsArrMoveDown(a, "shift", args) }
+            return jsDelText(a, "" + (n - 1))
+        }
+        if (name == "splice") {
+            var st = (args.length > 0) ? jsRelIndex(jsArgNum(args, 0, 0), n) : n
+            var dc = (args.length > 1) ? jsnToInt(jsArgNum(args, 1, 0)) : n - st
+            if (dc < 0) { dc = 0 }
+            if (st + dc > n) { dc = n - st }
+            var ins = args.length > 2 ? args.length - 2 : 0
+            if (lv == 3) { return (dc == 0 && ins == 0) ? jsRoText(a, "length") : jsRoText(a, "" + st) }
+            if (ins > dc) { return jsAddText("" + n) }
+            if (ins < dc) {
+                jsArrMoveDown(a, "splice", args)
+                return jsDelText(a, "" + (n - 1))
+            }
+            return ""
+        }
+        return (lv == 3 && n > 0) ? jsRoText(a, "0") : ""
+    }
+    // The elements a shrinking method leaves, written over a without changing its length.
+    function jsArrMoveDown(a, name, args) {
+        var cp = a.slice()
+        jsArrayMethod(cp, name, args)
+        for (var i = 0; i < cp.length; i++) { a[i] = cp[i] }
     }
     // Object.defineProperties(o, props) and Object.create's second argument: one
     // jsDefineKey per own enumerable key of props.
@@ -5095,6 +5299,13 @@ NotFuncHead = :script(~~
         return out
     }
     function jsArrayMethod(a, name, args) {
+        if (jsAttrN > 0) {
+            var lv = jsArrLevel(a)
+            if (lv > 0) {
+                var mr = jsArrMethodRefusal(a, name, args, lv)
+                if (mr != "") { biRaise("TypeError: " + mr) }
+            }
+        }
         var n = a.length
         var cb = args[0]
         if (name == "toString") { return {v: jsJoin(a, ",")} }
@@ -5581,14 +5792,14 @@ NotFuncHead = :script(~~
         // shared host functions print Go's %v). js_jsprintfn is the compiler twin.
         "println": jsPrintln, "print": jsPrint, "printf": printf, "sprintf": sprintf,
         "parseInt": fnMetaSet(function(v, r) { return jsnParseInt(jsStr(v), jsToNum(r) | 0) }, "parseInt", 2),
-        "parseFloat": fnMetaSet(function(v) { return jsnParseFloat(jsStr(v)) }, "parseFloat", 1), "Math": jsMathObj, "String": jsStringFn,
+        "parseFloat": fnMetaSet(function(v) { return jsnParseFloat(jsStr(v)) }, "parseFloat", 1), "Math": jsMathObj, "String": fnMetaSet(jsStringFn, "String", 1),
         // BigInt(v) is ToBigInt and Number(v) is ToNumber; the latter is the only way
         // back out of a BigInt, since unary '+' refuses it.
-        "BigInt": jsBigIntFn, "Number": jsNumberFn, "Boolean": fnMetaSet(jsBooleanFn, "Boolean", 1),
-        "Function": fnMetaSet(jsFunctionFn, "Function", 1), "Object": fnMetaSet(jsObjectGlobal, "Object", 1), "Array": jsArrayFn, "JSON": jsJsonObj,
+        "BigInt": fnMetaSet(jsBigIntFn, "BigInt", 1), "Number": fnMetaSet(jsNumberFn, "Number", 1), "Boolean": fnMetaSet(jsBooleanFn, "Boolean", 1),
+        "Function": fnMetaSet(jsFunctionFn, "Function", 1), "Object": fnMetaSet(jsObjectGlobal, "Object", 1), "Array": fnMetaSet(jsArrayFn, "Array", 1), "JSON": jsJsonObj,
         // The Promise global: a function value, so `new Promise(exec)` constructs one
         // and `typeof Promise` is "function". The statics resolve through jsBuiltin.
-        "Promise": jsPromiseFn, "Symbol": jsSymbolFn,
+        "Promise": fnMetaSet(jsPromiseFn, "Promise", 1), "Symbol": fnMetaSet(jsSymbolFn, "Symbol", 0),
         // NaN and Infinity are global BINDINGS in JavaScript.
         "NaN": 0 / 0, "Infinity": 1 / 0, "undefined": undefined,
         // The top level 'this' and 'globalThis' are the SAME object, which is what
@@ -5927,11 +6138,10 @@ NotFuncHead = :script(~~
     // The value of `x.constructor` for an object this engine built: the class
     // descriptor an instance carries, or - for an instance of a constructor FUNCTION -
     // the function itself, which ctorDescriptor remembers under __ctorfn. undefined
-    // for anything with no __class at all (a plain literal; node answers Object there,
-    // which needs a prototype chain this value model does not have). The descriptor
-    // Object.create files for a plain prototype object is no class, so the nearest
-    // class above it answers - unless that object, or one below the class, holds an
-    // own `constructor` (`H.prototype.constructor = H`).
+    // for anything with no __class at all (a plain literal, which jsBuiltinCtor answers
+    // with Object). The descriptor Object.create files for a plain prototype object is
+    // no class, so the nearest class above it answers - unless that object, or one
+    // below the class, holds an own `constructor` (`H.prototype.constructor = H`).
     function classCtorOf(o) {
         var cl = anytype // A class descriptor, or absent.
         cl = o.__class
@@ -6052,6 +6262,11 @@ NotFuncHead = :script(~~
         }
         // An arguments object's `length` is its own slot (jsIsArgs).
         if (argsWant && k === "length" && jsIsArgs(o)) { return jsArgsLen(o) }
+        if (k === "constructor") {
+            var bc = anytype // The builtin global, or undefined for the ordinary read.
+            bc = jsBuiltinCtor(o)
+            if (bc !== undefined) { return bc }
+        }
         if (k === "prototype") {
             var bp = anytype // The prototype object, or undefined for a non-callable.
             bp = protoOf(o)
@@ -6567,6 +6782,10 @@ NotFuncHead = :script(~~
             // one answer for the read, the key list and getOwnPropertyNames.
             if (k === "name" || k === "length") { return }
             var fp = fnPropsMake(o)
+            if (jsAttrN > 0) {
+                var fr = jsWriteRefusal(fp, k, v)
+                if (fr != "") { jsRefuse(fr); return }
+            }
             scopePut(fp, "" + k, v)
             trackKey(fp, "" + k)
             return
@@ -6583,8 +6802,12 @@ NotFuncHead = :script(~~
         // (jsIsArgs): the elements stay as they are...
         if (argsWant && k === "length" && jsIsArgs(o) && typeof v == "number" && v >= 0 && Math.floor(v) === v &&
             v < 67108864) { arrKindSet(o, 19 + 32 * v); return }
-        // A write to a non-writable property is dropped (jsDefineKey).
-        if (jsAttrN > 0 && typeof o == "object" && o !== null && jsAttrHas(o, "__ro", "" + k)) { return }
+        // A write the property attributes or the integrity level refuse (jsDefineKey,
+        // jsSetIntegrity).
+        if (jsAttrN > 0 && typeof o == "object" && o !== null) {
+            var wr = jsWriteRefusal(o, k, v)
+            if (wr != "") { jsRefuse(wr); return }
+        }
         scopePut(o, k, v)
         trackKey(o, k) // Keep the object's for-in key list up to date.
         // ...and a value that is no array length resizes it as an array write does.
@@ -6719,13 +6942,15 @@ NotFuncHead = :script(~~
             return a
         }
         if (hasOwn(v, "__keys")) {
-            if (hasOwn(v, "__hidden")) {
-                var shown = []
-                var ks = v["__keys"]
-                for (var h = 0; h < ks.length; h++) { if (v.__hidden.indexOf(ks[h]) < 0) { shown.push(ks[h]) } }
-                return jsIndexOrder(shown)
+            var shown = []
+            // A String wrapper's own keys begin with its string's indices (ECMA-262
+            // 10.4.3.3, StringExoticObject [[OwnPropertyKeys]]).
+            if (typeof v.__bvof == "string") { shown = ownKeys(v.__bvof) }
+            var ks = v["__keys"]
+            for (var h = 0; h < ks.length; h++) {
+                if (!hasOwn(v, "__hidden") || v.__hidden.indexOf(ks[h]) < 0) { shown.push(ks[h]) }
             }
-            return jsIndexOrder(v["__keys"])
+            return jsIndexOrder(shown)
         }
         // A FUNCTION enumerates the own properties written onto it, which node reports
         // and this engine keeps in a side table.
@@ -7816,7 +8041,7 @@ NotFuncHead = :script(~~
     }
     // new RegExp(src, flags) and RegExp(src, flags): the same construction with the flags
     // arriving at run time instead of at parse time.
-    scopePut(hostGlobals, "RegExp", function() {
+    scopePut(hostGlobals, "RegExp", fnMetaSet(function() {
         var a0 = (arguments.length > 0) ? arguments[0] : ""
         var src = ""
         var fl = ""
@@ -7825,7 +8050,7 @@ NotFuncHead = :script(~~
         else { src = "" + a0 }
         if (arguments.length > 1 && arguments[1] != undefined && arguments[1] != null) { fl = "" + arguments[1] }
         return mkRegex(src, jsReCanon(fl))
-    })
+    }, "RegExp", 2))
 
     // ----- the Error hierarchy ---------------------------------------------
     //
@@ -8134,6 +8359,7 @@ NotFuncHead = :script(~~
         if (typeof o == "function") { return fnOwn(o, "" + k) }
         if (argsWant && jsIsArgs(o)) { return jsArgsHas(o, k) }
         if (Array.isArray(o)) { var n = k - 0; return n >= 0 && n < o.length }
+        if (jsIsWrap(o) && typeof o.__bvof == "string" && jsHasOwn(o.__bvof, k)) { return true }
         // `"m" in C` asks the STATIC namespace and nothing else: the descriptor's own
         // slots are C's instance methods, which node does not report as properties of
         // the constructor.
@@ -8194,7 +8420,7 @@ NotFuncHead = :script(~~
         if (typeof v != "object") { return false }
         // A wrapper is an instance of its primitive's global; the prototype object it
         // may itself be is not.
-        if (jsIsWrap(v) && (cls === jsNumberFn || cls === jsStringFn || cls === jsBooleanFn)) {
+        if (jsIsWrap(v) && (cls === jsNumberFn || cls === jsStringFn || cls === jsBooleanFn || cls === jsBigIntFn || cls === jsSymbolFn)) {
             return jsWrapCtor(v.__bvof) === cls && v !== builtinProto(cls)
         }
         // A CONSTRUCTOR FUNCTION on the right: its instances carry the synthetic
@@ -8250,8 +8476,14 @@ NotFuncHead = :script(~~
         return function() {
             if (ref.path.length == 0) { return true } // 'delete x' on a variable: a sloppy-mode no-op.
             var p = resolveRef(ref)
-            // A non-configurable property stays (jsDefineKey).
-            if (jsAttrN > 0 && typeof p.obj == "object" && p.obj !== null && jsAttrHas(p.obj, "__nc", "" + p.key)) { return false }
+            // A non-configurable property stays (jsDefineKey, jsSetIntegrity).
+            if (jsAttrN > 0 && typeof p.obj == "object" && p.obj !== null) {
+                var dr = jsDeleteRefusal(p.obj, p.key)
+                if (dr != "") {
+                    jsRefuse(dr)
+                    return false
+                }
+            }
             // A FUNCTION's own properties live in the side table; the map there takes
             // the delete in the object's place.
             var tgt = anytype // The object the key is dropped from.
@@ -9475,6 +9707,7 @@ NotFuncHead = :script(~~
         }
         // A wrapper's methods are its primitive's.
         if (jsIsWrap(target)) {
+            if (isBigInt(target.__bvof)) { return mcall(target.__bvof, name, args, site) }
             var wb = anytype // {v} or null.
             wb = jsBuiltin(target.__bvof, name, args)
             if (wb != null) { return wb.v }

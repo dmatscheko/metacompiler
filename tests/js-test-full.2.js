@@ -1,11 +1,12 @@
-// Full-syntax test: JavaScript - part 2 of 4, sections 36-43.
+// Full-syntax test: JavaScript - part 2 of 4, sections 36-43, 101 and 102.
 //
 // THE JS RATCHET IS FOUR FILES: as one file its -frozen interpreter leg ran into
 // ./test.sh --full's time brake (peak memory grew superlinearly with the file), and
 // the fourth is a Module, the one goal symbol in which 'export' may stand.
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
-//   tests/js-test-full.2.js   sections 36-43, engine agreement, generators, Error, Math
+//   tests/js-test-full.2.js   sections 36-43, 101 and 102, engine agreement, generators,
+//                             Error, Math, builtin constructors, integrity levels
 //   tests/js-test-full.3.js   sections 44-56, 58-71 and 73-100, the call/class/
 //                             private-name model, iterators, the arguments object and
 //                             the rest of the builtin surface (see its header)
@@ -1109,6 +1110,107 @@ function s43() {
     check("ref11", r5 === "Cannot mix BigInt and other types, use explicit conversions")
 }
 
+// ===== SECTION 101: the builtin globals' name and length, x.constructor, Object(1n), String wrapper keys =====
+// Number, String, Array, BigInt, Promise, Symbol and RegExp carry node's own name and
+// length. A value no class built answers its builtin global for `constructor` - 7 is
+// a Number, [] an Array, a plain object and Object.prototype itself an Object - and a
+// null-prototype object answers nothing. Object(v) wraps a BigInt and a symbol as it
+// wraps a number, and a String wrapper owns its string's indices and `length`, which
+// Object.keys, for-in, `in`, hasOwnProperty and getOwnPropertyNames list before its
+// other own properties. Values read off node 24.
+function s101() {
+    const gs = [Number, String, Array, BigInt, Promise, Symbol, RegExp]
+    check("nm101a", gs.map((g) => g.name + "/" + g.length).join() === "Number/1,String/1,Array/1,BigInt/1,Promise/1,Symbol/0,RegExp/2")
+    const vs = [7, "s", true, [1], {}, 2n, 1.5]
+    check("ct101b", vs[0].constructor === Number && vs[1].constructor === String && vs[2].constructor === Boolean &&
+        vs[3].constructor === Array && vs[4].constructor === Object && vs[5].constructor === BigInt &&
+        vs.map((v) => v.constructor.name).join() === "Number,String,Boolean,Array,Object,BigInt,Number")
+    check("ct101c", Object.prototype.constructor === Object && Array.prototype.constructor === Array &&
+        Number.prototype.constructor === Number && String.prototype.constructor === String &&
+        (function () {}).constructor === Function && new Number(vs[0]).constructor === Number &&
+        Object.create(null).constructor === undefined)
+    const b = Object(vs[5]), sy = Object(Symbol("q"))
+    check("wr101d", typeof b === "object" && b + 1n === 3n && b instanceof BigInt && typeof b.valueOf() === "bigint" &&
+        b.toString() === "2" && b.constructor === BigInt && typeof sy === "object" && sy.description === "q" &&
+        sy.toString() === "Symbol(q)" && typeof sy.valueOf() === "symbol" && sy instanceof Symbol && !(vs[5] instanceof BigInt))
+    const sw = new String("abc"), ks = []
+    for (const k in sw) ks.push(k)
+    sw.extra = 5
+    check("sw101e", Object.keys(sw).join() === "0,1,2,extra" && ks.join() === "0,1,2" && sw[1] === "b" && sw["2"] === "c" &&
+        sw.hasOwnProperty("1") && !sw.hasOwnProperty("3") && "0" in sw && !("5" in sw) &&
+        Object.getOwnPropertyNames(sw).join() === "0,1,2,length,extra" &&
+        JSON.stringify(Object.entries(new String("hi"))) === '[["0","h"],["1","i"]]' && Object.values(Object("xy")).join() === "x,y")
+}
+
+// ===== SECTION 102: Object.freeze, seal and preventExtensions =====
+// preventExtensions stops new properties, seal also stops deletes, freeze also stops
+// writes, each shallow and each answering its argument; isFrozen / isSealed /
+// isExtensible test the level, a primitive being frozen. Sloppy code drops a refused
+// write or delete; strict code - a "use strict" body, a class body, an Array method,
+// Object.assign - raises node's TypeError. An array keeps the same three levels, and a
+// sealed array's shift moves its elements down before it fails. Values read off node 24.
+function s102() {
+    const vals = [1, 2, 3]
+    const fz = Object.freeze({ a: vals[0], n: { m: vals[0] } })
+    fz.a = vals[1]
+    fz.b = vals[1]
+    delete fz.a
+    fz.n.m = vals[2]
+    fz.a += 5
+    check("fz102a", fz.a === 1 && fz.b === undefined && fz.n.m === 3 && Object.isFrozen(fz) && Object.isSealed(fz) &&
+        !Object.isExtensible(fz) && !Object.isFrozen(fz.n) && Object.freeze(fz) === fz && Object.keys(fz).join() === "a,n")
+    const sl = Object.seal({ x: vals[0] })
+    sl.x = vals[1]
+    sl.y = vals[2]
+    delete sl.x
+    const pe = Object.preventExtensions({ q: vals[0] })
+    pe.q = vals[2]
+    pe.r = vals[1]
+    const peq = pe.q
+    delete pe.q
+    check("sl102b", sl.x === 2 && sl.y === undefined && Object.isSealed(sl) && !Object.isFrozen(sl) && peq === 3 &&
+        pe.q === undefined && pe.r === undefined && !Object.isExtensible(pe) && Object.isFrozen(pe) &&
+        !Object.isFrozen({}) && Object.isExtensible({}) && Object.isFrozen(vals[0]) && !Object.isExtensible("s") &&
+        Object.isFrozen(Object.freeze({ get g() { return 2 } })))
+    const err = (f) => { try { f(); return "ok" } catch (e) { return e instanceof TypeError ? e.message : "?" } }
+    check("st102c", err(function () { "use strict"; fz.a = 2 }) === "Cannot assign to read only property 'a' of object '#<Object>'" &&
+        err(function () { "use strict"; fz.z = 2 }) === "Cannot add property z, object is not extensible" &&
+        err(function () { "use strict"; delete sl.x }) === "Cannot delete property 'x' of #<Object>" &&
+        err(function () { "use strict"; fz.a++ }) === "Cannot assign to read only property 'a' of object '#<Object>'" &&
+        err(function () { "use strict"; [fz.a] = [5] }) === "Cannot assign to read only property 'a' of object '#<Object>'" &&
+        err(function () { "use strict"; sl.x = 4 }) === "ok" && sl.x === 4 && err(() => { fz.a = 2 }) === "ok")
+    class P102 { constructor() { this.x = vals[0]; Object.freeze(this) } bump() { this.x = vals[1] } }
+    check("cl102d", err(() => new P102().bump()) === "Cannot assign to read only property 'x' of object '#<P102>'")
+    const fa = Object.freeze([3, 1, 2]), sa = Object.seal([3, 1, 2]), na = Object.preventExtensions([3, 1, 2])
+    fa[0] = 9
+    fa[5] = 9
+    fa.length = 1
+    sa[0] = 5
+    sa[3] = 9
+    na[1] = 7
+    na[4] = 4
+    check("ar102e", fa.join() === "3,1,2" && sa.join() === "5,1,2" && na.join() === "3,7,2" && Object.isFrozen(fa) &&
+        Object.isSealed(sa) && !Object.isFrozen(sa) && !Object.isExtensible(na) && !Object.isSealed(na) &&
+        !(delete fa[0]) && !(delete sa[1]) && delete na[0] && na[0] === undefined)
+    check("ar102f", err(() => fa.push(4)) === "Cannot add property 3, object is not extensible" &&
+        err(() => fa.pop()) === "Cannot delete property '2' of [object Array]" &&
+        err(() => fa.sort()) === "Cannot assign to read only property '0' of object '[object Array]'" &&
+        err(() => sa.unshift(0)) === "Cannot add property 3, object is not extensible" &&
+        err(() => na.push(1)) === "Cannot add property 3, object is not extensible" &&
+        err(() => sa.reverse()) === "ok" && sa.join() === "2,1,5" && na.pop() === 2 && fa.map((x) => x * 2).join() === "6,2,4" &&
+        err(function () { "use strict"; fa[0] = 1 }) === "Cannot assign to read only property '0' of object '[object Array]'" &&
+        err(function () { "use strict"; delete sa[0] }) === "Cannot delete property '0' of [object Array]")
+    const ss = Object.seal([3, 1, 2])
+    check("ar102g", err(() => ss.shift()) === "Cannot delete property '2' of [object Array]" && ss.join() === "1,2,2")
+    check("df102h", err(() => Object.defineProperty(fz, "z", { value: 1 })) === "Cannot define property z, object is not extensible" &&
+        err(() => Object.assign(fz, { a: 5 })) === "Cannot assign to read only property 'a' of object '#<Object>'" &&
+        err(() => Object.setPrototypeOf(sl, {})) === "#<Object> is not extensible" &&
+        Object.defineProperty(sl, "x", { value: 6 }).x === 6)
+    const fn = Object.freeze(function f102() {})
+    fn.x = 1
+    check("fn102i", fn.x === undefined && Object.isFrozen(fn) && !Object.isFrozen(function () {}))
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1120,6 +1222,8 @@ function main() {
     s41() // SECTION-CALL 41
     s42() // SECTION-CALL 42
     s43() // SECTION-CALL 43
+    s101() // SECTION-CALL 101
+    s102() // SECTION-CALL 102
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

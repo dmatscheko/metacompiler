@@ -4447,6 +4447,61 @@ function s94() {
     check("np94f", pmsg === "Cannot convert object to primitive value");
 }
 
+// ===== SECTION 95: the builtin globals' name and length, x.constructor, Object(1n), String wrapper keys =====
+// See SECTION 101 of tests/js-test-full.2.js. Values read off node 24.
+function s95() {
+    const gs: any[] = [Number, String, Array, BigInt, Promise, Symbol, RegExp];
+    check("nm95a", gs.map((g: any) => g.name + "/" + g.length).join() === "Number/1,String/1,Array/1,BigInt/1,Promise/1,Symbol/0,RegExp/2");
+    const vs: any[] = [7, "s", true, [1], {}, 2n];
+    check("ct95b", vs[0].constructor === Number && vs[1].constructor === String && vs[2].constructor === Boolean &&
+        vs[3].constructor === Array && vs[4].constructor === Object && vs[5].constructor === BigInt &&
+        Object.prototype.constructor === Object && Number.prototype.constructor === Number &&
+        (function () {}).constructor === Function && Object.create(null).constructor === undefined);
+    const b: any = Object(vs[5]);
+    const sy: any = Object(Symbol("q"));
+    check("wr95c", typeof b === "object" && b + 1n === 3n && b instanceof BigInt && typeof b.valueOf() === "bigint" &&
+        b.toString() === "2" && typeof sy === "object" && sy.description === "q" && typeof sy.valueOf() === "symbol");
+    const sw: any = new String("abc");
+    const ks: string[] = [];
+    for (const k in sw) ks.push(k);
+    sw.extra = 5;
+    check("sw95d", Object.keys(sw).join() === "0,1,2,extra" && ks.join() === "0,1,2" && sw[1] === "b" &&
+        sw.hasOwnProperty("1") && !sw.hasOwnProperty("3") && "0" in sw && Object.getOwnPropertyNames(sw).join() === "0,1,2,length,extra" &&
+        JSON.stringify(Object.entries(new String("hi"))) === '[["0","h"],["1","i"]]');
+}
+
+// ===== SECTION 96: Object.freeze, seal and preventExtensions =====
+// See SECTION 102 of tests/js-test-full.2.js. Values read off node 24.
+class P96 {
+    x: number;
+    constructor(v: number) { this.x = v; Object.freeze(this); }
+    bump(): void { this.x = this.x + 1; }
+}
+function s96() {
+    const vals: number[] = [1, 2, 3];
+    const fz: any = Object.freeze({ a: vals[0] });
+    const sl: any = Object.seal({ x: vals[0] });
+    const pe: any = Object.preventExtensions({ q: vals[0] });
+    const err = (f: () => void): string => { try { f(); return "ok"; } catch (e) { return e instanceof TypeError ? e.message : "?"; } };
+    check("fz96a", Object.isFrozen(fz) && !Object.isExtensible(fz) && Object.isSealed(sl) && !Object.isFrozen(sl) &&
+        !Object.isExtensible(pe) && !Object.isSealed(pe) && Object.isFrozen(vals[0]) && !Object.isFrozen({}) &&
+        err(function () { "use strict"; sl.x = vals[1]; }) === "ok" && sl.x === 2 && fz.a === 1);
+    check("st96b", err(function () { "use strict"; fz.a = 2; }) === "Cannot assign to read only property 'a' of object '#<Object>'" &&
+        err(function () { "use strict"; fz.z = 2; }) === "Cannot add property z, object is not extensible" &&
+        err(function () { "use strict"; delete sl.x; }) === "Cannot delete property 'x' of #<Object>" &&
+        err(function () { "use strict"; pe.r = 2; }) === "Cannot add property r, object is not extensible" &&
+        err(() => new P96(vals[0]).bump()) === "Cannot assign to read only property 'x' of object '#<P96>'" &&
+        err(() => Object.assign(fz, { a: 5 })) === "Cannot assign to read only property 'a' of object '#<Object>'");
+    const fa: any = Object.freeze([3, 1, 2]);
+    const sa: any = Object.seal([3, 1, 2]);
+    check("ar96c", Object.isFrozen(fa) && Object.isSealed(sa) &&
+        err(() => fa.push(4)) === "Cannot add property 3, object is not extensible" &&
+        err(() => fa.pop()) === "Cannot delete property '2' of [object Array]" &&
+        err(() => sa.reverse()) === "ok" && sa.join() === "2,1,3" && fa.join() === "3,1,2" &&
+        err(function () { "use strict"; sa[3] = 9; }) === "Cannot add property 3, object is not extensible" &&
+        err(function () { "use strict"; fa[0] = 1; }) === "Cannot assign to read only property '0' of object '[object Array]'");
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -4544,6 +4599,8 @@ function main(): number {
     s92(); // SECTION-CALL 92
     s93(); // SECTION-CALL 93
     s94(); // SECTION-CALL 94
+    s95(); // SECTION-CALL 95
+    s96(); // SECTION-CALL 96
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

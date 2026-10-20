@@ -1180,6 +1180,15 @@ function js_jsdel(o, key) {
             }
         }
     }
+    // A delete the marks refuse (jvDeleteRefusal) answers false; js_jsrefuse raises
+    // it in strict code.
+    if (jvAttrN > 0) {
+        var dr = jvDeleteRefusal(o, key)
+        if (dr != "") {
+            jvRefused = dr
+            return false
+        }
+    }
     if (Array.isArray(o)) {
         var idx = jvToNumber(key)
         if (idx === Math.trunc(idx)) {
@@ -1195,10 +1204,6 @@ function js_jsdel(o, key) {
         if (fp !== undefined) { delKey(fp, jvStr(key)) }
     }
     if (jvIsObj(o)) {
-        // A non-configurable property stays (jvDefineProp).
-        if (jvAttrN > 0) {
-            if (jvAttrHas(o, "__nc", jvStr(key))) { return false }
-        }
         if (o === jvMathObj) { delKey(jvMathHid, jvStr(key)) }
         delKey(o, jvStr(key))
     }
@@ -1375,7 +1380,7 @@ function jvStoredKeys(o) {
         pd = o["__protoof"]
         if (pd !== undefined) { return jvViewKeys(o, pd) }
     }
-    return jvEnumKeys(o, jvIndexOrder(keysOf(o)))
+    return jvEnumKeys(o, jvIndexOrder(jvWrapKeys(o)))
 }
 // The own enumerable keys of the prototype view of descriptor d: its declared
 // methods and accessors are not enumerable (jvProtoDeclared).
@@ -1439,6 +1444,14 @@ function jvHasOwn(self, k) {
         return jvIndexIn(kk, self.length)
     }
     if (!jvIsObj(self)) { return false }
+    // A String wrapper owns its string's indices and length.
+    if (jvStrWrapN > 0) {
+        var wp = anytype
+        wp = self["__bvof"]
+        if (typeof wp == "string") {
+            if (jvHasOwn(wp, kk)) { return true }
+        }
+    }
     if (jvClsN > 0) {
         if (jvIsClassDesc(self)) { return jvInNames(jvClassOwnNames(self), kk) }
     }
@@ -1574,8 +1587,8 @@ function jvStaticEnumKeys(cls) {
 // What `x.constructor` answers for an object this engine built: the class descriptor
 // the instance carries, or - for an instance of a constructor FUNCTION - the function
 // itself, which jvCtorDesc remembers under __ctorfn. undefined for a value with no
-// __class at all (a plain object literal; node answers Object there, which needs a
-// prototype chain this value model does not have). Twins: jsvConstructorOf in
+// __class at all (a plain object literal, which jvBuiltinCtor answers with Object).
+// Twins: jsvConstructorOf in
 // abnf/jsrtjsprint.go and classCtorOf in the two *-interpreter.abnf start scripts.
 function jvConstructorOf(o) {
     var cls = anytype
@@ -1890,6 +1903,7 @@ function js_jsmget(o, key) {
                 if (cur === undefined) {
                     var acc = jvFindClassAcc(o, key)
                     if (acc !== undefined) { return jvAccGet(acc, o) }
+                    if (jvStrWrapN > 0) { return jvWrapRead(o, key) }
                     return undefined
                 }
                 return cur
@@ -1923,6 +1937,7 @@ function js_jsmget(o, key) {
         var fm = anytype
         fm = jvFnMethod(o, key)
         if (fm !== undefined) { return fm }
+        if (jvStrWrapN > 0) { return jvWrapRead(o, key) }
         return o[key]
     }
     if (jvSymN > 0) {
@@ -1937,6 +1952,7 @@ function js_jsmget(o, key) {
             }
         }
     }
+    if (jvStrWrapN > 0) { return jvWrapRead(o, key) }
     return o[key]
 }
 
@@ -2221,6 +2237,7 @@ function js_jsvget(o, key) {
             }
         }
     }
+    if (jvStrWrapN > 0) { return jvWrapRead(o, key) }
     return o[key]
 }
 
@@ -2235,7 +2252,7 @@ function jvValueMiss(o, key) {
         // `new F()`, the function F itself).
         if (key == "constructor") {
             var cf = anytype
-            cf = jvConstructorOf(o)
+            cf = jvBuiltinCtor(o)
             if (cf !== undefined) { return cf }
         }
         var bof = anytype
@@ -2272,6 +2289,7 @@ function jvValueMiss(o, key) {
         }
     }
     if (key == "prototype") { return jvBuiltinProto(o) }
+    if (key == "constructor") { return jvBuiltinCtor(o) }
     if (typeof o == "boolean") {
         if (key == "toString" || key == "valueOf") { return jvBuiltinValue("b", key) }
     }
@@ -2413,6 +2431,7 @@ function jvBuiltinProtoAt(at) {
 function jvWrapProtoAt(p) {
     if (typeof p == "number") { return 2 }
     if (typeof p == "string") { return 1 }
+    if (jbIsBig(p)) { return 5 }
     return 6
 }
 
@@ -2609,6 +2628,13 @@ function jvHas(o, key) {
             }
         }
         if (js_has(o, key)) { return true }
+        if (jvStrWrapN > 0) {
+            var wp = anytype
+            wp = o["__bvof"]
+            if (typeof wp == "string") {
+                if (jvHasOwn(wp, k)) { return true }
+            }
+        }
         // `"constructor" in e` is true in node for every instance.
         if (k == "constructor") {
             if (jvConstructorOf(o) !== undefined) { return true }
@@ -2653,7 +2679,10 @@ function js_jsmset(o, key, v) {
         if (jvIsStaticSide(o, sk)) {
             var sv = anytype
             sv = jvStaticFind(o, sk)
-            if (jvIsAcc(sv)) { return jvAccSet(sv, o, v) }
+            if (jvIsAcc(sv)) {
+                jvAccSet(sv, o, v)
+                return undefined
+            }
             var st = o["__statics"]
             if (!jvIsObj(st)) { st = js_jsstatics(o) }
             var had = jvSlotHas(st, sk)
@@ -2669,11 +2698,29 @@ function js_jsmset(o, key, v) {
         if (jvIsObj(o)) {
             var k = jvStr(key)
             var cur = o[k]
-            if (jvIsAcc(cur)) { return jvAccSet(cur, o, v) }
+            if (jvIsAcc(cur)) {
+                jvAccSet(cur, o, v)
+                return undefined
+            }
             if (cur === undefined) {
                 var acc = jvFindClassAcc(o, k)
-                if (acc !== undefined) { return jvAccSet(acc, o, v) }
+                if (acc !== undefined) {
+                    jvAccSet(acc, o, v)
+                    return undefined
+                }
             }
+        }
+    }
+    // A write the attributes or the integrity level refuse answers false, and
+    // js_jsrefuse raises it in strict code (jvWriteRefusal).
+    if (jvAttrN > 0) {
+        var wt = anytype
+        wt = o
+        if (jvIsCallable(o)) { wt = jvFnPropsOf(o) }
+        var wr = jvWriteRefusal(wt, key, v)
+        if (wr != "") {
+            jvRefused = wr
+            return false
         }
     }
     // A write onto a FUNCTION goes to the side table: the floor's set_member has no
@@ -2719,12 +2766,6 @@ function js_jsmset(o, key, v) {
                 arrKindSet(o, 19 + 32 * o.length)
                 return undefined
             }
-        }
-    }
-    // A write to a non-writable property is dropped (jvDefineProp).
-    if (jvAttrN > 0) {
-        if (jvIsObj(o)) {
-            if (jvAttrHas(o, "__ro", jvStr(key))) { return undefined }
         }
     }
     o[key] = v
@@ -2807,7 +2848,10 @@ function js_jsnewres(res, obj) {
     if (res === undefined) { return obj }
     if (jvIsObjLike(res)) { return res }
     if (jvIsCallable(res)) { return res }
-    if (obj["__bvof"] !== undefined) { obj["__bvof"] = res }
+    if (obj["__bvof"] !== undefined) {
+        obj["__bvof"] = res
+        if (typeof res == "string") { jvStrWrapN = jvStrWrapN + 1 }
+    }
     return obj
 }
 
@@ -3066,11 +3110,12 @@ function js_jsinstanceof(v, c) {
     if (jvFunctionFn !== undefined && c === jvFunctionFn) { return jvIsCallable(v) || jvIsClassDesc(v) }
     // A wrapper is an instance of its primitive's global; the prototype object it may
     // itself be is not.
-    if (c === jvNumberFn || c === jvStringFn || c === jvBooleanFn) {
+    if (c === jvNumberFn || c === jvStringFn || c === jvBooleanFn || c === jvBigIntFn || c === jvSymbolFn) {
         if (jvIsObj(v)) {
             var wp = anytype
             wp = v["__bvof"]
             if (wp !== undefined) {
+                if (c === jvSymbolFn) { return jvIsSym(wp) }
                 var at = jvWrapProtoAt(wp)
                 return jvBuiltinProto(c) === jvBuiltinProtoAt(at) && v !== jvBuiltinProtoAt(at)
             }
@@ -3429,17 +3474,88 @@ function js_jsobject() {
 }
 
 // The primitive wrapper objects: an object whose hidden __bvof slot holds a number, a
-// string or a boolean. Twin of jsWrap / jsToObject in js-interpreter.abnf, which
-// states the rule; jsvWrap / jsvToObject in abnf/jsrtjsprint.go.
+// string, a boolean, a BigInt or a symbol. Twin of jsWrap / jsToObject in
+// js-interpreter.abnf, which states the rule; jsvWrap / jsvToObject in
+// abnf/jsrtjsprint.go.
 function jvWrap(p) {
     var o = {}
     o["__bvof"] = p
+    if (typeof p == "string") { jvStrWrapN = jvStrWrapN + 1 }
     return o
 }
+// The count of String wrappers made: while it is 0 a member read pays one compare for
+// a wrapper's indices (jvWrapRead).
+var jvStrWrapN = 0
 function jvToObject(v) {
     if (jvUndefOrNull(v)) { return {} }
     if (typeof v == "number" || typeof v == "string" || typeof v == "boolean") { return jvWrap(v) }
+    if (jbIsBig(v)) { return jvWrap(v) }
+    if (jvIsSym(v)) { return jvWrap(v) }
     return v
+}
+// o[key] for a read the own slots answer, and a String wrapper's index or length off
+// its string. Reached only once a String wrapper exists (jvStrWrapN).
+function jvWrapRead(o, key) {
+    var v = anytype
+    v = o[key]
+    if (v !== undefined) { return v }
+    if (!jvIsObj(o)) { return v }
+    var wp = anytype
+    wp = o["__bvof"]
+    if (typeof wp != "string") { return v }
+    if (!jvHasOwn(wp, key)) { return v }
+    var i = jvToNumber(jvPropKey(key))
+    if (i !== i) { return wp.length }
+    return wp.substring(i, i + 1)
+}
+// The own keys of object o as keysOf lists them, after a String wrapper's indices.
+function jvWrapKeys(o) {
+    var ks = keysOf(o)
+    if (jvStrWrapN == 0) { return ks }
+    var wp = anytype
+    wp = o["__bvof"]
+    if (typeof wp != "string") { return ks }
+    var out = jvIndexKeys(wp.length)
+    var i = 0
+    while (i < ks.length) {
+        out.push(ks[i])
+        i = i + 1
+    }
+    return out
+}
+// `x.constructor` where no class answers it. Twin of jsBuiltinCtor in
+// js-interpreter.abnf, which states the rule; jsvBuiltinCtor in abnf/jsrtjsprint.go.
+function jvBuiltinCtor(o) {
+    var r = anytype
+    r = undefined
+    if (typeof o == "string") { return jvStringFn }
+    if (typeof o == "number") { return jvNumberFn }
+    if (typeof o == "boolean") { return jvBooleanFn }
+    if (Array.isArray(o)) {
+        if (jvIsArgs(o)) { return jvObjGlobal }
+        return jvArrayFn
+    }
+    if (jvIsObj(o)) {
+        if (jvIsClassDesc(o)) { return r }
+        if (o["__protoof"] !== undefined) { return r }
+        if (jvNoObjProto(o)) { return r }
+        if (jbIsBig(o)) { return jvBigIntFn }
+        if (jvIsSym(o)) { return jvSymbolFn }
+        var wp = anytype
+        wp = o["__bvof"]
+        if (wp !== undefined) { return jvBuiltinCtor(wp) }
+        if (o["__class"] !== undefined) {
+            var cf = anytype
+            cf = jvConstructorOf(o)
+            if (cf !== undefined) { return cf }
+            return jvObjGlobal
+        }
+        if (jpIs(o)) { return jpFn }
+        if (jxIsRe(o)) { return jxRegExpFn }
+        return jvObjGlobal
+    }
+    if (jvIsCallable(o)) { return jvFunctionFn }
+    return r
 }
 // The `Object` global js_jsobject built, for Object.getPrototypeOf.
 var jvObjGlobal = anytype
@@ -3664,10 +3780,10 @@ var jvArrayOwnNames = ["length", "name", "prototype", "isArray", "from", "fromAs
 // this is a real function, and String.fromCharCode is answered by js_jsmcall.
 function js_jsstringfn() {
     if (jvStringFn === undefined) {
-        jvStringFn = function () {
+        jvStringFn = fnMetaSet(function () {
             if (arguments.length === 0) { return "" }
             return jvStr(arguments[0])
-        }
+        }, "String", 1)
     }
     return jvStringFn
 }
@@ -3677,7 +3793,7 @@ function js_jsstringfn() {
 // js_jsarrayfn in abnf/jsrtjsprint.go and jsArrayFn in js-interpreter.abnf.
 function js_jsarrayfn() {
     if (jvArrayFn === undefined) {
-        jvArrayFn = function () {
+        jvArrayFn = fnMetaSet(function () {
             var out = []
             if (arguments.length === 1 && typeof arguments[0] == "number") {
                 var n = arguments[0]
@@ -3689,7 +3805,7 @@ function js_jsarrayfn() {
             var j = 0
             while (j < arguments.length) { out.push(arguments[j]); j = j + 1 }
             return out
-        }
+        }, "Array", 1)
     }
     return jvArrayFn
 }
@@ -3752,7 +3868,7 @@ function jvOwnKeys(v) {
             pd = v["__protoof"]
             if (pd !== undefined) { return jvViewKeys(v, pd) }
         }
-        return jvEnumKeys(v, jvIndexOrder(keysOf(v)))
+        return jvEnumKeys(v, jvIndexOrder(jvWrapKeys(v)))
     }
     // A FUNCTION's own properties live in the side table.
     if (jvFnPropsN > 0) {
@@ -4275,6 +4391,13 @@ function jvArrLocale(a) {
 }
 
 function jvArrMethod(a, name, args) {
+    if (jvAttrN > 0) {
+        var lv = jvArrLevel(a)
+        if (lv > 0) {
+            var mr = jvArrMethodRefusal(a, name, args, lv)
+            if (mr != "") { jbRaise("TypeError: " + mr) }
+        }
+    }
     var n = a.length
     var cb = jvArg(args, 0)
     if (name == "toString") { return jvStr(a) }
@@ -4832,11 +4955,208 @@ function jvSetProto(o, p) {
     return o
 }
 
+// Integrity levels, Object.preventExtensions / seal / freeze: __noext on an object,
+// with __nc and __ro on every own property, and the kind word of an array (20
+// frozen, 21 sealed, 22 not extensible). Every mark counts in jvAttrN. Twin of the
+// integrity block of js-interpreter.abnf (jsSetIntegrity), which states the rule;
+// jsvSetIntegrity in abnf/jsrtjsprint.go.
+function jvSetIntegrity(o, lv) {
+    if (jvIsCallable(o)) {
+        jvSetIntegrity(jvFnPropsMake(o), lv)
+        return o
+    }
+    if (Array.isArray(o)) {
+        if (jvIsArgs(o)) { return o }
+        jvAttrN = jvAttrN + 1
+        if (lv > jvArrLevel(o)) { arrKindSet(o, 23 - lv) }
+        return o
+    }
+    if (!jvIsObj(o)) { return o }
+    if (jvIsClassDesc(o) || jbIsBig(o) || jvIsSym(o)) { return o }
+    jvAttrN = jvAttrN + 1
+    o["__noext"] = true
+    if (lv == 1) { return o }
+    var ks = keysOf(o)
+    var i = 0
+    while (i < ks.length) {
+        jvAttrSet(o, "__nc", ks[i], true)
+        if (lv == 3) {
+            if (!jvIsAcc(o[ks[i]])) { jvAttrSet(o, "__ro", ks[i], true) }
+        }
+        i = i + 1
+    }
+    return o
+}
+// An array's integrity level: 3 frozen, 2 sealed, 1 not extensible, 0 none.
+function jvArrLevel(a) {
+    var k = arrKind(a) % 32
+    if (k < 20) { return 0 }
+    if (k > 22) { return 0 }
+    return 23 - k
+}
+// TestIntegrityLevel as a number: 3 frozen, 2 sealed, 1 not extensible, 0 none.
+function jvIntegrity(o) {
+    if (jvIsCallable(o)) {
+        if (jvFnPropsN == 0) { return 0 }
+        var fp = anytype
+        fp = jvFnPropsOf(o)
+        if (fp === undefined) { return 0 }
+        return jvIntegrity(fp)
+    }
+    if (Array.isArray(o)) {
+        var al = jvArrLevel(o)
+        if (al == 1) { if (o.length == 0) { return 2 } }
+        return al
+    }
+    if (!jvIsObj(o)) { return 3 }
+    if (jvIsClassDesc(o)) { return 0 }
+    if (jbIsBig(o) || jvIsSym(o)) { return 3 }
+    if (o["__noext"] !== true) { return 0 }
+    var lv = 3
+    var ks = keysOf(o)
+    var i = 0
+    while (i < ks.length) {
+        if (!jvAttrHas(o, "__nc", ks[i])) { return 1 }
+        if (!jvIsAcc(o[ks[i]])) {
+            if (!jvAttrHas(o, "__ro", ks[i])) { lv = 2 }
+        }
+        i = i + 1
+    }
+    return lv
+}
+function jvIsExtensible(o) {
+    if (Array.isArray(o) || jvIsCallable(o)) { return jvIntegrity(o) == 0 }
+    if (!jvIsObj(o) || jbIsBig(o) || jvIsSym(o)) { return false }
+    return jvIntegrity(o) == 0
+}
+// V8's rendering of the object in a refused write's message.
+function jvObjText(o) {
+    if (Array.isArray(o)) { return "[object Array]" }
+    if (o["__errh"] === true) { return jvStr(o) }
+    if (jvNoObjProto(o)) { return "[object Object]" }
+    var c = anytype
+    c = jvBuiltinCtor(o)
+    var nm = anytype
+    nm = undefined
+    if (c !== undefined) { nm = js_jsvget(c, "name") }
+    if (typeof nm != "string") { nm = "Object" }
+    if (nm == "") { nm = "Object" }
+    return "#<" + nm + ">"
+}
+function jvRoText(o, key) { return "Cannot assign to read only property '" + jvKeyUnesc(key) + "' of object '" + jvObjText(o) + "'" }
+function jvAddText(key) { return "Cannot add property " + jvKeyUnesc(key) + ", object is not extensible" }
+function jvDelText(o, key) { return "Cannot delete property '" + jvKeyUnesc(key) + "' of " + jvObjText(o) }
+// The TypeError text a write of v to o[key] meets under o's marks, or "".
+function jvWriteRefusal(o, key, v) {
+    if (Array.isArray(o)) {
+        var lv = jvArrLevel(o)
+        if (lv == 0) { return "" }
+        if (key === "length") {
+            if (lv == 3) { return jvRoText(o, key) }
+            if (lv == 2) { if (jvToNumber(v) < o.length) { return jvDelText(o, "" + (o.length - 1)) } }
+            return ""
+        }
+        if (!jvIndexIn(key, o.length)) { return jvAddText(jvStr(key)) }
+        if (lv == 3) { return jvRoText(o, jvStr(key)) }
+        return ""
+    }
+    if (!jvIsObj(o)) { return "" }
+    var k = jvStr(key)
+    if (jvAttrHas(o, "__ro", k)) { return jvRoText(o, k) }
+    if (o["__noext"] === true) {
+        if (!jvSlotHas(o, k)) {
+            if (jvFindClassAcc(o, k) === undefined) { return jvAddText(k) }
+        }
+    }
+    return ""
+}
+// The TypeError text a delete of o[key] meets, or "".
+function jvDeleteRefusal(o, key) {
+    if (Array.isArray(o)) {
+        if (jvArrLevel(o) >= 2) { if (jvIndexIn(key, o.length)) { return jvDelText(o, jvStr(key)) } }
+        return ""
+    }
+    if (!jvIsObj(o)) { return "" }
+    if (jvAttrHas(o, "__nc", jvStr(key))) { return jvDelText(o, jvStr(key)) }
+    return ""
+}
+// The text of the last write or delete the marks refused, which js_jsrefuse raises.
+var jvRefused = ""
+// The emitter's call after a refused js_jsmset or js_jsdel in strict code. Twin of
+// js_jsrefuse in abnf/jsrtjsprint.go.
+function js_jsrefuse() {
+    if (jvRefused != "") {
+        var msg = jvRefused
+        jvRefused = ""
+        jbRaise("TypeError: " + msg)
+    }
+    return undefined
+}
+// The TypeError an Array method meets on an array of integrity level lv, or "" when
+// it runs; a sealed array's shift or shrinking splice first moves the elements down.
+function jvArrMethodRefusal(a, name, args, lv) {
+    var n = a.length
+    if (name == "push" || name == "unshift") {
+        if (args.length > 0) { return jvAddText("" + n) }
+        return ""
+    }
+    if (lv == 1) { return "" }
+    if (name == "pop" || name == "shift") {
+        if (n == 0) {
+            if (lv == 3) { return jvRoText(a, "length") }
+            return ""
+        }
+        if (lv == 3) { if (name == "shift") { if (n > 1) { return jvRoText(a, "0") } } }
+        if (name == "shift") { jvArrMoveDown(a, name, args) }
+        return jvDelText(a, "" + (n - 1))
+    }
+    if (name == "splice") {
+        var st = n
+        if (args.length > 0) { st = jvRelIndex(jvToNumber(args[0]), n) }
+        var dc = n - st
+        if (args.length > 1) { dc = jvToInt(jvToNumber(args[1])) }
+        if (dc < 0) { dc = 0 }
+        if (st + dc > n) { dc = n - st }
+        var ins = 0
+        if (args.length > 2) { ins = args.length - 2 }
+        if (lv == 3) {
+            if (dc == 0) { if (ins == 0) { return jvRoText(a, "length") } }
+            return jvRoText(a, "" + st)
+        }
+        if (ins > dc) { return jvAddText("" + n) }
+        if (ins < dc) {
+            jvArrMoveDown(a, name, args)
+            return jvDelText(a, "" + (n - 1))
+        }
+        return ""
+    }
+    if (name == "sort" || name == "reverse" || name == "fill" || name == "copyWithin") {
+        if (lv == 3) { if (n > 0) { return jvRoText(a, "0") } }
+    }
+    return ""
+}
+// The elements a shrinking method leaves, written over a without changing its length.
+function jvArrMoveDown(a, name, args) {
+    var cp = []
+    var i = 0
+    while (i < a.length) {
+        cp.push(a[i])
+        i = i + 1
+    }
+    jvArrMethod(cp, name, args)
+    var j = 0
+    while (j < cp.length) {
+        a[j] = cp[j]
+        j = j + 1
+    }
+    return undefined
+}
+
 // The count of objects holding a non-enumerable property (jvDefineProp): while it is
 // 0 a key listing skips the __nonenum test.
 var jvNeN = 0
-// The count of objects holding an __ro or an __nc table: while it is 0 a write and a
-// delete skip the test.
+// The count of objects holding an __ro or an __nc table or an integrity mark
+// (jvSetIntegrity): while it is 0 a write and a delete skip the test.
 var jvAttrN = 0
 
 // Object.defineProperty(o, key, desc) for a key already in the object's own spelling:
@@ -4866,6 +5186,7 @@ function jvDefineProp(o, key, desc) {
     var hasW = js_has(desc, "writable")
     var hasE = js_has(desc, "enumerable")
     var hasC = js_has(desc, "configurable")
+    if (!exists) { if (o["__noext"] === true) { jbRaise("TypeError: Cannot define property " + jvKeyUnesc(key) + ", object is not extensible") } }
     if (exists && jvAttrHas(o, "__nc", key)) {
         var no = hasC && !js_jsnot(js_jsmget(desc, "configurable"))
         if (hasE && !js_jsnot(js_jsmget(desc, "enumerable")) == jvAttrHas(o, "__nonenum", key)) { no = true }
@@ -4928,7 +5249,16 @@ function jvObjectGlobalMethod(name, args) {
         return co
     }
     if (name == "getPrototypeOf") { return jvGetProto(src) }
-    if (name == "setPrototypeOf") { return jvSetProto(src, jvArg(args, 1)) }
+    if (name == "setPrototypeOf") {
+        if (jvAttrN > 0) {
+            if (jvIsObj(src)) {
+                if (src["__noext"] === true) {
+                    if (jvGetProto(src) !== jvArg(args, 1)) { jbRaise("TypeError: " + jvObjText(src) + " is not extensible") }
+                }
+            }
+        }
+        return jvSetProto(src, jvArg(args, 1))
+    }
     if (name == "defineProperty" || name == "defineProperties") {
         if ((!jvIsObjLike(src) && !jvIsCallable(src)) || jbIsBig(src)) { jbRaise("TypeError: Object." + name + " called on non-object") }
         if (name == "defineProperties") { return jvDefineProps(src, jvArg(args, 1)) }
@@ -4996,6 +5326,21 @@ function jvObjectGlobalMethod(name, args) {
             if (jvErrOwn(src, "message") === true) { out.push("message") }
         }
         var ks = jvOwnKeys(src)
+        // A String wrapper's `length` follows its indices.
+        if (name == "getOwnPropertyNames" && jvStrWrapN > 0 && jvIsObj(src)) {
+            var gw = anytype
+            gw = src["__bvof"]
+            if (typeof gw == "string") {
+                ks = jvIndexKeys(gw.length)
+                ks.push("length")
+                var gk = jvIndexOrder(keysOf(src))
+                var gi = 0
+                while (gi < gk.length) {
+                    ks.push(gk[gi])
+                    gi = gi + 1
+                }
+            }
+        }
         // A non-enumerable property is in the key order too, where it was defined.
         if (name == "getOwnPropertyNames" && jvNeN > 0 && jvIsObj(src)) {
             if (src["__nonenum"] !== undefined) { ks = jvErrHide(src, jvIndexOrder(keysOf(src))) }
@@ -5047,7 +5392,14 @@ function jvObjectGlobalMethod(name, args) {
                 var sk = jvOwnKeys(s)
                 var sj = 0
                 while (sj < sk.length) {
-                    js_jsmset(src, sk[sj], js_jsmget(s, sk[sj]))
+                    var av = anytype
+                    av = js_jsmget(s, sk[sj])
+                    // Object.assign is a builtin, and so strict code: a refused write raises.
+                    if (jvAttrN > 0) {
+                        var ar = jvWriteRefusal(src, sk[sj], av)
+                        if (ar != "") { jbRaise("TypeError: " + ar) }
+                    }
+                    js_jsmset(src, sk[sj], av)
                     sj = sj + 1
                 }
                 var ss = jvSymKeys(s)
@@ -5103,7 +5455,12 @@ function jvObjectGlobalMethod(name, args) {
         }
         return g
     }
-    if (name == "freeze" || name == "seal") { return src }
+    if (name == "freeze") { return jvSetIntegrity(src, 3) }
+    if (name == "seal") { return jvSetIntegrity(src, 2) }
+    if (name == "preventExtensions") { return jvSetIntegrity(src, 1) }
+    if (name == "isFrozen") { return jvIntegrity(src) == 3 }
+    if (name == "isSealed") { return jvIntegrity(src) >= 2 }
+    if (name == "isExtensible") { return jvIsExtensible(src) }
     if (name == "is") { return jvSameValue(jvArg(args, 0), jvArg(args, 1)) }
     return jvMiss
 }
@@ -6270,11 +6627,11 @@ function js_jsbigint(src) {
 // The BigInt(v) global, declared into the program scope by the grammar the way
 // String / Object / println already are.
 function js_jsbigintfn() {
-    jvBigIntFn = function(v) {
+    jvBigIntFn = fnMetaSet(function(v) {
         if (v === undefined) { jbRaise("TypeError: Cannot convert undefined to a BigInt") }
         jbStrict = true
         return jbOf(v)
-    }
+    }, "BigInt", 1)
     return jvBigIntFn
 }
 
@@ -6296,11 +6653,11 @@ function js_jsfunctionfn() {
 // Number(v): the only way back OUT of a BigInt, since unary '+' refuses it.
 function js_jsnumberfn() {
     if (jvNumberFn === undefined) {
-        jvNumberFn = function(v) {
+        jvNumberFn = fnMetaSet(function(v) {
             if (jbIsBig(v)) { return jbToNum(v) }
             if (v === undefined) { return arguments.length == 0 ? 0 : NaN }
             return jvToNumber(v)
-        }
+        }, "Number", 1)
     }
     return jvNumberFn
 }
@@ -7117,7 +7474,7 @@ function jxRegExpFn(src, flags) {
     return jxCtorArgs(a)
 }
 
-function js_jsxctor() { return jxRegExpFn }
+function js_jsxctor() { return fnMetaSet(jxRegExpFn, "RegExp", 2) }
 
 // The call wrapper. `replace` and `split` DO have a native for a string receiver, so
 // they arrive through js_jsxcall as a BOUND METHOD instead of through js_jsmcall;
@@ -7647,7 +8004,7 @@ function js_jsawaitv(v) {
 // and `typeof Promise` is "function". The executor runs SYNCHRONOUSLY.
 function js_jspromfn() {
     if (jpFn === undefined) {
-        jpFn = function (exec) {
+        jpFn = fnMetaSet(function (exec) {
             var p = jpNew()
             // jbRaise, not fail: node throws this and a try/catch recovers it,
             // where fail is the floor's abort and a js_try deliberately does not
@@ -7656,7 +8013,7 @@ function js_jspromfn() {
             try { jvCallT(exec, undefined, [jpResolveFn(p), jpRejectFn(p)]) }
             catch (e) { jpSettle(p, 2, e) }
             return p
-        }
+        }, "Promise", 1)
     }
     return jpFn
 }

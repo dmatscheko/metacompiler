@@ -524,7 +524,7 @@ func (rt *jsrt) addJSBigIntExterns(m map[string]func(args []uint64) uint64) {
 	// The BigInt(v) and Number(v) globals, declared into the program scope by the
 	// grammar the way String / Object / println already are.
 	m["js_jsbigintfn"] = func(a []uint64) uint64 {
-		return w(jsHostFunc("BigInt", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return w(rt.jsvNamedHost("BigInt", 1, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			if len(args) == 0 {
 				rt.bigRaise("TypeError: Cannot convert undefined to a BigInt")
 			}
@@ -534,7 +534,7 @@ func (rt *jsrt) addJSBigIntExterns(m map[string]func(args []uint64) uint64) {
 		}))
 	}
 	m["js_jsnumberfn"] = func(a []uint64) uint64 {
-		return w(jsHostFunc("Number", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return w(rt.jsvNamedHost("Number", 1, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			if len(args) == 0 {
 				return float64(0)
 			}
