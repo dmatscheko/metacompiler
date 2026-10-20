@@ -140,7 +140,7 @@ non-integral floats use JS formatting, not %g.
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-621 swift: generic type arguments are not applied; static members on a generic parameter; non-ASCII operators · P1 · SW · OPEN [V]
+### T-621 swift: generic type arguments are not applied; static members on a generic parameter; non-ASCII operators · P1 · SW · IN PROGRESS (SW worker, round 8) [V]
 `struct Box<T> { var v: T }; print(Box<Double>(v: 2).v)` → both halves `2` (swiftc `2.0`); `let b: Box<Double> = Box(v: 3)` and
 `Stack<Double>().push(2)` likewise — the generic bindings need carrying on each instance (or at the construction site).
 `func fold<M: Monoid>(_ xs: [M]) -> M { xs.reduce(M.zero, +) }` aborts "unknown name: M" (a static member on an inferred generic
