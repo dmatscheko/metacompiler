@@ -2011,6 +2011,15 @@ function goStructTyName(st) {
     }
     return goStructTys["$" + base] === true ? st : ""
 }
+// A type test's type as a pointer's box names it: in a package, "*cancelCtx" is
+// "*context.cancelCtx" (goStructTyName); anything else as written.
+function goAssertTyC(t) {
+    if (t.length > 1 && t.charAt(0) == "*") {
+        var q = goStructTyName(t.substring(1))
+        if (q != "") { return "*" + q }
+    }
+    return t
+}
 // Is box type ty a struct value's (goStructTyName)?
 function goIsValBoxTy(ty) { return ty.charAt(0) != "*" && goStructTys["$" + stNoTyArgs(ty)] === true }
 // "[N]T" -> "T" for an array type of literal length N, else "".
@@ -3072,6 +3081,13 @@ function goPreIfaceMeths(iname, body) {
             var e = stClose(body, i)
             if (e < 0) { return }
             goMethPTys["$" + iname + "." + body.substring(ns, i)] = goPreParams(body.substring(i + 1, e))
+            // ... and as another package sees it (`ctx.Value(k)` on a context.Context).
+            if (goPrePkg != "") {
+                var qps = goPreParams(body.substring(i + 1, e))
+                var q = 0
+                while (q < qps.length) { qps[q] = goPkgQual(goPrePkg, qps[q]); q = q + 1 }
+                goMethPTys["$" + goPrePkg + "." + iname + "." + body.substring(ns, i)] = qps
+            }
             i = e + 1
         }
         while (i < body.length && body.charAt(i) != "\n" && body.charAt(i) != ";") { i = i + 1 }
@@ -3354,6 +3370,7 @@ function goLibFile(path) {
     if (path == "path/filepath") { return "lib/go-filepath.go" }
     if (path == "log") { return "lib/go-log.go" }
     if (path == "flag") { return "lib/go-flag.go" }
+    if (path == "context") { return "lib/go-context.go" }
     if (path == "unicode/utf8") { return "lib/go-utf8.go" }
     if (path == "sync/atomic") { return "lib/go-atomic.go" }
     return ""

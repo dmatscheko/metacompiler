@@ -504,7 +504,7 @@ AssertOk    <~~ push(makeAssertOk(cAssertOkC(takeAll()))) ~~>
               AssertBase "." "(" AssertType ")" NotComma ;
 AssertBase  <~~ push(foldCallMember(goBoxArgsC(goRecvsC(takeAll(), up.start)))) ~~>
             = Primary { MethodSfx | FieldSfx | SliceSfx | IndexSfx | CallSfx } ;
-AssertType  <~~ push({at: goWalkQual(firstType(up.in))}) ~~>
+AssertType  <~~ push({at: goAssertTyC(goWalkQual(firstType(up.in)))}) ~~>
             = Type ;
 
 // The comma ok idiom: the value (or the zero value) plus the key presence flag.
@@ -624,7 +624,7 @@ TypeSwitch  <~~ push(makeTypeSwitch(takeAll())); cSwExit() ~~>
 TypeCase    <~~ push(makeTypeCase(cTsCase(takeAll()))) ~~>
             = CCaseOn ( "case" KwEnd CaseType { "," CaseType }
               | "default" KwEnd ) ":" ;
-CaseType    <~~ push({ct: goWalkQual(up.in)}) ~~>
+CaseType    <~~ push({ct: goAssertTyC(goWalkQual(up.in))}) ~~>
             = Type ;
 // The subjectless body is tried before the subject so a bare 'switch {' never enters
 // SwitchSubj: that would push the composite-literal gate marker (CondOn) and then fail
@@ -858,7 +858,7 @@ Spread      <~~ push({spread: true}) ~~> = "..." ;
 // type for a predeclared scalar or a declared struct. Any other target is the
 // identity (see goAssertType).
 TypeAssertSfx = "." "(" AssertSfxTy ")" ;
-AssertSfxTy <~~ push({kind: "assert", at: goWalkQual(firstType(up.in))}) ~~> = Type ;
+AssertSfxTy <~~ push({kind: "assert", at: goAssertTyC(goWalkQual(firstType(up.in)))}) ~~> = Type ;
 
 // A string or bool literal reports its type, so a store binds it typed (`s := "a"`
 // makes &s a *string); the shared literal rules know nothing of static types.
@@ -2688,7 +2688,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     // Whether a receive can proceed WITHOUT blocking - what a select's case arms ask
     // before falling back to the default arm.
+    // A nil channel is never ready: a select skips its arm. Twins: js_gochan_ready
+    // in abnf/jsrt.go and lib/go-rt.metajs.
     function chanReady(ch) {
+        if (ch === null || ch === undefined) { return false }
         if (!isChan(ch)) fail("receive from a non-channel")
         if (ch.buf.length == 0 && !ch.closed) { goDrain() }
         return ch.buf.length > 0 || ch.closed
@@ -6266,7 +6269,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     core.blank = "_"
     // Go stdlib packages the runtime provides (resolveImport lives in lib/interp-core.js;
     // exact-match paths, so sub-packages like "encoding/json" are listed in full).
-    core.stdlibImports = ["fmt", "os", "errors", "regexp", "encoding/json", "context", "reflect"]
+    core.stdlibImports = ["fmt", "os", "errors", "regexp", "encoding/json", "reflect"]
     core.nullWord = "nil"
     // `p.In.X = 1` with a nil p.In walks resolveRef's path; in Go it is a recoverable
     // panic. The hook is additive in lib/interp-core.js - every language that leaves

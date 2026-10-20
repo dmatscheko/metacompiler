@@ -15702,6 +15702,10 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// Can a receive proceed WITHOUT blocking? What a select's arms ask before
 		// falling back to the default arm; it drains the goroutine queue first.
 		"js_gochan_ready": func(a []uint64) uint64 {
+			// A nil channel is never ready: a select skips its arm.
+			if isUndefOrNull(u(a[0])) {
+				return jsHFalse
+			}
 			o, buf, ok := goChanParts(u(a[0]))
 			if !ok {
 				rt.fail("receive from a non-channel")

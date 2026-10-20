@@ -2877,6 +2877,9 @@ function goDrain() {
     }
     return undefined
 }
+// A select with no arm ready and no default runs the queue once (makeSelect in
+// go-to-llvm-ir.abnf). Twin of js_godrain in abnf/jsrt.go.
+function js_godrain() { return goDrain() }
 
 // goChanRecv takes one value; ok is false exactly when the channel is closed and
 // drained, and the value is then the element type's zero value.
@@ -2972,6 +2975,8 @@ function js_gochan_recvok(ch) {
 // Can a receive proceed WITHOUT blocking? What a select's arms ask before
 // falling back to the default arm; it drains the goroutine queue first.
 function js_gochan_ready(ch) {
+    // A nil channel is never ready: a select skips its arm.
+    if (ch === undefined || ch === null) { return false }
     if (!goIsChan(ch)) { fail("receive from a non-channel") }
     if (ch.buf.length == 0 && ch.closed !== true) { goDrain() }
     if (ch.buf.length > 0) { return true }

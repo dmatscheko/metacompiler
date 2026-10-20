@@ -45,6 +45,8 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -180,10 +182,45 @@ func s96() {
 	check("pfw1", a == 11 && b == 20)
 }
 
+// ===== SECTION 97: package context; a select over a nil channel =====
+// Go source (languages/lib/go-context.go). The expected values are go run's.
+type key97 string
+
+func worker97(ctx context.Context, out chan<- string) {
+	select {
+	case <-ctx.Done():
+		out <- "stopped: " + ctx.Err().Error()
+	}
+}
+
+func s97() {
+	bg := context.Background()
+	ctx, cancel := context.WithCancel(bg)
+	child, cancel2 := context.WithCancel(ctx)
+	defer cancel2()
+	vctx := context.WithValue(child, key97("user"), "ann")
+	before := fmt.Sprint(ctx.Err(), vctx.Value(key97("user")), vctx.Value(key97("none")), vctx.Value("user"))
+	out := make(chan string, 1)
+	cancel()
+	go worker97(vctx, out)
+	got := <-out
+	idle := "busy"
+	select {
+	case <-bg.Done():
+	default:
+		idle = "idle"
+	}
+	cc, ccancel := context.WithCancelCause(bg)
+	ccancel(errors.New("boom"))
+	check("ctx1", fmt.Sprintf("%s|%s|%v|%s|%v %v|%v", before, got, child.Err() == context.Canceled, idle, cc.Err(), context.Cause(cc), bg) ==
+		"<nil>ann<nil> <nil>|stopped: context canceled|true|idle|context canceled boom|context.Background")
+}
+
 func main() {
 	s94() // SECTION-CALL 94
 	s95() // SECTION-CALL 95
 	s96() // SECTION-CALL 96
+	s97() // SECTION-CALL 97
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }
