@@ -147,7 +147,7 @@ reports cap 4 where growslice says 1) — escape analysis.
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-634 swift: an Optional Set return does not adopt its literal · P3 · SW · OPEN [V]
+### T-634 swift: an Optional Set return does not adopt its literal · P3 · SW · IN PROGRESS (SW worker, round 11) [V]
 `func mkOpt(_ b: Bool) -> Set<Double>? { b ? [4] : nil }; print(mkOpt(true)!.sorted())` → all legs `[4]` (swiftc `[4.0]`): the
 Set-return conversion skips Optional Set types (needs a nil branch in the emitter and the interpreter's adopt).
 
