@@ -89,7 +89,7 @@ inputs — record in manual 7.9 unless made bit-exact. `__exit__`'s traceback ar
 
 # JS — JavaScript and TypeScript
 
-### T-641 js: Object.getOwnPropertyNames of a prototype · P2 · JS · OPEN [V]
+### T-641 js: Object.getOwnPropertyNames of a prototype · P2 · JS · IN PROGRESS (JS worker, round 9) [V]
 `class K { m(){} get g(){return 1} }; Object.getOwnPropertyNames(K.prototype)` → all legs `""` (node `constructor,m,g`);
 `function F(){}; F.prototype.q = 1` → ours `q` (node `constructor,q`); a string-keyed `["__#@iterator"]` method likewise missing. js and ts.
 
