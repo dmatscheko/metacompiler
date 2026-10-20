@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-671** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-672** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -138,18 +138,10 @@ reports cap 4 where growslice says 1) — escape analysis.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-667 php: ArgumentCountError unavailable unless spelled; arrow-function generators · P1 · PHP · IN PROGRESS (PHP worker, round 13) [V spec-only]
-`function f($a){} try { f(); } catch (Error $e) { echo get_class($e), ": ", $e->getMessage(); }` → interp uncaught fatal "Too few
-arguments ..."; llvm.Run/native "Call to undefined function ArgumentCountError()" (PHP `ArgumentCountError: Too few arguments to function
-f(), 0 passed in ... on line 4 and exactly 1 expected`) — the library class is compiled only when the program spells its name; load it
-whenever an arity check can raise it. `$af = fn($z) => yield $z; foreach ($af(3) as $v) echo $v;` → "yield outside a generator" in both
-halves (PHP 3: makeArrowFn passes isGen=false / bypasses closureV).
-
-### T-668 php: scalar parameter and return types are never checked · P2 · PHP · IN PROGRESS (PHP worker, round 13) [V spec-only]
-`function h(int $a){ return $a; } echo h("x");` → prints `x` in all engines (PHP coercive mode: TypeError "h(): Argument #1 ($a) must be of
-type int, string given, called in ... on line N"); `h("5")` must coerce to int 5; return types (`: int`) likewise; `declare(strict_types=1)`
-refuses coercion. Implement zend_verify_arg_type / the coercion table (int, float, string, bool, ?T, union types, mixed) in both halves;
-measure the php bench (a check on every typed parameter).
+### T-671 php: promoted constructor parameters declare no typed property; typed-property TypeError prints `self` · P3 · PHP · OPEN [V]
+`class A { function __construct(public int $x) {} }; $a = new A(1); $a->x = "z";` → no TypeError in any engine (php-src: a promoted
+parameter declares the typed property `public int $x`, so the write raises "Cannot assign string to property A::$x of type int").
+The existing typed-property TypeError writes `self` unresolved where zend_type_to_string_resolved writes the class name.
 
 ### T-666 php: the preg_* functions do not exist · P2 · PHP · IN PROGRESS (PHP worker, round 13) [V spec-only]
 `preg_replace('/a/', 'b', 'aa')` → "Call to undefined function preg_replace()" in all engines; preg_match, preg_match_all, preg_split,
@@ -163,6 +155,8 @@ PHP CLI prints `Warning: Cannot unbind $this of closure using $this in <file> on
 warnings) on stdout with display_errors=1, plus possibly a `PHP Warning:` log line on stderr depending on ini. No PHP engine here
 has a warning channel or tracks runtime line numbers at those sites. Decide: which stream/ini model to emulate, and whether
 line tracking at warning sites is worth its cost.
+The same channel would carry `Deprecated: Implicit conversion from float 1.5 to int loses precision` (a float argument to an int
+parameter), which no engine prints either.
 
 ---
 
@@ -770,6 +764,8 @@ T-658 js: inherited data properties read as undefined; Object.create; Object.pro
 T-663 php: user functions with too few arguments; library method arity; named-argument "not passed" — DONE 4b257c30
 T-665 php: generator argument count checked at first resume; get_class/get_parent_class accept too many — DONE 9e081dd3
 T-664 js: replacing a constructor's prototype; getPrototypeOf/setPrototypeOf/defineProperty; toLocaleString; Object.create(null) — DONE e4c56dde (PARTIAL: replaced prototypes, get/setPrototypeOf, defineProperty/ies, create(null), toLocaleString — 4 legs = node; valueOf.call boxing → T-669)
+T-667 php: ArgumentCountError unavailable unless spelled; arrow-function generators — DONE e7427422 (ArgumentCountError class without the name; arrow-fn generators; new nolib matrix pair)
+T-668 php: scalar parameter and return types are never checked — DONE 2e67e859 + e3111793 (scalar/nullable/union/class param+return types with weak coercion, strict widening, generator args at the call; spec-only from php-src)
 
 # Settled — do not re-open
 
@@ -803,7 +799,7 @@ named function expression's inner name immutable (needs a const flag on the floo
 scope, or a scope-walking extern on every plain-name assignment, measured at
 +21%..+43% elsewhere on that path).
 
-**DECLINED after measurement.** php handle reuse after free (needs refcounts) · swift's module-qualified enum names in collections (`[o.Dir.up]` depends on swiftc's module name) · rbUserObj / rbIsClassObj frame elimination (no gain over 15 pairs) · a real suspension for the replay generators (impossible under the pinned goja; ~3,600 lines pure-MetaJS) · CPS coroutines in the emitter · full correct rounding of the transcendentals · a shared nominal type id on boxed values (cheap to store, but every consumer needs static types the grammars do not have; split per language) · matching Apple libm's last digit (ruby atan2: no portable algorithm reproduces it, 1.6% of pairs differ even from the correctly rounded value) · js sloppy-mode primitive `this` boxing (needs wrapper objects in every engine) · a generator's `finally` at collection (python needs refcount timing; no finalizers, manual 7.8) · `i in arr` after `delete` · iterator close on
+**DECLINED after measurement.** php per-file strict_types (the probes and suites are single-file programs; the whole-program flag equals per-file there) · php handle reuse after free (needs refcounts) · swift's module-qualified enum names in collections (`[o.Dir.up]` depends on swiftc's module name) · rbUserObj / rbIsClassObj frame elimination (no gain over 15 pairs) · a real suspension for the replay generators (impossible under the pinned goja; ~3,600 lines pure-MetaJS) · CPS coroutines in the emitter · full correct rounding of the transcendentals · a shared nominal type id on boxed values (cheap to store, but every consumer needs static types the grammars do not have; split per language) · matching Apple libm's last digit (ruby atan2: no portable algorithm reproduces it, 1.6% of pairs differ even from the correctly rounded value) · js sloppy-mode primitive `this` boxing (needs wrapper objects in every engine) · a generator's `finally` at collection (python needs refcount timing; no finalizers, manual 7.8) · `i in arr` after `delete` · iterator close on
 `throw` (a depth stack cannot survive `for await`) · a catchable unknown-name error
 in java/go/swift/csharp/metajs (COMPILE-time in each real toolchain) · kotlin
 `:script` → `!"token"` · `case_map` into layer 2 (135×) · retiring the Go twin
