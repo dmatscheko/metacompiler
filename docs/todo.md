@@ -64,7 +64,7 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-683 python: `__name__` is undefined at module level; `type(super)` / `isinstance(super(), super)`; `__classdictcell__` · P1 · PY · OPEN [V]
+### T-683 python: `__name__` is undefined at module level; `type(super)` / `isinstance(super(), super)`; `__classdictcell__` · P1 · PY · IN PROGRESS (PY worker, round 14) [V]
 `print(__name__)` → NameError in all engines (CPython `__main__`), so `if __name__ == "__main__":` fails — P1. `type(super)` →
 `super` (CPython `type`); `type(super()) is super`, `isinstance(super(), super)` → False (CPython True): the name `super` reads as a
 bound proxy, not the type. CPython 3.14 puts `__classdictcell__` in a metaclass namespace for a class body defining a function; we
