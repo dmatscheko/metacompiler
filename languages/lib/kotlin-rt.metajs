@@ -4392,6 +4392,13 @@ function ktSeqMethodK(arr, name, args, kind) {
         for (i = 0; i < es.length; i = i + 1) { out.push(ktCall2(f, i, es[i])) }
         return out
     }
+    if (name == "mapIndexedNotNull") {
+        for (i = 0; i < es.length; i = i + 1) {
+            v = ktCall2(f, i, es[i])
+            if (!rtIsNil(v)) { out.push(v) }
+        }
+        return out
+    }
     if (name == "mapNotNull") {
         for (i = 0; i < es.length; i = i + 1) {
             v = ktCall1(f, es[i])
@@ -4770,6 +4777,36 @@ function ktSeqMethodK(arr, name, args, kind) {
         if (es.length == 0) { ktNoElemNull() }
         return ktSortBy(es, f, false)[0]
     }
+    // maxWith / minWith by a Comparator: the FIRST greatest (least) element.
+    if (name == "maxWith" || name == "minWith" || name == "maxWithOrNull" || name == "minWithOrNull") {
+        if (es.length == 0) {
+            if (name == "maxWithOrNull" || name == "minWithOrNull") { return null }
+            ktNoElemNull()
+        }
+        best = es[0]
+        b = name == "maxWith" || name == "maxWithOrNull"
+        for (i = 1; i < es.length; i = i + 1) {
+            n = ktNum(ktCall2(f, best, es[i]))
+            if ((b && n < 0) || (!b && n > 0)) { best = es[i] }
+        }
+        return best
+    }
+    // firstNotNullOf / firstNotNullOfOrNull: the first non-null transform.
+    if (name == "firstNotNullOf" || name == "firstNotNullOfOrNull") {
+        for (i = 0; i < es.length; i = i + 1) {
+            v = ktCall1(f, es[i])
+            if (!rtIsNil(v)) { return v }
+        }
+        if (name == "firstNotNullOfOrNull") { return null }
+        ktRaise("NoSuchElementException", "No element of the collection was transformed to a non-null value.")
+    }
+    // binarySearch(element[, comparator]) or binarySearch { comparison }: java's
+    // search over the (assumed sorted) list, -(insertion point) - 1 on a miss.
+    if (name == "binarySearch") { return k3BinSearch(es, args) }
+    if (name == "fill") {
+        for (i = 0; i < es.length; i = i + 1) { es[i] = f }
+        return undefined
+    }
     if (name == "onEach") {
         for (i = 0; i < es.length; i = i + 1) { ktCall1(f, es[i]) }
         return arr
@@ -4786,13 +4823,21 @@ function ktSeqMethodK(arr, name, args, kind) {
         } else { out.push(f) }
         return out
     }
+    // minus(element) drops the FIRST occurrence only; minus(collection) drops
+    // every element the collection contains.
     if (name == "minus") {
         oth = [f]
-        if (k3IsCollection(f)) { oth = ktElems(f) }
+        var many = k3IsCollection(f)
+        if (many) { oth = ktElems(f) }
+        var gone = false
         for (i = 0; i < es.length; i = i + 1) {
             b = false
             for (j = 0; j < oth.length; j = j + 1) {
                 if (ktEqVals(oth[j], es[i])) { b = true }
+            }
+            if (b && !many) {
+                b = !gone
+                gone = true
             }
             if (!b) { out.push(es[i]) }
         }
@@ -5081,6 +5126,22 @@ function k3WhileCut(es, f) {
         if (!k3Truthy(ktCall1(f, es[i]))) { return i }
     }
     return es.length
+}
+
+// k3BinSearch is the binarySearch arm of ktSeqMethodK (jsrtkotlin.go).
+function k3BinSearch(es, args) {
+    var f = ktArg(args, 0)
+    var byFn = args.length == 1 && ktIsFn(f)
+    var byCmp = args.length > 1 && ktIsFn(args[1])
+    var lo = 0
+    var hi = es.length - 1
+    while (lo <= hi) {
+        var mid = Math.floor((lo + hi) / 2)
+        var c = 0
+        if (byFn) { c = k2Int(ktCall1(f, es[mid])) } else if (byCmp) { c = k2Int(ktCall2(args[1], es[mid], f)) } else { c = k4CmpValues(es[mid], f) }
+        if (c < 0) { lo = mid + 1 } else if (c > 0) { hi = mid - 1 } else { return mid }
+    }
+    return -(lo + 1)
 }
 
 // takeLastWhile / dropLastWhile cut after the last element the predicate rejects.

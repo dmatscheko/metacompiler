@@ -2401,7 +2401,12 @@ func init() {
 							return w(v)
 						}
 					} else if !isUndefOrNull(t) {
-						if v := rt.getMember(t, name); !isUndefOrNull(v) {
+						// A builtin `this` (a String, a List) answers through the
+						// Kotlin member surface, not js_mcall's JavaScript one: an
+						// unqualified sort() inside list.apply { } is
+						// MutableList.sort. The twin is js_ktget's step 2 in
+						// languages/lib/kotlin-rt.metajs.
+						if v, ok := rt.ktRecvMember(t, name, iscall); ok && !isUndefOrNull(v) {
 							if rt.traced {
 								rt.trVar("read", name, v)
 							}
@@ -2577,6 +2582,16 @@ func init() {
 				r = next(a)
 			} else {
 				r = m["js_get"](a)
+			}
+			// js_get answers a String's or a List's own JavaScript methods
+			// (split, sort, ...); no Kotlin property of either is a function, so
+			// one is a miss here, as it is natively.
+			if _, isFn := u(r).(*boundMethod); isFn {
+				if _, isStr := o.(string); isStr {
+					r = w(jsUndef)
+				} else if _, isArr := o.(*jsArray); isArr {
+					r = w(jsUndef)
+				}
 			}
 			// `.size` is Kotlin's collection length. The emitter does not rewrite it
 			// to `.length` for every receiver, since a user class may declare its own
@@ -4989,10 +5004,12 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 			out = append(out, ktElems(rt, e)...)
 		}
 		return arr(out), true
-	case "mapIndexed":
-		out := make([]interface{}, len(es))
+	case "mapIndexed", "mapIndexedNotNull":
+		out := []interface{}{}
 		for i, e := range es {
-			out[i] = rt.ktCall(f, float64(i), e)
+			if v := rt.ktCall(f, float64(i), e); name == "mapIndexed" || !isUndefOrNull(v) {
+				out = append(out, v)
+			}
 		}
 		return arr(out), true
 	case "mapNotNull":
@@ -5520,6 +5537,64 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 			rt.ktNoElem(nil)
 		}
 		return ktSortBy(rt, es, f, name == "maxBy").elems[0], true
+	// maxWith / minWith by a Comparator: the FIRST greatest (least) element.
+	case "maxWith", "minWith", "maxWithOrNull", "minWithOrNull":
+		if len(es) == 0 {
+			if strings.HasSuffix(name, "OrNull") {
+				return jsNull, true
+			}
+			rt.ktNoElem(nil)
+		}
+		best := es[0]
+		isMax := strings.HasPrefix(name, "max")
+		for _, e := range es[1:] {
+			c := rt.toNumber(rt.ktCall(f, best, e))
+			if (isMax && c < 0) || (!isMax && c > 0) {
+				best = e
+			}
+		}
+		return best, true
+	// firstNotNullOf / firstNotNullOfOrNull: the first non-null transform.
+	case "firstNotNullOf", "firstNotNullOfOrNull":
+		for _, e := range es {
+			if v := rt.ktCall(f, e); !isUndefOrNull(v) {
+				return v, true
+			}
+		}
+		if name == "firstNotNullOfOrNull" {
+			return jsNull, true
+		}
+		rt.ktRaise("NoSuchElementException", "No element of the collection was transformed to a non-null value.")
+	// binarySearch(element[, comparator]) or binarySearch { comparison }: java's
+	// search over the (assumed sorted) list, -(insertion point) - 1 on a miss.
+	case "binarySearch":
+		lo, hi := 0, len(es)-1
+		for lo <= hi {
+			mid := (lo + hi) / 2
+			var c int
+			switch {
+			case len(args) == 1 && isCallable(f):
+				c = jsToInt(rt.toNumber(rt.ktCall(f, es[mid])))
+			case len(args) > 1 && isCallable(args[1]):
+				c = jsToInt(rt.toNumber(rt.ktCall(args[1], es[mid], f)))
+			default:
+				c = rt.ktCmpValues(es[mid], f)
+			}
+			switch {
+			case c < 0:
+				lo = mid + 1
+			case c > 0:
+				hi = mid - 1
+			default:
+				return float64(mid), true
+			}
+		}
+		return float64(-(lo + 1)), true
+	case "fill":
+		for i := range es {
+			es[i] = f
+		}
+		return jsUndef, true
 	case "onEach":
 		for _, e := range es {
 			rt.ktCall(f, e)
@@ -5538,12 +5613,16 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 			out = append(out, f)
 		}
 		return arr(out), true
+	// minus(element) drops the FIRST occurrence only; minus(collection) drops every
+	// element the collection contains.
 	case "minus":
 		rem := []interface{}{f}
-		if ktIsCollection(f) {
+		many := ktIsCollection(f)
+		if many {
 			rem = ktElems(rt, f)
 		}
 		out := []interface{}{}
+		gone := false
 		for _, e := range es {
 			drop := false
 			for _, r := range rem {
@@ -5551,6 +5630,10 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 					drop = true
 					break
 				}
+			}
+			if drop && !many {
+				drop = !gone
+				gone = true
 			}
 			if !drop {
 				out = append(out, e)

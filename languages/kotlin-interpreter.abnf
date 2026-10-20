@@ -6071,9 +6071,13 @@ NotMemberKw = :script(~~
             }
             return {v: out}
         }
-        if (name == "mapIndexed") {
+        if (name == "mapIndexed" || name == "mapIndexedNotNull") {
             out = []
-            for (i = 0; i < es.length; i++) { out.push(f(i, es[i])) }
+            for (i = 0; i < es.length; i++) {
+                var miv = anytype
+                miv = f(i, es[i])
+                if (name == "mapIndexed" || (miv !== null && miv !== undefined)) { out.push(miv) }
+            }
             return {v: out}
         }
         if (name == "mapNotNull") {
@@ -6425,6 +6429,48 @@ NotMemberKw = :script(~~
             if (es.length == 0) { kNoElem(null) }
             return {v: kSortBy(es, f, name == "maxBy")[0]}
         }
+        // maxWith / minWith by a Comparator: the FIRST greatest (least) element.
+        if (name == "maxWith" || name == "minWith" || name == "maxWithOrNull" || name == "minWithOrNull") {
+            if (es.length == 0) {
+                if (name == "maxWithOrNull" || name == "minWithOrNull") { return {v: null} }
+                kNoElem(null)
+            }
+            var bestw = anytype
+            bestw = es[0]
+            var wmax = name == "maxWith" || name == "maxWithOrNull"
+            for (i = 1; i < es.length; i++) {
+                var wc = f(bestw, es[i])
+                if (wmax ? wc < 0 : wc > 0) { bestw = es[i] }
+            }
+            return {v: bestw}
+        }
+        // firstNotNullOf / firstNotNullOfOrNull: the first non-null transform.
+        if (name == "firstNotNullOf" || name == "firstNotNullOfOrNull") {
+            for (i = 0; i < es.length; i++) {
+                var fnn = anytype
+                fnn = f(es[i])
+                if (fnn !== null && fnn !== undefined) { return {v: fnn} }
+            }
+            if (name == "firstNotNullOfOrNull") { return {v: null} }
+            kRaise("NoSuchElementException", "No element of the collection was transformed to a non-null value.")
+        }
+        // binarySearch(element[, comparator]) or binarySearch { comparison }: java's
+        // search over the (assumed sorted) list, -(insertion point) - 1 on a miss.
+        if (name == "binarySearch") {
+            var blo = 0
+            var bhi = es.length - 1
+            while (blo <= bhi) {
+                var bmid = Math.floor((blo + bhi) / 2)
+                var bc = typeof f == "function" && args.length == 1 ? f(es[bmid])
+                    : (typeof args[1] == "function" ? args[1](es[bmid], f) : kCmpValues(es[bmid], f))
+                if (bc < 0) { blo = bmid + 1 } else if (bc > 0) { bhi = bmid - 1 } else { return {v: bmid} }
+            }
+            return {v: 0 - (blo + 1)}
+        }
+        if (name == "fill") {
+            for (i = 0; i < es.length; i++) { es[i] = f }
+            return {v: undefined}
+        }
         if (name == "onEach") {
             for (i = 0; i < es.length; i++) { f(es[i]) }
             return {v: es}
@@ -6442,12 +6488,17 @@ NotMemberKw = :script(~~
             } else { out.push(f) }
             return {v: out}
         }
+        // minus(element) drops the FIRST occurrence only; minus(collection) drops
+        // every element the collection contains.
         if (name == "minus") {
-            var rem = (Array.isArray(f) || isRange(f)) ? kElems(f) : [f]
+            var many = Array.isArray(f) || isRange(f) || kIsSet(f)
+            var rem = many ? kElems(f) : [f]
+            var gone = false
             out = []
             for (i = 0; i < es.length; i++) {
                 var drop = false
                 for (var ri2 = 0; ri2 < rem.length; ri2++) { if (kEqVals(rem[ri2], es[i])) { drop = true } }
+                if (drop && !many) { drop = !gone; gone = true }
                 if (!drop) { out.push(es[i]) }
             }
             return {v: out}

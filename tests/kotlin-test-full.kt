@@ -4866,6 +4866,31 @@ fun sec98() {
                     && s95err { "Hello".removeRange(3, 1) } == "IndexOutOfBoundsException: End index (1) is less than start index (3).")
 }
 
+// ===== SECTION 99: list members and the implicit receiver =====
+// Every row was read off kotlin-stdlib 2.2.21 driven from java (JDK 24). minus(element)
+// and `-=` drop the FIRST occurrence only. An unqualified member call inside
+// apply / run reaches the receiver's KOTLIN member (MutableList.sort sorts numbers,
+// String.split is Kotlin's), never the host's own method of that name.
+// binarySearch is java's (-(insertion point) - 1 on a miss); maxWith / minWith keep
+// the first extreme.
+fun sec99() {
+    val xs = listOf(5, 3, 8, 1, 9, 2, 8)
+    val ml = mutableListOf(8, 1, 8)
+    ml -= 8
+    check("min99a", "" + xs.minus(8) == "[5, 3, 1, 9, 2, 8]" && "" + (xs - listOf(8, 1)) == "[5, 3, 9, 2]" && "" + ml == "[1, 8]")
+    val srt = mutableListOf(10, 9, 100, 2).apply { sort() }
+    check("rcv99b", "" + srt == "[2, 9, 10, 100]" && "" + "abc".run { split("") } == "[, a, b, c, ]")
+    val ss = xs.sorted()
+    check("bin99c", ss.binarySearch(8) == 5 && ss.binarySearch(4) == -4 && ss.binarySearch(10) == -8
+                    && ss.binarySearch { it.compareTo(5) } == 3 && listOf("a", "c", "e").binarySearch("d", compareBy { it }) == -3)
+    check("lst99d", "" + xs.mapIndexedNotNull { i, v -> if (i > 4) v else null } == "[2, 8]" && xs.firstNotNullOf { if (it > 6) "big$it" else null } == "big8"
+                    && xs.firstNotNullOfOrNull { if (it > 60) it else null } == null)
+    val fl = mutableListOf(1, 2, 3)
+    fl.fill(7)
+    check("lst99e", xs.maxWith(compareBy { it % 5 }) == 9 && xs.minWith(compareBy { it % 5 }) == 5
+                    && emptyList<Int>().maxWithOrNull(compareBy { it }) == null && "" + fl == "[7, 7, 7]")
+}
+
 
 fun main() {
     s01() // SECTION-CALL 01
@@ -4966,6 +4991,7 @@ fun main() {
     sec96() // SECTION-CALL 96
     sec97() // SECTION-CALL 97
     sec98() // SECTION-CALL 98
+    sec99() // SECTION-CALL 99
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

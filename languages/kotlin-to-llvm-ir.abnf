@@ -2604,9 +2604,12 @@ KwContract  = "contract" KwEnd ;
             // In VALUE position there is nothing to decide: Kotlin has no unqualified
             // name that means a method, so the field read is simply tried, and a MISS
             // falls to exactly the block instB would have fallen to (dispB).
+            // A CALL goes straight to js_ktget, whose ktRecvMember binds the
+            // receiver's Kotlin member: js_get under llvm.Run would answer the
+            // host's own JavaScript array method (sort() there sorts as strings).
             var rp2B = curF.NewBlock("")
             rpB.NewCondBr(truthy(rpB, rpB.NewCall(rtRecvProp(), [ps[1]])), fgB, rp2B)
-            rp2B.NewCondBr(truthy(rp2B, ps[2]), instB, fgB)
+            rp2B.NewCondBr(truthy(rp2B, ps[2]), dispB, fgB)
             var mV = instB.NewCall(rtSafeGet(), [thV, ps[1]])
             var hitB = curF.NewBlock("")
             var p2B = curF.NewBlock("")
