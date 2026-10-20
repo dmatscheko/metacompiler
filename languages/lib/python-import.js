@@ -5,7 +5,8 @@
 // The modules (and submodules) written in Python: lib/python-<top>.py.
 var pyLibMods = ["copy", "dataclasses", "collections", "json", "itertools",
                  "functools", "string", "os", "os.path", "random", "importlib", "operator", "enum",
-                 "heapq", "bisect", "contextlib", "io", "types", "textwrap", "abc", "typing", "sys", "fractions", "statistics"]
+                 "heapq", "bisect", "contextlib", "io", "types", "textwrap", "abc", "typing", "sys", "fractions", "statistics",
+                 "datetime", "pprint", "struct", "array", "decimal"]
 
 // The functions the runtime modules math, re and sys offer. Keep in step with
 // pyMHas in languages/lib/python-rt.metajs and pyModHas in abnf/jsrtpymath.go.
