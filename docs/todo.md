@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-667** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-669** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -135,18 +135,25 @@ reports cap 4 where growslice says 1) — escape analysis.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
+### T-667 php: ArgumentCountError unavailable unless spelled; arrow-function generators · P1 · PHP · OPEN [V spec-only]
+`function f($a){} try { f(); } catch (Error $e) { echo get_class($e), ": ", $e->getMessage(); }` → interp uncaught fatal "Too few
+arguments ..."; llvm.Run/native "Call to undefined function ArgumentCountError()" (PHP `ArgumentCountError: Too few arguments to function
+f(), 0 passed in ... on line 4 and exactly 1 expected`) — the library class is compiled only when the program spells its name; load it
+whenever an arity check can raise it. `$af = fn($z) => yield $z; foreach ($af(3) as $v) echo $v;` → "yield outside a generator" in both
+halves (PHP 3: makeArrowFn passes isGen=false / bypasses closureV).
+
+### T-668 php: scalar parameter and return types are never checked · P2 · PHP · OPEN [V spec-only]
+`function h(int $a){ return $a; } echo h("x");` → prints `x` in all engines (PHP coercive mode: TypeError "h(): Argument #1 ($a) must be of
+type int, string given, called in ... on line N"); `h("5")` must coerce to int 5; return types (`: int`) likewise; `declare(strict_types=1)`
+refuses coercion. Implement zend_verify_arg_type / the coercion table (int, float, string, bool, ?T, union types, mixed) in both halves;
+measure the php bench (a check on every typed parameter).
+
 ### T-666 php: the preg_* functions do not exist · P2 · PHP · OPEN [V spec-only]
 `preg_replace('/a/', 'b', 'aa')` → "Call to undefined function preg_replace()" in all engines; preg_match, preg_match_all, preg_split,
 preg_quote, preg_replace_callback, preg_grep and preg_last_error likewise. Implement them on the shared regex engine under a PCRE dialect
 flag (delimiters and modifiers i m s x u U D, named groups (?P<n>), $n / ${n} / \n replacement references, PREG_SPLIT_* and
 PREG_*_ORDER flags, the matches array shape and offsets), additive and flag-gated in lib/regex.js / abnf/jsrtregex.go (full matrix,
 native-full, gen-all for all languages). Settle from php-src ext/pcre and its phpt files.
-
-### T-665 php: generator argument count checked at first resume; get_class/get_parent_class accept too many · P3 · PHP · IN PROGRESS (PHP worker, round 12) [V spec-only]
-`function g($a){ yield $a; } $gen = g(); echo "gen made";` → we print "gen made" then raise at the first resume (PHP raises before: RECV
-precedes ZEND_GENERATOR_CREATE) — an eager check outside the deferred body (compiler: around js_genfn; interpreter: before newGen).
-`get_class(1, 2)` accepted (PHP "get_class() expects at most 1 argument, 2 given"): add the `/* at most 1 */` marker in php-stdlib.php for
-get_class and get_parent_class.
 
 ### T-596 php: binding and undefined-variable warnings are never printed · P3 · PHP · BLOCKED - needs a user decision
 PHP CLI prints `Warning: Cannot unbind $this of closure using $this in <file> on line <n>` (and undefined-variable/-index
@@ -758,6 +765,7 @@ T-659 php: calling a library function through a name built at run time — DONE 
 T-662 php: library functions called with too few arguments do not raise ArgumentCountError — DONE a9a5ac97
 T-658 js: inherited data properties read as undefined; Object.create; Object.prototype method set; shim identity — DONE 9f4ba349
 T-663 php: user functions with too few arguments; library method arity; named-argument "not passed" — DONE 4b257c30
+T-665 php: generator argument count checked at first resume; get_class/get_parent_class accept too many — DONE 9e081dd3
 
 # Settled — do not re-open
 
