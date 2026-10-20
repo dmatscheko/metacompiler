@@ -175,7 +175,7 @@ line tracking at warning sites is worth its cost.
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
 
-### T-645 lua: string arithmetic ignores the strings' metatable · P3 · LUA · OPEN [V]
+### T-645 lua: string arithmetic ignores the strings' metatable · P3 · LUA · IN PROGRESS (LUA worker, round 7) [V]
 `getmetatable("").__add = nil; print(pcall(function() return "1" + "2" end))` → all legs `true 3` (lua 5.5 "attempt to perform arithmetic
 on a string value (constant '1')"); `getmetatable("").__add` is nil in ours, a function in lua (5.4+ coerces strings in arithmetic
 through the string metatable's __add/__sub/...).
