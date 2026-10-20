@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-655** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-656** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -136,13 +136,13 @@ reports cap 4 where growslice says 1) — escape analysis.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-651 php: case-insensitive dynamic function names; `\`-prefixed names; array_map type checks; positional after named in a spread · P2 · PHP · IN PROGRESS (PHP worker, round 6) [V spec-only]
-`$f = 'USORT'; $f($a, 'cmp')` → "Call to undefined function USORT()" in all engines (PHP function names are case-insensitive).
-`$f = '\uasort'; $f(...)` → "Call to undefined function uasort()" when nothing else names uasort (the stdlib function is not loaded
-for a backslash-prefixed string). `array_map('strlen', 5)` prints nothing (PHP TypeError "array_map(): Argument #2 ($array) must be of
-type array, int given", array.c). `$sp = ['k' => 5, 6]; f(...$sp)` accepted (ZEND_SEND_UNPACK: Error "Cannot use positional argument
-after named argument during unpacking"). Callback binding in the caller's frame is still missing for `call_user_func('usort', $a,
-[$this, 'priv'])`, a first-class `usort(...)` value, and named callback arguments; array_udiff_uassoc / array_uintersect_uassoc missing.
+### T-655 php: function_exists(); direct calls in another letter case; callback message; var_dump of a first-class callable · P2 · PHP · OPEN [V spec-only]
+`function_exists('strlen')` → "Call to undefined function function_exists()" in all engines. `function myCmp(){}; MYCMP();` and
+`STRTOUPPER("x")` → "Call to undefined function" (PHP names are case-insensitive; keep the written name in the miss message, lower-case
+the lookup — branch only at mixed-case call sites). An array callback without two members → "array must have exactly two members"
+(zend_API.c 8.2/8.3: "array callback must have exactly two members"; php-interpreter.abnf phpCheckCallback, php-rt.metajs ~3608,
+jsrtphp.go ~3842). `var_dump(usort(...))` → NULL (PHP `object(Closure)#n`). `call_user_func_array('array_map', [[$this,'priv'], $a])` is
+judged in the library frame.
 
 ### T-596 php: binding and undefined-variable warnings are never printed · P3 · PHP · BLOCKED - needs a user decision
 PHP CLI prints `Warning: Cannot unbind $this of closure using $this in <file> on line <n>` (and undefined-variable/-index
@@ -743,6 +743,7 @@ T-606 php: library callbacks outside libCbArg; argument-error order; named arg i
 T-644 js: own-property details of prototypes and functions — DONE 1456360f (a function declaration's arguments/caller/prototype own names stay a recorded value-model limit)
 T-649 python: class-body names visible inside methods; compiled runtime exceptions' `__mro__`; regex lookbehind — DONE 7e3dc3f0 (\N{name} resolves only the 14-name table — a full Unicode name table DECLINED, as for java's \N)
 T-650 java: static field through an instance; StringBuffer; CharSequence; ArrayList.clone; superclass order; Matcher.hitEnd — DONE 898cfc4c b4e0e8a3 7fcc0dcb except Matcher.hitEnd/requireEnd (T-654)
+T-651 php: case-insensitive dynamic function names; `\`-prefixed names; array_map type checks; positional after named in a spread — DONE 350c6dcd
 
 # Settled — do not re-open
 
