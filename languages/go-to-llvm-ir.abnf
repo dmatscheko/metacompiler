@@ -159,8 +159,9 @@ NamedField  = Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } SameLine FTy
 // The field's type TEXT, which gives the field its zero value in a literal that
 // leaves it out (Go zero-fills; an absent property would read back as undefined).
 FType       <~~ push({fty: goWalkQual(firstType(up.in))}) ~~> = Type ;
-// An embedded field's NAME is its type name (w.base09, plus the promoted w.id).
-EmbedField  = [ "*" ] [ Id "." ] Id <~~ push(up.in); push({fty: ""}) ~~> [ FieldTag ] [ ";" ] ;
+// An embedded field's NAME is its type name (w.base09, plus the promoted w.id); an
+// embedded INTERFACE keeps its type, so a literal boxes the value put there.
+EmbedField  = [ "*" ] [ Id "." ] Id <~~ push(up.in); push({fty: goIsIfaceTy(up.in) ? up.in : ""}) ~~> [ FieldTag ] [ ";" ] ;
 FieldTag    = RawString <~~ pop() ~~> ;
 // The method set is parsed when the body is an ordinary method list; any other body
 // falls through to SkipBlock with NO method names ("satisfied by anything"). Twin of
@@ -214,7 +215,7 @@ CExprItem   <~~ push({cat: up.pos, cks: up.start}) ~~> = Expression ;
 // is tried first, so `func f() {` never reaches here.
 FuncDecl    = FuncBodied | FuncNoBody ;
 FuncBodied  <~~ push(makeFuncStmt(takeAll())) ~~>
-            = "func" KwEnd [ Receiver ] Id <~~ push(cPoisonName(up.in)) ~~> [ TypeParams ] ParamList [ SameLine RetTypes ] Block [ ";" ] ;
+            = "func" KwEnd [ Receiver ] Id <~~ push(cPoisonName(up.in)) ~~> [ TypeParams ] ParamList [ SameLine RetTypes ] FuncBody [ ";" ] ;
 FuncNoBody  <~~ push(makeFuncStmt(takeAll())) ~~>
             = "func" KwEnd [ Receiver ] Id <~~ push(cPoisonName(up.in)) ~~> [ TypeParams ] ParamList [ SameLine RetTypes ] NoBody [ ";" ] ;
 // An always-empty match: Go source holds no NUL byte, so the optional never consumes
@@ -458,6 +459,11 @@ DeferChain  <~~ push(foldCallMember(goBoxArgsC(goRecvsC(takeAll(), up.start)))) 
 DeferPrim   = "(" Expression ")" | FuncLit | VarRef ;
 
 Block       <~~ push(makeBlockStmt(takeAll())); cScopeExit() ~~>
+            = "{" CScopeOn { Statement } "}" ;
+// A function's body is the SAME block as its parameters and results, so it runs in
+// their scope rather than a new one: `i, j := 0, n` with i a named result assigns
+// that result (and declares j) instead of shadowing it.
+FuncBody    <~~ push(makeSeq(takeAll())); cScopeExit() ~~>
             = "{" CScopeOn { Statement } "}" ;
 // Always-empty matches whose only purpose is their TAG, the shape NoBody uses: Go
 // source holds no NUL byte, so the optional never consumes anything. A rule's own tag
@@ -1033,7 +1039,7 @@ CompName    = "int" KwEnd | "string" KwEnd | "bool" KwEnd | Id { "." Id } ;
 
 // func(x int) int { ... }: a function literal; a real closure over its scope.
 FuncLit     <~~ push(makeFuncLit(takeAll())); regSt(up.pos, goFuncLitTy(c.srcSlice(up.start, up.pos))) ~~>
-            = "func" KwEnd ParamList [ RetTypes ] Block ;
+            = "func" KwEnd ParamList [ RetTypes ] FuncBody ;
 
 // []int{1, 2, 3} and [][]int{{1}, {2, 3}} - a slice literal, whose elements may be
 // bare brace groups built against the element type.
@@ -5754,12 +5760,19 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             // a plain number and could not carry it.
             if (itc != null) { return {b: fb, v: emitGiConv(fb, a[0], itc)} }
             if (!isSliceTy) { return {b: fb, v: emitConvV(fb, t, a[0])} }
-            // []byte(s) / []rune(s): the header records the element type, so a later
-            // bs[0] += 200 wraps at 8 bits the way Go's byte does. T(nil) of a slice
-            // type is its nil slice (js_not: null or undefined); twin of makeConv.
-            return emitSelect(fb, callExt(fb, "js_not", [a[0]]),
-                              function(nb) { return {b: nb, v: emitZeroTy(nb, t)} },
-                              function(cb) { return {b: cb, v: emitSlT(cb, emitSlOf(cb, emitConvV(cb, t, a[0])), elemTy(t))} })
+            // A slice header converts to the defined slice type unchanged, sharing its
+            // backing store (`IntSlice(xs).Swap(0, 1)` swaps xs's elements). A string
+            // or plain array is converted into a fresh header that records the element
+            // type, so a later bs[0] += 200 wraps at 8 bits the way Go's byte does.
+            // T(nil) of a slice type is its nil slice (js_not: null or undefined);
+            // twin of makeConv.
+            return emitSelect(fb, emitIsSl(fb, a[0]),
+                function(tb) { return {b: tb, v: a[0]} },
+                function(xb) {
+                    return emitSelect(xb, callExt(xb, "js_not", [a[0]]),
+                        function(nb) { return {b: nb, v: emitZeroTy(nb, t)} },
+                        function(cb) { return {b: cb, v: emitSlT(cb, emitSlOf(cb, emitConvV(cb, t, a[0])), elemTy(t))} })
+                })
         })
     }
     // js_goconv only knows plain arrays, so a slice argument hands over its
@@ -6104,7 +6117,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
 
     // Go stdlib packages the runtime provides (resolveImport lives in lib/compile-core.js;
     // exact-match paths, so sub-packages like "encoding/json" are listed in full).
-    core.stdlibImports = ["fmt", "os", "strconv", "sort", "errors", "bufio", "io", "time", "sync", "bytes", "unicode", "regexp", "path", "encoding/json", "context", "flag", "log", "reflect"]
+    core.stdlibImports = ["fmt", "os", "strconv", "errors", "bufio", "io", "time", "sync", "bytes", "unicode", "regexp", "path", "encoding/json", "context", "flag", "log", "reflect"]
     function fail(msg) { println("go compiler error: " + msg); exit(1) }
 
     // Project-file imports: import "mathbox" -> mathbox.go (a slash path like "a/b" ->

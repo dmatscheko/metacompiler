@@ -2033,8 +2033,11 @@ function goBoxArgsC(items) {
             }
         } else if (s != null && typeof s == "object" && s.kind == "mcall" && s.rc != null) {
             // A method's interface-typed parameter boxes its argument, as goCallBoxC
-            // does for a function's.
+            // does for a function's, and so does a package function's.
             var mp = goMethPTysOf(s.rc, s.name)
+            if (mp == null && !s.rc.loc && goPkgNames["$" + s.rc.text] === true && goFnPTys["$" + s.rc.text + "." + s.name] !== undefined) {
+                mp = goFnPTys["$" + s.rc.text + "." + s.name]
+            }
             var k = 0
             while (mp != null && k < s.args.length) {
                 if (!(s.spread && k == s.args.length - 1)) {
@@ -2359,6 +2362,14 @@ function goPreFunc(text, i) {
         goFnPTys["$" + name] = goPreParams(text.substring(ps + 1, i))
         goFnSig["$" + name] = goSigAt(text, ps)
     }
+    // Seen from outside, a package function's parameter types are qualified
+    // ("Interface" is "sort.Interface"), so `sort.Sort(byAge)` boxes its argument.
+    if (recv == "" && goPrePkg != "") {
+        var qps = goPreParams(text.substring(ps + 1, i))
+        var qi = 0
+        while (qi < qps.length) { qps[qi] = goPkgQual(goPrePkg, qps[qi]); qi = qi + 1 }
+        goFnPTys["$" + goPrePkg + "." + name] = qps
+    }
     i = stSkipWs(text, i + 1)
     var rty = ""
     var nres = 0
@@ -2417,6 +2428,7 @@ function goPreType(text, i) {
     }
     if (rest.substring(0, 9) == "interface") {
         goIfaceTys["$" + name] = true
+        if (goPrePkg != "") { goIfaceTys["$" + goPrePkg + "." + name] = true }
         var iob = text.indexOf("{", i)
         var icb = iob < 0 ? -1 : stClose(text, iob)
         if (icb > 0) { goPreIfaceMeths(name, text.substring(iob + 1, icb)) }
@@ -2579,8 +2591,11 @@ function goPreField(sname, f) {
             var ty = stNoWs(t.substring(j))
             var k = 0
             while (k < names.length) { goNoteFld(sname, names[k], ty); k = k + 1 }
+            return
         }
-        return
+        // One name and no type: the field is EMBEDDED (`Sw`, `pkg.T`).
+        if (names.length > 1) { return }
+        break
     }
     // embedded
     var et = stNoWs(t)
@@ -2731,6 +2746,9 @@ function goDtPlan(rc, name) {
     var t = rc == null ? "" : stChainFrom(rc.head, rc.hty, rc.loc, rc.text)
     var bt = (t.length > 0 && t.charAt(0) == "*") ? t.substring(1) : t
     var bk = goTyKey(bt)
+    // A struct whose FIELD has the name holds a func value there: `l.Swap(i, j)`
+    // calls it, whichever defined types declare a Swap method.
+    if (bt != "" && goPreFld["$" + bk + "." + name] !== undefined) { return null }
     if (bt != "" && goMethRty["$" + bk + "." + name] !== undefined) {
         if (!goIsDefTy(bt)) { return null }
         return {fn: bt + "." + name, ty: bt, ptr: goMethPtr["$" + bk + "." + name] === true, dyn: false,
@@ -2745,6 +2763,7 @@ function goDtPlan(rc, name) {
 function goLibFile(path) {
     if (path == "strings") { return "lib/go-strings.go" }
     if (path == "math") { return "lib/go-math.go" }
+    if (path == "sort") { return "lib/go-sort.go" }
     return ""
 }
 // The method EXPRESSION T.M of a defined type T (`f := Color.String`): the method's

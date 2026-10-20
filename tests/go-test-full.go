@@ -47,6 +47,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"sort"
 	"strings"
 )
 
@@ -4373,6 +4374,90 @@ func s82() {
 
 type U82 uint8
 
+// ===== SECTION 83: package sort, and what it leans on =====
+// sort is Go source (languages/lib/go-sort.go) running Go's own algorithms, so the
+// ORDER OF EQUAL ELEMENTS after Sort and Slice is go's: past twelve elements
+// pdqsort is not stable. The expected values are go run's.
+type R83 struct{ k, id int }
+
+type ByK83 []R83
+
+func (a ByK83) Len() int           { return len(a) }
+func (a ByK83) Less(i, j int) bool { return a[i].k < a[j].k }
+func (a ByK83) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+
+func ids83(a []R83) string {
+	s := ""
+	for _, r := range a {
+		s += fmt.Sprint(r.id)
+		s += " "
+	}
+	return s
+}
+
+func mk83() []R83 {
+	ks := []int{3, 1, 2, 1, 3, 0, 2, 1, 3, 0, 1, 2, 3, 0, 1, 2, 2, 1, 0, 3}
+	out := []R83{}
+	for i, k := range ks {
+		out = append(out, R83{k, i})
+	}
+	return out
+}
+
+type IS83 []int
+
+func (a IS83) Swap(i, j int) { a[i], a[j] = a[j], a[i] }
+
+type Sw83 interface{ Swap(i, j int) }
+
+// A struct FIELD named like a method some defined type declares.
+type LS83 struct{ Swap func(i, j int) }
+
+type Rev83 struct{ Sw83 }
+
+// A := naming a result of the function assigns it: the body is the results' block.
+func nr83(n int) (i int) {
+	i, j := 5, n
+	i += j
+	return
+}
+
+func s83() {
+	a := mk83()
+	sort.Slice(a, func(i, j int) bool { return a[i].k < a[j].k })
+	check("srt1", ids83(a) == "5 18 13 9 10 14 1 7 17 3 11 2 15 16 6 4 12 0 8 19 ")
+	b := mk83()
+	sort.SliceStable(b, func(i, j int) bool { return b[i].k < b[j].k })
+	check("srt2", ids83(b) == "5 9 13 18 1 3 7 10 14 17 2 6 11 15 16 0 4 8 12 19 ")
+	c := mk83()
+	sort.Sort(sort.Reverse(ByK83(c)))
+	check("srt3", ids83(c) == "0 19 4 12 8 2 16 15 6 11 10 7 14 3 17 1 9 13 5 18 " && sort.IsSorted(sort.Reverse(ByK83(c))))
+	xs := []int{5, -2, 9, 0, 5, 3}
+	fs := []float64{2.5, math.NaN(), -1, math.Inf(1), 0}
+	ss := []string{"pear", "Apple", "fig", "apple"}
+	sort.Ints(xs)
+	sort.Float64s(fs)
+	sort.Strings(ss)
+	check("srt4", fmt.Sprint(xs, fs, ss, sort.SearchInts(xs, 4), sort.SearchStrings(ss, "fig"), sort.IntsAreSorted(xs)) ==
+		"[-2 0 3 5 5 9] [NaN -1 0 2.5 +Inf] [Apple apple fig pear] 3 2 true")
+	is := sort.IntSlice{3, 1, 2}
+	is.Sort()
+	i, found := sort.Find(len(xs), func(i int) int { return 5 - xs[i] })
+	check("srt5", fmt.Sprint(is, is.Search(2), sort.Search(100, func(i int) bool { return i*i >= 50 }), i, found) == "[1 2 3] 1 8 3 true")
+	// Converting a slice to a defined slice type shares its backing array; a func
+	// field is called even where a defined type has a method of that name; a
+	// method promoted from an embedded interface is a method value too.
+	ys := []int{1, 2, 3}
+	IS83(ys).Swap(0, 2)
+	var sw Sw83 = IS83(ys)
+	l := LS83{sw.Swap}
+	l.Swap(0, 1)
+	r := &Rev83{IS83(ys)}
+	f := r.Swap
+	f(1, 2)
+	check("srt6", fmt.Sprint(ys, nr83(3)) == "[2 1 3] 8")
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -4456,6 +4541,7 @@ func main() {
 	s80() // SECTION-CALL 80
 	s81() // SECTION-CALL 81
 	s82() // SECTION-CALL 82
+	s83() // SECTION-CALL 83
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

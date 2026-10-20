@@ -143,8 +143,9 @@ StructBody  = "struct" KwEnd "{" { FieldDecl } "}" ;
 FieldDecl   = NamedField | EmbedField ;
 NamedField  = Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } SameLine FType [ FieldTag ] [ ";" ] ;
 FType       <~~ push({fty: goWalkQual(firstType(up.in))}) ~~> = Type ;
-// An embedded field's NAME is its type name (w.base09 as well as the promoted w.id).
-EmbedField  = [ "*" ] [ Id "." ] Id <~~ push(up.in); push({fty: ""}) ~~> [ FieldTag ] [ ";" ] ;
+// An embedded field's NAME is its type name (w.base09 as well as the promoted w.id);
+// an embedded INTERFACE keeps its type, so a literal boxes the value put there.
+EmbedField  = [ "*" ] [ Id "." ] Id <~~ push(up.in); push({fty: goIsIfaceTy(up.in) ? up.in : ""}) ~~> [ FieldTag ] [ ";" ] ;
 FieldTag    = RawString <~~ pop() ~~> ;
 // The method set is parsed when the body is an ordinary method list. The SkipBlock
 // alternative behind it accepts every other interface body - a constraint interface
@@ -195,7 +196,7 @@ CExprItem   <~~ push({cat: up.pos, cks: up.start}) ~~> = Expression ;
 // is tried first, so `func f() {` never reaches here.
 FuncDecl    = FuncBodied | FuncNoBody ;
 FuncBodied  <~~ buildFunc(takeAll()) ~~>
-            = "func" KwEnd [ Receiver ] Id <~~ push(cPoisonName(up.in)) ~~> [ TypeParams ] ParamList [ SameLine RetTypes ] Block [ ";" ] ;
+            = "func" KwEnd [ Receiver ] Id <~~ push(cPoisonName(up.in)) ~~> [ TypeParams ] ParamList [ SameLine RetTypes ] FuncBody [ ";" ] ;
 FuncNoBody  <~~ buildFunc(takeAll()) ~~>
             = "func" KwEnd [ Receiver ] Id <~~ push(cPoisonName(up.in)) ~~> [ TypeParams ] ParamList [ SameLine RetTypes ] NoBody [ ";" ] ;
 // An always-empty match: Go source holds no NUL byte, so the optional never consumes
@@ -441,6 +442,11 @@ DeferChain  <~~ push(foldCallMember(goBoxArgsC(goRecvsC(takeAll(), up.start)))) 
 DeferPrim   = "(" Expression ")" | FuncLit | VarRef ;
 
 Block       <~~ push(makeBlockStmt(takeAll())); cScopeExit() ~~>
+            = "{" CScopeOn { Statement } "}" ;
+// A function's body is the SAME block as its parameters and results, so it runs in
+// their scope rather than a new one: `i, j := 0, n` with i a named result assigns
+// that result (and declares j) instead of shadowing it.
+FuncBody    <~~ push(goStmts(takeAll(), false)); cScopeExit() ~~>
             = "{" CScopeOn { Statement } "}" ;
 // Always-empty matches whose only purpose is their TAG, the shape NoBody uses: Go
 // source holds no NUL byte, so the optional never consumes anything. A rule's own tag
@@ -1061,7 +1067,7 @@ RuneLit     <~~ push(goRuneLitC(pop(), up.pos)) ~~>
 
 // func(x int) int { ... }: a function literal; a real closure over its scope.
 FuncLit     <~~ push(makeFuncLit(takeAll())); regSt(up.pos, goFuncLitTy(c.srcSlice(up.start, up.pos))) ~~>
-            = "func" KwEnd ParamList [ RetTypes ] Block ;
+            = "func" KwEnd ParamList [ RetTypes ] FuncBody ;
 
 MapTypeZ    = "map" KwEnd "[" KType "]" ZType ;
 // The KEY type text, which an elided struct key is built against (see CompKey).
@@ -2142,6 +2148,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 var byPtr = o.__class["__ptr$" + name] == true
                 return bindMethod(byPtr ? o : goCopyBy(o, "S"), o.__class[name])
             }
+            // ... and a method promoted from an embedded field, bound to that field.
+            var pm = goPromoted(o, name)
+            if (pm != null) { return bindMethod(pm.recv, pm.fn) }
         }
         return core.getField(o, name)
     }
@@ -3522,15 +3531,17 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function thunkOf(it) { return (typeof it == "function") ? it : it.t }
 
     // The block runs its statements in order and resolves a goto to one of its OWN
-    // labels by jumping to that index; anything else propagates.
-    makeBlockStmt = function(items) {
+    // labels by jumping to that index; anything else propagates. A function body
+    // runs in its parameters' scope (ownScope false, see FuncBody).
+    makeBlockStmt = function(items) { return goStmts(items, true) }
+    function goStmts(items, ownScope) {
         var thunks = []
         var labels = []
         for (var i = 0; i < items.length; i++) {
             thunks.push(thunkOf(items[i]))
             labels.push(labelOf(items[i]))
         }
-        return function() { return runStmts(thunks, labels, true) }
+        return function() { return runStmts(thunks, labels, ownScope) }
     }
     function findLabel(labels, name) {
         for (var i = 0; i < labels.length; i++) { if (labels[i] == name) { return i } }
@@ -6006,7 +6017,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     core.blank = "_"
     // Go stdlib packages the runtime provides (resolveImport lives in lib/interp-core.js;
     // exact-match paths, so sub-packages like "encoding/json" are listed in full).
-    core.stdlibImports = ["fmt", "os", "strconv", "sort", "errors", "bufio", "io", "time", "sync", "bytes", "unicode", "regexp", "path", "encoding/json", "context", "flag", "log", "reflect"]
+    core.stdlibImports = ["fmt", "os", "strconv", "errors", "bufio", "io", "time", "sync", "bytes", "unicode", "regexp", "path", "encoding/json", "context", "flag", "log", "reflect"]
     core.nullWord = "nil"
     // `p.In.X = 1` with a nil p.In walks resolveRef's path; in Go it is a recoverable
     // panic. The hook is additive in lib/interp-core.js - every language that leaves
