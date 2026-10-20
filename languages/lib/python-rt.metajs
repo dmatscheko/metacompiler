@@ -12524,9 +12524,24 @@ function pyMLdexpExp(v) {
     return v
 }
 
+// Go: pyMathReal. A math function's argument as a double: an int, a bool or a
+// float, or an object with __float__ (else __index__); anything else is
+// CPython's TypeError.
 function pyMArg(args, i) {
     if (i >= args.length) { fail("math: missing argument") }
-    return pyNum(args[i])
+    var v = args[i]
+    if (typeof v == "number" || typeof v == "boolean" || pyIsFlo(v) || pyIsBig(v)) { return pyNum(v) }
+    var vc = pyInstClassOf(v)
+    if (vc !== null) {
+        if (pyLookupHas(vc, "__float__")) {
+            var r = pyCall(pyLookupVal(vc, "__float__"), [v])
+            if (!pyIsFlo(r)) { pyRaiseExc("TypeError", pyTypeName(v) + ".__float__ returned non-float (type " + pyTypeName(r) + ")") }
+            return pyNum(r)
+        }
+        if (pyHasIndex(v)) { return pyNum(pyIndexOf(v)) }
+    }
+    pyRaiseExc("TypeError", "must be real number, not " + pyTypeName(v))
+    return 0
 }
 
 // Go: rt.pyMathKwArgs. math.NAME's arguments with its keyword arguments placed:
@@ -12751,9 +12766,22 @@ function pyMathCall(name, args) {
     if (name == "tanh") { return pyMkFlo(Math.tanh(pyMArg(args, 0))) }
     if (name == "degrees") { return pyMkFlo(pyMArg(args, 0) * (180 / 3.141592653589793)) }
     if (name == "radians") { return pyMkFlo(pyMArg(args, 0) * (3.141592653589793 / 180)) }
-    if (name == "floor") { return pyMInt(Math.floor(pyMArg(args, 0))) }
-    if (name == "ceil") { return pyMInt(Math.ceil(pyMArg(args, 0))) }
-    if (name == "trunc") { return pyMInt(Math.trunc(pyMArg(args, 0))) }
+    // An int is itself, exactly; an object answers through __floor__, __ceil__
+    // or __trunc__; anything else goes through its double (Go: pyMathCall).
+    if (name == "floor" || name == "ceil" || name == "trunc") {
+        var iv = pyEArgAt(args, 0)
+        if (typeof iv == "boolean") {
+            if (iv) { return 1 }
+            return 0
+        }
+        if (typeof iv == "number" || pyIsBig(iv)) { return iv }
+        var ic = pyInstClassOf(iv)
+        if (ic !== null && pyLookupHas(ic, "__" + name + "__")) { return pyCall(pyLookupVal(ic, "__" + name + "__"), [iv]) }
+        var fv = pyMArg(args, 0)
+        if (name == "floor") { return pyMInt(Math.floor(fv)) }
+        if (name == "ceil") { return pyMInt(Math.ceil(fv)) }
+        return pyMInt(Math.trunc(fv))
+    }
     if (name == "gcd") {
         if (args.length == 0) { return 0 }
         if (pyMAnyBig(args)) { return pyMGcdBig(args, true) }

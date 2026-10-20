@@ -55,7 +55,41 @@ func pyMathArg(rt *jsrt, args []interface{}, i int) float64 {
 	if i >= len(args) {
 		rt.fail("math: missing argument")
 	}
-	return rt.pyToF(args[i])
+	return rt.pyMathReal(args[i])
+}
+
+// pyMathReal is a math function's argument as a double: an int, a bool or a
+// float, or an object with __float__ (else __index__); anything else is
+// CPython's TypeError. Twin of pyMArg in python-interpreter.abnf and
+// lib/python-rt.metajs.
+func (rt *jsrt) pyMathReal(v interface{}) float64 {
+	switch x := v.(type) {
+	case float64:
+		return x
+	case bool:
+		if x {
+			return 1
+		}
+		return 0
+	case *jsPyFlo:
+		return x.f
+	case *jsBigInt:
+		return rt.pyToF(x)
+	}
+	if _, cls, ok := pyInstance(v); ok {
+		if m, found := pyLookup(cls, "__float__"); found && isCallable(m) {
+			r := rt.call(m, jsUndef, []interface{}{v})
+			if f, isF := r.(*jsPyFlo); isF {
+				return f.f
+			}
+			rt.pyRaise("TypeError", pyTypeName(rt, v)+".__float__ returned non-float (type "+pyTypeName(rt, r)+")")
+		}
+		if r, ok := rt.pyIndexOf(v); ok {
+			return rt.pyToF(r)
+		}
+	}
+	rt.pyRaise("TypeError", "must be real number, not "+pyTypeName(rt, v))
+	return 0
 }
 
 // pyMathInt is CPython's rule for the integral answers: floor/ceil/trunc raise
@@ -386,12 +420,32 @@ func (rt *jsrt) pyMathCall(name string, args []interface{}) interface{} {
 	case "radians":
 		return pyMathFlo(pyMathArg(rt, args, 0) * (math.Pi / 180))
 	// ---- float in, INT out
-	case "floor":
-		return pyMathInt(rt, math.Floor(pyMathArg(rt, args, 0)))
-	case "ceil":
-		return pyMathInt(rt, math.Ceil(pyMathArg(rt, args, 0)))
-	case "trunc":
-		return pyMathInt(rt, math.Trunc(pyMathArg(rt, args, 0)))
+	case "floor", "ceil", "trunc":
+		// An int is itself, exactly; an object answers through __floor__,
+		// __ceil__ or __trunc__; anything else goes through its double.
+		v := argAt(args, 0)
+		switch x := v.(type) {
+		case float64, *jsBigInt:
+			return v
+		case bool:
+			if x {
+				return 1.0
+			}
+			return 0.0
+		}
+		if _, cls, ok := pyInstance(v); ok {
+			if m, found := pyLookup(cls, "__"+name+"__"); found && isCallable(m) {
+				return rt.call(m, jsUndef, []interface{}{v})
+			}
+		}
+		f := pyMathArg(rt, args, 0)
+		switch name {
+		case "floor":
+			return pyMathInt(rt, math.Floor(f))
+		case "ceil":
+			return pyMathInt(rt, math.Ceil(f))
+		}
+		return pyMathInt(rt, math.Trunc(f))
 	case "gcd":
 		if len(args) == 0 {
 			return 0.0

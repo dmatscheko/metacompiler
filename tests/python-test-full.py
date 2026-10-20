@@ -7245,6 +7245,38 @@ def s142():
     check("slotdict", not hasattr(S142Slot(), "__dict__") and hasattr(S142I(1), "__dict__")
           and msgs == ["vars() argument must have __dict__ attribute", "'S142Slot' object has no attribute '__dict__'"])
 
+# ===== SECTION 143: fractions.Fraction; math's real and integral arguments =====
+from fractions import Fraction as S143F
+import math as S143m
+
+class S143Real:
+    def __float__(self):
+        return 2.25
+
+def s143():
+    F = S143F
+    x = F(355, 113)
+    check("frac1", F(1, 3) + F(1, 6) == F(1, 2) and F(3, -6) == F(-1, 2) and F("2_000/3") == F(2000, 3)
+          and F(" -3 / 4 ") == F(-3, 4) and F("1.5e-2") == F(3, 200) and F(0.1) == F(3602879701896397, 36028797018963968)
+          and repr(F(6, 4)) == "Fraction(3, 2)" and str(F(4, 2)) == "2" and F(1, 2) + 0.25 == 0.75
+          and type(F(1) + 1).__name__ == "Fraction" and 2 ** F(3) == 8 and F(-2, 3) ** 3 == F(-8, 27))
+    check("frac2", round(x) == 3 and round(x, 2) == F(157, 50) and S143m.floor(x) == 3 and S143m.ceil(-x) == -3
+          and x.limit_denominator(10) == F(22, 7) and f"{x:.5f}" == "3.14159" and f"{-x:+.1%}" == "-314.2%"
+          and hash(F(1, 2)) == hash(0.5) and sum(F(1, n) for n in range(1, 6)) == F(137, 60)
+          and divmod(F(7, 2), 2) == (1, F(3, 2)) and sorted([F(1, 2), F(1, 3), 0.4]) == [F(1, 3), 0.4, F(1, 2)])
+    try:
+        F(1, 2) / 0
+        check("frac3", False)
+    except ZeroDivisionError as e:
+        check("frac3", str(e) == "Fraction(1, 0)")
+    try:
+        S143m.sqrt("x")
+        check("mathreal", False)
+    except TypeError as e:
+        check("mathreal", str(e) == "must be real number, not str" and S143m.sqrt(S143Real()) == 1.5
+              and S143m.floor(10 ** 20 + 1) == 100000000000000000001 and S143m.trunc(-(2 ** 70) - 1) == -(2 ** 70) - 1
+              and S143m.floor(S143Real()) == 2)
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -7385,5 +7417,6 @@ def main():
     s140() # SECTION-CALL 140
     s141() # SECTION-CALL 141
     s142() # SECTION-CALL 142
+    s143() # SECTION-CALL 143
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

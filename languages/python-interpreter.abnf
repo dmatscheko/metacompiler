@@ -4904,9 +4904,26 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (v < 0 - 2200) { return 0 - 2200 }
         return v
     }
+    // A math function's argument as a double: an int, a bool or a float, or an
+    // object with __float__ (else __index__); anything else is CPython's
+    // TypeError. Twin of pyMathReal in abnf/jsrtpymath.go and
+    // lib/python-rt.metajs.
     function pyMArg(args, i) {
         if (i >= args.length) { fail("math: missing argument") }
-        return floVal(args[i])
+        var v = args[i]
+        if (typeof v == "number" || typeof v == "boolean" || isFlo(v) || bigIsBig(v)) { return floVal(v) }
+        if (pyUser(v)) {
+            var ff = clsFind(v.__class, "__float__")
+            if (ff != null) {
+                var r = anytype
+                r = ff(v)
+                if (!isFlo(r)) { pyListErr("TypeError", pyTypeOf(v).__name + ".__float__ returned non-float (type " + pyTypeOf(r).__name + ")") }
+                return floVal(r)
+            }
+            if (pyHasIndex(v)) { return floVal(pyIndexOf(v)) }
+        }
+        pyListErr("TypeError", "must be real number, not " + pyTypeOf(v).__name)
+        return 0
     }
     // math.NAME's arguments with its keyword arguments placed: only isclose takes
     // any, rel_tol and abs_tol, which land third and fourth. Twin of pyMathKwArgs
@@ -5128,9 +5145,20 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "tanh") { return pyFlo(Math.tanh(pyMArg(args, 0))) }
         if (name == "degrees") { return pyFlo(pyMArg(args, 0) * (180 / 3.141592653589793)) }
         if (name == "radians") { return pyFlo(pyMArg(args, 0) * (3.141592653589793 / 180)) }
-        if (name == "floor") { return pyMInt(Math.floor(pyMArg(args, 0))) }
-        if (name == "ceil") { return pyMInt(Math.ceil(pyMArg(args, 0))) }
-        if (name == "trunc") { return pyMInt(Math.trunc(pyMArg(args, 0))) }
+        // An int is itself, exactly; an object answers through __floor__,
+        // __ceil__ or __trunc__; anything else goes through its double.
+        if (name == "floor" || name == "ceil" || name == "trunc") {
+            var iv = anytype
+            iv = args[0]
+            if (typeof iv == "boolean") { return iv ? 1 : 0 }
+            if (typeof iv == "number" || bigIsBig(iv)) { return iv }
+            var ih = pyUser(iv) ? clsFind(iv.__class, "__" + name + "__") : null
+            if (ih != null) { return ih(iv) }
+            var fv = pyMArg(args, 0)
+            if (name == "floor") { return pyMInt(Math.floor(fv)) }
+            if (name == "ceil") { return pyMInt(Math.ceil(fv)) }
+            return pyMInt(Math.trunc(fv))
+        }
         if (name == "gcd") {
             if (args.length == 0) { return 0 }
             if (pyMAnyBig(args)) { return pyMGcdBig(args, true) }
