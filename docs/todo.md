@@ -137,7 +137,7 @@ reports cap 4 where growslice says 1) — escape analysis.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-657 php: first-class callable identity; var_dump of method callables; builtins without library wrappers · P3 · PHP · OPEN [V spec-only]
+### T-657 php: first-class callable identity; var_dump of method callables; builtins without library wrappers · P3 · PHP · IN PROGRESS (PHP worker, round 8) [V spec-only]
 `Closure::fromCallable('opt') === opt(...)` → compiler true (PHP false: every f(...) / fromCallable makes a new Closure; interp right);
 `spl_object_id($f) === spl_object_id(opt(...))` → true in all engines (PHP false). `var_dump($obj->m(...))` / `A::s(...)` → NULL (fake
 method closures carry no handle or debug record). define/defined/constant/error_reporting/realpath have no library wrapper:
