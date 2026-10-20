@@ -1002,7 +1002,7 @@ DynFieldSfx <~~ push({kind: "dfield", name: pop()}) ~~>
             = "->" ( VarRef | "{" Expression "}" ) ;
 IndexSfx    <~~ push({kind: "index", idx: pop()}) ~~>
             = "[" Expression "]" ;
-CallSfx     <~~ push({kind: "call", args: takeAll()}) ~~>
+CallSfx     <~~ push(makeCallSfx(takeAll())) ~~>
             = "(" [ ArgList ] ")" ;
 
 // An argument list: positional, named (h: 5), spread (...$a) or the PHP 8.1
@@ -1047,7 +1047,7 @@ ArgEnd      = :script(~~
 // that name to it, as LvalArg does a positional one.
 NamedLvalArg <~~ var lab = popLabel(); var lv = makeLvalArg(pop()); lv.argname = lab; push(lv) ~~>
             = ArgLabel Target ArgEnd ;
-NamedArg    <~~ push({argname: popLabel(), argval: pop()}) ~~>
+NamedArg    <~~ push({argname: popLabel(), argval: pop(), dyn: phpLibDynArg(up.in.substring(up.in.indexOf(":") + 1))}) ~~>
             = ArgLabel Expression ;
 ArgLabel    <~~ push({alabel: up.in}) ~~>
             = Id ":" !":" ;
@@ -1058,7 +1058,7 @@ SpreadArg   <~~ push({argspread: pop(), argcv: isCvText(up.in.substring(3))}) ~~
             = "..." Expression ;
 FccArg      <~~ push({fcc: true}) ~~>
             = "..." ;
-PosArg      <~~ push({argval: pop()}) ~~>
+PosArg      <~~ push({argval: pop(), dyn: phpLibDynArg(up.in)}) ~~>
             = Expression ;
 // '::' as a SUFFIX of a member chain: $obj::CONST, $obj::class, $obj::method().
 // The class is taken from the value on the left (an instance, or a class name in a
@@ -4758,6 +4758,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         // what $c(...) yields. Twin of the same arm in php-to-llvm-ir.abnf.
         if (p.name != null && p.args != null && phsCase(p.raw, false) == "closure" && phsCase(p.name, false) == "fromcallable") {
             var fa = p.args
+            if (phpLibDynCall("closure::fromcallable", 1000, fa, "argname", "argspread")) { phpLibAll() }
             return function() { return cloFromCallable(evalArgs(fa).pos[0]) }
         }
         // Closure::bind($c, $newThis, $newScope) is $c->bindTo($newThis, $newScope).
@@ -4782,6 +4783,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             }
             return staticAccess(cls, stName(p), sp, p.args, p.base)
         }
+    }
+    // A call of a value may call a library function by a name built at run time
+    // (phpLibAll). Twin of makeCallSfx in php-to-llvm-ir.abnf.
+    function makeCallSfx(items) {
+        phpLibAll()
+        return {kind: "call", args: items}
     }
     function makeStaticSfx(items) {
         var p = splitStatic(items)
@@ -5984,6 +5991,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             }
         }
         var args = items.slice(1)
+        var cbAt = libCbArg["$" + phsCase(bare, false)]
+        if (phpLibDynCall(phsCase(bare, false), cbAt == undefined ? 1000 : cbAt.at, args, "argname", "argspread")) { phpLibAll() }
         // An engine native taken as a first-class callable is the library's
         // declaration of it, whose parameters it shows, as the compiler's is.
         var fccLib = false
@@ -8124,7 +8133,21 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (viaCall && hasOwn(phpBuiltins, name)) { return name }
         if (phpLib == null) { phpLib = phpLibIndex(load("lib/php-stdlib.php")) }
         phpLibLoad(phpLibKey(phpLib, name))
+        // Twin of the same test in php-to-llvm-ir.abnf's phpLibRef.
+        var lcn = phsCase(name, false)
+        var cbn = libCbArg["$" + lcn]
+        if (!viaCall && phpLibSinkAt(lcn, cbn == undefined ? 1000 : cbn.at) != 1000) { phpLibAll() }
         return name
+    }
+    // Every library function, for a program that may call one by a name built at
+    // run time. Twin of phpLibAll in php-to-llvm-ir.abnf.
+    var phpLibDepth = 0
+    var phpLibAllDone = false
+    function phpLibAll() {
+        if (phpLibDepth > 0 || phpLibAllDone) { return }
+        phpLibAllDone = true
+        if (phpLib == null) { phpLib = phpLibIndex(load("lib/php-stdlib.php")) }
+        for (var i = 0; i < phpLib.named.length; i++) { phpLibLoad(phpLib.named[i]) }
     }
     function phpLibClasses(text) {
         if (phpLib == null) { phpLib = phpLibIndex(load("lib/php-stdlib.php")) }
@@ -8149,7 +8172,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         topClasses = []
         hoisted = {}
         jw = jumpWalkNew()
+        phpLibDepth = phpLibDepth + 1
         c.compile(asg)
+        phpLibDepth = phpLibDepth - 1
         topDefs = outerDefs
         topClasses = outerClasses
         hoisted = outerHoisted

@@ -17,12 +17,13 @@
 // The library's lines; each piece's [first, last] line under its key, "$name"
 // for a function and "#name" in lower case for a class (class names are case
 // insensitive); the class names in lower case; the key of the class each class
-// extends; for each line whether it belongs to a piece; and the names of the
-// functions a program may name, lower-cased between commas.
+// extends; for each line whether it belongs to a piece; the names of the
+// functions a program may name, lower-cased between commas; and their keys.
 function phpLibIndex(text) {
     var lines = text.split("\n")
     var fns = {}
     var names = ","
+    var named = []
     var classes = []
     var bases = {}
     var inFn = []
@@ -41,7 +42,10 @@ function phpLibIndex(text) {
             var name = l.substring(head.length, j)
             if (head == "function ") {
                 cur = "$" + name
-                if (name.substring(0, 5) != "__mec") { names = names + name.toLowerCase() + "," }
+                if (name.substring(0, 5) != "__mec") {
+                    names = names + name.toLowerCase() + ","
+                    named.push(cur)
+                }
             }
             else {
                 cur = "#" + name.toLowerCase()
@@ -53,7 +57,7 @@ function phpLibIndex(text) {
         inFn.push(cur != "")
     }
     if (cur != "") { fns[cur] = [start, lines.length - 1] }
-    return {lines: lines, fns: fns, classes: classes, bases: bases, inFn: inFn, names: names}
+    return {lines: lines, fns: fns, classes: classes, bases: bases, inFn: inFn, names: names, named: named}
 }
 
 // The keyword that opens a piece on line l, or "".
@@ -83,6 +87,117 @@ function phpLibKey(ix, name) {
 // Is lc, a lower-cased name, one of the library's functions a program may name,
 // compiled or not? Twin of function_exists in php-to-llvm-ir.abnf.
 function phpLibNamed(ix, lc) { return lc.indexOf(",") < 0 && ix.names.indexOf("," + lc + ",") >= 0 }
+
+// The position of the callable that lc, a lower-cased function name or
+// "closure::fromcallable", takes by name: -n for each of the last n arguments,
+// libAt for a library function that takes a callback, 1000 for none.
+function phpLibSinkAt(lc, libAt) {
+    if (lc == "call_user_func" || lc == "call_user_func_array" || lc == "is_callable" || lc == "function_exists"
+        || lc == "closure::fromcallable") { return 0 }
+    if (lc == "iterator_apply") { return 1 }
+    return libAt
+}
+
+// Can a call of lc reach a function through a name built at run time? Its
+// callable is the argument at phpLibSinkAt's position or the one named after that
+// parameter; dyn on an argument record is phpLibDynArg's answer for it, and a
+// record without it, or a spread (field spr; lab is the label field), may be
+// anything.
+function phpLibDynCall(lc, libAt, args, lab, spr) {
+    var at = phpLibSinkAt(lc, libAt)
+    if (at == 1000) { return false }
+    var pname = "callback"
+    if (lc == "is_callable") { pname = "value" }
+    if (lc == "function_exists") { pname = "function" }
+    for (var i = 0; i < args.length; i++) {
+        var a = args[i]
+        if (a != null) {
+            if (a[spr] !== undefined) { return true }
+            var hit = false
+            if (a[lab] !== undefined) { hit = a[lab] == pname }
+            else if (at >= 0) { hit = i == at }
+            else { hit = i >= args.length + at }
+            if (hit && a.dyn !== false) { return true }
+        }
+    }
+    return false
+}
+
+// Can argument text t evaluate to a function name built at run time? A string
+// literal names its function where it is written (phpLibRef), and a closure, an
+// array literal (a method callable) or a first-class callable 'f(...)' is no
+// name at all; anything else may be one.
+function phpLibDynArg(t) {
+    var a = 0
+    var z = t.length
+    while (a < z && phpLibSpace(t.charCodeAt(a))) { a = a + 1 }
+    while (z > a && phpLibSpace(t.charCodeAt(z - 1))) { z = z - 1 }
+    if (a == z) { return false }
+    var w = t.substring(a, z)
+    var q = w.charAt(0)
+    if (q == "'" || q == "\"" || q == "[") { return phpLibCloseAt(w, 0) != w.length - 1 }
+    var lead = phpLibLead(w)
+    if (lead.substring(0, 6) == "static") { lead = lead.substring(6) }
+    if (lead.substring(0, 9) == "function(" || lead.substring(0, 10) == "function&(" || lead.substring(0, 3) == "fn("
+        || lead.substring(0, 4) == "fn&(") { return false }
+    if (lead.substring(0, 6) == "array(") { return phpLibCloseAt(w, w.indexOf("(")) != w.length - 1 }
+    if (w.length > 5 && w.substring(w.length - 5) == "(...)") {
+        for (var i = 0; i < w.length - 5; i++) {
+            var ch = w.charCodeAt(i)
+            if (!phpLibWordChar(w, i) && ch != 36 && ch != 92 && ch != 58 && ch != 45 && ch != 62) { return true }
+        }
+        return false
+    }
+    return true
+}
+
+// The first 12 non-blank characters of w, lower-cased.
+function phpLibLead(w) {
+    var out = ""
+    for (var i = 0; i < w.length && out.length < 12; i++) {
+        if (!phpLibSpace(w.charCodeAt(i))) { out = out + w.charAt(i).toLowerCase() }
+    }
+    return out
+}
+
+function phpLibSpace(ch) { return ch == 32 || ch == 9 || ch == 10 || ch == 13 }
+
+// The index in w of what closes the quote or bracket at i: the matching quote,
+// past escapes, or the bracket that balances it, past quoted text; -1 if none.
+// A '"' literal holding a '$' or '{' may interpolate, so it closes nowhere.
+function phpLibCloseAt(w, i) {
+    var open = w.charAt(i)
+    if (open == "'" || open == "\"") {
+        var j = i + 1
+        while (j < w.length) {
+            var d = w.charAt(j)
+            if (d == "\\") { j = j + 2 }
+            else if (d == open) { return j }
+            else if (open == "\"" && (d == "$" || d == "{")) { return -1 }
+            else { j = j + 1 }
+        }
+        return -1
+    }
+    var close = open == "[" ? "]" : ")"
+    var depth = 0
+    var k = i
+    while (k < w.length) {
+        var e = w.charAt(k)
+        if (e == "'" || e == "\"") {
+            var end = phpLibCloseAt(w, k)
+            if (end < 0) { return -1 }
+            k = end + 1
+        } else {
+            if (e == open) { depth = depth + 1 }
+            else if (e == close) {
+                depth = depth - 1
+                if (depth == 0) { return k }
+            }
+            k = k + 1
+        }
+    }
+    return -1
+}
 
 // The keys of the library classes text spells as a whole word, in any case.
 function phpLibClassesIn(ix, text) {

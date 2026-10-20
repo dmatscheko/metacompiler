@@ -746,6 +746,21 @@ $fqf = '\UKSORT';
 $fqf($fqk, 'strcmp');
 check("fn-dyn-qualified-lib", array_keys($fqk), ["x", "y"]);
 
+// A library function called through a name built at run time - directly,
+// through call_user_func and a callback, or tested first - is compiled in,
+// in a method as at the top level.
+class FnDynBuilt {
+    public function rev($s) {
+        $f = 'str' . 'rev';
+        return $f($s);
+    }
+}
+$fdb = ['ar' . 'ray_pro' . 'duct', 'uc' . 'words', 'lc' . 'first'];
+$fdw = function_exists($fdb[1]) ? $fdb[1]('two words') : 'skipped';
+check("fn-dyn-built-lib", [(new FnDynBuilt())->rev('abc'), call_user_func($fdb[0], [2, 3, 4]), $fdw,
+                           array_map($fdb[2], ['AB', 'Cd']), is_callable($fdb[2]), is_callable($fdb[2] . 'x')],
+      ["cba", 24, "Two Words", ["aB", "cd"], true, false]);
+
 // ----- done -----
 echo "features: " . $checks . " checks, " . $fails . " failures\n";
 exit($fails);

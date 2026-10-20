@@ -1054,7 +1054,7 @@ ArgEnd      = :script(~~
         return abnf.newToken("\x01notlval", 0)
     })()
 ~~) ;
-NamedArg    <~~ push(placedArg({aname: argLabel(up.in), pos: pop(), vtext: plainVarText(up.in.substring(up.in.indexOf(":") + 1))})) ~~>
+NamedArg    <~~ push(placedArg({aname: argLabel(up.in), pos: pop(), vtext: plainVarText(up.in.substring(up.in.indexOf(":") + 1)), dyn: phpLibDynArg(up.in.substring(up.in.indexOf(":") + 1))})) ~~>
             = ArgLabel Expression ;
 ArgLabel    = Id ":" !":" ;
 // acv: the name of a spread plain variable, whose elements a by-reference parameter
@@ -1064,7 +1064,7 @@ SpreadArg   <~~ var sv = trimWs(up.in).substring(3); push(placedArg({aspread: po
             = "..." Expression ;
 FccArg      <~~ push({fcc: true}) ~~>
             = "..." ;
-PosArg      <~~ push({pos: pop(), vtext: plainVarText(up.in)}) ~~>
+PosArg      <~~ push({pos: pop(), vtext: plainVarText(up.in), dyn: phpLibDynArg(up.in)}) ~~>
             = Expression ;
 // 'f($a[])' / 'f($x[][$y])': an APPEND target is an argument only for a by-reference
 // parameter, which then binds the new element's cell (targetCell). It has no value to
@@ -3786,9 +3786,11 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         return {kind: "mcall", name: name, args: sfxRest(items), nullsafe: sfxNs(items)}
     }
     // A call of a value may name a method through its class, which php_callable
-    // checks against the class's non-static methods (nsUsed).
+    // checks against the class's non-static methods (nsUsed), or a library
+    // function by a name built at run time (phpLibAll).
     function makeCallSfx(items) {
         nsUsed = true
+        phpLibAll()
         return {kind: "call", args: items, lib: libDynSite()}
     }
     function makeFieldSfx(items) {
@@ -4551,6 +4553,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         // what $c(...) yields. Twin of the same arm in php-interpreter.abnf.
         var fromCb = memT == null && args != null && args.length > 0 && args[0].pos != undefined && baseText != null
             && phsCase(baseText, false) == "closure" && phsCase(mem, false) == "fromcallable"
+        if (fromCb && phpLibDynCall("closure::fromcallable", 1000, args, "aname", "aspread")) { phpLibAll() }
         // Closure::bind($c, $newThis, $newScope) is $c->bindTo($newThis, $newScope).
         var cloBindAt = memT == null && args != null && args.length > 0 && argsArePlain(args) && baseText != null
             && phsCase(baseText, false) == "closure" && phsCase(mem, false) == "bind"
@@ -7036,6 +7039,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 name = bare
             }
         }
+        var cbAt = libCbArg["$" + phsCase(bare, false)]
+        if (phpLibDynCall(phsCase(bare, false), cbAt == undefined ? 1000 : cbAt.at, args, "aname", "aspread")) { phpLibAll() }
         // call_user_func of a library function that takes a callback: that callback
         // is judged here too, the first user frame (cufLib).
         var cufRaw = null
@@ -8217,7 +8222,23 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (!viaCall && (lcn == "bindto" || lcn == "bind" || lcn == "call")) { cloRebind = true }
         if (phpLib == null) { phpLib = phpLibIndex(load("lib/php-stdlib.php")) }
         phpLibLoad(phpLibKey(phpLib, name))
+        // A string naming a function that calls a callable passes it arguments
+        // this site cannot see (phpLibAll).
+        var cbn = libCbArg["$" + lcn]
+        if (!viaCall && phpLibSinkAt(lcn, cbn == undefined ? 1000 : cbn.at) != 1000) { phpLibAll() }
         return name
+    }
+    // A program that may call a function by a name it builds at run time
+    // (phpLibDynCall, a call of a value) gets every library function: which one
+    // it names is only known when it runs. A call in the library's own text
+    // passes on what its caller handed it.
+    var phpLibDepth = 0
+    var phpLibAllDone = false
+    function phpLibAll() {
+        if (phpLibDepth > 0 || phpLibAllDone) { return }
+        phpLibAllDone = true
+        if (phpLib == null) { phpLib = phpLibIndex(load("lib/php-stdlib.php")) }
+        for (var i = 0; i < phpLib.named.length; i++) { phpLibLoad(phpLib.named[i]) }
     }
     function phpLibClasses(text) {
         if (phpLib == null) { phpLib = phpLibIndex(load("lib/php-stdlib.php")) }
@@ -8243,7 +8264,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         topClasses = []
         hoisted = {}
         jw = jumpWalkNew()
+        phpLibDepth = phpLibDepth + 1
         c.compile(asg)
+        phpLibDepth = phpLibDepth - 1
         topDefs = outerDefs
         topClasses = outerClasses
         hoisted = outerHoisted
