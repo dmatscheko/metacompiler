@@ -5,6 +5,13 @@
 // engines. The exception messages are java 24.0.2's.
 package java.lang;
 
+interface CharSequence {
+    int length();
+    char charAt(int index);
+    CharSequence subSequence(int start, int end);
+    default boolean isEmpty() { return length() == 0; }
+}
+
 // The text is `text`, then the levels of a binary counter, then `tail`. An
 // append concatenates onto tail, which stays short: once it holds 64 chars it
 // is carried into the counter, where parts[k] holds 2^k carried tails joined,
@@ -16,8 +23,10 @@ package java.lang;
 // whose bit is clear may hold a stale piece that is never read. before is the
 // length of everything ahead of tail.
 // Serializable is lib/java-util.java's, which a program that can name it has
-// loaded (jUtilWants); without it the clause names nothing.
-final class StringBuilder implements Serializable {
+// loaded (jUtilWants); without it the clause names nothing. StringBuffer
+// extends this class to share its body, which java's does not (jxNotA in
+// lib/java-strings.js answers instanceof as java does).
+class StringBuilder implements Serializable, CharSequence {
     String text;
     String tail;
     String[] parts;
@@ -112,6 +121,7 @@ final class StringBuilder implements Serializable {
         return flat().charAt(index);
     }
     public String toString() { return flat(); }
+    public CharSequence subSequence(int start, int end) { return substring(start, end); }
     public String substring(int start) { return substring(start, length()); }
     public String substring(int start, int end) {
         checkRange(start, end);
@@ -181,4 +191,12 @@ final class StringBuilder implements Serializable {
         set(new String(cs));
         return this;
     }
+}
+
+// java.lang.StringBuffer: StringBuilder's operations under its own class.
+final class StringBuffer extends StringBuilder {
+    public StringBuffer() { super(); }
+    public StringBuffer(int capacity) { super(capacity); }
+    public StringBuffer(String str) { super(str); }
+    public StringBuffer(CharSequence seq) { super(seq); }
 }

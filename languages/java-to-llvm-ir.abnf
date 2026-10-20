@@ -1334,7 +1334,7 @@ LeadMods    = { Annotation | ModKw } ;
 // __super when it has no superclass (so its default methods and `instanceof`
 // work), and every further one is listed on __ifaces and has its default
 // methods copied in.
-ImplementsSkip <~~ push({impls: takeAll()}) ~~> = KwImplements IType { "," IType } ;
+ImplementsSkip <~~ push(jNoteImpls(takeAll())) ~~> = KwImplements IType { "," IType } ;
 IType       <~~ push(stripWs(up.in)) ~~> = Type ;
 Throws      = KwThrows Type { "," Type } ;
 CatchType   = { Annotation } Type { "|" { Annotation } Type } ;
@@ -4802,6 +4802,13 @@ HasStatic   = :script(~~
     var jPatternLoaded = false
     var jUtilWant = false
     var jLangWant = false
+    // An implements clause naming CharSequence wants lib/java-lang.java too.
+    function jNoteImpls(names) {
+        for (var i = 0; i < names.length; i++) {
+            if (jLangWants(jSimpleName(baseTypeName(names[i])))) { jLangWant = true }
+        }
+        return {impls: names}
+    }
     var jPkgPrefix = ""
     function jLoadLib(file, prefix) {
         var text = load(file)

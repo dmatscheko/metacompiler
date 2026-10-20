@@ -7,6 +7,7 @@
 
 import java.util.function.Function;
 import java.util.function.BinaryOperator;
+import java.io.*;
 
 class Counter {
     int value;
@@ -176,6 +177,9 @@ class Box {
  *   3. Outer.this.f still reaches the field that a local is shadowing
  */
 interface Sup { String get(); }
+
+// Serializable through `import java.io.*`.
+class Ser implements Serializable { }
 
 class Encl {
     int fld = 42;
@@ -808,6 +812,8 @@ public class Main {
             Main.check("iof-binding-else", false);
         }
         Main.check("iof-int", 7 instanceof Integer);
+        Object iofSer = new Ser();
+        Main.check("iof-io-star", iofSer instanceof Serializable && !(iofObj instanceof Ser));
 
         // ----- unqualified instance / static field access -----
         // A member body may name a field without `this.` / `Cls.`, and a local or

@@ -200,6 +200,9 @@ class ArrayList<E> implements List<E>, Cloneable, Serializable, RandomAccess {
         elems = new Object[c.size()];
         addAll(c);
     }
+    // A shallow copy of the list's own class; LinkedList and Stack, which
+    // extend this one here, answer their own.
+    public Object clone() { return new ArrayList<E>(this); }
 
     void writable() {
         if (frozen) { throw new UnsupportedOperationException(); }
@@ -1353,6 +1356,7 @@ final class OptionalDouble {
 class LinkedList<E> extends ArrayList<E> implements Deque<E> {
     public LinkedList() { super(); }
     public LinkedList(Collection<? extends E> c) { super(c); }
+    public Object clone() { return new LinkedList<E>(this); }
     void checkIndex(int index) {
         if (index < 0 || index >= count) { throw new IndexOutOfBoundsException("Index: " + index + ", Size: " + count); }
     }
@@ -1377,6 +1381,11 @@ class LinkedList<E> extends ArrayList<E> implements Deque<E> {
 // java.util.Stack: push, pop and peek at the end of the list.
 class Stack<E> extends ArrayList<E> {
     public Stack() { super(); }
+    public Object clone() {
+        Stack<E> s = new Stack<E>();
+        s.addAll(this);
+        return s;
+    }
     public E push(E e) {
         add(e);
         return e;

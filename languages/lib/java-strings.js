@@ -113,12 +113,13 @@ function jxArrIs(tag, sname, t) {
 }
 // lib/java-util.java's LinkedList and Stack extend its ArrayList to share
 // its body, which java's do not: neither is an ArrayList, and a LinkedList
-// (unlike a Stack, a Vector) is no RandomAccess either. Does the class chain
-// from cls reach one of them before ArrayList, where t is a type that
-// inheritance alone would wrongly grant? Twin of jxNotA in
+// (unlike a Stack, a Vector) is no RandomAccess either. Likewise
+// lib/java-lang.java's StringBuffer is no StringBuilder. Does the class chain
+// from cls reach one of them before the class it extends, where t is a type
+// that inheritance alone would wrongly grant? Twin of jxNotA in
 // abnf/jsrtjavastr.go.
 function jxNotA(cls, t) {
-    if (t != "ArrayList" && t != "RandomAccess") { return false }
+    if (t != "ArrayList" && t != "RandomAccess" && t != "StringBuilder") { return false }
     var c = anytype // Walks a __super chain of descriptors.
     c = cls
     var guard = 0
@@ -127,7 +128,8 @@ function jxNotA(cls, t) {
         var bn = c["__bname"]
         if (bn == "java.util.LinkedList") { return true }
         if (bn == "java.util.Stack") { return t == "ArrayList" }
-        if (bn == "java.util.ArrayList") { return false }
+        if (bn == "java.util.ArrayList" || bn == "java.lang.StringBuilder") { return false }
+        if (bn == "java.lang.StringBuffer") { return true }
         c = c["__super"]
     }
     return false

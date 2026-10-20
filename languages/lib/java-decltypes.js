@@ -1014,7 +1014,7 @@ function jOvIsPrim(t) { return jOvPrims.indexOf("," + t + ",") >= 0 }
 function jOvTok(raw) {
     if (raw.length > 2 && raw.substring(raw.length - 2) == "[]") { return jOvTok(raw.substring(0, raw.length - 2)) + "[]" }
     if (jOvIsPrim(raw) || jOvCore.indexOf("," + raw + ",") >= 0) { return raw }
-    if (jOvIfaces["$" + raw] == true) { return jOvIfaceTok(raw) }
+    if (jOvIfaces["$" + raw] == true && !jOvCoreIface(raw)) { return jOvIfaceTok(raw) }
     if (jOvCls["$" + raw] != undefined) { return raw }
     var er = jTyVarErasure(raw)
     if (er != "") { return jOvTok(er) }
@@ -1042,7 +1042,32 @@ function jOvSub(s, t) {
     if (sp || tp) { return false }
     if (t == "*" || t == "Object") { return true }
     if (t == "Number") { return ",Integer,Long,Double,Float,Short,Byte,".indexOf("," + s + ",") >= 0 }
-    return jOvExtends(jOvUntag(s), jOvUntag(t), 0)
+    return jOvExtends(jOvUntag(s), jOvUntag(t), 0) && !jOvNotA(s, t)
+}
+// The library's LinkedList and Stack extend its ArrayList, and its
+// StringBuffer its StringBuilder, only to share a body: is t a type that
+// inheritance alone grants s, where java's does not? The static twin of jxNotA
+// in lib/java-strings.js.
+function jOvNotA(s, t) {
+    if (t != "ArrayList" && t != "RandomAccess" && t != "StringBuilder") { return false }
+    var c = s
+    for (var guard = 0; c != "" && guard < 64; guard++) {
+        if (c == "LinkedList") { return true }
+        if (c == "Stack") { return t == "ArrayList" }
+        if (c == "StringBuffer") { return true }
+        if (c == "ArrayList" || c == "StringBuilder") { return false }
+        var rec = jOvCls["$" + c]
+        if (rec == undefined) { return false }
+        c = rec.sup
+    }
+    return false
+}
+// Is name an interface a library file declares that String or a box
+// implements (jLibIfaces)? It keeps the library token "*", which
+// jOvLibAccepts judges: a declared interface's token takes no core one.
+function jOvCoreIface(name) {
+    var impl = jLibIfaces["$" + name]
+    return impl != undefined && impl.indexOf(",String,") >= 0
 }
 // A declared interface's token: "~" + a functional one's name, "#" + any
 // other's.
@@ -1196,8 +1221,8 @@ function jOvBox(k) {
 // (jLoadUtil); without such an import none of its names is visible, as in Java.
 function jUtilWants(path) {
     // java.io.Serializable is one of the marker interfaces lib/java-util.java
-    // declares.
-    if (path == "java.util.*" || path == "java.base" || path == "java.io.Serializable") { return true }
+    // declares, so `import java.io.*` names it too.
+    if (path == "java.util.*" || path == "java.base" || path == "java.io.Serializable" || path == "java.io.*") { return true }
     if (path.length < 11 || path.substring(0, 10) != "java.util.") { return false }
     var rest = path.substring(10)
     var dot = rest.indexOf(".")
@@ -1258,9 +1283,10 @@ function jFuncWants(path) {
         .indexOf("," + path.substring(19) + ",") >= 0
 }
 
-// Does `new cls(...)` create a type lib/java-lang.java declares? Then the
-// grammar compiles that file with the program.
-function jLangWants(cls) { return cls == "StringBuilder" }
+// Does `new cls(...)`, or a class implementing cls, name a type
+// lib/java-lang.java declares? Then the grammar compiles that file with the
+// program.
+function jLangWants(cls) { return cls == "StringBuilder" || cls == "StringBuffer" || cls == "CharSequence" }
 
 // ----- Static overload selection (JLS 15.12.2 is static) -----
 //
@@ -1778,7 +1804,7 @@ function jOvSTok(ty) {
         return (et == "" || et == "null" || jIsFnTy(et)) ? "" : et + "[]"
     }
     if (jOvIsPrim(b) || jOvCore.indexOf("," + b + ",") >= 0) { return b }
-    if (jOvIfaces["$" + b] == true) { return jOvIfaceTok(b) }
+    if (jOvIfaces["$" + b] == true && !jOvCoreIface(b)) { return jOvIfaceTok(b) }
     if (jOvCls["$" + b] != undefined) { return b }
     var er = jTyVarErasure(b)
     if (er != "") { return jOvSTok(er) }

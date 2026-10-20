@@ -1426,6 +1426,14 @@ func (rt *jsrt) jvIsType(v interface{}, t string) bool {
 		return false
 	}
 	bn := jvBoxName(v)
+	if bn == "" && t == "CharSequence" {
+		o, isObj := v.(*jsObject)
+		if !isObj {
+			return false
+		}
+		cls, _ := o.props["__class"].(*jsObject)
+		return classIsNamed(cls, t)
+	}
 	if bn == "" {
 		if !rt.isTypeName(v, t) {
 			return false
@@ -1443,11 +1451,12 @@ func (rt *jsrt) jvIsType(v interface{}, t string) bool {
 }
 
 // jxNotA: does the class chain from cls reach lib/java-util.java's LinkedList
-// or Stack, which extend its ArrayList, before ArrayList itself, for a t that
+// or Stack, which extend its ArrayList, before ArrayList itself (or
+// lib/java-lang.java's StringBuffer before StringBuilder), for a t that
 // inheritance alone would wrongly grant? Twin of jxNotA in
 // lib/java-strings.js, which states the rule.
 func jxNotA(cls interface{}, t string) bool {
-	if t != "ArrayList" && t != "RandomAccess" {
+	if t != "ArrayList" && t != "RandomAccess" && t != "StringBuilder" {
 		return false
 	}
 	for guard := 0; guard < 64; guard++ {
@@ -1460,8 +1469,10 @@ func jxNotA(cls interface{}, t string) bool {
 			return true
 		case "java.util.Stack":
 			return t == "ArrayList"
-		case "java.util.ArrayList":
+		case "java.util.ArrayList", "java.lang.StringBuilder":
 			return false
+		case "java.lang.StringBuffer":
+			return true
 		}
 		cls = c.props["__super"]
 	}

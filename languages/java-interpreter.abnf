@@ -3894,7 +3894,9 @@ HasStatic   = :script(~~
     // and of that class's supertypes (Number for the six numeric ones, CharSequence
     // for String, Comparable and Serializable for all eight and String), never of
     // another wrapper - `(Object) 3 instanceof Double` is false (JLS 15.20.2).
-    // Every other value goes to the shared rtIsType. A qualified name
+    // Every other value goes to the shared rtIsType, except that an object is
+    // a CharSequence by its class chain, where rtIsType answers for strings
+    // alone (lib/java-lang.java's StringBuilder implements it). A qualified name
     // (java.lang.Integer, Main.Box, Map.Entry) is tested by its simple name, the
     // one a class descriptor carries. Twin of js_jvis in abnf/jsrtjavastr.go and
     // languages/lib/java-rt.metajs.
@@ -3907,7 +3909,7 @@ HasStatic   = :script(~~
         }
         if (t.indexOf("[") >= 0) { return false }
         var bn = jBoxName(v)
-        if (bn == "") { return rtIsType(v, t) && !jxNotA(v.__class, t) }
+        if (bn == "") { return (t == "CharSequence" ? rtClassIs(v.__class, t) : rtIsType(v, t)) && !jxNotA(v.__class, t) }
         if (t == bn || t == "Object" || t == "Comparable" || t == "Serializable") { return true }
         if (t == "Number") { return bn != "String" && bn != "Boolean" && bn != "Character" }
         return t == "CharSequence" && bn == "String"
@@ -5998,6 +6000,11 @@ HasStatic   = :script(~~
                 }
             }
             if (members[i].impl != undefined) {
+                // CharSequence is lib/java-lang.java's, which the class needs now.
+                if (!jLangLoaded && jLangWants(jSimpleName(members[i].impl))) {
+                    jLangWant = true
+                    jLoadWanted()
+                }
                 var iv = jResolveClass(members[i].impl)
                 if (iv != undefined && iv != null) {
                     if (cls.__ifaces == undefined) { cls.__ifaces = [] }

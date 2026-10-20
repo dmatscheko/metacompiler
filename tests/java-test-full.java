@@ -187,6 +187,7 @@ class Main {
         S89.run(); // SECTION-CALL 89
         S90.run(); // SECTION-CALL 90
         S91.run(); // SECTION-CALL 91
+        S92.run(); // SECTION-CALL 92
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -5012,5 +5013,59 @@ class S91 {
         Sub nul = null;
         st = st + " " + h.k + hb.k + ((Base) h).k + " " + mk().j + nul.j + log;
         Main.check("sf91", st.equals("5 1 1 6 8311 10577 2055 77mk"));
+    }
+}
+
+// ===== SECTION 92: StringBuffer, CharSequence, the list types' clone =====
+//
+// StringBuffer has StringBuilder's operations and is its own class: neither
+// is an instance of the other, both are CharSequences, as a String and a
+// class implementing the interface are. An ArrayList's clone is a shallow
+// copy of the same class, a LinkedList's a LinkedList and a Stack's a Stack.
+// Every expected value is java 24.0.2's.
+class S92 {
+    static class Name implements CharSequence {
+        public int length() { return 2; }
+        public char charAt(int i) { return "ab".charAt(i); }
+        public CharSequence subSequence(int s, int e) { return "ab".subSequence(s, e); }
+        public String toString() { return "ab"; }
+    }
+    static int len(CharSequence cs) { return cs.length(); }
+    static String f(CharSequence c) { return "cs" + c.length(); }
+    static String f(Object o) { return "obj"; }
+    static String g(StringBuilder b) { return "sb"; }
+    static String g(CharSequence c) { return "cs"; }
+    static void run() {
+        StringBuffer buf = new StringBuffer("xy");
+        Object o = "q";
+        String ov = f("abc") + f(new StringBuilder("ab")) + f(buf) + f(3) + f(o) + " " + g(new StringBuilder()) + g(buf) + g("s")
+            + " " + String.join("-", new StringBuilder("a"), buf, "c") + "xy".contentEquals(buf);
+        Main.check("ov92", ov.equals("cs3cs2cs2objobj sbcscs a-xy-ctrue"));
+        StringBuffer sb = new StringBuffer("x");
+        sb.append(1).append('c').append(2.5).insert(0, "<").reverse();
+        StringBuffer e = new StringBuffer();
+        e.append("hello world").setLength(5);
+        e.deleteCharAt(0).replace(0, 1, "E");
+        String st = sb + " " + sb.length() + sb.charAt(0) + " " + sb.getClass().getName() + " " + e + e.indexOf("l");
+        Object o1 = new StringBuilder("q"), o2 = sb, o3 = "s", o4 = new Name();
+        st = st + " " + (o1 instanceof CharSequence) + (o2 instanceof CharSequence) + (o3 instanceof CharSequence)
+            + (o4 instanceof CharSequence) + (o1 instanceof StringBuffer) + (o2 instanceof StringBuilder);
+        CharSequence cs = new StringBuilder("hello");
+        st = st + " " + len(new StringBuilder("abc")) + len(sb) + len("hi") + len(new Name()) + " " + cs.subSequence(1, 3)
+            + cs.charAt(4) + cs.isEmpty() + " " + new StringBuilder(new Name()) + new StringBuffer(cs)
+            + " " + new StringBuffer("abc").compareTo(new StringBuffer("abd"));
+        Main.check("sb92", st.equals("5.2c1x< 75 java.lang.StringBuffer Ello1 truetruetruetruefalsefalse 3722 elofalse abhello -1"));
+        ArrayList<Integer> a = new ArrayList<>(List.of(4, 7));
+        @SuppressWarnings("unchecked")
+        ArrayList<Integer> c = (ArrayList<Integer>) a.clone();
+        c.add(1);
+        LinkedList<Integer> l = new LinkedList<>(List.of(1, 2));
+        Object lc = l.clone();
+        Stack<Integer> s = new Stack<>();
+        s.push(5);
+        Object sc = s.clone();
+        s.push(6);
+        String cl = a + " " + c + " " + lc + lc.getClass().getName() + (lc instanceof LinkedList) + " " + sc + sc.getClass().getName() + s;
+        Main.check("cl92", cl.equals("[4, 7] [4, 7, 1] [1, 2]java.util.LinkedListtrue [5]java.util.Stack[5, 6]"));
     }
 }
