@@ -90,6 +90,8 @@
 import "./regex.js"
 // (?P...) translation and re.error's message, position and fields.
 import "./python-regex.js"
+// \w of a str pattern (the rxPyWordHit knob): "_" or str.isalnum(). Go: rxPyWord.
+rxPyWordHit = function (c) { return c == 95 || pyCpAlpha(c) || pyCpNumeric(c) }
 
 // The shared layer-2 runtime: the externs every language implements identically,
 // parameterised by the rtk* hooks below.
@@ -9969,6 +9971,13 @@ function js_pyexcenter(v) {
     return undefined
 }
 
+// The module's builtin exception class becomes the one pyExcClass hands to a
+// runtime-raised exception. Go: js_pyexcreg in abnf/jsrt.go.
+function js_pyexcreg(name, cls) {
+    pyTypeTable["$" + pyToStr(name)] = cls
+    return undefined
+}
+
 function js_pyexcchain(v) {
     var n = pyExcHandled.length
     if (n > 0 && pyExcHandled[n - 1] !== v && pyInstClassOf(v) !== null) {
@@ -11893,15 +11902,16 @@ var pyEReU = 32
 var pyEReX = 64
 var pyEReA = 256
 
-// pyEReFlagStr is Go pyReFlagStr: the bitmask onto the Python dialect P and four neutral
-// letters. re.A is the engine's only behaviour and re.U is the py3 default, so
-// both are accepted and ignored; re.L has no locale to read.
+// pyEReFlagStr is Go pyReFlagStr: the bitmask onto the Python dialect P and five
+// neutral letters (re.A is the engine's a). re.U is the py3 default, so it is
+// accepted and ignored; re.L has no locale to read.
 function pyEReFlagStr(n) {
     var s = "P"
     if ((n & pyEReI) != 0) { s = s + "i" }
     if ((n & pyEReS) != 0) { s = s + "s" }
     if ((n & pyEReM) != 0) { s = s + "m" }
     if ((n & pyEReX) != 0) { s = s + "x" }
+    if ((n & pyEReA) != 0) { s = s + "a" }
     return s
 }
 
@@ -12277,11 +12287,17 @@ function pyERxFindAll(rv, s, asMatch) {
             var g0 = rxGroup(re, s, m, 0)
             if (g0 === null) { out.push("") } else { out.push(g0) }
         } else if (re["ngroups"] == 1) {
+            // A group that did not take part is "" here, not None.
             var g1 = rxGroup(re, s, m, 1)
-            if (g1 === null) { out.push(undefined) } else { out.push(g1) }
+            if (g1 === null) { out.push("") } else { out.push(g1) }
         } else {
             var t = pyTup([])
-            pyERxAppendGroups(t, re, s, m)
+            var gi = 1
+            while (gi <= re["ngroups"]) {
+                var gv = rxGroup(re, s, m, gi)
+                if (gv === null) { t.push("") } else { t.push(gv) }
+                gi = gi + 1
+            }
             out.push(t)
         }
         if (m["end"] == m["begin"]) { at = m["end"] + 1 } else { at = m["end"] }

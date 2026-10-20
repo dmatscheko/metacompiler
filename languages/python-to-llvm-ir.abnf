@@ -1348,6 +1348,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // so a def, a lambda or a class nested right there closes over the class's
     // cell instead of its namespace (pyClosureBase).
     var pyInClassBody = false
+    // True while a comprehension right inside a class body is emitted: it no
+    // longer reads the class namespace, but __class__ is still unbound there.
+    var pyInClassComp = false
     var pySuperSelf = null
 
     // Names the emitter DECLARED in a scope of the current function that is not a
@@ -2586,6 +2589,32 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         postB.NewBr(headB)
         return exitB
     }
+    // Open a list, set or dict comprehension's own scope. Right inside a class body
+    // it opens over the class's cell, as a def does (pyClosureBase), so only the
+    // outermost iterable - evaluated first, in the class namespace - sees the
+    // class's names. Answers the block and the clause list to walk; the caller
+    // restores pyInClassBody, pyInClassComp and pyBindSink. Twin of pyCompScope in
+    // python-interpreter.abnf.
+    function compOpen(b, cl) {
+        if (!pyInClassBody) {
+            curScopeV = callExt(b, "js_scope_new", [curScopeV])
+            return {b: b, cl: cl}
+        }
+        var r = cl[0].citer(b)
+        var nb = r.b
+        hidCount++
+        var srcName = "$cs" + hidCount
+        curScopeV = callExt(nb, "js_scope_new", [pyClosureBase(nb)])
+        callExt(nb, "js_scope_decl", [curScopeV, emitStr(nb, srcName), r.v])
+        pyInClassBody = false
+        pyInClassComp = true
+        pyBindSink = null
+        var out = [{cfor: cl[0].cfor, citer: function(ib) {
+            return {b: ib, v: callExt(ib, "js_scope_get", [curScopeV, emitStr(ib, srcName)])}
+        }}]
+        for (var k = 1; k < cl.length; k++) { out.push(cl[k]) }
+        return {b: nb, cl: out}
+    }
     // [expr for ...] - the accumulator is a plain array, so a set comprehension is the
     // same loop with js_pyset_new around it (makeSetOf) and a dict one differs only in
     // what each element is (a [key, value] pair, folded by makeDictComp below).
@@ -2597,13 +2626,20 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var oName = "$co" + hidCount
             var saved = curScopeV
             var savedWal = walrusScopeV
-            curScopeV = callExt(b, "js_scope_new", [curScopeV])
+            var savedInClass = pyInClassBody
+            var savedInComp = pyInClassComp
+            var savedSink = pyBindSink
+            var op = compOpen(b, cl)
+            b = op.b
             walrusScopeV = (savedWal != null) ? savedWal : saved
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, oName), callExt(b, "js_arr_new", [])])
-            var endB = emitCompChain(b, cl, 0, oName, exprT)
+            var endB = emitCompChain(b, op.cl, 0, oName, exprT)
             var outV = callExt(endB, "js_scope_get", [curScopeV, emitStr(endB, oName)])
             curScopeV = saved
             walrusScopeV = savedWal
+            pyInClassBody = savedInClass
+            pyInClassComp = savedInComp
+            pyBindSink = savedSink
             return {b: endB, v: outV}
         }
     }
@@ -2626,7 +2662,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             walrusScopeV = null
             var idx = emitClosure(["gx*src"], function(fb) { return emitCompChain(fb, inner, 0, null, exprT) }, false)
             walrusScopeV = savedWal
-            var clo = callExt(b, "js_genfn", [callExt(b, "js_closure", [handle(idx), curScopeV])])
+            // Like a def, it closes over a class body's cell, not its namespace.
+            var clo = callExt(b, "js_genfn", [callExt(b, "js_closure", [handle(idx), pyClosureBase(b)])])
             var argsV = callExt(b, "js_arr_new", [])
             callExt(b, "js_arr_push", [argsV, srcV])
             return {b: b, v: callExt(b, "js_call", [clo, hUndef, argsV])}
@@ -2655,10 +2692,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var jName = "$dcj" + hidCount
             var saved = curScopeV
             var savedWal = walrusScopeV
-            curScopeV = callExt(b, "js_scope_new", [curScopeV])
+            var savedInClass = pyInClassBody
+            var savedInComp = pyInClassComp
+            var savedSink = pyBindSink
+            var op = compOpen(b, cl)
+            b = op.b
             walrusScopeV = (savedWal != null) ? savedWal : saved
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, oName), callExt(b, "js_arr_new", [])])
-            var endB = emitCompChain(b, cl, 0, oName, pairT)
+            var endB = emitCompChain(b, op.cl, 0, oName, pairT)
             var pairsV = callExt(endB, "js_scope_get", [curScopeV, emitStr(endB, oName)])
             var dV = callExt(endB, "js_dict_new", [])
             callExt(endB, "js_scope_decl", [curScopeV, emitStr(endB, jName), emitNum(endB, 0)])
@@ -2677,6 +2718,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             fbody.NewBr(fhead)
             curScopeV = saved
             walrusScopeV = savedWal
+            pyInClassBody = savedInClass
+            pyInClassComp = savedInComp
+            pyBindSink = savedSink
             return {b: fexit, v: dV}
         }
     }
@@ -4050,11 +4094,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var savedSelf = pySuperSelf
         if (!isCtl) { pySuperSelf = params.length > 0 ? params[0] : null }
         var savedInClass = pyInClassBody
+        var savedInComp = pyInClassComp
         if (!isCtl) {
             pyBindSink = null
             pyAnnotHere = false
             pyInnerNames = {}
             pyInClassBody = false
+            pyInClassComp = false
         }
         if (isCtl) {
             curScopeV = callExt(fb, "js_scope_new", [f.Params[0]])
@@ -4121,6 +4167,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         pyInnerNames = savedInner
         pySuperSelf = savedSelf
         pyInClassBody = savedInClass
+        pyInClassComp = savedInComp
         if (isCtl) { ctlLeave() }
         curF = savedF
         curScopeV = savedScope
@@ -4826,6 +4873,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             excMade[excNames[e0]] = eCls
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, excNames[e0]), eCls])
         }
+        // An exception the RUNTIME raises carries these same class objects, so
+        // `type(e) is ValueError` holds for int("x") too (js_pyexcreg).
+        callExt(b, "js_pyexcreg", [emitStr(b, "BaseException"), excRoot])
+        callExt(b, "js_pyexcreg", [emitStr(b, "Exception"), excBase])
+        for (var er0 = 0; er0 < excNames.length; er0++) {
+            callExt(b, "js_pyexcreg", [emitStr(b, excNames[er0]), excMade[excNames[er0]]])
+        }
         // OSError's own __new__, __init__ and __str__ (errno, strerror, filename,
         // the subclass an errno names): js_pyoserrnew / js_pyoserrinit /
         // js_pyoserrstr in abnf/jsrt.go. __new__ finds the subclass by name in
@@ -5044,6 +5098,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var selfV = hUndef
                 if (pySuperSelf != null) { selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, pySuperSelf)]) }
                 return {b: b, v: callExt(b, "js_pysuper", [clsV, selfV])}
+            }
+        }
+        // __class__ inside a function of a class body is that same cell; in the
+        // class body itself (its comprehensions included) and outside any class
+        // it is an ordinary (unbound) name. Twin of pyClassCellHere in python-interpreter.abnf.
+        if (name == "__class__") {
+            return function(b) {
+                if (pySuperCls && !pyInClassBody && !pyInClassComp) {
+                    return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, "__pycls__")])}
+                }
+                return {b: b, v: pyGetVar(b, curScopeV, emitStr(b, name))}
             }
         }
         // __import__ is lib/python-importlib.py's, compiled in at its first

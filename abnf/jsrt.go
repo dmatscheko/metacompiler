@@ -16687,6 +16687,18 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			rt.pyHandled = append(rt.pyHandled, u(a[0]))
 			return 0
 		},
+		// (name, class): the module's builtin exception class becomes the one
+		// pyExcClass hands to a runtime-raised exception. Twin of js_pyexcreg in
+		// languages/lib/python-rt.metajs.
+		"js_pyexcreg": func(a []uint64) uint64 {
+			if cls, ok := u(a[1]).(*jsObject); ok {
+				if rt.pyTypes == nil {
+					rt.pyTypes = map[string]*jsObject{}
+				}
+				rt.pyTypes[rt.toString(u(a[0]))] = cls
+			}
+			return 0
+		},
 		"js_pyexcchain": func(a []uint64) uint64 {
 			rt.pyExcChain(u(a[0]))
 			return 0

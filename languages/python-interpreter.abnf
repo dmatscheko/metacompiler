@@ -1083,6 +1083,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // declaration - see docs/abnf-dialect-gotchas.md).
     include("lib/regex.js")
     rxFail = function (msg) { fail(msg) }
+    rxPyWordHit = function (c) { return c == 95 || pyCpAlpha(c) || pyCpNumeric(c) }
     // (?P...) translation and re.error's message, position and fields.
     include("lib/python-regex.js")
 
@@ -4568,9 +4569,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // re.match / re.fullmatch are NOT a search plus a position check; see the
     // note at their implementation below.
 
-    // CPython's re constants (sre_constants). re.A is the engine's only behaviour
-    // and re.U is the py3 default, so both are accepted and ignored; re.L has no
-    // locale to read and is ignored too.
+    // CPython's re constants (sre_constants). re.A is the engine's a flag (ASCII
+    // \w \W \b \B) and re.U is the py3 default, so it is accepted and ignored;
+    // re.L has no locale to read and is ignored too.
     var PY_RE_I = 2
     var PY_RE_L = 4
     var PY_RE_M = 8
@@ -4586,6 +4587,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if ((n & PY_RE_S) != 0) { s += "s" }
         if ((n & PY_RE_M) != 0) { s += "m" }
         if ((n & PY_RE_X) != 0) { s += "x" }
+        if ((n & PY_RE_A) != 0) { s += "a" }
         return s
     }
     function pyReFlagNum(fl) {
@@ -4642,6 +4644,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // and pyEq treats null and undefined as DIFFERENT - so every "no match" and
     // every non-participating group has to answer undefined, not null.
     function pyReNone(v) { return v === null ? undefined : v }
+    function pyReEmpty(v) { return v === null ? "" : v }
     function pyReSearch(rv, s, from) {
         var m = rxSearch(rv.prog, s, from)
         if (m == null) { return undefined }
@@ -4778,12 +4781,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         while (at <= s.length) {
             var m = rxSearch(rv.prog, s, at)
             if (m == null) { break }
+            // A group that did not take part is "" here, not None.
             if (asMatch) { out.push(pyMkMatch(rv, rv.prog, s, m)) }
             else if (rv.prog.ngroups == 0) { out.push(rxGroup(rv.prog, s, m, 0)) }
-            else if (rv.prog.ngroups == 1) { out.push(pyReNone(rxGroup(rv.prog, s, m, 1))) }
+            else if (rv.prog.ngroups == 1) { out.push(pyReEmpty(rxGroup(rv.prog, s, m, 1))) }
             else {
                 var t = []
-                for (var g = 1; g <= rv.prog.ngroups; g++) { t.push(pyReNone(rxGroup(rv.prog, s, m, g))) }
+                for (var g = 1; g <= rv.prog.ngroups; g++) { t.push(pyReEmpty(rxGroup(rv.prog, s, m, g))) }
                 out.push(pyTup(t))
             }
             at = m.end == m.begin ? m.end + 1 : m.end
@@ -8014,6 +8018,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // argument - neither of which a value can carry. See pySuperHere.
         // languages/python-to-llvm-ir.abnf's makeVarRef does the same thing.
         if (name == "super") { return function() { return pySuperHere() } }
+        if (name == "__class__") { return function() { return pyClassCellHere() } }
         // __import__ is lib/python-importlib.py's, compiled in at its first
         // mention. Twin of the same line in python-to-llvm-ir.abnf's makeVarRef.
         if (name == "__import__") { core.importFile("importlib", null) }
@@ -11415,14 +11420,33 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             compRun(cl, i + 1, exprT, out)
         }
     }
+    // compRun in a list, set or dict comprehension's own scope. Right inside a class
+    // body that scope sits over the class's cell, as a def's does (pyClosureScopes),
+    // so only the outermost iterable - evaluated first, in the class namespace - sees
+    // the class's names. Twin of compOpen in python-to-llvm-ir.abnf.
+    function compRunOwn(cl, exprT, out) {
+        if (scopes[scopes.length - 1].__pycell === undefined) {
+            scopes.push({})
+            compRun(cl, 0, exprT, out)
+            scopes.pop()
+            return
+        }
+        var src = anytype
+        src = cl[0].citer()
+        var own = [{cfor: cl[0].cfor, citer: function() { return src }}]
+        for (var k = 1; k < cl.length; k++) { own.push(cl[k]) }
+        var saved = scopes
+        scopes = pyClosureScopes()
+        scopes.push({})
+        try { compRun(own, 0, exprT, out) }
+        finally { scopes = saved }
+    }
     function makeListComp(items) {
         var exprT = items[0]
         var cl = compClauses(items, 1)
         return function() {
             var out = []
-            scopes.push({})
-            compRun(cl, 0, exprT, out)
-            scopes.pop()
+            compRunOwn(cl, exprT, out)
             return out
         }
     }
@@ -11438,8 +11462,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var cl = compClauses(items, 1)
         return function() {
             var src = pyDelegOf(cl[0].citer())
-            var g = newGenObject(function() { return undefined }, scopes.slice(), pyGenExpPlist, [], [], null)
-            var own = scopes.slice()
+            // Like a def, it closes over a class body's cell, not its namespace.
+            var g = newGenObject(function() { return undefined }, pyClosureScopes(), pyGenExpPlist, [], [], null)
+            var own = pyClosureScopes()
             own.push({__pyfn: true, __pyd: ""})
             g.gx = {cl: cl, exprT: exprT, src: src, lv: [], started: false, scopes: own}
             return g
@@ -11513,9 +11538,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var pairT = function() { return {ckey: kExprT(), cval: vExprT()} }
         return function() {
             var out = []
-            scopes.push({})
-            compRun(cl, 0, pairT, out)
-            scopes.pop()
+            compRunOwn(cl, pairT, out)
             var d = newDict()
             for (var i = 0; i < out.length; i++) { dictSet(d, out[i].ckey, out[i].cval) }
             return d
@@ -13664,6 +13687,24 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // its own name `super` does not shadow it. That is the one deliberate departure
     // from CPython here, and it is the same in all three engines.
     function pySuperObj(cls, obj) { return {__pysup: true, __scls: cls, __sobj: obj} }
+    // The name __class__: the same cell, but only from a function nested in a
+    // class body; in the class body itself and outside any class it is an
+    // ordinary name. Twin of the __class__ arm of makeVarRef in
+    // python-to-llvm-ir.abnf.
+    function pyClassCellHere() {
+        var inFn = false
+        var i = scopes.length - 1
+        while (i >= 0) {
+            var sc = scopes[i]
+            if (!inFn && sc.__pycell !== undefined) { i = 0 }
+            else {
+                if (sc.__pyfn === true) { inFn = true }
+                if (inFn && hasOwn(sc, "__pycls")) { return sc.__pycls }
+            }
+            i = i - 1
+        }
+        return pyReadName("__class__")
+    }
     function pySuperHere() {
         var cls = anytype
         cls = undefined

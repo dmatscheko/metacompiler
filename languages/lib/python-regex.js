@@ -176,6 +176,11 @@ function pyReErrInfo(pat, nf, err, at) {
     if (err.indexOf("invalid group reference ") == 0) {
         return {msg: err, pos: k - (err.length - 24)}
     }
+    // CPython points at the backslash of \N, and at the name of (?P=name).
+    if (err == "cannot refer to an open group") {
+        if (pat.charAt(k - 1) == ")") { return {msg: err, pos: pyReLastAt(pat, "=", k) + 1} }
+        return {msg: err, pos: pyReLastAt(pat, "\\", k)}
+    }
     if (err.indexOf("unsupported group form (?") == 0) {
         return {msg: "unknown extension ?" + pat.charAt(k - 1), pos: k - 2}
     }

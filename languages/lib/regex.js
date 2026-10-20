@@ -87,7 +87,11 @@
 //                                            the inline letters for .flags; under
 //                                            J it answers Pattern.flags(), the
 //                                            letters in force at the pattern's
-//                                            end, as rxFlagsGet spells them)
+//                                            end, as rxFlagsGet spells them;
+//                                            \w \W \b \B are Python's Unicode ones,
+//                                            rxPyWordHit)
+//                                            a (P only: re.ASCII, as the inline a:
+//                                            \w \W \b \B are ASCII's)
 //                                            re.ok is false and re.err is set on a
 //                                            bad pattern; re.errAt is the error's
 //                                            index into the pattern, or -1.
@@ -170,6 +174,8 @@ var RX_JWORDB = 16  // \b: ASCII \w, and a non-spacing mark after a letter or di
 var RX_JNWORDB = 17
 var RX_JUWORDB = 18 // \b under UNICODE_CHARACTER_CLASS: Unicode \w
 var RX_JUNWORDB = 19
+var RX_PUWORDB = 20  // \b under P without a: Python's Unicode \w (rxPyWordHit)
+var RX_PUNWORDB = 21
 
 // ----- Character-class shorthands -----
 var RX_SD = 1      // \d
@@ -184,6 +190,8 @@ var RX_SJH = 9     // Java's \h: horizontal whitespace
 var RX_SJNH = 10   // Java's \H
 var RX_SJV = 11    // Java's \v: vertical whitespace
 var RX_SJNV = 12   // Java's \V
+var RX_SPW = 13    // Python's Unicode \w (rxPyWordHit)
+var RX_SPNW = 14   // Python's Unicode \W
 
 // Step cap for one rxSearch attempt. A pathological pattern reports
 // "regexp: step limit exceeded" rather than hanging the whole run.
@@ -315,6 +323,8 @@ function rxSpHas(code, c) {
     if (code == RX_SJNH) { return !rxIsHSpaceJ(c) }
     if (code == RX_SJV) { return rxIsVSpaceJ(c) }
     if (code == RX_SJNV) { return !rxIsVSpaceJ(c) }
+    if (code == RX_SPW) { return rxPyWordHit(c) }
+    if (code == RX_SPNW) { return !rxPyWordHit(c) }
     return false
 }
 
@@ -335,6 +345,11 @@ function rxIsVSpaceJ(c) {
 // lib/java-chars.js and lib/java-regex.js), so a grammar that passes J assigns
 // its own after the include.
 var rxPropHit = function (id, c) { return false }
+
+// rxPyWordHit answers whether c is a word character of a Python str pattern:
+// "_" or what str.isalnum() accepts. A KNOB like rxPropHit, assigned by the
+// grammars that pass P (the tables are lib/python-chars.js's).
+var rxPyWordHit = function (c) { return rxIsWordCode(c) }
 
 // rxClsHitX is rxClsHit for a class TREE: the union of the class's own ranges,
 // its properties and its nested classes, intersected with every && operand.
@@ -556,9 +571,10 @@ function rxCountGroups(p) {
 function rxNode(t) {
     // bname carries the NAME of a \k<name> backreference until rxCompile resolves it
     // to a group number; it stays "" for every other node.
-    // cnt marks a J {n,m} repeat, which is emitted as a counted loop.
+    // cnt marks a J {n,m} repeat, which is emitted as a counted loop; closed marks
+    // a capturing group whose ")" has been read (P's open-group reference check).
     return {t: t, items: [], cls: rxNewCls(), min: 0, max: 0, greedy: true, gidx: -1, bname: "",
-            cnt: false}
+            cnt: false, closed: false}
 }
 
 // rxNameIdx is the group NUMBER a name was declared for, or -1.
@@ -884,8 +900,8 @@ function rxEsc(st, inClass) {
     }
     if (c == 100) { res.kind = 1; res.sp = RX_SD; return res }
     if (c == 68) { res.kind = 1; res.sp = RX_SND; return res }
-    if (c == 119) { res.kind = 1; res.sp = RX_SW; return res }
-    if (c == 87) { res.kind = 1; res.sp = RX_SNW; return res }
+    if (c == 119) { res.kind = 1; res.sp = st.pyuni ? RX_SPW : RX_SW; return res }
+    if (c == 87) { res.kind = 1; res.sp = st.pyuni ? RX_SPNW : RX_SNW; return res }
     if (c == 115) { res.kind = 1; res.sp = RX_SS; return res }
     if (c == 83) { res.kind = 1; res.sp = RX_SNS; return res }
     if (c == 104) { res.kind = 1; res.sp = RX_SH; return res }
@@ -930,6 +946,14 @@ function rxEsc(st, inClass) {
     if (!inClass && c >= 49 && c <= 57) { // \1 .. \9
         // A backreference only if the pattern HAS that group (rxCountGroups counted
         // them before the parse began).
+        // Python's group must be opened before the reference and closed by it.
+        if (st.py && c - 48 <= st.ntotal) {
+            if (c - 48 > st.ngroups) {
+                rxErr(st, "invalid group reference " + (c - 48))
+            } else if (!st.gnodes[c - 48].closed) {
+                rxErr(st, "cannot refer to an open group")
+            }
+        }
         if (c - 48 <= st.ntotal) {
             res.kind = 2
             res.ch = c - 48
@@ -1449,6 +1473,7 @@ function rxParseGroup(st) {
             nidx.push(ng.gidx)
             ng.items.push(rxParseAlt(st))
             rxExpect(st, 41, "unterminated group")
+            ng.closed = true
             return ng
         }
         if (st.py && "aiLmsux-".indexOf(p.charAt(st.i)) >= 0) { return rxParseFlagsP(st) }
@@ -1478,6 +1503,7 @@ function rxParseGroup(st) {
     cg.items.push(rxParseAlt(st))
     st.depth = st.depth - 1
     rxExpect(st, 41, st.ere ? "Unmatched ( or \\(" : "unterminated group")
+    cg.closed = true
     return cg
 }
 
@@ -1537,6 +1563,7 @@ function rxParseFlagsP(st) {
     var multi = st.multi
     var dotall = st.dotall
     var ext = st.ext
+    var pyuni = st.pyuni
     rxFlagsSet(st, on, true)
     rxFlagsSet(st, off, false)
     var g = rxNode("group")
@@ -1546,6 +1573,7 @@ function rxParseFlagsP(st) {
     st.multi = multi
     st.dotall = dotall
     st.ext = ext
+    st.pyuni = pyuni
     return g
 }
 
@@ -1600,6 +1628,7 @@ function rxFlagsSet(st, letters, v) {
         st.ucase = v
     }
     if (letters.indexOf("c") >= 0) { st.canon = v }
+    if (letters.indexOf("a") >= 0) { st.pyuni = !v }
 }
 
 // The flags in force, as rxFlagsSet's letters, and back.
@@ -1707,6 +1736,16 @@ function rxParseAtom(st) {
                 }
                 return kb
             }
+            if (st.py) {
+                // So does Python, and the group must already be closed as well.
+                kb.gidx = rxNameIdx(st.names, st.nameGroups, knm)
+                if (kb.gidx < 0) {
+                    rxErr(st, "unknown group name '" + knm + "'")
+                } else if (!st.gnodes[kb.gidx].closed) {
+                    rxErr(st, "cannot refer to an open group")
+                }
+                return kb
+            }
             st.pending.push(kb)
             return kb
         }
@@ -1743,6 +1782,8 @@ function rxParseAtom(st) {
             if (nxt == 65) { a.gidx = RX_BOS }
             if (nxt == 122) { a.gidx = RX_EOS }
             if (nxt == 90) { a.gidx = st.py ? RX_EOS : RX_EOSNL }
+            if (st.pyuni && nxt == 98) { a.gidx = RX_PUWORDB }
+            if (st.pyuni && nxt == 66) { a.gidx = RX_PUNWORDB }
             if (st.java) {
                 if (nxt == 98) { a.gidx = st.uclass ? RX_JUWORDB : RX_JWORDB }
                 if (nxt == 66) { a.gidx = st.uclass ? RX_JUNWORDB : RX_JNWORDB }
@@ -2514,6 +2555,7 @@ function rxCompile(pattern, flags) {
     var bfail = false
     var ucase = false
     var unix = false
+    var pyascii = false
     var fi = 0
     while (fi < flags.length) {
         var f = flags.charAt(fi)
@@ -2531,6 +2573,7 @@ function rxCompile(pattern, flags) {
         else if (f == "n") { bfail = true }
         else if (f == "u") { ucase = true }
         else if (f == "d") { unix = true }
+        else if (f == "a") { pyascii = true }
         fi = fi + 1
     }
     if (java || py) { bfail = true }
@@ -2561,7 +2604,7 @@ function rxCompile(pattern, flags) {
         depth: 0, java: java, errAt: -1, pcls: rxNewCls(), gnodes: [rxNode("empty")],
         py: py, icase: icase, multi: multi, gend: 0, gflags: "",
         ucase: ucase && java, uclass: false, unix: unix && java, inl: false, supp: false,
-        canon: false
+        canon: false, pyuni: py && !pyascii
     }
     // Under P and J case folding and line anchoring are decided per atom while
     // parsing.
@@ -2632,6 +2675,12 @@ function rxAssertOK(re, text, kind, sp) {
         if (sp == n) { return true }
         if (!re.multi && kind == RX_EOL) { return false }
         return text.charCodeAt(sp) == 10
+    }
+    if (kind == RX_PUWORDB || kind == RX_PUNWORDB) {
+        var pb = sp > 0 && rxPyWordHit(text.charCodeAt(sp - 1))
+        var pa = sp < n && rxPyWordHit(text.charCodeAt(sp))
+        if (kind == RX_PUWORDB) { return pb != pa }
+        return pb == pa
     }
     if (kind >= RX_JBOL) { return rxAssertJ(text, kind, sp) }
     var before = false

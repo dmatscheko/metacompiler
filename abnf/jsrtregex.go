@@ -81,6 +81,9 @@ const (
 	rxJNWordB  = 17
 	rxJUWordB  = 18
 	rxJUNWordB = 19
+	// \b and \B under P without a: Python's Unicode \w (rxPyWord).
+	rxPUWordB  = 20
+	rxPUNWordB = 21
 )
 
 // ----- Character-class shorthands -----
@@ -98,6 +101,9 @@ const (
 	rxSJNH = 10
 	rxSJV  = 11
 	rxSJNV = 12
+	// Python's Unicode \w and \W (rxPyWord).
+	rxSPW  = 13
+	rxSPNW = 14
 )
 
 // rxSteps caps one rxSearch attempt, so a pathological pattern reports an error
@@ -239,8 +245,18 @@ func rxSpHas(code int, c rune) bool {
 		return rxIsVSpaceJ(c)
 	case rxSJNV:
 		return !rxIsVSpaceJ(c)
+	case rxSPW:
+		return rxPyWord(c)
+	case rxSPNW:
+		return !rxPyWord(c)
 	}
 	return false
+}
+
+// rxPyWord answers whether c is a word character of a Python str pattern: "_"
+// or what str.isalnum() accepts. Twin of the rxPyWordHit knob of lib/regex.js.
+func rxPyWord(c rune) bool {
+	return rxIsWord(c) || (c >= 128 && (pyCpAlpha(int(c)) || pyCpNumeric(int(c))))
 }
 
 // java.util.regex's \h and \v. Twins of rxIsHSpaceJ / rxIsVSpaceJ in lib/regex.js.
@@ -379,6 +395,9 @@ type rxNode struct {
 	bname string
 	// cnt marks a J {n,m} repeat, which is emitted as a counted loop.
 	cnt bool
+	// closed marks a capturing group whose ")" has been read (P's open-group
+	// reference check).
+	closed bool
 }
 
 func rxNewNode(t string) *rxNode {
@@ -431,6 +450,8 @@ type rxSt struct {
 	// rxSuppJ), and canon is J's CANON_EQ, which is only reported (Pattern.flags).
 	supp  bool
 	canon bool
+	// pyuni: under P, \w \W \b \B are Python's Unicode ones (no a flag in force).
+	pyuni bool
 	// gnodes[g] is capturing group g's node (rxWidthP), from index 1.
 	gnodes []*rxNode
 }
@@ -890,8 +911,14 @@ func (st *rxSt) esc(inClass bool) rxEscRes {
 	case 'D':
 		return rxEscRes{kind: 1, sp: rxSND}
 	case 'w':
+		if st.pyuni {
+			return rxEscRes{kind: 1, sp: rxSPW}
+		}
 		return rxEscRes{kind: 1, sp: rxSW}
 	case 'W':
+		if st.pyuni {
+			return rxEscRes{kind: 1, sp: rxSPNW}
+		}
 		return rxEscRes{kind: 1, sp: rxSNW}
 	case 's':
 		return rxEscRes{kind: 1, sp: rxSS}
@@ -955,6 +982,14 @@ func (st *rxSt) esc(inClass bool) rxEscRes {
 	if !inClass && c >= '1' && c <= '9' {
 		// A backreference only if the pattern HAS that group (rxCountGroups counted
 		// them before the parse began).
+		// Python's group must be opened before the reference and closed by it.
+		if st.py && int(c-'0') <= st.ntotal {
+			if int(c-'0') > st.ngroups {
+				st.fail("invalid group reference " + string(c))
+			} else if !st.gnodes[c-'0'].closed {
+				st.fail("cannot refer to an open group")
+			}
+		}
 		if int(c-'0') <= st.ntotal {
 			return rxEscRes{kind: 2, ch: c - '0'}
 		}
@@ -1440,6 +1475,7 @@ func (st *rxSt) parseGroup() *rxNode {
 			st.nameGroups = append(st.nameGroups, ng.gidx)
 			ng.items = append(ng.items, st.parseAlt())
 			st.expect(')', "unterminated group")
+			ng.closed = true
 			return ng
 		}
 		if st.py && strings.ContainsRune("aiLmsux-", k) {
@@ -1474,6 +1510,7 @@ func (st *rxSt) parseGroup() *rxNode {
 	} else {
 		st.expect(')', "unterminated group")
 	}
+	cg.closed = true
 	return cg
 }
 
@@ -1529,13 +1566,13 @@ func (st *rxSt) parseFlagsP() *rxNode {
 		return rxNewNode("empty")
 	}
 	st.i++
-	icase, multi, dotall, ext := st.icase, st.multi, st.dotall, st.ext
+	icase, multi, dotall, ext, pyuni := st.icase, st.multi, st.dotall, st.ext, st.pyuni
 	st.setFlags(on, true)
 	st.setFlags(off, false)
 	g := rxNewNode("group")
 	g.items = append(g.items, st.parseAlt())
 	st.expect(')', "missing ), unterminated subpattern")
-	st.icase, st.multi, st.dotall, st.ext = icase, multi, dotall, ext
+	st.icase, st.multi, st.dotall, st.ext, st.pyuni = icase, multi, dotall, ext, pyuni
 	return g
 }
 
@@ -1599,6 +1636,9 @@ func (st *rxSt) setFlags(letters string, v bool) {
 	}
 	if strings.Contains(letters, "c") {
 		st.canon = v
+	}
+	if strings.Contains(letters, "a") {
+		st.pyuni = !v
 	}
 }
 
@@ -1753,6 +1793,16 @@ func (st *rxSt) parseAtom() *rxNode {
 				}
 				return kb
 			}
+			if st.py {
+				// So does Python, and the group must already be closed as well.
+				kb.gidx = st.nameIdx(kb.bname)
+				if kb.gidx < 0 {
+					st.fail("unknown group name '" + kb.bname + "'")
+				} else if !st.gnodes[kb.gidx].closed {
+					st.fail("cannot refer to an open group")
+				}
+				return kb
+			}
 			st.pending = append(st.pending, kb)
 			return kb
 		}
@@ -1801,6 +1851,12 @@ func (st *rxSt) parseAtom() *rxNode {
 				if st.py {
 					a.gidx = rxEOS
 				}
+			}
+			if st.pyuni && nxt == 'b' {
+				a.gidx = rxPUWordB
+			}
+			if st.pyuni && nxt == 'B' {
+				a.gidx = rxPUNWordB
 			}
 			if st.java {
 				switch nxt {
@@ -2608,7 +2664,8 @@ func rxCompile(pattern, flags string) *rxRe {
 		pat = rxExpandQuotes(pat)
 	}
 	st := &rxSt{p: pat, ext: ext, dotall: dotall, octal: octal, ere: ere, posix: posix, java: java, errAt: -1,
-		py: py, icase: icase, multi: multi, ucase: ucase, unix: unix, gnodes: []*rxNode{nil}}
+		py: py, icase: icase, multi: multi, ucase: ucase, unix: unix, gnodes: []*rxNode{nil},
+		pyuni: py && !strings.ContainsRune(flags, 'a')}
 	// Under P and J case folding and line anchoring are decided per atom while
 	// parsing.
 	if py || java {
@@ -2769,6 +2826,14 @@ func (re *rxRe) assertOK(text []rune, kind, sp int) bool {
 			return false
 		}
 		return text[sp] == '\n'
+	}
+	if kind == rxPUWordB || kind == rxPUNWordB {
+		pb := sp > 0 && rxPyWord(text[sp-1])
+		pa := sp < n && rxPyWord(text[sp])
+		if kind == rxPUWordB {
+			return pb != pa
+		}
+		return pb == pa
 	}
 	if kind >= rxJBOL {
 		return rxAssertJ(text, kind, sp)

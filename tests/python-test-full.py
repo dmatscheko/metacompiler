@@ -7321,6 +7321,128 @@ def s154():
           == ["missing { 2", "missing { 3", "missing character name 3", "missing character name 3",
               "missing }, unterminated name 3", "undefined character name 'NO SUCH NAME' 0", ["——", "☃"]])
 
+# ===== SECTION 155: runtime exceptions' classes; __class__; regex group references and Unicode \w; class-body comprehensions =====
+# An exception the runtime raises is an instance of the program's own builtin
+# class, so `type(e) is ValueError` holds. __class__ in any function nested in a
+# class body is that class; in the class body itself and outside one it is an
+# unbound name. Python's re refuses a backreference to a group not yet opened or
+# still open, \w \W \b are Unicode's for a str pattern unless re.ASCII or (?a),
+# and findall reports a group that did not take part as "". A comprehension in a
+# class body sees the class's names only in its outermost iterable. Values are
+# CPython 3.14's.
+import re as S155re
+
+S155x = 1
+
+class S155C:
+    def m(self):
+        return __class__
+    def n(self):
+        def inner():
+            return __class__.__name__
+        return inner()
+    def lam(self):
+        return (lambda: __class__)()
+    def comp(self):
+        return [__class__.__name__ for _ in range(2)]
+    @staticmethod
+    def s():
+        return __class__.__name__
+    @classmethod
+    def k(cls):
+        return __class__ is cls
+
+class S155D(S155C):
+    def m2(self):
+        return (__class__.__name__, super().m().__name__)
+
+class S155K:
+    S155x = 5
+    xs = [10, 20]
+    a = [S155x for _ in range(2)]
+    b = [y + S155x for y in range(2)]
+    c = {k: S155x for k in range(1)}
+    d = list(S155x for _ in range(2))
+    e = [z for z in [S155x]]
+    f = [[S155x + j for j in range(2)] for i in xs]
+    g = {i: i for i in xs if i > S155x}
+
+def s155fn():
+    return __class__
+
+def s155outer():
+    w = "outer"
+    class C:
+        w = "class"
+        r = [w for _ in range(1)]
+        s = list(w for _ in range(1))
+    return [C.r, C.s]
+
+def s155err(p):
+    try:
+        S155re.compile(p)
+        return "ok"
+    except S155re.error as e:
+        return e.msg + " " + str(e.pos)
+
+def s155():
+    got = []
+    try:
+        int("x")
+    except ValueError as e:
+        got.append(type(e) is ValueError)
+    try:
+        [1][5]
+    except LookupError as e:
+        got.append([type(e) is IndexError, type(e) is LookupError])
+    try:
+        {}["k"]
+    except Exception as e:
+        got.append(type(e) == KeyError)
+    try:
+        1 // 0
+    except ArithmeticError as e:
+        got.append(type(e) is ZeroDivisionError)
+    check("rtexccls", got == [True, [True, False], True, True])
+    check("clscell1", [S155C().m() is S155C, S155C().n(), S155C().lam() is S155C, S155C().comp(),
+                       S155C.s(), S155C.k(), S155D.k(), S155D().m2(), S155D().m() is S155C]
+          == [True, "S155C", True, ["S155C", "S155C"], "S155C", True, False, ("S155D", "S155C"), True])
+    ms = []
+    try:
+        class S155E:
+            y = __class__
+    except NameError as e:
+        ms.append(str(e))
+    try:
+        s155fn()
+    except NameError as e:
+        ms.append(str(e))
+    try:
+        class S155F:
+            y = [__class__ for _ in range(1)]
+    except NameError as e:
+        ms.append(str(e))
+    check("clscell2", ms == ["name '__class__' is not defined"] * 3)
+    check("regref", [s155err(r"\1(a)"), s155err(r"(a\1)"), s155err(r"(a)\2"), s155err(r"(a(b)\2)"),
+                     s155err(r"((a)\2)"), s155err(r"(?P<n>a(?P=n))"), s155err(r"(?P=n)(?P<n>a)"),
+                     s155err(r"(?P<n>a)(?P=n)"), s155err(r"(a)|\1"), s155err(r"[\1]")]
+          == ["invalid group reference 1 1", "cannot refer to an open group 2", "invalid group reference 2 4", "ok",
+              "ok", "cannot refer to an open group 11", "unknown group name 'n' 4", "ok", "ok", "ok"])
+    t = "naïve straße 名前 x_1 a\u0301 ٣Ⅻ½"
+    check("reuniw", [S155re.findall(r"\w+", t), S155re.findall(r"\W+", "é!?ü"), S155re.findall(r"[^\w ]+", t),
+                     S155re.sub(r"\b", "|", "é x"), S155re.findall(r"\w+", t, S155re.ASCII),
+                     S155re.findall(r"(?a)\w+", "aé"), S155re.findall(r"(?a:\w+)\w*", "aé b"),
+                     S155re.findall(r"\B.", "éé"), S155re.match(r"\w", "é", S155re.A)]
+          == [["naïve", "straße", "名前", "x_1", "a", "٣Ⅻ½"], ["!?"], ["\u0301"], "|é| |x|",
+              ["na", "ve", "stra", "e", "x_1", "a"], ["a"], ["aé", "b"], ["é"], None])
+    check("refindall", [S155re.findall(r"(a)|b", "ab"), S155re.findall(r"(a)|(b)", "ab"),
+                        S155re.findall(r"(x)?y", "yxy"), [m.groups() for m in S155re.finditer(r"(a)|b", "ab")]]
+          == [["a", ""], [("a", ""), ("", "b")], ["", "x"], [("a",), (None,)]])
+    check("clscomp", [S155K.a, S155K.b, S155K.c, S155K.d, S155K.e, S155K.f, S155K.g, s155outer(),
+                      hasattr(S155K, "y"), hasattr(S155K, "i")]
+          == [[1, 1], [1, 2], {0: 1}, [1, 1], [5], [[1, 2], [1, 2]], {10: 10, 20: 20}, [["outer"], ["outer"]],
+              False, False])
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -7461,5 +7583,6 @@ def main():
     s147() # SECTION-CALL 147
     s153() # SECTION-CALL 153
     s154() # SECTION-CALL 154
+    s155() # SECTION-CALL 155
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

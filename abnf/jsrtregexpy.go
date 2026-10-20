@@ -40,9 +40,9 @@ const (
 	pyReA = 256
 )
 
-// pyReFlagStr maps the bitmask onto the engine's Python dialect P and four neutral
-// letters. re.A is the engine's only behaviour and re.U is the py3 default, so
-// both are accepted and ignored; re.L has no locale to read.
+// pyReFlagStr maps the bitmask onto the engine's Python dialect P and five neutral
+// letters (re.A is the engine's a). re.U is the py3 default, so it is accepted
+// and ignored; re.L has no locale to read.
 func pyReFlagStr(n int) string {
 	s := "P"
 	if n&pyReI != 0 {
@@ -56,6 +56,9 @@ func pyReFlagStr(n int) string {
 	}
 	if n&pyReX != 0 {
 		s += "x"
+	}
+	if n&pyReA != 0 {
+		s += "a"
 	}
 	return s
 }
@@ -314,6 +317,12 @@ func pyReErrInfo(pat, nf, err string, at int) (string, int) {
 		return err, k - 1 - len([]rune(err[20:len(err)-1]))
 	case strings.HasPrefix(err, "invalid group reference "):
 		return err, k - len(err) + 24
+	case err == "cannot refer to an open group":
+		// CPython points at the backslash of \N, and at the name of (?P=name).
+		if p[k-1] == ')' {
+			return err, pyReLastAt(p, '=', k) + 1
+		}
+		return err, pyReLastAt(p, '\\', k)
 	case strings.HasPrefix(err, "unsupported group form (?"):
 		return "unknown extension ?" + string(p[k-1]), k - 2
 	case strings.HasPrefix(err, "unknown extension ?<"):
@@ -763,14 +772,15 @@ func (rt *jsrt) rxPyFindAll(rv *jsObject, s string, asMatch bool) *jsArray {
 			g, _ := re.group(text, m, 0)
 			out.elems = append(out.elems, g)
 		case re.ngroups == 1:
-			if g, gok := re.group(text, m, 1); gok {
-				out.elems = append(out.elems, g)
-			} else {
-				out.elems = append(out.elems, jsUndef)
-			}
+			// A group that did not take part is "" here, not None.
+			g, _ := re.group(text, m, 1)
+			out.elems = append(out.elems, g)
 		default:
 			t := pyTup(&jsArray{})
-			rxPyAppendGroups(t, re, text, m)
+			for gi := 1; gi <= re.ngroups; gi++ {
+				g, _ := re.group(text, m, gi)
+				t.elems = append(t.elems, g)
+			}
 			out.elems = append(out.elems, t)
 		}
 		if m.end == m.begin {
