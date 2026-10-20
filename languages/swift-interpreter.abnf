@@ -1198,12 +1198,12 @@ TOptEnd     <~~ push({optend: true}) ~~> = NoSpace "?" NotChar63 ;
 // `a?.b = c` / `a?[i] = c`: an optional-chain target. The segment after the `?`
 // carries `opt`: a nil there skips the whole assignment, right-hand side included.
 TOpt        = NoSpace "?" NotChar63 ( "." Id <~~ push({key: swBt(up.in), opt: true}) ~~> | TOptIdx ) ;
-TOptIdx     <~~ var ia = takeAll(); push({idx: makeIndexKey(swIdxKeys(ia)), dflt: swIdxDfltOf(ia), opt: true}) ~~>
+TOptIdx     <~~ var ia = takeAll(); push({idx: makeIndexKeyL(swIdxKeys(ia), swIdxLabelOf(ia)), dflt: swIdxDfltOf(ia), opt: true}) ~~>
             = "[" IndexArg { "," IndexArg } "]" ;
 TTupIdx     <~~ push({key: up.in}) ~~> = "0"..."9" { "0"..."9" } ;
 TShort      <~~ push("$" + up.in) ~~> = "0"..."9" { "0"..."9" } ;
 TForce      = NoSpace "!" NotChar61 ;
-TIndex      <~~ var ia = takeAll(); push({idx: makeIndexKey(swIdxKeys(ia)), dflt: swIdxDfltOf(ia)}) ~~>
+TIndex      <~~ var ia = takeAll(); push({idx: makeIndexKeyL(swIdxKeys(ia), swIdxLabelOf(ia)), dflt: swIdxDfltOf(ia)}) ~~>
             = "[" IndexArg { "," IndexArg } "]" ;
 
 // cond ? a : b (right associative). The ? cannot be confused with ?? (consumed
@@ -1463,14 +1463,18 @@ FieldSfx    = "." Id <~~ push({kind:"field", name: swBt(up.in)}) ~~> ;
 TupleSfx    = "." TupleIdx ;
 TupleIdx    <~~ push({kind:"field", name: up.in}) ~~>
             = "0"..."9" { "0"..."9" } ;
-IndexSfx    <~~ var ia = takeAll(); push({kind:"index", idx: makeIndexKey(swIdxKeys(ia)), dflt: swIdxDfltOf(ia)}) ~~>
+IndexSfx    <~~ var ia = takeAll(); push({kind:"index", idx: makeIndexKeyL(swIdxKeys(ia), swIdxLabelOf(ia)), dflt: swIdxDfltOf(ia)}) ~~>
             = SameLineParen "[" IndexArg { "," IndexArg } "]" ;
 // A subscript index, with the one-sided DOWN range (`a[...1]`, `a[..<2]`) tried
 // first - see RangeExpr for why the UP form cannot be an alternative here.
-IndexArg    = PartRangeDn | IdxDflt | Expression ;
+IndexArg    = PartRangeDn | IdxDflt | IdxLabelled | Expression ;
 // `d[k, default: v]`: Dictionary's defaulting subscript. The default travels
 // BESIDE the key (swIdxDfltOf), as an autoclosure: it runs only on a miss.
 IdxDflt     <~~ push({dfltArg: pop()}) ~~> = KwDefault ":" Expression ;
+// `xs[safe: 1]`: a subscript's argument label, which picks the subscript a
+// program declares with that label for its first parameter (swSubKey).
+IdxLabelled = IdxLabel ":" Expression ;
+IdxLabel    <~~ push({ilbl: swBt(up.in)}) ~~> = Id ;
 PartRangeDn <~~ push(makeRange(takeAll())) ~~> = RangeOp AddExpr ;
 // f(args) applied to whatever the chain produced so far - a closure out of an array
 // (queued[0]()), a function returned by a function, a computed member. The opening
@@ -4190,8 +4194,31 @@ KwContinue  = "continue" KwEnd ;
         for (var j = ab.lo; j < ab.hi; j++) { out.push(o[j]) }
         return out
     }
+    // Inside a builtin's own subscript extension (`extension String { subscript(i:
+    // Int) -> Character { self[index(startIndex, offsetBy: i)] } }`) a subscript of a
+    // builtin value is the builtin's: an Index is an Int in this model, and Swift
+    // picks the String.Index overload there. Twin of swBSubBody in
+    // swift-to-llvm-ir.abnf.
+    var swBSubDepth = 0
+    // The program subscript an index of o reaches (base `__sub_get` / `__sub_set`,
+    // extra the arguments beyond the index: a setter's newValue, a `default:`), or
+    // null. A builtin's own subscript answers an index no extension subscript takes
+    // (`xs[0]` beside an extension's `subscript(i: Int, j: Int)`).
+    function swSubFor(o, base, i, extra) {
+        var key = swSubKey(base, i)
+        var bi = o === null || o === undefined || typeof o != "object" || o.__class == undefined
+        if (bi && swBSubDepth > 0) { return null }
+        var sa = subAccessor(o, key)
+        if (sa != null && bi && !swSubTakes(o, key, idxArgs(i).length + extra)) { return null }
+        return sa
+    }
     function swIndex(o, i) {
-        var sg = subAccessor(o, "__sub_get")
+        var bi = o === null || o === undefined || typeof o != "object" || o.__class == undefined
+        var sg = swSubFor(o, "__sub_get", i, 0)
+        if (sg != null && bi) {
+            swBSubDepth++
+            try { return sg.apply(undefined, concat2impl([o], idxArgs(i))) } finally { swBSubDepth-- }
+        }
         if (sg != null) { return sg.apply(undefined, concat2impl([o], idxArgs(i))) }
         if (isRange(i) && (Array.isArray(o) || typeof o == "string")) { return swSlice(o, i) }
         // A range's element at an index (see swCrIxAt).
@@ -4240,7 +4267,7 @@ KwContinue  = "continue" KwEnd ;
             return
         }
         if (typeof o == "object") {
-            var ss = subAccessor(o, "__sub_set")
+            var ss = swSubFor(o, "__sub_set", k, 1)
             if (ss != null) { ss.apply(undefined, concat2impl(concat2impl([o], idxArgs(k)), [v])); return }
             if (!hasOwn(o, k)) {
                 var s = findAccessor(o, "__set_" + k)
@@ -4272,7 +4299,7 @@ KwContinue  = "continue" KwEnd ;
     }
     function getElemP(o, k) {
         if (isDict(o)) { var di = dictFind(o, k); return di < 0 ? undefined : o.vals[di] }
-        var sg2 = subAccessor(o, "__sub_get")
+        var sg2 = swSubFor(o, "__sub_get", k, 0)
         if (sg2 != null) { return sg2.apply(undefined, concat2impl([o], idxArgs(k))) }
         if (hasOwn(o, k)) { return o[k] }
         var g = findAccessor(o, "__get_" + k)
@@ -6758,7 +6785,7 @@ KwContinue  = "continue" KwEnd ;
         // A `Set<T>` parameter makes its argument a Set, as a `Set<T>` declaration
         // makes its initializer one; an Optional one keeps its nil. Twin of
         // makeParam in swift-to-llvm-ir.abnf.
-        return {name: name, label: label, type: type, adopt: ad, variadic: isVar, auto: isAuto,
+        return {name: name, label: label, xl: ids.length > 1 && label != "", type: type, adopt: ad, variadic: isVar, auto: isAuto,
                 inout: isInout, hasDefault: hasDflt, dflt: dflt,
                 isSet: !isVar && !isInout && swIsSetTy(type) && type.charAt(type.length - 1) != "?"}
     }
@@ -9241,10 +9268,14 @@ KwContinue  = "continue" KwEnd ;
     function swIdxKeys(items) {
         var ks = []
         for (var i = 0; i < items.length; i++) {
-            if (typeof items[i] == "object" && items[i] !== null && items[i].dfltArg != undefined) { continue }
+            if (typeof items[i] == "object" && items[i] !== null && (items[i].dfltArg != undefined || items[i].ilbl != undefined)) { continue }
             ks.push(items[i])
         }
         return ks
+    }
+    // The label of an index's FIRST argument, "" for none.
+    function swIdxLabelOf(items) {
+        return items.length > 0 && typeof items[0] == "object" && items[0] !== null && items[0].ilbl != undefined ? items[0].ilbl : ""
     }
     function swIdxDfltOf(items) {
         var l = items[items.length - 1]
@@ -9263,7 +9294,7 @@ KwContinue  = "continue" KwEnd ;
         // last argument (`p[5, default: -1]`). Twin of swEmitIdxDflt in
         // swift-to-llvm-ir.abnf.
         if (!isDict(o)) {
-            var sg = subAccessor(o, "__sub_get")
+            var sg = swSubFor(o, "__sub_get", k, 1)
             if (sg != null) {
                 var ks = idxArgs(k).slice(0)
                 ks.push(dflt())
@@ -9286,6 +9317,37 @@ KwContinue  = "continue" KwEnd ;
             for (var i = 0; i < items.length; i++) { vals.push(items[i]()) }
             return {__idxs: vals}
         }
+    }
+    // A labelled index travels as {__idxs, __lbl}, whatever its arity. Twin in
+    // swift-to-llvm-ir.abnf.
+    function makeIndexKeyL(items, lbl) {
+        if (lbl == "") { return makeIndexKey(items) }
+        return function() {
+            var vals = []
+            for (var i = 0; i < items.length; i++) { vals.push(items[i]()) }
+            return {__idxs: vals, __lbl: lbl}
+        }
+    }
+    // Whether a subscript of o's (extension) table takes n index arguments, its
+    // defaulted trailing parameters allowing fewer. Twin of the arity in the
+    // names swEmitIndexS reads in swift-to-llvm-ir.abnf.
+    function swSubTakes(o, key, n) {
+        var t = accTable(o)
+        var lst = t == null ? null : classFind(t, "__ov_" + key)
+        if (lst == undefined || lst === null) { return true }
+        for (var c = 0; c < lst.length; c++) {
+            var ps = lst[c].params
+            var req = ps.length
+            while (req > 0 && ps[req - 1].hasDefault) { req-- }
+            if (n >= req && n <= ps.length) { return true }
+        }
+        return false
+    }
+    // The subscript accessor an index reaches: `__sub_get` for an unlabelled one,
+    // `__sub_get$safe` for `[safe: i]` (makeSubscript names them alike).
+    function swSubKey(base, i) {
+        if (i !== null && i !== undefined && typeof i == "object" && i.__lbl != undefined) { return base + "$" + i.__lbl }
+        return base
     }
     // A type descriptor uses its STATIC subscript; an instance its own. Without the
     // split, Grid12[4] would find the instance subscript on the descriptor and run it
@@ -9320,14 +9382,17 @@ KwContinue  = "continue" KwEnd ;
             else if (a.kind == "set" || a.kind == "_modify") { set = a.body; if (a.param != null) { setP = a.param } }
         }
         var out = []
-        if (get != null) { out.push({method: {name: "__sub_get", params: params, body: get, rtype: rty}}) }
+        // A written label on the first parameter (`subscript(safe i: Int)`) names a
+        // subscript of its own, which only `[safe: i]` reaches (swSubKey).
+        var sx = params.length > 0 && params[0].xl === true ? "$" + params[0].label : ""
+        if (get != null) { out.push({method: {name: "__sub_get" + sx, params: params, body: get, rtype: rty}}) }
         if (set != null) {
             var sp = []
             for (var k = 0; k < params.length; k++) { sp.push(params[k]) }
             var np = plainParam(setP)
             np.adopt = rty
             sp.push(np)
-            out.push({method: {name: "__sub_set", params: sp, body: set}})
+            out.push({method: {name: "__sub_set" + sx, params: sp, body: set}})
         }
         return out
     }

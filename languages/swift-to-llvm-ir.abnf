@@ -1180,12 +1180,12 @@ TOptEnd     <~~ push({optend: true}) ~~> = NoSpace "?" NotChar63 ;
 // `a?.b = c` / `a?[i] = c`: an optional-chain target. The segment after the `?`
 // carries `opt`: a nil there skips the whole assignment, right-hand side included.
 TOpt        = NoSpace "?" NotChar63 ( "." Id <~~ push({key: swBt(up.in), opt: true}) ~~> | TOptIdx ) ;
-TOptIdx     <~~ var ia = takeAll(); push({idx: makeIndexKey(swIdxKeys(ia)), dflt: swIdxDfltOf(ia), opt: true}) ~~>
+TOptIdx     <~~ var ia = takeAll(); push({idx: makeIndexKeyL(swIdxKeys(ia), swIdxLabelOf(ia)), dflt: swIdxDfltOf(ia), opt: true}) ~~>
             = "[" IndexArg { "," IndexArg } "]" ;
 TTupIdx     <~~ push({key: up.in}) ~~> = "0"..."9" { "0"..."9" } ;
 TShort      <~~ push("$" + up.in) ~~> = "0"..."9" { "0"..."9" } ;
 TForce      = NoSpace "!" NotChar61 ;
-TIndex      <~~ var ia = takeAll(); push({idx: makeIndexKey(swIdxKeys(ia)), dflt: swIdxDfltOf(ia)}) ~~>
+TIndex      <~~ var ia = takeAll(); push({idx: makeIndexKeyL(swIdxKeys(ia), swIdxLabelOf(ia)), dflt: swIdxDfltOf(ia)}) ~~>
             = "[" IndexArg { "," IndexArg } "]" ;
 
 Ternary     <~~ push(makeTernary(takeAll(), up.in)) ~~>
@@ -1441,14 +1441,18 @@ FieldSfx    = "." Id <~~ push(makeFieldSfx(swBt(up.in))) ~~> ;
 TupleSfx    = "." TupleIdx ;
 TupleIdx    <~~ push({kind:"field", name: up.in}) ~~>
             = "0"..."9" { "0"..."9" } ;
-IndexSfx    <~~ var ia = takeAll(); push({kind:"index", idx: makeIndexKey(swIdxKeys(ia)), dflt: swIdxDfltOf(ia)}) ~~>
+IndexSfx    <~~ var ia = takeAll(); push({kind:"index", idx: makeIndexKeyL(swIdxKeys(ia), swIdxLabelOf(ia)), dflt: swIdxDfltOf(ia), sub: swSubNameOf(ia)}) ~~>
             = SameLineParen "[" IndexArg { "," IndexArg } "]" ;
 // A subscript index, with the one-sided DOWN range (`a[...1]`, `a[..<2]`) tried
 // first - see RangeExpr for why the UP form cannot be an alternative here.
-IndexArg    = PartRangeDn | IdxDflt | Expression ;
+IndexArg    = PartRangeDn | IdxDflt | IdxLabelled | Expression ;
 // `d[k, default: v]`: Dictionary's defaulting subscript. The default travels
 // BESIDE the key (swIdxDfltOf), as an autoclosure: it runs only on a miss.
 IdxDflt     <~~ push({dfltArg: pop()}) ~~> = KwDefault ":" Expression ;
+// `xs[safe: 1]`: a subscript's argument label, which picks the subscript a
+// program declares with that label for its first parameter (swSubKey).
+IdxLabelled = IdxLabel ":" Expression ;
+IdxLabel    <~~ push({ilbl: swBt(up.in)}) ~~> = Id ;
 PartRangeDn <~~ push(makeRange(takeAll())) ~~> = RangeOp AddExpr ;
 // f(args) applied to whatever the chain produced so far - a closure out of an array
 // (queued[0]()), a function returned by a function, a computed member. The opening
@@ -4977,7 +4981,7 @@ KwContinue  = "continue" KwEnd ;
     // else keeps the js_swidx / js_swdset path.
     function rtSubGet() {
         return rtFunc("sw_subget", 2, function(b, ps) {
-            var g = b.NewCall(rtSubLookup(), [ps[0], callExt(b, "js_jadd", [emitStr(b, "__sub_get"), b.NewCall(rtIdxArity(), [ps[1]])])])
+            var g = b.NewCall(rtSubLookup(), [ps[0], b.NewCall(rtSubName(), [emitStr(b, "__sub_get"), ps[1], emitNum(b, 0)])])
             var callB = curF.NewBlock("")
             var plainB = curF.NewBlock("")
             b.NewCondBr(truthy(b, g), callB, plainB)
@@ -4990,7 +4994,7 @@ KwContinue  = "continue" KwEnd ;
     }
     function rtSubSet() {
         return rtFunc("sw_subset", 3, function(b, ps) {
-            var g = b.NewCall(rtSubLookup(), [ps[0], callExt(b, "js_jadd", [emitStr(b, "__sub_set"), b.NewCall(rtIdxArity(), [ps[1]])])])
+            var g = b.NewCall(rtSubLookup(), [ps[0], b.NewCall(rtSubName(), [emitStr(b, "__sub_set"), ps[1], emitNum(b, 0)])])
             var callB = curF.NewBlock("")
             var plainB = curF.NewBlock("")
             b.NewCondBr(truthy(b, g), callB, plainB)
@@ -5658,8 +5662,49 @@ KwContinue  = "continue" KwEnd ;
         curF = savedF
         return swStatRefIdx
     }
+    // Inside a builtin's own subscript extension (`extension String { subscript(i:
+    // Int) -> Character { self[index(startIndex, offsetBy: i)] } }`) a subscript is
+    // the builtin's: an Index is an Int in this model, and Swift picks the
+    // String.Index overload there. Twin of swBSubDepth in swift-interpreter.abnf.
+    var swBSubBody = false
+    // The getter name an index suffix reaches, as makeSubscript names it: its
+    // argument count and its first argument's label.
+    function swSubNameOf(ia) {
+        var l = swIdxLabelOf(ia)
+        return "__sub_get" + swIdxKeys(ia).length + (l == "" ? "" : "$" + l)
+    }
+    // An index read whose subscript a BUILTIN's extension declares (`extension
+    // Array { subscript(safe i: Int) -> Element? }`): a receiver of that builtin
+    // runs the extension's getter from its $ext$ table, anything else reads as
+    // emitIndexRead does. Twin of the builtin arm of swIndex in
+    // swift-interpreter.abnf.
+    function swEmitIndexS(b, cur, idxV, name) {
+        var bases = name == undefined || swBSubBody ? null : builtinMethOf(name)
+        if (bases == null) { return {b: b, v: emitIndexRead(b, cur, idxV)} }
+        var outB = curF.NewBlock("")
+        var inc = []
+        for (var i = 0; i < bases.length; i++) {
+            var bn = bases[i] == "Character" ? "String" : bases[i]
+            var extB = curF.NewBlock("")
+            var nextB = curF.NewBlock("")
+            var isB = callExt(b, "js_is_type", [cur, emitStr(b, bn)])
+            b.NewCondBr(truthy(b, isB), extB, nextB)
+            var args = callExt(extB, "js_arr_new", [])
+            callExt(extB, "js_arr_push", [args, cur])
+            extB = emitSpreadIdx(extB, args, idxV)
+            var tbl = extB.NewCall(rtKGet(), [curScopeV, emitStr(extB, "$ext$" + bases[i])])
+            var ev = callExt(extB, "js_call", [callExt(extB, "js_get", [tbl, emitStr(extB, name)]), hUndef, args])
+            extB.NewBr(outB)
+            inc.push(llvm.ir.NewIncoming(ev, extB))
+            b = nextB
+        }
+        var pv = emitIndexRead(b, cur, idxV)
+        b.NewBr(outB)
+        inc.push(llvm.ir.NewIncoming(pv, b))
+        return {b: outB, v: outB.NewPhi(inc)}
+    }
     function emitIndexRead(b, cur, idxV) {
-        if (!hasSubscript) { return callExt(b, core.indexExt, [cur, idxV]) }
+        if (!hasSubscript || swBSubBody) { return callExt(b, core.indexExt, [cur, idxV]) }
         return b.NewCall(rtSubGet(), [cur, idxV])
     }
     // The name a chain STARTS with, when it starts with a bare one: the matched text
@@ -6015,7 +6060,11 @@ KwContinue  = "continue" KwEnd ;
                             var rd = swEmitIdxDflt(b, cur, ri.v, s.dflt, swDfltStores(suffixes, i), "")
                             b = rd.b
                             cur = rd.v
-                        } else { cur = emitIndexRead(b, cur, ri.v) }
+                        } else {
+                            var rx = swEmitIndexS(b, cur, ri.v, s.sub)
+                            b = rx.b
+                            cur = rx.v
+                        }
                     }
                 }
                 return {b: b, v: cur}
@@ -6238,7 +6287,11 @@ KwContinue  = "continue" KwEnd ;
                         var rd2 = swEmitIdxDflt(b, cur, ir2.v, s.dflt, swDfltStores(suffixes, i), swTyPeel(anns[i], 1))
                         b = rd2.b
                         cur = rd2.v
-                    } else { cur = emitIndexRead(b, cur, ir2.v) }
+                    } else {
+                        var rx2 = swEmitIndexS(b, cur, ir2.v, s.sub)
+                        b = rx2.b
+                        cur = rx2.v
+                    }
                     pathKey = null
                 }
             }
@@ -6640,7 +6693,7 @@ KwContinue  = "continue" KwEnd ;
         // A `Set<T>` parameter makes its argument a Set, as a `Set<T>` declaration
         // makes its initializer one: `f([1, 1, 2])` binds a two-member Set. An
         // Optional one keeps its nil.
-        return {name: name, label: label, type: type, adopt: ad, variadic: isVar, auto: isAuto,
+        return {name: name, label: label, xl: ids.length > 1 && label != "", type: type, adopt: ad, variadic: isVar, auto: isAuto,
                 inout: isInout, hasDefault: hasDflt, dflt: dflt,
                 isSet: !isVar && !isInout && swIsSetTy(type) && type.charAt(type.length - 1) != "?"}
     }
@@ -9636,10 +9689,14 @@ KwContinue  = "continue" KwEnd ;
     function swIdxKeys(items) {
         var ks = []
         for (var i = 0; i < items.length; i++) {
-            if (typeof items[i] == "object" && items[i] !== null && items[i].dfltArg != undefined) { continue }
+            if (typeof items[i] == "object" && items[i] !== null && (items[i].dfltArg != undefined || items[i].ilbl != undefined)) { continue }
             ks.push(items[i])
         }
         return ks
+    }
+    // The label of an index's FIRST argument, "" for none.
+    function swIdxLabelOf(items) {
+        return items.length > 0 && typeof items[0] == "object" && items[0] !== null && items[0].ilbl != undefined ? items[0].ilbl : ""
     }
     function swIdxDfltOf(items) {
         var l = items[items.length - 1]
@@ -9657,8 +9714,7 @@ KwContinue  = "continue" KwEnd ;
         // A program subscript with a `default:` parameter takes the default as its
         // last argument (`p[5, default: -1]`). Twin of swIdxDflt in
         // swift-interpreter.abnf.
-        var arV = callExt(b, "js_jadd", [b.NewCall(rtIdxArity(), [k]), emitNum(b, 1)])
-        var g = b.NewCall(rtSubLookup(), [o, callExt(b, "js_jadd", [emitStr(b, "__sub_get"), arV])])
+        var g = b.NewCall(rtSubLookup(), [o, b.NewCall(rtSubName(), [emitStr(b, "__sub_get"), k, emitNum(b, 1)])])
         var userB = curF.NewBlock("")
         var dictB = curF.NewBlock("")
         var outB = curF.NewBlock("")
@@ -9696,6 +9752,12 @@ KwContinue  = "continue" KwEnd ;
     }
     function makeIndexKey(items) {
         if (items.length == 1) { return items[0] }
+        return makeIndexKeyL(items, "")
+    }
+    // A labelled index travels as {__idxs, __lbl}, whatever its arity. Twin in
+    // swift-interpreter.abnf.
+    function makeIndexKeyL(items, lbl) {
+        if (lbl == "" && items.length == 1) { return items[0] }
         return function(b) {
             var arr = callExt(b, "js_arr_new", [])
             for (var i = 0; i < items.length; i++) {
@@ -9705,8 +9767,23 @@ KwContinue  = "continue" KwEnd ;
             }
             var o = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [o, emitStr(b, "__idxs"), arr])
+            if (lbl != "") { callExt(b, "js_set", [o, emitStr(b, "__lbl"), emitStr(b, lbl)]) }
             return {b: b, v: o}
         }
+    }
+    // The accessor name an index reaches: base + its arity (+ extra, a `default:`
+    // argument), plus `$label` for a labelled one (`[safe: i]`; makeSubscript names
+    // them alike). Twin of swSubKey in swift-interpreter.abnf.
+    function rtSubName() {
+        return rtFunc("sw_subname", 3, function(b, ps) {
+            var nm = callExt(b, "js_jadd", [ps[0], callExt(b, "js_jadd", [b.NewCall(rtIdxArity(), [ps[1]]), ps[2]])])
+            var lV = b.NewCall(rtSafeGet(), [ps[1], emitStr(b, "__lbl")])
+            var plainB = curF.NewBlock("")
+            var lblB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [lV, hUndef])), plainB, lblB)
+            plainB.NewRet(nm)
+            lblB.NewRet(callExt(lblB, "js_jadd", [nm, callExt(lblB, "js_jadd", [emitStr(lblB, "$"), lV])]))
+        })
     }
 
     // ----- Computed properties and property observers -----
@@ -9793,8 +9870,11 @@ KwContinue  = "continue" KwEnd ;
         // overload dispatcher picks the same one.
         var req = params.length
         while (req > 0 && params[req - 1].hasDefault) { req-- }
+        // A written label on the first parameter (`subscript(safe i: Int)`) names a
+        // subscript of its own, which only `[safe: i]` reaches (rtSubName).
+        var sx = params.length > 0 && params[0].xl === true ? "$" + params[0].label : ""
         for (var ar = req; get != null && ar <= params.length; ar++) {
-            out.push({method: {name: "__sub_get" + ar, params: params, body: get, rtype: rty}})
+            out.push({method: {name: "__sub_get" + ar + sx, params: params, body: get, rtype: rty}})
         }
         if (set != null) {
             var sp = []
@@ -9802,7 +9882,7 @@ KwContinue  = "continue" KwEnd ;
             var np = plainParam(setP)
             np.adopt = rty
             sp.push(np)
-            out.push({method: {name: "__sub_set" + params.length, params: sp, body: set}})
+            out.push({method: {name: "__sub_set" + params.length + sx, params: sp, body: set}})
         }
         return out
     }
@@ -10436,7 +10516,10 @@ KwContinue  = "continue" KwEnd ;
                 n = hasOwn(seen, "$init") ? seen["$init"] : 0
                 seen["$init"] = n + 1
             } else { n = ovNext(tname, false, mth.name) }
+            var savedBSub = swBSubBody
+            swBSubBody = mth.name.substring(0, 9) == "__sub_get" && swInBuiltinExt()
             var idx = emitFunc(mth.params, mth.body, true, false, mth.rlabels, mth.rtype)
+            swBSubBody = savedBSub
             defPos(b, mth.pos)
             callExt(b, "js_set", [tblV, emitStr(b, memberKey(mth.name, n)),
                                   callExt(b, "js_closure", [handle(idx), curScopeV])])
@@ -11301,7 +11384,10 @@ KwContinue  = "continue" KwEnd ;
             var n
             if (mth.name == "init") { n = initIdxs[nInit]; nInit++ }
             else { n = ovNext(tname, false, mth.name) }
+            var savedXSub = swBSubBody
+            swBSubBody = mth.name.substring(0, 9) == "__sub_get" && swInBuiltinExt()
             var idx = emitFunc(mth.params, mth.body, true, false, mth.rlabels, mth.rtype)
+            swBSubBody = savedXSub
             defPos(b, mth.pos)
             callExt(b, "js_set", [tblV, emitStr(b, memberKey(mth.name, n)),
                                   callExt(b, "js_closure", [handle(idx), curScopeV])])

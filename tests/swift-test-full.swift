@@ -5653,6 +5653,27 @@ func s147() {
     check("147b", o.a == nil && o.b == 3 && Opt147().b == 2 && Opt147(a: 1).a == 1)
 }
 
+// ===== SECTION 148: subscripts a builtin's extension declares =====
+// `xs[safe: 1]` reaches the subscript declared with that argument label, a
+// two-index `xs[0, 1]` the two-parameter one, and a plain `xs[0]` still the
+// Array's own. Inside `extension String { subscript(i: Int) -> Character {
+// self[index(startIndex, offsetBy: i)] } }` the String.Index subscript is read
+// (an Index is an Int in this model) - it does not recurse. Every value read off
+// swiftc 6.1.2.
+extension String {
+    subscript(i148 i: Int) -> Character { self[index(startIndex, offsetBy: i)] }
+}
+extension Array {
+    subscript(safe148 i: Int) -> Element? { i >= 0 && i < count ? self[i] : nil }
+    subscript(i: Int, j148: Int) -> Int { i * 10 + j148 }
+}
+func s148() {
+    let s = "Hello"
+    let xs = [7, 8]
+    check("148a", s[i148: 1] == "e" && s[i148: 4] == "o" && s[s.startIndex] == "H")
+    check("148b", xs[safe148: 1] == 8 && xs[safe148: 2] == nil && xs[0] == 7 && xs[2, 3] == 23)
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5801,6 +5822,7 @@ func main() {
     s145() // SECTION-CALL 145
     s146() // SECTION-CALL 146
     s147() // SECTION-CALL 147
+    s148() // SECTION-CALL 148
     print("full: \(checks) checks, \(fails) failures")
 }
 
