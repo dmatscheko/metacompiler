@@ -12,7 +12,10 @@
 # Lib/random.py's, so a seeded sequence is CPython's draw for draw. There is no
 # entropy source here: an unseeded generator starts from seed(0) rather than
 # from os.urandom, and the module's own generator is seeded at its first draw
-# rather than at import.
+# rather than at import. A str or bytes seed (CPython hashes it with SHA-512)
+# is not supported; a float seed is its hash(), as there.
+
+import math as _mec_rd_math
 
 _mec_rd_mask = 0xFFFFFFFF
 _mec_rd_unseeded = object()
@@ -83,19 +86,25 @@ class _mec_rd_MT:
 
 
 class _mec_rd_module:
-    __all__ = ["Random", "choice", "choices", "getrandbits", "randint", "random", "randrange", "sample", "seed",
-               "shuffle", "uniform"]
+    __all__ = ["Random", "betavariate", "choice", "choices", "expovariate", "gammavariate", "gauss",
+               "getrandbits", "getstate", "lognormvariate", "normalvariate", "paretovariate", "randbytes",
+               "randint", "random", "randrange", "sample", "seed", "setstate", "shuffle", "triangular",
+               "uniform", "weibullvariate"]
 
     class Random:
         def __init__(self, x=None):
             self._mec_rd_mt = _mec_rd_MT()
+            self.gauss_next = None
             if x is not _mec_rd_unseeded:
                 self.seed(x)
 
         def seed(self, a=None):
+            self.gauss_next = None
             if a is None:
                 a = 0
-            if isinstance(a, (str, bytes, float)):
+            if isinstance(a, float):
+                a = hash(a)
+            if isinstance(a, (str, bytes, bytearray)):
                 raise NotImplementedError("random.seed() of a " + type(a).__name__ + " is not supported")
             if not isinstance(a, int):
                 raise TypeError("The only supported seed types are:\nNone, int, float, str, bytes, and bytearray.")
@@ -126,6 +135,118 @@ class _mec_rd_module:
                 shift += 32
                 k -= 32
             return out
+
+        # (version, the 624 state words and the position, gauss_next), as
+        # CPython's getstate answers.
+        def getstate(self):
+            mt = self._mec_rd_mt
+            if mt.index < 0:
+                mt.init_by_array([0])
+            return (3, tuple(mt.mt) + (mt.index,), self.gauss_next)
+
+        def setstate(self, state):
+            if state[0] != 3:
+                raise ValueError("state with version " + str(state[0]) + " passed to Random.setstate() "
+                                 "of version 3")
+            words = state[1]
+            self._mec_rd_mt.mt = list(words[:624])
+            self._mec_rd_mt.index = words[624]
+            self.gauss_next = state[2]
+
+        def randbytes(self, n):
+            return self.getrandbits(n * 8).to_bytes(n, "little")
+
+        def triangular(self, low=0.0, high=1.0, mode=None):
+            u = self.random()
+            try:
+                c = 0.5 if mode is None else (mode - low) / (high - low)
+            except ZeroDivisionError:
+                return low
+            if u > c:
+                u = 1.0 - u
+                c = 1.0 - c
+                low, high = high, low
+            return low + (high - low) * _mec_rd_math.sqrt(u * c)
+
+        # Kinderman and Monahan's ratio of uniforms.
+        def normalvariate(self, mu=0.0, sigma=1.0):
+            while True:
+                u1 = self.random()
+                u2 = 1.0 - self.random()
+                z = _mec_rd_NV_MAGICCONST * (u1 - 0.5) / u2
+                zz = z * z / 4.0
+                if zz <= -_mec_rd_math.log(u2):
+                    break
+            return mu + z * sigma
+
+        # Box-Muller, the second value of a pair kept for the next call.
+        def gauss(self, mu=0.0, sigma=1.0):
+            z = self.gauss_next
+            self.gauss_next = None
+            if z is None:
+                x2pi = self.random() * _mec_rd_math.tau
+                g2rad = _mec_rd_math.sqrt(-2.0 * _mec_rd_math.log(1.0 - self.random()))
+                z = _mec_rd_math.cos(x2pi) * g2rad
+                self.gauss_next = _mec_rd_math.sin(x2pi) * g2rad
+            return mu + z * sigma
+
+        def lognormvariate(self, mu, sigma):
+            return _mec_rd_math.exp(self.normalvariate(mu, sigma))
+
+        def expovariate(self, lambd=1.0):
+            return -_mec_rd_math.log(1.0 - self.random()) / lambd
+
+        def paretovariate(self, alpha):
+            u = 1.0 - self.random()
+            return u ** (-1.0 / alpha)
+
+        def weibullvariate(self, alpha, beta):
+            u = 1.0 - self.random()
+            return alpha * (-_mec_rd_math.log(u)) ** (1.0 / beta)
+
+        # Cheng's rejection method above 1, an exponential at 1, and
+        # algorithm GS (Kennedy and Gentle) below.
+        def gammavariate(self, alpha, beta):
+            if alpha <= 0.0 or beta <= 0.0:
+                raise ValueError("gammavariate: alpha and beta must be > 0.0")
+            if alpha > 1.0:
+                ainv = _mec_rd_math.sqrt(2.0 * alpha - 1.0)
+                bbb = alpha - _mec_rd_LOG4
+                ccc = alpha + ainv
+                while True:
+                    u1 = self.random()
+                    if not 1e-7 < u1 < 0.9999999:
+                        continue
+                    u2 = 1.0 - self.random()
+                    v = _mec_rd_math.log(u1 / (1.0 - u1)) / ainv
+                    x = alpha * _mec_rd_math.exp(v)
+                    z = u1 * u1 * u2
+                    r = bbb + ccc * v - x
+                    if r + _mec_rd_SG_MAGICCONST - 4.5 * z >= 0.0 or r >= _mec_rd_math.log(z):
+                        return x * beta
+            if alpha == 1.0:
+                return -_mec_rd_math.log(1.0 - self.random()) * beta
+            while True:
+                u = self.random()
+                b = (_mec_rd_math.e + alpha) / _mec_rd_math.e
+                p = b * u
+                if p <= 1.0:
+                    x = p ** (1.0 / alpha)
+                else:
+                    x = -_mec_rd_math.log((b - p) / alpha)
+                u1 = self.random()
+                if p > 1.0:
+                    if u1 <= x ** (alpha - 1.0):
+                        break
+                elif u1 <= _mec_rd_math.exp(-x):
+                    break
+            return x * beta
+
+        def betavariate(self, alpha, beta):
+            y = self.gammavariate(alpha, 1.0)
+            if y:
+                return y / (y + self.gammavariate(beta, 1.0))
+            return 0.0
 
         def _randbelow(self, n):
             k = n.bit_length()
@@ -266,8 +387,61 @@ class _mec_rd_module:
     def sample(population, k):
         return _mec_rd_inst.sample(population, k)
 
+    @staticmethod
+    def getstate():
+        return _mec_rd_inst.getstate()
+
+    @staticmethod
+    def setstate(state):
+        _mec_rd_inst.setstate(state)
+
+    @staticmethod
+    def randbytes(n):
+        return _mec_rd_inst.randbytes(n)
+
+    @staticmethod
+    def triangular(low=0.0, high=1.0, mode=None):
+        return _mec_rd_inst.triangular(low, high, mode)
+
+    @staticmethod
+    def normalvariate(mu=0.0, sigma=1.0):
+        return _mec_rd_inst.normalvariate(mu, sigma)
+
+    @staticmethod
+    def gauss(mu=0.0, sigma=1.0):
+        return _mec_rd_inst.gauss(mu, sigma)
+
+    @staticmethod
+    def lognormvariate(mu, sigma):
+        return _mec_rd_inst.lognormvariate(mu, sigma)
+
+    @staticmethod
+    def expovariate(lambd=1.0):
+        return _mec_rd_inst.expovariate(lambd)
+
+    @staticmethod
+    def paretovariate(alpha):
+        return _mec_rd_inst.paretovariate(alpha)
+
+    @staticmethod
+    def weibullvariate(alpha, beta):
+        return _mec_rd_inst.weibullvariate(alpha, beta)
+
+    @staticmethod
+    def gammavariate(alpha, beta):
+        return _mec_rd_inst.gammavariate(alpha, beta)
+
+    @staticmethod
+    def betavariate(alpha, beta):
+        return _mec_rd_inst.betavariate(alpha, beta)
+
     def __repr__(self):
         return "<module 'random'>"
+
+
+_mec_rd_NV_MAGICCONST = 4 * _mec_rd_math.exp(-0.5) / _mec_rd_math.sqrt(2.0)
+_mec_rd_LOG4 = _mec_rd_math.log(4.0)
+_mec_rd_SG_MAGICCONST = 1.0 + _mec_rd_math.log(4.5)
 
 
 # ceil(log(x, 4)) for the integer x > 0 that sample() asks about, exactly.
