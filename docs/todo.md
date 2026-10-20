@@ -124,7 +124,7 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-630 kotlin: sorted collections forget order on insert; copyOfRange; java.util imports; extension dispatch limits · P1 · KT · OPEN [V spec-only]
+### T-630 kotlin: sorted collections forget order on insert; copyOfRange; java.util imports; extension dispatch limits · P1 · KT · IN PROGRESS (KT worker, round 5) [V spec-only]
 `val m = sortedMapOf(2 to "b", 1 to "a"); m[0] = "z"; println(m)` → `{1=a, 2=b, 0=z}` in all engines (TreeMap `{0=z, 1=a, 2=b}`); a
 sortedSetOf + add likewise. `arrayOf(3,1,2).copyOfRange(1, 3)` → interp "unknown list method: copyOfRange" (check the others).
 `import java.util.ArrayList` / `HashMap` / other java.util collections → "unresolved import" (add them to ktJavaClassImports in
