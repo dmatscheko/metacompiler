@@ -99,7 +99,7 @@ recorded as a value-model limit). `K.prototype.hasOwnProperty("constructor")` / 
 
 # JV — Java
 
-### T-646 java: static method through a subclass name; RandomAccess / Serializable markers; Matcher.hitEnd · P1 · JV · OPEN [V]
+### T-646 java: static method through a subclass name; RandomAccess / Serializable markers; Matcher.hitEnd · P1 · JV · IN PROGRESS (JV worker, round 9) [V]
 `class Base { static String name() { return "B"; } } class Sub extends Base {}`; `Sub.name()` → all engines "unknown method 'name'"
 (java `B`). `new ArrayList<>() instanceof RandomAccess` → false (java true; our LinkedList extends ArrayList, so mark ArrayList only);
 `new StringBuilder() instanceof Serializable` → false (java true). Matcher.hitEnd/requireEnd need a hit-the-end flag from the shared
