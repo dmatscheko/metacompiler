@@ -116,7 +116,7 @@ not change the renderer.
 
 # GO — Go  (oracle: `go run`)
 
-### T-632 go: regexp (RE2 dialect), encoding/json and reflect, real stdin · P2 · GO · OPEN [V]
+### T-632 go: regexp (RE2 dialect), encoding/json and reflect, real stdin · P2 · GO · IN PROGRESS (GO worker, round 9) [V]
 regexp needs an RE2 dialect flag on the shared lib/regex.js / abnf/jsrtregex.go (additive, flag-gated): `^`/`$` only at text
 start/end without (?m); inline (?i)(?m)(?s)(?U); (?P<name>) and (?<name>); \pL / \p{Greek}; POSIX [[:alpha:]]; \Q..\E; reject
 backreferences and lookaround; Go's empty-match advance in FindAll/ReplaceAll; $1 / ${name} expansion. encoding/json and reflect need
