@@ -148,7 +148,7 @@ func pyModHas(mod, name string) bool {
 			"degrees", "radians", "floor", "ceil", "trunc",
 			"gcd", "lcm", "factorial", "isnan", "isinf", "isfinite", "isclose",
 			"isqrt", "comb", "perm", "prod", "fsum",
-			"frexp", "ldexp", "modf", "ulp", "nextafter", "dist":
+			"frexp", "ldexp", "modf", "ulp", "nextafter", "dist", "remainder":
 			return true
 		}
 	case "re":
@@ -264,8 +264,18 @@ func (rt *jsrt) pyMathCall(name string, args []interface{}) interface{} {
 		return pyMathPow(rt, pyMathArg(rt, args, 0), pyMathArg(rt, args, 1))
 	case "fabs":
 		return pyMathFlo(math.Abs(pyMathArg(rt, args, 0)))
-	case "fmod":
-		return pyMathFlo(math.Mod(pyMathArg(rt, args, 0), pyMathArg(rt, args, 1)))
+	case "fmod", "remainder":
+		// C's fmod and IEEE's remainder; a NaN from two non-NaN arguments is
+		// CPython's domain error.
+		x, y := pyMathArg(rt, args, 0), pyMathArg(rt, args, 1)
+		r := math.Mod(x, y)
+		if name == "remainder" {
+			r = math.Remainder(x, y)
+		}
+		if math.IsNaN(r) && !math.IsNaN(x) && !math.IsNaN(y) {
+			rt.pyRaise("ValueError", "math domain error")
+		}
+		return pyMathFlo(r)
 	case "copysign":
 		return pyMathFlo(math.Copysign(pyMathArg(rt, args, 0), pyMathArg(rt, args, 1)))
 	case "atan2":

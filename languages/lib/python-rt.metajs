@@ -12436,7 +12436,7 @@ function pyMHas(mod, name) {
     if (name == "lcm" || name == "factorial" || name == "isnan" || name == "isinf") { return true }
     if (name == "isfinite" || name == "isclose" || name == "cbrt") { return true }
     if (name == "frexp" || name == "ldexp" || name == "modf" || name == "ulp") { return true }
-    if (name == "nextafter" || name == "dist") { return true }
+    if (name == "nextafter" || name == "dist" || name == "remainder") { return true }
     return name == "isqrt" || name == "comb" || name == "perm" || name == "prod" || name == "fsum"
 }
 
@@ -12631,10 +12631,15 @@ function pyMathCall(name, args) {
     }
     if (name == "pow") { return pyMPow(pyMArg(args, 0), pyMArg(args, 1)) }
     if (name == "fabs") { return pyMkFlo(Math.abs(pyMArg(args, 0))) }
-    if (name == "fmod") {
+    // fmod is C's (%, exact) and remainder IEEE's; a NaN from two non-NaN
+    // arguments is CPython's domain error (Go: pyMathCall).
+    if (name == "fmod" || name == "remainder") {
         var fa = pyMArg(args, 0)
         var fb = pyMArg(args, 1)
-        return pyMkFlo(fa - Math.trunc(fa / fb) * fb)
+        var fr = 0
+        if (name == "fmod") { fr = fa % fb } else { fr = pynRemainder(fa, fb) }
+        if (fr !== fr && fa === fa && fb === fb) { pyRaiseExc("ValueError", "math domain error") }
+        return pyMkFlo(fr)
     }
     if (name == "copysign") {
         var cm = Math.abs(pyMArg(args, 0))

@@ -7171,6 +7171,27 @@ def s140():
     check("iter2", first == [1, 2, 3] and list(it) == [] and calls[0] == 4
           and list(iter(lambda: next(data), "")) == ["a", "b"] and type(it).__name__ == "callable_iterator")
 
+# ===== SECTION 141: math.fmod is exact; math.remainder =====
+import math as S141m
+
+def s141():
+    xs = [1e17, 5.5, 1e300, 123456789.123, 2.0 ** 60, -0.0, 7.25]
+    ys = [3.0, 0.1, 7.3, 0.001, 10.0, 1.0, -2.5]
+    check("fmod1", [S141m.fmod(x, y) for x, y in zip(xs, ys)]
+          == [1.0, 0.0999999999999997, 0.7299664879653811, 0.000999993376923471, 6.0, -0.0, 2.25]
+          and str(S141m.fmod(-0.0, 1.0)) == "-0.0" and S141m.fmod(5.0, float("inf")) == 5.0)
+    check("remainder1", [S141m.remainder(5, 2), S141m.remainder(7, 2), S141m.remainder(-5, 2), S141m.remainder(5.5, 1),
+                         S141m.remainder(4.5, 1), S141m.remainder(1e17, 3)] == [1.0, -1.0, -1.0, -0.5, 0.5, 1.0]
+          and str(S141m.remainder(-0.0, 1)) == "-0.0")
+    errs = 0
+    for a, b in [(1.0, 0.0), (float("inf"), 1.0)]:
+        for fn in (S141m.fmod, S141m.remainder):
+            try:
+                fn(a, b)
+            except ValueError as e:
+                errs += str(e) == "math domain error"
+    check("fmoddom", errs == 4)
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -7309,5 +7330,6 @@ def main():
     s138() # SECTION-CALL 138
     s139() # SECTION-CALL 139
     s140() # SECTION-CALL 140
+    s141() # SECTION-CALL 141
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

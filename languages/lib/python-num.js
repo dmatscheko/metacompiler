@@ -264,6 +264,27 @@ function pynFloMod(x, y) {
     if (y < 0) { return 0 / (0 - 1) }
     return 0
 }
+// math.remainder: CPython's m_remainder, the IEEE 754 remainder x - n*y with n
+// the integer nearest x / y, a tie going to the even one. Exact, as fmod (JS
+// %) is. A NaN for a zero y or an infinite x, which the caller reports as the
+// domain error. Go twin: math.Remainder in abnf/jsrtpymath.go.
+function pynRemainder(x, y) {
+    var inf = Math.pow(2, 1024)
+    if (x !== x) { return x }
+    if (y !== y) { return y }
+    if (x == inf || x == 0 - inf) { return inf - inf }
+    if (y == inf || y == 0 - inf) { return x }
+    if (y == 0) { return inf - inf }
+    var ax = Math.abs(x)
+    var ay = Math.abs(y)
+    var m = ax % ay
+    var c = ay - m
+    var r = m
+    if (m > c) { r = 0 - c }
+    else if (m == c) { r = m - 2 * ((0.5 * (ax - m)) % ay) }
+    if (x < 0 || (x === 0 && 1 / x < 0)) { return r / (0 - 1) }
+    return r
+}
 function pynFloDiv(x, y) {
     var m = x % y
     var d = (x - m) / y

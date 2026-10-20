@@ -5031,10 +5031,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (name == "pow") { return pyMPow(pyMArg(args, 0), pyMArg(args, 1)) }
         if (name == "fabs") { return pyFlo(Math.abs(pyMArg(args, 0))) }
-        if (name == "fmod") {
+        // fmod is C's (JS %, exact) and remainder IEEE's; a NaN from two
+        // non-NaN arguments is CPython's domain error. Twin of the same arms in
+        // abnf/jsrtpymath.go and lib/python-rt.metajs.
+        if (name == "fmod" || name == "remainder") {
             var fa = pyMArg(args, 0)
             var fb = pyMArg(args, 1)
-            return pyFlo(fa - Math.trunc(fa / fb) * fb)
+            var fr = name == "fmod" ? fa % fb : pynRemainder(fa, fb)
+            if (fr !== fr && fa === fa && fb === fb) { pyRaise(pyMakeExc("ValueError", ["math domain error"])) }
+            return pyFlo(fr)
         }
         if (name == "copysign") {
             var cm = Math.abs(pyMArg(args, 0))
