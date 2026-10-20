@@ -214,6 +214,144 @@ class OrderedDict(dict):
         return "OrderedDict(" + dict.__repr__(self) + ")"
 
 
+# A view over a list of mappings, searched first to last; writes and deletes go
+# to the first. Not a dict subclass, as in CPython. keys() / values() / items()
+# answer the views of the merged dict, whose repr is dict_keys(...) where
+# CPython's is KeysView(ChainMap(...)).
+class ChainMap:
+    def __init__(self, *maps):
+        self.maps = list(maps) or [{}]
+
+    def __missing__(self, key):
+        raise KeyError(key)
+
+    def __getitem__(self, key):
+        for mapping in self.maps:
+            if key in mapping:
+                return mapping[key]
+        return self.__missing__(key)
+
+    def get(self, key, default=None):
+        return self[key] if key in self else default
+
+    def _mec_co_flat(self):
+        d = {}
+        for mapping in reversed(self.maps):
+            for k in mapping:
+                d[k] = None
+        for k in d:
+            d[k] = self[k]
+        return d
+
+    def __len__(self):
+        return len(self._mec_co_flat())
+
+    def __iter__(self):
+        return iter(list(self._mec_co_flat()))
+
+    def __contains__(self, key):
+        for mapping in self.maps:
+            if key in mapping:
+                return True
+        return False
+
+    def __bool__(self):
+        for mapping in self.maps:
+            if mapping:
+                return True
+        return False
+
+    def keys(self):
+        return self._mec_co_flat().keys()
+
+    def values(self):
+        return self._mec_co_flat().values()
+
+    def items(self):
+        return self._mec_co_flat().items()
+
+    def __eq__(self, other):
+        if isinstance(other, ChainMap):
+            return self._mec_co_flat() == other._mec_co_flat()
+        if isinstance(other, dict):
+            return self._mec_co_flat() == other
+        return NotImplemented
+
+    def __repr__(self):
+        return type(self).__name__ + "(" + ", ".join([repr(m) for m in self.maps]) + ")"
+
+    @classmethod
+    def fromkeys(cls, iterable, value=None):
+        return cls(dict.fromkeys(iterable, value))
+
+    def copy(self):
+        return type(self)(self.maps[0].copy(), *self.maps[1:])
+
+    def __copy__(self):
+        return self.copy()
+
+    def new_child(self, m=None, **kwargs):
+        if m is None:
+            m = kwargs
+        elif kwargs:
+            m.update(kwargs)
+        return type(self)(m, *self.maps)
+
+    @property
+    def parents(self):
+        return type(self)(*self.maps[1:])
+
+    def __setitem__(self, key, value):
+        self.maps[0][key] = value
+
+    def __delitem__(self, key):
+        if key not in self.maps[0]:
+            raise KeyError("Key not found in the first mapping: " + repr(key))
+        del self.maps[0][key]
+
+    def setdefault(self, key, default=None):
+        if key not in self:
+            self[key] = default
+        return self[key]
+
+    def update(self, other=(), /, **kwds):
+        self.maps[0].update(other, **kwds)
+
+    def popitem(self):
+        if not self.maps[0]:
+            raise KeyError("No keys found in the first mapping.")
+        return self.maps[0].popitem()
+
+    def pop(self, key, *args):
+        if key in self.maps[0]:
+            return self.maps[0].pop(key)
+        if args:
+            return args[0]
+        raise KeyError("Key not found in the first mapping: " + repr(key))
+
+    def clear(self):
+        self.maps[0].clear()
+
+    def __ior__(self, other):
+        self.maps[0].update(other)
+        return self
+
+    def __or__(self, other):
+        if not isinstance(other, (dict, ChainMap)):
+            return NotImplemented
+        m = self.copy()
+        m.maps[0].update(other)
+        return m
+
+    def __ror__(self, other):
+        if not isinstance(other, (dict, ChainMap)):
+            return NotImplemented
+        m = dict(other)
+        for child in reversed(self.maps):
+            m.update(child)
+        return type(self)(m)
+
+
 class Counter(dict):
     def __init__(self, iterable=None, /, **kwds):
         super().__init__()
@@ -503,7 +641,7 @@ def _mec_co_count(pair):
 
 
 class _mec_co_module:
-    __all__ = ["Counter", "OrderedDict", "defaultdict", "deque", "namedtuple"]
+    __all__ = ["ChainMap", "Counter", "OrderedDict", "defaultdict", "deque", "namedtuple"]
 
     def __repr__(self):
         return "<module 'collections'>"
@@ -525,4 +663,5 @@ _mec_co_module.deque = deque
 _mec_co_module.defaultdict = defaultdict
 _mec_co_module.OrderedDict = OrderedDict
 _mec_co_module.Counter = Counter
+_mec_co_module.ChainMap = ChainMap
 _mec_co_module.namedtuple = staticmethod(namedtuple)

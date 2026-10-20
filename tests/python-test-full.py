@@ -6801,6 +6801,60 @@ def s130():
     check("clstry", K.z == 5 and K.w == 2 and K.f == 3 and not hasattr(K, "q") and not hasattr(K, "err")
           and not hasattr(K, "gone") and list(K.__annotations__) == ["a"])
 
+# ===== SECTION 131: heapq, bisect and collections.ChainMap =====
+# A heap's list layout is CPython's item for item (the same sift algorithm);
+# every value here is CPython 3.14's.
+import heapq
+import bisect
+from collections import ChainMap
+
+def s131():
+    h = []
+    for v in [5, 1, 8, 3, 2, 9, 0, 7]:
+        heapq.heappush(h, v)
+    xs = [9, 4, 7, 1, 8, 2, 6]
+    heapq.heapify(xs)
+    check("heapq1", h == [0, 2, 1, 5, 3, 9, 8, 7] and xs == [1, 4, 2, 9, 8, 7, 6]
+          and [heapq.heappop(h) for _ in range(3)] == [0, 1, 2] and h == [3, 5, 7, 9, 8])
+    m = [3, 1, 4, 1, 5]
+    heapq.heapify_max(m)
+    check("heapq2", heapq.heappushpop(xs, 0) == 0 and heapq.heapreplace(xs, 10) == 1 and xs == [2, 4, 6, 9, 8, 7, 10]
+          and m == [5, 3, 4, 1, 1] and heapq.heappop_max(m) == 5
+          and list(heapq.merge([1, 4], [2, 3], [0])) == [0, 1, 2, 3, 4]
+          and list(heapq.merge([5, 2], [4, 1], reverse=True)) == [5, 4, 2, 1]
+          and heapq.nlargest(2, ["a", "bbb", "cc", "dd"], key=len) == ["bbb", "cc"]
+          and heapq.nsmallest(2, [4, 1, 3]) == [1, 3])
+    try:
+        heapq.heappop([])
+        check("heapq3", False)
+    except IndexError as e:
+        check("heapq3", str(e) == "index out of range")
+    a = [1, 2, 4, 4, 7]
+    bisect.insort(a, 4)
+    bisect.insort_left(a, 5)
+    recs = [("a", 1), ("c", 3)]
+    bisect.insort(recs, ("b", 2), key=lambda r: r[1])
+    check("bisect1", bisect.bisect_left(a, 4) == 2 and bisect.bisect_right(a, 4) == 5 and bisect.bisect(a, 0) == 0
+          and bisect.bisect_left(a, 4, 0, 2) == 2 and a == [1, 2, 4, 4, 4, 5, 7]
+          and recs == [("a", 1), ("b", 2), ("c", 3)] and bisect.bisect_left(recs, 3, key=lambda r: r[1]) == 2)
+    try:
+        bisect.bisect_left(a, 1, -1)
+        check("bisect2", False)
+    except ValueError as e:
+        check("bisect2", str(e) == "lo must be non-negative")
+    cm = ChainMap({"a": 1}, {"a": 2, "b": 3})
+    cm["c"] = 4
+    kid = cm.new_child({"a": 9})
+    check("chainmap1", cm["a"] == 1 and cm["b"] == 3 and len(cm) == 3 and list(cm) == ["a", "b", "c"]
+          and cm.maps[0] == {"a": 1, "c": 4} and kid["a"] == 9 and kid.parents["a"] == 1
+          and repr(cm) == "ChainMap({'a': 1, 'c': 4}, {'a': 2, 'b': 3})" and cm.get("zz", 0) == 0
+          and dict(cm) == {"a": 1, "b": 3, "c": 4} and not ChainMap() and str(ChainMap()) == "ChainMap({})")
+    try:
+        del cm["b"]
+        check("chainmap2", False)
+    except KeyError as e:
+        check("chainmap2", str(e) == "\"Key not found in the first mapping: 'b'\"")
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -6929,5 +6983,6 @@ def main():
     s128() # SECTION-CALL 128
     s129() # SECTION-CALL 129
     s130() # SECTION-CALL 130
+    s131() # SECTION-CALL 131
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]
