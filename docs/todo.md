@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-648** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-649** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -175,10 +175,10 @@ line tracking at warning sites is worth its cost.
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
 
-### T-645 lua: string arithmetic ignores the strings' metatable · P3 · LUA · IN PROGRESS (LUA worker, round 7) [V]
-`getmetatable("").__add = nil; print(pcall(function() return "1" + "2" end))` → all legs `true 3` (lua 5.5 "attempt to perform arithmetic
-on a string value (constant '1')"); `getmetatable("").__add` is nil in ours, a function in lua (5.4+ coerces strings in arithmetic
-through the string metatable's __add/__sub/...).
+### T-648 lua: `tonumber("-0.0")` loses the zero's sign in the interpreter and natively · P1 · LUA · OPEN [V]
+`for _, s in ipairs({"-0.0"," -0.0 ","-0e5","-0x0p0","-.0"}) do print(tonumber(s), math.type(tonumber(s))) end` → interp and native
+`0.0 float`; llvm.Run and lua 5.5 `-0.0 float` (and `-0` → `0 integer`). luaNumVal (lua-interpreter.abnf) and luParseNum
+(lib/lua-rt.metajs).
 
 ---
 
@@ -763,6 +763,7 @@ T-642 kotlin: `is ArrayList` / `is HashSet` and other concrete collection classe
 T-605 lua: the string metatable's `__index` cannot be replaced; `next(_G)` skips non-string proxy keys — DONE 1729b70e
 T-637 java: static field and method of one name; field hiding; lazy static init; nested type names hoisted globally — DONE 84f9d63d (all P1 parts; Cloneable, live descending views, Matcher regions; hitEnd/requireEnd are T-646)
 T-643 kotlin: `sorted()` results and deques answer `is ArrayList` true; SortedSet key views; javaClass.name — DONE 5238c524
+T-645 lua: string arithmetic ignores the strings' metatable — DONE 0ccab79f
 
 # Settled — do not re-open
 
