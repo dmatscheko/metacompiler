@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-656** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-657** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -89,11 +89,12 @@ keys). `class C{ n(){} }; "n" in C.prototype` → false (node true). `typeof K.h
 
 # JV — Java
 
-### T-654 java: user `super.clone()`; FQN `java.io.Serializable` without import; Matcher.hitEnd/requireEnd · P2 · JV · IN PROGRESS (JV worker, round 11) [V]
-`class P implements Cloneable { public P clone() { return (P) super.clone(); } }` → "unknown super method 'clone'" in all engines (java
-a shallow copy; needs Object.clone in jSuperObject / js_jvsuper / layer 2 and CloneNotSupportedException). `Object o = new
-StringBuffer(); o instanceof java.io.Serializable` with no import → false (java true). Matcher.hitEnd/requireEnd need a hit-the-end flag
-from the shared regex engine (J-gated, lib/regex.js / abnf/jsrtregex.go); transparent / non-anchoring bounds not modelled.
+### T-656 java: `x.new Inner()` with a third same-named nested type; Matcher.hitEnd/requireEnd · P2 · JV · OPEN [V]
+`class A { int a = 1; class Inner { int get() { return a; } } }`, `class C { static class Holder { static class Inner {...} } }`, `class B {
+int b = 2; class Inner { int get() { return b; } } static int run() { B o = new B(); Inner i = o.new Inner(); return i.get(); } }`; main
+`A x = new A(); A.Inner ai = x.new Inner(); println(ai.get() + " " + B.run())` → java `1 2`; interp "unknown class: Inner", compiled
+"variable not defined: Inner" (jNestRename; with only A and B all legs agree). Matcher.hitEnd/requireEnd need a hit-the-end flag from
+the shared regex engine (J-gated lib/regex.js / abnf/jsrtregex.go), then a small java side.
 
 ---
 
@@ -744,6 +745,7 @@ T-644 js: own-property details of prototypes and functions — DONE 1456360f (a 
 T-649 python: class-body names visible inside methods; compiled runtime exceptions' `__mro__`; regex lookbehind — DONE 7e3dc3f0 (\N{name} resolves only the 14-name table — a full Unicode name table DECLINED, as for java's \N)
 T-650 java: static field through an instance; StringBuffer; CharSequence; ArrayList.clone; superclass order; Matcher.hitEnd — DONE 898cfc4c b4e0e8a3 7fcc0dcb except Matcher.hitEnd/requireEnd (T-654)
 T-651 php: case-insensitive dynamic function names; `\`-prefixed names; array_map type checks; positional after named in a spread — DONE 350c6dcd
+T-654 java: user `super.clone()`; FQN `java.io.Serializable` without import; Matcher.hitEnd/requireEnd — PARTIAL 218ab25d (Object.clone via super.clone, Cloneable/Serializable markers without imports); hitEnd/requireEnd and the nested-name-rename defect are T-656
 
 # Settled — do not re-open
 
