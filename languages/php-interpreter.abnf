@@ -4030,11 +4030,11 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         cv = cur
         return function(argset) { return phpInvoke(cv, argset) }
     }
-    // asCallable, showing the record of the function a name names (fnRecs).
+    // asCallable; a name of a function is a new Closure of it (fnFresh).
     function fnCallable(cur) {
         var c2 = asCallable(cur)
         if (typeof cur == "string" && cur.indexOf("::") < 0 && varExists(fnKey(phsCase(fnName(cur), false)))) {
-            fnMetaSet(c2, fnMeta(getVar(fnKey(phsCase(fnName(cur), false))), "name"), 0)
+            return fnFresh(c2, getVar(fnKey(phsCase(fnName(cur), false))))
         }
         return c2
     }
@@ -4056,16 +4056,15 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     function fnKey(lc) { return "\x00f" + lc }
     // A named function as a value is a Closure too (strlen(...), a callback),
     // which var_dump shows by its name and parameters (zend_closure_get_debug_info
-    // of a fake closure); it takes a handle when first shown. fnMeta's name
-    // "fn:<n>" indexes its record in fnRecs. Twin of js_phfnrec in
-    // lib/php-rt.metajs and abnf/jsrtphpstr.go.
+    // of a fake closure). Each f(...) or Closure::fromCallable('f') is a new one
+    // (zend_create_fake_closure): fnFresh, which answers its record {fn, i} when
+    // called with cloProbe; it takes a handle when first shown (fnRecId). A
+    // declared function's fnMeta name "fn:<n>" indexes its declaration in fnRecs.
+    // Twin of js_phfnnew in lib/php-rt.metajs and abnf/jsrtphpstr.go.
     var fnRecs = []
     function fnRecOf(v) {
-        if (typeof v != "function") { return null }
-        var nm = anytype
-        nm = fnMeta(v, "name")
-        if (typeof nm != "string" || nm.substring(0, 3) != "fn:") { return null }
-        return fnRecs[phpInt(nm.substring(3))]
+        if (typeof v != "function" || fnMeta(v, "name") != "fn") { return null }
+        return v(cloProbe)
     }
     function fnRecId(r) {
         if (r.i == 0) {
@@ -4074,9 +4073,19 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         return r.i
     }
+    // A new Closure running call, of the function declared as decl.
+    function fnFresh(call, decl) {
+        var nm = anytype
+        nm = fnMeta(decl, "name")
+        var rec = {fn: fnRecs[phpInt(nm.substring(3))], i: 0}
+        return fnMetaSet(function(argset) {
+            if (argset === cloProbe) { return rec }
+            return call(argset)
+        }, "fn", 0)
+    }
     function declFn(fn) {
         var f = fnMetaSet(makeFunClosure(fn), "fn:" + fnRecs.length, 0)
-        fnRecs.push({fn: fn, i: 0})
+        fnRecs.push(fn)
         scopePut(globalScope, fn.name, f)
         var lc = phsCase(fn.name, false)
         scopePut(globalScope, fnKey(lc), f)
@@ -4999,11 +5008,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // A closure made from a callable (zend_create_fake_closure): a method, or the
     // __call / __callStatic that stands in for one. call(t, cs, argset) runs it
     // with the $this t and the called scope cs; sc is the class of the method it
-    // was made from and st marks a static one. It answers its record when called
-    // with cloProbe, as a literal does. Twin of js_phfake in lib/php-rt.metajs and
-    // abnf/jsrtphp.go.
-    function fakeClosure(call, sc, st, t, cs) {
-        var rec = {call: call, sc: sc, st: st, t: t, cs: cs}
+    // was made from and st marks a static one; d is its debug record
+    // (phsCloDesc), named "<class>::<method>", and it takes a handle when first
+    // shown (fnRecId). It answers its record when called with cloProbe, as a
+    // literal does. Twin of js_phfake in lib/php-rt.metajs and abnf/jsrtphp.go.
+    function fakeClosure(call, sc, st, t, cs, d) {
+        var rec = {call: call, sc: sc, st: st, t: t, cs: cs, d: d, i: 0}
         return fnMetaSet(function(argset) {
             if (argset === cloProbe) { return rec }
             return call(t, cs, argset)
@@ -5018,21 +5028,28 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var d = phpMethodDecl(cls, lc)
         var st = phpNonStatic(cls, lc) == ""
         var fm = m
+        var sc = anytype
+        sc = d == null ? cls : d.k
+        var fn = mRecs[phpInt(fnMeta(m, "name").substring(2))]
         return fakeClosure(function(ft, fcs, a) { pendingStatic = fcs; return fm(ft, a) },
-                           d == null ? cls : d.k, st, st ? null : t, cs)
+                           sc, st, st ? null : t, cs, fnDescOf(sc.__name + "::" + fn.name, "", "", [], fn.params))
     }
+    // The debug record of the __call or __callStatic trampoline standing in for
+    // the method name of class k: one optional parameter, $arguments
+    // (zend_closure_from_frame).
+    function fakeMagicDesc(k, name) { return phsCloDesc(k.__name + "::" + name, "", "", [], ["$arguments"], [false], [true]) }
     // t's __call standing in for the method name.
     function fakeCall(t, name) {
         var d = phpMethodDecl(t.__class, "__call")
         return fakeClosure(function(ft, fcs, a) { return classFind(ft.__class, "__call")(ft, argsOf([name, arrOf(a.pos)])) },
-                           d.k, false, t, t.__class)
+                           d.k, false, t, t.__class, fakeMagicDesc(d.k, name))
     }
     // cls's __callStatic standing in for the method name, called in bind.
     function fakeCallStatic(cls, name, bind) {
         var d = phpMethodDecl(cls, "__callstatic")
         var fcs = classFind(cls, "__callstatic")
         return fakeClosure(function(ft, c2, a) { pendingStatic = c2; return fcs(null, argsOf([name, arrOf(a.pos)])) },
-                           d.k, true, null, bind)
+                           d.k, true, null, bind, fakeMagicDesc(d.k, name))
     }
     // A closure made from a callable keeps its method's class as its scope: it
     // binds an instance of that class unless the method is static, none unless it
@@ -5047,7 +5064,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (ce !== fr.sc) { return null }
         var nt = anytype
         nt = isObj(nthis) ? nthis : null
-        return fakeClosure(fr.call, fr.sc, fr.st, nt, nt != null ? nt.__class : ce)
+        return fakeClosure(fr.call, fr.sc, fr.st, nt, nt != null ? nt.__class : ce, fr.d)
     }
     // bindTo's $newScope: an object's class, a class name, null for none, and
     // "static" (the default) for the closure's own. A name no class has binds
@@ -6004,9 +6021,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 var pname = name
                 return makePartial(function(a2) { return anyCase ? callDyn(pname, a2) : callNamed(pname, a2) }, argset)
             }
-            // f(...) is the first-class callable form: it yields the function itself.
+            // f(...) is the first-class callable form: a new Closure of the function.
             if (argset.fcc === true) {
-                if (fccLib) { return getVar(name) }
+                if (fccLib) { return fnFresh(getVar(name), getVar(name)) }
                 if (hasOwn(phpBuiltins, name)) {
                     var bf = phpBuiltins[name]
                     return function(a2) { return bf.apply(undefined, a2.pos) }
@@ -6016,9 +6033,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 if (libCb) {
                     var lf = getVar(name)
                     var lname = name
-                    return fnMetaSet(function(a2) { libArgs(lname, a2); return lf(a2) }, fnMeta(lf, "name"), 0)
+                    return fnFresh(function(a2) { libArgs(lname, a2); return lf(a2) }, lf)
                 }
-                return anyCase ? fnGet(name) : getVar(name)
+                var df = anyCase ? fnGet(name) : getVar(name)
+                return fnFresh(df, df)
             }
             return anyCase ? callDyn(name, argset) : callNamed(name, argset)
         }
@@ -6213,9 +6231,13 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // else the receiver's own class (so static:: inside an instance method resolves in
     // the actual, possibly derived, class), else the declaring class. A static
     // method binds no $this, whatever receiver the call went through.
+    // Its fnMeta name "m:<n>" indexes fn in mRecs, which a closure made from it
+    // (fakeMethod) is shown by.
+    var mRecs = []
     function makeMethodClosure(fn, defCls) {
         var stat = fn.isStatic === true
-        return function(self, argset) {
+        mRecs.push(fn)
+        return fnMetaSet(function(self, argset) {
             var st = anytype
             st = pendingStatic
             pendingStatic = null
@@ -6229,7 +6251,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 return newGen(function() { return invokePhpCls(fn, me, argset, defCls, gst) })
             }
             return invokePhpCls(fn, me, argset, defCls, st)
-        }
+        }, "m:" + (mRecs.length - 1), 0)
     }
     // A named function is GLOBAL wherever its declaration stands: one written inside
     // a function body is registered in the global table when control reaches it.
@@ -6817,6 +6839,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (isObj(o)) { return o.__vdid }
             var fr = fnRecOf(o)
             if (fr != null) { return fnRecId(fr) }
+            var kr = fakeRecOf(o)
+            if (kr != null) { return fnRecId(kr) }
             var cr = cloRecOf(o)
             return cr == null ? 0 : cr.i
         },
@@ -6914,9 +6938,14 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         "get_parent_class": function(v) { return arguments.length == 0 ? phpParentOf(ctxSelf()) : phpParentClass(v) },
         "class_exists": function(n) { return phpClassExists(n, false) },
         // function_exists: a function of that name in any letter case, one leading
-        // "\" dropped (ZEND_FUNCTION(function_exists)). Twin of emitBuiltin's in
+        // "\" dropped (ZEND_FUNCTION(function_exists)); a library function exists
+        // whether or not the program compiled it. Twin of emitBuiltin's in
         // php-to-llvm-ir.abnf.
-        "function_exists": function(n) { return fnDefined(phpStr(n)) },
+        "function_exists": function(n) {
+            if (fnDefined(phpStr(n))) { return true }
+            if (phpLib == null) { phpLib = phpLibIndex(load("lib/php-stdlib.php")) }
+            return phpLibNamed(phpLib, phsCase(fnName(phpStr(n)), false))
+        },
         // realpath(3) through the host; false when the path does not resolve. Twin
         // of js_realpath (languages/lib/runtime.c, abnf/jsrtphp.go).
         "realpath": function(p) {
@@ -7540,7 +7569,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             }
             return out + pad + "}\n"
         }
-        if (isObj(v) || cloRecOf(v) != null || fnRecOf(v) != null) {
+        if (isObj(v) || cloRecOf(v) != null || fnRecOf(v) != null || fakeRecOf(v) != null) {
             for (var di = 0; di < dumping.length; di++) {
                 if (dumping[di] === v) { return pad + "*RECURSION*\n" }
             }
@@ -7580,6 +7609,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         var fr = fnRecOf(v)
         if (fr != null) { return phsCloDump(fnDescOf(fr.fn.name, "", "", [], fr.fn.params), "" + fnRecId(fr), ind, [], "") }
+        var kr = fakeRecOf(v)
+        if (kr != null) { return phsCloDump(kr.d, "" + fnRecId(kr), ind, [], kr.t == null ? "" : dumpOf(kr.t, ind + 2)) }
         var cr = cloRecOf(v)
         var sn = phsCloStatics(cr.d)
         var sd = []

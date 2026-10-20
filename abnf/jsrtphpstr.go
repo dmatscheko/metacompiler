@@ -532,15 +532,40 @@ func init() {
 		// js_phplace reads, the scope its captures live in and its bound $this.
 		// The emitter stores it in the closure's meta (js_jsfnmeta). Twin of
 		// js_phclo in lib/php-rt.metajs and closureBody in php-interpreter.abnf.
-		// (desc, sig) -> the record of a named function's Closure: its debug record
-		// (phsCloDesc, no file) and its signature. It takes a handle when var_dump
-		// or spl_object_id first sees it (phpFnID). Twin of js_phfnrec in
+		// (desc, sig) -> the record of a named function or a method: its debug
+		// record (phsCloDesc, no file) and its signature. A Closure of a named
+		// function (js_phfnnew) takes a handle when var_dump or spl_object_id
+		// first sees it (phpFnID). Twin of js_phfnrec in
 		// lib/php-rt.metajs and fnRecs in php-interpreter.abnf.
 		m["js_phfnrec"] = func(a []uint64) uint64 {
 			rec := newJSObject()
 			rec.set("fd", u(a[0]))
 			rec.set("s", u(a[1]))
 			return w(rec)
+		}
+		// (f) -> the record of a new Closure of the named function f: a copy of
+		// f's, with f's by-reference mask (mk) and f itself; undefined for
+		// anything else. Twin of js_phfnnew in lib/php-rt.metajs and fnFresh in
+		// php-interpreter.abnf.
+		m["js_phfnnew"] = func(a []uint64) uint64 {
+			fr := phpFnRec(u(a[0]))
+			if fr == nil {
+				return jsHUndefined
+			}
+			rec := newJSObject()
+			rec.set("fd", fr.props["fd"])
+			rec.set("s", fr.props["s"])
+			rec.set("mk", float64(jsvFnMeta(u(a[0])).length))
+			rec.set("f", u(a[0]))
+			return w(rec)
+		}
+		// (v) -> the function a Closure made by js_phfnnew forwards to; v itself
+		// for anything else. Twin of js_phfnof in lib/php-rt.metajs.
+		m["js_phfnof"] = func(a []uint64) uint64 {
+			if fr := phpFnRec(u(a[0])); fr != nil && fr.props["f"] != nil {
+				return w(fr.props["f"])
+			}
+			return a[0]
 		}
 		m["js_phclo"] = func(a []uint64) uint64 {
 			rt.phpStamp(nil)
@@ -563,6 +588,9 @@ func init() {
 			}
 			if fr := phpFnRec(u(a[0])); fr != nil {
 				return rt.wrapNum(float64(rt.phpFnID(fr)))
+			}
+			if fk := phpFakeRec(u(a[0])); fk != nil {
+				return rt.wrapNum(float64(rt.phpFnID(fk)))
 			}
 			return rt.wrapNum(0)
 		}

@@ -3852,6 +3852,63 @@ function s74dump() {
     var_dump($f(...));
 }
 
+// ===== SECTION 75: first-class callable identity, closures made from methods, natives by name =====
+// Every f(...), $name(...) and Closure::fromCallable('f') makes a NEW Closure
+// object (Zend/zend_closures.c zend_create_fake_closure), with its own handle;
+// a closure's own $c(...) and fromCallable($c) are $c itself
+// (zend_closure_from_frame). A closure made from a method is shown by
+// "function" "<class>::<method>", its bound "this" and "parameter"
+// (zend_closure_get_debug_info); one standing in for __call / __callStatic is
+// named after the method asked for, in the class declaring the magic method,
+// with the one optional parameter $arguments (zend_get_call_trampoline_func).
+// s75dump puts those in the transcript. define, defined, constant,
+// error_reporting and realpath are functions like any other: function_exists
+// knows them and a name calls them; function_exists knows every library
+// function, whether or not the program names it literally.
+function s75f($x = 1) { return $x; }
+class S75P { function __call($n, $a) { return $n; } static function __callStatic($n, $a) { return $n; } }
+class S75C extends S75P {
+    public $own;
+    function m($a, &$b = null) { return $a; }
+    static function s() { return 7; }
+}
+function s75() {
+    $a = s75f(...);
+    $b = s75f(...);
+    $n = 's75' . 'f';
+    check("fci1", $a !== $b && $a === $a && Closure::fromCallable('s75f') !== $a && $n(...) !== $n(...)
+        && spl_object_id($a) !== spl_object_id($b) && spl_object_id($a) === spl_object_id($a)
+        && spl_object_id($a) !== spl_object_id(Closure::fromCallable($n)) && $a(4) === 4 && $n(...)(5) === 5);
+    $o = new S75C;
+    $m1 = $o->m(...);
+    $m2 = $o->m(...);
+    $s1 = S75C::s(...);
+    $u = $o->other(...);
+    check("fci2", $m1 !== $m2 && spl_object_id($m1) > 0 && spl_object_id($m1) !== spl_object_id($m2)
+        && spl_object_id($s1) > 0 && spl_object_id($u) > 0 && spl_object_id($u) !== spl_object_id($s1)
+        && $m1(3) === 3 && $s1() === 7 && $u() === "other");
+    $c = function () { return 1; };
+    check("fci3", $c(...) === $c && Closure::fromCallable($c) === $c);
+    $d = 'define';
+    $d('S75_K', 9);
+    $df = 'defined';
+    $cf = 'constant';
+    $er = 'error_reporting';
+    check("nat1", function_exists('define') && function_exists('defined') && function_exists('constant')
+        && function_exists('error_reporting') && function_exists('realpath')
+        && $df('S75_K') && !$df('S75_NONE') && $cf('S75_K') === 9 && is_int($er()));
+    $k = ['diff_key', 'ripos'];
+    check("fex2", function_exists('array_' . $k[0]) && function_exists('str' . $k[1])
+        && !function_exists('array_' . $k[1]) && !function_exists('str' . $k[1] . ',strlen'));
+}
+function s75dump() {
+    $o = new S75C;
+    var_dump($o->m(...));
+    var_dump(S75C::s(...), $o->other(...), S75C::other(...));
+    $o->own = $o->m(...);
+    var_dump($o);
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -3936,6 +3993,8 @@ function main() {
     s73(); // SECTION-CALL 73
     s74(); // SECTION-CALL 74
     s74dump(); // SECTION-CALL 74
+    s75(); // SECTION-CALL 75
+    s75dump(); // SECTION-CALL 75
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

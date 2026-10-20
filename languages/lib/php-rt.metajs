@@ -1657,11 +1657,27 @@ function phCloRec(v) {
     if (r !== undefined && r["fk"] !== true && r["fd"] === undefined) { return r }
     return undefined
 }
-// The record of a named function's Closure: its debug record (phsCloDesc, no
-// file) and its signature. It takes a handle when var_dump or spl_object_id
-// first sees it (phFnID). Twin of m["js_phfnrec"] in abnf/jsrtphpstr.go and
+// The record of a named function or a method: its debug record (phsCloDesc, no
+// file) and its signature. A Closure of a named function (js_phfnnew) takes a
+// handle when var_dump or spl_object_id first sees it (phFnID), as one made
+// from a method (js_phfake) does. Twin of m["js_phfnrec"] in abnf/jsrtphpstr.go and
 // fnRecs in php-interpreter.abnf.
 function js_phfnrec(d, s) { return {fd: d, s: s} }
+// The record of a new Closure of the named function f: a copy of f's, with f's
+// by-reference mask (mk) and f itself; undefined for anything else. Twin of
+// m["js_phfnnew"] in abnf/jsrtphpstr.go and fnFresh in php-interpreter.abnf.
+function js_phfnnew(f) {
+    var r = phFnRec(f)
+    if (r === undefined) { return undefined }
+    return {fd: r["fd"], s: r["s"], mk: fnMeta(f, "length"), f: f}
+}
+// The function a Closure made by js_phfnnew forwards to; v itself for anything
+// else. Twin of m["js_phfnof"] in abnf/jsrtphpstr.go.
+function js_phfnof(v) {
+    var r = phFnRec(v)
+    if (r === undefined || r["f"] === undefined) { return v }
+    return r["f"]
+}
 function phFnRec(v) {
     var r = phMetaRec(v)
     if (r !== undefined && r["fd"] !== undefined) { return r }
@@ -1691,8 +1707,9 @@ function phMetaRec(v) {
 // the method name that recv (an object, or a class) answers, or the __call /
 // __callStatic standing in for it. It keeps the method's signature and by-reference
 // mask (mk), the method's class sc, whether it is static, the $this it is bound to
-// - recv's, or self for a static dispatch of a non-static method - and the
-// emitted factory phFakeBind makes a rebound one with (fakeFactory in
+// - recv's, or self for a static dispatch of a non-static method - the debug
+// record d var_dump shows (phFakeDesc) and the emitted factory phFakeBind makes
+// a rebound one with (fakeFactory in
 // php-to-llvm-ir.abnf). The emitter puts it in the closure's meta. Twin of
 // m["js_phfake"] in abnf/jsrtphp.go and fakeClosure in php-interpreter.abnf.
 function js_phfake(recv, name, self, fac) {
@@ -1703,7 +1720,8 @@ function js_phfake(recv, name, self, fac) {
     var mm = phMethodOf(recv, nm)
     var d = phMethodDecl(cls, lc)
     var st = false
-    if (d === undefined) {
+    var magic = d === undefined
+    if (magic) {
         st = !phIsObj(recv) || phOwner(cls, "__call") === undefined
         d = phMethodDecl(cls, st ? "__callstatic" : "__call")
     } else { st = phStaticIn(d["k"], lc) }
@@ -1711,14 +1729,28 @@ function js_phfake(recv, name, self, fac) {
     t = undefined
     if (!st) { t = phIsObj(recv) ? recv : self }
     var fm = typeof mm == "function"
-    return {fk: true, s: fm ? phSigOf(mm) : "", mk: fm ? fnMeta(mm, "length") : 0, n: nm,
+    // No class at all: recv is a Closure, whose own methods these are.
+    var scn = "Closure"
+    if (d !== undefined) { scn = phStr(d["k"]["__name"]) } else if (cls !== undefined) { scn = phStr(cls["__name"]) }
+    var desc = scn + "::" + phFakeDesc(mm, nm, magic)
+    return {fk: true, d: desc, s: fm ? phSigOf(mm) : "", mk: fm ? fnMeta(mm, "length") : 0, n: nm,
             sc: d === undefined ? cls : d["k"], st: st, t: t, f: fac}
 }
 // The record of the closure the factory makes from the one src, bound to nt.
 // Twin of m["js_phfakerec"] in abnf/jsrtphp.go.
 function js_phfakerec(src, nt) {
     var r = phFakeRec(src)
-    return {fk: true, s: r["s"], mk: r["mk"], n: r["n"], sc: r["sc"], st: r["st"], t: nt, f: r["f"]}
+    return {fk: true, d: r["d"], s: r["s"], mk: r["mk"], n: r["n"], sc: r["sc"], st: r["st"], t: nt, f: r["f"]}
+}
+// The debug record (phsCloDesc) of a closure made from method mm, after its
+// "<class>::": the method's own (js_phfnrec), or for the __call / __callStatic
+// trampoline standing in for the method name one optional parameter,
+// $arguments (zend_closure_from_frame). Twin of phpFakeDesc in abnf/jsrtphp.go.
+function phFakeDesc(mm, name, magic) {
+    var fr = phFnRec(mm)
+    if (!magic && fr !== undefined) { return fr["fd"] }
+    if (magic) { return phsCloDesc(name, "", "", [], ["$arguments"], [false], [true]) }
+    return phsCloDesc(name, "", "", [], [], [], [])
 }
 
 // The methods [$closure, name] names validly. Twin of phpCloHas in
@@ -1862,6 +1894,8 @@ function js_phoidof(v) {
     if (r !== undefined) { return r["i"] }
     var fr = phFnRec(v)
     if (fr !== undefined) { return phFnID(fr) }
+    var kr = phFakeRec(v)
+    if (kr !== undefined) { return phFnID(kr) }
     return 0
 }
 
@@ -1899,7 +1933,7 @@ function phDump(v, ind) {
     }
     var fr = phFnRec(v)
     if (fr !== undefined) { return phsCloDump(fr["fd"], phStr(phFnID(fr)), ind, [], "") }
-    if (phIsObj(v) || phCloRec(v) !== undefined) {
+    if (phIsObj(v) || phCloRec(v) !== undefined || phFakeRec(v) !== undefined) {
         var di = 0
         while (di < phDumping.length) {
             if (phDumping[di] === v) { return pad + "*RECURSION*\n" }
@@ -1954,6 +1988,12 @@ function phDumpObj(v, ind, pad) {
             j = j + 1
         }
         return oout + pad + "}\n"
+    }
+    var kr = phFakeRec(v)
+    if (kr !== undefined) {
+        var kt = ""
+        if (!rtIsNil(kr["t"])) { kt = phDump(kr["t"], ind + 2) }
+        return phsCloDump(kr["d"], phStr(phFnID(kr)), ind, [], kt)
     }
     var cr = phCloRec(v)
     var sn = phsCloStatics(cr["d"])

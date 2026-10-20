@@ -127,6 +127,11 @@ function var_dump($value, ...$values) {
     foreach ($values as $v) { var_dump($v); }
 }
 function function_exists($function) { return function_exists($function); }
+function define($constant_name, $value, $case_insensitive = false) { return define($constant_name, $value); }
+function defined($constant_name) { return defined($constant_name); }
+function constant($name) { return constant($name); }
+function error_reporting($error_level = null) { return error_reporting($error_level); }
+function realpath($path) { return realpath($path); }
 
 // zend_zval_value_name, the "X given" of PHP 8.3's argument TypeErrors: a bool is
 // named by its value ("true given"), anything else as get_debug_type does.

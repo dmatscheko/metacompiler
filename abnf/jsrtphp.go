@@ -1375,7 +1375,8 @@ func phpFnRec(v interface{}) *jsObject {
 	return nil
 }
 
-// phpFnID is the handle of a named function's Closure, taken when first asked.
+// phpFnID is the handle of a Closure of a named function or one made from a
+// method (js_phfnnew, js_phfake), taken when first asked.
 func (rt *jsrt) phpFnID(fr *jsObject) int {
 	if n, ok := fr.props["i"].(float64); ok {
 		return int(n)
@@ -1383,6 +1384,21 @@ func (rt *jsrt) phpFnID(fr *jsObject) int {
 	rt.phpStamp(nil)
 	fr.set("i", float64(phpHandles[rt]))
 	return phpHandles[rt]
+}
+
+// phpFakeDesc is the debug record (phsCloDesc) of a closure made from method
+// meth, after its "<class>::": the method's own (js_phfnrec), or for the
+// __call / __callStatic trampoline standing in for the method name one optional
+// parameter, $arguments (zend_closure_from_frame). Twin of phFakeDesc in
+// lib/php-rt.metajs and fakeMethod in php-interpreter.abnf.
+func (rt *jsrt) phpFakeDesc(meth interface{}, name string, magic bool) string {
+	if fr := phpFnRec(meth); !magic && fr != nil {
+		return rt.phpStr(fr.props["fd"])
+	}
+	if magic {
+		return name + "\n\n\n\n$arguments\n0"
+	}
+	return name + "\n\n\n\n\n0"
 }
 
 func phpFakeRec(v interface{}) *jsObject {
@@ -2633,7 +2649,7 @@ func (rt *jsrt) phpDump(v interface{}, ind int) string {
 	if fr := phpFnRec(v); fr != nil {
 		return phpCloDump(rt.phpStr(fr.props["fd"]), rt.phpFnID(fr), ind, nil, "")
 	}
-	if phpIsObj(v) || phpLitRec(v) != nil {
+	if phpIsObj(v) || phpLitRec(v) != nil || phpFakeRec(v) != nil {
 		for _, d := range phpDumping[rt] {
 			if d == v {
 				return pad + "*RECURSION*\n"
@@ -2690,6 +2706,13 @@ func (rt *jsrt) phpDumpObj(v interface{}, ind int, pad string) string {
 			out += rt.phpDump(phpDeref(o.props[k]), ind+2)
 		}
 		return out + pad + "}\n"
+	}
+	if fk := phpFakeRec(v); fk != nil {
+		this := ""
+		if t := fk.props["t"]; t != jsUndef && t != jsNull && t != nil {
+			this = rt.phpDump(t, ind+2)
+		}
+		return phpCloDump(rt.phpStr(fk.props["d"]), rt.phpFnID(fk), ind, nil, this)
 	}
 	rec := phpLitRec(v)
 	d := rt.phpStr(rec.props["d"])
@@ -4027,8 +4050,9 @@ func init() {
 		// object, or a class) answers, or the __call / __callStatic standing in
 		// for it. It keeps the method's signature and by-reference mask (mk), the
 		// method's class sc, whether it is static, the $this it is bound to -
-		// recv's, or this for a static dispatch of a non-static method - and the
-		// emitted factory phpFakeBind makes a rebound one with. Twin of js_phfake
+		// recv's, or this for a static dispatch of a non-static method - the
+		// debug record d var_dump shows (phpFakeDesc) and the emitted factory
+		// phpFakeBind makes a rebound one with. Twin of js_phfake
 		// in languages/lib/php-rt.metajs and fakeClosure in php-interpreter.abnf.
 		m["js_phfake"] = func(a []uint64) uint64 {
 			recv := u(a[0])
@@ -4041,13 +4065,14 @@ func init() {
 			meth := rt.phpMethodOf(recv, nm)
 			k, _ := rt.phpMethodDecl(cls, lc)
 			st := false
-			if k == nil {
+			magic := k == nil
+			if magic {
 				st = !phpIsObj(recv) || phpOwner(cls, "__call") == nil
-				magic := "__call"
+				mn := "__call"
 				if st {
-					magic = "__callstatic"
+					mn = "__callstatic"
 				}
-				k, _ = rt.phpMethodDecl(cls, magic)
+				k, _ = rt.phpMethodDecl(cls, mn)
 			} else {
 				st = phpStaticIn(k, lc)
 			}
@@ -4065,7 +4090,13 @@ func init() {
 			if meth != nil {
 				sig = rt.phpSigOf(meth)
 			}
+			// No class at all: recv is a Closure, whose own methods these are.
+			scn := "Closure"
+			if k != nil {
+				scn = rt.phpStr(k.props["__name"])
+			}
 			rec := newJSObject()
+			rec.set("d", scn+"::"+rt.phpFakeDesc(meth, nm, magic))
 			rec.set("fk", true)
 			rec.set("s", sig)
 			rec.set("mk", float64(jsvFnMeta(meth).length))
@@ -4081,7 +4112,7 @@ func init() {
 		m["js_phfakerec"] = func(a []uint64) uint64 {
 			src := phpFakeRec(u(a[0]))
 			rec := newJSObject()
-			for _, k := range []string{"fk", "s", "mk", "n", "sc", "st", "f"} {
+			for _, k := range []string{"fk", "d", "s", "mk", "n", "sc", "st", "f"} {
 				rec.set(k, src.props[k])
 			}
 			rec.set("t", u(a[1]))

@@ -3884,7 +3884,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                     if (hasFcc(s.args)) {
                         var rcf = callableV(b, cur, false, false)
                         b = rcf.b
-                        cur = rcf.v
+                        cur = fccFresh(b, rcf.v)
                         continue
                     }
                     // $f(1, ?) : a partial over whatever the chain has produced.
@@ -4288,6 +4288,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, inv, hUndef), othB, cloB)
         var rcb = s.args[0].pos(cloB)
         var cv = callableV(rcb.b, cbCheckV(rcb.b, rcb.v, emitStr(rcb.b, "Failed to create closure from callable:"), true, true), true, true)
+        cv.v = fccFresh(cv.b, cv.v)
         cv.b.NewBr(mergeB)
         var ro = emitMcallSfx(othB, recv, s)
         ro.b.NewBr(mergeB)
@@ -4569,7 +4570,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             }
             if (fromCb) {
                 var rcb = args[0].pos(b)
-                return callableV(rcb.b, cbCheckV(rcb.b, rcb.v, emitStr(rcb.b, "Failed to create closure from callable:"), true, true), true, true)
+                var fcv = callableV(rcb.b, cbCheckV(rcb.b, rcb.v, emitStr(rcb.b, "Failed to create closure from callable:"), true, true), true, true)
+                return {b: fcv.b, v: fccFresh(fcv.b, fcv.v)}
             }
             var rb = baseT(b)
             b = rb.b
@@ -6208,6 +6210,34 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (callableF == undefined) { callableF = emitCallableFn() }
         return {b: b, v: b.NewCall(callableF, [curScopeV, v, cb ? hTrue : hFalse, emitNum(b, internal ? 2 : 0)])}
     }
+    // f(...), $name(...) and Closure::fromCallable('f') make a NEW Closure of a
+    // named function (zend_create_fake_closure): a closure forwarding its call to
+    // f, under a copy of f's record that also keeps f (js_phfnnew, js_phfnof).
+    // Any other callable is answered as it is. ONE module-level helper
+    // (php_fccfresh) and one forwarding body.
+    var fccFreshF = undefined
+    function fccFresh(b, fV) {
+        if (fccFreshF == undefined) {
+            funcCount++
+            var fwdIdx = funcCount
+            var wf = m.NewFunc("jsf_" + fwdIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+            var wb = wf.NewBlock("entry")
+            var tV = callExt(wb, "js_scope_get", [wf.Params[0], emitStr(wb, "\x00fccfn")])
+            wb.NewRet(callExt(wb, "js_call", [tV, hUndef, wf.Params[1]]))
+            fccFreshF = m.NewFunc("php_fccfresh", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("f", i64)])
+            var eb = fccFreshF.NewBlock("entry")
+            var sameB = fccFreshF.NewBlock("same")
+            var newB = fccFreshF.NewBlock("new")
+            var recV = callExt(eb, "js_phfnnew", [fccFreshF.Params[1]])
+            eb.NewCondBr(eb.NewICmp(llvm.enum.IPredEQ, recV, hUndef), sameB, newB)
+            sameB.NewRet(fccFreshF.Params[1])
+            var holder = callExt(newB, "js_scope_new", [fccFreshF.Params[0]])
+            callExt(newB, "js_scope_decl", [holder, emitStr(newB, "\x00fccfn"), fccFreshF.Params[1]])
+            var clo = callExt(newB, "js_closure", [handle(fwdIdx), holder])
+            newB.NewRet(callExt(newB, "js_jsfnmeta", [clo, recV, callExt(newB, "js_get", [recV, emitStr(newB, "mk")])]))
+        }
+        return b.NewCall(fccFreshF, [curScopeV, fV])
+    }
     // PHP function names are case-insensitive: a function is also declared under a
     // hidden lower-cased key and its lower-cased name (makeDefStmt). On an exact miss, a name given at run
     // time is looked up again lower-cased with one leading "\" dropped
@@ -6685,7 +6715,15 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var fnBare = b.NewSelect(truthy(b, bsV), callExt(b, "js_phsubstr", [fnS, emitNum(b, 1), hNull]), fnS)
             var fnK = callExt(b, "js_phcat", [emitStr(b, "\x00f"), callExt(b, "js_phcase", [fnBare, hFalse])])
             var fnHit = b.NewCall(fnProbeFn(), [curScopeV, fnK, hNull])
-            return {b: b, v: callExt(b, "js_phnot", [callExt(b, "js_seq", [fnHit, hNull])])}
+            // A library function exists whether or not the program compiled it
+            // (phpLibNamed).
+            var fnLc = callExt(b, "js_phcase", [fnBare, hFalse])
+            var fnNeedle = callExt(b, "js_phcat", [callExt(b, "js_phcat", [emitStr(b, ","), fnLc]), emitStr(b, ",")])
+            var libAt = callExt(b, "js_phstrpos", [emitStr(b, phpLib.names), fnNeedle, hNull])
+            var commaAt = callExt(b, "js_phstrpos", [fnLc, emitStr(b, ","), hNull])
+            var libV = b.NewSelect(truthy(b, callExt(b, "js_phis", [emitStr(b, "int"), commaAt])), hFalse,
+                                   callExt(b, "js_phis", [emitStr(b, "int"), libAt]))
+            return {b: b, v: b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, fnHit, hNull), libV, hTrue)}
         }
         // define() writes the SAME scope a `const` does, which is what makes a
         // defined constant readable through a bare name.
@@ -6943,9 +6981,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             doneB.NewRet(hNull)
             var fccB = f.NewBlock("fcc")
             eb.NewCondBr(truthy(eb, callExt(eb, "js_phis", [emitStr(eb, "string"), nm])), strB, fccB)
-            // A library function taken as a first-class callable (usort(...)) is that
-            // function's own closure.
+            // A library function taken as a first-class callable (usort(...)) is a
+            // closure forwarding to that function's own (js_phfnof).
             var fcur = fccB
+            var fnOf = callExt(fcur, "js_phfnof", [nm])
             for (var fi = 0; fi < libCbList.length; fi++) {
                 var fcb = libCbList[fi]
                 var fN = fcb.at == -2 ? 2 : 1
@@ -6953,7 +6992,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 var fhitB = f.NewBlock("")
                 var fnextB = f.NewBlock("")
                 var libV = callExt(fcur, "js_scope_get", [curScopeV, emitStr(fcur, fcb.n)])
-                fcur.NewCondBr(fcur.NewICmp(llvm.enum.IPredEQ, nm, libV), fhitB, fnextB)
+                fcur.NewCondBr(fcur.NewICmp(llvm.enum.IPredEQ, fnOf, libV), fhitB, fnextB)
                 if (fN == 2) { fhitB = libChecks(fhitB, f.Params[2], fcb.n, fcb, n - 2) }
                 libChecks(fhitB, f.Params[2], fcb.n, fcb, fcb.at < 0 ? n - 1 : fcb.at).NewBr(doneB)
                 fcur = fnextB
@@ -7034,14 +7073,15 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         }
         return function(b) {
             // strlen(...): PHP 8.1's first-class callable syntax. The value of the
-            // expression IS the function, so there is nothing to call here.
+            // expression is a new Closure of the function (fccFresh), so there is
+            // nothing to call here.
             var fk = anytype
             if (anyCase) {
                 fk = fnByKey(b, name)
                 b = fk.b
             }
             if (hasFcc(args)) {
-                return {b: b, v: anyCase ? fk.v : callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])}
+                return {b: b, v: fccFresh(b, anyCase ? fk.v : callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)]))}
             }
             if (hasPlace(args)) {
                 var pfV = anyCase ? fk.v : callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
@@ -7357,18 +7397,18 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (genClosure) { clo = callExt(b, "js_genfn", [clo]) }
         return clo
     }
-    // A function value carries what a call through a VARIABLE needs to know about
+    // A method value carries what a call through a VARIABLE needs to know about
     // its parameters, in its meta slot (js_jsfnmeta): the positions of its
     // by-reference parameters as a bit mask in the length, which js_phrefat reads
-    // back, and its parameter list in the name - the names without '$', comma
-    // separated, the variadic one spelled "...name" - which js_phplace places named
-    // arguments and a variadic tail by. The list is recorded only when the program
-    // has a call that needs it (dynPlaceNamed / dynPlaceVariadic below).
+    // back, and in the name a record (js_phfnrec) of its parameter list - the
+    // names without '$', comma separated, the variadic one spelled "...name" -
+    // which js_phplace places named arguments and a variadic tail by, and of its
+    // debug record, which a closure made from it shows (js_phfake). The list is
+    // recorded only when the program has a call that needs it (dynPlaceNamed /
+    // dynPlaceVariadic below).
     function withSig(b, fn, pl) {
-        var mask = refMask(pl)
-        var sig = plSig(pl)
-        if (mask == 0 && sig == "") { return fn }
-        return callExt(b, "js_jsfnmeta", [fn, emitStr(b, sig), emitNum(b, mask)])
+        var recV = callExt(b, "js_phfnrec", [emitStr(b, fnDescOf(pl.name, "", "", [], pl)), emitStr(b, plSig(pl))])
+        return callExt(b, "js_jsfnmeta", [fn, recV, emitNum(b, refMask(pl))])
     }
     // Bit i is set for a by-reference position i; a by-reference variadic ('&...$xs')
     // sets every position from its own up to the 53 a double holds exactly.
