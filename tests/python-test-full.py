@@ -6953,6 +6953,62 @@ def s135():
     except RuntimeError as e:
         check("with3", repr(e.__context__) == "KeyError(1)")
 
+# ===== SECTION 136: contextlib, io.StringIO, types.SimpleNamespace, textwrap =====
+import contextlib as S136cl
+import io as S136io
+import types as S136ty
+import textwrap as S136tw
+
+@S136cl.contextmanager
+def S136tag(log, name):
+    log.append("<" + name)
+    try:
+        yield name.upper()
+    except KeyError:
+        log.append("swallowed")
+    finally:
+        log.append(name + ">")
+
+def s136():
+    log = []
+    with S136tag(log, "a") as t:
+        log.append(t)
+    with S136tag(log, "b"):
+        raise KeyError("k")
+    try:
+        with S136tag(log, "c"):
+            raise ValueError("v")
+    except ValueError:
+        log.append("propagated")
+    with S136cl.suppress(ZeroDivisionError):
+        1 / 0
+    with S136cl.ExitStack() as st:
+        st.callback(log.append, "cb")
+        log.append(st.enter_context(S136tag(log, "d")))
+    check("ctxlib1", log == ["<a", "A", "a>", "<b", "swallowed", "b>", "<c", "c>", "propagated",
+                             "<d", "D", "d>", "cb"]
+          and type(S136cl.suppress()).__name__ == "suppress")
+    s = S136io.StringIO()
+    print("x", 1, file=s)
+    s.write("yz")
+    s.seek(1)
+    s.write("Q")
+    s.seek(0)
+    check("stringio1", s.getvalue() == "xQ1\nyz" and s.readline() == "xQ1\n" and s.read() == "yz"
+          and S136io.StringIO("a\nb").readlines() == ["a\n", "b"])
+    ns = S136ty.SimpleNamespace(a=1, b="x")
+    ns.c = 2
+    del ns.a
+    check("simplens1", repr(ns) == "namespace(b='x', c=2)" and ns == S136ty.SimpleNamespace(b="x", c=2)
+          and isinstance(len, S136ty.BuiltinFunctionType) and isinstance(s136, S136ty.FunctionType))
+    check("textwrap1", S136tw.wrap("The quick brown fox jumps over the lazy dog", 12)
+          == ["The quick", "brown fox", "jumps over", "the lazy dog"]
+          and S136tw.wrap("well--known text-book e-mail", 9) == ["well--", "known", "text-book", "e-mail"]
+          and S136tw.shorten("Hello  world, how are you?", 15) == "Hello [...]"
+          and S136tw.dedent("  a\n    b\n\n  c") == "a\n  b\n\nc"
+          and S136tw.indent("a\n\nb", "> ") == "> a\n\n> b"
+          and S136tw.fill("one two three", 7, initial_indent="* ") == "* one\ntwo\nthree")
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -7086,5 +7142,6 @@ def main():
     s133() # SECTION-CALL 133
     s134() # SECTION-CALL 134
     s135() # SECTION-CALL 135
+    s136() # SECTION-CALL 136
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]
