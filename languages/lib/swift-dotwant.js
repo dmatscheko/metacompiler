@@ -801,6 +801,14 @@ function swGenInScope(ty) {
     for (var i = 0; i < swGenScope.length; i++) { if (swTyNames(ty, swGenScope[i].names)) { return true } }
     return false
 }
+// The array type a value made a `Set<E>` adopts first, so `let s: Set<Double> =
+// [1, 2]` holds 1.0 and 2.0: "[E]", or "" for any other annotation.
+function swSetArrAnn(t) {
+    var u = t
+    while (u.length > 0 && (u.charAt(u.length - 1) == "?" || u.charAt(u.length - 1) == "!")) { u = u.substring(0, u.length - 1) }
+    var ga = swDsGenArgs(u, "Set")
+    return ga == null || ga.length != 1 ? "" : "[" + ga[0] + "]"
+}
 // The generic parameter names of each declared type, for its extensions.
 var swGenTypes = {}
 // Marks the adoption sites of a generic type's members (mem is splitMembers'

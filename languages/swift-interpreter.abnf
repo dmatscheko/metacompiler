@@ -6787,7 +6787,7 @@ KwContinue  = "continue" KwEnd ;
         // makeParam in swift-to-llvm-ir.abnf.
         return {name: name, label: label, xl: ids.length > 1 && label != "", type: type, adopt: ad, variadic: isVar, auto: isAuto,
                 inout: isInout, hasDefault: hasDflt, dflt: dflt,
-                isSet: !isVar && !isInout && swIsSetTy(type) && type.charAt(type.length - 1) != "?"}
+                isSet: !isVar && !isInout && swIsSetTy(type) && type.charAt(type.length - 1) != "?", setAdopt: swSetArrAnn(type)}
     }
     // An argument: {lbl, t} for a value, {lbl, ref} for &x, {lbl, dflt} for a
     // default the call site filled in.
@@ -7926,7 +7926,7 @@ KwContinue  = "continue" KwEnd ;
             // its first assignment, and the adoption below turns a number into a box.
             var v = anytype
             v = swCopy(valT())
-            if (setTy && op == "=") { v = swSetOf(v) }
+            if (setTy && op == "=") { v = swSetOf(swAdoptAnn(v, swSetArrAnn(localAnn))) }
             if (op == "=" && viaSelf) {
                 var dty = swSelfFieldDeepTy(lastKey)
                 if (dty != "") { v = swAdoptAnn(v, dty) }
@@ -8551,7 +8551,10 @@ KwContinue  = "continue" KwEnd ;
         // arrives by a later assignment (Swift's definite-initialization rule is
         // a type-checker job, and this front end does not enforce it).
         if (init == undefined) { return function() { declVar(name, null) } }
-        if (swIsSetTy(annTxt)) { return function() { declVar(name, swSetOf(init())) } }
+        if (swIsSetTy(annTxt)) {
+            var sa = swSetArrAnn(annTxt)
+            return function() { declVar(name, swSetOf(swAdoptAnn(init(), sa))) }
+        }
         if (labels == null) { return function() { declVar(name, swCopy(init())) } }
         return function() { declVar(name, relabelTuple(swCopy(init()), labels)) }
     }
@@ -9118,7 +9121,7 @@ KwContinue  = "continue" KwEnd ;
         for (var j = 0; j < f.params.length; j++) {
             var pj = f.params[j]
             var pv = anytype
-            pv = pj.isSet ? swSetOf(bnd.vals[j]) : bnd.vals[j]
+            pv = pj.isSet ? swSetOf(swAdoptAnn(bnd.vals[j], pj.setAdopt)) : bnd.vals[j]
             declVar(pj.name, pv)
             // A generic parameter this one binds (swDsMarkTypeParams): the type it
             // holds, or the type of its value.
@@ -9443,7 +9446,8 @@ KwContinue  = "continue" KwEnd ;
         notePropTy(items[0], annTxt)
         var pinit = swDotWant(items[k], items[k + 1], annTxt)
         if (pinit != undefined && swIsSetTy(annTxt)) {
-            return {prop: items[0], ty: ty, ann: annTxt, hasInit: true, init: function() { return swSetOf(pinit()) }}
+            var psa = swSetArrAnn(annTxt)
+            return {prop: items[0], ty: ty, ann: annTxt, hasInit: true, init: function() { return swSetOf(swAdoptAnn(pinit(), psa)) }}
         }
         if (pinit != undefined) { return {prop: items[0], ty: ty, ann: annTxt, hasInit: true, init: pinit} }
         // A `var` of an Optional type with no initial value starts as nil (Swift's
@@ -9704,7 +9708,7 @@ KwContinue  = "continue" KwEnd ;
             mparams.push({name: fields[s].store, label: fields[s].name, type: "",
                           adopt: fields[s].ty, variadic: false, auto: false, inout: false,
                           hasDefault: fields[s].hasInit, dflt: fields[s].init, ann: fields[s].ann,
-                          isSet: swIsSetTy(fa) && fa.charAt(fa.length - 1) != "?"})
+                          isSet: swIsSetTy(fa) && fa.charAt(fa.length - 1) != "?", setAdopt: swSetArrAnn(fa)})
         }
         return mparams
     }
@@ -9938,7 +9942,7 @@ KwContinue  = "continue" KwEnd ;
                     for (var a = 1; a < arguments.length; a++) { args.push(arguments[a]) }
                     var bnd = swBindArgs(mparams, args, self)
                     for (var p2 = 0; p2 < mparams.length; p2++) {
-                        scopePut(self, mparams[p2].name, mparams[p2].isSet ? swSetOf(bnd.vals[p2]) : bnd.vals[p2])
+                        scopePut(self, mparams[p2].name, mparams[p2].isSet ? swSetOf(swAdoptAnn(bnd.vals[p2], mparams[p2].setAdopt)) : bnd.vals[p2])
                     }
                 })
             }

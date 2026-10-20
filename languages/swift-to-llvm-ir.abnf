@@ -6695,7 +6695,7 @@ KwContinue  = "continue" KwEnd ;
         // Optional one keeps its nil.
         return {name: name, label: label, xl: ids.length > 1 && label != "", type: type, adopt: ad, variadic: isVar, auto: isAuto,
                 inout: isInout, hasDefault: hasDflt, dflt: dflt,
-                isSet: !isVar && !isInout && swIsSetTy(type) && type.charAt(type.length - 1) != "?"}
+                isSet: !isVar && !isInout && swIsSetTy(type) && type.charAt(type.length - 1) != "?", setAdopt: swSetArrAnn(type)}
     }
     function pName(p) { return (typeof p == "string") ? p : p.name }
     function makeCallArg(items, txt) {
@@ -7861,7 +7861,7 @@ KwContinue  = "continue" KwEnd ;
         var obs = hasOwn(localObsReg, "$" + ref.name) ? localObsReg["$" + ref.name] : null
         // `s = [1, 2]` into a local declared `Set<Int>`, and `d[[1, 2]] = v` into
         // one declared `[Set<Int>: V]`.
-        if (ref.path.length == 0 && op == "=" && hasLocal && swIsSetTy(localAnn)) { valT = swSetInit(valT) }
+        if (ref.path.length == 0 && op == "=" && hasLocal && swIsSetTy(localAnn)) { valT = swSetInit(valT, localAnn) }
         var setKey = ref.path.length == 1 && ref.path[0].key == undefined && hasLocal && swIsSetKeyTy(localAnn)
         var optChain = false
         for (var oc = 0; oc < ref.path.length; oc++) { if (ref.path[oc].opt == true) { optChain = true } }
@@ -8662,7 +8662,7 @@ KwContinue  = "continue" KwEnd ;
                 return b
             }
         }
-        if (swIsSetTy(annTxt)) { init = swSetInit(init) }
+        if (swIsSetTy(annTxt)) { init = swSetInit(init, annTxt) }
         return function(b) {
             var r = init(b)
             b = r.b
@@ -9180,7 +9180,7 @@ KwContinue  = "continue" KwEnd ;
             // The memberwise initializer is emitted through here too, which is
             // how `T(a: 3)` fills a `var a: Double` field.
             var pv = swEmitAdopt(b, av, prm.adopt)
-            if (prm.isSet) { pv = emitSetOf(b, pv) }
+            if (prm.isSet) { pv = emitSetOf(b, swEmitAdopt(b, pv, prm.setAdopt)) }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, prm.name), pv])
             // A generic parameter this one binds (swDsMarkTypeParams): the type it
             // holds, or the type of its value.
@@ -9667,7 +9667,7 @@ KwContinue  = "continue" KwEnd ;
         notePropTy(items[0], annTxt)
         var pinit = swDotWant(items[k], items[k + 1], annTxt)
         if (pinit != undefined && swIsSetTy(annTxt)) {
-            return {prop: items[0], ty: ty, ann: annTxt, hasInit: true, init: swSetInit(pinit)}
+            return {prop: items[0], ty: ty, ann: annTxt, hasInit: true, init: swSetInit(pinit, annTxt)}
         }
         if (pinit != undefined) { return {prop: items[0], ty: ty, ann: annTxt, hasInit: true, init: pinit} }
         // A `var` of an Optional type with no initial value starts as nil (Swift's
@@ -10029,7 +10029,7 @@ KwContinue  = "continue" KwEnd ;
             mparams.push({name: fields[s].store, label: fields[s].name, type: "",
                           adopt: fields[s].ty, variadic: false, auto: false, inout: false,
                           hasDefault: fields[s].hasInit, dflt: fields[s].init, ann: fields[s].ann,
-                          isSet: swIsSetTy(fa) && fa.charAt(fa.length - 1) != "?"})
+                          isSet: swIsSetTy(fa) && fa.charAt(fa.length - 1) != "?", setAdopt: swSetArrAnn(fa)})
         }
         return mparams
     }
@@ -12126,10 +12126,12 @@ KwContinue  = "continue" KwEnd ;
         return callExt(b, "js_swsetof", [sv])
     }
     // `var s: Set<Int> = [1, 2]`: the initializer, made a Set.
-    function swSetInit(t) {
+    // Its elements adopt the Set's element type first (swSetArrAnn).
+    function swSetInit(t, ann) {
+        var sa = swSetArrAnn(ann)
         return function(b) {
             var r = t(b)
-            return {b: r.b, v: emitSetOf(r.b, r.v)}
+            return {b: r.b, v: emitSetOf(r.b, swEmitAdopt(r.b, r.v, sa))}
         }
     }
     // `let a: [Set<Int>] = [[1], [2, 3]]`: an Array OF Sets, so each element literal

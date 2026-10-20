@@ -5674,6 +5674,21 @@ func s148() {
     check("148b", xs[safe148: 1] == 8 && xs[safe148: 2] == nil && xs[0] == 7 && xs[2, 3] == 23)
 }
 
+// ===== SECTION 149: a Set's element type adopts its literals =====
+// `let s: Set<Double> = [1, 2]` holds 1.0 and 2.0, as `[Double]` would - through a
+// declaration, a later assignment, a parameter, a stored property's default and
+// a memberwise argument. Every value read off swiftc 6.1.2.
+struct Bag149 { var xs: Set<Double>; var ys: Set<Double> = [3] }
+func sum149(_ s: Set<Double>) -> String { "\(s.sorted())" }
+func s149() {
+    let s: Set<Double> = [1, 2]
+    var t: Set<Double> = []
+    t = [5]
+    let b = Bag149(xs: [4])
+    check("149a", "\(s.sorted())" == "[1.0, 2.0]" && "\(t)" == "[5.0]" && sum149([7]) == "[7.0]")
+    check("149b", "\(b.xs)" == "[4.0]" && "\(b.ys)" == "[3.0]")
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5823,6 +5838,7 @@ func main() {
     s146() // SECTION-CALL 146
     s147() // SECTION-CALL 147
     s148() // SECTION-CALL 148
+    s149() // SECTION-CALL 149
     print("full: \(checks) checks, \(fails) failures")
 }
 
