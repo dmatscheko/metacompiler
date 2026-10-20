@@ -9084,10 +9084,14 @@ KwContinue  = "continue" KwEnd ;
     // A method value. owner is the type the method was DECLARED in; it is pushed for
     // the duration of the call so a `super` inside the body resolves against the right
     // level of the hierarchy even when the method was inherited.
-    function makeMethodClosure(f, owner) {
+    // stat: a static member, which an operator call reaches with no receiver; its
+    // self is then the declaring type's descriptor, so the body reads the type's
+    // statics unqualified (`allCases` in a `static func <`). Twin of emitFunc's
+    // selfName in swift-to-llvm-ir.abnf.
+    function makeMethodClosure(f, owner, stat) {
         return function() {
             var raw = arguments
-            var call = [f, null, raw[0]]
+            var call = [f, null, raw[0] === undefined && stat === true ? (owner.__desc != undefined ? owner.__desc : owner) : raw[0]]
             for (var i = 1; i < raw.length; i++) { call.push(raw[i]) }
             ownerStack.push(owner)
             try {
@@ -9603,7 +9607,7 @@ KwContinue  = "continue" KwEnd ;
         // `static func +`, whose two operands pick by TYPE.
         for (var sm = 0; sm < mem.statMethods.length; sm++) {
             addMethod(cls, "__static_" + mem.statMethods[sm].name,
-                      makeMethodClosure(mem.statMethods[sm], cls), mem.statMethods[sm].params)
+                      makeMethodClosure(mem.statMethods[sm], cls, true), mem.statMethods[sm].params)
         }
         for (var sc = 0; sc < mem.statComps.length; sc++) {
             var sp = mem.statComps[sc]

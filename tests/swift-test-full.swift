@@ -5479,6 +5479,24 @@ func s139() {
         && (try? parse139("5").get()) == 5.0)
 }
 
+// ===== SECTION 140: a static operator reads its type's statics unqualified =====
+// Inside `static func <` an enum's synthesized `allCases` (and a struct's own
+// static) is in scope exactly as in any static member, whether the operator is
+// written, derived (`>`) or used by sorted(). Every value read off swiftc 6.1.2.
+enum Suit140: CaseIterable, Comparable {
+    case clubs, hearts, spades
+    static func < (a: Suit140, b: Suit140) -> Bool { allCases.firstIndex(of: a)! < allCases.firstIndex(of: b)! }
+}
+struct Ver140: Comparable {
+    var n: Int
+    static let base = 10
+    static func < (a: Ver140, b: Ver140) -> Bool { a.n % base < b.n % base }
+}
+func s140() {
+    check("140a", Suit140.clubs < .hearts && Suit140.spades > .clubs && [Suit140.spades, .clubs, .hearts].sorted() == [.clubs, .hearts, .spades])
+    check("140b", Ver140(n: 21) < Ver140(n: 13) && [Ver140(n: 19), Ver140(n: 5)].sorted().map { $0.n } == [5, 19])
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5619,6 +5637,7 @@ func main() {
     s137() // SECTION-CALL 137
     s138() // SECTION-CALL 138
     s139() // SECTION-CALL 139
+    s140() // SECTION-CALL 140
     print("full: \(checks) checks, \(fails) failures")
 }
 
