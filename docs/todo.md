@@ -76,12 +76,12 @@ non-ASCII class range spanning 256 or more characters only gets the text-side up
 
 # JS — JavaScript and TypeScript
 
-### T-694 js/ts: valid numeric literals rejected — `0x1_0`, `0.0_1`, `08e1` / `09.5e1` · P2 · JS · OPEN [V]
+### T-694 js/ts: valid numeric literals rejected — `0x1_0`, `0.0_1`, `08e1` / `09.5e1` · P2 · JS · IN PROGRESS (JS worker, round 18) [V]
 node: `0x1_0` 16 (js-interpreter's HexLit takes no `_`); `0.0_1` 0.01 (js-interpreter, js-to-llvm-ir and typescript-to-llvm-ir
 SepNumLit need a `_` before the `.`; typescript-interpreter right); sloppy `08e1` / `09.5e1` 80 / 95 (js NonOctalDecLit has no
 exponent; unverified in our grammars). Sweep all literal forms through the four grammars against node / tsc.
 
-### T-695 js: no function source text; defineProperty / delete of a function's `name` / `length` · P3 · JS · OPEN [V]
+### T-695 js: no function source text; defineProperty / delete of a function's `name` / `length` · P3 · JS · IN PROGRESS (JS worker, round 18) [V]
 `String(f)` / `f.toString()` → `[function]` (interp via jsStr; `"" + f` gives the host closure source), a class → `[object Object]`;
 node prints the source text (also inside V8's "read only property 'name' of function '<source>'"). `Object.defineProperty(fn,
 "name"|"length", {...})` is ignored in all engines (node replaces it; `writable: true` makes later writes succeed); `delete
