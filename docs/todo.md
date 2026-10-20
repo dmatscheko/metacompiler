@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-637** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-638** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -101,12 +101,14 @@ marker). `Object.getOwnPropertySymbols` missing in all legs. Compiled `[...null]
 
 # JV — Java
 
-### T-625 java/kotlin regex: supplementary characters in interp and native; PSE constructor; Kotlin Regex.options · P1 · JV · IN PROGRESS (JV worker, round 7) [V]
-Under the J dialect the interpreter and native legs match UTF-16 units, the Go twin (runes) and Java code points:
-`"😀".matches(".")`, `.matches("[^a]")`, `.matches("\\p{So}")` → false in interp and native, true in llvm.Run and java;
-`"a😀b".replaceAll(".", "#")` → `####` (java `###`). Make lib/regex.js step by code point under J (additive, flag-gated) and
-assert with astral characters. P3: `new PatternSyntaxException(desc, regex, index)` constructed by a program is not implemented;
-kotlin `Regex("a", IGNORE_CASE).options` and `Regex("(?i)a").options` → `[]` in all engines (kotlin-stdlib `[IGNORE_CASE]`).
+### T-637 java: static field and method of one name; field hiding; lazy static init; nested type names hoisted globally · P1 · JV · OPEN [V]
+`static int count; static int count() {...}` collide on the class descriptor in both engines ("unknown method 'count'").
+Field hiding (subclass redeclares a field, `super.name`): compiled "variable not defined: super", the interpreter reads the subclass
+value. Static initialization is eager: a member class's static block runs right after its top-level class, not at first use
+(`static{log.append("O")}` → ours `L:Of|`, java `L:f|O`). Nested types are hoisted by simple name across the program: a `record Pt`
+in one class breaks `S24.Pt` elsewhere. P3: `new ArrayList<>() instanceof Cloneable` false (java true); descendingMap/Set/KeySet are
+copies, not live views; Matcher has no regions, hitEnd/requireEnd, usePattern, results(); Character.getName missing (declined with
+\N{name} for the same table-size reason).
 
 ---
 
@@ -746,6 +748,7 @@ T-630 kotlin: sorted collections forget order on insert; copyOfRange; java.util 
 T-631 swift: interp runs a metatype init twice; `is T` with a metatype-bound T; `Int?(5)`; generic enum type(of:); Set returns — DONE d4683967 (is T / as? T with bound T, Int?(5), generic enum type(of:), Set returns, minimumCapacity); the interp double-init P1 did not reproduce in ~40 forms nor at the filing commit (4aa5b951) — closed as not reproducible, assertion 154a pins the case
 T-588 bash: `$[ expr ]`; `$'\uDFFF'` length; native stdout buffering vs stderr order — DONE 77c376cc (plus \u/\U decoding in every engine; stderr ordered against buffered stdout natively)
 T-635 bash: `$'\cX'` control escapes; `$'\?'` in the interpreter; batch native stdout/stderr order — DONE a03ea5f4 (bash); batch has no program-visible stderr — its fatal-diagnostic ordering moved to T-636
+T-625 java/kotlin regex: supplementary characters in interp and native; PSE constructor; Kotlin Regex.options — DONE fbc1b072 (plus a java sweep: local class captures, array patterns, EnumMap/EnumSet, java.util.function defaults, Pattern/Matcher, records, BitSet ...)
 
 # Settled — do not re-open
 
