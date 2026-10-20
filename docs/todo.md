@@ -135,7 +135,7 @@ reports cap 4 where growslice says 1) — escape analysis.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-665 php: generator argument count checked at first resume; get_class/get_parent_class accept too many · P3 · PHP · OPEN [V spec-only]
+### T-665 php: generator argument count checked at first resume; get_class/get_parent_class accept too many · P3 · PHP · IN PROGRESS (PHP worker, round 12) [V spec-only]
 `function g($a){ yield $a; } $gen = g(); echo "gen made";` → we print "gen made" then raise at the first resume (PHP raises before: RECV
 precedes ZEND_GENERATOR_CREATE) — an eager check outside the deferred body (compiler: around js_genfn; interpreter: before newGen).
 `get_class(1, 2)` accepted (PHP "get_class() expects at most 1 argument, 2 given"): add the `/* at most 1 */` marker in php-stdlib.php for
