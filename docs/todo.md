@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-669** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-671** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -78,12 +78,15 @@ astral letter may differ between engines (probe first).
 
 # JS — JavaScript and TypeScript
 
-### T-664 js: replacing a constructor's prototype; getPrototypeOf/setPrototypeOf/defineProperty; toLocaleString; Object.create(null) · P1 · JS · IN PROGRESS (JS worker, round 13) [V]
-`function F(){}; F.prototype = {q: 4}; new F().q` → undefined in all engines (node 4) — P1. `Object.getPrototypeOf`, `Object.setPrototypeOf`,
-`Object.defineProperty` and Object.create's second argument → "not a function" / ignored (node: `Object.getPrototypeOf(Object.create({p:1})).p`
-1; `Object.create({}, {a:{value:1}}).a` 1). `(1234.5).toLocaleString()` → interp `1234.5`, compiled "is not a function" (node `1,234.5`; the
-halves disagree); Array toLocaleString likewise. `Object.create(null)` still has Object.prototype's methods (`typeof n.toString` → function,
-node undefined). `({}).valueOf.call(7)` → a number (node boxes it, typeof "object").
+### T-669 js: primitive wrapper objects (`new Number(7)`, `Object(7)`, `({}).valueOf.call(7)`) · P2 · JS · OPEN [V]
+All engines: `new Number(7)` → empty object, `Object(7)` → "Object is not a function", `({}).valueOf.call(7)` → a number (node: `object 8`
+for `typeof x, x+1` on all three). Needs a wrapper value kind in all five engines: ToPrimitive, method dispatch on the box,
+Object.prototype.toString tag, JSON, instanceof. Number.prototype.toFixed (via `Number.prototype`) → "is not a function".
+
+### T-670 js: defineProperty writable/configurable; getOwnPropertyNames of non-enumerables; Function/Boolean.prototype; String of a null-proto object · P3 · JS · OPEN [V]
+`Object.defineProperty(o,"x",{value:1}); o.x=2; o.x` → 2 (node sloppy 1). `Object.getOwnPropertyNames` omits a defineProperty'd
+non-enumerable key (node lists it). `Object.getPrototypeOf(function(){})` / `(true)` → undefined (node Function.prototype /
+Boolean.prototype). `String(Object.create(null))` → "[object Object]" (node TypeError "Cannot convert object to primitive value").
 
 ---
 
@@ -766,6 +769,7 @@ T-662 php: library functions called with too few arguments do not raise Argument
 T-658 js: inherited data properties read as undefined; Object.create; Object.prototype method set; shim identity — DONE 9f4ba349
 T-663 php: user functions with too few arguments; library method arity; named-argument "not passed" — DONE 4b257c30
 T-665 php: generator argument count checked at first resume; get_class/get_parent_class accept too many — DONE 9e081dd3
+T-664 js: replacing a constructor's prototype; getPrototypeOf/setPrototypeOf/defineProperty; toLocaleString; Object.create(null) — DONE e4c56dde (PARTIAL: replaced prototypes, get/setPrototypeOf, defineProperty/ies, create(null), toLocaleString — 4 legs = node; valueOf.call boxing → T-669)
 
 # Settled — do not re-open
 
