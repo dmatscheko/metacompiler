@@ -4306,6 +4306,7 @@ const (
 	Z82f float64 = 0
 	F82h float64 = 0.5
 	T82f float32 = 3.4028234663852886e38
+	T82g float32 = 3.4028235677973366e38
 )
 
 func s82() {
@@ -4363,6 +4364,11 @@ func s82() {
 	// arithmetic on a float32 conversion is binary32 arithmetic.
 	check("cke10", fmt.Sprintf("%T %T %T %T %T", T82a, T82b, T82c, T82f, Z82f) == "uint8 uint8 main.C82 float32 float64")
 	check("cke11", fmt.Sprint(T82f, float32(1)/3, float32(2)/3+0, F82h*2) == "3.4028235e+38 0.33333334 0.6666667 1")
+	// A constant reaching a float32 is rounded ONCE, from its exact value: this
+	// one is just below the tie between MaxFloat32 and 2^128, which it would land
+	// on exactly as a float64 first.
+	var f32 float32 = 3.4028235677973366e38
+	check("cke12", fmt.Sprint(f32, float32(3.4028235677973366e38), T82g) == "3.4028235e+38 3.4028235e+38 3.4028235e+38")
 }
 
 type U82 uint8

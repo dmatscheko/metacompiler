@@ -1211,7 +1211,13 @@ function goConstTo(t, kr, ty, ctx) {
     var w = goTyWord(shown)
     if (typeof definedUnder[w] == "string") { w = goTyWord(resolveDefined(w)) }
     if (isFloatTy(w)) {
-        if (cRoundFlo(cAsF(kr.k), w == "float32") == null) { goKFail(kr, "cannot use " + goKDesc(kr) + " as " + shown + " value in " + ctx + " (overflows)") }
+        var rf = cRoundFlo(cAsF(kr.k), w == "float32")
+        if (rf == null) { goKFail(kr, "cannot use " + goKDesc(kr) + " as " + shown + " value in " + ctx + " (overflows)"); return t }
+        // A float32 location rounds the EXACT constant once; through a float64
+        // first, 3.4028235677973366e38 would land on a binary32 tie and round
+        // up to +Inf. The binary32 value is a double, so the location's own
+        // rounding of it is exact.
+        if (w == "float32") { return cMaterialize(rf) }
         return (kr.k.f || goIsIfaceTy(bt)) ? t : cMaterialize(cAsF(kr.k))
     }
     var it = goIntTy(w)
@@ -1461,8 +1467,12 @@ function goTkConv(to, ks, ke, pos) {
 // items = [{conv}, thunk, {cks, cke}] of a conversion whose type is written out,
 // which ends at pos.
 function goConvC(items, pos) {
-    goConvConst(constAt(items[2].cke), items[2].cks, items[2].cke, items[0].conv)
+    var k = constAt(items[2].cke)
+    goConvConst(k, items[2].cks, items[2].cke, items[0].conv)
     goTkConv(items[0].conv, items[2].cks, items[2].cke, pos)
+    // float32(c) rounds the exact constant once (goConstTo's float32 rule).
+    var tt = goTkType(items[0].conv)
+    if (k != null && !cIsCx(k) && tt != null && tt.u == "float32") { return [items[0], cMaterialize(cRoundFlo(cAsF(k), true))] }
     return [items[0], items[1]]
 }
 // `=` storing value kr into target lref, one of n targets: the blank identifier
@@ -3049,7 +3059,10 @@ function cBindSpec(items, start) {
         while (cn < names.length) {
             var tkr = goKRecOf(cSpecVal(fns, cn, okn, cIotaIdx), cLastAks[cn], cLastAts[cn])
             if (tkr != null && ats.length == 0) { tkr = {k: tkr.k, ks: tkr.ks, ke: tkr.ke, ln: start} }
-            if (tkr != null) { goConstTo(null, tkr, cLastTy, "constant declaration") }
+            if (tkr != null) {
+                var tv = goConstTo(ats.length == names.length ? rest[cn] : null, tkr, cLastTy, "constant declaration")
+                if (ats.length == names.length) { rest[cn] = tv }
+            }
             cn = cn + 1
         }
     }
