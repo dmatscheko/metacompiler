@@ -626,6 +626,21 @@ func s113() {
 		"func(string) error|func(error, interface {}) bool|func(int)")
 }
 
+// ===== SECTION 114: a statement that opens with '(' after a selector =====
+// Go ends a line after an identifier, so `pm := w.cnt` is a statement of its own
+// and the next line's `(pm)` is not a call of w.cnt. The expected values are go
+// run's.
+type w114 struct{ cnt map[string]int }
+
+func s114() {
+	w := w114{map[string]int{}}
+	pm := w.cnt
+	(pm)["a"]++
+	pp := &w.cnt
+	(*pp)["a"] += 2
+	check("selnl114", w.cnt["a"] == 3)
+}
+
 func main() {
 	s94()   // SECTION-CALL 94
 	s95()   // SECTION-CALL 95
@@ -645,6 +660,7 @@ func main() {
 	s111()  // SECTION-CALL 111
 	s112()  // SECTION-CALL 112
 	s113()  // SECTION-CALL 113
+	s114()  // SECTION-CALL 114
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

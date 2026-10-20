@@ -885,8 +885,9 @@ SliceSfx    <~~ push(makeSliceSfx(takeAll(), up.start)) ~~>
 // expression does not parse at all.
 CallSfx     <~~ push(makeCallSfx(takeAll())) ~~>
             = "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
+// `x := w.f` followed by a line that opens with '(' is two statements (SameLine).
 MethodSfx   <~~ push(makeMethodSfx(popName(), takeAll(), up.start)) ~~>
-            = "." Id <~~ push({mname: up.in}) ~~> "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
+            = "." Id <~~ push({mname: up.in}) ~~> SameLine "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
 FieldSfx    <~~ push({kind: "field", name: pop().fname, at: up.start, rc: null}) ~~>
             = "." Id <~~ push({fname: up.in}) ~~> ;
 IndexSfx    <~~ var ikm = pop(); push({kind:"index", idx: pop(), ksty: ikm.ksty, kk: ikm.kr, at: up.start, rc: null}) ~~>

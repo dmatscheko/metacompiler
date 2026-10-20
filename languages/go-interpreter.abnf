@@ -855,8 +855,9 @@ TypeArgsSfx  = TypeArgsMany | TypeArgsKw ;
 TypeArgsMany = "[" Type "," Type { "," Type } "]" ;
 TypeArgsKw   = "[" NonExprT "]" ;
 NonExprT     = "[" "]" Type | ArrayTypeT | MapTypeT | FuncTypeT | ChanTypeT | IfaceTypeT | StructTypeT ;
+// `x := w.f` followed by a line that opens with '(' is two statements (SameLine).
 MethodSfx   <~~ push(makeMethodSfx(popName(), takeAll(), up.start)) ~~>
-            = "." Id <~~ push({mname: up.in}) ~~> "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
+            = "." Id <~~ push({mname: up.in}) ~~> SameLine "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
 FieldSfx    <~~ push({kind: "field", name: pop().fname, at: up.start, rc: null, dt: null, dtk: false, me: "", pkg: curPkgName}) ~~>
             = "." Id <~~ push({fname: up.in}) ~~> ;
 SliceSfx    <~~ push(makeSliceSfx(takeAll(), up.start)) ~~>
