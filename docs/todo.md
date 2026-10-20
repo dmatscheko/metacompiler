@@ -122,7 +122,7 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-639 kotlin: `is` on collections; MutableList deque methods; comparator TreeSet/TreeMap; LinkedList/ArrayDeque/PriorityQueue · P1 · KT · OPEN [V spec-only]
+### T-639 kotlin: `is` on collections; MutableList deque methods; comparator TreeSet/TreeMap; LinkedList/ArrayDeque/PriorityQueue · P1 · KT · IN PROGRESS (KT worker, round 7) [V spec-only]
 `x is Set<*>`, `is Map<*,*>`, `is Iterable<*>` answer false for sets, maps and lists, and `is Collection<*>` false for sets, in every
 engine (Kotlin: setOf → Collection/Iterable/Set true; listOf → Collection/Iterable/List true; mapOf → Map true; 1..2 → Iterable true).
 `addFirst`/`addLast`/`removeFirst`/`removeLast`/`removeFirstOrNull`/`removeLastOrNull` on MutableList missing (interp "unknown list
