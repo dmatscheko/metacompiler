@@ -1083,6 +1083,8 @@ abstract class AbstractSet<E> implements Set<E> {
         for (int i = 0; i < n; i++) { remove(gone[i]); any = true; }
         return any;
     }
+    public boolean removeAll(Collection<?> c) { return removeIf(e -> c.contains(e)); }
+    public boolean retainAll(Collection<?> c) { return removeIf(e -> !c.contains(e)); }
     public void forEach(java.util.function.Consumer<? super E> action) {
         Iterator<E> it = iterator();
         while (it.hasNext()) { action.accept(it.next()); }
@@ -1183,6 +1185,67 @@ class TreeSet<E> extends AbstractSet<E> {
     public E pollLast() {
         Map.Entry<E, Object> e = map.pollLastEntry();
         return e == null ? null : e.getKey();
+    }
+}
+
+// java.util.EnumMap: a map keyed by one enum's constants, iterating in their
+// declaration order - the enums' natural order, so a TreeMap.
+class EnumMap<K extends Enum<K>, V> extends TreeMap<K, V> {
+    public EnumMap(Class<K> keyType) { super(); }
+    public EnumMap(Map<K, ? extends V> m) { super(m); }
+}
+
+// java.util.EnumSet: a set of one enum's constants in declaration order, a
+// TreeSet that keeps its element type for allOf, range and complementOf.
+class EnumSet<E extends Enum<E>> extends TreeSet<E> {
+    Class<E> elementType;
+
+    EnumSet(Class<E> elementType) { this.elementType = elementType; }
+
+    public static <E extends Enum<E>> EnumSet<E> noneOf(Class<E> elementType) { return new EnumSet<E>(elementType); }
+    public static <E extends Enum<E>> EnumSet<E> allOf(Class<E> elementType) {
+        EnumSet<E> s = new EnumSet<E>(elementType);
+        E[] all = elementType.getEnumConstants();
+        for (int i = 0; i < all.length; i++) { s.add(all[i]); }
+        return s;
+    }
+    @SafeVarargs
+    public static <E extends Enum<E>> EnumSet<E> of(E first, E... rest) {
+        EnumSet<E> s = new EnumSet<E>(first.getDeclaringClass());
+        s.add(first);
+        for (int i = 0; i < rest.length; i++) { s.add(rest[i]); }
+        return s;
+    }
+    public static <E extends Enum<E>> EnumSet<E> range(E from, E to) {
+        if (from.compareTo(to) > 0) { throw new IllegalArgumentException(from + " > " + to); }
+        EnumSet<E> s = new EnumSet<E>(from.getDeclaringClass());
+        E[] all = s.elementType.getEnumConstants();
+        for (int i = from.ordinal(); i <= to.ordinal(); i++) { s.add(all[i]); }
+        return s;
+    }
+    public static <E extends Enum<E>> EnumSet<E> complementOf(EnumSet<E> other) {
+        EnumSet<E> s = new EnumSet<E>(other.elementType);
+        E[] all = other.elementType.getEnumConstants();
+        for (int i = 0; i < all.length; i++) {
+            if (!other.contains(all[i])) { s.add(all[i]); }
+        }
+        return s;
+    }
+    public static <E extends Enum<E>> EnumSet<E> copyOf(Collection<E> c) {
+        if (c instanceof EnumSet) {
+            EnumSet<E> s = new EnumSet<E>(((EnumSet<E>) c).elementType);
+            s.addAll(c);
+            return s;
+        }
+        if (c.isEmpty()) { throw new IllegalArgumentException("Collection is empty"); }
+        EnumSet<E> s = new EnumSet<E>(c.iterator().next().getDeclaringClass());
+        s.addAll(c);
+        return s;
+    }
+    public EnumSet<E> clone() {
+        EnumSet<E> s = new EnumSet<E>(elementType);
+        s.addAll(this);
+        return s;
     }
 }
 

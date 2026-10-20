@@ -2816,7 +2816,10 @@ HasStatic   = :script(~~
     function makeInstTail(items) {
         if (items[0] != undefined && items[0].ipat != undefined) { return {iof: true, pat: items[0].ipat} }
         var tail = {iof: true, tname: items[0]}
-        if (items.length > 1) { tail.bind = items[1].bind }
+        if (items.length > 1) {
+            tail.bind = items[1].bind
+            jPatDecl(tail.bind, tail.tname)
+        }
         return tail
     }
     function makeInstOf(items, pos) {
@@ -4073,6 +4076,14 @@ HasStatic   = :script(~~
         var from = 0
         for (var i = 0; i < t.length; i++) { if (t.charAt(i) == ".") { from = i + 1 } }
         return t.substring(from)
+    }
+    // The "[]" suffixes of a type name, one per dimension.
+    function jArrDims(s) {
+        var out = ""
+        for (var i = 0; i + 1 < s.length; i++) {
+            if (s.charAt(i) == "[" && s.charAt(i + 1) == "]") { out = out + "[]" }
+        }
+        return out
     }
     function baseTypeName(s) {
         var out = ""
@@ -5628,15 +5639,25 @@ HasStatic   = :script(~~
         }
         return {econst: true, name: name, args: args, body: body}
     }
-    // One helper method on the enum descriptor. `name`/`ordinal` are instance methods
-    // (the receiver arrives as argument 0); `values`/`valueOf` are static and read the
-    // descriptor back out of the captured scope.
+    // One helper method on the enum descriptor. `name`/`ordinal`/`compareTo`/
+    // `getDeclaringClass` are instance methods (the receiver arrives as argument 0);
+    // `values`/`valueOf` are static and read the descriptor back out of the
+    // captured scope. Twins of jEnumCompare and getDeclaringClass in
+    // java-interpreter.abnf.
     function emitEnumHelper(kind, ename) {
         var body = function(b) {
             var a0 = callExt(b, "js_arg", [curF.Params[1], handle(0)])
             var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, ename)])
             if (kind == "name") { b.NewRet(callExt(b, "js_get", [a0, emitStr(b, "__ename")])) }
             else if (kind == "ordinal") { b.NewRet(callExt(b, "js_get", [a0, emitStr(b, "__eord")])) }
+            else if (kind == "compareTo") {
+                var a1 = callExt(b, "js_arg", [curF.Params[1], handle(1)])
+                b.NewRet(callExt(b, "js_sub", [callExt(b, "js_get", [a0, emitStr(b, "__eord")]),
+                                               callExt(b, "js_get", [a1, emitStr(b, "__eord")])]))
+            }
+            else if (kind == "getDeclaringClass") {
+                b.NewRet(callExt(b, "js_jvclasslit", [clsV, emitStr(b, ename), emitStr(b, ename), emitNum(b, 0), hFalse]))
+            }
             else if (kind == "values") { b.NewRet(callExt(b, "js_get", [clsV, emitStr(b, "__values")])) }
             else { b.NewRet(callExt(b, "js_get", [clsV, a0])) }
             return deadBlock()
@@ -5651,7 +5672,13 @@ HasStatic   = :script(~~
         for (var i = 1; i < items.length; i++) {
             if (items[i].econst != undefined) { consts.push(items[i]) } else { members.push(items[i]) }
         }
-        for (var k = 0; k < consts.length; k++) { enumConstOwner["$" + consts[k].name] = name }
+        for (var k = 0; k < consts.length; k++) {
+            enumConstOwner["$" + consts[k].name] = name
+            // A constant is a static field of the enum, which its body names
+            // unqualified (lookupFieldKind).
+            fieldKind["$" + name + "#" + consts[k].name] = "static"
+            fieldNames["$" + consts[k].name] = true
+        }
         // A constant BODY is an anonymous subclass of the enum; build it up front so
         // the walk-time registration (class names) happens here too.
         var subs = []
@@ -5676,7 +5703,8 @@ HasStatic   = :script(~~
         return function(b) {
             b = clsStmt(b)
             var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
-            var kinds = ["name", "ordinal", "values", "valueOf"]
+            // compareTo is final in java.lang.Enum, so no enum declares its own.
+            var kinds = ["name", "ordinal", "values", "valueOf", "getDeclaringClass", "compareTo"]
             for (var h = 0; h < kinds.length; h++) {
                 callExt(b, "js_set", [clsV, emitStr(b, kinds[h]),
                                       callExt(b, "js_closure", [handle(emitEnumHelper(kinds[h], name)), curScopeV])])
@@ -5729,7 +5757,8 @@ HasStatic   = :script(~~
         var bind = null
         var subs = []
         for (var i = 0; i < items.length; i++) {
-            if (items[i].pty != undefined) { ty = baseTypeName(items[i].pty); continue }
+            // An array type keeps its dimensions: `case int[] a` tests for int[].
+            if (items[i].pty != undefined) { ty = baseTypeName(items[i].pty) + jArrDims(items[i].pty); continue }
             if (items[i].pbind != undefined) { bind = items[i].pbind; continue }
             subs.push(items[i])
         }
@@ -5737,6 +5766,7 @@ HasStatic   = :script(~~
     }
     function makeTypePattern(items) {
         var p = patParts(items)
+        if (p.bind != null) { jPatDecl(p.bind, p.ty) }
         return {ty: p.ty, bind: p.bind, subs: null}
     }
     function makeRecPattern(items) {

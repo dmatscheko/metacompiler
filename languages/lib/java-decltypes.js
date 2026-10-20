@@ -29,6 +29,9 @@ function jVarTy(dtext) {
     if (t == "" || t == "null" || jIsFnTy(t)) { return "var" }
     return t
 }
+// A pattern variable (`x instanceof String s`, `case Box b ->`) is a local of
+// its pattern's type; `var` reads as unknown.
+function jPatDecl(name, ty) { jTyDecl(name, ty == "var" ? "" : ty) }
 // An enhanced for's variable is declared with its FeType (`for (Integer x :
 // l)` makes l.remove(x) the remove(Object) overload); dims written after the
 // name (`for (int r[] : m)`) extend it.
@@ -959,6 +962,7 @@ function jMapWants(path) {
         || path == "java.util.LinkedHashMap" || path == "java.util.LinkedHashSet" || path == "java.util.TreeSet"
         || path == "HashMap" || path == "HashSet" || path == "TreeMap" || path == "LinkedHashMap"
         || path == "LinkedHashSet" || path == "TreeSet" || path == "java.base"
+        || path == "java.util.EnumMap" || path == "java.util.EnumSet" || path == "EnumMap" || path == "EnumSet"
 }
 
 // Does this import name a java.util.stream type? Then the grammar compiles

@@ -44,6 +44,8 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.ConcurrentModificationException;
 import java.util.EmptyStackException;
+import java.util.EnumMap;
+import java.util.EnumSet;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -162,6 +164,7 @@ class Main {
         S76.run(); // SECTION-CALL 76
         S77.run(); // SECTION-CALL 77
         S78.run(); // SECTION-CALL 78
+        S79.run(); // SECTION-CALL 79
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -4440,5 +4443,85 @@ class S78 {
         }
         Main.check("pc78", pc.equals("Bad|3|a(\tb|Bad near index 3\na(\tb\n  \t^;None|-1|xyz|None\nxyz;null|5|null|null near index 5\nnull;"));
         Main.check("sr78", rp.equals("###|x##y|5|5|😀😀|😀#|4|a/b/c|<😀>x|𝐀́#x#|#x#😀|##"));
+    }
+}
+
+// ===== SECTION 79: local classes, array type patterns, enum constants, EnumMap and EnumSet, Character's statics =====
+//
+// A local class body reads the enclosing method's effectively final locals. A
+// type pattern or instanceof may name an array type: int[] is only int[],
+// Object[] takes every reference array, an array is no List. A pattern variable
+// is a local of the pattern's type. An enum body names its constants bare, and
+// compareTo / getDeclaringClass are java.lang.Enum's. EnumMap and EnumSet keep
+// declaration order. Every expected value is java 24.0.2's.
+class S79 {
+    enum Tone { LOW, MID, HIGH, TOP;
+        boolean edge() { return this == LOW || this == TOP; }
+    }
+    enum Calc {
+        PLUS { int on(int a, int b) { return a + b; } },
+        TIMES { int on(int a, int b) { return a * b; } };
+        abstract int on(int a, int b);
+    }
+    record Cell(int v) {}
+    static String kind(Object v) {
+        return switch (v) {
+            case int[] a -> "ints" + a.length;
+            case String[] a -> "strs" + a.length;
+            case Object[] a -> "objs" + a.length;
+            default -> "other";
+        };
+    }
+    static void run() {
+        int base = 7;
+        String tag = "t";
+        class Scale {
+            int by(int k) { return k * base; }
+            String name() { return tag + base; }
+        }
+        Main.check("lc79", new Scale().by(3) == 21 && new Scale().name().equals("t7"));
+        Object[] vs = {new int[]{1, 2}, new String[]{"a"}, new String[][]{{"b"}}, new int[][]{{1}}, new Cell[]{new Cell(1)}, "s", 4};
+        String ap = "";
+        for (Object v : vs) {
+            ap = ap + (v instanceof int[] ? 1 : 0) + (v instanceof String[] ? 1 : 0) + (v instanceof Object[] ? 1 : 0)
+                + (v instanceof Object[][] ? 1 : 0) + (v instanceof Cell[] ? 1 : 0) + (v instanceof List ? 1 : 0) + kind(v) + ";";
+        }
+        Main.check("ap79", ap.equals("100000ints2;011000strs1;001100objs1;001000objs1;001010objs1;000000other;000000other;"));
+        String pv = "";
+        for (Cell s : List.of(new Cell(2))) { pv = pv + s.v(); }
+        Object o = "pattern";
+        if (o instanceof String s && s.length() > 3) { pv = pv + s.toUpperCase(); }
+        Object w = List.of(1, 2);
+        String sw = switch (w) { case List<?> s -> "n" + s.size(); default -> "?"; };
+        Main.check("pv79", (pv + sw).equals("2PATTERNn2"));
+        String ec = Tone.LOW.edge() + " " + Tone.MID.edge() + " " + Tone.TOP.compareTo(Tone.MID) + " " + Calc.TIMES.getDeclaringClass().getSimpleName()
+            + " " + (Calc.PLUS.getDeclaringClass() == Calc.class) + " " + Calc.class.isEnum() + " " + Tone.class.getEnumConstants().length + " " + String.class.getEnumConstants();
+        Main.check("ec79", ec.equals("true false 2 Calc true true 4 null"));
+        EnumMap<Tone, Integer> em = new EnumMap<>(Tone.class);
+        em.put(Tone.TOP, 4); em.put(Tone.LOW, 1); em.merge(Tone.LOW, 10, Integer::sum);
+        EnumSet<Tone> two = EnumSet.of(Tone.HIGH, Tone.LOW);
+        String es = em + " " + two + " " + EnumSet.complementOf(two) + " " + EnumSet.range(Tone.MID, Tone.TOP) + " " + EnumSet.allOf(Calc.class)
+            + " " + EnumSet.noneOf(Tone.class) + " " + EnumSet.copyOf(List.of(Tone.TOP, Tone.LOW));
+        try { EnumSet.range(Tone.TOP, Tone.LOW); } catch (IllegalArgumentException e) { es = es + " " + e.getMessage(); }
+        Main.check("em79", es.equals("{LOW=11, TOP=4} [LOW, HIGH] [MID, TOP] [MID, HIGH, TOP] [PLUS, TIMES] [] [LOW, TOP] TOP > LOW"));
+        Set<Integer> st = new TreeSet<>(List.of(1, 2, 3, 4, 5));
+        Set<Integer> hs = new HashSet<>(List.of(1, 2, 3, 4, 5));
+        boolean r1 = st.removeAll(List.of(2, 4, 9));
+        boolean r2 = hs.retainAll(Set.of(1, 5, 7));
+        boolean r3 = hs.retainAll(Set.of(1, 5));
+        Main.check("sr79", (st + " " + hs + " " + r1 + r2 + r3).equals("[1, 3, 5] [1, 5] truetruefalse"));
+        int[] cs = {32, 160, 9, 127, 453, 888, 95, 36, 173, 65279, 55357, 56832, 8364, 19968, 10084};
+        String ch = "";
+        for (int c : cs) {
+            char x = (char) c;
+            ch = ch + (Character.isSpaceChar(x) ? 1 : 0) + (Character.isISOControl(x) ? 1 : 0) + (Character.isTitleCase(x) ? 1 : 0)
+                + (Character.isDefined(x) ? 1 : 0) + (Character.isJavaIdentifierStart(x) ? 1 : 0) + (Character.isJavaIdentifierPart(x) ? 1 : 0)
+                + (Character.isIdentifierIgnorable(x) ? 1 : 0) + (Character.isHighSurrogate(x) ? 1 : 0) + (Character.isLowSurrogate(x) ? 1 : 0)
+                + (Character.isMirrored(x) ? 1 : 0) + (Character.isIdeographic(c) ? 1 : 0) + (Character.isEmoji(c) ? 1 : 0) + Character.getType(x) + ";";
+        }
+        ch = ch + Character.charCount(0x1F600) + Character.toCodePoint('\uD83D', '\uDE00') + (int) Character.highSurrogate(0x1F600)
+            + (int) Character.lowSurrogate(0x1F600) + Character.isSurrogatePair('\uD83D', '\uDE00') + Character.isValidCodePoint(0x110000)
+            + Character.isSupplementaryCodePoint(0x10000) + Character.isBmpCodePoint(0xFFFF) + (int) Character.reverseBytes('a');
+        Main.check("ch79", ch.equals("10010000000012;10010000000012;01010000000015;01010110000015;0011110000003;0000000000000;00011100000023;00011100000026;00010110000016;00010110000016;00010001000019;00010000100019;00011100000026;0001110000105;00010000000128;21285125535756832truefalsetruetrue24832"));
     }
 }

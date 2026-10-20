@@ -7,6 +7,58 @@ import "strings"
 // describes the encoding), over java.lang.Character's own classification in
 // jsrtjavachars.go.
 
+// jxCharPreds and jxCharIs are java.lang.Character's predicates past the
+// ones jvCharMembers spells out; twins of JX_CHAR_PREDS and jxCharIs in
+// lib/java-regex.js, which describe them.
+var jxCharPreds = []string{"isIdeographic", "isMirrored", "isEmoji", "isEmojiPresentation", "isEmojiModifier",
+	"isEmojiModifierBase", "isEmojiComponent", "isExtendedPictographic", "isSpaceChar", "isISOControl",
+	"isTitleCase", "isDefined", "isJavaIdentifierStart", "isJavaLetter", "isJavaIdentifierPart",
+	"isJavaLetterOrDigit", "isUnicodeIdentifierStart", "isUnicodeIdentifierPart", "isIdentifierIgnorable",
+	"isSurrogate", "isHighSurrogate", "isLowSurrogate", "isSupplementaryCodePoint", "isValidCodePoint",
+	"isBmpCodePoint", "isSpace"}
+
+func jxCharIs(name string, c int) bool {
+	for k := 0; k < 8; k++ {
+		if jxCharPreds[k] == name {
+			return rxPropHit(rxPBin+k, rune(c))
+		}
+	}
+	switch name {
+	case "isSpaceChar":
+		g := jxGc(c)
+		return g >= 12 && g <= 14
+	case "isISOControl":
+		return (c >= 0 && c <= 31) || (c >= 127 && c <= 159)
+	case "isTitleCase":
+		return jxGc(c) == 3
+	case "isDefined":
+		return jxGc(c) != 0
+	case "isJavaIdentifierStart", "isJavaLetter":
+		return rxPropHit(rxPJStart, rune(c))
+	case "isJavaIdentifierPart", "isJavaLetterOrDigit":
+		return rxPropHit(rxPJPart, rune(c))
+	case "isUnicodeIdentifierStart":
+		return rxPropHit(rxPUStart, rune(c))
+	case "isUnicodeIdentifierPart":
+		return rxPropHit(rxPUPart, rune(c))
+	case "isIdentifierIgnorable":
+		return rxPropHit(rxPIgnore, rune(c))
+	case "isSurrogate":
+		return c >= 0xD800 && c <= 0xDFFF
+	case "isHighSurrogate":
+		return c >= 0xD800 && c <= 0xDBFF
+	case "isLowSurrogate":
+		return c >= 0xDC00 && c <= 0xDFFF
+	case "isSupplementaryCodePoint":
+		return c >= 0x10000 && c <= 0x10FFFF
+	case "isValidCodePoint":
+		return c >= 0 && c <= 0x10FFFF
+	case "isBmpCodePoint":
+		return c >= 0 && c <= 0xFFFF
+	}
+	return c == 9 || c == 10 || c == 12 || c == 13 || c == 32
+}
+
 // rxPropHit answers whether c has the \p{..} property id (rxP* in
 // jsrtregex.go). Twin of jxPropHit in lib/java-regex.js.
 func rxPropHit(id int, ch rune) bool {

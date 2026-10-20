@@ -1343,6 +1343,13 @@ func (rt *jsrt) jvIsType(v interface{}, t string) bool {
 		t = t[:i]
 	}
 	t = t[strings.LastIndexByte(t, '.')+1:]
+	if arr, ok := v.(*jsArray); ok {
+		tag := jvpArrayTag(arr)
+		return jxArrIs(tag, jxArraySimple(tag), t)
+	}
+	if strings.Contains(t, "[") {
+		return false
+	}
 	bn := jvBoxName(v)
 	if bn == "" {
 		return rt.isTypeName(v, t)
@@ -1354,6 +1361,28 @@ func (rt *jsrt) jvIsType(v interface{}, t string) bool {
 		return bn != "String" && bn != "Boolean" && bn != "Character"
 	}
 	return t == "CharSequence" && bn == "String"
+}
+
+// jxArrIs is `v instanceof t` for an array v of class name tag (simple name
+// sname); twin of jxArrIs in lib/java-strings.js, which states the rule.
+func jxArrIs(tag, sname, t string) bool {
+	switch t {
+	case sname, "Object", "Cloneable", "Serializable":
+		return true
+	}
+	dt, e := 0, len(t)
+	for e >= 2 && t[e-2:e] == "[]" {
+		dt++
+		e -= 2
+	}
+	if dt == 0 || t[:e] != "Object" {
+		return false
+	}
+	da := 0
+	for da < len(tag) && tag[da] == '[' {
+		da++
+	}
+	return da > dt || (da == dt && tag[da] == 'L')
 }
 
 // jvPrimZero is the zero of the primitive type named n, nil for a reference type.
@@ -1504,6 +1533,27 @@ func init() {
 			}
 			return classOf(simple, simple)
 		}))
+		// getEnumConstants and isEnum read the descriptor a class literal or
+		// getClass recorded (__cdesc). Twin of jClassCls in java-interpreter.abnf.
+		enumVals := func(self *jsObject) *jsArray {
+			if d, ok := self.props["__cdesc"].(*jsObject); ok {
+				vs, _ := d.props["__values"].(*jsArray)
+				return vs
+			}
+			return nil
+		}
+		classCls.set("getEnumConstants", jsHostFunc("getEnumConstants", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			self, _ := argAt(args, 0).(*jsObject)
+			vs := enumVals(self)
+			if vs == nil {
+				return jsNull
+			}
+			return &jsArray{elems: append([]interface{}{}, vs.elems...), kind: jvArrTagKind("[L" + rt.toString(self.props["__cname"]) + ";")}
+		}))
+		classCls.set("isEnum", jsHostFunc("isEnum", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			self, _ := argAt(args, 0).(*jsObject)
+			return enumVals(self) != nil
+		}))
 		reflArray := newJSObject()
 		reflArray.set("getLength", jsHostFunc("getLength", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			v := argAt(args, 0)
@@ -1556,6 +1606,9 @@ func init() {
 				if u(a[4]) == true {
 					c.set("__ciface", true)
 				}
+				if cls, ok := u(a[0]).(*jsObject); ok {
+					c.set("__cdesc", cls)
+				}
 				return w(c)
 			}
 			tag := strings.Repeat("[", dims-1) + jvArrOfDesc(name)
@@ -1571,7 +1624,9 @@ func init() {
 				return w(classOf(tag, jxArraySimple(tag)))
 			case *jsObject:
 				if cls, ok := t.props["__class"].(*jsObject); ok {
-					return w(classOf(jvpClassName(cls), rt.toString(cls.props["__name"])))
+					c := classOf(jvpClassName(cls), rt.toString(cls.props["__name"]))
+					c.set("__cdesc", cls)
+					return w(c)
 				}
 			case jsNullT, jsUndefT:
 				rt.fail("method call .getClass() on null")

@@ -464,8 +464,10 @@ Statement   = Block | If | While | Do | ForEach | For | Switch | Return | Yield 
 // A LOCAL class: the declaration builds it where the file is walked (so it is
 // registered before the enclosing method ever runs) and leaves a do-nothing
 // statement behind. Its scope is wider than Java's - it stays visible after the
-// method - which no program that compiles under javac can observe.
-LocalClass  <~~ push(function() {}) ~~>
+// method - which no program that compiles under javac can observe. The
+// statement records the scope chain it runs in, so the class body can name the
+// enclosing method's (effectively final) locals.
+LocalClass  <~~ push(makeLocalClass(jLastBuilt)) ~~>
             = NoSealed NestedType ;
 // yield: the value of the enclosing switch EXPRESSION arm. It travels as its own
 // signal, so it passes out of nested blocks and loops like return does.
@@ -2914,6 +2916,15 @@ HasStatic   = :script(~~
         o.forDigit = function(d, radix) { return jChar(jxForDigit(jNum(d), jNum(radix))) }
         o.compare = function(a, b) { return code(a) - code(b) }
         o.valueOf = function(v) { return v }
+        var pred = function(n) { return function(v) { return jxCharIs(n, code(v)) } }
+        for (var pi = 0; pi < JX_CHAR_PREDS.length; pi++) { o[JX_CHAR_PREDS[pi]] = pred(JX_CHAR_PREDS[pi]) }
+        o.getType = function(v) { return jxGc(code(v)) }
+        o.charCount = function(v) { return code(v) >= 65536 ? 2 : 1 }
+        o.toCodePoint = function(h, l) { return (code(h) - 55296) * 1024 + code(l) - 56320 + 65536 }
+        o.isSurrogatePair = function(h, l) { return jxCharIs("isHighSurrogate", code(h)) && jxCharIs("isLowSurrogate", code(l)) }
+        o.highSurrogate = function(v) { return jChar(((code(v) >>> 10) + 55232) & 65535) }
+        o.lowSurrogate = function(v) { return jChar((code(v) & 1023) + 56320) }
+        o.reverseBytes = function(v) { var c = code(v); return jChar((c & 255) * 256 + ((c >> 8) & 255)) }
     }
     jCharMembers(hostGlobals["Character"])
     // Java's Math.max / Math.min on doubles: NaN wins, and -0.0 is below 0.0.
@@ -3719,6 +3730,25 @@ HasStatic   = :script(~~
         return c
     }
     function jLangClass(simple) { return jClassOf("java.lang." + simple, simple) }
+    // The Class of a descriptor, which remembers it (__cdesc) for
+    // getEnumConstants and isEnum.
+    function jClassOfDesc(cls) {
+        var c = jClassOf(jClassBin(cls), cls.__name)
+        c.__cdesc = cls
+        return c
+    }
+    // Class#getEnumConstants: an enum's constants in order, null for any other
+    // class; Class#isEnum. Twins in abnf/jsrtjavastr.go and
+    // languages/lib/java-rt.metajs.
+    jClassCls.getEnumConstants = function(self) {
+        var d = self.__cdesc
+        if (d == undefined || d.__evalues == undefined) { return null }
+        return jArrTag(d.__evalues.slice(0), "[L" + self.__cname + ";")
+    }
+    jClassCls.isEnum = function(self) {
+        var d = self.__cdesc
+        return d != undefined && d.__evalues != undefined
+    }
     // A class literal (jClassLit in lib/java-decltypes.js): the class a
     // descriptor in scope names, else the literal's own name; an array of it
     // per dimension. Twin of js_jvclasslit in abnf/jsrtjavastr.go and
@@ -3738,6 +3768,7 @@ HasStatic   = :script(~~
             if (lit.dims == 0) {
                 var c = jClassOf(n, sm)
                 if (iface) { c.__ciface = true }
+                if (cls != undefined && cls != null && cls.__isclass === true) { c.__cdesc = cls }
                 return c
             }
             var tag = jArrOfDesc(n)
@@ -3829,7 +3860,7 @@ HasStatic   = :script(~~
             var tag = jArrayTag(v)
             return jClassOf(tag, jArraySimple(tag))
         }
-        if (typeof v == "object" && v.__class != undefined) { return jClassOf(jClassBin(v.__class), v.__class.__name) }
+        if (typeof v == "object" && v.__class != undefined) { return jClassOfDesc(v.__class) }
         fail("getClass() of a value with no class")
     }
     // "java.util.Map.Entry" -> "Entry". The frozen host has no lastIndexOf.
@@ -3867,6 +3898,11 @@ HasStatic   = :script(~~
     function jIsType(v, tname) {
         if (v === null || v === undefined) { return false }
         var t = jSimpleName(tname.split("<")[0])
+        if (Array.isArray(v)) {
+            var tag = jArrayTag(v)
+            return jxArrIs(tag, jArraySimple(tag), t)
+        }
+        if (t.indexOf("[") >= 0) { return false }
         var bn = jBoxName(v)
         if (bn == "") { return rtIsType(v, t) }
         if (t == bn || t == "Object" || t == "Comparable" || t == "Serializable") { return true }
@@ -4496,7 +4532,10 @@ HasStatic   = :script(~~
     function makeInstTail(items) {
         if (items[0].ipat != undefined) { return {iof: true, pat: items[0].ipat} }
         var tail = {iof: true, tname: items[0]}
-        if (items.length > 1) { tail.bind = items[1].bind }
+        if (items.length > 1) {
+            tail.bind = items[1].bind
+            jPatDecl(tail.bind, tail.tname)
+        }
         return tail
     }
     function makeInstOf(items, pos) {
@@ -4518,6 +4557,7 @@ HasStatic   = :script(~~
     // primitive names always bind (types are erased in this model). A record
     // pattern additionally matches its components against nested patterns.
     function makeTypePat(items) {
+        jPatDecl(items[1].pname, items[0].ptype)
         return {prec: false, ptype: items[0].ptype, pname: items[1].pname}
     }
     function makeRecPat(items) {
@@ -4681,6 +4721,7 @@ HasStatic   = :script(~~
             // unrelated object's fields. A static nested type gets one too and
             // never uses it (its body cannot legally name an outer instance field).
             var obj = {__class: cls, __outer: jNestOuter(cls)}
+            if (cls.__lscope != undefined) { obj.__cscope = cls.__lscope }
             var argv = []
             for (var i = 0; i < args.length; i++) argv.push(args[i]())
             if (sig == undefined) { sig = jOvCtorSig(cls.__name, atys) }
@@ -6488,6 +6529,8 @@ HasStatic   = :script(~~
         if (!hasOwn(cls, "toString")) { cls.toString = jEnumName }
         if (!hasOwn(cls, "compareTo")) { cls.compareTo = jEnumCompare }
         if (!hasOwn(cls, "equals")) { cls.equals = jEnumEquals }
+        // Enum#getDeclaringClass: the enum, also for a constant with a body.
+        cls.getDeclaringClass = function() { return jClassOfDesc(cls) }
         var vals = []
         for (i = 0; i < consts.length; i++) {
             var ec = consts[i]
@@ -6508,6 +6551,10 @@ HasStatic   = :script(~~
             obj.__ename = ec.econst
             obj.__eord = i
             cls[ec.econst] = obj
+            // A constant is a static field, which the enum's body names
+            // unqualified (jStaticOwner).
+            if (cls.__sfld == undefined) { cls.__sfld = {} }
+            cls.__sfld[ec.econst] = true
             vals.push(obj)
         }
         cls.__evalues = vals
@@ -6707,12 +6754,21 @@ HasStatic   = :script(~~
     // Leaves the class body: restores the enclosing name and, for a NESTED type,
     // additionally registers it under its qualified name.
     function jExitClass(name, cls) {
+        jLastBuilt = cls
         var outer = jClassStack.pop()
         jCurBin = jBinStack.pop()
         curClassName = outer
         if (outer != "" && outer != undefined && cls != undefined && cls != null) {
             globalScope[outer + "." + name] = cls
         }
+    }
+    // The descriptor jExitClass saw last: a LocalClass statement's own class.
+    var jLastBuilt = null
+    // A local class statement: each run records the enclosing method's scope
+    // chain on the class (__lscope), and makeNew hands it to every instance as
+    // __cscope, which jOuterOwner searches as it does an anonymous class's.
+    function makeLocalClass(cls) {
+        return function() { cls.__lscope = scopes.slice(0) }
     }
     function buildClass(items) {
         jOvDeclare(items[0], items.slice(1))
@@ -6968,9 +7024,10 @@ HasStatic   = :script(~~
             // shadows a field of the enclosing class. In java 24.0.2,
             // `Sup f(int fld) { return new Sup(){ ... fld ... }; }` inside a
             // class that also declares `int fld` answers the PARAMETER, while
-            // `Outer.this.fld` still answers the field. Only an anonymous instance
-            // carries __cscope (makeNewAnon / jNewInnerAnon); for every other object
-            // this test is one undefined read per hop.
+            // `Outer.this.fld` still answers the field. Only an anonymous or a
+            // local class's instance carries __cscope (makeNewAnon / jNewInnerAnon /
+            // makeNew); for every other object this test is one undefined read per
+            // hop.
             var ch = v.__cscope
             if (ch != undefined && ch != null) {
                 for (var ci = ch.length - 1; ci >= 0; ci--) {

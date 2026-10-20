@@ -784,6 +784,36 @@ func jvCharMembers(o *jsObject) {
 	o.set("valueOf", jsHostFunc("valueOf", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		return argAt(args, 0)
 	}))
+	for _, n := range jxCharPreds {
+		name := n
+		pred(name, func(c int) bool { return jxCharIs(name, c) })
+	}
+	num := func(name string, f func(c int) int) {
+		o.set(name, jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return float64(f(code(rt, argAt(args, 0))))
+		}))
+	}
+	char := func(name string, f func(c int) int) {
+		o.set(name, jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return jsChar{code: int32(f(code(rt, argAt(args, 0))))}
+		}))
+	}
+	num("getType", jxGc)
+	num("charCount", func(c int) int {
+		if c >= 0x10000 {
+			return 2
+		}
+		return 1
+	})
+	char("highSurrogate", func(c int) int { return (int(uint32(c)>>10) + 0xD7C0) & 0xFFFF })
+	char("lowSurrogate", func(c int) int { return c&0x3FF + 0xDC00 })
+	char("reverseBytes", func(c int) int { return c&0xFF<<8 | c>>8&0xFF })
+	o.set("toCodePoint", jsHostFunc("toCodePoint", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return float64((code(rt, argAt(args, 0))-0xD800)*1024 + code(rt, argAt(args, 1)) - 0xDC00 + 0x10000)
+	}))
+	o.set("isSurrogatePair", jsHostFunc("isSurrogatePair", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return jxCharIs("isHighSurrogate", code(rt, argAt(args, 0))) && jxCharIs("isLowSurrogate", code(rt, argAt(args, 1)))
+	}))
 }
 
 // jvUnbox is Number's intValue() ... doubleValue(), Character's charValue() and

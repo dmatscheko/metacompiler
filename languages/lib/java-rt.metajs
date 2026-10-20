@@ -2173,6 +2173,25 @@ function jvClassOf(name, simple) {
             return "class " + self["__cname"]
         }
         cc["getComponentType"] = function(self) { return jvComponent(self["__cname"]) }
+        // getEnumConstants and isEnum read the descriptor a class literal or
+        // getClass recorded (__cdesc). Twin of jClassCls in java-interpreter.abnf.
+        cc["getEnumConstants"] = function(self) {
+            var d = self["__cdesc"]
+            if (d === undefined) { return null }
+            var vs = d["__values"]
+            if (vs === undefined) { return null }
+            var a = []
+            var i = 0
+            while (i < vs.length) {
+                a.push(vs[i])
+                i = i + 1
+            }
+            return js_jvarrtag(a, "[L" + self["__cname"] + ";")
+        }
+        cc["isEnum"] = function(self) {
+            var d = self["__cdesc"]
+            return d !== undefined && d["__values"] !== undefined
+        }
         jvClassCls = cc
     }
     var key = "$" + name
@@ -2338,6 +2357,11 @@ function js_jvis(v, t0) {
         i = i + 1
     }
     var t = t0.substring(from, end)
+    if (Array.isArray(v)) {
+        var tag = jpArrayTag(v)
+        return jxArrIs(tag, jvArraySimple(tag), t)
+    }
+    if (t.indexOf("[") >= 0) { return false }
     var bn = jvBoxName(v)
     if (bn == "") { return js_is_type(v, t) }
     if (t == bn || t == "Object" || t == "Comparable" || t == "Serializable") { return true }
@@ -2399,6 +2423,7 @@ function js_jvclasslit(cls, name, simple, dims, iface) {
     if (dims == 0) {
         var c = jvClassOf(n, sm)
         if (iface === true) { c["__ciface"] = true }
+        if (cls !== undefined && cls !== null && typeof cls == "object") { c["__cdesc"] = cls }
         return c
     }
     var tag = jvArrOfDesc(n)
@@ -2423,7 +2448,11 @@ function js_jvgetclass(v) {
     }
     if (typeof v == "object") {
         var cls = v["__class"]
-        if (cls !== undefined) { return jvClassOf(jpClassName(cls), cls["__name"]) }
+        if (cls !== undefined) {
+            var gc = jvClassOf(jpClassName(cls), cls["__name"])
+            gc["__cdesc"] = cls
+            return gc
+        }
     }
     fail("getClass() of a value with no class")
     return undefined
@@ -3333,7 +3362,26 @@ function jvCharMembers(o) {
     o["forDigit"] = function(d, radix) { return jvChar(jxForDigit(rtjNum(d), rtjNum(radix))) }
     o["compare"] = function(a, b) { return jvCharCode(a) - jvCharCode(b) }
     o["valueOf"] = function(v) { return v }
+    var pi = 0
+    while (pi < JX_CHAR_PREDS.length) {
+        o[JX_CHAR_PREDS[pi]] = jvCharPred(JX_CHAR_PREDS[pi])
+        pi = pi + 1
+    }
+    o["getType"] = function(v) { return jxGc(jvCharCode(v)) }
+    o["charCount"] = function(v) { return jvCharCode(v) >= 65536 ? 2 : 1 }
+    o["toCodePoint"] = function(h, l) { return (jvCharCode(h) - 55296) * 1024 + jvCharCode(l) - 56320 + 65536 }
+    o["isSurrogatePair"] = function(h, l) {
+        return jxCharIs("isHighSurrogate", jvCharCode(h)) && jxCharIs("isLowSurrogate", jvCharCode(l))
+    }
+    o["highSurrogate"] = function(v) { return jvChar(((jvCharCode(v) >>> 10) + 55232) & 65535) }
+    o["lowSurrogate"] = function(v) { return jvChar((jvCharCode(v) & 1023) + 56320) }
+    o["reverseBytes"] = function(v) {
+        var c = jvCharCode(v)
+        return jvChar((c & 255) * 256 + ((c >> 8) & 255))
+    }
 }
+// One of jxCharIs's predicates as a Character static.
+function jvCharPred(name) { return function(v) { return jxCharIs(name, jvCharCode(v)) } }
 
 // Math.max / Math.min on doubles: NaN wins, and -0.0 is below 0.0. Twin of
 // jMaxD / jMinD in java-interpreter.abnf.

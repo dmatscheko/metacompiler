@@ -93,6 +93,24 @@ function jxCpAt(s, i) {
     }
     return c
 }
+// `v instanceof T` for an array v whose class name is tag (simple name sname):
+// T is its own type, Object, Cloneable or Serializable, or Object[]..[] of no
+// more dimensions than a reference array has (JLS 4.10.3). A covariant
+// element type other than Object is not modelled. Twin of jxArrIs in
+// abnf/jsrtjavastr.go.
+function jxArrIs(tag, sname, t) {
+    if (t == sname || t == "Object" || t == "Cloneable" || t == "Serializable") { return true }
+    var dt = 0
+    var e = t.length
+    while (e >= 2 && t.substring(e - 2, e) == "[]") {
+        dt = dt + 1
+        e = e - 2
+    }
+    if (dt == 0 || t.substring(0, e) != "Object") { return false }
+    var da = 0
+    while (da < tag.length && tag.charAt(da) == "[") { da = da + 1 }
+    return da > dt || (da == dt && tag.charAt(da) == "L")
+}
 // String.chars and codePoints as int arrays (a surrogate pair is one code
 // point), and lines' parts: split at \n, \r and \r\n, with no empty last line.
 function jxChars(s) {

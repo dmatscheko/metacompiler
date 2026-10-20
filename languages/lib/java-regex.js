@@ -57,6 +57,42 @@ function jxPropHit(id, c) {
     return id == RX_PJPART && (start || part)
 }
 
+// java.lang.Character's predicates past the ones each engine's member table
+// spells out itself (jCharMembers in java-interpreter.abnf, jvCharMembers in
+// lib/java-rt.metajs and abnf/jsrtjava.go), which register these names over
+// jxCharIs. The emoji, ideographic and mirrored ones are jxBin's bits in
+// order. Twin of jxCharIs in abnf/jsrtjavaprops.go.
+var JX_CHAR_PREDS = ["isIdeographic", "isMirrored", "isEmoji", "isEmojiPresentation", "isEmojiModifier",
+    "isEmojiModifierBase", "isEmojiComponent", "isExtendedPictographic", "isSpaceChar", "isISOControl",
+    "isTitleCase", "isDefined", "isJavaIdentifierStart", "isJavaLetter", "isJavaIdentifierPart",
+    "isJavaLetterOrDigit", "isUnicodeIdentifierStart", "isUnicodeIdentifierPart", "isIdentifierIgnorable",
+    "isSurrogate", "isHighSurrogate", "isLowSurrogate", "isSupplementaryCodePoint", "isValidCodePoint",
+    "isBmpCodePoint", "isSpace"]
+function jxCharIs(name, c) {
+    var k = 0
+    while (k < 8) {
+        if (JX_CHAR_PREDS[k] == name) { return jxPropHit(RX_PBIN + k, c) }
+        k = k + 1
+    }
+    var g = jxGc(c)
+    if (name == "isSpaceChar") { return g >= 12 && g <= 14 }
+    if (name == "isISOControl") { return (c >= 0 && c <= 31) || (c >= 127 && c <= 159) }
+    if (name == "isTitleCase") { return g == 3 }
+    if (name == "isDefined") { return g != 0 }
+    if (name == "isJavaIdentifierStart" || name == "isJavaLetter") { return jxPropHit(RX_PJSTART, c) }
+    if (name == "isJavaIdentifierPart" || name == "isJavaLetterOrDigit") { return jxPropHit(RX_PJPART, c) }
+    if (name == "isUnicodeIdentifierStart") { return jxPropHit(RX_PUSTART, c) }
+    if (name == "isUnicodeIdentifierPart") { return jxPropHit(RX_PUPART, c) }
+    if (name == "isIdentifierIgnorable") { return jxPropHit(RX_PIGNORE, c) }
+    if (name == "isSurrogate") { return c >= 55296 && c <= 57343 }
+    if (name == "isHighSurrogate") { return c >= 55296 && c <= 56319 }
+    if (name == "isLowSurrogate") { return c >= 56320 && c <= 57343 }
+    if (name == "isSupplementaryCodePoint") { return c >= 65536 && c <= 1114111 }
+    if (name == "isValidCodePoint") { return c >= 0 && c <= 1114111 }
+    if (name == "isBmpCodePoint") { return c >= 0 && c <= 65535 }
+    return c == 9 || c == 10 || c == 12 || c == 13 || c == 32
+}
+
 // jxIdExtra: 1 for the Other_ID_Start characters, 2 for the Other_ID_Continue
 // ones that no general category covers, which isUnicodeIdentifierStart /
 // isUnicodeIdentifierPart add.
