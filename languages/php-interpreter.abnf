@@ -1810,7 +1810,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (r !== phpTypeBad) { return r }
         var where = argset.site == undefined || argset.site == "" ? "" : ", called" + argset.site
         phpRaise("TypeError", phpFnShown(who, cls) + "(): Argument #" + n + " (" + p.name + ") must be of type "
-            + phpTypeText(p.rel ? phpTypeResolve(p.typ, false) : p.typ) + ", " + phpValueName(v) + " given" + where)
+            + phsTypeText(p.rel ? phpTypeResolve(p.typ, false) : p.typ) + ", " + phpValueName(v) + " given" + where)
     }
     // The body of a function declaring return type rtype, checking what it returns
     // (zend_verify_return_type): a generator's and a void function's are not; a
@@ -1831,7 +1831,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             var fit = anytype
             fit = ret ? phpTypeFit(rel ? phpTypeResolve(rtype, true) : rtype, v, ctxSelf()) : phpTypeBad
             if (fit === phpTypeBad) {
-                phpRaise("TypeError", name + "(): Return value must be of type " + phpTypeText(rel ? phpTypeResolve(rtype, false) : rtype)
+                phpRaise("TypeError", name + "(): Return value must be of type " + phsTypeText(rel ? phpTypeResolve(rtype, false) : rtype)
                     + ", " + (ret ? phpValueName(v) : "none") + " returned")
             }
             return {ret: true, v: fit}
@@ -1848,7 +1848,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // lsb. Twin of phpTypeResolve in abnf/jsrtphp.go and phTypeResolve in
     // lib/php-rt.metajs.
     function phpTypeResolve(typ, lsb) {
-        var alts = phpTypeAlts(typ)
+        var alts = phsTypeAlts(typ)
         var self = anytype
         self = ctxSelf()
         var out = ""
@@ -6314,7 +6314,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var ptyp = typ
         if (promote && typ != "") { typedNames[nm] = true }
         if (dnull) { typ = phpTypeOrNull(typ) }
-        return {name: nm, byref: byref, variadic: variadic, def: def, promote: promote, vis: vis, typ: typ, ptyp: ptyp, rel: phpTypeRel(typ)}
+        return {name: nm, byref: byref, variadic: variadic, def: def, promote: promote, vis: vis, typ: typ, ptyp: ptyp, pnull: dnull, rel: phpTypeRel(typ)}
     }
     // The name is not always items[0]: a method may carry captured modifiers in front
     // of it, so the string is looked for rather than indexed. 'static' is remembered
@@ -6602,9 +6602,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     // The parsed pieces of a class body, sorted by kind. Split out of makeClassStmt
     // so an ANONYMOUS class (new class (...) { ... }) can build one the same way,
-    // without a name and without declaring anything.
-    function classParts(items, start) {
+    // without a name and without declaring anything. self is the name of a named
+    // class that is not a trait, and "" for the others, whose types keep self and
+    // parent as written (zend_is_scope_known).
+    function classParts(items, start, self) {
         var p = {methods: [], props: [], statics: [], consts: [], ext: null, ifaces: [], uses: [], rawNames: []}
+        var promoted = []
         for (var i = start; i < items.length; i++) {
             var it = items[i]
             if (it == null || it == undefined) { continue }
@@ -6616,6 +6619,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                     var cps = it.method.params
                     for (var pq = 0; pq < cps.length; pq++) {
                         if (cps[pq].promote === true) {
+                            promoted.push(cps[pq])
                             p.props.push({name: cps[pq].name.substring(1), init: null, isStatic: false, hooks: [], vis: cps[pq].vis, typ: cps[pq].ptyp})
                         }
                     }
@@ -6636,6 +6640,22 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             }
         }
         p.ifaces = addStringable(p.ifaces, p.methods)
+        var parent = p.ext == null ? "" : p.ext
+        if (parent.charAt(0) == "\\") { parent = parent.substring(1) }
+        if (self != "") {
+            for (var pi = 0; pi < p.props.length; pi++) { p.props[pi].typ = phsTypeSubstSelf(p.props[pi].typ, self, parent) }
+            for (var si = 0; si < p.statics.length; si++) { p.statics[si].typ = phsTypeSubstSelf(p.statics[si].typ, self, parent) }
+        }
+        // A promoted parameter's null default does not make its type nullable, so
+        // one its type refuses is a compile error (zend_compile_params). Twin of
+        // makeClassStmt in php-to-llvm-ir.abnf.
+        for (var nq = 0; nq < promoted.length; nq++) {
+            var pt = promoted[nq].ptyp
+            if (promoted[nq].pnull === true && pt != "" && phpTypeOrNull(pt) != pt) {
+                fail("Cannot use null as default value for parameter " + promoted[nq].name + " of type "
+                     + phsTypeText(self != "" ? phsTypeSubstSelf(pt, self, parent) : pt))
+            }
+        }
         return p
     }
     // A class declaring __toString implements Stringable without naming it, after
@@ -6758,6 +6778,17 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         return out
     }
+    // The cell of static property rec on cls, its initializer queued on pend. A
+    // typed one, the class's own or a trait's, carries its type (st), declaring
+    // class (sk) and name (sn) and starts uninitialised.
+    function addStaticCell(cls, rec, pend) {
+        var cell = anytype
+        cell = {__refcell: true, v: null}
+        var st = rec.typ
+        if (st != undefined && st != "") { cell = {__refcell: true, v: undefined, st: st, sk: cls, sn: rec.name} }
+        dictSet(cls.__statics, rec.name, cell)
+        pend.push({cell: cell, rec: rec})
+    }
     function buildClass(name, p) {
         var tm = traitMembers(p.uses)
         // PHP's slot order: the class's own properties in body order (promoted
@@ -6780,11 +6811,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         // initializer is a constant expression where self:: names this class, run
         // when the class is first used (classInit).
         var pend = []
-        for (var ts = 0; ts < tm.statics.length; ts++) {
-            var tcell = {__refcell: true, v: null}
-            dictSet(cls.__statics, tm.statics[ts].name, tcell)
-            pend.push({cell: tcell, rec: tm.statics[ts]})
-        }
+        for (var ts = 0; ts < tm.statics.length; ts++) { addStaticCell(cls, tm.statics[ts], pend) }
         cls.__mlc = phpMethodList(tm.methods) + phpMethodList(p.methods).substring(1)
         cls.__mns = phpNonStaticList(tm.methods) + phpNonStaticList(p.methods).substring(1)
         cls.__svis = phpStaticVisList(name, tm.statics) + phpStaticVisList(name, p.statics).substring(1)
@@ -6794,14 +6821,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         for (var tmi = 0; tmi < tm.methods.length; tmi++) {
             setMethod(cls, tm.methods[tmi].name, makeMethodClosure(tm.methods[tmi], cls))
         }
-        for (var s2 = 0; s2 < p.statics.length; s2++) {
-            var scell = anytype
-            scell = {__refcell: true, v: null}
-            var st = p.statics[s2].typ
-            if (st != undefined && st != "") { scell = {__refcell: true, v: undefined, st: st, sk: cls, sn: p.statics[s2].name} }
-            dictSet(cls.__statics, p.statics[s2].name, scell)
-            pend.push({cell: scell, rec: p.statics[s2]})
-        }
+        for (var s2 = 0; s2 < p.statics.length; s2++) { addStaticCell(cls, p.statics[s2], pend) }
         cls.__sinit = pend
         for (var m2 = 0; m2 < p.methods.length; m2++) {
             setMethod(cls, p.methods[m2].name, makeMethodClosure(p.methods[m2], cls))
@@ -6845,11 +6865,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     function makeClassStmt(items) {
         var name = items[0]
-        var p = classParts(items, 1)
-        var parent = p.ext == null ? "" : p.ext
-        if (parent.charAt(0) == "\\") { parent = parent.substring(1) }
-        for (var pi = 0; pi < p.props.length; pi++) { p.props[pi].typ = phpTypeSubstSelf(p.props[pi].typ, name, parent) }
-        for (var si = 0; si < p.statics.length; si++) { p.statics[si].typ = phpTypeSubstSelf(p.statics[si].typ, name, parent) }
+        var p = classParts(items, 1, name)
         lastClassDecl = {name: name, ext: p.ext, plain: p.ifaces.length == 0 && p.uses.length == 0}
         return function() { declClass(name, buildClass(name, p)); return null }
     }
@@ -6864,7 +6880,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (items[i] != null && items[i] != undefined && items[i].ecase != undefined) { cases.push(items[i].ecase) }
             else { rest.push(items[i]) }
         }
-        var p = classParts(rest, 0)
+        var p = classParts(rest, 0, "")
         return function() {
             var cls = buildClass(name, p)
             cls.__isenum = true
@@ -6912,7 +6928,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     function makeTraitStmt(items) {
         var name = items[0]
-        var p = classParts(items, 1)
+        var p = classParts(items, 1, "")
         lastClassDecl = {name: name, ext: null, plain: true}
         return function() {
             declClass(name, {__isclass: true, __istrait: true, __name: name, __parts: p, __super: null,
@@ -6934,7 +6950,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             else if (items[i] != null && items[i] != undefined && items[i].anonAt != undefined) { at = items[i].anonAt }
             else { rest.push(items[i]) }
         }
-        var p = classParts(rest, 0)
+        var p = classParts(rest, 0, "")
         var shown = anonClassName(p.rawNames)
         var sfx = anonSuffix(at, anonCount)
         anonCount = anonCount + 1
@@ -7534,30 +7550,6 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // of one of them pays for the type check (phpPropFit).
     var typedNames = {}
     var phpTypeBad = {bad: true}
-    // The alternatives of a declared type: '?T' is T|null, '(A&B)|C' splits at
-    // the top-level bars only.
-    function phpTypeAlts(typ) {
-        var out = []
-        var t = typ
-        if (t.charAt(0) == "?") {
-            out.push("null")
-            t = t.substring(1)
-        }
-        var depth = 0
-        var from = 0
-        for (var i = 0; i <= t.length; i++) {
-            var ch = i < t.length ? t.charAt(i) : "|"
-            if (ch == "(") { depth++ }
-            else if (ch == ")") { depth-- }
-            else if (ch == "|" && depth == 0) {
-                var a = t.substring(from, i)
-                if (a.charAt(0) == "(") { a = a.substring(1, a.length - 1) }
-                out.push(a)
-                from = i + 1
-            }
-        }
-        return out
-    }
     // Does v belong to the single (non-union) type a as it stands, with no
     // coercion? self is the class that declared the type.
     function phpTypeIs(a, v, self) {
@@ -7594,7 +7586,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // int|float type taking a numeric string as int or float by its own form.
     // Twin of phTypeFit in lib/php-rt.metajs and phpTypeFit in abnf/jsrtphp.go.
     function phpTypeFit(typ, v, self) {
-        var alts = phpTypeAlts(typ)
+        var alts = phsTypeAlts(typ)
         var mask = ""
         for (var i = 0; i < alts.length; i++) {
             if (phpTypeIs(alts[i], v, self)) { return v }
@@ -7642,61 +7634,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (d != d || d >= lim || d < 0 - lim) { return null }
         return phpCast("int", f)
     }
-    // A declared type as PHP prints it (zend_type_to_string): class names first,
-    // then the builtin types in PHP's order, and null as a '?' prefix on a lone
-    // type or as a last '|null'. Twin of phTypeText in lib/php-rt.metajs and
-    // phpTypeText in abnf/jsrtphp.go.
-    function phpTypeText(typ) {
-        var alts = phpTypeAlts(typ)
-        var order = ["object", "array", "string", "int", "float", "bool", "false", "true"]
-        var builtin = ",object,array,string,int,float,bool,false,true,"
-        var s = ""
-        var n = 0
-        var hasNull = false
-        for (var i = 0; i < alts.length; i++) {
-            var lc = phsCase(alts[i], false)
-            if (lc == "null") { hasNull = true }
-            else if (builtin.indexOf("," + lc + ",") < 0) {
-                s += (n > 0 ? "|" : "") + (alts[i].indexOf("&") >= 0 && alts.length > 1 ? "(" + alts[i] + ")" : alts[i])
-                n++
-            }
-        }
-        for (var o = 0; o < order.length; o++) {
-            for (var j = 0; j < alts.length; j++) {
-                if (phsCase(alts[j], false) == order[o]) {
-                    s += (n > 0 ? "|" : "") + order[o]
-                    n++
-                }
-            }
-        }
-        if (!hasNull) { return s }
-        if (n == 1 && s.indexOf("&") < 0 && phsCase(s, false) != "mixed") { return "?" + s }
-        return n == 0 ? "null" : s + "|null"
-    }
-    // A property type with self and parent replaced by the names of the declaring
-    // class and of the parent it names, as written: PHP substitutes them when it
-    // compiles a named class that is not a trait (zend_compile_single_typename), so
-    // its checks and messages name the class. Twin of phTypeSubstSelf in
-    // php-to-llvm-ir.abnf.
-    function phpTypeSubstSelf(typ, self, parent) {
-        if (typ == undefined || typ == "") { return typ }
-        var out = ""
-        var from = 0
-        for (var i = 0; i <= typ.length; i++) {
-            var ch = i < typ.length ? typ.charAt(i) : ""
-            if (ch == "" || "?|&()".indexOf(ch) >= 0) {
-                var w = typ.substring(from, i)
-                var lc = phsCase(w, false)
-                if (lc == "self") { w = self }
-                else if (lc == "parent" && parent != "") { w = parent }
-                out += w + ch
-                from = i + 1
-            }
-        }
-        return out
-    }
     function phpTypeErr(k, pname, v, typ) {
-        phpRaise("TypeError", "Cannot assign " + phpValueName(v) + " to property " + k.__name + "::$" + pname + " of type " + phpTypeText(typ))
+        phpRaise("TypeError", "Cannot assign " + phpValueName(v) + " to property " + k.__name + "::$" + pname + " of type " + phsTypeText(typ))
     }
     // A write of v to property pname of o: v as its declared type takes it.
     function phpPropFit(o, pname, v) {

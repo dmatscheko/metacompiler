@@ -3083,7 +3083,7 @@ class S64Pro {
     function setS($v) { $this->s = $v; }
 }
 class S64Self extends S64P { public self $me; public static ?parent $sp = null; }
-trait S64ST { public self $ts; }
+trait S64ST { public self $ts; public static int $tsi = 0; public static ?self $tss = null; }
 class S64SU { use S64ST; }
 class S64Priv {
     private $x = 1;
@@ -3129,6 +3129,10 @@ function s64() {
         && s64err(function () { (new S64Self)->me = 1; }) === "TypeError: Cannot assign int to property S64Self::\$me of type S64Self"
         && s64err(function () { S64Self::$sp = 1; }) === "TypeError: Cannot assign int to property S64Self::\$sp of type ?S64P"
         && s64err(function () { (new S64SU)->ts = 1; }) === "TypeError: Cannot assign int to property S64SU::\$ts of type self");
+    S64SU::$tsi = "8";
+    check("tst3", S64SU::$tsi === 8
+        && s64err(function () { S64SU::$tsi = "x"; }) === "TypeError: Cannot assign string to property S64SU::\$tsi of type int"
+        && s64err(function () { S64SU::$tss = 1; }) === "TypeError: Cannot assign int to property S64SU::\$tss of type ?self");
     $r = "9";
     $q = new S64P;
     $q->i =& $r;

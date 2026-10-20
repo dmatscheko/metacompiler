@@ -364,6 +364,98 @@ function phsCase(s, up) {
     return out
 }
 
+// The alternatives of a declared type: '?T' is T|null, and '(A&B)|C' splits at
+// the top-level bars only.
+function phsTypeAlts(typ) {
+    var out = []
+    var t = typ
+    if (t.charAt(0) == "?") {
+        out.push("null")
+        t = t.substring(1)
+    }
+    var depth = 0
+    var from = 0
+    var i = 0
+    while (i <= t.length) {
+        var ch = "|"
+        if (i < t.length) { ch = t.charAt(i) }
+        if (ch == "(") { depth = depth + 1 }
+        else if (ch == ")") { depth = depth - 1 }
+        else if (ch == "|" && depth == 0) {
+            var a = t.substring(from, i)
+            if (a.charAt(0) == "(") { a = a.substring(1, a.length - 1) }
+            out.push(a)
+            from = i + 1
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// A declared type as PHP prints it (zend_type_to_string): class names first,
+// then the builtin types in PHP's order, and null as a '?' prefix on a lone
+// type or as a last '|null'. Twin of phpTypeText in abnf/jsrtphp.go.
+function phsTypeText(typ) {
+    var alts = phsTypeAlts(typ)
+    var order = ["object", "array", "string", "int", "float", "bool", "false", "true"]
+    var builtin = ",object,array,string,int,float,bool,false,true,"
+    var s = ""
+    var n = 0
+    var hasNull = false
+    var i = 0
+    while (i < alts.length) {
+        var lc = phsCase(alts[i], false)
+        if (lc == "null") { hasNull = true }
+        else if (builtin.indexOf("," + lc + ",") < 0) {
+            if (n > 0) { s = s + "|" }
+            if (alts[i].indexOf("&") >= 0 && alts.length > 1) { s = s + "(" + alts[i] + ")" } else { s = s + alts[i] }
+            n = n + 1
+        }
+        i = i + 1
+    }
+    var o = 0
+    while (o < order.length) {
+        var j = 0
+        while (j < alts.length) {
+            if (phsCase(alts[j], false) == order[o]) {
+                if (n > 0) { s = s + "|" }
+                s = s + order[o]
+                n = n + 1
+            }
+            j = j + 1
+        }
+        o = o + 1
+    }
+    if (!hasNull) { return s }
+    if (n == 1 && s.indexOf("&") < 0 && phsCase(s, false) != "mixed") { return "?" + s }
+    if (n == 0) { return "null" }
+    return s + "|null"
+}
+
+// A property or parameter type with self and parent replaced by the names of
+// the declaring class and of the parent it names, as written: PHP substitutes
+// them when it compiles a named class that is not a trait
+// (zend_compile_single_typename), so its checks and messages name the class.
+function phsTypeSubstSelf(typ, self, parent) {
+    var out = ""
+    var from = 0
+    var i = 0
+    while (i <= typ.length) {
+        var ch = ""
+        if (i < typ.length) { ch = typ.charAt(i) }
+        if (ch == "" || "?|&()".indexOf(ch) >= 0) {
+            var w = typ.substring(from, i)
+            var lc = phsCase(w, false)
+            if (lc == "self") { w = self }
+            else if (lc == "parent" && parent != "") { w = parent }
+            out = out + w + ch
+            from = i + 1
+        }
+        i = i + 1
+    }
+    return out
+}
+
 // Is the class name n (a leading "\" allowed, any letter case) one of the
 // interfaces the engine itself declares - zend_interfaces.c, zend_exceptions.c,
 // zend_enum.c and ext/json - which interface_exists reports though no program

@@ -2087,6 +2087,18 @@
             "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-test-finallygoto.php", "-q"]
         },
         {
+            "name": "PHP promoted parameter null default SHOULD FAIL (interpreted)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-interpreter.abnf", "tests/php-test-promotenull.php", "-q"]
+        },
+        {
+            "name": "PHP promoted parameter null default SHOULD FAIL (compiled)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-test-promotenull.php", "-q"]
+        },
+        {
             "name": "PHP break out of finally SHOULD FAIL (interpreted)",
             "type": "go",
             "request": "launch",

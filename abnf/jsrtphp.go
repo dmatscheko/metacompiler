@@ -2920,8 +2920,8 @@ func (rt *jsrt) phpBadAccess(cls *jsObject, name string) {
 var phpStrictTypes = map[*jsrt]bool{}
 
 // phpTypeAlts is the alternatives of a declared type: '?T' is T|null, and
-// '(A&B)|C' splits at the top-level bars only. Twin of phpTypeAlts in
-// languages/php-interpreter.abnf.
+// '(A&B)|C' splits at the top-level bars only. Twin of phsTypeAlts in
+// languages/lib/php-strings.js.
 func phpTypeAlts(typ string) []string {
 	var out []string
 	t := typ
@@ -3088,7 +3088,7 @@ func (rt *jsrt) phpWeakInt(v interface{}) interface{} {
 }
 
 // phpTypeText is a declared type as PHP prints it (zend_type_to_string). Twin
-// of phpTypeText in languages/php-interpreter.abnf.
+// of phsTypeText in languages/lib/php-strings.js.
 func phpTypeText(typ string) string {
 	alts := phpTypeAlts(typ)
 	order := []string{"object", "array", "string", "int", "float", "bool", "false", "true"}

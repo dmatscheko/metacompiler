@@ -7513,12 +7513,15 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 if (phVisWord(items[i].pmod) != "") { pendingVis = phVisWord(items[i].pmod) }
             }
             else if (items[i].ptype != undefined) { pendingType = items[i].ptype }
+            else if (items[i].pdef != undefined && items[i].pnull && pvis.length > 0 && pvis[pvis.length - 1].at == seen - 1) {
+                pvis[pvis.length - 1].pnull = true
+            }
             else if (items[i].param != undefined) {
                 // A promoted parameter declares a property of its type as written:
                 // a null default does not widen it (zend_compile_params).
                 if (pendingMod) {
                     promoted.push(items[i].param)
-                    pvis.push({name: items[i].param.substring(1), vis: pendingVis, typ: phpLibDepth > 0 ? "" : pendingType})
+                    pvis.push({name: items[i].param.substring(1), vis: pendingVis, typ: phpLibDepth > 0 ? "" : pendingType, at: seen, pnull: false})
                 }
                 pendingMod = false
                 pendingVis = ""
@@ -7836,26 +7839,6 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         }
         return out
     }
-    // A property type with self and parent replaced by the names of the declaring
-    // class and of the parent it names, as written (zend_compile_single_typename).
-    // Twin of phpTypeSubstSelf in php-interpreter.abnf.
-    function phTypeSubstSelf(typ, self, parent) {
-        if (typ == undefined || typ == "") { return typ }
-        var out = ""
-        var from = 0
-        for (var i = 0; i <= typ.length; i++) {
-            var ch = i < typ.length ? typ.charAt(i) : ""
-            if (ch == "" || "?|&()".indexOf(ch) >= 0) {
-                var w = typ.substring(from, i)
-                var lc = phsCase(w, false)
-                if (lc == "self") { w = self }
-                else if (lc == "parent" && parent != "") { w = parent }
-                out = out + w + ch
-                from = i + 1
-            }
-        }
-        return out
-    }
     // A declared type as var_dump prints it: no leading backslash on a name.
     // Twin of propTypeText in php-interpreter.abnf.
     // A parameter type made nullable by a default spelled null: T becomes ?T, a
@@ -8020,9 +8003,14 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     var traitBodies = {}
     function makeTraitDecl(items) {
         var name = items[0]
+        var tms = []
         for (var i = 1; i < items.length; i++) {
-            if (items[i] != undefined && items[i].method != undefined) { noteMagic(items[i].method.name) }
+            if (items[i] != undefined && items[i].method != undefined) {
+                noteMagic(items[i].method.name)
+                tms.push(items[i].method)
+            }
         }
+        promoteNullCheck(tms, "", "")
         traitBodies["$" + name] = items.slice(1)
         lastClassDecl = {name: name, ext: "", plain: true}
         return function(b) { return b }
@@ -8274,6 +8262,23 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         out.push("Stringable")
         return out
     }
+    // A promoted parameter's null default does not make its type nullable, so one
+    // its type refuses is a compile error (zend_compile_params). self is the name
+    // of a named class, "" where self and parent stay as written. Twin of
+    // classParts in php-interpreter.abnf.
+    function promoteNullCheck(methods, self, parent) {
+        for (var i = 0; i < methods.length; i++) {
+            if (methods[i].name != "__construct") { continue }
+            var pvs = methods[i].pvis
+            for (var j = 0; j < pvs.length; j++) {
+                var pt = pvs[j].typ
+                if (pvs[j].pnull === true && pt != "" && phpTypeOrNull(pt) != pt) {
+                    fail("Cannot use null as default value for parameter $" + pvs[j].name + " of type "
+                         + phsTypeText(self != "" ? phsTypeSubstSelf(pt, self, parent) : pt))
+                }
+            }
+        }
+    }
     function makeClassStmt(items) {
         var name = items[0]
         srcClasses["$" + name] = true
@@ -8326,12 +8331,13 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 else { props.push(items[i].propdecl) }
             }
         }
+        var parent = extRaw == null ? "" : extRaw
+        if (parent.charAt(0) == "\\") { parent = parent.substring(1) }
         if (!anon) {
-            var parent = extRaw == null ? "" : extRaw
-            if (parent.charAt(0) == "\\") { parent = parent.substring(1) }
-            for (var pt = 0; pt < props.length; pt++) { props[pt].typ = phTypeSubstSelf(props[pt].typ, name, parent) }
-            for (var stt = 0; stt < statics.length; stt++) { statics[stt].typ = phTypeSubstSelf(statics[stt].typ, name, parent) }
+            for (var pt = 0; pt < props.length; pt++) { props[pt].typ = phsTypeSubstSelf(props[pt].typ, name, parent) }
+            for (var stt = 0; stt < statics.length; stt++) { statics[stt].typ = phsTypeSubstSelf(statics[stt].typ, name, parent) }
         }
+        promoteNullCheck(methods, anon ? "" : name, parent)
         // Trait members are copied in where the class does not declare the name
         // itself. The copy happens at WALK time, so the emitted class carries them
         // exactly as if they had been written out in the body.

@@ -2331,33 +2331,6 @@ function js_phstrict() {
     phStrictTypes = true
     return undefined
 }
-// The alternatives of a declared type: '?T' is T|null, and '(A&B)|C' splits at
-// the top-level bars only. Twin of phpTypeAlts in languages/php-interpreter.abnf.
-function phTypeAlts(typ) {
-    var out = []
-    var t = typ
-    if (t.charAt(0) == "?") {
-        out.push("null")
-        t = t.substring(1)
-    }
-    var depth = 0
-    var from = 0
-    var i = 0
-    while (i <= t.length) {
-        var ch = "|"
-        if (i < t.length) { ch = t.charAt(i) }
-        if (ch == "(") { depth = depth + 1 }
-        else if (ch == ")") { depth = depth - 1 }
-        else if (ch == "|" && depth == 0) {
-            var a = t.substring(from, i)
-            if (a.charAt(0) == "(") { a = a.substring(1, a.length - 1) }
-            out.push(a)
-            from = i + 1
-        }
-        i = i + 1
-    }
-    return out
-}
 // Does v belong to the single (non-union) type a, with no coercion? self is the
 // class that declared the type. Twin of phpTypeIs in
 // languages/php-interpreter.abnf.
@@ -2394,7 +2367,7 @@ function phTypeIs(a, v, self) {
 // phpTypeFit in languages/php-interpreter.abnf, which states the rules.
 var phTypeBad = {bad: true}
 function phTypeFit(typ, v, self) {
-    var alts = phTypeAlts(typ)
+    var alts = phsTypeAlts(typ)
     var mask = ""
     var i = 0
     while (i < alts.length) {
@@ -2450,44 +2423,6 @@ function phWeakInt(v) {
     if (d != d || d >= lim || d < 0 - lim) { return undefined }
     return phCast("int", f)
 }
-// A declared type as PHP prints it (zend_type_to_string). Twin of phpTypeText in
-// languages/php-interpreter.abnf.
-function phTypeText(typ) {
-    var alts = phTypeAlts(typ)
-    var order = ["object", "array", "string", "int", "float", "bool", "false", "true"]
-    var builtin = ",object,array,string,int,float,bool,false,true,"
-    var s = ""
-    var n = 0
-    var hasNull = false
-    var i = 0
-    while (i < alts.length) {
-        var lc = phsCase(alts[i], false)
-        if (lc == "null") { hasNull = true }
-        else if (builtin.indexOf("," + lc + ",") < 0) {
-            if (n > 0) { s = s + "|" }
-            if (alts[i].indexOf("&") >= 0 && alts.length > 1) { s = s + "(" + alts[i] + ")" } else { s = s + alts[i] }
-            n = n + 1
-        }
-        i = i + 1
-    }
-    var o = 0
-    while (o < order.length) {
-        var j = 0
-        while (j < alts.length) {
-            if (phsCase(alts[j], false) == order[o]) {
-                if (n > 0) { s = s + "|" }
-                s = s + order[o]
-                n = n + 1
-            }
-            j = j + 1
-        }
-        o = o + 1
-    }
-    if (!hasNull) { return s }
-    if (n == 1 && s.indexOf("&") < 0 && phsCase(s, false) != "mixed") { return "?" + s }
-    if (n == 0) { return "null" }
-    return s + "|null"
-}
 // v as the declared type of property name on an instance of cls takes it, or
 // PHP's TypeError. Twin of phpPropFit in languages/php-interpreter.abnf.
 function phPropFit(cls, name, v) {
@@ -2501,7 +2436,7 @@ function phPropFit(cls, name, v) {
 function phSlotFit(k, name, typ, v) {
     var r = phTypeFit(typ, v, k)
     if (r === phTypeBad) {
-        phRaise("TypeError", "Cannot assign " + phValueName(v) + " to property " + phStr(k["__name"]) + "::$" + name + " of type " + phTypeText(typ))
+        phRaise("TypeError", "Cannot assign " + phValueName(v) + " to property " + phStr(k["__name"]) + "::$" + name + " of type " + phsTypeText(typ))
     }
     return r
 }
@@ -2519,7 +2454,7 @@ function phFnShown(who, scope) {
 // (zend_type_to_string_resolved), and static by the name of class lsb when there
 // is one. Twin of phpTypeResolve in abnf/jsrtphp.go.
 function phTypeResolve(typ, self, lsb) {
-    var alts = phTypeAlts(typ)
+    var alts = phsTypeAlts(typ)
     var out = ""
     var i = 0
     while (i < alts.length) {
@@ -2603,7 +2538,7 @@ function js_phargerr(v, typ, self, n, pname, who, scope, where, rest) {
     var site = phStr(where)
     if (site != "") { site = ", called" + site }
     phRaise("TypeError", phFnShown(who, scope) + "(): Argument #" + at + " (" + phStr(pname) + ") must be of type "
-        + phTypeText(t) + ", " + phValueName(bad) + " given" + site)
+        + phsTypeText(t) + ", " + phValueName(bad) + " given" + site)
     return undefined
 }
 // v, what a function declaring return type typ returns (undefined: it ended
@@ -2619,7 +2554,7 @@ function js_phretfit(v, typ, self, lsb, who, scope) {
         if (r !== phTypeBad) { return r }
         given = phValueName(v)
     }
-    phRaise("TypeError", name + "(): Return value must be of type " + phTypeText(phSigType(typ, self, undefined)) + ", " + given + " returned")
+    phRaise("TypeError", name + "(): Return value must be of type " + phsTypeText(phSigType(typ, self, undefined)) + ", " + given + " returned")
     return undefined
 }
 
