@@ -500,7 +500,7 @@ ClassMod    = "class" KwEnd ;
 
 // func name(label param: Type, ...) -> Ret { ... }
 FunDecl     <~~ var fd = makeFun(takeAll(), up.start, up.pos); swInitClaim(up.start, up.pos, false); swNoteTop(fd.name); push(fd) ~~>
-            = KwFunc FuncName [ SkipAngle ] ParamList [ FnEffects ] [ "->" FunRetType <~~ push({rtxt: stripWs(up.in)}) ~~> ] [ GenWhere ] FnBody ;
+            = KwFunc FuncName [ FunGenParams ] ParamList [ FnEffects ] [ "->" FunRetType <~~ push({rtxt: stripWs(up.in)}) ~~> ] [ GenWhere ] FnBody ;
 // AnnType, except that a type no adoption acts on is captured as TEXT too: the
 // member-chain typer (swChainAnns) reads a function's declared return type.
 FunRetType  = FnAnnType | LabelledTupleType | IntAnnType | OptNumAnnType | DeepAnnType | OtherAnnType ;
@@ -554,6 +554,9 @@ StructDecl  <~~ push(makeStructStmt(takeAll())) ~~>
             = KwStruct Id <~~ push(swBt(up.in)) ~~> [ TypeGenParams ] [ ":" InheritList ] [ GenWhere ] "{" { Member } "}" ;
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
             = KwClass Id <~~ push(swBt(up.in)) ~~> [ TypeGenParams ] [ ":" InheritList ] [ GenWhere ] "{" { Member } "}" ;
+// A generic function's parameter names, open while its declaration is walked
+// (swGenOpen in lib/swift-dotwant.js; makeFun closes them).
+FunGenParams <~~ swGenOpen(swGenParamNames(stripWs(up.in)), up.start) ~~> = SkipAngle ;
 // A generic type's parameter NAMES (constraints dropped): swGenMark in
 // lib/swift-dotwant.js binds them per instance.
 TypeGenParams <~~ push({tgens: swGenParamNames(stripWs(up.in))}) ~~> = SkipAngle ;
@@ -594,7 +597,7 @@ DeinitDecl  <~~ push({}) ~~> = KwDeinit SkipBlock ;
 SubscriptDecl <~~ swDotClaim(up.start, up.pos, ""); var ms = makeSubscript(takeAll()); for (var i = 0; i < ms.length; i++) { push(ms[i]) } ~~>
             = KwSubscript [ SkipAngle ] ParamList [ "->" AnnType ] [ GenWhere ] PropAccessors ;
 MethodDecl  <~~ push({method: makeFun(takeAll(), up.start, up.pos)}) ~~>
-            = KwFunc FuncName [ SkipAngle ] ParamList [ FnEffects ] [ "->" AnnType <~~ push({rtxt: stripWs(up.in)}) ~~> ] [ GenWhere ] FnBody ;
+            = KwFunc FuncName [ FunGenParams ] ParamList [ FnEffects ] [ "->" AnnType <~~ push({rtxt: stripWs(up.in)}) ~~> ] [ GenWhere ] FnBody ;
 // var w = 2, h = 3 declares two stored properties; each binding becomes its own
 // {prop} record, so the type builder sees them in declaration order. In `var w,
 // h: Double` both are Double (swBindsShared in lib/swift-dotwant.js).
@@ -712,8 +715,9 @@ ExtensionDecl <~~ push(makeExtensionStmt(takeAll())) ~~>
 ExtType     <~~ push({extname: stripWs(up.in)}) ~~> = Type ;
 // typealias: an alias needs nothing at run time; its target text is recorded for
 // the write-site adoption test (swTyUnalias).
+AliasGenParams <~~ push({algens: swGenParamNames(stripWs(up.in))}) ~~> = SkipAngle ;
 TypeAliasDecl <~~ push(makeTypeAliasStmt(takeAll())) ~~>
-            = KwTypealias Id <~~ push({alname: swBt(up.in)}) ~~> [ SkipAngle ] "="
+            = KwTypealias Id <~~ push({alname: swBt(up.in)}) ~~> [ AliasGenParams ] "="
               Type <~~ push({alty: stripWs(up.in)}) ~~> [ ";" ] ;
 
 // Types are parsed and ignored: arrays [T], dictionaries [K: V], optionals T?,
@@ -784,7 +788,7 @@ AnnType     = FnAnnType | LabelledTupleType | IntAnnType | OptNumAnnType | DeepA
 // its element types too, and `let t: (x: Double, y: Int) = (3, 4)` has to hold 3.0
 // exactly as the anonymous `(Double, Int)` form does. js_swadoptdeep strips each
 // element's `label:` prefix.
-LabelledTupleType <~~ push({tlabels: takeAll(), atype: stripWs(up.in)}) ~~>
+LabelledTupleType <~~ push({tlabels: takeAll(), atype: swAliasExpand(stripWs(up.in))}) ~~>
             = "(" LtNamed { "," LtElem } ")" NotArrow NotTypeSuffix ;
 LtElem      = LtNamed | LtAnon ;
 LtNamed     = Id <~~ swTupLblSeen = true; push(swBt(up.in)) ~~> ":" Type ;
@@ -995,8 +999,9 @@ DeclAnnType = FnAnnType | LabelledTupleType | IntAnnType | OptNumAnnType | DeepA
 // EXISTENTIAL slot (`Any`, a protocol, ...) does not adopt; see swKeepMode.
 // Each annotation form keeps only its TEXT: a type attribute inside it
 // (`(@escaping (Int) -> Int) -> Int`) pushes a marker that is dropped here. One
-// applying a generic type of the program (`Box<Double>`) adopts: swGenAnnRec.
-OtherAnnType <~~ takeAll(); push(swGenAnnRec(stripWs(up.in))) ~~> = Type ;
+// applying a generic type of the program (`Box<Double>`) adopts, and one naming a
+// typealias is read as the type it stands for: swOtherAnnRec.
+OtherAnnType <~~ takeAll(); push(swOtherAnnRec(stripWs(up.in))) ~~> = Type ;
 // A FUNCTION-TYPED SLOT. Every other adoption site in this front end reads the type
 // off the VALUE (see chapter 7.15 of the manual) - floatness and integer width live
 // on the value and a write adopts what the slot already holds. That argument runs
@@ -1006,7 +1011,7 @@ OtherAnnType <~~ takeAll(); push(swGenAnnRec(stripWs(up.in))) ~~> = Type ;
 // it is captured (the general Type would discard it) and the declaration wraps the
 // value in a synthetic function that adopts each argument, calls the original and
 // adopts the result - swAdoptFn here, swEmitAdoptFn in the compiler.
-FnAnnType   <~~ takeAll(); push({atype: stripWs(up.in)}) ~~>
+FnAnnType   <~~ takeAll(); push({atype: swAliasExpand(stripWs(up.in))}) ~~>
             = "(" [ TupleTypeElem { "," TupleTypeElem } ] ")" [ TypeEffects ] "->" Type ;
 IntAnnType  <~~ push({itype: up.in}) ~~> = NumTypeName NotTypeSuffix ;
 NumTypeName = ( "Int64" | "Int32" | "Int16" | "Int8" | "Int"
@@ -1024,13 +1029,14 @@ NumTypeName = ( "Int64" | "Int32" | "Int16" | "Int8" | "Int"
 // leaving the `?` to break the NEXT statement.
 //
 // The inner types are the general Type: only the top level has to be a container
-// here, and js_swadoptdeep ignores every leaf it does not recognise.
+// here, and js_swadoptdeep ignores every leaf it does not recognise. A typealias in
+// the text is expanded first (swAliasExpand in lib/swift-dotwant.js).
 // `Unicode.Scalar`: a String literal it types becomes a scalar (swMkScalar).
 ScalarAnnType <~~ takeAll(); push({atype: stripWs(up.in)}) ~~>
             = ( "Unicode" NoSpace "." NoSpace "Scalar" | "UnicodeScalar" ) KwEnd NotTypeSuffix ;
 OptNumAnnType <~~ takeAll(); push({atype: stripWs(up.in)}) ~~>
             = NumTypeName NoSpace ( "?" | "!" ) NotTypeSuffix ;
-DeepAnnType <~~ takeAll(); push({atype: stripWs(up.in)}) ~~>
+DeepAnnType <~~ takeAll(); push({atype: swAliasExpand(stripWs(up.in))}) ~~>
             = DeepTyCore { NoSpace ( "?" | "!" ) } NotTypeSuffix ;
 DeepTyCore  = "[" Type [ ":" Type ] "]"
             | "(" TupleTypeElem { "," TupleTypeElem } ")" NotArrow ;
@@ -6586,7 +6592,7 @@ KwContinue  = "continue" KwEnd ;
         for (var i = 0; i < items.length; i++) {
             var it = items[i]
             if (it.pid != undefined) { ids.push(it.pid) }
-            else if (it.ptype != undefined) { type = stripWs(it.ptype) }
+            else if (it.ptype != undefined) { type = swAliasExpand(stripWs(it.ptype)) }
             else if (it.pvar != undefined) { isVar = true }
             else if (it.pinout != undefined) { isInout = true }
             else if (it.pdflt != undefined) { hasDflt = true; dflt = it.pdflt; swDsWantSpan(it.dat, type) }
@@ -6900,7 +6906,7 @@ KwContinue  = "continue" KwEnd ;
         var rest = [items[0]]
         for (var i = 2; i < items.length; i++) { rest.push(items[i]) }
         var ann = swGenAnn(items[0], items[1].gargs)
-        var call = makeCall(rest, ann == "" ? items[1].gargs : "")
+        var call = makeCall(rest, ann == "" && !swGenInScope(items[1].gargs) ? items[1].gargs : "")
         if (ann == "") { return call }
         return function(b) {
             var r = call(b)
@@ -9176,9 +9182,13 @@ KwContinue  = "continue" KwEnd ;
         swDotClaim(from, to, rtxt)
         swDsNoteSig(items[0], items[1].params)
         swDsNoteGenRet(items[0], from, to, rtxt)
+        swGenClose(from, to)
         var gens = swDsGenNames(from, to)
         swDsMarkTypeParams(items[1].params, gens)
-        if (rty == "" && swTyHasUserGen(rtxt)) { rty = rtxt }
+        if (rty == "") {
+            var rx = swAliasExpand(rtxt)
+            if (swTyHasUserGen(rx) || (rx != rtxt && swAdoptNeeded(rx))) { rty = rx }
+        }
         swGenUnbind(items[1].params, gens)
         if (swTyHasUserGen(rty) && swTyNames(rty, gens)) { rty = "" }
         return {name: items[0], params: items[1].params, body: items[k], rlabels: labels, rtype: rty, ret: ret, pos: up.start,
@@ -11059,10 +11069,13 @@ KwContinue  = "continue" KwEnd ;
         lastDeclRec = -1
         var n = ""
         var t = ""
+        var ps = []
         for (var i = 0; i < items.length; i++) {
             if (items[i].alname != undefined) { n = items[i].alname }
             if (items[i].alty != undefined) { t = items[i].alty }
+            if (items[i].algens != undefined) { ps = items[i].algens }
         }
+        if (n != "") { swAliasNote(n, ps, t) }
         if (n != "") { swAliasReg["$" + n] = t }
         return function(b) { return b }
     }
@@ -11233,7 +11246,7 @@ KwContinue  = "continue" KwEnd ;
         var ty = ""
         for (var i = 0; i < items.length; i++) {
             if (items[i] != undefined && items[i].clabel != undefined) { lbl = items[i].clabel }
-            if (items[i] != undefined && items[i].cty != undefined && swAdoptNeeded(items[i].cty)) { ty = items[i].cty }
+            if (items[i] != undefined && items[i].cty != undefined && swAdoptNeeded(swAliasExpand(items[i].cty))) { ty = swAliasExpand(items[i].cty) }
         }
         return {clabel: lbl, cty: ty}
     }

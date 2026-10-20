@@ -5411,6 +5411,41 @@ func s137() {
     check("137b", a / 2 == 0.5 && "\(b)" == "3.0" && "\(c) \(d)" == "1 2.0" && "\(K137().x / 3)" == "0.33333334")
 }
 
+// ===== SECTION 138: a typealias adopts as the type it names =====
+// `let r: Real = 3` with `typealias Real = Double` holds 3.0, through an alias
+// of an alias, a generic alias (`Table<Double>`), a labelled tuple, a function
+// type, a parameter, a result and an enum payload. And `Wrapper<U>(...)` inside a
+// method generic over U is not bound to the NAME U. Every value read off swiftc
+// 6.1.2.
+typealias Real138 = Double
+typealias Meters138 = Real138
+typealias Pt138 = (x: Real138, y: Real138)
+typealias Op138 = (Real138) -> Real138
+typealias Table138<V> = [String: V]
+enum Shape138 { case circle(Real138), box(w: Real138, h: Real138) }
+struct Wrapper138<T> {
+    var value: T
+    func map<U>(_ f: (T) -> U) -> Wrapper138<U> { Wrapper138<U>(value: f(value)) }
+}
+func mid138(_ a: Pt138, _ b: Pt138) -> Pt138 { ((a.x + b.x) / 2, (a.y + b.y) / 2) }
+func half138(_ x: Real138) -> Real138 { x / 2 }
+func s138() {
+    let r: Real138 = 3
+    let m: Meters138 = 7
+    var p: Pt138 = (1, 2)
+    p.x += 1
+    let op: Op138 = { $0 / 2 }
+    var t: Table138<Double> = ["a": 1]
+    t["b"] = 2
+    let rs: [Real138] = [1, 2]
+    check("138a", r / 2 == 1.5 && m / 2 == 3.5 && "\(p)" == "(x: 2.0, y: 2.0)" && op(3) == 1.5 && "\(rs)" == "[1.0, 2.0]")
+    check("138b", "\(t["a"]!)" == "1.0" && "\(mid138((0, 0), (1, 3)))" == "(x: 0.5, y: 1.5)" && half138(3) == 1.5)
+    var area = 0.0
+    if case let .box(w, h) = Shape138.box(w: 2, h: 3) { area = w * h / 4 }
+    let w = Wrapper138(value: 3).map { Double($0) / 2 }.map { "\($0)" }
+    check("138c", area == 1.5 && "\(w)" == "Wrapper138<String>(value: \"1.5\")")
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5549,6 +5584,7 @@ func main() {
     s135() // SECTION-CALL 135
     s136() // SECTION-CALL 136
     s137() // SECTION-CALL 137
+    s138() // SECTION-CALL 138
     print("full: \(checks) checks, \(fails) failures")
 }
 

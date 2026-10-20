@@ -588,6 +588,108 @@ function swDsMarkTypeParams(params, gens) {
     }
 }
 
+// ----- Type aliases -----
+// `typealias Real = Double`, `typealias Grid<T> = [[T]]`: an annotation naming an
+// alias adopts as the type it stands for, so `let r: Real = 3` holds 3.0. The
+// walk expands the aliases declared above the annotation (swAliasExpand) and
+// classifies the result as the annotation forms of the grammar would (swAnnRecOf).
+var swAliasDefs = {}
+function swAliasNote(name, params, target) { swAliasDefs["$" + name] = {ps: params, to: target} }
+function swAliasExpand(t) {
+    var cur = t
+    for (var guard = 0; guard < 16; guard++) {
+        var nx = swAliasStep(cur)
+        if (nx == cur) { return cur }
+        cur = nx
+    }
+    return cur
+}
+// One pass replacing each alias in t, its generic arguments substituted, by its
+// target. A function type followed by `?` is parenthesised, as written in Swift.
+function swAliasStep(t) {
+    var out = ""
+    var i = 0
+    while (i < t.length) {
+        if (!swDsIdCh(t.charAt(i))) { out = out + t.charAt(i); i++; continue }
+        var s = i
+        while (i < t.length && swDsIdCh(t.charAt(i))) { i++ }
+        var tok = t.substring(s, i)
+        if ((s > 0 && t.charAt(s - 1) == ".") || !hasOwn(swAliasDefs, "$" + tok)) { out = out + tok; continue }
+        var d = swAliasDefs["$" + tok]
+        var to = d.to
+        if (d.ps.length > 0) {
+            var e = swAngleEnd(t, i)
+            if (e < 0) { out = out + tok; continue }
+            var args = swDsGenArgs(tok + t.substring(i, e + 1), tok)
+            if (args == null || args.length != d.ps.length) { out = out + tok; continue }
+            to = swTySubst(to, d.ps, args)
+            i = e + 1
+        }
+        if (to.indexOf("->") >= 0 && i < t.length && (t.charAt(i) == "?" || t.charAt(i) == "!")) { to = "(" + to + ")" }
+        out = out + to
+    }
+    return out
+}
+// The index of the `>` closing the `<` at t[i], or -1.
+function swAngleEnd(t, i) {
+    if (i >= t.length || t.charAt(i) != "<") { return -1 }
+    var depth = 0
+    for (var j = i; j < t.length; j++) {
+        var ch = t.charAt(j)
+        if (ch == "-" && j + 1 < t.length && t.charAt(j + 1) == ">") { j++; continue }
+        if (ch == "<" || ch == "[" || ch == "(") { depth++ }
+        else if (ch == ">" || ch == "]" || ch == ")") { depth--; if (depth == 0) { return ch == ">" ? j : -1 } }
+    }
+    return -1
+}
+// ty with each whole identifier names[k] replaced by args[k].
+function swTySubst(ty, names, args) {
+    var out = ""
+    var i = 0
+    while (i < ty.length) {
+        if (!swDsIdCh(ty.charAt(i))) { out = out + ty.charAt(i); i++; continue }
+        var s = i
+        while (i < ty.length && swDsIdCh(ty.charAt(i))) { i++ }
+        var tok = ty.substring(s, i)
+        if (s == 0 || ty.charAt(s - 1) != ".") {
+            for (var k = 0; k < names.length; k++) { if (names[k] == tok) { tok = args[k]; break } }
+        }
+        out = out + tok
+    }
+    return out
+}
+// The record the grammar's annotation forms push for type text e (DeclAnnType):
+// {itype} for a numeric name, {tlabels, atype} for a labelled tuple, {atype} for
+// a function type, a structural or Optional numeric one, else swGenAnnRec's.
+var swNumTyNames = "|Int64|Int32|Int16|Int8|Int|UInt64|UInt32|UInt16|UInt8|UInt|Double|Float|"
+function swAnnRecOf(e) {
+    if (swNumTyNames.indexOf("|" + e + "|") >= 0) { return {itype: e} }
+    if (e == "Unicode.Scalar" || e == "UnicodeScalar") { return {atype: e} }
+    var core = e
+    while (core.length > 1 && (core.charAt(core.length - 1) == "?" || core.charAt(core.length - 1) == "!")) { core = core.substring(0, core.length - 1) }
+    if (core.charAt(0) == "(") {
+        var close = swDsGroupEnd(core, 0)
+        if (close > 0 && core.substring(close + 1).indexOf("->") >= 0) { return {atype: e} }
+        if (close == core.length - 1 && core == e) {
+            var parts = swTySplit(core.substring(1, close), ",")
+            var labels = []
+            for (var i = 0; i < parts.length; i++) {
+                var lp = swTySplit(parts[i], ":")
+                labels.push(lp.length == 2 && swDsIdCh(lp[0].charAt(0)) ? lp[0] : "")
+            }
+            if (labels[0] != "") { return {tlabels: labels, atype: e} }
+        }
+        return {atype: e}
+    }
+    if (core.charAt(0) == "[" || swNumTyNames.indexOf("|" + core + "|") >= 0) { return {atype: e} }
+    return swGenAnnRec(e)
+}
+// The record an annotation that no other form claimed pushes, its aliases expanded.
+function swOtherAnnRec(t) {
+    var e = swAliasExpand(t)
+    return e == t ? swGenAnnRec(t) : swAnnRecOf(e)
+}
+
 // `var w, h: Double` declares BOTH as Double: a binding with neither an annotation
 // nor an initializer takes the annotation of the binding after it. items are the
 // {dbind} records of one declaration (each the item list of one binding, its name
@@ -674,15 +776,31 @@ function swGenUnbind(params, gens) {
 }
 // The record an annotation that no numeric or structural form claimed pushes: one
 // APPLYING a generic type of the program (`Box<Double>`, `Box<Double>?`) is an
-// adopting {atype}, as `[Double]` is; anything else is only text, {otype}.
+// adopting {atype}, as `[Double]` is; anything else - one naming a generic
+// parameter in scope included - is only text, {otype}.
 function swGenAnnRec(t) {
     var c0 = t.charAt(0)
-    if (swDsIdCh(c0) && swTyHasUserGen(t)) { return {atype: t} }
+    if (swDsIdCh(c0) && swTyHasUserGen(t) && !swGenInScope(t)) { return {atype: t} }
     return {otype: t}
 }
 // Whether an element type is one applied generic type (`Box<Double>`), which
 // adopts as a plain leaf does.
 function swGenLeafTy(e) { return swDsIdCh(e.charAt(0)) && e.charAt(e.length - 1) == ">" && swTyHasUserGen(e) }
+// The generic parameters of the functions whose declarations the walk is inside
+// (`func map<U>(...)`): a type text naming one of them is no concrete type, so
+// `Wrapper<U>(...)` there binds nothing. FunGenParams opens an entry and makeFun
+// closes it - the one whose parameter list lies inside its declaration [from, to).
+var swGenScope = []
+function swGenOpen(names, pos) { swGenScope.push({names: names, pos: pos}) }
+function swGenClose(from, to) {
+    if (swGenScope.length == 0) { return }
+    var top = swGenScope[swGenScope.length - 1]
+    if (top.pos >= from && top.pos < to) { swGenScope.pop() }
+}
+function swGenInScope(ty) {
+    for (var i = 0; i < swGenScope.length; i++) { if (swTyNames(ty, swGenScope[i].names)) { return true } }
+    return false
+}
 // The generic parameter names of each declared type, for its extensions.
 var swGenTypes = {}
 // Marks the adoption sites of a generic type's members (mem is splitMembers'
