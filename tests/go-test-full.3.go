@@ -876,6 +876,101 @@ func s121() {
 	check("ltygen121c", s121gen[T121]() == "{ }|{{ } 0}|main.W121[main.T121]|[{{ } 0} {{ } 2}]|[]main.W121[main.T121]|{ }")
 }
 
+// ===== SECTION 122: append's growth inside a generic function =====
+// Inside a generic function a slice's element type is the instantiated one: the
+// slots growth adds past the length hold its zero (a struct's own instance, a
+// string's "") and the capacity follows its size - also for a local type, and
+// for a type argument built from the caller's own type parameter. A string, bool
+// or defined element type pads with its own zero too, and a struct of an
+// instantiated generic type is a value. Every slice escapes into sink122, so
+// gc's stack buffer for a first small append does not apply. The expected
+// values are go run's.
+type b122[T any] struct {
+	v T
+	p *int
+}
+
+type pr122[K comparable, V any] struct {
+	k K
+	v V
+}
+
+type n122 string
+
+var sink122 any
+
+func g122[T any](x T) string {
+	ws := []b122[T]{}
+	ws = append(ws, b122[T]{v: x}, b122[T]{v: x}, b122[T]{v: x}, b122[T]{v: x}, b122[T]{v: x})
+	sink122 = ws
+	ms := make([]b122[T], 0)
+	ms = append(ms, b122[T]{v: x})
+	ms = append(ms, b122[T]{v: x})
+	ms = append(ms, b122[T]{v: x})
+	ms = ms[:cap(ms)]
+	sink122 = ms
+	ts := []T{x, x, x}
+	ts = append(ts, x)
+	ts = ts[:cap(ts)]
+	sink122 = ts
+	type w122 struct {
+		v T
+		n int
+	}
+	ls := []w122{{x, 1}}
+	ls = append(ls, w122{x, 2})
+	ls = append(ls, w122{x, 3})
+	ls = ls[:cap(ls)]
+	sink122 = ls
+	return fmt.Sprintf("%d %d %T %v %v|%d %T %#v|%d %v", cap(ws), len(ms), ms[3], ms[3].v, ms[3].p == nil,
+		len(ts), ts[5], ts[5], len(ls), ls[3])
+}
+
+func h122[K comparable, V any](k K, v V) string {
+	ps := []pr122[K, V]{{k, v}, {k, v}, {k, v}}
+	ps = append(ps, pr122[K, V]{k, v})
+	ps = ps[:cap(ps)]
+	sink122 = ps
+	return fmt.Sprintf("%d %T %v", len(ps), ps[5], ps[5])
+}
+
+func o122[T any](x T) string { return i122[b122[T]]() }
+
+func i122[U any]() string {
+	var z U
+	us := []U{z, z, z}
+	us = append(us, z)
+	us = us[:cap(us)]
+	sink122 = us
+	return fmt.Sprintf("%T %v %d %v", z, z, len(us), us[5])
+}
+
+func s122() {
+	s := []string{"a", "b", "c"}
+	s = append(s, "d")
+	s = s[:cap(s)]
+	n := []n122{"a", "b", "c"}
+	n = append(n, "d")
+	n = n[:cap(n)]
+	bs := []bool{true, true, true}
+	bs = append(bs, true)
+	bs = bs[:cap(bs)]
+	a := b122[int]{v: 1}
+	ws := []b122[int]{a}
+	a.v = 9
+	var arr [2]b122[string]
+	arr[0].v = "x"
+	cp := arr
+	cp[0].v = "y"
+	out := fmt.Sprintf("%q %q %v %v %v %v %v", s[5], n[5], bs[7], a.v, ws[0].v, arr[0].v, cp[0].v)
+	check("growpad122", out == `"" "" false 9 1 x y`)
+	check("growgen122a", g122(5) == "5 4 main.b122[int] 0 true|6 int 0|4 {0 0}")
+	check("growgen122b", g122("a") == `5 4 main.b122[string]  true|6 string ""|4 { 0}`)
+	check("growgen122c", g122([3]int32{1, 2, 3}) == "5 4 main.b122[[3]int32] [0 0 0] true|6 [3]int32 [3]int32{0, 0, 0}|4 {[0 0 0] 0}")
+	check("growgen122d", h122("k", 1)+"|"+h122(2, true) == "6 main.pr122[string,int] { 0}|6 main.pr122[int,bool] {0 false}")
+	check("growgen122e", o122(7)+"|"+o122("q") == "main.b122[int] {0 <nil>} 6 {0 <nil>}|main.b122[string] { <nil>} 6 { <nil>}")
+}
+
 func main() {
 	s94()   // SECTION-CALL 94
 	s95()   // SECTION-CALL 95
@@ -903,6 +998,7 @@ func main() {
 	s119()  // SECTION-CALL 119
 	s120()  // SECTION-CALL 120
 	s121()  // SECTION-CALL 121
+	s122()  // SECTION-CALL 122
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

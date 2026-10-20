@@ -6366,6 +6366,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var c = q != null ? goQualClass(q) : structAt(null, ty)
         if (c == undefined && q == null && resolveDefined(ty) != ty) { return goCopyCode(resolveDefined(ty)) }
         if (c != undefined && c != null && c.__isclass == true && Array.isArray(c.__fields)) { return "S" }
+        // An instantiated generic type (Box[int]) copies as its generic type does.
+        var gb = stNoTyArgs(ty)
+        if (gb != ty) { return goCopyCode(gb) }
         return ""
     }
     function goCopyBy(v, code) {

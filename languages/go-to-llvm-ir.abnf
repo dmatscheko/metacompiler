@@ -3135,6 +3135,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (structFields[ty] != undefined || (curEmitPkg != null && structFields[sKey(curEmitPkg, ty)] != undefined)) { return "S" }
         var rn = resolveDefined(ty)
         if (rn != ty) { return goCopyCodeC(rn) }
+        // An instantiated generic type (Box[int]) copies as its generic type does.
+        var gb = stNoTyArgs(ty)
+        if (gb != ty) { return goCopyCodeC(gb) }
         return ""
     }
     function emitStoreCopy(b, v, ty) {
@@ -3511,8 +3514,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // hostGlobals["append"] in go-interpreter.abnf.
     var goEts = []
     var goEtSeen = {}
+    // Element types that name the type parameters in scope ({t, own, names}): the
+    // header carries the instantiated text, so goEszFill lists t at every
+    // instantiation of their owner (goTpInstsOf).
+    var goEtGens = []
     function goEtNote(et) {
-        if (goEtSeen["$" + et] !== true) { goEtSeen["$" + et] = true; goEts.push(et) }
+        if (goEtSeen["$" + et] === true) { return }
+        goEtSeen["$" + et] = true
+        goEts.push(et)
+        if (goTpUsedOf(et, curTps).length > 0) { goEtGens.push({t: et, own: goTpOwn, names: curTps}) }
     }
     var goEszF = null
     function declGrowCap(b) {
@@ -3597,6 +3607,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         for (var pi = 0; pi < pre.length; pi++) { goEtNote(pre[pi]) }
         // A generic's element type is one of its instantiations at run time.
         for (var ti = 0; ti < goTpCands.length; ti++) { goEtNote(goTpCands[ti]) }
+        var ng = goEtGens.length
+        for (var gi = 0; gi < ng; gi++) {
+            var ins = goTpInstsOf(goEtGens[gi].own, goEtGens[gi].names, [goEtGens[gi].t])
+            for (var ii = 0; ii < ins.length; ii++) { goEtNote(ins[ii][0]) }
+        }
         var savedF = curF
         var savedScope = curScopeV
         curF = goEszF
@@ -3637,7 +3652,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         seen["$" + t] = true
         if (t.charAt(0) == "[" && t.charAt(1) != "]") { return goPadReach(elemTy(t), seen) }
         if (goPadZeroTy(t)) { return true }
-        if (goLocalTys["$" + t] === true) { return false }
+        if (goLocalTys["$" + stNoTyArgs(t)] === true) { return false }
         var an = goAnonSt(t)
         var fts = an != null ? an.t : sFTypes(t)
         if (fts == undefined || fts == null) { return true }
@@ -3646,10 +3661,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     // A type declared inside a function files its own $ezero maker when the
     // declaration runs, closed over the scope its descriptor binds in, so growth pads
-    // with the zero of the type that declaration made. Twin of apPad in
+    // with the zero of the type that declaration made - in a generic function under
+    // the instantiated text a header carries (goLtyRef). Twin of apPad in
     // go-interpreter.abnf, which reads the name's latest declaration the same way.
-    function goEzLocal(decl, t) {
+    function goEzLocal(decl, key) {
         if (cScopes.length == 1) { return decl }
+        var t = goLtyRef(key)
         return function(b) {
             b = decl(b)
             if (!goPadZeroTy(t) && goCopyCodeC(t) == "") { return b }
@@ -3664,7 +3681,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             zfb.NewRet(emitZeroTy(zfb, t))
             curF = savedF
             curScopeV = savedScope
-            callExt(b, "js_set", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$ezero")]), emitStr(b, t),
+            callExt(b, "js_set", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$ezero")]), emitTpResOr(b, t),
                                   callExt(b, "js_closure", [handle(zidx), curScopeV])])
             return b
         }
@@ -6216,10 +6233,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$defers"), callExt(b, "js_arr_new", [])])
         // A generic function's type parameters (emitTpBind); a function literal keeps
-        // the ones of the function around it.
+        // the ones of the function around it. goTpCur and goTpOwn follow, so what
+        // go-constfold.js notes while the body is emitted is this generic's
+        // (goTpNote, goTpEdge).
         var savedTps = curTps
+        var savedOwn = goTpOwn
         if (tps != undefined && tps != null) {
             curTps = tps.names
+            goTpCur = curTps
+            goTpOwn = tps.own
             emitTpBind(b, tps, f.Params[1])
         }
         // Named results are zero-valued locals of the function; a bare return yields
@@ -6271,6 +6293,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         curRets = savedRets
         curRtys = savedRtys
         curTps = savedTps
+        goTpCur = savedTps
+        goTpOwn = savedOwn
         curF = savedF
         curScopeV = savedScope
         loopStack = savedLoops
@@ -6606,7 +6630,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var body = items[i]
         var at = up.start
         var tps = anytype
-        tps = goTpCur.length > 0 ? {names: goTpCur, recv: recv != null} : null
+        tps = goTpCur.length > 0 ? {names: goTpCur, recv: recv != null, own: goTpOwn} : null
         goTpEnd()
         if (recv != null) {
             // recv = [name, {byptr}?, typeName]
@@ -6935,6 +6959,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             }
         }
         b = makeSeq(items)(b)
+        goTpClose()
         if (goTpZeroF != null) { goTpZeroFill() }
         if (goRfZeroF != null) { goRfZeroFill() }
         goEszFill()

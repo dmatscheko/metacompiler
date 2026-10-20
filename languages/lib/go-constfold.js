@@ -2507,12 +2507,13 @@ function goAnonNote(text, rec) {
     while (k < rec.f.length) { goPreFld["$" + text + "." + rec.f[k]] = rec.t[k]; k = k + 1 }
     goPreFldOrd["$" + text] = rec.f
 }
-// Is the zero of element type et a nil or a container rather than a number - a
-// pointer, slice, array, map, func, chan or interface? A slot append's growth adds
-// past the length takes that zero (so does a struct, which each grammar asks its
-// own goCopyCode about).
+// Is the zero of element type et something other than a number - "", false, or a
+// nil or container (a pointer, slice, array, map, func, chan or interface), also
+// through a defined type? A slot append's growth adds past the length takes that
+// zero (so does a struct, which each grammar asks its own goCopyCode about).
 function goPadZeroTy(et) {
-    if (et == "any" || et == "error") { return true }
+    if (et == "any" || et == "error" || et == "string" || et == "bool") { return true }
+    if (typeof definedUnder[et] == "string" && resolveDefined(et) != et) { return goPadZeroTy(resolveDefined(et)) }
     var c = et.charAt(0)
     if (c == "*" || c == "[") { return true }
     return et.indexOf("map[") == 0 || et.indexOf("func") == 0 || et.indexOf("chan") == 0 || et.indexOf("interface") == 0
@@ -2733,7 +2734,12 @@ function goTpSplit(t) {
 }
 // The function name's tag: the receiver's parameters (`func (s *Stack[T]) Pop()`)
 // come into scope, and TypeParamGrp adds a function's own.
-function goTpFnC(name) { goTpCur = goTpRecv; goTpRecv = []; return name }
+function goTpFnC(name) {
+    goTpOwn = goTpRecv.length > 0 ? "t:" + goTpRecvTy : "f:" + name
+    goTpCur = goTpRecv
+    goTpRecv = []
+    return name
+}
 function goTpAdd(n) { goTpCur = goTpCur.concat([n]) }
 // Every concrete type text a generic is instantiated with, in order: the compiler
 // makes the zero value of each ahead of time ($zeros in go-to-llvm-ir.abnf). A text
@@ -2746,7 +2752,95 @@ function goTpNote(t) {
     goTpCandSeen["$" + t] = true
     goTpCands.push(t)
 }
-function goTpEnd() { goTpCur = []; goTpRecv = [] }
+// ----- Instantiation sets -----
+// Which type arguments each generic reaches the program with, for the compiler's
+// tables keyed by an instantiated type text ($esz, $ezero, $zeros). The OWNER of
+// the type parameters in scope is "f:F" for generic function F, "t:R" for generic
+// type R and its methods (the walk's in goTpOwn). Every instantiation written in
+// an owner is an edge {from, names, to, ts}; one naming the owner's own
+// parameters (inner[Box[T]] inside outer[T]) is instantiated at each of the
+// owner's own instantiations by goTpClose.
+var goTpOwn = ""
+var goTpRecvTy = "" // a method receiver's generic type, until the method's name
+var goTpEdges = []
+var goTpEdgeSeen = {}
+var goTpInst = {}   // owner -> {seen, list}: its instantiations, each a list of texts
+var goTpInstOwns = []
+function goTpEdge(to, ts) {
+    var key = goTpOwn + "|" + to
+    var i = 0
+    while (i < ts.length) { key = key + "|" + ts[i]; i = i + 1 }
+    if (goTpEdgeSeen[key] === true) { return }
+    goTpEdgeSeen[key] = true
+    goTpEdges.push({from: goTpOwn, names: goTpCur, to: to, ts: ts})
+}
+function goTpInstAdd(own, ts) {
+    var key = ""
+    var i = 0
+    while (i < ts.length) {
+        if (ts[i] == "") { return false }
+        key = key + "|" + ts[i]
+        i = i + 1
+    }
+    var r = goTpInst["$" + own]
+    if (r === undefined) { r = {seen: {}, list: []}; goTpInst["$" + own] = r; goTpInstOwns.push(own) }
+    if (r.seen[key] === true) { return false }
+    r.seen[key] = true
+    r.list.push(ts)
+    return true
+}
+// Once the whole program is emitted: every owner's instantiations, to a fixed
+// point, and each text in them a candidate (goTpNote). Go rejects an instantiation
+// cycle, so a chain of edges nests a text at most once per edge.
+function goTpClose() {
+    var round = 0
+    var more = true
+    while (more && round <= goTpEdges.length) {
+        more = false
+        var e = 0
+        while (e < goTpEdges.length) {
+            var ed = goTpEdges[e]
+            var all = ""
+            var k = 0
+            while (k < ed.ts.length) { all = all + "," + ed.ts[k]; k = k + 1 }
+            if (goTpUsedOf(all, ed.names).length == 0) { more = goTpInstAdd(ed.to, ed.ts) || more }
+            else {
+                var src = goTpInstsOf(ed.from, ed.names, ed.ts)
+                var j = 0
+                while (j < src.length) { more = goTpInstAdd(ed.to, src[j]) || more; j = j + 1 }
+            }
+            e = e + 1
+        }
+        round = round + 1
+    }
+    var o = 0
+    while (o < goTpInstOwns.length) {
+        var l = goTpInst["$" + goTpInstOwns[o]].list
+        var m = 0
+        while (m < l.length) {
+            var n = 0
+            while (n < l[m].length) { goTpNote(l[m][n]); n = n + 1 }
+            m = m + 1
+        }
+        o = o + 1
+    }
+}
+// The texts ts at each instantiation of owner own, whose parameters are names.
+function goTpInstsOf(own, names, ts) {
+    var out = []
+    var r = goTpInst["$" + own]
+    if (r === undefined) { return out }
+    var i = 0
+    while (i < r.list.length) {
+        var row = []
+        var k = 0
+        while (k < ts.length) { row.push(goTpSubst(ts[k], names, r.list[i])); k = k + 1 }
+        out.push(row)
+        i = i + 1
+    }
+    return out
+}
+function goTpEnd() { goTpCur = []; goTpRecv = []; goTpOwn = "" }
 // A type declared inside a function ends no type parameter list: the enclosing
 // generic function's stay in scope (a local type cannot have its own).
 function goTpEndTy() { if (cScopes.length == 1) { goTpEnd() } }
@@ -2765,19 +2859,22 @@ var goLtyN = 0
 // The type name TypeDecl's Id binds, already poisoned in the current frame: the
 // name itself at top level, else its key.
 function goLtyDecl(name) {
-    if (cScopes.length == 1) { return name }
+    if (cScopes.length == 1) { goTpOwn = "t:" + name; return name }
     goLtyN = goLtyN + 1
     var key = name + "__L" + goLtyN
-    var ref = key
-    if (goTpCur.length > 0) {
-        goGenTys["$" + key] = goTpCur
-        ref = key + "["
-        var i = 0
-        while (i < goTpCur.length) { ref = ref + (i > 0 ? "," : "") + goTpCur[i]; i = i + 1 }
-        ref = ref + "]"
-    }
-    cBindX(name, {ltk: key, lty: ref})
+    if (goTpCur.length > 0) { goGenTys["$" + key] = goTpCur }
+    cBindX(name, {ltk: key, lty: goLtyRef(key)})
     return key
+}
+// How local type key is read: key[P1,...] when it is generic over its function's
+// type parameters, else key.
+function goLtyRef(key) {
+    var tps = goGenTys["$" + key]
+    if (tps === undefined) { return key }
+    var ref = key + "["
+    var i = 0
+    while (i < tps.length) { ref = ref + (i > 0 ? "," : "") + tps[i]; i = i + 1 }
+    return ref + "]"
 }
 // The local type binding name resolves to in the walk's scope, or null.
 function goLtyAt(name) {
@@ -2811,6 +2908,9 @@ function goLtyRw(t) {
 function goTpRecvC(text) {
     var a = text.indexOf("[")
     goTpRecv = a < 0 ? [] : goTpNames(text.substring(a + 1, stClose(text, a)))
+    var s = a
+    while (s > 0 && cIsIdCh(text.charCodeAt(s - 1))) { s = s - 1 }
+    goTpRecvTy = a < 0 ? "" : text.substring(s, a)
 }
 function goTpIn(names, n) {
     var i = 0
@@ -2864,8 +2964,10 @@ function goTpArgsOf(t) {
     if (e < 0) { return "" }
     var ta = t.substring(b + 1, e)
     var ps = goTpSplit(ta)
+    var ts = []
     var i = 0
-    while (i < ps.length) { goTpNote(stNoWs(ps[i])); i = i + 1 }
+    while (i < ps.length) { ts.push(stNoWs(ps[i])); goTpNote(ts[i]); i = i + 1 }
+    goTpEdge("t:" + t.substring(0, b), ts)
     return ta
 }
 // The type texts a call of name instantiates it with, when name is a generic
@@ -2903,6 +3005,7 @@ function goTpInfer(name, sp, explicit) {
         goTpNote(ts[k])
         k = k + 1
     }
+    goTpEdge("f:" + name, ts)
     var all = ""
     k = 0
     while (k < ts.length) { all = all + "," + ts[k]; k = k + 1 }
