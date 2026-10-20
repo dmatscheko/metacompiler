@@ -4730,7 +4730,14 @@ KwContinue  = "continue" KwEnd ;
         }
         if (name == "map" || name == "flatMap") { return args[0](target) }
         if (name == "description") { return szStr(target) }
+        // `9.squareRoot()`: only a FloatingPoint value has these, so a plain integer
+        // receiving one is a literal Swift typed as a Double. Twins: swIntMethod in
+        // lib/swift-rt.metajs and js_swmcall in abnf/jsrtswift.go.
+        if (!szIs(target) && swFloOnlyMethod(name)) { return mcall(swFlo(target), name, args) }
         fail("unknown Int method: " + name)
+    }
+    function swFloOnlyMethod(n) {
+        return n == "squareRoot" || n == "rounded" || n == "truncatingRemainder" || n == "remainder"
     }
     // Double.remainder(dividingBy:): IEEE 754's remainder, x - y*n with n the
     // quotient rounded to nearest, ties to even, so 7.5 by 2 is -0.5. fdlibm's
@@ -5383,7 +5390,7 @@ KwContinue  = "continue" KwEnd ;
             var comb = args[1]
             for (i = 0; i < n; i++) {
                 var r2 = comb(acc, t[i])
-                if (r2 !== undefined) { acc = r2 }
+                if (r2 !== undefined) { acc = swKeepLabels(acc, r2) }
             }
             return acc
         }
@@ -8505,6 +8512,15 @@ KwContinue  = "continue" KwEnd ;
         if (swIsSetTy(annTxt)) { return function() { declVar(name, swSetOf(init())) } }
         if (labels == null) { return function() { declVar(name, swCopy(init())) } }
         return function() { declVar(name, relabelTuple(swCopy(init()), labels)) }
+    }
+    // reduce's accumulator keeps its TYPE: a closure answering `(a, b)` where the
+    // initial value is `(min: .., max: ..)` answers the labelled tuple, as Swift
+    // infers the closure's result from it. Twins: swKeepLabels in
+    // lib/swift-rt.metajs and abnf/jsrtswift.go.
+    function swKeepLabels(prev, nv) {
+        if (!isTupleVal(prev) || !isTupleVal(nv) || !hasOwn(prev, "__tlabels") || hasOwn(nv, "__tlabels")) { return nv }
+        if (prev.__tuple != nv.__tuple) { return nv }
+        return relabelTuple(nv, prev.__tlabels)
     }
     // Copies the element names of a tuple TYPE onto a tuple value.
     function relabelTuple(v, labels) {

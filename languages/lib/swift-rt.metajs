@@ -894,6 +894,25 @@ function swCopyDict(v) {
 // A LABELLED tuple stores the same value twice - under "0" and under its label -
 // and the copy re-establishes that aliasing rather than walking keys, so the two
 // spellings of one element stay the one element.
+// reduce's accumulator keeps its TYPE: a closure answering `(a, b)` where the
+// initial value is `(min: .., max: ..)` answers the labelled tuple, as Swift
+// infers the closure's result from it. Twins: swKeepLabels in
+// languages/swift-interpreter.abnf and abnf/jsrtswift.go.
+function swKeepLabels(prev, nv) {
+    if (typeof prev != "object" || typeof nv != "object") { return nv }
+    if (prev === null || nv === null) { return nv }
+    var n = swNumProp(prev, "__tuple")
+    if (n < 0 || swNumProp(nv, "__tuple") != n) { return nv }
+    var lbls = prev["__tlabels"]
+    if (!rtIsArr(lbls) || nv["__tlabels"] !== undefined) { return nv }
+    var i = 0
+    while (i < n && i < lbls.length) {
+        if (lbls[i] != "") { nv[lbls[i]] = nv["" + i] }
+        i = i + 1
+    }
+    nv["__tlabels"] = lbls
+    return nv
+}
 function swCopyTup(v, n) {
     var out = {__tuple: n}
     var lbls = v["__tlabels"]
@@ -2634,7 +2653,7 @@ function swSeqMethod(o, name, args) {
         i = 0
         while (i < n) {
             var r2 = args[1].apply(undefined, [acc, o[i]])
-            if (r2 !== undefined) { acc = r2 }
+            if (r2 !== undefined) { acc = swKeepLabels(acc, r2) }
             i = i + 1
         }
         return acc
@@ -3479,6 +3498,14 @@ function swIntMethod(v, name, args) {
         return t
     }
     if (name === "map" || name === "flatMap") { return args[0](v) }
+    // `9.squareRoot()`: only a FloatingPoint value has these, so a plain integer
+    // receiving one is a literal Swift typed as a Double. Twins: swIntMethod in
+    // languages/swift-interpreter.abnf and js_swmcall in abnf/jsrtswift.go.
+    if (typeof v == "number") {
+        if (name === "squareRoot" || name === "rounded" || name === "truncatingRemainder" || name === "remainder") {
+            return js_swmcall(swMkFlo(v), name, args)
+        }
+    }
     return js_mcall(v, name, args)
 }
 

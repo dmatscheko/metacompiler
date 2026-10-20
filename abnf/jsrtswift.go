@@ -1306,6 +1306,15 @@ func init() {
 		m["js_swrandomf"] = func(a []uint64) uint64 { return swRandom(a, 2) }
 		m["js_swmcall"] = func(a []uint64) uint64 {
 			f, isFlo := u(a[0]).(jsJFlo)
+			// `9.squareRoot()`: only a FloatingPoint value has these, so a plain
+			// integer receiving one is a literal Swift typed as a Double. Twins:
+			// swIntMethod in languages/swift-interpreter.abnf and lib/swift-rt.metajs.
+			if n, isNum := u(a[0]).(float64); isNum {
+				switch rt.toString(u(a[1])) {
+				case "squareRoot", "rounded", "truncatingRemainder", "remainder":
+					f, isFlo = swMkFlo(n), true
+				}
+			}
 			if !isFlo {
 				if v, ok := rt.swIntMethod(u(a[0]), rt.toString(u(a[1])), rt.swArgList(u(a[2]))); ok {
 					return w(v)
@@ -4665,12 +4674,39 @@ func (rt *jsrt) swSeqMethod(o *jsArray, name string, args []interface{}, rnd *sw
 		for _, e := range o.elems {
 			r2 := rt.call(args[1], jsUndef, []interface{}{acc, e})
 			if _, isUndef := r2.(jsUndefT); !isUndef {
-				acc = r2
+				acc = swKeepLabels(acc, r2)
 			}
 		}
 		return acc, true
 	}
 	return nil, false
+}
+
+// swKeepLabels: reduce's accumulator keeps its TYPE, so a closure answering
+// `(a, b)` where the initial value is `(min: .., max: ..)` answers the labelled
+// tuple, as Swift infers the closure's result from it. Twins: swKeepLabels in
+// languages/swift-interpreter.abnf and lib/swift-rt.metajs.
+func swKeepLabels(prev, nv interface{}) interface{} {
+	po, ok1 := prev.(*jsObject)
+	no, ok2 := nv.(*jsObject)
+	if !ok1 || !ok2 {
+		return nv
+	}
+	n, ok := swNumProp(po, "__tuple")
+	if m, ok2 := swNumProp(no, "__tuple"); !ok || !ok2 || m != n {
+		return nv
+	}
+	lbls, isArr := po.props["__tlabels"].(*jsArray)
+	if _, has := no.props["__tlabels"]; !isArr || has {
+		return nv
+	}
+	for i, l := range swStrArray(lbls) {
+		if i < n && l != "" {
+			no.set(l, no.props[strconv.Itoa(i)])
+		}
+	}
+	no.set("__tlabels", lbls)
+	return nv
 }
 
 // swSplitSeq is Collection.split, step for step; the arguments are told apart by

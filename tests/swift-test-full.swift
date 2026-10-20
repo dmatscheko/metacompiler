@@ -5550,6 +5550,16 @@ func s142() {
     check("142b", "\(m.data)" == "[0.0, 3.0, 0.0, 0.0]" && m[0, 1] / 2 == 1.5 && "\(mi.data)" == "[7, 0]")
 }
 
+// ===== SECTION 143: an integer literal with a Double method; reduce's tuple =====
+// `9.squareRoot()` types the literal as a Double, as only FloatingPoint has the
+// member; and reduce's closure answering an unlabelled tuple keeps the labels of
+// the initial `(min: .., max: ..)`. Every value read off swiftc 6.1.2.
+func s143() {
+    let st = [3, 7, 1].reduce((min: Int.max, max: Int.min)) { (min($0.min, $1), max($0.max, $1)) }
+    check("143a", "\(9.squareRoot())" == "3.0" && "\(7.truncatingRemainder(dividingBy: 2))" == "1.0" && 2.rounded() == 2.0)
+    check("143b", st.min == 1 && st.max == 7 && "\(st)" == "(min: 1, max: 7)")
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5693,6 +5703,7 @@ func main() {
     s140() // SECTION-CALL 140
     s141() // SECTION-CALL 141
     s142() // SECTION-CALL 142
+    s143() // SECTION-CALL 143
     print("full: \(checks) checks, \(fails) failures")
 }
 
