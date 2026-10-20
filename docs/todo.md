@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-631** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-632** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -157,12 +157,13 @@ appending to a nil []int → 1,2,4,8,...,512,848,1280; for []byte from 8/16/32).
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-626 swift: generics through metatypes and nil Optionals; `Set<Double>([..])`; overflow-reporting arithmetic; utf16Offset · P2 · SW · IN PROGRESS (SW worker, round 9) [V]
-`print(type(of: Box<Double>(v: 1)))` → all legs `Box` (swiftc `Box<Double>`). `func orDefault<T: Defaultable>(_ x: T?) -> T` with
-`orDefault(Int?.none)` → every leg aborts "type(of:) of this value is not supported" (swiftc 0). `func zero<T: Numeric>(_ t: T.Type)
--> T { 0 }; zero(Double.self)` → 0 (swiftc 0.0). `Set<Double>([1, 2])` → `[1, 2]` (swiftc `[1.0, 2.0]`). `addingReportingOverflow`,
-`multipliedReportingOverflow`, ... abort as unknown Int methods. `str.firstIndex(of: "x")!.utf16Offset(in: str)` aborts (String.Index
-is an Int here).
+### T-631 swift: interp runs a metatype init twice; `is T` with a metatype-bound T; `Int?(5)`; generic enum type(of:); Set returns · P1 · SW · OPEN [V]
+`func build<M: Makes>(_ t: M.Type) -> M { t.init(n: 4) }` with a counter in `init(n:)` → interp 2, llvm.Run/native/swiftc 1 (the
+interpreter runs the initializer twice — P1). `func isa<T>(_ a: Any, _ t: T.Type) -> Bool { a is T }; isa(box, Box<Double>.self)` → false
+(swiftc true); `as? T` likewise, `cast(any, ...)!` traps. `Int?(5)` → interp "call of a non-function value", compiled "call of a non
+function value: [object Object]" (swiftc accepts). `print(type(of: Either<Int, String>.left(1)))` → `Either` (swiftc `Either<Int,
+String>`). `func mk() -> Set<Double> { return [1, 2] }` → `[1, 2]` (swiftc `[1.0, 2.0]`). `Set<Double>(minimumCapacity: 4)` aborts
+"Set(): not a sequence".
 
 ---
 
@@ -749,6 +750,7 @@ T-621 swift: generic type arguments are not applied; static members on a generic
 T-622 kotlin: `Char(97)`, `sequence {}` builder, implicit-receiver operator calls, split with a named limit, formatter class names — DONE b75ef2dd fc105dae (the compiled split-with-named-limit item did not reproduce; an interp-only variant was fixed)
 T-620 python: `re.error` is uncatchable; compiled class-body except bindings lost — DONE 1119e4c9 (plus heapq/bisect/contextlib/io/types/textwrap/abc/typing/fractions/statistics modules and ~20 engine fixes)
 T-627 kotlin: sortedMapOf unsorted; Array.copyOf(); extensions not dispatched by receiver type; `import java.util.Random` — DONE 3186c9ec
+T-626 swift: generics through metatypes and nil Optionals; `Set<Double>([..])`; overflow-reporting arithmetic; utf16Offset — DONE 26488dd9 9d7706d6
 
 # Settled — do not re-open
 
