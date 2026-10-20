@@ -2222,6 +2222,10 @@ func (rt *jsrt) giSlotOf(x, k interface{}) interface{} {
 	return nil
 }
 
+// goStdinRest is the part of standard input's current line os.Stdin's Read has
+// not handed out yet (js_gostdin).
+var goStdinRest string
+
 func init() {
 	rxExtraExterns = append(rxExtraExterns, func(rt *jsrt, m map[string]func(args []uint64) uint64) {
 		u := rt.unwrap
@@ -2249,6 +2253,26 @@ func init() {
 		// not part of a character) back as that one byte - phpRaw's rule. Twin of
 		// js_gorawstr in lib/go-rt.metajs.
 		m["js_gorawstr"] = func(a []uint64) uint64 { return w(phpRaw(rt.toString(u(a[0])))) }
+		// js_gostdin(room, eof): os.Stdin's Read - standard input a line at a time
+		// (readIn), as [the next bytes of it that fit in room, nil], or ["", eof]
+		// at its end. Twin of js_gostdin in lib/go-rt.metajs, goStdinRead in
+		// go-interpreter.abnf.
+		m["js_gostdin"] = func(a []uint64) uint64 {
+			room := int(rt.toNumber(u(a[0])))
+			if room > 0 && goStdinRest == "" {
+				goStdinRest = readIn(0)
+			}
+			if room > 0 && goStdinRest == "" {
+				return w(&jsArray{elems: []interface{}{"", u(a[1])}})
+			}
+			cut := room
+			if cut > len(goStdinRest) {
+				cut = len(goStdinRest)
+			}
+			chunk := goStdinRest[:cut]
+			goStdinRest = goStdinRest[cut:]
+			return w(&jsArray{elems: []interface{}{chunk, jsNull}})
+		}
 		// goMathSqrt(x): the correctly rounded square root lib/go-math.go's Sqrt is,
 		// a float64. Twin of js_gosqrt in lib/go-rt.metajs, goMathSqrt in
 		// go-interpreter.abnf.

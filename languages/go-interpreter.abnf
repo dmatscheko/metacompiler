@@ -1592,12 +1592,36 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         for (var i = 0; i < arguments.length; i++) { out += gstr(arguments[i]) }
         gOut(out)
     }
-    // os.Args holds the program, as the source file named it; os.Stdin is a reader at
-    // its end, as this runtime reads no input. Twin of the os object in
-    // go-to-llvm-ir.abnf.
+    // os.Args holds the program, as the source file named it. Twin of the os object
+    // in go-to-llvm-ir.abnf.
     var goProgName = c.file
     hostGlobals["os"] = { Exit: function(code) { exit(code | 0) }, Stdout: goOsFile(1), Stderr: goOsFile(2),
-                          Stdin: {Read: function(p) { return goMv([0, hostGlobals["errors"].New("EOF")]) }} }
+                          Stdin: {Read: function(p) { return goStdinRead(p) }} }
+    // os.Stdin's Read: standard input (readIn), taken a line at a time, so what the
+    // program printed before the read shows first; p gets as much of the line as it
+    // holds, and the rest waits for the next Read. At the end of the input it
+    // answers (0, io.EOF) - an error reading "EOF" when no package imported io.
+    // Twin of js_gostdin in abnf/jsrtgolang.go and lib/go-rt.metajs.
+    var goStdinRest = ""
+    function goStdinRead(p) {
+        var room = goLen(p)
+        if (room > 0 && goStdinRest == "") { goStdinRest = readIn(0) }
+        if (room > 0 && goStdinRest == "") {
+            var io = pkgScopes["$io"]
+            return goMv([0, io != undefined ? io.EOF : hostGlobals["errors"].New("EOF")])
+        }
+        var chunk = goStdinRest
+        if (byteLen(chunk) == chunk.length) {
+            chunk = goStdinRest.substring(0, room)
+            goStdinRest = goStdinRest.substring(chunk.length, goStdinRest.length)
+        } else {
+            var bs = utf8Bytes(goStdinRest)
+            var cut = room < bs.length ? room : bs.length
+            chunk = utf8Decode(bs.slice(0, cut))
+            goStdinRest = utf8Decode(bs.slice(cut, bs.length))
+        }
+        return goMv([hostGlobals["copy"](p, chunk), null])
+    }
     // The correctly rounded square root lib/go-math.go's Sqrt is. Twin of js_gosqrt in
     // abnf/jsrtgolang.go and lib/go-rt.metajs.
     hostGlobals["goMathSqrt"] = function(x) { return gFlo(Math.sqrt(szNum(gNumF(x)))) }
@@ -1808,6 +1832,44 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     var gStrDepth = 0
     // ----- fmt's format verbs: lib/go-fmt.js over this engine's value model -----
     include("lib/go-fmt.js")
+    // ----- regexp's primitives: lib/go-regexp.js over lib/regex.js's R dialect -----
+    // R's \p{..} classes are java.util.regex's (lib/java-regex.js), through
+    // regex.js's knobs rxPropHit and rxPropCls, set by assignment.
+    include("lib/regex.js")
+    include("lib/java-chars.js")
+    include("lib/java-regex.js")
+    include("lib/go-regexp.js")
+    rxPropHit = function (id, c) { return jxPropHit(id, c) }
+    rxPropCls = function (st, name, at) { return jxPropCls(st, name, at) }
+    // goRxText (lib/go-regexp.js): this engine holds a byte that is not part of a
+    // character as U+DC80 + byte (goByteForm), which is one byte; a surrogate
+    // pair is four. Twin of goRxText in lib/go-rt.metajs and abnf/jsrtgoregexp.go.
+    function goRxText(s) {
+        goRxT = s
+        var off = []
+        if (byteLen(s) != s.length) {
+            var b = 0
+            var i = 0
+            while (i < s.length) {
+                var c = s.charCodeAt(i)
+                off.push(b)
+                if (c < 128) { b = b + 1 }
+                else if (c < 2048) { b = b + 2 }
+                else if (c >= 55296 && c < 56320 && i + 1 < s.length && s.charCodeAt(i + 1) >= 56320 && s.charCodeAt(i + 1) < 57344) {
+                    off.push(b)
+                    b = b + 4
+                    i = i + 1
+                } else if (c >= 56448 && c < 56576) { b = b + 1 }
+                else { b = b + 3 }
+                i = i + 1
+            }
+            off.push(b)
+        }
+        goRxOff = off
+    }
+    hostGlobals["goRxError"] = function(expr) { return goRxError(expr) }
+    hostGlobals["goRxNames"] = function(expr) { return goRxNames(expr) }
+    hostGlobals["goRxExec"] = function(expr, s, pos) { return goRxExec(expr, s, szNum(pos)) }
     // The type name fmt writes in a bad-verb note for a SCALAR operand, "nil" for
     // nil and "" for anything else (a slice, map or struct, which fmt walks element
     // by element rather than noting). A 64 bit box answers "int" or "uint": the
@@ -2154,11 +2216,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function goSlice(baseIn, s) {
         var base = isPtr(baseIn) ? ptrGet(baseIn) : baseIn   // p[:] on a *[N]T: see goIndex.
         if (typeof base == "string") {
-            // A string slice is a BYTE range: "héllo"[1:3] is the two bytes of é.
-            var bs = utf8Bytes(base)
-            var blo = s.lo != null ? s.lo() : 0
-            var bhi = s.hi != null ? s.hi() : bs.length
-            goSliceCheck(szNum(blo), szNum(bhi), 0, bs.length, false, "length")
+            // A string slice is a BYTE range: "héllo"[1:3] is the two bytes of é. An
+            // ASCII string's bytes are its units; another's are its cached byte form.
+            var ascii = byteLen(base) == base.length
+            var bs = ascii ? [] : goByteForm(base)
+            var nb = ascii ? base.length : bs.length
+            var blo = szNum(s.lo != null ? s.lo() : 0)
+            var bhi = szNum(s.hi != null ? s.hi() : nb)
+            goSliceCheck(blo, bhi, 0, nb, false, "length")
+            if (ascii) { return base.substring(blo, bhi) }
             return utf8Decode(bs.slice(blo, bhi))
         }
         if (base === undefined || base === null) {
@@ -6269,7 +6335,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     core.blank = "_"
     // Go stdlib packages the runtime provides (resolveImport lives in lib/interp-core.js;
     // exact-match paths, so sub-packages like "encoding/json" are listed in full).
-    core.stdlibImports = ["fmt", "os", "errors", "regexp", "encoding/json", "reflect"]
+    core.stdlibImports = ["fmt", "os", "errors", "encoding/json", "reflect"]
     core.nullWord = "nil"
     // `p.In.X = 1` with a nil p.In walks resolveRef's path; in Go it is a recoverable
     // panic. The hook is additive in lib/interp-core.js - every language that leaves

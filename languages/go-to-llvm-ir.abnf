@@ -6508,17 +6508,25 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         callExt(b, "js_set", [osV, emitStr(b, "Exit"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "exit")])])
         b = declOsFile(b, osV, "Stdout", 1)
         b = declOsFile(b, osV, "Stderr", 2)
-        // os.Args holds the program, as the source file named it; os.Stdin is a
-        // reader at its end, as this runtime reads no input. Twin of
-        // hostGlobals["os"] in go-interpreter.abnf.
+        // os.Args holds the program, as the source file named it. os.Stdin's Read
+        // takes [chunk, err] from js_gostdin - the next bytes of standard input that
+        // fit in p, and at its end io.EOF (an error reading "EOF" when no package
+        // imported io) - and copies the chunk into p. Twin of hostGlobals["os"] and
+        // goStdinRead in go-interpreter.abnf.
         var inV = callExt(b, "js_obj_new", [])
+        var haveIo = importedFiles["$" + goLibFile("io")] == true
         b = declFn(b, "$stdinRead", 1, function(fb, a) {
+            var eofV = haveIo ? emitPkgMember(fb, "io", "EOF") : hUndef
+            if (!haveIo) {
+                var newV = callExt(fb, "js_get", [callExt(fb, "js_scope_get", [curScopeV, emitStr(fb, "errors")]), emitStr(fb, "New")])
+                var eargs = callExt(fb, "js_arr_new", [])
+                callExt(fb, "js_arr_push", [eargs, emitStr(fb, "EOF")])
+                eofV = callExt(fb, "js_call", [newV, hUndef, eargs])
+            }
+            var got = callExt(fb, "js_gostdin", [emitHelper(fb, "len", [a[0]]), eofV])
             var rv = callExt(fb, "js_arr_new", [])
-            callExt(fb, "js_arr_push", [rv, emitNum(fb, 0)])
-            var newV = callExt(fb, "js_get", [callExt(fb, "js_scope_get", [curScopeV, emitStr(fb, "errors")]), emitStr(fb, "New")])
-            var eargs = callExt(fb, "js_arr_new", [])
-            callExt(fb, "js_arr_push", [eargs, emitStr(fb, "EOF")])
-            callExt(fb, "js_arr_push", [rv, callExt(fb, "js_call", [newV, hUndef, eargs])])
+            callExt(fb, "js_arr_push", [rv, emitHelper(fb, "copy", [a[0], callExt(fb, "js_get", [got, emitNum(fb, 0)])])])
+            callExt(fb, "js_arr_push", [rv, callExt(fb, "js_get", [got, emitNum(fb, 1)])])
             return {b: fb, v: usesMultiRet ? emitMvWrap(fb, rv) : rv}
         })
         callExt(b, "js_set", [inV, emitStr(b, "Read"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$stdinRead")])])
@@ -6527,6 +6535,14 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // The correctly rounded square root lib/go-math.go's Sqrt is, declared when
         // the program imports math. Twin of goMathSqrt in go-interpreter.abnf.
         if (importedFiles["$" + goLibFile("math")] == true) { b = declBuiltin(b, "goMathSqrt", "js_gosqrt", null) }
+        // The three primitives lib/go-regexp.go is written over, declared when the
+        // program imports regexp. Twins of the goRx* host globals in
+        // go-interpreter.abnf.
+        if (importedFiles["$" + goLibFile("regexp")] == true) {
+            b = declBuiltin(b, "goRxError", "js_gorxerror", null)
+            b = declBuiltin(b, "goRxNames", "js_gorxnames", null)
+            b = declBuiltin(b, "goRxExec", "js_gorxexec", null)
+        }
         // len/cap/copy/append/clear come from declSlices (they have to reach through a
         // slice header); delete(m, k) is still a one-liner.
         funcCount++
@@ -6699,7 +6715,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
 
     // Go stdlib packages the runtime provides (resolveImport lives in lib/compile-core.js;
     // exact-match paths, so sub-packages like "encoding/json" are listed in full).
-    core.stdlibImports = ["fmt", "os", "errors", "regexp", "encoding/json", "reflect"]
+    core.stdlibImports = ["fmt", "os", "errors", "encoding/json", "reflect"]
     function fail(msg) { println("go compiler error: " + msg); exit(1) }
 
     // Project-file imports: import "mathbox" -> mathbox.go (a slash path like "a/b" ->

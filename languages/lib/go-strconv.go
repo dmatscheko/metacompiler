@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"unicode/utf8"
 )
 
 const IntSize = 64
@@ -1154,6 +1155,28 @@ func QuoteToASCII(s string) string            { return fmt.Sprintf("%+q", s) }
 func QuoteRune(r rune) string                 { return fmt.Sprintf("%q", r) }
 func QuoteRuneToASCII(r rune) string          { return fmt.Sprintf("%+q", r) }
 func AppendQuote(dst []byte, s string) []byte { return append(dst, Quote(s)...) }
+
+// CanBackquote: s is valid UTF-8 and has no control character but a tab, no `
+// and no byte order mark, so it can be a raw string literal.
+func CanBackquote(s string) bool {
+	for len(s) > 0 {
+		r, wid := utf8.DecodeRuneInString(s)
+		s = s[wid:]
+		if wid > 1 {
+			if r == '\ufeff' {
+				return false
+			}
+			continue
+		}
+		if r == utf8.RuneError {
+			return false
+		}
+		if (r < ' ' && r != '\t') || r == '`' || r == '\u007F' {
+			return false
+		}
+	}
+	return true
+}
 
 func unhex(b byte) (v rune, ok bool) {
 	c := rune(b)

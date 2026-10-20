@@ -3373,6 +3373,7 @@ function goLibFile(path) {
     if (path == "context") { return "lib/go-context.go" }
     if (path == "unicode/utf8") { return "lib/go-utf8.go" }
     if (path == "sync/atomic") { return "lib/go-atomic.go" }
+    if (path == "regexp") { return "lib/go-regexp.go" }
     return ""
 }
 // The method EXPRESSION T.M of a defined type T (`f := Color.String`): the method's

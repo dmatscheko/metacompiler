@@ -54,6 +54,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -216,11 +217,57 @@ func s97() {
 		"<nil>ann<nil> <nil>|stopped: context canceled|true|idle|context canceled boom|context.Background")
 }
 
+// ===== SECTION 98: package regexp =====
+// Go source (languages/lib/go-regexp.go) over lib/regex.js's R dialect: RE2
+// syntax, Go's error texts, leftmost-first matching with Go's empty-iteration
+// rule, byte offsets, FindAll's and ReplaceAll's empty-match steps, $ templates.
+// The expected values are go run's.
+func s98() {
+	pats := []string{`(a*)*`, `(|a)+`, `()*`, `(?:(a)|b)+`, `(?U)a+`, `(?i)k+`, `(?m)^\w`, `\pL+`, `\p{Greek}+`, `[[:^alpha:]]+`, `\Qa.b\E+`, `(?s).$`, `\bx\b`}
+	texts := []string{"aaa", "aa", "x", "ab", "aaa", "\u212akK", "a\nb", "1héllo2", "abγδε", "ab12cd", "a.bbb", "a\n", "x ax x"}
+	out := ""
+	for i, p := range pats {
+		out += fmt.Sprint(regexp.MustCompile(p).FindAllStringSubmatchIndex(texts[i], -1), ";")
+	}
+	check("rx1", out == "[[0 3 0 3]];[[0 0 0 0] [1 1 1 1] [2 2 2 2]];[[0 0 0 0] [1 1 1 1]];[[0 2 0 1]];[[0 1] [1 2] [2 3]];[[0 5]];[[0 1] [2 3]];[[1 7]];[[2 8]];[[2 4]];[[0 5]];[[1 2]];[[0 1] [5 6]];")
+	re := regexp.MustCompile(`(?P<key>\w+)=(?P<val>\w*)`)
+	src := "a=1, bb=22, c=, é=x"
+	check("rx2", fmt.Sprint(re.ReplaceAllString(src, "$val:$key"), "|", re.ReplaceAllString(src, "${key}x$1x$$ $9"), "|",
+		re.SubexpNames(), re.SubexpIndex("val"), re.NumSubexp(), "|", re.FindAllString(src, 2), "|", re.ReplaceAllStringFunc(src, strings.ToUpper)) ==
+		"1:a, 22:bb, :c, é=x|ax$ , bbx$ , cx$ , é=x|[ key val] 2 2|[a=1 bb=22]|A=1, BB=22, C=, é=x")
+	a := regexp.MustCompile(`a*`)
+	check("rx3", fmt.Sprint(a.Split("abaabaccadaaae", 5), len(a.Split("abaabaccadaaae", -1)), a.ReplaceAllString("baaac", "X"),
+		regexp.MustCompile(`x*`).FindAllStringIndex("éxé\U0001F600", -1), regexp.MustCompile(`.`).FindAllStringIndex("a\xff\xc3é", -1),
+		regexp.QuoteMeta(`1.5+[x]`)) == "[ b b c cadaaae] 7XbXcX[[0 0] [2 3] [5 5] [9 9]] [[0 1] [1 2] [2 3] [3 5]]1\\.5\\+\\[x\\]")
+	errs := ""
+	for _, p := range []string{`a**`, `(?=a)`, `(?<=a)`, `\1`, `a{1001}`, `[z-a]`, `(`, `x)`, `[a`, `\p{Foo}`, `[[:foo:]]`, `(?z)`, `(a{2}){501}`, `\x{110000}`, `a\`} {
+		_, err := regexp.Compile(p)
+		errs += err.Error() + "\n"
+	}
+	check("rx4", errs == "error parsing regexp: invalid nested repetition operator: `**`\nerror parsing regexp: invalid or unsupported Perl syntax: `(?=`\nerror parsing regexp: invalid named capture: `(?<=a)`\nerror parsing regexp: invalid escape sequence: `\\1`\nerror parsing regexp: invalid repeat count: `{1001}`\nerror parsing regexp: invalid character class range: `z-a`\nerror parsing regexp: missing closing ): `(`\nerror parsing regexp: unexpected ): `x)`\nerror parsing regexp: missing closing ]: `[a`\nerror parsing regexp: invalid character class range: `\\p{Foo}`\nerror parsing regexp: invalid character class range: `[:foo:]`\nerror parsing regexp: invalid or unsupported Perl syntax: `(?z`\nerror parsing regexp: invalid repeat count: `{501}`\nerror parsing regexp: invalid escape sequence: `\\x{110000`\nerror parsing regexp: trailing backslash at end of expression: ``\n")
+	defer func() {
+		check("rx5", fmt.Sprint(recover()) == "regexp: Compile(`a\tb(`): error parsing regexp: missing closing ): `a\tb(`")
+	}()
+	regexp.MustCompile("a\tb(")
+}
+
+// ===== SECTION 99: os.Stdin =====
+// Nothing here reads standard input, which the harness leaves to its caller:
+// reading it is probed with input fed through a pipe. A Read into no room
+// answers (0, nil) without reading. The expected values are go run's.
+func s99() {
+	var r io.Reader = os.Stdin
+	k, err := r.Read(make([]byte, 0))
+	check("stdin1", k == 0 && err == nil)
+}
+
 func main() {
 	s94() // SECTION-CALL 94
 	s95() // SECTION-CALL 95
 	s96() // SECTION-CALL 96
 	s97() // SECTION-CALL 97
+	s98() // SECTION-CALL 98
+	s99() // SECTION-CALL 99
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

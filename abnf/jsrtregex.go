@@ -454,6 +454,8 @@ type rxSt struct {
 	pyuni bool
 	// gnodes[g] is capturing group g's node (rxWidthP), from index 1.
 	gnodes []*rxNode
+	// re2 is the R flag: the J pattern is rxRe2's rewrite of a Go one.
+	re2 bool
 }
 
 // rxIsMetaCh answers whether a character has to be backslashed to stay a literal.
@@ -1858,7 +1860,8 @@ func (st *rxSt) parseAtom() *rxNode {
 			if st.pyuni && nxt == 'B' {
 				a.gidx = rxPUNWordB
 			}
-			if st.java {
+			// Go's \b and \B are ASCII \w ones (R).
+			if st.java && !st.re2 {
 				switch nxt {
 				case 'b':
 					a.gidx = rxJWordB
@@ -2119,7 +2122,7 @@ func (st *rxSt) parsePiece() *rxNode {
 		rep.min = minV
 		rep.max = maxV
 		rep.greedy = true
-		rep.cnt = counted
+		rep.cnt = counted && !st.re2
 		// A POSIX ERE has no lazy or possessive form, so the ? of "a*?" is a SECOND
 		// quantifier there rather than a modifier of the first.
 		if st.java {
@@ -2218,6 +2221,7 @@ type rxProg struct {
 	nmarks int
 	jsrep  bool
 	java   bool
+	re2    bool
 	dummy  *rxCls
 	// cmin/cmax/cgreedy describe counted loop i (rxOpCInit .. rxOpCInc), lbmin/lbmax
 	// the length range of lookbehind i (-1: unbounded).
@@ -2540,6 +2544,10 @@ func (pg *rxProg) emitAlt(node *rxNode) {
 }
 
 func (pg *rxProg) emitRep(node *rxNode) {
+	if pg.re2 && node.max < 0 {
+		pg.emitRepRe2(node)
+		return
+	}
 	body := node.items[0]
 	for i := 0; i < node.min; i++ {
 		pg.emitClear(body)
@@ -2584,6 +2592,907 @@ func (pg *rxProg) emitRep(node *rxNode) {
 			pg.as[at] = endAt
 			pg.bs[at] = at + 1
 		}
+	}
+}
+
+// ===== The RE2 dialect (flag R): Go's regexp/syntax =====
+//
+// rxRe2 reads a pattern the way Go's regexp.Compile does and answers its J
+// spelling or Go's error text; twin of rxRe2 in lib/regex.js, which states the
+// rewrite. The pattern here is code points (wtf8Runes), so a character is one
+// index wide where the JS side steps over a surrogate pair.
+
+// Go's unicode tables for \p{..}; twins of RX_RE2_CATS, RX_RE2_CALIAS,
+// RX_RE2_SCRIPTS and RX_RE2_NEWSC in lib/regex.js.
+const rxRe2Cats = " C Cc Cf Cn Co Cs L Ll Lm Lo Lt Lu M Mc Me Mn N Nd Nl No P Pc Pd Pe Pf Pi Po Ps S Sc Sk Sm So Z Zl Zp Zs "
+const rxRe2CAlias = " Cased_Letter=LC Close_Punctuation=Pe Combining_Mark=M Connector_Punctuation=Pc Control=Cc" +
+	" Currency_Symbol=Sc Dash_Punctuation=Pd Decimal_Number=Nd Enclosing_Mark=Me Final_Punctuation=Pf" +
+	" Format=Cf Initial_Punctuation=Pi Letter=L Letter_Number=Nl Line_Separator=Zl Lowercase_Letter=Ll" +
+	" Mark=M Math_Symbol=Sm Modifier_Letter=Lm Modifier_Symbol=Sk Nonspacing_Mark=Mn Number=N" +
+	" Open_Punctuation=Ps Other=C Other_Letter=Lo Other_Number=No Other_Punctuation=Po Other_Symbol=So" +
+	" Paragraph_Separator=Zp Private_Use=Co Punctuation=P Separator=Z Space_Separator=Zs Spacing_Mark=Mc" +
+	" Surrogate=Cs Symbol=S Titlecase_Letter=Lt Unassigned=Cn Uppercase_Letter=Lu cntrl=Cc digit=Nd punct=P "
+const rxRe2Scripts = " Adlam Ahom Anatolian_Hieroglyphs Arabic Armenian Avestan Balinese Bamum Bassa_Vah Batak" +
+	" Bengali Beria_Erfe Bhaiksuki Bopomofo Brahmi Braille Buginese Buhid Canadian_Aboriginal Carian" +
+	" Caucasian_Albanian Chakma Cham Cherokee Chorasmian Common Coptic Cuneiform Cypriot Cypro_Minoan" +
+	" Cyrillic Deseret Devanagari Dives_Akuru Dogra Duployan Egyptian_Hieroglyphs Elbasan Elymaic" +
+	" Ethiopic Garay Georgian Glagolitic Gothic Grantha Greek Gujarati Gunjala_Gondi Gurmukhi" +
+	" Gurung_Khema Han Hangul Hanifi_Rohingya Hanunoo Hatran Hebrew Hiragana Imperial_Aramaic Inherited" +
+	" Inscriptional_Pahlavi Inscriptional_Parthian Javanese Kaithi Kannada Katakana Kawi Kayah_Li" +
+	" Kharoshthi Khitan_Small_Script Khmer Khojki Khudawadi Kirat_Rai Lao Latin Lepcha Limbu Linear_A" +
+	" Linear_B Lisu Lycian Lydian Mahajani Makasar Malayalam Mandaic Manichaean Marchen Masaram_Gondi" +
+	" Medefaidrin Meetei_Mayek Mende_Kikakui Meroitic_Cursive Meroitic_Hieroglyphs Miao Modi Mongolian" +
+	" Mro Multani Myanmar Nabataean Nag_Mundari Nandinagari New_Tai_Lue Newa Nko Nushu" +
+	" Nyiakeng_Puachue_Hmong Ogham Ol_Chiki Ol_Onal Old_Hungarian Old_Italic Old_North_Arabian" +
+	" Old_Permic Old_Persian Old_Sogdian Old_South_Arabian Old_Turkic Old_Uyghur Oriya Osage Osmanya" +
+	" Pahawh_Hmong Palmyrene Pau_Cin_Hau Phags_Pa Phoenician Psalter_Pahlavi Rejang Runic Samaritan" +
+	" Saurashtra Sharada Shavian Siddham Sidetic SignWriting Sinhala Sogdian Sora_Sompeng Soyombo" +
+	" Sundanese Sunuwar Syloti_Nagri Syriac Tagalog Tagbanwa Tai_Le Tai_Tham Tai_Viet Tai_Yo Takri" +
+	" Tamil Tangsa Tangut Telugu Thaana Thai Tibetan Tifinagh Tirhuta Todhri Tolong_Siki Toto" +
+	" Tulu_Tigalari Ugaritic Vai Vithkuqi Wancho Warang_Citi Yezidi Yi Zanabazar_Square "
+const rxRe2NewSc = " Beria_Erfe Sidetic Tai_Yo Tolong_Siki "
+
+// rxRe2Spec: twin of rxRe2Spec in lib/regex.js.
+func rxRe2Spec(name string) string {
+	switch name {
+	case "d", "digit":
+		return "09"
+	case "s":
+		return "\t\n\f\r  "
+	case "w", "word":
+		return "09AZ__az"
+	case "alnum":
+		return "09AZaz"
+	case "alpha":
+		return "AZaz"
+	case "ascii":
+		return "\x00\x7f"
+	case "blank":
+		return "\t\t  "
+	case "cntrl":
+		return "\x00\x1f\x7f\x7f"
+	case "graph":
+		return "!~"
+	case "lower":
+		return "az"
+	case "print":
+		return " ~"
+	case "punct":
+		return "!/:@[`{~"
+	case "space":
+		return "\t\r  "
+	case "upper":
+		return "AZ"
+	case "xdigit":
+		return "09AFaf"
+	}
+	return ""
+}
+
+type rxRe2Frame struct {
+	alts                     string
+	nalts                    int
+	cur                      []string
+	needs                    []int
+	need                     int
+	cap                      int
+	fold, multi, dotnl, lazy bool
+}
+
+type rxRe2St struct {
+	p                        []rune
+	i, k, n                  int
+	err                      string
+	fold, multi, dotnl, lazy bool
+	frames                   []*rxRe2Frame
+	depth                    int
+	ncap                     int
+	names                    []string
+	nameGroups               []int
+	lastRep                  int
+}
+
+type rxRe2Res struct {
+	out, err   string
+	names      []string
+	nameGroups []int
+}
+
+func (t *rxRe2St) str(from, to int) string { return rxUnitsStr(t.p[from:to]) }
+
+func (t *rxRe2St) fail(code, expr string) {
+	if t.err == "" {
+		t.err = "error parsing regexp: " + code + ": `" + expr + "`"
+	}
+}
+
+func (t *rxRe2St) open(cp int) {
+	t.frames = append(t.frames[:t.depth+1], &rxRe2Frame{cap: cp, fold: t.fold, multi: t.multi, dotnl: t.dotnl, lazy: t.lazy})
+	t.depth++
+}
+
+func (t *rxRe2St) push(text string, need int) {
+	f := t.frames[t.depth]
+	f.cur = append(f.cur, text)
+	f.needs = append(f.needs, need)
+}
+
+func (f *rxRe2Frame) body() string {
+	s := strings.Join(f.cur, "")
+	if f.nalts == 0 {
+		return s
+	}
+	return f.alts + "|" + s
+}
+
+func (f *rxRe2Frame) needOf() int {
+	n := f.need
+	for _, v := range f.needs {
+		if v > n {
+			n = v
+		}
+	}
+	return n
+}
+
+func (t *rxRe2St) bar() {
+	f := t.frames[t.depth]
+	f.need = f.needOf()
+	f.alts = f.body()
+	f.nalts++
+	f.cur, f.needs = nil, nil
+}
+
+func (t *rxRe2St) close() {
+	if t.depth == 0 {
+		t.fail("unexpected )", t.str(0, t.n))
+		return
+	}
+	f := t.frames[t.depth]
+	t.depth--
+	t.fold, t.multi, t.dotnl, t.lazy = f.fold, f.multi, f.dotnl, f.lazy
+	if f.cap > 0 {
+		t.push("("+f.body()+")", f.needOf())
+	} else {
+		t.push("(?:"+f.body()+")", f.needOf())
+	}
+	t.i++
+}
+
+func rxRe2Hex(c rune) string { return "\\x{" + strings.ToUpper(strconv.FormatInt(int64(c), 16)) + "}" }
+
+func (t *rxRe2St) lit(c rune) {
+	s := rxRe2Hex(c)
+	if rxIsWord(c) && c != '_' {
+		s = string(c)
+	}
+	if t.fold {
+		s = "(?iu:" + s + ")"
+	}
+	t.push(s, 0)
+}
+
+type rxRe2Cls struct {
+	lo, hi []rune
+	props  string
+}
+
+func (cls *rxRe2Cls) rng(a, b rune) {
+	cls.lo = append(cls.lo, a)
+	cls.hi = append(cls.hi, b)
+}
+
+func (cls *rxRe2Cls) group(spec string, neg bool) {
+	from := rune(0)
+	for k := 0; k < len(spec); k += 2 {
+		a, b := rune(spec[k]), rune(spec[k+1])
+		if !neg {
+			cls.rng(a, b)
+		} else {
+			if a > from {
+				cls.rng(from, a-1)
+			}
+			from = b + 1
+		}
+	}
+	if neg {
+		cls.rng(from, 0x10FFFF)
+	}
+}
+
+func (cls *rxRe2Cls) text(neg bool) string {
+	s := "["
+	if neg {
+		s = "[^"
+	}
+	for i := range cls.lo {
+		s += rxRe2Hex(cls.lo[i])
+		if cls.hi[i] != cls.lo[i] {
+			s += "-" + rxRe2Hex(cls.hi[i])
+		}
+	}
+	return s + cls.props + "]"
+}
+
+func (t *rxRe2St) pushCls(cls *rxRe2Cls, neg bool) {
+	s := cls.text(neg)
+	if t.fold {
+		s = "(?iu:" + s + ")"
+	}
+	t.push(s, 0)
+}
+
+// rxRe2Canon is regexp/syntax's canonicalName.
+func rxRe2Canon(name string) string {
+	var out []byte
+	first := true
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if c == '_' || c == '-' || c == ' ' {
+			continue
+		}
+		if first {
+			if 'a' <= c && c <= 'z' {
+				c -= 32
+			}
+			first = false
+		} else if 'A' <= c && c <= 'Z' {
+			c += 32
+		}
+		out = append(out, c)
+	}
+	return string(out)
+}
+
+func rxRe2Word(table, canon, sep string) string {
+	for _, w := range strings.Fields(table) {
+		key := w
+		if sep != "" {
+			if k := strings.Index(w, sep); k >= 0 {
+				key = w[:k]
+			}
+		}
+		if rxRe2Canon(key) == canon {
+			return w
+		}
+	}
+	return ""
+}
+
+func rxRe2Prop(name string, sign int) string {
+	p, np := "\\p{", "\\P{"
+	if sign < 0 {
+		p, np = np, p
+	}
+	c := rxRe2Canon(name)
+	switch c {
+	case "Any":
+		return p + "all}"
+	case "Assigned":
+		return np + "Cn}"
+	case "Ascii":
+		return p + "ASCII}"
+	case "Lc":
+		return p + "LC}"
+	}
+	cat := rxRe2Word(rxRe2Cats, c, "")
+	if cat == "" {
+		if al := rxRe2Word(rxRe2CAlias, c, "="); al != "" {
+			cat = al[strings.Index(al, "=")+1:]
+		}
+	}
+	if cat != "" {
+		return p + cat + "}"
+	}
+	sc := rxRe2Word(rxRe2Scripts, c, "")
+	if sc == "" {
+		return ""
+	}
+	if strings.Contains(rxRe2NewSc, " "+sc+" ") {
+		return np + "all}"
+	}
+	return p + "Is" + strings.ToUpper(sc) + "}"
+}
+
+func (t *rxRe2St) uni(at int, cls *rxRe2Cls) int {
+	p := t.p
+	sign := 1
+	if p[at+1] == 'P' {
+		sign = -1
+	}
+	j := at + 2
+	seq, name := "", ""
+	if j >= t.n {
+		seq = t.str(at, j)
+	} else if p[j] != '{' {
+		j++
+		seq, name = t.str(at, j), t.str(at+2, j)
+	} else {
+		end := -1
+		for e := at; e < t.n; e++ {
+			if p[e] == '}' {
+				end = e
+				break
+			}
+		}
+		if end < 0 {
+			t.fail("invalid character class range", t.str(at, t.n))
+			return j
+		}
+		seq, name = t.str(at, end+1), t.str(at+3, end)
+		j = end + 1
+	}
+	if name != "" && name[0] == '^' {
+		sign = -sign
+		name = name[1:]
+	}
+	item := rxRe2Prop(name, sign)
+	if item == "" {
+		t.fail("invalid character class range", seq)
+		return j
+	}
+	cls.props += item
+	return j
+}
+
+func (cls *rxRe2Cls) perl(c rune) bool {
+	lc := c
+	if 'A' <= c && c <= 'Z' {
+		lc = c + 32
+	}
+	if lc != 'd' && lc != 's' && lc != 'w' {
+		return false
+	}
+	cls.group(rxRe2Spec(string(lc)), lc != c)
+	return true
+}
+
+func (t *rxRe2St) esc(at int) rune {
+	p := t.p
+	j := at + 1
+	if j >= t.n {
+		t.fail("trailing backslash at end of expression", "")
+		return -1
+	}
+	c := p[j]
+	j++
+	t.k = j
+	if c < 128 && !(rxIsWord(c) && c != '_') {
+		return c
+	}
+	octal := c == '0'
+	if c >= '1' && c <= '7' {
+		octal = j < t.n && p[j] >= '0' && p[j] <= '7'
+	}
+	if octal {
+		r := c - '0'
+		for n := 1; n < 3 && j < t.n && p[j] >= '0' && p[j] <= '7'; n++ {
+			r = r*8 + p[j] - '0'
+			j++
+		}
+		t.k = j
+		return r
+	}
+	if c == 'x' && j < t.n {
+		x := p[j]
+		j++
+		if x == '{' {
+			nh, v := 0, rune(0)
+			for j < t.n {
+				h := p[j]
+				j++
+				if h == '}' {
+					if nh == 0 {
+						break
+					}
+					t.k = j
+					return v
+				}
+				hv := rune(rxHexVal(h))
+				if !rxIsHex(h) {
+					break
+				}
+				v = v*16 + hv
+				if v > 0x10FFFF {
+					break
+				}
+				nh++
+			}
+		} else {
+			y := rune(-1)
+			if j < t.n {
+				yc := p[j]
+				j++
+				if rxIsHex(yc) {
+					y = rune(rxHexVal(yc))
+				}
+			}
+			if rxIsHex(x) && y >= 0 {
+				t.k = j
+				return rune(rxHexVal(x))*16 + y
+			}
+		}
+	}
+	switch c {
+	case 'a':
+		t.k = j
+		return '\a'
+	case 'f':
+		t.k = j
+		return '\f'
+	case 'n':
+		t.k = j
+		return '\n'
+	case 'r':
+		t.k = j
+		return '\r'
+	case 't':
+		t.k = j
+		return '\t'
+	case 'v':
+		t.k = j
+		return '\v'
+	}
+	t.fail("invalid escape sequence", t.str(at, j))
+	return -1
+}
+
+func (t *rxRe2St) classChar(at, whole int) rune {
+	if at >= t.n {
+		t.fail("missing closing ]", t.str(whole, t.n))
+		return -1
+	}
+	if t.p[at] == '\\' {
+		return t.esc(at)
+	}
+	t.k = at + 1
+	return t.p[at]
+}
+
+func (t *rxRe2St) class() {
+	p := t.p
+	s := t.i
+	j := s + 1
+	neg := false
+	if j < t.n && p[j] == '^' {
+		neg = true
+		j++
+	}
+	cls := &rxRe2Cls{}
+	first := true
+	for t.err == "" && (j >= t.n || p[j] != ']' || first) {
+		first = false
+		if t.n-j > 2 && p[j] == '[' && p[j+1] == ':' {
+			e := -1
+			for k := j + 2; k+1 < t.n; k++ {
+				if p[k] == ':' && p[k+1] == ']' {
+					e = k
+					break
+				}
+			}
+			if e >= 0 {
+				name := t.str(j, e+2)
+				pn := name[2 : len(name)-2]
+				pneg := pn != "" && pn[0] == '^'
+				if pneg {
+					pn = pn[1:]
+				}
+				spec := ""
+				if len(pn) > 1 {
+					spec = rxRe2Spec(pn)
+				}
+				if spec == "" {
+					t.fail("invalid character class range", name)
+					return
+				}
+				cls.group(spec, pneg)
+				j = e + 2
+				continue
+			}
+		}
+		if j+1 < t.n && p[j] == '\\' {
+			d := p[j+1]
+			if d == 'p' || d == 'P' {
+				j = t.uni(j, cls)
+				continue
+			}
+			if cls.perl(d) {
+				j += 2
+				continue
+			}
+		}
+		rs := j
+		lo := t.classChar(j, s)
+		if lo < 0 {
+			return
+		}
+		j = t.k
+		hi := lo
+		if t.n-j >= 2 && p[j] == '-' && p[j+1] != ']' {
+			hi = t.classChar(j+1, s)
+			if hi < 0 {
+				return
+			}
+			j = t.k
+			if hi < lo {
+				t.fail("invalid character class range", t.str(rs, j))
+				return
+			}
+		}
+		cls.rng(lo, hi)
+	}
+	if t.err != "" {
+		return
+	}
+	t.i = j + 1
+	t.pushCls(cls, neg)
+}
+
+// bound is regexp/syntax's parseRepeat; ok is false when '{' is a literal.
+func (t *rxRe2St) bound() (lo, hi, end int, ok bool) {
+	p := t.p
+	j := t.i + 1
+	lo = t.num(j)
+	if lo == -2 {
+		return
+	}
+	j = t.k
+	hi = lo
+	if j >= t.n {
+		return
+	}
+	if p[j] == ',' {
+		j++
+		if j >= t.n {
+			return
+		}
+		if p[j] == '}' {
+			hi = -1
+		} else {
+			hi = t.num(j)
+			if hi == -2 {
+				return
+			}
+			j = t.k
+			if hi == -1 {
+				lo = -1
+			}
+		}
+	}
+	if j >= t.n || p[j] != '}' {
+		return
+	}
+	return lo, hi, j + 1, true
+}
+
+func (t *rxRe2St) num(at int) int {
+	p := t.p
+	if at >= t.n || !rxIsDigit(p[at]) {
+		return -2
+	}
+	if at+1 < t.n && p[at] == '0' && rxIsDigit(p[at+1]) {
+		return -2
+	}
+	j, v := at, 0
+	for j < t.n && rxIsDigit(p[j]) {
+		if v >= 0 {
+			if v >= 100000000 {
+				v = -1
+			} else {
+				v = v*10 + int(p[j]-'0')
+			}
+		}
+		j++
+	}
+	t.k = j
+	return v
+}
+
+func (t *rxRe2St) repeat(op, min, max int, counted bool) {
+	p := t.p
+	q := t.str(op, t.i)
+	lazy := false
+	if t.i < t.n && p[t.i] == '?' {
+		lazy = true
+		t.i++
+	}
+	if t.lastRep >= 0 {
+		t.fail("invalid nested repetition operator", t.str(t.lastRep, t.i))
+		return
+	}
+	f := t.frames[t.depth]
+	if len(f.cur) == 0 {
+		t.fail("missing argument to repetition operator", t.str(op, t.i))
+		return
+	}
+	atom := f.cur[len(f.cur)-1]
+	need := f.needs[len(f.needs)-1]
+	f.cur, f.needs = f.cur[:len(f.cur)-1], f.needs[:len(f.needs)-1]
+	if counted {
+		m := max
+		if m < 0 {
+			m = min
+		}
+		if m == 0 {
+			need = 0
+		} else if need > 1 {
+			need = m * need
+		} else {
+			need = m
+		}
+		if (min >= 2 || max >= 2) && need > 1000 {
+			t.fail("invalid repeat count", t.str(op, t.i))
+			return
+		}
+	}
+	if lazy != t.lazy {
+		q += "?"
+	}
+	t.push("(?:"+atom+")"+q, need)
+}
+
+func (t *rxRe2St) flags() {
+	p := t.p
+	i := t.i
+	named := t.n-i > 4 && p[i+2] == 'P' && p[i+3] == '<'
+	start := i + 4
+	if !named && t.n-i > 3 && p[i+2] == '<' {
+		named = true
+		start = i + 3
+	}
+	if named {
+		end := -1
+		for e := i; e < t.n; e++ {
+			if p[e] == '>' {
+				end = e
+				break
+			}
+		}
+		if end < 0 {
+			t.fail("invalid named capture", t.str(i, t.n))
+			return
+		}
+		name := t.str(start, end)
+		ok := name != ""
+		for _, c := range []rune(name) {
+			if !rxIsWord(c) {
+				ok = false
+			}
+		}
+		if !ok {
+			t.fail("invalid named capture", t.str(i, end+1))
+			return
+		}
+		t.ncap++
+		t.names = append(t.names, name)
+		t.nameGroups = append(t.nameGroups, t.ncap)
+		t.open(t.ncap)
+		t.i = end + 1
+		return
+	}
+	j := i + 2
+	fold, multi, dotnl, ung := t.fold, t.multi, t.dotnl, t.lazy
+	neg, saw := false, false
+loop:
+	for j < t.n {
+		c := p[j]
+		j++
+		switch c {
+		case 'i':
+			fold = !neg
+		case 'm':
+			multi = !neg
+		case 's':
+			dotnl = !neg
+		case 'U':
+			ung = !neg
+		case '-':
+			if neg {
+				break loop
+			}
+			neg, saw = true, false
+			continue
+		case ':', ')':
+			if neg && !saw {
+				break loop
+			}
+			if c == ':' {
+				t.open(0)
+			}
+			t.fold, t.multi, t.dotnl, t.lazy = fold, multi, dotnl, ung
+			t.i = j
+			return
+		default:
+			break loop
+		}
+		saw = true
+	}
+	t.fail("invalid or unsupported Perl syntax", t.str(i, j))
+}
+
+func (t *rxRe2St) escape() {
+	p := t.p
+	i := t.i
+	if i+1 < t.n {
+		d := p[i+1]
+		as := ""
+		switch d {
+		case 'A':
+			as = "\\A"
+		case 'b':
+			as = "\\b"
+		case 'B':
+			as = "\\B"
+		case 'z':
+			as = "\\z"
+		}
+		if as != "" {
+			t.push(as, 0)
+			t.i = i + 2
+			return
+		}
+		if d == 'C' {
+			t.fail("invalid escape sequence", "\\C")
+			return
+		}
+		if d == 'Q' {
+			stop, next := t.n, t.n
+			for e := i + 2; e+1 < t.n; e++ {
+				if p[e] == '\\' && p[e+1] == 'E' {
+					stop, next = e, e+2
+					break
+				}
+			}
+			for j := i + 2; j < stop; j++ {
+				t.lit(p[j])
+			}
+			t.i = next
+			return
+		}
+		cls := &rxRe2Cls{}
+		if d == 'p' || d == 'P' {
+			t.i = t.uni(i, cls)
+			if t.err == "" {
+				t.pushCls(cls, false)
+			}
+			return
+		}
+		if cls.perl(d) {
+			t.i = i + 2
+			t.pushCls(cls, false)
+			return
+		}
+	}
+	r := t.esc(i)
+	if r < 0 {
+		return
+	}
+	t.i = t.k
+	t.lit(r)
+}
+
+func rxRe2(p []rune) *rxRe2Res {
+	t := &rxRe2St{p: p, n: len(p), depth: -1, lastRep: -1}
+	t.open(0)
+	for t.i < t.n && t.err == "" {
+		rep := -1
+		switch c := p[t.i]; c {
+		case '(':
+			if t.i+1 < t.n && p[t.i+1] == '?' {
+				t.flags()
+			} else {
+				t.ncap++
+				t.open(t.ncap)
+				t.i++
+			}
+		case '|':
+			t.bar()
+			t.i++
+		case ')':
+			t.close()
+		case '^', '$':
+			anc := "\\A"
+			if c == '$' {
+				anc = "\\z"
+			}
+			if t.multi {
+				anc = "(?:\\A|(?<=\\x{A}))"
+				if c == '$' {
+					anc = "(?:\\z|(?=\\x{A}))"
+				}
+			}
+			t.push(anc, 0)
+			t.i++
+		case '.':
+			if t.dotnl {
+				t.push("[\\x{0}-\\x{10FFFF}]", 0)
+			} else {
+				t.push("[^\\x{A}]", 0)
+			}
+			t.i++
+		case '[':
+			t.class()
+		case '*', '+', '?':
+			rep = t.i
+			t.i++
+			lo, hi := 0, -1
+			if c == '+' {
+				lo = 1
+			}
+			if c == '?' {
+				hi = 1
+			}
+			t.repeat(rep, lo, hi, false)
+		case '{':
+			lo, hi, end, ok := t.bound()
+			if !ok {
+				t.lit('{')
+				t.i++
+			} else if lo < 0 || lo > 1000 || hi > 1000 || (hi >= 0 && lo > hi) {
+				t.fail("invalid repeat count", t.str(t.i, end))
+			} else {
+				rep = t.i
+				t.i = end
+				t.repeat(rep, lo, hi, true)
+			}
+		case '\\':
+			t.escape()
+		default:
+			if isSurrogate(c) {
+				t.fail("invalid UTF-8", t.str(t.i, t.n))
+			}
+			t.lit(c)
+			t.i++
+		}
+		t.lastRep = rep
+	}
+	if t.err == "" && t.depth != 0 {
+		t.fail("missing closing )", t.str(0, t.n))
+	}
+	res := &rxRe2Res{err: t.err, names: t.names, nameGroups: t.nameGroups}
+	if t.err == "" {
+		res.out = t.frames[0].body()
+	}
+	return res
+}
+
+// emitRepRe2 is an unbounded repeat under R, compiled as Go compiles it; twin of
+// rxEmitRepRe2 in lib/regex.js, which states the rule.
+func (pg *rxProg) emitRepRe2(node *rxNode) {
+	body := node.items[0]
+	for i := 1; i < node.min; i++ {
+		pg.emit(body)
+	}
+	skip := -1
+	if node.min == 0 {
+		skip = pg.add(rxOpSplit, 0, 0, pg.dummy)
+	}
+	m0 := pg.nmarks
+	pg.nmarks += 2
+	pg.add(rxOpMark, m0, 0, pg.dummy)
+	pg.emit(body)
+	keep := pg.add(rxOpProg, m0, 0, pg.dummy)
+	l1 := pg.here()
+	sp := pg.add(rxOpSplit, 0, 0, pg.dummy)
+	pg.add(rxOpMark, m0+1, 0, pg.dummy)
+	pg.emit(body)
+	pg.add(rxOpProg, m0+1, -1, pg.dummy)
+	pg.add(rxOpJmp, l1, 0, pg.dummy)
+	out := pg.here()
+	pg.bs[keep] = out
+	pg.splitTo(sp, l1+1, out, node.greedy)
+	if skip >= 0 {
+		pg.splitTo(skip, skip+1, out, node.greedy)
+	}
+}
+
+// splitTo points the SPLIT at `at` into a loop body and out of it, the body
+// first when greedy.
+func (pg *rxProg) splitTo(at, body, out int, greedy bool) {
+	if greedy {
+		pg.as[at], pg.bs[at] = body, out
+	} else {
+		pg.as[at], pg.bs[at] = out, body
 	}
 }
 
@@ -2636,6 +3545,13 @@ func rxCompile(pattern, flags string) *rxRe {
 	java := strings.ContainsRune(flags, 'J')
 	py := strings.ContainsRune(flags, 'P')
 	bfail := java || py || strings.ContainsRune(flags, 'n')
+	// R reads the pattern as Go does and compiles its J spelling (rxRe2).
+	re2 := strings.ContainsRune(flags, 'R')
+	tr := rxRe2(nil)
+	if re2 {
+		tr = rxRe2(wtf8Runes(pattern))
+		java, bfail = true, true
+	}
 	ucase := java && strings.ContainsRune(flags, 'u')
 	unix := java && strings.ContainsRune(flags, 'd')
 	// The POSIX ERE dialect (bash's [[ =~ ]]). What it changes is spelled out at each
@@ -2660,12 +3576,15 @@ func rxCompile(pattern, flags string) *rxRe {
 	if java {
 		pat = wtf8Runes(pattern)
 	}
+	if re2 {
+		pat = wtf8Runes(tr.out)
+	}
 	if quoting {
 		pat = rxExpandQuotes(pat)
 	}
 	st := &rxSt{p: pat, ext: ext, dotall: dotall, octal: octal, ere: ere, posix: posix, java: java, errAt: -1,
 		py: py, icase: icase, multi: multi, ucase: ucase, unix: unix, gnodes: []*rxNode{nil},
-		pyuni: py && !strings.ContainsRune(flags, 'a')}
+		pyuni: py && !strings.ContainsRune(flags, 'a'), re2: re2}
 	// Under P and J case folding and line anchoring are decided per atom while
 	// parsing.
 	if py || java {
@@ -2696,6 +3615,9 @@ func rxCompile(pattern, flags string) *rxRe {
 	if py && st.err == "" && st.lookbVarP(ast) {
 		st.fail("look-behind requires fixed-width pattern")
 	}
+	if tr.err != "" {
+		st.err = tr.err
+	}
 	if st.err != "" {
 		return &rxRe{ok: false, err: st.err, errAt: st.errAt, icase: icase, dotall: dotall, multi: multi,
 			jsrep: jsrep, java: java, bfail: bfail, src: pattern, flags: flags}
@@ -2705,16 +3627,20 @@ func rxCompile(pattern, flags string) *rxRe {
 	if java {
 		gflags = st.getFlags()
 	}
-	pg := &rxProg{jsrep: jsrep, java: java, dummy: rxNewCls()}
+	pg := &rxProg{jsrep: jsrep, java: java, re2: re2, dummy: rxNewCls()}
 	pg.add(rxOpSave, 0, 0, pg.dummy)
 	pg.emit(ast)
 	pg.add(rxOpSave, 1, 0, pg.dummy)
 	pg.add(rxOpMatch, 0, 0, pg.dummy)
+	names, nameGroups := st.names, st.nameGroups
+	if re2 {
+		names, nameGroups = tr.names, tr.nameGroups
+	}
 	return &rxRe{
 		ok: true, ops: pg.ops, as: pg.as, bs: pg.bs, clss: pg.clss,
-		ngroups: st.ngroups, nmarks: pg.nmarks, names: st.names, nameGroups: st.nameGroups,
+		ngroups: st.ngroups, nmarks: pg.nmarks, names: names, nameGroups: nameGroups,
 		icase: icase, dotall: dotall, multi: multi, jsrep: jsrep, java: java, errAt: -1,
-		supp: java && (st.supp || rxSuppJ(ast) || rxHasSurr(pat)), bfail: bfail, gflags: gflags,
+		supp: java && (re2 || st.supp || rxSuppJ(ast) || rxHasSurr(pat)), bfail: bfail, gflags: gflags,
 		cmin: pg.cmin, cmax: pg.cmax, cgreedy: pg.cgreedy, lbmin: pg.lbmin, lbmax: pg.lbmax,
 		src: pattern, flags: flags,
 	}
@@ -3023,7 +3949,8 @@ func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt)
 				//     1 keeps "aaa", which is what node and bash print.
 				// Failing here always terminates: the SPLIT above has exactly one
 				// alternative left, and it is the loop exit.
-				if re.jsrep {
+				// Under R a PROG whose b is -1 always fails (emitRepRe2).
+				if re.jsrep || re.bs[pc] < 0 {
 					return -1
 				}
 				pc = re.bs[pc]

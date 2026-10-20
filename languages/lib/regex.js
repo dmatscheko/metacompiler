@@ -92,6 +92,10 @@
 //                                            rxPyWordHit)
 //                                            a (P only: re.ASCII, as the inline a:
 //                                            \w \W \b \B are ASCII's)
+//                                            R (Go's regexp: RE2 syntax with Go's
+//                                            error texts, rewritten into J by
+//                                            rxRe2, and Go's matching rules - see
+//                                            rxRe2; re.names are Go's group names)
 //                                            re.ok is false and re.err is set on a
 //                                            bad pattern; re.errAt is the error's
 //                                            index into the pattern, or -1.
@@ -1784,7 +1788,8 @@ function rxParseAtom(st) {
             if (nxt == 90) { a.gidx = st.py ? RX_EOS : RX_EOSNL }
             if (st.pyuni && nxt == 98) { a.gidx = RX_PUWORDB }
             if (st.pyuni && nxt == 66) { a.gidx = RX_PUNWORDB }
-            if (st.java) {
+            // Go's \b and \B are ASCII \w ones (R).
+            if (st.java && !st.re2) {
                 if (nxt == 98) { a.gidx = st.uclass ? RX_JUWORDB : RX_JWORDB }
                 if (nxt == 66) { a.gidx = st.uclass ? RX_JUNWORDB : RX_JNWORDB }
                 if (nxt == 90) { a.gidx = rxEolJ(st, false) }
@@ -2040,7 +2045,7 @@ function rxParsePiece(st) {
         rep.min = minV
         rep.max = maxV
         rep.greedy = true
-        rep.cnt = counted
+        rep.cnt = counted && !st.re2
         // A POSIX ERE has no lazy or possessive form, so the ? of "a*?" is a SECOND
         // quantifier there rather than a modifier of the first.
         if (st.java) { rxSkipX(st) }
@@ -2124,7 +2129,7 @@ function rxParseAlt(st) {
 // cmin/cmax/cgreedy describe counted loop i (RX_CINIT .. RX_CINC), lbmin/lbmax
 // the length range of lookbehind i (-1: unbounded).
 function rxNewProg() {
-    return {ops: [], as: [], bs: [], clss: [], nmarks: 0, jsrep: false, java: false, dummy: rxNewCls(),
+    return {ops: [], as: [], bs: [], clss: [], nmarks: 0, jsrep: false, java: false, re2: false, dummy: rxNewCls(),
             cmin: [], cmax: [], cgreedy: [], lbmin: [], lbmax: []}
 }
 
@@ -2423,6 +2428,10 @@ function rxEmitClear(pg, body) {
 }
 
 function rxEmitRep(pg, node) {
+    if (pg.re2 && node.max < 0) {
+        rxEmitRepRe2(pg, node)
+        return
+    }
     var body = node.items[0]
     var i = 0
     while (i < node.min) {
@@ -2479,6 +2488,765 @@ function rxEmitRep(pg, node) {
     }
 }
 
+
+// rxEmitRepRe2 is an unbounded repeat under R, compiled as Go compiles it:
+// x{n,} is n-1 copies of x and then x+, x* is (x+)?, and Go's matcher never
+// enters the same instruction at the same position twice. So the first
+// iteration of the x+ may match empty, and is then the last one (the loop
+// stands where that iteration began); a later iteration that matches empty
+// brings the loop back to where it already stood and FAILS (PROG with b = -1),
+// which undoes it, captures included. regexp/syntax's compile.go.
+function rxEmitRepRe2(pg, node) {
+    var body = node.items[0]
+    var i = 1
+    while (i < node.min) {
+        rxEmit(pg, body)
+        i = i + 1
+    }
+    var skip = -1
+    if (node.min == 0) { skip = rxAdd(pg, RX_SPLIT, 0, 0, pg.dummy) }
+    var m0 = pg.nmarks
+    pg.nmarks = m0 + 2
+    rxAdd(pg, RX_MARK, m0, 0, pg.dummy)
+    rxEmit(pg, body)
+    var keep = rxAdd(pg, RX_PROG, m0, 0, pg.dummy)
+    var l1 = rxHere(pg)
+    var sp = rxAdd(pg, RX_SPLIT, 0, 0, pg.dummy)
+    rxAdd(pg, RX_MARK, m0 + 1, 0, pg.dummy)
+    rxEmit(pg, body)
+    rxAdd(pg, RX_PROG, m0 + 1, 0 - 1, pg.dummy)
+    rxAdd(pg, RX_JMP, l1, 0, pg.dummy)
+    var out = rxHere(pg)
+    rxSetB(pg, keep, out)
+    rxSplitTo(pg, sp, l1 + 1, out, node.greedy)
+    if (skip >= 0) { rxSplitTo(pg, skip, skip + 1, out, node.greedy) }
+}
+
+// rxSplitTo points the SPLIT at `at` into a loop body and out of it, the body
+// first when greedy.
+function rxSplitTo(pg, at, body, out, greedy) {
+    if (greedy) {
+        rxSetA(pg, at, body)
+        rxSetB(pg, at, out)
+    } else {
+        rxSetA(pg, at, out)
+        rxSetB(pg, at, body)
+    }
+}
+
+// ===== The RE2 dialect (flag R): Go's regexp/syntax =====
+//
+// rxRe2 reads a pattern the way Go's regexp.Compile does (regexp/syntax's Parse
+// with the Perl flags) and answers {out, err, names, nameGroups}: err is Go's
+// "error parsing regexp: CODE: `EXPR`" for a pattern Go rejects, and otherwise
+// out is the same pattern spelled in the J dialect so that J reads exactly what
+// Go means. A literal is \x{h}, inside (?iu:..) under (?i); . and the Perl and
+// POSIX classes are explicit classes; ^ and $ are \A and \z, or under (?m) an
+// alternation with a newline look-around; \pN and \p{Greek} are J's properties;
+// (?U) is applied to every quantifier; a named group is a plain group whose
+// name the result carries, since Go allows any [A-Za-z0-9_]+. Matching is J's
+// with re2 set (rxEmitRepRe2, the ASCII \b, code-point steps).
+// Twin: rxRe2 in abnf/jsrtregex.go.
+
+// Go's unicode.Categories keys, unicode.CategoryAliases (Name=Key) and
+// unicode.Scripts keys (Unicode 17), for \p{..}.
+var RX_RE2_CATS = " C Cc Cf Cn Co Cs L Ll Lm Lo Lt Lu M Mc Me Mn N Nd Nl No P Pc Pd Pe Pf Pi Po Ps S Sc Sk Sm So Z Zl Zp Zs "
+var RX_RE2_CALIAS = " Cased_Letter=LC Close_Punctuation=Pe Combining_Mark=M Connector_Punctuation=Pc Control=Cc"
+    + " Currency_Symbol=Sc Dash_Punctuation=Pd Decimal_Number=Nd Enclosing_Mark=Me Final_Punctuation=Pf"
+    + " Format=Cf Initial_Punctuation=Pi Letter=L Letter_Number=Nl Line_Separator=Zl Lowercase_Letter=Ll"
+    + " Mark=M Math_Symbol=Sm Modifier_Letter=Lm Modifier_Symbol=Sk Nonspacing_Mark=Mn Number=N"
+    + " Open_Punctuation=Ps Other=C Other_Letter=Lo Other_Number=No Other_Punctuation=Po Other_Symbol=So"
+    + " Paragraph_Separator=Zp Private_Use=Co Punctuation=P Separator=Z Space_Separator=Zs Spacing_Mark=Mc"
+    + " Surrogate=Cs Symbol=S Titlecase_Letter=Lt Unassigned=Cn Uppercase_Letter=Lu cntrl=Cc digit=Nd punct=P "
+var RX_RE2_SCRIPTS = " Adlam Ahom Anatolian_Hieroglyphs Arabic Armenian Avestan Balinese Bamum Bassa_Vah Batak"
+    + " Bengali Beria_Erfe Bhaiksuki Bopomofo Brahmi Braille Buginese Buhid Canadian_Aboriginal Carian"
+    + " Caucasian_Albanian Chakma Cham Cherokee Chorasmian Common Coptic Cuneiform Cypriot Cypro_Minoan"
+    + " Cyrillic Deseret Devanagari Dives_Akuru Dogra Duployan Egyptian_Hieroglyphs Elbasan Elymaic"
+    + " Ethiopic Garay Georgian Glagolitic Gothic Grantha Greek Gujarati Gunjala_Gondi Gurmukhi"
+    + " Gurung_Khema Han Hangul Hanifi_Rohingya Hanunoo Hatran Hebrew Hiragana Imperial_Aramaic Inherited"
+    + " Inscriptional_Pahlavi Inscriptional_Parthian Javanese Kaithi Kannada Katakana Kawi Kayah_Li"
+    + " Kharoshthi Khitan_Small_Script Khmer Khojki Khudawadi Kirat_Rai Lao Latin Lepcha Limbu Linear_A"
+    + " Linear_B Lisu Lycian Lydian Mahajani Makasar Malayalam Mandaic Manichaean Marchen Masaram_Gondi"
+    + " Medefaidrin Meetei_Mayek Mende_Kikakui Meroitic_Cursive Meroitic_Hieroglyphs Miao Modi Mongolian"
+    + " Mro Multani Myanmar Nabataean Nag_Mundari Nandinagari New_Tai_Lue Newa Nko Nushu"
+    + " Nyiakeng_Puachue_Hmong Ogham Ol_Chiki Ol_Onal Old_Hungarian Old_Italic Old_North_Arabian"
+    + " Old_Permic Old_Persian Old_Sogdian Old_South_Arabian Old_Turkic Old_Uyghur Oriya Osage Osmanya"
+    + " Pahawh_Hmong Palmyrene Pau_Cin_Hau Phags_Pa Phoenician Psalter_Pahlavi Rejang Runic Samaritan"
+    + " Saurashtra Sharada Shavian Siddham Sidetic SignWriting Sinhala Sogdian Sora_Sompeng Soyombo"
+    + " Sundanese Sunuwar Syloti_Nagri Syriac Tagalog Tagbanwa Tai_Le Tai_Tham Tai_Viet Tai_Yo Takri"
+    + " Tamil Tangsa Tangut Telugu Thaana Thai Tibetan Tifinagh Tirhuta Todhri Tolong_Siki Toto"
+    + " Tulu_Tigalari Ugaritic Vai Vithkuqi Wancho Warang_Citi Yezidi Yi Zanabazar_Square "
+// The scripts Unicode 17 added, which J's tables (Java's Unicode) do not know:
+// their characters are unassigned there, so \p{Sidetic} matches nothing.
+var RX_RE2_NEWSC = " Beria_Erfe Sidetic Tai_Yo Tolong_Siki "
+// regexp/syntax's perl_groups.go: the ranges of \d \s \w and of the POSIX
+// [:name:] classes, as pairs of characters (low, high); "" for another name.
+function rxRe2Spec(name) {
+    if (name == "d" || name == "digit") { return "09" }
+    if (name == "s") { return "\t\n\f\r  " }
+    if (name == "w" || name == "word") { return "09AZ__az" }
+    if (name == "alnum") { return "09AZaz" }
+    if (name == "alpha") { return "AZaz" }
+    if (name == "ascii") { return "\u0000\u007f" }
+    if (name == "blank") { return "\t\t  " }
+    if (name == "cntrl") { return "\u0000\u001f\u007f\u007f" }
+    if (name == "graph") { return "!~" }
+    if (name == "lower") { return "az" }
+    if (name == "print") { return " ~" }
+    if (name == "punct") { return "!/:@[`{~" }
+    if (name == "space") { return "\t\r  " }
+    if (name == "upper") { return "AZ" }
+    if (name == "xdigit") { return "09AFaf" }
+    return ""
+}
+
+function rxRe2Fail(t, code, expr) {
+    if (t.err == "") { t.err = "error parsing regexp: " + code + ": `" + expr + "`" }
+}
+
+// The parse state: the flags in force, and one frame per open group holding the
+// alternatives read so far (alts, nalts), the atoms of the current one (cur,
+// with each atom's need) and the flags to restore at its ')'.
+function rxRe2Open(t, cap) {
+    var f = {alts: "", nalts: 0, cur: [], needs: [], need: 0, cap: cap,
+             fold: t.fold, multi: t.multi, dotnl: t.dotnl, lazy: t.lazy}
+    var fr = t.frames
+    if (t.depth + 1 < fr.length) { fr[t.depth + 1] = f } else { fr.push(f) }
+    t.depth = t.depth + 1
+}
+
+function rxRe2Push(t, text, need) {
+    var f = t.frames[t.depth]
+    var cur = f.cur
+    cur.push(text)
+    var needs = f.needs
+    needs.push(need)
+}
+
+// The text of a group's body: its alternatives and the current one.
+function rxRe2Body(f) {
+    var cur = f.cur
+    var s = ""
+    var i = 0
+    while (i < cur.length) {
+        s = s + cur[i]
+        i = i + 1
+    }
+    if (f.nalts == 0) { return s }
+    return f.alts + "|" + s
+}
+
+// A group's need: the largest over its atoms. need is what regexp/syntax's
+// repeatIsValid asks of the repeats inside an atom - the least n for which they
+// fit in n copies - so a counted repeat {..m} over an atom of need k needs
+// max(m, m * k), and Go rejects one whose need passes 1000.
+function rxRe2Need(f) {
+    var n = f.need
+    var needs = f.needs
+    var i = 0
+    while (i < needs.length) {
+        if (needs[i] > n) { n = needs[i] }
+        i = i + 1
+    }
+    return n
+}
+
+function rxRe2Bar(t) {
+    var f = t.frames[t.depth]
+    f.need = rxRe2Need(f)
+    f.alts = rxRe2Body(f)
+    f.nalts = f.nalts + 1
+    f.cur = []
+    f.needs = []
+}
+
+function rxRe2Close(t) {
+    if (t.depth == 0) {
+        rxRe2Fail(t, "unexpected )", t.p)
+        return
+    }
+    var f = t.frames[t.depth]
+    t.depth = t.depth - 1
+    t.fold = f.fold
+    t.multi = f.multi
+    t.dotnl = f.dotnl
+    t.lazy = f.lazy
+    var body = rxRe2Body(f)
+    rxRe2Push(t, f.cap > 0 ? "(" + body + ")" : "(?:" + body + ")", rxRe2Need(f))
+    t.i = t.i + 1
+}
+
+function rxRe2Hex(c) {
+    var d = "0123456789ABCDEF"
+    var s = ""
+    var v = c
+    while (v >= 16) {
+        s = d.charAt(v % 16) + s
+        v = Math.floor(v / 16)
+    }
+    return "\\x{" + d.charAt(v) + s + "}"
+}
+
+function rxRe2Lit(t, c) {
+    var s = rxRe2Hex(c)
+    if (rxIsWordCode(c) && c != 95) { s = rxCpStr(c) }
+    rxRe2Push(t, t.fold ? "(?iu:" + s + ")" : s, 0)
+}
+
+// A class under construction: lo/hi range pairs and J property items (props).
+function rxRe2Cls() { return {lo: [], hi: [], props: ""} }
+
+function rxRe2Range(cls, a, b) {
+    var lo = cls.lo
+    var hi = cls.hi
+    lo.push(a)
+    hi.push(b)
+}
+
+// rxRe2Group adds the ranges of spec (rxRe2Spec), or every character outside
+// them when neg.
+function rxRe2Group(cls, spec, neg) {
+    var from = 0
+    var k = 0
+    while (k < spec.length) {
+        var a = spec.charCodeAt(k)
+        var b = spec.charCodeAt(k + 1)
+        k = k + 2
+        if (!neg) { rxRe2Range(cls, a, b) }
+        else {
+            if (a > from) { rxRe2Range(cls, from, a - 1) }
+            from = b + 1
+        }
+    }
+    if (neg) { rxRe2Range(cls, from, 1114111) }
+}
+
+function rxRe2ClsText(cls, neg) {
+    var s = neg ? "[^" : "["
+    var lo = cls.lo
+    var hi = cls.hi
+    var i = 0
+    while (i < lo.length) {
+        s = s + rxRe2Hex(lo[i])
+        if (hi[i] != lo[i]) { s = s + "-" + rxRe2Hex(hi[i]) }
+        i = i + 1
+    }
+    return s + cls.props + "]"
+}
+
+function rxRe2PushCls(t, cls, neg) {
+    var s = rxRe2ClsText(cls, neg)
+    rxRe2Push(t, t.fold ? "(?iu:" + s + ")" : s, 0)
+}
+
+// regexp/syntax's canonicalName: no _ - or space, the first letter upper case
+// and the others lower case.
+function rxRe2Canon(name) {
+    var out = ""
+    var first = true
+    var i = 0
+    while (i < name.length) {
+        var c = name.charCodeAt(i)
+        i = i + 1
+        if (c == 95 || c == 45 || c == 32) { continue }
+        if (first) {
+            if (c >= 97 && c <= 122) { c = c - 32 }
+            first = false
+        } else if (c >= 65 && c <= 90) { c = c + 32 }
+        out = out + String.fromCharCode(c)
+    }
+    return out
+}
+
+// rxRe2Word finds the word in table (space-separated) whose canonical name is
+// canon, from index 1 on, and answers it, or "".
+function rxRe2Word(table, canon, sep) {
+    var i = 1
+    while (i < table.length) {
+        var e = table.indexOf(" ", i)
+        var w = table.substring(i, e)
+        var key = w
+        var k = sep.length > 0 ? w.indexOf(sep) : 0 - 1
+        if (k >= 0) { key = w.substring(0, k) }
+        if (rxRe2Canon(key) == canon) { return w }
+        i = e + 1
+    }
+    return ""
+}
+
+// The J item for Go's \p{name} (sign -1: \P{name}), or "" when Go knows no such
+// name: regexp/syntax's unicodeTable.
+function rxRe2Prop(name, sign) {
+    var p = sign > 0 ? "\\p{" : "\\P{"
+    var c = rxRe2Canon(name)
+    if (c == "Any") { return p + "all}" }
+    if (c == "Assigned") { return (sign > 0 ? "\\P{" : "\\p{") + "Cn}" }
+    if (c == "Ascii") { return p + "ASCII}" }
+    if (c == "Lc") { return p + "LC}" }
+    var cat = rxRe2Word(RX_RE2_CATS, c, "")
+    if (cat == "") {
+        var al = rxRe2Word(RX_RE2_CALIAS, c, "=")
+        if (al != "") { cat = al.substring(al.indexOf("=") + 1, al.length) }
+    }
+    if (cat == "LC") { return p + "LC}" }
+    if (cat != "") { return p + cat + "}" }
+    var sc = rxRe2Word(RX_RE2_SCRIPTS, c, "")
+    if (sc == "") { return "" }
+    if (RX_RE2_NEWSC.indexOf(" " + sc + " ") >= 0) { return (sign > 0 ? "\\P{" : "\\p{") + "all}" }
+    return p + "Is" + sc.toUpperCase() + "}"
+}
+
+// \p.. or \P.. at index at: its J item goes into cls, and the index after it
+// is the answer (regexp/syntax's parseUnicodeClass).
+function rxRe2Uni(t, at, cls) {
+    var p = t.p
+    var sign = p.charCodeAt(at + 1) == 80 ? 0 - 1 : 1
+    var j = at + 2
+    var seq = ""
+    var name = ""
+    if (j >= t.n) {
+        seq = p.substring(at, j)
+    } else if (p.charCodeAt(j) != 123) {
+        j = j + (rxCpAt(p, j) > 65535 ? 2 : 1)
+        seq = p.substring(at, j)
+        name = p.substring(at + 2, j)
+    } else {
+        var end = p.indexOf("}", at)
+        if (end < 0) {
+            rxRe2Fail(t, "invalid character class range", p.substring(at, t.n))
+            return j
+        }
+        seq = p.substring(at, end + 1)
+        name = p.substring(at + 3, end)
+        j = end + 1
+    }
+    if (name.length > 0 && name.charCodeAt(0) == 94) {
+        sign = 0 - sign
+        name = name.substring(1, name.length)
+    }
+    var item = rxRe2Prop(name, sign)
+    if (item == "") {
+        rxRe2Fail(t, "invalid character class range", seq)
+        return j
+    }
+    cls.props = cls.props + item
+    return j
+}
+
+// The Perl class \d \D \s \S \w \W whose letter is c, into cls; false for any
+// other letter.
+function rxRe2Perl(cls, c) {
+    var lc = c >= 65 && c <= 90 ? c + 32 : c
+    if (lc != 100 && lc != 115 && lc != 119) { return false }
+    rxRe2Group(cls, rxRe2Spec(String.fromCharCode(lc)), lc != c)
+    return true
+}
+
+// The escape at index at (regexp/syntax's parseEscape): its character, with the
+// index after it in t.k, or -1 after reporting Go's error.
+function rxRe2Esc(t, at) {
+    var p = t.p
+    var j = at + 1
+    if (j >= t.n) {
+        rxRe2Fail(t, "trailing backslash at end of expression", "")
+        return 0 - 1
+    }
+    var c = rxCpAt(p, j)
+    j = j + (c > 65535 ? 2 : 1)
+    t.k = j
+    if (c < 128 && !(rxIsWordCode(c) && c != 95)) { return c }
+    var octal = c == 48
+    if (c >= 49 && c <= 55) { octal = j < t.n && p.charCodeAt(j) >= 48 && p.charCodeAt(j) <= 55 }
+    if (octal) {
+        var r = c - 48
+        var n = 1
+        while (n < 3 && j < t.n && p.charCodeAt(j) >= 48 && p.charCodeAt(j) <= 55) {
+            r = r * 8 + p.charCodeAt(j) - 48
+            j = j + 1
+            n = n + 1
+        }
+        t.k = j
+        return r
+    }
+    if (c == 120 && j < t.n) {
+        var x = rxCpAt(p, j)
+        j = j + (x > 65535 ? 2 : 1)
+        if (x == 123) {
+            var nh = 0
+            var v = 0
+            while (true) {
+                if (j >= t.n) { break }
+                var h = rxCpAt(p, j)
+                j = j + (h > 65535 ? 2 : 1)
+                if (h == 125) {
+                    if (nh == 0) { break }
+                    t.k = j
+                    return v
+                }
+                var hv = rxIsHexCode(h) ? rxHexVal(h) : 0 - 1
+                if (hv < 0) { break }
+                v = v * 16 + hv
+                if (v > 1114111) { break }
+                nh = nh + 1
+            }
+        } else {
+            var y = -1
+            if (j < t.n) {
+                var yc = rxCpAt(p, j)
+                j = j + (yc > 65535 ? 2 : 1)
+                if (rxIsHexCode(yc)) { y = rxHexVal(yc) }
+            }
+            if (rxIsHexCode(x) && y >= 0) {
+                t.k = j
+                return rxHexVal(x) * 16 + y
+            }
+        }
+    }
+    var simple = "a\u0007f\u000cn\nr\rt\tv\u000b"
+    var s = 0
+    while (s < simple.length) {
+        if (simple.charCodeAt(s) == c) {
+            t.k = j
+            return simple.charCodeAt(s + 1)
+        }
+        s = s + 2
+    }
+    rxRe2Fail(t, "invalid escape sequence", p.substring(at, j))
+    return 0 - 1
+}
+
+// One character of a class at index at, with the index after it in t.k; -1
+// after an error.
+function rxRe2ClassChar(t, at, whole) {
+    if (at >= t.n) {
+        rxRe2Fail(t, "missing closing ]", t.p.substring(whole, t.n))
+        return 0 - 1
+    }
+    if (t.p.charCodeAt(at) == 92) { return rxRe2Esc(t, at) }
+    var c = rxCpAt(t.p, at)
+    t.k = at + (c > 65535 ? 2 : 1)
+    return c
+}
+
+// A bracketed class at t.i (regexp/syntax's parseClass).
+function rxRe2Class(t) {
+    var p = t.p
+    var s = t.i
+    var j = s + 1
+    var neg = false
+    if (j < t.n && p.charCodeAt(j) == 94) {
+        neg = true
+        j = j + 1
+    }
+    var cls = rxRe2Cls()
+    var first = true
+    while (t.err == "" && (j >= t.n || p.charCodeAt(j) != 93 || first)) {
+        first = false
+        if (t.n - j > 2 && p.charCodeAt(j) == 91 && p.charCodeAt(j + 1) == 58) {
+            var e = p.indexOf(":]", j + 2)
+            if (e >= 0) {
+                var name = p.substring(j, e + 2)
+                var pn = name.substring(2, name.length - 2)
+                var pneg = pn.length > 0 && pn.charCodeAt(0) == 94
+                if (pneg) { pn = pn.substring(1, pn.length) }
+                var spec = pn.length > 1 ? rxRe2Spec(pn) : ""
+                if (spec == "") {
+                    rxRe2Fail(t, "invalid character class range", name)
+                    return
+                }
+                rxRe2Group(cls, spec, pneg)
+                j = e + 2
+                continue
+            }
+        }
+        if (j + 1 < t.n && p.charCodeAt(j) == 92) {
+            var d = p.charCodeAt(j + 1)
+            if (d == 112 || d == 80) {
+                j = rxRe2Uni(t, j, cls)
+                continue
+            }
+            if (rxRe2Perl(cls, d)) {
+                j = j + 2
+                continue
+            }
+        }
+        var rs = j
+        var lo = rxRe2ClassChar(t, j, s)
+        if (lo < 0) { return }
+        j = t.k
+        var hi = lo
+        if (t.n - j >= 2 && p.charCodeAt(j) == 45 && p.charCodeAt(j + 1) != 93) {
+            hi = rxRe2ClassChar(t, j + 1, s)
+            if (hi < 0) { return }
+            j = t.k
+            if (hi < lo) {
+                rxRe2Fail(t, "invalid character class range", p.substring(rs, j))
+                return
+            }
+        }
+        rxRe2Range(cls, lo, hi)
+    }
+    if (t.err != "") { return }
+    t.i = j + 1
+    rxRe2PushCls(t, cls, neg)
+}
+
+// regexp/syntax's parseRepeat at t.i: {min}, {min,} or {min,max}, as
+// {min, max (-1: none), end}; null when the text is not one, and then '{' is a
+// literal. A number of more than eight digits reads as -1, which Go rejects.
+function rxRe2Bound(t) {
+    var p = t.p
+    var j = t.i + 1
+    var lo = rxRe2Int(t, j)
+    if (lo == 0 - 2) { return null }
+    j = t.k
+    var hi = lo
+    if (j >= t.n) { return null }
+    if (p.charCodeAt(j) == 44) {
+        j = j + 1
+        if (j >= t.n) { return null }
+        if (p.charCodeAt(j) == 125) { hi = 0 - 1 }
+        else {
+            hi = rxRe2Int(t, j)
+            if (hi == 0 - 2) { return null }
+            j = t.k
+            if (hi == 0 - 1) { lo = 0 - 1 }
+        }
+    }
+    if (j >= t.n || p.charCodeAt(j) != 125) { return null }
+    return {min: lo, max: hi, end: j + 1}
+}
+
+// A decimal number at index at with no leading zero, the index after it in t.k:
+// -2 when there is none, -1 when it has more than eight digits.
+function rxRe2Int(t, at) {
+    var p = t.p
+    if (at >= t.n || !rxIsDigitCode(p.charCodeAt(at))) { return 0 - 2 }
+    if (at + 1 < t.n && p.charCodeAt(at) == 48 && rxIsDigitCode(p.charCodeAt(at + 1))) { return 0 - 2 }
+    var j = at
+    var v = 0
+    while (j < t.n && rxIsDigitCode(p.charCodeAt(j))) {
+        if (v >= 0) { v = v >= 100000000 ? 0 - 1 : v * 10 + p.charCodeAt(j) - 48 }
+        j = j + 1
+    }
+    t.k = j
+    return v
+}
+
+// A repetition operator spelled from index op to t.i (regexp/syntax's repeat):
+// a trailing ? makes it lazy, a repeat may not follow a repeat, and it applies
+// to the atom before it.
+function rxRe2Repeat(t, op, min, max, counted) {
+    var p = t.p
+    var q = p.substring(op, t.i)
+    var lazy = false
+    if (t.i < t.n && p.charCodeAt(t.i) == 63) {
+        lazy = true
+        t.i = t.i + 1
+    }
+    if (t.lastRep >= 0) {
+        rxRe2Fail(t, "invalid nested repetition operator", p.substring(t.lastRep, t.i))
+        return
+    }
+    var f = t.frames[t.depth]
+    var cur = f.cur
+    if (cur.length == 0) {
+        rxRe2Fail(t, "missing argument to repetition operator", p.substring(op, t.i))
+        return
+    }
+    var atom = cur.pop()
+    var needs = f.needs
+    var need = needs.pop()
+    if (counted) {
+        var m = max < 0 ? min : max
+        need = m == 0 ? 0 : (need > 1 ? m * need : m)
+        if ((min >= 2 || max >= 2) && need > 1000) {
+            rxRe2Fail(t, "invalid repeat count", p.substring(op, t.i))
+            return
+        }
+    }
+    rxRe2Push(t, "(?:" + atom + ")" + q + (lazy == t.lazy ? "" : "?"), need)
+}
+
+// (?..: a named group, a flag change, or a non-capturing group with flags
+// (regexp/syntax's parsePerlFlags). A flag change lasts to the end of the
+// enclosing group.
+function rxRe2Flags(t) {
+    var p = t.p
+    var i = t.i
+    var named = t.n - i > 4 && p.charCodeAt(i + 2) == 80 && p.charCodeAt(i + 3) == 60
+    var start = i + 4
+    if (!named && t.n - i > 3 && p.charCodeAt(i + 2) == 60) {
+        named = true
+        start = i + 3
+    }
+    if (named) {
+        var end = p.indexOf(">", i)
+        if (end < 0) {
+            rxRe2Fail(t, "invalid named capture", p.substring(i, t.n))
+            return
+        }
+        var name = p.substring(start, end)
+        var ok = name.length > 0
+        var k = 0
+        while (k < name.length) {
+            if (!rxIsWordCode(name.charCodeAt(k))) { ok = false }
+            k = k + 1
+        }
+        if (!ok) {
+            rxRe2Fail(t, "invalid named capture", p.substring(i, end + 1))
+            return
+        }
+        t.ncap = t.ncap + 1
+        var names = t.names
+        names.push(name)
+        var groups = t.nameGroups
+        groups.push(t.ncap)
+        rxRe2Open(t, t.ncap)
+        t.i = end + 1
+        return
+    }
+    var j = i + 2
+    var fold = t.fold
+    var multi = t.multi
+    var dotnl = t.dotnl
+    var ung = t.lazy
+    var neg = false
+    var saw = false
+    while (j < t.n) {
+        var c = rxCpAt(p, j)
+        j = j + (c > 65535 ? 2 : 1)
+        if (c == 105) { fold = !neg }
+        else if (c == 109) { multi = !neg }
+        else if (c == 115) { dotnl = !neg }
+        else if (c == 85) { ung = !neg }
+        else if (c == 45) {
+            if (neg) { break }
+            neg = true
+            saw = false
+            continue
+        } else if (c == 58 || c == 41) {
+            if (neg && !saw) { break }
+            if (c == 58) { rxRe2Open(t, 0) }
+            t.fold = fold
+            t.multi = multi
+            t.dotnl = dotnl
+            t.lazy = ung
+            t.i = j
+            return
+        } else { break }
+        saw = true
+    }
+    rxRe2Fail(t, "invalid or unsupported Perl syntax", p.substring(i, j))
+}
+
+// A backslash at t.i outside a class.
+function rxRe2Escape(t) {
+    var p = t.p
+    var i = t.i
+    if (i + 1 < t.n) {
+        var d = p.charCodeAt(i + 1)
+        var as = d == 65 ? "\\A" : d == 98 ? "\\b" : d == 66 ? "\\B" : d == 122 ? "\\z" : ""
+        if (as != "") {
+            rxRe2Push(t, as, 0)
+            t.i = i + 2
+            return
+        }
+        if (d == 67) {
+            rxRe2Fail(t, "invalid escape sequence", "\\C")
+            return
+        }
+        if (d == 81) {
+            var e = p.indexOf("\\E", i + 2)
+            var stop = e < 0 ? t.n : e
+            var j = i + 2
+            while (j < stop) {
+                var c = rxCpAt(p, j)
+                rxRe2Lit(t, c)
+                j = j + (c > 65535 ? 2 : 1)
+            }
+            t.i = e < 0 ? t.n : e + 2
+            return
+        }
+        var cls = rxRe2Cls()
+        if (d == 112 || d == 80) {
+            t.i = rxRe2Uni(t, i, cls)
+            if (t.err == "") { rxRe2PushCls(t, cls, false) }
+            return
+        }
+        if (rxRe2Perl(cls, d)) {
+            t.i = i + 2
+            rxRe2PushCls(t, cls, false)
+            return
+        }
+    }
+    var r = rxRe2Esc(t, i)
+    if (r < 0) { return }
+    t.i = t.k
+    rxRe2Lit(t, r)
+}
+
+function rxRe2(pattern) {
+    var t = {p: pattern, i: 0, k: 0, n: pattern.length, err: "", fold: false, multi: false, dotnl: false,
+             lazy: false, frames: [], depth: 0 - 1, ncap: 0, names: [], nameGroups: [], lastRep: 0 - 1}
+    rxRe2Open(t, 0)
+    var p = pattern
+    while (t.i < t.n && t.err == "") {
+        var rep = 0 - 1
+        var c = p.charCodeAt(t.i)
+        if (c == 40) {
+            if (t.i + 1 < t.n && p.charCodeAt(t.i + 1) == 63) { rxRe2Flags(t) }
+            else {
+                t.ncap = t.ncap + 1
+                rxRe2Open(t, t.ncap)
+                t.i = t.i + 1
+            }
+        } else if (c == 124) {
+            rxRe2Bar(t)
+            t.i = t.i + 1
+        } else if (c == 41) {
+            rxRe2Close(t)
+        } else if (c == 94 || c == 36) {
+            var anc = c == 94 ? "\\A" : "\\z"
+            if (t.multi) { anc = c == 94 ? "(?:\\A|(?<=\\x{A}))" : "(?:\\z|(?=\\x{A}))" }
+            rxRe2Push(t, anc, 0)
+            t.i = t.i + 1
+        } else if (c == 46) {
+            rxRe2Push(t, t.dotnl ? "[\\x{0}-\\x{10FFFF}]" : "[^\\x{A}]", 0)
+            t.i = t.i + 1
+        } else if (c == 91) {
+            rxRe2Class(t)
+        } else if (c == 42 || c == 43 || c == 63) {
+            rep = t.i
+            t.i = t.i + 1
+            rxRe2Repeat(t, rep, c == 43 ? 1 : 0, c == 63 ? 1 : 0 - 1, false)
+        } else if (c == 123) {
+            var b = rxRe2Bound(t)
+            if (b == null) {
+                rxRe2Lit(t, 123)
+                t.i = t.i + 1
+            } else if (b.min < 0 || b.min > 1000 || b.max > 1000 || (b.max >= 0 && b.min > b.max)) {
+                rxRe2Fail(t, "invalid repeat count", p.substring(t.i, b.end))
+            } else {
+                rep = t.i
+                t.i = b.end
+                rxRe2Repeat(t, rep, b.min, b.max, true)
+            }
+        } else if (c == 92) {
+            rxRe2Escape(t)
+        } else {
+            var cp = rxCpAt(p, t.i)
+            if (cp >= 55296 && cp <= 57343) {
+                rxRe2Fail(t, "invalid UTF-8", p.substring(t.i, t.n))
+            }
+            rxRe2Lit(t, cp)
+            t.i = t.i + (cp > 65535 ? 2 : 1)
+        }
+        t.lastRep = rep
+    }
+    if (t.err == "" && t.depth != 0) { rxRe2Fail(t, "missing closing )", p) }
+    return {out: t.err == "" ? rxRe2Body(t.frames[0]) : "", err: t.err, names: t.names, nameGroups: t.nameGroups}
+}
 
 // ===== Compilation =====
 
@@ -2556,6 +3324,7 @@ function rxCompile(pattern, flags) {
     var ucase = false
     var unix = false
     var pyascii = false
+    var re2 = false
     var fi = 0
     while (fi < flags.length) {
         var f = flags.charAt(fi)
@@ -2574,8 +3343,12 @@ function rxCompile(pattern, flags) {
         else if (f == "u") { ucase = true }
         else if (f == "d") { unix = true }
         else if (f == "a") { pyascii = true }
+        else if (f == "R") { re2 = true }
         fi = fi + 1
     }
+    // R reads the pattern as Go does and compiles its J spelling (rxRe2).
+    var tr = rxRe2(re2 ? pattern : "")
+    if (re2) { java = true }
     if (java || py) { bfail = true }
     // The POSIX ERE dialect (bash's [[ =~ ]]). What it changes is spelled out at each
     // site; the two whole-engine consequences are here. A "." matches a newline in an
@@ -2596,7 +3369,7 @@ function rxCompile(pattern, flags) {
     // \Q...\E is expanded before anything else looks at the text, so neither the
     // group counter nor the parser needs a quoting mode. re.src keeps the ORIGINAL
     // pattern, which is what a language's .source / inspect reports.
-    var pat = quoting ? rxExpandQuotes(pattern) : pattern
+    var pat = re2 ? tr.out : quoting ? rxExpandQuotes(pattern) : pattern
     var st = {
         p: pat, i: 0, n: pat.length, err: "",
         ngroups: 0, names: [], nameGroups: [], pending: [], ext: ext, dotall: dotall,
@@ -2604,7 +3377,7 @@ function rxCompile(pattern, flags) {
         depth: 0, java: java, errAt: -1, pcls: rxNewCls(), gnodes: [rxNode("empty")],
         py: py, icase: icase, multi: multi, gend: 0, gflags: "",
         ucase: ucase && java, uclass: false, unix: unix && java, inl: false, supp: false,
-        canon: false, pyuni: py && !pyascii
+        canon: false, pyuni: py && !pyascii, re2: re2
     }
     // Under P and J case folding and line anchoring are decided per atom while
     // parsing.
@@ -2613,7 +3386,7 @@ function rxCompile(pattern, flags) {
         multi = false
     }
     var ast = rxParseAlt(st)
-    var supp = java && (st.supp || rxSuppJ(ast) || rxHasSurr(pat))
+    var supp = java && (re2 || st.supp || rxSuppJ(ast) || rxHasSurr(pat))
     // Resolve every \k<name> now that the whole name table is known.
     var pend = st.pending
     var pi = 0
@@ -2630,6 +3403,7 @@ function rxCompile(pattern, flags) {
     // CPython checks a look-behind's width when it compiles the parsed pattern,
     // so every parse error is reported first.
     if (py && st.err == "" && rxLookbVarP(st, ast)) { rxErr(st, "look-behind requires fixed-width pattern") }
+    if (tr.err != "") { st.err = tr.err }
     if (st.err != "") {
         return {ok: false, err: st.err, errAt: st.errAt, ops: [], as: [], bs: [], clss: [],
                 ngroups: 0, nmarks: 0, names: [], nameGroups: [],
@@ -2641,13 +3415,15 @@ function rxCompile(pattern, flags) {
     var pg = rxNewProg()
     pg.jsrep = jsrep
     pg.java = java
+    pg.re2 = re2
     rxAdd(pg, RX_SAVE, 0, 0, pg.dummy)
     rxEmit(pg, ast)
     rxAdd(pg, RX_SAVE, 1, 0, pg.dummy)
     rxAdd(pg, RX_MATCH, 0, 0, pg.dummy)
     return {
         ok: true, err: "", errAt: -1, ops: pg.ops, as: pg.as, bs: pg.bs, clss: pg.clss,
-        ngroups: st.ngroups, nmarks: pg.nmarks, names: st.names, nameGroups: st.nameGroups,
+        ngroups: st.ngroups, nmarks: pg.nmarks, names: re2 ? tr.names : st.names,
+        nameGroups: re2 ? tr.nameGroups : st.nameGroups,
         icase: icase, dotall: dotall, multi: multi, jsrep: jsrep, java: java,
         supp: supp, bfail: bfail, gflags: java ? rxFlagsGet(st) : st.gflags,
         cmin: pg.cmin, cmax: pg.cmax, cgreedy: pg.cgreedy, lbmin: pg.lbmin, lbmax: pg.lbmax,
@@ -2836,7 +3612,8 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st) {
                 //     Group 1 keeps "aaa", which is what node and bash print.
                 // Failing here always terminates: the SPLIT above has exactly one
                 // alternative left, and it is the loop exit.
-                if (re.jsrep) { return -1 }
+                // Under R a PROG whose b is -1 always fails (rxEmitRepRe2).
+                if (re.jsrep || bs[pc] < 0) { return -1 }
                 pc = bs[pc]
             } else { pc = pc + 1 }
         } else if (op == RX_ASSERT) {

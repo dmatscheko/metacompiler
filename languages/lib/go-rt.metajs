@@ -2945,6 +2945,74 @@ function js_gorawstr(s) {
     return bytesStr(out)
 }
 
+// ===================================================== regexp ===============
+
+// regexp's primitives: lib/go-regexp.js over lib/regex.js's R dialect, whose
+// \p{..} classes are java.util.regex's (lib/java-regex.js), through regex.js's
+// knobs rxPropHit and rxPropCls, set by assignment.
+import "./regex.js"
+import "./java-chars.js"
+import "./java-regex.js"
+import "./go-regexp.js"
+rxPropHit = function (id, c) { return jxPropHit(id, c) }
+rxPropCls = function (st, name, at) { return jxPropCls(st, name, at) }
+
+// goRxText (lib/go-regexp.js) over goRunes: a byte that is not part of a
+// character is U+DC00 + byte, and when there is none the floor's own units are
+// the text. Twin of goRxText in go-interpreter.abnf and abnf/jsrtgoregexp.go.
+function goRxText(s) {
+    goRxT = s
+    var off = []
+    var n = byteLen(s)
+    if (n != s.length) {
+        var r = goRunes(s)
+        var cps = r.cps
+        var offs = r.offs
+        var t = ""
+        var bad = false
+        var k = 0
+        while (k < cps.length) {
+            var b = offs[k]
+            var e = k + 1 < cps.length ? offs[k + 1] : n
+            var cp = cps[k]
+            var held = cp == 65533 && e - b == 1
+            if (held && !bad) {
+                t = s.substring(0, off.length)
+                bad = true
+            }
+            off.push(b)
+            if (cp > 65535) { off.push(b) }
+            if (bad) { t = t + (held ? String.fromCharCode(56320 + byteAt(s, b)) : rxCpStr(cp)) }
+            k = k + 1
+        }
+        off.push(n)
+        if (bad) { goRxT = t }
+    }
+    goRxOff = off
+}
+
+// goRxError, goRxNames and goRxExec, the builtins lib/go-regexp.go calls. Twins
+// of js_gorxerror, js_gorxnames and js_gorxexec in abnf/jsrtgoregexp.go.
+function js_gorxerror(args) { return goRxError(args[0]) }
+function js_gorxnames(args) { return goRxNames(args[0]) }
+function js_gorxexec(args) { return goRxExec(args[0], args[1], goNum(args[2])) }
+
+// js_gostdin(room, eof): os.Stdin's Read - standard input a line at a time
+// (readIn), as [the next bytes of it that fit in room, nil], or ["", eof] at its
+// end. Twin of js_gostdin in abnf/jsrtgolang.go, goStdinRead in
+// go-interpreter.abnf.
+var goStdinRest = ""
+function js_gostdin(roomV, eof) {
+    var room = goNum(roomV)
+    if (room > 0 && goStdinRest == "") { goStdinRest = readIn(0) }
+    if (room > 0 && goStdinRest == "") { return ["", eof] }
+    var n = byteLen(goStdinRest)
+    var cut = room < n ? room : n
+    var chunk = byteSub(goStdinRest, 0, cut)
+    goStdinRest = byteSub(goStdinRest, cut, n)
+    return [chunk, null]
+}
+
 // goMathSqrt(x): the correctly rounded square root lib/go-math.go's Sqrt is, a
 // float64. Twin of js_gosqrt in abnf/jsrtgolang.go, goMathSqrt in
 // go-interpreter.abnf.
