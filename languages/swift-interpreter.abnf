@@ -7185,7 +7185,9 @@ KwContinue  = "continue" KwEnd ;
                 return cv
             }
             if (typeof f != "function") { fail("call of a non function: " + name) }
+            swSelfCallLabels = recLabels(recs)
             var r = f.apply(undefined, argv)
+            swSelfCallLabels = null
             writeBacks(ea.boxes)
             return r
         }
@@ -9169,6 +9171,9 @@ KwContinue  = "continue" KwEnd ;
     // memberwise one (which takes the same number of arguments). Set immediately
     // before the call and consumed by the dispatcher, so nothing can nest in between.
     var pendingLabels = null
+    // The labels of an unqualified call of a value, for a builtin's own method an
+    // extension body calls without `self.` (see core.varMiss).
+    var swSelfCallLabels = null
     function recLabels(recs) {
         var out = []
         for (var i = 0; i < recs.length; i++) {
@@ -11456,10 +11461,14 @@ KwContinue  = "continue" KwEnd ;
                 // Any other name that is not a host global is one of the builtin's
                 // own METHODS: `uppercased()` is `self.uppercased()`. Twin of the
                 // swInBuiltinExt arm of makeCall in swift-to-llvm-ir.abnf.
+                // The call's labels pick among the builtin's members as on
+                // `self.index(after: i)` (swSelfCallLabels, set by makeCall).
                 if (!hasOwn(hostGlobals, name)) {
                     return {v: function() {
                         var margs = []
                         for (var i = 0; i < arguments.length; i++) { margs.push(arguments[i]) }
+                        pendingLabels = swSelfCallLabels
+                        swSelfCallLabels = null
                         return mcall(self, name, margs)
                     }}
                 }
@@ -11474,6 +11483,8 @@ KwContinue  = "continue" KwEnd ;
         return n == "count" || n == "isEmpty" || n == "first" || n == "last"
             || n == "description" || n == "indices" || n == "magnitude" || n == "bitWidth"
             || n == "isNaN" || n == "isInfinite" || n == "isFinite" || n == "isZero"
+            || n == "startIndex" || n == "endIndex" || n == "keys" || n == "values"
+            || n == "utf8" || n == "unicodeScalars"
     }
     core.setMiss = function(name, value) {
         var self = findThis()

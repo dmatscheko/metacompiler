@@ -7481,6 +7481,9 @@ KwContinue  = "continue" KwEnd ;
                 } else if (builtinMethOf(name) != null) {
                     var sbt = swEmitExtTbl(selfB, builtinMethOf(name), selfRV)
                     sv = callExt(selfB, "js_swextcall", [selfRV, emitStr(selfB, name), ea.v, sbt])
+                } else if (swInBuiltinExt()) {
+                    // A builtin receiver's own member, its labels picking it.
+                    sv = swEmitLMCall(selfB, selfRV, {name: name, args: args}, emitStr(selfB, name), ea.v)
                 } else {
                     // In a static member self is a descriptor, whose methods only
                     // js_swmcall's static arm finds.
@@ -7503,8 +7506,9 @@ KwContinue  = "continue" KwEnd ;
                 b.NewCondBr(truthy(b, callExt(b, "js_seq", [xtv, emitStr(b, "undefined")])), xSelfB, xLocB)
                 var xlv = callExt(xLocB, "js_call", [xLocB.NewCall(rtKGet(), [curScopeV, emitStr(xLocB, name)]), hUndef, ea.v])
                 xLocB.NewBr(xJoinB)
-                var xsv = swEmitMCall(xSelfB, xSelfB.NewCall(rtKGet(), [curScopeV, emitStr(xSelfB, "self")]),
-                                      name, emitStr(xSelfB, name), ea.v)
+                // The labels pick among the builtin's members, as on `self.index(after: i)`.
+                var xsv = swEmitLMCall(xSelfB, xSelfB.NewCall(rtKGet(), [curScopeV, emitStr(xSelfB, "self")]),
+                                       {name: name, args: args}, emitStr(xSelfB, name), ea.v)
                 xSelfB.NewBr(xJoinB)
                 var xjv = xJoinB.NewPhi([llvm.ir.NewIncoming(xlv, xLocB), llvm.ir.NewIncoming(xsv, xSelfB)])
                 emitWriteBacks(xJoinB, ea.boxes)
@@ -10866,6 +10870,8 @@ KwContinue  = "continue" KwEnd ;
         return n == "count" || n == "isEmpty" || n == "first" || n == "last"
             || n == "description" || n == "indices" || n == "magnitude" || n == "bitWidth"
             || n == "isNaN" || n == "isInfinite" || n == "isFinite" || n == "isZero"
+            || n == "startIndex" || n == "endIndex" || n == "keys" || n == "values"
+            || n == "utf8" || n == "unicodeScalars"
     }
     // Is the innermost enclosing type an extension of a builtin (emit time)?
     function swInBuiltinExt() {

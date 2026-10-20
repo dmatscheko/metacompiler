@@ -5497,6 +5497,27 @@ func s140() {
     check("140b", Ver140(n: 21) < Ver140(n: 13) && [Ver140(n: 19), Ver140(n: 5)].sorted().map { $0.n } == [5, 19])
 }
 
+// ===== SECTION 141: a builtin's index members, unqualified in its extension =====
+// Inside `extension Array` / `extension String` / `extension Collection`,
+// `startIndex`, `endIndex` and `index(after:)` / `index(before:)` are self's,
+// with the labels picking the member as on `self.index(after: i)`. Every value
+// read off swiftc 6.1.2.
+extension Array {
+    var second141: Element? { count > 1 ? self[index(after: startIndex)] : nil }
+    func lastIdx141() -> Int { index(before: endIndex) }
+}
+extension String {
+    var secondChar141: Character { self[index(after: startIndex)] }
+}
+extension Collection {
+    var third141: Element? { count > 2 ? self[index(startIndex, offsetBy: 2)] : nil }
+}
+func s141() {
+    let xs = [5, 6, 7]
+    check("141a", xs.second141 == 6 && xs.lastIdx141() == 2 && "abc".secondChar141 == "b")
+    check("141b", xs.third141 == 7 && "xyz".third141 == "z" && [1].third141 == nil)
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5638,6 +5659,7 @@ func main() {
     s138() // SECTION-CALL 138
     s139() // SECTION-CALL 139
     s140() // SECTION-CALL 140
+    s141() // SECTION-CALL 141
     print("full: \(checks) checks, \(fails) failures")
 }
 
