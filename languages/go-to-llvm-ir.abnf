@@ -2643,7 +2643,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // arr[i] = v, growing the array with zero values up to i first (that is what an
     // indexed element like [5]int{4: 9} needs).
     function emitSeqPut(b, arr, idx, v, cet) {
-        var gap = callExt(b, "js_sub", [callExt(b, "js_jadd", [idx, emitNum(b, 1)]),
+        var gap = callExt(b, "js_sub", [callExt(b, "js_add", [idx, emitNum(b, 1)]),
                                         callExt(b, "js_golen", [arr])])
         var eb = emitCountLoop(b, gap, function(lb, iV) {
             callExt(lb, "js_arr_push", [arr, emitZeroDecl(lb, cet)])
@@ -2669,7 +2669,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var rv = emitElemVal(b, e, cet)
             b = rv.b
             b = emitSeqPut(b, arr, idx, rv.v, cet)
-            at = callExt(b, "js_jadd", [idx, emitNum(b, 1)])
+            at = callExt(b, "js_add", [idx, emitNum(b, 1)])
         }
         if (kind == "array" && alenT != null) {
             var rn = alenT(b)
@@ -3425,6 +3425,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // arrays, so every slice operation goes through a GENERATED function instead (the
     // externs stay underneath for the array and string cases). declFn builds one; the
     // bodies below are the compiler's twin of the interpreter's slice helpers.
+    // Their offset and length arithmetic is js_add, the floor's own add (a plain
+    // number from any pair of numeric handles): in a native binary a layer-2 extern
+    // such as js_jadd costs thousands of instructions per call, and these run once
+    // per element.
     function declFn(b, name, arity, bodyFn) {
         funcCount++
         var idx = funcCount
@@ -3467,7 +3471,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var iB = callExt(bodyB, "js_scope_get", [sc, emitStr(bodyB, nm)])
         var endB = bodyFn(bodyB, iB)
         var iE = callExt(endB, "js_scope_get", [sc, emitStr(endB, nm)])
-        callExt(endB, "js_scope_set", [sc, emitStr(endB, nm), callExt(endB, "js_jadd", [iE, emitNum(endB, 1)])])
+        callExt(endB, "js_scope_set", [sc, emitStr(endB, nm), callExt(endB, "js_add", [iE, emitNum(endB, 1)])])
         endB.NewBr(headB)
         return exitB
     }
@@ -3541,7 +3545,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var oc = a[0]
             var nl = a[1]
             callExt(fb, "js_scope_decl", [sc, emitStr(fb, "$nc"), oc])
-            var dbl = callExt(fb, "js_jadd", [oc, oc])
+            var dbl = callExt(fb, "js_add", [oc, oc])
             var bigB = curF.NewBlock("")
             var notBigB = curF.NewBlock("")
             var smallB = curF.NewBlock("")
@@ -3557,9 +3561,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var hn = callExt(headB, "js_scope_get", [sc, emitStr(headB, "$nc")])
             headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [hn, nl])), stepB, joinB)
             var sn = callExt(stepB, "js_scope_get", [sc, emitStr(stepB, "$nc")])
-            var q = callExt(stepB, "js_jadd", [sn, emitNum(stepB, 768)])
+            var q = callExt(stepB, "js_add", [sn, emitNum(stepB, 768)])
             var inc = callExt(stepB, "js_div", [callExt(stepB, "js_sub", [q, callExt(stepB, "js_mod", [q, emitNum(stepB, 4)])]), emitNum(stepB, 4)])
-            callExt(stepB, "js_scope_set", [sc, emitStr(stepB, "$nc"), callExt(stepB, "js_jadd", [sn, inc])])
+            callExt(stepB, "js_scope_set", [sc, emitStr(stepB, "$nc"), callExt(stepB, "js_add", [sn, inc])])
             stepB.NewBr(headB)
             var nc = callExt(joinB, "js_scope_get", [sc, emitStr(joinB, "$nc")])
             var codeR = emitSelect(joinB, callExt(joinB, "js_get", [callExt(joinB, "js_scope_get", [sc, emitStr(joinB, "$esz")]), a[2]]),
@@ -3576,9 +3580,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                                       function(yb) { return {b: yb, v: emitNum(yb, 8)} }, function(nb) { return {b: nb, v: emitNum(nb, 0)} })
                 }, function(nb) { return {b: nb, v: emitNum(nb, 0)} })
                 var hb = hdr.b
-                var req = callExt(hb, "js_jadd", [mem, hdr.v])
+                var req = callExt(hb, "js_add", [mem, hdr.v])
                 var memR = emitSelect(hb, callExt(hb, "js_gt", [mem, emitNum(hb, 32760)]), function(lb) {
-                    var r8 = callExt(lb, "js_jadd", [mem, emitNum(lb, 8191)])
+                    var r8 = callExt(lb, "js_add", [mem, emitNum(lb, 8191)])
                     return {b: lb, v: callExt(lb, "js_sub", [r8, callExt(lb, "js_mod", [r8, emitNum(lb, 8192)])])}
                 }, function(sb) {
                     var cls = callExt(sb, "js_scope_get", [sc, emitStr(sb, "$sizecls")])
@@ -3589,7 +3593,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                     sb.NewBr(ch)
                     var ci = callExt(ch, "js_scope_get", [sc, emitStr(ch, "$ci")])
                     ch.NewCondBr(truthy(ch, callExt(ch, "js_lt", [callExt(ch, "js_get", [cls, ci]), req])), cs, ce)
-                    callExt(cs, "js_scope_set", [sc, emitStr(cs, "$ci"), callExt(cs, "js_jadd", [callExt(cs, "js_scope_get", [sc, emitStr(cs, "$ci")]), emitNum(cs, 1)])])
+                    callExt(cs, "js_scope_set", [sc, emitStr(cs, "$ci"), callExt(cs, "js_add", [callExt(cs, "js_scope_get", [sc, emitStr(cs, "$ci")]), emitNum(cs, 1)])])
                     cs.NewBr(ch)
                     var cv = callExt(ce, "js_get", [cls, callExt(ce, "js_scope_get", [sc, emitStr(ce, "$ci")])])
                     return {b: ce, v: callExt(ce, "js_sub", [cv, hdr.v])}
@@ -3752,7 +3756,6 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                                   // array: the BOUND is the header's length, which
                                   // only the header knows (`base[0:2]` of a five
                                   // element slice has cap 5, and sub[4] panics).
-                                  // It also drops the js_jadd.
                                   return {b: tb, v: callExt(tb, "js_gislget", [x, i])}
                               },
                               function(eb) { return {b: eb, v: callExt(eb, "js_map_get", [x, i])} })
@@ -3784,7 +3787,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 var off = slF(tb, x, "o")
                 var eb2 = emitCountLoop(tb, slF(tb, x, "n"), function(lb, iV) {
                     callExt(lb, "js_arr_push", [out, callExt(lb, "js_map_get",
-                            [base, callExt(lb, "js_jadd", [off, iV])])])
+                            [base, callExt(lb, "js_add", [off, iV])])])
                     return lb
                 })
                 return {b: eb2, v: out}
@@ -3836,7 +3839,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                     // two-index form) and isSlV choose go's panic wording.
                     callExt(b3, "js_gislbounds", [rlo.v, rhi.v, mx, pc.v, isSlV])
                     var outH = emitSlHdr(b3, pa.v,
-                                         callExt(b3, "js_jadd", [po.v, rlo.v]),
+                                         callExt(b3, "js_add", [po.v, rlo.v]),
                                          callExt(b3, "js_sub", [rhi.v, rlo.v]),
                                          callExt(b3, "js_sub", [rmx.v, rlo.v]))
                     callExt(b3, "js_set", [outH, emitStr(b3, "et"), callExt(b3, "js_get", [x, emitStr(b3, "et")])])
@@ -3862,7 +3865,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         b = declFn(b, "append", 0, function(fb, a, f) {
             var argsV = f.Params[1]
             var s0 = callExt(fb, "js_arg", [argsV, handle(0)])
-            var add = callExt(fb, "js_sub", [callExt(fb, "js_golen", [argsV]), emitNum(fb, 1)])
+            var add = callExt(fb, "js_sub", [callExt(fb, "js_get", [argsV, emitStr(fb, "length")]), emitNum(fb, 1)])
             var isSlV = emitIsSl(fb, s0)
             // A nil slice starts a new backing array; a plain array is its own backing.
             var baseR = emitSelect(fb, callExt(fb, "js_not", [s0]),
@@ -3878,55 +3881,55 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var hc = emitSelect(hn.b, isSlV, function(tb) { return {b: tb, v: slF(tb, s0, "c")} },
                                              function(eb) { return {b: eb, v: callExt(eb, "js_golen", [baseR.v])} })
             var b3 = hc.b
-            var need = callExt(b3, "js_jadd", [hn.v, add])
-            // {a, o, c} of the array the result writes into, as a three element array.
-            var grown = emitSelect(b3, callExt(b3, "js_gt", [need, hc.v]), function(tb) {
-                var na = callExt(tb, "js_arr_new", [])
-                var eb2 = emitCountLoop(tb, hn.v, function(lb, iV) {
-                    callExt(lb, "js_arr_push", [na, callExt(lb, "js_map_get",
-                            [ha.v, callExt(lb, "js_jadd", [ho.v, iV])])])
-                    return lb
-                })
-                var etZ = emitSelect(eb2, isSlV, function(tb) { return {b: tb, v: slF(tb, s0, "et")} },
-                                                 function(eb) { return {b: eb, v: hUndef} })
-                // A GROWING append OVER-ALLOCATES, by gc's rule ($growcap).
-                var c2 = {b: etZ.b, v: emitHelper(etZ.b, "$growcap", [hc.v, need, etZ.v])}
-                var fill = callExt(c2.b, "js_sub", [c2.v, hn.v])
-                // The slots past the new length hold the element type's zero ($ezero).
-                var zmk = callExt(c2.b, "js_get", [callExt(c2.b, "js_scope_get", [curScopeV, emitStr(c2.b, "$ezero")]), etZ.v])
-                var eb3 = emitCountLoop(c2.b, fill, function(lb, iV) {
-                    var pz = emitSelect(lb, zmk, function(tb) { return {b: tb, v: callExt(tb, "js_call", [zmk, hUndef, callExt(tb, "js_arr_new", [])])} },
-                                        function(eb) { return {b: eb, v: callExt(eb, "js_giadopt", [etZ.v, emitNum(eb, 0)])} })
-                    callExt(pz.b, "js_arr_push", [na, pz.v])
-                    return pz.b
-                })
-                var trip = callExt(eb3, "js_arr_new", [])
-                callExt(eb3, "js_arr_push", [trip, na])
-                callExt(eb3, "js_arr_push", [trip, emitNum(eb3, 0)])
-                callExt(eb3, "js_arr_push", [trip, c2.v])
-                return {b: eb3, v: trip}
-            }, function(eb) {
-                var trip = callExt(eb, "js_arr_new", [])
-                callExt(eb, "js_arr_push", [trip, ha.v])
-                callExt(eb, "js_arr_push", [trip, ho.v])
-                callExt(eb, "js_arr_push", [trip, hc.v])
-                return {b: eb, v: trip}
-            })
-            var b4 = grown.b
-            var ra = callExt(b4, "js_map_get", [grown.v, emitNum(b4, 0)])
-            var ro = callExt(b4, "js_map_get", [grown.v, emitNum(b4, 1)])
-            var rc = callExt(b4, "js_map_get", [grown.v, emitNum(b4, 2)])
+            var need = callExt(b3, "js_add", [hn.v, add])
             // The element type is not written at an append site, so it comes off the
             // header: `var bs []uint8` is EMPTY, and an empty slice has no element to
-            // take a width from. js_giadopt is the identity when there is no "et".
-            var etV = emitSelect(b4, isSlV, function(tb) { return {b: tb, v: slF(tb, s0, "et")} },
+            // take a width from.
+            var etV = emitSelect(b3, isSlV, function(tb) { return {b: tb, v: slF(tb, s0, "et")} },
                                             function(eb) { return {b: eb, v: hUndef} })
-            var b4b = etV.b
-            var b5 = emitCountLoop(b4b, add, function(lb, iV) {
-                callExt(lb, "js_gisetat", [ra, callExt(lb, "js_jadd", [callExt(lb, "js_jadd", [ro, hn.v]), iV]),
-                                         callExt(lb, "js_giadopt", [etV.v,
-                                             callExt(lb, "js_map_get", [argsV, callExt(lb, "js_jadd", [iV, emitNum(lb, 1)])])])])
-                return lb
+            var b3e = etV.b
+            // {a, o, c} of the array the result writes into: three phis over the two arms.
+            var growB = curF.NewBlock("")
+            var keepB = curF.NewBlock("")
+            var b4 = curF.NewBlock("")
+            b3e.NewCondBr(truthy(b3e, callExt(b3e, "js_gt", [need, hc.v])), growB, keepB)
+            var na = callExt(growB, "js_goslice", [ha.v, ho.v, callExt(growB, "js_add", [ho.v, hn.v])])
+            // A GROWING append OVER-ALLOCATES, by gc's rule ($growcap).
+            var c2 = emitHelper(growB, "$growcap", [hc.v, need, etV.v])
+            var fill = callExt(growB, "js_sub", [c2, hn.v])
+            // The slots past the new length hold the element type's zero: a fresh one
+            // each from $ezero's maker for a struct or an array, one shared value else.
+            var zmk = callExt(growB, "js_get", [callExt(growB, "js_scope_get", [curScopeV, emitStr(growB, "$ezero")]), etV.v])
+            var fz = emitSelect(growB, zmk, function(tb) {
+                return {b: emitCountLoop(tb, fill, function(lb, iV) {
+                    callExt(lb, "js_arr_push", [na, callExt(lb, "js_call", [zmk, hUndef, callExt(lb, "js_arr_new", [])])])
+                    return lb
+                }), v: hUndef}
+            }, function(eb) {
+                var z = callExt(eb, "js_giadopt", [etV.v, emitNum(eb, 0)])
+                return {b: emitCountLoop(eb, fill, function(lb, iV) {
+                    callExt(lb, "js_arr_push", [na, z])
+                    return lb
+                }), v: hUndef}
+            })
+            var eb3 = fz.b
+            var zero = emitNum(eb3, 0)
+            eb3.NewBr(b4)
+            keepB.NewBr(b4)
+            var ra = b4.NewPhi([llvm.ir.NewIncoming(na, eb3), llvm.ir.NewIncoming(ha.v, keepB)])
+            var ro = b4.NewPhi([llvm.ir.NewIncoming(zero, eb3), llvm.ir.NewIncoming(ho.v, keepB)])
+            var rc = b4.NewPhi([llvm.ir.NewIncoming(c2, eb3), llvm.ir.NewIncoming(hc.v, keepB)])
+            // Each new element lands at its type's width: js_giadopt by the header's
+            // type text, or, with none recorded, js_gisetat by the width the slot
+            // already carries. Every index is in range, as the capacity covers need.
+            var at0 = callExt(b4, "js_add", [ro, hn.v])
+            var b5 = emitCountLoop(b4, add, function(lb, iV) {
+                var at = callExt(lb, "js_add", [at0, iV])
+                var v = callExt(lb, "js_get", [argsV, callExt(lb, "js_add", [iV, emitNum(lb, 1)])])
+                var st = emitSelect(lb, etV.v, function(tb) {
+                    return {b: tb, v: callExt(tb, "js_set", [ra, at, callExt(tb, "js_giadopt", [etV.v, v])])}
+                }, function(eb) { return {b: eb, v: callExt(eb, "js_gisetat", [ra, at, v])} })
+                return st.b
             })
             var outH = emitSlHdr(b5, ra, ro, need, rc)
             callExt(b5, "js_set", [outH, emitStr(b5, "et"), etV.v])
@@ -6398,7 +6401,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var eb = emitCountLoop(fb, callExt(fb, "js_golen", [a[1]]), function(lb, iV) {
                 var p = callExt(lb, "js_get", [a[1], iV])
                 var s1 = callExt(lb, "js_add", [callExt(lb, "js_scope_get", [sc, emitStr(lb, "$s")]), p])
-                var s2 = callExt(lb, "js_add", [s1, callExt(lb, "js_get", [a[0], callExt(lb, "js_jadd", [iV, emitNum(lb, 1)])])])
+                var s2 = callExt(lb, "js_add", [s1, callExt(lb, "js_get", [a[0], callExt(lb, "js_add", [iV, emitNum(lb, 1)])])])
                 callExt(lb, "js_scope_set", [sc, emitStr(lb, "$s"), s2])
                 var bad = emitSelect(lb, callExt(lb, "js_seq", [p, emitStr(lb, "")]),
                                      function(tb) { return {b: tb, v: hTrue} },

@@ -971,6 +971,50 @@ func s122() {
 	check("growgen122e", o122(7)+"|"+o122("q") == "main.b122[int] {0 <nil>} 6 {0 <nil>}|main.b122[string] { <nil>} 6 { <nil>}")
 }
 
+// ===== SECTION 123: long append loops and the element store =====
+// Hundreds of appends grow by gc's rule; each padded slot is a zero of its own;
+// an append inside the capacity writes into the array a slice was cut from; the
+// stored element keeps the element type's width. The expected values are go run's.
+var sink123 any
+
+func s123() {
+	var xs []int
+	for i := 0; i < 600; i++ {
+		xs = append(xs, i*2)
+	}
+	sum := 0
+	for _, x := range xs {
+		sum += x
+	}
+	sink123 = xs
+	ss := []string{}
+	for i := 0; i < 300; i++ {
+		ss = append(ss, fmt.Sprint(i%10))
+	}
+	sink123 = ss
+	check("aploop123", fmt.Sprint(len(xs), cap(xs), xs[599], sum, len(ss), cap(ss), " ", ss[299]) ==
+		"600 848 1198 359400 300 303 9")
+	s := append([]int{}, 1, 2, 3)
+	s = append(s, 4)
+	t := s[:cap(s)]
+	t[4] = 9
+	sink123 = s
+	var arr [5]int
+	w := arr[1:2]
+	w = append(w, 7)
+	w = append(w, 8, 9, 10, 11)
+	w[0] = 5
+	bs := []byte("ab")
+	bs = append(bs, 200, 100)
+	bs[2] += bs[3]
+	u := []uint16{1}
+	u = append(u, 65535)
+	u[1]++
+	m := append([]int{}, 1, 2, 3, 4, 5, 6, 7)
+	check("apstore123", fmt.Sprint(t, arr, w, bs, u, len(m), cap(m)) ==
+		"[1 2 3 4 9 0] [0 0 7 0 0] [5 7 8 9 10 11] [97 98 44 100] [1 0] 7 8")
+}
+
 func main() {
 	s94()   // SECTION-CALL 94
 	s95()   // SECTION-CALL 95
@@ -999,6 +1043,7 @@ func main() {
 	s120()  // SECTION-CALL 120
 	s121()  // SECTION-CALL 121
 	s122()  // SECTION-CALL 122
+	s123()  // SECTION-CALL 123
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

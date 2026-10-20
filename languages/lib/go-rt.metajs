@@ -1374,12 +1374,8 @@ function js_goiscls(v, cls) {
     return v.__class === cls
 }
 
-// js_jadd: string concat, 32 bit add for two int32-valued operands, float add
-// when either side is boxed. The Go emitter uses it only for INDEX arithmetic
-// (an offset plus a length) and for the two halves of a complex, so the int32
-// arm is the one that runs; it is written out in full anyway, because the shared
-// extern is what llvm.Run compares against.
-// js_jadd is SHARED - lib/runtime.metajs, via the rtkStr/rtkNum hooks above.
+// js_jadd is SHARED - lib/runtime.metajs, via the rtkStr/rtkNum hooks above. The
+// Go emitter does not emit it: its index arithmetic is the floor's js_add.
 
 function goJavaStr(v) {
     if (typeof v == "string") { return v }
@@ -1421,10 +1417,7 @@ function js_goslice(v, lo0, hi0) {
     var lo = goBound(lo0, 0)
     var hi = goBound(hi0, v.length)
     goSliceCheck(lo, hi, 0, v.length, false, "length")
-    var out = []
-    var i = lo
-    while (i < hi) { out.push(v[i]); i = i + 1 }
-    return out
+    return v.slice(lo, hi)
 }
 
 function goBound(h, dflt) {
@@ -3443,14 +3436,32 @@ function goTyWord(ty) {
 // float64 struct field assigned a plain 1 divides as an integer.
 function goAdoptText(ty, v) {
     if (!goNumeric(v)) { return v }
-    var word = goTyWord(ty)
-    if (word == "float64") { return flo(goNum(v), 1) }
+    var k = "$" + ty
+    var b = anytype
+    b = GO_ADOPT_BITS[k]
+    if (b === undefined) {
+        b = goAdoptBits(ty)
+        GO_ADOPT_BITS[k] = b
+    }
+    if (b === null) { return v }
+    if (b.w > 0) { return sintConv(v, b.w, b.u) }
+    if (b.w == 0) { return flo(goNum(v), 1) }
     // A float32 SLOT rounds what is put in it - a struct field, a []float32
     // element, a float32 parameter.
-    if (word == "float32") { return js_gflo32(v) }
+    return js_gflo32(v)
+}
+
+// What goAdoptText does with a type text, memoized per text in GO_ADOPT_BITS
+// because every appended element and every typed store asks it: an integer
+// type's goTyBits, w 0 for float64 and -1 for float32, null for anything else.
+var GO_ADOPT_BITS = {}
+function goAdoptBits(ty) {
+    var word = goTyWord(ty)
+    if (word == "float64") { return {w: 0, u: false} }
+    if (word == "float32") { return {w: 0 - 1, u: false} }
     var b = goTyBits(word)
-    if (b === undefined) { return v }
-    return sintConv(v, b.w, b.u)
+    if (b === undefined) { return null }
+    return b
 }
 
 // giAdoptLike applies the width the slot ALREADY carries.
@@ -3581,10 +3592,13 @@ function js_gisetat(c, k, v) {
     if (goIsNilMap(c)) { throw goRTErr("runtime.plainError", "assignment to entry in nil map") }
     // An out of range ARRAY store panics with the same wording the READ uses,
     // rather than reaching js_pyset, whose own bound is the floor's `fail` (a hard
-    // abort no recover() can catch).
+    // abort no recover() can catch). An in-range one is stored right here, which
+    // spares append's per-element store the generic container walk below.
     if (Array.isArray(c)) {
         var ai = goIdx(k)
         if (ai < 0 || ai >= c.length) { goIdxPanic(ai, c.length) }
+        c[ai] = goAdoptLike(c[ai], v)
+        return undefined
     }
     // A map entry is found by Go's key rule (goMapFind), which the shared
     // js_pyset's key scan cannot see.
