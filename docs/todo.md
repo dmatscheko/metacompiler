@@ -64,7 +64,7 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-681 python: `__classcell__` through a metaclass `__new__`; `super()` object's own type · P3 · PY · OPEN [V]
+### T-681 python: `__classcell__` through a metaclass `__new__`; `super()` object's own type · P3 · PY · IN PROGRESS (PY worker, round 13) [V]
 A metaclass `__new__` calling a method that reads `__class__` after `super().__new__` → CPython `meta H` (type.__new__ fills the cell
 from `__classcell__`); interp NameError, compiler the provisional pre-metaclass class. `super().__class__.__name__` → CPython
 `super`, ours AttributeError; `type(super()).__name__` → CPython `super`, interp `object`.
