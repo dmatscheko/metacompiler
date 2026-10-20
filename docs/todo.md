@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-638** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-639** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -187,12 +187,11 @@ _G proxy, in both halves.
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-636 batch native: capture nesting limited to 8; rt_die not ordered after stdout; bash `${v@Q}` of a non-UTF-8 byte · P2 · SH · IN PROGRESS (SH worker, round 9) [V]
-A `call :r` recursion 12 deep with `> nul` on each call: the interpreter prints "before" and "after"; native dies with
-"batch-rt: capture nesting exhausted" exit 70 (a fixed-size table in batch-rt.c; grow it as bash-rt.c's T-529 fix did). batch-rt.c's
-rt_ech does not fflush(0) before writing fd 2 (bash-rt.c does), so with `2>&1` the diagnostic precedes earlier stdout. bash:
-`v=$'\cé'; echo "${v@Q}"` → bash `$'\003\251'`; all our legs print the 0xa9 byte raw (`$'\003<a9>'`): @Q must octal-escape an invalid
-UTF-8 byte.
+### T-638 bash: `@Q` / `printf %q` / `declare -p` of a well-formed non-printable character · P3 · SH · OPEN [V]
+bash decides with iswprint: `v=$'\xc2\x85'` (U+0085) → bash `$'\302\205'`, ours keeps it raw in single quotes; U+200B
+(`$'\xe2\x80\x8b'`) → bash `$'\342\200\213'`; `$'\x01\xc2\x85'` → bash `$'\001\302\205'`. All legs. Needs the locale's
+iswprint table (macOS en_US.UTF-8): derive it from the oracle over every code point, as the swift/java tables were, or record the
+divergence in manual 7.9.
 
 ---
 
@@ -749,6 +748,7 @@ T-631 swift: interp runs a metatype init twice; `is T` with a metatype-bound T; 
 T-588 bash: `$[ expr ]`; `$'\uDFFF'` length; native stdout buffering vs stderr order — DONE 77c376cc (plus \u/\U decoding in every engine; stderr ordered against buffered stdout natively)
 T-635 bash: `$'\cX'` control escapes; `$'\?'` in the interpreter; batch native stdout/stderr order — DONE a03ea5f4 (bash); batch has no program-visible stderr — its fatal-diagnostic ordering moved to T-636
 T-625 java/kotlin regex: supplementary characters in interp and native; PSE constructor; Kotlin Regex.options — DONE fbc1b072 (plus a java sweep: local class captures, array patterns, EnumMap/EnumSet, java.util.function defaults, Pattern/Matcher, records, BitSet ...)
+T-636 batch native: capture nesting limited to 8; rt_die not ordered after stdout; bash `${v@Q}` of a non-UTF-8 byte — DONE 8bd03604 b91f7bd2
 
 # Settled — do not re-open
 
