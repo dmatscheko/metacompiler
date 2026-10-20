@@ -1342,7 +1342,10 @@ BinAhead    = :script(~~
     })()
 ~~) ;
 DqStr       <~~ push(makeTemplate(takeAll())) ~~>
-            = '"' :whitespace() { TplBraceExpr | TplVar | TplChunk | TplSpecial } '"' :whitespace(Whitespace) ;
+            = '"' :whitespace() { TplBraceExpr | TplDollarCurly | TplVar | TplChunk | TplSpecial } '"' :whitespace(Whitespace) ;
+// Twin of TplDollarCurly in php-interpreter.abnf; see there.
+TplDollarCurly <~~ pop(); push({e: compileSnippet(dollarCurlySrc(up.in.substring(2, up.in.length - 1)))}) ~~>
+            = "$" "{" :whitespace(Whitespace) Expression "}" ;
 TplBraceExpr <~~ push({e: pop()}) ~~>
             = CurlyOpen "{" :whitespace(Whitespace) Expression "}" ;
 // Twin of CurlyOpen in php-interpreter.abnf; see there.
@@ -2389,9 +2392,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         while (i < body.length) {
             var ch = body.charAt(i)
             if (ch == "\\" && i + 1 < body.length) { lit += ch + body.charAt(i + 1); i += 2; continue }
-            if (ch == "{" && i + 1 < body.length && body.charAt(i + 1) == "$") {
+            var dc = ch == "$" && i + 1 < body.length && body.charAt(i + 1) == "{"
+            if (dc || (ch == "{" && i + 1 < body.length && body.charAt(i + 1) == "$")) {
                 var depth = 0
-                var j = i
+                var j = dc ? i + 1 : i
                 while (j < body.length) {
                     if (body.charAt(j) == "{") { depth++ }
                     else if (body.charAt(j) == "}") { depth--; if (depth == 0) { break } }
@@ -2399,7 +2403,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 }
                 if (j < body.length) {
                     if (lit != "") { parts.push(dqPiece(lit)); lit = "" }
-                    parts.push({e: compileSnippet(body.substring(i + 1, j))})
+                    var src = dc ? dollarCurlySrc(body.substring(i + 2, j)) : body.substring(i + 1, j)
+                    parts.push({e: compileSnippet(src)})
                     i = j + 1
                     continue
                 }
@@ -2437,6 +2442,15 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     }
     function isNameStart(ch) { return (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || ch == "_" }
     function isNameChar(ch) { return isNameStart(ch) || (ch >= "0" && ch <= "9") }
+    // Twin of dollarCurlySrc in php-interpreter.abnf; see there.
+    function dollarCurlySrc(inner) {
+        var k = 0
+        if (inner.length > 0 && isNameStart(inner.charAt(0))) {
+            while (k < inner.length && isNameChar(inner.charAt(k))) { k++ }
+        }
+        if (k > 0 && (k == inner.length || inner.charAt(k) == "[")) { return "$" + inner }
+        return "${" + inner + "}"
+    }
     function compileSnippet(src) {
         var frag = c.parseFrom(c.agrammar, src, "Expression")
         return c.compile(frag).stack[0]

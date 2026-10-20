@@ -25,7 +25,7 @@
 // superglobals other than $GLOBALS, include/require/eval, fibers, Generator
 // methods (->send() and friends live on the engine's Generator class), references
 // returned from functions, reflection (attributes are applied, never read
-// back), and the "${var}" interpolation form (deprecated since PHP 8.2).
+// back), and the deprecation notice of the "${var}" interpolation form.
 // Expected values follow real PHP 8.3 (e.g. 7 / 2 === 3.5 and strlen counts
 // bytes); validated against the manual by hand - no local php binary.
 //
@@ -83,7 +83,6 @@ function s03() {
 }
 
 // ===== SECTION 04: string interpolation =====
-// The "${var}" form is deprecated since PHP 8.2 and deliberately skipped.
 function s04() {
     $n = 6;
     $arr = [10, 20];
@@ -97,6 +96,9 @@ function s04() {
     check("itp6", "$o->val" === "7" && "{$o->twice()}" === "14");
     // '{' starts an interpolation only when '$' follows it immediately.
     check("itp7", "a{b}|{ $n}|{}|{{$n}}|\{$n}" === 'a{b}|{ 6}|{}|{6}|\{6}');
+    // "${name}" and "${name[k]}" name the variable; any other "${expr}" computes the name.
+    $v = "n";
+    check("itp8", "${n}|${v}|${arr[1]}|${$v}|${'n'}|$${n}" === '6|n|20|6|6|$6');
 }
 class S04Obj { public $val = 7; public function twice() { return $this->val * 2; } }
 
@@ -124,6 +126,10 @@ function s05() {
     {x}{ $x}{{$x}}
     EOT;
     check("hd5", $b === '{x}{ 8}{8}');
+    $d = <<<EOT
+    ${x}|${b}
+    EOT;
+    check("hd6", $d === '8|{x}{ 8}{8}');
 }
 
 // ===== SECTION 06: array literals and spread =====
@@ -2614,11 +2620,11 @@ class S59It extends ArrayIterator {
 }
 function s59() {
     $f = s59f();
-    check("mag1", $f[0] === "s59f" && $f[1] === "{closure:s59f():2576}|{closure:s59f():2576}"
-        && $f[2] === "{closure:s59f():2577}" && $f[3] === "{closure:{closure:s59f():2578}:2578}"
+    check("mag1", $f[0] === "s59f" && $f[1] === "{closure:s59f():2582}|{closure:s59f():2582}"
+        && $f[2] === "{closure:s59f():2583}" && $f[3] === "{closure:{closure:s59f():2584}:2584}"
         && $f[4] === "s59f");
     $m = (new S59C)->m();
-    check("mag2", $m[0] === "{closure:S59C::m():2583}|{closure:S59C::m():2583}|S59C"
+    check("mag2", $m[0] === "{closure:S59C::m():2589}|{closure:S59C::m():2589}|S59C"
         && $m[1] === "m" && $m[2] === "S59C::m" && (new S59H)->p === "\$p::get|S59H::\$p::get");
     check("spl1", class_exists('ArrayIterator') && class_exists('arrayobject') && class_exists("SplStack")
         && class_exists('SplObjectStorage') && interface_exists('SeekableIterator')
