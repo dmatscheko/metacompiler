@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-660** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-661** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -64,13 +64,11 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-653 python: compiled `type(e) is ValueError`; `__class__` in methods; regex group refs, Unicode \w, findall None; class-body comprehensions · P1 · PY · IN PROGRESS (PY worker, round 10) [V]
-Compiled only: `try: int("x") except ValueError as e: print(type(e) is ValueError)` → False (the runtime's class is a different object
-from the program's ValueError; interp and python3 True). `__class__` inside a method → NameError in all engines (python3 the class).
-P regex, all engines: `re.compile(r"\1(a)")` and `r"(a\1)"` accepted (python "invalid group reference 1 at position 1", "cannot refer
-to an open group at position 2"); `re.findall(r"\w", "é!")` → `[]` (python `['é']`: \w is Unicode for str patterns); `re.findall(r"(a)|b",
-"ab")` → `['a', None]` (python `['a', '']`). A comprehension in a class body sees class names (`x = 5` in the class, global x = 1, `[x for
-_ in range(2)]` → python `[1, 1]`).
+### T-660 python: Unicode `\d` / `\s` in regex; `__class__` in a class nested in a method; astral \w across engines · P2 · PY · OPEN [V]
+`re.findall(r"[\W\d]+", "٣4")` → ours `['4']` (python `['٣4']`: a str pattern's \d is any Nd digit; \s likewise Unicode) — use the
+same knob pattern as \w. `class F: def m(self): class G: z = __class__` → NameError in all engines (CPython F; the compiler cannot reach
+the outer cell past G's own `__pycls__`). Astral characters: the Go twin matches runes, regex.js UTF-16 units — a Unicode \w on an
+astral letter may differ between engines (probe first).
 
 ---
 
@@ -750,6 +748,7 @@ T-654 java: user `super.clone()`; FQN `java.io.Serializable` without import; Mat
 T-655 php: function_exists(); direct calls in another letter case; callback message; var_dump of a first-class callable — DONE 8f44cfd4 858a0fd6 (Closure handle reuse after a temporary DECLINED: object ids are never reused by design, manual 7.8 GC model)
 T-652 js: for-in through the prototype chain; `in` on prototype methods; Object.prototype methods as class values; private static getters — DONE 6b4fd2a2
 T-657 php: first-class callable identity; var_dump of method callables; builtins without library wrappers — DONE 14fa3618
+T-653 python: compiled `type(e) is ValueError`; `__class__` in methods; regex group refs, Unicode \w, findall None; class-body comprehensions — DONE b7d3736a
 
 # Settled — do not re-open
 
