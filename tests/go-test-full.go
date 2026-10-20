@@ -4227,7 +4227,7 @@ func s80() {
 // An assignment converts like a declaration does, an integer constant beyond int64
 // is held by a uint64 or rounded into a float, and one beside a float operand is
 // that float. The expected values are go run's.
-func u81(x uint64) uint64  { return x | 1 }
+func u81(x uint64) uint64   { return x | 1 }
 func f81(x float64) float64 { return x / 2 }
 
 func s81() {
@@ -4295,6 +4295,19 @@ func r82() (int8, uint16) {
 	return -128, 65535
 }
 
+type C82 int8
+
+const (
+	T82a uint8   = 200
+	T82b         = T82a + 55
+	T82c C82     = -127
+	T82s         = "héllo"
+	T82t         = T82s + "!"
+	Z82f float64 = 0
+	F82h float64 = 0.5
+	T82f float32 = 3.4028234663852886e38
+)
+
 func s82() {
 	check("cke1", fmt.Sprint(E82{B82{255}, -128}, []P82{{1, 255}, {2, 0}}, map[string]P82{"a": {1, 255}},
 		map[K82]uint8{{-128, 127}: 255}, [3]uint8{2: 255}, L82{255}, M82{255: -128}, P82{b: 255, a: 1}) ==
@@ -4338,6 +4351,14 @@ func s82() {
 	var ii int = 1e3
 	ui += 3.0
 	check("cke7", fmt.Sprint(ui, ii, ui+250.0, ii/2.0, []int{4.0}, x<<2.0, 1<<2.0) == "5 1000 255 500 [4] 20 4")
+	// A TYPED constant expression must fit its type at every step
+	// (go-fail-test-typed-const.go, -typed-divzero.go), and a named constant
+	// string bounds a constant index like a literal does (-const-str-index.go,
+	// -const-str-slice.go); these are the extremes that compile.
+	zf := 1.0
+	check("cke8", fmt.Sprint(T82b, T82a/2*2, -T82c, T82c-1, -(T82c-1+1), uint8(200)+55, int8(-128)/1, zf/Z82f) ==
+		"255 200 127 -128 127 255 -128 +Inf")
+	check("cke9", fmt.Sprint(T82s[5], T82t[6], T82s[6:], T82t[1:7], len(T82t)) == "111 33éllo!7")
 }
 
 type U82 uint8

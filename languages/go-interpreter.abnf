@@ -773,7 +773,7 @@ Plus        = "+" UnaryExpr ;
 // over '<' (a compare's '<' is followed by whitespace or a different next token).
 Recv        <~~ push(goClearC(makeRecv(pop(), up.pos), up.pos)) ~~>
             = "<-" UnaryExpr ;
-Neg         <~~ push(goNegC(pop(), up.pos)) ~~>
+Neg         <~~ push(goNegC(pop(), up.pos, up.start)) ~~>
             = "-" UnaryExpr ;
 Not         <~~ push(goClearC(makeNot(pop()), up.pos)) ~~>
             = "!" UnaryExpr ;
@@ -941,7 +941,7 @@ MakeChanT   <~~ push({mkind: "chan", czero: pop().cet}) ~~>
 // float64(i)/2 a float division and ^uint8(x) an eight bit complement. A conversion
 // to a user-defined type still goes through Call. Longest spelling first: this is a
 // PEG, so "uint" matching the front of "uint16" would never be retried.
-ConvExpr    <~~ push(makeConv(goConvC(takeAll()), up.pos)) ~~>
+ConvExpr    <~~ push(makeConv(goConvC(takeAll(), up.pos), up.pos)) ~~>
             = ConvType "(" ConvArg [ "," ] ")" ;
 // The converted value, followed by its source range (goConvC).
 ConvArg     <~~ var cv = pop(); push(cv); push({cks: up.start, cke: up.pos}) ~~> = Expression ;
@@ -3056,11 +3056,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         goRunCheck(items, ops, sty)
         var folded = goFoldConst(items, ops, pos, ty)
         if (folded != null) { return folded }
+        var tk = goTkRun(items, ops)
         if (ty == null) { goFloOperands(items, ts, sty) }
         goShiftCounts(items, ops, ts)
         regConst(pos, null)
         regCFn(pos, cfn)
         regSt(pos, sty)
+        regTk(pos, tk)
         if (ty == null) {
             var flat = [ts[0]]
             for (var j = 0; j < ops.length; j++) { flat.push(ops[j]); flat.push(ts[j + 1]) }
@@ -6084,7 +6086,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         cFnByPos = {}
         convByPos = {}
         stByPos = {}
-        cScopes = [{n: [], v: [], t: []}]
+        cScopes = [cFrame()]
         cPend = []
         cPendT = []
         cSwMarks = []

@@ -755,6 +755,66 @@
             "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-slice.go", "-q"]
         },
         {
+            "name": "Go interpreter typed constant overflow SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-typed-const.go", "-q"]
+        },
+        {
+            "name": "Go compiler typed constant overflow SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-typed-const.go", "-q"]
+        },
+        {
+            "name": "Go interpreter typed constant division by zero SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-typed-divzero.go", "-q"]
+        },
+        {
+            "name": "Go compiler typed constant division by zero SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-typed-divzero.go", "-q"]
+        },
+        {
+            "name": "Go interpreter named constant string index SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-const-str-index.go", "-q"]
+        },
+        {
+            "name": "Go compiler named constant string index SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-const-str-index.go", "-q"]
+        },
+        {
+            "name": "Go interpreter constant string slice bound SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-const-str-slice.go", "-q"]
+        },
+        {
+            "name": "Go compiler constant string slice bound SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-const-str-slice.go", "-q"]
+        },
+        {
+            "name": "Go interpreter float32 constant overflow SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-float32.go", "-q"]
+        },
+        {
+            "name": "Go compiler float32 constant overflow SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-float32.go", "-q"]
+        },
+        {
             "name": "Go interpreter constant index out of range SHOULD FAIL",
             "type": "go",
             "request": "launch",

@@ -513,16 +513,27 @@ function cApply0(op, a, b) {
 // rational out to the target ulp and rounds there.
 function cToF64(c) {
     if (c.s === 0) { return 0 }
+    var r = cRoundBin(c, false)
+    if (r == null) { return c.s < 0 ? 0 - cbInf : cbInf }
+    var v = cLdexp(cbToNum(r.q), r.ulp)
+    return c.s < 0 ? 0 - v : v
+}
+// |c| (non-zero, real) rounded to the nearest float32 or float64, ties to even, as
+// q * 2^ulp; null when it rounds past the largest finite value (Go: "overflows").
+function cRoundBin(c, f32) {
+    var mb = f32 ? 23 : 52
+    var emax = f32 ? 127 : 1023
+    var umin = f32 ? 0 - 149 : 0 - 1074
     var k = cbBitLen(c.n) - cbBitLen(c.d)
-    if (k > 1200) { return c.s < 0 ? 0 - cbInf : cbInf }
-    if (k < 0 - 1200) { return 0 }
+    if (k > emax + 2) { return null }
+    if (k < umin - 2) { return {q: [], ulp: 0} }
     var big = false
     if (k >= 0) { big = cbCmp(c.n, cbShl(c.d, k)) >= 0 }
     else { big = cbCmp(cbShl(c.n, 0 - k), c.d) >= 0 }
     var e = big ? k : k - 1
-    if (e > 1023) { return c.s < 0 ? 0 - cbInf : cbInf }
-    var ulp = e - 52
-    if (ulp < 0 - 1074) { ulp = 0 - 1074 }
+    if (e > emax) { return null }
+    var ulp = e - mb
+    if (ulp < umin) { ulp = umin }
     var num = c.n
     var den = c.d
     if (ulp >= 0) { den = cbShl(den, ulp) } else { num = cbShl(num, 0 - ulp) }
@@ -533,8 +544,117 @@ function cToF64(c) {
     if (cp > 0) { up = true }
     else if (cp === 0) { up = !cbEven(q) }
     if (up) { q = cbAdd(q, cbOne()) }
-    var v = cLdexp(cbToNum(q), ulp)
-    return c.s < 0 ? 0 - v : v
+    if (cbBitLen(q) + ulp > emax + 1) { return null }
+    return {q: q, ulp: ulp}
+}
+// Real constant c rounded to float32 or float64, exactly, as a float constant; null
+// when it overflows. A typed float constant is rounded to its type (go/types does
+// the same after every operation).
+function cRoundFlo(c, f32) {
+    if (c.s === 0) { return cMk(0, [], cbOne(), true) }
+    var r = cRoundBin(c, f32)
+    if (r == null) { return null }
+    if (r.ulp >= 0) { return cMk(c.s, cbShl(r.q, r.ulp), cbOne(), true) }
+    return cReduce(cMk(c.s, r.q, cbShl(cbOne(), 0 - r.ulp), true))
+}
+
+// ----- how go/constant prints a float constant in a diagnostic -----
+// %.6g of the nearest float64, or %g (shortest) where %.6g would hide that the
+// value has a fraction; outside float64's range, six digits and the exponent.
+function cGoFloStr(c) {
+    if (c.s === 0) { return "0" }
+    var a = cMk(1, c.n, c.d, true)
+    var sg = c.s < 0 ? "-" : ""
+    var r = cRoundFlo(a, false)
+    if (r == null || r.s === 0) {
+        var m = cDecDigits(a, 6)
+        var e = m.dp - 1
+        return sg + cFmtG({d: m.d, dp: 1}, 6, false) + "e" + (e < 0 ? "" : "+") + e
+    }
+    var s = cFmtG(cDecDigits(r, 6), 6, false)
+    if (goKInt(c) == null && s.indexOf(".") < 0) { s = cFmtG(cShortDigits(cToF64(r)), 0, true) }
+    return sg + s
+}
+// Positive rational r rounded half to even to n significant digits: {d, dp} with
+// r ~ 0.d * 10^dp.
+function cDecDigits(r, n) {
+    var e = cbToDec(r.n).length - cbToDec(r.d).length
+    var q = []
+    var rem = []
+    var den = []
+    var done = false
+    while (!done) {
+        var s = n - e
+        var num = r.n
+        den = r.d
+        if (s >= 0) { num = cbMul(num, cbPow10(s)) } else { den = cbMul(den, cbPow10(0 - s)) }
+        var dm = cbDivMod(num, den)
+        var len = cbIsZero(dm.q) ? 0 : cbToDec(dm.q).length
+        if (len > n) { e = e + 1 }
+        else if (len < n) { e = e - 1 }
+        else { q = dm.q; rem = dm.r; done = true }
+    }
+    var cp = cbCmp(cbMulSmall(rem, 2), den)
+    if (cp > 0 || (cp === 0 && !cbEven(q))) { q = cbAdd(q, cbOne()) }
+    var ds = cbToDec(q)
+    if (ds.length > n) { ds = ds.substring(0, n); e = e + 1 }
+    return {d: ds, dp: e}
+}
+// The shortest round-tripping digits of positive double x, read off the host's
+// own Number-to-String, as {d, dp}.
+function cShortDigits(x) {
+    var s = "" + x
+    var ei = s.indexOf("e")
+    var exp = 0
+    if (ei >= 0) {
+        var es = s.substring(ei + 1)
+        if (es.charAt(0) == "+") { es = es.substring(1) }
+        exp = parseInt(es, 10)
+        s = s.substring(0, ei)
+    }
+    var dot = s.indexOf(".")
+    var ip = dot < 0 ? s : s.substring(0, dot)
+    var ds = dot < 0 ? s : ip + s.substring(dot + 1)
+    var dp = ip.length + exp
+    var lead = 0
+    while (lead < ds.length - 1 && ds.charAt(lead) == "0") { lead = lead + 1 }
+    return {d: ds.substring(lead), dp: dp - lead}
+}
+// strconv's %g over decimal digits {d, dp} (the value 0.d * 10^dp) at precision
+// prec, or at the shortest digits when shortest.
+function cFmtG(dd, prec, shortest) {
+    var d = dd.d
+    var end = d.length
+    while (end > 1 && d.charAt(end - 1) == "0") { end = end - 1 }
+    d = d.substring(0, end)
+    var nd = d.length
+    if (shortest) { prec = nd }
+    var eprec = prec
+    if (eprec > nd && nd >= dd.dp) { eprec = nd }
+    if (shortest) { eprec = 6 }
+    var exp = dd.dp - 1
+    if (exp < 0 - 4 || exp >= eprec) {
+        var pe = prec > nd ? nd : prec
+        var out = d.charAt(0)
+        if (pe > 1) { out = out + "." + d.substring(1, pe) }
+        var ae = exp < 0 ? 0 - exp : exp
+        return out + "e" + (exp < 0 ? "-" : "+") + (ae < 10 ? "0" : "") + ae
+    }
+    var pf = prec > dd.dp ? nd : prec
+    var fd = pf - dd.dp > 0 ? pf - dd.dp : 0
+    var ip = ""
+    var i = 0
+    if (dd.dp <= 0) { ip = "0" }
+    while (i < dd.dp) { ip = ip + (i < nd ? d.charAt(i) : "0"); i = i + 1 }
+    if (fd == 0) { return ip }
+    var fp = ""
+    var j = 0
+    while (j < fd) {
+        var at = dd.dp + j
+        fp = fp + (at >= 0 && at < nd ? d.charAt(at) : "0")
+        j = j + 1
+    }
+    return ip + "." + fp
 }
 function cPow2(k) {
     var v = 1
@@ -639,9 +759,11 @@ function cFromIntText(s, radix, start) {
 // node that ends where an operand ends either re-registers its own value or clears.
 var constByPos = {}
 var cNone = {s: 0, n: [], d: [], f: false, none: true}
+var tkByPos = {}
 function regConst(pos, c) {
     if (pos == undefined || pos == null) { return }
     stByPos["p" + pos] = ""
+    tkByPos["p" + pos] = null
     constByPos["p" + pos] = (c == null) ? cNone : c
     if (c == null) { cFnByPos["p" + pos] = cFnNone } else { cFnByPos["p" + pos] = cKonstFn(c) }
 }
@@ -809,14 +931,14 @@ function goComplC(items) {
     var inner = cfnAt(items[1].at)
     var c = constAt(items[1].at)
     if (c != null) { regConst(items[1].at, cNot(c)) }
-    else { regCFn(items[1].at, cNotFn(inner)) }
+    else { regCFn(items[1].at, cNotFn(inner)); regTk(items[1].at, null) }
 }
 // -x and (x) do not move the END position of what they wrap (a prefix operator
 // and the group's ')' respectively), so both simply re-register at their own key.
-function goNegC(t, pos) {
+function goNegC(t, pos, s) {
     var inner = cfnAt(pos)
     var c = constAt(pos)
-    if (c == null) { regCFn(pos, cNegFn(inner)); return makeNeg(t) }
+    if (c == null) { regCFn(pos, cNegFn(inner)); goTkNeg(pos, s); return makeNeg(t) }
     var nc = cNeg(c)
     regConst(pos, nc)
     // UNARY MINUS IS A FOLD SITE because a Go CONSTANT HAS NO SIGNED ZERO:
@@ -837,7 +959,7 @@ function goNegC(t, pos) {
 function goParenC(items, pos) {
     var c = constAt(items[1].at)
     if (c != null) { regConst(pos, c) }
-    else { regCFn(pos, cfnAt(items[1].at)) }
+    else { regCFn(pos, cfnAt(items[1].at)); regTk(pos, tkAt(items[1].at)) }
     return items[0]
 }
 function cFromRadixText(text) {
@@ -881,12 +1003,15 @@ function cFromRadixText(text) {
 //     order in Go; this fold runs in source order, so a forward reference declines.
 //   - a name declared with := , var, or as a parameter anywhere its frame can see,
 //     and every name at all once the frame that bound it has been popped.
-// A frame is {n: names, v: constants, t: static types} as parallel arrays rather than
-// an object, because a frame has to be TRUNCATED (the switch-case rule) and
-// enumerated, and neither is expressible on an object in the frozen script subset.
-// The t column is the STATIC TYPES section's (below); a binder that does not set it
-// leaves "", which means "not known".
-var cScopes = [{n: [], v: [], t: []}]
+// A frame is {n: names, v: constants, t: static types, x: extras} as parallel arrays
+// rather than an object, because a frame has to be TRUNCATED (the switch-case rule)
+// and enumerated, and neither is expressible on an object in the frozen script
+// subset. The t column is the STATIC TYPES section's (below); a binder that does
+// not set it leaves "", which means "not known". The x column is what the checks
+// know of a constant that does not fold: a typed constant's goTkMk record, or a
+// string constant's byte length as {sl} (cBindSpec).
+function cFrame() { return {n: [], v: [], t: [], x: []} }
+var cScopes = [cFrame()]
 var cPend = []
 var cPendT = []
 var cSwMarks = []
@@ -896,9 +1021,9 @@ function cTop() { return cScopes[cScopes.length - 1] }
 // the PACKAGE frame instead and kill `const n` for the whole file.
 function cPendName(name) { cPend.push(name); cPendT.push(""); return name }
 function cScopeEnter() {
-    var f = {n: [], v: [], t: []}
+    var f = cFrame()
     var i = 0
-    while (i < cPend.length) { f.n.push(cPend[i]); f.v.push(null); f.t.push(cPendT[i]); i = i + 1 }
+    while (i < cPend.length) { f.n.push(cPend[i]); f.v.push(null); f.t.push(cPendT[i]); f.x.push(null); i = i + 1 }
     cPend = []
     cPendT = []
     cScopes.push(f)
@@ -909,21 +1034,31 @@ function cBindConst(name, c) {
     f.n.push(name)
     f.v.push(c == undefined ? null : c)
     f.t.push("")
+    f.x.push(null)
 }
 // Returns the name so it can be written inline in a tag that also pushes it.
 function cPoisonName(name) { cBindConst(name, null); return name }
-function cLookup(name) {
+// The innermost binding of name as {f: its frame, i: its index}, or null.
+function cFind(name) {
     var s = cScopes.length - 1
     while (s >= 0) {
         var f = cScopes[s]
         var i = f.n.length - 1
         while (i >= 0) {
-            if (f.n[i] === name) { return f.v[i] }
+            if (f.n[i] === name) { return {f: f, i: i} }
             i = i - 1
         }
         s = s - 1
     }
     return null
+}
+function cLookup(name) {
+    var b = cFind(name)
+    return b == null ? null : b.f.v[b.i]
+}
+function cXLookup(name) {
+    var b = cFind(name)
+    return b == null ? null : b.f.x[b.i]
 }
 // ----- STATIC TYPES: which stores copy a struct -----
 // A struct and a pointer to it are ONE object in this value model, so a store
@@ -964,26 +1099,24 @@ function stStoreAt(pos) {
     return c.rn === true ? "int32" : "int"
 }
 function cTyLookup(name) {
-    var s = cScopes.length - 1
-    while (s >= 0) {
-        var f = cScopes[s]
-        var i = f.n.length - 1
-        while (i >= 0) {
-            if (f.n[i] === name) { return f.t[i] }
-            i = i - 1
-        }
-        s = s - 1
-    }
-    return ""
+    var b = cFind(name)
+    return b == null ? "" : b.f.t[b.i]
 }
 // The newest binding of name in the innermost frame takes the type ty.
 function cBindTy(name, ty) {
+    var i = cTopIdx(name)
+    if (i >= 0) { cTop().t[i] = ty }
+}
+// ... and its x column (cFrame) takes x.
+function cBindX(name, x) {
+    var i = cTopIdx(name)
+    if (i >= 0) { cTop().x[i] = x }
+}
+function cTopIdx(name) {
     var f = cTop()
     var i = f.n.length - 1
-    while (i >= 0) {
-        if (f.n[i] === name) { f.t[i] = ty; return }
-        i = i - 1
-    }
+    while (i >= 0 && f.n[i] !== name) { i = i - 1 }
+    return i
 }
 // A pending parameter or receiver name takes its declared type.
 function cPendTy(name, ty) {
@@ -1074,11 +1207,13 @@ function goKRecOf(k, start, pos) {
 function goConstTo(t, kr, ty, ctx) {
     if (kr == null || ty == "") { return t }
     var bt = stBare(ty)
-    if (kr.k.f && goIsIfaceTy(bt)) { return t }
-    var shown = goIsIfaceTy(bt) ? "int" : bt
+    var shown = goIsIfaceTy(bt) ? (kr.k.f ? "float64" : "int") : bt
     var w = goTyWord(shown)
     if (typeof definedUnder[w] == "string") { w = goTyWord(resolveDefined(w)) }
-    if (isFloatTy(w)) { return kr.k.f ? t : cMaterialize(cAsF(kr.k)) }
+    if (isFloatTy(w)) {
+        if (cRoundFlo(cAsF(kr.k), w == "float32") == null) { goKFail(kr, "cannot use " + goKDesc(kr) + " as " + shown + " value in " + ctx + " (overflows)") }
+        return (kr.k.f || goIsIfaceTy(bt)) ? t : cMaterialize(cAsF(kr.k))
+    }
     var it = goIntTy(w)
     if (it == null) { return t }
     var iv = goKInt(kr.k)
@@ -1093,15 +1228,62 @@ function goKInt(k) {
     if (!cbIsZero(qr.r)) { return null }
     return cInt(k.s, qr.q)
 }
-// How go's diagnostics name a constant: its source, then its value where the two
-// differ - "1 << 63 (untyped int constant 9223372036854775808)", "h (untyped
-// float constant 0.5)".
-function goKDesc(kr) {
-    var src = stTrim(c.srcSlice(kr.ks, kr.ke))
-    var iv = goKInt(kr.k)
-    var dec = iv != null ? (iv.s < 0 ? "-" : "") + cbToDec(iv.n) : "" + cToF64(kr.k)
+function cIntStr(k) { return (k.s < 0 ? "-" : "") + cbToDec(k.n) }
+// A constant's value as go/constant prints it: an integer in decimal, a float
+// constant by cGoFloStr even when it is integral (1e6 is "1e+06").
+function cValStr(k) { return k.f ? cGoFloStr(k) : cIntStr(k) }
+// How go's diagnostics name an untyped constant: its source, then its value where
+// the two differ - "1 << 63 (untyped int constant 9223372036854775808)", "h
+// (untyped float constant 0.5)".
+function goKDesc(kr) { return goKDescV(kr, cValStr(kr.k)) }
+function goKDescV(kr, val) {
+    var src = goExprText(kr.ks, kr.ke)
     var kind = kr.k.f ? "float" : (kr.k.rn === true ? "rune" : "int")
-    return src + " (untyped " + kind + " constant" + (src == dec ? "" : " " + dec) + ")"
+    return src + " (untyped " + kind + " constant" + (src == val ? "" : " " + val) + ")"
+}
+// The source [s, e] the way go/types prints an expression: a binary operator
+// between single spaces, a unary one against its operand, ", " between
+// arguments, nothing else - `1<<63` is "1 << 63".
+function goExprText(s, e) {
+    var src = c.srcSlice(s, e)
+    var out = ""
+    var prev = ""
+    var i = 0
+    while (i < src.length) {
+        var ch = src.charAt(i)
+        var cc = src.charCodeAt(i)
+        if (cc <= 32) { i = i + 1; continue }
+        var j = i + 1
+        var kind = "op"
+        if (cIsIdCh(cc) || ch == ".") {
+            kind = "x"
+            var hex = ch == "0" && (src.charAt(j) == "x" || src.charAt(j) == "X")
+            var num = (cc >= 48 && cc <= 57) || ch == "."
+            while (j < src.length) {
+                var dc = src.charAt(j)
+                if (cIsIdCh(src.charCodeAt(j)) || dc == ".") { j = j + 1; continue }
+                var pc = src.charAt(j - 1)
+                if ((dc == "+" || dc == "-") && num && (hex ? (pc == "p" || pc == "P") : (pc == "e" || pc == "E"))) { j = j + 1; continue }
+                break
+            }
+        } else if (ch == "\"" || ch == "'" || ch == "`") {
+            kind = "x"
+            while (j < src.length && src.charAt(j) != ch) { j = j + ((src.charAt(j) == "\\" && ch != "`") ? 2 : 1) }
+            j = j + 1
+        } else if (ch == "(" || ch == ")" || ch == "[" || ch == "]" || ch == "{" || ch == "}" || ch == "," || ch == ":") {
+            kind = ch
+        } else {
+            var two = src.substring(i, i + 2)
+            if (two == "<<" || two == ">>" || two == "&^" || two == "&&" || two == "||" || two == "==" || two == "!=" || two == "<=" || two == ">=" || two == "<-") { j = i + 2 }
+        }
+        var tok = src.substring(i, j)
+        if (kind == "op" && (prev == "x" || prev == ")" || prev == "]" || prev == "}")) { out = out + " " + tok + " " }
+        else if (kind == ",") { out = out + ", " }
+        else { out = out + tok }
+        prev = kind
+        i = j
+    }
+    return out
 }
 // kr.ln, where present, is the position whose line the error is reported at.
 function goKFail(kr, msg) { fail(c.curFile() + ":" + c.lineOf(kr.ln != undefined ? kr.ln : kr.ks) + ": " + msg) }
@@ -1132,27 +1314,155 @@ function goShiftCountOk(kr) {
     if (kr.k.s < 0) { goKFail(kr, "invalid operation: negative shift count " + goKDesc(kr)) }
 }
 function goDivZeroFail(ks) { fail(c.curFile() + ":" + c.lineOf(ks) + ": invalid operation: division by zero") }
-// A conversion `to(c)` of an untyped constant c (source [ks, ke]) to an integer
-// type must represent it exactly: `uint8(256)` is "constant 256 overflows
-// uint8" and `int(2.5)` "cannot convert 2.5 (untyped float constant) to type int".
+// A conversion `to(c)` of an untyped constant c (source [ks, ke]) must represent
+// it: `uint8(256)` is "constant 256 overflows uint8", `int(2.5)` "cannot convert
+// 2.5 (untyped float constant) to type int", `float32(1e39)` "cannot convert 1e39
+// (untyped float constant 1e+39) to type float32". An integral float constant is
+// shown as the integer the conversion tried.
 function goConvConst(k, ks, ke, to) {
     if (k == null || cIsCx(k)) { return }
+    var kr = {k: k, ks: ks, ke: ke}
+    var tt = goTkType(to)
+    if (tt != null && tt.f) {
+        if (cRoundFlo(cAsF(k), tt.u == "float32") == null) { goKFail(kr, "cannot convert " + goKDesc(kr) + " to type " + to) }
+        return
+    }
     var it = goIntUnder(to)
     if (it == null) { return }
-    var v = k
-    if (k.f) {
-        var qr = cbDivMod(k.n, k.d)
-        if (!cbIsZero(qr.r)) {
-            goKFail({k: k, ks: ks, ke: ke}, "cannot convert " + stTrim(c.srcSlice(ks, ke)) + " (untyped float constant) to type " + to)
-            return
-        }
-        v = cInt(k.s, qr.q)
-    }
-    if (!cFitsInt(v, it.w, it.u)) { goKFail({k: v, ks: ks, ke: ke}, "constant " + (v.s < 0 ? "-" : "") + cbToDec(v.n) + " overflows " + to) }
+    var v = goKInt(k)
+    if (v == null) { goKFail(kr, "cannot convert " + goKDesc(kr) + " to type " + to); return }
+    if (cFitsInt(v, it.w, it.u)) { return }
+    if (k.f) { goKFail(kr, "cannot convert " + goKDescV(kr, cIntStr(v)) + " to type " + to); return }
+    goKFail(kr, "constant " + cIntStr(v) + " overflows " + to)
 }
-// items = [{conv}, thunk, {cks, cke}] of a conversion whose type is written out.
-function goConvC(items) {
+
+// ----- TYPED constants: compile-time checks only -----
+// `const a uint8 = 200`, `uint8(200)` and `a + 1` are constants OF A TYPE, whose
+// every value must be representable in it: `a + a` is "a + a (constant 400 of
+// type uint8) overflows uint8" and `float64(1) / 0` a division by zero. The value
+// a program computes is unaffected - a typed constant never folds into an
+// expression (see cBindSpec) - so this is a parallel channel only the checks
+// read: tkByPos maps an end position to {k: the exact value, ty: the type as
+// written, u: its underlying basic type, f: a float type, w/us: an integer
+// type's width and signedness}, and regConst clears it under constByPos's
+// invariant. A float value is rounded to its type after every operation, as
+// go/types rounds it.
+function regTk(pos, tk) {
+    if (pos == undefined || pos == null) { return }
+    tkByPos["p" + pos] = tk
+}
+function tkAt(pos) {
+    if (pos == undefined || pos == null) { return null }
+    var t = tkByPos["p" + pos]
+    return t == undefined ? null : t
+}
+// The numeric type ty names, seen through a defined type, as goTkMk's type record.
+function goTkType(ty) {
+    var t = goTyWord(stBare(ty))
+    var w = t
+    if (typeof definedUnder[w] == "string") { w = goTyWord(resolveDefined(w)) }
+    if (isFloatTy(w)) { return {ty: t, u: w, f: true, w: 0, us: false} }
+    var it = goIntTy(w)
+    if (it == null) { return null }
+    return {ty: t, u: w, f: false, w: it.w, us: it.u}
+}
+// Constant k given type tt, or null where it cannot hold it (a fraction at an
+// integer type, an overflow) - the error is reported by the caller's own check.
+function goTkMk(k, tt) {
+    if (k == null || cIsCx(k)) { return null }
+    var v = tt.f ? cRoundFlo(cAsF(k), tt.u == "float32") : goKInt(k)
+    if (v == null || (!tt.f && !cFitsInt(v, tt.w, tt.us))) { return null }
+    return {k: v, ty: tt.ty, u: tt.u, f: tt.f, w: tt.w, us: tt.us}
+}
+// "a + a (constant 400 of type uint8)", "c (constant 7 of uint8 type C)".
+function goTkDesc(s, e, tk) {
+    var src = goExprText(s, e)
+    var val = cValStr(tk.k)
+    var tys = tk.ty == tk.u ? "type " + tk.ty : tk.u + " type " + tk.ty
+    return src + " (constant" + (src == val ? "" : " " + val) + " of " + tys + ")"
+}
+// The value nx an operator produced on operands of tk's type, checked against
+// the type and rounded to it; the source [s, e] names it in the diagnostic.
+function goTkStep(nx, tk, s, e) {
+    var r = {k: nx, ty: tk.ty, u: tk.u, f: tk.f, w: tk.w, us: tk.us}
+    if (tk.f) {
+        var rf = cRoundFlo(nx, tk.u == "float32")
+        if (rf != null) { r.k = rf; return r }
+    } else if (cFitsInt(nx, tk.w, tk.us)) { return r }
+    goKFail({ks: s}, goTkDesc(s, e, r) + " overflows " + tk.u)
+    return null
+}
+// A binary run (goFoldConst's items layout) in which every operand is a constant
+// and at least one is typed: the typed constant it evaluates to, or null. Every
+// typed operand must have the same type (go rejects a mix), an untyped one is
+// converted to it, and a shift takes its left operand's type.
+function goTkRun(items, ops) {
+    var tt = null
+    var k = 0
+    while (k <= ops.length) {
+        var t0 = tkAt(items[3 * k + 1].at)
+        if (t0 != null) {
+            if (tt != null && tt.ty != t0.ty) { return null }
+            tt = t0
+        }
+        k = k + 1
+    }
+    if (tt == null) { return null }
+    var acc = tkAt(items[1].at)
+    var ak = acc != null ? acc.k : constAt(items[1].at)
+    if (ak == null || cIsCx(ak)) { return null }
+    k = 0
+    while (k < ops.length) {
+        var op = ops[k]
+        var r = items[3 * k + 4]
+        var rt = tkAt(r.at)
+        var rk = rt != null ? rt.k : constAt(r.at)
+        if (rk == null || cIsCx(rk)) { return null }
+        var shift = op == "<<" || op == ">>"
+        if (acc == null && rt == null) {
+            ak = cApply(op, ak, rk)
+            if (ak == null) { return null }
+        } else {
+            if (shift && acc == null) { return null }
+            if (!shift && acc == null) { ak = tt.f ? cAsF(ak) : goKInt(ak) }
+            if (!shift && rt == null) { rk = tt.f ? cAsF(rk) : goKInt(rk) }
+            if (ak == null || rk == null) { return null }
+            if ((op == "/" || op == "%") && rk.s === 0) { goDivZeroFail(r.as); return null }
+            var nx = cApply(op, ak, rk)
+            if (nx == null || cTooBig(nx)) { return null }
+            acc = goTkStep(nx, tt, items[1].as, r.at)
+            if (acc == null) { return null }
+            ak = acc.k
+        }
+        k = k + 1
+    }
+    return acc
+}
+// -x of a typed constant x ending at pos, the whole starting at s.
+function goTkNeg(pos, s) {
+    var t = tkAt(pos)
+    if (t == null) { return }
+    regTk(pos, goTkStep(cNeg(t.k), t, s, pos))
+}
+// to(x) of a constant x - typed or untyped, source [ks, ke] - registered as a
+// constant of type to at the conversion's end pos. A typed x must be
+// representable in the new type.
+function goTkConv(to, ks, ke, pos) {
+    var tt = goTkType(to)
+    var t0 = tkAt(ke)
+    if (tt != null && t0 != null) {
+        var kr = {k: t0.k, ks: ks, ke: ke}
+        var iv = goKInt(t0.k)
+        if (tt.f ? cRoundFlo(cAsF(t0.k), tt.u == "float32") == null : iv == null) { goKFail(kr, "cannot convert " + goTkDesc(ks, ke, t0) + " to type " + to) }
+        else if (!tt.f && !cFitsInt(iv, tt.w, tt.us)) { goKFail(kr, "constant " + cIntStr(iv) + " overflows " + to) }
+    }
+    regTk(pos, tt == null ? null : goTkMk(t0 != null ? t0.k : constAt(ke), tt))
+}
+// items = [{conv}, thunk, {cks, cke}] of a conversion whose type is written out,
+// which ends at pos.
+function goConvC(items, pos) {
     goConvConst(constAt(items[2].cke), items[2].cks, items[2].cke, items[0].conv)
+    goTkConv(items[0].conv, items[2].cks, items[2].cke, pos)
     return [items[0], items[1]]
 }
 // `=` storing value kr into target lref, one of n targets: the blank identifier
@@ -2308,7 +2618,7 @@ function goIdxCheck(kr, ty, os, oe) {
     if (kr == null || kr.k.f) { return }
     var t = goIdxTy(ty)
     var n = goArrLen(t)
-    if (n < 0 && os >= 0) { n = goStrLitLen(stTrim(c.srcSlice(os, oe))) }
+    if (n < 0 && os >= 0) { n = goConstStrLen(c.srcSlice(os, oe)) }
     if (t.indexOf("map[") == 0 || (n < 0 && t != "string" && t.charAt(0) != "[")) { return }
     if (kr.k.s < 0) { goKFail(kr, "invalid argument: index " + goKIdxDesc(kr) + " must not be negative"); return }
     if (n >= 0 && cbCmp(kr.k.n, cbFromSmall(n)) >= 0) { goKFail(kr, "invalid argument: index " + cbToDec(kr.k.n) + " out of bounds [0:" + n + "]") }
@@ -2319,7 +2629,7 @@ function goIdxCheck(kr, ty, os, oe) {
 function goSliceKCheck(ks, ty, os, oe) {
     var t = goIdxTy(ty)
     var n = goArrLen(t)
-    if (n < 0) { n = goStrLitLen(stTrim(c.srcSlice(os, oe))) }
+    if (n < 0) { n = goConstStrLen(c.srcSlice(os, oe)) }
     var prev = null
     var i = 0
     while (i < ks.length) {
@@ -2607,7 +2917,7 @@ function cSwEnter() { cSwMarks.push({d: cScopes.length, k: cTop().n.length, ts: 
 function cSwTrunc(m) {
     if (cScopes.length !== m.d) { return }
     var f = cTop()
-    while (f.n.length > m.k) { f.n.pop(); f.v.pop(); f.t.pop() }
+    while (f.n.length > m.k) { f.n.pop(); f.v.pop(); f.t.pop(); f.x.pop() }
 }
 function cSwCase() { if (cSwMarks.length > 0) { cSwTrunc(cSwMarks[cSwMarks.length - 1]) } }
 function cSwExit() { if (cSwMarks.length > 0) { cSwTrunc(cSwMarks.pop()) } }
@@ -2669,6 +2979,8 @@ function goNameC(name, pos) {
     var ty = cTyLookup(name)
     if (ty == "" && goFnSig["$" + name] !== undefined && !cIsLocal(name)) { ty = goFnSig["$" + name] }
     regSt(pos, ty)
+    var x = cXLookup(name)
+    if (x != null && x.k != undefined) { regTk(pos, x) }
     return makeVarRef(name)
 }
 // A const spec binds its names and hands the item list on with the position markers
@@ -2713,10 +3025,13 @@ function cBindSpec(items, start) {
     if (cIotaIdx <= 0) { cLastTy = "" }
     if (typed) { cLastTy = cty }
     else if (rest.length > 0) { cLastTy = "" }
+    var own = ats.length === names.length
     var n = 0
     while (n < names.length) {
-        cBindConst(names[n], typed ? null : cSpecVal(fns, n, okn, cIotaIdx))
+        var sv = cSpecVal(fns, n, okn, cIotaIdx)
+        cBindConst(names[n], typed ? null : sv)
         if (cLastTy != "") { cBindTy(names[n], cLastTy) }
+        cBindX(names[n], own ? cSpecX(sv, aks[n], ats[n]) : cSpecX(sv, -1, -1))
         n = n + 1
     }
     // A TYPED const is deliberately NOT an untyped folding constant (cBindConst
@@ -2752,6 +3067,48 @@ function cBindSpec(items, start) {
     var z = 0
     while (z < rest.length) { out.push(rest[z]); z = z + 1 }
     return out
+}
+// What the x column records for a spec's constant: sv is its untyped value (null
+// when it did not fold) and [as, at] its own expression's source (-1: it repeats
+// the spec above). A spec with a numeric type, or whose expression is a typed
+// constant, binds a typed constant; one whose expression is a constant string, its
+// byte length.
+function cSpecX(sv, as, at) {
+    var tt = cLastTy != "" ? goTkType(cLastTy) : null
+    var tk = at >= 0 ? tkAt(at) : null
+    if (tt != null) { return goTkMk(sv != null ? sv : (tk != null ? tk.k : null), tt) }
+    if (sv != null) { return null }
+    if (tk != null && cLastTy == "") { return tk }
+    var sl = at >= 0 ? goConstStrLen(c.srcSlice(as, at)) : 0 - 1
+    return sl >= 0 ? {sl: sl} : null
+}
+// The byte length of a constant string expression: string literals and string
+// constants joined by '+', else -1.
+function goConstStrLen(text) {
+    var total = 0
+    var start = 0
+    var q = ""
+    var i = 0
+    while (i <= text.length) {
+        var ch = i < text.length ? text.charAt(i) : "+"
+        if (q != "") {
+            if (ch == "\\" && q != "`") { i = i + 1 }
+            else if (ch == q) { q = "" }
+        } else if (ch == "\"" || ch == "`") { q = ch }
+        else if (ch == "+") {
+            var part = stTrim(text.substring(start, i))
+            var n = goStrLitLen(part)
+            if (n < 0) {
+                var x = cXLookup(part)
+                n = (x != null && x.sl != undefined) ? x.sl : 0 - 1
+            }
+            if (n < 0) { return 0 - 1 }
+            total = total + n
+            start = i + 1
+        }
+        i = i + 1
+    }
+    return total
 }
 // A RUNE constant whose value lands where it takes its DEFAULT type - a call
 // argument, a returned value, `x := 'a'` - becomes an int32 there (goI32Thunk in
