@@ -175,7 +175,7 @@ line tracking at warning sites is worth its cost.
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
 
-### T-648 lua: `tonumber("-0.0")` loses the zero's sign in the interpreter and natively · P1 · LUA · OPEN [V]
+### T-648 lua: `tonumber("-0.0")` loses the zero's sign in the interpreter and natively · P1 · LUA · IN PROGRESS (LUA worker, round 8) [V]
 `for _, s in ipairs({"-0.0"," -0.0 ","-0e5","-0x0p0","-.0"}) do print(tonumber(s), math.type(tonumber(s))) end` → interp and native
 `0.0 float`; llvm.Run and lua 5.5 `-0.0 float` (and `-0` → `0 integer`). luaNumVal (lua-interpreter.abnf) and luParseNum
 (lib/lua-rt.metajs).
