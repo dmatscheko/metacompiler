@@ -161,6 +161,7 @@ char *rt_replace(char *s, char *p, char *r, int mode);
 char *rt_case(char *s, int mode, char *pat);
 char *rt_shquote(char *sq);
 char *rt_ansic(char *ac);
+int rt_utf8put(char *d, long cp);
 char *rt_unraw(char *s);
 int rt_haschar(char *s, int ch);
 char *rt_read_line(int u);
@@ -261,14 +262,19 @@ int putchar(int c);
  * diagnostic on stderr and exits 70. Neither is reached on a successful path. */
 long write(int fd, const char *buf, unsigned long n);
 void exit(int code);
+int fflush(void *f);
 
 /* One byte to fd 2. A char[1] on the stack rather than a pointer into the
  * arena, because the arena is exactly what is gone when this runs (the same
- * shape as runtime.c's o_ch). */
+ * shape as runtime.c's o_ch). Standard output is putchar's stdio buffer, so it
+ * is flushed first (fflush(NULL): every stream, no FILE* needed): bash writes
+ * each command's output as it runs, and `cmd 2>&1` interleaves the two in
+ * program order. */
 int rt_ech(int c)
 {
     char b[1];
     b[0] = (char)c;
+    fflush(0);
     write(2, b, (unsigned long)1);
     return 0;
 }
@@ -1958,8 +1964,9 @@ int rt_hexval(int hc) {
 /* rt_ansic: the ${v@E} form - the $'...' escapes decoded at RUN time.
  *
  * \NNN (one to THREE octal digits, total, so $'\0101' is \b then "1") and \xHH
- * (one or two hex digits) are decoded, so ${v@E} inverts ${v@Q}. A \x with no
- * hex digit after it stays literal, as bash leaves it. */
+ * (one or two hex digits) are decoded, so ${v@E} inverts ${v@Q}, and \uHHHH /
+ * \UHHHHHHHH are the code point's UTF-8. A \x, \u or \U with no hex digit after
+ * it stays literal, as bash leaves it. */
 char *rt_ansic(char *ac) {
     int len = rt_strlen(ac);
     char *dst = rt_bump(len + 1);
@@ -1996,6 +2003,20 @@ char *rt_ansic(char *ac) {
             }
             dst[o] = (char)v;
             o = o + 1;
+        } else if ((c0 == 92) && (i + 1 < len) && (c1 == 117 || c1 == 85) &&
+                   (i + 2 < len) && (rt_hexval((int)(unsigned char)ac[i + 2]) >= 0)) {
+            long v = 0;
+            int n = 0;
+            int maxd = (c1 == 117) ? 4 : 8;
+            i = i + 2;
+            while (n < maxd && i < len) {
+                int d = rt_hexval((int)(unsigned char)ac[i]);
+                if (d < 0) break;
+                v = v * 16 + d;
+                i = i + 1;
+                n = n + 1;
+            }
+            o = o + rt_utf8put(dst + o, v);
         } else if ((c0 == 92) && (i + 1 < len)) {
             int mapped = c1;
             if (c1 == 97) mapped = 7;
@@ -2007,6 +2028,11 @@ char *rt_ansic(char *ac) {
             if (c1 == 114) mapped = 13;
             if (c1 == 101) mapped = 27;
             if (c1 == 69) mapped = 27;
+            /* any other escape stays as written, backslash included */
+            if (mapped == c1 && c1 != 92 && c1 != 39 && c1 != 34 && c1 != 63) {
+                dst[o] = (char)92;
+                o = o + 1;
+            }
             dst[o] = (char)mapped;
             o = o + 1;
             i = i + 2;
@@ -2309,28 +2335,35 @@ char *pf_enc(char *s)
     return d;
 }
 
+/* Writes the UTF-8 pattern of code point cp to d and answers its length. bash
+ * writes a value that is no character - a surrogate, or past U+10FFFF - in the
+ * same pattern, up to six bytes for 2^31 - 1, and nothing from 2^31 on.
+ * Twin of pfChr in bash-interpreter.abnf and ucsChr in bash-to-llvm-ir.abnf. */
+int rt_utf8put(char *d, long cp)
+{
+    int n = 2;
+    int k;
+    if (cp < 128) {
+        d[0] = (char)cp;
+        return 1;
+    }
+    if (cp >= 2147483648) return 0;
+    while (n < 6 && cp >= (1L << (5 * n + 1))) n = n + 1;
+    for (k = n - 1; k > 0; k = k - 1) {
+        d[k] = (char)(128 + cp % 64);
+        cp = cp / 64;
+    }
+    d[0] = (char)(((65280 >> n) & 255) + cp);
+    return n;
+}
+
 /* The UTF-8 encoding of a code point (\u / \U). */
 char *pf_utf8(long cp)
 {
     char *d;
     if (cp < 128) return pf_chr((int)cp);
-    d = rt_bump(5);
-    if (cp < 2048) {
-        d[0] = (char)(192 + cp / 64);
-        d[1] = (char)(128 + cp % 64);
-        d[2] = 0;
-    } else if (cp < 65536) {
-        d[0] = (char)(224 + cp / 4096);
-        d[1] = (char)(128 + (cp / 64) % 64);
-        d[2] = (char)(128 + cp % 64);
-        d[3] = 0;
-    } else {
-        d[0] = (char)(240 + cp / 262144);
-        d[1] = (char)(128 + (cp / 4096) % 64);
-        d[2] = (char)(128 + (cp / 64) % 64);
-        d[3] = (char)(128 + cp % 64);
-        d[4] = 0;
-    }
+    d = rt_bump(7);
+    d[rt_utf8put(d, cp)] = 0;
     return d;
 }
 

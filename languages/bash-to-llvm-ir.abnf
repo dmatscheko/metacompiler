@@ -36,7 +36,7 @@ their argument with THIS grammar and emit it inline; a computed eval is lowered 
 assignment form NAME=VALUE, through a runtime name-to-slot dispatch.
 
 The program plus its runtime needs no extern but putchar/getchar (and, in a native build only,
-write for standard error), so -exe links it with nothing else.
+write and fflush for standard error), so -exe links it with nothing else.
 
 The generated module is printed (this is the compiler output); it is valid LLVM IR and can be
 handed to clang. Passing -exe PATH to mec links it into a native executable with clang directly
@@ -360,7 +360,7 @@ Tilde       <~~ push(mkTilde()) ~~> = "~" TildeEnd ;
 // A backslash immediately followed by a newline is a line continuation: both vanish.
 LineCont    <~~ push(makeConst("")) ~~> = "\\" "\n" ;
 
-// $'...' : ANSI-C quoting. The body is taken raw and decoded by ansiC (\n \t \xHH \0NNN ...).
+// $'...' : ANSI-C quoting. The body is taken raw and decoded by ansiC (\n \t \xHH \0NNN \uHHHH ...).
 AnsiSeg     = "$'" :whitespace() AnsiBody "'" ;
 AnsiBody    <~~ push(ansiWord(ansiC(up.in))) ~~> = { AnsiEsc | AnsiLit } ;
 AnsiEsc     = "\\" AnyCh ;
@@ -423,7 +423,7 @@ BackSub     <~~ push(mkCmdSub(pop())) ~~>
 // $(( EXPR )): a text holding an expansion (or a double quote, which bash removes) is kept as
 // a word, expanded, and read by rt_arith at run time - bash expands first and parses after,
 // so e="1 + 2"; $(( $e * 2 )) is 5. Twin of ArithExp in bash-interpreter.abnf.
-ArithExp    = ArithDyn | ArithSt | ArithRaw ;
+ArithExp    = ArithDyn | ArithSt | ArithRaw | ArithBrk ;
 ArithSt     <~~ arClaim(up.start + 3, up.pos - 2); push(mkArith(pop())) ~~> = "$((" :whitespace(Whitespace) ArList "))" ;
 ArithDyn    <~~ push(mkArith(mkArDyn(pop()))) ~~> = "$((" :whitespace() ArHasExp ArDynWord "))" ;
 ArithRaw    <~~ push(mkArith(mkArDyn(pop()))) ~~> = "$((" :whitespace() ArDynWord "))" ;
@@ -433,6 +433,18 @@ ArDynParen  = ArDynOpen { ArDynSeg } ArDynClose ;
 ArDynOpen   <~~ push(makeConst("(")) ~~> = "(" ;
 ArDynClose  <~~ push(makeConst(")")) ~~> = ")" ;
 ArDynBare   <~~ push(makeConst(up.in)) ~~> = !@+"()$`\"" ;
+// $[ expr ] : the obsolete spelling of $(( expr )), which bash still expands. Its text ends at
+// the "]" that closes the "$[", so a subscript's brackets are matched inside it.
+ArithBrk    = ArithBrkDyn | ArithBrkSt | ArithBrkRaw ;
+ArithBrkSt  <~~ arClaim(up.start + 2, up.pos - 1); push(mkArith(pop())) ~~> = "$[" :whitespace(Whitespace) ArList "]" ;
+ArithBrkDyn <~~ push(mkArith(mkArDyn(pop()))) ~~> = "$[" :whitespace() ArHasExp ArBrkWord "]" ;
+ArithBrkRaw <~~ push(mkArith(mkArDyn(pop()))) ~~> = "$[" :whitespace() ArBrkWord "]" ;
+ArBrkWord   <~~ push(mkNsWord(takeAll())) ~~> = { ArBrkSeg } ;
+ArBrkSeg    = DqSeg | ExpSeg | ArDynParen | ArBrkPair | ArBrkBare ;
+ArBrkPair   = ArBrkOpen { ArBrkSeg } ArBrkClose ;
+ArBrkOpen   <~~ push(makeConst("[")) ~~> = "[" ;
+ArBrkClose  <~~ push(makeConst("]")) ~~> = "]" ;
+ArBrkBare   <~~ push(makeConst(up.in)) ~~> = !@+"()[]$`\"" ;
 
 // ${...} : the whole parameter-expansion family. Inside the braces whitespace is NOT
 // skipped (a default word may contain spaces), and the enclosing state is restored on return.
@@ -817,8 +829,8 @@ HdScan = :script(~~
     })()
 ~~) ;
 
-// Succeeds (consuming nothing) when the arithmetic text up to its closing "))" holds a "$", a
-// "`" or a double quote - the texts bash has to expand before it can parse them.
+// Succeeds (consuming nothing) when the arithmetic text up to its closing "))" or "]" holds a
+// "$", a "`" or a double quote - the texts bash has to expand before it can parse them.
 ArHasExp = :script(~~
     (function() {
         var i = 0
@@ -827,8 +839,8 @@ ArHasExp = :script(~~
             var cc = c.peek(i)
             if (cc === -1) { return abnf.newToken("\x01ar-static", 0) }
             if (cc === 36 || cc === 96 || cc === 34) { return }
-            if (cc === 40) { depth = depth + 1 }
-            if (cc === 41) {
+            if (cc === 40 || cc === 91) { depth = depth + 1 }
+            if (cc === 41 || cc === 93) {
                 if (depth === 0) { return abnf.newToken("\x01ar-static", 0) }
                 depth = depth - 1
             }
@@ -1038,6 +1050,23 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // A byte a \xHH / \NNN escape produced: a character below 0x80; above, the lone surrogate
     // U+DC80..U+DCFF standing for that raw byte (see ansiWord).
     function escByte(v) { return String.fromCharCode((v < 128) ? v : 56320 + v) }
+    // Code point cp (\u / \U) as text: a character, or - for a surrogate or a value past U+10FFFF,
+    // which bash still writes in the UTF-8 pattern (six bytes at most, none from 2^31) - raw
+    // bytes. Twin of rt_utf8put in lib/bash-rt.c.
+    function ucsChr(cp) {
+        if (cp < 55296 || (cp > 57343 && cp < 65536)) { return String.fromCharCode(cp) }
+        if (cp >= 65536 && cp < 1114112) {
+            var off = cp - 65536
+            return String.fromCharCode(55296 + (off - off % 1024) / 1024) + String.fromCharCode(56320 + off % 1024)
+        }
+        if (cp >= 2147483648) { return "" }
+        var n = 3
+        while (n < 6 && cp >= Math.pow(2, 5 * n + 1)) { n = n + 1 }
+        var tail = ""
+        var k
+        for (k = 1; k < n; k++) { tail = escByte(128 + cp % 64) + tail; cp = (cp - cp % 64) / 64 }
+        return escByte(256 - Math.pow(2, 8 - n) + cp) + tail
+    }
     // A decoded $'...' text as a word segment. A constant cannot hold a raw byte - the IR
     // string is the text's UTF-8 - so a text with one is interned with each raw byte as its
     // three WTF-8 bytes and turned back into that byte at run time by rt_unraw. Twin of
@@ -1093,6 +1122,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         if (v == 0) { return out }
                         out = out + escByte(v)
                     }
+                }
+                else if ((e == "u" || e == "U") && i < t.length && hexVal(t.charCodeAt(i)) >= 0) {
+                    var uv = 0, un = 0
+                    while (un < ((e == "u") ? 4 : 8) && i < t.length && hexVal(t.charCodeAt(i)) >= 0) { uv = uv * 16 + hexVal(t.charCodeAt(i)); i = i + 1; un = un + 1 }
+                    if (uv == 0) { return out }
+                    out = out + ucsChr(uv)
                 }
                 else { out = out + "\\" + e }
             }

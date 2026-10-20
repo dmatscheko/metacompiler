@@ -942,8 +942,6 @@ s25() {
   check pex7 "${x@L}" "a b"
   check pex8 "${x@u}" "A b"
   # towupper / towlower: one character for one, so the sharp s stays (bash 5.3).
-  # Literal UTF-8: these engines read neither $'\u' nor a byte-wise $'\x' as a
-  # character.
   local xs="straße Σ"
   check pex8a "${xs@U}" "STRAßE Σ"
   check pex9 "${x@E}" "a b"
@@ -2650,6 +2648,40 @@ S56
         echo "st $?" ); check aem15 "$o" ""
 }
 
+# ===== SECTION 57: $[ ] arithmetic =====
+# $[ EXPR ] is the obsolete spelling of $(( EXPR )), still expanded (bash 5.3).
+s57() {
+  local x=5 a=(10 20 30) e='1 + 2'
+  check lar1 "$[ 3 + 4 ]" 7
+  check lar2 "$[x*2]:$[ (x+1) % 4 ]" "10:2"
+  check lar3 "$[ a[1] + a[x-3] ]" 50
+  check lar4 "$[ $e * 2 ]" 5
+  check lar5 "$(( $[2+3] * 2 ))" 10
+  check lar6 "q$[1+1]q" q2q
+  check lar7 '$[1+1]' '$[1+1]'
+}
+
+# ===== SECTION 58: \u / \U code points =====
+# \uHHHH and \UHHHHHHHH write a code point's UTF-8 (in a UTF-8 locale) - a surrogate
+# or a value past U+10FFFF too, in the same pattern up to six bytes, and nothing from
+# 2^31 on; a byte that is no character counts as one in ${#v}. Every expected value is
+# bash 5.3's under LC_ALL=en_US.UTF-8.
+s58() {
+  local v
+  v=$'\uDFFF'; check uesc1 "${#v}" 3
+  check uesc2 "$v" $'\xed\xbf\xbf'
+  check uesc3 $'\u00e9\U0001F600\u41' "é😀A"
+  check uesc4 $'\U00110000' $'\xf4\x90\x80\x80'
+  v=$'x\U7FFFFFFFy'; check uesc5 "${#v}" 8
+  check uesc6 $'a\U80000000b' ab
+  check uesc7 $'a\u0b' $'a\x0b'
+  check uesc8 $'a\U00000000b' a
+  check uesc9 $'a\uxb' 'a\uxb'
+  check uesc10 "$(printf '\uD800|\U7FFFFFFF')" $'\xed\xa0\x80|\xfd\xbf\xbf\xbf\xbf\xbf'
+  v='a\uDFFFb\U1F600\ux'; check uesc11 "${v@E}" $'a\xed\xbf\xbfb\U1F600\\ux'
+  check uesc12 "$(echo -e '\U04000000')" $'\xfc\x84\x80\x80\x80\x80'
+}
+
 s01   # SECTION-CALL 01
 s02   # SECTION-CALL 02
 s03   # SECTION-CALL 03
@@ -2706,5 +2738,7 @@ s53   # SECTION-CALL 53
 s54   # SECTION-CALL 54
 s55   # SECTION-CALL 55
 s56   # SECTION-CALL 56
+s57   # SECTION-CALL 57
+s58   # SECTION-CALL 58
 echo "full: $checks checks, $fails failures"
 exit $fails

@@ -125,6 +125,7 @@ EXPECT_ROWS="brainfuck:features:tests/brainfuck-test-features.txt:tests/brainfuc
              calculator:compiler:tests/calculator-compiler-features.txt:exit-only
              bash:bytes:tests/bash-test-bytes.sh:tests/bash-bytes.expected
              bash:stack:tests/bash-native-stack.sh:tests/bash-stack.expected
+             bash:stderr:tests/bash-native-stderr.sh:tests/bash-stderr.expected
              lua:bytes:tests/lua-test-bytes.lua:tests/lua-bytes.expected
              php:bytes:tests/php-test-bytes.php:tests/php-bytes.expected"
 
