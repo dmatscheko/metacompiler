@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-686** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-687** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -64,11 +64,10 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-683 python: `__name__` is undefined at module level; `type(super)` / `isinstance(super(), super)`; `__classdictcell__` · P1 · PY · IN PROGRESS (PY worker, round 14) [V]
-`print(__name__)` → NameError in all engines (CPython `__main__`), so `if __name__ == "__main__":` fails — P1. `type(super)` →
-`super` (CPython `type`); `type(super()) is super`, `isinstance(super(), super)` → False (CPython True): the name `super` reads as a
-bound proxy, not the type. CPython 3.14 puts `__classdictcell__` in a metaclass namespace for a class body defining a function; we
-never do. A comprehension in a nested class body reading `__class__` over-marks the outer class's `__classcell__`.
+### T-686 python: `(a): int = 1` binds nothing; `type(cell)`; 3.14 namespace keys `__firstlineno__` / `__static_attributes__` / `__annotate_func__` · P3 · PY · OPEN [V]
+`(a): int = 1; print(a)` → NameError in interp and run (CPython 1); in a class body the name binds as `''`. `type(ns["__classcell__"])`
+→ `<class 'object'>` (CPython `<class 'cell'>`). A metaclass namespace lacks `__firstlineno__` and `__static_attributes__` and
+carries `__annotations__` where 3.14 has `__annotate_func__` (PEP 649).
 
 ### T-680 python re: IGNORECASE pairs from CPython's `_ignorecase_fixes`; non-ASCII ranges of 256+ chars · P3 · PY · OPEN [V]
 `re.match("(?i)\u0390", "\u1fd3")` matches in CPython (full-fold extra pairs, sre_compile `_ignorecase_fixes`), not here. A
@@ -780,6 +779,7 @@ T-681 python: `__classcell__` through a metaclass `__new__`; `super()` object's 
 T-676 js: Object.freeze / seal do nothing; read-only writes and non-configurable deletes are silent in strict code — DONE 88ec20ec (freeze/seal/preventExtensions + is*, sloppy drops and strict TypeErrors with node's texts, counter-gated — 4 legs = node, TS via tsc 6)
 T-677 js: builtin globals' `.name`/`.length`; `(7).constructor === Number`; `Object(1n)`/`Object(Symbol())`; String wrapper index keys — DONE 88ec20ec (builtin name/length, primitive .constructor identity, BigInt/Symbol wrappers, String wrapper index keys — 4 legs = node; follow-up T-684)
 T-682 go: anonymous struct types as declared types; embedding a package-qualified type; fmt.Append*/os.Getenv — DONE c904bd4d f64c6e84 (anonymous struct types via a registry, pkg.T embedding, fmt.Append*, os.Getenv/LookupEnv, per-slot struct zeros in make and append growth — 4 legs = go run; follow-up T-685)
+T-683 python: `__name__` is undefined at module level; `type(super)` / `isinstance(super(), super)`; `__classdictcell__` — DONE aebcd94c (__name__ = __main__ / dotted module names, the name super is the type, __classdictcell__ per 3.14, comprehension cell marking, super repr — 4 legs = python3; follow-up T-686)
 
 # Settled — do not re-open
 
