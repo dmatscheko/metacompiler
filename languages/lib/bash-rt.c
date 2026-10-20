@@ -1894,24 +1894,37 @@ char *rt_case(char *s, int mode, char *pat) {
     return dst;
 }
 
+/* Does quoting v need the $'...' form: a control character, or a byte >= 0x80
+ * that does not start a well-formed UTF-8 character (rt_cpw answers 1). Twin of
+ * needsAnsi in bash-interpreter.abnf. */
+int rt_needansi(char *v) {
+    int i = 0;
+    while (v[i] != 0) {
+        int c = (int)(unsigned char)v[i];
+        int w;
+        if (c < 32 || c == 127) return 1;
+        w = 1;
+        if (c >= 128) {
+            w = rt_cpw(v + i);
+            if (w == 1) return 1;
+        }
+        i = i + w;
+    }
+    return 0;
+}
+
 /* rt_shquote: the ${v@Q} / ${v@K} / ${v@k} form - sq quoted so the shell would
  * read it back unchanged. Single quotes normally, with an embedded ' spelled
- * '\'', and the $'...' form (rt_ansiqs) as soon as the value holds a control
- * character. */
+ * '\'', and the $'...' form (rt_ansiqs) when rt_needansi. */
 char *rt_shquote(char *sq) {
     int len = rt_strlen(sq);
     char *dst;
     int o = 0;
     int i = 0;
-    while (i < len) {
-        int c0 = (int)(unsigned char)sq[i];
-        if ((c0 < 32) || (c0 == 127)) return rt_ansiqs(sq);
-        i = i + 1;
-    }
+    if (rt_needansi(sq) != 0) return rt_ansiqs(sq);
     /* 4 bytes per input byte is the worst case ('\''), plus the quotes and NUL. */
     dst = rt_bump(len * 4 + 3);
     dst[o] = (char)39; o = o + 1;
-    i = 0;
     while (i < len) {
         int c0 = (int)(unsigned char)sq[i];
         if (c0 == 39) {
@@ -2227,13 +2240,12 @@ char *rt_radix(char *s, int base, int upper, int alt) {
 
 /* rt_pfq: printf %q. This is bash's BACKSLASH form, NOT ${v@Q}'s single-quoted
  * one - `printf %q "a b"` is `a\ b` while `${v@Q}` is `'a b'`. An empty operand
- * is '' and a value holding a control character falls back to rt_shquote, which
- * already emits the $'...' spelling. Mirrors printfQuote in
+ * is '' and a value that rt_needansi falls back to rt_shquote, which already
+ * emits the $'...' spelling. Mirrors printfQuote in
  * languages/bash-interpreter.abnf. */
 char *rt_pfq(char *s) {
     int len = rt_strlen(s);
     int i;
-    int ctl = 0;
     char *dst;
     int o;
     if (len == 0) {
@@ -2243,13 +2255,7 @@ char *rt_pfq(char *s) {
         dst[2] = 0;
         return dst;
     }
-    i = 0;
-    while (i < len) {
-        int c = (int)(unsigned char)s[i];
-        if (c < 32 || c == 127) ctl = 1;
-        i = i + 1;
-    }
-    if (ctl != 0) return rt_shquote(s);
+    if (rt_needansi(s) != 0) return rt_shquote(s);
     dst = rt_bump(2 * len + 1);
     o = 0;
     i = 0;
@@ -3656,8 +3662,9 @@ char *rt_pfxnames(char *p, char *sep, int star) {
  * IS IT AN ARRAY: at least one element, or set empty (rt_arr_mark) - then
  * `declare -a a=()`. One only declared (rt_arr_dmark) is `declare -a a`. The
  * interpreter's declIsArr / declOnly ask the same two questions. */
-/* The $'...' form, with bash's escape table - the same one shellQuote uses in
- * languages/bash-interpreter.abnf.
+/* The $'...' form, with bash's escape table - the same one ansiQuote uses in
+ * languages/bash-interpreter.abnf. A byte that does not start a well-formed
+ * UTF-8 character is \NNN; a well-formed one is copied whole.
  *
  * rt_ansiqs and rt_dqs build a string rather than print, so `declare -p` and
  * ${a[@]@A} share one renderer. */
@@ -3671,6 +3678,8 @@ char *rt_ansiqs(char *v) {
     while (i < n) {
         int c = (int)(unsigned char)v[i];
         int e = 0;
+        int w = 1;
+        if (c >= 128) w = rt_cpw(v + i);
         if (c == 39) e = 39;
         else if (c == 92) e = 92;
         else if (c == 7) e = 97;
@@ -3684,35 +3693,31 @@ char *rt_ansiqs(char *v) {
         if (e != 0) {
             d[o] = (char)92; o = o + 1;
             d[o] = (char)e; o = o + 1;
-        } else if (c < 32 || c == 127) {
+        } else if (c < 32 || c == 127 || (c >= 128 && w == 1)) {
             d[o] = (char)92; o = o + 1;
             d[o] = (char)(48 + (c / 64)); o = o + 1;
             d[o] = (char)(48 + ((c / 8) % 8)); o = o + 1;
             d[o] = (char)(48 + (c % 8)); o = o + 1;
         } else {
-            d[o] = (char)c; o = o + 1;
+            /* a byte, or a whole well-formed character, as itself */
+            int k = 0;
+            while (k < w) { d[o] = v[i + k]; o = o + 1; k = k + 1; }
         }
-        i = i + 1;
+        i = i + w;
     }
     d[o] = (char)39; o = o + 1;
     d[o] = 0;
     return d;
 }
 
-/* "..." unless the value holds a control character. A byte >= 128 is not one:
- * in a UTF-8 locale bash prints the accented byte intact. */
+/* "..." unless rt_needansi. A well-formed UTF-8 character does not need it: in
+ * a UTF-8 locale bash prints the accented character intact. */
 char *rt_dqs(char *v) {
     int n = rt_strlen(v);
-    int ctl = 0;
     int i = 0;
     char *d;
     int o = 0;
-    while (i < n) {
-        int c = (int)(unsigned char)v[i];
-        if (c < 32 || c == 127) { ctl = 1; }
-        i = i + 1;
-    }
-    if (ctl != 0) return rt_ansiqs(v);
+    if (rt_needansi(v) != 0) return rt_ansiqs(v);
     d = rt_bump(n * 2 + 4);
     d[o] = (char)34; o = o + 1;
     i = 0;

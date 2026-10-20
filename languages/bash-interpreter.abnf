@@ -1680,13 +1680,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // ${v@Q}: the value quoted so the shell reads it back unchanged. bash ALWAYS quotes
     // ('abc', not abc), writes an embedded quote as '\'', and switches the whole thing to
-    // the $'...' form as soon as the value holds a control character:
+    // the $'...' form as soon as the value holds a control character or a byte that is
+    // not part of a well-formed UTF-8 character:
     //     abc -> 'abc'   a b -> 'a b'   it's -> 'it'\''s'   "x<NL>y" -> $'x\ny'
-    function shellQuote(v) {
-        var ctl = false
+    function shellQuote(v0) {
+        var v = normBytes(v0)
         var i
-        for (i = 0; i < v.length; i++) { var cc = v.charCodeAt(i); if (cc < 32 || cc == 127) { ctl = true } }
-        if (!ctl) {
+        if (!needsAnsi(v)) {
             var out = "'"
             for (i = 0; i < v.length; i++) {
                 var ch = v.charAt(i)
@@ -1696,8 +1696,19 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return ansiQuote(v)
     }
+    // Does quoting v need the $'...' form: a control character, or a raw byte (one that
+    // bytesStr could not read as a character). v is already normBytes'd. Twin of
+    // rt_needansi in languages/lib/bash-rt.c.
+    function needsAnsi(v) {
+        var i
+        for (i = 0; i < v.length; i++) {
+            var cc = v.charCodeAt(i)
+            if (cc < 32 || cc == 127 || isRawCh(cc)) { return true }
+        }
+        return false
+    }
     // The $'...' form on its own: ${v@Q} reaches it through shellQuote, `declare -p`
-    // through declQuote, and the escape table is bash's for both.
+    // through declQuote, and the escape table is bash's for both. A raw byte is \NNN.
     function ansiQuote(v) {
         var o2 = "$'"
         var i
@@ -1715,6 +1726,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else if (k == 13) { o2 = o2 + "\\r" }
             else if (k == 27) { o2 = o2 + "\\E" }
             else if (k < 32 || k == 127) { o2 = o2 + "\\" + octal3(k) }
+            else if (isRawCh(k)) { o2 = o2 + "\\" + octal3(k - 56320) }
             else { o2 = o2 + c2 }
         }
         return o2 + "'"
@@ -1745,16 +1757,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // LIMITS: -x/-r are not modelled (see varAttrs), so `declare -x XX=1` prints
     // `declare --`. The bare `declare -p` with NO names prints nothing: bash lists every
     // variable in the shell, most of which this engine does not have.
-    // bash quotes a `declare -p` value with "..." unless it holds a CONTROL character, and
-    // with the ANSI-C form $'...' when it does - the same switch ${v@Q} makes, and the
-    // same escape table, hence ansiQuote. (Do not add a second helper named like one above:
-    // a later function declaration silently replaces the earlier one.) A byte >= 128 is NOT
+    // bash quotes a `declare -p` value with "..." unless needsAnsi, and with the ANSI-C
+    // form $'...' when it does - the same switch ${v@Q} makes, and the same escape table,
+    // hence ansiQuote. (Do not add a second helper named like one above: a later function
+    // declaration silently replaces the earlier one.) A well-formed UTF-8 character is NOT
     // a control character: in a UTF-8 locale bash prints `declare -- q="aeb"` intact.
-    function declQuote(v) {
-        var ctl = false
+    function declQuote(v0) {
+        var v = normBytes(v0)
         var i
-        for (i = 0; i < v.length; i++) { var cc = v.charCodeAt(i); if (cc < 32 || cc == 127) { ctl = true } }
-        if (ctl) { return ansiQuote(v) }
+        if (needsAnsi(v)) { return ansiQuote(v) }
         var out = "\""
         for (i = 0; i < v.length; i++) {
             var ch = v.charAt(i)
@@ -4640,10 +4651,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // value holding a control character falls back to the $'...' spelling, both as bash does.
     function printfQuote(v) {
         if (v.length == 0) { return "''" }
-        var ctl = false
         var i
-        for (i = 0; i < v.length; i++) { var cc = v.charCodeAt(i); if (cc < 32 || cc == 127) { ctl = true } }
-        if (ctl) { return shellQuote(v) }
+        if (needsAnsi(normBytes(v))) { return shellQuote(v) }
         var out = ""
         for (i = 0; i < v.length; i++) {
             var ch = chunkAt(v, i)

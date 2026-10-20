@@ -953,6 +953,12 @@ s25() {
   check pex11 "${esc@E}" "$(printf 'a\tb')"
   local q="it's"
   check pex12 "${q@Q}" "'it'\\''s'"
+  # a byte that is not part of a well-formed UTF-8 character is \NNN in the $'...'
+  # form (UTF-8 locale); a well-formed one stays as itself
+  local qb=$'\cé' qc=$'a\xffb' qd=$'é\x80z' qe=$'\xed\xa0\x80'
+  check pex25 "${qb@Q}" $'$\'\\003\\251\''
+  check pex26 "${qc@Q}|${qd@Q}|${qe@Q}" $'$\'a\\377b\'|$\'\xc3\xa9\\200z\'|$\'\\355\\240\\200\''
+  check pex27 "$(declare -p qc)|$(printf %q "$qc")" $'declare -- qc=$\'a\\377b\'|$\'a\\377b\''
   # an omitted offset means 0, an omitted length means "to the end", and a blank
   # between the last arithmetic token and the brace is allowed
   local y=abcdef
