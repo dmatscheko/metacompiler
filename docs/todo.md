@@ -135,20 +135,20 @@ reports cap 4 where growslice says 1) — escape analysis.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-667 php: ArgumentCountError unavailable unless spelled; arrow-function generators · P1 · PHP · OPEN [V spec-only]
+### T-667 php: ArgumentCountError unavailable unless spelled; arrow-function generators · P1 · PHP · IN PROGRESS (PHP worker, round 13) [V spec-only]
 `function f($a){} try { f(); } catch (Error $e) { echo get_class($e), ": ", $e->getMessage(); }` → interp uncaught fatal "Too few
 arguments ..."; llvm.Run/native "Call to undefined function ArgumentCountError()" (PHP `ArgumentCountError: Too few arguments to function
 f(), 0 passed in ... on line 4 and exactly 1 expected`) — the library class is compiled only when the program spells its name; load it
 whenever an arity check can raise it. `$af = fn($z) => yield $z; foreach ($af(3) as $v) echo $v;` → "yield outside a generator" in both
 halves (PHP 3: makeArrowFn passes isGen=false / bypasses closureV).
 
-### T-668 php: scalar parameter and return types are never checked · P2 · PHP · OPEN [V spec-only]
+### T-668 php: scalar parameter and return types are never checked · P2 · PHP · IN PROGRESS (PHP worker, round 13) [V spec-only]
 `function h(int $a){ return $a; } echo h("x");` → prints `x` in all engines (PHP coercive mode: TypeError "h(): Argument #1 ($a) must be of
 type int, string given, called in ... on line N"); `h("5")` must coerce to int 5; return types (`: int`) likewise; `declare(strict_types=1)`
 refuses coercion. Implement zend_verify_arg_type / the coercion table (int, float, string, bool, ?T, union types, mixed) in both halves;
 measure the php bench (a check on every typed parameter).
 
-### T-666 php: the preg_* functions do not exist · P2 · PHP · OPEN [V spec-only]
+### T-666 php: the preg_* functions do not exist · P2 · PHP · IN PROGRESS (PHP worker, round 13) [V spec-only]
 `preg_replace('/a/', 'b', 'aa')` → "Call to undefined function preg_replace()" in all engines; preg_match, preg_match_all, preg_split,
 preg_quote, preg_replace_callback, preg_grep and preg_last_error likewise. Implement them on the shared regex engine under a PCRE dialect
 flag (delimiters and modifiers i m s x u U D, named groups (?P<n>), $n / ${n} / \n replacement references, PREG_SPLIT_* and
