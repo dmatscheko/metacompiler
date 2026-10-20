@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-622** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-623** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -115,11 +115,14 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-617 kotlin: `Char.isLetter` for uncased letters; UInt in format; collection class names in format errors · P2 · KT · IN PROGRESS (KT worker, round 2) [V spec-only]
-`'中'.isLetter()` → false (JVM true): interp kIsLetterCh and layer 2 k2IsLetter treat a letter without case as a non-letter;
-java-chars.js (now linked into kotlin) has the right table (read in the code, probe first). `"%d".format(1u)` formats as an int
-(JVM IllegalFormatConversionException "d != kotlin.UInt"). `"%d".format(listOf(1,2))` → "d != ArrayList" (JVM
-`java.util.Arrays$ArrayList`). Use the kotlin-stdlib jar driven from java as the oracle.
+### T-622 kotlin: `Char(97)`, `sequence {}` builder, implicit-receiver operator calls, split with a named limit, formatter class names · P2 · KT · OPEN [V spec-only]
+`Char(97)` → interp "call of a non function: Char", compiled "call of a non function value" (JVM `a`). `sequence { yield(1) }`
+→ "unknown name: sequence" in all engines (the floor's generators can carry it). Inside `fun Int.f()`, an unqualified `times(2)`
+→ "unknown name: times". Compiled only: `"a,b;c:d".split(",", ";", ":", limit = 2)` loses a delimiter (orderArgs puts the named
+value over a positional slot). Formatter mismatch names: `mapOf(1 to 2)` → ours `java.util.LinkedHashMap` (JVM
+`java.util.Collections$SingletonMap`; likewise setOf(x) SingletonSet, emptySet()/emptyMap() EmptySet/EmptyMap, hashSetOf HashSet,
+sortedSetOf TreeSet); an Array argument → ours `ArrayList` (JVM `[Ljava.lang.Integer;`, `[I`). `String.CASE_INSENSITIVE_ORDER` and
+`java.util.Random(1)` unknown. Oracle: the kotlin-stdlib jar driven from java.
 
 ---
 
@@ -721,6 +724,7 @@ T-614 python: smaller gaps — math, object repr prefix, OSError errno subclass,
 T-611 python: metaclasses, and the `enum` module on top of them — DONE 48620009 (Flag/IntFlag and the functional API not offered)
 T-612 python: set iteration order of ints differs from CPython — DONE af6e7322 for sets of ints built by adding; dummy-slot order after removal, union/copy table sizes and constant displays recorded in manual 7.9
 T-616 swift: `d[f()]? += 1` evaluates the target twice; `(+)` as a value; `\.0` key paths; metatype init overloads — DONE fb23c0a5 (plus a 16-commit swiftc-checked sweep: b32fe227..b32b114c)
+T-617 kotlin: `Char.isLetter` for uncased letters; UInt in format; collection class names in format errors — DONE 8af069ec (plus a stdlib sweep, ~40 fixes: text search options, split, comparators, groupingBy, Char arithmetic, Regex.split, minus, radix toString, operator-function calls)
 
 # Settled — do not re-open
 
