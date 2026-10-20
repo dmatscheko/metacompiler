@@ -20838,8 +20838,9 @@ func pyIsDescriptor(v interface{}, hook string) (interface{}, bool) {
 // pyMroAttr answers C.__mro__ and C.__bases__. The class chains here leave out
 // `object`, which owns nothing a lookup could find, while CPython ends every
 // resolution order with it and gives a root class the base (object,); a builtin
-// type is its own chain, bool's going through int. Twin of pyMroAttr in
-// languages/lib/python-rt.metajs and languages/python-interpreter.abnf.
+// type is its own chain, bool's going through int, and the class of a
+// RUNTIME-raised exception (pyExcClass) is its single-base __super chain. Twin of
+// pyMroAttr in languages/lib/python-rt.metajs and languages/python-interpreter.abnf.
 func (rt *jsrt) pyMroAttr(cls *jsObject, name string) *jsArray {
 	obj := rt.pyBuiltinClass("object")
 	if cls == obj {
@@ -20849,14 +20850,20 @@ func (rt *jsrt) pyMroAttr(cls *jsObject, name string) *jsArray {
 		return &jsArray{elems: []interface{}{obj}}
 	}
 	var out []interface{}
+	_, user := cls.props["__mro"].(*jsArray)
+	sup, chained := cls.props["__super"].(*jsObject)
 	if name == "__bases__" {
 		if bl, ok := cls.props["__basesl"].(*jsArray); ok {
 			out = append(out, bl.elems...)
+		} else if chained && !user {
+			out = append(out, sup)
 		}
-	} else if mro, ok := cls.props["__mro"].(*jsArray); ok {
-		out = append(out, mro.elems...)
+	} else if user {
+		out = append(out, cls.props["__mro"].(*jsArray).elems...)
 	} else {
-		out = append(out, cls)
+		for c := cls; c != nil; c, _ = c.props["__super"].(*jsObject) {
+			out = append(out, c)
+		}
 	}
 	if pyBuiltinClsName(cls) == "bool" {
 		out = append(out, rt.pyBuiltinClass("int"))

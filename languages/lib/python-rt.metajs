@@ -2072,7 +2072,8 @@ function pyInstDictPush(d) {
 // C.__mro__ and C.__bases__. The class chains here leave out `object`, which owns
 // nothing a lookup could find, while CPython ends every resolution order with it
 // and gives a root class the base (object,); a builtin type is its own chain,
-// bool's going through int. Go: rt.pyMroAttr in abnf/jsrt.go.
+// bool's going through int, and the class of a RUNTIME-raised exception
+// (pyExcClass) is its single-base __super chain. Go: rt.pyMroAttr in abnf/jsrt.go.
 function pyMroAttr(cls, name) {
     var obj = pyBuiltinClass("object")
     if (cls === obj) {
@@ -2080,13 +2081,19 @@ function pyMroAttr(cls, name) {
         return [obj]
     }
     var out = []
+    var user = pyIsArr(cls["__mro"])
     if (name == "__bases__") {
         var bl = cls["__basesl"]
         if (pyIsArr(bl)) { out = pyCCopyArr(bl) }
-    } else if (pyIsArr(cls["__mro"])) {
+        else if (!user && pyIsObj(cls["__super"])) { out.push(cls["__super"]) }
+    } else if (user) {
         out = pyCCopyArr(cls["__mro"])
     } else {
-        out.push(cls)
+        var c = cls
+        while (pyIsObj(c)) {
+            out.push(c)
+            c = c["__super"]
+        }
     }
     if (pyBuiltinClsName(cls) == "bool") { out.push(pyBuiltinClass("int")) }
     if (out.length == 0) {

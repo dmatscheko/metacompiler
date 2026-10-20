@@ -23,6 +23,7 @@ package abnf
 // exactly what it did before.
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -60,15 +61,29 @@ func pyReFlagStr(n int) string {
 }
 
 // pyRePat translates Python's P-spellings into the neutral engine's:
-// (?P<name>...) is (?<name>...) and (?P=name) is the named backreference \k<name>.
-// Escapes and character classes are stepped over, so `[(?P<]` is left alone. An
-// unknown name is the ENGINE's error to report, which is why nothing is counted here.
-// Twin of pyRePat in languages/lib/python-regex.js.
+// (?P<name>...) is (?<name>...), (?P=name) is the named backreference \k<name>
+// (so a \k the program wrote is Python's bad escape), and \N{NAME} is the
+// character's \UHHHHHHHH. Other escapes and character classes are stepped over,
+// so `[(?P<]` is left alone. An unknown group name is the ENGINE's error to report,
+// which is why nothing is counted here. Twin of pyRePat in
+// languages/lib/python-regex.js.
 func pyRePat(src string) (string, string) {
 	var out strings.Builder
 	inCls := false
 	for i := 0; i < len(src); {
 		ch := src[i]
+		if ch == '\\' && i+1 < len(src) && src[i+1] == 'k' {
+			return "", "bad escape \\k"
+		}
+		if ch == '\\' && i+1 < len(src) && src[i+1] == 'N' {
+			esc, next, err := pyReNamedEsc(src, i)
+			if err != "" {
+				return "", err
+			}
+			out.WriteString(esc)
+			i = next
+			continue
+		}
 		if ch == '\\' {
 			end := i + 2
 			if end > len(src) {
@@ -191,6 +206,72 @@ func pyReLastAt(p []rune, ch rune, k int) int {
 	return i
 }
 
+// pyReNamedEsc reads \N{NAME} at byte i: the \UHHHHHHHH escape and the index
+// after it, or sre_parse's error, in its order. Twin of pyReNamedEsc in
+// languages/lib/python-regex.js.
+func pyReNamedEsc(src string, i int) (string, int, string) {
+	if i+2 >= len(src) || src[i+2] != '{' {
+		return "", 0, "missing {"
+	}
+	j := i + 3
+	for j < len(src) && src[j] != '}' {
+		j++
+	}
+	if j == i+3 {
+		return "", 0, "missing character name"
+	}
+	if j >= len(src) {
+		return "", 0, "missing }, unterminated name"
+	}
+	name := src[i+3 : j]
+	cp := pyUniNameCp(name)
+	if cp < 0 {
+		q := "'"
+		if strings.Contains(name, "'") && !strings.Contains(name, "\"") {
+			q = "\""
+		}
+		return "", 0, "undefined character name " + q + name + q
+	}
+	return fmt.Sprintf("\\U%08x", cp), j + 1, ""
+}
+
+// pyUniNameCp is the code point of a Unicode character name, matched without
+// regard to case, or -1: the small table of pyUniNameCp in
+// languages/lib/python-chars.js.
+func pyUniNameCp(name string) int {
+	switch strings.ToUpper(name) {
+	case "BULLET":
+		return 8226
+	case "DEGREE SIGN":
+		return 176
+	case "EURO SIGN":
+		return 8364
+	case "GREEK SMALL LETTER ALPHA":
+		return 945
+	case "GREEK CAPITAL LETTER DELTA":
+		return 916
+	case "AMPERSAND":
+		return 38
+	case "LEFT CURLY BRACKET":
+		return 123
+	case "RIGHT CURLY BRACKET":
+		return 125
+	case "EXCLAMATION MARK":
+		return 33
+	case "LATIN SMALL LETTER A WITH DIAERESIS":
+		return 228
+	case "GREEK SMALL LETTER PI":
+		return 960
+	case "EM DASH":
+		return 8212
+	case "SNOWMAN":
+		return 9731
+	case "NO-BREAK SPACE":
+		return 160
+	}
+	return -1
+}
+
 // pyReErrInfo is CPython's message and position (-1 for None) for the engine
 // error err on pattern pat, at the engine's own index at for an unmapped kind.
 func pyReErrInfo(pat, nf, err string, at int) (string, int) {
@@ -239,6 +320,12 @@ func pyReErrInfo(pat, nf, err string, at int) (string, int) {
 		return err, k - 3
 	case strings.HasPrefix(err, "bad escape \\"):
 		return err, k - 2
+	case err == "missing {" || err == "missing character name":
+		return err, k
+	case err == "missing }, unterminated name":
+		return err, k - 1
+	case strings.HasPrefix(err, "undefined character name "):
+		return err, k - len([]rune(err)) + 23
 	case strings.HasPrefix(err, "redefinition of group name '"):
 		return err, k - 1 - len([]rune(err[28:strings.Index(err, "' as group")]))
 	}

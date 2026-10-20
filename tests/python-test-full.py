@@ -7207,6 +7207,120 @@ def s153():
     except ValueError as e:
         check("sumprod2", str(e) == "Inputs are not the same length")
 
+# ===== SECTION 154: class bodies are no enclosing scope; runtime exceptions' __mro__; look-behind =====
+# A function nested in a class body skips the class namespace when it resolves a
+# free name, so a method's `max` is the builtin and its `x` the global, while a
+# default value and the class body itself still see the class's names. A
+# zero-argument super() still finds the defining class. An exception the runtime
+# raises has CPython's whole __mro__. Python's re takes a fixed-width look-behind
+# and refuses a varying one after the parse; \k is a bad escape; \N{...} names a
+# character. Values are CPython 3.14's.
+import re as S154re
+
+S154x = 1
+
+class S154Base:
+    def hi(self):
+        return "base"
+
+class S154K(S154Base):
+    S154x = 5
+    def max(self, o):
+        return "method"
+    def f(self):
+        return max(1, 2)
+    def g(self, d=S154x):
+        return (S154x, d)
+    lf = lambda self: S154x
+    def hi(self):
+        return "k+" + super().hi()
+    def nest(self):
+        def inner():
+            return S154x
+        return inner()
+    def miss(self):
+        try:
+            return lim
+        except NameError as e:
+            return str(e)
+    lim = 3
+    class Inner:
+        def m(self):
+            return S154x
+    y = S154x + 1
+
+def s154outer():
+    v = 10
+    class C:
+        v = 20
+        def m(self):
+            return v
+        def setv(self):
+            nonlocal v
+            v = 30
+            return v
+        u = v
+    c = C()
+    return [c.m(), C.u, c.setv(), c.m(), v]
+
+def s154names(e):
+    return [c.__name__ for c in type(e).__mro__]
+
+def s154err(p):
+    try:
+        S154re.compile(p)
+        return "ok"
+    except S154re.error as e:
+        return e.msg + " " + str(e.pos)
+
+def s154():
+    k = S154K()
+    check("clsscope1", [k.f(), k.g(), k.lf(), k.hi(), k.nest(), k.miss(), S154K.Inner().m(), S154K.y]
+          == [2, (1, 5), 1, "k+base", 1, "name 'lim' is not defined", 1, 6])
+    check("clsscope2", s154outer() == [10, 20, 30, 30, 30])
+    ms = []
+    try:
+        int("x")
+    except ValueError as e:
+        ms.append(s154names(e))
+    try:
+        [1][5]
+    except IndexError as e:
+        ms.append(s154names(e))
+    try:
+        {}["k"]
+    except KeyError as e:
+        ms.append(s154names(e))
+    try:
+        1 // 0
+    except ZeroDivisionError as e:
+        ms.append(s154names(e))
+        ms.append(type(e).__bases__[0].__name__)
+    check("excmro", ms == [["ValueError", "Exception", "BaseException", "object"],
+                           ["IndexError", "LookupError", "Exception", "BaseException", "object"],
+                           ["KeyError", "LookupError", "Exception", "BaseException", "object"],
+                           ["ZeroDivisionError", "ArithmeticError", "Exception", "BaseException", "object"],
+                           "ArithmeticError"])
+    t = "aab abc xbbc bbbc ab cde abe"
+    check("lookb1", [S154re.findall(r"(?<=ab)c", t), S154re.findall(r"(?<!b)c", t),
+                     [m.span() for m in S154re.finditer(r"(?<=ab|cd)e", t)],
+                     S154re.findall(r"(?<=a(?<!xy))b", t), S154re.findall(r"(a)(?<=\1)b", t),
+                     S154re.findall(r"(?P<q>ab)(?<=(?P=q))c", t), S154re.findall(r"(?<=(?:a|b){3})c", t)]
+          == [["c"], ["c"], [(23, 24), (27, 28)], ["b", "b", "b", "b"], ["a", "a", "a", "a"], ["ab"], ["c"]])
+    check("lookb2", [S154re.sub(r"(?<=\d)(?=(\d{3})+$)", ",", "1234567"),
+                     S154re.split(r"(?<=[.!?]) ", "One. Two! Three")]
+          == ["1,234,567", ["One.", "Two!", "Three"]])
+    check("lookb3", [s154err(r"(?<=a|bc)d"), s154err(r"(?<=a+)b"), s154err(r"(?<=a(?:b)?)c"),
+                     s154err(r"(?<=a+)("), s154err(r"(?<=a{2})b")]
+          == ["look-behind requires fixed-width pattern None", "look-behind requires fixed-width pattern None",
+              "look-behind requires fixed-width pattern None", "missing ), unterminated subpattern 7", "ok"])
+    check("rebadk", [s154err(r"\k<n>"), s154err(r"(?P<n>a)\k<n>"), s154err(r"[\k]")]
+          == ["bad escape \\k 0", "bad escape \\k 8", "bad escape \\k 1"])
+    check("renamed", [s154err(r"\N"), s154err(r"a\Nx"), s154err(r"\N{"), s154err(r"\N{}"), s154err(r"\N{EM DASH"),
+                      s154err(r"\N{NO SUCH NAME}"), S154re.findall(r"\N{em dash}+|[\N{SNOWMAN}]", "a——b☃")]
+          == ["missing { 2", "missing { 3", "missing character name 3", "missing character name 3",
+              "missing }, unterminated name 3", "undefined character name 'NO SUCH NAME' 0", ["——", "☃"]])
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -7346,5 +7460,6 @@ def main():
     s146() # SECTION-CALL 146
     s147() # SECTION-CALL 147
     s153() # SECTION-CALL 153
+    s154() # SECTION-CALL 154
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

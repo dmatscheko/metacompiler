@@ -431,6 +431,8 @@ type rxSt struct {
 	// rxSuppJ), and canon is J's CANON_EQ, which is only reported (Pattern.flags).
 	supp  bool
 	canon bool
+	// gnodes[g] is capturing group g's node (rxWidthP), from index 1.
+	gnodes []*rxNode
 }
 
 // rxIsMetaCh answers whether a character has to be backslashed to stay a literal.
@@ -1402,7 +1404,7 @@ func (st *rxSt) parseGroup() *rxNode {
 		case k == '<' || (k == '\'' && !st.java):
 			if k == '<' && st.i+1 < st.n {
 				k2 := st.p[st.i+1]
-				if (k2 == '=' || k2 == '!') && st.java {
+				if (k2 == '=' || k2 == '!') && (st.java || st.py) {
 					st.i += 2
 					lb := rxNewNode("lookb")
 					if k2 == '!' {
@@ -1433,6 +1435,7 @@ func (st *rxSt) parseGroup() *rxNode {
 			ng := rxNewNode("group")
 			st.ngroups++
 			ng.gidx = st.ngroups
+			st.gnodes = append(st.gnodes, ng)
 			st.names = append(st.names, nm)
 			st.nameGroups = append(st.nameGroups, ng.gidx)
 			ng.items = append(ng.items, st.parseAlt())
@@ -1462,6 +1465,7 @@ func (st *rxSt) parseGroup() *rxNode {
 	cg := rxNewNode("group")
 	st.ngroups++
 	cg.gidx = st.ngroups
+	st.gnodes = append(st.gnodes, cg)
 	st.depth++
 	cg.items = append(cg.items, st.parseAlt())
 	st.depth--
@@ -2372,6 +2376,68 @@ func (n *rxNode) maxLen() int {
 	return 0
 }
 
+// lookbVarP: does a look-behind under n match a varying number of characters?
+// Twin of rxLookbVarP in lib/regex.js.
+func (st *rxSt) lookbVarP(n *rxNode) bool {
+	if n.t == "lookb" && st.widthP(n.items[0], 0) < 0 {
+		return true
+	}
+	for _, it := range n.items {
+		if st.lookbVarP(it) {
+			return true
+		}
+	}
+	return false
+}
+
+// widthP is the one number of characters a node always matches under P, or -1
+// when it can vary: Python's look-behind must be fixed-width. A backreference is
+// as wide as the group it names (st.gnodes); depth stops a group that refers to
+// itself. Twin of rxWidthP in lib/regex.js.
+func (st *rxSt) widthP(n *rxNode, depth int) int {
+	switch n.t {
+	case "cls":
+		return 1
+	case "cat", "alt":
+		acc := 0
+		for i, it := range n.items {
+			w := st.widthP(it, depth)
+			if w < 0 {
+				return -1
+			}
+			if n.t == "cat" {
+				acc = rxLenCap(acc + w)
+			} else if i > 0 && w != acc {
+				return -1
+			} else {
+				acc = w
+			}
+		}
+		return acc
+	case "group":
+		return st.widthP(n.items[0], depth)
+	case "rep":
+		b := st.widthP(n.items[0], depth)
+		if b == 0 {
+			return 0
+		}
+		if b < 0 || n.min != n.max {
+			return -1
+		}
+		return rxLenCap(n.min * b)
+	case "bref":
+		g := n.gidx
+		if n.bname != "" {
+			g = st.nameIdx(n.bname)
+		}
+		if g < 1 || g >= len(st.gnodes) || depth > st.ngroups {
+			return -1
+		}
+		return st.widthP(st.gnodes[g], depth+1)
+	}
+	return 0
+}
+
 // rxLenCap saturates a length at the int range, which no text reaches.
 func rxLenCap(n int) int {
 	if n > 2147483647 {
@@ -2542,7 +2608,7 @@ func rxCompile(pattern, flags string) *rxRe {
 		pat = rxExpandQuotes(pat)
 	}
 	st := &rxSt{p: pat, ext: ext, dotall: dotall, octal: octal, ere: ere, posix: posix, java: java, errAt: -1,
-		py: py, icase: icase, multi: multi, ucase: ucase, unix: unix}
+		py: py, icase: icase, multi: multi, ucase: ucase, unix: unix, gnodes: []*rxNode{nil}}
 	// Under P and J case folding and line anchoring are decided per atom while
 	// parsing.
 	if py || java {
@@ -2567,6 +2633,11 @@ func rxCompile(pattern, flags string) *rxRe {
 		} else {
 			st.fail("unexpected character in pattern")
 		}
+	}
+	// CPython checks a look-behind's width when it compiles the parsed pattern,
+	// so every parse error is reported first.
+	if py && st.err == "" && st.lookbVarP(ast) {
+		st.fail("look-behind requires fixed-width pattern")
 	}
 	if st.err != "" {
 		return &rxRe{ok: false, err: st.err, errAt: st.errAt, icase: icase, dotall: dotall, multi: multi,

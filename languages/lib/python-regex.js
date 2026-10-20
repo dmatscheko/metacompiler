@@ -5,10 +5,11 @@
 // (import), each after lib/regex.js. Go twin: abnf/jsrtregexpy.go.
 
 // pyRePat translates Python's P-spellings into the neutral engine's:
-// (?P<name>...) is (?<name>...) and (?P=name) is the named backreference \k<name>.
-// Escapes and character classes are stepped over, so `[(?P<]` is left alone. An
-// unknown name is the ENGINE's error to report, which is why nothing is counted
-// here. Answers {out, err}; err is "" on success.
+// (?P<name>...) is (?<name>...), (?P=name) is the named backreference \k<name>
+// (so a \k the program wrote is Python's bad escape), and \N{NAME} is the
+// character's \UHHHHHHHH. Other escapes and character classes are stepped over,
+// so `[(?P<]` is left alone. An unknown group name is the ENGINE's error to report,
+// which is why nothing is counted here. Answers {out, err}; err is "" on success.
 function pyRePat(src) {
     var out = ""
     var inCls = false
@@ -16,6 +17,15 @@ function pyRePat(src) {
     while (i < src.length) {
         var ch = src.charAt(i)
         if (ch == "\\") {
+            var e = src.charAt(i + 1)
+            if (e == "k") { return {out: "", err: "bad escape \\k"} }
+            if (e == "N") {
+                var ne = pyReNamedEsc(src, i)
+                if (ne.err != "") { return {out: "", err: ne.err} }
+                out = out + ne.out
+                i = ne.next
+                continue
+            }
             out = out + src.substring(i, i + 2)
             i = i + 2
             continue
@@ -61,6 +71,33 @@ function pyRePat(src) {
         i = i + 1
     }
     return {out: out, err: ""}
+}
+
+// \N{NAME} at index i: {out: the \UHHHHHHHH escape, next: the index after it, err}.
+// The errors are sre_parse's, in its order: no brace, an empty name, no closing
+// brace, a name the table (pyUniNameCp) does not hold.
+function pyReNamedEsc(src, i) {
+    if (src.charAt(i + 2) != "{") { return {out: "", next: 0, err: "missing {"} }
+    var j = i + 3
+    while (j < src.length && src.charAt(j) != "}") { j = j + 1 }
+    if (j == i + 3) { return {out: "", next: 0, err: "missing character name"} }
+    if (j >= src.length) { return {out: "", next: 0, err: "missing }, unterminated name"} }
+    var name = src.substring(i + 3, j)
+    var cp = pyUniNameCp(name)
+    if (cp < 0) { return {out: "", next: 0, err: "undefined character name " + pyReQuote(name)} }
+    var hex = ""
+    while (hex.length < 8) {
+        hex = "0123456789abcdef".charAt(cp % 16) + hex
+        cp = Math.floor(cp / 16)
+    }
+    return {out: "\\U" + hex, next: j + 1, err: ""}
+}
+
+// repr() of a str that needs no escapes: single quotes, unless it holds one and
+// no double quote.
+function pyReQuote(s) {
+    if (s.indexOf("'") >= 0 && s.indexOf("\"") < 0) { return "\"" + s + "\"" }
+    return "'" + s + "'"
 }
 
 // The error the whole pipeline (pyRePat, then the engine under the neutral flags
@@ -144,6 +181,9 @@ function pyReErrInfo(pat, nf, err, at) {
     }
     if (err.indexOf("unknown extension ?<") == 0) { return {msg: err, pos: k - 3} }
     if (err.indexOf("bad escape \\") == 0) { return {msg: err, pos: k - 2} }
+    if (err == "missing {" || err == "missing character name") { return {msg: err, pos: k} }
+    if (err == "missing }, unterminated name") { return {msg: err, pos: k - 1} }
+    if (err.indexOf("undefined character name ") == 0) { return {msg: err, pos: k - (err.length - 23)} }
     if (err.indexOf("redefinition of group name '") == 0) {
         return {msg: err, pos: k - 1 - (err.indexOf("' as group") - 28)}
     }

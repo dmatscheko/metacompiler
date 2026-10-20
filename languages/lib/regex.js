@@ -1414,7 +1414,7 @@ function rxParseGroup(st) {
         if (k == 60 || (k == 39 && !st.java)) { // (?<name>  (?'name'
             if (k == 60 && st.i + 1 < st.n) {
                 var k2 = p.charCodeAt(st.i + 1)
-                if ((k2 == 61 || k2 == 33) && st.java) { // (?<= (?<!
+                if ((k2 == 61 || k2 == 33) && (st.java || st.py)) { // (?<= (?<!
                     st.i = st.i + 2
                     var lb = rxNode("lookb")
                     if (k2 == 33) { lb.gidx = 1 }
@@ -1441,6 +1441,8 @@ function rxParseGroup(st) {
             var ng = rxNode("group")
             st.ngroups = st.ngroups + 1
             ng.gidx = st.ngroups
+            var ngn = st.gnodes
+            ngn.push(ng)
             var names = st.names
             var nidx = st.nameGroups
             names.push(nm)
@@ -1470,6 +1472,8 @@ function rxParseGroup(st) {
     var cg = rxNode("group")
     st.ngroups = st.ngroups + 1
     cg.gidx = st.ngroups
+    var cgn = st.gnodes
+    cgn.push(cg)
     st.depth = st.depth + 1
     cg.items.push(rxParseAlt(st))
     st.depth = st.depth - 1
@@ -2241,6 +2245,53 @@ function rxMinLen(node) {
     return 0
 }
 
+// rxLookbVarP: does a look-behind under node match a varying number of characters?
+function rxLookbVarP(st, node) {
+    if (node.t == "lookb" && rxWidthP(st, node.items[0], 0) < 0) { return true }
+    var items = node.items
+    var i = 0
+    while (i < items.length) {
+        if (rxLookbVarP(st, items[i])) { return true }
+        i = i + 1
+    }
+    return false
+}
+
+// rxWidthP is the one number of characters a node always matches under P, or -1
+// when it can vary: Python's look-behind must be fixed-width. A backreference is
+// as wide as the group it names (st.gnodes); depth stops a group that refers to
+// itself.
+function rxWidthP(st, node, depth) {
+    var t = node.t
+    if (t == "cls") { return 1 }
+    var items = node.items
+    if (t == "cat" || t == "alt") {
+        var acc = 0
+        var i = 0
+        while (i < items.length) {
+            var w = rxWidthP(st, items[i], depth)
+            if (w < 0) { return -1 }
+            if (t == "cat") { acc = rxLenCap(acc + w) } else if (i > 0 && w != acc) { return -1 } else { acc = w }
+            i = i + 1
+        }
+        return acc
+    }
+    if (t == "group") { return rxWidthP(st, items[0], depth) }
+    if (t == "rep") {
+        var b = rxWidthP(st, items[0], depth)
+        if (b == 0) { return 0 }
+        if (b < 0 || node.min != node.max) { return -1 }
+        return rxLenCap(node.min * b)
+    }
+    if (t == "bref") {
+        var g = node.bname != "" ? rxNameIdx(st.names, st.nameGroups, node.bname) : node.gidx
+        var gn = st.gnodes
+        if (g < 1 || g >= gn.length || depth > st.ngroups) { return -1 }
+        return rxWidthP(st, gn[g], depth + 1)
+    }
+    return 0
+}
+
 // Lengths saturate at the int range, which no text reaches, so that the products
 // of nested bounds cannot overflow.
 function rxLenCap(n) { return n > 2147483647 ? 2147483647 : n }
@@ -2507,7 +2558,7 @@ function rxCompile(pattern, flags) {
         p: pat, i: 0, n: pat.length, err: "",
         ngroups: 0, names: [], nameGroups: [], pending: [], ext: ext, dotall: dotall,
         octal: octal, ntotal: ere ? 0 : rxCountGroups(pat), ere: ere, posix: posix,
-        depth: 0, java: java, errAt: -1, pcls: rxNewCls(),
+        depth: 0, java: java, errAt: -1, pcls: rxNewCls(), gnodes: [rxNode("empty")],
         py: py, icase: icase, multi: multi, gend: 0, gflags: "",
         ucase: ucase && java, uclass: false, unix: unix && java, inl: false, supp: false,
         canon: false
@@ -2533,6 +2584,9 @@ function rxCompile(pattern, flags) {
         if (pat.charCodeAt(st.i) == 41) { rxErr(st, "unmatched ) in pattern") }
         else { rxErr(st, "unexpected character in pattern") }
     }
+    // CPython checks a look-behind's width when it compiles the parsed pattern,
+    // so every parse error is reported first.
+    if (py && st.err == "" && rxLookbVarP(st, ast)) { rxErr(st, "look-behind requires fixed-width pattern") }
     if (st.err != "") {
         return {ok: false, err: st.err, errAt: st.errAt, ops: [], as: [], bs: [], clss: [],
                 ngroups: 0, nmarks: 0, names: [], nameGroups: [],

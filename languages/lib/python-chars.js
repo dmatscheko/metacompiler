@@ -59,3 +59,20 @@ function pyCpNumeric(c) {
     if (jcIsLetter(c)) { return pyHanNumerals.indexOf(c) >= 0 }
     return jcClass(c) % 8 == 6 || jcNumericValue(c) != 0 - 1
 }
+
+// \N{NAME}: the code point of a Unicode character name, matched without regard
+// to case as CPython does, or -1. A small table of the names a program is likely
+// to spell out: the full one is ~34,000 names and 1 MB of text beyond the
+// algorithmic ones, so a name outside it is refused as unknown. Used by string
+// literals and by the `re` module (pyRePat). Twins: pyUniNames in
+// python-to-llvm-ir.abnf and pyUniNameCp in abnf/jsrtregexpy.go.
+var pyUniNameList = ["BULLET", "DEGREE SIGN", "EURO SIGN", "GREEK SMALL LETTER ALPHA",
+                     "GREEK CAPITAL LETTER DELTA", "AMPERSAND", "LEFT CURLY BRACKET",
+                     "RIGHT CURLY BRACKET", "EXCLAMATION MARK", "LATIN SMALL LETTER A WITH DIAERESIS",
+                     "GREEK SMALL LETTER PI", "EM DASH", "SNOWMAN", "NO-BREAK SPACE"]
+var pyUniNameCps = [8226, 176, 8364, 945, 916, 38, 123, 125, 33, 228, 960, 8212, 9731, 160]
+
+function pyUniNameCp(name) {
+    var i = pyUniNameList.indexOf(name.toUpperCase())
+    return i < 0 ? 0 - 1 : pyUniNameCps[i]
+}

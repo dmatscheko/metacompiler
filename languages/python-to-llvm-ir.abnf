@@ -1344,6 +1344,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // both nest the way CPython's do: a def inside a method keeps the class cell
     // and takes its OWN first argument. See makeVarRef.
     var pySuperCls = false
+    // True while the innermost binding boundary being emitted is a CLASS BODY,
+    // so a def, a lambda or a class nested right there closes over the class's
+    // cell instead of its namespace (pyClosureBase).
+    var pyInClassBody = false
     var pySuperSelf = null
 
     // Names the emitter DECLARED in a scope of the current function that is not a
@@ -1950,9 +1954,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // are Python's: the single-character ones, the three digit octal form, the two
     // digit hex form, the four and eight digit Unicode forms, the named character
     // form (a small table of the names a program is likely to spell out, matched
-    // without regard to case; a name outside it is an error, see the interpreter's
-    // twin for the size of the full table) and a backslash before a newline,
-    // which joins the lines.
+    // without regard to case; a name outside it is an error. Twin of pyUniNameCp
+    // in lib/python-chars.js) and a backslash before a newline, which joins the
+    // lines.
     // The table is keyed with a "$" prefix: a bare name like "constructor" would
     // otherwise resolve to an inherited Object.prototype member under a host JS
     // engine and answer for a name the table does not hold.
@@ -4045,10 +4049,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // keeps the one around it. See makeVarRef.
         var savedSelf = pySuperSelf
         if (!isCtl) { pySuperSelf = params.length > 0 ? params[0] : null }
+        var savedInClass = pyInClassBody
         if (!isCtl) {
             pyBindSink = null
             pyAnnotHere = false
             pyInnerNames = {}
+            pyInClassBody = false
         }
         if (isCtl) {
             curScopeV = callExt(fb, "js_scope_new", [f.Params[0]])
@@ -4114,6 +4120,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (!isCtl) { pyAnnotHere = savedAnnot }
         pyInnerNames = savedInner
         pySuperSelf = savedSelf
+        pyInClassBody = savedInClass
         if (isCtl) { ctlLeave() }
         curF = savedF
         curScopeV = savedScope
@@ -4130,8 +4137,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (var i = 0; i < plist.dflts.length; i++) {
             if (plist.dflts[i] != null) { has = true }
         }
-        if (!has) { return {b: b, env: curScopeV} }
-        var env = callExt(b, "js_scope_new", [curScopeV])
+        if (!has) { return {b: b, env: pyClosureBase(b)} }
+        var env = callExt(b, "js_scope_new", [pyClosureBase(b)])
         for (var i = 0; i < plist.dflts.length; i++) {
             if (plist.dflts[i] == null) { continue }
             var r = plist.dflts[i](b)
@@ -4205,6 +4212,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var d = walkDocs["$" + items[0]]
         walkSuiteDoc = (d === undefined) ? null : d
         return makeSeq(items.slice(1))
+    }
+    // The scope a def, a lambda or a class body closes over. CPython never makes a
+    // class namespace an enclosing scope of anything nested in it (a method's `max`
+    // is the builtin, not the method beside it), so right inside a class body that
+    // is the class's CELL: the scope around the class, plus __pycls__ for a
+    // zero-argument super(). A try/with body closure reaches it as "pycell*".
+    // Twin of pyClosureScopes in python-interpreter.abnf.
+    function pyClosureBase(b) {
+        if (!pyInClassBody) { return curScopeV }
+        return callExt(b, "js_scope_get", [curScopeV, emitStr(b, "pycell*")])
     }
     // A def pushes {dname, dstmt}: the name is what a decorator chain rebinds.
     // js_pyfnname remembers it on the closure so f.__name__ can answer.
@@ -4293,10 +4310,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // inherited.
             callExt(b, "js_pyclsdoc", [cls, doc == null ? hUndef : emitStr(b, doc)])
             var savedSuperCls = pySuperCls
+            var savedInClass = pyInClassBody
             var saved = curScopeV
             // A class body is a namespace of its own: what it binds becomes a
-            // class member and never leaks into the scope around it.
-            curScopeV = pyOpenBoundary(b, saved, false)
+            // class member and never leaks into the scope around it. It opens
+            // over its cell (pyClosureBase), which holds the __class__ cell.
+            var cellV = callExt(b, "js_scope_new", [pyClosureBase(b)])
+            callExt(b, "js_scope_decl", [cellV, emitStr(b, "pycell*"), cellV])
+            curScopeV = pyOpenBoundary(b, cellV, false)
             var bodyScope = curScopeV
             var savedSink2 = pyBindSink
             var savedAnnot2 = pyAnnotHere
@@ -4306,10 +4327,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             pyInnerNames = {}
             // The __class__ cell. js_scope_decl and NOT pySetVar, so the name never
             // reaches pyBindSink and never becomes a member of the class.
-            callExt(b, "js_scope_decl", [bodyScope, emitStr(b, "__pycls__"), cls])
+            callExt(b, "js_scope_decl", [cellV, emitStr(b, "__pycls__"), cls])
             pySuperCls = true
+            pyInClassBody = true
             b = bodyT(b)
             pySuperCls = savedSuperCls
+            pyInClassBody = savedInClass
             b = pyClassFill(b, cls, bodyScope, pyBindSink)
             // js_pyclass_meta finishes the class, or has its metaclass make the
             // real one from it; the __class__ cell then names that one.
@@ -4317,7 +4340,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // PEP 695 type parameters make the class subscriptable (pyGenericOk
             // in abnf/jsrt.go).
             if (generic) { callExt(b, "js_set", [cls, emitStr(b, "__generic"), hTrue]) }
-            callExt(b, "js_scope_set", [bodyScope, emitStr(b, "__pycls__"), cls])
+            callExt(b, "js_scope_set", [cellV, emitStr(b, "__pycls__"), cls])
             // SETUP_ANNOTATIONS: the body HELD an annotation, so the class has an
             // __annotations__ dict whether or not the annotated statement ran.
             if (pyAnnotHere) { b = pyEnsureAnnot(b, cls) }
