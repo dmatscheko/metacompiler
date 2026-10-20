@@ -4078,6 +4078,7 @@ function s78none(): int { }
 function s78nret(): ?string { return null; }
 function s78void(): void { return; }
 function s78var(int ...$xs) { return $xs; }
+function s78gvar(int ...$xs) { yield 1; }
 function s78ref(int &$r) { $r = $r + 1; }
 function s78gen(int $n): Generator { yield $n; return "r"; }
 function s78cb(callable $c) { return $c(); }
@@ -4107,6 +4108,7 @@ function s78() {
     $m[] = s78e(fn() => s78var(1, "z"), __LINE__);
     $m[] = s78e(fn() => s78ret("q"), __LINE__);
     $m[] = s78e(fn() => s78none(), __LINE__);
+    $m[] = s78e(fn() => s78gvar(1, "z"), __LINE__);
     check("sty2", $m === [
         "s78int(): Argument #1 (\$a) must be of type int, string given, called in F on line L",
         "s78int(): Argument #1 (\$a) must be of type int, null given, called in F on line L",
@@ -4114,7 +4116,8 @@ function s78() {
         "s78dn(): Argument #1 (\$x) must be of type ?int, string given, called in F on line L",
         "s78var(): Argument #2 (\$xs) must be of type int, string given, called in F on line L",
         "s78ret(): Return value must be of type int, string returned",
-        "s78none(): Return value must be of type int, none returned"]);
+        "s78none(): Return value must be of type int, none returned",
+        "s78gvar(): Argument #2 (\$xs) must be of type int, string given, called in F on line L"]);
     $n = [];
     $n[] = s78e(fn() => (new S78P)->same(5), __LINE__);
     $n[] = s78e(fn() => (new S78K)->up(5), __LINE__);

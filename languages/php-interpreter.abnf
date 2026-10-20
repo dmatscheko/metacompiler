@@ -1897,6 +1897,34 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             }
             if (!have && (params[i].def == null || (named != null && phpReqAfter(params, i)))) { phpMissArg(params, i, argset, who, cls) }
         }
+        var vi = params.length - 1
+        if (vi >= 0 && params[vi].variadic === true && params[vi].typ != "") {
+            var tail = newArr()
+            for (var j = vi; j < argset.pos.length; j++) { arrPush(tail, deref(argset.pos[j])) }
+            if (named != null) {
+                for (var q = 0; q < argset.nkeys.length; q++) {
+                    if (!phpNamedTaken(params, vi, argset.nkeys[q])) { arrSet(tail, argset.nkeys[q].substring(1), named[argset.nkeys[q]]) }
+                }
+            }
+            phpRestFit(params[vi], vi, tail, argset, who, cls)
+        }
+    }
+    // Does one of the first n parameters take the named argument nk?
+    function phpNamedTaken(params, n, nk) {
+        for (var r = 0; r < n; r++) { if (params[r].name == nk) { return true } }
+        return false
+    }
+    // The elements of rest, what typed variadic parameter p (at position i)
+    // collected, each as its type takes it: argument i + 1 + k for the k-th, the
+    // named ones counted after the positions. A cell gets its value written back.
+    // Twin of js_phfit's rest mode in abnf/jsrtphp.go and lib/php-rt.metajs.
+    function phpRestFit(p, i, rest, argset, who, cls) {
+        for (var k = 0; k < rest.vals.length; k++) {
+            var x = anytype
+            x = rest.vals[k]
+            if (isRef(x)) { x.v = phpArgFit(p, i + 1 + k, x.v, argset, who, cls) }
+            else { rest.vals[k] = phpArgFit(p, i + 1 + k, x, argset, who, cls) }
+        }
     }
     // Binds one call's arguments into the CURRENT (already pushed) frame; who and
     // cls name the function for phpMissArg.
@@ -1917,15 +1945,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                         var vc = argset.tgts[j]()
                         rebind(undefined, vc)
                         arrPush(rest, vc)
-                    } else if (p.typ != "") { arrPush(rest, phpArgFit(p, j + 1, phpCopy(argValue(pos[j])), argset, who, cls)) }
-                    else { arrPush(rest, phpCopy(argValue(pos[j]))) }
+                    } else { arrPush(rest, phpCopy(argValue(pos[j]))) }
                 }
                 if (named != null) {
                     for (var q = 0; q < argset.nkeys.length; q++) {
                         var nk = argset.nkeys[q]
-                        var took = false
-                        for (var r = 0; r < i; r++) { if (params[r].name == nk) { took = true } }
-                        if (took) { continue }
+                        if (phpNamedTaken(params, i, nk)) { continue }
                         // A by-reference variadic takes a named argument by
                         // reference too (zend_get_arg_offset_by_name answers the
                         // variadic's position for a name no parameter declares).
@@ -1936,6 +1961,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                         } else { arrSet(rest, nk.substring(1), phpCopy(named[nk])) }
                     }
                 }
+                if (p.typ != "") { phpRestFit(p, i, rest, argset, who, cls) }
                 declVar(p.name, rest)
                 return
             }
