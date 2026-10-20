@@ -101,9 +101,14 @@ const (
 	rxSJNH = 10
 	rxSJV  = 11
 	rxSJNV = 12
-	// Python's Unicode \w and \W (rxPyWord).
+	// Python's Unicode \w and \W (rxPyWord), \d and \D (pyCpDecimal), \s and \S
+	// (pysIsSpaceCode).
 	rxSPW  = 13
 	rxSPNW = 14
+	rxSPD  = 15
+	rxSPND = 16
+	rxSPS  = 17
+	rxSPNS = 18
 )
 
 // rxSteps caps one rxSearch attempt, so a pathological pattern reports an error
@@ -249,6 +254,14 @@ func rxSpHas(code int, c rune) bool {
 		return rxPyWord(c)
 	case rxSPNW:
 		return !rxPyWord(c)
+	case rxSPD:
+		return pyCpDecimal(int(c))
+	case rxSPND:
+		return !pyCpDecimal(int(c))
+	case rxSPS:
+		return pysIsSpaceCode(int(c))
+	case rxSPNS:
+		return !pysIsSpaceCode(int(c))
 	}
 	return false
 }
@@ -450,7 +463,8 @@ type rxSt struct {
 	// rxSuppJ), and canon is J's CANON_EQ, which is only reported (Pattern.flags).
 	supp  bool
 	canon bool
-	// pyuni: under P, \w \W \b \B are Python's Unicode ones (no a flag in force).
+	// pyuni: under P, \w \W \b \B \d \D \s \S are Python's Unicode ones (no a
+	// flag in force).
 	pyuni bool
 	// gnodes[g] is capturing group g's node (rxWidthP), from index 1.
 	gnodes []*rxNode
@@ -909,8 +923,14 @@ func (st *rxSt) esc(inClass bool) rxEscRes {
 	}
 	switch c {
 	case 'd':
+		if st.pyuni {
+			return rxEscRes{kind: 1, sp: rxSPD}
+		}
 		return rxEscRes{kind: 1, sp: rxSD}
 	case 'D':
+		if st.pyuni {
+			return rxEscRes{kind: 1, sp: rxSPND}
+		}
 		return rxEscRes{kind: 1, sp: rxSND}
 	case 'w':
 		if st.pyuni {
@@ -923,8 +943,14 @@ func (st *rxSt) esc(inClass bool) rxEscRes {
 		}
 		return rxEscRes{kind: 1, sp: rxSNW}
 	case 's':
+		if st.pyuni {
+			return rxEscRes{kind: 1, sp: rxSPS}
+		}
 		return rxEscRes{kind: 1, sp: rxSS}
 	case 'S':
+		if st.pyuni {
+			return rxEscRes{kind: 1, sp: rxSPNS}
+		}
 		return rxEscRes{kind: 1, sp: rxSNS}
 	case 'h':
 		return rxEscRes{kind: 1, sp: rxSH}

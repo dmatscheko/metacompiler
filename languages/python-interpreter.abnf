@@ -1084,6 +1084,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     include("lib/regex.js")
     rxFail = function (msg) { fail(msg) }
     rxPyWordHit = function (c) { return c == 95 || pyCpAlpha(c) || pyCpNumeric(c) }
+    rxPyDigitHit = function (c) { return pyCpDecimal(c) }
+    rxPySpaceHit = function (c) { return pyCpSpace(c) }
     // (?P...) translation and re.error's message, position and fields.
     include("lib/python-regex.js")
 
@@ -1536,7 +1538,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pyIsDec(c) { return c >= "0" && c <= "9" }
     // The whitespace float() strips: str.isspace() less U+001C..U+001F, which
     // CPython tests with its ASCII-only Py_ISSPACE.
-    function pyFloSpace(c) { return (c < 28 || c > 31) && pySIsSpaceCh(String.fromCharCode(c)) }
+    function pyFloSpace(c) { return (c < 28 || c > 31) && pyCpSpace(c) }
     // Calling a builtin type object is a CONVERSION - str(x), int(x), list(x) - which
     // pyCall routes here rather than instantiating a class.
     function pyConvert(name, args, named) {
@@ -3765,7 +3767,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // A compiled pattern and a match render the way CPython's repr does.
         if (isPyRe(v)) { return "re.compile(" + prepr(v.pattern) + ")" }
         if (isPyMatch(v)) {
-            return "<re.Match object; span=(" + v.m.begin + ", " + v.m.end + "), match="
+            return "<re.Match object; span=(" + pyReCpIdx(v.string, v.m.begin) + ", "
+                   + pyReCpIdx(v.string, v.m.end) + "), match="
                    + prepr(rxGroup(v.prog, v.string, v.m, 0)) + ">"
         }
         if (isBytes(v)) { return pyBytesRepr(v) }
@@ -4646,7 +4649,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pyReNone(v) { return v === null ? undefined : v }
     function pyReEmpty(v) { return v === null ? "" : v }
     function pyReSearch(rv, s, from) {
-        var m = rxSearch(rv.prog, s, from)
+        var m = rxSearch(rv.prog, s, pyReUnitIdx(s, from))
         if (m == null) { return undefined }
         return pyMkMatch(rv, rv.prog, s, m)
     }
@@ -4656,7 +4659,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // including Python's `pos` argument - and unlike an \A(?:...)\z wrapper, they
     // have no quarrel with the x flag's trailing comments.
     function pyReAnchoredMatch(rv, s, from, whole) {
-        var m = whole ? rxMatchWhole(rv.prog, s, from) : rxMatchAt(rv.prog, s, from)
+        var at = pyReUnitIdx(s, from)
+        var m = whole ? rxMatchWhole(rv.prog, s, at) : rxMatchAt(rv.prog, s, at)
         if (m == null) { return undefined }
         return pyMkMatch(rv, rv.prog, s, m)
     }
@@ -4673,8 +4677,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pyMSpan(md, k, which) {
         var slot = 2 * pyMGroupIdx(md, k) + which
         var caps = md.m.caps
-        if (slot >= caps.length) { return -1 }
-        return caps[slot]
+        if (slot >= caps.length || caps[slot] < 0) { return -1 }
+        return pyReCpIdx(md.string, caps[slot])
     }
     function pyMGroups(md) {
         var out = []
@@ -4734,9 +4738,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             last = m.end
             at = m.end
             if (m.end == m.begin) {
-                if (m.end < s.length) { out += s.charAt(m.end) }
-                last = m.end + 1
-                at = m.end + 1
+                last = pyReNext(s, m.end)
+                at = last
+                if (m.end < s.length) { out += s.substring(m.end, last) }
             }
         }
         if (last <= s.length) { out += s.substring(last, s.length) }
@@ -4760,7 +4764,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 parts.push(s.substring(last, m.begin))
                 for (var g2 = 1; g2 <= rv.prog.ngroups; g2++) { parts.push(pyReNone(rxGroup(rv.prog, s, m, g2))) }
                 last = m.begin
-                at = m.begin + 1
+                at = pyReNext(s, m.begin)
                 n = n + 1
                 continue
             }
@@ -4790,7 +4794,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 for (var g = 1; g <= rv.prog.ngroups; g++) { t.push(pyReEmpty(rxGroup(rv.prog, s, m, g))) }
                 out.push(pyTup(t))
             }
-            at = m.end == m.begin ? m.end + 1 : m.end
+            at = m.end == m.begin ? pyReNext(s, m.end) : m.end
         }
         return out
     }
@@ -5679,16 +5683,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // Py_UNICODE_ISSPACE: the ASCII set, the C1 and separator code points, and the
     // three Unicode space blocks.
-    function pySIsSpaceCh(ch) {
-        var c = ch.charCodeAt(0)
-        if (c == 32) { return true }
-        if (c >= 9 && c <= 13) { return true }
-        if (c >= 28 && c <= 31) { return true }
-        if (c == 133 || c == 160 || c == 5760) { return true }
-        if (c >= 8192 && c <= 8202) { return true }
-        if (c == 8232 || c == 8233 || c == 8239 || c == 8287 || c == 12288) { return true }
-        return false
-    }
 
     // str.splitlines' universal newlines.
     function pySIsBreakCh(c) {
@@ -5780,7 +5774,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     //
     // `chars` is a SET of characters, not a prefix; `useWS` is the no-argument form.
     function pySStripHit(ch, chars, useWS) {
-        if (useWS) { return pySIsSpaceCh(ch) }
+        if (useWS) { return pyCpSpace(ch.charCodeAt(0)) }
         return chars.indexOf(ch) >= 0
     }
 
@@ -5813,14 +5807,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var i = 0
         var n = 0
         while (i < s.length) {
-            while (i < s.length && pySIsSpaceCh(s.charAt(i))) { i = i + 1 }
+            while (i < s.length && pyCpSpace(s.charCodeAt(i))) { i = i + 1 }
             if (i >= s.length) { return out }
             if (maxsplit >= 0 && n >= maxsplit) {
                 out.push(s.substring(i, s.length))
                 return out
             }
             var j = i
-            while (j < s.length && !pySIsSpaceCh(s.charAt(j))) { j = j + 1 }
+            while (j < s.length && !pyCpSpace(s.charCodeAt(j))) { j = j + 1 }
             out.push(s.substring(i, j))
             n = n + 1
             i = j
@@ -5858,14 +5852,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var e = s.length
         var n = 0
         while (e > 0) {
-            while (e > 0 && pySIsSpaceCh(s.charAt(e - 1))) { e = e - 1 }
+            while (e > 0 && pyCpSpace(s.charCodeAt(e - 1))) { e = e - 1 }
             if (e <= 0) { return pySReverse(out) }
             if (maxsplit >= 0 && n >= maxsplit) {
                 out.push(s.substring(0, e))
                 return pySReverse(out)
             }
             var j = e
-            while (j > 0 && !pySIsSpaceCh(s.charAt(j - 1))) { j = j - 1 }
+            while (j > 0 && !pyCpSpace(s.charCodeAt(j - 1))) { j = j - 1 }
             out.push(s.substring(j, e))
             n = n + 1
             e = j
@@ -6450,7 +6444,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else if (kind == 3) { ok = pyCpAlpha(cp) || pyCpNumeric(cp) }
             else if (kind == 5) { ok = pyCpDigit(cp) }
             else if (kind == 6) { ok = pyCpNumeric(cp) }
-            else { ok = pySIsSpaceCh(ch) }
+            else { ok = pyCpSpace(cp) }
             if (!ok) { return false }
             i = i + 1
         }
@@ -12706,7 +12700,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // The class body binds into a RECORDING namespace scope: core.setMiss
             // appends every new name to __nskeys, because the value model has no
             // key enumeration (MetaJS has no for..in).
-            var ns = {__nskeys: [], __pyfn: true, __pyd: "", __pycell: {}}
+            var ns = {__nskeys: [], __pyfn: true, __pyd: "", __pycell: {__pyccell: true}}
             var outer = scopes
             scopes = pyClosureScopes()
             scopes.push(ns)
@@ -13687,17 +13681,26 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // its own name `super` does not shadow it. That is the one deliberate departure
     // from CPython here, and it is the same in all three engines.
     function pySuperObj(cls, obj) { return {__pysup: true, __scls: cls, __sobj: obj} }
-    // The name __class__: the same cell, but only from a function nested in a
-    // class body; in the class body itself and outside any class it is an
-    // ordinary name. Twin of the __class__ arm of makeVarRef in
-    // python-to-llvm-ir.abnf.
+    // The name __class__: from a function nested in a class body, that class's
+    // cell. A class body reads its own namespace first and then the cell of the
+    // block around it (LOAD_FROM_DICT_OR_DEREF): in a method, the method's
+    // class; right inside another class body, that class's cell, still empty
+    // while its body runs. A comprehension right in a class body, and code
+    // outside any class, read an ordinary name. Twin of the __class__ arm of
+    // makeVarRef in python-to-llvm-ir.abnf.
     function pyClassCellHere() {
         var inFn = false
+        var inBody = false
         var i = scopes.length - 1
         while (i >= 0) {
             var sc = scopes[i]
-            if (!inFn && sc.__pycell !== undefined) { i = 0 }
-            else {
+            if (!inFn && sc.__pycell !== undefined) {
+                if (hasOwn(sc, "__class__")) { return pyReadName("__class__") }
+                inBody = true
+            } else if (!inFn && sc.__pyccell === true) {
+                if (!inBody) { return pyReadName("__class__") }
+                pyRaise(pyMakeExc("NameError", ["cannot access free variable '__class__' where it is not associated with a value in enclosing scope"]))
+            } else {
                 if (sc.__pyfn === true) { inFn = true }
                 if (inFn && hasOwn(sc, "__pycls")) { return sc.__pycls }
             }

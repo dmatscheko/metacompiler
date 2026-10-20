@@ -88,10 +88,11 @@
 //                                            J it answers Pattern.flags(), the
 //                                            letters in force at the pattern's
 //                                            end, as rxFlagsGet spells them;
-//                                            \w \W \b \B are Python's Unicode ones,
-//                                            rxPyWordHit)
+//                                            \w \W \b \B \d \D \s \S are Python's
+//                                            Unicode ones, rxPyWordHit /
+//                                            rxPyDigitHit / rxPySpaceHit)
 //                                            a (P only: re.ASCII, as the inline a:
-//                                            \w \W \b \B are ASCII's)
+//                                            those are ASCII's)
 //                                            R (Go's regexp: RE2 syntax with Go's
 //                                            error texts, rewritten into J by
 //                                            rxRe2, and Go's matching rules - see
@@ -196,6 +197,10 @@ var RX_SJV = 11    // Java's \v: vertical whitespace
 var RX_SJNV = 12   // Java's \V
 var RX_SPW = 13    // Python's Unicode \w (rxPyWordHit)
 var RX_SPNW = 14   // Python's Unicode \W
+var RX_SPD = 15    // Python's Unicode \d (rxPyDigitHit)
+var RX_SPND = 16   // Python's Unicode \D
+var RX_SPS = 17    // Python's Unicode \s (rxPySpaceHit)
+var RX_SPNS = 18   // Python's Unicode \S
 
 // Step cap for one rxSearch attempt. A pathological pattern reports
 // "regexp: step limit exceeded" rather than hanging the whole run.
@@ -246,9 +251,32 @@ function rxIsSpaceCode(c) {
 
 function rxIsDigitCode(c) { return c >= 48 && c <= 57 }
 
+// rxCpBackN steps rxCpBack k times from i, or answers -1 past the start.
+function rxCpBackN(s, i, k) {
+    var j = i
+    var m = 0
+    while (m < k) {
+        if (j <= 0) { return 0 - 1 }
+        j = rxCpBack(s, j)
+        m = m + 1
+    }
+    return j
+}
+
+// rxCpBack is where the code point ending just before UTF-16 index i of s starts:
+// i - 2 after a surrogate pair, else i - 1.
+function rxCpBack(s, i) {
+    if (i >= 2) {
+        var d = s.charCodeAt(i - 1)
+        var c = s.charCodeAt(i - 2)
+        if (d >= 56320 && d <= 57343 && c >= 55296 && c <= 56319) { return i - 2 }
+    }
+    return i - 1
+}
+
 // rxCpAt is the code point at UTF-16 index i of s, a surrogate pair read as one.
-// The J dialect reads both pattern and text this way, as java.util.regex reads
-// code points; a lone surrogate is a code point of its own.
+// The J and P dialects read both pattern and text this way, as java.util.regex
+// and CPython read code points; a lone surrogate is a code point of its own.
 function rxCpAt(s, i) {
     var c = s.charCodeAt(i)
     if (c >= 55296 && c <= 56319 && i + 1 < s.length) {
@@ -329,6 +357,10 @@ function rxSpHas(code, c) {
     if (code == RX_SJNV) { return !rxIsVSpaceJ(c) }
     if (code == RX_SPW) { return rxPyWordHit(c) }
     if (code == RX_SPNW) { return !rxPyWordHit(c) }
+    if (code == RX_SPD) { return rxPyDigitHit(c) }
+    if (code == RX_SPND) { return !rxPyDigitHit(c) }
+    if (code == RX_SPS) { return rxPySpaceHit(c) }
+    if (code == RX_SPNS) { return !rxPySpaceHit(c) }
     return false
 }
 
@@ -354,6 +386,10 @@ var rxPropHit = function (id, c) { return false }
 // "_" or what str.isalnum() accepts. A KNOB like rxPropHit, assigned by the
 // grammars that pass P (the tables are lib/python-chars.js's).
 var rxPyWordHit = function (c) { return rxIsWordCode(c) }
+// \d and \s of a str pattern: str.isdecimal() (Unicode Nd) and str.isspace().
+// KNOBS like rxPyWordHit.
+var rxPyDigitHit = function (c) { return rxIsDigitCode(c) }
+var rxPySpaceHit = function (c) { return rxIsSpaceCode(c) }
 
 // rxClsHitX is rxClsHit for a class TREE: the union of the class's own ranges,
 // its properties and its nested classes, intersected with every && operand.
@@ -902,12 +938,12 @@ function rxEsc(st, inClass) {
         res.ch = bv
         return res
     }
-    if (c == 100) { res.kind = 1; res.sp = RX_SD; return res }
-    if (c == 68) { res.kind = 1; res.sp = RX_SND; return res }
+    if (c == 100) { res.kind = 1; res.sp = st.pyuni ? RX_SPD : RX_SD; return res }
+    if (c == 68) { res.kind = 1; res.sp = st.pyuni ? RX_SPND : RX_SND; return res }
     if (c == 119) { res.kind = 1; res.sp = st.pyuni ? RX_SPW : RX_SW; return res }
     if (c == 87) { res.kind = 1; res.sp = st.pyuni ? RX_SPNW : RX_SNW; return res }
-    if (c == 115) { res.kind = 1; res.sp = RX_SS; return res }
-    if (c == 83) { res.kind = 1; res.sp = RX_SNS; return res }
+    if (c == 115) { res.kind = 1; res.sp = st.pyuni ? RX_SPS : RX_SS; return res }
+    if (c == 83) { res.kind = 1; res.sp = st.pyuni ? RX_SPNS : RX_SNS; return res }
     if (c == 104) { res.kind = 1; res.sp = RX_SH; return res }
     if (c == 72) { res.kind = 1; res.sp = RX_SNH; return res }
     if (c == 110) { res.ch = 10; return res }
@@ -984,7 +1020,7 @@ function rxEsc(st, inClass) {
         res.ch = oval
         return res
     }
-    if (st.java && c >= 55296 && c <= 56319) {
+    if ((st.java || st.py) && c >= 55296 && c <= 56319) {
         c = rxCpAt(p, st.i - 1)
         if (c > 65535) { st.i = st.i + 1 }
     }
@@ -1065,7 +1101,8 @@ function rxParseClass(st) {
             }
             loCode = e.ch
         } else {
-            st.i = st.i + 1
+            if (st.py) { c = rxCpAt(p, st.i) }
+            st.i = st.i + (c > 65535 ? 2 : 1)
             loCode = c
         }
         // A range needs a '-' that is neither the last character nor followed by ].
@@ -1090,7 +1127,8 @@ function rxParseClass(st) {
                 }
                 hiCode = e2.ch
             } else {
-                st.i = st.i + 1
+                if (st.py) { c2 = rxCpAt(p, st.i) }
+                st.i = st.i + (c2 > 65535 ? 2 : 1)
                 hiCode = c2
             }
             if (hiCode < loCode) {
@@ -1838,7 +1876,7 @@ function rxParseAtom(st) {
         st.i = st.i + 1
         return rxNode("empty")
     }
-    if (st.java) { c = rxCpAt(p, st.i) }
+    if (st.java || st.py) { c = rxCpAt(p, st.i) }
     st.i = st.i + (c > 65535 ? 2 : 1)
     var lit = rxNode("cls")
     rxClsAdd(lit.cls, c, c)
@@ -3386,7 +3424,10 @@ function rxCompile(pattern, flags) {
         multi = false
     }
     var ast = rxParseAlt(st)
-    var supp = java && (re2 || st.supp || rxSuppJ(ast) || rxHasSurr(pat))
+    // A search steps over a surrogate pair whole: under J when the pattern has
+    // a supplementary character (java.util.regex's hasSupplementary), and always
+    // under P, where the text is code points.
+    var supp = py || java && (re2 || st.supp || rxSuppJ(ast) || rxHasSurr(pat))
     // Resolve every \k<name> now that the whole name table is known.
     var pend = st.pending
     var pi = 0
@@ -3408,7 +3449,7 @@ function rxCompile(pattern, flags) {
         return {ok: false, err: st.err, errAt: st.errAt, ops: [], as: [], bs: [], clss: [],
                 ngroups: 0, nmarks: 0, names: [], nameGroups: [],
                 icase: icase, dotall: dotall, multi: multi, jsrep: jsrep, java: java,
-                supp: false, bfail: bfail, gflags: "",
+                py: false, supp: false, bfail: bfail, gflags: "",
                 cmin: [], cmax: [], cgreedy: [], lbmin: [], lbmax: [],
                 src: pattern, flags: flags}
     }
@@ -3425,7 +3466,7 @@ function rxCompile(pattern, flags) {
         ngroups: st.ngroups, nmarks: pg.nmarks, names: re2 ? tr.names : st.names,
         nameGroups: re2 ? tr.nameGroups : st.nameGroups,
         icase: icase, dotall: dotall, multi: multi, jsrep: jsrep, java: java,
-        supp: supp, bfail: bfail, gflags: java ? rxFlagsGet(st) : st.gflags,
+        py: py, supp: supp, bfail: bfail, gflags: java ? rxFlagsGet(st) : st.gflags,
         cmin: pg.cmin, cmax: pg.cmax, cgreedy: pg.cgreedy, lbmin: pg.lbmin, lbmax: pg.lbmax,
         src: pattern, flags: flags
     }
@@ -3453,8 +3494,8 @@ function rxAssertOK(re, text, kind, sp) {
         return text.charCodeAt(sp) == 10
     }
     if (kind == RX_PUWORDB || kind == RX_PUNWORDB) {
-        var pb = sp > 0 && rxPyWordHit(text.charCodeAt(sp - 1))
-        var pa = sp < n && rxPyWordHit(text.charCodeAt(sp))
+        var pb = sp > 0 && rxPyWordHit(rxCpAt(text, rxCpBack(text, sp)))
+        var pa = sp < n && rxPyWordHit(rxCpAt(text, sp))
         if (kind == RX_PUWORDB) { return pb != pa }
         return pb == pa
     }
@@ -3551,8 +3592,8 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st) {
         if (op == RX_CLASS) {
             if (sp >= n) { return -1 }
             var cc = text.charCodeAt(sp)
-            // J reads a surrogate pair as one character.
-            if (cc >= 55296 && cc <= 56319 && re.java) { cc = rxCpAt(text, sp) }
+            // J and P read a surrogate pair as one character.
+            if (cc >= 55296 && cc <= 56319 && (re.java || re.py)) { cc = rxCpAt(text, sp) }
             if (!rxClsMatch(clss[pc], cc, re.icase)) { return -1 }
             pc = pc + 1
             sp = sp + (cc > 65535 ? 2 : 1)
@@ -3740,6 +3781,11 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st) {
             var lmax = lbmaxs[lid]
             var lfrom = sp - lbmins[lid]
             var lto = lmax < 0 ? 0 : sp - lmax
+            // The range counts characters; under P one may be a surrogate pair.
+            if (re.py) {
+                lfrom = rxCpBackN(text, sp, lbmins[lid])
+                lto = lmax < 0 ? 0 : rxCpBackN(text, sp, lmax)
+            }
             if (lto < 0) { lto = 0 }
             var lsaved = st.lbt
             st.lbt = sp
@@ -3747,7 +3793,7 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st) {
             while (!lhit && lfrom >= lto) {
                 if (rxRun(re, text, pc + 1, lfrom, caps, marks, st) >= 0) { lhit = true }
                 if (st.over) { return -1 }
-                lfrom = lfrom - 1
+                lfrom = re.py ? rxCpBack(text, lfrom) : lfrom - 1
             }
             st.lbt = lsaved
             if (lhit == lneg) { return -1 }

@@ -1312,6 +1312,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var pySetVarF = undefined
     var pyGetVarF = undefined
     var pyDelVarF = undefined
+    var pyClsRefF = undefined
     var pyGlobalF = undefined
 
     // Open a binding boundary: the MID scope with the marks, then the scope the
@@ -1351,6 +1352,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // True while a comprehension right inside a class body is emitted: it no
     // longer reads the class namespace, but __class__ is still unbound there.
     var pyInClassComp = false
+    // True while a class body is emitted whose enclosing block gives it a
+    // __class__ cell: a method of an enclosing class, or that class body itself.
+    var pyClsCell = false
     var pySuperSelf = null
 
     // Names the emitter DECLARED in a scope of the current function that is not a
@@ -1543,6 +1547,34 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             okB.NewRet(vv)
         }
         return b.NewCall(pyGetVarF, [envV, nameV])
+    }
+
+    // __class__ read right in a class body that has a cell from its enclosing
+    // block (pyClsCell): the body's own binding, else the cell makeClass left in
+    // "pyoutcls*" - the enclosing method's class, or undefined for a class right
+    // inside a class body, whose own cell is still empty while that body runs.
+    // Twin of pyClassCellHere in python-interpreter.abnf.
+    function pyClsRef(b, envV) {
+        if (pyClsRefF == undefined) {
+            pyClsRefF = m.NewFunc("py_clsref", i64, [llvm.ir.NewParam("env", i64)])
+            var envP = pyClsRefF.Params[0]
+            var eb = pyClsRefF.NewBlock("entry")
+            var ownB = pyClsRefF.NewBlock("own")
+            var cellB = pyClsRefF.NewBlock("cell")
+            var setB = pyClsRefF.NewBlock("set")
+            var emptyB = pyClsRefF.NewBlock("empty")
+            eb.NewCondBr(truthy(eb, callExt(eb, "js_scope_has", [envP, emitStr(eb, "__class__")])), ownB, cellB)
+            ownB.NewRet(pyGetVar(ownB, envP, emitStr(ownB, "__class__")))
+            var cv = callExt(cellB, "js_scope_get", [envP, emitStr(cellB, "pyoutcls*")])
+            cellB.NewCondBr(truthy(cellB, callExt(cellB, "js_seq", [cv, hUndef])), emptyB, setB)
+            setB.NewRet(cv)
+            var ar = callExt(emptyB, "js_arr_new", [])
+            callExt(emptyB, "js_arr_push", [ar, emitStr(emptyB, "cannot access free variable '__class__' where it is not associated with a value in enclosing scope")])
+            var clsV = callExt(emptyB, "js_scope_get", [envP, emitStr(emptyB, "NameError")])
+            callExt(emptyB, "js_throw", [callExt(emptyB, "js_pycall", [clsV, ar, handle(0)])])
+            emptyB.NewRet(handle(0))
+        }
+        return b.NewCall(pyClsRefF, [envV])
     }
 
     // `del x`: abnf/jsrt.go walks for the scope that HAS the name and leaves the
@@ -4364,6 +4396,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // over its cell (pyClosureBase), which holds the __class__ cell.
             var cellV = callExt(b, "js_scope_new", [pyClosureBase(b)])
             callExt(b, "js_scope_decl", [cellV, emitStr(b, "pycell*"), cellV])
+            // __class__ in this body, past its own binding, is the cell of the
+            // enclosing block (LOAD_FROM_DICT_OR_DEREF; pyClsRef): in a method,
+            // the method's class; right inside a class body, that class's cell,
+            // empty until its body has run.
+            var savedClsCell = pyClsCell
+            pyClsCell = pySuperCls
+            if (pySuperCls) {
+                var outerCls = pyInClassBody ? hUndef : callExt(b, "js_scope_get", [curScopeV, emitStr(b, "__pycls__")])
+                callExt(b, "js_scope_decl", [cellV, emitStr(b, "pyoutcls*"), outerCls])
+            }
             curScopeV = pyOpenBoundary(b, cellV, false)
             var bodyScope = curScopeV
             var savedSink2 = pyBindSink
@@ -4380,6 +4422,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b = bodyT(b)
             pySuperCls = savedSuperCls
             pyInClassBody = savedInClass
+            pyClsCell = savedClsCell
             b = pyClassFill(b, cls, bodyScope, pyBindSink)
             // js_pyclass_meta finishes the class, or has its metaclass make the
             // real one from it; the __class__ cell then names that one.
@@ -5100,14 +5143,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return {b: b, v: callExt(b, "js_pysuper", [clsV, selfV])}
             }
         }
-        // __class__ inside a function of a class body is that same cell; in the
-        // class body itself (its comprehensions included) and outside any class
-        // it is an ordinary (unbound) name. Twin of pyClassCellHere in python-interpreter.abnf.
+        // __class__ inside a function of a class body is that same cell; in a
+        // class body, its own binding and then the enclosing block's cell
+        // (pyClsRef); in a comprehension right in a class body and outside any
+        // class it is an ordinary (unbound) name. Twin of pyClassCellHere in
+        // python-interpreter.abnf.
         if (name == "__class__") {
             return function(b) {
                 if (pySuperCls && !pyInClassBody && !pyInClassComp) {
                     return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, "__pycls__")])}
                 }
+                if (pyClsCell && pyInClassBody && !pyInClassComp) { return {b: b, v: pyClsRef(b, curScopeV)} }
                 return {b: b, v: pyGetVar(b, curScopeV, emitStr(b, name))}
             }
         }

@@ -1,7 +1,7 @@
-// python-chars.js -- str.isalpha / isdecimal / isdigit / isnumeric of one code
-// point, for python-interpreter.abnf (include) and languages/lib/python-rt.metajs
-// (import), each after lib/java-chars.js. Go twin: pyCpAlpha .. pyCpNumeric in
-// abnf/pystrmethod.go.
+// python-chars.js -- str.isalpha / isdecimal / isdigit / isnumeric / isspace of
+// one code point, for python-interpreter.abnf (include) and
+// languages/lib/python-rt.metajs (import), each after lib/java-chars.js. Go twin:
+// pyCpAlpha .. pyCpNumeric and pysIsSpaceCode in abnf/pystrmethod.go.
 //
 // CPython 3.14 and java-chars.js's table are both Unicode 16.0, and over every
 // code point isalpha IS Character.isLetter (the L* categories) and isdecimal IS
@@ -58,6 +58,17 @@ function pyCpNumeric(c) {
     if (c < 128) { return c >= 48 && c <= 57 }
     if (jcIsLetter(c)) { return pyHanNumerals.indexOf(c) >= 0 }
     return jcClass(c) % 8 == 6 || jcNumericValue(c) != 0 - 1
+}
+
+// str.isspace of one code point: Py_UNICODE_ISSPACE. Also the \s of a str
+// pattern (the rxPySpaceHit knob of lib/regex.js).
+function pyCpSpace(c) {
+    if (c == 32) { return true }
+    if (c >= 9 && c <= 13) { return true }
+    if (c >= 28 && c <= 31) { return true }
+    if (c == 133 || c == 160 || c == 5760) { return true }
+    if (c >= 8192 && c <= 8202) { return true }
+    return c == 8232 || c == 8233 || c == 8239 || c == 8287 || c == 12288
 }
 
 // \N{NAME}: the code point of a Unicode character name, matched without regard

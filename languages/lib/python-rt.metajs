@@ -90,8 +90,11 @@
 import "./regex.js"
 // (?P...) translation and re.error's message, position and fields.
 import "./python-regex.js"
-// \w of a str pattern (the rxPyWordHit knob): "_" or str.isalnum(). Go: rxPyWord.
+// \w \d \s of a str pattern (the rxPy*Hit knobs): "_" or str.isalnum(),
+// str.isdecimal(), str.isspace(). Go: rxPyWord, pyCpDecimal, pysIsSpaceCode.
 rxPyWordHit = function (c) { return c == 95 || pyCpAlpha(c) || pyCpNumeric(c) }
+rxPyDigitHit = function (c) { return pyCpDecimal(c) }
+rxPySpaceHit = function (c) { return pyCpSpace(c) }
 
 // The shared layer-2 runtime: the externs every language implements identically,
 // parameterised by the rtk* hooks below.
@@ -5709,7 +5712,7 @@ function pyFloDecimal(t, i) {
 function pyIsDec(c) { return c >= "0" && c <= "9" }
 // The whitespace float() strips: str.isspace() less U+001C..U+001F, which
 // CPython tests with its ASCII-only Py_ISSPACE.
-function pyFloSpace(c) { return (c < 28 || c > 31) && pySIsSpaceCh(String.fromCharCode(c)) }
+function pyFloSpace(c) { return (c < 28 || c > 31) && pyCpSpace(c) }
 
 // Go: js_pyfloat. A STRING goes through pyStrToF, not toNumber.
 function js_pyfloat(v0) {
@@ -12052,7 +12055,7 @@ function pyERxMatchOf(v) { return rxMatchOf(v) }
 // test here and the failure text is the engine's own.
 function pyERxSearch(rv, s, from) {
     var re = pyERxReOf(rv)
-    var m = rxSearch(re, s, from)
+    var m = rxSearch(re, s, pyReUnitIdx(s, from))
     if (m === null) { return undefined }
     return pyERxMkMatch(rv, rv["__src"], re["flags"], s, m)
 }
@@ -12068,12 +12071,13 @@ function pyERxAnchored(rv, s, from, whole) {
     // keeps the TYPE CLASS it is first assigned, so `var m = null` followed by a
     // match object is the dialect's classic trap.
     var re = pyERxReOf(rv)
+    var at = pyReUnitIdx(s, from)
     if (whole) {
-        var mw = rxMatchWhole(re, s, from)
+        var mw = rxMatchWhole(re, s, at)
         if (mw === null) { return undefined }
         return pyERxMkMatch(rv, rv["__src"], re["flags"], s, mw)
     }
-    var ma = rxMatchAt(re, s, from)
+    var ma = rxMatchAt(re, s, at)
     if (ma === null) { return undefined }
     return pyERxMkMatch(rv, rv["__src"], re["flags"], s, ma)
 }
@@ -12109,7 +12113,8 @@ function pyERxSpan(md, key, which) {
     var slot = 2 * pyERxGroupIdx(md, key) + which
     var caps = mo["m"]["caps"]
     if (slot >= caps.length) { return -1 }
-    return caps[slot]
+    if (caps[slot] < 0) { return -1 }
+    return pyReCpIdx(mo["text"], caps[slot])
 }
 
 // pyERxAppendGroups is Go rxPyAppendGroups.
@@ -12225,9 +12230,9 @@ function pyERxSub(rv, repl, s, count) {
         at = m["end"]
         if (m["end"] == m["begin"]) {
             // An empty match must still make progress or this loop never ends.
-            if (m["end"] < s.length) { out = out + s.charAt(m["end"]) }
-            last = m["end"] + 1
-            at = m["end"] + 1
+            last = pyReNext(s, m["end"])
+            at = last
+            if (m["end"] < s.length) { out = out + s.substring(m["end"], last) }
         }
     }
     if (last <= s.length) { out = out + s.substring(last, s.length) }
@@ -12253,7 +12258,7 @@ function pyERxSplit(rv, s, maxsplit) {
             pyERxAppendGroups(parts, re, s, m)
             // Go leaves `last` at the match's own begin here, NOT begin+1.
             last = m["begin"]
-            at = m["begin"] + 1
+            at = pyReNext(s, m["begin"])
             n = n + 1
             continue
         }
@@ -12300,7 +12305,7 @@ function pyERxFindAll(rv, s, asMatch) {
             }
             out.push(t)
         }
-        if (m["end"] == m["begin"]) { at = m["end"] + 1 } else { at = m["end"] }
+        if (m["end"] == m["begin"]) { at = pyReNext(s, m["end"]) } else { at = m["end"] }
     }
     return out
 }
@@ -12473,8 +12478,9 @@ function pyERxRepr(v) {
         var w = rxGroup(mo["re"], mo["text"], mo["m"], 0)
         // Go's `g, _ := re.group(...)` leaves g as "" when the group did not
         // participate; regex.js answers null there.
-        return {ok: true, s: "<re.Match object; span=(" + pyStr(mo["m"]["begin"]) + ", " +
-                             pyStr(mo["m"]["end"]) + "), match='" + (w === null ? "" : w) + "'>"}
+        var mt = mo["text"]
+        return {ok: true, s: "<re.Match object; span=(" + pyStr(pyReCpIdx(mt, mo["m"]["begin"])) + ", " +
+                             pyStr(pyReCpIdx(mt, mo["m"]["end"])) + "), match='" + (w === null ? "" : w) + "'>"}
     }
     return {ok: false, s: ""}
 }
@@ -13543,16 +13549,6 @@ function pySIsLoCh(ch) {
 
 // Py_UNICODE_ISSPACE: the ASCII set, the C1 and separator code points, and the
 // three Unicode space blocks.
-function pySIsSpaceCh(ch) {
-    var c = ch.charCodeAt(0)
-    if (c == 32) { return true }
-    if (c >= 9 && c <= 13) { return true }
-    if (c >= 28 && c <= 31) { return true }
-    if (c == 133 || c == 160 || c == 5760) { return true }
-    if (c >= 8192 && c <= 8202) { return true }
-    if (c == 8232 || c == 8233 || c == 8239 || c == 8287 || c == 12288) { return true }
-    return false
-}
 
 // str.splitlines' universal newlines.
 function pySIsBreakCh(c) {
@@ -13644,7 +13640,7 @@ function pySEnds(s, suf, start, end) {
 //
 // `chars` is a SET of characters, not a prefix; `useWS` is the no-argument form.
 function pySStripHit(ch, chars, useWS) {
-    if (useWS) { return pySIsSpaceCh(ch) }
+    if (useWS) { return pyCpSpace(ch.charCodeAt(0)) }
     return chars.indexOf(ch) >= 0
 }
 
@@ -13677,14 +13673,14 @@ function pySSplitWS(s, maxsplit) {
     var i = 0
     var n = 0
     while (i < s.length) {
-        while (i < s.length && pySIsSpaceCh(s.charAt(i))) { i = i + 1 }
+        while (i < s.length && pyCpSpace(s.charCodeAt(i))) { i = i + 1 }
         if (i >= s.length) { return out }
         if (maxsplit >= 0 && n >= maxsplit) {
             out.push(s.substring(i, s.length))
             return out
         }
         var j = i
-        while (j < s.length && !pySIsSpaceCh(s.charAt(j))) { j = j + 1 }
+        while (j < s.length && !pyCpSpace(s.charCodeAt(j))) { j = j + 1 }
         out.push(s.substring(i, j))
         n = n + 1
         i = j
@@ -13722,14 +13718,14 @@ function pySRSplitWS(s, maxsplit) {
     var e = s.length
     var n = 0
     while (e > 0) {
-        while (e > 0 && pySIsSpaceCh(s.charAt(e - 1))) { e = e - 1 }
+        while (e > 0 && pyCpSpace(s.charCodeAt(e - 1))) { e = e - 1 }
         if (e <= 0) { return pySReverse(out) }
         if (maxsplit >= 0 && n >= maxsplit) {
             out.push(s.substring(0, e))
             return pySReverse(out)
         }
         var j = e
-        while (j > 0 && !pySIsSpaceCh(s.charAt(j - 1))) { j = j - 1 }
+        while (j > 0 && !pyCpSpace(s.charCodeAt(j - 1))) { j = j - 1 }
         out.push(s.substring(j, e))
         n = n + 1
         e = j
@@ -14213,7 +14209,7 @@ function pySAllCh(s, kind) {
         else if (kind == 3) { ok = pyCpAlpha(cp) || pyCpNumeric(cp) }
         else if (kind == 5) { ok = pyCpDigit(cp) }
         else if (kind == 6) { ok = pyCpNumeric(cp) }
-        else { ok = pySIsSpaceCh(ch) }
+        else { ok = pyCpSpace(cp) }
         if (!ok) { return false }
         i = i + 1
     }

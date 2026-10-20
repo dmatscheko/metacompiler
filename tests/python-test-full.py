@@ -7443,6 +7443,87 @@ def s155():
           == [[1, 1], [1, 2], {0: 1}, [1, 1], [5], [[1, 2], [1, 2]], {10: 10, 20: 20}, [["outer"], ["outer"]],
               False, False])
 
+# ===== SECTION 156: Unicode \d \s; astral characters in re; __class__ in a class nested in a method =====
+# For a str pattern \d is any Unicode decimal digit (str.isdecimal) and \s any
+# str.isspace() character, unless re.ASCII or (?a). A pattern and its text are
+# read by code point, so an astral character is one character and every
+# position is a code-point index. A class body reads __class__ from its own
+# namespace and then from the block around it: in a method, the method's class;
+# right inside another class body, that class's still-empty cell. Values are
+# CPython 3.14's.
+import re as S156re
+
+class S156F:
+    def m(self):
+        class G:
+            z = __class__
+        return G.z
+    def own(self):
+        class G:
+            __class__ = 5
+            z = __class__
+        return G.z
+    def deep(self):
+        def inner():
+            class G:
+                z = __class__
+            return G.z
+        return inner()
+    def meth(self):
+        class G:
+            def k(self):
+                class H:
+                    z = __class__
+                return H.z
+        return G().k().__name__
+    def incls(self):
+        class G:
+            class H:
+                z = __class__
+        return G.H.z
+    def comp(self):
+        class G:
+            w = [__class__ for _ in range(1)]
+        return G.w
+
+def s156err(f):
+    try:
+        return f()
+    except NameError as e:
+        return str(e)
+
+def s156():
+    check("reunids", [S156re.findall(r"[\W\d]+", "\u06634"), S156re.findall(r"\d+", "a\u0663\u0664b\u00b2c\uff11"),
+                      S156re.findall(r"\D+", "a\u0663\u0664b"), S156re.findall(r"\s+", "a\u00a0b\u2003c\x1cd\x85e\u3000f"),
+                      S156re.findall(r"\S+", "a\u00a0b\u2003c\x1cd"), S156re.findall(r"[^\s\d]+", "a\u00a0\u2028b\u0663c"),
+                      S156re.findall(r"(?a)\d+", "1\u06632"), S156re.findall(r"(?a)\s+", "a\u00a0 b"),
+                      S156re.findall(r"\d", "1\u0663", S156re.ASCII), S156re.sub(r"\s", "_", "a\u2029b\u180ec"),
+                      S156re.findall(r"(?a:\d)\d", "1\u0663"), S156re.findall(r"[\s\d]", "\U0001D7CE\u2028")]
+          == [["\u06634"], ["\u0663\u0664", "\uff11"], ["a", "b"], ["\xa0", "\u2003", "\x1c", "\x85", "\u3000"],
+              ["a", "b", "c", "d"], ["a", "b", "c"], ["1", "2"], [" "], ["1"], "a_b\u180ec", ["1\u0663"],
+              ["\U0001d7ce", "\u2028"]])
+    t = "a\U0001F600xb\U0001D400\U0001D401 \U00010400z"
+    m = S156re.search(r"\U0001F600(x)", t)
+    check("reastral", [m.span(), m.span(1), m.start(1), m.end(), m.group(0), str(m)[:34],
+                       S156re.findall(r".", "\U0001F600a"), S156re.findall(r"\w+", t), S156re.findall(r"\W+", t),
+                       S156re.findall(r"\b\w", t), S156re.findall(r"[\U0001F600-\U0001F64F]+", "a\U0001F601\U0001F602b"),
+                       S156re.split(r"x", t), S156re.sub(r"", "-", "a\U0001F600b"), S156re.sub(r"[^a]", "-", "\U0001F600a"),
+                       [mm.span() for mm in S156re.finditer(r"", "\U0001F600\U0001F600")],
+                       S156re.findall(r"(.)\1", "\U0001F600\U0001F600\U0001F600"),
+                       S156re.findall(r"..", "\U0001F600\U0001F600x"),
+                       S156re.compile(r"z").search(t, 5).span(), S156re.compile(r"\U0001D401").match(t, 5).span(),
+                       S156re.findall(r"(?<=\U0001F600)x", t), S156re.findall(r"(?<!\U0001D400)\w", t),
+                       S156re.findall(r"(?<=..)z", t), S156re.fullmatch(r"\W\w*", "\U0001F600\U0001D400").span()]
+          == [(1, 3), (2, 3), 2, 3, "\U0001f600x", "<re.Match object; span=(1, 3), mat", ["\U0001f600", "a"],
+              ["a", "xb\U0001d400\U0001d401", "\U00010400z"], ["\U0001f600", " "], ["a", "x", "\U00010400"],
+              ["\U0001f601\U0001f602"], ["a\U0001f600", "b\U0001d400\U0001d401 \U00010400z"], "-a-\U0001f600-b-", "-a",
+              [(0, 0), (1, 1), (2, 2)], ["\U0001f600"], ["\U0001f600\U0001f600"], (8, 9), (5, 6), ["x"],
+              ["a", "x", "b", "\U0001d400", "\U00010400", "z"], ["z"], (0, 2)])
+    f = S156F()
+    free = "cannot access free variable '__class__' where it is not associated with a value in enclosing scope"
+    check("clscell3", [f.m() is S156F, f.own(), f.deep() is S156F, f.meth(), s156err(f.incls), s156err(f.comp)]
+          == [True, 5, True, "G", free, "name '__class__' is not defined"])
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -7584,5 +7665,6 @@ def main():
     s153() # SECTION-CALL 153
     s154() # SECTION-CALL 154
     s155() # SECTION-CALL 155
+    s156() # SECTION-CALL 156
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]
