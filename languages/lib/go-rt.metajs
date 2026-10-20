@@ -2485,14 +2485,16 @@ function js_gorepanic() {
 
 // A method of v's own descriptor, or one PROMOTED from an embedded struct.
 // Is field i of descriptor cls embedded, so that its methods are the struct's?
-// Its declared type is "" (an embedded struct) or its own name (an embedded
-// interface); a descriptor that records no types counts every field. Twins:
-// goFieldEmbedded in abnf/jsrt.go and go-interpreter.abnf.
+// Its declared type is "" (an embedded pointer), its own name, or a package's
+// type of that name. Twins: goFieldEmbedded in abnf/jsrt.go and
+// go-interpreter.abnf.
 function goFieldEmbedded(cls, i) {
     if (!goHas(cls, "__ftypes") || !Array.isArray(cls.__ftypes) || i >= cls.__ftypes.length) { return true }
     var t = goStrOf(cls.__ftypes[i])
     var n = goStrOf(cls.__fields[i])
-    return t == "" || t == n || t == "*" + n
+    if (t == "" || t == n || t == "*" + n) { return true }
+    var d = t.length - n.length - 1
+    return d > 0 && t.charAt(d) == "." && t.substring(d + 1) == n
 }
 function goHasMethod(v, name) {
     var cls = goClassOf(v)
@@ -3289,6 +3291,15 @@ function js_gostdin(roomV, eof) {
     var chunk = byteSub(goStdinRest, 0, cut)
     goStdinRest = byteSub(goStdinRest, cut, n)
     return [chunk, null]
+}
+
+// js_gogetenv(name, lookup): os.Getenv's answer ("" when unset), or with lookup
+// os.LookupEnv's [value, ok]. Twin of js_gogetenv in abnf/jsrtgolang.go,
+// hostGlobals["os"] in go-interpreter.abnf.
+function js_gogetenv(name, lookup) {
+    var v = osQuery(5, name)
+    if (lookup === true) { return v === undefined ? ["", false] : [v, true] }
+    return v === undefined ? "" : v
 }
 
 // goMathSqrt(x): the correctly rounded square root lib/go-math.go's Sqrt is, a

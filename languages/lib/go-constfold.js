@@ -2473,6 +2473,44 @@ function cIsLocal(name) {
 // walk captures.
 var goPreFld = {}     // "$S.f" -> the type of field f of struct S
 var goPreFldOrd = {}  // "$S" -> S's field names in declaration order
+// An INLINE struct type (`var r struct{ a int }`, a field `In struct{ V int }`)
+// reaches the rest of the front end as its text with the whitespace taken out
+// ("struct{aint}"), and its field list cannot be read back out of that. The
+// grammars parse the list where the type is written and note it under the text
+// (goAnonStReg): items are the field names, each group followed by its {fty}.
+// A zero value, a copy and a field's static type look it up (goAnonSt); its
+// fields also go into goPreFld, so `r.a` is typed.
+var goAnonSts = {}    // "$struct{...}" -> {f: field names, t: their types, cls}
+function goAnonStReg(text, items) {
+    var fs = []
+    var ft = []
+    var pend = 0
+    var i = 0
+    while (i < items.length) {
+        var it = items[i]
+        if (typeof it == "string") { fs.push(it); pend = pend + 1 }
+        else {
+            while (pend > 0) { ft.push(it.fty); pend = pend - 1 }
+        }
+        i = i + 1
+    }
+    var rec = {f: fs, t: ft, cls: null}
+    goAnonNote(text, rec)
+    var q = goWalkQual(text)
+    if (q != text) { goAnonNote(q, rec) }
+    return rec
+}
+function goAnonNote(text, rec) {
+    if (goAnonSts["$" + text] !== undefined) { return }
+    goAnonSts["$" + text] = rec
+    var k = 0
+    while (k < rec.f.length) { goPreFld["$" + text + "." + rec.f[k]] = rec.t[k]; k = k + 1 }
+    goPreFldOrd["$" + text] = rec.f
+}
+function goAnonSt(t) {
+    var r = goAnonSts["$" + t]
+    return r === undefined ? null : r
+}
 // An imported file's declarations. Inside the package they keep their own names,
 // and its defined types are not boxed there (goDtBoxTy), since their methods live
 // in the package's own scope. Seen from outside they are QUALIFIED, as the source

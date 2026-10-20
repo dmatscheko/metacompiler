@@ -358,10 +358,14 @@ TopVarSpec  <~~ push(goTopVarC(pop(), "var " + c.srcSlice(up.start, up.pos))) ~~
 
 Type        = "*" Type | "[" "]" Type | ArrayTypeT | MapTypeT | FuncTypeT | ChanTypeT | IfaceTypeT
             | StructTypeT | ( "int" KwEnd | "string" KwEnd | "bool" KwEnd | Id ) [ "." Id ] [ TypeArgs ] ;
-// An anonymous struct type in a TYPE position (var x struct{ a int }): parsed, its
-// body balanced-skipped. Tried before the bare-name form, which would otherwise read
-// 'struct' as an identifier and stop there.
-StructTypeT = "struct" KwEnd SkipBlock ;
+// An anonymous struct type in a TYPE position (var x struct{ a int }) notes its field
+// list under its text (goAnonStReg), which is how it gets a zero instance; the tag
+// consumes what the fields push, so the rule stays item-neutral. A body the field
+// rules do not read is balanced-skipped. Tried before the bare-name form, which would
+// otherwise read 'struct' as an identifier and stop there.
+StructTypeT = StructTypeF | "struct" KwEnd SkipBlock ;
+StructTypeF <~~ goAnonStReg(up.in, takeAll()) ~~>
+            = "struct" KwEnd "{" { AnonField } "}" ;
 TypeArgs    = "[" Type { "," Type } "]" ;
 // A pointer type (*T) and a fixed size array ([N]T / [...]T) are parsed in every type
 // position; the pointer is transparent (structs already behave like references) and an
@@ -1219,9 +1223,10 @@ QualStructLit <~~ var qi = takeAll(); goLitClaim(qi[0] + "." + qi[1], up.start, 
 // struct{ a, b int }{10, 20}: an anonymous struct type carries its own field list, so
 // the descriptor is built at the literal site instead of being looked up by name. No
 // StructGate: 'struct' can never open an if/for body.
-AnonStructLit <~~ goLitClaim("", up.start, up.pos); push(makeAnonStructLit(takeAll())) ~~>
-            = "struct" KwEnd "{" { AnonField } "}"
-              "{" [ LitElem { "," LitElem } [ "," ] ] "}" ;
+AnonStructLit <~~ goLitClaim("", up.start, up.pos); var ai = takeAll(); push(goLitC(makeAnonStructLit(ai), ai[0].anty, up.pos)) ~~>
+            = AnonLitTy "{" [ LitElem { "," LitElem } [ "," ] ] "}" ;
+AnonLitTy   <~~ push({anty: up.in, an: goAnonStReg(up.in, takeAll())}) ~~>
+            = "struct" KwEnd "{" { AnonField } "}" ;
 // A field of an anonymous struct: named, as in a declared struct, or embedded
 // (`struct{ *strings.Reader }`), whose name is its type's.
 AnonField   = AnonNamed | AnonEmbed ;
@@ -2667,6 +2672,17 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (kind == "slice") { return {b: b, v: emitSlT(b, emitSlOf(b, arr), cet)} }
         return {b: b, v: arr}
     }
+    // The body of $smake / $smakec (declSlices).
+    function emitSmake(fb, a) {
+        var arr = callExt(fb, "js_arr_new", [])
+        var eb = emitCountLoop(fb, a[1], function(lb, iV) {
+            callExt(lb, "js_arr_push", [arr, a.length > 4 ? callExt(lb, "js_gocopy", [a[2], a[4]]) : a[2]])
+            return lb
+        })
+        var outH = emitSlHdr(eb, arr, emitNum(eb, 0), a[0], a[1])
+        callExt(eb, "js_set", [outH, emitStr(eb, "et"), a[3]])
+        return {b: eb, v: outH}
+    }
     // items = [{cet}, lenThunk, capThunk?]
     function makeMakeSlice(items) {
         var cet = items[0].cet
@@ -2684,6 +2700,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             // js_gomakesl panics on a negative length or a capacity below it.
             callExt(b, "js_gomakesl", [rl.v, cp])
             goEtNote(cet)
+            var code = goCopyCodeC(cet)
+            if (code != "") {
+                return {b: b, v: emitHelper(b, "$smakec", [rl.v, cp, emitZeroDecl(b, cet), emitTpResOr(b, cet), emitStr(b, code)])}
+            }
             return {b: b, v: emitHelper(b, "$smake", [rl.v, cp, emitZeroDecl(b, cet), emitTpResOr(b, cet)])}
         }
     }
@@ -2986,36 +3006,26 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return makeConstLenThunk(n)
     }
     function makeConstLenThunk(n) { return function(b) { return {b: b, v: emitNum(b, n)} } }
-    // struct{ a, b int }{10, 20}: items = [fieldName..., {fty}, ..., body elements].
-    // The descriptor is built fresh at the literal site (there is no name to look up);
-    // js_goeq compares two anonymous structs by name and field list, not by identity.
+    // struct{ a, b int }{10, 20}: items = [{anty, an}, body elements...], an the
+    // field list goAnonStReg noted. The descriptor is built fresh at the literal site
+    // (there is no name to look up); js_goeq compares two anonymous structs by name
+    // and field list, not by identity.
     function makeAnonStructLit(items) {
-        var fields = []
-        var ftypes = []
-        var pending = []
+        var an = items[0].an
         var args = []
-        var inBody = false
-        for (var i = 0; i < items.length; i++) {
-            var it = items[i]
-            if (!inBody && typeof it == "string") { pending.push(it); continue }
-            if (!inBody && typeof it == "object" && it != null && it.fty != undefined) {
-                for (var k = 0; k < pending.length; k++) { fields.push(pending[k]); ftypes.push(it.fty) }
-                pending = []
-                continue
-            }
-            inBody = true
-            args.push(it)
-        }
+        for (var i = 1; i < items.length; i++) { args.push(items[i]) }
         var als = litSplit(args)
-        return function(b) {
-            var clsV = callExt(b, "js_obj_new", [])
-            callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
-            callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, "struct")])
-            emitNameList(b, clsV, "__fields", fields)
-            emitNameList(b, clsV, "__ftypes", ftypes)
-            emitFCopy(b, clsV, ftypes)
-            return emitStructVal(b, clsV, fields, ftypes, als.args, als.estys)
-        }
+        return function(b) { return emitStructVal(b, emitAnonCls(b, an), an.f, an.t, als.args, als.estys) }
+    }
+    // The descriptor of an anonymous struct type, from its goAnonStReg record.
+    function emitAnonCls(b, an) {
+        var clsV = callExt(b, "js_obj_new", [])
+        callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
+        callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, "struct")])
+        emitNameList(b, clsV, "__fields", an.f)
+        emitNameList(b, clsV, "__ftypes", an.t)
+        emitFCopy(b, clsV, an.t)
+        return clsV
     }
     // The shared body of both literal forms: zero-fill, then apply the elements in
     // order (a keyed one names its field, a positional one takes the next field).
@@ -3107,6 +3117,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             if (cl <= 1) { return "" }
             return "A" + goCopyCodeC(ty.substring(cl + 1))
         }
+        if (goAnonSt(ty) != null) { return "S" }
         if (structFields[ty] != undefined || (curEmitPkg != null && structFields[sKey(curEmitPkg, ty)] != undefined)) { return "S" }
         var rn = resolveDefined(ty)
         if (rn != ty) { return goCopyCodeC(rn) }
@@ -3748,20 +3759,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 })
         })
         // make([]T, n, cap): cap zero values of the element type, length n over them.
-        b = declFn(b, "$smake", 4, function(fb, a) {
-            var n = a[0]
-            var cp = a[1]
-            var zero = a[2]
-            var et = a[3]
-            var arr = callExt(fb, "js_arr_new", [])
-            var eb = emitCountLoop(fb, cp, function(lb, iV) {
-                callExt(lb, "js_arr_push", [arr, zero])
-                return lb
-            })
-            var outH = emitSlHdr(eb, arr, emitNum(eb, 0), n, cp)
-            callExt(eb, "js_set", [outH, emitStr(eb, "et"), et])
-            return {b: eb, v: outH}
-        })
+        // $smakec is the form for an element type that copies (a struct, an array of
+        // them): each slot holds its own copy of the zero, by the copy code a[4].
+        b = declFn(b, "$smake", 4, emitSmake)
+        b = declFn(b, "$smakec", 5, emitSmake)
         // append(s, v...): writes into the backing array when the capacity allows (so
         // another slice over it sees the new element, like Go) and reallocates when not.
         b = declGrowCap(b)
@@ -3970,6 +3971,40 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         callExt(fb, "js_arr_push", [wa, bs])
         fb.NewRet(callExt(fb, "js_gomcall", [callExt(fb, "js_arg", [argsV, handle(0)]), emitStr(fb, "Write"), wa]))
         callExt(b, "js_set", [target, emitStr(b, name), callExt(b, "js_closure", [handle(idx), curScopeV])])
+        return b
+    }
+    // fmt.Append / Appendln / Appendf(b, ...): append(b, s...) for the text s that
+    // Sprint / Sprintln / Sprintf (js_gostr mode) make of the rest, so b grows by
+    // append's rule; a nil b is a nil []byte. Twin of goFAppend in
+    // go-interpreter.abnf.
+    function declFappend(b, fmtV, name, mode) {
+        b = declFn(b, "$fmt." + name, 0, function(fb, a, f) {
+            var argsV = f.Params[1]
+            var s = callExt(fb, "js_gostr", [callExt(fb, "js_goslice", [argsV, emitNum(fb, 1), hUndef]), emitNum(fb, mode)])
+            var b0 = callExt(fb, "js_arg", [argsV, handle(0)])
+            var base = emitSelect(fb, callExt(fb, "js_not", [b0]),
+                                  function(tb) { return {b: tb, v: emitZeroTy(tb, "[]byte")} },
+                                  function(eb) { return {b: eb, v: b0} })
+            var eb = base.b
+            var av = callExt(eb, "js_arr_new", [])
+            callExt(eb, "js_arr_push", [av, base.v])
+            callExt(eb, "js_arr_push", [av, emitHelper(eb, "$spread", [s])])
+            callExt(eb, "js_gospread", [av])
+            return {b: eb, v: callExt(eb, "js_call", [callExt(eb, "js_scope_get", [curScopeV, emitStr(eb, "append")]), hUndef, av])}
+        })
+        callExt(b, "js_set", [fmtV, emitStr(b, name), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$fmt." + name)])])
+        return b
+    }
+    // os.Getenv / os.LookupEnv over js_gogetenv. Twin of hostGlobals["os"] in
+    // go-interpreter.abnf.
+    function declGetenv(b, osV) {
+        b = declFn(b, "$os.Getenv", 1, function(fb, a) { return {b: fb, v: callExt(fb, "js_gogetenv", [a[0], hFalse])} })
+        b = declFn(b, "$os.LookupEnv", 1, function(fb, a) {
+            var r = callExt(fb, "js_gogetenv", [a[0], hTrue])
+            return {b: fb, v: usesMultiRet ? emitMvWrap(fb, r) : r}
+        })
+        callExt(b, "js_set", [osV, emitStr(b, "Getenv"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$os.Getenv")])])
+        callExt(b, "js_set", [osV, emitStr(b, "LookupEnv"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$os.LookupEnv")])])
         return b
     }
     // os.Stdin, os.Stdout and os.Stderr: *os.File values (fd 0, 1, 2), each with
@@ -4740,7 +4775,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             callExt(b, "js_set", [mV, emitStr(b, "__nil"), hTrue])
             return mV
         }
-        if (wd == "chan" || wd == "func" || wd == "interface" || wd == "struct") { return hNull }
+        // An inline struct type, by the field list its text was noted with.
+        if (wd == "struct") {
+            var an = goAnonSt(t)
+            return an == null ? hNull : emitStructZero(b, emitAnonCls(b, an), an.f, an.t)
+        }
+        if (wd == "chan" || wd == "func" || wd == "interface") { return hNull }
         var flds = sFields(wd)
         if (flds != undefined && flds != null) {
             var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, wd)])
@@ -6706,6 +6746,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         b = declFprint(b, fmtV, "Fprint", 1)
         b = declFprint(b, fmtV, "Fprintln", 0)
         b = declFprint(b, fmtV, "Fprintf", 4)
+        b = declFappend(b, fmtV, "Append", 1)
+        b = declFappend(b, fmtV, "Appendln", 0)
+        b = declFappend(b, fmtV, "Appendf", 4)
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "fmt"), fmtV])
         var errV = callExt(b, "js_obj_new", [])
         b = declPrint(b, errV, "New", "js_goerrors", 0)
@@ -6725,6 +6768,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         b = declOsFile(b, osV, "Stdin", 0)
         b = declOsFile(b, osV, "Stdout", 1)
         b = declOsFile(b, osV, "Stderr", 2)
+        b = declGetenv(b, osV)
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "os"), osV])
         // The correctly rounded square root lib/go-math.go's Sqrt is, declared when
         // the program imports math. Twin of goMathSqrt in go-interpreter.abnf.

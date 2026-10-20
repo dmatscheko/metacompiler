@@ -2359,16 +2359,16 @@ func (rt *jsrt) goMethod(v interface{}, name string) (interface{}, interface{}, 
 
 // goFieldEmbedded: is field i (named name) of struct descriptor cls an embedded
 // one, whose methods the struct has too? Its declared type is "" (an embedded
-// struct) or its own name (an embedded interface); a descriptor that records no
-// types counts every field. Twins: goFieldEmbedded in go-interpreter.abnf and
-// lib/go-rt.metajs.
+// pointer), its own name, or a package's type of that name (`strings.Builder`
+// embeds as field Builder); a descriptor that records no types counts every
+// field. Twins: goFieldEmbedded in go-interpreter.abnf and lib/go-rt.metajs.
 func goFieldEmbedded(cls *jsObject, i int, name string) bool {
 	ft, ok := cls.props["__ftypes"].(*jsArray)
 	if !ok || i >= len(ft.elems) {
 		return true
 	}
 	t, _ := ft.elems[i].(string)
-	return t == "" || t == name || t == "*"+name
+	return t == "" || t == name || t == "*"+name || strings.HasSuffix(t, "."+name)
 }
 
 // identityEq compares two reference values without panicking on uncomparable types.

@@ -680,6 +680,96 @@ func s116() {
 	check("derefcall116", o.x == 22 && n == 5)
 }
 
+// ===== SECTION 117: an anonymous struct type as a declared type =====
+// A variable, a field, a slice element and a parameter of an inline struct type
+// get a zero instance with every field at its own type's zero, and a value of one
+// copies on assignment like any struct. The expected values are go run's.
+type o117 struct {
+	Name string
+	In   struct {
+		V    int
+		X, Y int8
+	}
+}
+
+var cfg117 struct {
+	Port int
+	Tags []string
+}
+
+func bump117(p struct{ n int }) int {
+	p.n++
+	return p.n
+}
+
+func s117() {
+	var r struct {
+		a int
+		s string
+		b uint8
+		w struct{ z int }
+	}
+	r.a = 5
+	r.b = 255
+	r.b++
+	out := fmt.Sprintf("%v %+v", r, r)
+	var o o117
+	o.In.V = 3
+	o.In.X = 127
+	o.In.X++
+	o2 := o
+	o2.In.V = 4
+	out += fmt.Sprint(" ", o, o2.In.V)
+	a := struct{ x int }{1}
+	b := a
+	b.x = 2
+	out += fmt.Sprint(" ", a.x, b.x, bump117(struct{ n int }{6}))
+	cfg117.Port = 80
+	cfg117.Tags = append(cfg117.Tags, "t")
+	out += fmt.Sprintf(" %+v", cfg117)
+	ps := make([]struct{ a, b int }, 2)
+	ps[1].b = 9
+	var e1, e2 struct{ v int }
+	out += fmt.Sprint(" ", ps, e1 == e2)
+	check("anonty117", out == "{5  0 {0}} {a:5 s: b:0 w:{z:0}} { {3 -128 0}} 4 1 2 7 {Port:80 Tags:[t]} [{0 0} {0 9}] true")
+}
+
+// ===== SECTION 118: an embedded type of another package =====
+// `strings.Builder` embedded in a struct is the field Builder, and its methods are
+// the struct's, through a pointer too. The expected values are go run's.
+type s118 struct {
+	strings.Builder
+	n int
+}
+
+type p118 struct{ *strings.Builder }
+
+func s118f() {
+	var s s118
+	s.WriteString("hi")
+	s.WriteByte('!')
+	p := p118{&strings.Builder{}}
+	p.WriteString("ab")
+	check("pkgembed118", s.String() == "hi!" && s.Len() == 3 && s.Builder.Len() == 3 && s.n == 0 && p.String() == "ab")
+}
+
+// ===== SECTION 119: fmt.Append, Appendf and Appendln; os.Getenv and os.LookupEnv =====
+// fmt.Append* append what Sprint* make of their operands to a []byte, which grows
+// by append's rule. The expected values are go run's.
+func s119() {
+	buf := fmt.Append(nil, "x", 1, 2)
+	out := fmt.Sprint(len(buf), cap(buf), string(buf))
+	buf = fmt.Appendf(buf, "-%d-%s", 7, "q")
+	buf = fmt.Appendln(buf, "end", 3)
+	out += fmt.Sprintf(" %q %d %d", string(buf), len(buf), cap(buf))
+	small := make([]byte, 0, 2)
+	grown := fmt.Append(small, "héllo")
+	out += fmt.Sprint(" ", len(grown), len(small), fmt.Append(nil) == nil)
+	v, ok := os.LookupEnv("MEC_UNSET_VARIABLE_119")
+	check("fmtappend119", out == `4 8x1 2 "x1 2-7-qend 3\n" 14 16 6 0 true`)
+	check("getenv119", os.Getenv("MEC_UNSET_VARIABLE_119") == "" && v == "" && !ok && os.Getenv("PATH") != "")
+}
+
 func main() {
 	s94()   // SECTION-CALL 94
 	s95()   // SECTION-CALL 95
@@ -702,6 +792,9 @@ func main() {
 	s114()  // SECTION-CALL 114
 	s115()  // SECTION-CALL 115
 	s116()  // SECTION-CALL 116
+	s117()  // SECTION-CALL 117
+	s118f() // SECTION-CALL 118
+	s119()  // SECTION-CALL 119
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

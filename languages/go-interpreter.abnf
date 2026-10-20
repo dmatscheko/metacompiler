@@ -340,7 +340,12 @@ Type        = "*" Type | "[" "]" Type | ArrayTypeT | MapTypeT | FuncTypeT | Chan
 // instantiation (Stack[int]).
 NamedType   = ( "int" KwEnd | "string" KwEnd | "bool" KwEnd | Id ) [ "." Id ] [ TypeArgs ] ;
 TypeArgs    = "[" Type { "," Type } "]" ;
-StructTypeT = "struct" KwEnd SkipBlock ;
+// An inline struct type notes its field list under its text (goAnonStReg), which is
+// how `var r struct{ a int }` gets a zero instance; the tag consumes what the fields
+// push, so the rule stays item-neutral.
+StructTypeT = StructTypeF | "struct" KwEnd SkipBlock ;
+StructTypeF <~~ goAnonStReg(up.in, takeAll()) ~~>
+            = "struct" KwEnd "{" { AnonField } "}" ;
 // A pointer type (*T) is transparent (structs already behave like references) and a
 // fixed size array ([N]T / [...]T) declares like a slice; the size is parsed, ignored.
 ArrayTypeT  = "[" ( "..." | Expression <~~ pop() ~~> ) "]" Type ;
@@ -944,7 +949,7 @@ CompNamed   <~~ push({ckind: "struct", cname: compTypeName(up.in), ctargs: goTpA
 CompElemT   <~~ push({cet: goWalkQual(firstType(up.in))}) ~~>
             = Type ;
 // An anonymous struct type carries its own field list.
-CompStructT <~~ push({ckind: "anon", cfields: takeAll()}) ~~>
+CompStructT <~~ push({ckind: "anon", an: goAnonStReg(up.in, takeAll()), ctext: up.in}) ~~>
             = "struct" KwEnd "{" { AnonField } "}" ;
 // A field of an anonymous struct: named, as in a declared struct, or embedded
 // (`struct{ *strings.Reader }`), whose name is its type's.
@@ -1543,6 +1548,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return out
     }
     function goFprint(w, s) { return mcall(w, "Write", [goConvert("[]byte", s)]) }
+    // fmt.Append / Appendln / Appendf(b, ...): append(b, s...) for the text s that
+    // Sprint / Sprintln / Sprintf make of the rest, so b grows by append's rule. A nil
+    // b is a nil []byte. Twin of declFappend in go-to-llvm-ir.abnf.
+    function goFAppend(b, s) {
+        var bs = goConvert("[]byte", s)
+        var args = [(b === undefined || b === null) ? goZeroTy("[]byte") : b]
+        for (var i = 0; i < bs.n; i++) { args.push(bs.a[bs.o + i]) }
+        return hostGlobals["append"].apply(undefined, args)
+    }
     // os.Stdin, os.Stdout and os.Stderr are *os.File values, each with Read, Write and
     // WriteString; reading an output or writing standard input answers the error go
     // gets on a pipe. A write prints; standard error is reached through eprintln,
@@ -1612,6 +1626,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var a4 = gArgsFrom(arguments, 2)
             return goFprint(arguments[0], gfFormat(gstr(arguments[1]), a4, GF_NOWRAP))
         },
+        Append: function() { return goFAppend(arguments[0], gPrText(gArgsFrom(arguments, 1))) },
+        Appendln: function() { return goFAppend(arguments[0], gLnText(gArgsFrom(arguments, 1)) + "\n") },
+        Appendf: function() { return goFAppend(arguments[0], gfFormat(gstr(arguments[1]), gArgsFrom(arguments, 2), GF_NOWRAP)) },
         Errorf: function() {
             var a3 = []
             for (var j3 = 1; j3 < arguments.length; j3++) { a3.push(arguments[j3]) }
@@ -1658,7 +1675,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // in go-to-llvm-ir.abnf.
     var goProgName = c.file
     hostGlobals["os"] = { Exit: function(code) { exit(code | 0) }, Stdout: goOsFile(1), Stderr: goOsFile(2),
-                          Stdin: goOsFile(0) }
+                          Stdin: goOsFile(0),
+                          // os.Getenv / os.LookupEnv over the host's environment
+                          // (osQuery 5 answers undefined for an unset name). Twin of
+                          // js_gogetenv in abnf/jsrtgolang.go and lib/go-rt.metajs.
+                          Getenv: function(k) { var v = osQuery(5, k); return v === undefined ? "" : v },
+                          LookupEnv: function(k) { var v = osQuery(5, k); return goMv(v === undefined ? ["", false] : [v, true]) } }
     // os.Stdin's Read: standard input (readIn), taken a line at a time, so what the
     // program printed before the read shows first; p gets as much of the line as it
     // holds, and the rest waits for the next Read. At the end of the input it
@@ -3041,15 +3063,18 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
 
     // Is field i of descriptor cls embedded, so that its methods are the struct's?
-    // Its declared type is "" (an embedded struct) or its own name (an embedded
-    // interface); a descriptor that records no types counts every field. Twins:
-    // goFieldEmbedded in abnf/jsrt.go and lib/go-rt.metajs.
+    // Its declared type is "" (an embedded pointer), its own name, or a package's
+    // type of that name (`strings.Builder` embeds as field Builder); a descriptor
+    // that records no types counts every field. Twins: goFieldEmbedded in
+    // abnf/jsrt.go and lib/go-rt.metajs.
     function goFieldEmbedded(cls, i) {
         var fts = cls.__ftypes
         if (!Array.isArray(fts) || i >= fts.length) { return true }
         var t = fts[i]
         var n = cls.__fields[i]
-        return t == "" || t == n || t == "*" + n
+        if (t == "" || t == n || t == "*" + n) { return true }
+        var d = t.length - n.length - 1
+        return d > 0 && t.charAt(d) == "." && t.substring(d + 1) == n
     }
     // The method `name` promoted from an embedded struct field of v, with its
     // receiver, or null. The twin is goMethod in languages/lib/go-rt.metajs.
@@ -4280,14 +4305,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (isFloatTy(w)) { return w == "float32" ? gFlo32(0) : gFlo(0) }
         if (w == "string") { return "" }
         if (w == "bool") { return false }
-        // A bare `struct` is an INLINE struct type, and its zero value is not
-        // reachable from here: VType captures the type text with the whitespace
-        // already stripped ("struct{aint32buint8}"), so the field list cannot be
-        // read back out of it. Supporting `var w struct{ a int32 }` needs the
-        // grammar to parse that field list the way StructBody does for a named
-        // type - a text parse here is unrecoverable, not merely awkward.
         if (w == "map") { return newNilMap(goZeroTy(mapValText(t)), t) }
-        if (w == "chan" || w == "func" || w == "interface" || w == "struct") { return null }
+        // An inline struct type, by the field list its text was noted with.
+        if (w == "struct") {
+            var an = goAnonSt(t)
+            return an == null ? null : goZeroStruct(anonClass(an))
+        }
+        if (w == "chan" || w == "func" || w == "interface") { return null }
         // `var x pkga.Item`: goTyWord stops at the '.', so the qualified spelling is
         // resolved here rather than read as the type `pkga`.
         var qz = goQualTy(t)
@@ -4384,7 +4408,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
         // A struct: a named one (its descriptor is a global) or an anonymous one.
         var cls = anytype
-        if (desc.ckind == "anon") { cls = anonClass(desc) }
+        if (desc.ckind == "anon") { cls = anonClass(desc.an) }
         else {
             // A DEFINED type: `type L []int; L{1, 2, 3}` is the []int literal, and
             // `type Q Point; Q{1, 2}` is the Point literal. resolveDefined lands on a
@@ -4510,28 +4534,18 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (t.indexOf("map[") == 0) { return {ckind: "map", czero: mapValText(t), ckeyt: mapKeyText(t)} }
         return {ckind: "struct", cname: t}
     }
-    // Anonymous struct types get one descriptor per literal site, cached on the desc.
-    // cfields = [name..., {fty}, name..., {fty}, ...]: a group of names shares the
-    // type that follows it, as in makeAnonStructLit in go-to-llvm-ir.abnf.
-    function anonClass(desc) {
-        if (desc.cls == undefined) {
-            var fs = []
-            var ft = []
-            var pend = 0
-            for (var i = 0; i < desc.cfields.length; i++) {
-                var it = desc.cfields[i]
-                if (typeof it == "string") { fs.push(it); pend = pend + 1; continue }
-                for (var k = 0; k < pend; k++) { ft.push(it.fty) }
-                pend = 0
-            }
-            desc.cls = {__isclass: true, __name: "struct", __fields: fs, __ftypes: ft}
-        }
-        return desc.cls
+    // The descriptor of an anonymous struct type, from its goAnonStReg record and
+    // cached on it: one per literal site, and one per type text for a zero value.
+    function anonClass(an) {
+        if (an.cls == null) { an.cls = {__isclass: true, __name: "struct", __fields: an.f, __ftypes: an.t} }
+        return an.cls
     }
     // The static type a composite literal reports (goLitC): a named struct by its
-    // name, an array as "[N]" + its element type, anything else as a slice (no copy).
+    // name, an anonymous one by its type text, an array as "[N]" + its element type,
+    // a slice and a map as theirs.
     function compLitTy(desc, elems) {
         if (desc.ckind == "struct" && desc.cname != undefined) { return desc.cname }
+        if (desc.ckind == "anon") { return desc.ctext }
         if (desc.ckind == "array") { return goArrLitTy(desc.ctext, desc.cet, elems.length, goLitKeyed(elems)) }
         if (desc.ckind == "slice") { return "[]" + desc.cet }
         if (desc.ckind == "map") { return "map[" + desc.ckeyt + "]" + desc.czero }
@@ -6322,6 +6336,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var ec = goCopyCode(ty.substring(cl + 1))
             return "A" + ec
         }
+        if (goAnonSt(ty) != null) { return "S" }
         var q = goQualTy(ty)
         var c = q != null ? goQualClass(q) : structAt(null, ty)
         if (c == undefined && q == null && resolveDefined(ty) != ty) { return goCopyCode(resolveDefined(ty)) }

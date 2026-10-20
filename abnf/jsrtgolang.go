@@ -2274,6 +2274,16 @@ func init() {
 			goStdinRest = goStdinRest[cut:]
 			return w(&jsArray{elems: []interface{}{chunk, jsNull}})
 		}
+		// js_gogetenv(name, lookup): os.Getenv's answer ("" when unset), or with
+		// lookup os.LookupEnv's [value, ok]. Twin of js_gogetenv in
+		// lib/go-rt.metajs, hostGlobals["os"] in go-interpreter.abnf.
+		m["js_gogetenv"] = func(a []uint64) uint64 {
+			v, ok := os.LookupEnv(rt.toString(u(a[0])))
+			if rt.truthy(u(a[1])) {
+				return w(&jsArray{elems: []interface{}{v, ok}})
+			}
+			return w(v)
+		}
 		// goMathSqrt(x): the correctly rounded square root lib/go-math.go's Sqrt is,
 		// a float64. Twin of js_gosqrt in lib/go-rt.metajs, goMathSqrt in
 		// go-interpreter.abnf.
