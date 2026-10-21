@@ -129,7 +129,7 @@ parameter), which no engine prints either.
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-717 bash: native binaries exhaust the 4 MiB string arena on long-running programs · P2 · SH · OPEN [V]
+### T-717 bash: native binaries exhaust the 4 MiB string arena on long-running programs · P2 · SH · IN PROGRESS (SH worker, round 15) [V]
 bash-rt.c allocates strings and never frees them, so a long program dies: a generated script running 400 extglob patterns × 11
 subjects × 8 `${}` forms exits 70 "string arena exhausted" after ~288 lines (bash 5.3 and the interpreter finish). Reclaim dead
 strings (scope-end / statement-end release, or a growable arena with reuse) without slowing the bench.
