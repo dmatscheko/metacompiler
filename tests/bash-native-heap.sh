@@ -27,3 +27,15 @@ for ((r = 0; r < 12; r++)); do
   done
 done
 echo "lines $n chars $tot"
+# Arrays far past any fixed table - 6000 indexed and 3000 associative elements, each read
+# back by index or key - and a 200-byte value overwritten on every pass, which its slot
+# keeps in one buffer rather than one copy per pass.
+big=()
+declare -A kv
+for ((i = 0; i < 6000; i++)); do big+=("e$i"); done
+for ((i = 0; i < 3000; i++)); do kv[k$i]=$i; done
+s=0
+for ((i = 0; i < 6000; i += 7)); do s=$((s + ${#big[i]} + ${kv[k$((i % 3000))]})); done
+long=""
+for ((i = 0; i < 2000; i++)); do long="${big[*]:i:40}"; done
+echo "arrays ${#big[@]} ${#kv[@]} $s ${#long} ${long:0:24}"

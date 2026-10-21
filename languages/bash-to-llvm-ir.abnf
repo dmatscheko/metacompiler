@@ -1395,6 +1395,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var hPosTy = llvm.types.NewArray(2, i64)
     var gHPos = rtGlobal("h_pos", hPosTy)
     var gAFloor = rtGlobal("a_floor", i64)
+    // The rows of every array (bash-rt.c): 0 means no name is an array, which an assignment
+    // tests before it asks rt_arr_any about its own.
+    var gArrRows = rtGlobal("arr_rows", i64)
+    // Branches to `yes` when `nm` names an array with an element, else to `no`.
+    function brIfArray(b, nm, yes, no) {
+        var chk = curF.NewBlock("")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i64, gArrRows), zero64), chk, no)
+        chk.NewCondBr(chk.NewICmp(llvm.enum.IPredNE, chk.NewCall(rtArrAny, nm), zero), yes, no)
+    }
     function hPos(b, h) { return b.NewLoad(i64, b.NewGetElementPtr(hPosTy, gHPos, zero, llvm.constant.NewInt(i32, h))) }
     function heapMark(b) { return {a: hPos(b, 0), l: hPos(b, 1)} }
     // The call is skipped when it could change nothing: no string above the floor (a
@@ -1409,9 +1418,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return done
     }
     function heapPin(b) { b.NewStore(hPos(b, 0), gAFloor) }
-    // A scalar assignment's value, moved down onto the statement's mark (rt_keep); mk is
-    // null when the value's expansion allocates nothing besides the value itself.
-    function heapKeep(b, mk, v) { return mk == null ? v : b.NewCall(rtKeep, [mk.a, mk.l, v]) }
+    // The value of an assignment to `name`, moved down onto the statement's mark or into the
+    // slot's own buffer (rt_keep); mk is null when the value's expansion allocates nothing
+    // besides the value itself.
+    function heapKeep(b, mk, name, v) {
+        return mk == null ? v : b.NewCall(rtKeep, [mk.a, mk.l, v, llvm.constant.NewInt(i32, getVarId(name))])
+    }
 
     // ===================================================================================
     //  Emitter state.
@@ -1487,9 +1499,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // i8* rt_bump(i32 n): n fresh bytes of the string heap.
     var rtBump = rtDecl("rt_bump", true, [0])
-    // i32 rt_release(i64 m, i64 lm) / i8* rt_keep(i64 m, i64 lm, i8* v): see heapMark.
+    // i32 rt_release(i64 m, i64 lm) / i8* rt_keep(i64 m, i64 lm, i8* v, i32 id): see heapMark.
     var rtRelease = rtDecl("rt_release", false, [3, 3])
-    var rtKeep = rtDecl("rt_keep", true, [3, 3, 1])
+    var rtKeep = rtDecl("rt_keep", true, [3, 3, 1, 0])
     // i32 rt_strlen(i8* s)
     var rtStrlen = rtDecl("rt_strlen", false, [1])
     // i32 rt_charlen(i8* s): the number of CHARACTERS in s, which is what bash's ${#s}
@@ -1583,7 +1595,6 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtIfsTrail = rtDecl("rt_ifstrail", false, [1, 1])
 
     // arrays: one flat store of (arrayName, key, value) triples with a linear scan.
-    var rtArrFind = rtDecl("rt_arr_find", false, [1, 1])
     var rtArrSet = rtDecl("rt_arr_set", false, [1, 1, 1])
     var rtArrGet = rtDecl("rt_arr_get", true, [1, 1])
     var rtArrHas = rtDecl("rt_arr_has", false, [1, 1])
@@ -1667,8 +1678,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // ---- output, capture, subshell and `local` -----------------------------------------
     // Bodies in languages/lib/bash-rt.c.
-    // rt_nounset: under set -u, reading an unset variable raises the abort flag.
-    var rtNounset = rtDecl("rt_nounset", true, [1, 1, 0])
+    // rt_var: $NAME - element 0 of an array, else the slot's value; under set -u reading an
+    // unset variable raises the abort flag.
+    var rtVar = rtDecl("rt_var", true, [1, 1])
     // rt_putc: one byte to the current sink - the innermost capture buffer if one is open,
     // stdout if not; channel 1 goes to fd 2 in a native build and nowhere under llvm.Run.
     var rtPutc = rtDecl("rt_putc", false, [0])
@@ -1708,12 +1720,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (idx == 0) { return gepStr(b, c.file) }
             return b.NewCall(rtParam, llvm.constant.NewInt(i32, idx))
         }
-        // an array name expands to its element 0. A select evaluates both operands and an array's
-        // own gvars slot is the unset marker, so rt_nounset is told which arm is live - otherwise
-        // `set -u; a=(11 22); echo "$a"` would abort where bash prints 11.
-        var isA = b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtArrAny, gepStr(b, name)), zero)
-        return b.NewSelect(isA, b.NewCall(rtArrGet, [gepStr(b, name), gepStr(b, "0")]),
-                                b.NewCall(rtNounset, [loadVar(b, name), gepStr(b, name), b.NewZExt(isA, i32)]))
+        // an array name expands to its element 0, a scalar to its slot (rt_var)
+        return b.NewCall(rtVar, [gepStr(b, name), loadVar(b, name)])
     }
 
     // ===================================================================================
@@ -1898,8 +1906,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // indexed array's an arithmetic expression (rt_arr_key; a canonical literal index
             // needs no evaluation). Computed ONCE per expansion, so `${a[i++]}` steps i once.
             var subOf = function(b) { return subKeyOf(b, name, idxW) }
+            // 0 = a plain key, 1 = "@" (fields), 2 = "*" (joined); known here for a literal
+            // subscript, -1 when only the run time knows.
+            var kindC = (idxW.c == undefined) ? -1 : ((idxW.c == "@") ? 1 : ((idxW.c == "*") ? 2 : 0))
             var kindOf = function(b, sub) {
-                // 0 = a plain key, 1 = "@" (fields), 2 = "*" (joined)
+                if (kindC >= 0) { return llvm.constant.NewInt(i32, kindC) }
                 var isAt = b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtStreq, [sub, gepStr(b, "@")]), zero)
                 var isStar = b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtStreq, [sub, gepStr(b, "*")]), zero)
                 return b.NewSelect(isAt, one, b.NewSelect(isStar, llvm.constant.NewInt(i32, 2), zero))
@@ -2010,7 +2021,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var idxColon = (op != "") && (op.charAt(0) == ":")
             var idxO = idxColon ? op.slice(1) : op
             var idxWordT = wordT
-            return {f: true, c: undefined, fn: function(b) {
+            // A literal element subscript never yields fields, and a literal [*] none inside
+            // double quotes (dqs), so neither needs the field boundaries of mkDqWord.
+            return {f: !(op == "" && kindC == 0), dqs: op == "" && kindC == 2, c: undefined, fn: function(b) {
                 var rs = subOf(b); b = rs.b
                 var k = kindOf(b, rs.v)
                 var whole = b.NewICmp(llvm.enum.IPredNE, k, zero)
@@ -2390,11 +2403,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // fields, joined onto the neighbouring text at the boundaries. One whose every part is
     // such a list, and empty, is NO field (`opened` stays 0): with no parameters `f "$@"`
     // passes nothing. Twin of mkDqWord in bash-interpreter.abnf.
-    function mkDqWord(segs) {
-        if (segs.length == 0) { return makeConst("") }
+    function mkDqWord(segs0) {
+        if (segs0.length == 0) { return makeConst("") }
+        var segs = []
         var anyFields = false
         var i
-        for (i = 0; i < segs.length; i++) { if (segs[i].f == true) { anyFields = true } }
+        for (i = 0; i < segs0.length; i++) {
+            var sg = segs0[i]
+            if (sg.dqs == true) { sg = {s: sg.s, c: sg.c, fn: sg.fn} }
+            segs.push(sg)
+            if (sg.f == true) { anyFields = true }
+        }
         if (!anyFields) { return mkWord(segs) }
         return {c: undefined, f: true, fn: function(b) {
             // Quoted: a $* inside joins even within an unquoted ${x:-"$*"}.
@@ -2998,31 +3017,29 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             if (a.op == "+=") { rv = b.NewAdd(b.NewCall(rtStr2int, loadVar(b, a.name)), rv) }
             b = emitAbortCheck(b)
-            storeVar(b, a.name, heapKeep(b, mk, b.NewCall(rtInt2str, rv)))
+            storeVar(b, a.name, heapKeep(b, mk, a.name, b.NewCall(rtInt2str, rv)))
             return b
         }
         // On an array name, a scalar assignment is to element 0 and `+=` appends to its text:
         // bash 5.3 answers `abd c` for e=(ab c); e+=d.
         var setE0 = assoc ? rtArrSet : rtArrIset
         if (a.op == "+=") {
-            var isA = b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtArrAny, nm), zero)
             var arrB = curF.NewBlock(""), strB = curF.NewBlock(""), mg = curF.NewBlock("")
-            b.NewCondBr(isA, arrB, strB)
+            brIfArray(b, nm, arrB, strB)
             var e0 = gepStr(arrB, "0")
             arrB.NewCall(setE0, [nm, e0, arrB.NewCall(rtStrcat, [arrB.NewCall(rtArrGet, [nm, e0]), v])])
             arrB.NewBr(mg)
             // rt_sapp appends in place to the slot's own buffer (bash-rt.c, "append buffers").
             var sid = llvm.constant.NewInt(i32, getVarId(a.name))
-            storeVar(strB, a.name, heapKeep(strB, mk, strB.NewCall(rtSapp, [sid, loadVar(strB, a.name), v])))
+            storeVar(strB, a.name, heapKeep(strB, mk, a.name, strB.NewCall(rtSapp, [sid, loadVar(strB, a.name), v])))
             strB.NewBr(mg)
             return mg
         }
-        var isA2 = b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtArrAny, nm), zero)
         var arrB2 = curF.NewBlock(""), strB2 = curF.NewBlock(""), mg2 = curF.NewBlock("")
-        b.NewCondBr(isA2, arrB2, strB2)
+        brIfArray(b, nm, arrB2, strB2)
         arrB2.NewCall(setE0, [nm, gepStr(arrB2, "0"), v])
         arrB2.NewBr(mg2)
-        storeVar(strB2, a.name, heapKeep(strB2, mk, v))
+        storeVar(strB2, a.name, heapKeep(strB2, mk, a.name, v))
         strB2.NewBr(mg2)
         return mg2
     }

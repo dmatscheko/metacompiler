@@ -448,6 +448,38 @@ s60() {
   done
   r=$(for w in "$@"; do printf '%s,' "${w,,}"; : "$w$w$w"; done)
   check hr2 "$# $* $r" "4 ALPHA0 BETA1 GAMMA2 ALPHA3 alpha0,beta1,gamma2,alpha3,"
+  # --- a long value a plain assignment stores is kept in its slot's own buffer, which
+  # the next one rewrites in place: whatever else took the old value keeps it
+  local L=0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz big cp out k=0 sub fr
+  local -a held=()
+  s60f() { local big="${L}in$1"; out="$out<${big:72}|$2>"; big="${L}in2$1"; out="$out<${big:72}>"; }
+  s60g() { big="${L}g${1:72}"; out="$out[${1:72}|${big:72}]"; }
+  out=""
+  set --
+  while [ $k -lt 4 ]; do
+    big="${L}a$k"
+    cp=$big
+    held[k]=$big
+    set -- "$big" "$@"
+    big="${L}b$k"
+    s60f "$k" "${big:72}"
+    s60g "$big"
+    sub=$(big="${L}s$k"; fr="${L}f$k"; fr="${fr}F"; echo "${big:72}${fr:72}")
+    ( big="${L}t$k" )
+    out="$out{${cp:72}|${big:72}|$sub|${fr:72}}"
+    fr="${L}o$k"
+    while read -r line; do
+      big="${L}h$k"
+      out="$out(${line:72})"
+    done <<EOF
+$big
+${big}2
+EOF
+    k=$((k + 1))
+  done
+  check hr3 "$out" "<in0|b0><in20>[b0|gb0]{a0|gb0|s0f0F|}(gb0)(gb02)<in1|b1><in21>[b1|gb1]{a1|gb1|s1f1F|o0}(gb1)(gb12)<in2|b2><in22>[b2|gb2]{a2|gb2|s2f2F|o1}(gb2)(gb22)<in3|b3><in23>[b3|gb3]{a3|gb3|s3f3F|o2}(gb3)(gb32)"
+  check hr4 "${held[*]:0:4}" "${L}a0 ${L}a1 ${L}a2 ${L}a3"
+  check hr5 "$# ${1:72} ${2:72} ${4:72} ${big:72} ${cp:72}" "4 a3 a2 a0 h3 a3"
 }
 # ===== SECTION 62: a scalar is element 0 of the array its name becomes =====
 # An element assignment, an appending literal or `declare -a` on a SET scalar keeps

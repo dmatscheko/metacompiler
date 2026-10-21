@@ -133,6 +133,7 @@ int frame_n;
 
 /* ---- prototypes of every runtime helper (any chunk may call any other) ---- */
 char *rt_bump(int n);
+char *rt_sown(int id, char *v, int n);
 char *rt_lbump(int n);
 int rt_islist(char *v);
 char *rt_lcat(char *a, char *b);
@@ -370,8 +371,11 @@ void rt_die(char *what, int want, int used, int cap)
  * list is never stored (each store takes a joined string or one field), so
  * its release has no floor. A scalar assignment also moves its value down
  * onto the mark (rt_keep), so the garbage its own expansion made goes back
- * too. A helper whose allocations are all scratch for one call (rt_eg,
- * rt_globat, rt_patany) goes back to its entry position with rt_hset.
+ * too - or, for a value of 64 bytes or more, copies it into its slot's own
+ * buffer (rt_sown, "append buffers" below) and gives back all of it, so a
+ * loop that overwrites a long value keeps one copy, not one per pass. A helper
+ * whose allocations are all scratch for one call (rt_eg, rt_globat,
+ * rt_patany) goes back to its entry position with rt_hset.
  */
 long h_pos[2];        /* the next free position                            */
 long h_cv[2];         /* the current chunk's first position ...            */
@@ -519,19 +523,21 @@ int rt_pin(void) {
     return 0;
 }
 
-/* A scalar assignment's value v, with everything allocated since mark (m, lm)
- * given back. A v below where the release lands (older, a literal, or stored
- * by the expansion itself) stays put, and so does a list. A v above it that is
- * shorter than the garbage below it moves down - to the release point, or to
- * the start of the first later chunk with room, at the latest its own - so
- * the copy frees at least what it costs; a longer v stays, and with it
- * everything allocated so far. strlen and memmove are libc: the IR
+/* Slot id's value v, with everything allocated since mark (m, lm) given back.
+ * A v below where the release lands (older, a literal, or stored by the
+ * expansion itself) stays put, and so does a list. A v above it of 64 bytes
+ * or more goes to the slot's buffer when rt_sown can take it. Another v
+ * above it that is shorter than the garbage below it moves down - to the
+ * release point, or to the start of the first later chunk with room, at the
+ * latest its own - so the copy frees at least what it costs; a longer v stays,
+ * and with it everything allocated so far. strlen and memmove are libc: the IR
  * interpreter runs them as one step each (abnf/llvmmap.go, libcExterns). */
-char *rt_keep(long m, long lm, char *v) {
+char *rt_keep(long m, long lm, char *v, int id) {
     long lo = rt_alo(m);
     long vp;
     long n;
     int k;
+    char *o;
     if (rt_islist(v) != 0) {
         rt_hset(0, lo);
         return v;
@@ -545,6 +551,13 @@ char *rt_keep(long m, long lm, char *v) {
         return v;
     }
     n = (long)strlen(v);
+    if (n >= 64) {
+        o = rt_sown(id, v, (int)n);
+        if (o != 0) {
+            rt_hset(0, lo);
+            return o;
+        }
+    }
     if (n >= vp - lo) return v;
     k = rt_hchunk(0, lo);
     while (lo + n + 1 > h_cvs[k] + h_ccap[k]) {
@@ -678,8 +691,11 @@ char *rt_sput(char *d, char *s) {
  * that took a pointer into it marks it shared (rt_abheld), and another
  * variable, a `local` save or standard input holding one is found by the scan
  * in rt_abmine. A subshell snapshots the variables, so a buffer is only
- * written at the subshell depth that made it. A buffer that stops being its
- * slot's value is freed when the next one replaces it, if nothing holds it. */
+ * written at the subshell depth that made it, and one made inside a subshell
+ * is dropped when it ends (rt_abdrop). A buffer that stops being its slot's
+ * value is freed when the next one replaces it, if nothing holds it. A long
+ * value a plain assignment stores goes into the same buffer (rt_sown), which
+ * is what lets the arena give that value back. */
 char *ab_buf[1024];
 int ab_len[1024];
 int ab_cap[1024];
@@ -755,6 +771,71 @@ char *rt_sapp(int id, char *o, char *x) {
     return nb;
 }
 
+/* Slot id's copy of v (n bytes): its buffer, rewritten in place when nothing
+ * but the slot holds it and v fits, else a fresh one. 0 when the slot's buffer
+ * belongs to an outer shell level, which this level must neither write nor
+ * forget; the caller then keeps v where it is. */
+char *rt_sown(int id, char *v, int n) {
+    char *b = ab_buf[id];
+    int mine;
+    int cap;
+    char *nb;
+    if (b != 0 && ab_depth[id] != ss_depth) return 0;
+    mine = rt_abmine(id);
+    if (mine != 0 && n < ab_cap[id]) {
+        memmove(b, v, (unsigned long)(n + 1));
+        ab_len[id] = n;
+        return b;
+    }
+    cap = n + n / 2 + 16;
+    nb = (char *)malloc((unsigned long)cap);
+    if (nb == 0) rt_die("append buffer", cap, n, cap);
+    memmove(nb, v, (unsigned long)(n + 1));
+    if (b == 0) {
+        ab_ids[ab_n] = id;
+        ab_n = ab_n + 1;
+    } else if (mine != 0) {
+        free(b);
+    }
+    ab_buf[id] = nb;
+    ab_len[id] = n;
+    ab_cap[id] = cap;
+    ab_shared[id] = 0;
+    ab_depth[id] = ss_depth;
+    return nb;
+}
+
+/* A subshell of depth d has ended and the variables are the snapshot again:
+ * a buffer made inside it is no slot's value now, and is freed unless an array
+ * element, a positional parameter, a `local` save or standard input took it.
+ * Its slot leaves ab_ids. */
+int rt_abdrop(int d) {
+    int i = 0;
+    int o = 0;
+    int j;
+    int id;
+    int held;
+    while (i < ab_n) {
+        id = ab_ids[i];
+        if (ab_depth[id] > d) {
+            held = ab_shared[id] != 0 || rt_abin(id, stdin_buf) != 0 ? 1 : 0;
+            j = 0;
+            while (held == 0 && j < ls_top) {
+                if (rt_abin(id, ls_val[j]) != 0) held = 1;
+                j = j + 1;
+            }
+            if (held == 0) free(ab_buf[id]);
+            ab_buf[id] = 0;
+        } else {
+            ab_ids[o] = id;
+            o = o + 1;
+        }
+        i = i + 1;
+    }
+    ab_n = o;
+    return 0;
+}
+
 /* rt_int2str: decimal string in the arena (mirrors the interpreter's numToStr).
  * The digits are formed in a stack buffer first so the allocation is exact. A
  * digit is taken from the remainder of the SIGNED value, so LONG_MIN, which has
@@ -762,24 +843,24 @@ char *rt_sapp(int id, char *o, char *x) {
 char *rt_int2str(long n) {
     char tmp[24];
     char *dst;
-    if (n == 0) { dst = rt_bump(2); dst[0] = 48; dst[1] = 0; return dst; }
-    int neg = n < 0;
     long a = n;
     int t = 23;
+    tmp[23] = 0;
+    if (n == 0) { dst = rt_bump(2); dst[0] = 48; dst[1] = 0; return dst; }
     while (a != 0) {
         long q = a / 10;
         long dg = a - q * 10;
         if (dg < 0) dg = 0 - dg;
-        tmp[t] = (char)(48 + (int)dg);
         t = t - 1;
+        tmp[t] = (char)(48 + (int)dg);
         a = q;
     }
-    int d = 0;
-    dst = rt_bump((23 - t) + (neg ? 1 : 0) + 1);
-    if (neg) { dst[0] = 45; d = 1; }
-    int j = t + 1;
-    while (j <= 23) { dst[d] = tmp[j]; d = d + 1; j = j + 1; }
-    dst[d] = 0;
+    if (n < 0) {
+        t = t - 1;
+        tmp[t] = 45;
+    }
+    dst = rt_bump(24 - t);
+    memmove(dst, tmp + t, (unsigned long)(24 - t));
     return dst;
 }
 
@@ -3676,7 +3757,18 @@ char *rt_splitifs(char *v, char *ifs) {
      * string IS a one-field list in this protocol. An empty value has NO fields
      * (list_nil below). */
     if (len > 0) {
-        while (q < len && rt_haschar(ifs, (int)(unsigned char)v[q]) == 0) { q = q + 1; }
+        /* an IFS of blanks only (the default) cannot hold a byte above 32 */
+        int wsonly = 1;
+        i = 0;
+        while (ifs[i] != 0) {
+            if (ifs[i] != 32 && ifs[i] != 9 && ifs[i] != 10) wsonly = 0;
+            i = i + 1;
+        }
+        while (q < len) {
+            int ch = (int)(unsigned char)v[q];
+            if ((wsonly == 0 || ch <= 32) && rt_haschar(ifs, ch) != 0) break;
+            q = q + 1;
+        }
         if (q == len) return v;
     }
     pass = 0;
@@ -4307,17 +4399,38 @@ int rt_arr_count(char *nm) {
 }
 
 /* i8* rt_arr_list(i8* nm, i8* sep, i32 star, i32 keys): the keys or the values
- * of an array, as a field list (star == 0) or joined with sep (star != 0). */
+ * of an array, as a field list (star == 0) or joined with sep (star != 0) in
+ * one allocation. */
 char *rt_arr_list(char *nm, char *sep, int star, int keys) {
     int r = rt_ar_find(nm);
     char *out = list_nil;
     int i = 0;
     int n = r >= 0 ? ar_n[r] : 0;
+    char **vs;
+    long tot;
+    char *q;
+    if (n == 0) return star != 0 ? &empty[0] : out;
+    vs = keys != 0 ? ar_k[r] : ar_v[r];
+    if (star == 0) {
+        while (i < n) {
+            out = rt_fadd(out, vs[i]);
+            i = i + 1;
+        }
+        return out;
+    }
+    tot = (long)(n - 1) * (long)strlen(sep) + 1;
     while (i < n) {
-        out = rt_fadd(out, keys != 0 ? ar_k[r][i] : ar_v[r][i]);
+        tot = tot + (long)strlen(vs[i]);
         i = i + 1;
     }
-    return star != 0 ? rt_ljoin(out, sep) : out;
+    out = rt_bump((int)tot);
+    q = rt_sput(out, vs[0]);
+    i = 1;
+    while (i < n) {
+        q = rt_sput(rt_sput(q, sep), vs[i]);
+        i = i + 1;
+    }
+    return out;
 }
 
 /* rt_arr_nextidx(nm): one past the largest non-negative numeric key, 0 for
@@ -5308,6 +5421,23 @@ char *rt_nounset(char *v, char *name, int isarr)
     return v;
 }
 
+/* $NAME for a plain name: element 0 when NAME is an array, else v, the value of
+ * its slot, with set -u's check. Every expansion of a variable makes this call. */
+char *rt_var(char *nm, char *v)
+{
+    int r;
+    int at;
+    if (arr_rows != 0) {
+        r = rt_ar_find(nm);
+        if (r >= 0 && ar_n[r] > 0) {
+            at = rt_ar_pos(r, "0");
+            return at >= 0 ? ar_v[r][at] : &empty[0];
+        }
+    }
+    if (opt_nounset != 0) return rt_nounset(v, nm, 0);
+    return v;
+}
+
 /* One output byte - into the innermost capture buffer if a command substitution
  * is running, otherwise to stdout. Channel 1 is the standard error channel and
  * channel 2 is the bit bucket.
@@ -5517,6 +5647,7 @@ int rt_ss_restore(int u)
         gvars[i] = blk[i];
         i = i + 1;
     }
+    rt_abdrop(d);
     p = nvars;
     arr_rows = 0;
     r = 0;
