@@ -39,3 +39,12 @@ for ((i = 0; i < 6000; i += 7)); do s=$((s + ${#big[i]} + ${kv[k$((i % 3000))]})
 long=""
 for ((i = 0; i < 2000; i++)); do long="${big[*]:i:40}"; done
 echo "arrays ${#big[@]} ${#kv[@]} $s ${#long} ${long:0:24}"
+# A 5 KB element overwritten on every pass, in an indexed and an associative array, which
+# keeps one buffer per element rather than one copy per pass.
+el=(x y)
+declare -A em=([k]=v)
+for ((i = 0; i < 3000; i++)); do
+  el[0]="${big[*]:0:900}$i"
+  em[k]="${big[*]:0:900}:$i"
+done
+echo "elements ${#el[0]} ${el[0]: -6} ${#em[k]} ${em[k]: -6}"

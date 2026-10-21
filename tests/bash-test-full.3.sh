@@ -649,6 +649,56 @@ y"
   o=$( { x=''; echo "${!x:-q}"; echo never; } 2>&1 ); r=$?
   check in5 "$r $(s63m "$o")" "1 : invalid variable name"
 }
+# ===== SECTION 64: what holds a long array element that is overwritten =====
+# An element assignment keeps a long value in the element's own buffer, which the next one
+# rewrites in place: a copy taken of it - by a variable, a positional parameter, another
+# element, an expansion still being built, a here-string, a caller's array a `local` hides,
+# a subshell - keeps the old value, and an element unset, emptied or replaced by arithmetic
+# reads back right. Every expected value is bash 5.3's.
+s64f() { local -a a; a[0]="${L64}f$1"; out="$out<${a[0]:72}>"; a[0]="${L64}g$1"; out="$out<${a[0]:72}>"; }
+s64g() { a[0]="${L64}h${1:72}"; out="$out[${1:72}|${a[0]:72}]"; }
+s64() {
+  L64=0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz
+  local -a a=(x y) b=() c=()
+  local -A m64=([k]=v)
+  local out="" k=0 cp line sub
+  set --
+  while [ $k -lt 4 ]; do
+    a[0]="${L64}a$k"
+    m64[k]="${L64}m$k"
+    cp=${a[0]}
+    b[k]=${a[0]}
+    c=("${a[@]}")
+    set -- "${a[0]}" "$@"
+    a[0]="${L64}b$k"
+    m64[k]+="+"
+    s64f "$k"
+    s64g "${a[0]}"
+    sub=$(a[0]="${L64}s$k"; echo "${a[0]:72}")
+    ( a[0]="${L64}t$k" )
+    line="${a[0]:72}$(( a[1] = k ))${a[0]:72}"
+    out="$out{${cp:72}|${b[k]:72}|${c[0]:72}|$sub|$line|${m64[k]:72}}"
+    while read -r line; do
+      a[0]="${L64}r$k"
+      out="$out(${line:72})"
+    done <<< "${a[0]}"
+    k=$((k + 1))
+  done
+  check eb1 "$out" "<f0><g0>[b0|hb0]{a0|a0|a0|s0|hb00hb0|m0+}(hb0)<f1><g1>[b1|hb1]{a1|a1|a1|s1|hb11hb1|m1+}(hb1)<f2><g2>[b2|hb2]{a2|a2|a2|s2|hb22hb2|m2+}(hb2)<f3><g3>[b3|hb3]{a3|a3|a3|s3|hb33hb3|m3+}(hb3)"
+  check eb2 "$# ${1:72} ${4:72} ${b[*]:0:4}" "4 a3 a0 ${L64}a0 ${L64}a1 ${L64}a2 ${L64}a3"
+  a[0]="${L64}u"
+  (( a[0] = 7 ))
+  a[2]="${L64}v"
+  unset 'a[2]'
+  a[3]="${L64}w"
+  a=("${a[3]}" "${a[@]}")
+  a[0]="${L64}x"
+  check eb3 "${#a[@]} ${a[0]:72} ${a[1]} ${a[2]} ${a[3]:72}" "4 x 7 3 w"
+  a[0]="${L64}o"
+  ( unset 'a[0]'; a[5]="${L64}z"; a[6]="${L64}y" )
+  sub=$( (( a[0] = 1 )); a[1]="${L64}q"; a=(); a[2]="${L64}p"; echo "${a[2]:72}" )
+  check eb4 "${a[0]:72} $sub ${#a[@]}" "o p 4"
+}
 # ===== END SECTIONS =====
 
 s47   # SECTION-CALL 47
@@ -667,5 +717,6 @@ s59   # SECTION-CALL 59
 s60   # SECTION-CALL 60
 s62   # SECTION-CALL 62
 s63   # SECTION-CALL 63
+s64   # SECTION-CALL 64
 echo "full: $checks checks, $fails failures"
 exit $fails

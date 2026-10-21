@@ -239,6 +239,8 @@ int rt_arr_smarked(char *nm);
 char *rt_finlist(char *v);
 int rt_isfin(char *v);
 char *rt_attrv(char *old, char *v, int at);
+char *rt_eown(char *old, char *v, int n);
+int rt_release(long m, long lm);
 int rt_mf_next(void);
 int rt_isname(char *t);
 char *rt_slicefields(char *f, int off, int n, char *sep, int star);
@@ -377,7 +379,9 @@ void rt_die(char *what, int want, int used, int cap)
  * onto the mark (rt_keep), so the garbage its own expansion made goes back
  * too - or, for a value of 64 bytes or more, copies it into its slot's own
  * buffer (rt_sown, "append buffers" below) and gives back all of it, so a
- * loop that overwrites a long value keeps one copy, not one per pass. A helper
+ * loop that overwrites a long value keeps one copy, not one per pass; an
+ * assignment to an existing array element does the same (rt_arr_keep,
+ * "element buffers"). A helper
  * whose allocations are all scratch for one call (rt_eg, rt_globat,
  * rt_patany) goes back to its entry position with rt_hset.
  */
@@ -4195,16 +4199,174 @@ void rt_ar_ins(int r, int at, char *k, char *v)
     }
 }
 
+/* ---- element buffers -------------------------------------------------------
+ * A long value an element ASSIGNMENT stores (rt_arr_keep) is copied into a
+ * malloc'd buffer of its own, and the next such store to that element rewrites
+ * it in place, or frees it, so a loop that overwrites a long element keeps one
+ * copy instead of pinning one per pass in the arena. Its one reference is its
+ * row: every read hands out a copy (rt_eread), so no variable, parameter or
+ * value still being expanded ever holds it - `x="${a[0]}$((a[0]=1))"` reads a
+ * copy before the arithmetic frees the buffer. Only a copy of the rows can: a
+ * subshell's snapshot holds the outer level's, so a buffer is rewritten or
+ * freed only at the subshell depth that made it, and one made inside a
+ * subshell is freed when it ends (rt_ebsub); a `local` save holds the caller's,
+ * so the buffers it copies are marked shared and never freed. Any store that
+ * replaces a row's value, an unset element and an emptied array drop the
+ * buffer the row held (rt_ebdrop). The table is open addressing by address:
+ * eb_p 0 is an empty slot, eb_gone a deleted one. */
+char **eb_p;
+int *eb_cap;
+int *eb_dep;
+int *eb_sh;
+int eb_sz;            /* a power of two, or 0 before the first buffer */
+int eb_n;             /* live buffers: 0 lets every read skip the lookup */
+int eb_used;          /* live and deleted slots */
+int eb_deep;          /* live buffers made inside a subshell */
+char eb_gone[1];
+
+/* The slot of buffer p, or -1. */
+int rt_ebfind(char *p)
+{
+    int m;
+    int h;
+    if (eb_n == 0) return -1;
+    m = eb_sz - 1;
+    h = (int)(((long)p >> 4) & (long)m);
+    while (eb_p[h] != 0) {
+        if (eb_p[h] == p) return h;
+        h = (h + 1) & m;
+    }
+    return -1;
+}
+
+/* Enter buffer p of cap bytes, made at this subshell depth. */
+void rt_ebadd(char *p, int cap)
+{
+    int m;
+    int h;
+    int i;
+    int osz = eb_sz;
+    char **op = eb_p;
+    int *oc = eb_cap;
+    int *od = eb_dep;
+    int *os = eb_sh;
+    if (2 * (eb_used + 1) > eb_sz) {
+        eb_sz = 64;
+        while (eb_sz < 4 * (eb_n + 1)) eb_sz = eb_sz * 2;
+        eb_p = (char **)rt_xalloc("element buffers", (long)eb_sz * 8);
+        eb_cap = (int *)rt_xalloc("element buffers", (long)eb_sz * 4);
+        eb_dep = (int *)rt_xalloc("element buffers", (long)eb_sz * 4);
+        eb_sh = (int *)rt_xalloc("element buffers", (long)eb_sz * 4);
+        i = 0;
+        while (i < eb_sz) {
+            eb_p[i] = 0;
+            i = i + 1;
+        }
+        eb_used = eb_n;
+        m = eb_sz - 1;
+        i = 0;
+        while (i < osz) {
+            if (op[i] != 0 && op[i] != &eb_gone[0]) {
+                h = (int)(((long)op[i] >> 4) & (long)m);
+                while (eb_p[h] != 0) h = (h + 1) & m;
+                eb_p[h] = op[i];
+                eb_cap[h] = oc[i];
+                eb_dep[h] = od[i];
+                eb_sh[h] = os[i];
+            }
+            i = i + 1;
+        }
+        if (op != 0) {
+            free(op);
+            free(oc);
+            free(od);
+            free(os);
+        }
+    }
+    m = eb_sz - 1;
+    h = (int)(((long)p >> 4) & (long)m);
+    while (eb_p[h] != 0 && eb_p[h] != &eb_gone[0]) h = (h + 1) & m;
+    if (eb_p[h] == 0) eb_used = eb_used + 1;
+    eb_p[h] = p;
+    eb_cap[h] = cap;
+    eb_dep[h] = ss_depth;
+    eb_sh[h] = 0;
+    eb_n = eb_n + 1;
+    if (ss_depth > 0) eb_deep = eb_deep + 1;
+}
+
+/* Free the buffer in slot h. */
+void rt_ebfree(int h)
+{
+    free(eb_p[h]);
+    if (eb_dep[h] > 0) eb_deep = eb_deep - 1;
+    eb_p[h] = &eb_gone[0];
+    eb_n = eb_n - 1;
+}
+
+/* A row stopped holding v: v's buffer, if it is one this level owns, is freed. */
+void rt_ebdrop(char *v)
+{
+    int h = rt_ebfind(v);
+    if (h >= 0 && eb_dep[h] == ss_depth && eb_sh[h] == 0) rt_ebfree(h);
+}
+
+/* What a read of the row value v hands out: v, or an arena copy of a buffer. */
+char *rt_eread(char *v)
+{
+    long n;
+    char *c;
+    if (rt_ebfind(v) < 0) return v;
+    n = (long)strlen(v);
+    c = rt_bump((int)n + 1);
+    memmove(c, v, (unsigned long)(n + 1));
+    return c;
+}
+
+/* The subshell of depth d has ended and the rows are its snapshot again: every
+ * buffer made inside it is no row's value now. A shared one stays, as d's. */
+void rt_ebsub(int d)
+{
+    int i = 0;
+    if (eb_deep == 0) return;
+    while (i < eb_sz) {
+        if (eb_p[i] != 0 && eb_p[i] != &eb_gone[0] && eb_dep[i] > d) {
+            if (eb_sh[i] == 0) rt_ebfree(i);
+            else {
+                if (d == 0) eb_deep = eb_deep - 1;
+                eb_dep[i] = d;
+            }
+        }
+        i = i + 1;
+    }
+}
+
+/* Row `at` of record r takes v. The value it held is ar_old, and its buffer is
+ * dropped unless ar_hold says rt_arr_keep, which may rewrite it, is storing. */
+char *ar_old;
+int ar_lr;
+int ar_li;
+int ar_hold;
+void rt_ar_put(int r, int at, char *v)
+{
+    ar_lr = r;
+    ar_li = at;
+    ar_old = ar_v[r][at];
+    ar_v[r][at] = v;
+    if (eb_n != 0 && ar_hold == 0) rt_ebdrop(ar_old);
+}
+
 /* i32 rt_arr_set(i8* nm, i8* k, i8* v): update the row of k, or append one. */
 int rt_arr_set(char *nm, char *k, char *v) {
     int r = rt_ar_rec(nm);
     int at = rt_ar_pos(r, k);
     int n;
+    ar_old = 0;
     rt_pin();
     rt_abheld(k);
     rt_abheld(v);
     if (at >= 0) {
-        ar_v[r][at] = v;
+        rt_ar_put(r, at, v);
         return 0;
     }
     n = ar_n[r];
@@ -4228,6 +4390,7 @@ int rt_arr_iset(char *nm, char *k, char *v) {
     int i;
     long kv;
     char **ks;
+    ar_old = 0;
     rt_abheld(v);
     if (k == &bad_key[0]) {
         arith_err = 1;
@@ -4248,7 +4411,7 @@ int rt_arr_iset(char *nm, char *k, char *v) {
             int mid = (lo + hi) / 2;
             long km = rt_str2int(ks[mid]);
             if (km == kv) {
-                ar_v[r][mid] = v;
+                rt_ar_put(r, mid, v);
                 return 0;
             }
             if (km < kv) lo = mid + 1;
@@ -4264,7 +4427,7 @@ int rt_arr_iset(char *nm, char *k, char *v) {
     while (i >= 0) {
         long ki = rt_str2int(ks[i]);
         if (ki == kv) {
-            ar_v[r][i] = v;
+            rt_ar_put(r, i, v);
             return 0;
         }
         if (ki < kv) {
@@ -4275,6 +4438,56 @@ int rt_arr_iset(char *nm, char *k, char *v) {
     }
     rt_ar_ins(r, pos, k, v);
     return 0;
+}
+
+/* `a[k]=v` (and `a[k]+=x`, v the whole new value) as a command, the statement's
+ * mark (m, lm). Where the element already exists and v is a long value the
+ * statement made, v goes to the element's own buffer (rt_eown) and everything
+ * the statement allocated is given back; otherwise v is stored as rt_arr_set
+ * and rt_arr_iset store it, pinning the statement's allocations, and the
+ * buffer the element held, if any, is dropped. */
+int rt_arr_keep(long m, long lm, char *nm, char *k, char *v, int assoc)
+{
+    long fl = a_floor;
+    long n;
+    char *old;
+    ar_hold = 1;
+    if (assoc != 0) rt_arr_set(nm, k, v);
+    else rt_arr_iset(nm, k, v);
+    ar_hold = 0;
+    old = ar_old;
+    if (old == 0) return 0;
+    n = (long)strlen(v);
+    if (n >= 64 && rt_vpos(v) >= (m > fl ? m : fl)) {
+        a_floor = fl;
+        ar_v[ar_lr][ar_li] = rt_eown(old, v, (int)n);
+        rt_release(m, lm);
+        return 0;
+    }
+    if (eb_n != 0) rt_ebdrop(old);
+    return 0;
+}
+
+/* The element buffer that is to hold v (n bytes) in place of the row's value
+ * old: old itself, rewritten, when it is a buffer this level owns and v fits,
+ * else a fresh one, old's freed if this level owns it. */
+char *rt_eown(char *old, char *v, int n)
+{
+    int h = rt_ebfind(old);
+    int cap;
+    char *nb;
+    if (h >= 0 && eb_dep[h] == ss_depth && eb_sh[h] == 0) {
+        if (n < eb_cap[h]) {
+            memmove(old, v, (unsigned long)(n + 1));
+            return old;
+        }
+        rt_ebfree(h);
+    }
+    cap = n + n / 2 + 16;
+    nb = rt_xalloc("element buffer", (long)cap);
+    memmove(nb, v, (unsigned long)(n + 1));
+    rt_ebadd(nb, cap);
+    return nb;
 }
 
 /* The key an INDEXED subscript's value names: a negative index counts back from
@@ -4587,7 +4800,7 @@ char *rt_arr_get(char *nm, char *k) {
     int at;
     if (r < 0) return empty;
     at = rt_ar_pos(r, k);
-    if (at >= 0) return ar_v[r][at];
+    if (at >= 0) return eb_n != 0 ? rt_eread(ar_v[r][at]) : ar_v[r][at];
     return empty;
 }
 
@@ -4607,6 +4820,7 @@ int rt_arr_del(char *nm, char *k) {
     if (r < 0 || ar_n[r] == 0) return 0;
     at = rt_ar_pos(r, k);
     if (at < 0) return 0;
+    if (eb_n != 0) rt_ebdrop(ar_v[r][at]);
     n = ar_n[r] - 1;
     if (at < n) {
         memmove(ar_k[r] + at, ar_k[r] + at + 1, (unsigned long)(n - at) * 8);
@@ -4777,7 +4991,12 @@ int rt_arr_smarked(char *nm) {
 /* i32 rt_arr_clear(i8* nm): drop every row of one array, and its marks. */
 int rt_arr_clear(char *nm) {
     int r = rt_ar_find(nm);
+    int i = 0;
     if (r < 0) return 0;
+    while (eb_n != 0 && i < ar_n[r]) {
+        rt_ebdrop(ar_v[r][i]);
+        i = i + 1;
+    }
     arr_rows = arr_rows - ar_n[r];
     ar_n[r] = 0;
     ar_mk[r] = 0;
@@ -5675,7 +5894,8 @@ char *rt_var(char *nm, char *v)
         r = rt_ar_find(nm);
         if (r >= 0 && ar_n[r] > 0) {
             at = rt_ar_pos(r, "0");
-            return at >= 0 ? ar_v[r][at] : &empty[0];
+            if (at < 0) return &empty[0];
+            return eb_n != 0 ? rt_eread(ar_v[r][at]) : ar_v[r][at];
         }
     }
     if (opt_nounset != 0) return rt_nounset(v, nm, 0);
@@ -5892,6 +6112,7 @@ int rt_ss_restore(int u)
         i = i + 1;
     }
     rt_abdrop(d);
+    rt_ebsub(d);
     p = nvars;
     arr_rows = 0;
     r = 0;
@@ -5924,6 +6145,8 @@ int rt_push_local(int id)
     int t;
     int r;
     int cnt = 0;
+    int i = 0;
+    int h;
     t = ls_top;
     /* LSMAX. Refusing the push would leak the "local" into the caller. */
     if (t >= 512) {
@@ -5946,6 +6169,11 @@ int rt_push_local(int id)
         if (cnt > 0) {
             memmove(las_k + las_top, ar_k[r], (unsigned long)cnt * 8);
             memmove(las_v + las_top, ar_v[r], (unsigned long)cnt * 8);
+        }
+        while (eb_n != 0 && cnt > 0 && i < cnt) {
+            h = rt_ebfind(ar_v[r][i]);
+            if (h >= 0) eb_sh[h] = 1;
+            i = i + 1;
         }
         las_top = las_top + cnt;
     }
