@@ -72,7 +72,7 @@ its report; anything structural there is a CORE ticket.
 
 # JS — JavaScript and TypeScript
 
-### T-715 js: `K.constructor`; sparse array keys; defineProperty attributes on array named keys; template object identity · P3 · JS · OPEN [V]
+### T-715 js: `K.constructor`; sparse array keys; defineProperty attributes on array named keys; template object identity · P3 · JS · IN PROGRESS (JS worker, round 26) [V]
 `class K {}; typeof K.constructor` → undefined (node function). `k=[]; k["1"]=7; Object.keys(k)` → `0,1` (node `1`: holes are not
 keys). `Object.defineProperty(arr, "n", {value, enumerable:false})` → still listed by keys / for-in, descriptor says enumerable (node
 hides it). A tagged template's strings object is rebuilt per call (node: one object per call site).
