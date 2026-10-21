@@ -181,10 +181,10 @@ OpMethodName = "[]=" | "[]" | "<=>" | "===" | "==" | "!=" | "<<" | ">>" | "<=" |
 // class C ... end with instance methods; C.new builds an instance. attr_reader /
 // attr_writer / attr_accessor declare @ivar getters/setters on the class.
 ClassDecl   <~~ push(makeClassStmt(takeAll(), up.pos)) ~~>
-            = KwClass ClassPath <~~ push(up.in) ~~> [ Superclass ]
-              { Semi | SingletonBlock | Def <~~ push({method: pop()}) ~~> | AttrDecl
+            = KwClass ClassPath <~~ push(up.in) ~~> [ Superclass ] ClassItems [ ClassGuard ] End ;
+ClassItems  = { Semi | SingletonBlock | Def <~~ push({method: pop()}) ~~> | AttrDecl
               | AliasStmt | ClassDecl <~~ push({cstmt: pop()}) ~~>
-              | ModuleDecl <~~ push({cstmt: pop()}) ~~> | ClassBodyStmt } [ ClassGuard ] End ;
+              | ModuleDecl <~~ push({cstmt: pop()}) ~~> | ClassBodyStmt } ;
 // A class body may carry its own rescue / else / ensure clauses, with no `begin` of
 // its own - exactly like a def body. They come after the body items, and no class-body
 // item can start with `rescue` or `ensure`, so the item loop stops there by itself.
@@ -238,6 +238,7 @@ AliasGvar   = "$" Id <~~ push("$" + up.in) ~~> ;
 // the overridden method).
 Superclass  = "<" !"<" KwSelf <~~ push({supername: "self"}) ~~>
             | "<" !"<" ScopedName <~~ push({supername: up.in}) ~~> HeaderEnd
+            | "<" !"<" StructNew <~~ push({superexpr: pop()}) ~~>
             | "<" !"<" SuperExprDrop ;
 // HeaderEnd is what tells `class D < Base` from `class D < Module.new`: only a name
 // that ENDS the header line is the constant path the method tables are built from;
@@ -256,6 +257,18 @@ HeaderEnd = :script(~~
 // and raises a TypeError at RUN time. Only a constant path names a class the method
 // tables can be built from, so anything else is parsed and dropped.
 SuperExprDrop <~~ pop() ~~> = PostfixExpr ;
+// Struct.new(ARGS) as a superclass is evaluated: `class P < Struct.new(:x, :y)'. It
+// is spelled out (not a PostfixExpr) so a following `do' stays the body of
+// StructDecl below rather than becoming a block of the call.
+StructNew   <~~ push(foldCallMember([makeVarRef("Struct"), {phead: null}, {kind: "mcall", name: "new", args: takeAll()}])) ~~>
+            = "Struct" KwEnd "." "new" KwEnd "(" [ Arg { "," Arg } [ "," ] ] ")" ;
+// CONST = Struct.new(ARGS) do BODY end: the block is a class body, so it is read as
+// `class CONST < Struct.new(ARGS); BODY; end' (CONST's superclass is then the
+// anonymous struct class rather than Struct, which only #superclass and
+// #ancestors can see).
+StructDecl  <~~ push(makeClassStmt(takeAll(), up.pos)) ~~>
+            = ClassPath <~~ push(up.in) ~~> "=" StructNew <~~ push({superexpr: pop()}) ~~>
+              ( KwDo ClassItems End | "{" ClassItems "}" ) ;
 // Anything else in a class body - @@classvar = v, include M, private, alias - runs
 // as an ordinary statement with `self` bound to the class object.
 ClassBodyStmt <~~ push({cstmt: sitedStmt(pop())}) ~~>
@@ -614,7 +627,7 @@ OrWord      = "or" KwEnd ;
 AndWord     = "and" KwEnd ;
 NotWord     = "not" KwEnd ;
 
-AssignExpr  = Assignment | Ternary ;
+AssignExpr  = StructDecl | Assignment | Ternary ;
 Ternary     <~~ push(makeTernary(takeAll())) ~~>
             = OrExpr [ "?" Expression ":" Expression ] ;
 
@@ -665,7 +678,7 @@ NotTilde = :script(~~
     })()
 ~~) ;
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
-            = TargetHead { "." Id <~~ push({key: up.in, call: true}) ~~> | "&." Id <~~ push({key: up.in}) ~~>
+            = TargetHead { "." Id <~~ push({key: up.in, call: true}) ~~> | "&." Id <~~ push({key: up.in, call: true, safe: true}) ~~>
               | "::" Id <~~ push({key: up.in}) ~~> | TIndex } ;
 // The '@@' alternative must come BEFORE '@' (PEG: the shorter one would win), and the
 // scoped-constant head before the plain name for the same reason. `self` is a head of
@@ -8993,6 +9006,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // generic instance construction below.
             if (name == "new" && target === hostGlobals["Array"]) { return arrNew(args, blk) }
             if (name == "new" && target === hostGlobals["Regexp"]) { return regexNew(args) }
+            if (name == "new" && target === hostGlobals["Struct"]) { return structNew(args) }
             // Hash.new / Hash.new(v) / Hash.new { |h, k| }. The default is kept in
             // the hidden __hdef / __hdefp slots and honoured by hashDefault at every
             // read.
@@ -9024,7 +9038,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (target.__name == "Object") { return hostGlobals["BasicObject"] }
                 return hostGlobals["Object"]
             }
-            if (name == "instance_methods") { return [] }
+            if (name == "instance_methods") { return args.length > 0 && !rtest(args[0]) ? ownInstanceMethods(target) : [] }
             // Module#ancestors / #include? / #< / #<= / #> / #>=: the reflection surface.
             if (name == "ancestors") { return ancestorsOf(target) }
             if (name == "include?") { return ancestorHas(target, args[0]) }
@@ -10429,6 +10443,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (args.length == 1 && params.length > 1 && Array.isArray(args[0])) { args = args[0] }
                 var saved = scopes
                 scopes = captured.slice(0)
+                // A define_method body runs instance_exec-style: self is the receiver.
+                if (blkSelfFor === f) {
+                    blkSelfFor = null
+                    scopes.push({self: blkSelf})
+                }
                 scopes.push({})
                 blkBind(params, args)
                 var site = rbSitePos
@@ -10507,6 +10526,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return {args: plain, blk: blk, blkParams: bparams}
     }
+    // The block a define_method body is about to enter, and the receiver it binds
+    // as self (consumed by makeBlock's closure on entry).
+    var blkSelfFor = anytype
+    blkSelfFor = null
+    var blkSelf = anytype
+    blkSelf = null
     // blockCall runs one block invocation and turns a `redo` into a re-run.
     function blockCall(f, args) {
         while (true) {
@@ -10648,6 +10673,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             ivarPut(ivarSelf(), ref.ivar, v)
             return
         }
+        if (!isLocalName(ref.name)) { constName(v, ref.name) }
         rubySet(ref.name, v)
     }
     // Ruby has no declaration keyword: assignment updates an existing local (search
@@ -10671,17 +10697,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // A `.name' step before the last is a zero-argument method call, read as a
     // member chain reads it (foldCallMember); the last step is the place written.
+    // A `&.name' step is the same call, skipped (nil) on a nil receiver.
     // Twin of emitRefPath in ruby-to-llvm-ir.abnf.
     function resolveRefRuby(ref) {
         var o = anytype
         o = readTarget(ref)
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
-            if (s.call) { o = boxOut(o, mcall(o, s.key, [], null)) }
+            if (s.call) { o = s.safe === true && (o === null || o === undefined) ? null : boxOut(o, mcall(o, s.key, [], null)) }
             else if (s.key != undefined) { o = hasOwn(o, s.key) ? o[s.key] : undefined } else { o = rindex(o, s.idx()) }
         }
         var last = ref.path[ref.path.length - 1]
-        if (last.key != undefined) { return {obj: o, key: last.key, key2: undefined, isIdx: false, call: last.call == true} }
+        if (last.key != undefined) { return {obj: o, key: last.key, key2: undefined, isIdx: false, call: last.call == true, safe: last.safe === true} }
         var k2 = anytype
         k2 = (last.idx2 != undefined && last.idx2 != null) ? last.idx2() : undefined
         return {obj: o, key: last.idx(), key2: k2, isIdx: true}
@@ -10996,6 +11023,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     else {
                         scopePut(mod, fn.name, makeMethodClosure(fn))
                         mod.__methodNames.push(fn.name)
+                        imnNote(mod, fn.name)
                         // module_function: the method is ALSO callable on the module.
                         if (curVis == "module_function") { scopePut(mod, "$s$" + fn.name, makeMethodClosure(fn)); snamePut(mod, fn.name) }
                     }
@@ -11326,10 +11354,117 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var fn = function() {
             var a = []
             for (var i = 1; i < arguments.length; i++) { a.push(arguments[i]) }
+            blkSelfFor = body
+            blkSelf = arguments[0]
             return blockCall(body, a)
         }
-        if (sing) { singPut(o, nm, fn) } else { scopePut(o, nm, fn) }
+        if (sing) { singPut(o, nm, fn) } else { scopePut(o, nm, fn); imnNote(o, nm) }
         return mkSym(nm)
+    }
+    // Struct.new(:a, :b [, keyword_init: true]): a new class, a subclass of Struct,
+    // with a reader and a writer per member and the Struct instance methods. A
+    // member's value lives in the instance slot of its name - the slot an
+    // attr_accessor uses, which is what `s.a = v' writes in every engine (so
+    // #instance_variables lists the members, where MRI lists none). The class is
+    // named by the constant it is assigned to (constName); `class P <
+    // Struct.new(...)' and `S = Struct.new(...) do ... end' are class statements
+    // over it. Twins: rubyStructNew in abnf/jsrtruby.go, rbStructNew in
+    // lib/ruby-rt.metajs.
+    function structNew(args) {
+        var names = []
+        var kwi = false
+        for (var i = 0; i < args.length; i++) {
+            var a = args[i]
+            if (isDict(a)) {
+                for (var k = 0; k < a.keys.length; k++) {
+                    if (isSym(a.keys[k]) && a.keys[k].s == "keyword_init") { kwi = rtest(a.vals[k]) }
+                }
+                continue
+            }
+            names.push(rstr(a))
+        }
+        var cls = {__isclass: true, __name: "", __super: hostGlobals["Struct"], __mixins: [], __prepends: []}
+        var put = function(n, f) { scopePut(cls, n, f); imnNote(cls, n) }
+        put("initialize", function(self) {
+            for (var j = 0; j < names.length; j++) { ivarPut(self, names[j], null) }
+            if (kwi) {
+                var d = arguments.length > 1 ? arguments[1] : null
+                if (isDict(d)) {
+                    for (var q = 0; q < d.keys.length; q++) {
+                        var kn = rstr(d.keys[q])
+                        if (names.indexOf(kn) < 0) { raiseErr("initialize", "ArgumentError", "unknown keywords: " + kn) }
+                        ivarPut(self, kn, d.vals[q])
+                    }
+                }
+            } else {
+                if (arguments.length - 1 > names.length) { raiseErr("initialize", "ArgumentError", "struct size differs") }
+                for (var p = 1; p < arguments.length; p++) { ivarPut(self, names[p - 1], arguments[p]) }
+            }
+            return null
+        })
+        for (var m = 0; m < names.length; m++) { structAccessors(put, names[m]) }
+        var memberSyms = function() {
+            var out = []
+            for (var j = 0; j < names.length; j++) { out.push(mkSym(names[j])) }
+            return out
+        }
+        var vals = function(self) {
+            var out = []
+            for (var j = 0; j < names.length; j++) { out.push(self[names[j]]) }
+            return out
+        }
+        scopePut(cls, "$s$members", function(self) { return memberSyms() })
+        put("members", function(self) { return memberSyms() })
+        put("to_a", vals)
+        put("values", vals)
+        put("size", function(self) { return names.length })
+        put("length", function(self) { return names.length })
+        put("to_h", function(self) {
+            var d = {__dict: true, keys: [], vals: []}
+            for (var j = 0; j < names.length; j++) { dictSet(d, mkSym(names[j]), self[names[j]]) }
+            return d
+        })
+        put("==", function(self, o) {
+            return isUserObj(o) && o.__class === self.__class && rubyEq(vals(self), vals(o))
+        })
+        put("eql?", function(self, o) {
+            return isUserObj(o) && o.__class === self.__class && valEql(vals(self), vals(o))
+        })
+        put("[]", function(self, k) { return self[names[structSlot(names, k)]] })
+        put("[]=", function(self, k, v) { ivarPut(self, names[structSlot(names, k)], v); return v })
+        var text = function(self) {
+            var out = "#<struct "
+            var cn = self.__class.__name
+            if (cn != "") { out += cn + " " }
+            for (var j = 0; j < names.length; j++) {
+                if (j > 0) { out += ", " }
+                out += names[j] + "=" + rinspect(self[names[j]])
+            }
+            return out + ">"
+        }
+        put("inspect", text)
+        put("to_s", text)
+        return cls
+    }
+    function structAccessors(put, n) {
+        put(n, function(self) { return self[n] })
+        put(n + "=", function(self, v) { ivarPut(self, n, v); return v })
+    }
+    // A Struct subscript: a member position (negative from the end) or a member name.
+    function structSlot(names, k) {
+        if (typeof k == "number") {
+            var i = k < 0 ? k + names.length : k
+            if (i < 0) { raiseErr("[]", "IndexError", "offset " + intStr(k) + " too small for struct(size:" + intStr(names.length) + ")") }
+            if (i >= names.length) { raiseErr("[]", "IndexError", "offset " + intStr(k) + " too large for struct(size:" + intStr(names.length) + ")") }
+            return i
+        }
+        var ix = names.indexOf(rstr(k))
+        if (ix < 0) { raiseErr("[]", "NameError", "no member '" + rstr(k) + "' in struct") }
+        return ix
+    }
+    // A class first assigned to a constant takes its name (`S = Struct.new(:a)').
+    function constName(v, name) {
+        if (v !== null && v !== undefined && typeof v == "object" && v.__isclass === true && v.__name === "") { v.__name = name }
     }
     // A module's instance-method names, its own included modules' first - the same
     // list ruby-to-llvm-ir.abnf emits onto a module object as __mnames.
@@ -11637,10 +11772,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function makeClassStmt(items, pos) {
         var name = items[0]
         var supName = null
+        var supExpr = null
         var ordered = []
         var guards = []
         for (var i = 1; i < items.length; i++) {
             if (items[i].supername != undefined) { supName = items[i].supername }
+            else if (items[i].superexpr != undefined) { supExpr = items[i].superexpr }
             else if (items[i].cguard != undefined) { guards = items[i].cguard }
             else { ordered.push(items[i]) }
         }
@@ -11665,6 +11802,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 sv = getVar(supName)
                 if (sv != undefined && sv != null && sv.__isclass === true) { cls.__super = sv }
             }
+            if (supExpr != null) { cls.__super = supExpr() }
             rubySet(name, cls)
             // Run the body items in SOURCE order with self bound to the class object:
             // a `private` only affects the defs that come after it, and a class-body
@@ -11808,6 +11946,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (fn.singleton === true) { scopePut(cls, "$s$" + fn.name, makeMethodClosure(fn)); snamePut(cls, fn.name) }
             else {
                 scopePut(cls, fn.name, makeMethodClosure(fn))
+                imnNote(cls, fn.name)
                 if (curVis != "public" && curClass === cls) { scopePut(cls, "$v$" + fn.name, curVis) }
             }
         }
@@ -11847,6 +11986,29 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         m = lookupMethod(cls, oldName)
         if (typeof m != "function") { fail("alias: unknown method '" + oldName + "'") }
         scopePut(cls, newName, m)
+        imnNote(cls, newName)
+    }
+    // The instance-method names a class or module defines ITSELF, in order of first
+    // definition (__imn), and Module#instance_methods(false): those that are not
+    // private. MRI lists them in its method-table order, which no engine here
+    // reproduces. initialize, initialize_copy and respond_to_missing? are always
+    // private in MRI. Twins: rubyOwnIMethods in abnf/jsrt.go, rbOwnIMethods in
+    // lib/ruby-rt.metajs.
+    function imnNote(c, name) {
+        if (c.__imn == undefined) { c.__imn = [] }
+        for (var i = 0; i < c.__imn.length; i++) { if (c.__imn[i] == name) { return } }
+        c.__imn.push(name)
+    }
+    function ownInstanceMethods(c) {
+        var out = []
+        if (c.__imn == undefined) { return out }
+        for (var i = 0; i < c.__imn.length; i++) {
+            var n = c.__imn[i]
+            if (n == "initialize" || n == "initialize_copy" || n == "respond_to_missing?") { continue }
+            if (hasOwn(c, "$v$" + n) && c["$v$" + n] == "private") { continue }
+            out.push(mkSym(n))
+        }
+        return out
     }
     // The declared visibility of a method, looked up along the class chain.
     function visOf(cls, name) {
@@ -12249,7 +12411,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 }
             } else {
                 var p = resolveRefRuby(ref)
-                if (p.call) { v = boxOut(p.obj, mcall(p.obj, p.key, [], null)) }
+                if (p.call) { v = p.safe && (p.obj === null || p.obj === undefined) ? null : boxOut(p.obj, mcall(p.obj, p.key, [], null)) }
+                // `a[i, n] << x' appends to the NEW subsequence a[i, n] answers.
+                else if (p.key2 !== undefined) { v = boxOut(p.obj, mcall(p.obj, "[]", [p.key, p.key2], null)) }
                 else if (isDict(p.obj)) {
                     // A MISS answers the hash's default, exactly as Hash#[] does - so
                     // `nest[k] << v' on a Hash.new { |h, k| h[k] = [] } appends to the
@@ -12838,7 +13002,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                              // Method is what `method(:x)' answers to #class.
                              "Method", "NilClass",
                              "TrueClass", "FalseClass", "Object", "BasicObject", "Kernel",
-                             "Comparable", "Enumerable", "Enumerator", "Math",
+                             "Comparable", "Enumerable", "Enumerator", "Math", "Struct",
                              // Class and Module are what a class object and a module
                              // object answer to #class.
                              "Class", "Module"]

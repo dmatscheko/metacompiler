@@ -251,6 +251,182 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 		home.put(name, u(a[2]))
 		return 0
 	}
+	// A class first assigned to a constant takes its name (`S = Struct.new(:a)').
+	// Twin of js_rconstname in languages/lib/ruby-rt.metajs and constName in
+	// ruby-interpreter.abnf.
+	m["js_rconstname"] = func(a []uint64) uint64 {
+		if o, ok := u(a[0]).(*jsObject); ok {
+			if _, isCls := o.props["__isclass"]; isCls && o.props["__name"] == "" {
+				o.set("__name", rt.toString(u(a[1])))
+			}
+		}
+		return a[0]
+	}
+}
+
+// rubyStructNew is Struct.new(:a, :b [, keyword_init: true]): a new class, a
+// subclass of Struct, with a reader and a writer per member and the Struct
+// instance methods. A member's value lives in the instance slot of its name, which
+// is what `s.a = v' writes (structNew in ruby-interpreter.abnf says why). Twins:
+// rbStructNew in languages/lib/ruby-rt.metajs, structNew in ruby-interpreter.abnf.
+func (rt *jsrt) rubyStructNew(argv []interface{}) interface{} {
+	pos, _ := rubyBlockArgs(argv)
+	var names []string
+	kwi := false
+	for _, a := range pos {
+		if keys, vals, isDict := dictParts(a); isDict {
+			for i, k := range keys.elems {
+				if s, isSym := k.(jsSym); isSym && s.s == "keyword_init" {
+					kwi = rubyTruthy(vals.elems[i])
+				}
+			}
+			continue
+		}
+		names = append(names, rt.rubyStr(a))
+	}
+	cls := newJSObject()
+	cls.set("__isclass", true)
+	cls.set("__name", "")
+	cls.set("__super", rt.rubyBuiltinClass("Struct"))
+	put := func(n string, f func(self *jsObject, args []interface{}) interface{}) {
+		cls.set(n, &hostFunc{name: "method:" + n, fn: func(rt *jsrt, this uint64, a []interface{}) interface{} {
+			self, _ := a[0].(*jsObject)
+			pa, _ := rubyBlockArgs(a[1:])
+			return f(self, pa)
+		}})
+		rubyIMNote(cls, n)
+	}
+	vals := func(self *jsObject) *jsArray {
+		out := &jsArray{}
+		for _, n := range names {
+			out.elems = append(out.elems, self.props[n])
+		}
+		return out
+	}
+	put("initialize", func(self *jsObject, args []interface{}) interface{} {
+		for _, n := range names {
+			self.set(n, jsNull)
+		}
+		if kwi {
+			if keys, kv, isDict := dictParts(argAt(args, 0)); isDict && len(args) > 0 {
+				for i, k := range keys.elems {
+					kn := rt.rubyStr(k)
+					if strIndex(names, kn) < 0 {
+						rt.rubyRaiseErr("initialize", "ArgumentError", "unknown keywords: "+kn)
+					}
+					self.set(kn, kv.elems[i])
+				}
+			}
+		} else {
+			if len(args) > len(names) {
+				rt.rubyRaiseErr("initialize", "ArgumentError", "struct size differs")
+			}
+			for i, v := range args {
+				self.set(names[i], v)
+			}
+		}
+		return jsNull
+	})
+	for _, n := range names {
+		n := n
+		put(n, func(self *jsObject, args []interface{}) interface{} { return self.props[n] })
+		put(n+"=", func(self *jsObject, args []interface{}) interface{} {
+			self.set(n, argAt(args, 0))
+			return argAt(args, 0)
+		})
+	}
+	members := func() interface{} {
+		out := &jsArray{}
+		for _, n := range names {
+			out.elems = append(out.elems, jsSym{s: n})
+		}
+		return out
+	}
+	cls.set("$s$members", &hostFunc{name: "method:members", fn: func(rt *jsrt, this uint64, a []interface{}) interface{} { return members() }})
+	put("members", func(self *jsObject, args []interface{}) interface{} { return members() })
+	toA := func(self *jsObject, args []interface{}) interface{} { return vals(self) }
+	put("to_a", toA)
+	put("values", toA)
+	size := func(self *jsObject, args []interface{}) interface{} { return float64(len(names)) }
+	put("size", size)
+	put("length", size)
+	put("to_h", func(self *jsObject, args []interface{}) interface{} {
+		d := rubyNewDict()
+		keys, dv, _ := dictParts(d)
+		for i, n := range names {
+			dictAppend(keys, dv, jsSym{s: n}, self.props[names[i]])
+		}
+		return d
+	})
+	same := func(self *jsObject, o interface{}) (*jsObject, bool) {
+		oo, isObj := o.(*jsObject)
+		return oo, isObj && oo.props["__class"] == self.props["__class"]
+	}
+	put("==", func(self *jsObject, args []interface{}) interface{} {
+		o, ok := same(self, argAt(args, 0))
+		return ok && rt.rubyEq(vals(self), vals(o))
+	})
+	put("eql?", func(self *jsObject, args []interface{}) interface{} {
+		o, ok := same(self, argAt(args, 0))
+		return ok && rt.rubyEqlDeep(vals(self), vals(o))
+	})
+	put("[]", func(self *jsObject, args []interface{}) interface{} {
+		return self.props[names[rt.rubyStructSlot(names, argAt(args, 0))]]
+	})
+	put("[]=", func(self *jsObject, args []interface{}) interface{} {
+		self.set(names[rt.rubyStructSlot(names, argAt(args, 0))], argAt(args, 1))
+		return argAt(args, 1)
+	})
+	text := func(self *jsObject, args []interface{}) interface{} {
+		var sb strings.Builder
+		sb.WriteString("#<struct ")
+		if cn := rubyInstClassName(self); cn != "" {
+			sb.WriteString(cn + " ")
+		}
+		for i, n := range names {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString(n + "=" + rt.rubyInspect(self.props[names[i]]))
+		}
+		sb.WriteString(">")
+		return sb.String()
+	}
+	put("inspect", text)
+	put("to_s", text)
+	return cls
+}
+
+// rubyStructSlot is a Struct subscript: a member position (negative from the
+// end) or a member name.
+func (rt *jsrt) rubyStructSlot(names []string, k interface{}) int {
+	if f, isNum := k.(float64); isNum {
+		i := int(f)
+		if i < 0 {
+			i += len(names)
+		}
+		if i < 0 {
+			rt.rubyRaiseErr("[]", "IndexError", "offset "+rubyIntStr(f)+" too small for struct(size:"+rubyIntStr(float64(len(names)))+")")
+		}
+		if i >= len(names) {
+			rt.rubyRaiseErr("[]", "IndexError", "offset "+rubyIntStr(f)+" too large for struct(size:"+rubyIntStr(float64(len(names)))+")")
+		}
+		return i
+	}
+	ix := strIndex(names, rt.rubyStr(k))
+	if ix < 0 {
+		rt.rubyRaiseErr("[]", "NameError", "no member '"+rt.rubyStr(k)+"' in struct")
+	}
+	return ix
+}
+
+func strIndex(xs []string, s string) int {
+	for i, x := range xs {
+		if x == s {
+			return i
+		}
+	}
+	return -1
 }
 
 func rubyIsKernelObj(v interface{}) bool {

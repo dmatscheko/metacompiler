@@ -4090,6 +4090,14 @@ def s91
   d = Hash.new("")
   d[:k] << "x"
   check("ap91g", d == {} && d[:z] == "x")
+  sn = [[v[0]], [v[1]]]
+  sn&.first << v[2]
+  check("ap91h", sn == [[1, 3], [2]])
+  q = [[v[0]], [v[1]], [v[2]]]
+  q[0, 2] << 7
+  u = v[5].dup
+  u[0, 2] << "X"
+  check("ap91i", q == [[1], [2], [3]] && u == "abc")
 end
 # ===== SECTION 92: =begin / =end block comments =====
 # Both markers stand at the start of a line; `=endx` does not close the comment,
@@ -4142,6 +4150,24 @@ def s94
   r = S94C.define_method(:z) { |a| a * 2 }
   S94C.send(:define_method, :w) { 7 }
   check("dm94b", r == :z && o.z(3) == 6 && o.w == 7 && o.respond_to?(:a))
+  S94D.send(:define_method, :dyn) { |n| [self.class, @v + n] }
+  S94M.define_method(:mod) { self.class }
+  g = Object.new
+  g.define_singleton_method(:who) { equal?(g) }
+  d = S94D.new
+  check("dm94c", d.me == S94D && d.iv == 4 && d.dyn(1) == [S94D, 5] && S94E.new.mod == S94E && g.who)
+end
+# A define_method body runs with self the receiver (instance_exec), and a method a
+# module gains at run time reaches the classes that include it.
+class S94D
+  def initialize; @v = 4; end
+  define_method(:me) { self.class }
+  define_method(:iv) { @v }
+end
+module S94M
+end
+class S94E
+  include S94M
 end
 # ===== SECTION 97: Strings a builtin builds are new objects =====
 # s[i], s[a..b], s[i, n], format / sprintf and the Strings each_char / each_line /
@@ -4176,6 +4202,46 @@ def s97
   h1 = {s.dup => 1}
   h2 = {(v[4] + "x") => 2, ("he" + "llo") => 3}
   check("sb97d", h1.keys[0].equal?(h1.keys[0]) && h1.keys[0].equal?(h2.keys[1]) && !h1.keys[0].equal?(s))
+end
+# ===== SECTION 98: Struct, class-body locals, instance_methods(false) =====
+# Struct.new builds a class with a reader and a writer per member, ==, to_a,
+# members, [] and keyword_init; `class P < Struct.new(...)' and a Struct.new block
+# add methods. A class-body local is visible to a constant of the same body, and
+# Module#instance_methods(false) lists a class's own public and protected methods
+# (sorted here: MRI answers its method-table order). /usr/bin/ruby 2.6 settles each.
+S98S = Struct.new(:a, :b)
+S98K = Struct.new(:x, :y, keyword_init: true)
+class S98P < Struct.new(:x, :y)
+  def sum; x + y; end
+end
+S98Q = Struct.new(:a) do
+  def dbl; a * 2; end
+end
+class S98L
+  r = 5
+  QQ = r * 2
+  def initialize; end
+  def f; end
+  attr_reader :g
+  alias h f
+  private
+  def i; end
+end
+def s98
+  v = [1, 2, 10, 3, 4]
+  s = S98S.new(v[0], v[1])
+  s.a = v[2]
+  t = S98S.new(v[0])
+  check("st98a", s.a == 10 && s.b == 2 && s.to_a == [10, 2] && t.b.nil? && S98S.members == [:a, :b])
+  check("st98b", s == S98S.new(10, 2) && s != S98S.new(1, 2) && s.inspect == "#<struct S98S a=10, b=2>")
+  s[1] = v[4]
+  check("st98c", s[0] == 10 && s[:b] == 4 && s["a"] == 10 && s.members == [:a, :b] && s.to_h == {a: 10, b: 4})
+  k = S98K.new(x: v[0], y: v[1])
+  e = begin; S98S.new(1, 2, 3); nil; rescue ArgumentError => x; x.message; end
+  check("st98d", k.x == 1 && k.y == 2 && e == "struct size differs")
+  pt = S98P.new(v[3], v[4])
+  check("st98e", pt.sum == 7 && pt.to_a == [3, 4] && S98Q.new(v[4]).dbl == 8 && pt.to_s == "#<struct S98P x=3, y=4>")
+  check("st98f", S98L::QQ == 10 && S98L.instance_methods(false).sort == [:f, :g, :h])
 end
 
 s39() # SECTION-CALL 39
@@ -4237,5 +4303,6 @@ s94() # SECTION-CALL 94
 s95() # SECTION-CALL 95
 s96() # SECTION-CALL 96
 s97() # SECTION-CALL 97
+s98() # SECTION-CALL 98
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

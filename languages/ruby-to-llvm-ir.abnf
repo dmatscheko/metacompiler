@@ -183,12 +183,12 @@ OpMethodName = "[]=" | "[]" | "<=>" | "===" | "==" | "!=" | "<<" | ">>" | "<=" |
 // class C ... end with instance methods; C.new builds an instance. attr_reader /
 // attr_writer / attr_accessor declare @ivar getters/setters on the class.
 ClassDecl   <~~ push(makeClassStmt(takeAll(), up.pos)) ~~>
-            = KwClass ClassPath <~~ push(up.in) ~~> [ Superclass ]
-              { Semi | SingletonBlock | Def <~~ push({method: pop()}) ~~> | AttrDecl
+            = KwClass ClassPath <~~ push(up.in) ~~> [ Superclass ] ClassItems [ ClassGuard ] End ;
+ClassItems  = { Semi | SingletonBlock | Def <~~ push({method: pop()}) ~~> | AttrDecl
               | AliasStmt | AliasMethodStmt | DefineMethodStmt | MixinStmt | VisStmt
               | ClassDecl <~~ push({nested: pop(), nestedName: lastDeclName}) ~~>
               | ModuleDecl <~~ push({nested: pop(), nestedName: lastDeclName}) ~~>
-              | ClassBodyStmt } [ ClassGuard ] End ;
+              | ClassBodyStmt } ;
 // A class body may carry its own rescue / else / ensure clauses, with no `begin` of
 // its own - exactly like a def body. They come after the body items, and no class-body
 // item can start with `rescue` or `ensure`, so the item loop stops there by itself.
@@ -272,6 +272,7 @@ VisWord     = "private" | "protected" | "public" | "module_function" ;
 // the overridden method).
 Superclass  = "<" !"<" KwSelf <~~ push({supername: "self"}) ~~>
             | "<" !"<" ScopedName <~~ push({supername: up.in}) ~~> HeaderEnd
+            | "<" !"<" StructNew <~~ push({superexpr: pop(), smembers: lastStructMembers}) ~~>
             | "<" !"<" SuperExprDrop ;
 // HeaderEnd is what tells `class D < Base` from `class D < Module.new`: only a name
 // that ENDS the header line is the constant path the method tables are built from;
@@ -290,6 +291,19 @@ HeaderEnd = :script(~~
 // and raises a TypeError at RUN time. Only a constant path names a class the method
 // tables can be built from, so anything else is parsed and dropped.
 SuperExprDrop <~~ pop() ~~> = PostfixExpr ;
+// Struct.new(ARGS) as a superclass is evaluated: `class P < Struct.new(:x, :y)'. It
+// is spelled out (not a PostfixExpr) so a following `do' stays the body of
+// StructDecl below rather than becoming a block of the call.
+StructNew   <~~ push(foldCallMember([makeVarRef("Struct"), {phead: null}, {kind: "mcall", name: "new", args: takeAll()}]));
+                lastStructMembers = structMemberNames(up.in) ~~>
+            = "Struct" KwEnd "." "new" KwEnd "(" [ Arg { "," Arg } [ "," ] ] ")" ;
+// CONST = Struct.new(ARGS) do BODY end: the block is a class body, so it is read as
+// `class CONST < Struct.new(ARGS); BODY; end' (CONST's superclass is then the
+// anonymous struct class rather than Struct, which only #superclass and
+// #ancestors can see).
+StructDecl  <~~ push(makeClassStmt(takeAll(), up.pos)) ~~>
+            = ClassPath <~~ push(up.in) ~~> "=" StructNew <~~ push({superexpr: pop(), smembers: lastStructMembers}) ~~>
+              ( KwDo ClassItems End | "{" ClassItems "}" ) ;
 // Anything else in a class body - @@classvar = v, include M, private, alias - runs
 // as an ordinary statement with `self` bound to the class object.
 ClassBodyStmt <~~ push({cstmt: pop(), ctext: up.in}) ~~>
@@ -358,7 +372,7 @@ CommandStmt = CommandForm ;
 // newline, an operator, a comma or a `)` never reaches it.
 // A command call may itself be the ONE argument (`p two 1, 2` is p(two(1, 2)));
 // MRI accepts it nowhere else in the list.
-CommandForm <~~ push(makeCall(takeAll())) ~~>
+CommandForm <~~ push(makeCall(dmCallItems(takeAll(), up.in))) ~~>
             = BareName <~~ push(up.in) ~~> NotLocalCmd SameLine CmdArgAhead ( CommandForm | Arg { "," Arg } ) [ Block ] ;
 // NotLocalCmd fails the command form when its name is a LOCAL VARIABLE. MRI reads
 // `x -1`, `x *2`, `x &m`, `x ?c` and `x [1]` with its local-variable table: for a local they
@@ -649,7 +663,7 @@ OrWord      = "or" KwEnd ;
 AndWord     = "and" KwEnd ;
 NotWord     = "not" KwEnd ;
 
-AssignExpr  = Assignment | Ternary ;
+AssignExpr  = StructDecl | Assignment | Ternary ;
 Ternary     <~~ push(makeTernary(takeAll())) ~~>
             = OrExpr [ "?" Expression ":" Expression ] ;
 
@@ -700,7 +714,7 @@ NotTilde = :script(~~
     })()
 ~~) ;
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
-            = TargetHead { "." Id <~~ push({key: up.in, call: true}) ~~> | "&." Id <~~ push({key: up.in}) ~~>
+            = TargetHead { "." Id <~~ push({key: up.in, call: true}) ~~> | "&." Id <~~ push({key: up.in, call: true, safe: true}) ~~>
               | "::" Id <~~ push({key: up.in}) ~~> | TIndex } ;
 // The '@@' alternative must come BEFORE '@' (PEG: the shorter one would win), and the
 // scoped-constant head before the plain name for the same reason. `self` is a head of
@@ -901,9 +915,9 @@ PostfixExpr <~~ push(foldCallMember(takeAll())) ~~>
 // still wins whenever there is a `(`.
 // The place (a variable) the primary reads, when the primary IS one: see notePlace.
 PrimaryEnd  = :whitespace() "" <~~ push({phead: hasPlaceAt(up.pos) ? placeAt["p" + up.pos] : null}) ~~> :whitespace(Whitespace) ;
-CmdMethodSfx <~~ push({kind: "mcall", name: popName(), args: takeAll()}) ~~>
+CmdMethodSfx <~~ var cn = popName(); push({kind: "mcall", name: cn, args: dmArgs(cn, takeAll(), up.in)}) ~~>
             = "." MethodName <~~ push({mname: noteMName(up.in)}) ~~> SameLine CmdArgAhead Arg { "," Arg } [ Block ] ;
-MethodSfx   <~~ push(methodSfx(popName(), takeAll())) ~~>
+MethodSfx   <~~ var mn = popName(); push(methodSfx(mn, dmArgs(mn, takeAll(), up.in))) ~~>
             = "." MethodName <~~ push({mname: noteMName(up.in)}) ~~> MArgs ;
 // p.(x): the parenthesis-only call shorthand for a Proc (Proc#call).
 CallSfx     <~~ push({kind: "mcall", name: "call", args: takeAll()}) ~~>
@@ -1957,7 +1971,7 @@ RaiseExpr   <~~ push(makeRaise(takeAll(), up.pos)) ~~>
 // (`block_given?`). BareName is a non-keyword identifier that may end in ? or !;
 // the longest form comes first, so `x ? a : b` only reaches the ternary after the
 // call alternatives have failed and rolled back.
-Call        <~~ push(makeCall(takeAll())) ~~>
+Call        <~~ push(makeCall(dmCallItems(takeAll(), up.in))) ~~>
             = BareName <~~ push(up.in) ~~> SameLine "(" [ Arg { "," Arg } [ "," ] ] ")" [ Block ]
             | BareName <~~ push(up.in) ~~> Block
             | PredName <~~ push(up.in) ~~> ;
@@ -3596,12 +3610,69 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // the program names `arity', and behaviour must not depend on that.
         // The block's PARAMETER SHAPE is known right here, at the literal, which is
         // the one place it is free.
+        // blkMethT emits the same block in the METHOD convention (the receiver is
+        // argument 0 and binds self), for a define_method body (dmArgs).
         return {blkKinds: paramKinds(params), blkT: function(b) {
             curBlkDepth++
             var idx = emitFunc(params, bodyStmt, false, false, true)
             curBlkDepth--
             return {b: b, v: emitArity(b, callExt(b, "js_closure", [handle(idx), curScopeV]), params)}
+        }, blkMethT: function(b) {
+            var idx = emitFunc(params, bodyStmt, true, false, true)
+            return {b: b, v: emitArity(b, callExt(b, "js_closure", [handle(idx), curScopeV]), params)}
         }}
+    }
+    // The members a literal `Struct.new(:x, "y", keyword_init: true)' declares, read
+    // off its text: they are methods of the class built over it (makeClassStmt), so
+    // a bare `x' in one of its methods is a call on self.
+    var lastStructMembers = []
+    function structMemberNames(txt) {
+        var out = []
+        var t = ""
+        var on = false
+        for (var i = txt.indexOf("(") + 1; i < txt.length; i++) {
+            var ch = txt.charAt(i)
+            if (ch == "," || ch == ")") {
+                if (t != "" && t.indexOf(":") < 0 && t.indexOf("=") < 0) { out.push(t) }
+                t = ""
+                on = false
+            } else if (ch == ":" && !on) { on = true }
+            else if (ch != " " && ch != "\t" && ch != "\n" && ch != "\"" && ch != "'") { on = true; t += ch }
+        }
+        return out
+    }
+    // A literal block given to define_method / define_singleton_method (directly or
+    // through send) is the METHOD BODY and runs instance_exec-style, self being the
+    // receiver. It is emitted in the method convention and its marker says so
+    // (__rself), so the runtime installs it as the method itself. The send form is
+    // recognised from the call's text (txt, as matched: `.send(:define_method,...`),
+    // because a symbol thunk does not keep its identity through the tag stack.
+    // Twin of blockMethodDef in ruby-interpreter.abnf.
+    function isDmName(nm) { return nm == "define_method" || nm == "define_singleton_method" }
+    function dmArgs(name, args, txt) {
+        var dm = isDmName(name)
+        if (!dm && (name == "send" || name == "__send__" || name == "public_send")) {
+            var at = txt.indexOf(name) + name.length
+            if (txt.charAt(at) == "(") { at++ }
+            for (var k = 0; k < 2 && !dm; k++) {
+                var sym = k == 0 ? ":define_method" : ":define_singleton_method"
+                var nx = txt.charAt(at + sym.length)
+                dm = txt.slice(at, at + sym.length) == sym && (nx == "," || nx == ")")
+            }
+        }
+        if (!dm) { return args }
+        var out = []
+        for (var i = 0; i < args.length; i++) {
+            var a = args[i]
+            if (a != null && a != undefined && typeof a != "function" && a.blkMethT != undefined) {
+                out.push({blkKinds: a.blkKinds, blkT: a.blkMethT, blkSelf: true})
+            } else { out.push(a) }
+        }
+        return out
+    }
+    function dmCallItems(items, txt) {
+        if (items.length < 2) { return items }
+        return [items[0]].concat(dmArgs(items[0], items.slice(1), txt))
     }
     // ->(a, b = 1) { ... }: a lambda is a VALUE (an ordinary closure), not a block.
     // js_rlambda marks it so `lambda?` can tell it from a proc.
@@ -3639,10 +3710,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var argsV = callExt(b, "js_arr_new", [])
         var kw = []
         var blkT = null
+        var blkSelf = false
         var j
         for (j = 0; j < args.length; j++) {
             var a = args[j]
-            if (a != null && a != undefined && typeof a != "function" && a.blkT != undefined) { blkT = a.blkT }
+            if (a != null && a != undefined && typeof a != "function" && a.blkT != undefined) {
+                blkT = a.blkT
+                blkSelf = a.blkSelf === true
+            }
         }
         for (j = 0; j < args.length; j++) {
             var e = args[j]
@@ -3693,7 +3768,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // m(some_proc)' binds f, and `block_given?' is false for a method
             // never given a block). The fact is recorded HERE, at the call
             // site that knows it. js_rblock unwraps at the other end.
-            callExt(b, "js_arr_push", [argsV, callExt(b, "js_rblkwrap", [rb.v])])
+            var wrapV = callExt(b, "js_rblkwrap", [rb.v])
+            if (blkSelf) { callExt(b, "js_set", [wrapV, emitStr(b, "__rself"), hTrue]) }
+            callExt(b, "js_arr_push", [argsV, wrapV])
         }
         return {b: b, v: argsV}
     }
@@ -3908,10 +3985,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     var curCtlDepth = 0
     function emitLocalSet(b, name, v) {
         var local = isLocalName(name)
+        // A class first assigned to a constant takes its name (`S = Struct.new(:a)').
+        if (!local) { v = callExt(b, "js_rconstname", [v, emitStr(b, name)]) }
         if (local && curDefFn) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), v])
         } else if (local && (inDefFrame(name) || (curDefLocals == null && curCtlDepth > 0))) {
             callExt(b, "js_rlset", [curScopeV, emitStr(b, name), v, emitNum(b, curCtlDepth)])
+        } else if (!local && curClsBodyFn) {
+            b = emitConstUp(b, name, v)
         } else {
             callExt(b, "js_pyset_var", [curScopeV, emitStr(b, name), v])
         }
@@ -3923,6 +4004,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // A parenthesised head is only ever a target THROUGH a path ((...).a = 1).
         if (ref.texpr != undefined) { fail("cannot assign to a parenthesized expression") }
         if (ref.sconst != undefined) {
+            if (curClsBodyFn) { return emitConstUp(b, ref.sconst, v) }
             callExt(b, "js_pyset_var", [curScopeV, emitStr(b, ref.sconst), v])
             return b
         }
@@ -3950,12 +4032,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var o = rh.v
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
-            if (s.call) { o = callExt(b, "js_rxmcall", [o, emitStr(b, methodKey(s.key)), callExt(b, "js_arr_new", [])]) }
+            if (s.call) { var rc = emitStepCall(b, o, s.key, s.safe === true); b = rc.b; o = rc.v }
             else if (s.key != undefined) { o = callExt(b, "js_get", [o, emitStr(b, s.key)]) }
             else { var ri = s.idx(b); b = ri.b; o = callExt(b, core.indexExt, [o, ri.v]) }
         }
         var last = ref.path[ref.path.length - 1]
-        if (last.key != undefined) { return {b: b, obj: o, key: emitStr(b, last.key), key2: hUndef, dict: true, call: last.call == true, name: last.key} }
+        if (last.key != undefined) {
+            return {b: b, obj: o, key: emitStr(b, last.key), key2: hUndef, dict: true, call: last.call == true,
+                    safe: last.safe === true, name: last.key}
+        }
         var kr = last.idx(b)
         b = kr.b
         var k2V = hUndef
@@ -3964,7 +4049,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             b = kr2.b
             k2V = kr2.v
         }
-        return {b: b, obj: o, key: kr.v, key2: k2V, dict: false}
+        return {b: b, obj: o, key: kr.v, key2: k2V, dict: false, two: last.idx2 != undefined && last.idx2 != null}
+    }
+    // A `.name' / `&.name' step of a target path: a zero-argument call, which `&.'
+    // skips (nil) on a nil receiver. Twin of resolveRefRuby in ruby-interpreter.abnf.
+    function emitStepCall(b, o, name, safe) {
+        if (!safe) { return {b: b, v: callExt(b, "js_rxmcall", [o, emitStr(b, methodKey(name)), callExt(b, "js_arr_new", [])])} }
+        var callB = curF.NewBlock("")
+        var joinB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_seq", [o, hNull])), joinB, callB)
+        var cv = callExt(callB, "js_rxmcall", [o, emitStr(callB, methodKey(name)), callExt(callB, "js_arr_new", [])])
+        callB.NewBr(joinB)
+        return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(hNull, b), llvm.ir.NewIncoming(cv, callB)])}
     }
     // The index-assignment tail, shared by every write site. js_rsetsl answers the
     // container, or the box a plain string became, so `s[0] = "H"' writes it back
@@ -4629,8 +4725,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 var p = emitRefPath(b, ref)
                 b = p.b
                 if (p.call) {
-                    v = callExt(b, "js_rxmcall", [p.obj, emitStr(b, methodKey(p.name)), callExt(b, "js_arr_new", [])])
-                    v = callExt(b, "js_rsprom", [hUndef, hUndef, v])
+                    var rc = emitStepCall(b, p.obj, p.name, p.safe)
+                    b = rc.b
+                    v = callExt(b, "js_rsprom", [hUndef, hUndef, rc.v])
+                } else if (p.two === true) {
+                    // `a[i, n] << x' appends to the NEW subsequence a[i, n] answers.
+                    var iav = callExt(b, "js_arr_new", [])
+                    callExt(b, "js_arr_push", [iav, p.key])
+                    callExt(b, "js_arr_push", [iav, p.key2])
+                    v = callExt(b, "js_rxmcall", [p.obj, emitStr(b, methodKey("[]")), iav])
                 } else if (p.dict) {
                     v = callExt(b, "js_rsprom", [hUndef, hUndef, callExt(b, "js_get", [p.obj, p.key])])
                 } else {
@@ -5437,6 +5540,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var savedSiteSave = curSiteSave
         var savedBlkDepth = curBlkDepth
         if (declBlk === true || isMethod === true) { curBlkDepth = 0 }
+        var savedClsBodyFn = curClsBodyFn
+        if (isCtl !== true) { curClsBodyFn = false }
         curDefFn = declBlk === true
         curCtlDepth = isCtl === true ? curCtlDepth + 1 : 0
         if (declBlk === true) { curDefLocals = {m: {}, l: []} }
@@ -5520,6 +5625,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         curCtlDepth = savedCtlDepth
         curSiteSave = savedSiteSave
         curBlkDepth = savedBlkDepth
+        curClsBodyFn = savedClsBodyFn
         return idx
     }
     function makeFun(items) {
@@ -7002,6 +7108,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var it = items[i]
             if (it == undefined) { continue }
             if (it.supername != undefined) { r.supername = it.supername; continue }
+            if (it.superexpr != undefined) { r.superexpr = it.superexpr; r.smembers = it.smembers; continue }
             if (it.vis != undefined) { vis = visWordOf(it.vis); continue }
             if (it.mixkind != undefined) {
                 if (it.mixkind == "include") { r.includes.push(it.mixname) }
@@ -7039,7 +7146,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 }
                 continue
             }
-            if (it.nested != undefined) { r.cstmts.push({t: it.nested, name: it.nestedName, nested: true}); continue }
+            if (it.nested != undefined) { r.cstmts.push({t: it.nested, name: it.nestedName}); continue }
             if (it.cstmt != undefined) {
                 var cn = constAssignName(it.ctext)
                 if (cn != "") { r.consts.push(cn) }
@@ -7148,6 +7255,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var modV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, anc[i])])
             callExt(b, "js_set", [dstV, emitStr(b, slot + anc[i]), modV])
             callExt(b, "js_arr_push", [listV, modV])
+            // An include copies the module's methods now, so a program's module keeps
+            // its includers (__incl) for a define_method it runs later
+            // (rubyIncludersPut in abnf/jsrt.go).
+            if (orderKey == "__mixorder" && moduleDefs["$" + anc[i]] != undefined) { callExt(b, "js_arr_push", [callExt(b, "js_get", [modV, emitStr(b, "__incl")]), dstV]) }
         }
         callExt(b, "js_set", [dstV, emitStr(b, orderKey), listV])
         return b
@@ -7183,11 +7294,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // are decided at BUILD time from the class the def sits in, and a statement-level
     // alias names a class only known at run time - so it parses and warns.
     function makeAliasTop(pair, pos) { return notImplExpr("alias outside a class body", pos) }
-    // A class-body item that is DECLARATIVE rather than executable: a nested class or
-    // module, and a CONST = ... assignment. Both are emitted in the enclosing scope and
-    // published on the class under $c$, so Outer::Inner and C::CONST resolve - which is
-    // what the interpreter's publishModuleScope does for the same two shapes.
-    function hoistedCstmt(it) { return it.nested === true || (it.name != undefined && it.name != "") }
     function makeClassStmt(items, pos) {
         var name = items[0]
         lastDeclName = name
@@ -7212,7 +7318,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return function(b) {
                 var bkey = "$" + curClsName + "::" + name
                 if (curClsName == "" && emittedClasses[bkey] == undefined) {
-                    emittedClasses[bkey] = {anc: [], snames: [], core: false}
+                    emittedClasses[bkey] = {anc: [], snames: [], core: false, imn: null}
                     callExt(b, "js_rbreopen", [])
                 }
                 if (emittedClasses[bkey] == undefined) { notImpl("a nested class named like a builtin class", pos) }
@@ -7243,6 +7349,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (own[m1].name == "initialize") { hasInit = true }
         }
         for (var m2 = 0; m2 < front.length; m2++) { mnames.push(front[m2].name) }
+        if (r.smembers != undefined) {
+            for (var sm = 0; sm < r.smembers.length; sm++) { mnames.push(r.smembers[sm]); mnames.push(r.smembers[sm] + "=") }
+        }
         // A class opened twice declares the methods of BOTH bodies.
         classMethods["$" + name] = unionNames(classMethods["$" + name], mnames)
         noteMethodNames(mnames)
@@ -7256,7 +7365,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (superName != "") { classSupers["$" + name] = superName }
         // A prepend gives the class a synthetic ancestor even without a superclass,
         // so `super` inside the prepended method is a legal thing to emit.
-        if (front.length > 0 && superName == "") { classHasSuper["$" + name] = true }
+        if ((front.length > 0 && superName == "") || r.superexpr != undefined) { classHasSuper["$" + name] = true }
         var coreName = name + "$core"
         return function(b) {
             // A class statement for a name the same enclosing class or module has
@@ -7264,17 +7373,25 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // stay, and this body adds to them.
             var ekey = "$" + curClsName + "::" + name
             if (emittedClasses[ekey] != undefined) { return emitReopen(b, emittedClasses[ekey], name, r, incAnc, pos) }
-            emittedClasses[ekey] = {anc: incAnc, snames: snames, core: front.length > 0}
+            var imn = ownIMNames([], r)
+            emittedClasses[ekey] = {anc: incAnc, snames: snames, core: front.length > 0, imn: imn}
             var clsV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
             callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
+            b = emitNameList(b, clsV, imn, "__imn")
             var baseSet = false
             var baseV = hNull
             if (superName != "") {
                 baseV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, superName)])
                 baseSet = true
+            } else if (r.superexpr != undefined) {
+                var rsx = r.superexpr(b)
+                b = rsx.b
+                baseV = rsx.v
+                baseSet = true
             }
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
+            if (curClsBodyFn) { b = emitConstUp(b, name, clsV) }
+            else { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV]) }
             // The mixin record. A prepended module is an ancestor IN FRONT of the
             // class and an extended one belongs to the class OBJECT (`D.is_a?(M)'
             // after `extend M'), so the three go in three slots.
@@ -7297,7 +7414,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // ordinary class object with no __rbuiltin, so rubyExcIsA / rbIsA walk
             // straight through it to the builtin and `rescue StandardError' is
             // unaffected.
-            var builtinSuper = (superName == "" || classMethods["$" + superName] == undefined)
+            var builtinSuper = r.superexpr == undefined && (superName == "" || classMethods["$" + superName] == undefined)
             var hasShim = false
             if (baseSet && hasInit && builtinSuper) {
                 var shimV = callExt(b, "js_obj_new", [])
@@ -7363,32 +7480,56 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         for (var i = 0; i < add.length; i++) { if (!nameIn(out, add[i])) { out.push(add[i]) } }
         return out
     }
-    // A class body: the nested classes and modules first, declared in the ENCLOSING
-    // scope (so a method of the outer class can name them) and published on the
-    // class under $c$, which is what makes Outer::Inner resolve - then the other
-    // statements, run with `self` bound to the class object.
+    // A class body runs in order, in a function of its own with `self` bound to the
+    // class object, so its locals stay its own while a constant may read them
+    // (`r = 5; QQ = r`). The constants and the nested classes and modules it
+    // introduces are bound in the ENCLOSING scope instead (curClsBodyFn,
+    // emitConstUp), so a method of the class can name them, and are published on
+    // the class under $c$ afterwards, which is what makes Outer::Inner and C::CONST
+    // resolve (the interpreter's publishModuleScope does the same).
+    var curClsBodyFn = false
+    function emitConstUp(b, name, v) {
+        callExt(b, "js_rlset", [curScopeV, emitStr(b, name), v, emitNum(b, curCtlDepth + 1)])
+        return b
+    }
     function emitClassBody(b, clsV, r) {
+        if (r.cstmts.length == 0) { return {b: b, v: hNull} }
+        var bodyTs = []
+        for (var ci = 0; ci < r.cstmts.length; ci++) { bodyTs.push(r.cstmts[ci].t) }
+        var body = makeBody(bodyTs)
+        nextSelfIsCls = true
+        var cbIdx = emitFunc([], function(bb) {
+            curClsBodyFn = true
+            return body(bb)
+        }, true)
+        var cbArgs = callExt(b, "js_arr_new", [])
+        callExt(b, "js_arr_push", [cbArgs, clsV])
+        var v = callExt(b, "js_call", [callExt(b, "js_closure", [handle(cbIdx), curScopeV]), hUndef, cbArgs])
         for (var ni = 0; ni < r.cstmts.length; ni++) {
-            if (!hoistedCstmt(r.cstmts[ni])) { continue }
-            var nres = r.cstmts[ni].t(b)
-            b = nres.b
             var nn = r.cstmts[ni].name
             if (nn != undefined && nn != "") {
                 callExt(b, "js_set", [clsV, emitStr(b, "$c$" + nn),
                                       callExt(b, "js_scope_get", [curScopeV, emitStr(b, nn)])])
             }
         }
-        var bodyTs = []
-        for (var ci = 0; ci < r.cstmts.length; ci++) {
-            if (hoistedCstmt(r.cstmts[ci])) { continue }
-            bodyTs.push(r.cstmts[ci].t)
+        return {b: b, v: v}
+    }
+    // The instance-method names a class or module body defines ITSELF and does not
+    // make private, appended to `prev': the __imn list Module#instance_methods(false)
+    // answers from (rubyOwnIMethods in abnf/jsrt.go). initialize and its kin are
+    // private in MRI whatever the body says.
+    function ownIMNames(prev, r) {
+        var out = prev.slice(0)
+        var add = function(n) {
+            if (n == "initialize" || n == "initialize_copy" || n == "respond_to_missing?" || nameIn(out, n)) { return }
+            for (var q = 0; q < r.restricted.length; q++) {
+                if (r.restricted[q].name == n && r.restricted[q].kind == "private") { return }
+            }
+            out.push(n)
         }
-        if (bodyTs.length == 0) { return {b: b, v: hNull} }
-        nextSelfIsCls = true
-        var cbIdx = emitFunc([], makeBody(bodyTs), true)
-        var cbArgs = callExt(b, "js_arr_new", [])
-        callExt(b, "js_arr_push", [cbArgs, clsV])
-        return {b: b, v: callExt(b, "js_call", [callExt(b, "js_closure", [handle(cbIdx), curScopeV]), hUndef, cbArgs])}
+        for (var i = 0; i < r.methods.length; i++) { add(r.methods[i].name) }
+        for (var j = 0; j < r.aliases.length; j++) { add(r.aliases[j].to) }
+        return out
     }
     // alias / alias_method: the new name is bound to the SAME closure, after every
     // method of the body exists.
@@ -7414,6 +7555,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         for (var k = 0; k < r.sdefs.length; k++) { snames.push(r.sdefs[k].name) }
         prev.snames = unionNames(prev.snames, snames)
         b = emitNameList(b, clsV, prev.snames, "__snames")
+        // The reopening body's new instance-method names join the list at run time,
+        // behind any a define_method has added since. A builtin class keeps none.
+        var imn = prev.imn == null ? [] : ownIMNames(prev.imn, r)
+        if (prev.imn != null && imn.length > prev.imn.length) {
+            var imnV = callExt(b, "js_get", [clsV, emitStr(b, "__imn")])
+            for (var ii = prev.imn.length; ii < imn.length; ii++) { callExt(b, "js_arr_push", [imnV, emitStr(b, imn[ii])]) }
+            prev.imn = imn
+        }
         var savedCls = curClsName
         curClsName = name
         var cb = emitClassBody(b, clsV, r)
@@ -7519,7 +7668,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             callExt(b, "js_set", [modV, emitStr(b, "__isclass"), hTrue])
             callExt(b, "js_set", [modV, emitStr(b, "__ismodule"), hTrue])
             callExt(b, "js_set", [modV, emitStr(b, "__name"), emitStr(b, name)])
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), modV])
+            b = emitNameList(b, modV, ownIMNames([], r), "__imn")
+            b = emitNameList(b, modV, [], "__incl")
+            if (curClsBodyFn) { b = emitConstUp(b, name, modV) }
+            else { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), modV]) }
             b = emitMixRecord(b, modV, modAnc, "$mix$", "__mixorder")
             var savedCls = curClsName
             curClsName = name
@@ -7700,7 +7852,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // Math is a MODULE, and it belongs here for the same reason the classes do:
         // without it the name falls through to the ROOT scope's JavaScript Math, and
         // Math.sqrt(4) has to answer 2.0, not 2.
-        "Math",
+        "Math", "Struct",
         "Exception", "StandardError", "RuntimeError", "ArgumentError", "TypeError",
         "NameError", "NoMethodError", "IndexError", "KeyError", "RangeError",
         "ZeroDivisionError", "StopIteration", "FrozenError", "NotImplementedError",

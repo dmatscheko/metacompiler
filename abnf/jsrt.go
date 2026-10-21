@@ -6170,6 +6170,67 @@ func rubySingExtend(o *jsObject, m interface{}) {
 
 // Object#singleton_methods: the direct defs, then each extended module's instance
 // methods (the names the emitter records on the module object as __mnames), once each.
+// rubyIMNote records a run-time define_method in the class's own instance-method
+// names (__imn, emitted per class by ruby-to-llvm-ir.abnf), and rubyOwnIMethods is
+// Module#instance_methods(false): those names, in order of first definition (MRI
+// lists its method-table order, which no engine reproduces). The emitter leaves the
+// private ones out. Twins: rbIMNote / rbOwnIMethods in lib/ruby-rt.metajs,
+// imnNote / ownInstanceMethods in ruby-interpreter.abnf.
+func rubyIMNote(o *jsObject, nm string) {
+	ns, isArr := o.props["__imn"].(*jsArray)
+	if !isArr {
+		ns = &jsArray{}
+		o.set("__imn", ns)
+	}
+	for _, e := range ns.elems {
+		if e == nm {
+			return
+		}
+	}
+	ns.elems = append(ns.elems, nm)
+}
+
+// rubyIncludersPut hands a method a MODULE gains at run time to the classes that
+// include it (__incl, recorded by emitMixRecord of ruby-to-llvm-ir.abnf), because
+// an include copies the module's methods at build time. A method the class
+// defines itself (its __imn) still wins. Twin of rbIncludersPut in
+// lib/ruby-rt.metajs.
+func rubyIncludersPut(m *jsObject, nm string, fn interface{}) {
+	incl, isArr := m.props["__incl"].(*jsArray)
+	if !isArr {
+		return
+	}
+	for _, c := range incl.elems {
+		co, isObj := c.(*jsObject)
+		if !isObj {
+			continue
+		}
+		own := false
+		if ns, has := co.props["__imn"].(*jsArray); has {
+			for _, e := range ns.elems {
+				if e == nm {
+					own = true
+				}
+			}
+		}
+		if !own {
+			co.props[nm] = fn
+		}
+	}
+}
+
+func rubyOwnIMethods(o *jsObject) *jsArray {
+	out := &jsArray{}
+	if ns, isArr := o.props["__imn"].(*jsArray); isArr {
+		for _, e := range ns.elems {
+			if s, isStr := e.(string); isStr {
+				out.elems = append(out.elems, jsSym{s: s})
+			}
+		}
+	}
+	return out
+}
+
 func (rt *jsrt) rubySingNames(o *jsObject) *jsArray {
 	out := &jsArray{}
 	seen := map[string]bool{}
@@ -10987,7 +11048,13 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				if objIsCls {
 					nm, fn := rt.rubyBlockMethod(args)
 					o.props[nm] = fn
+					rubyIMNote(o, nm)
+					rubyIncludersPut(o, nm, fn)
 					return jsSym{s: nm}
+				}
+			case "instance_methods":
+				if pos, _ := rubyBlockArgs(args); objIsCls && len(pos) > 0 && !rubyTruthy(pos[0]) {
+					return rubyOwnIMethods(o)
 				}
 			case "singleton_methods":
 				return rt.rubySingNames(o)
@@ -11280,19 +11347,25 @@ func (rt *jsrt) rubyArityOf(f interface{}) float64 {
 
 // rubyBlockMethod is the (name, body) of #define_method / #define_singleton_method
 // as a method closure. The receiver is prepended by the dispatch, exactly as it is
-// for a compiled method; the block body does not take it (it closes over its
-// defining scope instead). Twin of rbBlockMethod in lib/ruby-rt.metajs and
-// blockMethodDef in ruby-interpreter.abnf.
+// for a compiled method. A literal block whose marker carries __rself was emitted
+// in that convention (dmArgs of ruby-to-llvm-ir.abnf) and IS the method; any other
+// body does not take the receiver and is wrapped. Twin of rbBlockMethod in
+// lib/ruby-rt.metajs and blockMethodDef in ruby-interpreter.abnf.
 func (rt *jsrt) rubyBlockMethod(args []interface{}) (string, interface{}) {
 	pos, blk := rubyBlockArgs(args)
 	if len(pos) == 0 {
 		rt.fail("no method name given")
 	}
+	nm := rt.rubyStr(pos[0])
+	if blk != nil {
+		if _, own := args[len(args)-1].(*jsObject).props["__rself"]; own {
+			return nm, blk
+		}
+	}
 	body := blk
 	if body == nil && len(pos) > 1 {
 		body = pos[1]
 	}
-	nm := rt.rubyStr(pos[0])
 	return nm, &hostFunc{name: "method:" + nm,
 		fn: func(rt *jsrt, this uint64, a []interface{}) interface{} {
 			if len(a) > 0 {
@@ -14888,6 +14961,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 					}
 					if bn == "Regexp" {
 						return w(rt.rubyRegexNew(argv))
+					}
+					if bn == "Struct" {
+						return w(rt.rubyStructNew(argv))
 					}
 					return w(rt.rubyExc(cls, argv))
 				}
