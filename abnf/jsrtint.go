@@ -619,9 +619,11 @@ func fnMetaBindings(b map[string]interface{}) {
 // arrKindBindings adds arrKind(a) and arrKindSet(a, k), host ids 99/100 of
 // languages/lib/runtime.c: the small kind number kept on an array (jsArray.kind).
 // arrKind answers 0 for an untagged array and for a non-array; arrKindSet ignores
-// a non-array and answers its first argument. The frozen grammar host binds them
-// too (frozenBaseBindings), and commonscript.go binds the goja twin, because an
-// interpreter half keeps the same kinds as its compiler half.
+// a non-array and answers its first argument. arrProps(a) and arrPropsSet(a, o),
+// host ids 106/107, are the same pair for the object holding an array's named
+// properties (jsArray.props), undefined until set. The frozen grammar host binds
+// them too (frozenBaseBindings), and commonscript.go binds the goja twin, because
+// an interpreter half keeps the same kinds as its compiler half.
 func arrKindBindings(b map[string]interface{}) {
 	b["arrKind"] = jsHostFunc("arrKind", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		if a, ok := argAt(args, 0).(*jsArray); ok {
@@ -633,6 +635,19 @@ func arrKindBindings(b map[string]interface{}) {
 		v := argAt(args, 0)
 		if a, ok := v.(*jsArray); ok {
 			a.kind = int(rt.toNumber(argAt(args, 1)))
+		}
+		return v
+	})
+	b["arrProps"] = jsHostFunc("arrProps", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		if a, ok := argAt(args, 0).(*jsArray); ok && a.props != nil {
+			return a.props
+		}
+		return jsUndef
+	})
+	b["arrPropsSet"] = jsHostFunc("arrPropsSet", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		v := argAt(args, 0)
+		if a, ok := v.(*jsArray); ok {
+			a.props = argAt(args, 1)
 		}
 		return v
 	})

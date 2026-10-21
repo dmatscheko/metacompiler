@@ -3946,6 +3946,7 @@ NotFuncHead = :script(~~
         if (typeof self == "string" || Array.isArray(self)) {
             if (kk == "length") { return true }
             if (argsWant && jsIsArgs(self)) { return jsArgsHas(self, kk) }
+            if (Array.isArray(self) && jsArrNamedHas(self, kk)) { return true }
             var n = kk - 0
             return ("" + n) === kk && n >= 0 && n < self.length && Math.floor(n) === n
         }
@@ -4072,13 +4073,15 @@ NotFuncHead = :script(~~
             for (var oi = 0; oi < ok.length; oi++) { nl.push(ok[oi]) }
             return nl
         }
-        // An array's or a string's `length` after its indices, an arguments object's
-        // `callee` after that.
+        // An array's or a string's `length` after its indices, before an array's named
+        // properties, an arguments object's `callee` after that.
         if (typeof v == "string" || Array.isArray(v)) {
             var ak = jsOwnKeys(v)
-            ak.push("length")
-            if (jsIsArgs(v)) { ak.push("callee") }
-            return ak
+            var lenAt = (Array.isArray(v) && !jsIsArgs(v)) ? v.length : ak.length
+            var gk = ak.slice(0, lenAt)
+            gk.push("length")
+            if (jsIsArgs(v)) { gk.push("callee") }
+            return gk.concat(ak.slice(lenAt))
         }
         if (typeof v == "object" && v !== null && hasOwn(v, "__protoof")) { return jsProtoGopn(v) }
         if (isClassDesc(v)) { return jsClassOwnNames(v) }
@@ -4246,18 +4249,18 @@ NotFuncHead = :script(~~
     // object, so that a promise keeps no own keys at all.
     function jpMethod(p, name, args) {
         if (name == "then") {
-            var d1 = jpNew()
+            var d1 = jpMake(jpSpecies(p))
             jpThen(p, jpArg(args, 0), jpArg(args, 1), d1)
             return d1
         }
         if (name == "catch") {
-            var d2 = jpNew()
+            var d2 = jpMake(jpSpecies(p))
             jpThen(p, undefined, jpArg(args, 0), d2)
             return d2
         }
         if (name == "finally") {
             var fn = jpArg(args, 0)
-            var d3 = jpNew()
+            var d3 = jpMake(jpSpecies(p))
             jpThen(p, jpFinallyPass(fn), jpFinallyRaise(fn), d3)
             return d3
         }
@@ -4290,24 +4293,55 @@ NotFuncHead = :script(~~
     // one state OBJECT rather than captured locals, because a MetaJS local keeps the
     // type it was first assigned and a counter written from two closures is exactly
     // the shape that trips over.
-    function jpStatic(name, args) {
-        if (name == "resolve") { return jpResolveValue(jpArg(args, 0)) }
+    // Called on Promise (c undefined) or on its subclass c, whose instance each
+    // answers (jpMake); resolve answers a promise of that very class unchanged. Twins:
+    // promStatic in abnf/jsrt.go, jpStatic in languages/lib/js-rt.metajs.
+    function jpStatic(c, name, args) {
+        if (name == "resolve") {
+            var x = anytype // The value to resolve with.
+            x = jpArg(args, 0)
+            if (jpIs(x) && x.__class === c) { return x }
+            var pv = jpMake(c)
+            jpResolve(pv, x)
+            return pv
+        }
         if (name == "reject") {
-            var pr = jpNew()
+            var pr = jpMake(c)
             jpSettle(pr, 2, jpArg(args, 0))
             return pr
         }
-        if (name == "all") { return jpCombine("all", jpArg(args, 0)) }
-        if (name == "allSettled") { return jpCombine("allSettled", jpArg(args, 0)) }
-        if (name == "race") { return jpCombine("race", jpArg(args, 0)) }
-        if (name == "any") { return jpCombine("any", jpArg(args, 0)) }
+        if (name == "all") { return jpCombine("all", jpArg(args, 0), c) }
+        if (name == "allSettled") { return jpCombine("allSettled", jpArg(args, 0), c) }
+        if (name == "race") { return jpCombine("race", jpArg(args, 0), c) }
+        if (name == "any") { return jpCombine("any", jpArg(args, 0), c) }
         return jpMiss
     }
-    function jpCombine(kind, src) {
+    // SpeciesConstructor(p, %Promise%) for the promise then / catch / finally derive
+    // from: jsSpeciesOf the class of a Promise subclass instance, undefined for a
+    // plain promise. Twins: promSpecies in abnf/jsrt.go, jpSpecies in
+    // languages/lib/js-rt.metajs.
+    function jpSpecies(p) {
+        var none = anytype
+        none = undefined
+        if (p.__class == undefined) { return none }
+        return jsSpeciesOf(p.__class)
+    }
+    // A fresh pending promise, made by `new c(executor)` for a Promise subclass c, a
+    // plain one for undefined. Twin of promMake in abnf/jsrt.go, which states the
+    // rule.
+    function jpMake(c) {
+        if (c !== undefined) {
+            var r = anytype // What the subclass's construction answers.
+            r = jsConstructClass(c, [function(res, rej) { return undefined }])
+            if (jpIs(r)) { return r }
+        }
+        return jpNew()
+    }
+    function jpCombine(kind, src, c) {
         if (!Array.isArray(src)) { fail("Promise." + kind + " needs an array") }
         var st = {}
         st["kind"] = kind
-        st["out"] = jpNew()
+        st["out"] = jpMake(c)
         st["results"] = []
         st["left"] = src.length
         for (var i = 0; i < src.length; i++) { st["results"].push(undefined) }
@@ -4318,7 +4352,17 @@ NotFuncHead = :script(~~
             return st["out"]
         }
         for (var j = 0; j < src.length; j++) {
-            jpThen(jpResolveValue(src[j]), jpCombineFn(st, j, true), jpCombineFn(st, j, false), undefined)
+            // On a subclass each element goes through c.resolve and its then makes a
+            // derived c (promStatic in abnf/jsrt.go).
+            var ep = anytype // The element's promise.
+            var dp = anytype // The derived promise its then makes, or undefined.
+            ep = jpResolveValue(src[j])
+            dp = undefined
+            if (c !== undefined) {
+                ep = jpStatic(c, "resolve", [src[j]])
+                dp = jpMake(jpSpecies(ep))
+            }
+            jpThen(ep, jpCombineFn(st, j, true), jpCombineFn(st, j, false), dp)
         }
         return st["out"]
     }
@@ -4603,7 +4647,7 @@ NotFuncHead = :script(~~
             if (pmr !== jpMiss) { return {v: pmr} }
         }
         if (target === jsPromiseFn) {
-            var psr = jpStatic(name, args)
+            var psr = jpStatic(undefined, name, args)
             if (psr !== jpMiss) { return {v: psr} }
         }
         if (target === jsObjectGlobal) { return jsObjectStatic(name, args) }
@@ -6309,6 +6353,14 @@ NotFuncHead = :script(~~
             }
         }
         if (k === "__#@iterator" && (typeof o == "string" || Array.isArray(o))) { return jsSeqIterFn(o) }
+        if (Array.isArray(o) && (typeof k == "string" ? k !== "length" : !(k >= 0 && Math.floor(k) === k))) {
+            var np = anytype // The array's named properties, or undefined (jsArrNamed).
+            np = jsArrNamed(o, false)
+            if (np !== undefined && np.__keys.indexOf("" + k) >= 0) { return np["" + k] }
+            // Under goja the host array would answer its own Object.prototype method,
+            // where -frozen's has none and jsProtoCall answers.
+            if (jsIsProtoName(k)) { return undefined }
+        }
         return o[k]
     }
     // ================================================ the STATIC namespace ====
@@ -7125,6 +7177,12 @@ NotFuncHead = :script(~~
             var wr = jsWriteRefusal(o, k, v)
             if (wr != "") { jsRefuse(wr); return }
         }
+        if (k !== "length" && Array.isArray(o) && jsArrIndexKey(k) < 0) {
+            var np = jsArrNamed(o, true)
+            scopePut(np, k, v)
+            trackKey(np, k)
+            return
+        }
         scopePut(o, k, v)
         trackKey(o, k) // Keep the object's for-in key list up to date.
         // ...and a value that is no array length resizes it as an array write does.
@@ -7249,6 +7307,35 @@ NotFuncHead = :script(~~
     // abnf/jsrtjsprint.go and jvOwnKeys in languages/lib/js-rt.metajs, which read the
     // same list under the name __sfk (their statics table is a runtime object whose
     // own key order records every write, so the enumerable ones need naming).
+    // An array's NAMED properties - a key that is no index, `a.foo = 1` - live in an
+    // object kept on the array (arrProps / arrPropsSet, host ids 106/107) with the
+    // __keys list every object here keeps; jsArrNamed answers it, made at the first
+    // such write when `make` asks, else undefined while there is none. An array's own
+    // keys are its indices, then these in insertion order. Twins: jsArray.props in
+    // abnf/jsrt.go (setMember, getMember) and field e of the array cell in
+    // languages/lib/runtime.c (set_member, get_member).
+    function jsArrNamed(a, make) {
+        var p = anytype // The named-property object, or undefined.
+        p = arrProps(a)
+        if (p === undefined && make) {
+            p = {"__keys": []}
+            arrPropsSet(a, p)
+        }
+        return p
+    }
+    function jsArrNamedHas(a, k) {
+        var p = anytype // The named-property object, or undefined.
+        p = arrProps(a)
+        return p !== undefined && p.__keys.indexOf(k) >= 0
+    }
+    // The array index member key k names, or -1 when it names a property: ToNumber of
+    // k must be a non-negative integer. Twin of rt.arrIndexOf in abnf/jsrt.go.
+    function jsArrIndexKey(k) {
+        var n = anytype // ToNumber of the key.
+        n = (typeof k == "number") ? k : k - 0
+        if (!(n >= 0) || n === Infinity || Math.floor(n) !== n) { return 0 - 1 }
+        return n
+    }
     function ownKeys(v) {
         if (v == undefined || v == null) { return [] }
         if (isClassDesc(v)) { return ownKeys(v.__statics) }
@@ -7260,6 +7347,9 @@ NotFuncHead = :script(~~
         if (Array.isArray(v)) {
             var a = []
             for (var j = 0; j < v.length; j++) { a.push("" + j) }
+            var np = anytype // The array's named properties, or undefined (jsArrNamed).
+            np = jsArrNamed(v, false)
+            if (np !== undefined) { return a.concat(ownKeys(np)) }
             return a
         }
         if (hasOwn(v, "__keys")) {
@@ -8679,7 +8769,11 @@ NotFuncHead = :script(~~
         if (typeof o == "function") { return fnOwn(o, "" + k) }
         if (argsWant && jsIsArgs(o)) { return jsArgsHas(o, k) }
         if (jsArrClasses.length > 0 && Array.isArray(o) && jsArrClassOf(o) !== undefined && jsProtoChainHas(jsArrClassOf(o), "" + k)) { return true }
-        if (Array.isArray(o)) { var n = k - 0; return n >= 0 && n < o.length }
+        if (Array.isArray(o)) {
+            if (jsArrNamedHas(o, "" + k)) { return true }
+            var n = k - 0
+            return n >= 0 && n < o.length
+        }
         if (jsIsWrap(o) && typeof o.__bvof == "string" && jsHasOwn(o.__bvof, k)) { return true }
         // `"m" in C` asks the STATIC namespace and nothing else: the descriptor's own
         // slots are C's instance methods, which node does not report as properties of
@@ -8835,6 +8929,10 @@ NotFuncHead = :script(~~
                 var dfp = anytype
                 dfp = fnPropsOf(p.obj)
                 if (dfp !== undefined) { tgt = dfp }
+            }
+            if (Array.isArray(p.obj) && jsArrIndexKey(p.key) < 0) {
+                tgt = jsArrNamed(p.obj, false)
+                if (tgt === undefined) { return true }
             }
             if (typeof tgt != "function") {
                 scopePut(tgt, p.key, undefined)
@@ -10031,6 +10129,16 @@ NotFuncHead = :script(~~
         pendingNewTarget = undefined
         return r
     }
+    // A class field on the instance being built: an Array subclass instance keeps a
+    // named one beside its elements (jsArrNamed), so setMember files it.
+    function jsFieldPut(self, k, v) {
+        if (Array.isArray(self)) {
+            setMember(self, k, v)
+            return
+        }
+        scopePut(self, k, v)
+        trackKey(self, k)
+    }
     function ctorFields(fields, fscopes) {
         var saved = scopes
         // A field initializer is evaluated as a method is: new.target is undefined in it.
@@ -10041,8 +10149,7 @@ NotFuncHead = :script(~~
         for (var k = 0; k < fields.length; k++) {
             var fk = memberKey(fields[k])
             var fv = (fields[k].init != null) ? fields[k].init() : undefined
-            scopePut(self, fk, fv)
-            trackKey(self, fk)
+            jsFieldPut(self, fk, fv)
         }
         scopes = saved
         return undefined
@@ -10120,6 +10227,12 @@ NotFuncHead = :script(~~
         if (isClassDesc(target)) {
             var bb = anytype // The builtin the class's chain ends at, or undefined.
             bb = jsBuiltinBase(target)
+            // Promise's statics make the subclass's instance (jpStatic).
+            if (bb === jsPromiseFn) {
+                var bps = anytype // The static's answer, or jpMiss.
+                bps = jpStatic(target, name, args)
+                if (bps !== jpMiss) { return bps }
+            }
             if (bb !== undefined) {
                 var bs = anytype // {v} or null.
                 bs = jsBuiltin(bb, name, args)
@@ -10222,8 +10335,7 @@ NotFuncHead = :script(~~
         return jsArrClasses[Math.floor(k / 32) - 1]
     }
     // A method call on an instance: {v} from the class chain, or null for the Array
-    // builtins to answer. The builtins that make a new array through ArraySpeciesCreate
-    // answer one of the instance's class; the subclass constructor is not run for it.
+    // builtins to answer (jsArrBuiltin).
     var jsArrSpecies = {"concat": true, "filter": true, "flat": true, "flatMap": true, "map": true, "slice": true, "splice": true}
     function jsArrSubCall(a, name, args) {
         var cls = anytype // A class descriptor, or absent.
@@ -10262,11 +10374,43 @@ NotFuncHead = :script(~~
         return null
     }
     // An Array builtin on an instance, which is also what its super.m() reaches.
+    // One that makes its array through ArraySpeciesCreate (ECMA-262 10.4.2.3, the
+    // names in jsArrSpecies) makes it with the instance's species constructor: called
+    // with the length the builtin asks for - map the source's, slice and splice the
+    // count, the others 0 - before the builtin runs, or after it for slice and splice,
+    // whose count is the length of the builtin's own answer; then filled with that
+    // answer's elements, and concat, slice and splice set its length. Twins:
+    // jsvArrBuiltin in abnf/jsrtjsprint.go, jvArrBuiltin in languages/lib/js-rt.metajs.
     function jsArrBuiltin(a, name, args) {
+        var sc = anytype // The species constructor, or undefined for the plain builtin.
+        sc = undefined
+        if (hasOwn(jsArrSpecies, name) && jsArrClassOf(a) !== undefined) { sc = jsSpeciesOf(jsArrClassOf(a)) }
+        if (sc === undefined) { return jsBuiltin(a, name, args) }
+        var pre = name != "slice" && name != "splice"
+        var out = anytype // The species constructor's object.
+        if (pre) { out = jsConstructClass(sc, [name == "map" ? a.length : 0]) }
         var r = anytype // {v} or null.
         r = jsBuiltin(a, name, args)
-        if (r != null && hasOwn(jsArrSpecies, name) && Array.isArray(r.v) && jsArrClassOf(a) !== undefined) { jsArrTag(r.v, jsArrClassOf(a)) }
-        return r
+        if (r == null || !Array.isArray(r.v)) { return r }
+        if (!pre) { out = jsConstructClass(sc, [r.v.length]) }
+        for (var i = 0; i < r.v.length; i++) { setMember(out, i, r.v[i]) }
+        if (!pre || name == "concat") { setMember(out, "length", r.v.length) }
+        return {v: out}
+    }
+    // The class a builtin making a new object of an instance of class cls makes it
+    // with: cls's static [Symbol.species], or undefined for the builtin's plain kind.
+    // Twins: jsSpeciesOf in abnf/jsrt.go, which states the rule, and jvSpeciesOf in
+    // languages/lib/js-rt.metajs.
+    function jsSpeciesOf(cls) {
+        var hit = anytype // The static member's record, or undefined.
+        hit = classStaticFind(cls, "__#@species")
+        if (hit == undefined || (!hit.isacc && hit.v === undefined)) { return cls }
+        var v = anytype // The species.
+        v = hit.isacc ? (hit.g == undefined ? undefined : callWithThis(hit.g, cls, [])) : hit.v
+        if (isClassDesc(v)) { return v }
+        var none = anytype
+        none = undefined
+        return none
     }
     // A read: a getter, a method value or `constructor` off the class chain.
     function jsArrSubRead(a, k) {
@@ -10543,16 +10687,21 @@ NotFuncHead = :script(~~
             // node's TypeError for `new` on something that is neither a class nor a
             // constructor function, and CATCHABLE.
             if (cls == undefined || !cls.__isclass) { biRaise("TypeError: " + clsName + " is not a constructor") }
-            var obj = {}
-            obj["__class"] = cls
-            obj["__keys"] = []
-            var cargv = [obj]
-            for (var j = 0; j < argv.length; j++) cargv.push(argv[j])
-            var cret = anytype // [[Construct]]: a returned OBJECT replaces the instance.
-            cret = ctorConstruct(cls, cargv, cls)
-            if (cret != undefined && cret != null && (typeof cret == "object" || typeof cret == "function")) { return cret }
-            return obj
+            return jsConstructClass(cls, argv)
         }
+    }
+    // `new C(...argv)` for a class descriptor C: the instance carries C, the
+    // constructor runs with new.target C, and an object it returns wins.
+    function jsConstructClass(cls, argv) {
+        var obj = {}
+        obj["__class"] = cls
+        obj["__keys"] = []
+        var cargv = [obj]
+        for (var j = 0; j < argv.length; j++) cargv.push(argv[j])
+        var cret = anytype // [[Construct]]: a returned OBJECT replaces the instance.
+        cret = ctorConstruct(cls, cargv, cls)
+        if (cret != undefined && cret != null && (typeof cret == "object" || typeof cret == "function")) { return cret }
+        return obj
     }
     // `new F(...)` for a FUNCTION F. A wrapper of the primitive the call answers, and
     // ToObject for Object.

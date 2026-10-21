@@ -168,6 +168,12 @@ type jsArray struct {
 	// written by arrKind / arrKindSet (arrKindBindings in jsrtint.go); the floor's
 	// twin is field d of the array cell in languages/lib/runtime.c.
 	kind int
+
+	// props holds the array's NAMED (non-index) properties for a language that
+	// has them (js: `a.foo = 1`), nil until one is written; not carried over to
+	// a copy. Read and written by arrProps / arrPropsSet (arrKindBindings in
+	// jsrtint.go); the floor's twin is field e of the array cell.
+	props interface{}
 }
 
 // jsClosure is a compiled MetaJS function: an IR function plus the captured
@@ -1132,16 +1138,16 @@ func (rt *jsrt) promResolveValue(x interface{}) *jsObject {
 func (rt *jsrt) promMethod(p *jsObject, name string, args []interface{}) (interface{}, bool) {
 	switch name {
 	case "then":
-		derived := promNew()
+		derived := rt.promMake(rt.promSpecies(p))
 		rt.promThen(p, argAt(args, 0), argAt(args, 1), derived)
 		return derived, true
 	case "catch":
-		derived := promNew()
+		derived := rt.promMake(rt.promSpecies(p))
 		rt.promThen(p, jsUndef, argAt(args, 0), derived)
 		return derived, true
 	case "finally":
 		fn := argAt(args, 0)
-		derived := promNew()
+		derived := rt.promMake(rt.promSpecies(p))
 		pass := jsHostFunc("finally", func(rt *jsrt, this uint64, a []interface{}) interface{} {
 			if isCallable(fn) {
 				rt.call(fn, jsUndef, nil)
@@ -1158,6 +1164,60 @@ func (rt *jsrt) promMethod(p *jsObject, name string, args []interface{}) (interf
 		return derived, true
 	}
 	return nil, false
+}
+
+// promSpecies is SpeciesConstructor(p, %Promise%) (ECMA-262 7.3.22) for the
+// promise then / catch / finally derive from: jsSpeciesOf the class of a Promise
+// subclass instance, nil for a plain promise. Twins: jpSpecies in
+// languages/lib/js-rt.metajs and both *-interpreter.abnf.
+func (rt *jsrt) promSpecies(p *jsObject) *jsObject {
+	cls, ok := p.props["__class"].(*jsObject)
+	if !ok {
+		return nil
+	}
+	return rt.jsSpeciesOf(cls)
+}
+
+// jsSpeciesOf is the class a builtin making a new object of an instance of class
+// cls makes it with: cls's static [Symbol.species], which the builtin's own
+// answers as cls itself, or nil for the builtin's plain kind (a species of the
+// builtin, of null, of anything but a class). A static data member holding
+// undefined counts as none, as layer 2's static table cannot tell the two apart.
+// Twins: jvSpeciesOf in languages/lib/js-rt.metajs, jsSpeciesOf in both
+// *-interpreter.abnf.
+func (rt *jsrt) jsSpeciesOf(cls *jsObject) *jsObject {
+	v, _, found := jsStaticsFind(cls, "__#@species")
+	if !found || v == jsUndef {
+		return cls
+	}
+	if acc, isAcc := v.(*jsAccessor); isAcc {
+		v = jsUndef
+		if acc.get != nil {
+			v = rt.call(acc.get, cls, nil)
+		}
+	}
+	if c, isCls := v.(*jsObject); isCls && isClassDesc(c) {
+		return c
+	}
+	return nil
+}
+
+// promMake is a fresh pending promise, made by `new c(executor)` for a Promise
+// subclass c (NewPromiseCapability, ECMA-262 27.2.1.5), so its constructor runs and
+// the promise is c's instance; nil makes a plain one. The executor does nothing: the
+// machinery settles the promise it answers directly, as the resolving functions
+// the executor would receive do. Twins: jpMake in languages/lib/js-rt.metajs and
+// both *-interpreter.abnf.
+func (rt *jsrt) promMake(c *jsObject) *jsObject {
+	if c != nil {
+		r := rt.jsvConstruct(c, []interface{}{jsHostFunc("", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return jsUndef
+		})})
+		if promIs(r) {
+			return r.(*jsObject)
+		}
+	}
+	return promNew()
 }
 
 // asyncStep resumes an async body once and re-arms it. sent is the value the
@@ -1254,13 +1314,23 @@ func (rt *jsrt) promiseGlobal() *hostFunc {
 	return rt.promFn
 }
 
-// promStatic answers Promise.resolve / reject / all / allSettled / race / any.
-func (rt *jsrt) promStatic(name string, args []interface{}) (interface{}, bool) {
+// promStatic answers Promise.resolve / reject / all / allSettled / race / any,
+// called on Promise (c nil) or on its subclass c, whose instance each answers
+// (promMake). Promise.resolve answers a promise of that very class unchanged.
+func (rt *jsrt) promStatic(c *jsObject, name string, args []interface{}) (interface{}, bool) {
 	switch name {
 	case "resolve":
-		return rt.promResolveValue(argAt(args, 0)), true
+		x := argAt(args, 0)
+		if xo, isProm := x.(*jsObject); isProm && promIs(xo) {
+			if xc, _ := xo.props["__class"].(*jsObject); xc == c {
+				return xo, true
+			}
+		}
+		p := rt.promMake(c)
+		rt.promResolve(p, x)
+		return p, true
 	case "reject":
-		p := promNew()
+		p := rt.promMake(c)
 		rt.promSettle(p, 2, argAt(args, 0))
 		return p, true
 	case "all", "allSettled", "race", "any":
@@ -1268,7 +1338,7 @@ func (rt *jsrt) promStatic(name string, args []interface{}) (interface{}, bool) 
 		if !ok {
 			rt.fail("Promise.%s needs an array", name)
 		}
-		out := promNew()
+		out := rt.promMake(c)
 		n := len(src.elems)
 		results := &jsArray{elems: make([]interface{}, n)}
 		for i := range results.elems {
@@ -1286,7 +1356,15 @@ func (rt *jsrt) promStatic(name string, args []interface{}) (interface{}, bool) 
 		}
 		for i, el := range src.elems {
 			idx := i
+			// On a subclass each element goes through c.resolve and its then makes a
+			// derived c, as Promise.all's Invoke(nextPromise, "then") does.
 			ep := rt.promResolveValue(el)
+			var dp *jsObject
+			if c != nil {
+				r, _ := rt.promStatic(c, "resolve", []interface{}{el})
+				ep = r.(*jsObject)
+				dp = rt.promMake(rt.promSpecies(ep))
+			}
 			rt.promThen(ep,
 				jsHostFunc("all", func(rt *jsrt, this uint64, a []interface{}) interface{} {
 					v := argAt(a, 0)
@@ -1334,7 +1412,7 @@ func (rt *jsrt) promStatic(name string, args []interface{}) (interface{}, bool) 
 						}
 					}
 					return jsUndef
-				}), nil)
+				}), dp)
 		}
 		return out, true
 	}
@@ -2950,12 +3028,17 @@ func (rt *jsrt) getMember(obj interface{}, key interface{}) interface{} {
 				return &boundMethod{recv: o, name: ks}
 			}
 		}
-		if !maybeNumeric(key) { // A property name like 'mname' is not an index.
+		if i := rt.arrIndexOf(key); i >= 0 {
+			if i < len(o.elems) {
+				return o.elems[i]
+			}
 			return jsUndef
 		}
-		idx := rt.toNumber(key)
-		if idx == math.Trunc(idx) && idx >= 0 && int(idx) < len(o.elems) {
-			return o.elems[int(idx)]
+		// A key that is no index names a property in o.props (setMember).
+		if p, ok := o.props.(*jsObject); ok {
+			if v, has := p.props[rt.toString(key)]; has {
+				return v
+			}
 		}
 		return jsUndef
 	case *jsGenerator:
@@ -3130,6 +3213,20 @@ func (rt *jsrt) importGoValue(v interface{}) interface{} {
 	}
 }
 
+// arrIndexOf is the array index a member key names, or -1 for a key that is
+// no index (a property name, a negative or fractional number). Twin of
+// maybe_numeric + index_of_key in languages/lib/runtime.c.
+func (rt *jsrt) arrIndexOf(key interface{}) int {
+	if !maybeNumeric(key) {
+		return -1
+	}
+	idx := rt.toNumber(key)
+	if idx != math.Trunc(idx) || idx < 0 || idx > math.MaxInt64/2 {
+		return -1
+	}
+	return int(idx)
+}
+
 func (rt *jsrt) setMember(obj interface{}, key interface{}, val interface{}) {
 	if isUndefOrNull(obj) {
 		if exc, ok := rt.runMissHook(&rt.missSet, key, obj); ok {
@@ -3173,14 +3270,19 @@ func (rt *jsrt) setMember(obj interface{}, key interface{}, val interface{}) {
 			}
 			return
 		}
-		if !maybeNumeric(key) {
-			rt.fail("invalid array index %s", rt.toString(key))
+		i := rt.arrIndexOf(key)
+		// A key that is no index is a NAMED property: it lives in an object kept
+		// in o.props (arrProps), made at the first such write. Twin of set_member
+		// in languages/lib/runtime.c.
+		if i < 0 {
+			p, ok := o.props.(*jsObject)
+			if !ok {
+				p = newJSObject()
+				o.props = p
+			}
+			p.set(rt.toString(key), val)
+			return
 		}
-		idx := rt.toNumber(key)
-		if idx != math.Trunc(idx) || idx < 0 {
-			rt.fail("invalid array index %s", rt.toString(key))
-		}
-		i := int(idx)
 		o.dropIdx()
 		for len(o.elems) <= i {
 			o.elems = append(o.elems, jsUndef)

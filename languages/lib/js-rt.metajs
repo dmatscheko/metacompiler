@@ -1297,8 +1297,12 @@ function js_jsdel(o, key) {
         if (idx === Math.trunc(idx)) {
             if (idx >= 0) {
                 if (idx < o.length) { o[idx] = undefined }
+                return true
             }
         }
+        var dp = anytype
+        dp = arrProps(o)
+        if (dp !== undefined) { delKey(dp, jvStr(key)) }
         return true
     }
     if (jvIsCallable(o)) {
@@ -1506,7 +1510,7 @@ function jvStoredKeys(o) {
         if (jvArgsN > 0) {
             if (jvIsArgs(o)) { return jvArgsKeys(o) }
         }
-        return jvIndexKeys(o.length)
+        return jvArrKeys(o)
     }
     if (typeof o == "string") { return jvIndexKeys(o.length) }
     if (!jvIsObj(o)) {
@@ -1587,6 +1591,9 @@ function jvHasOwn(self, k) {
         if (kk === "length") { return true }
         if (jvArgsN > 0) {
             if (jvIsArgs(self)) { return jvArgsHas(self, kk) }
+        }
+        if (Array.isArray(self)) {
+            if (jvArrNamedHas(self, kk)) { return true }
         }
         if (jvStr(jvToNumber(kk)) !== kk) { return false }
         return jvIndexIn(kk, self.length)
@@ -1697,6 +1704,33 @@ function jvIndexKeys(n) {
         i = i + 1
     }
     return out
+}
+
+// An array's own keys: its indices, then its NAMED properties in insertion order
+// (node's OrdinaryOwnPropertyKeys). The floor's set_member keeps a key that is no
+// index in an object in the array cell's field e, which arrProps (host id 106)
+// answers, undefined while there is none. Twin: jsvArrNamed in
+// abnf/jsrtjsprint.go.
+function jvArrKeys(a) {
+    var out = jvIndexKeys(a.length)
+    var p = anytype
+    p = arrProps(a)
+    if (p !== undefined) {
+        var ks = keysOf(p)
+        var i = 0
+        while (i < ks.length) {
+            out.push(ks[i])
+            i = i + 1
+        }
+    }
+    return out
+}
+// Whether array a has the named own property k.
+function jvArrNamedHas(a, k) {
+    var p = anytype
+    p = arrProps(a)
+    if (p === undefined) { return false }
+    return jvSlotHas(p, k)
 }
 
 function js_jssfield(statics, key, v) {
@@ -2837,6 +2871,7 @@ function jvHas(o, key) {
         }
         if (Array.isArray(o)) {
             if (key == "length" || jvArrM[key] === 1) { return true }
+            if (jvArrNamedHas(o, key)) { return true }
             if (jvArrClsN > 0) {
                 var hac = anytype
                 hac = jvArrClass(o)
@@ -3463,21 +3498,57 @@ function jvClassCall(a, cls, name, args) {
     return jvMiss
 }
 
-// An Array builtin on an instance, which is also what its super.m() reaches; a
-// species builtin's array is one of the instance's class.
+// An Array builtin on an instance, which is also what its super.m() reaches. A
+// species builtin makes its array with the instance's species constructor - see
+// jsvArrBuiltin in abnf/jsrtjsprint.go, its twin, for the rule.
 function jvArrBuiltin(a, name, args) {
+    var sc = anytype
+    sc = undefined
+    if (jvIsSpecies(name)) {
+        var cl = anytype
+        cl = jvArrClass(a)
+        if (cl !== undefined) { sc = jvSpeciesOf(cl) }
+    }
+    if (sc === undefined) { return jvArrMethod(a, name, args) }
+    var pre = name != "slice" && name != "splice"
+    var out = anytype
+    out = undefined
+    if (pre) {
+        var n = 0
+        if (name == "map") { n = a.length }
+        out = jvConstruct(sc, [n])
+    }
     var r = anytype
     r = jvArrMethod(a, name, args)
-    if (r !== jvMiss) {
-        if (Array.isArray(r)) {
-            if (jvIsSpecies(name)) {
-                var cl = anytype
-                cl = jvArrClass(a)
-                if (cl !== undefined) { jvArrTag(r, cl) }
-            }
-        }
+    if (!Array.isArray(r)) { return r }
+    if (!pre) { out = jvConstruct(sc, [r.length]) }
+    var i = 0
+    while (i < r.length) {
+        out[i] = r[i]
+        i = i + 1
     }
-    return r
+    if (!pre || name == "concat") { out["length"] = r.length }
+    return out
+}
+
+// The class a builtin making a new object of an instance of class cls makes it
+// with: cls's static [Symbol.species], or undefined for the builtin's plain kind.
+// Twin of jsSpeciesOf in abnf/jsrt.go, which states the rule.
+function jvSpeciesOf(cls) {
+    var v = anytype
+    v = jvStaticFind(cls, "__#@species")
+    if (v === undefined) { return cls }
+    if (jvIsAcc(v)) { v = jvAccGet(v, cls) }
+    if (jvIsClassDesc(v)) { return v }
+    return undefined
+}
+
+// `new C(args...)` for a class descriptor C. Twin of jsvConstruct in
+// abnf/jsrtjsprint.go.
+function jvConstruct(cls, args) {
+    var o = {}
+    o["__class"] = cls
+    return js_jsnewres(js_jsnewcall(cls, cls["__ctor"], jvPrepend(o, args)), o)
 }
 
 // A read off an instance: `constructor`, a getter or a method value of its class
@@ -4466,13 +4537,7 @@ function jvOwnKeys(v) {
         if (jvArgsN > 0) {
             if (jvIsArgs(v)) { return jvArgsKeys(v) }
         }
-        var oa = []
-        var j = 0
-        while (j < v.length) {
-            oa.push(j + "")
-            j = j + 1
-        }
-        return oa
+        return jvArrKeys(v)
     }
     if (typeof v == "string") {
         var os = []
@@ -6026,18 +6091,24 @@ function jvObjectGlobalMethod(name, args) {
         if (name == "getOwnPropertyNames" && jvNeN > 0 && jvIsObj(src)) {
             if (src["__nonenum"] !== undefined) { ks = jvErrHide(src, jvIndexOrder(keysOf(src))) }
         }
-        var i = 0
-        while (i < ks.length) {
-            out.push(jvKeyUnesc(ks[i]))
-            i = i + 1
-        }
-        // ...and an array's or a string's `length` after its indices, an arguments
-        // object's `callee` after that.
+        // ...and an array's or a string's `length` after its indices, before an
+        // array's named properties, an arguments object's `callee` after that.
+        var lenAt = 0 - 1
         if (name == "getOwnPropertyNames") {
-            if (Array.isArray(src) || typeof src == "string") {
+            if (typeof src == "string") { lenAt = ks.length }
+            if (Array.isArray(src)) {
+                lenAt = ks.length
+                if (!jvIsArgs(src)) { lenAt = src.length }
+            }
+        }
+        var i = 0
+        while (i <= ks.length) {
+            if (i === lenAt) {
                 out.push("length")
                 if (jvIsArgs(src)) { out.push("callee") }
             }
+            if (i < ks.length) { out.push(jvKeyUnesc(ks[i])) }
+            i = i + 1
         }
         return out
     }
@@ -6500,7 +6571,14 @@ function js_jsmcall(recv, key, args) {
                 if (jvIsProtoName(name)) { return jvProtoApply(recv, name, args) }
                 var hb = anytype
                 hb = jvBuiltinBase(recv)
-                if (hb !== undefined) { return js_jsmcall(hb, name, args) }
+                if (hb !== undefined) {
+                    // Promise's statics make the subclass's instance (jpStatic).
+                    if (jpFn !== undefined && hb === jpFn) {
+                        var hps = jpStatic(recv, name, args)
+                        if (hps !== jvMiss) { return hps }
+                    }
+                    return js_jsmcall(hb, name, args)
+                }
                 if (jvMissCallSet) { return jvMissCall }
             }
         }
@@ -6533,7 +6611,7 @@ function js_jsmcall(recv, key, args) {
         if (pm !== jvMiss) { return pm }
     }
     if (jpFn !== undefined && recv === jpFn) {
-        var ps = jpStatic(name, args)
+        var ps = jpStatic(undefined, name, args)
         if (ps !== jvMiss) { return ps }
     }
     // A Promise / RegExp subclass instance (jvHostRoot): its class's methods first.
@@ -8468,22 +8546,43 @@ function jpResolveValue(x) {
 // that a promise keeps no own keys at all.
 function jpMethod(p, name, args) {
     if (name == "then") {
-        var d1 = jpNew()
+        var d1 = jpMake(jpSpecies(p))
         jpThen(p, jvArg(args, 0), jvArg(args, 1), d1)
         return d1
     }
     if (name == "catch") {
-        var d2 = jpNew()
+        var d2 = jpMake(jpSpecies(p))
         jpThen(p, undefined, jvArg(args, 0), d2)
         return d2
     }
     if (name == "finally") {
         var fn = jvArg(args, 0)
-        var d3 = jpNew()
+        var d3 = jpMake(jpSpecies(p))
         jpThen(p, jpFinallyPass(fn), jpFinallyRaise(fn), d3)
         return d3
     }
     return jvMiss
+}
+
+// SpeciesConstructor(p, %Promise%) for the promise then / catch / finally derive
+// from: jvSpeciesOf the class of a Promise subclass instance, undefined for a plain
+// promise. Twin of promSpecies in abnf/jsrt.go.
+function jpSpecies(p) {
+    var cls = anytype
+    cls = p["__class"]
+    if (cls === undefined) { return undefined }
+    return jvSpeciesOf(cls)
+}
+
+// A fresh pending promise, made by `new c(executor)` for a Promise subclass c, a
+// plain one for undefined. Twin of promMake in abnf/jsrt.go, which states the rule.
+function jpMake(c) {
+    if (c !== undefined) {
+        var r = anytype
+        r = jvConstruct(c, [function (res, rej) { return undefined }])
+        if (jpIs(r)) { return r }
+    }
+    return jpNew()
 }
 
 // The value `p.then` READ AS A VALUE is: jpMethod bound to its receiver. node's is
@@ -8519,25 +8618,37 @@ function jpFinallyRaise(fn) {
 // one state OBJECT rather than captured locals, because a MetaJS local keeps the
 // type it was first assigned and a counter written from two closures is exactly
 // the shape that trips over.
-function jpStatic(name, args) {
-    if (name == "resolve") { return jpResolveValue(jvArg(args, 0)) }
+// Called on Promise (c undefined) or on its subclass c, whose instance each answers
+// (jpMake); resolve answers a promise of that very class unchanged. Twin of
+// promStatic in abnf/jsrt.go.
+function jpStatic(c, name, args) {
+    if (name == "resolve") {
+        var x = anytype
+        x = jvArg(args, 0)
+        if (jpIs(x)) {
+            if (x["__class"] === c) { return x }
+        }
+        var pv = jpMake(c)
+        jpResolve(pv, x)
+        return pv
+    }
     if (name == "reject") {
-        var pr = jpNew()
+        var pr = jpMake(c)
         jpSettle(pr, 2, jvArg(args, 0))
         return pr
     }
-    if (name == "all") { return jpCombine("all", jvArg(args, 0)) }
-    if (name == "allSettled") { return jpCombine("allSettled", jvArg(args, 0)) }
-    if (name == "race") { return jpCombine("race", jvArg(args, 0)) }
-    if (name == "any") { return jpCombine("any", jvArg(args, 0)) }
+    if (name == "all") { return jpCombine("all", jvArg(args, 0), c) }
+    if (name == "allSettled") { return jpCombine("allSettled", jvArg(args, 0), c) }
+    if (name == "race") { return jpCombine("race", jvArg(args, 0), c) }
+    if (name == "any") { return jpCombine("any", jvArg(args, 0), c) }
     return jvMiss
 }
 
-function jpCombine(kind, src) {
+function jpCombine(kind, src, c) {
     if (!Array.isArray(src)) { fail("Promise." + kind + " needs an array") }
     var st = {}
     st["kind"] = kind
-    st["out"] = jpNew()
+    st["out"] = jpMake(c)
     st["results"] = []
     st["left"] = src.length
     var i = 0
@@ -8553,7 +8664,17 @@ function jpCombine(kind, src) {
     }
     var j = 0
     while (j < src.length) {
-        jpThen(jpResolveValue(src[j]), jpCombineFn(st, j, true), jpCombineFn(st, j, false), undefined)
+        // On a subclass each element goes through c.resolve and its then makes a
+        // derived c (promStatic in abnf/jsrt.go).
+        var ep = anytype
+        var dp = anytype
+        ep = jpResolveValue(src[j])
+        dp = undefined
+        if (c !== undefined) {
+            ep = jpStatic(c, "resolve", [src[j]])
+            dp = jpMake(jpSpecies(ep))
+        }
+        jpThen(ep, jpCombineFn(st, j, true), jpCombineFn(st, j, false), dp)
         j = j + 1
     }
     return st["out"]

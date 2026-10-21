@@ -848,6 +848,74 @@ check("raw-and-array-copies", (function () {
         && [1, 2, 3, 4, 5].copyWithin(1, 0, 2).join(",") === "1,1,2,4,5";
 })());
 
+// ----- an array's named properties; a builtin subclass's species constructor -----
+// A key that is no array index is an ordinary own property of the array, listed after
+// the indices. map / filter / slice / splice / concat / flatMap on an Array subclass
+// instance construct the subclass (its constructor runs), and then / catch / finally
+// and the statics of a Promise subclass answer the subclass. Values are node 24's.
+var spLog = [];
+class SpArr extends Array {
+    constructor(...xs) { super(...xs); this.tag = "t" + xs.length; spLog.push(xs.length); }
+}
+class SpFld extends Array { f = "fld"; }
+class SpPlain extends Array { static get [Symbol.species]() { return Array; } }
+class SpProm extends Promise {
+    constructor(ex) { super(ex); this.tag = "p"; spLog.push("p"); }
+}
+class SpPlainProm extends Promise { static get [Symbol.species]() { return Promise; } }
+check("array-named-props", (function () {
+    var a = [1, 2];
+    var ks = ["foo", "bar", "-1", "1.5"];
+    a[ks[0]] = 5;
+    a.bar = "b";
+    var r = Object.keys(a).join(",") === "0,1,foo,bar" && a.foo === 5 && a.length === 2 && JSON.stringify(a) === "[1,2]";
+    var seen = [];
+    for (var k in a) { seen.push(k); }
+    r = r && seen.join(",") === "0,1,foo,bar" && Object.entries(a).length === 4 && Object.values(a).join(",") === "1,2,5,b";
+    r = r && a.hasOwnProperty("foo") && !a.hasOwnProperty("zz") && "bar" in a && !("zz" in a) && Object.hasOwn(a, "bar");
+    a.foo += 10;
+    a.foo++;
+    r = r && a.foo === 16 && Object.getOwnPropertyNames(a).join(",") === "0,1,length,foo,bar";
+    delete a.foo;
+    a[ks[2]] = "neg";
+    a[1.5] = "frac";
+    r = r && a.foo === undefined && !("foo" in a) && a[-1] === "neg" && a[ks[3]] === "frac" && a.length === 2;
+    r = r && Object.keys(a).join(",") === "0,1,bar,-1,1.5" && JSON.stringify(Object.assign({}, a)) === '{"0":1,"1":2,"bar":"b","-1":"neg","1.5":"frac"}';
+    a.push(3);
+    return r && a.length === 3 && a.bar === "b" && a.slice().bar === undefined && Object.keys([7]).join(",") === "0";
+})());
+check("array-subclass-species", (function () {
+    spLog = [];
+    var m = new SpArr(3, 4, 5);
+    var mm = m.map(function (x) { return x * 2; });
+    var ff = m.filter(function (x) { return x > 3; });
+    var ss = m.slice(1);
+    var cc = m.concat([9]);
+    var fl = m.flatMap(function (x) { return [x, x]; });
+    var sp = m.splice(0, 1);
+    var r = m.tag === "t3" && mm instanceof SpArr && mm.tag === "t1" && mm.join() === "6,8,10" && Object.keys(mm).join() === "0,1,2,tag";
+    r = r && ff instanceof SpArr && ff.join() === "4,5" && ss instanceof SpArr && ss.length === 2 && cc.join() === "3,4,5,9";
+    r = r && fl.length === 6 && sp instanceof SpArr && sp.join() === "3" && m.join() === "4,5" && spLog.join() === "3,1,1,1,1,1,1";
+    var fx = new SpFld();
+    fx.push(4, 5);
+    var fy = fx.filter(function (x) { return x > 4; });
+    var pl = SpPlain.from([1, 2]).map(function (x) { return x + 1; });
+    return r && fx.f === "fld" && fy.f === "fld" && fy instanceof SpFld && Object.keys(fy).join() === "0,f"
+        && !(pl instanceof SpPlain) && Array.isArray(pl) && pl.join() === "2,3";
+})());
+check("promise-subclass-species", (function () {
+    spLog = [];
+    var p = SpProm.resolve(1);
+    var q = p.then(function (v) { return v + 1; });
+    var r = p instanceof SpProm && p.tag === "p" && q instanceof SpProm && q.catch(function () {}) instanceof SpProm;
+    r = r && q.finally(function () {}) instanceof SpProm && SpProm.reject(5).catch(function () {}) instanceof SpProm;
+    r = r && SpProm.all([1]) instanceof SpProm && SpProm.race([1]) instanceof SpProm && SpProm.resolve(p) === p;
+    r = r && Promise.resolve(p) !== p && !(Promise.resolve(3).then(function (v) { return v; }) instanceof SpProm);
+    var pp = new SpPlainProm(function (res) { res(1); });
+    return r && pp instanceof SpPlainProm && !(pp.then(function (v) { return v; }) instanceof SpPlainProm)
+        && spLog.join() === "p,p,p,p,p,p,p,p,p,p,p,p";
+})());
+
 function main() {
     println("features: " + checks + " checks, " + failures + " failures");
     return failures;

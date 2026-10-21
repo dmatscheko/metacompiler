@@ -679,9 +679,10 @@ func installGojaFnMeta(vm *goja.Runtime) {
 	})
 }
 
-// installGojaArrKind binds arrKind(a) and arrKindSet(a, k), the goja twin of
-// arrKindBindings (jsrtint.go). The number is kept ON the array under a private
-// symbol, so a copy (slice, concat, a literal) starts untagged, as jsArray's does.
+// installGojaArrKind binds arrKind(a) and arrKindSet(a, k), and arrProps(a) and
+// arrPropsSet(a, o), the goja twin of arrKindBindings (jsrtint.go). Each value is
+// kept ON the array under a private symbol, so a copy (slice, concat, a literal)
+// starts without it, as jsArray's does.
 func installGojaArrKind(vm *goja.Runtime) {
 	sym := goja.NewSymbol("arrKind")
 	arrObj := func(v goja.Value) *goja.Object {
@@ -703,6 +704,24 @@ func installGojaArrKind(vm *goja.Runtime) {
 		a := call.Argument(0)
 		if o := arrObj(a); o != nil {
 			if err := o.DefineDataPropertySymbol(sym, vm.ToValue(call.Argument(1).ToInteger()), goja.FLAG_TRUE, goja.FLAG_FALSE, goja.FLAG_TRUE); err != nil {
+				panic(err)
+			}
+		}
+		return a
+	})
+	psym := goja.NewSymbol("arrProps")
+	vm.Set("arrProps", func(call goja.FunctionCall) goja.Value {
+		if o := arrObj(call.Argument(0)); o != nil {
+			if v := o.GetSymbol(psym); v != nil {
+				return v
+			}
+		}
+		return goja.Undefined()
+	})
+	vm.Set("arrPropsSet", func(call goja.FunctionCall) goja.Value {
+		a := call.Argument(0)
+		if o := arrObj(a); o != nil {
+			if err := o.DefineDataPropertySymbol(psym, call.Argument(1), goja.FLAG_TRUE, goja.FLAG_FALSE, goja.FLAG_TRUE); err != nil {
 				panic(err)
 			}
 		}

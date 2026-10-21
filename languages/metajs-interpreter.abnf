@@ -1084,6 +1084,10 @@ KwDefault   = "default" KwEnd ;
         // on an array; bound by both grammar hosts like the fnMeta pair.
         "arrKind": arrKind,
         "arrKindSet": arrKindSet,
+        // arrProps(a) / arrPropsSet(a, o): host ids 106/107, the object holding
+        // an array's named properties; bound by both grammar hosts likewise.
+        "arrProps": arrProps,
+        "arrPropsSet": arrPropsSet,
         // byteAt(s, i) / byteSub(s, lo, hi) / bytesStr(a): host ids 101..103, a
         // string as its bytes; bound by both grammar hosts like the arrKind pair.
         "byteAt": byteAt,

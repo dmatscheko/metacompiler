@@ -878,7 +878,7 @@ void gc_trace_cell(long b) {
 	long *w = (long *)b;
 	long t = w[0];
 	if (t == 4)  { gc_try(w[1], 0); gc_try(w[3], 0); return; }  /* bytes, units */
-	if (t == 5)  { gc_try(w[1], 1); return; }                   /* array elements */
+	if (t == 5)  { gc_try(w[1], 1); gc_try(w[5], 1); return; }  /* elements, named properties */
 	if (t == 6)  { gc_try(w[1], 1); gc_try(w[2], 1); return; }  /* keys, values */
 	/* 7 8 9 16 are the function kinds: e holds the name js_jsfnmeta set. */
 	if (t == 7)  { gc_try(w[2], 1); gc_try(w[5], 1); return; }  /* closure env, name */
@@ -3872,9 +3872,10 @@ long get_member(long obj, long key) {
 			mid = method_id_array(key);
 			if (mid != 0) { return mk_bound(obj, mid); }
 		}
-		if (!maybe_numeric(key)) { return H_UNDEF; }
-		idx = index_of_key(key);
-		if (idx >= 0 && idx < arr_len(obj)) { return arr_get(obj, idx); }
+		idx = maybe_numeric(key) ? index_of_key(key) : -1;
+		if (idx >= 0) { return arr_get(obj, idx); }
+		/* A key that is no index names a property in field e (set_member). */
+		if (fe(obj) != H_UNDEF) { return obj_get(fe(obj), to_string(key)); }
 		return H_UNDEF;
 	}
 	if (t == 4) {
@@ -3913,9 +3914,14 @@ void set_member(long obj, long key, long val) {
 			while (arr_len(obj) < ln) { arr_push(obj, H_UNDEF); }
 			return;
 		}
-		if (!maybe_numeric(key)) { die2("invalid array index ", key); }
-		idx = index_of_key(key);
-		if (idx < 0) { die2("invalid array index ", key); }
+		idx = maybe_numeric(key) ? index_of_key(key) : -1;
+		/* A key that is no index is a NAMED property: it lives in an object
+		 * kept in field e (arrProps), made at the first such write. */
+		if (idx < 0) {
+			if (fe(obj) == H_UNDEF) { se(obj, mk_obj()); }
+			obj_put(fe(obj), to_string(key), val);
+			return;
+		}
 		while (arr_len(obj) <= idx) { arr_push(obj, H_UNDEF); }
 		arr_set(obj, idx, val);
 		return;
@@ -6525,6 +6531,20 @@ long host_call(long id, long self, long args) {
 		if (tag_of(a) == 5) { sd(a, d_to_long(arg_num(args, 1))); }
 		return a;
 	}
+	/* arrProps(a) / arrPropsSet(a, o): the object holding the NAMED (non-index)
+	 * properties a language keeps on an array, in field e - undefined until set,
+	 * since mk_arr leaves e at handle 0, and not carried over to a copy. Twin of
+	 * jsArray.props in abnf/jsrt.go. */
+	case 106: {
+		long a = arg_at(args, 0);
+		if (tag_of(a) != 5) { return H_UNDEF; }
+		return fe(a);
+	}
+	case 107: {
+		long a = arg_at(args, 0);
+		if (tag_of(a) == 5) { se(a, arg_at(args, 1)); }
+		return a;
+	}
 	/* byteAt(s, i) / byteSub(s, lo, hi) / bytesStr(a): a string as the BYTES a
 	 * cell holds (UTF-8, WTF-8 for a lone surrogate), for a language whose
 	 * strings are byte strings (go). byteAt is the i-th byte, -1 outside s;
@@ -7579,6 +7599,8 @@ void boot(void) {
 	seed_root("fnMetaSet", mk_host(95));
 	seed_root("arrKind", mk_host(99));
 	seed_root("arrKindSet", mk_host(100));
+	seed_root("arrProps", mk_host(106));
+	seed_root("arrPropsSet", mk_host(107));
 	seed_root("byteAt", mk_host(101));
 	seed_root("byteSub", mk_host(102));
 	seed_root("bytesStr", mk_host(103));

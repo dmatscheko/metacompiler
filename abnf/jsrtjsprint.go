@@ -957,6 +957,15 @@ func jsvStaticDel(cls *jsObject, name string) {
 }
 
 // jsvObjDel drops an own property and its key-order entry.
+// jsvArrNamed is the object holding an array's NAMED properties (jsArray.props,
+// which the shared setMember fills), or nil while it has none. The indices come
+// first in every key list and the names after them, in insertion order, which is
+// node's OrdinaryOwnPropertyKeys. Twin: jvArrNamed in languages/lib/js-rt.metajs.
+func jsvArrNamed(a *jsArray) *jsObject {
+	p, _ := a.props.(*jsObject)
+	return p
+}
+
 func jsvObjDel(o *jsObject, name string) {
 	if _, found := o.props[name]; !found {
 		return
@@ -1766,6 +1775,9 @@ func jsvOwnKeys(v interface{}) []string {
 		for i := range o.elems {
 			out[i] = strconv.Itoa(i)
 		}
+		if p := jsvArrNamed(o); p != nil {
+			out = append(out, jsvOwnKeys(p)...)
+		}
 		return out
 	case string:
 		n := len([]rune(o))
@@ -1847,17 +1859,22 @@ func jsvGopnKeys(v interface{}) []string {
 			}
 			return jsvErrGopn(o, jsvOwnKeys(v))
 		}
-		// An array's or a string's `length` after its indices, an arguments object's
-		// `callee` after that.
+		// An array's or a string's `length` after its indices, before an array's
+		// named properties, an arguments object's `callee` after that.
 		switch t := v.(type) {
 		case string:
 			return append(jsvOwnKeys(v), "length")
 		case *jsArray:
-			ks := append(jsvOwnKeys(v), "length")
-			if jsvIsArgs(t) {
-				ks = append(ks, "callee")
+			ks := jsvOwnKeys(v)
+			n := len(ks)
+			if !jsvIsArgs(t) {
+				n = len(t.elems)
 			}
-			return ks
+			out := append(append([]string{}, ks[:n]...), "length")
+			if jsvIsArgs(t) {
+				out = append(out, "callee")
+			}
+			return append(out, ks[n:]...)
 		}
 		return jsvOwnKeys(v)
 	}
@@ -2102,8 +2119,7 @@ func jsvMethodValue(name string, fn interface{}) *hostFunc {
 // in languages/lib/js-rt.metajs.
 var jsvArrClasses []*jsObject
 
-// The builtins that make their array through ArraySpeciesCreate answer one of the
-// instance's class; the subclass constructor is not run for it.
+// The builtins that make their array through ArraySpeciesCreate (jsvArrBuiltin).
 var jsvArrSpecies = map[string]bool{"concat": true, "filter": true, "flat": true, "flatMap": true, "map": true, "slice": true, "splice": true}
 
 func jsvArrTag(a *jsArray, cls *jsObject) {
@@ -2149,20 +2165,66 @@ func (rt *jsrt) jsvClassCall(a interface{}, cls *jsObject, name string, args []i
 	return nil, false
 }
 
-// An Array builtin on an instance, which is also what its super.m() reaches.
+// An Array builtin on an instance, which is also what its super.m() reaches. One
+// that makes its array through ArraySpeciesCreate (ECMA-262 10.4.2.3) makes it with
+// the instance's species constructor (jsSpeciesOf): constructed with the length the builtin
+// asks for - map the source's, slice and splice the count, the others 0 - before
+// the builtin runs, or after it for slice and splice, whose count is the length of
+// the builtin's own answer; then filled with that answer's elements, and concat,
+// slice and splice set its length. Twins: jvArrBuiltin in
+// languages/lib/js-rt.metajs, jsArrBuiltin in both *-interpreter.abnf.
 func (rt *jsrt) jsvArrBuiltin(a *jsArray, name string, args []interface{}) (interface{}, bool) {
 	if lv := jsvArrLevel(a); jsvAttrN > 0 && lv > 0 {
 		if msg := rt.jsvArrMethodRefusal(a, name, args, lv); msg != "" {
 			rt.bigRaise("TypeError: %s", msg)
 		}
 	}
-	v, handled := rt.jsvMethod(a, name, args)
-	if r, isArr := v.(*jsArray); handled && isArr && jsvArrSpecies[name] {
-		if cls := jsvArrClass(a); cls != nil {
-			jsvArrTag(r, cls)
-		}
+	var sc *jsObject
+	if cls := jsvArrClass(a); cls != nil && jsvArrSpecies[name] {
+		sc = rt.jsSpeciesOf(cls)
 	}
-	return v, handled
+	if sc == nil {
+		return rt.jsvMethod(a, name, args)
+	}
+	pre := name != "slice" && name != "splice"
+	var out interface{}
+	if pre {
+		n := 0
+		if name == "map" {
+			n = len(a.elems)
+		}
+		out = rt.jsvConstruct(sc, []interface{}{float64(n)})
+	}
+	v, handled := rt.jsvMethod(a, name, args)
+	r, isArr := v.(*jsArray)
+	if !handled || !isArr {
+		return v, handled
+	}
+	if !pre {
+		out = rt.jsvConstruct(sc, []interface{}{float64(len(r.elems))})
+	}
+	for i, e := range r.elems {
+		rt.setMember(out, float64(i), e)
+	}
+	if !pre || name == "concat" {
+		rt.setMember(out, "length", float64(len(r.elems)))
+	}
+	return out, true
+}
+
+// `new C(args...)` for a class descriptor C: the instance carries C, the
+// constructor runs with new.target C, and an object it returns wins. Twin of
+// makeNewFrom's class arm in js-to-llvm-ir.abnf.
+func (rt *jsrt) jsvConstruct(cls *jsObject, args []interface{}) interface{} {
+	o := newJSObject()
+	o.set("__class", cls)
+	rt.pendingNewTarget = cls
+	r := rt.call(cls.props["__ctor"], jsUndef, append([]interface{}{o}, args...))
+	rt.pendingNewTarget = nil
+	if jsvIsObjLike(r) || isCallable(r) {
+		return r
+	}
+	return o
 }
 
 // A read off an instance: `constructor`, a getter or a method value of its class chain.
@@ -2452,6 +2514,11 @@ func (rt *jsrt) jsvHasOwn(v interface{}, k string) bool {
 	case *jsArray:
 		if jsvIsArgs(o) && k != "length" {
 			return jsvArgsHas(o, k)
+		}
+		if p := jsvArrNamed(o); p != nil {
+			if _, has := p.props[k]; has {
+				return true
+			}
 		}
 		n = len(o.elems)
 	case string:
@@ -3551,7 +3618,7 @@ func (rt *jsrt) jsvMethod(target interface{}, name string, args []interface{}) (
 	// Promise.resolve / reject / all / allSettled / race / any on the `Promise`
 	// global, which is a function value, so js_get finds no member of that name.
 	if hf, ok := target.(*hostFunc); ok && rt.promFn != nil && hf == rt.promFn {
-		if v, handled := rt.promStatic(name, args); handled {
+		if v, handled := rt.promStatic(nil, name, args); handled {
 			return v, true
 		}
 	}
@@ -5123,11 +5190,12 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			}
 		}
 		if arr, ok := u(a[0]).(*jsArray); ok {
-			if maybeNumeric(u(a[1])) {
-				idx := rt.toNumber(u(a[1]))
-				if idx == math.Trunc(idx) && idx >= 0 && int(idx) < len(arr.elems) {
-					arr.elems[int(idx)] = jsUndef
+			if i := rt.arrIndexOf(u(a[1])); i >= 0 {
+				if i < len(arr.elems) {
+					arr.elems[i] = jsUndef
 				}
+			} else if p := jsvArrNamed(arr); p != nil {
+				jsvObjDel(p, rt.toString(u(a[1])))
 			}
 			return boolH(true)
 		}
@@ -5731,8 +5799,15 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 				return w(jsvArgsHas(arr, name))
 			}
 		}
-		if _, isArr := u(a[0]).(*jsArray); isArr && (name == "length" || jsvArrayMethods[name] || jsvObjProtoName(jsvKeyUnesc(name))) {
-			return w(true)
+		if arr, isArr := u(a[0]).(*jsArray); isArr {
+			if name == "length" || jsvArrayMethods[name] || jsvObjProtoName(jsvKeyUnesc(name)) {
+				return w(true)
+			}
+			if p := jsvArrNamed(arr); p != nil {
+				if _, has := p.props[name]; has {
+					return w(true)
+				}
+			}
 		}
 		if cls := jsvArrClass(u(a[0])); cls != nil && jsvProtoChainHas(cls, name) {
 			return w(true)
@@ -6036,7 +6111,13 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 				}
 				return w(out)
 			}
-			return w(jsvIndexKeys(len(v.elems)))
+			out := jsvIndexKeys(len(v.elems))
+			if p := jsvArrNamed(v); p != nil {
+				for _, k := range jsvOwnKeys(p) {
+					out.elems = append(out.elems, k)
+				}
+			}
+			return w(out)
 		case string:
 			// strLen, not len(v): a string is indexed in UTF-16 CODE UNITS here.
 			return w(jsvIndexKeys(rt.strLen(v)))
@@ -6386,6 +6467,12 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			c, _ := u(a[0]).(*jsObject)
 			for guard := 0; c != nil && guard < 64; guard++ {
 				if b, isHost := c.props["__ctorfn"].(*hostFunc); isHost {
+					// Promise's statics make the subclass's instance (promStatic).
+					if rt.promFn != nil && b == rt.promFn {
+						if v, handled := rt.promStatic(u(a[0]).(*jsObject), rt.toString(u(a[1])), arr.elems); handled {
+							return w(v)
+						}
+					}
 					return m["js_jsmcall"]([]uint64{w(b), a[1], a[2]})
 				}
 				c, _ = c.props["__super"].(*jsObject)
