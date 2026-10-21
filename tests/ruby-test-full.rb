@@ -4091,6 +4091,24 @@ def s91
   d[:k] << "x"
   check("ap91g", d == {} && d[:z] == "x")
 end
+# ===== SECTION 92: =begin / =end block comments =====
+# Both markers stand at the start of a line; `=endx` does not close the comment,
+# and `v =begin` is an assignment of a begin block. /usr/bin/ruby 2.6 settles each.
+def s92
+  n = [1,
+=begin
+2,
+=endx
+=end
+       3]
+  v =begin
+    5
+  end
+=begin	trailing words
+p :hidden
+=end	trailing words
+  check("bc92a", n == [1, 3] && v == 5)
+end
 
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
@@ -4145,6 +4163,7 @@ s88() # SECTION-CALL 88
 s89() # SECTION-CALL 89
 s90() # SECTION-CALL 90
 s91() # SECTION-CALL 91
+s92() # SECTION-CALL 92
 s95() # SECTION-CALL 95
 s96() # SECTION-CALL 96
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"

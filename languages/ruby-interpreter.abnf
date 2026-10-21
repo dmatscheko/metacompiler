@@ -39,13 +39,33 @@ The same subset with the same semantics is compiled to LLVM IR by ruby-to-llvm-i
 
 // Ruby '#' line comments (the '#{' of an interpolation lives inside a string
 // token, which disables whitespace skipping, so it never reaches here).
-Whitespace  = { @+" \t\r\n" | Comment | LineJoin } ;
+Whitespace  = { @+" \t\r\n" | Comment | BlockComment | LineJoin } ;
 // A backslash at the end of a line joins it to the next one, so the pair is nothing
 // but whitespace (`.should == \` continued on the following line).
 LineJoin    = "\\" :whitespace() "\r"..."\r" "\n"..."\n" :whitespace(Whitespace)
             | "\\" :whitespace() "\n"..."\n" :whitespace(Whitespace) ;
 Comment     = "#" :whitespace() { NotNewline } :whitespace(Whitespace) ;
 NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
+// =begin ... =end: a block comment. Both markers stand at the start of a line and
+// end at a blank or the line's end, so `x =begin' and `=beginning' are neither.
+BlockComment = "=begin" BcBegin :whitespace() { NotNewline } "\n"..."\n"
+               { BcNotEnd { NotNewline } "\n"..."\n" } "=end" { NotNewline } :whitespace(Whitespace) ;
+BcBegin = :script(~~
+    (function() {
+        var no = abnf.newToken("\x01nobcbegin", 0)
+        if (c.peek(-7) !== -1 && c.peek(-7) !== 10) { return no }
+        var t = c.peek(0)
+        if (t !== -1 && t !== 32 && t !== 9 && t !== 10 && t !== 13) { return no }
+    })()
+~~) ;
+BcNotEnd = :script(~~
+    (function() {
+        var w = "=end"
+        for (var i = 0; i < w.length; i++) { if (c.peek(i) !== w.charCodeAt(i)) { return undefined } }
+        var t = c.peek(4)
+        if (t === -1 || t === 32 || t === 9 || t === 10 || t === 13) { return abnf.newToken("\x01bcend", 0) }
+    })()
+~~) ;
 
 // The whole program is a sequence of definitions and statements executed in order.
 Program     <~~ runProgram(takeAll()) ~~>
