@@ -140,15 +140,6 @@ parameter), which no engine prints either.
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
-### T-741 tooling: -callgraph residue — go function bodies unnamed, runtime helpers as nodes, method-call externs, entry functions · P3 · CORE · IN PROGRESS (CORE worker, round 5) [V]
-Go: a function body is a separate closure that never gets a name, so `main` calling `g` reads `jsf_78 -> g` (go left out of
-EDGE_CASES). Runtime helpers still appear as definitions/callees: jsnum.N, sw_copy and other sw_*, lua_appendall/lua_mk/lua_str,
-kt_safeget/kt_clsfind/kt_dread/kt_fprobe, dt_safeget, php_scope_probe/php_site_text (treat every defined non-jsf_N, non-scaffold
-handle-IR function as fabric). phpmain / dartmain appear as definitions with edges (entry scaffolding). Python emits `<module> ->
-main` from the guarded `if main is defined: main()` even without a main. Method calls through js_swmcall, js_csmcall, js_phmcall,
-js_rxmcall, js_ktsmcall, js_pyrxmcall, js_jsmcall, js_gomcall make no edge (only js_mcall / js_supercall / js_jvsuper are known).
-Some python prelude closures are unnamed (jsf_66..68).
-
 ### T-184 dart: `IndexError` vs `RangeError` text for `[1,2,3][7]` · P3 · DA · BLOCKED - needs a Dart VM to settle [U spec-only]
 A reviewer argued the VM prints `RangeError (index): Invalid value: Not in inclusive
 range 0..2: 7` (a plain RangeError); the current engines print the IndexError form
@@ -796,6 +787,7 @@ T-737 tooling + js: swift overloads and module bodies in -callgraph; `Object.ass
 T-738 ruby: strings produced by methods are not boxes; Array#to_h; define_method compiled; frozen hash keys; frozen_string_literal — DONE bfe97792 4235b67f (method/operator results are fresh string boxes incl. arrays of them, Array#to_h, define_method by String/Symbol in the compiler, frozen hash keys and immediates, frozen_string_literal per file — = ruby 2.6; follow-up T-740)
 T-739 tooling: -callgraph loses swift and python call edges — DONE 3b5a140e (name-read/call helpers of python, swift, dart, kotlin, lua, ruby recognised; overload/method second names resolve to the source name; helpers dropped from the graph — EDGE_CASES for 12 languages, srcpos 38/38; follow-up T-741)
 T-740 ruby: `<<` through a method call reads a raw property; `=begin`/`=end`; dynamic define_method compiled; `p ?c` — DONE c73ddb45..968722e3 (append/assign path .name steps call the method, =begin/=end, `f ?c`, run-time define_method on class objects in all engines, builtin-built strings are boxes, one key object per text — = ruby 2.6; follow-up T-742)
+T-741 tooling: -callgraph residue — go function bodies unnamed, runtime helpers as nodes, method-call externs, entry functions — DONE 2e091671 (closure bodies fold into their function, runtime fabric and entry scaffolding dropped, guarded python main, all method-call externs give edges — srcpos 39/39 incl. go; no named definition or edge lost across 13 feature files)
 
 # Settled — do not re-open
 
