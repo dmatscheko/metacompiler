@@ -72,7 +72,7 @@ its report; anything structural there is a CORE ticket.
 
 # JS — JavaScript and TypeScript
 
-### T-707 js: named properties on arrays; species for builtin subclasses · P2 · JS · OPEN [V]
+### T-707 js: named properties on arrays; species for builtin subclasses · P2 · JS · IN PROGRESS (JS worker, round 24) [V]
 `var a = [1,2]; a.foo = 5; Object.keys(a)` → llvm.Run / native "invalid array index foo", goja interp accepts the write but keys miss
 it (node `0,1,foo`); so `this.x = …` and class fields on Array subclass instances fail compiled. map/filter/slice on a subclass
 instance do not run the subclass constructor (Symbol.species); `P.resolve()` / `then()` on a Promise subclass return a plain Promise
