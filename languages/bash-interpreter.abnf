@@ -1237,8 +1237,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var capStack = []
     var cmdSubRan = false   // did the word just evaluated contain a substitution? ($? rule)
 
-    // Two output channels. 0 = standard output (captured by $( ) when one is open), 1 = the
-    // standard error channel, 2 = discarded.
+    // Output channels. 0 = standard output (captured by $( ) when one is open), 1 = the
+    // standard error channel, 2 = discarded, and 3 + N = capture level N fixed (3 the real
+    // standard output): a redirection that copies standard output (2>&1, >/dev/stdout) takes
+    // the level it is at that moment, so a $( ) opened inside does not take the copy over.
+    // A capture makes channel 0 its own while it is open (capOpen / capClose).
     //
     // Channel 1 goes to `eprintln`, the tag host's standard-error channel, which both script
     // hosts bind identically (goja in abnf/commonscript.go, the frozen engine in abnf/jsrt.go)
@@ -1250,14 +1253,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var sinkOut = 0
     var sinkErr = 1
     var errBuf = ""
+    var capSinks = []   // the sinkOut each open capture replaced
 
     function writeChan(ch, s) {
         if (ch == 1) { errBuf = errBuf + s; flushErrLines(); return }
-        if (ch != 0) { return }
-        if (capStack.length > 0) {
+        if (ch == 2) { return }
+        var lv = (ch == 0) ? capStack.length : ch - 3
+        if (lv > capStack.length) { lv = capStack.length }
+        if (lv > 0) {
             var cs = nulSeen ? dropNul(s) : s
-            if (cs.length != s.length) { capNul["$" + capStack.length] = true }
-            capStack[capStack.length - 1] = capStack[capStack.length - 1] + cs
+            if (cs.length != s.length) { capNul["$" + lv] = true }
+            capStack[lv - 1] = capStack[lv - 1] + cs
         }
         else if (rawSeen && hasRaw(s)) { writeBytes(bytesText(strBytes(s))) }
         else { print(s) }
@@ -1361,6 +1367,19 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (errBuf.length > 0) { eprintln(errBuf); errBuf = "" }
     }
     function emitOut(s) { writeChan(sinkOut, s) }
+    // A channel a redirection copies: "the current standard output" fixed to its level now.
+    // Twin of rt_fix_chan in languages/lib/bash-rt.c.
+    function fixChan(ch) { return (ch == 0) ? 3 + capStack.length : ch }
+    // A capture ($( ) or a pipeline stage) owns standard output while it is open.
+    function capOpen() {
+        capStack.push("")
+        capSinks.push(sinkOut)
+        sinkOut = 0
+    }
+    function capClose() {
+        sinkOut = capSinks.pop()
+        return capStack.pop()
+    }
     function emitErr(s) { writeChan(sinkErr, s) }
 
     function setStatus(s) { lastStatus = s | 0 }
@@ -3625,7 +3644,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // the substitution sees the loops around it: `break` there ends it with the status 0.
     function mkCmdSub(bodyT) {
         return function() {
-            capStack.push("")
+            capOpen()
             capNul["$" + capStack.length] = false
             var saved = saveShellState()
             var savedFrames = localFrames
@@ -3642,7 +3661,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             restoreShellState(saved)
             localFrames = savedFrames
             var nulGone = capNul["$" + capStack.length]
-            var out = capStack.pop()
+            var out = capClose()
             if (nulGone) { emitErr("bash: warning: command substitution: ignored null byte in input\n") }
             setStatus(st)
             cmdSubRan = true
@@ -4921,14 +4940,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else if (r.rd == "<") { newIn = "" }
             else if (r.rd == ">&" || r.rd == "<&") {
                 // N>&M : route channel N wherever channel M currently goes.
-                var src = (tgt == "2") ? sinkErr : sinkOut
+                var src = fixChan((tgt == "2") ? sinkErr : sinkOut)
                 if (fd == "2") { sinkErr = src } else { sinkOut = src }
             } else if (r.rd == "&>" || r.rd == "&>>") {
-                var ch = (tgt == "/dev/stdout") ? 0 : 2
+                var ch = (tgt == "/dev/stdout") ? fixChan(sinkOut) : 2
                 sinkOut = ch
                 sinkErr = ch
             } else {
-                var ch2 = (tgt == "/dev/stdout") ? 0 : ((tgt == "/dev/stderr") ? 1 : 2)
+                var ch2 = (tgt == "/dev/stdout") ? fixChan(sinkOut) : ((tgt == "/dev/stderr") ? sinkErr : 2)
                 if (fd == "2") { sinkErr = ch2 } else { sinkOut = ch2 }
             }
         }
@@ -6069,12 +6088,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var k
             for (k = 0; k < stages.length; k++) {
                 var lastStage = (k == stages.length - 1)
-                if (!lastStage) { capStack.push("") }
+                if (!lastStage) { capOpen() }
                 st = stages[k]()
                 statuses.push((typeof st == "object") ? st.ret : st)
                 if (typeof st != "object" && st != 0 && firstFail == 0) { firstFail = st }
                 if (!lastStage) {
-                    var out = capStack.pop()
+                    var out = capClose()
                     stdinBuf = out
                     stdinPos = 0
                 }

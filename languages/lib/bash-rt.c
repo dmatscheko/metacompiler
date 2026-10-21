@@ -79,6 +79,7 @@ char *cap_buf[4096];
 int cap_len[4096];
 int cap_sz[4096];    /* how big cap_buf[i] is; rt_putc doubles it when it fills */
 int cap_nul[4096];   /* a NUL byte was dropped at this depth (rt_cap_end warns) */
+int cap_sink[4096];  /* the sink_out the capture at this depth replaced */
 int cap_depth;
 
 /* Subshell isolation: ( LIST ) and $( ) snapshot the whole variable array and
@@ -115,8 +116,10 @@ int abort_flag;
 int cond_err;
 int cond_depth;
 
-/* Two output channels. 0 = standard output (captured by $( ) when one is open),
- * 1 = the standard error channel, 2 = discarded. */
+/* Output channels. 0 = standard output (captured by $( ) when one is open),
+ * 1 = the standard error channel, 2 = discarded, and 3 + N = capture depth N
+ * fixed (3 the real standard output), which a redirection that copies standard
+ * output takes (rt_fix_chan). An open capture makes channel 0 its own. */
 int sink_out;
 int sink_err = 1;
 
@@ -5948,8 +5951,9 @@ int rt_putc(int c)
         }
         return 0;
     }
-    if (chan == 0) {
-        d = cap_depth;
+    if (chan == 0 || chan >= 3) {
+        d = chan == 0 ? cap_depth : chan - 3;
+        if (d > cap_depth) d = cap_depth;
         if (d > 0) {
             buf = cap_buf[d - 1];
             l = cap_len[d - 1];
@@ -5985,7 +5989,15 @@ int rt_putc(int c)
     return 0;
 }
 
-/* Open a fresh capture buffer. */
+/* A channel a redirection copies (N>&M, >/dev/stdout): "the current standard
+ * output" becomes the capture depth it is at now, so a $( ) opened later inside
+ * does not take the copy over. Twin of fixChan in bash-interpreter.abnf. */
+int rt_fix_chan(int ch)
+{
+    return ch == 0 ? 3 + cap_depth : ch;
+}
+
+/* Open a fresh capture buffer; it owns standard output until rt_cap_end. */
 int rt_cap_begin(int u)
 {
     int d;
@@ -6004,6 +6016,8 @@ int rt_cap_begin(int u)
     }
     cap_len[d] = 0;
     cap_nul[d] = 0;
+    cap_sink[d] = sink_out;
+    sink_out = 0;
     cap_depth = d + 1;
     return 0;
 }
@@ -6024,6 +6038,7 @@ char *rt_cap_end(int cmdsub)
     int saved;
     d2 = cap_depth - 1;
     cap_depth = d2;
+    sink_out = cap_sink[d2];
     if (cmdsub != 0 && cap_nul[d2] != 0) {
         saved = sink_out;
         sink_out = sink_err;

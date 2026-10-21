@@ -1730,6 +1730,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtPutc = rtDecl("rt_putc", false, [0])
     var rtCapBegin = rtDecl("rt_cap_begin", false, [0])
     var rtCapEnd = rtDecl("rt_cap_end", true, [0])
+    var rtFixChan = rtDecl("rt_fix_chan", false, [0])
     var rtPrints = rtDecl("rt_prints", false, [1])
     var rtSsSave = rtDecl("rt_ss_save", false, [0])
     var rtSsRestore = rtDecl("rt_ss_restore", false, [0])
@@ -5213,20 +5214,22 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             else if (r.rd == "<") { b.NewStore(emptyPtr(b), gStdin); b.NewStore(zero, gStdinPos) }
             else if (r.rd == ">&" || r.rd == "<&") {
+                // a copy of standard output is fixed to the capture it is in now (rt_fix_chan)
                 var src = (r.target != null && r.target.c == "2") ? b.NewLoad(i32, gSinkErr) : b.NewLoad(i32, gSinkOut)
+                src = b.NewCall(rtFixChan, src)
                 if (fd == "2") { b.NewStore(src, gSinkErr) } else { b.NewStore(src, gSinkOut) }
             }
             else if (r.rd == "&>" || r.rd == "&>>") {
-                var ch = llvm.constant.NewInt(i32, (r.target != null && r.target.c == "/dev/stdout") ? 0 : 2)
+                var ch = llvm.constant.NewInt(i32, 2)
+                if (r.target != null && r.target.c == "/dev/stdout") { ch = b.NewCall(rtFixChan, b.NewLoad(i32, gSinkOut)) }
                 b.NewStore(ch, gSinkOut)
                 b.NewStore(ch, gSinkErr)
             }
             else {
                 var tc = (r.target != null) ? r.target.c : undefined
-                var n = 2
-                if (tc == "/dev/stdout") { n = 0 }
-                if (tc == "/dev/stderr") { n = 1 }
-                var ch2 = llvm.constant.NewInt(i32, n)
+                var ch2 = llvm.constant.NewInt(i32, 2)
+                if (tc == "/dev/stdout") { ch2 = b.NewCall(rtFixChan, b.NewLoad(i32, gSinkOut)) }
+                if (tc == "/dev/stderr") { ch2 = b.NewLoad(i32, gSinkErr) }
                 if (fd == "2") { b.NewStore(ch2, gSinkErr) } else { b.NewStore(ch2, gSinkOut) }
             }
         }

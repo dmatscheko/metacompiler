@@ -875,6 +875,27 @@ b"
   o=$( trap 'echo a' EXIT; trap '' EXIT; echo in; ( trap 'echo c' EXIT; trap - EXIT ) )
   check tr5 "$o" "in"
 }
+# ===== SECTION 71: a copy of standard output is the stream it is when it is made =====
+# 2>&1 and >/dev/stdout copy what standard output IS at that moment, so a $( ) or a pipeline
+# stage opened later inside writes its own standard output to its own pipe and its standard
+# error still to the copy; and a capture opened inside a redirected group captures. A
+# declaration expands its words before its redirections apply. Every expected value is
+# bash 5.3's.
+s71() {
+  local o v x
+  { x=$(echo y); } >/dev/null 2>&1
+  o=$( { v=$(echo E1 >&2); echo "v=[$v]"; } 2>&1 )
+  check fd1 "$x|$o" "y|E1
+v=[]"
+  o=$( { echo "x$(echo E2 >&2)" >/dev/null; : $(echo E3 >&2); } 2>&1 )
+  check fd2 "$o" "E2
+E3"
+  o=$( { v=$( { echo E4 >&2; } 2>&1 ); echo "v=$v"; echo q | { read l; echo "l=$l" >&2; }; } 2>&1 )
+  check fd3 "$o" "v=E4
+l=q"
+  o=$( { local s71v=$(echo E5 >&2) 2>/dev/null; } 2>&1 )
+  check fd4 "$o" "E5"
+}
 # ===== END SECTIONS =====
 
 s47   # SECTION-CALL 47
@@ -900,5 +921,6 @@ s67   # SECTION-CALL 67
 s68   # SECTION-CALL 68
 s69   # SECTION-CALL 69
 s70   # SECTION-CALL 70
+s71   # SECTION-CALL 71
 echo "full: $checks checks, $fails failures"
 exit $fails
