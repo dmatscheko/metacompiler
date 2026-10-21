@@ -138,7 +138,7 @@ parameter), which no engine prints either.
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
-### T-739 tooling: -callgraph loses swift and python call edges · P3 · CORE · OPEN [V]
+### T-739 tooling: -callgraph loses swift and python call edges · P3 · CORE · IN PROGRESS (CORE worker, round 4) [V]
 Swift name reads go through `sw_kget`, python's through `py_getvar` — direct IR helpers, not js_scope_get/js_kget — so `let r = g(1)`
 shows as `<module> -> (dynamic)` and the helpers appear as callees (`<module> -> sw_kget`, `<module> -> py_getvar`). Teach the
 callgraph's name-read recognition these helpers (and check the other languages' equivalents) so static edges are recovered.
