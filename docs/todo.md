@@ -147,10 +147,10 @@ parameter), which no engine prints either.
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-727 bash: assigning an element to a scalar drops the scalar · P2 · SH · OPEN [V]
+### T-727 bash: assigning an element to a scalar drops the scalar · P2 · SH · IN PROGRESS (SH worker, round 17) [V]
 `t=abcd; t[1]=x; echo "${t[*]}"` → bash `abcd x` (the scalar becomes element 0); all our engines `x`. Same for `u=ab; u[1]=x`.
 
-### T-728 bash native: arrays scan a flat table on every scalar access, cap at 4096 rows; stored values never freed · P2 · SH · OPEN [V]
+### T-728 bash native: arrays scan a flat table on every scalar access, cap at 4096 rows; stored values never freed · P2 · SH · IN PROGRESS (SH worker, round 17) [V]
 Compiled bash calls rt_arr_any / rt_arr_find on every scalar read/write, scanning the whole flat array table: with a 600-element array
 a loop doing `a+=(x)` costs ~280K steps per pass; the array store caps at 4096 rows. The heap floor keeps every stored value: `t="${a[*]}"`
 3000 times over a 1 MB array reaches 2.8 GB RSS natively. Index arrays by variable (hash or per-variable vector) and reclaim
