@@ -72,7 +72,7 @@ its report; anything structural there is a CORE ticket.
 
 # JS — JavaScript and TypeScript
 
-### T-710 js: `Sub.from` / `Sub.of` on an Array subclass; `Symbol.species` reads; `typeof [].hasOwnProperty`; tagged-template strings array; `"01"` array key · P2 · JS · OPEN [V]
+### T-710 js: `Sub.from` / `Sub.of` on an Array subclass; `Symbol.species` reads; `typeof [].hasOwnProperty`; tagged-template strings array; `"01"` array key · P2 · JS · IN PROGRESS (JS worker, round 25) [V]
 `class C extends Array {}; C.from([1,2,3])` → "C.from is not a function" in all legs (node a C). `Array[Symbol.species]` /
 `Sub[Symbol.species]` → undefined (node the class). `typeof [].hasOwnProperty` → "undefined" (node "function"). A tagged template's
 strings object is array-like (node: a frozen array, `raw` non-enumerable). `a["01"] = 1` is index 1 via the floor's maybe_numeric /
@@ -142,12 +142,12 @@ value, or printf padding) and make it linear in all engines.
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
-### T-708 core: building a large string natively is quadratic in ar_block's free-list walk · P1 · CORE · OPEN [V]
+### T-708 core: building a large string natively is quadratic in ar_block's free-list walk · P1 · CORE · IN PROGRESS (CORE worker, round 1) [V]
 python `s = "ab"*35000; print(len(s))` built with `-exe` takes ~20 s (CPython instant; llvm.Run instant): the time is in runtime.c
 `ar_block` walking the big-block free list. Profile which allocation pattern grows the list and make big-block allocation O(1)
 amortised (size-segregated lists or a bump region); check other languages' string building too; bench all languages.
 
-### T-674 go (CORE): native recursion capped at ~500 Go frames by the js_gotry jump-buffer stack · P2 · CORE · OPEN [V]
+### T-674 go (CORE): native recursion capped at ~500 Go frames by the js_gotry jump-buffer stack · P2 · CORE · IN PROGRESS (CORE worker, round 1) [V]
 Every Go function runs through js_gotry and runtime.c caps the setjmp stack at JB_CAP=512 (`die("try nested too deeply")`), so a
 native Go program recursing ~500 deep dies (also json.Unmarshal of a valid 10000-deep value); interp and llvm.Run are fine, go
 itself handles millions. Related to T-505 (what a too-deep recursion should raise).
@@ -175,7 +175,7 @@ range 0..2: 7` (a plain RangeError); the current engines print the IndexError fo
 `RangeError (index): Index out of range: index should be less than 3: 7`, which is
 believed to be the modern VM's. Leave as is unless a real dart run settles it.
 
-### T-505 java (and probably every language): unbounded recursion kills the process instead of raising · P2 · CORE · OPEN [V finder only]
+### T-505 java (and probably every language): unbounded recursion kills the process instead of raising · P2 · CORE · IN PROGRESS (CORE worker, round 1) [V finder only]
 `static void rec(int n){ rec(n+1); }` inside `try { } catch (StackOverflowError e)`: interp and run die with Go "fatal
 error: stack overflow" (exit 2), native SIGSEGV (exit 139); java catches it. Needs a depth limit in the engines; probe the
 other languages' equivalents (python RecursionError, js RangeError "Maximum call stack size exceeded", kotlin, csharp).
