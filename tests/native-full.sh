@@ -113,13 +113,13 @@ trap 'rm -rf "$OUT"' EXIT
 #            `full`, `full.2` and `full.3`, and a MODULE, tests/js-test-full.4.mjs,
 #            whose kind `full.4.mjs` carries its own extension. The
 #            THIRD FIELD IS COMMA-SEPARATED, because ROWS itself is split on whitespace.
-#   python   has several ratchet files (split so its -frozen interpreter leg stays well
-#   go       under the IR interpreter's step brake): tests/<lang>-test-full.<ext>,
+#   python   have several ratchet files (split so each leg stays well
+#   go, bash under the IR interpreter's step brake): tests/<lang>-test-full.<ext>,
 #            tests/<lang>-test-full.2.<ext> and tests/<lang>-test-full.3.<ext>, the
 #            kinds `full`, `full.2` and `full.3`; go and python also have full.4,
 #            python full.5.
 #   lua      has tests/lua-test-full.2.lua beside its ratchet, for the same reason.
-ROWS="bash:sh batch:cmd c:c csharp:cs dart:dart go:go:full,features,full.2,full.3,full.4 java:java kotlin:kt
+ROWS="bash:sh:full,features,full.2,full.3 batch:cmd c:c csharp:cs dart:dart go:go:full,features,full.2,full.3,full.4 java:java kotlin:kt
       js:js:full,features,full.2,full.3,full.4.mjs
       lua:lua:full,features,full.2 metajs:js php:php python:py:full,features,full.2,full.3,full.4,full.5 ruby:rb swift:swift typescript:ts
       lisp:txt:features tinyc:txt:features"

@@ -694,7 +694,7 @@ declare -A dpv=(["k one"]=y)
 check dpa8 "$(declare -p dpv)" 'declare -A dpv=(["k one"]="y" )'
 
 # ----- the @-transform family, a computed command name, echo's flags -----
-# tests/bash-test-full.sh SECTION 34 is the full set and carries the reasoning;
+# tests/bash-test-full.2.sh SECTION 34 is the full set and carries the reasoning;
 # these are the rows that must stay green in the MATRIX and in the native binary,
 # which the ratchet file does not reach.
 xa=(pa "p b")
