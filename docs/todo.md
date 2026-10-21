@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-738** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-739** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -68,12 +68,11 @@ its report; anything structural there is a CORE ticket.
 
 # RB — Ruby
 
-### T-736 ruby: bang methods on strings do not mutate; `puts` inside an expression; send with a receiver to a top-level def; `===` · P1 · RB · IN PROGRESS (RB worker, round 12) [V]
-`s = "ab"; s.upcase!; puts s` → ruby `AB`, all engines `ab` (strings are immutable host strings; upcase!/downcase!/capitalize!/
-swapcase!/reverse!/strip!/chomp!/squeeze!/sub!/gsub!/replace/<<  on a String must mutate the object every alias sees) — P1.
-`x && puts("a")`, `x || puts("a")`, `x and puts("a")` do not parse (puts/print exist only as statements, KwPuts) — P2.
-`self.send(:h, 6)`, `C.new.send(:h, 2)` to a top-level def → NoMethodError (ruby 12 / 4). `"a".===("a")` / `send(:===)` →
-NoMethodError (ruby true).
+### T-738 ruby: strings produced by methods are not boxes; Array#to_h; define_method compiled; frozen hash keys; frozen_string_literal · P2 · RB · OPEN [V]
+`a = "a b".split; a.each { |w| w.upcase! }; p a` → ruby `["A", "B"]`, ours unchanged: a computed string copied into an array before its
+first mutation keeps the old text (every string-producing method must return a box, or promotion must reach the shared element).
+`[["x",1]].to_h` → NoMethodError in all engines (ruby `{"x"=>1}`). `define_method("bar") { }` in a class body → NoMethodError in the
+compiler legs only. `h.keys[0].frozen?` → false (ruby true: string keys are frozen copies). `# frozen_string_literal: true` is ignored.
 
 ---
 
@@ -786,6 +785,7 @@ T-731 js: accessors on array indices; -callgraph names js functions `jsf_N` — 
 T-732 ruby: `3r % 0` hangs the interpreter; `!x` after a newline read as a method suffix; operator/arity gaps — DONE 82d93a95 (Rational zero divisors raise, glued ?/! suffixes, x.OP(y) as send, receiver-less send to top-level defs, negative array sizes, frames for format and blocks — = ruby 2.6; follow-up T-736)
 T-734 js: `Object.assign` onto an array aborts compiled; data attributes on array indices — DONE d83425a1 (Object.assign onto arrays/functions through js_jsmset, per-index data attributes with spec-ordered movers in a shared js-arrmove.js — ~200-row probes = node)
 T-735 tooling: -callgraph definition names for python (`jsf_N`), php (body line, not header), swift (mangled `f$1`) — DONE a130da28 (python name pass follows js_pysig/js_pyfnname, php hoisted defs at their header, swift single definitions by source name — srcpos 26/26; follow-up T-737)
+T-736 ruby: bang methods on strings do not mutate; `puts` inside an expression; send with a receiver to a top-level def; `===` — DONE 942cfc07 4db06632 (strings are mutable boxes per literal, promoted in place on first mutation through any place; frozen strings, identity; puts in expressions; receiver send to top-level defs; === by name — = ruby 2.6; ruby bench unchanged; follow-up T-738)
 
 # Settled — do not re-open
 
