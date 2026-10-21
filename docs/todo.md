@@ -130,7 +130,7 @@ parameter), which no engine prints either.
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-711 bash: glob `?` and pattern elements match one UTF-16 unit in the interpreter · P3 · SH · OPEN [V]
+### T-711 bash: glob `?` and pattern elements match one UTF-16 unit in the interpreter · P3 · SH · IN PROGRESS (SH worker, round 12) [V]
 In bash-interpreter.abnf a glob `?` (and every pattern element) consumes one UTF-16 code unit, so an astral character (emoji) counts
 as two to `${v#?}`, `${v/?/x}`, `case` patterns; bash-rt.c (llvm.Run, native) and bash 5.3 count one character. Halves diverge.
 
