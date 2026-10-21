@@ -4733,6 +4733,96 @@ function s102(): void {
     check("fh102h", s.hello() === "hi1" && s instanceof R102 && Object.getPrototypeOf(S102) === R102 && sk.join() === "s");
 }
 
+// ===== SECTION 103: new.target, and a class extending a builtin =====
+// new.target is the class `new` named, also inside a parent constructor super()
+// reached and inside a constructor function a class extends; a generator and a plain
+// call see undefined, an arrow its function's (tsc rejects it in a method, TS17013).
+// Values read off tsc 6.0.3's default output run by node 24.
+const v103: number[] = [1, 2, 3];
+class A103 {
+    t: string; e: boolean; n: boolean;
+    constructor() { this.t = typeof new.target; this.e = new.target === A103; this.n = new.target === B103; }
+}
+class B103 extends A103 {}
+class D103 extends B103 {
+    d: boolean; w: string;
+    constructor() { super(); this.d = new.target === D103; this.w = new.target.name; }
+}
+function nt103(): string { return typeof new.target; }
+function F103(this: any): void { nt103(); this.f = new.target === F103; this.h = new.target === (H103 as any); this.a = (() => new.target)() === new.target; }
+class H103 extends (F103 as any) {}
+function* g103(): Generator<string> { yield typeof new.target; }
+class E103 extends Error {
+    nt: boolean;
+    constructor(m: string) { super(m); this.nt = new.target === E103; }
+}
+// A class extending Array makes real arrays: its own and inherited methods win over
+// the builtins, super.m() reaches Array.prototype, the builtins that create an array
+// answer one of the class, and from / of are its inherited statics.
+class L103 extends Array<number> {
+    sum(): number { return this.reduce((a, b) => a + b, 0); }
+    get last(): number { return this[this.length - 1]; }
+    push(...xs: number[]): number { return super.push(...xs) + 100; }
+    toString(): string { return "L<" + this.join("|") + ">"; }
+}
+class K103 extends L103 { sum(): number { return super.sum() * 10; } }
+class S103 extends Array<number> { constructor(...xs: number[]) { super(...xs); this.push(this.length); } }
+class P103 extends Map<string, number> { getOr(k: string, d: number): number { return this.has(k) ? this.get(k)! : d; } }
+// ...and Promise, RegExp and the primitive wrappers: the builtin's object, filed under
+// the class, whose own methods come first.
+class Q103 extends Promise<number> { tag(): string { return "Q"; } }
+class R103 extends RegExp { both(s: string): boolean { return this.test(s) && this.source === "a+"; } }
+class U103 extends String { shout(): string { return this.toUpperCase() + "!"; } }
+class N103 extends Number { constructor(v: number) { super(v * 10); } half(): number { return (this as any) / 2; } }
+class B103b extends Boolean { neg(): boolean { return !this.valueOf(); } }
+function s103(): void {
+    const a = new A103();
+    const b = new B103();
+    const d = new D103();
+    check("nt103a", a.t === "function" && a.e && !a.n && b.t === "function" && !b.e && b.n);
+    check("nt103b", !d.e && !d.n && d.d && d.w === "D103");
+    const f: any = new (F103 as any)();
+    const h: any = new H103();
+    check("nt103c", f.f && !f.h && f.a && !h.f && h.h && h.a && nt103() === "undefined");
+    check("nt103d", g103().next().value === "undefined");
+    const ks: (typeof A103)[] = [A103, B103];
+    const got: boolean[] = [];
+    for (let i = 0; i < ks.length; i++) { const o = new ks[i](); got.push(o.e, o.n); }
+    check("nt103e", got.join() === "true,false,false,true");
+    const e = new E103("m" + v103[0]);
+    check("nt103f", e.nt && e.message === "m1" && e instanceof E103 && e instanceof Error && String(e) === "Error: m1");
+    const l = new L103();
+    check("xa103a", l.push(v103[0], v103[1], v103[2]) === 103 && l.length === 3 && l[1] === 2 && l.sum() === 6 && l.last === 3);
+    check("xa103b", Array.isArray(l) && l instanceof L103 && l instanceof Array && !(l instanceof K103) && !([1] instanceof L103));
+    check("xa103c", l.constructor === L103 && String(l) === "L<1|2|3>" && `${l}` === "L<1|2|3>" && JSON.stringify(l) === "[1,2,3]");
+    const k = new K103(v103[1], v103[2]);
+    check("xa103d", k.sum() === 50 && k instanceof L103 && k.length === 2 && new K103(v103[2]).length === 3 && typeof k.sum === "function");
+    const m = l.map(x => x * 2) as L103;
+    check("xa103e", m instanceof L103 && m.sum() === 12 && l.filter(x => x > 1) instanceof L103 && (l.slice(1) as L103).sum() === 5 &&
+        [...l].join() === "1,2,3");
+    const fr = L103.from([v103[2], v103[2]]) as L103;
+    check("xa103f", fr instanceof L103 && fr.sum() === 6 && (L103.of(v103[0]) as L103).last === 1 && Object.getPrototypeOf(L103) === Array);
+    const s = new S103(7, 8);
+    check("xa103g", s.join() === "7,8,2" && s instanceof S103 && !(s instanceof L103));
+    Object.freeze(l);
+    let refused = false;
+    try { l.push(4); } catch (err) { refused = err instanceof TypeError; }
+    check("xa103h", refused && l.length === 3 && Object.isFrozen(l) && l instanceof L103);
+    const mm = new P103([["a", v103[0]]]);
+    check("xa103i", mm.getOr("a", 0) === 1 && mm.getOr("b", 9) === 9 && mm instanceof Map);
+    const q = new Q103(res => res(v103[0]));
+    const re = new R103("a+", "g");
+    check("xb103a", q instanceof Q103 && q instanceof Promise && q.tag() === "Q" && q.constructor === Q103 &&
+        new Promise<number>(res => res(1)) instanceof Promise && !((q as any) instanceof RegExp));
+    check("xb103b", re instanceof R103 && re instanceof RegExp && re.both("caat") && re.flags === "g" && /x/ instanceof RegExp &&
+        "baa".replace(new R103("a"), "o") === "boa");
+    const u = new U103("hey");
+    const n = new N103(v103[2]);
+    check("xb103c", u.shout() === "HEY!" && u.length === 3 && u + "?" === "hey?" && u instanceof String && u.constructor === U103 &&
+        typeof u === "object");
+    check("xb103d", n.half() === 15 && (n as any) + 0 === 30 && n instanceof Number && n.toFixed(1) === "30.0" && new B103b(false).neg());
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -4838,6 +4928,7 @@ function main(): number {
     s100(); // SECTION-CALL 100
     s101(); // SECTION-CALL 101
     s102(); // SECTION-CALL 102
+    s103(); // SECTION-CALL 103
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

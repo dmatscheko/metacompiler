@@ -784,7 +784,7 @@ func (rt *jsrt) jsvSetIntegrity(v interface{}, lv int) interface{} {
 		}
 		jsvAttrN++
 		if lv > jsvArrLevel(o) {
-			o.kind = 23 - lv
+			o.kind = o.kind&^31 + 23 - lv
 		}
 	case *jsObject:
 		if isClassDesc(o) || jsvIsSym(o) {
@@ -1375,6 +1375,11 @@ func (rt *jsrt) jsvString(v interface{}) string {
 	case *jsArray:
 		if jsvIsArgs(t) {
 			return "[object Arguments]"
+		}
+		if cls := jsvArrClass(t); cls != nil {
+			if r, ok := rt.jsvClassCall(t, cls, "toString", nil); ok {
+				return rt.jsvString(r)
+			}
 		}
 		parts := make([]string, len(t.elems))
 		for i, e := range t.elems {
@@ -2089,6 +2094,105 @@ func jsvMethodValue(name string, fn interface{}) *hostFunc {
 	jsvFnSrcSet(shim, jsvFnSrcIdx(fn)+1)
 	jsvMethodVals[fn] = shim
 	return shim
+}
+
+// An instance of a class extending Array is an ARRAY whose kind word carries 1 + the
+// index of its class in jsvArrClasses above the low five bits. Twins: jsArrClasses
+// and its neighbours in both *-interpreter.abnf (which state the rule), jvArrClasses
+// in languages/lib/js-rt.metajs.
+var jsvArrClasses []*jsObject
+
+// The builtins that make their array through ArraySpeciesCreate answer one of the
+// instance's class; the subclass constructor is not run for it.
+var jsvArrSpecies = map[string]bool{"concat": true, "filter": true, "flat": true, "flatMap": true, "map": true, "slice": true, "splice": true}
+
+func jsvArrTag(a *jsArray, cls *jsObject) {
+	at := -1
+	for i, c := range jsvArrClasses {
+		if c == cls {
+			at = i
+			break
+		}
+	}
+	if at < 0 {
+		at = len(jsvArrClasses)
+		jsvArrClasses = append(jsvArrClasses, cls)
+	}
+	a.kind = a.kind&31 + 32*(at+1)
+}
+
+func jsvArrClass(v interface{}) *jsObject {
+	if len(jsvArrClasses) == 0 {
+		return nil
+	}
+	a, ok := v.(*jsArray)
+	if !ok || a.kind < 32 || a.kind&31 == jsArgsKind {
+		return nil
+	}
+	return jsvArrClasses[a.kind>>5-1]
+}
+
+// A method call on an instance of a class extending a builtin: the class chain's own
+// method, or false for the builtin's methods to answer.
+func (rt *jsrt) jsvClassCall(a interface{}, cls *jsObject, name string, args []interface{}) (interface{}, bool) {
+	for c, guard := cls, 0; c != nil && guard < 64; guard++ {
+		if m, has := c.props[name]; has && isCallable(m) && !jsvInternalKey(name) {
+			return rt.call(m, jsUndef, append([]interface{}{a}, args...)), true
+		}
+		if v, hasView := c.props["__pview"].(*jsObject); hasView {
+			if pv, has := v.props[name]; has && isCallable(pv) {
+				return rt.call(pv, a, args), true
+			}
+		}
+		c, _ = c.props["__super"].(*jsObject)
+	}
+	return nil, false
+}
+
+// An Array builtin on an instance, which is also what its super.m() reaches.
+func (rt *jsrt) jsvArrBuiltin(a *jsArray, name string, args []interface{}) (interface{}, bool) {
+	if lv := jsvArrLevel(a); jsvAttrN > 0 && lv > 0 {
+		if msg := rt.jsvArrMethodRefusal(a, name, args, lv); msg != "" {
+			rt.bigRaise("TypeError: %s", msg)
+		}
+	}
+	v, handled := rt.jsvMethod(a, name, args)
+	if r, isArr := v.(*jsArray); handled && isArr && jsvArrSpecies[name] {
+		if cls := jsvArrClass(a); cls != nil {
+			jsvArrTag(r, cls)
+		}
+	}
+	return v, handled
+}
+
+// A read off an instance: `constructor`, a getter or a method value of its class chain.
+func (rt *jsrt) jsvArrSubRead(a *jsArray, cls *jsObject, name string) (interface{}, bool) {
+	if jsvInternalKey(name) {
+		return nil, false
+	}
+	if name == "constructor" {
+		return cls, true
+	}
+	for c, guard := cls, 0; c != nil && guard < 64; guard++ {
+		if m, has := c.props[name]; has {
+			if acc, isAcc := m.(*jsAccessor); isAcc {
+				if acc.get == nil {
+					return jsUndef, true
+				}
+				return rt.call(acc.get, a, nil), true
+			}
+			if isCallable(m) {
+				return jsvMethodValue(name, m), true
+			}
+		}
+		if v, hasView := c.props["__pview"].(*jsObject); hasView {
+			if pv, has := v.props[name]; has {
+				return pv, true
+			}
+		}
+		c, _ = c.props["__super"].(*jsObject)
+	}
+	return nil, false
 }
 
 // The value of `f.name` / `f.length`, or nil for any other name and any receiver that is
@@ -4783,6 +4887,20 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			return rt.call(v, args[0], args[1:])
 		}))
 	}
+	// js_jsnewcall(nt, ctor, args): a class constructor's call, made with new.target
+	// nt - the class `new` names, or the running new.target for super(). The arming
+	// is cleared afterwards, since a builtin parent's host constructor never takes
+	// it. Twin of js_jsnewcall in languages/lib/js-rt.metajs.
+	m["js_jsnewcall"] = func(a []uint64) uint64 {
+		args, ok := u(a[2]).(*jsArray)
+		if !ok {
+			rt.fail("js_jsnewcall args must be an array")
+		}
+		rt.pendingNewTarget = u(a[0])
+		r := rt.callH(u(a[1]), jsUndef, args.elems, a[2])
+		rt.pendingNewTarget = nil
+		return w(r)
+	}
 	// [[Construct]]: an object the constructor RETURNS wins over the fresh receiver,
 	// and a wrapper js_jsnewclass made holds the primitive.
 	m["js_jsnewres"] = func(a []uint64) uint64 {
@@ -4908,6 +5026,10 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			switch hf.name {
 			case "Function":
 				return boolH(isCallable(v) || isClassDesc(v))
+			case "Promise":
+				return boolH(promIs(v))
+			case "RegExp":
+				return boolH(rxIsRegexObj(v))
 			case "Number", "String", "Boolean", "BigInt", "Symbol":
 				// A wrapper is an instance of its primitive's global; the prototype
 				// object it may itself be is not.
@@ -4962,6 +5084,15 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 					break
 				}
 				cls = clsObj.props["__super"]
+			}
+			return boolH(false)
+		}
+		if cls := jsvArrClass(v); cls != nil {
+			for c, guard := cls, 0; c != nil && guard < 64; guard++ {
+				if c == target {
+					return boolH(true)
+				}
+				c, _ = c.props["__super"].(*jsObject)
 			}
 			return boolH(false)
 		}
@@ -5066,8 +5197,66 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	// F's own properties through __ctorfn. Any other heritage value comes back
 	// unchanged. Twins: js_jsheritage in languages/lib/js-rt.metajs and jsHeritage in
 	// both *-interpreter.abnf.
-	var objectRoot *jsObject
+	// `class C extends Array`: the Array global stands as arrayRoot, whose
+	// constructor makes what Array(...args) makes and files new.target's class on it.
+	// Twins: jsArrayRootClass in both *-interpreter.abnf, jvArrayRoot in
+	// languages/lib/js-rt.metajs.
+	var objectRoot, arrayRoot *jsObject
+	// `class C extends Promise` (RegExp, Number, String, Boolean): the builtin stands
+	// as a descriptor of its own, whose constructor makes the object `new B()` makes
+	// and files new.target's class on it. Twins: jsHostRoot in both
+	// *-interpreter.abnf, jvHostRoot in languages/lib/js-rt.metajs.
+	hostRoots := map[*hostFunc]*jsObject{}
+	hostRoot := func(b *hostFunc) *jsObject {
+		if d, ok := hostRoots[b]; ok {
+			return d
+		}
+		d := newJSObject()
+		d.set("__isclass", true)
+		d.set("__name", b.name)
+		d.set("__ctorfn", b)
+		d.set("__ctor", jsHostFunc("", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			nt, _ := rt.pendingNewTarget.(*jsObject)
+			rt.pendingNewTarget = nil
+			o := newJSObject()
+			m["js_jsnewclass"]([]uint64{w(o), w(b)})
+			r := m["js_call_new"]([]uint64{w(b), w(o), w(&jsArray{elems: append([]interface{}{}, args[1:]...)})})
+			rt.pendingNewTarget = nil
+			res := u(m["js_jsnewres"]([]uint64{r, w(o)}))
+			if ro, isObj := res.(*jsObject); isObj && nt != nil && isClassDesc(nt) {
+				ro.set("__class", nt)
+			}
+			return res
+		}))
+		hostRoots[b] = d
+		return d
+	}
 	m["js_jsheritage"] = func(a []uint64) uint64 {
+		if hf, isHost := u(a[0]).(*hostFunc); isHost {
+			switch hf.name {
+			case "Promise", "RegExp", "Number", "String", "Boolean":
+				return w(hostRoot(hf))
+			}
+		}
+		if jsvIsArrayGlobal(u(a[0])) {
+			if arrayRoot == nil {
+				arrayFn := u(a[0])
+				arrayRoot = newJSObject()
+				arrayRoot.set("__isclass", true)
+				arrayRoot.set("__name", "Array")
+				arrayRoot.set("__ctorfn", arrayFn)
+				arrayRoot.set("__ctor", jsHostFunc("", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+					nt, _ := rt.pendingNewTarget.(*jsObject)
+					rt.pendingNewTarget = nil
+					r := rt.call(arrayFn, jsUndef, args[1:])
+					if arr, isArr := r.(*jsArray); isArr && nt != nil && isClassDesc(nt) {
+						jsvArrTag(arr, nt)
+					}
+					return r
+				}))
+			}
+			return w(arrayRoot)
+		}
 		if fn, isFn := u(a[0]).(*jsClosure); isFn {
 			d := descOf(fn)
 			if p, has := jsvOwnProto(fn); has {
@@ -5340,6 +5529,11 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	// languages/lib/js-rt.metajs and the interpreters' is getMember's class-method arm.
 	var vget func(a []uint64) uint64
 	vget = func(a []uint64) uint64 {
+		if cls := jsvArrClass(u(a[0])); cls != nil {
+			if v, found := rt.jsvArrSubRead(u(a[0]).(*jsArray), cls, rt.toString(u(a[1]))); found {
+				return w(v)
+			}
+		}
 		if fam := jsvBuiltinFam(u(a[0]), rt.toString(u(a[1]))); fam != 0 {
 			return w(builtinValue(fam, rt.toString(u(a[1]))))
 		}
@@ -5424,6 +5618,18 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			return w(d)
 		}
 		if p, isWrap := recv.props["__bvof"]; isWrap {
+			// An instance of a class extending Number / String / Boolean (jsHostRoot):
+			// its class first.
+			if cls := recv.props["__class"]; cls != nil {
+				if name == "constructor" {
+					if c, found := jsvConstructorOf(recv); found {
+						return w(c)
+					}
+				}
+				if v, found := jsvChainRead(cls, name); found {
+					return w(v)
+				}
+			}
 			return vget([]uint64{w(p), a[1]})
 		}
 		if d, isView := recv.props["__protoof"].(*jsObject); isView {
@@ -5698,7 +5904,20 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		if args == nil {
 			args = &jsArray{}
 		}
-		return w(rt.jsvProtoApply(u(a[0]), rt.toString(u(a[1])), args.elems))
+		name := rt.toString(u(a[1]))
+		// An Array subclass's super.m() reaches Array.prototype; any other name that
+		// is not Object.prototype's answers the miss sentinel for the call site.
+		if arr, isArr := u(a[0]).(*jsArray); isArr {
+			if v, handled := rt.jsvArrBuiltin(arr, name, args.elems); handled {
+				return w(v)
+			}
+		}
+		if !jsvIsProtoName(name) {
+			if v, ok := rt.mcallMiss(); ok {
+				return w(v)
+			}
+		}
+		return w(rt.jsvProtoApply(u(a[0]), name, args.elems))
 	}
 
 	// js_jskeys is js_keys plus the class-descriptor arm. The floor's js_keys is
@@ -6063,6 +6282,20 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		if !ok {
 			rt.fail("js_jsmcall args must be an array")
 		}
+		// An Array subclass instance's own methods win over the Array builtins, and
+		// over an integrity level's refusal of a builtin of the same name.
+		if cls := jsvArrClass(u(a[0])); cls != nil {
+			if v, handled := rt.jsvClassCall(u(a[0]), cls, rt.toString(u(a[1])), arr.elems); handled {
+				return w(v)
+			}
+		} else if o, isObj := u(a[0]).(*jsObject); isObj && len(hostRoots) > 0 && (promIs(o) || rxIsRegexObj(o)) {
+			// A Promise / RegExp subclass instance (hostRoot): the same order.
+			if cls, isInst := o.props["__class"].(*jsObject); isInst {
+				if v, handled := rt.jsvClassCall(o, cls, rt.toString(u(a[1])), arr.elems); handled {
+					return w(v)
+				}
+			}
+		}
 		if jsvAttrN > 0 {
 			name := rt.toString(u(a[1]))
 			if t, isArr := u(a[0]).(*jsArray); isArr {
@@ -6085,6 +6318,11 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 				return w(rt.jsvOwnDescs(name, arr.elems, func(v interface{}, k string) interface{} {
 					return u(m["js_jsvget"]([]uint64{w(v), w(k)}))
 				}))
+			}
+		}
+		if t, isArr := u(a[0]).(*jsArray); isArr && jsvArrClass(t) != nil {
+			if v, handled := rt.jsvArrBuiltin(t, rt.toString(u(a[1])), arr.elems); handled {
+				return w(v)
 			}
 		}
 		if v, handled := rt.jsvMethod(u(a[0]), rt.toString(u(a[1])), arr.elems); handled {

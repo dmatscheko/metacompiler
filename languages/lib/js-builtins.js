@@ -233,7 +233,7 @@ Array.from = function from(items, mapFn, self) {
             out.push(mapFn === undefined ? v : mapFn.call(self, v, i))
             i = i + 1
         }
-        return out
+        return __arrOf(this, out)
     }
     // Any other iterable through its own iterator, which for an arguments object stops
     // at its length.
@@ -243,7 +243,7 @@ Array.from = function from(items, mapFn, self) {
             out.push(mapFn === undefined ? s.value : mapFn.call(self, s.value, i))
             i = i + 1
         }
-        return out
+        return __arrOf(this, out)
     }
     var n = Number(items.length)
     if (!(n > 0)) { n = 0 }
@@ -251,10 +251,20 @@ Array.from = function from(items, mapFn, self) {
     for (var j = 0; j < n; j++) {
         out.push(mapFn === undefined ? items[j] : mapFn.call(self, items[j], j))
     }
-    return out
+    return __arrOf(this, out)
 }
 
-Array.of = function of(...items) { return items }
+Array.of = function of(...items) { return __arrOf(this, items) }
+
+// Array.from and Array.of called on a class extending Array (`V.from(xs)`, which
+// reaches them as V's inherited statics) answer an instance of that class: a
+// `new V()` holding the elements.
+function __arrOf(C, out) {
+    if (C === Array || typeof C !== "function") { return out }
+    var r = new C()
+    for (var i = 0; i < out.length; i++) { r[i] = out[i] }
+    return r
+}
 
 // The global isNaN and isFinite convert their argument with ToNumber first (so
 // isNaN("abc") is true and isFinite("12") is true), unlike Number.isNaN/isFinite.

@@ -3514,6 +3514,11 @@ NotFuncHead = :script(~~
         if (isBigInt(v)) { return biToStr(v, 10) }
         if (Array.isArray(v)) {
             if (jsIsArgs(v)) { return "[object Arguments]" }
+            if (jsArrClasses.length > 0) {
+                var ts = anytype // An Array subclass's own toString, {v} or null.
+                ts = jsArrSubCall(v, "toString", [])
+                if (ts != null) { return jsStr(ts.v) }
+            }
             var out = ""
             for (var i = 0; i < v.length; i++) {
                 if (i > 0) { out = out + "," }
@@ -4035,14 +4040,14 @@ NotFuncHead = :script(~~
         if (typeof o != "object" || isClassDesc(o) || hasOwn(o, "constructor") || hasOwn(o, "__protoof") || jsNoObjProto(o)) { return undefined }
         if (isBigInt(o)) { return jsBigIntFn }
         if (jsIsSym(o)) { return jsSymbolFn }
-        if (jsIsWrap(o)) { return jsWrapCtor(o.__bvof) }
         if (o.__class != undefined) {
             var cf = anytype // The class an instance was built from, if any.
             cf = classCtorOf(o)
             return cf !== undefined ? cf : jsObjectGlobal
         }
+        if (jsIsWrap(o)) { return jsWrapCtor(o.__bvof) }
         if (jpIs(o)) { return jsPromiseFn }
-        if (rxIsRegexObj(o)) { return hostGlobals["RegExp"] }
+        if (rxIsRegexObj(o) || isRegex(o)) { return hostGlobals["RegExp"] }
         return jsObjectGlobal
     }
     function jsOwnKeys(v) {
@@ -5066,7 +5071,7 @@ NotFuncHead = :script(~~
         if (o === null || typeof o != "object" || isBigInt(o) || jsIsSym(o) || isClassDesc(o) || jsIsArgs(o)) { return o }
         jsAttrN = jsAttrN + 1
         if (Array.isArray(o)) {
-            if (lv > jsArrLevel(o)) { arrKindSet(o, 23 - lv) }
+            if (lv > jsArrLevel(o)) { arrKindSet(o, arrKind(o) - arrKind(o) % 32 + 23 - lv) }
             return o
         }
         scopePut(o, "__noext", true)
@@ -6491,6 +6496,11 @@ NotFuncHead = :script(~~
     // allocating a closure it would throw away. Twins: js_jsvget in
     // abnf/jsrtjsprint.go and in languages/lib/js-rt.metajs.
     function getMember(o, k) {
+        if (jsArrClasses.length > 0 && typeof k == "string" && Array.isArray(o)) {
+            var am = anytype // An Array subclass instance's own member, or absent.
+            am = jsArrSubRead(o, k)
+            if (am !== undefined) { return am }
+        }
         // A String / Array / Number builtin method as a value (see builtinValue).
         // `length` is the one hot read on those kinds, so it skips the table.
         if (typeof k == "string" && k !== "length" && (typeof o == "string" || typeof o == "number" || typeof o == "boolean" || Array.isArray(o))) {
@@ -8722,6 +8732,8 @@ NotFuncHead = :script(~~
         // prototype chain here, so they are answered from the value's own shape.
         if (cls === hostGlobals["Object"]) { return typeof v == "object" || typeof v == "function" }
         if (cls === hostGlobals["Array"]) { return jsIsArr(v) }
+        if (cls === jsPromiseFn) { return jpIs(v) }
+        if (cls === hostGlobals["RegExp"]) { return isRegex(v) || rxIsRegexObj(v) }
         if (cls === jsFunctionFn) { return typeof v == "function" || isClassDesc(v) }
         if (typeof v != "object") { return false }
         // A wrapper is an instance of its primitive's global; the prototype object it
@@ -8745,7 +8757,9 @@ NotFuncHead = :script(~~
             }
             if (want == undefined) { return false }
         }
-        for (var cl = v.__class; cl != undefined && cl != null; cl = cl.__super) { if (cl === want) return true }
+        var vc = anytype // The instance's class: an Array subclass instance's is in its kind word.
+        vc = Array.isArray(v) ? jsArrClassOf(v) : v.__class
+        for (var cl = vc; cl != undefined && cl != null; cl = cl.__super) { if (cl === want) return true }
         return false
     }
     // The comma (sequence) operator: every operand is evaluated, the LAST one is the value.
@@ -9640,6 +9654,7 @@ NotFuncHead = :script(~~
         var sc = {}
         sc["0strict"] = strict
         sc["this"] = self
+        sc["new.target"] = undefined // A generator or async body is never constructed.
         var ao = args.slice()
         sc["arguments"] = jsArgsObj(ao)
         jsArgMap(sc, argm, ao)
@@ -9936,6 +9951,7 @@ NotFuncHead = :script(~~
             scopes = env.slice()
             var sc = {}
             sc["this"] = self
+            sc["new.target"] = undefined // A method is never constructed.
             sc["arguments"] = jsArgsObj(args)
             sc["0strict"] = true // A class body is strict code, always.
             scopes.push(sc)
@@ -9951,6 +9967,10 @@ NotFuncHead = :script(~~
     function makeCtorClosure(params, bodyT, fields, defScopes, hasSuper, isDefault) {
         var env = defScopes.slice()
         return function() {
+            // new.target arrives through the one-shot slot like a function's does:
+            // `new C()` arms it with C, and super() passes the running one on.
+            var nt = pendingNewTarget
+            pendingNewTarget = undefined
             var self = arguments[0]
             var args = []
             for (var i = 1; i < arguments.length; i++) args.push(arguments[i])
@@ -9958,6 +9978,7 @@ NotFuncHead = :script(~~
             scopes = env.slice()
             var sc = {}
             sc["this"] = self
+            sc["new.target"] = nt
             sc["arguments"] = jsArgsObj(args)
             sc["0strict"] = true // A class body is strict code, always.
             scopes.push(sc)
@@ -9977,7 +9998,7 @@ NotFuncHead = :script(~~
                 // on to A, which is also how `class E extends Error {}` carries its message.
                 var supArgs = [self]
                 for (var sa = 0; sa < args.length; sa++) supArgs.push(args[sa])
-                ctorSuperDone(self, supCls.__ctor.apply(undefined, supArgs))
+                ctorSuperDone(self, ctorConstruct(supCls, supArgs, nt))
             } else if (!hasSuper) {
                 ctorFields(fields, fscopes)
             }
@@ -9993,6 +10014,15 @@ NotFuncHead = :script(~~
             if (hasSuper && (rv == undefined || rv == null || (typeof rv != "object" && typeof rv != "function"))) { return sc["this"] }
             return rv
         }
+    }
+    // Runs a class's constructor on cargv = [instance, args...] with new.target nt.
+    // The slot is cleared afterwards: a builtin parent's constructor never drains it.
+    function ctorConstruct(cls, cargv, nt) {
+        pendingNewTarget = nt
+        var r = anytype // [[Construct]]: the constructor may return a replacement.
+        r = cls.__ctor.apply(undefined, cargv)
+        pendingNewTarget = undefined
+        return r
     }
     function ctorFields(fields, fscopes) {
         var saved = scopes
@@ -10048,6 +10078,11 @@ NotFuncHead = :script(~~
                 else if (hasOwn(cl, "__pview") && hasOwn(cl.__pview, name)) { pm = cl.__pview[name] }
             }
             if (typeof pm == "function") { return callWithThis(pm, target, args) }
+            if (m == undefined && jsIsWrap(target) && !isBigInt(target.__bvof)) {
+                var cwb = anytype // A wrapper subclass instance: its primitive's method, {v} or null.
+                cwb = jsBuiltin(target.__bvof, name, args)
+                if (cwb != null) { return cwb.v }
+            }
             if (m == undefined) {
                 var pc = anytype // {v} or null.
                 pc = jsProtoCall(target, name, args)
@@ -10117,6 +10152,82 @@ NotFuncHead = :script(~~
     }
     function makeStaticBlock(body) { return {kind: "staticblock", body: body} }
 
+    // `class C extends Array`: the Array global stands as this descriptor. Its
+    // constructor makes what Array(...args) makes and files new.target's class on it
+    // (jsArrTag), so an instance is a real array; __ctorfn makes Array's own
+    // properties (from, of) the subclass's inherited statics. Twins: js_jsheritage in
+    // abnf/jsrtjsprint.go and languages/lib/js-rt.metajs.
+    var jsArrayRootClass = {"__isclass": true, "__name": "Array", "__ctorfn": jsArrayFn, "__ctor": function() {
+        var nt = anytype // The class `new` named.
+        nt = pendingNewTarget
+        pendingNewTarget = undefined
+        var args = []
+        for (var i = 1; i < arguments.length; i++) { args.push(arguments[i]) }
+        var a = jsArrayFn.apply(undefined, args)
+        if (isClassDesc(nt)) { jsArrTag(a, nt) }
+        return a
+    }}
+    // An instance of a class extending Array is an ARRAY whose kind word (arrKind)
+    // carries 1 + the index of its class in jsArrClasses above the low five bits, which
+    // keep their meaning (19 the arguments object, 20-22 an integrity level). Its own
+    // and inherited methods win over the Array builtins of the same name. Twins:
+    // jsvArrClass in abnf/jsrtjsprint.go, jvArrClass in languages/lib/js-rt.metajs.
+    var jsArrClasses = []
+    function jsArrTag(a, cls) {
+        var at = 0 - 1
+        for (var i = 0; i < jsArrClasses.length; i++) { if (jsArrClasses[i] === cls) { at = i } }
+        if (at < 0) {
+            at = jsArrClasses.length
+            jsArrClasses.push(cls)
+        }
+        arrKindSet(a, arrKind(a) % 32 + 32 * (at + 1))
+        return a
+    }
+    function jsArrClassOf(a) {
+        var none = anytype
+        none = undefined
+        if (jsArrClasses.length == 0 || !Array.isArray(a)) { return none }
+        var k = arrKind(a)
+        if (k < 32 || k % 32 == 19) { return none }
+        return jsArrClasses[Math.floor(k / 32) - 1]
+    }
+    // A method call on an instance: {v} from the class chain, or null for the Array
+    // builtins to answer. The builtins that make a new array through ArraySpeciesCreate
+    // answer one of the instance's class; the subclass constructor is not run for it.
+    var jsArrSpecies = {"concat": true, "filter": true, "flat": true, "flatMap": true, "map": true, "slice": true, "splice": true}
+    function jsArrSubCall(a, name, args) {
+        var cls = anytype // A class descriptor, or absent.
+        cls = jsArrClassOf(a)
+        if (cls === undefined) { return null }
+        for (var cl = cls; cl != undefined && cl != null; cl = cl.__super) {
+            if (hasOwn(cl, name) && typeof cl[name] == "function" && !isInternalKey(name)) {
+                return {v: cl[name].apply(undefined, concat2impl([a], args))}
+            }
+            if (hasOwn(cl, "__pview") && hasOwn(cl.__pview, name)) { return {v: callWithThis(cl.__pview[name], a, args)} }
+        }
+        if (!hasOwn(jsArrSpecies, name)) { return null }
+        return jsArrBuiltin(a, name, args)
+    }
+    // An Array builtin on an instance, which is also what its super.m() reaches.
+    function jsArrBuiltin(a, name, args) {
+        var r = anytype // {v} or null.
+        r = jsBuiltin(a, name, args)
+        if (r != null && hasOwn(jsArrSpecies, name) && Array.isArray(r.v) && jsArrClassOf(a) !== undefined) { jsArrTag(r.v, jsArrClassOf(a)) }
+        return r
+    }
+    // A read: a getter, a method value or `constructor` off the class chain.
+    function jsArrSubRead(a, k) {
+        var none = anytype
+        none = undefined
+        var cls = anytype // A class descriptor, or absent.
+        cls = jsArrClassOf(a)
+        if (cls === undefined || isInternalKey(k)) { return none }
+        if (k == "constructor") { return cls }
+        for (var cl = cls; cl != undefined && cl != null; cl = cl.__super) {
+            if (hasOwn(cl, "__acc") && hasOwn(cl["__acc"], "get:" + k)) { return callWithThis(cl["__acc"]["get:" + k], a, []) }
+        }
+        return protoChainRead(cls, k)
+    }
     // A class as a VALUE: builds the descriptor object, attaches the methods and
     // accessors, then runs the static initializers (fields and static blocks) in source
     // order. Shared by the declaration (which binds the result) and the class expression
@@ -10131,10 +10242,12 @@ NotFuncHead = :script(~~
     // follow from the __super walk; its __ctor runs F on the new `this`, and the
     // static walks read F's own properties through __ctorfn (classStaticFind). A
     // prototype the program wrote onto F (`F.prototype = p`) is the parent prototype as
-    // it stands now, so that case gets a descriptor of its own whose view is p. A
-    // builtin global keeps the "unknown superclass" error.
+    // it stands now, so that case gets a descriptor of its own whose view is p. Any
+    // other builtin global keeps the "unknown superclass" error.
     function jsHeritage(v) {
         if (v === jsObjectGlobal) { return jsObjectRootClass }
+        if (v === jsArrayFn) { return jsArrayRootClass }
+        if (v === jsPromiseFn || v === hostGlobals["RegExp"] || v === jsNumberFn || v === jsStringFn || v === jsBooleanFn) { return jsHostRoot(v) }
         if (typeof v != "function" || builtinProto(v) !== undefined) { return v }
         var d = ctorDescriptor(fnNameOf(v), v)
         if (fnPropsN > 0 && fnOwn(v, "prototype")) {
@@ -10373,25 +10486,7 @@ NotFuncHead = :script(~~
             // the shape 'new.target' exists for. The fresh object goes in through the
             // receiver slot, and an object the function returns explicitly wins over it,
             // exactly like [[Construct]] does.
-            if (typeof cls == "function") {
-                // A wrapper of the primitive the call answers, and ToObject for Object.
-                if (cls === jsNumberFn || cls === jsStringFn || cls === jsBooleanFn) { return jsWrap(cls.apply(undefined, argv)) }
-                if (cls === jsObjectGlobal) { return jsToObject(argv.length > 0 ? argv[0] : undefined) }
-                var self = {}
-                self["__keys"] = []
-                var nd = anytype // The instance's descriptor; none for a non-object prototype.
-                nd = newClassOf(clsName, cls)
-                if (nd !== undefined) { self["__class"] = nd }
-                pendingNewTarget = cls
-                var r = anytype // The function may return a replacement object.
-                r = callWithThis(cls, self, argv)
-                // [[Construct]] keeps an explicitly returned OBJECT, and a function
-                // IS an object - `function Meta() { return function () {} }` makes
-                // `new Meta()` answer that inner function, which is what lets
-                // `new (new Meta())()` construct through it.
-                if (r != undefined && r != null && (typeof r == "object" || typeof r == "function")) { return r }
-                return self
-            }
+            if (typeof cls == "function") { return jsConstructFn(cls, argv, clsName) }
             // node's TypeError for `new` on something that is neither a class nor a
             // constructor function, and CATCHABLE.
             if (cls == undefined || !cls.__isclass) { biRaise("TypeError: " + clsName + " is not a constructor") }
@@ -10401,10 +10496,56 @@ NotFuncHead = :script(~~
             var cargv = [obj]
             for (var j = 0; j < argv.length; j++) cargv.push(argv[j])
             var cret = anytype // [[Construct]]: a returned OBJECT replaces the instance.
-            cret = cls.__ctor.apply(undefined, cargv)
+            cret = ctorConstruct(cls, cargv, cls)
             if (cret != undefined && cret != null && (typeof cret == "object" || typeof cret == "function")) { return cret }
             return obj
         }
+    }
+    // `new F(...)` for a FUNCTION F. A wrapper of the primitive the call answers, and
+    // ToObject for Object.
+    function jsConstructFn(cls, argv, clsName) {
+        if (cls === jsNumberFn || cls === jsStringFn || cls === jsBooleanFn) { return jsWrap(cls.apply(undefined, argv)) }
+        if (cls === jsObjectGlobal) { return jsToObject(argv.length > 0 ? argv[0] : undefined) }
+        var self = {}
+        self["__keys"] = []
+        var nd = anytype // The instance's descriptor; none for a non-object prototype.
+        nd = newClassOf(clsName, cls)
+        if (nd !== undefined) { self["__class"] = nd }
+        pendingNewTarget = cls
+        var r = anytype // The function may return a replacement object.
+        r = callWithThis(cls, self, argv)
+        // [[Construct]] keeps an explicitly returned OBJECT, and a function IS an
+        // object - `function Meta() { return function () {} }` makes `new Meta()`
+        // answer that inner function, which is what lets `new (new Meta())()`
+        // construct through it.
+        if (r != undefined && r != null && (typeof r == "object" || typeof r == "function")) { return r }
+        return self
+    }
+    // `class C extends Promise` (RegExp, Number, String, Boolean): the builtin stands as
+    // a descriptor of its own, whose constructor makes the object `new B()` makes and
+    // files new.target's class on it, so the class's methods come first and the
+    // builtin's answer every other name. Twins: hostRoots in abnf/jsrtjsprint.go,
+    // jvHostRoot in languages/lib/js-rt.metajs.
+    var jsHostRoots = []
+    function jsHostRoot(b) {
+        for (var i = 0; i < jsHostRoots.length; i++) { if (jsHostRoots[i].__ctorfn === b) { return jsHostRoots[i] } }
+        var d = {}
+        d["__isclass"] = true
+        d["__name"] = fnNameOf(b)
+        d["__ctorfn"] = b
+        d["__ctor"] = function() {
+            var nt = anytype // The class `new` named.
+            nt = pendingNewTarget
+            pendingNewTarget = undefined
+            var args = []
+            for (var j = 1; j < arguments.length; j++) { args.push(arguments[j]) }
+            var r = anytype // The builtin's object.
+            r = jsConstructFn(b, args, fnNameOf(b))
+            if (isClassDesc(nt) && typeof r == "object" && r !== null) { r["__class"] = nt }
+            return r
+        }
+        jsHostRoots.push(d)
+        return d
     }
     // The class descriptor a constructor FUNCTION gets, so its instances still answer
     // 'instanceof' and carry a name. One descriptor per function, remembered on the
@@ -10618,7 +10759,7 @@ NotFuncHead = :script(~~
                 var supCls = getVar("__class__").__super
                 if (supCls == undefined) fail("super() with no superclass")
                 var argv = concat2impl([self], evalArgs(argThunks))
-                ctorSuperDone(self, supCls.__ctor.apply(undefined, argv))
+                ctorSuperDone(self, ctorConstruct(supCls, argv, getVar("new.target")))
                 return undefined
             }
         }
@@ -10646,6 +10787,11 @@ NotFuncHead = :script(~~
             // ...and the chain ends at Object.prototype, whose methods run on the
             // receiver (`super.toString()` is "[object Object]"). Twin of
             // js_jssupproto in abnf/jsrtjsprint.go and languages/lib/js-rt.metajs.
+            if (typeof m != "function" && Array.isArray(self)) {
+                var sb = anytype // An Array subclass's super.m() reaches Array.prototype.
+                sb = jsArrBuiltin(self, name, evalArgs(argThunks))
+                if (sb != null) { return sb.v }
+            }
             if (typeof m != "function" && !isClassDesc(self) && jsIsProtoName(name)) { return jsProtoApply(self, name, evalArgs(argThunks)) }
             if (typeof m != "function") { biRaise("TypeError: (intermediate value)." + name + " is not a function") }
             var argv = concat2impl([self], evalArgs(argThunks))
@@ -11064,20 +11210,26 @@ NotFuncHead = :script(~~
                     curThis = undefined
                 } else {
                     var argv = evalArgs(s.args)
+                    // An Array subclass instance's own methods come first (jsArrSubCall).
+                    var aHit = anytype
+                    aHit = (jsArrClasses.length > 0 && Array.isArray(curThis)) ? jsArrSubCall(curThis, lastKey, argv) : null
                     // The regular-expression surface first: a RegExp receiver has no
                     // members of its own (getMember answered undefined), and a string
                     // receiver whose argument is a pattern must not fall through to the
                     // host's own string method, which knows nothing about these values.
                     // Answers null for every call that is none of its business, which is
                     // every call in a program that uses no regular expression.
-                    var rxHit = rxDispatch(curThis, lastKey, argv)
+                    var rxHit = anytype
+                    rxHit = (aHit != null) ? null : rxDispatch(curThis, lastKey, argv)
                     // JavaScript's own String / Array / Number / Object method
                     // surface, spelled in this script rather than taken from the
                     // script host, which differs per engine. abnf/jsrtjsprint.go
                     // (js_jsmcall) is the compiler twin.
                     var bHit = anytype
-                    bHit = (rxHit != null || jsIsArgs(curThis)) ? null : jsBuiltin(curThis, lastKey, argv)
-                    if (rxHit != null) {
+                    bHit = (aHit != null || rxHit != null || jsIsArgs(curThis)) ? null : jsBuiltin(curThis, lastKey, argv)
+                    if (aHit != null) {
+                        cur = aHit.v
+                    } else if (rxHit != null) {
                         cur = rxHit.v
                     } else if (bHit != null) {
                         cur = bHit.v

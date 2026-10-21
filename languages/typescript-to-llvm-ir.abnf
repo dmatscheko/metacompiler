@@ -939,7 +939,7 @@ SuperKeyIdx <~~ push({skey: keyEscT(pop())}) ~~>
             = "[" Expression "]" ;
 
 // 'new.target': the constructor the running call was made with, or undefined for an
-// ordinary call. makeNew's function form goes through js_call_new, which is what arms it.
+// ordinary call. js_call_new (a function) and js_jsnewcall (a class) arm it; see ntWant.
 NewTarget   <~~ push(makeNewTarget()) ~~>
             = KwNew "." "target" KwEnd ;
 AsyncArrow  <~~ push(makeAsyncArrow(takeAll(), up.in)) ~~>
@@ -3961,6 +3961,8 @@ NotFuncHead = :script(~~
             }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), thisV])
         }
+        // A generator or async body (lexThis, not an arrow) is never constructed.
+        if (!isCtl && isArrow !== true) { bindNewTarget(b, lexThis != true) }
         b = bindParams(b, paramNames, f.Params[1], 0)
         // See the twin of this line in js-to-llvm-ir.abnf.
         if (!isCtl && isArrow !== true) {
@@ -4985,6 +4987,8 @@ NotFuncHead = :script(~~
         forOfIters = []
         var b = f.NewBlock("entry")
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
+        // Only the constructor (the one with a field list) is ever constructed.
+        bindNewTarget(b, initFields != null)
         var off = 0
         if (isInstance) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), callExt(b, "js_arg", [f.Params[1], handle(0)])])
@@ -5005,7 +5009,7 @@ NotFuncHead = :script(~~
             var supCls = callExt(b, "js_scope_get", [curScopeV, emitStr(b, implicitSuper)])
             var supCtor = callExt(b, memGetExt(), [supCls, emitStr(b, "__ctor")])
             // See the twin of this comment in js-to-llvm-ir.abnf.
-            b = emitSuperDone(b, jsCall(b, supCtor, hUndef, f.Params[1]), inits)
+            b = emitSuperDone(b, superCall(b, supCtor, f.Params[1]), inits)
         } else if (derived != true) {
             b = emitFieldInits(b, inits)
         }
@@ -5081,6 +5085,12 @@ NotFuncHead = :script(~~
             var m = items[i]
             if (m == undefined || m.skip != undefined) { continue }
             if (m.cname != undefined) { info.name = m.cname; continue }
+            // See the twin of this comment in js-to-llvm-ir.abnf.
+            if (m.ext === "Array" || m.ext === "Promise" || m.ext === "RegExp" || m.ext === "Number" || m.ext === "String" ||
+                m.ext === "Boolean" || (m.ext == undefined && m.extT != undefined)) {
+                ntWant = true
+                arrSubWant = true
+            }
             // See the twin of this comment in js-to-llvm-ir.abnf.
             if (m.ext != undefined) { m = {extT: makeVarRef(m.ext)} }
             // See the twin of this comment in js-to-llvm-ir.abnf.
@@ -5222,7 +5232,8 @@ NotFuncHead = :script(~~
     }
     // 'new.target'.
     function makeNewTarget() {
-        return function(b) { return {b: b, v: callExt(b, "js_newtarget", [])} }
+        ntWant = true
+        return function(b) { return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, "new.target")])} }
     }
 
     // See the twin of this comment in js-to-llvm-ir.abnf.
@@ -5286,12 +5297,17 @@ NotFuncHead = :script(~~
             var ctorV = callExt(cb, memGetExt(), [clsV, emitStr(cb, "__ctor")])
             // [[Construct]]'s last step, as in the function form: an OBJECT the
             // constructor returns replaces the instance.
-            var oCr = callExt(cb, "js_jsnewres", [jsCall(cb, ctorV, hUndef, cargs), oC])
+            var oCr = callExt(cb, "js_jsnewres", [ntWant ? callExt(cb, "js_jsnewcall", [clsV, ctorV, cargs]) : jsCall(cb, ctorV, hUndef, cargs), oC])
             cb.NewBr(mergeB)
             return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(oF, fnB), llvm.ir.NewIncoming(oCr, cb)])}
         }
     }
 
+    // The parent constructor's call for super(): new.target is the running one.
+    function superCall(b, supCtor, argsV) {
+        if (!ntWant) { return jsCall(b, supCtor, hUndef, argsV) }
+        return callExt(b, "js_jsnewcall", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, "new.target")]), supCtor, argsV])
+    }
     // super(args): delegate to the parent constructor. super.m(args): dispatch m on the
     // parent class (js_supercall walks __super from there). The defining class is
     // captured at build time (curClassName).
@@ -5306,7 +5322,7 @@ NotFuncHead = :script(~~
                 var argsV = callExt(b, "js_arr_new", [])
                 callExt(b, "js_arr_push", [argsV, thisV])
                 b = pushArgs(b, argsV, argThunks)
-                b = emitSuperDone(b, jsCall(b, supCtor, hUndef, argsV), superFields)
+                b = emitSuperDone(b, superCall(b, supCtor, argsV), superFields)
                 return {b: b, v: hUndef}
             }
         }
@@ -5329,6 +5345,19 @@ NotFuncHead = :script(~~
                 scBadB.NewBr(scEndB)
                 scOkB.NewBr(scEndB)
                 return {b: scEndB, v: scEndB.NewPhi([llvm.ir.NewIncoming(scV, scOkB), llvm.ir.NewIncoming(pV, scBadB)])}
+            }
+            if (arrSubWant) {
+                // js_jssupproto answers an Array subclass's Array.prototype method, and
+                // the miss sentinel again for anything else.
+                var aV = callExt(scBadB, "js_jssupproto", [thisV, emitStr(scBadB, name), argsV])
+                var aOkB = curF.NewBlock("")
+                var aBadB = curF.NewBlock("")
+                scBadB.NewCondBr(scBadB.NewICmp(llvm.enum.IPredEQ, aV, scBadB.NewLoad(i64, mcallMissGlob())), aBadB, aOkB)
+                emitSiteThrow(aBadB, "(intermediate value)." + name + " is not a function")
+                var aEndB = curF.NewBlock("")
+                aOkB.NewBr(aEndB)
+                scOkB.NewBr(aEndB)
+                return {b: aEndB, v: aEndB.NewPhi([llvm.ir.NewIncoming(scV, scOkB), llvm.ir.NewIncoming(aV, aOkB)])}
             }
             emitSiteThrow(scBadB, "(intermediate value)." + name + " is not a function")
             return {b: scOkB, v: scV}
@@ -5715,6 +5744,12 @@ NotFuncHead = :script(~~
     function noteMember(name) { if (name == "normalize") { normWant = true } }
     // See the twin of this comment in js-to-llvm-ir.abnf.
     var argsWant = false
+    // new.target's entry binding: see the twin of this comment in js-to-llvm-ir.abnf.
+    var ntWant = false
+    var arrSubWant = false
+    function bindNewTarget(b, live) {
+        if (ntWant) { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "new.target"), live ? callExt(b, "js_newtarget", []) : hUndef]) }
+    }
     // The mapped arguments object: see the twin of this comment in js-to-llvm-ir.abnf.
     var paramSeen = {}
     function noteParam(name) {

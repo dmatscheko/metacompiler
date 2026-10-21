@@ -1,4 +1,4 @@
-// Full-syntax test: JavaScript - part 3 of 4, sections 44-56, 58-71, 73-100 and 109.
+// Full-syntax test: JavaScript - part 3 of 4, sections 44-56, 58-71, 73-100, 109-110.
 //
 // THE JS RATCHET IS FOUR FILES: as one file its -frozen interpreter leg ran into
 // ./test.sh --full's time brake (peak memory grew superlinearly with the file), and
@@ -7,7 +7,7 @@
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43 and 101-108, engine agreement, generators,
 //                             Error, Math, builtin constructors, integrity levels
-//   tests/js-test-full.3.js   sections 44-56, 58-71, 73-100 and 109, the call/class/private-name
+//   tests/js-test-full.3.js   sections 44-56, 58-71, 73-100, 109-110, the call/class/private-name
 //                             model, the Unicode identifier tables, iterators, derived
 //                             constructors, JSON, guards, Set and Map, iterator closing,
 //                             hasOwnProperty, delete, Object.prototype, extends Object,
@@ -21,7 +21,8 @@
 //                             Object.create, a replaced constructor prototype,
 //                             getPrototypeOf / setPrototypeOf / defineProperty,
 //                             toLocaleString, primitive wrapper objects and property
-//                             attributes, a class extending a constructor function
+//                             attributes, a class extending a constructor function,
+//                             new.target and a class extending a builtin
 //   (section 72 is in tests/js-test-full.4.mjs, beside 57: it needs a file that
 //   names no builtin class but in a `new`)
 //   tests/js-test-full.4.mjs  section 57, export in a Module
@@ -2869,6 +2870,89 @@ function s109() {
     check("fh109i", q.replaced === true && q.q === 1 && !(q instanceof Q109))
 }
 
+// ===== SECTION 110: new.target, and a class extending a builtin =====
+// new.target is the class `new` named, also inside a parent constructor super()
+// reached and inside a constructor function a class extends; a method, a generator
+// and a plain call see undefined, an arrow its function's. Values read off node 24.
+const v110 = [1, 2, 3]
+class A110 { constructor() { this.t = typeof new.target; this.e = new.target === A110; this.n = new.target === B110 } }
+class B110 extends A110 {}
+class D110 extends B110 { constructor() { super(); this.d = new.target === D110; this.w = new.target.name } }
+function F110() { nt110(); this.f = new.target === F110; this.h = new.target === H110; this.a = (() => new.target)() === new.target }
+function nt110() { return typeof new.target }
+class H110 extends F110 {}
+class M110 { m() { return typeof new.target } static s() { return typeof new.target } }
+function* g110() { yield typeof new.target }
+class E110 extends Error { constructor(m) { super(m); this.nt = new.target === E110 } }
+// A class extending Array makes real arrays: its own and inherited methods win over
+// the builtins, super.m() reaches Array.prototype, the builtins that create an array
+// answer one of the class, and from / of are its inherited statics.
+class L110 extends Array {
+    sum() { return this.reduce((a, b) => a + b, 0) }
+    get last() { return this[this.length - 1] }
+    push(...xs) { return super.push(...xs) + 100 }
+    toString() { return "L<" + this.join("|") + ">" }
+}
+class K110 extends L110 { sum() { return super.sum() * 10 } }
+class S110 extends Array { constructor(...xs) { super(...xs); this.push(this.length) } }
+class P110 extends Map { getOr(k, d) { return this.has(k) ? this.get(k) : d } }
+class T110 extends Set { addAll(xs) { for (const x of xs) this.add(x); return this } }
+// ...and Promise, RegExp and the primitive wrappers: the builtin's object, filed under
+// the class, whose own methods come first.
+class Q110 extends Promise { tag() { return "Q" } }
+class R110 extends RegExp { both(s) { return this.test(s) && this.source === "a+" } }
+class U110 extends String { shout() { return this.toUpperCase() + "!" } }
+class N110 extends Number { constructor(v) { super(v * 10) } half() { return this / 2 } }
+class B110b extends Boolean { neg() { return !this.valueOf() } }
+function s110() {
+    const a = new A110()
+    const b = new B110()
+    const d = new D110()
+    check("nt110a", a.t === "function" && a.e && !a.n && b.t === "function" && !b.e && b.n)
+    check("nt110b", !d.e && !d.n && d.d && d.w === "D110")
+    const f = new F110()
+    const h = new H110()
+    check("nt110c", f.f && !f.h && f.a && !h.f && h.h && h.a && nt110() === "undefined")
+    check("nt110d", new M110().m() === "undefined" && M110.s() === "undefined" && g110().next().value === "undefined")
+    const ks = [A110, B110]
+    const got = []
+    for (let i = 0; i < ks.length; i++) { const o = new ks[i](); got.push(o.e, o.n) }
+    check("nt110e", got.join() === "true,false,false,true")
+    const e = new E110("m" + v110[0])
+    check("nt110f", e.nt && e.message === "m1" && e instanceof E110 && e instanceof Error && String(e) === "Error: m1")
+    const l = new L110()
+    check("xa110a", l.push(v110[0], v110[1], v110[2]) === 103 && l.length === 3 && l[1] === 2 && l.sum() === 6 && l.last === 3)
+    check("xa110b", Array.isArray(l) && l instanceof L110 && l instanceof Array && !(l instanceof K110) && !([1] instanceof L110))
+    check("xa110c", l.constructor === L110 && String(l) === "L<1|2|3>" && `${l}` === "L<1|2|3>" && JSON.stringify(l) === "[1,2,3]")
+    const k = new K110(v110[1], v110[2])
+    check("xa110d", k.sum() === 50 && k instanceof L110 && k.length === 2 && new K110(v110[2]).length === 3 && typeof k.sum === "function")
+    const m = l.map(x => x * 2)
+    check("xa110e", m instanceof L110 && m.sum() === 12 && l.filter(x => x > 1) instanceof L110 && l.slice(1).sum() === 5 &&
+        !(l.toReversed() instanceof L110) && [...l].join() === "1,2,3")
+    const fr = L110.from([v110[2], v110[2]])
+    check("xa110f", fr instanceof L110 && fr.sum() === 6 && L110.of(v110[0]).last === 1 && Object.getPrototypeOf(L110) === Array)
+    const s = new S110(7, 8)
+    check("xa110g", s.join() === "7,8,2" && s instanceof S110 && !(s instanceof L110))
+    Object.freeze(l)
+    let refused = false
+    try { l.push(4) } catch (err) { refused = err instanceof TypeError }
+    check("xa110h", refused && l.length === 3 && Object.isFrozen(l) && l instanceof L110)
+    const mm = new P110([["a", v110[0]]])
+    const ts = new T110().addAll([1, 2, 2, 3])
+    check("xa110i", mm.getOr("a", 0) === 1 && mm.getOr("b", 9) === 9 && mm instanceof Map && ts.size === 3 && ts instanceof Set)
+    const q = new Q110(res => res(v110[0]))
+    const re = new R110("a+", "g")
+    check("xb110a", q instanceof Q110 && q instanceof Promise && q.tag() === "Q" && q.constructor === Q110 &&
+        new Promise(res => res(1)) instanceof Promise && !(q instanceof RegExp))
+    check("xb110b", re instanceof R110 && re instanceof RegExp && re.both("caat") && re.flags === "g" && /x/ instanceof RegExp &&
+        "baa".replace(new R110("a"), "o") === "boa")
+    const u = new U110("hey")
+    const n = new N110(v110[2])
+    check("xb110c", u.shout() === "HEY!" && u.length === 3 && u + "?" === "hey?" && u instanceof String && u.constructor === U110 &&
+        typeof u === "object")
+    check("xb110d", n.half() === 15 && n + 0 === 30 && n instanceof Number && n.toFixed(1) === "30.0" && new B110b(false).neg())
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -2928,6 +3012,7 @@ function main() {
     s99() // SECTION-CALL 99
     s100() // SECTION-CALL 100
     s109() // SECTION-CALL 109
+    s110() // SECTION-CALL 110
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

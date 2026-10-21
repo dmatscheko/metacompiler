@@ -1027,6 +1027,15 @@ function jvStr(v) {
     }
     if (Array.isArray(v)) {
         if (jvIsArgs(v)) { return "[object Arguments]" }
+        if (jvArrClsN > 0) {
+            var acl = anytype
+            acl = jvArrClass(v)
+            if (acl !== undefined) {
+                var ats = anytype
+                ats = jvClassCall(v, acl, "toString", [])
+                if (ats !== jvMiss) { return jvStr(ats) }
+            }
+        }
         var out = ""
         var i = 0
         while (i < v.length) {
@@ -2373,7 +2382,14 @@ function js_jsvget(o, key) {
             }
         }
         var bfam = jvBuiltinFam(o, key)
-        if (bfam != "") { return jvBuiltinValue(bfam, key) }
+        if (bfam != "") {
+            if (jvArrClsN > 0) {
+                var asb = anytype
+                asb = jvArrSubRead(o, key)
+                if (asb !== jvMiss) { return asb }
+            }
+            return jvBuiltinValue(bfam, key)
+        }
         // `f.name` and `f.length` - two inline comparisons, no call (see the comment
         // beside jvFnNameOf). Before the own-property side table, because both are
         // non-writable in node and js_jsmset drops a write to either. An arguments
@@ -2437,6 +2453,13 @@ function js_jsvget(o, key) {
 // The SLOW path of a value read, entered only when the object has no such own slot:
 // a method read as a value. Kept out of line so the common read pays one `===`.
 function jvValueMiss(o, key) {
+    if (jvArrClsN > 0) {
+        if (Array.isArray(o)) {
+            var asr = anytype
+            asr = jvArrSubRead(o, key)
+            if (asr !== jvMiss) { return asr }
+        }
+    }
     if (jvIsObj(o)) {
         if (key == "then" || key == "catch" || key == "finally") {
             if (jpIs(o)) { return jpBound(o, key) }
@@ -2450,7 +2473,16 @@ function jvValueMiss(o, key) {
         }
         var bof = anytype
         bof = o["__bvof"]
-        if (bof !== undefined) { return js_jsvget(bof, key) }
+        if (bof !== undefined) {
+            // An instance of a class extending Number / String / Boolean (jvHostRoot):
+            // its class first.
+            if (o["__class"] !== undefined) {
+                var wcv = anytype
+                wcv = jvChainRead(o["__class"], key)
+                if (wcv !== undefined) { return wcv }
+            }
+            return js_jsvget(bof, key)
+        }
         if (jvPvN > 0) {
             var pd = anytype
             pd = o["__protoof"]
@@ -3091,6 +3123,16 @@ function js_call_new(callee, self, args) {
     return callee.apply(self, args)
 }
 
+// A class constructor's call with new.target nt, cleared afterwards. Twin of
+// js_jsnewcall in abnf/jsrtjsprint.go.
+function js_jsnewcall(nt, ctor, args) {
+    js_jssetnew(nt, undefined)
+    var r = anytype
+    r = ctor.apply(undefined, args)
+    jvNewTarget = undefined
+    return r
+}
+
 // [[Construct]]'s last step: an OBJECT the constructor RETURNS wins over the fresh
 // receiver, and a wrapper js_jsnewclass made holds the primitive.
 function js_jsnewres(res, obj) {
@@ -3188,7 +3230,20 @@ function js_jssupget(sup, self, key) {
 
 // super.m(args) for one of Object.prototype's methods that nothing on the __super
 // chain defines. Twin of m["js_jssupproto"] in abnf/jsrtjsprint.go.
-function js_jssupproto(self, name, args) { return jvProtoApply(self, jvStr(name), args) }
+// An Array subclass's super.m() reaches Array.prototype; any other name that is not
+// Object.prototype's answers the miss sentinel for the call site.
+function js_jssupproto(self, name, args) {
+    var k = jvStr(name)
+    if (Array.isArray(self)) {
+        var ab = anytype
+        ab = jvArrBuiltin(self, k, args)
+        if (ab !== jvMiss) { return ab }
+    }
+    if (!jvIsProtoName(k)) {
+        if (jvMissCallSet) { return jvMissCall }
+    }
+    return jvProtoApply(self, k, args)
+}
 
 // 'super.x = v'. A setter on the chain wins; otherwise this is an ordinary [[Set]]
 // whose RECEIVER is `this`, so the own property lands there.
@@ -3325,9 +3380,151 @@ function jvIsArrayGlobal(v) {
     return keysOf(v).length === 1
 }
 
+// ======================================== a class extending Array ==========
+//
+// An instance is an ARRAY whose kind word carries 1 + the index of its class in
+// jvArrClasses above the low five bits. Twins: jsvArrClasses and its neighbours in
+// abnf/jsrtjsprint.go, jsArrClasses in both *-interpreter.abnf (which state the rule).
+var jvArrClasses = []
+var jvArrClsN = 0
+
+function jvArrTag(a, cls) {
+    var at = 0 - 1
+    var i = 0
+    while (i < jvArrClsN) {
+        if (jvArrClasses[i] === cls) { at = i }
+        i = i + 1
+    }
+    if (at < 0) {
+        at = jvArrClsN
+        jvArrClasses.push(cls)
+        jvArrClsN = jvArrClsN + 1
+    }
+    arrKindSet(a, arrKind(a) % 32 + 32 * (at + 1))
+    return a
+}
+
+function jvArrClass(v) {
+    if (jvArrClsN == 0) { return undefined }
+    if (!Array.isArray(v)) { return undefined }
+    var k = arrKind(v)
+    if (k < 32) { return undefined }
+    if (k % 32 == 19) { return undefined }
+    return jvArrClasses[Math.floor(k / 32) - 1]
+}
+
+// The builtins that make their array through ArraySpeciesCreate.
+function jvIsSpecies(name) {
+    return name == "concat" || name == "filter" || name == "flat" || name == "flatMap" || name == "map" ||
+        name == "slice" || name == "splice"
+}
+
+// A method call on an instance of a class extending a builtin: the class chain's own
+// method, or jvMiss.
+function jvClassCall(a, cls, name, args) {
+    if (name.length >= 2 && name.substring(0, 2) == "__") { return jvMiss }
+    var c = anytype
+    c = cls
+    var guard = 0
+    while (jvIsObj(c) && guard < 64) {
+        var m = anytype
+        m = c[name]
+        if (jvIsCallable(m)) { return jvCallT(m, a, jvPrepend(a, args)) }
+        var pv = anytype
+        pv = c["__pview"]
+        if (pv !== undefined) {
+            var pf = anytype
+            pf = pv[name]
+            if (jvIsCallable(pf)) { return jvCallT(pf, a, args) }
+        }
+        c = c["__super"]
+        guard = guard + 1
+    }
+    return jvMiss
+}
+
+// An Array builtin on an instance, which is also what its super.m() reaches; a
+// species builtin's array is one of the instance's class.
+function jvArrBuiltin(a, name, args) {
+    var r = anytype
+    r = jvArrMethod(a, name, args)
+    if (r !== jvMiss) {
+        if (Array.isArray(r)) {
+            if (jvIsSpecies(name)) {
+                var cl = anytype
+                cl = jvArrClass(a)
+                if (cl !== undefined) { jvArrTag(r, cl) }
+            }
+        }
+    }
+    return r
+}
+
+// A read off an instance: `constructor`, a getter or a method value of its class
+// chain, or jvMiss.
+function jvArrSubRead(a, key) {
+    var cls = anytype
+    cls = jvArrClass(a)
+    if (cls === undefined) { return jvMiss }
+    if (key.length >= 2 && key.substring(0, 2) == "__") { return jvMiss }
+    if (key == "constructor") { return cls }
+    var c = anytype
+    c = cls
+    var guard = 0
+    while (jvIsObj(c) && guard < 64) {
+        var m = anytype
+        m = c[key]
+        if (m !== undefined) {
+            if (jvIsAcc(m)) { return jvAccGet(m, a) }
+            if (jvIsCallable(m)) { return jvMethodValue(m, key) }
+        }
+        var pv = anytype
+        pv = c["__pview"]
+        if (pv !== undefined) {
+            var pw = anytype
+            pw = pv[key]
+            if (pw !== undefined) { return pw }
+        }
+        c = c["__super"]
+        guard = guard + 1
+    }
+    return jvMiss
+}
+
+// `class C extends Array`: the Array global stands as this descriptor, whose
+// constructor makes what Array(...args) makes and files new.target's class on it.
+// Twins: arrayRoot in abnf/jsrtjsprint.go, jsArrayRootClass in both
+// *-interpreter.abnf.
+var jvArrayRoot = anytype
+function jvArrayRootOf(fn) {
+    if (jvArrayRoot === undefined) {
+        var r = {}
+        r["__isclass"] = true
+        r["__name"] = "Array"
+        r["__ctorfn"] = fn
+        r["__ctor"] = function () {
+            var nt = anytype
+            nt = jvNewTarget
+            jvNewTarget = undefined
+            var rest = []
+            var i = 1
+            while (i < arguments.length) {
+                rest.push(arguments[i])
+                i = i + 1
+            }
+            var a = anytype
+            a = jvCallT(fn, undefined, rest)
+            if (jvIsClassDesc(nt)) { jvArrTag(a, nt) }
+            return a
+        }
+        jvArrayRoot = r
+    }
+    return jvArrayRoot
+}
+
 function jvChainHas(v, d) {
-    if (!jvIsObj(v)) { return false }
-    var cls = v["__class"]
+    var cls = anytype
+    if (jvIsObj(v)) { cls = v["__class"] } else { cls = jvArrClass(v) }
     while (jvIsObj(cls)) {
         if (cls === d) { return true }
         cls = cls["__super"]
@@ -3357,6 +3554,8 @@ function js_jsinstanceof(v, c) {
     }
     if (jvIsArrayGlobal(c)) { return Array.isArray(v) && !jvIsArgs(v) }
     if (jvFunctionFn !== undefined && c === jvFunctionFn) { return jvIsCallable(v) || jvIsClassDesc(v) }
+    if (jpFn !== undefined && c === jpFn) { return jpIs(v) }
+    if (c === jxRegExpFn) { return jxIsRe(v) }
     // A wrapper is an instance of its primitive's global; the prototype object it may
     // itself be is not.
     if (c === jvNumberFn || c === jvStringFn || c === jvBooleanFn || c === jvBigIntFn || c === jvSymbolFn) {
@@ -3790,15 +3989,15 @@ function jvBuiltinCtor(o) {
         if (jvNoObjProto(o)) { return r }
         if (jbIsBig(o)) { return jvBigIntFn }
         if (jvIsSym(o)) { return jvSymbolFn }
-        var wp = anytype
-        wp = o["__bvof"]
-        if (wp !== undefined) { return jvBuiltinCtor(wp) }
         if (o["__class"] !== undefined) {
             var cf = anytype
             cf = jvConstructorOf(o)
             if (cf !== undefined) { return cf }
             return jvObjGlobal
         }
+        var wp = anytype
+        wp = o["__bvof"]
+        if (wp !== undefined) { return jvBuiltinCtor(wp) }
         if (jpIs(o)) { return jpFn }
         if (jxIsRe(o)) { return jxRegExpFn }
         return jvObjGlobal
@@ -3893,8 +4092,58 @@ function js_jsdelegclose(src) {
 // one for a plain constructor function. Twin of js_jsheritage in abnf/jsrtjsprint.go,
 // which says why.
 var jvObjectRoot = anytype
+// `class C extends Promise` (RegExp, Number, String, Boolean): the builtin stands as
+// a descriptor of its own, whose constructor makes the object `new B()` makes and
+// files new.target's class on it. Twins: hostRoot in abnf/jsrtjsprint.go, jsHostRoot
+// in both *-interpreter.abnf.
+var jvHostRoots = []
+function jvIsHostHeritable(v) {
+    if (v === jxRegExpFn) { return true }
+    if (jpFn !== undefined && v === jpFn) { return true }
+    if (jvNumberFn !== undefined && v === jvNumberFn) { return true }
+    if (jvStringFn !== undefined && v === jvStringFn) { return true }
+    return jvBooleanFn !== undefined && v === jvBooleanFn
+}
+function jvHostRoot(b) {
+    var i = 0
+    while (i < jvHostRoots.length) {
+        if (jvHostRoots[i]["__ctorfn"] === b) { return jvHostRoots[i] }
+        i = i + 1
+    }
+    var d = {}
+    d["__isclass"] = true
+    d["__name"] = jvFnNameOf(b)
+    d["__ctorfn"] = b
+    d["__ctor"] = function () {
+        var nt = anytype
+        nt = jvNewTarget
+        jvNewTarget = undefined
+        var rest = []
+        var j = 1
+        while (j < arguments.length) {
+            rest.push(arguments[j])
+            j = j + 1
+        }
+        var o = {}
+        js_jsnewclass(o, b)
+        var r = anytype
+        r = js_call_new(b, o, rest)
+        jvNewTarget = undefined
+        var res = anytype
+        res = js_jsnewres(r, o)
+        if (jvIsClassDesc(nt)) {
+            if (jvIsObj(res)) { res["__class"] = nt }
+        }
+        return res
+    }
+    jvHostRoots.push(d)
+    return d
+}
+
 function js_jsheritage(v) {
     if (!jvIsObjectGlobal(v)) {
+        if (jvIsArrayGlobal(v)) { return jvArrayRootOf(v) }
+        if (jvIsHostHeritable(v)) { return jvHostRoot(v) }
         if (jvIsCallable(v) && jvBuiltinAt(v) < 0) { return jvFnHeritage(v) }
         return v
     }
@@ -3925,13 +4174,17 @@ function jvFnHeritage(fn) {
     }
     if (d["__ctor"] === undefined) {
         d["__ctor"] = function () {
+            // super() reaches fn as a constructor: the running new.target goes on.
+            var nt = anytype
+            nt = jvNewTarget
             var rest = []
             var i = 1
             while (i < arguments.length) {
                 rest.push(arguments[i])
                 i = i + 1
             }
-            return jvCallT(fn, arguments[0], rest)
+            js_jssetnew(nt, arguments[0])
+            return fn.apply(arguments[0], rest)
         }
     }
     return d
@@ -5255,7 +5508,7 @@ function jvSetIntegrity(o, lv) {
     if (Array.isArray(o)) {
         if (jvIsArgs(o)) { return o }
         jvAttrN = jvAttrN + 1
-        if (lv > jvArrLevel(o)) { arrKindSet(o, 23 - lv) }
+        if (lv > jvArrLevel(o)) { arrKindSet(o, arrKind(o) - arrKind(o) % 32 + 23 - lv) }
         return o
     }
     if (!jvIsObj(o)) { return o }
@@ -6098,6 +6351,11 @@ function jvFallbackCall(recv, name, args) {
                 var av = jvAccGet(acc, recv)
                 if (jvIsCallable(av)) { return jvCallT(av, recv, args) }
             }
+            // An instance of a class extending Number / String / Boolean (jvHostRoot):
+            // its primitive's methods.
+            var cwp = anytype
+            cwp = recv["__bvof"]
+            if (cwp !== undefined) { return js_jsmcall(cwp, name, args) }
             // Object.prototype's methods (jvProtoApply). Twin of the js_jsmcall arm in
             // abnf/jsrtjsprint.go.
             if (jvIsProtoName(name) && !jvNoObjProto(recv)) {
@@ -6214,6 +6472,20 @@ function js_jsmcall(recv, key, args) {
         var ps = jpStatic(name, args)
         if (ps !== jvMiss) { return ps }
     }
+    // A Promise / RegExp subclass instance (jvHostRoot): its class's methods first.
+    if (jvHostRoots.length > 0) {
+        if (jvIsObj(recv)) {
+            var hcl = anytype
+            hcl = recv["__class"]
+            if (hcl !== undefined) {
+                if (jpIs(recv) || jxIsRe(recv)) {
+                    var hsc = anytype
+                    hsc = jvClassCall(recv, hcl, name, args)
+                    if (hsc !== jvMiss) { return hsc }
+                }
+            }
+        }
+    }
     var r = jxMcall(recv, name, args)
     if (r !== jxMiss) { return r }
     // BigInt.prototype: (255n).toString(16), (1n).valueOf(), toLocaleString().
@@ -6274,6 +6546,16 @@ function js_jsmcall(recv, key, args) {
         if (sm !== jvMiss) { return sm }
     }
     if (Array.isArray(recv) && !jvIsArgs(recv)) {
+        if (jvArrClsN > 0) {
+            var acl = anytype
+            acl = jvArrClass(recv)
+            if (acl !== undefined) {
+                var asc = anytype
+                asc = jvClassCall(recv, acl, name, args)
+                if (asc === jvMiss) { asc = jvArrBuiltin(recv, name, args) }
+                if (asc !== jvMiss) { return asc }
+            }
+        }
         var am = jvArrMethod(recv, name, args)
         if (am !== jvMiss) { return am }
     }
