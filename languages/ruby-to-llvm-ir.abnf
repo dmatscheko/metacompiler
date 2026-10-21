@@ -3723,8 +3723,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             curBlkDepth++
             var idx = emitFunc(params, bodyStmt, false, false, false, false, -1)
             curBlkDepth--
-            return {b: b, v: callExt(b, "js_rlambda",
-                        [emitArity(b, callExt(b, "js_closure", [handle(idx), curScopeV]), params)])}
+            var lamV = callExt(b, "js_rlambda", [emitArity(b, callExt(b, "js_closure", [handle(idx), curScopeV]), params)])
+            // Like a `lambda { }` block, it may become a define_method body (`&->`).
+            if (dmTakesValue) {
+                var midx = emitFunc(params, bodyStmt, true, false, true)
+                callExt(b, "js_rmtwin", [lamV, emitArity(b, callExt(b, "js_closure", [handle(midx), curScopeV]), params)])
+            }
+            return {b: b, v: lamV}
         }
     }
     // A block reaches a call as a marker, so a call can tell it from its arguments.
@@ -4033,6 +4038,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (curFTag == curFrame.tag && curF.Blocks.length == curFrame.nb) { return }
         if (curFrame.pre.indexOf(name) < 0) { curFrame.pre.push(name) }
     }
+    // MRI makes `k` a local at the `k =` of `k = k`, so the right side reads nil.
+    // While that right side emits, rhsLocal is the name and rhsFrame its frame; a
+    // read of it there declares it in the frame's prologue (frameLocalNew skips the
+    // straight-line start) and maps the undefined slot to nil. A read inside a
+    // nested block or def is a different frame and keeps the usual rule.
+    var rhsLocal = ""
+    var rhsFrame = null
+    function rhsLocalRead(b, name) {
+        if (curFrame.pre.indexOf(name) < 0) { curFrame.pre.push(name) }
+        return frameLocalRead(b, name, callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)]))
+    }
     function frameLocalRead(b, name, v) {
         var fr = curFrame
         while (fr !== null) {
@@ -4132,16 +4148,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (ref.path.length == 1 && ref.texpr == undefined) { return emitHeadSet(b, ref, nv) }
         return b
     }
-    // The write of a `.name' target: a call of the setter where one may exist (see
-    // attrDispatches), the slot where only an attr_writer / attr_accessor of the name
-    // does (rubyAttrWNames; all such a setter does is write it). Where no setter of
-    // the name exists, js_rattrset raises MRI's NoMethodError on a user object.
-    // js_rattrset takes the setter's method key too, because a private one inside
-    // its own class is reached as "$q$name=". Twin of attrSet in
-    // ruby-interpreter.abnf.
-    var rubyAttrWNames = {}
+    // The write of a `.name' target: js_rattrset calls the setter on a user object,
+    // which raises MRI's NoMethodError where its class has none - an attr_writer of
+    // the name in some other class does not make the write a plain slot store. It
+    // takes the setter's method key too, because a private one inside its own class
+    // is reached as "$q$name=". Twin of attrSet in ruby-interpreter.abnf.
     function emitAttrSet(b, p, v) {
-        if (!attrDispatches(p.name) && rubyAttrWNames["$" + p.name] === true) { callExt(b, "js_set", [p.obj, p.key, v]); return }
         callExt(b, "js_rattrset", [p.obj, p.key, v, emitStr(b, methodKey(p.name + "="))])
     }
     // Bind the raised value to a rescue clause's `=> TARGET` - an ordinary assignment:
@@ -4164,8 +4176,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // ||= / &&= are not implemented (no short circuit): warn and fall back to a
         // plain assignment so the target is still written and the rest compiles.
         if (op == "||=" || op == "&&=") { notImpl("conditional assignment (" + op + ")", pos); op = "=" }
+        var bare = ref.path.length == 0 && ref.name != undefined && ref.ivar == undefined && ref.gvar == undefined &&
+                   ref.cvar == undefined && ref.sconst == undefined && ref.texpr == undefined && isLocalName(ref.name)
         return function(b) {
+            var savedRL = rhsLocal
+            var savedRF = rhsFrame
+            if (bare && curFrame !== null && !knownLocal(ref.name)) {
+                rhsLocal = ref.name
+                rhsFrame = curFrame
+            }
             var r = valT(b)
+            rhsLocal = savedRL
+            rhsFrame = savedRF
             b = r.b
             var v = r.v
             if (ref.path.length == 0) {
@@ -6967,6 +6989,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
         }
         return function(b) {
+            if (name === rhsLocal && curFrame === rhsFrame && !knownLocal(name)) { return {b: b, v: rhsLocalRead(b, name)} }
             // A BARE `rand` is Kernel#rand called with no arguments, not a name. Guarded
             // exactly like the `rand(...)' call arm above, so a program that defines a rand
             // of its own still wins.
@@ -7120,7 +7143,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }}
     }
     function attrSetterMethod(n) {
-        rubyAttrWNames["$" + n] = true
         return {name: n + "=", params: ["v"], body: function(b) {
             var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
             var vv = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "v")])

@@ -2708,7 +2708,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return function() {
             var v = anytype
             v = lookupConst(name)
-            if (v == undefined) { fail("uninitialized constant " + name) }
+            if (v === undefined) { fail("uninitialized constant " + name) }
             return v
         }
     }
@@ -10464,6 +10464,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 for (var k = 0; k < arguments.length; k++) { args.push(arguments[k]) }
                 var saved = scopes
                 scopes = captured.slice(0)
+                // As a define_method body (`&->(q) { }`) it binds the receiver as
+                // self, like makeBlock's closure.
+                if (blkSelfFor === f) {
+                    blkSelfFor = null
+                    scopes.push({self: blkSelf})
+                }
                 scopes.push({})
                 // MRI names a lambda's frame "block in ...", which this model does
                 // not, so an argument count raised here carries no site.
@@ -10808,8 +10814,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // so those are not noted. setterNames holds every other installed `name='
     // ("$" + name), so a write no setter can answer costs one lookup. attrWNames
     // holds the attr_writer / attr_accessor names: an instance written through a
-    // name in neither set has no setter of it, which is MRI's NoMethodError (or
-    // its method_missing). Twin of js_rattrset in abnf/jsrtruby.go and
+    // name in neither set, or whose class lacks the attr_writer another class
+    // has, has no setter of it, which is MRI's NoMethodError (or its
+    // method_missing). Twin of js_rattrset in abnf/jsrtruby.go and
     // lib/ruby-rt.metajs.
     var setterNames = {}
     var attrWNames = {}
@@ -10824,7 +10831,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return
         }
         if (isUserObj(o)) {
-            if (attrWNames["$" + k] !== true) { mcall(o, k + "=", [v], null); return }
+            if (attrWNames["$" + k] !== true || !singRespond(o, k + "=")) { mcall(o, k + "=", [v], null); return }
             ivarPut(o, k, v)
             return
         }
@@ -12846,7 +12853,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (hasOwn(scopes[i], parts[0])) { cur = scopes[i][parts[0]] }
         }
         if (cur == undefined && hasOwn(hostGlobals, parts[0])) { cur = hostGlobals[parts[0]] }
-        for (var j = 1; j < parts.length && cur != undefined && cur != null; j++) {
+        // Only the LAST segment may be nil (`R::RV` after `RV = nil`); a nil
+        // scope before it leaves the name unresolved.
+        for (var j = 1; j < parts.length; j++) {
+            if (cur === undefined || cur === null) { return undefined }
             cur = hasOwn(cur, "$c$" + parts[j]) ? cur["$c$" + parts[j]]
                 : (hasOwn(cur, parts[j]) ? cur[parts[j]] : undefined)
         }

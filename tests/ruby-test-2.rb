@@ -116,6 +116,13 @@ t = Temp.new
 t.celsius = 100
 check("attr_writer effect", t.fahrenheit, 212)
 
+# Box's attr_accessor :width gives Plain no setter of that name.
+class Plain
+end
+pl = Plain.new
+werr = begin; pl.width = 5; nil; rescue NoMethodError => e; e.name; end
+check("attr_writer of another class", [werr, pl.instance_variables], [:width=, []])
+
 # ----- done -----
 if fails == 0
   puts "Ruby subset self test 2 passed"

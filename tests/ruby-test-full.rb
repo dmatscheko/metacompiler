@@ -4375,9 +4375,14 @@ class S100R
   rescue RuntimeError
   end
   RV = [rv]
+  rn = nil
+  RN = rn
 end
+class S100P; attr_writer :pw; end
+class S100Q; end
 class S100D
   define_method(:y, &lambda { self.class })
+  define_method(:z, &->(q) { [self.class, q] })
   def initialize; @x = 1; end
   def x; @x; end
 end
@@ -4424,6 +4429,13 @@ def s100
   check("dm100h", d.y == S100D)
   we = begin; d.x = v[2]; nil; rescue NoMethodError => e; e.class; end
   check("ws100i", we == NoMethodError && d.x == 1)
+  check("dm100j", d.z(v[2]) == [S100D, 5])
+  kk = kk
+  check("lv100k", kk.nil?)
+  check("cn100l", S100R::RN.nil?)
+  q = S100Q.new
+  qe = begin; q.pw = v[2]; nil; rescue NoMethodError => e; e.name; end
+  check("aw100m", qe == :pw= && q.instance_variables == [])
 end
 
 s39() # SECTION-CALL 39
