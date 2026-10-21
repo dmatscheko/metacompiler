@@ -265,6 +265,21 @@ function s07() {
     // initializers run.
     class SG7 { static f: number = sA[2]; static blk: number; static { SG7.blk = SG7.f + sA[0]; } }
     check("cls19", SG7.blk === 4);
+    // A numeric static key is stored as its string form, so a number index reaches
+    // it; for-in over a subclass visits the inherited enumerable statics after its
+    // own, integer keys first per class, and an own name shadows an inherited one.
+    class SN7 { static 7: string = "seven"; static k: number = sA[0]; static 1.5: string = "f"; }
+    class SO7 extends SN7 { static 3: string = "three"; static k: number = sA[2]; }
+    const sn: number = sA[1] * 3 + sA[0];
+    const SNa: any = SN7;
+    const SOa: any = SO7;
+    check("cls20", SNa[sn] === "seven" && SNa["7"] === "seven" && SOa[sn] === "seven"
+                   && SNa[sA[0] + 0.5] === "f");
+    SNa[sA[1]] = "two";
+    check("cls21", SNa["2"] === "two" && SOa[sA[1]] === "two");
+    const sk: string[] = [];
+    for (const sKey in SO7) { sk.push(sKey); }
+    check("cls22", sk.join(",") === "3,k,2,7,1.5");
 }
 
 // ===== SECTION 08: abstract classes and inheritance =====

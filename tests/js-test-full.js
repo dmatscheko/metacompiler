@@ -324,6 +324,19 @@ function s13() {
     // initializers run.
     class SG { static f = sA[2]; static { SG.blk = SG.f + sA[0] } }
     check("cls19", SG.blk === 4)
+    // A numeric static key is stored as its string form, so a number index reaches
+    // it; for-in over a subclass visits the inherited enumerable statics after its
+    // own, integer keys first per class, and an own name shadows an inherited one.
+    class SN { static 7 = "seven"; static k = sA[0]; static 1.5 = "f" }
+    class SO extends SN { static 3 = "three"; static k() {} }
+    var sn = sA[1] * 3 + sA[0]
+    check("cls20", SN[sn] === "seven" && SN["7"] === "seven" && SO[sn] === "seven"
+                   && SN[sA[0] + 0.5] === "f")
+    SN[sA[1]] = "two"
+    check("cls21", SN["2"] === "two" && SO[sA[1]] === "two")
+    var sk = []
+    for (var sKey in SO) { sk.push(sKey) }
+    check("cls22", sk.join(",") === "3,2,7,1.5")
 }
 
 // ===== SECTION 14: iteration statements =====

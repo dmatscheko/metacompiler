@@ -2548,6 +2548,31 @@ func jsvInheritedKeys(cls interface{}, ks []interface{}) []interface{} {
 	return ks
 }
 
+// jsvStaticForInKeys is for-in over a CLASS OBJECT: its own enumerable statics ks,
+// then each superclass's, nearest first. A name a lower class owns - enumerable or
+// not, its length, name and prototype included - shadows the inherited one. Twins:
+// jsStaticForInKeys in both *-interpreter.abnf, jvStaticForInKeys in
+// languages/lib/js-rt.metajs.
+func jsvStaticForInKeys(c *jsObject, ks []interface{}) []interface{} {
+	seen := map[string]bool{}
+	for _, k := range jsvClassOwnNames(c) {
+		seen[k] = true
+	}
+	cl, _ := c.props["__super"].(*jsObject)
+	for guard := 0; cl != nil && isClassDesc(cl) && guard < 64; guard++ {
+		for _, k := range jsvStaticEnumKeys(cl) {
+			if !seen[k] {
+				ks = append(ks, k)
+			}
+		}
+		for _, k := range jsvClassOwnNames(cl) {
+			seen[k] = true
+		}
+		cl, _ = cl.props["__super"].(*jsObject)
+	}
+	return ks
+}
+
 // jsvProtoChainHas reports whether k is a property of the prototype chain from
 // descriptor cls up: a method or accessor a class body declared, or a key written
 // onto a prototype view. Twins: jvProtoChainHas in languages/lib/js-rt.metajs,
@@ -5680,6 +5705,12 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	m["js_jsforinkeys"] = func(a []uint64) uint64 {
 		r := jsKeysAll(a)
 		if o, isObj := u(a[0]).(*jsObject); isObj {
+			if isClassDesc(o) {
+				if arr, ok := u(r).(*jsArray); ok {
+					arr.elems = jsvStaticForInKeys(o, arr.elems)
+				}
+				return unescKeys(r)
+			}
 			from := o.props["__class"]
 			if d, isView := o.props["__protoof"].(*jsObject); isView {
 				from = d

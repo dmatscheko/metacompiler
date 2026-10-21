@@ -6210,7 +6210,7 @@ NotFuncHead = :script(~~
         // A CLASS DESCRIPTOR reads from its static namespace and from nowhere else, and
         // the test is FIRST because the two arms below - the accessor table and the own
         // slot - are where its INSTANCE members live.
-        if (isStaticSide(o, k)) { return staticSideRead(o, k) }
+        if (isStaticSide(o, k)) { return staticSideRead(o, "" + k) }
         // Catches null and undefined. node's TypeError, catchable, with node's own
         // wording; the compiler half reaches it through js_rt_missmem.
         if (o == undefined) { biRaise("TypeError: Cannot read properties of " + jsStr(o) + " (reading '" + jsStr(jsKeyUnesc(k)) + "')") }
@@ -6340,6 +6340,8 @@ NotFuncHead = :script(~~
     // '__#s' in the static table, so excluding it makes `C.#s` answer undefined.
     function isStaticSide(o, k) {
         if (!isClassDesc(o)) { return false }
+        // A number key names the static whose key is its string form (`static 7`).
+        if (typeof k == "number") { return true }
         if (typeof k != "string") { return false }
         if (isPrivateKey(k)) { return true }
         return !isInternalKey(k)
@@ -7055,7 +7057,7 @@ NotFuncHead = :script(~~
             // A class's own `name` and `length` are non-writable, unless the class body
             // declares a static member of that name, which replaces them.
             if ((k == "name" || k == "length") && !classOwnsStatic(o, k)) { jsRefuse(jsFnRoText(o, k)); return }
-            staticSideWrite(o, k, v)
+            staticSideWrite(o, "" + k, v)
             return
         }
         if (o != undefined && o != null && typeof o == "object" && !Array.isArray(o)) {
@@ -8973,10 +8975,32 @@ NotFuncHead = :script(~~
     function jsForInKeys(o) {
         var ks = jsKeys(o)
         if (o == undefined || o == null || typeof o != "object" || Array.isArray(o)) { return ks }
+        if (isClassDesc(o)) { return jsStaticForInKeys(o, ks) }
         var cl = anytype // The descriptor the chain starts at, or undefined.
         cl = hasOwn(o, "__protoof") ? o.__protoof : o.__class
         if (cl == undefined || cl == null) { return ks }
         return jsInheritedKeys(cl, ks)
+    }
+    // for-in over a CLASS OBJECT: its own enumerable statics ks, then each superclass's,
+    // nearest first. A name a lower class owns - enumerable or not, its length, name
+    // and prototype included - shadows the inherited one. Twins: jsvStaticForInKeys in
+    // abnf/jsrtjsprint.go, jvStaticForInKeys in languages/lib/js-rt.metajs.
+    function jsStaticForInKeys(c, ks) {
+        var out = ks.slice()
+        var seen = jsClassOwnNames(c)
+        var cl = anytype // A superclass descriptor, or what ends the chain.
+        cl = c.__super
+        var guard = 0
+        while (isClassDesc(cl) && guard < 64) {
+            var vk = ownKeys(cl)
+            for (var i = 0; i < vk.length; i++) {
+                if (seen.indexOf(vk[i]) < 0) { out.push(vk[i]) }
+            }
+            seen = seen.concat(jsClassOwnNames(cl))
+            cl = cl.__super
+            guard = guard + 1
+        }
+        return out
     }
     // Appends to the own key list ks the enumerable keys of the prototype chain from
     // descriptor cl up: each level's prototype view's keys. A name the object or a

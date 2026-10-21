@@ -4876,7 +4876,7 @@ NotFuncHead = :script(~~
         // A CLASS DESCRIPTOR reads from its static namespace and from nowhere else, and
         // the test is FIRST because the two arms below - the accessor table and the own
         // slot - are where its INSTANCE members live.
-        if (isStaticSide(o, k)) { return staticSideRead(o, k) }
+        if (isStaticSide(o, k)) { return staticSideRead(o, "" + k) }
         // Catches null and undefined. node's TypeError, catchable, with node's own
         // wording; the compiler half reaches it through js_rt_missmem.
         if (o == undefined) { biRaise("TypeError: Cannot read properties of " + jsStr(o) + " (reading '" + jsStr(jsKeyUnesc(k)) + "')") }
@@ -4973,6 +4973,8 @@ NotFuncHead = :script(~~
     // read off the descriptor by `new`, instanceof and the error machinery.
     function isStaticSide(o, k) {
         if (!isClassDesc(o)) { return false }
+        // A number key names the static whose key is its string form (`static 7`).
+        if (typeof k == "number") { return true }
         if (typeof k != "string") { return false }
         // A mangled PRIVATE name is a '__' name too and is NOT one of the engine's own
         // slots: `static #s = 5` files '__#s' in the static table, so excluding it makes
@@ -5536,7 +5538,7 @@ NotFuncHead = :script(~~
         if (isStaticSide(o, k)) {
             // See the twin of this comment in js-interpreter.abnf.
             if ((k == "name" || k == "length") && !classOwnsStatic(o, k)) { jsRefuse(jsFnRoText(o, k)); return }
-            staticSideWrite(o, k, v)
+            staticSideWrite(o, "" + k, v)
             return
         }
         if (o != undefined && o != null && typeof o == "object" && !Array.isArray(o)) {
@@ -7196,10 +7198,29 @@ NotFuncHead = :script(~~
     function jsForInKeys(o) {
         var ks = jsKeys(o)
         if (o == undefined || o == null || typeof o != "object" || Array.isArray(o)) { return ks }
+        if (isClassDesc(o)) { return jsStaticForInKeys(o, ks) }
         var cl = anytype // The descriptor the chain starts at, or undefined.
         cl = hasOwn(o, "__protoof") ? o.__protoof : o.__class
         if (cl == undefined || cl == null) { return ks }
         return jsInheritedKeys(cl, ks)
+    }
+    // See the twin of this comment in js-interpreter.abnf.
+    function jsStaticForInKeys(c, ks) {
+        var out = ks.slice()
+        var seen = jsClassOwnNames(c)
+        var cl = anytype // A superclass descriptor, or what ends the chain.
+        cl = c.__super
+        var guard = 0
+        while (isClassDesc(cl) && guard < 64) {
+            var vk = ownKeys(cl)
+            for (var i = 0; i < vk.length; i++) {
+                if (seen.indexOf(vk[i]) < 0) { out.push(vk[i]) }
+            }
+            seen = seen.concat(jsClassOwnNames(cl))
+            cl = cl.__super
+            guard = guard + 1
+        }
+        return out
     }
     // See the twin of this comment in js-interpreter.abnf.
     function jsInheritedKeys(cl, ks) {

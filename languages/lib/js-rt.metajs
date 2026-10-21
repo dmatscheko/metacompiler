@@ -1384,6 +1384,9 @@ function js_jskeys(o) { return jvKeysUnesc(jvStoredKeys(o)) }
 // m["js_jsforinkeys"] in abnf/jsrtjsprint.go, jsForInKeys in both *-interpreter.abnf.
 function js_jsforinkeys(o) {
     var ks = jvStoredKeys(o)
+    if (jvClsN > 0) {
+        if (jvIsClassDesc(o)) { return jvKeysUnesc(jvStaticForInKeys(o, ks)) }
+    }
     if (jvPvN > 0) {
         if (jvIsObj(o)) {
             var cl = anytype
@@ -1427,6 +1430,29 @@ function jvInheritedKeys(cls, ks) {
         jvPushAll(seen, vk)
         jvPushAll(seen, keysOf(cls))
         cls = cls["__super"]
+        guard = guard + 1
+    }
+    return out
+}
+// for-in over a CLASS OBJECT: its own enumerable statics ks, then each superclass's,
+// nearest first. A name a lower class owns - enumerable or not, its length, name and
+// prototype included - shadows the inherited one. Twins: jsvStaticForInKeys in
+// abnf/jsrtjsprint.go, jsStaticForInKeys in both *-interpreter.abnf.
+function jvStaticForInKeys(c, ks) {
+    var out = ks.slice(0)
+    var seen = jvClassOwnNames(c)
+    var cl = anytype
+    cl = c["__super"]
+    var guard = 0
+    while (jvIsClassDesc(cl) && guard < 64) {
+        var vk = jvStaticEnumKeys(cl)
+        var i = 0
+        while (i < vk.length) {
+            if (seen.indexOf(vk[i]) < 0) { out.push(vk[i]) }
+            i = i + 1
+        }
+        jvPushAll(seen, jvClassOwnNames(cl))
+        cl = cl["__super"]
         guard = guard + 1
     }
     return out
@@ -2379,6 +2405,13 @@ function js_jsvget(o, key) {
                 }
                 return js_jsvget(o, key["__symkey"])
             }
+        }
+    }
+    // A number key on a class object names the static stored under its string form
+    // (`static 7`). Twin of isStaticSide's number arm in both *-interpreter.abnf.
+    if (jvClsN > 0) {
+        if (typeof key == "number") {
+            if (jvIsClassDesc(o)) { return js_jsvget(o, jvStr(key)) }
         }
     }
     if (jvStrWrapN > 0) { return jvWrapRead(o, key) }
