@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-741** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-742** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -141,10 +141,14 @@ parameter), which no engine prints either.
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
-### T-739 tooling: -callgraph loses swift and python call edges · P3 · CORE · IN PROGRESS (CORE worker, round 4) [V]
-Swift name reads go through `sw_kget`, python's through `py_getvar` — direct IR helpers, not js_scope_get/js_kget — so `let r = g(1)`
-shows as `<module> -> (dynamic)` and the helpers appear as callees (`<module> -> sw_kget`, `<module> -> py_getvar`). Teach the
-callgraph's name-read recognition these helpers (and check the other languages' equivalents) so static edges are recovered.
+### T-741 tooling: -callgraph residue — go function bodies unnamed, runtime helpers as nodes, method-call externs, entry functions · P3 · CORE · OPEN [V]
+Go: a function body is a separate closure that never gets a name, so `main` calling `g` reads `jsf_78 -> g` (go left out of
+EDGE_CASES). Runtime helpers still appear as definitions/callees: jsnum.N, sw_copy and other sw_*, lua_appendall/lua_mk/lua_str,
+kt_safeget/kt_clsfind/kt_dread/kt_fprobe, dt_safeget, php_scope_probe/php_site_text (treat every defined non-jsf_N, non-scaffold
+handle-IR function as fabric). phpmain / dartmain appear as definitions with edges (entry scaffolding). Python emits `<module> ->
+main` from the guarded `if main is defined: main()` even without a main. Method calls through js_swmcall, js_csmcall, js_phmcall,
+js_rxmcall, js_ktsmcall, js_pyrxmcall, js_jsmcall, js_gomcall make no edge (only js_mcall / js_supercall / js_jvsuper are known).
+Some python prelude closures are unnamed (jsf_66..68).
 
 ### T-184 dart: `IndexError` vs `RangeError` text for `[1,2,3][7]` · P3 · DA · BLOCKED - needs a Dart VM to settle [U spec-only]
 A reviewer argued the VM prints `RangeError (index): Invalid value: Not in inclusive
@@ -791,6 +795,7 @@ T-735 tooling: -callgraph definition names for python (`jsf_N`), php (body line,
 T-736 ruby: bang methods on strings do not mutate; `puts` inside an expression; send with a receiver to a top-level def; `===` — DONE 942cfc07 4db06632 (strings are mutable boxes per literal, promoted in place on first mutation through any place; frozen strings, identity; puts in expressions; receiver send to top-level defs; === by name — = ruby 2.6; ruby bench unchanged; follow-up T-738)
 T-737 tooling + js: swift overloads and module bodies in -callgraph; `Object.assign(5, {...})` compiled — DONE ca9a0474 6763ce45 (swift overloads by source name, module bodies as <module>, unescaped jsonl; Object.assign ToObject's a primitive target incl. host objects — srcpos 26/26, = node; follow-up T-739)
 T-738 ruby: strings produced by methods are not boxes; Array#to_h; define_method compiled; frozen hash keys; frozen_string_literal — DONE bfe97792 4235b67f (method/operator results are fresh string boxes incl. arrays of them, Array#to_h, define_method by String/Symbol in the compiler, frozen hash keys and immediates, frozen_string_literal per file — = ruby 2.6; follow-up T-740)
+T-739 tooling: -callgraph loses swift and python call edges — DONE 3b5a140e (name-read/call helpers of python, swift, dart, kotlin, lua, ruby recognised; overload/method second names resolve to the source name; helpers dropped from the graph — EDGE_CASES for 12 languages, srcpos 38/38; follow-up T-741)
 
 # Settled — do not re-open
 
