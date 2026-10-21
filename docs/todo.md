@@ -79,7 +79,7 @@ p(v[0] + v[1])` → `"a1"` in all engines (ruby TypeError "no implicit conversio
 
 # JS — JavaScript and TypeScript
 
-### T-731 js: accessors on array indices; -callgraph names js functions `jsf_N` · P3 · JS · OPEN [V]
+### T-731 js: accessors on array indices; -callgraph names js functions `jsf_N` · P3 · JS · IN PROGRESS (JS worker, round 29) [V]
 `Object.defineProperty(a, "0", {get(){…}})` is ignored in all engines: every array builtin, spread, for-of, JSON and the floor's numeric
 `a[i]` read element storage directly, so it needs one property-aware element read behind a counter gate in each engine (runtime.c
 included). `-callgraph` names js/ts function definitions `jsf_N` instead of their source names (the name pass maps
