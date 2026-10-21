@@ -147,7 +147,7 @@ parameter), which no engine prints either.
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-730 bash: a pipeline's last stage runs in the current shell; scalar `-i`/`-u` ignored by read and `${v:=}`; smaller gaps · P2 · SH · OPEN [V]
+### T-730 bash: a pipeline's last stage runs in the current shell; scalar `-i`/`-u` ignored by read and `${v:=}`; smaller gaps · P2 · SH · IN PROGRESS (SH worker, round 19) [V]
 `echo a | read v; echo "[$v]"` → bash `[]` (every pipeline stage is a subshell without lastpipe), all engines `[a]`; same for `mapfile`
 in a pipe. `declare -i c; read c <<< "1+2"` → bash 3, ours `1+2`; `declare -i f; ${f:=2+3}` → 5 vs `2+3`; `declare -u c; echo
 "${c:=xy}"` → XY vs xy. Compiler only: `declare -u d=(ab); read d <<< xy` writes the scalar slot (bash and interp `XY` in element 0).
