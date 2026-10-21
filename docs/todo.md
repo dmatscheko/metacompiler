@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-713** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-715** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -130,14 +130,20 @@ parameter), which no engine prints either.
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-712 bash: non-ASCII POSIX classes in globs; empty extglob matches in `${v//pat/rep}` · P3 · SH · IN PROGRESS (SH worker, round 13) [V]
-`x="é😀"; echo "${x#[[:alpha:]]}"` → bash 5.3 `😀`, all our engines `é😀` (globCtype / re_ctype are ASCII-only; re_ctype is shared with
-the bash regex side). With `shopt -s extglob`: `v=abac; ${v//*(a)/Z}` → bash `ZZbZZc`, ours `ZbZc`; `v=xy; ${v//*(a)/Z}` → `ZxZy`
-vs `xy`; `e=""; ${e//!(b)/Z}` / `${e//?(a)/Z}` → bash empty, ours `Z`. All engines agree with each other.
+### T-713 bash: extglob edge cases — `*` before `@(`/`!(`/`+(`, `**(a)`, halves split on `*@(a|)` · P3 · SH · OPEN [V]
+bash 5.3 says false, all our engines true: `[[ b == *!(b) ]]`, `[[ a == *!(a) ]]`, `[[ xy == *@(|a) ]]`, `[[ "" == *@(|a) ]]`,
+`[[ xy == x*@(|a) ]]` (a `*` before an `@(`/`!(`/`+(` group never matches an empty tail in bash; drives `${v/%@(|a)/Z}` → bash `xy`,
+ours `xyZ`). `**(a)` never matches in our engines (interp globAt's star-run collapse eats the `*` of `*(`); bash matches every string.
+`[[ s == *@(a|) ]]` for s = "", b, xy: interpreter true, compiled and bash false (halves diverge).
 
 ---
 
 # C — C subset
+
+### T-714 c: string literals over 4096 bytes break llvm.Run; global `char *a[N] = {...}` crashes the compiler · P2 · C · OPEN [V]
+A string literal longer than 4096 bytes is emitted with array indices like `u0x1000`, which llvm.Run rejects ("unable to parse
+integer u0x1000"); native builds are fine. A global `char *a[N] = {"..", ...}` initializer crashes c-to-llvm-ir (TypeError in
+emitInit). Oracle: cc/clang.
 
 ---
 
@@ -789,6 +795,7 @@ T-705 php preg: PCRE2's empty-iteration loop rule; long `\p{...}` names; PCRE2 s
 T-707 js: named properties on arrays; species for builtin subclasses — DONE 438be4a4 6c1f2bdd (named array properties in a side object on the non-index path in all engines, ArraySpeciesCreate / Promise SpeciesConstructor, regex match records are arrays — 4 legs = node; other languages' benches paired-neutral; follow-up T-710)
 T-709 bash: the interpreter is very slow building a long string (`printf -v s '%*s' 35000` + `${s// /ab}`) — DONE 17952f3c (fixed-length patterns test one candidate per start like bash's umatchlen, linear result building, freed candidates, one-allocation padding — 35000-char repro 0.3–1.8 s in every engine, = bash 5.3; follow-up T-711)
 T-711 bash: glob `?` and pattern elements match one UTF-16 unit in the interpreter — DONE 3e4a5ea7 (glob elements step whole characters in the interpreter — 4 legs = bash 5.3; follow-up T-712)
+T-712 bash: non-ASCII POSIX classes in globs; empty extglob matches in `${v//pat/rep}` — DONE 61c107ce (Unicode class table read off macOS iswctype replaces the print table in both engines, undecodable bytes in no class, pat_subst's empty-match rule — 4 legs = bash 5.3; follow-ups T-713/T-714)
 
 # Settled — do not re-open
 
