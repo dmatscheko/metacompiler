@@ -68,7 +68,7 @@ its report; anything structural there is a CORE ticket.
 
 # RB — Ruby
 
-### T-738 ruby: strings produced by methods are not boxes; Array#to_h; define_method compiled; frozen hash keys; frozen_string_literal · P2 · RB · OPEN [V]
+### T-738 ruby: strings produced by methods are not boxes; Array#to_h; define_method compiled; frozen hash keys; frozen_string_literal · P2 · RB · IN PROGRESS (RB worker, round 13) [V]
 `a = "a b".split; a.each { |w| w.upcase! }; p a` → ruby `["A", "B"]`, ours unchanged: a computed string copied into an array before its
 first mutation keeps the old text (every string-producing method must return a box, or promotion must reach the shared element).
 `[["x",1]].to_h` → NoMethodError in all engines (ruby `{"x"=>1}`). `define_method("bar") { }` in a class body → NoMethodError in the
