@@ -80,7 +80,7 @@ BodyItem    = HdBodyItem | AliasTop | Statement ;
 ModuleDecl  <~~ clsRanges.push({s: up.start, e: up.pos}); push(makeModuleStmt(takeAll(), up.pos)) ~~>
             = KwModule ScopedName <~~ push(up.in) ~~>
               { Semi | Def <~~ push({method: pop()}) ~~> | ClassDecl <~~ push({nested: pop()}) ~~>
-              | ModuleDecl <~~ push({nested: pop()}) ~~> | AliasStmt | ClassBodyStmt } [ ClassGuard ] End ;
+              | ModuleDecl <~~ push({nested: pop()}) ~~> | AliasStmt | AttrDecl | ClassBodyStmt } [ ClassGuard ] End ;
 // A constant path Foo::Bar::Baz (module / class name or a scoped reference).
 ScopedName  = [ "::" ] Name { "::" Name } ;
 // The name in a class/module header is normally a constant path, but Ruby also parses
@@ -679,8 +679,10 @@ NotTilde = :script(~~
     })()
 ~~) ;
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
-            = TargetHead { "." Id <~~ push({key: up.in, call: true}) ~~> | "&." Id <~~ push({key: up.in, call: true, safe: true}) ~~>
-              | "::" Id <~~ push({key: up.in}) ~~> | TIndex } ;
+            = ( NumLit <~~ push({texpr: pop()}) ~~> TargetStep | TargetHead ) { TargetStep } ;
+// A numeric literal is a head only with a step after it: `5.x = 1' calls Integer#x=.
+TargetStep  = "." Id <~~ push({key: up.in, call: true}) ~~> | "&." Id <~~ push({key: up.in, call: true, safe: true}) ~~>
+            | "::" Id <~~ push({key: up.in}) ~~> | TIndex ;
 // The '@@' alternative must come BEFORE '@' (PEG: the shorter one would win), and the
 // scoped-constant head before the plain name for the same reason. `self` is a head of
 // its own: `self.attr = v` is how a method writes through its own accessor.
@@ -8577,9 +8579,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "nil?") { return target === null || target === undefined }
         // A literal String is not frozen (MRI 2.6 without the magic comment), and
         // neither is one a method built; a box carries its own flag.
-        // nil, true, false, a Symbol and a number are frozen; a box carries its flag.
+        // nil, true, false, a Symbol and a number are frozen; a box and a user
+        // instance carry their own flag.
         if (name == "frozen?") {
             if (target === null || target === undefined || typeof target == "boolean") { return true }
+            if (isUserObj(target)) { return target.__fz === true }
             return isRStr(target) ? target.__fz : (isSym(target) || isNumV(target))
         }
         if (name == "equal?") { return identicalP(target, args[0]) }
@@ -9030,6 +9034,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 // class over and #dup does not.
                 // Reached only when the class defines neither, so a user #dup wins.
                 if (name == "dup" || name == "clone") { return singCopy(target, name == "clone") }
+                // Object#freeze only sets the flag #frozen? and #clone read: no write
+                // to the instance checks it.
+                if (name == "freeze") { target.__fz = true; return target }
                 if (name == "instance_variable_get" || name == "instance_variable_set") {
                     return ivarAccess(target, name == "instance_variable_set", args)
                 }
@@ -9089,6 +9096,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 return hostGlobals["Object"]
             }
             if (name == "instance_methods") { return args.length > 0 && !rtest(args[0]) ? ownInstanceMethods(target) : allInstanceMethods(target) }
+            if (name == "public_instance_methods") {
+                return publicOnly(target, args.length > 0 && !rtest(args[0]) ? ownInstanceMethods(target) : allInstanceMethods(target))
+            }
+            if (name == "method_defined?") { return symListHas(allInstanceMethods(target), rstr(args[0])) }
+            if (name == "constants") { return constNames(target, !(args.length > 0 && !rtest(args[0]))) }
             // Module#ancestors / #include? / #< / #<= / #> / #>=: the reflection surface.
             if (name == "ancestors") { return ancestorsOf(target) }
             if (name == "include?") { return ancestorHas(target, args[0]) }
@@ -10534,13 +10546,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var f = function() {
                 var args = []
                 for (var k = 0; k < arguments.length; k++) { args.push(arguments[k]) }
+                // A define_method body runs instance_exec-style (self is the receiver)
+                // and binds its arguments as a method does: counted, never spread.
+                var dm = blkSelfFor === f
+                if (dm) { lamArity(args, params) }
                 // A single array argument spreads over several block parameters
                 // (`hash.each { |k, v| }`, `[[1, 2]].each { |a, b| }`).
-                if (args.length == 1 && params.length > 1 && Array.isArray(args[0])) { args = args[0] }
+                else if (args.length == 1 && params.length > 1 && Array.isArray(args[0])) { args = args[0] }
                 var saved = scopes
                 scopes = captured.slice(0)
-                // A define_method body runs instance_exec-style: self is the receiver.
-                if (blkSelfFor === f) {
+                if (dm) {
                     blkSelfFor = null
                     scopes.push({self: blkSelf})
                 }
@@ -10811,13 +10826,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // `obj.name = v' calls a `name=' the object (or its class, for a class object)
     // has, and writes the slot otherwise - which is all attr_writer's setter does,
-    // so those are not noted. setterNames holds every other installed `name='
-    // ("$" + name), so a write no setter can answer costs one lookup. attrWNames
+    // so those are not noted. setterNames holds every other installed `name=' and
+    // every one a private/protected/public directive names, whose visibility the
+    // write must check ("$" + name), so a write no setter can answer costs one
+    // lookup. attrWNames
     // holds the attr_writer / attr_accessor names: an instance written through a
     // name in neither set, or whose class lacks the attr_writer another class
     // has, has no setter of it, which is MRI's NoMethodError (or its
-    // method_missing). Twin of js_rattrset in abnf/jsrtruby.go and
-    // lib/ruby-rt.metajs.
+    // method_missing); so has a value that is not an object (`5.x = 1'). Twin
+    // of js_rattrset in abnf/jsrtruby.go and lib/ruby-rt.metajs.
     var setterNames = {}
     var attrWNames = {}
     function setterNote(name) {
@@ -10835,6 +10852,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             ivarPut(o, k, v)
             return
         }
+        if (o === null || o === undefined || typeof o != "object" || Array.isArray(o) || isRStr(o)) { mcall(o, k + "=", [v], null); return }
         rsetIndex(o, k, v)
     }
     // The index-assignment tail, shared by every write site. rsetSlice answers the
@@ -11138,21 +11156,28 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             curVis = "public"
             // The module body's items, as one runnable unit, so a `rescue` / `ensure` on
             // the module body can wrap them (a module body is a def body's twin here).
+            var install = function(fn) {
+                fn.owner = mod
+                if (fn.attrw !== true) { setterNote(fn.name) }
+                if (fn.singleton === true) { scopePut(mod, "$s$" + fn.name, makeMethodClosure(fn)); snamePut(mod, fn.name) }
+                else {
+                    scopePut(mod, fn.name, makeMethodClosure(fn))
+                    mod.__methodNames.push(fn.name)
+                    imnNote(mod, fn.name)
+                    // module_function: the method is ALSO callable on the module.
+                    if (curVis == "module_function") { scopePut(mod, "$s$" + fn.name, makeMethodClosure(fn)); snamePut(mod, fn.name) }
+                }
+            }
             var runItems = function() {
               for (var i = 0; i < ordered.length; i++) {
                 var it = ordered[i]
                 if (it == undefined) { continue }
-                if (it.method != undefined) {
-                    var fn = it.method
-                    fn.owner = mod
-                    setterNote(fn.name)
-                    if (fn.singleton === true) { scopePut(mod, "$s$" + fn.name, makeMethodClosure(fn)); snamePut(mod, fn.name) }
-                    else {
-                        scopePut(mod, fn.name, makeMethodClosure(fn))
-                        mod.__methodNames.push(fn.name)
-                        imnNote(mod, fn.name)
-                        // module_function: the method is ALSO callable on the module.
-                        if (curVis == "module_function") { scopePut(mod, "$s$" + fn.name, makeMethodClosure(fn)); snamePut(mod, fn.name) }
+                if (it.method != undefined) { install(it.method) }
+                else if (it.attr != undefined) {
+                    var a = it.attr
+                    for (var j = 0; j < a.names.length; j++) {
+                        if (a.kind != "attr_writer") { install(attrGetterFn(a.names[j])) }
+                        if (a.kind != "attr_reader") { install(attrSetterFn(a.names[j])) }
                     }
                 } else if (it.alias != undefined) { doAlias(mod, it.alias[0], it.alias[1]) }
                 else if (it.nested != undefined) { it.nested() }
@@ -11184,6 +11209,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var n = names[i]
             if (n == "self") { continue }
             scopePut(mod, "$c$" + n, sc[n])
+            var c0 = n.charCodeAt(0)
+            if (c0 >= 65 && c0 <= 90) {
+                if (mod.__cnames == undefined) { mod.__cnames = [] }
+                if (mod.__cnames.indexOf(n) < 0) { mod.__cnames.push(n) }
+            }
             if (!hasOwn(globalScope, n)) { scopePut(globalScope, n, sc[n]) }
         }
     }
@@ -11485,6 +11515,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             blkSelf = arguments[0]
             return blockCall(body, a)
         }
+        copyArity(fn, wrapCore(body))
         if (sing) { singPut(o, nm, fn) } else { scopePut(o, nm, fn); imnNote(o, nm); setterNote(nm) }
         return mkSym(nm)
     }
@@ -11692,6 +11723,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // A Struct's member values, which the copy owns separately.
         if (o.__sv != undefined) { out.__sv = o.__sv.slice(0) }
         if (!withSing) { return out }
+        if (o.__fz === true) { out.__fz = true }
         if (o.__sing != undefined) {
             var t = {}
             var ns = []
@@ -11915,10 +11947,21 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
     }
     makeVarRef = function(name, at) {
+        // lex.k: 0 not yet known, 1 an assignment before `at' makes the name a
+        // local here, 2 it does not. Decided on first run, once the parse has noted
+        // every assignment and range.
+        var lex = {k: 0}
         return function() {
             for (var i = scopes.length - 1; i >= 1; i--) {
                 if (hasOwn(scopes[i], name)) { return scopes[i][name] }
             }
+            // A local not bound yet is nil, and it hides a method of its name
+            // (`k2 = k2' reads nil). Inside a def the loop above searched the whole
+            // frame; at the top level the global slot is a local unless it holds
+            // the def itself.
+            if (lex.k == 0) { lex.k = lexLocalAt(name, at) ? 1 : 2 }
+            if (lex.k == 1 && (frameScopeOf(scopes) != null || !hasOwn(globalScope, name)
+                               || (hasOwn(globalScope, "$d$" + name) && globalScope[name] === globalScope["$d$" + name]))) { return null }
             if (name == "__method__") { return mkSym(rstr(getVar("$mname"))) }
             // `private` / `module_function` on a line of their own are ZERO-argument
             // calls, not references to the method object.
@@ -12242,10 +12285,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var self = findSelf()
         if (v == "private") {
             if (self === recv) { return }
-            throw {__exc: true, v: mkExc(hostGlobals["NoMethodError"], "private method '" + name + "' called")}
+            nameErr("NoMethodError", "private method '" + name + "' called", name, recv)
         }
         if (self !== null && self !== undefined && isUserObj(self) && valueIsA(self, recv.__class)) { return }
-        throw {__exc: true, v: mkExc(hostGlobals["NoMethodError"], "protected method '" + name + "' called")}
+        nameErr("NoMethodError", "protected method '" + name + "' called", name, recv)
     }
     // attr_reader / attr_writer / attr_accessor become @ivar getter/setter methods
     // synthesized as ordinary function descriptors on the class descriptor.
@@ -13222,6 +13265,34 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return out
     }
+    // Module#public_instance_methods: instance_methods less the protected ones.
+    // Twins: rubyPublicIMethods in abnf/jsrt.go, rbPublicIMethods in
+    // lib/ruby-rt.metajs.
+    function publicOnly(cls, syms) {
+        var out = []
+        for (var i = 0; i < syms.length; i++) { if (visOf(cls, syms[i].s) == "public") { out.push(syms[i]) } }
+        return out
+    }
+    function symListHas(syms, n) {
+        for (var i = 0; i < syms.length; i++) { if (syms[i].s == n) { return true } }
+        return false
+    }
+    // Module#constants: the class's own constants in definition order (__cnames,
+    // publishModuleScope), then each ancestor's unless inherit is false. Twins:
+    // rubyConstNames in abnf/jsrt.go, rbConstNames in lib/ruby-rt.metajs.
+    function constNames(cls, inherit) {
+        var out = []
+        var seen = {}
+        var anc = inherit ? ancestorsOf(cls) : [cls]
+        for (var i = 0; i < anc.length; i++) {
+            var ns = anc[i].__cnames
+            if (ns == undefined) { continue }
+            for (var j = 0; j < ns.length; j++) {
+                if (seen["$" + ns[j]] !== true) { seen["$" + ns[j]] = true; out.push(mkSym(ns[j])) }
+            }
+        }
+        return out
+    }
     function ancestorHas(cls, m) {
         if (m === cls) { return false }
         var anc = ancestorsOf(cls)
@@ -13508,7 +13579,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function visDirective(mode, args) {
         var c = directiveClass()
         if (args.length == 0) { curVis = mode; return null }
-        for (var i = 0; i < args.length; i++) { scopePut(c, "$v$" + rstr(args[i]), mode) }
+        for (var i = 0; i < args.length; i++) {
+            scopePut(c, "$v$" + rstr(args[i]), mode)
+            setterNote(rstr(args[i]))
+        }
         return null
     }
     // The frozen engine has no Array.prototype, so `arguments` is copied by hand.

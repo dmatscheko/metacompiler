@@ -1768,6 +1768,109 @@ check("frozen-magic-comment", [fzl_lit.frozen?, fzl_interp(1).frozen?, fzl_words
 check("frozen-magic-shared", [fzl_lit.equal?(fzl_lit), fzl_interp(1).equal?(fzl_interp(1)), fzl_words[0].equal?(fzl_words[0])],
       [true, false, true])
 
+# ----- private setters, setter calls on any value, module attrs, a local hiding a method -----
+# `o.x = v' is a call of x= whatever o is: a private one raises NoMethodError
+# naming it, also where a subclass made an inherited attr_writer private, and a
+# value with no x= (an Integer, a String) raises the same error.
+class PvA
+  attr_accessor :x
+  private :x=
+  def set(v); self.x = v; x; end
+end
+class PvB
+  attr_accessor :y
+end
+class PvC < PvB
+  private :y=
+  def set(v); self.y = v; y; end
+end
+def pv_name
+  yield
+  :none
+rescue NoMethodError => e
+  e.name
+end
+pv_a = PvA.new
+pv_c = PvC.new
+pv_b = PvB.new
+pv_b.y = 4
+pv_n = 5
+pv_s = "s"
+pv_z = nil
+check("private-setter", [pv_a.set(3), pv_name { pv_a.x = 5 }, pv_a.x], [3, :x=, 3])
+check("private-setter-inherited", [pv_c.set(6), pv_name { pv_c.y = 7 }, pv_c.y, pv_b.y], [6, :y=, 6, 4])
+check("setter-on-value", [pv_name { pv_n.x = 1 }, pv_name { pv_s.x = 1 }, pv_name { 5.x = 1 }, pv_name { pv_z.x = 1 }],
+      [:x=, :x=, :x=, :x=])
+module PvM
+  attr_writer :w
+  attr_accessor :a
+end
+class PvK
+  include PvM
+  def w; @w; end
+end
+pv_k = PvK.new
+pv_k.w = 1
+pv_k.a = 2
+check("module-attr", [pv_k.w, pv_k.a, PvM.instance_methods.sort], [1, 2, [:a, :a=, :w=]])
+def pv_k2; 9; end
+def pv_shadow; pv_k2 = pv_k2; pv_k2; end
+def pv_late; a = pv_k2; pv_k2 = 3; [a, pv_k2]; end
+check("local-hides-method", [pv_shadow, pv_late], [nil, [9, 3]])
+
+# ----- define_method binds its arguments as a method does -----
+class PvD
+  define_method(:one) { |a| a }
+  define_method(:opt) { |a, b = 2| [a, b] }
+  define_method(:two) { |a, b| [a, b] }
+  [:dyn].each { |n| define_method(n) { |v| v } }
+  pv_pr = proc { |a| a }
+  define_method(:pv, pv_pr)
+end
+def pv_argc
+  yield
+  :none
+rescue ArgumentError => e
+  e.message
+end
+pv_d = PvD.new
+check("define-method-argc", [pv_argc { pv_d.one }, pv_argc { pv_d.one(1, 2) }, pv_argc { pv_d.opt },
+                             pv_argc { pv_d.dyn }, pv_argc { pv_d.pv }, pv_argc { pv_d.two([1, 2]) }],
+      ["wrong number of arguments (given 0, expected 1)", "wrong number of arguments (given 2, expected 1)",
+       "wrong number of arguments (given 0, expected 1..2)", "wrong number of arguments (given 0, expected 1)",
+       "wrong number of arguments (given 0, expected 1)", "wrong number of arguments (given 1, expected 2)"])
+check("define-method-bind", [pv_d.opt(1), pv_d.dyn(4), pv_d.two(1, 2)], [[1, 2], 4, [1, 2]])
+
+# ----- Object#freeze on an instance, and Module reflection -----
+# freeze sets the flag #frozen? and #clone read; a write to a frozen instance is
+# not checked (MRI raises FrozenError).
+class PvE
+  PZ = 1
+  PW = 2
+  attr_accessor :v
+  def m; end
+  def pm; end
+  protected :pm
+  private
+  def q; end
+end
+class PvF < PvE
+  PN = 3
+  def n; end
+end
+pv_e = PvE.new
+pv_e.v = 1
+check("freeze-instance", [pv_e.frozen?, pv_e.freeze.equal?(pv_e), pv_e.frozen?, pv_e.dup.frozen?, pv_e.clone.frozen?,
+                          pv_e.clone.v, PvE.new.frozen?],
+      [false, true, true, false, true, 1, false])
+check("public-instance-methods", [PvE.public_instance_methods(false).sort, PvF.public_instance_methods(false),
+                                  PvF.public_instance_methods.include?(:m), PvF.public_instance_methods.include?(:pm)],
+      [[:m, :v, :v=], [:n], true, false])
+check("method-defined", [PvE.method_defined?(:m), PvE.method_defined?(:pm), PvE.method_defined?(:q),
+                         PvE.method_defined?("v="), PvF.method_defined?(:m), PvE.method_defined?(:zz)],
+      [true, true, false, true, true, false])
+check("module-constants", [PvE.constants.sort, PvF.constants.sort, PvF.constants(false)], [[:PW, :PZ], [:PN, :PW, :PZ], [:PN]])
+
 puts "features: #{FEAT[0]} checks, #{FEAT[1]} failures"
 
 exit(FEAT[1])

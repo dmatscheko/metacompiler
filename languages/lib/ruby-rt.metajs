@@ -3647,6 +3647,40 @@ function rbAllIMethods(o) {
     }
     return out
 }
+// Module#public_instance_methods: instance_methods less the protected ones. Twin
+// of rubyPublicIMethods in abnf/jsrt.go.
+function rbPublicIMethods(cls, names) {
+    var out = []
+    var i = 0
+    while (i < names.length) {
+        if (!rbRestricted(cls, names[i]["s"])) { out.push(names[i]) }
+        i = i + 1
+    }
+    return out
+}
+// Module#constants. Twin of rubyConstNames in abnf/jsrt.go, which states the
+// rule.
+function rbConstNames(o, inherit) {
+    var out = []
+    var seen = {}
+    var anc = [o]
+    if (inherit) { anc = rbAncestors(o) }
+    var i = 0
+    while (i < anc.length) {
+        var ns = anytype
+        ns = anc[i]["__cnames"]
+        var j = 0
+        while (ns !== undefined && ns !== null && j < ns.length) {
+            if (seen["$" + ns[j]] !== true) {
+                seen["$" + ns[j]] = true
+                out.push(rbSym(ns[j]))
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return out
+}
 function rbSingExtend(o, m) {
     if (!rbIsObj(m)) { return undefined }
     var xs = anytype
@@ -3731,6 +3765,7 @@ function rbSingCopy(o, withSing) {
     // A Struct's member values, which the copy owns separately.
     if (o["__sv"] !== undefined) { out["__sv"] = rbArgsFrom(o["__sv"], 0) }
     if (!withSing) { return out }
+    if (o["__fz"] === true) { out["__fz"] = true }
     var t = o["__sing"]
     if (t !== undefined && t !== null) {
         var nt = {}
@@ -7166,7 +7201,7 @@ function js_rrespond(target, args) {
     if (!rbIsObj(target)) { return rbMethod(target, "respond_to?", args) }
     if (rbResponds("", n)) { return true }
     if (rbSingFind(target, n) !== undefined) { return true }
-    if (rbRestricted(target, n)) { return all }
+    if (rbRestricted(target["__class"], n)) { return all }
     return rbSingRespond(target, n) || (all && rbRespondsPriv(n))
 }
 
@@ -7177,11 +7212,12 @@ function rbRespondsPriv(n) {
     return rbRespondsPrivate(n) || rbBuiltinClass("Object")["$p$" + n] !== undefined
 }
 
-// Is n a private or protected method of an instance's class chain? The emitter
-// keeps such a method under "$q$" + n, and a nearer class holding only the plain
-// name overrides it as a public one. Twin of rubyRestricted in abnf/jsrtruby.go.
-function rbRestricted(o, n) {
-    var c = o["__class"]
+// Is n a private or protected method of a class chain (an instance's __class)?
+// The emitter keeps such a method under "$q$" + n, and a nearer class holding only
+// the plain name overrides it as a public one. Twin of rubyRestricted in
+// abnf/jsrtruby.go.
+function rbRestricted(cls, n) {
+    var c = cls
     while (c !== undefined && c !== null && rbIsObj(c)) {
         if (c["$q$" + n] !== undefined) { return true }
         if (c[n] !== undefined) { return false }
@@ -7318,6 +7354,12 @@ function rbMethod(target, name, args) {
             return rbSingCopy(target, name == "clone")
         }
     }
+    // Object#freeze on a user instance only sets the flag #frozen? and #clone
+    // read: no write to the instance checks it.
+    if (name == "freeze" && rbUserObj(target) && rbFindMethod(target, name) === undefined) {
+        target["__fz"] = true
+        return target
+    }
     if (name == "instance_variable_get" || name == "instance_variable_set") {
         if ((rbUserObj(target) || rbClassObj(target)) && rbFindMethod(target, name) === undefined) {
             return rbIvarAccess(target, name, args)
@@ -7336,6 +7378,7 @@ function rbMethod(target, name, args) {
     // number are frozen.
     if (name == "frozen?") {
         if (rtIsNil(target) || target === true || target === false) { return true }
+        if (rbUserObj(target)) { return target["__fz"] === true }
         return rbIsSym(target) || rbIsNum(target)
     }
 
@@ -7675,6 +7718,21 @@ function rbMethod(target, name, args) {
             // $s$ walk above runs first.
             if (name == "ancestors") { return rbAncestors(target) }
             if (name == "include?") { return rbAncestorHas(target, rbArgAt(args, 0)) }
+            if (name == "public_instance_methods") {
+                if (rbNPos(args) > 0 && !rbTruthy(rbArgAt(args, 0))) { return rbPublicIMethods(target, rbOwnIMethods(target)) }
+                return rbPublicIMethods(target, rbAllIMethods(target))
+            }
+            if (name == "method_defined?") {
+                var mdn = rbStr(rbArgAt(args, 0))
+                var mds = rbAllIMethods(target)
+                var mdi = 0
+                while (mdi < mds.length) {
+                    if (mds[mdi]["s"] == mdn) { return true }
+                    mdi = mdi + 1
+                }
+                return false
+            }
+            if (name == "constants") { return rbConstNames(target, rbNPos(args) == 0 || rbTruthy(rbArgAt(args, 0))) }
             if (name == "class") {
                 if (target["__ismodule"] === true) { return rbBuiltinClass("Module") }
                 return rbBuiltinClass("Class")
@@ -8317,7 +8375,7 @@ function js_rsingdef(obj, name, fn) {
 // obj.name = v where a setter may exist. Twin of js_rattrset in abnf/jsrtruby.go.
 function js_rattrset(o, k, v, sk) {
     var sn = rbStr(sk)
-    if (rbIsObj(o) && (rbSingRespond(o, sn) || rbUserObj(o))) {
+    if (!rbIsObj(o) || o["__rstr"] === true || rbSingRespond(o, sn) || rbUserObj(o)) {
         js_rxmcall(o, sn, [v])
         return undefined
     }

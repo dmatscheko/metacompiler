@@ -6273,6 +6273,50 @@ func (rt *jsrt) rubyAllIMethods(o *jsObject) *jsArray {
 	return out
 }
 
+// rubyPublicIMethods is Module#public_instance_methods: instance_methods less the
+// protected ones, which the emitter keeps under "$q$" (methodKey in
+// ruby-to-llvm-ir.abnf). Twins: publicOnly in ruby-interpreter.abnf,
+// rbPublicIMethods in lib/ruby-rt.metajs.
+func rubyPublicIMethods(cls *jsObject, names *jsArray) *jsArray {
+	out := &jsArray{}
+	for _, e := range names.elems {
+		if !rubyRestricted(cls, e.(jsSym).s) {
+			out.elems = append(out.elems, e)
+		}
+	}
+	return out
+}
+
+// rubyConstNames is Module#constants: the class's own constants in definition
+// order (the __cnames list the emitter writes), then each ancestor's unless
+// inherit is false. Twins: constNames in ruby-interpreter.abnf, rbConstNames in
+// lib/ruby-rt.metajs.
+func (rt *jsrt) rubyConstNames(o *jsObject, inherit bool) *jsArray {
+	out := &jsArray{}
+	seen := map[string]bool{}
+	anc := []interface{}{o}
+	if inherit {
+		anc = rt.rubyAncestors(o).elems
+	}
+	for _, a := range anc {
+		ao, isObj := a.(*jsObject)
+		if !isObj {
+			continue
+		}
+		ns, isArr := ao.props["__cnames"].(*jsArray)
+		if !isArr {
+			continue
+		}
+		for _, e := range ns.elems {
+			if n, isStr := e.(string); isStr && !seen[n] {
+				seen[n] = true
+				out.elems = append(out.elems, jsSym{s: n})
+			}
+		}
+	}
+	return out
+}
+
 func (rt *jsrt) rubySingNames(o *jsObject) *jsArray {
 	out := &jsArray{}
 	seen := map[string]bool{}
@@ -6349,6 +6393,9 @@ func rubySingCopy(o *jsObject, withSing bool) *jsObject {
 	}
 	if !withSing {
 		return out
+	}
+	if fz, _ := o.props["__fz"].(bool); fz {
+		out.set("__fz", true)
 	}
 	if t, isObj := o.props["__sing"].(*jsObject); isObj {
 		nt := newJSObject()
@@ -10658,11 +10705,25 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 	// a box answers its own flag before this. nil, true, false, a Symbol and a
 	// number are frozen.
 	case "frozen?":
-		switch target.(type) {
+		switch t := target.(type) {
 		case jsNullT, jsUndefT, bool, jsSym:
 			return true
+		case *jsObject:
+			if rubyUserObj(t) {
+				fz, _ := t.props["__fz"].(bool)
+				return fz
+			}
 		}
 		return rubyIsNum(target)
+	// Object#freeze on a user instance only sets the flag #frozen? and #clone
+	// read: no write to the instance checks it.
+	case "freeze":
+		if o, isObj := target.(*jsObject); isObj && rubyUserObj(o) {
+			if _, hasOwn := rubyFindMethod(target, name); !hasOwn {
+				o.set("__fz", true)
+				return o
+			}
+		}
 
 	case "equal?":
 		return rubyIdenticalP(target, argAt(args, 0))
@@ -11180,6 +11241,22 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				return rt.rubyAncestors(o)
 			case "include?":
 				return rt.rubyAncestorHas(o, argAt(args, 0))
+			case "public_instance_methods":
+				if pos, _ := rubyBlockArgs(args); len(pos) > 0 && !rubyTruthy(pos[0]) {
+					return rubyPublicIMethods(o, rubyOwnIMethods(o))
+				}
+				return rubyPublicIMethods(o, rt.rubyAllIMethods(o))
+			case "method_defined?":
+				n := rt.rubyStr(argAt(args, 0))
+				for _, e := range rt.rubyAllIMethods(o).elems {
+					if e.(jsSym).s == n {
+						return true
+					}
+				}
+				return false
+			case "constants":
+				pos, _ := rubyBlockArgs(args)
+				return rt.rubyConstNames(o, len(pos) == 0 || rubyTruthy(pos[0]))
 			case "class":
 				if isMod {
 					return rt.rubyBuiltinClass("Module")

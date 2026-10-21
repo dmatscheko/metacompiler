@@ -82,7 +82,7 @@ ModuleDecl  <~~ push(makeModuleStmt(takeAll(), up.pos)) ~~>
             = KwModule ScopedName <~~ push(up.in) ~~>
               { Semi | Def <~~ push({method: pop()}) ~~> | ClassDecl <~~ push({nested: pop(), nestedName: lastDeclName}) ~~>
               | ModuleDecl <~~ push({nested: pop(), nestedName: lastDeclName}) ~~> | AliasStmt | AliasMethodStmt
-              | DefineMethodStmt | MixinStmt | VisStmt | ClassBodyStmt } [ ClassGuard ] End ;
+              | DefineMethodStmt | MixinStmt | VisStmt | AttrDecl | ClassBodyStmt } [ ClassGuard ] End ;
 // A constant path Foo::Bar::Baz (module / class name or a scoped reference).
 ScopedName  = [ "::" ] Name { "::" Name } ;
 // The name in a class/module header is normally a constant path, but Ruby also parses
@@ -721,8 +721,10 @@ NotTilde = :script(~~
     })()
 ~~) ;
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
-            = TargetHead { "." Id <~~ push({key: up.in, call: true}) ~~> | "&." Id <~~ push({key: up.in, call: true, safe: true}) ~~>
-              | "::" Id <~~ push({key: up.in}) ~~> | TIndex } ;
+            = ( NumLit <~~ push({texpr: pop()}) ~~> TargetStep | TargetHead ) { TargetStep } ;
+// A numeric literal is a head only with a step after it: `5.x = 1' calls Integer#x=.
+TargetStep  = "." Id <~~ push({key: up.in, call: true}) ~~> | "&." Id <~~ push({key: up.in, call: true, safe: true}) ~~>
+            | "::" Id <~~ push({key: up.in}) ~~> | TIndex ;
 // The '@@' alternative must come BEFORE '@' (PEG: the shorter one would win), and the
 // scoped-constant head before the plain name for the same reason. `self` is a head of
 // its own: `self.attr = v` is how a method writes through its own accessor.
@@ -5725,7 +5727,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, blkSlot),
                                          callExt(b, "js_rblock", [f.Params[1]])])
         }
-        b = emitParams(b, f.Params[1], params, off, isBlock)
+        // A block in the method convention is a define_method body (blkMethT, the
+        // method twin), which binds its arguments as a method does: counted, never
+        // spread. Twin of the dm check in makeBlock of ruby-interpreter.abnf.
+        b = emitParams(b, f.Params[1], params, off, isBlock === true && isMethod !== true)
         // The prologue that frameLocalNew fills is left open until the body is
         // emitted; it runs once per call, before any `redo' target.
         var preB = null
@@ -7244,10 +7249,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (curClsName != "" && isRestricted(curClsName, name)) { return "$q$" + name }
         return name
     }
+    // The stub's NoMethodError carries #name and #receiver as nameErr's does
+    // (ruby-interpreter.abnf), raised at the calling statement.
     function restrictedStub(kind, name) {
         return function(b) {
-            callExt(b, "js_rraise", [callExt(b, "js_rclass", [emitStr(b, "NoMethodError")]),
-                                     emitStr(b, kind + " method '" + name + "' called")])
+            var msgA = callExt(b, "js_arr_new", [])
+            callExt(b, "js_arr_push", [msgA, emitStr(b, kind + " method '" + name + "' called")])
+            var e = callExt(b, "js_rnew", [callExt(b, "js_rclass", [emitStr(b, "NoMethodError")]), msgA])
+            callExt(b, "js_set", [e, emitStr(b, "__nmname"), callExt(b, "js_sym", [emitStr(b, name)])])
+            callExt(b, "js_set", [e, emitStr(b, "__nmrecv"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])])
+            callExt(b, "js_set", [e, emitStr(b, "__rframe"), emitStr(b, "")])
+            callExt(b, "js_rraise", [e, hUndef])
             b.NewRet(hUndef)
             return {b: deadBlock(), v: hNull}
         }
@@ -7367,6 +7379,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function emitMethods(b, dstV, list, prefix, owner, restrictedList) {
         var savedMeth = curMethName
         var savedParams = curMethParams
+        if (prefix == "") { list = list.concat(inheritedRestricted(list, owner, restrictedList)) }
         for (var k = 0; k < list.length; k++) {
             var m = list[k]
             var key = prefix + m.name
@@ -7395,6 +7408,30 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         curMethName = savedMeth
         curMethParams = savedParams
         return b
+    }
+
+    // `private :m' in a class that inherits m from a compiled superclass: MRI makes
+    // the class's own m a private copy of the inherited one, so it gets a method
+    // that forwards to super, which emitMethods then stores restricted like a def.
+    function inheritedRestricted(list, owner, restrictedList) {
+        var out = []
+        var sup = classSupers["$" + owner]
+        for (var q = 0; q < restrictedList.length; q++) {
+            var n = restrictedList[q].name
+            var own = false
+            for (var k = 0; k < list.length; k++) { if (list[k].name == n) { own = true } }
+            if (!own && sup != undefined && classHasMethod(sup, n)) { out.push(superForwarder(owner, n)) }
+        }
+        return out
+    }
+    function superForwarder(owner, n) {
+        return {name: n, params: [paramDesc({param: "$fwd", splat: true})], body: function(b) {
+            var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, owner)])
+            var supV = callExt(b, "js_get", [clsV, emitStr(b, "__super")])
+            var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
+            var argsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$fwd")])
+            return {b: b, v: callExt(b, "js_supercall", [supV, selfV, emitStr(b, n), argsV])}
+        }}
     }
 
     // The method descriptors an `include M` / `prepend M` / `extend M` contributes.
@@ -7721,7 +7758,24 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                                       callExt(b, "js_scope_get", [curScopeV, emitStr(b, nn)])])
             }
         }
+        b = emitConstNames(b, clsV, r)
         return {b: b, v: v}
+    }
+    // The __cnames list Module#constants answers from (rubyConstNames in
+    // abnf/jsrt.go): every constant the bodies of the class or module being
+    // emitted (curClsName) bind, in source order. Twin of publishModuleScope in
+    // ruby-interpreter.abnf.
+    var classConstNames = {}
+    function emitConstNames(b, dstV, r) {
+        var add = []
+        for (var i = 0; i < r.cstmts.length; i++) {
+            var n = r.cstmts[i].name
+            if (n != undefined && n != "") { add.push(n) }
+        }
+        if (add.length == 0) { return b }
+        var all = unionNames(classConstNames["$" + curClsName], add)
+        classConstNames["$" + curClsName] = all
+        return emitNameList(b, dstV, all, "__cnames")
     }
     // The instance-method names a class or module body defines ITSELF and does not
     // make private, appended to `prev': the __imn list Module#instance_methods(false)
@@ -7906,6 +7960,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                                           callExt(b, "js_scope_get", [curScopeV, emitStr(b, cn)])])
                 }
             }
+            b = emitConstNames(b, modV, r)
             curHasSelf = savedHasSelf
             curSelfIsCls = savedSelfIsCls
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "self"), outerSelfV])

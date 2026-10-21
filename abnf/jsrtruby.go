@@ -260,17 +260,19 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 	}
 	// obj.name = v where a setter may exist: (object, slot key, value, setter key).
 	// The setter is called when the object (or its class, for a class object) has
-	// one; an instance without one takes the call anyway, which is MRI's
-	// NoMethodError (or its method_missing); anything else has the slot written.
-	// Twin of js_rattrset in languages/lib/ruby-rt.metajs and attrSet in
-	// ruby-interpreter.abnf.
+	// one; an instance without one, or a value that is not an object (`5.x = 1'),
+	// takes the call anyway, which is MRI's NoMethodError (or its method_missing);
+	// anything else has the slot written. Twin of js_rattrset in
+	// languages/lib/ruby-rt.metajs and attrSet in ruby-interpreter.abnf.
 	m["js_rattrset"] = func(a []uint64) uint64 {
-		if o, ok := u(a[0]).(*jsObject); ok {
+		o, ok := u(a[0]).(*jsObject)
+		if ok {
 			_, isCls := o.props["__isclass"]
-			if rubySingRespond(o, rt.toString(u(a[3]))) || rubyUserObj(o) && !isCls {
-				m["js_rxmcall"]([]uint64{a[0], a[3], w(&jsArray{elems: []interface{}{u(a[2])}})})
-				return 0
-			}
+			ok = !rubySingRespond(o, rt.toString(u(a[3]))) && (!rubyUserObj(o) || isCls)
+		}
+		if !ok {
+			m["js_rxmcall"]([]uint64{a[0], a[3], w(&jsArray{elems: []interface{}{u(a[2])}})})
+			return 0
 		}
 		return m["js_set"](a[:3])
 	}
@@ -1698,7 +1700,7 @@ func (rt *jsrt) rubyRespond(target interface{}, args []interface{}) interface{} 
 	if _, ok := rubySingFind(o, n); ok {
 		return true
 	}
-	if rubyRestricted(o, n) {
+	if rubyRestricted(o.props["__class"], n) {
 		return all
 	}
 	return rubySingRespond(o, n) || (all && rt.rubyRespondsPrivate(n))
@@ -1713,12 +1715,12 @@ func (rt *jsrt) rubyRespondsPrivate(n string) bool {
 	return top
 }
 
-// rubyRestricted: is n a private or protected method of an instance's class chain?
-// The emitter keeps such a method under "$q$" + n (methodKey in
-// ruby-to-llvm-ir.abnf), and a nearer class holding only the plain name overrides
-// it as a public one.
-func rubyRestricted(o *jsObject, n string) bool {
-	for cls := o.props["__class"]; cls != nil; {
+// rubyRestricted: is n a private or protected method of a class chain (an
+// instance's __class)? The emitter keeps such a method under "$q$" + n (methodKey
+// in ruby-to-llvm-ir.abnf), and a nearer class holding only the plain name
+// overrides it as a public one.
+func rubyRestricted(cls interface{}, n string) bool {
+	for cls != nil {
 		clsObj, ok := cls.(*jsObject)
 		if !ok {
 			break
