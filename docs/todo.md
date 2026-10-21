@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-712** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-713** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -130,9 +130,10 @@ parameter), which no engine prints either.
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-711 bash: glob `?` and pattern elements match one UTF-16 unit in the interpreter · P3 · SH · IN PROGRESS (SH worker, round 12) [V]
-In bash-interpreter.abnf a glob `?` (and every pattern element) consumes one UTF-16 code unit, so an astral character (emoji) counts
-as two to `${v#?}`, `${v/?/x}`, `case` patterns; bash-rt.c (llvm.Run, native) and bash 5.3 count one character. Halves diverge.
+### T-712 bash: non-ASCII POSIX classes in globs; empty extglob matches in `${v//pat/rep}` · P3 · SH · OPEN [V]
+`x="é😀"; echo "${x#[[:alpha:]]}"` → bash 5.3 `😀`, all our engines `é😀` (globCtype / re_ctype are ASCII-only; re_ctype is shared with
+the bash regex side). With `shopt -s extglob`: `v=abac; ${v//*(a)/Z}` → bash `ZZbZZc`, ours `ZbZc`; `v=xy; ${v//*(a)/Z}` → `ZxZy`
+vs `xy`; `e=""; ${e//!(b)/Z}` / `${e//?(a)/Z}` → bash empty, ours `Z`. All engines agree with each other.
 
 ---
 
@@ -787,6 +788,7 @@ T-706 regex (CORE): the per-attempt step cap fires on long linear inputs — DON
 T-705 php preg: PCRE2's empty-iteration loop rule; long `\p{...}` names; PCRE2 start-optimization residue; `(*ACCEPT)` scope; `MARK` — DONE d4599b4d (PCRE2 loop rule, loose \p names per 10.48, (*ACCEPT) scope, MARK reporting, minlength; residue declined, see Settled)
 T-707 js: named properties on arrays; species for builtin subclasses — DONE 438be4a4 6c1f2bdd (named array properties in a side object on the non-index path in all engines, ArraySpeciesCreate / Promise SpeciesConstructor, regex match records are arrays — 4 legs = node; other languages' benches paired-neutral; follow-up T-710)
 T-709 bash: the interpreter is very slow building a long string (`printf -v s '%*s' 35000` + `${s// /ab}`) — DONE 17952f3c (fixed-length patterns test one candidate per start like bash's umatchlen, linear result building, freed candidates, one-allocation padding — 35000-char repro 0.3–1.8 s in every engine, = bash 5.3; follow-up T-711)
+T-711 bash: glob `?` and pattern elements match one UTF-16 unit in the interpreter — DONE 3e4a5ea7 (glob elements step whole characters in the interpreter — 4 legs = bash 5.3; follow-up T-712)
 
 # Settled — do not re-open
 
