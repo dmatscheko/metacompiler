@@ -3668,7 +3668,9 @@ var rbExcParent = {
     // ScriptError sits beside StandardError, so a bare `rescue` does not catch
     // NotImplementedError.
     $ScriptError: "Exception",
-    $NotImplementedError: "ScriptError"
+    $NotImplementedError: "ScriptError",
+    // A call nested past the stack; not a StandardError either.
+    $SystemStackError: "Exception"
 }
 
 // Math::DomainError < StandardError: a scoped name, so not an identifier key above.

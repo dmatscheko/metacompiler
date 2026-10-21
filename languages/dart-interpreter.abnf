@@ -1617,6 +1617,11 @@ KwDeferred  = "deferred" KwEnd ;
     function dxRaise0(name) {
         throw {__exc: true, v: dxNew(name, "", [])}
     }
+    // A call nested past the limit is dart:core's StackOverflowError. How deep the
+    // VM gets depends on its stack; this limit is ours. Twin of the js_rt_deep hook
+    // dart-to-llvm-ir.abnf registers.
+    coreDepthMax = 10000
+    coreDeepHook = function() { dxRaise0("StackOverflowError") }
     // The same, with the full positional argument list of the class's constructor.
     function dxRaiseA(name, ctor, argv) {
         throw {__exc: true, v: dxNew(name, ctor, argv)}
@@ -3898,7 +3903,11 @@ KwDeferred  = "deferred" KwEnd ;
             var sc = {}
             scopes.push(sc)
             bindPlainParams(sc, params, args, 0)
+            var depth = coreDepth + 1
+            coreDepth = depth
+            if (depth > coreDepthMax) { coreTooDeep() }
             var r = gen ? runGenerator(bodyStmt) : bodyStmt()
+            coreDepth = depth - 1
             scopes = saved
             if (gen) { return r }
             return (r != undefined && r.isRet) ? r.v : undefined
@@ -4418,7 +4427,11 @@ KwDeferred  = "deferred" KwEnd ;
             scopes = [globalScope, {}]
             var sc = scopes[scopes.length - 1]
             bindPlainParams(sc, params, args, 0)
+            var depth = coreDepth + 1
+            coreDepth = depth
+            if (depth > coreDepthMax) { coreTooDeep() }
             var r = (bodyStmt != null) ? bodyStmt() : undefined
+            coreDepth = depth - 1
             scopes = saved
             return (r != undefined && r.isRet) ? r.v : null
         }
@@ -4509,7 +4522,11 @@ KwDeferred  = "deferred" KwEnd ;
             declVar("__owner", ownerName)
             var sc = scopes[scopes.length - 1]
             bindPlainParams(sc, params, args, 1)
+            var depth = coreDepth + 1
+            coreDepth = depth
+            if (depth > coreDepthMax) { coreTooDeep() }
             var r = gen ? runGenerator(bodyStmt) : bodyStmt()
+            coreDepth = depth - 1
             scopes = saved
             if (gen) { return r }
             return (r != undefined && r.isRet) ? r.v : undefined
@@ -4526,7 +4543,11 @@ KwDeferred  = "deferred" KwEnd ;
             scopes = [globalScope, {}]
             var sc = scopes[scopes.length - 1]
             bindPlainParams(sc, params, args, 0)
+            var depth = coreDepth + 1
+            coreDepth = depth
+            if (depth > coreDepthMax) { coreTooDeep() }
             var r = gen ? runGenerator(bodyStmt) : bodyStmt()
+            coreDepth = depth - 1
             scopes = saved
             if (gen) { return r }
             return (r != undefined && r.isRet) ? r.v : undefined
@@ -4695,11 +4716,13 @@ KwDeferred  = "deferred" KwEnd ;
         }
         return function() {
             var savedChain = scopes.slice()
+            var savedDepth = coreDepth
             var box = {sig: undefined}
             try {
                 box.sig = tryT()
             } catch (e) {
                 scopes = savedChain.slice()
+                coreDepth = savedDepth
                 var hit = null
                 if (excIsUser(e)) {
                     for (var k = 0; k < clauses.length; k++) {

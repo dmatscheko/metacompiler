@@ -621,6 +621,17 @@ type jsrt struct {
 	// restores it around a resume, which makes generators nest.
 	curGen *jsGenerator
 
+	// deepN counts the program's closures that are running, deepMax is the
+	// language's limit (0: none registered) and deepHook/deepExit its answer
+	// past it, registered by js_rt_deep: a closure answering the value to throw,
+	// or with a non-zero deepExit a message for stderr and that exit status.
+	// The floor's twins are CALL_DEPTH, CALL_MAX, RT_DEEP and RT_DEEP_EXIT.
+	deepN    int
+	deepMax  int
+	deepHook interface{}
+	deepExit int
+	deepBusy bool
+
 	// genBusy is the language's hook for a resume of a RUNNING generator (its
 	// body stepping itself): a closure answering the value to throw, or nil to
 	// abort. Registered by js_rt_genbusy; the floor's is RT_GEN_BUSY.
@@ -768,8 +779,11 @@ func (g *jsGenerator) step(rt *jsrt, sent interface{}) interface{} {
 	rt.thisStack, rt.newTargetStack = g.savedThis, g.savedNT
 	prevGen := rt.curGen
 	rt.curGen = g
+	// The body counts its calls on top of the resumer's; twin of gen_resume.
+	calls := rt.deepN
 	g.resume <- sent
 	st := <-g.yields
+	rt.deepN = calls
 	g.running = false
 	rt.curGen = prevGen
 	g.savedThis, g.savedNT = rt.thisStack, rt.newTargetStack
@@ -3322,6 +3336,69 @@ func (rt *jsrt) setGoMember(obj interface{}, name string, val interface{}) {
 // ----------------------------------------------------------------------------
 // Calls
 
+// callCounted is callInner's closure arm once a language has registered a
+// recursion limit (js_rt_deep): the call is counted for its duration, and the
+// deferred decrement keeps the count right when a throw unwinds it. Past the
+// limit the language's hook decides; twin of js_call's count in
+// languages/lib/runtime.c.
+func (rt *jsrt) callCounted(c *jsClosure, this interface{}, argsH uint64, args []interface{}) interface{} {
+	rt.deepN++
+	defer func() { rt.deepN-- }()
+	if rt.deepN > rt.deepMax {
+		rt.tooDeep()
+	}
+	return rt.callClosure(c, this, args, argsH)
+}
+
+// tooDeep answers a call past the limit: the hook's value is thrown, with room
+// for the hook to construct it, or the message is printed and the process ends.
+func (rt *jsrt) tooDeep() {
+	if rt.deepExit != 0 {
+		fmt.Fprint(warnWriter, rt.toString(rt.deepHook))
+		os.Exit(rt.deepExit)
+	}
+	if rt.deepBusy {
+		rt.fail("stack overflow inside the stack overflow hook")
+	}
+	rt.deepBusy = true
+	rt.deepMax += 64
+	v := rt.call(rt.deepHook, jsUndef, nil)
+	rt.deepMax -= 64
+	rt.deepBusy = false
+	panic(&jsThrown{value: v})
+}
+
+// callClause runs a try clause without counting it as a call (a frame is a
+// function, not a try body): the floor's call_clause.
+func (rt *jsrt) callClause(c interface{}, args []interface{}) interface{} {
+	if cl, ok := c.(*jsClosure); ok {
+		return rt.callClosure(cl, jsUndef, args, 0)
+	}
+	return rt.call(c, jsUndef, args)
+}
+
+// callClosure runs a compiled closure.
+func (rt *jsrt) callClosure(c *jsClosure, this interface{}, args []interface{}, argsH uint64) interface{} {
+	if argsH == 0 {
+		argsH = rt.wrap(&jsArray{elems: args})
+	}
+	// The two-element argument slice is reused: machine.call copies the
+	// parameters into the callee's frame before anything can run, so a
+	// nested call may overwrite the buffer afterwards.
+	rt.callBuf[0], rt.callBuf[1] = c.env, argsH
+	if !rt.trackThis {
+		return rt.unwrap(c.ma.call(c.fn, rt.callBuf[:]))
+	}
+	rt.thisStack = append(rt.thisStack, this)
+	nt := rt.pendingNewTarget
+	rt.pendingNewTarget = nil
+	rt.newTargetStack = append(rt.newTargetStack, nt)
+	ret := c.ma.call(c.fn, rt.callBuf[:])
+	rt.thisStack = rt.thisStack[:len(rt.thisStack)-1]
+	rt.newTargetStack = rt.newTargetStack[:len(rt.newTargetStack)-1]
+	return rt.unwrap(ret)
+}
+
 func (rt *jsrt) call(callee interface{}, this interface{}, args []interface{}) interface{} {
 	return rt.callH(callee, this, args, 0)
 }
@@ -3362,24 +3439,10 @@ func (rt *jsrt) callH(callee interface{}, this interface{}, args []interface{}, 
 func (rt *jsrt) callInner(callee interface{}, this interface{}, args []interface{}, argsH uint64) interface{} {
 	switch c := callee.(type) {
 	case *jsClosure:
-		if argsH == 0 {
-			argsH = rt.wrap(&jsArray{elems: args})
+		if rt.deepMax > 0 {
+			return rt.callCounted(c, this, argsH, args)
 		}
-		// The two-element argument slice is reused: machine.call copies the
-		// parameters into the callee's frame before anything can run, so a
-		// nested call may overwrite the buffer afterwards.
-		rt.callBuf[0], rt.callBuf[1] = c.env, argsH
-		if !rt.trackThis {
-			return rt.unwrap(c.ma.call(c.fn, rt.callBuf[:]))
-		}
-		rt.thisStack = append(rt.thisStack, this)
-		nt := rt.pendingNewTarget
-		rt.pendingNewTarget = nil
-		rt.newTargetStack = append(rt.newTargetStack, nt)
-		ret := c.ma.call(c.fn, rt.callBuf[:])
-		rt.thisStack = rt.thisStack[:len(rt.thisStack)-1]
-		rt.newTargetStack = rt.newTargetStack[:len(rt.newTargetStack)-1]
-		return rt.unwrap(ret)
+		return rt.callClosure(c, this, args, argsH)
 	case *hostFunc:
 		return c.fn(rt, rt.wrap(this), args)
 	case *boundMethod:
@@ -7124,6 +7187,8 @@ var rubyExcParent = map[string]string{
 	// NotImplementedError.
 	"ScriptError":         "Exception",
 	"NotImplementedError": "ScriptError",
+	// A call nested past the stack; not a StandardError either.
+	"SystemStackError": "Exception",
 }
 
 // rubyExcIsA answers `v is an exception of builtin class named bn': it walks the
@@ -13416,6 +13481,12 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// The twins are js_rt_missvar / js_rt_missmem in languages/lib/runtime.c.
 		"js_rt_missvar": func(a []uint64) uint64 { rt.missVar = u(a[0]); return 0 },
 		"js_rt_genbusy": func(a []uint64) uint64 { rt.genBusy = u(a[0]); return 0 },
+		"js_rt_deep": func(a []uint64) uint64 {
+			rt.deepMax = int(jsToInt(rt.toNumber(u(a[0]))))
+			rt.deepHook = u(a[1])
+			rt.deepExit = int(jsToInt(rt.toNumber(u(a[2]))))
+			return 0
+		},
 		"js_rt_missmem": func(a []uint64) uint64 { rt.missMem = u(a[0]); return 0 },
 		// The WRITE sibling of missMem: a hook of its own because node's two
 		// messages differ ("Cannot read properties of" / "Cannot set properties of").
@@ -13935,7 +14006,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 						}
 					}
 				}()
-				res = rt.call(c, jsUndef, args)
+				res = rt.callClause(c, args)
 				return
 			}
 			result, pending := run(tryC, nil)

@@ -190,6 +190,7 @@ class Main {
         S92.run(); // SECTION-CALL 92
         S93.run(); // SECTION-CALL 93
         S94.run(); // SECTION-CALL 94
+        S100.run(); // SECTION-CALL 100
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -1599,6 +1600,27 @@ class S30 {
 
     static boolean eqPair(Object a, Object b) {
         return a.equals(b) && a.hashCode() == b.hashCode();
+    }
+}
+
+// ===== SECTION 100: unbounded recursion =====
+//
+// A call nested past the stack is a StackOverflowError (a VirtualMachineError,
+// not an Exception) with a null message, and the depth a caught one unwound is
+// given back. Every expected value is java 24.0.2's.
+class S100 {
+    static int rec(int n) { return rec(n + 1) + 1; }
+    static int deep(int n) { return n == 0 ? 0 : 1 + deep(n - 1); }
+    int m(int n) { return m(n + 1); }
+    static void run() {
+        String got = "";
+        for (int i = 0; i < 2; i++) {
+            try { rec(0); } catch (Exception e) { got += "E"; } catch (StackOverflowError e) { got += e + "/" + e.getMessage() + ";"; }
+        }
+        Main.check("soe1", got.equals("java.lang.StackOverflowError/null;java.lang.StackOverflowError/null;"));
+        String how = "";
+        try { new S100().m(0); } catch (VirtualMachineError e) { how = e.getClass().getName(); }
+        Main.check("soe2", how.equals("java.lang.StackOverflowError") && deep(100) == 100);
     }
 }
 

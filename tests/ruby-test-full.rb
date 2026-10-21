@@ -1935,6 +1935,31 @@ end
 class S39D < S39C
   def inherited_call(n); method(:inst).call(n); end
 end
+# ===== SECTION 95: unbounded recursion =====
+# A call nested past the stack is SystemStackError "stack level too deep", an
+# Exception that a bare rescue (StandardError) does not take, and the depth a
+# rescued one unwound is given back. /usr/bin/ruby 2.6 settles every value.
+def s95rec(n); s95rec(n + 1) + 1; end
+def s95deep(n); n == 0 ? 0 : 1 + s95deep(n - 1); end
+def s95
+  got = []
+  2.times do
+    begin
+      begin
+        s95rec(0)
+      rescue => e
+        got << "std"
+      end
+    rescue SystemStackError => e
+      got << "#{e.class}: #{e.message} #{e.is_a?(StandardError)}"
+    end
+  end
+  check("sse1", got == ["SystemStackError: stack level too deep false"] * 2)
+  f = lambda { |n| f.call(n + 1) }
+  how = begin; f.call(0); rescue Exception => e; e.class.to_s; end
+  check("sse2", how == "SystemStackError" && s95deep(100) == 100)
+end
+
 # ===== END SECTIONS =====
 s01() # SECTION-CALL 01
 s02() # SECTION-CALL 02
@@ -3960,5 +3985,6 @@ s86() # SECTION-CALL 86
 s87() # SECTION-CALL 87
 s88() # SECTION-CALL 88
 s89() # SECTION-CALL 89
+s95() # SECTION-CALL 95
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

@@ -5724,6 +5724,9 @@ HasStatic   = :script(~~
         // Any program can dereference or unbox a null.
         runtimeExc["$NullPointerException"] = true
         noteTypeUse("NullPointerException")
+        // Any program can recurse past the stack (the js_rt_deep hook).
+        runtimeExc["$StackOverflowError"] = true
+        noteTypeUse("StackOverflowError")
         if (jUsesIdx) {
             runtimeExc["$ArrayIndexOutOfBoundsException"] = true
             noteTypeUse("ArrayIndexOutOfBoundsException")
@@ -6390,6 +6393,17 @@ HasStatic   = :script(~~
         }, false, null)
         callExt(b, "js_rt_missmem", [callExt(b, "js_closure", [handle(npeFn), curScopeV])])
         callExt(b, "js_rt_missset", [callExt(b, "js_closure", [handle(npeFn), curScopeV])])
+        // A call nested past the limit is a StackOverflowError with a null
+        // message: the floor's and the twin's js_rt_deep hook. Twin of the
+        // interpreter's coreDeepHook.
+        var soeFn = emitFunc([], function(bb) {
+            var oV = callExt(bb, "js_obj_new", [])
+            callExt(bb, "js_set", [oV, emitStr(bb, "__class"), callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "StackOverflowError")])])
+            callExt(bb, "js_set", [oV, emitStr(bb, "__msg"), hNull])
+            bb.NewRet(oV)
+            return deadBlock()
+        }, false, null)
+        callExt(b, "js_rt_deep", [emitNum(b, 10000), callExt(b, "js_closure", [handle(soeFn), curScopeV]), emitNum(b, 0)])
         b = emitImported(b)
         b = makeSeq(items)(b)
         b = jRunAllWaiting(b)

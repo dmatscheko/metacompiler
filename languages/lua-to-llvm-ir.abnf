@@ -3941,6 +3941,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         callExt(b, "js_rt_missmem", [callExt(b, "js_closure", [handle(emitLibFunc(libIndexNil)), curScopeV])])
         callExt(b, "js_rt_missset", [callExt(b, "js_closure", [handle(emitLibFunc(libIndexNil)), curScopeV])])
         callExt(b, "js_rt_missfn", [callExt(b, "js_closure", [handle(emitLibFunc(libCallBad)), curScopeV])])
+        // A call nested past the limit is lua's "stack overflow" error: the floor's
+        // and the twin's js_rt_deep hook (the interpreter's coreDeepHook).
+        callExt(b, "js_rt_deep", [emitNum(b, 10000), callExt(b, "js_closure", [handle(emitLibFunc(libTooDeep)), curScopeV]), emitNum(b, 0)])
         // An error nobody caught ends the run with lua's own text for its error
         // object: the chunk runs as the try body of one js_try whose catch renders
         // it. The body is a function of its own that reads jsmain's scope straight
@@ -3961,6 +3964,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function libIndexNil(bb, argsH) {
         return {b: bb, v: luaMarker(bb, emitStr(bb, "attempt to index a nil value"))}
+    }
+    function libTooDeep(bb, argsH) {
+        return {b: bb, v: luaMarker(bb, emitStr(bb, "stack overflow"))}
     }
     // The floor's hook for a call of a value that is no function, with the callee
     // and the argument array: a value with a __call is called through it, with

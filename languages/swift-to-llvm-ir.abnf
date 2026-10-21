@@ -12013,6 +12013,10 @@ KwContinue  = "continue" KwEnd ;
         curF = f
         var b = f.NewBlock("entry")
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
+        // A call nested past the limit crashes a swift program (SIGSEGV, exit status
+        // 139, nothing on stderr): the floor's and the twin's js_rt_deep hook end the
+        // run with that status. Twin of coreDeepHook in swift-interpreter.abnf.
+        callExt(b, "js_rt_deep", [emitNum(b, 10000), emitStr(b, ""), emitNum(b, 139)])
         // Swift print appends a newline: bind it to the runtime's println.
         var printlnV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "println")])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "print"), printlnV])

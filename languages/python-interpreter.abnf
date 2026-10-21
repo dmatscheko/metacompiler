@@ -12420,7 +12420,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var pyExcNames = ["BaseException", "Exception", "ArithmeticError", "ZeroDivisionError",
                       "LookupError", "IndexError", "KeyError", "ValueError", "TypeError",
                       "NameError", "UnboundLocalError", "AttributeError", "RuntimeError",
-                      "StopIteration", "NotImplementedError", "AssertionError",
+                      "StopIteration", "NotImplementedError", "RecursionError", "AssertionError",
                       "OSError", "ExceptionGroup", "OverflowError", "UnicodeError", "UnicodeDecodeError",
                       "UnicodeEncodeError", "GeneratorExit", "MemoryError", "SystemExit", "ImportError", "ModuleNotFoundError",
                       "BlockingIOError", "ChildProcessError", "ConnectionError", "BrokenPipeError", "ConnectionAbortedError", "ConnectionRefusedError", "ConnectionResetError", "FileExistsError", "FileNotFoundError", "InterruptedError", "IsADirectoryError", "NotADirectoryError", "PermissionError", "ProcessLookupError", "TimeoutError", "EOFError"]
@@ -12439,6 +12439,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     pyExcParent["RuntimeError"] = "Exception"
     pyExcParent["StopIteration"] = "Exception"
     pyExcParent["NotImplementedError"] = "RuntimeError"
+    pyExcParent["RecursionError"] = "RuntimeError"
     pyExcParent["AssertionError"] = "Exception"
     pyExcParent["OSError"] = "Exception"
     pyExcParent["ExceptionGroup"] = "Exception"
@@ -12469,6 +12470,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     pyExcParent["ProcessLookupError"] = "OSError"
     pyExcParent["TimeoutError"] = "OSError"
     pyExcParent["EOFError"] = "Exception"
+    // A call past CPython's default recursion limit (1000 frames, the module's
+    // among them) raises RecursionError. Twin of the js_rt_deep hook
+    // python-to-llvm-ir.abnf registers.
+    coreDepthMax = 999
+    coreDeepHook = function() { pyListErr("RecursionError", "maximum recursion depth exceeded") }
     function installExceptions() {
         for (var i = 0; i < pyExcNames.length; i++) {
             var n = pyExcNames[i]
@@ -14691,8 +14697,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (isGenFn) { return newGenObject(bodyT, defScopes, plist, dflts, args, named) }
                 var saved = scopes
                 scopes = callScopes(defScopes, plist, dflts, args, named)
+                var depth = coreDepth + 1
+                coreDepth = depth
                 var r = anytype
-                try { r = bodyT() } finally { scopes = saved }
+                try {
+                    if (depth > coreDepthMax) { coreTooDeep() }
+                    r = bodyT()
+                } finally { scopes = saved; coreDepth = depth - 1 }
                 return (r != undefined && r.isRet) ? r.v : undefined
             }
             fnNameSet(fn, name, plist.qual, doc)
@@ -14746,8 +14757,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 pyArgsFit(plist, args, named, lf)
                 var saved = scopes
                 scopes = callScopes(defScopes, plist, dflts, args, named)
+                var depth = coreDepth + 1
+                coreDepth = depth
                 var r = anytype
-                try { r = exprT() } finally { scopes = saved }
+                try {
+                    if (depth > coreDepthMax) { coreTooDeep() }
+                    r = exprT()
+                } finally { scopes = saved; coreDepth = depth - 1 }
                 return r
             }
             // Only a NESTED lambda's qualname ('f.<locals>.<lambda>') differs

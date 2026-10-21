@@ -3047,9 +3047,11 @@ NotFuncHead = :script(~~
     function jpAdoptJob(p, x) {
         return function() {
             if (jpIs(x)) { jpThen(x, jpResolveFn(p), jpRejectFn(p), undefined); return }
+            var depth = coreDepth
             try { callWithThis(getMember(x, "then"), x, [jpResolveFn(p), jpRejectFn(p)]) }
             catch (e) {
                 if (!excIsUser(e)) { throw e }
+                coreDepth = depth
                 jpSettle(p, 2, e.v)
             }
         }
@@ -3073,9 +3075,11 @@ NotFuncHead = :script(~~
             out = undefined
             thrown = undefined
             var threw = false
+            var depth = coreDepth
             try { out = callWithThis(handler, undefined, [arg]) }
             catch (e) {
                 if (!excIsUser(e)) { throw e }
+                coreDepth = depth
                 threw = true
                 thrown = e.v
             }
@@ -3252,9 +3256,11 @@ NotFuncHead = :script(~~
         res = undefined
         thrown = undefined
         var threw = false
+        var depth = coreDepth
         try { res = g["next"](send) }
         catch (e) {
             if (!excIsUser(e)) { throw e }
+            coreDepth = depth
             threw = true
             thrown = e.v
         }
@@ -3370,9 +3376,11 @@ NotFuncHead = :script(~~
         thrown = undefined
         var threw = false
         st["started"] = true
+        var depth = coreDepth
         try { res = st["g"]["next"](send) }
         catch (e) {
             if (!excIsUser(e)) { throw e }
+            coreDepth = depth
             threw = true
             thrown = e.v
         }
@@ -3423,9 +3431,11 @@ NotFuncHead = :script(~~
         var p = jpNew()
         // See the twin of this comment in js-interpreter.abnf.
         if (typeof exec != "function") { biRaise("TypeError: Promise resolver " + jsStr(exec) + " is not a function") }
+        var depth = coreDepth
         try { callWithThis(exec, undefined, [jpResolveFn(p), jpRejectFn(p)]) }
         catch (e) {
             if (!excIsUser(e)) { throw e }
+            coreDepth = depth
             jpSettle(p, 2, e.v)
         }
         return p
@@ -4532,6 +4542,11 @@ NotFuncHead = :script(~~
     }
     // See the twin of this comment in js-interpreter.abnf.
     function biRaise(msg) { throw {__exc: true, v: jsErrFromText(msg)} }
+    // A call nested past node's stack is its RangeError. The depth node reaches
+    // depends on its stack size and the frames' sizes; this limit is ours. Twin of
+    // the js_rt_deep hook the compiler emits.
+    coreDepthMax = 10000
+    coreDeepHook = function() { biRaise("RangeError: Maximum call stack size exceeded") }
     function jsBigIntFn(v) {
         if (arguments.length == 0) { biRaise("TypeError: Cannot convert undefined to a BigInt") }
         return biOf(v)
@@ -4887,7 +4902,11 @@ NotFuncHead = :script(~~
             // value may read an earlier parameter ('function f(a, b = a + 1)').
             scopes.push(sc)
             bindParams(sc, params, args)
+            var depth = coreDepth + 1
+            coreDepth = depth
+            if (depth > coreDepthMax) { coreTooDeep() }
             var r = bodyT()
+            coreDepth = depth - 1
             scopes = saved
             return (r != undefined && r.isRet) ? r.v : undefined
         }
@@ -4911,7 +4930,11 @@ NotFuncHead = :script(~~
             sc["0strict"] = strictHere
             scopes.push(sc)
             bindParams(sc, params, args)
+            var depth = coreDepth + 1
+            coreDepth = depth
+            if (depth > coreDepthMax) { coreTooDeep() }
             var r = bodyT()
+            coreDepth = depth - 1
             scopes = saved
             return (r != undefined && r.isRet) ? r.v : undefined
         }
@@ -8213,7 +8236,11 @@ NotFuncHead = :script(~~
             sc["0strict"] = true // A class body is strict code, always.
             scopes.push(sc)
             bindParams(sc, params, args)
+            var depth = coreDepth + 1
+            coreDepth = depth
+            if (depth > coreDepthMax) { coreTooDeep() }
             var r = bodyT()
+            coreDepth = depth - 1
             scopes = saved
             return (r != undefined && r.isRet) ? r.v : undefined
         }
@@ -8260,7 +8287,11 @@ NotFuncHead = :script(~~
             }
             var rb = anytype // The body's return record, or absent.
             rb = undefined
+            var depth = coreDepth + 1
+            coreDepth = depth
+            if (depth > coreDepthMax) { coreTooDeep() }
             if (bodyT != null) rb = bodyT()
+            coreDepth = depth - 1
             scopes = saved
             // See the twin of this comment in js-interpreter.abnf.
             var rv = anytype

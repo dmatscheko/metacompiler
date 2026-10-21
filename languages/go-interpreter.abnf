@@ -6605,15 +6605,20 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var myChain = scopes
         var res = undefined
         var caught = null
+        var depth = coreDepth + 1
+        coreDepth = depth
         try {
+            if (depth > coreDepthMax) { coreTooDeep() }
             res = body()
         } catch (e) {
             // The unwind left `scopes` wherever the panic happened; the defers of THIS
             // frame have to run on this frame's own chain.
             scopes = myChain
+            coreDepth = depth - 1
             if (e != undefined && e != null && e.__gopanic == true) { caught = e }
             else { deferFrames.pop(); scopes = saved; throw e }
         }
+        coreDepth = depth - 1
         deferFrames.pop()
         if (res != undefined && res != null && res.isRet && res.bx != undefined && res.bx != null) { res.v = goRetBox(res.v, res.bx, rtl) }
         // NO RETURN SIGNAL in a function that declares results means its panic was
@@ -6675,6 +6680,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
 
     // ----- Core library config (see lib/interp-core.js) -----
     core.lang = "go"
+    // A call nested past the limit ends the program as go's runtime does: these two
+    // lines on stderr and exit status 2, which no recover() can stop. Twin of the
+    // js_rt_deep hook go-to-llvm-ir.abnf registers.
+    coreDepthMax = 10000
+    coreDeepHook = function() {
+        eprintln("runtime: goroutine stack exceeds 1000000000-byte limit")
+        eprintln("fatal error: stack overflow")
+        exit(2)
+    }
     core.blank = "_"
     // Go stdlib packages the runtime provides (resolveImport lives in lib/interp-core.js;
     // exact-match paths, so sub-packages like "encoding/json" are listed in full).

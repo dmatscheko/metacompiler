@@ -5039,7 +5039,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         "NameError", "StopIteration", "ArithmeticError", "LookupError",
                         "OSError", "ExceptionGroup", "AssertionError",
                         "ZeroDivisionError", "IndexError", "KeyError", "UnboundLocalError",
-                        "NotImplementedError", "OverflowError", "UnicodeError", "UnicodeDecodeError",
+                        "NotImplementedError", "RecursionError", "OverflowError", "UnicodeError", "UnicodeDecodeError",
                         "UnicodeEncodeError", "GeneratorExit", "MemoryError", "SystemExit", "ImportError", "ModuleNotFoundError",
                         "BlockingIOError", "ChildProcessError", "ConnectionError", "BrokenPipeError", "ConnectionAbortedError", "ConnectionRefusedError", "ConnectionResetError", "FileExistsError", "FileNotFoundError", "InterruptedError", "IsADirectoryError", "NotADirectoryError", "PermissionError", "ProcessLookupError", "TimeoutError", "EOFError"]
         var excParent = {}
@@ -5048,6 +5048,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         excParent["KeyError"] = "LookupError"
         excParent["UnboundLocalError"] = "NameError"
         excParent["NotImplementedError"] = "RuntimeError"
+        excParent["RecursionError"] = "RuntimeError"
         // math.floor(inf) is an OverflowError in CPython, not a ValueError - the
         // integral answer does not exist rather than being out of domain.
         excParent["OverflowError"] = "ArithmeticError"
@@ -5213,6 +5214,19 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var gbCls = callExt(gbb, "js_scope_get", [gbf.Params[0], emitStr(gbb, "ValueError")])
         gbb.NewRet(callExt(gbb, "js_pycall", [gbCls, gbArgs, handle(0)]))
         callExt(b, "js_rt_genbusy", [callExt(b, "js_closure", [handle(gbIdx), curScopeV])])
+        // A call past CPython's default recursion limit (1000 frames, the
+        // module's among them) raises RecursionError: the floor's and the twin's
+        // js_rt_deep hook, answering the instance the same way.
+        funcCount++
+        var rdIdx = funcCount
+        var rdf = m.NewFunc("jsf_" + rdIdx, i64,
+                            [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var rdb = rdf.NewBlock("entry")
+        var rdArgs = callExt(rdb, "js_arr_new", [])
+        callExt(rdb, "js_arr_push", [rdArgs, emitStr(rdb, "maximum recursion depth exceeded")])
+        var rdCls = callExt(rdb, "js_scope_get", [rdf.Params[0], emitStr(rdb, "RecursionError")])
+        rdb.NewRet(callExt(rdb, "js_pycall", [rdCls, rdArgs, handle(0)]))
+        callExt(b, "js_rt_deep", [emitNum(b, 999), callExt(b, "js_closure", [handle(rdIdx), curScopeV]), emitNum(b, 0)])
 
         // An exception nobody catches aborts with CPython's last traceback line,
         // `KeyError: 1`, which only python's own str() and class name can render:

@@ -2367,7 +2367,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var sp = luaCallPos.length
             if (luaTail) { luaTail = false; sp = sp - 1 } else { luaCallPos.push(ep) }
             luaOwnTop = true
+            var depth = coreDepth + 1
+            coreDepth = depth
+            if (depth > coreDepthMax) { coreTooDeep() }
             var r = bodyT()
+            // A tail call still to make runs at the caller's depth.
+            coreDepth = depth - 1
             var res = anytype // The return value, or a tail call still to make.
             res = (r != undefined && r.isRet) ? r.v : LUA_NONE
             // A tail call leaves this frame's luaCallPos entry for its callee.
@@ -2767,6 +2772,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (!luaRunning) { coreFail(msg) }
         throw {__exc: true, v: luaPos + msg}
     }
+    // A call nested past the limit is lua's "stack overflow" error, positioned at
+    // the call. Lua's own limit is its stack's size in slots (LUAI_MAXSTACK);
+    // this one counts calls. Twin of the js_rt_deep hook the compiler emits.
+    coreDepthMax = 10000
+    coreDeepHook = function() { fail("stack overflow") }
     // The position error(msg, level) prefixes: level 1 is the function that called
     // error, level n the one n - 1 calls further out (luaL_where); none below 1.
     function luaWhere(lv) {
@@ -2819,27 +2829,35 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var depth = luaCallPos.length
         var savedPos = luaPos
         var tbcD = luaTbc.length
+        var savedDepth = coreDepth
         luaTail = false
         luaCallPos.push(luaPos)
         luaPos = ""
         var out = anytype // The multi-value pcall answers.
+        // pcall is a call frame of its own, as the compiled half's library
+        // function is.
+        coreDepth = savedDepth + 1
         try {
+            if (coreDepth > coreDepthMax) { coreTooDeep() }
             var vs = []
             vs.push(true)
             luaCallName = null
             var all = luaAll(luaCallAll(f, args))
             for (var i = 0; i < all.length; i++) { vs.push(all[i]) }
             out = mkMulti(vs)
+            coreDepth = savedDepth
         } catch (e) {
             if (!excIsUser(e)) { throw e }
             scopes = savedChain.slice()
             luaFnBase = savedBase
             luaBlockBase = savedBlock
             luaTrampFn = null
+            coreDepth = savedDepth
             var ev = anytype // The error object, or what the handler made of it.
             ev = e.v
             if (handler !== undefined) { ev = luaHandle(handler, ev) }
             ev = luaTbcUnwind(tbcD, ev)
+            coreDepth = savedDepth
             // lua 5.5 reports a nil error object as this string.
             if (ev === undefined || ev === null) { ev = "<no error object>" }
             out = mkMulti([false, ev])
@@ -2910,11 +2928,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         luaCoCur = co
         luaCtxLoad(co.ctx)
         var out = anytype // [ok, values...]
+        // The body counts its calls on top of the resumer's, as in gen_resume.
+        var savedDepth = coreDepth
         try {
             var r = coResume(co.h, args)
+            coreDepth = savedDepth
             co.st = r.done ? "dead" : "suspended"
             out = [true].concat(r.value)
         } catch (e) {
+            coreDepth = savedDepth
             // A coroutine that dies of an error keeps its pending to-be-closed
             // values until coroutine.close (manual 3.3.8).
             co.ctx = luaCtxSave()

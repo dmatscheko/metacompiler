@@ -7145,6 +7145,11 @@ KwLet       = "let" KwEnd ;
         curF = f
         var b = f.NewBlock("entry")
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
+        // A call nested past the limit is .NET's StackOverflowException, which no
+        // catch can stop: the runtime writes "Stack overflow." on stderr and aborts
+        // (exit status 134; its repeated frame list is not reproduced). Twin of
+        // coreDeepHook in csharp-interpreter.abnf.
+        callExt(b, "js_rt_deep", [emitNum(b, 10000), emitStr(b, "Stack overflow.\n"), emitNum(b, 134)])
         // Console.WriteLine / Console.Write. NOT the shared println / print host
         // globals, which hand the raw runtime value to Go's %v. js_csconsole builds
         // the object with C#'s own value rendering - the twin of csStr in

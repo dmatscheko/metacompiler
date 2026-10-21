@@ -2795,6 +2795,12 @@ NotMemberKw = :script(~~
     function kThrowExc(clsName, msg) {
         throw {__exc: true, v: {__class: globalScope[clsName], message: msg}}
     }
+    // A call nested past the JVM's stack is java.lang.StackOverflowError with a
+    // null message. How deep the JVM gets depends on its stack size and the
+    // frames' sizes; this limit is ours. Twin of the js_rt_deep hook the compiler
+    // emits.
+    coreDepthMax = 10000
+    coreDeepHook = function() { kThrowExc("StackOverflowError", null) }
     // kotlin.ranges' checkStepIsPositive. Twin of ktStepBad in abnf/jsrtkotlin.go and
     // k4StepBad in languages/lib/kotlin-rt.metajs.
     function kStepBad(st) { kThrowExc("IllegalArgumentException", "Step must be positive, was: " + kstr2(st) + ".") }
@@ -5029,11 +5035,15 @@ NotMemberKw = :script(~~
         scopes = base
         if (bindThis) { declVar("this", self) }
         bindParams(params, args, argOff, kTakeNamed())
+        var depth = coreDepth + 1
+        coreDepth = depth
         var r = anytype
         try {
+            if (depth > coreDepthMax) { coreTooDeep() }
             r = nlrRun(body)
         } finally {
             scopes = saved
+            coreDepth = depth - 1
         }
         return (r != undefined && r.isRet) ? r.v : undefined
     }
@@ -8616,7 +8626,10 @@ NotMemberKw = :script(~~
                 // travels on, which is what makes return@outer from a nested lambda
                 // work. A plain non-local `return` still uses the __nlret marker every
                 // FUNCTION frame catches, so the two never collide.
+                var depth = coreDepth + 1
+                coreDepth = depth
                 try {
+                    if (depth > coreDepthMax) { coreTooDeep() }
                     for (var k = 0; k < body.length; k++) {
                         if (body[k].expr != undefined) {
                             last = body[k].expr()
@@ -8638,6 +8651,7 @@ NotMemberKw = :script(~~
                         throw e
                     }
                 }
+                coreDepth = depth - 1
                 scopes = saved
                 return last
             }
@@ -9117,13 +9131,17 @@ NotMemberKw = :script(~~
         scopes = [globalScope, {}]
         if (self != undefined) declVar(recvName, self)
         bindParams(params, args, 0, named)
+        var depth = coreDepth + 1
+        coreDepth = depth
         var r = anytype
         try {
+            if (depth > coreDepthMax) { coreTooDeep() }
             if (core.framePush != null) core.framePush()
             r = nlrRun(body)
             if (core.framePop != null) core.framePop()
         } finally {
             scopes = saved
+            coreDepth = depth - 1
         }
         return (r != undefined && r.isRet) ? r.v : undefined
     }
@@ -9730,7 +9748,12 @@ NotMemberKw = :script(~~
             declVar("__dispatch", argv[0])
             bindParams(f.params, argv, 2, kTakeNamed())
             var r = anytype
-            try { r = nlrRun(f.body) } finally { scopes = saved }
+            var depth = coreDepth + 1
+            coreDepth = depth
+            try {
+                if (depth > coreDepthMax) { coreTooDeep() }
+                r = nlrRun(f.body)
+            } finally { scopes = saved; coreDepth = depth - 1 }
             return (r != undefined && r.isRet) ? r.v : undefined
         }
     }
@@ -9744,7 +9767,12 @@ NotMemberKw = :script(~~
             declVar("this", argv[1])
             declVar("__dispatch", argv[0])
             var r = anytype
-            try { r = nlrRun(body) } finally { scopes = saved }
+            var depth = coreDepth + 1
+            coreDepth = depth
+            try {
+                if (depth > coreDepthMax) { coreTooDeep() }
+                r = nlrRun(body)
+            } finally { scopes = saved; coreDepth = depth - 1 }
             return (r != undefined && r.isRet) ? r.v : undefined
         }
     }
@@ -9757,7 +9785,12 @@ NotMemberKw = :script(~~
             declVar("this", argv[1])
             declVar("__dispatch", argv[0])
             declVar(pn, argv[2])
-            try { nlrRun(body) } finally { scopes = saved }
+            var depth = coreDepth + 1
+            coreDepth = depth
+            try {
+                if (depth > coreDepthMax) { coreTooDeep() }
+                nlrRun(body)
+            } finally { scopes = saved; coreDepth = depth - 1 }
         }
     }
     // The dispatch receiver of the frame we are in, if any (see makeMemberExtClosure).
@@ -9812,7 +9845,12 @@ NotMemberKw = :script(~~
             declVar("this", self)
             declVar("field", kfield(self, name))
             var r = anytype
-            try { r = nlrRun(body) } finally { scopes = saved }
+            var depth = coreDepth + 1
+            coreDepth = depth
+            try {
+                if (depth > coreDepthMax) { coreTooDeep() }
+                r = nlrRun(body)
+            } finally { scopes = saved; coreDepth = depth - 1 }
             return (r != undefined && r.isRet) ? r.v : undefined
         }
     }

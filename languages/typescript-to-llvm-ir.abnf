@@ -6626,6 +6626,14 @@ NotFuncHead = :script(~~
         var gb = gf.NewBlock("entry")
         gb.NewRet(callExt(gb, "js_jserrmk", [emitStr(gb, "TypeError: Generator is already running")]))
         callExt(b, "js_rt_genbusy", [callExt(b, "js_closure", [handle(gIdx), curScopeV])])
+        // A call nested past the limit raises node's RangeError through the
+        // floor's and the twin's js_rt_deep hook (the interpreter's coreDeepHook).
+        funcCount++
+        var rdIdx = funcCount
+        var rdf = m.NewFunc("jsf_" + rdIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var rdb = rdf.NewBlock("entry")
+        rdb.NewRet(callExt(rdb, "js_jserrmk", [emitStr(rdb, "RangeError: Maximum call stack size exceeded")]))
+        callExt(b, "js_rt_deep", [emitNum(b, 10000), callExt(b, "js_closure", [handle(rdIdx), curScopeV]), emitNum(b, 0)])
 
         // See the twin of this comment in js-to-llvm-ir.abnf.
         var missV = callExt(b, "js_gc_pin", [callExt(b, "js_obj_new", [])])

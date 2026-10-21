@@ -6825,7 +6825,11 @@ KwContinue  = "continue" KwEnd ;
                     declVar(params[i], i < ptypes.length ? swAdoptAnn(av, ptypes[i]) : av)
                 }
                 var st = {last: undefined, ranOff: true}
+                var depth = coreDepth + 1
+                coreDepth = depth
+                if (depth > coreDepthMax) { coreTooDeep() }
                 swClRun(body, 0, st)
+                coreDepth = depth - 1
                 var last = anytype // A block's value hops types across items.
                 last = st.last
                 var ranOff = st.ranOff
@@ -9297,7 +9301,11 @@ KwContinue  = "continue" KwEnd ;
             else if (pj.tval != undefined && pv !== null && pv !== undefined) { declVar(pj.tval, hostGlobals["type"](pv)) }
             if (pj.telem != undefined && Array.isArray(pv) && pv.length > 0) { declVar(pj.telem, hostGlobals["type"](pv[0])) }
         }
+        var depth = coreDepth + 1
+        coreDepth = depth
+        if (depth > coreDepthMax) { coreTooDeep() }
         var r = f.body()
+        coreDepth = depth - 1
         for (var k = 0; k < bnd.boxes.length; k++) { bnd.boxes[k].box.v = getVar(bnd.boxes[k].name) }
         // A return type naming a bound generic parameter (swDsGenRet) adopts the
         // builtin type it holds. Twin of the "@" arm of swEmitAdopt in
@@ -11717,6 +11725,11 @@ KwContinue  = "continue" KwEnd ;
     hostGlobals["UInt8"] = swIntType(8, true)
 
     core.lang = "swift"
+    // A call nested past the limit crashes a swift program (SIGSEGV, exit status
+    // 139, nothing on stderr). Twin of the js_rt_deep hook swift-to-llvm-ir.abnf
+    // registers.
+    coreDepthMax = 10000
+    coreDeepHook = function() { exit(139) }
     // `_` is the discard name: `_ = expr` evaluates and throws the value away.
     core.blank = "_"
     core.add = swadd

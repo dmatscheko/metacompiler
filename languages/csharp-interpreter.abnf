@@ -4709,7 +4709,11 @@ KwLet       = "let" KwEnd ;
         var sc = {}
         csBindArgs(sc, pinfo, args)
         scopes.push(sc)
+        var depth = coreDepth + 1
+        coreDepth = depth
+        if (depth > coreDepthMax) { coreTooDeep() }
         var r = bodyT()
+        coreDepth = depth - 1
         scopes = saved
         return (r != undefined && r.isRet) ? r.v : undefined
     }
@@ -5542,9 +5546,13 @@ KwLet       = "let" KwEnd ;
         var sc = {}
         csBindArgs(sc, pinfo, args)
         for (var i = 0; i < pinfo.params.length; i++) { declVar(pinfo.params[i], sc[pinfo.params[i]]) }
+        var depth = coreDepth + 1
+        coreDepth = depth
+        if (depth > coreDepthMax) { coreTooDeep() }
         if (core.framePush != null) core.framePush()
         var r = body()
         if (core.framePop != null) core.framePop()
+        coreDepth = depth - 1
         scopes = saved
         return (r != undefined && r.isRet) ? r.v : undefined
     }
@@ -6480,6 +6488,14 @@ KwLet       = "let" KwEnd ;
 
     // ----- Core library config (see lib/interp-core.js) -----
     core.lang = "csharp"
+    // A call nested past the limit is .NET's StackOverflowException, which no catch
+    // can stop: "Stack overflow." on stderr and an abort (exit status 134). Twin of
+    // the js_rt_deep hook csharp-to-llvm-ir.abnf registers.
+    coreDepthMax = 10000
+    coreDeepHook = function() {
+        eprintln("Stack overflow.")
+        exit(134)
+    }
     core.add = csAdd
     core.getField = function(o, name) {
         if (name == "Current" && (csIsEnum(o) || csIsGen(o))) { return o.cur }

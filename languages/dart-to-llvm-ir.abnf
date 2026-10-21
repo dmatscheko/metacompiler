@@ -5162,6 +5162,14 @@ KwSuper     = "super" KwEnd ;
         curF = f
         var b = f.NewBlock("entry")
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
+        // A call nested past the limit is dart:core's StackOverflowError: the
+        // floor's and the twin's js_rt_deep hook (the interpreter's coreDeepHook).
+        funcCount++
+        var rdIdx = funcCount
+        var rdf = m.NewFunc("jsf_" + rdIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var rdb = rdf.NewBlock("entry")
+        rdb.NewRet(callExt(rdb, "js_dartexc", [emitStr(rdb, "StackOverflowError"), emitStr(rdb, ""), callExt(rdb, "js_arr_new", [])]))
+        callExt(b, "js_rt_deep", [emitNum(b, 10000), callExt(b, "js_closure", [handle(rdIdx), curScopeV]), emitNum(b, 0)])
         // Dart print writes x.toString() followed by a newline - js_dartprint
         // (abnf/jsrtdart.go), the Dart twin of js_rputs / js_luaprint, not the shared
         // println host function, which hands the RAW value to Go's %v.

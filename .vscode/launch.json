@@ -2710,6 +2710,18 @@
             "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-abort-divz-test.go", "-q", "-exe", "tests/go-abort-divz.out"]
         },
         {
+            "name": "Go abort probe, unbounded recursion (interpreter, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-abort-deep-test.go", "-q"]
+        },
+        {
+            "name": "Go abort probe, unbounded recursion, native binary SHOULD ABORT, ALL HALVES (interpreter vs llvm.Run vs native)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-abort-deep-test.go", "-q", "-exe", "tests/go-abort-deep.out"]
+        },
+        {
             "name": "Java abort probe, uncaught RuntimeException (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
@@ -2732,6 +2744,18 @@
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["languages/csharp-to-llvm-ir.abnf", "tests/csharp-abort-test.cs", "-q", "-exe", "tests/csharp-abort.out"]
+        },
+        {
+            "name": "C# abort probe, unbounded recursion (interpreter, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/csharp-interpreter.abnf", "tests/csharp-abort-test-deep.cs", "-q"]
+        },
+        {
+            "name": "C# abort probe, unbounded recursion, native binary SHOULD ABORT, ALL HALVES (interpreter vs llvm.Run vs native)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/csharp-to-llvm-ir.abnf", "tests/csharp-abort-test-deep.cs", "-q", "-exe", "tests/csharp-abort-deep.out"]
         },
         {
             "name": "PHP abort probe, uncaught Exception (interpreter, SHOULD FAIL)",
@@ -2816,6 +2840,18 @@
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["languages/swift-to-llvm-ir.abnf", "tests/swift-abort-test-throw.swift", "-q", "-exe", "tests/swift-abort.out"]
+        },
+        {
+            "name": "Swift abort probe, unbounded recursion (interpreter, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/swift-interpreter.abnf", "tests/swift-abort-test-deep.swift", "-q"]
+        },
+        {
+            "name": "Swift abort probe, unbounded recursion, native binary SHOULD ABORT, ALL HALVES (interpreter vs llvm.Run vs native)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/swift-to-llvm-ir.abnf", "tests/swift-abort-test-deep.swift", "-q", "-exe", "tests/swift-abort-deep.out"]
         },
         {
             "name": "Swift abort probe, Int of an out-of-range Double (interpreter, SHOULD FAIL)",

@@ -856,6 +856,24 @@ void s29() {
   check("ts18", !identical(TsPlain(9), TsPlain(9)));
 }
 
+// ===== SECTION 45: unbounded recursion =====
+// A call nested past the stack is dart:core's StackOverflowError, an Error
+// whose toString is "Stack Overflow" (errors.dart), and the depth a caught one
+// unwound is given back. Spec-cited: no dart on this machine.
+int s45rec(int n) => s45rec(n + 1) + 1;
+int s45deep(int n) => n == 0 ? 0 : 1 + s45deep(n - 1);
+class S45C { int m(int n) => m(n + 1); }
+void s45() {
+  var got = <String>[];
+  for (var i = 0; i < 2; i++) {
+    try { s45rec(0); } on Exception { got.add("E"); } on StackOverflowError catch (e) { got.add("$e ${e is Error}"); }
+  }
+  check("soe1", got.join(";") == "Stack Overflow true;Stack Overflow true");
+  var how = "";
+  try { S45C().m(0); } on Error catch (e) { how = "$e"; }
+  check("soe2", how == "Stack Overflow" && s45deep(100) == 100);
+}
+
 // ===== END SECTIONS =====
 
 
@@ -1753,6 +1771,7 @@ int main() {
   s38(); // SECTION-CALL 38
   s39(); // SECTION-CALL 39
   s40(); // SECTION-CALL 40
+  s45(); // SECTION-CALL 45
   print("full: $checks checks, $fails failures");
   return fails;
 }

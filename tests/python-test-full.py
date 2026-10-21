@@ -7940,15 +7940,39 @@ def s161():
           and type("T", (), {"__annotate_func__": lambda f: {"k": 1}}).__annotations__ == {"k": 1})
     check("nscell", S161out[4:] == ["cell:<class 'cell'>", "cell:<class 'cell'>"])
 
-# ===== SECTION 181: a string built a little at a time =====
+# ===== SECTION 181: a string built a little at a time; unbounded recursion =====
 # Every step of the repetition allocates a block a few bytes larger than any
-# freed before it, the pattern that makes a first-fit free list quadratic.
+# freed before it, the pattern that makes a first-fit free list quadratic. A
+# call past the default recursion limit (1000 frames: the module, main and
+# s181 are three of them) is a RecursionError, and the depth a caught one
+# unwound is given back. CPython 3.14 settles every value.
 def s181():
     s = "ab" * 35000
     t = ""
     for i in range(3000):
         t += "xy"
     check("bigrep", len(s) == 70000 and s[69999] == "b" and s[:4] == "abab" and len(t) == 6000 and t[-1] == "y")
+    depth = [0]
+    def rec(n):
+        depth[0] = n
+        rec(n + 1)
+    got = []
+    for i in range(3):
+        try:
+            rec(1)
+        except RecursionError as e:
+            got.append(type(e).__name__ + ": " + str(e) + " " + str(depth[0]))
+    def deep(n):
+        return 0 if n == 0 else 1 + deep(n - 1)
+    check("recerr", got == ["RecursionError: maximum recursion depth exceeded 997"] * 3
+          and isinstance(RecursionError(), RuntimeError) and deep(990) == 990)
+    lam = lambda n: lam(n + 1)
+    try:
+        lam(0)
+        res = "none"
+    except RuntimeError as e:
+        res = type(e).__name__
+    check("reclam", res == "RecursionError")
 
 def main():
     s01() # SECTION-CALL 01

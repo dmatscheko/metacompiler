@@ -386,7 +386,7 @@ long GC_STACK_BASE;
  *             are the resumer's try-barrier pool and depth, parked with it.
  *
  * Both are GROWN rather than fixed: 10,000 suspended generators is a working
- * workload (each owns a 512 KB coroutine stack, of which it touches a few pages). The old array
+ * workload (each owns a 2 MB coroutine stack, of which it touches a few pages). The old array
  * is not freed, so doubling costs less than one extra copy of the final array in
  * total - the same bargain every other malloc in this file makes. */
 long CORO;           /* long *: the live coroutines' control blocks */
@@ -4223,9 +4223,63 @@ int fn_kind(long h);
 
 long gen_create(long gf, long args);
 
+/* ---- THE CALL DEPTH ------------------------------------------------------
+ * CALL_DEPTH counts the calls of the PROGRAM's own closures that are running:
+ * a closure of the emitted module, whose function index is below the 1,000,000
+ * a -rt-lib library is numbered from, so layer 2's own calls are not counted
+ * and the count is the one the Go twin keeps (its runtime is Go, not closures).
+ * A try clause is run uncounted (call_clause), so a frame is a function.
+ *
+ * Past CALL_MAX the language's js_rt_deep hook decides: a closure answering
+ * the value to throw (python's RecursionError, java's StackOverflowError), or,
+ * with a non-zero status, a message printed on stderr and an exit with that
+ * status (go, swift and csharp end the process). The counter is restored by
+ * every catch (js_try, since a throw skips the decrements) and around every
+ * generator resume. The twin is abnf/jsrt.go's deepN. */
+long CALL_DEPTH;
+long CALL_MAX;
+long RT_DEEP;
+long RT_DEEP_EXIT;
+long RT_DEEP_BUSY;   /* 1 while the hook runs */
+
+void call_too_deep(void) {
+	long max = CALL_MAX;
+	long v;
+	if (RT_DEEP_EXIT != 0) {
+		fflush(0);
+		OUTFD = 2;
+		o_str(to_string(RT_DEEP));
+		exit((int)RT_DEEP_EXIT);
+	}
+	/* Room for the hook and the constructor of the error it answers; a hook
+	 * that recurses past even that aborts. */
+	if (RT_DEEP_BUSY != 0) { die("stack overflow inside the stack overflow hook"); }
+	RT_DEEP_BUSY = 1;
+	CALL_MAX = max + 64;
+	v = js_call(RT_DEEP, H_UNDEF, mk_arr());
+	CALL_MAX = max;
+	RT_DEEP_BUSY = 0;
+	js_throw(v);
+}
+
+long js_rt_deep(long limit, long hook, long status) {
+	CALL_MAX = d_to_long(to_number(limit));
+	RT_DEEP = hook;
+	RT_DEEP_EXIT = d_to_long(to_number(status));
+	return 0;
+}
+
 long js_call(long callee, long self, long args) {
 	long t = tag_of(callee);
-	if (t == 7) { return jsdispatch(fa(callee), fb(callee), args); }
+	if (t == 7) {
+		long r;
+		if (fa(callee) >= 1000000) { return jsdispatch(fa(callee), fb(callee), args); }
+		CALL_DEPTH = CALL_DEPTH + 1;
+		if (CALL_DEPTH > CALL_MAX) { call_too_deep(); }
+		r = jsdispatch(fa(callee), fb(callee), args);
+		CALL_DEPTH = CALL_DEPTH - 1;
+		return r;
+	}
 	if (t == 8) { return host_call(fa(callee), self, args); }
 	if (t == 9) { return builtin_method(fa(callee), fb(callee), args); }
 	/* A generator FUNCTION: calling it runs NOTHING and answers a generator. */
@@ -4320,14 +4374,17 @@ long coro_grow(long arr, long cap, long newcap) {
 	return (long)n;
 }
 
+/* A body's stack is 2 MB: room for the call limit a language registers with
+ * js_rt_deep (10,000 lua frames take about 1 MB), since a recursion inside a
+ * generator counts toward the same limit as one outside. */
 long coro_alloc(long g) {
 	long *cb = (long *)malloc(8 * 16);
 	long i = 0;
 	while (i < 16) { cb[i] = 0; i = i + 1; }
-	cb[8] = (long)valloc(524288);
+	cb[8] = (long)valloc(2097152);
 	if (cb[8] == 0) { die("coroutines: out of memory for a generator's stack"); }
 	mprotect((void *)cb[8], 16384, 0);
-	cb[5] = cb[8] + 524288;
+	cb[5] = cb[8] + 2097152;
 	cb[6] = (long)malloc(512);
 	i = 0;
 	while (i < 64) { long *jb = (long *)cb[6]; jb[i] = 0; i = i + 1; }
@@ -4424,6 +4481,7 @@ void gen_resume(long g, long sent, int closing) {
 	long save_jbp;
 	long save_cap;
 	long save_depth;
+	long save_calls;
 	long threw;
 	if (fe(g) != 0) { return; }
 	if (fc(g) == 0) {
@@ -4464,6 +4522,9 @@ void gen_resume(long g, long sent, int closing) {
 	save_jbp = JBP;
 	save_cap = JB_CAP;
 	save_depth = JB_DEPTH;
+	/* The body counts its calls on top of the resumer's, and whatever it left
+	 * running when it parked is not the resumer's. */
+	save_calls = CALL_DEPTH;
 	if (cb[1] == 0) { mec_coro_boot(&cb[3], cb[5], (long)cb); }
 	else { mec_coro_switch(&cb[3], cb[2]); }
 	RES_N = RES_N - 1;
@@ -4479,6 +4540,7 @@ void gen_resume(long g, long sent, int closing) {
 	JBP = save_jbp;
 	JB_CAP = save_cap;
 	JB_DEPTH = save_depth;
+	CALL_DEPTH = save_calls;
 	threw = cb[11];
 	if (threw != 0) {
 		cb[11] = 0;
@@ -6738,21 +6800,29 @@ long js_throw(long v) {
 	return H_UNDEF;
 }
 
+/* A try clause: a program closure runs without counting a call (see CALL_DEPTH). */
+long call_clause(long c, long args) {
+	if (tag_of(c) == 7) { return jsdispatch(fa(c), fb(c), args); }
+	return js_call(c, H_UNDEF, args);
+}
+
 long js_try(long tryC, long catchC, long finC) {
 	long result = H_UNDEF;
 	long pending = H_UNDEF;
 	int havePending = 0;              /* a separate flag: `throw undefined` is legal */
 	long mydepth = JB_DEPTH;
+	long calls = CALL_DEPTH;
 	long buf;
 	int hasCatch = is_callable(catchC);
 	int hasFin = is_callable(finC);
 	buf = jb_at(JB_DEPTH);
 	JB_DEPTH = JB_DEPTH + 1;
 	if (setjmp((void *)buf) == 0) {
-		result = js_call(tryC, H_UNDEF, mk_arr());
+		result = call_clause(tryC, mk_arr());
 		JB_DEPTH = mydepth;
 	} else {
 		JB_DEPTH = mydepth;
+		CALL_DEPTH = calls;
 		pending = THROWN;
 		havePending = 1;
 	}
@@ -6771,10 +6841,11 @@ long js_try(long tryC, long catchC, long finC) {
 		buf = jb_at(JB_DEPTH);
 			JB_DEPTH = JB_DEPTH + 1;
 		if (setjmp((void *)buf) == 0) {
-			result = js_call(catchC, H_UNDEF, a);
+			result = call_clause(catchC, a);
 			JB_DEPTH = mydepth;
 		} else {
 			JB_DEPTH = mydepth;
+			CALL_DEPTH = calls;
 			pending = THROWN;
 			havePending = 1;
 		}
@@ -6784,13 +6855,14 @@ long js_try(long tryC, long catchC, long finC) {
 		buf = jb_at(JB_DEPTH);
 			JB_DEPTH = JB_DEPTH + 1;
 		if (setjmp((void *)buf) == 0) {
-			fres = js_call(finC, H_UNDEF, mk_arr());
+			fres = call_clause(finC, mk_arr());
 			JB_DEPTH = mydepth;
 			/* A return/break/continue in finally overrides the try/catch
 			 * completion AND swallows a pending throw, exactly like in JS. */
 			if (tag_of(fres) == 10) { havePending = 0; result = fres; }
 		} else {
 			JB_DEPTH = mydepth;
+			CALL_DEPTH = calls;
 			pending = THROWN;
 			havePending = 1;
 		}
@@ -6824,6 +6896,7 @@ void gc_roots(void) {
 	gc_try(RT_MISS_SET, 1);
 	gc_try(RT_MISS_FN, 1);
 	gc_try(RT_GEN_BUSY, 1);
+	gc_try(RT_DEEP, 1);
 	gc_try(FN_SRC_TEXT, 1);
 	gc_try(FN_SRC_TAB, 1);
 	gc_try(RETSLOT, 1);
@@ -7549,6 +7622,7 @@ void boot(void) {
 	/* main's own try-barrier pool. It is malloc'd rather than a global array
 	 * because JBP has to be able to point at EITHER it or a coroutine's, and a
 	 * pointer to one thing is simpler than an index into two. */
+	CALL_MAX = 9223372036854775807;
 	JB_MAIN = (long)malloc(8 * 512);
 	JB_CAP = 512;
 	jbi = 0;

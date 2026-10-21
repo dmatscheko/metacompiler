@@ -4916,6 +4916,26 @@ function s105(): void {
         tag105`x` !== tag105`x`);
 }
 
+// ===== SECTION 120: unbounded recursion =====
+// A call nested past the stack is a catchable RangeError, and the depth a caught
+// one unwound is given back: the recursion after it goes as deep as before.
+function s120rec(n: number): number { return s120rec(n + 1) + 1; }
+function s120deep(n: number): number { return n == 0 ? 0 : 1 + s120deep(n - 1); }
+class S120C { m(n: number): number { return this.m(n + 1); } }
+function s120(): void {
+    var got: string[] = []
+    for (var i = 0; i < 2; i++) {
+        try { s120rec(0) } catch (e) { got.push((e instanceof RangeError) + " " + (e as Error).name + ": " + (e as Error).message) }
+    }
+    check("rec1", got.length == 2 && got[1] == "true RangeError: Maximum call stack size exceeded")
+    var how = ""
+    try { new S120C().m(0) } catch (e) { how = String(e) }
+    var arrow = (n: number): number => arrow(n + 1)
+    try { arrow(0) } catch (e) { how = how + "|" + (e as Error).constructor.name }
+    check("rec2", how == "RangeError: Maximum call stack size exceeded|RangeError")
+    check("rec3", s120deep(100) == 100)
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -5024,6 +5044,7 @@ function main(): number {
     s103(); // SECTION-CALL 103
     s104(); // SECTION-CALL 104
     s105(); // SECTION-CALL 105
+    s120(); // SECTION-CALL 120
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

@@ -55,6 +55,29 @@ var objHasOwn = Object.prototype.hasOwnProperty // See hasOwn below.
 var globalScope = {}
 var scopes = [globalScope]
 var hostGlobals = {}
+// The program's call depth, the twin of CALL_DEPTH in lib/runtime.c and deepN in
+// abnf/jsrt.go: every call of a function of the program does
+//     var depth = coreDepth + 1
+//     coreDepth = depth
+//     if (depth > coreDepthMax) { coreTooDeep() }
+// on entry and `coreDepth = depth - 1` on exit, and a catch restores the count its
+// try started with (a throw skips the exits). Past the language's limit coreDeepHook
+// runs: it raises the language's error (python's RecursionError) or prints and
+// exits (go, swift, csharp). A language that sets no hook has no limit.
+var coreDepth = 0
+var coreDepthMax = 2000000000
+var coreDeepHook = anytype
+var coreDeepBusy = false
+function coreTooDeep() {
+    // The hook gets room to build its error; one recursing past that aborts.
+    if (coreDeepBusy) { fail("stack overflow inside the stack overflow hook") }
+    coreDeepBusy = true
+    coreDepthMax = coreDepthMax + 64
+    try { coreDeepHook() } finally {
+        coreDepthMax = coreDepthMax - 64
+        coreDeepBusy = false
+    }
+}
 // Loop control: a break/continue statement returns one of these markers through the
 // statement thunks; the enclosing loop consumes it (any other value is a return).
 var BRK = {sig: "break"}
@@ -175,11 +198,13 @@ function excTry(items) {
     }
     return function() {
         var savedChain = scopes.slice()
+        var savedDepth = coreDepth
         var box = {sig: undefined}
         try {
             box.sig = tryT()
         } catch (e) {
             scopes = savedChain.slice()
+            coreDepth = savedDepth
             if (excIsUser(e) && catchT != undefined) {
                 if (core.catchScope) { scopes.push({}) }
                 if (catchBind != undefined) { catchBind(e.v) }
@@ -586,9 +611,13 @@ function invokeBody(params, body, self, recvName, args) {
     for (var i = 0; i < params.length; i++) {
         declVar(params[i], i < args.length ? args[i] : undefined)
     }
+    var depth = coreDepth + 1
+    coreDepth = depth
+    if (depth > coreDepthMax) { coreTooDeep() }
     if (core.framePush != null) core.framePush()
     var r = body()
     if (core.framePop != null) core.framePop()
+    coreDepth = depth - 1
     scopes = saved
     return (r != undefined && r.isRet) ? r.v : undefined
 }
@@ -692,11 +721,13 @@ function excTryTyped(items) {
     }
     return function() {
         var savedChain = scopes.slice()
+        var savedDepth = coreDepth
         var box = {sig: undefined}
         try {
             box.sig = tryT()
         } catch (e) {
             scopes = savedChain.slice()
+            coreDepth = savedDepth
             var hit = null
             if (excIsUser(e)) {
                 for (var k = 0; k < clauses.length; k++) {

@@ -8206,6 +8206,18 @@ KwContract  = "contract" KwEnd ;
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, ktNumTypes[kt]),
                                          callExt(b, "js_kttype", [emitStr(b, ktNumTypes[kt])])])
         }
+        // A call nested past the limit is the JVM's StackOverflowError with a null
+        // message: the floor's and the twin's js_rt_deep hook. Twin of the
+        // interpreter's coreDeepHook.
+        funcCount++
+        var rdIdx = funcCount
+        var rdf = m.NewFunc("jsf_" + rdIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var rdb = rdf.NewBlock("entry")
+        var rdV = callExt(rdb, "js_obj_new", [])
+        callExt(rdb, "js_set", [rdV, emitStr(rdb, "__class"), callExt(rdb, "js_ktexccls", [emitStr(rdb, "StackOverflowError")])])
+        callExt(rdb, "js_set", [rdV, emitStr(rdb, "message"), hNull])
+        rdb.NewRet(rdV)
+        callExt(b, "js_rt_deep", [emitNum(b, 10000), callExt(b, "js_closure", [handle(rdIdx), curScopeV]), emitNum(b, 0)])
         b = emitImported(b)   // imported files' items, each under its own source (call-graph file attribution)
         b = makeSeq(topoClassItems(items))(b)
         // The entry point defaults to main(), but the -main flag (c.mainName) can override

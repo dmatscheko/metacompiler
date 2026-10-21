@@ -7451,7 +7451,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         "Exception", "StandardError", "RuntimeError", "ArgumentError", "TypeError",
         "NameError", "NoMethodError", "IndexError", "KeyError", "RangeError",
         "ZeroDivisionError", "StopIteration", "FrozenError", "NotImplementedError",
-        "ScriptError", "IOError", "EOFError", "LocalJumpError",
+        "ScriptError", "IOError", "EOFError", "LocalJumpError", "SystemStackError",
         // FloatDomainError < RangeError: what Float::INFINITY.to_i and
         // "%d" % Float::INFINITY raise.
         "FloatDomainError"]
@@ -7512,6 +7512,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, bn),
                                          callExt(b, "js_rclass", [emitStr(b, bn)])])
         }
+        // A call nested past the limit raises MRI's SystemStackError through the
+        // floor's and the twin's js_rt_deep hook (the interpreter's coreDeepHook).
+        funcCount++
+        var rdIdx = funcCount
+        var rdf = m.NewFunc("jsf_" + rdIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var rdb = rdf.NewBlock("entry")
+        var rdArgs = callExt(rdb, "js_arr_new", [])
+        callExt(rdb, "js_arr_push", [rdArgs, emitStr(rdb, "stack level too deep")])
+        rdb.NewRet(callExt(rdb, "js_rnew", [callExt(rdb, "js_rclass", [emitStr(rdb, "SystemStackError")]), rdArgs]))
+        callExt(b, "js_rt_deep", [emitNum(b, 10000), callExt(b, "js_closure", [handle(rdIdx), curScopeV]), emitNum(b, 0)])
         // THE WHOLE PROGRAM RUNS INSIDE ONE js_try, so an exception nobody rescued
         // is reported BY THE PROGRAM (js_rtop), in MRI's spelling, instead of
         // escaping the module to the generic uncaught-throw handler. This is the

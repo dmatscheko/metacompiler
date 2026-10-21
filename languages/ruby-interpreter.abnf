@@ -9963,8 +9963,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 scopes = captured.slice(0)
                 scopes.push({})
                 blkBind(params, args)
+                var depth = coreDepth + 1
+                coreDepth = depth
+                if (depth > coreDepthMax) { coreTooDeep() }
                 var r = anytype
                 r = body()
+                coreDepth = depth - 1
                 scopes = saved
                 if (isSig(r)) {
                     if (r.brk === true) { throw {__blkbrk: true, v: r.v} }
@@ -10692,17 +10696,22 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // super; end` pass the default on.
         declVar("$sargs", currentParamValues(fn.params))
         var r = anytype
+        var depth = coreDepth + 1
+        coreDepth = depth
         // `return` inside a block returns from the enclosing METHOD, so the block's
         // host throw is caught here rather than by the iterating call.
         try {
+            if (depth > coreDepthMax) { coreTooDeep() }
             r = fn.body()
         } catch (e) {
             scopes = saved
             blkTrim(bdepth)
+            coreDepth = depth - 1
             if (e !== null && e !== undefined && e.__blkret === true
                 && (e.rtag === undefined || e.rtag === null || e.rtag === mscope)) { return e.v }
             throw e
         }
+        coreDepth = depth - 1
         scopes = saved
         blkTrim(bdepth)
         if (isSig(r)) { return r.v }
@@ -11956,10 +11965,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 var handled = false
                 var bang0 = anytype
                 bang0 = hasOwn(rubyGlobals, "!") ? rubyGlobals["!"] : null
+                var savedDepth = coreDepth
                 try {
                     box.v = tryT()
                 } catch (e) {
                     scopes = savedChain.slice()
+                    coreDepth = savedDepth
                     if (!excIsUser(e)) { throw e }
                     var hit = null
                     for (var k = 0; k < clauses.length && hit == null; k++) {
@@ -12019,10 +12030,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var altT = items[1]
         return function() {
             var savedChain = scopes.slice()
+            var savedDepth = coreDepth
             try {
                 return mainT()
             } catch (e) {
                 scopes = savedChain.slice()
+                coreDepth = savedDepth
                 if (!excIsUser(e)) { throw e }
                 var bang0 = anytype
                 bang0 = hasOwn(rubyGlobals, "!") ? rubyGlobals["!"] : null
@@ -12370,6 +12383,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // NotImplementedError.
     hostGlobals["ScriptError"] = mkBuiltinClass("ScriptError", excBase)
     hostGlobals["NotImplementedError"] = mkBuiltinClass("NotImplementedError", hostGlobals["ScriptError"])
+    // SystemStackError < Exception: a call nested past the stack, which a bare
+    // `rescue' does not catch. How deep MRI gets depends on its VM stack; this
+    // limit is ours. Twin of the js_rt_deep hook the compiler emits.
+    hostGlobals["SystemStackError"] = mkBuiltinClass("SystemStackError", excBase)
+    coreDepthMax = 10000
+    coreDeepHook = function() { raiseErr("SystemStackError", "stack level too deep") }
     hostGlobals["NoMethodError"] = mkBuiltinClass("NoMethodError", hostGlobals["NameError"])
     hostGlobals["KeyError"] = mkBuiltinClass("KeyError", hostGlobals["IndexError"])
     hostGlobals["StopIteration"] = mkBuiltinClass("StopIteration", hostGlobals["IndexError"])

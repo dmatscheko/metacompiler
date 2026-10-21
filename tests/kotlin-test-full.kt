@@ -3363,6 +3363,27 @@ fun sec75() {
     check("sx25", (object : XI75, XBase75() {}).seed == 2)
 }
 
+// ===== SECTION 120: unbounded recursion =====
+// A call nested past the stack is the JVM's java.lang.StackOverflowError, an
+// Error with a null message that `catch (e: Exception)` does not take, and the
+// depth a caught one unwound is given back (java 24.0.2 settles the JVM side).
+fun s120rec(n: Int): Int = s120rec(n + 1) + 1
+fun s120deep(n: Int): Int = if (n == 0) 0 else 1 + s120deep(n - 1)
+class S120C { fun m(n: Int): Int = m(n + 1) }
+fun s120() {
+    var got = ""
+    for (i in 0 until 2) {
+        try { s120rec(0) } catch (e: Exception) { got += "E" } catch (e: StackOverflowError) { got += "" + e + "/" + e.message + ";" }
+    }
+    check("soe1", got == "java.lang.StackOverflowError/null;java.lang.StackOverflowError/null;")
+    var how = ""
+    try { S120C().m(0) } catch (e: Error) { how = "" + e }
+    var g: ((Int) -> Int)? = null
+    g = { n -> g!!(n + 1) }
+    try { g(0) } catch (e: Throwable) { how = how + "|" + e }
+    check("soe2", how == "java.lang.StackOverflowError|java.lang.StackOverflowError" && s120deep(100) == 100)
+}
+
 // ===== END SECTIONS =====
 
 // ===== SECTION 76: the IMPLICIT RECEIVER, and WHICH read answers it =====
@@ -5566,6 +5587,7 @@ fun main() {
     sec113() // SECTION-CALL 113
     sec114() // SECTION-CALL 114
     sec115() // SECTION-CALL 115
+    s120() // SECTION-CALL 120
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

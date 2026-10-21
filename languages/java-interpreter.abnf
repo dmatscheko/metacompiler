@@ -3177,6 +3177,11 @@ HasStatic   = :script(~~
     // A null reference used as an object or unboxed (JLS 15.12.4.4, 5.1.8): a
     // NullPointerException with a null message, the compiled halves' js_jvnpe.
     function jNpe() { jThrowExc("NullPointerException", null) }
+    // A call nested past the JVM's stack is a StackOverflowError with a null
+    // message. How deep the JVM gets depends on its stack size and the frames'
+    // sizes; this limit is ours. Twin of the js_rt_deep hook the compiler emits.
+    coreDepthMax = 10000
+    coreDeepHook = function() { jThrowExc("StackOverflowError", null) }
     // A condition: a null Boolean unboxes to an NPE.
     // `throw e` with e null throws a NullPointerException instead (JLS 14.18).
     function jThrowStmt(t) {
