@@ -557,6 +557,98 @@ s62() {
   um[p]=2
   check sa17 "${ua[*]} ${#ua[@]} ${um[p]} ${#um[@]}" "x z 2 2 1"
 }
+# ===== SECTION 63: mapfile, element attributes, unset 'p[1]', ${!a[k]} =====
+# mapfile / readarray store the records of standard input in an indexed array; -i, -u and
+# -l apply to every element an array stores as to a scalar; `unset 'p[1]'` on a scalar is
+# an error; ${!a[k]} and ${!a[@] OP} are indirections through the element(s), and one that
+# lands on no name is an expansion error. Every expected value is bash 5.3's.
+s63m() { local m=${1#bash: }; m=${m#*line [0-9]*: }; printf '%s' "${m%%$'\n'*}"; }
+s63c() { r63="$r63<$1:$2>"; }
+s63() {
+  local -a m=() n=(1 2 3 4)
+  local o r x
+  mapfile -t m <<< "a b
+c
+
+d"
+  check mf1 "${#m[@]}|${m[*]}|[${m[2]}]" "4|a b c  d|[]"
+  mapfile m <<< "x"
+  check mf2 "${#m[@]} ${#m[0]}" "1 2"
+  mapfile -t -O 2 -n 1 n <<< "X
+Y"
+  check mf3 "${n[*]}" "1 2 X 4"
+  readarray -t -s 1 -d : m <<< "p:q:r"
+  check mf4 "${#m[@]}|${m[0]}|${m[1]}" $'2|q|r\n'
+  r63=""
+  mapfile -tc 2 -C s63c m <<< "a
+b
+c
+d
+e"
+  check mf5 "$r63 ${m[*]}" "<1:b><3:d> a b c d e"
+  x=5
+  mapfile -t -O 1 x <<< "w"
+  check mf6 "${x[*]}|${#x[@]}" "5 w|2"
+  x=5
+  mapfile -t x < /dev/null
+  check mf7 "${#x[@]}|${x-unset}" "0|unset"
+  mapfile -t <<< "M"
+  check mf8 "${MAPFILE[*]}" "M"
+  o=$( { mapfile -t -n x m <<< "q"; } 2>&1 ); r=$?
+  check mf9 "$r $(s63m "$o")" "1 mapfile: x: invalid line count"
+  o=$( { readarray -q; } 2>&1 ); r=$?
+  check mf10 "$r $(s63m "$o")" "2 readarray: -q: invalid option"
+  o=$( { mapfile -t 1x <<< "q"; } 2>&1 ); r=$?
+  check mf11 "$r $(s63m "$o")" "1 mapfile: \`1x': not a valid identifier"
+  # --- -i, -u and -l on the elements of an array
+  local -i ni=5
+  ni[1]=3+4
+  ni[2]+=2
+  ni+=(2*3)
+  local -l lo=ABC
+  lo[1]=XY
+  lo+=(Mn)
+  local -u up=(ab)
+  up[0]+=cd
+  up[2]=ef
+  check ea1 "${ni[*]}|${lo[*]}|${up[*]}" "5 7 2 6|abc xy mn|ABCD EF"
+  local -ai ai=(1+1 2*3)
+  ai=7*2
+  ai+=1
+  local -Ai am=([k]=1+1)
+  am[j]=2*4
+  am+=([h]=3+3)
+  check ea2 "${ai[*]}|${am[k]} ${am[j]} ${am[h]}" "15 6|2 8 6"
+  local -ai ar
+  read -a ar <<< "3+3 4"
+  local -ua mu
+  mapfile -t mu <<< "x
+y"
+  check ea3 "${ar[*]}|${mu[*]}|${up[3]:=gh} ${up[*]}" "6 4|X Y|GH ABCD EF GH"
+  o=$( local -ai e=(1 2); { e=(5 x+ 7); echo never; } 2>/dev/null ); r=$?
+  check ea4 "$r[$o]" "1[]"
+  # --- unset of an element of a scalar
+  local p=ab q=cd w
+  unset 'p[1]' 2>/dev/null; r=$?
+  unset 'q[0]' 'nosuch[3]'
+  check us1 "$r|$p|$?|${q-unset}" "1|ab|0|unset"
+  unset 'p[@]' 2>/dev/null; r=$?
+  unset 'w[2]' 2>/dev/null
+  check us2 "$r|$?|$p" "1|1|ab"
+  o=$( { unset 'p[-1]'; } 2>&1 )
+  check us3 "$(s63m "$o")" "unset: p: not an array variable"
+  # --- indirection through an element
+  local hv=hello wv=world
+  local -a ia=(hv wv) one=(hv)
+  check in1 "${!ia[0]}|${!ia[1]^^}|${!ia[1]:1:3}|${!one[@]:1}|${!one[*]#h}|${!ia[*]}" "hello|WORLD|orl|ello|ello|0 1"
+  check in2 "${!ia[5]:-dflt}|${!ia[7]-d2}" "dflt|d2"
+  o=$( { echo "${!ia[@]:0:3}"; echo never; } 2>&1 ); r=$?
+  check in3 "$r $(s63m "$o")" "1 hv wv: invalid variable name"
+  o=$( { unset nsr; echo "${!nsr}"; echo never; } 2>&1 ); r=$?
+  check in4 "$r $(s63m "$o")" "1 nsr: invalid indirect expansion"
+  o=$( { x=''; echo "${!x:-q}"; echo never; } 2>&1 ); r=$?
+  check in5 "$r $(s63m "$o")" "1 : invalid variable name"
+}
 # ===== END SECTIONS =====
 
 s47   # SECTION-CALL 47
@@ -574,5 +666,6 @@ s58   # SECTION-CALL 58
 s59   # SECTION-CALL 59
 s60   # SECTION-CALL 60
 s62   # SECTION-CALL 62
+s63   # SECTION-CALL 63
 echo "full: $checks checks, $fails failures"
 exit $fails

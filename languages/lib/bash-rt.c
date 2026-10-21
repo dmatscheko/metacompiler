@@ -199,6 +199,8 @@ int rt_arr_set(char *nm, char *k, char *v);
 char *rt_arr_get(char *nm, char *k);
 int rt_arr_has(char *nm, char *k);
 int rt_arr_del(char *nm, char *k);
+int rt_arr_unset(char *nm, char *sub);
+int rt_berr(char *what, char *name, char *msg);
 int rt_arr_count(char *nm);
 int rt_arr_any(char *nm);
 char *rt_arr_list(char *nm, char *sep, int star, int keys);
@@ -236,7 +238,9 @@ int rt_arr_smark(char *nm);
 int rt_arr_smarked(char *nm);
 char *rt_finlist(char *v);
 int rt_isfin(char *v);
-int rt_arr_append(char *nm, char *f);
+char *rt_attrv(char *old, char *v, int at);
+int rt_mf_next(void);
+int rt_isname(char *t);
 char *rt_slicefields(char *f, int off, int n, char *sep, int star);
 char *rt_globescape(char *s);
 char *rt_catfields(char *a, char *b);
@@ -986,6 +990,25 @@ char *rt_pcheck(char *v, int bad, char *name, char *msg)
         abort_flag = 1;
     }
     return v;
+}
+
+/* "bash: WHAT: NAME: MSG" on the standard error channel; an empty WHAT is left
+ * out. */
+int rt_berr(char *what, char *name, char *msg)
+{
+    int saved = sink_out;
+    sink_out = sink_err;
+    rt_prints("bash: ");
+    if (what[0] != 0) {
+        rt_prints(what);
+        rt_prints(": ");
+    }
+    rt_prints(name);
+    rt_prints(": ");
+    rt_prints(msg);
+    rt_prints("\n");
+    sink_out = saved;
+    return 0;
 }
 
 /* ${v:off:len} with a negative len that ends before off: bash's "substring
@@ -2755,11 +2778,12 @@ int rt_haschar(char *s, int ch) {
 
 /* rt_read_line: the next line of stdin_buf (without its newline), advancing
  * stdin_pos. Returns a null-marked empty string and leaves the position at the
- * end when there is nothing left; read_eof answers whether that happened. */
+ * end when there is nothing left - a null stdin_buf, when nothing was
+ * redirected, holds nothing; read_eof answers whether that happened. */
 char *rt_read_line(int u) {
     char *buf = stdin_buf;
     int pos = stdin_pos;
-    int len = rt_strlen(buf);
+    int len = buf != 0 ? rt_strlen(buf) : 0;
     read_eof = 0;
     if (pos >= len) {
         read_eof = 1;
@@ -4304,18 +4328,38 @@ char *rt_arr_key(char *nm, char *sub) {
     return rt_arr_ikey(nm, rt_arith(sub));
 }
 
-/* One [k]=v of an INDEXED array literal. The answer is the index a following bare
- * word takes, one past k - b=([3]=c [1]=a b) puts b at 2 - or `next` unchanged
- * when k was a bad subscript. */
-long rt_arr_litkey(char *nm, char *k, char *v, long next) {
+/* The value an element store keeps under its array's attributes `at` (1 -i,
+ * 2 -u, 4 -l; bash 5.3 applies them to every element as to a scalar): -i
+ * evaluates v as arithmetic and, when old is not 0, adds old's value
+ * (`n[1]+=EXPR`); -u / -l map the case of old and v appended. An arithmetic
+ * error is left in arith_err for the caller, which then stores nothing. Twin of
+ * elemVal in bash-interpreter.abnf. */
+char *rt_attrv(char *old, char *v, int at) {
+    long n;
+    if ((at & 1) != 0) {
+        n = rt_arith(v);
+        if (old != 0) n = rt_arith(old) + n;
+        return rt_int2str(n);
+    }
+    if (old != 0) v = rt_strcat(old, v);
+    if ((at & 2) != 0) return rt_case(v, 1, empty);
+    if ((at & 4) != 0) return rt_case(v, 3, empty);
+    return v;
+}
+
+/* One [k]=v of an INDEXED array literal, v under the attributes `at`. The answer
+ * is the index a following bare word takes, one past k - b=([3]=c [1]=a b) puts b
+ * at 2 - or `next` unchanged when k was a bad subscript or v an arithmetic
+ * error. */
+long rt_arr_litkey(char *nm, char *k, char *v, long next, int at) {
     char *key = rt_arr_key(nm, k);
     if (key == &bad_key[0]) return next;
+    if (at != 0) v = rt_attrv(0, v, at);
+    if (arith_err != 0) return next;
     rt_arr_iset(nm, key, v);
     return rt_str2int(key) + 1;
 }
 
-/* The fields of a bare word of an INDEXED array literal, stored from index next
- * on; the answer is the index after the last one. */
 /* The fields `let` word arguments expanded to, each its own expression, in order; the
  * first error stops the command. With `need`, the list is every argument of the command
  * and no field at all is bash's "expression expected".
@@ -4332,14 +4376,209 @@ long rt_letfields(char *list, int need)
     return v;
 }
 
-long rt_arr_litwords(char *nm, char *f, long next) {
+/* The fields of a bare word of an INDEXED array literal, each under the
+ * attributes `at`, stored from index next on; the answer is the index after the
+ * last one. An arithmetic error stops the store there. */
+long rt_arr_litwords(char *nm, char *f, long next, int at) {
     int p = rt_fpos(f);
+    char *v;
     while (p >= 0) {
-        rt_arr_iset(nm, rt_int2str(next), rt_fat(f, p));
+        v = rt_fat(f, p);
+        if (at != 0) v = rt_attrv(0, v, at);
+        if (arith_err != 0) return next;
+        rt_arr_iset(nm, rt_int2str(next), v);
         next = next + 1;
         p = rt_fnext(f, p);
     }
     return next;
+}
+
+/* ---- mapfile / readarray ---------------------------------------------------
+ * rt_mf_begin checks the option values (each 0 when not given) and the name and
+ * prepares the array; then rt_mf_next reads one record of standard input into
+ * mf_line and rt_mf_store stores it, the emitter running a -C callback between
+ * the two when rt_mf_due says so. Twin of mapfileBuiltin in
+ * bash-interpreter.abnf, which documents the builtin. */
+int mf_dlm;           /* the delimiter byte; 0 (-d '') never occurs in stdin_buf */
+int mf_trim;          /* -t */
+long mf_left;         /* records still to store, -1 for every one */
+long mf_idx;          /* the index the next record goes to */
+long mf_got;          /* records read so far */
+long mf_q;            /* the callback quantum */
+int mf_at;            /* the array's attributes (rt_attrv) */
+char *mf_nm;
+char *mf_line;
+char *mf_pfx;         /* "mapfile: " or "readarray: ", for an arithmetic error */
+
+/* An option value as bash's legal_number reads it - blanks, an optional sign,
+ * decimal digits, blanks - in *out; 0 when it is not one. Twin of mfNum. */
+int rt_mf_num(char *s, long *out)
+{
+    int i = 0;
+    int neg = 0;
+    int d0;
+    long n = 0;
+    while (s[i] == 32 || s[i] == 9 || s[i] == 10) i = i + 1;
+    if (s[i] == 45 || s[i] == 43) {
+        neg = s[i] == 45 ? 1 : 0;
+        i = i + 1;
+    }
+    d0 = i;
+    while (s[i] >= 48 && s[i] <= 57) {
+        n = n * 10 + (long)(s[i] - 48);
+        i = i + 1;
+    }
+    if (i == d0) return 0;
+    while (s[i] == 32 || s[i] == 9 || s[i] == 10) i = i + 1;
+    if (s[i] != 0) return 0;
+    *out = neg != 0 ? 0 - n : n;
+    return 1;
+}
+
+/* An unknown option, or (missing) one without its value: bash's two lines and
+ * status 2. Twin of mfUsage. */
+int rt_mf_usage(char *who, char *opt, int missing)
+{
+    int saved;
+    rt_berr(who, opt, missing != 0 ? "option requires an argument" : "invalid option");
+    saved = sink_out;
+    sink_out = sink_err;
+    rt_prints(who);
+    rt_prints(": usage: ");
+    rt_prints(who);
+    rt_prints(" [-d delim] [-n count] [-O origin] [-s count] [-t] [-u fd] [-C callback] [-c quantum] [array]\n");
+    sink_out = saved;
+    return 2;
+}
+
+/* The status of a refused mapfile (1), or -1 when it goes ahead: then the array
+ * is emptied (and a scalar of the name unset) unless an origin was given, in
+ * which case a scalar becomes element 0, and the skipped records are read. */
+int rt_mf_begin(char *who, char *nm, char *dlm, char *cnt, char *org, char *skp, char *fd, char *qnt, int trim, int at)
+{
+    long n = 0;
+    long o = 0;
+    long sk = 0;
+    long q = 5000;
+    long u = 0;
+    int id;
+    if (fd != 0 && rt_mf_num(fd, &u) == 0) {
+        rt_berr(who, fd, "invalid file descriptor specification");
+        return 1;
+    }
+    if (u != 0) {
+        rt_berr(who, fd, "invalid file descriptor: Bad file descriptor");
+        return 1;
+    }
+    if (cnt != 0 && (rt_mf_num(cnt, &n) == 0 || n < 0)) {
+        rt_berr(who, cnt, "invalid line count");
+        return 1;
+    }
+    if (org != 0 && (rt_mf_num(org, &o) == 0 || o < 0)) {
+        rt_berr(who, org, "invalid array origin");
+        return 1;
+    }
+    if (skp != 0 && (rt_mf_num(skp, &sk) == 0 || sk < 0)) {
+        rt_berr(who, skp, "invalid line count");
+        return 1;
+    }
+    if (qnt != 0 && (rt_mf_num(qnt, &q) == 0 || q <= 0)) {
+        rt_berr(who, qnt, "invalid callback quantum");
+        return 1;
+    }
+    if (rt_isname(nm) == 0) {
+        rt_berr(who, rt_strcat(rt_strcat("`", nm), "'"), "not a valid identifier");
+        return 1;
+    }
+    if (rt_isassoc(nm) != 0) {
+        rt_berr(who, nm, "not an indexed array");
+        return 1;
+    }
+    id = rt_varslot(nm);
+    if (org == 0) {
+        rt_arr_clear(nm);
+        if (id >= 0) gvars[id] = &unset_marker[0];
+    } else if (id >= 0) {
+        rt_arr_adopt(nm, id);
+    }
+    rt_arr_mark(nm);
+    mf_nm = nm;
+    mf_dlm = dlm != 0 ? (int)(unsigned char)dlm[0] : 10;
+    mf_trim = trim;
+    mf_at = at;
+    mf_q = q;
+    mf_pfx = rt_streq(who, "readarray") != 0 ? "readarray: " : "mapfile: ";
+    mf_left = -1;
+    while (sk > 0 && rt_mf_next() != 0) sk = sk - 1;
+    mf_left = n > 0 ? n : -1;
+    mf_idx = o;
+    mf_got = 0;
+    return -1;
+}
+
+/* The next record into mf_line: 1, or 0 at the end of standard input (a null
+ * stdin_buf when nothing was redirected) or once -n records were read. */
+int rt_mf_next(void)
+{
+    char *buf = stdin_buf;
+    int pos = stdin_pos;
+    int k = pos;
+    if (mf_left == 0 || buf == 0 || buf[pos] == 0) return 0;
+    while (buf[k] != 0 && (int)(unsigned char)buf[k] != mf_dlm) k = k + 1;
+    if (buf[k] != 0) {
+        mf_line = rt_substr(buf, pos, mf_trim != 0 ? k - pos : k + 1 - pos);
+        k = k + 1;
+    } else {
+        mf_line = rt_substr(buf, pos, k - pos);
+    }
+    stdin_pos = k;
+    if (mf_left > 0) mf_left = mf_left - 1;
+    mf_got = mf_got + 1;
+    return 1;
+}
+
+/* A shell NAME: a letter or underscore, then letters, digits and underscores.
+ * Twin of isIdentText in bash-interpreter.abnf. */
+int rt_isname(char *t)
+{
+    int i = 0;
+    int c;
+    if (t[0] == 0) return 0;
+    while (t[i] != 0) {
+        c = (int)(unsigned char)t[i];
+        if (!((c >= 97 && c <= 122) || (c >= 65 && c <= 90) || c == 95 || (i > 0 && c >= 48 && c <= 57))) return 0;
+        i = i + 1;
+    }
+    return 1;
+}
+
+/* The callback's two arguments, the index and the record, as a field list. */
+char *rt_mf_args(void)
+{
+    return rt_fadd(rt_fput(list_nil, rt_int2str(mf_idx)), mf_line);
+}
+
+/* 1 when the callback runs before this record is stored: every mf_q-th one. */
+int rt_mf_due(void)
+{
+    return mf_got % mf_q == 0 ? 1 : 0;
+}
+
+/* mf_line as element mf_idx under the array's attributes; an arithmetic error
+ * (reported as mapfile's) stores nothing and is left in arith_err. */
+int rt_mf_store(void)
+{
+    char *v = mf_line;
+    char *sv = ar_pfx_s;
+    if (mf_at != 0) {
+        ar_pfx_s = mf_pfx;
+        v = rt_attrv(0, v, mf_at);
+        ar_pfx_s = sv;
+    }
+    if (arith_err != 0) return 0;
+    rt_arr_iset(mf_nm, rt_int2str(mf_idx), v);
+    mf_idx = mf_idx + 1;
+    return 0;
 }
 
 /* i8* rt_arr_get(i8* nm, i8* k): the value, or "" when absent. */
@@ -4359,17 +4598,13 @@ int rt_arr_has(char *nm, char *k) {
     return rt_ar_pos(r, k) >= 0 ? 1 : 0;
 }
 
-/* i32 rt_arr_del(i8* nm, i8* k): remove one row; the array stays set
- * (rt_arr_mark). On a name with no row, key 0 is the scalar, which is unset:
- * `p=ab; unset 'p[0]'` leaves p unset in bash 5.3. */
+/* rt_arr_del(nm, k): remove the row of key k, if there is one; the array stays
+ * set (rt_arr_mark). */
 int rt_arr_del(char *nm, char *k) {
     int r = rt_ar_find(nm);
     int at;
     int n;
-    if (r < 0 || ar_n[r] == 0) {
-        if (rt_streq(k, "0") != 0) rt_setvar_byname(nm, &unset_marker[0]);
-        return 0;
-    }
+    if (r < 0 || ar_n[r] == 0) return 0;
     at = rt_ar_pos(r, k);
     if (at < 0) return 0;
     n = ar_n[r] - 1;
@@ -4382,6 +4617,26 @@ int rt_arr_del(char *nm, char *k) {
     ar_mk[r] = ar_mk[r] | 1;
     rt_ar_khdrop(r);
     return 0;
+}
+
+/* `unset 'NAME[SUB]'`, SUB the subscript's text; the answer is the status. On a
+ * variable that is no array - set, or declared without a value - subscript 0
+ * unsets it and any other, @ and * and a negative index included, is bash 5.3's
+ * "not an array variable", status 1: `p=ab; unset 'p[1]'` keeps p. A name that is
+ * no variable at all is left alone. Twin of unsetElem in bash-interpreter.abnf. */
+int rt_arr_unset(char *nm, char *sub) {
+    int r = rt_ar_find(nm);
+    if ((r >= 0 && (ar_n[r] > 0 || (ar_mk[r] & 3) != 0)) || rt_isassoc(nm) != 0) {
+        rt_arr_del(nm, rt_arr_key(nm, sub));
+        return 0;
+    }
+    if (rt_getvar_byname(nm) == &unset_marker[0] && rt_arr_smarked(nm) == 0) return 0;
+    if (rt_streq(sub, "@") == 0 && rt_streq(sub, "*") == 0 && rt_arith(sub) == 0) {
+        rt_setvar_byname(nm, &unset_marker[0]);
+        return 0;
+    }
+    rt_berr("unset", nm, "not an array variable");
+    return 1;
 }
 
 /* 1 when the array has a row at all: the test every variable read makes. */
@@ -5125,17 +5380,6 @@ int rt_declp(char *nm, char *flag, int assoc) {
     rt_prints(" ");
     rt_prints(rt_arrassign(nm, assoc));
     rt_prints("\n");
-    return 0;
-}
-
-/* i32 rt_arr_append(i8* nm, i8* fields): append every field with the next
- * numeric index. */
-int rt_arr_append(char *nm, char *f) {
-    int p = rt_fpos(f);
-    while (p >= 0) {
-        rt_arr_set(nm, rt_int2str(rt_arr_nextidx(nm)), rt_fat(f, p));
-        p = rt_fnext(f, p);
-    }
     return 0;
 }
 
@@ -5919,8 +6163,70 @@ int rt_setvar_byname(char *n, char *v)
     return 0;
 }
 
+/* A name an indirection may land on: a NAME, NAME[SUB], a positional parameter
+ * or one of the special parameters. Twin of isRefName in bash-interpreter.abnf. */
+int rt_isref(char *v)
+{
+    int len = rt_strlen(v);
+    int i = 0;
+    int ok;
+    char *nm;
+    if (len == 1 && rt_haschar("@*#?-$!", (int)(unsigned char)v[0]) != 0) return 1;
+    if (rt_isname(v) != 0) return 1;
+    ok = len > 0 ? 1 : 0;
+    while (i < len) {
+        if (v[i] < 48 || v[i] > 57) ok = 0;
+        i = i + 1;
+    }
+    if (ok != 0) return 1;
+    if (len < 4 || v[len - 1] != 93) return 0;
+    i = 0;
+    while (i < len && v[i] != 91) i = i + 1;
+    if (i == 0 || i >= len - 2) return 0;
+    nm = rt_substr(v, 0, i);
+    return rt_isname(nm);
+}
+
+/* The value an indirection through NAME[SUB] starts from: the element of key k
+ * (kind 0), or the elements joined (kind 1 for @, by a space, 2 for *, by IFS's
+ * first character); the unset marker for an unset element or no element; 0 when
+ * NAME is no variable at all. Twin of the subscript arm of indName in
+ * bash-interpreter.abnf. */
+char *rt_indsub(char *nm, char *k, int kind)
+{
+    if (rt_arr_marks(nm) == 0 && rt_arr_any(nm) == 0 && rt_getvar_byname(nm) == &unset_marker[0]) return 0;
+    if (kind != 0) {
+        if (rt_sc_count(nm) == 0) return &unset_marker[0];
+        return rt_sc_list(nm, kind == 1 ? " " : rt_ifsfirst(), 1, 0);
+    }
+    if (rt_sc_has(nm, k) == 0) return &unset_marker[0];
+    return rt_sc_get(nm, k);
+}
+
+/* THE TARGET OF AN INDIRECTION ${!REF...}, REF being NAME (sub 0) or NAME[SUB],
+ * from REF's value v (rt_indsub's for NAME[SUB]): v itself when it names a
+ * variable (rt_isref), else bash 5.3's "v: invalid variable name", the empty
+ * value included. v == 0 - and, with strict, an unset v - is "REF: invalid
+ * indirect expansion". An error abandons the line, as an arithmetic error in an
+ * expansion does; the answer is then the unset marker, as it is for an unset
+ * target, which names no variable. Twin of indName in bash-interpreter.abnf. */
+char *rt_indname(char *nm, char *sub, char *v, int strict)
+{
+    if (v == 0 || (strict != 0 && v == &unset_marker[0])) {
+        rt_berr("", sub == 0 ? nm : rt_strcat(rt_strcat(rt_strcat(nm, "["), sub), "]"), "invalid indirect expansion");
+        arith_err = 1;
+        return &unset_marker[0];
+    }
+    if (v == &unset_marker[0]) return v;
+    if (rt_isref(v) != 0) return v;
+    rt_berr("", v, "invalid variable name");
+    arith_err = 1;
+    return &unset_marker[0];
+}
+
 /* `unset WORD` where the word came out of an expansion: NAME[SUB] removes the
- * element (the usual subscript rules), NAME the variable and its array. */
+ * element (rt_arr_unset), NAME the variable and its array. The answer is the
+ * status. */
 int rt_unset_name(char *n)
 {
     int len = rt_strlen(n);
@@ -5928,9 +6234,7 @@ int rt_unset_name(char *n)
     if (len > 2 && n[len - 1] == 93) {
         while (i < len && n[i] != 91) i = i + 1;
         if (i > 0 && i < len - 1) {
-            char *nm = rt_substr(n, 0, i);
-            rt_arr_del(nm, rt_arr_key(nm, rt_substr(n, i + 1, len - i - 2)));
-            return 0;
+            return rt_arr_unset(rt_substr(n, 0, i), rt_substr(n, i + 1, len - i - 2));
         }
     }
     rt_setvar_byname(n, &unset_marker[0]);

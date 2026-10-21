@@ -1470,6 +1470,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtEvalAssign = rtDecl("rt_eval_assign", false, [1])
     var rtGetByName = rtDecl("rt_getvar_byname", true, [1])
     var rtGetInd = rtDecl("rt_getvar_ind", true, [1])
+    // i8* rt_indsub(i8* nm, i8* k, i32 kind) / i8* rt_indname(i8* nm, i8* sub, i8* v, i32 strict):
+    // the variable an indirection lands on (bash-rt.c).
+    var rtIndSub = rtDecl("rt_indsub", true, [1, 1, 0])
+    var rtIndName = rtDecl("rt_indname", true, [1, 1, 1, 0])
 
     var funcs = {}        // user functions: "$"+name -> IR func (bashfn_NAME)
     var declaredFuncs = {}  // every name the program DEFINES somewhere (collected during the
@@ -1598,7 +1602,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtArrSet = rtDecl("rt_arr_set", false, [1, 1, 1])
     var rtArrGet = rtDecl("rt_arr_get", true, [1, 1])
     var rtArrHas = rtDecl("rt_arr_has", false, [1, 1])
-    var rtArrDel = rtDecl("rt_arr_del", false, [1, 1])
+    var rtArrUnset = rtDecl("rt_arr_unset", false, [1, 1])
     var rtArrAny = rtDecl("rt_arr_any", false, [1])
     var rtArrList = rtDecl("rt_arr_list", true, [1, 1, 0, 0])
     // The scalar-aware quartet, EXPANSION SITES ONLY - see languages/lib/bash-rt.c.
@@ -1630,8 +1634,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtUnsetName = rtDecl("rt_unset_name", false, [1])
     var rtIsAssoc = rtDecl("rt_isassoc", false, [1])
     var rtArrIkey = rtDecl("rt_arr_ikey", true, [1, 3])
-    var rtArrLitKey = rtDecl("rt_arr_litkey", 3, [1, 1, 1, 3])
-    var rtArrLitWords = rtDecl("rt_arr_litwords", 3, [1, 1, 3])
+    var rtArrLitKey = rtDecl("rt_arr_litkey", 3, [1, 1, 1, 3, 0])
+    var rtArrLitWords = rtDecl("rt_arr_litwords", 3, [1, 1, 3, 0])
+    // i8* rt_attrv(i8* old, i8* v, i32 at): an element's value under its array's attributes.
+    var rtAttrv = rtDecl("rt_attrv", true, [1, 1, 0])
+    // mapfile / readarray: see emitMapfile.
+    var rtMfUsage = rtDecl("rt_mf_usage", false, [1, 1, 0])
+    var rtMfBegin = rtDecl("rt_mf_begin", false, [1, 1, 1, 1, 1, 1, 1, 1, 0, 0])
+    var rtMfNext = rtDecl("rt_mf_next", false, [])
+    var rtMfDue = rtDecl("rt_mf_due", false, [])
+    var rtMfStore = rtDecl("rt_mf_store", false, [])
+    var rtMfArgs = rtDecl("rt_mf_args", true, [])
     var rtArrSlice = rtDecl("rt_arr_slice", true, [1, 3, 3, 0, 1, 0])
     var rtArrClear = rtDecl("rt_arr_clear", false, [1])
     var rtArrAdopt = rtDecl("rt_arr_adopt", false, [1, 0])
@@ -1639,7 +1652,6 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtArrDmark = rtDecl("rt_arr_dmark", false, [1])
     var rtArrSmark = rtDecl("rt_arr_smark", false, [1])
     var rtFinList = rtDecl("rt_finlist", true, [1])
-    var rtArrAppend = rtDecl("rt_arr_append", false, [1, 1])
     var rtSliceFields = rtDecl("rt_slicefields", true, [1, 0, 0, 1, 0])
     var rtGlobEsc = rtDecl("rt_globescape", true, [1])
     var rtRxEsc = rtDecl("rt_rxescape", true, [1])
@@ -1896,7 +1908,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return b.NewCall(rtShq, [v, isset])
         }
         // NAME[SUBSCRIPT]: the first word is the subscript, the rest belong to the operator.
-        if (hasIdx && words.length > 0) {
+        // ${!a[k] OP arg} is an indirection through a[k] (indIdxW, the scalar arms below);
+        // only the bare ${!a[@]} / ${!a[*]} list the keys.
+        var indIdxW = null
+        if (hasIdx && words.length > 0 && indp && !bare) {
+            indIdxW = words[0]
+            words = words.slice(1)
+            wordT = (words.length > 0) ? words[words.length - 1] : null
+        }
+        if (hasIdx && words.length > 0 && indIdxW == null) {
             var idxW = words[0]
             words = words.slice(1)
             wordT = (words.length > 0) ? words[words.length - 1] : null
@@ -1906,15 +1926,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // indexed array's an arithmetic expression (rt_arr_key; a canonical literal index
             // needs no evaluation). Computed ONCE per expansion, so `${a[i++]}` steps i once.
             var subOf = function(b) { return subKeyOf(b, name, idxW) }
-            // 0 = a plain key, 1 = "@" (fields), 2 = "*" (joined); known here for a literal
-            // subscript, -1 when only the run time knows.
-            var kindC = (idxW.c == undefined) ? -1 : ((idxW.c == "@") ? 1 : ((idxW.c == "*") ? 2 : 0))
-            var kindOf = function(b, sub) {
-                if (kindC >= 0) { return llvm.constant.NewInt(i32, kindC) }
-                var isAt = b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtStreq, [sub, gepStr(b, "@")]), zero)
-                var isStar = b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtStreq, [sub, gepStr(b, "*")]), zero)
-                return b.NewSelect(isAt, one, b.NewSelect(isStar, llvm.constant.NewInt(i32, 2), zero))
-            }
+            var kindC = subKindC(idxW)
+            var kindOf = function(b, sub) { return subKind(b, kindC, sub) }
             if (pe == "len") {
                 return {c: undefined, fn: function(b) {
                     var rs = subOf(b); b = rs.b
@@ -1925,13 +1938,20 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         i2s(b, b.NewCall(rtCharLen, b.NewCall(rtScGet, [nmOf(b), rs.k]))))}
                 }}
             }
+            // ${!a[@]} / ${!a[*]} are the keys; ${!a[k]} is an indirection through a[k].
             if (pe == "ind") {
                 return {f: true, c: undefined, fn: function(b) {
                     var rs = subOf(b); b = rs.b
                     var k = kindOf(b, rs.v)
-                    var star = b.NewICmp(llvm.enum.IPredEQ, k, llvm.constant.NewInt(i32, 2))
-                    return {b: b, v: b.NewCall(rtScList, [nmOf(b), starSepSp(b),
-                        b.NewZExt(star, i32), one])}
+                    var keysB = curF.NewBlock(""), indB = curF.NewBlock(""), jB = curF.NewBlock("")
+                    b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, k, zero), keysB, indB)
+                    var star = keysB.NewICmp(llvm.enum.IPredEQ, k, llvm.constant.NewInt(i32, 2))
+                    var keys = keysB.NewCall(rtScList, [nmOf(keysB), starSepSp(keysB), keysB.NewZExt(star, i32), one])
+                    keysB.NewBr(jB)
+                    var tg = indB.NewCall(rtIndName, [nmOf(indB), rs.v, indB.NewCall(rtIndSub, [nmOf(indB), rs.k, zero]), zero])
+                    var iv = indB.NewCall(rtGetInd, tg)
+                    indB.NewBr(jB)
+                    return {b: jB, v: jB.NewPhi([llvm.ir.NewIncoming(keys, keysB), llvm.ir.NewIncoming(iv, indB)])}
                 }}
             }
             if (pe == "substr") {
@@ -2059,7 +2079,20 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         // An unset or empty [@] list stays that empty list: "${a[@]+x}" is no word.
                         pickedL = b.NewSelect(blankL, b.NewSelect(star, emptyPtr(b), nilList(b)), de)
                     }
-                    if (idxO == "=") { b.NewCall(isAssoc ? rtArrSet : rtArrIset, [nmOf(b), kk, pickedE]) }
+                    if (idxO == "=") {
+                        // An assigned default is stored, and expands, under the array's
+                        // attributes: `declare -u d; echo "${d[0]:=xy}"` is XY.
+                        var eat = elemAttrs(name)
+                        if (eat != 0) {
+                            var atB = curF.NewBlock(""), atJ = curF.NewBlock("")
+                            b.NewCondBr(blankE, atB, atJ)
+                            var atV = atB.NewCall(rtAttrv, [nullStr, de, llvm.constant.NewInt(i32, eat)])
+                            atB.NewBr(atJ)
+                            pickedE = atJ.NewPhi([llvm.ir.NewIncoming(atV, atB), llvm.ir.NewIncoming(one1, b)])
+                            b = atJ
+                        }
+                        b.NewCall(isAssoc ? rtArrSet : rtArrIset, [nmOf(b), kk, pickedE])
+                    }
                     if (idxO == "?") {
                         var qmsg = gepStr(b, idxColon ? "parameter null or not set" : "parameter not set")
                         if (idxWordT != null) { qmsg = b.NewSelect(isEmptyStr(b, de), qmsg, de) }
@@ -2134,7 +2167,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // r='arr[@]' (or '@') makes the bare ${!r} a field list, hence f.
         if (pe == "ind") {
             return {f: true, c: undefined, fn: function(b) {
-                return {b: b, v: b.NewCall(rtGetInd, varString(b, name))}
+                return {b: b, v: b.NewCall(rtGetInd, b.NewCall(rtIndName, [gepStr(b, name), nullStr, varString(b, name), one]))}
             }}
         }
         // ${#v OP arg} is a parse-time-legal, run-time-illegal combination in bash:
@@ -2146,23 +2179,36 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return {b: b, v: emptyPtr(b)}
             }}
         }
-        // ${!ref OP arg}: the operator applies to the variable the indirection LANDED on, so
-        // every leaf below reads and writes through valOf/setOf instead of the fixed slot.
+        // ${!ref OP arg} and ${!a[k] OP arg}: the operator applies to the variable the
+        // indirection LANDED on (rt_indname), so every leaf below starts from targetOf - once
+        // per expansion - and reads and writes through valOf/setOf instead of the fixed slot.
         var indirect = indp
-        function valOf(b) {
-            if (indirect) { return b.NewCall(rtGetByName, varString(b, name)) }
+        var indKindC = (indIdxW != null) ? subKindC(indIdxW) : 0
+        function targetOf(b) {
+            if (!indirect) { return {b: b, v: null} }
+            if (indIdxW == null) {
+                return {b: b, v: b.NewCall(rtIndName, [gepStr(b, name), nullStr, varString(b, name), one])}
+            }
+            var rs = subKeyOf(b, name, indIdxW)
+            b = rs.b
+            var sv = b.NewCall(rtIndSub, [gepStr(b, name), rs.k, subKind(b, indKindC, rs.v)])
+            return {b: b, v: b.NewCall(rtIndName, [gepStr(b, name), rs.v, sv, zero])}
+        }
+        function valOf(b, tg) {
+            if (indirect) { return b.NewCall(rtGetByName, tg) }
             return varString(b, name)
         }
-        function setOf(b, v) {
-            if (indirect) { b.NewCall(rtSetByName, [varString(b, name), v]); return }
+        function setOf(b, tg, v) {
+            if (indirect) { b.NewCall(rtSetByName, [tg, v]); return }
             storeVar(b, name, v)
         }
         // The @-transforms (see applyXf above). The value is read ONCE and rt_isset asks whether
         // it is the unset marker, so `set -u` fires exactly as for a plain read.
         if (xf != "") {
             return {c: undefined, fn: function(b) {
-                var nmv = indirect ? varString(b, name) : gepStr(b, name)
-                var v0 = valOf(b)
+                var t0 = targetOf(b); b = t0.b
+                var nmv = indirect ? t0.v : gepStr(b, name)
+                var v0 = valOf(b, t0.v)
                 return {b: b, v: applyXf(b, v0, b.NewCall(rtIsset, v0), nmv)}
             }}
         }
@@ -2170,7 +2216,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var offT = ar32T(ariths[0])
             var lenT = (ariths.length > 1) ? ar32T(ariths[1]) : null
             return {c: undefined, fn: function(b) {
-                var v = valOf(b)
+                var t1 = targetOf(b); b = t1.b
+                var v = valOf(b, t1.v)
                 var ro = offT(b)
                 b = ro.b
                 // Offsets and lengths of ${v:off:len} are in CHARACTERS in bash, so the computation
@@ -2203,7 +2250,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (pe == "%%") { smode = 3 }
             var patW = (words.length > 0) ? words[0] : null
             return {c: undefined, fn: function(b) {
-                var v = valOf(b)
+                var t2 = targetOf(b); b = t2.b
+                var v = valOf(b, t2.v)
                 if (patW == null) { return {b: b, v: v} }
                 var rp = evalWord(b, patW)
                 b = rp.b
@@ -2219,7 +2267,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // operand; "" is the absent case.
             var cpW = (words.length > 0) ? words[0] : null
             return {c: undefined, fn: function(b) {
-                var cv = valOf(b)
+                var t3 = targetOf(b); b = t3.b
+                var cv = valOf(b, t3.v)
                 var cp = emptyPtr(b)
                 if (cpW != null) { var cr = evalWord(b, cpW); b = cr.b; cp = cr.v }
                 return {b: b, v: b.NewCall(rtCase, [cv, llvm.constant.NewInt(i32, cmode), cp])}
@@ -2232,7 +2281,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var pW = (words.length > 0) ? words[0] : null
             var rW = (words.length > 1) ? words[1] : null
             return {c: undefined, fn: function(b) {
-                var v = valOf(b)
+                var t4 = targetOf(b); b = t4.b
+                var v = valOf(b, t4.v)
                 if (pW == null) { return {b: b, v: v} }
                 var rp2 = evalWord(b, pW)
                 b = rp2.b
@@ -2242,11 +2292,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }}
         }
         if (op == "" && name == "*" && !indirect) { return {c: undefined, f: true, fn: function(b) { return {b: b, v: starParams(b)} }} }
-        if (op == "") { return {c: undefined, f: (name == "@"), fn: function(b) { return {b: b, v: valOf(b)} }} }
+        if (op == "") { return {c: undefined, f: (name == "@"), fn: function(b) { var t5 = targetOf(b); return {b: t5.b, v: valOf(t5.b, t5.v)} }} }
         var colon = (op.charAt(0) == ":")
         var o = colon ? op.slice(1) : op
         return {c: undefined, f: (o == "-" || o == "+"), fn: function(b) {
-            var v = valOf(b)
+            var t6 = targetOf(b); b = t6.b
+            var v = valOf(b, t6.v)
             // ":" forms treat "" like unset; the bare forms only test set-ness, which the
             // unset marker (a distinct empty string) records.
             var blank = colon ? isEmptyStr(b, v)
@@ -2264,7 +2315,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return {b: b, v: b.NewCall(rtPcheck, [v, b.NewZExt(blank, i32), gepStr(b, name), msg])}
             }
             var picked = b.NewSelect(blank, d, v)
-            if (o == "=") { setOf(b, picked) }
+            if (o == "=") { setOf(b, t6.v, picked) }
             return {b: b, v: picked}
         }}
     }
@@ -2962,23 +3013,28 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // takes an empty value.
         if (assoc) {
             var pendKey = null
+            var abox = {b: b}
             for (i = 0; i < vals.length; i++) {
-                if (vals[i].k != null) { b.NewCall(rtArrSet, [nm, vals[i].k, vals[i].v]); continue }
-                var w = wordJoin(b, vals[i].v)
-                if (pendKey == null) { pendKey = w } else { b.NewCall(rtArrSet, [nm, pendKey, w]); pendKey = null }
+                if (vals[i].k != null) { emitElemSet(abox, name, nm, vals[i].k, null, vals[i].v, true); continue }
+                var w = wordJoin(abox.b, vals[i].v)
+                if (pendKey == null) { pendKey = w } else { emitElemSet(abox, name, nm, pendKey, null, w, true); pendKey = null }
             }
-            if (pendKey != null) { b.NewCall(rtArrSet, [nm, pendKey, emptyPtr(b)]) }
-            return b
+            if (pendKey != null) { emitElemSet(abox, name, nm, pendKey, null, emptyPtr(abox.b), true) }
+            return abox.b
         }
         // In an INDEXED literal a bare word takes the index after the element before it
         // (b=([3]=c [1]=a b) is 1 2 3 = a b c), so the next index is threaded through
         // rt_arr_litkey / rt_arr_litwords. Twin of applyArrayLit in bash-interpreter.abnf.
         var next = append ? b.NewCall(rtArrNext, nm) : zero64
+        var at = elemAttrs(name)
+        var atC = llvm.constant.NewInt(i32, at)
         for (i = 0; i < vals.length; i++) {
-            if (vals[i].k != null) { next = b.NewCall(rtArrLitKey, [nm, vals[i].k, vals[i].v, next]) }
-            else { next = b.NewCall(rtArrLitWords, [nm, vals[i].v, next]) }
+            if (vals[i].k != null) { next = b.NewCall(rtArrLitKey, [nm, vals[i].k, vals[i].v, next, atC]) }
+            else { next = b.NewCall(rtArrLitWords, [nm, vals[i].v, next, atC]) }
         }
-        return b
+        // -i stops the literal at an element that is an arithmetic error, which then
+        // abandons the line.
+        return (at & 1) != 0 ? emitAbortCheck(b) : b
     }
     // An expansion error in a value abandons the command before anything is stored:
     // `k=$(( 1/0 ))` leaves k as it was. Twin of runAssign in bash-interpreter.abnf.
@@ -2999,10 +3055,19 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b = rk.b
             b = emitAbortCheck(b)
             if (!assoc) { b.NewCall(rtArrAdopt, [nm, llvm.constant.NewInt(i32, getVarId(a.name))]) }
-            if (a.op == "+=") { v = b.NewCall(rtStrcat, [b.NewCall(rtArrGet, [nm, rk.k]), v]) }
-            b.NewCall(assoc ? rtArrSet : rtArrIset, [nm, rk.k, v])
-            return b
+            var ebox = {b: b}
+            emitElemSet(ebox, a.name, nm, rk.k, (a.op == "+=") ? b.NewCall(rtArrGet, [nm, rk.k]) : null, v, assoc)
+            return ebox.b
         }
+        // On an array name, a scalar assignment is to element 0 and `+=` appends to its text
+        // (bash 5.3 answers `abd c` for e=(ab c); e+=d), both under the array's attributes.
+        var arrB = curF.NewBlock(""), strB = curF.NewBlock(""), mg = curF.NewBlock("")
+        brIfArray(b, nm, arrB, strB)
+        var e0 = gepStr(arrB, "0")
+        var e0box = {b: arrB}
+        emitElemSet(e0box, a.name, nm, e0, (a.op == "+=") ? arrB.NewCall(rtArrGet, [nm, e0]) : null, v, assoc)
+        e0box.b.NewBr(mg)
+        b = strB
         // `declare -i n` makes n=EXPR evaluate EXPR as arithmetic, and n+=EXPR an arithmetic ADD
         // (n=3; n+=4 is 7), not a concatenation. A literal right hand side is parsed with this
         // grammar and emitted as ordinary IR; an expanded one is read by rt_arith at run time.
@@ -3018,30 +3083,31 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (a.op == "+=") { rv = b.NewAdd(b.NewCall(rtStr2int, loadVar(b, a.name)), rv) }
             b = emitAbortCheck(b)
             storeVar(b, a.name, heapKeep(b, mk, a.name, b.NewCall(rtInt2str, rv)))
-            return b
-        }
-        // On an array name, a scalar assignment is to element 0 and `+=` appends to its text:
-        // bash 5.3 answers `abd c` for e=(ab c); e+=d.
-        var setE0 = assoc ? rtArrSet : rtArrIset
-        if (a.op == "+=") {
-            var arrB = curF.NewBlock(""), strB = curF.NewBlock(""), mg = curF.NewBlock("")
-            brIfArray(b, nm, arrB, strB)
-            var e0 = gepStr(arrB, "0")
-            arrB.NewCall(setE0, [nm, e0, arrB.NewCall(rtStrcat, [arrB.NewCall(rtArrGet, [nm, e0]), v])])
-            arrB.NewBr(mg)
+        } else if (a.op == "+=") {
             // rt_sapp appends in place to the slot's own buffer (bash-rt.c, "append buffers").
             var sid = llvm.constant.NewInt(i32, getVarId(a.name))
-            storeVar(strB, a.name, heapKeep(strB, mk, a.name, strB.NewCall(rtSapp, [sid, loadVar(strB, a.name), v])))
-            strB.NewBr(mg)
-            return mg
+            storeVar(b, a.name, heapKeep(b, mk, a.name, b.NewCall(rtSapp, [sid, loadVar(b, a.name), v])))
+        } else {
+            storeVar(b, a.name, heapKeep(b, mk, a.name, v))
         }
-        var arrB2 = curF.NewBlock(""), strB2 = curF.NewBlock(""), mg2 = curF.NewBlock("")
-        brIfArray(b, nm, arrB2, strB2)
-        arrB2.NewCall(setE0, [nm, gepStr(arrB2, "0"), v])
-        arrB2.NewBr(mg2)
-        storeVar(strB2, a.name, heapKeep(strB2, mk, a.name, v))
-        strB2.NewBr(mg2)
-        return mg2
+        b.NewBr(mg)
+        return mg
+    }
+    // Stores v as element `key` of array `name` (nm, its name as an i8*) under the array's
+    // attributes; old is the element's value for `+=`, else null. -i's arithmetic error
+    // abandons the line before the store. box.b is the block, moved on past the store.
+    function emitElemSet(box, name, nm, key, old, v, assoc) {
+        var b = box.b
+        var at = elemAttrs(name)
+        if (at != 0) { v = b.NewCall(rtAttrv, [(old == null) ? nullStr : old, v, llvm.constant.NewInt(i32, at)]) }
+        else if (old != null) { v = b.NewCall(rtStrcat, [old, v]) }
+        if ((at & 1) != 0) { b = emitAbortCheck(b) }
+        b.NewCall(assoc ? rtArrSet : rtArrIset, [nm, key, v])
+        box.b = b
+    }
+    // The attributes rt_attrv applies to an element of `name`: 1 -i, 2 -u, 4 -l.
+    function elemAttrs(name) {
+        return (attrOn(intVars, name) ? 1 : 0) + (attrOn(upVars, name) ? 2 : 0) + (attrOn(loVars, name) ? 4 : 0)
     }
     // items: one {a} per assignment, then the redirection records. Twin of makeAssign in
     // bash-interpreter.abnf.
@@ -3373,6 +3439,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var i
         for (i = 0; i < t.length; i++) { var cc = t.charCodeAt(i); if (cc < 48 || cc > 57) { return false } }
         return true
+    }
+    // The kind of subscript word w names - 0 a key, 1 "@" (fields), 2 "*" (joined) - when it
+    // is a literal, else -1: subKind then asks at run time.
+    function subKindC(w) { return (w.c == undefined) ? -1 : ((w.c == "@") ? 1 : ((w.c == "*") ? 2 : 0)) }
+    function subKind(b, kc, sub) {
+        if (kc >= 0) { return llvm.constant.NewInt(i32, kc) }
+        var isAt = b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtStreq, [sub, gepStr(b, "@")]), zero)
+        var isStar = b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtStreq, [sub, gepStr(b, "*")]), zero)
+        return b.NewSelect(isAt, one, b.NewSelect(isStar, llvm.constant.NewInt(i32, 2), zero))
     }
     // A subscript word and the key it names, {b, v: text, k: key}: an associative array's key
     // is the text, an indexed array's the value of the text as an arithmetic expression
@@ -4032,7 +4107,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var ifs = okB.NewSelect(okB.NewICmp(llvm.enum.IPredEQ, ifsRaw, unsetPtr(okB)), gepStr(okB, " \t\n"), ifsRaw)
         if (arrName != null) {
             okB.NewCall(rtArrClear, gepStr(okB, arrName))
-            okB.NewCall(rtArrAppend, [gepStr(okB, arrName), okB.NewCall(rtSplitIfs, [line, ifs])])
+            // An element that is an -i arithmetic error abandons the line.
+            var rat = elemAttrs(arrName)
+            if ((rat & 1) != 0) { okB.NewStore(gepStr(okB, "read: "), gArPfx) }
+            okB.NewCall(rtArrLitWords, [gepStr(okB, arrName), okB.NewCall(rtSplitIfs, [line, ifs]), zero64,
+                                        llvm.constant.NewInt(i32, rat)])
+            if ((rat & 1) != 0) {
+                okB.NewStore(emptyPtr(okB), gArPfx)
+                okB = emitAbortCheck(okB)
+            }
         }
         if (rawReply) { storeVar(okB, "REPLY", line) }
         for (k = 0; k < names.length; k++) {
@@ -4043,6 +4126,98 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         okB.NewStore(zero, gStatus)
         okB.NewBr(merge)
         return merge
+    }
+
+    // mapfile / readarray (see mapfileBuiltin in bash-interpreter.abnf). The options and the
+    // array name are read here and must be literal words; an option's value may be any word,
+    // checked at run time by rt_mf_begin. The records are read and stored by a loop over
+    // rt_mf_next and rt_mf_store, and a -C callback, compiled here as `CALLBACK "$@"`, runs
+    // over the index and the record (rt_mf_args) whenever rt_mf_due says so.
+    function emitMapfile(b, who, args) {
+        var vals = {}
+        var trim = 0
+        var name = "MAPFILE"
+        var cb = null
+        var bad = null
+        var missing = 0
+        var i = 0
+        while (i < args.length && bad == null) {
+            var a = args[i].c
+            if (a == undefined) { fail(who + " needs literal options and a literal array name in this compiler") }
+            if (a == "--") { i = i + 1; break }
+            if (a.length < 2 || a.charAt(0) != "-") { break }
+            var j = 1
+            while (j < a.length && bad == null) {
+                var f = a.charAt(j)
+                if (f == "t") { trim = 1; j = j + 1; continue }
+                if ("dnOsuCc".indexOf(f) < 0) { bad = "-" + f; continue }
+                var vt = null
+                if (j + 1 < a.length) { vt = makeConst(a.slice(j + 1)) }
+                else if (i + 1 < args.length) { i = i + 1; vt = args[i] }
+                else { bad = "-" + f; missing = 1; continue }
+                if (f == "C") {
+                    if (vt.c == undefined) { fail(who + " -C needs a literal callback in this compiler") }
+                    cb = vt.c
+                } else { vals["$" + f] = vt }
+                j = a.length
+            }
+            i = i + 1
+        }
+        if (bad != null) {
+            storeStatus(b, b.NewCall(rtMfUsage, [gepStr(b, who), gepStr(b, bad), llvm.constant.NewInt(i32, missing)]))
+            return b
+        }
+        if (i < args.length) {
+            if (args[i].c == undefined) { fail(who + " needs literal options and a literal array name in this compiler") }
+            name = args[i].c
+        }
+        var ops = [gepStr(b, who), gepStr(b, name)]
+        var letters = "dnOsuc"
+        var k
+        for (k = 0; k < letters.length; k++) {
+            var w = vals["$" + letters.charAt(k)]
+            if (w == undefined) { ops.push(nullStr); continue }
+            var rw = evalWord(b, w)
+            b = rw.b
+            ops.push(rw.v)
+        }
+        b = emitAbortCheck(b)
+        var at = isIdentText(name) ? elemAttrs(name) : 0
+        ops.push(llvm.constant.NewInt(i32, trim))
+        ops.push(llvm.constant.NewInt(i32, at))
+        var st = b.NewCall(rtMfBegin, ops)
+        var loopB = curF.NewBlock(""), bodyB = curF.NewBlock(""), endB = curF.NewBlock(""), doneB = curF.NewBlock("")
+        var refB = curF.NewBlock("")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredSLT, st, zero), loopB, refB)
+        storeStatus(refB, st)
+        refB.NewBr(doneB)
+        loopB.NewCondBr(loopB.NewICmp(llvm.enum.IPredNE, loopB.NewCall(rtMfNext), zero), bodyB, endB)
+        var sb = bodyB
+        if (cb != null) {
+            var cbB = curF.NewBlock(""), stB = curF.NewBlock("")
+            bodyB.NewCondBr(bodyB.NewICmp(llvm.enum.IPredNE, bodyB.NewCall(rtMfDue), zero), cbB, stB)
+            // The callback's own frame of positional parameters, as a function call has.
+            var savedTop = slotOf(i32), savedBase = slotOf(i32), savedN = slotOf(i32)
+            cbB.NewStore(cbB.NewLoad(i32, gArgvTop), savedTop)
+            cbB.NewStore(cbB.NewLoad(i32, gFrameBase), savedBase)
+            cbB.NewStore(cbB.NewLoad(i32, gFrameN), savedN)
+            cbB.NewCall(rtArgPush, cbB.NewCall(rtMfArgs))
+            var base = cbB.NewLoad(i32, savedTop)
+            cbB.NewStore(base, gFrameBase)
+            cbB.NewStore(cbB.NewSub(cbB.NewLoad(i32, gArgvTop), base), gFrameN)
+            var after = compileSnippet(cb + " \"$@\"")(cbB)
+            after.NewStore(after.NewLoad(i32, savedBase), gFrameBase)
+            after.NewStore(after.NewLoad(i32, savedN), gFrameN)
+            after.NewStore(after.NewLoad(i32, savedTop), gArgvTop)
+            after.NewBr(stB)
+            sb = stB
+        }
+        sb.NewCall(rtMfStore)
+        if ((at & 1) != 0) { sb = emitAbortCheck(sb) }
+        sb.NewBr(loopB)
+        storeStatusI(endB, 0)
+        endB.NewBr(doneB)
+        return doneB
     }
 
     // set [-e|+e] [-u|+u] [-o pipefail|+o pipefail]: the flags are runtime globals, so
@@ -4399,6 +4574,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return b
             }
             if (cmd == "read") { return emitRead(b, argTs) }
+            if (cmd == "mapfile" || cmd == "readarray") { return emitMapfile(b, cmd, argTs) }
             if (cmd == "shift") {
                 var sn = one
                 if (argTs.length > 0) {
@@ -4413,13 +4589,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             if (cmd == "unset") {
                 var uk
+                // The status: 1 when an operand failed (rt_arr_unset), else 0.
+                var ust = zero
                 for (uk = 0; uk < argTs.length; uk++) {
                     // A name built by expansion (`unset "d[$((i+1))]"`) is resolved at run time;
                     // the attribute and local bookkeeping below needs a literal one.
                     if (argTs[uk].c == undefined) {
                         var ru = evalWord(b, argTs[uk])
                         b = ru.b
-                        b.NewCall(rtUnsetName, ru.v)
+                        ust = b.NewOr(ust, b.NewCall(rtUnsetName, ru.v))
                         continue
                     }
                     var sp0 = splitSubscript(argTs[uk].c)
@@ -4440,10 +4618,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                                                   llvm.constant.NewInt(i32, getVarId("FUNCNAME"))])
                         }
                     } else {
-                        b.NewCall(rtArrDel, [gepStr(b, sp0.name), litKeyOf(b, sp0.name, sp0.key)])
+                        ust = b.NewOr(ust, b.NewCall(rtArrUnset, [gepStr(b, sp0.name), gepStr(b, sp0.key)]))
                     }
                 }
-                storeStatusI(b, 0)
+                storeStatus(b, ust)
                 return b
             }
             var f = funcFor(cmd)

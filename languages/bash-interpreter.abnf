@@ -1364,7 +1364,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function setVarVal(name, val) {
         if (rawSeen) { val = normBytes(val) }
-        if (isArr(name)) { arrSet(name, "0", val); return }
+        if (isArr(name)) { arrSet(name, "0", attrCase(name, val)); return }
         touchVar(name); vars["$" + name] = attrCase(name, val); varsHas["$" + name] = true
     }
     // -u / -l are ATTRIBUTES, not a one-off transform of the declaring assignment: bash 5.3
@@ -2334,7 +2334,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (wordT == args[0]) { wordT = null }
             wordT = (args.length > 0) ? args[args.length - 1] : null
         }
-        if (idxT != null) {
+        // ${!a[k] OP arg} is an indirection through a[k] (the scalar arms below); only the bare
+        // ${!a[@]} / ${!a[*]} list the keys.
+        if (idxT != null && !(indp && !bare)) {
             var readIdx = function() {
                 return subKey(name, wordJoin(idxT()))
             }
@@ -2347,10 +2349,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             if (pe == "ind") {
                 return function() {
-                    var sub = readIdx()
-                    var ks = scKeyList(name)
-                    if (sub == "@") { return encFields(ks) }
-                    return starJoinSp(ks)
+                    var raw = wordJoin(idxT())
+                    var sub = subKey(name, raw)
+                    if (sub == "@" || sub == "*") {
+                        var ks = scKeyList(name)
+                        if (sub == "@") { return encFields(ks) }
+                        return starJoinSp(ks)
+                    }
+                    var it = indName(name, sub, raw)
+                    return (it == null) ? "" : indVal(it)
                 }
             }
             if (pe == "substr") {
@@ -2477,7 +2484,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         // ${#v} counts CHARACTERS in bash; .length counts UTF-16 code units.
         if (pe == "len") { return function() { return numToStr(charLen(getVarVal(name))) } }
-        if (pe == "ind") { return function() { return indVal(getVarVal(name)) } }
+        if (pe == "ind") { return function() { var it = indName(name, null, null); return (it == null) ? "" : indVal(it) } }
         // ${!prefix*} and ${!prefix@} answer the NAMES of the set variables with that prefix,
         // in sorted order. Measured: `Zq=1; Zw=2; echo "${!Z*}"` -> "Zq Zw".
         if (pfx != "") {
@@ -2492,24 +2499,32 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // ${#v OP arg} is a parse-time-legal, run-time-illegal combination in bash:
         //     $ echo "${#x-default}"   ->  bash: ${#x-default}: bad substitution
         if (lenp) { var badName = name; return function() { fail("${#" + badName + "...}: bad substitution"); return "" } }
-        // ${!ref OP arg}: the operator applies to the variable the indirection LANDED on, so
-        // every leaf below reads its name through nameOf() instead of closing over `name`.
+        // ${!ref OP arg} and ${!a[k] OP arg}: the operator applies to the variable the
+        // indirection LANDED on (indName), so every leaf below reads its name through nameOf()
+        // - once per expansion - instead of closing over `name`; null is an unset target.
         var baseName = name
         var indirect = indp
-        var nameOf = function() { if (indirect) { return getVarVal(baseName) } return baseName }
+        var indIdxT = idxT
+        var nameOf = function() {
+            if (!indirect) { return baseName }
+            if (indIdxT == null) { return indName(baseName, null, null) }
+            var raw = wordJoin(indIdxT())
+            return indName(baseName, subKey(baseName, raw), raw)
+        }
         // The transform operators. @P (prompt expansion) is the only one that is not a pure
         // string function; promptExpand implements the escapes bash documents for PS1.
         if (xf != "") {
             var xfOp = xf
             return function() {
                 var xn = nameOf()
+                if (xn == null) { return "" }
                 return xformOne(getVarVal(xn), xfOp, xn, isSetVar(xn) || isArr(xn))
             }
         }
         if (pe == "substr") {
             var offT0 = args[0]
             var lenT0 = (args.length > 1) ? args[1] : null
-            return function() { return sliceStr(getVarVal(nameOf()), offT0, lenT0) }
+            return function() { var sn = nameOf(); return sliceStr((sn == null) ? "" : getVarVal(sn), offT0, lenT0) }
         }
         // The two strips, the two case maps and the two replacements, all through the one
         // applyPatOp the subscripted branch above uses element-wise.
@@ -2522,6 +2537,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var pat = (pT != null) ? wordJoin(pT()) : ""
                 var rep = (rT != null) ? wordJoin(rT()) : ""
                 var pnm = nameOf()
+                if (pnm == null) { return "" }
                 var pv = getVarVal(pnm)
                 // An UNSET value is left alone by ${v/p/r}; an empty one is a subject.
                 if (pv == "" && (sPe == "/" || sPe == "//") && !isSetVar(pnm) && !isArr(pnm)) { return "" }
@@ -2531,22 +2547,66 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (op == "" && name == "*" && !indirect) { return function() { return starJoin(posParams) } }
         if (op == "") { return function() { return getVarVal(nameOf()) } }
         return function() {
-            var v = getVarVal(nameOf())
+            var tn = nameOf()
+            var v = (tn == null) ? "" : getVarVal(tn)
             var colon = (op.charAt(0) == ":")
             var o = colon ? op.slice(1) : op
-            var blank = colon ? (!isSetVar(nameOf()) || v == "") : (!isSetVar(nameOf()))
+            var blank = (tn == null) || (colon ? (!isSetVar(tn) || v == "") : !isSetVar(tn))
             if (o == "-") { return blank ? dfltWord(wordT) : v }
             if (o == "+") { return blank ? "" : dfltWord(wordT) }
             if (o == "=") {
-                if (blank) { var d = (wordT != null) ? wordJoin(wordT()) : ""; setVarVal(nameOf(), d); return d }
+                if (blank) { var d = (wordT != null) ? wordJoin(wordT()) : ""; if (tn != null) { setVarVal(tn, d) }; return d }
                 return v
             }
             if (o == "?") {
-                if (blank) { paramErr(nameOf(), wordT, colon) }
+                if (blank) { paramErr((tn == null) ? baseName : tn, wordT, colon) }
                 return v
             }
             return v
         }
+    }
+    // THE TARGET OF AN INDIRECTION ${!REF...}: REF's value, which has to name a variable - a
+    // NAME, NAME[SUB], a positional or a special parameter (isRefName). REF is the variable
+    // `name`, or with a subscript (sub its key, raw its text) that element, or for @ / * the
+    // elements joined. bash 5.3: an unset REF is "REF: invalid indirect expansion" - for
+    // NAME[SUB] only when NAME is no variable at all, an unset element or an empty array being
+    // an unset target - and a value that is no name, the empty one included, is "VALUE:
+    // invalid variable name"; either abandons the line as an expansion error does. The answer
+    // is null for an unset target or after an error. Twin of rt_indname / rt_indsub in
+    // languages/lib/bash-rt.c.
+    function indName(name, sub, raw) {
+        var v = ""
+        if (sub == null) {
+            var special = !isIdentText(name) && !allDigits(name)
+            if (!special && !isArr(name) && !isSetVar(name)) { return indFail(name + ": invalid indirect expansion") }
+            v = getVarVal(name)
+        } else {
+            if (!isArr(name) && !isSetVar(name) && !attrOn(dclVars, name)) {
+                return indFail(name + "[" + raw + "]: invalid indirect expansion")
+            }
+            if (sub == "@" || sub == "*") {
+                var vals = scValList(name)
+                if (vals.length == 0) { return null }
+                v = joinList(vals, (sub == "@") ? " " : ifsFirst())
+            } else {
+                if (!scHas(name, sub)) { return null }
+                v = scGet(name, sub)
+            }
+        }
+        if (isRefName(v)) { return v }
+        return indFail(v + ": invalid variable name")
+    }
+    function indFail(msg) {
+        emitErr("bash: " + msg + "\n")
+        arithErr = true
+        return null
+    }
+    // A name an indirection may land on. Twin of rt_isref.
+    function isRefName(v) {
+        if (v.length == 1 && "@*#?-$!".indexOf(v) >= 0) { return true }
+        if (allDigits(v) || isIdentText(v)) { return true }
+        var sp = splitSubscript(v)
+        return sp.key != null && sp.key != "" && isIdentText(sp.name)
     }
     // ${v?word} / ${v:?word} on an unset (or, with the colon, empty) value: the word - or
     // bash's own text when it is empty - on standard error, and the (sub)shell ends with
@@ -3216,10 +3276,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var a = arrs[arrKey(name)]
         return arrLive(a, arrNorm(a, key))
     }
-    // On a name that is no array, key 0 is the scalar: `p=ab; unset 'p[0]'` unsets p.
-    // Twin of rt_arr_del.
+    // Removes the element of key from array name, if it has one. Twin of rt_arr_del.
     function arrDel(name, key) {
-        if (!isArr(name)) { if (key == "0") { unsetVar(name) }; return }
         var a = arrs[arrKey(name)]
         var kk = arrNorm(a, key)
         if (!arrLive(a, kk)) { return }
@@ -3233,6 +3291,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         a.vals["$" + kk] = ""
         a.gone["$" + kk] = true
         a.lit = true
+    }
+    // `unset 'NAME[SUB]'`, answering the status. On a variable that is no array - set, or
+    // declared without a value - subscript 0 unsets it and any other, @ and * and a negative
+    // index included, is bash 5.3's "not an array variable", status 1. A name that is no
+    // variable at all is left alone. Twin of rt_arr_unset.
+    function unsetElem(name, sub) {
+        if (isArr(name)) { arrDel(name, subKey(name, sub)); return 0 }
+        if (assocFact(name, false)) { return 0 }
+        if (!isSetVar(name) && !attrOn(dclVars, name)) { return 0 }
+        if (sub != "@" && sub != "*" && numToStr(arEval(sub)) == "0") { unsetVar(name); return 0 }
+        emitErr("bash: unset: " + name + ": not an array variable\n")
+        return 1
     }
     function arrKeyList(name) {
         if (!isArr(name)) { return [] }
@@ -3308,7 +3378,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (o == "-") { return blank ? dfltWord(wordT) : v }
         if (o == "+") { return blank ? "" : dfltWord(wordT) }
         if (o == "=") {
-            if (blank) { var d = (wordT != null) ? wordJoin(wordT()) : ""; arrSet(name, sub, d); return d }
+            // The default is stored, and expands, under the array's attributes.
+            if (blank) { var d = elemVal(name, null, (wordT != null) ? wordJoin(wordT()) : ""); if (!arithErr) { arrSet(name, sub, d) }; return d }
             return v
         }
         if (o == "?") {
@@ -3322,7 +3393,27 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         touchState(name)
         arrNew(name, assoc)
         var i
-        for (i = 0; i < list.length; i++) { arrSet(name, numToStr(i), list[i]) }
+        for (i = 0; i < list.length; i++) { if (!elemSet(name, numToStr(i), null, list[i])) { return } }
+    }
+    // The value an element store of array NAME keeps under its attributes (bash 5.3 applies
+    // them to every element as to a scalar): -i evaluates v as arithmetic and, when old is
+    // not null, adds old's value (`n[1]+=EXPR`); -u / -l map the case of old and v appended.
+    // Twin of rt_attrv in languages/lib/bash-rt.c.
+    function elemVal(name, old, v) {
+        if (attrOn(intVars, name)) {
+            var n = arEval(v)
+            if (old != null) { n = arOp("+", arEval(old), n) }
+            return numToStr(n)
+        }
+        return attrCase(name, (old != null) ? old + v : v)
+    }
+    // Stores elemVal(name, old, v) as element key; an arithmetic error stores nothing and
+    // answers false.
+    function elemSet(name, key, old, v) {
+        var ev = elemVal(name, old, v)
+        if (arithErr) { return false }
+        arrSet(name, key, ev)
+        return true
     }
     // A SET SCALAR BECOMES ELEMENT 0 of the array an element assignment, an appending
     // literal or `declare -a` makes of its name: bash 5.3 answers `abcd x` for
@@ -4530,10 +4621,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var next = anytype
             next = append ? arrNextIdx(name) : 0
             for (i = 0; i < pairs.length; i++) {
-                if (pairs[i].k == null) { arrSet(name, numToStr(next), pairs[i].v); next = arOp("+", next, 1) }
+                if (pairs[i].k == null) {
+                    if (!elemSet(name, numToStr(next), null, pairs[i].v)) { return }
+                    next = arOp("+", next, 1)
+                }
                 else {
                     var key = subKey(name, pairs[i].k)
-                    if (key != BAD_KEY) { arrSet(name, key, pairs[i].v); next = arOp("+", arStr(key), 1) }
+                    if (key != BAD_KEY) {
+                        if (!elemSet(name, key, null, pairs[i].v)) { return }
+                        next = arOp("+", arStr(key), 1)
+                    }
                 }
             }
             return
@@ -4543,10 +4640,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // trailing odd word takes an empty value, so `a+=(zz)` gives a["zz"]="".
         var plain = []
         for (i = 0; i < pairs.length; i++) {
-            if (pairs[i].k == null) { plain.push(pairs[i].v) } else { arrSet(name, pairs[i].k, pairs[i].v) }
+            if (pairs[i].k == null) { plain.push(pairs[i].v) } else if (!elemSet(name, pairs[i].k, null, pairs[i].v)) { return }
         }
         for (i = 0; i < plain.length; i = i + 2) {
-            arrSet(name, plain[i], (i + 1 < plain.length) ? plain[i + 1] : "")
+            if (!elemSet(name, plain[i], null, (i + 1 < plain.length) ? plain[i + 1] : "")) { return }
         }
     }
     // items: one {a} per assignment, then the redirection records. The status is that of
@@ -4602,13 +4699,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (arithErr || abortSignal != null) { return }
             if (!isAs) { arrAdopt(a.name) }
             arrEnsure(a.name, assoc)
-            if (a.op == "+=") { arrSet(a.name, key, arrGet(a.name, key) + v) } else { arrSet(a.name, key, v) }
+            elemSet(a.name, key, (a.op == "+=") ? arrGet(a.name, key) : null, v)
             return
         }
         if (arithErr || abortSignal != null) { return }
         if (a.op == "+=") {
             // On an array name `+=` appends to element 0's text: e=(ab c); e+=d is `abd c`.
-            if (isArr(a.name)) { arrSet(a.name, "0", arrGet(a.name, "0") + v) }
+            if (isArr(a.name)) { elemSet(a.name, "0", arrGet(a.name, "0"), v) }
             else if (attrOn(intVars, a.name)) { var sv = arOp("+", arEval(getVarVal(a.name)), arEval(v)); if (!arithErr) { setVarVal(a.name, numToStr(sv)) } }
             else { setVarVal(a.name, getVarVal(a.name) + v) }
             return
@@ -5054,6 +5151,133 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return 0
     }
 
+    // mapfile / readarray [-d DELIM] [-n COUNT] [-O ORIGIN] [-s COUNT] [-t] [-u FD]
+    // [-C CALLBACK] [-c QUANTUM] [ARRAY]: the records of standard input, each ending at DELIM
+    // (a newline; -d '' is a NUL, which standard input here never holds), into the indexed
+    // ARRAY (MAPFILE by default) from index ORIGIN on. Without -O the array is emptied first
+    // (a scalar of the name goes too); with it a scalar is element 0. -s skips records, -n
+    // stores at most COUNT (0: all), -t drops each record's delimiter, -u reads descriptor 0
+    // only, and CALLBACK runs as `CALLBACK INDEX RECORD` before every QUANTUM-th record
+    // (default 5000) is stored. The option values, the name and the options themselves are
+    // checked in bash 5.3's order with its messages; the elements take the array's
+    // attributes. Twin of emitMapfile in bash-to-llvm-ir.abnf, with rt_mf_begin.
+    function mapfileBuiltin(who, args) {
+        var o = mfOpts(args)
+        if (o.bad != null) { mfUsage(who, o.bad, o.missing); return 2 }
+        var nm = o.name
+        if (o.cb != null) { o.cbT = compileSnippet(o.cb + " \"$@\"") }
+        var cnt = mfNum(o.n), org = mfNum(o.O), skp = mfNum(o.s), qn = mfNum(o.c), fd = mfNum(o.u)
+        if (o.u != null && fd == null) { emitErr("bash: " + who + ": " + o.u + ": invalid file descriptor specification\n"); return 1 }
+        if (o.u != null && fd != 0) { emitErr("bash: " + who + ": " + o.u + ": invalid file descriptor: Bad file descriptor\n"); return 1 }
+        if (o.n != null && (cnt == null || cnt < 0)) { emitErr("bash: " + who + ": " + o.n + ": invalid line count\n"); return 1 }
+        if (o.O != null && (org == null || org < 0)) { emitErr("bash: " + who + ": " + o.O + ": invalid array origin\n"); return 1 }
+        if (o.s != null && (skp == null || skp < 0)) { emitErr("bash: " + who + ": " + o.s + ": invalid line count\n"); return 1 }
+        if (o.c != null && (qn == null || qn <= 0)) { emitErr("bash: " + who + ": " + o.c + ": invalid callback quantum\n"); return 1 }
+        if (!isIdentText(nm)) { emitErr("bash: " + who + ": `" + nm + "': not a valid identifier\n"); return 1 }
+        if (assocFact(nm, false)) { emitErr("bash: " + who + ": " + nm + ": not an indexed array\n"); return 1 }
+        if (o.O == null) { unsetVar(nm); arrNew(nm, false) } else { arrAdopt(nm); arrEnsure(nm, false) }
+        arrs[arrKey(nm)].lit = true
+        var dlm = (o.d == null) ? "\n" : o.d.charAt(0)
+        var k
+        for (k = 0; k < ((skp == null) ? 0 : skp); k++) { if (mfRecord(dlm, false) == null) { k = skp } }
+        var idx = (org == null) ? 0 : org
+        var quantum = (qn == null) ? 5000 : qn
+        var got = 0
+        var svp = arPfx
+        arPfx = who + ": "
+        while (cnt == null || cnt == 0 || got < cnt) {
+            var line = mfRecord(dlm, o.t)
+            if (line == null) { break }
+            got = got + 1
+            if (o.cbT != null && got % quantum == 0) {
+                var svPos = posParams
+                posParams = [numToStr(idx), line]
+                var cr = anytype
+                cr = o.cbT()
+                posParams = svPos
+                if (typeof cr == "object") { arPfx = svp; return cr }
+            }
+            if (!elemSet(nm, numToStr(idx), null, line)) { break }
+            idx = idx + 1
+        }
+        arPfx = svp
+        return 0
+    }
+    // The next record of standard input, its delimiter dropped when trim says so, or null
+    // at the end.
+    function mfRecord(dlm, trim) {
+        if (stdinPos >= stdinBuf.length) { return null }
+        var e = stdinPos
+        while (e < stdinBuf.length && stdinBuf.charAt(e) != dlm) { e = e + 1 }
+        var end = (e < stdinBuf.length) ? e + 1 : e
+        var rec = stdinBuf.slice(stdinPos, (trim && e < stdinBuf.length) ? e : end)
+        stdinPos = end
+        return rec
+    }
+    // mapfile's options as getopt reads them ("d:n:O:s:tu:C:c:"): letters may be bundled,
+    // a value may be attached or the next word, and the first word that is no option ends
+    // them. The answer holds each value given (null when absent), t, the array name, and
+    // in {bad} an option that is unknown or ({missing}) lacks its value.
+    function mfOpts(args) {
+        var o = {d: null, n: null, O: null, s: null, u: null, C: null, c: null, t: false, cb: null, cbT: null,
+                 name: "MAPFILE", bad: null, missing: false}
+        var i = 0
+        while (i < args.length) {
+            var a = args[i]
+            if (a == "--") { i = i + 1; break }
+            if (a.length < 2 || a.charAt(0) != "-") { break }
+            var j = 1
+            while (j < a.length) {
+                var f = a.charAt(j)
+                if (f == "t") { o.t = true; j = j + 1; continue }
+                if ("dnOsuCc".indexOf(f) < 0) { o.bad = "-" + f; return o }
+                var v = a.slice(j + 1)
+                if (v == "") {
+                    if (i + 1 >= args.length) { o.bad = "-" + f; o.missing = true; return o }
+                    i = i + 1
+                    v = args[i]
+                }
+                if (f == "C") { o.cb = v } else { o[f] = v }
+                j = a.length
+            }
+            i = i + 1
+        }
+        if (i < args.length) { o.name = args[i] }
+        return o
+    }
+    function mfUsage(who, opt, missing) {
+        emitErr("bash: " + who + ": " + opt + (missing ? ": option requires an argument\n" : ": invalid option\n"))
+        emitErr(who + ": usage: " + who + " [-d delim] [-n count] [-O origin] [-s count] [-t] [-u fd] [-C callback] [-c quantum] [array]\n")
+    }
+    // An option value as bash's legal_number reads it - blanks, an optional sign, decimal
+    // digits, blanks - or null. Twin of rt_mf_num.
+    function mfNum(s) {
+        if (s == null) { return null }
+        var i = 0
+        while (i < s.length && (s.charAt(i) == " " || s.charAt(i) == "\t" || s.charAt(i) == "\n")) { i = i + 1 }
+        var neg = false
+        if (i < s.length && (s.charAt(i) == "-" || s.charAt(i) == "+")) { neg = s.charAt(i) == "-"; i = i + 1 }
+        var d0 = i
+        var n = 0
+        while (i < s.length && s.charCodeAt(i) >= 48 && s.charCodeAt(i) <= 57) { n = n * 10 + (s.charCodeAt(i) - 48); i = i + 1 }
+        if (i == d0) { return null }
+        while (i < s.length && (s.charAt(i) == " " || s.charAt(i) == "\t" || s.charAt(i) == "\n")) { i = i + 1 }
+        if (i < s.length) { return null }
+        return neg ? -n : n
+    }
+    // A shell NAME: a letter or underscore, then letters, digits and underscores. Twin of
+    // isIdentText in bash-to-llvm-ir.abnf.
+    function isIdentText(t) {
+        if (t.length == 0) { return false }
+        var i
+        for (i = 0; i < t.length; i++) {
+            var cc = t.charCodeAt(i)
+            var al = (cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90) || cc == 95
+            if (!al && !(i > 0 && cc >= 48 && cc <= 57)) { return false }
+        }
+        return true
+    }
+
     // read [-r] [-a NAME] NAME... : one line of standard input, split on IFS, the last name
     // taking the rest. Returns 1 at end of file, exactly like the shell.
     function readBuiltin(args) {
@@ -5083,7 +5307,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         stdinPos = (e < stdinBuf.length) ? (e + 1) : e
         var rec = splitIFSRec(line)
         var fields = rec.f
-        if (arrName != null) { arrFromList(arrName, false, fields); return 0 }
+        if (arrName != null) {
+            var svp = arPfx
+            arPfx = "read: "
+            arrFromList(arrName, false, fields)
+            arPfx = svp
+            return 0
+        }
         if (names.length == 0) { setVarVal("REPLY", line); return 0 }
         var k
         for (k = 0; k < names.length; k++) {
@@ -5372,6 +5602,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (cmd == "unset") {
             var ui
+            var ust = 0
             for (ui = 0; ui < args.length; ui++) {
                 var sp = splitSubscript(args[ui])
                 if (sp.key == null) {
@@ -5380,10 +5611,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         if (localHere(sp.name)) { dclVars["$" + sp.name] = true }
                     }
                 }
-                else { arrDel(sp.name, subKey(sp.name, sp.key)) }
+                else if (unsetElem(sp.name, sp.key) != 0) { ust = 1 }
             }
-            setStatus(0)
-            return 0
+            setStatus(ust)
+            return ust
         }
         if (cmd == "false") { setStatus(1); return 1 }
         // `break N` / `continue N` past the loops there are act on the outermost one; outside
@@ -5425,7 +5656,24 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return er
         }
         if (cmd == "printf") { var pst = printfBuiltin(args); setStatus(pst); return pst }
-        if (cmd == "read") { var rst = readBuiltin(args); setStatus(rst); return rst }
+        if (cmd == "mapfile" || cmd == "readarray") {
+            var mst = anytype
+            mst = mapfileBuiltin(cmd, args)
+            if (typeof mst == "object") { return mst }
+            var mab = takeAbort()
+            if (mab != null) { setStatus(1); return mab }
+            setStatus(mst)
+            return mst
+        }
+        // An element that is an -i arithmetic error abandons the line, as an expansion
+        // error does.
+        if (cmd == "read") {
+            var rst = readBuiltin(args)
+            var rab = takeAbort()
+            if (rab != null) { setStatus(1); return rab }
+            setStatus(rst)
+            return rst
+        }
         if (cmd == "shift") {
             var n = (args.length > 0) ? strToInt(args[0]) : 1
             posParams = (n <= posParams.length) ? posParams.slice(n) : []
