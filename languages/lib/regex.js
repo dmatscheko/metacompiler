@@ -467,36 +467,94 @@ function rxClsFold(cls) {
     }
 }
 
-// rxClsFoldP is Python's Unicode IGNORECASE of a class: CPython folds every
-// character of a set, and two characters fold together when their lowercase or
-// their uppercase agree (_ignorecase_fixes). A short non-ASCII range gets its
-// characters' other cases here; the matcher (pu, rxClsHitU) tries the text
-// character's uppercase and its lowercase.
+// rxClsFoldP marks a class for Python's Unicode IGNORECASE, which the matcher
+// decides (rxClsHitP).
 function rxClsFoldP(cls) {
-    var lo = cls.lo
-    var hi = cls.hi
-    var n = lo.length
-    var i = 0
-    while (i < n) {
-        var a = lo[i] < 128 ? 128 : lo[i]
-        if (hi[i] - a < 256) {
-            var c = a
-            while (c <= hi[i]) {
-                var l = rxCaseU(c, 0)
-                var u = rxCaseU(c, 1)
-                rxClsAdd(cls, l, l)
-                rxClsAdd(cls, u, u)
-                var ul = rxCaseU(l, 1)
-                var lu = rxCaseU(u, 0)
-                rxClsAdd(cls, ul, ul)
-                rxClsAdd(cls, lu, lu)
-                c = c + 1
-            }
-        }
-        i = i + 1
-    }
     cls.u = true
     cls.pu = true
+}
+
+// CPython's re._casefix._EXTRA_CASES, as triples: a lowercase character, and
+// the one or two other lowercase characters IGNORECASE matches with it (-1:
+// none), sorted.
+var RX_PY_EXTRA = [105, 305, -1, 115, 383, -1, 181, 956, -1, 305, 105, -1, 383, 115, -1, 837, 953, 8126,
+    912, 8147, -1, 944, 8163, -1, 946, 976, -1, 949, 1013, -1, 952, 977, -1, 953, 837, 8126, 954, 1008, -1,
+    956, 181, -1, 960, 982, -1, 961, 1009, -1, 962, 963, -1, 963, 962, -1, 966, 981, -1, 976, 946, -1,
+    977, 952, -1, 981, 966, -1, 982, 960, -1, 1008, 954, -1, 1009, 961, -1, 1013, 949, -1, 1074, 7296, -1,
+    1076, 7297, -1, 1086, 7298, -1, 1089, 7299, -1, 1090, 7300, 7301, 1098, 7302, -1, 1123, 7303, -1,
+    7296, 1074, -1, 7297, 1076, -1, 7298, 1086, -1, 7299, 1089, -1, 7300, 1090, 7301, 7301, 1090, 7300,
+    7302, 1098, -1, 7303, 1123, -1, 7304, 42571, -1, 7777, 7835, -1, 7835, 7777, -1, 8126, 837, 953,
+    8147, 912, -1, 8163, 944, -1, 42571, 7304, -1, 64261, 64262, -1, 64262, 64261, -1]
+
+// The characters whose simple lowercase is not their simple uppercase's own
+// lowercase partner (UnicodeData.txt: the titlecase digraphs, U+0130, U+03F4,
+// U+1E9E and the three letterlike symbols), as pairs: the lowercase, then the
+// character, sorted.
+var RX_PY_LPRE = [105, 304, 107, 8490, 223, 7838, 229, 8491, 454, 453, 457, 456, 460, 459, 499, 498,
+    952, 1012, 969, 8486]
+
+// rxPyLower is CPython's lowercase of a character under IGNORECASE: the simple
+// mapping.
+function rxPyLower(c) {
+    if (c < 128) { return c >= 65 && c <= 90 ? c + 32 : c }
+    return rxCaseU(c, 0)
+}
+
+// rxClsRange: does one of the class's ranges hold c?
+function rxClsRange(cls, c) {
+    var lo = cls.lo
+    var hi = cls.hi
+    var i = 0
+    while (i < lo.length) {
+        if (c >= lo[i] && c <= hi[i]) { return true }
+        i = i + 1
+    }
+    return false
+}
+
+// rxClsHitP is CPython's IN_UNI_IGNORE test of c (whose own test the caller
+// made): the set holds the lowercase of each of its characters and what
+// RX_PY_EXTRA pairs that with, and the text character's lowercase x is looked
+// up in it - here, by looking for a character of the class whose lowercase is
+// x or one of x's extra cases. A shorthand is tested on x alone.
+function rxClsHitP(cls, c) {
+    var x = rxPyLower(c)
+    if (x != c) {
+        if (rxClsRange(cls, x)) { return true }
+        var sp = cls.sp
+        var i = 0
+        while (i < sp.length) {
+            if (rxSpHas(sp[i], x)) { return true }
+            i = i + 1
+        }
+    }
+    // The ranges hold both cases of an ASCII letter already (rxClsFold), and
+    // only i, k and s have a non-ASCII partner.
+    if (x < 128 && x != 105 && x != 107 && x != 115) { return false }
+    if (rxPyPre(cls, x)) { return true }
+    var e = RX_PY_EXTRA
+    var j = 0
+    while (j < e.length && e[j] <= x) {
+        if (e[j] == x) {
+            if (rxClsRange(cls, e[j + 1]) || rxPyPre(cls, e[j + 1])) { return true }
+            return e[j + 2] >= 0 && (rxClsRange(cls, e[j + 2]) || rxPyPre(cls, e[j + 2]))
+        }
+        j = j + 3
+    }
+    return false
+}
+
+// rxPyPre: does the class hold a character other than x whose lowercase is x?
+function rxPyPre(cls, x) {
+    var u = x < 128 ? (x >= 97 && x <= 122 ? x - 32 : x) : rxCaseU(x, 1)
+    if (u != x && rxClsRange(cls, u) && rxPyLower(u) == x) { return true }
+    var t = RX_PY_LPRE
+    var i = 0
+    while (i < t.length && t[i] <= x) {
+        if (t[i] == x && rxClsRange(cls, t[i + 1])) { return true }
+        i = i + 2
+    }
+    return false
 }
 
 // rxClsHit is the raw membership test, BEFORE negation.
@@ -514,9 +572,8 @@ function rxClsHit(cls, c) {
         if (rxSpHas(sp[i], c)) { return true }
         i = i + 1
     }
-    // A pu class (P's Unicode case folding) already holds the other case of its
-    // ASCII letters (rxClsFold), and no other character's case is ASCII.
-    if (cls.u && !(cls.pu && c < 128)) { return rxClsHitU(cls, c) }
+    // A pu class (P's) is a u class too.
+    if (cls.u) { return cls.pu ? rxClsHitP(cls, c) : rxClsHitU(cls, c) }
     return false
 }
 
@@ -578,7 +635,8 @@ function rxClsMatchX(cls, c, icase) {
 //   items child nodes (always an array)
 //   cls   character class (always an object)
 //   min/max/greedy   for "rep" (max < 0 means unbounded); min of a "bref" is 1
-//         for a case-insensitive one, 2 under Java's UNICODE_CASE
+//         for a case-insensitive one, 2 under Java's UNICODE_CASE, 3 under
+//         Python's Unicode IGNORECASE
 //   gidx  capture index for "group" (-1: non-capturing), assertion kind for "assert",
 //         group index for "bref", 1 for a negative "look"
 
@@ -2092,7 +2150,7 @@ function rxParsePiece(st) {
             rxClsFold(atom.cls)
             if (st.pyuni) { rxClsFoldP(atom.cls) }
         }
-        if (atom.t == "bref") { atom.min = st.pyuni ? 2 : 1 }
+        if (atom.t == "bref") { atom.min = st.pyuni ? 3 : 1 }
     }
     if (st.java && st.icase && atom.t == "bref") { atom.min = st.ucase ? 2 : 1 }
     rxSkipX(st)
@@ -4911,6 +4969,9 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st, base, keep) {
                                 var lu = rxCaseU(lc, 1)
                                 var ru = rxCaseU(rc, 1)
                                 if (lu != ru && rxCaseU(lu, 0) != rxCaseU(ru, 0)) { bmis = true }
+                            } else if (bs[pc] == 3) {
+                                // CPython's GROUPREF_UNI_IGNORE: equal lowercases.
+                                if (rxPyLower(lc) != rxPyLower(rc)) { bmis = true }
                             } else if (rxSwapCase(rc) != lc) {
                                 bmis = true
                             }

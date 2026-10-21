@@ -338,26 +338,68 @@ func (c *rxCls) fold() {
 	}
 }
 
-// foldP is Python's Unicode IGNORECASE of a class. Twin of rxClsFoldP in
-// lib/regex.js.
+// foldP marks a class for Python's Unicode IGNORECASE, which hitP decides.
+// Twin of rxClsFoldP in lib/regex.js.
 func (c *rxCls) foldP() {
-	n := len(c.lo)
-	for i := 0; i < n; i++ {
-		a := c.lo[i]
-		if a < 128 {
-			a = 128
+	c.u, c.pu = true, true
+}
+
+// rxPyExtra and rxPyLPre are RX_PY_EXTRA and RX_PY_LPRE in lib/regex.js.
+var rxPyExtra = map[rune][]rune{105: {305}, 115: {383}, 181: {956}, 305: {105}, 383: {115}, 837: {953, 8126},
+	912: {8147}, 944: {8163}, 946: {976}, 949: {1013}, 952: {977}, 953: {837, 8126}, 954: {1008},
+	956: {181}, 960: {982}, 961: {1009}, 962: {963}, 963: {962}, 966: {981}, 976: {946},
+	977: {952}, 981: {966}, 982: {960}, 1008: {954}, 1009: {961}, 1013: {949}, 1074: {7296},
+	1076: {7297}, 1086: {7298}, 1089: {7299}, 1090: {7300, 7301}, 1098: {7302}, 1123: {7303},
+	7296: {1074}, 7297: {1076}, 7298: {1086}, 7299: {1089}, 7300: {1090, 7301}, 7301: {1090, 7300},
+	7302: {1098}, 7303: {1123}, 7304: {42571}, 7777: {7835}, 7835: {7777}, 8126: {837, 953},
+	8147: {912}, 8163: {944}, 42571: {7304}, 64261: {64262}, 64262: {64261}}
+var rxPyLPre = map[rune]rune{105: 304, 107: 8490, 223: 7838, 229: 8491, 454: 453, 457: 456, 460: 459, 499: 498,
+	952: 1012, 969: 8486}
+
+func (c *rxCls) inRange(ch rune) bool {
+	for i := range c.lo {
+		if ch >= c.lo[i] && ch <= c.hi[i] {
+			return true
 		}
-		if c.hi[i]-a >= 256 {
-			continue
+	}
+	return false
+}
+
+// hitP is CPython's IN_UNI_IGNORE test; twin of rxClsHitP in lib/regex.js.
+func (c *rxCls) hitP(ch rune) bool {
+	x := unicode.ToLower(ch)
+	if x != ch {
+		if c.inRange(x) {
+			return true
 		}
-		for r := a; r <= c.hi[i]; r++ {
-			l, u := unicode.ToLower(r), unicode.ToUpper(r)
-			for _, v := range [4]rune{l, u, unicode.ToUpper(l), unicode.ToLower(u)} {
-				c.add(v, v)
+		for _, s := range c.sp {
+			if rxSpHas(s, x) {
+				return true
 			}
 		}
 	}
-	c.u, c.pu = true, true
+	if x < 128 && x != 'i' && x != 'k' && x != 's' {
+		return false
+	}
+	if c.pyPre(x) {
+		return true
+	}
+	for _, y := range rxPyExtra[x] {
+		if c.inRange(y) || c.pyPre(y) {
+			return true
+		}
+	}
+	return false
+}
+
+// pyPre: does the class hold a character other than x whose lowercase is x?
+// Twin of rxPyPre in lib/regex.js.
+func (c *rxCls) pyPre(x rune) bool {
+	if u := unicode.ToUpper(x); u != x && c.inRange(u) && unicode.ToLower(u) == x {
+		return true
+	}
+	s, ok := rxPyLPre[x]
+	return ok && c.inRange(s)
 }
 
 // rxSwapCase answers the other-case code point of an ASCII letter, or -1.
@@ -382,7 +424,10 @@ func (c *rxCls) hit(ch rune) bool {
 			return true
 		}
 	}
-	if c.u && !(c.pu && ch < 128) {
+	if c.pu {
+		return c.hitP(ch)
+	}
+	if c.u {
 		return c.hitU(ch)
 	}
 	return false
@@ -2115,7 +2160,7 @@ func (st *rxSt) parsePiece() *rxNode {
 		if atom.t == "bref" {
 			atom.min = 1
 			if st.pyuni {
-				atom.min = 2
+				atom.min = 3
 			}
 		}
 	}
@@ -5352,6 +5397,11 @@ func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt,
 							// Java's CIBackRef under UNICODE_CASE.
 							lu, ru := unicode.ToUpper(lc), unicode.ToUpper(rc)
 							if lu != ru && unicode.ToLower(lu) != unicode.ToLower(ru) {
+								mis = true
+							}
+						} else if re.bs[pc] == 3 {
+							// CPython's GROUPREF_UNI_IGNORE: equal lowercases.
+							if unicode.ToLower(lc) != unicode.ToLower(rc) {
 								mis = true
 							}
 						} else if rxSwapCase(rc) != lc {

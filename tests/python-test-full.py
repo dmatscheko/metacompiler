@@ -787,6 +787,17 @@ def s22():
     # stack of its own, not the native one.
     long = "ab" * 35000
     check("re41", re.match(r"^.*$", long).end() == 70000 and re.fullmatch(r"(ab)*", long).span(1) == (69998, 70000))
+    # IGNORECASE matches a character whose lowercase is in the set of the
+    # pattern's lowercases, plus re._casefix's extra pairs (U+0390 and U+1FD3,
+    # beta and its symbol form); a long range is folded like a short one. A
+    # backreference compares lowercases only.
+    check("re42", re.match("(?i)ΐ", "ΐ") is not None and re.match("(?i)[ϐ]", "β") is not None
+          and re.fullmatch("(?i)µ", "Μ") is not None and re.fullmatch("(?i)[İ]", "i") is not None
+          and re.fullmatch("(?i)ǅ", "Ǆ") is not None)
+    check("re43", re.fullmatch("(?i)[℀-∀]+", "kKåω") is not None and re.fullmatch("(?i)[Ā-˿]", "s") is not None
+          and re.fullmatch("(?i)[^℀-∀]", "k") is None)
+    check("re44", re.fullmatch(r"(?i)(s)\1", "sſ") is None and re.fullmatch(r"(?i)(k)\1", "kK") is not None
+          and re.fullmatch(r"(?i)(β)\1", "βϐ") is None)
 
 # ===== SECTION 23: interpreter/compiler agreement ratchet =====
 # Every check here is a place where python-interpreter.abnf and
