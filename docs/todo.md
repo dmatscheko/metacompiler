@@ -141,7 +141,7 @@ parameter), which no engine prints either.
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
-### T-741 tooling: -callgraph residue — go function bodies unnamed, runtime helpers as nodes, method-call externs, entry functions · P3 · CORE · OPEN [V]
+### T-741 tooling: -callgraph residue — go function bodies unnamed, runtime helpers as nodes, method-call externs, entry functions · P3 · CORE · IN PROGRESS (CORE worker, round 5) [V]
 Go: a function body is a separate closure that never gets a name, so `main` calling `g` reads `jsf_78 -> g` (go left out of
 EDGE_CASES). Runtime helpers still appear as definitions/callees: jsnum.N, sw_copy and other sw_*, lua_appendall/lua_mk/lua_str,
 kt_safeget/kt_clsfind/kt_dread/kt_fprobe, dt_safeget, php_scope_probe/php_site_text (treat every defined non-jsf_N, non-scaffold
