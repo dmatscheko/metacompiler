@@ -680,7 +680,7 @@ NotTilde = :script(~~
     })()
 ~~) ;
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
-            = TargetHead { "." Id <~~ push({key: up.in}) ~~> | "&." Id <~~ push({key: up.in}) ~~>
+            = TargetHead { "." Id <~~ push({key: up.in, call: true}) ~~> | "&." Id <~~ push({key: up.in}) ~~>
               | "::" Id <~~ push({key: up.in}) ~~> | TIndex } ;
 // The '@@' alternative must come BEFORE '@' (PEG: the shorter one would win), and the
 // scoped-constant head before the plain name for the same reason. `self` is a head of
@@ -3912,17 +3912,20 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         emitLocalSet(b, ref.name, v)
         return b
     }
+    // A `.name' step before the last is a zero-argument method call; the last step
+    // is the place written. Twin of resolveRefRuby in ruby-interpreter.abnf.
     function emitRefPath(b, ref) {
         var rh = emitHead(b, ref)
         b = rh.b
         var o = rh.v
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
-            if (s.key != undefined) { o = callExt(b, "js_get", [o, emitStr(b, s.key)]) }
+            if (s.call) { o = callExt(b, "js_rxmcall", [o, emitStr(b, methodKey(s.key)), callExt(b, "js_arr_new", [])]) }
+            else if (s.key != undefined) { o = callExt(b, "js_get", [o, emitStr(b, s.key)]) }
             else { var ri = s.idx(b); b = ri.b; o = callExt(b, core.indexExt, [o, ri.v]) }
         }
         var last = ref.path[ref.path.length - 1]
-        if (last.key != undefined) { return {b: b, obj: o, key: emitStr(b, last.key), key2: hUndef, dict: true} }
+        if (last.key != undefined) { return {b: b, obj: o, key: emitStr(b, last.key), key2: hUndef, dict: true, call: last.call == true, name: last.key} }
         var kr = last.idx(b)
         b = kr.b
         var k2V = hUndef
@@ -4571,33 +4574,39 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
     }
     // TARGET << V: the append statement. An Array and a String are both changed in
-    // place by js_rshl.
+    // place by js_rshl. A plain string read from a variable or an Array / Hash
+    // element becomes a box put back in that place first (js_rsprom); a `.name' last
+    // step is a method call, whose answer is no place. Twin of makeAppendStmt in
+    // ruby-interpreter.abnf.
     function makeAppendStmt(items) {
         var ref = items[0]
         var vals = items.slice(1)
         return function(b) {
-            var rr = emitHead(b, ref)
-            b = rr.b
-            var v = rr.v
-            for (var q = 0; q < ref.path.length; q++) {
-                var st = ref.path[q]
-                if (st.key != undefined) { v = callExt(b, "js_get", [v, emitStr(b, st.key)]) }
-                else {
-                    var ri = st.idx(b)
-                    b = ri.b
-                    v = callExt(b, core.indexExt, [v, ri.v])
+            var v = hUndef
+            if (ref.path.length == 0) {
+                var rr = emitHead(b, ref)
+                b = rr.b
+                v = rr.v
+                var nb = callExt(b, "js_rsprom", [hUndef, hUndef, v])
+                var setB = curF.NewBlock("")
+                var doneB = curF.NewBlock("")
+                b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, nb, v), setB, doneB)
+                setB = emitHeadSet(setB, ref, nb)
+                setB.NewBr(doneB)
+                b = doneB
+                v = nb
+            } else {
+                var p = emitRefPath(b, ref)
+                b = p.b
+                if (p.call) {
+                    v = callExt(b, "js_rxmcall", [p.obj, emitStr(b, methodKey(p.name)), callExt(b, "js_arr_new", [])])
+                    v = callExt(b, "js_rsprom", [hUndef, hUndef, v])
+                } else if (p.dict) {
+                    v = callExt(b, "js_rsprom", [hUndef, hUndef, callExt(b, "js_get", [p.obj, p.key])])
+                } else {
+                    v = callExt(b, "js_rsprom", [p.obj, p.key, callExt(b, core.indexExt, [p.obj, p.key])])
                 }
             }
-            // A plain string in the target becomes a box, written back first, so
-            // the append changes the object the target holds.
-            var nb = callExt(b, "js_rsprom", [hUndef, hUndef, v])
-            var setB = curF.NewBlock("")
-            var doneB = curF.NewBlock("")
-            b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, nb, v), setB, doneB)
-            setB = emitAssignTarget(setB, ref, nb)
-            setB.NewBr(doneB)
-            b = doneB
-            v = nb
             for (var i = 0; i < vals.length; i++) {
                 var rv = vals[i](b)
                 b = rv.b

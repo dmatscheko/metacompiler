@@ -4056,6 +4056,41 @@ def s90
   check("fr90b", s90at(s90err { "%d" % v[6] }, "%") && s90at(s90err { format("%d", v[6]) }, "format") &&
         s90at(s90err { sprintf("%d", v[0]) }, "sprintf"))
 end
+# ===== SECTION 91: `<<` through a method call in the target =====
+# `a.first << x` appends to the object the call answers: a `.name` step of an
+# append target is a method call, not a place, and an `[i]` step reads the element
+# once. A String key read out of a Hash is frozen. /usr/bin/ruby 2.6 settles each.
+class S91C
+  def initialize; @w = [[1], [2]]; @n = 0; end
+  def w; @n += 1; @w; end
+  attr_reader :n
+end
+def s91
+  v = [1, 2, 3, "ab", "c", "abc", -1]
+  a = [[v[0], v[1]]]
+  a.first << v[2]
+  check("ap91a", a == [[1, 2, 3]])
+  s = [v[3].dup]
+  s.last << v[4]
+  check("ap91b", s == ["abc"])
+  c = S91C.new
+  c.w.first << 5
+  c.w[1] << 6
+  check("ap91c", c.w == [[1, 5], [2, 6]] && c.n == 3)
+  h = {v[5] => 1}
+  e = begin; h.keys[0] << "x"; nil; rescue => x; x.class; end
+  check("ap91d", e == FrozenError && h == {"abc" => 1})
+  t = v[5].dup
+  t[0] << "x"
+  check("ap91e", t == "abc")
+  i = v[6]
+  b = ["p", "q"]
+  b[i += 1] << "!"
+  check("ap91f", b == ["p!", "q"] && i == 0)
+  d = Hash.new("")
+  d[:k] << "x"
+  check("ap91g", d == {} && d[:z] == "x")
+end
 
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
@@ -4109,6 +4144,7 @@ s87() # SECTION-CALL 87
 s88() # SECTION-CALL 88
 s89() # SECTION-CALL 89
 s90() # SECTION-CALL 90
+s91() # SECTION-CALL 91
 s95() # SECTION-CALL 95
 s96() # SECTION-CALL 96
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"

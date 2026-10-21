@@ -645,7 +645,7 @@ NotTilde = :script(~~
     })()
 ~~) ;
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
-            = TargetHead { "." Id <~~ push({key: up.in}) ~~> | "&." Id <~~ push({key: up.in}) ~~>
+            = TargetHead { "." Id <~~ push({key: up.in, call: true}) ~~> | "&." Id <~~ push({key: up.in}) ~~>
               | "::" Id <~~ push({key: up.in}) ~~> | TIndex } ;
 // The '@@' alternative must come BEFORE '@' (PEG: the shorter one would win), and the
 // scoped-constant head before the plain name for the same reason. `self` is a head of
@@ -10635,15 +10635,19 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         sc["__names"].push(name)
         scopePut(sc, name, value)
     }
+    // A `.name' step before the last is a zero-argument method call, read as a
+    // member chain reads it (foldCallMember); the last step is the place written.
+    // Twin of emitRefPath in ruby-to-llvm-ir.abnf.
     function resolveRefRuby(ref) {
         var o = anytype
         o = readTarget(ref)
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
-            if (s.key != undefined) { o = hasOwn(o, s.key) ? o[s.key] : undefined } else { o = rindex(o, s.idx()) }
+            if (s.call) { o = boxOut(o, mcall(o, s.key, [], null)) }
+            else if (s.key != undefined) { o = hasOwn(o, s.key) ? o[s.key] : undefined } else { o = rindex(o, s.idx()) }
         }
         var last = ref.path[ref.path.length - 1]
-        if (last.key != undefined) { return {obj: o, key: last.key, key2: undefined, isIdx: false} }
+        if (last.key != undefined) { return {obj: o, key: last.key, key2: undefined, isIdx: false, call: last.call == true} }
         var k2 = anytype
         k2 = (last.idx2 != undefined && last.idx2 != null) ? last.idx2() : undefined
         return {obj: o, key: last.idx(), key2: k2, isIdx: true}
@@ -12190,29 +12194,36 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return v
         }
     }
-    // TARGET << V: the append statement. A plain string in the target is made a box
-    // and written back first, so the append changes the object the target holds.
-    function readTargetFull(ref) {
-        if (ref.path.length == 0) { return readTarget(ref) }
-        var p = resolveRefRuby(ref)
-        // A MISS answers the hash's default, exactly as Hash#[] does - so
-        // `nest[k] << v' on a Hash.new { |h, k| h[k] = [] } appends to the array the
-        // default block just installed.
-        if (isDict(p.obj)) {
-            var di = dictFind(p.obj, p.key)
-            return di < 0 ? hashDefault(p.obj, p.key) : p.obj.vals[di]
-        }
-        return rindex(p.obj, p.key)
-    }
+    // TARGET << V: the append statement. A plain string read from a variable or an
+    // Array / Hash element is made a box and put back in that place first, so the
+    // append changes the object the target holds; a `.name' last step is a method
+    // call, whose answer is no place. Twin of makeAppendStmt in ruby-to-llvm-ir.abnf.
     function makeAppendStmt(items) {
         var ref = items[0]
         var vals = items.slice(1)
         return function() {
             var v = anytype
-            v = readTargetFull(ref)
-            if (typeof v == "string") {
-                v = mkRStr(v)
-                assignTargetRef(ref, v)
+            if (ref.path.length == 0) {
+                v = readTarget(ref)
+                if (typeof v == "string") {
+                    v = mkRStr(v)
+                    writeTarget(ref, v)
+                }
+            } else {
+                var p = resolveRefRuby(ref)
+                if (p.call) { v = boxOut(p.obj, mcall(p.obj, p.key, [], null)) }
+                else if (isDict(p.obj)) {
+                    // A MISS answers the hash's default, exactly as Hash#[] does - so
+                    // `nest[k] << v' on a Hash.new { |h, k| h[k] = [] } appends to the
+                    // array the default block just installed.
+                    var di = dictFind(p.obj, p.key)
+                    v = di < 0 ? hashDefault(p.obj, p.key) : p.obj.vals[di]
+                } else { v = rindex(p.obj, p.key) }
+                if (typeof v == "string") {
+                    var nb = mkRStr(v)
+                    if (p.isIdx) { promoteElem(p.obj, p.key, v, nb) }
+                    v = nb
+                }
             }
             for (var i = 0; i < vals.length; i++) { v = appendOp(v, vals[i]()) }
             return v
