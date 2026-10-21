@@ -76,7 +76,7 @@ non-ASCII class range spanning 256 or more characters only gets the text-side up
 
 # JS — JavaScript and TypeScript
 
-### T-702 js: numeric-key class statics; for-in over a subclass skips inherited statics · P2 · JS · OPEN [V]
+### T-702 js: numeric-key class statics; for-in over a subclass skips inherited statics · P2 · JS · IN PROGRESS (JS worker, round 21) [V]
 `class A { static 7 = "seven" }; let i = 7; A[7], A["7"], A[i]` → node `seven seven seven`; interp and native `undefined seven
 undefined` (llvm.Run right): halves diverge, interpreter grammar and layer 2. `class A { static 7 = "seven"; static k = 1 } class B
 extends A {}; for (k in B)` → node `7,k`, all legs empty (js and ts).
