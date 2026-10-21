@@ -132,12 +132,6 @@ parameter), which no engine prints either.
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
-### T-748 tooling: ruby -callgraph names regressed to `$d$f` after top-level defs stopped binding the plain name · P1 · CORE · IN PROGRESS (CORE worker, round 6) [V]
-tests/srcpos-probe.sh (a gate) on main: `FAIL ruby: definitions are on [f@1], -callgraph says [<module>@1 $d$f@1]` and edges
-`$d$g->$d$h`, `m->$d$g` instead of `g->h`, `m->g`. Cause: 910997a4 made a top-level ruby def bind only `$d$name` (so `k2 = k2` reads
-nil); abnf/callgraph.go named the definition from the plain-name store. Map ruby's `$d$NAME` slot to the source name `NAME` in the name
-pass (the def's own name, not a strip of every `$`), keep 910997a4's semantics, srcpos back to 39/39.
-
 ### T-184 dart: `IndexError` vs `RangeError` text for `[1,2,3][7]` · P3 · DA · BLOCKED - needs a Dart VM to settle [U spec-only]
 A reviewer argued the VM prints `RangeError (index): Invalid value: Not in inclusive
 range 0..2: 7` (a plain RangeError); the current engines print the IndexError form
@@ -792,6 +786,7 @@ T-744 ruby: Array/Hash#dig; values_at with ranges; rescue-skipped locals; single
 T-745 ruby: `&->` lambda self in define_method; compiler `k = k`; interp nil class constant; shared attr_writer name — DONE 9d2ebaf5 ceac1b25 (&-> define_method self, compiler k = k, interp nil class constants, missing attr setters raise with a per-class attr_writer marker fast path: attr-write loop +1.2% vs main — = ruby 2.6; follow-up T-746)
 T-746 ruby: private setters; `5.x = 1` crashes the interpreter; attr_writer in a module (compiler); local shadowing a method (interp); define_method arity — DONE 23eb3c9d (private setters incl. inherited, setters on any value, module attrs, interp local hiding a method, define_method arity, freeze/public_instance_methods/constants/method_defined? — = ruby 2.6; frozen-instance writes DECLINED, see Settled; follow-up T-747)
 T-747 ruby: halves divergences — Method#arity in the Go twin, inherited private setter from a subclass, compiler local hiding a method; `nil.x =`; missing keyword — DONE 910997a4 (Method#arity via explicit receivers in the Go twin, inherited private setter visibility, .new in call-chain setter targets, known locals over methods in the compiler, nil.x =, missing keyword errors incl. interpreter block keywords — = ruby 2.6)
+T-748 tooling: ruby -callgraph names regressed to `$d$f` after top-level defs stopped binding the plain name — DONE 022d8358 bdc1920e (ruby $d$NAME definitions named by their source name; js_rarity seen through as a passthrough — srcpos 39/39, other languages' graphs byte-identical)
 
 # Settled — do not re-open
 
