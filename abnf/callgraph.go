@@ -162,17 +162,18 @@ func appendCallgraphRecords(defs []cgDef, calls []cgCall) {
 		return
 	}
 	defer f.Close()
+	// Names such as "<module>" stay readable: no HTML escaping.
+	enc := json.NewEncoder(f)
+	enc.SetEscapeHTML(false)
 	// A failed write (full disk...) must not silently truncate the graph.
 	for _, d := range defs {
-		line, _ := json.Marshal(&TraceEvent{Ev: "sdef", Name: d.Name, Line: d.Line, Obj: d.File})
-		if _, err := f.Write(append(line, '\n')); err != nil {
+		if err := enc.Encode(&TraceEvent{Ev: "sdef", Name: d.Name, Line: d.Line, Obj: d.File}); err != nil {
 			fmt.Fprintln(os.Stderr, "callgraph write failed: ", err)
 			return
 		}
 	}
 	for _, c := range calls {
-		line, _ := json.Marshal(&TraceEvent{Ev: "scall", Name: c.From, Key: c.To, Obj: c.File})
-		if _, err := f.Write(append(line, '\n')); err != nil {
+		if err := enc.Encode(&TraceEvent{Ev: "scall", Name: c.From, Key: c.To, Obj: c.File}); err != nil {
 			fmt.Fprintln(os.Stderr, "callgraph write failed: ", err)
 			return
 		}
@@ -210,6 +211,12 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 			}
 		}
 	}
+
+	// The module entry scaffolding (jsmain and the shared-scope variant jsrun) is
+	// not program structure: its edges come from "(top)" and it never registers
+	// as a definition.
+	scaffold := func(n string) bool { return n == "jsmain" || n == "jsrun" }
+	fnName := map[string]string{} // jsf_N -> its source name
 
 	// Pass 1: string literals and closure creations (values compare by pointer).
 	var posFn *ir.Func
@@ -254,6 +261,15 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 				}
 			}
 			return
+		case "js_try":
+			// The try body the entry scaffold runs is the module top level (python
+			// and swift run the whole program inside one js_try); it is named as
+			// python's traceback names it.
+			if scaffold(f.Name()) && len(call.Args) > 0 {
+				if fn, ok := closureFn[call.Args[0]]; ok {
+					fnName[fn] = "<module>"
+				}
+			}
 		}
 		adj = false
 	})
@@ -261,7 +277,6 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 	// Pass 2: name reads, and the source names of the IR functions (a closure
 	// gets its name where it is stored: a declaration, an assignment, or the
 	// method slot of a class descriptor).
-	fnName := map[string]string{}
 	forEachCall(func(f *ir.Func, call *ir.InstCall, callee string) {
 		switch callee {
 		case "js_scope_get", "js_kget", "js_ktget":
@@ -309,9 +324,7 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 		return irName
 	}
 
-	// Pass 3: definitions and edges. The module entry scaffolding (jsmain and
-	// the shared-scope variant jsrun) is not program structure: its edges come
-	// from "(top)" and it never registers as a definition.
+	// Pass 3: definitions and edges.
 	// Stamp any functions still unattributed (the main file's, compiled after
 	// the last import popped) with the final source, so every function has one.
 	attributeModuleFuncs()
@@ -324,7 +337,6 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 		return traceSrcName, traceLineStarts
 	}
 
-	scaffold := func(n string) bool { return n == "jsmain" || n == "jsrun" }
 	var defs []cgDef
 	var calls []cgCall
 	unattributed := 0

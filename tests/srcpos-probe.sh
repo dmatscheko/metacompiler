@@ -29,7 +29,8 @@
 #    first statement (DEF_CASES): every header line is reported. Extra lines are
 #    allowed, as above - go's function body is a closure of its own, named by
 #    its first statement. A NAME@LINE entry also demands the definition there
-#    carry its source name, not the IR function's (jsf_N).
+#    carry its source name, not the IR function's (jsf_N): each swift overload
+#    its own name at its own line, a module top level run as a closure <module>.
 #
 # A language in the list below that emits NO markers at all is a FAILURE: the
 # list is exactly the handle-IR compilers, all of which are supposed to have
@@ -139,7 +140,7 @@ done
 
 # LANG:EXT:the header lines (or NAME@LINE) of the definitions in def_src_for().
 DEF_CASES=(
-    "python:py:f@1"
+    "python:py:f@1 <module>@1"
     "ruby:rb:f@1"
     "php:php:f@2"
     "js:js:f@1 main@5"
@@ -150,7 +151,7 @@ DEF_CASES=(
     "kotlin:kt:f@1 main@5"
     "java:java:f@2 main@6"
     "csharp:cs:F@3 Main@7"
-    "swift:swift:f@1"
+    "swift:swift:f@1 f@5 <module>@1"
     "go:go:f@3 main@8"
 )
 def_src_for() {
@@ -165,7 +166,7 @@ def_src_for() {
     kotlin) printf 'fun f(a: Int): Int {\n    val b = a\n    return b\n}\nfun main() {\n    f(1)\n}\n' ;;
     java)   printf 'public class Main {\n  static int f(int a) {\n    int b = a;\n    return b;\n  }\n  public static void main(String[] x) {\n    f(1);\n  }\n}\n' ;;
     csharp) printf 'using System;\nclass Program {\n  static int F(int a) {\n    int b = a;\n    return b;\n  }\n  static void Main() {\n    F(1);\n  }\n}\n' ;;
-    swift)  printf 'func f(_ a: Int) -> Int {\n    let b = a\n    return b\n}\nlet r = f(1)\n' ;;
+    swift)  printf 'func f(_ a: Int) -> Int {\n    let b = a\n    return b\n}\nfunc f(_ a: String) -> String {\n    return a\n}\nlet r = f(1)\n' ;;
     go)     printf 'package main\n\nfunc f(a int) int {\n\tb := a\n\treturn b\n}\n\nfunc main() {\n\tf(1)\n}\n' ;;
     esac
 }
