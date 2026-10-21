@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-737** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-738** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -78,11 +78,6 @@ NoMethodError (ruby true).
 ---
 
 # JS — JavaScript and TypeScript
-
-### T-734 js: `Object.assign` onto an array aborts compiled; data attributes on array indices · P2 · JS · IN PROGRESS (JS worker, round 30) [V]
-`Object.assign([0,0,9], [1,2]).join()` → node and the interpreters `1,2,9`; llvm.Run and native abort "Object.assign needs an object
-target" (halves diverge). `Object.defineProperty(a, "0", {value: 1, writable: false})` (any data attribute on an index, including
-turning an index accessor back into data — node then reports writable false) is ignored; the element stays writable.
 
 ---
 
@@ -144,10 +139,10 @@ parameter), which no engine prints either.
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
-### T-735 tooling: -callgraph definition names for python (`jsf_N`), php (body line, not header), swift (mangled `f$1`) · P3 · CORE · IN PROGRESS (JS worker, round 30) [V]
-`-callgraph` names python `def f` as `jsf_70@1` (like js before its fix: the name pass misses the wrapper the closure goes through),
-puts a php `function f` at its body's first line instead of the header line, and reports swift `f` as `f$1`. Extend
-tests/srcpos-probe.sh's NAME@LINE cases to these languages and fix the name/position recovery in abnf/callgraph.go or the emitters.
+### T-737 tooling + js: swift overloads and module bodies in -callgraph; `Object.assign(5, {...})` compiled · P3 · CORE · OPEN [V]
+-callgraph names swift overloads `g$1@12` / `g$2@13` (the name `g` goes to the line-less dispatch closure): name each overload `g` at
+its own line. Python and swift module bodies appear as `jsf_N@line`; name them `<module>` (as python tracebacks do) or `main`.
+`Object.assign(5, {a:1})` fails in the compiled js halves; node returns a Number wrapper (wrapper objects exist since T-669).
 
 ### T-184 dart: `IndexError` vs `RangeError` text for `[1,2,3][7]` · P3 · DA · BLOCKED - needs a Dart VM to settle [U spec-only]
 A reviewer argued the VM prints `RangeError (index): Invalid value: Not in inclusive
@@ -789,6 +784,8 @@ T-730 bash: a pipeline's last stage runs in the current shell; scalar `-i`/`-u` 
 T-733 bash: `o=$(nosuchcmd)` halves diverge; `exec` unsupported — DONE 820fcdfe (command not found on stderr ending its own subshell in both halves, redirection-only and bare exec — = bash 5.3)
 T-731 js: accessors on array indices; -callgraph names js functions `jsf_N` — DONE 389e9440 f9c16192 (-callgraph source names for js/ts with srcpos-probe checking NAME@LINE in 10 languages; index accessors honoured by reads, iteration, methods and introspection behind a counter gate — = node, all benches within spread; follow-ups T-734/T-735)
 T-732 ruby: `3r % 0` hangs the interpreter; `!x` after a newline read as a method suffix; operator/arity gaps — DONE 82d93a95 (Rational zero divisors raise, glued ?/! suffixes, x.OP(y) as send, receiver-less send to top-level defs, negative array sizes, frames for format and blocks — = ruby 2.6; follow-up T-736)
+T-734 js: `Object.assign` onto an array aborts compiled; data attributes on array indices — DONE d83425a1 (Object.assign onto arrays/functions through js_jsmset, per-index data attributes with spec-ordered movers in a shared js-arrmove.js — ~200-row probes = node)
+T-735 tooling: -callgraph definition names for python (`jsf_N`), php (body line, not header), swift (mangled `f$1`) — DONE a130da28 (python name pass follows js_pysig/js_pyfnname, php hoisted defs at their header, swift single definitions by source name — srcpos 26/26; follow-up T-737)
 
 # Settled — do not re-open
 
