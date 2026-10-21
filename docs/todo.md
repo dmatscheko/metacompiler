@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-725** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-727** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -79,15 +79,21 @@ p(v[0] + v[1])` → `"a1"` in all engines (ruby TypeError "no implicit conversio
 
 # JS — JavaScript and TypeScript
 
+### T-725 js: accessors inherited through a prototype object; `Reflect` missing in the interpreter · P2 · JS · OPEN [V]
+`var c = Object.create({get acc(){return 1}}); c.acc` → node 1; interp undefined, llvm.Run a raw Go struct (`&{0x… <nil>}`), native
+`[object Object]`; same for `F.prototype` / `A.prototype` accessors set with defineProperty; inherited setters never run and writes
+create own properties (node `o.set 1` / `false`). Needs the getter/setter lookup through the prototype view (`__pview`) on read and
+write in all engines. `Reflect` → ReferenceError in the js interpreter while the compiled legs have it (halves diverge).
+
+### T-726 js: accessors on array indices / functions via defineProperty; Symbol-keyed properties under freeze and in messages · P3 · JS · OPEN [V]
+`Object.defineProperty(a, "0", {get(){…}})` and the same on a function value are ignored (all engines). `Object.freeze` does not
+protect Symbol-keyed properties (strict write accepted; node "Cannot assign to read only property 'Symbol(q)' of object"); refusal
+messages print the internal key (`__#@match`) where node prints `Symbol(Symbol.match)`.
+
 ### T-723 js/ts: tests/srcpos-probe.sh reports -callgraph definition lines off by one · P1 · JS · OPEN [V]
 `tests/srcpos-probe.sh` on main: `FAIL js: definitions are on [1 5], -callgraph says [2 6]` (typescript the same); the other 24
 languages pass. A recent js/ts grammar change shifted the recorded definition position (suspects: function source spans
 js-fnsrc.js, class-in-try, new.target binding at entry). Bisect, fix, and wire srcpos-probe into the per-language verification.
-
-### T-718 js: a strict-mode write to a getter-only property is silently dropped · P3 · JS · IN PROGRESS (JS worker, round 27) [V]
-`"use strict"; var o = { get acc(){ return 1 } }; o.acc = 2` → node "TypeError: Cannot set property acc of #<Object> which has only a
-getter" (`of [object Array]` for an array named key; classes' getters likewise); all our engines drop the write. Every .ts file runs
-strict, so this affects all TypeScript.
 
 ---
 
@@ -811,6 +817,7 @@ T-708 core: building a large string natively is quadratic in ar_block's free-lis
 T-674 go (CORE): native recursion capped at ~500 Go frames by the js_gotry jump-buffer stack — DONE 3c89e494 (jmp_buf pool doubles instead of capping at 512; native go recursion now bounded by the 8 MB C stack, ~16,500 frames; = go run on depth 5000 and 10000-deep json)
 T-505 java (and probably every language): unbounded recursion kills the process instead of raising — DONE 4b8bcb99 (one call counter in all four engines raising each language's own error — python RecursionError at CPython's 1000, js RangeError, java/kotlin StackOverflowError, ruby SystemStackError, lua catchable stack overflow, dart StackOverflowError, go fatal exit 2, swift SIGSEGV, csharp per .NET docs; non-python limit 10,000 frames, below the reference for java/lua/go but within what the native 8 MB C stack allows; php/metajs → T-721)
 T-722 ruby: an uncaught internal error lacks MRI's `file:line:in 'meth': ` prefix — DONE 3430e76e for SystemStackError (statement site register in both engines, = ruby 2.6 first line and backtrace[0]); builtin-raised errors need frame names at jsrt.go raise sites → T-724
+T-718 js: a strict-mode write to a getter-only property is silently dropped — DONE efccf010 (getter-only writes raise node's TypeError naming the holder in strict code and drop without an own property in sloppy, incl. statics, destructuring, Object.assign; stale accessors after delete/redefine — 4 legs = node, TS via tsc 6; follow-ups T-725/T-726)
 
 # Settled — do not re-open
 
