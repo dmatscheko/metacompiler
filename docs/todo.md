@@ -68,7 +68,7 @@ its report; anything structural there is a CORE ticket.
 
 # RB — Ruby
 
-### T-722 ruby: an uncaught internal error lacks MRI's `file:line:in 'meth': ` prefix · P3 · RB · OPEN [V]
+### T-722 ruby: an uncaught internal error lacks MRI's `file:line:in 'meth': ` prefix · P3 · RB · IN PROGRESS (RB worker, round 9) [V]
 An uncaught SystemStackError (and other internally raised errors) prints `stack level too deep (SystemStackError)`; ruby prints
 `rec.rb:1:in 'rec': stack level too deep (SystemStackError)` (2.6: `in `rec'`). All three engines.
 
@@ -148,7 +148,7 @@ linear; bench bash.
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
-### T-721 php / metajs: unbounded recursion still kills the process · P3 · CORE · OPEN [U spec-only]
+### T-721 php / metajs: unbounded recursion still kills the process · P3 · CORE · IN PROGRESS (CORE worker, round 2) [U spec-only]
 php and metajs have no deep-recursion hook (T-505's js_rt_deep / coreDeepHook): interp and llvm.Run die with Go's fatal stack
 overflow, native SIGSEGV. php 8.3+ throws an Error whose message embeds a platform-dependent size (zend.max_allowed_stack_size /
 "Maximum call stack size of N bytes reached"); settle the text from php-src. metajs needs the hook in metajs-to-llvm-ir plus a re-freeze.
@@ -158,13 +158,13 @@ overflow, native SIGSEGV. php 8.3+ throws an Error whose message embeds a platfo
 Split the file (as go/js did with .2/.3/.4 parts, wired into test.sh / native-full.sh / gates) or raise -max-steps for --full with
 a documented reason.
 
-### T-716 core: a non-canonical numeric string key (`"01"`, `"1.0"`, `"+1"`, `" 1"`, `"-0"`) is an array index · P2 · CORE · OPEN [V]
+### T-716 core: a non-canonical numeric string key (`"01"`, `"1.0"`, `"+1"`, `" 1"`, `"-0"`) is an array index · P2 · CORE · IN PROGRESS (CORE worker, round 2) [V]
 js `k=[]; k["01"]=7` → node: named property (length 0, `k[1]` undefined, keys `01`); llvm.Run/native: index 1 (length 2); interpreter
 stores it where keys/`in` cannot see it. Make rt.arrIndexOf (abnf/jsrt.go), index_of_key / maybe_numeric (runtime.c) and the
 interpreters' jsArrIndexKey accept only canonical indices for string keys in js mode (`ToString(ToUint32(k)) === k`, `< 2^32-1`);
 check lua / php / other languages' numeric-string coercion first (they may rely on it — gate by language if so).
 
-### T-640 js (CORE): arguments mapped through another function; array holes · P3 · CORE · OPEN [V]
+### T-640 js (CORE): arguments mapped through another function; array holes · P3 · CORE · IN PROGRESS (CORE worker, round 2) [V]
 `function h(a){ a[0] = 9 } function f(p){ h(arguments); return p }; f(1)` → all legs 1 (node 9); likewise a closure writing through
 `var a = arguments`. Needs a back-pointer from the arguments array to its call scope: a traced field on the floor's array cell
 (gc_trace_cell's tag-5 arm pays a gc_try per array per collection, every language), get/set host ids in three engines, a jsArray field
@@ -173,7 +173,7 @@ parameter through arguments[i] (cost on every such read). Holes: `delete arr[1]`
 false false 3`, `h2 0,3 false true 4`; needs a hole marker distinct from undefined that every array read maps back (arr_get/js_get
 shared by all languages). Measure with tests/bench.sh for all languages. Also: `Object.keys` / for-in list holes (`k=[]; k["1"]=7; Object.keys(k)` → node `1`, ours `0,1`; `h[6]=9` on `[1,2,3]` → node `0,1,2,6`).
 
-### T-594 go (CORE): UTF-8-encoded surrogate bytes are rejoined by the shared string floor · P3 · CORE · OPEN [V]
+### T-594 go (CORE): UTF-8-encoded surrogate bytes are rejoined by the shared string floor · P3 · CORE · IN PROGRESS (CORE worker, round 2) [V]
 `s := "\xed\xa0\x80" + "\xed\xb0\x80"; fmt.Println(len(s), []byte(s))` → go `6 [237 160 128 237 176 128]` and raw output;
 interp right; llvm.Run and native `4 [240 144 128 128]`, a lone triple prints EF BF BD. The floor's str_cat / strConcat and
 the print path (print_val → fmt_top → wtf8_clean, writeBytes writes code units) read the bytes as WTF-8. Needs a go-mode raw
