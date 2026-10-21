@@ -1492,7 +1492,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var hadA = hasOwn(arrs, ak) && arrs[ak] != null
         fr.push({name: name, had: isSetVar(name), val: getVarVal(name),
                  ai: attrOn(intVars, name), au: attrOn(upVars, name), al: attrOn(loVars, name),
-                 ad: attrOn(dclVars, name), hasArr: hadA, arr: hadA ? arrCopy(arrs[ak]) : {assoc: false, keys: [], vals: {}, lit: false, decl: false}})
+                 ad: attrOn(dclVars, name), hasArr: hadA, arr: hadA ? arrCopy(arrs[ak]) : {assoc: false, keys: [], vals: {}, gone: {}, lit: false, decl: false}})
     }
 
     // Is NAME a local of the INNERMOST call frame?
@@ -2618,12 +2618,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (upper) { upVars["$" + names[k]] = true; loVars["$" + names[k]] = false }
                 if (lower) { loVars["$" + names[k]] = true; upVars["$" + names[k]] = false }
                 // A global `declare -a a` keeps a's elements; only a value or a local starts empty.
-                if (isArray && asgs[k] == null) { arrEnsure(names[k], assoc); arrs[arrKey(names[k])].decl = true }
+                if (isArray && asgs[k] == null) {
+                    if (!assoc && !localize) { arrAdopt(names[k]) }
+                    arrEnsure(names[k], assoc)
+                    arrs[arrKey(names[k])].decl = true
+                }
                 if (asgs[k] != null) {
                     if (isArray) { arrNew(names[k], assoc) }
                     runAssign(asgs[k], assoc)
                 }
-                else if (localize && !isArray) { unsetVar(names[k]) }
+                else if (localize) { unsetVar(names[k]) }
                 if (asgs[k] == null && !isArray && kw != "export" && kw != "readonly") { dclVars["$" + names[k]] = true }
             }
             var ab = takeAbort()
@@ -3101,7 +3105,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var nm = stNames[i]
             var ak = arrKey(nm)
             var hadA = hasOwn(arrs, ak) && arrs[ak] != null
-            out.push({hasArr: hadA, arr: hadA ? arrCopy(arrs[ak]) : {assoc: false, keys: [], vals: {}, lit: false, decl: false},
+            out.push({hasArr: hadA, arr: hadA ? arrCopy(arrs[ak]) : {assoc: false, keys: [], vals: {}, gone: {}, lit: false, decl: false},
                       ai: attrOn(intVars, nm), au: attrOn(upVars, nm), al: attrOn(loVars, nm), ad: attrOn(dclVars, nm)})
         }
         return out
@@ -3142,7 +3146,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function arrNew(name, assoc) {
         touchState(name)
-        arrs[arrKey(name)] = {assoc: assocFact(name, assoc), keys: [], vals: {}, lit: false, decl: false}
+        arrs[arrKey(name)] = {assoc: assocFact(name, assoc), keys: [], vals: {}, gone: {}, lit: false, decl: false}
         return arrs[arrKey(name)]
     }
     function arrEnsure(name, assoc) {
@@ -3162,7 +3166,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (key == BAD_KEY) { arithErr = true; return }
         var a = arrEnsure(name, false)
         var kk = arrNorm(a, key)
-        if (!hasOwn(a.vals, "$" + kk)) {
+        if (!arrLive(a, kk)) {
             if (a.assoc) { a.keys.push(kk) }
             else {
                 // keep the index list in numeric order, so ${!a[*]} and ${a[@]} are sorted; the
@@ -3182,10 +3186,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
         }
         a.vals["$" + kk] = val
+        a.gone["$" + kk] = false
+    }
+    // Is key kk an element of store a? The frozen engine has no `delete`, so an erased key
+    // keeps its slot in vals and is marked in gone.
+    function arrLive(a, kk) {
+        return hasOwn(a.vals, "$" + kk) && !(hasOwn(a.gone, "$" + kk) && a.gone["$" + kk])
     }
     // A shallow copy of one array store, for `local`'s save entry.
     function arrCopy(a) {
-        var c2 = {assoc: a.assoc, keys: [], vals: {}, lit: a.lit, decl: a.decl}
+        var c2 = {assoc: a.assoc, keys: [], vals: {}, gone: {}, lit: a.lit, decl: a.decl}
         var i
         for (i = 0; i < a.keys.length; i++) {
             var kk = a.keys[i]
@@ -3198,20 +3208,21 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (!isArr(name)) { return "" }
         var a = arrs[arrKey(name)]
         var kk = arrNorm(a, key)
-        if (hasOwn(a.vals, "$" + kk)) { return a.vals["$" + kk] }
+        if (arrLive(a, kk)) { return a.vals["$" + kk] }
         return ""
     }
     function arrHas(name, key) {
         if (!isArr(name)) { return false }
         var a = arrs[arrKey(name)]
-        return hasOwn(a.vals, "$" + arrNorm(a, key))
+        return arrLive(a, arrNorm(a, key))
     }
+    // On a name that is no array, key 0 is the scalar: `p=ab; unset 'p[0]'` unsets p.
+    // Twin of rt_arr_del.
     function arrDel(name, key) {
-        if (!isArr(name)) { return }
+        if (!isArr(name)) { if (key == "0") { unsetVar(name) }; return }
         var a = arrs[arrKey(name)]
         var kk = arrNorm(a, key)
-        if (!hasOwn(a.vals, "$" + kk)) { return }
-        a.vals["$" + kk] = ""
+        if (!arrLive(a, kk)) { return }
         var at = -1
         var i
         for (i = 0; i < a.keys.length; i++) { if (a.keys[i] == kk) { at = i } }
@@ -3219,11 +3230,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (i = at; i < a.keys.length - 1; i++) { a.keys[i] = a.keys[i + 1] }
             a.keys.pop()
         }
-        delete0(a.vals, "$" + kk)
+        a.vals["$" + kk] = ""
+        a.gone["$" + kk] = true
         a.lit = true
     }
-    // The frozen engine has no `delete`, so an erased key is remembered by the key LIST only.
-    function delete0(o, k) { o[k] = "" }
     function arrKeyList(name) {
         if (!isArr(name)) { return [] }
         var a = arrs[arrKey(name)]
@@ -3314,11 +3324,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var i
         for (i = 0; i < list.length; i++) { arrSet(name, numToStr(i), list[i]) }
     }
-    function arrAppendList(name, list) {
-        arrEnsure(name, false)
-        var next = arrNextIdx(name)
-        var i
-        for (i = 0; i < list.length; i++) { arrSet(name, numToStr(arOp("+", next, i)), list[i]) }
+    // A SET SCALAR BECOMES ELEMENT 0 of the array an element assignment, an appending
+    // literal or `declare -a` makes of its name: bash 5.3 answers `abcd x` for
+    // t=abcd; t[1]=x; echo "${t[*]}". Twin of rt_arr_adopt in languages/lib/bash-rt.c.
+    function arrAdopt(name) {
+        if (isArr(name) || !isSetVar(name)) { return }
+        var v = vars["$" + name]
+        unsetVar(name)
+        arrSet(name, "0", v)
     }
     // ${a[@]:off:len} on an INDEXED array counts INDICES: the slice starts at the first element
     // whose index is >= off (a negative off counts from one past the highest index) and takes
@@ -3359,7 +3372,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function arrIdxKey(name, k) {
         var kk = anytype
         kk = k
-        if (arIsNeg(kk)) { kk = arOp("+", arrNextIdx(name), kk) }
+        // A set scalar is element 0 of the array its name would be.
+        if (arIsNeg(kk)) { kk = arOp("+", isArr(name) ? arrNextIdx(name) : (isSetVar(name) ? 1 : 0), kk) }
         if (arIsNeg(kk)) { emitErr("bash: " + name + ": bad array subscript\n"); return BAD_KEY }
         return numToStr(kk)
     }
@@ -4573,23 +4587,28 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // An expansion error in a value abandons the command before anything is stored:
     // `k=$(( 1/0 ))` leaves k as it was. Twin of the emitAbortCheck in emitAssign.
     function runAssign(a, assoc) {
+        var isAs = assocFact(a.name, assoc)
         if (a.lit != null) {
             var lv = evalArrayLit(a.lit)
             if (arithErr || abortSignal != null) { return }
+            // A replacing literal drops a scalar of the name; an appending one keeps it as element 0.
+            if (a.op != "+=") { unsetVar(a.name) } else if (!isAs) { arrAdopt(a.name) }
             applyArrayLit(a.name, lv, a.op == "+=", assoc)
             return
         }
         var v = (a.valT != null) ? wordJoin(a.valT()) : ""
         if (a.idxT != null) {
-            arrEnsure(a.name, assoc)
             var key = subKey(a.name, wordJoin(a.idxT()))
             if (arithErr || abortSignal != null) { return }
+            if (!isAs) { arrAdopt(a.name) }
+            arrEnsure(a.name, assoc)
             if (a.op == "+=") { arrSet(a.name, key, arrGet(a.name, key) + v) } else { arrSet(a.name, key, v) }
             return
         }
         if (arithErr || abortSignal != null) { return }
         if (a.op == "+=") {
-            if (isArr(a.name)) { arrAppendList(a.name, [v]) }
+            // On an array name `+=` appends to element 0's text: e=(ab c); e+=d is `abd c`.
+            if (isArr(a.name)) { arrSet(a.name, "0", arrGet(a.name, "0") + v) }
             else if (attrOn(intVars, a.name)) { var sv = arOp("+", arEval(getVarVal(a.name)), arEval(v)); if (!arithErr) { setVarVal(a.name, numToStr(sv)) } }
             else { setVarVal(a.name, getVarVal(a.name) + v) }
             return

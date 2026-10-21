@@ -1292,6 +1292,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var nilTy = llvm.types.NewArray(2, i8)
     var gListNil = rtGlobal("list_nil", nilTy)
     function nilList(b) { return b.NewGetElementPtr(nilTy, gListNil, zero, zero) }
+    // {b, v}: v is fn(lb) when `whole` holds and the empty field list otherwise, fn's work done
+    // only on its own arm (fn emits into the one block it is handed). A subscripted expansion
+    // computes its element-list form this way, so reading one element does not cost the array.
+    function wholeList(b, whole, fn) {
+        var nil0 = nilList(b)
+        var lb = curF.NewBlock(""), lm = curF.NewBlock("")
+        b.NewCondBr(whole, lb, lm)
+        var lv = fn(lb)
+        lb.NewBr(lm)
+        return {b: lm, v: lm.NewPhi([llvm.ir.NewIncoming(lv, lb), llvm.ir.NewIncoming(nil0, b)])}
+    }
 
     // Variable storage is ONE global array of char*, indexed by a compile-time id, so the
     // `local` unwinder can restore a slot chosen at run time (a per-name global could only
@@ -1612,6 +1623,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtArrLitWords = rtDecl("rt_arr_litwords", 3, [1, 1, 3])
     var rtArrSlice = rtDecl("rt_arr_slice", true, [1, 3, 3, 0, 1, 0])
     var rtArrClear = rtDecl("rt_arr_clear", false, [1])
+    var rtArrAdopt = rtDecl("rt_arr_adopt", false, [1, 0])
     var rtArrMark = rtDecl("rt_arr_mark", false, [1])
     var rtArrDmark = rtDecl("rt_arr_dmark", false, [1])
     var rtArrSmark = rtDecl("rt_arr_smark", false, [1])
@@ -1922,24 +1934,26 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     var ro = offT(b); b = ro.b
                     var rlv = null
                     if (lenT != null) { var rl = lenT(b); b = rl.b; rlv = rl.v }
-                    var lstV = null
-                    if (name == "@" || name == "*" || isAssoc) {
-                        // The positional list counts from $0: "${@:1}" is $1 on.
-                        var all = (name == "@" || name == "*") ? b.NewCall(rtParams0)
-                                                               : b.NewCall(rtScList, [nmOf(b), ifsFirstValue(b), zero, zero])
-                        var cnt = b.NewCall(rtNFields, all)
-                        var off = b.NewSelect(b.NewICmp(llvm.enum.IPredSLT, ro.v, zero), b.NewAdd(cnt, ro.v), ro.v)
-                        // A negative offset reaching past the start selects nothing.
-                        off = b.NewSelect(b.NewICmp(llvm.enum.IPredSLT, off, zero), cnt, off)
-                        var n = b.NewSub(cnt, off)
-                        if (rlv != null) { n = rlv }
-                        lstV = b.NewCall(rtSliceFields, [all, off, n, ifsFirstValue(b), starArg(b, b.NewZExt(star, i32))])
-                    } else {
+                    var rsl = wholeList(b, whole, function(lb) {
+                        if (name == "@" || name == "*" || isAssoc) {
+                            // The positional list counts from $0: "${@:1}" is $1 on.
+                            var all = (name == "@" || name == "*") ? lb.NewCall(rtParams0)
+                                                                   : lb.NewCall(rtScList, [nmOf(lb), ifsFirstValue(lb), zero, zero])
+                            var cnt = lb.NewCall(rtNFields, all)
+                            var off = lb.NewSelect(lb.NewICmp(llvm.enum.IPredSLT, ro.v, zero), lb.NewAdd(cnt, ro.v), ro.v)
+                            // A negative offset reaching past the start selects nothing.
+                            off = lb.NewSelect(lb.NewICmp(llvm.enum.IPredSLT, off, zero), cnt, off)
+                            var n = lb.NewSub(cnt, off)
+                            if (rlv != null) { n = rlv }
+                            return lb.NewCall(rtSliceFields, [all, off, n, ifsFirstValue(lb), starArg(lb, lb.NewZExt(star, i32))])
+                        }
                         // An indexed array is sliced by INDEX (rt_arr_slice), not by position.
-                        lstV = b.NewCall(rtArrSlice, [nmOf(b), b.NewSExt(ro.v, i64),
-                            (rlv != null) ? b.NewSExt(rlv, i64) : zero64, (rlv != null) ? one : zero,
-                            ifsFirstValue(b), starArg(b, b.NewZExt(star, i32))])
-                    }
+                        return lb.NewCall(rtArrSlice, [nmOf(lb), lb.NewSExt(ro.v, i64),
+                            (rlv != null) ? lb.NewSExt(rlv, i64) : zero64, (rlv != null) ? one : zero,
+                            ifsFirstValue(lb), starArg(lb, lb.NewZExt(star, i32))])
+                    })
+                    b = rsl.b
+                    var lstV = rsl.v
                     // ${a[i]:off:len} slices the ELEMENT, not the element list.
                     var ev = b.NewCall(rtScGet, [nmOf(b), rs.k])
                     var elen = b.NewCall(rtCharLen, ev)
@@ -1974,11 +1988,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     if (mPatW != null) { var rp3 = evalWord(b, mPatW); b = rp3.b; pv = rp3.v }
                     var rv3 = emptyPtr(b)
                     if (mRepW != null) { var rr3 = evalWord(b, mRepW); b = rr3.b; rv3 = rr3.v }
-                    var allE = b.NewCall(rtScList, [nmOf(b), ifsFirstValue(b), zero, zero])
-                    var mSep = (mOp == 0) ? starSepSp(b) : ifsFirstValue(b)
-                    var mStar = b.NewZExt(star, i32)
-                    if (mOp != 0) { mStar = starArg(b, mStar) }
-                    var lstM = b.NewCall(rtMapf, [allE, mOpC, pv, rv3, mModeC, mSep, mStar])
+                    var rlm = wholeList(b, whole, function(lb) {
+                        var allE = lb.NewCall(rtScList, [nmOf(lb), ifsFirstValue(lb), zero, zero])
+                        var mSep = (mOp == 0) ? starSepSp(lb) : ifsFirstValue(lb)
+                        var mStar = lb.NewZExt(star, i32)
+                        if (mOp != 0) { mStar = starArg(lb, mStar) }
+                        return lb.NewCall(rtMapf, [allE, mOpC, pv, rv3, mModeC, mSep, mStar])
+                    })
+                    b = rlm.b
+                    var lstM = rlm.v
                     var evM = b.NewCall(rtScGet, [nmOf(b), rs.k])
                     var elM = evM
                     if (mOp == 0) { elM = b.NewCall(rtStrip, [evM, pv, mModeC]) }
@@ -1998,7 +2016,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var whole = b.NewICmp(llvm.enum.IPredNE, k, zero)
                 var star = b.NewICmp(llvm.enum.IPredEQ, k, llvm.constant.NewInt(i32, 2))
                 var starA = starArg(b, b.NewZExt(star, i32))
-                var lst = b.NewCall(rtScList, [nmOf(b), ifsFirstValue(b), starA, zero])
+                var rl0 = wholeList(b, whole, function(lb) { return lb.NewCall(rtScList, [nmOf(lb), ifsFirstValue(lb), starA, zero]) })
+                b = rl0.b
+                var lst = rl0.v
                 var one1 = b.NewCall(rtScGet, [nmOf(b), rs.k])
                 if (op != "") {
                     var kk = rs.k
@@ -2040,6 +2060,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     lst = pickedL
                 }
                 var sel = b.NewSelect(whole, lst, one1)
+                if (xf == "") { return {b: b, v: sel} }
                 // Is the ELEMENT the plain-subscript arm reads actually set? ${a[9]@Q} is
                 // empty in bash and ${a[9]@A} is `declare -a a`, both of which need this
                 // and neither of which the value alone can answer.
@@ -2912,7 +2933,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
         }
         b = emitAbortCheck(b)
-        if (!append) { b.NewCall(rtArrClear, nm) }
+        // A replacing literal drops a scalar of the name; an appending one keeps it as element 0.
+        if (!append) { b.NewCall(rtArrClear, nm); storeVarRaw(b, name, unsetPtr(b)) }
+        else if (!assoc) { b.NewCall(rtArrAdopt, [nm, llvm.constant.NewInt(i32, getVarId(name))]) }
         // A literal makes the name a SET array even with no element (rt_arr_mark).
         b.NewCall(rtArrMark, nm)
         // Bare words in an ASSOCIATIVE array literal are KEY VALUE pairs - bash 5.3.15 reads
@@ -2956,6 +2979,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var rk = subKeyOf(b, a.name, a.idxT)
             b = rk.b
             b = emitAbortCheck(b)
+            if (!assoc) { b.NewCall(rtArrAdopt, [nm, llvm.constant.NewInt(i32, getVarId(a.name))]) }
             if (a.op == "+=") { v = b.NewCall(rtStrcat, [b.NewCall(rtArrGet, [nm, rk.k]), v]) }
             b.NewCall(assoc ? rtArrSet : rtArrIset, [nm, rk.k, v])
             return b
@@ -2977,11 +3001,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             storeVar(b, a.name, heapKeep(b, mk, b.NewCall(rtInt2str, rv)))
             return b
         }
+        // On an array name, a scalar assignment is to element 0 and `+=` appends to its text:
+        // bash 5.3 answers `abd c` for e=(ab c); e+=d.
+        var setE0 = assoc ? rtArrSet : rtArrIset
         if (a.op == "+=") {
             var isA = b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtArrAny, nm), zero)
             var arrB = curF.NewBlock(""), strB = curF.NewBlock(""), mg = curF.NewBlock("")
             b.NewCondBr(isA, arrB, strB)
-            arrB.NewCall(rtArrAppend, [nm, v])
+            var e0 = gepStr(arrB, "0")
+            arrB.NewCall(setE0, [nm, e0, arrB.NewCall(rtStrcat, [arrB.NewCall(rtArrGet, [nm, e0]), v])])
             arrB.NewBr(mg)
             // rt_sapp appends in place to the slot's own buffer (bash-rt.c, "append buffers").
             var sid = llvm.constant.NewInt(i32, getVarId(a.name))
@@ -2989,11 +3017,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             strB.NewBr(mg)
             return mg
         }
-        // an ordinary scalar assignment - unless the name is an array, where it is element 0
         var isA2 = b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtArrAny, nm), zero)
         var arrB2 = curF.NewBlock(""), strB2 = curF.NewBlock(""), mg2 = curF.NewBlock("")
         b.NewCondBr(isA2, arrB2, strB2)
-        arrB2.NewCall(rtArrSet, [nm, gepStr(arrB2, "0"), v])
+        arrB2.NewCall(setE0, [nm, gepStr(arrB2, "0"), v])
         arrB2.NewBr(mg2)
         storeVar(strB2, a.name, heapKeep(strB2, mk, v))
         strB2.NewBr(mg2)
@@ -3116,7 +3143,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (asgs[j] != null) {
                     b = emitAssign(b, asgs[j], assoc, null)
                 }
-                else if (localize && !isArray) { storeVarRaw(b, names[j], unsetPtr(b)) }
+                else if (localize) { storeVarRaw(b, names[j], unsetPtr(b)) }
                 if (asgs[j] == null && !isArray && kw != "export" && kw != "readonly") { b.NewCall(rtArrSmark, gepStr(b, names[j])) }
             }
             storeStatusI(b, 0)

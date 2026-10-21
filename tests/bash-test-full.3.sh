@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Full-syntax test: Bash (the practical POSIX-plus-bash shell language) - part 3
-# of 4, sections 47 to 60; a new section goes here. The split is explained in
+# of 4, sections 47 to 60 and 62 on; a new section goes here. The split is explained in
 # tests/bash-test-full.sh.
 #
 # This file belongs to the SECOND test group (./test.sh --full): it is NOT part
@@ -449,6 +449,82 @@ s60() {
   r=$(for w in "$@"; do printf '%s,' "${w,,}"; : "$w$w$w"; done)
   check hr2 "$# $* $r" "4 ALPHA0 BETA1 GAMMA2 ALPHA3 alpha0,beta1,gamma2,alpha3,"
 }
+# ===== SECTION 62: a scalar is element 0 of the array its name becomes =====
+# An element assignment, an appending literal or `declare -a` on a SET scalar keeps
+# its value as element 0; a scalar assignment to an array name writes element 0, and
+# `+=` appends to its text. Every expected value is bash 5.3's.
+s62() {
+  local t=abcd u=ab v=ab w=ab y=ab z=ab k=ab e= p=ab g
+  t[1]=x
+  check sa1 "${t[*]}|${#t[@]}|${!t[*]}|$t" "abcd x|2|0 1|abcd"
+  u[1]=x
+  v[0]=x
+  check sa2 "${u[*]}|${v[*]}|${#v[@]}" "ab x|x|1"
+  w[0]+=x
+  y+=(x y)
+  check sa3 "${w[*]}|${y[*]}|${#y[@]}" "abx|ab x y|3"
+  z[3]=q
+  k[-1]=K
+  e[1]=x
+  check sa4 "${!z[*]}|${z[*]}|$k|${#e[@]}|[${e[0]}]" "0 3|ab q|K|2|[]"
+  s62f() { local q=lo; q[2]=m; echo "${q[*]}"; }
+  local q=out
+  check sa5 "$(s62f)|$q" "lo m|out"
+  s62g() { local -a q; q[1]=z; echo "${q[*]}"; }
+  check sa6 "$(s62g)" "z"
+  local h=ab
+  ( h[1]=c; echo "${h[*]}" ) > /dev/null
+  check sa7 "${h[*]}|$(h[1]=c; echo "${h[*]}")" "ab|ab c"
+  unset 'p[0]'
+  check sa8 "[${p-unset}]|${#p[@]}" "[unset]|0"
+  local r=ab
+  r[1]=c
+  r=zz
+  g[2]=x
+  g=G
+  check sa9 "${r[*]}|${g[*]}|${!g[*]}" "zz c|G x|0 2"
+  local f=(ab c)
+  f+=d
+  check sa10 "${f[*]}" "abd c"
+  d62=ab
+  declare -ga d62
+  check sa11 "${d62[*]}|${#d62[@]}" "ab|1"
+  local o=ab
+  o=(x)
+  unset 'o[0]'
+  check sa12 "[${o-unset}]" "[unset]"
+  # --- each array is found by its own name; a large one bisects or hashes its keys
+  local -a big=()
+  local -A am=()
+  local i=0 n=0 s=0
+  while [ $i -lt 300 ]; do
+    big+=("v$i")
+    am[k$i]=$i
+    i=$((i + 1))
+  done
+  i=0
+  while [ $i -lt 300 ]; do
+    s=$((s + ${am[k$i]}))
+    [ "${big[i]}" = "v$i" ] && n=$((n + 1))
+    i=$((i + 3))
+  done
+  check sa13 "${#big[@]} ${#am[@]} ${big[-1]} ${am[k299]} $n $s" "300 300 v299 299 100 14850"
+  big[5000]=far
+  big[4000]=mid
+  unset 'big[0]' 'am[k7]'
+  check sa14 "${#big[@]} ${big[*]: -1001} ${big[299]} ${#am[@]} [${am[k7]-gone}]" "301 mid far v299 299 [gone]"
+  s62h() { local big=(one); big[1]=two; s62r="${big[*]}"; }
+  s62h
+  check sa15 "$s62r ${#big[@]} ${big[4000]}" "one two 301 mid"
+  # --- an unset element is gone, and a later write brings it back
+  local -a ua=(x y)
+  local -A um=([p]=1)
+  unset 'ua[1]' 'um[p]'
+  check sa16 "[${ua[1]-gone}][${um[p]-gone}]" "[gone][gone]"
+  ua[1]=z
+  um[p]=2
+  check sa17 "${ua[*]} ${#ua[@]} ${um[p]} ${#um[@]}" "x z 2 2 1"
+}
 # ===== END SECTIONS =====
 
 s47   # SECTION-CALL 47
@@ -465,5 +541,6 @@ s57   # SECTION-CALL 57
 s58   # SECTION-CALL 58
 s59   # SECTION-CALL 59
 s60   # SECTION-CALL 60
+s62   # SECTION-CALL 62
 echo "full: $checks checks, $fails failures"
 exit $fails

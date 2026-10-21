@@ -54,20 +54,21 @@ int nvars;
 char *varnames[1024];
 
 /* The `local` save stack: (slot id, previous value) pairs. LSMAX = 512.
- * A BINDING IS NOT JUST A SCALAR: an ARRAY of the same name lives in the flat
- * (name, key, value) store below, and bash restores it on return too, so each
- * entry also records how many of its rows were copied onto the array save
- * stack. ls_acnt[t] is 0 for the usual scalar case and the pop then does
- * nothing beyond clearing whatever the call created. */
+ * A BINDING IS NOT JUST A SCALAR: an ARRAY of the same name lives in the array
+ * store below, and bash restores it on return too, so each entry also records
+ * how many of its rows were copied onto the array save stack. ls_acnt[t] is 0
+ * for the usual scalar case and the pop then does nothing beyond clearing
+ * whatever the call created. */
 int ls_id[512];
 char *ls_val[512];
 int ls_acnt[512];
-int ls_amark[512];   /* the binding's marks (rt_arr_mark 1, rt_arr_dmark 2, rt_arr_smark 4), restored too */
+int ls_amark[512];   /* the record's marks (1 2 4, see rt_arr_mark), and 8 when it was not sorted */
 int ls_top;
 
-/* The array save stack the entries above index into. LASMAX = 4096. */
-char *las_k[4096];
-char *las_v[4096];
+/* The array save stack the entries above index into, grown by doubling. */
+char **las_k;
+char **las_v;
+int las_cap;
 int las_top;
 
 /* Output capture for $( ) / ` `: one arena buffer per nesting depth, allocated
@@ -82,17 +83,20 @@ int cap_depth;
 
 /* Subshell isolation: ( LIST ) and $( ) snapshot the whole variable array and
  * the whole array store, so `a=(p q); ( a[0]=Z )` leaves the caller with "p q".
- * The store is a flat triple table (arr_nm / arr_k / arr_v, NARR = 4096) whose
- * entries are arena pointers never rewritten in place, so copying the pointers
- * and arr_n is a complete snapshot. Each depth keeps its own block - nvars values,
- * then ss_cap[d] rows of name, key and value - allocated the first time the depth
- * is reached and reused after, re-allocated only when the store has outgrown it.
- * So the nesting is bounded by SSMAX = 4096, recursion through $( ) included.
+ * A row's key and value are heap strings never rewritten in place, so copying the
+ * pointers is a complete snapshot. Each depth keeps its own malloc'd blocks -
+ * ss_blk[d]: nvars values, then a key and a value per row; ss_rec[d]: rows,
+ * marks and sortedness of each of the ss_an[d] records - made the first time the
+ * depth is reached and reused after, grown when the store has outgrown them. A
+ * record made inside the subshell is emptied on the way out. So the nesting is
+ * bounded by SSMAX = 4096, recursion through $( ) included.
  *
  * Attributes (-i/-u/-l/-A) are not here: bash-to-llvm-ir.abnf keeps them in
  * COMPILE-TIME maps and unwinds its attribute log around a subshell body. */
 char **ss_blk[4096];
-int ss_cap[4096];
+long ss_cap[4096];
+int *ss_rec[4096];
+int ss_rcap[4096];
 int ss_an[4096];
 int ss_depth;
 
@@ -190,7 +194,6 @@ int rt_ifstrail(char *v, char *ifs);
 char *rt_bnd_acc2(char *acc, char *open, int opened, char *f, int lead, int trail);
 char *rt_bnd_open2(char *open, int opened, char *f, int lead, int trail);
 int rt_bnd_opened2(int opened, char *f, int lead, int trail);
-int rt_arr_find(char *nm, char *k);
 int rt_arr_set(char *nm, char *k, char *v);
 char *rt_arr_get(char *nm, char *k);
 int rt_arr_has(char *nm, char *k);
@@ -224,6 +227,7 @@ long rt_arr_nextidx(char *nm);
 int rt_arr_iset(char *nm, char *k, char *v);
 char *rt_arr_ikey(char *nm, long k);
 int rt_arr_clear(char *nm);
+int rt_arr_adopt(char *nm, int id);
 int rt_arr_mark(char *nm);
 int rt_arr_dmark(char *nm);
 int rt_arr_dmarked(char *nm);
@@ -3826,115 +3830,345 @@ int rt_bnd_opened2(int opened, char *f, int lead, int trail) {
 }
 
 /* ---- arrays ---------------------------------------------------------------
- * One flat store of (arrayName, key, value) triples with a linear scan. Keys
- * are strings for both kinds of array, and the row order is the order ${!a[*]}
- * and ${a[@]} report: index order for an indexed array (rt_arr_iset), insertion
- * order for an associative one (rt_arr_set). NARR = 4096.
+ * One RECORD per array name, found through an open-addressing table of the
+ * names (rt_nhash, linear probing, doubled at half full), so a lookup costs the
+ * name and not the size of every other array. Record r keeps its rows in two
+ * malloc'd vectors, ar_k[r] / ar_v[r] (ar_n[r] used of ar_cap[r]), in the order
+ * ${!a[*]} and ${a[@]} report: index order for an indexed array (rt_arr_iset),
+ * insertion order for an associative one (rt_arr_set). ar_srt[r] says every key
+ * is a canonical decimal (rt_iscanon) and they ascend, which lets a lookup
+ * bisect; any other record of 16 rows or more is looked up through ar_kh[r], an
+ * open-addressing table of row + 1 by key, built on the first lookup, extended by
+ * an append and dropped by anything that moves rows. ar_mk[r] holds the marks
+ * (rt_arr_mark 1, rt_arr_dmark 2, rt_arr_smark 4). A record is never removed:
+ * one with no row and no mark is an absent array. The name is copied; keys and
+ * values are heap strings, held by rt_pin like any other stored value.
  */
-char *arr_nm[4096];   /* NEW GLOBAL */
-char *arr_k[4096];    /* NEW GLOBAL */
-char *arr_v[4096];    /* NEW GLOBAL */
-int arr_n;            /* NEW GLOBAL */
+char **ar_nm;
+char ***ar_k;
+char ***ar_v;
+int *ar_n;
+int *ar_cap;
+int *ar_mk;
+int *ar_srt;
+int **ar_kh;
+int *ar_khsz;
+int ar_cnt;
+int ar_rcap;
+int *ar_h;            /* record + 1, 0 = empty */
+int ar_hsz;           /* a power of two, or 0 before the first record */
+long arr_rows;        /* the rows of every record: 0 answers rt_arr_any at once */
 
-/* i32 rt_arr_find(i8* nm, i8* k): slot index, or -1. */
-int rt_arr_find(char *nm, char *k) {
-    int n = arr_n;
+void *realloc(void *p, unsigned long n);
+
+/* djb2 over the name's bytes; the caller masks it to its table. */
+int rt_nhash(char *n)
+{
+    int h = 5381;
     int i = 0;
+    while (n[i] != 0) {
+        h = (h * 33) ^ (int)(unsigned char)n[i];
+        i = i + 1;
+    }
+    return h;
+}
+
+/* A block of n bytes from malloc, or the fail-stop. */
+char *rt_xalloc(char *what, long n)
+{
+    char *p = (char *)malloc((unsigned long)n);
+    if (p == 0) rt_die(what, (int)n, 0, 0);
+    return p;
+}
+
+/* The same block grown to n bytes, its contents kept. */
+char *rt_xgrow(char *what, char *p, long n)
+{
+    char *q = (char *)realloc(p, (unsigned long)n);
+    if (q == 0) rt_die(what, (int)n, 0, 0);
+    return q;
+}
+
+/* The record of array nm, or -1. */
+int rt_ar_find(char *nm)
+{
+    int m;
+    int h;
+    int e;
+    if (ar_cnt == 0) return -1;
+    m = ar_hsz - 1;
+    h = rt_nhash(nm) & m;
+    e = ar_h[h];
+    while (e != 0) {
+        if (rt_streq(nm, ar_nm[e - 1]) != 0) return e - 1;
+        h = (h + 1) & m;
+        e = ar_h[h];
+    }
+    return -1;
+}
+
+void rt_ar_hput(int r)
+{
+    int m = ar_hsz - 1;
+    int h = rt_nhash(ar_nm[r]) & m;
+    while (ar_h[h] != 0) h = (h + 1) & m;
+    ar_h[h] = r + 1;
+}
+
+/* The record of array nm, made empty when there is none. */
+int rt_ar_rec(char *nm)
+{
+    int r = rt_ar_find(nm);
+    int i;
+    int len;
+    if (r >= 0) return r;
+    if (ar_cnt == ar_rcap) {
+        ar_rcap = ar_rcap == 0 ? 64 : ar_rcap * 2;
+        ar_nm = (char **)rt_xgrow("array records", (char *)ar_nm, (long)ar_rcap * 8);
+        ar_k = (char ***)rt_xgrow("array records", (char *)ar_k, (long)ar_rcap * 8);
+        ar_v = (char ***)rt_xgrow("array records", (char *)ar_v, (long)ar_rcap * 8);
+        ar_n = (int *)rt_xgrow("array records", (char *)ar_n, (long)ar_rcap * 4);
+        ar_cap = (int *)rt_xgrow("array records", (char *)ar_cap, (long)ar_rcap * 4);
+        ar_mk = (int *)rt_xgrow("array records", (char *)ar_mk, (long)ar_rcap * 4);
+        ar_srt = (int *)rt_xgrow("array records", (char *)ar_srt, (long)ar_rcap * 4);
+        ar_kh = (int **)rt_xgrow("array records", (char *)ar_kh, (long)ar_rcap * 8);
+        ar_khsz = (int *)rt_xgrow("array records", (char *)ar_khsz, (long)ar_rcap * 4);
+    }
+    if (2 * (ar_cnt + 1) > ar_hsz) {
+        if (ar_h != 0) free(ar_h);
+        ar_hsz = ar_hsz == 0 ? 128 : ar_hsz * 2;
+        ar_h = (int *)rt_xalloc("array names", (long)ar_hsz * 4);
+        i = 0;
+        while (i < ar_hsz) {
+            ar_h[i] = 0;
+            i = i + 1;
+        }
+        i = 0;
+        while (i < ar_cnt) {
+            rt_ar_hput(i);
+            i = i + 1;
+        }
+    }
+    r = ar_cnt;
+    len = (int)strlen(nm);
+    ar_nm[r] = rt_xalloc("array names", (long)len + 1);
+    memmove(ar_nm[r], nm, (unsigned long)(len + 1));
+    ar_k[r] = 0;
+    ar_v[r] = 0;
+    ar_n[r] = 0;
+    ar_cap[r] = 0;
+    ar_mk[r] = 0;
+    ar_srt[r] = 1;
+    ar_kh[r] = 0;
+    ar_khsz[r] = 0;
+    ar_cnt = r + 1;
+    rt_ar_hput(r);
+    return r;
+}
+
+/* Room in record r for n rows. */
+void rt_ar_room(int r, int n)
+{
+    int cap = ar_cap[r];
+    if (n <= cap) return;
+    cap = cap == 0 ? 8 : cap * 2;
+    if (cap < n) cap = n;
+    ar_k[r] = (char **)rt_xgrow("array rows", (char *)ar_k[r], (long)cap * 8);
+    ar_v[r] = (char **)rt_xgrow("array rows", (char *)ar_v[r], (long)cap * 8);
+    ar_cap[r] = cap;
+}
+
+/* Is k a decimal as rt_int2str writes it: 0, or an optional minus and a nonzero
+ * digit, at most 18 digits so it cannot overflow? */
+int rt_iscanon(char *k)
+{
+    int i = k[0] == 45 ? 1 : 0;
+    int d = i;
+    if (k[i] == 48) return k[i + 1] == 0 && i == 0 ? 1 : 0;
+    while (k[i] >= 48 && k[i] <= 57) i = i + 1;
+    return k[i] == 0 && i > d && i - d <= 18 ? 1 : 0;
+}
+
+/* Record r's key table: row i entered, or dropped. */
+void rt_ar_khput(int r, int i)
+{
+    int m = ar_khsz[r] - 1;
+    int h = rt_nhash(ar_k[r][i]) & m;
+    while (ar_kh[r][h] != 0) h = (h + 1) & m;
+    ar_kh[r][h] = i + 1;
+}
+
+void rt_ar_khdrop(int r)
+{
+    if (ar_kh[r] != 0) free(ar_kh[r]);
+    ar_kh[r] = 0;
+}
+
+/* The row of key k in record r, or -1. A sorted record holds canonical keys
+ * only, so another key is not there, and a canonical one is bisected for. */
+int rt_ar_pos(int r, char *k)
+{
+    int n = ar_n[r];
+    char **ks = ar_k[r];
+    int i;
+    int m;
+    if (ar_srt[r] != 0) {
+        int lo = 0;
+        int hi = n - 1;
+        long kv;
+        if (rt_iscanon(k) == 0) return -1;
+        kv = rt_str2int(k);
+        while (lo <= hi) {
+            int mid = (lo + hi) / 2;
+            long km = rt_str2int(ks[mid]);
+            if (km == kv) return mid;
+            if (km < kv) lo = mid + 1;
+            else hi = mid - 1;
+        }
+        return -1;
+    }
+    if (n >= 16) {
+        if (ar_kh[r] == 0) {
+            m = 32;
+            while (m < 4 * n) m = m * 2;
+            ar_kh[r] = (int *)rt_xalloc("array keys", (long)m * 4);
+            ar_khsz[r] = m;
+            i = 0;
+            while (i < m) {
+                ar_kh[r][i] = 0;
+                i = i + 1;
+            }
+            i = 0;
+            while (i < n) {
+                rt_ar_khput(r, i);
+                i = i + 1;
+            }
+        }
+        m = ar_khsz[r] - 1;
+        i = rt_nhash(k) & m;
+        while (ar_kh[r][i] != 0) {
+            if (rt_streq(k, ks[ar_kh[r][i] - 1]) != 0) return ar_kh[r][i] - 1;
+            i = (i + 1) & m;
+        }
+        return -1;
+    }
+    i = 0;
     while (i < n) {
-        int sameNm = rt_streq(nm, arr_nm[i]) != 0;
-        int sameK = rt_streq(k, arr_k[i]) != 0;
-        if (sameNm && sameK) return i;
+        if (rt_streq(k, ks[i]) != 0) return i;
         i = i + 1;
     }
     return -1;
 }
 
-/* i32 rt_arr_set(i8* nm, i8* k, i8* v) */
+/* Insert (k, v) as row `at` of record r. */
+void rt_ar_ins(int r, int at, char *k, char *v)
+{
+    int n = ar_n[r];
+    rt_ar_room(r, n + 1);
+    if (at < n) {
+        memmove(ar_k[r] + at + 1, ar_k[r] + at, (unsigned long)(n - at) * 8);
+        memmove(ar_v[r] + at + 1, ar_v[r] + at, (unsigned long)(n - at) * 8);
+    }
+    ar_k[r][at] = k;
+    ar_v[r][at] = v;
+    ar_n[r] = n + 1;
+    arr_rows = arr_rows + 1;
+    if (ar_kh[r] != 0) {
+        if (at < n || 2 * (n + 1) > ar_khsz[r]) rt_ar_khdrop(r);
+        else rt_ar_khput(r, n);
+    }
+}
+
+/* i32 rt_arr_set(i8* nm, i8* k, i8* v): update the row of k, or append one. */
 int rt_arr_set(char *nm, char *k, char *v) {
-    int at = rt_arr_find(nm, k);
+    int r = rt_ar_rec(nm);
+    int at = rt_ar_pos(r, k);
+    int n;
     rt_pin();
     rt_abheld(k);
     rt_abheld(v);
     if (at >= 0) {
-        arr_v[at] = v;
+        ar_v[r][at] = v;
         return 0;
     }
-    int n = arr_n;
-    /* ARRMAX = 4096 distinct (array, key) pairs. */
-    if (n >= 4096) {
-        rt_die("array store", 1, n, 4096);
-    }
-    arr_nm[n] = nm;
-    arr_k[n] = k;
-    arr_v[n] = v;
-    arr_n = n + 1;
+    n = ar_n[r];
+    if (ar_srt[r] != 0 && (rt_iscanon(k) == 0 || (n > 0 && rt_str2int(ar_k[r][n - 1]) >= rt_str2int(k))))
+        ar_srt[r] = 0;
+    rt_ar_ins(r, n, k, v);
     return 0;
 }
 
 /* AN INDEXED ARRAY KEEPS ITS ROWS IN INDEX ORDER, the order bash lists ${!a[*]}
  * and ${a[@]} in whatever order the elements were assigned (a[5]=x; a[2]=y lists
  * 2 5): a new row goes in front of the first row of the same array with a greater
- * index. An associative array keeps insertion order (manual 7.9), so its writes and
- * the store's own marks stay on rt_arr_set. A write to bad_key is dropped. */
+ * index, and a key is matched by its numeric value. An associative array keeps
+ * insertion order (manual 7.9), so its writes stay on rt_arr_set. A write to
+ * bad_key is dropped. */
 char bad_key[1];
 int rt_arr_iset(char *nm, char *k, char *v) {
-    int at;
+    int r;
     int n;
     int pos;
     int i;
     long kv;
+    char **ks;
     rt_abheld(v);
     if (k == &bad_key[0]) {
         arith_err = 1;
         return 0;
     }
     rt_pin();
-    /* The array's rows are already in order, so one scan from the END finds the
-     * row to update or the place to insert; appending in ascending order - the
-     * common case - stops at the array's last row. */
-    n = arr_n;
+    r = rt_ar_rec(nm);
+    n = ar_n[r];
+    ks = ar_k[r];
     kv = rt_str2int(k);
+    if (ar_srt[r] != 0) {
+        int lo = 0;
+        int hi = n - 1;
+        if (rt_iscanon(k) == 0) k = rt_int2str(kv);
+        /* appending in ascending order - the common case - is one compare */
+        if (n > 0 && rt_str2int(ks[n - 1]) < kv) lo = n;
+        while (lo <= hi) {
+            int mid = (lo + hi) / 2;
+            long km = rt_str2int(ks[mid]);
+            if (km == kv) {
+                ar_v[r][mid] = v;
+                return 0;
+            }
+            if (km < kv) lo = mid + 1;
+            else hi = mid - 1;
+        }
+        rt_ar_ins(r, lo, k, v);
+        return 0;
+    }
+    /* An unsorted record (an associative write came first): scan from the end
+     * for the row to update or the place to insert. */
     pos = 0;
     i = n - 1;
     while (i >= 0) {
-        if (rt_streq(nm, arr_nm[i]) != 0) {
-            long ki = rt_str2int(arr_k[i]);
-            if (ki == kv) {
-                arr_v[i] = v;
-                return 0;
-            }
-            if (ki < kv) {
-                pos = i + 1;
-                break;
-            }
+        long ki = rt_str2int(ks[i]);
+        if (ki == kv) {
+            ar_v[r][i] = v;
+            return 0;
+        }
+        if (ki < kv) {
+            pos = i + 1;
+            break;
         }
         i = i - 1;
     }
-    if (n >= 4096) {
-        rt_die("array store", 1, n, 4096);
-    }
-    i = n;
-    while (i > pos) {
-        arr_nm[i] = arr_nm[i - 1];
-        arr_k[i] = arr_k[i - 1];
-        arr_v[i] = arr_v[i - 1];
-        i = i - 1;
-    }
-    arr_nm[pos] = nm;
-    arr_k[pos] = k;
-    arr_v[pos] = v;
-    arr_n = n + 1;
+    rt_ar_ins(r, pos, k, v);
     return 0;
 }
 
 /* The key an INDEXED subscript's value names: a negative index counts back from
- * one past the highest one (${a[-1]} is the last element). One still negative
- * after that is bash's "bad array subscript": reported, and answered with
- * bad_key, which no element has and rt_arr_iset refuses to write. Twin of
- * subKey in bash-interpreter.abnf. */
+ * one past the highest one (${a[-1]} is the last element; a set scalar is
+ * element 0). One still negative after that is bash's "bad array subscript":
+ * reported, and answered with bad_key, which no element has and rt_arr_iset
+ * refuses to write. Twin of subKey in bash-interpreter.abnf. */
 char *rt_arr_ikey(char *nm, long k) {
     int saved;
-    if (k < 0) k = rt_arr_nextidx(nm) + k;
+    if (k < 0) k = (rt_arr_any(nm) != 0 ? rt_arr_nextidx(nm) : (long)rt_sc_count(nm)) + k;
     if (k < 0) {
         saved = sink_out;
         sink_out = sink_err;
@@ -4018,88 +4252,91 @@ long rt_arr_litwords(char *nm, char *f, long next) {
 
 /* i8* rt_arr_get(i8* nm, i8* k): the value, or "" when absent. */
 char *rt_arr_get(char *nm, char *k) {
-    int at = rt_arr_find(nm, k);
-    if (at >= 0) return arr_v[at];
+    int r = rt_ar_find(nm);
+    int at;
+    if (r < 0) return empty;
+    at = rt_ar_pos(r, k);
+    if (at >= 0) return ar_v[r][at];
     return empty;
 }
 
 /* i32 rt_arr_has(i8* nm, i8* k) */
 int rt_arr_has(char *nm, char *k) {
-    int at = rt_arr_find(nm, k);
-    return at >= 0;
+    int r = rt_ar_find(nm);
+    if (r < 0) return 0;
+    return rt_ar_pos(r, k) >= 0 ? 1 : 0;
 }
 
-/* i32 rt_arr_del(i8* nm, i8* k): remove one entry, shifting the tail of the
- * store down over the hole; the array stays set (rt_arr_mark). */
+/* i32 rt_arr_del(i8* nm, i8* k): remove one row; the array stays set
+ * (rt_arr_mark). On a name with no row, key 0 is the scalar, which is unset:
+ * `p=ab; unset 'p[0]'` leaves p unset in bash 5.3. */
 int rt_arr_del(char *nm, char *k) {
-    int at = rt_arr_find(nm, k);
-    int i = at;
-    if (at >= 0) {
-        while (1) {
-            int n = arr_n;
-            if (i < n - 1) {
-                int j = i + 1;
-                arr_nm[i] = arr_nm[j];
-                arr_k[i] = arr_k[j];
-                arr_v[i] = arr_v[j];
-                i = j;
-            } else {
-                arr_n = arr_n - 1;
-                break;
-            }
-        }
-        rt_arr_mark(nm);
+    int r = rt_ar_find(nm);
+    int at;
+    int n;
+    if (r < 0 || ar_n[r] == 0) {
+        if (rt_streq(k, "0") != 0) rt_setvar_byname(nm, &unset_marker[0]);
+        return 0;
     }
+    at = rt_ar_pos(r, k);
+    if (at < 0) return 0;
+    n = ar_n[r] - 1;
+    if (at < n) {
+        memmove(ar_k[r] + at, ar_k[r] + at + 1, (unsigned long)(n - at) * 8);
+        memmove(ar_v[r] + at, ar_v[r] + at + 1, (unsigned long)(n - at) * 8);
+    }
+    ar_n[r] = n;
+    arr_rows = arr_rows - 1;
+    ar_mk[r] = ar_mk[r] | 1;
+    rt_ar_khdrop(r);
     return 0;
 }
 
-/* 1 when the array has a row at all: the test every variable read makes, so it
- * stops at the first row instead of counting them. */
+/* 1 when the array has a row at all: the test every variable read makes. */
 int rt_arr_any(char *nm) {
-    int n = arr_n;
-    int i = 0;
-    while (i < n) {
-        if (rt_streq(nm, arr_nm[i]) != 0) return 1;
-        i = i + 1;
-    }
-    return 0;
+    int r;
+    if (arr_rows == 0) return 0;
+    r = rt_ar_find(nm);
+    return r >= 0 && ar_n[r] > 0 ? 1 : 0;
 }
 
 /* i32 rt_arr_count(i8* nm) */
 int rt_arr_count(char *nm) {
-    int n = arr_n;
-    int i = 0, c = 0;
-    while (i < n) {
-        int same = rt_streq(nm, arr_nm[i]) != 0;
-        c = same ? c + 1 : c;
-        i = i + 1;
-    }
-    return c;
+    int r = rt_ar_find(nm);
+    return r >= 0 ? ar_n[r] : 0;
 }
 
 /* i8* rt_arr_list(i8* nm, i8* sep, i32 star, i32 keys): the keys or the values
  * of an array, as a field list (star == 0) or joined with sep (star != 0). */
 char *rt_arr_list(char *nm, char *sep, int star, int keys) {
-    int n = arr_n;
+    int r = rt_ar_find(nm);
     char *out = list_nil;
     int i = 0;
+    int n = r >= 0 ? ar_n[r] : 0;
     while (i < n) {
-        if (rt_streq(nm, arr_nm[i]) != 0) out = rt_fadd(out, keys != 0 ? arr_k[i] : arr_v[i]);
+        out = rt_fadd(out, keys != 0 ? ar_k[r][i] : ar_v[r][i]);
         i = i + 1;
     }
     return star != 0 ? rt_ljoin(out, sep) : out;
 }
 
-/* rt_arr_nextidx(nm): one past the largest numeric key, 0 for none. */
+/* rt_arr_nextidx(nm): one past the largest non-negative numeric key, 0 for
+ * none - a sorted record's last row. */
 long rt_arr_nextidx(char *nm) {
-    int n = arr_n;
+    int r = rt_ar_find(nm);
     int i = 0;
+    int n;
     long mx = 0;
+    if (r < 0) return 0;
+    n = ar_n[r];
+    if (ar_srt[r] != 0) {
+        if (n == 0) return 0;
+        mx = rt_str2int(ar_k[r][n - 1]);
+        return mx >= 0 ? mx + 1 : 0;
+    }
     while (i < n) {
-        int same = rt_streq(nm, arr_nm[i]) != 0;
-        long kn = rt_str2int(arr_k[i]);
-        int bigger = same && kn >= mx;
-        mx = bigger ? kn + 1 : mx;
+        long kn = rt_str2int(ar_k[r][i]);
+        mx = kn >= mx ? kn + 1 : mx;
         i = i + 1;
     }
     return mx;
@@ -4122,74 +4359,74 @@ int rt_isfin(char *v) {
 }
 
 /* AN ARRAY ASSIGNED A LITERAL IS SET EVEN WITH NO ELEMENT: bash 5.3 lists `e=()`
- * in ${!e*} and not `declare -a e`. A row store keeps nothing for an empty array,
- * so the literal leaves a mark - the row ("\003NAME", "") - which rt_arr_clear
- * drops with the rows and the subshell snapshot copies with them. Unsetting an
- * element leaves the same mark: `b[0]=1; unset 'b[0]'` is the set, empty
- * `declare -a b=()`. Twin of the `lit` flag of an array in bash-interpreter.abnf. */
+ * in ${!e*} and not `declare -a e`. A record with no row is otherwise absent, so
+ * the literal leaves mark 1, which rt_arr_clear drops with the rows and the
+ * subshell snapshot copies with them. Unsetting an element leaves the same mark:
+ * `b[0]=1; unset 'b[0]'` is the set, empty `declare -a b=()`. Twin of the `lit`
+ * flag of an array in bash-interpreter.abnf. */
 int rt_arr_mark(char *nm) {
-    return rt_arr_set(rt_strcat("\003", nm), empty, empty);
+    int r = rt_ar_rec(nm);
+    ar_mk[r] = ar_mk[r] | 1;
+    return 0;
 }
 
 /* A DECLARED-ONLY ARRAY (`declare -a e` with no value) is not set, but
- * `declare -p e` prints `declare -a e`: the row ("\003NAME", "d") records the
- * declaration. Twin of the `decl` flag of an array in bash-interpreter.abnf. */
+ * `declare -p e` prints `declare -a e`: mark 2 records the declaration. Twin of
+ * the `decl` flag of an array in bash-interpreter.abnf. */
 int rt_arr_dmark(char *nm) {
-    return rt_arr_set(rt_strcat("\003", nm), "d", empty);
+    int r = rt_ar_rec(nm);
+    ar_mk[r] = ar_mk[r] | 2;
+    return 0;
 }
 
 /* A SCALAR DECLARED WITHOUT A VALUE (`declare x`, or a local unset in the
  * function that declared it) is not set, but `declare -p x` prints
- * `declare -- x`: the row ("\003NAME", "s"). Twin of dclVars in
- * bash-interpreter.abnf. */
+ * `declare -- x`: mark 4. Twin of dclVars in bash-interpreter.abnf. */
 int rt_arr_smark(char *nm) {
-    return rt_arr_set(rt_strcat("\003", nm), "s", empty);
-}
-
-/* Is the row name rn NAME's mark? */
-int rt_ismark(char *rn, char *nm) {
-    int i = 0;
-    if ((int)(unsigned char)rn[0] != 3) return 0;
-    while (nm[i] != 0 && rn[i + 1] == nm[i]) i = i + 1;
-    return nm[i] == 0 && rn[i + 1] == 0;
-}
-
-/* Does NAME carry the mark with key k ("" set, "d" declared)? */
-int rt_arr_haskmark(char *nm, char *k) {
-    int i = 0;
-    while (i < arr_n) {
-        if (rt_ismark(arr_nm[i], nm) != 0 && rt_streq(arr_k[i], k) != 0) return 1;
-        i = i + 1;
-    }
+    int r = rt_ar_rec(nm);
+    ar_mk[r] = ar_mk[r] | 4;
     return 0;
 }
 
+/* NAME's marks, 0 for a name without a record. */
+int rt_arr_marks(char *nm) {
+    int r = rt_ar_find(nm);
+    return r >= 0 ? ar_mk[r] : 0;
+}
+
 int rt_arr_marked(char *nm) {
-    return rt_arr_haskmark(nm, empty);
+    return rt_arr_marks(nm) & 1;
 }
 
 int rt_arr_dmarked(char *nm) {
-    return rt_arr_haskmark(nm, "d");
+    return (rt_arr_marks(nm) & 2) != 0 ? 1 : 0;
 }
 
 int rt_arr_smarked(char *nm) {
-    return rt_arr_haskmark(nm, "s");
+    return (rt_arr_marks(nm) & 4) != 0 ? 1 : 0;
 }
 
-/* i32 rt_arr_clear(i8* nm): drop every entry of one array, and its mark. */
+/* i32 rt_arr_clear(i8* nm): drop every row of one array, and its marks. */
 int rt_arr_clear(char *nm) {
-    int i = 0, o = 0;
-    while (i < arr_n) {
-        int same = rt_streq(nm, arr_nm[i]) != 0 || rt_ismark(arr_nm[i], nm) != 0;
-        if (!same) {
-            arr_nm[o] = arr_nm[i];
-            arr_k[o] = arr_k[i];
-            arr_v[o] = arr_v[i];
-            o = o + 1;
-        }
-        i = i + 1;
-    }
-    arr_n = o;
+    int r = rt_ar_find(nm);
+    if (r < 0) return 0;
+    arr_rows = arr_rows - ar_n[r];
+    ar_n[r] = 0;
+    ar_mk[r] = 0;
+    ar_srt[r] = 1;
+    rt_ar_khdrop(r);
+    return 0;
+}
+
+/* A SET SCALAR BECOMES ELEMENT 0 of the array an element assignment or an
+ * appending literal makes of its name: bash 5.3 answers `abcd x` for
+ * t=abcd; t[1]=x; echo "${t[*]}". Slot id is left unset, so the name reads
+ * through the array from then on. Twin of arrAdopt in bash-interpreter.abnf. */
+int rt_arr_adopt(char *nm, int id) {
+    char *v = gvars[id];
+    if (v == &unset_marker[0] || rt_arr_any(nm) != 0) return 0;
+    rt_arr_iset(nm, "0", v);
+    gvars[id] = &unset_marker[0];
     return 0;
 }
 
@@ -4275,22 +4512,21 @@ char *rt_params0(void) {
 
 /* ${!p*} / ${!p@}: the names of the SET variables starting with p, sorted - a
  * scalar that is not the unset marker, or an array with an element or a literal
- * (rt_arr_mark; arrays live in arr_nm, not among the scalar slots). Joined with sep when star is set, a
+ * (rt_arr_mark; arrays are records, not scalar slots). Joined with sep when star is set, a
  * field list otherwise. Twin of varNamesWithPrefix in
  * languages/bash-interpreter.abnf. */
 char *rt_pfxnames(char *p, char *sep, int star) {
     char *nm[1024];
     int n = 0;
     int pl = rt_strlen(p);
-    int total = nvars + arr_n;
+    int total = nvars + ar_cnt;
     int i = 0;
     int j;
     int dup;
     char *v;
     char *out;
     while (i < total) {
-        v = i < nvars ? varnames[i] : arr_nm[i - nvars];
-        if ((int)(unsigned char)v[0] == 3) v = rt_substr(v, 1, rt_strlen(v) - 1);
+        v = i < nvars ? varnames[i] : ar_nm[i - nvars];
         int ok = rt_strlen(v) >= pl && rt_streq(rt_substr(v, 0, pl), p) != 0;
         if (ok && rt_getvar_byname(v) == &unset_marker[0] && rt_arr_any(v) == 0
             && rt_arr_marked(v) == 0) ok = 0;
@@ -4438,18 +4674,17 @@ int rt_keymeta(char *k) {
 /* `NAME=([k]="v" ...)`: the third FIELD of `declare -p` and of ${a[@]@A}. */
 char *rt_arrassign(char *nm, int assoc) {
     char *out = rt_strcat(nm, "=(");
+    int r = rt_ar_find(nm);
+    int n = r >= 0 ? ar_n[r] : 0;
     int c = 0;
-    int i = 0;
-    while (i < arr_n) {
-        if (rt_streq(nm, arr_nm[i]) != 0) {
-            if (c > 0) out = rt_strcat(out, " ");
-            out = rt_strcat(out, "[");
-            out = rt_strcat(out, rt_keymeta(arr_k[i]) != 0 ? rt_dqs(arr_k[i]) : arr_k[i]);
-            out = rt_strcat(out, "]=");
-            out = rt_strcat(out, rt_dqs(arr_v[i]));
-            c = c + 1;
-        }
-        i = i + 1;
+    while (c < n) {
+        char *k = ar_k[r][c];
+        if (c > 0) out = rt_strcat(out, " ");
+        out = rt_strcat(out, "[");
+        out = rt_strcat(out, rt_keymeta(k) != 0 ? rt_dqs(k) : k);
+        out = rt_strcat(out, "]=");
+        out = rt_strcat(out, rt_dqs(ar_v[r][c]));
+        c = c + 1;
     }
     if (assoc != 0 && c > 0) out = rt_strcat(out, " ");
     return rt_strcat(out, ")");
@@ -4572,16 +4807,15 @@ char *rt_declpos(char *ifs, char *sep, int star) {
  * writes for the associative form only. */
 char *rt_kvq(char *nm, int assoc, char *v, int isset) {
     char *out = list_nil;
+    int r = rt_ar_find(nm);
+    int n = r >= 0 ? ar_n[r] : 0;
     int c = 0;
-    int i = 0;
-    if (rt_arr_any(nm) == 0 && assoc == 0) return rt_shq(v, isset);
-    while (i < arr_n) {
-        if (rt_streq(nm, arr_nm[i]) != 0) {
-            out = rt_fadd(out, rt_keymeta(arr_k[i]) != 0 ? rt_dqs(arr_k[i]) : arr_k[i]);
-            out = rt_fadd(out, rt_dqs(arr_v[i]));
-            c = c + 1;
-        }
-        i = i + 1;
+    if (n == 0 && assoc == 0) return rt_shq(v, isset);
+    while (c < n) {
+        char *k = ar_k[r][c];
+        out = rt_fadd(out, rt_keymeta(k) != 0 ? rt_dqs(k) : k);
+        out = rt_fadd(out, rt_dqs(ar_v[r][c]));
+        c = c + 1;
     }
     if (assoc != 0 && c > 0) out = rt_fadd(out, empty);
     return rt_ljoin(out, " ");
@@ -4590,10 +4824,12 @@ char *rt_kvq(char *nm, int assoc, char *v, int isset) {
 /* ${a[@]@k}: the same pairs, unquoted, as separate FIELDS. */
 char *rt_kvp(char *nm, char *sep, int star, char *v, int isset) {
     char *out = list_nil;
+    int r = rt_ar_find(nm);
+    int n = r >= 0 ? ar_n[r] : 0;
     int i = 0;
-    if (rt_arr_any(nm) == 0) return rt_shq(v, isset);
-    while (i < arr_n) {
-        if (rt_streq(nm, arr_nm[i]) != 0) out = rt_fadd(rt_fadd(out, arr_k[i]), arr_v[i]);
+    if (n == 0) return rt_shq(v, isset);
+    while (i < n) {
+        out = rt_fadd(rt_fadd(out, ar_k[r][i]), ar_v[r][i]);
         i = i + 1;
     }
     return star != 0 ? rt_ljoin(out, sep) : out;
@@ -4798,7 +5034,8 @@ int rt_arr_append(char *nm, char *f) {
  * position, which for it is the same thing. A negative len is bash's "substring
  * expression < 0". */
 char *rt_arr_slice(char *nm, long off, long len, int haslen, char *sep, int star) {
-    int n = arr_n;
+    int r = rt_ar_find(nm);
+    int n = r >= 0 ? ar_n[r] : 0;
     int isStar = star != 0;
     char *out = isStar ? empty : list_nil;
     int i = 0;
@@ -4821,8 +5058,8 @@ char *rt_arr_slice(char *nm, long off, long len, int haslen, char *sep, int star
     }
     out = list_nil;
     while (i < n) {
-        if (rt_streq(nm, arr_nm[i]) != 0 && rt_str2int(arr_k[i]) >= off && (haslen == 0 || taken < len)) {
-            out = rt_fadd(out, arr_v[i]);
+        if (rt_str2int(ar_k[r][i]) >= off && (haslen == 0 || taken < len)) {
+            out = rt_fadd(out, ar_v[r][i]);
             taken = taken + 1;
         }
         i = i + 1;
@@ -5217,34 +5454,47 @@ int rt_prints(char *s)
 int rt_ss_save(int u)
 {
     int d;
-    int base;
     int i;
+    int r;
+    long p;
     char **blk;
+    int *rec;
     d = ss_depth;
     if (d >= 4096) {
         rt_die("subshell nesting", 1, d, 4096);
     }
-    if (ss_cap[d] < arr_n || ss_cap[d] == 0) {
-        int cap = arr_n < 64 ? 64 : arr_n * 2;
-        ss_blk[d] = (char **)rt_bump8((nvars + 3 * cap) * 8);
-        rt_pin();
-        ss_cap[d] = cap;
+    if (ss_cap[d] < nvars + 2 * arr_rows || ss_blk[d] == 0) {
+        ss_cap[d] = nvars + 4 * arr_rows + 64;
+        if (ss_blk[d] != 0) free(ss_blk[d]);
+        ss_blk[d] = (char **)rt_xalloc("subshell snapshot", ss_cap[d] * 8);
+    }
+    if (ss_rcap[d] < ar_cnt || ss_rec[d] == 0) {
+        ss_rcap[d] = 2 * ar_cnt + 16;
+        if (ss_rec[d] != 0) free(ss_rec[d]);
+        ss_rec[d] = (int *)rt_xalloc("subshell snapshot", (long)ss_rcap[d] * 12);
     }
     blk = ss_blk[d];
+    rec = ss_rec[d];
     i = 0;
     while (i < nvars) {
         blk[i] = gvars[i];
         i = i + 1;
     }
-    base = nvars;
-    i = 0;
-    while (i < arr_n) {
-        blk[base + 3 * i] = arr_nm[i];
-        blk[base + 3 * i + 1] = arr_k[i];
-        blk[base + 3 * i + 2] = arr_v[i];
-        i = i + 1;
+    p = nvars;
+    r = 0;
+    while (r < ar_cnt) {
+        int n = ar_n[r];
+        rec[3 * r] = n;
+        rec[3 * r + 1] = ar_mk[r];
+        rec[3 * r + 2] = ar_srt[r];
+        if (n > 0) {
+            memmove(blk + p, ar_k[r], (unsigned long)n * 8);
+            memmove(blk + p + n, ar_v[r], (unsigned long)n * 8);
+        }
+        p = p + 2 * n;
+        r = r + 1;
     }
-    ss_an[d] = arr_n;
+    ss_an[d] = ar_cnt;
     ss_depth = d + 1;
     return 0;
 }
@@ -5253,28 +5503,43 @@ int rt_ss_save(int u)
 int rt_ss_restore(int u)
 {
     int d;
-    int base;
-    int n;
     int i;
+    int r;
+    long p;
     char **blk;
+    int *rec;
     d = ss_depth - 1;
     ss_depth = d;
     blk = ss_blk[d];
+    rec = ss_rec[d];
     i = 0;
     while (i < nvars) {
         gvars[i] = blk[i];
         i = i + 1;
     }
-    base = nvars;
-    n = ss_an[d];
-    i = 0;
-    while (i < n) {
-        arr_nm[i] = blk[base + 3 * i];
-        arr_k[i] = blk[base + 3 * i + 1];
-        arr_v[i] = blk[base + 3 * i + 2];
-        i = i + 1;
+    p = nvars;
+    arr_rows = 0;
+    r = 0;
+    while (r < ar_cnt) {
+        int n = 0;
+        ar_mk[r] = 0;
+        ar_srt[r] = 1;
+        if (r < ss_an[d]) {
+            n = rec[3 * r];
+            ar_mk[r] = rec[3 * r + 1];
+            ar_srt[r] = rec[3 * r + 2];
+            rt_ar_room(r, n);
+            if (n > 0) {
+                memmove(ar_k[r], blk + p, (unsigned long)n * 8);
+                memmove(ar_v[r], blk + p + n, (unsigned long)n * 8);
+            }
+            p = p + 2 * n;
+        }
+        ar_n[r] = n;
+        arr_rows = arr_rows + n;
+        rt_ar_khdrop(r);
+        r = r + 1;
     }
-    arr_n = n;
     return 0;
 }
 
@@ -5282,6 +5547,8 @@ int rt_ss_restore(int u)
 int rt_push_local(int id)
 {
     int t;
+    int r;
+    int cnt = 0;
     t = ls_top;
     /* LSMAX. Refusing the push would leak the "local" into the caller. */
     if (t >= 512) {
@@ -5289,27 +5556,23 @@ int rt_push_local(int id)
     }
     ls_id[t] = id;
     ls_val[t] = gvars[id];
-    /* Copy this name's array rows aside. The scan is skipped entirely when the
-     * program has no array live, which is the common case and is why `local`
-     * in a hot recursive function does not pay for this. */
-    int cnt = 0;
+    /* Copy this name's array rows aside: none when the name has no record,
+     * which is why `local` in a hot recursive function does not pay for this. */
     ls_amark[t] = 0;
-    if (arr_n > 0) {
-        char *nm = varnames[id];
-        ls_amark[t] = rt_arr_marked(nm) + 2 * rt_arr_dmarked(nm) + 4 * rt_arr_smarked(nm);
-        int i = 0;
-        while (i < arr_n) {
-            if (rt_streq(nm, arr_nm[i]) != 0) {
-                if (las_top >= 4096) {
-                    rt_die("local array save stack", 1, las_top, 4096);
-                }
-                las_k[las_top] = arr_k[i];
-                las_v[las_top] = arr_v[i];
-                las_top = las_top + 1;
-                cnt = cnt + 1;
-            }
-            i = i + 1;
+    r = rt_ar_find(varnames[id]);
+    if (r >= 0) {
+        cnt = ar_n[r];
+        ls_amark[t] = ar_mk[r] | (ar_srt[r] != 0 ? 0 : 8);
+        if (las_top + cnt > las_cap) {
+            las_cap = 2 * (las_top + cnt) + 64;
+            las_k = (char **)rt_xgrow("local array save stack", (char *)las_k, (long)las_cap * 8);
+            las_v = (char **)rt_xgrow("local array save stack", (char *)las_v, (long)las_cap * 8);
         }
+        if (cnt > 0) {
+            memmove(las_k + las_top, ar_k[r], (unsigned long)cnt * 8);
+            memmove(las_v + las_top, ar_v[r], (unsigned long)cnt * 8);
+        }
+        las_top = las_top + cnt;
     }
     ls_acnt[t] = cnt;
     ls_top = t + 1;
@@ -5319,20 +5582,25 @@ int rt_push_local(int id)
 /* Put entry t's saved binding back; its array rows start at las index `rows`. */
 int rt_ls_restore(int t, int rows)
 {
-    gvars[ls_id[t]] = ls_val[t];
     int cnt = ls_acnt[t];
-    if (arr_n > 0 || cnt > 0) {
-        char *nm = varnames[ls_id[t]];
+    int r;
+    char *nm = varnames[ls_id[t]];
+    gvars[ls_id[t]] = ls_val[t];
+    if (cnt == 0 && ls_amark[t] == 0) {
         rt_arr_clear(nm);
-        int i = rows;
-        while (i < rows + cnt) {
-            rt_arr_set(nm, las_k[i], las_v[i]);
-            i = i + 1;
-        }
-        if ((ls_amark[t] & 1) != 0) rt_arr_mark(nm);
-        if ((ls_amark[t] & 2) != 0) rt_arr_dmark(nm);
-        if ((ls_amark[t] & 4) != 0) rt_arr_smark(nm);
+        return 0;
     }
+    r = rt_ar_rec(nm);
+    rt_ar_room(r, cnt);
+    if (cnt > 0) {
+        memmove(ar_k[r], las_k + rows, (unsigned long)cnt * 8);
+        memmove(ar_v[r], las_v + rows, (unsigned long)cnt * 8);
+    }
+    arr_rows = arr_rows - ar_n[r] + cnt;
+    ar_n[r] = cnt;
+    ar_mk[r] = ls_amark[t] & 7;
+    ar_srt[r] = (ls_amark[t] & 8) != 0 ? 0 : 1;
+    rt_ar_khdrop(r);
     return 0;
 }
 
@@ -5397,20 +5665,14 @@ int rt_unset_up(int id, int d, int fn)
 
 /* The slot of the variable called n, or -1. Every by-name access - ${!r}, a name
  * in a run-time arithmetic string, declare - goes through here, so the names are
- * indexed once, the first time, in an open-addressing table (djb2, linear
+ * indexed once, the first time, in an open-addressing table (rt_nhash, linear
  * probing; nvars is final by then, main's entry block having filled varnames). */
 int vh_tab[4096];     /* slot + 1, 0 = empty */
 int vh_built;
 
 int rt_vhash(char *n)
 {
-    int h = 5381;
-    int i = 0;
-    while (n[i] != 0) {
-        h = (h * 33) ^ (int)(unsigned char)n[i];
-        i = i + 1;
-    }
-    return h & 4095;
+    return rt_nhash(n) & 4095;
 }
 
 int rt_varslot(char *n)
