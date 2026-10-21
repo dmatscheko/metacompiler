@@ -8352,14 +8352,34 @@ NotFuncHead = :script(~~
         var cls = anytype // A class descriptor, or absent.
         cls = jsArrClassOf(a)
         if (cls === undefined) { return null }
-        for (var cl = cls; cl != undefined && cl != null; cl = cl.__super) {
-            if (hasOwn(cl, name) && typeof cl[name] == "function" && !isInternalKey(name)) {
-                return {v: cl[name].apply(undefined, concat2impl([a], args))}
-            }
-            if (hasOwn(cl, "__pview") && hasOwn(cl.__pview, name)) { return {v: callWithThis(cl.__pview[name], a, args)} }
-        }
-        if (!hasOwn(jsArrSpecies, name)) { return null }
+        var own = anytype // {v} or null.
+        own = jsClassChainCall(a, cls, name, args)
+        if (own != null || !hasOwn(jsArrSpecies, name)) { return own }
         return jsArrBuiltin(a, name, args)
+    }
+    // A method of the class chain from cls called on o: {v}, or null when none has it.
+    function jsClassChainCall(o, cls, name, args) {
+        if (isInternalKey(name)) { return null }
+        for (var cl = cls; cl != undefined && cl != null; cl = cl.__super) {
+            if (hasOwn(cl, name) && typeof cl[name] == "function") { return {v: cl[name].apply(undefined, concat2impl([o], args))} }
+            if (hasOwn(cl, "__pview") && hasOwn(cl.__pview, name)) { return {v: callWithThis(cl.__pview[name], o, args)} }
+        }
+        return null
+    }
+    // Twin of jsHostSubCall and jsHostBuiltin in js-interpreter.abnf.
+    function jsHostSubCall(o, name, args) {
+        if (o.__class == undefined || !(jpIs(o) || isRegex(o) || rxIsRegexObj(o))) { return null }
+        return jsClassChainCall(o, o.__class, name, args)
+    }
+    function jsHostBuiltin(o, name, args) {
+        if (jsIsWrap(o)) { return jsBuiltin(o.__bvof, name, args) }
+        if (jpIs(o)) {
+            var pm = anytype
+            pm = jpMethod(o, name, args)
+            if (pm !== jpMiss) { return {v: pm} }
+        }
+        if (isRegex(o) || rxIsRegexObj(o)) { return rxDispatch(o, name, args) }
+        return null
     }
     function jsArrBuiltin(a, name, args) {
         var r = anytype // {v} or null.
@@ -8950,6 +8970,11 @@ NotFuncHead = :script(~~
                 var sb = anytype // An Array subclass's super.m() reaches Array.prototype.
                 sb = jsArrBuiltin(self, name, evalArgs(argThunks))
                 if (sb != null) { return sb.v }
+            }
+            if (typeof m != "function" && jsHostRoots.length > 0 && typeof self == "object" && self !== null && !Array.isArray(self)) {
+                var hb = anytype // ...and a Promise / RegExp / wrapper subclass's the builtin's.
+                hb = jsHostBuiltin(self, name, evalArgs(argThunks))
+                if (hb != null) { return hb.v }
             }
             if (typeof m != "function" && !isClassDesc(self) && jsIsProtoName(name)) { return jsProtoApply(self, name, evalArgs(argThunks)) }
             if (typeof m != "function") { biRaise("TypeError: (intermediate value)." + name + " is not a function") }
@@ -9629,6 +9654,9 @@ NotFuncHead = :script(~~
                     // An Array subclass instance's own methods come first (jsArrSubCall).
                     var aHit = anytype
                     aHit = (jsArrClasses.length > 0 && Array.isArray(curThis)) ? jsArrSubCall(curThis, lastKey, argv) : null
+                    if (jsHostRoots.length > 0 && aHit == null && typeof curThis == "object" && curThis !== null && !Array.isArray(curThis)) {
+                        aHit = jsHostSubCall(curThis, lastKey, argv)
+                    }
                     // See the twin of this comment in js-interpreter.abnf.
                     var rxHit = anytype
                     rxHit = (aHit != null) ? null : rxDispatch(curThis, lastKey, argv)

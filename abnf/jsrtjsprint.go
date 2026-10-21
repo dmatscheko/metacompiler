@@ -5918,11 +5918,27 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			args = &jsArray{}
 		}
 		name := rt.toString(u(a[1]))
-		// An Array subclass's super.m() reaches Array.prototype; any other name that
-		// is not Object.prototype's answers the miss sentinel for the call site.
+		// An Array subclass's super.m() reaches Array.prototype, a Promise / RegExp /
+		// wrapper subclass's the builtin's (hostRoot); any other name that is not
+		// Object.prototype's answers the miss sentinel for the call site.
 		if arr, isArr := u(a[0]).(*jsArray); isArr {
 			if v, handled := rt.jsvArrBuiltin(arr, name, args.elems); handled {
 				return w(v)
+			}
+		}
+		if o, isObj := u(a[0]).(*jsObject); isObj && o.props["__class"] != nil {
+			if p, isWrap := o.props["__bvof"]; isWrap {
+				return m["js_jsmcall"]([]uint64{w(p), a[1], a[2]})
+			}
+			if rxIsRegexObj(o) {
+				if v, handled := rt.jsxMethod(o, name, args.elems); handled {
+					return w(v)
+				}
+			}
+			if promIs(o) {
+				if v, handled := rt.promMethod(o, name, args.elems); handled {
+					return w(v)
+				}
 			}
 		}
 		if !jsvIsProtoName(name) {
@@ -6313,8 +6329,8 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			if v, handled := rt.jsvClassCall(u(a[0]), cls, rt.toString(u(a[1])), arr.elems); handled {
 				return w(v)
 			}
-		} else if o, isObj := u(a[0]).(*jsObject); isObj && len(hostRoots) > 0 && (promIs(o) || rxIsRegexObj(o)) {
-			// A Promise / RegExp subclass instance (hostRoot): the same order.
+		} else if o, isObj := u(a[0]).(*jsObject); isObj && len(hostRoots) > 0 && (promIs(o) || rxIsRegexObj(o) || o.props["__bvof"] != nil) {
+			// A Promise / RegExp / wrapper subclass instance (hostRoot): the same order.
 			if cls, isInst := o.props["__class"].(*jsObject); isInst {
 				if v, handled := rt.jsvClassCall(o, cls, rt.toString(u(a[1])), arr.elems); handled {
 					return w(v)

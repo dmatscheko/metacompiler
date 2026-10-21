@@ -2908,6 +2908,8 @@ class R110 extends RegExp { both(s) { return this.test(s) && this.source === "a+
 class U110 extends String { shout() { return this.toUpperCase() + "!" } }
 class N110 extends Number { constructor(v) { super(v * 10) } half() { return this / 2 } }
 class B110b extends Boolean { neg() { return !this.valueOf() } }
+class R110b extends RegExp { test(s) { return !super.test(s) } }
+class U110b extends String { toUpperCase() { return "own" } charAt(i) { return super.charAt(i) + "!" } }
 function s110() {
     const a = new A110()
     const b = new B110()
@@ -2961,6 +2963,10 @@ function s110() {
     check("xb110e", L110.isArray(l) && !K110.isArray({}) && Q110.resolve(v110[0]) instanceof Promise && N110.isInteger(v110[2]))
     check("xb110f", Object.getPrototypeOf(l) === L110.prototype && "sum" in l && "last" in l && !("zz" in l) &&
         L110.prototype instanceof Array && Object.getPrototypeOf(L110.prototype) === Array.prototype && Object.getPrototypeOf(u) === U110.prototype)
+    // An override of a builtin's own method wins, and its super.m() is the builtin's.
+    const rb = new R110b("a")
+    const ub = new U110b("xy")
+    check("xb110g", rb.test("cat") === false && rb.test("dog") === true && ub.toUpperCase() === "own" && ub.charAt(v110[0]) === "y!")
 }
 
 // ===== SECTION 111: a class declared inside a try, catch or finally block =====

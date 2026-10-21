@@ -3235,14 +3235,29 @@ function js_jssupget(sup, self, key) {
 
 // super.m(args) for one of Object.prototype's methods that nothing on the __super
 // chain defines. Twin of m["js_jssupproto"] in abnf/jsrtjsprint.go.
-// An Array subclass's super.m() reaches Array.prototype; any other name that is not
-// Object.prototype's answers the miss sentinel for the call site.
+// An Array subclass's super.m() reaches Array.prototype, a Promise / RegExp / wrapper
+// subclass's the builtin's; any other name that is not Object.prototype's answers the
+// miss sentinel for the call site.
 function js_jssupproto(self, name, args) {
     var k = jvStr(name)
     if (Array.isArray(self)) {
         var ab = anytype
         ab = jvArrBuiltin(self, k, args)
         if (ab !== jvMiss) { return ab }
+    }
+    // ...and a Promise / RegExp / wrapper subclass's the builtin's (jvHostRoot).
+    if (jvIsObj(self)) {
+        if (self["__class"] !== undefined) {
+            var swp = anytype
+            swp = self["__bvof"]
+            if (swp !== undefined) { return js_jsmcall(swp, k, args) }
+            if (jxIsRe(self)) { return jxMcall(self, k, args) }
+            if (jpIs(self)) {
+                var spm = anytype
+                spm = jpMethod(self, k, args)
+                if (spm !== jvMiss) { return spm }
+            }
+        }
     }
     if (!jvIsProtoName(k)) {
         if (jvMissCallSet) { return jvMissCall }
