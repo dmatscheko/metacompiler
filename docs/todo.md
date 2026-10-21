@@ -68,7 +68,7 @@ its report; anything structural there is a CORE ticket.
 
 # RB — Ruby
 
-### T-747 ruby: halves divergences — Method#arity in the Go twin, inherited private setter from a subclass, compiler local hiding a method; `nil.x =`; missing keyword · P2 · RB · OPEN [V]
+### T-747 ruby: halves divergences — Method#arity in the Go twin, inherited private setter from a subclass, compiler local hiding a method; `nil.x =`; missing keyword · P2 · RB · IN PROGRESS (RB worker, round 20) [V]
 llvm.Run: `d.method(:y).arity` → 0 for `def y(a)` and define_method methods (interp/native/ruby 1 / -2). run and native:
 `class A; attr_accessor :x; private :x=; end; class B < A; def w; self.x = 5; end; end` raises "private method 'x=' called" (interp
 and ruby allow it: methodKey only checks the current class's restricted list). Compiler: top-level `def k2;9;end; k2 = k2; p k2` →
