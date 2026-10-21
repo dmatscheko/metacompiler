@@ -548,6 +548,7 @@ function jxRxFind(pattern, bits, text, from, gpos, glast, mode, cut) {
     re.jcut = cut
     var m = null
     // rxMatchWhole and rxMatchAt with a Matcher's \G and \b{g} state.
+    rxBudget(re, text)
     if (mode == 1) { m = rxAttempt(re, text, from, text.length, gpos, glast, -1) }
     else if (mode == 2) { m = rxAttempt(re, text, from, -1, gpos, glast, -1) }
     else { m = rxSearchFrom(re, text, from, gpos, glast) }

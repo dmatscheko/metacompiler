@@ -7,8 +7,7 @@
 # output). Native only, and named outside tests/bash-test-* for that reason: twenty
 # thousand regex matches are past the IR interpreter's step brake. Then subjects of
 # 70,000 bytes: the regex VM's backtracking lives on a stack of its own, and its step
-# limit (per start position) scales with the subject, so linear work - and a
-# search whose many starts each do linear work - is never cut off.
+# limit scales with the subject, so linear work is never cut off.
 n=0
 m=0
 while [ $n -lt 20 ]; do
@@ -26,5 +25,3 @@ s=${s:0:70000}
 [[ $s =~ (a|b)(a|b)+ ]]; echo "$? ${#BASH_REMATCH[0]} ${BASH_REMATCH[2]}"
 [[ $s =~ ^([ab]b?)+$ ]]; echo "$? ${#BASH_REMATCH[0]} ${BASH_REMATCH[1]}"
 [[ ${s}x =~ (ab)+x ]]; echo "$? ${#BASH_REMATCH[0]}"
-t=${s:0:1000}
-[[ ${t}x =~ (ab)+c|x ]]; echo "$? ${BASH_REMATCH[0]}"

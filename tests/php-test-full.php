@@ -4351,6 +4351,10 @@ function s79() {
     // Linear work on a long subject is never cut off by the step limit.
     $lng = str_repeat("ab", 20000);
     check("pg59", preg_match('/(?:t|u|v|w|x|y|a|b){2,}/', $lng, $m) === 1 && strlen($m[0]) === 40000);
+    // A pathological pattern on a long subject still stops at the step limit.
+    $as = str_repeat("a", 2000) . "!";
+    check("pg60", preg_match('/(a+)+$/', $as) === false && preg_last_error() === PREG_BACKTRACK_LIMIT_ERROR
+        && preg_match('/(a|aa)+$/', $as) === false && preg_last_error() === PREG_BACKTRACK_LIMIT_ERROR);
 }
 
 // ===== END SECTIONS =====

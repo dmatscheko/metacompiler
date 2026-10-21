@@ -5022,7 +5022,7 @@ int rt_fskind(char *p)
  *   RE_NMARK   64   empty-iteration guard slots
  *   RE_SLOTS  192   = RE_NCAP + RE_NMARK             -> re_slot[192]
  *   RE_BT  1048576  backtrack-stack entries          -> re_bx, re_by
- *   RE_STEPS 400000 VM steps per start position, on top of one per
+ *   RE_STEPS 400000 VM steps per rt_regex_search call, on top of four per
  *            (instruction, subject position) pair: linear work never
  *            reaches it, the revisiting of a pathological pattern does
  *
@@ -5048,7 +5048,7 @@ char *re_err;                 /* NEW GLOBAL: last compile error text        */
 char *re_subj;                /* NEW GLOBAL: the subject being searched     */
 int re_slen;                  /* NEW GLOBAL: its length in bytes            */
 long re_steps;                /* NEW GLOBAL: VM steps used                  */
-long re_cap;                  /* NEW GLOBAL: the step cap of one start      */
+long re_cap;                  /* NEW GLOBAL: the step cap of one search     */
 /* The backtrack stack, RE_BT entries: an alternative's pc and sp, or a
  * slot's undo (-1 - slot, its old value). */
 int re_bx[1048576];           /* NEW GLOBAL                                 */
@@ -6078,7 +6078,8 @@ int rt_regex_search(char *pat, char *subj, char *flags, int *caps, int ncaps)
     slen = rt_strlen(subj);
     re_subj = subj;
     re_slen = slen;
-    re_cap = 400000 + (long)(slen + 1) * (long)re_pc;
+    re_cap = 400000 + (long)(slen + 1) * (long)re_pc * 4;
+    re_steps = 0;
     pairs = re_ng + 1;
 
     /* ---- search: leftmost wins, so the start position is tried in order. */
@@ -6087,7 +6088,6 @@ int rt_regex_search(char *pat, char *subj, char *flags, int *caps, int ncaps)
         for (k = 0; k < 192; k++) {
             re_slot[k] = -1;
         }
-        re_steps = 0;
         r = re_run(0, start);
         if (r == -2) {
             return -2;

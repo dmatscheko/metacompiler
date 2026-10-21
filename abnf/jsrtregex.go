@@ -135,10 +135,14 @@ const (
 	rxSPNS = 18
 )
 
-// rxSteps caps one rxSearch attempt on top of one step per (instruction,
-// position) pair, so linear work never reaches it and a pathological pattern
-// reports an error instead of hanging the run. Twin of RX_STEPS in lib/regex.js.
-const rxSteps = 400000
+// rxSteps caps one search on top of rxStepK steps per (instruction, position)
+// pair (budget), so linear work never reaches it and a pathological pattern
+// reports an error instead of hanging the run. Twins of RX_STEPS and RX_STEPK
+// in lib/regex.js.
+const (
+	rxSteps = 400000
+	rxStepK = 4
+)
 
 // ===== Character classes =====
 
@@ -4219,6 +4223,8 @@ type rxRe struct {
 	lbmin, lbmax        []int
 	src                 string
 	flags               string
+	// steps is the current search's step counter (budget).
+	steps int
 	// pcre is the C flag (rxPcre): see rxRunUndo.
 	pcre bool
 	// hitEnd and reqEnd are java.util.regex's Matcher.hitEnd and requireEnd,
@@ -6987,6 +6993,12 @@ func (re *rxRe) search(text []rune, start int) (*rxMatch, bool) {
 	return re.searchFrom(text, start, start, 0)
 }
 
+// budget starts the step counter of a search over text (rxBudget in
+// lib/regex.js).
+func (re *rxRe) budget(text []rune) {
+	re.steps = -(len(text) + 1) * len(re.ops) * rxStepK
+}
+
 // searchAdv is search with CPython's must_advance: when adv, a match that is
 // empty at start itself is refused, though a longer one there is not. Twin of
 // rxSearchAdv in lib/regex.js.
@@ -6994,12 +7006,14 @@ func (re *rxRe) searchAdv(text []rune, start int, adv bool) (*rxMatch, bool) {
 	if !adv || start < 0 || start > len(text) {
 		return re.search(text, start)
 	}
+	re.budget(text)
 	m, ok := re.attempt(text, start, -1, start, 0, start)
 	// A (*COMMIT) or (*SKIP) only ends this attempt (rxSearchAdv).
 	if !ok || (m != nil && m.begin != -1 && m.begin != -3) {
 		return m, ok
 	}
-	return re.search(text, re.nextStart(text, start))
+	next := re.nextStart(text, start)
+	return re.scan(text, next, next, 0)
 }
 
 // searchFrom is search for java.util.regex's Matcher.find, whose \G and \b{g}
@@ -7007,6 +7021,12 @@ func (re *rxRe) searchAdv(text []rune, start int, adv bool) (*rxMatch, bool) {
 // find. It tries no start that leaves fewer than re.jmin units. Twin of
 // rxSearchFrom in lib/regex.js.
 func (re *rxRe) searchFrom(text []rune, from, gpos, glast int) (*rxMatch, bool) {
+	re.budget(text)
+	return re.scan(text, from, gpos, glast)
+}
+
+// scan is searchFrom on the current step budget (rxScan in lib/regex.js).
+func (re *rxRe) scan(text []rune, from, gpos, glast int) (*rxMatch, bool) {
 	last := len(text) - re.jmin
 	for at := from; at <= last; {
 		m, ok := re.attempt(text, at, -1, gpos, glast, -1)
@@ -7054,7 +7074,7 @@ func (re *rxRe) attempt(text []rune, at, mustEnd, gpos, glast, adv int) (*rxMatc
 	for i := range marks {
 		marks[i] = -1
 	}
-	st := &rxRunSt{steps: -(len(text) + 1) * len(re.ops), mustEnd: mustEnd, lbt: -1, gpos: gpos, glast: glast, adv: adv, wrap: -1, bt: re.bt[:0]}
+	st := &rxRunSt{steps: re.steps, mustEnd: mustEnd, lbt: -1, gpos: gpos, glast: glast, adv: adv, wrap: -1, bt: re.bt[:0]}
 	defer func() { re.bt = st.bt[:0] }()
 	if len(re.cmin) > 0 {
 		st.ctr = make([]int, len(re.cmin))
@@ -7063,7 +7083,9 @@ func (re *rxRe) attempt(text []rune, at, mustEnd, gpos, glast, adv int) (*rxMatc
 			st.cbeg[i] = -1
 		}
 	}
-	if end := re.run(text, 0, at, caps, marks, st, 0); end >= 0 {
+	end := re.run(text, 0, at, caps, marks, st, 0)
+	re.steps = st.steps
+	if end >= 0 {
 		return &rxMatch{begin: caps[0], end: caps[1], caps: caps}, true
 	}
 	// See rxAttempt in lib/regex.js for the C dialect's records.
@@ -7091,6 +7113,7 @@ func (re *rxRe) matchAt(text []rune, at int) (*rxMatch, bool) {
 	if at < 0 || at > len(text) {
 		return nil, true
 	}
+	re.budget(text)
 	return re.attempt(text, at, -1, at, 0, -1)
 }
 
@@ -7101,6 +7124,7 @@ func (re *rxRe) matchWhole(text []rune, at int) (*rxMatch, bool) {
 	if at < 0 || at > len(text) {
 		return nil, true
 	}
+	re.budget(text)
 	return re.attempt(text, at, len(text), at, 0, -1)
 }
 

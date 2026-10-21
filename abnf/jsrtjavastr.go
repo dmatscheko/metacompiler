@@ -371,6 +371,7 @@ func (rt *jsrt) jxRxPrim(s, name string, num func(int) int, arg func(int) interf
 	var mt *rxMatch
 	ok := true
 	re.hitEnd, re.reqEnd, re.jcut = false, false, rune(num(6))
+	re.budget(text)
 	switch mode {
 	case 1:
 		mt, ok = re.attempt(text, from, len(text), gpos, glast, -1)

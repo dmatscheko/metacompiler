@@ -240,12 +240,14 @@ var RX_SPND = 16   // Python's Unicode \D
 var RX_SPS = 17    // Python's Unicode \s (rxPySpaceHit)
 var RX_SPNS = 18   // Python's Unicode \S
 
-// Step cap for one rxSearch attempt, on top of one step per (instruction,
-// position) pair: a match that visits each of those states a bounded number of
-// times is linear work and never reaches it, while the revisiting a
-// pathological pattern does (exponential or polynomial in the input) reports
-// "regexp: step limit exceeded" rather than hanging the whole run.
+// Step cap for one search (all its attempts), on top of RX_STEPK steps per
+// (instruction, subject position) pair (rxBudget): a search that visits each
+// of those states a bounded number of times is linear work and never reaches
+// it, while the revisiting a pathological pattern does (exponential or
+// polynomial in the input) reports "regexp: step limit exceeded" rather than
+// hanging the whole run.
 var RX_STEPS = 400000
+var RX_STEPK = 4
 
 
 // ===== Character classes =====
@@ -5637,7 +5639,7 @@ function rxCompile(pattern, flags) {
                 icase: icase, dotall: dotall, multi: multi, jsrep: jsrep, java: java,
                 py: false, supp: false, bfail: bfail, gflags: "",
                 cmin: [], cmax: [], cgreedy: [], lbmin: [], lbmax: [],
-                src: pattern, flags: flags, hitEnd: false, reqEnd: false, jbegin: false, jmin: 0, jcut: 0}
+                src: pattern, flags: flags, hitEnd: false, reqEnd: false, jbegin: false, jmin: 0, jcut: 0, steps: 0}
     }
     var pg = rxNewProg()
     pg.jsrep = jsrep
@@ -5676,7 +5678,7 @@ function rxCompile(pattern, flags) {
         icase: icase, dotall: dotall, multi: multi, jsrep: jsrep, java: java,
         py: py, supp: supp, bfail: bfail, gflags: java ? rxFlagsGet(st) : st.gflags, pcre: pcre,
         cmin: pg.cmin, cmax: pg.cmax, cgreedy: pg.cgreedy, lbmin: pg.lbmin, lbmax: pg.lbmax,
-        src: pattern, flags: flags, hitEnd: false, reqEnd: false, jbegin: jbegin, jmin: jmin,
+        src: pattern, flags: flags, hitEnd: false, reqEnd: false, jbegin: jbegin, jmin: jmin, steps: 0,
         jcut: 0
     }
 }
@@ -6595,11 +6597,11 @@ function rxAttempt(re, text, at, mustEnd, gpos, glast, adv) {
         cbeg.push(-1)
         i = i + 1
     }
-    // The counter starts below zero by the size of the state space, so rxRun
-    // compares it against the fixed RX_STEPS.
-    var st = {steps: 0 - (text.length + 1) * re.ops.length, over: false, mustEnd: mustEnd, lbt: -1, ctr: ctr, cbeg: cbeg,
+    // The search's counter (rxBudget) carries over from attempt to attempt.
+    var st = {steps: re.steps, over: false, mustEnd: mustEnd, lbt: -1, ctr: ctr, cbeg: cbeg,
               gpos: gpos, glast: glast, adv: adv, wrap: 0 - 1, verb: 0}
     var end = rxRun(re, text, 0, at, caps, marks, st, 0, 0)
+    re.steps = st.steps
     // Under C the outcomes besides a match and none are records with a
     // negative begin: -2 the step limit (PHP's backtrack limit), -4 a
     // recursion that would loop, -1 a (*COMMIT) (no match from any start)
@@ -6616,8 +6618,21 @@ function rxAttempt(re, text, at, mustEnd, gpos, glast, adv) {
     return null
 }
 
+// rxBudget starts the step counter of a search over text: below zero by
+// RX_STEPK steps per (instruction, position) pair, so that rxRun compares it
+// against the fixed RX_STEPS.
+function rxBudget(re, text) {
+    re.steps = 0 - (text.length + 1) * re.ops.length * RX_STEPK
+}
+
 function rxSearch(re, text, start) {
     if (!re.ok) { rxFail("invalid regexp: " + re.err) }
+    rxBudget(re, text)
+    return rxScan(re, text, start)
+}
+
+// rxScan is rxSearch on the current step budget.
+function rxScan(re, text, start) {
     var from = start
     if (from < 0) { from = 0 }
     var at = from
@@ -6644,11 +6659,12 @@ function rxSearch(re, text, start) {
 // search after an empty match asks for this, so that it moves on.
 function rxSearchAdv(re, text, start, adv) {
     if (!adv || start < 0 || start > text.length) { return rxSearch(re, text, start) }
+    rxBudget(re, text)
     var m = rxAttempt(re, text, start, -1, start, 0, start)
     // The refusal of an empty match is an attempt of its own (PHP's anchored
     // retry), so a (*COMMIT) or (*SKIP) there only ends that attempt.
     if (m != null && m.begin != 0 - 1 && m.begin != 0 - 3) { return m }
-    return rxSearch(re, text, start + (re.supp && start + 1 < text.length && rxCpAt(text, start) > 65535 ? 2 : 1))
+    return rxScan(re, text, start + (re.supp && start + 1 < text.length && rxCpAt(text, start) > 65535 ? 2 : 1))
 }
 
 // rxSearchFrom is rxSearch for java.util.regex's Matcher.find, whose \G and
@@ -6658,6 +6674,7 @@ function rxSearchAdv(re, text, start, adv) {
 // folded into rxSearch, which every language calls once per match.
 function rxSearchFrom(re, text, start, gpos, glast) {
     if (!re.ok) { rxFail("invalid regexp: " + re.err) }
+    rxBudget(re, text)
     var at = start
     var last = text.length - re.jmin
     while (at <= last) {
@@ -6674,6 +6691,7 @@ function rxSearchFrom(re, text, start, gpos, glast) {
 function rxMatchAt(re, text, at) {
     if (!re.ok) { rxFail("invalid regexp: " + re.err) }
     if (at < 0 || at > text.length) { return null }
+    rxBudget(re, text)
     return rxAttempt(re, text, at, -1, at, 0, -1)
 }
 
@@ -6685,6 +6703,7 @@ function rxMatchAt(re, text, at) {
 function rxMatchWhole(re, text, at) {
     if (!re.ok) { rxFail("invalid regexp: " + re.err) }
     if (at < 0 || at > text.length) { return null }
+    rxBudget(re, text)
     return rxAttempt(re, text, at, text.length, at, 0, -1)
 }
 
