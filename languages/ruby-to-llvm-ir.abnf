@@ -2568,17 +2568,46 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // hands over [pos, thunk].
     //
     // Everything else is core stmtPos: the marker is emitted only when the host
-    // collects positions (c.tracing), so without -trace/-cfgraph/-callgraph/-why
-    // the emitted module is byte for byte the module of a grammar with no markers.
+    // collects positions (c.tracing). The statement's site (rbSiteMark) is stored
+    // either way.
     function rbStmtPos(items) {
         var t = items[1]
-        if (!c.tracing) { return t }
         var pos = items[0]
         if (pos == undefined) { return t }
         return function(b) {
-            callExt(b, "js_srcpos", [handle(pos)])
+            if (c.tracing) { callExt(b, "js_srcpos", [handle(pos)]) }
+            rbSiteMark(b, pos)
             return t(b)
         }
+    }
+    // ----- The running statement's site -----
+    // rb.site / rb.sitelen hold the bytes of MRI's frame string for the statement
+    // that started last ("prog.rb:2:in `rec'", see raiseSite): module globals, so a
+    // statement costs two stores and no extern. A method, block or lambda function
+    // reads them on entry and stores them back at each of its rets, and a begin
+    // stores back what it started with, so after a call the caller's statement is
+    // current again. The SystemStackError hook reads them: MRI reports the overflow
+    // at the statement whose call overflowed, in that statement's method.
+    // Twin of rbSitePos in ruby-interpreter.abnf.
+    var gRbSite = m.NewGlobalDef("rb.site", llvm.constant.NewNull(llvm.types.I8Ptr))
+    var gRbSiteLen = m.NewGlobalDef("rb.sitelen", handle(0))
+    // The entry values of the function being emitted, which its rets store back;
+    // null in a begin/rescue/ensure closure, which is part of its enclosing frame.
+    var curSiteSave = null
+    function rbSiteMark(b, pos) {
+        var g = coreStrGlobal(raiseSite(pos))
+        b.NewStore(g.ptr, gRbSite)
+        b.NewStore(g.len, gRbSiteLen)
+    }
+    function rbSiteLoad(b) { return {p: b.NewLoad(llvm.types.I8Ptr, gRbSite), n: b.NewLoad(i64, gRbSiteLen)} }
+    function rbSiteStore(b, sv) {
+        b.NewStore(sv.p, gRbSite)
+        b.NewStore(sv.n, gRbSiteLen)
+    }
+    var coreRetStmt = retStmt
+    retStmt = function(b, v) {
+        if (curSiteSave !== null && !inCtlBody()) { rbSiteStore(b, curSiteSave) }
+        return coreRetStmt(b, v)
     }
 
     // ----- Ruby truthiness: only nil and false are falsy. The value handles are
@@ -4718,7 +4747,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // leaving the begin skips the restore and keeps it. Twin of makeTry
             // in ruby-interpreter.abnf.
             var bang0 = catchT != null ? callExt(b, "js_rgget", [emitStr(b, "!")]) : hUndef
+            var site0 = rbSiteLoad(b)
             var ctl = callExt(b, "js_try", [tryClo, catchClo, finClo])
+            rbSiteStore(b, site0)
             if (catchT != null) { callExt(b, "js_rgset", [emitStr(b, "!"), bang0]) }
             var afterB = curF.NewBlock("")
             b.NewCondBr(truthy(b, callExt(b, "js_is_type", [ctl, emitStr(b, retryName)])), headB, afterB)
@@ -5210,6 +5241,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var savedTopLocals = curTopLocals
         var savedDefFn = curDefFn
         var savedCtlDepth = curCtlDepth
+        var savedSiteSave = curSiteSave
         curDefFn = declBlk === true
         curCtlDepth = isCtl === true ? curCtlDepth + 1 : 0
         if (declBlk === true) { curDefLocals = {m: {}, l: []} }
@@ -5245,6 +5277,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         curRedoB = null
         if (isCtl) { ctlEnter(idx) }
         var b = f.NewBlock("entry")
+        curSiteSave = isCtl === true ? null : rbSiteLoad(b)
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
         var off = 0
         if (isMethod) {
@@ -5265,6 +5298,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             curRedoB = redoB
         }
         var endB = bodyStmt(b)
+        if (curSiteSave !== null) { rbSiteStore(endB.b, curSiteSave) }
         endB.b.NewRet(endB.v)
         if (isCtl) { ctlLeave() }
         curF = savedF
@@ -5285,6 +5319,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         curTopLocals = savedTopLocals
         curDefFn = savedDefFn
         curCtlDepth = savedCtlDepth
+        curSiteSave = savedSiteSave
         return idx
     }
     function makeFun(items) {
@@ -7520,7 +7555,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var rdb = rdf.NewBlock("entry")
         var rdArgs = callExt(rdb, "js_arr_new", [])
         callExt(rdb, "js_arr_push", [rdArgs, emitStr(rdb, "stack level too deep")])
-        rdb.NewRet(callExt(rdb, "js_rnew", [callExt(rdb, "js_rclass", [emitStr(rdb, "SystemStackError")]), rdArgs]))
+        var rdExc = callExt(rdb, "js_rnew", [callExt(rdb, "js_rclass", [emitStr(rdb, "SystemStackError")]), rdArgs])
+        // Its first backtrace frame is the running statement's site (rbSiteMark).
+        var rdSite = rbSiteLoad(rdb)
+        var rdSetB = rdf.NewBlock("")
+        var rdEndB = rdf.NewBlock("")
+        rdb.NewCondBr(rdb.NewICmp(llvm.enum.IPredNE, rdSite.n, handle(0)), rdSetB, rdEndB)
+        callExt(rdSetB, "js_set", [rdExc, emitStr(rdSetB, "__rwhere"), callExt(rdSetB, "js_str_mem", [rdSite.p, rdSite.n])])
+        rdSetB.NewBr(rdEndB)
+        rdEndB.NewRet(rdExc)
         callExt(b, "js_rt_deep", [emitNum(b, 10000), callExt(b, "js_closure", [handle(rdIdx), curScopeV]), emitNum(b, 0)])
         // THE WHOLE PROGRAM RUNS INSIDE ONE js_try, so an exception nobody rescued
         // is reported BY THE PROGRAM (js_rtop), in MRI's spelling, instead of

@@ -72,8 +72,8 @@ KwNilPath   = "nil" KwEnd "::" Name ;
 // A def: implicit return of the last expression, or an explicit return. A singleton
 // receiver (def self.m / def obj.m) defines a singleton method. The parameter list
 // accepts default / splat / double-splat / block / keyword parameters.
-Def         <~~ push(makeFun(takeAll())) ~~>
-            = KwDef [ SelfRecv ] DefName <~~ push(up.in) ~~> [ ParamList ] DefTail ;
+Def         <~~ push(defAt(takeAll(), up.pos)) ~~>
+            = "" <~~ push(up.pos) ~~> KwDef [ SelfRecv ] DefName <~~ push(up.in) ~~> [ ParamList ] DefTail ;
 // The name a def may carry. SetterName comes FIRST (PEG): `def name=(v)` declares the
 // assignment method `name=`, and it is told apart from the endless `def name = EXPR`
 // by the `=` being GLUED to the name - which is exactly Ruby's own rule, and has to
@@ -229,7 +229,7 @@ HeaderEnd = :script(~~
 SuperExprDrop <~~ pop() ~~> = PostfixExpr ;
 // Anything else in a class body - @@classvar = v, include M, private, alias - runs
 // as an ordinary statement with `self` bound to the class object.
-ClassBodyStmt <~~ push({cstmt: pop()}) ~~>
+ClassBodyStmt <~~ push({cstmt: sitedStmt(pop())}) ~~>
             = Statement ;
 AttrDecl    <~~ push(makeAttr(takeAll())) ~~>
             = AttrKind <~~ push({akind: up.in}) ~~> AttrSym { "," AttrSym } ;
@@ -252,7 +252,12 @@ Body        <~~ push({body: makeBody(takeAll())}) ~~>
 // A bare ';' is an empty statement: Ruby uses it as a statement separator, and it
 // appears immediately after a def / class / module header (def f(x); BODY; end).
 // Semi pushes nothing, so a body simply skips it.
-Statement   = Semi | Require | DoWhileStmt | ModStmt ;
+// PosStmt records where the statement's FIRST token sits (an empty token skips the
+// whitespace in front of it), which makeBody publishes as the running statement's
+// site; Semi and Require push nothing, so it cannot sit on Statement itself.
+Statement   = Semi | Require | PosStmt ;
+PosStmt     <~~ push(stmtAt(takeAll())) ~~>
+            = "" <~~ push(up.pos) ~~> ( DoWhileStmt | ModStmt ) ;
 Semi        = ";" ;
 DoWhileStmt <~~ push(makeDoWhile(takeAll())) ~~>
             = KwBegin Body End SameLine DoWhileKw Expression ;
@@ -2398,13 +2403,55 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return r !== null && r !== undefined && typeof r == "object"
             && (r.ret === true || r.brk === true || r.cont === true || r.redo === true)
     }
+    // ----- The running statement's site -----
+    // rbSitePos is the source position of the statement that started last (-1:
+    // none). A method, block or lambda puts its caller's value back when it returns
+    // and a begin puts back the value it started with, so after a call the
+    // caller's statement is current again. coreDeepHook reads it: MRI reports a
+    // SystemStackError at the statement whose call overflowed, in that statement's
+    // method. Twin of rbSiteMark in ruby-to-llvm-ir.abnf.
+    var rbSitePos = -1
+    function stmtAt(items) { return {spos: items[0], st: items[1]} }
+    // A class-body statement is not part of a Body, so it marks its own site.
+    function sitedStmt(m) { return function() { rbSitePos = m.spos; return m.st() } }
+    // Every def's source span with its name, so a site can name its method the way
+    // the compiler half does at emit time (curMethName).
+    var defRanges = []
+    function defAt(items, end) {
+        var fn = makeFun(items.slice(1))
+        defRanges.push({s: items[0], e: end, n: fn.name})
+        return fn
+    }
+    // MRI's frame for the site at pos: "prog.rb:2:in `rec'", named by the innermost
+    // def whose source contains pos ("<main>" outside every def). Twin of raiseSite
+    // in ruby-to-llvm-ir.abnf.
+    function siteAt(pos) {
+        var who = "<main>"
+        var best = -1
+        for (var i = 0; i < defRanges.length; i++) {
+            var d = defRanges[i]
+            if (d.s <= pos && pos < d.e && d.s > best) { best = d.s; who = d.n }
+        }
+        return c.file + ":" + c.lineOf(pos) + ":in `" + who + "'"
+    }
+    // A body's items are PosStmt records and the few bare thunks (alias) that carry
+    // no site; the site array runs beside the thunk array so the loop stays flat.
     function makeBody(items) {
+        var ts = []
+        var ps = []
+        for (var k = 0; k < items.length; k++) {
+            var it = anytype
+            it = items[k]
+            if (typeof it == "function") { ts.push(it); ps.push(-1) }
+            else { ts.push(it.st); ps.push(it.spos) }
+        }
         return function() {
             var last = anytype        // holds the last statement value of any type
             last = null               // an empty body is nil
-            for (var i = 0; i < items.length; i++) {
+            for (var i = 0; i < ts.length; i++) {
+                rbSitePos = ps[i]
                 var r = anytype
-                r = items[i]()
+                r = ts[i]()
                 if (isSig(r)) { return r }
                 last = r
             }
@@ -9904,13 +9951,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 scopes.push({})
                 bindParams(params, args)
                 var r = anytype
+                var site = rbSitePos
                 try {
                     r = bodyT()
                 } catch (e) {
                     scopes = saved
-                    if (e !== null && e !== undefined && e.__blkret === true) { return e.v }
+                    if (e !== null && e !== undefined && e.__blkret === true) {
+                        rbSitePos = site
+                        return e.v
+                    }
                     throw e
                 }
+                rbSitePos = site
                 scopes = saved
                 if (isSig(r)) { return r.v }
                 return r
@@ -9963,12 +10015,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 scopes = captured.slice(0)
                 scopes.push({})
                 blkBind(params, args)
+                var site = rbSitePos
                 var depth = coreDepth + 1
                 coreDepth = depth
                 if (depth > coreDepthMax) { coreTooDeep() }
                 var r = anytype
                 r = body()
                 coreDepth = depth - 1
+                rbSitePos = site
                 scopes = saved
                 if (isSig(r)) {
                     if (r.brk === true) { throw {__blkbrk: true, v: r.v} }
@@ -10431,15 +10485,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // error, so all three engines print the same line. js_rtop of
         // lib/ruby-rt.metajs and abnf/jsrt.go are the compiled halves' twins.
         // A top-level `return' ENDS THE PROGRAM in MRI (it is legal at the main
-        // level and behaves like falling off the end). isSig also stops on a stray
+        // level and behaves like falling off the end). makeBody also stops on a stray
         // top-level break/next, which MRI turns into a LocalJumpError - ending
         // quietly is closer than ignoring it.
+        var body = makeBody(items)
         try {
-            for (var i = 0; i < items.length; i++) {
-                var sv = anytype
-                sv = items[i]()
-                if (isSig(sv)) { break }
-            }
+            body()
         } catch (e) {
             if (excIsUser(e)) {
                 eprintln(excTopLine(e.v))
@@ -10696,6 +10747,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // super; end` pass the default on.
         declVar("$sargs", currentParamValues(fn.params))
         var r = anytype
+        var site = rbSitePos
         var depth = coreDepth + 1
         coreDepth = depth
         // `return` inside a block returns from the enclosing METHOD, so the block's
@@ -10708,10 +10760,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             blkTrim(bdepth)
             coreDepth = depth - 1
             if (e !== null && e !== undefined && e.__blkret === true
-                && (e.rtag === undefined || e.rtag === null || e.rtag === mscope)) { return e.v }
+                && (e.rtag === undefined || e.rtag === null || e.rtag === mscope)) {
+                rbSitePos = site
+                return e.v
+            }
             throw e
         }
         coreDepth = depth - 1
+        rbSitePos = site
         scopes = saved
         blkTrim(bdepth)
         if (isSig(r)) { return r.v }
@@ -11966,6 +12022,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 var bang0 = anytype
                 bang0 = hasOwn(rubyGlobals, "!") ? rubyGlobals["!"] : null
                 var savedDepth = coreDepth
+                var site0 = rbSitePos
                 try {
                     box.v = tryT()
                 } catch (e) {
@@ -12008,9 +12065,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                         // A return/break/next signal out of ensure must override the
                         // begin/rescue completion AND cancel a pending re-raise - only
                         // a return from the host finally block does both.
-                        if (isSig(fr)) { return fr }
+                        if (isSig(fr)) {
+                            rbSitePos = site0
+                            return fr
+                        }
                     }
                 }
+                rbSitePos = site0
                 if (box.again) { continue }
                 return box.v
             }
@@ -12031,8 +12092,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return function() {
             var savedChain = scopes.slice()
             var savedDepth = coreDepth
+            var site0 = rbSitePos
             try {
-                return mainT()
+                var r0 = anytype
+                r0 = mainT()
+                // The compiled half runs mainT as a closure of its own, whose ret
+                // stores the site back (emitFunc).
+                rbSitePos = site0
+                return r0
             } catch (e) {
                 scopes = savedChain.slice()
                 coreDepth = savedDepth
@@ -12388,7 +12455,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // limit is ours. Twin of the js_rt_deep hook the compiler emits.
     hostGlobals["SystemStackError"] = mkBuiltinClass("SystemStackError", excBase)
     coreDepthMax = 10000
-    coreDeepHook = function() { raiseErr("SystemStackError", "stack level too deep") }
+    // Its first backtrace frame is the running statement's site (rbSitePos).
+    coreDeepHook = function() {
+        var e = mkExc(hostGlobals["SystemStackError"], "stack level too deep")
+        if (rbSitePos >= 0) { rawSet(e, "__rwhere", siteAt(rbSitePos)) }
+        throw {__exc: true, v: e}
+    }
     hostGlobals["NoMethodError"] = mkBuiltinClass("NoMethodError", hostGlobals["NameError"])
     hostGlobals["KeyError"] = mkBuiltinClass("KeyError", hostGlobals["IndexError"])
     hostGlobals["StopIteration"] = mkBuiltinClass("StopIteration", hostGlobals["IndexError"])

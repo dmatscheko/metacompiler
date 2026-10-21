@@ -1938,11 +1938,15 @@ end
 # ===== SECTION 95: unbounded recursion =====
 # A call nested past the stack is SystemStackError "stack level too deep", an
 # Exception that a bare rescue (StandardError) does not take, and the depth a
-# rescued one unwound is given back. /usr/bin/ruby 2.6 settles every value.
+# rescued one unwound is given back. Its first backtrace frame (and so the
+# uncaught "prog.rb:LINE:in `meth': stack level too deep" line) is the statement
+# whose call overflowed, in its method. /usr/bin/ruby 2.6 settles every value.
+S95L = [__LINE__ + 1]
 def s95rec(n); s95rec(n + 1) + 1; end
 def s95deep(n); n == 0 ? 0 : 1 + s95deep(n - 1); end
 def s95
   got = []
+  bt = nil
   2.times do
     begin
       begin
@@ -1952,9 +1956,11 @@ def s95
       end
     rescue SystemStackError => e
       got << "#{e.class}: #{e.message} #{e.is_a?(StandardError)}"
+      bt = e.backtrace
     end
   end
   check("sse1", got == ["SystemStackError: stack level too deep false"] * 2)
+  check("sse3", !bt.nil? && bt[0].end_with?(":" + S95L[0].to_s + ":in `s95rec\'"))
   f = lambda { |n| f.call(n + 1) }
   how = begin; f.call(0); rescue Exception => e; e.class.to_s; end
   check("sse2", how == "SystemStackError" && s95deep(100) == 100)
