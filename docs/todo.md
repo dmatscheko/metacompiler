@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-746** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-747** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -68,11 +68,12 @@ its report; anything structural there is a CORE ticket.
 
 # RB — Ruby
 
-### T-745 ruby: `&->` lambda self in define_method; compiler `k = k`; interp nil class constant; shared attr_writer name · P3 · RB · IN PROGRESS (RB worker, round 18) [V]
-`define_method(:v, &->(q) { [self.class, q] })` → `[Class, 5]` both halves (ruby `[D, 5]`; the `&lambda {}` form works). Compiler:
-`k = k` → NameError (ruby nil; the right side compiles before the name counts as a local). Interpreter: `class R; rv = nil; RV = rv;
-end; R::RV` → "uninitialized constant R::RV" (ruby nil). Compiler: when any class has an attr_writer/attr_accessor of a name, `o.x = v`
-on a class without that setter writes the field instead of raising NoMethodError.
+### T-746 ruby: private setters; `5.x = 1` crashes the interpreter; attr_writer in a module (compiler); local shadowing a method (interp); define_method arity · P2 · RB · OPEN [V]
+`private :x=` (in the class or a subclass of an attr_accessor class) lets an outside `o.x =` succeed or raise with a nil name (ruby
+NoMethodError `x=`). `5.x = 1` → interpreter host TypeError crash (ruby NoMethodError). Compiler: `attr_writer` inside a module is
+unsupported. Interp: `def k2; 9; end; def f; k2 = k2; p k2; end` prints 9 (ruby nil; makeVarRef tries selfMethod before
+lexLocalAt). define_method bodies skip the argument-count check (`define_method(:x) { |a| }` called with none → ruby ArgumentError;
+compiled legs run with nil). Interp: `#freeze` on a user object; `public_instance_methods`, `constants`, `method_defined?` missing.
 
 ---
 
@@ -789,6 +790,7 @@ T-741 tooling: -callgraph residue — go function bodies unnamed, runtime helper
 T-742 ruby: Struct; `self` in a define_method block; class-body locals in constants (compiler); instance_methods(false) — DONE b7e9eee4 (Struct in all engines, define_method blocks with the instance as self, class bodies run in order with constants bound up, instance_methods(false), includers see module define_method, &. and a[i,n] append targets — = ruby 2.6; follow-up T-743)
 T-743 ruby: `obj.x = v` never calls a user-defined `x=`; `nil << x` aborts; private :name and instance_methods in the compiler — DONE b89d3f62 35a63044 (setter dispatch on attribute writes and compound assignment gated at compile time, Struct members in a hidden array with each/hash/dig/values_at, rescuable nil << x, compiler private :names, instance_methods, define_method(&blk) — = ruby 2.6; follow-up T-744)
 T-744 ruby: Array/Hash#dig; values_at with ranges; rescue-skipped locals; singleton attr_accessor; alias of setters; class-body bare class-method calls — DONE 118304bb (Array/Hash#dig, values_at ranges, unrun-assignment locals read nil, singleton attr_accessor, setter aliases, bare class-method calls in class bodies, Float bit-op NoMethodError, &lambda self, missing setters raise — = ruby 2.6; follow-up T-745)
+T-745 ruby: `&->` lambda self in define_method; compiler `k = k`; interp nil class constant; shared attr_writer name — DONE 9d2ebaf5 ceac1b25 (&-> define_method self, compiler k = k, interp nil class constants, missing attr setters raise with a per-class attr_writer marker fast path: attr-write loop +1.2% vs main — = ruby 2.6; follow-up T-746)
 
 # Settled — do not re-open
 
