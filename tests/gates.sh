@@ -131,6 +131,7 @@ start shape  go run ./tools/shape-scan -max "$SHAPE_GROUPS" -max-lines "$SHAPE_L
 # rules stopped matching would report zero findings, like a clean tree.
 start lint   go run ./tools/metajs-lint -grammars -q
 start lintst go run ./tools/metajs-lint -selftest
+start srcpos tests/srcpos-probe.sh
 if [ "$QUICK" = 0 ]; then
     start clang  tests/clang-check.sh
     start native tests/native-full.sh
@@ -209,6 +210,12 @@ esac
 # 4. Go-side unit tests.
 if [ "$(rc_of gotest)" = 0 ]; then pass "go test" "$(tail -1 "$log/gotest")"
 else fail "go test" "$(tail -3 "$log/gotest" | tr '\n' ' ')"; fi
+
+# 4b. Source positions: the -trace / -callgraph line of a statement and a
+#     definition. No other gate reads them.
+sp=$(grep -E '^srcpos: ' "$log/srcpos" | tail -1)
+if [ "$(rc_of srcpos)" = 0 ]; then pass srcpos "${sp:-ok}"
+else fail srcpos "${sp:-no summary}: $(grep '^FAIL' "$log/srcpos" | head -3 | tr '\n' ' ')"; fi
 
 # 5. The layer-2 shape ratchet: the only gate that can see a body copy-pasted
 #    into a second language.

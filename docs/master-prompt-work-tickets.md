@@ -133,6 +133,7 @@ Rules:
                                        'BUT -frozen|VACUOUS|MISMATCH|FROZEN-DIFF|KILLED|RUN-FAILED'
     ./test.sh --cross -f <lang>        (0 divergent)
     tests/native-full.sh <lang>        (0 failures)
+    tests/srcpos-probe.sh <lang>       (0 wrong)
     tests/gen-all.sh --check           (if you touched runtime.c / *.metajs)
     go vet ./abnf/ && go test ./abnf/  (if you touched Go)
   If you touched a shared file (abnf/jsrt.go, lib/runtime.metajs, lib/runtime.c,

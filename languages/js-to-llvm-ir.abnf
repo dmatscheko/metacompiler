@@ -6463,9 +6463,11 @@ NotFuncHead = :script(~~
     // Annex B assignment finds it from inside a try body's own IR function too. Twin
     // in js-interpreter.abnf.
     var emitParams = [] // The parameter list of the function being emitted.
-    // Each function closes over the current scope and is bound in sc.
+    // Each function closes over the current scope and is bound in sc. Its closure is
+    // created here, away from its declaration, so defPos names the declaration line.
     function emitFnInit(b, fns, sc) {
         for (var i = 0; i < fns.length; i++) {
+            defPos(b, fns[i].at)
             var r = fns[i].fnT(b)
             b = r.b
             callExt(b, "js_scope_decl", [sc, emitStr(b, fns[i].name), r.v])
