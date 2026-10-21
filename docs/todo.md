@@ -68,7 +68,7 @@ its report; anything structural there is a CORE ticket.
 
 # RB — Ruby
 
-### T-732 ruby: `3r % 0` hangs the interpreter; `!x` after a newline read as a method suffix; operator/arity gaps · P2 · RB · OPEN [V]
+### T-732 ruby: `3r % 0` hangs the interpreter; `!x` after a newline read as a method suffix; operator/arity gaps · P2 · RB · IN PROGRESS (RB worker, round 11) [V]
 `3r % 0` → interpreter hangs, llvm.Run aborts "division by zero" (ruby ZeroDivisionError). Parser: `bt = e.backtrace` then a line
 starting `!bt.nil?` is read as a call to `backtrace!` (all engines). `"a".+("c")` → NoMethodError (ruby "ac"). `def h(a); end;
 send(:h)` → NoMethodError (ruby ArgumentError in `h'). `[1,2].first(-1)` raises nothing (ruby ArgumentError "negative array size").
