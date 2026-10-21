@@ -460,6 +460,9 @@ type jsrt struct {
 	// rubyBuiltinExt: the program reopened a builtin class (js_rbreopen), so
 	// rubyMethod asks that class's own method table for a builtin value.
 	rubyBuiltinExt bool
+	// rubyFmtFrame: the Ruby method running rubyFormat2 ("%", "format", "sprintf",
+	// "printf"), the frame of every error the format raises.
+	rubyFmtFrame string
 
 	// rubyGlobals holds Ruby's $globals, which live outside every scope: a write
 	// inside a method is visible everywhere, and a read of a never-assigned one
@@ -5940,6 +5943,9 @@ func (rt *jsrt) rubyNumBin(op string, l, r interface{}) interface{} {
 	}
 	if rk == 1 {
 		p, q := rt.rubyAsRat(l), rt.rubyAsRat(r)
+		if (op == "/" || op == "%") && q.n == 0 {
+			rt.rubyRaiseErr(op, "ZeroDivisionError", "divided by 0")
+		}
 		switch op {
 		case "+", "-", "*", "/":
 			return rt.rubyRatArith(op, p, q)
@@ -5965,6 +5971,10 @@ func (rt *jsrt) rubyNumBin(op string, l, r interface{}) interface{} {
 		case "/":
 			return jsFlo{f: x / y}
 		case "%":
+			// Numeric#% on a Rational: Numeric#div raises on a zero divisor.
+			if _, isRat := l.(jsRat); isRat && y == 0 {
+				rt.rubyRaiseErr(op, "ZeroDivisionError", "divided by 0")
+			}
 			return jsFlo{f: rubyFloMod(x, y)}
 		case "**":
 			return jsFlo{f: crPow(x, y)}
@@ -6431,7 +6441,7 @@ func (rt *jsrt) rubyBin(op string, l, r interface{}) interface{} {
 		}
 	case "%":
 		if ls, ok := l.(string); ok {
-			return rt.rubyFormat(ls, r)
+			return rt.rubyFormat2(ls, r, "%")
 		}
 	case "<<":
 		if la, ok := l.(*jsArray); ok {
@@ -9124,9 +9134,9 @@ func (rt *jsrt) rubyKernelInvoke(n string, args []interface{}) interface{} {
 		}
 		return &jsArray{elems: append([]interface{}{}, args...)}
 	case "format", "sprintf":
-		return rt.rubyFormatArgs(args)
+		return rt.rubyFormatArgs(args, n)
 	case "printf":
-		fmt.Fprint(outWriter, wtf8Clean(rt.rubyFormatArgs(args)))
+		fmt.Fprint(outWriter, wtf8Clean(rt.rubyFormatArgs(args, n)))
 		return jsNull
 	case "rand":
 		if len(args) == 0 {
@@ -9959,12 +9969,12 @@ func (rt *jsrt) rubyFmtIntOperand(v interface{}) interface{} {
 		if n, ok := rubyStrToInum(s, 0, true); ok {
 			return rt.rubyBigNarrow(n)
 		}
-		rt.rubyRaiseErr("", "ArgumentError", "invalid value for Integer(): "+rubyStrInspect(s))
+		rt.rubyRaiseErr(rt.rubyFmtFrame, "ArgumentError", "invalid value for Integer(): "+rubyStrInspect(s))
 	}
 	if uc, has := rt.rubyFmtUserConv(v, "to_int", "to_i"); has && rubyFmtIsNumV(uc) {
 		return uc
 	}
-	rt.rubyRaiseErr("", "TypeError", "can't convert "+rubyFmtConvName(v)+" into Integer")
+	rt.rubyRaiseErr(rt.rubyFmtFrame, "TypeError", "can't convert "+rubyFmtConvName(v)+" into Integer")
 	return float64(0)
 }
 
@@ -9976,12 +9986,12 @@ func (rt *jsrt) rubyFmtFloOperand(v interface{}) float64 {
 		if f, ok := rubyStrToDbl(s, true); ok {
 			return f
 		}
-		rt.rubyRaiseErr("", "ArgumentError", "invalid value for Float(): "+rubyStrInspect(s))
+		rt.rubyRaiseErr(rt.rubyFmtFrame, "ArgumentError", "invalid value for Float(): "+rubyStrInspect(s))
 	}
 	if uf, has := rt.rubyFmtUserConv(v, "to_f", ""); has && rubyFmtIsNumV(uf) {
 		return rubyToF(uf)
 	}
-	rt.rubyRaiseErr("", "TypeError", "can't convert "+rubyFmtConvName(v)+" into Float")
+	rt.rubyRaiseErr(rt.rubyFmtFrame, "TypeError", "can't convert "+rubyFmtConvName(v)+" into Float")
 	return 0
 }
 
@@ -9997,9 +10007,9 @@ func (rt *jsrt) rubyFmtCharOperand(v interface{}) float64 {
 		return rubyToF(uc)
 	}
 	if isUndefOrNull(v) {
-		rt.rubyRaiseErr("", "TypeError", "no implicit conversion from nil to integer")
+		rt.rubyRaiseErr(rt.rubyFmtFrame, "TypeError", "no implicit conversion from nil to integer")
 	}
-	rt.rubyRaiseErr("", "TypeError", "no implicit conversion of "+rubyFmtConvName(v)+" into Integer")
+	rt.rubyRaiseErr(rt.rubyFmtFrame, "TypeError", "no implicit conversion of "+rubyFmtConvName(v)+" into Integer")
 	return 0
 }
 
@@ -10193,7 +10203,7 @@ func (rt *jsrt) rubyFormat(spec string, arg interface{}) string {
 				// first and said so at the site; MRI raises, and the message is
 				// its own.
 				if rubyCharCount(s) != 1 {
-					rt.rubyRaiseErr("", "ArgumentError", "%c requires a character")
+					rt.rubyRaiseErr(rt.rubyFmtFrame, "ArgumentError", "%c requires a character")
 				}
 				body = s
 			} else {
@@ -10280,6 +10290,11 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 		// An OPERATOR reached by name (`3.send(:+, 4)`, "a".send(:+, "b"),
 		// [1].send(:<<, 2)) is the one shape the type tables cannot answer: they
 		// hold named methods, and + / << / <=> are evaluated by rubyBin.
+		// == / != by name are the operators themselves: rubyEq, which reaches a
+		// user class's own #==. Twin of mcall's send arm in ruby-interpreter.abnf.
+		if len(args) == 2 && (mn == "==" || mn == "!=") {
+			return rt.rubyEq(target, args[1]) == (mn == "==")
+		}
 		if len(args) == 2 && rubyIsBinOpName(mn) {
 			// The comparisons are NOT rubyBin's (it has no <=> arm at all): they
 			// are the js_rlt/js_rcmp family, exactly as the emitter spells them.
@@ -11017,7 +11032,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 		if bn, isBuiltin := o.props["__rbuiltin"].(string); isBuiltin && bn == "Kernel" {
 			switch name {
 			case "format", "sprintf":
-				return rt.rubyFormatArgs(args)
+				return rt.rubyFormatArgs(args, name)
 			case "rand":
 				return rubyRand(argAt(args, 0))
 			}
@@ -11210,9 +11225,7 @@ func rubyIsBlkArg(v interface{}) bool {
 }
 
 // rubyIsBinOpName is the set of operator METHOD names Object#send may be handed.
-// == and != are left out on purpose: every dispatcher answers those for every
-// value already, and routing them through rubyBin would send a user object's
-// `==` back through the method table it just came out of.
+// == and != are not in it: they are rubyEq, never rubyBin (see rubyMethod).
 func rubyIsBinOpName(n string) bool {
 	switch n {
 	case "+", "-", "*", "/", "%", "**", "<<", ">>", "&", "|", "^", "<", ">", "<=", ">=", "<=>":
@@ -11339,6 +11352,20 @@ func rubyArrNorm(t *jsArray, v interface{}) int {
 	return n
 }
 
+// rubyArrCountArg is the COUNT of first / last / pop / shift / take, which MRI
+// refuses below zero. Twin of arrCountArg in ruby-interpreter.abnf.
+func (rt *jsrt) rubyArrCountArg(name string, v interface{}) int {
+	n := int(math.Trunc(rubyToF(v)))
+	if n < 0 {
+		msg := "negative array size"
+		if name == "take" {
+			msg = "attempt to take negative size"
+		}
+		rt.rubyRaiseErr(name, "ArgumentError", msg)
+	}
+	return n
+}
+
 func rubyArrSub(t *jsArray, from, length int) *jsArray {
 	out := &jsArray{}
 	for i := from; i < len(t.elems) && len(out.elems) < length; i++ {
@@ -11420,13 +11447,14 @@ func (rt *jsrt) rubyArrOr(l, r *jsArray) *jsArray {
 	return out
 }
 
-// rubyFormatArgs is Kernel#format / #sprintf on a whole argument list
-// [format, args...] - shared by the js_rformat extern and the Kernel.format form.
-func (rt *jsrt) rubyFormatArgs(args []interface{}) string {
+// rubyFormatArgs is Kernel#format / #sprintf / #printf (named by frame) on a whole
+// argument list [format, args...] - shared by the js_rformat extern and the
+// Kernel.format form.
+func (rt *jsrt) rubyFormatArgs(args []interface{}, frame string) string {
 	if len(args) == 0 {
 		return ""
 	}
-	return rt.rubyFormat(rt.rubyStr(args[0]), &jsArray{elems: args[1:]})
+	return rt.rubyFormat2(rt.rubyStr(args[0]), &jsArray{elems: args[1:]}, frame)
 }
 
 // rubyPatternHit is the `pattern === value` test that all?/any?/none?/one? apply
@@ -12030,7 +12058,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 	// ARRAY: `[1,2,3].first(2)` is [1, 2].
 	case "pop":
 		if len(pos) > 0 {
-			n := int(math.Trunc(rubyToF(pos[0])))
+			n := rt.rubyArrCountArg(name, pos[0])
 			if n > len(t.elems) {
 				n = len(t.elems)
 			}
@@ -12047,7 +12075,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 		return v
 	case "first":
 		if len(pos) > 0 {
-			return rubyArrSub(t, 0, int(math.Trunc(rubyToF(pos[0]))))
+			return rubyArrSub(t, 0, rt.rubyArrCountArg(name, pos[0]))
 		}
 		if len(t.elems) == 0 {
 			return jsNull
@@ -12055,7 +12083,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 		return t.elems[0]
 	case "last":
 		if len(pos) > 0 {
-			n := int(math.Trunc(rubyToF(pos[0])))
+			n := rt.rubyArrCountArg(name, pos[0])
 			if n > len(t.elems) {
 				n = len(t.elems)
 			}
@@ -12068,7 +12096,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 	// shift removes from the FRONT; unshift/prepend adds there, variadically.
 	case "shift":
 		if len(pos) > 0 {
-			n := int(math.Trunc(rubyToF(pos[0])))
+			n := rt.rubyArrCountArg(name, pos[0])
 			if n > len(t.elems) {
 				n = len(t.elems)
 			}
@@ -12473,7 +12501,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 		}
 		return t
 	case "take":
-		return rubyArrSub(t, 0, int(math.Trunc(rubyToF(argAt(pos, 0)))))
+		return rubyArrSub(t, 0, rt.rubyArrCountArg(name, argAt(pos, 0)))
 	case "drop":
 		n := int(math.Trunc(rubyToF(argAt(pos, 0))))
 		return rubyArrSub(t, n, len(t.elems)-n)
@@ -14733,7 +14761,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if !ok {
 				return rt.wrapStr("")
 			}
-			return rt.wrapStr(rt.rubyFormatArgs(arr.elems))
+			return rt.wrapStr(rt.rubyFormatArgs(arr.elems, rt.toString(u(a[1]))))
 		},
 		// Kernel#rand, as a call the emitter makes for the bare name.
 		"js_rrand": func(a []uint64) uint64 {

@@ -135,7 +135,16 @@ ParamSimple = Name <~~ push({param: up.in}) ~~> ;
 // Method / call names may end with ? or ! (empty?, include?); Name may not. A def
 // may equally name an OPERATOR (def +, def -@, def [], def []=, def <=>), which is
 // how a class joins the operator table - the longest spelling comes first (PEG).
-MethodName  = OpMethodName | Id [ "?" | "!" NotEqGlued ] ;
+MethodName  = OpMethodName | Id [ SfxGlued ( "?" | "!" NotEqGlued ) ] ;
+// A ? / ! suffix is GLUED to its name: `x.max` and then a line starting `!y`
+// are two statements, not a call to max!. A guard sees the source before the
+// next token's whitespace skip, so peek(0) is the character right after the name.
+SfxGlued    = :script(~~
+    (function() {
+        var cc = c.peek(0)
+        if (cc !== 63 && cc !== 33) { return abnf.newToken("\x01nosfx", 0) }
+    })()
+~~) ;
 // `A.new.should != 2` - without this the `!` is taken as part of the method name and
 // the `= 2` is left over. It has to be a :script rather than a `!"="` lookahead,
 // because a lookahead skips the space in front of it and would then also reject the
@@ -831,7 +840,7 @@ PostfixExpr <~~ push(foldCallMember(takeAll())) ~~>
 // still wins whenever there is a `(`.
 CmdMethodSfx <~~ push({kind: "mcall", name: popName(), args: takeAll()}) ~~>
             = "." MethodName <~~ push({mname: noteMName(up.in)}) ~~> SameLine CmdArgAhead Arg { "," Arg } [ Block ] ;
-MethodSfx   <~~ push({kind: "mcall", name: popName(), args: takeAll()}) ~~>
+MethodSfx   <~~ push(methodSfx(popName(), takeAll())) ~~>
             = "." MethodName <~~ push({mname: noteMName(up.in)}) ~~> MArgs ;
 // p.(x): the parenthesis-only call shorthand for a Proc (Proc#call).
 CallSfx     <~~ push({kind: "mcall", name: "call", args: takeAll()}) ~~>
@@ -886,14 +895,14 @@ BlockArg    <~~ push({blkT: makeBlockArg(pop())}) ~~>
 
 // ->(a, b = 1) { ... } / -> { ... }: a lambda literal. Unlike a block it is a VALUE,
 // and a `return` inside it returns from the lambda itself.
-LambdaLit   <~~ push(makeLambda(takeAll())) ~~>
-            = "->" [ "(" [ Param { "," Param } ] ")" | Param { "," Param } ] LambdaBody ;
+LambdaLit   <~~ var li = takeAll(); push(makeLambda(blkSpan(li, up.pos))) ~~>
+            = "" <~~ push(up.pos) ~~> "->" [ "(" [ Param { "," Param } ] ")" | Param { "," Param } ] LambdaBody ;
 LambdaBody  = KwDo Body End | "{" [ BlockParams ] Body "}" ;
 
 // A block passed to a method call: a real closure over the current scope.
-Block       <~~ push(makeBlock(takeAll())) ~~>
-            = NoLoopDo KwDo [ BlockParams ] GuardedBlockBody End
-            | NoLambdaParam "{" [ BlockParams ] BlockBody "}" ;
+Block       <~~ var bi = takeAll(); push(makeBlock(blkSpan(bi, up.pos))) ~~>
+            = NoLoopDo "" <~~ push(up.pos) ~~> KwDo [ BlockParams ] GuardedBlockBody End
+            | NoLambdaParam "" <~~ push(up.pos) ~~> "{" [ BlockParams ] BlockBody "}" ;
 // A `{` may not open a BLOCK inside a parenthesis-less lambda parameter list: in
 // `-> a=a() { a }` the braces are the lambda's BODY, and without this guard the default
 // value `a()` takes them as its block and the lambda is left with none. Like NoLoopDo
@@ -1891,7 +1900,7 @@ Call        <~~ push(makeCall(takeAll())) ~~>
             = BareName <~~ push(up.in) ~~> SameLine "(" [ Arg { "," Arg } [ "," ] ] ")" [ Block ]
             | BareName <~~ push(up.in) ~~> Block
             | PredName <~~ push(up.in) ~~> ;
-BareName    = NotKw Id [ "?" | "!" ] ;
+BareName    = NotKw Id [ SfxGlued PredSfx ] ;
 // A bare predicate/bang call has to be told apart from `a != b` and from the ternary
 // `x ? a : b`, so the suffix character is checked with whitespace skipping OFF: a `!`
 // may not be followed by `=`, and a `?` may not be followed by whitespace (Ruby uses
@@ -2433,7 +2442,34 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var d = defRanges[i]
             if (d.s <= pos && pos < d.e && d.s > best) { best = d.s; who = d.n }
         }
-        return c.file + ":" + c.lineOf(pos) + ":in `" + who + "'"
+        return c.file + ":" + c.lineOf(pos) + ":in `" + blkFrame(pos, best, who) + "'"
+    }
+    // Every block and lambda literal's source span. A site inside N of them, counted
+    // inside its innermost def only, is MRI's frame "block in NAME" or
+    // "block (N levels) in NAME" - a LEXICAL property of the block's code. Twin of
+    // curBlkDepth in ruby-to-llvm-ir.abnf.
+    var blkRanges = []
+    function blkSpan(items, end) {
+        blkRanges.push({s: items[0], e: end})
+        return items.slice(1)
+    }
+    function blkFrame(pos, defStart, who) {
+        var n = 0
+        for (var i = 0; i < blkRanges.length; i++) {
+            var k = blkRanges[i]
+            if (k.s <= pos && pos < k.e && k.s > defStart) { n = n + 1 }
+        }
+        if (n == 0) { return who }
+        if (n == 1) { return "block in " + who }
+        return "block (" + n + " levels) in " + who
+    }
+    function defStartAt(pos) {
+        var best = -1
+        for (var i = 0; i < defRanges.length; i++) {
+            var d = defRanges[i]
+            if (d.s <= pos && pos < d.e && d.s > best) { best = d.s }
+        }
+        return best
     }
     // A body's items are PosStmt records and the few bare thunks (alias) that carry
     // no site; the site array runs beside the thunk array so the loop stays flat.
@@ -4812,6 +4848,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (op == "+") { return mkRat(numBin("+", numBin("*", p.n, q.d), numBin("*", q.n, p.d)), numBin("*", p.d, q.d)) }
             if (op == "-") { return mkRat(numBin("-", numBin("*", p.n, q.d), numBin("*", q.n, p.d)), numBin("*", p.d, q.d)) }
             if (op == "*") { return mkRat(numBin("*", p.n, q.n), numBin("*", p.d, q.d)) }
+            // An exact zero divisor raises (twin: rubyNumBin in abnf/jsrt.go).
+            if ((op == "/" || op == "%") && numEq(q.n, 0)) { raiseErr(op, "ZeroDivisionError", "divided by 0") }
             if (op == "/") { return mkRat(numBin("*", p.n, q.d), numBin("*", p.d, q.n)) }
             // x % y is x - y * (x / y).floor, a Rational (Rational(7, 2) % 2 is (3/2)).
             if (op == "%") {
@@ -4840,6 +4878,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // the DIVIDEND's, which the tag engine drops because it keeps an
             // integral value as an integer, so -4.0 % 2.0 must be re-signed.
             if (op == "%") {
+                // Rational has no #% of its own: Numeric#% is x - y * x.div(y), and
+                // Numeric#div raises on any zero divisor, 0.0 included.
+                if (y == 0 && isRat(l)) { raiseErr(op, "ZeroDivisionError", "divided by 0") }
                 var fm = x % y
                 if (fm == 0) { return mkFlo(zeroSigned(x)) }
                 if (y * fm < 0) { return mkFlo(fm + y) }
@@ -5048,6 +5089,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (!drop) { out.push(l[i]) }
         }
         return out
+    }
+    // The COUNT of first / last / pop / shift / take, which MRI refuses below zero.
+    // Twins: rubyArrCountArg in abnf/jsrt.go, rbArrCountArg in lib/ruby-rt.metajs.
+    function arrCountArg(name, v) {
+        var n = Math.trunc(toF(v))
+        if (n < 0) { raiseErr(name, "ArgumentError", name == "take" ? "attempt to take negative size" : "negative array size") }
+        return n
     }
     function arrRepeat(l, times) {
         var n = Math.trunc(toF(times))
@@ -6261,11 +6309,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (typeof v == "string") {
             var ri = strToInum(v, 0, true)
             if (ri.ok) { return ri.v }
-            raiseErr("", "ArgumentError", "invalid value for Integer(): " + strInspect(v))
+            raiseErr(fmtFrame, "ArgumentError", "invalid value for Integer(): " + strInspect(v))
         }
         var uc = fmtUserConv(v, "to_int", "to_i")
         if (uc !== null && fmtIsNumV(uc)) { return uc }
-        raiseErr("", "TypeError", "can't convert " + fmtConvName(v) + " into Integer")
+        raiseErr(fmtFrame, "TypeError", "can't convert " + fmtConvName(v) + " into Integer")
         return 0
     }
     function fmtFloOperand(v) {
@@ -6274,11 +6322,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var rf = anytype
             rf = rbnStrToDbl(v, true)
             if (rf !== null) { return rf }
-            raiseErr("", "ArgumentError", "invalid value for Float(): " + strInspect(v))
+            raiseErr(fmtFrame, "ArgumentError", "invalid value for Float(): " + strInspect(v))
         }
         var uf = fmtUserConv(v, "to_f", "")
         if (uf !== null && fmtIsNumV(uf)) { return toF(uf) }
-        raiseErr("", "TypeError", "can't convert " + fmtConvName(v) + " into Float")
+        raiseErr(fmtFrame, "TypeError", "can't convert " + fmtConvName(v) + " into Float")
         return 0
     }
     // %c's message is NOT the Integer one, and MRI writes it TWO ways: nil is
@@ -6290,9 +6338,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var uc = fmtUserConv(v, "to_int", "to_i")
         if (uc !== null && fmtIsNumV(uc)) { return toF(uc) }
         if (v === null || v === undefined) {
-            raiseErr("", "TypeError", "no implicit conversion from nil to integer")
+            raiseErr(fmtFrame, "TypeError", "no implicit conversion from nil to integer")
         }
-        raiseErr("", "TypeError", "no implicit conversion of " + fmtConvName(v) + " into Integer")
+        raiseErr(fmtFrame, "TypeError", "no implicit conversion of " + fmtConvName(v) + " into Integer")
         return 0
     }
     // MRI prints "Inf", "-Inf" and "NaN" for a non-finite float under every float
@@ -6481,7 +6529,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // A String operand must be EXACTLY one character; MRI raises otherwise, and
             // the message is its own.
             if (typeof v == "string") {
-                if (charCount(v) != 1) { raiseErr("", "ArgumentError", "%c requires a character") }
+                if (charCount(v) != 1) { raiseErr(fmtFrame, "ArgumentError", "%c requires a character") }
                 body = v
             }
             else { body = charFromCode(Math.trunc(fmtCharOperand(v))) }
@@ -6543,7 +6591,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // rbFmtTooFew in languages/lib/ruby-rt.metajs and rubyFmtTooFew in
     // abnf/jsrtruby.go are the twins.
     function fmtTooFew() {
-        raiseErr("", "ArgumentError", "too few arguments")
+        raiseErr(fmtFrame, "ArgumentError", "too few arguments")
     }
     function fmtHashArg(args) {
         if (args.length == 1 && isDict(args[0])) { return args[0] }
@@ -6551,7 +6599,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     function fmtNamed(args, name, open, close) {
         var h = fmtHashArg(args)
-        if (h === null) { raiseErr("", "ArgumentError", "one hash required") }
+        if (h === null) { raiseErr(fmtFrame, "ArgumentError", "one hash required") }
         // A SCAN and not dictFind: the key is the Symbol :name, and building one
         // here would depend on symTable's interning agreeing with whatever built
         // the hash. A String key does NOT match - MRI's "%{x}" % {"x" => 1} is a
@@ -6559,7 +6607,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         for (var i = 0; i < h.keys.length; i++) {
             if (isSym(h.keys[i]) && h.keys[i].s == name) { return h.vals[i] }
         }
-        raiseErr("", "KeyError", "key" + open + name + close + " not found")
+        raiseErr(fmtFrame, "KeyError", "key" + open + name + close + " not found")
         return null
     }
     // The value a `*` reads: the next positional argument, or the explicit one of
@@ -6613,11 +6661,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var cc = c.charCodeAt(0)
         // % as the conversion of a non-empty head ("%5%"), and a newline or a NUL
         // that is NOT directly after the % ("%5\n"), are MRI's one message.
-        if (c == "%" || cc == 10 || cc == 0) { raiseErr("", "ArgumentError", "invalid format character - %") }
-        if (cc >= 32 && cc < 127) { raiseErr("", "ArgumentError", "malformed format string - %" + c) }
-        raiseErr("", "ArgumentError", "malformed format string")
+        if (c == "%" || cc == 10 || cc == 0) { raiseErr(fmtFrame, "ArgumentError", "invalid format character - %") }
+        if (cc >= 32 && cc < 127) { raiseErr(fmtFrame, "ArgumentError", "malformed format string - %" + c) }
+        raiseErr(fmtFrame, "ArgumentError", "malformed format string")
     }
-    function rformat(fmt, arg) {
+    // The Ruby method running the formatter - "%", "format", "sprintf" or "printf" -
+    // which MRI names as the frame of every error the format raises. Twins:
+    // rubyFmtFrame in abnf/jsrt.go, rbFmtFrame in lib/ruby-rt.metajs.
+    var fmtFrame = ""
+    function rformat(fmt, arg, frame) {
+        var outerFrame = fmtFrame
+        fmtFrame = frame
         var args = Array.isArray(arg) ? arg : [arg]
         var out = ""
         var st = {ai: 0}
@@ -6627,7 +6681,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (ch != "%") { out += ch; i = i + 1; continue }
             // A MALFORMED directive is an ArgumentError in MRI; see isFmtConv above
             // for the messages.
-            if (i + 1 >= fmt.length) { raiseErr("", "ArgumentError", "incomplete format specifier; use %% (double %) instead") }
+            if (i + 1 >= fmt.length) { raiseErr(fmtFrame, "ArgumentError", "incomplete format specifier; use %% (double %) instead") }
             if (fmt.charAt(i + 1) == "%") { out += "%"; i = i + 2; continue }
             // A newline or a NUL DIRECTLY after the % is the one shape MRI writes
             // out instead of raising - "%\n" is "%\n" and "%\n%d" is "%\n5" - and
@@ -6676,7 +6730,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     continue
                 }
                 if (c2 == ".") {
-                    if (prec >= 0) { raiseErr("", "ArgumentError", "precision given twice") }
+                    if (prec >= 0) { raiseErr(fmtFrame, "ArgumentError", "precision given twice") }
                     j = j + 1
                     tail = 2
                     if (j < fmt.length && fmt.charAt(j) == "*") {
@@ -6709,10 +6763,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             var conv = "s"
             if (!brace) {
-                if (bad) { raiseErr("", "ArgumentError", "malformed name - unmatched parenthesis") }
+                if (bad) { raiseErr(fmtFrame, "ArgumentError", "malformed name - unmatched parenthesis") }
                 if (j >= fmt.length) {
-                    if (tail == 2) { raiseErr("", "ArgumentError", "malformed format string - %*[0-9]") }
-                    if (tail != 3) { raiseErr("", "ArgumentError", "invalid format character - %") }
+                    if (tail == 2) { raiseErr(fmtFrame, "ArgumentError", "malformed format string - %*[0-9]") }
+                    if (tail != 3) { raiseErr(fmtFrame, "ArgumentError", "invalid format character - %") }
                     // A selector or a <name> that ran off the end writes a bare "%"
                     // in MRI ("%1$" % 5 is "%"), but the name is still LOOKED UP -
                     // "%<x>" % 5 is *one hash required*.
@@ -6745,6 +6799,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             out += fmtOne(spec, conv, av)
             i = j
         }
+        fmtFrame = outerFrame
         return out
     }
     function makeTemplate(items) {
@@ -7041,6 +7096,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // answers 0, which is what an unrecorded closure answers anyway.
     var usesArity = false
     function noteMName(n) { if (n == "arity") { usesArity = true } return n }
+    // `x.+(y)' calls an operator METHOD by name, which is exactly `x.send(:+, y)'.
+    // Twin of methodSfx in ruby-to-llvm-ir.abnf.
+    function methodSfx(name, args) {
+        if (args.length == 1 && (isBinOpName(name) || name == "==" || name == "!=")) { return {kind: "mcall", name: "send", args: [makeConst(mkSym(name)), args[0]]} }
+        return {kind: "mcall", name: name, args: args}
+    }
     // A DOUBLE-QUOTED Ruby string's escapes. unescapeJs of the shared core is
     // JavaScript's set - it is right about \n \t \r \xNN \uNNNN and copies anything
     // else through as the bare letter - and Ruby's set is wider in four ways:
@@ -8186,12 +8247,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var sname = rstr(args[0])
             // An OPERATOR reached by name (`3.send(:+, 4)') is the one shape the type
             // tables cannot answer: they hold named methods, and + / << / <=> are
-            // evaluated by rbin. == and != are left out on purpose - every dispatcher
-            // answers those already, and routing a user object's == through rbin sends
-            // it back through the method table it just came out of.
+            // evaluated by rbin. == and != have their own arm, below.
             // binOps is what a source-level `l <op> r' runs, so routing through it
             // is agreement with this half's own operators by construction; rbin
             // alone is not (it has no <=> arm, and spaceship is a separate body).
+            // == / != by name are the operators themselves: rubyEq, which reaches a
+            // user class's own #==.
+            if (args.length == 2 && (sname == "==" || sname == "!=")) { return binOps[sname](target, args[1]) }
             if (args.length == 2 && isBinOpName(sname)) {
                 // `<<' is not in binOps: it is a statement form here (makeAppendStmt),
                 // because a Ruby String is mutable and ours is not.
@@ -9157,7 +9219,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // ARRAY (`[1,2,3].first(2)` is [1, 2]).
         if (name == "pop") {
             if (args.length > 0) {
-                var pn = Math.trunc(toF(args[0]))
+                var pn = arrCountArg(name, args[0])
                 if (pn > t.length) { pn = t.length }
                 var ptail = arrSub(t, t.length - pn, pn)
                 arrReplace(t, arrSub(t, 0, t.length - pn))
@@ -9166,12 +9228,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return t.length == 0 ? null : t.pop()
         }
         if (name == "first") {
-            if (args.length > 0) { return arrSub(t, 0, Math.trunc(toF(args[0]))) }
+            if (args.length > 0) { return arrSub(t, 0, arrCountArg(name, args[0])) }
             return t.length == 0 ? null : t[0]
         }
         if (name == "last") {
             if (args.length > 0) {
-                var ln = Math.trunc(toF(args[0]))
+                var ln = arrCountArg(name, args[0])
                 if (ln > t.length) { ln = t.length }
                 return arrSub(t, t.length - ln, ln)
             }
@@ -9180,7 +9242,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // shift removes from the FRONT; unshift/prepend adds there, variadically.
         if (name == "shift") {
             if (args.length > 0) {
-                var sn = Math.trunc(toF(args[0]))
+                var sn = arrCountArg(name, args[0])
                 if (sn > t.length) { sn = t.length }
                 var shead = arrSub(t, 0, sn)
                 arrReplace(t, arrSub(t, sn, t.length - sn))
@@ -9461,7 +9523,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             for (i = 0; i < res.length; i++) { blockCall(blk, [res[i]]) }
             return t
         }
-        if (name == "take") { return arrSub(t, 0, Math.trunc(toF(args[0]))) }
+        if (name == "take") { return arrSub(t, 0, arrCountArg(name, args[0])) }
         if (name == "drop") {
             var dn = Math.trunc(toF(args[0]))
             return arrSub(t, dn, t.length - dn)
@@ -10409,6 +10471,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // The ones of them that also stand alone, as a bare name with no arguments.
     // Twin of bareSelfCallNames in ruby-to-llvm-ir.abnf.
     var bareSelfCallNames = ["instance_variables", "singleton_methods", "frozen?"]
+    // A receiver-less send(:name, ...) reaches a top-level def or a Kernel function,
+    // both private Object methods in MRI, unless self has its own method of the name.
+    // Twin of js_rselfsend in abnf/jsrtruby.go.
+    function selfSendDef(argv) {
+        if (argv.length == 0) { return undefined }
+        var sn = rstr(argv[0])
+        if (typeof selfMethod(sn) == "function") { return undefined }
+        if (rubyMethods["$" + sn] === true && hasVar("$d$" + sn)) { return getVar("$d$" + sn) }
+        if (kernelMethodIndex(sn) >= 0) { return function() { return kernelInvoke(sn, argsArray(arguments)) } }
+        return undefined
+    }
     function makeCall(items) {
         var name = items[0]
         var sp = splitBlock(items.slice(1))
@@ -10441,6 +10514,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (f == undefined && typeof selfMethod(name) == "function") {
                 if (bf == null) { return mcall(findSelf(), name, argv, null) }
                 return catchBlkBreak(function() { return mcall(findSelf(), name, argv, bf) })
+            }
+            if (f == undefined && (name == "send" || name == "__send__") && !hasVar(name)) {
+                var sdf = anytype
+                sdf = selfSendDef(argv)
+                if (sdf !== undefined) { f = sdf; argv = argv.slice(1) }
             }
             // An Object method a bare call reaches on the implicit self.
             if (f == undefined && selfCallNames.indexOf(name) >= 0 && rubyMethods["$" + name] !== true && !hasVar(name)) {
@@ -12220,7 +12298,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var mv = getVar("$mname")
             if (typeof mv == "string" && mv != "") { who = mv }
         }
-        return c.file + ":" + c.lineOf(pos) + ":in `" + who + "'"
+        return c.file + ":" + c.lineOf(pos) + ":in `" + blkFrame(pos, defStartAt(pos), who) + "'"
     }
     // Record the raise site on the exception object, unless it already carries one
     // (a re-raise keeps the ORIGINAL site, as MRI does).
@@ -12785,18 +12863,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     hostGlobals["format"] = function() {
         var a = argsArray(arguments)
-        return rformat(rstr(a[0]), a.slice(1))
+        return rformat(rstr(a[0]), a.slice(1), "format")
     }
     hostGlobals["sprintf"] = function() {
         var sa = argsArray(arguments)
-        return rformat(rstr(sa[0]), sa.slice(1))
+        return rformat(rstr(sa[0]), sa.slice(1), "sprintf")
     }
     // Kernel#printf is print(format(...)) - Ruby's format, not the shared host
     // printf.
     hostGlobals["printf"] = function() {
         var pa = argsArray(arguments)
         if (pa.length == 0) { return null }
-        print(rformat(rstr(pa[0]), pa.slice(1)))
+        print(rformat(rstr(pa[0]), pa.slice(1), "printf"))
         return null
     }
     // Kernel#p writes INSPECT (not to_s) one argument per line, and answers the
@@ -12874,7 +12952,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     binOps["-"]  = function(l, r) { return rbin("-", l, r) }
     binOps["*"]  = function(l, r) { if (typeof l == "string") { return strRepeat(l, toF(r)) } return rbin("*", l, r) }
     binOps["/"]  = function(l, r) { return rbin("/", l, r) }
-    binOps["%"]  = function(l, r) { if (typeof l == "string") { return rformat(l, r) } return rbin("%", l, r) }
+    binOps["%"]  = function(l, r) { if (typeof l == "string") { return rformat(l, r, "%") } return rbin("%", l, r) }
     binOps["**"] = function(l, r) { return rbin("**", l, r) }
     binOps["&"]  = function(l, r) { return rbin("&", l, r) }
     binOps["|"]  = function(l, r) { return rbin("|", l, r) }

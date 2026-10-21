@@ -1389,6 +1389,8 @@ function rbNumBin(op, l, r) {
         if (op == "+") { return rbMkRat(rbNumBin("+", rbNumBin("*", p["n"], q["d"]), rbNumBin("*", q["n"], p["d"])), rbNumBin("*", p["d"], q["d"])) }
         if (op == "-") { return rbMkRat(rbNumBin("-", rbNumBin("*", p["n"], q["d"]), rbNumBin("*", q["n"], p["d"])), rbNumBin("*", p["d"], q["d"])) }
         if (op == "*") { return rbMkRat(rbNumBin("*", p["n"], q["n"]), rbNumBin("*", p["d"], q["d"])) }
+        // Twin of rubyNumBin's zero-divisor raise in abnf/jsrt.go.
+        if ((op == "/" || op == "%") && rbEq(q["n"], 0)) { rbRaiseErr(op, "ZeroDivisionError", "divided by 0") }
         if (op == "/") { return rbMkRat(rbNumBin("*", p["n"], q["d"]), rbNumBin("*", p["d"], q["n"])) }
         if (op == "%") {
             var fq = rbNumBin("/", p, q)
@@ -1412,6 +1414,7 @@ function rbNumBin(op, l, r) {
         // being exact). rbZeroSign puts back the DIVIDEND's sign that fmod's zero
         // carries and the tag engine drops.
         if (op == "%") {
+            if (y == 0 && rbIsRat(l)) { rbRaiseErr(op, "ZeroDivisionError", "divided by 0") }
             var fm = x % y
             if (fm == 0) { return rbMkFlo(rbZeroSign(x)) }
             if (y * fm < 0) { return rbMkFlo(fm + y) }
@@ -2342,11 +2345,11 @@ function rbFmtIntOperand(v) {
     if (typeof v == "string") {
         var ri = rbStrToInum(v, 0, true)
         if (ri["ok"]) { return ri["v"] }
-        rbRaiseErr("", "ArgumentError", "invalid value for Integer(): " + rbStrInspect(v))
+        rbRaiseErr(rbFmtFrame, "ArgumentError", "invalid value for Integer(): " + rbStrInspect(v))
     }
     var uc = rbFmtUserConv(v, "to_int", "to_i")
     if (uc !== null && rbFmtIsNumV(uc)) { return uc }
-    rbRaiseErr("", "TypeError", "can't convert " + rbFmtConvName(v) + " into Integer")
+    rbRaiseErr(rbFmtFrame, "TypeError", "can't convert " + rbFmtConvName(v) + " into Integer")
     return 0
 }
 function rbFmtFloOperand(v) {
@@ -2355,11 +2358,11 @@ function rbFmtFloOperand(v) {
         var rf = anytype
         rf = rbnStrToDbl(v, true)
         if (rf !== null) { return rf }
-        rbRaiseErr("", "ArgumentError", "invalid value for Float(): " + rbStrInspect(v))
+        rbRaiseErr(rbFmtFrame, "ArgumentError", "invalid value for Float(): " + rbStrInspect(v))
     }
     var uf = rbFmtUserConv(v, "to_f", "")
     if (uf !== null && rbFmtIsNumV(uf)) { return rbToF(uf) }
-    rbRaiseErr("", "TypeError", "can't convert " + rbFmtConvName(v) + " into Float")
+    rbRaiseErr(rbFmtFrame, "TypeError", "can't convert " + rbFmtConvName(v) + " into Float")
     return 0
 }
 // %c's message is NOT the Integer one, and MRI writes it TWO ways: nil is
@@ -2370,8 +2373,8 @@ function rbFmtCharOperand(v) {
     if (rbFmtIsNumV(v)) { return rbToF(v) }
     var uc = rbFmtUserConv(v, "to_int", "to_i")
     if (uc !== null && rbFmtIsNumV(uc)) { return rbToF(uc) }
-    if (rtIsNil(v)) { rbRaiseErr("", "TypeError", "no implicit conversion from nil to integer") }
-    rbRaiseErr("", "TypeError", "no implicit conversion of " + rbFmtConvName(v) + " into Integer")
+    if (rtIsNil(v)) { rbRaiseErr(rbFmtFrame, "TypeError", "no implicit conversion from nil to integer") }
+    rbRaiseErr(rbFmtFrame, "TypeError", "no implicit conversion of " + rbFmtConvName(v) + " into Integer")
     return 0
 }
 
@@ -2648,7 +2651,7 @@ function rbFloDomain(x) {
 // abnf/jsrtruby.go is the other twin. NOT implemented: MRI's four
 // ArgumentErrors for MIXING the numbered, unnumbered and named styles.
 function rbFmtTooFew() {
-    rbRaiseErr("", "ArgumentError", "too few arguments")
+    rbRaiseErr(rbFmtFrame, "ArgumentError", "too few arguments")
 }
 
 function rbFmtHashArg(args) {
@@ -2658,7 +2661,7 @@ function rbFmtHashArg(args) {
 
 function rbFmtNamed(args, name, open, close) {
     var h = rbFmtHashArg(args)
-    if (h === null) { rbRaiseErr("", "ArgumentError", "one hash required") }
+    if (h === null) { rbRaiseErr(rbFmtFrame, "ArgumentError", "one hash required") }
     // A SCAN and not rbDictFind: the key is the Symbol :name and a String key does
     // NOT match - MRI's "%{x}" % {"x" => 1} is a KeyError.
     var keys = h["keys"]
@@ -2668,7 +2671,7 @@ function rbFmtNamed(args, name, open, close) {
         if (rbIsSym(keys[i]) && keys[i]["s"] == name) { return vals[i] }
         i = i + 1
     }
-    rbRaiseErr("", "KeyError", "key" + open + name + close + " not found")
+    rbRaiseErr(rbFmtFrame, "KeyError", "key" + open + name + close + " not found")
     return null
 }
 
@@ -2721,12 +2724,16 @@ function rbFmtCheckConv(c) {
     var cc = c.charCodeAt(0)
     // % as the conversion of a non-empty head ("%5%"), and a newline or a NUL that
     // is NOT directly after the % ("%5\n"), are MRI's one message.
-    if (c == "%" || cc == 10 || cc == 0) { rbRaiseErr("", "ArgumentError", "invalid format character - %") }
-    if (cc >= 32 && cc < 127) { rbRaiseErr("", "ArgumentError", "malformed format string - %" + c) }
-    rbRaiseErr("", "ArgumentError", "malformed format string")
+    if (c == "%" || cc == 10 || cc == 0) { rbRaiseErr(rbFmtFrame, "ArgumentError", "invalid format character - %") }
+    if (cc >= 32 && cc < 127) { rbRaiseErr(rbFmtFrame, "ArgumentError", "malformed format string - %" + c) }
+    rbRaiseErr(rbFmtFrame, "ArgumentError", "malformed format string")
 }
 
-function rbFormat(spec, arg) {
+// The Ruby method running rbFormat - see rubyFmtFrame in abnf/jsrt.go.
+var rbFmtFrame = ""
+function rbFormat(spec, arg, frame) {
+    var outerFrame = rbFmtFrame
+    rbFmtFrame = frame
     var args = [arg]
     if (rbIsArr(arg)) { args = arg }
     var st = {ai: 0}
@@ -2741,7 +2748,7 @@ function rbFormat(spec, arg) {
         i = i + 1
         // A MALFORMED directive is an ArgumentError in MRI; rbFmtCheckConv
         // carries the table.
-        if (i >= spec.length) { rbRaiseErr("", "ArgumentError", "incomplete format specifier; use %% (double %) instead") }
+        if (i >= spec.length) { rbRaiseErr(rbFmtFrame, "ArgumentError", "incomplete format specifier; use %% (double %) instead") }
         if (spec.charAt(i) == "%") {
             out = out + "%"
             i = i + 1
@@ -2816,7 +2823,7 @@ function rbFormat(spec, arg) {
                 continue
             }
             if (fc == ".") {
-                if (prec >= 0) { rbRaiseErr("", "ArgumentError", "precision given twice") }
+                if (prec >= 0) { rbRaiseErr(rbFmtFrame, "ArgumentError", "precision given twice") }
                 i = i + 1
                 tail = 2
                 if (i < spec.length && spec.charAt(i) == "*") {
@@ -2859,10 +2866,10 @@ function rbFormat(spec, arg) {
         }
         var conv = "s"
         if (!brace) {
-            if (bad) { rbRaiseErr("", "ArgumentError", "malformed name - unmatched parenthesis") }
+            if (bad) { rbRaiseErr(rbFmtFrame, "ArgumentError", "malformed name - unmatched parenthesis") }
             if (i >= spec.length) {
-                if (tail == 2) { rbRaiseErr("", "ArgumentError", "malformed format string - %*[0-9]") }
-                if (tail != 3) { rbRaiseErr("", "ArgumentError", "invalid format character - %") }
+                if (tail == 2) { rbRaiseErr(rbFmtFrame, "ArgumentError", "malformed format string - %*[0-9]") }
+                if (tail != 3) { rbRaiseErr(rbFmtFrame, "ArgumentError", "invalid format character - %") }
                 // A selector or a <name> that ran off the end writes a bare "%" in
                 // MRI ("%1$" % 5 is "%"), but the name is still LOOKED UP -
                 // "%<x>" % 5 is *one hash required*.
@@ -2960,7 +2967,7 @@ function rbFormat(spec, arg) {
             // a numeric directive - "%05c" % 65 is "    A" - and MRI ignores a
             // precision on it outright ("%.0c" % 65 is "A").
             if (typeof nx == "string") {
-                if (rbCharCount(nx) != 1) { rbRaiseErr("", "ArgumentError", "%c requires a character") }
+                if (rbCharCount(nx) != 1) { rbRaiseErr(rbFmtFrame, "ArgumentError", "%c requires a character") }
                 body = nx
             }
             else { body = rbCharCode(Math.trunc(rbFmtCharOperand(nx))) }
@@ -3023,6 +3030,7 @@ function rbFormat(spec, arg) {
         }
         out = out + body
     }
+    rbFmtFrame = outerFrame
     return out
 }
 
@@ -4281,7 +4289,7 @@ function rbBin(op, l, r) {
         if (rbIsArr(l) && rbIsArr(r)) { return rbArrOr(l, r) }
     }
     if (op == "%") {
-        if (typeof l == "string") { return rbFormat(l, r) }
+        if (typeof l == "string") { return rbFormat(l, r, "%") }
     }
     if (op == "<<") {
         if (rbIsArr(l)) {
@@ -6014,7 +6022,7 @@ function rbArrayMethod(t, name, args) {
     // ARRAY: `[1,2,3].first(2)` is [1, 2].
     if (name == "pop") {
         if (nPos > 0) {
-            var pn = Math.trunc(rbToF(args[0]))
+            var pn = rbArrCountArg(name, args[0])
             if (pn > t.length) { pn = t.length }
             var ptail = rbArrSub(t, t.length - pn, pn)
             rbArrReplace(t, rbArrSub(t, 0, t.length - pn))
@@ -6024,13 +6032,13 @@ function rbArrayMethod(t, name, args) {
         return t.pop()
     }
     if (name == "first") {
-        if (nPos > 0) { return rbArrSub(t, 0, Math.trunc(rbToF(args[0]))) }
+        if (nPos > 0) { return rbArrSub(t, 0, rbArrCountArg(name, args[0])) }
         if (t.length == 0) { return null }
         return t[0]
     }
     if (name == "last") {
         if (nPos > 0) {
-            var ln = Math.trunc(rbToF(args[0]))
+            var ln = rbArrCountArg(name, args[0])
             if (ln > t.length) { ln = t.length }
             return rbArrSub(t, t.length - ln, ln)
         }
@@ -6040,7 +6048,7 @@ function rbArrayMethod(t, name, args) {
     // shift removes from the FRONT; unshift/prepend adds there, variadically.
     if (name == "shift") {
         if (nPos > 0) {
-            var sn = Math.trunc(rbToF(args[0]))
+            var sn = rbArrCountArg(name, args[0])
             if (sn > t.length) { sn = t.length }
             var shead = rbArrSub(t, 0, sn)
             rbArrReplace(t, rbArrSub(t, sn, t.length - sn))
@@ -6439,7 +6447,7 @@ function rbArrayMethod(t, name, args) {
         while (pm < res.length) { rbCall1(blk, res[pm]); pm = pm + 1 }
         return t
     }
-    if (name == "take") { return rbArrSub(t, 0, Math.trunc(rbToF(rbPosAt(args, nPos, 0)))) }
+    if (name == "take") { return rbArrSub(t, 0, rbArrCountArg(name, rbPosAt(args, nPos, 0))) }
     if (name == "drop") {
         var dn = Math.trunc(rbToF(rbPosAt(args, nPos, 0)))
         return rbArrSub(t, dn, t.length - dn)
@@ -6850,11 +6858,11 @@ function rbMethod(target, name, args) {
         var mn = rbStr(args[0])
         // An OPERATOR reached by name (`3.send(:+, 4)') is the one shape the type
         // tables cannot answer: they hold named methods, and + / << / <=> are
-        // evaluated by rbBin. == and != are left out on purpose - every dispatcher
-        // answers those already, and routing a user object's == through rbBin sends
-        // it back through the method table it just came out of.
+        // evaluated by rbBin. == and != have their own arm, below.
         // The comparisons are NOT rbBin's (it has no <=> arm at all): they are the
         // js_rlt/js_rcmp family, exactly as the emitter spells them.
+        // Twin of the == / != arm of rubyMethod's send in abnf/jsrt.go.
+        if (args.length == 2 && (mn == "==" || mn == "!=")) { return rbEq(target, args[1]) == (mn == "==") }
         if (args.length == 2 && rbIsBinOpName(mn)) {
             if (mn == "<") { return rbCmp(target, args[1]) < 0 }
             if (mn == ">") { return rbCmp(target, args[1]) > 0 }
@@ -7326,7 +7334,7 @@ function rbMethod(target, name, args) {
                     kf.push(args[ki])
                     ki = ki + 1
                 }
-                return js_rformat(kf)
+                return js_rformat(kf, name)
             }
             if (name == "rand") { return rbRand(rbArgAt(args, 0)) }
         }
@@ -7644,8 +7652,9 @@ function js_rp(args) {
     return rtCopyArr(args)
 }
 
-// Kernel#format / sprintf: the argument array is [format, args...].
-function js_rformat(args) {
+// Kernel#format / sprintf / printf: the argument array is [format, args...], and
+// frame is the method's name.
+function js_rformat(args, frame) {
     if (!rbIsArr(args) || args.length == 0) { return "" }
     var rest = []
     var i = 1
@@ -7653,7 +7662,7 @@ function js_rformat(args) {
         rest.push(args[i])
         i = i + 1
     }
-    return rbFormat(rbStr(args[0]), rest)
+    return rbFormat(rbStr(args[0]), rest, rbStr(frame))
 }
 
 // Kernel#rand, as a call the emitter makes for the bare name. See rbRand.
@@ -8813,6 +8822,31 @@ function js_rfn(scope, name) {
     rbNoMethod(rbScopeSelf(scope), n)
     return null
 }
+// The COUNT of first / last / pop / shift / take - see rubyArrCountArg in abnf/jsrt.go.
+function rbArrCountArg(name, v) {
+    var n = Math.trunc(rbToF(v))
+    if (n < 0) { rbRaiseErr(name, "ArgumentError", name == "take" ? "attempt to take negative size" : "negative array size") }
+    return n
+}
+// A receiver-less send(:name, ...) - see js_rselfsend in abnf/jsrtruby.go.
+function js_rselfsend(scope, self, args) {
+    if (args.length > 0) {
+        var n = rbStr(args[0])
+        if (rbFindMethod(self, n) === undefined) {
+            var s = anytype
+            s = scope
+            while (s !== undefined && s !== null) {
+                if (scopeHas(s, "$d$" + n)) {
+                    var f = scopeGet(s, "$d$" + n)
+                    if (typeof f == "function") { return f.apply(undefined, args.slice(1)) }
+                }
+                s = scopeParent(s)
+            }
+            if (rbKernelMethodIndex(n) >= 0) { return rbKernelInvoke(n, args.slice(1)) }
+        }
+    }
+    return rbMethod(self, "send", args)
+}
 // The implicit receiver at a scope: the nearest `self` binding, or the main
 // object where that is nil. Twin of rubyScopeSelf in abnf/jsrtruby.go.
 function rbScopeSelf(scope) {
@@ -9091,8 +9125,8 @@ function rbKernelInvoke(n, args) {
         return null
     }
     if (n == "p") { return js_rp(args) }
-    if (n == "format" || n == "sprintf") { return js_rformat(args) }
-    if (n == "printf") { js_rprint(js_rformat(args)); return null }
+    if (n == "format" || n == "sprintf") { return js_rformat(args, n) }
+    if (n == "printf") { js_rprint(js_rformat(args, n)); return null }
     if (n == "rand") { return js_rrand(args) }
     return js_rkconv(n, args)
 }

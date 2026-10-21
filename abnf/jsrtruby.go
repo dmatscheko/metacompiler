@@ -46,13 +46,13 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 	u := rt.unwrap
 	w := rt.wrap
 
-	// Kernel#format / #sprintf.
+	// Kernel#format / #sprintf / #printf: (arguments, the method's name).
 	m["js_rformat"] = func(a []uint64) uint64 {
 		arr, ok := u(a[0]).(*jsArray)
 		if !ok || len(arr.elems) == 0 {
 			return rt.wrapStr("")
 		}
-		return rt.wrapStr(rt.rubyFormat2(rt.rubyStr(arr.elems[0]), &jsArray{elems: arr.elems[1:]}))
+		return rt.wrapStr(rt.rubyFormat2(rt.rubyStr(arr.elems[0]), &jsArray{elems: arr.elems[1:]}, rt.toString(u(a[1]))))
 	}
 
 	m["js_rrespond"] = func(a []uint64) uint64 {
@@ -104,7 +104,7 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 	baseMod := m["js_rmod"]
 	m["js_rmod"] = func(a []uint64) uint64 {
 		if s, ok := u(a[0]).(string); ok {
-			return rt.wrapStr(rt.rubyFormat2(s, u(a[1])))
+			return rt.wrapStr(rt.rubyFormat2(s, u(a[1]), "%"))
 		}
 		return baseMod(a)
 	}
@@ -124,7 +124,7 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 			if rubyIsKernelObj(u(a[0])) && (nm == "format" || nm == "sprintf") {
 				if arr, ok := args.(*jsArray); ok && len(arr.elems) > 0 {
 					return rt.wrapStr(rt.rubyFormat2(rt.rubyStr(arr.elems[0]),
-						&jsArray{elems: arr.elems[1:]}))
+						&jsArray{elems: arr.elems[1:]}, nm))
 				}
 			}
 			if v, done := rubyFloPredicate(u(a[0]), nm); done {
@@ -159,6 +159,27 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 		self := rubyScopeSelf(rt, a[0])
 		rt.rubyNameErr("NameError", "undefined local variable or method `"+name+"' for "+rt.rubyNoMethodDesc(self), name, self)
 		return 0
+	}
+	// A receiver-less send(:name, ...): a top-level def and a Kernel function are
+	// MRI's private Object methods, so they answer when the receiver has no method
+	// of the name. Twin of
+	// js_rselfsend in languages/lib/ruby-rt.metajs and selfSendDef in
+	// ruby-interpreter.abnf.
+	m["js_rselfsend"] = func(a []uint64) uint64 {
+		if arr, ok := u(a[2]).(*jsArray); ok && len(arr.elems) > 0 {
+			name := rt.rubyStr(arr.elems[0])
+			if _, found := rubyFindMethod(u(a[1]), name); !found {
+				for sc := rt.scopeOf(a[0]); sc != nil; sc = sc.parent {
+					if v, ok := sc.get("$d$" + name); ok && isCallable(v) {
+						return w(rt.call(v, jsUndef, arr.elems[1:]))
+					}
+				}
+				if rubyKernelMethodIndex(name) >= 0 {
+					return w(rt.rubyKernelInvoke(name, arr.elems[1:]))
+				}
+			}
+		}
+		return w(rt.rubyMethod(u(a[1]), "send", u(a[2]).(*jsArray).elems))
 	}
 	// The callee of a bare `name(args)` that names no def: the chain walk of
 	// js_scope_get, with a miss raising MRI's NoMethodError on the implicit self.
@@ -397,7 +418,7 @@ func rubyIsFmtConv(c byte) bool {
 }
 
 func (rt *jsrt) rubyFmtTooFew() {
-	rt.rubyRaiseErr("", "ArgumentError", "too few arguments")
+	rt.rubyRaiseErr(rt.rubyFmtFrame, "ArgumentError", "too few arguments")
 }
 
 func (rt *jsrt) rubyFmtCheckConv(c byte) {
@@ -407,15 +428,17 @@ func (rt *jsrt) rubyFmtCheckConv(c byte) {
 	// % as the conversion of a non-empty head ("%5%"), and a newline or a NUL that
 	// is NOT directly after the % ("%5\n"), are MRI's one message.
 	if c == '%' || c == '\n' || c == 0 {
-		rt.rubyRaiseErr("", "ArgumentError", "invalid format character - %")
+		rt.rubyRaiseErr(rt.rubyFmtFrame, "ArgumentError", "invalid format character - %")
 	}
 	if c >= 32 && c < 127 {
-		rt.rubyRaiseErr("", "ArgumentError", "malformed format string - %"+string(c))
+		rt.rubyRaiseErr(rt.rubyFmtFrame, "ArgumentError", "malformed format string - %"+string(c))
 	}
-	rt.rubyRaiseErr("", "ArgumentError", "malformed format string")
+	rt.rubyRaiseErr(rt.rubyFmtFrame, "ArgumentError", "malformed format string")
 }
 
-func (rt *jsrt) rubyFormat2(spec string, arg interface{}) string {
+func (rt *jsrt) rubyFormat2(spec string, arg interface{}, frame string) string {
+	outerFrame := rt.rubyFmtFrame
+	rt.rubyFmtFrame = frame
 	args := []interface{}{arg}
 	if a, ok := arg.(*jsArray); ok {
 		args = a.elems
@@ -462,7 +485,7 @@ func (rt *jsrt) rubyFormat2(spec string, arg interface{}) string {
 		// A MALFORMED directive is an ArgumentError in MRI. rubyFmtCheckConv
 		// carries the rule.
 		if i+1 >= len(spec) {
-			rt.rubyRaiseErr("", "ArgumentError", "incomplete format specifier; use %% (double %) instead")
+			rt.rubyRaiseErr(rt.rubyFmtFrame, "ArgumentError", "incomplete format specifier; use %% (double %) instead")
 		}
 		if spec[i+1] == '%' {
 			out.WriteString("%")
@@ -531,7 +554,7 @@ func (rt *jsrt) rubyFormat2(spec string, arg interface{}) string {
 			}
 			if c == '.' {
 				if prec >= 0 {
-					rt.rubyRaiseErr("", "ArgumentError", "precision given twice")
+					rt.rubyRaiseErr(rt.rubyFmtFrame, "ArgumentError", "precision given twice")
 				}
 				j++
 				tail = 2
@@ -574,14 +597,14 @@ func (rt *jsrt) rubyFormat2(spec string, arg interface{}) string {
 		conv := byte('s')
 		if !brace {
 			if bad {
-				rt.rubyRaiseErr("", "ArgumentError", "malformed name - unmatched parenthesis")
+				rt.rubyRaiseErr(rt.rubyFmtFrame, "ArgumentError", "malformed name - unmatched parenthesis")
 			}
 			if j >= len(spec) {
 				if tail == 2 {
-					rt.rubyRaiseErr("", "ArgumentError", "malformed format string - %*[0-9]")
+					rt.rubyRaiseErr(rt.rubyFmtFrame, "ArgumentError", "malformed format string - %*[0-9]")
 				}
 				if tail != 3 {
-					rt.rubyRaiseErr("", "ArgumentError", "invalid format character - %")
+					rt.rubyRaiseErr(rt.rubyFmtFrame, "ArgumentError", "invalid format character - %")
 				}
 				// A selector or a <name> that ran off the end writes a bare "%"
 				// in MRI ("%1$" % 5 is "%"), but the name is still LOOKED UP -
@@ -651,6 +674,7 @@ func (rt *jsrt) rubyFormat2(spec string, arg interface{}) string {
 		out.WriteString(rt.rubyFormat(head+string(conv), &jsArray{elems: []interface{}{av}}))
 		i = j
 	}
+	rt.rubyFmtFrame = outerFrame
 	return out.String()
 }
 
@@ -679,7 +703,7 @@ func (rt *jsrt) rubyFmtNamed(args []interface{}, name, open, close string) inter
 		}
 	}
 	if h == nil {
-		rt.rubyRaiseErr("", "ArgumentError", "one hash required")
+		rt.rubyRaiseErr(rt.rubyFmtFrame, "ArgumentError", "one hash required")
 	}
 	keys, _ := h.props["keys"].(*jsArray)
 	vals, _ := h.props["vals"].(*jsArray)
@@ -690,7 +714,7 @@ func (rt *jsrt) rubyFmtNamed(args []interface{}, name, open, close string) inter
 			}
 		}
 	}
-	rt.rubyRaiseErr("", "KeyError", "key"+open+name+close+" not found")
+	rt.rubyRaiseErr(rt.rubyFmtFrame, "KeyError", "key"+open+name+close+" not found")
 	return jsNull
 }
 

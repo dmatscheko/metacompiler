@@ -4012,6 +4012,51 @@ def s89
         /(x)?y\1/i.match("Y") == nil)
 end
 
+# ===== SECTION 90: operator methods by name, send, a Rational zero divisor, frames =====
+# x.+(y) is x + y; a receiver-less send reaches a top-level def (a private Object
+# method) and a Kernel function; a Rational divided by an exact zero raises; a ? / !
+# suffix is glued to its name, so a line opening with `!` is a new statement; a
+# negative count is refused; an error raised in a block is in "block in NAME", and a
+# format error in the formatting method. Every right-hand side is /usr/bin/ruby
+# 2.6.10's own answer. THIS SECTION RUNS UNDER REAL RUBY.
+def s90h(a); a * 2; end
+def s90at(e, frame)
+  bt = e.backtrace
+  !bt.nil? && bt[0].end_with?(":in `" + frame + "'")
+end
+def s90err
+  yield
+  nil
+rescue Exception => e
+  e
+end
+def s90blk(v)
+  [v].each { |x| [x].each { |y| raise "deep" } }
+end
+def s90
+  v = ["a", "c", 3, 0, [1, 2], -1, nil, 0.0]
+  check("op90a", v[0].+(v[1]) == "ac" && v[2].*(v[2]) == 9 && v[4].-([1]) == [2] && v[0].==("a") && v[0].!=(v[1]))
+  check("op90b", v[0].send(:==, "a") && v[0].send(:!=, "a") == false && v[2].<=>(v[3]) == 1)
+  check("sd90a", send(:s90h, v[2]) == 6 && __send__(:s90h, 4) == 8 && send(:format, "%d", v[2]) == "3")
+  e = s90err { send(:s90h) }
+  check("sd90b", e.is_a?(ArgumentError) && e.message == "wrong number of arguments (given 0, expected 1)" &&
+        s90at(e, "s90h"))
+  e = s90err { Rational(v[2], 1) % v[3] }
+  check("rz90a", e.is_a?(ZeroDivisionError) && e.message == "divided by 0")
+  check("rz90b", s90err { Rational(v[2], 1) / v[3] }.is_a?(ZeroDivisionError) &&
+        s90err { Rational(v[2], 1) % v[7] }.is_a?(ZeroDivisionError))
+  bt = v[4].max
+  !bt.nil?
+  check("bg90a", bt == 2)
+  e = s90err { v[4].first(v[5]) }
+  check("ng90a", e.is_a?(ArgumentError) && e.message == "negative array size" &&
+        s90err { v[4].take(v[5]) }.message == "attempt to take negative size")
+  check("ng90b", s90err { v[4].last(v[5]) }.message == "negative array size" && s90err { v[4].dup.pop(v[5]) }.is_a?(ArgumentError))
+  check("fr90a", s90at(s90err { raise "x" }, "block in s90") && s90at(s90err { s90blk(1) }, "block (2 levels) in s90blk"))
+  check("fr90b", s90at(s90err { "%d" % v[6] }, "%") && s90at(s90err { format("%d", v[6]) }, "format") &&
+        s90at(s90err { sprintf("%d", v[0]) }, "sprintf"))
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -4063,6 +4108,7 @@ s86() # SECTION-CALL 86
 s87() # SECTION-CALL 87
 s88() # SECTION-CALL 88
 s89() # SECTION-CALL 89
+s90() # SECTION-CALL 90
 s95() # SECTION-CALL 95
 s96() # SECTION-CALL 96
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"

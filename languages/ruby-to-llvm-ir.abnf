@@ -137,7 +137,16 @@ ParamSimple = Name <~~ push({param: up.in}) ~~> ;
 // Method / call names may end with ? or ! (empty?, include?); Name may not. A def
 // may equally name an OPERATOR (def +, def -@, def [], def []=, def <=>), which is
 // how a class joins the operator table - the longest spelling comes first (PEG).
-MethodName  = OpMethodName | Id [ "?" | "!" NotEqGlued ] ;
+MethodName  = OpMethodName | Id [ SfxGlued ( "?" | "!" NotEqGlued ) ] ;
+// A ? / ! suffix is GLUED to its name: `x.max` and then a line starting `!y`
+// are two statements, not a call to max!. A guard sees the source before the
+// next token's whitespace skip, so peek(0) is the character right after the name.
+SfxGlued    = :script(~~
+    (function() {
+        var cc = c.peek(0)
+        if (cc !== 63 && cc !== 33) { return abnf.newToken("\x01nosfx", 0) }
+    })()
+~~) ;
 // `A.new.should != 2` - without this the `!` is taken as part of the method name and
 // the `= 2` is left over. It has to be a :script rather than a `!"="` lookahead,
 // because a lookahead skips the space in front of it and would then also reject the
@@ -863,7 +872,7 @@ PostfixExpr <~~ push(foldCallMember(takeAll())) ~~>
 // still wins whenever there is a `(`.
 CmdMethodSfx <~~ push({kind: "mcall", name: popName(), args: takeAll()}) ~~>
             = "." MethodName <~~ push({mname: noteMName(up.in)}) ~~> SameLine CmdArgAhead Arg { "," Arg } [ Block ] ;
-MethodSfx   <~~ push({kind: "mcall", name: popName(), args: takeAll()}) ~~>
+MethodSfx   <~~ push(methodSfx(popName(), takeAll())) ~~>
             = "." MethodName <~~ push({mname: noteMName(up.in)}) ~~> MArgs ;
 // p.(x): the parenthesis-only call shorthand for a Proc (Proc#call).
 CallSfx     <~~ push({kind: "mcall", name: "call", args: takeAll()}) ~~>
@@ -1920,7 +1929,7 @@ Call        <~~ push(makeCall(takeAll())) ~~>
             = BareName <~~ push(up.in) ~~> SameLine "(" [ Arg { "," Arg } [ "," ] ] ")" [ Block ]
             | BareName <~~ push(up.in) ~~> Block
             | PredName <~~ push(up.in) ~~> ;
-BareName    = NotKw Id [ "?" | "!" ] ;
+BareName    = NotKw Id [ SfxGlued PredSfx ] ;
 // A bare predicate/bang call has to be told apart from `a != b` and from the ternary
 // `x ? a : b`, so the suffix character is checked with whitespace skipping OFF: a `!`
 // may not be followed by `=`, and a `?` may not be followed by whitespace (Ruby uses
@@ -3018,6 +3027,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // answers 0, which is what an unrecorded closure answers anyway.
     var usesArity = false
     function noteMName(n) { if (n == "arity") { usesArity = true } return n }
+    // `x.+(y)' calls an operator METHOD by name, which is exactly `x.send(:+, y)'.
+    // Twin of methodSfx in ruby-interpreter.abnf, and isBinOpName of its set.
+    function isBinOpName(n) {
+        if (n == "+" || n == "-" || n == "*" || n == "/" || n == "%" || n == "**") { return true }
+        if (n == "<<" || n == ">>" || n == "&" || n == "|" || n == "^") { return true }
+        return n == "<" || n == ">" || n == "<=" || n == ">=" || n == "<=>"
+    }
+    function methodSfx(name, args) {
+        if (args.length == 1 && (isBinOpName(name) || name == "==" || name == "!=")) { return {kind: "mcall", name: "send", args: [makeConst(mkSym(name)), args[0]]} }
+        return {kind: "mcall", name: name, args: args}
+    }
     // A DOUBLE-QUOTED Ruby string's escapes. unescapeJs of the shared core is
     // JavaScript's set - it is right about \n \t \r \xNN \uNNNN and copies anything
     // else through as the bare letter - and Ruby's set is wider in four ways:
@@ -3463,7 +3483,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // The block's PARAMETER SHAPE is known right here, at the literal, which is
         // the one place it is free.
         return {blkKinds: paramKinds(params), blkT: function(b) {
+            curBlkDepth++
             var idx = emitFunc(params, bodyStmt, false, false, true)
+            curBlkDepth--
             return {b: b, v: emitArity(b, callExt(b, "js_closure", [handle(idx), curScopeV]), params)}
         }}
     }
@@ -3482,7 +3504,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         for (var q = 0; q < bps.length; q++) { params.push(bps[q]) }
         var bodyStmt = blockBodyOf(items)
         return function(b) {
+            curBlkDepth++
             var idx = emitFunc(params, bodyStmt, false, false, false, false, -1)
+            curBlkDepth--
             return {b: b, v: callExt(b, "js_rlambda",
                         [emitArity(b, callExt(b, "js_closure", [handle(idx), curScopeV]), params)])}
         }
@@ -4787,8 +4811,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // a block is reported as its enclosing method rather than "block in NAME".
     function raiseSite(pos) {
         var who = curMethName == "" ? "<main>" : curMethName
+        if (curBlkDepth == 1) { who = "block in " + who }
+        if (curBlkDepth > 1) { who = "block (" + curBlkDepth + " levels) in " + who }
         return c.file + ":" + c.lineOf(pos) + ":in `" + who + "'"
     }
+    // How many block / lambda literals enclose the code being emitted, inside its
+    // def: MRI's "block in NAME" frame. A def or class body starts again at 0 (see
+    // emitFunc). Twin of blkFrame in ruby-interpreter.abnf.
+    var curBlkDepth = 0
     // raise [EXPR[, EXPR]]: evaluate the operand and the optional message and hand
     // both to js_rraise, which decides what exception object to throw.
     function makeRaise(items, pos) {
@@ -4910,7 +4940,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return function(b) {
                 var ea = emitArgs(b, fargs)
                 b = ea.b
-                return {b: b, v: callExt(b, "js_rformat", [ea.v])}
+                return {b: b, v: callExt(b, "js_rformat", [ea.v, emitStr(b, name)])}
             }
         }
         // Kernel#rand. There is no random source here, so js_rrand is
@@ -4970,7 +5000,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 var eka = emitArgs(b, kargs)
                 b = eka.b
                 if (kname == "p") { return {b: b, v: callExt(b, "js_rp", [eka.v])} }
-                callExt(b, "js_rprint", [callExt(b, "js_rformat", [eka.v])])
+                callExt(b, "js_rprint", [callExt(b, "js_rformat", [eka.v, emitStr(b, "printf")])])
                 return {b: b, v: hNull}
             }
             var fallbackT = makePlainCall(kname, kargs)
@@ -5011,13 +5041,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     return emitBlkBreakCall(b, function(bb) {
                         var sV = emitIvarSelf(bb)
                         var ia = emitArgs(bb, args)
-                        return {b: ia.b, v: callExt(ia.b, "js_rxmcall", [sV, emitStr(ia.b, methodKey(name)), ia.v])}
+                        return {b: ia.b, v: emitSelfMcall(ia.b, sV, name, ia.v)}
                     })
                 }
                 var selfV = emitIvarSelf(b)
                 var eam = emitArgs(b, args)
                 b = eam.b
-                return {b: b, v: callExt(b, "js_rxmcall", [selfV, emitStr(b, methodKey(name)), eam.v])}
+                return {b: b, v: emitSelfMcall(b, selfV, name, eam.v)}
             }
             if (callHasBlk) {
                 return emitBlkBreakCall(b, function(bb) {
@@ -5054,13 +5084,21 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function isSelfCall(name) {
         return selfCallNames.indexOf(name) >= 0 && rubyAllMethods["$" + name] !== true && !knownLocal(name)
     }
+    // A call on the implicit self. A receiver-less send also reaches a top-level
+    // def, which needs the scope (js_rselfsend; selfSendDef in the interpreter).
+    function emitSelfMcall(b, selfV, name, argsV) {
+        if ((name == "send" || name == "__send__") && isSelfCall(name)) {
+            return callExt(b, "js_rselfsend", [curScopeV, selfV, argsV])
+        }
+        return callExt(b, "js_rxmcall", [selfV, emitStr(b, methodKey(name)), argsV])
+    }
     function makePlainCall(name, args) {
         return function(b) {
             if (selfMethod(curClsName, name) || isSelfCall(name)) {
                 var selfV = emitIvarSelf(b)
                 var eam = emitArgs(b, args)
                 b = eam.b
-                return {b: b, v: callExt(b, "js_rxmcall", [selfV, emitStr(b, methodKey(name)), eam.v])}
+                return {b: b, v: emitSelfMcall(b, selfV, name, eam.v)}
             }
             var fV = emitCallee(b, name)
             var ea = emitArgs(b, args)
@@ -5269,6 +5307,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var savedDefFn = curDefFn
         var savedCtlDepth = curCtlDepth
         var savedSiteSave = curSiteSave
+        var savedBlkDepth = curBlkDepth
+        if (declBlk === true || isMethod === true) { curBlkDepth = 0 }
         curDefFn = declBlk === true
         curCtlDepth = isCtl === true ? curCtlDepth + 1 : 0
         if (declBlk === true) { curDefLocals = {m: {}, l: []} }
@@ -5351,6 +5391,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         curDefFn = savedDefFn
         curCtlDepth = savedCtlDepth
         curSiteSave = savedSiteSave
+        curBlkDepth = savedBlkDepth
         return idx
     }
     function makeFun(items) {
