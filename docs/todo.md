@@ -68,13 +68,6 @@ its report; anything structural there is a CORE ticket.
 
 # RB — Ruby
 
-### T-747 ruby: halves divergences — Method#arity in the Go twin, inherited private setter from a subclass, compiler local hiding a method; `nil.x =`; missing keyword · P2 · RB · IN PROGRESS (RB worker, round 20) [V]
-llvm.Run: `d.method(:y).arity` → 0 for `def y(a)` and define_method methods (interp/native/ruby 1 / -2). run and native:
-`class A; attr_accessor :x; private :x=; end; class B < A; def w; self.x = 5; end; end` raises "private method 'x=' called" (interp
-and ruby allow it: methodKey only checks the current class's restricted list). Compiler: top-level `def k2;9;end; k2 = k2; p k2` →
-`#<Proc>` and in a class `def t; m = m; m; end` → 7 (ruby nil; interp right). `nil.x = 1` does not parse in either grammar.
-`define_method(:k) { |a:| }` called without the keyword returns instead of raising "missing keyword: a". Compiled legs: `class A; attr_accessor :x; private :x=; end; begin; A.new.x = 3; rescue NoMethodError => e; p e.name; end` → `:new` (interp and ruby `:x=`; the private-setter error names the wrong method when the receiver is a call chain).
-
 ---
 
 # JS — JavaScript and TypeScript
@@ -792,6 +785,7 @@ T-743 ruby: `obj.x = v` never calls a user-defined `x=`; `nil << x` aborts; priv
 T-744 ruby: Array/Hash#dig; values_at with ranges; rescue-skipped locals; singleton attr_accessor; alias of setters; class-body bare class-method calls — DONE 118304bb (Array/Hash#dig, values_at ranges, unrun-assignment locals read nil, singleton attr_accessor, setter aliases, bare class-method calls in class bodies, Float bit-op NoMethodError, &lambda self, missing setters raise — = ruby 2.6; follow-up T-745)
 T-745 ruby: `&->` lambda self in define_method; compiler `k = k`; interp nil class constant; shared attr_writer name — DONE 9d2ebaf5 ceac1b25 (&-> define_method self, compiler k = k, interp nil class constants, missing attr setters raise with a per-class attr_writer marker fast path: attr-write loop +1.2% vs main — = ruby 2.6; follow-up T-746)
 T-746 ruby: private setters; `5.x = 1` crashes the interpreter; attr_writer in a module (compiler); local shadowing a method (interp); define_method arity — DONE 23eb3c9d (private setters incl. inherited, setters on any value, module attrs, interp local hiding a method, define_method arity, freeze/public_instance_methods/constants/method_defined? — = ruby 2.6; frozen-instance writes DECLINED, see Settled; follow-up T-747)
+T-747 ruby: halves divergences — Method#arity in the Go twin, inherited private setter from a subclass, compiler local hiding a method; `nil.x =`; missing keyword — DONE 910997a4 (Method#arity via explicit receivers in the Go twin, inherited private setter visibility, .new in call-chain setter targets, known locals over methods in the compiler, nil.x =, missing keyword errors incl. interpreter block keywords — = ruby 2.6)
 
 # Settled — do not re-open
 
