@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-701** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-702** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -76,10 +76,10 @@ non-ASCII class range spanning 256 or more characters only gets the text-side up
 
 # JS — JavaScript and TypeScript
 
-### T-700 js: Object.getOwnPropertyDescriptor missing; builtin methods read as values have no name; `delete K.name` on a class · P2 · JS · IN PROGRESS (JS worker, round 19) [V]
-`Object.getOwnPropertyDescriptor(o, "x")` → "is not a function" in all legs (node returns the descriptor; also for accessors, frozen
-objects, functions' name/length). `[].push.name`, `"".slice.name` → "" so `String([].push)` → `function () { [native code] }` (node
-`push` / `function push() { [native code] }`). `delete K.name` / `delete K.length` on a class → K.name stays "K" (node "").
+### T-701 js: `delete` of a class static field or method does nothing · P3 · JS · OPEN [V]
+`class T { static z = 1; static m(){} }; delete T.z; delete T.m; T.z, T.m, Object.keys(T).length, T.hasOwnProperty("z")` → node
+`undefined undefined 0 false`, all our legs `1 m() {} 1 true`. Same cause: `class S { static name = "custom" }; delete S.name` leaves
+"custom" (node "").
 
 ---
 
@@ -783,6 +783,7 @@ T-697 go: nil slice element prints `<nil>`; interpreter cannot convert to a name
 T-699 go: `int / 2.0` gives a float; `z, w := nil, 5` redeclaring a slice; conversion to another package's interface — DONE 93e55138 (untyped float constant converts by the other operand's static type incl. compound assignment, := nil takes the redeclared type, pkg.Iface(x) conversion — 4 legs = go run)
 T-694 js/ts: valid numeric literals rejected — `0x1_0`, `0.0_1`, `08e1` / `09.5e1` — DONE f25a0f10 (one separator rule for every digit run in all four grammars, sloppy 08e1/09.5e1, exact radix rounding — 92-form sweep = node / tsc)
 T-695 js: no function source text; defineProperty / delete of a function's `name` / `length` — DONE 03feaa8f c665a638 (defineProperty/delete of fn name/length via the own-property side table; js function and class source text from recorded spans, V8 elision in messages — 4 legs = node; TS keeps [function], see Settled; follow-up T-700)
+T-700 js: Object.getOwnPropertyDescriptor missing; builtin methods read as values have no name; `delete K.name` on a class — DONE 86530e0c (getOwnPropertyDescriptor(s) in all engines, builtin methods carry node's name/length, delete of a class's name/length, interpreter hasOwnProperty of literal accessors — 4 legs = node, TS via tsc 6; follow-up T-701)
 
 # Settled — do not re-open
 
@@ -816,7 +817,7 @@ named function expression's inner name immutable (needs a const flag on the floo
 scope, or a scope-walking extern on every plain-name assignment, measured at
 +21%..+43% elsewhere on that path).
 
-**DECLINED after measurement.** typescript function source text (the oracle prints tsc's re-emitted JavaScript, which the engines do not reproduce; .ts functions print `[function]`) · php heredoc `{$...}` / `${...}` end found by brace counting (a `}` inside a quoted string within the interpolated expression ends it early; double-quoted strings parse the expression properly) · python `__firstlineno__` / `__static_attributes__` / `__annotate_func__` on plain (non-metaclass) classes and their `__dict__` listing (introspection only; the metaclass namespace, where programs observe them, matches 3.14) · python rejecting `(p).k: int = 7` as a SyntaxError (an invalid program we accept; no valid program changes) · js `Function("src")` compiling source at run time (no engine here compiles at run time; it raises the EvalError text node gives when code generation is disallowed) · php per-file strict_types (the probes and suites are single-file programs; the whole-program flag equals per-file there) · php handle reuse after free (needs refcounts) · swift's module-qualified enum names in collections (`[o.Dir.up]` depends on swiftc's module name) · rbUserObj / rbIsClassObj frame elimination (no gain over 15 pairs) · a real suspension for the replay generators (impossible under the pinned goja; ~3,600 lines pure-MetaJS) · CPS coroutines in the emitter · full correct rounding of the transcendentals · a shared nominal type id on boxed values (cheap to store, but every consumer needs static types the grammars do not have; split per language) · matching Apple libm's last digit (ruby atan2: no portable algorithm reproduces it, 1.6% of pairs differ even from the correctly rounded value) · js sloppy-mode primitive `this` boxing (needs wrapper objects in every engine) · a generator's `finally` at collection (python needs refcount timing; no finalizers, manual 7.8) · `i in arr` after `delete` · iterator close on
+**DECLINED after measurement.** js a detached builtin `apply`/`call` (`var ap = Math.max.apply; ap(null, [3,9,4])`) answering instead of node's TypeError (all legs agree; only an error case differs) · typescript function source text (the oracle prints tsc's re-emitted JavaScript, which the engines do not reproduce; .ts functions print `[function]`) · php heredoc `{$...}` / `${...}` end found by brace counting (a `}` inside a quoted string within the interpolated expression ends it early; double-quoted strings parse the expression properly) · python `__firstlineno__` / `__static_attributes__` / `__annotate_func__` on plain (non-metaclass) classes and their `__dict__` listing (introspection only; the metaclass namespace, where programs observe them, matches 3.14) · python rejecting `(p).k: int = 7` as a SyntaxError (an invalid program we accept; no valid program changes) · js `Function("src")` compiling source at run time (no engine here compiles at run time; it raises the EvalError text node gives when code generation is disallowed) · php per-file strict_types (the probes and suites are single-file programs; the whole-program flag equals per-file there) · php handle reuse after free (needs refcounts) · swift's module-qualified enum names in collections (`[o.Dir.up]` depends on swiftc's module name) · rbUserObj / rbIsClassObj frame elimination (no gain over 15 pairs) · a real suspension for the replay generators (impossible under the pinned goja; ~3,600 lines pure-MetaJS) · CPS coroutines in the emitter · full correct rounding of the transcendentals · a shared nominal type id on boxed values (cheap to store, but every consumer needs static types the grammars do not have; split per language) · matching Apple libm's last digit (ruby atan2: no portable algorithm reproduces it, 1.6% of pairs differ even from the correctly rounded value) · js sloppy-mode primitive `this` boxing (needs wrapper objects in every engine) · a generator's `finally` at collection (python needs refcount timing; no finalizers, manual 7.8) · `i in arr` after `delete` · iterator close on
 `throw` (a depth stack cannot survive `for await`) · a catchable unknown-name error
 in java/go/swift/csharp/metajs (COMPILE-time in each real toolchain) · kotlin
 `:script` → `!"token"` · `case_map` into layer 2 (135×) · retiring the Go twin
