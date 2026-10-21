@@ -4355,6 +4355,40 @@ function s79() {
     $as = str_repeat("a", 2000) . "!";
     check("pg60", preg_match('/(a+)+$/', $as) === false && preg_last_error() === PREG_BACKTRACK_LIMIT_ERROR
         && preg_match('/(a|aa)+$/', $as) === false && preg_last_error() === PREG_BACKTRACK_LIMIT_ERROR);
+    // PCRE2 compiles x+ as one loop whose iterations stop at an empty one, and
+    // x{n,m} as copies of x, which do not.
+    check("pg61", preg_match('/((?(1)a|))+/', 'aaa', $m) === 1 && $m === ['', '']
+        && preg_match('/((?(1)a|)){1,3}/', 'aaa', $m) === 1 && $m === ['aa', 'a']
+        && preg_match('/((?(1)a|)){2,}/', 'aaa', $m) === 1 && $m === ['aaa', 'a']
+        && preg_match('/((?(1)a|)){2,}?b/', 'aaab', $m) === 1 && $m === ['aaab', 'a']);
+    // (*ACCEPT) in an atomic group ends the match; in a subroutine called from
+    // an assertion it returns from the call.
+    check("pg62", preg_match('/(?>a(*ACCEPT)b)c/', 'abc', $m) === 1 && $m === ['a']
+        && preg_match('/(?!(?>a(*ACCEPT)b))a/', 'ax') === 0
+        && preg_match('/(?=(?1)c)(a(*ACCEPT)b)/', 'ac', $m) === 1 && $m === ['a', 'a']
+        && preg_match('/x(?>(?1))y|(a(*ACCEPT)b)/', 'xay', $m) === 1 && $m === ['xay']);
+    // The latest (*MARK) on the matching path is $matches['MARK'].
+    $mk = "";
+    preg_replace_callback('/(*MARK:x)a|b/', function ($m) use (&$mk) { $mk .= $m['MARK'] ?? "-"; return ""; }, 'ab');
+    check("pg63", preg_match('/a(*:x)b|c(*:y)d/', 'cd', $m) === 1 && $m === ['cd', 'MARK' => 'y']
+        && preg_match_all('/(*MARK:x)a|(*MARK:y)b|c/', 'abc', $m) === 3 && $m['MARK'] === ['x', 'y']
+        && preg_match_all('/(*MARK:x)a|c/', 'ac', $m, PREG_SET_ORDER) === 2 && $m === [['a', 'MARK' => 'x'], ['c']]
+        && preg_match('/(?=(*MARK:x)a)a/', 'a', $m) === 1 && $m['MARK'] === 'x'
+        && preg_match('/(?!(*MARK:x)b)a/', 'a', $m) === 1 && $m === ['a']
+        && preg_match('/(*MARK:x)(?:a(*MARK:y)|b)c/', 'bc', $m) === 1 && $m['MARK'] === 'x' && $mk === "x-");
+    // \p names as PCRE2 10.48 reads them: case, spaces, hyphens and
+    // underscores ignored; no long general category names; scripts by any
+    // name; binary properties, which /i leaves alone.
+    check("pg64", preg_match('/\p{Lowercase_Letter}/u', 'a') === false && preg_last_error() === PREG_INTERNAL_ERROR
+        && preg_match('/\p{gc=Lu}/u', 'A') === false && preg_match('/\p{Lowercase}/iu', 'A') === 0
+        && preg_match('/\p{l o-w_e r}\p{LU}/u', 'aB') === 1 && preg_match('/\p{Ital}\p{sc=Grek}/u', "\u{10300}\u{3B1}") === 1
+        && preg_match('/\p{olditalic}\p{Script=Greek}/u', "\u{10300}\u{3B1}") === 1 && preg_match('/\p{ahex}+/u', 'aF9g', $m) === 1
+        && $m[0] === 'aF9' && preg_match('/\p{White_Space}\p{ascii}/u', " a") === 1);
+    // pcre2_match tries no start that leaves fewer units than the shortest
+    // match, where a branch recursing into its own group counts only if it is
+    // the first; and no first-character test when an (*ACCEPT) may come first.
+    check("pg65", preg_match('/xyz|(?R)ab/', 'ab') === 0 && preg_last_error() === PREG_NO_ERROR
+        && preg_match('/aaa|(?R)/', 'b') === false && preg_match_all('/(*ACCEPT)(?>(*PRUNE)x)/', 'abab') === 5);
 }
 
 // ===== END SECTIONS =====

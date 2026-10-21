@@ -362,6 +362,10 @@ func (st *rxSt) unicodeProp(cls *rxCls, u string) bool {
 	case "LETTER":
 		return jxProps(cls, rxPL)
 	case "LOWERCASE":
+		// PCRE2 (C) keeps its binary Lowercase and Uppercase caseful.
+		if st.pcre {
+			return jxProps(cls, rxPLower)
+		}
 		return jxProps(cls, st.cased(rxPLower))
 	case "NONCHARACTERCODEPOINT", "NONCHARACTER_CODE_POINT":
 		return jxProps(cls, rxPNonCh)
@@ -370,6 +374,9 @@ func (st *rxSt) unicodeProp(cls *rxCls, u string) bool {
 	case "PUNCTUATION":
 		return jxGcs(cls, "P")
 	case "UPPERCASE":
+		if st.pcre {
+			return jxProps(cls, rxPUpper)
+		}
 		return jxProps(cls, st.cased(rxPUpper))
 	case "WHITESPACE", "WHITE_SPACE":
 		return jxProps(cls, rxPWhite)

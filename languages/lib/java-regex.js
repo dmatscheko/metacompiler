@@ -273,11 +273,12 @@ function jxUnicodeProp(st, cls, u) {
     if (u == "IDEOGRAPHIC") { return jxProps(cls, RX_PBIN, -1) }
     if (u == "JOINCONTROL" || u == "JOIN_CONTROL") { return jxProps(cls, RX_PJOIN, -1) }
     if (u == "LETTER") { return jxProps(cls, RX_PL, -1) }
-    if (u == "LOWERCASE") { return jxProps(cls, st.icase ? RX_PCASED : RX_PLOWER, -1) }
+    // PCRE2 (C) keeps its binary Lowercase and Uppercase caseful.
+    if (u == "LOWERCASE") { return jxProps(cls, st.icase && !st.pcre ? RX_PCASED : RX_PLOWER, -1) }
     if (u == "NONCHARACTERCODEPOINT" || u == "NONCHARACTER_CODE_POINT") { return jxProps(cls, RX_PNONCH, -1) }
     if (u == "TITLECASE") { return jxProps(cls, st.icase ? RX_PCASED : RX_PLT, -1) }
     if (u == "PUNCTUATION") { return jxGcs(cls, "P") }
-    if (u == "UPPERCASE") { return jxProps(cls, st.icase ? RX_PCASED : RX_PUPPER, -1) }
+    if (u == "UPPERCASE") { return jxProps(cls, st.icase && !st.pcre ? RX_PCASED : RX_PUPPER, -1) }
     if (u == "WHITESPACE" || u == "WHITE_SPACE") { return jxProps(cls, RX_PWHITE, -1) }
     if (u == "WORD") { return jxProps(cls, RX_PWORD, -1) }
     return jxPosixU(st, cls, u)

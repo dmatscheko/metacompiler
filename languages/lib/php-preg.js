@@ -141,7 +141,8 @@ function phpRxUnit(b) {
 }
 
 // __mec_pregx: the match of key in s from byte offset pos, as byte offsets
-// (-1 for a group that did not take part), [] for none, or the PREG error code
+// (-1 for a group that did not take part) and then pcre2_get_mark's name when
+// a (*MARK) was passed, [] for none, or the PREG error code
 // (1 a recursion that would loop, 2 the step limit, 4 the subject is not
 // UTF-8, 5 the offset is inside a character). A pos of
 // -o - 1 asks for the match after an empty one at o: a non-empty one at o, else
@@ -163,6 +164,10 @@ function phpPregExec(key, s, pos) {
     while (i < caps.length) {
         out.push(caps[i] < 0 ? 0 - 1 : off.length == 0 ? caps[i] : off[caps[i]])
         i = i + 1
+    }
+    if (m.mark >= 0) {
+        var mk = re.vmarks[m.mark]
+        out.push(phpRxKeyUtf(key) ? mk : phsFromBytes(mk))
     }
     return out
 }

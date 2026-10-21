@@ -2525,11 +2525,13 @@ function rxParseAlt(st) {
 // prog is four parallel arrays: ops[], as[], bs[] and clss[]. Same reason as the
 // class representation - no mixed-type record anywhere.
 
-// cmin/cmax/cgreedy describe counted loop i (RX_CINIT .. RX_CINC), lbmin/lbmax
-// the length range of lookbehind i (-1: unbounded).
+// cmin/cmax/cgreedy describe counted loop i (RX_CINIT .. RX_CINC), and cemp
+// its iteration count from which an iteration that consumed nothing leaves it;
+// lbmin/lbmax the length range of lookbehind i (-1: unbounded).
 function rxNewProg() {
-    return {ops: [], as: [], bs: [], clss: [], nmarks: 0, jsrep: false, java: false, re2: false, dummy: rxNewCls(),
-            cmin: [], cmax: [], cgreedy: [], lbmin: [], lbmax: [], calls: [], thens: [], thenNodes: []}
+    return {ops: [], as: [], bs: [], clss: [], nmarks: 0, jsrep: false, java: false, re2: false, pcre: false,
+            dummy: rxNewCls(), cmin: [], cmax: [], cgreedy: [], cemp: [], lbmin: [], lbmax: [], calls: [], thens: [],
+            thenNodes: [], acc: 0}
 }
 
 // The smallest / largest group NUMBER declared inside a subtree, or -1 for none.
@@ -2738,7 +2740,7 @@ function rxEmitC(pg, node) {
             rxAdd(pg, RX_SAVE, 2 * kids[oi].gidx + 1, 0, pg.dummy)
             oi = oi + 1
         }
-        rxAdd(pg, RX_ACCEPT, 0, 0, pg.dummy)
+        pg.acc = rxAdd(pg, RX_ACCEPT, 0, 0, pg.dummy)
         return
     }
     if (t == "then") {
@@ -2778,6 +2780,8 @@ function rxFirstCU(node) {
         while (i < items.length) {
             var it = items[i]
             if (rxMaxLen(it) != 0) { return rxFirstCU(it) }
+            // An (*ACCEPT) before any character: a match may hold none.
+            if (rxMinLenC(it, [], []) < 0) { return null }
             i = i + 1
         }
         return null
@@ -2798,8 +2802,28 @@ function rxFirstCU(node) {
 // rxMinLenC is PCRE2's minimum length of node (find_minlength): rxMinLen, a
 // call or backreference counting its group's (0 for a group open around it,
 // open holding their numbers), a conditional its shorter arm; with an
-// (*ACCEPT) anywhere, 0.
+// (*ACCEPT) anywhere, 0. Under rxMinRule a branch that recurses into an open
+// group counts only as the first of its alternation (rxMinRec,
+// find_minlength's had_recurse), and only in the alternation around it:
+// every group is a level of its own. Without it the answer is 0 exactly when
+// PCRE2's could_be_empty_branch, which takes such a recursion as empty, finds
+// the pattern can match empty (PCRE2_MATCH_EMPTY, which skips the study).
+var rxMinRec = false
+var rxMinRule = false
 function rxMinLenC(node, gnodes, open) {
+    var t = node.t
+    if (t == "alt" || t == "group" || t == "atom" || t == "rep" || t == "cond" || t == "condr" || t == "conda") {
+        var outer = rxMinRec
+        rxMinRec = false
+        var m = rxMinLenCN(node, gnodes, open)
+        rxMinRec = outer
+        return m
+    }
+    return rxMinLenCN(node, gnodes, open)
+}
+
+// rxMinLenC's cases.
+function rxMinLenCN(node, gnodes, open) {
     var t = node.t
     var items = node.items
     if (t == "accept") { return 0 - 1 }
@@ -2807,20 +2831,26 @@ function rxMinLenC(node, gnodes, open) {
         var g = node.gidx
         var k = 0
         while (k < open.length) {
-            if (open[k] == g) { return 0 }
+            if (open[k] == g) {
+                rxMinRec = true
+                return 0
+            }
             k = k + 1
         }
         if (g >= gnodes.length || (t == "bref" && g == 0)) { return 0 }
         open.push(g)
+        var called = rxMinRec
         var gm = rxMinLenC(gnodes[g].items[0], gnodes, open)
+        rxMinRec = called
         open.pop()
         return gm
     }
     if (t == "cond" || t == "condr" || t == "conda") {
         var y = rxMinLenC(items[items.length - 2], gnodes, open)
+        rxMinRec = false
         var z = rxMinLenC(items[items.length - 1], gnodes, open)
         if (y < 0 || z < 0) { return 0 - 1 }
-        return y < z ? y : z
+        return z < y && !(rxMinRule && rxMinRec) ? z : y
     }
     if (t == "cat") {
         var sum = 0
@@ -2837,9 +2867,10 @@ function rxMinLenC(node, gnodes, open) {
         var best = 0 - 2
         var a = 0
         while (a < items.length) {
+            rxMinRec = false
             var am = rxMinLenC(items[a], gnodes, open)
             if (am < 0) { return 0 - 1 }
-            if (best < 0 || am < best) { best = am }
+            if (best < 0 || (am < best && !(rxMinRule && rxMinRec))) { best = am }
             a = a + 1
         }
         return best < 0 ? 0 : best
@@ -3121,6 +3152,9 @@ function rxMaxLen(node) {
 // rxEmitCount emits a J {n,m} repeat as ONE copy of the body inside a counted
 // loop, so a{2147483647} costs what a{2} does. An iteration that consumed
 // nothing leaves the loop, minimum reached or not (java.util.regex's Loop).
+// PCRE2 (C) compiles x{n,m} as copies of x, which never stop early, and x{n,}
+// as n-1 copies and then x+, whose iterations stop at an empty one; so under C
+// only an unbounded loop leaves, and only from iteration max(n, 1) on.
 function rxEmitCount(pg, node) {
     var cm = pg.cmin
     var c = cm.length
@@ -3129,6 +3163,8 @@ function rxEmitCount(pg, node) {
     cx.push(node.max)
     var cg = pg.cgreedy
     cg.push(node.greedy ? 1 : 0)
+    var ce = pg.cemp
+    ce.push(!pg.pcre ? 0 : node.max >= 0 ? node.max : node.min > 0 ? node.min - 1 : 0)
     rxAdd(pg, RX_CINIT, c, 0, pg.dummy)
     var top = rxAdd(pg, RX_CLOOP, c, 0, pg.dummy)
     rxEmit(pg, node.items[0])
@@ -3216,8 +3252,13 @@ function rxEmitRep(pg, node) {
         return
     }
     var body = node.items[0]
+    var guard = node.max < 0 && rxMinLen(body) == 0
+    // PCRE2 compiles x{n,} as n-1 copies of x and then x+, so under C the loop
+    // below takes the last required iteration as well: entered past its
+    // choice, it is left by that iteration when it consumes nothing.
+    var copies = pg.pcre && guard && node.min > 0 ? node.min - 1 : node.min
     var i = 0
-    while (i < node.min) {
+    while (i < copies) {
         rxEmitClear(pg, body)
         rxEmit(pg, body)
         i = i + 1
@@ -3227,11 +3268,12 @@ function rxEmitRep(pg, node) {
         // consumed nothing leaves the loop instead of spinning ((a*)* is a real
         // pattern, and without this it never terminates). A body that always
         // consumes something needs none.
-        var guard = rxMinLen(body) == 0
         var mk = pg.nmarks
         if (guard) { pg.nmarks = pg.nmarks + 1 }
+        var enter = copies < node.min ? rxAdd(pg, RX_JMP, 0, 0, pg.dummy) : 0 - 1
         var l1 = rxHere(pg)
         var sp = rxAdd(pg, RX_SPLIT, 0, 0, pg.dummy)
+        if (enter >= 0) { rxSetA(pg, enter, l1 + 1) }
         if (guard) { rxAdd(pg, RX_MARK, mk, 0, pg.dummy) }
         rxEmitClear(pg, body)
         rxEmit(pg, body)
@@ -4309,8 +4351,156 @@ function rxPcreShort(t, cls, c) {
     cls.props = cls.props + (lc == c ? items : "[^" + items + "]")
 }
 
-// The \p / \P at t.i (after the letter), into cls: PCRE2's general categories,
-// scripts and its X properties; "" and an error for an unknown name.
+// PCRE2's \p names (pcre2test -LS, -LP): RX_PCRE_SCAB maps each script's
+// other names, loosely spelled, to its Go name (RX_RE2_SCRIPTS); RX_PCRE_BIN
+// each binary property's names to the first.
+var RX_PCRE_SCAB = " adlm=Adlam aghb=Caucasian_Albanian arab=Arabic armi=Imperial_Aramaic armn=Armenian avst=Avestan"
+    + " bali=Balinese bamu=Bamum bass=Bassa_Vah batk=Batak beng=Bengali berf=Beria_Erfe bhks=Bhaiksuki"
+    + " bopo=Bopomofo brah=Brahmi brai=Braille bugi=Buginese buhd=Buhid cakm=Chakma"
+    + " cans=Canadian_Aboriginal cari=Carian cher=Cherokee chrs=Chorasmian copt=Coptic cpmn=Cypro_Minoan"
+    + " cprt=Cypriot cyrl=Cyrillic deva=Devanagari diak=Dives_Akuru dogr=Dogra dsrt=Deseret dupl=Duployan"
+    + " egyp=Egyptian_Hieroglyphs elba=Elbasan elym=Elymaic ethi=Ethiopic gara=Garay geor=Georgian"
+    + " glag=Glagolitic gong=Gunjala_Gondi gonm=Masaram_Gondi goth=Gothic gran=Grantha grek=Greek"
+    + " gujr=Gujarati gukh=Gurung_Khema guru=Gurmukhi hang=Hangul hani=Han hano=Hanunoo hatr=Hatran"
+    + " hebr=Hebrew hira=Hiragana hluw=Anatolian_Hieroglyphs hmng=Pahawh_Hmong hmnp=Nyiakeng_Puachue_Hmong"
+    + " hung=Old_Hungarian ital=Old_Italic kali=Kayah_Li kana=Katakana khar=Kharoshthi khmr=Khmer"
+    + " khoj=Khojki kits=Khitan_Small_Script knda=Kannada krai=Kirat_Rai kthi=Kaithi lana=Tai_Tham laoo=Lao"
+    + " latn=Latin lepc=Lepcha limb=Limbu lina=Linear_A linb=Linear_B lyci=Lycian lydi=Lydian mahj=Mahajani"
+    + " maka=Makasar mand=Mandaic mani=Manichaean marc=Marchen medf=Medefaidrin mend=Mende_Kikakui"
+    + " merc=Meroitic_Cursive mero=Meroitic_Hieroglyphs mlym=Malayalam mong=Mongolian mroo=Mro"
+    + " mtei=Meetei_Mayek mult=Multani mymr=Myanmar nagm=Nag_Mundari nand=Nandinagari"
+    + " narb=Old_North_Arabian nbat=Nabataean nkoo=Nko nshu=Nushu ogam=Ogham olck=Ol_Chiki onao=Ol_Onal"
+    + " orkh=Old_Turkic orya=Oriya osge=Osage osma=Osmanya ougr=Old_Uyghur palm=Palmyrene pauc=Pau_Cin_Hau"
+    + " perm=Old_Permic phag=Phags_Pa phli=Inscriptional_Pahlavi phlp=Psalter_Pahlavi phnx=Phoenician"
+    + " plrd=Miao prti=Inscriptional_Parthian qaac=Coptic qaai=Inherited rjng=Rejang rohg=Hanifi_Rohingya"
+    + " runr=Runic samr=Samaritan sarb=Old_South_Arabian saur=Saurashtra sgnw=SignWriting shaw=Shavian"
+    + " shrd=Sharada sidd=Siddham sidt=Sidetic sind=Khudawadi sinh=Sinhala sogd=Sogdian sogo=Old_Sogdian"
+    + " sora=Sora_Sompeng soyo=Soyombo sund=Sundanese sunu=Sunuwar sylo=Syloti_Nagri syrc=Syriac"
+    + " tagb=Tagbanwa takr=Takri tale=Tai_Le talu=New_Tai_Lue taml=Tamil tang=Tangut tavt=Tai_Viet"
+    + " tayo=Tai_Yo telu=Telugu tfng=Tifinagh tglg=Tagalog thaa=Thaana tibt=Tibetan tirh=Tirhuta"
+    + " tnsa=Tangsa todr=Todhri tols=Tolong_Siki tutg=Tulu_Tigalari ugar=Ugaritic vaii=Vai vith=Vithkuqi"
+    + " wara=Warang_Citi wcho=Wancho xpeo=Old_Persian xsux=Cuneiform yezi=Yezidi yiii=Yi"
+    + " zanb=Zanabazar_Square zinh=Inherited zyyy=Common "
+var RX_PCRE_BIN = " ahex=asciihexdigit alpha=alphabetic alphabetic=alphabetic ascii=ascii asciihexdigit=asciihexdigit"
+    + " bidic=bidicontrol bidicontrol=bidicontrol bidim=bidimirrored bidimirrored=bidimirrored cased=cased"
+    + " caseignorable=caseignorable changeswhencasefolded=changeswhencasefolded"
+    + " changeswhencasemapped=changeswhencasemapped changeswhenlowercased=changeswhenlowercased"
+    + " changeswhentitlecased=changeswhentitlecased changeswhenuppercased=changeswhenuppercased"
+    + " ci=caseignorable cwcf=changeswhencasefolded cwcm=changeswhencasemapped cwl=changeswhenlowercased"
+    + " cwt=changeswhentitlecased cwu=changeswhenuppercased dash=dash"
+    + " defaultignorablecodepoint=defaultignorablecodepoint dep=deprecated deprecated=deprecated"
+    + " di=defaultignorablecodepoint dia=diacritic diacritic=diacritic ebase=emojimodifierbase"
+    + " ecomp=emojicomponent emod=emojimodifier emoji=emoji emojicomponent=emojicomponent"
+    + " emojimodifier=emojimodifier emojimodifierbase=emojimodifierbase emojipresentation=emojipresentation"
+    + " epres=emojipresentation ext=extender extendedpictographic=extendedpictographic extender=extender"
+    + " extpict=extendedpictographic graphemebase=graphemebase graphemeextend=graphemeextend"
+    + " graphemelink=graphemelink grbase=graphemebase grext=graphemeextend grlink=graphemelink hex=hexdigit"
+    + " hexdigit=hexdigit idc=idcontinue idcompatmathcontinue=idcompatmathcontinue"
+    + " idcompatmathstart=idcompatmathstart idcontinue=idcontinue ideo=ideographic ideographic=ideographic"
+    + " ids=idstart idsb=idsbinaryoperator idsbinaryoperator=idsbinaryoperator idst=idstrinaryoperator"
+    + " idstart=idstart idstrinaryoperator=idstrinaryoperator idsu=idsunaryoperator"
+    + " idsunaryoperator=idsunaryoperator incb=incb joinc=joincontrol joincontrol=joincontrol"
+    + " loe=logicalorderexception logicalorderexception=logicalorderexception lower=lowercase"
+    + " lowercase=lowercase math=math mcm=modifiercombiningmark modifiercombiningmark=modifiercombiningmark"
+    + " nchar=noncharactercodepoint noncharactercodepoint=noncharactercodepoint patsyn=patternsyntax"
+    + " patternsyntax=patternsyntax patternwhitespace=patternwhitespace patws=patternwhitespace"
+    + " pcm=prependedconcatenationmark prependedconcatenationmark=prependedconcatenationmark"
+    + " qmark=quotationmark quotationmark=quotationmark radical=radical regionalindicator=regionalindicator"
+    + " ri=regionalindicator sd=softdotted sentenceterminal=sentenceterminal softdotted=softdotted"
+    + " space=whitespace sterm=sentenceterminal term=terminalpunctuation"
+    + " terminalpunctuation=terminalpunctuation uideo=unifiedideograph unifiedideograph=unifiedideograph"
+    + " upper=uppercase uppercase=uppercase variationselector=variationselector vs=variationselector"
+    + " whitespace=whitespace wspace=whitespace xidc=xidcontinue xidcontinue=xidcontinue xids=xidstart"
+    + " xidstart=xidstart "
+var RX_PCRE_GC = " c cc cf cn co cs l ll lm lo lt lu m mc me mn n nd nl no p pc pd pe pf pi po ps s sc sk sm so z zl zp zs "
+var RX_PCRE_BIDI = " al an b bn cs en es et fsi l lre lri lro nsm on pdf pdi r rle rli rlo s ws "
+
+// rxPcreLoose is a property name as PCRE2 looks it up: lower case, without
+// spaces, hyphens and underscores.
+function rxPcreLoose(name) {
+    var out = ""
+    var i = 0
+    while (i < name.length) {
+        var c = name.charCodeAt(i)
+        if (c != 32 && c != 45 && c != 95) { out = out + String.fromCharCode(c >= 65 && c <= 90 ? c + 32 : c) }
+        i = i + 1
+    }
+    return out
+}
+
+// rxPcreScript: the J item of the script loosely named k, or "".
+function rxPcreScript(k) {
+    if (k == "unknown" || k == "zzzz") { return "\\p{IsUnknown}" }
+    var w = rxRe2Word(RX_RE2_SCRIPTS, rxRe2Canon(k), "")
+    if (w == "") {
+        var e = RX_PCRE_SCAB.indexOf(" " + k + "=")
+        if (e < 0) { return "" }
+        var s = RX_PCRE_SCAB.substring(e + k.length + 2, RX_PCRE_SCAB.length)
+        w = s.substring(0, s.indexOf(" "))
+    }
+    return rxRe2Prop(w, 1)
+}
+
+// rxPcreBinItem: the J item of binary property b (RX_PCRE_BIN's first name),
+// or "" for one J has no table for.
+function rxPcreBinItem(b) {
+    if (b == "alphabetic") { return "\\p{IsAlphabetic}" }
+    if (b == "ascii") { return "\\x{0}-\\x{7F}" }
+    if (b == "asciihexdigit") { return "0-9A-Fa-f" }
+    if (b == "emoji") { return "\\p{IsEmoji}" }
+    if (b == "emojicomponent") { return "\\p{IsEmoji_Component}" }
+    if (b == "emojimodifier") { return "\\p{IsEmoji_Modifier}" }
+    if (b == "emojimodifierbase") { return "\\p{IsEmoji_Modifier_Base}" }
+    if (b == "emojipresentation") { return "\\p{IsEmoji_Presentation}" }
+    if (b == "extendedpictographic") { return "\\p{IsExtended_Pictographic}" }
+    if (b == "hexdigit") { return "\\p{IsHex_Digit}" }
+    if (b == "ideographic") { return "\\p{IsIdeographic}" }
+    if (b == "joincontrol") { return "\\p{IsJoin_Control}" }
+    if (b == "lowercase") { return "\\p{IsLowercase}" }
+    if (b == "noncharactercodepoint") { return "\\p{IsNoncharacter_Code_Point}" }
+    if (b == "uppercase") { return "\\p{IsUppercase}" }
+    if (b == "whitespace") { return "\\p{IsWhite_Space}" }
+    return ""
+}
+
+// rxPcrePropItems: the J items of \p{name} under PCRE2 (fi: caseless), "" for
+// a name PCRE2 does not know, "?" for one it knows that is not implemented here
+// (the other binary properties and the bidi classes). A script by its plain
+// name, scx or Script_Extensions is read as its Script: J has no
+// Script_Extensions.
+function rxPcrePropItems(name, fi) {
+    var k = rxPcreLoose(name)
+    var eq = k.indexOf("=")
+    if (eq < 0) { eq = k.indexOf(":") }
+    if (eq >= 0) {
+        var key = k.substring(0, eq)
+        var v = k.substring(eq + 1, k.length)
+        if (key == "sc" || key == "script" || key == "scx" || key == "scriptextensions") { return rxPcreScript(v) }
+        if (key == "bc" || key == "bidiclass") { return RX_PCRE_BIDI.indexOf(" " + v + " ") >= 0 ? "?" : "" }
+        return ""
+    }
+    // Caseless, Lu Ll and Lt each match any cased letter.
+    if (k == "l&" || k == "lc" || (fi && (k == "lu" || k == "ll" || k == "lt"))) { return "\\p{LC}" }
+    if (k == "any") { return "\\x{0}-\\x{10FFFF}" }
+    if (k == "xan") { return "\\p{L}\\p{N}" }
+    if (k == "xwd") { return RX_PCRE_UW }
+    if (k == "xsp" || k == "xps") { return RX_PCRE_US }
+    if (k == "xuc") { return "$@`\\x{A0}-\\x{D7FF}\\x{E000}-\\x{10FFFF}" }
+    if (k.length <= 2 && RX_PCRE_GC.indexOf(" " + k + " ") >= 0) { return "\\p{" + k.toUpperCase().substring(0, 1) + k.substring(1, k.length) + "}" }
+    var sc = rxPcreScript(k)
+    if (sc != "") { return sc }
+    var e = RX_PCRE_BIN.indexOf(" " + k + "=")
+    if (e >= 0) {
+        var s = RX_PCRE_BIN.substring(e + k.length + 2, RX_PCRE_BIN.length)
+        var it = rxPcreBinItem(s.substring(0, s.indexOf(" ")))
+        return it == "" ? "?" : it
+    }
+    if (k.indexOf("bidi") == 0 && RX_PCRE_BIDI.indexOf(" " + k.substring(4, k.length) + " ") >= 0) { return "?" }
+    return ""
+}
+
+// The \p / \P at t.i (after the letter), into cls (rxPcrePropItems); an
+// error for an unknown name.
 function rxPcreProp(t, cls, neg) {
     var p = t.p
     var name = ""
@@ -4334,19 +4524,10 @@ function rxPcreProp(t, cls, neg) {
         neg = !neg
         name = name.substring(1, name.length)
     }
-    var key = rxRe2Canon(name)
-    var items = ""
-    // Caseless, Lu Ll and Lt each match any cased letter.
-    if (name == "L&" || key == "Lc" || key == "L&" || (t.fi && (key == "Lu" || key == "Ll" || key == "Lt"))) {
-        items = "\\p{LC}"
-    }
-    else if (key == "Xan") { items = "\\p{L}\\p{N}" }
-    else if (key == "Xwd") { items = RX_PCRE_UW }
-    else if (key == "Xsp" || key == "Xps") { items = RX_PCRE_US }
-    else if (key == "Xuc") { items = "$@`\\x{A0}-\\x{D7FF}\\x{E000}-\\x{10FFFF}" }
-    else {
-        items = rxRe2Prop(name, 1)
-        if (key == "Any") { items = "\\x{0}-\\x{10FFFF}" }
+    var items = rxPcrePropItems(name, t.fi)
+    if (items == "?") {
+        rxPcreFail(t, "unsupported character property \\p{" + name + "}", t.i)
+        return
     }
     if (items == "") {
         rxPcreFail(t, "unknown property after \\P or \\p", t.i)
@@ -5454,7 +5635,7 @@ function rxPcre(pattern, mods) {
         out = "(?*S)" + out
     }
     return {out: t.err == "" ? out : "", err: t.err, errAt: t.errAt, names: t.names, nameGroups: t.nameGroups,
-            ncap: t.ncap, utf: t.utf}
+            ncap: t.ncap, utf: t.utf, marks: t.marks}
 }
 
 // ===== Compilation =====
@@ -5638,13 +5819,14 @@ function rxCompile(pattern, flags) {
                 ngroups: 0, nmarks: 0, names: [], nameGroups: [],
                 icase: icase, dotall: dotall, multi: multi, jsrep: jsrep, java: java,
                 py: false, supp: false, bfail: bfail, gflags: "",
-                cmin: [], cmax: [], cgreedy: [], lbmin: [], lbmax: [],
+                cmin: [], cmax: [], cgreedy: [], cemp: [], lbmin: [], lbmax: [], vmarks: [],
                 src: pattern, flags: flags, hitEnd: false, reqEnd: false, jbegin: false, jmin: 0, jcut: 0, steps: 0}
     }
     var pg = rxNewProg()
     pg.jsrep = jsrep
     pg.java = java
     pg.re2 = re2
+    pg.pcre = pcre
     if (st.startopt) { rxStartOpt(pg, ast) }
     if (pcre) {
         // pcre2_match tries no start that leaves fewer units than the
@@ -5653,7 +5835,12 @@ function rxCompile(pattern, flags) {
         g0.items.push(ast)
         var gns = st.gnodes
         gns[0] = g0
+        rxMinRule = false
         var cmin = rxMinLenC(ast, gns, [0])
+        if (cmin > 0) {
+            rxMinRule = true
+            cmin = rxMinLenC(ast, gns, [0])
+        }
         if (cmin > 0) { rxAdd(pg, RX_MINLEN, cmin, 0, pg.dummy) }
         // And none where a character every match holds after its first is
         // missing (pcre2_match's required code unit); an (*ACCEPT) can end a
@@ -5673,11 +5860,11 @@ function rxCompile(pattern, flags) {
     var jmin = java && !re2 && !pcre && !jbegin ? rxMinLen(ast) : 0
     return {
         ok: true, err: "", errAt: -1, ops: pg.ops, as: pg.as, bs: pg.bs, clss: pg.clss,
-        ngroups: st.ngroups, nmarks: pg.nmarks, names: re2 ? tr.names : pcre ? tp.names : st.names,
+        ngroups: st.ngroups, nmarks: pg.nmarks, vmarks: tp.marks, names: re2 ? tr.names : pcre ? tp.names : st.names,
         nameGroups: re2 ? tr.nameGroups : pcre ? tp.nameGroups : st.nameGroups,
         icase: icase, dotall: dotall, multi: multi, jsrep: jsrep, java: java,
         py: py, supp: supp, bfail: bfail, gflags: java ? rxFlagsGet(st) : st.gflags, pcre: pcre,
-        cmin: pg.cmin, cmax: pg.cmax, cgreedy: pg.cgreedy, lbmin: pg.lbmin, lbmax: pg.lbmax,
+        acc: pg.acc, cmin: pg.cmin, cmax: pg.cmax, cgreedy: pg.cgreedy, cemp: pg.cemp, lbmin: pg.lbmin, lbmax: pg.lbmax,
         src: pattern, flags: flags, hitEnd: false, reqEnd: false, jbegin: jbegin, jmin: jmin, steps: 0,
         jcut: 0
     }
@@ -5844,6 +6031,8 @@ var RX_BT_CALL = 6
 var RX_BT_RET = 7
 var RX_BT_VERB = 8
 var RX_BT_MARKN = 9
+// The name of the latest (*MARK) passed was x (st.lmark).
+var RX_BT_LMARK = 10
 // The C dialect's subroutine calls: rxCs[0 .. rxCsn) are the frames of the
 // calls in progress, innermost last; frame f returns to rxFrRet[f], was a call
 // of group rxFrG[f] at rxFrSp[f], and holds the registers as they were at the
@@ -5879,6 +6068,8 @@ var rxFrCbeg = []
 // that succeeds leaves its entries there, never revisited.
 function rxRun(re, text, pcIn, spIn, caps, marks, st, base, keep) {
     var lim = keep > 0 ? base - 1 : base
+    // The calls in progress when a nested run starts are not its own.
+    var csb = keep == 0 ? 0 : rxCsn
     var ops = re.ops
     var as = re.as
     var bs = re.bs
@@ -6001,7 +6192,7 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st, base, keep) {
                 // Under C the captures are put back when the rest of the match fails
                 // past here (rxUndoAll); the op then runs again, st.wrap saying so.
                 if (re.pcre && st.wrap != pc) {
-                    if (top > lim) { top = rxUndoAll(top, caps) }
+                    if (top > lim) { top = rxUndoAll(top, caps, st) }
                     btn = bk.length
                     st.wrap = pc
                     continue
@@ -6166,10 +6357,10 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st, base, keep) {
             } else if (op == RX_CINC) {
                 var islot = as[pc]
                 var ibeg = st.cbeg
-                if (ibeg[islot] == sp) {
+                var ictr = st.ctr
+                if (ibeg[islot] == sp && ictr[islot] >= re.cemp[islot]) {
                     pc = pc + 1
                 } else {
-                    var ictr = st.ctr
                     var tn = top
                     if (tn > lim) {
                         if (tn == btn) { btn = rxBtGrow() }
@@ -6183,7 +6374,7 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st, base, keep) {
                 }
             } else if (op == RX_LOOKB) {
                 if (re.pcre && st.wrap != pc) {
-                    if (top > lim) { top = rxUndoAll(top, caps) }
+                    if (top > lim) { top = rxUndoAll(top, caps, st) }
                     btn = bk.length
                     st.wrap = pc
                     continue
@@ -6230,7 +6421,7 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st, base, keep) {
                 // Captures the body set stay set then, as in Java; under C they
                 // are taken back, as in PCRE2.
                 if (re.pcre && st.wrap != pc) {
-                    if (top > lim) { top = rxUndoAll(top, caps) }
+                    if (top > lim) { top = rxUndoAll(top, caps, st) }
                     btn = bk.length
                     st.wrap = pc
                     continue
@@ -6244,7 +6435,16 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st, base, keep) {
                 if (ra < 0) {
                     break
                 }
-                pc = as[pc]
+                // An (*ACCEPT) in the body acts on what the group is in: it
+                // goes on out of an enclosing atomic group, and is otherwise
+                // this run's own (re.acc is one).
+                if (st.acc) {
+                    if (keep == 2 && rxCsn == csb) { return ra }
+                    st.acc = false
+                    pc = re.acc
+                } else {
+                    pc = as[pc]
+                }
                 sp = ra
             } else if (op == RX_ATOMEND) {
                 return sp
@@ -6291,13 +6491,15 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st, base, keep) {
                 if (top > lim) { top = rxBtPush(top, RX_BT_CALL, 0, 0) }
                 btn = bk.length
                 pc = as[pc]
-            } else if (op == RX_RET || (op == RX_ACCEPT && keep == 0 && rxCsn > 0)) {
+            } else if (op == RX_RET || (op == RX_ACCEPT && rxCsn > csb)) {
                 // (*ACCEPT) in a call returns from it.
                 top = rxRet(st, caps, marks, top, lim)
                 btn = bk.length
                 pc = rxRetPc
             } else if (op == RX_ACCEPT) {
-                // In an assertion or atomic group's body (*ACCEPT) ends the body.
+                // In an assertion's body (*ACCEPT) ends the body; in an atomic
+                // group's it ends the match, assertion or call the group is in.
+                if (keep == 2) { st.acc = true }
                 if (keep != 0) { return sp }
                 caps[1] = sp
                 if ((st.mustEnd >= 0 && sp != st.mustEnd) || sp == st.adv) {
@@ -6327,6 +6529,10 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st, base, keep) {
                 }
                 pc = pc + 1
             } else if (op == RX_VERB) {
+                if (as[pc] == RX_VMARK) {
+                    top = rxBtPush(top, RX_BT_LMARK, st.lmark, 0)
+                    st.lmark = bs[pc]
+                }
                 top = rxVerb(as[pc], bs[pc], sp, top)
                 btn = bk.length
                 pc = pc + 1
@@ -6369,6 +6575,8 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st, base, keep) {
                 st.cbeg[ux] = uy
             } else if (uk == RX_BT_CALL) {
                 rxCsn = rxCsn - 1
+            } else if (uk == RX_BT_LMARK) {
+                st.lmark = ux
             } else if (uk == RX_BT_RET) {
                 rxCsPush(ux)
             } else if (uk == RX_BT_VERB) {
@@ -6423,6 +6631,7 @@ function rxThenPop(top, base, target, caps, marks, st) {
         else if (k == RX_BT_CTR) { st.ctr[x] = by[t] }
         else if (k == RX_BT_CBEG) { st.cbeg[x] = by[t] }
         else if (k == RX_BT_CALL) { rxCsn = rxCsn - 1 }
+        else if (k == RX_BT_LMARK) { st.lmark = x }
         else if (k == RX_BT_RET) { rxCsPush(x) }
     }
     return 0 - 1
@@ -6534,11 +6743,11 @@ function rxRestore(top, lim, kind, cur, saved) {
 // above top, and answers the new top: PCRE2 forgets what a lookaround or atomic
 // group captured once the match backtracks past it, and what a negative
 // lookaround's body captured.
-function rxUndoAll(top, caps) {
+function rxUndoAll(top, caps, st) {
     var bk = rxBk
     var bx = rxBx
     var by = rxBy
-    var t = top
+    var t = rxBtPush(top, RX_BT_LMARK, st.lmark, 0)
     var i = 0
     while (i < caps.length) {
         if (t == bk.length) { rxBtGrow() }
@@ -6599,7 +6808,7 @@ function rxAttempt(re, text, at, mustEnd, gpos, glast, adv) {
     }
     // The search's counter (rxBudget) carries over from attempt to attempt.
     var st = {steps: re.steps, over: false, mustEnd: mustEnd, lbt: -1, ctr: ctr, cbeg: cbeg,
-              gpos: gpos, glast: glast, adv: adv, wrap: 0 - 1, verb: 0}
+              gpos: gpos, glast: glast, adv: adv, wrap: 0 - 1, verb: 0, acc: false, lmark: 0 - 1}
     var end = rxRun(re, text, 0, at, caps, marks, st, 0, 0)
     re.steps = st.steps
     // Under C the outcomes besides a match and none are records with a
@@ -6607,14 +6816,14 @@ function rxAttempt(re, text, at, mustEnd, gpos, glast, adv) {
     // recursion that would loop, -1 a (*COMMIT) (no match from any start)
     // and -3 a (*SKIP) to end. A run a verb ended answers -2.
     if (st.over) {
-        if (re.pcre) { return {begin: 0 - 2, end: 0 - 1, caps: caps} }
+        if (re.pcre) { return {begin: 0 - 2, end: 0 - 1, caps: caps, mark: 0 - 1} }
         rxFail("step limit exceeded")
     }
-    if (end >= 0) { return {begin: caps[0], end: caps[1], caps: caps} }
+    if (end >= 0) { return {begin: caps[0], end: caps[1], caps: caps, mark: st.lmark} }
     if (end == 0 - 1) { return null }
-    if (st.verb == RX_VCOMMIT) { return {begin: 0 - 1, end: 0 - 1, caps: caps} }
-    if (st.verb == RX_VSKIP) { return {begin: 0 - 3, end: rxSkip, caps: caps} }
-    if (st.verb == RX_VLOOP) { return {begin: 0 - 4, end: 0 - 1, caps: caps} }
+    if (st.verb == RX_VCOMMIT) { return {begin: 0 - 1, end: 0 - 1, caps: caps, mark: 0 - 1} }
+    if (st.verb == RX_VSKIP) { return {begin: 0 - 3, end: rxSkip, caps: caps, mark: 0 - 1} }
+    if (st.verb == RX_VLOOP) { return {begin: 0 - 4, end: 0 - 1, caps: caps, mark: 0 - 1} }
     return null
 }
 

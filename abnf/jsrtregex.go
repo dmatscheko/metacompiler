@@ -2571,15 +2571,19 @@ type rxProg struct {
 	jsrep  bool
 	java   bool
 	re2    bool
+	pcre   bool
 	dummy  *rxCls
-	// cmin/cmax/cgreedy describe counted loop i (rxOpCInit .. rxOpCInc), lbmin/lbmax
+	// cmin/cmax/cgreedy describe counted loop i (rxOpCInit .. rxOpCInc), and cemp
+	// its iteration count from which an empty iteration leaves it; lbmin/lbmax
 	// the length range of lookbehind i (-1: unbounded).
-	cmin, cmax, cgreedy []int
-	lbmin, lbmax        []int
+	cmin, cmax, cgreedy, cemp []int
+	lbmin, lbmax              []int
 	// The C dialect's calls, and its (*THEN)s and their nodes (rxEmitC).
 	calls     []int
 	thens     []int
 	thenNodes []*rxNode
+	// acc is an rxOpAccept (rxRe.acc).
+	acc int
 }
 
 // loG / hiG are the smallest and largest group NUMBER declared inside a subtree, or
@@ -2777,7 +2781,7 @@ func (pg *rxProg) emitC(node *rxNode) {
 		for _, g := range kids {
 			pg.add(rxOpSave, 2*g.gidx+1, 0, pg.dummy)
 		}
-		pg.add(rxOpAccept, 0, 0, pg.dummy)
+		pg.acc = pg.add(rxOpAccept, 0, 0, pg.dummy)
 	case "then":
 		b := -1
 		if node.min < 0 {
@@ -2832,6 +2836,10 @@ func (n *rxNode) firstCU() *rxNode {
 		for _, it := range n.items {
 			if it.maxLen() != 0 {
 				return it.firstCU()
+			}
+			// An (*ACCEPT) before any character (rxFirstCU).
+			if it.minLenC(nil, nil) < 0 {
+				return nil
 			}
 		}
 	case "alt":
@@ -2921,7 +2929,25 @@ func (c *rxCls) same(o *rxCls) bool {
 	return true
 }
 
+// rxMinRec and rxMinRule are rxMinRec and rxMinRule in lib/regex.js: the
+// branch being measured recurses into an open group; such a branch counts only
+// as the first of its alternation.
+var rxMinRec, rxMinRule bool
+
 func (n *rxNode) minLenC(gnodes []*rxNode, open []int) int {
+	switch n.t {
+	case "alt", "group", "atom", "rep", "cond", "condr", "conda":
+		outer := rxMinRec
+		rxMinRec = false
+		m := n.minLenCN(gnodes, open)
+		rxMinRec = outer
+		return m
+	}
+	return n.minLenCN(gnodes, open)
+}
+
+// minLenCN is minLenC's cases (rxMinLenCN in lib/regex.js).
+func (n *rxNode) minLenCN(gnodes []*rxNode, open []int) int {
 	items := n.items
 	switch n.t {
 	case "accept":
@@ -2930,23 +2956,28 @@ func (n *rxNode) minLenC(gnodes []*rxNode, open []int) int {
 		g := n.gidx
 		for _, o := range open {
 			if o == g {
+				rxMinRec = true
 				return 0
 			}
 		}
 		if g >= len(gnodes) || (n.t == "bref" && g == 0) {
 			return 0
 		}
-		return gnodes[g].items[0].minLenC(gnodes, append(open, g))
+		called := rxMinRec
+		m := gnodes[g].items[0].minLenC(gnodes, append(open, g))
+		rxMinRec = called
+		return m
 	case "cond", "condr", "conda":
 		y := items[len(items)-2].minLenC(gnodes, open)
+		rxMinRec = false
 		z := items[len(items)-1].minLenC(gnodes, open)
 		if y < 0 || z < 0 {
 			return -1
 		}
-		if y < z {
-			return y
+		if z < y && !(rxMinRule && rxMinRec) {
+			return z
 		}
-		return z
+		return y
 	case "cat":
 		sum := 0
 		for _, it := range items {
@@ -2960,11 +2991,12 @@ func (n *rxNode) minLenC(gnodes []*rxNode, open []int) int {
 	case "alt":
 		best := -2
 		for _, it := range items {
+			rxMinRec = false
 			m := it.minLenC(gnodes, open)
 			if m < 0 {
 				return -1
 			}
-			if best < 0 || m < best {
+			if best < 0 || (m < best && !(rxMinRule && rxMinRec)) {
 				best = m
 			}
 		}
@@ -3177,6 +3209,18 @@ func (pg *rxProg) emitCount(node *rxNode) {
 		g = 1
 	}
 	pg.cgreedy = append(pg.cgreedy, g)
+	// See rxEmitCount: under C only an unbounded loop leaves on an empty
+	// iteration, from iteration max(n, 1) on.
+	e := 0
+	if pg.pcre {
+		switch {
+		case node.max >= 0:
+			e = node.max
+		case node.min > 0:
+			e = node.min - 1
+		}
+	}
+	pg.cemp = append(pg.cemp, e)
 	pg.add(rxOpCInit, c, 0, pg.dummy)
 	top := pg.add(rxOpCLoop, c, 0, pg.dummy)
 	pg.emit(node.items[0])
@@ -3232,7 +3276,13 @@ func (pg *rxProg) emitRep(node *rxNode) {
 		return
 	}
 	body := node.items[0]
-	for i := 0; i < node.min; i++ {
+	guard := node.max < 0 && body.minLen() == 0
+	// Under C the loop takes the last required iteration (rxEmitRep).
+	copies := node.min
+	if pg.pcre && guard && node.min > 0 {
+		copies--
+	}
+	for i := 0; i < copies; i++ {
 		pg.emitClear(body)
 		pg.emit(body)
 	}
@@ -3241,13 +3291,19 @@ func (pg *rxProg) emitRep(node *rxNode) {
 		// consumed nothing leaves the loop instead of spinning ((a*)* is a real
 		// pattern, and without this it never terminates). A body that always
 		// consumes something needs none.
-		guard := body.minLen() == 0
 		mk := pg.nmarks
 		if guard {
 			pg.nmarks++
 		}
+		enter := -1
+		if copies < node.min {
+			enter = pg.add(rxOpJmp, 0, 0, pg.dummy)
+		}
 		l1 := pg.here()
 		sp := pg.add(rxOpSplit, 0, 0, pg.dummy)
+		if enter >= 0 {
+			pg.as[enter] = l1 + 1
+		}
 		if guard {
 			pg.add(rxOpMark, mk, 0, pg.dummy)
 		}
@@ -4220,13 +4276,18 @@ type rxRe struct {
 	bfail               bool
 	gflags              string
 	cmin, cmax, cgreedy []int
+	cemp                []int
 	lbmin, lbmax        []int
 	src                 string
 	flags               string
 	// steps is the current search's step counter (budget).
 	steps int
-	// pcre is the C flag (rxPcre): see rxRunUndo.
-	pcre bool
+	// pcre is the C flag (rxPcre): see rxRunUndo. acc is an rxOpAccept, which
+	// an (*ACCEPT) in an atomic group's body continues at; vmarks the (*MARK)
+	// names by id.
+	pcre   bool
+	acc    int
+	vmarks []string
 	// hitEnd and reqEnd are java.util.regex's Matcher.hitEnd and requireEnd,
 	// accumulated by every run until the caller clears them; jbegin says the
 	// pattern starts with Pattern's Begin node (rxBeginJ), and jmin is Start's
@@ -4288,6 +4349,7 @@ type rxPcreRes struct {
 	names      []string
 	nameGroups []int
 	utf        bool
+	marks      []string
 }
 
 func (t *rxPcreSt) fail(msg string, at int) {
@@ -4562,6 +4624,192 @@ func (t *rxPcreSt) short(cls *rxRe2Cls, c rune) {
 	}
 }
 
+// rxPcreScAb, rxPcreBin, rxPcreGC and rxPcreBidi are RX_PCRE_SCAB ..
+// RX_PCRE_BIDI in lib/regex.js.
+const rxPcreScAb = " adlm=Adlam aghb=Caucasian_Albanian arab=Arabic armi=Imperial_Aramaic armn=Armenian avst=Avestan" +
+	" bali=Balinese bamu=Bamum bass=Bassa_Vah batk=Batak beng=Bengali berf=Beria_Erfe bhks=Bhaiksuki" +
+	" bopo=Bopomofo brah=Brahmi brai=Braille bugi=Buginese buhd=Buhid cakm=Chakma" +
+	" cans=Canadian_Aboriginal cari=Carian cher=Cherokee chrs=Chorasmian copt=Coptic cpmn=Cypro_Minoan" +
+	" cprt=Cypriot cyrl=Cyrillic deva=Devanagari diak=Dives_Akuru dogr=Dogra dsrt=Deseret dupl=Duployan" +
+	" egyp=Egyptian_Hieroglyphs elba=Elbasan elym=Elymaic ethi=Ethiopic gara=Garay geor=Georgian" +
+	" glag=Glagolitic gong=Gunjala_Gondi gonm=Masaram_Gondi goth=Gothic gran=Grantha grek=Greek" +
+	" gujr=Gujarati gukh=Gurung_Khema guru=Gurmukhi hang=Hangul hani=Han hano=Hanunoo hatr=Hatran" +
+	" hebr=Hebrew hira=Hiragana hluw=Anatolian_Hieroglyphs hmng=Pahawh_Hmong hmnp=Nyiakeng_Puachue_Hmong" +
+	" hung=Old_Hungarian ital=Old_Italic kali=Kayah_Li kana=Katakana khar=Kharoshthi khmr=Khmer" +
+	" khoj=Khojki kits=Khitan_Small_Script knda=Kannada krai=Kirat_Rai kthi=Kaithi lana=Tai_Tham laoo=Lao" +
+	" latn=Latin lepc=Lepcha limb=Limbu lina=Linear_A linb=Linear_B lyci=Lycian lydi=Lydian mahj=Mahajani" +
+	" maka=Makasar mand=Mandaic mani=Manichaean marc=Marchen medf=Medefaidrin mend=Mende_Kikakui" +
+	" merc=Meroitic_Cursive mero=Meroitic_Hieroglyphs mlym=Malayalam mong=Mongolian mroo=Mro" +
+	" mtei=Meetei_Mayek mult=Multani mymr=Myanmar nagm=Nag_Mundari nand=Nandinagari" +
+	" narb=Old_North_Arabian nbat=Nabataean nkoo=Nko nshu=Nushu ogam=Ogham olck=Ol_Chiki onao=Ol_Onal" +
+	" orkh=Old_Turkic orya=Oriya osge=Osage osma=Osmanya ougr=Old_Uyghur palm=Palmyrene pauc=Pau_Cin_Hau" +
+	" perm=Old_Permic phag=Phags_Pa phli=Inscriptional_Pahlavi phlp=Psalter_Pahlavi phnx=Phoenician" +
+	" plrd=Miao prti=Inscriptional_Parthian qaac=Coptic qaai=Inherited rjng=Rejang rohg=Hanifi_Rohingya" +
+	" runr=Runic samr=Samaritan sarb=Old_South_Arabian saur=Saurashtra sgnw=SignWriting shaw=Shavian" +
+	" shrd=Sharada sidd=Siddham sidt=Sidetic sind=Khudawadi sinh=Sinhala sogd=Sogdian sogo=Old_Sogdian" +
+	" sora=Sora_Sompeng soyo=Soyombo sund=Sundanese sunu=Sunuwar sylo=Syloti_Nagri syrc=Syriac" +
+	" tagb=Tagbanwa takr=Takri tale=Tai_Le talu=New_Tai_Lue taml=Tamil tang=Tangut tavt=Tai_Viet" +
+	" tayo=Tai_Yo telu=Telugu tfng=Tifinagh tglg=Tagalog thaa=Thaana tibt=Tibetan tirh=Tirhuta" +
+	" tnsa=Tangsa todr=Todhri tols=Tolong_Siki tutg=Tulu_Tigalari ugar=Ugaritic vaii=Vai vith=Vithkuqi" +
+	" wara=Warang_Citi wcho=Wancho xpeo=Old_Persian xsux=Cuneiform yezi=Yezidi yiii=Yi" +
+	" zanb=Zanabazar_Square zinh=Inherited zyyy=Common "
+const rxPcreBin = " ahex=asciihexdigit alpha=alphabetic alphabetic=alphabetic ascii=ascii asciihexdigit=asciihexdigit" +
+	" bidic=bidicontrol bidicontrol=bidicontrol bidim=bidimirrored bidimirrored=bidimirrored cased=cased" +
+	" caseignorable=caseignorable changeswhencasefolded=changeswhencasefolded" +
+	" changeswhencasemapped=changeswhencasemapped changeswhenlowercased=changeswhenlowercased" +
+	" changeswhentitlecased=changeswhentitlecased changeswhenuppercased=changeswhenuppercased" +
+	" ci=caseignorable cwcf=changeswhencasefolded cwcm=changeswhencasemapped cwl=changeswhenlowercased" +
+	" cwt=changeswhentitlecased cwu=changeswhenuppercased dash=dash" +
+	" defaultignorablecodepoint=defaultignorablecodepoint dep=deprecated deprecated=deprecated" +
+	" di=defaultignorablecodepoint dia=diacritic diacritic=diacritic ebase=emojimodifierbase" +
+	" ecomp=emojicomponent emod=emojimodifier emoji=emoji emojicomponent=emojicomponent" +
+	" emojimodifier=emojimodifier emojimodifierbase=emojimodifierbase emojipresentation=emojipresentation" +
+	" epres=emojipresentation ext=extender extendedpictographic=extendedpictographic extender=extender" +
+	" extpict=extendedpictographic graphemebase=graphemebase graphemeextend=graphemeextend" +
+	" graphemelink=graphemelink grbase=graphemebase grext=graphemeextend grlink=graphemelink hex=hexdigit" +
+	" hexdigit=hexdigit idc=idcontinue idcompatmathcontinue=idcompatmathcontinue" +
+	" idcompatmathstart=idcompatmathstart idcontinue=idcontinue ideo=ideographic ideographic=ideographic" +
+	" ids=idstart idsb=idsbinaryoperator idsbinaryoperator=idsbinaryoperator idst=idstrinaryoperator" +
+	" idstart=idstart idstrinaryoperator=idstrinaryoperator idsu=idsunaryoperator" +
+	" idsunaryoperator=idsunaryoperator incb=incb joinc=joincontrol joincontrol=joincontrol" +
+	" loe=logicalorderexception logicalorderexception=logicalorderexception lower=lowercase" +
+	" lowercase=lowercase math=math mcm=modifiercombiningmark modifiercombiningmark=modifiercombiningmark" +
+	" nchar=noncharactercodepoint noncharactercodepoint=noncharactercodepoint patsyn=patternsyntax" +
+	" patternsyntax=patternsyntax patternwhitespace=patternwhitespace patws=patternwhitespace" +
+	" pcm=prependedconcatenationmark prependedconcatenationmark=prependedconcatenationmark" +
+	" qmark=quotationmark quotationmark=quotationmark radical=radical regionalindicator=regionalindicator" +
+	" ri=regionalindicator sd=softdotted sentenceterminal=sentenceterminal softdotted=softdotted" +
+	" space=whitespace sterm=sentenceterminal term=terminalpunctuation" +
+	" terminalpunctuation=terminalpunctuation uideo=unifiedideograph unifiedideograph=unifiedideograph" +
+	" upper=uppercase uppercase=uppercase variationselector=variationselector vs=variationselector" +
+	" whitespace=whitespace wspace=whitespace xidc=xidcontinue xidcontinue=xidcontinue xids=xidstart" +
+	" xidstart=xidstart "
+const rxPcreGC = " c cc cf cn co cs l ll lm lo lt lu m mc me mn n nd nl no p pc pd pe pf pi po ps s sc sk sm so z zl zp zs "
+const rxPcreBidi = " al an b bn cs en es et fsi l lre lri lro nsm on pdf pdi r rle rli rlo s ws "
+
+// rxPcreLoose is rxPcreLoose in lib/regex.js.
+func rxPcreLoose(name string) string {
+	var b strings.Builder
+	for _, c := range name {
+		switch {
+		case c == ' ' || c == '-' || c == '_':
+		case c >= 'A' && c <= 'Z':
+			b.WriteRune(c + 32)
+		default:
+			b.WriteRune(c)
+		}
+	}
+	return b.String()
+}
+
+// rxPcreScript is rxPcreScript in lib/regex.js.
+func rxPcreScript(k string) string {
+	if k == "unknown" || k == "zzzz" {
+		return "\\p{IsUnknown}"
+	}
+	w := rxRe2Word(rxRe2Scripts, rxRe2Canon(k), "")
+	if w == "" {
+		e := strings.Index(rxPcreScAb, " "+k+"=")
+		if e < 0 {
+			return ""
+		}
+		s := rxPcreScAb[e+len(k)+2:]
+		w = s[:strings.IndexByte(s, ' ')]
+	}
+	return rxRe2Prop(w, 1)
+}
+
+// rxPcreBinItem is rxPcreBinItem in lib/regex.js.
+func rxPcreBinItem(b string) string {
+	switch b {
+	case "alphabetic":
+		return "\\p{IsAlphabetic}"
+	case "ascii":
+		return "\\x{0}-\\x{7F}"
+	case "asciihexdigit":
+		return "0-9A-Fa-f"
+	case "emoji":
+		return "\\p{IsEmoji}"
+	case "emojicomponent":
+		return "\\p{IsEmoji_Component}"
+	case "emojimodifier":
+		return "\\p{IsEmoji_Modifier}"
+	case "emojimodifierbase":
+		return "\\p{IsEmoji_Modifier_Base}"
+	case "emojipresentation":
+		return "\\p{IsEmoji_Presentation}"
+	case "extendedpictographic":
+		return "\\p{IsExtended_Pictographic}"
+	case "hexdigit":
+		return "\\p{IsHex_Digit}"
+	case "ideographic":
+		return "\\p{IsIdeographic}"
+	case "joincontrol":
+		return "\\p{IsJoin_Control}"
+	case "lowercase":
+		return "\\p{IsLowercase}"
+	case "noncharactercodepoint":
+		return "\\p{IsNoncharacter_Code_Point}"
+	case "uppercase":
+		return "\\p{IsUppercase}"
+	case "whitespace":
+		return "\\p{IsWhite_Space}"
+	}
+	return ""
+}
+
+// rxPcrePropItems is rxPcrePropItems in lib/regex.js.
+func rxPcrePropItems(name string, fi bool) string {
+	k := rxPcreLoose(name)
+	eq := strings.IndexByte(k, '=')
+	if eq < 0 {
+		eq = strings.IndexByte(k, ':')
+	}
+	if eq >= 0 {
+		key, v := k[:eq], k[eq+1:]
+		switch key {
+		case "sc", "script", "scx", "scriptextensions":
+			return rxPcreScript(v)
+		case "bc", "bidiclass":
+			if strings.Contains(rxPcreBidi, " "+v+" ") {
+				return "?"
+			}
+		}
+		return ""
+	}
+	switch {
+	case k == "l&" || k == "lc" || (fi && (k == "lu" || k == "ll" || k == "lt")):
+		// Caseless, Lu Ll and Lt each match any cased letter.
+		return "\\p{LC}"
+	case k == "any":
+		return "\\x{0}-\\x{10FFFF}"
+	case k == "xan":
+		return "\\p{L}\\p{N}"
+	case k == "xwd":
+		return rxPcreUW
+	case k == "xsp" || k == "xps":
+		return rxPcreUS
+	case k == "xuc":
+		return "$@`\\x{A0}-\\x{D7FF}\\x{E000}-\\x{10FFFF}"
+	case len(k) <= 2 && strings.Contains(rxPcreGC, " "+k+" "):
+		return "\\p{" + strings.ToUpper(k[:1]) + k[1:] + "}"
+	}
+	if sc := rxPcreScript(k); sc != "" {
+		return sc
+	}
+	if e := strings.Index(rxPcreBin, " "+k+"="); e >= 0 {
+		s := rxPcreBin[e+len(k)+2:]
+		if it := rxPcreBinItem(s[:strings.IndexByte(s, ' ')]); it != "" {
+			return it
+		}
+		return "?"
+	}
+	if strings.HasPrefix(k, "bidi") && strings.Contains(rxPcreBidi, " "+k[4:]+" ") {
+		return "?"
+	}
+	return ""
+}
+
 func (t *rxPcreSt) prop(cls *rxRe2Cls, neg bool) {
 	p := t.p
 	name := ""
@@ -4587,25 +4835,10 @@ func (t *rxPcreSt) prop(cls *rxRe2Cls, neg bool) {
 		neg = !neg
 		name = name[1:]
 	}
-	key := rxRe2Canon(name)
-	items := ""
-	switch {
-	case name == "L&" || key == "Lc" || key == "L&" || (t.fi && (key == "Lu" || key == "Ll" || key == "Lt")):
-		// Caseless, Lu Ll and Lt each match any cased letter.
-		items = "\\p{LC}"
-	case key == "Xan":
-		items = "\\p{L}\\p{N}"
-	case key == "Xwd":
-		items = rxPcreUW
-	case key == "Xsp" || key == "Xps":
-		items = rxPcreUS
-	case key == "Xuc":
-		items = "$@`\\x{A0}-\\x{D7FF}\\x{E000}-\\x{10FFFF}"
-	default:
-		items = rxRe2Prop(name, 1)
-		if key == "Any" {
-			items = "\\x{0}-\\x{10FFFF}"
-		}
+	items := rxPcrePropItems(name, t.fi)
+	if items == "?" {
+		t.fail("unsupported character property \\p{"+name+"}", t.i)
+		return
 	}
 	if items == "" {
 		t.fail("unknown property after \\P or \\p", t.i)
@@ -5934,7 +6167,7 @@ func rxPcre(p []rune, mods string) *rxPcreRes {
 	if !t.nostart && (strings.Contains(out, "(?*VC") || strings.Contains(out, "(?*VP") || strings.Contains(out, "(?*VS")) {
 		out = "(?*S)" + out
 	}
-	res := &rxPcreRes{err: t.err, errAt: t.errAt, names: t.names, nameGroups: t.nameGroups, utf: t.utf}
+	res := &rxPcreRes{err: t.err, errAt: t.errAt, names: t.names, nameGroups: t.nameGroups, utf: t.utf, marks: t.marks}
 	if t.err == "" {
 		res.out = out
 	}
@@ -6059,7 +6292,7 @@ func rxCompile(pattern, flags string) *rxRe {
 	if java {
 		gflags = st.getFlags()
 	}
-	pg := &rxProg{jsrep: jsrep, java: java, re2: re2, dummy: rxNewCls()}
+	pg := &rxProg{jsrep: jsrep, java: java, re2: re2, pcre: pcre, dummy: rxNewCls()}
 	if st.startopt {
 		pg.startOpt(ast)
 	}
@@ -6067,7 +6300,12 @@ func rxCompile(pattern, flags string) *rxRe {
 		// See rxCompile in lib/regex.js: pcre2_match's minimum length and
 		// required code unit.
 		st.gnodes[0] = &rxNode{t: "group", items: []*rxNode{ast}, cls: rxNewCls(), gidx: -1}
+		rxMinRule = false
 		cmin := ast.minLenC(st.gnodes, []int{0})
+		if cmin > 0 {
+			rxMinRule = true
+			cmin = ast.minLenC(st.gnodes, []int{0})
+		}
 		if cmin > 0 {
 			pg.add(rxOpMinLen, cmin, 0, pg.dummy)
 		}
@@ -6111,8 +6349,8 @@ func rxCompile(pattern, flags string) *rxRe {
 		ngroups: st.ngroups, nmarks: pg.nmarks, names: names, nameGroups: nameGroups,
 		icase: icase, dotall: dotall, multi: multi, jsrep: jsrep, java: java, errAt: -1,
 		supp: java && (re2 || st.supp || rxSuppJ(ast) || rxHasSurr(pat)) || pcre && ucase, bfail: bfail, gflags: gflags,
-		pcre: pcre,
-		cmin: pg.cmin, cmax: pg.cmax, cgreedy: pg.cgreedy, lbmin: pg.lbmin, lbmax: pg.lbmax,
+		pcre: pcre, acc: pg.acc, vmarks: tp.marks,
+		cmin: pg.cmin, cmax: pg.cmax, cgreedy: pg.cgreedy, cemp: pg.cemp, lbmin: pg.lbmin, lbmax: pg.lbmax,
 		src: pattern, flags: flags, jbegin: jbegin, jmin: jmin,
 	}
 }
@@ -6221,6 +6459,10 @@ type rxRunSt struct {
 	cs         []int
 	fr         []rxFrame
 	retpc      int
+	// acc says an (*ACCEPT) ended an atomic group's body (RX_ATOM); lmark is
+	// the name of the latest (*MARK) passed on the path, or -1.
+	acc   bool
+	lmark int
 }
 
 func (re *rxRe) assertOK(text []rune, kind, sp int) bool {
@@ -6406,6 +6648,7 @@ const (
 	rxBtRet          // re-enter the call of frame x
 	rxBtVerb         // a verb of kind x, carrying y
 	rxBtMarkN        // a (*MARK) of name x, passed at y
+	rxBtLMark        // st.lmark = x
 )
 
 // rxFrame is a call in progress (rxFrRet .. rxFrCbeg in lib/regex.js).
@@ -6427,6 +6670,7 @@ func (st *rxRunSt) undo(lim, kind, x, v int) {
 // or atomic group captured once the match backtracks past it. Twin of rxUndoAll
 // in lib/regex.js.
 func (st *rxRunSt) undoAll(lim int, caps []int) {
+	st.undo(lim, rxBtLMark, st.lmark, 0)
 	for i, v := range caps {
 		st.undo(lim, rxBtCap, i, v)
 	}
@@ -6444,6 +6688,11 @@ func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt,
 	lim := base
 	if keep > 0 {
 		lim = base - 1
+	}
+	// The calls in progress when a nested run starts are not its own.
+	csb := 0
+	if keep != 0 {
+		csb = len(st.cs)
 	}
 	for {
 	fwd:
@@ -6639,7 +6888,7 @@ func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt,
 				}
 			case rxOpCInc:
 				slot := re.as[pc]
-				if st.cbeg[slot] == sp {
+				if st.cbeg[slot] == sp && st.ctr[slot] >= re.cemp[slot] {
 					pc++
 					break
 				}
@@ -6702,7 +6951,16 @@ func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt,
 				if ra < 0 {
 					break fwd
 				}
-				pc = re.as[pc]
+				// An (*ACCEPT) in the body (RX_ATOM in lib/regex.js).
+				if st.acc {
+					if keep == 2 && len(st.cs) == csb {
+						return ra
+					}
+					st.acc = false
+					pc = re.acc
+				} else {
+					pc = re.as[pc]
+				}
 				sp = ra
 			case rxOpAtomEnd:
 				return sp
@@ -6761,10 +7019,13 @@ func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt,
 				st.ret(caps, marks, lim)
 				pc = st.retpc
 			case rxOpAccept:
-				if keep == 0 && len(st.cs) > 0 {
+				if len(st.cs) > csb {
 					st.ret(caps, marks, lim)
 					pc = st.retpc
 					break
+				}
+				if keep == 2 {
+					st.acc = true
 				}
 				if keep != 0 {
 					return sp
@@ -6828,6 +7089,8 @@ func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt,
 				st.cbeg[x] = y
 			case rxBtCall:
 				st.cs = st.cs[:len(st.cs)-1]
+			case rxBtLMark:
+				st.lmark = x
 			case rxBtRet:
 				st.cs = append(st.cs, x)
 			case rxBtVerb:
@@ -6876,6 +7139,8 @@ func (st *rxRunSt) thenPop(base, target int, caps, marks []int) bool {
 			st.cbeg[x] = y
 		case rxBtCall:
 			st.cs = st.cs[:len(st.cs)-1]
+		case rxBtLMark:
+			st.lmark = x
 		case rxBtRet:
 			st.cs = append(st.cs, x)
 		}
@@ -6886,7 +7151,8 @@ func (st *rxRunSt) thenPop(base, target int, caps, marks []int) bool {
 // verbPass is rxVerb in lib/regex.js.
 func (st *rxRunSt) verbPass(kind, b, sp int) {
 	if kind == rxVMark {
-		st.bt = append(st.bt, rxBtMarkN, b, sp)
+		st.bt = append(st.bt, rxBtLMark, st.lmark, 0, rxBtMarkN, b, sp)
+		st.lmark = b
 		return
 	}
 	y := sp
@@ -6982,6 +7248,8 @@ type rxMatch struct {
 	begin int
 	end   int
 	caps  []int
+	// mark is the name of the latest (*MARK) on the matching path, or -1.
+	mark int
 }
 
 // search finds the leftmost match at or after start. ok=false means the step cap
@@ -7074,7 +7342,7 @@ func (re *rxRe) attempt(text []rune, at, mustEnd, gpos, glast, adv int) (*rxMatc
 	for i := range marks {
 		marks[i] = -1
 	}
-	st := &rxRunSt{steps: re.steps, mustEnd: mustEnd, lbt: -1, gpos: gpos, glast: glast, adv: adv, wrap: -1, bt: re.bt[:0]}
+	st := &rxRunSt{steps: re.steps, mustEnd: mustEnd, lbt: -1, gpos: gpos, glast: glast, adv: adv, wrap: -1, lmark: -1, bt: re.bt[:0]}
 	defer func() { re.bt = st.bt[:0] }()
 	if len(re.cmin) > 0 {
 		st.ctr = make([]int, len(re.cmin))
@@ -7086,7 +7354,7 @@ func (re *rxRe) attempt(text []rune, at, mustEnd, gpos, glast, adv int) (*rxMatc
 	end := re.run(text, 0, at, caps, marks, st, 0)
 	re.steps = st.steps
 	if end >= 0 {
-		return &rxMatch{begin: caps[0], end: caps[1], caps: caps}, true
+		return &rxMatch{begin: caps[0], end: caps[1], caps: caps, mark: st.lmark}, true
 	}
 	// See rxAttempt in lib/regex.js for the C dialect's records.
 	if st.over {

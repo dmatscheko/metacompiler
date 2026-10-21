@@ -1352,7 +1352,8 @@ function wordwrap($string, $width = 75, $break = "\n", $cut_long_words = false) 
 // names by number ("" for an unnamed group) or PCRE2's error text, and
 // __mec_pregx(key, subject, offset) runs one pcre2_match from a byte offset,
 // answering the 2 * (groups + 1) byte offsets (-1 for a group that did not take
-// part), [] for no match, or a PREG_*_ERROR code. An offset -o - 1 is the retry
+// part) and then the name of the latest (*MARK) on the matching path when there
+// is one, [] for no match, or a PREG_*_ERROR code. An offset -o - 1 is the retry
 // after an empty match at o: PCRE2_NOTEMPTY_ATSTART | PCRE2_ANCHORED there, and
 // when that fails the search from the next character. A key is the modifiers
 // that reach PCRE2, "/", and the pattern between the delimiters. The warnings
@@ -1483,6 +1484,7 @@ function __mec_pregsub($s, $o, $names, $flags) {
         if ($nm !== "" && (($i < $count && $o[2 * $i] >= 0) || !array_key_exists($nm, $r))) { $r[$nm] = $v; }
         $r[] = $v;
     }
+    if (count($o) % 2 == 1) { $r["MARK"] = $o[count($o) - 1]; }
     return $r;
 }
 
@@ -1526,6 +1528,7 @@ function preg_match_all($pattern, $subject, &$matches = null, $flags = 0, $offse
     $sets = [];
     foreach ($names as $nm) { $sets[] = []; }
     $matched = 0;
+    $marks = null;
     $pos = $offset;
     while (true) {
         $o = __mec_pregx($c[0], $subject, $pos);
@@ -1542,6 +1545,11 @@ function preg_match_all($pattern, $subject, &$matches = null, $flags = 0, $offse
             foreach ($names as $i => $nm) {
                 $sets[$i][] = $i < $count ? __mec_pregval($subject, $o, $i, $flags) : __mec_pregval($subject, [-1, -1], 0, $flags);
             }
+            // The (*MARK) names, by the number of the match.
+            if (count($o) % 2 == 1) {
+                if ($marks === null) { $marks = []; }
+                $marks[$matched - 1] = $o[count($o) - 1];
+            }
         }
         $pos = $o[1] == $o[0] ? -$o[1] - 1 : $o[1];
     }
@@ -1550,6 +1558,7 @@ function preg_match_all($pattern, $subject, &$matches = null, $flags = 0, $offse
             if ($nm !== "") { $matches[$nm] = $sets[$i]; }
             $matches[] = $sets[$i];
         }
+        if ($marks !== null) { $matches["MARK"] = $marks; }
     }
     return __mec_pregerr() == PREG_NO_ERROR ? $matched : false;
 }

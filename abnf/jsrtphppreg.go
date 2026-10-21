@@ -150,8 +150,9 @@ func init() {
 			}
 			return list(names)
 		}
-		// (key, s, pos): the match as byte offsets, [] for none, or the PREG
-		// error code; pos -o - 1 is the retry after an empty match at o.
+		// (key, s, pos): the match as byte offsets and the (*MARK) name, [] for
+		// none, or the PREG error code; pos -o - 1 is the retry after an empty
+		// match at o.
 		m["js_phpregx"] = func(a []uint64) uint64 {
 			key := rt.phpStr(u(a[0]))
 			re := phpRxRe(key)
@@ -196,6 +197,18 @@ func init() {
 					default:
 						out = append(out, phpMkInt(int64(c)))
 					}
+				}
+				if mt.mark >= 0 {
+					mk := re.vmarks[mt.mark]
+					if !phpRxKeyUtf(key) {
+						// A byte pattern's name is one unit per byte.
+						b := []byte{}
+						for _, c := range mk {
+							b = append(b, byte(c))
+						}
+						mk = string(b)
+					}
+					out = append(out, mk)
 				}
 			}
 			return list(out)
