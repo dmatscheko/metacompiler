@@ -73,7 +73,7 @@ llvm.Run: `d.method(:y).arity` → 0 for `def y(a)` and define_method methods (i
 `class A; attr_accessor :x; private :x=; end; class B < A; def w; self.x = 5; end; end` raises "private method 'x=' called" (interp
 and ruby allow it: methodKey only checks the current class's restricted list). Compiler: top-level `def k2;9;end; k2 = k2; p k2` →
 `#<Proc>` and in a class `def t; m = m; m; end` → 7 (ruby nil; interp right). `nil.x = 1` does not parse in either grammar.
-`define_method(:k) { |a:| }` called without the keyword returns instead of raising "missing keyword: a".
+`define_method(:k) { |a:| }` called without the keyword returns instead of raising "missing keyword: a". Compiled legs: `class A; attr_accessor :x; private :x=; end; begin; A.new.x = 3; rescue NoMethodError => e; p e.name; end` → `:new` (interp and ruby `:x=`; the private-setter error names the wrong method when the receiver is a call chain).
 
 ---
 
