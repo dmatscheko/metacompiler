@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-739** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-740** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -138,10 +138,10 @@ parameter), which no engine prints either.
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
-### T-737 tooling + js: swift overloads and module bodies in -callgraph; `Object.assign(5, {...})` compiled · P3 · CORE · IN PROGRESS (CORE worker, round 3) [V]
--callgraph names swift overloads `g$1@12` / `g$2@13` (the name `g` goes to the line-less dispatch closure): name each overload `g` at
-its own line. Python and swift module bodies appear as `jsf_N@line`; name them `<module>` (as python tracebacks do) or `main`.
-`Object.assign(5, {a:1})` fails in the compiled js halves; node returns a Number wrapper (wrapper objects exist since T-669).
+### T-739 tooling: -callgraph loses swift and python call edges · P3 · CORE · OPEN [V]
+Swift name reads go through `sw_kget`, python's through `py_getvar` — direct IR helpers, not js_scope_get/js_kget — so `let r = g(1)`
+shows as `<module> -> (dynamic)` and the helpers appear as callees (`<module> -> sw_kget`, `<module> -> py_getvar`). Teach the
+callgraph's name-read recognition these helpers (and check the other languages' equivalents) so static edges are recovered.
 
 ### T-184 dart: `IndexError` vs `RangeError` text for `[1,2,3][7]` · P3 · DA · BLOCKED - needs a Dart VM to settle [U spec-only]
 A reviewer argued the VM prints `RangeError (index): Invalid value: Not in inclusive
@@ -786,6 +786,7 @@ T-732 ruby: `3r % 0` hangs the interpreter; `!x` after a newline read as a metho
 T-734 js: `Object.assign` onto an array aborts compiled; data attributes on array indices — DONE d83425a1 (Object.assign onto arrays/functions through js_jsmset, per-index data attributes with spec-ordered movers in a shared js-arrmove.js — ~200-row probes = node)
 T-735 tooling: -callgraph definition names for python (`jsf_N`), php (body line, not header), swift (mangled `f$1`) — DONE a130da28 (python name pass follows js_pysig/js_pyfnname, php hoisted defs at their header, swift single definitions by source name — srcpos 26/26; follow-up T-737)
 T-736 ruby: bang methods on strings do not mutate; `puts` inside an expression; send with a receiver to a top-level def; `===` — DONE 942cfc07 4db06632 (strings are mutable boxes per literal, promoted in place on first mutation through any place; frozen strings, identity; puts in expressions; receiver send to top-level defs; === by name — = ruby 2.6; ruby bench unchanged; follow-up T-738)
+T-737 tooling + js: swift overloads and module bodies in -callgraph; `Object.assign(5, {...})` compiled — DONE ca9a0474 6763ce45 (swift overloads by source name, module bodies as <module>, unescaped jsonl; Object.assign ToObject's a primitive target incl. host objects — srcpos 26/26, = node; follow-up T-739)
 
 # Settled — do not re-open
 
